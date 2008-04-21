@@ -44,12 +44,12 @@ static int index_main(int argc, char **argv)
 	struct counts counts = {0,0};
 	int i;
 
-	apk_db_init(&db, NULL);
+	apk_db_open(&db, NULL);
 	for (i = 0; i < argc; i++)
 		apk_db_pkg_add_file(&db, argv[i]);
 	apk_db_index_write(&db, STDOUT_FILENO);
 	apk_hash_foreach(&db.available.names, warn_if_no_providers, &counts);
-	apk_db_free(&db);
+	apk_db_close(&db);
 
 	if (counts.unsatisfied != 0)
 		apk_warning("Total of %d unsatisfiable package "

@@ -18,6 +18,9 @@ char *apk_blob_cstr(apk_blob_t blob)
 {
 	char *cstr;
 
+	if (blob.ptr == NULL)
+		return strdup("");
+
 	if (blob.ptr[blob.len-1] == 0)
 		return strdup(blob.ptr);
 

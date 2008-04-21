@@ -18,6 +18,7 @@ apk_OBJS = \
 	blob.o \
 	hash.o \
 	md5.o \
+	create.o \
 	add.o \
 	del.o \
 	ver.o \
@@ -29,6 +30,7 @@ ALL_OBJS = $(apk_OBJS)
 all: $(TARGETS)
 
 apk: $(apk_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 clean::
 	@rm -f $(TARGETS) $(ALL_OBJS)

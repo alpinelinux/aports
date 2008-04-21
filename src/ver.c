@@ -44,8 +44,8 @@ static int ver_main(int argc, char **argv)
 		return 0;
 	}
 
-	apk_db_init(&db, "/home/fabled/tmproot/");
-	apk_db_read_config(&db);
+	if (apk_db_open(&db, apk_root) < 0)
+		return -1;
 
 	hlist_for_each_entry(pkg, c, &db.installed.packages, installed_pkgs_list) {
 		name = pkg->name;
@@ -61,7 +61,7 @@ static int ver_main(int argc, char **argv)
 		}
 		printf("%-40s%c\n", name->name, pkg != upg ? '<' : '=');
 	}
-	apk_db_free(&db);
+	apk_db_close(&db);
 
 	return 0;
 }

@@ -11,10 +11,16 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
+#include <getopt.h>
+#include <sys/stat.h>
 
 #include "apk_defines.h"
 #include "apk_applet.h"
+
+const char *apk_root = "/";
+const char *apk_repository = NULL;
 
 void apk_log(const char *prefix, const char *format, ...)
 {
@@ -46,10 +52,30 @@ int usage(void)
 	return 1;
 }
 
+static struct apk_applet *find_applet(const char *name)
+{
+	struct apk_applet **a;
+
+	for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
+		if (strcmp(name, (*a)->name) == 0)
+			return *a;
+	}
+	
+	return NULL;
+}
+
 int main(int argc, char **argv)
 {
-	struct apk_applet **a, *applet;
-	char *prog;
+	static struct option generic_options[] = {
+		{"root", required_argument, NULL, 'Q' },
+		{"repository", required_argument, NULL, 'X' },
+		{0, 0, 0, 0},
+	};
+	struct apk_applet *applet = NULL;
+	const char *prog;
+	int r;
+
+	umask(0);
 
 	prog = strrchr(argv[0], '/');
 	if (prog == NULL)
@@ -57,25 +83,35 @@ int main(int argc, char **argv)
 	else
 		prog++;
 
-	if (strcmp(prog, "apk") == 0) {
-		if (argc < 2)
-			return usage();
-		prog = argv[1];
-		argv++;
-		argc--;
-	} else if (strncmp(prog, "apk_", 4) == 0) {
-		prog += 4;
-	} else
-		return usage();
+	if (strncmp(prog, "apk_", 4) == 0)
+		applet = find_applet(prog + 4);
 
-	for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
-		applet = *a;
-		if (strcmp(prog, applet->name) == 0) {
-			argv++;
-			argc--;
-			return applet->main(argc, argv);
+	while ((r = getopt_long(argc, argv, "",
+				generic_options, NULL)) != -1) {
+		switch (r) {
+		case 'Q':
+			apk_root = optarg;
+			break;
+		case 'X':
+			apk_repository = optarg;
+			break;
+		default:
+			return usage();
 		}
 	}
 
-	return usage();
+	argc -= optind;
+	argv += optind;
+
+	if (applet == NULL) {
+		if (argc > 0)
+			applet = find_applet(argv[0]);
+		if (applet == NULL)
+			return usage();
+
+		argc--;
+		argv++;
+	}
+
+	return applet->main(argc, argv);
 }

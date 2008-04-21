@@ -362,26 +362,6 @@ int apk_pkg_run_script(struct apk_package *pkg, const char *root,
 		return -1;
 	}
 
-	/* FIXME: Remove this ugly kludge */
-	if (strcmp(pkg->name->name, "busybox") == 0 &&
-	    type == APK_SCRIPT_POST_INSTALL) {
-		apk_message("Create busybox links");
-
-		pid = fork();
-		if (pid == -1)
-			return -1;
-		if (pid == 0) {
-			chroot(root);
-			execl("/bin/busybox", "busybox", "--install", "-s", NULL);
-			exit(1);
-		}
-		waitpid(pid, &status, 0);
-		if (WIFEXITED(status))
-			return WEXITSTATUS(status);
-		return -1;
-
-	}
-
 	return 0;
 }
 

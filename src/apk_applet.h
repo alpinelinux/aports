@@ -12,6 +12,9 @@
 #ifndef APK_APPLET_H
 #define APK_APPLET_H
 
+extern const char *apk_root;
+extern const char *apk_repository;
+
 struct apk_applet {
 	const char *name;
         const char *usage;

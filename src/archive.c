@@ -57,7 +57,6 @@ static int get_dev_null(void)
 			err(EX_OSFILE, "/dev/null");
 	}
 	return fd_null;
-
 }
 
 pid_t apk_open_gz(int *fd)
@@ -243,6 +242,7 @@ int apk_archive_entry_extract(struct apk_archive_entry *ae, const char *fn)
 
 	/* BIG HONKING FIXME */
 	unlink(fn);
+	apk_message("Extracting %s...", ae->mode);
 
 	switch (ae->mode & S_IFMT) {
 	case S_IFDIR:

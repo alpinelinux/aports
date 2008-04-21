@@ -20,6 +20,7 @@
 #include "apk_package.h"
 #include "apk_database.h"
 #include "apk_state.h"
+#include "apk_applet.h"
 
 struct install_ctx {
 	struct apk_database *db;
@@ -107,7 +108,7 @@ static struct apk_db_dir *apk_db_dir_ref(struct apk_database *db,
 		if (dir->parent != NULL)
 			apk_db_dir_ref(db, dir->parent, create_dir);
 		db->installed.stats.dirs++;
-		if (create_dir)
+		if (create_dir && dir->mode)
 			mkdir(dir->dirname, dir->mode);
 	}
 	dir->refs++;
@@ -135,7 +136,7 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 	apk_blob_t bparent;
 	char *cstr;
 
-	if (name.ptr[name.len-1] == '/')
+	if (name.len && name.ptr[name.len-1] == '/')
 		name.len--;
 
 	cstr = apk_blob_cstr(name);
@@ -149,8 +150,12 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 	dir->dirname[name.len] = 0;
 	apk_hash_insert(&db->installed.dirs, dir);
 
-	if (apk_blob_rsplit(name, '/', &bparent, NULL))
+	if (name.len == 0)
+		dir->parent = NULL;
+        else if (apk_blob_rsplit(name, '/', &bparent, NULL))
 		dir->parent = apk_db_dir_get(db, bparent);
+	else
+		dir->parent = apk_db_dir_get(db, APK_BLOB_NULL);
 
 	return dir;
 }
@@ -194,22 +199,21 @@ static struct apk_db_file *apk_db_file_get(struct apk_database *db,
 	struct hlist_node *cur;
 	apk_blob_t bdir, bfile;
 
-	if (!apk_blob_rsplit(name, '/', &bdir, &bfile))
-		return NULL;
-
 	dir = NULL;
-	if (ctx != NULL && ctx->dircache != NULL) {
+	if (!apk_blob_rsplit(name, '/', &bdir, &bfile)) {
+		dir = apk_db_dir_get(db, APK_BLOB_NULL);
+		bfile = name;
+	} else if (ctx != NULL && ctx->dircache != NULL) {
 		dir = ctx->dircache;
 		if (strncmp(dir->dirname, bdir.ptr, bdir.len) != 0 ||
 		    dir->dirname[bdir.len] != 0)
 			dir = NULL;
 	}
-	if (dir == NULL) {
+	if (dir == NULL)
 		dir = apk_db_dir_get(db, bdir);
-		if (ctx != NULL) {
-			ctx->dircache = dir;
-			ctx->file_dir_node = &dir->files.first;
-		}
+	if (ctx != NULL && dir != ctx->dircache) {
+		ctx->dircache = dir;
+		ctx->file_dir_node = &dir->files.first;
 	}
 
 	hlist_for_each_entry(file, cur, &dir->files, dir_files_list) {
@@ -382,39 +386,45 @@ static int apk_db_read_scriptdb(struct apk_database *db, int fd)
 	return 0;
 }
 
-static const char *get_db_path(struct apk_database *db, const char *f)
+static const char *get_db_path(const char *root, const char *f)
 {
 	static char fn[1024];
 
-	snprintf(fn, sizeof(fn), "%s%s", db->root, f);
+	snprintf(fn, sizeof(fn), "%s/%s", root, f);
 
 	return fn;
 }
 
-void apk_db_init(struct apk_database *db, const char *root)
+int apk_db_create(const char *root)
 {
-	memset(db, 0, sizeof(*db));
-	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
-	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 4000);
-	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 1000);
+	apk_blob_t deps = APK_BLOB_STR("busybox, alpine-baselayout, "
+				       "apk-tools, alpine-conf");
+	int fd;
 
-	if (root != NULL) {
-		db->root = strdup(root);
-		apk_db_add_repository(db, "/home/fabled/foo/");
-		mkdir(get_db_path(db, "tmp"), 01777);
-		mkdir(get_db_path(db, "dev"), 0755);
-		mknod(get_db_path(db, "dev/null"), 0666, makedev(1, 3));
-	}
+	mkdir(get_db_path(root, "tmp"), 01777);
+	mkdir(get_db_path(root, "dev"), 0755);
+	mknod(get_db_path(root, "dev/null"), 0666, makedev(1, 3));
+	mkdir(get_db_path(root, "var"), 0755);
+	mkdir(get_db_path(root, "var/lib"), 0755);
+	mkdir(get_db_path(root, "var/lib/apk"), 0755);
+
+	fd = creat(get_db_path(root, "var/lib/apk/world"), 0600);
+	if (fd < 0)
+		return -1;
+	write(fd, deps.ptr, deps.len);
+	close(fd);
+
+	return 0;
 }
 
-int apk_db_read_config(struct apk_database *db)
+static int apk_db_read_config(struct apk_database *db)
 {
 	struct stat st;
 	char *buf;
 	int fd;
 
 	if (db->root == NULL)
-		return -1;
+		return 0;
 
 	/* Read:
 	 * 1. installed repository
@@ -424,27 +434,24 @@ int apk_db_read_config(struct apk_database *db)
 	 * 5. files db
 	 * 6. script db
 	 */
-	fd = open(get_db_path(db, "var/lib/apk/world"), O_RDONLY);
-	if (fd >= 0) {
-		fstat(fd, &st);
-		buf = malloc(st.st_size);
-		read(fd, buf, st.st_size);
-		apk_deps_parse(db, &db->world,
-			       APK_BLOB_PTR_LEN(buf, st.st_size));
-		close(fd);
-	} else {
-		apk_deps_parse(db, &db->world,
-			       APK_BLOB_STR("busybox, alpine-baselayout, "
-					    "apk-tools, alpine-conf"));
-	}
+	fd = open(get_db_path(db->root, "var/lib/apk/world"), O_RDONLY);
+	if (fd < 0)
+		return -1;
 
-	fd = open(get_db_path(db, "var/lib/apk/files"), O_RDONLY);
+	fstat(fd, &st);
+	buf = malloc(st.st_size);
+	read(fd, buf, st.st_size);
+	apk_deps_parse(db, &db->world,
+		       APK_BLOB_PTR_LEN(buf, st.st_size));
+	close(fd);
+
+	fd = open(get_db_path(db->root, "var/lib/apk/files"), O_RDONLY);
 	if (fd >= 0) {
 		apk_db_read_fdb(db, fd);
 		close(fd);
 	}
 
-	fd = open(get_db_path(db, "var/lib/apk/scripts"), O_RDONLY);
+	fd = open(get_db_path(db->root, "var/lib/apk/scripts"), O_RDONLY);
 	if (fd >= 0) {
 		apk_db_read_scriptdb(db, fd);
 		close(fd);
@@ -453,37 +460,54 @@ int apk_db_read_config(struct apk_database *db)
 	return 0;
 }
 
+int apk_db_open(struct apk_database *db, const char *root)
+{
+	memset(db, 0, sizeof(*db));
+	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
+	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 4000);
+	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 1000);
+
+	if (root != NULL) {
+		db->root = strdup(root);
+		db->root_fd = open(root, O_RDONLY);
+		if (db->root_fd < 0) {
+			free(db->root);
+			return -1;
+		}
+
+		apk_db_add_repository(db, apk_repository);
+	}
+
+	return apk_db_read_config(db);
+}
+
 struct write_ctx {
 	struct apk_database *db;
 	int fd;
 };
 
-int apk_db_write_config(struct apk_database *db)
+static int apk_db_write_config(struct apk_database *db)
 {
 	char buf[1024];
 	int n, fd;
 
 	if (db->root == NULL)
-		return -1;
+		return 0;
 
-	mkdir(get_db_path(db, "var"), 0755);
-	mkdir(get_db_path(db, "var/lib"), 0755);
-	mkdir(get_db_path(db, "var/lib/apk"), 0755);
-
-	fd = creat(get_db_path(db, "var/lib/apk/world"), 0600);
+	fd = creat(get_db_path(db->root, "var/lib/apk/world"), 0600);
 	if (fd < 0)
 		return -1;
 	n = apk_deps_format(buf, sizeof(buf), db->world);
 	write(fd, buf, n);
 	close(fd);
 
-	fd = creat(get_db_path(db, "var/lib/apk/files"), 0600);
+	fd = creat(get_db_path(db->root, "var/lib/apk/files"), 0600);
 	if (fd < 0)
 		return -1;
 	apk_db_write_fdb(db, fd);
 	close(fd);
 
-	fd = creat(get_db_path(db, "var/lib/apk/scripts"), 0600);
+	fd = creat(get_db_path(db->root, "var/lib/apk/scripts"), 0600);
 	if (fd < 0)
 		return -1;
 	apk_db_write_scriptdb(db, fd);
@@ -492,13 +516,17 @@ int apk_db_write_config(struct apk_database *db)
 	return 0;
 }
 
-void apk_db_free(struct apk_database *db)
+void apk_db_close(struct apk_database *db)
 {
+	apk_db_write_config(db);
+
 	apk_hash_free(&db->available.names);
 	apk_hash_free(&db->available.packages);
 	apk_hash_free(&db->installed.dirs);
-	if (db->root != NULL)
+	if (db->root != NULL) {
+		close(db->root_fd);
 		free(db->root);
+	}
 }
 
 static void apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)
@@ -593,7 +621,7 @@ int apk_db_add_repository(struct apk_database *db, const char *repo)
 		.url = strdup(repo)
 	};
 
-	snprintf(tmp, sizeof(tmp), "%sAPK_INDEX", repo);
+	snprintf(tmp, sizeof(tmp), "%s/APK_INDEX", repo);
 	fd = open(tmp, O_RDONLY);
 	if (fd < 0) {
 		apk_error("Failed to open index file %s", tmp);
@@ -732,7 +760,7 @@ int apk_db_install_pkg(struct apk_database *db,
 	pthread_t tid = 0;
 	int fd, r;
 
-	if (chdir(db->root) < 0)
+	if (fchdir(db->root_fd) < 0)
 		return errno;
 
 	/* Purge the old package if there */
@@ -753,7 +781,7 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	/* Install the new stuff */
 	snprintf(file, sizeof(file),
-		 "%s%s-%s.apk",
+		 "%s/%s-%s.apk",
 		 db->repos[0].url, newpkg->name->name, newpkg->version);
 
 	fd = open(file, O_RDONLY);

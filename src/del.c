@@ -18,8 +18,8 @@ static int del_main(int argc, char **argv)
 	struct apk_database db;
 	int i, j;
 
-	apk_db_init(&db, "/home/fabled/tmproot/");
-	apk_db_read_config(&db);
+	if (apk_db_open(&db, apk_root) < 0)
+		return -1;
 
 	if (db.world == NULL)
 		goto out;
@@ -38,7 +38,7 @@ static int del_main(int argc, char **argv)
 
 	apk_db_recalculate_and_commit(&db);
 out:
-	apk_db_free(&db);
+	apk_db_close(&db);
 
 	return 0;
 }

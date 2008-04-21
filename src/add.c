@@ -18,8 +18,9 @@ static int add_main(int argc, char **argv)
 	struct apk_database db;
 	int i;
 
-	apk_db_init(&db, "/home/fabled/tmproot/");
-	apk_db_read_config(&db);
+	if (apk_db_open(&db, apk_root) < 0)
+		return -1;
+
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep = {
 			.name = apk_db_get_name(&db, argv[i]),
@@ -27,7 +28,7 @@ static int add_main(int argc, char **argv)
 		apk_deps_add(&db.world, &dep);
 	}
 	apk_db_recalculate_and_commit(&db);
-	apk_db_free(&db);
+	apk_db_close(&db);
 
 	return 0;
 }
