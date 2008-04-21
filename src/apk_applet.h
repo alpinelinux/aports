@@ -22,6 +22,6 @@ extern struct apk_applet *__start_apkapplets, *__stop_apkapplets;
 
 #define APK_DEFINE_APPLET(x) \
 	static struct apk_applet *__applet_##x \
-	__attribute__((__section__("apkapplets") used)) = &x;
+	__attribute__((__section__("apkapplets"))) __attribute((used)) = &x;
 
 #endif

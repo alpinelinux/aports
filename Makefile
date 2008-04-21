@@ -22,7 +22,7 @@ INSTALLDIR=$(INSTALL) -d
 
 CFLAGS=-O2 -g -D_GNU_SOURCE -Werror -Wall -Wstrict-prototypes -std=gnu99 \
 	-DAPK_VERSION=\"$(FULL_VERSION)\"
-LDFLAGS=-g -lpthread
+LDFLAGS=-g -lpthread -nopie
 
 DESTDIR=
 SBINDIR=/usr/sbin
