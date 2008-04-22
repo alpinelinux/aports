@@ -44,9 +44,11 @@ typedef struct md5_ctx csum_ctx_t;
 #define csum_finish(ctx, buf)		md5_finish(ctx, buf)
 #endif
 
-#define apk_error(args...)	apk_log("ERROR: ", args)
-#define apk_warning(args...)	apk_log("WARNING: ", args)
-#define apk_message(args...)	apk_log(NULL, args)
+extern int apk_quiet;
+
+#define apk_error(args...)	if (!apk_quiet) { apk_log("ERROR: ", args); }
+#define apk_warning(args...)	if (!apk_quiet) { apk_log("WARNING: ", args); }
+#define apk_message(args...)	if (!apk_quiet) { apk_log(NULL, args); }
 
 void apk_log(const char *prefix, const char *format, ...);
 

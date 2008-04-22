@@ -108,8 +108,10 @@ static struct apk_db_dir *apk_db_dir_ref(struct apk_database *db,
 		if (dir->parent != NULL)
 			apk_db_dir_ref(db, dir->parent, create_dir);
 		db->installed.stats.dirs++;
-		if (create_dir && dir->mode)
+		if (create_dir && dir->mode) {
 			mkdir(dir->dirname, dir->mode);
+			chown(dir->dirname, dir->uid, dir->gid);
+		}
 	}
 	dir->refs++;
 
@@ -666,6 +668,7 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 	struct apk_database *db = ctx->db;
 	struct apk_package *pkg = ctx->pkg;
 	apk_blob_t name = APK_BLOB_STR(ae->name);
+	struct apk_db_dir *dir;
 	struct apk_db_file *file;
 	const char *p;
 	int r = 0, type;
@@ -722,7 +725,10 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 	} else {
 		if (name.ptr[name.len-1] == '/')
 			name.len--;
-		apk_db_dir_get(db, name)->mode = 0777 & ae->mode;
+		dir = apk_db_dir_get(db, name);
+		dir->mode = ae->mode & 07777;
+		dir->uid = ae->uid;
+		dir->gid = ae->gid;
 	}
 
 	return r;
@@ -817,9 +823,12 @@ int apk_db_install_pkg(struct apk_database *db,
 	r = apk_pkg_run_script(newpkg, db->root,
 			       (oldpkg == NULL) ?
 			       APK_SCRIPT_POST_INSTALL : APK_SCRIPT_POST_UPGRADE);
-	if (r != 0)
+	if (r != 0) {
 		apk_error("%s-%s: Failed to execute post-install/upgrade script",
 			  newpkg->name->name, newpkg->version);
+	} else if (apk_quiet) {
+		write(STDOUT_FILENO, ".", 1);
+	}
 	return r;
 
 err_close:

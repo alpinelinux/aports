@@ -124,7 +124,7 @@ int apk_parse_tar(int fd, apk_archive_entry_parser parser, void *ctx)
 			.size  = GET_OCTAL(buf.size),
 			.uid   = GET_OCTAL(buf.uid),
 			.gid   = GET_OCTAL(buf.gid),
-			.mode  = GET_OCTAL(buf.mode) & 0777,
+			.mode  = GET_OCTAL(buf.mode) & 07777,
 			.mtime = GET_OCTAL(buf.mtime),
 			.name  = entry.name,
 			.uname = buf.uname,
@@ -242,17 +242,16 @@ int apk_archive_entry_extract(struct apk_archive_entry *ae, const char *fn)
 
 	/* BIG HONKING FIXME */
 	unlink(fn);
-	apk_message("Extracting %s...", ae->mode);
 
 	switch (ae->mode & S_IFMT) {
 	case S_IFDIR:
-		r = mkdir(fn, ae->mode & 0777);
+		r = mkdir(fn, ae->mode & 07777);
 		if (r < 0 && errno == EEXIST)
 			r = 0;
 		break;
 	case S_IFREG:
 		if (ae->link_target == NULL) {
-			r = open(fn, O_WRONLY | O_CREAT, ae->mode & 0777);
+			r = open(fn, O_WRONLY | O_CREAT, ae->mode & 07777);
 			if (r < 0)
 				break;
 			ae->size -= do_splice(ae->read_fd, r, ae->size);
@@ -269,11 +268,17 @@ int apk_archive_entry_extract(struct apk_archive_entry *ae, const char *fn)
 	case S_IFBLK:
 	case S_IFCHR:
 	case S_IFIFO:
-		r = mknod(fn, ae->mode, ae->device);
+		r = mknod(fn, ae->mode & 07777, ae->device);
 		break;
 	}
-	if (r != 0)
+	if (r == 0) {
+		if (!S_ISLNK(ae->mode))
+			r = chown(fn, ae->uid, ae->gid);
+		else
+			r = lchown(fn, ae->uid, ae->gid);
+	} else {
 		apk_error("Failed to extract %s\n", ae->name);
+	}
 	return r;
 }
 

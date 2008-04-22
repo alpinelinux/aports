@@ -36,6 +36,8 @@ struct apk_db_dir {
 
 	unsigned refs;
 	mode_t mode;
+	uid_t uid;
+	gid_t gid;
 	char dirname[];
 };
 

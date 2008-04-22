@@ -21,6 +21,7 @@
 
 const char *apk_root = "/";
 const char *apk_repository = NULL;
+int apk_quiet = 0;
 
 void apk_log(const char *prefix, const char *format, ...)
 {
@@ -69,6 +70,7 @@ int main(int argc, char **argv)
 	static struct option generic_options[] = {
 		{"root", required_argument, NULL, 'Q' },
 		{"repository", required_argument, NULL, 'X' },
+		{"quiet", no_argument, NULL, 'q' },
 		{0, 0, 0, 0},
 	};
 	struct apk_applet *applet = NULL;
@@ -94,6 +96,9 @@ int main(int argc, char **argv)
 			break;
 		case 'X':
 			apk_repository = optarg;
+			break;
+		case 'q':
+			apk_quiet = 1;
 			break;
 		default:
 			return usage();

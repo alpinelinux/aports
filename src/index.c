@@ -26,12 +26,13 @@ static int warn_if_no_providers(apk_hash_item item, void *ctx)
 	struct apk_name *name = (struct apk_name *) item;
 
 	if (name->pkgs == NULL) {
-		if (++counts->unsatisfied < 10)
+		if (++counts->unsatisfied < 10) {
 			apk_warning("No provider for dependency '%s'",
 				    name->name);
-		else if (counts->unsatisfied == 10)
+		} else if (counts->unsatisfied == 10) {
 			apk_warning("Too many unsatisfiable dependencies, "
 				    "not reporting the rest.");
+		}
 	}
 	counts->total++;
 
