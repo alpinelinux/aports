@@ -75,7 +75,7 @@ void apk_pkg_free(struct apk_package *pkg);
 int apk_pkg_get_state(struct apk_package *pkg);
 int apk_pkg_add_script(struct apk_package *pkg, int fd,
 		       unsigned int type, unsigned int size);
-int apk_pkg_run_script(struct apk_package *pkg, const char *root,
+int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		       unsigned int type);
 
 struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_t entry);

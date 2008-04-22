@@ -44,9 +44,9 @@ typedef struct md5_ctx csum_ctx_t;
 #define csum_finish(ctx, buf)		md5_finish(ctx, buf)
 #endif
 
-extern int apk_quiet;
+extern int apk_cwd_fd, apk_quiet;
 
-#define apk_error(args...)	if (!apk_quiet) { apk_log("ERROR: ", args); }
+#define apk_error(args...)	apk_log("ERROR: ", args);
 #define apk_warning(args...)	if (!apk_quiet) { apk_log("WARNING: ", args); }
 #define apk_message(args...)	if (!apk_quiet) { apk_log(NULL, args); }
 
@@ -101,12 +101,18 @@ static inline int hlist_hashed(const struct hlist_node *n)
 static inline void __hlist_del(struct hlist_node *n, struct hlist_node **pprev)
 {
 	*pprev = n->next;
+	n->next = NULL;
 }
 
-static inline void hlist_del(struct hlist_node *n, struct hlist_node **pprev)
+static inline void hlist_del(struct hlist_node *n, struct hlist_head *h)
 {
-	__hlist_del(n, pprev);
-	n->next = LIST_POISON1;
+	struct hlist_node **pp = &h->first;
+
+	while (*pp != NULL && *pp != LIST_END && *pp != n)
+		pp = &(*pp)->next;
+
+	if (*pp == n)
+		__hlist_del(n, pp);
 }
 
 static inline void hlist_add_head(struct hlist_node *n, struct hlist_head *h)
@@ -121,6 +127,16 @@ static inline void hlist_add_after(struct hlist_node *n, struct hlist_node **pre
 {
 	n->next = *prev ? *prev : LIST_END;
 	*prev = n;
+}
+
+static inline struct hlist_node **hlist_tail_ptr(struct hlist_head *h)
+{
+	struct hlist_node *n = h->first;
+	if (n == NULL || n == LIST_END)
+		return &h->first;
+	while (n->next != NULL && n->next != LIST_END)
+		n = n->next;
+	return &n->next;
 }
 
 #define hlist_entry(ptr, type, member) container_of(ptr,type,member)

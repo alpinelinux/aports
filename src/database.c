@@ -183,10 +183,11 @@ static void apk_db_file_set_owner(struct apk_database *db,
 				  int create_dir,
 				  struct hlist_node **after)
 {
-	if (file->owner != NULL)
-		return;
-
-	db->installed.stats.files++;
+	if (file->owner != NULL) {
+		hlist_del(&file->pkg_files_list, &file->owner->owned_files);
+	} else {
+		db->installed.stats.files++;
+	}
 	file->dir = apk_db_dir_ref(db, file->dir, create_dir);
 	file->owner = owner;
 	hlist_add_after(&file->pkg_files_list, after);
@@ -215,7 +216,7 @@ static struct apk_db_file *apk_db_file_get(struct apk_database *db,
 		dir = apk_db_dir_get(db, bdir);
 	if (ctx != NULL && dir != ctx->dircache) {
 		ctx->dircache = dir;
-		ctx->file_dir_node = &dir->files.first;
+		ctx->file_dir_node = hlist_tail_ptr(&dir->files);
 	}
 
 	hlist_for_each_entry(file, cur, &dir->files, dir_files_list) {
@@ -274,7 +275,7 @@ static int apk_db_read_fdb(struct apk_database *db, int fd)
 				}
 				dir = NULL;
 				file_dir_node = NULL;
-				file_pkg_node = &pkg->owned_files.first;
+				file_pkg_node = hlist_tail_ptr(&pkg->owned_files);
 				break;
 			case 'D':
 				if (pkg == NULL) {
@@ -282,7 +283,7 @@ static int apk_db_read_fdb(struct apk_database *db, int fd)
 					return -1;
 				}
 				dir = apk_db_dir_get(db, l);
-				file_dir_node = &dir->files.first;
+				file_dir_node = hlist_tail_ptr(&dir->files);
 				break;
 			case 'F':
 				if (dir == NULL) {
@@ -388,29 +389,23 @@ static int apk_db_read_scriptdb(struct apk_database *db, int fd)
 	return 0;
 }
 
-static const char *get_db_path(const char *root, const char *f)
-{
-	static char fn[1024];
-
-	snprintf(fn, sizeof(fn), "%s/%s", root, f);
-
-	return fn;
-}
-
 int apk_db_create(const char *root)
 {
 	apk_blob_t deps = APK_BLOB_STR("busybox, alpine-baselayout, "
-				       "apk-tools, alpine-conf");
+				       "apk-tools, alpine-conf\n");
 	int fd;
 
-	mkdir(get_db_path(root, "tmp"), 01777);
-	mkdir(get_db_path(root, "dev"), 0755);
-	mknod(get_db_path(root, "dev/null"), 0666, makedev(1, 3));
-	mkdir(get_db_path(root, "var"), 0755);
-	mkdir(get_db_path(root, "var/lib"), 0755);
-	mkdir(get_db_path(root, "var/lib/apk"), 0755);
+	fchdir(apk_cwd_fd);
+	chdir(root);
 
-	fd = creat(get_db_path(root, "var/lib/apk/world"), 0600);
+	mkdir("tmp", 01777);
+	mkdir("dev", 0755);
+	mknod("dev/null", 0666, makedev(1, 3));
+	mkdir("var", 0755);
+	mkdir("var/lib", 0755);
+	mkdir("var/lib/apk", 0755);
+
+	fd = creat("var/lib/apk/world", 0600);
 	if (fd < 0)
 		return -1;
 	write(fd, deps.ptr, deps.len);
@@ -436,7 +431,9 @@ static int apk_db_read_config(struct apk_database *db)
 	 * 5. files db
 	 * 6. script db
 	 */
-	fd = open(get_db_path(db->root, "var/lib/apk/world"), O_RDONLY);
+	fchdir(db->root_fd);
+
+	fd = open("var/lib/apk/world", O_RDONLY);
 	if (fd < 0)
 		return -1;
 
@@ -447,13 +444,13 @@ static int apk_db_read_config(struct apk_database *db)
 		       APK_BLOB_PTR_LEN(buf, st.st_size));
 	close(fd);
 
-	fd = open(get_db_path(db->root, "var/lib/apk/files"), O_RDONLY);
+	fd = open("var/lib/apk/files", O_RDONLY);
 	if (fd >= 0) {
 		apk_db_read_fdb(db, fd);
 		close(fd);
 	}
 
-	fd = open(get_db_path(db->root, "var/lib/apk/scripts"), O_RDONLY);
+	fd = open("var/lib/apk/scripts", O_RDONLY);
 	if (fd >= 0) {
 		apk_db_read_scriptdb(db, fd);
 		close(fd);
@@ -496,20 +493,22 @@ static int apk_db_write_config(struct apk_database *db)
 	if (db->root == NULL)
 		return 0;
 
-	fd = creat(get_db_path(db->root, "var/lib/apk/world"), 0600);
+	fchdir(db->root_fd);
+
+	fd = creat("var/lib/apk/world", 0600);
 	if (fd < 0)
 		return -1;
 	n = apk_deps_format(buf, sizeof(buf), db->world);
 	write(fd, buf, n);
 	close(fd);
 
-	fd = creat(get_db_path(db->root, "var/lib/apk/files"), 0600);
+	fd = creat("var/lib/apk/files", 0600);
 	if (fd < 0)
 		return -1;
 	apk_db_write_fdb(db, fd);
 	close(fd);
 
-	fd = creat(get_db_path(db->root, "var/lib/apk/scripts"), 0600);
+	fd = creat("var/lib/apk/scripts", 0600);
 	if (fd < 0)
 		return -1;
 	apk_db_write_scriptdb(db, fd);
@@ -690,7 +689,7 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 					       type, ae->size);
 
 		if (type == ctx->script) {
-			r = apk_pkg_run_script(pkg, db->root, type);
+			r = apk_pkg_run_script(pkg, db->root_fd, type);
 			if (r != 0)
 				apk_error("%s-%s: Failed to execute pre-install/upgrade script",
 					  pkg->name->name, pkg->version);
@@ -700,7 +699,7 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 	}
 
 	if (ctx->file_pkg_node == NULL)
-		ctx->file_pkg_node = &pkg->owned_files.first;
+		ctx->file_pkg_node = hlist_tail_ptr(&pkg->owned_files);
 
 	if (!S_ISDIR(ae->mode)) {
 		file = apk_db_file_get(db, name, ctx);
@@ -708,7 +707,8 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 			return -1;
 
 		if (file->owner != NULL &&
-		    file->owner->name != pkg->name) {
+		    file->owner->name != pkg->name &&
+		    strcmp(file->owner->name->name, "busybox") != 0) {
 			apk_error("%s: Trying to overwrite %s owned by %s.\n",
 				  pkg->name->name, ae->name,
 				  file->owner->name->name);
@@ -749,7 +749,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 		unlink(fn);
 
 		apk_db_dir_unref(db, file->dir);
-		hlist_del(c, &pkg->owned_files.first);
+		__hlist_del(c, &pkg->owned_files.first);
 
 		db->installed.stats.files--;
 	}
@@ -772,14 +772,14 @@ int apk_db_install_pkg(struct apk_database *db,
 	/* Purge the old package if there */
 	if (oldpkg != NULL) {
 		if (newpkg == NULL) {
-			r = apk_pkg_run_script(oldpkg, db->root,
+			r = apk_pkg_run_script(oldpkg, db->root_fd,
 					       APK_SCRIPT_PRE_DEINSTALL);
 			if (r != 0)
 				return r;
 		}
 		apk_db_purge_pkg(db, oldpkg);
 		if (newpkg == NULL) {
-			apk_pkg_run_script(oldpkg, db->root,
+			apk_pkg_run_script(oldpkg, db->root_fd,
 					   APK_SCRIPT_POST_DEINSTALL);
 			return 0;
 		}
@@ -820,7 +820,7 @@ int apk_db_install_pkg(struct apk_database *db,
 		apk_warning("%s-%s: checksum does not match",
 			    newpkg->name->name, newpkg->version);
 
-	r = apk_pkg_run_script(newpkg, db->root,
+	r = apk_pkg_run_script(newpkg, db->root_fd,
 			       (oldpkg == NULL) ?
 			       APK_SCRIPT_POST_INSTALL : APK_SCRIPT_POST_UPGRADE);
 	if (r != 0) {

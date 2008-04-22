@@ -7,7 +7,7 @@
 # under the terms of the GNU General Public License version 3 as published
 # by the Free Software Foundation. See http://www.gnu.org/ for details.
 
-VERSION := 2.0-pre0
+VERSION := 2.0_pre0
 
 SVN_REV := $(shell svn info 2> /dev/null | grep ^Revision | cut -d ' ' -f 2)
 ifneq ($(SVN_REV),)
@@ -20,7 +20,7 @@ CC=gcc
 INSTALL=install
 INSTALLDIR=$(INSTALL) -d
 
-CFLAGS=-O2 -g -D_GNU_SOURCE -Werror -Wall -Wstrict-prototypes -std=gnu99 \
+CFLAGS=-g -D_GNU_SOURCE -Werror -Wall -Wstrict-prototypes -std=gnu99 \
 	-DAPK_VERSION=\"$(FULL_VERSION)\"
 LDFLAGS=-g -nopie
 LIBS=-lpthread
@@ -31,12 +31,12 @@ LDFLAGS+=-static
 endif
 
 DESTDIR=
-SBINDIR=/usr/sbin
+SBINDIR=/sbin
 CONFDIR=/etc/apk
 MANDIR=/usr/share/man
 DOCDIR=/usr/share/doc/apk
 
-SUBDIRS=src
+SUBDIRS=src scripts
 
 .PHONY: compile install clean all
 

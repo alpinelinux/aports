@@ -320,15 +320,20 @@ int apk_pkg_add_script(struct apk_package *pkg, int fd,
 	return r;
 }
 
-int apk_pkg_run_script(struct apk_package *pkg, const char *root,
+int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		       unsigned int type)
 {
+	static const char * const environment[] = {
+		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+		NULL
+	};
 	struct apk_script *script;
 	struct hlist_node *c;
 	int fd, status;
 	pid_t pid;
 	char fn[1024];
 
+	fchdir(root_fd);
 	hlist_for_each_entry(script, c, &pkg->scripts, script_list) {
 		if (script->type != type)
 			continue;
@@ -349,14 +354,13 @@ int apk_pkg_run_script(struct apk_package *pkg, const char *root,
 		if (pid == -1)
 			return -1;
 		if (pid == 0) {
-			chroot(root);
-			fn[2] = '.';
-			execl(&fn[2], script_types[script->type],
-			      pkg->version, "", NULL);
+			chroot(".");
+			execle(fn, script_types[script->type],
+			       pkg->version, "", NULL, environment);
 			exit(1);
 		}
 		waitpid(pid, &status, 0);
-		unlink(fn);
+		//unlink(fn);
 		if (WIFEXITED(status))
 			return WEXITSTATUS(status);
 		return -1;

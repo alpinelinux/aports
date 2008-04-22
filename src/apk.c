@@ -10,6 +10,7 @@
  */
 
 #include <stdio.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,7 @@
 const char *apk_root = "/";
 const char *apk_repository = NULL;
 int apk_quiet = 0;
+int apk_cwd_fd;
 
 void apk_log(const char *prefix, const char *format, ...)
 {
@@ -78,6 +80,7 @@ int main(int argc, char **argv)
 	int r;
 
 	umask(0);
+	apk_cwd_fd = open(".", O_RDONLY);
 
 	prog = strrchr(argv[0], '/');
 	if (prog == NULL)
