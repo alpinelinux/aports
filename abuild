@@ -1,0 +1,312 @@
+#!/bin/sh
+
+# script to build apk packages (light version og makepkg)
+# Copyright (c) 2008 Natanael Copa <natanael.copa@gmail.com>
+#
+# Distributed under GPL-2
+#
+# Depends on: busybox utilities, fakeroot, 
+#
+
+myver=0.2
+
+# read config
+MAKEAPK_CONF=${MAKEAPK_CONF:-/etc/abuild.conf}
+[ -f "$MAKEAPK_CONF" ] && . "$MAKEAPK_CONF"
+
+startdir="$PWD"
+srcdir=${srcdir:-"$startdir/src"}
+pkgdir=${pkgdir:-"$startdir/pkg"}
+pkgrel=0
+
+# defaults
+SRCDEST=${SRCDEST:-$startdir}
+PKGDEST=${PKGDEST:-$startdir}
+
+default_cmds="checkdeps fetch unpack rootpkg"
+all_cmds="checksum fetch unpack rootpkg build package cleancache clean srcpkg"
+
+# functions
+vecho() {
+	local sub=
+	[ -n "$INSUB" ] && sub="(sub)"
+	[ -z "$quiet" ] && echo ">>> $pkgname:" "$@" $sub >&2
+}
+
+warning() {
+	echo ">>> Warning:" "$@" >&2
+}
+
+die() {
+	quiet=
+	vecho "$@" >&2
+	exit 1
+}
+
+# check if we have needed packages to build this thing
+checkdeps() {
+	local i
+	local missing=
+	for i in $makedepends; do
+		apk_info -e $i || missing="$missing $i"
+	done
+	[ -z "$missing" ] && return 0
+	warning "Missing makedepends: $missing"
+	return 1
+}
+
+checkmd5() {
+	( cd "$SRCDEST" && echo "$md5" | awk '$2 == "'$1'" { print $0 } ' \
+		| md5sum -c )
+}
+
+uri_fetch() {
+	local uri="$1"
+	local d="${s##*/}"	# $(basename $s)
+	local q
+	[ -n "$quiet" ] && q="-q"
+	mkdir -p "$SRCDEST"
+	if ! [ -f "$SRCDEST/$d" ] || ! checkmd5 "$d" 2>/dev/null; then
+		rm -f "$SRCDEST/$d"
+		wget $q -c -P "$SRCDEST" "$uri" && checkmd5 "$d" 
+	fi
+}
+
+fetch() {
+	local s
+	mkdir -p "$srcdir"
+	for s in $source; do 
+		case "$s" in
+			http://*|ftp://*)
+				uri_fetch "$s" || return 1
+				;;
+			*)
+				[ -n "$genchecksum" ] && continue
+				checkmd5 "${s##*/}" || return 1
+				;;
+		esac
+		ln -sf "$SRCDEST/${s##*/}" "$srcdir"/
+	done
+}
+
+# unpack the sources
+unpack() {
+	local u
+	[ -z "$md5" ] && die "Use 'abuild checksum >>$APKBUILD' to generate a checksum"
+	mkdir -p "$srcdir"
+	for u in $source; do
+		local s="$SRCDEST/${u##*/}"	# $(basename $s)
+		case "$s" in
+			*.tar.gz)
+				tar -C "$srcdir" -zxf "$s" || return 1;;
+			*.tar.bz2)
+				tar -C "$srcdir" -jxf "$s" || return 1;;
+		esac
+	done
+}
+
+# cleanup source and package dir
+clean() {
+	rm -rf "$srcdir"
+	rm -rf "$pkgdir"
+	local i
+	for i in $subpackages; do
+		INSUB=1 $0 $i clean
+	done
+}
+
+# cleanup fetched sources
+cleancache() {
+	local s
+	for s in $source; do
+		case "$s" in
+			http:/*|ftp:/*)
+				rm -f "$SRCDIR/$(basename $s)";;
+		esac
+	done
+}
+
+cleanpkg() {
+	local p=$pkgname-$pkgver
+	[ $pkgrel -ne 0 ] && p="$p-r$pkgrel"
+	rm -f "$PKGDEST/$p.apk" "$PKGDEST/$p.src.tar.gz"
+	local i
+	for i in $subpackages; do
+		INSUB=1 $0 $i cleanpkg
+	done
+}
+
+runpart() {
+	local part=$1
+	vecho "$part"
+	$part || die "$part failed"
+}
+
+# override those in your build script
+build() {
+	die "No build() function found in $APKBUILD"
+}
+
+subpkg() {
+	[ -z "$subpackages" ] && return 0
+	local i
+	cd "$startdir"
+	for i in $subpackages; do
+		INSUB=1 $0 $i package || return 1
+	done
+}
+
+package_apk() {
+	local p="$pkgname-$pkgver"
+	[ "$pkgrel" -ne 0 ] && p="$p-r$pkgrel"
+	local pkg="$p.apk"
+	local db="$pkgdir/var/db/apk/$p"
+	mkdir -p "$db"
+	echo "$arch" > "$db/ARCH"
+	echo "$pkgdesc" > "$db/DESC"
+	echo "$license" > "$db/LICENSE"
+	echo "$depends" > "$db/DEPEND"
+	echo "$url" > "$db/WWW"
+	local i
+	for i in pre-install post-install pre-deinstall post-deinstall; do
+		[ -f ../$i ] && cp ../$i "$db"/
+	done
+	( cd "$pkgdir" && tar -zcf "$PKGDEST/$pkg" * )
+}
+
+package() {
+	package_apk
+}
+
+# predefined subpackage doc
+doc() {
+	local origname="$pkgname"
+	local origpkgdir="$pkgdir"
+	pkgname="$pkgname-doc"
+	pkgdir="$pkgdir-doc"
+	depends=""
+	local i
+	for i in doc man info html sgml; do
+		if [ -d "$origpkgdir/usr/share/$i" ]; then
+			mkdir -p "$pkgdir/usr/share"
+			mv "$origpkgdir/usr/share/$i" "$pkgdir/usr/share"
+		fi
+	done
+	[ -d "$pkgdir/usr/share/man" ] && depends="man"
+	return 0
+}
+
+# predefined subpackage mod
+mod() {
+	local origname="$pkgname"
+	local origpkgdir="$pkgdir"
+	pkgname="$pkgname-mod"
+	pkgdir="$pkgdir-mod"
+	depends="$kernel"
+	for i in firmware modules; do
+		if [ -d $origpkgdir/lib/$i ]; then
+			mkdir -p $pkgdir/lib
+			mv $origpkgdir/lib/$i $pkgdir/lib
+		fi
+	done
+}
+
+# predefined subpackage dev
+dev() {
+	local origname="$pkgname"
+	local origpkgdir="$pkgdir"
+	pkgname="$pkgname-dev"
+	pkgdir="$pkgdir-dev"
+	depends="$origname"
+	for i in $(cd "$origpkgdir" && find usr/lib -name '*.a' -o \
+			-name '*.la' -o -name '*.o' 2>/dev/null) \
+			usr/include usr/lib/pkgconfig usr/share/aclocal; do
+		if [ -e "$origpkgdir/$i" ] || [ -L "$origpkgdir/$i" ]; then
+			d="$pkgdir/${i%/*}"	# dirname $i
+			mkdir -p "$d"
+			mv "$origpkgdir/$i" "$d"
+		fi
+	done
+}
+
+# build and package in fakeroot
+rootpkg() {
+	fakeroot $0 build subpkg package
+}
+
+srcpkg() {
+	local p="$pkgname-$pkgver"
+	[ "$pkgrel" -ne 0 ] && p="$p-r$pkgrel"
+	local prefix="${PWD##*/}"
+	local i files="$prefix/APKBUILD"
+	for i in $source; do
+		files="$files $prefix/${i##*/}"
+	done
+	mkdir -p "$PKGDEST"
+	(cd .. && tar -zcf $PKGDEST/$p.src.tar.gz $files) 
+}
+
+usage() {
+	echo "$(basename $0) $myver"
+	echo "usage: $0 [options] [cmd] ..."
+	echo "Options:"
+	echo " -h  Show this help"
+	echo " -f  Force specified cmd, even if they are already done"
+	echo " -q  Quiet"
+	echo ""
+	echo "Commands:"
+	echo "  checksum   Generate checksum to be included in $APKBUILD"
+	echo "  fetch      Fetch sources to \$SRCDEST and verify checksums"
+	echo "  unpack     Unpack sources to \$srcdir"
+	echo "  build      Compile and install package into \$pkgdir"
+	echo "  package    Create package in \$PKGDEST"
+	echo "  rootpkg    Run '$0 build package' as fakeroot"
+	echo "  clean      Remove temp build and install dirs"
+	echo "  cleanpkg   Remove already built binary and source package"
+	echo "  cleancache Remove downloaded files from \$SRCDEST"
+	echo "  srcpkg     Make a source package"
+	echo ""
+	exit 0
+}
+
+checksum() {
+	local s files
+	for s in $source; do
+		files="$files ${s##*/}"
+	done
+	md5="$(cd "$SRCDEST" && md5sum $files)" || die "md5sum failed"
+	echo "md5=\"$md5\""
+}
+
+APKBUILD="${APKBUILD:-./APKBUILD}"
+
+while getopts "hfq" opt; do
+	case $opt in
+		'h') usage;;
+		'f') force=1;;
+		'q') quiet=1;;
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+# source the buildfile
+[ -f "$APKBUILD" ] || die "Could not find $APKBUILD (PWD=$PWD)"
+. "$APKBUILD"
+
+# If we are handling a sub package then reset subpackages
+[ -n "$INSUB" ] && subpackages=
+
+trap 'die "Aborted by user"' INT
+
+[ -n "$forceunpack" ] && rm -f "$srcdir"/.unpack
+
+
+if [ -z "$1" ]; then
+	set $default_cmds
+fi
+
+while [ $# -gt 0 ]; do
+	runpart $1
+	shift
+done
+
