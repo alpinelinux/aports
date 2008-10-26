@@ -9,6 +9,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -354,9 +355,11 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		if (pid == -1)
 			return -1;
 		if (pid == 0) {
-			chroot(".");
-			execle(fn, script_types[script->type],
-			       pkg->version, "", NULL, environment);
+			if (chroot(".") < 0) {
+				apk_error("chroot: %s", strerror(errno));
+			} else
+				execle(fn, script_types[script->type],
+				       pkg->version, "", NULL, environment);
 			exit(1);
 		}
 		waitpid(pid, &status, 0);

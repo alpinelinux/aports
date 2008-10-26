@@ -276,6 +276,9 @@ int apk_archive_entry_extract(struct apk_archive_entry *ae, const char *fn)
 			r = chown(fn, ae->uid, ae->gid);
 		else
 			r = lchown(fn, ae->uid, ae->gid);
+		if (r < 0)
+			apk_error("Failed to set ownership on %s: %s", fn, 
+					strerror(errno));
 	} else {
 		apk_error("Failed to extract %s\n", ae->name);
 	}

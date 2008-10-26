@@ -434,8 +434,10 @@ static int apk_db_read_config(struct apk_database *db)
 	fchdir(db->root_fd);
 
 	fd = open("var/lib/apk/world", O_RDONLY);
-	if (fd < 0)
+	if (fd < 0) {
+		apk_error("Please run 'apk create' to initialize root");
 		return -1;
+	}
 
 	fstat(fd, &st);
 	buf = malloc(st.st_size);
@@ -470,6 +472,7 @@ int apk_db_open(struct apk_database *db, const char *root)
 		db->root = strdup(root);
 		db->root_fd = open(root, O_RDONLY);
 		if (db->root_fd < 0) {
+			apk_error("%s: %s", root, strerror(errno));
 			free(db->root);
 			return -1;
 		}
@@ -791,8 +794,10 @@ int apk_db_install_pkg(struct apk_database *db,
 		 db->repos[0].url, newpkg->name->name, newpkg->version);
 
 	fd = open(file, O_RDONLY);
-	if (fd < 0)
+	if (fd < 0) {
+		apk_error("%s: %s", file, strerror(errno));
 		return errno;
+	}
 
 	fcntl(fd, F_SETFD, FD_CLOEXEC);
 
