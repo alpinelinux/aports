@@ -7,7 +7,7 @@
 # under the terms of the GNU General Public License version 3 as published
 # by the Free Software Foundation. See http://www.gnu.org/ for details.
 
-VERSION := 2.0_pre0
+VERSION := 2.0_pre1
 
 SVN_REV := $(shell svn info 2> /dev/null | grep ^Revision | cut -d ' ' -f 2)
 ifneq ($(SVN_REV),)
