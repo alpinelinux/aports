@@ -476,9 +476,9 @@ int apk_db_open(struct apk_database *db, const char *root)
 			free(db->root);
 			return -1;
 		}
-
-		apk_db_add_repository(db, apk_repository);
 	}
+	if (apk_repository != NULL)
+		apk_db_add_repository(db, apk_repository);
 
 	return apk_db_read_config(db);
 }

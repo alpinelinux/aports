@@ -106,6 +106,7 @@ int apk_deps_add(struct apk_dependency_array **depends,
 	*apk_dependency_array_add(depends) = *dep;
 	return 0;
 }
+
 void apk_deps_parse(struct apk_database *db,
 		    struct apk_dependency_array **depends,
 		    apk_blob_t blob)
@@ -171,6 +172,79 @@ struct read_info_ctx {
 	int has_install;
 };
 
+static int add_info(struct apk_database *db, struct apk_package *pkg,
+		    char field, apk_blob_t value)
+{
+	char *str;
+
+	switch (field) {
+	case 'P':
+		str = apk_blob_cstr(value);
+		pkg->name = apk_db_get_name(db, str);
+		free(str);
+		break;
+	case 'V':
+		pkg->version = apk_blob_cstr(value);
+		break;
+	case 'T':
+		pkg->description = apk_blob_cstr(value);
+		break;
+	case 'U':
+		pkg->url = apk_blob_cstr(value);
+		break;
+	case 'L':
+		pkg->license = apk_blob_cstr(value);
+		break;
+	case 'D':
+		apk_deps_parse(db, &pkg->depends, value);
+		break;
+	case 'C':
+		apk_hexdump_parse(APK_BLOB_BUF(pkg->csum), value);
+		break;
+	case 'S':
+		pkg->size = apk_blob_uint(value, 10);
+		break;
+	case 'I':
+		pkg->installed_size = apk_blob_uint(value, 10);
+		break;
+	}
+	return 0;
+}
+
+static int read_info_line(void *ctx, apk_blob_t line)
+{
+	static struct {
+		const char *str;
+		char field;
+	} fields[] = {
+		{ "pkgname", 'P' },
+		{ "pkgver",  'V' },
+		{ "pkgdesc", 'T' },
+		{ "url",     'U' },
+		{ "size",    'I' },
+		{ "license", 'L' },
+		{ "depend",  'D' },
+	};
+	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
+	apk_blob_t l, r;
+	int i;
+
+	if (line.ptr == NULL || line.len < 1 || line.ptr[0] == '#')
+		return 0;
+
+	if (!apk_blob_splitstr(line, " = ", &l, &r))
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(fields); i++) {
+		if (strncmp(fields[i].str, l.ptr, l.len) == 0) {
+			add_info(ri->db, ri->pkg, fields[i].field, r);
+			break;
+		}
+	}
+
+	return 0;
+}
+
 static int read_info_entry(struct apk_archive_entry *ae, void *ctx)
 {
 	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
@@ -179,6 +253,13 @@ static int read_info_entry(struct apk_archive_entry *ae, void *ctx)
 	const int bsize = 4 * 1024;
 	apk_blob_t name, version;
 	char *slash, *str;
+
+	if (strcmp(ae->name, ".PKGINFO") == 0) {
+		apk_blob_t blob = apk_archive_entry_read(ae);
+		apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
+		free(blob.ptr);
+		return 0;
+	}
 
 	if (strncmp(ae->name, "var/db/apk/", 11) != 0) {
 		pkg->installed_size += (ae->size + bsize - 1) & ~(bsize - 1);
@@ -248,14 +329,17 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 	ctx.db = db;
 	ctx.pkg->size = st.st_size;
 	ctx.has_install = 0;
-	if (apk_parse_tar_gz(fd, read_info_entry, &ctx) != 0) {
+	if (apk_parse_tar_gz(fd, read_info_entry, &ctx) < 0) {
+		apk_error("File %s is not an APK archive", file);
 		pthread_join(tid, NULL);
 		goto err;
 	}
 	pthread_join(tid, NULL);
 
-	if (ctx.pkg->name == NULL)
+	if (ctx.pkg->name == NULL) {
+		apk_error("File %s is corrupted", file);
 		goto err;
+	}
 
 	close(fd);
 
@@ -372,71 +456,37 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 	return 0;
 }
 
-static int parse_index_line(struct apk_database *db, struct apk_package *pkg,
-			    apk_blob_t blob)
+static int parse_index_line(void *ctx, apk_blob_t line)
 {
-	apk_blob_t d;
-	char *str;
+	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
 
-	if (blob.len < 2 || blob.ptr[1] != ':')
-		return -1;
+	if (line.len < 3 || line.ptr[1] != ':')
+		return 0;
 
-	d = APK_BLOB_PTR_LEN(blob.ptr+2, blob.len-2);
-	switch (blob.ptr[0]) {
-	case 'P':
-		str = apk_blob_cstr(d);
-		pkg->name = apk_db_get_name(db, str);
-		free(str);
-		break;
-	case 'V':
-		pkg->version = apk_blob_cstr(d);
-		break;
-	case 'T':
-		pkg->description = apk_blob_cstr(d);
-		break;
-	case 'U':
-		pkg->url = apk_blob_cstr(d);
-		break;
-	case 'L':
-		pkg->license = apk_blob_cstr(d);
-		break;
-	case 'D':
-		apk_deps_parse(db, &pkg->depends, d);
-		break;
-	case 'C':
-		apk_hexdump_parse(APK_BLOB_BUF(pkg->csum), d);
-		break;
-	case 'S':
-		pkg->size = apk_blob_uint(d, 10);
-		break;
-	case 'I':
-		pkg->installed_size = apk_blob_uint(d, 10);
-		break;
-	}
+	add_info(ri->db, ri->pkg, line.ptr[0], APK_BLOB_PTR_LEN(line.ptr+2, line.len-2));
 	return 0;
 }
 
 struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_t blob)
 {
-	struct apk_package *pkg;
-	apk_blob_t l, r;
+	struct read_info_ctx ctx;
 
-	pkg = calloc(1, sizeof(struct apk_package));
-	if (pkg == NULL)
+	ctx.pkg = calloc(1, sizeof(struct apk_package));
+	if (ctx.pkg == NULL)
 		return NULL;
 
-	r = blob;
-	while (apk_blob_splitstr(r, "\n", &l, &r))
-		parse_index_line(db, pkg, l);
-	parse_index_line(db, pkg, r);
+	ctx.db = db;
+	ctx.has_install = 0;
 
-	if (pkg->name == NULL) {
-		apk_pkg_free(pkg);
+	apk_blob_for_each_segment(blob, "\n", parse_index_line, &ctx);
+
+	if (ctx.pkg->name == NULL) {
+		apk_pkg_free(ctx.pkg);
 		printf("%.*s\n", blob.len, blob.ptr);
-		pkg = NULL;
+		ctx.pkg = NULL;
 	}
 
-	return pkg;
+	return ctx.pkg;
 }
 
 apk_blob_t apk_pkg_format_index_entry(struct apk_package *info, int size,

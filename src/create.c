@@ -15,6 +15,11 @@
 
 static int create_main(int argc, char **argv)
 {
+	if (strcmp(apk_root, "/") == 0) {
+		apk_error("Will not recreate system root.");
+		return 1;
+	}
+
 	return apk_db_create(apk_root);
 }
 

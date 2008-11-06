@@ -47,7 +47,7 @@ int apk_blob_rsplit(apk_blob_t blob, char split, apk_blob_t *l, apk_blob_t *r)
 	return 1;
 }
 
-int apk_blob_splitstr(apk_blob_t blob, char *split, apk_blob_t *l, apk_blob_t *r)
+int apk_blob_splitstr(apk_blob_t blob, const char *split, apk_blob_t *l, apk_blob_t *r)
 {
 	int splitlen = strlen(split);
 	char *pos = blob.ptr, *end = blob.ptr + blob.len - splitlen + 1;
@@ -69,6 +69,23 @@ int apk_blob_splitstr(apk_blob_t blob, char *split, apk_blob_t *l, apk_blob_t *r
 		*r = APK_BLOB_PTR_PTR(pos+splitlen, blob.ptr+blob.len-1);
 		return 1;
 	}
+}
+
+int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
+			      int (*cb)(void *ctx, apk_blob_t blob), void *ctx)
+{
+	apk_blob_t l, r;
+	int rc;
+
+	r = blob;
+	while (apk_blob_splitstr(r, split, &l, &r)) {
+		rc = cb(ctx, l);
+		if (rc != 0)
+			return rc;
+	}
+	if (r.len > 0)
+		return cb(ctx, r);
+	return 0;
 }
 
 static int dx(int c)

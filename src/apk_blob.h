@@ -27,9 +27,12 @@ typedef struct apk_blob apk_blob_t;
 #define APK_BLOB_PTR_PTR(beg,end)	APK_BLOB_PTR_LEN((beg),(end)-(beg)+1)
 
 char *apk_blob_cstr(apk_blob_t str);
-int apk_blob_splitstr(apk_blob_t blob, char *split, apk_blob_t *l, apk_blob_t *r);
+int apk_blob_splitstr(apk_blob_t blob, const char *split, apk_blob_t *l, apk_blob_t *r);
 int apk_blob_rsplit(apk_blob_t blob, char split, apk_blob_t *l, apk_blob_t *r);
 unsigned apk_blob_uint(apk_blob_t blob, int base);
+
+int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
+			      int (*cb)(void *ctx, apk_blob_t blob), void *ctx);
 
 int apk_hexdump_parse(apk_blob_t to, apk_blob_t from);
 int apk_hexdump_format(int tolen, char *to, apk_blob_t from);
