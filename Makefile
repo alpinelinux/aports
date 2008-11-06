@@ -22,7 +22,7 @@ INSTALLDIR=$(INSTALL) -d
 
 CFLAGS=-g -D_GNU_SOURCE -Werror -Wall -Wstrict-prototypes -std=gnu99 \
 	-DAPK_VERSION=\"$(FULL_VERSION)\"
-LDFLAGS=-g -nopie
+LDFLAGS=-g
 LIBS=-lpthread
 
 ifeq ($(STATIC),yes)
@@ -36,7 +36,7 @@ CONFDIR=/etc/apk
 MANDIR=/usr/share/man
 DOCDIR=/usr/share/doc/apk
 
-SUBDIRS=src scripts
+SUBDIRS=src
 
 .PHONY: compile install clean all
 
