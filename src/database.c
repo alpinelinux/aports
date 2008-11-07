@@ -692,7 +692,7 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 		p += strlen(pkg->version) + 1;
 
 		type = apk_script_type(p);
-		if (type != APK_SCRIPT_INVALID)
+		if (type == APK_SCRIPT_INVALID)
 			return 0;
 	}
 
@@ -703,7 +703,7 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 
 		if (type == APK_SCRIPT_GENERIC ||
 		    type == ctx->script) {
-			r = apk_pkg_run_script(pkg, db->root_fd, type);
+			r = apk_pkg_run_script(pkg, db->root_fd, ctx->script);
 			if (r != 0)
 				apk_error("%s-%s: Failed to execute pre-install/upgrade script",
 					  pkg->name->name, pkg->version);

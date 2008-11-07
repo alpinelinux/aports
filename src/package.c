@@ -172,7 +172,7 @@ int apk_script_type(const char *name)
 		    strcmp(script_types[i], name) == 0)
 			return i;
 
-	return -1;
+	return APK_SCRIPT_INVALID;
 }
 
 struct read_info_ctx {
