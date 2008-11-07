@@ -675,6 +675,9 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 	const char *p;
 	int r = 0, type;
 
+	if (strcmp(ae->name, ".PKGINFO") == 0)
+		return 0;
+
 	if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
 		p = &ae->name[11];
 		if (strncmp(p, pkg->name->name, strlen(pkg->name->name)) != 0)
