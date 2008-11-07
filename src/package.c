@@ -54,8 +54,10 @@ static apk_blob_t trim(apk_blob_t str)
 	if (str.ptr == NULL || str.len < 1)
 		return str;
 
-	if (str.ptr[str.len-2] == '\n')
+	if (str.ptr[str.len-1] == '\n') {
+		str.ptr[str.len-1] = 0;
 		return APK_BLOB_PTR_LEN(str.ptr, str.len-1);
+	}
 
 	return str;
 }
@@ -281,9 +283,9 @@ static int read_info_entry(void *ctx, const struct apk_archive_entry *ae,
 			apk_blob_t blob = apk_blob_from_istream(is, ae->size);
 			apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
 			free(blob.ptr);
-			/* FIXME: all done after checking if .INSTALL exists */
-			return 0;
+			return 1;
 		}
+		/* FIXME: Check for .INSTALL */
 	} else if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
 		/* APK 1.0 format */
 		if (!S_ISREG(ae->mode))

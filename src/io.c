@@ -183,12 +183,22 @@ static void is_bs_close(void *stream, csum_t csum)
 	struct apk_istream_bstream *isbs =
 		container_of(stream, struct apk_istream_bstream, bs);
 
-	if (csum != NULL)
+	if (csum != NULL) {
+		size_t size;
+
+		do {
+			size = isbs->is->read(isbs->is, isbs->buffer,
+					      sizeof(isbs->buffer));
+			csum_process(&isbs->csum_ctx, isbs->buffer, size);
+		} while (size == sizeof(isbs->buffer));
+
 		csum_finish(&isbs->csum_ctx, csum);
+	}
 
 	isbs->is->close(isbs->is);
 	free(isbs);
 }
+
 struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream)
 {
 	struct apk_istream_bstream *isbs;
@@ -238,8 +248,12 @@ static void mmap_close(void *stream, csum_t csum)
 	struct apk_mmap_bstream *mbs =
 		container_of(stream, struct apk_mmap_bstream, bs);
 
-	if (csum != NULL)
+	if (csum != NULL) {
+		if (mbs->pos != mbs->size)
+			csum_process(&mbs->csum_ctx, &mbs->ptr[mbs->pos],
+				     mbs->size - mbs->pos);
 		csum_finish(&mbs->csum_ctx, csum);
+	}
 
 	munmap(mbs->ptr, mbs->size);
 	free(mbs);
