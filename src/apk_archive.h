@@ -13,8 +13,8 @@
 #define APK_ARCHIVE
 
 #include <sys/types.h>
-#include <pthread.h>
 #include "apk_blob.h"
+#include "apk_io.h"
 
 struct apk_archive_entry {
 	char *name;
@@ -27,16 +27,19 @@ struct apk_archive_entry {
 	mode_t mode;
 	time_t mtime;
 	dev_t device;
-	int read_fd;
 };
 
-typedef int (*apk_archive_entry_parser)(struct apk_archive_entry *entry, void *ctx);
+typedef int (*apk_archive_entry_parser)(void *ctx,
+					const struct apk_archive_entry *ae,
+					struct apk_istream *istream);
 
-pid_t apk_open_gz(int *fd);
-int apk_parse_tar(int fd, apk_archive_entry_parser parser, void *ctx);
-int apk_parse_tar_gz(int fd, apk_archive_entry_parser parser, void *ctx);
-apk_blob_t apk_archive_entry_read(struct apk_archive_entry *ae);
-int apk_archive_entry_extract(struct apk_archive_entry *ae, const char *to);
-pthread_t apk_checksum_and_tee(int *fd, void *ptr);
+struct apk_istream *apk_gunzip_bstream(struct apk_bstream *);
+
+int apk_parse_tar(struct apk_istream *, apk_archive_entry_parser parser, void *ctx);
+int apk_parse_tar_gz(struct apk_bstream *, apk_archive_entry_parser parser, void *ctx);
+
+int apk_archive_entry_extract(const struct apk_archive_entry *ae,
+			      struct apk_istream *is,
+			      const char *to);
 
 #endif

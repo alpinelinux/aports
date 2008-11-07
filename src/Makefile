@@ -15,6 +15,8 @@ apk_OBJS = \
 	package.o \
 	archive.o \
 	version.o \
+	io.o \
+	gunzip.o \
 	blob.o \
 	hash.o \
 	md5.o \
@@ -30,7 +32,7 @@ ALL_OBJS = $(apk_OBJS)
 all: $(TARGETS)
 
 apk: $(apk_OBJS)
-	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS) /usr/lib/libz.a
 
 clean::
 	@rm -f $(TARGETS) $(ALL_OBJS)

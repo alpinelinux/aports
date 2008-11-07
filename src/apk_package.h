@@ -14,6 +14,7 @@
 
 #include "apk_version.h"
 #include "apk_hash.h"
+#include "apk_io.h"
 
 struct apk_database;
 struct apk_name;
@@ -75,7 +76,7 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *name);
 void apk_pkg_free(struct apk_package *pkg);
 
 int apk_pkg_get_state(struct apk_package *pkg);
-int apk_pkg_add_script(struct apk_package *pkg, int fd,
+int apk_pkg_add_script(struct apk_package *pkg, struct apk_istream *is,
 		       unsigned int type, unsigned int size);
 int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		       unsigned int type);

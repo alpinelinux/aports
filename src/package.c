@@ -254,7 +254,8 @@ static int read_info_line(void *ctx, apk_blob_t line)
 	return 0;
 }
 
-static int read_info_entry(struct apk_archive_entry *ae, void *ctx)
+static int read_info_entry(void *ctx, const struct apk_archive_entry *ae,
+			   struct apk_istream *is)
 {
 	static struct {
 		const char *str;
@@ -277,7 +278,7 @@ static int read_info_entry(struct apk_archive_entry *ae, void *ctx)
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
 		if (strcmp(ae->name, ".PKGINFO") == 0) {
-			apk_blob_t blob = apk_archive_entry_read(ae);
+			apk_blob_t blob = apk_blob_from_istream(is, ae->size);
 			apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
 			free(blob.ptr);
 			/* FIXME: all done after checking if .INSTALL exists */
@@ -306,7 +307,7 @@ static int read_info_entry(struct apk_archive_entry *ae, void *ctx)
 
 		for (i = 0; i < ARRAY_SIZE(fields); i++) {
 			if (strcmp(fields[i].str, slash+1) == 0) {
-				apk_blob_t blob = apk_archive_entry_read(ae);
+				apk_blob_t blob = apk_blob_from_istream(is, ae->size);
 				add_info(ri->db, ri->pkg, fields[i].field,
 					 trim(blob));
 				free(blob.ptr);
@@ -326,8 +327,8 @@ static int read_info_entry(struct apk_archive_entry *ae, void *ctx)
 struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 {
 	struct read_info_ctx ctx;
+	struct apk_bstream *bs;
 	struct stat st;
-	pthread_t tid;
 	int fd;
 
 	ctx.pkg = calloc(1, sizeof(struct apk_package));
@@ -341,26 +342,26 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 	fstat(fd, &st);
 	fcntl(fd, F_SETFD, FD_CLOEXEC);
 
-	tid = apk_checksum_and_tee(&fd, ctx.pkg->csum);
-	if (fd < 0)
+	bs = apk_bstream_from_fd(fd);
+	if (bs == NULL) {
+		close(fd);
 		goto err;
+	}
 
 	ctx.db = db;
 	ctx.pkg->size = st.st_size;
 	ctx.has_install = 0;
-	if (apk_parse_tar_gz(fd, read_info_entry, &ctx) < 0) {
+	if (apk_parse_tar_gz(bs, read_info_entry, &ctx) < 0) {
 		apk_error("File %s is not an APK archive", file);
-		pthread_join(tid, NULL);
+		bs->close(bs, NULL);
 		goto err;
 	}
-	pthread_join(tid, NULL);
+	bs->close(bs, ctx.pkg->csum);
 
 	if (ctx.pkg->name == NULL) {
 		apk_error("File %s is corrupted", file);
 		goto err;
 	}
-
-	close(fd);
 
 	/* Add implicit busybox dependency if there is scripts */
 	if (ctx.has_install) {
@@ -405,7 +406,7 @@ int apk_pkg_get_state(struct apk_package *pkg)
 	return APK_STATE_NO_INSTALL;
 }
 
-int apk_pkg_add_script(struct apk_package *pkg, int fd,
+int apk_pkg_add_script(struct apk_package *pkg, struct apk_istream *is,
 		       unsigned int type, unsigned int size)
 {
 	struct apk_script *script;
@@ -414,7 +415,7 @@ int apk_pkg_add_script(struct apk_package *pkg, int fd,
 	script = malloc(sizeof(struct apk_script) + size);
 	script->type = type;
 	script->size = size;
-	r = read(fd, script->script, size);
+	r = is->read(is, script->script, size);
 	if (r < 0) {
 		free(script);
 		return r;
