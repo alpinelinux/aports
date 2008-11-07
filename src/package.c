@@ -49,15 +49,15 @@ int apk_pkg_parse_name(apk_blob_t apkname,
 	return 0;
 }
 
-static char *trim(apk_blob_t str)
+static apk_blob_t trim(apk_blob_t str)
 {
 	if (str.ptr == NULL || str.len < 1)
-		return NULL;
+		return str;
 
 	if (str.ptr[str.len-2] == '\n')
-		str.ptr[str.len-2] = 0;
+		return APK_BLOB_PTR_LEN(str.ptr, str.len-1);
 
-	return str.ptr;
+	return str;
 }
 
 static void parse_depend(struct apk_database *db,
@@ -154,6 +154,15 @@ static const char *script_types[] = {
 	[APK_SCRIPT_POST_UPGRADE]	= "post-upgrade",
 };
 
+static const char *script_types2[] = {
+	[APK_SCRIPT_PRE_INSTALL]	= "pre_install",
+	[APK_SCRIPT_POST_INSTALL]	= "post_install",
+	[APK_SCRIPT_PRE_DEINSTALL]	= "pre_deinstall",
+	[APK_SCRIPT_POST_DEINSTALL]	= "post_deinstall",
+	[APK_SCRIPT_PRE_UPGRADE]	= "pre_upgrade",
+	[APK_SCRIPT_POST_UPGRADE]	= "post_upgrade",
+};
+
 int apk_script_type(const char *name)
 {
 	int i;
@@ -247,59 +256,69 @@ static int read_info_line(void *ctx, apk_blob_t line)
 
 static int read_info_entry(struct apk_archive_entry *ae, void *ctx)
 {
+	static struct {
+		const char *str;
+		char field;
+	} fields[] = {
+		{ "DESC",	'T' },
+		{ "WW",		'U' },
+		{ "LICENSE",	'L' },
+		{ "DEPEND", 	'D' },
+	};
 	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
 	struct apk_database *db = ri->db;
 	struct apk_package *pkg = ri->pkg;
 	const int bsize = 4 * 1024;
 	apk_blob_t name, version;
 	char *slash, *str;
+	int i;
 
-	if (strcmp(ae->name, ".PKGINFO") == 0) {
-		apk_blob_t blob = apk_archive_entry_read(ae);
-		apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
-		free(blob.ptr);
-		return 0;
-	}
-
-	if (strncmp(ae->name, "var/db/apk/", 11) != 0) {
-		pkg->installed_size += (ae->size + bsize - 1) & ~(bsize - 1);
-		return 0;
-	}
-
-	if (!S_ISREG(ae->mode))
-		return 0;
-
-	slash = strchr(&ae->name[11], '/');
-	if (slash == NULL)
-		return 0;
-
-	if (apk_pkg_parse_name(APK_BLOB_PTR_PTR(&ae->name[11], slash-1),
-			       &name, &version) < 0)
-		return -1;
-
-	if (pkg->name == NULL) {
-		str = apk_blob_cstr(name);
-		pkg->name = apk_db_get_name(db, str);
-		free(str);
-	}
-	if (pkg->version == NULL)
-		pkg->version = apk_blob_cstr(version);
-
-	if (strcmp(slash, "/DEPEND") == 0) {
-		apk_blob_t blob = apk_archive_entry_read(ae);
-		if (blob.ptr) {
-			apk_deps_parse(db, &pkg->depends, blob);
+	/* Meta info and scripts */
+	if (ae->name[0] == '.') {
+		/* APK 2.0 format */
+		if (strcmp(ae->name, ".PKGINFO") == 0) {
+			apk_blob_t blob = apk_archive_entry_read(ae);
+			apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
 			free(blob.ptr);
+			/* FIXME: all done after checking if .INSTALL exists */
+			return 0;
 		}
-	} else if (strcmp(slash, "/DESC") == 0) {
-		pkg->description = trim(apk_archive_entry_read(ae));
-	} else if (strcmp(slash, "/WWW") == 0) {
-		pkg->url = trim(apk_archive_entry_read(ae));
-	} else if (strcmp(slash, "/LICENSE") == 0) {
-		pkg->license = trim(apk_archive_entry_read(ae));
-	} else if (apk_script_type(slash+1) == APK_SCRIPT_POST_INSTALL ||
-		   apk_script_type(slash+1) == APK_SCRIPT_PRE_INSTALL)
-		ri->has_install = 1;
+	} else if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
+		/* APK 1.0 format */
+		if (!S_ISREG(ae->mode))
+			return 0;
+
+		slash = strchr(&ae->name[11], '/');
+		if (slash == NULL)
+			return 0;
+
+		if (apk_pkg_parse_name(APK_BLOB_PTR_PTR(&ae->name[11], slash-1),
+				       &name, &version) < 0)
+			return -1;
+
+		if (pkg->name == NULL) {
+			str = apk_blob_cstr(name);
+			pkg->name = apk_db_get_name(db, str);
+			free(str);
+		}
+		if (pkg->version == NULL)
+			pkg->version = apk_blob_cstr(version);
+
+		for (i = 0; i < ARRAY_SIZE(fields); i++) {
+			if (strcmp(fields[i].str, slash+1) == 0) {
+				apk_blob_t blob = apk_archive_entry_read(ae);
+				add_info(ri->db, ri->pkg, fields[i].field,
+					 trim(blob));
+				free(blob.ptr);
+				break;
+			}
+		}
+		if (apk_script_type(slash+1) == APK_SCRIPT_POST_INSTALL ||
+		    apk_script_type(slash+1) == APK_SCRIPT_PRE_INSTALL)
+			ri->has_install = 1;
+	} else {
+		pkg->installed_size += (ae->size + bsize - 1) & ~(bsize - 1);
+	}
 
 	return 0;
 }
@@ -420,13 +439,14 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 
 	fchdir(root_fd);
 	hlist_for_each_entry(script, c, &pkg->scripts, script_list) {
-		if (script->type != type)
+		if (script->type != type &&
+		    script->type != APK_SCRIPT_GENERIC)
 			continue;
 
 		snprintf(fn, sizeof(fn),
 			"tmp/%s-%s.%s",
 			pkg->name->name, pkg->version,
-			script_types[script->type]);
+			script_types[type]);
 		fd = creat(fn, 0777);
 		if (fd < 0)
 			return fd;
@@ -441,13 +461,17 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		if (pid == 0) {
 			if (chroot(".") < 0) {
 				apk_error("chroot: %s", strerror(errno));
-			} else
-				execle(fn, script_types[script->type],
+			} else if (script->type == APK_SCRIPT_GENERIC) {
+				execle(fn, "INSTALL", script_types2[type],
 				       pkg->version, "", NULL, environment);
+			} else {
+				execle(fn, script_types[type],
+				       pkg->version, "", NULL, environment);
+			}
 			exit(1);
 		}
 		waitpid(pid, &status, 0);
-		//unlink(fn);
+		unlink(fn);
 		if (WIFEXITED(status))
 			return WEXITSTATUS(status);
 		return -1;

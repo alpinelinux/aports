@@ -673,12 +673,16 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 	struct apk_db_dir *dir;
 	struct apk_db_file *file;
 	const char *p;
-	int r = 0, type;
+	int r = 0, type = APK_SCRIPT_INVALID;
 
-	if (strcmp(ae->name, ".PKGINFO") == 0)
-		return 0;
-
-	if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
+	/* Package metainfo and script processing */
+	if (ae->name[0] == '.') {
+		/* APK 2.0 format */
+		if (strcmp(ae->name, ".INSTALL") != 0)
+			return 0;
+		type = APK_SCRIPT_GENERIC;
+	} else if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
+		/* APK 1.0 format */
 		p = &ae->name[11];
 		if (strncmp(p, pkg->name->name, strlen(pkg->name->name)) != 0)
 			return 0;
@@ -688,13 +692,17 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 		p += strlen(pkg->version) + 1;
 
 		type = apk_script_type(p);
-		if (type < 0)
+		if (type != APK_SCRIPT_INVALID)
 			return 0;
+	}
 
+	/* Handle script */
+	if (type != APK_SCRIPT_INVALID) {
 		ae->size -= apk_pkg_add_script(pkg, ae->read_fd,
 					       type, ae->size);
 
-		if (type == ctx->script) {
+		if (type == APK_SCRIPT_GENERIC ||
+		    type == ctx->script) {
 			r = apk_pkg_run_script(pkg, db->root_fd, type);
 			if (r != 0)
 				apk_error("%s-%s: Failed to execute pre-install/upgrade script",
@@ -704,6 +712,7 @@ static int apk_db_install_archive_entry(struct apk_archive_entry *ae,
 		return r;
 	}
 
+	/* Installable entry */
 	if (ctx->file_pkg_node == NULL)
 		ctx->file_pkg_node = hlist_tail_ptr(&pkg->owned_files);
 

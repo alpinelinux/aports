@@ -18,12 +18,14 @@
 struct apk_database;
 struct apk_name;
 
-#define APK_SCRIPT_PRE_INSTALL		0
-#define APK_SCRIPT_POST_INSTALL		1
-#define APK_SCRIPT_PRE_DEINSTALL	2
-#define APK_SCRIPT_POST_DEINSTALL	3
-#define APK_SCRIPT_PRE_UPGRADE		4
-#define APK_SCRIPT_POST_UPGRADE		5
+#define APK_SCRIPT_INVALID		-1
+#define APK_SCRIPT_GENERIC		0
+#define APK_SCRIPT_PRE_INSTALL		1
+#define APK_SCRIPT_POST_INSTALL		2
+#define APK_SCRIPT_PRE_DEINSTALL	3
+#define APK_SCRIPT_POST_DEINSTALL	4
+#define APK_SCRIPT_PRE_UPGRADE		5
+#define APK_SCRIPT_POST_UPGRADE		6
 
 struct apk_script {
 	struct hlist_node script_list;
