@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <malloc.h>
+#include <sys/mman.h>
 
 #include "apk_defines.h"
 #include "apk_io.h"
@@ -122,23 +123,36 @@ size_t apk_istream_skip(struct apk_istream *is, size_t size)
 size_t apk_istream_splice(void *stream, int fd, size_t size)
 {
 	struct apk_istream *is = (struct apk_istream *) stream;
-	unsigned char buf[2048];
-	size_t done = 0, r, togo;
+	unsigned char *buf;
+	size_t bufsz, done = 0, r, togo;
+
+	bufsz = size;
+	if (bufsz > 256*1024)
+		bufsz = 256*1024;
+
+	buf = malloc(bufsz);
+	if (buf == NULL)
+		return -1;
 
 	while (done < size) {
 		togo = size - done;
-		if (togo > sizeof(buf))
-			togo = sizeof(buf);
+		if (togo > bufsz)
+			togo = bufsz;
 		r = is->read(is, buf, togo);
 		if (r < 0)
-			return r;
-		if (write(fd, buf, r) != r)
-			return -1;
+			goto err;
+		if (write(fd, buf, r) != r) {
+			r = -1;
+			goto err;
+		}
 		done += r;
 		if (r != togo)
 			break;
 	}
-	return done;
+	r = done;
+err:
+	free(buf);
+	return r;
 }
 
 struct apk_istream_bstream {
@@ -193,9 +207,84 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream)
 	return &isbs->bs;
 }
 
+struct apk_mmap_bstream {
+	struct apk_bstream bs;
+	csum_ctx_t csum_ctx;
+	int fd;
+	size_t size;
+	unsigned char *ptr;
+	size_t pos;
+};
+
+static size_t mmap_read(void *stream, void **ptr)
+{
+	struct apk_mmap_bstream *mbs =
+		container_of(stream, struct apk_mmap_bstream, bs);
+	size_t size;
+
+	size = mbs->size - mbs->pos;
+	if (size > 1024*1024)
+		size = 1024*1024;
+
+	*ptr = (void *) &mbs->ptr[mbs->pos];
+	csum_process(&mbs->csum_ctx, &mbs->ptr[mbs->pos], size);
+	mbs->pos += size;
+
+	return size;
+}
+
+static void mmap_close(void *stream, csum_t csum)
+{
+	struct apk_mmap_bstream *mbs =
+		container_of(stream, struct apk_mmap_bstream, bs);
+
+	if (csum != NULL)
+		csum_finish(&mbs->csum_ctx, csum);
+
+	munmap(mbs->ptr, mbs->size);
+	free(mbs);
+}
+
+static struct apk_bstream *apk_mmap_bstream_from_fd(int fd)
+{
+	struct apk_mmap_bstream *mbs;
+	struct stat st;
+	void *ptr;
+
+	if (fstat(fd, &st) < 0)
+		return NULL;
+
+	ptr = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (ptr == MAP_FAILED)
+		return NULL;
+
+	mbs = malloc(sizeof(struct apk_mmap_bstream));
+	if (mbs == NULL) {
+		munmap(ptr, st.st_size);
+		return NULL;
+	}
+
+	mbs->bs = (struct apk_bstream) {
+		.read = mmap_read,
+		.close = mmap_close,
+	};
+	mbs->fd = fd;
+	mbs->size = st.st_size;
+	mbs->ptr = ptr;
+	mbs->pos = 0;
+	csum_init(&mbs->csum_ctx);
+
+	return &mbs->bs;
+}
+
 struct apk_bstream *apk_bstream_from_fd(int fd)
 {
-	/* FIXME: Write mmap based bstream for files */
+	struct apk_bstream *bs;
+
+	bs = apk_mmap_bstream_from_fd(fd);
+	if (bs != NULL)
+		return bs;
+
 	return apk_bstream_from_istream(apk_istream_from_fd(fd));
 }
 
