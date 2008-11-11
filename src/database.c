@@ -323,6 +323,9 @@ static int apk_db_write_fdb(struct apk_database *db, int fd)
 		n += apk_hexdump_format(sizeof(buf)-n, &buf[n],
 					APK_BLOB_BUF(pkg->csum));
 		buf[n++] = '\n';
+		if (write(fd, buf, n) != n)
+			return -1;
+		n = 0;
 
 		dir = NULL;
 		hlist_for_each_entry(file, c2, &pkg->owned_files, pkg_files_list) {
@@ -340,7 +343,8 @@ static int apk_db_write_fdb(struct apk_database *db, int fd)
 				      "F%s\n",
 				      file->filename);
 
-			write(fd, buf, n);
+			if (write(fd, buf, n) != n)
+				return -1;
 			n = 0;
 		}
 	}
@@ -523,8 +527,6 @@ static int apk_db_write_config(struct apk_database *db)
 
 void apk_db_close(struct apk_database *db)
 {
-	apk_db_write_config(db);
-
 	apk_hash_free(&db->available.names);
 	apk_hash_free(&db->available.packages);
 	apk_hash_free(&db->installed.dirs);
