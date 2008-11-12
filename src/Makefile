@@ -32,7 +32,7 @@ ALL_OBJS = $(apk_OBJS)
 all: $(TARGETS)
 
 apk: $(apk_OBJS)
-	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS) /usr/lib/libz.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 clean::
 	@rm -f $(TARGETS) $(ALL_OBJS)

@@ -23,7 +23,7 @@ INSTALLDIR=$(INSTALL) -d
 CFLAGS=-g -D_GNU_SOURCE -Werror -Wall -Wstrict-prototypes -std=gnu99 \
 	-DAPK_VERSION=\"$(FULL_VERSION)\"
 LDFLAGS=-g
-LIBS=-lpthread
+LIBS=/usr/lib/libz.a
 
 ifeq ($(STATIC),yes)
 CFLAGS+=-fno-stack-protector
