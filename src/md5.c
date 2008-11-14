@@ -58,6 +58,8 @@
 
 #include "md5.h"
 
+md5sum_t bad_checksum = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+
 /* Handle endian-ness */
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define SWAP(n) (n)

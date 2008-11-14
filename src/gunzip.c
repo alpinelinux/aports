@@ -77,7 +77,6 @@ struct apk_istream *apk_gunzip_bstream(struct apk_bstream *bs)
 
 	*gis = (struct apk_gzip_istream) {
 		.is.read = gz_read,
-		.is.splice = apk_istream_splice,
 		.is.close = gz_close,
 		.bs = bs,
 		.z_err = 0,

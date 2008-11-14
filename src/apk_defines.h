@@ -12,6 +12,8 @@
 #ifndef APK_DEFINES_H
 #define APK_DEFINES_H
 
+#include <malloc.h>
+
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #define BIT(x) (1 << (x))
 
@@ -36,12 +38,15 @@
 #if 1
 #include "md5.h"
 
+typedef unsigned char *csum_p;
 typedef md5sum_t csum_t;
 typedef struct md5_ctx csum_ctx_t;
+extern csum_t bad_checksum;
 
 #define csum_init(ctx)			md5_init(ctx)
 #define csum_process(ctx, buf, len)	md5_process(ctx, buf, len)
 #define csum_finish(ctx, buf)		md5_finish(ctx, buf)
+#define csum_valid(buf)			memcmp(buf, bad_checksum, sizeof(csum_t))
 #endif
 
 extern int apk_cwd_fd, apk_quiet;
@@ -75,6 +80,8 @@ void apk_log(const char *prefix, const char *format, ...);
 		*a = array_type_name##_resize(*a, size);		\
 		return &(*a)->item[size-1];				\
 	}
+
+APK_ARRAY(apk_string_array, char *);
 
 #define LIST_END (void *) 0xe01
 #define LIST_POISON1 (void *) 0xdeadbeef

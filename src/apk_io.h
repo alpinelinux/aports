@@ -14,15 +14,28 @@
 #include "apk_defines.h"
 #include "apk_blob.h"
 
+struct apk_file_info {
+	char *name;
+	char *link_target;
+	char *uname;
+	char *gname;
+	off_t size;
+	uid_t uid;
+	gid_t gid;
+	mode_t mode;
+	time_t mtime;
+	dev_t device;
+	csum_t csum;
+};
+
 struct apk_istream {
 	size_t (*read)(void *stream, void *ptr, size_t size);
-	size_t (*splice)(void *stream, int fd, size_t size);
 	void (*close)(void *stream);
 };
 
 struct apk_bstream {
 	size_t (*read)(void *stream, void **ptr);
-	void (*close)(void *stream, csum_t csum);
+	void (*close)(void *stream, csum_p csum);
 };
 
 struct apk_istream *apk_istream_from_fd(int fd);

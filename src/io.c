@@ -47,22 +47,6 @@ static size_t fd_read(void *stream, void *ptr, size_t size)
 	return i;
 }
 
-static size_t fd_splice(void *stream, int fd, size_t size)
-{
-	struct apk_fd_istream *fis =
-		container_of(stream, struct apk_fd_istream, is);
-	size_t i = 0, r;
-
-	while (i != size) {
-		r = splice(fis->fd, NULL, fd, NULL, size - i, SPLICE_F_MOVE);
-		if (r == -1)
-			return i;
-		i += r;
-	}
-
-	return i;
-}
-
 static void fd_close(void *stream)
 {
 	struct apk_fd_istream *fis =
@@ -82,7 +66,6 @@ struct apk_istream *apk_istream_from_fd(int fd)
 
 	*fis = (struct apk_fd_istream) {
 		.is.read = fd_read,
-		.is.splice = fd_splice,
 		.is.close = fd_close,
 		.fd = fd,
 	};
@@ -322,3 +305,31 @@ apk_blob_t apk_blob_from_istream(struct apk_istream *is, size_t size)
 	return APK_BLOB_PTR_LEN(ptr, rsize);
 }
 
+int apk_file_get_info(const char *filename, struct apk_file_info *fi)
+{
+	struct stat st;
+	struct apk_bstream *bs;
+	int fd;
+
+	if (stat(filename, &st) != 0)
+		return -1;
+
+	*fi = (struct apk_file_info) {
+		.size = st.st_size,
+		.uid = st.st_uid,
+		.gid = st.st_gid,
+		.mode = st.st_mode,
+		.mtime = st.st_mtime,
+		.device = st.st_dev,
+	};
+
+	fd = open(filename, O_RDONLY);
+	if (fd < 0)
+		return 0;
+
+	bs = apk_bstream_from_fd(fd);
+	if (bs != NULL)
+		bs->close(bs, fi->csum);
+
+	return 0;
+}

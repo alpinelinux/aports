@@ -255,7 +255,7 @@ static int read_info_line(void *ctx, apk_blob_t line)
 	return 0;
 }
 
-static int read_info_entry(void *ctx, const struct apk_archive_entry *ae,
+static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 			   struct apk_istream *is)
 {
 	static struct {

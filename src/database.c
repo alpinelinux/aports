@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <unistd.h>
 #include <malloc.h>
 #include <string.h>
@@ -137,6 +138,7 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 	struct apk_db_dir *dir;
 	apk_blob_t bparent;
 	char *cstr;
+	int i;
 
 	if (name.len && name.ptr[name.len-1] == '/')
 		name.len--;
@@ -154,10 +156,21 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 
 	if (name.len == 0)
 		dir->parent = NULL;
-        else if (apk_blob_rsplit(name, '/', &bparent, NULL))
+	else if (apk_blob_rsplit(name, '/', &bparent, NULL))
 		dir->parent = apk_db_dir_get(db, bparent);
 	else
 		dir->parent = apk_db_dir_get(db, APK_BLOB_NULL);
+
+	if (dir->parent != NULL)
+		dir->flags = dir->parent->flags;
+
+	for (i = 0; i < db->protected_paths->num; i++) {
+		if (db->protected_paths->item[i][0] == '-' &&
+		    strcmp(&db->protected_paths->item[i][1], dir->dirname) == 0)
+			dir->flags &= ~APK_DBDIRF_PROTECTED;
+		else if (strcmp(db->protected_paths->item[i], dir->dirname) == 0)
+			dir->flags |= APK_DBDIRF_PROTECTED;
+	}
 
 	return dir;
 }
@@ -295,6 +308,16 @@ static int apk_db_read_fdb(struct apk_database *db, int fd)
 				file_dir_node = &file->dir_files_list.next;
 				file_pkg_node = &file->pkg_files_list.next;
 				break;
+			case 'C':
+				if (file == NULL) {
+					apk_error("FDB checksum entry before file entry");
+					return -1;
+				}
+				if (apk_hexdump_parse(APK_BLOB_BUF(file->csum), l)) {
+					apk_error("Not a valid checksum");
+					return -1;
+				}
+				break;
 			default:
 				apk_error("FDB entry '%c' unsupported", n);
 				return -1;
@@ -342,6 +365,12 @@ static int apk_db_write_fdb(struct apk_database *db, int fd)
 			n += snprintf(&buf[n], sizeof(buf)-n,
 				      "F%s\n",
 				      file->filename);
+			if (csum_valid(file->csum)) {
+				n += snprintf(&buf[n], sizeof(buf)-n, "C");
+				n += apk_hexdump_format(sizeof(buf)-n, &buf[n],
+							APK_BLOB_BUF(file->csum));
+				n += snprintf(&buf[n], sizeof(buf)-n, "\n");
+			}
 
 			if (write(fd, buf, n) != n)
 				return -1;
@@ -418,7 +447,7 @@ int apk_db_create(const char *root)
 	return 0;
 }
 
-static int apk_db_read_config(struct apk_database *db)
+static int apk_db_read_state(struct apk_database *db)
 {
 	struct apk_istream *is;
 	struct stat st;
@@ -466,8 +495,18 @@ static int apk_db_read_config(struct apk_database *db)
 	return 0;
 }
 
+static int add_protected_path(void *ctx, apk_blob_t blob)
+{
+	struct apk_database *db = (struct apk_database *) ctx;
+
+	*apk_string_array_add(&db->protected_paths) = apk_blob_cstr(blob);
+	return 0;
+}
+
 int apk_db_open(struct apk_database *db, const char *root)
 {
+	apk_blob_t dirs;
+
 	memset(db, 0, sizeof(*db));
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
 	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 4000);
@@ -485,7 +524,10 @@ int apk_db_open(struct apk_database *db, const char *root)
 	if (apk_repository != NULL)
 		apk_db_add_repository(db, apk_repository);
 
-	return apk_db_read_config(db);
+	dirs = APK_BLOB_STR("etc:-etc/init.d");
+	apk_blob_for_each_segment(dirs, ":", add_protected_path, db);
+
+	return apk_db_read_state(db);
 }
 
 struct write_ctx {
@@ -668,7 +710,7 @@ int apk_db_recalculate_and_commit(struct apk_database *db)
 }
 
 static int apk_db_install_archive_entry(void *_ctx,
-					const struct apk_archive_entry *ae,
+					const struct apk_file_info *ae,
 					struct apk_istream *is)
 {
 	struct install_ctx *ctx = (struct install_ctx *) _ctx;
@@ -677,6 +719,8 @@ static int apk_db_install_archive_entry(void *_ctx,
 	apk_blob_t name = APK_BLOB_STR(ae->name);
 	struct apk_db_dir *dir;
 	struct apk_db_file *file;
+	struct apk_file_info fi;
+	char alt_name[PATH_MAX];
 	const char *p;
 	int r = 0, type = APK_SCRIPT_INVALID;
 
@@ -740,7 +784,20 @@ static int apk_db_install_archive_entry(void *_ctx,
 		if (strncmp(file->filename, ".keep_", 6) == 0)
 			return 0;
 
-		r = apk_archive_entry_extract(ae, is, NULL);
+		if ((file->dir->flags & APK_DBDIRF_PROTECTED) &&
+		    csum_valid(file->csum) &&
+		    apk_file_get_info(ae->name, &fi) == 0 &&
+		    memcmp(file->csum, fi.csum, sizeof(csum_t)) != 0) {
+			/* Protected file, which is modified locally.
+			 * Extract to separate place */
+			snprintf(alt_name, sizeof(alt_name),
+				 "%s/%s.apk-new",
+				 dir->dirname, file->filename);
+			r = apk_archive_entry_extract(ae, is, alt_name);
+		} else {
+			r = apk_archive_entry_extract(ae, is, NULL);
+		}
+		memcpy(file->csum, ae->csum, sizeof(csum_t));
 	} else {
 		if (name.ptr[name.len-1] == '/')
 			name.len--;

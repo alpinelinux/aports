@@ -25,8 +25,11 @@ struct apk_db_file {
 
 	struct apk_db_dir *dir;
 	struct apk_package *owner;
+	csum_t csum;
 	char filename[];
 };
+
+#define APK_DBDIRF_PROTECTED		0x0001
 
 struct apk_db_dir {
 	apk_hash_node hash_node;
@@ -38,6 +41,7 @@ struct apk_db_dir {
 	mode_t mode;
 	uid_t uid;
 	gid_t gid;
+	unsigned flags;
 	char dirname[];
 };
 
@@ -58,6 +62,7 @@ struct apk_database {
 	unsigned pkg_id, num_repos;
 
 	struct apk_dependency_array *world;
+	struct apk_string_array *protected_paths;
 	struct apk_repository repos[APK_MAX_REPOS];
 
 	struct {

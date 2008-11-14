@@ -53,6 +53,8 @@ struct apk_tar_entry_istream {
 	struct apk_istream is;
 	struct apk_istream *tar_is;
 	size_t bytes_left;
+	csum_ctx_t csum_ctx;
+	csum_p csum;
 };
 
 static size_t tar_entry_read(void *stream, void *ptr, size_t size)
@@ -63,33 +65,24 @@ static size_t tar_entry_read(void *stream, void *ptr, size_t size)
 	if (size > teis->bytes_left)
 		size = teis->bytes_left;
 	size = teis->tar_is->read(teis->tar_is, ptr, size);
-	if (size >= 0)
+	if (size > 0) {
 		teis->bytes_left -= size;
-	return size;
-}
-
-static size_t tar_entry_splice(void *stream, int fd, size_t size)
-{
-	struct apk_tar_entry_istream *teis =
-		container_of(stream, struct apk_tar_entry_istream, is);
-
-	if (size > teis->bytes_left)
-		size = teis->bytes_left;
-	size = teis->tar_is->splice(teis->tar_is, fd, size);
-	if (size >= 0)
-		teis->bytes_left -= size;
+		csum_process(&teis->csum_ctx, ptr, size);
+		if (teis->bytes_left == 0)
+			csum_finish(&teis->csum_ctx, teis->csum);
+	}
 	return size;
 }
 
 int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 		  void *ctx)
 {
+	struct apk_file_info entry;
 	struct apk_tar_entry_istream teis = {
 		.is.read = tar_entry_read,
-		.is.splice = tar_entry_splice,
 		.tar_is = is,
+		.csum = entry.csum,
 	};
-	struct apk_archive_entry entry;
 	struct tar_header buf;
 	unsigned long offset = 0;
 	int end = 0, r;
@@ -107,7 +100,7 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 			continue;
 		}
 
-		entry = (struct apk_archive_entry){
+		entry = (struct apk_file_info){
 			.size  = GET_OCTAL(buf.size),
 			.uid   = GET_OCTAL(buf.uid),
 			.gid   = GET_OCTAL(buf.gid),
@@ -160,6 +153,7 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 				entry.name = strdup(buf.name);
 
 			/* callback parser function */
+			csum_init(&teis.csum_ctx);
 			r = parser(ctx, &entry, &teis.is);
 			if (r != 0)
 				return r;
@@ -191,7 +185,7 @@ int apk_parse_tar_gz(struct apk_bstream *bs, apk_archive_entry_parser parser,
 	return apk_parse_tar(apk_gunzip_bstream(bs), parser, ctx);
 }
 
-int apk_archive_entry_extract(const struct apk_archive_entry *ae,
+int apk_archive_entry_extract(const struct apk_file_info *ae,
 			      struct apk_istream *is,
 			      const char *fn)
 {
@@ -216,7 +210,7 @@ int apk_archive_entry_extract(const struct apk_archive_entry *ae,
 				r = -1;
 				break;
 			}
-			if (is->splice(is, fd, ae->size) == ae->size)
+			if (apk_istream_splice(is, fd, ae->size) == ae->size)
 				r = 0;
 			close(fd);
 		} else {

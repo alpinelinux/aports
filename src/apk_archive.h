@@ -16,29 +16,17 @@
 #include "apk_blob.h"
 #include "apk_io.h"
 
-struct apk_archive_entry {
-	char *name;
-	char *link_target;
-	char *uname; 
-	char *gname;
-	off_t size;
-	uid_t uid;
-	gid_t gid;
-	mode_t mode;
-	time_t mtime;
-	dev_t device;
-};
-
 typedef int (*apk_archive_entry_parser)(void *ctx,
-					const struct apk_archive_entry *ae,
+					const struct apk_file_info *ae,
 					struct apk_istream *istream);
 
+int apk_file_get_info(const char *filename, struct apk_file_info *fi);
 struct apk_istream *apk_gunzip_bstream(struct apk_bstream *);
 
 int apk_parse_tar(struct apk_istream *, apk_archive_entry_parser parser, void *ctx);
 int apk_parse_tar_gz(struct apk_bstream *, apk_archive_entry_parser parser, void *ctx);
 
-int apk_archive_entry_extract(const struct apk_archive_entry *ae,
+int apk_archive_entry_extract(const struct apk_file_info *ae,
 			      struct apk_istream *is,
 			      const char *to);
 
