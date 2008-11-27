@@ -152,8 +152,7 @@ static int apk_state_commit_deps(struct apk_state *state,
 int apk_state_commit(struct apk_state *state,
 		     struct apk_database *db)
 {
-	struct apk_package *pkg;
-	struct hlist_node *c, *n;
+	struct apk_package *pkg, *n;
 	int r;
 
 	/* Check all dependencies */
@@ -162,7 +161,7 @@ int apk_state_commit(struct apk_state *state,
 		return r;
 
 	/* And purge all installed packages that were not considered */
-	hlist_for_each_entry_safe(pkg, c, n, &db->installed.packages, installed_pkgs_list)
+	list_for_each_entry_safe(pkg, n, &db->installed.packages, installed_pkgs_list)
 		apk_state_commit_name(state, db, pkg->name);
 
 	return 0;

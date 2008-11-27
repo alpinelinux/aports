@@ -71,6 +71,26 @@ int apk_blob_splitstr(apk_blob_t blob, const char *split, apk_blob_t *l, apk_blo
 	}
 }
 
+unsigned long apk_blob_hash(apk_blob_t blob)
+{
+	unsigned long hash = 5381;
+	int i;
+
+        for (i = 0; i < blob.len; i++)
+		hash = hash * 33 + blob.ptr[i];
+
+	return hash;
+}
+
+int apk_blob_compare(apk_blob_t a, apk_blob_t b)
+{
+	if (a.len == b.len)
+		return memcmp(a.ptr, b.ptr, a.len);
+	if (a.len < b.len)
+		return -1;
+	return 1;
+}
+
 int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
 			      int (*cb)(void *ctx, apk_blob_t blob), void *ctx)
 {

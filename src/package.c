@@ -25,6 +25,17 @@
 #include "apk_database.h"
 #include "apk_state.h"
 
+static struct apk_package *apk_pkg_new(void)
+{
+	struct apk_package *pkg;
+
+	pkg = calloc(1, sizeof(struct apk_package));
+	if (pkg != NULL)
+		list_init(&pkg->installed_pkgs_list);
+
+	return pkg;
+}
+
 int apk_pkg_parse_name(apk_blob_t apkname,
 		       apk_blob_t *name,
 		       apk_blob_t *version)
@@ -67,7 +78,6 @@ static void parse_depend(struct apk_database *db,
 {
 	struct apk_dependency *dep;
 	struct apk_name *name;
-	char *cname;
 
 	while (blob.len && blob.ptr[0] == ' ')
 		blob.ptr++, blob.len--;
@@ -78,10 +88,7 @@ static void parse_depend(struct apk_database *db,
 	if (blob.len == 0)
 		return;
 
-	cname = apk_blob_cstr(blob);
-	name = apk_db_get_name(db, cname);
-	free(cname);
-
+	name = apk_db_get_name(db, blob);
 	dep = apk_dependency_array_add(depends);
 	*dep = (struct apk_dependency){
 		.prefer_upgrade = 0,
@@ -185,13 +192,9 @@ struct read_info_ctx {
 static int add_info(struct apk_database *db, struct apk_package *pkg,
 		    char field, apk_blob_t value)
 {
-	char *str;
-
 	switch (field) {
 	case 'P':
-		str = apk_blob_cstr(value);
-		pkg->name = apk_db_get_name(db, str);
-		free(str);
+		pkg->name = apk_db_get_name(db, value);
 		break;
 	case 'V':
 		pkg->version = apk_blob_cstr(value);
@@ -272,7 +275,7 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 	struct apk_package *pkg = ri->pkg;
 	const int bsize = 4 * 1024;
 	apk_blob_t name, version;
-	char *slash, *str;
+	char *slash;
 	int i;
 
 	/* Meta info and scripts */
@@ -298,11 +301,8 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 				       &name, &version) < 0)
 			return -1;
 
-		if (pkg->name == NULL) {
-			str = apk_blob_cstr(name);
-			pkg->name = apk_db_get_name(db, str);
-			free(str);
-		}
+		if (pkg->name == NULL)
+			pkg->name = apk_db_get_name(db, name);
 		if (pkg->version == NULL)
 			pkg->version = apk_blob_cstr(version);
 
@@ -332,7 +332,7 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 	struct stat st;
 	int fd;
 
-	ctx.pkg = calloc(1, sizeof(struct apk_package));
+	ctx.pkg = apk_pkg_new();
 	if (ctx.pkg == NULL)
 		return NULL;
 
@@ -367,7 +367,7 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 	/* Add implicit busybox dependency if there is scripts */
 	if (ctx.has_install) {
 		struct apk_dependency dep = {
-			.name = apk_db_get_name(db, "busybox"),
+			.name = apk_db_get_name(db, APK_BLOB_STR("busybox")),
 		};
 		apk_deps_add(&ctx.pkg->depends, &dep);
 	}
@@ -402,7 +402,7 @@ void apk_pkg_free(struct apk_package *pkg)
 
 int apk_pkg_get_state(struct apk_package *pkg)
 {
-	if (hlist_hashed(&pkg->installed_pkgs_list))
+	if (list_hashed(&pkg->installed_pkgs_list))
 		return APK_STATE_INSTALL;
 	return APK_STATE_NO_INSTALL;
 }
@@ -497,7 +497,7 @@ struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_
 {
 	struct read_info_ctx ctx;
 
-	ctx.pkg = calloc(1, sizeof(struct apk_package));
+	ctx.pkg = apk_pkg_new();
 	if (ctx.pkg == NULL)
 		return NULL;
 

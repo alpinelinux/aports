@@ -12,22 +12,6 @@
 #include "apk_defines.h"
 #include "apk_hash.h"
 
-unsigned long apk_hash_string(const char *str)
-{
-	unsigned long hash = 5381;
-	int c;
-
-	while ((c = *str++) != 0)
-		hash = hash * 33 + c;
-
-	return hash;
-}
-
-unsigned long apk_hash_csum(const void *ptr)
-{
-	return *(const unsigned long *) ptr;
-}
-
 void apk_hash_init(struct apk_hash *h, const struct apk_hash_ops *ops,
 		   int num_buckets)
 {
@@ -59,13 +43,13 @@ int apk_hash_foreach(struct apk_hash *h, apk_hash_enumerator_f e, void *ctx)
 	return 0;
 }
 
-apk_hash_item apk_hash_get(struct apk_hash *h, apk_hash_key key)
+apk_hash_item apk_hash_get(struct apk_hash *h, apk_blob_t key)
 {
 	ptrdiff_t offset = h->ops->node_offset;
 	unsigned long hash;
 	apk_hash_node *pos;
 	apk_hash_item item;
-	apk_hash_key itemkey;
+	apk_blob_t itemkey;
 
 	hash = h->ops->hash_key(key) % h->buckets->num;
 	hlist_for_each(pos, &h->buckets->item[hash]) {
@@ -80,7 +64,7 @@ apk_hash_item apk_hash_get(struct apk_hash *h, apk_hash_key key)
 
 void apk_hash_insert(struct apk_hash *h, apk_hash_item item)
 {
-	apk_hash_key key;
+	apk_blob_t key;
 	unsigned long hash;
 	apk_hash_node *node;
 
@@ -91,7 +75,7 @@ void apk_hash_insert(struct apk_hash *h, apk_hash_item item)
 	h->num_items++;
 }
 
-void apk_hash_delete(struct apk_hash *h, apk_hash_key key)
+void apk_hash_delete(struct apk_hash *h, apk_blob_t key)
 {
 }
 

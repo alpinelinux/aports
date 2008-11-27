@@ -34,7 +34,6 @@ static int ver_main(int argc, char **argv)
 	struct apk_database db;
 	struct apk_name *name;
 	struct apk_package *pkg, *upg, *tmp;
-	struct hlist_node *c;
 	int i, r;
 
 	if (argc == 2) {
@@ -47,7 +46,7 @@ static int ver_main(int argc, char **argv)
 	if (apk_db_open(&db, apk_root) < 0)
 		return -1;
 
-	hlist_for_each_entry(pkg, c, &db.installed.packages, installed_pkgs_list) {
+	list_for_each_entry(pkg, &db.installed.packages, installed_pkgs_list) {
 		name = pkg->name;
 		upg = pkg;
 		for (i = 0; i < name->pkgs->num; i++) {

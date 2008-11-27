@@ -57,7 +57,7 @@ struct apk_package {
 	unsigned int installed_size, size;
 
 	/* for installed packages only */
-	struct hlist_node installed_pkgs_list;
+	struct list_head installed_pkgs_list;
 	struct hlist_head owned_files;
 	struct hlist_head scripts;
 };

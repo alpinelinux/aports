@@ -33,51 +33,53 @@ struct install_ctx {
 	struct hlist_node **file_pkg_node;
 };
 
-static apk_hash_key pkg_name_get_key(apk_hash_item item)
+static apk_blob_t pkg_name_get_key(apk_hash_item item)
 {
-	return ((struct apk_name *) item)->name;
+	return APK_BLOB_STR(((struct apk_name *) item)->name);
 }
 
 static const struct apk_hash_ops pkg_name_hash_ops = {
 	.node_offset = offsetof(struct apk_name, hash_node),
 	.get_key = pkg_name_get_key,
-	.hash_key = (apk_hash_f) apk_hash_string,
-	.compare = (apk_hash_compare_f) strcmp,
+	.hash_key = apk_blob_hash,
+	.compare = apk_blob_compare,
 	.delete_item = (apk_hash_delete_f) apk_name_free,
 };
 
-static apk_hash_key pkg_info_get_key(apk_hash_item item)
+static apk_blob_t pkg_info_get_key(apk_hash_item item)
 {
-	return ((struct apk_package *) item)->csum;
+	return APK_BLOB_BUF(((struct apk_package *) item)->csum);
 }
 
-static int cmpcsum(apk_hash_key a, apk_hash_key b)
+static unsigned long csum_hash(apk_blob_t csum)
 {
-	return memcmp(a, b, sizeof(csum_t));
+	/* Checksum's highest bits have the most "randomness", use that
+	 * directly as hash */
+	return *(unsigned long *)csum.ptr;
 }
 
 static const struct apk_hash_ops pkg_info_hash_ops = {
 	.node_offset = offsetof(struct apk_package, hash_node),
 	.get_key = pkg_info_get_key,
-	.hash_key = (apk_hash_f) apk_hash_csum,
-	.compare = cmpcsum,
+	.hash_key = csum_hash,
+	.compare = apk_blob_compare,
 	.delete_item = (apk_hash_delete_f) apk_pkg_free,
 };
 
-static apk_hash_key apk_db_dir_get_key(apk_hash_item item)
+static apk_blob_t apk_db_dir_get_key(apk_hash_item item)
 {
-	return ((struct apk_db_dir *) item)->dirname;
+	return APK_BLOB_STR(((struct apk_db_dir *) item)->dirname);
 }
 
 static const struct apk_hash_ops dir_hash_ops = {
 	.node_offset = offsetof(struct apk_db_dir, hash_node),
 	.get_key = apk_db_dir_get_key,
-	.hash_key = (apk_hash_f) apk_hash_string,
-	.compare = (apk_hash_compare_f) strcmp,
+	.hash_key = apk_blob_hash,
+	.compare = apk_blob_compare,
 	.delete_item = (apk_hash_delete_f) free,
 };
 
-struct apk_name *apk_db_get_name(struct apk_database *db, const char *name)
+struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 {
 	struct apk_name *pn;
 
@@ -89,7 +91,7 @@ struct apk_name *apk_db_get_name(struct apk_database *db, const char *name)
 	if (pn == NULL)
 		return NULL;
 
-	pn->name = strdup(name);
+	pn->name = apk_blob_cstr(name);
 	apk_hash_insert(&db->available.names, pn);
 
 	return pn;
@@ -137,15 +139,12 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 {
 	struct apk_db_dir *dir;
 	apk_blob_t bparent;
-	char *cstr;
 	int i;
 
 	if (name.len && name.ptr[name.len-1] == '/')
 		name.len--;
 
-	cstr = apk_blob_cstr(name);
-	dir = (struct apk_db_dir *) apk_hash_get(&db->installed.dirs, cstr);
-	free(cstr);
+	dir = (struct apk_db_dir *) apk_hash_get(&db->installed.dirs, name);
 	if (dir != NULL)
 		return dir;
 
@@ -249,7 +248,6 @@ static int apk_db_read_fdb(struct apk_database *db, struct apk_istream *is)
 	struct apk_package *pkg = NULL;
 	struct apk_db_dir *dir = NULL;
 	struct apk_db_file *file = NULL;
-	struct hlist_node **pkg_node = &db->installed.packages.first;
 	struct hlist_node **file_dir_node = NULL;
 	struct hlist_node **file_pkg_node = NULL;
 
@@ -281,10 +279,9 @@ static int apk_db_read_fdb(struct apk_database *db, struct apk_istream *is)
 						  l.len, l.ptr);
 					return -1;
 				}
-				if (!hlist_hashed(&pkg->installed_pkgs_list)) {
+				if (!list_hashed(&pkg->installed_pkgs_list)) {
 					db->installed.stats.packages++;
-					hlist_add_after(&pkg->installed_pkgs_list, pkg_node);
-					pkg_node = &pkg->installed_pkgs_list.next;
+					list_add_tail(&pkg->installed_pkgs_list, &db->installed.packages);
 				}
 				dir = NULL;
 				file_dir_node = NULL;
@@ -336,11 +333,11 @@ static int apk_db_write_fdb(struct apk_database *db, int fd)
 	struct apk_package *pkg;
 	struct apk_db_dir *dir;
 	struct apk_db_file *file;
-	struct hlist_node *c1, *c2;
+	struct hlist_node *c2;
 	char buf[1024];
 	int n;
 
-	hlist_for_each_entry(pkg, c1, &db->installed.packages, installed_pkgs_list) {
+	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
 		n = 0;
 		buf[n++] = 'P';
 		n += apk_hexdump_format(sizeof(buf)-n, &buf[n],
@@ -392,10 +389,9 @@ static int apk_db_write_scriptdb(struct apk_database *db, int fd)
 	struct apk_package *pkg;
 	struct apk_script *script;
 	struct apk_script_header hdr;
-	struct hlist_node *c1, *c2;
+	struct hlist_node *c2;
 
-	hlist_for_each_entry(pkg, c1, &db->installed.packages,
-			     installed_pkgs_list) {
+	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
 		hlist_for_each_entry(script, c2, &pkg->scripts, script_list) {
 			memcpy(hdr.csum, pkg->csum, sizeof(csum_t));
 			hdr.type = script->type;
@@ -416,7 +412,8 @@ static int apk_db_read_scriptdb(struct apk_database *db, struct apk_istream *is)
 
 	while (is->read(is, &hdr, sizeof(hdr)) == sizeof(hdr)) {
 		pkg = apk_db_get_pkg(db, hdr.csum);
-		apk_pkg_add_script(pkg, is, hdr.type, hdr.size);
+		if (pkg != NULL)
+			apk_pkg_add_script(pkg, is, hdr.type, hdr.size);
 	}
 
 	return 0;
@@ -485,6 +482,12 @@ static int apk_db_read_state(struct apk_database *db)
 		is->close(is);
 	}
 
+	blob = apk_blob_from_file("etc/apk/repositories");
+	if (!APK_BLOB_IS_NULL(blob)) {
+		apk_blob_for_each_segment(blob, "\n", apk_db_add_repository, db);
+		free(blob.ptr);
+	}
+
 	return 0;
 }
 
@@ -504,6 +507,7 @@ int apk_db_open(struct apk_database *db, const char *root)
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
 	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 4000);
 	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 1000);
+	list_init(&db->installed.packages);
 
 	if (root != NULL) {
 		db->root = strdup(root);
@@ -515,7 +519,7 @@ int apk_db_open(struct apk_database *db, const char *root)
 		}
 	}
 	if (apk_repository != NULL)
-		apk_db_add_repository(db, apk_repository);
+		apk_db_add_repository(db, APK_BLOB_STR(apk_repository));
 
 	dirs = APK_BLOB_STR("etc:-etc/init.d");
 	apk_blob_for_each_segment(dirs, ":", add_protected_path, db);
@@ -575,7 +579,7 @@ static void apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_package *idb;
 
-	idb = apk_hash_get(&db->available.packages, pkg->csum);
+	idb = apk_hash_get(&db->available.packages, APK_BLOB_BUF(pkg->csum));
 	if (idb == NULL) {
 		pkg->id = db->pkg_id++;
 		apk_hash_insert(&db->available.packages, pkg);
@@ -588,7 +592,8 @@ static void apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)
 
 struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum)
 {
-	return apk_hash_get(&db->available.packages, sum);
+	return apk_hash_get(&db->available.packages,
+			    APK_BLOB_PTR_LEN((void*) sum, sizeof(csum_t)));
 }
 
 int apk_db_pkg_add_file(struct apk_database *db, const char *file)
@@ -603,7 +608,7 @@ int apk_db_pkg_add_file(struct apk_database *db, const char *file)
 	return TRUE;
 }
 
-int apk_db_index_read(struct apk_database *db, int fd, int repo)
+int apk_db_index_read(struct apk_database *db, struct apk_istream *is, int repo)
 {
 	struct apk_package *pkg;
 	char buf[1024];
@@ -612,7 +617,7 @@ int apk_db_index_read(struct apk_database *db, int fd, int repo)
 
 	r = APK_BLOB_PTR_LEN(buf, 0);
 	while (1) {
-		n = read(fd, &r.ptr[r.len], sizeof(buf) - r.len);
+		n = is->read(is, &r.ptr[r.len], sizeof(buf) - r.len);
 		if (n <= 0)
 			break;
 		r.len += n;
@@ -650,27 +655,29 @@ void apk_db_index_write(struct apk_database *db, int fd)
 	apk_hash_foreach(&db->available.packages, write_index_entry, (void *) fd);
 }
 
-int apk_db_add_repository(struct apk_database *db, const char *repo)
+int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 {
+	struct apk_database *db = _db.db;
+	struct apk_istream *is;
 	char tmp[256];
-	int fd, r;
+	int r;
 
 	if (db->num_repos >= APK_MAX_REPOS)
 		return -1;
 
 	r = db->num_repos++;
 	db->repos[r] = (struct apk_repository){
-		.url = strdup(repo)
+		.url = apk_blob_cstr(repository)
 	};
 
-	snprintf(tmp, sizeof(tmp), "%s/APK_INDEX", repo);
-	fd = open(tmp, O_RDONLY);
-	if (fd < 0) {
+	snprintf(tmp, sizeof(tmp), "%s/APK_INDEX", db->repos[r].url);
+	is = apk_istream_from_file(tmp);
+	if (is == NULL) {
 		apk_error("Failed to open index file %s", tmp);
 		return -1;
 	}
-	apk_db_index_read(db, fd, r);
-	close(fd);
+	apk_db_index_read(db, is, r);
+	is->close(is);
 
 	return 0;
 }
@@ -823,6 +830,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 		db->installed.stats.files--;
 	}
 	db->installed.stats.packages--;
+	list_del(&pkg->installed_pkgs_list);
 }
 
 int apk_db_install_pkg(struct apk_database *db,
@@ -883,7 +891,7 @@ int apk_db_install_pkg(struct apk_database *db,
 	bs->close(bs, csum);
 
 	db->installed.stats.packages++;
-	hlist_add_head(&newpkg->installed_pkgs_list, &db->installed.packages);
+	list_add_tail(&newpkg->installed_pkgs_list, &db->installed.packages);
 
 	if (memcmp(csum, newpkg->csum, sizeof(csum)) != 0)
 		apk_warning("%s-%s: checksum does not match",

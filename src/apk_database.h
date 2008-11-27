@@ -71,7 +71,7 @@ struct apk_database {
 	} available;
 
 	struct {
-		struct hlist_head packages;
+		struct list_head packages;
 		struct apk_hash dirs;
 		struct {
 			unsigned files;
@@ -81,7 +81,12 @@ struct apk_database {
 	} installed;
 };
 
-struct apk_name *apk_db_get_name(struct apk_database *db, const char *name);
+typedef union apk_database_or_void {
+	struct apk_database *db;
+	void *ptr;
+} apk_database_t __attribute__ ((__transparent_union__));
+
+struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name);
 void apk_name_free(struct apk_name *pkgname);
 
 int apk_db_create(const char *root);
@@ -91,10 +96,10 @@ void apk_db_close(struct apk_database *db);
 int apk_db_pkg_add_file(struct apk_database *db, const char *file);
 struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum);
 
-int apk_db_index_read(struct apk_database *db, int fd, int repo);
+int apk_db_index_read(struct apk_database *db, struct apk_istream *is, int repo);
 void apk_db_index_write(struct apk_database *db, int fd);
 
-int apk_db_add_repository(struct apk_database *db, const char *repo);
+int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 int apk_db_recalculate_and_commit(struct apk_database *db);
 
 int apk_db_install_pkg(struct apk_database *db,

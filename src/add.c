@@ -23,7 +23,7 @@ static int add_main(int argc, char **argv)
 
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep = {
-			.name = apk_db_get_name(&db, argv[i]),
+			.name = apk_db_get_name(&db, APK_BLOB_STR(argv[i])),
 		};
 		apk_deps_add(&db.world, &dep);
 	}

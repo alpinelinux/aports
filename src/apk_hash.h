@@ -14,20 +14,20 @@
 
 #include <malloc.h>
 #include "apk_defines.h"
+#include "apk_blob.h"
 
 typedef void *apk_hash_item;
-typedef const void *apk_hash_key;
 
-typedef unsigned long (*apk_hash_f)(apk_hash_key);
-typedef int (*apk_hash_compare_f)(apk_hash_key, apk_hash_key);
+typedef unsigned long (*apk_hash_f)(apk_blob_t);
+typedef int (*apk_hash_compare_f)(apk_blob_t, apk_blob_t);
 typedef void (*apk_hash_delete_f)(apk_hash_item);
 typedef int (*apk_hash_enumerator_f)(apk_hash_item, void *ctx);
 
 struct apk_hash_ops {
 	ptrdiff_t	node_offset;
-	apk_hash_key	(*get_key)(apk_hash_item item);
-	unsigned long	(*hash_key)(apk_hash_key key);
-	int		(*compare)(apk_hash_key key, apk_hash_key item);
+	apk_blob_t	(*get_key)(apk_hash_item item);
+	unsigned long	(*hash_key)(apk_blob_t key);
+	int		(*compare)(apk_blob_t key, apk_blob_t itemkey);
 	void		(*delete_item)(apk_hash_item item);
 };
 
@@ -40,16 +40,13 @@ struct apk_hash {
 	int num_items;
 };
 
-unsigned long apk_hash_string(const char *string);
-unsigned long apk_hash_csum(const void *);
-
 void apk_hash_init(struct apk_hash *h, const struct apk_hash_ops *ops,
 		   int num_buckets);
 void apk_hash_free(struct apk_hash *h);
 
 int apk_hash_foreach(struct apk_hash *h, apk_hash_enumerator_f e, void *ctx);
-apk_hash_item apk_hash_get(struct apk_hash *h, apk_hash_key key);
+apk_hash_item apk_hash_get(struct apk_hash *h, apk_blob_t key);
 void apk_hash_insert(struct apk_hash *h, apk_hash_item item);
-void apk_hash_delete(struct apk_hash *h, apk_hash_key key);
+void apk_hash_delete(struct apk_hash *h, apk_blob_t key);
 
 #endif
