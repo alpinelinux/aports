@@ -670,8 +670,8 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		.url = apk_blob_cstr(repository)
 	};
 
-	snprintf(tmp, sizeof(tmp), "%s/APK_INDEX", db->repos[r].url);
-	is = apk_istream_from_file(tmp);
+	snprintf(tmp, sizeof(tmp), "%s/APK_INDEX.gz", db->repos[r].url);
+	is = apk_istream_from_file_gz(tmp);
 	if (is == NULL) {
 		apk_error("Failed to open index file %s", tmp);
 		return -1;

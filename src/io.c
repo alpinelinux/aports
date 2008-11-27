@@ -362,3 +362,15 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 
 	return 0;
 }
+
+struct apk_istream *apk_istream_from_file_gz(const char *file)
+{
+	int fd;
+
+	fd = open(file, O_RDONLY);
+	if (fd < 0)
+		return NULL;
+
+	return apk_gunzip_bstream(apk_bstream_from_fd(fd));
+}
+
