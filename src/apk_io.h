@@ -47,5 +47,6 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream);
 struct apk_bstream *apk_bstream_from_fd(int fd);
 
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
+apk_blob_t apk_blob_from_file(const char *file);
 
 #endif

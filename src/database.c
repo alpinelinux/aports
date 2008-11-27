@@ -244,7 +244,7 @@ static struct apk_db_file *apk_db_file_get(struct apk_database *db,
 	return file;
 }
 
-static int apk_db_read_fdb(struct apk_database *db, int fd)
+static int apk_db_read_fdb(struct apk_database *db, struct apk_istream *is)
 {
 	struct apk_package *pkg = NULL;
 	struct apk_db_dir *dir = NULL;
@@ -260,7 +260,7 @@ static int apk_db_read_fdb(struct apk_database *db, int fd)
 
 	r = APK_BLOB_PTR_LEN(buf, 0);
 	while (1) {
-		n = read(fd, &r.ptr[r.len], sizeof(buf) - r.len);
+		n = is->read(is, &r.ptr[r.len], sizeof(buf) - r.len);
 		if (n <= 0)
 			break;
 		r.len += n;
@@ -450,9 +450,7 @@ int apk_db_create(const char *root)
 static int apk_db_read_state(struct apk_database *db)
 {
 	struct apk_istream *is;
-	struct stat st;
-	char *buf;
-	int fd;
+	apk_blob_t blob;
 
 	if (db->root == NULL)
 		return 0;
@@ -467,23 +465,18 @@ static int apk_db_read_state(struct apk_database *db)
 	 */
 	fchdir(db->root_fd);
 
-	fd = open("var/lib/apk/world", O_RDONLY);
-	if (fd < 0) {
+	blob = apk_blob_from_file("var/lib/apk/world");
+	if (APK_BLOB_IS_NULL(blob)) {
 		apk_error("Please run 'apk create' to initialize root");
 		return -1;
 	}
+	apk_deps_parse(db, &db->world, blob);
+	free(blob.ptr);
 
-	fstat(fd, &st);
-	buf = malloc(st.st_size);
-	read(fd, buf, st.st_size);
-	apk_deps_parse(db, &db->world,
-		       APK_BLOB_PTR_LEN(buf, st.st_size));
-	close(fd);
-
-	fd = open("var/lib/apk/files", O_RDONLY);
-	if (fd >= 0) {
-		apk_db_read_fdb(db, fd);
-		close(fd);
+	is = apk_istream_from_file("var/lib/apk/files");
+	if (is != NULL) {
+		apk_db_read_fdb(db, is);
+		is->close(is);
 	}
 
 	is = apk_istream_from_file("var/lib/apk/scripts");

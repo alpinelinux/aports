@@ -20,6 +20,8 @@ struct apk_blob {
 };
 typedef struct apk_blob apk_blob_t;
 
+#define APK_BLOB_IS_NULL(blob)		(blob.ptr == NULL)
+
 #define APK_BLOB_NULL			((apk_blob_t){0, NULL})
 #define APK_BLOB_STR(str)		((apk_blob_t){strlen(str), (str)})
 #define APK_BLOB_BUF(buf)		((apk_blob_t){sizeof(buf), (char *)(buf)})

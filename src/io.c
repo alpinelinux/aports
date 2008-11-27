@@ -305,6 +305,35 @@ apk_blob_t apk_blob_from_istream(struct apk_istream *is, size_t size)
 	return APK_BLOB_PTR_LEN(ptr, rsize);
 }
 
+apk_blob_t apk_blob_from_file(const char *file)
+{
+	int fd;
+	struct stat st;
+	char *buf;
+
+	fd = open(file, O_RDONLY);
+	if (fd < 0)
+		return APK_BLOB_NULL;
+
+	if (fstat(fd, &st) < 0)
+		goto err_fd;
+
+	buf = malloc(st.st_size);
+	if (buf == NULL)
+		goto err_fd;
+
+	if (read(fd, buf, st.st_size) != st.st_size)
+		goto err_read;
+
+	close(fd);
+	return APK_BLOB_PTR_LEN(buf, st.st_size);
+err_read:
+	free(buf);
+err_fd:
+	close(fd);
+	return APK_BLOB_NULL;
+}
+
 int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 {
 	struct stat st;
