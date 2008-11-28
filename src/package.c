@@ -25,7 +25,7 @@
 #include "apk_database.h"
 #include "apk_state.h"
 
-static struct apk_package *apk_pkg_new(void)
+struct apk_package *apk_pkg_new(void)
 {
 	struct apk_package *pkg;
 
@@ -189,8 +189,8 @@ struct read_info_ctx {
 	int has_install;
 };
 
-static int add_info(struct apk_database *db, struct apk_package *pkg,
-		    char field, apk_blob_t value)
+int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
+		     char field, apk_blob_t value)
 {
 	switch (field) {
 	case 'P':
@@ -220,6 +220,8 @@ static int add_info(struct apk_database *db, struct apk_package *pkg,
 	case 'I':
 		pkg->installed_size = apk_blob_uint(value, 10);
 		break;
+	default:
+		return -1;
 	}
 	return 0;
 }
@@ -250,7 +252,7 @@ static int read_info_line(void *ctx, apk_blob_t line)
 
 	for (i = 0; i < ARRAY_SIZE(fields); i++) {
 		if (strncmp(fields[i].str, l.ptr, l.len) == 0) {
-			add_info(ri->db, ri->pkg, fields[i].field, r);
+			apk_pkg_add_info(ri->db, ri->pkg, fields[i].field, r);
 			break;
 		}
 	}
@@ -309,8 +311,8 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 		for (i = 0; i < ARRAY_SIZE(fields); i++) {
 			if (strcmp(fields[i].str, slash+1) == 0) {
 				apk_blob_t blob = apk_blob_from_istream(is, ae->size);
-				add_info(ri->db, ri->pkg, fields[i].field,
-					 trim(blob));
+				apk_pkg_add_info(ri->db, ri->pkg, fields[i].field,
+						 trim(blob));
 				free(blob.ptr);
 				break;
 			}
@@ -407,6 +409,25 @@ int apk_pkg_get_state(struct apk_package *pkg)
 	return APK_STATE_NO_INSTALL;
 }
 
+void apk_pkg_set_state(struct apk_database *db, struct apk_package *pkg, int state)
+{
+	switch (state) {
+	case APK_STATE_INSTALL:
+		if (!list_hashed(&pkg->installed_pkgs_list)) {
+			db->installed.stats.packages++;
+			list_add_tail(&pkg->installed_pkgs_list,
+				      &db->installed.packages);
+		}
+		break;
+	case APK_STATE_NO_INSTALL:
+		if (list_hashed(&pkg->installed_pkgs_list)) {
+			db->installed.stats.packages--;
+			list_del(&pkg->installed_pkgs_list);
+		}
+		break;
+	}
+}
+
 int apk_pkg_add_script(struct apk_package *pkg, struct apk_istream *is,
 		       unsigned int type, unsigned int size)
 {
@@ -489,7 +510,7 @@ static int parse_index_line(void *ctx, apk_blob_t line)
 	if (line.len < 3 || line.ptr[1] != ':')
 		return 0;
 
-	add_info(ri->db, ri->pkg, line.ptr[0], APK_BLOB_PTR_LEN(line.ptr+2, line.len-2));
+	apk_pkg_add_info(ri->db, ri->pkg, line.ptr[0], APK_BLOB_PTR_LEN(line.ptr+2, line.len-2));
 	return 0;
 }
 
@@ -508,7 +529,8 @@ struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_
 
 	if (ctx.pkg->name == NULL) {
 		apk_pkg_free(ctx.pkg);
-		printf("%.*s\n", blob.len, blob.ptr);
+		apk_error("Failed to parse index entry: %.*s",
+			  blob.len, blob.ptr);
 		ctx.pkg = NULL;
 	}
 

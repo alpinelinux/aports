@@ -72,10 +72,14 @@ int apk_deps_format(char *buf, int size,
 		    struct apk_dependency_array *depends);
 int apk_script_type(const char *name);
 
+struct apk_package *apk_pkg_new(void);
 struct apk_package *apk_pkg_read(struct apk_database *db, const char *name);
 void apk_pkg_free(struct apk_package *pkg);
 
+int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
+		     char field, apk_blob_t value);
 int apk_pkg_get_state(struct apk_package *pkg);
+void apk_pkg_set_state(struct apk_database *db, struct apk_package *pkg, int state);
 int apk_pkg_add_script(struct apk_package *pkg, struct apk_istream *is,
 		       unsigned int type, unsigned int size);
 int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
