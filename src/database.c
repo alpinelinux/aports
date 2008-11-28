@@ -627,16 +627,14 @@ struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum)
 			    APK_BLOB_PTR_LEN((void*) sum, sizeof(csum_t)));
 }
 
-int apk_db_pkg_add_file(struct apk_database *db, const char *file)
+struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *file)
 {
 	struct apk_package *info;
 
 	info = apk_pkg_read(db, file);
-	if (info == NULL)
-		return FALSE;
-
-	apk_db_pkg_add(db, info);
-	return TRUE;
+	if (info != NULL)
+		apk_db_pkg_add(db, info);
+	return info;
 }
 
 static int write_index_entry(apk_hash_item item, void *ctx)
@@ -864,11 +862,15 @@ int apk_db_install_pkg(struct apk_database *db,
 	}
 
 	/* Install the new stuff */
-	snprintf(file, sizeof(file),
-		 "%s/%s-%s.apk",
-		 db->repos[0].url, newpkg->name->name, newpkg->version);
+	if (newpkg->filename == NULL) {
+		snprintf(file, sizeof(file),
+			 "%s/%s-%s.apk",
+			 db->repos[0].url, newpkg->name->name, newpkg->version);
 
-	fd = open(file, O_RDONLY);
+		fd = open(file, O_RDONLY);
+	} else
+		fd = open(newpkg->filename, O_RDONLY);
+
 	if (fd < 0) {
 		apk_error("%s: %s", file, strerror(errno));
 		return errno;

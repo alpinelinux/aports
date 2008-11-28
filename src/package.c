@@ -373,6 +373,7 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 		};
 		apk_deps_add(&ctx.pkg->depends, &dep);
 	}
+	ctx.pkg->filename = strdup(file);
 
 	return ctx.pkg;
 err:

@@ -22,14 +22,32 @@ static int add_main(int argc, char **argv)
 		return -1;
 
 	for (i = 0; i < argc; i++) {
-		struct apk_dependency dep = {
-			.name = apk_db_get_name(&db, APK_BLOB_STR(argv[i])),
-		};
+		struct apk_dependency dep;
+
+		if (strstr(argv[i], ".apk") != NULL) {
+			struct apk_package *pkg;
+
+			pkg = apk_db_pkg_add_file(&db, argv[i]);
+			if (pkg == NULL) {
+				apk_error("Unable to read '%s'", argv[i]);
+				goto err;
+			}
+
+			dep = (struct apk_dependency) {
+				.name = pkg->name,
+				.version_mask = APK_VERSION_RESULT_MASK(APK_VERSION_EQUAL),
+				.version = pkg->version,
+			};
+		} else {
+			dep = (struct apk_dependency) {
+				.name = apk_db_get_name(&db, APK_BLOB_STR(argv[i])),
+			};
+		}
 		apk_deps_add(&db.world, &dep);
 	}
 	apk_db_recalculate_and_commit(&db);
+err:
 	apk_db_close(&db);
-
 	return 0;
 }
 
