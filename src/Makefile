@@ -16,6 +16,7 @@ apk_OBJS = \
 	archive.o \
 	version.o \
 	io.o \
+	url.o \
 	gunzip.o \
 	blob.o \
 	hash.o \

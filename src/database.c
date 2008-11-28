@@ -840,7 +840,7 @@ int apk_db_install_pkg(struct apk_database *db,
 	struct install_ctx ctx;
 	csum_t csum;
 	char file[256];
-	int fd, r;
+	int r;
 
 	if (fchdir(db->root_fd) < 0)
 		return errno;
@@ -866,21 +866,14 @@ int apk_db_install_pkg(struct apk_database *db,
 		snprintf(file, sizeof(file),
 			 "%s/%s-%s.apk",
 			 db->repos[0].url, newpkg->name->name, newpkg->version);
-
-		fd = open(file, O_RDONLY);
+		bs = apk_bstream_from_url(file);
 	} else
-		fd = open(newpkg->filename, O_RDONLY);
+		bs = apk_bstream_from_file(newpkg->filename);
 
-	if (fd < 0) {
+	if (bs == NULL) {
 		apk_error("%s: %s", file, strerror(errno));
 		return errno;
 	}
-
-	fcntl(fd, F_SETFD, FD_CLOEXEC);
-
-	bs = apk_bstream_from_fd(fd);
-	if (bs == NULL)
-		goto err_close;
 
 	ctx = (struct install_ctx) {
 		.db = db,
@@ -909,8 +902,7 @@ int apk_db_install_pkg(struct apk_database *db,
 		write(STDOUT_FILENO, ".", 1);
 	}
 	return r;
-
 err_close:
-	close(fd);
+	bs->close(bs, NULL);
 	return -1;
 }

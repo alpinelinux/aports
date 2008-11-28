@@ -60,6 +60,9 @@ struct apk_istream *apk_istream_from_fd(int fd)
 {
 	struct apk_fd_istream *fis;
 
+	if (fd < 0)
+		return NULL;
+
 	fis = malloc(sizeof(struct apk_fd_istream));
 	if (fis == NULL)
 		return NULL;
@@ -80,6 +83,8 @@ struct apk_istream *apk_istream_from_file(const char *file)
 	fd = open(file, O_RDONLY);
 	if (fd < 0)
 		return NULL;
+
+	fcntl(fd, F_SETFD, FD_CLOEXEC);
 
 	return apk_istream_from_fd(fd);
 }
@@ -278,11 +283,26 @@ struct apk_bstream *apk_bstream_from_fd(int fd)
 {
 	struct apk_bstream *bs;
 
+	if (fd < 0)
+		return NULL;
+
 	bs = apk_mmap_bstream_from_fd(fd);
 	if (bs != NULL)
 		return bs;
 
 	return apk_bstream_from_istream(apk_istream_from_fd(fd));
+}
+
+struct apk_bstream *apk_bstream_from_file(const char *file)
+{
+	int fd;
+
+	fd = open(file, O_RDONLY);
+	if (fd < 0)
+		return NULL;
+
+	fcntl(fd, F_SETFD, FD_CLOEXEC);
+	return apk_bstream_from_fd(fd);
 }
 
 apk_blob_t apk_blob_from_istream(struct apk_istream *is, size_t size)
@@ -338,7 +358,6 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 {
 	struct stat st;
 	struct apk_bstream *bs;
-	int fd;
 
 	if (stat(filename, &st) != 0)
 		return -1;
@@ -352,11 +371,7 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 		.device = st.st_dev,
 	};
 
-	fd = open(filename, O_RDONLY);
-	if (fd < 0)
-		return 0;
-
-	bs = apk_bstream_from_fd(fd);
+	bs = apk_bstream_from_file(filename);
 	if (bs != NULL)
 		bs->close(bs, fi->csum);
 
@@ -365,12 +380,6 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 
 struct apk_istream *apk_istream_from_file_gz(const char *file)
 {
-	int fd;
-
-	fd = open(file, O_RDONLY);
-	if (fd < 0)
-		return NULL;
-
-	return apk_gunzip_bstream(apk_bstream_from_fd(fd));
+	return apk_gunzip_bstream(apk_bstream_from_file(file));
 }
 
