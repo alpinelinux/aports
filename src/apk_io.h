@@ -35,13 +35,20 @@ struct apk_istream {
 
 struct apk_bstream {
 	size_t (*read)(void *stream, void **ptr);
-	void (*close)(void *stream, csum_p csum);
+	void (*close)(void *stream, csum_p csum, size_t *size);
 };
 
-struct apk_istream *apk_gunzip_bstream(struct apk_bstream *);
+struct apk_ostream {
+	size_t (*write)(void *stream, const void *buf, size_t size);
+	void (*close)(void *stream);
+};
+
+struct apk_istream *apk_bstream_gunzip(struct apk_bstream *);
+struct apk_ostream *apk_ostream_gzip(struct apk_ostream *);
 
 struct apk_istream *apk_istream_from_fd(int fd);
 struct apk_istream *apk_istream_from_file(const char *file);
+struct apk_istream *apk_istream_from_file_gz(const char *file);
 struct apk_istream *apk_istream_from_url(const char *url);
 size_t apk_istream_skip(struct apk_istream *istream, size_t size);
 size_t apk_istream_splice(void *stream, int fd, size_t size);
@@ -51,7 +58,9 @@ struct apk_bstream *apk_bstream_from_fd(int fd);
 struct apk_bstream *apk_bstream_from_file(const char *file);
 struct apk_bstream *apk_bstream_from_url(const char *url);
 
-struct apk_istream *apk_istream_from_file_gz(const char *file);
+struct apk_ostream *apk_ostream_to_fd(int fd);
+struct apk_ostream *apk_ostream_to_file(const char *file, mode_t mode);
+struct apk_ostream *apk_ostream_to_file_gz(const char *file, mode_t mode);
 
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
 apk_blob_t apk_blob_from_file(const char *file);

@@ -331,35 +331,23 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 {
 	struct read_info_ctx ctx;
 	struct apk_bstream *bs;
-	struct stat st;
-	int fd;
 
 	ctx.pkg = apk_pkg_new();
 	if (ctx.pkg == NULL)
 		return NULL;
 
-	fd = open(file, O_RDONLY);
-	if (fd < 0)
+	bs = apk_bstream_from_file(file);
+	if (bs == NULL)
 		goto err;
-
-	fstat(fd, &st);
-	fcntl(fd, F_SETFD, FD_CLOEXEC);
-
-	bs = apk_bstream_from_fd(fd);
-	if (bs == NULL) {
-		close(fd);
-		goto err;
-	}
 
 	ctx.db = db;
-	ctx.pkg->size = st.st_size;
 	ctx.has_install = 0;
 	if (apk_parse_tar_gz(bs, read_info_entry, &ctx) < 0) {
 		apk_error("File %s is not an APK archive", file);
-		bs->close(bs, NULL);
+		bs->close(bs, NULL, NULL);
 		goto err;
 	}
-	bs->close(bs, ctx.pkg->csum);
+	bs->close(bs, ctx.pkg->csum, &ctx.pkg->size);
 
 	if (ctx.pkg->name == NULL) {
 		apk_error("File %s is corrupted", file);

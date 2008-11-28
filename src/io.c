@@ -23,7 +23,7 @@ struct apk_fd_istream {
 	int fd;
 };
 
-static size_t fd_read(void *stream, void *ptr, size_t size)
+static size_t fdi_read(void *stream, void *ptr, size_t size)
 {
 	struct apk_fd_istream *fis =
 		container_of(stream, struct apk_fd_istream, is);
@@ -47,7 +47,7 @@ static size_t fd_read(void *stream, void *ptr, size_t size)
 	return i;
 }
 
-static void fd_close(void *stream)
+static void fdi_close(void *stream)
 {
 	struct apk_fd_istream *fis =
 		container_of(stream, struct apk_fd_istream, is);
@@ -68,8 +68,8 @@ struct apk_istream *apk_istream_from_fd(int fd)
 		return NULL;
 
 	*fis = (struct apk_fd_istream) {
-		.is.read = fd_read,
-		.is.close = fd_close,
+		.is.read = fdi_read,
+		.is.close = fdi_close,
 		.fd = fd,
 	};
 
@@ -148,6 +148,7 @@ struct apk_istream_bstream {
 	struct apk_istream *is;
 	csum_ctx_t csum_ctx;
 	unsigned char buffer[8*1024];
+	size_t size;
 };
 
 static size_t is_bs_read(void *stream, void **ptr)
@@ -161,12 +162,13 @@ static size_t is_bs_read(void *stream, void **ptr)
 		return size;
 
 	csum_process(&isbs->csum_ctx, isbs->buffer, size);
+	isbs->size += size;
 
 	*ptr = isbs->buffer;
 	return size;
 }
 
-static void is_bs_close(void *stream, csum_t csum)
+static void is_bs_close(void *stream, csum_t csum, size_t *size)
 {
 	struct apk_istream_bstream *isbs =
 		container_of(stream, struct apk_istream_bstream, bs);
@@ -178,10 +180,14 @@ static void is_bs_close(void *stream, csum_t csum)
 			size = isbs->is->read(isbs->is, isbs->buffer,
 					      sizeof(isbs->buffer));
 			csum_process(&isbs->csum_ctx, isbs->buffer, size);
+			isbs->size += size;
 		} while (size == sizeof(isbs->buffer));
 
 		csum_finish(&isbs->csum_ctx, csum);
 	}
+
+	if (size != NULL)
+		*size = isbs->size;
 
 	isbs->is->close(isbs->is);
 	free(isbs);
@@ -231,7 +237,7 @@ static size_t mmap_read(void *stream, void **ptr)
 	return size;
 }
 
-static void mmap_close(void *stream, csum_t csum)
+static void mmap_close(void *stream, csum_t csum, size_t *size)
 {
 	struct apk_mmap_bstream *mbs =
 		container_of(stream, struct apk_mmap_bstream, bs);
@@ -242,6 +248,9 @@ static void mmap_close(void *stream, csum_t csum)
 				     mbs->size - mbs->pos);
 		csum_finish(&mbs->csum_ctx, csum);
 	}
+
+	if (size != NULL)
+		*size = mbs->size;
 
 	munmap(mbs->ptr, mbs->size);
 	free(mbs);
@@ -373,13 +382,78 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 
 	bs = apk_bstream_from_file(filename);
 	if (bs != NULL)
-		bs->close(bs, fi->csum);
+		bs->close(bs, fi->csum, NULL);
 
 	return 0;
 }
 
 struct apk_istream *apk_istream_from_file_gz(const char *file)
 {
-	return apk_gunzip_bstream(apk_bstream_from_file(file));
+	return apk_bstream_gunzip(apk_bstream_from_file(file));
+}
+
+struct apk_fd_ostream {
+	struct apk_ostream os;
+	int fd;
+};
+
+static size_t fdo_write(void *stream, const void *ptr, size_t size)
+{
+	struct apk_fd_ostream *fos =
+		container_of(stream, struct apk_fd_ostream, os);
+	size_t i = 0, r;
+
+	while (i < size) {
+		r = write(fos->fd, ptr + i, size - i);
+		if (r < 0)
+			return r;
+		if (r == 0)
+			return i;
+		i += r;
+	}
+
+	return i;
+}
+
+static void fdo_close(void *stream)
+{
+	struct apk_fd_ostream *fos =
+		container_of(stream, struct apk_fd_ostream, os);
+
+	close(fos->fd);
+	free(fos);
+}
+
+struct apk_ostream *apk_ostream_to_fd(int fd)
+{
+	struct apk_fd_ostream *fos;
+
+	if (fd < 0)
+		return NULL;
+
+	fos = malloc(sizeof(struct apk_fd_ostream));
+	if (fos == NULL)
+		return NULL;
+
+	*fos = (struct apk_fd_ostream) {
+		.os.write = fdo_write,
+		.os.close = fdo_close,
+		.fd = fd,
+	};
+
+	return &fos->os;
+}
+
+struct apk_ostream *apk_ostream_to_file(const char *file, mode_t mode)
+{
+	int fd;
+
+	fd = creat(file, mode);
+	if (fd < 0)
+		return NULL;
+
+	fcntl(fd, F_SETFD, FD_CLOEXEC);
+
+	return apk_ostream_to_fd(fd);
 }
 

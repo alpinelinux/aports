@@ -369,7 +369,7 @@ static int apk_db_index_read(struct apk_database *db, struct apk_istream *is, in
 	return 0;
 }
 
-static int apk_db_write_fdb(struct apk_database *db, int fd)
+static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 {
 	struct apk_package *pkg;
 	struct apk_db_dir *dir;
@@ -382,14 +382,14 @@ static int apk_db_write_fdb(struct apk_database *db, int fd)
 	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
 		blob = apk_pkg_format_index_entry(pkg, sizeof(buf), buf);
 		if (blob.ptr)
-			write(fd, blob.ptr, blob.len - 1);
+			os->write(os, blob.ptr, blob.len - 1);
 
-		n = 0;
 		dir = NULL;
 		hlist_for_each_entry(file, c2, &pkg->owned_files, pkg_files_list) {
 			if (file->owner == NULL)
 				continue;
 
+			n = 0;
 			if (dir != file->dir) {
 				dir = file->dir;
 				n += snprintf(&buf[n], sizeof(buf)-n,
@@ -409,11 +409,10 @@ static int apk_db_write_fdb(struct apk_database *db, int fd)
 				n += snprintf(&buf[n], sizeof(buf)-n, "\n");
 			}
 
-			if (write(fd, buf, n) != n)
+			if (os->write(os, buf, n) != n)
 				return -1;
-			n = 0;
 		}
-		write(fd, "\n", 1);
+		os->write(os, "\n", 1);
 	}
 
 	return 0;
@@ -425,7 +424,7 @@ struct apk_script_header {
 	unsigned int size;
 };
 
-static int apk_db_scriptdb_write(struct apk_database *db, int fd)
+static int apk_db_scriptdb_write(struct apk_database *db, struct apk_ostream *os)
 {
 	struct apk_package *pkg;
 	struct apk_script *script;
@@ -438,8 +437,11 @@ static int apk_db_scriptdb_write(struct apk_database *db, int fd)
 			hdr.type = script->type;
 			hdr.size = script->size;
 
-			write(fd, &hdr, sizeof(hdr));
-			write(fd, script->script, script->size);
+			if (os->write(os, &hdr, sizeof(hdr)) != sizeof(hdr))
+				return -1;
+
+			if (os->write(os, script->script, script->size) != script->size)
+				return -1;
 		}
 	}
 
@@ -580,32 +582,33 @@ struct write_ctx {
 
 static int apk_db_write_config(struct apk_database *db)
 {
+	struct apk_ostream *os;
 	char buf[1024];
-	int n, fd;
+	int n;
 
 	if (db->root == NULL)
 		return 0;
 
 	fchdir(db->root_fd);
 
-	fd = creat("var/lib/apk/world", 0600);
-	if (fd < 0)
+	os = apk_ostream_to_file("var/lib/apk/world", 0600);
+	if (os == NULL)
 		return -1;
 	n = apk_deps_format(buf, sizeof(buf), db->world);
-	write(fd, buf, n);
-	close(fd);
+	os->write(os, buf, n);
+	os->close(os);
 
-	fd = creat("var/lib/apk/installed", 0600);
-	if (fd < 0)
+	os = apk_ostream_to_file("var/lib/apk/installed", 0600);
+	if (os == NULL)
 		return -1;
-	apk_db_write_fdb(db, fd);
-	close(fd);
+	apk_db_write_fdb(db, os);
+	os->close(os);
 
-	fd = creat("var/lib/apk/scripts", 0600);
-	if (fd < 0)
+	os = apk_ostream_to_file("var/lib/apk/scripts", 0600);
+	if (os == NULL)
 		return -1;
-	apk_db_scriptdb_write(db, fd);
-	close(fd);
+	apk_db_scriptdb_write(db, os);
+	os->close(os);
 
 	return 0;
 }
@@ -639,20 +642,23 @@ struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *fil
 
 static int write_index_entry(apk_hash_item item, void *ctx)
 {
-	int fd = (int) ctx;
+	struct apk_ostream *os = (struct apk_ostream *) ctx;
 	char buf[1024];
 	apk_blob_t blob;
 
 	blob = apk_pkg_format_index_entry(item, sizeof(buf), buf);
-	if (blob.ptr)
-		write(fd, blob.ptr, blob.len);
+	if (APK_BLOB_IS_NULL(blob))
+		return 0;
+
+	if (os->write(os, blob.ptr, blob.len) != blob.len)
+		return -1;
 
 	return 0;
 }
 
-void apk_db_index_write(struct apk_database *db, int fd)
+void apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
 {
-	apk_hash_foreach(&db->available.packages, write_index_entry, (void *) fd);
+	apk_hash_foreach(&db->available.packages, write_index_entry, (void *) os);
 }
 
 int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
@@ -884,7 +890,7 @@ int apk_db_install_pkg(struct apk_database *db,
 	if (apk_parse_tar_gz(bs, apk_db_install_archive_entry, &ctx) != 0)
 		goto err_close;
 
-	bs->close(bs, csum);
+	bs->close(bs, csum, NULL);
 
 	apk_pkg_set_state(db, newpkg, APK_STATE_INSTALL);
 
@@ -903,6 +909,6 @@ int apk_db_install_pkg(struct apk_database *db,
 	}
 	return r;
 err_close:
-	bs->close(bs, NULL);
+	bs->close(bs, NULL, NULL);
 	return -1;
 }

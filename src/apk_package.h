@@ -54,7 +54,7 @@ struct apk_package {
 	char *version;
 	char *url, *description, *license;
 	struct apk_dependency_array *depends;
-	unsigned int installed_size, size;
+	size_t installed_size, size;
 	char *filename;
 
 	/* for installed packages only */

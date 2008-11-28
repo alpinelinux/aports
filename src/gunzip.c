@@ -67,7 +67,7 @@ static void gz_close(void *stream)
 	free(gis);
 }
 
-struct apk_istream *apk_gunzip_bstream(struct apk_bstream *bs)
+struct apk_istream *apk_bstream_gunzip(struct apk_bstream *bs)
 {
 	struct apk_gzip_istream *gis;
 

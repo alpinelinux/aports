@@ -43,12 +43,17 @@ static int index_main(int argc, char **argv)
 {
 	struct apk_database db;
 	struct counts counts = {0,0};
+	struct apk_ostream *os;
 	int i;
 
 	apk_db_open(&db, NULL);
 	for (i = 0; i < argc; i++)
 		apk_db_pkg_add_file(&db, argv[i]);
-	apk_db_index_write(&db, STDOUT_FILENO);
+
+	os = apk_ostream_to_fd(STDOUT_FILENO);
+	apk_db_index_write(&db, os);
+	os->close(os);
+
 	apk_hash_foreach(&db.available.names, warn_if_no_providers, &counts);
 	apk_db_close(&db);
 

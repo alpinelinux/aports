@@ -23,10 +23,6 @@
 #include "apk_defines.h"
 #include "apk_archive.h"
 
-#ifndef GUNZIP_BINARY
-#define GUNZIP_BINARY "/bin/gunzip"
-#endif
-
 struct tar_header {
 	/* ustar header, Posix 1003.1 */
 	char name[100];     /*   0-99 */
@@ -182,7 +178,7 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 int apk_parse_tar_gz(struct apk_bstream *bs, apk_archive_entry_parser parser,
 		     void *ctx)
 {
-	return apk_parse_tar(apk_gunzip_bstream(bs), parser, ctx);
+	return apk_parse_tar(apk_bstream_gunzip(bs), parser, ctx);
 }
 
 int apk_archive_entry_extract(const struct apk_file_info *ae,
