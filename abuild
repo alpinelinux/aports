@@ -36,6 +36,7 @@ pkgrel=0
 # defaults
 SRCDEST=${SRCDEST:-$startdir}
 PKGDEST=${PKGDEST:-$startdir}
+BUILD_BASE="binutils gcc make patch uclibc-dev"
 
 default_cmds="sanitycheck builddeps clean fetch md5check unpack rootpkg"
 
@@ -47,6 +48,9 @@ set_xterm_title() {
 
 cleanup() {
 	set_xterm_title ""
+	if [ -z "$install_after" ] && [ -n "$uninstall_after" ]; then
+		sudo apk_delete $uninstall_after
+	fi
 }
 
 die() {
@@ -394,42 +398,86 @@ up2date() {
 	return 0
 }
 
-# note: this must run in a subshell
-find_aport() {
-	local i
-	msg "Searching for $1 in aports tree..."
-	cd ../..
-	for i in */*/APKBUILD; do
-		pkgrel=
+# source all APKBUILDs and output:
+#  1) origin of package
+#  2) all dependencies
+# the output is i in a format easy parseable for awk
+depparse_aports() {
+	# lets run this in a subshell since we source all APKBUILD here
+	(
+	aportsdir=$(realpath ${APKBUILD%/APKBUILD}/../..)
+	for i in $aportsdir/*/*/APKBUILD; do
+		pkgname=
+		subpackages=
+		depends=
+		makedepends=
 		. $i
-		local j
+		dir=${i%/APKBUILD}
 		for j in $pkgname $subpackages; do
-			if [ "${j%%:*}" = "$1" ]; then
-				echo "$PWD/${i%/APKBUILD}/$1-$pkgver-r$pkgrel.apk"
-				return 0
-			fi
+			echo "o ${j%%:*} $dir"
+			set -- $depends $makedepends
+			echo -n "d ${j%%:*} $1"
+			shift
+			while [ $# -gt 0 ]; do
+				echo -n ",$1"
+				shift
+			done
+			echo
 		done
 	done
-	return 1
+	)
 }
 
-# recursively build and install dependencies
-builddeps() {
-	local dep pkg
-	for dep in $depends $makedepends; do
-		[ -z "$upgrade" ] && apk_info -e $dep && continue
-		[ -z "$recursive" ] && die "Missing dependency $dep. Use -r or -u to build recursively"
-		pkg=$(find_aport $dep) 
-		if [ -z "$pkg" ]; then
-			# try install from system repo as fallback
-			apk_add ${upgrade:+-u} $dep && continue
-			die "Failed to find dependency $dep"
+deptrace() {
+	( 	depparse_aports 
+		if [ -z "$upgrade" ]; then
+			# list installed pkgs and prefix with 'i '
+			apk_info | sed 's/-[0-9].*//; s/^/i /'
 		fi
-		# recursively build deps
-		msg "Entering ${pkg%/*}"
-		cd ${pkg%/*} 
-		$0 -r ${upgrade:+-u} || return 1
-		sudo apk_add ${upgrade:+-u} $pkg
+	) | awk -v pkgs="$BUILD_BASE $depends $makedepends" '
+
+	function depgraph(pkg,	a, i) {
+		if (visited[pkg])
+			return 0;
+		visited[pkg] = 1;
+		split(deps[pkg], a, ",");
+		for (i in a)
+			depgraph(a[i]);
+		print pkg ":" origin[pkg];
+
+	}
+
+	$1 == "i" { visited[$2] = 1 }
+	$1 == "o" { origin[$2] = $3 }
+	$1 == "d" { deps[$2] = $3 }
+	END {
+		split(pkgs, pkgarray);
+		for (i in pkgarray)
+			depgraph(pkgarray[i]);
+	}
+	'
+}
+
+# build and install dependencies
+builddeps() {
+	local deps alldeps pkg i dir ver
+	msg "Building dependencies..."
+	deps="$BUILD_BASE $depends $makedepends"
+	if [ -z "$recursive" ]; then
+		for i in $deps; do
+			apk_info -e $i || die "Missing dependency $i. Use -r to build recursively"
+		done
+		return 0
+	fi
+
+	for i in $(deptrace); do
+		# i = pkg:dir
+		local dir=${i#*:}
+		local pkg=${i%:*}
+		msg "Entering $dir"
+		cd "$dir" || return 1
+		$0 -i $pkg || return 1
+		uninstall_after="$pkg $uninstall_after"
 	done
 }
 
@@ -469,10 +517,11 @@ listpkg() {
 
 usage() {
 	echo "$(basename $0) $abuild_ver"
-	echo "usage: $0 [options] [cmd] ..."
+	echo "usage: $0 [options] [-i PKG] [cmd] ..."
 	echo "Options:"
-	echo " -h  Show this help"
 	echo " -f  Force specified cmd, even if they are already done"
+	echo " -h  Show this help"
+	echo " -i  Install PKG after successul build"
 	echo " -q  Quiet"
 	echo " -r  Recursively build and install missing dependencies (using sudo)"
 	echo " -u  Recursively build and upgrade dependencies (using sudo)"
@@ -499,10 +548,13 @@ usage() {
 
 APKBUILD="${APKBUILD:-./APKBUILD}"
 
-while getopts "hfqru" opt; do
+unset force
+unset recursive
+while getopts "fhi:qru" opt; do
 	case $opt in
-		'h') usage;;
 		'f') force=1;;
+		'h') usage;;
+		'i') install_after="$install_after $OPTARG";;
 		'q') quiet=1;;
 		'r') recursive=1;;
 		'u') upgrade=1
@@ -536,5 +588,11 @@ while [ $# -gt 0 ]; do
 	runpart $1
 	shift
 done
+
+for i in $install_after; do
+	sudo apk_add -s -u $PKGDEST/$i-$pkgver-r$pkgrel.apk \
+		|| die "Failed to install $i"
+done
+
 cleanup
 
