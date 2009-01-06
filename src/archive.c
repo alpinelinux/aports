@@ -115,6 +115,7 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 				free(entry.name);
 			entry.name = malloc(entry.size+1);
 			is->read(is, entry.name, entry.size);
+			entry.name[entry.size] = 0;
 			offset += entry.size;
 			entry.size = 0;
 			break;
@@ -133,7 +134,7 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 		case '3': /* char device */
 			entry.mode |= S_IFCHR;
 			break;
-		case '4': /* block devicek */
+		case '4': /* block device */
 			entry.mode |= S_IFBLK;
 			break;
 		case '5': /* directory */
@@ -151,10 +152,10 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 			/* callback parser function */
 			csum_init(&teis.csum_ctx);
 			r = parser(ctx, &entry, &teis.is);
+			free(entry.name);
 			if (r != 0)
 				return r;
 
-			free(entry.name);
 			entry.name = NULL;
 		}
 
