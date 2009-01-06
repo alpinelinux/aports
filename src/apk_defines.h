@@ -13,6 +13,7 @@
 #define APK_DEFINES_H
 
 #include <malloc.h>
+#include <string.h>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #define BIT(x) (1 << (x))
@@ -66,9 +67,13 @@ void apk_log(const char *prefix, const char *format, ...);
 	array_type_name##_resize(struct array_type_name *a, int size)	\
 	{								\
 		struct array_type_name *tmp;				\
+		int oldnum = a ? a->num : 0;				\
 		tmp = (struct array_type_name *)			\
 			realloc(a, sizeof(struct array_type_name) +	\
-				   size * sizeof(elem_type_name));	\
+				size * sizeof(elem_type_name));		\
+		if (size > oldnum)					\
+			memset(&tmp->item[oldnum], 0,			\
+			       (size - oldnum) * sizeof(a->item[0]));	\
 		tmp->num = size;					\
 		return tmp;						\
 	}								\
