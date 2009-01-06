@@ -59,7 +59,7 @@ struct apk_package {
 
 	/* for installed packages only */
 	struct list_head installed_pkgs_list;
-	struct hlist_head owned_files;
+	struct hlist_head owned_dirs;
 	struct hlist_head scripts;
 };
 APK_ARRAY(apk_package_array, struct apk_package *);

@@ -21,10 +21,9 @@
 
 struct apk_db_file {
 	struct hlist_node dir_files_list;
-	struct hlist_node pkg_files_list;
+	struct hlist_node diri_files_list;
 
-	struct apk_db_dir *dir;
-	struct apk_package *owner;
+	struct apk_db_dir_instance *diri;
 	csum_t csum;
 	char filename[];
 };
@@ -37,12 +36,19 @@ struct apk_db_dir {
 	struct hlist_head files;
 	struct apk_db_dir *parent;
 
-	unsigned refs;
+	unsigned short refs;
+	unsigned short flags;
+	char dirname[];
+};
+
+struct apk_db_dir_instance {
+	struct hlist_node pkg_dirs_list;
+	struct hlist_head owned_files;
+	struct apk_package *pkg;
+	struct apk_db_dir *dir;
 	mode_t mode;
 	uid_t uid;
 	gid_t gid;
-	unsigned flags;
-	char dirname[];
 };
 
 struct apk_name {

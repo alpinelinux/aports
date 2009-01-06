@@ -28,9 +28,11 @@ struct install_ctx {
 	struct apk_package *pkg;
 
 	int script;
-	struct apk_db_dir *dircache;
+	struct apk_db_dir_instance *diri;
+
+	struct hlist_node **diri_node;
 	struct hlist_node **file_dir_node;
-	struct hlist_node **file_pkg_node;
+	struct hlist_node **file_diri_node;
 };
 
 static apk_blob_t pkg_name_get_key(apk_hash_item item)
@@ -103,25 +105,7 @@ void apk_name_free(struct apk_name *name)
 	free(name);
 }
 
-static struct apk_db_dir *apk_db_dir_ref(struct apk_database *db,
-					 struct apk_db_dir *dir,
-					 int create_dir)
-{
-	if (dir->refs == 0) {
-		if (dir->parent != NULL)
-			apk_db_dir_ref(db, dir->parent, create_dir);
-		db->installed.stats.dirs++;
-		if (create_dir && dir->mode) {
-			mkdir(dir->dirname, dir->mode);
-			chown(dir->dirname, dir->uid, dir->gid);
-		}
-	}
-	dir->refs++;
-
-	return dir;
-}
-
-static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir)
+static void apk_db_dir_put(struct apk_database *db, struct apk_db_dir *dir)
 {
 	dir->refs--;
 	if (dir->refs > 0)
@@ -131,11 +115,17 @@ static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir)
 	rmdir(dir->dirname);
 
 	if (dir->parent != NULL)
-		apk_db_dir_unref(db, dir->parent);
+		apk_db_dir_put(db, dir->parent);
 }
 
-static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
-					 apk_blob_t name)
+static struct apk_db_dir *apk_db_dir_get(struct apk_db_dir *dir)
+{
+	dir->refs++;
+	return dir;
+}
+
+static struct apk_db_dir *apk_db_dir_get_db(struct apk_database *db,
+					    apk_blob_t name)
 {
 	struct apk_db_dir *dir;
 	apk_blob_t bparent;
@@ -146,9 +136,11 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 
 	dir = (struct apk_db_dir *) apk_hash_get(&db->installed.dirs, name);
 	if (dir != NULL)
-		return dir;
+		return apk_db_dir_get(dir);
 
+	db->installed.stats.dirs++;
 	dir = calloc(1, sizeof(*dir) + name.len + 1);
+	dir->refs = 1;
 	memcpy(dir->dirname, name.ptr, name.len);
 	dir->dirname[name.len] = 0;
 	apk_hash_insert(&db->installed.dirs, dir);
@@ -156,9 +148,9 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 	if (name.len == 0)
 		dir->parent = NULL;
 	else if (apk_blob_rsplit(name, '/', &bparent, NULL))
-		dir->parent = apk_db_dir_get(db, bparent);
+		dir->parent = apk_db_dir_get_db(db, bparent);
 	else
-		dir->parent = apk_db_dir_get(db, APK_BLOB_NULL);
+		dir->parent = apk_db_dir_get_db(db, APK_BLOB_NULL);
 
 	if (dir->parent != NULL)
 		dir->flags = dir->parent->flags;
@@ -174,6 +166,37 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 	return dir;
 }
 
+static struct apk_db_dir_instance *apk_db_diri_new(struct apk_database *db,
+						   struct apk_package *pkg,
+						   apk_blob_t name,
+						   struct hlist_node **after)
+{
+	struct apk_db_dir_instance *diri;
+
+	diri = calloc(1, sizeof(struct apk_db_dir_instance));
+	hlist_add_after(&diri->pkg_dirs_list, after);
+	diri->dir = apk_db_dir_get_db(db, name);
+	diri->pkg = pkg;
+
+	return diri;
+}
+
+static void apk_db_diri_set(struct apk_db_dir_instance *diri, mode_t mode,
+			    uid_t uid, gid_t gid)
+{
+	diri->mode = mode;
+	diri->uid = uid;
+	diri->gid = gid;
+}
+
+static void apk_db_diri_create(struct apk_db_dir_instance *diri)
+{
+	if (diri->dir->refs == 1) {
+		mkdir(diri->dir->dirname, diri->mode);
+		chown(diri->dir->dirname, diri->uid, diri->gid);
+	}
+}
+
 static struct apk_db_file *apk_db_file_new(struct apk_db_dir *dir,
 					   apk_blob_t name,
 					   struct hlist_node **after)
@@ -182,7 +205,6 @@ static struct apk_db_file *apk_db_file_new(struct apk_db_dir *dir,
 
 	file = calloc(1, sizeof(*file) + name.len + 1);
 	hlist_add_after(&file->dir_files_list, after);
-	file->dir = dir;
 	memcpy(file->filename, name.ptr, name.len);
 	file->filename[name.len] = 0;
 
@@ -191,45 +213,27 @@ static struct apk_db_file *apk_db_file_new(struct apk_db_dir *dir,
 
 static void apk_db_file_set_owner(struct apk_database *db,
 				  struct apk_db_file *file,
-				  struct apk_package *owner,
-				  int create_dir,
+				  struct apk_db_dir_instance *diri,
 				  struct hlist_node **after)
 {
-	if (file->owner != NULL) {
-		hlist_del(&file->pkg_files_list, &file->owner->owned_files);
+	if (file->diri != NULL) {
+		hlist_del(&file->diri_files_list, &file->diri->owned_files);
 	} else {
 		db->installed.stats.files++;
 	}
-	file->dir = apk_db_dir_ref(db, file->dir, create_dir);
-	file->owner = owner;
-	hlist_add_after(&file->pkg_files_list, after);
+	file->diri = diri;
+	hlist_add_after(&file->diri_files_list, after);
 }
 
 static struct apk_db_file *apk_db_file_get(struct apk_database *db,
-					   apk_blob_t name,
+					   apk_blob_t bfile,
 					   struct install_ctx *ctx)
 {
 	struct apk_db_dir *dir;
 	struct apk_db_file *file;
 	struct hlist_node *cur;
-	apk_blob_t bdir, bfile;
 
-	dir = NULL;
-	if (!apk_blob_rsplit(name, '/', &bdir, &bfile)) {
-		dir = apk_db_dir_get(db, APK_BLOB_NULL);
-		bfile = name;
-	} else if (ctx != NULL && ctx->dircache != NULL) {
-		dir = ctx->dircache;
-		if (strncmp(dir->dirname, bdir.ptr, bdir.len) != 0 ||
-		    dir->dirname[bdir.len] != 0)
-			dir = NULL;
-	}
-	if (dir == NULL)
-		dir = apk_db_dir_get(db, bdir);
-	if (ctx != NULL && dir != ctx->dircache) {
-		ctx->dircache = dir;
-		ctx->file_dir_node = hlist_tail_ptr(&dir->files);
-	}
+	dir = ctx->diri->dir;
 
 	hlist_for_each_entry(file, cur, &dir->files, dir_files_list) {
 		if (strncmp(file->filename, bfile.ptr, bfile.len) == 0 &&
@@ -237,6 +241,8 @@ static struct apk_db_file *apk_db_file_get(struct apk_database *db,
 			return file;
 	}
 
+	if (ctx->file_dir_node == NULL)
+		ctx->file_dir_node = hlist_tail_ptr(&dir->files);
 	file = apk_db_file_new(dir, bfile, ctx->file_dir_node);
 	ctx->file_dir_node = &file->dir_files_list.next;
 
@@ -263,15 +269,17 @@ static struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_pa
 static int apk_db_index_read(struct apk_database *db, struct apk_istream *is, int repo)
 {
 	struct apk_package *pkg = NULL;
-	struct apk_db_dir *dir = NULL;
+	struct apk_db_dir_instance *diri = NULL;
 	struct apk_db_file *file = NULL;
+	struct hlist_node **diri_node = NULL;
 	struct hlist_node **file_dir_node = NULL;
-	struct hlist_node **file_pkg_node = NULL;
+	struct hlist_node **file_diri_node = NULL;
 
 	char buf[1024];
 	apk_blob_t l, r;
-	int n, field;
+	int n, field, ret;
 
+	ret = -1;
 	r = APK_BLOB_PTR_LEN(buf, 0);
 	while (1) {
 		n = is->read(is, &r.ptr[r.len], sizeof(buf) - r.len);
@@ -305,9 +313,10 @@ static int apk_db_index_read(struct apk_database *db, struct apk_istream *is, in
 			/* If no package, create new */
 			if (pkg == NULL) {
 				pkg = apk_pkg_new();
-				dir = NULL;
+				diri = NULL;
+				diri_node = &pkg->owned_dirs.first;
 				file_dir_node = NULL;
-				file_pkg_node = hlist_tail_ptr(&pkg->owned_files);
+				file_diri_node = NULL;
 			}
 
 			/* Standard index line? */
@@ -326,25 +335,28 @@ static int apk_db_index_read(struct apk_database *db, struct apk_istream *is, in
 					apk_error("FDB directory entry before package entry");
 					return -1;
 				}
-				dir = apk_db_dir_get(db, l);
-				file_dir_node = hlist_tail_ptr(&dir->files);
+				diri = apk_db_diri_new(db, pkg, l, diri_node);
+				diri_node = &diri->pkg_dirs_list.next;
+				file_dir_node = hlist_tail_ptr(&diri->dir->files);
+				file_diri_node = &diri->owned_files.first;
 				break;
 			case 'M':
-				if (dir == NULL) {
+				if (diri == NULL) {
 					apk_error("FDB directory metadata entry before directory entry");
 					return -1;
 				}
-				sscanf(l.ptr, "%d:%d:%o", &dir->uid, &dir->gid, &dir->mode);
+				sscanf(l.ptr, "%d:%d:%o",
+				       &diri->uid, &diri->gid, &diri->mode);
 				break;
 			case 'R':
-				if (dir == NULL) {
+				if (diri == NULL) {
 					apk_error("FDB file entry before directory entry");
 					return -1;
 				}
-				file = apk_db_file_new(dir, l, file_dir_node);
-				apk_db_file_set_owner(db, file, pkg, FALSE, file_pkg_node);
+				file = apk_db_file_new(diri->dir, l, file_dir_node);
 				file_dir_node = &file->dir_files_list.next;
-				file_pkg_node = &file->pkg_files_list.next;
+				apk_db_file_set_owner(db, file, diri, file_diri_node);
+				file_diri_node = &file->diri_files_list.next;
 				break;
 			case 'Z':
 				if (file == NULL) {
@@ -365,52 +377,48 @@ static int apk_db_index_read(struct apk_database *db, struct apk_istream *is, in
 		memcpy(&buf[0], r.ptr, r.len);
 		r = APK_BLOB_PTR_LEN(buf, r.len);
 	}
+	ret = 0;
 
-	return 0;
+	return ret;
 }
 
 static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 {
 	struct apk_package *pkg;
-	struct apk_db_dir *dir;
+	struct apk_db_dir_instance *diri;
 	struct apk_db_file *file;
-	struct hlist_node *c2;
+	struct hlist_node *c1, *c2;
 	char buf[1024];
 	apk_blob_t blob;
-	int n;
+	int n = 0;
 
 	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
 		blob = apk_pkg_format_index_entry(pkg, sizeof(buf), buf);
 		if (blob.ptr)
 			os->write(os, blob.ptr, blob.len - 1);
 
-		dir = NULL;
-		hlist_for_each_entry(file, c2, &pkg->owned_files, pkg_files_list) {
-			if (file->owner == NULL)
-				continue;
-
-			n = 0;
-			if (dir != file->dir) {
-				dir = file->dir;
-				n += snprintf(&buf[n], sizeof(buf)-n,
-					      "F:%s\n"
-					      "M:%d:%d:%o\n",
-					      dir->dirname,
-					      dir->uid, dir->gid, dir->mode);
-			}
-
+		hlist_for_each_entry(diri, c1, &pkg->owned_dirs, pkg_dirs_list) {
 			n += snprintf(&buf[n], sizeof(buf)-n,
-				      "R:%s\n",
-				      file->filename);
-			if (csum_valid(file->csum)) {
-				n += snprintf(&buf[n], sizeof(buf)-n, "Z:");
-				n += apk_hexdump_format(sizeof(buf)-n, &buf[n],
-							APK_BLOB_BUF(file->csum));
-				n += snprintf(&buf[n], sizeof(buf)-n, "\n");
-			}
+				      "F:%s\n"
+				      "M:%d:%d:%o\n",
+				      diri->dir->dirname,
+				      diri->uid, diri->gid, diri->mode);
 
-			if (os->write(os, buf, n) != n)
-				return -1;
+			hlist_for_each_entry(file, c2, &diri->owned_files, diri_files_list) {
+				n += snprintf(&buf[n], sizeof(buf)-n,
+					      "R:%s\n",
+					      file->filename);
+				if (csum_valid(file->csum)) {
+					n += snprintf(&buf[n], sizeof(buf)-n, "Z:");
+					n += apk_hexdump_format(sizeof(buf)-n, &buf[n],
+								APK_BLOB_BUF(file->csum));
+					n += snprintf(&buf[n], sizeof(buf)-n, "\n");
+				}
+
+				if (os->write(os, buf, n) != n)
+					return -1;
+				n = 0;
+			}
 		}
 		os->write(os, "\n", 1);
 	}
@@ -721,9 +729,9 @@ static int apk_db_install_archive_entry(void *_ctx,
 {
 	struct install_ctx *ctx = (struct install_ctx *) _ctx;
 	struct apk_database *db = ctx->db;
-	struct apk_package *pkg = ctx->pkg;
-	apk_blob_t name = APK_BLOB_STR(ae->name);
-	struct apk_db_dir *dir;
+	struct apk_package *pkg = ctx->pkg, *opkg;
+	apk_blob_t name = APK_BLOB_STR(ae->name), bdir, bfile;
+	struct apk_db_dir_instance *diri = ctx->diri;
 	struct apk_db_file *file;
 	struct apk_file_info fi;
 	char alt_name[PATH_MAX];
@@ -767,30 +775,59 @@ static int apk_db_install_archive_entry(void *_ctx,
 	}
 
 	/* Installable entry */
-	if (ctx->file_pkg_node == NULL)
-		ctx->file_pkg_node = hlist_tail_ptr(&pkg->owned_files);
-
 	if (!S_ISDIR(ae->mode)) {
-		file = apk_db_file_get(db, name, ctx);
-		if (file == NULL)
-			return -1;
+		if (!apk_blob_rsplit(name, '/', &bdir, &bfile))
+			return 0;
 
-		if (file->owner != NULL &&
-		    file->owner->name != pkg->name &&
-		    strcmp(file->owner->name->name, "busybox") != 0) {
-			apk_error("%s: Trying to overwrite %s owned by %s.\n",
-				  pkg->name->name, ae->name,
-				  file->owner->name->name);
+		if (bfile.len > 6 && memcmp(bfile.ptr, ".keep_", 6) == 0)
+			return 0;
+
+		r = strlen(diri->dir->dirname);
+		r = strlen(bdir.ptr);
+		r = 0;
+
+		/* Make sure the file is part of the cached directory tree */
+		if (diri == NULL ||
+		    strncmp(diri->dir->dirname, bdir.ptr, bdir.len) != 0 ||
+		    diri->dir->dirname[bdir.len] != 0) {
+			struct hlist_node *n;
+
+			hlist_for_each_entry(diri, n, &pkg->owned_dirs, pkg_dirs_list) {
+				if (strncmp(diri->dir->dirname, bdir.ptr, bdir.len) == 0 &&
+				    diri->dir->dirname[bdir.len] == 0)
+					break;
+			}
+			if (diri == NULL) {
+				apk_error("%s: File '%*s' entry without directory entry.\n",
+					  pkg->name->name, name.len, name.ptr);
+				return -1;
+			}
+			ctx->diri = diri;
+		}
+
+		file = apk_db_file_get(db, name, ctx);
+		if (file == NULL) {
+			apk_error("%s: Failed to create fdb entry for '%*s'\n",
+				  pkg->name->name, name.len, name.ptr);
 			return -1;
 		}
 
-		apk_db_file_set_owner(db, file, pkg, TRUE, ctx->file_pkg_node);
-		ctx->file_pkg_node = &file->pkg_files_list.next;
+		if (file->diri != NULL) {
+			opkg = file->diri->pkg;
+			if (opkg->name != pkg->name &&
+			    strcmp(opkg->name->name, "busybox") != 0) {
+				apk_error("%s: Trying to overwrite %s owned by %s.\n",
+					  pkg->name->name, ae->name, opkg->name->name);
+				return -1;
+			}
+		}
 
-		if (strncmp(file->filename, ".keep_", 6) == 0)
-			return 0;
+		if (ctx->file_diri_node == NULL)
+			ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
+		apk_db_file_set_owner(db, file, diri, ctx->file_diri_node);
+		ctx->file_diri_node = &file->diri_files_list.next;
 
-		if ((file->dir->flags & APK_DBDIRF_PROTECTED) &&
+		if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
 		    csum_valid(file->csum) &&
 		    apk_file_get_info(ae->name, &fi) == 0 &&
 		    memcmp(file->csum, fi.csum, sizeof(csum_t)) != 0) {
@@ -798,7 +835,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			 * Extract to separate place */
 			snprintf(alt_name, sizeof(alt_name),
 				 "%s/%s.apk-new",
-				 dir->dirname, file->filename);
+				 diri->dir->dirname, file->filename);
 			r = apk_archive_entry_extract(ae, is, alt_name);
 		} else {
 			r = apk_archive_entry_extract(ae, is, NULL);
@@ -807,10 +844,19 @@ static int apk_db_install_archive_entry(void *_ctx,
 	} else {
 		if (name.ptr[name.len-1] == '/')
 			name.len--;
-		dir = apk_db_dir_get(db, name);
-		dir->mode = ae->mode & 07777;
-		dir->uid = ae->uid;
-		dir->gid = ae->gid;
+
+		printf("%s: %*s\n", pkg->name->name, name.len, name.ptr);
+
+		if (ctx->diri_node == NULL)
+			ctx->diri_node = hlist_tail_ptr(&pkg->owned_dirs);
+		ctx->diri = diri = apk_db_diri_new(db, pkg, name,
+						   ctx->diri_node);
+		ctx->diri_node = &diri->pkg_dirs_list.next;
+		ctx->file_dir_node = NULL;
+		ctx->file_diri_node = NULL;
+
+		apk_db_diri_set(diri, ae->mode & 0777, ae->uid, ae->gid);
+		apk_db_diri_create(diri);
 	}
 
 	return r;
@@ -819,21 +865,24 @@ static int apk_db_install_archive_entry(void *_ctx,
 static void apk_db_purge_pkg(struct apk_database *db,
 			     struct apk_package *pkg)
 {
+	struct apk_db_dir_instance *diri;
 	struct apk_db_file *file;
-	struct hlist_node *c, *n;
-	char fn[1024];
+	struct hlist_node *dc, *dn, *fc, *fn;
+	char name[1024];
 
-	hlist_for_each_entry_safe(file, c, n, &pkg->owned_files, pkg_files_list) {
-		file->owner = NULL;
-		snprintf(fn, sizeof(fn), "%s/%s",
-			 file->dir->dirname,
-			 file->filename);
-		unlink(fn);
+	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
+		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
+			file->diri = NULL;
+			snprintf(name, sizeof(name), "%s/%s",
+				 diri->dir->dirname,
+				 file->filename);
+			unlink(name);
+			__hlist_del(fc, &diri->owned_files.first);
 
-		apk_db_dir_unref(db, file->dir);
-		__hlist_del(c, &pkg->owned_files.first);
-
-		db->installed.stats.files--;
+			db->installed.stats.files--;
+		}
+		apk_db_dir_put(db, diri->dir);
+		__hlist_del(dc, &pkg->owned_dirs.first);
 	}
 	apk_pkg_set_state(db, pkg, APK_STATE_NO_INSTALL);
 }
