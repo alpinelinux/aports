@@ -30,7 +30,7 @@ void apk_log(const char *prefix, const char *format, ...)
 	va_list va;
 
 	if (prefix != NULL)
-		fprintf(stderr, prefix);
+		fprintf(stderr, "%s", prefix);
 	va_start(va, format);
 	vfprintf(stderr, format, va);
 	va_end(va);
