@@ -35,7 +35,7 @@ int apk_hash_foreach(struct apk_hash *h, apk_hash_enumerator_f e, void *ctx)
 	for (i = 0; i < h->buckets->num; i++) {
 		hlist_for_each_safe(pos, n, &h->buckets->item[i]) {
 			r = e(((void *) pos) - offset, ctx);
-			if (r != 0)
+			if (r != 0 && ctx != NULL)
 				return r;
 		}
 	}

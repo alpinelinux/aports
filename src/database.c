@@ -102,6 +102,7 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 void apk_name_free(struct apk_name *name)
 {
 	free(name->name);
+	free(name->pkgs);
 	free(name);
 }
 
@@ -197,6 +198,13 @@ static void apk_db_diri_create(struct apk_db_dir_instance *diri)
 	}
 }
 
+static void apk_db_diri_free(struct apk_database *db,
+			     struct apk_db_dir_instance *diri)
+{
+	apk_db_dir_put(db, diri->dir);
+	free(diri);
+}
+
 static struct apk_db_file *apk_db_file_new(struct apk_db_dir *dir,
 					   apk_blob_t name,
 					   struct hlist_node **after)
@@ -247,6 +255,11 @@ static struct apk_db_file *apk_db_file_get(struct apk_database *db,
 	ctx->file_dir_node = &file->dir_files_list.next;
 
 	return file;
+}
+
+static void apk_db_file_free(struct apk_db_file *file)
+{
+	free(file);
 }
 
 static struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)
@@ -623,6 +636,28 @@ static int apk_db_write_config(struct apk_database *db)
 
 void apk_db_close(struct apk_database *db)
 {
+	struct apk_package *pkg;
+	struct apk_db_dir_instance *diri;
+	struct apk_db_file *file;
+	struct hlist_node *dc, *dn, *fc, *fn;
+	int i;
+
+	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
+		hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
+			hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list)
+				apk_db_file_free(file);
+			apk_db_diri_free(db, diri);
+		}
+	}
+
+
+	for (i = 0; i < db->num_repos; i++)
+		free(db->repos[i].url);
+	for (i = 0; i < db->protected_paths->num; i++)
+		free(db->protected_paths->item[i]);
+	free(db->protected_paths);
+	free(db->world);
+
 	apk_hash_free(&db->available.names);
 	apk_hash_free(&db->available.packages);
 	apk_hash_free(&db->installed.dirs);

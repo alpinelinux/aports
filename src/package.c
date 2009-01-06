@@ -380,6 +380,8 @@ void apk_pkg_free(struct apk_package *pkg)
 	hlist_for_each_entry_safe(script, c, n, &pkg->scripts, script_list)
 		free(script);
 
+	if (pkg->depends)
+		free(pkg->depends);
 	if (pkg->version)
 		free(pkg->version);
 	if (pkg->url)
