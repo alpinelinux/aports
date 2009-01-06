@@ -1,7 +1,7 @@
 
 PACKAGE=abuild
-VERSION=0.3
-DISTFILES=Makefile abuild abuild.conf APKBUILD.proto
+VERSION:=$(shell  awk -F= '$$1 == "abuild_ver" {print $$2}' abuild)
+DISTFILES=Makefile abuild abuild.conf APKBUILD.proto buildrepo
 
 prefix ?= /usr
 sysconfdir ?= /etc
@@ -17,7 +17,7 @@ help:
 install: abuild abuild.conf APKBUILD.proto functions.sh
 	mkdir -p $(DESTDIR)/$(prefix)/bin $(DESTDIR)/$(sysconfdir) \
 		$(DESTDIR)/$(datadir)
-	cp abuild $(DESTDIR)/$(prefix)/bin/
+	cp abuild buildrepo $(DESTDIR)/$(prefix)/bin/
 	cp abuild.conf $(DESTDIR)/$(sysconfdir)/
 	cp APKBUILD.proto $(DESTDIR)/$(prefix)/share/abuild
 	cp functions.sh $(DESTDIR)/$(datadir)/
