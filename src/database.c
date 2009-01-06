@@ -113,7 +113,6 @@ static void apk_db_dir_put(struct apk_database *db, struct apk_db_dir *dir)
 		return;
 
 	db->installed.stats.dirs--;
-	rmdir(dir->dirname);
 
 	if (dir->parent != NULL)
 		apk_db_dir_put(db, dir->parent);
@@ -190,11 +189,18 @@ static void apk_db_diri_set(struct apk_db_dir_instance *diri, mode_t mode,
 	diri->gid = gid;
 }
 
-static void apk_db_diri_create(struct apk_db_dir_instance *diri)
+static void apk_db_diri_mkdir(struct apk_db_dir_instance *diri)
 {
 	if (diri->dir->refs == 1) {
 		mkdir(diri->dir->dirname, diri->mode);
 		chown(diri->dir->dirname, diri->uid, diri->gid);
+	}
+}
+
+static void apk_db_diri_rmdir(struct apk_db_dir_instance *diri)
+{
+	if (diri->dir->refs == 1) {
+		rmdir(diri->dir->dirname);
 	}
 }
 
@@ -889,7 +895,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 		ctx->file_diri_node = NULL;
 
 		apk_db_diri_set(diri, ae->mode & 0777, ae->uid, ae->gid);
-		apk_db_diri_create(diri);
+		apk_db_diri_mkdir(diri);
 	}
 
 	return r;
@@ -914,6 +920,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 
 			db->installed.stats.files--;
 		}
+		apk_db_diri_rmdir(diri);
 		apk_db_dir_put(db, diri->dir);
 		__hlist_del(dc, &pkg->owned_dirs.first);
 	}
