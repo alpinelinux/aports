@@ -880,8 +880,6 @@ static int apk_db_install_archive_entry(void *_ctx,
 		if (name.ptr[name.len-1] == '/')
 			name.len--;
 
-		printf("%s: %*s\n", pkg->name->name, name.len, name.ptr);
-
 		if (ctx->diri_node == NULL)
 			ctx->diri_node = hlist_tail_ptr(&pkg->owned_dirs);
 		ctx->diri = diri = apk_db_diri_new(db, pkg, name,
