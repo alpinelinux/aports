@@ -179,7 +179,14 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 int apk_parse_tar_gz(struct apk_bstream *bs, apk_archive_entry_parser parser,
 		     void *ctx)
 {
-	return apk_parse_tar(apk_bstream_gunzip(bs), parser, ctx);
+	struct apk_istream *is;
+	int rc;
+
+	is = apk_bstream_gunzip(bs, FALSE);
+	rc = apk_parse_tar(is, parser, ctx);
+	is->close(is);
+
+	return rc;
 }
 
 int apk_archive_entry_extract(const struct apk_file_info *ae,

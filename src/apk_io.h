@@ -43,7 +43,7 @@ struct apk_ostream {
 	void (*close)(void *stream);
 };
 
-struct apk_istream *apk_bstream_gunzip(struct apk_bstream *);
+struct apk_istream *apk_bstream_gunzip(struct apk_bstream *, int);
 struct apk_ostream *apk_ostream_gzip(struct apk_ostream *);
 
 struct apk_istream *apk_istream_from_fd(int fd);

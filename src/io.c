@@ -389,7 +389,7 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 
 struct apk_istream *apk_istream_from_file_gz(const char *file)
 {
-	return apk_bstream_gunzip(apk_bstream_from_file(file));
+	return apk_bstream_gunzip(apk_bstream_from_file(file), TRUE);
 }
 
 struct apk_fd_ostream {
