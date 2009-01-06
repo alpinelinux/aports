@@ -71,6 +71,9 @@ struct apk_istream *apk_bstream_gunzip(struct apk_bstream *bs)
 {
 	struct apk_gzip_istream *gis;
 
+	if (bs == NULL)
+		return NULL;
+
 	gis = malloc(sizeof(struct apk_gzip_istream));
 	if (gis == NULL)
 		return NULL;
