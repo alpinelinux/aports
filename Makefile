@@ -18,7 +18,9 @@ install: abuild abuild.conf APKBUILD.proto functions.sh
 	mkdir -p $(DESTDIR)/$(prefix)/bin $(DESTDIR)/$(sysconfdir) \
 		$(DESTDIR)/$(datadir)
 	cp abuild buildrepo $(DESTDIR)/$(prefix)/bin/
-	cp abuild.conf $(DESTDIR)/$(sysconfdir)/
+	if [ -z "$(DESTDIR)" ] && [ ! -f "/$(sysconfdir)"/abuild.conf ]; then\
+		cp abuild.conf $(DESTDIR)/$(sysconfdir)/; \
+	fi
 	cp APKBUILD.proto $(DESTDIR)/$(prefix)/share/abuild
 	cp functions.sh $(DESTDIR)/$(datadir)/
 
