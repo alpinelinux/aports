@@ -22,7 +22,7 @@
 
 const char *apk_root = "/";
 const char *apk_repository = NULL;
-int apk_quiet = 0;
+int apk_quiet = 0, apk_progress = 0;
 int apk_cwd_fd;
 
 void apk_log(const char *prefix, const char *format, ...)
@@ -73,6 +73,7 @@ int main(int argc, char **argv)
 		{"root", required_argument, NULL, 'Q' },
 		{"repository", required_argument, NULL, 'X' },
 		{"quiet", no_argument, NULL, 'q' },
+		{"progress", no_argument, NULL, 0x100 },
 		{0, 0, 0, 0},
 	};
 	struct apk_applet *applet = NULL;
@@ -102,6 +103,9 @@ int main(int argc, char **argv)
 			break;
 		case 'q':
 			apk_quiet = 1;
+			break;
+		case 0x100:
+			apk_progress = 1;
 			break;
 		default:
 			return usage();

@@ -275,7 +275,6 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
 	struct apk_database *db = ri->db;
 	struct apk_package *pkg = ri->pkg;
-	const int bsize = 4 * 1024;
 	apk_blob_t name, version;
 	char *slash;
 	int i;
@@ -321,7 +320,7 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 		    apk_script_type(slash+1) == APK_SCRIPT_PRE_INSTALL)
 			ri->has_install = 1;
 	} else {
-		pkg->installed_size += (ae->size + bsize - 1) & ~(bsize - 1);
+		pkg->installed_size += apk_calc_installed_size(ae->size);
 	}
 
 	return 0;

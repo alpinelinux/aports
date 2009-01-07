@@ -50,13 +50,32 @@ extern csum_t bad_checksum;
 #define csum_valid(buf)			memcmp(buf, bad_checksum, sizeof(csum_t))
 #endif
 
-extern int apk_cwd_fd, apk_quiet;
+extern int apk_cwd_fd, apk_quiet, apk_progress;
 
 #define apk_error(args...)	apk_log("ERROR: ", args);
 #define apk_warning(args...)	if (!apk_quiet) { apk_log("WARNING: ", args); }
 #define apk_message(args...)	if (!apk_quiet) { apk_log(NULL, args); }
 
 void apk_log(const char *prefix, const char *format, ...);
+
+static inline size_t apk_calc_installed_size(size_t size)
+{
+	const size_t bsize = 4 * 1024;
+
+	return (size + bsize - 1) & ~(bsize - 1);
+}
+static inline size_t muldiv(size_t a, size_t b, size_t c)
+{
+	unsigned long long tmp;
+	tmp = a;
+	tmp *= b;
+	tmp /= c;
+	return (size_t) tmp;
+}
+
+typedef void (*apk_progress_cb)(void *cb_ctx, size_t);
+
+#define APK_PROGRESS_SCALE 0x100
 
 #define APK_ARRAY(array_type_name, elem_type_name)			\
 	struct array_type_name {					\

@@ -108,7 +108,8 @@ size_t apk_istream_skip(struct apk_istream *is, size_t size)
 	return done;
 }
 
-size_t apk_istream_splice(void *stream, int fd, size_t size)
+size_t apk_istream_splice(void *stream, int fd, size_t size,
+			  apk_progress_cb cb, void *cb_ctx)
 {
 	struct apk_istream *is = (struct apk_istream *) stream;
 	unsigned char *buf;
@@ -123,6 +124,9 @@ size_t apk_istream_splice(void *stream, int fd, size_t size)
 		return -1;
 
 	while (done < size) {
+		if (done != 0 && cb != NULL)
+			cb(cb_ctx, muldiv(APK_PROGRESS_SCALE, done, size));
+
 		togo = size - done;
 		if (togo > bufsz)
 			togo = bufsz;

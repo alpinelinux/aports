@@ -19,8 +19,15 @@
 #define APK_STATE_INSTALL			2
 #define APK_STATE_NO_INSTALL			3
 
+struct apk_change {
+	struct list_head change_list;
+	struct apk_package *oldpkg;
+	struct apk_package *newpkg;
+};
+
 struct apk_state {
 	int refs;
+	struct list_head change_list_head;
 	unsigned char bitarray[];
 };
 
@@ -39,9 +46,9 @@ int apk_state_commit(struct apk_state *state, struct apk_database *db);
 
 int apk_state_satisfy_deps(struct apk_state *state,
 			   struct apk_dependency_array *deps);
+int apk_state_purge_unneeded(struct apk_state *state,
+			     struct apk_database *db);
 
-void apk_state_pkg_set(struct apk_state *state,
-		       struct apk_package *pkg);
 int apk_state_pkg_install(struct apk_state *state,
 			  struct apk_package *pkg);
 int apk_state_pkg_is_installed(struct apk_state *state,

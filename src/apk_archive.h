@@ -27,6 +27,7 @@ int apk_parse_tar_gz(struct apk_bstream *, apk_archive_entry_parser parser, void
 
 int apk_archive_entry_extract(const struct apk_file_info *ae,
 			      struct apk_istream *is,
-			      const char *to);
+			      const char *to,
+			      apk_progress_cb cb, void *cb_ctx);
 
 #endif

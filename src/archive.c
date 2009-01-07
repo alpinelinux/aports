@@ -191,7 +191,8 @@ int apk_parse_tar_gz(struct apk_bstream *bs, apk_archive_entry_parser parser,
 
 int apk_archive_entry_extract(const struct apk_file_info *ae,
 			      struct apk_istream *is,
-			      const char *fn)
+			      const char *fn, apk_progress_cb cb,
+			      void *cb_ctx)
 {
 	int r = -1, fd;
 
@@ -214,7 +215,8 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 				r = -1;
 				break;
 			}
-			if (apk_istream_splice(is, fd, ae->size) == ae->size)
+			if (apk_istream_splice(is, fd, ae->size, cb, cb_ctx)
+			    == ae->size)
 				r = 0;
 			close(fd);
 		} else {

@@ -109,6 +109,7 @@ int apk_db_recalculate_and_commit(struct apk_database *db);
 
 int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *oldpkg,
-		       struct apk_package *newpkg);
+		       struct apk_package *newpkg,
+		       apk_progress_cb cb, void *cb_ctx);
 
 #endif

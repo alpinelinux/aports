@@ -30,6 +30,11 @@ struct install_ctx {
 	int script;
 	struct apk_db_dir_instance *diri;
 
+	apk_progress_cb cb;
+	void *cb_ctx;
+	size_t installed_size;
+	size_t current_file_size;
+
 	struct hlist_node **diri_node;
 	struct hlist_node **file_dir_node;
 	struct hlist_node **file_diri_node;
@@ -174,9 +179,11 @@ static struct apk_db_dir_instance *apk_db_diri_new(struct apk_database *db,
 	struct apk_db_dir_instance *diri;
 
 	diri = calloc(1, sizeof(struct apk_db_dir_instance));
-	hlist_add_after(&diri->pkg_dirs_list, after);
-	diri->dir = apk_db_dir_get_db(db, name);
-	diri->pkg = pkg;
+	if (diri != NULL) {
+		hlist_add_after(&diri->pkg_dirs_list, after);
+		diri->dir = apk_db_dir_get_db(db, name);
+		diri->pkg = pkg;
+	}
 
 	return diri;
 }
@@ -438,6 +445,9 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 					return -1;
 				n = 0;
 			}
+			if (n != 0 && os->write(os, buf, n) != n)
+				return -1;
+			n = 0;
 		}
 		os->write(os, "\n", 1);
 	}
@@ -745,6 +755,12 @@ int apk_db_recalculate_and_commit(struct apk_database *db)
 	state = apk_state_new(db);
 	r = apk_state_satisfy_deps(state, db->world);
 	if (r == 0) {
+		r = apk_state_purge_unneeded(state, db);
+		if (r != 0) {
+			apk_error("Failed to clean up state");
+			return r;
+		}
+
 		r = apk_state_commit(state, db);
 		if (r != 0) {
 			apk_error("Failed to commit changes");
@@ -762,6 +778,21 @@ int apk_db_recalculate_and_commit(struct apk_database *db)
 	apk_state_unref(state);
 
 	return r;
+}
+
+static void extract_cb(void *_ctx, size_t progress)
+{
+	struct install_ctx *ctx = (struct install_ctx *) _ctx;
+
+	if (ctx->cb) {
+		size_t size = ctx->installed_size;
+
+		size += muldiv(progress, ctx->current_file_size, APK_PROGRESS_SCALE);
+		if (size > ctx->pkg->installed_size)
+			size = ctx->pkg->installed_size;
+
+		ctx->cb(ctx->cb_ctx, muldiv(APK_PROGRESS_SCALE, size, ctx->pkg->installed_size));
+	}
 }
 
 static int apk_db_install_archive_entry(void *_ctx,
@@ -815,7 +846,16 @@ static int apk_db_install_archive_entry(void *_ctx,
 		return r;
 	}
 
+	/* Show progress */
+	if (ctx->cb) {
+		size_t size = ctx->installed_size;
+		if (size > pkg->installed_size)
+			size = pkg->installed_size;
+		ctx->cb(ctx->cb_ctx, muldiv(APK_PROGRESS_SCALE, size, pkg->installed_size));
+	}
+
 	/* Installable entry */
+	ctx->current_file_size = apk_calc_installed_size(ae->size);
 	if (!S_ISDIR(ae->mode)) {
 		if (!apk_blob_rsplit(name, '/', &bdir, &bfile))
 			return 0;
@@ -877,9 +917,11 @@ static int apk_db_install_archive_entry(void *_ctx,
 			snprintf(alt_name, sizeof(alt_name),
 				 "%s/%s.apk-new",
 				 diri->dir->dirname, file->filename);
-			r = apk_archive_entry_extract(ae, is, alt_name);
+			r = apk_archive_entry_extract(ae, is, alt_name,
+						      extract_cb, ctx);
 		} else {
-			r = apk_archive_entry_extract(ae, is, NULL);
+			r = apk_archive_entry_extract(ae, is, NULL,
+						      extract_cb, ctx);
 		}
 		memcpy(file->csum, ae->csum, sizeof(csum_t));
 	} else {
@@ -897,6 +939,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 		apk_db_diri_set(diri, ae->mode & 0777, ae->uid, ae->gid);
 		apk_db_diri_mkdir(diri);
 	}
+	ctx->installed_size += ctx->current_file_size;
 
 	return r;
 }
@@ -929,7 +972,8 @@ static void apk_db_purge_pkg(struct apk_database *db,
 
 int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *oldpkg,
-		       struct apk_package *newpkg)
+		       struct apk_package *newpkg,
+		       apk_progress_cb cb, void *cb_ctx)
 {
 	struct apk_bstream *bs;
 	struct install_ctx ctx;
@@ -975,6 +1019,8 @@ int apk_db_install_pkg(struct apk_database *db,
 		.pkg = newpkg,
 		.script = (oldpkg == NULL) ?
 			APK_SCRIPT_PRE_INSTALL : APK_SCRIPT_PRE_UPGRADE,
+		.cb = cb,
+		.cb_ctx = cb_ctx,
 	};
 	if (apk_parse_tar_gz(bs, apk_db_install_archive_entry, &ctx) != 0)
 		goto err_close;
@@ -993,8 +1039,6 @@ int apk_db_install_pkg(struct apk_database *db,
 	if (r != 0) {
 		apk_error("%s-%s: Failed to execute post-install/upgrade script",
 			  newpkg->name->name, newpkg->version);
-	} else if (apk_quiet) {
-		write(STDOUT_FILENO, ".", 1);
 	}
 	return r;
 err_close:
