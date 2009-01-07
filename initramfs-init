@@ -1,0 +1,128 @@
+#!/bin/ash
+
+VERSION=1.9.1-pre0
+NEWROOT=/newroot
+SINGLEMODE=no
+
+# basic environment
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# basic mounts
+mount -t proc -o noexec,nosuid,nodev proc /proc
+mount -t sysfs -o noexec,nosuid,nodev sysfs /sys
+
+# some helpers
+ebegin() {
+	echo -n " * $*: "
+}
+eend() {
+	local msg
+	if [ "$1" = 0 ] || [ $# -lt 1 ] ; then
+		echo "ok."
+	else
+		shift
+		echo "failed. $*"
+		echo "Emergency recovery shell started."
+		exec /bin/busybox sh
+	fi
+}
+
+scan_drivers() {
+	if [ "$AUTODETECT" != no ] ; then
+		find /sys -name modalias | xargs sort | while read a ; do
+			modprobe $a 2>/dev/null \
+				|| echo $a >> /tmp/hwdrivers.failed
+		done
+	fi
+}
+
+# gotta start from somewhere :)
+echo "Starting Alpine $VERSION"
+
+# read the kernel options
+for i in `cat /proc/cmdline` ; do
+	case $i in
+		s|single|1)
+			SINGLEMODE=yes ;;
+		modules=*)
+			MODULES="`echo ${i#modules=} | tr ',' ' '`";;
+		noautodetect)
+			AUTODETECT=no;;
+		*=*)    eval KOPT_$i ;;
+		*)      eval KOPT_$i=yes ;;
+	esac
+done
+
+ALPINE_DEV=${KOPT_alpine_dev%%:*}
+ALPINE_MNT=/media/$ALPINE_DEV
+
+# hide kernel messages
+dmesg -n 1
+
+# setup /dev
+ebegin "Starting mdev"
+mount -t tmpfs -o exec,nosuid,mode=0755 mdev /dev
+mknod -m 666 /dev/null c 1 3
+ln -s sr0 /dev/cdrom
+echo "/sbin/mdev" > /proc/sys/kernel/hotplug
+mdev -s
+RC=$?
+[ -d /dev/pts ] || mkdir -m 755 /dev/pts
+[ -c /dev/ptmx ] || mknod -m 666 /dev/ptmx c 5 2
+mount -t devpts -o gid=5,mode=0620,noexec,nosuid devpts /dev/pts
+[ -d /dev/shm ] || mkdir /dev/shm
+mount -t tmpfs -o nodev,nosuid,noexec shm /dev/shm
+eend $RC
+
+# load available drivers to get access to modloop media
+ebegin "Loading boot drivers"
+[ "$MODULES" ] && modprobe $MODULES 2> /dev/null
+scan_drivers
+scan_drivers
+eend 0
+
+# locate boot media and mount it
+ebegin "Mounting boot media"
+mount $ALPINE_MNT >/dev/null 2>&1
+eend $?
+ebegin "Mounting loopback device for kernel modules"
+modprobe loop
+mount -o loop,ro -t cramfs /media/$ALPINE_DEV/$(dirname ${KOPT_BOOT_IMAGE:-""})/modloop.cmg /.modloop
+rc=$?
+if [ "$rc" = 0 ]; then
+	rm -rf /lib/modules
+	ln -sf /.modloop/modules /lib
+fi
+if [ -d $ALPINE_MNT/firmware ]; then
+	mkdir -p /lib/firmware
+	cp -a $ALPINE_MNT/firmware/* /lib/firmware/
+fi
+eend $?
+
+# early console?
+if [ "$SINGLEMODE" = "yes" ]; then
+	echo "Entering single mode. Type 'exit' to continue booting."
+	sh
+fi
+
+# more drivers
+ebegin "Loading hardware drivers"
+scan_drivers
+eend 0
+
+# install new root
+ebegin "Installing packets to root filesystem"
+mount -t tmpfs -o size=50M tmpfs $NEWROOT
+apk create --root /newroot
+apk add --root /newroot --repository /media/cdrom/apks
+eend $?
+
+# switch over to new root
+cat /proc/mounts | while read DEV DIR TYPE OPTS ; do
+	if [ "$DIR" != "/" -a "$DIR" != "$NEWROOT" -a -d "$DIR" ]; then
+		mkdir -p $NEWROOT/$DIR
+		mount -o move $DIR $NEWROOT/$DIR
+	fi
+done
+sync
+exec /bin/busybox switch_root $NEWROOT /sbin/init $KOPT_init_args || exec /bin/busybox sh
