@@ -535,8 +535,8 @@ apk_blob_t apk_pkg_format_index_entry(struct apk_package *info, int size,
 	n += snprintf(&buf[n], size-n,
 		      "P:%s\n"
 		      "V:%s\n"
-		      "S:%u\n"
-		      "I:%u\n"
+		      "S:%zu\n"
+		      "I:%zu\n"
 		      "T:%s\n"
 		      "U:%s\n"
 		      "L:%s\n",
