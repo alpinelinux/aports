@@ -730,6 +730,10 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	char tmp[256];
 	int r;
 
+	if (repository.ptr == NULL || *repository.ptr == '\0' 
+			|| *repository.ptr == '#')
+		return 0;
+
 	if (db->num_repos >= APK_MAX_REPOS)
 		return -1;
 
