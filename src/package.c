@@ -124,12 +124,12 @@ void apk_deps_parse(struct apk_database *db,
 
 	start = blob.ptr;
 	for (i = 0; i < blob.len; i++) {
-		if (blob.ptr[i] != ',' && blob.ptr[i] != '\n')
+		if (blob.ptr[i] != ' ' && blob.ptr[i] != '\n')
 			continue;
 
 		parse_depend(db, depends,
 			     APK_BLOB_PTR_PTR(start, &blob.ptr[i-1]));
-		start = &blob.ptr[i+1];
+		start = &blob.ptr[i];
 	}
 	parse_depend(db, depends,
 		     APK_BLOB_PTR_PTR(start, &blob.ptr[i-1]));
@@ -145,7 +145,7 @@ int apk_deps_format(char *buf, int size,
 
 	for (i = 0; i < depends->num - 1; i++)
 		n += snprintf(&buf[n], size-n,
-			      "%s, ",
+			      "%s ",
 			      depends->item[i].name->name);
 	n += snprintf(&buf[n], size-n,
 		      "%s\n",
