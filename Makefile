@@ -24,6 +24,7 @@ CFLAGS?=-g -Werror -Wall -Wstrict-prototypes
 CFLAGS+=-D_GNU_SOURCE -std=gnu99 -DAPK_VERSION=\"$(FULL_VERSION)\"
 
 LDFLAGS?=-g
+LDFLAGS+=-nopie
 LIBS=/usr/lib/libz.a
 
 ifeq ($(STATIC),yes)
