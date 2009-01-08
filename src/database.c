@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <malloc.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "apk_defines.h"
 #include "apk_package.h"
@@ -576,6 +577,7 @@ static int add_protected_path(void *ctx, apk_blob_t blob)
 int apk_db_open(struct apk_database *db, const char *root)
 {
 	apk_blob_t blob;
+	const char *apk_repos = getenv("APK_REPOS");
 
 	memset(db, 0, sizeof(*db));
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
@@ -599,8 +601,9 @@ int apk_db_open(struct apk_database *db, const char *root)
 	if (apk_db_read_state(db) != 0)
 		return -1;
 
-	fchdir(db->root_fd);
-	blob = apk_blob_from_file("etc/apk/repositories");
+	if (apk_repos == NULL)
+		apk_repos="/etc/apk/repositories";
+	blob = apk_blob_from_file(apk_repos);
 	if (!APK_BLOB_IS_NULL(blob)) {
 		apk_blob_for_each_segment(blob, "\n", apk_db_add_repository, db);
 		free(blob.ptr);
