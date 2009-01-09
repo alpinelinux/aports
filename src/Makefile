@@ -26,6 +26,7 @@ apk_OBJS = \
 	del.o \
 	ver.o \
 	index.o \
+	info.o \
 	apk.o
 
 ALL_OBJS = $(apk_OBJS)
