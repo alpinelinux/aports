@@ -507,7 +507,10 @@ int apk_db_create(const char *root)
 	int fd;
 
 	fchdir(apk_cwd_fd);
-	chdir(root);
+	if (chdir(root) == -1) {
+		apk_error("%s: %s", root, strerror(errno));
+		return -1;
+	}
 
 	mkdir("tmp", 01777);
 	mkdir("dev", 0755);
