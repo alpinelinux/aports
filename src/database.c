@@ -502,8 +502,8 @@ static int apk_db_scriptdb_read(struct apk_database *db, struct apk_istream *is)
 
 int apk_db_create(const char *root)
 {
-	apk_blob_t deps = APK_BLOB_STR("busybox, alpine-baselayout, "
-				       "apk-tools, alpine-conf\n");
+	apk_blob_t deps = APK_BLOB_STR("busybox alpine-baselayout "
+				       "apk-tools alpine-conf\n");
 	int fd;
 
 	fchdir(apk_cwd_fd);
