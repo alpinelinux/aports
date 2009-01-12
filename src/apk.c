@@ -20,7 +20,7 @@
 #include "apk_defines.h"
 #include "apk_applet.h"
 
-const char *apk_root = "/";
+const char *apk_root;
 const char *apk_repository = NULL;
 int apk_quiet = 0, apk_progress = 0;
 int apk_cwd_fd;
@@ -114,6 +114,10 @@ int main(int argc, char **argv)
 
 	argc -= optind;
 	argv += optind;
+
+	apk_root = getenv("ROOT");
+	if (apk_root == NULL)
+		apk_root = "/";
 
 	if (applet == NULL) {
 		if (argc > 0)
