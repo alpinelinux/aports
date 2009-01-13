@@ -80,7 +80,7 @@ INITFS_MODDIR	:= $(INITFS_DIR)/lib/modules/$(KERNEL)
 INITFS_MODDIRSTAMP := $(DESTDIR)/stamp.initfs.modules
 
 INITFS_APKS	:= $(UCLIBC_APK) $(BUSYBOX_APK)
-INITFS_RAWBASEFILES  := etc/mdev.conf etc/passwd etc/group etc/fstab
+INITFS_RAWBASEFILES  := etc/mdev.conf etc/passwd etc/group etc/fstab etc/modules
 INITFS_BASEFILES     := $(addprefix $(INITFS_DIR)/, $(INITFS_RAWBASEFILES))
 
 $(INITFS_DIRSTAMP): $(INITFS_APKS)
@@ -88,8 +88,7 @@ $(INITFS_DIRSTAMP): $(INITFS_APKS)
 	@rm -rf $(INITFS_DIR)
 	@mkdir -p $(addprefix $(INITFS_DIR)/, \
 		dev proc sys sbin bin .modloop lib/modules \
-		media/cdrom media/floppy media/usb \
-		newroot/proc newroot/sys)
+		media/cdrom media/floppy media/usb newroot)
 	@for apk in $(INITFS_APKS) ; do \
 		tar -C $(INITFS_DIR) -xzf $$apk ; \
 	done
@@ -158,7 +157,7 @@ $(ISOLINUX_CFG):
 	@echo "default linux" >>$(ISOLINUX_CFG)
 	@echo "label linux" >>$(ISOLINUX_CFG)
 	@echo "	kernel /boot/vmlinuz" >>$(ISOLINUX_CFG)
-	@echo "	append initrd=/boot/initramfs.gz alpine_dev=cdrom quiet" >>$(ISOLINUX_CFG)
+	@echo "	append initrd=/boot/initramfs.gz alpine_dev=cdrom modules=floppy quiet" >>$(ISOLINUX_CFG)
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/vmlinuz
 ISO_APKS	:= $(ISO_DIR)/apks

@@ -1,4 +1,4 @@
-#!/bin/ash
+#!/bin/sh
 
 VERSION=1.9.1-pre0
 NEWROOT=/newroot
@@ -34,6 +34,22 @@ scan_drivers() {
 				|| echo $a >> /tmp/hwdrivers.failed
 		done
 	fi
+}
+
+find_ovl() {
+	local mnt="$1"
+	local ovl
+	local lines
+
+	# look for apkovl's on mounted media
+	ovl=$( ls -1 "$mnt"/*.apkovl.tar.gz* 2>/dev/null ) || return 1
+	lines=$(echo "$ovl" | wc -l)
+
+	if [ $lines -gt 1 ] ; then
+		echo "ERROR: More than one apkovl file was found on $(basename $mnt). None will be read." >&2
+		return 1
+	fi
+	echo "$ovl"
 }
 
 # gotta start from somewhere :)
@@ -74,9 +90,16 @@ mount -t devpts -o gid=5,mode=0620,noexec,nosuid devpts /dev/pts
 mount -t tmpfs -o nodev,nosuid,noexec shm /dev/shm
 eend $RC
 
+/bin/sh
 # load available drivers to get access to modloop media
 ebegin "Loading boot drivers"
 [ "$MODULES" ] && modprobe $MODULES 2> /dev/null
+if [ -f /etc/modules ] ; then
+	sed 's/\#.*//g' < /etc/modules |
+	while read module args; do
+		modprobe -q $module $args
+	done
+fi
 scan_drivers
 scan_drivers
 eend 0
@@ -110,11 +133,27 @@ ebegin "Loading hardware drivers"
 scan_drivers
 eend 0
 
+# look for apkovl
+for i in usb floppy cdrom; do
+	mount /media/$i 2>/dev/null || continue
+	ovl=$(find_ovl /media/$i)
+	[ -f "$ovl" ] && break
+	umount /media/$i 2>/dev/null
+done
+
+if [ -f "$ovl" ]; then
+	ebegin "Loading user settings from $ovl"
+	tar -C $NEWROOT -zxf "$ovl"
+	eend $?
+	umount /media/$i 2>/dev/null
+	pkgs=$(sed 's/\#.*//' $NEWROOT/etc/lbu/packages.list 2>/dev/null)
+fi
+
 # install new root
 ebegin "Installing packages to root filesystem"
 mount -t tmpfs -o size=50M tmpfs $NEWROOT
 apk create --root /newroot
-apk add --root /newroot --repository /media/cdrom/apks --quiet --progress
+apk add --root /newroot --repository /media/cdrom/apks --quiet --progress $pkgs
 eend $?
 
 # switch over to new root
@@ -125,4 +164,11 @@ cat /proc/mounts | while read DEV DIR TYPE OPTS ; do
 	fi
 done
 sync
-exec /bin/busybox switch_root $NEWROOT /sbin/init $KOPT_init_args || exec /bin/busybox sh
+
+if [ -x $NEWROOT/sbin/init ]; then
+	exec /bin/busybox switch_root $NEWROOT /sbin/init $KOPT_init_args
+fi
+
+echo "initramfs emergency recovery shell launched"
+exec /bin/busybox sh
+reboot
