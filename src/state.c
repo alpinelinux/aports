@@ -253,13 +253,17 @@ int apk_state_satisfy_name(struct apk_state *state,
 	}
 	apk_state_set(state, preferred->id, APK_STATE_INSTALL);
 
+	r = apk_state_satisfy_deps(state, preferred->depends);
+	if (r != 0)
+		return r;
+
 	if (preferred != installed) {
 		r = apk_state_add_change(state, installed, preferred);
 		if (r != 0)
 			return r;
 	}
 
-	return apk_state_satisfy_deps(state, preferred->depends);
+	return 0;
 }
 
 int apk_state_satisfy_deps(struct apk_state *state,
@@ -271,7 +275,7 @@ int apk_state_satisfy_deps(struct apk_state *state,
 	if (deps == NULL)
 		return 0;
 
-	for (i = 0; i < deps->num; i++) {
+	for (i = deps->num - 1; i >= 0; i--) {
 		name = deps->item[i].name;
 		if (name->pkgs == NULL) {
 			apk_error("No providers for '%s'", name->name);
