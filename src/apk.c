@@ -115,7 +115,8 @@ int main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-	apk_root = getenv("ROOT");
+	if (apk_root == NULL)
+		apk_root = getenv("ROOT");
 	if (apk_root == NULL)
 		apk_root = "/";
 
