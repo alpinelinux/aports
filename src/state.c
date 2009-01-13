@@ -53,7 +53,7 @@ static int apk_state_add_change(struct apk_state *state,
 		return -1;
 
 	list_init(&change->change_list);
-	list_add_tail(&change->change_list, &state->change_list_head);
+	list_add(&change->change_list, &state->change_list_head);
 	change->oldpkg = oldpkg;
 	change->newpkg = newpkg;
 
