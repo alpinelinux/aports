@@ -21,7 +21,6 @@ apk_OBJS = \
 	blob.o \
 	hash.o \
 	md5.o \
-	create.o \
 	add.o \
 	del.o \
 	ver.o \

@@ -9,17 +9,55 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include "apk_applet.h"
 #include "apk_database.h"
 
+#define FLAG_INITDB		0x001
+
+struct add_ctx {
+	unsigned int flags;
+};
+
+static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
+{
+	struct add_ctx *actx = (struct add_ctx *) ctx;
+
+	switch (optch) {
+	case 0x10000:
+		actx->flags |= FLAG_INITDB;
+		break;
+	default:
+		return -1;
+	}
+	return 0;
+}
+
 static int add_main(void *ctx, int argc, char **argv)
 {
+	struct add_ctx *actx = (struct add_ctx *) ctx;
 	struct apk_database db;
-	int i;
+	int i, r, ret = 1;
 
-	if (apk_db_open(&db, apk_root) < 0)
-		return -1;
+	r = apk_db_open(&db, apk_root);
+	if ((r == -ENOENT) && (actx->flags & FLAG_INITDB)) {
+		if (strcmp(apk_root, "/") == 0) {
+			apk_error("Will not recreate system root.");
+			return 1;
+		}
+		r = apk_db_create(apk_root);
+		if (r != 0) {
+			apk_error("Failed to create apkdb: %s",
+				  strerror(-r));
+			return 1;
+		}
+		r = apk_db_open(&db, apk_root);
+	}
+	if (r != 0) {
+		apk_error("APK database not present (use --initdb to create one)");
+		return 1;
+	}
 
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;
@@ -45,15 +83,23 @@ static int add_main(void *ctx, int argc, char **argv)
 		}
 		apk_deps_add(&db.world, &dep);
 	}
-	apk_db_recalculate_and_commit(&db);
+	ret = apk_db_recalculate_and_commit(&db);
 err:
 	apk_db_close(&db);
-	return 0;
+	return ret;
 }
+
+static struct option add_options[] = {
+	{ "initdb",	no_argument,		NULL, 0x10000 },
+};
 
 static struct apk_applet apk_add = {
 	.name = "add",
-	.usage = "apkname...",
+	.usage = "[--initdb] apkname...",
+	.context_size = sizeof(struct add_ctx),
+	.num_options = ARRAY_SIZE(add_options),
+	.options = add_options,
+	.parse = add_parse,
 	.main = add_main,
 };
 

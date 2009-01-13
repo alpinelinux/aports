@@ -511,10 +511,8 @@ int apk_db_create(const char *root)
 	int fd;
 
 	fchdir(apk_cwd_fd);
-	if (chdir(root) == -1) {
-		apk_error("%s: %s", root, strerror(errno));
-		return -1;
-	}
+	if (chdir(root) == -1)
+		return -errno;
 
 	mkdir("tmp", 01777);
 	mkdir("dev", 0755);
@@ -525,7 +523,7 @@ int apk_db_create(const char *root)
 
 	fd = creat("var/lib/apk/world", 0600);
 	if (fd < 0)
-		return -1;
+		return -errno;
 	write(fd, deps.ptr, deps.len);
 	close(fd);
 
@@ -551,10 +549,8 @@ static int apk_db_read_state(struct apk_database *db)
 	fchdir(db->root_fd);
 
 	blob = apk_blob_from_file("var/lib/apk/world");
-	if (APK_BLOB_IS_NULL(blob)) {
-		apk_error("Please run 'apk create' to initialize root");
-		return -1;
-	}
+	if (APK_BLOB_IS_NULL(blob))
+		return -ENOENT;
 	apk_deps_parse(db, &db->world, blob);
 	free(blob.ptr);
 
@@ -585,6 +581,7 @@ int apk_db_open(struct apk_database *db, const char *root)
 {
 	apk_blob_t blob;
 	const char *apk_repos = getenv("APK_REPOS");
+	int r;
 
 	memset(db, 0, sizeof(*db));
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
@@ -597,17 +594,17 @@ int apk_db_open(struct apk_database *db, const char *root)
 		db->root = strdup(root);
 		db->root_fd = open(root, O_RDONLY);
 		if (db->root_fd < 0) {
-			apk_error("%s: %s", root, strerror(errno));
 			free(db->root);
-			return -1;
+			return -errno;
 		}
 	}
 
 	blob = APK_BLOB_STR("etc:-etc/init.d");
 	apk_blob_for_each_segment(blob, ":", add_protected_path, db);
 
-	if (apk_db_read_state(db) != 0)
-		return -1;
+	r = apk_db_read_state(db);
+	if (r != 0)
+		return r;
 
 	if (apk_repos == NULL)
 		apk_repos="/etc/apk/repositories";
