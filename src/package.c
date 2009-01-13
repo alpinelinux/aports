@@ -72,32 +72,6 @@ static apk_blob_t trim(apk_blob_t str)
 	return str;
 }
 
-static void parse_depend(struct apk_database *db,
-			 struct apk_dependency_array **depends,
-			 apk_blob_t blob)
-{
-	struct apk_dependency *dep;
-	struct apk_name *name;
-
-	while (blob.len && blob.ptr[0] == ' ')
-		blob.ptr++, blob.len--;
-	while (blob.len && (blob.ptr[blob.len-1] == ' ' ||
-			    blob.ptr[blob.len-1] == 0))
-		blob.len--;
-
-	if (blob.len == 0)
-		return;
-
-	name = apk_db_get_name(db, blob);
-	dep = apk_dependency_array_add(depends);
-	*dep = (struct apk_dependency){
-		.prefer_upgrade = 0,
-		.version_mask = 0,
-		.name = name,
-		.version = NULL,
-	};
-}
-
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep)
 {
@@ -115,24 +89,48 @@ int apk_deps_add(struct apk_dependency_array **depends,
 	return 0;
 }
 
+struct parse_depend_ctx {
+	struct apk_database *db;
+	struct apk_dependency_array **depends;
+};
+
+static int parse_depend(void *ctx, apk_blob_t blob)
+{
+	struct parse_depend_ctx *pctx = (struct parse_depend_ctx *) ctx;
+	struct apk_dependency *dep;
+	struct apk_name *name;
+
+	if (blob.len == 0)
+		return 0;
+
+	name = apk_db_get_name(pctx->db, blob);
+	if (name == NULL)
+		return -1;
+
+	dep = apk_dependency_array_add(pctx->depends);
+	if (dep == NULL)
+		return -1;
+
+	*dep = (struct apk_dependency){
+		.prefer_upgrade = 0,
+		.version_mask = 0,
+		.name = name,
+		.version = NULL,
+	};
+
+	return 0;
+}
+
 void apk_deps_parse(struct apk_database *db,
 		    struct apk_dependency_array **depends,
 		    apk_blob_t blob)
 {
-	char *start;
-	int i;
+	struct parse_depend_ctx ctx = { db, depends };
 
-	start = blob.ptr;
-	for (i = 0; i < blob.len && blob.ptr[i] != '\n'; i++) {
-		if (blob.ptr[i] != ' ')
-			continue;
+	if (blob.len > 1 && blob.ptr[blob.len-1] == '\n')
+		blob.len--;
 
-		parse_depend(db, depends,
-			     APK_BLOB_PTR_PTR(start, &blob.ptr[i-1]));
-		start = &blob.ptr[i];
-	}
-	parse_depend(db, depends,
-		     APK_BLOB_PTR_PTR(start, &blob.ptr[i-1]));
+	apk_blob_for_each_segment(blob, " ", parse_depend, &ctx);
 }
 
 int apk_deps_format(char *buf, int size,
