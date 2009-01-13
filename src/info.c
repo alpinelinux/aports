@@ -54,6 +54,38 @@ static int info_exists(struct apk_database *db, int argc, char **argv)
 	return 0;
 }
 
+static int info_who_owns(struct apk_database *db, int argc, char **argv)
+{
+	struct apk_package *pkg;
+	struct apk_dependency_array *deps = NULL;
+	struct apk_dependency dep;
+	int i;
+
+	for (i = 0; i < argc; i++) {
+		pkg = apk_db_get_file_owner(db, APK_BLOB_STR(argv[i]));
+		if (pkg == NULL)
+			continue;
+
+		if (apk_quiet) {
+			dep = (struct apk_dependency) {
+				.name = pkg->name,
+			};
+			apk_deps_add(&deps, &dep);
+		} else {
+			printf("%s is owned by %s-%s\n", argv[i],
+			       pkg->name->name, pkg->version);
+		}
+	}
+	if (apk_quiet && deps != NULL) {
+		char buf[512];
+		apk_deps_format(buf, sizeof(buf), deps);
+		printf("%s\n", buf);
+		free(deps);
+	}
+
+	return 0;
+}
+
 static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
@@ -61,6 +93,9 @@ static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 	switch (optch) {
 	case 'e':
 		ictx->action = info_exists;
+		break;
+	case 'W':
+		ictx->action = info_who_owns;
 		break;
 	default:
 		return -1;
@@ -88,6 +123,7 @@ static int info_main(void *ctx, int argc, char **argv)
 
 static struct option info_options[] = {
 	{ "installed",	no_argument,		NULL, 'e' },
+	{ "who-owns",	no_argument,		NULL, 'W' },
 };
 
 static struct apk_applet apk_info = {

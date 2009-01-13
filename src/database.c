@@ -135,6 +135,12 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_db_dir *dir)
 	return dir;
 }
 
+static struct apk_db_dir *apk_db_dir_query(struct apk_database *db,
+					   apk_blob_t name)
+{
+	return (struct apk_db_dir *) apk_hash_get(&db->installed.dirs, name);
+}
+
 static struct apk_db_dir *apk_db_dir_get_db(struct apk_database *db,
 					    apk_blob_t name)
 {
@@ -145,7 +151,7 @@ static struct apk_db_dir *apk_db_dir_get_db(struct apk_database *db,
 	if (name.len && name.ptr[name.len-1] == '/')
 		name.len--;
 
-	dir = (struct apk_db_dir *) apk_hash_get(&db->installed.dirs, name);
+	dir = apk_db_dir_query(db, name);
 	if (dir != NULL)
 		return apk_db_dir_get(dir);
 
@@ -643,6 +649,8 @@ static int apk_db_write_config(struct apk_database *db)
 	if (os == NULL)
 		return -1;
 	n = apk_deps_format(buf, sizeof(buf), db->world);
+	if (n < sizeof(buf))
+		buf[n++] = '\n';
 	os->write(os, buf, n);
 	os->close(os);
 
@@ -677,7 +685,6 @@ void apk_db_close(struct apk_database *db)
 		}
 	}
 
-
 	for (i = 0; i < db->num_repos; i++)
 		free(db->repos[i].url);
 	for (i = 0; i < db->protected_paths->num; i++)
@@ -698,6 +705,33 @@ struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum)
 {
 	return apk_hash_get(&db->available.packages,
 			    APK_BLOB_PTR_LEN((void*) sum, sizeof(csum_t)));
+}
+
+struct apk_package *apk_db_get_file_owner(struct apk_database *db,
+					  apk_blob_t filename)
+{
+	apk_blob_t dir, file;
+	struct apk_db_dir *ddir;
+	struct apk_db_file *dfile;
+	struct hlist_node *cur;
+
+	if (!apk_blob_rsplit(filename, '/', &dir, &file))
+		return NULL;
+
+	if (dir.ptr[0] == '/')
+		dir.ptr++, dir.len--;
+
+	ddir = apk_db_dir_query(db, dir);
+	if (ddir == NULL)
+		return NULL;
+
+	hlist_for_each_entry(dfile, cur, &ddir->files, dir_files_list) {
+		if (strncmp(dfile->filename, file.ptr, file.len) == 0 &&
+		    dfile->filename[file.len] == 0)
+			return dfile->diri->pkg;
+	}
+
+	return NULL;
 }
 
 struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *file)
@@ -901,7 +935,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			ctx->diri = diri;
 		}
 
-		file = apk_db_file_get(db, name, ctx);
+		file = apk_db_file_get(db, bfile, ctx);
 		if (file == NULL) {
 			apk_error("%s: Failed to create fdb entry for '%*s'\n",
 				  pkg->name->name, name.len, name.ptr);

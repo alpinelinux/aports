@@ -141,13 +141,13 @@ int apk_deps_format(char *buf, int size,
 	if (depends == NULL)
 		return 0;
 
-	for (i = 0; i < depends->num - 1; i++)
+	for (i = 0; i < depends->num; i++) {
+		if (i && n < size)
+			buf[n++] = ' ';
 		n += snprintf(&buf[n], size-n,
-			      "%s ",
+			      "%s",
 			      depends->item[i].name->name);
-	n += snprintf(&buf[n], size-n,
-		      "%s\n",
-		      depends->item[i].name->name);
+	}
 	return n;
 }
 
@@ -545,6 +545,8 @@ apk_blob_t apk_pkg_format_index_entry(struct apk_package *info, int size,
 	if (info->depends != NULL) {
 		n += snprintf(&buf[n], size-n, "D:");
 		n += apk_deps_format(&buf[n], size-n, info->depends);
+		if (n < size)
+			buf[n++] = '\n';
 	}
 	n += snprintf(&buf[n], size-n, "C:");
 	n += apk_hexdump_format(size-n, &buf[n],
