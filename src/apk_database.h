@@ -20,7 +20,7 @@
 #define APK_MAX_REPOS 32
 
 struct apk_db_file {
-	struct hlist_node dir_files_list;
+	struct hlist_node hash_node;
 	struct hlist_node diri_files_list;
 
 	struct apk_db_dir_instance *diri;
@@ -79,6 +79,7 @@ struct apk_database {
 	struct {
 		struct list_head packages;
 		struct apk_hash dirs;
+		struct apk_hash files;
 		struct {
 			unsigned files;
 			unsigned dirs;
