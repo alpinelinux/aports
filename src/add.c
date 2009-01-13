@@ -13,7 +13,7 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 
-static int add_main(int argc, char **argv)
+static int add_main(void *ctx, int argc, char **argv)
 {
 	struct apk_database db;
 	int i;

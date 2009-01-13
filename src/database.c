@@ -87,11 +87,16 @@ static const struct apk_hash_ops dir_hash_ops = {
 	.delete_item = (apk_hash_delete_f) free,
 };
 
+struct apk_name *apk_db_query_name(struct apk_database *db, apk_blob_t name)
+{
+	return (struct apk_name *) apk_hash_get(&db->available.names, name);
+}
+
 struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 {
 	struct apk_name *pn;
 
-	pn = (struct apk_name *) apk_hash_get(&db->available.names, name);
+	pn = apk_db_query_name(db, name);
 	if (pn != NULL)
 		return pn;
 

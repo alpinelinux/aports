@@ -29,7 +29,7 @@ static int res2char(int res)
 	}
 }
 
-static int ver_main(int argc, char **argv)
+static int ver_main(void *ctx, int argc, char **argv)
 {
 	struct apk_database db;
 	struct apk_name *name;

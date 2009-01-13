@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <fcntl.h>
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,21 +68,11 @@ static struct apk_applet *find_applet(const char *name)
 	return NULL;
 }
 
-int main(int argc, char **argv)
+static struct apk_applet *deduce_applet(int argc, char **argv)
 {
-	static struct option generic_options[] = {
-		{"root", required_argument, NULL, 'Q' },
-		{"repository", required_argument, NULL, 'X' },
-		{"quiet", no_argument, NULL, 'q' },
-		{"progress", no_argument, NULL, 0x100 },
-		{0, 0, 0, 0},
-	};
-	struct apk_applet *applet = NULL;
+	struct apk_applet *a;
 	const char *prog;
-	int r;
-
-	umask(0);
-	apk_cwd_fd = open(".", O_RDONLY);
+	int i;
 
 	prog = strrchr(argv[0], '/');
 	if (prog == NULL)
@@ -90,10 +81,64 @@ int main(int argc, char **argv)
 		prog++;
 
 	if (strncmp(prog, "apk_", 4) == 0)
-		applet = find_applet(prog + 4);
+		return find_applet(prog + 4);
 
-	while ((r = getopt_long(argc, argv, "",
-				generic_options, NULL)) != -1) {
+	for (i = 1; i < argc; i++) {
+		if (argv[i][0] == '-')
+			continue;
+
+		a = find_applet(argv[i]);
+		if (a != NULL)
+			return a;
+	}
+
+	return NULL;
+}
+
+#define NUM_GENERIC_OPTS 4
+static struct option generic_options[32] = {
+	{ "root",	required_argument, 	NULL, 'Q' },
+	{ "repository",	required_argument, 	NULL, 'X' },
+	{ "quiet",	no_argument,		NULL, 'q' },
+	{ "progress",	no_argument,		NULL, 0x100 },
+};
+
+int main(int argc, char **argv)
+{
+	struct apk_applet *applet;
+	char short_options[256], *sopt;
+	struct option *opt;
+	int r, optindex;
+	void *ctx = NULL;
+
+	umask(0);
+	apk_cwd_fd = open(".", O_RDONLY);
+	apk_root = getenv("ROOT");
+
+	applet = deduce_applet(argc, argv);
+	if (applet == NULL)
+		return usage();
+
+	if (applet->num_options && applet->options) {
+		memcpy(&generic_options[NUM_GENERIC_OPTS],
+		       applet->options,
+		       applet->num_options * sizeof(struct option));
+	}
+	for (opt = &generic_options[0], sopt = short_options;
+	     opt->name != NULL; opt++) {
+		if (opt->flag == NULL && isalnum(opt->val)) {
+			*(sopt++) = opt->val;
+			if (opt->has_arg != no_argument)
+				*(sopt++) = ':';
+		}
+	}
+
+	if (applet->context_size != 0)
+		ctx = calloc(1, applet->context_size);
+
+	optindex = 0;
+	while ((r = getopt_long(argc, argv, short_options,
+				generic_options, &optindex)) != -1) {
 		switch (r) {
 		case 'Q':
 			apk_root = optarg;
@@ -108,27 +153,24 @@ int main(int argc, char **argv)
 			apk_progress = 1;
 			break;
 		default:
-			return usage();
+			if (applet->parse == NULL)
+				return usage();
+			if (applet->parse(ctx, r, optindex - NUM_GENERIC_OPTS,
+					  optarg) != 0)
+				return usage();
+			break;
 		}
 	}
 
-	argc -= optind;
-	argv += optind;
-
-	if (apk_root == NULL)
-		apk_root = getenv("ROOT");
 	if (apk_root == NULL)
 		apk_root = "/";
 
-	if (applet == NULL) {
-		if (argc > 0)
-			applet = find_applet(argv[0]);
-		if (applet == NULL)
-			return usage();
-
+	argc -= optind;
+	argv += optind;
+	if (argc >= 1 && strcmp(argv[0], applet->name) == 0) {
 		argc--;
 		argv++;
 	}
 
-	return applet->main(argc, argv);
+	return applet->main(ctx, argc, argv);
 }

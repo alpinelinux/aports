@@ -12,13 +12,21 @@
 #ifndef APK_APPLET_H
 #define APK_APPLET_H
 
+#include <getopt.h>
+
 extern const char *apk_root;
 extern const char *apk_repository;
 
 struct apk_applet {
 	const char *name;
-        const char *usage;
-	int (*main)(int argc, char **argv);
+	const char *usage;
+
+	int context_size;
+	int num_options;
+	struct option *options;
+
+	int (*parse)(void *ctx, int optch, int optindex, const char *optarg);
+	int (*main)(void *ctx, int argc, char **argv);
 };
 
 extern struct apk_applet *__start_apkapplets, *__stop_apkapplets;

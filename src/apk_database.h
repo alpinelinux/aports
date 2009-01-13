@@ -93,6 +93,7 @@ typedef union apk_database_or_void {
 } apk_database_t __attribute__ ((__transparent_union__));
 
 struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name);
+struct apk_name *apk_db_query_name(struct apk_database *db, apk_blob_t name);
 void apk_name_free(struct apk_name *pkgname);
 
 int apk_db_create(const char *root);

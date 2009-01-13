@@ -39,7 +39,7 @@ static int warn_if_no_providers(apk_hash_item item, void *ctx)
 	return 0;
 }
 
-static int index_main(int argc, char **argv)
+static int index_main(void *ctx, int argc, char **argv)
 {
 	struct apk_database db;
 	struct counts counts = {0,0};

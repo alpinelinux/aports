@@ -13,7 +13,7 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 
-static int create_main(int argc, char **argv)
+static int create_main(void *ctx, int argc, char **argv)
 {
 	if (strcmp(apk_root, "/") == 0) {
 		apk_error("Will not recreate system root.");
