@@ -52,11 +52,19 @@ apk_hash_item apk_hash_get(struct apk_hash *h, apk_blob_t key)
 	apk_blob_t itemkey;
 
 	hash = h->ops->hash_key(key) % h->buckets->num;
-	hlist_for_each(pos, &h->buckets->item[hash]) {
-		item = ((void *) pos) - offset;
-		itemkey = h->ops->get_key(item);
-		if (h->ops->compare(key, itemkey) == 0)
-			return item;
+	if (h->ops->compare_item != NULL) {
+		hlist_for_each(pos, &h->buckets->item[hash]) {
+			item = ((void *) pos) - offset;
+			if (h->ops->compare_item(item, key) == 0)
+				return item;
+		}
+	} else {
+		hlist_for_each(pos, &h->buckets->item[hash]) {
+			item = ((void *) pos) - offset;
+			itemkey = h->ops->get_key(item);
+			if (h->ops->compare(key, itemkey) == 0)
+				return item;
+		}
 	}
 
 	return NULL;
@@ -64,12 +72,14 @@ apk_hash_item apk_hash_get(struct apk_hash *h, apk_blob_t key)
 
 void apk_hash_insert(struct apk_hash *h, apk_hash_item item)
 {
-	apk_blob_t key;
 	unsigned long hash;
 	apk_hash_node *node;
 
-	key = h->ops->get_key(item);
-	hash = h->ops->hash_key(key) % h->buckets->num;
+	if (h->ops->hash_item == NULL)
+		hash = h->ops->hash_key(h->ops->get_key(item));
+	else
+		hash = h->ops->hash_item(item);
+	hash %= h->buckets->num;
 	node = (apk_hash_node *) (item + h->ops->node_offset);
 	hlist_add_head(node, &h->buckets->item[hash]);
 	h->num_items++;

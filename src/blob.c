@@ -42,7 +42,7 @@ int apk_blob_rsplit(apk_blob_t blob, char split, apk_blob_t *l, apk_blob_t *r)
 	if (l != NULL)
 		*l = APK_BLOB_PTR_PTR(blob.ptr, sep - 1);
 	if (r != NULL)
-		*r = APK_BLOB_PTR_PTR(sep + 1, blob.ptr + blob.len);
+		*r = APK_BLOB_PTR_PTR(sep + 1, blob.ptr + blob.len - 1);
 
 	return 1;
 }

@@ -20,6 +20,7 @@ typedef void *apk_hash_item;
 
 typedef unsigned long (*apk_hash_f)(apk_blob_t);
 typedef int (*apk_hash_compare_f)(apk_blob_t, apk_blob_t);
+typedef int (*apk_hash_compare_item_f)(apk_hash_item, apk_blob_t);
 typedef void (*apk_hash_delete_f)(apk_hash_item);
 typedef int (*apk_hash_enumerator_f)(apk_hash_item, void *ctx);
 
@@ -27,7 +28,9 @@ struct apk_hash_ops {
 	ptrdiff_t	node_offset;
 	apk_blob_t	(*get_key)(apk_hash_item item);
 	unsigned long	(*hash_key)(apk_blob_t key);
-	int		(*compare)(apk_blob_t key, apk_blob_t itemkey);
+	unsigned long	(*hash_item)(apk_hash_item item);
+	int		(*compare)(apk_blob_t itemkey, apk_blob_t key);
+	int		(*compare_item)(apk_hash_item item, apk_blob_t key);
 	void		(*delete_item)(apk_hash_item item);
 };
 

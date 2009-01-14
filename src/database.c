@@ -86,16 +86,45 @@ static const struct apk_hash_ops dir_hash_ops = {
 	.delete_item = (apk_hash_delete_f) free,
 };
 
-static apk_blob_t apk_db_file_get_key(apk_hash_item item)
+struct apk_db_file_hash_key {
+	apk_blob_t dirname;
+	apk_blob_t filename;
+};
+
+static unsigned long apk_db_file_hash_key(apk_blob_t _key)
 {
-	return APK_BLOB_STR(((struct apk_db_file *) item)->filename);
+	struct apk_db_file_hash_key *key = (struct apk_db_file_hash_key *) _key.ptr;
+
+	return apk_blob_hash(key->dirname) ^
+	       apk_blob_hash(key->filename);
+}
+
+static unsigned long apk_db_file_hash_item(apk_hash_item item)
+{
+	struct apk_db_file *dbf = (struct apk_db_file *) item;
+
+	return apk_blob_hash(APK_BLOB_STR(dbf->diri->dir->dirname)) ^
+	       apk_blob_hash(APK_BLOB_STR(dbf->filename));
+}
+
+static int apk_db_file_compare_item(apk_hash_item item, apk_blob_t _key)
+{
+	struct apk_db_file *dbf = (struct apk_db_file *) item;
+	struct apk_db_file_hash_key *key = (struct apk_db_file_hash_key *) _key.ptr;
+	int r;
+
+	r = apk_blob_compare(key->dirname, APK_BLOB_STR(dbf->diri->dir->dirname));
+	if (r != 0)
+		return r;
+
+	return apk_blob_compare(key->filename, APK_BLOB_STR(dbf->filename));
 }
 
 static const struct apk_hash_ops file_hash_ops = {
 	.node_offset = offsetof(struct apk_db_file, hash_node),
-	.get_key = apk_db_file_get_key,
-	.hash_key = apk_blob_hash,
-	.compare = apk_blob_compare,
+	.hash_key = apk_db_file_hash_key,
+	.hash_item = apk_db_file_hash_item,
+	.compare_item = apk_db_file_compare_item,
 	.delete_item = (apk_hash_delete_f) free,
 };
 
@@ -242,25 +271,29 @@ static void apk_db_diri_free(struct apk_database *db,
 	free(diri);
 }
 
-static struct apk_db_file *apk_db_file_query(struct apk_database *db,
-					     apk_blob_t name)
-{
-	return (struct apk_db_file *) apk_hash_get(&db->installed.files, name);
-}
-
 static struct apk_db_file *apk_db_file_get(struct apk_database *db,
+					   struct apk_db_dir_instance *diri,
 					   apk_blob_t name)
 {
 	struct apk_db_file *file;
+	struct apk_db_file_hash_key key;
 
-	file = apk_db_file_query(db, name);
+	key = (struct apk_db_file_hash_key) {
+		.dirname = APK_BLOB_STR(diri->dir->dirname),
+		.filename = name,
+	};
+
+	file = (struct apk_db_file *) apk_hash_get(&db->installed.files,
+						   APK_BLOB_BUF(&key));
 	if (file != NULL)
 		return file;
 
 	file = calloc(1, sizeof(*file) + name.len + 1);
 	memcpy(file->filename, name.ptr, name.len);
 	file->filename[name.len] = 0;
+	file->diri = diri;
 	apk_hash_insert(&db->installed.files, file);
+	file->diri = NULL;
 
 	return file;
 }
@@ -305,9 +338,8 @@ static int apk_db_index_read(struct apk_database *db, struct apk_istream *is, in
 	struct hlist_node **file_diri_node = NULL;
 
 	char buf[1024];
-	char tmp[512];
 	apk_blob_t l, r;
-	int n, field, i;
+	int n, field;
 
 	r = APK_BLOB_PTR_LEN(buf, 0);
 	while (1) {
@@ -384,9 +416,7 @@ static int apk_db_index_read(struct apk_database *db, struct apk_istream *is, in
 					apk_error("FDB file entry before directory entry");
 					return -1;
 				}
-				i = snprintf(tmp, sizeof(tmp), "%s/%.*s",
-					     diri->dir->dirname, l.len, l.ptr);
-				file = apk_db_file_get(db, APK_BLOB_PTR_LEN(tmp, i));
+				file = apk_db_file_get(db, diri, l);
 				apk_db_file_set_owner(db, file, diri, file_diri_node);
 				file_diri_node = &file->diri_files_list.next;
 				break;
@@ -701,11 +731,16 @@ struct apk_package *apk_db_get_file_owner(struct apk_database *db,
 					  apk_blob_t filename)
 {
 	struct apk_db_file *dbf;
+	struct apk_db_file_hash_key key;
 
 	if (filename.len && filename.ptr[0] == '/')
 		filename.len--, filename.ptr++;
 
-	dbf = apk_db_file_query(db, filename);
+	if (!apk_blob_rsplit(filename, '/', &key.dirname, &key.filename))
+		return NULL;
+
+	dbf = (struct apk_db_file *) apk_hash_get(&db->installed.files,
+						  APK_BLOB_BUF(&key));
 	if (dbf == NULL)
 		return NULL;
 
@@ -913,7 +948,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			ctx->diri = diri;
 		}
 
-		file = apk_db_file_get(db, name);
+		file = apk_db_file_get(db, diri, bfile);
 		if (file == NULL) {
 			apk_error("%s: Failed to create fdb entry for '%*s'\n",
 				  pkg->name->name, name.len, name.ptr);
