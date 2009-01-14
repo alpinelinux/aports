@@ -26,6 +26,7 @@ apk_OBJS = \
 	ver.o \
 	index.o \
 	info.o \
+	audit.o \
 	apk.o
 
 ALL_OBJS = $(apk_OBJS)

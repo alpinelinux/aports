@@ -45,12 +45,19 @@ static apk_blob_t pkg_name_get_key(apk_hash_item item)
 	return APK_BLOB_STR(((struct apk_name *) item)->name);
 }
 
+static void pkg_name_free(struct apk_name *name)
+{
+	free(name->name);
+	free(name->pkgs);
+	free(name);
+}
+
 static const struct apk_hash_ops pkg_name_hash_ops = {
 	.node_offset = offsetof(struct apk_name, hash_node),
 	.get_key = pkg_name_get_key,
 	.hash_key = apk_blob_hash,
 	.compare = apk_blob_compare,
-	.delete_item = (apk_hash_delete_f) apk_name_free,
+	.delete_item = (apk_hash_delete_f) pkg_name_free,
 };
 
 static apk_blob_t pkg_info_get_key(apk_hash_item item)
@@ -151,13 +158,6 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 	return pn;
 }
 
-void apk_name_free(struct apk_name *name)
-{
-	free(name->name);
-	free(name->pkgs);
-	free(name);
-}
-
 static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir)
 {
 	dir->refs--;
@@ -176,8 +176,8 @@ static struct apk_db_dir *apk_db_dir_ref(struct apk_db_dir *dir)
 	return dir;
 }
 
-static struct apk_db_dir *apk_db_dir_query(struct apk_database *db,
-					   apk_blob_t name)
+struct apk_db_dir *apk_db_dir_query(struct apk_database *db,
+				    apk_blob_t name)
 {
 	return (struct apk_db_dir *) apk_hash_get(&db->installed.dirs, name);
 }
@@ -269,6 +269,21 @@ static void apk_db_diri_free(struct apk_database *db,
 {
 	apk_db_dir_unref(db, diri->dir);
 	free(diri);
+}
+
+struct apk_db_file *apk_db_file_query(struct apk_database *db,
+				      apk_blob_t dir,
+				      apk_blob_t name)
+{
+	struct apk_db_file_hash_key key;
+
+	key = (struct apk_db_file_hash_key) {
+		.dirname = dir,
+		.filename = name,
+	};
+
+	return (struct apk_db_file *) apk_hash_get(&db->installed.files,
+						   APK_BLOB_BUF(&key));
 }
 
 static struct apk_db_file *apk_db_file_get(struct apk_database *db,
@@ -925,10 +940,6 @@ static int apk_db_install_archive_entry(void *_ctx,
 		if (bfile.len > 6 && memcmp(bfile.ptr, ".keep_", 6) == 0)
 			return 0;
 
-		r = strlen(diri->dir->dirname);
-		r = strlen(bdir.ptr);
-		r = 0;
-
 		/* Make sure the file is part of the cached directory tree */
 		if (diri == NULL ||
 		    strncmp(diri->dir->dirname, bdir.ptr, bdir.len) != 0 ||
@@ -946,6 +957,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 				return -1;
 			}
 			ctx->diri = diri;
+			ctx->file_diri_node = NULL;
 		}
 
 		file = apk_db_file_get(db, diri, bfile);

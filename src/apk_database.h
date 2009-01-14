@@ -95,7 +95,11 @@ typedef union apk_database_or_void {
 
 struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name);
 struct apk_name *apk_db_query_name(struct apk_database *db, apk_blob_t name);
-void apk_name_free(struct apk_name *pkgname);
+struct apk_db_dir *apk_db_dir_query(struct apk_database *db,
+				    apk_blob_t name);
+struct apk_db_file *apk_db_file_query(struct apk_database *db,
+				      apk_blob_t dir,
+				      apk_blob_t name);
 
 int apk_db_create(const char *root);
 int apk_db_open(struct apk_database *db, const char *root);
