@@ -44,8 +44,10 @@ else
 endif
 	@echo
 
-#clean:
-#	rm -rf $(DESTDIR)
+clean:
+	rm -rf $(MODLOOP) $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) \
+		$(INITFS) $(INITFS_DIRSTAMP) $(INITFS_DIR) \
+		$(ISO_DIR)
 
 #
 # Modloop
