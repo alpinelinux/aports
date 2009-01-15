@@ -126,7 +126,8 @@ int main(int argc, char **argv)
 	}
 	for (opt = &generic_options[0], sopt = short_options;
 	     opt->name != NULL; opt++) {
-		if (opt->flag == NULL && isalnum(opt->val)) {
+		if (opt->flag == NULL &&
+		    opt->val <= 0xff && isalnum(opt->val)) {
 			*(sopt++) = opt->val;
 			if (opt->has_arg != no_argument)
 				*(sopt++) = ':';
