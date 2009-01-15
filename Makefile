@@ -1,7 +1,9 @@
 
 PACKAGE=abuild
 VERSION:=$(shell  awk -F= '$$1 == "abuild_ver" {print $$2}' abuild)
-DISTFILES=Makefile abuild abuild.conf APKBUILD.proto buildrepo
+USR_BIN_FILES=abuild devbuild mkalpine buildrepo
+DISTFILES=$(USR_BIN_FILES) Makefile abuild.conf APKBUILD.proto 
+
 
 prefix ?= /usr
 sysconfdir ?= /etc
@@ -14,23 +16,25 @@ help:
 	@echo "usage: make install [ DESTDIR=<path> ]"
 	@echo "       make dist"
 
-install: abuild abuild.conf APKBUILD.proto functions.sh
+install: $(USR_BIN_FILES) abuild.conf APKBUILD.proto functions.sh
 	mkdir -p $(DESTDIR)/$(prefix)/bin $(DESTDIR)/$(sysconfdir) \
 		$(DESTDIR)/$(datadir)
-	cp abuild buildrepo $(DESTDIR)/$(prefix)/bin/
+	for i in $(USR_BIN_FILES); do\
+		install -m 755 $$i $(DESTDIR)/$(prefix)/bin/$$i;\
+	done
 	if [ -z "$(DESTDIR)" ] && [ ! -f "/$(sysconfdir)"/abuild.conf ]; then\
 		cp abuild.conf $(DESTDIR)/$(sysconfdir)/; \
 	fi
 	cp APKBUILD.proto $(DESTDIR)/$(prefix)/share/abuild
 	cp functions.sh $(DESTDIR)/$(datadir)/
 
-dist:	$(P).tar.gz
+dist:	$(P).tar.bz2
 
-$(P).tar.gz:	$(DISTFILES)
+$(P).tar.bz2:	$(DISTFILES)
 	rm -rf $(P)
 	mkdir -p $(P)
 	cp $(DISTFILES) $(P)/
-	tar -czf $@ $(P)
+	tar -cjf $@ $(P)
 	rm -rf $(P)
 
 .PHONY: install dist
