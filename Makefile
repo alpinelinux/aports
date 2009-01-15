@@ -51,10 +51,16 @@ install::
 	$(INSTALLDIR) $(DESTDIR)$(DOCDIR)
 	$(INSTALL) README $(DESTDIR)$(DOCDIR)
 
-dist:
-	svn-clean
-	(TOP=`pwd` && cd .. && ln -s $$TOP apk-tools-$(VERSION) && \
-	 tar --exclude '*/.svn*' -cjvf apk-tools-$(VERSION).tar.bz2 apk-tools-$(VERSION)/* && \
-	 rm apk-tools-$(VERSION))
+clean::
+	rm -rf $(TARBALL)
+
+TARBALL := apk-tools-$(VERSION).tar.bz2
+dist:	$(TARBALL)
+$(TARBALL):
+	rm -rf apk-tools
+	git clone . apk-tools
+	cd apk-tools && (cd .. && git diff) | patch -p1
+	tar -cjf $@ apk-tools
+	rm -rf apk-tools
 
 .EXPORT_ALL_VARIABLES:
