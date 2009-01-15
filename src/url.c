@@ -66,6 +66,11 @@ struct apk_istream *apk_istream_from_url(const char *url)
 	return apk_istream_from_fd(fork_wget(url));
 }
 
+struct apk_istream *apk_istream_from_url_gz(const char *file)
+{
+	return apk_bstream_gunzip(apk_bstream_from_url(file), TRUE);
+}
+
 struct apk_bstream *apk_bstream_from_url(const char *url)
 {
 	if (url_is_file(url))
@@ -73,3 +78,4 @@ struct apk_bstream *apk_bstream_from_url(const char *url)
 
 	return apk_bstream_from_fd(fork_wget(url));
 }
+

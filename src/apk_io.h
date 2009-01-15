@@ -50,6 +50,7 @@ struct apk_istream *apk_istream_from_fd(int fd);
 struct apk_istream *apk_istream_from_file(const char *file);
 struct apk_istream *apk_istream_from_file_gz(const char *file);
 struct apk_istream *apk_istream_from_url(const char *url);
+struct apk_istream *apk_istream_from_url_gz(const char *url);
 size_t apk_istream_skip(struct apk_istream *istream, size_t size);
 size_t apk_istream_splice(void *stream, int fd, size_t size,
 			  apk_progress_cb cb, void *cb_ctx);
