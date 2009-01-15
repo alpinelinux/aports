@@ -8,7 +8,7 @@
 # by the Free Software Foundation. See http://www.gnu.org/ for details.
 
 PACKAGE := apk-tools
-VERSION := 2.0_pre1
+VERSION := 2.0_pre2
 
 SVN_REV := $(shell svn info 2> /dev/null | grep ^Revision | cut -d ' ' -f 2)
 ifneq ($(SVN_REV),)
