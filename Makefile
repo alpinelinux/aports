@@ -7,6 +7,7 @@
 # under the terms of the GNU General Public License version 3 as published
 # by the Free Software Foundation. See http://www.gnu.org/ for details.
 
+PACKAGE := apk-tools
 VERSION := 2.0_pre1
 
 SVN_REV := $(shell svn info 2> /dev/null | grep ^Revision | cut -d ' ' -f 2)
@@ -54,13 +55,13 @@ install::
 clean::
 	rm -rf $(TARBALL)
 
-TARBALL := apk-tools-$(VERSION).tar.bz2
+TARBALL := $(PACKAGE)-$(VERSION).tar.bz2
 dist:	$(TARBALL)
 $(TARBALL):
-	rm -rf apk-tools
-	git clone . apk-tools
-	cd apk-tools && (cd .. && git diff) | patch -p1
-	tar -cjf $@ apk-tools
-	rm -rf apk-tools
+	rm -rf $(PACKAGE)
+	git clone . $(PACKAGE)
+	cd $(PACKAGE) && (cd .. && git diff) | patch -p1
+	tar -cjf $@ $(PACKAGE)
+	rm -rf $(PACKAGE)
 
 .EXPORT_ALL_VARIABLES:
