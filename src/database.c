@@ -568,7 +568,7 @@ int apk_db_create(const char *root)
 	mkdir("var/lib", 0755);
 	mkdir("var/lib/apk", 0755);
 
-	fd = creat("var/lib/apk/world", 0600);
+	fd = creat("var/lib/apk/world", 0644);
 	if (fd < 0)
 		return -errno;
 	write(fd, deps.ptr, deps.len);
@@ -683,7 +683,7 @@ static int apk_db_write_config(struct apk_database *db)
 
 	fchdir(db->root_fd);
 
-	os = apk_ostream_to_file("var/lib/apk/world", 0600);
+	os = apk_ostream_to_file("var/lib/apk/world", 0644);
 	if (os == NULL)
 		return -1;
 	n = apk_deps_format(buf, sizeof(buf), db->world);
@@ -692,13 +692,13 @@ static int apk_db_write_config(struct apk_database *db)
 	os->write(os, buf, n);
 	os->close(os);
 
-	os = apk_ostream_to_file("var/lib/apk/installed", 0600);
+	os = apk_ostream_to_file("var/lib/apk/installed", 0644);
 	if (os == NULL)
 		return -1;
 	apk_db_write_fdb(db, os);
 	os->close(os);
 
-	os = apk_ostream_to_file("var/lib/apk/scripts", 0600);
+	os = apk_ostream_to_file("var/lib/apk/scripts", 0644);
 	if (os == NULL)
 		return -1;
 	apk_db_scriptdb_write(db, os);
