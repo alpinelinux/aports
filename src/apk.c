@@ -23,7 +23,7 @@
 
 const char *apk_root;
 const char *apk_repository = NULL;
-int apk_quiet = 0, apk_progress = 0;
+int apk_verbosity = 1, apk_progress = 0;
 int apk_cwd_fd;
 
 void apk_log(const char *prefix, const char *format, ...)
@@ -95,11 +95,12 @@ static struct apk_applet *deduce_applet(int argc, char **argv)
 	return NULL;
 }
 
-#define NUM_GENERIC_OPTS 4
+#define NUM_GENERIC_OPTS 5
 static struct option generic_options[32] = {
 	{ "root",	required_argument, 	NULL, 'Q' },
 	{ "repository",	required_argument, 	NULL, 'X' },
 	{ "quiet",	no_argument,		NULL, 'q' },
+	{ "verbose",	no_argument,		NULL, 'v' },
 	{ "progress",	no_argument,		NULL, 0x100 },
 };
 
@@ -148,7 +149,10 @@ int main(int argc, char **argv)
 			apk_repository = optarg;
 			break;
 		case 'q':
-			apk_quiet = 1;
+			apk_verbosity--;
+			break;
+		case 'v':
+			apk_verbosity++;
 			break;
 		case 0x100:
 			apk_progress = 1;

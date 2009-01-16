@@ -26,8 +26,10 @@ static int info_list(struct apk_database *db, int argc, char **argv)
 
 	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
 		printf("%s", pkg->name->name);
-		if (!apk_quiet)
-			printf("-%s - %s", pkg->version, pkg->description);
+		if (apk_verbosity > 0)
+			printf("-%s", pkg->version);
+		if (apk_verbosity > 1)
+			printf("- %s", pkg->description);
 		printf("\n");
 	}
 	return 0;
@@ -66,7 +68,7 @@ static int info_who_owns(struct apk_database *db, int argc, char **argv)
 		if (pkg == NULL)
 			continue;
 
-		if (apk_quiet) {
+		if (apk_verbosity < 1) {
 			dep = (struct apk_dependency) {
 				.name = pkg->name,
 			};
@@ -76,7 +78,7 @@ static int info_who_owns(struct apk_database *db, int argc, char **argv)
 			       pkg->name->name, pkg->version);
 		}
 	}
-	if (apk_quiet && deps != NULL) {
+	if (apk_verbosity < 1 && deps != NULL) {
 		char buf[512];
 		apk_deps_format(buf, sizeof(buf), deps);
 		printf("%s\n", buf);

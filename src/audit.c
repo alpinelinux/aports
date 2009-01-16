@@ -75,7 +75,7 @@ static int audit_directory(apk_hash_item item, void *ctx)
 				reason = 'F';
 			}
 		}
-		if (apk_quiet)
+		if (apk_verbosity < 1)
 			printf("%s\n", tmp);
 		else
 			printf("%c %s\n", reason, tmp);
