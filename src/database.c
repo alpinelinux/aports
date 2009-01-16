@@ -645,15 +645,6 @@ int apk_db_open(struct apk_database *db, const char *root)
 			free(db->root);
 			return -errno;
 		}
-
-		if (apk_repos == NULL)
-			apk_repos = "/etc/apk/repositories";
-		blob = apk_blob_from_file(apk_repos);
-		if (!APK_BLOB_IS_NULL(blob)) {
-			apk_blob_for_each_segment(blob, "\n",
-						  apk_db_add_repository, db);
-			free(blob.ptr);
-		}
 	}
 
 	blob = APK_BLOB_STR("etc:-etc/init.d");
@@ -662,6 +653,19 @@ int apk_db_open(struct apk_database *db, const char *root)
 	r = apk_db_read_state(db);
 	if (r != 0)
 		return r;
+
+	if (root != NULL) {
+		if (apk_repos == NULL)
+			apk_repos = "/etc/apk/repositories";
+		blob = apk_blob_from_file(apk_repos);
+		if (!APK_BLOB_IS_NULL(blob)) {
+			r = apk_blob_for_each_segment(blob, "\n",
+						      apk_db_add_repository, db);
+			free(blob.ptr);
+			if (r != 0)
+				return r;
+		}
+	}
 
 	if (apk_repository != NULL)
 		apk_db_add_repository(db, APK_BLOB_STR(apk_repository));
