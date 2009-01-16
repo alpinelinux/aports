@@ -108,7 +108,7 @@ struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *fil
 struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum);
 struct apk_package *apk_db_get_file_owner(struct apk_database *db, apk_blob_t filename);
 
-void apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
+int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 int apk_db_recalculate_and_commit(struct apk_database *db);
