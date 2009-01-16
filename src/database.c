@@ -638,6 +638,7 @@ int apk_db_open(struct apk_database *db, const char *root)
 	list_init(&db->installed.packages);
 
 	if (root != NULL) {
+		fchdir(apk_cwd_fd);
 		db->root = strdup(root);
 		db->root_fd = open(root, O_RDONLY);
 		if (db->root_fd < 0) {
