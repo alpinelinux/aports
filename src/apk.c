@@ -142,7 +142,7 @@ int main(int argc, char **argv)
 	while ((r = getopt_long(argc, argv, short_options,
 				generic_options, &optindex)) != -1) {
 		switch (r) {
-		case 'Q':
+		case 'p':
 			apk_root = optarg;
 			break;
 		case 'X':
