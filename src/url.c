@@ -47,10 +47,9 @@ static int fork_wget(const char *url)
 	if (pid == 0) {
 		setsid();
 		close(fds[0]);
-		dup2(open("/dev/null", O_WRONLY), STDERR_FILENO);
 		dup2(open("/dev/null", O_RDONLY), STDIN_FILENO);
 		dup2(fds[1], STDOUT_FILENO);
-		execlp("wget", "wget", "-O", "-", url, NULL);
+		execlp("wget", "wget", "-q", "-O", "-", url, NULL);
 		exit(0);
 	}
 
