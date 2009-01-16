@@ -97,7 +97,7 @@ static struct apk_applet *deduce_applet(int argc, char **argv)
 
 #define NUM_GENERIC_OPTS 5
 static struct option generic_options[32] = {
-	{ "root",	required_argument, 	NULL, 'Q' },
+	{ "root",	required_argument, 	NULL, 'p' },
 	{ "repository",	required_argument, 	NULL, 'X' },
 	{ "quiet",	no_argument,		NULL, 'q' },
 	{ "verbose",	no_argument,		NULL, 'v' },
