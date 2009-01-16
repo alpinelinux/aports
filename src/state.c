@@ -205,7 +205,7 @@ int apk_state_satisfy_name(struct apk_state *state,
 			   struct apk_name *name)
 {
 	struct apk_package *preferred = NULL, *installed = NULL;
-	int i, r, upgrading = 1;
+	int i, r;
 
 	/* Is something already installed? Or figure out the preferred
 	 * package. */
@@ -216,9 +216,9 @@ int apk_state_satisfy_name(struct apk_state *state,
 
 		if (apk_pkg_get_state(name->pkgs->item[i]) == APK_STATE_INSTALL) {
 			installed = name->pkgs->item[i];
-			if (!upgrading) {
+			if (!apk_upgrade) {
 				preferred = installed;
-				continue;
+				break;
 			}
 		}
 

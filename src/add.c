@@ -14,7 +14,7 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 
-#define FLAG_INITDB		0x001
+#define FLAG_INITDB		0x0001
 
 struct add_ctx {
 	unsigned int flags;
@@ -27,6 +27,9 @@ static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
 	switch (optch) {
 	case 0x10000:
 		actx->flags |= FLAG_INITDB;
+		break;
+	case 'u':
+		apk_upgrade = 1;
 		break;
 	default:
 		return -1;
@@ -73,8 +76,8 @@ static int add_main(void *ctx, int argc, char **argv)
 
 			dep = (struct apk_dependency) {
 				.name = pkg->name,
-				.version_mask = APK_VERSION_RESULT_MASK(APK_VERSION_EQUAL),
-				.version = pkg->version,
+				.min_version = pkg->version,
+				.max_version = pkg->version,
 			};
 		} else {
 			dep = (struct apk_dependency) {
@@ -91,11 +94,12 @@ err:
 
 static struct option add_options[] = {
 	{ "initdb",	no_argument,		NULL, 0x10000 },
+	{ "upgrade",	no_argument,		NULL, 'u' },
 };
 
 static struct apk_applet apk_add = {
 	.name = "add",
-	.usage = "[--initdb] apkname...",
+	.usage = "[--initdb] [--upgrade|-u] apkname...",
 	.context_size = sizeof(struct add_ctx),
 	.num_options = ARRAY_SIZE(add_options),
 	.options = add_options,

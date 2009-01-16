@@ -36,12 +36,9 @@ struct apk_script {
 };
 
 struct apk_dependency {
-	unsigned conflict : 1;
-	unsigned prefer_upgrade : 1;
-	unsigned version_mask : 3;
-
 	struct apk_name *name;
-	char *version;
+	char *min_version;
+	char *max_version;
 };
 APK_ARRAY(apk_dependency_array, struct apk_dependency);
 

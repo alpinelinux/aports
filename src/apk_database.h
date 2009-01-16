@@ -53,7 +53,6 @@ struct apk_db_dir_instance {
 
 struct apk_name {
 	apk_hash_node hash_node;
-
 	char *name;
 	struct apk_package_array *pkgs;
 };
