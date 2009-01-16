@@ -16,7 +16,6 @@
 #include "apk_database.h"
 
 struct counts {
-	int total;
 	int unsatisfied;
 };
 
@@ -34,7 +33,6 @@ static int warn_if_no_providers(apk_hash_item item, void *ctx)
 				    "not reporting the rest.");
 		}
 	}
-	counts->total++;
 
 	return 0;
 }
@@ -42,16 +40,16 @@ static int warn_if_no_providers(apk_hash_item item, void *ctx)
 static int index_main(void *ctx, int argc, char **argv)
 {
 	struct apk_database db;
-	struct counts counts = {0,0};
+	struct counts counts = {0};
 	struct apk_ostream *os;
-	int i;
+	int total, i;
 
 	apk_db_open(&db, NULL);
 	for (i = 0; i < argc; i++)
 		apk_db_pkg_add_file(&db, argv[i]);
 
 	os = apk_ostream_to_fd(STDOUT_FILENO);
-	apk_db_index_write(&db, os);
+	total = apk_db_index_write(&db, os);
 	os->close(os);
 
 	apk_hash_foreach(&db.available.names, warn_if_no_providers, &counts);
@@ -61,7 +59,7 @@ static int index_main(void *ctx, int argc, char **argv)
 		apk_warning("Total of %d unsatisfiable package "
 			    "names. Your repository maybe broken.",
 			    counts.unsatisfied);
-	apk_message("Index has %d packages", counts.total);
+	apk_message("Index has %d packages", total);
 
 	return 0;
 }

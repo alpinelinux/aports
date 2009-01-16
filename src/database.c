@@ -645,6 +645,15 @@ int apk_db_open(struct apk_database *db, const char *root)
 			free(db->root);
 			return -errno;
 		}
+
+		if (apk_repos == NULL)
+			apk_repos = "/etc/apk/repositories";
+		blob = apk_blob_from_file(apk_repos);
+		if (!APK_BLOB_IS_NULL(blob)) {
+			apk_blob_for_each_segment(blob, "\n",
+						  apk_db_add_repository, db);
+			free(blob.ptr);
+		}
 	}
 
 	blob = APK_BLOB_STR("etc:-etc/init.d");
@@ -653,14 +662,6 @@ int apk_db_open(struct apk_database *db, const char *root)
 	r = apk_db_read_state(db);
 	if (r != 0)
 		return r;
-
-	if (apk_repos == NULL)
-		apk_repos="/etc/apk/repositories";
-	blob = apk_blob_from_file(apk_repos);
-	if (!APK_BLOB_IS_NULL(blob)) {
-		apk_blob_for_each_segment(blob, "\n", apk_db_add_repository, db);
-		free(blob.ptr);
-	}
 
 	if (apk_repository != NULL)
 		apk_db_add_repository(db, APK_BLOB_STR(apk_repository));
@@ -775,25 +776,39 @@ struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *fil
 	return info;
 }
 
+struct index_write_ctx {
+	struct apk_ostream *os;
+	int count;
+};
+
 static int write_index_entry(apk_hash_item item, void *ctx)
 {
-	struct apk_ostream *os = (struct apk_ostream *) ctx;
+	struct index_write_ctx *iwctx = (struct index_write_ctx *) ctx;
+	struct apk_package *pkg = (struct apk_package *) item;
 	char buf[1024];
 	apk_blob_t blob;
 
-	blob = apk_pkg_format_index_entry(item, sizeof(buf), buf);
+	if (pkg->repos != 0)
+		return 0;
+
+	blob = apk_pkg_format_index_entry(pkg, sizeof(buf), buf);
 	if (APK_BLOB_IS_NULL(blob))
 		return 0;
 
-	if (os->write(os, blob.ptr, blob.len) != blob.len)
+	if (iwctx->os->write(iwctx->os, blob.ptr, blob.len) != blob.len)
 		return -1;
 
+	iwctx->count++;
 	return 0;
 }
 
-void apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
+int apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
 {
-	apk_hash_foreach(&db->available.packages, write_index_entry, (void *) os);
+	struct index_write_ctx ctx = { os, 0 };
+
+	apk_hash_foreach(&db->available.packages, write_index_entry, &ctx);
+
+	return ctx.count;
 }
 
 int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
