@@ -1076,7 +1076,7 @@ int apk_db_install_pkg(struct apk_database *db,
 	struct install_ctx ctx;
 	csum_t csum;
 	char file[256];
-	int r;
+	int r, i;
 
 	if (fchdir(db->root_fd) < 0)
 		return errno;
@@ -1097,9 +1097,20 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	/* Install the new stuff */
 	if (newpkg->filename == NULL) {
+		for (i = 0; i < APK_MAX_REPOS; i++)
+			if (newpkg->repos & BIT(i))
+				break;
+
+		if (i >= APK_MAX_REPOS) {
+			apk_error("%s-%s: not present in any repository",
+				  newpkg->name->name, newpkg->version);
+			return -1;
+		}
+
 		snprintf(file, sizeof(file),
 			 "%s/%s-%s.apk",
-			 db->repos[0].url, newpkg->name->name, newpkg->version);
+			 db->repos[i].url,
+			 newpkg->name->name, newpkg->version);
 		bs = apk_bstream_from_url(file);
 	} else
 		bs = apk_bstream_from_file(newpkg->filename);
