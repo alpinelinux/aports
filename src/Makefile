@@ -36,6 +36,9 @@ all: $(TARGETS)
 apk: $(apk_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
+apk.static: $(apk_OBJS)
+	$(CC) $(LDFLAGS) -static -o $@ $^ $(LIBS)
+
 clean::
 	@rm -f $(TARGETS) $(ALL_OBJS)
 

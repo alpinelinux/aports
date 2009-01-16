@@ -41,9 +41,12 @@ DOCDIR=/usr/share/doc/apk
 
 SUBDIRS=src
 
-.PHONY: compile install clean all
+.PHONY: compile install clean all static
 
 all: compile
+
+static:
+	$(MAKE) $(MFLAGS) -C src apk.static
 
 compile install clean::
 	@for i in $(SUBDIRS); do $(MAKE) $(MFLAGS) -C $$i $(MAKECMDGOALS); done
