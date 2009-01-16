@@ -556,6 +556,7 @@ int apk_db_create(const char *root)
 	int fd;
 
 	fchdir(apk_cwd_fd);
+	mkdir(root, 0755);
 	if (chdir(root) == -1)
 		return -errno;
 
