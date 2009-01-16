@@ -50,7 +50,7 @@ extern csum_t bad_checksum;
 #define csum_valid(buf)			memcmp(buf, bad_checksum, sizeof(csum_t))
 #endif
 
-extern int apk_cwd_fd, apk_verbosity, apk_progress;
+extern int apk_cwd_fd, apk_verbosity, apk_progress, apk_upgrade;
 
 #define apk_error(args...)	apk_log("ERROR: ", args);
 #define apk_warning(args...)	if (apk_verbosity > 0) { apk_log("WARNING: ", args); }

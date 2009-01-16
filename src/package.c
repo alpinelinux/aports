@@ -112,10 +112,7 @@ static int parse_depend(void *ctx, apk_blob_t blob)
 		return -1;
 
 	*dep = (struct apk_dependency){
-		.prefer_upgrade = 0,
-		.version_mask = 0,
 		.name = name,
-		.version = NULL,
 	};
 
 	return 0;

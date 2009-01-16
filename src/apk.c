@@ -23,7 +23,7 @@
 
 const char *apk_root;
 const char *apk_repository = NULL;
-int apk_verbosity = 1, apk_progress = 0;
+int apk_verbosity = 1, apk_progress = 0, apk_upgrade = 0;
 int apk_cwd_fd;
 
 void apk_log(const char *prefix, const char *format, ...)

@@ -15,9 +15,8 @@
 #include "apk_database.h"
 
 #define APK_STATE_NOT_CONSIDERED		0
-#define APK_STATE_PREFER_UPGRADE		1
-#define APK_STATE_INSTALL			2
-#define APK_STATE_NO_INSTALL			3
+#define APK_STATE_INSTALL			1
+#define APK_STATE_NO_INSTALL			2
 
 struct apk_change {
 	struct list_head change_list;
