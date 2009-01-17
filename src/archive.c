@@ -14,6 +14,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <utime.h>
 #include <malloc.h>
 #include <string.h>
 #include <unistd.h>
@@ -194,6 +195,7 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 			      const char *fn, apk_progress_cb cb,
 			      void *cb_ctx)
 {
+	struct utimbuf utb;
 	int r = -1, fd;
 
 	if (fn == NULL)
@@ -238,17 +240,34 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 			r = chown(fn, ae->uid, ae->gid);
 		else
 			r = lchown(fn, ae->uid, ae->gid);
-		if (r < 0)
-			apk_error("Failed to set ownership on %s: %s", fn, 
-					strerror(errno));
-		/* chown resets suid bit so we need set it again */
-		if (ae->mode & 07000)
-			r = chmod(fn, ae->mode & 07777);
-		if (r < 0)
-			apk_error("Failed to set file permissions on %s: %s", 
+		if (r < 0) {
+			apk_error("Failed to set ownership on %s: %s",
 				  fn, strerror(errno));
+			return -errno;
+		}
+
+		/* chown resets suid bit so we need set it again */
+		if (ae->mode & 07000) {
+			r = chmod(fn, ae->mode & 07777);
+			if (r < 0) {
+				apk_error("Failed to set file permissions "
+					  "on %s: %s",
+					  fn, strerror(errno));
+				return -errno;
+			}
+		}
+
+		/* preserve modification time */
+		utb.actime = utb.modtime = ae->mtime;
+		r = utime(fn, &utb);
+		if (r < 0) {
+			apk_error("Failed to preserve modification time on %s: %s",
+				  fn, strerror(errno));
+			return -errno;
+		}
 	} else {
-		apk_error("Failed to extract %s\n", ae->name);
+		apk_error("Failed to extract %s: %s", ae->name, strerror(errno));
+		return -errno;
 	}
-	return r;
+	return 0;
 }
