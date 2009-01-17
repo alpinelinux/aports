@@ -38,13 +38,17 @@ void apk_log(const char *prefix, const char *format, ...)
 	fprintf(stderr, "\n");
 }
 
+int version(void)
+{
+	printf("apk-tools " APK_VERSION "\n");
+	return 0;
+}
 int usage(void)
 {
 	struct apk_applet **a, *applet;
 
-	printf("apk-tools " APK_VERSION "\n"
-	       "\n"
-	       "Usage:\n");
+	version();
+	printf("\nUsage:\n");
 
 	for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
 		applet = *a;
@@ -95,12 +99,13 @@ static struct apk_applet *deduce_applet(int argc, char **argv)
 	return NULL;
 }
 
-#define NUM_GENERIC_OPTS 5
+#define NUM_GENERIC_OPTS 6
 static struct option generic_options[32] = {
 	{ "root",	required_argument, 	NULL, 'p' },
 	{ "repository",	required_argument, 	NULL, 'X' },
 	{ "quiet",	no_argument,		NULL, 'q' },
 	{ "verbose",	no_argument,		NULL, 'v' },
+	{ "version",	no_argument,		NULL, 'V' },
 	{ "progress",	no_argument,		NULL, 0x100 },
 };
 
@@ -117,14 +122,17 @@ int main(int argc, char **argv)
 	apk_root = getenv("ROOT");
 
 	applet = deduce_applet(argc, argv);
-	if (applet == NULL)
-		return usage();
+	if (applet != NULL) {
+		if (applet->num_options && applet->options) {
+			memcpy(&generic_options[NUM_GENERIC_OPTS],
+			       applet->options,
+			       applet->num_options * sizeof(struct option));
+		}
 
-	if (applet->num_options && applet->options) {
-		memcpy(&generic_options[NUM_GENERIC_OPTS],
-		       applet->options,
-		       applet->num_options * sizeof(struct option));
+		if (applet->context_size != 0)
+			ctx = calloc(1, applet->context_size);
 	}
+
 	for (opt = &generic_options[0], sopt = short_options;
 	     opt->name != NULL; opt++) {
 		if (opt->flag == NULL &&
@@ -134,9 +142,6 @@ int main(int argc, char **argv)
 				*(sopt++) = ':';
 		}
 	}
-
-	if (applet->context_size != 0)
-		ctx = calloc(1, applet->context_size);
 
 	optindex = 0;
 	while ((r = getopt_long(argc, argv, short_options,
@@ -154,11 +159,14 @@ int main(int argc, char **argv)
 		case 'v':
 			apk_verbosity++;
 			break;
+		case 'V':
+			return version();
+			break;
 		case 0x100:
 			apk_progress = 1;
 			break;
 		default:
-			if (applet->parse == NULL)
+			if (applet == NULL || applet->parse == NULL)
 				return usage();
 			if (applet->parse(ctx, r, optindex - NUM_GENERIC_OPTS,
 					  optarg) != 0)
@@ -166,6 +174,9 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
+
+	if (applet == NULL)
+		return usage();
 
 	if (apk_root == NULL)
 		apk_root = "/";
