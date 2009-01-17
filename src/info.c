@@ -111,7 +111,7 @@ static int info_main(void *ctx, int argc, char **argv)
 	struct apk_database db;
 	int r;
 
-	if (apk_db_open(&db, apk_root) < 0)
+	if (apk_db_open(&db, apk_root, APK_OPENF_READ) < 0)
 		return -1;
 
 	if (ictx->action != NULL)

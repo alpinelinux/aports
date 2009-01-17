@@ -116,7 +116,7 @@ static int audit_main(void *ctx, int argc, char **argv)
 		return 2;
 	}
 
-	r = apk_db_open(&db, apk_root);
+	r = apk_db_open(&db, apk_root, APK_OPENF_READ);
 	if (r != 0) {
 		apk_error("APK database not present");
 		return 1;

@@ -44,7 +44,7 @@ static int index_main(void *ctx, int argc, char **argv)
 	struct apk_ostream *os;
 	int total, i;
 
-	apk_db_open(&db, NULL);
+	apk_db_open(&db, NULL, APK_OPENF_READ);
 	for (i = 0; i < argc; i++)
 		apk_db_pkg_add_file(&db, argv[i]);
 

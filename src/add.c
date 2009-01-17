@@ -14,10 +14,8 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 
-#define FLAG_INITDB		0x0001
-
 struct add_ctx {
-	unsigned int flags;
+	unsigned int open_flags;
 };
 
 static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
@@ -26,7 +24,7 @@ static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
 
 	switch (optch) {
 	case 0x10000:
-		actx->flags |= FLAG_INITDB;
+		actx->open_flags |= APK_OPENF_CREATE;
 		break;
 	case 'u':
 		apk_upgrade = 1;
@@ -43,24 +41,9 @@ static int add_main(void *ctx, int argc, char **argv)
 	struct apk_database db;
 	int i, r, ret = 1;
 
-	r = apk_db_open(&db, apk_root);
-	if ((r == -ENOENT) && (actx->flags & FLAG_INITDB)) {
-		if (strcmp(apk_root, "/") == 0) {
-			apk_error("Will not recreate system root.");
-			return 1;
-		}
-		r = apk_db_create(apk_root);
-		if (r != 0) {
-			apk_error("Failed to create apkdb: %s",
-				  strerror(-r));
-			return 1;
-		}
-		r = apk_db_open(&db, apk_root);
-	}
-	if (r != 0) {
-		apk_error("APK database not present (use --initdb to create one)");
-		return 1;
-	}
+	r = apk_db_open(&db, apk_root, actx->open_flags | APK_OPENF_WRITE);
+	if (r != 0)
+		return r;
 
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;

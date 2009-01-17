@@ -43,7 +43,7 @@ static int ver_main(void *ctx, int argc, char **argv)
 		return 0;
 	}
 
-	if (apk_db_open(&db, apk_root) < 0)
+	if (apk_db_open(&db, apk_root, APK_OPENF_READ) < 0)
 		return -1;
 
 	list_for_each_entry(pkg, &db.installed.packages, installed_pkgs_list) {

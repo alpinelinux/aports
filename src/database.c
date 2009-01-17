@@ -17,6 +17,7 @@
 #include <malloc.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/file.h>
 
 #include "apk_defines.h"
 #include "apk_package.h"
@@ -550,40 +551,10 @@ static int apk_db_scriptdb_read(struct apk_database *db, struct apk_istream *is)
 	return 0;
 }
 
-int apk_db_create(const char *root)
-{
-	apk_blob_t deps = APK_BLOB_STR("busybox alpine-baselayout "
-				       "apk-tools alpine-conf\n");
-	int fd;
-
-	fchdir(apk_cwd_fd);
-	mkdir(root, 0755);
-	if (chdir(root) == -1)
-		return -errno;
-
-	mkdir("tmp", 01777);
-	mkdir("dev", 0755);
-	mknod("dev/null", 0666, makedev(1, 3));
-	mkdir("var", 0755);
-	mkdir("var/lib", 0755);
-	mkdir("var/lib/apk", 0755);
-
-	fd = creat("var/lib/apk/world", 0644);
-	if (fd < 0)
-		return -errno;
-	write(fd, deps.ptr, deps.len);
-	close(fd);
-
-	return 0;
-}
-
 static int apk_db_read_state(struct apk_database *db)
 {
 	struct apk_istream *is;
 	apk_blob_t blob;
-
-	if (db->root == NULL)
-		return 0;
 
 	/* Read:
 	 * 1. installed repository
@@ -624,10 +595,33 @@ static int add_protected_path(void *ctx, apk_blob_t blob)
 	return 0;
 }
 
-int apk_db_open(struct apk_database *db, const char *root)
+static int apk_db_create(struct apk_database *db)
+{
+	apk_blob_t deps = APK_BLOB_STR("busybox alpine-baselayout "
+				       "apk-tools alpine-conf");
+	int fd;
+
+	fchdir(db->root_fd);
+	mkdir("tmp", 01777);
+	mkdir("dev", 0755);
+	mknod("dev/null", 0666, makedev(1, 3));
+	mkdir("var", 0755);
+	mkdir("var/lib", 0755);
+	mkdir("var/lib/apk", 0755);
+
+	fd = creat("var/lib/apk/world", 0644);
+	if (fd < 0)
+		return -errno;
+	write(fd, deps.ptr, deps.len);
+	close(fd);
+
+	return 0;
+}
+
+int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 {
 	apk_blob_t blob;
-	const char *apk_repos = getenv("APK_REPOS");
+	const char *apk_repos = getenv("APK_REPOS"), *msg;
 	int r;
 
 	memset(db, 0, sizeof(*db));
@@ -641,20 +635,45 @@ int apk_db_open(struct apk_database *db, const char *root)
 		fchdir(apk_cwd_fd);
 		db->root = strdup(root);
 		db->root_fd = open(root, O_RDONLY);
+		if (db->root_fd < 0 && (flags & APK_OPENF_CREATE)) {
+			mkdir(db->root, 0755);
+			db->root_fd = open(root, O_RDONLY);
+		}
 		if (db->root_fd < 0) {
-			free(db->root);
-			return -errno;
+			msg = "Unable to open root";
+			goto ret_errno;
+		}
+
+		fchdir(db->root_fd);
+		if (flags & APK_OPENF_WRITE) {
+			db->lock_fd = open("var/lib/apk/lock",
+					   O_CREAT | O_WRONLY, 0400);
+			if (db->lock_fd < 0 ||
+			    flock(db->lock_fd, LOCK_EX | LOCK_NB) < 0) {
+				msg = "Unable to lock database";
+				goto ret_errno;
+			}
 		}
 	}
 
 	blob = APK_BLOB_STR("etc:-etc/init.d");
 	apk_blob_for_each_segment(blob, ":", add_protected_path, db);
 
-	r = apk_db_read_state(db);
-	if (r != 0)
-		return r;
-
 	if (root != NULL) {
+		r = apk_db_read_state(db);
+		if (r == -ENOENT && (flags & APK_OPENF_CREATE)) {
+			r = apk_db_create(db);
+			if (r != 0) {
+				msg = "Unable to create database";
+				goto ret_r;
+			}
+			r = apk_db_read_state(db);
+		}
+		if (r != 0) {
+			msg = "Unable to read database state";
+			goto ret_r;
+		}
+
 		if (apk_repos == NULL)
 			apk_repos = "/etc/apk/repositories";
 		blob = apk_blob_from_file(apk_repos);
@@ -662,15 +681,29 @@ int apk_db_open(struct apk_database *db, const char *root)
 			r = apk_blob_for_each_segment(blob, "\n",
 						      apk_db_add_repository, db);
 			free(blob.ptr);
-			if (r != 0)
-				return r;
+			if (r != 0) {
+				msg = "Unable to load repositories";
+				goto ret_r;
+			}
 		}
 	}
 
-	if (apk_repository != NULL)
-		apk_db_add_repository(db, APK_BLOB_STR(apk_repository));
+	if (apk_repository != NULL) {
+		r = apk_db_add_repository(db, APK_BLOB_STR(apk_repository));
+		if (r != 0) {
+			msg = "Unable to load repositories";
+			goto ret_r;
+		}
+	}
 
 	return 0;
+
+ret_errno:
+	r = -errno;
+ret_r:
+	apk_error("%s: %s", msg, strerror(-r));
+	apk_db_close(db);
+	return r;
 }
 
 struct write_ctx {
@@ -687,6 +720,11 @@ static int apk_db_write_config(struct apk_database *db)
 	if (db->root == NULL)
 		return 0;
 
+	if (db->lock_fd == 0) {
+		apk_error("Refusing to write db without write lock!");
+		return -1;
+	}
+
 	fchdir(db->root_fd);
 
 	os = apk_ostream_to_file("var/lib/apk/world", 0644);
@@ -698,11 +736,14 @@ static int apk_db_write_config(struct apk_database *db)
 	os->write(os, buf, n);
 	os->close(os);
 
-	os = apk_ostream_to_file("var/lib/apk/installed", 0644);
+	os = apk_ostream_to_file("var/lib/apk/installed.new", 0644);
 	if (os == NULL)
 		return -1;
 	apk_db_write_fdb(db, os);
 	os->close(os);
+
+	if (rename("var/lib/apk/installed.new", "var/lib/apk/installed") < 0)
+		return -errno;
 
 	os = apk_ostream_to_file("var/lib/apk/scripts", 0644);
 	if (os == NULL)
@@ -728,20 +769,25 @@ void apk_db_close(struct apk_database *db)
 
 	for (i = 0; i < db->num_repos; i++)
 		free(db->repos[i].url);
-	for (i = 0; i < db->protected_paths->num; i++)
-		free(db->protected_paths->item[i]);
-	free(db->protected_paths);
-	free(db->world);
+	if (db->protected_paths) {
+		for (i = 0; i < db->protected_paths->num; i++)
+			free(db->protected_paths->item[i]);
+		free(db->protected_paths);
+	}
+	if (db->world)
+		free(db->world);
 
 	apk_hash_free(&db->available.names);
 	apk_hash_free(&db->available.packages);
 	apk_hash_free(&db->installed.files);
 	apk_hash_free(&db->installed.dirs);
 
-	if (db->root != NULL) {
+	if (db->root_fd)
 		close(db->root_fd);
+	if (db->lock_fd)
+		close(db->lock_fd);
+	if (db->root != NULL)
 		free(db->root);
-	}
 }
 
 struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum)

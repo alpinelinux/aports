@@ -63,7 +63,7 @@ struct apk_repository {
 
 struct apk_database {
 	char *root;
-	int root_fd;
+	int root_fd, lock_fd;
 	unsigned pkg_id, num_repos;
 
 	struct apk_dependency_array *world;
@@ -100,8 +100,11 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 				      apk_blob_t dir,
 				      apk_blob_t name);
 
-int apk_db_create(const char *root);
-int apk_db_open(struct apk_database *db, const char *root);
+#define APK_OPENF_READ		0x0000
+#define APK_OPENF_WRITE		0x0001
+#define APK_OPENF_CREATE	0x0002
+
+int apk_db_open(struct apk_database *db, const char *root, unsigned int flags);
 void apk_db_close(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *file);
