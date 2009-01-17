@@ -241,6 +241,12 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 		if (r < 0)
 			apk_error("Failed to set ownership on %s: %s", fn, 
 					strerror(errno));
+		/* chown resets suid bit so we need set it again */
+		if (ae->mode & 07000)
+			r = chmod(fn, ae->mode & 07777);
+		if (r < 0)
+			apk_error("Failed to set file permissions on %s: %s", 
+				  fn, strerror(errno));
 	} else {
 		apk_error("Failed to extract %s\n", ae->name);
 	}
