@@ -100,9 +100,8 @@ void apk_hash_delete(struct apk_hash *h, apk_blob_t key)
 			if (h->ops->compare_item(item, key) == 0) {
 				hlist_del(pos, &h->buckets->item[hash]);
 				h->ops->delete_item(item);
-				return;
+				break;
 			}
-
 		}
 	} else {
 		hlist_for_each(pos, &h->buckets->item[hash]) {
@@ -111,7 +110,7 @@ void apk_hash_delete(struct apk_hash *h, apk_blob_t key)
 			if (h->ops->compare(key, itemkey) == 0) {
 				hlist_del(pos, &h->buckets->item[hash]);
 				h->ops->delete_item(item);
-				return;
+				break;
 			}
 		}
 	}

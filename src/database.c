@@ -1051,8 +1051,6 @@ static void apk_db_purge_pkg(struct apk_database *db,
 				 diri->dir->dirname,
 				 file->filename);
 
-			file->diri = NULL;
-
 			key = (struct apk_db_file_hash_key) {
 				.dirname = APK_BLOB_STR(diri->dir->dirname),
 				.filename = APK_BLOB_STR(file->filename),
@@ -1061,7 +1059,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 					APK_BLOB_BUF(&key));
 			unlink(name);
 			__hlist_del(fc, &diri->owned_files.first);
-
+			file->diri = NULL;
 			db->installed.stats.files--;
 		}
 		apk_db_diri_rmdir(diri);
