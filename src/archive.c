@@ -257,13 +257,15 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 			}
 		}
 
-		/* preserve modification time */
-		utb.actime = utb.modtime = ae->mtime;
-		r = utime(fn, &utb);
-		if (r < 0) {
-			apk_error("Failed to preserve modification time on %s: %s",
-				  fn, strerror(errno));
-			return -errno;
+		if (!S_ISLNK(ae->mode)) {
+			/* preserve modification time */
+			utb.actime = utb.modtime = ae->mtime;
+			r = utime(fn, &utb);
+			if (r < 0) {
+				apk_error("Failed to preserve modification time on %s: %s",
+					fn, strerror(errno));
+				return -errno;
+			}
 		}
 	} else {
 		apk_error("Failed to extract %s: %s", ae->name, strerror(errno));
