@@ -1049,16 +1049,19 @@ static int apk_db_install_archive_entry(void *_ctx,
 		}
 
 		if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
-		    csum_valid(file->csum) &&
-		    apk_file_get_info(ae->name, &fi) == 0 &&
-		    memcmp(file->csum, fi.csum, sizeof(csum_t)) != 0) {
-			/* Protected file, which is modified locally.
-			 * Extract to separate place */
+		    apk_file_get_info(ae->name, &fi) == 0) {
+			/* Protected file. Extract to separate place */
 			snprintf(alt_name, sizeof(alt_name),
 				 "%s/%s.apk-new",
 				 diri->dir->dirname, file->filename);
 			r = apk_archive_entry_extract(ae, is, alt_name,
 						      extract_cb, ctx);
+			if (memcmp(ae->csum, fi.csum, sizeof(csum_t)) == 0) {
+				/* not modified locally. rename to original */
+				if (rename(alt_name, ae->name) < 0)
+					apk_warning("%s: %s", ae->name, 
+						    strerror(errno));
+		    	}
 		} else {
 			r = apk_archive_entry_extract(ae, is, NULL,
 						      extract_cb, ctx);
