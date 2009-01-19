@@ -22,7 +22,7 @@ install: $(USR_BIN_FILES) abuild.conf APKBUILD.proto functions.sh
 	for i in $(USR_BIN_FILES); do\
 		install -m 755 $$i $(DESTDIR)/$(prefix)/bin/$$i;\
 	done
-	if [ -z "$(DESTDIR)" ] && [ ! -f "/$(sysconfdir)"/abuild.conf ]; then\
+	if [ -n "$(DESTDIR)" ] || [ ! -f "/$(sysconfdir)"/abuild.conf ]; then\
 		cp abuild.conf $(DESTDIR)/$(sysconfdir)/; \
 	fi
 	cp APKBUILD.proto $(DESTDIR)/$(prefix)/share/abuild
