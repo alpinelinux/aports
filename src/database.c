@@ -648,6 +648,16 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 		if (flags & APK_OPENF_WRITE) {
 			db->lock_fd = open("var/lib/apk/lock",
 					   O_CREAT | O_WRONLY, 0400);
+			if (db->lock_fd < 0 && errno == ENOENT &&
+			    (flags & APK_OPENF_CREATE)) {
+				r = apk_db_create(db);
+				if (r != 0) {
+					msg = "Unable to create database";
+					goto ret_r;
+				}
+				db->lock_fd = open("var/lib/apk/lock",
+						   O_CREAT | O_WRONLY, 0400);
+			}
 			if (db->lock_fd < 0 ||
 			    flock(db->lock_fd, LOCK_EX | LOCK_NB) < 0) {
 				msg = "Unable to lock database";
