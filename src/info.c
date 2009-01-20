@@ -118,7 +118,8 @@ static int info_contents(struct apk_database *db, int argc, char **argv)
 		}
 		for (j = 0; j < name->pkgs->num; j++) {
 			struct apk_package *pkg = name->pkgs->item[j];
-			if (apk_verbosity == 1)
+			if (apk_verbosity == 1 
+			    && apk_pkg_get_state(pkg) == APK_STATE_INSTALL)
 				printf("\n%s-%s contains:\n", pkg->name->name,
 					pkg->version);
 			info_print_contents(name->pkgs->item[j]);
