@@ -88,6 +88,45 @@ static int info_who_owns(struct apk_database *db, int argc, char **argv)
 	return 0;
 }
 
+static void info_print_contents(struct apk_package *pkg)
+{
+	struct apk_db_dir_instance *diri;
+	struct apk_db_file *file;
+	struct hlist_node *dc, *dn, *fc, *fn;
+
+	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs,
+				  pkg_dirs_list) {
+		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files,
+					  diri_files_list) {
+			if (apk_verbosity > 1)
+				printf("%s ", pkg->name->name);
+			printf("%s/%s\n", diri->dir->dirname, file->filename);
+		}
+	}
+}
+
+static int info_contents(struct apk_database *db, int argc, char **argv)
+{
+	struct apk_name *name;
+	int i, j;
+
+	for (i = 0; i < argc; i++) {
+		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
+                 if (name == NULL) {
+		 	apk_error("Not found: %s", name);
+			return 1;
+		}
+		for (j = 0; j < name->pkgs->num; j++) {
+			struct apk_package *pkg = name->pkgs->item[j];
+			if (apk_verbosity == 1)
+				printf("\n%s-%s contains:\n", pkg->name->name,
+					pkg->version);
+			info_print_contents(name->pkgs->item[j]);
+		}
+	}
+	return 0;
+}
+
 static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
@@ -98,6 +137,9 @@ static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 		break;
 	case 'W':
 		ictx->action = info_who_owns;
+		break;
+	case 'L':
+		ictx->action = info_contents;
 		break;
 	default:
 		return -1;
@@ -124,6 +166,7 @@ static int info_main(void *ctx, int argc, char **argv)
 }
 
 static struct option info_options[] = {
+	{ "contents",	no_argument,		NULL, 'L' },
 	{ "installed",	no_argument,		NULL, 'e' },
 	{ "who-owns",	no_argument,		NULL, 'W' },
 };
