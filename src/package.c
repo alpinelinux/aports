@@ -13,7 +13,6 @@
 #include <fcntl.h>
 #include <ctype.h>
 #include <stdio.h>
-#include <limits.h>
 #include <malloc.h>
 #include <string.h>
 #include <stdlib.h>
@@ -326,16 +325,12 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 {
 	struct read_info_ctx ctx;
 	struct apk_bstream *bs;
-	char realfile[PATH_MAX];
-
-	if (realpath(file, realfile) < 0)
-		return NULL;
 
 	ctx.pkg = apk_pkg_new();
 	if (ctx.pkg == NULL)
 		return NULL;
 
-	bs = apk_bstream_from_file(realfile);
+	bs = apk_bstream_from_file(file);
 	if (bs == NULL)
 		goto err;
 
@@ -360,7 +355,7 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 		};
 		apk_deps_add(&ctx.pkg->depends, &dep);
 	}
-	ctx.pkg->filename = strdup(realfile);
+	ctx.pkg->filename = strdup(file);
 
 	return ctx.pkg;
 err:
