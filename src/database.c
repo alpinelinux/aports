@@ -706,6 +706,7 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 		}
 	}
 
+	fchdir(apk_cwd_fd);
 	return 0;
 
 ret_errno:
@@ -713,6 +714,7 @@ ret_errno:
 ret_r:
 	apk_error("%s: %s", msg, strerror(-r));
 	apk_db_close(db);
+	fchdir(apk_cwd_fd);
 	return r;
 }
 
