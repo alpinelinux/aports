@@ -253,10 +253,8 @@ static void apk_db_diri_set(struct apk_db_dir_instance *diri, mode_t mode,
 
 static void apk_db_diri_mkdir(struct apk_db_dir_instance *diri)
 {
-	if (diri->dir->refs == 1) {
-		mkdir(diri->dir->dirname, diri->mode);
+	if (mkdir(diri->dir->dirname, diri->mode) == 0)
 		chown(diri->dir->dirname, diri->uid, diri->gid);
-	}
 }
 
 static void apk_db_diri_rmdir(struct apk_db_dir_instance *diri)
