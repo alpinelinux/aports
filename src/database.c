@@ -1120,18 +1120,17 @@ static void apk_db_purge_pkg(struct apk_database *db,
 				.dirname = APK_BLOB_STR(diri->dir->dirname),
 				.filename = APK_BLOB_STR(file->filename),
 			};
-			apk_hash_delete(&db->installed.files,
-					APK_BLOB_BUF(&key));
 			unlink(name);
 			if (apk_verbosity > 1)
 				printf("%s\n", name);
 			__hlist_del(fc, &diri->owned_files.first);
-			file->diri = NULL;
+			apk_hash_delete(&db->installed.files,
+					APK_BLOB_BUF(&key));
 			db->installed.stats.files--;
 		}
 		apk_db_diri_rmdir(diri);
-		apk_db_dir_unref(db, diri->dir);
 		__hlist_del(dc, &pkg->owned_dirs.first);
+		apk_db_diri_free(db, diri);
 	}
 	apk_pkg_set_state(db, pkg, APK_STATE_NO_INSTALL);
 }
