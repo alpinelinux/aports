@@ -1057,6 +1057,9 @@ static int apk_db_install_archive_entry(void *_ctx,
 			apk_db_file_change_owner(db, file, diri,
 						 &ctx->file_diri_node);
 		}
+		
+		if (apk_verbosity > 1)
+			printf("%s\n", ae->name);
 
 		if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
 		    apk_file_get_info(ae->name, &fi) == 0) {
@@ -1078,6 +1081,9 @@ static int apk_db_install_archive_entry(void *_ctx,
 		}
 		memcpy(file->csum, ae->csum, sizeof(csum_t));
 	} else {
+		if (apk_verbosity > 1)
+			printf("%s\n", ae->name);
+
 		if (name.ptr[name.len-1] == '/')
 			name.len--;
 
@@ -1117,6 +1123,8 @@ static void apk_db_purge_pkg(struct apk_database *db,
 			apk_hash_delete(&db->installed.files,
 					APK_BLOB_BUF(&key));
 			unlink(name);
+			if (apk_verbosity > 1)
+				printf("%s\n", name);
 			__hlist_del(fc, &diri->owned_files.first);
 			file->diri = NULL;
 			db->installed.stats.files--;
