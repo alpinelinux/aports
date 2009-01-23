@@ -96,6 +96,7 @@ $(INITFS_DIRSTAMP): $(INITFS_APKS)
 	done
 	@rm -f "$(INITFS_DIR)/.PKGINFO"
 	@mknod $(INITFS_DIR)/dev/null c 1 3
+	@mkdir -p "$(INITFS_DIR)/etc"
 	@echo floppy >> "$(INITFS_DIR)/etc/modules"
 	@touch $(INITFS_DIRSTAMP)
 
