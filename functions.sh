@@ -13,22 +13,22 @@ fi
 # functions
 msg() {
 	local prompt="$GREEN>>>${NORMAL}"
-	local fake="${FAKEROOTKEY:+${BLUE}(fakeroot)${NORMAL} }"
+	local fake="${FAKEROOTKEY:+${BLUE}*${NORMAL}}"
 	local name="${STRONG}${subpkgname:-$pkgname}${NORMAL}"
-	[ -z "$quiet" ] && printf "${prompt} ${fake}${name}: $@\n" >&2
+	[ -z "$quiet" ] && printf "${prompt} ${name}${fake}: $@\n" >&2
 }
 
 warning() {
-	local prompt="${YELLOW}>>> WARNING: ${NORMAL}"
-	local fake="${FAKEROOTKEY:+${BLUE}(fakeroot)${NORMAL} }"
+	local prompt="${YELLOW}>>> WARNING:${NORMAL}"
+	local fake="${FAKEROOTKEY:+${BLUE}*${NORMAL}}"
 	local name="${STRONG}${subpkgname:-$pkgname}${NORMAL}"
-	printf "${prompt} ${fake}${name}: $@\n" >&2
+	printf "${prompt} ${name}${fake}: $@\n" >&2
 }
 
 error() {
-	local prompt="${RED}>>> ERROR: ${NORMAL}"
-	local fake="${FAKEROOTKEY:+${BLUE}(fakeroot)${NORMAL} }"
+	local prompt="${RED}>>> ERROR:${NORMAL}"
+	local fake="${FAKEROOTKEY:+${BLUE}*${NORMAL}}"
 	local name="${STRONG}${subpkgname:-$pkgname}${NORMAL}"
-	printf "${prompt} ${fake}${name}: $@\n" >&2
+	printf "${prompt} ${name}${fake}: $@\n" >&2
 }
 
