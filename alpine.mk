@@ -2,10 +2,14 @@
 
 -include alpine.conf.mk
 
-ISO		?= alpine-test.iso
+BUILD_DATE	:= $(shell date +%y%m%d)
+ALPINE_RELEASE	?= $(BUILD_DATE)
+ALPINE_NAME	?= alpine-test
 DESTDIR		?= $(shell pwd)/isotmp
 APKDIRS		?= ../aports/core/*/
 
+ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE).iso
+ISO_LINK	?= $(ALPINE_NAME).iso
 ISO_DIR		:= $(DESTDIR)/isofs
 
 find_apk	= $(firstword $(wildcard $(addprefix $(APKDIRS),$(1)-[0-9]*.apk)))
@@ -186,6 +190,8 @@ $(ISO_KERNEL): $(KERNEL_APK)
 
 $(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_APKS)
 	@echo "==> iso: building $(notdir $(ISO))"
+	@echo "$(ALPINE_NAME)-$(ALPINE_RELEASE) $(BUILD_DATE)" \
+		> $(ISO_DIR)/.alpine-release
 	@genisoimage -o $(ISO) -l -J -R \
 		-b isolinux/isolinux.bin \
 		-c isolinux/boot.cat	\
@@ -194,4 +200,5 @@ $(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO
 		-boot-info-table	\
 		-quiet			\
 		$(ISO_DIR)
+	@ln -fs $@ $(ISO_LINK)
 
