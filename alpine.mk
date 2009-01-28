@@ -1,5 +1,7 @@
 #!/usr/bin/make -f
 
+-include alpine.conf.mk
+
 ISO		?= alpine-test.iso
 DESTDIR		?= $(shell pwd)/isotmp
 APKDIRS		?= ../aports/core/*/
