@@ -2,7 +2,8 @@
 PACKAGE=abuild
 VERSION:=$(shell  awk -F= '$$1 == "abuild_ver" {print $$2}' abuild)
 USR_BIN_FILES=abuild devbuild mkalpine buildrepo
-DISTFILES=$(USR_BIN_FILES) Makefile abuild.conf APKBUILD.proto 
+SAMPLES=sample.APKBUILD sample.initd sample.confd sample.install
+DISTFILES=$(USR_BIN_FILES) $(SAMPLES) Makefile abuild.conf \
 
 
 prefix ?= /usr
@@ -16,7 +17,7 @@ help:
 	@echo "usage: make install [ DESTDIR=<path> ]"
 	@echo "       make dist"
 
-install: $(USR_BIN_FILES) abuild.conf APKBUILD.proto functions.sh
+install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	mkdir -p $(DESTDIR)/$(prefix)/bin $(DESTDIR)/$(sysconfdir) \
 		$(DESTDIR)/$(datadir)
 	for i in $(USR_BIN_FILES); do\
@@ -25,7 +26,7 @@ install: $(USR_BIN_FILES) abuild.conf APKBUILD.proto functions.sh
 	if [ -n "$(DESTDIR)" ] || [ ! -f "/$(sysconfdir)"/abuild.conf ]; then\
 		cp abuild.conf $(DESTDIR)/$(sysconfdir)/; \
 	fi
-	cp APKBUILD.proto $(DESTDIR)/$(prefix)/share/abuild
+	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild
 	cp functions.sh $(DESTDIR)/$(datadir)/
 
 dist:	$(P).tar.bz2

@@ -9,7 +9,6 @@ pkgname=NAME
 pkgver=VERSION
 pkgrel=0
 pkgdesc=""
-arch=""
 url=""
 license="GPL"
 depends=""
@@ -27,6 +26,9 @@ build() {
 		--infodir=/usr/share/info
 	make || return 1
 	make DESTDIR="$pkgdir" install
+
+	# install -m755 -D "$srcdir"/$pkgname.initd "$pkgdir"/etc/init.d/$pkgname
+	# install -m644 -D "$srcdir"/$pkgname.confd "$pkgdir"/etc/conf.d/$pkgname
 }
 
 md5sums="" #generate with 'abuild checksum'
