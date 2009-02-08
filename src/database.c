@@ -1047,8 +1047,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 
 		if (file->diri != diri) {
 			opkg = file->diri->pkg;
-			if (opkg->name != pkg->name &&
-			    strcmp(opkg->name->name, "busybox") != 0) {
+			if (opkg->name != pkg->name) {
 				apk_error("%s: Trying to overwrite %s owned by %s.\n",
 					  pkg->name->name, ae->name, opkg->name->name);
 				return -1;
