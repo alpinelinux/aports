@@ -94,15 +94,19 @@ static void info_print_contents(struct apk_package *pkg)
 	struct apk_db_file *file;
 	struct hlist_node *dc, *dn, *fc, *fn;
 
+	if (apk_verbosity == 1)
+		printf("%s-%s contains:\n", pkg->name->name, pkg->version);
+
 	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs,
 				  pkg_dirs_list) {
 		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files,
 					  diri_files_list) {
 			if (apk_verbosity > 1)
-				printf("%s ", pkg->name->name);
+				printf("%s: ", pkg->name->name);
 			printf("%s/%s\n", diri->dir->dirname, file->filename);
 		}
 	}
+	puts("");
 }
 
 static int info_contents(struct apk_database *db, int argc, char **argv)
@@ -118,11 +122,8 @@ static int info_contents(struct apk_database *db, int argc, char **argv)
 		}
 		for (j = 0; j < name->pkgs->num; j++) {
 			struct apk_package *pkg = name->pkgs->item[j];
-			if (apk_verbosity == 1 
-			    && apk_pkg_get_state(pkg) == APK_STATE_INSTALL)
-				printf("\n%s-%s contains:\n", pkg->name->name,
-					pkg->version);
-			info_print_contents(name->pkgs->item[j]);
+			if (apk_pkg_get_state(pkg) == APK_STATE_INSTALL)
+				info_print_contents(pkg);
 		}
 	}
 	return 0;
