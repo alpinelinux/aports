@@ -112,7 +112,7 @@ static int info_contents(struct apk_database *db, int argc, char **argv)
 
 	for (i = 0; i < argc; i++) {
 		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-                 if (name == NULL) {
+		if (name == NULL) {
 		 	apk_error("Not found: %s", name);
 			return 1;
 		}
@@ -128,6 +128,43 @@ static int info_contents(struct apk_database *db, int argc, char **argv)
 	return 0;
 }
 
+static void info_print_depends(struct apk_package *pkg)
+{
+	int i;
+	char *separator = apk_verbosity > 1 ? " " : "\n";
+	if (apk_verbosity == 1) 
+		printf("%s-%s depends on:\n", pkg->name->name, pkg->version);
+	if (pkg->depends == NULL)
+		return;
+	if (apk_verbosity > 1)
+		printf("%s: ", pkg->name->name);
+	for (i = 0; i < pkg->depends->num; i++) {
+		printf("%s%s", pkg->depends->item[i].name->name, separator);
+	}
+	puts("");
+}
+
+static int info_depends(struct apk_database *db, int argc, char **argv)
+{
+	struct apk_name *name;
+	int i, j;
+
+	for (i = 0; i < argc; i++) {
+		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
+		if (name == NULL) {
+		 	apk_error("Not found: %s", argv[i]);
+			return 1;
+		}
+		for (j = 0; j < name->pkgs->num; j++) {
+			struct apk_package *pkg = name->pkgs->item[j];
+			if (apk_pkg_get_state(pkg) == APK_STATE_INSTALL) 
+				info_print_depends(pkg);
+		}
+	}
+	return 0;
+}
+
+
 static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
@@ -141,6 +178,9 @@ static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 		break;
 	case 'L':
 		ictx->action = info_contents;
+		break;
+	case 'R':
+		ictx->action = info_depends;
 		break;
 	default:
 		return -1;
@@ -170,6 +210,7 @@ static struct option info_options[] = {
 	{ "contents",	no_argument,		NULL, 'L' },
 	{ "installed",	no_argument,		NULL, 'e' },
 	{ "who-owns",	no_argument,		NULL, 'W' },
+	{ "depends",	no_argument,		NULL, 'R' },
 };
 
 static struct apk_applet apk_info = {
