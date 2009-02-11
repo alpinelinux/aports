@@ -87,6 +87,7 @@ $(MODLOOP): $(MODLOOP_DIRSTAMP)
 	@mkdir -p $(dir $(MODLOOP))
 	@mkcramfs $(MODLOOP_DIR)/lib $(MODLOOP)
 
+modloop: $(MODLOOP)
 #
 # Initramfs rules
 #
