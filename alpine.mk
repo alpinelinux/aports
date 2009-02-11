@@ -6,6 +6,7 @@ BUILD_DATE	:= $(shell date +%y%m%d)
 ALPINE_RELEASE	?= $(BUILD_DATE)
 ALPINE_NAME	?= alpine-test
 DESTDIR		?= $(shell pwd)/isotmp
+APORTS_DIR	?= $(HOME)/aports
 APKDIRS		?= ../aports/core/*/
 
 ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE).iso
@@ -14,10 +15,11 @@ ISO_DIR		:= $(DESTDIR)/isofs
 
 find_apk	= $(firstword $(wildcard $(addprefix $(APKDIRS),$(1)-[0-9]*.apk)))
 
-KERNEL_FLAVOR	?= linux-grsec
-KERNEL_NAME	:= $(subst linux-,,$(KERNEL_FLAVOR))
-KERNEL_APK	:= $(call find_apk,$(KERNEL_FLAVOR))
-MODULE_APK	:= $(wildcard $(subst /$(KERNEL_FLAVOR)-,/$(KERNEL_FLAVOR)-mod-,$(KERNEL_APK)))
+KERNEL_FLAVOR	?= grsec
+KERNEL_PKGNAME	?= linux-$(KERNEL_FLAVOR)
+KERNEL_NAME	:= $(subst linux-,,$(KERNEL_PKGNAME))
+KERNEL_APK	:= $(call find_apk,$(KERNEL_PKGNAME))
+MODULE_APK	:= $(wildcard $(subst /$(KERNEL_PKGNAME)-,/$(KERNEL_PKGNAME)-mod-,$(KERNEL_APK)))
 KERNEL		:= $(word 3,$(subst -, ,$(notdir $(KERNEL_APK))))-$(word 2,$(subst -, ,$(notdir $(KERNEL_APK))))
 
 ALPINEBASELAYOUT_APK := $(call find_apk,alpine-baselayout)
@@ -39,8 +41,6 @@ help:
 	@echo
 	@echo "Type 'make' to build $(ISO)"
 	@echo
-	@echo "kernel: $(KERNEL_NAME)"
-	@echo
 	@echo "I will use the following sources files:"
 	@echo " 1. $(notdir $(KERNEL_APK)) (looks like $(KERNEL))"
 	@echo " 2. $(notdir $(MODULE_APK))"
@@ -53,6 +53,11 @@ else
 	@echo " 6. $(APK_BIN)"
 endif
 	@echo
+	@echo "ALPINE_NAME:    $(ALPINE_NAME)"
+	@echo "ALPINE_RELEASE: $(ALPINE_RELEASE)"
+	@echo "KERNEL_FLAVOR:  $(KERNEL_FLAVOR)"
+	@echo "APORTS_DIR:     $(APORTS_DIR)"
+	@echo
 
 clean:
 	rm -rf $(MODLOOP) $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) \
@@ -62,7 +67,6 @@ clean:
 #
 # Repos
 #
-APORTS_DIR	:=
 REPOS_DIR	:= $(ISO_DIR)/packages
 REPOS_DIRSTAMP	:= $(DESTDIR)/stamp.repos
 
@@ -158,6 +162,7 @@ $(INITFS): $(INITFS_DIRSTAMP) $(INITFS_DIR)/init $(INITFS_DIR)/sbin/apk $(INITFS
 	@echo "==> initramfs: creating $(notdir $(INITFS))"
 	@(cd $(INITFS_DIR) && find . | cpio -o -H newc | gzip -9) > $(INITFS)
 
+initfs: $(INITFS)
 #
 # ISO rules
 #
@@ -215,3 +220,4 @@ $(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO
 		$(ISO_DIR)
 	@ln -fs $@ $(ISO_LINK)
 
+iso: $(ISO)
