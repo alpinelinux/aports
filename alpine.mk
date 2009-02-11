@@ -14,8 +14,10 @@ ISO_DIR		:= $(DESTDIR)/isofs
 
 find_apk	= $(firstword $(wildcard $(addprefix $(APKDIRS),$(1)-[0-9]*.apk)))
 
-KERNEL_APK	:= $(call find_apk,linux-grsec)
-MODULE_APK	:= $(wildcard $(subst /linux-grsec-,/linux-grsec-mod-,$(KERNEL_APK)))
+KERNEL_FLAVOR	?= linux-grsec
+KERNEL_NAME	:= $(subst linux-,,$(KERNEL_FLAVOR))
+KERNEL_APK	:= $(call find_apk,$(KERNEL_FLAVOR))
+MODULE_APK	:= $(wildcard $(subst /$(KERNEL_FLAVOR)-,/$(KERNEL_FLAVOR)-mod-,$(KERNEL_APK)))
 KERNEL		:= $(word 3,$(subst -, ,$(notdir $(KERNEL_APK))))-$(word 2,$(subst -, ,$(notdir $(KERNEL_APK))))
 
 ALPINEBASELAYOUT_APK := $(call find_apk,alpine-baselayout)
@@ -37,6 +39,8 @@ help:
 	@echo
 	@echo "Type 'make' to build $(ISO)"
 	@echo
+	@echo "kernel: $(KERNEL_NAME)"
+	@echo
 	@echo "I will use the following sources files:"
 	@echo " 1. $(notdir $(KERNEL_APK)) (looks like $(KERNEL))"
 	@echo " 2. $(notdir $(MODULE_APK))"
@@ -54,6 +58,13 @@ clean:
 	rm -rf $(MODLOOP) $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) \
 		$(INITFS) $(INITFS_DIRSTAMP) $(INITFS_DIR) \
 		$(ISO_DIR)
+
+#
+# Repos
+#
+APORTS_DIR	:=
+REPOS_DIR	:= $(ISO_DIR)/packages
+REPOS_DIRSTAMP	:= $(DESTDIR)/stamp.repos
 
 #
 # Modloop
@@ -164,12 +175,12 @@ $(ISOLINUX_CFG):
 	@mkdir -p $(dir $(ISOLINUX_BIN))
 	@echo "timeout 20" >$(ISOLINUX_CFG)
 	@echo "prompt 1" >>$(ISOLINUX_CFG)
-	@echo "default linux" >>$(ISOLINUX_CFG)
-	@echo "label linux" >>$(ISOLINUX_CFG)
-	@echo "	kernel /boot/vmlinuz" >>$(ISOLINUX_CFG)
+	@echo "default $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
+	@echo "label $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
+	@echo "	kernel /boot/$(KERNAL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "	append initrd=/boot/initramfs.gz alpine_dev=cdrom modules=floppy quiet" >>$(ISOLINUX_CFG)
 
-ISO_KERNEL	:= $(ISO_DIR)/boot/vmlinuz
+ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
 ISO_APKS	:= $(ISO_DIR)/apks
 ISO_APKINDEX	:= $(ISO_APKS)/APK_INDEX.gz
 
@@ -185,7 +196,8 @@ $(ISO_APKS): $(SOURCE_APKS)
 $(ISO_KERNEL): $(KERNEL_APK)
 	@echo "==> iso: install kernel $(KERNEL)"
 	@mkdir -p $(dir $(ISO_KERNEL))
-	@tar -C $(ISO_DIR) -xzf $(KERNEL_APK) boot/vmlinuz boot/System.map
+	@tar -C $(ISO_DIR) -xzf $(KERNEL_APK)
+	@rm -f $(ISO_DIR)/.[A-Z]*
 	@touch $(ISO_KERNEL)
 
 $(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_APKS)
