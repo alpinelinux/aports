@@ -7,19 +7,27 @@ ALPINE_RELEASE	?= $(BUILD_DATE)
 ALPINE_NAME	?= alpine-test
 DESTDIR		?= $(shell pwd)/isotmp
 APORTS_DIR	?= $(HOME)/aports
-APKDIRS		?= ../aports/core/*/
+REPOS		?= core extra
+
+# this might need to change...
+APKDIRS		?= $(REPOS_DIR)/*/
 
 ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE).iso
 ISO_LINK	?= $(ALPINE_NAME).iso
 ISO_DIR		:= $(DESTDIR)/isofs
+REPOS_DIR	:= $(ISO_DIR)/packages
 
-find_apk	= $(firstword $(wildcard $(addprefix $(APKDIRS),$(1)-[0-9]*.apk)))
+#find_apk	= $(firstword $(wildcard $(addprefix $(APKDIRS),$(1)-[0-9]*.apk)))
+# limitations for find_apk:
+# must be in core repository
+# can not be a subpackage
+find_apk	= $(shell . $(APORTS_DIR)/core/$(1)/APKBUILD && echo $(REPOS_DIR)/core/$(1)-$$pkgver-r$$pkgrel.apk)
 
 KERNEL_FLAVOR	?= grsec
 KERNEL_PKGNAME	?= linux-$(KERNEL_FLAVOR)
-KERNEL_NAME	:= $(subst linux-,,$(KERNEL_PKGNAME))
+KERNEL_NAME	:= $(KERNEL_FLAVOR)
 KERNEL_APK	:= $(call find_apk,$(KERNEL_PKGNAME))
-MODULE_APK	:= $(wildcard $(subst /$(KERNEL_PKGNAME)-,/$(KERNEL_PKGNAME)-mod-,$(KERNEL_APK)))
+MODULE_APK	:= $(subst /$(KERNEL_PKGNAME)-,/$(KERNEL_PKGNAME)-mod-,$(KERNEL_APK))
 KERNEL		:= $(word 3,$(subst -, ,$(notdir $(KERNEL_APK))))-$(word 2,$(subst -, ,$(notdir $(KERNEL_APK))))
 
 ALPINEBASELAYOUT_APK := $(call find_apk,alpine-baselayout)
@@ -27,12 +35,13 @@ UCLIBC_APK	:= $(call find_apk,uclibc)
 BUSYBOX_APK	:= $(call find_apk,busybox)
 APK_TOOLS_APK	:= $(call find_apk,apk-tools)
 
-SOURCE_APKS	:= $(wildcard $(APKDIRS)/*apk)
-APK_BIN		:= $(shell which apk)
+SOURCE_APKBUILDS := $(wildcard $(addprefix $(APORTS_DIR)/,$(REPOS))/*/APKBUILD)
+SOURCE_APKS	= $(wildcard $(APKDIRS)/*apk)
+#APK_BIN		:= $(shell which apk)
 
-ifneq ($(words $(KERNEL_APK) $(MODULE_APK) $(ALPINEBASELAYOUT_APK) $(UCLIBC_APK) $(BUSYBOX_APK) $(APK_TOOLS_APK)),6)
-$(error I did not find all APKs which I need.)
-endif
+#ifneq ($(words $(KERNEL_APK) $(MODULE_APK) $(ALPINEBASELAYOUT_APK) $(UCLIBC_APK) $(BUSYBOX_APK) $(APK_TOOLS_APK)),6)
+#$(error I did not find all APKs which I need.)
+#endif
 
 all: $(ISO)
 
@@ -57,6 +66,7 @@ endif
 	@echo "ALPINE_RELEASE: $(ALPINE_RELEASE)"
 	@echo "KERNEL_FLAVOR:  $(KERNEL_FLAVOR)"
 	@echo "APORTS_DIR:     $(APORTS_DIR)"
+	@echo "KERNEL:         $(KERNEL)"
 	@echo
 
 clean:
@@ -67,18 +77,24 @@ clean:
 #
 # Repos
 #
-REPOS_DIR	:= $(ISO_DIR)/packages
+repos: $(REPOS_DIRSTAMP)
+
 REPOS_DIRSTAMP	:= $(DESTDIR)/stamp.repos
+$(REPOS_DIRSTAMP): $(SOURCE_APKBUILDS)
+	@echo "==> repositories: $(REPOS)"
+	@buildrepo -p -a $(APORTS_DIR) -d $(REPOS_DIR) $(REPOS)
 
 #
 # Modloop
 #
+modloop: $(MODLOOP)
+
 MODLOOP		:= $(ISO_DIR)/boot/modloop.cmg
 MODLOOP_DIR	:= $(DESTDIR)/modloop
 MODLOOP_DIRSTAMP := $(DESTDIR)/stamp.modloop
 
-$(MODLOOP_DIRSTAMP): $(MODULE_APK)
-	@echo "==> modloop: prepare modules $(notdir $(MODULE_APK))"
+$(MODLOOP_DIRSTAMP): $(REPOS_DIRSTAMP) $(MODULE_APK)
+	@echo "==> modloop: prepare $(KERNEL) modules $(notdir $(MODULE_APK))"
 	@rm -rf $(MODLOOP_DIR)
 	@mkdir -p $(MODLOOP_DIR)/lib/modules/
 	@tar -C $(MODLOOP_DIR) -xzf $(MODULE_APK)
@@ -91,12 +107,12 @@ $(MODLOOP): $(MODLOOP_DIRSTAMP)
 	@mkdir -p $(dir $(MODLOOP))
 	@mkcramfs $(MODLOOP_DIR)/lib $(MODLOOP)
 
-modloop: $(MODLOOP)
 #
 # Initramfs rules
 #
+initfs: $(INITFS)
 
-INITFS		:= $(ISO_DIR)/boot/initramfs.gz
+INITFS		:= $(ISO_DIR)/boot/$(KERNEL_NAME).gz
 
 INITFS_DIRSTAMP	:= $(DESTDIR)/stamp.initfs
 INITFS_DIR	:= $(DESTDIR)/initfs
@@ -117,7 +133,7 @@ $(INITFS_DIRSTAMP): $(INITFS_APKS)
 		tar -C $(INITFS_DIR) -xzf $$apk ; \
 	done
 	@rm -f "$(INITFS_DIR)/.PKGINFO"
-	@mknod $(INITFS_DIR)/dev/null c 1 3
+#	@mknod $(INITFS_DIR)/dev/null c 1 3
 	@mkdir -p "$(INITFS_DIR)/etc"
 	@echo floppy >> "$(INITFS_DIR)/etc/modules"
 	@touch $(INITFS_DIRSTAMP)
@@ -162,7 +178,6 @@ $(INITFS): $(INITFS_DIRSTAMP) $(INITFS_DIR)/init $(INITFS_DIR)/sbin/apk $(INITFS
 	@echo "==> initramfs: creating $(notdir $(INITFS))"
 	@(cd $(INITFS_DIR) && find . | cpio -o -H newc | gzip -9) > $(INITFS)
 
-initfs: $(INITFS)
 #
 # ISO rules
 #
@@ -183,8 +198,8 @@ $(ISOLINUX_CFG):
 	@echo "prompt 1" >>$(ISOLINUX_CFG)
 	@echo "default $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "label $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
-	@echo "	kernel /boot/$(KERNAL_NAME)" >>$(ISOLINUX_CFG)
-	@echo "	append initrd=/boot/initramfs.gz alpine_dev=cdrom modules=floppy quiet" >>$(ISOLINUX_CFG)
+	@echo "	kernel /boot/$(KERNEL_NAME)" >>$(ISOLINUX_CFG)
+	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom modules=floppy quiet" >>$(ISOLINUX_CFG)
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
 ISO_APKS	:= $(ISO_DIR)/apks
