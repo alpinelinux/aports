@@ -89,7 +89,7 @@ $(REPOS_DIRSTAMP): $(SOURCE_APKBUILDS)
 #
 modloop: $(MODLOOP)
 
-MODLOOP		:= $(ISO_DIR)/boot/modloop.cmg
+MODLOOP		:= $(ISO_DIR)/boot/$(KERNEL_NAME).cmg
 MODLOOP_DIR	:= $(DESTDIR)/modloop
 MODLOOP_DIRSTAMP := $(DESTDIR)/stamp.modloop
 
