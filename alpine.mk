@@ -83,6 +83,7 @@ REPOS_DIRSTAMP	:= $(DESTDIR)/stamp.repos
 $(REPOS_DIRSTAMP): $(SOURCE_APKBUILDS)
 	@echo "==> repositories: $(REPOS)"
 	@buildrepo -p -a $(APORTS_DIR) -d $(REPOS_DIR) $(REPOS)
+	@touch $@
 
 #
 # Modloop
@@ -151,6 +152,7 @@ ifeq ($(APK_BIN),)
 $(INITFS_DIR)/sbin/apk: $(APK_TOOLS_APK) $(INITFS_DIRSTAMP)
 	@echo "==> initramfs: $(notdir $(APK_TOOLS_APK))"
 	@tar -C $(INITFS_DIR) -xzf $(APK_TOOLS_APK) sbin/apk
+	@touch $@
 else
 $(INITFS_DIR)/sbin/apk: $(APK_BIN) $(INITFS_DIRSTAMP)
 	@echo "==> initramfs: copy $(APK_BIN) from buildroot"
@@ -202,17 +204,17 @@ $(ISOLINUX_CFG):
 	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom modules=floppy quiet" >>$(ISOLINUX_CFG)
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
-ISO_APKS	:= $(ISO_DIR)/apks
-ISO_APKINDEX	:= $(ISO_APKS)/APK_INDEX.gz
+#ISO_APKS	:= $(ISO_DIR)/apks
+#ISO_APKINDEX	:= $(ISO_APKS)/APK_INDEX.gz
 
-$(ISO_APKS): $(SOURCE_APKS)
-	@echo "==> iso: prepare APK repository"
-	@rm -rf $(ISO_APKS)
-	@mkdir -p $(ISO_APKS)
-	@for a in $(SOURCE_APKS) ; do \
-		ln -f $$a $(ISO_APKS) 2>/dev/null || cp $$a $(ISO_APKS) ; \
-	done
-	@apk index $(SOURCE_APKS) | gzip -9 > $(ISO_APKINDEX)
+#$(ISO_APKS): $(SOURCE_APKS)
+#	@echo "==> iso: prepare APK repository"
+#	@rm -rf $(ISO_APKS)
+#	@mkdir -p $(ISO_APKS)
+#	@for a in $(SOURCE_APKS) ; do \
+#		ln -f $$a $(ISO_APKS) 2>/dev/null || cp $$a $(ISO_APKS) ; \
+#	done
+#	@apk index $(SOURCE_APKS) | gzip -9 > $(ISO_APKINDEX)
 
 $(ISO_KERNEL): $(KERNEL_APK)
 	@echo "==> iso: install kernel $(KERNEL)"
@@ -221,7 +223,7 @@ $(ISO_KERNEL): $(KERNEL_APK)
 	@rm -f $(ISO_DIR)/.[A-Z]*
 	@touch $(ISO_KERNEL)
 
-$(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_APKS)
+$(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL)
 	@echo "==> iso: building $(notdir $(ISO))"
 	@echo "$(ALPINE_NAME)-$(ALPINE_RELEASE) $(BUILD_DATE)" \
 		> $(ISO_DIR)/.alpine-release
