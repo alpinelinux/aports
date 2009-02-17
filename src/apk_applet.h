@@ -13,9 +13,16 @@
 #define APK_APPLET_H
 
 #include <getopt.h>
+#include "apk_defines.h"
 
 extern const char *apk_root;
-extern const char *apk_repository;
+
+struct apk_repository_url {
+	struct list_head list;
+	const char *url;
+};
+
+extern struct apk_repository_url apk_repository_list;
 
 struct apk_applet {
 	const char *name;

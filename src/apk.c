@@ -22,7 +22,7 @@
 #include "apk_applet.h"
 
 const char *apk_root;
-const char *apk_repository = NULL;
+struct apk_repository_url apk_repository_list;
 int apk_verbosity = 1, apk_progress = 0, apk_upgrade = 0;
 int apk_cwd_fd;
 
@@ -99,6 +99,17 @@ static struct apk_applet *deduce_applet(int argc, char **argv)
 	return NULL;
 }
 
+static struct apk_repository_url *apk_repository_new(const char *url)
+{
+	struct apk_repository_url *r = calloc(1, 
+			sizeof(struct apk_repository_url));
+	if (r) {
+		r->url = url;
+		list_init(&r->list);
+	}
+	return r;
+}
+
 #define NUM_GENERIC_OPTS 6
 static struct option generic_options[32] = {
 	{ "root",	required_argument, 	NULL, 'p' },
@@ -116,10 +127,12 @@ int main(int argc, char **argv)
 	struct option *opt;
 	int r, optindex;
 	void *ctx = NULL;
+	struct apk_repository_url *repo = NULL;
 
 	umask(0);
 	apk_cwd_fd = open(".", O_RDONLY);
 	apk_root = getenv("ROOT");
+	list_init(&apk_repository_list.list);
 
 	applet = deduce_applet(argc, argv);
 	if (applet != NULL) {
@@ -151,7 +164,9 @@ int main(int argc, char **argv)
 			apk_root = optarg;
 			break;
 		case 'X':
-			apk_repository = optarg;
+			repo = apk_repository_new(optarg);
+			if (repo)
+				list_add(&repo->list, &apk_repository_list.list);
 			break;
 		case 'q':
 			apk_verbosity--;

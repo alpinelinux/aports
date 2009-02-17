@@ -621,6 +621,7 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	apk_blob_t blob;
 	const char *apk_repos = getenv("APK_REPOS"), *msg;
 	int r;
+	struct apk_repository_url *repo = NULL;
 
 	memset(db, 0, sizeof(*db));
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
@@ -696,10 +697,10 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 		}
 	}
 
-	if (apk_repository != NULL) {
-		r = apk_db_add_repository(db, APK_BLOB_STR(apk_repository));
+	list_for_each_entry(repo, &apk_repository_list.list, list) {
+		r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
 		if (r != 0) {
-			msg = "Unable to load repositories";
+			msg = repo->url;
 			goto ret_r;
 		}
 	}
