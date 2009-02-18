@@ -5,6 +5,7 @@
 BUILD_DATE	:= $(shell date +%y%m%d)
 ALPINE_RELEASE	?= $(BUILD_DATE)
 ALPINE_NAME	?= alpine-test
+ALPINE_ARCH	:= i386
 DESTDIR		?= $(shell pwd)/isotmp
 APORTS_DIR	?= $(HOME)/aports
 REPOS		?= core extra
@@ -12,16 +13,17 @@ REPOS		?= core extra
 # this might need to change...
 APKDIRS		?= $(REPOS_DIR)/*/
 
-ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE).iso
+ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).iso
 ISO_LINK	?= $(ALPINE_NAME).iso
 ISO_DIR		:= $(DESTDIR)/isofs
 REPOS_DIR	:= $(ISO_DIR)/packages
 
-#find_apk	= $(firstword $(wildcard $(addprefix $(APKDIRS),$(1)-[0-9]*.apk)))
 # limitations for find_apk:
-# must be in core repository
 # can not be a subpackage
-find_apk	= $(shell . $(APORTS_DIR)/core/$(1)/APKBUILD && echo $(REPOS_DIR)/core/$(1)-$$pkgver-r$$pkgrel.apk)
+find_aport 	= $(firstword $(wildcard $(APORTS_DIR)/*/$(1)))
+find_repo	= $(subst $(APORTS_DIR),$(REPOS_DIR),$(dir $(call find_aport,$(1))))
+find_apk	= $(shell . $(call find_aport,$(1))/APKBUILD ;\
+			echo $(call find_repo,$(1))/$(1)-$$pkgver-r$$pkgrel.apk)
 
 KERNEL_FLAVOR	?= grsec
 KERNEL_PKGNAME	?= linux-$(KERNEL_FLAVOR)
@@ -34,6 +36,8 @@ ALPINEBASELAYOUT_APK := $(call find_apk,alpine-baselayout)
 UCLIBC_APK	:= $(call find_apk,uclibc)
 BUSYBOX_APK	:= $(call find_apk,busybox)
 APK_TOOLS_APK	:= $(call find_apk,apk-tools)
+SYSLINUX_APK	:= $(call find_apk,syslinux)
+STRACE_APK	:= $(call find_apk,strace)
 
 SOURCE_APKBUILDS := $(wildcard $(addprefix $(APORTS_DIR)/,$(REPOS))/*/APKBUILD)
 SOURCE_APKS	= $(wildcard $(APKDIRS)/*apk)
@@ -88,11 +92,11 @@ $(REPOS_DIRSTAMP): $(SOURCE_APKBUILDS)
 #
 # Modloop
 #
-modloop: $(MODLOOP)
-
 MODLOOP		:= $(ISO_DIR)/boot/$(KERNEL_NAME).cmg
 MODLOOP_DIR	:= $(DESTDIR)/modloop
 MODLOOP_DIRSTAMP := $(DESTDIR)/stamp.modloop
+
+modloop: $(MODLOOP)
 
 $(MODLOOP_DIRSTAMP): $(REPOS_DIRSTAMP) $(MODULE_APK)
 	@echo "==> modloop: prepare $(KERNEL) modules $(notdir $(MODULE_APK))"
@@ -111,7 +115,6 @@ $(MODLOOP): $(MODLOOP_DIRSTAMP)
 #
 # Initramfs rules
 #
-initfs: $(INITFS)
 
 INITFS		:= $(ISO_DIR)/boot/$(KERNEL_NAME).gz
 
@@ -120,9 +123,12 @@ INITFS_DIR	:= $(DESTDIR)/initfs
 INITFS_MODDIR	:= $(INITFS_DIR)/lib/modules/$(KERNEL)
 INITFS_MODDIRSTAMP := $(DESTDIR)/stamp.initfs.modules
 
-INITFS_APKS	:= $(UCLIBC_APK) $(BUSYBOX_APK)
-INITFS_RAWBASEFILES  := etc/mdev.conf etc/passwd etc/group etc/fstab etc/modules
+INITFS_APKS	:= $(UCLIBC_APK) $(BUSYBOX_APK) 
+INITFS_RAWBASEFILES  := etc/mdev.conf etc/passwd etc/group etc/fstab \
+			etc/modules etc/modprobe.d/blacklist
 INITFS_BASEFILES     := $(addprefix $(INITFS_DIR)/, $(INITFS_RAWBASEFILES))
+
+initfs: $(INITFS)
 
 $(INITFS_DIRSTAMP): $(INITFS_APKS)
 	@echo "==> initramfs: prepare baselayout"
@@ -167,7 +173,7 @@ $(INITFS_MODDIRSTAMP): $(INITFS_DIRSTAMP) $(INITFS_MODFILES) $(MODLOOP_DIRSTAMP)
 		cp -flLpR $(MODLOOP_DIR)/lib/modules/*/kernel/drivers/$$i \
 			$(INITFS_MODDIR)/kernel/drivers/ ; \
 	done
-	@for i in isofs vfat nls ext2 cramfs '*.ko'; do \
+	@for i in isofs vfat fat nls jbd 'ext*' cramfs '*.ko'; do \
 		cp -flLpR $(MODLOOP_DIR)/lib/modules/*/kernel/fs/$$i \
 			$(INITFS_MODDIR)/kernel/fs/ ; \
 	done
@@ -188,10 +194,11 @@ ISOLINUX	:= $(ISO_DIR)/isolinux
 ISOLINUX_BIN	:= $(ISOLINUX)/isolinux.bin
 ISOLINUX_CFG	:= $(ISOLINUX)/isolinux.cfg
 
-$(ISOLINUX_BIN): /usr/share/syslinux/isolinux.bin
+$(ISOLINUX_BIN): $(SYSLINUX_APK)
 	@echo "==> iso: install isolinux"
 	@mkdir -p $(dir $(ISOLINUX_BIN))
-	@cp /usr/share/syslinux/isolinux.bin $(ISOLINUX_BIN)
+	@tar -O -zxf $(SYSLINUX_APK) usr/share/syslinux/isolinux.bin > $@
+#	@cp /usr/share/syslinux/isolinux.bin $(ISOLINUX_BIN)
 
 $(ISOLINUX_CFG):
 	@echo "==> iso: configure isolinux"
