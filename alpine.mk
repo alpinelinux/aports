@@ -208,7 +208,7 @@ $(ISOLINUX_CFG):
 	@echo "default $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "label $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$(ISOLINUX_CFG)
-	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom modules=floppy quiet" >>$(ISOLINUX_CFG)
+	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom:iso9660 modules=floppy quiet" >>$(ISOLINUX_CFG)
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
 #ISO_APKS	:= $(ISO_DIR)/apks
