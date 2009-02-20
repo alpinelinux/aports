@@ -30,6 +30,10 @@ KERNEL_PKGNAME	?= linux-$(KERNEL_FLAVOR)
 KERNEL_NAME	:= $(KERNEL_FLAVOR)
 KERNEL_APK	:= $(call find_apk,$(KERNEL_PKGNAME))
 MODULE_APK	:= $(subst /$(KERNEL_PKGNAME)-,/$(KERNEL_PKGNAME)-mod-,$(KERNEL_APK))
+
+XTABLES_ADDONS_APK:= $(subst xtables-addons,xtables-addons-$(KERNEL_FLAVOR),$(call find_apk,xtables-addons))
+MOD_APKS	:= $(MODULE_APK) $(XTABLES_ADDONS_APK)
+
 KERNEL		:= $(word 3,$(subst -, ,$(notdir $(KERNEL_APK))))-$(word 2,$(subst -, ,$(notdir $(KERNEL_APK))))
 
 ALPINEBASELAYOUT_APK := $(call find_apk,alpine-baselayout)
@@ -89,6 +93,8 @@ $(REPOS_DIRSTAMP): $(SOURCE_APKBUILDS)
 	@buildrepo -p -a $(APORTS_DIR) -d $(REPOS_DIR) $(REPOS)
 	@touch $@
 
+%.apk: $(REPOS_DIRSTAMP)
+
 #
 # Modloop
 #
@@ -98,11 +104,13 @@ MODLOOP_DIRSTAMP := $(DESTDIR)/stamp.modloop
 
 modloop: $(MODLOOP)
 
-$(MODLOOP_DIRSTAMP): $(REPOS_DIRSTAMP) $(MODULE_APK)
-	@echo "==> modloop: prepare $(KERNEL) modules $(notdir $(MODULE_APK))"
+$(MODLOOP_DIRSTAMP): $(REPOS_DIRSTAMP) $(MOD_APKS)
 	@rm -rf $(MODLOOP_DIR)
 	@mkdir -p $(MODLOOP_DIR)/lib/modules/
-	@tar -C $(MODLOOP_DIR) -xzf $(MODULE_APK)
+	@for i in $(MOD_APKS); do \
+		echo "==> modloop: prepare modules $$i";\
+		tar -C $(MODLOOP_DIR) -xzf "$$i"; \
+	done
 	@rm -rf $(addprefix $(MODLOOP_DIR)/lib/modules/*/, source build)
 	@depmod $(KERNEL) -b $(MODLOOP_DIR)
 	@touch $(MODLOOP_DIRSTAMP)
