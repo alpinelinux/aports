@@ -80,7 +80,7 @@ endif
 clean:
 	rm -rf $(MODLOOP) $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) \
 		$(INITFS) $(INITFS_DIRSTAMP) $(INITFS_DIR) \
-		$(ISO_DIR)
+		$(ISO_DIR) $(REPOS_DIRSTAMP)
 
 #
 # Repos
