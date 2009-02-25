@@ -1,0 +1,242 @@
+
+Currently, on multihomed host, when chrony is not bound to a specific
+IP address, a query is sent to an interface and the default source IP
+hint for the back route differs, the reply will have a source IP
+different than where the query was destinied to. This will cause
+problems because connection tracking firewalls will drop the replies
+and most likely the client program will get confused too.
+
+This patch uses the IP_PKTINFO mechanism to get the IP address where
+received packets where targetted to and use that IP address as source
+hint when sending a reply.
+---
+ addressing.h |    1 +
+ broadcast.c  |    1 +
+ cmdmon.c     |    3 ++
+ conf.c       |    1 +
+ ntp_io.c     |   92 +++++++++++++++++++++++++++++++++++++++++----------------
+ 5 files changed, 72 insertions(+), 26 deletions(-)
+
+diff --git a/addressing.h b/addressing.h
+index aa20ed9..05152f4 100644
+--- a/addressing.h
++++ b/addressing.h
+@@ -36,6 +36,7 @@
+ typedef struct {
+   unsigned long ip_addr;
+   unsigned short port;
++  unsigned long local_ip_addr;
+ } NTP_Remote_Address;
+ 
+ #if 0
+diff --git a/broadcast.c b/broadcast.c
+index be217e7..c979741 100644
+--- a/broadcast.c
++++ b/broadcast.c
+@@ -146,6 +146,7 @@ BRD_AddDestination(unsigned long addr, unsigned short port, int interval)
+ 
+   destinations[n_destinations].addr.ip_addr = addr;
+   destinations[n_destinations].addr.port = port;
++  destinations[n_destinations].addr.local_ip_addr = 0;
+   destinations[n_destinations].interval = interval;
+ 
+   SCH_AddTimeoutInClass((double) interval, 1.0,
+diff --git a/cmdmon.c b/cmdmon.c
+index 819977c..8affb0b 100644
+--- a/cmdmon.c
++++ b/cmdmon.c
+@@ -1097,6 +1097,7 @@ handle_add_server(CMD_Request *rx_message, CMD_Reply *tx_message)
+   
+   rem_addr.ip_addr = ntohl(rx_message->data.ntp_source.ip_addr);
+   rem_addr.port = (unsigned short)(ntohl(rx_message->data.ntp_source.port));
++  rem_addr.local_ip_addr = 0;
+   params.minpoll = ntohl(rx_message->data.ntp_source.minpoll);
+   params.maxpoll = ntohl(rx_message->data.ntp_source.maxpoll);
+   params.presend_minpoll = ntohl(rx_message->data.ntp_source.presend_minpoll);
+@@ -1133,6 +1134,7 @@ handle_add_peer(CMD_Request *rx_message, CMD_Reply *tx_message)
+   
+   rem_addr.ip_addr = ntohl(rx_message->data.ntp_source.ip_addr);
+   rem_addr.port = (unsigned short)(ntohl(rx_message->data.ntp_source.port));
++  rem_addr.local_ip_addr = 0;
+   params.minpoll = ntohl(rx_message->data.ntp_source.minpoll);
+   params.maxpoll = ntohl(rx_message->data.ntp_source.maxpoll);
+   params.presend_minpoll = ntohl(rx_message->data.ntp_source.presend_minpoll);
+@@ -1167,6 +1169,7 @@ handle_del_source(CMD_Request *rx_message, CMD_Reply *tx_message)
+   
+   rem_addr.ip_addr = ntohl(rx_message->data.del_source.ip_addr);
+   rem_addr.port = 0;
++  rem_addr.local_ip_addr = 0;
+   
+   status = NSR_RemoveSource(&rem_addr);
+   switch (status) {
+diff --git a/conf.c b/conf.c
+index e34927e..ddd13f1 100644
+--- a/conf.c
++++ b/conf.c
+@@ -949,6 +949,7 @@ CNF_AddSources(void) {
+   for (i=0; i<n_ntp_sources; i++) {
+     server.ip_addr = ntp_sources[i].ip_addr;
+     server.port = ntp_sources[i].port;
++    server.local_ip_addr = 0;
+ 
+     switch (ntp_sources[i].type) {
+       case SERVER:
+diff --git a/ntp_io.c b/ntp_io.c
+index afb6ad1..db89758 100644
+--- a/ntp_io.c
++++ b/ntp_io.c
+@@ -118,6 +118,12 @@ NIO_Initialise(void)
+     LOG(LOGS_ERR, LOGF_NtpIO, "Could not set broadcast socket options");
+     /* Don't quit - we might survive anyway */
+   }
++  /* We want the local IP info too */
++  if (setsockopt(sock_fd, IPPROTO_IP, IP_PKTINFO, (char *)&on_off, sizeof(on_off)) < 0) {
++    LOG(LOGS_ERR, LOGF_NtpIO, "Could not request packet info using socket option");
++    /* Don't quit - we might survive anyway */
++  }
++
+ 
+   /* Bind the port */
+   my_addr.sin_family = AF_INET;
+@@ -182,22 +188,30 @@ read_from_socket(void *anything)
+ 
+   int status;
+   ReceiveBuffer message;
+-  int message_length;
+   struct sockaddr_in where_from;
+-  socklen_t from_length;
+   unsigned int flags = 0;
+   struct timeval now;
+   NTP_Remote_Address remote_addr;
+   double local_clock_err;
++  char cmsgbuf[256];
++  struct cmsghdr *cmsg;
++  struct msghdr msg;
++  struct iovec iov;
+ 
+   assert(initialised);
+ 
+-  from_length = sizeof(where_from);
+-  message_length = sizeof(message);
++  iov.iov_base = message.arbitrary;
++  iov.iov_len = sizeof(message);
++  msg.msg_name = &where_from;
++  msg.msg_namelen = sizeof(where_from);
++  msg.msg_iov = &iov;
++  msg.msg_iovlen = 1;
++  msg.msg_control = (void *) cmsgbuf;
++  msg.msg_controllen = sizeof(cmsgbuf);
++  msg.msg_flags = 0;
+ 
+   LCL_ReadCookedTime(&now, &local_clock_err);
+-  status = recvfrom(sock_fd, (char *)&message, message_length, flags,
+-                    (struct sockaddr *)&where_from, &from_length);
++  status = recvmsg(sock_fd, &msg, flags);
+ 
+   /* Don't bother checking if read failed or why if it did.  More
+      likely than not, it will be connection refused, resulting from a
+@@ -209,6 +223,13 @@ read_from_socket(void *anything)
+   if (status > 0) {
+     remote_addr.ip_addr = ntohl(where_from.sin_addr.s_addr);
+     remote_addr.port = ntohs(where_from.sin_port);
++    remote_addr.local_ip_addr = 0;
++
++    for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
++      if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO)
++        remote_addr.local_ip_addr =
++          ntohl(((struct in_pktinfo *) CMSG_DATA(cmsg))->ipi_spec_dst.s_addr);
++    }
+ 
+     if (status == NTP_NORMAL_PACKET_SIZE) {
+ 
+@@ -229,21 +250,45 @@ read_from_socket(void *anything)
+ }
+ 
+ /* ================================================== */
+-/* Send an unauthenticated packet to a given address */
++/* Send a packet to given address */
+ 
+-void
+-NIO_SendNormalPacket(NTP_Packet *packet, NTP_Remote_Address *remote_addr)
++static void
++NIO_SendPacket(NTP_Packet *packet, int packetlen, NTP_Remote_Address *remote_addr)
+ {
+   struct sockaddr_in remote;
++  struct msghdr msg;
++  struct iovec iov;
++  struct {
++    struct cmsghdr cm;
++    struct in_pktinfo ipi;
++  } cmsg;
+ 
+   assert(initialised);
+ 
+   remote.sin_family = AF_INET;
+   remote.sin_port = htons(remote_addr->port);
+   remote.sin_addr.s_addr = htonl(remote_addr->ip_addr);
++  iov.iov_base = (void *) packet;
++  iov.iov_len = packetlen;
++  msg.msg_name = &remote;
++  msg.msg_namelen = sizeof(remote);
++  msg.msg_iov = &iov;
++  msg.msg_iovlen = 1;
++  if (remote_addr->local_ip_addr) {
++    cmsg.cm.cmsg_len = sizeof(cmsg);
++    cmsg.cm.cmsg_level = IPPROTO_IP;
++    cmsg.cm.cmsg_type = IP_PKTINFO;
++    memset(&cmsg.ipi, 0, sizeof(cmsg.ipi));
++    cmsg.ipi.ipi_spec_dst.s_addr = htonl(remote_addr->local_ip_addr);
++    msg.msg_control = (void *) &cmsg;
++    msg.msg_controllen = sizeof(cmsg);
++  } else {
++    msg.msg_control = NULL;
++    msg.msg_controllen = 0;
++  }
++  msg.msg_flags = 0;
+ 
+-  if (sendto(sock_fd, (void *) packet, NTP_NORMAL_PACKET_SIZE, 0,
+-             (struct sockaddr *) &remote, sizeof(remote)) < 0) {
++  if (sendmsg(sock_fd, &msg, 0) < 0) {
+     LOG(LOGS_WARN, LOGF_NtpIO, "Could not send to %s:%d : %s",
+         UTI_IPToDottedQuad(remote_addr->ip_addr), remote_addr->port, strerror(errno));
+   }
+@@ -252,26 +297,21 @@ NIO_SendNormalPacket(NTP_Packet *packet, NTP_Remote_Address *remote_addr)
+ }
+ 
+ /* ================================================== */
+-/* Send an authenticated packet to a given address */
++/* Send an unauthenticated packet to a given address */
+ 
+ void
+-NIO_SendAuthenticatedPacket(NTP_Packet *packet, NTP_Remote_Address *remote_addr)
++NIO_SendNormalPacket(NTP_Packet *packet, NTP_Remote_Address *remote_addr)
+ {
+-  struct sockaddr_in remote;
+-
+-  assert(initialised);
+-
+-  remote.sin_family = AF_INET;
+-  remote.sin_port = htons(remote_addr->port);
+-  remote.sin_addr.s_addr = htonl(remote_addr->ip_addr);
++  NIO_SendPacket(packet, NTP_NORMAL_PACKET_SIZE, remote_addr);
++}
+ 
+-  if (sendto(sock_fd, (void *) packet, sizeof(NTP_Packet), 0,
+-             (struct sockaddr *) &remote, sizeof(remote)) < 0) {
+-    LOG(LOGS_WARN, LOGF_NtpIO, "Could not send to %s:%d : %s",
+-        UTI_IPToDottedQuad(remote_addr->ip_addr), remote_addr->port, strerror(errno));
+-  }
++/* ================================================== */
++/* Send an authenticated packet to a given address */
+ 
+-  return;
++void
++NIO_SendAuthenticatedPacket(NTP_Packet *packet, NTP_Remote_Address *remote_addr)
++{
++  NIO_SendPacket(packet, sizeof(NTP_Packet), remote_addr);
+ }
+ 
+ /* ================================================== */
+-- 
+1.5.6.3
+
