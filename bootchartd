@@ -1,0 +1,192 @@
+#!/bin/sh
+#
+# Bootchart logger script
+# Ziga Mahkovec  <ziga.mahkovec@klika.si>
+#
+# Modified heavily for Alpine Linux bootcharting
+# Timo Teras <timo.teras@iki.fi>
+#
+# This script is used for data collection for the bootchart
+# boot performance visualization tool (http://www.bootchart.org).
+#
+# This script is tied to Alpine Init scripts and charts the
+# bootup procedure only.
+#
+
+PATH="/sbin:/bin:/usr/sbin:/usr/bin:$PATH"
+
+# Configuration for bootchartd, the bootchart logger script.
+TMPFS_SIZE=32m
+SAMPLE_PERIOD=0.1
+PROCESS_ACCOUNTING="no"
+BOOTLOG_DEST=/var/log/bootchart.tgz
+LOGDIR=/bootchart
+EXIT_PROC="mingetty agetty rungetty getty fgetty"
+
+# Monitoring commands
+log_cmd_1="cat /proc/stat"
+log_target_1=proc_stat.log
+
+# /proc/diskstats is available in 2.6 kernels
+log_cmd_2="cat /proc/diskstats"
+log_target_2=proc_diskstats.log
+
+log_cmd_3="cat /proc/[1-9]*/stat 2>/dev/null"
+log_target_3=proc_ps.log
+
+# Uncomment this line for diskless stations
+#log_cmd_4="cat /proc/net/dev"
+#log_target_4=proc_netdev.log
+
+max_log=3
+
+do_logging()
+{
+	# Enable process accounting if configured
+	if [ "$PROCESS_ACCOUNTING" = "yes" ]; then
+		[ -e kernel_pacct ] || : > kernel_pacct
+		accton kernel_pacct
+	fi
+
+	# open file descriptors
+	i=1
+	while [ $i -le $max_log ]; do
+		eval target=\"\$log_target_$i\"
+		if [ -z "$target" ]; then
+			max_log=$i
+			break
+		fi
+
+		fd=$((2 + $i))
+		eval exec $fd'>>$target'
+		eval log_fd_$i=$fd
+		i=$(($i + 1))
+	done
+
+	not_stop_logging=true
+	while $not_stop_logging && \
+	{ ! pidof $EXIT_PROC >/dev/null; }; do
+		if [ -r /proc/uptime ]; then
+			# Write the time (in jiffies).
+			read uptime < /proc/uptime
+			uptime=${uptime%% [0-9]*}
+			uptime=${uptime%.*}${uptime#*.}
+
+			i=1
+			while [ $i -le $max_log ]; do
+				eval fd=\$log_fd_$i\; cmd=\$log_cmd_$i
+
+				{
+					echo $uptime
+					# Log the command output
+					eval $cmd
+					echo
+				} >&$fd
+				i=$(($i + 1))
+			done
+		fi
+
+		sleep $SAMPLE_PERIOD
+	done
+
+	# close file descriptors
+	i=1
+	while [ $i -le $max_log ]; do
+		eval fd=\$log_fd_$i
+		eval exec $fd'>&-'
+		i=$(($i + 1))
+	done
+
+	[ -e kernel_pacct ] && accton off
+}
+
+# Stop the boot logger.  The lock file is removed to force the loggers in
+# background to exit.  Some final log files are created and then all log files
+# from the tmpfs are packaged and stored in $BOOTLOG_DEST.
+finalize()
+{
+	# Stop process accounting if configured
+	local pacct=
+	[ -e kernel_pacct ] && pacct=kernel_pacct
+
+	# Write system information
+	# Log some basic information about the system.
+	(
+		echo "version = $VERSION"
+		echo "title = Boot chart for $( hostname | sed q ) ($( date ))"
+		echo "system.uname = $( uname -srvm | sed q )"
+		if [ -f /etc/alpine-release ]; then
+			echo "system.release = $( sed q /etc/alpine-release )"
+		elif [ -f /etc/gentoo-release ]; then
+			echo "system.release = $( sed q /etc/gentoo-release )"
+		elif [ -f /etc/SuSE-release ]; then
+			echo "system.release = $( sed q /etc/SuSE-release )"
+		elif [ -f /etc/debian_version ]; then
+			echo "system.release = Debian GNU/$( uname -s ) $( cat /etc/debian_version )"
+		elif [ -f /etc/frugalware-release ]; then
+			echo "system.release = $( sed q /etc/frugalware-release )"
+		elif [ -f /etc/pardus-release ]; then
+			echo "system.release = $( sed q /etc/pardus-release )"
+		else
+			echo "system.release = $( sed 's/\\.//g;q' /etc/issue )"
+		fi
+
+		# Get CPU count
+		local cpucount=$(grep -c '^processor' /proc/cpuinfo)
+		if [ $cpucount -gt 1 -a -n "$(grep 'sibling.*2' /proc/cpuinfo)" ]; then
+			# Hyper-Threading enabled
+			cpucount=$(( $cpucount / 2 ))
+		fi
+		if grep -q '^model name' /proc/cpuinfo; then
+			echo "system.cpu = $( grep '^model name' /proc/cpuinfo | sed q )"\
+			     "($cpucount)"
+		else
+			echo "system.cpu = $( grep '^cpu' /proc/cpuinfo | sed q )"\
+			     "($cpucount)"
+		fi
+
+		echo "system.kernel.options = $( sed q /proc/cmdline )"
+	) >> header
+
+	# Package log files
+	tar -zcf "$BOOTLOG_DEST" header $pacct *.log
+	rm "$LOGDIR"/*
+	rmdir "$LOGDIR"
+}
+
+case "$1" in
+init)
+	# Started by the kernel or by the init script.
+	NEWROOT="$2"
+	mkdir "$LOGDIR"
+	cd "$LOGDIR"
+
+	(
+		trap "not_stop_logging=false" USR1
+		reexec=false
+		trap "reexec=true; not_stop_logging=false" USR2
+
+		do_logging
+		if $reexec; then
+			mkdir "$NEWROOT$LOGDIR"
+			mv * "$NEWROOT$LOGDIR"
+			cp /sbin/bootchartd $NEWROOT/sbin
+			exec chroot $NEWROOT /sbin/bootchartd continue_logging \
+				"$LOGDIR" </newroot/dev/null \
+				>$NEWROOT/dev/console 2>&1
+		else
+			sleep $SAMPLE_PERIOD
+			sleep $SAMPLE_PERIOD
+			finalize
+		fi
+	) &
+	;;
+continue_logging)
+	cd "$2"
+	trap "not_stop_logging=false" USR1
+	do_logging
+	finalize
+	;;
+esac
+
+exit 0
