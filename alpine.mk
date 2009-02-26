@@ -162,6 +162,10 @@ $(INITFS_DIR)/init: initramfs-init $(INITFS_DIRSTAMP)
 	@echo "==> initramfs: init script"
 	@cp initramfs-init "$(INITFS_DIR)/init"
 
+$(INITFS_DIR)/sbin/bootchartd: bootchartd $(INITFS_DIRSTAMP)
+	@echo "==> initramfs: bootchartd"
+	@cp bootchartd "$(INITFS_DIR)/sbin/bootchartd"
+
 ifeq ($(APK_BIN),)
 $(INITFS_DIR)/sbin/apk: $(APK_TOOLS_APK) $(INITFS_DIRSTAMP)
 	@echo "==> initramfs: $(notdir $(APK_TOOLS_APK))"
@@ -190,7 +194,7 @@ $(INITFS_MODDIRSTAMP): $(INITFS_DIRSTAMP) $(INITFS_MODFILES) $(MODLOOP_DIRSTAMP)
 	@depmod $(KERNEL) -b $(INITFS_DIR)
 	@touch $(INITFS_MODDIRSTAMP)
 
-$(INITFS): $(INITFS_DIRSTAMP) $(INITFS_DIR)/init $(INITFS_DIR)/sbin/apk $(INITFS_MODDIRSTAMP) $(INITFS_BASEFILES)
+$(INITFS): $(INITFS_DIRSTAMP) $(INITFS_DIR)/init $(INITFS_DIR)/sbin/bootchartd $(INITFS_DIR)/sbin/apk $(INITFS_MODDIRSTAMP) $(INITFS_BASEFILES)
 	@echo "==> initramfs: creating $(notdir $(INITFS))"
 	@(cd $(INITFS_DIR) && find . | cpio -o -H newc | gzip -9) > $(INITFS)
 
