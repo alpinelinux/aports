@@ -182,6 +182,7 @@ int apk_script_type(const char *name)
 struct read_info_ctx {
 	struct apk_database *db;
 	struct apk_package *pkg;
+	int version;
 	int has_install;
 };
 
@@ -278,15 +279,21 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 	/* Meta info and scripts */
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
+		ri->version = 2;
 		if (strcmp(ae->name, ".PKGINFO") == 0) {
 			apk_blob_t blob = apk_blob_from_istream(is, ae->size);
 			apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
 			free(blob.ptr);
+			return 0;
+		}
+		if (strcmp(ae->name, ".INSTALL") == 0) {
+			apk_warning("Package '%s-%s' contains deprecated .INSTALL",
+				    pkg->name->name, pkg->version);
 			return 1;
 		}
-		/* FIXME: Check for .INSTALL */
 	} else if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
 		/* APK 1.0 format */
+		ri->version = 1;
 		if (!S_ISREG(ae->mode))
 			return 0;
 
@@ -315,7 +322,12 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 		if (apk_script_type(slash+1) == APK_SCRIPT_POST_INSTALL ||
 		    apk_script_type(slash+1) == APK_SCRIPT_PRE_INSTALL)
 			ri->has_install = 1;
+	} else if (ri->version == 2) {
+		/* All metdata of version 2.x package handled */
+		return 1;
 	} else {
+		/* Version 1.x packages do not contain installed size
+		 * in metadata, so we calculate it here */
 		pkg->installed_size += apk_calc_installed_size(ae->size);
 	}
 
@@ -513,6 +525,7 @@ struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_
 		return NULL;
 
 	ctx.db = db;
+	ctx.version = 0;
 	ctx.has_install = 0;
 
 	apk_blob_for_each_segment(blob, "\n", parse_index_line, &ctx);
