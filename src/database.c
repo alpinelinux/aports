@@ -969,9 +969,13 @@ static int apk_db_install_archive_entry(void *_ctx,
 	/* Package metainfo and script processing */
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
-		if (strcmp(ae->name, ".INSTALL") != 0)
+		if (strcmp(ae->name, ".INSTALL") == 0)
+			type = APK_SCRIPT_GENERIC;
+		else
+			type = apk_script_type(&ae->name[1]);
+
+		if (type == APK_SCRIPT_INVALID)
 			return 0;
-		type = APK_SCRIPT_GENERIC;
 	} else if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
 		/* APK 1.0 format */
 		p = &ae->name[11];
