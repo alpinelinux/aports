@@ -149,14 +149,13 @@ $(INITFS_DIRSTAMP): $(INITFS_APKS)
 		tar -C $(INITFS_DIR) -xzf $$apk ; \
 	done
 	@rm -f "$(INITFS_DIR)/.PKGINFO"
-#	@mknod $(INITFS_DIR)/dev/null c 1 3
-	@mkdir -p "$(INITFS_DIR)/etc"
-	@echo floppy >> "$(INITFS_DIR)/etc/modules"
 	@touch $(INITFS_DIRSTAMP)
 
 $(INITFS_BASEFILES): $(INITFS_DIRSTAMP) $(ALPINEBASELAYOUT_APK)
 	@echo "==> initramfs: $(notdir $(ALPINEBASELAYOUT_APK))"
 	@tar -C $(INITFS_DIR) -xzf $(ALPINEBASELAYOUT_APK) $(INITFS_RAWBASEFILES)
+	#@echo "floppy" >> "$(INITFS_DIR)/etc/modules"
+	#@echo "libata dma=0" >> "$(INITFS_DIR)/etc/modules"
 	@touch $(INITFS_BASEFILES)
 
 $(INITFS_DIR)/init: initramfs-init $(INITFS_DIRSTAMP)
@@ -197,6 +196,7 @@ $(INITFS_MODDIRSTAMP): $(INITFS_DIRSTAMP) $(INITFS_MODFILES) $(MODLOOP_DIRSTAMP)
 
 $(INITFS): $(INITFS_DIRSTAMP) $(INITFS_DIR)/init $(INITFS_DIR)/sbin/bootchartd $(INITFS_DIR)/sbin/apk $(INITFS_MODDIRSTAMP) $(INITFS_BASEFILES)
 	@echo "==> initramfs: creating $(notdir $(INITFS))"
+	@mkdir -p $(dir $(INITFS))
 	@(cd $(INITFS_DIR) && find . | cpio -o -H newc | gzip -9) > $(INITFS)
 
 #
