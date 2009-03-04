@@ -81,7 +81,7 @@ endif
 clean:
 	rm -rf $(MODLOOP) $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) \
 		$(INITFS) $(INITFS_DIRSTAMP) $(INITFS_DIR) \
-		$(ISO_DIR) $(REPOS_DIRSTAMP)
+		$(ISO_DIR) $(REPOS_DIRSTAMP) $(ISO_REPOS_DIRSTAMP)
 
 #
 # Repos
@@ -206,6 +206,7 @@ $(INITFS): $(INITFS_DIRSTAMP) $(INITFS_DIR)/init $(INITFS_DIR)/sbin/bootchartd $
 ISOLINUX	:= $(ISO_DIR)/isolinux
 ISOLINUX_BIN	:= $(ISOLINUX)/isolinux.bin
 ISOLINUX_CFG	:= $(ISOLINUX)/isolinux.cfg
+SYSLINUX_CFG	:= $(ISO_DIR)/syslinux.cfg
 
 $(ISOLINUX_BIN): $(SYSLINUX_APK)
 	@echo "==> iso: install isolinux"
@@ -222,6 +223,15 @@ $(ISOLINUX_CFG):
 	@echo "label $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom:iso9660 modules=floppy quiet" >>$(ISOLINUX_CFG)
+
+$(SYSLINUX_CFG):
+	@echo "==> iso: configure syslinux"
+	@echo "timeout 20" >$@
+	@echo "prompt 1" >>$@
+	@echo "default $(KERNEL_NAME)" >>$@
+	@echo "label $(KERNEL_NAME)" >>$@
+	@echo "	kernel /boot/$(KERNEL_NAME)" >>$@
+	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=sda1:vfat quiet" >>$@
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
 ISO_PKGDIR	:= $(ISO_DIR)/packages
@@ -251,7 +261,7 @@ $(ISO_KERNEL): $(KERNEL_APK)
 	@rm -f $(ISO_DIR)/.[A-Z]*
 	@touch $(ISO_KERNEL)
 
-$(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_REPOS_DIRSTAMP)
+$(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_REPOS_DIRSTAMP) $(SYSLINUX_CFG)
 	@echo "==> iso: building $(notdir $(ISO))"
 	@echo "$(ALPINE_NAME)-$(ALPINE_RELEASE) $(BUILD_DATE)" \
 		> $(ISO_DIR)/.alpine-release
