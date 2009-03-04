@@ -1074,7 +1074,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 
 		if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
 		    apk_file_get_info(ae->name, &fi) == 0 &&
-		    (memcmp(file->csum, fi.csum, sizeof(csum_t)) == 0 ||
+		    (memcmp(file->csum, fi.csum, sizeof(csum_t)) != 0 ||
 		     !csum_valid(file->csum))) {
 			/* Protected file. Extract to separate place */
 			if (!apk_clean) {
