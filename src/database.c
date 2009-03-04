@@ -1060,8 +1060,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 						  opkg->name->name);
 					return -1;
 				}
-				apk_warning("%s: Trying to overwrite %s "
-					    "owned by %s.\n",
+				apk_warning("%s: Overwriting %s owned by %s.\n",
 					    pkg->name->name, ae->name,
 					    opkg->name->name);
 			}
