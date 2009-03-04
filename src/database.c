@@ -1083,6 +1083,9 @@ static int apk_db_install_archive_entry(void *_ctx,
 					 diri->dir->dirname, file->filename);
 				r = apk_archive_entry_extract(ae, is, alt_name,
 							      extract_cb, ctx);
+				/* remove identical apk-new */
+				if (memcmp(ae->csum, fi.csum, sizeof(csum_t)) == 0)
+					unlink(alt_name);
 			}
 		} else {
 			r = apk_archive_entry_extract(ae, is, NULL,
