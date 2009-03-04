@@ -24,7 +24,7 @@
 const char *apk_root;
 struct apk_repository_url apk_repository_list;
 int apk_verbosity = 1, apk_progress = 0, apk_upgrade = 0;
-int apk_clean = 0;
+int apk_clean = 0, apk_force = 0;
 int apk_cwd_fd;
 
 void apk_log(const char *prefix, const char *format, ...)
@@ -111,7 +111,7 @@ static struct apk_repository_url *apk_repository_new(const char *url)
 	return r;
 }
 
-#define NUM_GENERIC_OPTS 7
+#define NUM_GENERIC_OPTS 8
 static struct option generic_options[32] = {
 	{ "root",		required_argument,	NULL, 'p' },
 	{ "repository",		required_argument,	NULL, 'X' },
@@ -120,6 +120,7 @@ static struct option generic_options[32] = {
 	{ "version",		no_argument,		NULL, 'V' },
 	{ "progress",		no_argument,		&apk_progress,	1 },
 	{ "clean-protected",	no_argument,		&apk_clean,	1 },
+	{ "force",		no_argument,		&apk_force,	1 },
 };
 
 int main(int argc, char **argv)

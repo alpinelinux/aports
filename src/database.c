@@ -1053,9 +1053,17 @@ static int apk_db_install_archive_entry(void *_ctx,
 		if (file->diri != diri) {
 			opkg = file->diri->pkg;
 			if (opkg->name != pkg->name) {
-				apk_error("%s: Trying to overwrite %s owned by %s.\n",
-					  pkg->name->name, ae->name, opkg->name->name);
-				return -1;
+				if (!apk_force) {
+					apk_error("%s: Trying to overwrite %s "
+						  "owned by %s.\n",
+						  pkg->name->name, ae->name,
+						  opkg->name->name);
+					return -1;
+				}
+				apk_warning("%s: Trying to overwrite %s "
+					    "owned by %s.\n",
+					    pkg->name->name, ae->name,
+					    opkg->name->name);
 			}
 
 			apk_db_file_change_owner(db, file, diri,

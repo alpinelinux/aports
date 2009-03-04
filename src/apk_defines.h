@@ -51,7 +51,7 @@ extern csum_t bad_checksum;
 #endif
 
 extern int apk_cwd_fd, apk_verbosity, apk_progress, apk_upgrade;
-extern int apk_clean;
+extern int apk_clean, apk_force;
 
 #define apk_error(args...)	apk_log("ERROR: ", args);
 #define apk_warning(args...)	if (apk_verbosity > 0) { apk_log("WARNING: ", args); }
