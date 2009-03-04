@@ -24,6 +24,7 @@
 const char *apk_root;
 struct apk_repository_url apk_repository_list;
 int apk_verbosity = 1, apk_progress = 0, apk_upgrade = 0;
+int apk_clean = 0;
 int apk_cwd_fd;
 
 void apk_log(const char *prefix, const char *format, ...)
@@ -110,14 +111,15 @@ static struct apk_repository_url *apk_repository_new(const char *url)
 	return r;
 }
 
-#define NUM_GENERIC_OPTS 6
+#define NUM_GENERIC_OPTS 7
 static struct option generic_options[32] = {
-	{ "root",	required_argument, 	NULL, 'p' },
-	{ "repository",	required_argument, 	NULL, 'X' },
-	{ "quiet",	no_argument,		NULL, 'q' },
-	{ "verbose",	no_argument,		NULL, 'v' },
-	{ "version",	no_argument,		NULL, 'V' },
-	{ "progress",	no_argument,		NULL, 0x100 },
+	{ "root",		required_argument,	NULL, 'p' },
+	{ "repository",		required_argument,	NULL, 'X' },
+	{ "quiet",		no_argument,		NULL, 'q' },
+	{ "verbose",		no_argument,		NULL, 'v' },
+	{ "version",		no_argument,		NULL, 'V' },
+	{ "progress",		no_argument,		&apk_progress,	1 },
+	{ "clean-protected",	no_argument,		&apk_clean,	1 },
 };
 
 int main(int argc, char **argv)
@@ -160,6 +162,8 @@ int main(int argc, char **argv)
 	while ((r = getopt_long(argc, argv, short_options,
 				generic_options, &optindex)) != -1) {
 		switch (r) {
+		case 0:
+			break;
 		case 'p':
 			apk_root = optarg;
 			break;
@@ -176,9 +180,6 @@ int main(int argc, char **argv)
 			break;
 		case 'V':
 			return version();
-			break;
-		case 0x100:
-			apk_progress = 1;
 			break;
 		default:
 			if (applet == NULL || applet->parse == NULL)
