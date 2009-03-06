@@ -2,7 +2,8 @@
 PACKAGE=abuild
 VERSION:=$(shell  awk -F= '$$1 == "abuild_ver" {print $$2}' abuild)
 USR_BIN_FILES=abuild devbuild mkalpine buildrepo
-SAMPLES=sample.APKBUILD sample.initd sample.confd sample.install
+SAMPLES=sample.APKBUILD sample.initd sample.confd sample.pre-install \
+	sample.post-install
 DISTFILES=$(USR_BIN_FILES) $(SAMPLES) Makefile abuild.conf \
 
 
