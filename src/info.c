@@ -35,30 +35,6 @@ static int info_list(struct apk_database *db, int argc, char **argv)
 	return 0;
 }
 
-static int info_repo_pkgs_print(apk_hash_item item, void *ctx)
-{
-	struct apk_database *db = (struct apk_database *) ctx;
-	struct apk_package *pkg = (struct apk_package *) item;
-
-	printf("%s", pkg->name->name);
-	if (apk_verbosity > 0)
-		printf("-%s", pkg->version);
-	if (apk_verbosity > 1) {
-		printf("\n\t%s", db->repos[pkg->repos].url);
-		printf("\n\t%s", pkg->description);
-	}
-	printf("\n");
-
-	return 0;
-}
-
-static int info_repo_pkgs(struct apk_database *db, int argc, char **argv)
-{
-	apk_hash_foreach(&db->available.packages, info_repo_pkgs_print, db);
-
-	return 0;
-}
-
 static int info_exists(struct apk_database *db, int argc, char **argv)
 {
 	struct apk_name *name;
@@ -207,9 +183,6 @@ static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 	case 'R':
 		ictx->action = info_depends;
 		break;
-	case 'o':
-		ictx->action = info_repo_pkgs;
-		break;
 	default:
 		return -1;
 	}
@@ -239,12 +212,11 @@ static struct option info_options[] = {
 	{ "installed",	no_argument,		NULL, 'e' },
 	{ "who-owns",	no_argument,		NULL, 'W' },
 	{ "depends",	no_argument,		NULL, 'R' },
-	{ "repo-pkgs",	no_argument,		NULL, 'o' },
 };
 
 static struct apk_applet apk_info = {
 	.name = "info",
-	.usage = "[--repo-pkgs|-o]",
+	.usage = "",
 	.context_size = sizeof(struct info_ctx),
 	.num_options = ARRAY_SIZE(info_options),
 	.options = info_options,
