@@ -10,6 +10,8 @@ DESTDIR		?= $(shell pwd)/isotmp
 APORTS_DIR	?= $(HOME)/aports
 REPOS		?= core extra
 
+SUDO		= sudo
+
 # this might need to change...
 APKDIRS		?= $(REPOS_DIR)/*/
 
@@ -198,6 +200,21 @@ $(INITFS): $(INITFS_DIRSTAMP) $(INITFS_DIR)/init $(INITFS_DIR)/sbin/bootchartd $
 	@echo "==> initramfs: creating $(notdir $(INITFS))"
 	@mkdir -p $(dir $(INITFS))
 	@(cd $(INITFS_DIR) && find . | cpio -o -H newc | gzip -9) > $(INITFS)
+
+#
+# Vserver template rules
+#
+VSTEMPLATE	:= $(ISO_DIR)/vs-template.tar.bz2
+VSTEMPLATE_DIR 	:= $(DESTDIR)/vs-template
+
+vstemplate: $(VSTEMPLATE)
+	@echo "==> vstemplate: built $(VSTEMPLATE)"
+
+$(VSTEMPLATE):
+	@$(SUDO) rm -rf "$(VSTEMPLATE_DIR)"
+	@$(SUDO) mkdir -p "$(VSTEMPLATE_DIR)"
+	@$(SUDO) apk add --initdb --root $(VSTEMPLATE_DIR) alpine-baselayout
+	@cd $(VSTEMPLATE_DIR) && $(SUDO) tar -jcf $@ *
 
 #
 # ISO rules
