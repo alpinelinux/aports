@@ -54,12 +54,13 @@ ACCT_APK	:= $(call find_apk,acct)
 #$(error I did not find all APKs which I need.)
 #endif
 
-all: $(ISO)
+
+all: isofs
 
 help:
 	@echo "Alpine ISO builder"
 	@echo
-	@echo "Type 'make' to build $(ISO)"
+	@echo "Type 'make iso' to build $(ISO)"
 	@echo
 	@echo "I will use the following sources files:"
 	@echo " 1. $(notdir $(KERNEL_APK)) (looks like $(KERNEL))"
@@ -136,7 +137,7 @@ INITFS_MODDIRSTAMP := $(DESTDIR)/stamp.initfs.modules
 
 INITFS_APKS	:= $(UCLIBC_APK) $(BUSYBOX_APK) $(ACCT_APK) 
 INITFS_RAWBASEFILES  := etc/mdev.conf etc/passwd etc/group etc/fstab \
-			etc/modules etc/modprobe.d/blacklist
+			etc/modules etc/modprobe.d/blacklist lib/mdev
 INITFS_BASEFILES     := $(addprefix $(INITFS_DIR)/, $(INITFS_RAWBASEFILES))
 
 initfs: $(INITFS)
@@ -255,6 +256,7 @@ ISO_PKGDIR	:= $(ISO_DIR)/packages
 ISO_REPOS	:= $(addprefix $(ISO_PKGDIR)/,$(REPOS))
 ISO_APKINDEX	:= $(addsuffix /APK_INDEX.gz,$(ISO_REPOS))
 ISO_REPOS_DIRSTAMP := $(DESTDIR)/stamp.isorepos
+ISOFS_DIRSTAMP	:= $(DESTDIR)/stamp.isofs
 
 $(ISO_REPOS_DIRSTAMP): $(addsuffix /APK_INDEX.gz,$(addprefix $(REPOS_DIR)/,$(REPOS)))
 	@echo "==> iso: prepare repositories $(REPOS)"
@@ -278,7 +280,10 @@ $(ISO_KERNEL): $(KERNEL_APK)
 	@rm -f $(ISO_DIR)/.[A-Z]*
 	@touch $(ISO_KERNEL)
 
-$(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_REPOS_DIRSTAMP) $(SYSLINUX_CFG)
+$(ISOFS_DIRSTAMP): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_REPOS_DIRSTAMP) $(SYSLINUX_CFG)
+	@touch $@
+
+$(ISO): $(ISOFS_DIRSTAMP)
 	@echo "==> iso: building $(notdir $(ISO))"
 	@echo "$(ALPINE_NAME)-$(ALPINE_RELEASE) $(BUILD_DATE)" \
 		> $(ISO_DIR)/.alpine-release
@@ -292,4 +297,5 @@ $(ISO): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO
 		$(ISO_DIR)
 	@ln -fs $@ $(ISO_LINK)
 
+isofs: $(ISOFS_DIRSTAMP)
 iso: $(ISO)
