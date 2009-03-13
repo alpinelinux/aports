@@ -94,7 +94,7 @@ REPOS_DIRSTAMP	:= $(DESTDIR)/stamp.repos
 $(REPOS_DIRSTAMP): $(SOURCE_APKBUILDS)
 	@echo "==> repositories: $(REPOS)"
 	@buildrepo -p -a $(APORTS_DIR) -d $(REPOS_DIR) $(REPOS)
-	@touch $@
+	@mkdir -p $(dir $@) && touch $@
 
 %.apk: $(REPOS_DIRSTAMP)
 
