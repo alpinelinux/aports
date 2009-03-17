@@ -399,16 +399,16 @@ struct apk_istream *apk_istream_from_file_gz(const char *file)
 struct apk_fd_ostream {
 	struct apk_ostream os;
 	int fd;
+	size_t bytes;
+	char buffer[1024];
 };
 
-static size_t fdo_write(void *stream, const void *ptr, size_t size)
+static size_t safe_write(int fd, const void *ptr, size_t size)
 {
-	struct apk_fd_ostream *fos =
-		container_of(stream, struct apk_fd_ostream, os);
 	size_t i = 0, r;
 
 	while (i < size) {
-		r = write(fos->fd, ptr + i, size - i);
+		r = write(fd, ptr + i, size - i);
 		if (r < 0)
 			return r;
 		if (r == 0)
@@ -419,11 +419,42 @@ static size_t fdo_write(void *stream, const void *ptr, size_t size)
 	return i;
 }
 
+static int fdo_flush(struct apk_fd_ostream *fos)
+{
+	if (fos->bytes == 0)
+		return 0;
+
+	if (safe_write(fos->fd, fos->buffer, fos->bytes) != fos->bytes)
+		return -1;
+
+	fos->bytes = 0;
+	return 0;
+}
+
+static size_t fdo_write(void *stream, const void *ptr, size_t size)
+{
+	struct apk_fd_ostream *fos =
+		container_of(stream, struct apk_fd_ostream, os);
+
+	if (size + fos->bytes >= sizeof(fos->buffer)) {
+		if (fdo_flush(fos))
+			return -1;
+		if (size >= sizeof(fos->buffer) / 2)
+			return safe_write(fos->fd, ptr, size);
+	}
+
+	memcpy(&fos->buffer[fos->bytes], ptr, size);
+	fos->bytes += size;
+
+	return size;
+}
+
 static void fdo_close(void *stream)
 {
 	struct apk_fd_ostream *fos =
 		container_of(stream, struct apk_fd_ostream, os);
 
+	fdo_flush(fos);
 	close(fos->fd);
 	free(fos);
 }
