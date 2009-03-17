@@ -149,6 +149,29 @@ int apk_deps_format(char *buf, int size,
 	return n;
 }
 
+int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os)
+{
+	int i, len, n = 0;
+
+	if (deps == NULL)
+		return 0;
+
+	for (i = 0; i < deps->num; i++) {
+		if (i) {
+			if (os->write(os, " ", 1) != 1)
+				return -1;
+			n += 1;
+		}
+
+		len = strlen(deps->item[i].name->name);
+		if (os->write(os, deps->item[i].name->name, len) != len)
+			return -1;
+		n += len;
+	}
+
+	return n;
+}
+
 static const char *script_types[] = {
 	[APK_SCRIPT_PRE_INSTALL]	= "pre-install",
 	[APK_SCRIPT_POST_INSTALL]	= "post-install",

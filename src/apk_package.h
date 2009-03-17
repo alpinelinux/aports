@@ -68,6 +68,7 @@ void apk_deps_parse(struct apk_database *db,
 		    apk_blob_t blob);
 int apk_deps_format(char *buf, int size,
 		    struct apk_dependency_array *depends);
+int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os);
 int apk_script_type(const char *name);
 
 struct apk_package *apk_pkg_new(void);

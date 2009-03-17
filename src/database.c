@@ -725,8 +725,6 @@ struct write_ctx {
 static int apk_db_write_config(struct apk_database *db)
 {
 	struct apk_ostream *os;
-	char buf[1024];
-	int n;
 
 	if (db->root == NULL)
 		return 0;
@@ -741,10 +739,8 @@ static int apk_db_write_config(struct apk_database *db)
 	os = apk_ostream_to_file("var/lib/apk/world", 0644);
 	if (os == NULL)
 		return -1;
-	n = apk_deps_format(buf, sizeof(buf), db->world);
-	if (n < sizeof(buf))
-		buf[n++] = '\n';
-	os->write(os, buf, n);
+	apk_deps_write(db->world, os);
+	os->write(os, "\n", 1);
 	os->close(os);
 
 	os = apk_ostream_to_file("var/lib/apk/installed.new", 0644);
