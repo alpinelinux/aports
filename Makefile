@@ -4,7 +4,7 @@ VERSION:=$(shell  awk -F= '$$1 == "abuild_ver" {print $$2}' abuild)
 USR_BIN_FILES=abuild devbuild mkalpine buildrepo
 SAMPLES=sample.APKBUILD sample.initd sample.confd sample.pre-install \
 	sample.post-install
-DISTFILES=$(USR_BIN_FILES) $(SAMPLES) Makefile abuild.conf \
+DISTFILES=$(USR_BIN_FILES) $(SAMPLES) Makefile abuild.conf initramfs-init \
 
 
 prefix ?= /usr
@@ -29,6 +29,7 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	fi
 	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild
 	cp functions.sh $(DESTDIR)/$(datadir)/
+	cp initamfs-init $(DESTDIR)/$(datadir)/
 
 dist:	$(P).tar.bz2
 
