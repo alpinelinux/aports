@@ -184,13 +184,13 @@ $(INITFS_MODDIRSTAMP): $(INITFS_DIRSTAMP) $(INITFS_MODFILES) $(MODLOOP_DIRSTAMP)
 	@echo "==> initramfs: $(notdir $(MODULE_APK))"
 	@rm -rf $(INITFS_DIR)/lib/modules
 	@mkdir -p $(addprefix $(INITFS_MODDIR)/kernel/,drivers fs)
-	@for i in acpi ata block ide scsi cdrom usb message hid; do \
+	@for i in acpi ata block ide scsi cdrom usb message hid md; do \
 		cp -flLpR $(MODLOOP_DIR)/lib/modules/*/kernel/drivers/$$i \
 			$(INITFS_MODDIR)/kernel/drivers/ ; \
 	done
 	@for i in isofs vfat fat nls jbd 'ext*' cramfs '*.ko'; do \
 		cp -flLpR $(MODLOOP_DIR)/lib/modules/*/kernel/fs/$$i \
-			$(INITFS_MODDIR)/kernel/fs/ ; \
+			$(INITFS_MODDIR)/kernel/fs/ 2>/dev/null; \
 	done
 	@cp -flLpR $(MODLOOP_DIR)/lib/modules/*/kernel/lib \
 		$(INITFS_MODDIR)/kernel/
