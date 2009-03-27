@@ -240,7 +240,7 @@ $(ISOLINUX_CFG):
 	@echo "default $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "label $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$(ISOLINUX_CFG)
-	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom:iso9660 modules=floppy quiet" >>$(ISOLINUX_CFG)
+	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom:iso9660 modules=sd-mod,usb-storage,floppy quiet" >>$(ISOLINUX_CFG)
 
 $(SYSLINUX_CFG):
 	@echo "==> iso: configure syslinux"
@@ -249,7 +249,7 @@ $(SYSLINUX_CFG):
 	@echo "default $(KERNEL_NAME)" >>$@
 	@echo "label $(KERNEL_NAME)" >>$@
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$@
-	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=sda1:vfat modules=usb-storage,sd-mod quiet" >>$@
+	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=sda1:vfat modules=sd-mod,usb-storage quiet" >>$@
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
 ISO_PKGDIR	:= $(ISO_DIR)/packages
@@ -294,8 +294,20 @@ $(ISO): $(ISOFS_DIRSTAMP)
 		-boot-load-size 4	\
 		-boot-info-table	\
 		-quiet			\
+		$(ISO_OPTS)		\
 		$(ISO_DIR)
 	@ln -fs $@ $(ISO_LINK)
 
 isofs: $(ISOFS_DIRSTAMP)
 iso: $(ISO)
+
+#
+# SHA1 sum of ISO
+#
+SHA1	:= $(ISO).sha1
+
+$(SHA1):	$(ISO)
+	@echo "==> Generating sha1 sum"
+	@sha1sum $(ISO) > $@ || rm -f $@
+
+sha1: $(SHA1)
