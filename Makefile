@@ -29,7 +29,7 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	fi
 	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild
 	cp functions.sh $(DESTDIR)/$(datadir)/
-	cp initamfs-init $(DESTDIR)/$(datadir)/
+	cp initramfs-init $(DESTDIR)/$(datadir)/
 
 dist:	$(P).tar.bz2
 
