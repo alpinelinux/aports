@@ -45,12 +45,28 @@ static int ver_test(int argc, char **argv)
 	return 0;
 }
 
+static int ver_validate(int argc, char **argv)
+{
+	int i, r = 0;
+	for (i = 0; i < argc; i++) {
+		if (!apk_version_validate(APK_BLOB_STR(argv[i]))) {
+			if (apk_verbosity > 0)
+				printf("%s\n", argv[i]);
+			r++;
+		}
+	}
+	return r;
+}
+	
 static int ver_parse(void *ctx, int opt, int optindex, const char *optarg)
 {
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
 	switch (opt) {
 	case 't':
 		ictx->action = ver_test;
+		break;
+	case 'c':
+		ictx->action = ver_validate;
 		break;
 	default:
 		return -1;
@@ -93,6 +109,7 @@ static int ver_main(void *ctx, int argc, char **argv)
 
 static struct option ver_options[] = {
 	{ "test", 	no_argument,	NULL, 't' },
+	{ "check", 	no_argument,	NULL, 'c' },
 };
 
 static struct apk_applet apk_ver = {
