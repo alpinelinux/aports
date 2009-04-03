@@ -9,6 +9,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <fnmatch.h>
 #include <stdio.h>
 #include "apk_defines.h"
 #include "apk_applet.h"
@@ -46,7 +47,7 @@ static int search_query_print(apk_hash_item item, void *ctx)
 	struct search_query_ctx *ictx = (struct search_query_ctx *) ctx;
 	struct apk_package *pkg = (struct apk_package *) item;
 
-	if( strstr(pkg->name->name, ictx->query) == NULL )
+	if (fnmatch(ictx->query, pkg->name->name, 0) != 0)
 		return 0;
 	search_list_print(item, ictx->db);
 
