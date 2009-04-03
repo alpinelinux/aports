@@ -15,6 +15,10 @@
 #include "apk_database.h"
 #include "apk_version.h"
 
+struct ver_ctx {
+	int (*action)(int argc, char **argv);
+};
+
 static int res2char(int res)
 {
 	switch (res) {
@@ -29,19 +33,41 @@ static int res2char(int res)
 	}
 }
 
+static int ver_test(int argc, char **argv)
+{
+	int r;
+
+	if (argc != 2)
+		return 1;
+
+	r = apk_version_compare(APK_BLOB_STR(argv[0]), APK_BLOB_STR(argv[1]));
+	printf("%c\n", res2char(r));
+	return 0;
+}
+
+static int ver_parse(void *ctx, int opt, int optindex, const char *optarg)
+{
+	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
+	switch (opt) {
+	case 't':
+		ictx->action = ver_test;
+		break;
+	default:
+		return -1;
+	}
+	return 0;
+}
+
 static int ver_main(void *ctx, int argc, char **argv)
 {
+	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
 	struct apk_database db;
 	struct apk_name *name;
 	struct apk_package *pkg, *upg, *tmp;
 	int i, r;
 
-	if (argc == 2) {
-		r = apk_version_compare(APK_BLOB_STR(argv[0]),
-					APK_BLOB_STR(argv[1]));
-		printf("%c\n", res2char(r));
-		return 0;
-	}
+	if (ictx->action != NULL)
+		return ictx->action(argc, argv);
 
 	if (apk_db_open(&db, apk_root, APK_OPENF_READ) < 0)
 		return -1;
@@ -65,9 +91,17 @@ static int ver_main(void *ctx, int argc, char **argv)
 	return 0;
 }
 
+static struct option ver_options[] = {
+	{ "test", 	no_argument,	NULL, 't' },
+};
+
 static struct apk_applet apk_ver = {
 	.name = "version",
-	.usage = "[version1 version2]",
+	.usage = "[-t version1 version2]",
+	.context_size = sizeof(struct ver_ctx),
+	.num_options = ARRAY_SIZE(ver_options),
+	.options = ver_options,
+	.parse = ver_parse,
 	.main = ver_main,
 };
 
