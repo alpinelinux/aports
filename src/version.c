@@ -33,7 +33,8 @@ static void next_token(int *type, apk_blob_t *blob)
 
 	if (blob->len == 0 || blob->ptr[0] == 0) {
 		n = TOKEN_END;
-	} else if (*type == TOKEN_DIGIT && islower(blob->ptr[0])) {
+	} else if ((*type == TOKEN_DIGIT || *type == TOKEN_DIGIT_OR_ZERO) &&
+	           islower(blob->ptr[0])) {
 		n = TOKEN_LETTER;
 	} else if (*type == TOKEN_SUFFIX && isdigit(blob->ptr[0])) {
 		n = TOKEN_SUFFIX_NO;
