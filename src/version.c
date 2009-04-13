@@ -36,6 +36,8 @@ static void next_token(int *type, apk_blob_t *blob)
 	} else if ((*type == TOKEN_DIGIT || *type == TOKEN_DIGIT_OR_ZERO) &&
 	           islower(blob->ptr[0])) {
 		n = TOKEN_LETTER;
+	} else if (*type == TOKEN_LETTER && isdigit(blob->ptr[0])) {
+		n = TOKEN_DIGIT;
 	} else if (*type == TOKEN_SUFFIX && isdigit(blob->ptr[0])) {
 		n = TOKEN_SUFFIX_NO;
 	} else {
@@ -61,7 +63,8 @@ static void next_token(int *type, apk_blob_t *blob)
 
 	if (n < *type) {
 		if (! ((n == TOKEN_DIGIT_OR_ZERO && *type == TOKEN_DIGIT) ||
-		       (n == TOKEN_SUFFIX && *type == TOKEN_SUFFIX_NO)))
+		       (n == TOKEN_SUFFIX && *type == TOKEN_SUFFIX_NO) ||
+		       (n == TOKEN_DIGIT && *type == TOKEN_LETTER)))
 			n = TOKEN_INVALID;
 	}
 	*type = n;
