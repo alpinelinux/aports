@@ -18,7 +18,7 @@ APKDIRS		?= $(REPOS_DIR)/*/
 ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).iso
 ISO_LINK	?= $(ALPINE_NAME).iso
 ISO_DIR		:= $(DESTDIR)/isofs
-REPOS_DIR	?= /var/lib/packages
+REPOS_DIR	?= $(HOME)/packages
 
 # limitations for find_apk:
 # can not be a subpackage
@@ -34,7 +34,8 @@ KERNEL_APK	:= $(call find_apk,$(KERNEL_PKGNAME))
 MODULE_APK	:= $(subst /$(KERNEL_PKGNAME)-,/$(KERNEL_PKGNAME)-mod-,$(KERNEL_APK))
 
 XTABLES_ADDONS_APK:= $(subst xtables-addons,xtables-addons-$(KERNEL_FLAVOR),$(call find_apk,xtables-addons))
-MOD_APKS	:= $(MODULE_APK) $(XTABLES_ADDONS_APK)
+DAHDI_LINUX_APK:= $(subst dahdi-linux,dahdi-linux-$(KERNEL_FLAVOR),$(call find_apk,dahdi-linux))
+MOD_APKS	:= $(MODULE_APK) $(XTABLES_ADDONS_APK) $(DAHDI_LINUX_APK)
 
 KERNEL		:= $(word 3,$(subst -, ,$(notdir $(KERNEL_APK))))-$(word 2,$(subst -, ,$(notdir $(KERNEL_APK))))
 
