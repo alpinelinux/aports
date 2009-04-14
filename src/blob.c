@@ -31,6 +31,34 @@ char *apk_blob_cstr(apk_blob_t blob)
 	return cstr;
 }
 
+int apk_blob_spn(apk_blob_t blob, const char *accept, apk_blob_t *l, apk_blob_t *r)
+{
+	int i;
+
+	for (i = 0; i < blob.len; i++) {
+		if (strchr(accept, blob.ptr[i]) == NULL) {
+			*l = APK_BLOB_PTR_LEN(blob.ptr, i);
+			*r = APK_BLOB_PTR_LEN(blob.ptr+i, blob.len-i);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+int apk_blob_cspn(apk_blob_t blob, const char *reject, apk_blob_t *l, apk_blob_t *r)
+{
+	int i;
+
+	for (i = 0; i < blob.len; i++) {
+		if (strchr(reject, blob.ptr[i]) != NULL) {
+			*l = APK_BLOB_PTR_LEN(blob.ptr, i);
+			*r = APK_BLOB_PTR_LEN(blob.ptr+i, blob.len-i);
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int apk_blob_rsplit(apk_blob_t blob, char split, apk_blob_t *l, apk_blob_t *r)
 {
 	char *sep;
