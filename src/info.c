@@ -50,7 +50,7 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 			return 1;
 
 		for (j = 0; j < name->pkgs->num; j++) {
-			if (apk_pkg_get_state(name->pkgs->item[j]) == APK_STATE_INSTALL)
+			if (apk_pkg_get_state(name->pkgs->item[j]) == APK_PKG_INSTALLED)
 				break;
 		}
 		if (j >= name->pkgs->num)
@@ -76,6 +76,7 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 		if (apk_verbosity < 1) {
 			dep = (struct apk_dependency) {
 				.name = pkg->name,
+				.result_mask = APK_DEPMASK_REQUIRE,
 			};
 			apk_deps_add(&deps, &dep);
 		} else {
@@ -107,7 +108,7 @@ static int info_package(struct info_ctx *ctx, struct apk_database *db,
 		}
 		for (j = 0; j < name->pkgs->num; j++) {
 			struct apk_package *pkg = name->pkgs->item[j];
-			if (apk_pkg_get_state(pkg) == APK_STATE_INSTALL)
+			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
 				ctx->subaction(pkg);
 		}
 	}
@@ -172,7 +173,7 @@ static void info_print_required_by(struct apk_package *pkg)
 		for (j = 0; j < name0->pkgs->num; j++) {
 			struct apk_package *pkg0 = name0->pkgs->item[j];
 
-			if (apk_pkg_get_state(pkg0) != APK_STATE_INSTALL ||
+			if (apk_pkg_get_state(pkg0) != APK_PKG_INSTALLED ||
 			    pkg0->depends == NULL)
 				continue;
 			for (k = 0; k < pkg0->depends->num; k++) {

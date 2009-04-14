@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include "apk_applet.h"
 #include "apk_database.h"
+#include "apk_state.h"
 
 struct add_ctx {
 	unsigned int open_flags;
@@ -27,7 +28,7 @@ static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
 		actx->open_flags |= APK_OPENF_CREATE;
 		break;
 	case 'u':
-		apk_upgrade = 1;
+		apk_flags |= APK_UPGRADE;
 		break;
 	default:
 		return -1;
@@ -39,12 +40,14 @@ static int add_main(void *ctx, int argc, char **argv)
 {
 	struct add_ctx *actx = (struct add_ctx *) ctx;
 	struct apk_database db;
-	int i, r, ret = 1;
+	struct apk_state *state;
+	int i, r;
 
 	r = apk_db_open(&db, apk_root, actx->open_flags | APK_OPENF_WRITE);
 	if (r != 0)
 		return r;
 
+	state = apk_state_new(&db);
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;
 
@@ -59,20 +62,29 @@ static int add_main(void *ctx, int argc, char **argv)
 
 			dep = (struct apk_dependency) {
 				.name = pkg->name,
-				.min_version = pkg->version,
-				.max_version = pkg->version,
+				.version = pkg->version,
+				.result_mask = APK_VERSION_EQUAL,
 			};
 		} else {
 			dep = (struct apk_dependency) {
 				.name = apk_db_get_name(&db, APK_BLOB_STR(argv[i])),
+				.result_mask = APK_DEPMASK_REQUIRE,
 			};
 		}
 		apk_deps_add(&db.world, &dep);
+		dep.name->flags |= APK_NAME_TOPLEVEL;
+
+		r = apk_state_lock_dependency(state, &dep);
+		if (r != 0) {
+			apk_error("Unable to install '%s'", dep.name->name);
+			goto err;
+		}
 	}
-	ret = apk_db_recalculate_and_commit(&db);
+	r = apk_state_commit(state, &db);
 err:
+	apk_state_unref(state);
 	apk_db_close(&db);
-	return ret;
+	return r;
 }
 
 static struct option add_options[] = {

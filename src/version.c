@@ -143,6 +143,12 @@ int apk_version_compare(apk_blob_t a, apk_blob_t b)
 	int at = TOKEN_DIGIT, bt = TOKEN_DIGIT;
 	int av = 0, bv = 0;
 
+	if (APK_BLOB_IS_NULL(a) || APK_BLOB_IS_NULL(b)) {
+		if (APK_BLOB_IS_NULL(a) && APK_BLOB_IS_NULL(b))
+			return APK_VERSION_EQUAL;
+		return APK_VERSION_EQUAL | APK_VERSION_GREATER | APK_VERSION_LESS;
+	}
+
 	while (at == bt && at != TOKEN_END && at != TOKEN_INVALID && av == bv) {
 		av = get_token(&at, &a);
 		bv = get_token(&bt, &b);

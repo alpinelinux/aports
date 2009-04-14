@@ -100,9 +100,45 @@ static int parse_depend(void *ctx, apk_blob_t blob)
 	struct parse_depend_ctx *pctx = (struct parse_depend_ctx *) ctx;
 	struct apk_dependency *dep;
 	struct apk_name *name;
+	apk_blob_t bname, bop, bver = APK_BLOB_NULL;
+	int mask = APK_VERSION_LESS | APK_VERSION_EQUAL | APK_VERSION_GREATER;
 
 	if (blob.len == 0)
 		return 0;
+
+	/* [!]name[<,<=,=,>=,>]ver */
+	if (blob.ptr[0] == '!') {
+		mask = 0;
+		blob.ptr++;
+		blob.len--;
+	}
+	if (apk_blob_cspn(blob, "<>=", &bname, &bop)) {
+		int i;
+
+		if (mask == 0)
+			return -1;
+		if (!apk_blob_spn(bop, "<>=", &bop, &bver))
+			return -1;
+		for (i = 0; i < blob.len; i++) {
+			switch (blob.ptr[i]) {
+			case '<':
+				mask |= APK_VERSION_LESS;
+				break;
+			case '>':
+				mask |= APK_VERSION_GREATER;
+				break;
+			case '=':
+				mask |= APK_VERSION_EQUAL;
+				break;
+			}
+		}
+		if ((mask & (APK_VERSION_LESS|APK_VERSION_GREATER))
+		    == (APK_VERSION_LESS|APK_VERSION_GREATER))
+			return -1;
+
+		if (!apk_version_validate(bver))
+			return -1;
+	}
 
 	name = apk_db_get_name(pctx->db, blob);
 	if (name == NULL)
@@ -114,6 +150,8 @@ static int parse_depend(void *ctx, apk_blob_t blob)
 
 	*dep = (struct apk_dependency){
 		.name = name,
+		.version = APK_BLOB_IS_NULL(bver) ? NULL : apk_blob_cstr(bver),
+		.result_mask = mask,
 	};
 
 	return 0;
@@ -131,6 +169,24 @@ void apk_deps_parse(struct apk_database *db,
 	apk_blob_for_each_segment(blob, " ", parse_depend, &ctx);
 }
 
+static const char *mask2str(int mask)
+{
+	switch (mask) {
+	case APK_VERSION_LESS:
+		return "<";
+	case APK_VERSION_LESS|APK_VERSION_EQUAL:
+		return "<=";
+	case APK_VERSION_EQUAL:
+		return "=";
+	case APK_VERSION_GREATER|APK_VERSION_EQUAL:
+		return ">=";
+	case APK_VERSION_GREATER:
+		return ">";
+	default:
+		return "?";
+	}
+}
+
 int apk_deps_format(char *buf, int size,
 		    struct apk_dependency_array *depends)
 {
@@ -142,9 +198,25 @@ int apk_deps_format(char *buf, int size,
 	for (i = 0; i < depends->num; i++) {
 		if (i && n < size)
 			buf[n++] = ' ';
-		n += snprintf(&buf[n], size-n,
-			      "%s",
-			      depends->item[i].name->name);
+		switch (depends->item[i].result_mask) {
+		case APK_DEPMASK_CONFLICT:
+			n += snprintf(&buf[n], size-n,
+				      "!%s",
+				      depends->item[i].name->name);
+			break;
+		case APK_DEPMASK_REQUIRE:
+			n += snprintf(&buf[n], size-n,
+				      "%s",
+				      depends->item[i].name->name);
+			break;
+		default:
+			n += snprintf(&buf[n], size-n,
+				      "%s%s%s",
+				      depends->item[i].name->name,
+				      mask2str(depends->item[i].result_mask),
+				      depends->item[i].version);
+			break;
+		}
 	}
 	return n;
 }
@@ -430,21 +502,21 @@ void apk_pkg_free(struct apk_package *pkg)
 int apk_pkg_get_state(struct apk_package *pkg)
 {
 	if (list_hashed(&pkg->installed_pkgs_list))
-		return APK_STATE_INSTALL;
-	return APK_STATE_NO_INSTALL;
+		return APK_PKG_INSTALLED;
+	return APK_PKG_NOT_INSTALLED;
 }
 
 void apk_pkg_set_state(struct apk_database *db, struct apk_package *pkg, int state)
 {
 	switch (state) {
-	case APK_STATE_INSTALL:
+	case APK_PKG_INSTALLED:
 		if (!list_hashed(&pkg->installed_pkgs_list)) {
 			db->installed.stats.packages++;
 			list_add_tail(&pkg->installed_pkgs_list,
 				      &db->installed.packages);
 		}
 		break;
-	case APK_STATE_NO_INSTALL:
+	case APK_PKG_NOT_INSTALLED:
 		if (list_hashed(&pkg->installed_pkgs_list)) {
 			db->installed.stats.packages--;
 			list_del(&pkg->installed_pkgs_list);

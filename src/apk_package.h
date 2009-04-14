@@ -28,6 +28,9 @@ struct apk_name;
 #define APK_SCRIPT_PRE_UPGRADE		5
 #define APK_SCRIPT_POST_UPGRADE		6
 
+#define APK_PKG_NOT_INSTALLED		0
+#define APK_PKG_INSTALLED		1
+
 struct apk_script {
 	struct hlist_node script_list;
 	unsigned int type;
@@ -35,10 +38,14 @@ struct apk_script {
 	char script[];
 };
 
+#define APK_DEPMASK_REQUIRE	(APK_VERSION_EQUAL|APK_VERSION_LESS|\
+				 APK_VERSION_GREATER)
+#define APK_DEPMASK_CONFLICT	(0)
+
 struct apk_dependency {
 	struct apk_name *name;
-	char *min_version;
-	char *max_version;
+	int result_mask;
+	char *version;
 };
 APK_ARRAY(apk_dependency_array, struct apk_dependency);
 
@@ -46,7 +53,7 @@ struct apk_package {
 	apk_hash_node hash_node;
 
 	csum_t csum;
-	unsigned id, repos;
+	unsigned repos;
 	struct apk_name *name;
 	char *version;
 	char *url, *description, *license;

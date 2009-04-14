@@ -14,43 +14,17 @@
 
 #include "apk_database.h"
 
-#define APK_STATE_NOT_CONSIDERED		0
-#define APK_STATE_INSTALL			1
-#define APK_STATE_NO_INSTALL			2
-
-struct apk_change {
-	struct list_head change_list;
-	struct apk_package *oldpkg;
-	struct apk_package *newpkg;
-};
-
-struct apk_state {
-	int refs;
-	struct list_head change_list_head;
-	unsigned char bitarray[];
-};
-
-struct apk_deferred_state {
-	unsigned int preference;
-	struct apk_package *deferred_install;
-	/* struct apk_pkg_name_queue *install_queue; */
-	struct apk_state *state;
-};
+struct apk_state;
 
 struct apk_state *apk_state_new(struct apk_database *db);
 struct apk_state *apk_state_dup(struct apk_state *state);
 void apk_state_unref(struct apk_state *state);
 
 int apk_state_commit(struct apk_state *state, struct apk_database *db);
-
-int apk_state_satisfy_deps(struct apk_state *state,
-			   struct apk_dependency_array *deps);
-int apk_state_purge_unneeded(struct apk_state *state,
-			     struct apk_database *db);
-
-int apk_state_pkg_install(struct apk_state *state,
-			  struct apk_package *pkg);
-int apk_state_pkg_is_installed(struct apk_state *state,
-			       struct apk_package *pkg);
+int apk_state_lock_dependency(struct apk_state *state,
+			      struct apk_dependency *dep);
+int apk_state_lock_name(struct apk_state *state,
+			struct apk_name *name,
+			struct apk_package *newpkg);
 
 #endif

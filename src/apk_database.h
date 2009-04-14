@@ -54,8 +54,12 @@ struct apk_db_dir_instance {
 	gid_t gid;
 };
 
+#define APK_NAME_TOPLEVEL	0x0001
+
 struct apk_name {
 	apk_hash_node hash_node;
+	unsigned int id;
+	unsigned int flags;
 	char *name;
 	struct apk_package_array *pkgs;
 	struct apk_name_array *rdepends;
@@ -68,7 +72,7 @@ struct apk_repository {
 struct apk_database {
 	char *root;
 	int root_fd, lock_fd;
-	unsigned pkg_id, num_repos;
+	unsigned name_id, num_repos;
 
 	struct apk_dependency_array *world;
 	struct apk_string_array *protected_paths;
@@ -109,6 +113,7 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 #define APK_OPENF_CREATE	0x0002
 
 int apk_db_open(struct apk_database *db, const char *root, unsigned int flags);
+int apk_db_write_config(struct apk_database *db);
 void apk_db_close(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *file);
@@ -118,8 +123,6 @@ struct apk_package *apk_db_get_file_owner(struct apk_database *db, apk_blob_t fi
 int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
-int apk_db_recalculate_and_commit(struct apk_database *db);
-
 int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *oldpkg,
 		       struct apk_package *newpkg,

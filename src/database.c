@@ -154,6 +154,7 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 		return NULL;
 
 	pn->name = apk_blob_cstr(name);
+	pn->id = db->name_id++;
 	apk_hash_insert(&db->available.names, pn);
 
 	return pn;
@@ -355,7 +356,6 @@ static struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_pa
 	idb = apk_hash_get(&db->available.packages, APK_BLOB_BUF(pkg->csum));
 	if (idb == NULL) {
 		idb = pkg;
-		pkg->id = db->pkg_id++;
 		apk_hash_insert(&db->available.packages, pkg);
 		*apk_package_array_add(&pkg->name->pkgs) = pkg;
 		apk_db_pkg_rdepends(db, pkg);
@@ -393,7 +393,7 @@ static int apk_db_index_read(struct apk_database *db, struct apk_istream *is, in
 				if (repo != -1)
 					pkg->repos |= BIT(repo);
 				else
-					apk_pkg_set_state(db, pkg, APK_STATE_INSTALL);
+					apk_pkg_set_state(db, pkg, APK_PKG_INSTALLED);
 
 				if (apk_db_pkg_add(db, pkg) != pkg && repo == -1) {
 					apk_error("Installed database load failed");
@@ -573,6 +573,7 @@ static int apk_db_read_state(struct apk_database *db)
 {
 	struct apk_istream *is;
 	apk_blob_t blob;
+	int i;
 
 	/* Read:
 	 * 1. installed repository
@@ -589,6 +590,9 @@ static int apk_db_read_state(struct apk_database *db)
 		return -ENOENT;
 	apk_deps_parse(db, &db->world, blob);
 	free(blob.ptr);
+
+	for (i = 0; i < db->world->num; i++)
+		db->world->item[i].name->flags |= APK_NAME_TOPLEVEL;
 
 	is = apk_istream_from_file("var/lib/apk/installed");
 	if (is != NULL) {
@@ -742,7 +746,7 @@ struct write_ctx {
 	int fd;
 };
 
-static int apk_db_write_config(struct apk_database *db)
+int apk_db_write_config(struct apk_database *db)
 {
 	struct apk_ostream *os;
 
@@ -919,39 +923,6 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	return 0;
 }
 
-int apk_db_recalculate_and_commit(struct apk_database *db)
-{
-	struct apk_state *state;
-	int r;
-
-	state = apk_state_new(db);
-	r = apk_state_satisfy_deps(state, db->world);
-	if (r == 0) {
-		r = apk_state_purge_unneeded(state, db);
-		if (r != 0) {
-			apk_error("Failed to clean up state");
-			return r;
-		}
-
-		r = apk_state_commit(state, db);
-		if (r != 0) {
-			apk_error("Failed to commit changes");
-			return r;
-		}
-		apk_db_write_config(db);
-
-		apk_message("OK: %d packages, %d dirs, %d files",
-			    db->installed.stats.packages,
-			    db->installed.stats.dirs,
-			    db->installed.stats.files);
-	} else {
-		apk_error("Failed to build installation graph");
-	}
-	apk_state_unref(state);
-
-	return r;
-}
-
 static void extract_cb(void *_ctx, size_t progress)
 {
 	struct install_ctx *ctx = (struct install_ctx *) _ctx;
@@ -1069,7 +1040,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 		if (file->diri != diri) {
 			opkg = file->diri->pkg;
 			if (opkg->name != pkg->name) {
-				if (!apk_force) {
+				if (!(apk_flags & APK_FORCE)) {
 					apk_error("%s: Trying to overwrite %s "
 						  "owned by %s.\n",
 						  pkg->name->name, ae->name,
@@ -1093,7 +1064,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 		    (memcmp(file->csum, fi.csum, sizeof(csum_t)) != 0 ||
 		     !csum_valid(file->csum))) {
 			/* Protected file. Extract to separate place */
-			if (!apk_clean) {
+			if (!(apk_flags & APK_CLEAN_PROTECTED)) {
 				snprintf(alt_name, sizeof(alt_name),
 					 "%s/%s.apk-new",
 					 diri->dir->dirname, file->filename);
@@ -1160,7 +1131,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 		__hlist_del(dc, &pkg->owned_dirs.first);
 		apk_db_diri_free(db, diri);
 	}
-	apk_pkg_set_state(db, pkg, APK_STATE_NO_INSTALL);
+	apk_pkg_set_state(db, pkg, APK_PKG_NOT_INSTALLED);
 }
 
 int apk_db_install_pkg(struct apk_database *db,
@@ -1229,7 +1200,7 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	bs->close(bs, csum, NULL);
 
-	apk_pkg_set_state(db, newpkg, APK_STATE_INSTALL);
+	apk_pkg_set_state(db, newpkg, APK_PKG_INSTALLED);
 
 	if (memcmp(csum, newpkg->csum, sizeof(csum)) != 0)
 		apk_warning("%s-%s: checksum does not match",

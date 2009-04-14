@@ -14,11 +14,9 @@
 
 #include "apk_blob.h"
 
-#define APK_VERSION_LESS		-1
-#define APK_VERSION_EQUAL		0
-#define APK_VERSION_GREATER		1
-
-#define APK_VERSION_RESULT_MASK(r)	(1 << ((r)+1))
+#define APK_VERSION_EQUAL		1
+#define APK_VERSION_LESS		2
+#define APK_VERSION_GREATER		4
 
 int apk_version_validate(apk_blob_t ver);
 int apk_version_compare(apk_blob_t a, apk_blob_t b);
