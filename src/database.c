@@ -329,6 +329,25 @@ static void apk_db_file_change_owner(struct apk_database *db,
 	*after = &file->diri_files_list.next;
 }
 
+static void apk_db_pkg_rdepends(struct apk_database *db, struct apk_package *pkg)
+{
+	int i, j;
+
+	if (pkg->depends == NULL)
+		return;
+
+	for (i = 0; i < pkg->depends->num; i++) {
+		struct apk_name *rname = pkg->depends->item[i].name;
+
+		if (rname->rdepends) {
+			for (j = 0; j < rname->rdepends->num; j++)
+				if (rname->rdepends->item[j] == pkg->name)
+					return;
+		}
+		*apk_name_array_add(&rname->rdepends) = pkg->name;
+	}
+}
+
 static struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_package *idb;
@@ -339,6 +358,7 @@ static struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_pa
 		pkg->id = db->pkg_id++;
 		apk_hash_insert(&db->available.packages, pkg);
 		*apk_package_array_add(&pkg->name->pkgs) = pkg;
+		apk_db_pkg_rdepends(db, pkg);
 	} else {
 		idb->repos |= pkg->repos;
 		apk_pkg_free(pkg);

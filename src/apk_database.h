@@ -19,6 +19,9 @@
 
 #define APK_MAX_REPOS 32
 
+struct apk_name;
+APK_ARRAY(apk_name_array, struct apk_name *);
+
 struct apk_db_file {
 	struct hlist_node hash_node;
 	struct hlist_node diri_files_list;
@@ -55,6 +58,7 @@ struct apk_name {
 	apk_hash_node hash_node;
 	char *name;
 	struct apk_package_array *pkgs;
+	struct apk_name_array *rdepends;
 };
 
 struct apk_repository {
