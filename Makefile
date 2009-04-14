@@ -10,9 +10,13 @@
 PACKAGE := apk-tools
 VERSION := 2.0_pre10
 
-SVN_REV := $(shell svn info 2> /dev/null | grep ^Revision | cut -d ' ' -f 2)
-ifneq ($(SVN_REV),)
-FULL_VERSION := $(VERSION)-r$(SVN_REV)
+GIT_REV := $(shell git describe || echo exported)
+ifneq ($(GIT_REV), exported)
+ifneq ($(filter apk-tools-$(VERSION)%, $(GIT_REV)),)
+FULL_VERSION := $(patsubst apk-tools-%,%,$(GIT_REV))
+else
+FULL_VERSION := $(GIT_REV)
+endif
 else
 FULL_VERSION := $(VERSION)
 endif
