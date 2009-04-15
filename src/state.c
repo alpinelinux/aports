@@ -162,7 +162,7 @@ int apk_state_lock_dependency(struct apk_state *state,
 {
 	struct apk_name *name = dep->name;
 	struct apk_name_choices *c;
-        struct apk_package *installed, *latest = NULL, *use;
+        struct apk_package *installed = NULL, *latest = NULL, *use;
 	int i;
 
 	if (ns_empty(state->name[name->id])) {
