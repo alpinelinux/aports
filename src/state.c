@@ -10,6 +10,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <malloc.h>
 
@@ -637,6 +638,7 @@ int apk_state_commit(struct apk_state *state,
 {
 	struct progress prog;
 	struct apk_change *change;
+	int size_diff = 0;
 	int r;
 
 	/* Count what needs to be done */
@@ -645,18 +647,27 @@ int apk_state_commit(struct apk_state *state,
 		if (change->newpkg == NULL)
 			apk_state_autoclean(state, change->oldpkg);
 		apk_count_change(change, &prog.total);
+		if (change->newpkg)
+			size_diff += change->newpkg->installed_size;
+		if (change->oldpkg)
+			size_diff -= change->oldpkg->installed_size;
 	}
+	size_diff /= 1024;
 
-	if (apk_verbosity >= 1) {
+	if (apk_verbosity > 1) {
 		r = dump_packages(state, cmp_remove,
 				  "The following packages will be REMOVED");
 		r += dump_packages(state, cmp_downgrade,
 				   "The following packages will be DOWNGRADED");
-		if (r || apk_verbosity >= 2) {
+		if (r || apk_verbosity > 2) {
 			dump_packages(state, cmp_new,
 				      "The following NEW packages will be installed");
 			dump_packages(state, cmp_upgrade,
 				      "The following packages will be upgraded");
+			fprintf(stderr, "%d kB of %s\n", abs(size_diff),
+				(size_diff < 0) ?
+				"disk space will be freed" :
+				"additional disk space will be used");
 			fprintf(stderr, "Do you want to continue [Y/n]? ");
 			fflush(stderr);
 			r = fgetc(stdin);
