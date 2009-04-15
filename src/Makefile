@@ -27,6 +27,7 @@ apk_OBJS = \
 	index.o \
 	info.o \
 	search.o \
+	fetch.o \
 	audit.o \
 	apk.o
 

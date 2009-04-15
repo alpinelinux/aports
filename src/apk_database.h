@@ -111,6 +111,7 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 #define APK_OPENF_READ		0x0000
 #define APK_OPENF_WRITE		0x0001
 #define APK_OPENF_CREATE	0x0002
+#define APK_OPENF_EMPTY_STATE	0x0004
 
 int apk_db_open(struct apk_database *db, const char *root, unsigned int flags);
 int apk_db_write_config(struct apk_database *db);

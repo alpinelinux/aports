@@ -14,7 +14,19 @@
 
 #include "apk_database.h"
 
-struct apk_state;
+typedef void *apk_name_state_t;
+
+struct apk_change {
+	struct list_head change_list;
+	struct apk_package *oldpkg;
+	struct apk_package *newpkg;
+};
+
+struct apk_state {
+	int refs;
+	struct list_head change_list_head;
+	apk_name_state_t name[];
+};
 
 struct apk_state *apk_state_new(struct apk_database *db);
 struct apk_state *apk_state_dup(struct apk_state *state);

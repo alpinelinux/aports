@@ -16,23 +16,9 @@
 #include "apk_state.h"
 #include "apk_database.h"
 
-typedef void *apk_name_state_t;
-
-struct apk_change {
-	struct list_head change_list;
-	struct apk_package *oldpkg;
-	struct apk_package *newpkg;
-};
-
 struct apk_name_choices {
 	unsigned short refs, num;
 	struct apk_package *pkgs[];
-};
-
-struct apk_state {
-	int refs;
-	struct list_head change_list_head;
-	apk_name_state_t name[];
 };
 
 #if 0

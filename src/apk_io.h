@@ -67,4 +67,6 @@ struct apk_ostream *apk_ostream_to_file_gz(const char *file, mode_t mode);
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
 apk_blob_t apk_blob_from_file(const char *file);
 
+int apk_file_get_info(const char *filename, struct apk_file_info *fi);
+
 #endif

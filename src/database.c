@@ -693,18 +693,20 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	apk_blob_for_each_segment(blob, ":", add_protected_path, db);
 
 	if (root != NULL) {
-		r = apk_db_read_state(db);
-		if (r == -ENOENT && (flags & APK_OPENF_CREATE)) {
-			r = apk_db_create(db);
+		if (!(flags & APK_OPENF_EMPTY_STATE)) {
+			r = apk_db_read_state(db);
+			if (r == -ENOENT && (flags & APK_OPENF_CREATE)) {
+				r = apk_db_create(db);
+				if (r != 0) {
+					msg = "Unable to create database";
+					goto ret_r;
+				}
+				r = apk_db_read_state(db);
+			}
 			if (r != 0) {
-				msg = "Unable to create database";
+				msg = "Unable to read database state";
 				goto ret_r;
 			}
-			r = apk_db_read_state(db);
-		}
-		if (r != 0) {
-			msg = "Unable to read database state";
-			goto ret_r;
 		}
 
 		if (apk_repos == NULL)
