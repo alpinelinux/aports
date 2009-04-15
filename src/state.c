@@ -170,16 +170,8 @@ int apk_state_lock_dependency(struct apk_state *state,
 		return -1;
 
 	if (ns_empty(state->name[name->id])) {
-		if (dep->result_mask == APK_DEPMASK_CONFLICT) {
-			if ((name->flags & APK_NAME_TOPLEVEL) &&
-			    !(apk_flags & APK_FORCE)) {
-				apk_error("Not deleting top level dependency "
-					  "'%s'. Use -f to override.",
-					  name->name);
-				return -1;
-			}
+		if (dep->result_mask == APK_DEPMASK_CONFLICT)
 			return apk_state_lock_name(state, name, NULL);
-		}
 
 		/* This name has not been visited yet.
 		 * Construct list of candidates. */
@@ -284,15 +276,125 @@ static int apk_state_fix_package(struct apk_state *state,
 	return 0;
 }
 
+static int call_if_dependency_broke(struct apk_state *state,
+				    struct apk_package *pkg,
+				    struct apk_name *dep_name,
+				    int (*cb)(struct apk_state *state,
+					      struct apk_package *pkg))
+{
+	struct apk_package *dep_pkg;
+	int k;
+
+	if (pkg->depends == NULL)
+		return 0;
+
+	dep_pkg = ns_to_pkg(state->name[dep_name->id]);
+	for (k = 0; k < pkg->depends->num; k++) {
+		struct apk_dependency *dep = &pkg->depends->item[k];
+		if (dep->name != dep_name)
+			continue;
+		if (dep_pkg == NULL &&
+		    dep->result_mask == APK_DEPMASK_CONFLICT)
+			continue;
+		if (dep_pkg != NULL &&
+		    (apk_version_compare(APK_BLOB_STR(dep_pkg->version),
+					 APK_BLOB_STR(dep->version))
+		     & dep->result_mask))
+			continue;
+		return cb(state, pkg);
+	}
+
+	return 0;
+}
+
+static int for_each_broken_reverse_depency(struct apk_state *state,
+					   struct apk_name *name,
+					   int (*cb)(struct apk_state *state,
+						     struct apk_package *pkg))
+{
+	struct apk_package *pkg0;
+	int i, j, r;
+
+	if (name->rdepends == NULL)
+		return 0;
+
+	for (i = 0; i < name->rdepends->num; i++) {
+		struct apk_name *name0 = name->rdepends->item[i];
+
+		if (ns_locked(state->name[name0->id])) {
+			pkg0 = ns_to_pkg(state->name[name0->id]);
+			if (pkg0 == NULL)
+				continue;
+			return call_if_dependency_broke(state, pkg0, name, cb);
+		}
+
+		if (!ns_empty(state->name[name0->id])) {
+			struct apk_name_choices *ns =
+				ns_to_choices(state->name[name0->id]);
+
+			for (j = 0; j < ns->num; j++) {
+				if (apk_pkg_get_state(ns->pkgs[j])
+				    != APK_PKG_INSTALLED)
+					continue;
+				r = call_if_dependency_broke(state,
+							     ns->pkgs[j],
+							     name, cb);
+				if (r != 0)
+					return r;
+			}
+			return 0;
+		}
+
+		for (j = 0; j < name0->pkgs->num; j++) {
+			pkg0 = name0->pkgs->item[j];
+
+			if (apk_pkg_get_state(pkg0) != APK_PKG_INSTALLED)
+				continue;
+
+			r = call_if_dependency_broke(state,
+						     name0->pkgs->item[j],
+						     name, cb);
+			if (r != 0)
+				return r;
+		}
+	}
+
+	return 0;
+}
+
+static int delete_broken_package(struct apk_state *state,
+				 struct apk_package *pkg)
+
+{
+	return apk_state_lock_name(state, pkg->name, NULL);
+}
+
+static int reinstall_broken_package(struct apk_state *state,
+				    struct apk_package *pkg)
+
+{
+	struct apk_dependency dep = {
+		.name = pkg->name,
+		.result_mask = APK_DEPMASK_REQUIRE,
+	};
+	return apk_state_lock_dependency(state, &dep);
+}
+
 int apk_state_lock_name(struct apk_state *state,
 			struct apk_name *name,
 			struct apk_package *newpkg)
 {
 	struct apk_package *oldpkg = NULL;
-	int i, j, k, r;
+	int i, r;
 
 	if (name->id >= state->num_names)
 		return -1;
+
+	if ((name->flags & APK_NAME_TOPLEVEL) && !(apk_flags & APK_FORCE)) {
+		apk_error("Not deleting top level dependency '%s'. "
+			  "Use -f to override.", name->name);
+		return -1;
+	}
 
 	ns_free(state->name[name->id]);
 	state->name[name->id] = ns_from_pkg(newpkg);
@@ -302,7 +404,8 @@ int apk_state_lock_name(struct apk_state *state,
 			struct apk_package *pkg = name->pkgs->item[i];
 
 			if (name->pkgs->item[i]->name == name &&
-			    apk_pkg_get_state(name->pkgs->item[i]) == APK_PKG_INSTALLED)
+			    apk_pkg_get_state(name->pkgs->item[i])
+			    == APK_PKG_INSTALLED)
 				oldpkg = pkg;
 		}
 	}
@@ -313,39 +416,13 @@ int apk_state_lock_name(struct apk_state *state,
 
 	/* First we need to make sure the dependants of the old package
 	 * still have their dependencies ok. */
-	if (oldpkg != NULL && oldpkg->name->rdepends != NULL) {
-		for (i = 0; i < name->rdepends->num; i++) {
-			struct apk_name *name0 = name->rdepends->item[i];
-
-			for (j = 0; j < name0->pkgs->num; j++) {
-				struct apk_package *pkg0 = name0->pkgs->item[j];
-
-				if (apk_pkg_get_state(pkg0) != APK_PKG_INSTALLED)
-					continue;
-				if (pkg0->depends == NULL)
-					continue;
-				for (k = 0; k < pkg0->depends->num; k++) {
-					if (pkg0->depends->item[k].name
-					    == name)
-						break;
-				}
-				if (k < pkg0->depends->num) {
-					/* FIXME: Try fixing harder */
-					if (newpkg == NULL) {
-						struct apk_dependency dep;
-						dep = (struct apk_dependency) {
-							.name = name0,
-							.result_mask = APK_DEPMASK_CONFLICT,
-						};
-						r = apk_state_lock_dependency(state, &dep);
-					} else
-						r = apk_state_lock_dependency(state,
-									      &pkg0->depends->item[k]);
-					if (r != 0)
-						return r;
-				}
-			}
-		}
+	if (oldpkg != NULL) {
+		r = for_each_broken_reverse_depency(state, name,
+						    newpkg == NULL ?
+						    delete_broken_package :
+						    reinstall_broken_package);
+		if (r != 0)
+			return r;
 	}
 
 	/* Check that all other dependencies hold for the new package. */
@@ -515,6 +592,45 @@ static int cmp_upgrade(struct apk_change *change)
 	return 0;
 }
 
+static int fail_if_something_broke(struct apk_state *state,
+				   struct apk_package *pkg)
+
+{
+	return 1;
+}
+
+static int apk_state_autoclean(struct apk_state *state,
+			       struct apk_package *pkg)
+{
+	apk_name_state_t oldns;
+	int i, r;
+
+	if (pkg->depends == NULL)
+		return 0;
+
+	for (i = 0; i < pkg->depends->num; i++) {
+		struct apk_name *n = pkg->depends->item[i].name;
+
+		if (ns_locked(state->name[n->id]))
+			continue;
+		if (n->flags & APK_NAME_TOPLEVEL)
+			continue;
+
+		oldns = state->name[n->id];
+		state->name[n->id] = ns_from_pkg(NULL);
+		r = for_each_broken_reverse_depency(state, n,
+						    fail_if_something_broke);
+		state->name[n->id] = oldns;
+
+		if (r == 0) {
+			r = apk_state_lock_name(state, n, NULL);
+			if (r != 0)
+				return r;
+		}
+	}
+	return 0;
+}
+
 int apk_state_commit(struct apk_state *state,
 		     struct apk_database *db)
 {
@@ -524,8 +640,11 @@ int apk_state_commit(struct apk_state *state,
 
 	/* Count what needs to be done */
 	memset(&prog, 0, sizeof(prog));
-	list_for_each_entry(change, &state->change_list_head, change_list)
+	list_for_each_entry(change, &state->change_list_head, change_list) {
+		if (change->newpkg == NULL)
+			apk_state_autoclean(state, change->oldpkg);
 		apk_count_change(change, &prog.total);
+	}
 
 	if (apk_verbosity >= 1) {
 		r = dump_packages(state, cmp_remove,
