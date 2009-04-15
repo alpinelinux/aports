@@ -220,7 +220,7 @@ int apk_state_lock_dependency(struct apk_state *state,
 
 #if 1
 	/* Get latest and installed packages */
-	for (i = 0; i < c->num; i++) {
+	for (i = 0, latest = NULL; i < c->num; i++) {
 		struct apk_package *pkg = c->pkgs[i];
 
 		if (apk_pkg_get_state(c->pkgs[i]) == APK_PKG_INSTALLED)
