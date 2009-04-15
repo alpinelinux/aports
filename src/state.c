@@ -170,8 +170,16 @@ int apk_state_lock_dependency(struct apk_state *state,
 		return -1;
 
 	if (ns_empty(state->name[name->id])) {
-		if (dep->result_mask == APK_DEPMASK_CONFLICT)
+		if (dep->result_mask == APK_DEPMASK_CONFLICT) {
+			if ((name->flags & APK_NAME_TOPLEVEL) &&
+			    !(apk_flags & APK_FORCE)) {
+				apk_error("Not deleting top level dependency "
+					  "'%s'. Use -f to override.",
+					  name->name);
+				return -1;
+			}
 			return apk_state_lock_name(state, name, NULL);
+		}
 
 		/* This name has not been visited yet.
 		 * Construct list of candidates. */

@@ -117,9 +117,9 @@ static struct option generic_options[32] = {
 	{ "quiet",		no_argument,		NULL, 'q' },
 	{ "verbose",		no_argument,		NULL, 'v' },
 	{ "version",		no_argument,		NULL, 'V' },
+	{ "force",		no_argument,		NULL, 'f' },
 	{ "progress",		no_argument,		NULL, 0x101 },
 	{ "clean-protected",	no_argument,		NULL, 0x102 },
-	{ "force",		no_argument,		NULL, 0x103 },
 	{ "simulate",		no_argument,		NULL, 0x104 },
 };
 
@@ -181,14 +181,14 @@ int main(int argc, char **argv)
 			break;
 		case 'V':
 			return version();
+		case 'f':
+			apk_flags |= APK_FORCE;
+			break;
 		case 0x101:
 			apk_flags |= APK_PROGRESS;
 			break;
 		case 0x102:
 			apk_flags |= APK_CLEAN_PROTECTED;
-			break;
-		case 0x103:
-			apk_flags |= APK_FORCE;
 			break;
 		case 0x104:
 			apk_flags |= APK_SIMULATE;
