@@ -23,7 +23,7 @@ struct apk_change {
 };
 
 struct apk_state {
-	int refs;
+	unsigned int refs, num_names;
 	struct list_head change_list_head;
 	apk_name_state_t name[];
 };

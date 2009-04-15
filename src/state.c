@@ -121,6 +121,7 @@ struct apk_state *apk_state_new(struct apk_database *db)
 	num_bytes = sizeof(struct apk_state) + db->name_id * sizeof(char *);
 	state = (struct apk_state*) calloc(1, num_bytes);
 	state->refs = 1;
+	state->num_names = db->name_id;
 	list_init(&state->change_list_head);
 
 	return state;
@@ -164,6 +165,9 @@ int apk_state_lock_dependency(struct apk_state *state,
 	struct apk_name_choices *c;
         struct apk_package *installed = NULL, *latest = NULL, *use;
 	int i;
+
+	if (name->id >= state->num_names)
+		return -1;
 
 	if (ns_empty(state->name[name->id])) {
 		if (dep->result_mask == APK_DEPMASK_CONFLICT)
@@ -278,6 +282,9 @@ int apk_state_lock_name(struct apk_state *state,
 {
 	struct apk_package *oldpkg = NULL;
 	int i, j, k, r;
+
+	if (name->id >= state->num_names)
+		return -1;
 
 	ns_free(state->name[name->id]);
 	state->name[name->id] = ns_from_pkg(newpkg);
