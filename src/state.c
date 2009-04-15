@@ -364,7 +364,6 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 
 static int delete_broken_package(struct apk_state *state,
 				 struct apk_package *pkg)
-
 {
 	return apk_state_lock_name(state, pkg->name, NULL);
 }
@@ -390,7 +389,9 @@ int apk_state_lock_name(struct apk_state *state,
 	if (name->id >= state->num_names)
 		return -1;
 
-	if ((name->flags & APK_NAME_TOPLEVEL) && !(apk_flags & APK_FORCE)) {
+	if (newpkg == NULL &&
+	    (name->flags & APK_NAME_TOPLEVEL) &&
+	    !(apk_flags & APK_FORCE)) {
 		apk_error("Not deleting top level dependency '%s'. "
 			  "Use -f to override.", name->name);
 		return -1;
