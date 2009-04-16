@@ -492,3 +492,13 @@ struct apk_ostream *apk_ostream_to_file(const char *file, mode_t mode)
 	return apk_ostream_to_fd(fd);
 }
 
+size_t apk_ostream_write_string(struct apk_ostream *os, const char *string)
+{
+	size_t len;
+
+	len = strlen(string);
+	if (os->write(os, string, len) != len)
+		return -1;
+
+	return len;
+}

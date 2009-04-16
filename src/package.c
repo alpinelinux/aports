@@ -188,61 +188,9 @@ void apk_deps_parse(struct apk_database *db,
 	apk_blob_for_each_segment(blob, " ", parse_depend, &ctx);
 }
 
-static const char *mask2str(int mask)
-{
-	switch (mask) {
-	case APK_VERSION_LESS:
-		return "<";
-	case APK_VERSION_LESS|APK_VERSION_EQUAL:
-		return "<=";
-	case APK_VERSION_EQUAL:
-		return "=";
-	case APK_VERSION_GREATER|APK_VERSION_EQUAL:
-		return ">=";
-	case APK_VERSION_GREATER:
-		return ">";
-	default:
-		return "?";
-	}
-}
-
-int apk_deps_format(char *buf, int size,
-		    struct apk_dependency_array *depends)
-{
-	int i, n = 0;
-
-	if (depends == NULL)
-		return 0;
-
-	for (i = 0; i < depends->num; i++) {
-		if (i && n < size)
-			buf[n++] = ' ';
-		switch (depends->item[i].result_mask) {
-		case APK_DEPMASK_CONFLICT:
-			n += snprintf(&buf[n], size-n,
-				      "!%s",
-				      depends->item[i].name->name);
-			break;
-		case APK_DEPMASK_REQUIRE:
-			n += snprintf(&buf[n], size-n,
-				      "%s",
-				      depends->item[i].name->name);
-			break;
-		default:
-			n += snprintf(&buf[n], size-n,
-				      "%s%s%s",
-				      depends->item[i].name->name,
-				      mask2str(depends->item[i].result_mask),
-				      depends->item[i].version);
-			break;
-		}
-	}
-	return n;
-}
-
 int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os)
 {
-	int i, len, n = 0;
+	int i, r, n = 0;
 
 	if (deps == NULL)
 		return 0;
@@ -254,10 +202,29 @@ int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os)
 			n += 1;
 		}
 
-		len = strlen(deps->item[i].name->name);
-		if (os->write(os, deps->item[i].name->name, len) != len)
-			return -1;
-		n += len;
+		if (deps->item[i].result_mask == APK_DEPMASK_CONFLICT) {
+			if (os->write(os, "!", 1) != 1)
+				return -1;
+			n += 1;
+		}
+
+		r = apk_ostream_write_string(os, deps->item[i].name->name);
+		if (r < 0)
+			return r;
+		n += r;
+
+		if (deps->item[i].result_mask != APK_DEPMASK_CONFLICT &&
+		    deps->item[i].result_mask != APK_DEPMASK_REQUIRE) {
+			r = apk_ostream_write_string(os, apk_version_op_string(deps->item[i].result_mask));
+			if (r < 0)
+				return r;
+			n += r;
+
+			r = apk_ostream_write_string(os, deps->item[i].version);
+			if (r < 0)
+				return r;
+			n += r;
+		}
 	}
 
 	return n;
@@ -654,34 +621,45 @@ struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_
 	return ctx.pkg;
 }
 
-apk_blob_t apk_pkg_format_index_entry(struct apk_package *info, int size,
-				      char *buf)
+int apk_pkg_write_index_entry(struct apk_package *info,
+			      struct apk_ostream *os)
 {
-	int n = 0;
+	char buf[512];
+	int n, r, t = 0;
 
-	n += snprintf(&buf[n], size-n,
-		      "P:%s\n"
-		      "V:%s\n"
-		      "S:%zu\n"
-		      "I:%zu\n"
-		      "T:%s\n"
-		      "U:%s\n"
-		      "L:%s\n",
-		      info->name->name, info->version,
-		      info->size, info->installed_size,
-		      info->description, info->url, info->license);
+	n = snprintf(buf, sizeof(buf),
+		     "P:%s\n"
+		     "V:%s\n"
+		     "S:%zu\n"
+		     "I:%zu\n"
+		     "T:%s\n"
+		     "U:%s\n"
+		     "L:%s\n",
+		     info->name->name, info->version,
+		     info->size, info->installed_size,
+		     info->description, info->url, info->license);
+	if (os->write(os, buf, n) != n)
+		return -1;
+	t += n;
 
 	if (info->depends != NULL) {
-		n += snprintf(&buf[n], size-n, "D:");
-		n += apk_deps_format(&buf[n], size-n, info->depends);
-		if (n < size)
-			buf[n++] = '\n';
+		if (os->write(os, "D:", 2) != 2)
+			return -1;
+		r = apk_deps_write(info->depends, os);
+		if (r < 0)
+			return r;
+		if (os->write(os, "\n", 1) != 1)
+			return -1;
+		t += r + 3;
 	}
-	n += snprintf(&buf[n], size-n, "C:");
-	n += apk_hexdump_format(size-n, &buf[n],
-				APK_BLOB_BUF(info->csum));
-	n += snprintf(&buf[n], size-n,
-		      "\n\n");
 
-	return APK_BLOB_PTR_LEN(buf, n);
+	n = snprintf(buf, sizeof(buf), "C:");
+	n += apk_hexdump_format(sizeof(buf)-n, &buf[n], APK_BLOB_BUF(info->csum));
+	n += snprintf(&buf[n], sizeof(buf)-n, "\n");
+
+	if (os->write(os, buf, n) != n)
+		return -1;
+	t += n;
+
+	return n;
 }

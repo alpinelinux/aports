@@ -489,13 +489,12 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 	struct apk_db_file *file;
 	struct hlist_node *c1, *c2;
 	char buf[1024];
-	apk_blob_t blob;
-	int n = 0;
+	int n = 0, r;
 
 	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
-		blob = apk_pkg_format_index_entry(pkg, sizeof(buf), buf);
-		if (blob.ptr)
-			os->write(os, blob.ptr, blob.len - 1);
+		r = apk_pkg_write_index_entry(pkg, os);
+		if (r < 0)
+			return r;
 
 		hlist_for_each_entry(diri, c1, &pkg->owned_dirs, pkg_dirs_list) {
 			n += snprintf(&buf[n], sizeof(buf)-n,
@@ -872,17 +871,16 @@ static int write_index_entry(apk_hash_item item, void *ctx)
 {
 	struct index_write_ctx *iwctx = (struct index_write_ctx *) ctx;
 	struct apk_package *pkg = (struct apk_package *) item;
-	char buf[1024];
-	apk_blob_t blob;
+	int r;
 
 	if (pkg->repos != 0)
 		return 0;
 
-	blob = apk_pkg_format_index_entry(pkg, sizeof(buf), buf);
-	if (APK_BLOB_IS_NULL(blob))
-		return 0;
+	r = apk_pkg_write_index_entry(pkg, iwctx->os);
+	if (r < 0)
+		return r;
 
-	if (iwctx->os->write(iwctx->os, blob.ptr, blob.len) != blob.len)
+	if (iwctx->os->write(iwctx->os, "\n", 1) != 1)
 		return -1;
 
 	iwctx->count++;

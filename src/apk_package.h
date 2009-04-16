@@ -75,8 +75,6 @@ void apk_deps_del(struct apk_dependency_array **deps,
 void apk_deps_parse(struct apk_database *db,
 		    struct apk_dependency_array **depends,
 		    apk_blob_t blob);
-int apk_deps_format(char *buf, int size,
-		    struct apk_dependency_array *depends);
 int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os);
 int apk_script_type(const char *name);
 
@@ -94,6 +92,6 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		       unsigned int type);
 
 struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_t entry);
-apk_blob_t apk_pkg_format_index_entry(struct apk_package *pkg, int size, char *buf);
+int apk_pkg_write_index_entry(struct apk_package *pkg, struct apk_ostream *os);
 
 #endif

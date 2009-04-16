@@ -63,6 +63,7 @@ struct apk_bstream *apk_bstream_from_url(const char *url);
 struct apk_ostream *apk_ostream_to_fd(int fd);
 struct apk_ostream *apk_ostream_to_file(const char *file, mode_t mode);
 struct apk_ostream *apk_ostream_to_file_gz(const char *file, mode_t mode);
+size_t apk_ostream_write_string(struct apk_ostream *ostream, const char *string);
 
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
 apk_blob_t apk_blob_from_file(const char *file);

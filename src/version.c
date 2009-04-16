@@ -128,6 +128,24 @@ static int get_token(int *type, apk_blob_t *blob)
 	return v;
 }
 
+const char *apk_version_op_string(int mask)
+{
+	switch (mask) {
+	case APK_VERSION_LESS:
+		return "<";
+	case APK_VERSION_LESS|APK_VERSION_EQUAL:
+		return "<=";
+	case APK_VERSION_EQUAL:
+		return "=";
+	case APK_VERSION_GREATER|APK_VERSION_EQUAL:
+		return ">=";
+	case APK_VERSION_GREATER:
+		return ">";
+	default:
+		return "?";
+	}
+}
+
 int apk_version_validate(apk_blob_t ver)
 {
 	int t = TOKEN_DIGIT;

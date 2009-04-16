@@ -10,6 +10,7 @@
  */
 
 #include <stdio.h>
+#include <unistd.h>
 #include "apk_defines.h"
 #include "apk_applet.h"
 #include "apk_package.h"
@@ -85,9 +86,13 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 		}
 	}
 	if (apk_verbosity < 1 && deps != NULL) {
-		char buf[512];
-		apk_deps_format(buf, sizeof(buf), deps);
-		printf("%s\n", buf);
+		struct apk_ostream *os;
+
+		os = apk_ostream_to_fd(STDOUT_FILENO);
+		apk_deps_write(deps, os);
+		os->write(os, "\n", 1);
+		os->close(os);
+
 		free(deps);
 	}
 
