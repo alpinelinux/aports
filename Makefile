@@ -1,74 +1,36 @@
-# Makefile - one file to rule them all, one file to bind them
-#
-# Copyright (C) 2007 Timo Teräs <timo.teras@iki.fi>
-# All rights reserved.
-#
-# This program is free software; you can redistribute it and/or modify it 
-# under the terms of the GNU General Public License version 3 as published
-# by the Free Software Foundation. See http://www.gnu.org/ for details.
+##
+# Building apk-tools
 
 PACKAGE := apk-tools
 VERSION := 2.0_pre10
 
-GIT_REV := $(shell git describe || echo exported)
-ifneq ($(GIT_REV), exported)
-ifneq ($(filter apk-tools-$(VERSION)%, $(GIT_REV)),)
-FULL_VERSION := $(patsubst apk-tools-%,%,$(GIT_REV))
-else
-FULL_VERSION := $(GIT_REV)
-endif
-else
-FULL_VERSION := $(VERSION)
-endif
+##
+# Default directories
 
-CC=gcc
-INSTALL=install
-INSTALLDIR=$(INSTALL) -d
+DESTDIR		:=
+SBINDIR		:= /sbin
+CONFDIR		:= /etc/apk
+MANDIR		:= /usr/share/man
+DOCDIR		:= /usr/share/doc/apk
 
-CFLAGS?=-g -Werror -Wall -Wstrict-prototypes
-CFLAGS+=-D_GNU_SOURCE -std=gnu99 -DAPK_VERSION=\"$(FULL_VERSION)\"
+export DESTDIR SBINDIR CONFDIR MANDIR DOCDIR
 
-LDFLAGS?=-g
-LDFLAGS+=-nopie
-LIBS=/usr/lib/libz.a
+##
+# Top-level rules and targets
 
-ifeq ($(STATIC),yes)
-CFLAGS+=-fno-stack-protector
-LDFLAGS+=-static
-endif
+targets		:= src/
 
-DESTDIR=
-SBINDIR=/sbin
-CONFDIR=/etc/apk
-MANDIR=/usr/share/man
-DOCDIR=/usr/share/doc/apk
+##
+# Include all rules and stuff
 
-SUBDIRS=src
+include Make.rules
 
-.PHONY: compile install clean all static
-
-all: compile
-
-static:
-	$(MAKE) $(MFLAGS) -C src apk.static
-
-compile install clean::
-	@for i in $(SUBDIRS); do $(MAKE) $(MFLAGS) -C $$i $(MAKECMDGOALS); done
+##
+# Top-level targets
 
 install::
 	$(INSTALLDIR) $(DESTDIR)$(DOCDIR)
 	$(INSTALL) README $(DESTDIR)$(DOCDIR)
 
-clean::
-	rm -rf $(TARBALL)
-
-TARBALL := $(PACKAGE)-$(VERSION).tar.bz2
-dist:	$(TARBALL)
-$(TARBALL):
-	rm -rf $(PACKAGE)
-	git clone . $(PACKAGE)
-	cd $(PACKAGE) && (cd .. && git diff) | patch -p1
-	tar -cjf $@ $(PACKAGE)
-	rm -rf $(PACKAGE)
-
-.EXPORT_ALL_VARIABLES:
+static:
+	$(Q)$(MAKE) STATIC=y
