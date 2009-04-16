@@ -35,7 +35,9 @@ MODULE_APK	:= $(subst /$(KERNEL_PKGNAME)-,/$(KERNEL_PKGNAME)-mod-,$(KERNEL_APK))
 
 XTABLES_ADDONS_APK:= $(subst xtables-addons,xtables-addons-$(KERNEL_FLAVOR),$(call find_apk,xtables-addons))
 DAHDI_LINUX_APK:= $(subst dahdi-linux,dahdi-linux-$(KERNEL_FLAVOR),$(call find_apk,dahdi-linux))
-MOD_APKS	:= $(MODULE_APK) $(XTABLES_ADDONS_APK) $(DAHDI_LINUX_APK)
+ISCSITARGET_APK:= $(subst iscsitarget,iscsitarget-$(KERNEL_FLAVOR),$(call find_apk,iscsitarget))
+MOD_APKS	:= $(MODULE_APK) $(XTABLES_ADDONS_APK) $(DAHDI_LINUX_APK) \
+		   $(ISCSITARGET_APK)
 
 KERNEL		:= $(word 3,$(subst -, ,$(notdir $(KERNEL_APK))))-$(word 2,$(subst -, ,$(notdir $(KERNEL_APK))))
 
