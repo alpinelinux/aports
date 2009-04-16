@@ -360,7 +360,7 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 		char field;
 	} fields[] = {
 		{ "DESC",	'T' },
-		{ "WW",		'U' },
+		{ "WWW",	'U' },
 		{ "LICENSE",	'L' },
 		{ "DEPEND", 	'D' },
 	};
