@@ -27,13 +27,11 @@ static int del_main(void *ctx, int argc, char **argv)
 	if (db.world == NULL)
 		goto out;
 
-	state = apk_state_new(&db);
 	for (i = 0; i < argc; i++) {
-		struct apk_dependency dep;
-
 		name = apk_db_get_name(&db, APK_BLOB_STR(argv[i]));
 
 		/* Remove from world, so we get proper changeset */
+		name->flags &= ~APK_NAME_TOPLEVEL;
 		for (j = 0; j < db.world->num; j++) {
 			if (strcmp(db.world->item[j].name->name,
 				   argv[i]) == 0) {
@@ -43,8 +41,13 @@ static int del_main(void *ctx, int argc, char **argv)
 					apk_dependency_array_resize(db.world, db.world->num-1);
 			}
 		}
-		name->flags &= ~APK_NAME_TOPLEVEL;
+	}
 
+	state = apk_state_new(&db);
+	for (i = 0; i < argc; i++) {
+		struct apk_dependency dep;
+
+		name = apk_db_get_name(&db, APK_BLOB_STR(argv[i]));
 		dep = (struct apk_dependency) {
 			.name = name,
 			.result_mask = APK_DEPMASK_CONFLICT,
