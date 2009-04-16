@@ -69,5 +69,7 @@ apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
 apk_blob_t apk_blob_from_file(const char *file);
 
 int apk_file_get_info(const char *filename, struct apk_file_info *fi);
+int apk_url_download(const char *url, const char *file);
+const char *apk_url_local_file(const char *url);
 
 #endif

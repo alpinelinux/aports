@@ -803,8 +803,11 @@ void apk_db_close(struct apk_database *db)
 		}
 	}
 
-	for (i = 0; i < db->num_repos; i++)
+	for (i = 0; i < db->num_repos; i++) {
 		free(db->repos[i].url);
+		if (db->repos[i].cache != NULL)
+			free(db->repos[i].cache);
+	}
 	if (db->protected_paths) {
 		for (i = 0; i < db->protected_paths->num; i++)
 			free(db->protected_paths->item[i]);
@@ -896,12 +899,76 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
 	return ctx.count;
 }
 
+static struct apk_bstream *apk_db_cache_open(struct apk_database *db,
+					     const char *file)
+{
+	char tmp[256];
+
+	if (db->root == NULL)
+		return NULL;
+
+	snprintf(tmp, sizeof(tmp), "%svar/lib/apk/%s", db->root, file);
+	return apk_bstream_from_file(tmp);
+}
+
+static int apk_db_cache_has(struct apk_database *db, const char *file)
+{
+	char tmp[256];
+	struct apk_file_info fi;
+	int r;
+
+	if (db->root == NULL)
+		return FALSE;
+
+	snprintf(tmp, sizeof(tmp), "%svar/lib/apk/%s", db->root, file);
+	r = apk_file_get_info(tmp, &fi);
+	if (r < 0)
+		return FALSE;
+
+	return TRUE;
+}
+
+static struct apk_bstream *apk_repository_file_open(struct apk_repository *repo,
+						    const char *file)
+{
+	char tmp[256];
+
+	snprintf(tmp, sizeof(tmp), "%s/%s", repo->url, file);
+
+	return apk_bstream_from_url(tmp);
+}
+
+int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
+{
+	char tmp[256], tmp2[256];
+	int r;
+
+	if (repo->cache == NULL)
+		return 0;
+
+	apk_message("fetch index %s", repo->url);
+
+	snprintf(tmp, sizeof(tmp), "%s/APK_INDEX.gz", repo->url);
+	snprintf(tmp2, sizeof(tmp2), "%svar/lib/apk/%s.new",
+		 db->root, repo->cache);
+	r = apk_url_download(tmp, tmp2);
+	if (r < 0)
+		return r;
+
+	snprintf(tmp2, sizeof(tmp2), "%svar/lib/apk/%s",
+		 db->root, repo->cache);
+	if (rename(tmp2, tmp) < 0)
+		return -errno;
+
+	return 0;
+}
+
 int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 {
 	struct apk_database *db = _db.db;
-	struct apk_istream *is;
-	char tmp[256];
-	int r;
+	struct apk_istream *is = NULL;
+	char buf[2*sizeof(csum_t)+32], *name;
+	int r, n;
 
 	if (repository.ptr == NULL || *repository.ptr == '\0' 
 			|| *repository.ptr == '#')
@@ -911,14 +978,37 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		return -1;
 
 	r = db->num_repos++;
-	db->repos[r] = (struct apk_repository){
-		.url = apk_blob_cstr(repository)
+	db->repos[r] = (struct apk_repository) {
+		.url = apk_blob_cstr(repository),
+		.cache = NULL,
 	};
 
-	snprintf(tmp, sizeof(tmp), "%s/APK_INDEX.gz", db->repos[r].url);
-	is = apk_istream_from_url_gz(tmp);
+	if (apk_url_local_file(db->repos[r].url) == NULL) {
+		csum_ctx_t csum;
+		csum_t res;
+
+		csum_init(&csum);
+		csum_process(&csum, repository.ptr, repository.len);
+		csum_finish(&csum, res);
+
+		n = apk_hexdump_format(sizeof(buf), buf, APK_BLOB_BUF(res)) - 1;
+		snprintf(&buf[n], sizeof(buf) - n, ".index.gz");
+
+		db->repos[r].cache = strdup(buf);
+
+		if (!apk_db_cache_has(db, db->repos[r].cache)) {
+			n = apk_repository_update(db, &db->repos[r]);
+			if (n < 0)
+				return n;
+		}
+		name = db->repos[r].cache;
+		is = apk_bstream_gunzip(apk_db_cache_open(db, db->repos[r].cache), 1);
+	} else {
+		name = "APK_INDEX.gz";
+		is = apk_bstream_gunzip(apk_repository_file_open(&db->repos[r], name), 1);
+	}
 	if (is == NULL) {
-		apk_error("Failed to open index file %s", tmp);
+		apk_error("Failed to open index file %s", name);
 		return -1;
 	}
 	apk_db_index_read(db, is, r);

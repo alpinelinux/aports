@@ -67,6 +67,7 @@ struct apk_name {
 
 struct apk_repository {
 	char *url;
+	char *cache;
 };
 
 struct apk_database {
@@ -124,6 +125,8 @@ struct apk_package *apk_db_get_file_owner(struct apk_database *db, apk_blob_t fi
 int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
+int apk_repository_update(struct apk_database *db, struct apk_repository *repo);
+
 int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *oldpkg,
 		       struct apk_package *newpkg,

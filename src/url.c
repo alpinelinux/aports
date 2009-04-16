@@ -13,10 +13,11 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include "apk_io.h"
 
-static const char *url_is_file(const char *url)
+const char *apk_url_local_file(const char *url)
 {
 	if (strncmp(url, "file:", 5) == 0)
 		return &url[5];
@@ -59,8 +60,8 @@ static int fork_wget(const char *url)
 
 struct apk_istream *apk_istream_from_url(const char *url)
 {
-	if (url_is_file(url) != NULL)
-		return apk_istream_from_file(url_is_file(url));
+	if (apk_url_local_file(url) != NULL)
+		return apk_istream_from_file(apk_url_local_file(url));
 
 	return apk_istream_from_fd(fork_wget(url));
 }
@@ -72,9 +73,34 @@ struct apk_istream *apk_istream_from_url_gz(const char *file)
 
 struct apk_bstream *apk_bstream_from_url(const char *url)
 {
-	if (url_is_file(url))
+	if (apk_url_local_file(url))
 		return apk_bstream_from_file(url);
 
 	return apk_bstream_from_fd(fork_wget(url));
+}
+
+int apk_url_download(const char *url, const char *file)
+{
+	pid_t pid;
+	int status;
+
+	pid = fork();
+	if (pid == -1)
+		return -1;
+
+	if (pid == 0) {
+		setsid();
+		dup2(open("/dev/null", O_RDONLY), STDIN_FILENO);
+		execlp("wget", "wget", "-q", "-O", file, url, NULL);
+		exit(0);
+	}
+
+	waitpid(pid, &status, 0);
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		unlink(file);
+		return -1;
+	}
+
+	return 0;
 }
 
