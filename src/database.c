@@ -361,6 +361,10 @@ static struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_pa
 		apk_db_pkg_rdepends(db, pkg);
 	} else {
 		idb->repos |= pkg->repos;
+		if (idb->filename == NULL && pkg->filename != NULL) {
+			idb->filename = pkg->filename;
+			pkg->filename = NULL;
+		}
 		apk_pkg_free(pkg);
 	}
 	return idb;
@@ -855,7 +859,7 @@ struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *fil
 
 	info = apk_pkg_read(db, file);
 	if (info != NULL)
-		apk_db_pkg_add(db, info);
+		info = apk_db_pkg_add(db, info);
 	return info;
 }
 
