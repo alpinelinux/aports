@@ -70,6 +70,8 @@ APK_ARRAY(apk_package_array, struct apk_package *);
 
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep);
+void apk_deps_del(struct apk_dependency_array **deps,
+		  struct apk_name *name);
 void apk_deps_parse(struct apk_database *db,
 		    struct apk_dependency_array **depends,
 		    apk_blob_t blob);

@@ -90,6 +90,25 @@ int apk_deps_add(struct apk_dependency_array **depends,
 	return 0;
 }
 
+void apk_deps_del(struct apk_dependency_array **pdeps,
+		  struct apk_name *name)
+{
+	struct apk_dependency_array *deps = *pdeps;
+	int i;
+
+	if (deps == NULL)
+		return;
+
+	for (i = 0; i < deps->num; i++) {
+		if (deps->item[i].name != name)
+			continue;
+
+		deps->item[i] = deps->item[deps->num-1];
+		*pdeps = apk_dependency_array_resize(deps, deps->num-1);
+		break;
+	}
+}
+
 struct parse_depend_ctx {
 	struct apk_database *db;
 	struct apk_dependency_array **depends;

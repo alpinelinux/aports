@@ -19,7 +19,7 @@ static int del_main(void *ctx, int argc, char **argv)
 	struct apk_database db;
 	struct apk_state *state;
 	struct apk_name *name;
-	int i, j, r;
+	int i, r;
 
 	if (apk_db_open(&db, apk_root, APK_OPENF_WRITE) < 0)
 		return -1;
@@ -29,18 +29,8 @@ static int del_main(void *ctx, int argc, char **argv)
 
 	for (i = 0; i < argc; i++) {
 		name = apk_db_get_name(&db, APK_BLOB_STR(argv[i]));
-
-		/* Remove from world, so we get proper changeset */
 		name->flags &= ~APK_NAME_TOPLEVEL;
-		for (j = 0; j < db.world->num; j++) {
-			if (strcmp(db.world->item[j].name->name,
-				   argv[i]) == 0) {
-				db.world->item[j] =
-					db.world->item[db.world->num-1];
-				db.world =
-					apk_dependency_array_resize(db.world, db.world->num-1);
-			}
-		}
+		apk_deps_del(&db.world, name);
 	}
 
 	state = apk_state_new(&db);
