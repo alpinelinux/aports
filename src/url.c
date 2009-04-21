@@ -91,6 +91,7 @@ int apk_url_download(const char *url, const char *file)
 	if (pid == 0) {
 		setsid();
 		dup2(open("/dev/null", O_RDONLY), STDIN_FILENO);
+		unlink(file);
 		execlp("wget", "wget", "-q", "-O", file, url, NULL);
 		exit(0);
 	}
