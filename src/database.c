@@ -906,7 +906,7 @@ static struct apk_bstream *apk_db_cache_open(struct apk_database *db,
 	if (db->root == NULL)
 		return NULL;
 
-	snprintf(tmp, sizeof(tmp), "%svar/lib/apk/%s", db->root, file);
+	snprintf(tmp, sizeof(tmp), "%s/var/lib/apk/%s", db->root, file);	
 	return apk_bstream_from_file(tmp);
 }
 
@@ -919,7 +919,7 @@ static int apk_db_cache_has(struct apk_database *db, const char *file)
 	if (db->root == NULL)
 		return FALSE;
 
-	snprintf(tmp, sizeof(tmp), "%svar/lib/apk/%s", db->root, file);
+	snprintf(tmp, sizeof(tmp), "%s/var/lib/apk/%s", db->root, file);
 	r = apk_file_get_info(tmp, &fi);
 	if (r < 0)
 		return FALSE;
@@ -948,13 +948,13 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 	apk_message("fetch index %s", repo->url);
 
 	snprintf(tmp, sizeof(tmp), "%s/APK_INDEX.gz", repo->url);
-	snprintf(tmp2, sizeof(tmp2), "%svar/lib/apk/%s.new",
+	snprintf(tmp2, sizeof(tmp2), "%s/var/lib/apk/%s.new",
 		 db->root, repo->cache);
 	r = apk_url_download(tmp, tmp2);
 	if (r < 0)
 		return r;
 
-	snprintf(tmp, sizeof(tmp), "%svar/lib/apk/%s",
+	snprintf(tmp, sizeof(tmp), "%s/var/lib/apk/%s",
 		 db->root, repo->cache);
 	if (rename(tmp2, tmp) < 0)
 		return -errno;
