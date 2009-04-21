@@ -712,23 +712,25 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 			}
 		}
 
-		if (apk_repos == NULL)
-			apk_repos = "/etc/apk/repositories";
-		blob = apk_blob_from_file(apk_repos);
-		if (!APK_BLOB_IS_NULL(blob)) {
-			r = apk_blob_for_each_segment(blob, "\n",
-						      apk_db_add_repository, db);
-			free(blob.ptr);
-			if (r != 0)
-				goto ret_r;
+		if (!(flags & APK_OPENF_EMPTY_REPOS)) {
+			if (apk_repos == NULL)
+				apk_repos = "/etc/apk/repositories";
+			blob = apk_blob_from_file(apk_repos);
+			if (!APK_BLOB_IS_NULL(blob)) {
+				r = apk_blob_for_each_segment(blob, "\n",
+							      apk_db_add_repository, db);
+				free(blob.ptr);
+				if (r != 0)
+					goto ret_r;
+			}
 		}
 	}
 
-	list_for_each_entry(repo, &apk_repository_list.list, list) {
-		r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
-		if (r != 0) {
-			msg = repo->url;
-			goto ret_r;
+	if (!(flags & APK_OPENF_EMPTY_REPOS)) {
+		list_for_each_entry(repo, &apk_repository_list.list, list) {
+			r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
+			if (r != 0)
+				goto ret_r;
 		}
 	}
 
