@@ -9,6 +9,7 @@ CFLAGS_apk.o		:= -DAPK_VERSION=\"$(FULL_VERSION)\"
 progs-$(STATIC)		+= apk.static
 apk.static-objs		:= $(apk-objs)
 LDFLAGS_apk.static	:= -static
+LDFLAGS_apk		+= -nopie
 
 LIBS			:= /usr/lib/libz.a
 
