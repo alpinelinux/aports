@@ -23,19 +23,31 @@ struct info_ctx {
 	void (*subaction)(struct apk_package *pkg);
 };
 
+static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
+{
+	int verbosity = apk_verbosity;
+	if (verbosity < minimal_verbosity)
+		verbosity = minimal_verbosity;
+
+	if (pkg == NULL || verbosity < 1)
+		return;
+
+	printf("%s", pkg->name->name);
+	if (apk_verbosity > 1)
+		printf("-%s", pkg->version);
+	if (apk_verbosity > 2)
+		printf(" - %s", pkg->description);
+	printf("\n");
+}
+
+
 static int info_list(struct info_ctx *ctx, struct apk_database *db,
 		     int argc, char **argv)
 {
 	struct apk_package *pkg;
 
-	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
-		printf("%s", pkg->name->name);
-		if (apk_verbosity > 0)
-			printf("-%s", pkg->version);
-		if (apk_verbosity > 1)
-			printf("- %s", pkg->description);
-		printf("\n");
-	}
+	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list)
+		verbose_print_pkg(pkg, 1);
 	return 0;
 }
 
@@ -43,22 +55,26 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 		       int argc, char **argv)
 {
 	struct apk_name *name;
-	int i, j;
+	int i, j, ret = 0;
 
 	for (i = 0; i < argc; i++) {
 		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-		if (name == NULL)
-			return 1;
+		if (name == NULL) { 
+			ret++;
+			continue;
+		}
 
 		for (j = 0; j < name->pkgs->num; j++) {
 			if (apk_pkg_get_state(name->pkgs->item[j]) == APK_PKG_INSTALLED)
 				break;
 		}
-		if (j >= name->pkgs->num)
-			return 2;
+		if (j >= name->pkgs->num) {
+			ret++;
+		} else
+			verbose_print_pkg(name->pkgs->item[j], 0);
 	}
 
-	return 0;
+	return ret;
 }
 
 static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
