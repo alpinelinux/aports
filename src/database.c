@@ -646,7 +646,7 @@ static int apk_db_create(struct apk_database *db)
 int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 {
 	apk_blob_t blob;
-	const char *apk_repos = getenv("APK_REPOS"), *msg;
+	const char *apk_repos = getenv("APK_REPOS"), *msg = NULL;
 	int r;
 	struct apk_repository_url *repo = NULL;
 
@@ -719,10 +719,8 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 			r = apk_blob_for_each_segment(blob, "\n",
 						      apk_db_add_repository, db);
 			free(blob.ptr);
-			if (r != 0) {
-				msg = "Unable to load repositories";
+			if (r != 0)
 				goto ret_r;
-			}
 		}
 	}
 
@@ -740,7 +738,8 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 ret_errno:
 	r = -errno;
 ret_r:
-	apk_error("%s: %s", msg, strerror(-r));
+	if (msg != NULL)
+		apk_error("%s: %s", msg, strerror(-r));
 	apk_db_close(db);
 	fchdir(apk_cwd_fd);
 	return r;
@@ -1008,7 +1007,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		is = apk_bstream_gunzip(apk_repository_file_open(&db->repos[r], name), 1);
 	}
 	if (is == NULL) {
-		apk_error("Failed to open index file %s", name);
+		apk_error("Failed to open index for %s", db->repos[r].url);
 		return -1;
 	}
 	apk_db_index_read(db, is, r);
