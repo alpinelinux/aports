@@ -955,7 +955,7 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 	if (r < 0)
 		return r;
 
-	snprintf(tmp2, sizeof(tmp2), "%svar/lib/apk/%s",
+	snprintf(tmp, sizeof(tmp), "%svar/lib/apk/%s",
 		 db->root, repo->cache);
 	if (rename(tmp2, tmp) < 0)
 		return -errno;
