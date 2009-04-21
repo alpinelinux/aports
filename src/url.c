@@ -83,6 +83,7 @@ int apk_url_download(const char *url, const char *file)
 {
 	pid_t pid;
 	int status;
+	char tmp[256];
 
 	pid = fork();
 	if (pid == -1)
@@ -91,7 +92,8 @@ int apk_url_download(const char *url, const char *file)
 	if (pid == 0) {
 		setsid();
 		dup2(open("/dev/null", O_RDONLY), STDIN_FILENO);
-		unlink(file);
+		snprintf(tmp, sizeof(tmp), "%s.backup", file);
+		rename(file, tmp);
 		execlp("wget", "wget", "-q", "-O", file, url, NULL);
 		exit(0);
 	}
