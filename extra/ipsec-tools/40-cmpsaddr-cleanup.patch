@@ -1,0 +1,1403 @@
+Get rid of CMPSADDR hack in port comparisons. Trac #295.
+
+From: Timo Teras <timo.teras@iki.fi>
+
+
+---
+
+ src/racoon/admin.c        |   37 ++++---
+ src/racoon/grabmyaddr.c   |   22 ++--
+ src/racoon/handler.c      |   41 +++-----
+ src/racoon/handler.h      |    7 -
+ src/racoon/isakmp.c       |   90 ++++-------------
+ src/racoon/isakmp_cfg.c   |    9 --
+ src/racoon/isakmp_inf.c   |  111 ++++-----------------
+ src/racoon/isakmp_quick.c |   29 +++---
+ src/racoon/nattraversal.c |    8 +-
+ src/racoon/pfkey.c        |   52 +++-------
+ src/racoon/policy.c       |   22 ++--
+ src/racoon/remoteconf.c   |   30 +-----
+ src/racoon/remoteconf.h   |    3 -
+ src/racoon/sockmisc.c     |  234 +++------------------------------------------
+ src/racoon/sockmisc.h     |   15 +--
+ src/racoon/throttle.c     |    2 
+ 16 files changed, 170 insertions(+), 542 deletions(-)
+
+
+diff --git a/src/racoon/admin.c b/src/racoon/admin.c
+index 576e191..b67e545 100644
+--- a/src/racoon/admin.c
++++ b/src/racoon/admin.c
+@@ -167,6 +167,14 @@ end:
+ 	return error;
+ }
+ 
++static int admin_ph1_delete_sa(struct ph1handle *iph1, void *arg)
++{
++	if (iph1->status >= PHASE1ST_ESTABLISHED)
++		isakmp_info_send_d1(iph1);
++	purge_remote(iph1);
++	return 0;
++}
++
+ /*
+  * main child's process.
+  */
+@@ -257,7 +265,7 @@ admin_process(so2, combuf)
+ 			break;
+ 		}
+ 
+-		iph1 = getph1byaddrwop(src, dst);
++		iph1 = getph1byaddr(src, dst, 0);
+ 		if (iph1 == NULL) {
+ 			l_ac_errno = ENOENT;
+ 			break;
+@@ -292,30 +300,25 @@ admin_process(so2, combuf)
+ 
+ 	case ADMIN_DELETE_SA: {
+ 		struct ph1handle *iph1;
+-		struct sockaddr *dst;
+-		struct sockaddr *src;
++		struct ph1selector sel;
+ 		char *loc, *rem;
+ 
+-		src = (struct sockaddr *)
++		memset(&sel, 0, sizeof(sel));
++		sel.local = (struct sockaddr *)
+ 			&((struct admin_com_indexes *)
+ 			    ((caddr_t)com + sizeof(*com)))->src;
+-		dst = (struct sockaddr *)
++		sel.remote = (struct sockaddr *)
+ 			&((struct admin_com_indexes *)
+ 			    ((caddr_t)com + sizeof(*com)))->dst;
+ 
+-		loc = racoon_strdup(saddrwop2str(src));
+-		rem = racoon_strdup(saddrwop2str(dst));
++		loc = racoon_strdup(saddr2str(sel.local));
++		rem = racoon_strdup(saddr2str(sel.remote));
+ 		STRDUP_FATAL(loc);
+ 		STRDUP_FATAL(rem);
+ 
+-		if ((iph1 = getph1byaddrwop(src, dst)) == NULL) {
+-			plog(LLV_ERROR, LOCATION, NULL, 
+-			    "phase 1 for %s -> %s not found\n", loc, rem);
+-		} else {
+-			if (iph1->status >= PHASE1ST_ESTABLISHED)
+-				isakmp_info_send_d1(iph1);
+-			purge_remote(iph1);
+-		}
++		plog(LLV_INFO, LOCATION, NULL,
++		     "admin delete-sa %s %s\n", loc, rem);
++		enumph1(&sel, admin_ph1_delete_sa, NULL);
+ 
+ 		racoon_free(loc);
+ 		racoon_free(rem);
+@@ -360,7 +363,7 @@ admin_process(so2, combuf)
+ 		plog(LLV_INFO, LOCATION, NULL, 
+ 		    "Flushing all SAs for peer %s\n", rem);
+ 
+-		while ((iph1 = getph1bydstaddrwop(dst)) != NULL) {
++		while ((iph1 = getph1bydstaddr(dst)) != NULL) {
+ 			loc = racoon_strdup(saddrwop2str(iph1->local));
+ 			STRDUP_FATAL(loc);
+ 
+@@ -429,7 +432,7 @@ admin_process(so2, combuf)
+ 			l_ac_errno = -1;
+ 
+ 			/* connected already? */
+-			ph1 = getph1byaddrwop(src, dst);
++			ph1 = getph1byaddr(src, dst, 0);
+ 			if (ph1 != NULL) {
+ 				event_list = &ph1->evt_listeners;
+ 				if (ph1->status == PHASE1ST_ESTABLISHED)
+diff --git a/src/racoon/grabmyaddr.c b/src/racoon/grabmyaddr.c
+index f866dd5..cb1b638 100644
+--- a/src/racoon/grabmyaddr.c
++++ b/src/racoon/grabmyaddr.c
+@@ -100,7 +100,7 @@ myaddr_configured(addr)
+ 		return TRUE;
+ 
+ 	LIST_FOREACH(cfg, &configured, chain) {
+-		if (cmpsaddrstrict(addr, (struct sockaddr *) &cfg->addr) == 0)
++		if (cmpsaddr(addr, (struct sockaddr *) &cfg->addr) == 0)
+ 			return TRUE;
+ 	}
+ 
+@@ -116,7 +116,7 @@ myaddr_open(addr, udp_encap)
+ 
+ 	/* Already open? */
+ 	LIST_FOREACH(my, &opened, chain) {
+-		if (cmpsaddrstrict(addr, (struct sockaddr *) &my->addr) == 0)
++		if (cmpsaddr(addr, (struct sockaddr *) &my->addr) == 0)
+ 			return TRUE;
+ 	}
+ 
+@@ -156,7 +156,7 @@ myaddr_open_all_configured(addr)
+ 
+ 	LIST_FOREACH(cfg, &configured, chain) {
+ 		if (addr != NULL &&
+-		    cmpsaddrwop(addr, (struct sockaddr *) &cfg->addr) != 0)
++		    cmpsaddr(addr, (struct sockaddr *) &cfg->addr) != 0)
+ 			continue;
+ 		if (!myaddr_open((struct sockaddr *) &cfg->addr, cfg->udp_encap))
+ 			return FALSE;
+@@ -187,8 +187,8 @@ myaddr_close_all_open(addr)
+ 	for (my = LIST_FIRST(&opened); my; my = next) {
+ 		next = LIST_NEXT(my, chain);
+ 
+-		if (!cmpsaddrwop((struct sockaddr *) &addr,
+-				 (struct sockaddr *) &my->addr))
++		if (!cmpsaddr((struct sockaddr *) &addr,
++			      (struct sockaddr *) &my->addr))
+ 			myaddr_delete(my);
+ 	}
+ }
+@@ -261,7 +261,7 @@ myaddr_getfd(addr)
+ 	struct myaddr *my;
+ 
+ 	LIST_FOREACH(my, &opened, chain) {
+-		if (cmpsaddrstrict((struct sockaddr *) &my->addr, addr) == 0)
++		if (cmpsaddr((struct sockaddr *) &my->addr, addr) == 0)
+ 			return my->fd;
+ 	}
+ 
+@@ -273,19 +273,13 @@ myaddr_getsport(addr)
+ 	struct sockaddr *addr;
+ {
+ 	struct myaddr *my;
+-	int bestmatch_port = -1;
+ 
+ 	LIST_FOREACH(my, &opened, chain) {
+-		if (cmpsaddrstrict((struct sockaddr *) &my->addr, addr) == 0)
++		if (cmpsaddr((struct sockaddr *) &my->addr, addr) == 0)
+ 			return extract_port((struct sockaddr *) &my->addr);
+-		if (cmpsaddrwop((struct sockaddr *) &my->addr, addr) != 0)
+-			continue;
+-		if (bestmatch_port == -1 ||
+-		    extract_port((struct sockaddr *) &my->addr) == PORT_ISAKMP)
+-			bestmatch_port = extract_port((struct sockaddr *) &my->addr);
+ 	}
+ 
+-	return bestmatch_port;
++	return PORT_ISAKMP;
+ }
+ 
+ void
+diff --git a/src/racoon/handler.c b/src/racoon/handler.c
+index 960b5b3..b33986f 100644
+--- a/src/racoon/handler.c
++++ b/src/racoon/handler.c
+@@ -120,11 +120,11 @@ enumph1(sel, enum_func, enum_arg)
+ 	LIST_FOREACH(p, &ph1tree, chain) {
+ 		if (sel != NULL) {
+ 			if (sel->local != NULL &&
+-			    CMPSADDR(sel->local, p->local) != 0)
++			    cmpsaddr(sel->local, p->local) != 0)
+ 				continue;
+ 
+ 			if (sel->remote != NULL &&
+-			    CMPSADDR(sel->remote, p->remote) != 0)
++			    cmpsaddr(sel->remote, p->remote) != 0)
+ 				continue;
+ 		}
+ 
+@@ -201,17 +201,12 @@ getph1(rmconf, local, remote, flags)
+ 			     "status %d, skipping\n", p->status);
+ 			continue;
+ 		}
+-		if (flags & GETPH1_F_WITHOUT_PORTS) {
+-			if (local != NULL && cmpsaddrwop(local, p->local) != 0)
+-				continue;
+-			if (remote != NULL && cmpsaddrwop(remote, p->remote) != 0)
+-				continue;
+-		} else {
+-			if (local != NULL && CMPSADDR(local, p->local) != 0)
+-				continue;
+-			if (remote != NULL && CMPSADDR(remote, p->remote) != 0)
+-				continue;
+-		}
++
++		if (local != NULL && cmpsaddr(local, p->local) != 0)
++			continue;
++
++		if (remote != NULL && cmpsaddr(remote, p->remote) != 0)
++			continue;
+ 
+ 		plog(LLV_DEBUG2, LOCATION, NULL, "matched\n");
+ 		return p;
+@@ -287,8 +282,8 @@ void migrate_dying_ph12(iph1)
+ 		if (p->status < PHASE1ST_DYING)
+ 			continue;
+ 
+-		if (CMPSADDR(iph1->local, p->local) == 0
+-		 && CMPSADDR(iph1->remote, p->remote) == 0)
++		if (cmpsaddr(iph1->local, p->local) == 0
++		 && cmpsaddr(iph1->remote, p->remote) == 0)
+ 			migrate_ph12(p, iph1);
+ 	}
+ }
+@@ -518,11 +513,11 @@ enumph2(sel, enum_func, enum_arg)
+ 				continue;
+ 
+ 			if (sel->src != NULL &&
+-			    CMPSADDR(sel->src, p->src) != 0)
++			    cmpsaddr(sel->src, p->src) != 0)
+ 				continue;
+ 
+ 			if (sel->dst != NULL &&
+-			    CMPSADDR(sel->dst, p->dst) != 0)
++			    cmpsaddr(sel->dst, p->dst) != 0)
+ 				continue;
+ 		}
+ 
+@@ -586,8 +581,8 @@ getph2byid(src, dst, spid)
+ 
+ 	LIST_FOREACH(p, &ph2tree, chain) {
+ 		if (spid == p->spid &&
+-		    cmpsaddrwild(src, p->src) == 0 &&
+-		    cmpsaddrwild(dst, p->dst) == 0){
++		    cmpsaddr(src, p->src) == 0 &&
++		    cmpsaddr(dst, p->dst) == 0){
+ 			/* Sanity check to detect zombie handlers
+ 			 * XXX Sould be done "somewhere" more interesting,
+ 			 * because we have lots of getph2byxxxx(), but this one
+@@ -614,8 +609,8 @@ getph2bysaddr(src, dst)
+ 	struct ph2handle *p;
+ 
+ 	LIST_FOREACH(p, &ph2tree, chain) {
+-		if (cmpsaddrstrict(src, p->src) == 0 &&
+-		    cmpsaddrstrict(dst, p->dst) == 0)
++		if (cmpsaddr(src, p->src) == 0 &&
++		    cmpsaddr(dst, p->dst) == 0)
+ 			return p;
+ 	}
+ 
+@@ -918,7 +913,7 @@ getcontacted(remote)
+ 	struct contacted *p;
+ 
+ 	LIST_FOREACH(p, &ctdtree, chain) {
+-		if (cmpsaddrstrict(remote, p->remote) == 0)
++		if (cmpsaddr(remote, p->remote) == 0)
+ 			return p;
+ 	}
+ 
+@@ -997,7 +992,7 @@ check_recvdpkt(remote, local, rbuf)
+ 	/*
+ 	 * the packet was processed before, but the remote address mismatches.
+ 	 */
+-	if (cmpsaddrstrict(remote, r->remote) != 0)
++	if (cmpsaddr(remote, r->remote) != 0)
+ 		return 2;
+ 
+ 	/*
+diff --git a/src/racoon/handler.h b/src/racoon/handler.h
+index c31753d..8f19c88 100644
+--- a/src/racoon/handler.h
++++ b/src/racoon/handler.h
+@@ -467,7 +467,6 @@ extern int enumph1 __P((struct ph1selector *ph1sel,
+ 			void *enum_arg));
+ 
+ #define GETPH1_F_ESTABLISHED		0x0001
+-#define GETPH1_F_WITHOUT_PORTS		0x0002
+ 
+ extern struct ph1handle *getph1 __P((struct remoteconf *rmconf,
+ 				     struct sockaddr *local,
+@@ -476,10 +475,8 @@ extern struct ph1handle *getph1 __P((struct remoteconf *rmconf,
+ 
+ #define getph1byaddr(local, remote, est) \
+ 	getph1(NULL, local, remote, est ? GETPH1_F_ESTABLISHED : 0)
+-#define getph1byaddrwop(local, remote) \
+-	getph1(NULL, local, remote, GETPH1_F_WITHOUT_PORTS)
+-#define getph1bydstaddrwop(remote) \
+-	getph1(NULL, NULL, remote, GETPH1_F_WITHOUT_PORTS)
++#define getph1bydstaddr(remote) \
++	getph1(NULL, NULL, remote, 0)
+ 
+ #ifdef ENABLE_HYBRID
+ struct ph1handle *getph1bylogin __P((char *));
+diff --git a/src/racoon/isakmp.c b/src/racoon/isakmp.c
+index fe51653..0de16d1 100644
+--- a/src/racoon/isakmp.c
++++ b/src/racoon/isakmp.c
+@@ -475,8 +475,8 @@ isakmp_main(msg, remote, local)
+ 		/* Floating ports for NAT-T */
+ 		if (NATT_AVAILABLE(iph1) &&
+ 		    ! (iph1->natt_flags & NAT_PORTS_CHANGED) &&
+-		    ((cmpsaddrstrict(iph1->remote, remote) != 0) ||
+-		    (cmpsaddrstrict(iph1->local, local) != 0)))
++		    ((cmpsaddr(iph1->remote, remote) != 0) ||
++		     (cmpsaddr(iph1->local, local) != 0)))
+ 		{
+ 			/* prevent memory leak */
+ 			racoon_free(iph1->remote);
+@@ -517,7 +517,7 @@ isakmp_main(msg, remote, local)
+ #endif
+ 
+ 		/* must be same addresses in one stream of a phase at least. */
+-		if (cmpsaddrstrict(iph1->remote, remote) != 0) {
++		if (cmpsaddr(iph1->remote, remote) != 0) {
+ 			char *saddr_db, *saddr_act;
+ 
+ 			saddr_db = racoon_strdup(saddr2str(iph1->remote));
+@@ -643,7 +643,7 @@ isakmp_main(msg, remote, local)
+ 					"exchange received.\n");
+ 				return -1;
+ 			}
+-			if (cmpsaddrstrict(iph1->remote, remote) != 0) {
++			if (cmpsaddr(iph1->remote, remote) != 0) {
+ 				plog(LLV_WARNING, LOCATION, remote,
+ 					"remote address mismatched. "
+ 					"db=%s\n",
+@@ -1275,6 +1275,12 @@ isakmp_ph2begin_i(iph1, iph2)
+ 	}
+ #endif
+ 
++	/* fixup ph2 ports for this ph1 */
++	if (extract_port(iph2->src) == 0)
++		set_port(iph2->src, extract_port(iph1->local));
++	if (extract_port(iph2->dst) == 0)
++		set_port(iph2->dst, extract_port(iph1->remote));
++
+ 	/* found ISAKMP-SA. */
+ 	plog(LLV_DEBUG, LOCATION, NULL, "===\n");
+ 	plog(LLV_DEBUG, LOCATION, NULL, "begin QUICK mode.\n");
+@@ -1353,15 +1359,6 @@ isakmp_ph2begin_r(iph1, msg)
+ 		delph2(iph2);
+ 		return -1;
+ 	}
+-#if (!defined(ENABLE_NATT)) || (defined(BROKEN_NATT))
+-	if (set_port(iph2->dst, 0) == NULL ||
+-	    set_port(iph2->src, 0) == NULL) {
+-		plog(LLV_ERROR, LOCATION, NULL,
+-		     "invalid family: %d\n", iph2->dst->sa_family);
+-		delph2(iph2);
+-		return -1;
+-	}
+-#endif
+ 
+ 	/* add new entry to isakmp status table */
+ 	insph2(iph2);
+@@ -2186,23 +2183,12 @@ isakmp_post_acquire(iph2)
+ 		return 0;
+ 	}
+ 
+-	/* 
+-	 * Search isakmp status table by address and port 
+-	 * If NAT-T is in use, consider null ports as a 
+-	 * wildcard and use IKE ports instead.
++	/*
++	 * XXX Searching by IP addresses + ports might fail on
++	 * some cases, we should use the ISAKMP identity to search
++	 * matching ISAKMP.
+ 	 */
+-#ifdef ENABLE_NATT
+-	if (!extract_port(iph2->src) && !extract_port(iph2->dst)) {
+-		if ((iph1 = getph1byaddrwop(iph2->src, iph2->dst)) != NULL) {
+-			set_port(iph2->src, extract_port(iph1->local));
+-			set_port(iph2->dst, extract_port(iph1->remote));
+-		}
+-	} else {
+-		iph1 = getph1byaddr(iph2->src, iph2->dst, 0);
+-	}
+-#else
+ 	iph1 = getph1byaddr(iph2->src, iph2->dst, 0);
+-#endif
+ 
+ 	/* no ISAKMP-SA found. */
+ 	if (iph1 == NULL) {
+@@ -2380,26 +2366,8 @@ isakmp_chkph1there(iph2)
+ 		return;
+ 	}
+ 
+-	/* 
+-	 * Search isakmp status table by address and port 
+-	 * If NAT-T is in use, consider null ports as a 
+-	 * wildcard and use IKE ports instead.
+-	 */
+-#ifdef ENABLE_NATT
+-	if (!extract_port(iph2->src) && !extract_port(iph2->dst)) {
+-		plog(LLV_DEBUG2, LOCATION, NULL, "CHKPH1THERE: extract_port.\n");
+-		if( (iph1 = getph1byaddrwop(iph2->src, iph2->dst)) != NULL){
+-			plog(LLV_DEBUG2, LOCATION, NULL, "CHKPH1THERE: found a ph1 wop.\n");
+-		}
+-	} else {
+-		plog(LLV_DEBUG2, LOCATION, NULL, "CHKPH1THERE: searching byaddr.\n");
+-		iph1 = getph1byaddr(iph2->src, iph2->dst, 0);
+-		if(iph1 != NULL)
+-			plog(LLV_DEBUG2, LOCATION, NULL, "CHKPH1THERE: found byaddr.\n");
+-	}
+-#else
++	/* Search isakmp status table by address and port */
+ 	iph1 = getph1byaddr(iph2->src, iph2->dst, 0);
+-#endif
+ 
+ 	/* XXX Even if ph1 as responder is there, should we not start
+ 	 * phase 2 negotiation ? */
+@@ -3321,20 +3289,10 @@ purge_remote(iph1)
+ 			msg = next;
+ 			continue;
+ 		}
++		pk_fixup_sa_addresses(mhp);
+ 		src = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_SRC]);
+ 		dst = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_DST]);
+ 
+-#ifdef SADB_X_NAT_T_NEW_MAPPING
+-		if (PFKEY_ADDR_X_NATTYPE(mhp[SADB_X_EXT_NAT_T_TYPE])) {
+-			/* NAT-T is enabled for this SADB entry; copy
+-			 * the ports from NAT-T extensions */
+-			if(mhp[SADB_X_EXT_NAT_T_SPORT] != NULL)
+-				set_port(src, PFKEY_ADDR_X_PORT(mhp[SADB_X_EXT_NAT_T_SPORT]));
+-			if(mhp[SADB_X_EXT_NAT_T_DPORT] != NULL)
+-				set_port(dst, PFKEY_ADDR_X_PORT(mhp[SADB_X_EXT_NAT_T_DPORT]));
+-		}
+-#endif
+-
+ 		if (sa->sadb_sa_state != SADB_SASTATE_LARVAL &&
+ 		    sa->sadb_sa_state != SADB_SASTATE_MATURE &&
+ 		    sa->sadb_sa_state != SADB_SASTATE_DYING) {
+@@ -3346,22 +3304,14 @@ purge_remote(iph1)
+ 		 * check in/outbound SAs.
+ 		 * Select only SAs where src == local and dst == remote (outgoing)
+ 		 * or src == remote and dst == local (incoming).
+-		 * XXX we sometime have src/dst ports set to 0 and want to match
+-		 * iph1->local/remote with ports set to 500. This is a bug, see trac:2
+ 		 */
+-#ifdef ENABLE_NATT
+-		if ((cmpsaddrmagic(iph1->local, src) || cmpsaddrmagic(iph1->remote, dst)) &&
+-			(cmpsaddrmagic(iph1->local, dst) || cmpsaddrmagic(iph1->remote, src))) {
+-			msg = next;
+-			continue;
+-		}
+-#else
+-		if ((CMPSADDR(iph1->local, src) || CMPSADDR(iph1->remote, dst)) &&
+-			(CMPSADDR(iph1->local, dst) || CMPSADDR(iph1->remote, src))) {
++		if ((cmpsaddr(iph1->local, src) ||
++		     cmpsaddr(iph1->remote, dst)) &&
++		    (cmpsaddr(iph1->local, dst) ||
++		     cmpsaddr(iph1->remote, src))) {
+ 			msg = next;
+ 			continue;
+ 		}
+-#endif
+ 
+ 		proto_id = pfkey2ipsecdoi_proto(msg->sadb_msg_satype);
+ 		iph2 = getph2bysaidx(src, dst, proto_id, sa->sadb_sa_spi);
+diff --git a/src/racoon/isakmp_cfg.c b/src/racoon/isakmp_cfg.c
+index 62916f8..df763f8 100644
+--- a/src/racoon/isakmp_cfg.c
++++ b/src/racoon/isakmp_cfg.c
+@@ -1151,15 +1151,6 @@ isakmp_cfg_send(iph1, payload, np, flags, new_exchange)
+ 		goto end;
+ 	}
+ 
+-#if (!defined(ENABLE_NATT)) || (defined(BROKEN_NATT))
+-	if (set_port(iph2->dst, 0) == NULL ||
+-	    set_port(iph2->src, 0) == NULL) {
+-		plog(LLV_ERROR, LOCATION, NULL,
+-		     "invalid family: %d\n", iph1->remote->sa_family);
+-		delph2(iph2);
+-		goto end;
+-	}
+-#endif
+ 	iph2->side = INITIATOR;
+ 	iph2->status = PHASE2ST_START;
+ 
+diff --git a/src/racoon/isakmp_inf.c b/src/racoon/isakmp_inf.c
+index a712825..6fa3498 100644
+--- a/src/racoon/isakmp_inf.c
++++ b/src/racoon/isakmp_inf.c
+@@ -903,15 +903,6 @@ isakmp_info_send_common(iph1, payload, np, flags)
+ 		delph2(iph2);
+ 		goto end;
+ 	}
+-#if (!defined(ENABLE_NATT)) || (defined(BROKEN_NATT))
+-	if (set_port(iph2->dst, 0) == NULL ||
+-	    set_port(iph2->src, 0) == NULL) {
+-		plog(LLV_ERROR, LOCATION, NULL,
+-		     "invalid family: %d\n", iph1->remote->sa_family);
+-		delph2(iph2);
+-		goto end;
+-	}
+-#endif
+ 	iph2->side = INITIATOR;
+ 	iph2->status = PHASE2ST_START;
+ 	iph2->msgid = isakmp_newmsgid2(iph1);
+@@ -1127,9 +1118,6 @@ purge_ipsec_spi(dst0, proto, spi, n)
+ 	u_int64_t created;
+ 	size_t i;
+ 	caddr_t mhp[SADB_EXT_MAX + 1];
+-#ifdef ENABLE_NATT
+-	int natt_port_forced;
+-#endif
+ 
+ 	plog(LLV_DEBUG2, LOCATION, NULL,
+ 		 "purge_ipsec_spi:\n");
+@@ -1169,6 +1157,7 @@ purge_ipsec_spi(dst0, proto, spi, n)
+ 			msg = next;
+ 			continue;
+ 		}
++		pk_fixup_sa_addresses(mhp);
+ 		src = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_SRC]);
+ 		dst = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_DST]);
+ 		lt = (struct sadb_lifetime*)mhp[SADB_EXT_LIFETIME_HARD];
+@@ -1182,28 +1171,7 @@ purge_ipsec_spi(dst0, proto, spi, n)
+ 			msg = next;
+ 			continue;
+ 		}
+-#ifdef ENABLE_NATT
+-		if (PFKEY_ADDR_X_NATTYPE(mhp[SADB_X_EXT_NAT_T_TYPE])) {
+-			/* NAT-T is enabled for this SADB entry; copy
+-			 * the ports from NAT-T extensions */
+-			if (extract_port(src) == 0 &&
+-			    mhp[SADB_X_EXT_NAT_T_SPORT] != NULL) {
+-				set_port(src, PFKEY_ADDR_X_PORT(mhp[SADB_X_EXT_NAT_T_SPORT]));
+-			}
+ 
+-			if (extract_port(dst) == 0 &&
+-			    mhp[SADB_X_EXT_NAT_T_DPORT] != NULL) {
+-				set_port(dst, PFKEY_ADDR_X_PORT(mhp[SADB_X_EXT_NAT_T_DPORT]));
+-			}
+-			natt_port_forced = 0;
+-		} else {
+-			/* Force default UDP ports, so
+-			 * CMPSADDR will match SAs with NO encapsulation */
+-			set_port(src, PORT_ISAKMP);
+-			set_port(dst, PORT_ISAKMP);
+-			natt_port_forced = 1;
+-		}
+-#endif
+ 		plog(LLV_DEBUG2, LOCATION, NULL, "src: %s\n", saddr2str(src));
+ 		plog(LLV_DEBUG2, LOCATION, NULL, "dst: %s\n", saddr2str(dst));
+ 
+@@ -1211,19 +1179,11 @@ purge_ipsec_spi(dst0, proto, spi, n)
+ 
+ 		/* don't delete inbound SAs at the moment */
+ 		/* XXX should we remove SAs with opposite direction as well? */
+-		if (CMPSADDR(dst0, dst)) {
++		if (cmpsaddr(dst0, dst)) {
+ 			msg = next;
+ 			continue;
+ 		}
+ 
+-#ifdef ENABLE_NATT
+-		if (natt_port_forced) {
+-			/* Set back port to 0 if it was forced
+-			 * to default UDP port */
+-			set_port(src, 0);
+-			set_port(dst, 0);
+-		}
+-#endif
+ 		for (i = 0; i < n; i++) {
+ 			plog(LLV_DEBUG, LOCATION, NULL,
+ 				"check spi(packet)=%u spi(db)=%u.\n",
+@@ -1354,37 +1314,33 @@ isakmp_info_recv_initialcontact(iph1, protectedph2)
+ 	msg = (struct sadb_msg *)buf->v;
+ 	end = (struct sadb_msg *)(buf->v + buf->l);
+ 
+-	while (msg < end) {
++	for (; msg < end; msg = next) {
+ 		if ((msg->sadb_msg_len << 3) < sizeof(*msg))
+ 			break;
++
+ 		next = (struct sadb_msg *)((caddr_t)msg + (msg->sadb_msg_len << 3));
+-		if (msg->sadb_msg_type != SADB_DUMP) {
+-			msg = next;
++		if (msg->sadb_msg_type != SADB_DUMP)
+ 			continue;
+-		}
+ 
+ 		if (pfkey_align(msg, mhp) || pfkey_check(mhp)) {
+ 			plog(LLV_ERROR, LOCATION, NULL,
+ 				"pfkey_check (%s)\n", ipsec_strerror());
+-			msg = next;
+ 			continue;
+ 		}
+ 
+ 		if (mhp[SADB_EXT_SA] == NULL
+ 		 || mhp[SADB_EXT_ADDRESS_SRC] == NULL
+-		 || mhp[SADB_EXT_ADDRESS_DST] == NULL) {
+-			msg = next;
++		 || mhp[SADB_EXT_ADDRESS_DST] == NULL)
+ 			continue;
+-		}
++
+ 		sa = (struct sadb_sa *)mhp[SADB_EXT_SA];
++		pk_fixup_sa_addresses(mhp);
+ 		src = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_SRC]);
+ 		dst = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_DST]);
+ 
+ 		if (sa->sadb_sa_state != SADB_SASTATE_MATURE
+-		 && sa->sadb_sa_state != SADB_SASTATE_DYING) {
+-			msg = next;
++		 && sa->sadb_sa_state != SADB_SASTATE_DYING)
+ 			continue;
+-		}
+ 
+ 		/*
+ 		 * RFC2407 4.6.3.3 INITIAL-CONTACT is the message that
+@@ -1394,39 +1350,18 @@ isakmp_info_recv_initialcontact(iph1, protectedph2)
+ 		 * racoon only deletes SA which is matched both the
+ 		 * source address and the destination accress.
+ 		 */
+-#ifdef ENABLE_NATT
+-		/* 
+-		 * XXX RFC 3947 says that whe MUST NOT use IP+port to find old SAs
+-		 * from this peer !
+-		 */
+-		if(iph1->natt_flags & NAT_DETECTED){
+-			if (CMPSADDR(iph1->local, src) == 0 &&
+-				CMPSADDR(iph1->remote, dst) == 0)
+-				;
+-			else if (CMPSADDR(iph1->remote, src) == 0 &&
+-					 CMPSADDR(iph1->local, dst) == 0)
+-				;
+-			else {
+-				msg = next;
+-				continue;
+-			}
+-		} else
+-#endif
+-		/* If there is no NAT-T, we don't have to check addr + port...
+-		 * XXX what about a configuration with a remote peers which is not
+-		 * NATed, but which NATs some other peers ?
+-		 * Here, the INITIAl-CONTACT would also flush all those NATed peers !!
+-		 */
+-		if (cmpsaddrwop(iph1->local, src) == 0 &&
+-		    cmpsaddrwop(iph1->remote, dst) == 0)
+-			;
+-		else if (cmpsaddrwop(iph1->remote, src) == 0 &&
+-		    cmpsaddrwop(iph1->local, dst) == 0)
+-			;
+-		else {
+-			msg = next;
++
++		/*
++		 * Check that the IP and port match. But this is not optimal,
++		 * since NAT-T can make the peer have multiple different
++		 * ports. Correct thing to do is delete all entries with
++                 * same identity. -TT
++                 */
++		if ((cmpsaddr(iph1->local, src) != 0 ||
++		     cmpsaddr(iph1->remote, dst) != 0) &&
++		    (cmpsaddr(iph1->local, dst) != 0 ||
++		     cmpsaddr(iph1->remote, src) != 0))
+ 			continue;
+-		}
+ 
+ 		/*
+ 		 * Make sure this is an SATYPE that we manage.
+@@ -1438,10 +1373,8 @@ isakmp_info_recv_initialcontact(iph1, protectedph2)
+ 			    msg->sadb_msg_satype)
+ 				break;
+ 		}
+-		if (i == pfkey_nsatypes) {
+-			msg = next;
++		if (i == pfkey_nsatypes)
+ 			continue;
+-		}
+ 
+ 		plog(LLV_INFO, LOCATION, NULL,
+ 			"purging spi=%u.\n", ntohl(sa->sadb_sa_spi));
+@@ -1461,8 +1394,6 @@ isakmp_info_recv_initialcontact(iph1, protectedph2)
+ 			remph2(iph2);
+ 			delph2(iph2);
+ 		}
+-
+-		msg = next;
+ 	}
+ 
+ 	vfree(buf);
+diff --git a/src/racoon/isakmp_quick.c b/src/racoon/isakmp_quick.c
+index 804c1bf..46c84c1 100644
+--- a/src/racoon/isakmp_quick.c
++++ b/src/racoon/isakmp_quick.c
+@@ -610,17 +610,19 @@ quick_i2recv(iph2, msg0)
+ 			error = ISAKMP_NTYPE_ATTRIBUTES_NOT_SUPPORTED;
+ 			goto end;
+ 		}
++#ifdef ENABLE_NATT
++		set_port(iph2->natoa_src,
++			 extract_port((struct sockaddr *) &proposed_addr));
++#endif
+ 
+-		if (cmpsaddrstrict((struct sockaddr *) &proposed_addr,
+-				   (struct sockaddr *) &got_addr) == 0) {
++		if (cmpsaddr((struct sockaddr *) &proposed_addr,
++			     (struct sockaddr *) &got_addr) == 0) {
+ 			plog(LLV_DEBUG, LOCATION, NULL,
+ 				"IDci matches proposal.\n");
+ #ifdef ENABLE_NATT
+ 		} else if (iph2->natoa_src != NULL
+-			&& cmpsaddrwop(iph2->natoa_src,
+-				       (struct sockaddr *) &got_addr) == 0
+-			&& extract_port((struct sockaddr *) &proposed_addr) ==
+-			   extract_port((struct sockaddr *) &got_addr)) {
++			&& cmpsaddr(iph2->natoa_src,
++				    (struct sockaddr *) &got_addr) == 0) {
+ 			plog(LLV_DEBUG, LOCATION, NULL,
+ 				"IDci matches NAT-OAi.\n");
+ #endif
+@@ -656,16 +658,19 @@ quick_i2recv(iph2, msg0)
+ 			goto end;
+ 		}
+ 
+-		if (cmpsaddrstrict((struct sockaddr *) &proposed_addr,
+-				   (struct sockaddr *) &got_addr) == 0) {
++#ifdef ENABLE_NATT
++		set_port(iph2->natoa_dst,
++			 extract_port((struct sockaddr *) &proposed_addr));
++#endif
++
++		if (cmpsaddr((struct sockaddr *) &proposed_addr,
++			     (struct sockaddr *) &got_addr) == 0) {
+ 			plog(LLV_DEBUG, LOCATION, NULL,
+ 				"IDcr matches proposal.\n");
+ #ifdef ENABLE_NATT
+ 		} else if (iph2->natoa_dst != NULL
+-			&& cmpsaddrwop(iph2->natoa_dst,
+-				       (struct sockaddr *) &got_addr) == 0
+-			&& extract_port((struct sockaddr *) &proposed_addr) ==
+-			   extract_port((struct sockaddr *) &got_addr)) {
++			&& cmpsaddr(iph2->natoa_dst,
++				    (struct sockaddr *) &got_addr) == 0) {
+ 			plog(LLV_DEBUG, LOCATION, NULL,
+ 				"IDcr matches NAT-OAr.\n");
+ #endif
+diff --git a/src/racoon/nattraversal.c b/src/racoon/nattraversal.c
+index f23341a..92095de 100644
+--- a/src/racoon/nattraversal.c
++++ b/src/racoon/nattraversal.c
+@@ -379,8 +379,8 @@ natt_keepalive_add (struct sockaddr *src, struct sockaddr *dst)
+   struct natt_ka_addrs *ka = NULL, *new_addr;
+   
+   TAILQ_FOREACH (ka, &ka_tree, chain) {
+-    if (cmpsaddrstrict(ka->src, src) == 0 && 
+-	cmpsaddrstrict(ka->dst, dst) == 0) {
++    if (cmpsaddr(ka->src, src) == 0 &&
++	cmpsaddr(ka->dst, dst) == 0) {
+       ka->in_use++;
+       plog (LLV_INFO, LOCATION, NULL, "KA found: %s (in_use=%u)\n",
+ 	    saddr2str_fromto("%s->%s", src, dst), ka->in_use);
+@@ -443,8 +443,8 @@ natt_keepalive_remove (struct sockaddr *src, struct sockaddr *dst)
+     plog (LLV_DEBUG, LOCATION, NULL, "KA tree dump: %s (in_use=%u)\n",
+ 	  saddr2str_fromto("%s->%s", src, dst), ka->in_use);
+ 
+-    if (cmpsaddrstrict(ka->src, src) == 0 && 
+-	cmpsaddrstrict(ka->dst, dst) == 0 &&
++    if (cmpsaddr(ka->src, src) == 0 &&
++	cmpsaddr(ka->dst, dst) == 0 &&
+ 	-- ka->in_use <= 0) {
+ 
+       plog (LLV_DEBUG, LOCATION, NULL, "KA removing this one...\n");
+diff --git a/src/racoon/pfkey.c b/src/racoon/pfkey.c
+index c210c5e..3778ef2 100644
+--- a/src/racoon/pfkey.c
++++ b/src/racoon/pfkey.c
+@@ -774,8 +774,12 @@ pk_fixup_sa_addresses(mhp)
+ 	caddr_t *mhp;
+ {
+ 	struct sockaddr *src, *dst;
++
+ 	src = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_SRC]);
+ 	dst = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_DST]);
++	set_port(src, PORT_ISAKMP);
++	set_port(dst, PORT_ISAKMP);
++
+ #ifdef ENABLE_NATT
+ 	if (PFKEY_ADDR_X_NATTYPE(mhp[SADB_X_EXT_NAT_T_TYPE])) {
+ 		/* NAT-T is enabled for this SADB entry; copy
+@@ -785,9 +789,6 @@ pk_fixup_sa_addresses(mhp)
+ 		if(mhp[SADB_X_EXT_NAT_T_DPORT] != NULL)
+ 			set_port(dst, PFKEY_ADDR_X_PORT(mhp[SADB_X_EXT_NAT_T_DPORT]));
+ 	}
+-#else
+-	set_port(src, 0);
+-	set_port(dst, 0);
+ #endif
+ }
+ 
+@@ -949,10 +950,6 @@ pk_sendgetspi(iph2)
+ 			dport=extract_port(dst);
+ 		}
+ #endif
+-		/* Always remove port information, it will be sent in
+-		 * SADB_X_EXT_NAT_T_[S|D]PORT if needed */
+-		set_port(src, 0);
+-		set_port(dst, 0);
+ 
+ 		plog(LLV_DEBUG, LOCATION, NULL, "call pfkey_send_getspi\n");
+ 		if (pfkey_send_getspi_nat(
+@@ -1009,6 +1006,7 @@ pk_recvgetspi(mhp)
+ 	}
+ 	msg = (struct sadb_msg *)mhp[0];
+ 	sa = (struct sadb_sa *)mhp[SADB_EXT_SA];
++	pk_fixup_sa_addresses(mhp);
+ 	dst = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_SRC]); /* note SA dir */
+ 	src = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_DST]);
+ 
+@@ -1183,18 +1181,14 @@ pk_sendupdate(iph2)
+ #ifdef ENABLE_NATT
+ 		if (pr->udp_encap) {
+ 			sa_args.l_natt_type = iph2->ph1->natt_options->encaps_type;
+-			sa_args.l_natt_sport = extract_port (iph2->ph1->remote);
+-			sa_args.l_natt_dport = extract_port (iph2->ph1->local);
++			sa_args.l_natt_sport = extract_port(iph2->ph1->remote);
++			sa_args.l_natt_dport = extract_port(iph2->ph1->local);
+ 			sa_args.l_natt_oa = iph2->natoa_src;
+ #ifdef SADB_X_EXT_NAT_T_FRAG
+ 			sa_args.l_natt_frag = iph2->ph1->rmconf->esp_frag;
+ #endif
+ 		}
+ #endif
+-		/* Always remove port information, it will be sent in
+-		 * SADB_X_EXT_NAT_T_[S|D]PORT if needed */
+-		set_port(sa_args.src, 0);
+-		set_port(sa_args.dst, 0);
+ 
+ 		/* more info to fill in */
+ 		sa_args.spi = pr->spi;
+@@ -1358,14 +1352,6 @@ pk_recvupdate(mhp)
+ 	/* turn off schedule */
+ 	sched_cancel(&iph2->scr);
+ 
+-	/* Force the update of ph2's ports, as there is at least one
+-	 * situation where they'll mismatch with ph1's values
+-	 */
+-#ifdef ENABLE_NATT
+-	set_port(iph2->src, extract_port(iph2->ph1->local));
+-	set_port(iph2->dst, extract_port(iph2->ph1->remote));
+-#endif
+-
+ 	/*
+ 	 * since we are going to reuse the phase2 handler, we need to
+ 	 * remain it and refresh all the references between ph1 and ph2 to use.
+@@ -1418,7 +1404,7 @@ pk_sendadd(iph2)
+ 		racoon_free(sa_args.src);
+ 		racoon_free(sa_args.dst);
+ 		return -1;
+- 	}
++	}
+ 
+ 	for (pr = iph2->approval->head; pr != NULL; pr = pr->next) {
+ 		/* validity check */
+@@ -1490,11 +1476,6 @@ pk_sendadd(iph2)
+ #endif
+ 		}
+ #endif
+-		/* Always remove port information, it will be sent in
+-		 * SADB_X_EXT_NAT_T_[S|D]PORT if needed */
+-		set_port(sa_args.src, 0);
+-		set_port(sa_args.dst, 0);
+-
+ 		/* more info to fill in */
+ 		sa_args.spi = pr->spi_p;
+ 		sa_args.reqid = pr->reqid_out;
+@@ -1559,6 +1540,7 @@ pk_recvadd(mhp)
+ 		return -1;
+ 	}
+ 	msg = (struct sadb_msg *)mhp[0];
++	pk_fixup_sa_addresses(mhp);
+ 	src = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_SRC]);
+ 	dst = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_DST]);
+ 	sa = (struct sadb_sa *)mhp[SADB_EXT_SA];
+@@ -1749,7 +1731,9 @@ pk_recvacquire(mhp)
+ 	}
+ 	msg = (struct sadb_msg *)mhp[0];
+ 	xpl = (struct sadb_x_policy *)mhp[SADB_X_EXT_POLICY];
+-	pk_fixup_sa_addresses(mhp);
++	/* acquire does not have nat-t ports; so do not bother setting
++	 * the default port 500; just use the port zero for wildcard
++	 * matching the get a valid natted destination */
+ 	sp_src = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_SRC]);
+ 	sp_dst = PFKEY_ADDR_SADDR(mhp[SADB_EXT_ADDRESS_DST]);
+ 
+@@ -2884,8 +2868,8 @@ migrate_ph1_ike_addresses(iph1, arg)
+ 	u_int16_t port;
+ 
+ 	/* Already up-to-date? */
+-	if (cmpsaddrwop(iph1->local, ma->local) == 0 &&
+-	    cmpsaddrwop(iph1->remote, ma->remote) == 0)
++	if (cmpsaddr(iph1->local, ma->local) == 0 &&
++	    cmpsaddr(iph1->remote, ma->remote) == 0)
+ 		return 0;
+ 
+ 	if (iph1->status < PHASE1ST_ESTABLISHED) {
+@@ -2985,8 +2969,8 @@ migrate_ph2_ike_addresses(iph2, arg)
+ 		migrate_ph1_ike_addresses(iph2->ph1, arg);
+ 
+ 	/* Already up-to-date? */
+-	if (CMPSADDR(iph2->src, ma->local) == 0 &&
+-	    CMPSADDR(iph2->dst, ma->remote) == 0)
++	if (cmpsaddr(iph2->src, ma->local) == 0 &&
++	    cmpsaddr(iph2->dst, ma->remote) == 0)
+ 		return 0;
+ 
+ 	/* save src/dst as sa_src/sa_dst before rewriting */
+@@ -3206,8 +3190,8 @@ migrate_ph2_one_isr(spid, isr_cur, xisr_old, xisr_new)
+ 		     "changing address families (%d to %d) for endpoints.\n",
+ 		     osaddr->sa_family, nsaddr->sa_family);
+ 
+-	if (CMPSADDR(osaddr, (struct sockaddr *)&saidx->src) ||
+-	    CMPSADDR(odaddr, (struct sockaddr *)&saidx->dst)) {
++	if (cmpsaddr(osaddr, (struct sockaddr *) &saidx->src) ||
++	    cmpsaddr(odaddr, (struct sockaddr *) &saidx->dst)) {
+ 		plog(LLV_DEBUG, LOCATION, NULL, "SADB_X_MIGRATE: "
+ 		     "mismatch of addresses in saidx and xisr.\n");
+ 		return -1;
+diff --git a/src/racoon/policy.c b/src/racoon/policy.c
+index 850fa6b..058753f 100644
+--- a/src/racoon/policy.c
++++ b/src/racoon/policy.c
+@@ -141,16 +141,18 @@ getsp_r(spidx, iph2)
+ 		saddr2str(iph2->src));
+ 	plog(LLV_DEBUG, LOCATION, NULL, "src2: %s\n",
+ 		saddr2str((struct sockaddr *)&spidx->src));
+-	if (cmpsaddrwop(iph2->src, (struct sockaddr *)&spidx->src)
+-	 || spidx->prefs != prefixlen)
++
++	if (cmpsaddr(iph2->src, (struct sockaddr *) &spidx->src) ||
++	    spidx->prefs != prefixlen)
+ 		return NULL;
+ 
+ 	plog(LLV_DEBUG, LOCATION, NULL, "dst1: %s\n",
+ 		saddr2str(iph2->dst));
+ 	plog(LLV_DEBUG, LOCATION, NULL, "dst2: %s\n",
+ 		saddr2str((struct sockaddr *)&spidx->dst));
+-	if (cmpsaddrwop(iph2->dst, (struct sockaddr *)&spidx->dst)
+-	 || spidx->prefd != prefixlen)
++
++	if (cmpsaddr(iph2->dst, (struct sockaddr *) &spidx->dst) ||
++	    spidx->prefd != prefixlen)
+ 		return NULL;
+ 
+ 	plog(LLV_DEBUG, LOCATION, NULL, "looks to be transport mode\n");
+@@ -198,11 +200,11 @@ cmpspidxstrict(a, b)
+ 	 || a->ul_proto != b->ul_proto)
+ 		return 1;
+ 
+-	if (cmpsaddrstrict((struct sockaddr *)&a->src,
+-			   (struct sockaddr *)&b->src))
++	if (cmpsaddr((struct sockaddr *) &a->src,
++		     (struct sockaddr *) &b->src))
+ 		return 1;
+-	if (cmpsaddrstrict((struct sockaddr *)&a->dst,
+-			   (struct sockaddr *)&b->dst))
++	if (cmpsaddr((struct sockaddr *) &a->dst,
++		     (struct sockaddr *) &b->dst))
+ 		return 1;
+ 
+ #ifdef HAVE_SECCTX
+@@ -259,7 +261,7 @@ cmpspidxwild(a, b)
+ 		a, b->prefs, saddr2str((struct sockaddr *)&sa1));
+ 	plog(LLV_DEBUG, LOCATION, NULL, "%p masked with /%d: %s\n",
+ 		b, b->prefs, saddr2str((struct sockaddr *)&sa2));
+-	if (cmpsaddrwild((struct sockaddr *)&sa1, (struct sockaddr *)&sa2))
++	if (cmpsaddr((struct sockaddr *)&sa1, (struct sockaddr *)&sa2))
+ 		return 1;
+ 
+ #ifndef __linux__
+@@ -277,7 +279,7 @@ cmpspidxwild(a, b)
+ 		a, b->prefd, saddr2str((struct sockaddr *)&sa1));
+ 	plog(LLV_DEBUG, LOCATION, NULL, "%p masked with /%d: %s\n",
+ 		b, b->prefd, saddr2str((struct sockaddr *)&sa2));
+-	if (cmpsaddrwild((struct sockaddr *)&sa1, (struct sockaddr *)&sa2))
++	if (cmpsaddr((struct sockaddr *)&sa1, (struct sockaddr *)&sa2))
+ 		return 1;
+ 
+ #ifdef HAVE_SECCTX
+diff --git a/src/racoon/remoteconf.c b/src/racoon/remoteconf.c
+index 73d80bc..88c622c 100644
+--- a/src/racoon/remoteconf.c
++++ b/src/racoon/remoteconf.c
+@@ -200,15 +200,9 @@ rmconf_match_type(rmsel, rmconf)
+ 	/* Check address */
+ 	if (rmsel->remote != NULL) {
+ 		if (rmconf->remote->sa_family != AF_UNSPEC) {
+-			if (rmsel->flags & GETRMCONF_F_NO_PORTS) {
+-				if (cmpsaddrwop(rmsel->remote,
+-						rmconf->remote) != 0)
+-					return 0;
+-			} else {
+-				if (cmpsaddrstrict(rmsel->remote,
+-						   rmconf->remote) != 0)
+-					return 0;
+-			}
++			if (cmpsaddr(rmsel->remote, rmconf->remote) != 0)
++				return 0;
++
+ 			/* Address matched */
+ 			ret = 2;
+ 		}
+@@ -262,7 +256,7 @@ void rmconf_selector_from_ph1(rmsel, iph1)
+ 	struct ph1handle *iph1;
+ {
+ 	memset(rmsel, 0, sizeof(*rmsel));
+-	rmsel->flags = GETRMCONF_F_NO_PORTS;
++	rmsel->flags = 0;
+ 	rmsel->remote = iph1->remote;
+ 	rmsel->etype = iph1->etype;
+ 	rmsel->approval = iph1->approval;
+@@ -357,22 +351,8 @@ getrmconf(remote, flags)
+ 	int n = 0;
+ 
+ 	memset(&ctx, 0, sizeof(ctx));
+-	ctx.sel.flags = flags | GETRMCONF_F_NO_PORTS;
++	ctx.sel.flags = flags;
+ 	ctx.sel.remote = remote;
+-#ifndef ENABLE_NATT
+-	/* 
+-	 * We never have ports set in our remote configurations, but when
+-	 * NAT-T is enabled, the kernel can have policies with ports and
+-	 * send us an acquire message for a destination that has a port set.
+-	 * If we do this port check here, we don't find the remote config.
+-	 *
+-	 * In an ideal world, we would be able to have remote conf with
+-	 * port, and the port could be a wildcard. That test could be used.
+-	 */
+-	if (remote->sa_family != AF_UNSPEC &&
+-	    extract_port(remote) != IPSEC_PORT_ANY)
+-		ctx.sel.flags &= ~GETRMCONF_F_NO_PORTS;
+-#endif /* ENABLE_NATT */
+ 
+ 	if (enumrmconf(&ctx.sel, rmconf_find, &ctx) != 0) {
+ 		plog(LLV_ERROR, LOCATION, remote,
+diff --git a/src/racoon/remoteconf.h b/src/racoon/remoteconf.h
+index 38faf03..b2e9e4a 100644
+--- a/src/racoon/remoteconf.h
++++ b/src/racoon/remoteconf.h
+@@ -189,8 +189,7 @@ extern int enumrmconf __P((struct rmconfselector *rmsel,
+ 			   void *enum_arg));
+ 
+ #define GETRMCONF_F_NO_ANONYMOUS	0x0001
+-#define GETRMCONF_F_NO_PORTS		0x0002
+-#define GETRMCONF_F_NO_PASSIVE		0x0004
++#define GETRMCONF_F_NO_PASSIVE		0x0002
+ 
+ #define RMCONF_ERR_MULTIPLE		((struct remoteconf *) -1)
+ 
+diff --git a/src/racoon/sockmisc.c b/src/racoon/sockmisc.c
+index 5c1f9c7..2bc2177 100644
+--- a/src/racoon/sockmisc.c
++++ b/src/racoon/sockmisc.c
+@@ -80,87 +77,28 @@
+ const int niflags = 0;
+ 
+ /*
+- * compare two sockaddr without port number.
+- * OUT:	0: equal.
+- *	1: not equal.
+- */
+-int
+-cmpsaddrwop(addr1, addr2)
+-	const struct sockaddr *addr1;
+-	const struct sockaddr *addr2;
+-{
+-	caddr_t sa1, sa2;
+-
+-	if (addr1 == 0 && addr2 == 0)
+-		return 0;
+-	if (addr1 == 0 || addr2 == 0)
+-		return 1;
+-
+-#ifdef __linux__
+-	if (addr1->sa_family != addr2->sa_family)
+-		return 1;
+-#else
+-	if (addr1->sa_len != addr2->sa_len
+-	 || addr1->sa_family != addr2->sa_family)
+-		return 1;
+-
+-#endif /* __linux__ */
+-
+-	switch (addr1->sa_family) {
+-	case AF_UNSPEC:
+-		break;
+-	case AF_INET:
+-		sa1 = (caddr_t)&((struct sockaddr_in *)addr1)->sin_addr;
+-		sa2 = (caddr_t)&((struct sockaddr_in *)addr2)->sin_addr;
+-		if (memcmp(sa1, sa2, sizeof(struct in_addr)) != 0)
+-			return 1;
+-		break;
+-#ifdef INET6
+-	case AF_INET6:
+-		sa1 = (caddr_t)&((struct sockaddr_in6 *)addr1)->sin6_addr;
+-		sa2 = (caddr_t)&((struct sockaddr_in6 *)addr2)->sin6_addr;
+-		if (memcmp(sa1, sa2, sizeof(struct in6_addr)) != 0)
+-			return 1;
+-		if (((struct sockaddr_in6 *)addr1)->sin6_scope_id !=
+-		    ((struct sockaddr_in6 *)addr2)->sin6_scope_id)
+-			return 1;
+-		break;
+-#endif
+-	default:
+-		return 1;
+-	}
+-
+-	return 0;
+-}
+-
+-/*
+  * compare two sockaddr with port, taking care wildcard.
+  * addr1 is a subject address, addr2 is in a database entry.
+  * OUT:	0: equal.
+  *	1: not equal.
+  */
+ int
+-cmpsaddrwild(addr1, addr2)
++cmpsaddr(addr1, addr2)
+ 	const struct sockaddr *addr1;
+ 	const struct sockaddr *addr2;
+ {
+ 	caddr_t sa1, sa2;
+ 	u_short port1, port2;
+ 
+-	if (addr1 == 0 && addr2 == 0)
+-		return 0;
+-	if (addr1 == 0 || addr2 == 0)
+-		return 1;
++	if (addr1 == NULL && addr2 == NULL)
++		return CMPSADDR_MATCH;
+ 
+-#ifdef __linux__
+-	if (addr1->sa_family != addr2->sa_family)
+-		return 1;
+-#else
+-	if (addr1->sa_len != addr2->sa_len
+-	 || addr1->sa_family != addr2->sa_family)
+-		return 1;
++	if (addr1 == NULL || addr2 == NULL)
++		return CMPSADDR_MISMATCH;
+ 
+-#endif /* __linux__ */
++	if (addr1->sa_family != addr2->sa_family ||
++	    sysdep_sa_len(addr1) != sysdep_sa_len(addr2))
++		return CMPSADDR_MISMATCH;
+ 
+ 	switch (addr1->sa_family) {
+ 	case AF_UNSPEC:
+@@ -170,12 +108,8 @@ cmpsaddrwild(addr1, addr2)
+ 		sa2 = (caddr_t)&((struct sockaddr_in *)addr2)->sin_addr;
+ 		port1 = ((struct sockaddr_in *)addr1)->sin_port;
+ 		port2 = ((struct sockaddr_in *)addr2)->sin_port;
+-		if (!(port1 == IPSEC_PORT_ANY ||
+-		      port2 == IPSEC_PORT_ANY ||
+-		      port1 == port2))
+-			return 1;
+ 		if (memcmp(sa1, sa2, sizeof(struct in_addr)) != 0)
+-			return 1;
++			return CMPSADDR_MISMATCH;
+ 		break;
+ #ifdef INET6
+ 	case AF_INET6:
+@@ -183,155 +117,23 @@ cmpsaddrwild(addr1, addr2)
+ 		sa2 = (caddr_t)&((struct sockaddr_in6 *)addr2)->sin6_addr;
+ 		port1 = ((struct sockaddr_in6 *)addr1)->sin6_port;
+ 		port2 = ((struct sockaddr_in6 *)addr2)->sin6_port;
+-		if (!(port1 == IPSEC_PORT_ANY ||
+-		      port2 == IPSEC_PORT_ANY ||
+-		      port1 == port2))
+-			return 1;
+ 		if (memcmp(sa1, sa2, sizeof(struct in6_addr)) != 0)
+-			return 1;
++			return CMPSADDR_MISMATCH;
+ 		if (((struct sockaddr_in6 *)addr1)->sin6_scope_id !=
+ 		    ((struct sockaddr_in6 *)addr2)->sin6_scope_id)
+-			return 1;
++			return CMPSADDR_MISMATCH;
+ 		break;
+ #endif
+ 	default:
+-		return 1;
++		return CMPSADDR_MISMATCH;
+ 	}
+ 
+-	return 0;
+-}
+-
+-/*
+- * compare two sockaddr with port, taking care specific situation:
+- * one addr has 0 as port, and the other has 500 (network order), return equal
+- * OUT:	0: equal.
+- *	1: not equal.
+- */
+-int
+-cmpsaddrmagic(addr1, addr2)
+-	const struct sockaddr *addr1;
+-	const struct sockaddr *addr2;
+-{
+-	caddr_t sa1, sa2;
+-	u_short port1, port2;
+-
+-	if (addr1 == 0 && addr2 == 0)
+-		return 0;
+-	if (addr1 == 0 || addr2 == 0)
+-		return 1;
+-
+-#ifdef __linux__
+-	if (addr1->sa_family != addr2->sa_family)
+-		return 1;
+-#else
+-	if (addr1->sa_len != addr2->sa_len
+-	 || addr1->sa_family != addr2->sa_family)
+-		return 1;
++	if (port1 == port2 ||
++	    port1 == IPSEC_PORT_ANY ||
++	    port2 == IPSEC_PORT_ANY)
++		return CMPSADDR_MATCH;
+ 
+-#endif /* __linux__ */
+-
+-	switch (addr1->sa_family) {
+-	case AF_UNSPEC:
+-		break;
+-	case AF_INET:
+-		sa1 = (caddr_t)&((struct sockaddr_in *)addr1)->sin_addr;
+-		sa2 = (caddr_t)&((struct sockaddr_in *)addr2)->sin_addr;
+-		port1 = ((struct sockaddr_in *)addr1)->sin_port;
+-		port2 = ((struct sockaddr_in *)addr2)->sin_port;
+-		plog(LLV_DEBUG, LOCATION, NULL, "cmpsaddr_magic: port1 == %d, port2 == %d\n", port1, port2);
+-		if (!((port1 == IPSEC_PORT_ANY && port2 == ntohs(PORT_ISAKMP)) ||
+-			  (port2 == IPSEC_PORT_ANY && port1 == ntohs(PORT_ISAKMP)) ||
+-		      (port1 == port2))){			
+-			plog(LLV_DEBUG, LOCATION, NULL, "cmpsaddr_magic: ports mismatch\n");
+-			return 1;
+-		}
+-		plog(LLV_DEBUG, LOCATION, NULL, "cmpsaddr_magic: ports matched\n");
+-		if (memcmp(sa1, sa2, sizeof(struct in_addr)) != 0)
+-			return 1;
+-		break;
+-#ifdef INET6
+-	case AF_INET6:
+-		sa1 = (caddr_t)&((struct sockaddr_in6 *)addr1)->sin6_addr;
+-		sa2 = (caddr_t)&((struct sockaddr_in6 *)addr2)->sin6_addr;
+-		port1 = ((struct sockaddr_in6 *)addr1)->sin6_port;
+-		port2 = ((struct sockaddr_in6 *)addr2)->sin6_port;
+-		if (!((port1 == IPSEC_PORT_ANY && port2 == PORT_ISAKMP) ||
+-			  (port2 == IPSEC_PORT_ANY && port1 == PORT_ISAKMP) ||
+-		      (port1 == port2)))
+-			return 1;
+-		if (memcmp(sa1, sa2, sizeof(struct in6_addr)) != 0)
+-			return 1;
+-		if (((struct sockaddr_in6 *)addr1)->sin6_scope_id !=
+-		    ((struct sockaddr_in6 *)addr2)->sin6_scope_id)
+-			return 1;
+-		break;
+-#endif
+-	default:
+-		return 1;
+-	}
+-
+-	return 0;
+-}
+-
+-/*
+- * compare two sockaddr with strict match on port.
+- * OUT:	0: equal.
+- *	1: not equal.
+- */
+-int
+-cmpsaddrstrict(addr1, addr2)
+-	const struct sockaddr *addr1;
+-	const struct sockaddr *addr2;
+-{
+-	caddr_t sa1, sa2;
+-	u_short port1, port2;
+-
+-	if (addr1 == 0 && addr2 == 0)
+-		return 0;
+-	if (addr1 == 0 || addr2 == 0)
+-		return 1;
+-
+-#ifdef __linux__
+-	if (addr1->sa_family != addr2->sa_family)
+-		return 1;
+-#else
+-	if (addr1->sa_len != addr2->sa_len
+-	 || addr1->sa_family != addr2->sa_family)
+-		return 1;
+-
+-#endif /* __linux__ */
+-
+-	switch (addr1->sa_family) {
+-	case AF_INET:
+-		sa1 = (caddr_t)&((struct sockaddr_in *)addr1)->sin_addr;
+-		sa2 = (caddr_t)&((struct sockaddr_in *)addr2)->sin_addr;
+-		port1 = ((struct sockaddr_in *)addr1)->sin_port;
+-		port2 = ((struct sockaddr_in *)addr2)->sin_port;
+-		if (port1 != port2)
+-			return 1;
+-		if (memcmp(sa1, sa2, sizeof(struct in_addr)) != 0)
+-			return 1;
+-		break;
+-#ifdef INET6
+-	case AF_INET6:
+-		sa1 = (caddr_t)&((struct sockaddr_in6 *)addr1)->sin6_addr;
+-		sa2 = (caddr_t)&((struct sockaddr_in6 *)addr2)->sin6_addr;
+-		port1 = ((struct sockaddr_in6 *)addr1)->sin6_port;
+-		port2 = ((struct sockaddr_in6 *)addr2)->sin6_port;
+-		if (port1 != port2)
+-			return 1;
+-		if (memcmp(sa1, sa2, sizeof(struct in6_addr)) != 0)
+-			return 1;
+-		if (((struct sockaddr_in6 *)addr1)->sin6_scope_id !=
+-		    ((struct sockaddr_in6 *)addr2)->sin6_scope_id)
+-			return 1;
+-		break;
+-#endif
+-	default:
+-		return 1;
+-	}
+-
+-	return 0;
++	return CMPSADDR_WOP_MATCH;
+ }
+ 
+ /* get local address against the destination. */
+@@ -1129,7 +931,7 @@ naddr_score(const struct netaddr *naddr, const struct sockaddr *saddr)
+ 		free(a2);
+ 		free(a3);
+ 	}
+-	if (cmpsaddrwop(&sa, &naddr->sa.sa) == 0)
++	if (cmpsaddr(&sa, &naddr->sa.sa) == 0)
+ 		return naddr->prefix + port_score;
+ 
+ 	return -1;
+diff --git a/src/racoon/sockmisc.h b/src/racoon/sockmisc.h
+index fcc286f..0a58f44 100644
+--- a/src/racoon/sockmisc.h
++++ b/src/racoon/sockmisc.h
+@@ -54,16 +54,11 @@ struct netaddr {
+ 
+ extern const int niflags;
+ 
+-extern int cmpsaddrwop __P((const struct sockaddr *, const struct sockaddr *));
+-extern int cmpsaddrwild __P((const struct sockaddr *, const struct sockaddr *));
+-extern int cmpsaddrstrict __P((const struct sockaddr *, const struct sockaddr *));
+-extern int cmpsaddrmagic __P((const struct sockaddr *, const struct sockaddr *));
+-
+-#ifdef ENABLE_NATT 
+-#define CMPSADDR(saddr1, saddr2) cmpsaddrstrict((saddr1), (saddr2))
+-#else 
+-#define CMPSADDR(saddr1, saddr2) cmpsaddrwop((saddr1), (saddr2))
+-#endif
++#define CMPSADDR_MATCH		0
++#define CMPSADDR_WOP_MATCH	1
++#define CMPSADDR_MISMATCH	2
++
++extern int cmpsaddr __P((const struct sockaddr *, const struct sockaddr *));
+ 
+ extern struct sockaddr *getlocaladdr __P((struct sockaddr *));
+ 
+diff --git a/src/racoon/throttle.c b/src/racoon/throttle.c
+index 5ab62c3..64b566b 100644
+--- a/src/racoon/throttle.c
++++ b/src/racoon/throttle.c
+@@ -104,7 +104,7 @@ restart:
+ 			goto restart;
+ 		}
+ 
+-		if (cmpsaddrwop(addr, (struct sockaddr *)&te->host) == 0) {
++		if (cmpsaddr(addr, (struct sockaddr *) &te->host) == 0) {
+ 			found = 1;
+ 			break;
+ 		}
