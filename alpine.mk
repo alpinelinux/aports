@@ -49,15 +49,6 @@ SYSLINUX_APK	:= $(call find_apk,syslinux)
 STRACE_APK	:= $(call find_apk,strace)
 ACCT_APK	:= $(call find_apk,acct)
 
-#SOURCE_APKBUILDS := $(wildcard $(addprefix $(APORTS_DIR)/,$(REPOS))/*/APKBUILD)
-#SOURCE_APKS	= $(wildcard $(APKDIRS)/*apk)
-#APK_BIN		:= $(shell which apk)
-
-#ifneq ($(words $(KERNEL_APK) $(MODULE_APK) $(ALPINEBASELAYOUT_APK) $(UCLIBC_APK) $(BUSYBOX_APK) $(APK_TOOLS_APK)),6)
-#$(error I did not find all APKs which I need.)
-#endif
-
-
 all: isofs
 
 help:
@@ -133,77 +124,14 @@ $(MODLOOP): $(MODLOOP_DIRSTAMP)
 
 INITFS		:= $(ISO_DIR)/boot/$(KERNEL_NAME).gz
 
-INITFS_DIRSTAMP	:= $(DESTDIR)/stamp.initfs
+#INITFS_DIRSTAMP	:= $(DESTDIR)/stamp.initfs
 INITFS_DIR	:= $(DESTDIR)/initfs
-INITFS_MODDIR	:= $(INITFS_DIR)/lib/modules/$(KERNEL)
-INITFS_MODDIRSTAMP := $(DESTDIR)/stamp.initfs.modules
-
-INITFS_APKS	:= $(UCLIBC_APK) $(BUSYBOX_APK) $(ACCT_APK) 
-INITFS_RAWBASEFILES  := etc/mdev.conf etc/passwd etc/group etc/fstab \
-			etc/modules etc/modprobe.d/blacklist lib/mdev
-INITFS_BASEFILES     := $(addprefix $(INITFS_DIR)/, $(INITFS_RAWBASEFILES))
+INITFS_FEATURES	:= ata base bootchart cdrom cramfs ext3 ide raid scsi usb
 
 initfs: $(INITFS)
-
-$(INITFS_DIRSTAMP): $(INITFS_APKS)
-	@echo "==> initramfs: prepare baselayout"
-	@rm -rf $(INITFS_DIR)
-	@mkdir -p $(addprefix $(INITFS_DIR)/, \
-		dev proc sys sbin bin .modloop lib/modules \
-		media/cdrom media/floppy media/usb newroot)
-	@for apk in $(INITFS_APKS) ; do \
-		tar -C $(INITFS_DIR) -xzf $$apk ; \
-	done
-	@rm -f "$(INITFS_DIR)/.PKGINFO"
-	@touch $(INITFS_DIRSTAMP)
-
-$(INITFS_BASEFILES): $(INITFS_DIRSTAMP) $(ALPINEBASELAYOUT_APK)
-	@echo "==> initramfs: $(notdir $(ALPINEBASELAYOUT_APK))"
-	@tar -C $(INITFS_DIR) -xzf $(ALPINEBASELAYOUT_APK) $(INITFS_RAWBASEFILES)
-	#@echo "floppy" >> "$(INITFS_DIR)/etc/modules"
-	#@echo "libata dma=0" >> "$(INITFS_DIR)/etc/modules"
-	@touch $(INITFS_BASEFILES)
-
-$(INITFS_DIR)/init: initramfs-init $(INITFS_DIRSTAMP)
-	@echo "==> initramfs: init script"
-	@cp initramfs-init "$(INITFS_DIR)/init"
-
-$(INITFS_DIR)/sbin/bootchartd: bootchartd $(INITFS_DIRSTAMP)
-	@echo "==> initramfs: bootchartd"
-	@cp bootchartd "$(INITFS_DIR)/sbin/bootchartd"
-
-ifeq ($(APK_BIN),)
-$(INITFS_DIR)/sbin/apk: $(APK_TOOLS_APK) $(INITFS_DIRSTAMP)
-	@echo "==> initramfs: $(notdir $(APK_TOOLS_APK))"
-	@tar -C $(INITFS_DIR) -xzf $(APK_TOOLS_APK) sbin/apk
-	@touch $@
-else
-$(INITFS_DIR)/sbin/apk: $(APK_BIN) $(INITFS_DIRSTAMP)
-	@echo "==> initramfs: copy $(APK_BIN) from buildroot"
-	@cp $(APK_BIN) "$(INITFS_DIR)/sbin"
-endif
-
-$(INITFS_MODDIRSTAMP): $(INITFS_DIRSTAMP) $(INITFS_MODFILES) $(MODLOOP_DIRSTAMP)
-	@echo "==> initramfs: $(notdir $(MODULE_APK))"
-	@rm -rf $(INITFS_DIR)/lib/modules
-	@mkdir -p $(addprefix $(INITFS_MODDIR)/kernel/,drivers fs)
-	@for i in acpi ata block ide scsi cdrom usb message hid md; do \
-		cp -flLpR $(MODLOOP_DIR)/lib/modules/*/kernel/drivers/$$i \
-			$(INITFS_MODDIR)/kernel/drivers/ ; \
-	done
-	@for i in isofs vfat fat nls jbd 'ext*' cramfs '*.ko'; do \
-		cp -flLpR $(MODLOOP_DIR)/lib/modules/*/kernel/fs/$$i \
-			$(INITFS_MODDIR)/kernel/fs/ 2>/dev/null; \
-	done
-	@cp -flLpR $(MODLOOP_DIR)/lib/modules/*/kernel/lib \
-		$(INITFS_MODDIR)/kernel/
-	@depmod $(KERNEL) -b $(INITFS_DIR)
-	@touch $(INITFS_MODDIRSTAMP)
-
-$(INITFS): $(INITFS_DIRSTAMP) $(INITFS_DIR)/init $(INITFS_DIR)/sbin/bootchartd $(INITFS_DIR)/sbin/apk $(INITFS_MODDIRSTAMP) $(INITFS_BASEFILES)
-	@echo "==> initramfs: creating $(notdir $(INITFS))"
-	@mkdir -p $(dir $(INITFS))
-	@(cd $(INITFS_DIR) && find . | cpio -o -H newc | gzip -9) > $(INITFS)
+$(INITFS):	$(shell mkinitfs -F "$(INITFS_FEATURES)" -l $(KERNEL))
+	@mkinitfs -F "$(INITFS_FEATURES)" \
+		-t $(INITFS_DIR) -o $@ $(KERNEL)
 
 #
 # Vserver template rules
