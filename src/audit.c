@@ -70,9 +70,9 @@ static int audit_directory(apk_hash_item item, void *ctx)
 						     APK_BLOB_BUF(dbf->csum)) == 0)
 					continue;
 
-				reason = 'M';
+				reason = 'U';
 			} else {
-				reason = 'F';
+				reason = 'A';
 			}
 		}
 		if (apk_verbosity < 1)
