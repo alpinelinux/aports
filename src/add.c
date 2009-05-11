@@ -40,7 +40,7 @@ static int add_main(void *ctx, int argc, char **argv)
 {
 	struct add_ctx *actx = (struct add_ctx *) ctx;
 	struct apk_database db;
-	struct apk_state *state;
+	struct apk_state *state = NULL;
 	struct apk_dependency_array *pkgs; /* list of pkgs to install */
 	int i, r;
 
@@ -86,7 +86,8 @@ static int add_main(void *ctx, int argc, char **argv)
 	}
 	r = apk_state_commit(state, &db);
 err:
-	apk_state_unref(state);
+	if (state != NULL)
+		apk_state_unref(state);
 	apk_db_close(&db);
 	return r;
 }

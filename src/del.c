@@ -19,7 +19,7 @@ static int del_main(void *ctx, int argc, char **argv)
 	struct apk_database db;
 	struct apk_state *state;
 	struct apk_name *name;
-	int i, r;
+	int i, r = 0;
 
 	if (apk_db_open(&db, apk_root, APK_OPENF_WRITE) < 0)
 		return -1;
