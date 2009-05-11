@@ -41,13 +41,13 @@ static int add_main(void *ctx, int argc, char **argv)
 	struct add_ctx *actx = (struct add_ctx *) ctx;
 	struct apk_database db;
 	struct apk_state *state;
+	struct apk_dependency_array *pkgs; /* list of pkgs to install */
 	int i, r;
 
 	r = apk_db_open(&db, apk_root, actx->open_flags | APK_OPENF_WRITE);
 	if (r != 0)
 		return r;
 
-	state = apk_state_new(&db);
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;
 
@@ -61,7 +61,7 @@ static int add_main(void *ctx, int argc, char **argv)
 			}
 
 			dep = (struct apk_dependency) {
-				.name = pkg->name,
+				.name = apk_db_get_name(&db, APK_BLOB_STR(pkg->name->name)),
 				.version = pkg->version,
 				.result_mask = APK_VERSION_EQUAL,
 			};
@@ -71,14 +71,18 @@ static int add_main(void *ctx, int argc, char **argv)
 				.result_mask = APK_DEPMASK_REQUIRE,
 			};
 		}
-		apk_deps_add(&db.world, &dep);
 		dep.name->flags |= APK_NAME_TOPLEVEL;
+		apk_deps_add(&pkgs, &dep);
+	}
 
-		r = apk_state_lock_dependency(state, &dep);
+	state = apk_state_new(&db);
+	for (i = 0; i < pkgs->num; i++) {
+		r = apk_state_lock_dependency(state, &pkgs->item[i]);
 		if (r != 0) {
-			apk_error("Unable to install '%s'", dep.name->name);
+			apk_error("Unable to install '%s'", pkgs->item[i].name->name);
 			goto err;
 		}
+		apk_deps_add(&db.world, &pkgs->item[i]);
 	}
 	r = apk_state_commit(state, &db);
 err:
