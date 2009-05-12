@@ -370,7 +370,7 @@ static struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_pa
 	return idb;
 }
 
-static int apk_db_index_read(struct apk_database *db, struct apk_istream *is, int repo)
+int apk_db_index_read(struct apk_database *db, struct apk_istream *is, int repo)
 {
 	struct apk_package *pkg = NULL;
 	struct apk_db_dir_instance *diri = NULL;
