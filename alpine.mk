@@ -126,7 +126,7 @@ INITFS		:= $(ISO_DIR)/boot/$(KERNEL_NAME).gz
 
 #INITFS_DIRSTAMP	:= $(DESTDIR)/stamp.initfs
 INITFS_DIR	:= $(DESTDIR)/initfs
-INITFS_FEATURES	:= ata base bootchart cdrom cramfs ext3 ide raid scsi usb
+INITFS_FEATURES	:= ata base bootchart cdrom cramfs ext3 ide floppy raid scsi usb
 
 initfs: $(INITFS)
 $(INITFS):	$(shell mkinitfs -F "$(INITFS_FEATURES)" -l $(KERNEL))
