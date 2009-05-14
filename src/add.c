@@ -17,6 +17,7 @@
 
 struct add_ctx {
 	unsigned int open_flags;
+	const char *virtpkg;
 };
 
 static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
@@ -30,6 +31,9 @@ static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
 	case 'u':
 		apk_flags |= APK_UPGRADE;
 		break;
+	case 't':
+		actx->virtpkg = optarg;
+		break;
 	default:
 		return -1;
 	}
@@ -41,12 +45,33 @@ static int add_main(void *ctx, int argc, char **argv)
 	struct add_ctx *actx = (struct add_ctx *) ctx;
 	struct apk_database db;
 	struct apk_state *state = NULL;
-	struct apk_dependency_array *pkgs = NULL; /* list of pkgs to install */
+	struct apk_dependency_array *pkgs = NULL;
+	struct apk_package *virtpkg = NULL;
 	int i, r;
 
 	r = apk_db_open(&db, apk_root, actx->open_flags | APK_OPENF_WRITE);
 	if (r != 0)
 		return r;
+	
+	if (actx->virtpkg) {
+		struct apk_dependency dep;
+		virtpkg = apk_pkg_new();
+		if (virtpkg == NULL) {
+			apk_error("Failed to allocate virtual meta package");
+			goto err;
+		}
+		virtpkg->name = apk_db_get_name(&db, APK_BLOB_STR(actx->virtpkg));			
+		virtpkg->version = strdup("0");
+		virtpkg->description = strdup("virtual meta package");
+		dep = (struct apk_dependency) {
+			.name = virtpkg->name,
+			.version = virtpkg->version,
+			.result_mask = APK_VERSION_EQUAL,
+		};
+		dep.name->flags |= APK_NAME_TOPLEVEL | APK_NAME_VIRTUAL;
+		virtpkg = apk_db_pkg_add(&db, virtpkg);
+		apk_deps_add(&pkgs, &dep);
+	}
 
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;
@@ -71,8 +96,12 @@ static int add_main(void *ctx, int argc, char **argv)
 				.result_mask = APK_DEPMASK_REQUIRE,
 			};
 		}
-		dep.name->flags |= APK_NAME_TOPLEVEL;
-		apk_deps_add(&pkgs, &dep);
+		if (virtpkg) {
+			apk_deps_add(&virtpkg->depends, &dep);
+		} else {
+			dep.name->flags |= APK_NAME_TOPLEVEL;
+			apk_deps_add(&pkgs, &dep);
+		}
 	}
 
 	state = apk_state_new(&db);
@@ -95,11 +124,12 @@ err:
 static struct option add_options[] = {
 	{ "initdb",	no_argument,		NULL, 0x10000 },
 	{ "upgrade",	no_argument,		NULL, 'u' },
+	{ "virtual",	required_argument,	NULL, 't' },
 };
 
 static struct apk_applet apk_add = {
 	.name = "add",
-	.usage = "[--initdb] [--upgrade|-u] apkname...",
+	.usage = "[--initdb] [--upgrade|-u] [--virtual metaname] apkname...",
 	.context_size = sizeof(struct add_ctx),
 	.num_options = ARRAY_SIZE(add_options),
 	.options = add_options,

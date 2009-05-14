@@ -55,6 +55,7 @@ struct apk_db_dir_instance {
 };
 
 #define APK_NAME_TOPLEVEL	0x0001
+#define APK_NAME_VIRTUAL	0x0002
 
 struct apk_name {
 	apk_hash_node hash_node;
@@ -120,6 +121,7 @@ int apk_db_write_config(struct apk_database *db);
 void apk_db_close(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *file);
+struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);
 struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum);
 struct apk_package *apk_db_get_file_owner(struct apk_database *db, apk_blob_t filename);
 

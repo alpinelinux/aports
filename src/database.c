@@ -349,7 +349,7 @@ static void apk_db_pkg_rdepends(struct apk_database *db, struct apk_package *pkg
 	}
 }
 
-static struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)
+struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_package *idb;
 
@@ -1229,35 +1229,16 @@ static void apk_db_purge_pkg(struct apk_database *db,
 	apk_pkg_set_state(db, pkg, APK_PKG_NOT_INSTALLED);
 }
 
-int apk_db_install_pkg(struct apk_database *db,
-		       struct apk_package *oldpkg,
-		       struct apk_package *newpkg,
-		       apk_progress_cb cb, void *cb_ctx)
+static int apk_db_unpack_pkg(struct apk_database *db,
+			     struct apk_package *newpkg,
+			     int upgrade, csum_t csum,
+			     apk_progress_cb cb, void *cb_ctx)
 {
-	struct apk_bstream *bs;
 	struct install_ctx ctx;
-	csum_t csum;
+	struct apk_bstream *bs;
 	char file[256];
-	int r, i;
+	int i;
 
-	if (fchdir(db->root_fd) < 0)
-		return errno;
-
-	/* Just purging? */
-	if (oldpkg != NULL && newpkg == NULL) {
-		r = apk_pkg_run_script(oldpkg, db->root_fd,
-				       APK_SCRIPT_PRE_DEINSTALL);
-		if (r != 0)
-			return r;
-
-		apk_db_purge_pkg(db, oldpkg);
-
-		r = apk_pkg_run_script(oldpkg, db->root_fd,
-				       APK_SCRIPT_POST_DEINSTALL);
-		return r;
-	}
-
-	/* Install the new stuff */
 	if (newpkg->filename == NULL) {
 		for (i = 0; i < APK_MAX_REPOS; i++)
 			if (newpkg->repos & BIT(i))
@@ -1285,8 +1266,8 @@ int apk_db_install_pkg(struct apk_database *db,
 	ctx = (struct install_ctx) {
 		.db = db,
 		.pkg = newpkg,
-		.script = (oldpkg == NULL) ?
-			APK_SCRIPT_PRE_INSTALL : APK_SCRIPT_PRE_UPGRADE,
+		.script = upgrade ? 
+			APK_SCRIPT_PRE_UPGRADE : APK_SCRIPT_PRE_INSTALL,
 		.cb = cb,
 		.cb_ctx = cb_ctx,
 	};
@@ -1294,10 +1275,49 @@ int apk_db_install_pkg(struct apk_database *db,
 		goto err_close;
 
 	bs->close(bs, csum, NULL);
+	return 0;
+err_close:
+	bs->close(bs, NULL, NULL);
+	return -1;
+}
+
+int apk_db_install_pkg(struct apk_database *db,
+		       struct apk_package *oldpkg,
+		       struct apk_package *newpkg,
+		       apk_progress_cb cb, void *cb_ctx)
+{
+	csum_t csum;
+	int r;
+
+	if (fchdir(db->root_fd) < 0)
+		return errno;
+
+	/* Just purging? */
+	if (oldpkg != NULL && newpkg == NULL) {
+		r = apk_pkg_run_script(oldpkg, db->root_fd,
+				       APK_SCRIPT_PRE_DEINSTALL);
+		if (r != 0)
+			return r;
+
+		apk_db_purge_pkg(db, oldpkg);
+
+		r = apk_pkg_run_script(oldpkg, db->root_fd,
+				       APK_SCRIPT_POST_DEINSTALL);
+		return r;
+	}
+
+	/* Install the new stuff */
+	if (!(newpkg->name->flags & APK_NAME_VIRTUAL)) {
+		r = apk_db_unpack_pkg(db, newpkg, (oldpkg == NULL), csum,
+				      cb, cb_ctx);
+		if (r != 0)
+			return r;
+	}
 
 	apk_pkg_set_state(db, newpkg, APK_PKG_INSTALLED);
 
-	if (memcmp(csum, newpkg->csum, sizeof(csum)) != 0)
+	if (!(newpkg->name->flags & APK_NAME_VIRTUAL) &&
+	    memcmp(csum, newpkg->csum, sizeof(csum)) != 0)
 		apk_warning("%s-%s: checksum does not match",
 			    newpkg->name->name, newpkg->version);
 
@@ -1312,7 +1332,4 @@ int apk_db_install_pkg(struct apk_database *db,
 			  newpkg->name->name, newpkg->version);
 	}
 	return r;
-err_close:
-	bs->close(bs, NULL, NULL);
-	return -1;
 }
