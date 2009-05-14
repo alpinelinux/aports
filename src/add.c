@@ -41,7 +41,7 @@ static int add_main(void *ctx, int argc, char **argv)
 	struct add_ctx *actx = (struct add_ctx *) ctx;
 	struct apk_database db;
 	struct apk_state *state = NULL;
-	struct apk_dependency_array *pkgs; /* list of pkgs to install */
+	struct apk_dependency_array *pkgs = NULL; /* list of pkgs to install */
 	int i, r;
 
 	r = apk_db_open(&db, apk_root, actx->open_flags | APK_OPENF_WRITE);
