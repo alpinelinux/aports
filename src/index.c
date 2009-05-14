@@ -86,7 +86,7 @@ static int index_main(void *ctx, int argc, char **argv)
 		if (ictx->delete) {
 			struct apk_name *name;
 			name = apk_db_query_name(&db, APK_BLOB_STR(argv[i]));
-			if (name == NULL)
+			if (name == NULL || name->pkgs == NULL)
 				continue;
 			/* apk_db_index_write() will only print the pkgs
 			   where repos == 0. We prevent to write the given
