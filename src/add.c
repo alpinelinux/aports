@@ -47,6 +47,7 @@ static int add_main(void *ctx, int argc, char **argv)
 	struct apk_state *state = NULL;
 	struct apk_dependency_array *pkgs = NULL;
 	struct apk_package *virtpkg = NULL;
+	struct apk_dependency virtdep;
 	int i, r;
 
 	r = apk_db_open(&db, apk_root, actx->open_flags | APK_OPENF_WRITE);
@@ -54,7 +55,6 @@ static int add_main(void *ctx, int argc, char **argv)
 		return r;
 	
 	if (actx->virtpkg) {
-		struct apk_dependency dep;
 		virtpkg = apk_pkg_new();
 		if (virtpkg == NULL) {
 			apk_error("Failed to allocate virtual meta package");
@@ -63,14 +63,13 @@ static int add_main(void *ctx, int argc, char **argv)
 		virtpkg->name = apk_db_get_name(&db, APK_BLOB_STR(actx->virtpkg));			
 		virtpkg->version = strdup("0");
 		virtpkg->description = strdup("virtual meta package");
-		dep = (struct apk_dependency) {
+		virtdep = (struct apk_dependency) {
 			.name = virtpkg->name,
 			.version = virtpkg->version,
 			.result_mask = APK_VERSION_EQUAL,
 		};
-		dep.name->flags |= APK_NAME_TOPLEVEL | APK_NAME_VIRTUAL;
+		virtdep.name->flags |= APK_NAME_TOPLEVEL | APK_NAME_VIRTUAL;
 		virtpkg = apk_db_pkg_add(&db, virtpkg);
-		apk_deps_add(&pkgs, &dep);
 	}
 
 	for (i = 0; i < argc; i++) {
@@ -100,9 +99,12 @@ static int add_main(void *ctx, int argc, char **argv)
 			apk_deps_add(&virtpkg->depends, &dep);
 		} else {
 			dep.name->flags |= APK_NAME_TOPLEVEL;
-			apk_deps_add(&pkgs, &dep);
 		}
+		apk_deps_add(&pkgs, &dep);
 	}
+
+	if (virtpkg)
+		apk_deps_add(&pkgs, &virtdep);
 
 	state = apk_state_new(&db);
 	for (i = 0; i < pkgs->num; i++) {
