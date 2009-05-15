@@ -40,6 +40,14 @@ static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
 	return 0;
 }
 
+static void md5_str(const char *str, md5sum_t csum)
+{
+	struct md5_ctx ctx;
+	md5_init(&ctx);
+	md5_process(&ctx, str, strlen(str));
+	md5_finish(&ctx, csum);
+}
+
 static int add_main(void *ctx, int argc, char **argv)
 {
 	struct add_ctx *actx = (struct add_ctx *) ctx;
@@ -61,6 +69,7 @@ static int add_main(void *ctx, int argc, char **argv)
 			goto err;
 		}
 		virtpkg->name = apk_db_get_name(&db, APK_BLOB_STR(actx->virtpkg));			
+		md5_str(virtpkg->name->name, virtpkg->csum);
 		virtpkg->version = strdup("0");
 		virtpkg->description = strdup("virtual meta package");
 		virtdep = (struct apk_dependency) {
@@ -103,8 +112,10 @@ static int add_main(void *ctx, int argc, char **argv)
 		apk_deps_add(&pkgs, &dep);
 	}
 
-	if (virtpkg)
+	if (virtpkg) {
 		apk_deps_add(&pkgs, &virtdep);
+		apk_deps_add(&db.world, &virtdep);
+	}
 
 	state = apk_state_new(&db);
 	for (i = 0; i < pkgs->num; i++) {
@@ -113,7 +124,8 @@ static int add_main(void *ctx, int argc, char **argv)
 			apk_error("Unable to install '%s'", pkgs->item[i].name->name);
 			goto err;
 		}
-		apk_deps_add(&db.world, &pkgs->item[i]);
+		if (!virtpkg)
+			apk_deps_add(&db.world, &pkgs->item[i]);
 	}
 	r = apk_state_commit(state, &db);
 err:
