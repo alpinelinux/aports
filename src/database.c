@@ -1308,7 +1308,7 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	/* Install the new stuff */
 	if (!(newpkg->name->flags & APK_NAME_VIRTUAL)) {
-		r = apk_db_unpack_pkg(db, newpkg, (oldpkg == NULL), csum,
+		r = apk_db_unpack_pkg(db, newpkg, (oldpkg != NULL), csum,
 				      cb, cb_ctx);
 		if (r != 0)
 			return r;
