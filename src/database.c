@@ -717,21 +717,16 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 				apk_repos = "/etc/apk/repositories";
 			blob = apk_blob_from_file(apk_repos);
 			if (!APK_BLOB_IS_NULL(blob)) {
-				r = apk_blob_for_each_segment(blob, "\n",
-							      apk_db_add_repository, db);
+				apk_blob_for_each_segment(blob, "\n",
+							  apk_db_add_repository, db);
 				free(blob.ptr);
-				if (r != 0)
-					goto ret_r;
 			}
 		}
 	}
 
 	if (!(flags & APK_OPENF_EMPTY_REPOS)) {
-		list_for_each_entry(repo, &apk_repository_list.list, list) {
-			r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
-			if (r != 0)
-				goto ret_r;
-		}
+		list_for_each_entry(repo, &apk_repository_list.list, list)
+			apk_db_add_repository(db, APK_BLOB_STR(repo->url));
 	}
 
 	fchdir(apk_cwd_fd);
@@ -1009,7 +1004,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		is = apk_bstream_gunzip(apk_repository_file_open(&db->repos[r], name), 1);
 	}
 	if (is == NULL) {
-		apk_error("Failed to open index for %s", db->repos[r].url);
+		apk_warning("Failed to open index for %s", db->repos[r].url);
 		return -1;
 	}
 	apk_db_index_read(db, is, r);
