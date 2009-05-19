@@ -118,7 +118,7 @@ static int add_main(void *ctx, int argc, char **argv)
 	}
 
 	state = apk_state_new(&db);
-	for (i = 0; i < pkgs->num; i++) {
+	for (i = 0; (pkgs != NULL) && i < pkgs->num; i++) {
 		r = apk_state_lock_dependency(state, &pkgs->item[i]);
 		if (r != 0) {
 			apk_error("Unable to install '%s'", pkgs->item[i].name->name);
