@@ -60,7 +60,8 @@ static int add_main(void *ctx, int argc, char **argv)
 	struct apk_dependency virtdep;
 	int i, r;
 
-	if (strcmp(argv[0], "starwars") == 0)
+	if ((argc > 0) && (apk_verbosity > 1) && 
+	    (strcmp(argv[0], "starwars") == 0))
 		return system("telnet towel.blinkenlights.nl");
 
 	r = apk_db_open(&db, apk_root, actx->open_flags | APK_OPENF_WRITE);
