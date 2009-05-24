@@ -412,10 +412,6 @@ int apk_state_lock_name(struct apk_state *state,
 		}
 	}
 
-	/* If the chosen package is installed, all is done here */
-	if (oldpkg == newpkg)
-		return 0;
-
 	/* First we need to make sure the dependants of the old package
 	 * still have their dependencies ok. */
 	if (oldpkg != NULL) {
@@ -433,6 +429,10 @@ int apk_state_lock_name(struct apk_state *state,
 		if (r != 0)
 			return r;
 	}
+
+	/* If the chosen package is installed, all is done here */
+	if (oldpkg == newpkg)
+		return 0;
 
 	/* Track change */
 	r = apk_state_add_change(state, oldpkg, newpkg);
