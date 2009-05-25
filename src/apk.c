@@ -55,7 +55,7 @@ int usage(void)
 		printf("    apk %s %s\n",
 		       applet->name, applet->usage);
 	}
-	printf("\n");
+	printf("\nThis apk has coffee making abilities.\n\n");
 
 	return 1;
 }
