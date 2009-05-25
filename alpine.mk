@@ -235,10 +235,34 @@ iso: $(ISO)
 #
 # SHA1 sum of ISO
 #
-SHA1	:= $(ISO).sha1
+ISO_SHA1	:= $(ISO).sha1
 
-$(SHA1):	$(ISO)
+$(ISO_SHA1):	$(ISO)
 	@echo "==> Generating sha1 sum"
 	@sha1sum $(ISO) > $@ || rm -f $@
 
-sha1: $(SHA1)
+#
+# USB image
+#
+USBIMG 		:= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).img
+USBIMG_SIZE 	:= 510 
+MBRPATH 	:= /usr/share/syslinux/mbr.bin
+# the offset where the frist partition is found
+USBIMG_OFFSET	:= 16384
+
+$(USBIMG): $(ISOFS_DIRSTAMP)
+	#Creating imagefile
+	dd if=/dev/zero of=$(USBIMG) bs=1000000 count=$(USBIMG_SIZE)
+	parted -s $(USBIMG) mklabel msdos
+	parted -s $(USBIMG) mkpartfs primary fat32 0 $(USBIMG_SIZE)
+	parted -s $(USBIMG) set 1 boot on
+	dd if=$(MBRPATH) of=$(USBIMG) oflags=notrunc
+	syslinux -o $(USBIMG_OFFSET) $(USBIMG)
+	mcopy -i $(USBIMG)@@$(USBIMG_OFFSET) $(ISO_DIR)/* $(ISO_DIR)/.[a-z]* ::
+
+USBIMG_SHA1	:= $(USBIMG).sha1
+$(USBIMG_SHA1):	$(USBIMG)
+	@echo "==> Generating sha1 sum"
+	@sha1sum $(USBIMG) > $@ || rm -f $@
+
+sha1 release: $(ISO_SHA1) $(USBIMG_SHA1)
