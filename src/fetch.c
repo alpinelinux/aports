@@ -95,10 +95,10 @@ static int fetch_package(struct fetch_ctx *fctx,
 	}
 
 	r = apk_istream_splice(is, fd, pkg->size, NULL, NULL);
+	is->close(is);
 	if (fd != STDOUT_FILENO)
 		close(fd);
 	if (r != pkg->size) {
-		is->close(is);
 		apk_error("Unable to download '%s'", file);
 		unlink(file);
 		return -1;
