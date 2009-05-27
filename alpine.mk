@@ -49,6 +49,20 @@ SYSLINUX_APK	:= $(call find_apk,syslinux)
 STRACE_APK	:= $(call find_apk,strace)
 ACCT_APK	:= $(call find_apk,acct)
 
+APORTS_DIR	?= $(HOME)/aports
+REPOS		?= core extra
+APKS_FILTER	:= | grep -v -- '-dev$$' | grep -v 'sources'
+APKBUILDS	:= $(addsuffix /*/APKBUILD,$(addprefix $(APORTS_DIR)/,$(REPOS)))
+APKS		:= $(shell for i in $(APKBUILDS); do cd $${i%/*}; \
+				. $$i; \
+				for j in $$pkgname $$subpackages; do \
+					echo $${j%:*}; \
+				done; \
+			   done $(APKS_FILTER) | sort | uniq)
+
+#test:
+#	echo $(APKS)
+
 all: isofs
 
 help:
@@ -183,23 +197,30 @@ $(SYSLINUX_CFG):
 	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=sda1:vfat modules=sd-mod,usb-storage quiet" >>$@
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
-ISO_PKGDIR	:= $(ISO_DIR)/packages
+ISO_PKGDIR	:= $(ISO_DIR)/apks
 ISO_REPOS	:= $(addprefix $(ISO_PKGDIR)/,$(REPOS))
 ISO_APKINDEX	:= $(addsuffix /APK_INDEX.gz,$(ISO_REPOS))
 ISO_REPOS_DIRSTAMP := $(DESTDIR)/stamp.isorepos
 ISOFS_DIRSTAMP	:= $(DESTDIR)/stamp.isofs
 
-$(ISO_REPOS_DIRSTAMP): $(addsuffix /APK_INDEX.gz,$(addprefix $(REPOS_DIR)/,$(REPOS)))
-	@echo "==> iso: prepare repositories $(REPOS)"
-	@rm -rf $(ISO_PKGDIR)
-	@mkdir -p $(ISO_REPOS)
-	@for r in $(REPOS); do \
-		for a in $(REPOS_DIR)/$$r/*; do \
-			ln -f "$$a" $(ISO_PKGDIR)/$$r/$${a##*/} 2>/dev/null \
-			|| cp -r "$$a" $(ISO_PKGDIR)/$$r/$${a##*/} ;\
-		done;\
-	done
+#$(ISO_REPOS_DIRSTAMP): $(addsuffix /APK_INDEX.gz,$(addprefix $(REPOS_DIR)/,$(REPOS)))
+$(ISO_REPOS_DIRSTAMP): $(ISO_PKGDIR)/APK_INDEX.gz
 	@touch $@
+
+$(ISO_PKGDIR)/APK_INDEX.gz: 
+	@echo "==> iso: prepare repositories $(REPOS)"
+#	@rm -rf $(ISO_PKGDIR)
+#	@mkdir -p $(ISO_REPOS)
+#	@for r in $(REPOS); do \
+#		for a in $(REPOS_DIR)/$$r/*; do \
+#			ln -f "$$a" $(ISO_PKGDIR)/$$r/$${a##*/} 2>/dev/null \
+#			|| cp -r "$$a" $(ISO_PKGDIR)/$$r/$${a##*/} ;\
+#		done;\
+#	done
+	mkdir -p $(ISO_PKGDIR)
+	apk fetch --repo /var/cache/abuild/apks -v -R -o $(ISO_PKGDIR) \
+		$(APKS)
+	apk index $(ISO_PKGDIR)/* | gzip > $@
 
 #$(ISO_APKINDEX): $(ISO_REPOS)
 #	@apk index $(dir $@)/*.apk | gzip -9 > $@
@@ -245,18 +266,18 @@ $(ISO_SHA1):	$(ISO)
 # USB image
 #
 USBIMG 		:= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).img
-USBIMG_SIZE 	:= 510 
+USBIMG_SIZE 	:= $(shell echo $$(( `du -s $(ISO_DIR) | awk '{print $$1}'` + 8192 )) )
 MBRPATH 	:= /usr/share/syslinux/mbr.bin
 # the offset where the frist partition is found
 USBIMG_OFFSET	:= 16384
 
 $(USBIMG): $(ISOFS_DIRSTAMP)
 	#Creating imagefile
-	dd if=/dev/zero of=$(USBIMG) bs=1000000 count=$(USBIMG_SIZE)
+	dd if=/dev/zero of=$(USBIMG) bs=1024 count=$(USBIMG_SIZE)
 	parted -s $(USBIMG) mklabel msdos
-	parted -s $(USBIMG) mkpartfs primary fat32 0 $(USBIMG_SIZE)
+	parted -s $(USBIMG) mkpartfs primary fat32 0 $$(( $(USBIMG_SIZE) * 1024 / 1000000))
 	parted -s $(USBIMG) set 1 boot on
-	dd if=$(MBRPATH) of=$(USBIMG) oflags=notrunc
+	dd if=$(MBRPATH) of=$(USBIMG) conv=notrunc
 	syslinux -o $(USBIMG_OFFSET) $(USBIMG)
 	mcopy -i $(USBIMG)@@$(USBIMG_OFFSET) $(ISO_DIR)/* $(ISO_DIR)/.[a-z]* ::
 
