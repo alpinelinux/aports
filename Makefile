@@ -2,6 +2,7 @@
 # Building apk-tools
 
 PACKAGE := apk-tools
+TAGPREFIX := $(PACKAGE)-
 VERSION := 2.0_pre12
 
 ##
