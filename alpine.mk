@@ -7,25 +7,19 @@ ALPINE_RELEASE	?= $(BUILD_DATE)
 ALPINE_NAME	?= alpine-test
 ALPINE_ARCH	:= i386
 DESTDIR		?= $(shell pwd)/isotmp
-APORTS_DIR	?= $(HOME)/aports
+
 REPOS		?= core extra
 
 SUDO		= sudo
 
-# this might need to change...
-APKDIRS		?= $(REPOS_DIR)/*/
-
 ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).iso
 ISO_LINK	?= $(ALPINE_NAME).iso
 ISO_DIR		:= $(DESTDIR)/isofs
-REPOS_DIR	?= $(HOME)/packages
+ISO_PKGDIR	:= $(ISO_DIR)/apks
 
-# limitations for find_apk:
-# can not be a subpackage
-find_aport 	= $(firstword $(wildcard $(APORTS_DIR)/*/$(1)))
-find_repo	= $(subst $(APORTS_DIR),$(REPOS_DIR),$(dir $(call find_aport,$(1))))
-find_apk	= $(shell . $(call find_aport,$(1))/APKBUILD ;\
-			echo $(call find_repo,$(1))/$(1)-$$pkgver-r$$pkgrel.apk)
+find_apk_ver	= $(shell apk search $(1) | sort | uniq)
+find_apk_file	= $(addsuffix .apk,$(call find_apk_ver,$(1)))
+find_apk	= $(addprefix $(ISO_PKGDIR)/,$(call find_apk_file,$(1)))
 
 KERNEL_FLAVOR	?= grsec
 KERNEL_PKGNAME	?= linux-$(KERNEL_FLAVOR)
@@ -49,19 +43,11 @@ SYSLINUX_APK	:= $(call find_apk,syslinux)
 STRACE_APK	:= $(call find_apk,strace)
 ACCT_APK	:= $(call find_apk,acct)
 
-APORTS_DIR	?= $(HOME)/aports
-REPOS		?= core extra
-APKS_FILTER	:= | grep -v -- '-dev$$' | grep -v 'sources'
-APKBUILDS	:= $(addsuffix /*/APKBUILD,$(addprefix $(APORTS_DIR)/,$(REPOS)))
-APKS		:= $(shell for i in $(APKBUILDS); do cd $${i%/*}; \
-				. $$i; \
-				for j in $$pkgname $$subpackages; do \
-					echo $${j%:*}; \
-				done; \
-			   done $(APKS_FILTER) | sort | uniq)
+APKS_FILTER	?= | grep -v -- '-dev$$' | grep -v 'sources'
 
-#test:
-#	echo $(APKS)
+APKS		?= '*'
+APK_FILES	:= $(call find_apk,$(APKS))
+APK_REPO	?= --repo /var/cache/abuild/apks
 
 all: isofs
 
@@ -85,7 +71,6 @@ endif
 	@echo "ALPINE_NAME:    $(ALPINE_NAME)"
 	@echo "ALPINE_RELEASE: $(ALPINE_RELEASE)"
 	@echo "KERNEL_FLAVOR:  $(KERNEL_FLAVOR)"
-	@echo "APORTS_DIR:     $(APORTS_DIR)"
 	@echo "KERNEL:         $(KERNEL)"
 	@echo
 
@@ -94,18 +79,12 @@ clean:
 		$(INITFS) $(INITFS_DIRSTAMP) $(INITFS_DIR) \
 		$(ISO_DIR) $(REPOS_DIRSTAMP) $(ISO_REPOS_DIRSTAMP)
 
-#
-# Repos
-#
-repos: $(REPOS_DIRSTAMP)
 
-REPOS_DIRSTAMP	:= $(DESTDIR)/stamp.repos
-$(REPOS_DIRSTAMP): $(SOURCE_APKBUILDS)
-	@echo "==> repositories: $(REPOS)"
-	@buildrepo -p -a $(APORTS_DIR) -d $(REPOS_DIR) $(REPOS)
-	@mkdir -p $(dir $@) && touch $@
-
-%.apk: $(REPOS_DIRSTAMP)
+$(APK_FILES):
+	@mkdir -p "$(dir $@)";\
+	p="$(notdir $(basename $@))";\
+	apk fetch $(APK_REPO) -R -v -o "$(dir $@)" $${p%-[0-9]*}
+#	apk fetch --repo /var/cache/abuild/apks -v -R -o $(ISO_PKGDIR) \
 
 #
 # Modloop
@@ -138,7 +117,6 @@ $(MODLOOP): $(MODLOOP_DIRSTAMP)
 
 INITFS		:= $(ISO_DIR)/boot/$(KERNEL_NAME).gz
 
-#INITFS_DIRSTAMP	:= $(DESTDIR)/stamp.initfs
 INITFS_DIR	:= $(DESTDIR)/initfs
 INITFS_FEATURES	:= ata base bootchart cdrom cramfs ext3 ide floppy raid scsi usb
 
@@ -159,7 +137,7 @@ vstemplate: $(VSTEMPLATE)
 $(VSTEMPLATE):
 	@$(SUDO) rm -rf "$(VSTEMPLATE_DIR)"
 	@$(SUDO) mkdir -p "$(VSTEMPLATE_DIR)"
-	@$(SUDO) apk add --initdb --root $(VSTEMPLATE_DIR) alpine-baselayout
+	@$(SUDO) apk add --initdb --root $(VSTEMPLATE_DIR) alpine-baselayout openrc busybox
 	@cd $(VSTEMPLATE_DIR) && $(SUDO) tar -jcf $@ *
 
 #
@@ -174,8 +152,10 @@ SYSLINUX_CFG	:= $(ISO_DIR)/syslinux.cfg
 $(ISOLINUX_BIN): $(SYSLINUX_APK)
 	@echo "==> iso: install isolinux"
 	@mkdir -p $(dir $(ISOLINUX_BIN))
-	@tar -O -zxf $(SYSLINUX_APK) usr/share/syslinux/isolinux.bin > $@
-#	@cp /usr/share/syslinux/isolinux.bin $(ISOLINUX_BIN)
+	@for i in $(SYSLINUX_APK); do \
+		[ -f "$$i" ] || continue ;\
+		tar -O -zxf "$$i" usr/share/syslinux/isolinux.bin > $@ && exit 0;\
+	done ; exit 1
 
 $(ISOLINUX_CFG):
 	@echo "==> iso: configure isolinux"
@@ -197,33 +177,17 @@ $(SYSLINUX_CFG):
 	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=sda1:vfat modules=sd-mod,usb-storage quiet" >>$@
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
-ISO_PKGDIR	:= $(ISO_DIR)/apks
 ISO_REPOS	:= $(addprefix $(ISO_PKGDIR)/,$(REPOS))
 ISO_APKINDEX	:= $(addsuffix /APK_INDEX.gz,$(ISO_REPOS))
 ISO_REPOS_DIRSTAMP := $(DESTDIR)/stamp.isorepos
 ISOFS_DIRSTAMP	:= $(DESTDIR)/stamp.isofs
 
-#$(ISO_REPOS_DIRSTAMP): $(addsuffix /APK_INDEX.gz,$(addprefix $(REPOS_DIR)/,$(REPOS)))
 $(ISO_REPOS_DIRSTAMP): $(ISO_PKGDIR)/APK_INDEX.gz
 	@touch $@
 
-$(ISO_PKGDIR)/APK_INDEX.gz: 
-	@echo "==> iso: prepare repositories $(REPOS)"
-#	@rm -rf $(ISO_PKGDIR)
-#	@mkdir -p $(ISO_REPOS)
-#	@for r in $(REPOS); do \
-#		for a in $(REPOS_DIR)/$$r/*; do \
-#			ln -f "$$a" $(ISO_PKGDIR)/$$r/$${a##*/} 2>/dev/null \
-#			|| cp -r "$$a" $(ISO_PKGDIR)/$$r/$${a##*/} ;\
-#		done;\
-#	done
-	mkdir -p $(ISO_PKGDIR)
-	apk fetch --repo /var/cache/abuild/apks -v -R -o $(ISO_PKGDIR) \
-		$(APKS)
-	apk index $(ISO_PKGDIR)/* | gzip > $@
-
-#$(ISO_APKINDEX): $(ISO_REPOS)
-#	@apk index $(dir $@)/*.apk | gzip -9 > $@
+$(ISO_PKGDIR)/APK_INDEX.gz: $(APK_FILES)
+	@echo "==> iso: generating repository index"
+	@apk index $(APK_FILES) | gzip > $@
 
 $(ISO_KERNEL): $(KERNEL_APK)
 	@echo "==> iso: install kernel $(KERNEL)"
