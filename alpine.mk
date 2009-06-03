@@ -173,7 +173,7 @@ $(SYSLINUX_CFG):
 	@echo "default $(KERNEL_NAME)" >>$@
 	@echo "label $(KERNEL_NAME)" >>$@
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$@
-	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=sda1:vfat modules=sd-mod,usb-storage quiet" >>$@
+	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=usbdisk:vfat modules=sd-mod,usb-storage quiet" >>$@
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
 ISO_REPOS	:= $(addprefix $(ISO_PKGDIR)/,$(REPOS))
