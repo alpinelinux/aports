@@ -235,14 +235,15 @@ MBRPATH 	:= /usr/share/syslinux/mbr.bin
 USBIMG_OFFSET	:= 16384
 
 $(USBIMG): $(ISOFS_DIRSTAMP)
-	#Creating imagefile
-	dd if=/dev/zero of=$(USBIMG) bs=1024 count=$(USBIMG_SIZE)
-	parted -s $(USBIMG) mklabel msdos
-	parted -s $(USBIMG) mkpartfs primary fat32 0 $$(( $(USBIMG_SIZE) * 1024 / 1000000))
-	parted -s $(USBIMG) set 1 boot on
-	dd if=$(MBRPATH) of=$(USBIMG) conv=notrunc
-	syslinux -o $(USBIMG_OFFSET) $(USBIMG)
-	mcopy -i $(USBIMG)@@$(USBIMG_OFFSET) $(ISO_DIR)/* $(ISO_DIR)/.[a-z]* ::
+	@echo "==> Generating $@"
+	@dd if=/dev/zero of=$(USBIMG) bs=1024 count=$(USBIMG_SIZE)
+	@parted -s $(USBIMG) mklabel msdos
+	@parted -s $(USBIMG) mkpartfs primary fat32 0 \
+		$$(( $(USBIMG_SIZE) * 1024 / 1000000))
+	@parted -s $(USBIMG) set 1 boot on
+	@dd if=$(MBRPATH) of=$(USBIMG) conv=notrunc
+	@syslinux -o $(USBIMG_OFFSET) $(USBIMG)
+	@mcopy -i $(USBIMG)@@$(USBIMG_OFFSET) $(ISO_DIR)/* $(ISO_DIR)/.[a-z]* ::
 
 USBIMG_SHA1	:= $(USBIMG).sha1
 $(USBIMG_SHA1):	$(USBIMG)
