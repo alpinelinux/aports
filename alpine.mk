@@ -229,7 +229,8 @@ $(ISO_SHA1):	$(ISO)
 # USB image
 #
 USBIMG 		:= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).img
-USBIMG_SIZE 	= $(shell echo $$(( `du -s $(ISO_DIR) | awk '{print $$1}'` + 8192 )) )
+USBIMG_FREE	?= 8192
+USBIMG_SIZE 	= $(shell echo $$(( `du -s $(ISO_DIR) | awk '{print $$1}'` + $(USBIMG_FREE) )) )
 MBRPATH 	:= /usr/share/syslinux/mbr.bin
 # the offset where the frist partition is found
 USBIMG_OFFSET	:= 16384
