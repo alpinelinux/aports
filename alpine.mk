@@ -186,7 +186,7 @@ $(ISO_REPOS_DIRSTAMP): $(ISO_PKGDIR)/APK_INDEX.gz
 
 $(ISO_PKGDIR)/APK_INDEX.gz: $(APK_FILES)
 	@echo "==> iso: generating repository index"
-	@apk index $(APK_FILES) | gzip > $@
+	@apk index $(ISO_PKGDIR)/*.apk | gzip > $@
 
 $(ISO_KERNEL): $(KERNEL_APK)
 	@echo "==> iso: install kernel $(KERNEL)"
