@@ -365,20 +365,69 @@ EOF
 		metafiles="$metafiles $script"
 	done
 	echo $metafiles | tr ' ' '\n' > "$dir"/.metafiles
+}
 
+prepare_tracedeps() {
+	local dir=${subpkgdir:-$pkgdir}
+	options_has "!tracedeps" && return 0
 	find -name '*.so' | sed 's:.*/::' >"$dir"/.provides-so
+	scanelf -Rn "$dir" | awk '$1 == "ET_DYN" || $1 == "ET_EXEC" {print $2}'  \
+		| sed 's:,:\n:g' | sort | uniq \
+	| while read i; do
+		# only add files that are not self provided
+		grep "^$i$" "$dir"/.provides-so >/dev/null \
+			|| echo $i >> "$dir"/.needs-so
+	done
 }
 
 prepare_package() {
 	msg "Preparing ${subpkgname:+sub}package ${subpkgname:-$pkgname}..."
-	options_has "!strip" ||	stripbin
+	stripbin
 	prepare_metafiles
+	prepare_tracedeps
 }
 
 pkginfo_val() {
 	local key="$1"
 	local file="$2"
 	awk -F ' = ' "\$1 == \"$key\" {print \$2}" "$file"
+}
+
+trace_apk_deps() {
+	local name="$1"
+	local dir="$2"
+	local i autodeps=
+	msg "Tracing dependencies..."
+	for i in $(cat "$dir"/.needs-so 2>/dev/null); do
+		local j found
+		# first check if its provide by same apkbuild
+		for j in ../*/.provides-so; do
+			if grep -w $i $j >/dev/null 2>&1; then
+				j=${j##*/}
+				found=${j%.*}
+				break
+			fi
+		done
+		# check apk db if not provided by a subpackage
+		if [ -z "$found" ]; then
+			found=$(apk info -q -W /lib/$i /usr/lib/$i)
+		fi
+		if [ -z "$found" ]; then
+			error "Could not find dependency for $i"
+			return 1
+		fi
+		if grep -w "^depend = $found" "$dir"/.PKGINFO >/dev/null ; then
+			warning "You can remove '$found' from depends"
+			continue
+		fi
+		list_has $found $autodeps || autodeps="$autodeps $found"
+		msg "Added $found as dependency as it has $i"
+	done
+	[ -z "$autodeps" ] && return 0
+	echo "# automatically detected:" >> "$dir"/.PKGINFO
+	for i in $autodeps; do
+		echo "depend = $i" >> "$dir"/.PKGINFO
+	done
 }
 
 create_apks() {
@@ -388,6 +437,8 @@ create_apks() {
 		local name=$(pkginfo_val pkgname $file)
 		local ver=$(pkginfo_val pkgver $file)
 		local apk=$name-$ver.apk
+
+		trace_apk_deps "$name" "$dir" || return 1
 		msg "Creating $apk..."
 		(
 		cd "$dir"
@@ -678,6 +729,7 @@ checksum() {
 
 stripbin() {
 	local bin
+	options_has "!strip" && return 0
 	cd "${subpkgdir:-$pkgdir}" || return 1
 	msg "Stripping binaries"
 	find . -type f 2>/dev/null | while read bin; do
