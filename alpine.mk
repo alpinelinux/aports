@@ -249,4 +249,7 @@ $(USBIMG_SHA1):	$(USBIMG)
 	@echo "==> Generating sha1 sum"
 	@sha1sum $(USBIMG) > $@ || rm -f $@
 
+$(ALPINE_NAME).img:	$(USBIMG)
+	@ln -sf $(USBIMG) $@
+
 sha1 release: $(ISO_SHA1) $(USBIMG_SHA1)
