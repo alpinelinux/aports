@@ -41,7 +41,6 @@ BUSYBOX_APK	:= $(call find_apk,busybox)
 APK_TOOLS_APK	:= $(call find_apk,apk-tools)
 SYSLINUX_APK	:= $(call find_apk,syslinux)
 STRACE_APK	:= $(call find_apk,strace)
-ACCT_APK	:= $(call find_apk,acct)
 
 APKS_FILTER	?= | grep -v -- '-dev$$' | grep -v 'sources'
 
@@ -77,7 +76,7 @@ endif
 clean:
 	rm -rf $(MODLOOP) $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) \
 		$(INITFS) $(INITFS_DIRSTAMP) $(INITFS_DIR) \
-		$(ISO_DIR) $(REPOS_DIRSTAMP) $(ISO_REPOS_DIRSTAMP)
+		$(ISO_DIR) $(ISO_REPOS_DIRSTAMP)
 
 
 $(APK_FILES):
@@ -95,7 +94,7 @@ MODLOOP_DIRSTAMP := $(DESTDIR)/stamp.modloop
 
 modloop: $(MODLOOP)
 
-$(MODLOOP_DIRSTAMP): $(REPOS_DIRSTAMP) $(MOD_APKS)
+$(MODLOOP_DIRSTAMP): $(MOD_APKS)
 	@rm -rf $(MODLOOP_DIR)
 	@mkdir -p $(MODLOOP_DIR)/lib/modules/
 	@for i in $(MOD_APKS); do \
