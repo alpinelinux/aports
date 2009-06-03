@@ -5,7 +5,7 @@ VERSION		:= 1.15
 prefix		?= /usr
 sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
-apkcache	?= /var/cache/abuild/apks
+apkcache	?= ~/.cache/apks
 
 USR_BIN_FILES	:= abuild devbuild mkalpine buildrepo
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
