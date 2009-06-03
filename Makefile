@@ -2,9 +2,10 @@
 PACKAGE		:= abuild
 VERSION		:= 1.14
 
-prefix ?= /usr
-sysconfdir ?= /etc
-datadir ?= $(prefix)/share/$(PACKAGE)
+prefix		?= /usr
+sysconfdir	?= /etc
+datadir		?= $(prefix)/share/$(PACKAGE)
+apkcache	?= /var/cache/abuild/apks
 
 USR_BIN_FILES	:= abuild devbuild mkalpine buildrepo
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
@@ -29,7 +30,8 @@ TAR		:= tar
 SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@prefix@:$(prefix):g' \
 			-e 's:@sysconfdir@:$(sysconfdir):g' \
-			-e 's:@datadir@:$(datadir):g'
+			-e 's:@datadir@:$(datadir):g' \
+			-e 's:@apkcache@:$(apkcache):g'
 
 .SUFFIXES:	.sh.in .in
 .sh.in.sh:
