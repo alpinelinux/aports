@@ -236,10 +236,9 @@ MBRPATH 	:= /usr/share/syslinux/mbr.bin
 $(USBIMG): $(ISOFS_DIRSTAMP)
 	@echo "==> Generating $@"
 	@dd if=/dev/zero of=$(USBIMG) bs=1024 count=$(USBIMG_SIZE)
-	@dd if=$(MBRPATH) of=$(USBIMG) conv=notrunc
 	@mkfs.vfat $(USBIMG) >/dev/null
 	@syslinux $(USBIMG)
-	@mcopy -i $(USBIMG) $(ISO_DIR)/* $(ISO_DIR)/.[a-z]* ::
+	@MTOOLS_SKIP_CHECK=1 mcopy -i $(USBIMG) $(ISO_DIR)/* $(ISO_DIR)/.[a-z]* ::
 
 USBIMG_SHA1	:= $(USBIMG).sha1
 $(USBIMG_SHA1):	$(USBIMG)
