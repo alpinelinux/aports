@@ -1,6 +1,6 @@
 
 PACKAGE		:= abuild
-VERSION		:= 1.15
+VERSION		:= 1.15.1
 
 prefix		?= /usr
 sysconfdir	?= /etc
