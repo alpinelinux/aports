@@ -232,19 +232,14 @@ USBIMG 		:= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).img
 USBIMG_FREE	?= 8192
 USBIMG_SIZE 	= $(shell echo $$(( `du -s $(ISO_DIR) | awk '{print $$1}'` + $(USBIMG_FREE) )) )
 MBRPATH 	:= /usr/share/syslinux/mbr.bin
-# the offset where the frist partition is found
-USBIMG_OFFSET	:= 16384
 
 $(USBIMG): $(ISOFS_DIRSTAMP)
 	@echo "==> Generating $@"
 	@dd if=/dev/zero of=$(USBIMG) bs=1024 count=$(USBIMG_SIZE)
-	@parted -s $(USBIMG) mklabel msdos
-	@parted -s $(USBIMG) mkpartfs primary fat32 0 \
-		$$(( $(USBIMG_SIZE) * 1024 / 1000000))
-	@parted -s $(USBIMG) set 1 boot on
 	@dd if=$(MBRPATH) of=$(USBIMG) conv=notrunc
-	@syslinux -o $(USBIMG_OFFSET) $(USBIMG)
-	@mcopy -i $(USBIMG)@@$(USBIMG_OFFSET) $(ISO_DIR)/* $(ISO_DIR)/.[a-z]* ::
+	@mkfs.vfat $(USBIMG) >/dev/null
+	@syslinux $(USBIMG)
+	@mcopy -i $(USBIMG) $(ISO_DIR)/* $(ISO_DIR)/.[a-z]* ::
 
 USBIMG_SHA1	:= $(USBIMG).sha1
 $(USBIMG_SHA1):	$(USBIMG)
@@ -253,5 +248,7 @@ $(USBIMG_SHA1):	$(USBIMG)
 
 $(ALPINE_NAME).img:	$(USBIMG)
 	@ln -sf $(USBIMG) $@
+
+img:	$(ALPINE_NAME).img
 
 sha1 release: $(ISO_SHA1) $(USBIMG_SHA1)
