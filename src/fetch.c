@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "apk_applet.h"
 #include "apk_database.h"
@@ -20,6 +21,7 @@
 
 #define FETCH_RECURSIVE		1
 #define FETCH_STDOUT		2
+#define FETCH_LINK		4
 
 struct fetch_ctx {
 	unsigned int flags;
@@ -37,6 +39,9 @@ static int fetch_parse(void *ctx, int optch, int optindex, const char *optarg)
 	case 's':
 		fctx->flags |= FETCH_STDOUT;
 		break;
+	case 'L':
+		fctx->flags |= FETCH_LINK;
+		break;
 	case 'o':
 		fctx->outdir = optarg;
 		break;
@@ -51,29 +56,22 @@ static int fetch_package(struct fetch_ctx *fctx,
 			 struct apk_package *pkg)
 {
 	struct apk_istream *is;
-	char file[256];
+	char infile[256];
+	char outfile[256];
 	int i, r, fd;
 
-	if (fctx->flags & FETCH_STDOUT) {
-		fd = STDOUT_FILENO;
-	} else {
+	printf("DEBUG: hello\n");
+	if (!(fctx->flags & FETCH_STDOUT)) {
 		struct apk_file_info fi;
 
-		snprintf(file, sizeof(file), "%s/%s-%s.apk",
+		snprintf(outfile, sizeof(outfile), "%s/%s-%s.apk",
 			 fctx->outdir ? fctx->outdir : ".",
 			 pkg->name->name, pkg->version);
 
-		if (apk_file_get_info(file, &fi) == 0 &&
+		if (apk_file_get_info(outfile, &fi) == 0 &&
 		    fi.size == pkg->size)
 			return 0;
-
-		fd = creat(file, 0644);
-		if (fd < 0) {
-			apk_error("Unable to create '%s'", file);
-			return -1;
-		}
 	}
-
 	apk_message("Downloading %s-%s", pkg->name->name, pkg->version);
 
 	for (i = 0; i < APK_MAX_REPOS; i++)
@@ -86,11 +84,26 @@ static int fetch_package(struct fetch_ctx *fctx,
 		return -1;
 	}
 
-	snprintf(file, sizeof(file), "%s/%s-%s.apk",
+	snprintf(infile, sizeof(infile), "%s/%s-%s.apk",
 		 db->repos[i].url, pkg->name->name, pkg->version);
-	is = apk_istream_from_url(file);
+
+	if (fctx->flags & FETCH_STDOUT) {
+		fd = STDOUT_FILENO;
+	} else {
+		if ((fctx->flags & FETCH_LINK) && apk_url_local_file(infile)) {
+			if (link(infile, outfile) == 0)
+				return 0;
+		}
+		fd = creat(outfile, 0644);
+		if (fd < 0) {
+			apk_error("%s: %s", outfile, strerror(errno));
+			return -1;
+		}
+	}
+
+	is = apk_istream_from_url(infile);
 	if (is == NULL) {
-		apk_error("Unable to download '%s'", file);
+		apk_error("Unable to download '%s'", infile);
 		return -1;
 	}
 
@@ -99,8 +112,8 @@ static int fetch_package(struct fetch_ctx *fctx,
 	if (fd != STDOUT_FILENO)
 		close(fd);
 	if (r != pkg->size) {
-		apk_error("Unable to download '%s'", file);
-		unlink(file);
+		apk_error("Unable to download '%s'", infile);
+		unlink(outfile);
 		return -1;
 	}
 
@@ -171,12 +184,13 @@ err:
 static struct option fetch_options[] = {
 	{ "recursive",	no_argument,		NULL, 'R' },
 	{ "stdout",	no_argument,		NULL, 's' },
+	{ "link",	no_argument,		NULL, 'L' },
 	{ "output",	required_argument,	NULL, 'o' },
 };
 
 static struct apk_applet apk_fetch = {
 	.name = "fetch",
-	.usage = "[-R|--recursive|--stdout] [-o dir] apkname...",
+	.usage = "[-R|--recursive|--stdout] [--link|-L]  [-o dir] apkname...",
 	.context_size = sizeof(struct fetch_ctx),
 	.num_options = ARRAY_SIZE(fetch_options),
 	.options = fetch_options,
