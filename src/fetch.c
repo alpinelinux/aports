@@ -60,7 +60,6 @@ static int fetch_package(struct fetch_ctx *fctx,
 	char outfile[256];
 	int i, r, fd;
 
-	printf("DEBUG: hello\n");
 	if (!(fctx->flags & FETCH_STDOUT)) {
 		struct apk_file_info fi;
 
