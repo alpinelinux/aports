@@ -90,7 +90,9 @@ static int fetch_package(struct fetch_ctx *fctx,
 		fd = STDOUT_FILENO;
 	} else {
 		if ((fctx->flags & FETCH_LINK) && apk_url_local_file(infile)) {
-			if (link(infile, outfile) == 0)
+			char real_infile[256];
+			readlink(infile, real_infile, sizeof(real_infile));
+			if (link(real_infile, outfile) == 0)
 				return 0;
 		}
 		fd = creat(outfile, 0644);
