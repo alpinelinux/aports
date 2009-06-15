@@ -8,8 +8,6 @@ ALPINE_NAME	?= alpine-test
 ALPINE_ARCH	:= i386
 DESTDIR		?= $(shell pwd)/isotmp
 
-REPOS		?= core extra
-
 SUDO		= sudo
 
 ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).iso
@@ -17,7 +15,9 @@ ISO_LINK	?= $(ALPINE_NAME).iso
 ISO_DIR		:= $(DESTDIR)/isofs
 ISO_PKGDIR	:= $(ISO_DIR)/apks
 
-find_apk_ver	= $(shell apk search $(1) | sort | uniq)
+APK_OPTS	:= $(addprefix --repo ,$(APK_REPOS))
+
+find_apk_ver	= $(shell apk search $(APK_OPTS) $(1) | sort | uniq)
 find_apk_file	= $(addsuffix .apk,$(call find_apk_ver,$(1)))
 find_apk	= $(addprefix $(ISO_PKGDIR)/,$(call find_apk_file,$(1)))
 
@@ -46,7 +46,6 @@ APKS_FILTER	?= | grep -v -- '-dev$$' | grep -v 'sources'
 
 APKS		?= '*'
 APK_FILES	:= $(call find_apk,$(APKS))
-APK_REPO	?= --repo /var/cache/abuild/apks
 
 all: isofs
 
@@ -81,9 +80,8 @@ clean:
 
 $(APK_FILES):
 	@mkdir -p "$(dir $@)";\
-	p="$(notdir $(basename $@))";\
-	apk fetch $(APK_REPO) -R -v -o "$(dir $@)" $${p%-[0-9]*}
-#	apk fetch --repo /var/cache/abuild/apks -v -R -o $(ISO_PKGDIR) \
+	apk fetch $(APK_OPTS) -R -v -o "$(dir $@)" \
+		`apk search -q $(APK_OPTS) $(APKS) | sort | uniq`
 
 #
 # Modloop
@@ -164,7 +162,7 @@ $(ISOLINUX_CFG):
 	@echo "default $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "label $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$(ISOLINUX_CFG)
-	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom:iso9660 modules=sd-mod,usb-storage,floppy quiet" >>$(ISOLINUX_CFG)
+	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom:iso9660 modules=loop,cramfs,sd-mod,usb-storage,floppy quiet" >>$(ISOLINUX_CFG)
 
 $(SYSLINUX_CFG):
 	@echo "==> iso: configure syslinux"
@@ -173,11 +171,9 @@ $(SYSLINUX_CFG):
 	@echo "default $(KERNEL_NAME)" >>$@
 	@echo "label $(KERNEL_NAME)" >>$@
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$@
-	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=usbdisk:vfat modules=sd-mod,usb-storage quiet" >>$@
+	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=usbdisk:vfat modules=loop,cramfs,sd-mod,usb-storage quiet" >>$@
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
-ISO_REPOS	:= $(addprefix $(ISO_PKGDIR)/,$(REPOS))
-ISO_APKINDEX	:= $(addsuffix /APK_INDEX.gz,$(ISO_REPOS))
 ISO_REPOS_DIRSTAMP := $(DESTDIR)/stamp.isorepos
 ISOFS_DIRSTAMP	:= $(DESTDIR)/stamp.isofs
 
