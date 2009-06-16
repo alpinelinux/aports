@@ -122,11 +122,7 @@ static int add_main(void *ctx, int argc, char **argv)
 		md5_str(virtpkg->name->name, virtpkg->csum);
 		virtpkg->version = strdup("0");
 		virtpkg->description = strdup("virtual meta package");
-		virtdep = (struct apk_dependency) {
-			.name = virtpkg->name,
-			.version = virtpkg->version,
-			.result_mask = APK_VERSION_EQUAL,
-		};
+		virtdep = apk_dep_from_pkg(&db, virtpkg);
 		virtdep.name->flags |= APK_NAME_TOPLEVEL | APK_NAME_VIRTUAL;
 		virtpkg = apk_db_pkg_add(&db, virtpkg);
 	}
@@ -143,17 +139,10 @@ static int add_main(void *ctx, int argc, char **argv)
 				goto err;
 			}
 
-			dep = (struct apk_dependency) {
-				.name = apk_db_get_name(&db, APK_BLOB_STR(pkg->name->name)),
-				.version = pkg->version,
-				.result_mask = APK_VERSION_EQUAL,
-			};
-		} else {
-			dep = (struct apk_dependency) {
-				.name = apk_db_get_name(&db, APK_BLOB_STR(argv[i])),
-				.result_mask = APK_DEPMASK_REQUIRE,
-			};
-		}
+			dep = apk_dep_from_pkg(&db, pkg);
+		} else
+			dep = apk_dep_from_str(&db, argv[i]);
+
 		if (virtpkg) {
 			apk_deps_add(&virtpkg->depends, &dep);
 		} else {

@@ -146,6 +146,24 @@ const char *apk_version_op_string(int mask)
 	}
 }
 
+int apk_version_result_mask(const char *str)
+{
+	int r = 0;
+	switch (*str) {
+	case '<':
+		r = APK_VERSION_LESS;
+		str++;
+		break;
+	case '>':
+		r = APK_VERSION_GREATER;
+		str++;
+		break;
+	}
+	if (*str ==  '=')
+		r |= APK_VERSION_EQUAL;
+	return r;
+}			
+
 int apk_version_validate(apk_blob_t ver)
 {
 	int t = TOKEN_DIGIT;

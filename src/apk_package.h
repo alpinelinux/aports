@@ -94,4 +94,8 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_t entry);
 int apk_pkg_write_index_entry(struct apk_package *pkg, struct apk_ostream *os);
 
+struct apk_dependency apk_dep_from_str(struct apk_database *db,
+				       char *str);
+struct apk_dependency apk_dep_from_pkg(struct apk_database *db,
+				       struct apk_package *pkg);
 #endif

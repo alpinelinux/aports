@@ -663,3 +663,36 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 
 	return n;
 }
+
+struct apk_dependency apk_dep_from_str(struct apk_database *db,
+				       char *str)
+{
+	apk_blob_t name = APK_BLOB_STR(str);
+	char *v = str;
+	int mask = APK_DEPMASK_REQUIRE;
+
+	v = strpbrk(str, "<>=");
+	if (v != NULL) {
+		name.len = v - str;
+		mask = apk_version_result_mask(v++);
+		if (*v == '=')
+			v++;
+	} 
+	printf("DEBUG: result_mask = %x\n", mask);
+	return (struct apk_dependency) {
+		.name = apk_db_get_name(db, name),
+		.version = v,
+		.result_mask = mask,
+	};
+}
+
+struct apk_dependency apk_dep_from_pkg(struct apk_database *db,
+				       struct apk_package *pkg)
+{
+	return (struct apk_dependency) {
+		.name = apk_db_get_name(db, APK_BLOB_STR(pkg->name->name)),
+		.version = pkg->version,
+		.result_mask = APK_VERSION_EQUAL,
+	};
+}
+
