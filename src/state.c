@@ -201,11 +201,14 @@ int apk_state_lock_dependency(struct apk_state *state,
 
 	/* Multiple candidates: prune incompatible versions. */
 	c = ns_to_choices(state->name[name->id]);
-	for (i = 0; i < c->num; i++) {
+	i = 0;
+	while (i < c->num) {
 		if (apk_version_compare(APK_BLOB_STR(c->pkgs[i]->version),
 					APK_BLOB_STR(dep->version))
-		    & dep->result_mask)
+		    & dep->result_mask) {
+		    	i++;
 			continue;
+		}
 
 		c = name_choices_writable(c);
 		c->pkgs[i] = c->pkgs[c->num - 1];
