@@ -61,14 +61,13 @@ static int fetch_package(struct fetch_ctx *fctx,
 	int i, r, fd;
 
 	if (!(fctx->flags & FETCH_STDOUT)) {
-		struct apk_file_info fi;
+		struct stat st;
 
 		snprintf(outfile, sizeof(outfile), "%s/%s-%s.apk",
 			 fctx->outdir ? fctx->outdir : ".",
 			 pkg->name->name, pkg->version);
 
-		if (apk_file_get_info(outfile, &fi) == 0 &&
-		    fi.size == pkg->size)
+		if (lstat(outfile, &st) == 0 && st.st_size == pkg->size)
 			return 0;
 	}
 	apk_message("Downloading %s-%s", pkg->name->name, pkg->version);
