@@ -297,7 +297,7 @@ static struct option info_options[] = {
 static struct apk_applet apk_info = {
 	.name = "info",
 	.usage = "[-L|--contents] [-e|--installed] [-W|--who-owns] [-R|--depends]\n"
-		 "\t\t[-r|--rdepends] PACKAGE...",
+		 "\t\t[-r|--rdepends] [-w|--webage] [-s|--size] PACKAGE...",
 	.context_size = sizeof(struct info_ctx),
 	.num_options = ARRAY_SIZE(info_options),
 	.options = info_options,
