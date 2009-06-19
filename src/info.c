@@ -209,6 +209,26 @@ static void info_print_required_by(struct apk_package *pkg)
 	puts("");
 }
 
+static void info_print_url(struct apk_package *pkg)
+{
+	if (apk_verbosity > 1)
+		printf("%s: %s\n", pkg->name->name, pkg->url);
+	else
+		printf("%s-%s webpage:\n%s\n\n", pkg->name->name, pkg->version,
+		       pkg->url);
+	puts("");
+}
+
+static void info_print_size(struct apk_package *pkg)
+{
+	if (apk_verbosity > 1)
+		printf("%s: %i\n", pkg->name->name, pkg->installed_size);
+	else
+		printf("%s-%s installed size:\n%i\n\n", pkg->name->name, pkg->version,
+		       pkg->installed_size);
+	puts("");
+}
+
 static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
@@ -219,6 +239,10 @@ static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 		break;
 	case 'W':
 		ictx->action = info_who_owns;
+		break;
+	case 'w':
+		ictx->action = info_package;
+		ictx->subaction = info_print_url;
 		break;
 	case 'L':
 		ictx->action = info_package;
@@ -231,6 +255,10 @@ static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 	case 'r':
 		ictx->action = info_package;
 		ictx->subaction = info_print_required_by;
+		break;
+	case 's':
+		ictx->action = info_package;
+		ictx->subaction = info_print_size;
 		break;
 	default:
 		return -1;
@@ -262,6 +290,8 @@ static struct option info_options[] = {
 	{ "who-owns",	no_argument,		NULL, 'W' },
 	{ "depends",	no_argument,		NULL, 'R' },
 	{ "rdepends",	no_argument,		NULL, 'r' },
+	{ "webpage",	no_argument,		NULL, 'w' },
+	{ "size",	no_argument,		NULL, 's' },
 };
 
 static struct apk_applet apk_info = {
