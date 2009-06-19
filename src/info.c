@@ -20,7 +20,33 @@
 struct info_ctx {
 	int (*action)(struct info_ctx *ctx, struct apk_database *db,
 		      int argc, char **argv);
+	int subaction_mask;
+};
+
+struct info_subaction {
+	int mask;
 	void (*subaction)(struct apk_package *pkg);
+};
+
+static void info_print_depends(struct apk_package *pkg);
+static void info_print_url(struct apk_package *pkg);
+static void info_print_required_by(struct apk_package *pkg);
+static void info_print_size(struct apk_package *pkg);
+static void info_print_contents(struct apk_package *pkg);
+
+#define APK_INFO_URL		0x01
+#define APK_INFO_DEPENDS	0x02
+#define APK_INFO_RDEPENDS	0x04
+#define APK_INFO_SIZE		0x08
+#define APK_INFO_CONTENTS	0x10
+
+#define APK_INFO_NUM_SUBACTIONS 5
+static struct info_subaction info_package_actions[] = {
+	{ APK_INFO_URL,		info_print_url },
+	{ APK_INFO_DEPENDS,	info_print_depends },
+	{ APK_INFO_RDEPENDS,	info_print_required_by },
+	{ APK_INFO_SIZE,	info_print_size },
+	{ APK_INFO_CONTENTS,	info_print_contents },
 };
 
 static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
@@ -115,6 +141,16 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 	return 0;
 }
 
+static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
+{
+	int i;
+	for (i = 0; i < APK_INFO_NUM_SUBACTIONS; i++)
+		if (info_package_actions[i].mask & ctx->subaction_mask) {
+			info_package_actions[i].subaction(pkg);
+			puts("");
+		}
+}
+
 static int info_package(struct info_ctx *ctx, struct apk_database *db,
 			int argc, char **argv)
 {
@@ -130,7 +166,7 @@ static int info_package(struct info_ctx *ctx, struct apk_database *db,
 		for (j = 0; j < name->pkgs->num; j++) {
 			struct apk_package *pkg = name->pkgs->item[j];
 			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
-				ctx->subaction(pkg);
+				info_subaction(ctx, pkg);
 		}
 	}
 	return 0;
@@ -154,7 +190,6 @@ static void info_print_contents(struct apk_package *pkg)
 			printf("%s/%s\n", diri->dir->dirname, file->filename);
 		}
 	}
-	puts("");
 }
 
 static void info_print_depends(struct apk_package *pkg)
@@ -170,7 +205,6 @@ static void info_print_depends(struct apk_package *pkg)
 	for (i = 0; i < pkg->depends->num; i++) {
 		printf("%s%s", pkg->depends->item[i].name->name, separator);
 	}
-	puts("");
 }
 
 static void info_print_required_by(struct apk_package *pkg)
@@ -206,7 +240,6 @@ static void info_print_required_by(struct apk_package *pkg)
 			}
 		}
 	}
-	puts("");
 }
 
 static void info_print_url(struct apk_package *pkg)
@@ -214,9 +247,8 @@ static void info_print_url(struct apk_package *pkg)
 	if (apk_verbosity > 1)
 		printf("%s: %s\n", pkg->name->name, pkg->url);
 	else
-		printf("%s-%s webpage:\n%s\n\n", pkg->name->name, pkg->version,
+		printf("%s-%s webpage:\n%s\n", pkg->name->name, pkg->version,
 		       pkg->url);
-	puts("");
 }
 
 static void info_print_size(struct apk_package *pkg)
@@ -224,15 +256,15 @@ static void info_print_size(struct apk_package *pkg)
 	if (apk_verbosity > 1)
 		printf("%s: %i\n", pkg->name->name, pkg->installed_size);
 	else
-		printf("%s-%s installed size:\n%i\n\n", pkg->name->name, pkg->version,
+		printf("%s-%s installed size:\n%i\n", pkg->name->name, pkg->version,
 		       pkg->installed_size);
-	puts("");
 }
 
 static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
 
+	ictx->action = info_package;
 	switch (optch) {
 	case 'e':
 		ictx->action = info_exists;
@@ -241,24 +273,19 @@ static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 		ictx->action = info_who_owns;
 		break;
 	case 'w':
-		ictx->action = info_package;
-		ictx->subaction = info_print_url;
+		ictx->subaction_mask |= APK_INFO_URL;
 		break;
 	case 'L':
-		ictx->action = info_package;
-		ictx->subaction = info_print_contents;
+		ictx->subaction_mask |= APK_INFO_CONTENTS;
 		break;
 	case 'R':
-		ictx->action = info_package;
-		ictx->subaction = info_print_depends;
+		ictx->subaction_mask |= APK_INFO_DEPENDS;
 		break;
 	case 'r':
-		ictx->action = info_package;
-		ictx->subaction = info_print_required_by;
+		ictx->subaction_mask |= APK_INFO_RDEPENDS;
 		break;
 	case 's':
-		ictx->action = info_package;
-		ictx->subaction = info_print_size;
+		ictx->subaction_mask |= APK_INFO_SIZE;
 		break;
 	default:
 		return -1;
