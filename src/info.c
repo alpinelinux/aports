@@ -33,20 +33,23 @@ static void info_print_url(struct apk_package *pkg);
 static void info_print_required_by(struct apk_package *pkg);
 static void info_print_size(struct apk_package *pkg);
 static void info_print_contents(struct apk_package *pkg);
+static void info_print_description(struct apk_package *pkg);
 
 #define APK_INFO_URL		0x01
 #define APK_INFO_DEPENDS	0x02
 #define APK_INFO_RDEPENDS	0x04
 #define APK_INFO_SIZE		0x08
 #define APK_INFO_CONTENTS	0x10
+#define APK_INFO_DESC		0x20
 
-#define APK_INFO_NUM_SUBACTIONS 5
+#define APK_INFO_NUM_SUBACTIONS 6
 static struct info_subaction info_package_actions[] = {
+	{ APK_INFO_DESC,	info_print_description },
 	{ APK_INFO_URL,		info_print_url },
-	{ APK_INFO_DEPENDS,	info_print_depends },
-	{ APK_INFO_RDEPENDS,	info_print_required_by },
 	{ APK_INFO_SIZE,	info_print_size },
 	{ APK_INFO_CONTENTS,	info_print_contents },
+	{ APK_INFO_DEPENDS,	info_print_depends },
+	{ APK_INFO_RDEPENDS,	info_print_required_by },
 };
 
 static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
@@ -245,7 +248,7 @@ static void info_print_required_by(struct apk_package *pkg)
 static void info_print_url(struct apk_package *pkg)
 {
 	if (apk_verbosity > 1)
-		printf("%s: %s\n", pkg->name->name, pkg->url);
+		printf("%s: %s", pkg->name->name, pkg->url);
 	else
 		printf("%s-%s webpage:\n%s\n", pkg->name->name, pkg->version,
 		       pkg->url);
@@ -254,12 +257,20 @@ static void info_print_url(struct apk_package *pkg)
 static void info_print_size(struct apk_package *pkg)
 {
 	if (apk_verbosity > 1)
-		printf("%s: %i\n", pkg->name->name, pkg->installed_size);
+		printf("%s: %i", pkg->name->name, pkg->installed_size);
 	else
 		printf("%s-%s installed size:\n%i\n", pkg->name->name, pkg->version,
 		       pkg->installed_size);
 }
 
+static void info_print_description(struct apk_package *pkg)
+{
+	if (apk_verbosity > 1)
+		printf("%s: %s", pkg->name->name, pkg->description);
+	else
+		printf("%s-%s description:\n%s\n", pkg->name->name,
+		       pkg->version, pkg->description);
+}
 static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
@@ -286,6 +297,9 @@ static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 		break;
 	case 's':
 		ictx->subaction_mask |= APK_INFO_SIZE;
+		break;
+	case 'd':
+		ictx->subaction_mask |= APK_INFO_DESC;
 		break;
 	default:
 		return -1;
@@ -319,6 +333,7 @@ static struct option info_options[] = {
 	{ "rdepends",	no_argument,		NULL, 'r' },
 	{ "webpage",	no_argument,		NULL, 'w' },
 	{ "size",	no_argument,		NULL, 's' },
+	{ "description", no_argument,		NULL, 'd' },
 };
 
 static struct apk_applet apk_info = {
