@@ -182,7 +182,7 @@ static struct option add_options[] = {
 
 static struct apk_applet apk_add = {
 	.name = "add",
-	.usage = "[--initdb] [--upgrade|-u] [--virtual metaname] apkname...",
+	.usage = "[--initdb] [-u|--upgrade] [-t|--virtual NAME] PACKAGE...",
 	.context_size = sizeof(struct add_ctx),
 	.num_options = ARRAY_SIZE(add_options),
 	.options = add_options,

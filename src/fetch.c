@@ -193,7 +193,8 @@ static struct option fetch_options[] = {
 
 static struct apk_applet apk_fetch = {
 	.name = "fetch",
-	.usage = "[-R|--recursive|--stdout] [--link|-L]  [-o dir] apkname...",
+	.usage = "[-R|--recursive|--stdout] [-L|--link]  [-o|--output DIR]\n"
+		 "\t\t PACKAGE...",
 	.context_size = sizeof(struct fetch_ctx),
 	.num_options = ARRAY_SIZE(fetch_options),
 	.options = fetch_options,

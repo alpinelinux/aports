@@ -119,7 +119,7 @@ static struct option index_options[] = {
 
 static struct apk_applet apk_index = {
 	.name = "index",
-	.usage = "[-d indexfile] apkname...",
+	.usage = "[-d|--delete INDEXFILE] FILE...",
 	.context_size = sizeof(struct index_ctx),
 	.num_options = ARRAY_SIZE(index_options),
 	.options = index_options,

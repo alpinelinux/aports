@@ -114,7 +114,7 @@ static struct option ver_options[] = {
 
 static struct apk_applet apk_ver = {
 	.name = "version",
-	.usage = "[-t version1 version2]",
+	.usage = "[-t|--test version1 version2] [-c|--check]",
 	.context_size = sizeof(struct ver_ctx),
 	.num_options = ARRAY_SIZE(ver_options),
 	.options = ver_options,

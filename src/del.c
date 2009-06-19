@@ -60,7 +60,7 @@ out:
 
 static struct apk_applet apk_del = {
 	.name = "del",
-	.usage = "apkname...",
+	.usage = "PACKAGE...",
 	.main = del_main,
 };
 

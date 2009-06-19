@@ -28,7 +28,6 @@ struct search_query_ctx {
 
 static int search_list_print(apk_hash_item item, void *ctx)
 {
-	//struct apk_database *db = (struct apk_database *) ctx;
 	struct apk_package *pkg = (struct apk_package *) item;
 
 	printf("%s", pkg->name->name);
@@ -137,7 +136,7 @@ static struct option search_options[] = {
 
 static struct apk_applet apk_search = {
 	.name = "search",
-	.usage = "[--description|-d] [search_pattern]",
+	.usage = "[--description|-d] PATTERN",
 	.context_size = sizeof(struct search_ctx),
 	.num_options = ARRAY_SIZE(search_options),
 	.options = search_options,

@@ -43,20 +43,29 @@ int version(void)
 	printf("apk-tools " APK_VERSION "\n");
 	return 0;
 }
-int usage(void)
-{
-	struct apk_applet **a, *applet;
 
-	version();
-	printf("\nUsage:\n");
+int generic_usage(void)
+{
+	struct apk_applet **a;
+	printf("usage: apk COMMAND [-h|--help] [-p|--root DIR] [-X|--repository REPO]\n"
+	       "\t\t   [-q|--quiet] [-v|--verbose] [-V|--version] [-f|--force]\n"
+	       "\t\t   [--progress] [--clean-protected] [--simulate] [ARGS]...\n\n"
+	       "commands: ");
 
 	for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
-		applet = *a;
-		printf("    apk %s %s\n",
-		       applet->name, applet->usage);
+		printf("%s ",
+		       (*a)->name);
 	}
-	printf("\nThis apk has coffee making abilities.\n\n");
+	printf("\n\n");
+	return 1;
+}
 
+int usage(struct apk_applet *applet)
+{
+	version();
+	if (applet == NULL)
+		return generic_usage();
+	printf("usage: apk %s %s\n\n", applet->name, applet->usage);
 	return 1;
 }
 
@@ -110,8 +119,9 @@ static struct apk_repository_url *apk_repository_new(const char *url)
 	return r;
 }
 
-#define NUM_GENERIC_OPTS 9
+#define NUM_GENERIC_OPTS 10
 static struct option generic_options[32] = {
+	{ "help",		no_argument,		NULL, 'h'},
 	{ "root",		required_argument,	NULL, 'p' },
 	{ "repository",		required_argument,	NULL, 'X' },
 	{ "quiet",		no_argument,		NULL, 'q' },
@@ -165,6 +175,9 @@ int main(int argc, char **argv)
 		switch (r) {
 		case 0:
 			break;
+		case 'h':
+			return usage(applet);
+			break;
 		case 'p':
 			apk_root = optarg;
 			break;
@@ -194,17 +207,16 @@ int main(int argc, char **argv)
 			apk_flags |= APK_SIMULATE;
 			break;
 		default:
-			if (applet == NULL || applet->parse == NULL)
-				return usage();
-			if (applet->parse(ctx, r, optindex - NUM_GENERIC_OPTS,
+			if (applet == NULL || applet->parse == NULL ||
+			    applet->parse(ctx, r, optindex - NUM_GENERIC_OPTS,
 					  optarg) != 0)
-				return usage();
+				return usage(applet);
 			break;
 		}
 	}
 
 	if (applet == NULL)
-		return usage();
+		return usage(NULL);
 
 	if (apk_root == NULL)
 		apk_root = "/";
