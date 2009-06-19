@@ -18,14 +18,11 @@
 static int update_main(void *ctx, int argc, char **argv)
 {
 	struct apk_database db;
-	int i;
 
 	if (apk_db_open(&db, apk_root, APK_OPENF_READ) < 0)
 		return -1;
 
-	for (i = 0; i < db.num_repos; i++)
-		apk_repository_update(&db, &db.repos[i]);
-
+	apk_repository_update_all(&db);
 	apk_db_close(&db);
 
 	return 0;

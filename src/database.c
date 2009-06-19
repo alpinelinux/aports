@@ -959,6 +959,17 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 	return 0;
 }
 
+int apk_repository_update_all(struct apk_database *db)
+{
+	int i, ret;
+	for (i = 0; i < db->num_repos; i++) {
+		ret = apk_repository_update(db, &db->repos[i]);
+		if (ret < 0)
+			return ret;
+	}
+	return 0;
+}
+
 int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 {
 	struct apk_database *db = _db.db;
