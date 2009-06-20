@@ -191,8 +191,7 @@ int apk_state_lock_dependency(struct apk_state *state,
 			return -1;
 		}
 
-		if (apk_version_compare(APK_BLOB_STR(pkg->version),
-					APK_BLOB_STR(dep->version))
+		if (apk_version_compare(pkg->version, dep->version)
 		    & dep->result_mask)
 			return 0;
 
@@ -203,8 +202,7 @@ int apk_state_lock_dependency(struct apk_state *state,
 	c = ns_to_choices(state->name[name->id]);
 	i = 0;
 	while (i < c->num) {
-		if (apk_version_compare(APK_BLOB_STR(c->pkgs[i]->version),
-					APK_BLOB_STR(dep->version))
+		if (apk_version_compare(c->pkgs[i]->version, dep->version)
 		    & dep->result_mask) {
 		    	i++;
 			continue;
@@ -235,8 +233,7 @@ int apk_state_lock_dependency(struct apk_state *state,
 			installed = pkg;
 
 		if (latest == NULL ||
-		    apk_version_compare(APK_BLOB_STR(pkg->version),
-					APK_BLOB_STR(latest->version)) == APK_VERSION_GREATER)
+		    apk_pkg_version_compare(pkg, latest) == APK_VERSION_GREATER)
 			latest = pkg;
 	}
 
@@ -301,8 +298,7 @@ static int call_if_dependency_broke(struct apk_state *state,
 		    dep->result_mask == APK_DEPMASK_CONFLICT)
 			continue;
 		if (dep_pkg != NULL &&
-		    (apk_version_compare(APK_BLOB_STR(dep_pkg->version),
-					 APK_BLOB_STR(dep->version))
+		    (apk_version_compare(dep_pkg->version, dep->version)
 		     & dep->result_mask))
 			continue;
 		return cb(state, pkg);
@@ -466,8 +462,7 @@ static void apk_print_change(struct apk_database *db,
 			    name->name,
 			    oldpkg->version);
 	} else {
-		r = apk_version_compare(APK_BLOB_STR(newpkg->version),
-					APK_BLOB_STR(oldpkg->version));
+		r = apk_pkg_version_compare(newpkg, oldpkg);
 		switch (r) {
 		case APK_VERSION_LESS:
 			msg = "Downgrading";
@@ -579,8 +574,7 @@ static int cmp_downgrade(struct apk_change *change)
 {
 	if (change->newpkg == NULL || change->oldpkg == NULL)
 		return 0;
-	if (apk_version_compare(APK_BLOB_STR(change->newpkg->version),
-				APK_BLOB_STR(change->oldpkg->version))
+	if (apk_pkg_version_compare(change->newpkg, change->oldpkg)
 	    & APK_VERSION_LESS)
 		return 1;
 	return 0;
@@ -590,8 +584,7 @@ static int cmp_upgrade(struct apk_change *change)
 {
 	if (change->newpkg == NULL || change->oldpkg == NULL)
 		return 0;
-	if (apk_version_compare(APK_BLOB_STR(change->newpkg->version),
-				APK_BLOB_STR(change->oldpkg->version))
+	if (apk_pkg_version_compare(change->newpkg, change->oldpkg)
 	    & APK_VERSION_GREATER)
 		return 1;
 	return 0;

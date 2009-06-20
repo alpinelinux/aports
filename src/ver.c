@@ -40,7 +40,7 @@ static int ver_test(int argc, char **argv)
 	if (argc != 2)
 		return 1;
 
-	r = apk_version_compare(APK_BLOB_STR(argv[0]), APK_BLOB_STR(argv[1]));
+	r = apk_version_compare(argv[0], argv[1]);
 	printf("%c\n", res2char(r));
 	return 0;
 }
@@ -74,13 +74,35 @@ static int ver_parse(void *ctx, int opt, int optindex, const char *optarg)
 	return 0;
 }
 
+static void ver_print_package_status(struct apk_package *pkg)
+{
+	struct apk_name *name;
+	struct apk_package *latest, *tmp;
+	int i, r;
+
+	name = pkg->name;
+	latest = pkg;
+	for (i = 0; i < name->pkgs->num; i++) {
+		tmp = name->pkgs->item[i];
+		if (tmp->name != name || 
+		    apk_pkg_get_state(tmp) == APK_PKG_INSTALLED)
+			continue;
+		r = apk_pkg_version_compare(tmp, latest);
+		if (r == APK_VERSION_GREATER)
+			latest = tmp;
+	}
+	r = apk_pkg_version_compare(pkg, latest);
+	printf("%s-%-40s%s %s\n", name->name, pkg->version, apk_version_op_string(r), latest->version);
+}
+
 static int ver_main(void *ctx, int argc, char **argv)
 {
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
 	struct apk_database db;
+	struct apk_package *pkg;
 	struct apk_name *name;
-	struct apk_package *pkg, *upg, *tmp;
-	int i, r;
+	int i, j, ret = 0;
+
 
 	if (ictx->action != NULL)
 		return ictx->action(argc, argv);
@@ -88,23 +110,31 @@ static int ver_main(void *ctx, int argc, char **argv)
 	if (apk_db_open(&db, apk_root, APK_OPENF_READ) < 0)
 		return -1;
 
-	list_for_each_entry(pkg, &db.installed.packages, installed_pkgs_list) {
-		name = pkg->name;
-		upg = pkg;
-		for (i = 0; i < name->pkgs->num; i++) {
-			tmp = name->pkgs->item[i];
-			if (tmp->name != name)
-				continue;
-			r = apk_version_compare(APK_BLOB_STR(tmp->version),
-						APK_BLOB_STR(upg->version));
-			if (r == APK_VERSION_GREATER)
-				upg = tmp;
+	if (argc == 0) {
+		list_for_each_entry(pkg, &db.installed.packages,
+				    installed_pkgs_list) {
+			ver_print_package_status(pkg);
 		}
-		printf("%-40s%c\n", name->name, pkg != upg ? '<' : '=');
+		goto ver_exit;
 	}
-	apk_db_close(&db);
 
-	return 0;
+	for (i = 0; i < argc; i++) {
+		name = apk_db_query_name(&db, APK_BLOB_STR(argv[i]));
+		if (name == NULL) {
+			apk_error("Not found: %s", name);
+			ret = 1;
+			goto ver_exit;
+		}
+		for (j = 0; j < name->pkgs->num; j++) {
+			struct apk_package *pkg = name->pkgs->item[j];
+			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
+				ver_print_package_status(pkg);
+		}
+	}
+
+ver_exit:
+	apk_db_close(&db);
+	return ret;
 }
 
 static struct option ver_options[] = {

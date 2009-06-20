@@ -664,6 +664,11 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	return n;
 }
 
+int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b)
+{
+	return apk_version_compare(a->version, b->version);
+}
+
 struct apk_dependency apk_dep_from_str(struct apk_database *db,
 				       char *str)
 {

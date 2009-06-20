@@ -164,8 +164,8 @@ static int fetch_main(void *ctx, int argc, char **argv)
 
 			for (j = 0; j < dep.name->pkgs->num; j++)
 				if (pkg == NULL ||
-				    apk_version_compare(APK_BLOB_STR(dep.name->pkgs->item[j]->version),
-							APK_BLOB_STR(pkg->version))
+				    apk_pkg_version_compare(dep.name->pkgs->item[j],
+							    pkg)
 				    == APK_VERSION_GREATER)
 					pkg = dep.name->pkgs->item[j];
 
