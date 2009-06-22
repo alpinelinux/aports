@@ -683,7 +683,6 @@ struct apk_dependency apk_dep_from_str(struct apk_database *db,
 		if (*v == '=')
 			v++;
 	} 
-	printf("DEBUG: result_mask = %x\n", mask);
 	return (struct apk_dependency) {
 		.name = apk_db_get_name(db, name),
 		.version = v,
