@@ -174,20 +174,16 @@ int apk_version_validate(apk_blob_t ver)
 	return t == TOKEN_END;
 }
 
-int apk_version_compare(const char *str1, const char *str2)
+int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
 {
 	int at = TOKEN_DIGIT, bt = TOKEN_DIGIT;
 	int av = 0, bv = 0;
-	apk_blob_t a, b;
 
-	if (str1 == NULL || str2 == NULL) {
-		if (str1 == NULL && str2 == NULL)
+	if (APK_BLOB_IS_NULL(a) || APK_BLOB_IS_NULL(b)) {
+		if (APK_BLOB_IS_NULL(a) && APK_BLOB_IS_NULL(b))
 			return APK_VERSION_EQUAL;
 		return APK_VERSION_EQUAL | APK_VERSION_GREATER | APK_VERSION_LESS;
 	}
-	
-	a = APK_BLOB_STR(str1);
-	b = APK_BLOB_STR(str2);
 
 	while (at == bt && at != TOKEN_END && at != TOKEN_INVALID && av == bv) {
 		av = get_token(&at, &a);
@@ -212,4 +208,9 @@ int apk_version_compare(const char *str1, const char *str2)
 		return get_token(&bt, &b) > 0 ?
 			APK_VERSION_LESS : APK_VERSION_GREATER;
 	return APK_VERSION_EQUAL;
+}
+
+int apk_version_compare(const char *str1, const char *str2)
+{
+	return apk_version_compare_blob(APK_BLOB_STR(str1), APK_BLOB_STR(str2));
 }
