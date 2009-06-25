@@ -16,6 +16,18 @@
 #include "apk_database.h"
 #include "apk_state.h"
 
+static int upgrade_parse(void *ctx, int optch, int optindex, const char *optarg)
+{
+	switch (optch) {
+	case 'a':
+		apk_flags |= APK_PREFER_AVAILABLE;
+		break;
+	default:
+		return -1;
+	}
+	return 0;
+}
+
 static int upgrade_main(void *ctx, int argc, char **argv)
 {
 	struct apk_database db;
@@ -45,9 +57,16 @@ err:
 	return r;
 }
 
+static struct option upgrade_options[] = {
+	{ "available",	no_argument,		NULL, 'a' },
+};
+
 static struct apk_applet apk_upgrade = {
 	.name = "upgrade",
-	.usage = "",
+	.usage = "[-a|--available]",
+	.num_options = ARRAY_SIZE(upgrade_options),
+	.options = upgrade_options,
+	.parse = upgrade_parse,
 	.main = upgrade_main,
 };
 

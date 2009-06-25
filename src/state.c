@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -232,8 +232,25 @@ int apk_state_lock_dependency(struct apk_state *state,
 		if (apk_pkg_get_state(c->pkgs[i]) == APK_PKG_INSTALLED)
 			installed = pkg;
 
-		if (latest == NULL ||
-		    apk_pkg_version_compare(pkg, latest) == APK_VERSION_GREATER)
+		if (latest == NULL) {
+			latest = pkg;
+			continue;
+		}
+
+		if (apk_flags & APK_PREFER_AVAILABLE) {
+			if (latest->repos != 0 && pkg->repos == 0)
+				continue;
+
+			if (latest->repos == 0 && pkg->repos != 0) {
+				latest = pkg;
+				continue;
+			}
+
+			/* Otherwise both are not available, or both are
+			 * available and we just compare the versions then */
+		}
+
+		if (apk_pkg_version_compare(pkg, latest) == APK_VERSION_GREATER)
 			latest = pkg;
 	}
 
