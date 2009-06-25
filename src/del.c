@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -60,7 +60,8 @@ out:
 
 static struct apk_applet apk_del = {
 	.name = "del",
-	.usage = "PACKAGE...",
+	.help = "Remove PACKAGEs from the main dependencies and uninstall them.",
+	.arguments = "PACKAGE...",
 	.main = del_main,
 };
 

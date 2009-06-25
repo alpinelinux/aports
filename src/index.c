@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -113,13 +113,16 @@ static int index_main(void *ctx, int argc, char **argv)
 	return 0;
 }
 
-static struct option index_options[] = {
-	{ "delete",	required_argument,	NULL, 'd' },
+static struct apk_option index_options[] = {
+	{ 'd', "delete",
+	  "Read existing INDEXFILE and delete the listed FILEs from it",
+	  required_argument, "INDEXFILE" },
 };
 
 static struct apk_applet apk_index = {
 	.name = "index",
-	.usage = "[-d|--delete INDEXFILE] FILE...",
+	.help = "Create repository index file from FILEs.",
+	.arguments = "FILE...",
 	.context_size = sizeof(struct index_ctx),
 	.num_options = ARRAY_SIZE(index_options),
 	.options = index_options,

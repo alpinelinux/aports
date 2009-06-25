@@ -57,13 +57,16 @@ err:
 	return r;
 }
 
-static struct option upgrade_options[] = {
-	{ "available",	no_argument,		NULL, 'a' },
+static struct apk_option upgrade_options[] = {
+	{ 'a', "available",
+	  "Re-install or downgrade if currently installed package is not "
+	  "currently available from any repository" },
 };
 
 static struct apk_applet apk_upgrade = {
 	.name = "upgrade",
-	.usage = "[-a|--available]",
+	.help = "Upgrade (or downgrade with -a) the currently installed "
+		"packages to versions available in repositories.",
 	.num_options = ARRAY_SIZE(upgrade_options),
 	.options = upgrade_options,
 	.parse = upgrade_parse,

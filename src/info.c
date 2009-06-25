@@ -4,7 +4,7 @@
  * Copyright (C) 2009 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -88,7 +88,7 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 
 	for (i = 0; i < argc; i++) {
 		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-		if (name == NULL) { 
+		if (name == NULL) {
 			ret++;
 			continue;
 		}
@@ -199,7 +199,7 @@ static void info_print_depends(struct apk_package *pkg)
 {
 	int i;
 	char *separator = apk_verbosity > 1 ? " " : "\n";
-	if (apk_verbosity == 1) 
+	if (apk_verbosity == 1)
 		printf("%s-%s depends on:\n", pkg->name->name, pkg->version);
 	if (pkg->depends == NULL)
 		return;
@@ -325,21 +325,21 @@ static int info_main(void *ctx, int argc, char **argv)
 	return r;
 }
 
-static struct option info_options[] = {
-	{ "contents",	no_argument,		NULL, 'L' },
-	{ "installed",	no_argument,		NULL, 'e' },
-	{ "who-owns",	no_argument,		NULL, 'W' },
-	{ "depends",	no_argument,		NULL, 'R' },
-	{ "rdepends",	no_argument,		NULL, 'r' },
-	{ "webpage",	no_argument,		NULL, 'w' },
-	{ "size",	no_argument,		NULL, 's' },
-	{ "description", no_argument,		NULL, 'd' },
+static struct apk_option info_options[] = {
+	{ 'L', "contents",	"List contents of the PACKAGE" },
+	{ 'e', "installed",	"Check if PACKAGE is installed" },
+	{ 'W', "who-owns",	"Print the package owning the specified file" },
+	{ 'R', "depends",	"List packages that the PACKAGE depends on" },
+	{ 'r', "rdepends",	"List all packages depending on PACKAGE" },
+	{ 'w', "webpage",	"Show URL for more information about PACKAGE" },
+	{ 's', "size",		"Show installed size of PACKAGE" },
+	{ 'd', "description",	"Print description for PACKAGE" },
 };
 
 static struct apk_applet apk_info = {
 	.name = "info",
-	.usage = "[-L|--contents] [-e|--installed] [-W|--who-owns] [-R|--depends]\n"
-		 "\t\t[-r|--rdepends] [-w|--webage] [-s|--size] PACKAGE...",
+	.help = "Give detailed information about PACKAGEs.",
+	.arguments = "PACKAGE...",
 	.context_size = sizeof(struct info_ctx),
 	.num_options = ARRAY_SIZE(info_options),
 	.options = info_options,

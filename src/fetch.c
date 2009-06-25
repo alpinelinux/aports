@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -184,17 +184,20 @@ err:
 	return r;
 }
 
-static struct option fetch_options[] = {
-	{ "recursive",	no_argument,		NULL, 'R' },
-	{ "stdout",	no_argument,		NULL, 's' },
-	{ "link",	no_argument,		NULL, 'L' },
-	{ "output",	required_argument,	NULL, 'o' },
+static struct apk_option fetch_options[] = {
+	{ 'l', "link",		"Create hard links if possible" },
+	{ 'R', "recursive",	"Fetch the PACKAGE and all it's dependencies" },
+	{ 's', "stdout",
+	  "Dump the .apk to stdout (incompatible with -o and -R)" },
+	{ 'o', "output",	"Directory to place the PACKAGEs to",
+	  required_argument, "DIR" },
 };
 
 static struct apk_applet apk_fetch = {
 	.name = "fetch",
-	.usage = "[-R|--recursive|--stdout] [-L|--link]  [-o|--output DIR]\n"
-		 "\t\t PACKAGE...",
+	.help = "Download PACKAGEs from repositories to a local directory from "
+		"which a local mirror repository can be created.",
+	.arguments = "PACKAGE...",
 	.context_size = sizeof(struct fetch_ctx),
 	.num_options = ARRAY_SIZE(fetch_options),
 	.options = fetch_options,

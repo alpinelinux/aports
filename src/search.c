@@ -130,13 +130,14 @@ static int search_main(void *ctx, int argc, char **argv)
 	return r;
 }
 
-static struct option search_options[] = {
-	{ "description",	no_argument,		NULL, 'd' },
+static struct apk_option search_options[] = {
+	{ 'd', "description", "Search also package descriptions" },
 };
 
 static struct apk_applet apk_search = {
 	.name = "search",
-	.usage = "[--description|-d] PATTERN",
+	.help = "Search package names (and descriptions) by wildcard PATTERN.",
+	.arguments = "PATTERN",
 	.context_size = sizeof(struct search_ctx),
 	.num_options = ARRAY_SIZE(search_options),
 	.options = search_options,

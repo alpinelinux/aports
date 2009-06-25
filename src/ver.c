@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -57,7 +57,7 @@ static int ver_validate(int argc, char **argv)
 	}
 	return r;
 }
-	
+
 static int ver_parse(void *ctx, int opt, int optindex, const char *optarg)
 {
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
@@ -84,7 +84,7 @@ static void ver_print_package_status(struct apk_package *pkg)
 	latest = pkg;
 	for (i = 0; i < name->pkgs->num; i++) {
 		tmp = name->pkgs->item[i];
-		if (tmp->name != name || 
+		if (tmp->name != name ||
 		    apk_pkg_get_state(tmp) == APK_PKG_INSTALLED)
 			continue;
 		r = apk_pkg_version_compare(tmp, latest);
@@ -137,14 +137,15 @@ ver_exit:
 	return ret;
 }
 
-static struct option ver_options[] = {
-	{ "test", 	no_argument,	NULL, 't' },
-	{ "check", 	no_argument,	NULL, 'c' },
+static struct apk_option ver_options[] = {
+	{ 't', "test",		"Compare two given versions" },
+	{ 'c', "check", 	"Check if the given version string is valid" },
 };
 
 static struct apk_applet apk_ver = {
 	.name = "version",
-	.usage = "[-t|--test version1 version2] [-c|--check]",
+	.help = "Compare package versions (in installed database vs. available)"
+		" or do tests on version strings given on command line.",
 	.context_size = sizeof(struct ver_ctx),
 	.num_options = ARRAY_SIZE(ver_options),
 	.options = ver_options,

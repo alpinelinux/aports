@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -128,13 +128,15 @@ static int audit_main(void *ctx, int argc, char **argv)
 	return r;
 }
 
-static struct option audit_options[] = {
-	{ "backup",	no_argument,		NULL, 0x10000 },
+static struct apk_option audit_options[] = {
+	{ 0x10000, "backup",
+	  "List all modified configuration files that need to be backed up" },
 };
 
 static struct apk_applet apk_audit = {
 	.name = "audit",
-	.usage = "--backup",
+	.help = "Audit the filesystem for changes compared to installed "
+		"database.",
 	.context_size = sizeof(struct audit_ctx),
 	.num_options = ARRAY_SIZE(audit_options),
 	.options = audit_options,
