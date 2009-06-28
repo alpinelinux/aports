@@ -3,7 +3,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -59,6 +59,7 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream);
 struct apk_bstream *apk_bstream_from_fd(int fd);
 struct apk_bstream *apk_bstream_from_file(const char *file);
 struct apk_bstream *apk_bstream_from_url(const char *url);
+struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, const char *to);
 
 struct apk_ostream *apk_ostream_to_fd(int fd);
 struct apk_ostream *apk_ostream_to_file(const char *file, mode_t mode);

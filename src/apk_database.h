@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -68,13 +68,14 @@ struct apk_name {
 
 struct apk_repository {
 	char *url;
-	char *cache;
+	csum_t url_csum;
 };
 
 struct apk_database {
 	char *root;
 	int root_fd, lock_fd;
 	unsigned name_id, num_repos;
+	const char *cache_dir;
 
 	struct apk_dependency_array *world;
 	struct apk_string_array *protected_paths;

@@ -319,6 +319,64 @@ struct apk_bstream *apk_bstream_from_file(const char *file)
 	return apk_bstream_from_fd(fd);
 }
 
+
+struct apk_tee_bstream {
+	struct apk_bstream bs;
+	struct apk_bstream *inner_bs;
+	int fd;
+	size_t size;
+};
+
+static size_t tee_read(void *stream, void **ptr)
+{
+	struct apk_tee_bstream *tbs =
+		container_of(stream, struct apk_tee_bstream, bs);
+	size_t size;
+
+	size = tbs->inner_bs->read(tbs->inner_bs, ptr);
+	if (size >= 0)
+		tbs->size += write(tbs->fd, *ptr, size);
+
+	return size;
+}
+
+static void tee_close(void *stream, csum_t csum, size_t *size)
+{
+	struct apk_tee_bstream *tbs =
+		container_of(stream, struct apk_tee_bstream, bs);
+
+	tbs->inner_bs->close(tbs->inner_bs, csum, NULL);
+	if (size != NULL)
+		*size = tbs->size;
+	close(tbs->fd);
+	free(tbs);
+}
+
+struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, const char *to)
+{
+	struct apk_tee_bstream *tbs;
+	int fd;
+
+	fd = creat(to, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	if (fd < 0)
+		return NULL;
+
+	tbs = malloc(sizeof(struct apk_tee_bstream));
+	if (tbs == NULL) {
+		close(fd);
+		return NULL;
+	}
+
+	tbs->bs = (struct apk_bstream) {
+		.read = tee_read,
+		.close = tee_close,
+	};
+	tbs->inner_bs = from;
+	tbs->fd = fd;
+
+	return &tbs->bs;
+}
+
 apk_blob_t apk_blob_from_istream(struct apk_istream *is, size_t size)
 {
 	void *ptr;
