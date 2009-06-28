@@ -41,14 +41,6 @@ static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
 	return 0;
 }
 
-static void md5_str(const char *str, md5sum_t csum)
-{
-	struct md5_ctx ctx;
-	md5_init(&ctx);
-	md5_process(&ctx, str, strlen(str));
-	md5_finish(&ctx, csum);
-}
-
 static int cup(void)
 {
 	/* compressed/uncompressed size is 259/1213 */
@@ -111,7 +103,7 @@ static int add_main(void *ctx, int argc, char **argv)
 			goto err;
 		}
 		virtpkg->name = apk_db_get_name(&db, APK_BLOB_STR(actx->virtpkg));
-		md5_str(virtpkg->name->name, virtpkg->csum);
+		apk_blob_csum(APK_BLOB_STR(virtpkg->name->name), virtpkg->csum);
 		virtpkg->version = strdup("0");
 		virtpkg->description = strdup("virtual meta package");
 		virtdep = apk_dep_from_pkg(&db, virtpkg);

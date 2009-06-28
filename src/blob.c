@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -163,6 +163,15 @@ unsigned apk_blob_uint(apk_blob_t blob, int base)
 		val += ch;
 	}
 	return val;
+}
+
+void apk_blob_csum(apk_blob_t blob, csum_t csum)
+{
+	csum_ctx_t ctx;
+
+	csum_init(&ctx);
+	csum_process(&ctx, blob.ptr, blob.len);
+	csum_finish(&ctx, csum);
 }
 
 int apk_hexdump_parse(apk_blob_t to, apk_blob_t from)

@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -903,7 +903,7 @@ static struct apk_bstream *apk_db_cache_open(struct apk_database *db,
 	if (db->root == NULL)
 		return NULL;
 
-	snprintf(tmp, sizeof(tmp), "%s/var/lib/apk/%s", db->root, file);	
+	snprintf(tmp, sizeof(tmp), "%s/var/lib/apk/%s", db->root, file);
 	return apk_bstream_from_file(tmp);
 }
 
@@ -977,7 +977,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	char buf[2*sizeof(csum_t)+32], *name;
 	int r, n;
 
-	if (repository.ptr == NULL || *repository.ptr == '\0' 
+	if (repository.ptr == NULL || *repository.ptr == '\0'
 			|| *repository.ptr == '#')
 		return 0;
 
@@ -991,14 +991,10 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	};
 
 	if (apk_url_local_file(db->repos[r].url) == NULL) {
-		csum_ctx_t csum;
-		csum_t res;
+		csum_t cs;
 
-		csum_init(&csum);
-		csum_process(&csum, repository.ptr, repository.len);
-		csum_finish(&csum, res);
-
-		n = apk_hexdump_format(sizeof(buf), buf, APK_BLOB_BUF(res)) - 1;
+		apk_blob_csum(repository, cs);
+		n = apk_hexdump_format(sizeof(buf), buf, APK_BLOB_BUF(cs)) - 1;
 		snprintf(&buf[n], sizeof(buf) - n, ".index.gz");
 
 		db->repos[r].cache = strdup(buf);
@@ -1156,7 +1152,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			apk_db_file_change_owner(db, file, diri,
 						 &ctx->file_diri_node);
 		}
-		
+
 		if (apk_verbosity > 1)
 			printf("%s\n", ae->name);
 
@@ -1272,7 +1268,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	ctx = (struct install_ctx) {
 		.db = db,
 		.pkg = newpkg,
-		.script = upgrade ? 
+		.script = upgrade ?
 			APK_SCRIPT_PRE_UPGRADE : APK_SCRIPT_PRE_INSTALL,
 		.cb = cb,
 		.cb_ctx = cb_ctx,
