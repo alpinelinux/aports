@@ -25,7 +25,7 @@
 #include "apk_state.h"
 #include "apk_applet.h"
 
-static const char * const apk_index_gz = "APK_INDEX.gz";
+const char * const apk_index_gz = "APK_INDEX.gz";
 static const char * const apk_static_cache_dir = "var/lib/apk";
 static const char * const apk_linked_cache_dir = "etc/apk/cache";
 
@@ -832,6 +832,11 @@ void apk_db_close(struct apk_database *db)
 		free(db->root);
 }
 
+int apk_db_cache_active(struct apk_database *db)
+{
+	return db->cache_dir != apk_static_cache_dir;
+}
+
 struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum)
 {
 	return apk_hash_get(&db->available.packages,
@@ -908,7 +913,8 @@ static void apk_db_cache_get_name(char *buf, size_t bufsz,
 {
 	char csumstr[sizeof(csum_t)*2+1];
 
-	apk_hexdump_format(sizeof(csumstr), csumstr, APK_BLOB_BUF(csum));
+	apk_hexdump_format(sizeof(csumstr), csumstr,
+			   APK_BLOB_PTR_LEN((void *)csum, sizeof(csum_t)));
 	snprintf(buf, bufsz, "%s/%s/%s.%s%s",
 		 db->root, db->cache_dir, csumstr, file, temp ? ".new" : "");
 }
@@ -935,30 +941,47 @@ static struct apk_bstream *apk_repository_file_open(struct apk_repository *repo,
 	return apk_bstream_from_url(tmp);
 }
 
-int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
+int apk_cache_download(struct apk_database *db, csum_t csum,
+		       const char *url, const char *item)
 {
 	char tmp[256], tmp2[256];
 	int r;
 
-	if (!csum_valid(repo->url_csum))
+	snprintf(tmp, sizeof(tmp), "%s/%s", url, item);
+	apk_message("fetch %s", tmp);
+
+	if (apk_flags & APK_SIMULATE)
 		return 0;
 
-	apk_message("fetch index %s", repo->url);
-
-	snprintf(tmp, sizeof(tmp), "%s/%s", repo->url, apk_index_gz);
-	apk_db_cache_get_name(tmp2, sizeof(tmp2), db, repo->url_csum,
-			      apk_index_gz, TRUE);
-
+	apk_db_cache_get_name(tmp2, sizeof(tmp2), db, csum, item, TRUE);
 	r = apk_url_download(tmp, tmp2);
 	if (r < 0)
 		return r;
 
-	apk_db_cache_get_name(tmp, sizeof(tmp), db, repo->url_csum,
-			      apk_index_gz, FALSE);
+	apk_db_cache_get_name(tmp, sizeof(tmp), db, csum, item, FALSE);
 	if (rename(tmp2, tmp) < 0)
 		return -errno;
 
 	return 0;
+}
+
+int apk_cache_exists(struct apk_database *db, csum_t csum, const char *item)
+{
+	char tmp[256];
+
+	if (db->root == NULL)
+		return 0;
+
+	apk_db_cache_get_name(tmp, sizeof(tmp), db, csum, item, FALSE);
+	return access(tmp, R_OK | W_OK) == 0;
+}
+
+int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
+{
+	if (!csum_valid(repo->url_csum))
+		return 0;
+
+	return apk_cache_download(db, repo->url_csum, repo->url, apk_index_gz);
 }
 
 int apk_repository_update_all(struct apk_database *db)
@@ -1238,7 +1261,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	struct install_ctx ctx;
 	struct apk_bstream *bs = NULL;
 	char pkgname[256], file[256];
-	int i, need_copy = TRUE;
+	int i, need_copy = FALSE;
 	size_t length;
 
 	snprintf(pkgname, sizeof(pkgname), "%s-%s.apk",
@@ -1258,8 +1281,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		}
 
 		repo = &db->repos[i];
-		if (db->cache_dir != apk_static_cache_dir &&
-		    csum_valid(repo->url_csum))
+		if (apk_db_cache_active(db) && csum_valid(repo->url_csum))
 			bs = apk_db_cache_open(db, newpkg->csum, pkgname);
 
 		if (bs == NULL) {
@@ -1273,6 +1295,8 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		bs = apk_bstream_from_file(newpkg->filename);
 		need_copy = TRUE;
 	}
+	if (!apk_db_cache_active(db))
+		need_copy = FALSE;
 	if (need_copy) {
 		apk_db_cache_get_name(file, sizeof(file), db, newpkg->csum,
 				      pkgname, TRUE);

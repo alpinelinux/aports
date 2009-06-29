@@ -19,6 +19,8 @@
 
 #define APK_MAX_REPOS 32
 
+extern const char * const apk_index_gz;
+
 struct apk_name;
 APK_ARRAY(apk_name_array, struct apk_name *);
 
@@ -120,6 +122,7 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 int apk_db_open(struct apk_database *db, const char *root, unsigned int flags);
 int apk_db_write_config(struct apk_database *db);
 void apk_db_close(struct apk_database *db);
+int apk_db_cache_active(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *file);
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);
@@ -132,6 +135,10 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo);
 int apk_repository_update_all(struct apk_database *db);
+
+int apk_cache_download(struct apk_database *db, csum_t csum,
+		       const char *url, const char *item);
+int apk_cache_exists(struct apk_database *db, csum_t csum, const char *item);
 
 int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *oldpkg,

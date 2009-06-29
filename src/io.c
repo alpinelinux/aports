@@ -331,7 +331,7 @@ static size_t tee_read(void *stream, void **ptr)
 {
 	struct apk_tee_bstream *tbs =
 		container_of(stream, struct apk_tee_bstream, bs);
-	size_t size;
+	ssize_t size;
 
 	size = tbs->inner_bs->read(tbs->inner_bs, ptr);
 	if (size >= 0)
@@ -373,6 +373,7 @@ struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, const char *to)
 	};
 	tbs->inner_bs = from;
 	tbs->fd = fd;
+	tbs->size = 0;
 
 	return &tbs->bs;
 }

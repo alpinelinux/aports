@@ -328,5 +328,8 @@ int main(int argc, char **argv)
 		argv++;
 	}
 
-	return applet->main(ctx, argc, argv);
+	r = applet->main(ctx, argc, argv);
+	if (r == -100)
+		return usage(applet);
+	return r;
 }
