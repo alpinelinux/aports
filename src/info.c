@@ -257,9 +257,9 @@ static void info_print_url(struct apk_package *pkg)
 static void info_print_size(struct apk_package *pkg)
 {
 	if (apk_verbosity > 1)
-		printf("%s: %i", pkg->name->name, pkg->installed_size);
+		printf("%s: %zu", pkg->name->name, pkg->installed_size);
 	else
-		printf("%s-%s installed size:\n%i\n", pkg->name->name, pkg->version,
+		printf("%s-%s installed size:\n%zu\n", pkg->name->name, pkg->version,
 		       pkg->installed_size);
 }
 
