@@ -14,11 +14,15 @@ license="GPL"
 depends=""
 makedepends=""
 install=
-subpackages="$pkgname-doc $pkgname-dev"
+subpackages="$pkgname-dev $pkgname-doc"
 source="http://downloads.sourceforge.net/$pkgname/$pkgname-$pkgver.tar.gz"
 
+# append extra dependencies to -dev subpackage
+# remove if not used.
+# depends_dev="somepackage-dev"
+
 build() {
-	cd "$srcdir/$pkgname-$pkgver"
+	cd "$srcdir"/$pkgname-$pkgver
 
 	./configure --prefix=/usr \
 		--sysconfdir=/etc \
@@ -27,6 +31,7 @@ build() {
 	make || return 1
 	make DESTDIR="$pkgdir" install
 
+	# remove the 2 lines below (and this) if there is no init.d script
 	# install -m755 -D "$srcdir"/$pkgname.initd "$pkgdir"/etc/init.d/$pkgname
 	# install -m644 -D "$srcdir"/$pkgname.confd "$pkgdir"/etc/conf.d/$pkgname
 }
