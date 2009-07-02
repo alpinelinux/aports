@@ -3,7 +3,7 @@
 
 PACKAGE := apk-tools
 TAGPREFIX := $(PACKAGE)-
-VERSION := 2.0_pre12
+VERSION := 2.0_pre13
 
 ##
 # Default directories
