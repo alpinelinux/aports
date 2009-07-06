@@ -82,6 +82,9 @@ static int fetch_package(struct fetch_ctx *fctx,
 		return -1;
 	}
 
+	if (apk_flags & APK_SIMULATE)
+		return 0;
+
 	snprintf(infile, sizeof(infile), "%s/%s-%s.apk",
 		 db->repos[i].url, pkg->name->name, pkg->version);
 
