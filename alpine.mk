@@ -21,26 +21,27 @@ find_apk_ver	= $(shell apk search $(APK_OPTS) $(1) | sort | uniq)
 find_apk_file	= $(addsuffix .apk,$(call find_apk_ver,$(1)))
 find_apk	= $(addprefix $(ISO_PKGDIR)/,$(call find_apk_file,$(1)))
 
+# get apk does not support wildcards
+get_apk         = $(addsuffix .apk,$(shell apk fetch --simulate $(APK_OPTS) $(1) 2>&1 | sed 's:^Downloading :$(ISO_PKGDIR)/:'))
+
 KERNEL_FLAVOR	?= grsec
 KERNEL_PKGNAME	?= linux-$(KERNEL_FLAVOR)
 KERNEL_NAME	:= $(KERNEL_FLAVOR)
-KERNEL_APK	:= $(call find_apk,$(KERNEL_PKGNAME))
-MODULE_APK	:= $(subst /$(KERNEL_PKGNAME)-,/$(KERNEL_PKGNAME)-mod-,$(KERNEL_APK))
+KERNEL_APK	:= $(call get_apk,$(KERNEL_PKGNAME))
 
-XTABLES_ADDONS_APK:= $(subst xtables-addons,xtables-addons-$(KERNEL_FLAVOR),$(call find_apk,xtables-addons))
-DAHDI_LINUX_APK:= $(subst dahdi-linux,dahdi-linux-$(KERNEL_FLAVOR),$(call find_apk,dahdi-linux))
-ISCSITARGET_APK:= $(subst iscsitarget,iscsitarget-$(KERNEL_FLAVOR),$(call find_apk,iscsitarget))
-MOD_APKS	:= $(MODULE_APK) $(XTABLES_ADDONS_APK) $(DAHDI_LINUX_APK) \
+XTABLES_ADDONS_APK:= $(call get_apk,xtables-addons-$(KERNEL_FLAVOR))
+DAHDI_LINUX_APK	:= $(call get_apk,dahdi-linux-$(KERNEL_FLAVOR))
+ISCSITARGET_APK	:= $(call get_apk,iscsitarget-$(KERNEL_FLAVOR))
+MOD_APKS	:= $(KERNEL_APK) $(XTABLES_ADDONS_APK) $(DAHDI_LINUX_APK) \
 		   $(ISCSITARGET_APK)
 
 KERNEL		:= $(word 3,$(subst -, ,$(notdir $(KERNEL_APK))))-$(word 2,$(subst -, ,$(notdir $(KERNEL_APK))))
 
 ALPINEBASELAYOUT_APK := $(call find_apk,alpine-baselayout)
-UCLIBC_APK	:= $(call find_apk,uclibc)
-BUSYBOX_APK	:= $(call find_apk,busybox)
-APK_TOOLS_APK	:= $(call find_apk,apk-tools)
-SYSLINUX_APK	:= $(call find_apk,syslinux)
-STRACE_APK	:= $(call find_apk,strace)
+UCLIBC_APK	:= $(call get_apk,uclibc)
+BUSYBOX_APK	:= $(call get_apk,busybox)
+APK_TOOLS_APK	:= $(call get_apk,apk-tools)
+STRACE_APK	:= $(call get_apk,strace)
 
 APKS_FILTER	?= | grep -v -- '-dev$$' | grep -v 'sources'
 
@@ -56,7 +57,7 @@ help:
 	@echo
 	@echo "I will use the following sources files:"
 	@echo " 1. $(notdir $(KERNEL_APK)) (looks like $(KERNEL))"
-	@echo " 2. $(notdir $(MODULE_APK))"
+	@echo " 2. $(notdir $(MOD_APKS))"
 	@echo " 3. $(notdir $(ALPINEBASELAYOUT_APK))"
 	@echo " 4. $(notdir $(UCLIBC_APK))"
 	@echo " 5. $(notdir $(BUSYBOX_APK))"
@@ -80,8 +81,10 @@ clean:
 
 $(APK_FILES):
 	@mkdir -p "$(dir $@)";\
-	apk fetch $(APK_OPTS) -R -v -o "$(dir $@)" \
-		`apk search -q $(APK_OPTS) $(APKS) | sort | uniq`
+	p="$(notdir $(basename $@))";\
+	apk fetch $(APK_REPO) -R -v -o "$(dir $@)" $${p%-[0-9]*}
+#	apk fetch $(APK_OPTS) -R -v -o "$(dir $@)" \
+#		`apk search -q $(APK_OPTS) $(APKS) | sort | uniq`
 
 #
 # Modloop
@@ -146,13 +149,12 @@ ISOLINUX_BIN	:= $(ISOLINUX)/isolinux.bin
 ISOLINUX_CFG	:= $(ISOLINUX)/isolinux.cfg
 SYSLINUX_CFG	:= $(ISO_DIR)/syslinux.cfg
 
-$(ISOLINUX_BIN): $(SYSLINUX_APK)
+$(ISOLINUX_BIN):
 	@echo "==> iso: install isolinux"
 	@mkdir -p $(dir $(ISOLINUX_BIN))
-	@for i in $(SYSLINUX_APK); do \
-		[ -f "$$i" ] || continue ;\
-		tar -O -zxf "$$i" usr/share/syslinux/isolinux.bin > $@ && exit 0;\
-	done ; exit 1
+	@if ! apk fetch $(APK_REPO) --stdout syslinux | tar -O -zx usr/share/syslinux/isolinux.bin > $@; then \
+		rm -f $@ && exit 1;\
+	fi
 
 $(ISOLINUX_CFG):
 	@echo "==> iso: configure isolinux"
@@ -205,6 +207,7 @@ $(ISO): $(ISOFS_DIRSTAMP)
 		-boot-load-size 4	\
 		-boot-info-table	\
 		-quiet			\
+		-follow-links		\
 		$(ISO_OPTS)		\
 		$(ISO_DIR)
 	@ln -fs $@ $(ISO_LINK)
