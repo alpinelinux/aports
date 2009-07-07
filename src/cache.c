@@ -67,6 +67,7 @@ static int cache_clean(struct apk_database *db)
 {
 	DIR *dir;
 	struct dirent *de;
+	struct apk_package *pkg;
 	char path[256];
 	int delete, i;
 	csum_t csum;
@@ -102,13 +103,20 @@ static int cache_clean(struct apk_database *db)
 				delete = (i >= db->num_repos);
 			} else {
 				/* Package - search for it */
-				delete = (apk_db_get_pkg(db, csum) == NULL);
+				pkg = apk_db_get_pkg(db, csum);
+				if (pkg == NULL)
+					break;
+
+				snprintf(path, sizeof(path), "%s-%s.apk",
+					 pkg->name->name, pkg->version);
+				delete = strcmp(&de->d_name[sizeof(csum_t)*2+1],
+						path);
 			}
 		} while (0);
 
 		if (delete) {
 			if (apk_verbosity >= 2)
-				apk_message("Deleting %s", de->d_name);
+				apk_message("deleting %s", de->d_name);
 			if (!(apk_flags & APK_SIMULATE))
 				unlink(de->d_name);
 		}
