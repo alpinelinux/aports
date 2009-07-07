@@ -15,17 +15,34 @@
 #include "apk_defines.h"
 #include "apk_applet.h"
 #include "apk_database.h"
+#include "apk_state.h"
 
 #define CACHE_CLEAN	BIT(0)
 #define CACHE_DOWNLOAD	BIT(1)
 
 static int cache_download(struct apk_database *db)
 {
+	struct apk_state *state;
+	struct apk_change *change;
 	struct apk_package *pkg;
 	char pkgfile[256];
 	int i, r;
 
-	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
+	if (db->world == NULL)
+		return 0;
+
+	state = apk_state_new(db);
+	for (i = 0; i < db->world->num; i++) {
+		r = apk_state_lock_dependency(state, &db->world->item[i]);
+		if (r != 0) {
+			apk_error("Unable to select version for '%s'",
+				  db->world->item[i].name->name);
+			goto err;
+		}
+	}
+
+	list_for_each_entry(change, &state->change_list_head, change_list) {
+		pkg = change->newpkg;
 		snprintf(pkgfile, sizeof(pkgfile), "%s-%s.apk",
 			 pkg->name->name, pkg->version);
 		if (apk_cache_exists(db, pkg->csum, pkgfile))
@@ -40,7 +57,10 @@ static int cache_download(struct apk_database *db)
 				return r;
 		}
 	}
-	return 0;
+
+err:
+	apk_state_unref(state);
+	return r;
 }
 
 static int cache_clean(struct apk_database *db)
@@ -117,7 +137,7 @@ static int cache_main(void *ctx, int argc, char **argv)
 		return -100;
 
 	r = apk_db_open(&db, apk_root,
-			(actions & CACHE_DOWNLOAD) ? 0 : APK_OPENF_NO_STATE);
+			APK_OPENF_NO_SCRIPTS | APK_OPENF_NO_INSTALLED);
 	if (r != 0)
 		return r;
 
