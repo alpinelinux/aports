@@ -24,23 +24,27 @@
 
 const char *apk_root;
 struct apk_repository_url apk_repository_list;
-int apk_verbosity = 1, apk_cwd_fd;
+int apk_verbosity = 1, apk_cwd_fd, apk_wait;
 unsigned int apk_flags = 0;
 
 static struct apk_option generic_options[] = {
 	{ 'h', "help",		"Show generic help or applet specific help" },
 	{ 'p', "root",		"Install packages to DIR",
-	  required_argument, "DIR" },
+				required_argument, "DIR" },
 	{ 'X', "repository",	"Use packages from REPO",
-	  required_argument, "REPO" },
+				required_argument, "REPO" },
 	{ 'q', "quiet",		"Print less information" },
 	{ 'v', "verbose",	"Print more information" },
 	{ 'V', "version",	"Print program version and exit" },
 	{ 'f', "force",		"Do what was asked even if it looks dangerous" },
 	{ 0x101, "progress",	"Show a progress bar" },
-	{ 0x102, "clean-protected",
-		 "Do not create .apk-new files to configuration dirs" },
-	{ 0x104, "simulate",	"Show what would be done without actually doing it" },
+	{ 0x102, "clean-protected", "Do not create .apk-new files to "
+				"configuration dirs" },
+	{ 0x104, "simulate",	"Show what would be done without actually "
+				"doing it" },
+	{ 0x105, "wait",	"Wait for TIME seconds to get an exclusive "
+				"repository lock before failing",
+				required_argument, "TIME" },
 };
 
 void apk_log(const char *prefix, const char *format, ...)
@@ -304,6 +308,9 @@ int main(int argc, char **argv)
 			break;
 		case 0x104:
 			apk_flags |= APK_SIMULATE;
+			break;
+		case 0x105:
+			apk_wait = atoi(optarg);
 			break;
 		default:
 			if (applet == NULL || applet->parse == NULL ||

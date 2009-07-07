@@ -50,7 +50,7 @@ extern csum_t bad_checksum;
 #define csum_valid(buf)			memcmp(buf, bad_checksum, sizeof(csum_t))
 #endif
 
-extern int apk_cwd_fd, apk_verbosity;
+extern int apk_cwd_fd, apk_verbosity, apk_wait;
 extern unsigned int apk_flags;
 
 #define APK_FORCE		0x0001

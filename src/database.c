@@ -17,6 +17,7 @@
 #include <malloc.h>
 #include <string.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <sys/file.h>
 
 #include "apk_defines.h"
@@ -653,6 +654,10 @@ static int apk_db_create(struct apk_database *db)
 	return 0;
 }
 
+static void handle_alarm(int sig)
+{
+}
+
 int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 {
 	const char *apk_repos = getenv("APK_REPOS"), *msg = NULL;
@@ -698,8 +703,24 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 			}
 			if (db->lock_fd < 0 ||
 			    flock(db->lock_fd, LOCK_EX | LOCK_NB) < 0) {
-				msg = "Unable to lock database";
-				goto ret_errno;
+				if (apk_wait) {
+					struct sigaction sa, old_sa;
+
+					apk_message("Waiting for repository lock");
+					memset(&sa, 0, sizeof sa);
+					sa.sa_handler = handle_alarm;
+					sa.sa_flags   = SA_ONESHOT;
+					sigaction(SIGALRM, &sa, &old_sa);
+
+					alarm(apk_wait);
+					if (flock(db->lock_fd, LOCK_EX) < 0) {
+						msg = "Unable to lock database";
+						goto ret_errno;
+					}
+
+					alarm(0);
+					sigaction(SIGALRM, &old_sa, NULL);
+				}
 			}
 		}
 	}
