@@ -78,6 +78,7 @@ static void ver_print_package_status(struct apk_package *pkg)
 {
 	struct apk_name *name;
 	struct apk_package *latest, *tmp;
+	char pkgname[256];
 	int i, r;
 
 	name = pkg->name;
@@ -92,7 +93,8 @@ static void ver_print_package_status(struct apk_package *pkg)
 			latest = tmp;
 	}
 	r = apk_pkg_version_compare(pkg, latest);
-	printf("%s-%-40s%s %s\n", name->name, pkg->version, apk_version_op_string(r), latest->version);
+	snprintf(pkgname, sizeof(pkgname), "%s-%s", name->name, pkg->version);
+	printf("%-40s%s %s\n", pkgname, apk_version_op_string(r), latest->version);
 }
 
 static int ver_main(void *ctx, int argc, char **argv)
