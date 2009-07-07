@@ -46,6 +46,7 @@ extern unsigned int apk_flags;
 #define APK_UPGRADE		0x0010
 #define APK_RECURSIVE		0x0020
 #define APK_PREFER_AVAILABLE	0x0040
+#define APK_UPDATE_CACHE	0x0080
 
 #define apk_error(args...)	apk_log("ERROR: ", args);
 #define apk_warning(args...)	if (apk_verbosity > 0) { apk_log("WARNING: ", args); }

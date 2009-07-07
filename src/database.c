@@ -1026,7 +1026,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	struct apk_istream *is = NULL;
 	struct apk_bstream *bs = NULL;
 	struct apk_repository *repo;
-	int r, n;
+	int r, n = 1;
 
 	if (repository.ptr == NULL || *repository.ptr == '\0'
 			|| *repository.ptr == '#')
@@ -1045,9 +1045,13 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	if (apk_url_local_file(repo->url) == NULL) {
 		csum_blob(repository, repo->url_csum);
 
+		if (apk_flags & APK_UPDATE_CACHE)
+			n = apk_repository_update(db, repo);
+
 		bs = apk_db_cache_open(db, repo->url_csum, apk_index_gz);
 		if (bs == NULL) {
-			n = apk_repository_update(db, repo);
+			if (n == 1)
+				n = apk_repository_update(db, repo);
 			if (n < 0)
 				return n;
 			bs = apk_db_cache_open(db, repo->url_csum,

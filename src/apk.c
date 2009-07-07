@@ -41,6 +41,7 @@ static struct apk_option generic_options[] = {
 	{ 'v', "verbose",	"Print more information" },
 	{ 'V', "version",	"Print program version and exit" },
 	{ 'f', "force",		"Do what was asked even if it looks dangerous" },
+	{ 'U', "update-cache",	"Update the repository cache" },
 	{ 0x101, "progress",	"Show a progress bar" },
 	{ 0x102, "clean-protected", "Do not create .apk-new files to "
 				"configuration dirs" },
@@ -323,6 +324,9 @@ int main(int argc, char **argv)
 			return version();
 		case 'f':
 			apk_flags |= APK_FORCE;
+			break;
+		case 'U':
+			apk_flags |= APK_UPDATE_CACHE;
 			break;
 		case 0x101:
 			apk_flags |= APK_PROGRESS;
