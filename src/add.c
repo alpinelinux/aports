@@ -145,7 +145,8 @@ static int add_main(void *ctx, int argc, char **argv)
 		r = apk_state_lock_dependency(state, &pkgs->item[i]);
 		if (r != 0) {
 			apk_error("Unable to install '%s'", pkgs->item[i].name->name);
-			goto err;
+			if (!(apk_flags & APK_FORCE))
+				goto err;
 		}
 		if (!virtpkg)
 			apk_deps_add(&db.world, &pkgs->item[i]);
