@@ -132,7 +132,7 @@ static int fetch_main(void *ctx, int argc, char **argv)
 	struct apk_database db;
 	int i, j, r;
 
-	r = apk_db_open(&db, apk_root, APK_OPENF_EMPTY_STATE);
+	r = apk_db_open(&db, apk_root, APK_OPENF_NO_STATE);
 	if (r != 0)
 		return r;
 

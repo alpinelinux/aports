@@ -116,8 +116,14 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 #define APK_OPENF_READ		0x0000
 #define APK_OPENF_WRITE		0x0001
 #define APK_OPENF_CREATE	0x0002
-#define APK_OPENF_EMPTY_STATE	0x0004
-#define APK_OPENF_EMPTY_REPOS	0x0008
+#define APK_OPENF_NO_INSTALLED	0x0010
+#define APK_OPENF_NO_SCRIPTS	0x0020
+#define APK_OPENF_NO_WORLD	0x0040
+#define APK_OPENF_NO_REPOS	0x0080
+
+#define APK_OPENF_NO_STATE	(APK_OPENF_NO_INSTALLED |	\
+				 APK_OPENF_NO_SCRIPTS |		\
+				 APK_OPENF_NO_WORLD)
 
 int apk_db_open(struct apk_database *db, const char *root, unsigned int flags);
 int apk_db_write_config(struct apk_database *db);

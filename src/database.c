@@ -576,7 +576,7 @@ static int apk_db_scriptdb_read(struct apk_database *db, struct apk_istream *is)
 	return 0;
 }
 
-static int apk_db_read_state(struct apk_database *db)
+static int apk_db_read_state(struct apk_database *db, int flags)
 {
 	struct apk_istream *is;
 	apk_blob_t blob;
@@ -592,25 +592,31 @@ static int apk_db_read_state(struct apk_database *db)
 	 */
 	fchdir(db->root_fd);
 
-	blob = apk_blob_from_file("var/lib/apk/world");
-	if (APK_BLOB_IS_NULL(blob))
-		return -ENOENT;
-	apk_deps_parse(db, &db->world, blob);
-	free(blob.ptr);
+	if (!(flags & APK_OPENF_NO_WORLD)) {
+		blob = apk_blob_from_file("var/lib/apk/world");
+		if (APK_BLOB_IS_NULL(blob))
+			return -ENOENT;
+		apk_deps_parse(db, &db->world, blob);
+		free(blob.ptr);
 
-	for (i = 0; i < db->world->num; i++)
-		db->world->item[i].name->flags |= APK_NAME_TOPLEVEL;
-
-	is = apk_istream_from_file("var/lib/apk/installed");
-	if (is != NULL) {
-		apk_db_index_read(db, is, -1);
-		is->close(is);
+		for (i = 0; i < db->world->num; i++)
+			db->world->item[i].name->flags |= APK_NAME_TOPLEVEL;
 	}
 
-	is = apk_istream_from_file("var/lib/apk/scripts");
-	if (is != NULL) {
-		apk_db_scriptdb_read(db, is);
-		is->close(is);
+	if (!(flags & APK_OPENF_NO_INSTALLED)) {
+		is = apk_istream_from_file("var/lib/apk/installed");
+		if (is != NULL) {
+			apk_db_index_read(db, is, -1);
+			is->close(is);
+		}
+	}
+
+	if (!(flags & APK_OPENF_NO_SCRIPTS)) {
+		is = apk_istream_from_file("var/lib/apk/scripts");
+		if (is != NULL) {
+			apk_db_scriptdb_read(db, is);
+			is->close(is);
+		}
 	}
 
 	return 0;
@@ -702,23 +708,21 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	apk_blob_for_each_segment(blob, ":", add_protected_path, db);
 
 	if (root != NULL) {
-		if (!(flags & APK_OPENF_EMPTY_STATE)) {
-			r = apk_db_read_state(db);
-			if (r == -ENOENT && (flags & APK_OPENF_CREATE)) {
-				r = apk_db_create(db);
-				if (r != 0) {
-					msg = "Unable to create database";
-					goto ret_r;
-				}
-				r = apk_db_read_state(db);
-			}
+		r = apk_db_read_state(db, flags);
+		if (r == -ENOENT && (flags & APK_OPENF_CREATE)) {
+			r = apk_db_create(db);
 			if (r != 0) {
-				msg = "Unable to read database state";
+				msg = "Unable to create database";
 				goto ret_r;
 			}
+			r = apk_db_read_state(db, flags);
+		}
+		if (r != 0) {
+			msg = "Unable to read database state";
+			goto ret_r;
 		}
 
-		if (!(flags & APK_OPENF_EMPTY_REPOS)) {
+		if (!(flags & APK_OPENF_NO_REPOS)) {
 			if (apk_repos == NULL)
 				apk_repos = "/etc/apk/repositories";
 			blob = apk_blob_from_file(apk_repos);
@@ -733,7 +737,7 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 			db->cache_dir = apk_linked_cache_dir;
 	}
 
-	if (!(flags & APK_OPENF_EMPTY_REPOS)) {
+	if (!(flags & APK_OPENF_NO_REPOS)) {
 		list_for_each_entry(repo, &apk_repository_list.list, list)
 			apk_db_add_repository(db, APK_BLOB_STR(repo->url));
 	}

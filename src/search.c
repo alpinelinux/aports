@@ -118,7 +118,7 @@ static int search_main(void *ctx, int argc, char **argv)
 	struct apk_database db;
 	int r;
 
-	if (apk_db_open(&db, apk_root, APK_OPENF_READ + APK_OPENF_EMPTY_STATE) < 0)
+	if (apk_db_open(&db, apk_root, APK_OPENF_READ | APK_OPENF_NO_STATE) < 0)
 		return -1;
 
 	if (ictx->action != NULL)

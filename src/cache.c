@@ -117,7 +117,7 @@ static int cache_main(void *ctx, int argc, char **argv)
 		return -100;
 
 	r = apk_db_open(&db, apk_root,
-			(actions & CACHE_DOWNLOAD) ? 0 : APK_OPENF_EMPTY_STATE);
+			(actions & CACHE_DOWNLOAD) ? 0 : APK_OPENF_NO_STATE);
 	if (r != 0)
 		return r;
 
