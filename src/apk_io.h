@@ -13,6 +13,7 @@
 
 #include "apk_defines.h"
 #include "apk_blob.h"
+#include "apk_csum.h"
 
 struct apk_file_info {
 	char *name;

@@ -1043,7 +1043,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	};
 
 	if (apk_url_local_file(repo->url) == NULL) {
-		apk_blob_csum(repository, repo->url_csum);
+		csum_blob(repository, repo->url_csum);
 
 		bs = apk_db_cache_open(db, repo->url_csum, apk_index_gz);
 		if (bs == NULL) {

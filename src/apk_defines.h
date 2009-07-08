@@ -36,20 +36,6 @@
         (type *)( (char *)__mptr - offsetof(type,member) );})
 #endif
 
-#if 1
-#include "md5.h"
-
-typedef unsigned char *csum_p;
-typedef md5sum_t csum_t;
-typedef struct md5_ctx csum_ctx_t;
-extern csum_t bad_checksum;
-
-#define csum_init(ctx)			md5_init(ctx)
-#define csum_process(ctx, buf, len)	md5_process(ctx, buf, len)
-#define csum_finish(ctx, buf)		md5_finish(ctx, buf)
-#define csum_valid(buf)			memcmp(buf, bad_checksum, sizeof(csum_t))
-#endif
-
 extern int apk_cwd_fd, apk_verbosity, apk_wait;
 extern unsigned int apk_flags;
 

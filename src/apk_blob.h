@@ -44,7 +44,6 @@ int apk_blob_rsplit(apk_blob_t blob, char split, apk_blob_t *l, apk_blob_t *r);
 unsigned apk_blob_uint(apk_blob_t blob, int base);
 unsigned long apk_blob_hash(apk_blob_t str);
 int apk_blob_compare(apk_blob_t a, apk_blob_t b);
-void apk_blob_csum(apk_blob_t blob, csum_t csum);
 
 int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
 			      apk_blob_cb cb, void *ctx);

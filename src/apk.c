@@ -21,7 +21,9 @@
 #include "apk_defines.h"
 #include "apk_applet.h"
 #include "apk_blob.h"
+#include "apk_csum.h"
 
+csum_t bad_checksum = {0};
 const char *apk_root;
 struct apk_repository_url apk_repository_list;
 int apk_verbosity = 1, apk_cwd_fd, apk_wait;

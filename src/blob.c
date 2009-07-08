@@ -165,15 +165,6 @@ unsigned apk_blob_uint(apk_blob_t blob, int base)
 	return val;
 }
 
-void apk_blob_csum(apk_blob_t blob, csum_t csum)
-{
-	csum_ctx_t ctx;
-
-	csum_init(&ctx);
-	csum_process(&ctx, blob.ptr, blob.len);
-	csum_finish(&ctx, csum);
-}
-
 int apk_hexdump_parse(apk_blob_t to, apk_blob_t from)
 {
 	int i;
