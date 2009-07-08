@@ -1,4 +1,4 @@
-PKGDEPS := openssl
+PKGDEPS := openssl zlib
 
 ifeq ($(shell pkg-config --print-errors --exists $(PKGDEPS) || echo fail),fail)
 $(error Build dependencies are not met)
@@ -16,8 +16,10 @@ apk.static-objs		:= $(apk-objs)
 LDFLAGS_apk.static	:= -static
 LDFLAGS_apk		+= -nopie
 
-LIBS			+= $(shell pkg-config --libs $(PKGDEPS))
-LIBS			+= /usr/lib/libz.a
+CFLAGS			+= $(shell pkg-config --cflags $(PKGDEPS))
+LIBS			:= -Wl,--as-needed \
+				$(shell pkg-config --libs $(PKGDEPS)) \
+			   -Wl,--no-as-needed
 
 install::
 	$(INSTALLDIR) $(DESTDIR)$(SBINDIR)
