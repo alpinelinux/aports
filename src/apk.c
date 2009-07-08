@@ -18,6 +18,8 @@
 #include <getopt.h>
 #include <sys/stat.h>
 
+#include <openssl/engine.h>
+
 #include "apk_defines.h"
 #include "apk_applet.h"
 #include "apk_blob.h"
@@ -237,6 +239,24 @@ static void merge_options(struct option *opts, struct apk_option *ao, int num)
 	opts->name = NULL;
 }
 
+static void fini_openssl(void)
+{
+	EVP_cleanup();
+#ifndef OPENSSL_NO_ENGINE
+	ENGINE_cleanup();
+#endif
+	CRYPTO_cleanup_all_ex_data();
+}
+
+static void init_openssl(void)
+{
+	atexit(fini_openssl);
+	OpenSSL_add_all_algorithms();
+#ifndef OPENSSL_NO_ENGINE
+	ENGINE_load_builtin_engines();
+#endif
+}
+
 int main(int argc, char **argv)
 {
 	struct apk_applet *applet;
@@ -273,6 +293,8 @@ int main(int argc, char **argv)
 				*(sopt++) = ':';
 		}
 	}
+
+	init_openssl();
 
 	optindex = 0;
 	while ((r = getopt_long(argc, argv, short_options,
