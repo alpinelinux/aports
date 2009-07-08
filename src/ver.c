@@ -17,21 +17,8 @@
 
 struct ver_ctx {
 	int (*action)(int argc, char **argv);
+	const char *limchars;
 };
-
-static int res2char(int res)
-{
-	switch (res) {
-	case APK_VERSION_LESS:
-		return '<';
-	case APK_VERSION_GREATER:
-		return '>';
-	case APK_VERSION_EQUAL:
-		return '=';
-	default:
-		return '?';
-	}
-}
 
 static int ver_test(int argc, char **argv)
 {
@@ -41,7 +28,7 @@ static int ver_test(int argc, char **argv)
 		return 1;
 
 	r = apk_version_compare(argv[0], argv[1]);
-	printf("%c\n", res2char(r));
+	printf("%s\n", apk_version_op_string(r));
 	return 0;
 }
 
@@ -68,33 +55,38 @@ static int ver_parse(void *ctx, int opt, int optindex, const char *optarg)
 	case 'c':
 		ictx->action = ver_validate;
 		break;
+	case 'l':
+		ictx->limchars = optarg;
+		break;
 	default:
 		return -1;
 	}
 	return 0;
 }
 
-static void ver_print_package_status(struct apk_package *pkg)
+static void ver_print_package_status(struct apk_package *pkg, const char *limit)
 {
 	struct apk_name *name;
-	struct apk_package *latest, *tmp;
+	struct apk_package *tmp;
 	char pkgname[256];
-	int i, r;
+	const char *opstr, *latest = "";
+	int i, r = -1;
 
 	name = pkg->name;
-	latest = pkg;
 	for (i = 0; i < name->pkgs->num; i++) {
 		tmp = name->pkgs->item[i];
-		if (tmp->name != name ||
-		    apk_pkg_get_state(tmp) == APK_PKG_INSTALLED)
+		if (tmp->name != name || tmp->repos == 0)
 			continue;
-		r = apk_pkg_version_compare(tmp, latest);
+		r = apk_version_compare(tmp->version, latest);
 		if (r == APK_VERSION_GREATER)
-			latest = tmp;
+			latest = tmp->version;
 	}
-	r = apk_pkg_version_compare(pkg, latest);
+	r = apk_version_compare(pkg->version, latest);
+	opstr = apk_version_op_string(r);
+	if ((limit != NULL) && (strchr(limit, *opstr) == NULL))
+		return;
 	snprintf(pkgname, sizeof(pkgname), "%s-%s", name->name, pkg->version);
-	printf("%-40s%s %s\n", pkgname, apk_version_op_string(r), latest->version);
+	printf("%-40s%s %s\n", pkgname, opstr, latest);
 }
 
 static int ver_main(void *ctx, int argc, char **argv)
@@ -112,10 +104,13 @@ static int ver_main(void *ctx, int argc, char **argv)
 	if (apk_db_open(&db, apk_root, APK_OPENF_READ) < 0)
 		return -1;
 
+	if (apk_verbosity > 0)
+		printf("%-42sAvailable:\n", "Installed:");
+
 	if (argc == 0) {
 		list_for_each_entry(pkg, &db.installed.packages,
 				    installed_pkgs_list) {
-			ver_print_package_status(pkg);
+			ver_print_package_status(pkg, ictx->limchars);
 		}
 		goto ver_exit;
 	}
@@ -130,7 +125,7 @@ static int ver_main(void *ctx, int argc, char **argv)
 		for (j = 0; j < name->pkgs->num; j++) {
 			struct apk_package *pkg = name->pkgs->item[j];
 			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
-				ver_print_package_status(pkg);
+				ver_print_package_status(pkg, ictx->limchars);
 		}
 	}
 
@@ -142,6 +137,8 @@ ver_exit:
 static struct apk_option ver_options[] = {
 	{ 't', "test",		"Compare two given versions" },
 	{ 'c', "check", 	"Check if the given version string is valid" },
+	{ 'l', "limit",		"Limit output to packages whos status matches LIMCHAR",
+	  required_argument, "LIMCHAR" },
 };
 
 static struct apk_applet apk_ver = {
