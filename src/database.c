@@ -688,6 +688,9 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 		}
 
 		fchdir(db->root_fd);
+		if (stat(apk_linked_cache_dir, &st) == 0 && S_ISDIR(st.st_mode))
+			db->cache_dir = apk_linked_cache_dir;
+
 		if (flags & APK_OPENF_WRITE) {
 			db->lock_fd = open("var/lib/apk/lock",
 					   O_CREAT | O_WRONLY, 0400);
@@ -753,9 +756,6 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 				free(blob.ptr);
 			}
 		}
-
-		if (stat(apk_linked_cache_dir, &st) == 0 && S_ISDIR(st.st_mode))
-			db->cache_dir = apk_linked_cache_dir;
 	}
 
 	if (!(flags & APK_OPENF_NO_REPOS)) {
