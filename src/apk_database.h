@@ -140,8 +140,6 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo);
-int apk_repository_update_all(struct apk_database *db);
-
 int apk_cache_download(struct apk_database *db, csum_t csum,
 		       const char *url, const char *item);
 int apk_cache_exists(struct apk_database *db, csum_t csum, const char *item);

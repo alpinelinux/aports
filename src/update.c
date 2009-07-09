@@ -19,10 +19,9 @@ static int update_main(void *ctx, int argc, char **argv)
 {
 	struct apk_database db;
 
+	apk_flags |= APK_UPDATE_CACHE;
 	if (apk_db_open(&db, apk_root, APK_OPENF_READ) < 0)
 		return -1;
-
-	apk_repository_update_all(&db);
 	apk_db_close(&db);
 
 	return 0;
