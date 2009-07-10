@@ -3,7 +3,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -29,6 +29,7 @@ static size_t gz_read(void *stream, void *ptr, size_t size)
 {
 	struct apk_gzip_istream *gis =
 		container_of(stream, struct apk_gzip_istream, is);
+	int restart_count = 0;
 
 	if (gis->z_err == Z_DATA_ERROR || gis->z_err == Z_ERRNO)
 		return -1;
@@ -51,6 +52,15 @@ static size_t gz_read(void *stream, void *ptr, size_t size)
 		}
 
 		gis->z_err = inflate(&gis->zs, Z_NO_FLUSH);
+		if (restart_count == 0 && gis->z_err == Z_STREAM_END) {
+			inflateEnd(&gis->zs);
+			if (inflateInit2(&gis->zs, 15+32) != Z_OK)
+				return -1;
+			gis->z_err = Z_OK;
+			restart_count++;
+		} else {
+			restart_count = 0;
+		}
 	}
 
 	if (gis->z_err != Z_OK && gis->z_err != Z_STREAM_END)
