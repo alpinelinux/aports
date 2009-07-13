@@ -43,11 +43,7 @@ static inline int csum_valid(csum_p csum)
 
 static inline void csum_blob(apk_blob_t blob, csum_p csum)
 {
-	csum_ctx_t ctx;
-
-	csum_init(&ctx);
-	csum_process(&ctx, (csum_p) blob.ptr, blob.len);
-	csum_finish(&ctx, csum);
+	EVP_Digest(blob.ptr, blob.len, csum, NULL, EVP_md5(), NULL);
 }
 
 #endif

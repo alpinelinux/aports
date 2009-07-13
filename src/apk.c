@@ -255,6 +255,7 @@ static void init_openssl(void)
 	OpenSSL_add_all_algorithms();
 #ifndef OPENSSL_NO_ENGINE
 	ENGINE_load_builtin_engines();
+	ENGINE_register_all_complete();
 #endif
 }
 
