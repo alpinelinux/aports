@@ -36,7 +36,7 @@ struct apk_istream {
 
 struct apk_bstream {
 	size_t (*read)(void *stream, void **ptr);
-	void (*close)(void *stream, csum_p csum, size_t *size);
+	void (*close)(void *stream, size_t *size);
 };
 
 struct apk_ostream {
@@ -44,7 +44,20 @@ struct apk_ostream {
 	void (*close)(void *stream);
 };
 
-struct apk_istream *apk_bstream_gunzip(struct apk_bstream *, int);
+#define APK_MPART_BEGIN		0
+#define APK_MPART_BOUNDARY	1
+#define APK_MPART_END		2
+
+typedef int (*apk_multipart_cb)(void *ctx, EVP_MD_CTX *mdctx, int part);
+
+struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *, int,
+					     apk_multipart_cb cb, void *ctx);
+static inline struct apk_istream *apk_bstream_gunzip(struct apk_bstream *bs,
+						     int autoclose)
+{
+	return apk_bstream_gunzip_mpart(bs, autoclose, NULL, NULL);
+}
+
 struct apk_ostream *apk_ostream_gzip(struct apk_ostream *);
 
 struct apk_istream *apk_istream_from_fd(int fd);

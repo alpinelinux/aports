@@ -150,7 +150,6 @@ err:
 struct apk_istream_bstream {
 	struct apk_bstream bs;
 	struct apk_istream *is;
-	csum_ctx_t csum_ctx;
 	unsigned char buffer[8*1024];
 	size_t size;
 };
@@ -165,30 +164,16 @@ static size_t is_bs_read(void *stream, void **ptr)
 	if (size <= 0)
 		return size;
 
-	csum_process(&isbs->csum_ctx, isbs->buffer, size);
 	isbs->size += size;
 
 	*ptr = isbs->buffer;
 	return size;
 }
 
-static void is_bs_close(void *stream, csum_t csum, size_t *size)
+static void is_bs_close(void *stream, size_t *size)
 {
 	struct apk_istream_bstream *isbs =
 		container_of(stream, struct apk_istream_bstream, bs);
-
-	if (csum != NULL) {
-		size_t size;
-
-		do {
-			size = isbs->is->read(isbs->is, isbs->buffer,
-					      sizeof(isbs->buffer));
-			csum_process(&isbs->csum_ctx, isbs->buffer, size);
-			isbs->size += size;
-		} while (size == sizeof(isbs->buffer));
-
-		csum_finish(&isbs->csum_ctx, csum);
-	}
 
 	if (size != NULL)
 		*size = isbs->size;
@@ -210,14 +195,12 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream)
 		.close = is_bs_close,
 	};
 	isbs->is = istream;
-	csum_init(&isbs->csum_ctx);
 
 	return &isbs->bs;
 }
 
 struct apk_mmap_bstream {
 	struct apk_bstream bs;
-	csum_ctx_t csum_ctx;
 	int fd;
 	size_t size;
 	unsigned char *ptr;
@@ -235,23 +218,15 @@ static size_t mmap_read(void *stream, void **ptr)
 		size = 1024*1024;
 
 	*ptr = (void *) &mbs->ptr[mbs->pos];
-	csum_process(&mbs->csum_ctx, &mbs->ptr[mbs->pos], size);
 	mbs->pos += size;
 
 	return size;
 }
 
-static void mmap_close(void *stream, csum_t csum, size_t *size)
+static void mmap_close(void *stream, size_t *size)
 {
 	struct apk_mmap_bstream *mbs =
 		container_of(stream, struct apk_mmap_bstream, bs);
-
-	if (csum != NULL) {
-		if (mbs->pos != mbs->size)
-			csum_process(&mbs->csum_ctx, &mbs->ptr[mbs->pos],
-				     mbs->size - mbs->pos);
-		csum_finish(&mbs->csum_ctx, csum);
-	}
 
 	if (size != NULL)
 		*size = mbs->size;
@@ -288,7 +263,6 @@ static struct apk_bstream *apk_mmap_bstream_from_fd(int fd)
 	mbs->size = st.st_size;
 	mbs->ptr = ptr;
 	mbs->pos = 0;
-	csum_init(&mbs->csum_ctx);
 
 	return &mbs->bs;
 }
@@ -340,12 +314,12 @@ static size_t tee_read(void *stream, void **ptr)
 	return size;
 }
 
-static void tee_close(void *stream, csum_t csum, size_t *size)
+static void tee_close(void *stream, size_t *size)
 {
 	struct apk_tee_bstream *tbs =
 		container_of(stream, struct apk_tee_bstream, bs);
 
-	tbs->inner_bs->close(tbs->inner_bs, csum, NULL);
+	tbs->inner_bs->close(tbs->inner_bs, NULL);
 	if (size != NULL)
 		*size = tbs->size;
 	close(tbs->fd);
@@ -431,6 +405,7 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 {
 	struct stat st;
 	struct apk_bstream *bs;
+	csum_ctx_t ctx;
 
 	if (stat(filename, &st) != 0)
 		return -1;
@@ -445,8 +420,17 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 	};
 
 	bs = apk_bstream_from_file(filename);
-	if (bs != NULL)
-		bs->close(bs, fi->csum, NULL);
+	if (bs != NULL) {
+		ssize_t size;
+		void *ptr;
+
+		csum_init(&ctx);
+		while ((size = bs->read(bs, &ptr)) > 0)
+			csum_process(&ctx, ptr, size);
+		csum_finish(&ctx, fi->csum);
+
+		bs->close(bs, NULL);
+	}
 
 	return 0;
 }

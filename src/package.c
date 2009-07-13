@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -415,10 +415,26 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 	return 0;
 }
 
+static int apk_pkg_gzip_part(void *ctx, EVP_MD_CTX *mdctx, int part)
+{
+	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
+
+	switch (part) {
+	case APK_MPART_BEGIN:
+		EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
+		break;
+	case APK_MPART_END:
+		EVP_DigestFinal_ex(mdctx, ri->pkg->csum, NULL);
+		break;
+	}
+	return 0;
+}
+
 struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 {
 	struct read_info_ctx ctx;
 	struct apk_bstream *bs;
+	struct apk_istream *tar;
 	char realfile[PATH_MAX];
 
 	if (realpath(file, realfile) < 0)
@@ -434,12 +450,14 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 
 	ctx.db = db;
 	ctx.has_install = 0;
-	if (apk_parse_tar_gz(bs, read_info_entry, &ctx) < 0) {
+
+	tar = apk_bstream_gunzip_mpart(bs, FALSE, apk_pkg_gzip_part, &ctx);
+	if (apk_parse_tar(tar, read_info_entry, &ctx) < 0) {
 		apk_error("File %s is not an APK archive", file);
-		bs->close(bs, NULL, NULL);
+		bs->close(bs, NULL);
 		goto err;
 	}
-	bs->close(bs, ctx.pkg->csum, &ctx.pkg->size);
+	bs->close(bs, &ctx.pkg->size);
 
 	if (ctx.pkg->name == NULL) {
 		apk_error("File %s is corrupted", file);
@@ -682,7 +700,7 @@ struct apk_dependency apk_dep_from_str(struct apk_database *db,
 		mask = apk_version_result_mask(v++);
 		if (*v == '=')
 			v++;
-	} 
+	}
 	return (struct apk_dependency) {
 		.name = apk_db_get_name(db, name),
 		.version = v,

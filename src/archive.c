@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -91,7 +91,7 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 		if (buf.name[0] == '\0') {
 			if (end) {
 				r = 0;
-				break;
+				//break;
 			}
 			end++;
 			continue;

@@ -27,12 +27,10 @@ static int audit_directory(apk_hash_item item, void *ctx)
 	struct apk_db_file *dbf;
 	struct apk_database *db = (struct apk_database *) ctx;
 	struct dirent *de;
-	struct stat st;
-	struct apk_bstream *bs;
+	struct apk_file_info fi;
+	apk_blob_t bdir = APK_BLOB_STR(dbd->dirname);
 	char tmp[512], reason;
 	DIR *dir;
-	apk_blob_t bdir = APK_BLOB_STR(dbd->dirname);
-	csum_t csum;
 
 	if (!(dbd->flags & APK_DBDIRF_PROTECTED))
 		return 0;
@@ -49,10 +47,10 @@ static int audit_directory(apk_hash_item item, void *ctx)
 		snprintf(tmp, sizeof(tmp), "%s/%s",
 			 dbd->dirname, de->d_name);
 
-		if (stat(tmp, &st) < 0)
+		if (apk_file_get_info(tmp, &fi) < 0)
 			continue;
 
-		if (S_ISDIR(st.st_mode)) {
+		if (S_ISDIR(fi.mode)) {
 			if (apk_db_dir_query(db, APK_BLOB_STR(tmp)) != NULL)
 				continue;
 
@@ -60,13 +58,7 @@ static int audit_directory(apk_hash_item item, void *ctx)
 		} else {
 			dbf = apk_db_file_query(db, bdir, APK_BLOB_STR(de->d_name));
 			if (dbf != NULL) {
-				bs = apk_bstream_from_file(tmp);
-				if (bs == NULL)
-					continue;
-
-				bs->close(bs, csum, NULL);
-
-				if (apk_blob_compare(APK_BLOB_BUF(csum),
+				if (apk_blob_compare(APK_BLOB_BUF(fi.csum),
 						     APK_BLOB_BUF(dbf->csum)) == 0)
 					continue;
 

@@ -36,6 +36,7 @@ struct install_ctx {
 
 	int script;
 	struct apk_db_dir_instance *diri;
+	csum_t data_csum;
 
 	apk_progress_cb cb;
 	void *cb_ctx;
@@ -1271,13 +1272,28 @@ static void apk_db_purge_pkg(struct apk_database *db,
 	apk_pkg_set_state(db, pkg, APK_PKG_NOT_INSTALLED);
 }
 
+static int apk_db_gzip_part(void *pctx, EVP_MD_CTX *mdctx, int part)
+{
+	struct install_ctx *ctx = (struct install_ctx *) pctx;
+
+	switch (part) {
+	case APK_MPART_BEGIN:
+		EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
+		break;
+	case APK_MPART_END:
+		EVP_DigestFinal_ex(mdctx, ctx->data_csum, NULL);
+		break;
+	}
+	return 0;
+}
+
 static int apk_db_unpack_pkg(struct apk_database *db,
 			     struct apk_package *newpkg,
-			     int upgrade, csum_t csum,
-			     apk_progress_cb cb, void *cb_ctx)
+			     int upgrade, apk_progress_cb cb, void *cb_ctx)
 {
 	struct install_ctx ctx;
 	struct apk_bstream *bs = NULL;
+	struct apk_istream *tar;
 	char pkgname[256], file[256];
 	int i, need_copy = FALSE;
 	size_t length;
@@ -1334,10 +1350,17 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		.cb = cb,
 		.cb_ctx = cb_ctx,
 	};
-	if (apk_parse_tar_gz(bs, apk_db_install_archive_entry, &ctx) != 0)
-		goto err_close;
 
-	bs->close(bs, csum, &length);
+	tar = apk_bstream_gunzip_mpart(bs, FALSE, apk_db_gzip_part, &ctx);
+	if (apk_parse_tar(tar, apk_db_install_archive_entry, &ctx) != 0)
+		goto err_close;
+	bs->close(bs, &length);
+
+	/* Check the package checksum */
+	if (memcmp(ctx.data_csum, newpkg->csum, sizeof(csum_t)) != 0)
+		apk_warning("%s-%s: checksum does not match",
+			    newpkg->name->name, newpkg->version);
+
 	if (need_copy) {
 		if (length == newpkg->size) {
 			char file2[256];
@@ -1351,7 +1374,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 
 	return 0;
 err_close:
-	bs->close(bs, NULL, NULL);
+	bs->close(bs, NULL);
 	return -1;
 }
 
@@ -1360,7 +1383,6 @@ int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *newpkg,
 		       apk_progress_cb cb, void *cb_ctx)
 {
-	csum_t csum;
 	int r;
 
 	if (fchdir(db->root_fd) < 0)
@@ -1382,18 +1404,12 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	/* Install the new stuff */
 	if (!(newpkg->name->flags & APK_NAME_VIRTUAL)) {
-		r = apk_db_unpack_pkg(db, newpkg, (oldpkg != NULL), csum,
-				      cb, cb_ctx);
+		r = apk_db_unpack_pkg(db, newpkg, (oldpkg != NULL), cb, cb_ctx);
 		if (r != 0)
 			return r;
 	}
 
 	apk_pkg_set_state(db, newpkg, APK_PKG_INSTALLED);
-
-	if (!(newpkg->name->flags & APK_NAME_VIRTUAL) &&
-	    memcmp(csum, newpkg->csum, sizeof(csum)) != 0)
-		apk_warning("%s-%s: checksum does not match",
-			    newpkg->name->name, newpkg->version);
 
 	if (oldpkg != NULL)
 		apk_db_purge_pkg(db, oldpkg);
