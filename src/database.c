@@ -205,7 +205,8 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 		return apk_db_dir_ref(dir);
 
 	db->installed.stats.dirs++;
-	dir = calloc(1, sizeof(*dir) + name.len + 1);
+	dir = malloc(sizeof(*dir) + name.len + 1);
+	memset(dir, 0, sizeof(*dir));
 	dir->refs = 1;
 	memcpy(dir->dirname, name.ptr, name.len);
 	dir->dirname[name.len] = 0;
@@ -311,7 +312,8 @@ static struct apk_db_file *apk_db_file_get(struct apk_database *db,
 	if (file != NULL)
 		return file;
 
-	file = calloc(1, sizeof(*file) + name.len + 1);
+	file = malloc(sizeof(*file) + name.len + 1);
+	memset(file, 0, sizeof(*file));
 	memcpy(file->filename, name.ptr, name.len);
 	file->filename[name.len] = 0;
 
@@ -376,116 +378,107 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 	return idb;
 }
 
-int apk_db_index_read(struct apk_database *db, struct apk_istream *is, int repo)
+int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 {
 	struct apk_package *pkg = NULL;
 	struct apk_db_dir_instance *diri = NULL;
 	struct apk_db_file *file = NULL;
 	struct hlist_node **diri_node = NULL;
 	struct hlist_node **file_diri_node = NULL;
+	apk_blob_t token = APK_BLOB_STR("\n"), l;
+	int field;
 
-	char buf[1024];
-	apk_blob_t l, r;
-	int n, field;
-
-	r = APK_BLOB_PTR_LEN(buf, 0);
-	while (1) {
-		n = is->read(is, &r.ptr[r.len], sizeof(buf) - r.len);
-		if (n <= 0)
-			break;
-		r.len += n;
-
-		while (apk_blob_splitstr(r, "\n", &l, &r)) {
-			if (l.len < 2 || l.ptr[1] != ':') {
-				if (pkg == NULL)
-					continue;
-
-				if (repo != -1)
-					pkg->repos |= BIT(repo);
-				else
-					apk_pkg_set_state(db, pkg, APK_PKG_INSTALLED);
-
-				if (apk_db_pkg_add(db, pkg) != pkg && repo == -1) {
-					apk_error("Installed database load failed");
-					return -1;
-				}
-				pkg = NULL;
-				continue;
-			}
-
-			/* Get field */
-			field = l.ptr[0];
-			l.ptr += 2;
-			l.len -= 2;
-
-			/* If no package, create new */
-			if (pkg == NULL) {
-				pkg = apk_pkg_new();
-				diri = NULL;
-				diri_node = hlist_tail_ptr(&pkg->owned_dirs);
-				file_diri_node = NULL;
-			}
-
-			/* Standard index line? */
-			if (apk_pkg_add_info(db, pkg, field, l) == 0)
+	while (!APK_BLOB_IS_NULL(l = bs->read(bs, token))) {
+		if (l.len < 2 || l.ptr[1] != ':') {
+			if (pkg == NULL)
 				continue;
 
-			if (repo != -1) {
-				apk_error("Invalid index entry '%c'", field);
-				return -1;
-			}
+			if (repo != -1)
+				pkg->repos |= BIT(repo);
+			else
+				apk_pkg_set_state(db, pkg, APK_PKG_INSTALLED);
 
-			/* Check FDB special entries */
-			switch (field) {
-			case 'F':
-				if (pkg->name == NULL) {
-					apk_error("FDB directory entry before package entry");
-					return -1;
-				}
-				diri = apk_db_diri_new(db, pkg, l, &diri_node);
-				file_diri_node = &diri->owned_files.first;
-				break;
-			case 'M':
-				if (diri == NULL) {
-					apk_error("FDB directory metadata entry before directory entry");
-					return -1;
-				}
-				/* FIXME: sscanf may touch unallocated area */
-				if (sscanf(l.ptr, "%d:%d:%o",
-					   &diri->uid, &diri->gid, &diri->mode) != 3) {
-					apk_error("FDB bad directory mode entry");
-					return -1;
-				}
-				break;
-			case 'R':
-				if (diri == NULL) {
-					apk_error("FDB file entry before directory entry");
-					return -1;
-				}
-				file = apk_db_file_get(db, diri, l,
-						       &file_diri_node);
-				break;
-			case 'Z':
-				if (file == NULL) {
-					apk_error("FDB checksum entry before file entry");
-					return -1;
-				}
-				if (apk_hexdump_parse(APK_BLOB_BUF(file->csum), l)) {
-					apk_error("Not a valid checksum");
-					return -1;
-				}
-				break;
-			default:
-				apk_error("FDB entry '%c' unsupported", n);
+			if (apk_db_pkg_add(db, pkg) != pkg && repo == -1) {
+				apk_error("Installed database load failed");
 				return -1;
 			}
+			pkg = NULL;
+			continue;
 		}
 
-		memcpy(&buf[0], r.ptr, r.len);
-		r = APK_BLOB_PTR_LEN(buf, r.len);
+		/* Get field */
+		field = l.ptr[0];
+		l.ptr += 2;
+		l.len -= 2;
+
+		/* If no package, create new */
+		if (pkg == NULL) {
+			pkg = apk_pkg_new();
+			diri = NULL;
+			diri_node = hlist_tail_ptr(&pkg->owned_dirs);
+			file_diri_node = NULL;
+		}
+
+		/* Standard index line? */
+		if (apk_pkg_add_info(db, pkg, field, l) == 0)
+			continue;
+
+		if (repo != -1) {
+			apk_error("Invalid index entry '%c'", field);
+			return -1;
+		}
+
+		/* Check FDB special entries */
+		switch (field) {
+		case 'F':
+			if (pkg->name == NULL) {
+				apk_error("FDB directory entry before package entry");
+				return -1;
+			}
+			diri = apk_db_diri_new(db, pkg, l, &diri_node);
+			file_diri_node = &diri->owned_files.first;
+			break;
+		case 'M':
+			if (diri == NULL) {
+				apk_error("FDB directory metadata entry before directory entry");
+				return -1;
+			}
+			diri->uid = apk_blob_parse_uint(&l, 10);
+			if (apk_blob_parse_char(&l) != ':')
+				goto bad_mode;
+			diri->gid = apk_blob_parse_uint(&l, 10);
+			if (apk_blob_parse_char(&l) != ':')
+				goto bad_mode;
+			diri->mode = apk_blob_parse_uint(&l, 8);
+			break;
+		case 'R':
+			if (diri == NULL) {
+				apk_error("FDB file entry before directory entry");
+				return -1;
+			}
+			file = apk_db_file_get(db, diri, l,
+					       &file_diri_node);
+			break;
+		case 'Z':
+			if (file == NULL) {
+				apk_error("FDB checksum entry before file entry");
+				return -1;
+			}
+			if (apk_hexdump_parse(APK_BLOB_BUF(file->csum), l)) {
+				apk_error("Not a valid checksum");
+				return -1;
+			}
+			break;
+		default:
+			apk_error("FDB entry '%c' unsupported", field);
+			return -1;
+		}
 	}
 
 	return 0;
+bad_mode:
+	apk_error("FDB bad directory mode entry");
+	return -1;
 }
 
 static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
@@ -581,6 +574,7 @@ static int apk_db_scriptdb_read(struct apk_database *db, struct apk_istream *is)
 static int apk_db_read_state(struct apk_database *db, int flags)
 {
 	struct apk_istream *is;
+	struct apk_bstream *bs;
 	apk_blob_t blob;
 	int i;
 
@@ -606,10 +600,10 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	}
 
 	if (!(flags & APK_OPENF_NO_INSTALLED)) {
-		is = apk_istream_from_file("var/lib/apk/installed");
-		if (is != NULL) {
-			apk_db_index_read(db, is, -1);
-			is->close(is);
+		bs = apk_bstream_from_file("var/lib/apk/installed");
+		if (bs != NULL) {
+			apk_db_index_read(db, bs, -1);
+			bs->close(bs, NULL);
 		}
 	}
 
@@ -1013,7 +1007,6 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 {
 	struct apk_database *db = _db.db;
-	struct apk_istream *is = NULL;
 	struct apk_bstream *bs = NULL;
 	struct apk_repository *repo;
 	int r, n = 1;
@@ -1050,13 +1043,13 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	} else {
 		bs = apk_repository_file_open(repo, apk_index_gz);
 	}
-	is = apk_bstream_gunzip(bs, 1);
-	if (is == NULL) {
+	bs = apk_bstream_from_istream(apk_bstream_gunzip(bs, TRUE));
+	if (bs == NULL) {
 		apk_warning("Failed to open index for %s", repo->url);
 		return -1;
 	}
-	apk_db_index_read(db, is, r);
-	is->close(is);
+	apk_db_index_read(db, bs, r);
+	bs->close(bs, NULL);
 
 	return 0;
 }
@@ -1276,6 +1269,7 @@ static int apk_db_gzip_part(void *pctx, EVP_MD_CTX *mdctx, int part)
 {
 	struct install_ctx *ctx = (struct install_ctx *) pctx;
 
+	fprintf(stderr, "part %d\n", part);
 	switch (part) {
 	case APK_MPART_BEGIN:
 		EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);

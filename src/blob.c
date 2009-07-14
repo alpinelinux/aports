@@ -75,26 +75,25 @@ int apk_blob_rsplit(apk_blob_t blob, char split, apk_blob_t *l, apk_blob_t *r)
 	return 1;
 }
 
-int apk_blob_splitstr(apk_blob_t blob, const char *split, apk_blob_t *l, apk_blob_t *r)
+int apk_blob_split(apk_blob_t blob, apk_blob_t split, apk_blob_t *l, apk_blob_t *r)
 {
-	int splitlen = strlen(split);
-	char *pos = blob.ptr, *end = blob.ptr + blob.len - splitlen + 1;
+	char *pos = blob.ptr, *end = blob.ptr + blob.len - split.len + 1;
 
 	if (end < pos)
 		return 0;
 
 	while (1) {
-		pos = memchr(pos, split[0], end - pos);
+		pos = memchr(pos, split.ptr[0], end - pos);
 		if (pos == NULL)
 			return 0;
 
-		if (memcmp(pos, split, splitlen) != 0) {
+		if (split.len > 1 && memcmp(pos, split.ptr, split.len) != 0) {
 			pos++;
 			continue;
 		}
 
 		*l = APK_BLOB_PTR_PTR(blob.ptr, pos-1);
-		*r = APK_BLOB_PTR_PTR(pos+splitlen, blob.ptr+blob.len-1);
+		*r = APK_BLOB_PTR_PTR(pos+split.len, blob.ptr+blob.len-1);
 		return 1;
 	}
 }
@@ -122,11 +121,11 @@ int apk_blob_compare(apk_blob_t a, apk_blob_t b)
 int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
 			      int (*cb)(void *ctx, apk_blob_t blob), void *ctx)
 {
-	apk_blob_t l, r;
+	apk_blob_t l, r, s = APK_BLOB_STR(split);
 	int rc;
 
 	r = blob;
-	while (apk_blob_splitstr(r, split, &l, &r)) {
+	while (apk_blob_split(r, s, &l, &r)) {
 		rc = cb(ctx, l);
 		if (rc != 0)
 			return rc;
@@ -136,7 +135,7 @@ int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
 	return 0;
 }
 
-static int dx(int c)
+static inline int dx(int c)
 {
 	if (c >= '0' && c <= '9')
 		return c - '0';
@@ -147,22 +146,37 @@ static int dx(int c)
 	return -1;
 }
 
-unsigned apk_blob_uint(apk_blob_t blob, int base)
+unsigned int apk_blob_parse_uint(apk_blob_t *blob, int base)
 {
-	unsigned val;
-	int i, ch;
+	unsigned int val;
+	int ch;
 
 	val = 0;
-	for (i = 0; i < blob.len; i++) {
-		if (blob.ptr[i] == 0)
-			break;
-		ch = dx(blob.ptr[i]);
+	while (blob->len && blob->ptr[0] != 0) {
+		ch = dx(blob->ptr[0]);
 		if (ch < 0 || ch >= base)
-			return 0;
+			break;
 		val *= base;
 		val += ch;
+
+		blob->ptr++;
+		blob->len--;
 	}
+
 	return val;
+}
+
+int apk_blob_parse_char(apk_blob_t *blob)
+{
+	int r;
+
+	if (blob->len == 0 || blob->ptr == NULL)
+		return -1;
+	r = blob->ptr[0];
+	blob->ptr++;
+	blob->len--;
+
+	return r;
 }
 
 int apk_hexdump_parse(apk_blob_t to, apk_blob_t from)

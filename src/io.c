@@ -150,24 +150,60 @@ err:
 struct apk_istream_bstream {
 	struct apk_bstream bs;
 	struct apk_istream *is;
-	unsigned char buffer[8*1024];
+	apk_blob_t left;
+	char buffer[8*1024];
 	size_t size;
 };
 
-static size_t is_bs_read(void *stream, void **ptr)
+static apk_blob_t is_bs_read(void *stream, apk_blob_t token)
 {
 	struct apk_istream_bstream *isbs =
 		container_of(stream, struct apk_istream_bstream, bs);
-	size_t size;
+	ssize_t size;
+	apk_blob_t ret;
 
-	size = isbs->is->read(isbs->is, isbs->buffer, sizeof(isbs->buffer));
-	if (size <= 0)
-		return size;
+	/* If we have cached stuff, first check if it full fills the request */
+	if (isbs->left.len != 0) {
+		if (!APK_BLOB_IS_NULL(token)) {
+			/* If we have tokenized thingy left, return it */
+			if (apk_blob_split(isbs->left, token, &ret, &isbs->left))
+				goto ret;
+		} else
+			goto ret_all;
+	}
 
-	isbs->size += size;
+	/* If we've exchausted earlier, it's end of stream */
+	if (APK_BLOB_IS_NULL(isbs->left))
+		return APK_BLOB_NULL;
 
-	*ptr = isbs->buffer;
-	return size;
+	/* We need more data */
+	if (isbs->left.len != 0)
+		memcpy(isbs->buffer, isbs->left.ptr, isbs->left.len);
+	isbs->left.ptr = isbs->buffer;
+	size = isbs->is->read(isbs->is, isbs->buffer + isbs->left.len,
+			      sizeof(isbs->buffer) - isbs->left.len);
+	if (size > 0) {
+		isbs->size += size;
+		isbs->left.len += size;
+	} else if (size == 0) {
+		if (isbs->left.len == 0)
+			isbs->left = APK_BLOB_NULL;
+		goto ret_all;
+	}
+
+	if (!APK_BLOB_IS_NULL(token)) {
+		/* If we have tokenized thingy left, return it */
+		if (apk_blob_split(isbs->left, token, &ret, &isbs->left))
+			goto ret;
+		/* No token found; just return the full buffer */
+	}
+
+ret_all:
+	/* Return all that is in cache */
+	ret = isbs->left;
+	isbs->left.len = 0;
+ret:
+	return ret;
 }
 
 static void is_bs_close(void *stream, size_t *size)
@@ -195,6 +231,8 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream)
 		.close = is_bs_close,
 	};
 	isbs->is = istream;
+	isbs->left = APK_BLOB_PTR_LEN(isbs->buffer, 0),
+	isbs->size = 0;
 
 	return &isbs->bs;
 }
@@ -204,23 +242,24 @@ struct apk_mmap_bstream {
 	int fd;
 	size_t size;
 	unsigned char *ptr;
-	size_t pos;
+	apk_blob_t left;
 };
 
-static size_t mmap_read(void *stream, void **ptr)
+static apk_blob_t mmap_read(void *stream, apk_blob_t token)
 {
 	struct apk_mmap_bstream *mbs =
 		container_of(stream, struct apk_mmap_bstream, bs);
-	size_t size;
+	apk_blob_t ret;
 
-	size = mbs->size - mbs->pos;
-	if (size > 1024*1024)
-		size = 1024*1024;
+	if (!APK_BLOB_IS_NULL(token) && !APK_BLOB_IS_NULL(mbs->left)) {
+		if (apk_blob_split(mbs->left, token, &ret, &mbs->left))
+			return ret;
+	}
 
-	*ptr = (void *) &mbs->ptr[mbs->pos];
-	mbs->pos += size;
+	ret = mbs->left;
+	mbs->left = APK_BLOB_NULL;
 
-	return size;
+	return ret;
 }
 
 static void mmap_close(void *stream, size_t *size)
@@ -245,7 +284,7 @@ static struct apk_bstream *apk_mmap_bstream_from_fd(int fd)
 	if (fstat(fd, &st) < 0)
 		return NULL;
 
-	ptr = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	ptr = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
 	if (ptr == MAP_FAILED)
 		return NULL;
 
@@ -262,7 +301,7 @@ static struct apk_bstream *apk_mmap_bstream_from_fd(int fd)
 	mbs->fd = fd;
 	mbs->size = st.st_size;
 	mbs->ptr = ptr;
-	mbs->pos = 0;
+	mbs->left = APK_BLOB_PTR_LEN(ptr, mbs->size);
 
 	return &mbs->bs;
 }
@@ -301,17 +340,17 @@ struct apk_tee_bstream {
 	size_t size;
 };
 
-static size_t tee_read(void *stream, void **ptr)
+static apk_blob_t tee_read(void *stream, apk_blob_t token)
 {
 	struct apk_tee_bstream *tbs =
 		container_of(stream, struct apk_tee_bstream, bs);
-	ssize_t size;
+	apk_blob_t blob;
 
-	size = tbs->inner_bs->read(tbs->inner_bs, ptr);
-	if (size >= 0)
-		tbs->size += write(tbs->fd, *ptr, size);
+	blob = tbs->inner_bs->read(tbs->inner_bs, token);
+	if (!APK_BLOB_IS_NULL(blob))
+		tbs->size += write(tbs->fd, blob.ptr, blob.len);
 
-	return size;
+	return blob;
 }
 
 static void tee_close(void *stream, size_t *size)
@@ -421,12 +460,11 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 
 	bs = apk_bstream_from_file(filename);
 	if (bs != NULL) {
-		ssize_t size;
-		void *ptr;
+		apk_blob_t blob;
 
 		csum_init(&ctx);
-		while ((size = bs->read(bs, &ptr)) > 0)
-			csum_process(&ctx, ptr, size);
+		while (!APK_BLOB_IS_NULL(blob = bs->read(bs, APK_BLOB_NULL)))
+			csum_process(&ctx, (void*) blob.ptr, blob.len);
 		csum_finish(&ctx, fi->csum);
 
 		bs->close(bs, NULL);

@@ -41,15 +41,15 @@ static int index_parse(void *ctx, int optch, int optindex, const char *optarg)
 
 static int index_read_file(struct apk_database *db, struct index_ctx *ictx)
 {
-	struct apk_istream *is;
+	struct apk_bstream *bs;
 	int r;
 	if (ictx->index_file == NULL)
 		return 0;
-	is = apk_bstream_gunzip(apk_bstream_from_url(ictx->index_file), 1);
-	if (is == NULL)
+	bs = apk_bstream_from_istream(apk_bstream_gunzip(apk_bstream_from_url(ictx->index_file), 1));
+	if (bs == NULL)
 		return -1;
-	r = apk_db_index_read(db, is, -1);
-	is->close(is);
+	r = apk_db_index_read(db, bs, -1);
+	bs->close(bs, NULL);
 	return r;
 }
 

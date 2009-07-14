@@ -22,7 +22,7 @@ struct apk_blob {
 typedef struct apk_blob apk_blob_t;
 typedef int (*apk_blob_cb)(void *ctx, apk_blob_t blob);
 
-#define APK_BLOB_IS_NULL(blob)		(blob.ptr == NULL)
+#define APK_BLOB_IS_NULL(blob)		((blob).ptr == NULL)
 
 #define APK_BLOB_NULL			((apk_blob_t){0, NULL})
 #define APK_BLOB_BUF(buf)		((apk_blob_t){sizeof(buf), (char *)(buf)})
@@ -39,11 +39,12 @@ static inline apk_blob_t APK_BLOB_STR(const char *str)
 char *apk_blob_cstr(apk_blob_t str);
 int apk_blob_spn(apk_blob_t blob, const char *accept, apk_blob_t *l, apk_blob_t *r);
 int apk_blob_cspn(apk_blob_t blob, const char *reject, apk_blob_t *l, apk_blob_t *r);
-int apk_blob_splitstr(apk_blob_t blob, const char *split, apk_blob_t *l, apk_blob_t *r);
+int apk_blob_split(apk_blob_t blob, apk_blob_t split, apk_blob_t *l, apk_blob_t *r);
 int apk_blob_rsplit(apk_blob_t blob, char split, apk_blob_t *l, apk_blob_t *r);
-unsigned apk_blob_uint(apk_blob_t blob, int base);
 unsigned long apk_blob_hash(apk_blob_t str);
 int apk_blob_compare(apk_blob_t a, apk_blob_t b);
+unsigned int apk_blob_parse_uint(apk_blob_t *b, int radix);
+int apk_blob_parse_char(apk_blob_t *b);
 
 int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
 			      apk_blob_cb cb, void *ctx);

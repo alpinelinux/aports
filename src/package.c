@@ -293,10 +293,10 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		apk_hexdump_parse(APK_BLOB_BUF(pkg->csum), value);
 		break;
 	case 'S':
-		pkg->size = apk_blob_uint(value, 10);
+		pkg->size = apk_blob_parse_uint(&value, 10);
 		break;
 	case 'I':
-		pkg->installed_size = apk_blob_uint(value, 10);
+		pkg->installed_size = apk_blob_parse_uint(&value, 10);
 		break;
 	default:
 		return -1;
@@ -325,7 +325,7 @@ static int read_info_line(void *ctx, apk_blob_t line)
 	if (line.ptr == NULL || line.len < 1 || line.ptr[0] == '#')
 		return 0;
 
-	if (!apk_blob_splitstr(line, " = ", &l, &r))
+	if (!apk_blob_split(line, APK_BLOB_STR(" = "), &l, &r))
 		return 0;
 
 	for (i = 0; i < ARRAY_SIZE(fields); i++) {

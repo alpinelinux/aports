@@ -44,7 +44,12 @@ struct tar_header {
 	char padding[12];   /* 500-512 */
 };
 
-#define GET_OCTAL(s) apk_blob_uint(APK_BLOB_PTR_LEN(s, sizeof(s)), 8)
+#define GET_OCTAL(s) get_octal(s, sizeof(s))
+static int get_octal(char *s, size_t l)
+{
+	apk_blob_t b = APK_BLOB_PTR_LEN(s, l);
+	return apk_blob_parse_uint(&b, 8);
+}
 
 struct apk_tar_entry_istream {
 	struct apk_istream is;

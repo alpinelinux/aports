@@ -35,7 +35,7 @@ struct apk_istream {
 };
 
 struct apk_bstream {
-	size_t (*read)(void *stream, void **ptr);
+	apk_blob_t (*read)(void *stream, apk_blob_t token);
 	void (*close)(void *stream, size_t *size);
 };
 
