@@ -230,7 +230,7 @@ int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os)
 	return n;
 }
 
-static const char *script_types[] = {
+const char *apk_script_types[] = {
 	[APK_SCRIPT_PRE_INSTALL]	= "pre-install",
 	[APK_SCRIPT_POST_INSTALL]	= "post-install",
 	[APK_SCRIPT_PRE_DEINSTALL]	= "pre-deinstall",
@@ -252,9 +252,9 @@ int apk_script_type(const char *name)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(script_types); i++)
-		if (script_types[i] &&
-		    strcmp(script_types[i], name) == 0)
+	for (i = 0; i < ARRAY_SIZE(apk_script_types); i++)
+		if (apk_script_types[i] &&
+		    strcmp(apk_script_types[i], name) == 0)
 			return i;
 
 	return APK_SCRIPT_INVALID;
@@ -290,7 +290,7 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		apk_deps_parse(db, &pkg->depends, value);
 		break;
 	case 'C':
-		apk_blob_pull_hexdump(&value, APK_BLOB_BUF(pkg->csum));
+		apk_blob_pull_csum(&value, &pkg->csum);
 		break;
 	case 'S':
 		pkg->size = apk_blob_pull_uint(&value, 10);
@@ -426,7 +426,8 @@ static int apk_pkg_gzip_part(void *ctx, EVP_MD_CTX *mdctx, int part)
 		EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
 		break;
 	case APK_MPART_END:
-		EVP_DigestFinal_ex(mdctx, ri->pkg->csum, NULL);
+		ri->pkg->csum.type = EVP_MD_CTX_size(mdctx);
+		EVP_DigestFinal_ex(mdctx, ri->pkg->csum.data, NULL);
 		break;
 	}
 	return 0;
@@ -572,7 +573,7 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		snprintf(fn, sizeof(fn),
 			"tmp/%s-%s.%s",
 			pkg->name->name, pkg->version,
-			script_types[type]);
+			apk_script_types[type]);
 		fd = creat(fn, 0777);
 		if (fd < 0)
 			return fd;
@@ -591,7 +592,7 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 				execle(fn, "INSTALL", script_types2[type],
 				       pkg->version, "", NULL, environment);
 			} else {
-				execle(fn, script_types[type],
+				execle(fn, apk_script_types[type],
 				       pkg->version, "", NULL, environment);
 			}
 			exit(1);
@@ -649,7 +650,7 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	int r;
 
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("C:"));
-	apk_blob_push_hexdump(&bbuf, APK_BLOB_BUF(info->csum));
+	apk_blob_push_csum(&bbuf, &info->csum);
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nP:"));
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->name->name));
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nV:"));

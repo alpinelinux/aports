@@ -440,11 +440,10 @@ err_fd:
 	return APK_BLOB_NULL;
 }
 
-int apk_file_get_info(const char *filename, struct apk_file_info *fi)
+int apk_file_get_info(const char *filename, int checksum, struct apk_file_info *fi)
 {
 	struct stat st;
 	struct apk_bstream *bs;
-	csum_ctx_t ctx;
 
 	if (stat(filename, &st) != 0)
 		return -1;
@@ -458,14 +457,19 @@ int apk_file_get_info(const char *filename, struct apk_file_info *fi)
 		.device = st.st_dev,
 	};
 
+	if (checksum == APK_CHECKSUM_NONE)
+		return 0;
+
 	bs = apk_bstream_from_file(filename);
 	if (bs != NULL) {
+		EVP_MD_CTX mdctx;
 		apk_blob_t blob;
 
-		csum_init(&ctx);
+		EVP_DigestInit(&mdctx, apk_get_digest(checksum));
 		while (!APK_BLOB_IS_NULL(blob = bs->read(bs, APK_BLOB_NULL)))
-			csum_process(&ctx, (void*) blob.ptr, blob.len);
-		csum_finish(&ctx, fi->csum);
+			EVP_DigestUpdate(&mdctx, (void*) blob.ptr, blob.len);
+		fi->csum.type = EVP_MD_CTX_size(&mdctx);
+		EVP_DigestFinal(&mdctx, fi->csum.data, NULL);
 
 		bs->close(bs, NULL);
 	}

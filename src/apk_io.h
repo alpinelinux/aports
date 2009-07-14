@@ -11,9 +11,10 @@
 #ifndef APK_IO
 #define APK_IO
 
+#include <openssl/evp.h>
+
 #include "apk_defines.h"
 #include "apk_blob.h"
-#include "apk_csum.h"
 
 struct apk_file_info {
 	char *name;
@@ -26,7 +27,7 @@ struct apk_file_info {
 	mode_t mode;
 	time_t mtime;
 	dev_t device;
-	csum_t csum;
+	struct apk_checksum csum;
 };
 
 struct apk_istream {
@@ -83,7 +84,7 @@ size_t apk_ostream_write_string(struct apk_ostream *ostream, const char *string)
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
 apk_blob_t apk_blob_from_file(const char *file);
 
-int apk_file_get_info(const char *filename, struct apk_file_info *fi);
+int apk_file_get_info(const char *filename, int checksum, struct apk_file_info *fi);
 int apk_url_download(const char *url, const char *file);
 const char *apk_url_local_file(const char *url);
 

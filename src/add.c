@@ -103,7 +103,8 @@ static int add_main(void *ctx, int argc, char **argv)
 			goto err;
 		}
 		virtpkg->name = apk_db_get_name(&db, APK_BLOB_STR(actx->virtpkg));
-		csum_blob(APK_BLOB_STR(virtpkg->name->name), virtpkg->csum);
+		apk_blob_checksum(APK_BLOB_STR(virtpkg->name->name),
+				  apk_default_checksum(), &virtpkg->csum);
 		virtpkg->version = strdup("0");
 		virtpkg->description = strdup("virtual meta package");
 		virtdep = apk_dep_from_pkg(&db, virtpkg);

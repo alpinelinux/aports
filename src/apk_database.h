@@ -17,7 +17,8 @@
 #include "apk_archive.h"
 #include "apk_package.h"
 
-#define APK_MAX_REPOS 32
+#define APK_MAX_REPOS		32
+#define APK_CACHE_CSUM_BYTES	4
 
 extern const char * const apk_index_gz;
 
@@ -29,8 +30,8 @@ struct apk_db_file {
 	struct hlist_node diri_files_list;
 
 	struct apk_db_dir_instance *diri;
-	csum_t csum;
 	unsigned short namelen;
+	struct apk_checksum csum;
 	char name[];
 };
 
@@ -73,7 +74,7 @@ struct apk_name {
 
 struct apk_repository {
 	char *url;
-	csum_t url_csum;
+	struct apk_checksum csum;
 };
 
 struct apk_database {
@@ -135,7 +136,7 @@ int apk_db_cache_active(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *file);
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);
-struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum);
+struct apk_package *apk_db_get_pkg(struct apk_database *db, struct apk_checksum *csum);
 struct apk_package *apk_db_get_file_owner(struct apk_database *db, apk_blob_t filename);
 
 int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo);
@@ -143,9 +144,10 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo);
-int apk_cache_download(struct apk_database *db, csum_t csum,
+int apk_cache_download(struct apk_database *db, struct apk_checksum *csum,
 		       const char *url, const char *item);
-int apk_cache_exists(struct apk_database *db, csum_t csum, const char *item);
+int apk_cache_exists(struct apk_database *db, struct apk_checksum *csum,
+		     const char *item);
 
 int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *oldpkg,

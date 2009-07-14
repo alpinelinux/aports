@@ -46,13 +46,13 @@ static int cache_download(struct apk_database *db)
 		pkg = change->newpkg;
 		snprintf(pkgfile, sizeof(pkgfile), "%s-%s.apk",
 			 pkg->name->name, pkg->version);
-		if (apk_cache_exists(db, pkg->csum, pkgfile))
+		if (apk_cache_exists(db, &pkg->csum, pkgfile))
 			continue;
 		for (i = 0; i < db->num_repos; i++) {
 			if (!(pkg->repos & BIT(i)))
 				continue;
 
-			r = apk_cache_download(db, pkg->csum, db->repos[i].url,
+			r = apk_cache_download(db, &pkg->csum, db->repos[i].url,
 					       pkgfile);
 			if (r != 0)
 				return r;
@@ -68,11 +68,9 @@ static int cache_clean(struct apk_database *db)
 {
 	DIR *dir;
 	struct dirent *de;
-	struct apk_package *pkg;
-	char path[256];
+	char path[256], csum[APK_CACHE_CSUM_BYTES];
 	int delete, i;
 	apk_blob_t b;
-	csum_t csum;
 
 	snprintf(path, sizeof(path), "%s/%s", db->root, db->cache_dir);
 	if (chdir(path) != 0)
@@ -87,24 +85,25 @@ static int cache_clean(struct apk_database *db)
 			continue;
 		delete = TRUE;
 		do {
-			if (strlen(de->d_name) <= sizeof(csum_t)*2+2)
+			if (strlen(de->d_name) <= APK_CACHE_CSUM_BYTES*2+2)
 				break;
-			b = APK_BLOB_PTR_LEN(de->d_name, sizeof(csum_t) * 2);
+			b = APK_BLOB_PTR_LEN(de->d_name, APK_CACHE_CSUM_BYTES*2);
 			apk_blob_pull_hexdump(&b, APK_BLOB_BUF(csum));
 			if (APK_BLOB_IS_NULL(b))
 				break;
-			if (de->d_name[sizeof(csum_t)*2] != '.')
+			if (de->d_name[APK_CACHE_CSUM_BYTES*2] != '.')
 				break;
-			if (strcmp(&de->d_name[sizeof(csum_t)*2+1],
+			if (strcmp(&de->d_name[APK_CACHE_CSUM_BYTES*2+1],
 				   apk_index_gz) == 0) {
 				/* Index - check for matching repository */
 				for (i = 0; i < db->num_repos; i++)
-					if (memcmp(db->repos[i].url_csum,
-						   csum, sizeof(csum_t)) == 0)
+					if (memcmp(db->repos[i].csum.data,
+						   csum, APK_CACHE_CSUM_BYTES) == 0)
 						break;
 				delete = (i >= db->num_repos);
 			} else {
 				/* Package - search for it */
+#if 0
 				pkg = apk_db_get_pkg(db, csum);
 				if (pkg == NULL)
 					break;
@@ -113,6 +112,8 @@ static int cache_clean(struct apk_database *db)
 					 pkg->name->name, pkg->version);
 				delete = strcmp(&de->d_name[sizeof(csum_t)*2+1],
 						path);
+#endif
+//#warning FIXME - need to check if cache file is valid - look up using name, check csum
 			}
 		} while (0);
 

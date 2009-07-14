@@ -36,7 +36,7 @@ struct install_ctx {
 
 	int script;
 	struct apk_db_dir_instance *diri;
-	csum_t data_csum;
+	struct apk_checksum data_csum;
 
 	apk_progress_cb cb;
 	void *cb_ctx;
@@ -69,7 +69,7 @@ static const struct apk_hash_ops pkg_name_hash_ops = {
 
 static apk_blob_t pkg_info_get_key(apk_hash_item item)
 {
-	return APK_BLOB_BUF(((struct apk_package *) item)->csum);
+	return APK_BLOB_CSUM(((struct apk_package *) item)->csum);
 }
 
 static unsigned long csum_hash(apk_blob_t csum)
@@ -372,7 +372,7 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 {
 	struct apk_package *idb;
 
-	idb = apk_hash_get(&db->available.packages, APK_BLOB_BUF(pkg->csum));
+	idb = apk_hash_get(&db->available.packages, APK_BLOB_CSUM(pkg->csum));
 	if (idb == NULL) {
 		idb = pkg;
 		apk_hash_insert(&db->available.packages, pkg);
@@ -473,8 +473,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 				apk_error("FDB checksum entry before file entry");
 				return -1;
 			}
-
-			apk_blob_pull_hexdump(&l, APK_BLOB_BUF(file->csum));
+			apk_blob_pull_csum(&l, &file->csum);
 			break;
 		default:
 			apk_error("FDB entry '%c' unsupported", field);
@@ -518,9 +517,9 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 			hlist_for_each_entry(file, c2, &diri->owned_files, diri_files_list) {
 				apk_blob_push_blob(&bbuf, APK_BLOB_STR("R:"));
 				apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(file->name, file->namelen));
-				if (csum_valid(file->csum)) {
+				if (file->csum.type != APK_CHECKSUM_NONE) {
 					apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nZ:"));
-					apk_blob_push_hexdump(&bbuf, APK_BLOB_BUF(file->csum));
+					apk_blob_push_csum(&bbuf, &file->csum);
 				}
 				apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
@@ -538,46 +537,114 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 	return 0;
 }
 
-struct apk_script_header {
-	csum_t csum;
-	unsigned int type;
-	unsigned int size;
-};
-
 static int apk_db_scriptdb_write(struct apk_database *db, struct apk_ostream *os)
 {
 	struct apk_package *pkg;
 	struct apk_script *script;
-	struct apk_script_header hdr;
 	struct hlist_node *c2;
+	struct apk_file_info fi;
+	char filename[256];
+	apk_blob_t bfn;
+	int r, i;
 
 	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
 		hlist_for_each_entry(script, c2, &pkg->scripts, script_list) {
-			memcpy(hdr.csum, pkg->csum, sizeof(csum_t));
-			hdr.type = script->type;
-			hdr.size = script->size;
+			fi = (struct apk_file_info) {
+				.name = filename,
+				.uname = "root",
+				.gname = "root",
+				.size = script->size,
+				.uid = 0,
+				.gid = 0,
+				.mode = 0755 | S_IFREG,
+				.mtime = time(NULL),
+			};
+			/* The scripts db expects file names in format:
+			 * pkg-version.<hexdump of package checksum>.action */
+			bfn = APK_BLOB_BUF(filename);
+			apk_blob_push_blob(&bfn, APK_BLOB_STR(pkg->name->name));
+			apk_blob_push_blob(&bfn, APK_BLOB_STR("-"));
+			apk_blob_push_blob(&bfn, APK_BLOB_STR(pkg->version));
+			apk_blob_push_blob(&bfn, APK_BLOB_STR("."));
+			apk_blob_push_csum(&bfn, &pkg->csum);
+			apk_blob_push_blob(&bfn, APK_BLOB_STR("."));
+			apk_blob_push_blob(&bfn, APK_BLOB_STR(apk_script_types[script->type]));
+			apk_blob_push_blob(&bfn, APK_BLOB_PTR_LEN("", 1));
 
-			if (os->write(os, &hdr, sizeof(hdr)) != sizeof(hdr))
-				return -1;
-
-			if (os->write(os, script->script, script->size) != script->size)
-				return -1;
+			r = apk_write_tar_entry(os, &fi, script->script);
+			if (r < 0)
+				return r;
 		}
+	}
+
+	for (i = 0; i < 2; i++) {
+		r = apk_write_tar_entry(os, NULL, NULL);
+		if (r < 0)
+			return r;
+	}
+	return 0;
+}
+
+static int apk_db_scriptdb_read_v1(struct apk_database *db, struct apk_istream *is)
+{
+	struct apk_package *pkg;
+	struct {
+		unsigned char md5sum[16];
+		unsigned int type;
+		unsigned int size;
+	} hdr;
+	struct apk_checksum csum;
+
+	while (is->read(is, &hdr, sizeof(hdr)) == sizeof(hdr)) {
+		memcpy(csum.data, hdr.md5sum, sizeof(hdr.md5sum));
+		csum.type = APK_CHECKSUM_MD5;
+
+		pkg = apk_db_get_pkg(db, &csum);
+		if (pkg != NULL)
+			apk_pkg_add_script(pkg, is, hdr.type, hdr.size);
+		else
+			apk_istream_skip(is, hdr.size);
 	}
 
 	return 0;
 }
 
-static int apk_db_scriptdb_read(struct apk_database *db, struct apk_istream *is)
+static int apk_read_script_archive_entry(void *ctx,
+					 const struct apk_file_info *ae,
+					 struct apk_istream *is)
 {
+	struct apk_database *db = (struct apk_database *) ctx;
 	struct apk_package *pkg;
-	struct apk_script_header hdr;
+	char *fncsum, *fnaction;
+	struct apk_checksum csum;
+	apk_blob_t blob;
+	int type;
 
-	while (is->read(is, &hdr, sizeof(hdr)) == sizeof(hdr)) {
-		pkg = apk_db_get_pkg(db, hdr.csum);
-		if (pkg != NULL)
-			apk_pkg_add_script(pkg, is, hdr.type, hdr.size);
-	}
+	if (!S_ISREG(ae->mode))
+		return 0;
+
+	/* The scripts db expects file names in format:
+	 * pkgname-version.<hexdump of package checksum>.action */
+	fnaction = memrchr(ae->name, '.', strlen(ae->name));
+	if (fnaction == NULL || fnaction == ae->name)
+		return 0;
+	fncsum = memrchr(ae->name, '.', fnaction - ae->name - 1);
+	if (fncsum == NULL)
+		return 0;
+	fnaction++;
+	fncsum++;
+
+	/* Parse it */
+	type = apk_script_type(fnaction);
+	if (type == APK_SCRIPT_INVALID)
+		return 0;
+	blob = APK_BLOB_PTR_PTR(fncsum, fnaction - 2);
+	apk_blob_pull_csum(&blob, &csum);
+
+	/* Attach script */
+	pkg = apk_db_get_pkg(db, &csum);
+	if (pkg != NULL)
+		apk_pkg_add_script(pkg, is, type, ae->size);
 
 	return 0;
 }
@@ -619,11 +686,16 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	}
 
 	if (!(flags & APK_OPENF_NO_SCRIPTS)) {
-		is = apk_istream_from_file("var/lib/apk/scripts");
+		is = apk_istream_from_file("var/lib/apk/scripts.tar");
 		if (is != NULL) {
-			apk_db_scriptdb_read(db, is);
-			is->close(is);
+			apk_parse_tar(is, apk_read_script_archive_entry, db);
+		} else {
+			is = apk_istream_from_file("var/lib/apk/scripts");
+			if (is != NULL)
+				apk_db_scriptdb_read_v1(db, is);
 		}
+		if (is != NULL)
+			is->close(is);
 	}
 
 	return 0;
@@ -817,11 +889,15 @@ int apk_db_write_config(struct apk_database *db)
 	if (rename("var/lib/apk/installed.new", "var/lib/apk/installed") < 0)
 		return -errno;
 
-	os = apk_ostream_to_file("var/lib/apk/scripts", 0644);
+	os = apk_ostream_to_file("var/lib/apk/scripts.tar.new", 0644);
 	if (os == NULL)
 		return -1;
 	apk_db_scriptdb_write(db, os);
 	os->close(os);
+	if (rename("var/lib/apk/scripts.tar.new", "var/lib/apk/scripts.tar") < 0)
+		return -errno;
+
+	unlink("var/lib/apk/scripts");
 
 	return 0;
 }
@@ -868,10 +944,10 @@ int apk_db_cache_active(struct apk_database *db)
 	return db->cache_dir != apk_static_cache_dir;
 }
 
-struct apk_package *apk_db_get_pkg(struct apk_database *db, csum_t sum)
+struct apk_package *apk_db_get_pkg(struct apk_database *db,
+				   struct apk_checksum *csum)
 {
-	return apk_hash_get(&db->available.packages,
-			    APK_BLOB_PTR_LEN((void*) sum, sizeof(csum_t)));
+	return apk_hash_get(&db->available.packages, APK_BLOB_CSUM(*csum));
 }
 
 struct apk_package *apk_db_get_file_owner(struct apk_database *db,
@@ -939,22 +1015,24 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
 }
 
 static void apk_db_cache_get_name(char *buf, size_t bufsz,
-				  struct apk_database *db, csum_t csum,
+				  struct apk_database *db,
+				  struct apk_checksum *csum,
 				  const char *file, int temp)
 {
-	char csumstr[sizeof(csum_t)*2+1];
+	char csumstr[APK_CACHE_CSUM_BYTES*2+1];
 	apk_blob_t bbuf = APK_BLOB_BUF(csumstr);
 
 	apk_blob_push_hexdump(&bbuf,
-			      APK_BLOB_PTR_LEN((void *)csum, sizeof(csum_t)));
-	apk_blob_push_blob(&bbuf, APK_BLOB_STR(""));
+			      APK_BLOB_PTR_LEN((char *) csum->data, APK_CACHE_CSUM_BYTES));
+	apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN("", 1));
 
 	snprintf(buf, bufsz, "%s/%s/%s.%s%s",
 		 db->root, db->cache_dir, csumstr, file, temp ? ".new" : "");
 }
 
 static struct apk_bstream *apk_db_cache_open(struct apk_database *db,
-					     csum_t csum, const char *file)
+					     struct apk_checksum *csum,
+					     const char *file)
 {
 	char tmp[256];
 
@@ -975,7 +1053,7 @@ static struct apk_bstream *apk_repository_file_open(struct apk_repository *repo,
 	return apk_bstream_from_url(tmp);
 }
 
-int apk_cache_download(struct apk_database *db, csum_t csum,
+int apk_cache_download(struct apk_database *db, struct apk_checksum *csum,
 		       const char *url, const char *item)
 {
 	char tmp[256], tmp2[256];
@@ -999,7 +1077,8 @@ int apk_cache_download(struct apk_database *db, csum_t csum,
 	return 0;
 }
 
-int apk_cache_exists(struct apk_database *db, csum_t csum, const char *item)
+int apk_cache_exists(struct apk_database *db, struct apk_checksum *csum,
+		     const char *item)
 {
 	char tmp[256];
 
@@ -1012,10 +1091,10 @@ int apk_cache_exists(struct apk_database *db, csum_t csum, const char *item)
 
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 {
-	if (!csum_valid(repo->url_csum))
+	if (repo->csum.type == APK_CHECKSUM_NONE)
 		return 0;
 
-	return apk_cache_download(db, repo->url_csum, repo->url, apk_index_gz);
+	return apk_cache_download(db, &repo->csum, repo->url, apk_index_gz);
 }
 
 int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
@@ -1040,19 +1119,18 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	};
 
 	if (apk_url_local_file(repo->url) == NULL) {
-		csum_blob(repository, repo->url_csum);
+		apk_blob_checksum(repository, apk_default_checksum(), &repo->csum);
 
 		if (apk_flags & APK_UPDATE_CACHE)
 			n = apk_repository_update(db, repo);
 
-		bs = apk_db_cache_open(db, repo->url_csum, apk_index_gz);
+		bs = apk_db_cache_open(db, &repo->csum, apk_index_gz);
 		if (bs == NULL) {
 			if (n == 1)
 				n = apk_repository_update(db, repo);
 			if (n < 0)
 				return n;
-			bs = apk_db_cache_open(db, repo->url_csum,
-					       apk_index_gz);
+			bs = apk_db_cache_open(db, &repo->csum, apk_index_gz);
 		}
 	} else {
 		bs = apk_repository_file_open(repo, apk_index_gz);
@@ -1203,9 +1281,8 @@ static int apk_db_install_archive_entry(void *_ctx,
 			printf("%s\n", ae->name);
 
 		if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
-		    apk_file_get_info(ae->name, &fi) == 0 &&
-		    (memcmp(file->csum, fi.csum, sizeof(csum_t)) != 0 ||
-		     !csum_valid(file->csum))) {
+		    apk_file_get_info(ae->name, file->csum.type, &fi) == 0 &&
+		    apk_checksum_compare(&file->csum, &fi.csum) != 0) {
 			/* Protected file. Extract to separate place */
 			if (!(apk_flags & APK_CLEAN_PROTECTED)) {
 				snprintf(alt_name, sizeof(alt_name),
@@ -1213,15 +1290,18 @@ static int apk_db_install_archive_entry(void *_ctx,
 					 diri->dir->name, file->name);
 				r = apk_archive_entry_extract(ae, is, alt_name,
 							      extract_cb, ctx);
+
 				/* remove identical apk-new */
-				if (memcmp(ae->csum, fi.csum, sizeof(csum_t)) == 0)
+				if (ae->csum.type != fi.csum.type)
+					apk_file_get_info(ae->name, ae->csum.type, &fi);
+				if (apk_checksum_compare(&ae->csum, &fi.csum) == 0)
 					unlink(alt_name);
 			}
 		} else {
 			r = apk_archive_entry_extract(ae, is, NULL,
 						      extract_cb, ctx);
 		}
-		memcpy(file->csum, ae->csum, sizeof(csum_t));
+		memcpy(&file->csum, &ae->csum, sizeof(file->csum));
 	} else {
 		if (apk_verbosity > 1)
 			printf("%s\n", ae->name);
@@ -1286,7 +1366,8 @@ static int apk_db_gzip_part(void *pctx, EVP_MD_CTX *mdctx, int part)
 		EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
 		break;
 	case APK_MPART_END:
-		EVP_DigestFinal_ex(mdctx, ctx->data_csum, NULL);
+		ctx->data_csum.type = EVP_MD_CTX_size(mdctx);
+		EVP_DigestFinal_ex(mdctx, ctx->data_csum.data, NULL);
 		break;
 	}
 	return 0;
@@ -1320,14 +1401,15 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		}
 
 		repo = &db->repos[i];
-		if (apk_db_cache_active(db) && csum_valid(repo->url_csum))
-			bs = apk_db_cache_open(db, newpkg->csum, pkgname);
+		if (apk_db_cache_active(db) &&
+		    repo->csum.type != APK_CHECKSUM_NONE)
+			bs = apk_db_cache_open(db, &newpkg->csum, pkgname);
 
 		if (bs == NULL) {
 			snprintf(file, sizeof(file), "%s/%s",
 				 repo->url, pkgname);
 			bs = apk_bstream_from_url(file);
-			if (csum_valid(repo->url_csum))
+			if (repo->csum.type != APK_CHECKSUM_NONE)
 				need_copy = TRUE;
 		}
 	} else {
@@ -1337,7 +1419,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	if (!apk_db_cache_active(db))
 		need_copy = FALSE;
 	if (need_copy) {
-		apk_db_cache_get_name(file, sizeof(file), db, newpkg->csum,
+		apk_db_cache_get_name(file, sizeof(file), db, &newpkg->csum,
 				      pkgname, TRUE);
 		bs = apk_bstream_tee(bs, file);
 	}
@@ -1362,7 +1444,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	bs->close(bs, &length);
 
 	/* Check the package checksum */
-	if (memcmp(ctx.data_csum, newpkg->csum, sizeof(csum_t)) != 0)
+	if (apk_checksum_compare(&ctx.data_csum, &newpkg->csum) != 0)
 		apk_warning("%s-%s: checksum does not match",
 			    newpkg->name->name, newpkg->version);
 
@@ -1370,7 +1452,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		if (length == newpkg->size) {
 			char file2[256];
 			apk_db_cache_get_name(file2, sizeof(file2), db,
-					      newpkg->csum, pkgname, FALSE);
+					      &newpkg->csum, pkgname, FALSE);
 			rename(file, file2);
 		} else {
 			unlink(file);

@@ -186,6 +186,30 @@ void apk_blob_push_uint(apk_blob_t *to, unsigned int value, int radix)
 	apk_blob_push_blob(to, APK_BLOB_PTR_PTR(ptr+1, &buf[sizeof(buf)-1]));
 }
 
+static int checksum_char_to_id(char chr)
+{
+	switch (chr) {
+	case '1': return APK_CHECKSUM_SHA1;
+	}
+	return APK_CHECKSUM_NONE;
+}
+
+void apk_blob_push_csum(apk_blob_t *to, struct apk_checksum *csum)
+{
+	switch (csum->type) {
+	case APK_CHECKSUM_MD5:
+		apk_blob_push_hexdump(to, APK_BLOB_CSUM(*csum));
+		break;
+	case APK_CHECKSUM_SHA1:
+		apk_blob_push_blob(to, APK_BLOB_STR("X1"));
+		apk_blob_push_hexdump(to, APK_BLOB_CSUM(*csum));
+		break;
+	default:
+		*to = APK_BLOB_NULL;
+		break;
+	}
+}
+
 void apk_blob_push_hexdump(apk_blob_t *to, apk_blob_t binary)
 {
 	char *d;
@@ -237,6 +261,31 @@ unsigned int apk_blob_pull_uint(apk_blob_t *b, int radix)
 	}
 
 	return val;
+}
+
+void apk_blob_pull_csum(apk_blob_t *b, struct apk_checksum *csum)
+{
+	if (unlikely(APK_BLOB_IS_NULL(*b)))
+		return;
+
+	if (unlikely(b->len < 2)) {
+		*b = APK_BLOB_NULL;
+		return;
+	}
+
+	switch (b->ptr[0]) {
+	case 'X':
+		csum->type = checksum_char_to_id(b->ptr[1]);
+		b->ptr += 2;
+		b->len -= 2;
+		apk_blob_pull_hexdump(b, APK_BLOB_CSUM(*csum));
+		break;
+	default:
+		/* Assume MD5 for backwards compatibility */
+		csum->type = APK_CHECKSUM_MD5;
+		apk_blob_pull_hexdump(b, APK_BLOB_CSUM(*csum));
+		break;
+	}
 }
 
 void apk_blob_pull_hexdump(apk_blob_t *b, apk_blob_t to)

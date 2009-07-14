@@ -44,19 +44,34 @@ struct tar_header {
 	char padding[12];   /* 500-512 */
 };
 
-#define GET_OCTAL(s) get_octal(s, sizeof(s))
+#define GET_OCTAL(s)	get_octal(s, sizeof(s))
+#define PUT_OCTAL(s,v)	put_octal(s, sizeof(s), v)
+
 static int get_octal(char *s, size_t l)
 {
 	apk_blob_t b = APK_BLOB_PTR_LEN(s, l);
 	return apk_blob_pull_uint(&b, 8);
 }
 
+static void put_octal(char *s, size_t l, size_t value)
+{
+	char *ptr = &s[l - 1];
+
+	*(ptr--) = '\0';
+	while (value != 0 && ptr >= s) {
+		*(ptr--) = '0' + (value % 8);
+		value /= 8;
+	}
+	while (ptr >= s)
+		*(ptr--) = '0';
+}
+
 struct apk_tar_entry_istream {
 	struct apk_istream is;
 	struct apk_istream *tar_is;
 	size_t bytes_left;
-	csum_ctx_t csum_ctx;
-	csum_p csum;
+	EVP_MD_CTX mdctx;
+	struct apk_checksum *csum;
 };
 
 static size_t tar_entry_read(void *stream, void *ptr, size_t size)
@@ -69,9 +84,11 @@ static size_t tar_entry_read(void *stream, void *ptr, size_t size)
 	size = teis->tar_is->read(teis->tar_is, ptr, size);
 	if (size > 0) {
 		teis->bytes_left -= size;
-		csum_process(&teis->csum_ctx, ptr, size);
-		if (teis->bytes_left == 0)
-			csum_finish(&teis->csum_ctx, teis->csum);
+		EVP_DigestUpdate(&teis->mdctx, ptr, size);
+		if (teis->bytes_left == 0) {
+			teis->csum->type = EVP_MD_CTX_size(&teis->mdctx);
+			EVP_DigestFinal_ex(&teis->mdctx, teis->csum->data, NULL);
+		}
 	}
 	return size;
 }
@@ -83,13 +100,14 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 	struct apk_tar_entry_istream teis = {
 		.is.read = tar_entry_read,
 		.tar_is = is,
-		.csum = entry.csum,
+		.csum = &entry.csum,
 	};
 	struct tar_header buf;
 	unsigned long offset = 0;
 	int end = 0, r;
 	size_t toskip;
 
+	EVP_MD_CTX_init(&teis.mdctx);
 	memset(&entry, 0, sizeof(entry));
 	while ((r = is->read(is, &buf, 512)) == 512) {
 		offset += 512;
@@ -156,11 +174,11 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 				entry.name = strdup(buf.name);
 
 			/* callback parser function */
-			csum_init(&teis.csum_ctx);
+			EVP_DigestInit_ex(&teis.mdctx, apk_default_checksum(), NULL);
 			r = parser(ctx, &entry, &teis.is);
 			free(entry.name);
 			if (r != 0)
-				return r;
+				goto err;
 
 			entry.name = NULL;
 		}
@@ -173,10 +191,65 @@ int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
 		if (toskip != 0)
 			is->read(is, NULL, toskip);
 	}
+	EVP_MD_CTX_cleanup(&teis.mdctx);
 
 	if (r != 0) {
 		apk_error("Bad TAR header (r=%d)", r);
 		return -1;
+	}
+
+	return 0;
+
+err:
+	EVP_MD_CTX_cleanup(&teis.mdctx);
+	return r;
+}
+
+int apk_write_tar_entry(struct apk_ostream *os, const struct apk_file_info *ae, char *data)
+{
+	static char padding[512];
+	struct tar_header buf;
+	int pad;
+
+	memset(&buf, 0, sizeof(buf));
+	if (ae != NULL) {
+		const unsigned char *src;
+	        int chksum, i;
+
+		if (S_ISREG(ae->mode))
+			buf.typeflag = '0';
+		else
+			return -1;
+
+		strncpy(buf.name, ae->name, sizeof(buf.name));
+		strncpy(buf.uname, ae->uname, sizeof(buf.uname));
+		strncpy(buf.gname, ae->gname, sizeof(buf.gname));
+
+		PUT_OCTAL(buf.size, ae->size);
+		PUT_OCTAL(buf.uid, ae->uid);
+		PUT_OCTAL(buf.gid, ae->gid);
+		PUT_OCTAL(buf.mode, ae->mode & 07777);
+		PUT_OCTAL(buf.mtime, ae->mtime);
+
+		/* Checksum */
+		strcpy(buf.magic, "ustar  ");
+		memset(buf.chksum, ' ', sizeof(buf.chksum));
+		src = (const unsigned char *) &buf;
+		for (i = chksum = 0; i < sizeof(buf); i++)
+			chksum += src[i];
+	        put_octal(buf.chksum, sizeof(buf.chksum)-1, chksum);
+	}
+
+	if (os->write(os, &buf, sizeof(buf)) != sizeof(buf))
+		return -1;
+
+	if (data != NULL) {
+		if (os->write(os, data, ae->size) != ae->size)
+			return -1;
+		pad = 512 - (ae->size & 511);
+		if (pad != 512 &&
+		    os->write(os, padding, pad) != pad)
+			return -1;
 	}
 
 	return 0;

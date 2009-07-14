@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -52,7 +52,6 @@ APK_ARRAY(apk_dependency_array, struct apk_dependency);
 struct apk_package {
 	apk_hash_node hash_node;
 
-	csum_t csum;
 	unsigned repos;
 	struct apk_name *name;
 	char *version;
@@ -60,6 +59,7 @@ struct apk_package {
 	struct apk_dependency_array *depends;
 	size_t installed_size, size;
 	char *filename;
+	struct apk_checksum csum;
 
 	/* for installed packages only */
 	struct list_head installed_pkgs_list;
@@ -67,6 +67,8 @@ struct apk_package {
 	struct hlist_head scripts;
 };
 APK_ARRAY(apk_package_array, struct apk_package *);
+
+extern const char *apk_script_types[];
 
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep);
