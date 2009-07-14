@@ -44,13 +44,15 @@ int apk_blob_rsplit(apk_blob_t blob, char split, apk_blob_t *l, apk_blob_t *r);
 unsigned long apk_blob_hash_seed(apk_blob_t, unsigned long seed);
 unsigned long apk_blob_hash(apk_blob_t str);
 int apk_blob_compare(apk_blob_t a, apk_blob_t b);
-unsigned int apk_blob_parse_uint(apk_blob_t *b, int radix);
-int apk_blob_parse_char(apk_blob_t *b);
-
 int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
 			      apk_blob_cb cb, void *ctx);
 
-int apk_hexdump_parse(apk_blob_t to, apk_blob_t from);
-int apk_hexdump_format(int tolen, char *to, apk_blob_t from);
+void apk_blob_push_blob(apk_blob_t *to, apk_blob_t literal);
+void apk_blob_push_uint(apk_blob_t *to, unsigned int value, int radix);
+void apk_blob_push_hexdump(apk_blob_t *to, apk_blob_t binary);
+
+void apk_blob_pull_char(apk_blob_t *b, int expected);
+unsigned int apk_blob_pull_uint(apk_blob_t *b, int radix);
+void apk_blob_pull_hexdump(apk_blob_t *b, apk_blob_t to);
 
 #endif

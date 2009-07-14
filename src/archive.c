@@ -48,7 +48,7 @@ struct tar_header {
 static int get_octal(char *s, size_t l)
 {
 	apk_blob_t b = APK_BLOB_PTR_LEN(s, l);
-	return apk_blob_parse_uint(&b, 8);
+	return apk_blob_pull_uint(&b, 8);
 }
 
 struct apk_tar_entry_istream {

@@ -290,17 +290,19 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		apk_deps_parse(db, &pkg->depends, value);
 		break;
 	case 'C':
-		apk_hexdump_parse(APK_BLOB_BUF(pkg->csum), value);
+		apk_blob_pull_hexdump(&value, APK_BLOB_BUF(pkg->csum));
 		break;
 	case 'S':
-		pkg->size = apk_blob_parse_uint(&value, 10);
+		pkg->size = apk_blob_pull_uint(&value, 10);
 		break;
 	case 'I':
-		pkg->installed_size = apk_blob_parse_uint(&value, 10);
+		pkg->installed_size = apk_blob_pull_uint(&value, 10);
 		break;
 	default:
 		return -1;
 	}
+	if (APK_BLOB_IS_NULL(value))
+		return -1;
 	return 0;
 }
 
@@ -643,22 +645,29 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 			      struct apk_ostream *os)
 {
 	char buf[512];
-	int n, r, t = 0;
+	apk_blob_t bbuf = APK_BLOB_BUF(buf);
+	int r;
 
-	n = snprintf(buf, sizeof(buf),
-		     "P:%s\n"
-		     "V:%s\n"
-		     "S:%zu\n"
-		     "I:%zu\n"
-		     "T:%s\n"
-		     "U:%s\n"
-		     "L:%s\n",
-		     info->name->name, info->version,
-		     info->size, info->installed_size,
-		     info->description, info->url, info->license);
-	if (os->write(os, buf, n) != n)
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR("C:"));
+	apk_blob_push_hexdump(&bbuf, APK_BLOB_BUF(info->csum));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nP:"));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->name->name));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nV:"));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->version));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nS:"));
+	apk_blob_push_uint(&bbuf, info->size, 10);
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nI:"));
+	apk_blob_push_uint(&bbuf, info->installed_size, 10);
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nT:"));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->description));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nU:"));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->url));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nL:"));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->license));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
+
+	if (os->write(os, buf, bbuf.ptr - buf) != bbuf.ptr - buf)
 		return -1;
-	t += n;
 
 	if (info->depends != NULL) {
 		if (os->write(os, "D:", 2) != 2)
@@ -668,18 +677,9 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 			return r;
 		if (os->write(os, "\n", 1) != 1)
 			return -1;
-		t += r + 3;
 	}
 
-	n = snprintf(buf, sizeof(buf), "C:");
-	n += apk_hexdump_format(sizeof(buf)-n, &buf[n], APK_BLOB_BUF(info->csum));
-	n += snprintf(&buf[n], sizeof(buf)-n, "\n");
-
-	if (os->write(os, buf, n) != n)
-		return -1;
-	t += n;
-
-	return n;
+	return 0;
 }
 
 int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b)

@@ -454,13 +454,11 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 				apk_error("FDB directory metadata entry before directory entry");
 				return -1;
 			}
-			diri->uid = apk_blob_parse_uint(&l, 10);
-			if (apk_blob_parse_char(&l) != ':')
-				goto bad_mode;
-			diri->gid = apk_blob_parse_uint(&l, 10);
-			if (apk_blob_parse_char(&l) != ':')
-				goto bad_mode;
-			diri->mode = apk_blob_parse_uint(&l, 8);
+			diri->uid = apk_blob_pull_uint(&l, 10);
+			apk_blob_pull_char(&l, ':');
+			diri->gid = apk_blob_pull_uint(&l, 10);
+			apk_blob_pull_char(&l, ':');
+			diri->mode = apk_blob_pull_uint(&l, 8);
 			break;
 		case 'R':
 			if (diri == NULL) {
@@ -475,21 +473,20 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 				apk_error("FDB checksum entry before file entry");
 				return -1;
 			}
-			if (apk_hexdump_parse(APK_BLOB_BUF(file->csum), l)) {
-				apk_error("Not a valid checksum");
-				return -1;
-			}
+
+			apk_blob_pull_hexdump(&l, APK_BLOB_BUF(file->csum));
 			break;
 		default:
 			apk_error("FDB entry '%c' unsupported", field);
 			return -1;
 		}
+		if (APK_BLOB_IS_NULL(l)) {
+			apk_error("FDB format error in entry '%c'", field);
+			return -1;
+		}
 	}
 
 	return 0;
-bad_mode:
-	apk_error("FDB bad directory mode entry");
-	return -1;
 }
 
 static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
@@ -499,7 +496,8 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 	struct apk_db_file *file;
 	struct hlist_node *c1, *c2;
 	char buf[1024];
-	int n = 0, r;
+	apk_blob_t bbuf = APK_BLOB_BUF(buf);
+	int r;
 
 	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
 		r = apk_pkg_write_index_entry(pkg, os);
@@ -507,30 +505,32 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 			return r;
 
 		hlist_for_each_entry(diri, c1, &pkg->owned_dirs, pkg_dirs_list) {
-			n += snprintf(&buf[n], sizeof(buf)-n,
-				      "F:%s\n"
-				      "M:%d:%d:%o\n",
-				      diri->dir->name,
-				      diri->uid, diri->gid, diri->mode);
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("F:"));
+			apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen));
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nM:"));
+			apk_blob_push_uint(&bbuf, diri->uid, 10);
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR(":"));
+			apk_blob_push_uint(&bbuf, diri->gid, 10);
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR(":"));
+			apk_blob_push_uint(&bbuf, diri->mode, 8);
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
 			hlist_for_each_entry(file, c2, &diri->owned_files, diri_files_list) {
-				n += snprintf(&buf[n], sizeof(buf)-n,
-					      "R:%s\n",
-					      file->name);
+				apk_blob_push_blob(&bbuf, APK_BLOB_STR("R:"));
+				apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(file->name, file->namelen));
 				if (csum_valid(file->csum)) {
-					n += snprintf(&buf[n], sizeof(buf)-n, "Z:");
-					n += apk_hexdump_format(sizeof(buf)-n, &buf[n],
-								APK_BLOB_BUF(file->csum));
-					n += snprintf(&buf[n], sizeof(buf)-n, "\n");
+					apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nZ:"));
+					apk_blob_push_hexdump(&bbuf, APK_BLOB_BUF(file->csum));
 				}
+				apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
-				if (os->write(os, buf, n) != n)
+				if (os->write(os, buf, bbuf.ptr - buf) != bbuf.ptr - buf)
 					return -1;
-				n = 0;
+				bbuf = APK_BLOB_BUF(buf);
 			}
-			if (n != 0 && os->write(os, buf, n) != n)
+			if (os->write(os, buf, bbuf.ptr - buf) != bbuf.ptr - buf)
 				return -1;
-			n = 0;
+			bbuf = APK_BLOB_BUF(buf);
 		}
 		os->write(os, "\n", 1);
 	}
@@ -943,9 +943,12 @@ static void apk_db_cache_get_name(char *buf, size_t bufsz,
 				  const char *file, int temp)
 {
 	char csumstr[sizeof(csum_t)*2+1];
+	apk_blob_t bbuf = APK_BLOB_BUF(csumstr);
 
-	apk_hexdump_format(sizeof(csumstr), csumstr,
-			   APK_BLOB_PTR_LEN((void *)csum, sizeof(csum_t)));
+	apk_blob_push_hexdump(&bbuf,
+			      APK_BLOB_PTR_LEN((void *)csum, sizeof(csum_t)));
+	apk_blob_push_blob(&bbuf, APK_BLOB_STR(""));
+
 	snprintf(buf, bufsz, "%s/%s/%s.%s%s",
 		 db->root, db->cache_dir, csumstr, file, temp ? ".new" : "");
 }

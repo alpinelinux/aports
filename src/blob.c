@@ -151,62 +151,117 @@ static inline int dx(int c)
 	return -1;
 }
 
-unsigned int apk_blob_parse_uint(apk_blob_t *blob, int base)
+void apk_blob_push_blob(apk_blob_t *to, apk_blob_t literal)
+{
+	if (APK_BLOB_IS_NULL(*to))
+		return;
+
+	if (to->len < literal.len) {
+		*to = APK_BLOB_NULL;
+		return;
+	}
+
+	memcpy(to->ptr, literal.ptr, literal.len);
+	to->ptr += literal.len;
+	to->len -= literal.len;
+}
+
+static const char *xd = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+void apk_blob_push_uint(apk_blob_t *to, unsigned int value, int radix)
+{
+	char buf[64];
+	char *ptr = &buf[sizeof(buf)-1];
+
+	if (value == 0) {
+		apk_blob_push_blob(to, APK_BLOB_STR("0"));
+		return;
+	}
+
+	while (value != 0) {
+		*(ptr--) = xd[value % radix];
+		value /= radix;
+	}
+
+	apk_blob_push_blob(to, APK_BLOB_PTR_PTR(ptr+1, &buf[sizeof(buf)-1]));
+}
+
+void apk_blob_push_hexdump(apk_blob_t *to, apk_blob_t binary)
+{
+	char *d;
+	int i;
+
+	if (APK_BLOB_IS_NULL(*to))
+		return;
+
+	if (to->len < binary.len * 2) {
+		*to = APK_BLOB_NULL;
+		return;
+	}
+
+	for (i = 0, d = to->ptr; i < binary.len; i++) {
+		*(d++) = xd[(binary.ptr[i] >> 4) & 0xf];
+		*(d++) = xd[binary.ptr[i] & 0xf];
+	}
+	to->ptr = d;
+	to->len -= binary.len * 2;
+}
+
+void apk_blob_pull_char(apk_blob_t *b, int expected)
+{
+	if (APK_BLOB_IS_NULL(*b))
+		return;
+	if (b->len < 1 || b->ptr[0] != expected) {
+		*b = APK_BLOB_NULL;
+		return;
+	}
+	b->ptr ++;
+	b->len --;
+}
+
+unsigned int apk_blob_pull_uint(apk_blob_t *b, int radix)
 {
 	unsigned int val;
 	int ch;
 
 	val = 0;
-	while (blob->len && blob->ptr[0] != 0) {
-		ch = dx(blob->ptr[0]);
-		if (ch < 0 || ch >= base)
+	while (b->len && b->ptr[0] != 0) {
+		ch = dx(b->ptr[0]);
+		if (ch < 0 || ch >= radix)
 			break;
-		val *= base;
+		val *= radix;
 		val += ch;
 
-		blob->ptr++;
-		blob->len--;
+		b->ptr++;
+		b->len--;
 	}
 
 	return val;
 }
 
-int apk_blob_parse_char(apk_blob_t *blob)
+void apk_blob_pull_hexdump(apk_blob_t *b, apk_blob_t to)
 {
-	int r;
+	char *s, *d;
+	int i, r1, r2;
 
-	if (blob->len == 0 || blob->ptr == NULL)
-		return -1;
-	r = blob->ptr[0];
-	blob->ptr++;
-	blob->len--;
+	if (APK_BLOB_IS_NULL(*b))
+		return;
 
-	return r;
-}
+	if (to.len > b->len * 2)
+		goto err;
 
-int apk_hexdump_parse(apk_blob_t to, apk_blob_t from)
-{
-	int i;
-
-	if (to.len * 2 != from.len)
-		return -1;
-
-	for (i = 0; i < from.len / 2; i++)
-		to.ptr[i] = (dx(from.ptr[i*2]) << 4) + dx(from.ptr[i*2+1]);
-
-	return 0;
-}
-
-int apk_hexdump_format(int tolen, char *to, apk_blob_t from)
-{
-	static const char *xd = "0123456789abcdef";
-	int i;
-
-	for (i = 0; i < from.len && i*2+2 < tolen; i++) {
-		to[i*2+0] = xd[(from.ptr[i] >> 4) & 0xf];
-		to[i*2+1] = xd[from.ptr[i] & 0xf];
+	for (i = 0, s = b->ptr, d = to.ptr; i < to.len; i++) {
+		r1 = dx(*(s++));
+		if (r1 < 0)
+			goto err;
+		r2 = dx(*(s++));
+		if (r2 < 0)
+			goto err;
+		*(d++) = (r1 << 4) + r2;
 	}
-	to[i*2] = 0;
-
-	return i*2;
+	b->ptr = s;
+	b->len -= to.len * 2;
+	return;
+err:
+	*b = APK_BLOB_NULL;
 }

@@ -71,6 +71,7 @@ static int cache_clean(struct apk_database *db)
 	struct apk_package *pkg;
 	char path[256];
 	int delete, i;
+	apk_blob_t b;
 	csum_t csum;
 
 	snprintf(path, sizeof(path), "%s/%s", db->root, db->cache_dir);
@@ -88,9 +89,9 @@ static int cache_clean(struct apk_database *db)
 		do {
 			if (strlen(de->d_name) <= sizeof(csum_t)*2+2)
 				break;
-			if (apk_hexdump_parse(APK_BLOB_BUF(csum),
-					      APK_BLOB_PTR_LEN(de->d_name,
-					        sizeof(csum_t) * 2)) != 0)
+			b = APK_BLOB_PTR_LEN(de->d_name, sizeof(csum_t) * 2);
+			apk_blob_pull_hexdump(&b, APK_BLOB_BUF(csum));
+			if (APK_BLOB_IS_NULL(b))
 				break;
 			if (de->d_name[sizeof(csum_t)*2] != '.')
 				break;
