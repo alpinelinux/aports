@@ -30,6 +30,18 @@
 #define NULL 0L
 #endif
 
+#if defined __GNUC__ && __GNUC__ == 2 && __GNUC_MINOR__ < 96
+#define __builtin_expect(x, expected_value) (x)
+#endif
+
+#ifndef likely
+#define likely(x) __builtin_expect((!!(x)),1)
+#endif
+
+#ifndef unlikely
+#define unlikely(x) __builtin_expect((!!(x)),0)
+#endif
+
 #ifndef container_of
 #define container_of(ptr, type, member) ({                      \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \

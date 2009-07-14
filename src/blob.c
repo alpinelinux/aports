@@ -142,9 +142,9 @@ int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
 
 static inline int dx(int c)
 {
-	if (c >= '0' && c <= '9')
+	if (likely(c >= '0' && c <= '9'))
 		return c - '0';
-	if (c >= 'a' && c <= 'f')
+	if (likely(c >= 'a' && c <= 'f'))
 		return c - 'a' + 0xa;
 	if (c >= 'A' && c <= 'F')
 		return c - 'A' + 0xa;
@@ -153,10 +153,10 @@ static inline int dx(int c)
 
 void apk_blob_push_blob(apk_blob_t *to, apk_blob_t literal)
 {
-	if (APK_BLOB_IS_NULL(*to))
+	if (unlikely(APK_BLOB_IS_NULL(*to)))
 		return;
 
-	if (to->len < literal.len) {
+	if (unlikely(to->len < literal.len)) {
 		*to = APK_BLOB_NULL;
 		return;
 	}
@@ -191,10 +191,10 @@ void apk_blob_push_hexdump(apk_blob_t *to, apk_blob_t binary)
 	char *d;
 	int i;
 
-	if (APK_BLOB_IS_NULL(*to))
+	if (unlikely(APK_BLOB_IS_NULL(*to)))
 		return;
 
-	if (to->len < binary.len * 2) {
+	if (unlikely(to->len < binary.len * 2)) {
 		*to = APK_BLOB_NULL;
 		return;
 	}
@@ -209,9 +209,9 @@ void apk_blob_push_hexdump(apk_blob_t *to, apk_blob_t binary)
 
 void apk_blob_pull_char(apk_blob_t *b, int expected)
 {
-	if (APK_BLOB_IS_NULL(*b))
+	if (unlikely(APK_BLOB_IS_NULL(*b)))
 		return;
-	if (b->len < 1 || b->ptr[0] != expected) {
+	if (unlikely(b->len < 1 || b->ptr[0] != expected)) {
 		*b = APK_BLOB_NULL;
 		return;
 	}
@@ -244,18 +244,18 @@ void apk_blob_pull_hexdump(apk_blob_t *b, apk_blob_t to)
 	char *s, *d;
 	int i, r1, r2;
 
-	if (APK_BLOB_IS_NULL(*b))
+	if (unlikely(APK_BLOB_IS_NULL(*b)))
 		return;
 
-	if (to.len > b->len * 2)
+	if (unlikely(to.len > b->len * 2))
 		goto err;
 
 	for (i = 0, s = b->ptr, d = to.ptr; i < to.len; i++) {
 		r1 = dx(*(s++));
-		if (r1 < 0)
+		if (unlikely(r1 < 0))
 			goto err;
 		r2 = dx(*(s++));
-		if (r2 < 0)
+		if (unlikely(r2 < 0))
 			goto err;
 		*(d++) = (r1 << 4) + r2;
 	}
