@@ -28,14 +28,14 @@ static int audit_directory(apk_hash_item item, void *ctx)
 	struct apk_database *db = (struct apk_database *) ctx;
 	struct dirent *de;
 	struct apk_file_info fi;
-	apk_blob_t bdir = APK_BLOB_STR(dbd->dirname);
+	apk_blob_t bdir = APK_BLOB_PTR_LEN(dbd->name, dbd->namelen);
 	char tmp[512], reason;
 	DIR *dir;
 
 	if (!(dbd->flags & APK_DBDIRF_PROTECTED))
 		return 0;
 
-	dir = opendir(dbd->dirname);
+	dir = opendir(dbd->name);
 	if (dir == NULL)
 		return 0;
 
@@ -44,8 +44,7 @@ static int audit_directory(apk_hash_item item, void *ctx)
 		    strcmp(de->d_name, "..") == 0)
 			continue;
 
-		snprintf(tmp, sizeof(tmp), "%s/%s",
-			 dbd->dirname, de->d_name);
+		snprintf(tmp, sizeof(tmp), "%s/%s", dbd->name, de->d_name);
 
 		if (apk_file_get_info(tmp, &fi) < 0)
 			continue;

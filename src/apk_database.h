@@ -30,7 +30,8 @@ struct apk_db_file {
 
 	struct apk_db_dir_instance *diri;
 	csum_t csum;
-	char filename[];
+	unsigned short namelen;
+	char name[];
 };
 
 #define APK_DBDIRF_PROTECTED		0x0001
@@ -44,7 +45,8 @@ struct apk_db_dir {
 
 	unsigned short refs;
 	unsigned short flags;
-	char dirname[];
+	unsigned short namelen;
+	char name[];
 };
 
 struct apk_db_dir_instance {

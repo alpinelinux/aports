@@ -190,7 +190,7 @@ static void info_print_contents(struct apk_package *pkg)
 					  diri_files_list) {
 			if (apk_verbosity > 1)
 				printf("%s: ", pkg->name->name);
-			printf("%s/%s\n", diri->dir->dirname, file->filename);
+			printf("%s/%s\n", diri->dir->name, file->name);
 		}
 	}
 }
