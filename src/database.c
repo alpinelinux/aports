@@ -1281,7 +1281,6 @@ static int apk_db_gzip_part(void *pctx, EVP_MD_CTX *mdctx, int part)
 {
 	struct install_ctx *ctx = (struct install_ctx *) pctx;
 
-	fprintf(stderr, "part %d\n", part);
 	switch (part) {
 	case APK_MPART_BEGIN:
 		EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
