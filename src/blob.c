@@ -98,15 +98,20 @@ int apk_blob_split(apk_blob_t blob, apk_blob_t split, apk_blob_t *l, apk_blob_t 
 	}
 }
 
-unsigned long apk_blob_hash(apk_blob_t blob)
+unsigned long apk_blob_hash_seed(apk_blob_t blob, unsigned long seed)
 {
-	unsigned long hash = 5381;
+	unsigned long hash = seed;
 	int i;
 
         for (i = 0; i < blob.len; i++)
 		hash = hash * 33 + blob.ptr[i];
 
 	return hash;
+}
+
+unsigned long apk_blob_hash(apk_blob_t blob)
+{
+	return apk_blob_hash_seed(blob, 5381);
 }
 
 int apk_blob_compare(apk_blob_t a, apk_blob_t b)

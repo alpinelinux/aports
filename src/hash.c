@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -43,15 +43,14 @@ int apk_hash_foreach(struct apk_hash *h, apk_hash_enumerator_f e, void *ctx)
 	return 0;
 }
 
-apk_hash_item apk_hash_get(struct apk_hash *h, apk_blob_t key)
+apk_hash_item apk_hash_get_hashed(struct apk_hash *h, apk_blob_t key, unsigned long hash)
 {
 	ptrdiff_t offset = h->ops->node_offset;
-	unsigned long hash;
 	apk_hash_node *pos;
 	apk_hash_item item;
 	apk_blob_t itemkey;
 
-	hash = h->ops->hash_key(key) % h->buckets->num;
+	hash %= h->buckets->num;
 	if (h->ops->compare_item != NULL) {
 		hlist_for_each(pos, &h->buckets->item[hash]) {
 			item = ((void *) pos) - offset;
@@ -70,30 +69,24 @@ apk_hash_item apk_hash_get(struct apk_hash *h, apk_blob_t key)
 	return NULL;
 }
 
-void apk_hash_insert(struct apk_hash *h, apk_hash_item item)
+void apk_hash_insert_hashed(struct apk_hash *h, apk_hash_item item, unsigned long hash)
 {
-	unsigned long hash;
 	apk_hash_node *node;
 
-	if (h->ops->hash_item == NULL)
-		hash = h->ops->hash_key(h->ops->get_key(item));
-	else
-		hash = h->ops->hash_item(item);
 	hash %= h->buckets->num;
 	node = (apk_hash_node *) (item + h->ops->node_offset);
 	hlist_add_head(node, &h->buckets->item[hash]);
 	h->num_items++;
 }
 
-void apk_hash_delete(struct apk_hash *h, apk_blob_t key)
+void apk_hash_delete_hashed(struct apk_hash *h, apk_blob_t key, unsigned long hash)
 {
 	ptrdiff_t offset = h->ops->node_offset;
-	unsigned long hash;
 	apk_hash_node *pos;
 	apk_hash_item item;
 	apk_blob_t itemkey;
 
-	hash = h->ops->hash_key(key) % h->buckets->num;
+	hash %= h->buckets->num;
 	if (h->ops->compare_item != NULL) {
 		hlist_for_each(pos, &h->buckets->item[hash]) {
 			item = ((void *) pos) - offset;

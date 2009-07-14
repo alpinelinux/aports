@@ -38,6 +38,7 @@ struct apk_db_file {
 struct apk_db_dir {
 	apk_hash_node hash_node;
 
+	unsigned int hash;
 	struct hlist_head files;
 	struct apk_db_dir *parent;
 

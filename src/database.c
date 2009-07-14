@@ -101,6 +101,7 @@ static const struct apk_hash_ops dir_hash_ops = {
 };
 
 struct apk_db_file_hash_key {
+	unsigned long dirhash;
 	apk_blob_t dirname;
 	apk_blob_t filename;
 };
@@ -109,16 +110,14 @@ static unsigned long apk_db_file_hash_key(apk_blob_t _key)
 {
 	struct apk_db_file_hash_key *key = (struct apk_db_file_hash_key *) _key.ptr;
 
-	return apk_blob_hash(key->dirname) ^
-	       apk_blob_hash(key->filename);
+	return apk_blob_hash_seed(key->filename, key->dirhash);
 }
 
 static unsigned long apk_db_file_hash_item(apk_hash_item item)
 {
 	struct apk_db_file *dbf = (struct apk_db_file *) item;
 
-	return apk_blob_hash(APK_BLOB_STR(dbf->diri->dir->dirname)) ^
-	       apk_blob_hash(APK_BLOB_STR(dbf->filename));
+	return apk_blob_hash_seed(APK_BLOB_STR(dbf->filename), dbf->diri->dir->hash);
 }
 
 static int apk_db_file_compare_item(apk_hash_item item, apk_blob_t _key)
@@ -126,6 +125,9 @@ static int apk_db_file_compare_item(apk_hash_item item, apk_blob_t _key)
 	struct apk_db_file *dbf = (struct apk_db_file *) item;
 	struct apk_db_file_hash_key *key = (struct apk_db_file_hash_key *) _key.ptr;
 	int r;
+
+	if (key->dirhash != dbf->diri->dir->hash)
+		return key->dirhash - dbf->diri->dir->hash;
 
 	r = apk_blob_compare(key->dirname, APK_BLOB_STR(dbf->diri->dir->dirname));
 	if (r != 0)
@@ -150,8 +152,9 @@ struct apk_name *apk_db_query_name(struct apk_database *db, apk_blob_t name)
 struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 {
 	struct apk_name *pn;
+	unsigned long hash = apk_hash_from_key(&db->available.names, name);
 
-	pn = apk_db_query_name(db, name);
+	pn = (struct apk_name *) apk_hash_get_hashed(&db->available.names, name, hash);
 	if (pn != NULL)
 		return pn;
 
@@ -161,7 +164,7 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 
 	pn->name = apk_blob_cstr(name);
 	pn->id = db->name_id++;
-	apk_hash_insert(&db->available.names, pn);
+	apk_hash_insert_hashed(&db->available.names, pn, hash);
 
 	return pn;
 }
@@ -195,12 +198,13 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 {
 	struct apk_db_dir *dir;
 	apk_blob_t bparent;
+	unsigned long hash = apk_hash_from_key(&db->installed.dirs, name);
 	int i;
 
 	if (name.len && name.ptr[name.len-1] == '/')
 		name.len--;
 
-	dir = apk_db_dir_query(db, name);
+	dir = (struct apk_db_dir *) apk_hash_get_hashed(&db->installed.dirs, name, hash);
 	if (dir != NULL)
 		return apk_db_dir_ref(dir);
 
@@ -210,7 +214,8 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 	dir->refs = 1;
 	memcpy(dir->dirname, name.ptr, name.len);
 	dir->dirname[name.len] = 0;
-	apk_hash_insert(&db->installed.dirs, dir);
+	dir->hash = apk_blob_hash(APK_BLOB_STR(dir->dirname));
+	apk_hash_insert_hashed(&db->installed.dirs, dir, hash);
 
 	if (name.len == 0)
 		dir->parent = NULL;
@@ -286,6 +291,7 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 	struct apk_db_file_hash_key key;
 
 	key = (struct apk_db_file_hash_key) {
+		.dirhash = apk_blob_hash(dir),
 		.dirname = dir,
 		.filename = name,
 	};

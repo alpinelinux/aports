@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -48,8 +48,36 @@ void apk_hash_init(struct apk_hash *h, const struct apk_hash_ops *ops,
 void apk_hash_free(struct apk_hash *h);
 
 int apk_hash_foreach(struct apk_hash *h, apk_hash_enumerator_f e, void *ctx);
-apk_hash_item apk_hash_get(struct apk_hash *h, apk_blob_t key);
-void apk_hash_insert(struct apk_hash *h, apk_hash_item item);
-void apk_hash_delete(struct apk_hash *h, apk_blob_t key);
+apk_hash_item apk_hash_get_hashed(struct apk_hash *h, apk_blob_t key, unsigned long hash);
+void apk_hash_insert_hashed(struct apk_hash *h, apk_hash_item item, unsigned long hash);
+void apk_hash_delete_hashed(struct apk_hash *h, apk_blob_t key, unsigned long hash);
+
+static inline unsigned long apk_hash_from_key(struct apk_hash *h, apk_blob_t key)
+{
+	return h->ops->hash_key(key);
+}
+
+static inline unsigned long apk_hash_from_item(struct apk_hash *h, apk_hash_item item)
+{
+	if (h->ops->hash_item != NULL)
+		return h->ops->hash_item(item);
+	return apk_hash_from_key(h, h->ops->get_key(item));
+}
+
+static inline apk_hash_item apk_hash_get(struct apk_hash *h, apk_blob_t key)
+{
+	return apk_hash_get_hashed(h, key, apk_hash_from_key(h, key));
+}
+
+
+static inline void apk_hash_insert(struct apk_hash *h, apk_hash_item item)
+{
+	return apk_hash_insert_hashed(h, item, apk_hash_from_item(h, item));
+}
+
+static inline void apk_hash_delete(struct apk_hash *h, apk_blob_t key)
+{
+	return apk_hash_delete_hashed(h, key, apk_hash_from_key(h, key));
+}
 
 #endif
