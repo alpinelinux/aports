@@ -83,12 +83,13 @@ typedef void (*apk_progress_cb)(void *cb_ctx, size_t);
 	{								\
 		struct array_type_name *tmp;				\
 		int oldnum = a ? a->num : 0;				\
+		int diff = size - oldnum;				\
 		tmp = (struct array_type_name *)			\
 			realloc(a, sizeof(struct array_type_name) +	\
 				size * sizeof(elem_type_name));		\
-		if (size > oldnum)					\
+		if (diff > 0)						\
 			memset(&tmp->item[oldnum], 0,			\
-			       (size - oldnum) * sizeof(a->item[0]));	\
+			       diff * sizeof(a->item[0]));		\
 		tmp->num = size;					\
 		return tmp;						\
 	}								\
