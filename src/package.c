@@ -43,6 +43,9 @@ int apk_pkg_parse_name(apk_blob_t apkname,
 {
 	int i, dash = 0;
 
+	if (APK_BLOB_IS_NULL(apkname))
+		return -1;
+
 	for (i = apkname.len - 2; i >= 0; i--) {
 		if (apkname.ptr[i] != '-')
 			continue;

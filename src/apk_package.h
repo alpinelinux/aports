@@ -84,6 +84,8 @@ struct apk_package *apk_pkg_new(void);
 struct apk_package *apk_pkg_read(struct apk_database *db, const char *name);
 void apk_pkg_free(struct apk_package *pkg);
 
+int apk_pkg_parse_name(apk_blob_t apkname, apk_blob_t *name, apk_blob_t *version);
+
 int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		     char field, apk_blob_t value);
 int apk_pkg_get_state(struct apk_package *pkg);
