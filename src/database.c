@@ -991,7 +991,7 @@ static int write_index_entry(apk_hash_item item, void *ctx)
 	struct apk_package *pkg = (struct apk_package *) item;
 	int r;
 
-	if (pkg->repos != 0)
+	if (pkg->filename == NULL)
 		return 0;
 
 	r = apk_pkg_write_index_entry(pkg, iwctx->os);
