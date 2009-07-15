@@ -92,11 +92,13 @@ static inline const int apk_checksum_compare(const struct apk_checksum *a,
 void apk_blob_push_blob(apk_blob_t *to, apk_blob_t literal);
 void apk_blob_push_uint(apk_blob_t *to, unsigned int value, int radix);
 void apk_blob_push_csum(apk_blob_t *to, struct apk_checksum *csum);
+void apk_blob_push_base64(apk_blob_t *to, apk_blob_t binary);
 void apk_blob_push_hexdump(apk_blob_t *to, apk_blob_t binary);
 
 void apk_blob_pull_char(apk_blob_t *b, int expected);
 unsigned int apk_blob_pull_uint(apk_blob_t *b, int radix);
 void apk_blob_pull_csum(apk_blob_t *b, struct apk_checksum *csum);
+void apk_blob_pull_base64(apk_blob_t *b, apk_blob_t to);
 void apk_blob_pull_hexdump(apk_blob_t *b, apk_blob_t to);
 
 #endif
