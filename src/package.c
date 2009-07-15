@@ -372,7 +372,7 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 		if (strcmp(ae->name, ".INSTALL") == 0) {
 			apk_warning("Package '%s-%s' contains deprecated .INSTALL",
 				    pkg->name->name, pkg->version);
-			return 1;
+			return 0;
 		}
 	} else if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
 		/* APK 1.0 format */
@@ -407,7 +407,7 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 			ri->has_install = 1;
 	} else if (ri->version == 2) {
 		/* All metdata of version 2.x package handled */
-		return 1;
+		return 0;
 	} else {
 		/* Version 1.x packages do not contain installed size
 		 * in metadata, so we calculate it here */
