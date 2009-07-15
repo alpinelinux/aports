@@ -1,0 +1,897 @@
+#
+# OpenSSL patch to support VIA C7 hash engine
+# Written by: Timo Teras <timo.teras@iki.fi>
+# based on patch by: Michal Ludvig <michal@logix.cz>
+#                    http://www.logix.cz/michal/devel/padlock
+#
+Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
+===================================================================
+--- openssl-0.9.8k.orig/crypto/engine/eng_padlock.c	2009-07-12 19:24:42.000000000 +0300
++++ openssl-0.9.8k/crypto/engine/eng_padlock.c	2009-07-13 13:07:26.000000000 +0300
+@@ -1,10 +1,13 @@
+-/* 
++/*
+  * Support for VIA PadLock Advanced Cryptography Engine (ACE)
+  * Written by Michal Ludvig <michal@logix.cz>
+  *            http://www.logix.cz/michal
+  *
+- * Big thanks to Andy Polyakov for a help with optimization, 
+- * assembler fixes, port to MS Windows and a lot of other 
++ * SHA support by Timo Teras <timo.teras@iki.fi> based on code
++ * originally by Michal Ludvig.
++ *
++ * Big thanks to Andy Polyakov for a help with optimization,
++ * assembler fixes, port to MS Windows and a lot of other
+  * valuable work on this engine!
+  */
+ 
+@@ -66,6 +69,13 @@
+ #include <stdio.h>
+ #include <string.h>
+ 
++#include <signal.h>
++#include <stdint.h>
++#include <unistd.h>
++#include <sys/mman.h>
++#include <sys/ucontext.h>
++#include <arpa/inet.h>
++
+ #include <openssl/opensslconf.h>
+ #include <openssl/crypto.h>
+ #include <openssl/dso.h>
+@@ -74,12 +84,23 @@
+ #ifndef OPENSSL_NO_AES
+ #include <openssl/aes.h>
+ #endif
++#ifndef OPENSSL_NO_SHA
++#include <openssl/sha.h>
++#endif
+ #include <openssl/rand.h>
+ #include <openssl/err.h>
+ 
+ #ifndef OPENSSL_NO_HW
+ #ifndef OPENSSL_NO_HW_PADLOCK
+ 
++/* PadLock RNG is disabled by default */
++#define	PADLOCK_NO_RNG	1
++
++/* No ASM routines for SHA in MSC yet */
++#ifdef _MSC_VER
++#define OPENSSL_NO_SHA
++#endif
++
+ /* Attempt to have a single source for both 0.9.7 and 0.9.8 :-) */
+ #if (OPENSSL_VERSION_NUMBER >= 0x00908000L)
+ #  ifndef OPENSSL_NO_DYNAMIC_ENGINE
+@@ -96,7 +117,7 @@
+ /* VIA PadLock AES is available *ONLY* on some x86 CPUs.
+    Not only that it doesn't exist elsewhere, but it
+    even can't be compiled on other platforms!
+- 
++
+    In addition, because of the heavy use of inline assembler,
+    compiler choice is limited to GCC and Microsoft C. */
+ #undef COMPILE_HW_PADLOCK
+@@ -138,20 +159,42 @@
+ static int padlock_init(ENGINE *e);
+ 
+ /* RNG Stuff */
++#ifndef PADLOCK_NO_RNG
+ static RAND_METHOD padlock_rand;
++#endif
+ 
+ /* Cipher Stuff */
+ #ifndef OPENSSL_NO_AES
+ static int padlock_ciphers(ENGINE *e, const EVP_CIPHER **cipher, const int **nids, int nid);
+ #endif
+ 
++/* Digest Stuff */
++#ifndef OPENSSL_NO_SHA
++static int padlock_digests(ENGINE *e, const EVP_MD **digest, const int **nids, int nid);
++static volatile void *padlock_cached_sha_buffer = NULL;
++#endif
++
+ /* Engine names */
+ static const char *padlock_id = "padlock";
+ static char padlock_name[100];
+ 
+ /* Available features */
+-static int padlock_use_ace = 0;	/* Advanced Cryptography Engine */
+-static int padlock_use_rng = 0;	/* Random Number Generator */
++enum padlock_flags {
++	PADLOCK_RNG  = 0x01,
++	PADLOCK_ACE  = 0x02,
++	PADLOCK_ACE2 = 0x04,
++	PADLOCK_PHE  = 0x08,
++	PADLOCK_PMM  = 0x10
++};
++enum padlock_flags padlock_flags;
++
++#define PADLOCK_HAVE_RNG  (padlock_flags & PADLOCK_RNG)
++#define PADLOCK_HAVE_ACE  (padlock_flags & (PADLOCK_ACE|PADLOCK_ACE2))
++#define PADLOCK_HAVE_ACE1 (padlock_flags & PADLOCK_ACE)
++#define PADLOCK_HAVE_ACE2 (padlock_flags & PADLOCK_ACE2)
++#define PADLOCK_HAVE_PHE  (padlock_flags & PADLOCK_PHE)
++#define PADLOCK_HAVE_PMM  (padlock_flags & PADLOCK_PMM)
++
+ #ifndef OPENSSL_NO_AES
+ static int padlock_aes_align_required = 1;
+ #endif
+@@ -165,25 +208,30 @@
+ 	/* Check available features */
+ 	padlock_available();
+ 
+-#if 1	/* disable RNG for now, see commentary in vicinity of RNG code */
+-	padlock_use_rng=0;
+-#endif
+-
+ 	/* Generate a nice engine name with available features */
+ 	BIO_snprintf(padlock_name, sizeof(padlock_name),
+-		"VIA PadLock (%s, %s)", 
+-		 padlock_use_rng ? "RNG" : "no-RNG",
+-		 padlock_use_ace ? "ACE" : "no-ACE");
++		"VIA PadLock: %s%s%s%s%s",
++		 padlock_flags ? "" : "not supported",
++		 PADLOCK_HAVE_RNG ? "RNG " : "",
++		 PADLOCK_HAVE_ACE ? (PADLOCK_HAVE_ACE2 ? "ACE2 " : "ACE ") : "",
++		 PADLOCK_HAVE_PHE ? "PHE " : "",
++		 PADLOCK_HAVE_PMM ? "PMM " : "");
+ 
+-	/* Register everything or return with an error */ 
++	/* Register everything or return with an error */
+ 	if (!ENGINE_set_id(e, padlock_id) ||
+ 	    !ENGINE_set_name(e, padlock_name) ||
+ 
+-	    !ENGINE_set_init_function(e, padlock_init) ||
++	    !ENGINE_set_init_function(e, padlock_init)
+ #ifndef OPENSSL_NO_AES
+-	    (padlock_use_ace && !ENGINE_set_ciphers (e, padlock_ciphers)) ||
++	    || (PADLOCK_HAVE_ACE && !ENGINE_set_ciphers (e, padlock_ciphers))
++#endif
++#ifndef OPENSSL_NO_SHA
++	    || (PADLOCK_HAVE_PHE && !ENGINE_set_digests (e, padlock_digests))
++#endif
++#ifndef PADLOCK_NO_RNG
++	    || (PADLOCK_HAVE_RNG && !ENGINE_set_RAND (e, &padlock_rand))
+ #endif
+-	    (padlock_use_rng && !ENGINE_set_RAND (e, &padlock_rand))) {
++	    ) {
+ 		return 0;
+ 	}
+ 
+@@ -213,7 +261,7 @@
+ static int
+ padlock_init(ENGINE *e)
+ {
+-	return (padlock_use_rng || padlock_use_ace);
++	return (padlock_flags);
+ }
+ 
+ /* This stuff is needed if this ENGINE is being compiled into a self-contained
+@@ -247,7 +295,7 @@
+ #define AES_KEY_SIZE_192	24
+ #define AES_KEY_SIZE_256	32
+ 
+-/* Here we store the status information relevant to the 
++/* Here we store the status information relevant to the
+    current context. */
+ /* BIG FAT WARNING:
+  * 	Inline assembler in PADLOCK_XCRYPT_ASM()
+@@ -306,7 +354,7 @@
+ {
+ 	int result = -1;
+ 
+-	/* We're checking if the bit #21 of EFLAGS 
++	/* We're checking if the bit #21 of EFLAGS
+ 	   can be toggled. If yes = CPUID is available. */
+ 	asm volatile (
+ 		"pushf\n"
+@@ -322,7 +370,7 @@
+ 		"xorl %%eax, %%ecx\n"
+ 		"movl %%ecx, %0\n"
+ 		: "=r" (result) : : "eax", "ecx");
+-	
++
+ 	return (result == 0);
+ }
+ 
+@@ -365,10 +413,22 @@
+ 		: "+a"(eax), "=d"(edx) : : "ecx");
+ 
+ 	/* Fill up some flags */
+-	padlock_use_ace = ((edx & (0x3<<6)) == (0x3<<6));
+-	padlock_use_rng = ((edx & (0x3<<2)) == (0x3<<2));
++	padlock_flags |= ((edx & (0x3<<3)) ? PADLOCK_RNG : 0);
++	padlock_flags |= ((edx & (0x3<<7)) ? PADLOCK_ACE : 0);
++	padlock_flags |= ((edx & (0x3<<9)) ? PADLOCK_ACE2 : 0);
++	padlock_flags |= ((edx & (0x3<<11)) ? PADLOCK_PHE : 0);
++	padlock_flags |= ((edx & (0x3<<13)) ? PADLOCK_PMM : 0);
++
++	return padlock_flags;
++}
+ 
+-	return padlock_use_ace + padlock_use_rng;
++static inline void
++padlock_htonl_block(uint32_t *data, size_t count)
++{
++	while (count--) {
++		asm volatile ("bswapl %0" : "+r"(*data));
++		data++;
++	}
+ }
+ 
+ #ifndef OPENSSL_NO_AES
+@@ -377,17 +437,14 @@
+ padlock_bswapl(AES_KEY *ks)
+ {
+ 	size_t i = sizeof(ks->rd_key)/sizeof(ks->rd_key[0]);
+-	unsigned int *key = ks->rd_key;
++	uint32_t *key = (uint32_t*) ks->rd_key;
+ 
+-	while (i--) {
+-		asm volatile ("bswapl %0" : "+r"(*key));
+-		key++;
+-	}
++	padlock_htonl_block(key, i);
+ }
+ #endif
+ 
+ /* Force key reload from memory to the CPU microcode.
+-   Loading EFLAGS from the stack clears EFLAGS[30] 
++   Loading EFLAGS from the stack clears EFLAGS[30]
+    which does the trick. */
+ static inline void
+ padlock_reload_key(void)
+@@ -423,7 +480,7 @@
+ }
+ 
+ /* Template for padlock_xcrypt_* modes */
+-/* BIG FAT WARNING: 
++/* BIG FAT WARNING:
+  * 	The offsets used with 'leal' instructions
+  * 	describe items of the 'padlock_cipher_data'
+  * 	structure.
+@@ -475,7 +532,7 @@
+  * In case you wonder 'rep xcrypt*' instructions above are *not*
+  * affected by the Direction Flag and pointers advance toward
+  * larger addresses unconditionally.
+- */ 
++ */
+ static inline unsigned char *
+ padlock_memcpy(void *dst,const void *src,size_t n)
+ {
+@@ -501,7 +558,7 @@
+ 	_asm _emit 0x0f _asm _emit 0xa7	\
+ 	_asm _emit code
+ 
+-/* BIG FAT WARNING: 
++/* BIG FAT WARNING:
+  * 	The offsets used with 'lea' instructions
+  * 	describe items of the 'padlock_cipher_data'
+  * 	structure.
+@@ -840,7 +897,7 @@
+ 	return 1;
+ }
+ 
+-/* 
++/*
+  * Simplified version of padlock_aes_cipher() used when
+  * 1) both input and output buffers are at aligned addresses.
+  * or when
+@@ -895,7 +952,7 @@
+ # error "insane PADLOCK_CHUNK..."
+ #endif
+ 
+-/* Re-align the arguments to 16-Bytes boundaries and run the 
++/* Re-align the arguments to 16-Bytes boundaries and run the
+    encryption function itself. This function is not AES-specific. */
+ static int
+ padlock_aes_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out_arg,
+@@ -1157,6 +1214,470 @@
+ 
+ #endif /* OPENSSL_NO_AES */
+ 
++#ifndef OPENSSL_NO_SHA
++
++struct padlock_digest_data {
++	unsigned char		output[128+16];
++	uint64_t		total;
++
++	unsigned char		*buffer;
++	size_t			used;
++	size_t			size;
++
++	void			(*hash)(struct padlock_digest_data *data,
++				        const void *buf, size_t len);
++	int			(*update)(EVP_MD_CTX *ctx,
++					  const void *buffer, size_t len);
++	int			(*final)(EVP_MD_CTX *ctx, unsigned char *buffer);
++};
++
++#define DIGEST_DATA(ctx)	((struct padlock_digest_data *)(ctx->md_data))
++#define DIGEST_DATA_OUTPUT(dd)	(uint32_t*)(((uintptr_t)(dd->output) + 15) & ~15)
++#define PADLOCK_BUFFER_PAGES	14
++
++static inline void *
++padlock_atomic_xchg(volatile void **mem, void *fixed)
++{
++	/* No lock prefix due the xchg asserts it anyway, and the
++	 * funny unsigned long* cast is required to workaround some gcc
++	 * problems if compiling in PIC mode */
++	asm volatile (
++		"xchg %0, %1"
++		: "=r"(fixed)
++		: "m"(*(unsigned long*)mem), "0"(fixed)
++		: "memory");
++	return fixed;
++}
++
++static void
++padlock_do_sha1(struct padlock_digest_data *data, const void *buf, size_t len)
++{
++	uint32_t *output = DIGEST_DATA_OUTPUT(data);
++	asm volatile (
++		"xsha1"
++		: "+S"(buf), "+D"(output)
++		: "c"(len), "a"(0));
++}
++
++static void
++padlock_do_sha256(struct padlock_digest_data *data, const void *buf, size_t len)
++{
++	uint32_t *output = DIGEST_DATA_OUTPUT(data);
++	asm volatile (
++		"xsha256"
++		: "+S"(buf), "+D"(output)
++		: "c"(len), "a"(0));
++}
++
++static void
++handle_sigsegv(int sig, siginfo_t *info, void *uctxp)
++{
++	ucontext_t *uctx = uctxp;
++
++	uctx->uc_mcontext.gregs[14] += 4;
++}
++
++static void
++padlock_sha_nonfinalizing(struct padlock_digest_data *data)
++{
++	struct sigaction act, oldact;
++	size_t bofs = 0;
++
++	if (data->used != data->size) {
++		bofs = data->size - data->used;
++		memmove(&data->buffer[bofs], data->buffer, data->used);
++	}
++
++	memset(&act, 0, sizeof(act));
++	act.sa_sigaction = handle_sigsegv;
++	act.sa_flags = SA_SIGINFO;
++	sigaction(SIGSEGV, &act, &oldact);
++	data->hash(data, &data->buffer[bofs], data->used + 64);
++	sigaction(SIGSEGV, &oldact, NULL);
++}
++
++static void
++padlock_free_buffer(void *buf)
++{
++	buf = padlock_atomic_xchg(&padlock_cached_sha_buffer, buf);
++	if (buf != NULL)
++		munmap(buf, (PADLOCK_BUFFER_PAGES + 1) * getpagesize());
++}
++
++static void *
++padlock_allocate_buffer(size_t *maxsize)
++{
++	void *buf;
++	size_t size, page;
++
++	page = getpagesize();
++	buf = padlock_atomic_xchg(&padlock_cached_sha_buffer, NULL);
++	if (buf != NULL)
++		goto ret;
++
++	size = (PADLOCK_BUFFER_PAGES + 1) * page;
++	buf = mmap(0, size, PROT_READ | PROT_WRITE,
++		   MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
++	if (buf == NULL)
++		return NULL;
++
++	/* Try locking the pages to avoid swapping, but don't fail if
++	 * we are over quota. */
++	mlock(buf, size);
++
++	if (mprotect(buf + PADLOCK_BUFFER_PAGES * page, page, PROT_NONE) < 0) {
++		munmap(buf, size);
++		return NULL;
++	}
++
++ret:
++	*maxsize = PADLOCK_BUFFER_PAGES * page - 64;
++
++	return buf;
++}
++
++static int
++padlock_multi_update(EVP_MD_CTX *ctx, const void *data, size_t len)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++	size_t chunk_size;
++
++	if (ddata->buffer == NULL) {
++		ddata->buffer = padlock_allocate_buffer(&ddata->size);
++	}
++
++	while (len) {
++		if (ddata->used + len < ddata->size) {
++			memcpy(&ddata->buffer[ddata->used], data, len);
++			ddata->used += len;
++			ddata->total += len;
++			return 1;
++		}
++
++		chunk_size = ddata->size - ddata->used;
++		memcpy(&ddata->buffer[ddata->used], data, chunk_size);
++
++		data += chunk_size;
++		len -= chunk_size;
++		ddata->used = ddata->size;
++		ddata->total += chunk_size;
++		padlock_sha_nonfinalizing(ddata);
++		ddata->used = 0;
++	}
++
++	return 1;
++}
++
++static int
++padlock_oneshot_final(EVP_MD_CTX *ctx, unsigned char *md)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++	size_t size = EVP_MD_CTX_size(ctx);
++	uint32_t *output = DIGEST_DATA_OUTPUT(ddata);
++
++	padlock_htonl_block(output, size / sizeof(uint32_t));
++	memcpy(md, output, size);
++
++	return 1;
++}
++
++static int
++padlock_multi_final(EVP_MD_CTX *ctx, unsigned char *md)
++{
++	static const char padding[64] = { 0x80, };
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++
++	if (ddata->used == ddata->total) {
++		/* Sweet, everything fits in one buffer. */
++		ddata->hash(ddata, ddata->buffer, ddata->used);
++	} else {
++		/* Hardware already hashed some buffers.
++		 * Do finalizing manually */
++		union {
++			uint64_t u64;
++			uint32_t u32[2];
++		} bits_le, bits;
++		size_t lastblocklen, padlen;
++
++		/* BigEndianise the length. */
++		bits_le.u64 = ddata->total * 8;
++		bits.u32[1] = htonl(bits_le.u32[0]);
++		bits.u32[0] = htonl(bits_le.u32[1]);
++
++		/* Append padding, leave space for length. */
++		lastblocklen = ddata->total & 63;
++		padlen = (lastblocklen < 56) ? (56 - lastblocklen) : ((64+56) - lastblocklen);
++		padlock_multi_update(ctx, padding, padlen);
++
++		/* Length in BigEndian64 */
++		padlock_multi_update(ctx, (const char *) &bits, sizeof(bits));
++
++		/* And finally calculate it */
++		padlock_sha_nonfinalizing(ddata);
++	}
++
++	return padlock_oneshot_final(ctx, md);
++}
++
++static int
++padlock_oneshot_update(EVP_MD_CTX *ctx, const void *data, size_t length)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++
++	/* Oneshot update is only possible if context flags indicate so */
++	if (!(ctx->flags & EVP_MD_CTX_FLAG_ONESHOT)) {
++		ddata->update = padlock_multi_update;
++		ddata->final  = padlock_multi_final;
++		return padlock_multi_update(ctx, data, length);
++	}
++
++	ddata->hash(ddata, data, length);
++	return 1;
++}
++
++static void
++padlock_sha_init(struct padlock_digest_data *ddata)
++{
++	ddata->total  = 0;
++	ddata->buffer = NULL;
++	ddata->used   = 0;
++	ddata->size   = 0;
++	ddata->update = padlock_oneshot_update;
++	ddata->final  = padlock_oneshot_final;
++}
++
++static int
++padlock_sha1_init(EVP_MD_CTX *ctx)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++	uint32_t *output = DIGEST_DATA_OUTPUT(ddata);
++
++	output[0] = 0x67452301;
++	output[1] = 0xEFCDAB89;
++	output[2] = 0x98BADCFE;
++	output[3] = 0x10325476;
++	output[4] = 0xC3D2E1F0;
++
++	padlock_sha_init(ddata);
++	ddata->hash = padlock_do_sha1;
++
++	return 1;
++}
++
++static int
++padlock_sha224_init(EVP_MD_CTX *ctx)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++	uint32_t *output = DIGEST_DATA_OUTPUT(ddata);
++
++	output[0] = 0xC1059ED8UL;
++	output[1] = 0x367CD507UL;
++	output[2] = 0x3070DD17UL;
++	output[3] = 0xF70E5939UL;
++	output[4] = 0xFFC00B31UL;
++	output[5] = 0x68581511UL;
++	output[6] = 0x64F98FA7UL;
++	output[7] = 0xBEFA4FA4UL;
++
++	padlock_sha_init(ddata);
++	ddata->hash = padlock_do_sha256;
++
++	return 1;
++}
++
++static int
++padlock_sha256_init(EVP_MD_CTX *ctx)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++	uint32_t *output = DIGEST_DATA_OUTPUT(ddata);
++
++	output[0] = 0x6A09E667;
++	output[1] = 0xBB67AE85;
++	output[2] = 0x3C6EF372;
++	output[3] = 0xA54FF53A;
++	output[4] = 0x510E527F;
++	output[5] = 0x9B05688C;
++	output[6] = 0x1F83D9AB;
++	output[7] = 0x5BE0CD19;
++
++	padlock_sha_init(ddata);
++	ddata->hash = padlock_do_sha256;
++
++	return 1;
++}
++
++static int
++padlock_sha_update(EVP_MD_CTX *ctx, const void *data, size_t length)
++{
++	return DIGEST_DATA(ctx)->update(ctx, data, length);
++}
++
++static int
++padlock_sha_final(EVP_MD_CTX *ctx, unsigned char *md)
++{
++	return DIGEST_DATA(ctx)->final(ctx, md);
++}
++
++static int
++padlock_sha_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
++{
++	struct padlock_digest_data *dfrom = DIGEST_DATA(from);
++	struct padlock_digest_data *dto = DIGEST_DATA(to);
++
++	/* Copy the internal state */
++	memcpy(DIGEST_DATA_OUTPUT(dto), DIGEST_DATA_OUTPUT(dfrom), 128);
++	dto->total = dfrom->total - dfrom->used;
++	dto->hash  = dfrom->hash;
++	dto->used  = 0;
++
++	/* Try using oneshot update if possible */
++	if (dfrom->used == dfrom->total) {
++		dto->update = padlock_oneshot_update;
++		dto->final  = padlock_oneshot_final;
++	} else {
++		dto->update = padlock_multi_update;
++		dto->final  = padlock_multi_final;
++	}
++
++	/* Copy pending data - one oneshot destination, this means finalizing
++	 * the contents if we are still on the first iteration. */
++	if (dfrom->buffer != NULL)
++		padlock_sha_update(to, dfrom->buffer, dfrom->used);
++
++	return 1;
++}
++
++static int
++padlock_sha_cleanup(EVP_MD_CTX *ctx)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++
++	if (ddata->buffer != NULL)
++		padlock_free_buffer(ddata->buffer);
++	ddata->buffer = NULL;
++
++	return 1;
++}
++
++static const EVP_MD padlock_sha1_md = {
++	NID_sha1,
++	NID_sha1WithRSAEncryption,
++	SHA_DIGEST_LENGTH,
++	0,
++	padlock_sha1_init,
++	padlock_sha_update,
++	padlock_sha_final,
++	padlock_sha_copy,
++	padlock_sha_cleanup,
++	EVP_PKEY_RSA_method,
++	SHA_CBLOCK,
++	sizeof(struct padlock_digest_data),
++};
++
++static const EVP_MD padlock_dss1_md = {
++	NID_dsa,
++	NID_dsaWithSHA1,
++	SHA_DIGEST_LENGTH,
++	0,
++	padlock_sha1_init,
++	padlock_sha_update,
++	padlock_sha_final,
++	padlock_sha_copy,
++	padlock_sha_cleanup,
++	EVP_PKEY_DSA_method,
++	SHA_CBLOCK,
++	sizeof(struct padlock_digest_data),
++};
++
++static const EVP_MD padlock_sha224_md = {
++	NID_sha224,
++	NID_sha224WithRSAEncryption,
++	SHA224_DIGEST_LENGTH,
++	0,
++	padlock_sha224_init,
++	padlock_sha_update,
++	padlock_sha_final,
++	padlock_sha_copy,
++	padlock_sha_cleanup,
++	EVP_PKEY_RSA_method,
++	SHA_CBLOCK,
++	sizeof(struct padlock_digest_data),
++};
++
++static const EVP_MD padlock_sha256_md = {
++	NID_sha256,
++	NID_sha256WithRSAEncryption,
++	SHA256_DIGEST_LENGTH,
++	0,
++	padlock_sha256_init,
++	padlock_sha_update,
++	padlock_sha_final,
++	padlock_sha_copy,
++	padlock_sha_cleanup,
++	EVP_PKEY_RSA_method,
++	SHA_CBLOCK,
++	sizeof(struct padlock_digest_data),
++};
++
++static int padlock_digest_nids[] = {
++#if !defined(OPENSSL_NO_SHA)
++	NID_sha1,
++	NID_dsa,
++#endif
++#if !defined(OPENSSL_NO_SHA256)
++#if !defined(OPENSSL_NO_SHA224)
++	NID_sha224,
++#endif
++	NID_sha256,
++#endif
++};
++
++static int padlock_digest_nids_num = sizeof(padlock_digest_nids)/sizeof(padlock_digest_nids[0]);
++
++static int
++padlock_digests (ENGINE *e, const EVP_MD **digest, const int **nids, int nid)
++{
++	/* No specific digest => return a list of supported nids ... */
++	if (!digest) {
++		*nids = padlock_digest_nids;
++		return padlock_digest_nids_num;
++	}
++
++	/* ... or the requested "digest" otherwise */
++	switch (nid) {
++#if !defined(OPENSSL_NO_SHA)
++	  case NID_sha1:
++	    *digest = &padlock_sha1_md;
++	    break;
++	  case NID_dsa:
++	    *digest = &padlock_dss1_md;
++	    break;
++#endif
++
++#if !defined(OPENSSL_NO_SHA256)
++#if !defined(OPENSSL_NO_SHA224)
++	  case NID_sha224:
++	    *digest = &padlock_sha224_md;
++	    break;
++#endif	/* OPENSSL_NO_SHA224 */
++
++	  case NID_sha256:
++	    *digest = &padlock_sha256_md;
++	    break;
++#endif	/* OPENSSL_NO_SHA256 */
++
++	  default:
++	    /* Sorry, we don't support this NID */
++	    *digest = NULL;
++	    return 0;
++	}
++
++	return 1;
++}
++
++#endif /* OPENSSL_NO_SHA */
++
++#ifndef PADLOCK_NO_RNG
+ /* ===== Random Number Generator ===== */
+ /*
+  * This code is not engaged. The reason is that it does not comply
+@@ -1164,7 +1685,7 @@
+  * (posted at http://www.via.com.tw/en/viac3/c3.jsp) nor does it
+  * provide meaningful error control...
+  */
+-/* Wrapper that provides an interface between the API and 
++/* Wrapper that provides an interface between the API and
+    the raw PadLock RNG */
+ static int
+ padlock_rand_bytes(unsigned char *output, int count)
+@@ -1212,6 +1733,7 @@
+ 	padlock_rand_bytes,	/* pseudorand */
+ 	padlock_rand_status,	/* rand status */
+ };
++#endif /* PADLOCK_NO_RNG */
+ 
+ #endif /* COMPILE_HW_PADLOCK */
+ 
+Index: openssl-0.9.8k/crypto/evp/p_sign.c
+===================================================================
+--- openssl-0.9.8k.orig/crypto/evp/p_sign.c	2009-07-13 11:01:02.000000000 +0300
++++ openssl-0.9.8k/crypto/evp/p_sign.c	2009-07-13 11:01:45.000000000 +0300
+@@ -5,21 +5,21 @@
+  * This package is an SSL implementation written
+  * by Eric Young (eay@cryptsoft.com).
+  * The implementation was written so as to conform with Netscapes SSL.
+- * 
++ *
+  * This library is free for commercial and non-commercial use as long as
+  * the following conditions are aheared to.  The following conditions
+  * apply to all code found in this distribution, be it the RC4, RSA,
+  * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
+  * included with this distribution is covered by the same copyright terms
+  * except that the holder is Tim Hudson (tjh@cryptsoft.com).
+- * 
++ *
+  * Copyright remains Eric Young's, and as such any Copyright notices in
+  * the code are not to be removed.
+  * If this package is used in a product, Eric Young should be given attribution
+  * as the author of the parts of the library used.
+  * This can be in the form of a textual message at program startup or
+  * in documentation (online or textual) provided with the package.
+- * 
++ *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+  * are met:
+@@ -34,10 +34,10 @@
+  *     Eric Young (eay@cryptsoft.com)"
+  *    The word 'cryptographic' can be left out if the rouines from the library
+  *    being used are not cryptographic related :-).
+- * 4. If you include any Windows specific code (or a derivative thereof) from 
++ * 4. If you include any Windows specific code (or a derivative thereof) from
+  *    the apps directory (application code) you must include an acknowledgement:
+  *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
+- * 
++ *
+  * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
+  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+@@ -49,7 +49,7 @@
+  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+  * SUCH DAMAGE.
+- * 
++ *
+  * The licence and distribution terms for any publically available version or
+  * derivative of this code cannot be changed.  i.e. this code cannot simply be
+  * copied and put under another distribution licence
+@@ -105,6 +105,7 @@
+ 		return(0);
+ 		}
+ 	EVP_MD_CTX_init(&tmp_ctx);
++	M_EVP_MD_CTX_set_flags(&tmp_ctx,EVP_MD_CTX_FLAG_ONESHOT);
+ 	EVP_MD_CTX_copy_ex(&tmp_ctx,ctx);
+ 	if (ctx->digest->flags & EVP_MD_FLAG_SVCTX)
+ 		{
+Index: openssl-0.9.8k/crypto/evp/p_verify.c
+===================================================================
+--- openssl-0.9.8k.orig/crypto/evp/p_verify.c	2009-07-13 11:01:06.000000000 +0300
++++ openssl-0.9.8k/crypto/evp/p_verify.c	2009-07-13 11:02:11.000000000 +0300
+@@ -5,21 +5,21 @@
+  * This package is an SSL implementation written
+  * by Eric Young (eay@cryptsoft.com).
+  * The implementation was written so as to conform with Netscapes SSL.
+- * 
++ *
+  * This library is free for commercial and non-commercial use as long as
+  * the following conditions are aheared to.  The following conditions
+  * apply to all code found in this distribution, be it the RC4, RSA,
+  * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
+  * included with this distribution is covered by the same copyright terms
+  * except that the holder is Tim Hudson (tjh@cryptsoft.com).
+- * 
++ *
+  * Copyright remains Eric Young's, and as such any Copyright notices in
+  * the code are not to be removed.
+  * If this package is used in a product, Eric Young should be given attribution
+  * as the author of the parts of the library used.
+  * This can be in the form of a textual message at program startup or
+  * in documentation (online or textual) provided with the package.
+- * 
++ *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+  * are met:
+@@ -34,10 +34,10 @@
+  *     Eric Young (eay@cryptsoft.com)"
+  *    The word 'cryptographic' can be left out if the rouines from the library
+  *    being used are not cryptographic related :-).
+- * 4. If you include any Windows specific code (or a derivative thereof) from 
++ * 4. If you include any Windows specific code (or a derivative thereof) from
+  *    the apps directory (application code) you must include an acknowledgement:
+  *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
+- * 
++ *
+  * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
+  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+@@ -49,7 +49,7 @@
+  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+  * SUCH DAMAGE.
+- * 
++ *
+  * The licence and distribution terms for any publically available version or
+  * derivative of this code cannot be changed.  i.e. this code cannot simply be
+  * copied and put under another distribution licence
+@@ -92,7 +92,8 @@
+ 		}
+ 
+ 	EVP_MD_CTX_init(&tmp_ctx);
+-	EVP_MD_CTX_copy_ex(&tmp_ctx,ctx);     
++	M_EVP_MD_CTX_set_flags(&tmp_ctx,EVP_MD_CTX_FLAG_ONESHOT);
++	EVP_MD_CTX_copy_ex(&tmp_ctx,ctx);
+ 	if (ctx->digest->flags & EVP_MD_FLAG_SVCTX)
+ 		{
+ 		EVP_MD_SVCTX sctmp;
