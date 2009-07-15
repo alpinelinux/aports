@@ -190,16 +190,16 @@ $(ISO_KERNEL): $(KERNEL_APK)
 	@echo "==> iso: install kernel $(KERNEL)"
 	@mkdir -p $(dir $(ISO_KERNEL))
 	@tar -C $(ISO_DIR) -xzf $(KERNEL_APK)
-	@rm -f $(ISO_DIR)/.[A-Z]*
+	@rm -f $(ISO_DIR)/.[A-Z]* $(ISO_DIR)/.[a-z]*
 	@touch $(ISO_KERNEL)
 
 $(ISOFS_DIRSTAMP): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_REPOS_DIRSTAMP) $(SYSLINUX_CFG)
+	@echo "$(ALPINE_NAME)-$(ALPINE_RELEASE) $(BUILD_DATE)" \
+		> $(ISO_DIR)/.alpine-release
 	@touch $@
 
 $(ISO): $(ISOFS_DIRSTAMP)
 	@echo "==> iso: building $(notdir $(ISO))"
-	@echo "$(ALPINE_NAME)-$(ALPINE_RELEASE) $(BUILD_DATE)" \
-		> $(ISO_DIR)/.alpine-release
 	@genisoimage -o $(ISO) -l -J -R \
 		-b isolinux/isolinux.bin \
 		-c isolinux/boot.cat	\
