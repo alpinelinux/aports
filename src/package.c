@@ -242,15 +242,6 @@ const char *apk_script_types[] = {
 	[APK_SCRIPT_POST_UPGRADE]	= "post-upgrade",
 };
 
-static const char *script_types2[] = {
-	[APK_SCRIPT_PRE_INSTALL]	= "pre_install",
-	[APK_SCRIPT_POST_INSTALL]	= "post_install",
-	[APK_SCRIPT_PRE_DEINSTALL]	= "pre_deinstall",
-	[APK_SCRIPT_POST_DEINSTALL]	= "post_deinstall",
-	[APK_SCRIPT_PRE_UPGRADE]	= "pre_upgrade",
-	[APK_SCRIPT_POST_UPGRADE]	= "post_upgrade",
-};
-
 int apk_script_type(const char *name)
 {
 	int i;
@@ -569,8 +560,7 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 
 	fchdir(root_fd);
 	hlist_for_each_entry(script, c, &pkg->scripts, script_list) {
-		if (script->type != type &&
-		    script->type != APK_SCRIPT_GENERIC)
+		if (script->type != type)
 			continue;
 
 		snprintf(fn, sizeof(fn),
@@ -591,9 +581,6 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		if (pid == 0) {
 			if (chroot(".") < 0) {
 				apk_error("chroot: %s", strerror(errno));
-			} else if (script->type == APK_SCRIPT_GENERIC) {
-				execle(fn, "INSTALL", script_types2[type],
-				       pkg->version, "", NULL, environment);
 			} else {
 				execle(fn, apk_script_types[type],
 				       pkg->version, "", NULL, environment);

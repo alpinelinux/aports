@@ -1179,11 +1179,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 	/* Package metainfo and script processing */
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
-		if (strcmp(ae->name, ".INSTALL") == 0)
-			type = APK_SCRIPT_GENERIC;
-		else
-			type = apk_script_type(&ae->name[1]);
-
+		type = apk_script_type(&ae->name[1]);
 		if (type == APK_SCRIPT_INVALID)
 			return 0;
 	} else if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
@@ -1205,8 +1201,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 	if (type != APK_SCRIPT_INVALID) {
 		apk_pkg_add_script(pkg, is, type, ae->size);
 
-		if (type == APK_SCRIPT_GENERIC ||
-		    type == ctx->script) {
+		if (type == ctx->script) {
 			r = apk_pkg_run_script(pkg, db->root_fd, ctx->script);
 			if (r != 0)
 				apk_error("%s-%s: Failed to execute pre-install/upgrade script",
