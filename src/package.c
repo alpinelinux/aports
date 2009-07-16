@@ -257,8 +257,13 @@ int apk_script_type(const char *name)
 struct read_info_ctx {
 	struct apk_database *db;
 	struct apk_package *pkg;
-	int version;
-	int has_install;
+	const EVP_MD *md;
+	int version, action;
+	int has_signature : 1;
+	int has_install : 1;
+	int has_data_checksum : 1;
+	int data_started : 1;
+	int in_signatures : 1;
 };
 
 int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
@@ -325,11 +330,15 @@ static int read_info_line(void *ctx, apk_blob_t line)
 		return 0;
 
 	for (i = 0; i < ARRAY_SIZE(fields); i++) {
-		if (strncmp(fields[i].str, l.ptr, l.len) == 0) {
+		if (apk_blob_compare(APK_BLOB_STR(fields[i].str), l) == 0) {
 			apk_pkg_add_info(ri->db, ri->pkg, fields[i].field, r);
-			break;
+			return 0;
 		}
 	}
+
+	if (ri->data_started == 0 &&
+	    apk_blob_compare(APK_BLOB_STR("sha256"), l) == 0)
+		ri->has_data_checksum = 1;
 
 	return 0;
 }
@@ -354,21 +363,27 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 	int i;
 
 	/* Meta info and scripts */
-	if (ae->name[0] == '.') {
+	if (ri->in_signatures && strncmp(ae->name, ".SIGN.", 6) != 0)
+		ri->in_signatures = 0;
+
+	if (ri->data_started == 0 && ae->name[0] == '.') {
 		/* APK 2.0 format */
-		ri->version = 2;
 		if (strcmp(ae->name, ".PKGINFO") == 0) {
 			apk_blob_t blob = apk_blob_from_istream(is, ae->size);
 			apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
 			free(blob.ptr);
-			return 0;
-		}
-		if (strcmp(ae->name, ".INSTALL") == 0) {
+			ri->version = 2;
+		} else if (strncmp(ae->name, ".SIGN.", 6) == 0) {
+			ri->has_signature = 1;
+		} else if (strcmp(ae->name, ".INSTALL") == 0) {
 			apk_warning("Package '%s-%s' contains deprecated .INSTALL",
 				    pkg->name->name, pkg->version);
-			return 0;
 		}
-	} else if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
+		return 0;
+	}
+
+	ri->data_started = 1;
+	if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
 		/* APK 1.0 format */
 		ri->version = 1;
 		if (!S_ISREG(ae->mode))
@@ -399,10 +414,7 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 		if (apk_script_type(slash+1) == APK_SCRIPT_POST_INSTALL ||
 		    apk_script_type(slash+1) == APK_SCRIPT_PRE_INSTALL)
 			ri->has_install = 1;
-	} else if (ri->version == 2) {
-		/* All metdata of version 2.x package handled */
-		return 0;
-	} else {
+	} else if (ri->version < 2) {
 		/* Version 1.x packages do not contain installed size
 		 * in metadata, so we calculate it here */
 		pkg->installed_size += apk_calc_installed_size(ae->size);
@@ -417,28 +429,58 @@ static int apk_pkg_gzip_part(void *ctx, EVP_MD_CTX *mdctx, int part)
 
 	switch (part) {
 	case APK_MPART_BEGIN:
-		EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
+		EVP_DigestInit_ex(mdctx, ri->md, NULL);
 		break;
+	case APK_MPART_BOUNDARY:
+		if (ri->in_signatures) {
+			EVP_DigestFinal_ex(mdctx, ri->pkg->csum.data, NULL);
+			EVP_DigestInit_ex(mdctx, ri->md, NULL);
+			return 0;
+		}
+
+		if (ri->action == APK_SIGN_GENERATE_V1 ||
+		    !ri->has_data_checksum)
+			break;
+		/* Fallthrough to calculate checksum */
 	case APK_MPART_END:
 		ri->pkg->csum.type = EVP_MD_CTX_size(mdctx);
 		EVP_DigestFinal_ex(mdctx, ri->pkg->csum.data, NULL);
-		break;
+		return 1;
 	}
 	return 0;
 }
 
-struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
+struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
+				 int action)
 {
 	struct read_info_ctx ctx;
 	struct apk_file_info fi;
 	struct apk_bstream *bs;
 	struct apk_istream *tar;
 	char realfile[PATH_MAX];
+	int r;
 
 	if (realpath(file, realfile) < 0)
 		return NULL;
 	if (apk_file_get_info(realfile, APK_CHECKSUM_NONE, &fi) < 0)
 		return NULL;
+
+	memset(&ctx, 0, sizeof(ctx));
+	switch (action) {
+	case APK_SIGN_VERIFY:
+		ctx.in_signatures = 1;
+		ctx.md = EVP_md_null();
+		break;
+	case APK_SIGN_GENERATE:
+		ctx.in_signatures = 1;
+		ctx.md = EVP_sha1();
+		break;
+	case APK_SIGN_GENERATE_V1:
+		ctx.md = EVP_md5();
+		break;
+	default:
+		return NULL;
+	}
 
 	ctx.pkg = apk_pkg_new();
 	if (ctx.pkg == NULL)
@@ -450,15 +492,22 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 
 	ctx.db = db;
 	ctx.has_install = 0;
+	ctx.action = action;
 	ctx.pkg->size = fi.size;
 
 	tar = apk_bstream_gunzip_mpart(bs, apk_pkg_gzip_part, &ctx);
-	if (apk_parse_tar(tar, read_info_entry, &ctx) < 0) {
+	r = apk_tar_parse(tar, read_info_entry, &ctx);
+	tar->close(tar);
+	switch (r) {
+	case 0:
+		break;
+	case -2:
+		apk_error("File %s does not have a signature", file);
+		goto err;
+	default:
 		apk_error("File %s is not an APK archive", file);
-		bs->close(bs, NULL);
 		goto err;
 	}
-	tar->close(tar);
 
 	if (ctx.pkg->name == NULL) {
 		apk_error("File %s is corrupted", file);
@@ -474,7 +523,7 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 	}
 	ctx.pkg->filename = strdup(realfile);
 
-	return ctx.pkg;
+	return apk_db_pkg_add(db, ctx.pkg);
 err:
 	apk_pkg_free(ctx.pkg);
 	return NULL;

@@ -578,6 +578,45 @@ struct apk_ostream *apk_ostream_to_file(const char *file, mode_t mode)
 	return apk_ostream_to_fd(fd);
 }
 
+struct apk_counter_ostream {
+	struct apk_ostream os;
+	off_t *counter;
+};
+
+static size_t co_write(void *stream, const void *ptr, size_t size)
+{
+	struct apk_counter_ostream *cos =
+		container_of(stream, struct apk_counter_ostream, os);
+
+	*cos->counter += size;
+	return size;
+}
+
+static void co_close(void *stream)
+{
+	struct apk_counter_ostream *cos =
+		container_of(stream, struct apk_counter_ostream, os);
+
+	free(cos);
+}
+
+struct apk_ostream *apk_ostream_counter(off_t *counter)
+{
+	struct apk_counter_ostream *cos;
+
+	cos = malloc(sizeof(struct apk_counter_ostream));
+	if (cos == NULL)
+		return NULL;
+
+	*cos = (struct apk_counter_ostream) {
+		.os.write = co_write,
+		.os.close = co_close,
+		.counter = counter,
+	};
+
+	return &cos->os;
+}
+
 size_t apk_ostream_write_string(struct apk_ostream *os, const char *string)
 {
 	size_t len;

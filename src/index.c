@@ -10,10 +10,13 @@
  */
 
 #include <stdio.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "apk_applet.h"
 #include "apk_database.h"
+
+#define INDEX_OLD_FORMAT	0x10000
 
 struct counts {
 	int unsatisfied;
@@ -21,7 +24,9 @@ struct counts {
 
 struct index_ctx {
 	const char *index;
+	const char *output;
 	time_t index_mtime;
+	int method;
 };
 
 static int index_parse(void *ctx, int optch, int optindex, const char *optarg)
@@ -31,6 +36,12 @@ static int index_parse(void *ctx, int optch, int optindex, const char *optarg)
 	switch (optch) {
 	case 'x':
 		ictx->index = optarg;
+		break;
+	case 'o':
+		ictx->output = optarg;
+		break;
+	case INDEX_OLD_FORMAT:
+		ictx->method = APK_SIGN_GENERATE_V1;
 		break;
 	default:
 		return -1;
@@ -82,6 +93,16 @@ static int index_main(void *ctx, int argc, char **argv)
 	struct apk_file_info fi;
 	int total, i, j, found, newpkgs = 0;
 	struct index_ctx *ictx = (struct index_ctx *) ctx;
+
+	if (isatty(STDOUT_FILENO) && ictx->output == NULL &&
+	    !(apk_flags & APK_FORCE)) {
+		apk_error("Will not write binary index to console "
+			  "without --force");
+		return -1;
+	}
+
+	if (ictx->method == 0)
+		ictx->method = APK_SIGN_GENERATE;
 
 	apk_db_open(&db, NULL, APK_OPENF_READ);
 	if (index_read_file(&db, ictx) < 0) {
@@ -137,13 +158,33 @@ static int index_main(void *ctx, int argc, char **argv)
 		} while (0);
 
 		if (!found) {
-			apk_db_pkg_add_file(&db, argv[i]);
-			newpkgs++;
+			if (apk_pkg_read(&db, argv[i], ictx->method) != NULL)
+				newpkgs++;
 		}
 	}
 
-	os = apk_ostream_to_fd(STDOUT_FILENO);
+	if (ictx->method == APK_SIGN_GENERATE) {
+		memset(&fi, 0, sizeof(fi));
+		fi.name = "APKINDEX";
+		fi.mode = 0755 | S_IFREG;
+		os = apk_ostream_counter(&fi.size);
+		apk_db_index_write(&db, os);
+		os->close(os);
+	}
+
+	if (ictx->output != NULL)
+		os = apk_ostream_to_file(ictx->output, 0755);
+	else
+		os = apk_ostream_to_fd(STDOUT_FILENO);
+	if (ictx->method == APK_SIGN_GENERATE) {
+		os = apk_ostream_gzip(os);
+		apk_tar_write_entry(os, &fi, NULL);
+	}
 	total = apk_db_index_write(&db, os);
+	if (ictx->method == APK_SIGN_GENERATE) {
+		apk_tar_write_padding(os, &fi);
+		apk_tar_write_entry(os, NULL, NULL);
+	}
 	os->close(os);
 
 	apk_hash_foreach(&db.available.names, warn_if_no_providers, &counts);
@@ -160,9 +201,13 @@ static int index_main(void *ctx, int argc, char **argv)
 }
 
 static struct apk_option index_options[] = {
+	{ 'o', "output", "Write the generated index to FILE",
+	  required_argument, "FILE" },
 	{ 'x', "index", "Read INDEX to speed up new index creation by reusing "
 	  "the information from an old index",
 	  required_argument, "INDEX" },
+	{ INDEX_OLD_FORMAT, "old-format",
+	  "Specify to create old style index files" }
 };
 
 static struct apk_applet apk_index = {

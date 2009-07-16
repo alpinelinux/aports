@@ -118,7 +118,7 @@ static int add_main(void *ctx, int argc, char **argv)
 		if (strstr(argv[i], ".apk") != NULL) {
 			struct apk_package *pkg;
 
-			pkg = apk_db_pkg_add_file(&db, argv[i]);
+			pkg = apk_pkg_read(&db, argv[i], APK_SIGN_VERIFY);
 			if (pkg == NULL) {
 				apk_error("Unable to read '%s'", argv[i]);
 				goto err;

@@ -93,7 +93,7 @@ static size_t tar_entry_read(void *stream, void *ptr, size_t size)
 	return size;
 }
 
-int apk_parse_tar(struct apk_istream *is, apk_archive_entry_parser parser,
+int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		  void *ctx)
 {
 	struct apk_file_info entry;
@@ -205,11 +205,9 @@ err:
 	return r;
 }
 
-int apk_write_tar_entry(struct apk_ostream *os, const struct apk_file_info *ae, char *data)
+int apk_tar_write_entry(struct apk_ostream *os, const struct apk_file_info *ae, char *data)
 {
-	static char padding[512];
 	struct tar_header buf;
-	int pad;
 
 	memset(&buf, 0, sizeof(buf));
 	if (ae != NULL) {
@@ -221,15 +219,17 @@ int apk_write_tar_entry(struct apk_ostream *os, const struct apk_file_info *ae, 
 		else
 			return -1;
 
-		strncpy(buf.name, ae->name, sizeof(buf.name));
-		strncpy(buf.uname, ae->uname, sizeof(buf.uname));
-		strncpy(buf.gname, ae->gname, sizeof(buf.gname));
+		if (ae->name != NULL)
+			strncpy(buf.name, ae->name, sizeof(buf.name));
+
+		strncpy(buf.uname, ae->uname ?: "root", sizeof(buf.uname));
+		strncpy(buf.gname, ae->gname ?: "root", sizeof(buf.gname));
 
 		PUT_OCTAL(buf.size, ae->size);
 		PUT_OCTAL(buf.uid, ae->uid);
 		PUT_OCTAL(buf.gid, ae->gid);
 		PUT_OCTAL(buf.mode, ae->mode & 07777);
-		PUT_OCTAL(buf.mtime, ae->mtime);
+		PUT_OCTAL(buf.mtime, ae->mtime ?: time(NULL));
 
 		/* Checksum */
 		strcpy(buf.magic, "ustar  ");
@@ -243,14 +243,29 @@ int apk_write_tar_entry(struct apk_ostream *os, const struct apk_file_info *ae, 
 	if (os->write(os, &buf, sizeof(buf)) != sizeof(buf))
 		return -1;
 
-	if (data != NULL) {
+	if (ae == NULL) {
+		/* End-of-archive is two empty headers */
+		if (os->write(os, &buf, sizeof(buf)) != sizeof(buf))
+			return -1;
+	} else if (data != NULL) {
 		if (os->write(os, data, ae->size) != ae->size)
 			return -1;
-		pad = 512 - (ae->size & 511);
-		if (pad != 512 &&
-		    os->write(os, padding, pad) != pad)
+		if (apk_tar_write_padding(os, ae) != 0)
 			return -1;
 	}
+
+	return 0;
+}
+
+int apk_tar_write_padding(struct apk_ostream *os, const struct apk_file_info *ae)
+{
+	static char padding[512];
+	int pad;
+
+	pad = 512 - (ae->size & 511);
+	if (pad != 512 &&
+	    os->write(os, padding, pad) != pad)
+		return -1;
 
 	return 0;
 }

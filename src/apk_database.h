@@ -134,7 +134,6 @@ int apk_db_write_config(struct apk_database *db);
 void apk_db_close(struct apk_database *db);
 int apk_db_cache_active(struct apk_database *db);
 
-struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *file);
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);
 struct apk_package *apk_db_get_pkg(struct apk_database *db, struct apk_checksum *csum);
 struct apk_package *apk_db_get_file_owner(struct apk_database *db, apk_blob_t filename);

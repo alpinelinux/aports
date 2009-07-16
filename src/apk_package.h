@@ -30,6 +30,10 @@ struct apk_name;
 #define APK_PKG_NOT_INSTALLED		0
 #define APK_PKG_INSTALLED		1
 
+#define APK_SIGN_VERIFY			0
+#define APK_SIGN_GENERATE_V1		1
+#define APK_SIGN_GENERATE		2
+
 struct apk_script {
 	struct hlist_node script_list;
 	unsigned int type;
@@ -80,7 +84,7 @@ int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os);
 int apk_script_type(const char *name);
 
 struct apk_package *apk_pkg_new(void);
-struct apk_package *apk_pkg_read(struct apk_database *db, const char *name);
+struct apk_package *apk_pkg_read(struct apk_database *db, const char *name, int indexstyle);
 void apk_pkg_free(struct apk_package *pkg);
 
 int apk_pkg_parse_name(apk_blob_t apkname, apk_blob_t *name, apk_blob_t *version);

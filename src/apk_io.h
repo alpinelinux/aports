@@ -59,6 +59,7 @@ static inline struct apk_istream *apk_bstream_gunzip(struct apk_bstream *bs)
 }
 
 struct apk_ostream *apk_ostream_gzip(struct apk_ostream *);
+struct apk_ostream *apk_ostream_counter(off_t *);
 
 struct apk_istream *apk_istream_from_fd(int fd);
 struct apk_istream *apk_istream_from_file(const char *file);

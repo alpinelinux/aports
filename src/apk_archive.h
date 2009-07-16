@@ -20,8 +20,9 @@ typedef int (*apk_archive_entry_parser)(void *ctx,
 					const struct apk_file_info *ae,
 					struct apk_istream *istream);
 
-int apk_parse_tar(struct apk_istream *, apk_archive_entry_parser parser, void *ctx);
-int apk_write_tar_entry(struct apk_ostream *, const struct apk_file_info *ae, char *data);
+int apk_tar_parse(struct apk_istream *, apk_archive_entry_parser parser, void *ctx);
+int apk_tar_write_entry(struct apk_ostream *, const struct apk_file_info *ae, char *data);
+int apk_tar_write_padding(struct apk_ostream *, const struct apk_file_info *ae);
 
 int apk_archive_entry_extract(const struct apk_file_info *ae,
 			      struct apk_istream *is,

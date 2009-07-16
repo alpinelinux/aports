@@ -545,19 +545,14 @@ static int apk_db_scriptdb_write(struct apk_database *db, struct apk_ostream *os
 	struct apk_file_info fi;
 	char filename[256];
 	apk_blob_t bfn;
-	int r, i;
+	int r;
 
 	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
 		hlist_for_each_entry(script, c2, &pkg->scripts, script_list) {
 			fi = (struct apk_file_info) {
 				.name = filename,
-				.uname = "root",
-				.gname = "root",
 				.size = script->size,
-				.uid = 0,
-				.gid = 0,
 				.mode = 0755 | S_IFREG,
-				.mtime = time(NULL),
 			};
 			/* The scripts db expects file names in format:
 			 * pkg-version.<hexdump of package checksum>.action */
@@ -571,18 +566,13 @@ static int apk_db_scriptdb_write(struct apk_database *db, struct apk_ostream *os
 			apk_blob_push_blob(&bfn, APK_BLOB_STR(apk_script_types[script->type]));
 			apk_blob_push_blob(&bfn, APK_BLOB_PTR_LEN("", 1));
 
-			r = apk_write_tar_entry(os, &fi, script->script);
+			r = apk_tar_write_entry(os, &fi, script->script);
 			if (r < 0)
 				return r;
 		}
 	}
 
-	for (i = 0; i < 2; i++) {
-		r = apk_write_tar_entry(os, NULL, NULL);
-		if (r < 0)
-			return r;
-	}
-	return 0;
+	return apk_tar_write_entry(os, NULL, NULL);
 }
 
 static int apk_db_scriptdb_read_v1(struct apk_database *db, struct apk_istream *is)
@@ -688,7 +678,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	if (!(flags & APK_OPENF_NO_SCRIPTS)) {
 		is = apk_istream_from_file("var/lib/apk/scripts.tar");
 		if (is != NULL) {
-			apk_parse_tar(is, apk_read_script_archive_entry, db);
+			apk_tar_parse(is, apk_read_script_archive_entry, db);
 		} else {
 			is = apk_istream_from_file("var/lib/apk/scripts");
 			if (is != NULL)
@@ -968,16 +958,6 @@ struct apk_package *apk_db_get_file_owner(struct apk_database *db,
 		return NULL;
 
 	return dbf->diri->pkg;
-}
-
-struct apk_package *apk_db_pkg_add_file(struct apk_database *db, const char *file)
-{
-	struct apk_package *info;
-
-	info = apk_pkg_read(db, file);
-	if (info != NULL)
-		info = apk_db_pkg_add(db, info);
-	return info;
 }
 
 struct index_write_ctx {
@@ -1433,7 +1413,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	};
 
 	tar = apk_bstream_gunzip_mpart(bs, apk_db_gzip_part, &ctx);
-	if (apk_parse_tar(tar, apk_db_install_archive_entry, &ctx) != 0)
+	if (apk_tar_parse(tar, apk_db_install_archive_entry, &ctx) != 0)
 		goto err_close;
 	tar->close(tar);
 
