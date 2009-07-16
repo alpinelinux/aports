@@ -44,6 +44,13 @@ struct tar_header {
 	char padding[12];   /* 500-512 */
 };
 
+struct apk_tar_digest_info {
+	char id[4];
+	uint16_t nid;
+	uint16_t size;
+	char digest[];
+};
+
 #define GET_OCTAL(s)	get_octal(s, sizeof(s))
 #define PUT_OCTAL(s,v)	put_octal(s, sizeof(s), v)
 
@@ -82,13 +89,17 @@ static size_t tar_entry_read(void *stream, void *ptr, size_t size)
 	if (size > teis->bytes_left)
 		size = teis->bytes_left;
 	size = teis->tar_is->read(teis->tar_is, ptr, size);
-	if (size > 0) {
-		teis->bytes_left -= size;
-		EVP_DigestUpdate(&teis->mdctx, ptr, size);
-		if (teis->bytes_left == 0) {
-			teis->csum->type = EVP_MD_CTX_size(&teis->mdctx);
-			EVP_DigestFinal_ex(&teis->mdctx, teis->csum->data, NULL);
-		}
+	if (size < 0)
+		return -1;
+
+	teis->bytes_left -= size;
+	if (teis->csum != NULL)
+		return size;
+
+	EVP_DigestUpdate(&teis->mdctx, ptr, size);
+	if (teis->bytes_left == 0) {
+		teis->csum->type = EVP_MD_CTX_size(&teis->mdctx);
+		EVP_DigestFinal_ex(&teis->mdctx, teis->csum->data, NULL);
 	}
 	return size;
 }
@@ -100,13 +111,14 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	struct apk_tar_entry_istream teis = {
 		.is.read = tar_entry_read,
 		.tar_is = is,
-		.csum = &entry.csum,
 	};
 	struct tar_header buf;
+	struct apk_tar_digest_info *di;
 	unsigned long offset = 0;
 	int end = 0, r;
 	size_t toskip;
 
+	di = (struct apk_tar_digest_info *) &buf.linkname[3];
 	EVP_MD_CTX_init(&teis.mdctx);
 	memset(&entry, 0, sizeof(entry));
 	while ((r = is->read(is, &buf, 512)) == 512) {
@@ -146,6 +158,14 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		case '0':
 		case '7': /* regular file */
 			entry.mode |= S_IFREG;
+			if (memcmp(di->id, "APK2", 4) == 0 &&
+			    di->size <= sizeof(entry.csum.data)) {
+				entry.csum.type = di->size;
+				memcpy(entry.csum.data, di->digest, di->size);
+				teis.csum = NULL;
+			} else {
+				teis.csum = &entry.csum;
+			}
 			break;
 		case '1': /* hard link */
 			entry.mode |= S_IFREG;
