@@ -337,7 +337,7 @@ static int read_info_line(void *ctx, apk_blob_t line)
 	}
 
 	if (ri->data_started == 0 &&
-	    apk_blob_compare(APK_BLOB_STR("sha256"), l) == 0)
+	    apk_blob_compare(APK_BLOB_STR("datahash"), l) == 0)
 		ri->has_data_checksum = 1;
 
 	return 0;
