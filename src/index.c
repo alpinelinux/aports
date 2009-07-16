@@ -48,7 +48,7 @@ static int index_read_file(struct apk_database *db, struct index_ctx *ictx)
 	if (apk_file_get_info(ictx->index, APK_CHECKSUM_NONE, &fi) < 0)
 		return -1;
 	ictx->index_mtime = fi.mtime;
-	bs = apk_bstream_from_istream(apk_bstream_gunzip(apk_bstream_from_url(ictx->index), 1));
+	bs = apk_bstream_from_istream(apk_bstream_gunzip(apk_bstream_from_url(ictx->index)));
 	if (bs == NULL)
 		return -1;
 	r = apk_db_index_read(db, bs, 0);

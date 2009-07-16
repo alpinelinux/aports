@@ -430,11 +430,14 @@ static int apk_pkg_gzip_part(void *ctx, EVP_MD_CTX *mdctx, int part)
 struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 {
 	struct read_info_ctx ctx;
+	struct apk_file_info fi;
 	struct apk_bstream *bs;
 	struct apk_istream *tar;
 	char realfile[PATH_MAX];
 
 	if (realpath(file, realfile) < 0)
+		return NULL;
+	if (apk_file_get_info(realfile, APK_CHECKSUM_NONE, &fi) < 0)
 		return NULL;
 
 	ctx.pkg = apk_pkg_new();
@@ -447,14 +450,15 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file)
 
 	ctx.db = db;
 	ctx.has_install = 0;
+	ctx.pkg->size = fi.size;
 
-	tar = apk_bstream_gunzip_mpart(bs, FALSE, apk_pkg_gzip_part, &ctx);
+	tar = apk_bstream_gunzip_mpart(bs, apk_pkg_gzip_part, &ctx);
 	if (apk_parse_tar(tar, read_info_entry, &ctx) < 0) {
 		apk_error("File %s is not an APK archive", file);
 		bs->close(bs, NULL);
 		goto err;
 	}
-	bs->close(bs, &ctx.pkg->size);
+	tar->close(tar);
 
 	if (ctx.pkg->name == NULL) {
 		apk_error("File %s is corrupted", file);

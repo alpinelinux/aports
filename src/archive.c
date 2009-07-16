@@ -255,19 +255,6 @@ int apk_write_tar_entry(struct apk_ostream *os, const struct apk_file_info *ae, 
 	return 0;
 }
 
-int apk_parse_tar_gz(struct apk_bstream *bs, apk_archive_entry_parser parser,
-		     void *ctx)
-{
-	struct apk_istream *is;
-	int rc;
-
-	is = apk_bstream_gunzip(bs, FALSE);
-	rc = apk_parse_tar(is, parser, ctx);
-	is->close(is);
-
-	return rc;
-}
-
 int apk_archive_entry_extract(const struct apk_file_info *ae,
 			      struct apk_istream *is,
 			      const char *fn, apk_progress_cb cb,

@@ -1135,7 +1135,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	} else {
 		bs = apk_repository_file_open(repo, apk_index_gz);
 	}
-	bs = apk_bstream_from_istream(apk_bstream_gunzip(bs, TRUE));
+	bs = apk_bstream_from_istream(apk_bstream_gunzip(bs));
 	if (bs == NULL) {
 		apk_warning("Failed to open index for %s", repo->url);
 		return -1;
@@ -1377,7 +1377,6 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	struct apk_istream *tar;
 	char pkgname[256], file[256];
 	int i, need_copy = FALSE;
-	size_t length;
 
 	snprintf(pkgname, sizeof(pkgname), "%s-%s.apk",
 		 newpkg->name->name, newpkg->version);
@@ -1433,10 +1432,10 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		.cb_ctx = cb_ctx,
 	};
 
-	tar = apk_bstream_gunzip_mpart(bs, FALSE, apk_db_gzip_part, &ctx);
+	tar = apk_bstream_gunzip_mpart(bs, apk_db_gzip_part, &ctx);
 	if (apk_parse_tar(tar, apk_db_install_archive_entry, &ctx) != 0)
 		goto err_close;
-	bs->close(bs, &length);
+	tar->close(tar);
 
 	/* Check the package checksum */
 	if (apk_checksum_compare(&ctx.data_csum, &newpkg->csum) != 0)
@@ -1444,14 +1443,10 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 			    newpkg->name->name, newpkg->version);
 
 	if (need_copy) {
-		if (length == newpkg->size) {
-			char file2[256];
-			apk_db_cache_get_name(file2, sizeof(file2), db,
-					      &newpkg->csum, pkgname, FALSE);
-			rename(file, file2);
-		} else {
-			unlink(file);
-		}
+		char file2[256];
+		apk_db_cache_get_name(file2, sizeof(file2), db,
+				      &newpkg->csum, pkgname, FALSE);
+		rename(file, file2);
 	}
 
 	return 0;

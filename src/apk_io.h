@@ -51,12 +51,11 @@ struct apk_ostream {
 
 typedef int (*apk_multipart_cb)(void *ctx, EVP_MD_CTX *mdctx, int part);
 
-struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *, int,
+struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *,
 					     apk_multipart_cb cb, void *ctx);
-static inline struct apk_istream *apk_bstream_gunzip(struct apk_bstream *bs,
-						     int autoclose)
+static inline struct apk_istream *apk_bstream_gunzip(struct apk_bstream *bs)
 {
-	return apk_bstream_gunzip_mpart(bs, autoclose, NULL, NULL);
+	return apk_bstream_gunzip_mpart(bs, NULL, NULL);
 }
 
 struct apk_ostream *apk_ostream_gzip(struct apk_ostream *);

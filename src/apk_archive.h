@@ -21,7 +21,6 @@ typedef int (*apk_archive_entry_parser)(void *ctx,
 					struct apk_istream *istream);
 
 int apk_parse_tar(struct apk_istream *, apk_archive_entry_parser parser, void *ctx);
-int apk_parse_tar_gz(struct apk_bstream *, apk_archive_entry_parser parser, void *ctx);
 int apk_write_tar_entry(struct apk_ostream *, const struct apk_file_info *ae, char *data);
 
 int apk_archive_entry_extract(const struct apk_file_info *ae,

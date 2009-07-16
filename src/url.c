@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -68,7 +68,7 @@ struct apk_istream *apk_istream_from_url(const char *url)
 
 struct apk_istream *apk_istream_from_url_gz(const char *file)
 {
-	return apk_bstream_gunzip(apk_bstream_from_url(file), TRUE);
+	return apk_bstream_gunzip(apk_bstream_from_url(file));
 }
 
 struct apk_bstream *apk_bstream_from_url(const char *url)

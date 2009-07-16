@@ -22,7 +22,6 @@ struct apk_gzip_istream {
 	struct apk_bstream *bs;
 	z_stream zs;
 	int z_err;
-	int autoclose;
 
 	EVP_MD_CTX mdctx;
 	void *mdblock;
@@ -104,12 +103,11 @@ static void gz_close(void *stream)
 	if (gis->cb != NULL)
 		EVP_MD_CTX_cleanup(&gis->mdctx);
 	inflateEnd(&gis->zs);
-	if (gis->autoclose)
-		gis->bs->close(gis->bs, NULL);
+	gis->bs->close(gis->bs, NULL);
 	free(gis);
 }
 
-struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs, int autoclose,
+struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 					     apk_multipart_cb cb, void *ctx)
 {
 	struct apk_gzip_istream *gis;
@@ -126,7 +124,6 @@ struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs, int autoclo
 		.is.close = gz_close,
 		.bs = bs,
 		.z_err = 0,
-		.autoclose = autoclose,
 		.cb = cb,
 		.cbctx = ctx,
 	};
