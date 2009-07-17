@@ -391,13 +391,24 @@ int apk_sign_ctx_mpart_cb(void *ctx, EVP_MD_CTX *mdctx, int part)
 		break;
 	case APK_MPART_END:
 		if (sctx->action == APK_SIGN_VERIFY) {
-			/* Check that data checksum matches */
-			EVP_DigestFinal_ex(mdctx, calculated, NULL);
-			if (sctx->has_data_checksum &&
-			    EVP_MD_CTX_size(mdctx) != 0 &&
-			    memcmp(calculated, sctx->data_checksum,
-				   EVP_MD_CTX_size(mdctx)) == 0)
-				sctx->data_verified = 1;
+			if (sctx->has_data_checksum) {
+				/* Check that data checksum matches */
+				EVP_DigestFinal_ex(mdctx, calculated, NULL);
+				if (EVP_MD_CTX_size(mdctx) != 0 &&
+				    memcmp(calculated, sctx->data_checksum,
+				           EVP_MD_CTX_size(mdctx)) == 0)
+					sctx->data_verified = 1;
+			} else if (sctx->signature.pkey != NULL) {
+				/* Assume that the data is fully signed */
+				r = EVP_VerifyFinal(mdctx,
+					   (unsigned char *) sctx->signature.data.ptr,
+					   sctx->signature.data.len,
+					   sctx->signature.pkey);
+				if (r == 1) {
+					sctx->control_verified = 1;
+					sctx->data_verified = 1;
+				}
+			}
 		} else if (!sctx->has_data_checksum) {
 			/* Package identity is checksum of all data */
 			sctx->identity.type = EVP_MD_CTX_size(mdctx);

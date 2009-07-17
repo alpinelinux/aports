@@ -169,14 +169,14 @@ static int index_main(void *ctx, int argc, char **argv)
 	if (ictx->method == APK_SIGN_GENERATE) {
 		memset(&fi, 0, sizeof(fi));
 		fi.name = "APKINDEX";
-		fi.mode = 0755 | S_IFREG;
+		fi.mode = 0644 | S_IFREG;
 		os = apk_ostream_counter(&fi.size);
 		apk_db_index_write(&db, os);
 		os->close(os);
 	}
 
 	if (ictx->output != NULL)
-		os = apk_ostream_to_file(ictx->output, 0755);
+		os = apk_ostream_to_file(ictx->output, 0644);
 	else
 		os = apk_ostream_to_fd(STDOUT_FILENO);
 	if (ictx->method == APK_SIGN_GENERATE) {
