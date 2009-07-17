@@ -150,26 +150,26 @@ struct apk_gzip_ostream {
 	struct apk_ostream os;
 	struct apk_ostream *output;
 	z_stream zs;
-	unsigned char buffer[8*1024];
 };
 
 static size_t gzo_write(void *stream, const void *ptr, size_t size)
 {
 	struct apk_gzip_ostream *gos = (struct apk_gzip_ostream *) stream;
+	unsigned char buffer[1024];
 	size_t have;
 	int r;
 
 	gos->zs.avail_in = size;
 	gos->zs.next_in = (void *) ptr;
 	while (gos->zs.avail_in) {
-		gos->zs.avail_out = sizeof(gos->buffer);
-		gos->zs.next_out = gos->buffer;
+		gos->zs.avail_out = sizeof(buffer);
+		gos->zs.next_out = buffer;
 		r = deflate(&gos->zs, Z_NO_FLUSH);
 		if (r == Z_STREAM_ERROR)
 			return -1;
-		have = sizeof(gos->buffer) - gos->zs.avail_out;
+		have = sizeof(buffer) - gos->zs.avail_out;
 		if (have != 0) {
-			r = gos->output->write(gos->output, gos->buffer, have);
+			r = gos->output->write(gos->output, buffer, have);
 			if (r != have)
 				return -1;
 		}
@@ -181,11 +181,14 @@ static size_t gzo_write(void *stream, const void *ptr, size_t size)
 static void gzo_close(void *stream)
 {
 	struct apk_gzip_ostream *gos = (struct apk_gzip_ostream *) stream;
+	unsigned char buffer[1024];
 	size_t have;
 
+	gos->zs.avail_out = sizeof(buffer);
+	gos->zs.next_out = buffer;
 	deflate(&gos->zs, Z_FINISH);
-	have = sizeof(gos->buffer) - gos->zs.avail_out;
-	gos->output->write(gos->output, gos->buffer, have);
+	have = sizeof(buffer) - gos->zs.avail_out;
+	gos->output->write(gos->output, buffer, have);
 	gos->output->close(gos->output);
 
 	deflateEnd(&gos->zs);

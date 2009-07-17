@@ -259,12 +259,15 @@ int apk_script_type(const char *name)
 void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action)
 {
 	memset(ctx, 0, sizeof(struct apk_sign_ctx));
-	switch (ctx->action) {
+	ctx->action = action;
+	switch (action) {
 	case APK_SIGN_VERIFY:
 		ctx->md = EVP_md_null();
 		break;
 	case APK_SIGN_GENERATE_V1:
 		ctx->md = EVP_md5();
+		ctx->control_started = 1;
+		ctx->data_started = 1;
 		break;
 	case APK_SIGN_GENERATE:
 	default:
@@ -272,7 +275,6 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action)
 		ctx->md = EVP_sha1();
 		break;
 	}
-	ctx->action = action;
 }
 
 
@@ -396,7 +398,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, EVP_MD_CTX *mdctx, int part)
 			    memcmp(calculated, sctx->data_checksum,
 				   EVP_MD_CTX_size(mdctx)) == 0)
 				sctx->data_verified = 1;
-		} else {
+		} else if (!sctx->has_data_checksum) {
 			/* Package identity is checksum of all data */
 			sctx->identity.type = EVP_MD_CTX_size(mdctx);
 			EVP_DigestFinal_ex(mdctx, sctx->identity.data, NULL);
@@ -519,7 +521,7 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 	if (apk_sign_ctx_process_file(ri->sctx, ae, is) == 0)
 		return 0;
 
-	if (ri->sctx->data_started == 0 && ae->name[0] == '.') {
+	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
 		if (strcmp(ae->name, ".PKGINFO") == 0) {
 			apk_blob_t blob = apk_blob_from_istream(is, ae->size);
@@ -612,6 +614,9 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
 	if (sctx->action == APK_SIGN_VERIFY && !sctx->data_verified &&
 	    !(apk_flags & APK_FORCE))
 		goto err;
+	if (sctx->action != APK_SIGN_VERIFY)
+		ctx.pkg->csum = sctx->identity;
+	fprintf(stderr, "%s: %d\n", realfile, ctx.pkg->csum.type);
 
 	/* Add implicit busybox dependency if there is scripts */
 	if (ctx.has_install) {
@@ -808,6 +813,9 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nL:"));
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->license));
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
+
+	if (APK_BLOB_IS_NULL(bbuf))
+		return -1;
 
 	if (os->write(os, buf, bbuf.ptr - buf) != bbuf.ptr - buf)
 		return -1;
