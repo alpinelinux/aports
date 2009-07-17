@@ -616,7 +616,6 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
 		goto err;
 	if (sctx->action != APK_SIGN_VERIFY)
 		ctx.pkg->csum = sctx->identity;
-	fprintf(stderr, "%s: %d\n", realfile, ctx.pkg->csum.type);
 
 	/* Add implicit busybox dependency if there is scripts */
 	if (ctx.has_install) {
