@@ -1332,22 +1332,6 @@ static void apk_db_purge_pkg(struct apk_database *db,
 	apk_pkg_set_state(db, pkg, APK_PKG_NOT_INSTALLED);
 }
 
-static int apk_db_gzip_part(void *pctx, EVP_MD_CTX *mdctx, int part)
-{
-	struct install_ctx *ctx = (struct install_ctx *) pctx;
-
-	switch (part) {
-	case APK_MPART_BEGIN:
-		EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
-		break;
-	case APK_MPART_END:
-		ctx->data_csum.type = EVP_MD_CTX_size(mdctx);
-		EVP_DigestFinal_ex(mdctx, ctx->data_csum.data, NULL);
-		break;
-	}
-	return 0;
-}
-
 static int apk_db_unpack_pkg(struct apk_database *db,
 			     struct apk_package *newpkg,
 			     int upgrade, apk_progress_cb cb, void *cb_ctx)
@@ -1355,6 +1339,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	struct install_ctx ctx;
 	struct apk_bstream *bs = NULL;
 	struct apk_istream *tar;
+	struct apk_sign_ctx sctx;
 	char pkgname[256], file[256];
 	int i, need_copy = FALSE;
 
@@ -1411,8 +1396,9 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		.cb = cb,
 		.cb_ctx = cb_ctx,
 	};
-
-	tar = apk_bstream_gunzip_mpart(bs, apk_db_gzip_part, &ctx);
+	apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY);
+	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &sctx);
+	apk_sign_ctx_free(&sctx);
 	if (apk_tar_parse(tar, apk_db_install_archive_entry, &ctx) != 0)
 		goto err_close;
 	tar->close(tar);

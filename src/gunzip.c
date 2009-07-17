@@ -23,17 +23,16 @@ struct apk_gzip_istream {
 	z_stream zs;
 	int z_err;
 
-	EVP_MD_CTX mdctx;
-	void *mdblock;
-
 	apk_multipart_cb cb;
 	void *cbctx;
+	void *cbprev;
 };
 
 static size_t gzi_read(void *stream, void *ptr, size_t size)
 {
 	struct apk_gzip_istream *gis =
 		container_of(stream, struct apk_gzip_istream, is);
+	int r;
 
 	if (gis->z_err == Z_DATA_ERROR || gis->z_err == Z_ERRNO)
 		return -1;
@@ -50,22 +49,22 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 		if (gis->zs.avail_in == 0) {
 			apk_blob_t blob;
 
-			if (gis->cb != NULL && gis->mdblock != NULL) {
-				/* Digest the inflated bytes */
-				EVP_DigestUpdate(&gis->mdctx, gis->mdblock,
-						 (void *)gis->zs.next_in - gis->mdblock);
+			if (gis->cb != NULL && gis->cbprev != NULL) {
+				gis->cb(gis->cbctx, APK_MPART_DATA,
+					APK_BLOB_PTR_LEN(gis->cbprev,
+					(void *)gis->zs.next_in - gis->cbprev));
 			}
 			blob = gis->bs->read(gis->bs, APK_BLOB_NULL);
-			gis->mdblock = blob.ptr;
+			gis->cbprev = blob.ptr;
 			gis->zs.avail_in = blob.len;
-			gis->zs.next_in = (void *) gis->mdblock;
+			gis->zs.next_in = (void *) gis->cbprev;
 			if (gis->zs.avail_in < 0) {
 				gis->z_err = Z_DATA_ERROR;
 				return size - gis->zs.avail_out;
 			} else if (gis->zs.avail_in == 0) {
 				if (gis->cb != NULL)
-					gis->cb(gis->cbctx, &gis->mdctx,
-						APK_MPART_END);
+					gis->cb(gis->cbctx, APK_MPART_END,
+						APK_BLOB_NULL);
 				gis->z_err = Z_STREAM_END;
 				return size - gis->zs.avail_out;
 			}
@@ -75,14 +74,16 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 		if (gis->z_err == Z_STREAM_END) {
 			/* Digest the inflated bytes */
 			if (gis->cb != NULL) {
-				EVP_DigestUpdate(&gis->mdctx, gis->mdblock,
-						 (void *)gis->zs.next_in - gis->mdblock);
-				gis->mdblock = gis->zs.next_in;
-				if (gis->cb(gis->cbctx, &gis->mdctx,
-					    APK_MPART_BOUNDARY)) {
-					gis->z_err = Z_STREAM_END;
-					break;
+				r = gis->cb(gis->cbctx, APK_MPART_BOUNDARY,
+					    APK_BLOB_PTR_LEN(gis->cbprev,
+					    (void *)gis->zs.next_in - gis->cbprev));
+				if (r != 0) {
+					gis->z_err = Z_DATA_ERROR;
+					if (r > 0)
+						r = -1;
+					return r;
 				}
+				gis->cbprev = gis->zs.next_in;
 			}
 			inflateEnd(&gis->zs);
 			if (inflateInit2(&gis->zs, 15+32) != Z_OK)
@@ -102,8 +103,6 @@ static void gzi_close(void *stream)
 	struct apk_gzip_istream *gis =
 		container_of(stream, struct apk_gzip_istream, is);
 
-	if (gis->cb != NULL)
-		EVP_MD_CTX_cleanup(&gis->mdctx);
 	inflateEnd(&gis->zs);
 	gis->bs->close(gis->bs, NULL);
 	free(gis);
@@ -133,11 +132,6 @@ struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 	if (inflateInit2(&gis->zs, 15+32) != Z_OK) {
 		free(gis);
 		goto err;
-	}
-
-	if (gis->cb != NULL) {
-		EVP_MD_CTX_init(&gis->mdctx);
-		cb(ctx, &gis->mdctx, APK_MPART_BEGIN);
 	}
 
 	return &gis->is;

@@ -45,6 +45,7 @@ struct apk_sign_ctx {
 	int data_verified : 1;
 	char data_checksum[EVP_MAX_MD_SIZE];
 	struct apk_checksum identity;
+	EVP_MD_CTX mdctx;
 
 	struct {
 		apk_blob_t data;
@@ -97,7 +98,7 @@ void apk_sign_ctx_free(struct apk_sign_ctx *ctx);
 int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 			      const struct apk_file_info *fi,
 			      struct apk_istream *is);
-int apk_sign_ctx_mpart_cb(void *ctx, EVP_MD_CTX *mdctx, int part);
+int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t blob);
 
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep);

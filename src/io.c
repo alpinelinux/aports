@@ -295,6 +295,7 @@ static struct apk_bstream *apk_mmap_bstream_from_fd(int fd)
 	}
 
 	mbs->bs = (struct apk_bstream) {
+		.flags = APK_BSTREAM_SINGLE_READ,
 		.read = mmap_read,
 		.close = mmap_close,
 	};
@@ -466,6 +467,8 @@ int apk_file_get_info(const char *filename, int checksum, struct apk_file_info *
 		apk_blob_t blob;
 
 		EVP_DigestInit(&mdctx, apk_get_digest(checksum));
+		if (bs->flags & APK_BSTREAM_SINGLE_READ)
+			EVP_MD_CTX_set_flags(&mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 		while (!APK_BLOB_IS_NULL(blob = bs->read(bs, APK_BLOB_NULL)))
 			EVP_DigestUpdate(&mdctx, (void*) blob.ptr, blob.len);
 		fi->csum.type = EVP_MD_CTX_size(&mdctx);

@@ -35,7 +35,10 @@ struct apk_istream {
 	void (*close)(void *stream);
 };
 
+#define APK_BSTREAM_SINGLE_READ			0x0001
+
 struct apk_bstream {
+	unsigned int flags;
 	apk_blob_t (*read)(void *stream, apk_blob_t token);
 	void (*close)(void *stream, size_t *size);
 };
@@ -45,11 +48,11 @@ struct apk_ostream {
 	void (*close)(void *stream);
 };
 
-#define APK_MPART_BEGIN		0
-#define APK_MPART_BOUNDARY	1
-#define APK_MPART_END		2
+#define APK_MPART_DATA		1 /* data processed so far */
+#define APK_MPART_BOUNDARY	2 /* final part of data, before boundary */
+#define APK_MPART_END		3 /* signals end of stream */
 
-typedef int (*apk_multipart_cb)(void *ctx, EVP_MD_CTX *mdctx, int part);
+typedef int (*apk_multipart_cb)(void *ctx, int part, apk_blob_t data);
 
 struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *,
 					     apk_multipart_cb cb, void *ctx);
