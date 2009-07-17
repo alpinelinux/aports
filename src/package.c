@@ -20,6 +20,8 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+#include <openssl/pem.h>
+
 #include "apk_defines.h"
 #include "apk_archive.h"
 #include "apk_package.h"
@@ -254,16 +256,162 @@ int apk_script_type(const char *name)
 	return APK_SCRIPT_INVALID;
 }
 
+void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action)
+{
+	memset(ctx, 0, sizeof(struct apk_sign_ctx));
+	switch (ctx->action) {
+	case APK_SIGN_VERIFY:
+		ctx->md = EVP_md_null();
+		break;
+	case APK_SIGN_GENERATE_V1:
+		ctx->md = EVP_md5();
+		break;
+	case APK_SIGN_GENERATE:
+	default:
+		action = APK_SIGN_GENERATE;
+		ctx->md = EVP_sha1();
+		break;
+	}
+	ctx->action = action;
+}
+
+
+void apk_sign_ctx_free(struct apk_sign_ctx *ctx)
+{
+	if (ctx->signature.data.ptr != NULL)
+		free(ctx->signature.data.ptr);
+	if (ctx->signature.pkey != NULL)
+		EVP_PKEY_free(ctx->signature.pkey);
+}
+
+int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
+			      const struct apk_file_info *fi,
+			      struct apk_istream *is)
+{
+	if (ctx->data_started)
+		return 1;
+
+	if (fi->name[0] != '.') {
+		ctx->data_started = 1;
+		ctx->control_started = 1;
+		return 1;
+	}
+
+	if (ctx->control_started)
+		return 1;
+
+	if (strncmp(fi->name, ".SIGN.", 6) != 0) {
+		ctx->control_started = 1;
+		return 1;
+	}
+
+	/* A signature file */
+	ctx->num_signatures++;
+
+	/* Found already a trusted key */
+	if (ctx->signature.pkey != NULL)
+		return 0;
+
+	if (strncmp(&fi->name[6], "RSA.", 4) == 0 ||
+	    strncmp(&fi->name[6], "DSA.", 4) == 0) {
+		char file[256];
+	        BIO *bio = BIO_new(BIO_s_file());
+		snprintf(file, sizeof(file), "/etc/apk/keys/%s", &fi->name[10]);
+		if (BIO_read_filename(bio, file) > 0)
+			ctx->signature.pkey =
+				PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
+		if (ctx->signature.pkey != NULL) {
+			if (fi->name[6] == 'R')
+				ctx->md = EVP_sha1();
+			else
+				ctx->md = EVP_dss1();
+		}
+		BIO_free(bio);
+	} else
+		return 0;
+
+	if (ctx->signature.pkey != NULL)
+		ctx->signature.data = apk_blob_from_istream(is, fi->size);
+
+	return 0;
+}
+
+int apk_sign_ctx_mpart_cb(void *ctx, EVP_MD_CTX *mdctx, int part)
+{
+	struct apk_sign_ctx *sctx = (struct apk_sign_ctx *) ctx;
+	unsigned char calculated[EVP_MAX_MD_SIZE];
+	int r;
+
+	switch (part) {
+	case APK_MPART_BEGIN:
+		EVP_DigestInit_ex(mdctx, sctx->md, NULL);
+		break;
+	case APK_MPART_BOUNDARY:
+		/* We are not interested about checksums of signature,
+		 * reset checksum if we are still in signatures */
+		if (!sctx->control_started) {
+			EVP_DigestFinal_ex(mdctx, calculated, NULL);
+			EVP_DigestInit_ex(mdctx, sctx->md, NULL);
+			return 0;
+		}
+
+		/* Are we in control part?. */
+		if ((!sctx->control_started) || sctx->data_started)
+			return 0;
+
+		/* End of control block, make sure rest is handled as data */
+		sctx->data_started = 1;
+
+		/* Verify the signature if we have public key */
+		if (sctx->action == APK_SIGN_VERIFY &&
+		    sctx->signature.pkey != NULL) {
+			r = EVP_VerifyFinal(mdctx,
+					   (unsigned char *) sctx->signature.data.ptr,
+					   sctx->signature.data.len,
+					   sctx->signature.pkey);
+			if (r != 1)
+				return 1;
+
+			sctx->control_verified = 1;
+			EVP_DigestInit_ex(mdctx, sctx->md, NULL);
+			return 0;
+		} else if (sctx->action == APK_SIGN_GENERATE &&
+			   sctx->has_data_checksum) {
+			/* Package identity is checksum of control block */
+			sctx->identity.type = EVP_MD_CTX_size(mdctx);
+			EVP_DigestFinal_ex(mdctx, sctx->identity.data, NULL);
+			return 1;
+		} else {
+			/* Reset digest for hashing data */
+			EVP_DigestFinal_ex(mdctx, calculated, NULL);
+			EVP_DigestInit_ex(mdctx, sctx->md, NULL);
+		}
+		break;
+	case APK_MPART_END:
+		if (sctx->action == APK_SIGN_VERIFY) {
+			/* Check that data checksum matches */
+			EVP_DigestFinal_ex(mdctx, calculated, NULL);
+			if (sctx->has_data_checksum &&
+			    EVP_MD_CTX_size(mdctx) != 0 &&
+			    memcmp(calculated, sctx->data_checksum,
+				   EVP_MD_CTX_size(mdctx)) == 0)
+				sctx->data_verified = 1;
+		} else {
+			/* Package identity is checksum of all data */
+			sctx->identity.type = EVP_MD_CTX_size(mdctx);
+			EVP_DigestFinal_ex(mdctx, sctx->identity.data, NULL);
+		}
+		return 1;
+	}
+	return 0;
+}
+
 struct read_info_ctx {
 	struct apk_database *db;
 	struct apk_package *pkg;
-	const EVP_MD *md;
-	int version, action;
-	int has_signature : 1;
+	struct apk_sign_ctx *sctx;
+	int version;
 	int has_install : 1;
-	int has_data_checksum : 1;
-	int data_started : 1;
-	int in_signatures : 1;
 };
 
 int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
@@ -336,9 +484,14 @@ static int read_info_line(void *ctx, apk_blob_t line)
 		}
 	}
 
-	if (ri->data_started == 0 &&
-	    apk_blob_compare(APK_BLOB_STR("datahash"), l) == 0)
-		ri->has_data_checksum = 1;
+	if (ri->sctx->data_started == 0 &&
+	    apk_blob_compare(APK_BLOB_STR("datahash"), l) == 0) {
+		ri->sctx->has_data_checksum = 1;
+		ri->sctx->md = EVP_sha256();
+		apk_blob_pull_hexdump(
+			&r, APK_BLOB_PTR_LEN(ri->sctx->data_checksum,
+					     EVP_MD_size(ri->sctx->md)));
+	}
 
 	return 0;
 }
@@ -363,18 +516,16 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 	int i;
 
 	/* Meta info and scripts */
-	if (ri->in_signatures && strncmp(ae->name, ".SIGN.", 6) != 0)
-		ri->in_signatures = 0;
+	if (apk_sign_ctx_process_file(ri->sctx, ae, is) == 0)
+		return 0;
 
-	if (ri->data_started == 0 && ae->name[0] == '.') {
+	if (ri->sctx->data_started == 0 && ae->name[0] == '.') {
 		/* APK 2.0 format */
 		if (strcmp(ae->name, ".PKGINFO") == 0) {
 			apk_blob_t blob = apk_blob_from_istream(is, ae->size);
 			apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
 			free(blob.ptr);
 			ri->version = 2;
-		} else if (strncmp(ae->name, ".SIGN.", 6) == 0) {
-			ri->has_signature = 1;
 		} else if (strcmp(ae->name, ".INSTALL") == 0) {
 			apk_warning("Package '%s-%s' contains deprecated .INSTALL",
 				    pkg->name->name, pkg->version);
@@ -382,7 +533,6 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 		return 0;
 	}
 
-	ri->data_started = 1;
 	if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
 		/* APK 1.0 format */
 		ri->version = 1;
@@ -423,35 +573,8 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 	return 0;
 }
 
-static int apk_pkg_gzip_part(void *ctx, EVP_MD_CTX *mdctx, int part)
-{
-	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
-
-	switch (part) {
-	case APK_MPART_BEGIN:
-		EVP_DigestInit_ex(mdctx, ri->md, NULL);
-		break;
-	case APK_MPART_BOUNDARY:
-		if (ri->in_signatures) {
-			EVP_DigestFinal_ex(mdctx, ri->pkg->csum.data, NULL);
-			EVP_DigestInit_ex(mdctx, ri->md, NULL);
-			return 0;
-		}
-
-		if (ri->action == APK_SIGN_GENERATE_V1 ||
-		    !ri->has_data_checksum)
-			break;
-		/* Fallthrough to calculate checksum */
-	case APK_MPART_END:
-		ri->pkg->csum.type = EVP_MD_CTX_size(mdctx);
-		EVP_DigestFinal_ex(mdctx, ri->pkg->csum.data, NULL);
-		return 1;
-	}
-	return 0;
-}
-
 struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
-				 int action)
+				 struct apk_sign_ctx *sctx)
 {
 	struct read_info_ctx ctx;
 	struct apk_file_info fi;
@@ -466,22 +589,7 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
 		return NULL;
 
 	memset(&ctx, 0, sizeof(ctx));
-	switch (action) {
-	case APK_SIGN_VERIFY:
-		ctx.in_signatures = 1;
-		ctx.md = EVP_md_null();
-		break;
-	case APK_SIGN_GENERATE:
-		ctx.in_signatures = 1;
-		ctx.md = EVP_sha1();
-		break;
-	case APK_SIGN_GENERATE_V1:
-		ctx.md = EVP_md5();
-		break;
-	default:
-		return NULL;
-	}
-
+	ctx.sctx = sctx;
 	ctx.pkg = apk_pkg_new();
 	if (ctx.pkg == NULL)
 		return NULL;
@@ -492,27 +600,18 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
 
 	ctx.db = db;
 	ctx.has_install = 0;
-	ctx.action = action;
 	ctx.pkg->size = fi.size;
 
-	tar = apk_bstream_gunzip_mpart(bs, apk_pkg_gzip_part, &ctx);
+	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, sctx);
 	r = apk_tar_parse(tar, read_info_entry, &ctx);
 	tar->close(tar);
-	switch (r) {
-	case 0:
-		break;
-	case -2:
-		apk_error("File %s does not have a signature", file);
+	if (r < 0)
 		goto err;
-	default:
-		apk_error("File %s is not an APK archive", file);
+	if (ctx.pkg->name == NULL)
 		goto err;
-	}
-
-	if (ctx.pkg->name == NULL) {
-		apk_error("File %s is corrupted", file);
+	if (sctx->action == APK_SIGN_VERIFY && !sctx->data_verified &&
+	    !(apk_flags & APK_FORCE))
 		goto err;
-	}
 
 	/* Add implicit busybox dependency if there is scripts */
 	if (ctx.has_install) {

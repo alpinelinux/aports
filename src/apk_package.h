@@ -34,6 +34,25 @@ struct apk_name;
 #define APK_SIGN_GENERATE_V1		1
 #define APK_SIGN_GENERATE		2
 
+struct apk_sign_ctx {
+	int action;
+	const EVP_MD *md;
+	int num_signatures;
+	int control_started : 1;
+	int data_started : 1;
+	int has_data_checksum : 1;
+	int control_verified : 1;
+	int data_verified : 1;
+	char data_checksum[EVP_MAX_MD_SIZE];
+	struct apk_checksum identity;
+
+	struct {
+		apk_blob_t data;
+		EVP_PKEY *pkey;
+		char *identity;
+	} signature;
+};
+
 struct apk_script {
 	struct hlist_node script_list;
 	unsigned int type;
@@ -73,6 +92,13 @@ APK_ARRAY(apk_package_array, struct apk_package *);
 
 extern const char *apk_script_types[];
 
+void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action);
+void apk_sign_ctx_free(struct apk_sign_ctx *ctx);
+int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
+			      const struct apk_file_info *fi,
+			      struct apk_istream *is);
+int apk_sign_ctx_mpart_cb(void *ctx, EVP_MD_CTX *mdctx, int part);
+
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep);
 void apk_deps_del(struct apk_dependency_array **deps,
@@ -84,7 +110,8 @@ int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os);
 int apk_script_type(const char *name);
 
 struct apk_package *apk_pkg_new(void);
-struct apk_package *apk_pkg_read(struct apk_database *db, const char *name, int indexstyle);
+struct apk_package *apk_pkg_read(struct apk_database *db, const char *name,
+				 struct apk_sign_ctx *ctx);
 void apk_pkg_free(struct apk_package *pkg);
 
 int apk_pkg_parse_name(apk_blob_t apkname, apk_blob_t *name, apk_blob_t *version);
@@ -103,8 +130,7 @@ int apk_pkg_write_index_entry(struct apk_package *pkg, struct apk_ostream *os);
 
 int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b);
 
-struct apk_dependency apk_dep_from_str(struct apk_database *db,
-				       char *str);
+struct apk_dependency apk_dep_from_str(struct apk_database *db, char *str);
 struct apk_dependency apk_dep_from_pkg(struct apk_database *db,
 				       struct apk_package *pkg);
 #endif
