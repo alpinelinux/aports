@@ -177,12 +177,15 @@ static void gzo_close(void *stream)
 	struct apk_gzip_ostream *gos = (struct apk_gzip_ostream *) stream;
 	unsigned char buffer[1024];
 	size_t have;
+	int r;
 
-	gos->zs.avail_out = sizeof(buffer);
-	gos->zs.next_out = buffer;
-	deflate(&gos->zs, Z_FINISH);
-	have = sizeof(buffer) - gos->zs.avail_out;
-	gos->output->write(gos->output, buffer, have);
+	do {
+		gos->zs.avail_out = sizeof(buffer);
+		gos->zs.next_out = buffer;
+		r = deflate(&gos->zs, Z_FINISH);
+		have = sizeof(buffer) - gos->zs.avail_out;
+		gos->output->write(gos->output, buffer, have);
+	} while (r == Z_OK);
 	gos->output->close(gos->output);
 
 	deflateEnd(&gos->zs);
