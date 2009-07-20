@@ -7,11 +7,11 @@ sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
 apkcache	?= ~/.cache/apks
 
-USR_BIN_FILES	:= abuild devbuild mkalpine buildrepo
+SCRIPTS		:= abuild devbuild mkalpine buildrepo
+USR_BIN_FILES	:= $(SCRIPTS) abuild-tar
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
 
-SCRIPTS		:= $(USR_BIN_FILES)
 SCRIPT_SOURCES	:= $(addsuffix .in,$(SCRIPTS))
 
 DISTFILES=$(SCRIPT_SOURCES) $(SAMPLES) Makefile abuild.conf 
@@ -33,6 +33,8 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@datadir@:$(datadir):g' \
 			-e 's:@apkcache@:$(apkcache):g'
 
+SSL_LIBS	:= $(shell pkg-config --libs openssl)
+
 .SUFFIXES:	.sh.in .in
 .sh.in.sh:
 	${SED} ${SED_REPLACE} ${SED_EXTRA} $< > $@
@@ -40,12 +42,15 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 .in:
 	${SED} ${SED_REPLACE} ${SED_EXTRA} $< > $@
 
-
-
-
 P=$(PACKAGE)-$(VERSION)
 
-all: 	$(SCRIPTS)
+all: 	$(USR_BIN_FILES)
+
+clean:
+	@rm -f $(USR_BIN_FILES)
+
+abuild-tar:	abuild-tar.c
+	$(CC) -o $@ $(SSL_LIBS) $^
 
 help:
 	@echo "$(P) makefile"
