@@ -296,7 +296,7 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 	if (ctx->data_started)
 		return 1;
 
-	if (fi->name[0] != '.') {
+	if (fi->name[0] != '.' || strchr(fi->name, '/') != NULL) {
 		ctx->data_started = 1;
 		ctx->control_started = 1;
 		return 1;
