@@ -30,9 +30,11 @@ struct apk_name;
 #define APK_PKG_NOT_INSTALLED		0
 #define APK_PKG_INSTALLED		1
 
-#define APK_SIGN_VERIFY			0
-#define APK_SIGN_GENERATE_V1		1
-#define APK_SIGN_GENERATE		2
+#define APK_SIGN_NONE			0
+#define APK_SIGN_VERIFY			1
+#define APK_SIGN_VERIFY_IDENTITY	2
+#define APK_SIGN_GENERATE_V1		3
+#define APK_SIGN_GENERATE		4
 
 struct apk_sign_ctx {
 	int action;
@@ -93,11 +95,14 @@ APK_ARRAY(apk_package_array, struct apk_package *);
 
 extern const char *apk_script_types[];
 
-void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action);
+void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
+		       struct apk_checksum *identity);
 void apk_sign_ctx_free(struct apk_sign_ctx *ctx);
 int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 			      const struct apk_file_info *fi,
 			      struct apk_istream *is);
+int apk_sign_ctx_verify_tar(void *ctx, const struct apk_file_info *fi,
+			    struct apk_istream *is);
 int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t blob);
 
 int apk_deps_add(struct apk_dependency_array **depends,

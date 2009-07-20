@@ -159,7 +159,7 @@ static int index_main(void *ctx, int argc, char **argv)
 
 		if (!found) {
 			struct apk_sign_ctx sctx;
-			apk_sign_ctx_init(&sctx, ictx->method);
+			apk_sign_ctx_init(&sctx, ictx->method, NULL);
 			if (apk_pkg_read(&db, argv[i], &sctx) != NULL)
 				newpkgs++;
 			apk_sign_ctx_free(&sctx);

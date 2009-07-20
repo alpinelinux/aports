@@ -104,12 +104,17 @@ static size_t tar_entry_read(void *stream, void *ptr, size_t size)
 	return size;
 }
 
+static void tar_entry_close(void *stream)
+{
+}
+
 int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		  void *ctx)
 {
 	struct apk_file_info entry;
 	struct apk_tar_entry_istream teis = {
 		.is.read = tar_entry_read,
+		.is.close = tar_entry_close,
 		.tar_is = is,
 	};
 	struct tar_header buf;

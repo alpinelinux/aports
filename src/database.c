@@ -25,7 +25,9 @@
 #include "apk_database.h"
 #include "apk_state.h"
 #include "apk_applet.h"
+#include "apk_archive.h"
 
+const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
 const char * const apk_index_gz = "APK_INDEX.gz";
 static const char * const apk_static_cache_dir = "var/lib/apk";
 static const char * const apk_linked_cache_dir = "etc/apk/cache";
@@ -1034,12 +1036,13 @@ static struct apk_bstream *apk_repository_file_open(struct apk_repository *repo,
 }
 
 int apk_cache_download(struct apk_database *db, struct apk_checksum *csum,
-		       const char *url, const char *item)
+		       const char *url, const char *item, int verify)
 {
 	char tmp[256], tmp2[256];
 	int r;
 
-	snprintf(tmp, sizeof(tmp), "%s/%s", url, item);
+	snprintf(tmp, sizeof(tmp), "%s%s%s",
+		 url, url[strlen(url)-1] == '/' ? "" : "/", item);
 	apk_message("fetch %s", tmp);
 
 	if (apk_flags & APK_SIMULATE)
@@ -1049,6 +1052,24 @@ int apk_cache_download(struct apk_database *db, struct apk_checksum *csum,
 	r = apk_url_download(tmp, tmp2);
 	if (r < 0)
 		return r;
+
+	if (verify != APK_SIGN_NONE) {
+		struct apk_istream *is;
+		struct apk_sign_ctx sctx;
+		int ok;
+
+		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
+		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(tmp2),
+			apk_sign_ctx_mpart_cb, &sctx);
+		is->close(is);
+		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx);
+		ok = (r != 0) && sctx.control_verified && sctx.data_verified;
+		apk_sign_ctx_free(&sctx);
+		if (!ok) {
+			unlink(tmp2);
+			return -10;
+		}
+	}
 
 	apk_db_cache_get_name(tmp, sizeof(tmp), db, csum, item, FALSE);
 	if (rename(tmp2, tmp) < 0)
@@ -1069,12 +1090,59 @@ int apk_cache_exists(struct apk_database *db, struct apk_checksum *csum,
 	return access(tmp, R_OK | W_OK) == 0;
 }
 
+static int apk_cache_delete(struct apk_database *db, struct apk_checksum *csum,
+			    const char *item)
+{
+	char tmp[256];
+
+	if (db->root == NULL)
+		return 0;
+
+	apk_db_cache_get_name(tmp, sizeof(tmp), db, csum, item, FALSE);
+	return unlink(tmp);
+}
+
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 {
+	int r;
+
 	if (repo->csum.type == APK_CHECKSUM_NONE)
 		return 0;
 
-	return apk_cache_download(db, &repo->csum, repo->url, apk_index_gz);
+	r = apk_cache_download(db, &repo->csum, repo->url, apkindex_tar_gz,
+			       APK_SIGN_VERIFY);
+	if (r == 0 || r == -10) {
+		apk_cache_delete(db, &repo->csum, apk_index_gz);
+		return r;
+	}
+
+	return apk_cache_download(db, &repo->csum, repo->url, apk_index_gz,
+				  APK_SIGN_NONE);
+}
+
+struct apkindex_ctx {
+	struct apk_database *db;
+	struct apk_sign_ctx sctx;
+	int repo;
+};
+
+static int load_apkindex(void *sctx, const struct apk_file_info *fi,
+			 struct apk_istream *is)
+{
+	struct apkindex_ctx *ctx = (struct apkindex_ctx *) sctx;
+	struct apk_bstream *bs;
+
+	if (apk_sign_ctx_process_file(&ctx->sctx, fi, is) == 0)
+		return 0;
+
+	if (strcmp(fi->name, "APKINDEX") != 0)
+		return 0;
+
+	bs = apk_bstream_from_istream(is);
+	apk_db_index_read(ctx->db, bs, ctx->repo);
+	bs->close(bs, NULL);
+
+	return 0;
 }
 
 int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
@@ -1082,7 +1150,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	struct apk_database *db = _db.db;
 	struct apk_bstream *bs = NULL;
 	struct apk_repository *repo;
-	int r, n = 1;
+	int r, targz = 1;
 
 	if (repository.ptr == NULL || *repository.ptr == '\0'
 			|| *repository.ptr == '#')
@@ -1102,26 +1170,44 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		apk_blob_checksum(repository, apk_default_checksum(), &repo->csum);
 
 		if (apk_flags & APK_UPDATE_CACHE)
-			n = apk_repository_update(db, repo);
+			apk_repository_update(db, repo);
 
-		bs = apk_db_cache_open(db, &repo->csum, apk_index_gz);
+		bs = apk_db_cache_open(db, &repo->csum, apkindex_tar_gz);
 		if (bs == NULL) {
-			if (n == 1)
-				n = apk_repository_update(db, repo);
-			if (n < 0)
-				return n;
 			bs = apk_db_cache_open(db, &repo->csum, apk_index_gz);
+			targz = 0;
 		}
 	} else {
-		bs = apk_repository_file_open(repo, apk_index_gz);
+		bs = apk_repository_file_open(repo, apkindex_tar_gz);
+		if (bs == NULL) {
+			bs = apk_repository_file_open(repo, apk_index_gz);
+			targz = 0;
+		}
 	}
-	bs = apk_bstream_from_istream(apk_bstream_gunzip(bs));
 	if (bs == NULL) {
 		apk_warning("Failed to open index for %s", repo->url);
 		return -1;
 	}
-	apk_db_index_read(db, bs, r);
-	bs->close(bs, NULL);
+	if (targz) {
+		struct apk_istream *is;
+		struct apkindex_ctx ctx;
+
+		ctx.db = db;
+		ctx.repo = r;
+		apk_sign_ctx_init(&ctx.sctx, APK_SIGN_VERIFY, NULL);
+		is = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &ctx.sctx);
+		r = apk_tar_parse(is, load_apkindex, &ctx);
+		is->close(is);
+		apk_sign_ctx_free(&ctx.sctx);
+		if (!ctx.sctx.data_verified) {
+			apk_error("Bad repository signature: %s", repo->url);
+			return -1;
+		}
+	} else {
+		bs = apk_bstream_from_istream(apk_bstream_gunzip(bs));
+		apk_db_index_read(db, bs, r);
+		bs->close(bs, NULL);
+	}
 
 	return 0;
 }
@@ -1396,7 +1482,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		.cb = cb,
 		.cb_ctx = cb_ctx,
 	};
-	apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY);
+	apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY_IDENTITY, &newpkg->csum);
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &sctx);
 	apk_sign_ctx_free(&sctx);
 	if (apk_tar_parse(tar, apk_db_install_archive_entry, &ctx) != 0)

@@ -119,7 +119,7 @@ static int add_main(void *ctx, int argc, char **argv)
 			struct apk_package *pkg;
 			struct apk_sign_ctx sctx;
 
-			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY);
+			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
 			pkg = apk_pkg_read(&db, argv[i], &sctx);
 			apk_sign_ctx_free(&sctx);
 			if (pkg == NULL) {

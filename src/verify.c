@@ -16,14 +16,16 @@
 
 static int verify_main(void *ctx, int argc, char **argv)
 {
-	struct apk_database db;
 	struct apk_sign_ctx sctx;
-	int i, ok, rc = 0;
+	struct apk_istream *is;
+	int i, r, ok, rc = 0;
 
-	apk_db_open(&db, NULL, APK_OPENF_NO_STATE);
 	for (i = 0; i < argc; i++) {
-		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY);
-		apk_pkg_read(&db, argv[i], &sctx);
+		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
+		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(argv[i]),
+					      apk_sign_ctx_mpart_cb, &sctx);
+		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx);
+		is->close(is);
 		ok = sctx.control_verified && sctx.data_verified;
 		if (apk_verbosity >= 1)
 			apk_message("%s: %s", argv[i],
@@ -33,7 +35,6 @@ static int verify_main(void *ctx, int argc, char **argv)
 			rc++;
 		apk_sign_ctx_free(&sctx);
 	}
-	apk_db_close(&db);
 
 	return rc;
 }

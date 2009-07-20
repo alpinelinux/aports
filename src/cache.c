@@ -54,7 +54,7 @@ static int cache_download(struct apk_database *db)
 				continue;
 
 			r = apk_cache_download(db, &pkg->csum, db->repos[i].url,
-					       pkgfile);
+					       pkgfile, APK_SIGN_VERIFY_IDENTITY);
 			if (r != 0)
 				return r;
 		}
@@ -91,7 +91,8 @@ static int cache_clean(struct apk_database *db)
 			apk_blob_pull_hexdump(&b, APK_BLOB_BUF(csum));
 			apk_blob_pull_char(&b, '.');
 
-			if (apk_blob_compare(b, APK_BLOB_STR(apk_index_gz)) == 0) {
+			if (apk_blob_compare(b, APK_BLOB_STR(apk_index_gz)) == 0 ||
+			    apk_blob_compare(b, APK_BLOB_STR(apkindex_tar_gz)) == 0) {
 				/* Index - check for matching repository */
 				for (i = 0; i < db->num_repos; i++) {
 					if (memcmp(db->repos[i].csum.data,

@@ -256,13 +256,30 @@ int apk_script_type(const char *name)
 	return APK_SCRIPT_INVALID;
 }
 
-void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action)
+void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
+		       struct apk_checksum *identity)
 {
 	memset(ctx, 0, sizeof(struct apk_sign_ctx));
 	ctx->action = action;
 	switch (action) {
+	case APK_SIGN_NONE:
+		ctx->md = EVP_md_null();
+		ctx->control_started = 1;
+		ctx->data_started = 1;
+		break;
 	case APK_SIGN_VERIFY:
 		ctx->md = EVP_md_null();
+		break;
+	case APK_SIGN_VERIFY_IDENTITY:
+		if (identity->type == APK_CHECKSUM_MD5) {
+			ctx->md = EVP_md5();
+			ctx->control_started = 1;
+			ctx->data_started = 1;
+			ctx->has_data_checksum = 1;
+		} else {
+			ctx->md = EVP_sha1();
+		}
+		memcpy(&ctx->identity, identity, sizeof(ctx->identity));
 		break;
 	case APK_SIGN_GENERATE_V1:
 		ctx->md = EVP_md5();
@@ -341,6 +358,46 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 	return 0;
 }
 
+static int read_datahash(void *ctx, apk_blob_t line)
+{
+	struct apk_sign_ctx *sctx = (struct apk_sign_ctx *) ctx;
+	apk_blob_t l, r;
+
+	if (line.ptr == NULL || line.len < 1 || line.ptr[0] == '#')
+		return 0;
+
+	if (!apk_blob_split(line, APK_BLOB_STR(" = "), &l, &r))
+		return 0;
+
+	if (sctx->data_started == 0 &&
+	    apk_blob_compare(APK_BLOB_STR("datahash"), l) == 0) {
+		sctx->has_data_checksum = 1;
+		sctx->md = EVP_sha256();
+		apk_blob_pull_hexdump(
+			&r, APK_BLOB_PTR_LEN(sctx->data_checksum,
+					     EVP_MD_size(sctx->md)));
+	}
+
+	return 0;
+}
+
+int apk_sign_ctx_verify_tar(void *sctx, const struct apk_file_info *fi,
+			    struct apk_istream *is)
+{
+	struct apk_sign_ctx *ctx = (struct apk_sign_ctx *) sctx;
+
+	if (apk_sign_ctx_process_file(ctx, fi, is) == 0)
+		return 0;
+
+	if (strcmp(fi->name, ".PKGINFO") == 0) {
+		apk_blob_t blob = apk_blob_from_istream(is, fi->size);
+		apk_blob_for_each_segment(blob, "\n", read_datahash, ctx);
+		free(blob.ptr);
+	}
+
+	return 0;
+}
+
 int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 {
 	struct apk_sign_ctx *sctx = (struct apk_sign_ctx *) ctx;
@@ -370,6 +427,8 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 
 		/* End of control block, make sure rest is handled as data */
 		sctx->data_started = 1;
+		if (!sctx->has_data_checksum)
+			return 0;
 
 		/* Verify the signature if we have public key */
 		if (sctx->action == APK_SIGN_VERIFY &&
@@ -385,8 +444,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
 			EVP_MD_CTX_set_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 			return 0;
-		} else if (sctx->action == APK_SIGN_GENERATE &&
-			   sctx->has_data_checksum) {
+		} else if (sctx->action == APK_SIGN_GENERATE) {
 			/* Package identity is checksum of control block */
 			sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
 			EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
@@ -396,29 +454,37 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
 			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
 			EVP_MD_CTX_set_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+
+			if (sctx->action == APK_SIGN_VERIFY_IDENTITY) {
+				if (memcmp(calculated, sctx->identity.data,
+					   sctx->identity.type) == 0)
+					sctx->control_verified = 1;
+				return 1;
+			}
 		}
 		break;
 	case APK_MPART_END:
-		if (sctx->action == APK_SIGN_VERIFY) {
-			if (sctx->has_data_checksum) {
-				/* Check that data checksum matches */
-				EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
-				if (EVP_MD_CTX_size(&sctx->mdctx) != 0 &&
-				    memcmp(calculated, sctx->data_checksum,
-				           EVP_MD_CTX_size(&sctx->mdctx)) == 0)
-					sctx->data_verified = 1;
-			} else if (sctx->signature.pkey != NULL) {
-				/* Assume that the data is fully signed */
-				r = EVP_VerifyFinal(&sctx->mdctx,
-					   (unsigned char *) sctx->signature.data.ptr,
-					   sctx->signature.data.len,
-					   sctx->signature.pkey);
-				if (r == 1) {
-					sctx->control_verified = 1;
-					sctx->data_verified = 1;
-				}
+		if (sctx->has_data_checksum) {
+			/* Check that data checksum matches */
+			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
+			if (EVP_MD_CTX_size(&sctx->mdctx) != 0 &&
+			    memcmp(calculated, sctx->data_checksum,
+			           EVP_MD_CTX_size(&sctx->mdctx)) == 0)
+				sctx->data_verified = 1;
+		} else if (sctx->action == APK_SIGN_VERIFY) {
+			if (sctx->signature.pkey == NULL)
+				return 1;
+
+			/* Assume that the data is fully signed */
+			r = EVP_VerifyFinal(&sctx->mdctx,
+				   (unsigned char *) sctx->signature.data.ptr,
+				   sctx->signature.data.len,
+				   sctx->signature.pkey);
+			if (r == 1) {
+				sctx->control_verified = 1;
+				sctx->data_verified = 1;
 			}
-		} else if (!sctx->has_data_checksum) {
+		} else {
 			/* Package identity is checksum of all data */
 			sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
 			EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
