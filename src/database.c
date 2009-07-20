@@ -1112,12 +1112,17 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 	r = apk_cache_download(db, &repo->csum, repo->url, apkindex_tar_gz,
 			       APK_SIGN_VERIFY);
 	if (r == 0 || r == -10) {
+		if (r == -10)
+			apk_error("Failed to update %s: bad signature!");
 		apk_cache_delete(db, &repo->csum, apk_index_gz);
 		return r;
 	}
 
-	return apk_cache_download(db, &repo->csum, repo->url, apk_index_gz,
-				  APK_SIGN_NONE);
+	r = apk_cache_download(db, &repo->csum, repo->url, apk_index_gz,
+			       APK_SIGN_NONE);
+	if (r != 0)
+		apk_error("Failed to update %s: download failed");
+	return r;
 }
 
 struct apkindex_ctx {
