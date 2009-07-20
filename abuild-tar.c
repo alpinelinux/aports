@@ -115,6 +115,7 @@ static ssize_t full_read(int fd, void *buf, size_t count)
 		if (n <= 0)
 			break;
 		buf += n;
+		total += n;
 		count -= n;
 	} while (1);
 
@@ -136,6 +137,7 @@ static ssize_t full_write(int fd, const void *buf, size_t count)
 		if (n <= 0)
 			break;
 		buf += n;
+		total += n;
 		count -= n;
 	} while (1);
 
