@@ -10,6 +10,8 @@
 
 #include <stdio.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <stdint.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <string.h>
@@ -101,6 +103,68 @@ static int usage(void)
 "\n");
 }
 
+static ssize_t full_read(int fd, void *buf, size_t count)
+{
+	ssize_t total, n;
+
+	total = 0;
+	do {
+		n = read(fd, buf, count);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		buf += n;
+		count -= n;
+	} while (1);
+
+	if (total == 0 && n < 0)
+		return -1;
+
+	return total;
+}
+
+static ssize_t full_write(int fd, const void *buf, size_t count)
+{
+	ssize_t total, n;
+
+	total = 0;
+	do {
+		n = write(fd, buf, count);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		buf += n;
+		count -= n;
+	} while (1);
+
+	if (total == 0 && n < 0)
+		return -1;
+
+	return total;
+}
+
+static ssize_t full_splice(int from_fd, int to_fd, size_t count)
+{
+	ssize_t total, n;
+
+	total = 0;
+	do {
+		n = splice(from_fd, NULL, to_fd, count, 0);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		count -= n;
+	} while (1);
+
+	if (total == 0 && n < 0)
+		return -1;
+
+	return total;
+}
+
 static int do_it(const EVP_MD *md, int cut)
 {
 	struct tar_header hdr;
@@ -120,7 +184,7 @@ static int do_it(const EVP_MD *md, int cut)
 	}
 
 	do {
-		if (read(STDIN_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
+		if (full_read(STDIN_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
 			return 0;
 
 		if (cut && hdr.name[0] == 0)
@@ -136,7 +200,7 @@ static int do_it(const EVP_MD *md, int cut)
 			int chksum, i;
 
 			ptr = malloc(aligned_size);
-			if (read(STDIN_FILENO, ptr, aligned_size) != aligned_size)
+			if (full_read(STDIN_FILENO, ptr, aligned_size) != aligned_size)
 				return 1;
 
 			memcpy(&hdr.linkname[3], &mdinfo, sizeof(mdinfo));
@@ -151,21 +215,20 @@ static int do_it(const EVP_MD *md, int cut)
 			put_octal(hdr.chksum, sizeof(hdr.chksum)-1, chksum);
 		}
 
-		if (write(STDOUT_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
+		if (full_write(STDOUT_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
 			return 2;
 
 		if (dohash) {
-			if (write(STDOUT_FILENO, ptr, aligned_size) != aligned_size)
+			if (full_write(STDOUT_FILENO, ptr, aligned_size) != aligned_size)
 				return 2;
 			free(ptr);
 		} else if (aligned_size != 0) {
-			r = splice(STDIN_FILENO, NULL, STDOUT_FILENO, NULL,
-				   aligned_size, 0);
+			r = full_splice(STDIN_FILENO, STDOUT_FILENO, aligned_size);
 			if (r == -1) {
 				while (aligned_size > 0) {
-					if (read(STDIN_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
+					if (full_read(STDIN_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
 						return 1;
-					if (write(STDOUT_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
+					if (full_write(STDOUT_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
 						return 2;
 					aligned_size -= sizeof(hdr);
 				}
@@ -180,7 +243,7 @@ int main(int argc, char **argv)
 	static int cut = 0;
 	static const struct option options[] = {
 		{ "hash", optional_argument },
-		{ "no-end", no_argument, &cut, 1 },
+		{ "cut", no_argument, &cut, 1 },
 		{ NULL }
 	};
 	const EVP_MD *md = NULL;
@@ -195,8 +258,6 @@ int main(int argc, char **argv)
 		if (ndx == 0)
 			digest = optarg ? optarg : "sha1";
 	}
-
-	fprintf(stderr, "digest: %s, cut: %d\n", digest, cut);
 
 	if (digest == NULL && cut == 0)
 		return usage();
