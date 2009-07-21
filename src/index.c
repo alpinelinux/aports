@@ -51,20 +51,15 @@ static int index_parse(void *ctx, int optch, int optindex, const char *optarg)
 
 static int index_read_file(struct apk_database *db, struct index_ctx *ictx)
 {
-	struct apk_bstream *bs;
 	struct apk_file_info fi;
-	int r;
+
 	if (ictx->index == NULL)
 		return 0;
 	if (apk_file_get_info(ictx->index, APK_CHECKSUM_NONE, &fi) < 0)
 		return -1;
 	ictx->index_mtime = fi.mtime;
-	bs = apk_bstream_from_istream(apk_bstream_gunzip(apk_bstream_from_url(ictx->index)));
-	if (bs == NULL)
-		return -1;
-	r = apk_db_index_read(db, bs, 0);
-	bs->close(bs, NULL);
-	return r;
+
+	return apk_db_index_read_file(db, ictx->index, 0);
 }
 
 static int warn_if_no_providers(apk_hash_item item, void *ctx)
