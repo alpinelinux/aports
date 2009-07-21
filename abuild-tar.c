@@ -159,6 +159,7 @@ static ssize_t full_splice(int from_fd, int to_fd, size_t count)
 		if (n <= 0)
 			break;
 		count -= n;
+		total += n;
 	} while (1);
 
 	if (total == 0 && n < 0)
