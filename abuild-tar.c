@@ -153,7 +153,7 @@ static ssize_t full_splice(int from_fd, int to_fd, size_t count)
 
 	total = 0;
 	do {
-		n = splice(from_fd, NULL, to_fd, count, 0);
+		n = splice(from_fd, NULL, to_fd, NULL, count, 0);
 		if (n < 0 && errno == EINTR)
 			continue;
 		if (n <= 0)
