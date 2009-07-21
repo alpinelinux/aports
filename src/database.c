@@ -37,6 +37,7 @@ struct install_ctx {
 	struct apk_package *pkg;
 
 	int script;
+	int script_pending : 1;
 	struct apk_db_dir_instance *diri;
 	struct apk_checksum data_csum;
 	struct apk_sign_ctx sctx;
@@ -1233,6 +1234,24 @@ static void extract_cb(void *_ctx, size_t progress)
 	}
 }
 
+static int apk_db_run_pending_script(struct install_ctx *ctx)
+{
+	int r;
+
+	if (!ctx->script_pending)
+		return 0;
+	if (!ctx->sctx.control_verified)
+		return 0;
+
+	ctx->script_pending = FALSE;
+	r = apk_pkg_run_script(ctx->pkg, ctx->db->root_fd, ctx->script);
+	if (r != 0)
+		apk_error("%s-%s: Failed to execute "
+			  "pre-install/upgrade script",
+			  ctx->pkg->name->name, ctx->pkg->version);
+	return r;
+}
+
 static int apk_db_install_archive_entry(void *_ctx,
 					const struct apk_file_info *ae,
 					struct apk_istream *is)
@@ -1275,16 +1294,15 @@ static int apk_db_install_archive_entry(void *_ctx,
 	/* Handle script */
 	if (type != APK_SCRIPT_INVALID) {
 		apk_pkg_add_script(pkg, is, type, ae->size);
-
-		if (type == ctx->script) {
-			r = apk_pkg_run_script(pkg, db->root_fd, ctx->script);
-			if (r != 0)
-				apk_error("%s-%s: Failed to execute pre-install/upgrade script",
-					  pkg->name->name, pkg->version);
-		}
-
-		return r;
+		if (type == ctx->script)
+			ctx->script_pending = TRUE;
+		return apk_db_run_pending_script(ctx);
 	}
+
+	r = apk_db_run_pending_script(ctx);
+	if (r != 0)
+		return r;
+
 
 	/* Show progress */
 	if (ctx->cb) {
@@ -1501,6 +1519,9 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 			  newpkg->name->name, newpkg->version);
 		return -1;
 	}
+	r = apk_db_run_pending_script(&ctx);
+	if (r != 0)
+		return r;
 
 	if (need_copy) {
 		char file2[256];
