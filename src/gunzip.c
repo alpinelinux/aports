@@ -62,9 +62,16 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 				gis->z_err = Z_DATA_ERROR;
 				return size - gis->zs.avail_out;
 			} else if (gis->zs.avail_in == 0) {
-				if (gis->cb != NULL)
-					gis->cb(gis->cbctx, APK_MPART_END,
-						APK_BLOB_NULL);
+				if (gis->cb != NULL) {
+					r = gis->cb(gis->cbctx, APK_MPART_END,
+						    APK_BLOB_NULL);
+					if (r != 0) {
+						gis->z_err = Z_STREAM_END;
+						if (r > 0)
+							r = -1;
+						return r;
+					}
+				}
 				gis->z_err = Z_STREAM_END;
 				return size - gis->zs.avail_out;
 			}

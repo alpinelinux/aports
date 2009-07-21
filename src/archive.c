@@ -129,10 +129,8 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	while ((r = is->read(is, &buf, 512)) == 512) {
 		offset += 512;
 		if (buf.name[0] == '\0') {
-			if (end) {
-				r = 0;
-				//break;
-			}
+			if (end)
+				break;
 			end++;
 			continue;
 		}
@@ -218,10 +216,17 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	}
 	EVP_MD_CTX_cleanup(&teis.mdctx);
 
-	if (r != 0) {
-		apk_error("Bad TAR header (r=%d)", r);
-		return -1;
+	/* Read remaining end-of-archive records, to ensure we read all of
+	 * the file. The underlying istream is likely doing checksumming. */
+	if (r == 512) {
+		while ((r = is->read(is, &buf, 512)) == 512)
+			if (buf.name[0] != 0)
+				return -1;
 	}
+
+	/* Check that there was no partial record */
+	if (r != 0)
+		return -1;
 
 	return 0;
 

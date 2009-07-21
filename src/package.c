@@ -275,7 +275,6 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
 			ctx->md = EVP_md5();
 			ctx->control_started = 1;
 			ctx->data_started = 1;
-			ctx->has_data_checksum = 1;
 		} else {
 			ctx->md = EVP_sha1();
 		}
@@ -438,7 +437,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 					   sctx->signature.data.len,
 					   sctx->signature.pkey);
 			if (r != 1)
-				return 1;
+				return -1;
 
 			sctx->control_verified = 1;
 			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
@@ -457,9 +456,9 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 
 			if (sctx->action == APK_SIGN_VERIFY_IDENTITY) {
 				if (memcmp(calculated, sctx->identity.data,
-					   sctx->identity.type) == 0)
-					sctx->control_verified = 1;
-				return 1;
+					   sctx->identity.type) != 0)
+					return -1;
+				sctx->control_verified = 1;
 			}
 		}
 		break;
@@ -467,29 +466,39 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 		if (sctx->has_data_checksum) {
 			/* Check that data checksum matches */
 			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
-			if (EVP_MD_CTX_size(&sctx->mdctx) != 0 &&
+			if (EVP_MD_CTX_size(&sctx->mdctx) == 0 ||
 			    memcmp(calculated, sctx->data_checksum,
-			           EVP_MD_CTX_size(&sctx->mdctx)) == 0)
-				sctx->data_verified = 1;
+			           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
+				return -1;
+			sctx->data_verified = 1;
 		} else if (sctx->action == APK_SIGN_VERIFY) {
 			if (sctx->signature.pkey == NULL)
-				return 1;
+				return -1;
 
 			/* Assume that the data is fully signed */
 			r = EVP_VerifyFinal(&sctx->mdctx,
 				   (unsigned char *) sctx->signature.data.ptr,
 				   sctx->signature.data.len,
 				   sctx->signature.pkey);
-			if (r == 1) {
-				sctx->control_verified = 1;
-				sctx->data_verified = 1;
-			}
+			if (r != 1)
+				return -1;
+
+			sctx->control_verified = 1;
+			sctx->data_verified = 1;
+		} else if (sctx->action == APK_SIGN_VERIFY_IDENTITY) {
+			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
+			if (EVP_MD_CTX_size(&sctx->mdctx) == 0 ||
+			    memcmp(calculated, sctx->identity.data,
+			           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
+				return -1;
+			sctx->control_verified = 1;
+			sctx->data_verified = 1;
 		} else {
 			/* Package identity is checksum of all data */
 			sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
 			EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
 		}
-		return 1;
+		break;
 	}
 	return 0;
 }

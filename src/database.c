@@ -39,6 +39,7 @@ struct install_ctx {
 	int script;
 	struct apk_db_dir_instance *diri;
 	struct apk_checksum data_csum;
+	struct apk_sign_ctx sctx;
 
 	apk_progress_cb cb;
 	void *cb_ctx;
@@ -1247,6 +1248,9 @@ static int apk_db_install_archive_entry(void *_ctx,
 	const char *p;
 	int r = 0, type = APK_SCRIPT_INVALID;
 
+	if (apk_sign_ctx_process_file(&ctx->sctx, ae, is) == 0)
+		return 0;
+
 	/* Package metainfo and script processing */
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
@@ -1329,12 +1333,12 @@ static int apk_db_install_archive_entry(void *_ctx,
 			if (opkg->name != pkg->name) {
 				if (!(apk_flags & APK_FORCE)) {
 					apk_error("%s: Trying to overwrite %s "
-						  "owned by %s.\n",
+						  "owned by %s.",
 						  pkg->name->name, ae->name,
 						  opkg->name->name);
 					return -1;
 				}
-				apk_warning("%s: Overwriting %s owned by %s.\n",
+				apk_warning("%s: Overwriting %s owned by %s.",
 					    pkg->name->name, ae->name,
 					    opkg->name->name);
 			}
@@ -1430,9 +1434,8 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	struct install_ctx ctx;
 	struct apk_bstream *bs = NULL;
 	struct apk_istream *tar;
-	struct apk_sign_ctx sctx;
 	char pkgname[256], file[256];
-	int i, need_copy = FALSE;
+	int r, i, need_copy = FALSE;
 
 	snprintf(pkgname, sizeof(pkgname), "%s-%s.apk",
 		 newpkg->name->name, newpkg->version);
@@ -1487,17 +1490,17 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		.cb = cb,
 		.cb_ctx = cb_ctx,
 	};
-	apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY_IDENTITY, &newpkg->csum);
-	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &sctx);
-	apk_sign_ctx_free(&sctx);
-	if (apk_tar_parse(tar, apk_db_install_archive_entry, &ctx) != 0)
-		goto err_close;
+	apk_sign_ctx_init(&ctx.sctx, APK_SIGN_VERIFY_IDENTITY, &newpkg->csum);
+	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &ctx.sctx);
+	r = apk_tar_parse(tar, apk_db_install_archive_entry, &ctx);
+	apk_sign_ctx_free(&ctx.sctx);
 	tar->close(tar);
 
-	/* Check the package checksum */
-	if (apk_checksum_compare(&ctx.data_csum, &newpkg->csum) != 0)
-		apk_warning("%s-%s: checksum does not match",
-			    newpkg->name->name, newpkg->version);
+	if (r != 0) {
+		apk_error("%s-%s: package integrity check failed",
+			  newpkg->name->name, newpkg->version);
+		return -1;
+	}
 
 	if (need_copy) {
 		char file2[256];
@@ -1507,9 +1510,6 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	}
 
 	return 0;
-err_close:
-	bs->close(bs, NULL);
-	return -1;
 }
 
 int apk_db_install_pkg(struct apk_database *db,
