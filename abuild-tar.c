@@ -94,12 +94,12 @@ static int usage(void)
 	fprintf(stderr,
 "abuild-tar " VERSION "\n"
 "\n"
-"usage: abuild-tar [--hash [<algorithm>]] [--no-end]\n"
+"usage: abuild-tar [--hash [<algorithm>]] [--cut]\n"
 "\n"
 "options:\n"
 "  --hash [sha1|md5]	Read tar archive from stdin, precalculate hash for \n"
 "			regular	entries and output tar archive on stdout\n"
-"  --no-end		Remove the end of file tar record\n"
+"  --cut		Remove the end of file tar record\n"
 "\n");
 }
 
