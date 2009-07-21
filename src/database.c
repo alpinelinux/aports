@@ -741,8 +741,8 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	memset(db, 0, sizeof(*db));
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
 	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 4000);
-	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 1000);
-	apk_hash_init(&db->installed.files, &file_hash_ops, 4000);
+	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 2000);
+	apk_hash_init(&db->installed.files, &file_hash_ops, 10000);
 	list_init(&db->installed.packages);
 	db->cache_dir = apk_static_cache_dir;
 
@@ -1298,11 +1298,9 @@ static int apk_db_install_archive_entry(void *_ctx,
 			ctx->script_pending = TRUE;
 		return apk_db_run_pending_script(ctx);
 	}
-
 	r = apk_db_run_pending_script(ctx);
 	if (r != 0)
 		return r;
-
 
 	/* Show progress */
 	if (ctx->cb) {
@@ -1323,7 +1321,9 @@ static int apk_db_install_archive_entry(void *_ctx,
 
 		/* Make sure the file is part of the cached directory tree */
 		if (diri == NULL ||
-		    apk_blob_compare(APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen), bdir) != 0) {
+		    apk_blob_compare(APK_BLOB_PTR_LEN(diri->dir->name,
+						      diri->dir->namelen),
+				     bdir) != 0) {
 			struct hlist_node *n;
 
 			hlist_for_each_entry(diri, n, &pkg->owned_dirs, pkg_dirs_list) {
