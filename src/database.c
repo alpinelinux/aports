@@ -1284,8 +1284,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 	const char *p;
 	int r = 0, type = APK_SCRIPT_INVALID;
 
-	if (apk_sign_ctx_process_file(&ctx->sctx, ae, is) == 0)
-		return 0;
+	apk_sign_ctx_verify_tar(&ctx->sctx, ae, is);
 
 	/* Package metainfo and script processing */
 	if (ae->name[0] == '.') {

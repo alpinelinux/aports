@@ -330,7 +330,8 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 	ctx->num_signatures++;
 
 	/* Found already a trusted key */
-	if (ctx->signature.pkey != NULL)
+	if (ctx->action != APK_SIGN_VERIFY ||
+	    ctx->signature.pkey != NULL)
 		return 0;
 
 	if (strncmp(&fi->name[6], "RSA.", 4) == 0 ||

@@ -93,7 +93,7 @@ static size_t tar_entry_read(void *stream, void *ptr, size_t size)
 		return -1;
 
 	teis->bytes_left -= size;
-	if (teis->csum != NULL)
+	if (teis->csum == NULL)
 		return size;
 
 	EVP_DigestUpdate(&teis->mdctx, ptr, size);
