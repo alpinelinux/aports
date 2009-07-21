@@ -225,10 +225,10 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	}
 
 	/* Check that there was no partial record */
-	if (r != 0)
-		return -1;
+	if (r > 0)
+		r = -1;
 
-	return 0;
+	return r;
 
 err:
 	EVP_MD_CTX_cleanup(&teis.mdctx);

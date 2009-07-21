@@ -447,7 +447,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			/* Package identity is checksum of control block */
 			sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
 			EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
-			return 1;
+			return -1000;
 		} else {
 			/* Reset digest for hashing data */
 			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
@@ -702,7 +702,7 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, sctx);
 	r = apk_tar_parse(tar, read_info_entry, &ctx);
 	tar->close(tar);
-	if (r < 0)
+	if (r < 0 && r != -1000)
 		goto err;
 	if (ctx.pkg->name == NULL)
 		goto err;

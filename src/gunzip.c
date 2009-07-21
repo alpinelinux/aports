@@ -21,7 +21,7 @@ struct apk_gzip_istream {
 	struct apk_istream is;
 	struct apk_bstream *bs;
 	z_stream zs;
-	int z_err;
+	int err;
 
 	apk_multipart_cb cb;
 	void *cbctx;
@@ -34,10 +34,11 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 		container_of(stream, struct apk_gzip_istream, is);
 	int r;
 
-	if (gis->z_err == Z_DATA_ERROR || gis->z_err == Z_ERRNO)
-		return -1;
-	if (gis->z_err == Z_STREAM_END)
-		return 0;
+	if (gis->err != 0) {
+		if (gis->err > 0)
+			return 0;
+		return gis->err;
+	}
 
 	if (ptr == NULL)
 		return apk_istream_skip(&gis->is, size);
@@ -45,7 +46,7 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 	gis->zs.avail_out = size;
 	gis->zs.next_out  = ptr;
 
-	while (gis->zs.avail_out != 0 && gis->z_err == Z_OK) {
+	while (gis->zs.avail_out != 0 && gis->err == 0) {
 		if (gis->zs.avail_in == 0) {
 			apk_blob_t blob;
 
@@ -59,48 +60,54 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 			gis->zs.avail_in = blob.len;
 			gis->zs.next_in = (void *) gis->cbprev;
 			if (gis->zs.avail_in < 0) {
-				gis->z_err = Z_DATA_ERROR;
-				return size - gis->zs.avail_out;
+				gis->err = -1;
+				goto ret;
 			} else if (gis->zs.avail_in == 0) {
 				if (gis->cb != NULL) {
 					r = gis->cb(gis->cbctx, APK_MPART_END,
 						    APK_BLOB_NULL);
 					if (r != 0) {
-						gis->z_err = Z_STREAM_END;
 						if (r > 0)
 							r = -1;
-						return r;
+						gis->err = r;
 					}
-				}
-				gis->z_err = Z_STREAM_END;
-				return size - gis->zs.avail_out;
+				} else
+					gis->err = 1;
+				goto ret;
 			}
 		}
 
-		gis->z_err = inflate(&gis->zs, Z_NO_FLUSH);
-		if (gis->z_err == Z_STREAM_END) {
+		r = inflate(&gis->zs, Z_NO_FLUSH);
+		switch (r) {
+		case Z_STREAM_END:
 			/* Digest the inflated bytes */
 			if (gis->cb != NULL) {
 				r = gis->cb(gis->cbctx, APK_MPART_BOUNDARY,
 					    APK_BLOB_PTR_LEN(gis->cbprev,
 					    (void *)gis->zs.next_in - gis->cbprev));
 				if (r != 0) {
-					gis->z_err = Z_DATA_ERROR;
 					if (r > 0)
 						r = -1;
-					return r;
+					gis->err = r;
+					goto ret;
 				}
 				gis->cbprev = gis->zs.next_in;
 			}
 			inflateEnd(&gis->zs);
 			if (inflateInit2(&gis->zs, 15+32) != Z_OK)
 				return -1;
-			gis->z_err = Z_OK;
+			break;
+		case Z_OK:
+			break;
+		default:
+			gis->err = -1;
+			break;
 		}
 	}
 
-	if (gis->z_err != Z_OK && gis->z_err != Z_STREAM_END)
-		return -1;
+ret:
+	if (size - gis->zs.avail_out == 0)
+		return gis->err;
 
 	return size - gis->zs.avail_out;
 }
@@ -131,7 +138,6 @@ struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 		.is.read = gzi_read,
 		.is.close = gzi_close,
 		.bs = bs,
-		.z_err = 0,
 		.cb = cb,
 		.cbctx = ctx,
 	};
