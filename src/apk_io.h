@@ -36,6 +36,7 @@ struct apk_istream {
 };
 
 #define APK_BSTREAM_SINGLE_READ			0x0001
+#define APK_BSTREAM_EOF				0x0002
 
 struct apk_bstream {
 	unsigned int flags;

@@ -82,10 +82,13 @@ static ssize_t gzi_read(void *stream, void *ptr, size_t size)
 		switch (r) {
 		case Z_STREAM_END:
 			/* Digest the inflated bytes */
+			if ((gis->bs->flags & APK_BSTREAM_EOF) &&
+			    gis->zs.avail_in == 0)
+				gis->err = 1;
 			if (gis->cb != NULL) {
-				r = gis->cb(gis->cbctx, APK_MPART_BOUNDARY,
-					    APK_BLOB_PTR_LEN(gis->cbprev,
-					    (void *)gis->zs.next_in - gis->cbprev));
+				r = gis->cb(gis->cbctx,
+					    gis->err ? APK_MPART_END : APK_MPART_BOUNDARY,
+					    APK_BLOB_PTR_LEN(gis->cbprev, (void *) gis->zs.next_in - gis->cbprev));
 				if (r > 0)
 					r = -ECANCELED;
 				if (r != 0) {
@@ -94,6 +97,8 @@ static ssize_t gzi_read(void *stream, void *ptr, size_t size)
 				}
 				gis->cbprev = gis->zs.next_in;
 			}
+			if (gis->err)
+				goto ret;
 			inflateEnd(&gis->zs);
 			if (inflateInit2(&gis->zs, 15+32) != Z_OK)
 				return -ENOMEM;

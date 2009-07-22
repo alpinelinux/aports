@@ -260,6 +260,7 @@ static apk_blob_t mmap_read(void *stream, apk_blob_t token)
 
 	ret = mbs->left;
 	mbs->left = APK_BLOB_NULL;
+	mbs->bs.flags |= APK_BSTREAM_EOF;
 
 	return ret;
 }

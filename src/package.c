@@ -426,108 +426,91 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 {
 	struct apk_sign_ctx *sctx = (struct apk_sign_ctx *) ctx;
 	unsigned char calculated[EVP_MAX_MD_SIZE];
-	int r;
+	int r, end_of_control;
 
-	switch (part) {
-	case APK_MPART_DATA:
-		EVP_DigestUpdate(&sctx->mdctx, data.ptr, data.len);
-		break;
-	case APK_MPART_BOUNDARY:
-		EVP_DigestUpdate(&sctx->mdctx, data.ptr, data.len);
+	if ((part == APK_MPART_DATA) ||
+	    (part == APK_MPART_BOUNDARY && sctx->data_started))
+		goto update_digest;
 
-		/* We are not interested about checksums of signature,
-		 * reset checksum if we are still in signatures */
-		if (!sctx->control_started) {
-			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
-			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
-			return 0;
+	/* Still in signature blocks? */
+	if (!sctx->control_started)
+		goto reset_digest;
+
+	/* Grab state and mark all remaining block as data */
+	end_of_control = (sctx->data_started == 0);
+	sctx->data_started = 1;
+
+	/* End of control-block and control does not have data checksum? */
+	if (sctx->has_data_checksum == 0 && end_of_control)
+		goto update_digest;
+
+	/* Drool in the remaining of the digest block now, we will finish
+	 * it on all cases */
+	EVP_DigestUpdate(&sctx->mdctx, data.ptr, data.len);
+
+	/* End of control-block and checking control hash/signature or
+	 * end of data-block and checking its hash/signature */
+	if (sctx->has_data_checksum && !end_of_control) {
+		/* End of control-block and check it's hash */
+		EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
+		if (EVP_MD_CTX_size(&sctx->mdctx) == 0 ||
+		    memcmp(calculated, sctx->data_checksum,
+		           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
+			return -EKEYREJECTED;
+		sctx->data_verified = 1;
+		if (!(apk_flags & APK_ALLOW_UNTRUSTED) &&
+		    !sctx->control_verified)
+			return -ENOKEY;
+		return 0;
+	}
+
+	switch (sctx->action) {
+	case APK_SIGN_VERIFY:
+		if (sctx->signature.pkey == NULL) {
+			if (apk_flags & APK_ALLOW_UNTRUSTED)
+				break;
+			return -ENOKEY;
 		}
 
-		/* Are we in control part?. */
-		if ((!sctx->control_started) || sctx->data_started)
-			return 0;
-
-		/* End of control block, make sure rest is handled as data */
-		sctx->data_started = 1;
-		if (!sctx->has_data_checksum)
-			return 0;
-
-		/* Verify the signature if we have public key */
-		if (sctx->action == APK_SIGN_VERIFY) {
-			if (sctx->signature.pkey == NULL) {
-				if (!(apk_flags & APK_ALLOW_UNTRUSTED))
-					return -ENOKEY;
-			} else {
-				r = EVP_VerifyFinal(&sctx->mdctx,
-						(unsigned char *) sctx->signature.data.ptr,
-						sctx->signature.data.len,
-						sctx->signature.pkey);
-				if (r != 1)
-					return -EKEYREJECTED;
-
-				sctx->control_verified = 1;
-			}
-			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
-			return 0;
-		} else if (sctx->action == APK_SIGN_GENERATE) {
-			/* Package identity is checksum of control block */
-			sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
-			EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
+		r = EVP_VerifyFinal(&sctx->mdctx,
+			(unsigned char *) sctx->signature.data.ptr,
+			sctx->signature.data.len,
+			sctx->signature.pkey);
+		if (r != 1)
+			return -EKEYREJECTED;
+		sctx->control_verified = 1;
+		if (!sctx->has_data_checksum && part == APK_MPART_END)
+			sctx->data_verified = 1;
+		break;
+	case APK_SIGN_VERIFY_IDENTITY:
+		/* Reset digest for hashing data */
+		EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
+		if (memcmp(calculated, sctx->identity.data,
+			   sctx->identity.type) != 0)
+			return -EKEYREJECTED;
+		sctx->control_verified = 1;
+		if (!sctx->has_data_checksum && part == APK_MPART_END)
+			sctx->data_verified = 1;
+		break;
+	case APK_SIGN_GENERATE:
+	case APK_SIGN_GENERATE_V1:
+		/* Package identity is the checksum */
+		sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
+		EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
+		if (sctx->action == APK_SIGN_GENERATE &&
+		    sctx->has_data_checksum)
 			return -ECANCELED;
-		} else {
-			/* Reset digest for hashing data */
-			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
-			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
-
-			if (sctx->action == APK_SIGN_VERIFY_IDENTITY) {
-				if (memcmp(calculated, sctx->identity.data,
-					   sctx->identity.type) != 0)
-					return -EKEYREJECTED;
-				sctx->control_verified = 1;
-			}
-		}
-		break;
-	case APK_MPART_END:
-		if (sctx->has_data_checksum) {
-			/* Check that data checksum matches */
-			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
-			if (EVP_MD_CTX_size(&sctx->mdctx) == 0 ||
-			    memcmp(calculated, sctx->data_checksum,
-			           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
-				return -EKEYREJECTED;
-			sctx->data_verified = 1;
-			if (!(apk_flags & APK_ALLOW_UNTRUSTED) &&
-			    !sctx->control_verified)
-				return -ENOKEY;
-		} else if (sctx->action == APK_SIGN_VERIFY) {
-			if (sctx->signature.pkey == NULL)
-				return -EKEYREJECTED;
-
-			/* Assume that the data is fully signed */
-			r = EVP_VerifyFinal(&sctx->mdctx,
-				   (unsigned char *) sctx->signature.data.ptr,
-				   sctx->signature.data.len,
-				   sctx->signature.pkey);
-			if (r != 1)
-				return -EKEYREJECTED;
-
-			sctx->control_verified = 1;
-			sctx->data_verified = 1;
-		} else if (sctx->action == APK_SIGN_VERIFY_IDENTITY) {
-			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
-			if (EVP_MD_CTX_size(&sctx->mdctx) == 0 ||
-			    memcmp(calculated, sctx->identity.data,
-			           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
-				return -EKEYREJECTED;
-			sctx->control_verified = 1;
-			sctx->data_verified = 1;
-		} else {
-			/* Package identity is checksum of all data */
-			sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
-			EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
-		}
 		break;
 	}
+
+reset_digest:
+	EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
+	EVP_MD_CTX_set_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+	return 0;
+
+update_digest:
+	EVP_MD_CTX_clear_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+	EVP_DigestUpdate(&sctx->mdctx, data.ptr, data.len);
 	return 0;
 }
 

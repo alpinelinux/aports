@@ -20,6 +20,7 @@ static int verify_main(void *ctx, int argc, char **argv)
 	struct apk_istream *is;
 	int i, r, ok, rc = 0;
 
+	apk_flags |= APK_ALLOW_UNTRUSTED;
 	for (i = 0; i < argc; i++) {
 		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
 		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(argv[i]),
@@ -28,7 +29,7 @@ static int verify_main(void *ctx, int argc, char **argv)
 		is->close(is);
 		ok = sctx.control_verified && sctx.data_verified;
 		if (apk_verbosity >= 1)
-			apk_message("%s: %s", argv[i],
+			apk_message("%s: %d - %s", argv[i], r,
 				ok ? "OK" :
 				sctx.data_verified ? "UNTRUSTED" : "FAILED");
 		if (!ok)
