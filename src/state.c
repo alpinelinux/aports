@@ -690,6 +690,7 @@ int apk_state_commit(struct apk_state *state,
 	}
 
 	/* Go through changes */
+	r = 0;
 	list_for_each_entry(change, &state->change_list_head, change_list) {
 		apk_print_change(db, change->oldpkg, change->newpkg);
 		prog.pkg = change->newpkg;
@@ -700,7 +701,7 @@ int apk_state_commit(struct apk_state *state,
 					       (apk_flags & APK_PROGRESS) ? progress_cb : NULL,
 					       &prog);
 			if (r != 0)
-				return r;
+				break;
 		}
 
 		apk_count_change(change, &prog.done);
@@ -708,13 +709,14 @@ int apk_state_commit(struct apk_state *state,
 	if (apk_flags & APK_PROGRESS)
 		apk_draw_progress(20, 1);
 
-	if (!(apk_flags & APK_SIMULATE))
+	if (!(apk_flags & APK_SIMULATE) && prog.done.packages != 0)
 		apk_db_write_config(db);
 
-	apk_message("OK: %d packages, %d dirs, %d files",
-		    db->installed.stats.packages,
-		    db->installed.stats.dirs,
-		    db->installed.stats.files);
+	if (r != 0)
+		apk_message("OK: %d packages, %d dirs, %d files",
+			    db->installed.stats.packages,
+			    db->installed.stats.dirs,
+			    db->installed.stats.files);
 
-	return 0;
+	return r;
 }
