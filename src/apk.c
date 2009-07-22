@@ -43,6 +43,8 @@ static struct apk_option generic_options[] = {
 	{ 0x101, "progress",	"Show a progress bar" },
 	{ 0x102, "clean-protected", "Do not create .apk-new files to "
 				"configuration dirs" },
+	{ 0x103, "allow-untrusted", "Blindly install packages with untrusted "
+				"signatures or no signature at all" },
 	{ 0x104, "simulate",	"Show what would be done without actually "
 				"doing it" },
 	{ 0x105, "wait",	"Wait for TIME seconds to get an exclusive "
@@ -350,6 +352,9 @@ int main(int argc, char **argv)
 			break;
 		case 0x102:
 			apk_flags |= APK_CLEAN_PROTECTED;
+			break;
+		case 0x103:
+			apk_flags |= APK_ALLOW_UNTRUSTED;
 			break;
 		case 0x104:
 			apk_flags |= APK_SIMULATE;

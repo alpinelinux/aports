@@ -453,16 +453,20 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			return 0;
 
 		/* Verify the signature if we have public key */
-		if (sctx->action == APK_SIGN_VERIFY &&
-		    sctx->signature.pkey != NULL) {
-			r = EVP_VerifyFinal(&sctx->mdctx,
-					   (unsigned char *) sctx->signature.data.ptr,
-					   sctx->signature.data.len,
-					   sctx->signature.pkey);
-			if (r != 1)
-				return -EKEYREJECTED;
+		if (sctx->action == APK_SIGN_VERIFY) {
+			if (sctx->signature.pkey == NULL) {
+				if (!(apk_flags & APK_ALLOW_UNTRUSTED))
+					return -ENOKEY;
+			} else {
+				r = EVP_VerifyFinal(&sctx->mdctx,
+						(unsigned char *) sctx->signature.data.ptr,
+						sctx->signature.data.len,
+						sctx->signature.pkey);
+				if (r != 1)
+					return -EKEYREJECTED;
 
-			sctx->control_verified = 1;
+				sctx->control_verified = 1;
+			}
 			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
 			return 0;
 		} else if (sctx->action == APK_SIGN_GENERATE) {
@@ -492,7 +496,8 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
 				return -EKEYREJECTED;
 			sctx->data_verified = 1;
-			if (!sctx->control_verified)
+			if (!(apk_flags & APK_ALLOW_UNTRUSTED) &&
+			    !sctx->control_verified)
 				return -ENOKEY;
 		} else if (sctx->action == APK_SIGN_VERIFY) {
 			if (sctx->signature.pkey == NULL)
