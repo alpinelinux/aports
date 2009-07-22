@@ -712,7 +712,7 @@ int apk_state_commit(struct apk_state *state,
 	if (!(apk_flags & APK_SIMULATE) && prog.done.packages != 0)
 		apk_db_write_config(db);
 
-	if (r != 0)
+	if (r == 0)
 		apk_message("OK: %d packages, %d dirs, %d files",
 			    db->installed.stats.packages,
 			    db->installed.stats.dirs,
