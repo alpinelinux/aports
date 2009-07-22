@@ -60,9 +60,9 @@ extern unsigned int apk_flags;
 #define APK_PREFER_AVAILABLE	0x0040
 #define APK_UPDATE_CACHE	0x0080
 
-#define apk_error(args...)	apk_log("ERROR: ", args);
-#define apk_warning(args...)	if (apk_verbosity > 0) { apk_log("WARNING: ", args); }
-#define apk_message(args...)	if (apk_verbosity > 0) { apk_log(NULL, args); }
+#define apk_error(args...)	do { apk_log("ERROR: ", args); } while (0)
+#define apk_warning(args...)	do { if (apk_verbosity > 0) { apk_log("WARNING: ", args); } } while (0)
+#define apk_message(args...)	do { if (apk_verbosity > 0) { apk_log(NULL, args); } } while (0)
 
 void apk_log(const char *prefix, const char *format, ...);
 

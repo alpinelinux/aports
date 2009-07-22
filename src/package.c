@@ -86,8 +86,10 @@ int apk_deps_add(struct apk_dependency_array **depends,
 
 	if (deps != NULL) {
 		for (i = 0; i < deps->num; i++) {
-			if (deps->item[i].name == dep->name)
+			if (deps->item[i].name == dep->name) {
+				deps->item[i] = *dep;
 				return 0;
+			}
 		}
 	}
 
@@ -119,16 +121,12 @@ struct parse_depend_ctx {
 	struct apk_dependency_array **depends;
 };
 
-static int parse_depend(void *ctx, apk_blob_t blob)
+int apk_dep_from_blob(struct apk_dependency *dep, struct apk_database *db,
+		      apk_blob_t blob)
 {
-	struct parse_depend_ctx *pctx = (struct parse_depend_ctx *) ctx;
-	struct apk_dependency *dep;
 	struct apk_name *name;
 	apk_blob_t bname, bop, bver = APK_BLOB_NULL;
 	int mask = APK_VERSION_LESS | APK_VERSION_EQUAL | APK_VERSION_GREATER;
-
-	if (blob.len == 0)
-		return 0;
 
 	/* [!]name[<,<=,=,>=,>]ver */
 	if (blob.ptr[0] == '!') {
@@ -140,11 +138,12 @@ static int parse_depend(void *ctx, apk_blob_t blob)
 		int i;
 
 		if (mask == 0)
-			return -1;
+			return -EINVAL;
 		if (!apk_blob_spn(bop, "<>=", &bop, &bver))
-			return -1;
-		for (i = 0; i < blob.len; i++) {
-			switch (blob.ptr[i]) {
+			return -EINVAL;
+		mask = 0;
+		for (i = 0; i < bop.len; i++) {
+			switch (bop.ptr[i]) {
 			case '<':
 				mask |= APK_VERSION_LESS;
 				break;
@@ -158,25 +157,51 @@ static int parse_depend(void *ctx, apk_blob_t blob)
 		}
 		if ((mask & (APK_VERSION_LESS|APK_VERSION_GREATER))
 		    == (APK_VERSION_LESS|APK_VERSION_GREATER))
-			return -1;
+			return -EINVAL;
 
 		if (!apk_version_validate(bver))
-			return -1;
+			return -EINVAL;
+
+		blob = bname;
 	}
 
-	name = apk_db_get_name(pctx->db, blob);
+	name = apk_db_get_name(db, blob);
 	if (name == NULL)
-		return -1;
-
-	dep = apk_dependency_array_add(pctx->depends);
-	if (dep == NULL)
-		return -1;
+		return -ENOENT;
 
 	*dep = (struct apk_dependency){
 		.name = name,
 		.version = APK_BLOB_IS_NULL(bver) ? NULL : apk_blob_cstr(bver),
 		.result_mask = mask,
 	};
+	return 0;
+}
+
+void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
+		      struct apk_package *pkg)
+{
+	*dep = (struct apk_dependency) {
+		.name = apk_db_get_name(db, APK_BLOB_STR(pkg->name->name)),
+		.version = pkg->version,
+		.result_mask = APK_VERSION_EQUAL,
+	};
+}
+
+static int parse_depend(void *ctx, apk_blob_t blob)
+{
+	struct parse_depend_ctx *pctx = (struct parse_depend_ctx *) ctx;
+	struct apk_dependency *dep, p;
+
+	if (blob.len == 0)
+		return 0;
+
+	if (apk_dep_from_blob(&p, pctx->db, blob) < 0)
+		return -1;
+
+	dep = apk_dependency_array_add(pctx->depends);
+	if (dep == NULL)
+		return -1;
+	*dep = p;
 
 	return 0;
 }
@@ -435,7 +460,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 					   sctx->signature.data.len,
 					   sctx->signature.pkey);
 			if (r != 1)
-				return -1;
+				return -EKEYREJECTED;
 
 			sctx->control_verified = 1;
 			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
@@ -444,7 +469,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			/* Package identity is checksum of control block */
 			sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
 			EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
-			return -1000;
+			return -ECANCELED;
 		} else {
 			/* Reset digest for hashing data */
 			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
@@ -453,7 +478,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			if (sctx->action == APK_SIGN_VERIFY_IDENTITY) {
 				if (memcmp(calculated, sctx->identity.data,
 					   sctx->identity.type) != 0)
-					return -1;
+					return -EKEYREJECTED;
 				sctx->control_verified = 1;
 			}
 		}
@@ -465,11 +490,13 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			if (EVP_MD_CTX_size(&sctx->mdctx) == 0 ||
 			    memcmp(calculated, sctx->data_checksum,
 			           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
-				return -1;
+				return -EKEYREJECTED;
 			sctx->data_verified = 1;
+			if (!sctx->control_verified)
+				return -ENOKEY;
 		} else if (sctx->action == APK_SIGN_VERIFY) {
 			if (sctx->signature.pkey == NULL)
-				return -1;
+				return -EKEYREJECTED;
 
 			/* Assume that the data is fully signed */
 			r = EVP_VerifyFinal(&sctx->mdctx,
@@ -477,7 +504,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 				   sctx->signature.data.len,
 				   sctx->signature.pkey);
 			if (r != 1)
-				return -1;
+				return -EKEYREJECTED;
 
 			sctx->control_verified = 1;
 			sctx->data_verified = 1;
@@ -486,7 +513,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			if (EVP_MD_CTX_size(&sctx->mdctx) == 0 ||
 			    memcmp(calculated, sctx->identity.data,
 			           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
-				return -1;
+				return -EKEYREJECTED;
 			sctx->control_verified = 1;
 			sctx->data_verified = 1;
 		} else {
@@ -698,7 +725,7 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, sctx);
 	r = apk_tar_parse(tar, read_info_entry, &ctx);
 	tar->close(tar);
-	if (r < 0 && r != -1000)
+	if (r < 0 && r != -ECANCELED)
 		goto err;
 	if (ctx.pkg->name == NULL)
 		goto err;
@@ -927,35 +954,3 @@ int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b)
 {
 	return apk_version_compare(a->version, b->version);
 }
-
-struct apk_dependency apk_dep_from_str(struct apk_database *db,
-				       char *str)
-{
-	apk_blob_t name = APK_BLOB_STR(str);
-	char *v = str;
-	int mask = APK_DEPMASK_REQUIRE;
-
-	v = strpbrk(str, "<>=");
-	if (v != NULL) {
-		name.len = v - str;
-		mask = apk_version_result_mask(v++);
-		if (*v == '=')
-			v++;
-	}
-	return (struct apk_dependency) {
-		.name = apk_db_get_name(db, name),
-		.version = v,
-		.result_mask = mask,
-	};
-}
-
-struct apk_dependency apk_dep_from_pkg(struct apk_database *db,
-				       struct apk_package *pkg)
-{
-	return (struct apk_dependency) {
-		.name = apk_db_get_name(db, APK_BLOB_STR(pkg->name->name)),
-		.version = pkg->version,
-		.result_mask = APK_VERSION_EQUAL,
-	};
-}
-

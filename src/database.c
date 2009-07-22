@@ -668,7 +668,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 		apk_deps_parse(db, &db->world, blob);
 		free(blob.ptr);
 
-		for (i = 0; i < db->world->num; i++)
+		for (i = 0; db->world != NULL && i < db->world->num; i++)
 			db->world->item[i].name->flags |= APK_NAME_TOPLEVEL;
 	}
 
@@ -868,12 +868,14 @@ int apk_db_write_config(struct apk_database *db)
 
 	fchdir(db->root_fd);
 
-	os = apk_ostream_to_file("var/lib/apk/world", 0644);
+	os = apk_ostream_to_file("var/lib/apk/world.new", 0644);
 	if (os == NULL)
 		return -1;
 	apk_deps_write(db->world, os);
 	os->write(os, "\n", 1);
 	os->close(os);
+	if (rename("var/lib/apk/world.new", "var/lib/apk/world") < 0)
+		return -errno;
 
 	os = apk_ostream_to_file("var/lib/apk/installed.new", 0644);
 	if (os == NULL)
@@ -1061,18 +1063,16 @@ int apk_cache_download(struct apk_database *db, struct apk_checksum *csum,
 	if (verify != APK_SIGN_NONE) {
 		struct apk_istream *is;
 		struct apk_sign_ctx sctx;
-		int ok;
 
 		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
 		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(tmp2),
 			apk_sign_ctx_mpart_cb, &sctx);
 		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx);
 		is->close(is);
-		ok = (r == 0) && sctx.control_verified && sctx.data_verified;
 		apk_sign_ctx_free(&sctx);
-		if (!ok) {
+		if (r != 0) {
 			unlink(tmp2);
-			return -10;
+			return r;
 		}
 	}
 
@@ -1116,9 +1116,11 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 
 	r = apk_cache_download(db, &repo->csum, repo->url, apkindex_tar_gz,
 			       APK_SIGN_VERIFY);
-	if (r == 0 || r == -10) {
-		if (r == -10)
-			apk_error("%s: untrusted or bad signature!", repo->url);
+	if (r == 0 || r == -ENOKEY || r == -EKEYREJECTED) {
+		if (r == -ENOKEY)
+			apk_error("%s: verify: UNTRUSTED", repo->url);
+		else if (r == -EKEYREJECTED)
+			apk_error("%s: verify: FAILED", repo->url);
 		apk_cache_delete(db, &repo->csum, apk_index_gz);
 		return r;
 	}
@@ -1126,7 +1128,7 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 	r = apk_cache_download(db, &repo->csum, repo->url, apk_index_gz,
 			       APK_SIGN_NONE);
 	if (r != 0)
-		apk_error("Failed to update %s: download failed");
+		apk_error("Failed to update %s: download failed", repo->url);
 	return r;
 }
 
@@ -1454,6 +1456,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 	struct hlist_node *dc, *dn, *fc, *fn;
 	unsigned long hash;
 	char name[1024], tmpname[1024];
+	int r;
 
 	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
 		dir = diri->dir;
@@ -1500,7 +1503,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 			/* Claim ownership of the file in db */
 			if (ofile != NULL) {
 				hlist_del(&ofile->diri_files_list,
-					  &diri->owned_files);
+					  &ofile->diri->owned_files);
 				apk_hash_delete_hashed(&db->installed.files,
 						       APK_BLOB_BUF(&key), hash);
 			} else

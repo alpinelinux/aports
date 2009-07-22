@@ -363,7 +363,7 @@ int main(int argc, char **argv)
 	}
 
 	r = applet->main(ctx, argc, argv);
-	if (r == -100)
+	if (r == -EINVAL)
 		return usage(applet);
 	return r;
 }

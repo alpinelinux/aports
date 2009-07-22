@@ -105,6 +105,10 @@ int apk_sign_ctx_verify_tar(void *ctx, const struct apk_file_info *fi,
 			    struct apk_istream *is);
 int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t blob);
 
+int apk_dep_from_blob(struct apk_dependency *dep, struct apk_database *db,
+		      apk_blob_t blob);
+void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
+		      struct apk_package *pkg);
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep);
 void apk_deps_del(struct apk_dependency_array **deps,
@@ -112,6 +116,7 @@ void apk_deps_del(struct apk_dependency_array **deps,
 void apk_deps_parse(struct apk_database *db,
 		    struct apk_dependency_array **depends,
 		    apk_blob_t blob);
+
 int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os);
 int apk_script_type(const char *name);
 
@@ -136,7 +141,4 @@ int apk_pkg_write_index_entry(struct apk_package *pkg, struct apk_ostream *os);
 
 int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b);
 
-struct apk_dependency apk_dep_from_str(struct apk_database *db, char *str);
-struct apk_dependency apk_dep_from_pkg(struct apk_database *db,
-				       struct apk_package *pkg);
 #endif

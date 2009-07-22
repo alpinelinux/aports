@@ -9,9 +9,10 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <errno.h>
+#include <stdio.h>
 #include <dirent.h>
 #include <unistd.h>
-#include <stdio.h>
 
 #include "apk_defines.h"
 #include "apk_applet.h"
@@ -140,7 +141,7 @@ static int cache_main(void *ctx, int argc, char **argv)
 	int r;
 
 	if (argc != 1)
-		return -100;
+		return -EINVAL;
 
 	if (strcmp(argv[0], "sync") == 0)
 		actions = CACHE_CLEAN | CACHE_DOWNLOAD;
@@ -149,7 +150,7 @@ static int cache_main(void *ctx, int argc, char **argv)
 	else if (strcmp(argv[0], "download") == 0)
 		actions = CACHE_DOWNLOAD;
 	else
-		return -100;
+		return -EINVAL;
 
 	r = apk_db_open(&db, apk_root,
 			APK_OPENF_NO_SCRIPTS | APK_OPENF_NO_INSTALLED);
