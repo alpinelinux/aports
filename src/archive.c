@@ -81,27 +81,28 @@ struct apk_tar_entry_istream {
 	struct apk_checksum *csum;
 };
 
-static size_t tar_entry_read(void *stream, void *ptr, size_t size)
+static ssize_t tar_entry_read(void *stream, void *ptr, size_t size)
 {
 	struct apk_tar_entry_istream *teis =
 		container_of(stream, struct apk_tar_entry_istream, is);
+	ssize_t r;
 
 	if (size > teis->bytes_left)
 		size = teis->bytes_left;
-	size = teis->tar_is->read(teis->tar_is, ptr, size);
-	if (size < 0)
-		return -1;
+	r = teis->tar_is->read(teis->tar_is, ptr, size);
+	if (r < 0)
+		return r;
 
-	teis->bytes_left -= size;
+	teis->bytes_left -= r;
 	if (teis->csum == NULL)
-		return size;
+		return r;
 
-	EVP_DigestUpdate(&teis->mdctx, ptr, size);
+	EVP_DigestUpdate(&teis->mdctx, ptr, r);
 	if (teis->bytes_left == 0) {
 		teis->csum->type = EVP_MD_CTX_size(&teis->mdctx);
 		EVP_DigestFinal_ex(&teis->mdctx, teis->csum->data, NULL);
 	}
-	return size;
+	return r;
 }
 
 static void tar_entry_close(void *stream)
@@ -221,13 +222,13 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	if (r == 512) {
 		while ((r = is->read(is, &buf, 512)) == 512) {
 			if (buf.name[0] != 0)
-				return -1;
+				return -EBADMSG;
 		}
 	}
 
 	/* Check that there was no partial record */
 	if (r > 0)
-		r = -1;
+		r = -EBADMSG;
 
 	return r;
 

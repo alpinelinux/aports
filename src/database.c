@@ -1582,8 +1582,9 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	tar->close(tar);
 
 	if (r != 0) {
-		apk_error("%s-%s: package integrity check failed",
-			  newpkg->name->name, newpkg->version);
+		apk_error("%s-%s: %s",
+			  newpkg->name->name, newpkg->version,
+			  apk_error_str(r));
 		goto err;
 	}
 	r = apk_db_run_pending_script(&ctx);

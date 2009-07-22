@@ -50,6 +50,24 @@ static struct apk_option generic_options[] = {
 				required_argument, "TIME" },
 };
 
+const char *apk_error_str(int error)
+{
+	if (error < 0)
+		error = -error;
+	switch (error) {
+	case ENOKEY:
+		return "UNTRUSTED signature";
+	case EKEYREJECTED:
+		return "BAD signature";
+	case EIO:
+		return "IO ERROR";
+	case EBADMSG:
+		return "BAD archive";
+	default:
+		return strerror(error);
+	}
+}
+
 void apk_log(const char *prefix, const char *format, ...)
 {
 	va_list va;

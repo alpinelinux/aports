@@ -31,7 +31,7 @@ struct apk_file_info {
 };
 
 struct apk_istream {
-	size_t (*read)(void *stream, void *ptr, size_t size);
+	ssize_t (*read)(void *stream, void *ptr, size_t size);
 	void (*close)(void *stream);
 };
 
@@ -44,7 +44,7 @@ struct apk_bstream {
 };
 
 struct apk_ostream {
-	size_t (*write)(void *stream, const void *buf, size_t size);
+	ssize_t (*write)(void *stream, const void *buf, size_t size);
 	void (*close)(void *stream);
 };
 

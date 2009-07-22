@@ -120,10 +120,10 @@ static int add_main(void *ctx, int argc, char **argv)
 			struct apk_sign_ctx sctx;
 
 			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
-			pkg = apk_pkg_read(&db, argv[i], &sctx);
+			r = apk_pkg_read(&db, argv[i], &sctx, &pkg);
 			apk_sign_ctx_free(&sctx);
-			if (pkg == NULL) {
-				apk_error("Unable to read '%s'", argv[i]);
+			if (r != 0) {
+				apk_error("%s: %s", argv[i], apk_error_str(r));
 				goto err;
 			}
 

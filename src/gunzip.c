@@ -8,6 +8,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -28,7 +29,7 @@ struct apk_gzip_istream {
 	void *cbprev;
 };
 
-static size_t gzi_read(void *stream, void *ptr, size_t size)
+static ssize_t gzi_read(void *stream, void *ptr, size_t size)
 {
 	struct apk_gzip_istream *gis =
 		container_of(stream, struct apk_gzip_istream, is);
@@ -61,7 +62,7 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 			gis->zs.avail_in = blob.len;
 			gis->zs.next_in = (void *) gis->cbprev;
 			if (gis->zs.avail_in < 0) {
-				gis->err = -1;
+				gis->err = -EIO;
 				goto ret;
 			} else if (gis->zs.avail_in == 0) {
 				gis->err = 1;
@@ -69,7 +70,7 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 					r = gis->cb(gis->cbctx, APK_MPART_END,
 						    APK_BLOB_NULL);
 					if (r > 0)
-						r = -1;
+						r = -ECANCELED;
 					if (r != 0)
 						gis->err = r;
 				}
@@ -85,9 +86,9 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 				r = gis->cb(gis->cbctx, APK_MPART_BOUNDARY,
 					    APK_BLOB_PTR_LEN(gis->cbprev,
 					    (void *)gis->zs.next_in - gis->cbprev));
+				if (r > 0)
+					r = -ECANCELED;
 				if (r != 0) {
-					if (r > 0)
-						r = -1;
 					gis->err = r;
 					goto ret;
 				}
@@ -95,12 +96,12 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 			}
 			inflateEnd(&gis->zs);
 			if (inflateInit2(&gis->zs, 15+32) != Z_OK)
-				return -1;
+				return -ENOMEM;
 			break;
 		case Z_OK:
 			break;
 		default:
-			gis->err = -1;
+			gis->err = -EIO;
 			break;
 		}
 	}
@@ -159,12 +160,11 @@ struct apk_gzip_ostream {
 	z_stream zs;
 };
 
-static size_t gzo_write(void *stream, const void *ptr, size_t size)
+static ssize_t gzo_write(void *stream, const void *ptr, size_t size)
 {
 	struct apk_gzip_ostream *gos = (struct apk_gzip_ostream *) stream;
 	unsigned char buffer[1024];
-	size_t have;
-	int r;
+	ssize_t have, r;
 
 	gos->zs.avail_in = size;
 	gos->zs.next_in = (void *) ptr;
@@ -173,12 +173,12 @@ static size_t gzo_write(void *stream, const void *ptr, size_t size)
 		gos->zs.next_out = buffer;
 		r = deflate(&gos->zs, Z_NO_FLUSH);
 		if (r == Z_STREAM_ERROR)
-			return -1;
+			return -EIO;
 		have = sizeof(buffer) - gos->zs.avail_out;
 		if (have != 0) {
 			r = gos->output->write(gos->output, buffer, have);
 			if (r != have)
-				return -1;
+				return -EIO;
 		}
 	}
 

@@ -9,6 +9,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -23,22 +24,22 @@ struct apk_fd_istream {
 	int fd;
 };
 
-static size_t fdi_read(void *stream, void *ptr, size_t size)
+static ssize_t fdi_read(void *stream, void *ptr, size_t size)
 {
 	struct apk_fd_istream *fis =
 		container_of(stream, struct apk_fd_istream, is);
-	size_t i = 0, r;
+	ssize_t i = 0, r;
 
 	if (ptr == NULL) {
 		if (lseek(fis->fd, size, SEEK_CUR) < 0)
-			return -1;
+			return -errno;
 		return size;
 	}
 
 	while (i < size) {
 		r = read(fis->fd, ptr + i, size - i);
 		if (r < 0)
-			return r;
+			return -errno;
 		if (r == 0)
 			return i;
 		i += r;
@@ -121,7 +122,7 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 
 	buf = malloc(bufsz);
 	if (buf == NULL)
-		return -1;
+		return -ENOMEM;
 
 	while (done < size) {
 		if (done != 0 && cb != NULL)
@@ -134,7 +135,8 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 		if (r < 0)
 			goto err;
 		if (write(fd, buf, r) != r) {
-			r = -1;
+			if (r < 0)
+				r = -errno;
 			goto err;
 		}
 		done += r;
@@ -447,7 +449,7 @@ int apk_file_get_info(const char *filename, int checksum, struct apk_file_info *
 	struct apk_bstream *bs;
 
 	if (stat(filename, &st) != 0)
-		return -1;
+		return -errno;
 
 	*fi = (struct apk_file_info) {
 		.size = st.st_size,
@@ -492,14 +494,14 @@ struct apk_fd_ostream {
 	char buffer[1024];
 };
 
-static size_t safe_write(int fd, const void *ptr, size_t size)
+static ssize_t safe_write(int fd, const void *ptr, size_t size)
 {
-	size_t i = 0, r;
+	ssize_t i = 0, r;
 
 	while (i < size) {
 		r = write(fd, ptr + i, size - i);
 		if (r < 0)
-			return r;
+			return -errno;
 		if (r == 0)
 			return i;
 		i += r;
@@ -508,26 +510,30 @@ static size_t safe_write(int fd, const void *ptr, size_t size)
 	return i;
 }
 
-static int fdo_flush(struct apk_fd_ostream *fos)
+static ssize_t fdo_flush(struct apk_fd_ostream *fos)
 {
+	ssize_t r;
+
 	if (fos->bytes == 0)
 		return 0;
 
-	if (safe_write(fos->fd, fos->buffer, fos->bytes) != fos->bytes)
-		return -1;
+	if ((r = safe_write(fos->fd, fos->buffer, fos->bytes)) != fos->bytes)
+		return r;
 
 	fos->bytes = 0;
 	return 0;
 }
 
-static size_t fdo_write(void *stream, const void *ptr, size_t size)
+static ssize_t fdo_write(void *stream, const void *ptr, size_t size)
 {
 	struct apk_fd_ostream *fos =
 		container_of(stream, struct apk_fd_ostream, os);
+	ssize_t r;
 
 	if (size + fos->bytes >= sizeof(fos->buffer)) {
-		if (fdo_flush(fos))
-			return -1;
+		r = fdo_flush(fos);
+		if (r != 0)
+			return r;
 		if (size >= sizeof(fos->buffer) / 2)
 			return safe_write(fos->fd, ptr, size);
 	}
@@ -586,7 +592,7 @@ struct apk_counter_ostream {
 	off_t *counter;
 };
 
-static size_t co_write(void *stream, const void *ptr, size_t size)
+static ssize_t co_write(void *stream, const void *ptr, size_t size)
 {
 	struct apk_counter_ostream *cos =
 		container_of(stream, struct apk_counter_ostream, os);

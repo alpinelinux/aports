@@ -693,8 +693,8 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 	return 0;
 }
 
-struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
-				 struct apk_sign_ctx *sctx)
+int apk_pkg_read(struct apk_database *db, const char *file,
+	         struct apk_sign_ctx *sctx, struct apk_package **pkg)
 {
 	struct read_info_ctx ctx;
 	struct apk_file_info fi;
@@ -704,16 +704,17 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
 	int r;
 
 	if (realpath(file, realfile) < 0)
-		return NULL;
-	if (apk_file_get_info(realfile, APK_CHECKSUM_NONE, &fi) < 0)
-		return NULL;
+		return -errno;
+	r = apk_file_get_info(realfile, APK_CHECKSUM_NONE, &fi);
+	if (r != 0)
+		return r;
 
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.sctx = sctx;
 	ctx.pkg = apk_pkg_new();
+	r = -ENOMEM;
 	if (ctx.pkg == NULL)
-		return NULL;
-
+		goto err;
 	bs = apk_bstream_from_file(realfile);
 	if (bs == NULL)
 		goto err;
@@ -727,11 +728,10 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
 	tar->close(tar);
 	if (r < 0 && r != -ECANCELED)
 		goto err;
-	if (ctx.pkg->name == NULL)
+	if (ctx.pkg->name == NULL) {
+		r = -EBADMSG;
 		goto err;
-	if (sctx->action == APK_SIGN_VERIFY && !sctx->data_verified &&
-	    !(apk_flags & APK_FORCE))
-		goto err;
+	}
 	if (sctx->action != APK_SIGN_VERIFY)
 		ctx.pkg->csum = sctx->identity;
 
@@ -744,10 +744,13 @@ struct apk_package *apk_pkg_read(struct apk_database *db, const char *file,
 	}
 	ctx.pkg->filename = strdup(realfile);
 
-	return apk_db_pkg_add(db, ctx.pkg);
+	ctx.pkg = apk_db_pkg_add(db, ctx.pkg);
+	if (pkg != NULL)
+		*pkg = ctx.pkg;
+	r = 0;
 err:
 	apk_pkg_free(ctx.pkg);
-	return NULL;
+	return r;
 }
 
 void apk_pkg_free(struct apk_package *pkg)

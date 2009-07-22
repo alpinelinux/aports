@@ -65,6 +65,7 @@ extern unsigned int apk_flags;
 #define apk_message(args...)	do { if (apk_verbosity > 0) { apk_log(NULL, args); } } while (0)
 
 void apk_log(const char *prefix, const char *format, ...);
+const char *apk_error_str(int error);
 
 static inline size_t apk_calc_installed_size(size_t size)
 {
