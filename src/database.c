@@ -1475,13 +1475,20 @@ static void apk_db_migrate_files(struct apk_database *db,
 			ofile = (struct apk_db_file *) apk_hash_get_hashed(
 				&db->installed.files, APK_BLOB_BUF(&key), hash);
 
+			r = apk_file_get_info(name,
+				ofile ? ofile->csum.type : APK_CHECKSUM_NONE,
+				&fi);
 			if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
-			    ofile != NULL &&
-			    apk_file_get_info(name, ofile->csum.type, &fi) == 0 &&
-			    apk_checksum_compare(&ofile->csum, &fi.csum) != 0) {
-				/* Protected dir and existing file has been
-				 * changed */
-				if (ofile->csum.type != file->csum.type)
+			    (r == 0) &&
+			    (ofile == NULL ||
+			     apk_checksum_compare(&ofile->csum, &fi.csum) == 0)) {
+				/* Protected directory, with file without
+				 * db entry, or local modifications.
+				 *
+				 * Delete the apk-new if it's identical with the
+				 * existing file */
+				if (ofile == NULL ||
+				    ofile->csum.type != file->csum.type)
 					apk_file_get_info(name, file->csum.type, &fi);
 				if (apk_checksum_compare(&file->csum, &fi.csum) == 0)
 					unlink(tmpname);
@@ -1503,32 +1510,6 @@ static void apk_db_migrate_files(struct apk_database *db,
 		}
 	}
 }
-
-#if 0
-		if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
-		    apk_file_get_info(ae->name, file->csum.type, &fi) == 0 &&
-		    apk_checksum_compare(&file->csum, &fi.csum) != 0) {
-			/* Protected file. Extract to separate place */
-			if (!(apk_flags & APK_CLEAN_PROTECTED)) {
-				snprintf(alt_name, sizeof(alt_name),
-					 "%s/%s.apk-new",
-					 diri->dir->name, file->name);
-				r = apk_archive_entry_extract(ae, is, alt_name,
-							      extract_cb, ctx);
-
-				/* remove identical apk-new */
-				if (ae->csum.type != fi.csum.type)
-					apk_file_get_info(ae->name, ae->csum.type, &fi);
-				if (apk_checksum_compare(&ae->csum, &fi.csum) == 0)
-					unlink(alt_name);
-			}
-		} else {
-			r = apk_archive_entry_extract(ae, is, NULL,
-						      extract_cb, ctx);
-		}
-		memcpy(&file->csum, &ae->csum, sizeof(file->csum));
-#endif
-
 
 static int apk_db_unpack_pkg(struct apk_database *db,
 			     struct apk_package *newpkg,
