@@ -293,7 +293,6 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
 	}
 	EVP_MD_CTX_init(&ctx->mdctx);
 	EVP_DigestInit_ex(&ctx->mdctx, ctx->md, NULL);
-	EVP_MD_CTX_set_flags(&ctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 }
 
 
@@ -406,7 +405,6 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 
 	switch (part) {
 	case APK_MPART_DATA:
-		EVP_MD_CTX_clear_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 		EVP_DigestUpdate(&sctx->mdctx, data.ptr, data.len);
 		break;
 	case APK_MPART_BOUNDARY:
@@ -417,7 +415,6 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 		if (!sctx->control_started) {
 			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
 			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
-			EVP_MD_CTX_set_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 			return 0;
 		}
 
@@ -442,7 +439,6 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 
 			sctx->control_verified = 1;
 			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
-			EVP_MD_CTX_set_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 			return 0;
 		} else if (sctx->action == APK_SIGN_GENERATE) {
 			/* Package identity is checksum of control block */
@@ -453,7 +449,6 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			/* Reset digest for hashing data */
 			EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
 			EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
-			EVP_MD_CTX_set_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 
 			if (sctx->action == APK_SIGN_VERIFY_IDENTITY) {
 				if (memcmp(calculated, sctx->identity.data,

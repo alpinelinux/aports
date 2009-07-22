@@ -50,7 +50,8 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 		if (gis->zs.avail_in == 0) {
 			apk_blob_t blob;
 
-			if (gis->cb != NULL && gis->cbprev != NULL) {
+			if (gis->cb != NULL && gis->cbprev != NULL &&
+			    gis->cbprev != gis->zs.next_in) {
 				gis->cb(gis->cbctx, APK_MPART_DATA,
 					APK_BLOB_PTR_LEN(gis->cbprev,
 					(void *)gis->zs.next_in - gis->cbprev));
@@ -63,16 +64,15 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 				gis->err = -1;
 				goto ret;
 			} else if (gis->zs.avail_in == 0) {
+				gis->err = 1;
 				if (gis->cb != NULL) {
 					r = gis->cb(gis->cbctx, APK_MPART_END,
 						    APK_BLOB_NULL);
-					if (r != 0) {
-						if (r > 0)
-							r = -1;
+					if (r > 0)
+						r = -1;
+					if (r != 0)
 						gis->err = r;
-					}
-				} else
-					gis->err = 1;
+				}
 				goto ret;
 			}
 		}
@@ -107,7 +107,7 @@ static size_t gzi_read(void *stream, void *ptr, size_t size)
 
 ret:
 	if (size - gis->zs.avail_out == 0)
-		return gis->err;
+		return gis->err < 0 ? gis->err : 0;
 
 	return size - gis->zs.avail_out;
 }

@@ -219,9 +219,10 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	/* Read remaining end-of-archive records, to ensure we read all of
 	 * the file. The underlying istream is likely doing checksumming. */
 	if (r == 512) {
-		while ((r = is->read(is, &buf, 512)) == 512)
+		while ((r = is->read(is, &buf, 512)) == 512) {
 			if (buf.name[0] != 0)
 				return -1;
+		}
 	}
 
 	/* Check that there was no partial record */

@@ -305,6 +305,28 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 						   APK_BLOB_BUF(&key));
 }
 
+static struct apk_db_file *apk_db_file_new(struct apk_db_dir_instance *diri,
+					   apk_blob_t name,
+					   struct hlist_node ***after)
+{
+	struct apk_db_file *file;
+
+	file = malloc(sizeof(*file) + name.len + 1);
+	if (file == NULL)
+		return NULL;
+
+	memset(file, 0, sizeof(*file));
+	memcpy(file->name, name.ptr, name.len);
+	file->name[name.len] = 0;
+	file->namelen = name.len;
+
+	file->diri = diri;
+	hlist_add_after(&file->diri_files_list, *after);
+	*after = &file->diri_files_list.next;
+
+	return file;
+}
+
 static struct apk_db_file *apk_db_file_get(struct apk_database *db,
 					   struct apk_db_dir_instance *diri,
 					   apk_blob_t name,
@@ -326,31 +348,11 @@ static struct apk_db_file *apk_db_file_get(struct apk_database *db,
 	if (file != NULL)
 		return file;
 
-	file = malloc(sizeof(*file) + name.len + 1);
-	memset(file, 0, sizeof(*file));
-	memcpy(file->name, name.ptr, name.len);
-	file->name[name.len] = 0;
-	file->namelen = name.len;
-
-	file->diri = diri;
-	hlist_add_after(&file->diri_files_list, *after);
-	*after = &file->diri_files_list.next;
-
+	file = apk_db_file_new(diri, name, after);
 	apk_hash_insert_hashed(&db->installed.files, file, hash);
 	db->installed.stats.files++;
 
 	return file;
-}
-
-static void apk_db_file_change_owner(struct apk_database *db,
-				     struct apk_db_file *file,
-				     struct apk_db_dir_instance *diri,
-				     struct hlist_node ***after)
-{
-	hlist_del(&file->diri_files_list, &file->diri->owned_files);
-	file->diri = diri;
-	hlist_add_after(&file->diri_files_list, *after);
-	*after = &file->diri_files_list.next;
 }
 
 static void apk_db_pkg_rdepends(struct apk_database *db, struct apk_package *pkg)
@@ -469,8 +471,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 				apk_error("FDB file entry before directory entry");
 				return -1;
 			}
-			file = apk_db_file_get(db, diri, l,
-					       &file_diri_node);
+			file = apk_db_file_get(db, diri, l, &file_diri_node);
 			break;
 		case 'Z':
 			if (file == NULL) {
@@ -1031,8 +1032,10 @@ static struct apk_bstream *apk_repository_file_open(struct apk_repository *repo,
 						    const char *file)
 {
 	char tmp[256];
+	const char *url = repo->url;
 
-	snprintf(tmp, sizeof(tmp), "%s/%s", repo->url, file);
+	snprintf(tmp, sizeof(tmp), "%s%s%s",
+		 url, url[strlen(url)-1] == '/' ? "" : "/", file);
 
 	return apk_bstream_from_url(tmp);
 }
@@ -1063,9 +1066,9 @@ int apk_cache_download(struct apk_database *db, struct apk_checksum *csum,
 		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
 		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(tmp2),
 			apk_sign_ctx_mpart_cb, &sctx);
-		is->close(is);
 		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx);
-		ok = (r != 0) && sctx.control_verified && sctx.data_verified;
+		is->close(is);
+		ok = (r == 0) && sctx.control_verified && sctx.data_verified;
 		apk_sign_ctx_free(&sctx);
 		if (!ok) {
 			unlink(tmp2);
@@ -1115,7 +1118,7 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 			       APK_SIGN_VERIFY);
 	if (r == 0 || r == -10) {
 		if (r == -10)
-			apk_error("Failed to update %s: bad signature!");
+			apk_error("%s: untrusted or bad signature!", repo->url);
 		apk_cache_delete(db, &repo->csum, apk_index_gz);
 		return r;
 	}
@@ -1279,7 +1282,6 @@ static int apk_db_install_archive_entry(void *_ctx,
 	apk_blob_t name = APK_BLOB_STR(ae->name), bdir, bfile;
 	struct apk_db_dir_instance *diri = ctx->diri;
 	struct apk_db_file *file;
-	struct apk_file_info fi;
 	char alt_name[PATH_MAX];
 	const char *p;
 	int r = 0, type = APK_SCRIPT_INVALID;
@@ -1355,14 +1357,8 @@ static int apk_db_install_archive_entry(void *_ctx,
 			ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
 		}
 
-		file = apk_db_file_get(db, diri, bfile, &ctx->file_diri_node);
-		if (file == NULL) {
-			apk_error("%s: Failed to create fdb entry for '%*s'\n",
-				  pkg->name->name, name.len, name.ptr);
-			return -1;
-		}
-
-		if (file->diri != diri) {
+		file = apk_db_file_query(db, bdir, bfile);
+		if (file != NULL) {
 			opkg = file->diri->pkg;
 			if (opkg->name != pkg->name) {
 				if (!(apk_flags & APK_FORCE)) {
@@ -1376,14 +1372,139 @@ static int apk_db_install_archive_entry(void *_ctx,
 					    pkg->name->name, ae->name,
 					    opkg->name->name);
 			}
-
-			apk_db_file_change_owner(db, file, diri,
-						 &ctx->file_diri_node);
 		}
+
+		/* Create the file entry without adding it to hash */
+		file = apk_db_file_new(diri, bfile, &ctx->file_diri_node);
 
 		if (apk_verbosity > 1)
 			printf("%s\n", ae->name);
 
+		/* Extract the file as name.apk-new */
+		snprintf(alt_name, sizeof(alt_name), "%s/%s.apk-new",
+			 diri->dir->name, file->name);
+		r = apk_archive_entry_extract(ae, is, alt_name,
+					      extract_cb, ctx);
+	} else {
+		if (apk_verbosity > 1)
+			printf("%s\n", ae->name);
+
+		if (name.ptr[name.len-1] == '/')
+			name.len--;
+
+		if (ctx->diri_node == NULL)
+			ctx->diri_node = hlist_tail_ptr(&pkg->owned_dirs);
+		ctx->diri = diri = apk_db_diri_new(db, pkg, name,
+						   &ctx->diri_node);
+		ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
+
+		apk_db_diri_set(diri, ae->mode & 0777, ae->uid, ae->gid);
+		apk_db_diri_mkdir(diri);
+	}
+	ctx->installed_size += ctx->current_file_size;
+
+	return r;
+}
+
+static void apk_db_purge_pkg(struct apk_database *db, struct apk_package *pkg,
+			     const char *exten)
+{
+	struct apk_db_dir_instance *diri;
+	struct apk_db_file *file;
+	struct apk_db_file_hash_key key;
+	struct hlist_node *dc, *dn, *fc, *fn;
+	unsigned long hash;
+	char name[1024];
+
+	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
+		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
+			snprintf(name, sizeof(name), "%s/%s%s",
+				 diri->dir->name, file->name, exten ?: "");
+
+			key = (struct apk_db_file_hash_key) {
+				.dirname = APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen),
+				.filename = APK_BLOB_PTR_LEN(file->name, file->namelen),
+			};
+			hash = apk_blob_hash_seed(key.filename, diri->dir->hash);
+			unlink(name);
+			if (apk_verbosity > 1)
+				printf("%s\n", name);
+			__hlist_del(fc, &diri->owned_files.first);
+			if (exten == NULL) {
+				apk_hash_delete_hashed(&db->installed.files, APK_BLOB_BUF(&key), hash);
+				db->installed.stats.files--;
+			}
+		}
+		apk_db_diri_rmdir(diri);
+		__hlist_del(dc, &pkg->owned_dirs.first);
+		apk_db_diri_free(db, diri);
+	}
+	apk_pkg_set_state(db, pkg, APK_PKG_NOT_INSTALLED);
+}
+
+
+static void apk_db_migrate_files(struct apk_database *db,
+				 struct apk_package *pkg)
+{
+	struct apk_db_dir_instance *diri;
+	struct apk_db_dir *dir;
+	struct apk_db_file *file, *ofile;
+	struct apk_db_file_hash_key key;
+	struct apk_file_info fi;
+	struct hlist_node *dc, *dn, *fc, *fn;
+	unsigned long hash;
+	char name[1024], tmpname[1024];
+
+	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
+		dir = diri->dir;
+
+		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
+			snprintf(name, sizeof(name), "%s/%s",
+				 diri->dir->name, file->name);
+			snprintf(tmpname, sizeof(tmpname), "%s/%s.apk-new",
+				 diri->dir->name, file->name);
+
+			key = (struct apk_db_file_hash_key) {
+				.dirname = APK_BLOB_PTR_LEN(dir->name, dir->namelen),
+				.filename = APK_BLOB_PTR_LEN(file->name, file->namelen),
+			};
+
+			hash = apk_blob_hash_seed(key.filename, dir->hash);
+
+			/* check for existing file */
+			ofile = (struct apk_db_file *) apk_hash_get_hashed(
+				&db->installed.files, APK_BLOB_BUF(&key), hash);
+
+			if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
+			    ofile != NULL &&
+			    apk_file_get_info(name, ofile->csum.type, &fi) == 0 &&
+			    apk_checksum_compare(&ofile->csum, &fi.csum) != 0) {
+				/* Protected dir and existing file has been
+				 * changed */
+				if (ofile->csum.type != file->csum.type)
+					apk_file_get_info(name, file->csum.type, &fi);
+				if (apk_checksum_compare(&file->csum, &fi.csum) == 0)
+					unlink(tmpname);
+			} else {
+				/* Overwrite the old file */
+				rename(tmpname, name);
+			}
+
+			/* Claim ownership of the file in db */
+			if (ofile != NULL) {
+				hlist_del(&ofile->diri_files_list,
+					  &diri->owned_files);
+				apk_hash_delete_hashed(&db->installed.files,
+						       APK_BLOB_BUF(&key), hash);
+			} else
+				db->installed.stats.files++;
+
+			apk_hash_insert_hashed(&db->installed.files, file, hash);
+		}
+	}
+}
+
+#if 0
 		if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
 		    apk_file_get_info(ae->name, file->csum.type, &fi) == 0 &&
 		    apk_checksum_compare(&file->csum, &fi.csum) != 0) {
@@ -1406,60 +1527,8 @@ static int apk_db_install_archive_entry(void *_ctx,
 						      extract_cb, ctx);
 		}
 		memcpy(&file->csum, &ae->csum, sizeof(file->csum));
-	} else {
-		if (apk_verbosity > 1)
-			printf("%s\n", ae->name);
+#endif
 
-		if (name.ptr[name.len-1] == '/')
-			name.len--;
-
-		if (ctx->diri_node == NULL)
-			ctx->diri_node = hlist_tail_ptr(&pkg->owned_dirs);
-		ctx->diri = diri = apk_db_diri_new(db, pkg, name,
-						   &ctx->diri_node);
-		ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
-
-		apk_db_diri_set(diri, ae->mode & 0777, ae->uid, ae->gid);
-		apk_db_diri_mkdir(diri);
-	}
-	ctx->installed_size += ctx->current_file_size;
-
-	return r;
-}
-
-static void apk_db_purge_pkg(struct apk_database *db,
-			     struct apk_package *pkg)
-{
-	struct apk_db_dir_instance *diri;
-	struct apk_db_file *file;
-	struct apk_db_file_hash_key key;
-	struct hlist_node *dc, *dn, *fc, *fn;
-	unsigned long hash;
-	char name[1024];
-
-	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
-		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
-			snprintf(name, sizeof(name), "%s/%s",
-				 diri->dir->name, file->name);
-
-			key = (struct apk_db_file_hash_key) {
-				.dirname = APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen),
-				.filename = APK_BLOB_PTR_LEN(file->name, file->namelen),
-			};
-			hash = apk_blob_hash_seed(key.filename, diri->dir->hash);
-			unlink(name);
-			if (apk_verbosity > 1)
-				printf("%s\n", name);
-			__hlist_del(fc, &diri->owned_files.first);
-			apk_hash_delete_hashed(&db->installed.files, APK_BLOB_BUF(&key), hash);
-			db->installed.stats.files--;
-		}
-		apk_db_diri_rmdir(diri);
-		__hlist_del(dc, &pkg->owned_dirs.first);
-		apk_db_diri_free(db, diri);
-	}
-	apk_pkg_set_state(db, pkg, APK_PKG_NOT_INSTALLED);
-}
 
 static int apk_db_unpack_pkg(struct apk_database *db,
 			     struct apk_package *newpkg,
@@ -1493,9 +1562,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 			bs = apk_db_cache_open(db, &newpkg->csum, pkgname);
 
 		if (bs == NULL) {
-			snprintf(file, sizeof(file), "%s/%s",
-				 repo->url, pkgname);
-			bs = apk_bstream_from_url(file);
+			bs = apk_repository_file_open(repo, pkgname);
 			if (repo->csum.type != APK_CHECKSUM_NONE)
 				need_copy = TRUE;
 		}
@@ -1533,11 +1600,13 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	if (r != 0) {
 		apk_error("%s-%s: package integrity check failed",
 			  newpkg->name->name, newpkg->version);
-		return -1;
+		goto err;
 	}
 	r = apk_db_run_pending_script(&ctx);
 	if (r != 0)
-		return r;
+		goto err;
+
+	apk_db_migrate_files(db, newpkg);
 
 	if (need_copy) {
 		char file2[256];
@@ -1547,6 +1616,9 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	}
 
 	return 0;
+err:
+	apk_db_purge_pkg(db, newpkg, ".apk-new");
+	return r;
 }
 
 int apk_db_install_pkg(struct apk_database *db,
@@ -1566,7 +1638,7 @@ int apk_db_install_pkg(struct apk_database *db,
 		if (r != 0)
 			return r;
 
-		apk_db_purge_pkg(db, oldpkg);
+		apk_db_purge_pkg(db, oldpkg, NULL);
 
 		r = apk_pkg_run_script(oldpkg, db->root_fd,
 				       APK_SCRIPT_POST_DEINSTALL);
@@ -1583,7 +1655,7 @@ int apk_db_install_pkg(struct apk_database *db,
 	apk_pkg_set_state(db, newpkg, APK_PKG_INSTALLED);
 
 	if (oldpkg != NULL)
-		apk_db_purge_pkg(db, oldpkg);
+		apk_db_purge_pkg(db, oldpkg, NULL);
 
 	r = apk_pkg_run_script(newpkg, db->root_fd,
 			       (oldpkg == NULL) ?
