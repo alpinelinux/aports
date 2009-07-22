@@ -116,17 +116,27 @@ static int add_main(void *ctx, int argc, char **argv)
 		struct apk_dependency dep;
 
 		if (strstr(argv[i], ".apk") != NULL) {
-			struct apk_package *pkg;
+			struct apk_package *pkg = NULL;
 			struct apk_sign_ctx sctx;
 
-			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
+			if (!apk_db_cache_active(&db) &&
+			    !apk_db_permanent(&db) &&
+			    !(apk_flags & APK_FORCE)) {
+				apk_error("Use --force or enable package "
+					  "caching to install non-repository "
+					  "packages.");
+				goto err;
+			}
+
+			/* FIXME: should verify the package too */
+			apk_sign_ctx_init(&sctx, APK_SIGN_GENERATE, NULL);
 			r = apk_pkg_read(&db, argv[i], &sctx, &pkg);
 			apk_sign_ctx_free(&sctx);
 			if (r != 0) {
 				apk_error("%s: %s", argv[i], apk_error_str(r));
 				goto err;
-			}
 
+			}
 			apk_dep_from_pkg(&dep, &db, pkg);
 		} else {
 			r = apk_dep_from_blob(&dep, &db, APK_BLOB_STR(argv[i]));

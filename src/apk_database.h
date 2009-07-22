@@ -134,6 +134,7 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags);
 int apk_db_write_config(struct apk_database *db);
 void apk_db_close(struct apk_database *db);
 int apk_db_cache_active(struct apk_database *db);
+int apk_db_permanent(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);
 struct apk_package *apk_db_get_pkg(struct apk_database *db, struct apk_checksum *csum);

@@ -181,7 +181,7 @@ void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		      struct apk_package *pkg)
 {
 	*dep = (struct apk_dependency) {
-		.name = apk_db_get_name(db, APK_BLOB_STR(pkg->name->name)),
+		.name = pkg->name,
 		.version = pkg->version,
 		.result_mask = APK_VERSION_EQUAL,
 	};
@@ -735,7 +735,7 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	ctx.pkg = apk_db_pkg_add(db, ctx.pkg);
 	if (pkg != NULL)
 		*pkg = ctx.pkg;
-	r = 0;
+	return 0;
 err:
 	apk_pkg_free(ctx.pkg);
 	return r;

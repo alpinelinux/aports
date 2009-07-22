@@ -941,6 +941,17 @@ int apk_db_cache_active(struct apk_database *db)
 	return db->cache_dir != apk_static_cache_dir;
 }
 
+int apk_db_permanent(struct apk_database *db)
+{
+	struct stat st;
+
+	if (fstat(db->root_fd, &st) != 0)
+		return 0;
+	if (major(st.st_dev) == 0)
+		return 0;
+	return 1;
+}
+
 struct apk_package *apk_db_get_pkg(struct apk_database *db,
 				   struct apk_checksum *csum)
 {
