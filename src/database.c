@@ -1425,6 +1425,7 @@ static void apk_db_purge_pkg(struct apk_database *db, struct apk_package *pkg,
 	struct apk_db_dir_instance *diri;
 	struct apk_db_file *file;
 	struct apk_db_file_hash_key key;
+	struct apk_file_info fi;
 	struct hlist_node *dc, *dn, *fc, *fn;
 	unsigned long hash;
 	char name[1024];
@@ -1439,7 +1440,11 @@ static void apk_db_purge_pkg(struct apk_database *db, struct apk_package *pkg,
 				.filename = APK_BLOB_PTR_LEN(file->name, file->namelen),
 			};
 			hash = apk_blob_hash_seed(key.filename, diri->dir->hash);
-			unlink(name);
+			if (!(diri->dir->flags & APK_DBDIRF_PROTECTED) ||
+			    (apk_flags & APK_PURGE) ||
+			    (apk_file_get_info(name, file->csum.type, &fi) == 0 &&
+			     apk_checksum_compare(&file->csum, &fi.csum) == 0))
+				unlink(name);
 			if (apk_verbosity > 1)
 				printf("%s\n", name);
 			__hlist_del(fc, &diri->owned_files.first);

@@ -43,6 +43,8 @@ static struct apk_option generic_options[] = {
 	{ 0x101, "progress",	"Show a progress bar" },
 	{ 0x102, "clean-protected", "Do not create .apk-new files to "
 				"configuration dirs" },
+	{ 0x106, "purge",	"Delete also modified configuration files on "
+				"package removal" },
 	{ 0x103, "allow-untrusted", "Blindly install packages with untrusted "
 				"signatures or no signature at all" },
 	{ 0x104, "simulate",	"Show what would be done without actually "
@@ -358,6 +360,9 @@ int main(int argc, char **argv)
 			break;
 		case 0x104:
 			apk_flags |= APK_SIMULATE;
+			break;
+		case 0x106:
+			apk_flags |= APK_PURGE;
 			break;
 		case 0x105:
 			apk_wait = atoi(optarg);
