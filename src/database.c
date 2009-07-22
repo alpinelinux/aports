@@ -1493,7 +1493,8 @@ static void apk_db_migrate_files(struct apk_database *db,
 				if (ofile == NULL ||
 				    ofile->csum.type != file->csum.type)
 					apk_file_get_info(name, file->csum.type, &fi);
-				if (apk_checksum_compare(&file->csum, &fi.csum) == 0)
+				if ((apk_flags & APK_CLEAN_PROTECTED) ||
+				    apk_checksum_compare(&file->csum, &fi.csum) == 0)
 					unlink(tmpname);
 			} else {
 				/* Overwrite the old file */
