@@ -17,22 +17,29 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 
+#define AUDIT_BACKUP BIT(0)
+#define AUDIT_SYSTEM BIT(1)
+
 struct audit_ctx {
-	int (*action)(struct apk_database *db);
+	int type;
+	struct apk_database *db;
 };
 
 static int audit_directory(apk_hash_item item, void *ctx)
 {
 	struct apk_db_dir *dbd = (struct apk_db_dir *) item;
 	struct apk_db_file *dbf;
-	struct apk_database *db = (struct apk_database *) ctx;
+	struct audit_ctx *actx = (struct audit_ctx *) ctx;
+	struct apk_database *db = actx->db;
 	struct dirent *de;
 	struct apk_file_info fi;
 	apk_blob_t bdir = APK_BLOB_PTR_LEN(dbd->name, dbd->namelen);
 	char tmp[512], reason;
 	DIR *dir;
 
-	if (!(dbd->flags & APK_DBDIRF_PROTECTED))
+	if (!(actx->type & AUDIT_SYSTEM) && !(dbd->flags & APK_DBDIRF_PROTECTED))
+		return 0;
+	if (!(actx->type & AUDIT_BACKUP) && (dbd->flags & APK_DBDIRF_PROTECTED))
 		return 0;
 
 	dir = opendir(dbd->name);
@@ -78,19 +85,16 @@ static int audit_directory(apk_hash_item item, void *ctx)
 	return 0;
 }
 
-static int audit_backup(struct apk_database *db)
-{
-	fchdir(db->root_fd);
-	return apk_hash_foreach(&db->installed.dirs, audit_directory, db);
-}
-
 static int audit_parse(void *ctx, int optch, int optindex, const char *optarg)
 {
 	struct audit_ctx *actx = (struct audit_ctx *) ctx;
 
 	switch (optch) {
 	case 0x10000:
-		actx->action = audit_backup;
+		actx->type |= AUDIT_BACKUP;
+		break;
+	case 0x10001:
+		actx->type |= AUDIT_SYSTEM;
 		break;
 	default:
 		return -1;
@@ -104,10 +108,8 @@ static int audit_main(void *ctx, int argc, char **argv)
 	struct apk_database db;
 	int r;
 
-	if (actx->action == NULL) {
-		apk_error("No audit action requested");
-		return 2;
-	}
+	if (actx->type == 0)
+		return -EINVAL;
 
 	r = apk_db_open(&db, apk_root, APK_OPENF_READ);
 	if (r != 0) {
@@ -115,7 +117,10 @@ static int audit_main(void *ctx, int argc, char **argv)
 		return 1;
 	}
 
-	r = actx->action(&db);
+	actx->db = &db;
+
+	fchdir(db.root_fd);
+	r = apk_hash_foreach(&db.installed.dirs, audit_directory, actx);
 
 	apk_db_close(&db);
 	return r;
@@ -124,6 +129,7 @@ static int audit_main(void *ctx, int argc, char **argv)
 static struct apk_option audit_options[] = {
 	{ 0x10000, "backup",
 	  "List all modified configuration files that need to be backed up" },
+	{ 0x10001, "system", "List all modified non-protected files" },
 };
 
 static struct apk_applet apk_audit = {
