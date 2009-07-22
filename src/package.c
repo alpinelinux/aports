@@ -311,6 +311,7 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
 		ctx->data_started = 1;
 		break;
 	case APK_SIGN_GENERATE:
+	case APK_SIGN_VERIFY_AND_GENERATE:
 	default:
 		action = APK_SIGN_GENERATE;
 		ctx->md = EVP_sha1();
@@ -466,6 +467,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 
 	switch (sctx->action) {
 	case APK_SIGN_VERIFY:
+	case APK_SIGN_VERIFY_AND_GENERATE:
 		if (sctx->signature.pkey == NULL) {
 			if (apk_flags & APK_ALLOW_UNTRUSTED)
 				break;
@@ -501,6 +503,10 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 		    sctx->has_data_checksum)
 			return -ECANCELED;
 		break;
+	}
+	if (sctx->action == APK_SIGN_VERIFY_AND_GENERATE) {
+		sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
+		EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
 	}
 
 reset_digest:
