@@ -1146,7 +1146,7 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 struct apkindex_ctx {
 	struct apk_database *db;
 	struct apk_sign_ctx sctx;
-	int repo;
+	int repo, found;
 };
 
 static int load_apkindex(void *sctx, const struct apk_file_info *fi,
@@ -1161,11 +1161,12 @@ static int load_apkindex(void *sctx, const struct apk_file_info *fi,
 	if (strcmp(fi->name, "APKINDEX") != 0)
 		return 0;
 
+	ctx->found = 1;
 	bs = apk_bstream_from_istream(is);
 	apk_db_index_read(ctx->db, bs, ctx->repo);
 	bs->close(bs, NULL);
 
-	return -ECANCELED;
+	return 0;
 }
 
 static int load_index(struct apk_database *db, struct apk_bstream *bs,
@@ -1179,15 +1180,14 @@ static int load_index(struct apk_database *db, struct apk_bstream *bs,
 
 		ctx.db = db;
 		ctx.repo = repo;
+		ctx.found = 0;
 		apk_sign_ctx_init(&ctx.sctx, APK_SIGN_VERIFY, NULL);
 		is = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &ctx.sctx);
 		r = apk_tar_parse(is, load_apkindex, &ctx);
 		is->close(is);
 		apk_sign_ctx_free(&ctx.sctx);
-		if (r == 0)
+		if (ctx.found == 0)
 			r = -ENOMSG;
-		else if (r == -ECANCELED)
-			r = 0;
 	} else {
 		bs = apk_bstream_from_istream(apk_bstream_gunzip(bs));
 		apk_db_index_read(db, bs, repo);
