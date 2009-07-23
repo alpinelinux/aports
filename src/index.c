@@ -86,7 +86,7 @@ static int index_main(void *ctx, int argc, char **argv)
 	struct counts counts = {0};
 	struct apk_ostream *os;
 	struct apk_file_info fi;
-	int total, i, j, found, newpkgs = 0;
+	int total, r, i, j, found, newpkgs = 0;
 	struct index_ctx *ictx = (struct index_ctx *) ctx;
 
 	if (isatty(STDOUT_FILENO) && ictx->output == NULL &&
@@ -100,10 +100,10 @@ static int index_main(void *ctx, int argc, char **argv)
 		ictx->method = APK_SIGN_GENERATE;
 
 	apk_db_open(&db, NULL, APK_OPENF_READ);
-	if (index_read_file(&db, ictx) < 0) {
+	if ((r = index_read_file(&db, ictx)) < 0) {
 		apk_db_close(&db);
-		apk_error("The index is corrupt, or of unknown format.");
-		return -1;
+		apk_error("%s: %s", ictx->index, apk_error_str(r));
+		return r;
 	}
 
 	for (i = 0; i < argc; i++) {

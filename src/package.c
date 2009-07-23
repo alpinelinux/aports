@@ -723,7 +723,7 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	if (r < 0 && r != -ECANCELED)
 		goto err;
 	if (ctx.pkg->name == NULL) {
-		r = -EBADMSG;
+		r = -ENOMSG;
 		goto err;
 	}
 	if (sctx->action != APK_SIGN_VERIFY)

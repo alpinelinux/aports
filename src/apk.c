@@ -67,6 +67,8 @@ const char *apk_error_str(int error)
 		return "IO ERROR";
 	case EBADMSG:
 		return "BAD archive";
+	case ENOMSG:
+		return "archive does not contain expected data";
 	default:
 		return strerror(error);
 	}
