@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <sysexits.h>
 #include <sys/wait.h>
+#include <limits.h>
 
 #include "apk_defines.h"
 #include "apk_archive.h"
@@ -334,7 +335,10 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 				r = 0;
 			close(fd);
 		} else {
-			r = link(ae->link_target, fn);
+			char link_target[PATH_MAX];
+			snprintf(link_target, sizeof(link_target),
+				 "%s.apk-new", ae->link_target);
+			r = link(link_target, fn);
 		}
 		break;
 	case S_IFLNK:
