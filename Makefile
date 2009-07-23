@@ -7,7 +7,7 @@ sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
 apkcache	?= ~/.cache/apks
 
-SCRIPTS		:= abuild devbuild mkalpine buildrepo abuild-keygen
+SCRIPTS		:= abuild devbuild mkalpine buildrepo abuild-keygen abuild-sign
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
