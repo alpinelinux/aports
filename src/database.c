@@ -1693,7 +1693,7 @@ int apk_db_install_pkg(struct apk_database *db,
 	}
 
 	/* Install the new stuff */
-	if (!(newpkg->name->flags & APK_NAME_VIRTUAL)) {
+	if (newpkg->installed_size != 0) {
 		r = apk_db_unpack_pkg(db, newpkg, (oldpkg != NULL), cb, cb_ctx);
 		if (r != 0)
 			return r;

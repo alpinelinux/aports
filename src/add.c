@@ -127,7 +127,7 @@ static int add_main(void *ctx, int argc, char **argv)
 		virtpkg->version = strdup("0");
 		virtpkg->description = strdup("virtual meta package");
 		apk_dep_from_pkg(&virtdep, &db, virtpkg);
-		virtdep.name->flags |= APK_NAME_TOPLEVEL | APK_NAME_VIRTUAL;
+		virtdep.name->flags |= APK_NAME_TOPLEVEL;
 		virtpkg = apk_db_pkg_add(&db, virtpkg);
 	}
 
