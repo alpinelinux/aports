@@ -872,6 +872,7 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 			}
 			if (db->lock_fd < 0 ||
 			    flock(db->lock_fd, LOCK_EX | LOCK_NB) < 0) {
+				msg = "Unable to lock database";
 				if (apk_wait) {
 					struct sigaction sa, old_sa;
 
@@ -882,14 +883,13 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 					sigaction(SIGALRM, &sa, &old_sa);
 
 					alarm(apk_wait);
-					if (flock(db->lock_fd, LOCK_EX) < 0) {
-						msg = "Unable to lock database";
+					if (flock(db->lock_fd, LOCK_EX) < 0)
 						goto ret_errno;
-					}
 
 					alarm(0);
 					sigaction(SIGALRM, &old_sa, NULL);
-				}
+				} else
+					goto ret_errno;
 			}
 		}
 	}
