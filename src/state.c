@@ -667,7 +667,7 @@ int apk_state_commit(struct apk_state *state,
 	}
 	size_diff /= 1024;
 
-	if (apk_verbosity > 1) {
+	if (apk_verbosity > 1 || (apk_flags & APK_INTERACTIVE)) {
 		r = dump_packages(state, cmp_remove,
 				  "The following packages will be REMOVED");
 		r += dump_packages(state, cmp_downgrade,
@@ -681,6 +681,8 @@ int apk_state_commit(struct apk_state *state,
 				(size_diff < 0) ?
 				"disk space will be freed" :
 				"additional disk space will be used");
+		}
+		if (apk_flags & APK_INTERACTIVE) {
 			fprintf(stderr, "Do you want to continue [Y/n]? ");
 			fflush(stderr);
 			r = fgetc(stdin);

@@ -61,6 +61,7 @@ extern unsigned int apk_flags;
 #define APK_UPDATE_CACHE	0x0080
 #define APK_ALLOW_UNTRUSTED	0x0100
 #define APK_PURGE		0x0200
+#define APK_INTERACTIVE		0x0400
 
 #define apk_error(args...)	do { apk_log("ERROR: ", args); } while (0)
 #define apk_warning(args...)	do { if (apk_verbosity > 0) { apk_log("WARNING: ", args); } } while (0)

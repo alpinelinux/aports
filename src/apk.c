@@ -37,6 +37,7 @@ static struct apk_option generic_options[] = {
 				required_argument, "REPO" },
 	{ 'q', "quiet",		"Print less information" },
 	{ 'v', "verbose",	"Print more information" },
+	{ 'i', "interactive",	"Ask confirmation for certain operations" },
 	{ 'V', "version",	"Print program version and exit" },
 	{ 'f', "force",		"Do what was asked even if it looks dangerous" },
 	{ 'U', "update-cache",	"Update the repository cache" },
@@ -347,6 +348,9 @@ int main(int argc, char **argv)
 			return version();
 		case 'f':
 			apk_flags |= APK_FORCE;
+			break;
+		case 'i':
+			apk_flags |= APK_INTERACTIVE;
 			break;
 		case 'U':
 			apk_flags |= APK_UPDATE_CACHE;
