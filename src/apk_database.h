@@ -83,6 +83,7 @@ struct apk_database {
 	int root_fd, lock_fd;
 	unsigned name_id, num_repos;
 	const char *cache_dir;
+	int permanent;
 
 	struct apk_dependency_array *world;
 	struct apk_string_array *protected_paths;

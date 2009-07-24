@@ -1,7 +1,7 @@
 /* database.c - Alpine Package Keeper (APK)
  *
  * Copyright (C) 2005-2008 Natanael Copa <n@tanael.org>
- * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
+ * Copyright (C) 2008-2009 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -395,6 +395,23 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 	return idb;
 }
 
+static void apk_db_cache_get_name(char *buf, size_t bufsz,
+				  struct apk_database *db,
+				  struct apk_checksum *csum,
+				  const char *file, int temp)
+{
+	char csumstr[APK_CACHE_CSUM_BYTES*2+1];
+	apk_blob_t bbuf = APK_BLOB_BUF(csumstr);
+
+	apk_blob_push_hexdump(&bbuf,
+			      APK_BLOB_PTR_LEN((char *) csum->data,
+			      APK_CACHE_CSUM_BYTES));
+	apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN("", 1));
+
+	snprintf(buf, bufsz, "%s/%s/%s.%s%s",
+		 db->root, db->cache_dir, csumstr, file, temp ? ".new" : "");
+}
+
 int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 {
 	struct apk_package *pkg = NULL;
@@ -410,9 +427,9 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			if (pkg == NULL)
 				continue;
 
-			if (repo != -1)
+			if (repo >= 0)
 				pkg->repos |= BIT(repo);
-			else
+			else if (repo == -1)
 				apk_pkg_set_state(db, pkg, APK_PKG_INSTALLED);
 
 			if (apk_db_pkg_add(db, pkg) != pkg && repo == -1) {
@@ -678,6 +695,12 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 			apk_db_index_read(db, bs, -1);
 			bs->close(bs, NULL);
 		}
+
+		bs = apk_bstream_from_file("etc/apk/cache/installed");
+		if (bs != NULL) {
+			apk_db_index_read(db, bs, -2);
+			bs->close(bs, NULL);
+		}
 	}
 
 	if (!(flags & APK_OPENF_NO_SCRIPTS)) {
@@ -694,6 +717,73 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	}
 
 	return 0;
+}
+
+struct index_write_ctx {
+	struct apk_ostream *os;
+	int count;
+	int force;
+};
+
+static int write_index_entry(apk_hash_item item, void *ctx)
+{
+	struct index_write_ctx *iwctx = (struct index_write_ctx *) ctx;
+	struct apk_package *pkg = (struct apk_package *) item;
+	int r;
+
+	if (!iwctx->force && pkg->filename == NULL)
+		return 0;
+
+	r = apk_pkg_write_index_entry(pkg, iwctx->os);
+	if (r < 0)
+		return r;
+
+	if (iwctx->os->write(iwctx->os, "\n", 1) != 1)
+		return -1;
+
+	iwctx->count++;
+	return 0;
+}
+
+static int apk_db_index_write_nr_cache(struct apk_database *db)
+{
+	struct index_write_ctx ctx = { NULL, 0, TRUE };
+	struct apk_package *pkg;
+	struct apk_ostream *os;
+	int r;
+
+	if (!apk_db_cache_active(db))
+		return 0;
+
+	/* Write list of installed non-repository packages to
+	 * cached index file */
+	ctx.os = os = apk_ostream_to_file("etc/apk/cache/installed.new", 0644);
+	if (os == NULL)
+		return -1;
+
+	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
+		if (pkg->repos != 0)
+			continue;
+		r = write_index_entry(pkg, &ctx);
+		if (r != 0)
+			return r;
+	}
+
+	os->close(os);
+	if (rename("etc/apk/cache/installed.new",
+		   "etc/apk/cache/installed") < 0)
+			return -errno;
+
+	return ctx.count;
+}
+
+int apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
+{
+	struct index_write_ctx ctx = { os, 0, FALSE };
+
+	apk_hash_foreach(&db->available.packages, write_index_entry, &ctx);
+
+	return ctx.count;
 }
 
 static int add_protected_path(void *ctx, apk_blob_t blob)
@@ -746,6 +836,7 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	apk_hash_init(&db->installed.files, &file_hash_ops, 10000);
 	list_init(&db->installed.packages);
 	db->cache_dir = apk_static_cache_dir;
+	db->permanent = 1;
 
 	if (root != NULL) {
 		fchdir(apk_cwd_fd);
@@ -759,6 +850,8 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 			msg = "Unable to open root";
 			goto ret_errno;
 		}
+		if (fstat(db->root_fd, &st) != 0 || major(st.st_dev) == 0)
+			db->permanent = 0;
 
 		fchdir(db->root_fd);
 		if (stat(apk_linked_cache_dir, &st) == 0 && S_ISDIR(st.st_mode))
@@ -834,6 +927,9 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	if (!(flags & APK_OPENF_NO_REPOS)) {
 		list_for_each_entry(repo, &apk_repository_list.list, list)
 			apk_db_add_repository(db, APK_BLOB_STR(repo->url));
+
+		if (apk_flags & APK_UPDATE_CACHE)
+			apk_db_index_write_nr_cache(db);
 	}
 
 	fchdir(apk_cwd_fd);
@@ -895,6 +991,7 @@ int apk_db_write_config(struct apk_database *db)
 		return -errno;
 
 	unlink("var/lib/apk/scripts");
+	apk_db_index_write_nr_cache(db);
 
 	return 0;
 }
@@ -943,13 +1040,7 @@ int apk_db_cache_active(struct apk_database *db)
 
 int apk_db_permanent(struct apk_database *db)
 {
-	struct stat st;
-
-	if (fstat(db->root_fd, &st) != 0)
-		return 0;
-	if (major(st.st_dev) == 0)
-		return 0;
-	return 1;
+	return db->permanent;
 }
 
 struct apk_package *apk_db_get_pkg(struct apk_database *db,
@@ -976,56 +1067,6 @@ struct apk_package *apk_db_get_file_owner(struct apk_database *db,
 		return NULL;
 
 	return dbf->diri->pkg;
-}
-
-struct index_write_ctx {
-	struct apk_ostream *os;
-	int count;
-};
-
-static int write_index_entry(apk_hash_item item, void *ctx)
-{
-	struct index_write_ctx *iwctx = (struct index_write_ctx *) ctx;
-	struct apk_package *pkg = (struct apk_package *) item;
-	int r;
-
-	if (pkg->filename == NULL)
-		return 0;
-
-	r = apk_pkg_write_index_entry(pkg, iwctx->os);
-	if (r < 0)
-		return r;
-
-	if (iwctx->os->write(iwctx->os, "\n", 1) != 1)
-		return -1;
-
-	iwctx->count++;
-	return 0;
-}
-
-int apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
-{
-	struct index_write_ctx ctx = { os, 0 };
-
-	apk_hash_foreach(&db->available.packages, write_index_entry, &ctx);
-
-	return ctx.count;
-}
-
-static void apk_db_cache_get_name(char *buf, size_t bufsz,
-				  struct apk_database *db,
-				  struct apk_checksum *csum,
-				  const char *file, int temp)
-{
-	char csumstr[APK_CACHE_CSUM_BYTES*2+1];
-	apk_blob_t bbuf = APK_BLOB_BUF(csumstr);
-
-	apk_blob_push_hexdump(&bbuf,
-			      APK_BLOB_PTR_LEN((char *) csum->data, APK_CACHE_CSUM_BYTES));
-	apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN("", 1));
-
-	snprintf(buf, bufsz, "%s/%s/%s.%s%s",
-		 db->root, db->cache_dir, csumstr, file, temp ? ".new" : "");
 }
 
 static struct apk_bstream *apk_db_cache_open(struct apk_database *db,

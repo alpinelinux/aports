@@ -77,6 +77,22 @@ static int cup(void)
 	return 0;
 }
 
+static int non_repository_check(struct apk_database *db)
+{
+	if (apk_flags & APK_FORCE)
+		return 0;
+	if (apk_db_cache_active(db))
+		return 0;
+	if (apk_db_permanent(db))
+		return 0;
+
+	apk_error("You tried to add a non-repository package to system, "
+		  "but it would be lost on next reboot. Enable package caching "
+		  "(apk cache --help) or use --force if you know what you are "
+		  "doing.");
+	return 1;
+}
+
 
 static int add_main(void *ctx, int argc, char **argv)
 {
@@ -97,6 +113,9 @@ static int add_main(void *ctx, int argc, char **argv)
 		return r;
 
 	if (actx->virtpkg) {
+		if (non_repository_check(&db))
+			goto err;
+
 		virtpkg = apk_pkg_new();
 		if (virtpkg == NULL) {
 			apk_error("Failed to allocate virtual meta package");
@@ -119,14 +138,8 @@ static int add_main(void *ctx, int argc, char **argv)
 			struct apk_package *pkg = NULL;
 			struct apk_sign_ctx sctx;
 
-			if (!apk_db_cache_active(&db) &&
-			    !apk_db_permanent(&db) &&
-			    !(apk_flags & APK_FORCE)) {
-				apk_error("Use --force or enable package "
-					  "caching to install non-repository "
-					  "packages.");
+			if (non_repository_check(&db))
 				goto err;
-			}
 
 			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY_AND_GENERATE,
 					  NULL);
