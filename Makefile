@@ -1,6 +1,6 @@
 
 PACKAGE		:= abuild
-VERSION		:= 2.0_rc1
+VERSION		:= 2.0_rc2
 
 prefix		?= /usr
 sysconfdir	?= /etc
