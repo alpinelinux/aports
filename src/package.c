@@ -525,7 +525,6 @@ struct read_info_ctx {
 	struct apk_package *pkg;
 	struct apk_sign_ctx *sctx;
 	int version;
-	int has_install : 1;
 };
 
 int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
@@ -675,9 +674,6 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 				break;
 			}
 		}
-		if (apk_script_type(slash+1) == APK_SCRIPT_POST_INSTALL ||
-		    apk_script_type(slash+1) == APK_SCRIPT_PRE_INSTALL)
-			ri->has_install = 1;
 	} else if (ri->version < 2) {
 		/* Version 1.x packages do not contain installed size
 		 * in metadata, so we calculate it here */
@@ -714,7 +710,6 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 		goto err;
 
 	ctx.db = db;
-	ctx.has_install = 0;
 	ctx.pkg->size = fi.size;
 
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, sctx);
@@ -728,14 +723,6 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	}
 	if (sctx->action != APK_SIGN_VERIFY)
 		ctx.pkg->csum = sctx->identity;
-
-	/* Add implicit busybox dependency if there is scripts */
-	if (ctx.has_install) {
-		struct apk_dependency dep = {
-			.name = apk_db_get_name(db, APK_BLOB_STR("busybox")),
-		};
-		apk_deps_add(&ctx.pkg->depends, &dep);
-	}
 	ctx.pkg->filename = strdup(realfile);
 
 	ctx.pkg = apk_db_pkg_add(db, ctx.pkg);
@@ -889,7 +876,6 @@ struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_
 
 	ctx.db = db;
 	ctx.version = 0;
-	ctx.has_install = 0;
 
 	apk_blob_for_each_segment(blob, "\n", parse_index_line, &ctx);
 
