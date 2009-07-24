@@ -1435,8 +1435,8 @@ static int apk_db_install_archive_entry(void *_ctx,
 		/* Create the file entry without adding it to hash */
 		file = apk_db_file_new(diri, bfile, &ctx->file_diri_node);
 
-		if (apk_verbosity > 1)
-			printf("%s\n", ae->name);
+		if (apk_verbosity >= 3)
+			apk_message("%s", ae->name);
 
 		/* Extract the file as name.apk-new */
 		snprintf(alt_name, sizeof(alt_name), "%s/%s.apk-new",
@@ -1444,8 +1444,8 @@ static int apk_db_install_archive_entry(void *_ctx,
 		r = apk_archive_entry_extract(ae, is, alt_name,
 					      extract_cb, ctx);
 	} else {
-		if (apk_verbosity > 1)
-			printf("%s\n", ae->name);
+		if (apk_verbosity >= 3)
+			apk_message("%s", ae->name);
 
 		if (name.ptr[name.len-1] == '/')
 			name.len--;
@@ -1490,8 +1490,8 @@ static void apk_db_purge_pkg(struct apk_database *db, struct apk_package *pkg,
 			    (apk_file_get_info(name, file->csum.type, &fi) == 0 &&
 			     apk_checksum_compare(&file->csum, &fi.csum) == 0))
 				unlink(name);
-			if (apk_verbosity > 1)
-				printf("%s\n", name);
+			if (apk_verbosity >= 3)
+				apk_message("%s", name);
 			__hlist_del(fc, &diri->owned_files.first);
 			if (exten == NULL) {
 				apk_hash_delete_hashed(&db->installed.files, APK_BLOB_BUF(&key), hash);
