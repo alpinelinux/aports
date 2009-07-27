@@ -179,12 +179,12 @@ ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
 ISO_REPOS_DIRSTAMP := $(DESTDIR)/stamp.isorepos
 ISOFS_DIRSTAMP	:= $(DESTDIR)/stamp.isofs
 
-$(ISO_REPOS_DIRSTAMP): $(ISO_PKGDIR)/APK_INDEX.gz
+$(ISO_REPOS_DIRSTAMP): $(ISO_PKGDIR)/APKINDEX.tar.gz
 	@touch $@
 
-$(ISO_PKGDIR)/APK_INDEX.gz: $(APK_FILES)
+$(ISO_PKGDIR)/APKINDEX.tar.gz: $(APK_FILES)
 	@echo "==> iso: generating repository index"
-	@apk index $(ISO_PKGDIR)/*.apk | gzip > $@
+	@apk index -o $@ $(ISO_PKGDIR)/*.apk
 
 $(ISO_KERNEL): $(KERNEL_APK)
 	@echo "==> iso: install kernel $(KERNEL)"
