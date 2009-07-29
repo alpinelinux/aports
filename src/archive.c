@@ -90,6 +90,9 @@ static ssize_t tar_entry_read(void *stream, void *ptr, size_t size)
 
 	if (size > teis->bytes_left)
 		size = teis->bytes_left;
+        if (size == 0)
+                return 0;
+
 	r = teis->tar_is->read(teis->tar_is, ptr, size);
 	if (r < 0)
 		return r;
