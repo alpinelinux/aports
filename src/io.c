@@ -114,15 +114,25 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 {
 	struct apk_istream *is = (struct apk_istream *) stream;
 	unsigned char *buf;
-	size_t bufsz, done = 0, r, togo;
+	size_t bufsz, done = 0, r, togo, mmapped = 0;
 
 	bufsz = size;
-	if (bufsz > 256*1024)
-		bufsz = 256*1024;
+	if (size > 256 * 1024) {
+		buf = mmap(NULL, size, PROT_WRITE, 0, fd, 0);
+		if (buf != NULL) {
+			mmapped = 1;
+			if (bufsz > 2*1024*1024)
+				bufsz = 2*1024*1024;
+		}
+	}
+	if (!mmapped) {
+		if (bufsz > 256*1024)
+			bufsz = 256*1024;
 
-	buf = malloc(bufsz);
-	if (buf == NULL)
-		return -ENOMEM;
+		buf = malloc(bufsz);
+		if (buf == NULL)
+			return -ENOMEM;
+	}
 
 	while (done < size) {
 		if (done != 0 && cb != NULL)
@@ -134,18 +144,25 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 		r = is->read(is, buf, togo);
 		if (r < 0)
 			goto err;
-		if (write(fd, buf, r) != r) {
-			if (r < 0)
-				r = -errno;
-			goto err;
+
+		if (!mmapped) {
+			if (write(fd, buf, r) != r) {
+				if (r < 0)
+					r = -errno;
+				goto err;
+			}
 		}
+
 		done += r;
 		if (r != togo)
 			break;
 	}
 	r = done;
 err:
-	free(buf);
+	if (mmapped)
+		munmap(buf, size);
+	else
+		free(buf);
 	return r;
 }
 
