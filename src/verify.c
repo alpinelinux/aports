@@ -25,7 +25,7 @@ static int verify_main(void *ctx, int argc, char **argv)
 		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
 		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(argv[i]),
 					      apk_sign_ctx_mpart_cb, &sctx);
-		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx);
+		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx, FALSE);
 		is->close(is);
 		ok = sctx.control_verified && sctx.data_verified;
 		if (apk_verbosity >= 1)

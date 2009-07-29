@@ -114,7 +114,7 @@ static void tar_entry_close(void *stream)
 }
 
 int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
-		  void *ctx)
+		  void *ctx, int soft_checksums)
 {
 	struct apk_file_info entry;
 	struct apk_tar_entry_istream teis = {
@@ -152,6 +152,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			.device = makedev(GET_OCTAL(buf.devmajor),
 					  GET_OCTAL(buf.devminor)),
 		};
+		teis.csum = NULL;
 
 		switch (buf.typeflag) {
 		case 'L':
@@ -170,8 +171,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			    di->size <= sizeof(entry.csum.data)) {
 				entry.csum.type = di->size;
 				memcpy(entry.csum.data, di->digest, di->size);
-				teis.csum = NULL;
-			} else {
+			} else if (soft_checksums) {
 				teis.csum = &entry.csum;
 			}
 			break;
@@ -202,7 +202,10 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 				entry.name = strdup(buf.name);
 
 			/* callback parser function */
-			EVP_DigestInit_ex(&teis.mdctx, apk_default_checksum(), NULL);
+			if (teis.csum != NULL)
+				EVP_DigestInit_ex(&teis.mdctx,
+						  apk_default_checksum(), NULL);
+
 			r = parser(ctx, &entry, &teis.is);
 			free(entry.name);
 			if (r != 0)

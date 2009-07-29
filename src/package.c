@@ -713,7 +713,7 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	ctx.pkg->size = fi.size;
 
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, sctx);
-	r = apk_tar_parse(tar, read_info_entry, &ctx);
+	r = apk_tar_parse(tar, read_info_entry, &ctx, FALSE);
 	tar->close(tar);
 	if (r < 0 && r != -ECANCELED)
 		goto err;
