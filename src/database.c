@@ -1518,7 +1518,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 	struct hlist_node *dc, *dn, *fc, *fn;
 	unsigned long hash;
 	char name[1024], tmpname[1024];
-	int r;
+	int cstype, r;
 
 	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
 		dir = diri->dir;
@@ -1540,13 +1540,18 @@ static void apk_db_migrate_files(struct apk_database *db,
 			ofile = (struct apk_db_file *) apk_hash_get_hashed(
 				&db->installed.files, APK_BLOB_BUF(&key), hash);
 
-			r = apk_file_get_info(name,
-				ofile ? ofile->csum.type : APK_CHECKSUM_NONE,
-				&fi);
+			/* We want to compare checksums only if one exists
+			 * in db, and the file is in a protected path */
+			cstype = APK_CHECKSUM_NONE;
+			if (ofile != NULL &&
+			    (diri->dir->flags & APK_DBDIRF_PROTECTED))
+				cstype = ofile->csum.type;
+
+			r = apk_file_get_info(name, cstype, &fi);
 			if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
 			    (r == 0) &&
 			    (ofile == NULL ||
-			     apk_checksum_compare(&ofile->csum, &fi.csum) == 0)) {
+			     apk_checksum_compare(&ofile->csum, &fi.csum) != 0)) {
 				/* Protected directory, with file without
 				 * db entry, or local modifications.
 				 *
