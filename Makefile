@@ -29,7 +29,7 @@ include Make.rules
 ##
 # Top-level targets
 
-install::
+install:
 	$(INSTALLDIR) $(DESTDIR)$(DOCDIR)
 	$(INSTALL) README $(DESTDIR)$(DOCDIR)
 

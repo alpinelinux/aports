@@ -21,6 +21,6 @@ LIBS			:= -Wl,--as-needed \
 				$(shell pkg-config --libs $(PKGDEPS)) \
 			   -Wl,--no-as-needed
 
-install::
+install:
 	$(INSTALLDIR) $(DESTDIR)$(SBINDIR)
 	$(INSTALL) $(obj)/apk $(DESTDIR)$(SBINDIR)
