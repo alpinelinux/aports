@@ -1182,7 +1182,8 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 		return 0;
 
 	r = apk_cache_download(db, &repo->csum, repo->url, apkindex_tar_gz,
-			       APK_SIGN_VERIFY);
+			       (apk_flags & APK_ALLOW_UNTRUSTED) ?
+			       APK_SIGN_NONE : APK_SIGN_VERIFY);
 	if (r == 0 || r == -ENOKEY || r == -EKEYREJECTED) {
 		if (r == -ENOKEY)
 			apk_error("%s: verify: UNTRUSTED", repo->url);
