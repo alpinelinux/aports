@@ -112,6 +112,7 @@ size_t apk_istream_skip(struct apk_istream *is, size_t size)
 size_t apk_istream_splice(void *stream, int fd, size_t size,
 			  apk_progress_cb cb, void *cb_ctx)
 {
+	static void *splice_buffer = NULL;
 	struct apk_istream *is = (struct apk_istream *) stream;
 	unsigned char *buf = MAP_FAILED;
 	size_t bufsz, done = 0, r, togo, mmapped = 0;
@@ -128,12 +129,13 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 		}
 	}
 	if (!mmapped) {
-		if (bufsz > 256*1024)
-			bufsz = 256*1024;
-
-		buf = malloc(bufsz);
+		if (splice_buffer == NULL)
+			splice_buffer = malloc(256*1024);
+		buf = splice_buffer;
 		if (buf == NULL)
 			return -ENOMEM;
+		if (bufsz > 256*1024)
+			bufsz = 256*1024;
 	}
 
 	while (done < size) {
@@ -163,8 +165,6 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 err:
 	if (mmapped)
 		munmap(buf, size);
-	else
-		free(buf);
 	return r;
 }
 
