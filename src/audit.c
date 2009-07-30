@@ -69,10 +69,9 @@ static int audit_directory(apk_hash_item item, void *ctx)
 		} else {
 			dbf = apk_db_file_query(db, bdir, APK_BLOB_STR(de->d_name));
 			if (dbf != NULL) {
-				if (apk_file_get_info(tmp, dbf->csum.type, &fi) < 0)
-					continue;
-
-				if (apk_checksum_compare(&fi.csum, &dbf->csum) == 0)
+				if (dbf->csum.type != APK_CHECKSUM_NONE &&
+				    apk_file_get_info(tmp, dbf->csum.type, &fi) == 0 &&
+				    apk_checksum_compare(&fi.csum, &dbf->csum) == 0)
 					continue;
 
 				reason = 'U';

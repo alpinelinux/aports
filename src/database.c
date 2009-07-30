@@ -1458,6 +1458,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			 diri->dir->name, file->name);
 		r = apk_archive_entry_extract(ae, is, alt_name,
 					      extract_cb, ctx);
+		memcpy(&file->csum, &ae->csum, sizeof(file->csum));
 	} else {
 		if (apk_verbosity >= 3)
 			apk_message("%s", ae->name);
@@ -1502,7 +1503,8 @@ static void apk_db_purge_pkg(struct apk_database *db, struct apk_package *pkg,
 			hash = apk_blob_hash_seed(key.filename, diri->dir->hash);
 			if (!(diri->dir->flags & APK_DBDIRF_PROTECTED) ||
 			    (apk_flags & APK_PURGE) ||
-			    (apk_file_get_info(name, file->csum.type, &fi) == 0 &&
+			    (file->csum.type != APK_CHECKSUM_NONE &&
+			     apk_file_get_info(name, file->csum.type, &fi) == 0 &&
 			     apk_checksum_compare(&file->csum, &fi.csum) == 0))
 				unlink(name);
 			if (apk_verbosity >= 3)
@@ -1565,6 +1567,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 			if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
 			    (r == 0) &&
 			    (ofile == NULL ||
+			     ofile->csum.type == APK_CHECKSUM_NONE ||
 			     apk_checksum_compare(&ofile->csum, &fi.csum) != 0)) {
 				/* Protected directory, with file without
 				 * db entry, or local modifications.
@@ -1575,7 +1578,8 @@ static void apk_db_migrate_files(struct apk_database *db,
 				    ofile->csum.type != file->csum.type)
 					apk_file_get_info(name, file->csum.type, &fi);
 				if ((apk_flags & APK_CLEAN_PROTECTED) ||
-				    apk_checksum_compare(&file->csum, &fi.csum) == 0)
+				    (file->csum.type != APK_CHECKSUM_NONE &&
+				     apk_checksum_compare(&file->csum, &fi.csum) == 0))
 					unlink(tmpname);
 			} else {
 				/* Overwrite the old file */
