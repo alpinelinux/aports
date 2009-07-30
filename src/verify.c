@@ -8,6 +8,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -25,6 +26,12 @@ static int verify_main(void *ctx, int argc, char **argv)
 		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
 		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(argv[i]),
 					      apk_sign_ctx_mpart_cb, &sctx);
+		if (is == NULL) {
+			apk_error("%s: %s", strerror(errno), argv[i]);
+			apk_sign_ctx_free(&sctx);
+			rc++;
+			continue;
+		}
 		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx, FALSE);
 		is->close(is);
 		ok = sctx.control_verified && sctx.data_verified;
