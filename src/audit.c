@@ -56,6 +56,11 @@ static int audit_directory(apk_hash_item item, void *ctx)
 		if (apk_file_get_info(tmp, APK_CHECKSUM_NONE, &fi) < 0)
 			continue;
 
+		if (!(actx->type & AUDIT_SYSTEM) &&
+		    (dbd->flags & APK_DBDIRF_SYMLINKS_ONLY) &&
+		    !S_ISLNK(fi.mode))
+			continue;
+
 		if (S_ISDIR(fi.mode)) {
 			if (apk_db_dir_query(db, APK_BLOB_STR(tmp)) != NULL)
 				continue;

@@ -235,11 +235,25 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 		dir->flags = dir->parent->flags;
 
 	for (i = 0; i < db->protected_paths->num; i++) {
-		if (db->protected_paths->item[i][0] == '-' &&
-		    strcmp(&db->protected_paths->item[i][1], dir->name) == 0)
-			dir->flags &= ~APK_DBDIRF_PROTECTED;
-		else if (strcmp(db->protected_paths->item[i], dir->name) == 0)
-			dir->flags |= APK_DBDIRF_PROTECTED;
+		int flags = dir->flags, j;
+
+		flags |= APK_DBDIRF_PROTECTED;
+		for (j = 0; ; j++) {
+			switch (db->protected_paths->item[i][j]) {
+			case '-':
+				flags &= ~(APK_DBDIRF_PROTECTED |
+					   APK_DBDIRF_SYMLINKS_ONLY);
+				continue;
+			case '*':
+				flags |= APK_DBDIRF_SYMLINKS_ONLY |
+					 APK_DBDIRF_PROTECTED;
+				continue;
+			}
+			break;
+		}
+
+		if (strcmp(&db->protected_paths->item[i][j], dir->name) == 0)
+			dir->flags = flags;
 	}
 
 	return dir;
@@ -895,7 +909,7 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 		}
 	}
 
-	blob = APK_BLOB_STR("etc:-etc/init.d");
+	blob = APK_BLOB_STR("etc:*etc/init.d");
 	apk_blob_for_each_segment(blob, ":", add_protected_path, db);
 
 	if (root != NULL) {

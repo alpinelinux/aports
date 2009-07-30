@@ -37,6 +37,7 @@ struct apk_db_file {
 };
 
 #define APK_DBDIRF_PROTECTED		0x0001
+#define APK_DBDIRF_SYMLINKS_ONLY	0x0002
 
 struct apk_db_dir {
 	apk_hash_node hash_node;

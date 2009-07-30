@@ -468,7 +468,7 @@ int apk_file_get_info(const char *filename, int checksum, struct apk_file_info *
 	struct stat st;
 	struct apk_bstream *bs;
 
-	if (stat(filename, &st) != 0)
+	if (lstat(filename, &st) != 0)
 		return -errno;
 
 	*fi = (struct apk_file_info) {
