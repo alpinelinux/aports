@@ -331,7 +331,7 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 		break;
 	case S_IFREG:
 		if (ae->link_target == NULL) {
-			fd = open(fn, O_WRONLY | O_CREAT, ae->mode & 07777);
+			fd = open(fn, O_RDWR | O_CREAT, ae->mode & 07777);
 			if (fd < 0) {
 				r = -1;
 				break;

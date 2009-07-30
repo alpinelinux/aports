@@ -113,13 +113,15 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 			  apk_progress_cb cb, void *cb_ctx)
 {
 	struct apk_istream *is = (struct apk_istream *) stream;
-	unsigned char *buf;
+	unsigned char *buf = MAP_FAILED;
 	size_t bufsz, done = 0, r, togo, mmapped = 0;
 
 	bufsz = size;
-	if (size > 256 * 1024) {
-		buf = mmap(NULL, size, PROT_WRITE, 0, fd, 0);
-		if (buf != NULL) {
+	if (size > 128 * 1024) {
+		if (ftruncate(fd, size) == 0)
+			buf = mmap(NULL, size, PROT_READ | PROT_WRITE,
+				   MAP_SHARED, fd, 0);
+		if (buf != MAP_FAILED) {
 			mmapped = 1;
 			if (bufsz > 2*1024*1024)
 				bufsz = 2*1024*1024;
