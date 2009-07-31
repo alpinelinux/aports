@@ -1324,6 +1324,31 @@ static int apk_db_run_pending_script(struct install_ctx *ctx)
 	return r;
 }
 
+static struct apk_db_dir_instance *find_diri(struct apk_package *pkg,
+					     apk_blob_t dirname,
+					     struct apk_db_dir_instance *curdiri,
+					     struct hlist_node ***tail)
+{
+	struct hlist_node *n;
+	struct apk_db_dir_instance *diri;
+
+	if (curdiri != NULL &&
+	    apk_blob_compare(APK_BLOB_PTR_LEN(curdiri->dir->name,
+					      curdiri->dir->namelen),
+			     dirname) == 0)
+		return curdiri;
+
+	hlist_for_each_entry(diri, n, &pkg->owned_dirs, pkg_dirs_list) {
+		if (apk_blob_compare(APK_BLOB_PTR_LEN(diri->dir->name,
+						      diri->dir->namelen), dirname) == 0) {
+			if (tail != NULL)
+				*tail = hlist_tail_ptr(&diri->owned_files);
+			return diri;
+		}
+	}
+	return NULL;
+}
+
 static int apk_db_install_archive_entry(void *_ctx,
 					const struct apk_file_info *ae,
 					struct apk_istream *is)
@@ -1389,23 +1414,11 @@ static int apk_db_install_archive_entry(void *_ctx,
 			return 0;
 
 		/* Make sure the file is part of the cached directory tree */
-		if (diri == NULL ||
-		    apk_blob_compare(APK_BLOB_PTR_LEN(diri->dir->name,
-						      diri->dir->namelen),
-				     bdir) != 0) {
-			struct hlist_node *n;
-
-			hlist_for_each_entry(diri, n, &pkg->owned_dirs, pkg_dirs_list) {
-				if (apk_blob_compare(APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen), bdir) == 0)
-					break;
-			}
-			if (diri == NULL) {
-				apk_error("%s: File '%*s' entry without directory entry.\n",
-					  pkg->name->name, name.len, name.ptr);
-				return -1;
-			}
-			ctx->diri = diri;
-			ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
+		diri = find_diri(pkg, bdir, diri, &ctx->file_diri_node);
+		if (diri == NULL) {
+			apk_error("%s: File '%*s' entry without directory entry.\n",
+				  pkg->name->name, name.len, name.ptr);
+			return -1;
 		}
 
 		file = apk_db_file_query(db, bdir, bfile);
@@ -1434,7 +1447,36 @@ static int apk_db_install_archive_entry(void *_ctx,
 		/* Extract the file as name.apk-new */
 		r = apk_archive_entry_extract(db->root_fd, ae, ".apk-new", is,
 					      extract_cb, ctx);
-		memcpy(&file->csum, &ae->csum, sizeof(file->csum));
+
+		/* Hardlinks need special care for checksum */
+		if (ae->csum.type == APK_CHECKSUM_NONE &&
+		    ae->link_target != NULL) {
+			do {
+				struct apk_db_file *lfile;
+				struct apk_db_dir_instance *ldiri;
+				struct hlist_node *n;
+
+				if (!apk_blob_rsplit(APK_BLOB_STR(ae->link_target),
+						     '/', &bdir, &bfile))
+					break;
+
+				ldiri = find_diri(pkg, bdir, diri, NULL);
+				if (ldiri == NULL)
+					break;
+
+				hlist_for_each_entry(lfile, n, &ldiri->owned_files,
+						     diri_files_list) {
+					if (apk_blob_compare(APK_BLOB_PTR_LEN(lfile->name, lfile->namelen),
+							     bfile) == 0) {
+						memcpy(&file->csum, &lfile->csum,
+						       sizeof(file->csum));
+						break;
+					}
+				}
+			} while (0);
+
+		} else
+			memcpy(&file->csum, &ae->csum, sizeof(file->csum));
 	} else {
 		if (apk_verbosity >= 3)
 			apk_message("%s", ae->name);
