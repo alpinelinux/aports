@@ -114,21 +114,19 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 {
 	static void *splice_buffer = NULL;
 	struct apk_istream *is = (struct apk_istream *) stream;
-	unsigned char *buf = MAP_FAILED;
-	size_t bufsz, done = 0, r, togo, mmapped = 0;
+	unsigned char *buf, *mmapbase = MAP_FAILED;
+	size_t bufsz, done = 0, r, togo;
 
 	bufsz = size;
 	if (size > 128 * 1024) {
 		if (ftruncate(fd, size) == 0)
-			buf = mmap(NULL, size, PROT_READ | PROT_WRITE,
-				   MAP_SHARED, fd, 0);
-		if (buf != MAP_FAILED) {
-			mmapped = 1;
-			if (bufsz > 2*1024*1024)
-				bufsz = 2*1024*1024;
-		}
+			mmapbase = mmap(NULL, size, PROT_READ | PROT_WRITE,
+					MAP_SHARED, fd, 0);
+		if (bufsz > 2*1024*1024)
+			bufsz = 2*1024*1024;
+		buf = mmapbase;
 	}
-	if (!mmapped) {
+	if (mmapbase == MAP_FAILED) {
 		if (splice_buffer == NULL)
 			splice_buffer = malloc(256*1024);
 		buf = splice_buffer;
@@ -149,13 +147,14 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 		if (r < 0)
 			goto err;
 
-		if (!mmapped) {
+		if (mmapbase == MAP_FAILED) {
 			if (write(fd, buf, r) != r) {
 				if (r < 0)
 					r = -errno;
 				goto err;
 			}
-		}
+		} else
+			buf += r;
 
 		done += r;
 		if (r != togo)
@@ -163,8 +162,8 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 	}
 	r = done;
 err:
-	if (mmapped)
-		munmap(buf, size);
+	if (mmapbase != MAP_FAILED)
+		munmap(mmapbase, size);
 	return r;
 }
 
