@@ -48,7 +48,7 @@
         (type *)( (char *)__mptr - offsetof(type,member) );})
 #endif
 
-extern int apk_cwd_fd, apk_verbosity, apk_wait;
+extern int apk_verbosity, apk_wait;
 extern unsigned int apk_flags;
 
 #define APK_FORCE		0x0001

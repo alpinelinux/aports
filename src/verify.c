@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "apk_applet.h"
@@ -19,12 +20,17 @@ static int verify_main(void *ctx, int argc, char **argv)
 {
 	struct apk_sign_ctx sctx;
 	struct apk_istream *is;
+	struct apk_database db;
 	int i, r, ok, rc = 0;
 
 	apk_flags |= APK_ALLOW_UNTRUSTED;
+	r = apk_db_open(&db, apk_root, APK_OPENF_READ | APK_OPENF_NO_STATE);
+	if (r != 0)
+		return r;
+
 	for (i = 0; i < argc; i++) {
-		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL);
-		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(argv[i]),
+		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL, db.keys_fd);
+		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(AT_FDCWD, argv[i]),
 					      apk_sign_ctx_mpart_cb, &sctx);
 		if (is == NULL) {
 			apk_error("%s: %s", strerror(errno), argv[i]);
@@ -43,6 +49,7 @@ static int verify_main(void *ctx, int argc, char **argv)
 			rc++;
 		apk_sign_ctx_free(&sctx);
 	}
+	apk_db_close(&db);
 
 	return rc;
 }

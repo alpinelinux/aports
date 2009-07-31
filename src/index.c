@@ -55,7 +55,7 @@ static int index_read_file(struct apk_database *db, struct index_ctx *ictx)
 
 	if (ictx->index == NULL)
 		return 0;
-	if (apk_file_get_info(ictx->index, APK_CHECKSUM_NONE, &fi) < 0)
+	if (apk_file_get_info(AT_FDCWD, ictx->index, APK_CHECKSUM_NONE, &fi) < 0)
 		return -1;
 	ictx->index_mtime = fi.mtime;
 
@@ -107,7 +107,7 @@ static int index_main(void *ctx, int argc, char **argv)
 	}
 
 	for (i = 0; i < argc; i++) {
-		if (apk_file_get_info(argv[i], APK_CHECKSUM_NONE, &fi) < 0) {
+		if (apk_file_get_info(AT_FDCWD, argv[i], APK_CHECKSUM_NONE, &fi) < 0) {
 			apk_warning("File '%s' is unaccessible", argv[i]);
 			continue;
 		}
@@ -154,7 +154,7 @@ static int index_main(void *ctx, int argc, char **argv)
 
 		if (!found) {
 			struct apk_sign_ctx sctx;
-			apk_sign_ctx_init(&sctx, ictx->method, NULL);
+			apk_sign_ctx_init(&sctx, ictx->method, NULL, db.keys_fd);
 			if (apk_pkg_read(&db, argv[i], &sctx, NULL) == 0)
 				newpkgs++;
 			apk_sign_ctx_free(&sctx);
@@ -171,7 +171,7 @@ static int index_main(void *ctx, int argc, char **argv)
 	}
 
 	if (ictx->output != NULL)
-		os = apk_ostream_to_file(ictx->output, 0644);
+		os = apk_ostream_to_file(AT_FDCWD, ictx->output, 0644);
 	else
 		os = apk_ostream_to_fd(STDOUT_FILENO);
 	if (ictx->method == APK_SIGN_GENERATE) {

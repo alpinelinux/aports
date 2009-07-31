@@ -38,6 +38,7 @@ struct apk_name;
 #define APK_SIGN_VERIFY_AND_GENERATE	5
 
 struct apk_sign_ctx {
+	int keys_fd;
 	int action;
 	const EVP_MD *md;
 	int num_signatures;
@@ -97,7 +98,7 @@ APK_ARRAY(apk_package_array, struct apk_package *);
 extern const char *apk_script_types[];
 
 void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
-		       struct apk_checksum *identity);
+		       struct apk_checksum *identity, int keys_fd);
 void apk_sign_ctx_free(struct apk_sign_ctx *ctx);
 int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 			      const struct apk_file_info *fi,
@@ -121,6 +122,8 @@ void apk_deps_parse(struct apk_database *db,
 int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os);
 int apk_script_type(const char *name);
 
+void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to);
+void apk_pkg_format_cache(struct apk_package *pkg, apk_blob_t to);
 struct apk_package *apk_pkg_new(void);
 int apk_pkg_read(struct apk_database *db, const char *name,
 		 struct apk_sign_ctx *ctx, struct apk_package **pkg);

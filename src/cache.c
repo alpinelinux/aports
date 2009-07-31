@@ -28,7 +28,7 @@ static int cache_download(struct apk_database *db)
 	struct apk_state *state;
 	struct apk_change *change;
 	struct apk_package *pkg;
-	char pkgfile[256];
+	char item[PATH_MAX], cacheitem[PATH_MAX];
 	int i, r;
 
 	if (db->world == NULL)
@@ -38,24 +38,27 @@ static int cache_download(struct apk_database *db)
 	for (i = 0; i < db->world->num; i++) {
 		r = apk_state_lock_dependency(state, &db->world->item[i]);
 		if (r != 0) {
-			apk_error("Unable to select version for '%s'",
-				  db->world->item[i].name->name);
+			apk_error("Unable to select version for '%s': %d",
+				  db->world->item[i].name->name, r);
 			goto err;
 		}
 	}
 
 	list_for_each_entry(change, &state->change_list_head, change_list) {
 		pkg = change->newpkg;
-		snprintf(pkgfile, sizeof(pkgfile), "%s-%s.apk",
-			 pkg->name->name, pkg->version);
-		if (apk_cache_exists(db, &pkg->csum, pkgfile))
+
+		apk_pkg_format_cache(pkg, APK_BLOB_BUF(cacheitem));
+		if (faccessat(db->cache_fd, cacheitem, R_OK, 0) == 0)
 			continue;
+
 		for (i = 0; i < db->num_repos; i++) {
 			if (!(pkg->repos & BIT(i)))
 				continue;
 
-			r = apk_cache_download(db, &pkg->csum, db->repos[i].url,
-					       pkgfile, APK_SIGN_VERIFY_IDENTITY);
+			apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
+			r = apk_cache_download(db, db->repos[i].url,
+					       item, cacheitem,
+					       APK_SIGN_VERIFY_IDENTITY);
 			if (r != 0)
 				return r;
 		}
@@ -68,54 +71,54 @@ err:
 
 static int cache_clean(struct apk_database *db)
 {
+	char tmp[PATH_MAX];
 	DIR *dir;
 	struct dirent *de;
-	char path[256], csum[APK_CACHE_CSUM_BYTES];
 	int delete, i;
 	apk_blob_t b, bname, bver;
 	struct apk_name *name;
 
-	snprintf(path, sizeof(path), "%s/%s", db->root, db->cache_dir);
-	if (chdir(path) != 0)
-		return -1;
-
-	dir = opendir(path);
+	dir = fdopendir(dup(db->cache_fd));
 	if (dir == NULL)
 		return -1;
 
 	while ((de = readdir(dir)) != NULL) {
 		if (de->d_name[0] == '.')
 			continue;
+
 		delete = TRUE;
 		do {
 			b = APK_BLOB_STR(de->d_name);
-			apk_blob_pull_hexdump(&b, APK_BLOB_BUF(csum));
-			apk_blob_pull_char(&b, '.');
 
-			if (apk_blob_compare(b, APK_BLOB_STR(apk_index_gz)) == 0 ||
-			    apk_blob_compare(b, APK_BLOB_STR(apkindex_tar_gz)) == 0) {
+			if (apk_blob_compare(b, APK_BLOB_STR("installed")) == 0) {
+				delete = FALSE;
+				break;
+			}
+
+			if (apk_pkg_parse_name(b, &bname, &bver) < 0) {
 				/* Index - check for matching repository */
 				for (i = 0; i < db->num_repos; i++) {
-					if (memcmp(db->repos[i].csum.data,
-						   csum, APK_CACHE_CSUM_BYTES) != 0)
-						continue;
+					apk_cache_format_index(APK_BLOB_BUF(tmp), &db->repos[i], 0);
+					if (apk_blob_compare(b, APK_BLOB_STR(tmp)) != 0) {
+						apk_cache_format_index(APK_BLOB_BUF(tmp), &db->repos[i], 1);
+						if (apk_blob_compare(b, APK_BLOB_STR(tmp)) != 0)
+							continue;
+					}
 					delete = 0;
 					break;
 				}
-			} else if (b.len > 4 &&
-				   memcmp(b.ptr+b.len-4, ".apk", 4) == 0) {
+			} else {
 				/* Package - search for it */
-				if (apk_pkg_parse_name(b, &bname, &bver) < 0)
-					break;
-
 				name = apk_db_get_name(db, bname);
 				if (name == NULL || name->pkgs == NULL)
 					break;
-
 				for (i = 0; i < name->pkgs->num; i++) {
 					struct apk_package *pkg = name->pkgs->item[i];
-					if (memcmp(pkg->csum.data, csum, APK_CACHE_CSUM_BYTES) != 0)
+
+					apk_pkg_format_cache(pkg, APK_BLOB_BUF(tmp));
+					if (apk_blob_compare(b, APK_BLOB_STR(tmp)) != 0)
 						continue;
+
 					delete = 0;
 					break;
 				}
@@ -126,7 +129,7 @@ static int cache_clean(struct apk_database *db)
 			if (apk_verbosity >= 2)
 				apk_message("deleting %s", de->d_name);
 			if (!(apk_flags & APK_SIMULATE))
-				unlink(de->d_name);
+				unlinkat(db->cache_fd, de->d_name, 0);
 		}
 	}
 
@@ -152,7 +155,7 @@ static int cache_main(void *ctx, int argc, char **argv)
 	else
 		return -EINVAL;
 
-	r = apk_db_open(&db, apk_root,
+	r = apk_db_open(&db, apk_root, APK_OPENF_READ |
 			APK_OPENF_NO_SCRIPTS | APK_OPENF_NO_INSTALLED);
 	if (r != 0)
 		return r;

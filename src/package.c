@@ -28,6 +28,29 @@
 #include "apk_database.h"
 #include "apk_state.h"
 
+void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to)
+{
+	/* pkgname-1.0.apk */
+	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->name->name));
+	apk_blob_push_blob(&to, APK_BLOB_STR("-"));
+	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->version));
+	apk_blob_push_blob(&to, APK_BLOB_STR(".apk"));
+	apk_blob_push_blob(&to, APK_BLOB_PTR_LEN("", 1));
+}
+
+void apk_pkg_format_cache(struct apk_package *pkg, apk_blob_t to)
+{
+	/* pkgname-1.0_alpha1.12345678.apk */
+	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->name->name));
+	apk_blob_push_blob(&to, APK_BLOB_STR("-"));
+	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->version));
+	apk_blob_push_blob(&to, APK_BLOB_STR("."));
+	apk_blob_push_hexdump(&to, APK_BLOB_PTR_LEN((char *) pkg->csum.data,
+						    APK_CACHE_CSUM_BYTES));
+	apk_blob_push_blob(&to, APK_BLOB_STR(".apk"));
+	apk_blob_push_blob(&to, APK_BLOB_PTR_LEN("", 1));
+}
+
 struct apk_package *apk_pkg_new(void)
 {
 	struct apk_package *pkg;
@@ -56,6 +79,9 @@ int apk_pkg_parse_name(apk_blob_t apkname,
 		if (++dash >= 2)
 			return -1;
 	}
+	if (i < 0)
+		return -1;
+
 	if (name != NULL)
 		*name = APK_BLOB_PTR_LEN(apkname.ptr, i);
 	if (version != NULL)
@@ -282,9 +308,10 @@ int apk_script_type(const char *name)
 }
 
 void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
-		       struct apk_checksum *identity)
+		       struct apk_checksum *identity, int keys_fd)
 {
 	memset(ctx, 0, sizeof(struct apk_sign_ctx));
+	ctx->keys_fd = keys_fd;
 	ctx->action = action;
 	switch (action) {
 	case APK_SIGN_NONE:
@@ -359,14 +386,19 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 	    ctx->signature.pkey != NULL)
 		return 0;
 
+	if (ctx->keys_fd < 0)
+		return 0;
+
 	if (strncmp(&fi->name[6], "RSA.", 4) == 0 ||
 	    strncmp(&fi->name[6], "DSA.", 4) == 0) {
-		char file[256];
-	        BIO *bio = BIO_new(BIO_s_file());
-		snprintf(file, sizeof(file), "/etc/apk/keys/%s", &fi->name[10]);
-		if (BIO_read_filename(bio, file) > 0)
-			ctx->signature.pkey =
-				PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
+		int fd = openat(ctx->keys_fd, &fi->name[10], O_RDONLY);
+	        BIO *bio;
+
+		if (fd < 0)
+			return 0;
+
+		bio  = BIO_new_fp(fdopen(fd, "r"), 0);
+		ctx->signature.pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
 		if (ctx->signature.pkey != NULL) {
 			if (fi->name[6] == 'R')
 				ctx->md = EVP_sha1();
@@ -690,12 +722,9 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	struct apk_file_info fi;
 	struct apk_bstream *bs;
 	struct apk_istream *tar;
-	char realfile[PATH_MAX];
 	int r;
 
-	if (realpath(file, realfile) < 0)
-		return -errno;
-	r = apk_file_get_info(realfile, APK_CHECKSUM_NONE, &fi);
+	r = apk_file_get_info(AT_FDCWD, file, APK_CHECKSUM_NONE, &fi);
 	if (r != 0)
 		return r;
 
@@ -705,7 +734,7 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	r = -ENOMEM;
 	if (ctx.pkg == NULL)
 		goto err;
-	bs = apk_bstream_from_file(realfile);
+	bs = apk_bstream_from_file(AT_FDCWD, file);
 	if (bs == NULL)
 		goto err;
 
@@ -723,7 +752,7 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	}
 	if (sctx->action != APK_SIGN_VERIFY)
 		ctx.pkg->csum = sctx->identity;
-	ctx.pkg->filename = strdup(realfile);
+	ctx.pkg->filename = strdup(file);
 
 	ctx.pkg = apk_db_pkg_add(db, ctx.pkg);
 	if (pkg != NULL)
@@ -814,18 +843,17 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 	struct hlist_node *c;
 	int fd, status;
 	pid_t pid;
-	char fn[1024];
+	char fn[PATH_MAX];
 
-	fchdir(root_fd);
 	hlist_for_each_entry(script, c, &pkg->scripts, script_list) {
 		if (script->type != type)
 			continue;
 
-		snprintf(fn, sizeof(fn),
-			"tmp/%s-%s.%s",
+		snprintf(fn, sizeof(fn), "tmp/%s-%s.%s",
 			pkg->name->name, pkg->version,
 			apk_script_types[type]);
-		fd = creat(fn, 0777);
+
+		fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0777);
 		if (fd < 0)
 			return fd;
 		write(fd, script->script, script->size);
@@ -837,6 +865,7 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		if (pid == -1)
 			return -1;
 		if (pid == 0) {
+			fchdir(root_fd);
 			if (chroot(".") < 0) {
 				apk_error("chroot: %s", strerror(errno));
 			} else {
@@ -846,7 +875,7 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 			exit(1);
 		}
 		waitpid(pid, &status, 0);
-		unlink(fn);
+		unlinkat(root_fd, fn, 0);
 		if (WIFEXITED(status))
 			return WEXITSTATUS(status);
 		return -1;

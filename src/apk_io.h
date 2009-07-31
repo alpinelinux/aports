@@ -66,8 +66,8 @@ struct apk_ostream *apk_ostream_gzip(struct apk_ostream *);
 struct apk_ostream *apk_ostream_counter(off_t *);
 
 struct apk_istream *apk_istream_from_fd(int fd);
-struct apk_istream *apk_istream_from_file(const char *file);
-struct apk_istream *apk_istream_from_file_gz(const char *file);
+struct apk_istream *apk_istream_from_file(int atfd, const char *file);
+struct apk_istream *apk_istream_from_file_gz(int atfd, const char *file);
 struct apk_istream *apk_istream_from_url(const char *url);
 struct apk_istream *apk_istream_from_url_gz(const char *url);
 size_t apk_istream_skip(struct apk_istream *istream, size_t size);
@@ -76,20 +76,21 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 
 struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream);
 struct apk_bstream *apk_bstream_from_fd(int fd);
-struct apk_bstream *apk_bstream_from_file(const char *file);
+struct apk_bstream *apk_bstream_from_file(int atfd, const char *file);
 struct apk_bstream *apk_bstream_from_url(const char *url);
-struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, const char *to);
+struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to);
 
 struct apk_ostream *apk_ostream_to_fd(int fd);
-struct apk_ostream *apk_ostream_to_file(const char *file, mode_t mode);
-struct apk_ostream *apk_ostream_to_file_gz(const char *file, mode_t mode);
+struct apk_ostream *apk_ostream_to_file(int atfd, const char *file, mode_t mode);
+struct apk_ostream *apk_ostream_to_file_gz(int atfd, const char *file, mode_t mode);
 size_t apk_ostream_write_string(struct apk_ostream *ostream, const char *string);
 
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
-apk_blob_t apk_blob_from_file(const char *file);
+apk_blob_t apk_blob_from_file(int atfd, const char *file);
 
-int apk_file_get_info(const char *filename, int checksum, struct apk_file_info *fi);
-int apk_url_download(const char *url, const char *file);
+int apk_file_get_info(int atfd, const char *filename, int checksum,
+		      struct apk_file_info *fi);
+int apk_url_download(const char *url, int atfd, const char *file);
 const char *apk_url_local_file(const char *url);
 
 #endif

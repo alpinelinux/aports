@@ -711,7 +711,7 @@ int apk_state_commit(struct apk_state *state,
 	if (apk_flags & APK_PROGRESS)
 		apk_draw_progress(20, 1);
 
-	if (!(apk_flags & APK_SIMULATE) && prog.done.packages != 0)
+	if (!(apk_flags & APK_SIMULATE))
 		apk_db_write_config(db);
 
 	if (r == 0)

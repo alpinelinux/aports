@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <unistd.h>
 #include <errno.h>
 #include <zlib.h>
@@ -26,7 +27,7 @@
 
 struct fetch_ctx {
 	unsigned int flags;
-	const char *outdir;
+	int outdir_fd;
 };
 
 static int cup(void)
@@ -80,7 +81,7 @@ static int fetch_parse(void *ctx, int optch, int optindex, const char *optarg)
 		fctx->flags |= FETCH_LINK;
 		break;
 	case 'o':
-		fctx->outdir = optarg;
+		fctx->outdir_fd = openat(AT_FDCWD, optarg, O_RDONLY);
 		break;
 	default:
 		return -1;
@@ -93,22 +94,21 @@ static int fetch_package(struct fetch_ctx *fctx,
 			 struct apk_package *pkg)
 {
 	struct apk_istream *is;
-	char infile[256];
-	char outfile[256];
+	char pkgfile[PATH_MAX], url[PATH_MAX];
 	int i, r, fd;
 
+	apk_pkg_format_plain(pkg, APK_BLOB_BUF(pkgfile));
+
 	if (!(fctx->flags & FETCH_STDOUT)) {
-		struct stat st;
+		struct apk_file_info fi;
 
-		snprintf(outfile, sizeof(outfile), "%s/%s-%s.apk",
-			 fctx->outdir ? fctx->outdir : ".",
-			 pkg->name->name, pkg->version);
-
-		if (lstat(outfile, &st) == 0 && st.st_size == pkg->size)
+		if (apk_file_get_info(fctx->outdir_fd, pkgfile,
+				      APK_CHECKSUM_NONE, &fi) == 0 &&
+		    fi.size == pkg->size)
 			return 0;
 	}
-	apk_message("Downloading %s-%s", pkg->name->name, pkg->version);
 
+	apk_message("Downloading %s-%s", pkg->name->name, pkg->version);
 	for (i = 0; i < APK_MAX_REPOS; i++)
 		if (pkg->repos & BIT(i))
 			break;
@@ -122,31 +122,30 @@ static int fetch_package(struct fetch_ctx *fctx,
 	if (apk_flags & APK_SIMULATE)
 		return 0;
 
-	snprintf(infile, sizeof(infile), "%s/%s-%s.apk",
-		 db->repos[i].url, pkg->name->name, pkg->version);
+	snprintf(url, sizeof(url), "%s%s%s", db->repos[i].url,
+		 db->repos[i].url[strlen(db->repos[i].url)-1] == '/' ? "" : "/",
+		 pkgfile);
 
 	if (fctx->flags & FETCH_STDOUT) {
 		fd = STDOUT_FILENO;
 	} else {
-		if ((fctx->flags & FETCH_LINK) && apk_url_local_file(infile)) {
-			char real_infile[256];
-			int n;
-			n = readlink(infile, real_infile, sizeof(real_infile));
-			if (n > 0 && n < sizeof(real_infile))
-				real_infile[n] = '\0';
-			if (link(real_infile, outfile) == 0)
+		if ((fctx->flags & FETCH_LINK) && apk_url_local_file(url)) {
+			if (linkat(AT_FDCWD, url,
+				   fctx->outdir_fd, pkgfile,
+				   AT_SYMLINK_FOLLOW) == 0)
 				return 0;
 		}
-		fd = creat(outfile, 0644);
+		fd = openat(fctx->outdir_fd, pkgfile,
+			    O_CREAT|O_RDWR|O_TRUNC, 0644);
 		if (fd < 0) {
-			apk_error("%s: %s", outfile, strerror(errno));
+			apk_error("%s: %s", pkgfile, strerror(errno));
 			return -1;
 		}
 	}
 
-	is = apk_istream_from_url(infile);
+	is = apk_istream_from_url(url);
 	if (is == NULL) {
-		apk_error("Unable to download '%s'", infile);
+		apk_error("Unable to download '%s'", url);
 		return -1;
 	}
 
@@ -155,8 +154,8 @@ static int fetch_package(struct fetch_ctx *fctx,
 	if (fd != STDOUT_FILENO)
 		close(fd);
 	if (r != pkg->size) {
-		apk_error("Unable to download '%s'", infile);
-		unlink(outfile);
+		apk_error("Unable to download '%s'", url);
+		unlinkat(fctx->outdir_fd, pkgfile, 0);
 		return -1;
 	}
 
@@ -168,6 +167,9 @@ static int fetch_main(void *ctx, int argc, char **argv)
 	struct fetch_ctx *fctx = (struct fetch_ctx *) ctx;
 	struct apk_database db;
 	int i, j, r;
+
+	if (fctx->outdir_fd == 0)
+		fctx->outdir_fd = AT_FDCWD;
 
 	if ((argc > 0) && (strcmp(argv[0], "coffee") == 0)) {
 		if (apk_flags & APK_FORCE)

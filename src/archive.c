@@ -309,29 +309,28 @@ int apk_tar_write_padding(struct apk_ostream *os, const struct apk_file_info *ae
 	return 0;
 }
 
-int apk_archive_entry_extract(const struct apk_file_info *ae,
-			      struct apk_istream *is,
-			      const char *fn, apk_progress_cb cb,
-			      void *cb_ctx)
+int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
+			      const char *suffix, struct apk_istream *is,
+			      apk_progress_cb cb, void *cb_ctx)
 {
-	struct utimbuf utb;
-	int r = -1, fd;
+	char *fn = ae->name;
+	int fd, r = -1, atflags = 0;
 
-	if (fn == NULL)
-		fn = ae->name;
-
-	/* BIG HONKING FIXME */
-	unlink(fn);
+	if (suffix != NULL) {
+		fn = alloca(PATH_MAX);
+		snprintf(fn, PATH_MAX, "%s%s", ae->name, suffix);
+	}
+	unlinkat(atfd, fn, 0);
 
 	switch (ae->mode & S_IFMT) {
 	case S_IFDIR:
-		r = mkdir(fn, ae->mode & 07777);
+		r = mkdirat(atfd, fn, ae->mode & 07777);
 		if (r < 0 && errno == EEXIST)
 			r = 0;
 		break;
 	case S_IFREG:
 		if (ae->link_target == NULL) {
-			fd = open(fn, O_RDWR | O_CREAT, ae->mode & 07777);
+			fd = openat(atfd, fn, O_RDWR | O_CREAT, ae->mode & 07777);
 			if (fd < 0) {
 				r = -1;
 				break;
@@ -341,27 +340,28 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 				r = 0;
 			close(fd);
 		} else {
-			char link_target[PATH_MAX];
-			snprintf(link_target, sizeof(link_target),
-				 "%s.apk-new", ae->link_target);
-			r = link(link_target, fn);
+			char *link_target = ae->link_target;
+			if (suffix != NULL) {
+				link_target = alloca(PATH_MAX);
+				snprintf(link_target, PATH_MAX, "%s%s",
+					 ae->link_target, suffix);
+			}
+			r = linkat(atfd, link_target, atfd, fn, 0);
 		}
 		break;
 	case S_IFLNK:
-		r = symlink(ae->link_target, fn);
+		r = symlinkat(ae->link_target, atfd, fn);
+		atflags |= AT_SYMLINK_NOFOLLOW;
 		break;
 	case S_IFSOCK:
 	case S_IFBLK:
 	case S_IFCHR:
 	case S_IFIFO:
-		r = mknod(fn, ae->mode & 07777, ae->device);
+		r = mknodat(atfd, fn, ae->mode & 07777, ae->device);
 		break;
 	}
 	if (r == 0) {
-		if (!S_ISLNK(ae->mode))
-			r = chown(fn, ae->uid, ae->gid);
-		else
-			r = lchown(fn, ae->uid, ae->gid);
+		r = fchownat(atfd, fn, ae->uid, ae->gid, atflags);
 		if (r < 0) {
 			apk_error("Failed to set ownership on %s: %s",
 				  fn, strerror(errno));
@@ -370,7 +370,7 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 
 		/* chown resets suid bit so we need set it again */
 		if (ae->mode & 07000) {
-			r = chmod(fn, ae->mode & 07777);
+			r = fchmodat(atfd, fn, ae->mode & 07777, atflags);
 			if (r < 0) {
 				apk_error("Failed to set file permissions "
 					  "on %s: %s",
@@ -381,8 +381,11 @@ int apk_archive_entry_extract(const struct apk_file_info *ae,
 
 		if (!S_ISLNK(ae->mode)) {
 			/* preserve modification time */
-			utb.actime = utb.modtime = ae->mtime;
-			r = utime(fn, &utb);
+			struct timespec times[2];
+
+			times[0].tv_sec  = times[1].tv_sec  = ae->mtime;
+			times[0].tv_nsec = times[1].tv_nsec = 0;
+			r = utimensat(atfd, fn, times, atflags);
 			if (r < 0) {
 				apk_error("Failed to preserve modification time on %s: %s",
 					fn, strerror(errno));

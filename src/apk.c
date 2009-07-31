@@ -26,7 +26,7 @@
 
 const char *apk_root;
 struct apk_repository_url apk_repository_list;
-int apk_verbosity = 1, apk_cwd_fd, apk_wait;
+int apk_verbosity = 1, apk_wait;
 unsigned int apk_flags = 0;
 
 static struct apk_option generic_options[] = {
@@ -292,7 +292,6 @@ int main(int argc, char **argv)
 	struct apk_repository_url *repo = NULL;
 
 	umask(0);
-	apk_cwd_fd = open(".", O_RDONLY);
 	apk_root = getenv("ROOT");
 	list_init(&apk_repository_list.list);
 

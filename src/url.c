@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -61,7 +62,7 @@ static int fork_wget(const char *url)
 struct apk_istream *apk_istream_from_url(const char *url)
 {
 	if (apk_url_local_file(url) != NULL)
-		return apk_istream_from_file(apk_url_local_file(url));
+		return apk_istream_from_file(AT_FDCWD, apk_url_local_file(url));
 
 	return apk_istream_from_fd(fork_wget(url));
 }
@@ -74,16 +75,19 @@ struct apk_istream *apk_istream_from_url_gz(const char *file)
 struct apk_bstream *apk_bstream_from_url(const char *url)
 {
 	if (apk_url_local_file(url))
-		return apk_bstream_from_file(url);
+		return apk_bstream_from_file(AT_FDCWD, url);
 
 	return apk_bstream_from_fd(fork_wget(url));
 }
 
-int apk_url_download(const char *url, const char *file)
+int apk_url_download(const char *url, int atfd, const char *file)
 {
 	pid_t pid;
-	int status;
-	char tmp[256];
+	int status, fd;
+
+	fd = openat(atfd, file, O_CREAT|O_RDWR|O_TRUNC, 0644);
+	if (fd < 0)
+		return -errno;
 
 	pid = fork();
 	if (pid == -1)
@@ -92,15 +96,14 @@ int apk_url_download(const char *url, const char *file)
 	if (pid == 0) {
 		setsid();
 		dup2(open("/dev/null", O_RDONLY), STDIN_FILENO);
-		snprintf(tmp, sizeof(tmp), "%s.backup", file);
-		rename(file, tmp);
-		execlp("wget", "wget", "-q", "-O", file, url, NULL);
+		dup2(fd, STDOUT_FILENO);
+		execlp("wget", "wget", "-q", "-O", "-", url, NULL);
 		exit(0);
 	}
 
 	waitpid(pid, &status, 0);
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		unlink(file);
+		unlinkat(atfd, file, 0);
 		return -1;
 	}
 

@@ -11,6 +11,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -42,7 +43,7 @@ static int audit_directory(apk_hash_item item, void *ctx)
 	if (!(actx->type & AUDIT_BACKUP) && (dbd->flags & APK_DBDIRF_PROTECTED))
 		return 0;
 
-	dir = opendir(dbd->name);
+	dir = fdopendir(openat(db->root_fd, dbd->name, O_RDONLY));
 	if (dir == NULL)
 		return 0;
 
@@ -53,7 +54,7 @@ static int audit_directory(apk_hash_item item, void *ctx)
 
 		snprintf(tmp, sizeof(tmp), "%s/%s", dbd->name, de->d_name);
 
-		if (apk_file_get_info(tmp, APK_CHECKSUM_NONE, &fi) < 0)
+		if (apk_file_get_info(db->root_fd, tmp, APK_CHECKSUM_NONE, &fi) < 0)
 			continue;
 
 		if (!(actx->type & AUDIT_SYSTEM) &&
@@ -70,7 +71,7 @@ static int audit_directory(apk_hash_item item, void *ctx)
 			dbf = apk_db_file_query(db, bdir, APK_BLOB_STR(de->d_name));
 			if (dbf != NULL) {
 				if (dbf->csum.type != APK_CHECKSUM_NONE &&
-				    apk_file_get_info(tmp, dbf->csum.type, &fi) == 0 &&
+				    apk_file_get_info(db->root_fd, tmp, dbf->csum.type, &fi) == 0 &&
 				    apk_checksum_compare(&fi.csum, &dbf->csum) == 0)
 					continue;
 

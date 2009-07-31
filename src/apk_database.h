@@ -80,7 +80,7 @@ struct apk_repository {
 
 struct apk_database {
 	char *root;
-	int root_fd, lock_fd;
+	int root_fd, lock_fd, cache_fd, cachetmp_fd, keys_fd;
 	unsigned name_id, num_repos;
 	const char *cache_dir;
 	int permanent;
@@ -134,7 +134,6 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 int apk_db_open(struct apk_database *db, const char *root, unsigned int flags);
 int apk_db_write_config(struct apk_database *db);
 void apk_db_close(struct apk_database *db);
-int apk_db_cache_active(struct apk_database *db);
 int apk_db_permanent(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);
@@ -147,10 +146,11 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo);
-int apk_cache_download(struct apk_database *db, struct apk_checksum *csum,
-		       const char *url, const char *item, int verify);
-int apk_cache_exists(struct apk_database *db, struct apk_checksum *csum,
-		     const char *item);
+
+int apk_db_cache_active(struct apk_database *db);
+void apk_cache_format_index(apk_blob_t to, struct apk_repository *repo, int ver);
+int apk_cache_download(struct apk_database *db, const char *url,
+		       const char *item, const char *cache_item, int verify);
 
 int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *oldpkg,

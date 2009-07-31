@@ -77,11 +77,11 @@ struct apk_istream *apk_istream_from_fd(int fd)
 	return &fis->is;
 }
 
-struct apk_istream *apk_istream_from_file(const char *file)
+struct apk_istream *apk_istream_from_file(int atfd, const char *file)
 {
 	int fd;
 
-	fd = open(file, O_RDONLY);
+	fd = openat(atfd, file, O_RDONLY);
 	if (fd < 0)
 		return NULL;
 
@@ -342,11 +342,11 @@ struct apk_bstream *apk_bstream_from_fd(int fd)
 	return apk_bstream_from_istream(apk_istream_from_fd(fd));
 }
 
-struct apk_bstream *apk_bstream_from_file(const char *file)
+struct apk_bstream *apk_bstream_from_file(int atfd, const char *file)
 {
 	int fd;
 
-	fd = open(file, O_RDONLY);
+	fd = openat(atfd, file, O_RDONLY);
 	if (fd < 0)
 		return NULL;
 
@@ -387,12 +387,13 @@ static void tee_close(void *stream, size_t *size)
 	free(tbs);
 }
 
-struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, const char *to)
+struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to)
 {
 	struct apk_tee_bstream *tbs;
 	int fd;
 
-	fd = creat(to, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	fd = openat(atfd, to, O_CREAT | O_RDWR | O_TRUNC,
+		    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 	if (fd < 0)
 		return NULL;
 
@@ -433,13 +434,13 @@ apk_blob_t apk_blob_from_istream(struct apk_istream *is, size_t size)
 	return APK_BLOB_PTR_LEN(ptr, rsize);
 }
 
-apk_blob_t apk_blob_from_file(const char *file)
+apk_blob_t apk_blob_from_file(int atfd, const char *file)
 {
 	int fd;
 	struct stat st;
 	char *buf;
 
-	fd = open(file, O_RDONLY);
+	fd = openat(atfd, file, O_RDONLY);
 	if (fd < 0)
 		return APK_BLOB_NULL;
 
@@ -462,12 +463,13 @@ err_fd:
 	return APK_BLOB_NULL;
 }
 
-int apk_file_get_info(const char *filename, int checksum, struct apk_file_info *fi)
+int apk_file_get_info(int atfd, const char *filename, int checksum,
+		      struct apk_file_info *fi)
 {
-	struct stat st;
+	struct stat64 st;
 	struct apk_bstream *bs;
 
-	if (lstat(filename, &st) != 0)
+	if (fstatat64(atfd, filename, &st, AT_SYMLINK_NOFOLLOW) != 0)
 		return -errno;
 
 	*fi = (struct apk_file_info) {
@@ -482,7 +484,7 @@ int apk_file_get_info(const char *filename, int checksum, struct apk_file_info *
 	if (checksum == APK_CHECKSUM_NONE)
 		return 0;
 
-	bs = apk_bstream_from_file(filename);
+	bs = apk_bstream_from_file(atfd, filename);
 	if (bs != NULL) {
 		EVP_MD_CTX mdctx;
 		apk_blob_t blob;
@@ -501,9 +503,9 @@ int apk_file_get_info(const char *filename, int checksum, struct apk_file_info *
 	return 0;
 }
 
-struct apk_istream *apk_istream_from_file_gz(const char *file)
+struct apk_istream *apk_istream_from_file_gz(int atfd, const char *file)
 {
-	return apk_bstream_gunzip(apk_bstream_from_file(file));
+	return apk_bstream_gunzip(apk_bstream_from_file(atfd, file));
 }
 
 struct apk_fd_ostream {
@@ -593,11 +595,11 @@ struct apk_ostream *apk_ostream_to_fd(int fd)
 	return &fos->os;
 }
 
-struct apk_ostream *apk_ostream_to_file(const char *file, mode_t mode)
+struct apk_ostream *apk_ostream_to_file(int atfd, const char *file, mode_t mode)
 {
 	int fd;
 
-	fd = creat(file, mode);
+	fd = openat(atfd, file, O_CREAT | O_RDWR | O_TRUNC, mode);
 	if (fd < 0)
 		return NULL;
 
