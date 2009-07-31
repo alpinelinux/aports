@@ -6,8 +6,8 @@
 #
 Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 ===================================================================
---- openssl-0.9.8k.orig/crypto/engine/eng_padlock.c	2009-07-12 19:24:42.000000000 +0300
-+++ openssl-0.9.8k/crypto/engine/eng_padlock.c	2009-07-13 13:07:26.000000000 +0300
+--- openssl-0.9.8k.orig/crypto/engine/eng_padlock.c	2009-07-27 16:18:20.000000000 +0300
++++ openssl-0.9.8k/crypto/engine/eng_padlock.c	2009-07-30 22:02:54.000000000 +0300
 @@ -1,10 +1,13 @@
 -/* 
 +/*
@@ -147,14 +147,14 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
  #ifndef OPENSSL_NO_AES
 -	    (padlock_use_ace && !ENGINE_set_ciphers (e, padlock_ciphers)) ||
 +	    || (PADLOCK_HAVE_ACE && !ENGINE_set_ciphers (e, padlock_ciphers))
-+#endif
+ #endif
+-	    (padlock_use_rng && !ENGINE_set_RAND (e, &padlock_rand))) {
 +#ifndef OPENSSL_NO_SHA
 +	    || (PADLOCK_HAVE_PHE && !ENGINE_set_digests (e, padlock_digests))
 +#endif
 +#ifndef PADLOCK_NO_RNG
 +	    || (PADLOCK_HAVE_RNG && !ENGINE_set_RAND (e, &padlock_rand))
- #endif
--	    (padlock_use_rng && !ENGINE_set_RAND (e, &padlock_rand))) {
++#endif
 +	    ) {
  		return 0;
  	}
@@ -206,11 +206,11 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +	padlock_flags |= ((edx & (0x3<<9)) ? PADLOCK_ACE2 : 0);
 +	padlock_flags |= ((edx & (0x3<<11)) ? PADLOCK_PHE : 0);
 +	padlock_flags |= ((edx & (0x3<<13)) ? PADLOCK_PMM : 0);
-+
-+	return padlock_flags;
-+}
  
 -	return padlock_use_ace + padlock_use_rng;
++	return padlock_flags;
++}
++
 +static inline void
 +padlock_htonl_block(uint32_t *data, size_t count)
 +{
@@ -287,30 +287,34 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
     encryption function itself. This function is not AES-specific. */
  static int
  padlock_aes_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out_arg,
-@@ -1157,6 +1214,470 @@
+@@ -1157,6 +1214,514 @@
  
  #endif /* OPENSSL_NO_AES */
  
 +#ifndef OPENSSL_NO_SHA
 +
-+struct padlock_digest_data {
-+	unsigned char		output[128+16];
-+	uint64_t		total;
-+
-+	unsigned char		*buffer;
-+	size_t			used;
-+	size_t			size;
-+
-+	void			(*hash)(struct padlock_digest_data *data,
-+				        const void *buf, size_t len);
-+	int			(*update)(EVP_MD_CTX *ctx,
-+					  const void *buffer, size_t len);
-+	int			(*final)(EVP_MD_CTX *ctx, unsigned char *buffer);
-+};
-+
 +#define DIGEST_DATA(ctx)	((struct padlock_digest_data *)(ctx->md_data))
-+#define DIGEST_DATA_OUTPUT(dd)	(uint32_t*)(((uintptr_t)(dd->output) + 15) & ~15)
-+#define PADLOCK_BUFFER_PAGES	14
++#define PADLOCK_SHA_ALIGN(dd)	(uint32_t*)(((uintptr_t)(dd) + 15) & ~15)
++#define PADLOCK_SHA_PAGES	14
++#define PADLOCK_SHA_BUFFER	(512 - sizeof(size_t) - 4*sizeof(void*))
++#define PADLOCK_SHA_INITVECTOR_SIZE (8 * sizeof(uint32_t))
++
++struct padlock_digest_data {
++	union {
++		unsigned char		smallbuffer[PADLOCK_SHA_BUFFER];
++		struct {
++			unsigned char	padlockctx[128+16];
++			unsigned char	*buffer;
++			size_t		mmap_size;
++			uint64_t	total;
++		};
++	};
++	void	*initvector;
++	size_t	used;
++	void	(*hash)(void *padlockctx, const void *buf, size_t len);
++	int	(*update)(EVP_MD_CTX *ctx, const void *buffer, size_t len);
++	int	(*final)(EVP_MD_CTX *ctx, unsigned char *buffer);
++};
 +
 +static inline void *
 +padlock_atomic_xchg(volatile void **mem, void *fixed)
@@ -327,22 +331,20 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +}
 +
 +static void
-+padlock_do_sha1(struct padlock_digest_data *data, const void *buf, size_t len)
++padlock_do_sha1(void *padlockctx, const void *buf, size_t len)
 +{
-+	uint32_t *output = DIGEST_DATA_OUTPUT(data);
 +	asm volatile (
 +		"xsha1"
-+		: "+S"(buf), "+D"(output)
++		: "+S"(buf), "+D"(padlockctx)
 +		: "c"(len), "a"(0));
 +}
 +
 +static void
-+padlock_do_sha256(struct padlock_digest_data *data, const void *buf, size_t len)
++padlock_do_sha256(void *padlockctx, const void *buf, size_t len)
 +{
-+	uint32_t *output = DIGEST_DATA_OUTPUT(data);
 +	asm volatile (
 +		"xsha256"
-+		: "+S"(buf), "+D"(output)
++		: "+S"(buf), "+D"(padlockctx)
 +		: "c"(len), "a"(0));
 +}
 +
@@ -350,7 +352,6 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +handle_sigsegv(int sig, siginfo_t *info, void *uctxp)
 +{
 +	ucontext_t *uctx = uctxp;
-+
 +	uctx->uc_mcontext.gregs[14] += 4;
 +}
 +
@@ -360,8 +361,8 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +	struct sigaction act, oldact;
 +	size_t bofs = 0;
 +
-+	if (data->used != data->size) {
-+		bofs = data->size - data->used;
++	if (data->used != data->mmap_size) {
++		bofs = data->mmap_size - data->used;
 +		memmove(&data->buffer[bofs], data->buffer, data->used);
 +	}
 +
@@ -369,7 +370,8 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +	act.sa_sigaction = handle_sigsegv;
 +	act.sa_flags = SA_SIGINFO;
 +	sigaction(SIGSEGV, &act, &oldact);
-+	data->hash(data, &data->buffer[bofs], data->used + 64);
++	data->hash(PADLOCK_SHA_ALIGN(data->padlockctx),
++		   &data->buffer[bofs], data->used + 64);
 +	sigaction(SIGSEGV, &oldact, NULL);
 +}
 +
@@ -377,8 +379,9 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +padlock_free_buffer(void *buf)
 +{
 +	buf = padlock_atomic_xchg(&padlock_cached_sha_buffer, buf);
-+	if (buf != NULL)
-+		munmap(buf, (PADLOCK_BUFFER_PAGES + 1) * getpagesize());
++	if (buf != NULL) {
++		munmap(buf, (PADLOCK_SHA_PAGES + 1) * getpagesize());
++	}
 +}
 +
 +static void *
@@ -392,7 +395,7 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +	if (buf != NULL)
 +		goto ret;
 +
-+	size = (PADLOCK_BUFFER_PAGES + 1) * page;
++	size = (PADLOCK_SHA_PAGES + 1) * page;
 +	buf = mmap(0, size, PROT_READ | PROT_WRITE,
 +		   MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
 +	if (buf == NULL)
@@ -402,13 +405,13 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +	 * we are over quota. */
 +	mlock(buf, size);
 +
-+	if (mprotect(buf + PADLOCK_BUFFER_PAGES * page, page, PROT_NONE) < 0) {
++	if (mprotect(buf + PADLOCK_SHA_PAGES * page, page, PROT_NONE) < 0) {
 +		munmap(buf, size);
 +		return NULL;
 +	}
 +
 +ret:
-+	*maxsize = PADLOCK_BUFFER_PAGES * page - 64;
++	*maxsize = PADLOCK_SHA_PAGES * page - 64;
 +
 +	return buf;
 +}
@@ -419,24 +422,23 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
 +	size_t chunk_size;
 +
-+	if (ddata->buffer == NULL) {
-+		ddata->buffer = padlock_allocate_buffer(&ddata->size);
-+	}
++	if (ddata->buffer == NULL)
++		ddata->buffer = padlock_allocate_buffer(&ddata->mmap_size);
 +
 +	while (len) {
-+		if (ddata->used + len < ddata->size) {
++		if (ddata->used + len < ddata->mmap_size) {
 +			memcpy(&ddata->buffer[ddata->used], data, len);
 +			ddata->used += len;
 +			ddata->total += len;
 +			return 1;
 +		}
 +
-+		chunk_size = ddata->size - ddata->used;
++		chunk_size = ddata->mmap_size - ddata->used;
 +		memcpy(&ddata->buffer[ddata->used], data, chunk_size);
 +
 +		data += chunk_size;
 +		len -= chunk_size;
-+		ddata->used = ddata->size;
++		ddata->used = ddata->mmap_size;
 +		ddata->total += chunk_size;
 +		padlock_sha_nonfinalizing(ddata);
 +		ddata->used = 0;
@@ -450,10 +452,23 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +{
 +	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
 +	size_t size = EVP_MD_CTX_size(ctx);
-+	uint32_t *output = DIGEST_DATA_OUTPUT(ddata);
 +
-+	padlock_htonl_block(output, size / sizeof(uint32_t));
-+	memcpy(md, output, size);
++	memcpy(md, PADLOCK_SHA_ALIGN(ddata->padlockctx), size);
++	return 1;
++}
++
++static int
++padlock_copy_final(EVP_MD_CTX *ctx, unsigned char *md)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++	char padlockctx[128+16];
++	void *aligned = PADLOCK_SHA_ALIGN(padlockctx);
++	size_t size = EVP_MD_CTX_size(ctx);
++
++	memcpy(aligned, ddata->initvector, PADLOCK_SHA_INITVECTOR_SIZE);
++	ddata->hash(aligned, ddata->smallbuffer, ddata->used);
++	padlock_htonl_block(aligned, size / sizeof(uint32_t));
++	memcpy(md, aligned, size);
 +
 +	return 1;
 +}
@@ -463,10 +478,12 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +{
 +	static const char padding[64] = { 0x80, };
 +	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++	size_t mdsize = EVP_MD_CTX_size(ctx);
++	void *aligned = PADLOCK_SHA_ALIGN(ddata->padlockctx);
 +
 +	if (ddata->used == ddata->total) {
 +		/* Sweet, everything fits in one buffer. */
-+		ddata->hash(ddata, ddata->buffer, ddata->used);
++		ddata->hash(aligned, ddata->buffer, ddata->used);
 +	} else {
 +		/* Hardware already hashed some buffers.
 +		 * Do finalizing manually */
@@ -492,95 +509,119 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +		/* And finally calculate it */
 +		padlock_sha_nonfinalizing(ddata);
 +	}
++	padlock_htonl_block(aligned, mdsize / sizeof(uint32_t));
++	memcpy(md, aligned, mdsize);
 +
-+	return padlock_oneshot_final(ctx, md);
-+}
-+
-+static int
-+padlock_oneshot_update(EVP_MD_CTX *ctx, const void *data, size_t length)
-+{
-+	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
-+
-+	/* Oneshot update is only possible if context flags indicate so */
-+	if (!(ctx->flags & EVP_MD_CTX_FLAG_ONESHOT)) {
-+		ddata->update = padlock_multi_update;
-+		ddata->final  = padlock_multi_final;
-+		return padlock_multi_update(ctx, data, length);
-+	}
-+
-+	ddata->hash(ddata, data, length);
 +	return 1;
 +}
 +
-+static void
++static int
++padlock_copy_update(EVP_MD_CTX *ctx, const void *data, size_t len)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++
++	if (ddata->used + len > sizeof(ddata->smallbuffer)) {
++		ddata->update = padlock_multi_update;
++		ddata->final  = padlock_multi_final;
++
++		if (ddata->used != 0) {
++			void *buffer;
++			size_t mmap_size;
++
++			buffer = padlock_allocate_buffer(&mmap_size);
++			memcpy(buffer, ddata->smallbuffer, ddata->used);
++			ddata->buffer = buffer;
++			ddata->total = ddata->used;
++			ddata->mmap_size = mmap_size;
++		} else {
++			ddata->buffer = NULL;
++			ddata->total = 0;
++		}
++
++		memcpy(PADLOCK_SHA_ALIGN(ddata->padlockctx), ddata->initvector,
++		       PADLOCK_SHA_INITVECTOR_SIZE);
++
++		return padlock_multi_update(ctx, data, len);
++	}
++
++	memcpy(&ddata->smallbuffer[ddata->used], data, len);
++	ddata->used += len;
++
++	return 1;
++}
++
++static int
++padlock_oneshot_update(EVP_MD_CTX *ctx, const void *data, size_t len)
++{
++	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
++	void *aligned = PADLOCK_SHA_ALIGN(ddata->padlockctx);
++	size_t mdsize = EVP_MD_CTX_size(ctx);
++
++	/* Oneshot update is only possible if context flags indicate so */
++	if (!(ctx->flags & EVP_MD_CTX_FLAG_ONESHOT)) {
++		ddata->update = padlock_copy_update;
++		ddata->final  = padlock_copy_final;
++		return padlock_copy_update(ctx, data, len);
++	}
++
++	memcpy(aligned, ddata->initvector, PADLOCK_SHA_INITVECTOR_SIZE);
++	ddata->hash(aligned, data, len);
++	padlock_htonl_block(aligned, mdsize / sizeof(uint32_t));
++	ddata->used += len;
++
++	return 1;
++}
++
++static int
 +padlock_sha_init(struct padlock_digest_data *ddata)
 +{
-+	ddata->total  = 0;
-+	ddata->buffer = NULL;
-+	ddata->used   = 0;
-+	ddata->size   = 0;
-+	ddata->update = padlock_oneshot_update;
-+	ddata->final  = padlock_oneshot_final;
++	ddata->used      = 0;
++	ddata->update    = padlock_oneshot_update;
++	ddata->final     = padlock_oneshot_final;
++
++	return 1;
 +}
 +
 +static int
 +padlock_sha1_init(EVP_MD_CTX *ctx)
 +{
++	static uint32_t sha1_initvector[8] = {
++		0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476,
++		0xC3D2E1F0
++	};
 +	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
-+	uint32_t *output = DIGEST_DATA_OUTPUT(ddata);
 +
-+	output[0] = 0x67452301;
-+	output[1] = 0xEFCDAB89;
-+	output[2] = 0x98BADCFE;
-+	output[3] = 0x10325476;
-+	output[4] = 0xC3D2E1F0;
-+
-+	padlock_sha_init(ddata);
 +	ddata->hash = padlock_do_sha1;
-+
-+	return 1;
++	ddata->initvector = sha1_initvector;
++	return padlock_sha_init(ddata);
 +}
 +
 +static int
 +padlock_sha224_init(EVP_MD_CTX *ctx)
 +{
++	static uint32_t sha224_initvector[] = {
++		0xC1059ED8, 0x367CD507, 0x3070DD17, 0xF70E5939,
++		0xFFC00B31, 0x68581511, 0x64F98FA7, 0xBEFA4FA4,
++	};
 +	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
-+	uint32_t *output = DIGEST_DATA_OUTPUT(ddata);
 +
-+	output[0] = 0xC1059ED8UL;
-+	output[1] = 0x367CD507UL;
-+	output[2] = 0x3070DD17UL;
-+	output[3] = 0xF70E5939UL;
-+	output[4] = 0xFFC00B31UL;
-+	output[5] = 0x68581511UL;
-+	output[6] = 0x64F98FA7UL;
-+	output[7] = 0xBEFA4FA4UL;
-+
-+	padlock_sha_init(ddata);
 +	ddata->hash = padlock_do_sha256;
-+
-+	return 1;
++	ddata->initvector = sha224_initvector;
++	return padlock_sha_init(ddata);
 +}
 +
 +static int
 +padlock_sha256_init(EVP_MD_CTX *ctx)
 +{
++	static uint32_t sha256_initvector[] = {
++		0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
++		0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19
++	};
 +	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
-+	uint32_t *output = DIGEST_DATA_OUTPUT(ddata);
 +
-+	output[0] = 0x6A09E667;
-+	output[1] = 0xBB67AE85;
-+	output[2] = 0x3C6EF372;
-+	output[3] = 0xA54FF53A;
-+	output[4] = 0x510E527F;
-+	output[5] = 0x9B05688C;
-+	output[6] = 0x1F83D9AB;
-+	output[7] = 0x5BE0CD19;
-+
-+	padlock_sha_init(ddata);
 +	ddata->hash = padlock_do_sha256;
-+
-+	return 1;
++	ddata->initvector = sha256_initvector;
++	return padlock_sha_init(ddata);
 +}
 +
 +static int
@@ -601,25 +642,29 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +	struct padlock_digest_data *dfrom = DIGEST_DATA(from);
 +	struct padlock_digest_data *dto = DIGEST_DATA(to);
 +
-+	/* Copy the internal state */
-+	memcpy(DIGEST_DATA_OUTPUT(dto), DIGEST_DATA_OUTPUT(dfrom), 128);
-+	dto->total = dfrom->total - dfrom->used;
-+	dto->hash  = dfrom->hash;
-+	dto->used  = 0;
++	/* When we get here, dto is already a memcpied from dfrom,
++	 * it's ok for all other cases except when data is on a separate
++	 * mmapped area. It would be nice if we had a flag, if this is
++	 * a "finalization copy", so we could do finalizing SHA here and
++	 * store the result to *to precalculated. But there's no such
++	 * flag as to is reset on copy. */
 +
-+	/* Try using oneshot update if possible */
-+	if (dfrom->used == dfrom->total) {
-+		dto->update = padlock_oneshot_update;
-+		dto->final  = padlock_oneshot_final;
-+	} else {
-+		dto->update = padlock_multi_update;
-+		dto->final  = padlock_multi_final;
++	if (dfrom->update != padlock_copy_update) {
++		/* Recopy the context, as they might have different alignment */
++		memcpy(PADLOCK_SHA_ALIGN(dto->padlockctx),
++		       PADLOCK_SHA_ALIGN(dfrom->padlockctx),
++		       PADLOCK_SHA_INITVECTOR_SIZE);
 +	}
 +
-+	/* Copy pending data - one oneshot destination, this means finalizing
-+	 * the contents if we are still on the first iteration. */
-+	if (dfrom->buffer != NULL)
-+		padlock_sha_update(to, dfrom->buffer, dfrom->used);
++	if (dfrom->update == padlock_multi_update) {
++		/* Update total, and copy the buffer */
++		dto->total     = dfrom->total - dfrom->used;
++		dto->buffer    = NULL;
++		dto->used      = 0;
++		dto->mmap_size = 0;
++		if (dfrom->used != 0)
++			padlock_sha_update(to, dfrom->buffer, dfrom->used);
++	}
 +
 +	return 1;
 +}
@@ -629,9 +674,8 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
 +{
 +	struct padlock_digest_data *ddata = DIGEST_DATA(ctx);
 +
-+	if (ddata->buffer != NULL)
++	if (ddata->update == padlock_multi_update && ddata->buffer != NULL)
 +		padlock_free_buffer(ddata->buffer);
-+	ddata->buffer = NULL;
 +
 +	return 1;
 +}
@@ -758,7 +802,7 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
  /* ===== Random Number Generator ===== */
  /*
   * This code is not engaged. The reason is that it does not comply
-@@ -1164,7 +1685,7 @@
+@@ -1164,7 +1729,7 @@
   * (posted at http://www.via.com.tw/en/viac3/c3.jsp) nor does it
   * provide meaningful error control...
   */
@@ -767,7 +811,7 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
     the raw PadLock RNG */
  static int
  padlock_rand_bytes(unsigned char *output, int count)
-@@ -1212,6 +1733,7 @@
+@@ -1212,6 +1777,7 @@
  	padlock_rand_bytes,	/* pseudorand */
  	padlock_rand_status,	/* rand status */
  };
@@ -775,123 +819,3 @@ Index: openssl-0.9.8k/crypto/engine/eng_padlock.c
  
  #endif /* COMPILE_HW_PADLOCK */
  
-Index: openssl-0.9.8k/crypto/evp/p_sign.c
-===================================================================
---- openssl-0.9.8k.orig/crypto/evp/p_sign.c	2009-07-13 11:01:02.000000000 +0300
-+++ openssl-0.9.8k/crypto/evp/p_sign.c	2009-07-13 11:01:45.000000000 +0300
-@@ -5,21 +5,21 @@
-  * This package is an SSL implementation written
-  * by Eric Young (eay@cryptsoft.com).
-  * The implementation was written so as to conform with Netscapes SSL.
-- * 
-+ *
-  * This library is free for commercial and non-commercial use as long as
-  * the following conditions are aheared to.  The following conditions
-  * apply to all code found in this distribution, be it the RC4, RSA,
-  * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
-  * included with this distribution is covered by the same copyright terms
-  * except that the holder is Tim Hudson (tjh@cryptsoft.com).
-- * 
-+ *
-  * Copyright remains Eric Young's, and as such any Copyright notices in
-  * the code are not to be removed.
-  * If this package is used in a product, Eric Young should be given attribution
-  * as the author of the parts of the library used.
-  * This can be in the form of a textual message at program startup or
-  * in documentation (online or textual) provided with the package.
-- * 
-+ *
-  * Redistribution and use in source and binary forms, with or without
-  * modification, are permitted provided that the following conditions
-  * are met:
-@@ -34,10 +34,10 @@
-  *     Eric Young (eay@cryptsoft.com)"
-  *    The word 'cryptographic' can be left out if the rouines from the library
-  *    being used are not cryptographic related :-).
-- * 4. If you include any Windows specific code (or a derivative thereof) from 
-+ * 4. If you include any Windows specific code (or a derivative thereof) from
-  *    the apps directory (application code) you must include an acknowledgement:
-  *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
-- * 
-+ *
-  * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
-  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-@@ -49,7 +49,7 @@
-  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
-  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-  * SUCH DAMAGE.
-- * 
-+ *
-  * The licence and distribution terms for any publically available version or
-  * derivative of this code cannot be changed.  i.e. this code cannot simply be
-  * copied and put under another distribution licence
-@@ -105,6 +105,7 @@
- 		return(0);
- 		}
- 	EVP_MD_CTX_init(&tmp_ctx);
-+	M_EVP_MD_CTX_set_flags(&tmp_ctx,EVP_MD_CTX_FLAG_ONESHOT);
- 	EVP_MD_CTX_copy_ex(&tmp_ctx,ctx);
- 	if (ctx->digest->flags & EVP_MD_FLAG_SVCTX)
- 		{
-Index: openssl-0.9.8k/crypto/evp/p_verify.c
-===================================================================
---- openssl-0.9.8k.orig/crypto/evp/p_verify.c	2009-07-13 11:01:06.000000000 +0300
-+++ openssl-0.9.8k/crypto/evp/p_verify.c	2009-07-13 11:02:11.000000000 +0300
-@@ -5,21 +5,21 @@
-  * This package is an SSL implementation written
-  * by Eric Young (eay@cryptsoft.com).
-  * The implementation was written so as to conform with Netscapes SSL.
-- * 
-+ *
-  * This library is free for commercial and non-commercial use as long as
-  * the following conditions are aheared to.  The following conditions
-  * apply to all code found in this distribution, be it the RC4, RSA,
-  * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
-  * included with this distribution is covered by the same copyright terms
-  * except that the holder is Tim Hudson (tjh@cryptsoft.com).
-- * 
-+ *
-  * Copyright remains Eric Young's, and as such any Copyright notices in
-  * the code are not to be removed.
-  * If this package is used in a product, Eric Young should be given attribution
-  * as the author of the parts of the library used.
-  * This can be in the form of a textual message at program startup or
-  * in documentation (online or textual) provided with the package.
-- * 
-+ *
-  * Redistribution and use in source and binary forms, with or without
-  * modification, are permitted provided that the following conditions
-  * are met:
-@@ -34,10 +34,10 @@
-  *     Eric Young (eay@cryptsoft.com)"
-  *    The word 'cryptographic' can be left out if the rouines from the library
-  *    being used are not cryptographic related :-).
-- * 4. If you include any Windows specific code (or a derivative thereof) from 
-+ * 4. If you include any Windows specific code (or a derivative thereof) from
-  *    the apps directory (application code) you must include an acknowledgement:
-  *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
-- * 
-+ *
-  * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
-  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-@@ -49,7 +49,7 @@
-  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
-  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-  * SUCH DAMAGE.
-- * 
-+ *
-  * The licence and distribution terms for any publically available version or
-  * derivative of this code cannot be changed.  i.e. this code cannot simply be
-  * copied and put under another distribution licence
-@@ -92,7 +92,8 @@
- 		}
- 
- 	EVP_MD_CTX_init(&tmp_ctx);
--	EVP_MD_CTX_copy_ex(&tmp_ctx,ctx);     
-+	M_EVP_MD_CTX_set_flags(&tmp_ctx,EVP_MD_CTX_FLAG_ONESHOT);
-+	EVP_MD_CTX_copy_ex(&tmp_ctx,ctx);
- 	if (ctx->digest->flags & EVP_MD_FLAG_SVCTX)
- 		{
- 		EVP_MD_SVCTX sctmp;
