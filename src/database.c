@@ -749,10 +749,12 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 			bs->close(bs, NULL);
 		}
 
-		bs = apk_bstream_from_file(db->cache_fd, "installed");
-		if (bs != NULL) {
-			apk_db_index_read(db, bs, -2);
-			bs->close(bs, NULL);
+		if (apk_db_cache_active(db)) {
+			bs = apk_bstream_from_file(db->cache_fd, "installed");
+			if (bs != NULL) {
+				apk_db_index_read(db, bs, -2);
+				bs->close(bs, NULL);
+			}
 		}
 	}
 
