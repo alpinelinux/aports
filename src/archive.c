@@ -21,6 +21,7 @@
 #include <sysexits.h>
 #include <sys/wait.h>
 #include <limits.h>
+#include <stdint.h>
 
 #include "apk_defines.h"
 #include "apk_archive.h"
