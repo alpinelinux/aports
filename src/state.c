@@ -406,14 +406,6 @@ int apk_state_lock_name(struct apk_state *state,
 	if (name->id >= state->num_names)
 		return -1;
 
-	if (newpkg == NULL &&
-	    (name->flags & APK_NAME_TOPLEVEL) &&
-	    !(apk_flags & APK_FORCE)) {
-		apk_error("Not deleting top level dependency '%s'. "
-			  "Use -f to override.", name->name);
-		return -1;
-	}
-
 	ns_free(state->name[name->id]);
 	state->name[name->id] = ns_from_pkg(newpkg);
 
@@ -651,14 +643,17 @@ int apk_state_commit(struct apk_state *state,
 {
 	struct progress prog;
 	struct apk_change *change;
-	int size_diff = 0;
-	int r;
+	int r = 0, size_diff = 0, toplevel = FALSE, deleteonly = TRUE;
 
 	/* Count what needs to be done */
 	memset(&prog, 0, sizeof(prog));
 	list_for_each_entry(change, &state->change_list_head, change_list) {
-		if (change->newpkg == NULL)
+		if (change->newpkg == NULL) {
 			apk_state_autoclean(state, change->oldpkg);
+			if (change->oldpkg->name->flags & APK_NAME_TOPLEVEL)
+				toplevel = TRUE;
+		} else
+			deleteonly = FALSE;
 		apk_count_change(change, &prog.total);
 		if (change->newpkg)
 			size_diff += change->newpkg->installed_size;
@@ -666,6 +661,17 @@ int apk_state_commit(struct apk_state *state,
 			size_diff -= change->oldpkg->installed_size;
 	}
 	size_diff /= 1024;
+
+	if (toplevel &&
+	    (apk_flags & (APK_INTERACTIVE | APK_RECURSIVE_DELETE)) == 0) {
+		if (!deleteonly)
+			return -1;
+
+		dump_packages(state, cmp_remove,
+			      "The top-level dependencies have been updated "
+			      "but the following packages are not removed");
+		goto update_state;
+	}
 
 	if (apk_verbosity > 1 || (apk_flags & APK_INTERACTIVE)) {
 		r = dump_packages(state, cmp_remove,
@@ -704,6 +710,13 @@ int apk_state_commit(struct apk_state *state,
 					       &prog);
 			if (r != 0)
 				break;
+
+			if (change->oldpkg != NULL &&
+			    change->newpkg == NULL &&
+			    change->oldpkg->name->flags & APK_NAME_TOPLEVEL) {
+				change->oldpkg->name->flags &= ~APK_NAME_TOPLEVEL;
+				apk_deps_del(&db->world, change->oldpkg->name);
+			}
 		}
 
 		apk_count_change(change, &prog.done);
@@ -711,6 +724,7 @@ int apk_state_commit(struct apk_state *state,
 	if (apk_flags & APK_PROGRESS)
 		apk_draw_progress(20, 1);
 
+update_state:
 	if (!(apk_flags & APK_SIMULATE))
 		apk_db_write_config(db);
 

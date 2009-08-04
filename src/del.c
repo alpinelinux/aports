@@ -14,6 +14,18 @@
 #include "apk_state.h"
 #include "apk_database.h"
 
+static int del_parse(void *ctx, int optch, int optindex, const char *optarg)
+{
+	switch (optch) {
+	case 'r':
+		apk_flags |= APK_RECURSIVE_DELETE;
+		break;
+	default:
+		return -1;
+	}
+	return 0;
+}
+
 static int del_main(void *ctx, int argc, char **argv)
 {
 	struct apk_database db;
@@ -58,10 +70,18 @@ out:
 	return r;
 }
 
+static struct apk_option del_options[] = {
+	{ 'r', "rdepends",	"Recursively delete all top-level reverse "
+				"dependencies too." },
+};
+
 static struct apk_applet apk_del = {
 	.name = "del",
 	.help = "Remove PACKAGEs from the main dependencies and uninstall them.",
 	.arguments = "PACKAGE...",
+	.num_options = ARRAY_SIZE(del_options),
+	.options = del_options,
+	.parse = del_parse,
 	.main = del_main,
 };
 
