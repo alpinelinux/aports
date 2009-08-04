@@ -41,6 +41,9 @@ static int upgrade_main(void *ctx, int argc, char **argv)
 		return r;
 
 	state = apk_state_new(&db);
+	if (state == NULL)
+		goto err;
+
 	for (i = 0; i < db.world->num; i++) {
 		r = apk_state_lock_dependency(state, &db.world->item[i]);
 		if (r != 0) {

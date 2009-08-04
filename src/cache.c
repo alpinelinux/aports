@@ -29,12 +29,15 @@ static int cache_download(struct apk_database *db)
 	struct apk_change *change;
 	struct apk_package *pkg;
 	char item[PATH_MAX], cacheitem[PATH_MAX];
-	int i, r;
+	int i, r = 0;
 
 	if (db->world == NULL)
 		return 0;
 
 	state = apk_state_new(db);
+	if (state == NULL)
+		goto err;
+
 	for (i = 0; i < db->world->num; i++) {
 		r = apk_state_lock_dependency(state, &db->world->item[i]);
 		if (r != 0) {
@@ -65,7 +68,8 @@ static int cache_download(struct apk_database *db)
 	}
 
 err:
-	apk_state_unref(state);
+	if (state != NULL)
+		apk_state_unref(state);
 	return r;
 }
 

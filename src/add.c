@@ -130,6 +130,9 @@ static int add_main(void *ctx, int argc, char **argv)
 	}
 
 	state = apk_state_new(&db);
+	if (state == NULL)
+		goto err;
+
 	for (i = 0; (pkgs != NULL) && i < pkgs->num; i++) {
 		r = apk_state_lock_dependency(state, &pkgs->item[i]);
 		if (r != 0) {

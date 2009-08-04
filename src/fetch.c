@@ -193,6 +193,9 @@ static int fetch_main(void *ctx, int argc, char **argv)
 			struct apk_change *change;
 
 			state = apk_state_new(&db);
+			if (state == NULL)
+				goto err;
+
 			r = apk_state_lock_dependency(state, &dep);
 			if (r != 0) {
 				apk_state_unref(state);

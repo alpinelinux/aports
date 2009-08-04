@@ -46,6 +46,9 @@ static int del_main(void *ctx, int argc, char **argv)
 	}
 
 	state = apk_state_new(&db);
+	if (state == NULL)
+		goto err;
+
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;
 
@@ -63,7 +66,8 @@ static int del_main(void *ctx, int argc, char **argv)
 	}
 	r = apk_state_commit(state, &db);
 err:
-	apk_state_unref(state);
+	if (state != NULL)
+		apk_state_unref(state);
 out:
 	apk_db_close(&db);
 

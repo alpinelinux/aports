@@ -29,9 +29,22 @@ struct apk_deferred_state {
 };
 #endif
 
+int apk_state_prune_dependency(struct apk_state *state,
+			       struct apk_dependency *dep);
+
+#define APK_NS_LOCKED			0x00000001
+#define APK_NS_PENDING			0x00000002
+
 static int inline ns_locked(apk_name_state_t name)
 {
-	if (((intptr_t) name) & 0x1)
+	if (((intptr_t) name) & APK_NS_LOCKED)
+		return TRUE;
+	return FALSE;
+}
+
+static int inline ns_pending(apk_name_state_t name)
+{
+	if (((intptr_t) name) & APK_NS_PENDING)
 		return TRUE;
 	return FALSE;
 }
@@ -43,12 +56,18 @@ static int ns_empty(apk_name_state_t name)
 
 static apk_name_state_t ns_from_pkg(struct apk_package *pkg)
 {
-	return (apk_name_state_t) (((intptr_t) pkg) | 0x1);
+	return (apk_name_state_t) (((intptr_t) pkg) | APK_NS_LOCKED | APK_NS_PENDING);
+}
+
+static apk_name_state_t ns_from_pkg_non_pending(struct apk_package *pkg)
+{
+	return (apk_name_state_t) (((intptr_t) pkg) | APK_NS_LOCKED);
 }
 
 static struct apk_package *ns_to_pkg(apk_name_state_t name)
 {
-	return (struct apk_package *) (((intptr_t) name) & ~0x1);
+	return (struct apk_package *)
+		(((intptr_t) name) & ~(APK_NS_LOCKED | APK_NS_PENDING));
 }
 
 static apk_name_state_t ns_from_choices(struct apk_name_choices *nc)
@@ -117,7 +136,7 @@ static void ns_free(apk_name_state_t name)
 struct apk_state *apk_state_new(struct apk_database *db)
 {
 	struct apk_state *state;
-	int num_bytes;
+	int num_bytes, i, r;
 
 	num_bytes = sizeof(struct apk_state) + db->name_id * sizeof(char *);
 	state = (struct apk_state*) calloc(1, num_bytes);
@@ -125,7 +144,22 @@ struct apk_state *apk_state_new(struct apk_database *db)
 	state->num_names = db->name_id;
 	list_init(&state->change_list_head);
 
+	/* Instantiate each 'name' target in world, and lockout incompatible
+	 * choices */
+	for (i = 0; i < db->world->num; i++) {
+		r = apk_state_prune_dependency(state, &db->world->item[i]);
+		if (r < 0) {
+			apk_error("Top level dependencies for %s are "
+				  "conflicting or unsatisfiable.",
+				  db->world->item[i].name->name);
+			goto err;
+		}
+	}
+
 	return state;
+err:
+	free(state);
+	return NULL;
 }
 
 struct apk_state *apk_state_dup(struct apk_state *state)
@@ -159,20 +193,26 @@ static int apk_state_add_change(struct apk_state *state,
 	return 0;
 }
 
-int apk_state_lock_dependency(struct apk_state *state,
-			      struct apk_dependency *dep)
+/* returns:
+ *   -1 error
+ *    0 locked entry matches and is ok
+ *   +n this many candidates on apk_name_choices for the name
+ */
+int apk_state_prune_dependency(struct apk_state *state,
+			       struct apk_dependency *dep)
 {
 	struct apk_name *name = dep->name;
 	struct apk_name_choices *c;
-        struct apk_package *installed = NULL, *latest = NULL, *use;
 	int i;
 
 	if (name->id >= state->num_names)
 		return -1;
 
 	if (ns_empty(state->name[name->id])) {
-		if (dep->result_mask == APK_DEPMASK_CONFLICT)
-			return apk_state_lock_name(state, name, NULL);
+		if (dep->result_mask == APK_DEPMASK_CONFLICT) {
+			state->name[name->id] = ns_from_pkg(NULL);
+			return 1;
+		}
 
 		/* This name has not been visited yet.
 		 * Construct list of candidates. */
@@ -186,16 +226,17 @@ int apk_state_lock_dependency(struct apk_state *state,
 
 		/* Locked to not-installed / remove? */
 		if (pkg == NULL) {
-			if (dep->result_mask == APK_DEPMASK_CONFLICT)
-				return 0;
-			return -1;
+			if (dep->result_mask != APK_DEPMASK_CONFLICT)
+				return -1;
+		} else {
+			if (!(apk_version_compare(pkg->version, dep->version)
+			      & dep->result_mask))
+				return -1;
 		}
 
-		if (apk_version_compare(pkg->version, dep->version)
-		    & dep->result_mask)
-			return 0;
-
-		return -1;
+		if (ns_pending(state->name[name->id]))
+			return 1;
+		return 0;
 	}
 
 	/* Multiple candidates: prune incompatible versions. */
@@ -219,11 +260,30 @@ int apk_state_lock_dependency(struct apk_state *state,
 	if (c->num == 1) {
 		struct apk_package *pkg = c->pkgs[0];
 		name_choices_unref(c);
-		state->name[name->id] = NULL;
-		return apk_state_lock_name(state, name, pkg);
+		state->name[name->id] = ns_from_pkg(pkg);
+		return 1;
 	}
-	state->name[name->id] = ns_from_choices(c);
 
+	state->name[name->id] = ns_from_choices(c);
+	return c->num;
+}
+
+int apk_state_lock_dependency(struct apk_state *state,
+			      struct apk_dependency *dep)
+{
+	struct apk_name *name = dep->name;
+	struct apk_name_choices *c;
+        struct apk_package *installed = NULL, *latest = NULL, *use;
+	int i, r;
+
+	r = apk_state_prune_dependency(state, dep);
+	if (r <= 0)
+		return r;
+
+	if (ns_pending(state->name[name->id]))
+		return apk_state_lock_name(state, name, ns_to_pkg(state->name[name->id]));
+
+	c = ns_to_choices(state->name[name->id]);
 #if 1
 	/* Get latest and installed packages */
 	for (i = 0; i < c->num; i++) {
@@ -342,10 +402,10 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 			pkg0 = ns_to_pkg(state->name[name0->id]);
 			if (pkg0 == NULL)
 				continue;
-			return call_if_dependency_broke(state, pkg0, name, cb);
-		}
-
-		if (!ns_empty(state->name[name0->id])) {
+			r = call_if_dependency_broke(state, pkg0, name, cb);
+			if (r != 0)
+				return r;
+		} else if (!ns_empty(state->name[name0->id])) {
 			struct apk_name_choices *ns =
 				ns_to_choices(state->name[name0->id]);
 
@@ -358,21 +418,22 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 							     name, cb);
 				if (r != 0)
 					return r;
+				break;
 			}
-			return 0;
-		}
+		} else {
+			for (j = 0; j < name0->pkgs->num; j++) {
+				pkg0 = name0->pkgs->item[j];
 
-		for (j = 0; j < name0->pkgs->num; j++) {
-			pkg0 = name0->pkgs->item[j];
+				if (apk_pkg_get_state(pkg0) != APK_PKG_INSTALLED)
+					continue;
 
-			if (apk_pkg_get_state(pkg0) != APK_PKG_INSTALLED)
-				continue;
-
-			r = call_if_dependency_broke(state,
-						     name0->pkgs->item[j],
-						     name, cb);
-			if (r != 0)
-				return r;
+				r = call_if_dependency_broke(state,
+							     name0->pkgs->item[j],
+							     name, cb);
+				if (r != 0)
+					return r;
+				break;
+			}
 		}
 	}
 
@@ -407,7 +468,7 @@ int apk_state_lock_name(struct apk_state *state,
 		return -1;
 
 	ns_free(state->name[name->id]);
-	state->name[name->id] = ns_from_pkg(newpkg);
+	state->name[name->id] = ns_from_pkg_non_pending(newpkg);
 
 	if (name->pkgs != NULL) {
 		for (i = 0; i < name->pkgs->num; i++) {
