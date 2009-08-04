@@ -883,7 +883,7 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	struct apk_repository_url *repo = NULL;
 	struct stat64 st;
 	apk_blob_t blob;
-	int r;
+	int r, rr = 0;
 
 	memset(db, 0, sizeof(*db));
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
@@ -978,22 +978,26 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 				apk_repos = "etc/apk/repositories";
 			blob = apk_blob_from_file(db->root_fd, apk_repos);
 			if (!APK_BLOB_IS_NULL(blob)) {
-				apk_blob_for_each_segment(blob, "\n",
-							  apk_db_add_repository, db);
+				r = apk_blob_for_each_segment(
+					blob, "\n",
+					apk_db_add_repository, db);
+				rr = r ?: rr;
 				free(blob.ptr);
 			}
 		}
 	}
 
 	if (!(flags & APK_OPENF_NO_REPOS)) {
-		list_for_each_entry(repo, &apk_repository_list.list, list)
-			apk_db_add_repository(db, APK_BLOB_STR(repo->url));
+		list_for_each_entry(repo, &apk_repository_list.list, list) {
+			r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
+			rr = r ?: rr;
+		}
 
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_db_index_write_nr_cache(db);
 	}
 
-	return 0;
+	return rr;
 
 ret_errno:
 	r = -errno;
