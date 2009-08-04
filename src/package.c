@@ -415,7 +415,7 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 	return 0;
 }
 
-static int read_datahash(void *ctx, apk_blob_t line)
+int apk_sign_ctx_parse_pkginfo_line(void *ctx, apk_blob_t line)
 {
 	struct apk_sign_ctx *sctx = (struct apk_sign_ctx *) ctx;
 	apk_blob_t l, r;
@@ -448,7 +448,9 @@ int apk_sign_ctx_verify_tar(void *sctx, const struct apk_file_info *fi,
 
 	if (strcmp(fi->name, ".PKGINFO") == 0) {
 		apk_blob_t blob = apk_blob_from_istream(is, fi->size);
-		apk_blob_for_each_segment(blob, "\n", read_datahash, ctx);
+		apk_blob_for_each_segment(
+			blob, "\n",
+			apk_sign_ctx_parse_pkginfo_line, ctx);
 		free(blob.ptr);
 	}
 
@@ -628,15 +630,7 @@ static int read_info_line(void *ctx, apk_blob_t line)
 			return 0;
 		}
 	}
-
-	if (ri->sctx->data_started == 0 &&
-	    apk_blob_compare(APK_BLOB_STR("datahash"), l) == 0) {
-		ri->sctx->has_data_checksum = 1;
-		ri->sctx->md = EVP_sha256();
-		apk_blob_pull_hexdump(
-			&r, APK_BLOB_PTR_LEN(ri->sctx->data_checksum,
-					     EVP_MD_size(ri->sctx->md)));
-	}
+	apk_sign_ctx_parse_pkginfo_line(ri->sctx, line);
 
 	return 0;
 }

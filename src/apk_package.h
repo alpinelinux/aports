@@ -103,6 +103,7 @@ void apk_sign_ctx_free(struct apk_sign_ctx *ctx);
 int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 			      const struct apk_file_info *fi,
 			      struct apk_istream *is);
+int apk_sign_ctx_parse_pkginfo_line(void *ctx, apk_blob_t line);
 int apk_sign_ctx_verify_tar(void *ctx, const struct apk_file_info *fi,
 			    struct apk_istream *is);
 int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t blob);

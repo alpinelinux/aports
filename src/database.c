@@ -41,6 +41,7 @@ struct install_ctx {
 	struct apk_db_dir_instance *diri;
 	struct apk_checksum data_csum;
 	struct apk_sign_ctx sctx;
+	struct apk_name_array *replaces;
 
 	apk_progress_cb cb;
 	void *cb_ctx;
@@ -1353,6 +1354,37 @@ static struct apk_db_dir_instance *find_diri(struct apk_package *pkg,
 	return NULL;
 }
 
+static int parse_replaces(void *_ctx, apk_blob_t blob)
+{
+	struct install_ctx *ctx = (struct install_ctx *) _ctx;
+
+	if (blob.len == 0)
+		return 0;
+
+	*apk_name_array_add(&ctx->replaces) = apk_db_get_name(ctx->db, blob);
+	return 0;
+}
+
+static int read_info_line(void *_ctx, apk_blob_t line)
+{
+	struct install_ctx *ctx = (struct install_ctx *) _ctx;
+	apk_blob_t l, r;
+
+	if (line.ptr == NULL || line.len < 1 || line.ptr[0] == '#')
+		return 0;
+
+	if (!apk_blob_split(line, APK_BLOB_STR(" = "), &l, &r))
+		return 0;
+
+	if (apk_blob_compare(APK_BLOB_STR("replaces"), l) == 0) {
+		apk_blob_for_each_segment(r, " ", parse_replaces, ctx);
+		return 0;
+	}
+
+	apk_sign_ctx_parse_pkginfo_line(&ctx->sctx, line);
+	return 0;
+}
+
 static int apk_db_install_archive_entry(void *_ctx,
 					const struct apk_file_info *ae,
 					struct apk_istream *is)
@@ -1366,11 +1398,15 @@ static int apk_db_install_archive_entry(void *_ctx,
 	const char *p;
 	int r = 0, type = APK_SCRIPT_INVALID;
 
-	apk_sign_ctx_verify_tar(&ctx->sctx, ae, is);
-
 	/* Package metainfo and script processing */
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
+		if (strcmp(ae->name, ".PKGINFO") == 0) {
+			apk_blob_t blob = apk_blob_from_istream(is, ae->size);
+			apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
+			free(blob.ptr);
+			return 0;
+		}
 		type = apk_script_type(&ae->name[1]);
 		if (type == APK_SCRIPT_INVALID)
 			return 0;
@@ -1428,8 +1464,18 @@ static int apk_db_install_archive_entry(void *_ctx,
 		opkg = NULL;
 		file = apk_db_file_query(db, bdir, bfile);
 		if (file != NULL) {
+			int i;
+
 			opkg = file->diri->pkg;
-			if (opkg->name != pkg->name) {
+			do {
+				if (opkg->name == pkg->name)
+					break;
+				for (i = 0; ctx->replaces && i < ctx->replaces->num; i++)
+					if (opkg->name == ctx->replaces->item[i])
+						break;
+				if (ctx->replaces && i < ctx->replaces->num)
+					break;
+
 				if (!(apk_flags & APK_FORCE)) {
 					apk_error("%s: Trying to overwrite %s "
 						  "owned by %s.",
@@ -1440,7 +1486,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 				apk_warning("%s: Overwriting %s owned by %s.",
 					    pkg->name->name, ae->name,
 					    opkg->name->name);
-			}
+			} while (0);
 		}
 
 		if (opkg != pkg) {
@@ -1694,6 +1740,8 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	r = apk_tar_parse(tar, apk_db_install_archive_entry, &ctx, TRUE);
 	apk_sign_ctx_free(&ctx.sctx);
 	tar->close(tar);
+	if (ctx.replaces)
+		free(ctx.replaces);
 
 	if (r != 0) {
 		apk_error("%s-%s: %s",
