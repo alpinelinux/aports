@@ -319,7 +319,9 @@ int apk_state_lock_dependency(struct apk_state *state,
 	if (apk_flags & APK_UPGRADE) {
 		use = latest;
 	} else {
-		if (installed != NULL)
+		if (installed != NULL &&
+		    (installed->repos != 0 ||
+		     !(name->flags & APK_NAME_REINSTALL)))
 			use = installed;
 		else
 			use = latest;
@@ -500,7 +502,7 @@ int apk_state_lock_name(struct apk_state *state,
 	}
 
 	/* If the chosen package is installed, all is done here */
-	if (oldpkg == newpkg)
+	if (oldpkg == newpkg && !(newpkg->name->flags & APK_NAME_REINSTALL))
 		return 0;
 
 	/* Track change */

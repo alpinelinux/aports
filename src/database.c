@@ -1425,6 +1425,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			return -1;
 		}
 
+		opkg = NULL;
 		file = apk_db_file_query(db, bdir, bfile);
 		if (file != NULL) {
 			opkg = file->diri->pkg;
@@ -1442,8 +1443,10 @@ static int apk_db_install_archive_entry(void *_ctx,
 			}
 		}
 
-		/* Create the file entry without adding it to hash */
-		file = apk_db_file_new(diri, bfile, &ctx->file_diri_node);
+		if (opkg != pkg) {
+			/* Create the file entry without adding it to hash */
+			file = apk_db_file_new(diri, bfile, &ctx->file_diri_node);
+		}
 
 		if (apk_verbosity >= 3)
 			apk_message("%s", ae->name);
@@ -1555,7 +1558,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 	struct apk_file_info fi;
 	struct hlist_node *dc, *dn, *fc, *fn;
 	unsigned long hash;
-	char name[1024], tmpname[1024];
+	char name[PATH_MAX], tmpname[PATH_MAX];
 	int cstype, r;
 
 	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
@@ -1610,22 +1613,25 @@ static void apk_db_migrate_files(struct apk_database *db,
 			}
 
 			/* Claim ownership of the file in db */
-			if (ofile != NULL) {
-				hlist_del(&ofile->diri_files_list,
-					  &ofile->diri->owned_files);
-				apk_hash_delete_hashed(&db->installed.files,
-						       APK_BLOB_BUF(&key), hash);
-			} else
-				db->installed.stats.files++;
+			if (ofile != file) {
+				if (ofile != NULL) {
+					hlist_del(&ofile->diri_files_list,
+						&ofile->diri->owned_files);
+					apk_hash_delete_hashed(&db->installed.files,
+							       APK_BLOB_BUF(&key), hash);
+				} else
+					db->installed.stats.files++;
 
-			apk_hash_insert_hashed(&db->installed.files, file, hash);
+				apk_hash_insert_hashed(&db->installed.files, file, hash);
+			}
 		}
 	}
 }
 
 static int apk_db_unpack_pkg(struct apk_database *db,
 			     struct apk_package *newpkg,
-			     int upgrade, apk_progress_cb cb, void *cb_ctx)
+			     int upgrade, int reinstall,
+			     apk_progress_cb cb, void *cb_ctx)
 {
 	struct install_ctx ctx;
 	struct apk_bstream *bs = NULL;
@@ -1706,7 +1712,8 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 
 	return 0;
 err:
-	apk_db_purge_pkg(db, newpkg, ".apk-new");
+	if (!reinstall)
+		apk_db_purge_pkg(db, newpkg, ".apk-new");
 	return r;
 }
 
@@ -1733,14 +1740,14 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	/* Install the new stuff */
 	if (newpkg->installed_size != 0) {
-		r = apk_db_unpack_pkg(db, newpkg, (oldpkg != NULL), cb, cb_ctx);
+		r = apk_db_unpack_pkg(db, newpkg, (oldpkg != NULL),
+				      (oldpkg == newpkg), cb, cb_ctx);
 		if (r != 0)
 			return r;
 	}
 
 	apk_pkg_set_state(db, newpkg, APK_PKG_INSTALLED);
-
-	if (oldpkg != NULL)
+	if (oldpkg != NULL && oldpkg != newpkg)
 		apk_db_purge_pkg(db, oldpkg, NULL);
 
 	r = apk_pkg_run_script(newpkg, db->root_fd,

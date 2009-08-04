@@ -63,6 +63,7 @@ struct apk_db_dir_instance {
 };
 
 #define APK_NAME_TOPLEVEL	0x0001
+#define APK_NAME_REINSTALL	0x0002
 
 struct apk_name {
 	apk_hash_node hash_node;
