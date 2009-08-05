@@ -463,13 +463,17 @@ err_fd:
 	return APK_BLOB_NULL;
 }
 
-int apk_file_get_info(int atfd, const char *filename, int checksum,
+int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 		      struct apk_file_info *fi)
 {
 	struct stat64 st;
 	struct apk_bstream *bs;
+	int checksum = flags & 0xffff, atflags = 0;
 
-	if (fstatat64(atfd, filename, &st, AT_SYMLINK_NOFOLLOW) != 0)
+	if (flags & APK_FI_NOFOLLOW)
+		atflags |= AT_SYMLINK_NOFOLLOW;
+
+	if (fstatat64(atfd, filename, &st, atflags) != 0)
 		return -errno;
 
 	*fi = (struct apk_file_info) {

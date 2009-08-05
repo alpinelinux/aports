@@ -27,7 +27,7 @@ static int audit_file(struct apk_database *db, struct apk_db_file *dbf,
 {
 	struct apk_file_info fi;
 
-	if (apk_file_get_info(db->root_fd, name, dbf->csum.type, &fi) != 0)
+	if (apk_file_get_info(db->root_fd, name, APK_FI_NOFOLLOW | dbf->csum.type, &fi) != 0)
 		return 1;
 
 	if (dbf->csum.type != APK_CHECKSUM_NONE &&
@@ -62,7 +62,7 @@ static int audit_directory(apk_hash_item item, void *ctx)
 
 		snprintf(tmp, sizeof(tmp), "%s/%s", dbd->name, de->d_name);
 
-		if (apk_file_get_info(db->root_fd, tmp, APK_CHECKSUM_NONE, &fi) < 0)
+		if (apk_file_get_info(db->root_fd, tmp, APK_FI_NOFOLLOW, &fi) < 0)
 			continue;
 
 		if ((dbd->flags & APK_DBDIRF_SYMLINKS_ONLY) &&
