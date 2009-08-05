@@ -84,26 +84,33 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 		       int argc, char **argv)
 {
 	struct apk_name *name;
-	int i, j, ret = 0;
+	struct apk_package *pkg = NULL;
+	struct apk_dependency dep;
+	int r, i, j, ok = 0;
 
 	for (i = 0; i < argc; i++) {
-		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-		if (name == NULL) {
-			ret++;
+		r = apk_dep_from_blob(&dep, db, APK_BLOB_STR(argv[i]));
+		if (r != 0)
 			continue;
-		}
 
+		name = dep.name;
 		for (j = 0; j < name->pkgs->num; j++) {
-			if (apk_pkg_get_state(name->pkgs->item[j]) == APK_PKG_INSTALLED)
+			pkg = name->pkgs->item[j];
+			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
 				break;
 		}
-		if (j >= name->pkgs->num) {
-			ret++;
-		} else
-			verbose_print_pkg(name->pkgs->item[j], 0);
+		if (j >= name->pkgs->num)
+			continue;
+
+		if (!(apk_version_compare(pkg->version, dep.version)
+		      & dep.result_mask))
+			continue;
+
+		verbose_print_pkg(pkg, 0);
+		ok++;
 	}
 
-	return ret;
+	return argc - ok;
 }
 
 static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
