@@ -190,8 +190,8 @@ $(ISO_PKGDIR)/APKINDEX.tar.gz: $(APK_FILES)
 $(ISO_KERNEL): $(KERNEL_APK)
 	@echo "==> iso: install kernel $(KERNEL)"
 	@mkdir -p $(dir $(ISO_KERNEL))
-	@tar -C $(ISO_DIR) -xzf $(KERNEL_APK)
-	@rm -f $(ISO_DIR)/.[A-Z]* $(ISO_DIR)/.[a-z]*
+	@tar -C $(ISO_DIR) -xzf $(KERNEL_APK) boot
+	@rm -rf $(ISO_DIR)/.[A-Z]* $(ISO_DIR)/.[a-z]* $(ISO_DIR)/lib
 	@touch $(ISO_KERNEL)
 
 $(ISOFS_DIRSTAMP): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_REPOS_DIRSTAMP) $(SYSLINUX_CFG)
