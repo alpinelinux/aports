@@ -146,7 +146,7 @@ struct apk_state *apk_state_new(struct apk_database *db)
 
 	/* Instantiate each 'name' target in world, and lockout incompatible
 	 * choices */
-	for (i = 0; i < db->world->num; i++) {
+	for (i = 0; db->world != NULL && i < db->world->num; i++) {
 		r = apk_state_prune_dependency(state, &db->world->item[i]);
 		if (r < 0) {
 			apk_error("Top level dependencies for %s are "
