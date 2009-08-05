@@ -2,8 +2,7 @@
 # Building apk-tools
 
 PACKAGE := apk-tools
-TAGPREFIX := $(PACKAGE)-
-VERSION := 2.0_pre17
+VERSION := 2.0_rc1
 
 ##
 # Default directories
