@@ -99,7 +99,7 @@ static int index_main(void *ctx, int argc, char **argv)
 	if (ictx->method == 0)
 		ictx->method = APK_SIGN_GENERATE;
 
-	apk_db_open(&db, NULL, APK_OPENF_READ);
+	apk_db_open(&db, apk_root, APK_OPENF_READ | APK_OPENF_NO_STATE | APK_OPENF_NO_REPOS);
 	if ((r = index_read_file(&db, ictx)) < 0) {
 		apk_db_close(&db);
 		apk_error("%s: %s", ictx->index, apk_error_str(r));
