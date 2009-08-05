@@ -237,7 +237,7 @@ err:
 }
 
 static struct apk_option fetch_options[] = {
-	{ 'l', "link",		"Create hard links if possible" },
+	{ 'L', "link",		"Create hard links if possible" },
 	{ 'R', "recursive",	"Fetch the PACKAGE and all it's dependencies" },
 	{ 's', "stdout",
 	  "Dump the .apk to stdout (incompatible with -o and -R)" },
