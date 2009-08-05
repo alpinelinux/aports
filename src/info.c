@@ -94,6 +94,9 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 			continue;
 
 		name = dep.name;
+		if (name->pkgs == NULL)
+			continue;
+		
 		for (j = 0; j < name->pkgs->num; j++) {
 			pkg = name->pkgs->item[j];
 			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
