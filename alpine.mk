@@ -253,4 +253,7 @@ $(ALPINE_NAME).img:	$(USBIMG)
 
 img:	$(ALPINE_NAME).img
 
-sha1 release: $(ISO_SHA1) $(USBIMG_SHA1)
+sha1: $(ISO_SHA1) $(USBIMG_SHA1)
+
+release: $(ISO_SHA1)
+
