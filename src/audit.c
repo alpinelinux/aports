@@ -51,6 +51,9 @@ static int audit_directory(apk_hash_item item, void *ctx)
 	char tmp[PATH_MAX], reason;
 	DIR *dir;
 
+	if (!(dbd->flags & APK_DBDIRF_PROTECTED))
+		return 0;
+
 	dir = fdopendir(openat(db->root_fd, dbd->name, O_RDONLY));
 	if (dir == NULL)
 		return 0;
@@ -97,7 +100,7 @@ static int audit_directory(apk_hash_item item, void *ctx)
 
 static int audit_backup(struct apk_database *db)
 {
-	return apk_hash_foreach(&db->installed.dirs, audit_directory, &db);
+	return apk_hash_foreach(&db->installed.dirs, audit_directory, db);
 }
 
 static int audit_system(struct apk_database *db)
