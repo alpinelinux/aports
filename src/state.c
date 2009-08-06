@@ -298,9 +298,8 @@ int apk_state_lock_dependency(struct apk_state *state,
 
 		if (apk_pkg_get_state(c->pkgs[i]) == APK_PKG_INSTALLED)
 			installed = pkg;
-
-		if (pkg->filename == NULL &&
-		    apk_db_select_repo(state->db, pkg) == NULL)
+		else if (pkg->filename == NULL &&
+		         apk_db_select_repo(state->db, pkg) == NULL)
 			continue;
 
 		if (latest == NULL) {
