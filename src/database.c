@@ -1282,7 +1282,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	}
 	if (bs == NULL) {
 		apk_warning("Failed to open index for %s", repo->url);
-		return -1;
+		return 0;
 	}
 
 	r = load_index(db, bs, targz, r);
