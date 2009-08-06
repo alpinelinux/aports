@@ -23,7 +23,7 @@ static int update_main(void *ctx, struct apk_database *db, int argc, char **argv
 static struct apk_applet apk_update = {
 	.name = "update",
 	.help = "Update repository indexes from all remote repositories.",
-	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE,
+	.open_flags = APK_OPENF_WRITE,
 	.forced_flags = APK_UPDATE_CACHE,
 	.main = update_main,
 };

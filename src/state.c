@@ -502,7 +502,9 @@ int apk_state_lock_name(struct apk_state *state,
 	}
 
 	/* If the chosen package is installed, all is done here */
-	if (oldpkg == newpkg && !(newpkg->name->flags & APK_NAME_REINSTALL))
+	if (oldpkg == newpkg &&
+	    (newpkg == NULL ||
+	     !(newpkg->name->flags & APK_NAME_REINSTALL)))
 		return 0;
 
 	/* Track change */
