@@ -180,6 +180,7 @@ ISO_REPOS_DIRSTAMP := $(DESTDIR)/stamp.isorepos
 ISOFS_DIRSTAMP	:= $(DESTDIR)/stamp.isofs
 
 $(ISO_REPOS_DIRSTAMP): $(ISO_PKGDIR)/APKINDEX.tar.gz
+	@touch $(ISO_PKGDIR)/.boot_repository
 	@touch $@
 
 $(ISO_PKGDIR)/APKINDEX.tar.gz: $(APK_FILES)
