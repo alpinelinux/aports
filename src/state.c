@@ -113,11 +113,10 @@ static struct apk_name_choices *name_choices_new(struct apk_database *db,
 			    & dep->result_mask) {
 			    	j++;
 			} else {
-				nc->pkgs[i] = nc->pkgs[nc->num - 1];
+				nc->pkgs[j] = nc->pkgs[nc->num - 1];
 				nc->num--;
 			}
 		}
-
 	}
 
 	return nc;
