@@ -148,7 +148,7 @@ struct apk_state *apk_state_new(struct apk_database *db)
 	 * choices */
 	for (i = 0; db->world != NULL && i < db->world->num; i++) {
 		r = apk_state_prune_dependency(state, &db->world->item[i]);
-		if (r < 0) {
+		if (r < 0 && apk_verbosity && !(apk_flags & APK_FORCE)) {
 			apk_error("Top level dependencies for %s are "
 				  "conflicting or unsatisfiable.",
 				  db->world->item[i].name->name);
