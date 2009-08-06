@@ -82,9 +82,11 @@ static struct apk_name_choices *ns_to_choices(apk_name_state_t name)
 	return (struct apk_name_choices *) name;
 }
 
-static struct apk_name_choices *name_choices_new(struct apk_name *name)
+static struct apk_name_choices *name_choices_new(struct apk_database *db,
+						 struct apk_name *name)
 {
 	struct apk_name_choices *nc;
+	int i, j;
 
 	if (name->pkgs == NULL)
 		return NULL;
@@ -98,6 +100,26 @@ static struct apk_name_choices *name_choices_new(struct apk_name *name)
 	nc->num = name->pkgs->num;
 	memcpy(nc->pkgs, name->pkgs->item,
 	       name->pkgs->num * sizeof(struct apk_package *));
+
+	/* Check for global dependencies */
+	for (i = 0; db->world != NULL && i < db->world->num; i++) {
+		struct apk_dependency *dep = &db->world->item[i];
+
+		if (dep->name != name)
+			continue;
+
+		for (j = 0; j < nc->num; ) {
+			if (apk_version_compare(nc->pkgs[j]->version, dep->version)
+			    & dep->result_mask) {
+			    	j++;
+			} else {
+				nc->pkgs[i] = nc->pkgs[nc->num - 1];
+				nc->num--;
+			}
+		}
+
+	}
+
 	return nc;
 }
 
@@ -136,7 +158,7 @@ static void ns_free(apk_name_state_t name)
 struct apk_state *apk_state_new(struct apk_database *db)
 {
 	struct apk_state *state;
-	int num_bytes, i, r;
+	int num_bytes;
 
 	num_bytes = sizeof(struct apk_state) + db->name_id * sizeof(char *);
 	state = (struct apk_state*) calloc(1, num_bytes);
@@ -145,22 +167,7 @@ struct apk_state *apk_state_new(struct apk_database *db)
 	state->db = db;
 	list_init(&state->change_list_head);
 
-	/* Instantiate each 'name' target in world, and lockout incompatible
-	 * choices */
-	for (i = 0; db->world != NULL && i < db->world->num; i++) {
-		r = apk_state_prune_dependency(state, &db->world->item[i]);
-		if (r < 0 && apk_verbosity && !(apk_flags & APK_FORCE)) {
-			apk_error("Top level dependencies for %s are "
-				  "conflicting or unsatisfiable.",
-				  db->world->item[i].name->name);
-			goto err;
-		}
-	}
-
 	return state;
-err:
-	free(state);
-	return NULL;
 }
 
 struct apk_state *apk_state_dup(struct apk_state *state)
@@ -217,7 +224,7 @@ int apk_state_prune_dependency(struct apk_state *state,
 
 		/* This name has not been visited yet.
 		 * Construct list of candidates. */
-		state->name[name->id] = ns_from_choices(name_choices_new(name));
+		state->name[name->id] = ns_from_choices(name_choices_new(state->db, name));
 	}
 
 	if (ns_locked(state->name[name->id])) {

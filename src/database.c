@@ -854,8 +854,6 @@ static int add_protected_path(void *ctx, apk_blob_t blob)
 
 static int apk_db_create(struct apk_database *db)
 {
-	apk_blob_t deps = APK_BLOB_STR("busybox alpine-baselayout "
-				       "apk-tools alpine-conf");
 	int fd;
 
 	mkdirat(db->root_fd, "tmp", 01777);
@@ -868,7 +866,6 @@ static int apk_db_create(struct apk_database *db)
 	fd = openat(db->root_fd, "var/lib/apk/world", O_CREAT|O_RDWR|O_TRUNC, 0644);
 	if (fd < 0)
 		return -errno;
-	write(fd, deps.ptr, deps.len);
 	close(fd);
 
 	return 0;
