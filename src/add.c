@@ -114,6 +114,7 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		if (virtpkg) {
 			apk_deps_add(&virtpkg->depends, &dep);
 		} else {
+			apk_deps_add(&db->world, &dep);
 			dep.name->flags |= APK_NAME_TOPLEVEL;
 		}
 		apk_deps_add(&pkgs, &dep);
@@ -136,8 +137,6 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			if (!(apk_flags & APK_FORCE))
 				goto err;
 		}
-		if (!virtpkg)
-			apk_deps_add(&db->world, &pkgs->item[i]);
 	}
 	r = apk_state_commit(state, db);
 err:
