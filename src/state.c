@@ -613,24 +613,27 @@ static int dump_packages(struct apk_state *state,
 {
 	struct apk_change *change;
 	struct apk_name *name;
-	int match = 0;
+	struct apk_indent indent = { 0, 2 };
+	char tmp[256];
+	int match = 0, i;
 
 	list_for_each_entry(change, &state->change_list_head, change_list) {
 		if (!cmp(change))
 			continue;
 		if (match == 0)
-			fprintf(stderr, "%s:\n ", msg);
+			printf("%s:\n ", msg);
 		if (change->newpkg != NULL)
 			name = change->newpkg->name;
 		else
 			name = change->oldpkg->name;
 
-		fprintf(stderr, " %s%s", name->name,
-			(name->flags & APK_NAME_TOPLEVEL) ? "*" : "");
+		i = snprintf(tmp, sizeof(tmp), "%s%s", name->name,
+			     (name->flags & APK_NAME_TOPLEVEL) ? "*" : "");
+		apk_print_indented(&indent, APK_BLOB_PTR_LEN(tmp, i));
 		match++;
 	}
 	if (match)
-		fprintf(stderr, "\n");
+		printf("\n");
 	return match;
 }
 
@@ -754,8 +757,8 @@ int apk_state_commit(struct apk_state *state,
 				"additional disk space will be used");
 		}
 		if (apk_flags & APK_INTERACTIVE) {
-			fprintf(stderr, "Do you want to continue [Y/n]? ");
-			fflush(stderr);
+			printf("Do you want to continue [Y/n]? ");
+			fflush(stdout);
 			r = fgetc(stdin);
 			if (r != 'y' && r != 'Y')
 				return -1;

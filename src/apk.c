@@ -96,12 +96,7 @@ static int version(void)
 	return 0;
 }
 
-struct apk_indent {
-	int x;
-	int indent;
-};
-
-static int print_indented(struct apk_indent *i, apk_blob_t blob)
+int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
 {
 	static const int wrap_length = 80;
 
@@ -113,10 +108,10 @@ static int print_indented(struct apk_indent *i, apk_blob_t blob)
 	return 0;
 }
 
-static void print_indented_words(struct apk_indent *i, const char *text)
+void apk_print_indented_words(struct apk_indent *i, const char *text)
 {
 	apk_blob_for_each_segment(APK_BLOB_STR(text), " ",
-		(apk_blob_cb) print_indented, i);
+		(apk_blob_cb) apk_print_indented, i);
 }
 
 static int format_option(char *buf, size_t len, struct apk_option *o,
@@ -150,10 +145,10 @@ static void print_usage(const char *cmd, const char *args, int num_opts,
 		word[j++] = '[';
 		j += format_option(&word[j], sizeof(word) - j, &opts[i], "|");
 		word[j++] = ']';
-		print_indented(&indent, APK_BLOB_PTR_LEN(word, j));
+		apk_print_indented(&indent, APK_BLOB_PTR_LEN(word, j));
 	}
 	if (args != NULL)
-		print_indented(&indent, APK_BLOB_STR(args));
+		apk_print_indented(&indent, APK_BLOB_STR(args));
 	printf("\n");
 }
 
@@ -166,7 +161,7 @@ static void print_options(int num_opts, struct apk_option *opts)
 	for (i = 0; i < num_opts; i++) {
 		format_option(word, sizeof(word), &opts[i], ", ");
 		indent.x = printf("  %-*s", indent.indent - 3, word);
-		print_indented_words(&indent, opts[i].help);
+		apk_print_indented_words(&indent, opts[i].help);
 		printf("\n");
 	}
 }
@@ -189,7 +184,7 @@ static int usage(struct apk_applet *applet)
 		print_usage(applet->name, applet->arguments,
 			    applet->num_options, applet->options);
 		printf("\ndescription:\n%*s", indent.indent - 1, "");
-		print_indented_words(&indent, applet->help);
+		apk_print_indented_words(&indent, applet->help);
 	}
 	printf("\n\ngeneric options:\n");
 	print_options(ARRAY_SIZE(generic_options), generic_options);
