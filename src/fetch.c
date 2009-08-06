@@ -66,7 +66,8 @@ static int cup(void)
 	return 0;
 }
 
-static int fetch_parse(void *ctx, int optch, int optindex, const char *optarg)
+static int fetch_parse(void *ctx, struct apk_db_options *dbopts,
+		       int optch, int optindex, const char *optarg)
 {
 	struct fetch_ctx *fctx = (struct fetch_ctx *) ctx;
 
@@ -95,7 +96,7 @@ static int fetch_package(struct fetch_ctx *fctx,
 {
 	struct apk_istream *is;
 	char pkgfile[PATH_MAX], url[PATH_MAX];
-	int i, r, fd;
+	int r, i, fd;
 
 	apk_pkg_format_plain(pkg, APK_BLOB_BUF(pkgfile));
 
@@ -162,11 +163,10 @@ static int fetch_package(struct fetch_ctx *fctx,
 	return 0;
 }
 
-static int fetch_main(void *ctx, int argc, char **argv)
+static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct fetch_ctx *fctx = (struct fetch_ctx *) ctx;
-	struct apk_database db;
-	int i, j, r;
+	int r = 0, i, j;
 
 	if (fctx->outdir_fd == 0)
 		fctx->outdir_fd = AT_FDCWD;
@@ -178,13 +178,9 @@ static int fetch_main(void *ctx, int argc, char **argv)
 		return 0;
 	}
 
-	r = apk_db_open(&db, apk_root, APK_OPENF_NO_STATE);
-	if (r != 0)
-		return r;
-
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep = (struct apk_dependency) {
-			.name = apk_db_get_name(&db, APK_BLOB_STR(argv[i])),
+			.name = apk_db_get_name(db, APK_BLOB_STR(argv[i])),
 			.result_mask = APK_DEPMASK_REQUIRE,
 		};
 
@@ -192,7 +188,7 @@ static int fetch_main(void *ctx, int argc, char **argv)
 			struct apk_state *state;
 			struct apk_change *change;
 
-			state = apk_state_new(&db);
+			state = apk_state_new(db);
 			if (state == NULL)
 				goto err;
 
@@ -205,7 +201,7 @@ static int fetch_main(void *ctx, int argc, char **argv)
 			}
 
 			list_for_each_entry(change, &state->change_list_head, change_list) {
-				r = fetch_package(fctx, &db, change->newpkg);
+				r = fetch_package(fctx, db, change->newpkg);
 				if (r != 0)
 					goto err;
 			}
@@ -221,7 +217,7 @@ static int fetch_main(void *ctx, int argc, char **argv)
 				    == APK_VERSION_GREATER)
 					pkg = dep.name->pkgs->item[j];
 
-			r = fetch_package(fctx, &db, pkg);
+			r = fetch_package(fctx, db, pkg);
 			if (r != 0)
 				goto err;
 		} else {
@@ -232,7 +228,6 @@ static int fetch_main(void *ctx, int argc, char **argv)
 	}
 
 err:
-	apk_db_close(&db);
 	return r;
 }
 
@@ -250,6 +245,7 @@ static struct apk_applet apk_fetch = {
 	.help = "Download PACKAGEs from repositories to a local directory from "
 		"which a local mirror repository can be created.",
 	.arguments = "PACKAGE...",
+	.open_flags = APK_OPENF_READ|APK_OPENF_NO_STATE,
 	.context_size = sizeof(struct fetch_ctx),
 	.num_options = ARRAY_SIZE(fetch_options),
 	.options = fetch_options,

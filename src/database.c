@@ -878,15 +878,21 @@ static void handle_alarm(int sig)
 {
 }
 
-int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
+int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 {
-	const char *apk_repos = getenv("APK_REPOS"), *msg = NULL;
-	struct apk_repository_url *repo = NULL;
+	const char *msg = NULL;
+	struct apk_repository_list *repo = NULL;
 	struct stat64 st;
 	apk_blob_t blob;
 	int r, rr = 0;
 
 	memset(db, 0, sizeof(*db));
+	if (dbopts->open_flags == 0) {
+		msg = "Invalid open flags (internal error)";
+		r = -1;
+		goto ret_r;
+	}
+
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
 	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 4000);
 	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 2000);
@@ -895,11 +901,11 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	db->cache_dir = apk_static_cache_dir;
 	db->permanent = 1;
 
-	db->root = strdup(root);
+	db->root = strdup(dbopts->root ?: "/");
 	db->root_fd = openat(AT_FDCWD, db->root, O_RDONLY);
-	if (db->root_fd < 0 && (flags & APK_OPENF_CREATE)) {
+	if (db->root_fd < 0 && (dbopts->open_flags & APK_OPENF_CREATE)) {
 		mkdirat(AT_FDCWD, db->root, 0755);
-		db->root_fd = openat(AT_FDCWD, root, O_RDONLY);
+		db->root_fd = openat(AT_FDCWD, db->root, O_RDONLY);
 	}
 	if (db->root_fd < 0) {
 		msg = "Unable to open root";
@@ -912,11 +918,11 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	    S_ISDIR(st.st_mode))
 		db->cache_dir = apk_linked_cache_dir;
 
-	if (flags & APK_OPENF_WRITE) {
+	if (dbopts->open_flags & APK_OPENF_WRITE) {
 		db->lock_fd = openat(db->root_fd, "var/lib/apk/lock",
 				     O_CREAT | O_RDWR, 0400);
 		if (db->lock_fd < 0 && errno == ENOENT &&
-		    (flags & APK_OPENF_CREATE)) {
+		    (dbopts->open_flags & APK_OPENF_CREATE)) {
 			r = apk_db_create(db);
 			if (r != 0) {
 				msg = "Unable to create database";
@@ -954,30 +960,32 @@ int apk_db_open(struct apk_database *db, const char *root, unsigned int flags)
 	db->cache_fd = openat(db->root_fd, db->cache_dir, O_RDONLY);
 	mkdirat(db->cache_fd, "tmp", 0644);
 	db->cachetmp_fd = openat(db->cache_fd, "tmp", O_RDONLY);
-	db->keys_fd = openat(db->root_fd, "etc/apk/keys", O_RDONLY);
+	db->keys_fd = openat(db->root_fd,
+			     dbopts->keys_dir ?: "etc/apk/keys",
+			     O_RDONLY);
 
-	r = apk_db_read_state(db, flags);
-	if (r == -ENOENT && (flags & APK_OPENF_CREATE)) {
+	r = apk_db_read_state(db, dbopts->open_flags);
+	if (r == -ENOENT && (dbopts->open_flags & APK_OPENF_CREATE)) {
 		r = apk_db_create(db);
 		if (r != 0) {
 			msg = "Unable to create database";
 			goto ret_r;
 		}
-		r = apk_db_read_state(db, flags);
+		r = apk_db_read_state(db, dbopts->open_flags);
 	}
 	if (r != 0) {
 		msg = "Unable to read database state";
 		goto ret_r;
 	}
 
-	if (!(flags & APK_OPENF_NO_REPOS)) {
-		list_for_each_entry(repo, &apk_repository_list.list, list) {
+	if (!(dbopts->open_flags & APK_OPENF_NO_REPOS)) {
+		list_for_each_entry(repo, &dbopts->repository_list, list) {
 			r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
 			rr = r ?: rr;
 		}
-		if (apk_repos == NULL)
-			apk_repos = "etc/apk/repositories";
-		blob = apk_blob_from_file(db->root_fd, apk_repos);
+		blob = apk_blob_from_file(
+			db->root_fd,
+			dbopts->repositories_file ?: "etc/apk/repositories");
 		if (!APK_BLOB_IS_NULL(blob)) {
 			r = apk_blob_for_each_segment(
 				blob, "\n",

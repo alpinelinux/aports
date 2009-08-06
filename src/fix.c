@@ -19,7 +19,8 @@ struct fix_ctx {
 	unsigned int reinstall : 1;
 };
 
-static int fix_parse(void *pctx, int optch, int optindex, const char *optarg)
+static int fix_parse(void *pctx, struct apk_db_options *dbopts,
+		     int optch, int optindex, const char *optarg)
 {
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
 	switch (optch) {
@@ -35,24 +36,19 @@ static int fix_parse(void *pctx, int optch, int optindex, const char *optarg)
 	return 0;
 }
 
-static int fix_main(void *pctx, int argc, char **argv)
+static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 {
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
-	struct apk_database db;
 	struct apk_state *state = NULL;
 	struct apk_name *name;
-	int r, i, j;
+	int r = 0, i, j;
 
-	r = apk_db_open(&db, apk_root, APK_OPENF_WRITE);
-	if (r != 0)
-		return r;
-
-	state = apk_state_new(&db);
+	state = apk_state_new(db);
 	if (state == NULL)
-		goto err;
+		return -1;
 
 	for (i = 0; i < argc; i++) {
-		name = apk_db_get_name(&db, APK_BLOB_STR(argv[i]));
+		name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 		if (name == NULL)
 			goto err;
 
@@ -72,7 +68,7 @@ static int fix_main(void *pctx, int argc, char **argv)
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;
 
-		r = apk_dep_from_blob(&dep, &db, APK_BLOB_STR(argv[i]));
+		r = apk_dep_from_blob(&dep, db, APK_BLOB_STR(argv[i]));
 		if (r != 0)
 			goto err;
 
@@ -82,13 +78,12 @@ static int fix_main(void *pctx, int argc, char **argv)
 				goto err;
 		}
 	}
-	r = apk_state_commit(state, &db);
+	r = apk_state_commit(state, db);
 err:
 	if (r != 0 && i < argc)
 		apk_error("Error while processing '%s'", argv[i]);
 	if (state != NULL)
 		apk_state_unref(state);
-	apk_db_close(&db);
 	return r;
 }
 
@@ -102,6 +97,7 @@ static struct apk_applet apk_fix = {
 	.help = "Repair package or upgrade it without modifying main "
 		"dependencies.",
 	.arguments = "PACKAGE...",
+	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct fix_ctx),
 	.num_options = ARRAY_SIZE(fix_options),
 	.options = fix_options,

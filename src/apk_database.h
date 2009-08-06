@@ -79,6 +79,19 @@ struct apk_repository {
 	struct apk_checksum csum;
 };
 
+struct apk_repository_list {
+	struct list_head list;
+	const char *url;
+};
+
+struct apk_db_options {
+	unsigned long open_flags;
+	char *root;
+	char *keys_dir;
+	char *repositories_file;
+	struct list_head repository_list;
+};
+
 struct apk_database {
 	char *root;
 	int root_fd, lock_fd, cache_fd, cachetmp_fd, keys_fd;
@@ -120,9 +133,9 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 				      apk_blob_t dir,
 				      apk_blob_t name);
 
-#define APK_OPENF_READ		0x0000
-#define APK_OPENF_WRITE		0x0001
-#define APK_OPENF_CREATE	0x0002
+#define APK_OPENF_READ		0x0001
+#define APK_OPENF_WRITE		0x0002
+#define APK_OPENF_CREATE	0x0004
 #define APK_OPENF_NO_INSTALLED	0x0010
 #define APK_OPENF_NO_SCRIPTS	0x0020
 #define APK_OPENF_NO_WORLD	0x0040
@@ -132,7 +145,7 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 				 APK_OPENF_NO_SCRIPTS |		\
 				 APK_OPENF_NO_WORLD)
 
-int apk_db_open(struct apk_database *db, const char *root, unsigned int flags);
+int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts);
 int apk_db_write_config(struct apk_database *db);
 void apk_db_close(struct apk_database *db);
 int apk_db_permanent(struct apk_database *db);

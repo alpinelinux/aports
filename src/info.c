@@ -96,7 +96,7 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 		name = dep.name;
 		if (name->pkgs == NULL)
 			continue;
-		
+
 		for (j = 0; j < name->pkgs->num; j++) {
 			pkg = name->pkgs->item[j];
 			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
@@ -281,7 +281,8 @@ static void info_print_description(struct apk_package *pkg)
 		printf("%s-%s description:\n%s\n", pkg->name->name,
 		       pkg->version, pkg->description);
 }
-static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
+static int info_parse(void *ctx, struct apk_db_options *dbopts,
+		      int optch, int optindex, const char *optarg)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
 
@@ -317,22 +318,14 @@ static int info_parse(void *ctx, int optch, int optindex, const char *optarg)
 	return 0;
 }
 
-static int info_main(void *ctx, int argc, char **argv)
+static int info_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
-	struct apk_database db;
-	int r;
-
-	if (apk_db_open(&db, apk_root, APK_OPENF_READ | APK_OPENF_NO_REPOS) < 0)
-		return -1;
 
 	if (ictx->action != NULL)
-		r = ictx->action(ictx, &db, argc, argv);
-	else
-		r = info_list(ictx, &db, argc, argv);
+		return ictx->action(ictx, db, argc, argv);
 
-	apk_db_close(&db);
-	return r;
+	return info_list(ictx, db, argc, argv);
 }
 
 static struct apk_option info_options[] = {
@@ -350,6 +343,7 @@ static struct apk_applet apk_info = {
 	.name = "info",
 	.help = "Give detailed information about PACKAGEs.",
 	.arguments = "PACKAGE...",
+	.open_flags = APK_OPENF_READ | APK_OPENF_NO_REPOS,
 	.context_size = sizeof(struct info_ctx),
 	.num_options = ARRAY_SIZE(info_options),
 	.options = info_options,

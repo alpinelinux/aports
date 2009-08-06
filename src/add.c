@@ -16,17 +16,17 @@
 #include "apk_state.h"
 
 struct add_ctx {
-	unsigned int open_flags;
 	const char *virtpkg;
 };
 
-static int add_parse(void *ctx, int optch, int optindex, const char *optarg)
+static int add_parse(void *ctx, struct apk_db_options *dbopts,
+		     int optch, int optindex, const char *optarg)
 {
 	struct add_ctx *actx = (struct add_ctx *) ctx;
 
 	switch (optch) {
 	case 0x10000:
-		actx->open_flags |= APK_OPENF_CREATE;
+		dbopts->open_flags |= APK_OPENF_CREATE;
 		break;
 	case 'u':
 		apk_flags |= APK_UPGRADE;
@@ -57,22 +57,17 @@ static int non_repository_check(struct apk_database *db)
 }
 
 
-static int add_main(void *ctx, int argc, char **argv)
+static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct add_ctx *actx = (struct add_ctx *) ctx;
-	struct apk_database db;
 	struct apk_state *state = NULL;
 	struct apk_dependency_array *pkgs = NULL;
 	struct apk_package *virtpkg = NULL;
 	struct apk_dependency virtdep;
-	int i, r;
-
-	r = apk_db_open(&db, apk_root, actx->open_flags | APK_OPENF_WRITE);
-	if (r != 0)
-		return r;
+	int i, r = 0;
 
 	if (actx->virtpkg) {
-		if (non_repository_check(&db))
+		if (non_repository_check(db))
 			goto err;
 
 		virtpkg = apk_pkg_new();
@@ -80,14 +75,14 @@ static int add_main(void *ctx, int argc, char **argv)
 			apk_error("Failed to allocate virtual meta package");
 			goto err;
 		}
-		virtpkg->name = apk_db_get_name(&db, APK_BLOB_STR(actx->virtpkg));
+		virtpkg->name = apk_db_get_name(db, APK_BLOB_STR(actx->virtpkg));
 		apk_blob_checksum(APK_BLOB_STR(virtpkg->name->name),
 				  apk_default_checksum(), &virtpkg->csum);
 		virtpkg->version = strdup("0");
 		virtpkg->description = strdup("virtual meta package");
-		apk_dep_from_pkg(&virtdep, &db, virtpkg);
+		apk_dep_from_pkg(&virtdep, db, virtpkg);
 		virtdep.name->flags |= APK_NAME_TOPLEVEL;
-		virtpkg = apk_db_pkg_add(&db, virtpkg);
+		virtpkg = apk_db_pkg_add(db, virtpkg);
 	}
 
 	for (i = 0; i < argc; i++) {
@@ -97,21 +92,21 @@ static int add_main(void *ctx, int argc, char **argv)
 			struct apk_package *pkg = NULL;
 			struct apk_sign_ctx sctx;
 
-			if (non_repository_check(&db))
+			if (non_repository_check(db))
 				goto err;
 
 			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY_AND_GENERATE,
-					  NULL, db.keys_fd);
-			r = apk_pkg_read(&db, argv[i], &sctx, &pkg);
+					  NULL, db->keys_fd);
+			r = apk_pkg_read(db, argv[i], &sctx, &pkg);
 			apk_sign_ctx_free(&sctx);
 			if (r != 0) {
 				apk_error("%s: %s", argv[i], apk_error_str(r));
 				goto err;
 
 			}
-			apk_dep_from_pkg(&dep, &db, pkg);
+			apk_dep_from_pkg(&dep, db, pkg);
 		} else {
-			r = apk_dep_from_blob(&dep, &db, APK_BLOB_STR(argv[i]));
+			r = apk_dep_from_blob(&dep, db, APK_BLOB_STR(argv[i]));
 			if (r != 0)
 				goto err;
 		}
@@ -126,10 +121,10 @@ static int add_main(void *ctx, int argc, char **argv)
 
 	if (virtpkg) {
 		apk_deps_add(&pkgs, &virtdep);
-		apk_deps_add(&db.world, &virtdep);
+		apk_deps_add(&db->world, &virtdep);
 	}
 
-	state = apk_state_new(&db);
+	state = apk_state_new(db);
 	if (state == NULL)
 		goto err;
 
@@ -141,13 +136,12 @@ static int add_main(void *ctx, int argc, char **argv)
 				goto err;
 		}
 		if (!virtpkg)
-			apk_deps_add(&db.world, &pkgs->item[i]);
+			apk_deps_add(&db->world, &pkgs->item[i]);
 	}
-	r = apk_state_commit(state, &db);
+	r = apk_state_commit(state, db);
 err:
 	if (state != NULL)
 		apk_state_unref(state);
-	apk_db_close(&db);
 	return r;
 }
 
@@ -166,6 +160,7 @@ static struct apk_applet apk_add = {
 	.help = "Add (or update) PACKAGEs to main dependencies and install "
 		"them, while ensuring that all dependencies are met.",
 	.arguments = "PACKAGE...",
+	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct add_ctx),
 	.num_options = ARRAY_SIZE(add_options),
 	.options = add_options,

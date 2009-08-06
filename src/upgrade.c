@@ -16,7 +16,8 @@
 #include "apk_database.h"
 #include "apk_state.h"
 
-static int upgrade_parse(void *ctx, int optch, int optindex, const char *optarg)
+static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
+			 int optch, int optindex, const char *optarg)
 {
 	switch (optch) {
 	case 'a':
@@ -28,35 +29,29 @@ static int upgrade_parse(void *ctx, int optch, int optindex, const char *optarg)
 	return 0;
 }
 
-static int upgrade_main(void *ctx, int argc, char **argv)
+static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
-	struct apk_database db;
 	struct apk_state *state = NULL;
-	int i, r;
+	int i, r = 0;
 
 	apk_flags |= APK_UPGRADE;
 
-	r = apk_db_open(&db, apk_root, APK_OPENF_WRITE);
-	if (r != 0)
-		return r;
-
-	state = apk_state_new(&db);
+	state = apk_state_new(db);
 	if (state == NULL)
 		goto err;
 
-	for (i = 0; i < db.world->num; i++) {
-		r = apk_state_lock_dependency(state, &db.world->item[i]);
+	for (i = 0; i < db->world->num; i++) {
+		r = apk_state_lock_dependency(state, &db->world->item[i]);
 		if (r != 0) {
 			apk_error("Unable to upgrade '%s'",
-				  db.world->item[i].name->name);
+				  db->world->item[i].name->name);
 			goto err;
 		}
 	}
-	r = apk_state_commit(state, &db);
+	r = apk_state_commit(state, db);
 err:
 	if (state != NULL)
 		apk_state_unref(state);
-	apk_db_close(&db);
 	return r;
 }
 
@@ -70,6 +65,7 @@ static struct apk_applet apk_upgrade = {
 	.name = "upgrade",
 	.help = "Upgrade (or downgrade with -a) the currently installed "
 		"packages to versions available in repositories.",
+	.open_flags = APK_OPENF_WRITE,
 	.num_options = ARRAY_SIZE(upgrade_options),
 	.options = upgrade_options,
 	.parse = upgrade_parse,

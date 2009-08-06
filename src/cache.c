@@ -141,11 +141,9 @@ static int cache_clean(struct apk_database *db)
 	return 0;
 }
 
-static int cache_main(void *ctx, int argc, char **argv)
+static int cache_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
-	struct apk_database db;
-	int actions = 0;
-	int r;
+	int r = 0, actions = 0;
 
 	if (argc != 1)
 		return -EINVAL;
@@ -159,24 +157,18 @@ static int cache_main(void *ctx, int argc, char **argv)
 	else
 		return -EINVAL;
 
-	r = apk_db_open(&db, apk_root, APK_OPENF_READ |
-			APK_OPENF_NO_SCRIPTS | APK_OPENF_NO_INSTALLED);
-	if (r != 0)
-		return r;
-
-	if (!apk_db_cache_active(&db)) {
+	if (!apk_db_cache_active(db)) {
 		apk_error("Package cache is not enabled.\n");
 		r = 2;
 		goto err;
 	}
 
 	if (r == 0 && (actions & CACHE_CLEAN))
-		r = cache_clean(&db);
+		r = cache_clean(db);
 	if (r == 0 && (actions & CACHE_DOWNLOAD))
-		r = cache_download(&db);
+		r = cache_download(db);
 
 err:
-	apk_db_close(&db);
 	return r;
 }
 
@@ -187,6 +179,7 @@ static struct apk_applet apk_cache = {
 		"making /etc/apk/cache a symlink to the directory (on boot "
 		"media) that will be used as package cache.",
 	.arguments = "sync | clean | download",
+	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_NO_INSTALLED,
 	.main = cache_main,
 };
 

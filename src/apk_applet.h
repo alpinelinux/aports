@@ -14,15 +14,7 @@
 
 #include <getopt.h>
 #include "apk_defines.h"
-
-extern const char *apk_root;
-
-struct apk_repository_url {
-	struct list_head list;
-	const char *url;
-};
-
-extern struct apk_repository_url apk_repository_list;
+#include "apk_database.h"
 
 struct apk_option {
 	int val;
@@ -37,12 +29,14 @@ struct apk_applet {
 	const char *arguments;
 	const char *help;
 
+	unsigned int open_flags, forced_flags;
 	int context_size;
 	int num_options;
 	struct apk_option *options;
 
-	int (*parse)(void *ctx, int optch, int optindex, const char *optarg);
-	int (*main)(void *ctx, int argc, char **argv);
+	int (*parse)(void *ctx, struct apk_db_options *dbopts,
+		     int optch, int optindex, const char *optarg);
+	int (*main)(void *ctx, struct apk_database *db, int argc, char **argv);
 };
 
 extern struct apk_applet *__start_apkapplets, *__stop_apkapplets;

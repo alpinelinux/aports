@@ -16,20 +16,14 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 
-static int verify_main(void *ctx, int argc, char **argv)
+static int verify_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct apk_sign_ctx sctx;
 	struct apk_istream *is;
-	struct apk_database db;
 	int i, r, ok, rc = 0;
 
-	apk_flags |= APK_ALLOW_UNTRUSTED;
-	r = apk_db_open(&db, apk_root, APK_OPENF_READ | APK_OPENF_NO_STATE);
-	if (r != 0)
-		return r;
-
 	for (i = 0; i < argc; i++) {
-		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL, db.keys_fd);
+		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL, db->keys_fd);
 		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(AT_FDCWD, argv[i]),
 					      apk_sign_ctx_mpart_cb, &sctx);
 		if (is == NULL) {
@@ -49,7 +43,6 @@ static int verify_main(void *ctx, int argc, char **argv)
 			rc++;
 		apk_sign_ctx_free(&sctx);
 	}
-	apk_db_close(&db);
 
 	return rc;
 }
@@ -58,6 +51,8 @@ static struct apk_applet apk_verify = {
 	.name = "verify",
 	.help = "Verify package integrity and signature",
 	.arguments = "FILE...",
+	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE,
+	.forced_flags = APK_ALLOW_UNTRUSTED,
 	.main = verify_main,
 };
 

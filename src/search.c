@@ -98,7 +98,8 @@ static int search_desc(struct apk_database *db, int argc, char **argv)
 	return 0;
 }
 
-static int search_parse(void *ctx, int optch, int optindex, const char *optarg)
+static int search_parse(void *ctx, struct apk_db_options *dbopts,
+		        int optch, int optindex, const char *optarg)
 {
 	struct search_ctx *ictx = (struct search_ctx *) ctx;
 
@@ -112,22 +113,14 @@ static int search_parse(void *ctx, int optch, int optindex, const char *optarg)
 	return 0;
 }
 
-static int search_main(void *ctx, int argc, char **argv)
+static int search_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct search_ctx *ictx = (struct search_ctx *) ctx;
-	struct apk_database db;
-	int r;
-
-	if (apk_db_open(&db, apk_root, APK_OPENF_READ | APK_OPENF_NO_STATE) < 0)
-		return -1;
 
 	if (ictx->action != NULL)
-		r = ictx->action(&db, argc, argv);
-	else
-		r = search_list(&db, argc, argv);
+		return ictx->action(db, argc, argv);
 
-	apk_db_close(&db);
-	return r;
+	return search_list(db, argc, argv);
 }
 
 static struct apk_option search_options[] = {
@@ -138,6 +131,7 @@ static struct apk_applet apk_search = {
 	.name = "search",
 	.help = "Search package names (and descriptions) by wildcard PATTERN.",
 	.arguments = "PATTERN",
+	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE,
 	.context_size = sizeof(struct search_ctx),
 	.num_options = ARRAY_SIZE(search_options),
 	.options = search_options,

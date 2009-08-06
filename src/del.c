@@ -14,7 +14,8 @@
 #include "apk_state.h"
 #include "apk_database.h"
 
-static int del_parse(void *ctx, int optch, int optindex, const char *optarg)
+static int del_parse(void *ctx, struct apk_db_options *db,
+		     int optch, int optindex, const char *optarg)
 {
 	switch (optch) {
 	case 'r':
@@ -26,33 +27,29 @@ static int del_parse(void *ctx, int optch, int optindex, const char *optarg)
 	return 0;
 }
 
-static int del_main(void *ctx, int argc, char **argv)
+static int del_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
-	struct apk_database db;
 	struct apk_state *state;
 	struct apk_name *name;
 	int i, r = 0;
 
-	if (apk_db_open(&db, apk_root, APK_OPENF_WRITE) < 0)
-		return -1;
-
-	if (db.world == NULL)
-		goto out;
+	if (db->world == NULL)
+		return 0;
 
 	for (i = 0; i < argc; i++) {
-		name = apk_db_get_name(&db, APK_BLOB_STR(argv[i]));
+		name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 		name->flags &= ~APK_NAME_TOPLEVEL;
-		apk_deps_del(&db.world, name);
+		apk_deps_del(&db->world, name);
 	}
 
-	state = apk_state_new(&db);
+	state = apk_state_new(db);
 	if (state == NULL)
 		goto err;
 
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;
 
-		name = apk_db_get_name(&db, APK_BLOB_STR(argv[i]));
+		name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 		dep = (struct apk_dependency) {
 			.name = name,
 			.result_mask = APK_DEPMASK_CONFLICT,
@@ -64,12 +61,10 @@ static int del_main(void *ctx, int argc, char **argv)
 			goto err;
 		}
 	}
-	r = apk_state_commit(state, &db);
+	r = apk_state_commit(state, db);
 err:
 	if (state != NULL)
 		apk_state_unref(state);
-out:
-	apk_db_close(&db);
 
 	return r;
 }
@@ -83,6 +78,7 @@ static struct apk_applet apk_del = {
 	.name = "del",
 	.help = "Remove PACKAGEs from the main dependencies and uninstall them.",
 	.arguments = "PACKAGE...",
+	.open_flags = APK_OPENF_WRITE,
 	.num_options = ARRAY_SIZE(del_options),
 	.options = del_options,
 	.parse = del_parse,

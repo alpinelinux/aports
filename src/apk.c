@@ -21,11 +21,10 @@
 #include <openssl/engine.h>
 
 #include "apk_defines.h"
+#include "apk_database.h"
 #include "apk_applet.h"
 #include "apk_blob.h"
 
-const char *apk_root;
-struct apk_repository_url apk_repository_list;
 int apk_verbosity = 1, apk_wait;
 unsigned int apk_flags = 0;
 
@@ -53,6 +52,10 @@ static struct apk_option generic_options[] = {
 	{ 0x105, "wait",	"Wait for TIME seconds to get an exclusive "
 				"repository lock before failing",
 				required_argument, "TIME" },
+	{ 0x107, "keys-dir",	"Override directory of trusted keys",
+				required_argument, "KEYSDIR" },
+	{ 0x108, "repositories-file", "Override repositories file",
+				required_argument, "REPOFILE" }
 };
 
 const char *apk_error_str(int error)
@@ -239,10 +242,10 @@ static struct apk_applet *deduce_applet(int argc, char **argv)
 	return NULL;
 }
 
-static struct apk_repository_url *apk_repository_new(const char *url)
+static struct apk_repository_list *apk_repository_new(const char *url)
 {
-	struct apk_repository_url *r = calloc(1,
-			sizeof(struct apk_repository_url));
+	struct apk_repository_list *r = calloc(1,
+			sizeof(struct apk_repository_list));
 	if (r) {
 		r->url = url;
 		list_init(&r->list);
@@ -289,11 +292,13 @@ int main(int argc, char **argv)
 	struct option *opt, *all_options;
 	int r, optindex, num_options;
 	void *ctx = NULL;
-	struct apk_repository_url *repo = NULL;
+	struct apk_repository_list *repo = NULL;
+	struct apk_database db;
+	struct apk_db_options dbopts;
 
+	memset(&dbopts, 0, sizeof(dbopts));
+	list_init(&dbopts.repository_list);
 	umask(0);
-	apk_root = getenv("ROOT");
-	list_init(&apk_repository_list.list);
 
 	applet = deduce_applet(argc, argv);
 	num_options = ARRAY_SIZE(generic_options) + 1;
@@ -307,6 +312,8 @@ int main(int argc, char **argv)
 			      applet->options, applet->num_options);
 		if (applet->context_size != 0)
 			ctx = calloc(1, applet->context_size);
+		dbopts.open_flags = applet->open_flags;
+		apk_flags |= applet->forced_flags;
 	}
 
 	for (opt = all_options, sopt = short_options; opt->name != NULL; opt++) {
@@ -330,12 +337,18 @@ int main(int argc, char **argv)
 			return usage(applet);
 			break;
 		case 'p':
-			apk_root = optarg;
+			dbopts.root = optarg;
+			break;
+		case 0x107:
+			dbopts.keys_dir = optarg;
+			break;
+		case 0x108:
+			dbopts.repositories_file = optarg;
 			break;
 		case 'X':
 			repo = apk_repository_new(optarg);
 			if (repo)
-				list_add(&repo->list, &apk_repository_list.list);
+				list_add(&repo->list, &dbopts.repository_list);
 			break;
 		case 'q':
 			apk_verbosity--;
@@ -374,7 +387,7 @@ int main(int argc, char **argv)
 			break;
 		default:
 			if (applet == NULL || applet->parse == NULL ||
-			    applet->parse(ctx, r,
+			    applet->parse(ctx, &dbopts, r,
 					  optindex - ARRAY_SIZE(generic_options),
 					  optarg) != 0)
 				return usage(applet);
@@ -385,9 +398,6 @@ int main(int argc, char **argv)
 	if (applet == NULL)
 		return usage(NULL);
 
-	if (apk_root == NULL)
-		apk_root = "/";
-
 	argc -= optind;
 	argv += optind;
 	if (argc >= 1 && strcmp(argv[0], applet->name) == 0) {
@@ -395,7 +405,16 @@ int main(int argc, char **argv)
 		argv++;
 	}
 
-	r = applet->main(ctx, argc, argv);
+	r = apk_db_open(&db, &dbopts);
+	if (r != 0) {
+		apk_error("Failed to open apk database: %s",
+			  apk_error_str(r));
+		return r;
+	}
+
+	r = applet->main(ctx, &db, argc, argv);
+	apk_db_close(&db);
+
 	if (r == -EINVAL)
 		return usage(applet);
 	return r;

@@ -144,7 +144,8 @@ static int audit_system(struct apk_database *db)
 	return 0;
 }
 
-static int audit_parse(void *ctx, int optch, int optindex, const char *optarg)
+static int audit_parse(void *ctx, struct apk_db_options *dbopts,
+		       int optch, int optindex, const char *optarg)
 {
 	struct audit_ctx *actx = (struct audit_ctx *) ctx;
 
@@ -161,26 +162,14 @@ static int audit_parse(void *ctx, int optch, int optindex, const char *optarg)
 	return 0;
 }
 
-static int audit_main(void *ctx, int argc, char **argv)
+static int audit_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct audit_ctx *actx = (struct audit_ctx *) ctx;
-	struct apk_database db;
-	int r;
 
 	if (actx->audit == NULL)
 		return -EINVAL;
 
-	r = apk_db_open(&db, apk_root,
-		        APK_OPENF_READ | APK_OPENF_NO_SCRIPTS |
-			APK_OPENF_NO_REPOS);
-	if (r != 0) {
-		apk_error("Unable to open db: %s", apk_error_str(r));
-		return r;
-	}
-	r = actx->audit(&db);
-	apk_db_close(&db);
-
-	return r;
+	return actx->audit(db);
 }
 
 static struct apk_option audit_options[] = {
@@ -194,6 +183,7 @@ static struct apk_applet apk_audit = {
 	.name = "audit",
 	.help = "Audit the filesystem for changes compared to installed "
 		"database.",
+	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_NO_REPOS,
 	.context_size = sizeof(struct audit_ctx),
 	.num_options = ARRAY_SIZE(audit_options),
 	.options = audit_options,

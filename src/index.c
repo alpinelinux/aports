@@ -29,7 +29,8 @@ struct index_ctx {
 	int method;
 };
 
-static int index_parse(void *ctx, int optch, int optindex, const char *optarg)
+static int index_parse(void *ctx, struct apk_db_options *dbopts,
+		       int optch, int optindex, const char *optarg)
 {
 	struct index_ctx *ictx = (struct index_ctx *) ctx;
 
@@ -80,9 +81,8 @@ static int warn_if_no_providers(apk_hash_item item, void *ctx)
 	return 0;
 }
 
-static int index_main(void *ctx, int argc, char **argv)
+static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
-	struct apk_database db;
 	struct counts counts = {0};
 	struct apk_ostream *os;
 	struct apk_file_info fi;
@@ -99,9 +99,7 @@ static int index_main(void *ctx, int argc, char **argv)
 	if (ictx->method == 0)
 		ictx->method = APK_SIGN_GENERATE;
 
-	apk_db_open(&db, apk_root, APK_OPENF_READ | APK_OPENF_NO_STATE | APK_OPENF_NO_REPOS);
-	if ((r = index_read_file(&db, ictx)) < 0) {
-		apk_db_close(&db);
+	if ((r = index_read_file(db, ictx)) < 0) {
 		apk_error("%s: %s", ictx->index, apk_error_str(r));
 		return r;
 	}
@@ -136,7 +134,7 @@ static int index_main(void *ctx, int argc, char **argv)
 				break;
 
 			/* If we have it in the old index already? */
-			name = apk_db_query_name(&db, bname);
+			name = apk_db_query_name(db, bname);
 			if (name == NULL || name->pkgs == NULL)
 				break;
 
@@ -154,8 +152,8 @@ static int index_main(void *ctx, int argc, char **argv)
 
 		if (!found) {
 			struct apk_sign_ctx sctx;
-			apk_sign_ctx_init(&sctx, ictx->method, NULL, db.keys_fd);
-			if (apk_pkg_read(&db, argv[i], &sctx, NULL) == 0)
+			apk_sign_ctx_init(&sctx, ictx->method, NULL, db->keys_fd);
+			if (apk_pkg_read(db, argv[i], &sctx, NULL) == 0)
 				newpkgs++;
 			apk_sign_ctx_free(&sctx);
 		}
@@ -166,7 +164,7 @@ static int index_main(void *ctx, int argc, char **argv)
 		fi.name = "APKINDEX";
 		fi.mode = 0644 | S_IFREG;
 		os = apk_ostream_counter(&fi.size);
-		apk_db_index_write(&db, os);
+		apk_db_index_write(db, os);
 		os->close(os);
 	}
 
@@ -178,15 +176,14 @@ static int index_main(void *ctx, int argc, char **argv)
 		os = apk_ostream_gzip(os);
 		apk_tar_write_entry(os, &fi, NULL);
 	}
-	total = apk_db_index_write(&db, os);
+	total = apk_db_index_write(db, os);
 	if (ictx->method == APK_SIGN_GENERATE) {
 		apk_tar_write_padding(os, &fi);
 		apk_tar_write_entry(os, NULL, NULL);
 	}
 	os->close(os);
 
-	apk_hash_foreach(&db.available.names, warn_if_no_providers, &counts);
-	apk_db_close(&db);
+	apk_hash_foreach(&db->available.names, warn_if_no_providers, &counts);
 
 	if (counts.unsatisfied != 0)
 		apk_warning("Total of %d unsatisfiable package "
@@ -212,6 +209,7 @@ static struct apk_applet apk_index = {
 	.name = "index",
 	.help = "Create repository index file from FILEs.",
 	.arguments = "FILE...",
+	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE | APK_OPENF_NO_REPOS,
 	.context_size = sizeof(struct index_ctx),
 	.num_options = ARRAY_SIZE(index_options),
 	.options = index_options,

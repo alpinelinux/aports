@@ -45,7 +45,8 @@ static int ver_validate(int argc, char **argv)
 	return r;
 }
 
-static int ver_parse(void *ctx, int opt, int optindex, const char *optarg)
+static int ver_parse(void *ctx, struct apk_db_options *dbopts,
+		     int opt, int optindex, const char *optarg)
 {
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
 	switch (opt) {
@@ -89,10 +90,9 @@ static void ver_print_package_status(struct apk_package *pkg, const char *limit)
 	printf("%-40s%s %s\n", pkgname, opstr, latest);
 }
 
-static int ver_main(void *ctx, int argc, char **argv)
+static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
-	struct apk_database db;
 	struct apk_package *pkg;
 	struct apk_name *name;
 	int i, j, ret = 0;
@@ -101,14 +101,11 @@ static int ver_main(void *ctx, int argc, char **argv)
 	if (ictx->action != NULL)
 		return ictx->action(argc, argv);
 
-	if (apk_db_open(&db, apk_root, APK_OPENF_READ) < 0)
-		return -1;
-
 	if (apk_verbosity > 0)
 		printf("%-42sAvailable:\n", "Installed:");
 
 	if (argc == 0) {
-		list_for_each_entry(pkg, &db.installed.packages,
+		list_for_each_entry(pkg, &db->installed.packages,
 				    installed_pkgs_list) {
 			ver_print_package_status(pkg, ictx->limchars);
 		}
@@ -116,7 +113,7 @@ static int ver_main(void *ctx, int argc, char **argv)
 	}
 
 	for (i = 0; i < argc; i++) {
-		name = apk_db_query_name(&db, APK_BLOB_STR(argv[i]));
+		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
 		if (name == NULL) {
 			apk_error("Not found: %s", name);
 			ret = 1;
@@ -130,7 +127,6 @@ static int ver_main(void *ctx, int argc, char **argv)
 	}
 
 ver_exit:
-	apk_db_close(&db);
 	return ret;
 }
 
@@ -145,6 +141,7 @@ static struct apk_applet apk_ver = {
 	.name = "version",
 	.help = "Compare package versions (in installed database vs. available)"
 		" or do tests on version strings given on command line.",
+	.open_flags = APK_OPENF_READ,
 	.context_size = sizeof(struct ver_ctx),
 	.num_options = ARRAY_SIZE(ver_options),
 	.options = ver_options,
