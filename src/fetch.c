@@ -95,8 +95,9 @@ static int fetch_package(struct fetch_ctx *fctx,
 			 struct apk_package *pkg)
 {
 	struct apk_istream *is;
+	struct apk_repository *repo;
 	char pkgfile[PATH_MAX], url[PATH_MAX];
-	int r, i, fd;
+	int r, fd;
 
 	apk_pkg_format_plain(pkg, APK_BLOB_BUF(pkgfile));
 
@@ -110,12 +111,9 @@ static int fetch_package(struct fetch_ctx *fctx,
 	}
 
 	apk_message("Downloading %s-%s", pkg->name->name, pkg->version);
-	for (i = 0; i < APK_MAX_REPOS; i++)
-		if (pkg->repos & BIT(i))
-			break;
-
-	if (i >= APK_MAX_REPOS) {
-		apk_error("%s-%s: not present in any repository",
+	repo = apk_db_select_repo(db, pkg);
+	if (repo == NULL) {
+		apk_error("%s-%s: package is not currently available",
 			  pkg->name->name, pkg->version);
 		return -1;
 	}
@@ -123,8 +121,8 @@ static int fetch_package(struct fetch_ctx *fctx,
 	if (apk_flags & APK_SIMULATE)
 		return 0;
 
-	snprintf(url, sizeof(url), "%s%s%s", db->repos[i].url,
-		 db->repos[i].url[strlen(db->repos[i].url)-1] == '/' ? "" : "/",
+	snprintf(url, sizeof(url), "%s%s%s", repo->url,
+		 repo->url[strlen(repo->url)-1] == '/' ? "" : "/",
 		 pkgfile);
 
 	if (fctx->flags & FETCH_STDOUT) {

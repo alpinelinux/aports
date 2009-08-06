@@ -98,6 +98,7 @@ struct apk_database {
 	unsigned name_id, num_repos;
 	const char *cache_dir;
 	int permanent;
+	unsigned int local_repos;
 
 	struct apk_dependency_array *world;
 	struct apk_string_array *protected_paths;
@@ -159,6 +160,8 @@ int apk_db_index_read_file(struct apk_database *db, const char *file, int repo);
 int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
+struct apk_repository *apk_db_select_repo(struct apk_database *db,
+					  struct apk_package *pkg);
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo);
 
 int apk_db_cache_active(struct apk_database *db);

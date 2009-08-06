@@ -1156,6 +1156,37 @@ static struct apk_bstream *apk_repository_file_open(struct apk_repository *repo,
 	return apk_bstream_from_url(tmp);
 }
 
+struct apk_repository *apk_db_select_repo(struct apk_database *db,
+					  struct apk_package *pkg)
+{
+	unsigned int repos = pkg->repos;
+	int i;
+
+	/* Always prefer local repositories */
+	if ((repos & db->local_repos) != 0)
+		repos &= db->local_repos;
+
+	/* Pick first repository providing this package */
+	for (i = 0; i < APK_MAX_REPOS; i++)
+		if (repos & BIT(i))
+			break;
+
+	if (i >= APK_MAX_REPOS)
+		return NULL;
+
+	/* If this is a remote repository, and we have no network,
+	 * check that we have it in cache */
+	if ((db->local_repos & BIT(i)) == 0 && (apk_flags & APK_NO_NETWORK)) {
+		char cacheitem[PATH_MAX];
+
+		apk_pkg_format_cache(pkg, APK_BLOB_BUF(cacheitem));
+		if (faccessat(db->cache_fd, cacheitem, R_OK, 0) != 0)
+			return NULL;
+	}
+
+	return &db->repos[i];
+}
+
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 {
 	char cacheitem[PATH_MAX];
@@ -1282,6 +1313,8 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 			targz = 0;
 		}
 	} else {
+		db->local_repos |= BIT(r);
+
 		bs = apk_repository_file_open(repo, apkindex_tar_gz);
 		if (bs == NULL) {
 			bs = apk_repository_file_open(repo, apk_index_gz);
@@ -1686,22 +1719,18 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	struct apk_bstream *bs = NULL;
 	struct apk_istream *tar;
 	char file[PATH_MAX];
-	int r, i, need_copy = FALSE;
+	int r, need_copy = FALSE;
 
 	if (newpkg->filename == NULL) {
 		struct apk_repository *repo;
 
-		for (i = 0; i < APK_MAX_REPOS; i++)
-			if (newpkg->repos & BIT(i))
-				break;
-
-		if (i >= APK_MAX_REPOS) {
-			apk_error("%s-%s: not present in any repository",
+		repo = apk_db_select_repo(db, newpkg);
+		if (repo == NULL) {
+			apk_error("%s-%s: package is not currently available",
 				  newpkg->name->name, newpkg->version);
 			return -1;
 		}
 
-		repo = &db->repos[i];
 		if (apk_db_cache_active(db) &&
 		    repo->csum.type != APK_CHECKSUM_NONE) {
 			apk_pkg_format_cache(newpkg, APK_BLOB_BUF(file));

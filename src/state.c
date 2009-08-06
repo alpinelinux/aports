@@ -142,6 +142,7 @@ struct apk_state *apk_state_new(struct apk_database *db)
 	state = (struct apk_state*) calloc(1, num_bytes);
 	state->refs = 1;
 	state->num_names = db->name_id;
+	state->db = db;
 	list_init(&state->change_list_head);
 
 	/* Instantiate each 'name' target in world, and lockout incompatible
@@ -291,6 +292,10 @@ int apk_state_lock_dependency(struct apk_state *state,
 
 		if (apk_pkg_get_state(c->pkgs[i]) == APK_PKG_INSTALLED)
 			installed = pkg;
+
+		if (pkg->filename == NULL &&
+		    apk_db_select_repo(state->db, pkg) == NULL)
+			continue;
 
 		if (latest == NULL) {
 			latest = pkg;

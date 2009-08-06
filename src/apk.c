@@ -55,7 +55,8 @@ static struct apk_option generic_options[] = {
 	{ 0x107, "keys-dir",	"Override directory of trusted keys",
 				required_argument, "KEYSDIR" },
 	{ 0x108, "repositories-file", "Override repositories file",
-				required_argument, "REPOFILE" }
+				required_argument, "REPOFILE" },
+	{ 0x109, "no-network",	"Do not use network (cache is still used)" },
 };
 
 const char *apk_error_str(int error)
@@ -379,6 +380,9 @@ int main(int argc, char **argv)
 			break;
 		case 0x105:
 			apk_wait = atoi(optarg);
+			break;
+		case 0x109:
+			apk_flags |= APK_NO_NETWORK;
 			break;
 		default:
 			if (applet == NULL || applet->parse == NULL ||

@@ -28,6 +28,7 @@ static int cache_download(struct apk_database *db)
 	struct apk_state *state;
 	struct apk_change *change;
 	struct apk_package *pkg;
+	struct apk_repository *repo;
 	char item[PATH_MAX], cacheitem[PATH_MAX];
 	int i, r = 0;
 
@@ -54,17 +55,13 @@ static int cache_download(struct apk_database *db)
 		if (faccessat(db->cache_fd, cacheitem, R_OK, 0) == 0)
 			continue;
 
-		for (i = 0; i < db->num_repos; i++) {
-			if (!(pkg->repos & BIT(i)))
-				continue;
+		repo = apk_db_select_repo(db, pkg);
+		if (repo == NULL)
+			continue;
 
-			apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
-			r = apk_cache_download(db, db->repos[i].url,
-					       item, cacheitem,
-					       APK_SIGN_VERIFY_IDENTITY);
-			if (r != 0)
-				return r;
-		}
+		apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
+		apk_cache_download(db, repo->url, item, cacheitem,
+				   APK_SIGN_VERIFY_IDENTITY);
 	}
 
 err:

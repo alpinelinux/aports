@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -24,6 +24,7 @@ struct apk_change {
 
 struct apk_state {
 	unsigned int refs, num_names;
+	struct apk_database *db;
 	struct list_head change_list_head;
 	apk_name_state_t name[];
 };
