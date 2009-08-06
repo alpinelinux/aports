@@ -19,6 +19,7 @@
 #include "apk_database.h"
 
 struct audit_ctx {
+	unsigned int open_flags;
 	int (*audit)(struct apk_database *db);
 };
 
@@ -169,9 +170,11 @@ static int audit_main(void *ctx, int argc, char **argv)
 	if (actx->audit == NULL)
 		return -EINVAL;
 
-	r = apk_db_open(&db, apk_root, APK_OPENF_READ);
+	r = apk_db_open(&db, apk_root,
+		        APK_OPENF_READ | APK_OPENF_NO_SCRIPTS |
+			APK_OPENF_NO_REPOS);
 	if (r != 0) {
-		apk_error("APK database not present");
+		apk_error("Unable to open db: %s", apk_error_str(r));
 		return r;
 	}
 	r = actx->audit(&db);
