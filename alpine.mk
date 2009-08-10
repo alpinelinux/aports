@@ -15,7 +15,7 @@ ISO_LINK	?= $(ALPINE_NAME).iso
 ISO_DIR		:= $(DESTDIR)/isofs
 ISO_PKGDIR	:= $(ISO_DIR)/apks
 
-APK_OPTS	:= $(addprefix --repo ,$(APK_REPOS))
+APK_OPTS	:= $(addprefix --repository ,$(APK_REPOS))
 
 find_apk_ver	= $(shell apk search $(APK_OPTS) $(1) | sort | uniq)
 find_apk_file	= $(addsuffix .apk,$(call find_apk_ver,$(1)))
