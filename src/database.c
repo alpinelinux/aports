@@ -1431,6 +1431,9 @@ static int apk_db_install_archive_entry(void *_ctx,
 	const char *p;
 	int r = 0, type = APK_SCRIPT_INVALID;
 
+	if (apk_sign_ctx_process_file(&ctx->sctx, ae, is) == 0)
+		return 0;
+
 	/* Package metainfo and script processing */
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */

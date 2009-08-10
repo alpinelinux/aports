@@ -346,8 +346,8 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
 	}
 	EVP_MD_CTX_init(&ctx->mdctx);
 	EVP_DigestInit_ex(&ctx->mdctx, ctx->md, NULL);
+	EVP_MD_CTX_set_flags(&ctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 }
-
 
 void apk_sign_ctx_free(struct apk_sign_ctx *ctx)
 {
@@ -355,6 +355,7 @@ void apk_sign_ctx_free(struct apk_sign_ctx *ctx)
 		free(ctx->signature.data.ptr);
 	if (ctx->signature.pkey != NULL)
 		EVP_PKEY_free(ctx->signature.pkey);
+	EVP_MD_CTX_cleanup(&ctx->mdctx);
 }
 
 int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
@@ -468,15 +469,19 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 		goto update_digest;
 
 	/* Still in signature blocks? */
-	if (!sctx->control_started)
+	if (!sctx->control_started) {
+		if (part == APK_MPART_END)
+			return -EKEYREJECTED;
 		goto reset_digest;
+	}
 
 	/* Grab state and mark all remaining block as data */
 	end_of_control = (sctx->data_started == 0);
 	sctx->data_started = 1;
 
 	/* End of control-block and control does not have data checksum? */
-	if (sctx->has_data_checksum == 0 && end_of_control)
+	if (sctx->has_data_checksum == 0 && end_of_control &&
+	    part != APK_MPART_END)
 		goto update_digest;
 
 	/* Drool in the remaining of the digest block now, we will finish
@@ -542,7 +547,6 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 		sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
 		EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
 	}
-
 reset_digest:
 	EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
 	EVP_MD_CTX_set_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
