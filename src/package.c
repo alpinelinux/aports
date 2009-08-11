@@ -847,17 +847,22 @@ int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
 		if (script->type != type)
 			continue;
 
-		snprintf(fn, sizeof(fn), "tmp/%s-%s.%s",
+		/* Avoid /tmp as it can be mounted noexec */
+		snprintf(fn, sizeof(fn), "var/cache/misc/%s-%s.%s",
 			pkg->name->name, pkg->version,
 			apk_script_types[type]);
 
-		fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0777);
-		if (fd < 0)
-			return fd;
+		fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0755);
+		if (fd < 0) {
+			mkdirat(root_fd, "var/cache/misc", 0755);
+			fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0755);
+			if (fd < 0)
+				return -errno;
+		}
 		write(fd, script->script, script->size);
 		close(fd);
 
-		apk_message("Executing %s", &fn[4]);
+		apk_message("Executing %s", &fn[15]);
 
 		pid = fork();
 		if (pid == -1)

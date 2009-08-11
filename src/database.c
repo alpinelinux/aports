@@ -862,6 +862,8 @@ static int apk_db_create(struct apk_database *db)
 	mkdirat(db->root_fd, "var", 0755);
 	mkdirat(db->root_fd, "var/lib", 0755);
 	mkdirat(db->root_fd, "var/lib/apk", 0755);
+	mkdirat(db->root_fd, "var/cache", 0755);
+	mkdirat(db->root_fd, "var/cache/misc", 0755);
 
 	fd = openat(db->root_fd, "var/lib/apk/world", O_CREAT|O_RDWR|O_TRUNC, 0644);
 	if (fd < 0)
