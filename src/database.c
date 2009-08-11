@@ -1567,16 +1567,6 @@ static int apk_db_install_archive_entry(void *_ctx,
 				struct apk_db_dir_instance *ldiri;
 				struct hlist_node *n;
 
-				if (S_ISLNK(ae->mode)) {
-					EVP_Digest(ae->link_target,
-						   strlen(ae->link_target),
-						   file->csum.data, NULL,
-						   apk_checksum_default(),
-						   NULL);
-					file->csum.type = APK_CHECKSUM_DEFAULT;
-					break;
-				}
-
 				if (!apk_blob_rsplit(APK_BLOB_STR(ae->link_target),
 						     '/', &bdir, &bfile))
 					break;

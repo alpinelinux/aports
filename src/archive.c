@@ -50,7 +50,7 @@ struct apk_tar_digest_info {
 	char id[4];
 	uint16_t nid;
 	uint16_t size;
-	char digest[];
+	unsigned char digest[];
 };
 
 #define GET_OCTAL(s)	get_octal(s, sizeof(s))
@@ -124,12 +124,13 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		.tar_is = is,
 	};
 	struct tar_header buf;
-	struct apk_tar_digest_info *di;
+	struct apk_tar_digest_info *odi, *di;
 	unsigned long offset = 0;
 	int end = 0, r;
 	size_t toskip;
 
-	di = (struct apk_tar_digest_info *) &buf.linkname[3];
+	odi = (struct apk_tar_digest_info *) &buf.linkname[3];
+	di  = (struct apk_tar_digest_info *) &buf.devmajor[0];
 	EVP_MD_CTX_init(&teis.mdctx);
 	memset(&entry, 0, sizeof(entry));
 	while ((r = is->read(is, &buf, 512)) == 512) {
@@ -155,6 +156,13 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		};
 		teis.csum = NULL;
 
+		if (memcmp(di->id, "APK2", 4) == 0 &&
+		    di->size <= sizeof(entry.csum.data)) {
+			entry.csum.type = di->size;
+			memcpy(&entry.csum.data[0], buf.devminor, sizeof(buf.devminor));
+			memcpy(&entry.csum.data[sizeof(buf.devminor)], buf.padding, sizeof(buf.padding));
+		}
+
 		switch (buf.typeflag) {
 		case 'L':
 			if (entry.name != NULL)
@@ -168,12 +176,14 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		case '0':
 		case '7': /* regular file */
 			entry.mode |= S_IFREG;
-			if (memcmp(di->id, "APK2", 4) == 0 &&
-			    di->size <= sizeof(entry.csum.data)) {
-				entry.csum.type = di->size;
-				memcpy(entry.csum.data, di->digest, di->size);
-			} else if (soft_checksums) {
-				teis.csum = &entry.csum;
+			if (entry.csum.type == APK_CHECKSUM_NONE) {
+				if (memcmp(odi->id, "APK2", 4) == 0 &&
+				    odi->size <= sizeof(entry.csum.data)) {
+					entry.csum.type = odi->size;
+					memcpy(entry.csum.data, odi->digest,
+					       odi->size);
+				} else if (soft_checksums)
+					teis.csum = &entry.csum;
 			}
 			break;
 		case '1': /* hard link */
@@ -183,6 +193,13 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		case '2': /* symbolic link */
 			entry.mode |= S_IFLNK;
 			entry.link_target = buf.linkname;
+			if (entry.csum.type == APK_CHECKSUM_NONE &&
+			    soft_checksums) {
+				EVP_Digest(buf.linkname, strlen(buf.linkname),
+					   entry.csum.data, NULL,
+					   apk_checksum_default(), NULL);
+				entry.csum.type = APK_CHECKSUM_DEFAULT;
+			}
 			break;
 		case '3': /* char device */
 			entry.mode |= S_IFCHR;
