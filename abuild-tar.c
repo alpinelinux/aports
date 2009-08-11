@@ -42,6 +42,8 @@ struct tar_header {
 	char padding[12];   /* 500-512 */
 };
 
+#define MAX_MD_SIZE 20
+
 #define GET_OCTAL(s)	get_octal(s, sizeof(s))
 #define PUT_OCTAL(s,v)	put_octal(s, sizeof(s), v)
 
@@ -94,10 +96,10 @@ static int usage(void)
 	fprintf(stderr,
 "abuild-tar " VERSION "\n"
 "\n"
-"usage: abuild-tar [--hash [<algorithm>]] [--cut]\n"
+"usage: abuild-tar [--hash[=<algorithm>]] [--cut]\n"
 "\n"
 "options:\n"
-"  --hash [sha1|md5]	Read tar archive from stdin, precalculate hash for \n"
+"  --hash[=sha1|md5]	Read tar archive from stdin, precalculate hash for \n"
 "			regular	entries and output tar archive on stdout\n"
 "  --cut		Remove the end of file tar record\n"
 "\n");
@@ -173,7 +175,7 @@ static int do_it(const EVP_MD *md, int cut)
 	struct tar_header hdr;
 	size_t size, aligned_size;
 	void *ptr;
-	int dohash = 0, r;
+	int r;
 	struct {
 		char id[4];
 		uint16_t nid;
@@ -193,22 +195,34 @@ static int do_it(const EVP_MD *md, int cut)
 		if (cut && hdr.name[0] == 0)
 			return 0;
 
+		ptr = NULL;
 		size = GET_OCTAL(hdr.size);
 		aligned_size = (size + 511) & ~511;
 
-		if (md != NULL)
-			dohash = (hdr.typeflag == '0' || hdr.typeflag == '7');
-		if (dohash) {
+		if (md != NULL &&
+		    (hdr.typeflag == '0' || hdr.typeflag == '2' ||
+		     hdr.typeflag == '7')) {
 			const unsigned char *src;
+			unsigned char csdata[MAX_MD_SIZE];
 			int chksum, i;
 
-			ptr = malloc(aligned_size);
-			if (full_read(STDIN_FILENO, ptr, aligned_size) != aligned_size)
-				return 1;
+			if (hdr.typeflag == '0' || hdr.typeflag == '7') {
+				ptr = malloc(aligned_size);
+				if (full_read(STDIN_FILENO, ptr, aligned_size)
+				    != aligned_size)
+					return 1;
 
-			memcpy(&hdr.linkname[3], &mdinfo, sizeof(mdinfo));
-			EVP_Digest(ptr, size, &hdr.linkname[3+sizeof(mdinfo)],
-				   NULL, md, NULL);
+				memcpy(&hdr.linkname[3], &mdinfo, sizeof(mdinfo));
+				EVP_Digest(ptr, size, csdata, NULL, md, NULL);
+			} else {
+				EVP_Digest(hdr.linkname, strlen(hdr.linkname),
+					   csdata, NULL, md, NULL);
+			}
+
+			/* Embed to header */
+			memcpy(&hdr.devmajor, &mdinfo, sizeof(hdr.devmajor));
+			memcpy(&hdr.devminor, &csdata[0], sizeof(hdr.devminor));
+			memcpy(&hdr.padding,  &csdata[sizeof(hdr.devminor)], sizeof(hdr.padding));
 
 			/* Recalculate checksum */
 			memset(hdr.chksum, ' ', sizeof(hdr.chksum));
@@ -221,7 +235,7 @@ static int do_it(const EVP_MD *md, int cut)
 		if (full_write(STDOUT_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
 			return 2;
 
-		if (dohash) {
+		if (ptr != NULL) {
 			if (full_write(STDOUT_FILENO, ptr, aligned_size) != aligned_size)
 				return 2;
 			free(ptr);
@@ -271,6 +285,10 @@ int main(int argc, char **argv)
 		md = EVP_get_digestbyname(digest);
 		if (md == NULL)
 			return usage();
+		if (EVP_MD_size(md) > MAX_MD_SIZE) {
+			fprintf(stderr, "digest size is too large\n");
+			return -1;
+		}
 	}
 
 	return do_it(md, cut);
