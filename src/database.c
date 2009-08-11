@@ -1280,8 +1280,8 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	struct apk_repository *repo;
 	int r, targz = 1;
 
-	if (repository.ptr == NULL || *repository.ptr == '\0'
-			|| *repository.ptr == '\n' || *repository.ptr == '#')
+	if (repository.ptr == NULL || repository.len == 0 ||
+	    *repository.ptr == '#')
 		return 0;
 
 	if (db->num_repos >= APK_MAX_REPOS)
