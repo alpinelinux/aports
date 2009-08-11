@@ -488,12 +488,25 @@ int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 	if (checksum == APK_CHECKSUM_NONE)
 		return 0;
 
+	if ((flags & APK_FI_NOFOLLOW) && S_ISLNK(st.st_mode)) {
+		char *target = alloca(st.st_size);
+		if (target == NULL)
+			return -ENOMEM;
+		if (readlinkat(atfd, filename, target, st.st_size) < 0)
+			return -errno;
+
+		EVP_Digest(target, st.st_size, fi->csum.data, NULL,
+			   apk_checksum_evp(checksum), NULL);
+		fi->csum.type = checksum;
+		return 0;
+	}
+
 	bs = apk_bstream_from_file(atfd, filename);
 	if (bs != NULL) {
 		EVP_MD_CTX mdctx;
 		apk_blob_t blob;
 
-		EVP_DigestInit(&mdctx, apk_get_digest(checksum));
+		EVP_DigestInit(&mdctx, apk_checksum_evp(checksum));
 		if (bs->flags & APK_BSTREAM_SINGLE_READ)
 			EVP_MD_CTX_set_flags(&mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 		while (!APK_BLOB_IS_NULL(blob = bs->read(bs, APK_BLOB_NULL)))

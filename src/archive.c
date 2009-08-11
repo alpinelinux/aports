@@ -205,7 +205,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			/* callback parser function */
 			if (teis.csum != NULL)
 				EVP_DigestInit_ex(&teis.mdctx,
-						  apk_default_checksum(), NULL);
+						  apk_checksum_default(), NULL);
 
 			r = parser(ctx, &entry, &teis.is);
 			free(entry.name);

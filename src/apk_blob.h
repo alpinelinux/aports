@@ -27,6 +27,7 @@ typedef int (*apk_blob_cb)(void *ctx, apk_blob_t blob);
 #define APK_CHECKSUM_NONE	0
 #define APK_CHECKSUM_MD5	16
 #define APK_CHECKSUM_SHA1	20
+#define APK_CHECKSUM_DEFAULT	APK_CHECKSUM_SHA1
 
 /* Internal cointainer for MD5 or SHA1 */
 struct apk_checksum {
@@ -34,12 +35,7 @@ struct apk_checksum {
 	unsigned char type;
 };
 
-static inline const EVP_MD *apk_default_checksum(void)
-{
-	return EVP_sha1();
-}
-
-static inline const EVP_MD *apk_get_digest(int type)
+static inline const EVP_MD *apk_checksum_evp(int type)
 {
 	switch (type) {
 	case APK_CHECKSUM_MD5:
@@ -48,6 +44,11 @@ static inline const EVP_MD *apk_get_digest(int type)
 		return EVP_sha1();
 	}
 	return EVP_md_null();
+}
+
+static inline const EVP_MD *apk_checksum_default(void)
+{
+	return apk_checksum_evp(APK_CHECKSUM_DEFAULT);
 }
 
 #define APK_BLOB_IS_NULL(blob)		((blob).ptr == NULL)

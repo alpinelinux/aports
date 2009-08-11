@@ -1319,7 +1319,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	if (apk_url_local_file(repo->url) == NULL) {
 		char cacheitem[PATH_MAX];
 
-		apk_blob_checksum(repository, apk_default_checksum(), &repo->csum);
+		apk_blob_checksum(repository, apk_checksum_default(), &repo->csum);
 
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_repository_update(db, repo);
@@ -1566,6 +1566,16 @@ static int apk_db_install_archive_entry(void *_ctx,
 				struct apk_db_file *lfile;
 				struct apk_db_dir_instance *ldiri;
 				struct hlist_node *n;
+
+				if (S_ISLNK(ae->mode)) {
+					EVP_Digest(ae->link_target,
+						   strlen(ae->link_target),
+						   file->csum.data, NULL,
+						   apk_checksum_default(),
+						   NULL);
+					file->csum.type = APK_CHECKSUM_DEFAULT;
+					break;
+				}
 
 				if (!apk_blob_rsplit(APK_BLOB_STR(ae->link_target),
 						     '/', &bdir, &bfile))
