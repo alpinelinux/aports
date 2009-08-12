@@ -63,7 +63,10 @@ static apk_blob_t pkg_name_get_key(apk_hash_item item)
 static void pkg_name_free(struct apk_name *name)
 {
 	free(name->name);
-	free(name->pkgs);
+	if (name->pkgs)
+		free(name->pkgs);
+	if (name->rdepends)
+		free(name->rdepends);
 	free(name);
 }
 
@@ -407,6 +410,11 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 		if (idb->filename == NULL && pkg->filename != NULL) {
 			idb->filename = pkg->filename;
 			pkg->filename = NULL;
+		}
+		if (idb->ipkg == NULL && pkg->ipkg != NULL) {
+			idb->ipkg = pkg->ipkg;
+			idb->ipkg->pkg = idb;
+			pkg->ipkg = NULL;
 		}
 		apk_pkg_free(pkg);
 	}
