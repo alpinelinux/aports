@@ -53,7 +53,7 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 			goto err;
 
 		for (j = 0; j < name->pkgs->num; j++) {
-			if (apk_pkg_get_state(name->pkgs->item[j]) == APK_PKG_INSTALLED)
+			if (name->pkgs->item[j]->ipkg != NULL)
 				break;
 		}
 		if (j >= name->pkgs->num) {

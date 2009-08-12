@@ -20,12 +20,14 @@ struct apk_database;
 struct apk_name;
 
 #define APK_SCRIPT_INVALID		-1
-#define APK_SCRIPT_PRE_INSTALL		1
-#define APK_SCRIPT_POST_INSTALL		2
-#define APK_SCRIPT_PRE_DEINSTALL	3
-#define APK_SCRIPT_POST_DEINSTALL	4
-#define APK_SCRIPT_PRE_UPGRADE		5
-#define APK_SCRIPT_POST_UPGRADE		6
+#define APK_SCRIPT_PRE_INSTALL		0
+#define APK_SCRIPT_POST_INSTALL		1
+#define APK_SCRIPT_PRE_DEINSTALL	2
+#define APK_SCRIPT_POST_DEINSTALL	3
+#define APK_SCRIPT_PRE_UPGRADE		4
+#define APK_SCRIPT_POST_UPGRADE		5
+#define APK_SCRIPT_TRIGGER		6
+#define APK_SCRIPT_MAX			7
 
 #define APK_PKG_NOT_INSTALLED		0
 #define APK_PKG_INSTALLED		1
@@ -58,13 +60,6 @@ struct apk_sign_ctx {
 	} signature;
 };
 
-struct apk_script {
-	struct hlist_node script_list;
-	unsigned int type;
-	unsigned int size;
-	char script[];
-};
-
 #define APK_DEPMASK_REQUIRE	(APK_VERSION_EQUAL|APK_VERSION_LESS|\
 				 APK_VERSION_GREATER)
 #define APK_DEPMASK_CONFLICT	(0)
@@ -76,9 +71,17 @@ struct apk_dependency {
 };
 APK_ARRAY(apk_dependency_array, struct apk_dependency);
 
+struct apk_installed_package {
+	struct apk_package *pkg;
+	struct list_head installed_pkgs_list;
+	struct list_head trigger_pkgs_list;
+	struct hlist_head owned_dirs;
+	apk_blob_t script[APK_SCRIPT_MAX];
+	struct apk_string_array *triggers;
+};
+
 struct apk_package {
 	apk_hash_node hash_node;
-
 	unsigned repos;
 	struct apk_name *name;
 	char *version;
@@ -87,11 +90,7 @@ struct apk_package {
 	size_t installed_size, size;
 	char *filename;
 	struct apk_checksum csum;
-
-	/* for installed packages only */
-	struct list_head installed_pkgs_list;
-	struct hlist_head owned_dirs;
-	struct hlist_head scripts;
+	struct apk_installed_package *ipkg;
 };
 APK_ARRAY(apk_package_array, struct apk_package *);
 
@@ -134,12 +133,15 @@ int apk_pkg_parse_name(apk_blob_t apkname, apk_blob_t *name, apk_blob_t *version
 
 int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		     char field, apk_blob_t value);
-int apk_pkg_get_state(struct apk_package *pkg);
-void apk_pkg_set_state(struct apk_database *db, struct apk_package *pkg, int state);
-int apk_pkg_add_script(struct apk_package *pkg, struct apk_istream *is,
-		       unsigned int type, unsigned int size);
-int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
-		       unsigned int type);
+
+struct apk_installed_package *apk_pkg_install(struct apk_database *db, struct apk_package *pkg);
+void apk_pkg_uninstall(struct apk_database *db, struct apk_package *pkg);
+
+int apk_ipkg_add_script(struct apk_installed_package *ipkg,
+			struct apk_istream *is,
+			unsigned int type, unsigned int size);
+int apk_ipkg_run_script(struct apk_installed_package *ipkg, int root_fd,
+		        unsigned int type, char **argv);
 
 struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_t entry);
 int apk_pkg_write_index_entry(struct apk_package *pkg, struct apk_ostream *os);

@@ -296,7 +296,7 @@ int apk_state_lock_dependency(struct apk_state *state,
 	for (i = 0; i < c->num; i++) {
 		struct apk_package *pkg = c->pkgs[i];
 
-		if (apk_pkg_get_state(c->pkgs[i]) == APK_PKG_INSTALLED)
+		if (c->pkgs[i]->ipkg != NULL)
 			installed = pkg;
 		else if (pkg->filename == NULL &&
 		         apk_db_select_repo(state->db, pkg) == NULL)
@@ -422,8 +422,7 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 				ns_to_choices(state->name[name0->id]);
 
 			for (j = 0; j < ns->num; j++) {
-				if (apk_pkg_get_state(ns->pkgs[j])
-				    != APK_PKG_INSTALLED)
+				if (ns->pkgs[j]->ipkg == NULL)
 					continue;
 				r = call_if_dependency_broke(state,
 							     ns->pkgs[j],
@@ -436,7 +435,7 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 			for (j = 0; j < name0->pkgs->num; j++) {
 				pkg0 = name0->pkgs->item[j];
 
-				if (apk_pkg_get_state(pkg0) != APK_PKG_INSTALLED)
+				if (pkg0->ipkg == NULL)
 					continue;
 
 				r = call_if_dependency_broke(state,
@@ -487,8 +486,7 @@ int apk_state_lock_name(struct apk_state *state,
 			struct apk_package *pkg = name->pkgs->item[i];
 
 			if (name->pkgs->item[i]->name == name &&
-			    apk_pkg_get_state(name->pkgs->item[i])
-			    == APK_PKG_INSTALLED)
+			    name->pkgs->item[i]->ipkg != NULL)
 				oldpkg = pkg;
 		}
 	}

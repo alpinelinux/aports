@@ -93,7 +93,7 @@ static void ver_print_package_status(struct apk_package *pkg, const char *limit)
 static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
-	struct apk_package *pkg;
+	struct apk_installed_package *ipkg;
 	struct apk_name *name;
 	int i, j, ret = 0;
 
@@ -105,9 +105,9 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		printf("%-42sAvailable:\n", "Installed:");
 
 	if (argc == 0) {
-		list_for_each_entry(pkg, &db->installed.packages,
+		list_for_each_entry(ipkg, &db->installed.packages,
 				    installed_pkgs_list) {
-			ver_print_package_status(pkg, ictx->limchars);
+			ver_print_package_status(ipkg->pkg, ictx->limchars);
 		}
 		goto ver_exit;
 	}
@@ -121,7 +121,7 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		}
 		for (j = 0; j < name->pkgs->num; j++) {
 			struct apk_package *pkg = name->pkgs->item[j];
-			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
+			if (pkg->ipkg != NULL)
 				ver_print_package_status(pkg, ictx->limchars);
 		}
 	}

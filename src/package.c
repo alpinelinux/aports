@@ -53,13 +53,52 @@ void apk_pkg_format_cache(struct apk_package *pkg, apk_blob_t to)
 
 struct apk_package *apk_pkg_new(void)
 {
-	struct apk_package *pkg;
+	return calloc(1, sizeof(struct apk_package));
+}
 
-	pkg = calloc(1, sizeof(struct apk_package));
-	if (pkg != NULL)
-		list_init(&pkg->installed_pkgs_list);
+struct apk_installed_package *apk_pkg_install(struct apk_database *db,
+					      struct apk_package *pkg)
+{
+	struct apk_installed_package *ipkg;
 
-	return pkg;
+	if (pkg->ipkg != NULL)
+		return pkg->ipkg;
+
+	pkg->ipkg = ipkg = calloc(1, sizeof(struct apk_installed_package));
+	ipkg->pkg = pkg;
+	list_init(&ipkg->installed_pkgs_list);
+
+	db->installed.stats.packages++;
+	list_add_tail(&ipkg->installed_pkgs_list, &db->installed.packages);
+
+	return ipkg;
+}
+
+void apk_pkg_uninstall(struct apk_database *db, struct apk_package *pkg)
+{
+	struct apk_installed_package *ipkg = pkg->ipkg;
+	int i;
+
+	if (ipkg == NULL)
+		return;
+
+	if (db != NULL)
+		db->installed.stats.packages--;
+
+	list_del(&ipkg->installed_pkgs_list);
+
+	if (ipkg->triggers) {
+		list_del(&ipkg->trigger_pkgs_list);
+		for (i = 0; i < ipkg->triggers->num; i++)
+			free(ipkg->triggers->item[i]);
+		free(ipkg->triggers);
+	}
+
+	for (i = 0; i < APK_SCRIPT_MAX; i++)
+		if (ipkg->script[i].ptr != NULL)
+			free(ipkg->script[i].ptr);
+	free(ipkg);
+	pkg->ipkg = NULL;
 }
 
 int apk_pkg_parse_name(apk_blob_t apkname,
@@ -293,6 +332,7 @@ const char *apk_script_types[] = {
 	[APK_SCRIPT_POST_DEINSTALL]	= "post-deinstall",
 	[APK_SCRIPT_PRE_UPGRADE]	= "pre-upgrade",
 	[APK_SCRIPT_POST_UPGRADE]	= "post-upgrade",
+	[APK_SCRIPT_TRIGGER]		= "trigger",
 };
 
 int apk_script_type(const char *name)
@@ -763,15 +803,10 @@ err:
 
 void apk_pkg_free(struct apk_package *pkg)
 {
-	struct apk_script *script;
-	struct hlist_node *c, *n;
-
 	if (pkg == NULL)
 		return;
 
-	hlist_for_each_entry_safe(script, c, n, &pkg->scripts, script_list)
-		free(script);
-
+	apk_pkg_uninstall(NULL, pkg);
 	if (pkg->depends)
 		free(pkg->depends);
 	if (pkg->version)
@@ -785,106 +820,84 @@ void apk_pkg_free(struct apk_package *pkg)
 	free(pkg);
 }
 
-int apk_pkg_get_state(struct apk_package *pkg)
+int apk_ipkg_add_script(struct apk_installed_package *ipkg,
+			struct apk_istream *is,
+			unsigned int type, unsigned int size)
 {
-	if (list_hashed(&pkg->installed_pkgs_list))
-		return APK_PKG_INSTALLED;
-	return APK_PKG_NOT_INSTALLED;
-}
-
-void apk_pkg_set_state(struct apk_database *db, struct apk_package *pkg, int state)
-{
-	switch (state) {
-	case APK_PKG_INSTALLED:
-		if (!list_hashed(&pkg->installed_pkgs_list)) {
-			db->installed.stats.packages++;
-			list_add_tail(&pkg->installed_pkgs_list,
-				      &db->installed.packages);
-		}
-		break;
-	case APK_PKG_NOT_INSTALLED:
-		if (list_hashed(&pkg->installed_pkgs_list)) {
-			db->installed.stats.packages--;
-			list_del(&pkg->installed_pkgs_list);
-		}
-		break;
-	}
-}
-
-int apk_pkg_add_script(struct apk_package *pkg, struct apk_istream *is,
-		       unsigned int type, unsigned int size)
-{
-	struct apk_script *script;
+	void *ptr;
 	int r;
 
-	script = malloc(sizeof(struct apk_script) + size);
-	script->type = type;
-	script->size = size;
-	r = is->read(is, script->script, size);
+	if (type >= APK_SCRIPT_MAX)
+		return -1;
+
+	ptr = malloc(size);
+	r = is->read(is, ptr, size);
 	if (r < 0) {
-		free(script);
+		free(ptr);
 		return r;
 	}
 
-	hlist_add_head(&script->script_list, &pkg->scripts);
-	return r;
+	if (ipkg->script[type].ptr)
+		free(ipkg->script[type].ptr);
+	ipkg->script[type].ptr = ptr;
+	ipkg->script[type].len = size;
+	return 0;
 }
 
-int apk_pkg_run_script(struct apk_package *pkg, int root_fd,
-		       unsigned int type)
+int apk_ipkg_run_script(struct apk_installed_package *ipkg, int root_fd,
+			unsigned int type, char **argv)
 {
-	static const char * const environment[] = {
+	static char * const environment[] = {
 		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
 		NULL
 	};
-	struct apk_script *script;
-	struct hlist_node *c;
+	struct apk_package *pkg = ipkg->pkg;
+	char fn[PATH_MAX];
 	int fd, status;
 	pid_t pid;
-	char fn[PATH_MAX];
 
-	hlist_for_each_entry(script, c, &pkg->scripts, script_list) {
-		if (script->type != type)
-			continue;
-
-		/* Avoid /tmp as it can be mounted noexec */
-		snprintf(fn, sizeof(fn), "var/cache/misc/%s-%s.%s",
-			pkg->name->name, pkg->version,
-			apk_script_types[type]);
-
-		fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0755);
-		if (fd < 0) {
-			mkdirat(root_fd, "var/cache/misc", 0755);
-			fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0755);
-			if (fd < 0)
-				return -errno;
-		}
-		write(fd, script->script, script->size);
-		close(fd);
-
-		apk_message("Executing %s", &fn[15]);
-
-		pid = fork();
-		if (pid == -1)
-			return -1;
-		if (pid == 0) {
-			fchdir(root_fd);
-			if (chroot(".") < 0) {
-				apk_error("chroot: %s", strerror(errno));
-			} else {
-				execle(fn, apk_script_types[type],
-				       pkg->version, "", NULL, environment);
-			}
-			exit(1);
-		}
-		waitpid(pid, &status, 0);
-		unlinkat(root_fd, fn, 0);
-		if (WIFEXITED(status))
-			return WEXITSTATUS(status);
+	if (type >= APK_SCRIPT_MAX)
 		return -1;
-	}
 
-	return 0;
+	if (ipkg->script[type].ptr == NULL)
+		return 0;
+
+	argv[0] = (char *) apk_script_types[type];
+
+	/* Avoid /tmp as it can be mounted noexec */
+	snprintf(fn, sizeof(fn), "var/cache/misc/%s-%s.%s",
+		pkg->name->name, pkg->version,
+		apk_script_types[type]);
+
+	fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0755);
+	if (fd < 0) {
+		mkdirat(root_fd, "var/cache/misc", 0755);
+		fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0755);
+		if (fd < 0)
+			return -errno;
+	}
+	write(fd, ipkg->script[type].ptr, ipkg->script[type].len);
+	close(fd);
+
+	apk_message("Executing %s", &fn[15]);
+
+	pid = fork();
+	if (pid == -1)
+		return -1;
+	if (pid == 0) {
+		fchdir(root_fd);
+		if (chroot(".") < 0) {
+			apk_error("chroot: %s", strerror(errno));
+		} else {
+			execve(fn, argv, environment);
+		}
+		exit(1);
+	}
+	waitpid(pid, &status, 0);
+	unlinkat(root_fd, fn, 0);
+	if (WIFEXITED(status))
+		return WEXITSTATUS(status);
+	return -1;
 }
 
 static int parse_index_line(void *ctx, apk_blob_t line)

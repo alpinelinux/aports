@@ -106,6 +106,7 @@ static int audit_backup(struct apk_database *db)
 
 static int audit_system(struct apk_database *db)
 {
+	struct apk_installed_package *ipkg;
 	struct apk_package *pkg;
 	struct apk_db_dir_instance *diri;
 	struct apk_db_file *file;
@@ -113,8 +114,9 @@ static int audit_system(struct apk_database *db)
 	char name[PATH_MAX];
 	int done;
 
-	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
-		hlist_for_each_entry(diri, dn, &pkg->owned_dirs, pkg_dirs_list) {
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
+		pkg = ipkg->pkg;
+		hlist_for_each_entry(diri, dn, &ipkg->owned_dirs, pkg_dirs_list) {
 			if (diri->dir->flags & APK_DBDIRF_PROTECTED)
 				continue;
 

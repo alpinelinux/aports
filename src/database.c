@@ -35,9 +35,12 @@ static const char * const apk_linked_cache_dir = "etc/apk/cache";
 struct install_ctx {
 	struct apk_database *db;
 	struct apk_package *pkg;
+	struct apk_installed_package *ipkg;
 
 	int script;
+	char **script_args;
 	int script_pending : 1;
+
 	struct apk_db_dir_instance *diri;
 	struct apk_checksum data_csum;
 	struct apk_sign_ctx sctx;
@@ -471,6 +474,7 @@ int apk_cache_download(struct apk_database *db, const char *url,
 int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 {
 	struct apk_package *pkg = NULL;
+	struct apk_installed_package *ipkg = NULL;
 	struct apk_db_dir_instance *diri = NULL;
 	struct apk_db_file *file = NULL;
 	struct hlist_node **diri_node = NULL;
@@ -485,14 +489,13 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 
 			if (repo >= 0)
 				pkg->repos |= BIT(repo);
-			else if (repo == -1)
-				apk_pkg_set_state(db, pkg, APK_PKG_INSTALLED);
 
-			if (apk_db_pkg_add(db, pkg) != pkg && repo == -1) {
+			if (apk_db_pkg_add(db, pkg) == NULL) {
 				apk_error("Installed database load failed");
 				return -1;
 			}
 			pkg = NULL;
+			ipkg = NULL;
 			continue;
 		}
 
@@ -505,7 +508,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		if (pkg == NULL) {
 			pkg = apk_pkg_new();
 			diri = NULL;
-			diri_node = hlist_tail_ptr(&pkg->owned_dirs);
+			diri_node = NULL;
 			file_diri_node = NULL;
 		}
 
@@ -516,6 +519,12 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		if (repo != -1) {
 			apk_error("Invalid index entry '%c'", field);
 			return -1;
+		}
+
+		/* Create the installation entry */
+		if (ipkg == NULL) {
+			ipkg = apk_pkg_install(db, pkg);
+			diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
 		}
 
 		/* Check FDB special entries */
@@ -568,6 +577,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 
 static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 {
+	struct apk_installed_package *ipkg;
 	struct apk_package *pkg;
 	struct apk_db_dir_instance *diri;
 	struct apk_db_file *file;
@@ -576,12 +586,13 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 	apk_blob_t bbuf = APK_BLOB_BUF(buf);
 	int r;
 
-	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
+		pkg = ipkg->pkg;
 		r = apk_pkg_write_index_entry(pkg, os);
 		if (r < 0)
 			return r;
 
-		hlist_for_each_entry(diri, c1, &pkg->owned_dirs, pkg_dirs_list) {
+		hlist_for_each_entry(diri, c1, &ipkg->owned_dirs, pkg_dirs_list) {
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("F:"));
 			apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen));
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nM:"));
@@ -617,19 +628,23 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 
 static int apk_db_scriptdb_write(struct apk_database *db, struct apk_ostream *os)
 {
+	struct apk_installed_package *ipkg;
 	struct apk_package *pkg;
-	struct apk_script *script;
-	struct hlist_node *c2;
 	struct apk_file_info fi;
 	char filename[256];
 	apk_blob_t bfn;
-	int r;
+	int r, i;
 
-	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
-		hlist_for_each_entry(script, c2, &pkg->scripts, script_list) {
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
+		pkg = ipkg->pkg;
+
+		for (i = 0; i < APK_SCRIPT_MAX; i++) {
+			if (ipkg->script[i].ptr == NULL)
+				continue;
+
 			fi = (struct apk_file_info) {
 				.name = filename,
-				.size = script->size,
+				.size = ipkg->script[i].len,
 				.mode = 0755 | S_IFREG,
 			};
 			/* The scripts db expects file names in format:
@@ -641,10 +656,10 @@ static int apk_db_scriptdb_write(struct apk_database *db, struct apk_ostream *os
 			apk_blob_push_blob(&bfn, APK_BLOB_STR("."));
 			apk_blob_push_csum(&bfn, &pkg->csum);
 			apk_blob_push_blob(&bfn, APK_BLOB_STR("."));
-			apk_blob_push_blob(&bfn, APK_BLOB_STR(apk_script_types[script->type]));
+			apk_blob_push_blob(&bfn, APK_BLOB_STR(apk_script_types[i]));
 			apk_blob_push_blob(&bfn, APK_BLOB_PTR_LEN("", 1));
 
-			r = apk_tar_write_entry(os, &fi, script->script);
+			r = apk_tar_write_entry(os, &fi, ipkg->script[i].ptr);
 			if (r < 0)
 				return r;
 		}
@@ -668,8 +683,8 @@ static int apk_db_scriptdb_read_v1(struct apk_database *db, struct apk_istream *
 		csum.type = APK_CHECKSUM_MD5;
 
 		pkg = apk_db_get_pkg(db, &csum);
-		if (pkg != NULL)
-			apk_pkg_add_script(pkg, is, hdr.type, hdr.size);
+		if (pkg != NULL && pkg->ipkg != NULL)
+			apk_ipkg_add_script(pkg->ipkg, is, hdr.type, hdr.size);
 		else
 			apk_istream_skip(is, hdr.size);
 	}
@@ -711,8 +726,8 @@ static int apk_read_script_archive_entry(void *ctx,
 
 	/* Attach script */
 	pkg = apk_db_get_pkg(db, &csum);
-	if (pkg != NULL)
-		apk_pkg_add_script(pkg, is, type, ae->size);
+	if (pkg != NULL && pkg->ipkg != NULL)
+		apk_ipkg_add_script(pkg->ipkg, is, type, ae->size);
 
 	return 0;
 }
@@ -805,7 +820,7 @@ static int write_index_entry(apk_hash_item item, void *ctx)
 static int apk_db_index_write_nr_cache(struct apk_database *db)
 {
 	struct index_write_ctx ctx = { NULL, 0, TRUE };
-	struct apk_package *pkg;
+	struct apk_installed_package *ipkg;
 	struct apk_ostream *os;
 	int r;
 
@@ -822,10 +837,10 @@ static int apk_db_index_write_nr_cache(struct apk_database *db)
 		return -1;
 
 	ctx.os = os;
-	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
-		if (pkg->repos != 0)
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
+		if (ipkg->pkg->repos != 0)
 			continue;
-		r = write_index_entry(pkg, &ctx);
+		r = write_index_entry(ipkg->pkg, &ctx);
 		if (r != 0)
 			return r;
 	}
@@ -1074,13 +1089,13 @@ int apk_db_write_config(struct apk_database *db)
 
 void apk_db_close(struct apk_database *db)
 {
-	struct apk_package *pkg;
+	struct apk_installed_package *ipkg;
 	struct apk_db_dir_instance *diri;
 	struct hlist_node *dc, *dn;
 	int i;
 
-	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list) {
-		hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
+		hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
 			apk_db_diri_free(db, diri);
 		}
 	}
@@ -1384,7 +1399,8 @@ static int apk_db_run_pending_script(struct install_ctx *ctx)
 		return 0;
 
 	ctx->script_pending = FALSE;
-	r = apk_pkg_run_script(ctx->pkg, ctx->db->root_fd, ctx->script);
+	r = apk_ipkg_run_script(ctx->ipkg, ctx->db->root_fd, ctx->script,
+				ctx->script_args);
 	if (r != 0)
 		apk_error("%s-%s: Failed to execute "
 			  "pre-install/upgrade script",
@@ -1392,7 +1408,7 @@ static int apk_db_run_pending_script(struct install_ctx *ctx)
 	return r;
 }
 
-static struct apk_db_dir_instance *find_diri(struct apk_package *pkg,
+static struct apk_db_dir_instance *find_diri(struct apk_installed_package *ipkg,
 					     apk_blob_t dirname,
 					     struct apk_db_dir_instance *curdiri,
 					     struct hlist_node ***tail)
@@ -1406,7 +1422,7 @@ static struct apk_db_dir_instance *find_diri(struct apk_package *pkg,
 			     dirname) == 0)
 		return curdiri;
 
-	hlist_for_each_entry(diri, n, &pkg->owned_dirs, pkg_dirs_list) {
+	hlist_for_each_entry(diri, n, &ipkg->owned_dirs, pkg_dirs_list) {
 		if (apk_blob_compare(APK_BLOB_PTR_LEN(diri->dir->name,
 						      diri->dir->namelen), dirname) == 0) {
 			if (tail != NULL)
@@ -1428,9 +1444,23 @@ static int parse_replaces(void *_ctx, apk_blob_t blob)
 	return 0;
 }
 
+static int parse_triggers(void *_ctx, apk_blob_t blob)
+{
+	struct install_ctx *ctx = (struct install_ctx *) _ctx;
+	struct apk_installed_package *ipkg = ctx->ipkg;
+
+	if (blob.len == 0)
+		return 0;
+
+	*apk_string_array_add(&ipkg->triggers) = apk_blob_cstr(blob);
+	return 0;
+}
+
 static int read_info_line(void *_ctx, apk_blob_t line)
 {
 	struct install_ctx *ctx = (struct install_ctx *) _ctx;
+	struct apk_installed_package *ipkg = ctx->ipkg;
+	struct apk_database *db = ctx->db;
 	apk_blob_t l, r;
 
 	if (line.ptr == NULL || line.len < 1 || line.ptr[0] == '#')
@@ -1441,10 +1471,18 @@ static int read_info_line(void *_ctx, apk_blob_t line)
 
 	if (apk_blob_compare(APK_BLOB_STR("replaces"), l) == 0) {
 		apk_blob_for_each_segment(r, " ", parse_replaces, ctx);
-		return 0;
+	} else if (apk_blob_compare(APK_BLOB_STR("triggers"), l) == 0) {
+		if (ipkg->triggers) {
+			free(ipkg->triggers);
+			ipkg->triggers = NULL;
+		}
+		if (!list_hashed(&ipkg->trigger_pkgs_list))
+			list_add(&ipkg->trigger_pkgs_list,
+				 &db->installed.triggers);
+		apk_blob_for_each_segment(r, " ", parse_triggers, ctx);
+	} else {
+		apk_sign_ctx_parse_pkginfo_line(&ctx->sctx, line);
 	}
-
-	apk_sign_ctx_parse_pkginfo_line(&ctx->sctx, line);
 	return 0;
 }
 
@@ -1455,6 +1493,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 	struct install_ctx *ctx = (struct install_ctx *) _ctx;
 	struct apk_database *db = ctx->db;
 	struct apk_package *pkg = ctx->pkg, *opkg;
+	struct apk_installed_package *ipkg = pkg->ipkg;
 	apk_blob_t name = APK_BLOB_STR(ae->name), bdir, bfile;
 	struct apk_db_dir_instance *diri = ctx->diri;
 	struct apk_db_file *file;
@@ -1493,7 +1532,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 
 	/* Handle script */
 	if (type != APK_SCRIPT_INVALID) {
-		apk_pkg_add_script(pkg, is, type, ae->size);
+		apk_ipkg_add_script(ipkg, is, type, ae->size);
 		if (type == ctx->script)
 			ctx->script_pending = TRUE;
 		return apk_db_run_pending_script(ctx);
@@ -1520,7 +1559,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			return 0;
 
 		/* Make sure the file is part of the cached directory tree */
-		diri = find_diri(pkg, bdir, diri, &ctx->file_diri_node);
+		diri = find_diri(ipkg, bdir, diri, &ctx->file_diri_node);
 		if (diri == NULL) {
 			apk_error("%s: File '%*s' entry without directory entry.\n",
 				  pkg->name->name, name.len, name.ptr);
@@ -1579,7 +1618,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 						     '/', &bdir, &bfile))
 					break;
 
-				ldiri = find_diri(pkg, bdir, diri, NULL);
+				ldiri = find_diri(ipkg, bdir, diri, NULL);
 				if (ldiri == NULL)
 					break;
 
@@ -1604,7 +1643,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			name.len--;
 
 		if (ctx->diri_node == NULL)
-			ctx->diri_node = hlist_tail_ptr(&pkg->owned_dirs);
+			ctx->diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
 		ctx->diri = diri = apk_db_diri_new(db, pkg, name,
 						   &ctx->diri_node);
 		ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
@@ -1617,7 +1656,8 @@ static int apk_db_install_archive_entry(void *_ctx,
 	return r;
 }
 
-static void apk_db_purge_pkg(struct apk_database *db, struct apk_package *pkg,
+static void apk_db_purge_pkg(struct apk_database *db,
+			     struct apk_installed_package *ipkg,
 			     const char *exten)
 {
 	struct apk_db_dir_instance *diri;
@@ -1628,7 +1668,10 @@ static void apk_db_purge_pkg(struct apk_database *db, struct apk_package *pkg,
 	unsigned long hash;
 	char name[1024];
 
-	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
+	hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
+		if (exten == NULL)
+			diri->dir->flags |= APK_DBDIRF_MODIFIED;
+
 		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
 			snprintf(name, sizeof(name), "%s/%s%s",
 				 diri->dir->name, file->name, exten ?: "");
@@ -1653,15 +1696,14 @@ static void apk_db_purge_pkg(struct apk_database *db, struct apk_package *pkg,
 			}
 		}
 		apk_db_diri_rmdir(db, diri);
-		__hlist_del(dc, &pkg->owned_dirs.first);
+		__hlist_del(dc, &ipkg->owned_dirs.first);
 		apk_db_diri_free(db, diri);
 	}
-	apk_pkg_set_state(db, pkg, APK_PKG_NOT_INSTALLED);
 }
 
 
 static void apk_db_migrate_files(struct apk_database *db,
-				 struct apk_package *pkg)
+				 struct apk_installed_package *ipkg)
 {
 	struct apk_db_dir_instance *diri;
 	struct apk_db_dir *dir;
@@ -1673,8 +1715,9 @@ static void apk_db_migrate_files(struct apk_database *db,
 	char name[PATH_MAX], tmpname[PATH_MAX];
 	int cstype, r;
 
-	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs, pkg_dirs_list) {
+	hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
 		dir = diri->dir;
+		dir->flags |= APK_DBDIRF_MODIFIED;
 
 		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
 			snprintf(name, sizeof(name), "%s/%s",
@@ -1741,45 +1784,47 @@ static void apk_db_migrate_files(struct apk_database *db,
 }
 
 static int apk_db_unpack_pkg(struct apk_database *db,
-			     struct apk_package *newpkg,
+			     struct apk_installed_package *ipkg,
 			     int upgrade, int reinstall,
-			     apk_progress_cb cb, void *cb_ctx)
+			     apk_progress_cb cb, void *cb_ctx,
+			     char **script_args)
 {
 	struct install_ctx ctx;
 	struct apk_bstream *bs = NULL;
 	struct apk_istream *tar;
+	struct apk_package *pkg = ipkg->pkg;
 	char file[PATH_MAX];
 	int r, need_copy = FALSE;
 
-	if (newpkg->filename == NULL) {
+	if (pkg->filename == NULL) {
 		struct apk_repository *repo;
 
-		repo = apk_db_select_repo(db, newpkg);
+		repo = apk_db_select_repo(db, pkg);
 		if (repo == NULL) {
 			apk_error("%s-%s: package is not currently available",
-				  newpkg->name->name, newpkg->version);
+				  pkg->name->name, pkg->version);
 			return -1;
 		}
 
 		if (apk_db_cache_active(db) && apk_repo_is_remote(repo)) {
-			apk_pkg_format_cache(newpkg, APK_BLOB_BUF(file));
+			apk_pkg_format_cache(pkg, APK_BLOB_BUF(file));
 			bs = apk_bstream_from_file(db->cache_fd, file);
 		}
 
 		if (bs == NULL) {
-			apk_pkg_format_plain(newpkg, APK_BLOB_BUF(file));
+			apk_pkg_format_plain(pkg, APK_BLOB_BUF(file));
 			bs = apk_repo_file_open(repo, file);
 			if (apk_repo_is_remote(repo))
 				need_copy = TRUE;
 		}
 	} else {
-		bs = apk_bstream_from_file(AT_FDCWD, newpkg->filename);
+		bs = apk_bstream_from_file(AT_FDCWD, pkg->filename);
 		need_copy = TRUE;
 	}
 	if (!apk_db_cache_active(db))
 		need_copy = FALSE;
 	if (need_copy) {
-		apk_pkg_format_cache(newpkg, APK_BLOB_BUF(file));
+		apk_pkg_format_cache(pkg, APK_BLOB_BUF(file));
 		bs = apk_bstream_tee(bs, db->cachetmp_fd, file);
 	}
 
@@ -1790,13 +1835,15 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 
 	ctx = (struct install_ctx) {
 		.db = db,
-		.pkg = newpkg,
+		.pkg = pkg,
+		.ipkg = ipkg,
 		.script = upgrade ?
 			APK_SCRIPT_PRE_UPGRADE : APK_SCRIPT_PRE_INSTALL,
+		.script_args = script_args,
 		.cb = cb,
 		.cb_ctx = cb_ctx,
 	};
-	apk_sign_ctx_init(&ctx.sctx, APK_SIGN_VERIFY_IDENTITY, &newpkg->csum, db->keys_fd);
+	apk_sign_ctx_init(&ctx.sctx, APK_SIGN_VERIFY_IDENTITY, &pkg->csum, db->keys_fd);
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &ctx.sctx);
 	r = apk_tar_parse(tar, apk_db_install_archive_entry, &ctx, TRUE);
 	apk_sign_ctx_free(&ctx.sctx);
@@ -1813,7 +1860,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 
 	if (r != 0) {
 		apk_error("%s-%s: %s",
-			  newpkg->name->name, newpkg->version,
+			  pkg->name->name, pkg->version,
 			  apk_error_str(r));
 		goto err;
 	}
@@ -1821,12 +1868,12 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	if (r != 0)
 		goto err;
 
-	apk_db_migrate_files(db, newpkg);
+	apk_db_migrate_files(db, ipkg);
 
 	return 0;
 err:
 	if (!reinstall)
-		apk_db_purge_pkg(db, newpkg, ".apk-new");
+		apk_db_purge_pkg(db, ipkg, ".apk-new");
 	return r;
 }
 
@@ -1835,37 +1882,59 @@ int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *newpkg,
 		       apk_progress_cb cb, void *cb_ctx)
 {
+	char *script_args[] = { NULL, NULL, NULL };
+	struct apk_installed_package *ipkg;
 	int r;
+
+	/* Upgrade script gets two args: <new-pkg> <old-pkg> */
+	if (oldpkg != NULL && newpkg != NULL) {
+		script_args[0] = newpkg->version;
+		script_args[1] = oldpkg->version;
+	} else {
+		script_args[0] = oldpkg ? oldpkg->version : newpkg->version;
+	}
 
 	/* Just purging? */
 	if (oldpkg != NULL && newpkg == NULL) {
-		r = apk_pkg_run_script(oldpkg, db->root_fd,
-				       APK_SCRIPT_PRE_DEINSTALL);
+		ipkg = oldpkg->ipkg;
+
+		if (ipkg == NULL)
+			return 0;
+
+		r = apk_ipkg_run_script(ipkg, db->root_fd,
+					APK_SCRIPT_PRE_DEINSTALL, script_args);
 		if (r != 0)
 			return r;
 
-		apk_db_purge_pkg(db, oldpkg, NULL);
+		apk_db_purge_pkg(db, ipkg, NULL);
+		r = apk_ipkg_run_script(ipkg, db->root_fd,
+					APK_SCRIPT_POST_DEINSTALL, script_args);
+		apk_pkg_uninstall(db, oldpkg);
 
-		r = apk_pkg_run_script(oldpkg, db->root_fd,
-				       APK_SCRIPT_POST_DEINSTALL);
 		return r;
 	}
 
 	/* Install the new stuff */
+	ipkg = apk_pkg_install(db, newpkg);
 	if (newpkg->installed_size != 0) {
-		r = apk_db_unpack_pkg(db, newpkg, (oldpkg != NULL),
-				      (oldpkg == newpkg), cb, cb_ctx);
-		if (r != 0)
+		r = apk_db_unpack_pkg(db, ipkg, (oldpkg != NULL),
+				      (oldpkg == newpkg), cb, cb_ctx,
+				      script_args);
+		if (r != 0) {
+			apk_pkg_uninstall(db, newpkg);
 			return r;
+		}
 	}
 
-	apk_pkg_set_state(db, newpkg, APK_PKG_INSTALLED);
-	if (oldpkg != NULL && oldpkg != newpkg)
-		apk_db_purge_pkg(db, oldpkg, NULL);
+	if (oldpkg != NULL && oldpkg != newpkg && oldpkg->ipkg != NULL) {
+		apk_db_purge_pkg(db, oldpkg->ipkg, NULL);
+		apk_pkg_uninstall(db, oldpkg);
+	}
 
-	r = apk_pkg_run_script(newpkg, db->root_fd,
-			       (oldpkg == NULL) ?
-			       APK_SCRIPT_POST_INSTALL : APK_SCRIPT_POST_UPGRADE);
+	r = apk_ipkg_run_script(ipkg, db->root_fd,
+				(oldpkg == NULL) ?
+				APK_SCRIPT_POST_INSTALL : APK_SCRIPT_POST_UPGRADE,
+				script_args);
 	if (r != 0) {
 		apk_error("%s-%s: Failed to execute post-install/upgrade script",
 			  newpkg->name->name, newpkg->version);

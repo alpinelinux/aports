@@ -73,10 +73,10 @@ static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
 static int info_list(struct info_ctx *ctx, struct apk_database *db,
 		     int argc, char **argv)
 {
-	struct apk_package *pkg;
+	struct apk_installed_package *ipkg;
 
-	list_for_each_entry(pkg, &db->installed.packages, installed_pkgs_list)
-		verbose_print_pkg(pkg, 1);
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list)
+		verbose_print_pkg(ipkg->pkg, 1);
 	return 0;
 }
 
@@ -99,7 +99,7 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 
 		for (j = 0; j < name->pkgs->num; j++) {
 			pkg = name->pkgs->item[j];
-			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
+			if (pkg->ipkg != NULL)
 				break;
 		}
 		if (j >= name->pkgs->num)
@@ -178,7 +178,7 @@ static int info_package(struct info_ctx *ctx, struct apk_database *db,
 		}
 		for (j = 0; j < name->pkgs->num; j++) {
 			struct apk_package *pkg = name->pkgs->item[j];
-			if (apk_pkg_get_state(pkg) == APK_PKG_INSTALLED)
+			if (pkg->ipkg != NULL)
 				info_subaction(ctx, pkg);
 		}
 	}
@@ -187,14 +187,18 @@ static int info_package(struct info_ctx *ctx, struct apk_database *db,
 
 static void info_print_contents(struct apk_package *pkg)
 {
+	struct apk_installed_package *ipkg = pkg->ipkg;
 	struct apk_db_dir_instance *diri;
 	struct apk_db_file *file;
 	struct hlist_node *dc, *dn, *fc, *fn;
 
+	if (ipkg == NULL)
+		return;
+
 	if (apk_verbosity == 1)
 		printf("%s-%s contains:\n", pkg->name->name, pkg->version);
 
-	hlist_for_each_entry_safe(diri, dc, dn, &pkg->owned_dirs,
+	hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs,
 				  pkg_dirs_list) {
 		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files,
 					  diri_files_list) {
@@ -241,8 +245,7 @@ static void info_print_required_by(struct apk_package *pkg)
 		for (j = 0; j < name0->pkgs->num; j++) {
 			struct apk_package *pkg0 = name0->pkgs->item[j];
 
-			if (apk_pkg_get_state(pkg0) != APK_PKG_INSTALLED ||
-			    pkg0->depends == NULL)
+			if (pkg0->ipkg == NULL || pkg0->depends == NULL)
 				continue;
 			for (k = 0; k < pkg0->depends->num; k++) {
 				if (pkg0->depends->item[k].name != pkg->name)
