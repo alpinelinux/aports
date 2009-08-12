@@ -46,7 +46,7 @@ struct apk_bstream {
 
 struct apk_ostream {
 	ssize_t (*write)(void *stream, const void *buf, size_t size);
-	void (*close)(void *stream);
+	int (*close)(void *stream);
 };
 
 #define APK_MPART_DATA		1 /* data processed so far */
@@ -81,8 +81,8 @@ struct apk_bstream *apk_bstream_from_url(const char *url);
 struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to);
 
 struct apk_ostream *apk_ostream_to_fd(int fd);
-struct apk_ostream *apk_ostream_to_file(int atfd, const char *file, mode_t mode);
-struct apk_ostream *apk_ostream_to_file_gz(int atfd, const char *file, mode_t mode);
+struct apk_ostream *apk_ostream_to_file(int atfd, const char *file, const char *tmpfile, mode_t mode);
+struct apk_ostream *apk_ostream_to_file_gz(int atfd, const char *file, const char *tmpfile, mode_t mode);
 size_t apk_ostream_write_string(struct apk_ostream *ostream, const char *string);
 
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);

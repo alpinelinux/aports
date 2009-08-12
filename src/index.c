@@ -169,7 +169,7 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	}
 
 	if (ictx->output != NULL)
-		os = apk_ostream_to_file(AT_FDCWD, ictx->output, 0644);
+		os = apk_ostream_to_file(AT_FDCWD, ictx->output, NULL, 0644);
 	else
 		os = apk_ostream_to_fd(STDOUT_FILENO);
 	if (ictx->method == APK_SIGN_GENERATE) {

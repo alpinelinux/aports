@@ -190,24 +190,29 @@ static ssize_t gzo_write(void *stream, const void *ptr, size_t size)
 	return size;
 }
 
-static void gzo_close(void *stream)
+static int gzo_close(void *stream)
 {
 	struct apk_gzip_ostream *gos = (struct apk_gzip_ostream *) stream;
 	unsigned char buffer[1024];
 	size_t have;
-	int r;
+	int r, rc = 0;
 
 	do {
 		gos->zs.avail_out = sizeof(buffer);
 		gos->zs.next_out = buffer;
 		r = deflate(&gos->zs, Z_FINISH);
 		have = sizeof(buffer) - gos->zs.avail_out;
-		gos->output->write(gos->output, buffer, have);
+		if (gos->output->write(gos->output, buffer, have) != have)
+			rc = -EIO;
 	} while (r == Z_OK);
-	gos->output->close(gos->output);
+	r = gos->output->close(gos->output);
+	if (r != 0)
+		rc = r;
 
 	deflateEnd(&gos->zs);
 	free(stream);
+
+	return rc;
 }
 
 struct apk_ostream *apk_ostream_gzip(struct apk_ostream *output)

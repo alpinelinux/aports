@@ -65,8 +65,10 @@ struct apk_istream *apk_istream_from_fd(int fd)
 		return NULL;
 
 	fis = malloc(sizeof(struct apk_fd_istream));
-	if (fis == NULL)
+	if (fis == NULL) {
+		close(fd);
 		return NULL;
+	}
 
 	*fis = (struct apk_fd_istream) {
 		.is.read = fdi_read,
@@ -527,7 +529,11 @@ struct apk_istream *apk_istream_from_file_gz(int atfd, const char *file)
 
 struct apk_fd_ostream {
 	struct apk_ostream os;
-	int fd;
+	int fd, rc;
+
+	const char *file, *tmpfile;
+	int atfd;
+
 	size_t bytes;
 	char buffer[1024];
 };
@@ -555,8 +561,10 @@ static ssize_t fdo_flush(struct apk_fd_ostream *fos)
 	if (fos->bytes == 0)
 		return 0;
 
-	if ((r = safe_write(fos->fd, fos->buffer, fos->bytes)) != fos->bytes)
+	if ((r = safe_write(fos->fd, fos->buffer, fos->bytes)) != fos->bytes) {
+		fos->rc = r < 0 ? r : -EIO;
 		return r;
+	}
 
 	fos->bytes = 0;
 	return 0;
@@ -572,8 +580,12 @@ static ssize_t fdo_write(void *stream, const void *ptr, size_t size)
 		r = fdo_flush(fos);
 		if (r != 0)
 			return r;
-		if (size >= sizeof(fos->buffer) / 2)
-			return safe_write(fos->fd, ptr, size);
+		if (size >= sizeof(fos->buffer) / 2) {
+			r = safe_write(fos->fd, ptr, size);
+			if (r != size)
+				fos->rc = r < 0 ? r : -EIO;
+			return r;
+		}
 	}
 
 	memcpy(&fos->buffer[fos->bytes], ptr, size);
@@ -582,14 +594,28 @@ static ssize_t fdo_write(void *stream, const void *ptr, size_t size)
 	return size;
 }
 
-static void fdo_close(void *stream)
+static int fdo_close(void *stream)
 {
 	struct apk_fd_ostream *fos =
 		container_of(stream, struct apk_fd_ostream, os);
+	int rc = fos->rc;
 
 	fdo_flush(fos);
-	close(fos->fd);
+	if (fos->fd > STDERR_FILENO &&
+	    close(fos->fd) < 0)
+		rc = -errno;
+
+	if (fos->tmpfile != NULL) {
+		if (rc == 0)
+			renameat(fos->atfd, fos->tmpfile,
+				 fos->atfd, fos->file);
+		else
+			unlinkat(fos->atfd, fos->tmpfile, 0);
+	}
+
 	free(fos);
+
+	return rc;
 }
 
 struct apk_ostream *apk_ostream_to_fd(int fd)
@@ -600,8 +626,10 @@ struct apk_ostream *apk_ostream_to_fd(int fd)
 		return NULL;
 
 	fos = malloc(sizeof(struct apk_fd_ostream));
-	if (fos == NULL)
+	if (fos == NULL) {
+		close(fd);
 		return NULL;
+	}
 
 	*fos = (struct apk_fd_ostream) {
 		.os.write = fdo_write,
@@ -612,17 +640,32 @@ struct apk_ostream *apk_ostream_to_fd(int fd)
 	return &fos->os;
 }
 
-struct apk_ostream *apk_ostream_to_file(int atfd, const char *file, mode_t mode)
+struct apk_ostream *apk_ostream_to_file(int atfd,
+					const char *file,
+					const char *tmpfile,
+					mode_t mode)
 {
+	struct apk_ostream *os;
 	int fd;
 
-	fd = openat(atfd, file, O_CREAT | O_RDWR | O_TRUNC, mode);
+	fd = openat(atfd, tmpfile ?: file, O_CREAT | O_RDWR | O_TRUNC, mode);
 	if (fd < 0)
 		return NULL;
 
 	fcntl(fd, F_SETFD, FD_CLOEXEC);
 
-	return apk_ostream_to_fd(fd);
+	os = apk_ostream_to_fd(fd);
+	if (os == NULL)
+		return NULL;
+
+	if (tmpfile != NULL) {
+		struct apk_fd_ostream *fos =
+			container_of(os, struct apk_fd_ostream, os);
+		fos->file = file;
+		fos->tmpfile = tmpfile;
+		fos->atfd = atfd;
+	}
+	return os;
 }
 
 struct apk_counter_ostream {
@@ -639,12 +682,13 @@ static ssize_t co_write(void *stream, const void *ptr, size_t size)
 	return size;
 }
 
-static void co_close(void *stream)
+static int co_close(void *stream)
 {
 	struct apk_counter_ostream *cos =
 		container_of(stream, struct apk_counter_ostream, os);
 
 	free(cos);
+	return 0;
 }
 
 struct apk_ostream *apk_ostream_counter(off_t *counter)

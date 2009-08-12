@@ -814,7 +814,10 @@ static int apk_db_index_write_nr_cache(struct apk_database *db)
 
 	/* Write list of installed non-repository packages to
 	 * cached index file */
-	os = apk_ostream_to_file(db->cache_fd, "installed.new", 0644);
+	os = apk_ostream_to_file(db->cache_fd,
+				 "installed",
+				 "installed.new",
+				 0644);
 	if (os == NULL)
 		return -1;
 
@@ -826,11 +829,9 @@ static int apk_db_index_write_nr_cache(struct apk_database *db)
 		if (r != 0)
 			return r;
 	}
-
-	os->close(os);
-	if (renameat(db->cache_fd, "installed.new",
-		     db->cache_fd, "installed") < 0)
-			return -errno;
+	r = os->close(os);
+	if (r < 0)
+		return r;
 
 	return ctx.count;
 }
@@ -1020,6 +1021,7 @@ struct write_ctx {
 int apk_db_write_config(struct apk_database *db)
 {
 	struct apk_ostream *os;
+	int r;
 
 	if (db->root == NULL)
 		return 0;
@@ -1029,34 +1031,40 @@ int apk_db_write_config(struct apk_database *db)
 		return -1;
 	}
 
-	os = apk_ostream_to_file(db->root_fd, "var/lib/apk/world.new", 0644);
+	os = apk_ostream_to_file(db->root_fd,
+				 "var/lib/apk/world",
+				 "var/lib/apk/world.new",
+				 0644);
 	if (os == NULL)
 		return -1;
+
 	apk_deps_write(db->world, os);
 	os->write(os, "\n", 1);
-	os->close(os);
-	if (renameat(db->root_fd, "var/lib/apk/world.new",
-	             db->root_fd, "var/lib/apk/world") < 0)
-		return -errno;
+	r = os->close(os);
+	if (r < 0)
+		return r;
 
-	os = apk_ostream_to_file(db->root_fd, "var/lib/apk/installed.new", 0644);
+	os = apk_ostream_to_file(db->root_fd,
+				 "var/lib/apk/installed",
+				 "var/lib/apk/installed.new",
+				 0644);
 	if (os == NULL)
 		return -1;
 	apk_db_write_fdb(db, os);
-	os->close(os);
+	r = os->close(os);
+	if (r < 0)
+		return r;
 
-	if (renameat(db->root_fd, "var/lib/apk/installed.new",
-		     db->root_fd, "var/lib/apk/installed") < 0)
-		return -errno;
-
-	os = apk_ostream_to_file(db->root_fd, "var/lib/apk/scripts.tar.new", 0644);
+	os = apk_ostream_to_file(db->root_fd,
+				 "var/lib/apk/scripts.tar",
+				 "var/lib/apk/scripts.tar.new",
+				 0644);
 	if (os == NULL)
 		return -1;
 	apk_db_scriptdb_write(db, os);
-	os->close(os);
-	if (renameat(db->root_fd, "var/lib/apk/scripts.tar.new",
-		     db->root_fd, "var/lib/apk/scripts.tar") < 0)
-		return -errno;
+	r = os->close(os);
+	if (r < 0)
+		return r;
 
 	unlinkat(db->root_fd, "var/lib/apk/scripts", 0);
 	apk_db_index_write_nr_cache(db);
@@ -1796,6 +1804,13 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	if (ctx.replaces)
 		free(ctx.replaces);
 
+	if (need_copy) {
+		if (r == 0)
+			renameat(db->cachetmp_fd, file, db->cache_fd, file);
+		else
+			unlinkat(db->cachetmp_fd, file, 0);
+	}
+
 	if (r != 0) {
 		apk_error("%s-%s: %s",
 			  newpkg->name->name, newpkg->version,
@@ -1807,9 +1822,6 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		goto err;
 
 	apk_db_migrate_files(db, newpkg);
-
-	if (need_copy)
-		renameat(db->cachetmp_fd, file, db->cache_fd, file);
 
 	return 0;
 err:
