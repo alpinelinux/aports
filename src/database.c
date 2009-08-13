@@ -999,7 +999,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		db->permanent = 0;
 
 	if (fstatat64(db->root_fd, apk_linked_cache_dir, &st, 0) == 0 &&
-	    S_ISDIR(st.st_mode))
+	    S_ISDIR(st.st_mode) && major(st.st_dev) != 0)
 		db->cache_dir = apk_linked_cache_dir;
 
 	if (dbopts->open_flags & APK_OPENF_WRITE) {
