@@ -23,34 +23,15 @@ struct info_ctx {
 	int subaction_mask;
 };
 
-struct info_subaction {
-	int mask;
-	void (*subaction)(struct apk_package *pkg);
-};
-
-static void info_print_depends(struct apk_package *pkg);
-static void info_print_url(struct apk_package *pkg);
-static void info_print_required_by(struct apk_package *pkg);
-static void info_print_size(struct apk_package *pkg);
-static void info_print_contents(struct apk_package *pkg);
-static void info_print_description(struct apk_package *pkg);
-
-#define APK_INFO_URL		0x01
-#define APK_INFO_DEPENDS	0x02
-#define APK_INFO_RDEPENDS	0x04
-#define APK_INFO_SIZE		0x08
-#define APK_INFO_CONTENTS	0x10
-#define APK_INFO_DESC		0x20
-
-#define APK_INFO_NUM_SUBACTIONS 6
-static struct info_subaction info_package_actions[] = {
-	{ APK_INFO_DESC,	info_print_description },
-	{ APK_INFO_URL,		info_print_url },
-	{ APK_INFO_SIZE,	info_print_size },
-	{ APK_INFO_CONTENTS,	info_print_contents },
-	{ APK_INFO_DEPENDS,	info_print_depends },
-	{ APK_INFO_RDEPENDS,	info_print_required_by },
-};
+/* These need to stay in sync with the function pointer array in
+ * info_subaction() */
+#define APK_INFO_DESC		0x01
+#define APK_INFO_URL		0x02
+#define APK_INFO_SIZE		0x04
+#define APK_INFO_DEPENDS	0x08
+#define APK_INFO_RDEPENDS	0x10
+#define APK_INFO_CONTENTS	0x20
+#define APK_INFO_TRIGGERS	0x40
 
 static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
 {
@@ -154,59 +135,31 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 	return 0;
 }
 
-static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
+static void info_print_description(struct apk_package *pkg)
 {
-	int i;
-	for (i = 0; i < APK_INFO_NUM_SUBACTIONS; i++)
-		if (info_package_actions[i].mask & ctx->subaction_mask) {
-			info_package_actions[i].subaction(pkg);
-			puts("");
-		}
+	if (apk_verbosity > 1)
+		printf("%s: %s", pkg->name->name, pkg->description);
+	else
+		printf("%s-%s description:\n%s\n", pkg->name->name,
+		       pkg->version, pkg->description);
 }
 
-static int info_package(struct info_ctx *ctx, struct apk_database *db,
-			int argc, char **argv)
+static void info_print_url(struct apk_package *pkg)
 {
-	struct apk_name *name;
-	int i, j;
-
-	for (i = 0; i < argc; i++) {
-		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-		if (name == NULL) {
-			apk_error("Not found: %s", name);
-			return 1;
-		}
-		for (j = 0; j < name->pkgs->num; j++) {
-			struct apk_package *pkg = name->pkgs->item[j];
-			if (pkg->ipkg != NULL)
-				info_subaction(ctx, pkg);
-		}
-	}
-	return 0;
+	if (apk_verbosity > 1)
+		printf("%s: %s", pkg->name->name, pkg->url);
+	else
+		printf("%s-%s webpage:\n%s\n", pkg->name->name, pkg->version,
+		       pkg->url);
 }
 
-static void info_print_contents(struct apk_package *pkg)
+static void info_print_size(struct apk_package *pkg)
 {
-	struct apk_installed_package *ipkg = pkg->ipkg;
-	struct apk_db_dir_instance *diri;
-	struct apk_db_file *file;
-	struct hlist_node *dc, *dn, *fc, *fn;
-
-	if (ipkg == NULL)
-		return;
-
-	if (apk_verbosity == 1)
-		printf("%s-%s contains:\n", pkg->name->name, pkg->version);
-
-	hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs,
-				  pkg_dirs_list) {
-		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files,
-					  diri_files_list) {
-			if (apk_verbosity > 1)
-				printf("%s: ", pkg->name->name);
-			printf("%s/%s\n", diri->dir->name, file->name);
-		}
-	}
+	if (apk_verbosity > 1)
+		printf("%s: %zu", pkg->name->name, pkg->installed_size);
+	else
+		printf("%s-%s installed size:\n%zu\n", pkg->name->name, pkg->version,
+		       pkg->installed_size);
 }
 
 static void info_print_depends(struct apk_package *pkg)
@@ -258,32 +211,88 @@ static void info_print_required_by(struct apk_package *pkg)
 	}
 }
 
-static void info_print_url(struct apk_package *pkg)
+static void info_print_contents(struct apk_package *pkg)
 {
-	if (apk_verbosity > 1)
-		printf("%s: %s", pkg->name->name, pkg->url);
-	else
-		printf("%s-%s webpage:\n%s\n", pkg->name->name, pkg->version,
-		       pkg->url);
+	struct apk_installed_package *ipkg = pkg->ipkg;
+	struct apk_db_dir_instance *diri;
+	struct apk_db_file *file;
+	struct hlist_node *dc, *dn, *fc, *fn;
+
+	if (apk_verbosity == 1)
+		printf("%s-%s contains:\n", pkg->name->name, pkg->version);
+
+	hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs,
+				  pkg_dirs_list) {
+		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files,
+					  diri_files_list) {
+			if (apk_verbosity > 1)
+				printf("%s: ", pkg->name->name);
+			printf("%s/%s\n", diri->dir->name, file->name);
+		}
+	}
 }
 
-static void info_print_size(struct apk_package *pkg)
+static void info_print_triggers(struct apk_package *pkg)
 {
-	if (apk_verbosity > 1)
-		printf("%s: %zu", pkg->name->name, pkg->installed_size);
-	else
-		printf("%s-%s installed size:\n%zu\n", pkg->name->name, pkg->version,
-		       pkg->installed_size);
+	struct apk_installed_package *ipkg = pkg->ipkg;
+	int i;
+
+	if (apk_verbosity == 1)
+		printf("%s-%s triggers:\n", pkg->name->name, pkg->version);
+
+	for (i = 0; ipkg->triggers && i < ipkg->triggers->num; i++) {
+		if (apk_verbosity > 1)
+			printf("%s: trigger ", pkg->name->name);
+		printf("%s\n", ipkg->triggers->item[i]);
+	}
 }
 
-static void info_print_description(struct apk_package *pkg)
+static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 {
-	if (apk_verbosity > 1)
-		printf("%s: %s", pkg->name->name, pkg->description);
-	else
-		printf("%s-%s description:\n%s\n", pkg->name->name,
-		       pkg->version, pkg->description);
+	typedef void (*subaction_t)(struct apk_package *);
+	static subaction_t subactions[] = {
+		info_print_description,
+		info_print_url,
+		info_print_size,
+		info_print_depends,
+		info_print_required_by,
+		info_print_contents,
+		info_print_triggers,
+	};
+	const int requireipkg =
+		APK_INFO_CONTENTS | APK_INFO_TRIGGERS | APK_INFO_RDEPENDS;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(subactions); i++) {
+		if (!(BIT(i) & ctx->subaction_mask))
+			continue;
+
+		if (pkg->ipkg == NULL && (BIT(i) & requireipkg))
+			continue;
+
+		subactions[i](pkg);
+		puts("");
+	}
 }
+
+static int info_package(struct info_ctx *ctx, struct apk_database *db,
+			int argc, char **argv)
+{
+	struct apk_name *name;
+	int i, j;
+
+	for (i = 0; i < argc; i++) {
+		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
+		if (name == NULL) {
+			apk_error("Not found: %s", argv[i]);
+			return 1;
+		}
+		for (j = 0; j < name->pkgs->num; j++)
+			info_subaction(ctx, name->pkgs->item[j]);
+	}
+	return 0;
+}
+
 static int info_parse(void *ctx, struct apk_db_options *dbopts,
 		      int optch, int optindex, const char *optarg)
 {
@@ -300,9 +309,6 @@ static int info_parse(void *ctx, struct apk_db_options *dbopts,
 	case 'w':
 		ictx->subaction_mask |= APK_INFO_URL;
 		break;
-	case 'L':
-		ictx->subaction_mask |= APK_INFO_CONTENTS;
-		break;
 	case 'R':
 		ictx->subaction_mask |= APK_INFO_DEPENDS;
 		break;
@@ -314,6 +320,15 @@ static int info_parse(void *ctx, struct apk_db_options *dbopts,
 		break;
 	case 'd':
 		ictx->subaction_mask |= APK_INFO_DESC;
+		break;
+	case 'L':
+		ictx->subaction_mask |= APK_INFO_CONTENTS;
+		break;
+	case 't':
+		ictx->subaction_mask |= APK_INFO_TRIGGERS;
+		break;
+	case 'a':
+		ictx->subaction_mask = 0xffffffff;
 		break;
 	default:
 		return -1;
@@ -340,13 +355,15 @@ static struct apk_option info_options[] = {
 	{ 'w', "webpage",	"Show URL for more information about PACKAGE" },
 	{ 's', "size",		"Show installed size of PACKAGE" },
 	{ 'd', "description",	"Print description for PACKAGE" },
+	{ 't', "triggers",	"Print active triggers of PACKAGE" },
+	{ 'a', "all",		"Print all information about PACKAGE" },
 };
 
 static struct apk_applet apk_info = {
 	.name = "info",
 	.help = "Give detailed information about PACKAGEs.",
 	.arguments = "PACKAGE...",
-	.open_flags = APK_OPENF_READ | APK_OPENF_NO_REPOS,
+	.open_flags = APK_OPENF_READ,
 	.context_size = sizeof(struct info_ctx),
 	.num_options = ARRAY_SIZE(info_options),
 	.options = info_options,
