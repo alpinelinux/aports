@@ -41,38 +41,49 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
 	struct apk_state *state = NULL;
 	struct apk_name *name;
+	struct apk_package *pkg;
+	struct apk_package **pkgs;
 	int r = 0, i, j;
 
 	state = apk_state_new(db);
 	if (state == NULL)
 		return -1;
 
+	pkgs = alloca(sizeof(struct apk_package *) * argc);
 	for (i = 0; i < argc; i++) {
-		name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
-		if (name == NULL)
-			goto err;
+		pkg = NULL;
+		if (strstr(argv[i], ".apk") != NULL) {
+			struct apk_sign_ctx sctx;
 
-		for (j = 0; j < name->pkgs->num; j++) {
-			if (name->pkgs->item[j]->ipkg != NULL)
-				break;
+			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY_AND_GENERATE,
+					  NULL, db->keys_fd);
+			r = apk_pkg_read(db, argv[i], &sctx, &pkg);
+			apk_sign_ctx_free(&sctx);
+			if (r != 0) {
+				apk_error("%s: %s", argv[i], apk_error_str(r));
+				goto err;
+			}
+			name = pkg->name;
+		} else {
+			name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
+			for (j = 0; name && name->pkgs && j < name->pkgs->num; j++) {
+				if (name->pkgs->item[j]->ipkg != NULL) {
+					pkg = name->pkgs->item[j];
+					break;
+				}
+			}
 		}
-		if (j >= name->pkgs->num) {
-			apk_error("Package '%s' is not installed", name->name);
+		if (pkg == NULL || pkg->ipkg == NULL) {
+			apk_error("%s is not installed", name->name);
 			goto err;
 		}
-
 		if (ctx->reinstall)
 			name->flags |= APK_NAME_REINSTALL;
+		pkgs[i] = pkg;
 	}
 
 	for (i = 0; i < argc; i++) {
-		struct apk_dependency dep;
-
-		r = apk_dep_from_blob(&dep, db, APK_BLOB_STR(argv[i]));
-		if (r != 0)
-			goto err;
-
-		r = apk_state_lock_dependency(state, &dep);
+		r = apk_state_lock_name(state, pkg->name, pkg);
 		if (r != 0) {
 			if (!(apk_flags & APK_FORCE))
 				goto err;

@@ -352,11 +352,6 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
 	ctx->keys_fd = keys_fd;
 	ctx->action = action;
 	switch (action) {
-	case APK_SIGN_NONE:
-		ctx->md = EVP_md_null();
-		ctx->control_started = 1;
-		ctx->data_started = 1;
-		break;
 	case APK_SIGN_VERIFY:
 		ctx->md = EVP_md_null();
 		break;
@@ -377,9 +372,13 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
 		break;
 	case APK_SIGN_GENERATE:
 	case APK_SIGN_VERIFY_AND_GENERATE:
-	default:
-		action = APK_SIGN_GENERATE;
 		ctx->md = EVP_sha1();
+		break;
+	default:
+		action = APK_SIGN_NONE;
+		ctx->md = EVP_md_null();
+		ctx->control_started = 1;
+		ctx->data_started = 1;
 		break;
 	}
 	EVP_MD_CTX_init(&ctx->mdctx);
@@ -421,7 +420,8 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 	ctx->num_signatures++;
 
 	/* Found already a trusted key */
-	if (ctx->action != APK_SIGN_VERIFY ||
+	if ((ctx->action != APK_SIGN_VERIFY &&
+	     ctx->action != APK_SIGN_VERIFY_AND_GENERATE) ||
 	    ctx->signature.pkey != NULL)
 		return 0;
 
