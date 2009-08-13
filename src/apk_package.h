@@ -29,9 +29,6 @@ struct apk_name;
 #define APK_SCRIPT_TRIGGER		6
 #define APK_SCRIPT_MAX			7
 
-#define APK_PKG_NOT_INSTALLED		0
-#define APK_PKG_INSTALLED		1
-
 #define APK_SIGN_NONE			0
 #define APK_SIGN_VERIFY			1
 #define APK_SIGN_VERIFY_IDENTITY	2
@@ -71,13 +68,17 @@ struct apk_dependency {
 };
 APK_ARRAY(apk_dependency_array, struct apk_dependency);
 
+#define APK_IPKGF_RUN_ALL_TRIGGERS	0x00000001
+
 struct apk_installed_package {
 	struct apk_package *pkg;
+	unsigned int flags;
 	struct list_head installed_pkgs_list;
 	struct list_head trigger_pkgs_list;
 	struct hlist_head owned_dirs;
 	apk_blob_t script[APK_SCRIPT_MAX];
 	struct apk_string_array *triggers;
+	struct apk_string_array *pending_triggers;
 };
 
 struct apk_package {

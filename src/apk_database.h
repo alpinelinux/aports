@@ -36,9 +36,9 @@ struct apk_db_file {
 	char name[];
 };
 
-#define APK_DBDIRF_PROTECTED		0x0001
-#define APK_DBDIRF_SYMLINKS_ONLY	0x0002
-#define APK_DBDIRF_MODIFIED		0x0100
+#define APK_DBDIRF_PROTECTED		0x01
+#define APK_DBDIRF_SYMLINKS_ONLY	0x02
+#define APK_DBDIRF_MODIFIED		0x04
 
 struct apk_db_dir {
 	apk_hash_node hash_node;
@@ -48,8 +48,9 @@ struct apk_db_dir {
 	struct apk_db_dir *parent;
 
 	unsigned short refs;
-	unsigned short flags;
 	unsigned short namelen;
+	unsigned char flags;
+	char rooted_name[1];
 	char name[];
 };
 
@@ -149,8 +150,9 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 				 APK_OPENF_NO_WORLD)
 
 int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts);
-int apk_db_write_config(struct apk_database *db);
 void apk_db_close(struct apk_database *db);
+int apk_db_write_config(struct apk_database *db);
+int apk_db_run_triggers(struct apk_database *db);
 int apk_db_permanent(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);

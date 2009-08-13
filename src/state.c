@@ -801,8 +801,8 @@ int apk_state_commit(struct apk_state *state,
 		apk_draw_progress(20, 1);
 
 update_state:
-	if (!(apk_flags & APK_SIMULATE))
-		apk_db_write_config(db);
+	apk_db_run_triggers(db);
+	apk_db_write_config(db);
 
 	if (r == 0)
 		apk_message("OK: %d packages, %d dirs, %d files",

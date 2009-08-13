@@ -254,7 +254,7 @@ static inline void list_del(struct list_head *entry)
 
 static inline int list_hashed(const struct list_head *n)
 {
-	return n->next != n->prev;
+	return n->next != n && n->next != NULL;
 }
 
 #define list_entry(ptr, type, member) container_of(ptr,type,member)

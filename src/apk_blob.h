@@ -29,6 +29,8 @@ typedef int (*apk_blob_cb)(void *ctx, apk_blob_t blob);
 #define APK_CHECKSUM_SHA1	20
 #define APK_CHECKSUM_DEFAULT	APK_CHECKSUM_SHA1
 
+#define APK_BLOB_CHECKSUM_BUF	34
+
 /* Internal cointainer for MD5 or SHA1 */
 struct apk_checksum {
 	unsigned char data[20];

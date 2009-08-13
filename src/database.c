@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <fnmatch.h>
 #include <sys/file.h>
 
 #include "apk_defines.h"
@@ -225,6 +226,7 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 	dir = malloc(sizeof(*dir) + name.len + 1);
 	memset(dir, 0, sizeof(*dir));
 	dir->refs = 1;
+	dir->rooted_name[0] = '/';
 	memcpy(dir->name, name.ptr, name.len);
 	dir->name[name.len] = 0;
 	dir->namelen = name.len;
@@ -740,6 +742,59 @@ static int apk_read_script_archive_entry(void *ctx,
 	return 0;
 }
 
+static int parse_triggers(void *ctx, apk_blob_t blob)
+{
+	struct apk_installed_package *ipkg = ctx;
+
+	if (blob.len == 0)
+		return 0;
+
+	*apk_string_array_add(&ipkg->triggers) = apk_blob_cstr(blob);
+	return 0;
+}
+
+static void apk_db_triggers_write(struct apk_database *db, struct apk_ostream *os)
+{
+	struct apk_installed_package *ipkg;
+	char buf[APK_BLOB_CHECKSUM_BUF];
+	apk_blob_t bfn;
+	int i;
+
+	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
+		bfn = APK_BLOB_BUF(buf);
+		apk_blob_push_csum(&bfn, &ipkg->pkg->csum);
+		os->write(os, buf, buf - bfn.ptr);
+		for (i = 0; i < ipkg->triggers->num; i++) {
+			os->write(os, " ", 1);
+			apk_ostream_write_string(os, ipkg->triggers->item[i]);
+		}
+		os->write(os, "\n", 1);
+	}
+}
+
+static void apk_db_triggers_read(struct apk_database *db, struct apk_bstream *bs)
+{
+	struct apk_checksum csum;
+	struct apk_package *pkg;
+	struct apk_installed_package *ipkg;
+	apk_blob_t l;
+
+	while (!APK_BLOB_IS_NULL(l = bs->read(bs, APK_BLOB_STR("\n")))) {
+		apk_blob_pull_csum(&l, &csum);
+		apk_blob_pull_char(&l, ' ');
+
+		pkg = apk_db_get_pkg(db, &csum);
+		if (pkg == NULL || pkg->ipkg == NULL)
+			continue;
+
+		ipkg = pkg->ipkg;
+		apk_blob_for_each_segment(l, " ", parse_triggers, ipkg);
+		if (ipkg->triggers && !list_hashed(&ipkg->trigger_pkgs_list))
+			list_add_tail(&ipkg->trigger_pkgs_list,
+				      &db->installed.triggers);
+	}
+}
+
 static int apk_db_read_state(struct apk_database *db, int flags)
 {
 	struct apk_istream *is;
@@ -779,6 +834,12 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 				apk_db_index_read(db, bs, -2);
 				bs->close(bs, NULL);
 			}
+		}
+
+		bs = apk_bstream_from_file(db->root_fd, "var/lib/apk/triggers");
+		if (bs != NULL) {
+			apk_db_triggers_read(db, bs);
+			bs->close(bs, NULL);
 		}
 	}
 
@@ -921,6 +982,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 2000);
 	apk_hash_init(&db->installed.files, &file_hash_ops, 10000);
 	list_init(&db->installed.packages);
+	list_init(&db->installed.triggers);
 	db->cache_dir = apk_static_cache_dir;
 	db->permanent = 1;
 
@@ -1046,7 +1108,7 @@ int apk_db_write_config(struct apk_database *db)
 	struct apk_ostream *os;
 	int r;
 
-	if (db->root == NULL)
+	if ((apk_flags & APK_SIMULATE) || db->root == NULL)
 		return 0;
 
 	if (db->lock_fd == 0) {
@@ -1092,6 +1154,17 @@ int apk_db_write_config(struct apk_database *db)
 	unlinkat(db->root_fd, "var/lib/apk/scripts", 0);
 	apk_db_index_write_nr_cache(db);
 
+	os = apk_ostream_to_file(db->root_fd,
+				 "var/lib/apk/triggers",
+				 "var/lib/apk/triggers.new",
+				 0644);
+	if (os == NULL)
+		return -1;
+	apk_db_triggers_write(db, os);
+	r = os->close(os);
+	if (r < 0)
+		return r;
+
 	return 0;
 }
 
@@ -1136,6 +1209,57 @@ void apk_db_close(struct apk_database *db)
 		close(db->lock_fd);
 	if (db->root != NULL)
 		free(db->root);
+}
+
+static int fire_triggers(apk_hash_item item, void *ctx)
+{
+	struct apk_database *db = (struct apk_database *) ctx;
+	struct apk_db_dir *dbd = (struct apk_db_dir *) item;
+	struct apk_installed_package *ipkg;
+	int i;
+
+	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
+		if (((ipkg->flags & APK_IPKGF_RUN_ALL_TRIGGERS) == 0) &&
+		    ((dbd->flags & APK_DBDIRF_MODIFIED) == 0))
+			continue;
+
+		for (i = 0; i < ipkg->triggers->num; i++) {
+			if (ipkg->triggers->item[i][0] != '/')
+				continue;
+
+			if (fnmatch(ipkg->triggers->item[i], dbd->rooted_name,
+				    FNM_PATHNAME) != 0)
+				continue;
+
+			*apk_string_array_add(&ipkg->pending_triggers) =
+				dbd->rooted_name;
+			break;
+		}
+	}
+
+	return 0;
+}
+
+int apk_db_run_triggers(struct apk_database *db)
+{
+	struct apk_installed_package *ipkg;
+
+	apk_hash_foreach(&db->installed.dirs, fire_triggers, db);
+
+	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
+		if (ipkg->pending_triggers == NULL)
+			continue;
+
+		fprintf(stderr, "run triggers: %s\n", ipkg->pkg->name->name);
+
+		*apk_string_array_add(&ipkg->pending_triggers) = NULL;
+		apk_ipkg_run_script(ipkg, db->root_fd, APK_SCRIPT_TRIGGER,
+				    ipkg->pending_triggers->item);
+		free(ipkg->pending_triggers);
+		ipkg->pending_triggers = NULL;
+	}
+
+	return 0;
 }
 
 int apk_db_cache_active(struct apk_database *db)
@@ -1452,18 +1576,6 @@ static int parse_replaces(void *_ctx, apk_blob_t blob)
 	return 0;
 }
 
-static int parse_triggers(void *_ctx, apk_blob_t blob)
-{
-	struct install_ctx *ctx = (struct install_ctx *) _ctx;
-	struct apk_installed_package *ipkg = ctx->ipkg;
-
-	if (blob.len == 0)
-		return 0;
-
-	*apk_string_array_add(&ipkg->triggers) = apk_blob_cstr(blob);
-	return 0;
-}
-
 static int read_info_line(void *_ctx, apk_blob_t line)
 {
 	struct install_ctx *ctx = (struct install_ctx *) _ctx;
@@ -1484,10 +1596,10 @@ static int read_info_line(void *_ctx, apk_blob_t line)
 			free(ipkg->triggers);
 			ipkg->triggers = NULL;
 		}
-		if (!list_hashed(&ipkg->trigger_pkgs_list))
-			list_add(&ipkg->trigger_pkgs_list,
-				 &db->installed.triggers);
-		apk_blob_for_each_segment(r, " ", parse_triggers, ctx);
+		apk_blob_for_each_segment(r, " ", parse_triggers, ctx->ipkg);
+		if (ctx->ipkg->triggers && !list_hashed(&ipkg->trigger_pkgs_list))
+			list_add_tail(&ipkg->trigger_pkgs_list,
+				      &db->installed.triggers);
 	} else {
 		apk_sign_ctx_parse_pkginfo_line(&ctx->sctx, line);
 	}
@@ -1924,6 +2036,12 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	/* Install the new stuff */
 	ipkg = apk_pkg_install(db, newpkg);
+	ipkg->flags |= APK_IPKGF_RUN_ALL_TRIGGERS;
+	if (ipkg->triggers) {
+		list_del(&ipkg->trigger_pkgs_list);
+		free(ipkg->triggers);
+		ipkg->triggers = NULL;
+	}
 	if (newpkg->installed_size != 0) {
 		r = apk_db_unpack_pkg(db, ipkg, (oldpkg != NULL),
 				      (oldpkg == newpkg), cb, cb_ctx,

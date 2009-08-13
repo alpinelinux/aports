@@ -66,8 +66,6 @@ struct apk_installed_package *apk_pkg_install(struct apk_database *db,
 
 	pkg->ipkg = ipkg = calloc(1, sizeof(struct apk_installed_package));
 	ipkg->pkg = pkg;
-	list_init(&ipkg->installed_pkgs_list);
-
 	db->installed.stats.packages++;
 	list_add_tail(&ipkg->installed_pkgs_list, &db->installed.packages);
 
@@ -869,6 +867,10 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg, int root_fd,
 		pkg->name->name, pkg->version,
 		apk_script_types[type]);
 
+	apk_message("Executing %s", &fn[15]);
+	if (apk_flags & APK_SIMULATE)
+		return 0;
+
 	fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0755);
 	if (fd < 0) {
 		mkdirat(root_fd, "var/cache/misc", 0755);
@@ -878,8 +880,6 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg, int root_fd,
 	}
 	write(fd, ipkg->script[type].ptr, ipkg->script[type].len);
 	close(fd);
-
-	apk_message("Executing %s", &fn[15]);
 
 	pid = fork();
 	if (pid == -1)
