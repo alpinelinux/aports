@@ -1230,6 +1230,10 @@ static int fire_triggers(apk_hash_item item, void *ctx)
 				    FNM_PATHNAME) != 0)
 				continue;
 
+			if (ipkg->pending_triggers == NULL)
+				*apk_string_array_add(&ipkg->pending_triggers) =
+					NULL;
+
 			*apk_string_array_add(&ipkg->pending_triggers) =
 				dbd->rooted_name;
 			break;
@@ -2000,16 +2004,16 @@ int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *newpkg,
 		       apk_progress_cb cb, void *cb_ctx)
 {
-	char *script_args[] = { NULL, NULL, NULL };
+	char *script_args[] = { NULL, NULL, NULL, NULL };
 	struct apk_installed_package *ipkg;
 	int r;
 
 	/* Upgrade script gets two args: <new-pkg> <old-pkg> */
 	if (oldpkg != NULL && newpkg != NULL) {
-		script_args[0] = newpkg->version;
-		script_args[1] = oldpkg->version;
+		script_args[1] = newpkg->version;
+		script_args[2] = oldpkg->version;
 	} else {
-		script_args[0] = oldpkg ? oldpkg->version : newpkg->version;
+		script_args[1] = oldpkg ? oldpkg->version : newpkg->version;
 	}
 
 	/* Just purging? */
