@@ -518,8 +518,12 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		if (pkg == NULL) {
 			pkg = apk_pkg_new();
 			diri = NULL;
-			diri_node = NULL;
 			file_diri_node = NULL;
+
+			if (repo == -1) {
+				ipkg = apk_pkg_install(db, pkg);
+				diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
+			}
 		}
 
 		/* Standard index line? */
@@ -529,12 +533,6 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		if (repo != -1) {
 			apk_error("Invalid index entry '%c'", field);
 			return -1;
-		}
-
-		/* Create the installation entry */
-		if (ipkg == NULL) {
-			ipkg = apk_pkg_install(db, pkg);
-			diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
 		}
 
 		/* Check FDB special entries */
@@ -763,7 +761,8 @@ static void apk_db_triggers_write(struct apk_database *db, struct apk_ostream *o
 	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
 		bfn = APK_BLOB_BUF(buf);
 		apk_blob_push_csum(&bfn, &ipkg->pkg->csum);
-		os->write(os, buf, buf - bfn.ptr);
+		os->write(os, buf, bfn.ptr - buf);
+
 		for (i = 0; i < ipkg->triggers->num; i++) {
 			os->write(os, " ", 1);
 			apk_ostream_write_string(os, ipkg->triggers->item[i]);
@@ -1250,8 +1249,6 @@ int apk_db_run_triggers(struct apk_database *db)
 		if (ipkg->pending_triggers == NULL)
 			continue;
 
-		fprintf(stderr, "run triggers: %s\n", ipkg->pkg->name->name);
-
 		*apk_string_array_add(&ipkg->pending_triggers) = NULL;
 		apk_ipkg_run_script(ipkg, db->root_fd, APK_SCRIPT_TRIGGER,
 				    ipkg->pending_triggers->item);
@@ -1597,6 +1594,7 @@ static int read_info_line(void *_ctx, apk_blob_t line)
 			ipkg->triggers = NULL;
 		}
 		apk_blob_for_each_segment(r, " ", parse_triggers, ctx->ipkg);
+
 		if (ctx->ipkg->triggers && !list_hashed(&ipkg->trigger_pkgs_list))
 			list_add_tail(&ipkg->trigger_pkgs_list,
 				      &db->installed.triggers);
@@ -1786,7 +1784,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 	struct apk_file_info fi;
 	struct hlist_node *dc, *dn, *fc, *fn;
 	unsigned long hash;
-	char name[1024];
+	char name[PATH_MAX];
 
 	hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
 		if (exten == NULL)

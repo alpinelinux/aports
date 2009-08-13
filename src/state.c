@@ -299,7 +299,7 @@ int apk_state_lock_dependency(struct apk_state *state,
 	for (i = 0; i < c->num; i++) {
 		struct apk_package *pkg = c->pkgs[i];
 
-		if (c->pkgs[i]->ipkg != NULL)
+		if (pkg->ipkg != NULL)
 			installed = pkg;
 		else if (pkg->filename == NULL &&
 		         apk_db_select_repo(state->db, pkg) == NULL)
@@ -489,7 +489,7 @@ int apk_state_lock_name(struct apk_state *state,
 			struct apk_package *pkg = name->pkgs->item[i];
 
 			if (name->pkgs->item[i]->name == name &&
-			    name->pkgs->item[i]->ipkg != NULL)
+			    pkg->ipkg != NULL)
 				oldpkg = pkg;
 		}
 	}
@@ -544,8 +544,7 @@ static void apk_print_change(struct apk_database *db,
 			    name->name, newpkg->version);
 	} else if (newpkg == NULL) {
 		apk_message("Purging %s (%s)",
-			    name->name,
-			    oldpkg->version);
+			    name->name, oldpkg->version);
 	} else {
 		r = apk_pkg_version_compare(newpkg, oldpkg);
 		switch (r) {
@@ -757,15 +756,15 @@ int apk_state_commit(struct apk_state *state,
 				  "The following packages will be REMOVED");
 		r += dump_packages(state, cmp_downgrade,
 				   "The following packages will be DOWNGRADED");
-		if (r || apk_verbosity > 2) {
+		if (r || (apk_flags & APK_INTERACTIVE) || apk_verbosity > 2) {
 			dump_packages(state, cmp_new,
 				      "The following NEW packages will be installed");
 			dump_packages(state, cmp_upgrade,
 				      "The following packages will be upgraded");
-			fprintf(stderr, "%d kB of %s\n", abs(size_diff),
-				(size_diff < 0) ?
-				"disk space will be freed" :
-				"additional disk space will be used");
+			printf("%d kB of %s\n", abs(size_diff),
+			       (size_diff < 0) ?
+			       "disk space will be freed" :
+			       "additional disk space will be used");
 		}
 		if (apk_flags & APK_INTERACTIVE) {
 			printf("Do you want to continue [Y/n]? ");

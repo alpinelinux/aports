@@ -39,6 +39,7 @@ static int del_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	for (i = 0; i < argc; i++) {
 		name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 		name->flags &= ~APK_NAME_TOPLEVEL;
+		name->flags |= APK_NAME_TOPLEVEL_OVERRIDE;
 		apk_deps_del(&db->world, name);
 	}
 

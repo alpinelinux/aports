@@ -116,9 +116,10 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 		if (virtpkg)
 			apk_deps_add(&virtpkg->depends, &dep);
-		else
+		else {
 			deps[i] = dep;
-		deps[i].name->flags |= APK_NAME_TOPLEVEL_OVERRIDE;
+			deps[i].name->flags |= APK_NAME_TOPLEVEL_OVERRIDE;
+		}
 	}
 	if (virtpkg)
 		deps[0] = virtdep;
