@@ -56,15 +56,14 @@ static int non_repository_check(struct apk_database *db)
 	return 1;
 }
 
-
 static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct add_ctx *actx = (struct add_ctx *) ctx;
 	struct apk_state *state = NULL;
-	struct apk_dependency_array *pkgs = NULL;
 	struct apk_package *virtpkg = NULL;
 	struct apk_dependency virtdep;
-	int i, r = 0;
+	struct apk_dependency *deps;
+	int i, r = 0, num_deps = 0;
 
 	if (actx->virtpkg) {
 		if (non_repository_check(db))
@@ -83,7 +82,11 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		apk_dep_from_pkg(&virtdep, db, virtpkg);
 		virtdep.name->flags |= APK_NAME_TOPLEVEL;
 		virtpkg = apk_db_pkg_add(db, virtpkg);
-	}
+		num_deps = 1;
+	} else
+		num_deps = argc;
+
+	deps = alloca(sizeof(struct apk_dependency) * num_deps);
 
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;
@@ -111,29 +114,27 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 				goto err;
 		}
 
-		if (virtpkg) {
+		if (virtpkg)
 			apk_deps_add(&virtpkg->depends, &dep);
-		} else {
-			apk_deps_add(&db->world, &dep);
-			dep.name->flags |= APK_NAME_TOPLEVEL;
-		}
-		apk_deps_add(&pkgs, &dep);
+		else
+			deps[i] = dep;
+		deps[i].name->flags |= APK_NAME_TOPLEVEL_OVERRIDE;
 	}
-
-	if (virtpkg) {
-		apk_deps_add(&pkgs, &virtdep);
-		apk_deps_add(&db->world, &virtdep);
-	}
+	if (virtpkg)
+		deps[0] = virtdep;
 
 	state = apk_state_new(db);
 	if (state == NULL)
 		goto err;
 
-	for (i = 0; (pkgs != NULL) && i < pkgs->num; i++) {
-		r = apk_state_lock_dependency(state, &pkgs->item[i]);
-		if (r != 0) {
+	for (i = 0; i < num_deps; i++) {
+		r = apk_state_lock_dependency(state, &deps[i]);
+		if (r == 0) {
+			apk_deps_add(&db->world, &deps[i]);
+			deps[i].name->flags |= APK_NAME_TOPLEVEL;
+		} else {
 			apk_error("Unable to install '%s': %d",
-				  pkgs->item[i].name->name, r);
+				  deps[i].name->name, r);
 			if (!(apk_flags & APK_FORCE))
 				goto err;
 		}
@@ -169,4 +170,3 @@ static struct apk_applet apk_add = {
 };
 
 APK_DEFINE_APPLET(apk_add);
-

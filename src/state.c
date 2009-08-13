@@ -101,6 +101,9 @@ static struct apk_name_choices *name_choices_new(struct apk_database *db,
 	memcpy(nc->pkgs, name->pkgs->item,
 	       name->pkgs->num * sizeof(struct apk_package *));
 
+	if (name->flags & APK_NAME_TOPLEVEL_OVERRIDE)
+		return nc;
+
 	/* Check for global dependencies */
 	for (i = 0; db->world != NULL && i < db->world->num; i++) {
 		struct apk_dependency *dep = &db->world->item[i];

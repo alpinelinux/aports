@@ -64,8 +64,9 @@ struct apk_db_dir_instance {
 	gid_t gid;
 };
 
-#define APK_NAME_TOPLEVEL	0x0001
-#define APK_NAME_REINSTALL	0x0002
+#define APK_NAME_TOPLEVEL		0x0001
+#define APK_NAME_REINSTALL		0x0002
+#define APK_NAME_TOPLEVEL_OVERRIDE	0x0004
 
 struct apk_name {
 	apk_hash_node hash_node;
