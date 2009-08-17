@@ -42,14 +42,14 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	struct apk_state *state = NULL;
 	struct apk_name *name;
 	struct apk_package *pkg;
-	struct apk_package **pkgs;
+	struct apk_dependency *deps;
 	int r = 0, i, j;
 
 	state = apk_state_new(db);
 	if (state == NULL)
 		return -1;
 
-	pkgs = alloca(sizeof(struct apk_package *) * argc);
+	deps = alloca(sizeof(struct apk_dependency) * argc);
 	for (i = 0; i < argc; i++) {
 		pkg = NULL;
 		if (strstr(argv[i], ".apk") != NULL) {
@@ -63,10 +63,13 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 				apk_error("%s: %s", argv[i], apk_error_str(r));
 				goto err;
 			}
-			name = pkg->name;
+			apk_dep_from_pkg(&deps[i], db, pkg);
+			name = deps[i].name;
 		} else {
-			name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
-			for (j = 0; name && name->pkgs && j < name->pkgs->num; j++) {
+			apk_dep_from_blob(&deps[i], db, APK_BLOB_STR(argv[i]));
+			name = deps[i].name;
+
+			for (j = 0; name->pkgs && j < name->pkgs->num; j++) {
 				if (name->pkgs->item[j]->ipkg != NULL) {
 					pkg = name->pkgs->item[j];
 					break;
@@ -79,11 +82,10 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 		}
 		if (ctx->reinstall)
 			name->flags |= APK_NAME_REINSTALL;
-		pkgs[i] = pkg;
 	}
 
 	for (i = 0; i < argc; i++) {
-		r = apk_state_lock_name(state, pkg->name, pkg);
+		r = apk_state_lock_dependency(state, &deps[i]);
 		if (r != 0) {
 			if (!(apk_flags & APK_FORCE))
 				goto err;
