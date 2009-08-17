@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify it 
+ * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
@@ -74,6 +74,11 @@ static int get_token(int *type, apk_blob_t *blob)
 {
 	static const char *pre_suffixes[] = { "alpha", "beta", "pre", "rc" };
 	int v = 0, i = 0, nt = TOKEN_INVALID;
+
+	if (blob->len <= 0) {
+		*type = TOKEN_END;
+		return 0;
+	}
 
 	switch (*type) {
 	case TOKEN_DIGIT_OR_ZERO:
@@ -162,7 +167,7 @@ int apk_version_result_mask(const char *str)
 	if (*str ==  '=')
 		r |= APK_VERSION_EQUAL;
 	return r;
-}			
+}
 
 int apk_version_validate(apk_blob_t ver)
 {
@@ -201,13 +206,13 @@ int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
 		return APK_VERSION_LESS;
 	if (av > bv)
 		return APK_VERSION_GREATER;
-	if (at < bt)
-		return get_token(&at, &a) < 0 ?
-			APK_VERSION_LESS : APK_VERSION_GREATER;
-	if (bt < at)
-		return get_token(&bt, &b) > 0 ?
-			APK_VERSION_LESS : APK_VERSION_GREATER;
-	return APK_VERSION_EQUAL;
+
+	/* at and bt are the next expected token type */
+	if (at == bt)
+		return APK_VERSION_EQUAL;
+	if (at < bt || bt == TOKEN_INVALID)
+		return APK_VERSION_GREATER;
+	return APK_VERSION_LESS;
 }
 
 int apk_version_compare(const char *str1, const char *str2)
