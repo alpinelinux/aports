@@ -310,7 +310,8 @@ int apk_state_lock_dependency(struct apk_state *state,
 			continue;
 		}
 
-		if (apk_flags & APK_PREFER_AVAILABLE) {
+		if ((apk_flags & APK_PREFER_AVAILABLE) ||
+		    (name->flags & APK_NAME_REINSTALL)) {
 			if (latest->repos != 0 && pkg->repos == 0)
 				continue;
 
