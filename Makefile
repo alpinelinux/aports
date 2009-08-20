@@ -2,7 +2,7 @@
 # Building apk-tools
 
 PACKAGE := apk-tools
-VERSION := 2.0_rc3
+VERSION := 2.0_rc4
 
 ##
 # Default directories
