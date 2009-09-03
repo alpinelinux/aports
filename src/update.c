@@ -17,6 +17,24 @@
 
 static int update_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
+	struct apk_repository *repo;
+	int i;
+
+	if (apk_verbosity < 1)
+		return 0;
+
+	for (i = 0; i < db->num_repos; i++) {
+		repo = &db->repos[i];
+
+		if (APK_BLOB_IS_NULL(repo->description))
+			continue;
+
+		apk_message("%.*s [%s]",
+			    repo->description.len,
+			    repo->description.ptr,
+			    db->repos[i].url);
+	}
+
 	return 0;
 }
 

@@ -24,7 +24,7 @@ int apk_tar_parse(struct apk_istream *,
 		  apk_archive_entry_parser parser, void *ctx,
 		  int soft_checksums);
 int apk_tar_write_entry(struct apk_ostream *, const struct apk_file_info *ae,
-			char *data);
+			const char *data);
 int apk_tar_write_padding(struct apk_ostream *, const struct apk_file_info *ae);
 
 int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,

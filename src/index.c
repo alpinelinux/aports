@@ -25,6 +25,7 @@ struct counts {
 struct index_ctx {
 	const char *index;
 	const char *output;
+	const char *description;
 	time_t index_mtime;
 	int method;
 };
@@ -40,6 +41,9 @@ static int index_parse(void *ctx, struct apk_db_options *dbopts,
 		break;
 	case 'o':
 		ictx->output = optarg;
+		break;
+	case 'd':
+		ictx->description = optarg;
 		break;
 	case INDEX_OLD_FORMAT:
 		ictx->method = APK_SIGN_GENERATE_V1;
@@ -159,27 +163,35 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		}
 	}
 
-	if (ictx->method == APK_SIGN_GENERATE) {
-		memset(&fi, 0, sizeof(fi));
-		fi.name = "APKINDEX";
-		fi.mode = 0644 | S_IFREG;
-		os = apk_ostream_counter(&fi.size);
-		apk_db_index_write(db, os);
-		os->close(os);
-	}
-
 	if (ictx->output != NULL)
 		os = apk_ostream_to_file(AT_FDCWD, ictx->output, NULL, 0644);
 	else
 		os = apk_ostream_to_fd(STDOUT_FILENO);
+
 	if (ictx->method == APK_SIGN_GENERATE) {
+		struct apk_ostream *counter;
+
 		os = apk_ostream_gzip(os);
+
+		memset(&fi, 0, sizeof(fi));
+		fi.mode = 0644 | S_IFREG;
+		fi.name = "DESCRIPTION";
+		fi.size = strlen(ictx->description);
+		apk_tar_write_entry(os, &fi, ictx->description);
+
+		memset(&fi, 0, sizeof(fi));
+		fi.mode = 0644 | S_IFREG;
+		fi.name = "APKINDEX";
+		counter = apk_ostream_counter(&fi.size);
+		apk_db_index_write(db, counter);
+		counter->close(counter);
 		apk_tar_write_entry(os, &fi, NULL);
-	}
-	total = apk_db_index_write(db, os);
-	if (ictx->method == APK_SIGN_GENERATE) {
+		total = apk_db_index_write(db, os);
 		apk_tar_write_padding(os, &fi);
+
 		apk_tar_write_entry(os, NULL, NULL);
+	} else {
+		total = apk_db_index_write(db, os);
 	}
 	os->close(os);
 
@@ -201,6 +213,9 @@ static struct apk_option index_options[] = {
 	{ 'x', "index", "Read INDEX to speed up new index creation by reusing "
 	  "the information from an old index",
 	  required_argument, "INDEX" },
+	{ 'd', "description", "Embed TEXT as description and version "
+	  "information of the repository index",
+	  required_argument, "TEXT" },
 	{ INDEX_OLD_FORMAT, "old-format",
 	  "Specify to create old style index files" }
 };

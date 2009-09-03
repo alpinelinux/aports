@@ -80,6 +80,8 @@ struct apk_name {
 struct apk_repository {
 	char *url;
 	struct apk_checksum csum;
+
+	apk_blob_t description;
 };
 
 struct apk_repository_list {

@@ -262,7 +262,8 @@ err:
 	return r;
 }
 
-int apk_tar_write_entry(struct apk_ostream *os, const struct apk_file_info *ae, char *data)
+int apk_tar_write_entry(struct apk_ostream *os, const struct apk_file_info *ae,
+			const char *data)
 {
 	struct tar_header buf;
 

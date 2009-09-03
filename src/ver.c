@@ -16,11 +16,31 @@
 #include "apk_version.h"
 
 struct ver_ctx {
-	int (*action)(int argc, char **argv);
+	int (*action)(struct apk_database *db, int argc, char **argv);
 	const char *limchars;
 };
 
-static int ver_test(int argc, char **argv)
+static int ver_indexes(struct apk_database *db, int argc, char **argv)
+{
+	struct apk_repository *repo;
+	int i;
+
+	for (i = 0; i < db->num_repos; i++) {
+		repo = &db->repos[i];
+
+		if (APK_BLOB_IS_NULL(repo->description))
+			continue;
+
+		apk_message("%.*s [%s]",
+			    repo->description.len,
+			    repo->description.ptr,
+			    db->repos[i].url);
+	}
+
+	return 0;
+}
+
+static int ver_test(struct apk_database *db, int argc, char **argv)
 {
 	int r;
 
@@ -32,7 +52,7 @@ static int ver_test(int argc, char **argv)
 	return 0;
 }
 
-static int ver_validate(int argc, char **argv)
+static int ver_validate(struct apk_database *db, int argc, char **argv)
 {
 	int i, r = 0;
 	for (i = 0; i < argc; i++) {
@@ -50,6 +70,9 @@ static int ver_parse(void *ctx, struct apk_db_options *dbopts,
 {
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
 	switch (opt) {
+	case 'I':
+		ictx->action = ver_indexes;
+		break;
 	case 't':
 		ictx->action = ver_test;
 		break;
@@ -99,7 +122,7 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 
 	if (ictx->action != NULL)
-		return ictx->action(argc, argv);
+		return ictx->action(db, argc, argv);
 
 	if (apk_verbosity > 0)
 		printf("%-42sAvailable:\n", "Installed:");
@@ -131,6 +154,7 @@ ver_exit:
 }
 
 static struct apk_option ver_options[] = {
+	{ 'I', "indexes",	"Print description and versions of indexes" },
 	{ 't', "test",		"Compare two given versions" },
 	{ 'c', "check", 	"Check if the given version string is valid" },
 	{ 'l', "limit",		"Limit output to packages whos status matches LIMCHAR",

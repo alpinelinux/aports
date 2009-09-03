@@ -1399,17 +1399,21 @@ static int load_apkindex(void *sctx, const struct apk_file_info *fi,
 {
 	struct apkindex_ctx *ctx = (struct apkindex_ctx *) sctx;
 	struct apk_bstream *bs;
+	struct apk_repository *repo;
 
 	if (apk_sign_ctx_process_file(&ctx->sctx, fi, is) == 0)
 		return 0;
 
-	if (strcmp(fi->name, "APKINDEX") != 0)
-		return 0;
+	repo = &ctx->db->repos[ctx->repo];
 
-	ctx->found = 1;
-	bs = apk_bstream_from_istream(is);
-	apk_db_index_read(ctx->db, bs, ctx->repo);
-	bs->close(bs, NULL);
+	if (strcmp(fi->name, "DESCRIPTION") == 0) {
+		repo->description = apk_blob_from_istream(is, fi->size);
+	} else if (strcmp(fi->name, "APKINDEX") == 0) {
+		ctx->found = 1;
+		bs = apk_bstream_from_istream(is);
+		apk_db_index_read(ctx->db, bs, ctx->repo);
+		bs->close(bs, NULL);
+	}
 
 	return 0;
 }
