@@ -15,7 +15,7 @@ ISO_LINK	?= $(ALPINE_NAME).iso
 ISO_DIR		:= $(DESTDIR)/isofs
 ISO_PKGDIR	:= $(ISO_DIR)/apks
 
-APK_OPTS	:= $(addprefix --repository ,$(APK_REPOS))
+APK_OPTS	:= $(addprefix --repository ,$(APK_REPOS)) --keys-dir /etc/apk/keys
 
 find_apk_ver	= $(shell apk search $(APK_OPTS) $(1) | sort | uniq)
 find_apk_file	= $(addsuffix .apk,$(call find_apk_ver,$(1)))
@@ -28,12 +28,6 @@ KERNEL_FLAVOR	?= grsec
 KERNEL_PKGNAME	?= linux-$(KERNEL_FLAVOR)
 KERNEL_NAME	:= $(KERNEL_FLAVOR)
 KERNEL_APK	:= $(call get_apk,$(KERNEL_PKGNAME))
-
-XTABLES_ADDONS_APK:= $(call get_apk,xtables-addons-$(KERNEL_FLAVOR))
-DAHDI_LINUX_APK	:= $(call get_apk,dahdi-linux-$(KERNEL_FLAVOR))
-ISCSITARGET_APK	:= $(call get_apk,iscsitarget-$(KERNEL_FLAVOR))
-MOD_APKS	:= $(KERNEL_APK) $(XTABLES_ADDONS_APK) $(DAHDI_LINUX_APK) \
-		   $(ISCSITARGET_APK)
 
 KERNEL		:= $(word 3,$(subst -, ,$(notdir $(KERNEL_APK))))-$(word 2,$(subst -, ,$(notdir $(KERNEL_APK))))
 
@@ -92,15 +86,17 @@ $(APK_FILES):
 MODLOOP		:= $(ISO_DIR)/boot/$(KERNEL_NAME).cmg
 MODLOOP_DIR	:= $(DESTDIR)/modloop
 MODLOOP_DIRSTAMP := $(DESTDIR)/stamp.modloop
+MODLOOP_PKGS	:= $(KERNEL_PKGNAME) $(addsuffix -$(KERNEL_FLAVOR), dahdi-linux iscsitarget xtables-addons)
 
 modloop: $(MODLOOP)
 
-$(MODLOOP_DIRSTAMP): $(MOD_APKS)
+$(MODLOOP_DIRSTAMP):
+	@echo "==> modloop: Unpacking kernel modules";
 	@rm -rf $(MODLOOP_DIR)
 	@mkdir -p $(MODLOOP_DIR)/lib/modules/
-	@for i in $(MOD_APKS); do \
-		echo "==> modloop: prepare modules $$i";\
-		tar -C $(MODLOOP_DIR) -xzf "$$i"; \
+	@for i in $(MODLOOP_PKGS); do \
+		apk fetch $(APK_OPTS) --stdout $$i \
+			| tar -C $(MODLOOP_DIR) -xz; \
 	done
 	@rm -rf $(addprefix $(MODLOOP_DIR)/lib/modules/*/, source build)
 	@depmod $(KERNEL) -b $(MODLOOP_DIR)
@@ -111,6 +107,9 @@ $(MODLOOP): $(MODLOOP_DIRSTAMP)
 	@mkdir -p $(dir $(MODLOOP))
 	@mkcramfs $(MODLOOP_DIR)/lib $(MODLOOP)
 
+clean-modloop:
+	@rm -rf $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) $(MODLOOP)
+
 #
 # Initramfs rules
 #
@@ -118,12 +117,30 @@ $(MODLOOP): $(MODLOOP_DIRSTAMP)
 INITFS		:= $(ISO_DIR)/boot/$(KERNEL_NAME).gz
 
 INITFS_DIR	:= $(DESTDIR)/initfs
+INITFS_TMP	:= $(DESTDIR)/tmp.initfs
+INITFS_DIRSTAMP := $(DESTDIR)/stamp.initfs
 INITFS_FEATURES	:= ata base bootchart cdrom cramfs ext3 ide floppy raid scsi usb
+INITFS_PKGS	:= $(MODLOOP_PKGS) alpine-base
 
 initfs: $(INITFS)
-$(INITFS):	$(shell mkinitfs -F "$(INITFS_FEATURES)" -l $(KERNEL))
-	@mkinitfs -F "$(INITFS_FEATURES)" \
-		-t $(INITFS_DIR) -o $@ $(KERNEL)
+
+$(INITFS_DIRSTAMP):
+	@rm -rf $(INITFS_DIR) $(INITFS_TMP)
+	@mkdir -p $(INITFS_DIR) $(INITFS_TMP)
+	@for i in `apk fetch $(APK_OPTS) --simulate -R $(INITFS_PKGS) 2>&1\
+			| sed 's:^Downloading ::; s:-[0-9].*::' | sort | uniq`; do \
+		apk fetch $(APK_OPTS) --stdout $$i \
+			| tar -C $(INITFS_DIR) -zx || exit 1; \
+	done
+	@touch $@
+
+#$(INITFS):	$(shell mkinitfs -F "$(INITFS_FEATURES)" -l $(KERNEL))
+$(INITFS): $(INITFS_DIRSTAMP)
+	@mkinitfs -F "$(INITFS_FEATURES)" -t $(INITFS_TMP) \
+		-b $(INITFS_DIR) -o $@ $(KERNEL)
+
+clean-initfs:
+	@rm -rf $(INITFS) $(INITFS_DIRSTAMP) $(INITFS_DIR)
 
 #
 # Vserver template rules
@@ -137,7 +154,8 @@ vstemplate: $(VSTEMPLATE)
 $(VSTEMPLATE):
 	@$(SUDO) rm -rf "$(VSTEMPLATE_DIR)"
 	@$(SUDO) mkdir -p "$(VSTEMPLATE_DIR)"
-	@$(SUDO) apk add --initdb --root $(VSTEMPLATE_DIR) alpine-baselayout openrc busybox
+	@$(SUDO) apk add $(APK_OPTS) --initdb --root $(VSTEMPLATE_DIR) \
+		alpine-base
 	@cd $(VSTEMPLATE_DIR) && $(SUDO) tar -jcf $@ *
 
 #
@@ -188,12 +206,12 @@ $(ISO_PKGDIR)/APKINDEX.tar.gz: $(APK_FILES)
 	@apk index -o $@ $(ISO_PKGDIR)/*.apk
 	@abuild-sign $@
 
-$(ISO_KERNEL): $(KERNEL_APK)
+$(ISO_KERNEL): 
 	@echo "==> iso: install kernel $(KERNEL)"
 	@mkdir -p $(dir $(ISO_KERNEL))
-	@tar -C $(ISO_DIR) -xzf $(KERNEL_APK) boot
+	@apk fetch $(APK_OPTS) --stdout $(KERNEL_PKGNAME) \
+		| tar -C $(ISO_DIR) -xz boot
 	@rm -rf $(ISO_DIR)/.[A-Z]* $(ISO_DIR)/.[a-z]* $(ISO_DIR)/lib
-	@touch $(ISO_KERNEL)
 
 $(ISOFS_DIRSTAMP): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_REPOS_DIRSTAMP) $(SYSLINUX_CFG)
 	@echo "$(ALPINE_NAME)-$(ALPINE_RELEASE) $(BUILD_DATE)" \
@@ -237,7 +255,7 @@ MBRPATH 	:= /usr/share/syslinux/mbr.bin
 $(USBIMG): $(ISOFS_DIRSTAMP)
 	@echo "==> Generating $@"
 	@mformat -C -v 'ALPINE' -c 16 -h 64 -n 32 -i $(USBIMG) \
-		-t $$(($(USBIMG_SIZE) / 1200)) ::
+		-t $$(($(USBIMG_SIZE) / 1000)) ::
 	@syslinux $(USBIMG)
 	@mcopy -i $(USBIMG) $(ISO_DIR)/* $(ISO_DIR)/.[a-z]* ::
 	@mcopy -i $(USBIMG) /dev/zero ::/zero 2>/dev/null || true
