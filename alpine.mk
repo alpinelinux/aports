@@ -133,6 +133,7 @@ $(INITFS_DIRSTAMP):
 		apk fetch $(APK_OPTS) --stdout $$i \
 			| tar -C $(INITFS_DIR) -zx || exit 1; \
 	done
+	@cp -r /etc/apk/keys $(INITFS_DIR)/etc/apk/ || true
 	@touch $@
 
 #$(INITFS):	$(shell mkinitfs -F "$(INITFS_FEATURES)" -l $(KERNEL))
