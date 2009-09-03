@@ -8,6 +8,7 @@ ALPINE_NAME	?= alpine-test
 ALPINE_ARCH	:= i386
 DESTDIR		?= $(shell pwd)/isotmp
 
+MKCRAMFS	= mkcramfs
 SUDO		= sudo
 
 ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).iso
@@ -105,7 +106,7 @@ $(MODLOOP_DIRSTAMP):
 $(MODLOOP): $(MODLOOP_DIRSTAMP)
 	@echo "==> modloop: building image $(notdir $(MODLOOP))"
 	@mkdir -p $(dir $(MODLOOP))
-	@mkcramfs $(MODLOOP_DIR)/lib $(MODLOOP)
+	@$(MKCRAMFS) $(MODLOOP_DIR)/lib $(MODLOOP)
 
 clean-modloop:
 	@rm -rf $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) $(MODLOOP)
