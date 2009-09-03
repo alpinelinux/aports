@@ -173,11 +173,13 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 		os = apk_ostream_gzip(os);
 
-		memset(&fi, 0, sizeof(fi));
-		fi.mode = 0644 | S_IFREG;
-		fi.name = "DESCRIPTION";
-		fi.size = strlen(ictx->description);
-		apk_tar_write_entry(os, &fi, ictx->description);
+		if (ictx->description != NULL) {
+			memset(&fi, 0, sizeof(fi));
+			fi.mode = 0644 | S_IFREG;
+			fi.name = "DESCRIPTION";
+			fi.size = strlen(ictx->description);
+			apk_tar_write_entry(os, &fi, ictx->description);
+		}
 
 		memset(&fi, 0, sizeof(fi));
 		fi.mode = 0644 | S_IFREG;
