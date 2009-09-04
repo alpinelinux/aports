@@ -31,10 +31,10 @@ static int ver_indexes(struct apk_database *db, int argc, char **argv)
 		if (APK_BLOB_IS_NULL(repo->description))
 			continue;
 
-		apk_message("%.*s [%s]",
-			    repo->description.len,
-			    repo->description.ptr,
-			    db->repos[i].url);
+		printf("%.*s [%s]\n",
+                       repo->description.len,
+		       repo->description.ptr,
+		       db->repos[i].url);
 	}
 
 	return 0;
