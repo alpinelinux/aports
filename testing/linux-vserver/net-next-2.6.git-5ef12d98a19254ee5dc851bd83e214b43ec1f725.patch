@@ -1,0 +1,96 @@
+From: Timo Teras <timo.teras@iki.fi>
+Date: Thu, 11 Jun 2009 11:16:28 +0000 (-0700)
+Subject: neigh: fix state transition INCOMPLETE->FAILED via Netlink request
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Fdavem%2Fnet-next-2.6.git;a=commitdiff_plain;h=5ef12d98a19254ee5dc851bd83e214b43ec1f725;hp=2b85a34e911bf483c27cfdd124aeb1605145dc80
+
+neigh: fix state transition INCOMPLETE->FAILED via Netlink request
+
+The current code errors out the INCOMPLETE neigh entry skb queue only from
+the timer if maximum probes have been attempted and there has been no reply.
+This also causes the transtion to FAILED state.
+
+However, the neigh entry can be also updated via Netlink to inform that the
+address is unavailable.  Currently, neigh_update() just stops the timers and
+leaves the pending skb's unreleased. This results that the clean up code in
+the timer callback is never called, preventing also proper garbage collection.
+
+This fixes neigh_update() to process the pending skb queue immediately if
+INCOMPLETE -> FAILED state transtion occurs due to a Netlink request.
+
+Signed-off-by: Timo Teras <timo.teras@iki.fi>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+
+diff --git a/net/core/neighbour.c b/net/core/neighbour.c
+index c54229b..163b4f5 100644
+--- a/net/core/neighbour.c
++++ b/net/core/neighbour.c
+@@ -771,6 +771,28 @@ static __inline__ int neigh_max_probes(struct neighbour *n)
+ 		p->ucast_probes + p->app_probes + p->mcast_probes);
+ }
+ 
++static void neigh_invalidate(struct neighbour *neigh)
++{
++	struct sk_buff *skb;
++
++	NEIGH_CACHE_STAT_INC(neigh->tbl, res_failed);
++	NEIGH_PRINTK2("neigh %p is failed.\n", neigh);
++	neigh->updated = jiffies;
++
++	/* It is very thin place. report_unreachable is very complicated
++	   routine. Particularly, it can hit the same neighbour entry!
++
++	   So that, we try to be accurate and avoid dead loop. --ANK
++	 */
++	while (neigh->nud_state == NUD_FAILED &&
++	       (skb = __skb_dequeue(&neigh->arp_queue)) != NULL) {
++		write_unlock(&neigh->lock);
++		neigh->ops->error_report(neigh, skb);
++		write_lock(&neigh->lock);
++	}
++	skb_queue_purge(&neigh->arp_queue);
++}
++
+ /* Called when a timer expires for a neighbour entry. */
+ 
+ static void neigh_timer_handler(unsigned long arg)
+@@ -835,26 +857,9 @@ static void neigh_timer_handler(unsigned long arg)
+ 
+ 	if ((neigh->nud_state & (NUD_INCOMPLETE | NUD_PROBE)) &&
+ 	    atomic_read(&neigh->probes) >= neigh_max_probes(neigh)) {
+-		struct sk_buff *skb;
+-
+ 		neigh->nud_state = NUD_FAILED;
+-		neigh->updated = jiffies;
+ 		notify = 1;
+-		NEIGH_CACHE_STAT_INC(neigh->tbl, res_failed);
+-		NEIGH_PRINTK2("neigh %p is failed.\n", neigh);
+-
+-		/* It is very thin place. report_unreachable is very complicated
+-		   routine. Particularly, it can hit the same neighbour entry!
+-
+-		   So that, we try to be accurate and avoid dead loop. --ANK
+-		 */
+-		while (neigh->nud_state == NUD_FAILED &&
+-		       (skb = __skb_dequeue(&neigh->arp_queue)) != NULL) {
+-			write_unlock(&neigh->lock);
+-			neigh->ops->error_report(neigh, skb);
+-			write_lock(&neigh->lock);
+-		}
+-		skb_queue_purge(&neigh->arp_queue);
++		neigh_invalidate(neigh);
+ 	}
+ 
+ 	if (neigh->nud_state & NUD_IN_TIMER) {
+@@ -1001,6 +1006,11 @@ int neigh_update(struct neighbour *neigh, const u8 *lladdr, u8 new,
+ 		neigh->nud_state = new;
+ 		err = 0;
+ 		notify = old & NUD_VALID;
++		if ((old & (NUD_INCOMPLETE | NUD_PROBE)) &&
++		    (new & NUD_FAILED)) {
++			neigh_invalidate(neigh);
++			notify = 1;
++		}
+ 		goto out;
+ 	}
+ 
