@@ -1,12 +1,14 @@
 #!/usr/bin/make -f
 
--include alpine.conf.mk
+PROFILE		?= alpine
+
+-include $(PROFILE).conf.mk
 
 BUILD_DATE	:= $(shell date +%y%m%d)
 ALPINE_RELEASE	?= $(BUILD_DATE)
 ALPINE_NAME	?= alpine-test
 ALPINE_ARCH	:= i386
-DESTDIR		?= $(shell pwd)/isotmp
+DESTDIR		?= $(shell pwd)/isotmp.$(PROFILE)
 
 MKCRAMFS	= mkcramfs
 SUDO		= sudo
@@ -15,6 +17,8 @@ ISO		?= $(ALPINE_NAME)-$(ALPINE_RELEASE)-$(ALPINE_ARCH).iso
 ISO_LINK	?= $(ALPINE_NAME).iso
 ISO_DIR		:= $(DESTDIR)/isofs
 ISO_PKGDIR	:= $(ISO_DIR)/apks
+
+APKS		?= $(shell sed 's/\#.*//; s/\*/\\*/g' $(PROFILE).packages)
 
 APK_OPTS	:= $(addprefix --repository ,$(APK_REPOS)) --keys-dir /etc/apk/keys
 
@@ -86,12 +90,14 @@ $(APK_FILES):
 #
 MODLOOP		:= $(ISO_DIR)/boot/$(KERNEL_NAME).cmg
 MODLOOP_DIR	:= $(DESTDIR)/modloop
+MODLOOP_KERNELSTAMP := $(DESTDIR)/stamp.modloop.kernel
 MODLOOP_DIRSTAMP := $(DESTDIR)/stamp.modloop
-MODLOOP_PKGS	:= $(KERNEL_PKGNAME) $(addsuffix -$(KERNEL_FLAVOR), dahdi-linux iscsitarget xtables-addons)
+MODLOOP_EXTRA	?= $(addsuffix -$(KERNEL_FLAVOR), dahdi-linux iscsitarget xtables-addons)
+MODLOOP_PKGS	= $(KERNEL_PKGNAME) $(MODLOOP_EXTRA)
 
 modloop: $(MODLOOP)
 
-$(MODLOOP_DIRSTAMP):
+$(MODLOOP_KERNELSTAMP):
 	@echo "==> modloop: Unpacking kernel modules";
 	@rm -rf $(MODLOOP_DIR)
 	@mkdir -p $(MODLOOP_DIR)/lib/modules/
@@ -99,8 +105,13 @@ $(MODLOOP_DIRSTAMP):
 		apk fetch $(APK_OPTS) --stdout $$i \
 			| tar -C $(MODLOOP_DIR) -xz; \
 	done
+	@cp $(MODLOOP_DIR)/usr/share/$(KERNEL_PKGNAME)/kernel.release $@
+
+MODLOOP_KERNEL_RELEASE = $(shell cat $(MODLOOP_KERNELSTAMP))
+
+$(MODLOOP_DIRSTAMP): $(MODLOOP_KERNELSTAMP)
 	@rm -rf $(addprefix $(MODLOOP_DIR)/lib/modules/*/, source build)
-	@depmod $(KERNEL) -b $(MODLOOP_DIR)
+	@depmod $(MODLOOP_KERNEL_RELEASE) -b $(MODLOOP_DIR)
 	@touch $(MODLOOP_DIRSTAMP)
 
 $(MODLOOP): $(MODLOOP_DIRSTAMP)
@@ -109,7 +120,7 @@ $(MODLOOP): $(MODLOOP_DIRSTAMP)
 	@$(MKCRAMFS) $(MODLOOP_DIR)/lib $(MODLOOP)
 
 clean-modloop:
-	@rm -rf $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) $(MODLOOP)
+	@rm -rf $(MODLOOP_DIR) $(MODLOOP_DIRSTAMP) $(MODLOOP_PKGSTAMP) $(MODLOOP)
 
 #
 # Initramfs rules
@@ -137,9 +148,9 @@ $(INITFS_DIRSTAMP):
 	@touch $@
 
 #$(INITFS):	$(shell mkinitfs -F "$(INITFS_FEATURES)" -l $(KERNEL))
-$(INITFS): $(INITFS_DIRSTAMP)
+$(INITFS): $(INITFS_DIRSTAMP) $(MODLOOP_DIRSTAMP)
 	@mkinitfs -F "$(INITFS_FEATURES)" -t $(INITFS_TMP) \
-		-b $(INITFS_DIR) -o $@ $(KERNEL)
+		-b $(INITFS_DIR) -o $@ $(MODLOOP_KERNEL_RELEASE)
 
 clean-initfs:
 	@rm -rf $(INITFS) $(INITFS_DIRSTAMP) $(INITFS_DIR)
@@ -186,7 +197,7 @@ $(ISOLINUX_CFG):
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom:iso9660 modules=loop,cramfs,sd-mod,usb-storage,floppy quiet" >>$(ISOLINUX_CFG)
 
-$(SYSLINUX_CFG):
+$(SYSLINUX_CFG): $(MODLOOP_DIRSTAMP)
 	@echo "==> iso: configure syslinux"
 	@echo "timeout 20" >$@
 	@echo "prompt 1" >>$@
@@ -194,6 +205,9 @@ $(SYSLINUX_CFG):
 	@echo "label $(KERNEL_NAME)" >>$@
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$@
 	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=usbdisk:vfat modules=loop,cramfs,sd-mod,usb-storage quiet" >>$@
+
+clean-syslinux:
+	@rm -f $(SYSLINUX_CFG) $(ISOLINUX_CFG) $(ISOLINUX_BIN)
 
 ISO_KERNEL	:= $(ISO_DIR)/boot/$(KERNEL_NAME)
 ISO_REPOS_DIRSTAMP := $(DESTDIR)/stamp.isorepos
@@ -209,11 +223,13 @@ $(ISO_PKGDIR)/APKINDEX.tar.gz: $(APK_FILES)
 		-o $@ $(ISO_PKGDIR)/*.apk
 	@abuild-sign $@
 
-$(ISO_KERNEL): 
+$(ISO_KERNEL): $(MODLOOP_DIRSTAMP)
 	@echo "==> iso: install kernel $(KERNEL)"
 	@mkdir -p $(dir $(ISO_KERNEL))
 	@apk fetch $(APK_OPTS) --stdout $(KERNEL_PKGNAME) \
 		| tar -C $(ISO_DIR) -xz boot
+	@rm -f $(ISO_DIR)/boot/$(KERNEL_NAME)
+	@ln -s vmlinuz-$(MODLOOP_KERNEL_RELEASE) $@
 	@rm -rf $(ISO_DIR)/.[A-Z]* $(ISO_DIR)/.[a-z]* $(ISO_DIR)/lib
 
 $(ISOFS_DIRSTAMP): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KERNEL) $(ISO_REPOS_DIRSTAMP) $(SYSLINUX_CFG)
