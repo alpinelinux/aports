@@ -275,7 +275,7 @@ void apk_deps_parse(struct apk_database *db,
 {
 	struct parse_depend_ctx ctx = { db, depends };
 
-	if (blob.len > 1 && blob.ptr[blob.len-1] == '\n')
+	if (blob.len > 0 && blob.ptr[blob.len-1] == '\n')
 		blob.len--;
 
 	apk_blob_for_each_segment(blob, " ", parse_depend, &ctx);
