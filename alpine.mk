@@ -131,7 +131,7 @@ INITFS		:= $(ISO_DIR)/boot/$(KERNEL_NAME).gz
 INITFS_DIR	:= $(DESTDIR)/initfs
 INITFS_TMP	:= $(DESTDIR)/tmp.initfs
 INITFS_DIRSTAMP := $(DESTDIR)/stamp.initfs
-INITFS_FEATURES	:= ata base bootchart cdrom cramfs ext3 ide floppy raid scsi usb
+INITFS_FEATURES	:= ata base bootchart cdrom cramfs ext3 floppy raid scsi usb
 INITFS_PKGS	:= $(MODLOOP_PKGS) alpine-base acct
 
 initfs: $(INITFS)
