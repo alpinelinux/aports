@@ -105,7 +105,7 @@ $(MODLOOP_KERNELSTAMP):
 		apk fetch $(APK_OPTS) --stdout $$i \
 			| tar -C $(MODLOOP_DIR) -xz; \
 	done
-	@cp $(MODLOOP_DIR)/usr/share/$(KERNEL_PKGNAME)/kernel.release $@
+	@cp $(MODLOOP_DIR)/usr/share/kernel/$(KERNEL_FLAVOR)/kernel.release $@
 
 MODLOOP_KERNEL_RELEASE = $(shell cat $(MODLOOP_KERNELSTAMP))
 
@@ -126,7 +126,10 @@ clean-modloop:
 # Initramfs rules
 #
 
-INITFS		:= $(ISO_DIR)/boot/$(KERNEL_NAME).gz
+# isolinux cannot handle - in filenames
+#INITFS_NAME	:= initramfs-$(MODLOOP_KERNEL_RELEASE)
+INITFS_NAME	:= $(KERNEL_FLAVOR).gz
+INITFS		:= $(ISO_DIR)/boot/$(INITFS_NAME)
 
 INITFS_DIR	:= $(DESTDIR)/initfs
 INITFS_TMP	:= $(DESTDIR)/tmp.initfs
@@ -164,18 +167,20 @@ VSTEMPLATE_DIR 	:= $(DESTDIR)/vs-template
 vstemplate: $(VSTEMPLATE)
 	@echo "==> vstemplate: built $(VSTEMPLATE)"
 
+#must be run as root or in fakeroot
 $(VSTEMPLATE):
-	@$(SUDO) rm -rf "$(VSTEMPLATE_DIR)"
-	@$(SUDO) mkdir -p "$(VSTEMPLATE_DIR)"
-	@$(SUDO) apk add $(APK_OPTS) --initdb --root $(VSTEMPLATE_DIR) \
+	@rm -rf "$(VSTEMPLATE_DIR)"
+	@mkdir -p "$(VSTEMPLATE_DIR)"
+	@apk add $(APK_OPTS) --initdb --root $(VSTEMPLATE_DIR) \
 		alpine-base
-	@cd $(VSTEMPLATE_DIR) && $(SUDO) tar -jcf $@ *
+	@cd $(VSTEMPLATE_DIR) && tar -jcf $@ *
 
 #
 # ISO rules
 #
 
-ISOLINUX	:= $(ISO_DIR)/isolinux
+ISOLINUX_DIR	:= boot/isolinux
+ISOLINUX	:= $(ISO_DIR)/$(ISOLINUX_DIR)
 ISOLINUX_BIN	:= $(ISOLINUX)/isolinux.bin
 ISOLINUX_CFG	:= $(ISOLINUX)/isolinux.cfg
 SYSLINUX_CFG	:= $(ISO_DIR)/syslinux.cfg
@@ -195,7 +200,7 @@ $(ISOLINUX_CFG):
 	@echo "default $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "label $(KERNEL_NAME)" >>$(ISOLINUX_CFG)
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$(ISOLINUX_CFG)
-	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=cdrom:iso9660 modules=loop,cramfs,sd-mod,usb-storage,floppy quiet" >>$(ISOLINUX_CFG)
+	@echo "	append initrd=/boot/$(INITFS_NAME) alpine_dev=cdrom:iso9660 modules=loop,cramfs,sd-mod,usb-storage,floppy quiet" >>$(ISOLINUX_CFG)
 
 $(SYSLINUX_CFG): $(MODLOOP_DIRSTAMP)
 	@echo "==> iso: configure syslinux"
@@ -204,7 +209,7 @@ $(SYSLINUX_CFG): $(MODLOOP_DIRSTAMP)
 	@echo "default $(KERNEL_NAME)" >>$@
 	@echo "label $(KERNEL_NAME)" >>$@
 	@echo "	kernel /boot/$(KERNEL_NAME)" >>$@
-	@echo "	append initrd=/boot/$(KERNEL_NAME).gz alpine_dev=usbdisk:vfat modules=loop,cramfs,sd-mod,usb-storage quiet" >>$@
+	@echo "	append initrd=/boot/$(INITFS_NAME) alpine_dev=usbdisk:vfat modules=loop,cramfs,sd-mod,usb-storage quiet" >>$@
 
 clean-syslinux:
 	@rm -f $(SYSLINUX_CFG) $(ISOLINUX_CFG) $(ISOLINUX_BIN)
@@ -240,8 +245,8 @@ $(ISOFS_DIRSTAMP): $(MODLOOP) $(INITFS) $(ISOLINUX_CFG) $(ISOLINUX_BIN) $(ISO_KE
 $(ISO): $(ISOFS_DIRSTAMP)
 	@echo "==> iso: building $(notdir $(ISO))"
 	@genisoimage -o $(ISO) -l -J -R \
-		-b isolinux/isolinux.bin \
-		-c isolinux/boot.cat	\
+		-b $(ISOLINUX_DIR)/isolinux.bin \
+		-c $(ISOLINUX_DIR)/boot.cat	\
 		-no-emul-boot		\
 		-boot-load-size 4	\
 		-boot-info-table	\
