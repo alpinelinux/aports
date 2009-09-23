@@ -11,7 +11,7 @@ for i in "$@"; do
 
 	# extlinux will use path relative partition, so if /boot is on a
 	# separate partition we want /boot/<kernel> resolve to /<kernel>
-	ln -sf / /boot/boot
+	[ -e /boot/boot ] || ln -sf / /boot/boot
 
 	#this is for compat. to be removed eventually...
 	ln -sf vmlinuz-$flavor /boot/$flavor
