@@ -84,8 +84,14 @@ configure()
 		# Calculaton of WAN classes rates
 		WAN_SUB_RATE=$((WAN_RATE - (RATE_SUB_PERCENT * WAN_RATE / 100)))
 			INTERACTIVE_RATE=$((WAN_SUB_RATE / 5))
+		if [ $INTERACTIVE_RATE -lt 75000 ]; then
+			INTERACTIVE_RATE=75000
+			PRIVILEGED_RATE=$(((WAN_SUB_RATE - 75000) / 2))
+			BESTEFFORT_RATE=$(((WAN_SUB_RATE - 75000) / 2))
+		else
 			PRIVILEGED_RATE=$((WAN_SUB_RATE / 2))
 			BESTEFFORT_RATE=$((WAN_SUB_RATE / 3))
+		fi
 
 		DEV_RATE=${DEV_RATE:-$EGRESS_RATE}
 			DEV_RATE=`bits $DEV_RATE`
@@ -99,12 +105,10 @@ configure()
 		INTERACTIVE_PRIO_BURST=$((INTERACTIVE_RATE / 100 / 8))
 
 		INTERACTIVE_HFSC_DMAX=50000
-		INTERACTIVE_HFSC_UMAX=$((INTERACTIVE_RATE * INTERACTIVE_HFSC_DMAX / 1000 / 1000))
-	        	[ $INTERACTIVE_HFSC_UMAX -gt 1500 ] && INTERACTIVE_HFSC_UMAX=1500
+		INTERACTIVE_HFSC_UMAX=1500
 
 		PRIVILEGED_HFSC_DMAX=100000
-		PRIVILEGED_HFSC_UMAX=$((PRIVILEGED_RATE * PRIVILEGED_HFSC_DMAX / 1000 / 1000))
-        		[ $PRIVILEGED_HFSC_UMAX -gt 1500 ] && PRIVILEGED_HFSC_UMAX=1500
+		PRIVILEGED_HFSC_UMAX=1500
 
 		# Random Early Detect (RED) parameters calculation:
 		#  min         = maximum delay * rate (dalay ~ 200ms = 0.2sec) [b]
@@ -123,9 +127,18 @@ configure()
 		RED_LIMIT=$((8 * RED_MAX))
 
 		# Setting leaf Queuing Disciplines parameters
-		INTERACTIVE_LEAF_QDISC=`expand_leaf_qdisc $INTERACTIVE_LEAF_QDISC`
-		PRIVILEGED_LEAF_QDISC=`expand_leaf_qdisc $PRIVILEGED_LEAF_QDISC`
+		INTERACTIVE_LEAF_QDISC=pfifo
+			INTERACTIVE_LEAF_QDISC=`expand_leaf_qdisc $INTERACTIVE_LEAF_QDISC`
+		PRIVILEGED_LEAF_QDISC=pfifo
+			PRIVILEGED_LEAF_QDISC=`expand_leaf_qdisc $PRIVILEGED_LEAF_QDISC`
+		
+		# Force using SFQ in case rate is less than 2mbit	
+		if [ $BESTEFFORT_RATE -lt 2097152 ]; then
+			BESTEFFORT_LEAF_QDISC=sfq
+		fi
 		BESTEFFORT_LEAF_QDISC=`expand_leaf_qdisc $BESTEFFORT_LEAF_QDISC`
+
+		LAN_LEAF_QDISC=sfq
 		LAN_LEAF_QDISC=`expand_leaf_qdisc $LAN_LEAF_QDISC`
 	fi
 }
@@ -182,23 +195,26 @@ set_filters()
 		BESTEFFORT_FILTER_FLOWID=60
 		LAN_FILTER_FLOWID=70
 
-	for CLASS_TYPE in $CLASS_TYPES; do
-		if [ "$QDISC_CMD" = "prio" -a "$CLASS_TYPE" = "INTERACTIVE" ]; then
-			PARENT_CLASSID=1
-			INTERACTIVE_FILTER_FLOWID=1
-		else
-			PARENT_CLASSID=$1
-				PARENT_CLASSID=${PARENT_CLASSID:-1}
-			INTERACTIVE_FILTER_FLOWID=40
-		fi
+	{
+		for CLASS_TYPE in $CLASS_TYPES; do
+			if [ "$QDISC_CMD" = "prio" -a "$CLASS_TYPE" = "INTERACTIVE" ]; then
+				PARENT_CLASSID=1
+				INTERACTIVE_FILTER_FLOWID=1
+			else
+				PARENT_CLASSID=$1
+					PARENT_CLASSID=${PARENT_CLASSID:-1}
+				INTERACTIVE_FILTER_FLOWID=40
+			fi
 
-		for FILTER_NUM in `seq 1 100`; do
-			eval FILTER="\$$CLASS_TYPE"_FILTER_$FILTER_NUM
-				[ -z "$FILTER" ] && break
-			eval FILTER_FLOWID="\$$CLASS_TYPE"_FILTER_FLOWID
-				$ECHO tc filter add dev $DEV parent $PARENT_CLASSID:0 $FILTER flowid $PARENT_CLASSID:$FILTER_FLOWID
+			for FILTER_NUM in `seq 1 100`; do
+				eval FILTER="\$$CLASS_TYPE"_FILTER_$FILTER_NUM
+				if [ ! -z "$FILTER" ]; then
+					eval FILTER_FLOWID="\$$CLASS_TYPE"_FILTER_FLOWID
+						$ECHO tc filter add dev $DEV parent $PARENT_CLASSID:0 $FILTER flowid $PARENT_CLASSID:$FILTER_FLOWID
+				fi
+			done
 		done
-	done
+	} | sort -g
 
 	$ECHO
 }
@@ -401,8 +417,6 @@ start()
 					set_$ALG_CMD
 				fi
 	done
-
-describe > /tmp/$$
 
 	if [ $DEBUG -eq 0 ]; then
 	 	eend $?
