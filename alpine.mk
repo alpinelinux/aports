@@ -7,7 +7,7 @@ PROFILE		?= alpine
 BUILD_DATE	:= $(shell date +%y%m%d)
 ALPINE_RELEASE	?= $(BUILD_DATE)
 ALPINE_NAME	?= alpine-test
-ALPINE_ARCH	:= i386
+ALPINE_ARCH	:= x86
 DESTDIR		?= $(shell pwd)/isotmp.$(PROFILE)
 
 MKCRAMFS	= mkcramfs
@@ -220,6 +220,7 @@ ISOFS_DIRSTAMP	:= $(DESTDIR)/stamp.isofs
 
 $(ISO_REPOS_DIRSTAMP): $(ISO_PKGDIR)/APKINDEX.tar.gz
 	@touch $(ISO_PKGDIR)/.boot_repository
+	@rm -f $(ISO_PKGDIR)/.SIGN.*
 	@touch $@
 
 $(ISO_PKGDIR)/APKINDEX.tar.gz: $(APK_FILES)
