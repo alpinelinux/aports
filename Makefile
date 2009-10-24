@@ -25,6 +25,7 @@ else
 FULL_VERSION    := $(VERSION)
 endif
 
+CHMOD		:= chmod
 SED		:= sed
 TAR		:= tar
 
@@ -39,9 +40,11 @@ SSL_LIBS	:= $(shell pkg-config --libs openssl)
 .SUFFIXES:	.sh.in .in
 .sh.in.sh:
 	${SED} ${SED_REPLACE} ${SED_EXTRA} $< > $@
+	${CHMOD} +x $@
 
 .in:
 	${SED} ${SED_REPLACE} ${SED_EXTRA} $< > $@
+	${CHMOD} +x $@
 
 P=$(PACKAGE)-$(VERSION)
 
