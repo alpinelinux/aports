@@ -207,12 +207,23 @@ int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
 	if (av > bv)
 		return APK_VERSION_GREATER;
 
-	/* at and bt are the next expected token type */
+	/* both have TOKEN_END or TOKEN_INVALID next? */
 	if (at == bt)
 		return APK_VERSION_EQUAL;
-	if (at < bt || bt == TOKEN_INVALID)
+
+	/* leading version components and their values are equal,
+	 * now the non-terminating version is greater unless it's a suffix
+	 * indicating pre-release */
+	if (at == TOKEN_SUFFIX && get_token(&at, &a) < 0)
+		return APK_VERSION_LESS;
+	if (bt == TOKEN_SUFFIX && get_token(&bt, &b) < 0)
 		return APK_VERSION_GREATER;
-	return APK_VERSION_LESS;
+	if (at == TOKEN_END)
+		return APK_VERSION_LESS;
+	if (bt == TOKEN_END)
+		return APK_VERSION_GREATER;
+
+	return APK_VERSION_EQUAL;
 }
 
 int apk_version_compare(const char *str1, const char *str2)
