@@ -487,7 +487,7 @@ int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 		.device = st.st_dev,
 	};
 
-	if (checksum == APK_CHECKSUM_NONE)
+	if (checksum == APK_CHECKSUM_NONE || S_ISDIR(st.st_mode))
 		return 0;
 
 	if ((flags & APK_FI_NOFOLLOW) && S_ISLNK(st.st_mode)) {
