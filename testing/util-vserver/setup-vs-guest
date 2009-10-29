@@ -161,98 +161,146 @@ valid_ip() {
         ipcalc -s $1
 }
 
+# ask for hostname
+# 
+# $1 = default
+#
+# retrusn hostname in global var $resp
+#
+ask_hostname() {
+	while true; do
+		ask "Hostname for new vserver:" $1
+		if [ -d /etc/vservers/$resp ]; then
+			echo "/etc/vservers/$resp already exist"
+			continue
+		fi
+		if [ -d /vservers/$resp ]; then
+			echo "/vservers/$resp already exist"
+			continue
+		fi
+		valid_hostname $resp && break
+	done
+}
+
+ask_ifaceopts() {
+	# get ip address(es)
+	resp=
+	local ifaceopts= _def= _iface=
+	local ifaces=$(ip addr | awk -F: '$1 ~ /^[0-9]/ {printf "%s" $2} END {printf "\n"}')
+	local last_iface=$(echo $ifaces | sed 's/.* //')
+	while [ "$resp" != "done" ]; do
+		if [ -z "$ifaces" ] || [ "$ifaces" = "lo " ] || [ -n "$ifaceopts" ]; then
+			_def="done"
+		else
+			_def=$(echo $ifaces | sed 's/.* //')
+		fi
+		ask_which "network interface" "to use for $_hostname" \
+			"$ifaces" $_def
+		[ "$resp" = "done" ] && break
+
+		_iface=$resp
+		ifaces=$(rmel $_iface $ifaces)
+		# suggested ip by last digit + 1
+		_last_ip_mask=$(last_ipv4_addr_mask $_iface)
+		_last_ip=${_last_ip_mask%/*}
+		_last_ip_digit=${_last_ip##*.}
+		_ip=${_last_ip%.*}.$((($_last_ip_digit + 1) % 256))
+		_mask=${_last_ip_mask#*/}
+		while true; do
+			ask "Enter IP address/mask for $_iface:" $_ip/$_mask
+			valid_ip $resp && break
+			echo "$resp is not a valid IPv4 address/mask"
+		done
+		_ip_mask=$resp
+		ifaceopts="$ifaceopts --interface $_iface:$_ip_mask"
+
+		# suggest context from last digit in first ip address
+		if [ -z "$_context" ]; then
+			_ip=${_ip_mask%/*}
+			_last_digit=${_ip##*.}
+			_context=$((10000 + $_last_digit))
+		fi
+	done
+	resp="$ifacesopts"
+}
+
+ask_context() {
+	# get context id
+	while true; do
+		ask "Enter context id for $_hostname:" $_context
+		if echo "$resp" | egrep -q "[0-9]+"; then
+			[ $resp -ge 0 ] && [ $resp -lt 65535 ] && break
+		fi
+		echo "Context id must be a 0-65534 number"
+	done
+}
+
+ask_template() {
+	local temp
+	# get template
+	while true; do
+		ask "Enter template file (or empty for generate a new):" \
+			$_template
+		if [ -z "$resp" ] || [ -r "$resp" ]; then
+			break
+		fi
+		echo "Can not read $resp"
+	done
+	temp=$resp
+	if [ -z "$temp" ]; then
+		temp=/vservers/template.tar.gz
+		echo -n "Generating template..."
+		if setup-vs-template -q -o $temp; then
+			echo "ok"
+		else
+			echo "Failed to create template"
+			exit 1
+		fi
+	fi
+	resp=$temp
+}
+
+usage() {
+	echo "Usage: ${0##*/} [-h] [HOSTNAME...]"
+	exit 1
+}
+
+while getopts "h" opt; do
+	case "$opt" in
+		h) usage;;
+		?) usage;;
+	esac
+done
+
+shift $(($OPTIND - 1))
+
 if [ "$(whoami)" != "root" ]; then
 	echo "Need to be root. Sorry."
 	exit 1
 fi
 
-ifaces=$(ip addr | awk -F: '$1 ~ /^[0-9]/ {printf "%s" $2} END {printf "\n"}')
-last_iface=$(echo $ifaces | sed 's/.* //')
-
 while true; do
-	ask "Hostname for new vserver:"
-	if [ -d /etc/vservers/$resp ]; then
-		echo "/etc/vservers/$resp already exist"
-		continue
-	fi
-	if [ -d /vservers/$resp ]; then
-		echo "/vservers/$resp already exist"
-		continue
-	fi
-	valid_hostname $resp && break
+	ask_hostname $1
+	_hostname=$resp
+
+	ask_ifaceopts
+	_ifaceopts=$resp
+
+	ask_context
+	_context=$resp
+
+	ask_template
+	_template=$resp
+
+	vserver $_hostname build \
+		--hostname $_hostname \
+		$_ifaceopts \
+		--context $_context \
+		-m template -- -t "$_template" -d alpine \
+		&& cp /etc/resolv.conf /vservers/$_hostname/etc/ \
+		&& cp /etc/apk/repositories /vservers/$_hostname/etc/apk/ \
+		|| exit 1
+	
+	shift
+	[ $# -le 0 ] && exit 0
 done
-_hostname=$resp
-
-# get ip address(es)
-resp=
-ifaceopts=
-while [ "$resp" != "done" ]; do
-	if [ -z "$ifaces" ] || [ "$ifaces" = "lo " ]; then
-		_def="done"
-	else
-		_def=$(echo $ifaces | sed 's/.* //')
-	fi
-	ask_which "network interface" "to use for $_hostname" "$ifaces" $_def
-	[ "$resp" = "done" ] && break
-
-	_iface=$resp
-	ifaces=$(rmel $_iface $ifaces)
-	# suggested ip by last digit + 1
-	_last_ip_mask=$(last_ipv4_addr_mask $_iface)
-	_last_ip=${_last_ip_mask%/*}
-	_last_ip_digit=${_last_ip##*.}
-	_ip=${_last_ip%.*}.$((($_last_ip_digit + 1) % 256))
-	_mask=${_last_ip_mask#*/}
-	while true; do
-		ask "Enter IP address/mask for $_iface:" $_ip/$_mask
-		valid_ip $resp && break
-		echo "$resp is not a valid IPv4 address/mask"
-	done
-	_ip_mask=$resp
-	ifaceopts="$ifaceopts --interface $_iface:$_ip_mask"
-
-	# suggest context from last digit in first ip address
-	if [ -z "$_context" ]; then
-		_ip=${_ip_mask%/*}
-		_last_digit=${_ip##*.}
-		_context=$((10000 + $_last_digit))
-	fi
-done
-
-# get context id
-while true; do
-	ask "Enter context id for $_hostname:" $_context
-	if echo "$resp" | egrep -q "[0-9]+"; then
-		[ $resp -ge 0 ] && [ $resp -lt 65535 ] && break
-	fi
-	echo "Context id must be a 0-65534 number"
-done
-_context=$resp
-
-# get template
-while true; do
-	ask "Enter template file (or empty for generate a new):"
-	if [ -z "$resp" ] || [ -r "$resp" ]; then
-		break
-	fi
-	echo "Can not read $resp"
-done
-_template=$resp
-
-if [ -z "$_template" ]; then
-	_template=/vservers/template.tar.gz
-	echo -n "Generating template..."
-	if setup-vs-template -q -o $_template; then
-		echo "ok"
-	else
-		echo "Failed to create template"
-		exit 1
-	fi
-fi
-
-vserver $_hostname build \
-	--hostname $_hostname \
-	$ifaceopts \
-	--context $_context \
-	-m template -- -t "$_template" -d alpine
-
