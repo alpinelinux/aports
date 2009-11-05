@@ -218,9 +218,9 @@ int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
 		return APK_VERSION_LESS;
 	if (bt == TOKEN_SUFFIX && get_token(&bt, &b) < 0)
 		return APK_VERSION_GREATER;
-	if (at == TOKEN_END)
+	if (at > bt)
 		return APK_VERSION_LESS;
-	if (bt == TOKEN_END)
+	if (bt > at)
 		return APK_VERSION_GREATER;
 
 	return APK_VERSION_EQUAL;
