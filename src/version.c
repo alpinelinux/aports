@@ -104,17 +104,15 @@ static int get_token(int *type, apk_blob_t *blob)
 	case TOKEN_SUFFIX:
 		for (v = 0; v < ARRAY_SIZE(pre_suffixes); v++) {
 			i = strlen(pre_suffixes[v]);
-			if (i < blob->len &&
+			if (i <= blob->len &&
 			    strncmp(pre_suffixes[v], blob->ptr, i) == 0)
 				break;
 		}
 		if (v < ARRAY_SIZE(pre_suffixes)) {
-			nt = TOKEN_SUFFIX_NO;
 			v = v - ARRAY_SIZE(pre_suffixes);
 			break;
 		}
 		if (strncmp("p", blob->ptr, 1) == 0) {
-			nt = TOKEN_SUFFIX_NO;
 			v = 1;
 			break;
 		}
@@ -125,7 +123,9 @@ static int get_token(int *type, apk_blob_t *blob)
 	}
 	blob->ptr += i;
 	blob->len -= i;
-	if (nt != TOKEN_INVALID)
+	if (blob->len == 0)
+		*type = TOKEN_END;
+	else if (nt != TOKEN_INVALID)
 		*type = nt;
         else
 		next_token(type, blob);
@@ -181,7 +181,7 @@ int apk_version_validate(apk_blob_t ver)
 
 int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
 {
-	int at = TOKEN_DIGIT, bt = TOKEN_DIGIT;
+	int at = TOKEN_DIGIT, bt = TOKEN_DIGIT, tt;
 	int av = 0, bv = 0;
 
 	if (APK_BLOB_IS_NULL(a) || APK_BLOB_IS_NULL(b)) {
@@ -214,9 +214,11 @@ int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
 	/* leading version components and their values are equal,
 	 * now the non-terminating version is greater unless it's a suffix
 	 * indicating pre-release */
-	if (at == TOKEN_SUFFIX && get_token(&at, &a) < 0)
+	tt = at;
+	if (at == TOKEN_SUFFIX && get_token(&tt, &a) < 0)
 		return APK_VERSION_LESS;
-	if (bt == TOKEN_SUFFIX && get_token(&bt, &b) < 0)
+	tt = bt;
+	if (bt == TOKEN_SUFFIX && get_token(&tt, &b) < 0)
 		return APK_VERSION_GREATER;
 	if (at > bt)
 		return APK_VERSION_LESS;
