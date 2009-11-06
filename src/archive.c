@@ -344,8 +344,14 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 	    (ae->link_target != NULL)) {
 		/* non-standard entries need to be deleted first */
 		if (apk_flags & APK_NEVER_OVERWRITE) {
-			if (faccessat(atfd, fn, F_OK, AT_SYMLINK_NOFOLLOW) == 0)
+			if (faccessat(atfd, ae->name, F_OK,
+				      AT_SYMLINK_NOFOLLOW) == 0) {
+				/* destination exists, but we are not supposed
+				 * to overwrite, just clean the temp file */
+				if (suffix != NULL)
+					unlinkat(atfd, fn, 0);
 				return 0;
+			}
 		} else {
 			unlinkat(atfd, fn, 0);
 		}
