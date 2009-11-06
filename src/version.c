@@ -73,6 +73,7 @@ static void next_token(int *type, apk_blob_t *blob)
 static int get_token(int *type, apk_blob_t *blob)
 {
 	static const char *pre_suffixes[] = { "alpha", "beta", "pre", "rc" };
+	static const char *post_suffixes[] = { "cvs", "svn", "git", "hg", "p" };
 	int v = 0, i = 0, nt = TOKEN_INVALID;
 
 	if (blob->len <= 0) {
@@ -112,10 +113,14 @@ static int get_token(int *type, apk_blob_t *blob)
 			v = v - ARRAY_SIZE(pre_suffixes);
 			break;
 		}
-		if (strncmp("p", blob->ptr, 1) == 0) {
-			v = 1;
-			break;
+		for (v = 0; v < ARRAY_SIZE(post_suffixes); v++) {
+			i = strlen(post_suffixes[v]);
+			if (i <= blob->len &&
+			    strncmp(post_suffixes[v], blob->ptr, i) == 0)
+				break;
 		}
+		if (v < ARRAY_SIZE(post_suffixes))
+			break;
 		/* fallthrough: invalid suffix */
 	default:
 		*type = TOKEN_INVALID;
