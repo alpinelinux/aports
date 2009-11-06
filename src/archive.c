@@ -339,7 +339,17 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 		fn = alloca(PATH_MAX);
 		snprintf(fn, PATH_MAX, "%s%s", ae->name, suffix);
 	}
-	unlinkat(atfd, fn, 0);
+
+	if ((!S_ISDIR(ae->mode) && !S_ISREG(ae->mode)) ||
+	    (ae->link_target != NULL)) {
+		/* non-standard entries need to be deleted first */
+		if (apk_flags & APK_NEVER_OVERWRITE) {
+			if (faccessat(atfd, fn, F_OK, AT_SYMLINK_NOFOLLOW) == 0)
+				return 0;
+		} else {
+			unlinkat(atfd, fn, 0);
+		}
+	}
 
 	switch (ae->mode & S_IFMT) {
 	case S_IFDIR:
@@ -349,8 +359,16 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 		break;
 	case S_IFREG:
 		if (ae->link_target == NULL) {
-			fd = openat(atfd, fn, O_RDWR | O_CREAT, ae->mode & 07777);
+			int flags = O_RDWR | O_CREAT | O_TRUNC;
+
+			if (apk_flags & APK_NEVER_OVERWRITE)
+				flags |= O_EXCL;
+
+			fd = openat(atfd, fn, flags, ae->mode & 07777);
 			if (fd < 0) {
+				if ((apk_flags & APK_NEVER_OVERWRITE) &&
+				    (errno == EEXIST))
+					return 0;
 				r = -1;
 				break;
 			}
