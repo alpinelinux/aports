@@ -1890,9 +1890,16 @@ static void apk_db_migrate_files(struct apk_database *db,
 				     apk_checksum_compare(&file->csum, &fi.csum) == 0))
 					unlinkat(db->root_fd, tmpname, 0);
 			} else {
-				/* Overwrite the old file */
-				renameat(db->root_fd, tmpname,
-					 db->root_fd, name);
+				/* check if want keep existing files */
+				if ((apk_flags & APK_NEVER_OVERWRITE) &&
+				    (faccessat(db->root_fd, name, F_OK, 
+					      AT_SYMLINK_NOFOLLOW) == 0)) {
+					unlinkat(db->root_fd, tmpname, 0);
+				} else {
+					/* Overwrite the old file */
+					renameat(db->root_fd, tmpname,
+						 db->root_fd, name);
+				}
 			}
 
 			/* Claim ownership of the file in db */
