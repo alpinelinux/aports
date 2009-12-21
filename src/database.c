@@ -1923,11 +1923,15 @@ static void apk_db_migrate_files(struct apk_database *db,
 			cstype |= APK_FI_NOFOLLOW;
 
 			r = apk_file_get_info(db->root_fd, name, cstype, &fi);
-			if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
-			    (r == 0) &&
-			    (ofile == NULL ||
-			     ofile->csum.type == APK_CHECKSUM_NONE ||
-			     apk_checksum_compare(&ofile->csum, &fi.csum) != 0)) {
+			if (ofile->name == NULL) {
+				/* File was from overlay, delete the
+				 * packages version */
+				unlinkat(db->root_fd, tmpname, 0);
+			} else if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
+				   (r == 0) &&
+				   (ofile == NULL ||
+				    ofile->csum.type == APK_CHECKSUM_NONE ||
+				    apk_checksum_compare(&ofile->csum, &fi.csum) != 0)) {
 				/* Protected directory, with file without
 				 * db entry, or local modifications.
 				 *
@@ -1942,15 +1946,9 @@ static void apk_db_migrate_files(struct apk_database *db,
 				     apk_checksum_compare(&file->csum, &fi.csum) == 0))
 					unlinkat(db->root_fd, tmpname, 0);
 			} else {
-				if (ofile->name == NULL) {
-					/* File was from overlay, delete the
-					 * packages version */
-					unlinkat(db->root_fd, tmpname, 0);
-				} else {
-					/* Overwrite the old file */
-					renameat(db->root_fd, tmpname,
-						 db->root_fd, name);
-				}
+				/* Overwrite the old file */
+				renameat(db->root_fd, tmpname,
+					 db->root_fd, name);
 			}
 
 			/* Claim ownership of the file in db */
