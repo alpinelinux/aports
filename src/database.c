@@ -642,6 +642,7 @@ static int apk_db_scriptdb_write(struct apk_database *db, struct apk_ostream *os
 	char filename[256];
 	apk_blob_t bfn;
 	int r, i;
+	time_t now = time(NULL);
 
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		pkg = ipkg->pkg;
@@ -654,6 +655,7 @@ static int apk_db_scriptdb_write(struct apk_database *db, struct apk_ostream *os
 				.name = filename,
 				.size = ipkg->script[i].len,
 				.mode = 0755 | S_IFREG,
+				.mtime = now,
 			};
 			/* The scripts db expects file names in format:
 			 * pkg-version.<hexdump of package checksum>.action */
@@ -1892,7 +1894,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 			} else {
 				/* check if want keep existing files */
 				if ((apk_flags & APK_NEVER_OVERWRITE) &&
-				    (faccessat(db->root_fd, name, F_OK, 
+				    (faccessat(db->root_fd, name, F_OK,
 					      AT_SYMLINK_NOFOLLOW) == 0)) {
 					unlinkat(db->root_fd, tmpname, 0);
 				} else {
