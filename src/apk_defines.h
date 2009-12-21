@@ -64,8 +64,7 @@ extern unsigned int apk_flags;
 #define APK_INTERACTIVE		0x0400
 #define APK_RECURSIVE_DELETE	0x0800
 #define APK_NO_NETWORK		0x1000
-#define APK_NEVER_OVERWRITE	0x2000
-#define APK_OVERLAY_FROM_STDIN	0x4000
+#define APK_OVERLAY_FROM_STDIN	0x2000
 
 #define apk_error(args...)	do { apk_log("ERROR: ", args); } while (0)
 #define apk_warning(args...)	do { if (apk_verbosity > 0) { apk_log("WARNING: ", args); } } while (0)

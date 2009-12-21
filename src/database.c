@@ -1942,11 +1942,9 @@ static void apk_db_migrate_files(struct apk_database *db,
 				     apk_checksum_compare(&file->csum, &fi.csum) == 0))
 					unlinkat(db->root_fd, tmpname, 0);
 			} else {
-				/* check if want keep existing files */
-				if ((ofile->name == NULL) ||
-				    ((apk_flags & APK_NEVER_OVERWRITE) &&
-				     (faccessat(db->root_fd, name, F_OK,
-					        AT_SYMLINK_NOFOLLOW) == 0))) {
+				if (ofile->name == NULL) {
+					/* File was from overlay, delete the
+					 * packages version */
 					unlinkat(db->root_fd, tmpname, 0);
 				} else {
 					/* Overwrite the old file */

@@ -343,18 +343,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 	if ((!S_ISDIR(ae->mode) && !S_ISREG(ae->mode)) ||
 	    (ae->link_target != NULL)) {
 		/* non-standard entries need to be deleted first */
-		if (apk_flags & APK_NEVER_OVERWRITE) {
-			if (faccessat(atfd, ae->name, F_OK,
-				      AT_SYMLINK_NOFOLLOW) == 0) {
-				/* destination exists, but we are not supposed
-				 * to overwrite, just clean the temp file */
-				if (suffix != NULL)
-					unlinkat(atfd, fn, 0);
-				return 0;
-			}
-		} else {
-			unlinkat(atfd, fn, 0);
-		}
+		unlinkat(atfd, fn, 0);
 	}
 
 	switch (ae->mode & S_IFMT) {
@@ -367,14 +356,8 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 		if (ae->link_target == NULL) {
 			int flags = O_RDWR | O_CREAT | O_TRUNC;
 
-			if (apk_flags & APK_NEVER_OVERWRITE)
-				flags |= O_EXCL;
-
 			fd = openat(atfd, fn, flags, ae->mode & 07777);
 			if (fd < 0) {
-				if ((apk_flags & APK_NEVER_OVERWRITE) &&
-				    (errno == EEXIST))
-					return 0;
 				r = -1;
 				break;
 			}
