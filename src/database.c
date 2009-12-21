@@ -481,6 +481,31 @@ int apk_cache_download(struct apk_database *db, const char *url,
 	return 0;
 }
 
+static struct apk_db_dir_instance *find_diri(struct apk_installed_package *ipkg,
+					     apk_blob_t dirname,
+					     struct apk_db_dir_instance *curdiri,
+					     struct hlist_node ***tail)
+{
+	struct hlist_node *n;
+	struct apk_db_dir_instance *diri;
+
+	if (curdiri != NULL &&
+	    apk_blob_compare(APK_BLOB_PTR_LEN(curdiri->dir->name,
+					      curdiri->dir->namelen),
+			     dirname) == 0)
+		return curdiri;
+
+	hlist_for_each_entry(diri, n, &ipkg->owned_dirs, pkg_dirs_list) {
+		if (apk_blob_compare(APK_BLOB_PTR_LEN(diri->dir->name,
+						      diri->dir->namelen), dirname) == 0) {
+			if (tail != NULL)
+				*tail = hlist_tail_ptr(&diri->owned_files);
+			return diri;
+		}
+	}
+	return NULL;
+}
+
 int apk_db_read_overlay(struct apk_database *db, struct apk_bstream *bs)
 {
 	struct apk_db_dir_instance *diri = NULL;
@@ -508,6 +533,14 @@ int apk_db_read_overlay(struct apk_database *db, struct apk_bstream *bs)
 			diri = apk_db_diri_new(db, pkg, bdir, &diri_node);
 			file_diri_node = &diri->owned_files.first;
 		} else {
+			diri = find_diri(ipkg, bdir, diri, &file_diri_node);
+			if (diri == NULL) {
+				apk_error("overlay: File '%*s' entry without "
+					  "directory entry.\n",
+					  line.len, line.ptr);
+				return -1;
+			}
+
 			file = apk_db_file_get(db, diri, bfile, &file_diri_node);
 		}
 	}
@@ -1585,31 +1618,6 @@ static int apk_db_run_pending_script(struct install_ctx *ctx)
 			  "pre-install/upgrade script",
 			  ctx->pkg->name->name, ctx->pkg->version);
 	return r;
-}
-
-static struct apk_db_dir_instance *find_diri(struct apk_installed_package *ipkg,
-					     apk_blob_t dirname,
-					     struct apk_db_dir_instance *curdiri,
-					     struct hlist_node ***tail)
-{
-	struct hlist_node *n;
-	struct apk_db_dir_instance *diri;
-
-	if (curdiri != NULL &&
-	    apk_blob_compare(APK_BLOB_PTR_LEN(curdiri->dir->name,
-					      curdiri->dir->namelen),
-			     dirname) == 0)
-		return curdiri;
-
-	hlist_for_each_entry(diri, n, &ipkg->owned_dirs, pkg_dirs_list) {
-		if (apk_blob_compare(APK_BLOB_PTR_LEN(diri->dir->name,
-						      diri->dir->namelen), dirname) == 0) {
-			if (tail != NULL)
-				*tail = hlist_tail_ptr(&diri->owned_files);
-			return diri;
-		}
-	}
-	return NULL;
 }
 
 static int parse_replaces(void *_ctx, apk_blob_t blob)
