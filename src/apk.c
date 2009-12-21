@@ -58,6 +58,7 @@ static struct apk_option generic_options[] = {
 				required_argument, "REPOFILE" },
 	{ 0x109, "no-network",	"Do not use network (cache is still used)" },
 	{ 0x110, "never-overwrite", "Never overwrite existing files" },
+	{ 0x111, "overlay-from-stdin", "Read list of overlay files from stdin" },
 };
 
 const char *apk_error_str(int error)
@@ -387,6 +388,9 @@ int main(int argc, char **argv)
 			break;
 		case 0x110:
 			apk_flags |= APK_NEVER_OVERWRITE;
+			break;
+		case 0x111:
+			apk_flags |= APK_OVERLAY_FROM_STDIN;
 			break;
 		default:
 			if (applet == NULL || applet->parse == NULL ||

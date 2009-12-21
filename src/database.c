@@ -481,6 +481,40 @@ int apk_cache_download(struct apk_database *db, const char *url,
 	return 0;
 }
 
+int apk_db_read_overlay(struct apk_database *db, struct apk_bstream *bs)
+{
+	struct apk_db_dir_instance *diri = NULL;
+	struct hlist_node **diri_node = NULL, **file_diri_node = NULL;
+	struct apk_package *pkg;
+	struct apk_installed_package *ipkg;
+	struct apk_db_file *file;
+	apk_blob_t token = APK_BLOB_STR("\n"), line, bdir, bfile;
+
+	pkg = apk_pkg_new();
+	if (pkg == NULL)
+		return -1;
+
+	ipkg = apk_pkg_install(db, pkg);
+	if (ipkg == NULL)
+		return -1;
+
+	diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
+
+	while (!APK_BLOB_IS_NULL(line = bs->read(bs, token))) {
+		if (!apk_blob_rsplit(line, '/', &bdir, &bfile))
+			break;
+
+		if (bfile.len == 0) {
+			diri = apk_db_diri_new(db, pkg, bdir, &diri_node);
+			file_diri_node = &diri->owned_files.first;
+		} else {
+			file = apk_db_file_get(db, diri, bfile, &file_diri_node);
+		}
+	}
+
+	return 0;
+}
+
 int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 {
 	struct apk_package *pkg = NULL;
@@ -1049,6 +1083,12 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	db->keys_fd = openat(db->root_fd,
 			     dbopts->keys_dir ?: "etc/apk/keys",
 			     O_RDONLY);
+
+	if (apk_flags & APK_OVERLAY_FROM_STDIN) {
+		apk_flags &= ~APK_OVERLAY_FROM_STDIN;
+		apk_db_read_overlay(db, apk_bstream_from_istream(
+				apk_istream_from_fd(STDIN_FILENO)));
+	}
 
 	r = apk_db_read_state(db, dbopts->open_flags);
 	if (r == -ENOENT && (dbopts->open_flags & APK_OPENF_CREATE)) {
@@ -1701,8 +1741,13 @@ static int apk_db_install_archive_entry(void *_ctx,
 
 			opkg = file->diri->pkg;
 			do {
+				/* Overlay file? */
+				if (opkg->name == NULL)
+					break;
+				/* Upgrading package? */
 				if (opkg->name == pkg->name)
 					break;
+				/* Overwriting with permission? */
 				for (i = 0; ctx->replaces && i < ctx->replaces->num; i++)
 					if (opkg->name == ctx->replaces->item[i])
 						break;
@@ -1893,9 +1938,10 @@ static void apk_db_migrate_files(struct apk_database *db,
 					unlinkat(db->root_fd, tmpname, 0);
 			} else {
 				/* check if want keep existing files */
-				if ((apk_flags & APK_NEVER_OVERWRITE) &&
-				    (faccessat(db->root_fd, name, F_OK,
-					      AT_SYMLINK_NOFOLLOW) == 0)) {
+				if ((ofile->name == NULL) ||
+				    ((apk_flags & APK_NEVER_OVERWRITE) &&
+				     (faccessat(db->root_fd, name, F_OK,
+					        AT_SYMLINK_NOFOLLOW) == 0))) {
 					unlinkat(db->root_fd, tmpname, 0);
 				} else {
 					/* Overwrite the old file */

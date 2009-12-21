@@ -66,8 +66,13 @@ struct apk_installed_package *apk_pkg_install(struct apk_database *db,
 
 	pkg->ipkg = ipkg = calloc(1, sizeof(struct apk_installed_package));
 	ipkg->pkg = pkg;
-	db->installed.stats.packages++;
-	list_add_tail(&ipkg->installed_pkgs_list, &db->installed.packages);
+
+	/* Overlay override information resides in a nameless package */
+	if (pkg->name != NULL) {
+		db->installed.stats.packages++;
+		list_add_tail(&ipkg->installed_pkgs_list,
+			      &db->installed.packages);
+	}
 
 	return ipkg;
 }
