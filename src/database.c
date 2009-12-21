@@ -1923,7 +1923,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 			cstype |= APK_FI_NOFOLLOW;
 
 			r = apk_file_get_info(db->root_fd, name, cstype, &fi);
-			if (ofile->name == NULL) {
+			if (ofile && ofile->diri->pkg->name == NULL) {
 				/* File was from overlay, delete the
 				 * packages version */
 				unlinkat(db->root_fd, tmpname, 0);
