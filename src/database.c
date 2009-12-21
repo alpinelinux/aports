@@ -535,12 +535,9 @@ int apk_db_read_overlay(struct apk_database *db, struct apk_bstream *bs)
 		} else {
 			diri = find_diri(ipkg, bdir, diri, &file_diri_node);
 			if (diri == NULL) {
-				apk_error("overlay: File '%*s' entry without "
-					  "directory entry.\n",
-					  line.len, line.ptr);
-				return -1;
+				diri = apk_db_diri_new(db, pkg, bdir, &diri_node);
+				file_diri_node = &diri->owned_files.first;
 			}
-
 			file = apk_db_file_get(db, diri, bfile, &file_diri_node);
 		}
 	}
