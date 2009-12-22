@@ -581,13 +581,9 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		/* If no package, create new */
 		if (pkg == NULL) {
 			pkg = apk_pkg_new();
+                        ipkg = NULL;
 			diri = NULL;
 			file_diri_node = NULL;
-
-			if (repo == -1) {
-				ipkg = apk_pkg_install(db, pkg);
-				diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
-			}
 		}
 
 		/* Standard index line? */
@@ -597,6 +593,10 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		if (repo != -1) {
 			apk_error("Invalid index entry '%c'", field);
 			return -1;
+		}
+		if (ipkg == NULL) {
+			ipkg = apk_pkg_install(db, pkg);
+			diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
 		}
 
 		/* Check FDB special entries */
