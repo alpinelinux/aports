@@ -771,7 +771,7 @@ int apk_state_commit(struct apk_state *state,
 			printf("Do you want to continue [Y/n]? ");
 			fflush(stdout);
 			r = fgetc(stdin);
-			if (r != 'y' && r != 'Y')
+			if (r != 'y' && r != 'Y' && r != '\n')
 				return -1;
 		}
 	}
