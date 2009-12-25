@@ -587,16 +587,20 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		}
 
 		/* Standard index line? */
-		if (apk_pkg_add_info(db, pkg, field, l) == 0)
+		if (apk_pkg_add_info(db, pkg, field, l) == 0) {
+		        if (repo == -1 && field == 'S') {
+                                /* Instert to installed database; this needs to
+                                 * happen after package name has been read, but
+                                 * before first FDB entry. */
+                                ipkg = apk_pkg_install(db, pkg);
+                                diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
+		        }
 			continue;
+                }
 
-		if (repo != -1) {
+		if (repo != -1 || ipkg == NULL) {
 			apk_error("Invalid index entry '%c'", field);
 			return -1;
-		}
-		if (ipkg == NULL) {
-			ipkg = apk_pkg_install(db, pkg);
-			diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
 		}
 
 		/* Check FDB special entries */
