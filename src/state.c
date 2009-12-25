@@ -580,18 +580,21 @@ static void apk_count_change(struct apk_change *change, struct apk_stats *stats)
 		stats->packages ++;
 }
 
-static inline void apk_draw_progress(int x, int last)
+static inline void apk_draw_progress(int percent, int last)
 {
-	char tmp[] =
-		"-[                    ]- "
-		"\b\b\b\b\b\b\b\b\b\b\b\b\b"
-		"\b\b\b\b\b\b\b\b\b\b\b\b";
+	char tmp[128];
+	char reset[128];
 	int i;
 
-	for (i = 0; i < x; i++)
+	snprintf(tmp, sizeof(tmp), "-[                    ]- %3i%%", percent);
+	for (i = 0; (i < (percent/5)) && (i < (sizeof(tmp)-2)); i++)
 		tmp[2+i] = '#';
-
-	fwrite(tmp, last ? 25 : sizeof(tmp)-1, 1, stderr);
+	memset(reset, '\b', strlen(tmp));
+	fwrite(tmp, strlen(tmp), 1, stderr);
+	if (!last)
+		fwrite(reset, strlen(tmp), 1, stderr);
+	else if (apk_verbosity > 0)
+		fwrite("\n", 1, 1, stderr);
 	fflush(stderr);
 }
 
@@ -610,7 +613,7 @@ static void progress_cb(void *ctx, size_t progress)
 	if (prog->pkg != NULL)
 		partial = muldiv(progress, prog->pkg->installed_size, APK_PROGRESS_SCALE);
 
-        count = muldiv(20, prog->done.bytes + prog->done.packages + partial,
+        count = muldiv(100, prog->done.bytes + prog->done.packages + partial,
 		       prog->total.bytes + prog->total.packages);
 
 	if (prog->count != count)
@@ -801,7 +804,7 @@ int apk_state_commit(struct apk_state *state,
 		apk_count_change(change, &prog.done);
 	}
 	if (apk_flags & APK_PROGRESS)
-		apk_draw_progress(20, 1);
+		apk_draw_progress(100, 1);
 
 update_state:
 	apk_db_run_triggers(db);
