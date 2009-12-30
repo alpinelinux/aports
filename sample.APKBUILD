@@ -11,8 +11,8 @@ pkgrel=0
 pkgdesc=""
 url=""
 license="GPL"
-depends=""
-makedepends=""
+depends=
+makedepends=
 install=
 subpackages="$pkgname-dev $pkgname-doc"
 source="http://downloads.sourceforge.net/$pkgname/$pkgname-$pkgver.tar.gz"
@@ -21,14 +21,24 @@ source="http://downloads.sourceforge.net/$pkgname/$pkgname-$pkgver.tar.gz"
 # remove if not used.
 # depends_dev="somepackage-dev"
 
-build() {
-	cd "$srcdir"/$pkgname-$pkgver
+_builddir="$srcdir"/$pkgname-$pkgver
 
+prepare() {
+	cd "$_builddir"
+	# apply patches here
+}
+
+build() {
+	cd "$_builddir"
 	./configure --prefix=/usr \
 		--sysconfdir=/etc \
 		--mandir=/usr/share/man \
 		--infodir=/usr/share/info
 	make || return 1
+}
+
+package() {
+	cd "$_builddir"
 	make DESTDIR="$pkgdir" install
 
 	# remove the 2 lines below (and this) if there is no init.d script
