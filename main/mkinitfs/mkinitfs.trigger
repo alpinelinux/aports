@@ -3,15 +3,18 @@
 for i in "$@"; do
 	# get last element in path
 	flavor=${i##*/}
+	if ! [ -f "$i"/kernel.release ]; then
+		# kernel was uninstalled
+		rm -f $( readlink -f /boot/initramfs-$flavor ) \
+			/boot/initramfs-$flavor /boot/vmlinuz-$flavor \
+			/boot/$flavor /boot/$flavor.gz /$flavor /$flavor.gz
+		continue
+	fi
 	abi_release=$(cat "$i"/kernel.release)
 	initfs=initramfs-$abi_release
 	mkinitfs -o /boot/$initfs $abi_release
 	ln -sf $initfs /boot/initramfs-$flavor
 	ln -sf vmlinuz-$abi_release /boot/vmlinuz-$flavor
-
-	# extlinux will use path relative partition, so if /boot is on a
-	# separate partition we want /boot/<kernel> resolve to /<kernel>
-	[ -e /boot/boot ] || ln -sf / /boot/boot
 
 	#this is for compat. to be removed eventually...
 	ln -sf vmlinuz-$flavor /boot/$flavor
@@ -28,4 +31,10 @@ for i in "$@"; do
 		  $f
 	fi
 done
+
+# extlinux will use path relative partition, so if /boot is on a
+# separate partition we want /boot/<kernel> resolve to /<kernel>
+if ! [ -e /boot/boot ]; then
+	ln -sf / /boot/boot
+fi
 
