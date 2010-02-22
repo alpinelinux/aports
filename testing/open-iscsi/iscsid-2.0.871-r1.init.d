@@ -101,7 +101,7 @@ stop() {
 
 starttargets() {
         ebegin "Setting up iSCSI targets"
-        /usr/sbin/iscsiadm -m node --loginall=automatic
+        /usr/bin/iscsiadm -m node --loginall=automatic
 		ret=$?
         eend $ret
 		return $ret
@@ -110,7 +110,7 @@ starttargets() {
 stoptargets() {
         ebegin "Disconnecting iSCSI targets"
         sync
-        /usr/sbin/iscsiadm -m node --logoutall=all
+        /usr/bin/iscsiadm -m node --logoutall=all
 		ret=$?
         eend $ret
 		return $ret
@@ -123,5 +123,5 @@ restarttargets() {
 
 status() {
 	ebegin "Showing current active iSCSI sessions"
-	/usr/sbin/iscsiadm -m session
+	/usr/bin/iscsiadm -m session
 }
