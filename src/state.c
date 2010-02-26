@@ -529,11 +529,16 @@ int apk_state_lock_name(struct apk_state *state,
 
 static void apk_print_change(struct apk_database *db,
 			     struct apk_package *oldpkg,
-			     struct apk_package *newpkg)
+			     struct apk_package *newpkg,
+			     int num, int total)
 {
 	const char *msg = NULL;
 	int r;
 	struct apk_name *name;
+	char status[64];
+
+	snprintf(status, sizeof(status), "(%i/%i)", num, total);
+	status[sizeof(status) - 1] = '\0';
 
 	if (oldpkg != NULL)
 		name = oldpkg->name;
@@ -541,11 +546,11 @@ static void apk_print_change(struct apk_database *db,
 		name = newpkg->name;
 
 	if (oldpkg == NULL) {
-		apk_message("Installing %s (%s)",
-			    name->name, newpkg->version);
+		apk_message("%s Installing %s (%s)",
+			    status, name->name, newpkg->version);
 	} else if (newpkg == NULL) {
-		apk_message("Purging %s (%s)",
-			    name->name, oldpkg->version);
+		apk_message("%s Purging %s (%s)",
+			    status, name->name, oldpkg->version);
 	} else {
 		r = apk_pkg_version_compare(newpkg, oldpkg);
 		switch (r) {
@@ -559,8 +564,8 @@ static void apk_print_change(struct apk_database *db,
 			msg = "Upgrading";
 			break;
 		}
-		apk_message("%s %s (%s -> %s)",
-			    msg, name->name, oldpkg->version,
+		apk_message("%s %s %s (%s -> %s)",
+			    status, msg, name->name, oldpkg->version,
 			    newpkg->version);
 	}
 }
@@ -726,10 +731,12 @@ int apk_state_commit(struct apk_state *state,
 	struct progress prog;
 	struct apk_change *change;
 	int r = 0, size_diff = 0, toplevel = FALSE, deleteonly = TRUE;
+	int n = 0, numpkg = 0;
 
 	/* Count what needs to be done */
 	memset(&prog, 0, sizeof(prog));
 	list_for_each_entry(change, &state->change_list_head, change_list) {
+		numpkg++;
 		if (change->newpkg == NULL) {
 			apk_state_autoclean(state, change->oldpkg);
 			if (change->oldpkg->name->flags & APK_NAME_TOPLEVEL)
@@ -781,8 +788,10 @@ int apk_state_commit(struct apk_state *state,
 
 	/* Go through changes */
 	r = 0;
+	n = 0;
 	list_for_each_entry(change, &state->change_list_head, change_list) {
-		apk_print_change(db, change->oldpkg, change->newpkg);
+		n++;
+		apk_print_change(db, change->oldpkg, change->newpkg, n, numpkg);
 		prog.pkg = change->newpkg;
 
 		if (!(apk_flags & APK_SIMULATE)) {
