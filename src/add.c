@@ -63,7 +63,7 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	struct apk_package *virtpkg = NULL;
 	struct apk_dependency virtdep;
 	struct apk_dependency *deps;
-	int i, r = 0, num_deps = 0;
+	int i, r = 0, num_deps = 0, errors = 0;
 
 	if (actx->virtpkg) {
 		if (non_repository_check(db))
@@ -136,10 +136,12 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		} else {
 			apk_error("Unable to install '%s': %d",
 				  deps[i].name->name, r);
-			if (!(apk_flags & APK_FORCE))
-				goto err;
+			errors++;
 		}
 	}
+	if (errors && !(apk_flags & APK_FORCE))
+		goto err;
+
 	r = apk_state_commit(state, db);
 err:
 	if (state != NULL)
