@@ -1027,6 +1027,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 {
 	const char *msg = NULL;
 	struct apk_repository_list *repo = NULL;
+	struct apk_bstream *bs;
 	struct stat64 st;
 	apk_blob_t blob;
 	int r, rr = 0;
