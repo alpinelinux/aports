@@ -897,14 +897,6 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 			bs->close(bs, NULL);
 		}
 
-		if (apk_db_cache_active(db)) {
-			bs = apk_bstream_from_file(db->cache_fd, "installed");
-			if (bs != NULL) {
-				apk_db_index_read(db, bs, -2);
-				bs->close(bs, NULL);
-			}
-		}
-
 		bs = apk_bstream_from_file(db->root_fd, "var/lib/apk/triggers");
 		if (bs != NULL) {
 			apk_db_triggers_read(db, bs);
@@ -1139,6 +1131,14 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	}
 
 	if (!(dbopts->open_flags & APK_OPENF_NO_REPOS)) {
+		if (apk_db_cache_active(db)) {
+			bs = apk_bstream_from_file(db->cache_fd, "installed");
+			if (bs != NULL) {
+				apk_db_index_read(db, bs, -2);
+				bs->close(bs, NULL);
+			}
+		}
+
 		list_for_each_entry(repo, &dbopts->repository_list, list) {
 			r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
 			rr = r ?: rr;
