@@ -56,7 +56,7 @@ static int cache_download(struct apk_database *db)
 			continue;
 
 		repo = apk_db_select_repo(db, pkg);
-		if (repo == NULL)
+		if (repo == NULL || apk_url_local_file(repo->url) != NULL)
 			continue;
 
 		apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
