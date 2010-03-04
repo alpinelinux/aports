@@ -240,10 +240,12 @@ static struct apk_option fetch_options[] = {
 
 static struct apk_applet apk_fetch = {
 	.name = "fetch",
-	.help = "Download PACKAGEs from repositories to a local directory from "
-		"which a local mirror repository can be created.",
+	.help = "Download PACKAGEs from global repositories to a local "
+		"directory from which a local mirror repository can be "
+		"created.",
 	.arguments = "PACKAGE...",
-	.open_flags = APK_OPENF_READ|APK_OPENF_NO_STATE,
+	.open_flags =	APK_OPENF_READ | APK_OPENF_NO_STATE |
+			APK_OPENF_NO_INSTALLED_REPO,
 	.context_size = sizeof(struct fetch_ctx),
 	.num_options = ARRAY_SIZE(fetch_options),
 	.options = fetch_options,

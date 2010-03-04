@@ -1131,7 +1131,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		goto ret_r;
 	}
 
-	if (!(dbopts->open_flags & APK_OPENF_NO_REPOS)) {
+	if (!(dbopts->open_flags & APK_OPENF_NO_INSTALLED_REPO)) {
 		if (apk_db_cache_active(db)) {
 			bs = apk_bstream_from_file(db->cache_fd, "installed");
 			if (bs != NULL) {
@@ -1139,7 +1139,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 				bs->close(bs, NULL);
 			}
 		}
-
+	}
+	if (!(dbopts->open_flags & APK_OPENF_NO_SYS_REPOS)) {
 		list_for_each_entry(repo, &dbopts->repository_list, list) {
 			r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
 			rr = r ?: rr;
