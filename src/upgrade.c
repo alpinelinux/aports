@@ -15,6 +15,7 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 #include "apk_state.h"
+#include "apk_print.h"
 
 static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
 			 int optch, int optindex, const char *optarg)

@@ -16,6 +16,7 @@
 #include "apk_package.h"
 #include "apk_database.h"
 #include "apk_state.h"
+#include "apk_print.h"
 
 struct info_ctx {
 	int (*action)(struct info_ctx *ctx, struct apk_database *db,

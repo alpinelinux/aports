@@ -13,6 +13,7 @@
 #include "apk_applet.h"
 #include "apk_state.h"
 #include "apk_database.h"
+#include "apk_print.h"
 
 static int del_parse(void *ctx, struct apk_db_options *db,
 		     int optch, int optindex, const char *optarg)

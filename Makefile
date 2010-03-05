@@ -9,11 +9,12 @@ VERSION := 2.0.3
 
 DESTDIR		:=
 SBINDIR		:= /sbin
+LIBDIR		:= /lib
 CONFDIR		:= /etc/apk
 MANDIR		:= /usr/share/man
 DOCDIR		:= /usr/share/doc/apk
 
-export DESTDIR SBINDIR CONFDIR MANDIR DOCDIR
+export DESTDIR SBINDIR LIBDIR CONFDIR MANDIR DOCDIR
 
 ##
 # Top-level rules and targets

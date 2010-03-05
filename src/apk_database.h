@@ -155,7 +155,7 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 				 APK_OPENF_NO_SCRIPTS |		\
 				 APK_OPENF_NO_WORLD)
 
-int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts);
+int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts, int apk_wait);
 void apk_db_close(struct apk_database *db);
 int apk_db_write_config(struct apk_database *db);
 int apk_db_run_triggers(struct apk_database *db);

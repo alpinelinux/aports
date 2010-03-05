@@ -14,6 +14,7 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 #include "apk_version.h"
+#include "apk_print.h"
 
 struct ver_ctx {
 	int (*action)(struct apk_database *db, int argc, char **argv);

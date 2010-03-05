@@ -15,6 +15,7 @@
 
 #include "apk_applet.h"
 #include "apk_database.h"
+#include "apk_print.h"
 
 #define INDEX_OLD_FORMAT	0x10000
 

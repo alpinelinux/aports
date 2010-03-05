@@ -19,6 +19,7 @@
 #include "apk_database.h"
 #include "apk_state.h"
 #include "apk_package.h"
+#include "apk_print.h"
 
 #define CACHE_CLEAN	BIT(0)
 #define CACHE_DOWNLOAD	BIT(1)

@@ -14,6 +14,7 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 #include "apk_state.h"
+#include "apk_print.h"
 
 struct add_ctx {
 	const char *virtpkg;

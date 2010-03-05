@@ -47,7 +47,7 @@
         (type *)( (char *)__mptr - offsetof(type,member) );})
 #endif
 
-extern int apk_verbosity, apk_wait;
+extern int apk_verbosity;
 extern unsigned int apk_flags;
 
 #define APK_FORCE		0x0001
@@ -64,13 +64,6 @@ extern unsigned int apk_flags;
 #define APK_RECURSIVE_DELETE	0x0800
 #define APK_NO_NETWORK		0x1000
 #define APK_OVERLAY_FROM_STDIN	0x2000
-
-#define apk_error(args...)	do { apk_log("ERROR: ", args); } while (0)
-#define apk_warning(args...)	do { if (apk_verbosity > 0) { apk_log("WARNING: ", args); } } while (0)
-#define apk_message(args...)	do { if (apk_verbosity > 0) { apk_log(NULL, args); } } while (0)
-
-void apk_log(const char *prefix, const char *format, ...);
-const char *apk_error_str(int error);
 
 static inline size_t apk_calc_installed_size(size_t size)
 {

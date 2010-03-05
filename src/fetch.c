@@ -20,6 +20,7 @@
 #include "apk_database.h"
 #include "apk_state.h"
 #include "apk_io.h"
+#include "apk_print.h"
 
 #define FETCH_RECURSIVE		1
 #define FETCH_STDOUT		2

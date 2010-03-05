@@ -24,9 +24,7 @@
 #include "apk_database.h"
 #include "apk_applet.h"
 #include "apk_blob.h"
-
-int apk_verbosity = 1, apk_wait;
-unsigned int apk_flags = 0;
+#include "apk_print.h"
 
 static struct apk_option generic_options[] = {
 	{ 'h', "help",		"Show generic help or applet specific help" },
@@ -60,62 +58,10 @@ static struct apk_option generic_options[] = {
 	{ 0x111, "overlay-from-stdin", "Read list of overlay files from stdin" },
 };
 
-const char *apk_error_str(int error)
-{
-	if (error < 0)
-		error = -error;
-	switch (error) {
-	case ENOKEY:
-		return "UNTRUSTED signature";
-	case EKEYREJECTED:
-		return "BAD signature";
-	case EIO:
-		return "IO ERROR";
-	case EBADMSG:
-		return "BAD archive";
-	case ENOMSG:
-		return "archive does not contain expected data";
-	default:
-		return strerror(error);
-	}
-}
-
-void apk_log(const char *prefix, const char *format, ...)
-{
-	va_list va;
-
-	if (prefix != NULL)
-		fprintf(stderr, "%s", prefix);
-	va_start(va, format);
-	vfprintf(stderr, format, va);
-	va_end(va);
-	fprintf(stderr, "\n");
-}
-
 static int version(void)
 {
 	printf("apk-tools " APK_VERSION "\n");
 	return 0;
-}
-
-int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
-{
-	static const int wrap_length = 80;
-
-	if (i->x + blob.len + 1 >= wrap_length) {
-		i->x = i->indent;
-		printf("\n%*s", i->indent - 1, "");
-	} else if (i->x+1 < i->indent) {
-		printf("%*s", i->indent - i->x - 1, "");
-	}
-	i->x += printf(" %.*s", blob.len, blob.ptr);
-	return 0;
-}
-
-void apk_print_indented_words(struct apk_indent *i, const char *text)
-{
-	apk_blob_for_each_segment(APK_BLOB_STR(text), " ",
-		(apk_blob_cb) apk_print_indented, i);
 }
 
 static int format_option(char *buf, size_t len, struct apk_option *o,
@@ -289,7 +235,7 @@ int main(int argc, char **argv)
 	struct apk_applet *applet;
 	char short_options[256], *sopt;
 	struct option *opt, *all_options;
-	int r, optindex, num_options;
+	int r, optindex, num_options, apk_wait = 0;
 	void *ctx = NULL;
 	struct apk_repository_list *repo = NULL;
 	struct apk_database db;
@@ -410,7 +356,7 @@ int main(int argc, char **argv)
 		argv++;
 	}
 
-	r = apk_db_open(&db, &dbopts);
+	r = apk_db_open(&db, &dbopts, apk_wait);
 	if (r != 0) {
 		apk_error("Failed to open apk database: %s",
 			  apk_error_str(r));

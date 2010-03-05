@@ -27,6 +27,7 @@
 #include "apk_package.h"
 #include "apk_database.h"
 #include "apk_state.h"
+#include "apk_print.h"
 
 void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to)
 {

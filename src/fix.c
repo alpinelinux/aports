@@ -14,6 +14,7 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 #include "apk_state.h"
+#include "apk_print.h"
 
 struct fix_ctx {
 	unsigned int reinstall : 1;

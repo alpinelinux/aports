@@ -16,6 +16,7 @@
 
 #include "apk_state.h"
 #include "apk_database.h"
+#include "apk_print.h"
 
 struct apk_name_choices {
 	unsigned short refs, num;

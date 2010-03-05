@@ -27,6 +27,10 @@
 #include "apk_state.h"
 #include "apk_applet.h"
 #include "apk_archive.h"
+#include "apk_print.h"
+
+int apk_verbosity = 1;
+unsigned int apk_flags = 0;
 
 const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
 const char * const apk_index_gz = "APK_INDEX.gz";
@@ -1021,7 +1025,8 @@ static void handle_alarm(int sig)
 {
 }
 
-int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
+int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts, 
+		int apk_wait)
 {
 	const char *msg = NULL;
 	struct apk_repository_list *repo = NULL;

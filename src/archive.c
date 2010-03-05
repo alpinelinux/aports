@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include "apk_defines.h"
+#include "apk_print.h"
 #include "apk_archive.h"
 
 struct tar_header {

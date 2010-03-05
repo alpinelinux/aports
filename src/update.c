@@ -14,6 +14,7 @@
 #include "apk_applet.h"
 #include "apk_database.h"
 #include "apk_version.h"
+#include "apk_print.h"
 
 static int update_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
