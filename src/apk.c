@@ -235,7 +235,7 @@ int main(int argc, char **argv)
 	struct apk_applet *applet;
 	char short_options[256], *sopt;
 	struct option *opt, *all_options;
-	int r, optindex, num_options, apk_wait = 0;
+	int r, optindex, num_options;
 	void *ctx = NULL;
 	struct apk_repository_list *repo = NULL;
 	struct apk_database db;
@@ -328,7 +328,7 @@ int main(int argc, char **argv)
 			apk_flags |= APK_PURGE;
 			break;
 		case 0x105:
-			apk_wait = atoi(optarg);
+			dbopts.lock_wait = atoi(optarg);
 			break;
 		case 0x109:
 			apk_flags |= APK_NO_NETWORK;
@@ -356,7 +356,7 @@ int main(int argc, char **argv)
 		argv++;
 	}
 
-	r = apk_db_open(&db, &dbopts, apk_wait);
+	r = apk_db_open(&db, &dbopts);
 	if (r != 0) {
 		apk_error("Failed to open apk database: %s",
 			  apk_error_str(r));

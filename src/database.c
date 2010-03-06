@@ -1025,8 +1025,7 @@ static void handle_alarm(int sig)
 {
 }
 
-int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts, 
-		int apk_wait)
+int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 {
 	const char *msg = NULL;
 	struct apk_repository_list *repo = NULL;
@@ -1086,7 +1085,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts,
 		if (db->lock_fd < 0 ||
 		    flock(db->lock_fd, LOCK_EX | LOCK_NB) < 0) {
 			msg = "Unable to lock database";
-			if (apk_wait) {
+			if (dbopts->lock_wait) {
 				struct sigaction sa, old_sa;
 
 				apk_message("Waiting for repository lock");
@@ -1095,7 +1094,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts,
 				sa.sa_flags   = SA_ONESHOT;
 				sigaction(SIGALRM, &sa, &old_sa);
 
-				alarm(apk_wait);
+				alarm(dbopts->lock_wait);
 				if (flock(db->lock_fd, LOCK_EX) < 0)
 					goto ret_errno;
 
