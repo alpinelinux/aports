@@ -70,7 +70,7 @@ file_to_mbox = function (path)
 
 	local date = string.match("\n" .. headers, "\nDate: ([^\n]*)")
 	if date == nil then
-		date = os.date ("%a, %d %b %Y %X +%z", posix.stat(path, "mtime"))
+		date = os.date ("%c", posix.stat(path, "mtime"))
 	end
 	local weekday,day,month,year,time,offset = string.match(date, "([^,]*), +(%d+) (%a+) (%d+) ([%d:]*) ([%d]*)")
 
