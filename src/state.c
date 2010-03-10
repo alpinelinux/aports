@@ -157,6 +157,16 @@ static void ns_free(apk_name_state_t name)
 		name_choices_unref(ns_to_choices(name));
 }
 
+static inline int apk_state_pkg_available(struct apk_state *state,
+					  struct apk_package *pkg)
+{
+	if (pkg->filename != NULL)
+		return TRUE;
+	if (apk_db_select_repo(state->db, pkg) != NULL)
+		return TRUE;
+	return FALSE;
+}
+
 struct apk_state *apk_state_new(struct apk_database *db)
 {
 	struct apk_state *state;
@@ -263,15 +273,15 @@ int apk_state_prune_dependency(struct apk_state *state,
 		c->pkgs[i] = c->pkgs[c->num - 1];
 		c->num--;
 	}
-	if (c->num == 0) {
-		name_choices_unref(c);
-		return -1;
-	}
-	if (c->num == 1) {
+	if (c->num == 1 && apk_state_pkg_available(state, c->pkgs[0])) {
 		struct apk_package *pkg = c->pkgs[0];
 		name_choices_unref(c);
 		state->name[name->id] = ns_from_pkg(pkg);
 		return 1;
+	}
+	if (c->num <= 1) {
+		name_choices_unref(c);
+		return -1;
 	}
 
 	state->name[name->id] = ns_from_choices(c);
@@ -301,8 +311,7 @@ int apk_state_lock_dependency(struct apk_state *state,
 
 		if (pkg->ipkg != NULL)
 			installed = pkg;
-		else if (pkg->filename == NULL &&
-		         apk_db_select_repo(state->db, pkg) == NULL)
+		else if (!apk_state_pkg_available(state, pkg))
 			continue;
 
 		if (latest == NULL) {
