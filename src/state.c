@@ -160,6 +160,8 @@ static void ns_free(apk_name_state_t name)
 static inline int apk_state_pkg_available(struct apk_state *state,
 					  struct apk_package *pkg)
 {
+	if (pkg->installed_size == 0)
+		return TRUE;
 	if (pkg->filename != NULL)
 		return TRUE;
 	if (apk_db_select_repo(state->db, pkg) != NULL)
