@@ -4,6 +4,10 @@ rootdir := $(shell pwd)
 
 all: main testing non-free unstable
 
+apkbuilds := $(shell find . -maxdepth 3 -name APKBUILD -print)
+
+all-modules := $(sort $(subst ./,,$(patsubst %/,%,$(dir $(apkbuilds)))))
+
 main-modules :=  $(sort							\
 		   $(notdir						\
 		     $(patsubst %/,%,					\
@@ -57,33 +61,16 @@ unstable:
 	done
 
 clean:
-	for p in $(main-modules) ; \
-	do \
-		cd $(rootdir)/main/$$p; \
+	for p in $(all-modules) ; do \
+		cd $(rootdir)/$$p; \
 		abuild clean; \
-		abuild cleanoldpkg; \
 		abuild cleanpkg; \
-		abuild cleancache; \
 	done
-	for p in $(testing-modules) ; \
+
+distclean:
+	for p in $(all-modules) ; \
 	do \
-		cd $(rootdir)/testing/$$p; \
-		abuild clean; \
-		abuild cleanoldpkg; \
-		abuild cleanpkg; \
-		abuild cleancache; \
-	done
-	for p in $(non-free-modules) ; \
-	do \
-		cd $(rootdir)/non-free/$$p; \
-		abuild clean; \
-		abuild cleanoldpkg; \
-		abuild cleanpkg; \
-		abuild cleancache; \
-	done
-	for p in $(unstable-modules) ; \
-	do \
-		cd $(rootdir)/unstable/$$p; \
+		cd $(rootdir)/$$p; \
 		abuild clean; \
 		abuild cleanoldpkg; \
 		abuild cleanpkg; \
