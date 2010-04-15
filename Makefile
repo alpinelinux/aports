@@ -6,69 +6,53 @@ all: main testing non-free unstable
 
 apkbuilds := $(shell find . -maxdepth 3 -name APKBUILD -print)
 
-all-modules := $(sort $(subst ./,,$(patsubst %/,%,$(dir $(apkbuilds)))))
+all-pkgs := $(sort $(subst ./,,$(patsubst %/,%,$(dir $(apkbuilds)))))
 
-main-modules :=  $(sort							\
-		   $(notdir						\
-		     $(patsubst %/,%,					\
-		       $(dir						\
-		         $(shell find main -maxdepth 2 -name APKBUILD -print)))))
+main-pkgs :=  $(shell ./aport.lua deplist $(rootdir) main)
 
-testing-modules :=  $(sort						\
-		      $(notdir						\
-		        $(patsubst %/,%,				\
-		          $(dir						\
-		            $(shell find testing -maxdepth 2 -name APKBUILD -print)))))
+testing-pkgs :=  $(shell ./aport.lua deplist $(rootdir) testing)
 
-non-free-modules :=  $(sort						\
-		       $(notdir						\
-		         $(patsubst %/,%,				\
-		           $(dir					\
-		             $(shell find non-free -maxdepth 2 -name APKBUILD -print)))))
+non-free-pkgs :=  $(shell ./aport.lua deplist $(rootdir) non-free)
 
-unstable-modules :=  $(sort						\
-		       $(notdir						\
-		         $(patsubst %/,%,				\
-		           $(dir					\
-		             $(shell find unstable -maxdepth 2 -name APKBUILD -print)))))
+unstable-pkgs :=  $(shell ./aport.lua deplist $(rootdir) unstable)
 
 main: 
-	for p in $(main-modules) ; \
+	for p in $(main-pkgs) ; \
 	do \
 		cd $(rootdir)/$@/$$p; \
 		abuild -r; \
 	done
 
 testing: 
-	for p in $(testing-modules) ; \
+	for p in $(testing-pkgs) ; \
 	do \
 		cd $(rootdir)/$@/$$p; \
 		abuild -r; \
 	done
 
 non-free: 
-	for p in $(non-free-modules) ; \
+	for p in $(non-free-pkgs) ; \
 	do \
 		cd $(rootdir)/$@/$$p; \
 		abuild -r; \
 	done
 
 unstable: 
-	for p in $(unstable-modules) ; \
+	for p in $(unstable-pkgs) ; \
 	do \
 		cd $(rootdir)/$@/$$p; \
 		abuild -r; \
 	done
 
 clean:
-	for p in $(all-modules) ; do \
+	for p in $(all-pkgs) ; do \
 		cd $(rootdir)/$$p; \
 		abuild clean; \
 		abuild cleanpkg; \
 	done
 
 distclean:
-	for p in $(all-modules) ; \
+	for p in $(all-pkgs) ; \
 	do \
 		cd $(rootdir)/$$p; \
 		abuild clean; \
