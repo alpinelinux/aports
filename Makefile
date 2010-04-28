@@ -51,6 +51,12 @@ clean:
 		abuild cleanpkg; \
 	done
 
+fetch:
+	for p in $(all-pkgs) ; do \
+		cd $(rootdir)/$$p; \
+		abuild fetch; \
+	done
+
 distclean:
 	for p in $(all-pkgs) ; \
 	do \
