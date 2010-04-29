@@ -18,7 +18,7 @@ build () {
     for p in $pkgs ; do
         echo "Building $p"
         cd $rootdir/$1/$p
-        abuild -r > $rootdir/$1_$p.txt 2>&1 
+        abuild -rm > $rootdir/$1_$p.txt 2>&1 
         if [ "$?" = "0" ] ; then
             rm $rootdir/$1_$p.txt
         else
