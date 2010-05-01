@@ -33,8 +33,12 @@ build () {
     cd $rootdir
 }
 
-echo "Removing traces of previous builds"
-tmp=$(distclean)
+touch START_OF_BUILD.txt
+
+if [ "$1" != "noclean" ] ; then
+    echo "Removing traces of previous builds"
+    tmp=$(distclean)
+fi
 
 echo "Refresh aports tree"
 git pull
@@ -43,6 +47,8 @@ for s in main testing nonfree unstable ; do
     echo "Building packages in $s"
     build $s
 done
+
+touch END_OF_BUILD.txt
 
 echo "Done"
 
