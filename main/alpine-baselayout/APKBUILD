@@ -11,7 +11,12 @@ license=GPL-2
 
 build() {
 	cd "$srcdir"/$pkgname-$pkgver
+	rm -f src/mkmntdirs
 	make
+}
+
+package() {
+	cd "$srcdir"/$pkgname-$pkgver
 	make install PREFIX= DESTDIR="$pkgdir" || return 1
 }
 md5sums="76d61057c9e21d8e3ef85933a20b814d  alpine-baselayout-2.0_rc1.tar.bz2"
