@@ -283,7 +283,7 @@ static int info_package(struct info_ctx *ctx, struct apk_database *db,
 
 	for (i = 0; i < argc; i++) {
 		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-		if (name == NULL) {
+		if (name == NULL || name->pkgs == NULL) {
 			apk_error("Not found: %s", argv[i]);
 			return 1;
 		}
