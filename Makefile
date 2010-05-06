@@ -5,7 +5,7 @@ VERSION		:= 2.2
 prefix		?= /usr
 sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
-apkcache	?= ~/.cache/apks
+abuildrepo	?= ~/.cache/apks
 
 SCRIPTS		:= abuild devbuild mkalpine buildrepo abuild-keygen \
 		abuild-sign newapkbuild
@@ -33,7 +33,7 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@prefix@:$(prefix):g' \
 			-e 's:@sysconfdir@:$(sysconfdir):g' \
 			-e 's:@datadir@:$(datadir):g' \
-			-e 's:@apkcache@:$(apkcache):g'
+			-e 's:@abuildrepo@:$(abuildrepo):g'
 
 SSL_LIBS	:= $(shell pkg-config --libs openssl)
 
