@@ -41,10 +41,15 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 		goto err;
 
 	for (i = 0; i < db->world->num; i++) {
-		r = apk_state_lock_dependency(state, &db->world->item[i]);
+		struct apk_dependency *dep = &db->world->item[i];
+		if (dep->version && (apk_flags & APK_PREFER_AVAILABLE)) {
+			dep->result_mask = APK_VERSION_EQUAL | APK_VERSION_LESS | APK_VERSION_GREATER;
+			dep->version = NULL;
+		}
+		r = apk_state_lock_dependency(state, dep);
 		if (r != 0) {
 			apk_error("Unable to upgrade '%s'",
-				  db->world->item[i].name->name);
+				  dep->name->name);
 			goto err;
 		}
 	}
