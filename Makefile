@@ -35,6 +35,7 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@datadir@:$(datadir):g' \
 			-e 's:@abuildrepo@:$(abuildrepo):g'
 
+SSL_CFLAGS	:= $(shell pkg-config --cflags openssl)
 SSL_LIBS	:= $(shell pkg-config --libs openssl)
 
 .SUFFIXES:	.sh.in .in
@@ -54,7 +55,10 @@ clean:
 	@rm -f $(USR_BIN_FILES)
 
 abuild-tar:	abuild-tar.c
-	$(CC) -o $@ $(SSL_LIBS) $^
+	$(CC) -o $@ $^ -Wl,--as-needed $(SSL_LIBS)
+
+abuild-tar.static: abuild-tar.c
+	$(CC) -o $@ -static $(SSL_LIBS) $^
 
 help:
 	@echo "$(P) makefile"
