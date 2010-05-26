@@ -2,12 +2,12 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=2.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Meta package for minimal alpine base"
 url="http://alpinelinux.org"
 license="GPL"
 depends="alpine-baselayout alpine-conf apk-tools busybox busybox-initscripts
-	openrc"
+	openrc uclibc-utils"
 makedepends=
 install=
 subpackages=
