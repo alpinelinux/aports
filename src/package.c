@@ -441,7 +441,7 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 		if (fd < 0)
 			return 0;
 
-		bio  = BIO_new_fp(fdopen(fd, "r"), 0);
+		bio = BIO_new_fp(fdopen(fd, "r"), BIO_CLOSE);
 		ctx->signature.pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
 		if (ctx->signature.pkey != NULL) {
 			if (fi->name[6] == 'R')
