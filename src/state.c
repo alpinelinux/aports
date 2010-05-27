@@ -569,8 +569,12 @@ static void apk_print_change(struct apk_database *db,
 			msg = "Downgrading";
 			break;
 		case APK_VERSION_EQUAL:
-			msg = "Re-installing";
-			break;
+			if (newpkg == oldpkg) {
+				msg = "Re-installing";
+				break;
+			}
+			/* fallthrough - equal version, but different
+			 * package is counted as upgrade */
 		case APK_VERSION_GREATER:
 			msg = "Upgrading";
 			break;
@@ -689,19 +693,18 @@ static int cmp_downgrade(struct apk_change *change)
 
 static int cmp_upgrade(struct apk_change *change)
 {
-	int t;
-
 	if (change->newpkg == NULL || change->oldpkg == NULL)
 		return 0;
-	t = apk_pkg_version_compare(change->newpkg, change->oldpkg);
-	if (t & APK_VERSION_GREATER)
-		return 1;
+
 	/* Count swapping package as upgrade too - this can happen if
 	 * same package version is used after it was rebuilt against
 	 * newer libraries. Basically, different (and probably newer)
 	 * package, but equal version number. */
-	if ((t & APK_VERSION_EQUAL) && (change->newpkg != change->oldpkg))
+	if ((apk_pkg_version_compare(change->newpkg, change->oldpkg) &
+	     (APK_VERSION_GREATER | APK_VERSION_EQUAL)) &&
+	    (change->newpkg != change->oldpkg))
 		return 1;
+
 	return 0;
 }
 
