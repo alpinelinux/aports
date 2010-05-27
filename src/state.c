@@ -689,10 +689,18 @@ static int cmp_downgrade(struct apk_change *change)
 
 static int cmp_upgrade(struct apk_change *change)
 {
+	int t;
+
 	if (change->newpkg == NULL || change->oldpkg == NULL)
 		return 0;
-	if (apk_pkg_version_compare(change->newpkg, change->oldpkg)
-	    & APK_VERSION_GREATER)
+	t = apk_pkg_version_compare(change->newpkg, change->oldpkg);
+	if (t & APK_VERSION_GREATER)
+		return 1;
+	/* Count swapping package as upgrade too - this can happen if
+	 * same package version is used after it was rebuilt against
+	 * newer libraries. Basically, different (and probably newer)
+	 * package, but equal version number. */
+	if ((t & APK_VERSION_EQUAL) && (change->newpkg != change->oldpkg))
 		return 1;
 	return 0;
 }
