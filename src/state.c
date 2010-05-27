@@ -749,11 +749,12 @@ int apk_state_commit(struct apk_state *state,
 	list_for_each_entry(change, &state->change_list_head, change_list) {
 		numpkg++;
 		if (change->newpkg == NULL) {
-			apk_state_autoclean(state, change->oldpkg);
 			if (change->oldpkg->name->flags & APK_NAME_TOPLEVEL)
 				toplevel = TRUE;
 		} else
 			deleteonly = FALSE;
+		if (change->oldpkg != NULL)
+			apk_state_autoclean(state, change->oldpkg);
 		apk_count_change(change, &prog.total);
 		if (change->newpkg)
 			size_diff += change->newpkg->installed_size;
