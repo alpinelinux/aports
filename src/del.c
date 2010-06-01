@@ -56,13 +56,12 @@ static int del_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			.result_mask = APK_DEPMASK_CONFLICT,
 		};
 
-		r = apk_state_lock_dependency(state, &dep);
-		if (r != 0) {
-			apk_error("Unable to remove '%s'", name->name);
-			goto err;
-		}
+		r |= apk_state_lock_dependency(state, &dep);
 	}
-	r = apk_state_commit(state, db);
+	if (r == 0)
+		r = apk_state_commit(state, db);
+	else
+		apk_state_print_errors(state);
 err:
 	if (state != NULL)
 		apk_state_unref(state);

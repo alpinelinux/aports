@@ -67,12 +67,12 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 	if (actx->virtpkg) {
 		if (non_repository_check(db))
-			goto err;
+			return -1;
 
 		virtpkg = apk_pkg_new();
 		if (virtpkg == NULL) {
 			apk_error("Failed to allocate virtual meta package");
-			goto err;
+			return -1;
 		}
 		virtpkg->name = apk_db_get_name(db, APK_BLOB_STR(actx->virtpkg));
 		apk_blob_checksum(APK_BLOB_STR(virtpkg->name->name),
@@ -96,7 +96,7 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			struct apk_sign_ctx sctx;
 
 			if (non_repository_check(db))
-				goto err;
+				return -1;
 
 			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY_AND_GENERATE,
 					  NULL, db->keys_fd);
@@ -104,14 +104,13 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			apk_sign_ctx_free(&sctx);
 			if (r != 0) {
 				apk_error("%s: %s", argv[i], apk_error_str(r));
-				goto err;
-
+				return -1;
 			}
 			apk_dep_from_pkg(&dep, db, pkg);
 		} else {
 			r = apk_dep_from_blob(&dep, db, APK_BLOB_STR(argv[i]));
 			if (r != 0)
-				goto err;
+				return -1;
 		}
 
 		if (virtpkg)
@@ -126,7 +125,7 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 	state = apk_state_new(db);
 	if (state == NULL)
-		goto err;
+		return -1;
 
 	for (i = 0; i < num_deps; i++) {
 		r = apk_state_lock_dependency(state, &deps[i]);
@@ -134,16 +133,15 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			apk_deps_add(&db->world, &deps[i]);
 			deps[i].name->flags |= APK_NAME_TOPLEVEL;
 		} else {
-			apk_error("Unable to install '%s': %d",
-				  deps[i].name->name, r);
 			errors++;
 		}
 	}
-	if (errors && !(apk_flags & APK_FORCE))
-		goto err;
-
-	r = apk_state_commit(state, db);
-err:
+	if (errors && !(apk_flags & APK_FORCE)) {
+		apk_state_print_errors(state);
+		r = -1;
+	} else {
+		r = apk_state_commit(state, db);
+	}
 	if (state != NULL)
 		apk_state_unref(state);
 	return r;

@@ -286,43 +286,41 @@ void apk_deps_parse(struct apk_database *db,
 	apk_blob_for_each_segment(blob, " ", parse_depend, &ctx);
 }
 
+void apk_blob_push_dep(apk_blob_t *to, struct apk_dependency *dep)
+{
+	if (dep->result_mask == APK_DEPMASK_CONFLICT)
+		apk_blob_push_blob(to, APK_BLOB_PTR_LEN("!", 1));
+
+	apk_blob_push_blob(to, APK_BLOB_STR(dep->name->name));
+
+	if (dep->result_mask != APK_DEPMASK_CONFLICT &&
+	    dep->result_mask != APK_DEPMASK_REQUIRE) {
+		apk_blob_push_blob(to, APK_BLOB_STR(apk_version_op_string(dep->result_mask)));
+		apk_blob_push_blob(to, APK_BLOB_STR(dep->version));
+	}
+}
+
 int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os)
 {
-	int i, r, n = 0;
+	apk_blob_t blob;
+	char tmp[256];
+	int i, n = 0;
 
 	if (deps == NULL)
 		return 0;
 
 	for (i = 0; i < deps->num; i++) {
-		if (i) {
-			if (os->write(os, " ", 1) != 1)
-				return -1;
-			n += 1;
-		}
+		blob = APK_BLOB_BUF(tmp);
+		if (i)
+			apk_blob_push_blob(&blob, APK_BLOB_PTR_LEN(" ", 1));
+		apk_blob_push_dep(&blob, &deps->item[i]);
 
-		if (deps->item[i].result_mask == APK_DEPMASK_CONFLICT) {
-			if (os->write(os, "!", 1) != 1)
-				return -1;
-			n += 1;
-		}
+		blob = apk_blob_pushed(APK_BLOB_BUF(tmp), blob);
+		if (APK_BLOB_IS_NULL(blob) || 
+		    os->write(os, blob.ptr, blob.len) != blob.len)
+			return -1;
 
-		r = apk_ostream_write_string(os, deps->item[i].name->name);
-		if (r < 0)
-			return r;
-		n += r;
-
-		if (deps->item[i].result_mask != APK_DEPMASK_CONFLICT &&
-		    deps->item[i].result_mask != APK_DEPMASK_REQUIRE) {
-			r = apk_ostream_write_string(os, apk_version_op_string(deps->item[i].result_mask));
-			if (r < 0)
-				return r;
-			n += r;
-
-			r = apk_ostream_write_string(os, deps->item[i].version);
-			if (r < 0)
-				return r;
-			n += r;
-		}
+		n += blob.len;
 	}
 
 	return n;
@@ -967,7 +965,8 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	if (APK_BLOB_IS_NULL(bbuf))
 		return -1;
 
-	if (os->write(os, buf, bbuf.ptr - buf) != bbuf.ptr - buf)
+	bbuf = apk_blob_pushed(APK_BLOB_BUF(buf), bbuf);
+	if (os->write(os, bbuf.ptr, bbuf.len) != bbuf.len)
 		return -1;
 
 	if (info->depends != NULL) {

@@ -46,14 +46,12 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 			dep->result_mask = APK_VERSION_EQUAL | APK_VERSION_LESS | APK_VERSION_GREATER;
 			dep->version = NULL;
 		}
-		r = apk_state_lock_dependency(state, dep);
-		if (r != 0) {
-			apk_error("Unable to upgrade '%s'",
-				  dep->name->name);
-			goto err;
-		}
+		r |= apk_state_lock_dependency(state, dep);
 	}
-	r = apk_state_commit(state, db);
+	if (r == 0)
+		r = apk_state_commit(state, db);
+	else
+		apk_state_print_errors(state);
 err:
 	if (state != NULL)
 		apk_state_unref(state);

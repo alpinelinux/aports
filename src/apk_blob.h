@@ -74,6 +74,7 @@ int apk_blob_spn(apk_blob_t blob, const char *accept, apk_blob_t *l, apk_blob_t 
 int apk_blob_cspn(apk_blob_t blob, const char *reject, apk_blob_t *l, apk_blob_t *r);
 int apk_blob_split(apk_blob_t blob, apk_blob_t split, apk_blob_t *l, apk_blob_t *r);
 int apk_blob_rsplit(apk_blob_t blob, char split, apk_blob_t *l, apk_blob_t *r);
+apk_blob_t apk_blob_pushed(apk_blob_t buffer, apk_blob_t left);
 unsigned long apk_blob_hash_seed(apk_blob_t, unsigned long seed);
 unsigned long apk_blob_hash(apk_blob_t str);
 int apk_blob_compare(apk_blob_t a, apk_blob_t b);

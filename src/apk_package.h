@@ -112,6 +112,8 @@ int apk_dep_from_blob(struct apk_dependency *dep, struct apk_database *db,
 		      apk_blob_t blob);
 void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		      struct apk_package *pkg);
+void apk_blob_push_dep(apk_blob_t *to, struct apk_dependency *dep);
+
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep);
 void apk_deps_del(struct apk_dependency_array **deps,

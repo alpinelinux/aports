@@ -34,6 +34,16 @@ int apk_state_prune_dependency(struct apk_state *state,
 
 #define APK_NS_LOCKED			0x00000001
 #define APK_NS_PENDING			0x00000002
+#define APK_NS_ERROR			0x00000004
+
+static void apk_state_record_conflict(struct apk_state *state,
+				      struct apk_package *pkg)
+{
+	struct apk_name *name = pkg->name;
+
+	state->name[name->id] = (void*) (((intptr_t)state->name[name->id]) | APK_NS_ERROR);
+	*apk_package_array_add(&state->conflicts) = pkg;
+}
 
 static int inline ns_locked(apk_name_state_t name)
 {
@@ -45,6 +55,13 @@ static int inline ns_locked(apk_name_state_t name)
 static int inline ns_pending(apk_name_state_t name)
 {
 	if (((intptr_t) name) & APK_NS_PENDING)
+		return TRUE;
+	return FALSE;
+}
+
+static int inline ns_error(apk_name_state_t name)
+{
+	if (((intptr_t) name) & APK_NS_ERROR)
 		return TRUE;
 	return FALSE;
 }
@@ -67,7 +84,7 @@ static apk_name_state_t ns_from_pkg_non_pending(struct apk_package *pkg)
 static struct apk_package *ns_to_pkg(apk_name_state_t name)
 {
 	return (struct apk_package *)
-		(((intptr_t) name) & ~(APK_NS_LOCKED | APK_NS_PENDING));
+		(((intptr_t) name) & ~(APK_NS_LOCKED | APK_NS_PENDING | APK_NS_ERROR));
 }
 
 static apk_name_state_t ns_from_choices(struct apk_name_choices *nc)
@@ -247,7 +264,9 @@ int apk_state_prune_dependency(struct apk_state *state,
 		struct apk_package *pkg = ns_to_pkg(state->name[name->id]);
 
 		/* Locked to not-installed / remove? */
-		if (pkg == NULL) {
+		if (ns_error(state->name[name->id])) {
+			return -1;
+		} else if (pkg == NULL) {
 			if (dep->result_mask != APK_DEPMASK_CONFLICT)
 				return -1;
 		} else {
@@ -258,6 +277,7 @@ int apk_state_prune_dependency(struct apk_state *state,
 
 		if (ns_pending(state->name[name->id]))
 			return 1;
+
 		return 0;
 	}
 
@@ -370,22 +390,29 @@ int apk_state_lock_dependency(struct apk_state *state,
 static int apk_state_fix_package(struct apk_state *state,
 				 struct apk_package *pkg)
 {
-	int i, r;
+	int i, r, ret = 0;
+
+	if (pkg == NULL || pkg->depends == NULL)
+		return 0;
 
 	for (i = 0; i < pkg->depends->num; i++) {
 		r = apk_state_lock_dependency(state,
 					      &pkg->depends->item[i]);
 		if (r != 0)
-			return -1;
+			ret = -1;
 	}
-	return 0;
+
+	return ret;
 }
 
 static int call_if_dependency_broke(struct apk_state *state,
 				    struct apk_package *pkg,
 				    struct apk_name *dep_name,
 				    int (*cb)(struct apk_state *state,
-					      struct apk_package *pkg))
+					      struct apk_package *pkg,
+					      struct apk_dependency *dep,
+					      void *ctx),
+				    void *ctx)
 {
 	struct apk_package *dep_pkg;
 	int k;
@@ -405,7 +432,7 @@ static int call_if_dependency_broke(struct apk_state *state,
 		    (apk_version_compare(dep_pkg->version, dep->version)
 		     & dep->result_mask))
 			continue;
-		return cb(state, pkg);
+		return cb(state, pkg, dep, ctx);
 	}
 
 	return 0;
@@ -414,7 +441,10 @@ static int call_if_dependency_broke(struct apk_state *state,
 static int for_each_broken_reverse_depency(struct apk_state *state,
 					   struct apk_name *name,
 					   int (*cb)(struct apk_state *state,
-						     struct apk_package *pkg))
+						     struct apk_package *pkg,
+						     struct apk_dependency *dep,
+						     void *ctx),
+					   void *ctx)
 {
 	struct apk_package *pkg0;
 	int i, j, r;
@@ -429,7 +459,8 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 			pkg0 = ns_to_pkg(state->name[name0->id]);
 			if (pkg0 == NULL)
 				continue;
-			r = call_if_dependency_broke(state, pkg0, name, cb);
+			r = call_if_dependency_broke(state, pkg0, name,
+						     cb, ctx);
 			if (r != 0)
 				return r;
 		} else if (!ns_empty(state->name[name0->id])) {
@@ -441,7 +472,7 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 					continue;
 				r = call_if_dependency_broke(state,
 							     ns->pkgs[j],
-							     name, cb);
+							     name, cb, ctx);
 				if (r != 0)
 					return r;
 				break;
@@ -455,7 +486,7 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 
 				r = call_if_dependency_broke(state,
 							     name0->pkgs->item[j],
-							     name, cb);
+							     name, cb, ctx);
 				if (r != 0)
 					return r;
 				break;
@@ -467,20 +498,24 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 }
 
 static int delete_broken_package(struct apk_state *state,
-				 struct apk_package *pkg)
+				 struct apk_package *pkg,
+				 struct apk_dependency *dep,
+				 void *ctx)
 {
 	return apk_state_lock_name(state, pkg->name, NULL);
 }
 
 static int reinstall_broken_package(struct apk_state *state,
-				    struct apk_package *pkg)
+				    struct apk_package *pkg,
+				    struct apk_dependency *dep,
+				    void *ctx)
 
 {
-	struct apk_dependency dep = {
+	struct apk_dependency dep0 = {
 		.name = pkg->name,
 		.result_mask = APK_DEPMASK_REQUIRE,
 	};
-	return apk_state_lock_dependency(state, &dep);
+	return apk_state_lock_dependency(state, &dep0);
 }
 
 int apk_state_lock_name(struct apk_state *state,
@@ -512,16 +547,19 @@ int apk_state_lock_name(struct apk_state *state,
 		r = for_each_broken_reverse_depency(state, name,
 						    newpkg == NULL ?
 						    delete_broken_package :
-						    reinstall_broken_package);
-		if (r != 0)
+						    reinstall_broken_package,
+						    NULL);
+		if (r != 0) {
+			apk_state_record_conflict(state, newpkg);
 			return r;
+		}
 	}
 
 	/* Check that all other dependencies hold for the new package. */
-	if (newpkg != NULL && newpkg->depends != NULL) {
-		r = apk_state_fix_package(state, newpkg);
-		if (r != 0)
-			return r;
+	r = apk_state_fix_package(state, newpkg);
+	if (r != 0) {
+		apk_state_record_conflict(state, newpkg);
+		return r;
 	}
 
 	/* If the chosen package is installed, all is done here */
@@ -709,7 +747,9 @@ static int cmp_upgrade(struct apk_change *change)
 }
 
 static int fail_if_something_broke(struct apk_state *state,
-				   struct apk_package *pkg)
+				   struct apk_package *pkg,
+				   struct apk_dependency *dep,
+				   void *ctx)
 
 {
 	return 1;
@@ -735,7 +775,8 @@ static int apk_state_autoclean(struct apk_state *state,
 		oldns = state->name[n->id];
 		state->name[n->id] = ns_from_pkg(NULL);
 		r = for_each_broken_reverse_depency(state, n,
-						    fail_if_something_broke);
+						    fail_if_something_broke,
+						    NULL);
 		state->name[n->id] = oldns;
 
 		if (r == 0) {
@@ -745,6 +786,68 @@ static int apk_state_autoclean(struct apk_state *state,
 		}
 	}
 	return 0;
+}
+
+struct error_state {
+	struct apk_indent indent;
+	struct apk_package *prevpkg;
+};
+
+static int print_dep(struct apk_state *state,
+		     struct apk_package *pkg,
+		     struct apk_dependency *dep,
+		     void *ctx)
+{
+	struct error_state *es = (struct error_state *) ctx;
+	apk_blob_t blob;
+	char buf[256];
+	int len;
+
+	if (pkg != es->prevpkg) {
+		printf("\n");
+		es->indent.x = 0;
+		len = snprintf(buf, sizeof(buf), "%s-%s:",
+			       pkg->name->name, pkg->version);
+		apk_print_indented(&es->indent, APK_BLOB_PTR_LEN(buf, len));
+		es->prevpkg = pkg;
+	}
+
+	blob = APK_BLOB_BUF(buf);
+	apk_blob_push_dep(&blob, dep);
+	blob = apk_blob_pushed(APK_BLOB_BUF(buf), blob);
+	apk_print_indented(&es->indent, blob);
+
+	return 0;
+}
+
+void apk_state_print_errors(struct apk_state *state)
+{
+	struct apk_package *pkg;
+	struct error_state es;
+	int i, j, r;
+
+	if (state->conflicts == NULL)
+		return;
+
+	apk_error("Unable to satisfy all dependencies:");
+	for (i = 0; i < state->conflicts->num; i++) {
+		es.prevpkg = pkg = state->conflicts->item[i];
+		es.indent.x = es.indent.indent =
+			printf("  %s-%s:",
+				pkg->name->name, pkg->version);
+
+		for (j = 0; j < pkg->depends->num; j++) {
+			r = apk_state_lock_dependency(state,
+						      &pkg->depends->item[j]);
+			if (r != 0)
+				print_dep(state, pkg, &pkg->depends->item[j], &es);
+		}
+
+		/* Print conflicting reverse deps */
+		for_each_broken_reverse_depency(state, pkg->name,
+						print_dep, &es);
+		printf("\n");
+	}
 }
 
 int apk_state_commit(struct apk_state *state,

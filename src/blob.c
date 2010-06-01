@@ -98,6 +98,14 @@ int apk_blob_split(apk_blob_t blob, apk_blob_t split, apk_blob_t *l, apk_blob_t 
 	}
 }
 
+apk_blob_t apk_blob_pushed(apk_blob_t buffer, apk_blob_t left)
+{
+	if (buffer.ptr + buffer.len != left.ptr + left.len)
+		return APK_BLOB_NULL;
+
+	return APK_BLOB_PTR_LEN(buffer.ptr, left.ptr - buffer.ptr);
+}
+
 unsigned long apk_blob_hash_seed(apk_blob_t blob, unsigned long seed)
 {
 	unsigned long hash = seed;

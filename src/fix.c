@@ -84,14 +84,13 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 			name->flags |= APK_NAME_REINSTALL;
 	}
 
-	for (i = 0; i < argc; i++) {
-		r = apk_state_lock_dependency(state, &deps[i]);
-		if (r != 0) {
-			if (!(apk_flags & APK_FORCE))
-				goto err;
-		}
-	}
-	r = apk_state_commit(state, db);
+	for (i = 0; i < argc; i++)
+		r |= apk_state_lock_dependency(state, &deps[i]);
+
+	if (r == 0 || (apk_flags & APK_FORCE))
+		r = apk_state_commit(state, db);
+	else
+		apk_state_print_errors(state);
 err:
 	if (r != 0 && i < argc)
 		apk_error("Error while processing '%s'", argv[i]);
