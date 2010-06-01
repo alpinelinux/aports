@@ -267,8 +267,13 @@ int apk_state_prune_dependency(struct apk_state *state,
 		if (ns_error(state->name[name->id])) {
 			return -1;
 		} else if (pkg == NULL) {
-			if (dep->result_mask != APK_DEPMASK_CONFLICT)
+			if (dep->result_mask != APK_DEPMASK_CONFLICT) {
+				if (ns_pending(state->name[name->id])) {
+					state->name[name->id] = ns_from_pkg_non_pending(NULL);
+					*apk_name_array_add(&state->missing) = name;
+				}
 				return -1;
+			}
 		} else {
 			if (!(apk_version_compare(pkg->version, dep->version)
 			      & dep->result_mask))
@@ -826,16 +831,13 @@ void apk_state_print_errors(struct apk_state *state)
 	struct error_state es;
 	int i, j, r;
 
-	if (state->conflicts == NULL)
-		return;
+	for (i = 0; state->conflicts != NULL && i < state->conflicts->num; i++) {
+		if (i == 0)
+			apk_error("Unable to satisfy all dependencies:");
 
-	apk_error("Unable to satisfy all dependencies:");
-	for (i = 0; i < state->conflicts->num; i++) {
 		es.prevpkg = pkg = state->conflicts->item[i];
 		es.indent.x = es.indent.indent =
-			printf("  %s-%s:",
-				pkg->name->name, pkg->version);
-
+		printf("  %s-%s:", pkg->name->name, pkg->version);
 		for (j = 0; j < pkg->depends->num; j++) {
 			r = apk_state_lock_dependency(state,
 						      &pkg->depends->item[j]);
@@ -848,6 +850,18 @@ void apk_state_print_errors(struct apk_state *state)
 						print_dep, &es);
 		printf("\n");
 	}
+
+	for (i = 0; state->missing != NULL && i < state->missing->num; i++) {
+		struct apk_name *name = state->missing->item[i];
+		if (i == 0) {
+			apk_error("Missing packages:");
+			es.indent.x = 0;
+			es.indent.indent = 2;
+		}
+		apk_print_indented(&es.indent, APK_BLOB_STR(name->name));
+	}
+	if (i != 0)
+		printf("\n");
 }
 
 int apk_state_commit(struct apk_state *state,

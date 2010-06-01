@@ -27,6 +27,7 @@ struct apk_state {
 	struct apk_database *db;
 	struct list_head change_list_head;
 	struct apk_package_array *conflicts;
+	struct apk_name_array *missing;
 	apk_name_state_t name[];
 };
 
