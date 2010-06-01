@@ -831,7 +831,8 @@ static void apk_db_triggers_write(struct apk_database *db, struct apk_ostream *o
 	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
 		bfn = APK_BLOB_BUF(buf);
 		apk_blob_push_csum(&bfn, &ipkg->pkg->csum);
-		os->write(os, buf, bfn.ptr - buf);
+		bfn = apk_blob_pushed(APK_BLOB_BUF(buf), bfn);
+		os->write(os, bfn.ptr, bfn.len);
 
 		for (i = 0; i < ipkg->triggers->num; i++) {
 			os->write(os, " ", 1);
@@ -1269,8 +1270,8 @@ void apk_db_close(struct apk_database *db)
 	if (db->world)
 		free(db->world);
 
-	apk_hash_free(&db->available.names);
 	apk_hash_free(&db->available.packages);
+	apk_hash_free(&db->available.names);
 	apk_hash_free(&db->installed.files);
 	apk_hash_free(&db->installed.dirs);
 
@@ -2106,12 +2107,6 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	/* Install the new stuff */
 	ipkg = apk_pkg_install(db, newpkg);
-	ipkg->flags |= APK_IPKGF_RUN_ALL_TRIGGERS;
-	if (ipkg->triggers) {
-		list_del(&ipkg->trigger_pkgs_list);
-		free(ipkg->triggers);
-		ipkg->triggers = NULL;
-	}
 	if (newpkg->installed_size != 0) {
 		r = apk_db_unpack_pkg(db, ipkg, (oldpkg != NULL),
 				      (oldpkg == newpkg), cb, cb_ctx,
@@ -2120,6 +2115,13 @@ int apk_db_install_pkg(struct apk_database *db,
 			apk_pkg_uninstall(db, newpkg);
 			return r;
 		}
+	}
+
+	ipkg->flags |= APK_IPKGF_RUN_ALL_TRIGGERS;
+	if (ipkg->triggers) {
+		list_del(&ipkg->trigger_pkgs_list);
+		free(ipkg->triggers);
+		ipkg->triggers = NULL;
 	}
 
 	if (oldpkg != NULL && oldpkg != newpkg && oldpkg->ipkg != NULL) {

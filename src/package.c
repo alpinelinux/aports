@@ -92,6 +92,7 @@ void apk_pkg_uninstall(struct apk_database *db, struct apk_package *pkg)
 
 	if (ipkg->triggers) {
 		list_del(&ipkg->trigger_pkgs_list);
+		list_init(&ipkg->trigger_pkgs_list);
 		for (i = 0; i < ipkg->triggers->num; i++)
 			free(ipkg->triggers->item[i]);
 		free(ipkg->triggers);
