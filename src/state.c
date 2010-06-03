@@ -838,7 +838,7 @@ void apk_state_print_errors(struct apk_state *state)
 		es.prevpkg = pkg = state->conflicts->item[i];
 		es.indent.x = es.indent.indent =
 		printf("  %s-%s:", pkg->name->name, pkg->version);
-		for (j = 0; j < pkg->depends->num; j++) {
+		for (j = 0; pkg->depends != NULL && j < pkg->depends->num; j++) {
 			r = apk_state_lock_dependency(state,
 						      &pkg->depends->item[j]);
 			if (r != 0)
