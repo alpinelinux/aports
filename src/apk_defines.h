@@ -1,7 +1,7 @@
 /* apk_defines.c - Alpine Package Keeper (APK)
  *
  * Copyright (C) 2005-2008 Natanael Copa <n@tanael.org>
- * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
+ * Copyright (C) 2008-2010 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -12,7 +12,6 @@
 #ifndef APK_DEFINES_H
 #define APK_DEFINES_H
 
-#include <malloc.h>
 #include <string.h>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
@@ -92,32 +91,33 @@ typedef void (*apk_progress_cb)(void *cb_ctx, size_t);
 
 #define APK_PROGRESS_SCALE 0x100
 
+void *apk_array_resize(void *array, size_t new_size, size_t elem_size);
+
 #define APK_ARRAY(array_type_name, elem_type_name)			\
 	struct array_type_name {					\
 		int num;						\
 		elem_type_name item[];					\
 	};								\
-	static inline struct array_type_name *				\
-	array_type_name##_resize(struct array_type_name *a, int size)	\
+	static inline void						\
+	array_type_name##_init(struct array_type_name **a)		\
 	{								\
-		struct array_type_name *tmp;				\
-		int oldnum = a ? a->num : 0;				\
-		int diff = size - oldnum;				\
-		tmp = (struct array_type_name *)			\
-			realloc(a, sizeof(struct array_type_name) +	\
-				size * sizeof(elem_type_name));		\
-		if (diff > 0)						\
-			memset(&tmp->item[oldnum], 0,			\
-			       diff * sizeof(a->item[0]));		\
-		tmp->num = size;					\
-		return tmp;						\
+		*a = apk_array_resize(NULL, 0, 0);			\
+	}								\
+	static inline void						\
+	array_type_name##_free(struct array_type_name **a)		\
+	{								\
+		*a = apk_array_resize(*a, 0, 0);			\
+	}								\
+	static inline void						\
+	array_type_name##_resize(struct array_type_name **a, size_t size)\
+	{								\
+		*a = apk_array_resize(*a, size, sizeof(elem_type_name));\
 	}								\
 	static inline elem_type_name *					\
 	array_type_name##_add(struct array_type_name **a)		\
 	{								\
-		int size = 1;						\
-		if (*a != NULL) size += (*a)->num;			\
-		*a = array_type_name##_resize(*a, size);		\
+		int size = 1 + (*a)->num;				\
+		*a = apk_array_resize(*a, size, sizeof(elem_type_name));\
 		return &(*a)->item[size-1];				\
 	}
 

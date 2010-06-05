@@ -64,10 +64,8 @@ static apk_blob_t pkg_name_get_key(apk_hash_item item)
 static void pkg_name_free(struct apk_name *name)
 {
 	free(name->name);
-	if (name->pkgs)
-		free(name->pkgs);
-	if (name->rdepends)
-		free(name->rdepends);
+	apk_package_array_free(&name->pkgs);
+	apk_name_array_free(&name->rdepends);
 	free(name);
 }
 
@@ -178,6 +176,8 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 
 	pn->name = apk_blob_cstr(name);
 	pn->id = db->name_id++;
+	apk_package_array_init(&pn->pkgs);
+	apk_name_array_init(&pn->rdepends);
 	apk_hash_insert_hashed(&db->available.names, pn, hash);
 
 	return pn;
@@ -382,17 +382,13 @@ static void apk_db_pkg_rdepends(struct apk_database *db, struct apk_package *pkg
 {
 	int i, j;
 
-	if (pkg->depends == NULL)
-		return;
-
 	for (i = 0; i < pkg->depends->num; i++) {
 		struct apk_name *rname = pkg->depends->item[i].name;
 
-		if (rname->rdepends) {
-			for (j = 0; j < rname->rdepends->num; j++)
-				if (rname->rdepends->item[j] == pkg->name)
-					return;
-		}
+		for (j = 0; j < rname->rdepends->num; j++)
+			if (rname->rdepends->item[j] == pkg->name)
+				return;
+
 		*apk_name_array_add(&rname->rdepends) = pkg->name;
 	}
 }
@@ -859,7 +855,8 @@ static void apk_db_triggers_read(struct apk_database *db, struct apk_bstream *bs
 
 		ipkg = pkg->ipkg;
 		apk_blob_for_each_segment(l, " ", parse_triggers, ipkg);
-		if (ipkg->triggers && !list_hashed(&ipkg->trigger_pkgs_list))
+		if (ipkg->triggers->num != 0 &&
+		    !list_hashed(&ipkg->trigger_pkgs_list))
 			list_add_tail(&ipkg->trigger_pkgs_list,
 				      &db->installed.triggers);
 	}
@@ -887,7 +884,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 		apk_deps_parse(db, &db->world, blob);
 		free(blob.ptr);
 
-		for (i = 0; db->world != NULL && i < db->world->num; i++)
+		for (i = 0; i < db->world->num; i++)
 			db->world->item[i].name->flags |= APK_NAME_TOPLEVEL;
 	}
 
@@ -1046,6 +1043,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_hash_init(&db->installed.files, &file_hash_ops, 10000);
 	list_init(&db->installed.packages);
 	list_init(&db->installed.triggers);
+	apk_dependency_array_init(&db->world);
+	apk_string_array_init(&db->protected_paths);
 	db->cache_dir = apk_static_cache_dir;
 	db->permanent = 1;
 
@@ -1262,13 +1261,10 @@ void apk_db_close(struct apk_database *db)
 	for (i = 0; i < db->num_repos; i++) {
 		free(db->repos[i].url);
 	}
-	if (db->protected_paths) {
-		for (i = 0; i < db->protected_paths->num; i++)
-			free(db->protected_paths->item[i]);
-		free(db->protected_paths);
-	}
-	if (db->world)
-		free(db->world);
+	for (i = 0; i < db->protected_paths->num; i++)
+		free(db->protected_paths->item[i]);
+	apk_dependency_array_free(&db->world);
+	apk_string_array_free(&db->protected_paths);
 
 	apk_hash_free(&db->available.packages);
 	apk_hash_free(&db->available.names);
@@ -1309,10 +1305,10 @@ static int fire_triggers(apk_hash_item item, void *ctx)
 				    FNM_PATHNAME) != 0)
 				continue;
 
-			if (ipkg->pending_triggers == NULL)
+			/* And place holder for script name */
+			if (ipkg->pending_triggers->num == 0)
 				*apk_string_array_add(&ipkg->pending_triggers) =
 					NULL;
-
 			*apk_string_array_add(&ipkg->pending_triggers) =
 				dbd->rooted_name;
 			break;
@@ -1329,14 +1325,13 @@ int apk_db_run_triggers(struct apk_database *db)
 	apk_hash_foreach(&db->installed.dirs, fire_triggers, db);
 
 	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
-		if (ipkg->pending_triggers == NULL)
+		if (ipkg->pending_triggers->num == 0)
 			continue;
 
 		*apk_string_array_add(&ipkg->pending_triggers) = NULL;
 		apk_ipkg_run_script(ipkg, db->root_fd, APK_SCRIPT_TRIGGER,
 				    ipkg->pending_triggers->item);
-		free(ipkg->pending_triggers);
-		ipkg->pending_triggers = NULL;
+		apk_string_array_free(&ipkg->pending_triggers);
 	}
 
 	return 0;
@@ -1651,13 +1646,11 @@ static int read_info_line(void *_ctx, apk_blob_t line)
 	if (apk_blob_compare(APK_BLOB_STR("replaces"), l) == 0) {
 		apk_blob_for_each_segment(r, " ", parse_replaces, ctx);
 	} else if (apk_blob_compare(APK_BLOB_STR("triggers"), l) == 0) {
-		if (ipkg->triggers) {
-			free(ipkg->triggers);
-			ipkg->triggers = NULL;
-		}
+		apk_string_array_resize(&ipkg->triggers, 0);
 		apk_blob_for_each_segment(r, " ", parse_triggers, ctx->ipkg);
 
-		if (ctx->ipkg->triggers && !list_hashed(&ipkg->trigger_pkgs_list))
+		if (ctx->ipkg->triggers->num != 0 &&
+		    !list_hashed(&ipkg->trigger_pkgs_list))
 			list_add_tail(&ipkg->trigger_pkgs_list,
 				      &db->installed.triggers);
 	} else {
@@ -2118,10 +2111,9 @@ int apk_db_install_pkg(struct apk_database *db,
 	}
 
 	ipkg->flags |= APK_IPKGF_RUN_ALL_TRIGGERS;
-	if (ipkg->triggers) {
+	if (ipkg->triggers->num != 0) {
 		list_del(&ipkg->trigger_pkgs_list);
-		free(ipkg->triggers);
-		ipkg->triggers = NULL;
+		apk_string_array_free(&ipkg->triggers);
 	}
 
 	if (oldpkg != NULL && oldpkg != newpkg && oldpkg->ipkg != NULL) {

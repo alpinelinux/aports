@@ -53,7 +53,13 @@ void apk_pkg_format_cache(struct apk_package *pkg, apk_blob_t to)
 
 struct apk_package *apk_pkg_new(void)
 {
-	return calloc(1, sizeof(struct apk_package));
+	struct apk_package *pkg;
+
+	pkg = calloc(1, sizeof(struct apk_package));
+	if (pkg != NULL)
+		apk_dependency_array_init(&pkg->depends);
+
+	return pkg;
 }
 
 struct apk_installed_package *apk_pkg_install(struct apk_database *db,
@@ -66,6 +72,8 @@ struct apk_installed_package *apk_pkg_install(struct apk_database *db,
 
 	pkg->ipkg = ipkg = calloc(1, sizeof(struct apk_installed_package));
 	ipkg->pkg = pkg;
+	apk_string_array_init(&ipkg->triggers);
+	apk_string_array_init(&ipkg->pending_triggers);
 
 	/* Overlay override information resides in a nameless package */
 	if (pkg->name != NULL) {
@@ -90,13 +98,14 @@ void apk_pkg_uninstall(struct apk_database *db, struct apk_package *pkg)
 
 	list_del(&ipkg->installed_pkgs_list);
 
-	if (ipkg->triggers) {
+	if (ipkg->triggers->num) {
 		list_del(&ipkg->trigger_pkgs_list);
 		list_init(&ipkg->trigger_pkgs_list);
 		for (i = 0; i < ipkg->triggers->num; i++)
 			free(ipkg->triggers->item[i]);
-		free(ipkg->triggers);
 	}
+	apk_string_array_free(&ipkg->triggers);
+	apk_string_array_free(&ipkg->pending_triggers);
 
 	for (i = 0; i < APK_SCRIPT_MAX; i++)
 		if (ipkg->script[i].ptr != NULL)
@@ -180,7 +189,7 @@ void apk_deps_del(struct apk_dependency_array **pdeps,
 			continue;
 
 		deps->item[i] = deps->item[deps->num-1];
-		*pdeps = apk_dependency_array_resize(deps, deps->num-1);
+		apk_dependency_array_resize(pdeps, deps->num-1);
 		break;
 	}
 }
@@ -809,8 +818,7 @@ void apk_pkg_free(struct apk_package *pkg)
 		return;
 
 	apk_pkg_uninstall(NULL, pkg);
-	if (pkg->depends)
-		free(pkg->depends);
+	apk_dependency_array_free(&pkg->depends);
 	if (pkg->version)
 		free(pkg->version);
 	if (pkg->url)
@@ -970,7 +978,7 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	if (os->write(os, bbuf.ptr, bbuf.len) != bbuf.len)
 		return -1;
 
-	if (info->depends != NULL) {
+	if (info->depends->num > 0) {
 		if (os->write(os, "D:", 2) != 2)
 			return -1;
 		r = apk_deps_write(info->depends, os);

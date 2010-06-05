@@ -72,7 +72,7 @@ static int warn_if_no_providers(apk_hash_item item, void *ctx)
 	struct counts *counts = (struct counts *) ctx;
 	struct apk_name *name = (struct apk_name *) item;
 
-	if (name->pkgs == NULL) {
+	if (name->pkgs->num == 0) {
 		if (++counts->unsatisfied < 10) {
 			apk_warning("No provider for dependency '%s'",
 				    name->name);
@@ -139,7 +139,7 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 			/* If we have it in the old index already? */
 			name = apk_db_query_name(db, bname);
-			if (name == NULL || name->pkgs == NULL)
+			if (name == NULL)
 				break;
 
 			for (j = 0; j < name->pkgs->num; j++) {

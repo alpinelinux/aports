@@ -105,7 +105,7 @@ static struct apk_name_choices *name_choices_new(struct apk_database *db,
 	struct apk_name_choices *nc;
 	int i, j;
 
-	if (name->pkgs == NULL)
+	if (name->pkgs->num == 0)
 		return NULL;
 
 	nc = malloc(sizeof(struct apk_name_choices) +
@@ -122,7 +122,7 @@ static struct apk_name_choices *name_choices_new(struct apk_database *db,
 		return nc;
 
 	/* Check for global dependencies */
-	for (i = 0; db->world != NULL && i < db->world->num; i++) {
+	for (i = 0; i < db->world->num; i++) {
 		struct apk_dependency *dep = &db->world->item[i];
 
 		if (dep->name != name)
@@ -198,6 +198,9 @@ struct apk_state *apk_state_new(struct apk_database *db)
 	state->db = db;
 	list_init(&state->change_list_head);
 
+	apk_name_array_init(&state->missing);
+	apk_package_array_init(&state->conflicts);
+
 	return state;
 }
 
@@ -211,6 +214,9 @@ void apk_state_unref(struct apk_state *state)
 {
 	if (--state->refs > 0)
 		return;
+
+	apk_package_array_free(&state->conflicts);
+	apk_name_array_free(&state->missing);
 	free(state);
 }
 
@@ -397,7 +403,7 @@ static int apk_state_fix_package(struct apk_state *state,
 {
 	int i, r, ret = 0;
 
-	if (pkg == NULL || pkg->depends == NULL)
+	if (pkg == NULL)
 		return 0;
 
 	for (i = 0; i < pkg->depends->num; i++) {
@@ -421,9 +427,6 @@ static int call_if_dependency_broke(struct apk_state *state,
 {
 	struct apk_package *dep_pkg;
 	int k;
-
-	if (pkg->depends == NULL)
-		return 0;
 
 	dep_pkg = ns_to_pkg(state->name[dep_name->id]);
 	for (k = 0; k < pkg->depends->num; k++) {
@@ -453,9 +456,6 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 {
 	struct apk_package *pkg0;
 	int i, j, r;
-
-	if (name->rdepends == NULL)
-		return 0;
 
 	for (i = 0; i < name->rdepends->num; i++) {
 		struct apk_name *name0 = name->rdepends->item[i];
@@ -536,14 +536,11 @@ int apk_state_lock_name(struct apk_state *state,
 	ns_free(state->name[name->id]);
 	state->name[name->id] = ns_from_pkg_non_pending(newpkg);
 
-	if (name->pkgs != NULL) {
-		for (i = 0; i < name->pkgs->num; i++) {
-			struct apk_package *pkg = name->pkgs->item[i];
-
-			if (name->pkgs->item[i]->name == name &&
-			    pkg->ipkg != NULL)
-				oldpkg = pkg;
-		}
+	for (i = 0; i < name->pkgs->num; i++) {
+		struct apk_package *pkg = name->pkgs->item[i];
+		if (name->pkgs->item[i]->name == name &&
+		    pkg->ipkg != NULL)
+			oldpkg = pkg;
 	}
 
 	/* First we need to make sure the dependants of the old package
@@ -766,9 +763,6 @@ static int apk_state_autoclean(struct apk_state *state,
 	apk_name_state_t oldns;
 	int i, r;
 
-	if (pkg->depends == NULL)
-		return 0;
-
 	for (i = 0; i < pkg->depends->num; i++) {
 		struct apk_name *n = pkg->depends->item[i].name;
 
@@ -831,14 +825,14 @@ void apk_state_print_errors(struct apk_state *state)
 	struct error_state es;
 	int i, j, r;
 
-	for (i = 0; state->conflicts != NULL && i < state->conflicts->num; i++) {
+	for (i = 0; i < state->conflicts->num; i++) {
 		if (i == 0)
 			apk_error("Unable to satisfy all dependencies:");
 
 		es.prevpkg = pkg = state->conflicts->item[i];
 		es.indent.x = es.indent.indent =
 		printf("  %s-%s:", pkg->name->name, pkg->version);
-		for (j = 0; pkg->depends != NULL && j < pkg->depends->num; j++) {
+		for (j = 0; j < pkg->depends->num; j++) {
 			r = apk_state_lock_dependency(state,
 						      &pkg->depends->item[j]);
 			if (r != 0)
@@ -851,7 +845,7 @@ void apk_state_print_errors(struct apk_state *state)
 		printf("\n");
 	}
 
-	for (i = 0; state->missing != NULL && i < state->missing->num; i++) {
+	for (i = 0; i < state->missing->num; i++) {
 		struct apk_name *name = state->missing->item[i];
 		if (i == 0) {
 			apk_error("Missing packages:");

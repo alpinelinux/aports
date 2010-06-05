@@ -33,9 +33,6 @@ static int del_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	struct apk_name *name;
 	int i, r = 0;
 
-	if (db->world == NULL)
-		return 0;
-
 	for (i = 0; i < argc; i++) {
 		name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 		name->flags &= ~APK_NAME_TOPLEVEL;

@@ -75,9 +75,6 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 			continue;
 
 		name = dep.name;
-		if (name->pkgs == NULL)
-			continue;
-
 		for (j = 0; j < name->pkgs->num; j++) {
 			pkg = name->pkgs->item[j];
 			if (pkg->ipkg != NULL)
@@ -168,13 +165,10 @@ static void info_print_depends(struct apk_package *pkg)
 	char *separator = apk_verbosity > 1 ? " " : "\n";
 	if (apk_verbosity == 1)
 		printf("%s-%s depends on:\n", pkg->name->name, pkg->version);
-	if (pkg->depends == NULL)
-		return;
 	if (apk_verbosity > 1)
 		printf("%s: ", pkg->name->name);
-	for (i = 0; i < pkg->depends->num; i++) {
+	for (i = 0; i < pkg->depends->num; i++)
 		printf("%s%s", pkg->depends->item[i].name->name, separator);
-	}
 }
 
 static void info_print_required_by(struct apk_package *pkg)
@@ -184,8 +178,6 @@ static void info_print_required_by(struct apk_package *pkg)
 
 	if (apk_verbosity == 1)
 		printf("%s-%s is required by:\n", pkg->name->name, pkg->version);
-	if (pkg->name->rdepends == NULL)
-		return;
 	if (apk_verbosity > 1)
 		printf("%s: ", pkg->name->name);
 	for (i = 0; i < pkg->name->rdepends->num; i++) {
@@ -193,12 +185,10 @@ static void info_print_required_by(struct apk_package *pkg)
 
 		/* Check only the package that is installed, and that
 		 * it actually has this package as dependency. */
-		if (name0->pkgs == NULL)
-			continue;
 		for (j = 0; j < name0->pkgs->num; j++) {
 			struct apk_package *pkg0 = name0->pkgs->item[j];
 
-			if (pkg0->ipkg == NULL || pkg0->depends == NULL)
+			if (pkg0->ipkg == NULL)
 				continue;
 			for (k = 0; k < pkg0->depends->num; k++) {
 				if (pkg0->depends->item[k].name != pkg->name)
@@ -240,7 +230,7 @@ static void info_print_triggers(struct apk_package *pkg)
 	if (apk_verbosity == 1)
 		printf("%s-%s triggers:\n", pkg->name->name, pkg->version);
 
-	for (i = 0; ipkg->triggers && i < ipkg->triggers->num; i++) {
+	for (i = 0; i < ipkg->triggers->num; i++) {
 		if (apk_verbosity > 1)
 			printf("%s: trigger ", pkg->name->name);
 		printf("%s\n", ipkg->triggers->item[i]);
@@ -283,7 +273,7 @@ static int info_package(struct info_ctx *ctx, struct apk_database *db,
 
 	for (i = 0; i < argc; i++) {
 		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-		if (name == NULL || name->pkgs == NULL) {
+		if (name == NULL || name->pkgs->num == 0) {
 			apk_error("Not found: %s", argv[i]);
 			return 1;
 		}

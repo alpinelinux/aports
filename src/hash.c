@@ -16,14 +16,15 @@ void apk_hash_init(struct apk_hash *h, const struct apk_hash_ops *ops,
 		   int num_buckets)
 {
 	h->ops = ops;
-	h->buckets = apk_hash_array_resize(NULL, num_buckets);
+	apk_hash_array_init(&h->buckets);
+	apk_hash_array_resize(&h->buckets, num_buckets);
 	h->num_items = 0;
 }
 
 void apk_hash_free(struct apk_hash *h)
 {
 	apk_hash_foreach(h, (apk_hash_enumerator_f) h->ops->delete_item, NULL);
-	free(h->buckets);
+	apk_hash_array_free(&h->buckets);
 }
 
 int apk_hash_foreach(struct apk_hash *h, apk_hash_enumerator_f e, void *ctx)

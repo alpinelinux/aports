@@ -45,18 +45,12 @@ static int print_rdepends(struct apk_package *pkg)
 	int i, j, k;
 
 	name = pkg->name;
-	if (name->rdepends == NULL)
-		return 0;
 
 	printf("%s-%s:", pkg->name->name, pkg->version);
 	for (i = 0; i < name->rdepends->num; i++) {
 		name0 = name->rdepends->item[i];
-		if (name0->pkgs == NULL)
-			continue;
 		for (j = 0; j < name0->pkgs->num; j++) {
 			pkg0 = name0->pkgs->item[j];
-			if (pkg0->depends == NULL)
-				continue;
 			for (k = 0; k < pkg0->depends->num; k++) {
 				dep = &pkg0->depends->item[k];
 				if (name == dep->name &&
@@ -146,7 +140,7 @@ static int search_main(void *ctx, struct apk_database *db, int argc, char **argv
 	} else {
 		for (i = 0; i < argc; i++) {
 			name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-			if (name == NULL || name->pkgs == NULL)
+			if (name == NULL)
 				continue;
 			for (j = 0; j < name->pkgs->num; j++)
 				ictx->print(name->pkgs->item[j]);

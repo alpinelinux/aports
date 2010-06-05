@@ -69,7 +69,7 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 			apk_dep_from_blob(&deps[i], db, APK_BLOB_STR(argv[i]));
 			name = deps[i].name;
 
-			for (j = 0; name->pkgs && j < name->pkgs->num; j++) {
+			for (j = 0; j < name->pkgs->num; j++) {
 				if (name->pkgs->item[j]->ipkg != NULL) {
 					pkg = name->pkgs->item[j];
 					break;

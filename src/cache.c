@@ -32,9 +32,6 @@ static int cache_download(struct apk_database *db)
 	char item[PATH_MAX], cacheitem[PATH_MAX];
 	int i, r = 0;
 
-	if (db->world == NULL)
-		return 0;
-
 	state = apk_state_new(db);
 	if (state == NULL)
 		goto err;
@@ -111,7 +108,7 @@ static int cache_clean(struct apk_database *db)
 			} else {
 				/* Package - search for it */
 				name = apk_db_get_name(db, bname);
-				if (name == NULL || name->pkgs == NULL)
+				if (name == NULL)
 					break;
 				for (i = 0; i < name->pkgs->num; i++) {
 					struct apk_package *pkg = name->pkgs->item[i];

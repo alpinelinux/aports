@@ -205,7 +205,7 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			}
 
 			apk_state_unref(state);
-		} else if (dep.name->pkgs != NULL) {
+		} else {
 			struct apk_package *pkg = NULL;
 
 			for (j = 0; j < dep.name->pkgs->num; j++)
@@ -215,13 +215,15 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 				    == APK_VERSION_GREATER)
 					pkg = dep.name->pkgs->item[j];
 
+			if (pkg == NULL) {
+				apk_message("Unable to get '%s'", dep.name->name);
+				r = -1;
+				break;
+			}
+
 			r = fetch_package(fctx, db, pkg);
 			if (r != 0)
 				goto err;
-		} else {
-			apk_message("Unable to get '%s'", dep.name->name);
-			r = -1;
-			break;
 		}
 	}
 
