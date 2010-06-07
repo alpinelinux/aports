@@ -1753,10 +1753,10 @@ static int apk_db_install_archive_entry(void *_ctx,
 				if (opkg->name == pkg->name)
 					break;
 				/* Overwriting with permission? */
-				for (i = 0; ctx->replaces && i < ctx->replaces->num; i++)
+				for (i = 0; i < ctx->replaces->num; i++)
 					if (opkg->name == ctx->replaces->item[i])
 						break;
-				if (ctx->replaces && i < ctx->replaces->num)
+				if (i < ctx->replaces->num)
 					break;
 
 				if (!(apk_flags & APK_FORCE)) {
@@ -2027,13 +2027,13 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		.cb = cb,
 		.cb_ctx = cb_ctx,
 	};
+	apk_name_array_init(&ctx.replaces);
 	apk_sign_ctx_init(&ctx.sctx, APK_SIGN_VERIFY_IDENTITY, &pkg->csum, db->keys_fd);
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &ctx.sctx);
 	r = apk_tar_parse(tar, apk_db_install_archive_entry, &ctx, TRUE);
 	apk_sign_ctx_free(&ctx.sctx);
+	apk_name_array_free(&ctx.replaces);
 	tar->close(tar);
-	if (ctx.replaces)
-		free(ctx.replaces);
 
 	if (need_copy) {
 		if (r == 0)
