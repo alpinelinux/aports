@@ -41,7 +41,7 @@ static void apk_state_record_conflict(struct apk_state *state,
 {
 	struct apk_name *name = pkg->name;
 
-	state->name[name->id] = (void*) (((intptr_t)state->name[name->id]) | APK_NS_ERROR);
+	state->name[name->id] = (void*) (((intptr_t) pkg) | APK_NS_ERROR | APK_NS_LOCKED);
 	*apk_package_array_add(&state->conflicts) = pkg;
 }
 
@@ -314,6 +314,7 @@ int apk_state_prune_dependency(struct apk_state *state,
 	}
 	if (c->num <= 1) {
 		name_choices_unref(c);
+		state->name[name->id] = ns_from_pkg(NULL);
 		return -1;
 	}
 
@@ -830,8 +831,9 @@ void apk_state_print_errors(struct apk_state *state)
 			apk_error("Unable to satisfy all dependencies:");
 
 		es.prevpkg = pkg = state->conflicts->item[i];
-		es.indent.x = es.indent.indent =
+		es.indent.x =
 		printf("  %s-%s:", pkg->name->name, pkg->version);
+		es.indent.indent = es.indent.x + 1;
 		for (j = 0; j < pkg->depends->num; j++) {
 			r = apk_state_lock_dependency(state,
 						      &pkg->depends->item[j]);

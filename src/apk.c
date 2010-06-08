@@ -105,6 +105,8 @@ int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
 	if (i->x + blob.len + 1 >= wrap_length) {
 		i->x = i->indent;
 		printf("\n%*s", i->indent - 1, "");
+	} else if (i->x+1 < i->indent) {
+		printf("%*s", i->indent - i->x - 1, "");
 	}
 	i->x += printf(" %.*s", blob.len, blob.ptr);
 	return 0;
