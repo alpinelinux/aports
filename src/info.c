@@ -98,10 +98,11 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 			 int argc, char **argv)
 {
 	struct apk_package *pkg;
-	struct apk_dependency_array *deps = NULL;
+	struct apk_dependency_array *deps;
 	struct apk_dependency dep;
 	int i;
 
+	apk_dependency_array_init(&deps);
 	for (i = 0; i < argc; i++) {
 		pkg = apk_db_get_file_owner(db, APK_BLOB_STR(argv[i]));
 		if (pkg == NULL)
@@ -118,16 +119,15 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 			       pkg->name->name, pkg->version);
 		}
 	}
-	if (apk_verbosity < 1 && deps != NULL) {
+	if (apk_verbosity < 1 && deps->num != 0) {
 		struct apk_ostream *os;
 
 		os = apk_ostream_to_fd(STDOUT_FILENO);
 		apk_deps_write(deps, os);
 		os->write(os, "\n", 1);
 		os->close(os);
-
-		free(deps);
 	}
+	apk_dependency_array_free(&deps);
 
 	return 0;
 }
