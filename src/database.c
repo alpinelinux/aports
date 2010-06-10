@@ -2100,6 +2100,12 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	/* Install the new stuff */
 	ipkg = apk_pkg_install(db, newpkg);
+	ipkg->flags |= APK_IPKGF_RUN_ALL_TRIGGERS;
+	if (ipkg->triggers->num != 0) {
+		list_del(&ipkg->trigger_pkgs_list);
+		apk_string_array_free(&ipkg->triggers);
+	}
+
 	if (newpkg->installed_size != 0) {
 		r = apk_db_unpack_pkg(db, ipkg, (oldpkg != NULL),
 				      (oldpkg == newpkg), cb, cb_ctx,
@@ -2108,12 +2114,6 @@ int apk_db_install_pkg(struct apk_database *db,
 			apk_pkg_uninstall(db, newpkg);
 			return r;
 		}
-	}
-
-	ipkg->flags |= APK_IPKGF_RUN_ALL_TRIGGERS;
-	if (ipkg->triggers->num != 0) {
-		list_del(&ipkg->trigger_pkgs_list);
-		apk_string_array_free(&ipkg->triggers);
 	}
 
 	if (oldpkg != NULL && oldpkg != newpkg && oldpkg->ipkg != NULL) {
