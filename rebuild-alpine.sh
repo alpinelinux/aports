@@ -14,9 +14,15 @@ distclean () {
 build () { 
     local pkgs
     local maintainer
+    local pkgno
+    local failed
     pkgs=$(./aport.lua deplist $rootdir $1)
+    pktcnt=$(echo $pkgs | wc -w)
+    pkgno=0
+    failed=0
     for p in $pkgs ; do
-        echo "Building $p"
+        pkgno=$(expr "$pkgno" + 1)
+        echo "Building $p ($pkgno of $pktcnt in $1 - $failed failed)"
         cd $rootdir/$1/$p
         abuild -rm > $rootdir/$1_$p.txt 2>&1 
         if [ "$?" = "0" ] ; then
@@ -27,7 +33,8 @@ build () {
                 maintainer="default maintainer"
             fi
             echo "Package $1/$p failed to build (output in $rootdir/$1_$p.txt)"
-            echo "Package $1/$p failed to build. Notify $maintainer. Output is attached" | email -s "NOT SPAM $p build report" -a $rootdir/$1_$p.txt -n AlpineBuildBot -f build@alpinelinux.org amanison@anselsystems.com
+#            echo "Package $1/$p failed to build. Notify $maintainer. Output is attached" | email -s "NOT SPAM $p build report" -a $rootdir/$1_$p.txt -n AlpineBuildBot -f build@alpinelinux.org amanison@anselsystems.com
+             failed=$(expr "$failed" + 1)
         fi
     done
     cd $rootdir
@@ -43,7 +50,7 @@ fi
 echo "Refresh aports tree"
 git pull
 
-for s in main testing nonfree unstable ; do
+for s in main testing unstable ; do
     echo "Building packages in $s"
     build $s
 done
