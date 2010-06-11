@@ -300,8 +300,10 @@ static void apk_db_diri_set(struct apk_db_dir_instance *diri, mode_t mode,
 
 static void apk_db_diri_mkdir(struct apk_database *db, struct apk_db_dir_instance *diri)
 {
-	if (mkdirat(db->root_fd, diri->dir->name, diri->mode) == 0)
-		fchownat(db->root_fd, diri->dir->name, diri->uid, diri->gid, 0);
+	if (mkdirat(db->root_fd, diri->dir->name, diri->mode) == 0) {
+		if (fchownat(db->root_fd, diri->dir->name, diri->uid, diri->gid, 0) != 0)
+			;
+	}
 }
 
 static void apk_db_diri_rmdir(struct apk_database *db, struct apk_db_dir_instance *diri)
@@ -1013,7 +1015,7 @@ static int apk_db_create(struct apk_database *db)
 	mkdirat(db->root_fd, "var/cache", 0755);
 	mkdirat(db->root_fd, "var/cache/misc", 0755);
 
-	fd = openat(db->root_fd, "var/lib/apk/world", O_CREAT|O_RDWR|O_TRUNC, 0644);
+	fd = openat(db->root_fd, "var/lib/apk/world", O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0644);
 	if (fd < 0)
 		return -errno;
 	close(fd);
@@ -1053,10 +1055,10 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	db->permanent = 1;
 
 	db->root = strdup(dbopts->root ?: "/");
-	db->root_fd = openat(AT_FDCWD, db->root, O_RDONLY);
+	db->root_fd = openat(AT_FDCWD, db->root, O_RDONLY | O_CLOEXEC);
 	if (db->root_fd < 0 && (dbopts->open_flags & APK_OPENF_CREATE)) {
 		mkdirat(AT_FDCWD, db->root, 0755);
-		db->root_fd = openat(AT_FDCWD, db->root, O_RDONLY);
+		db->root_fd = openat(AT_FDCWD, db->root, O_RDONLY | O_CLOEXEC);
 	}
 	if (db->root_fd < 0) {
 		msg = "Unable to open root";
@@ -1071,7 +1073,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 
 	if (dbopts->open_flags & APK_OPENF_WRITE) {
 		db->lock_fd = openat(db->root_fd, "var/lib/apk/lock",
-				     O_CREAT | O_RDWR, 0400);
+				     O_CREAT | O_RDWR | O_CLOEXEC, 0400);
 		if (db->lock_fd < 0 && errno == ENOENT &&
 		    (dbopts->open_flags & APK_OPENF_CREATE)) {
 			r = apk_db_create(db);
@@ -1080,7 +1082,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 				goto ret_r;
 			}
 			db->lock_fd = openat(db->root_fd, "var/lib/apk/lock",
-					     O_CREAT | O_RDWR, 0400);
+					     O_CREAT | O_RDWR | O_CLOEXEC, 0400);
 		}
 		if (db->lock_fd < 0 ||
 		    flock(db->lock_fd, LOCK_EX | LOCK_NB) < 0) {
@@ -1108,12 +1110,12 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	blob = APK_BLOB_STR("etc:*etc/init.d");
 	apk_blob_for_each_segment(blob, ":", add_protected_path, db);
 
-	db->cache_fd = openat(db->root_fd, db->cache_dir, O_RDONLY);
+	db->cache_fd = openat(db->root_fd, db->cache_dir, O_RDONLY | O_CLOEXEC);
 	mkdirat(db->cache_fd, "tmp", 0644);
-	db->cachetmp_fd = openat(db->cache_fd, "tmp", O_RDONLY);
+	db->cachetmp_fd = openat(db->cache_fd, "tmp", O_RDONLY | O_CLOEXEC);
 	db->keys_fd = openat(db->root_fd,
 			     dbopts->keys_dir ?: "etc/apk/keys",
-			     O_RDONLY);
+			     O_RDONLY | O_CLOEXEC);
 
 	if (apk_flags & APK_OVERLAY_FROM_STDIN) {
 		apk_flags &= ~APK_OVERLAY_FROM_STDIN;

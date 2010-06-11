@@ -55,7 +55,7 @@ static int audit_directory(apk_hash_item item, void *ctx)
 	if (!(dbd->flags & APK_DBDIRF_PROTECTED))
 		return 0;
 
-	dir = fdopendir(openat(db->root_fd, dbd->name, O_RDONLY));
+	dir = fdopendir(openat(db->root_fd, dbd->name, O_RDONLY | O_CLOEXEC));
 	if (dir == NULL)
 		return 0;
 

@@ -83,11 +83,9 @@ struct apk_istream *apk_istream_from_file(int atfd, const char *file)
 {
 	int fd;
 
-	fd = openat(atfd, file, O_RDONLY);
+	fd = openat(atfd, file, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
 		return NULL;
-
-	fcntl(fd, F_SETFD, FD_CLOEXEC);
 
 	return apk_istream_from_fd(fd);
 }
@@ -348,11 +346,10 @@ struct apk_bstream *apk_bstream_from_file(int atfd, const char *file)
 {
 	int fd;
 
-	fd = openat(atfd, file, O_RDONLY);
+	fd = openat(atfd, file, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
 		return NULL;
 
-	fcntl(fd, F_SETFD, FD_CLOEXEC);
 	return apk_bstream_from_fd(fd);
 }
 
@@ -394,7 +391,7 @@ struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const ch
 	struct apk_tee_bstream *tbs;
 	int fd;
 
-	fd = openat(atfd, to, O_CREAT | O_RDWR | O_TRUNC,
+	fd = openat(atfd, to, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC,
 		    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 	if (fd < 0)
 		return NULL;
@@ -442,7 +439,7 @@ apk_blob_t apk_blob_from_file(int atfd, const char *file)
 	struct stat st;
 	char *buf;
 
-	fd = openat(atfd, file, O_RDONLY);
+	fd = openat(atfd, file, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
 		return APK_BLOB_NULL;
 
@@ -648,7 +645,7 @@ struct apk_ostream *apk_ostream_to_file(int atfd,
 	struct apk_ostream *os;
 	int fd;
 
-	fd = openat(atfd, tmpfile ?: file, O_CREAT | O_RDWR | O_TRUNC, mode);
+	fd = openat(atfd, tmpfile ?: file, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, mode);
 	if (fd < 0)
 		return NULL;
 

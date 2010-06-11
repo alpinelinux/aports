@@ -62,9 +62,7 @@ static int cup(void)
 	unsigned long len = sizeof(buf);
 
 	uncompress(buf, &len, z, sizeof(z));
-	write(STDOUT_FILENO, buf, len);
-
-	return 0;
+	return write(STDOUT_FILENO, buf, len) != len;
 }
 
 static int fetch_parse(void *ctx, struct apk_db_options *dbopts,
@@ -83,7 +81,7 @@ static int fetch_parse(void *ctx, struct apk_db_options *dbopts,
 		fctx->flags |= FETCH_LINK;
 		break;
 	case 'o':
-		fctx->outdir_fd = openat(AT_FDCWD, optarg, O_RDONLY);
+		fctx->outdir_fd = openat(AT_FDCWD, optarg, O_RDONLY | O_CLOEXEC);
 		break;
 	default:
 		return -1;
@@ -136,7 +134,7 @@ static int fetch_package(struct fetch_ctx *fctx,
 				return 0;
 		}
 		fd = openat(fctx->outdir_fd, pkgfile,
-			    O_CREAT|O_RDWR|O_TRUNC, 0644);
+			    O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0644);
 		if (fd < 0) {
 			apk_error("%s: %s", pkgfile, strerror(errno));
 			return -1;

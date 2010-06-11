@@ -355,7 +355,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 		break;
 	case S_IFREG:
 		if (ae->link_target == NULL) {
-			int flags = O_RDWR | O_CREAT | O_TRUNC;
+			int flags = O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC;
 
 			fd = openat(atfd, fn, flags, ae->mode & 07777);
 			if (fd < 0) {

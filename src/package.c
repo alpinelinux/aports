@@ -444,7 +444,7 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 
 	if (strncmp(&fi->name[6], "RSA.", 4) == 0 ||
 	    strncmp(&fi->name[6], "DSA.", 4) == 0) {
-		int fd = openat(ctx->keys_fd, &fi->name[10], O_RDONLY);
+		int fd = openat(ctx->keys_fd, &fi->name[10], O_RDONLY|O_CLOEXEC);
 	        BIO *bio;
 
 		if (fd < 0)
@@ -884,22 +884,24 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg, int root_fd,
 	if (apk_flags & APK_SIMULATE)
 		return 0;
 
-	fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0755);
+	fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0755);
 	if (fd < 0) {
 		mkdirat(root_fd, "var/cache/misc", 0755);
-		fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC, 0755);
+		fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0755);
 		if (fd < 0)
 			return -errno;
 	}
-	write(fd, ipkg->script[type].ptr, ipkg->script[type].len);
+	if (write(fd, ipkg->script[type].ptr, ipkg->script[type].len) < 0) {
+		close(fd);
+		return -errno;
+	}
 	close(fd);
 
 	pid = fork();
 	if (pid == -1)
 		return -1;
 	if (pid == 0) {
-		fchdir(root_fd);
-		if (chroot(".") < 0) {
+		if (fchdir(root_fd) < 0 || chroot(".") < 0) {
 			apk_error("chroot: %s", strerror(errno));
 		} else {
 			execve(fn, argv, environment);
