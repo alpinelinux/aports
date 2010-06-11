@@ -43,7 +43,4 @@ int apk_state_lock_name(struct apk_state *state,
 			struct apk_name *name,
 			struct apk_package *newpkg);
 
-int apk_print_indented(struct apk_indent *i, apk_blob_t blob);
-void apk_print_indented_words(struct apk_indent *i, const char *text);
-
 #endif

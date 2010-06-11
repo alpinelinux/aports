@@ -1,4 +1,4 @@
-/* state.c - Alpine Package Keeper (APK)
+/* print.c - Alpine Package Keeper (APK)
  *
  * Copyright (C) 2005-2008 Natanael Copa <n@tanael.org>
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>

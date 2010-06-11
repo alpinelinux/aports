@@ -1,4 +1,4 @@
-/* apk_state.h - Alpine Package Keeper (APK)
+/* apk_print.h - Alpine Package Keeper (APK)
  *
  * Copyright (C) 2005-2008 Natanael Copa <n@tanael.org>
  * Copyright (C) 2008 Timo Teräs <timo.teras@iki.fi>
