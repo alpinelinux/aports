@@ -1,4 +1,4 @@
-PKGDEPS := openssl zlib
+PKGDEPS := openssl zlib lua
 
 ifeq ($(shell pkg-config --print-errors --exists $(PKGDEPS) || echo fail),fail)
 $(error Build dependencies are not met)
@@ -11,14 +11,14 @@ libapk.so-objs		:= common.o state.o database.o package.o archive.o \
 shlibs-y		+= apk.so
 apk.so-objs		:= lua-apk.o
 CFLAGS_lua-apk.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\"
-LIBS_apk.so		:= -L$(obj) -llua -lapk
+LIBS_apk.so		:= -L$(obj) -lapk
 
 progs-y			+= apk
 apk-objs		:= apk.o add.o del.o fix.o update.o info.o \
 			   search.o upgrade.o cache.o ver.o index.o fetch.o \
 			   audit.o verify.o
 
-CFLAGS			+= -D_ATFILE_SOURCE
+CFLAGS_ALL		+= -D_ATFILE_SOURCE
 CFLAGS_apk.o		:= -DAPK_VERSION=\"$(FULL_VERSION)\"
 LIBS_apk		:= -lapk
 
@@ -27,11 +27,10 @@ apk.static-objs		:= $(apk-objs)
 LDFLAGS_apk.static	:= -static
 LDFLAGS_apk		+= -nopie -L$(obj)
 
-CFLAGS			+= $(shell pkg-config --cflags $(PKGDEPS))
+CFLAGS_ALL		+= $(shell pkg-config --cflags $(PKGDEPS))
 LIBS			:= -Wl,--as-needed \
 				$(shell pkg-config --libs $(PKGDEPS)) \
 			   -Wl,--no-as-needed
-
 
 $(obj)/apk:	$(obj)/libapk.so
 
