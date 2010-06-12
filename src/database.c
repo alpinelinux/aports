@@ -1037,6 +1037,10 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	int r, rr = 0;
 
 	memset(db, 0, sizeof(*db));
+	if (apk_flags & APK_SIMULATE) {
+		dbopts->open_flags &= ~(APK_OPENF_CREATE | APK_OPENF_WRITE);
+		dbopts->open_flags |= APK_OPENF_READ;
+	}
 	if (dbopts->open_flags == 0) {
 		msg = "Invalid open flags (internal error)";
 		r = -1;
