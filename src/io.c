@@ -15,9 +15,12 @@
 #include <unistd.h>
 #include <malloc.h>
 #include <sys/mman.h>
+#include <pwd.h>
+#include <grp.h>
 
 #include "apk_defines.h"
 #include "apk_io.h"
+#include "apk_hash.h"
 
 struct apk_fd_istream {
 	struct apk_istream is;
@@ -714,4 +717,127 @@ size_t apk_ostream_write_string(struct apk_ostream *os, const char *string)
 		return -1;
 
 	return len;
+}
+
+struct cache_item {
+	apk_hash_node hash_node;
+	unsigned int genid;
+	union {
+		uid_t uid;
+		gid_t gid;
+	};
+	unsigned short len;
+	char name[];
+};
+
+static apk_blob_t cache_item_get_key(apk_hash_item item)
+{
+	struct cache_item *ci = (struct cache_item *) item;
+	return APK_BLOB_PTR_LEN(ci->name, ci->len);
+}
+
+static const struct apk_hash_ops id_hash_ops = {
+	.node_offset = offsetof(struct cache_item, hash_node),
+	.get_key = cache_item_get_key,
+	.hash_key = apk_blob_hash,
+	.compare = apk_blob_compare,
+	.delete_item = (apk_hash_delete_f) free,
+};
+
+static struct cache_item *resolve_cache_item(struct apk_hash *hash, apk_blob_t name)
+{
+	struct cache_item *ci;
+	unsigned long h;
+
+	h = id_hash_ops.hash_key(name);
+	ci = (struct cache_item *) apk_hash_get_hashed(hash, name, h);
+	if (ci != NULL)
+		return ci;
+
+	ci = calloc(1, sizeof(struct cache_item) + name.len);
+	if (ci == NULL)
+		return NULL;
+
+	ci->len = name.len;
+	memcpy(ci->name, name.ptr, name.len);
+	apk_hash_insert_hashed(hash, ci, h);
+
+	return ci;
+}
+
+static unsigned int id_genid = 0;
+static struct apk_hash uid_cache, gid_cache;
+
+void apk_id_cache_init(void)
+{
+	apk_hash_init(&uid_cache, &id_hash_ops, 256);
+	apk_hash_init(&gid_cache, &id_hash_ops, 256);
+	id_genid = 1;
+}
+
+void apk_id_cache_free(void)
+{
+	apk_hash_free(&uid_cache);
+	apk_hash_free(&gid_cache);
+}
+
+void apk_id_cache_reset(void)
+{
+	id_genid++;
+	if (id_genid == 0)
+		id_genid = 1;
+}
+
+uid_t apk_resolve_uid(const char *username, uid_t default_uid)
+{
+	struct cache_item *ci;
+	struct passwd pwent, *pwd;
+	char buf[1024];
+	int r;
+
+	ci = resolve_cache_item(&uid_cache, APK_BLOB_STR(username));
+	if (ci == NULL)
+		return default_uid;
+
+	if (ci->genid != id_genid) {
+		r = getpwnam_r(username, &pwent, buf, sizeof(buf), &pwd);
+		if (pwd != NULL)
+			ci->uid = pwd->pw_uid;
+		else
+			ci->uid = -1;
+		if (r == 0)
+			ci->genid = id_genid;
+	}
+
+	if (ci->uid != -1)
+		return ci->uid;
+
+	return default_uid;
+}
+
+uid_t apk_resolve_gid(const char *groupname, uid_t default_gid)
+{
+	struct cache_item *ci;
+	struct group grent, *grp;
+	char buf[1024];
+	int r;
+
+	ci = resolve_cache_item(&gid_cache, APK_BLOB_STR(groupname));
+	if (ci == NULL)
+		return default_gid;
+
+	if (ci->genid != id_genid) {
+		r = getgrnam_r(groupname, &grent, buf, sizeof(buf), &grp);
+		if (grp != NULL)
+			ci->gid = grp->gr_gid;
+		else
+			ci->gid = -1;
+		if (r == 0)
+			ci->genid = id_genid;
+	}
+
+	if (ci->gid != -1)
+		return ci->gid;
+
+	return default_gid;
 }

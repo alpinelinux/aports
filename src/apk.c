@@ -244,6 +244,7 @@ int main(int argc, char **argv)
 	memset(&dbopts, 0, sizeof(dbopts));
 	list_init(&dbopts.repository_list);
 	umask(0);
+	apk_id_cache_init();
 
 	applet = deduce_applet(argc, argv);
 	num_options = ARRAY_SIZE(generic_options) + 1;
@@ -365,6 +366,7 @@ int main(int argc, char **argv)
 
 	r = applet->main(ctx, &db, argc, argv);
 	apk_db_close(&db);
+	apk_id_cache_free();
 
 	if (r == -EINVAL)
 		return usage(applet);

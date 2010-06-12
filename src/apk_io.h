@@ -95,4 +95,10 @@ int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 int apk_url_download(const char *url, int atfd, const char *file);
 const char *apk_url_local_file(const char *url);
 
+void apk_id_cache_init(void);
+void apk_id_cache_free(void);
+void apk_id_cache_reset(void);
+uid_t apk_resolve_uid(const char *username, uid_t default_uid);
+uid_t apk_resolve_gid(const char *groupname, uid_t default_gid);
+
 #endif

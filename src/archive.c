@@ -388,7 +388,10 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 		break;
 	}
 	if (r == 0) {
-		r = fchownat(atfd, fn, ae->uid, ae->gid, atflags);
+		r = fchownat(atfd, fn,
+			     apk_resolve_uid(ae->uname, ae->uid),
+			     apk_resolve_gid(ae->gname, ae->gid),
+			     atflags);
 		if (r < 0) {
 			apk_error("Failed to set ownership on %s: %s",
 				  fn, strerror(errno));

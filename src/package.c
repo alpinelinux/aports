@@ -910,6 +910,8 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg, int root_fd,
 	}
 	waitpid(pid, &status, 0);
 	unlinkat(root_fd, fn, 0);
+	apk_id_cache_reset();
+
 	if (WIFEXITED(status))
 		return WEXITSTATUS(status);
 	return -1;
