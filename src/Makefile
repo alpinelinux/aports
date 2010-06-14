@@ -4,23 +4,42 @@ ifeq ($(shell pkg-config --print-errors --exists $(PKGDEPS) || echo fail),fail)
 $(error Build dependencies are not met)
 endif
 
-shlibs-y		+= libapk.so
-libapk.so-objs		:= common.o state.o database.o package.o archive.o \
-			   version.o io.o url.o gunzip.o blob.o hash.o print.o
-
+# lua module
+ifneq ($(LUAAPK),)
+LIBAPK			:= YesPlease
 shlibs-y		+= apk.so
 apk.so-objs		:= lua-apk.o
 CFLAGS_lua-apk.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\"
 LIBS_apk.so		:= -L$(obj) -lapk
+LUA_LIB-y		:= $(obj)/apk.so
+install-LUA_LIB-y	:= $(INSTALLDIR) $(DESTDIR)$(LUA_LIBDIR) \
+			   $(INSTALL) $(LUA_LIB-y) $(DESTDIR)$(LUA_LIBDIR)
+endif
 
 progs-y			+= apk
 apk-objs		:= apk.o add.o del.o fix.o update.o info.o \
 			   search.o upgrade.o cache.o ver.o index.o fetch.o \
 			   audit.o verify.o
 
+libapk.so-objs		:= common.o state.o database.o package.o archive.o \
+			   version.o io.o url.o gunzip.o blob.o hash.o print.o
+
+ifeq ($(SHARED_LIBAPK),)
+apk-objs		+= $(libapk.so-objs)
+else
+LIBAPK			:= YesPlease
+LIBS_apk		:= -lapk
+endif
+
+ifneq ($(LIBAPK),)
+shlibs-y		+= libapk.so
+LIBAPK-y		:= $(obj)/libapk.so
+install-LIBAPK-y	:= $(INSTALLDIR) $(DESTDIR)$(LIBDIR) \
+			   $(INSTALL) $(LIBAPK-y) $(DESTDIR)$(LIBDIR)
+endif
+
 CFLAGS_ALL		+= -D_ATFILE_SOURCE
 CFLAGS_apk.o		:= -DAPK_VERSION=\"$(FULL_VERSION)\"
-LIBS_apk		:= -lapk
 
 progs-$(STATIC)		+= apk.static
 apk.static-objs		:= $(apk-objs)
@@ -32,13 +51,13 @@ LIBS			:= -Wl,--as-needed \
 				$(shell pkg-config --libs $(PKGDEPS)) \
 			   -Wl,--no-as-needed
 
-$(obj)/apk:	$(obj)/libapk.so
+$(obj)/apk:	$(LIBAPK-y)
 
 $(obj)/apk.so:	$(obj)/libapk.so
 
-install: $(obj)/apk $(obj)/libapk.so $(obj)/apk.so
-	$(INSTALLDIR) $(addprefix $(DESTDIR),$(SBINDIR) $(LIBDIR) $(LUA_LIBDIR))
+install: $(obj)/apk $(LIBAPK-y) $(LUA_LIB-y)
+	$(INSTALLDIR) $(DESTDIR)$(SBINDIR)
 	$(INSTALL) $(obj)/apk $(DESTDIR)$(SBINDIR)
-	$(INSTALL) $(obj)/libapk.so $(DESTDIR)$(LIBDIR)
-	$(INSTALL) $(obj)/apk.so $(DESTDIR)$(LUA_LIBDIR)
+	$(install-LIBAPK-y)
+	$(install-LUA_LIB-y)
 
