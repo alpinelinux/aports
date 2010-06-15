@@ -33,10 +33,12 @@ static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
 static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct apk_state *state = NULL;
+	struct apk_name_array *missing;
 	int i, r = 0;
 
 	apk_flags |= APK_UPGRADE;
 
+	apk_name_array_init(&missing);
 	state = apk_state_new(db);
 	if (state == NULL)
 		goto err;
@@ -47,15 +49,33 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 			dep->result_mask = APK_VERSION_EQUAL | APK_VERSION_LESS | APK_VERSION_GREATER;
 			dep->version = NULL;
 		}
-		r |= apk_state_lock_dependency(state, dep);
+		if (dep->name->pkgs->num != 0)
+			r |= apk_state_lock_dependency(state, dep);
+		else
+			*apk_name_array_add(&missing) = dep->name;
 	}
-	if (r == 0)
+	if (r == 0) {
+		for (i = 0; i < missing->num; i++) {
+			struct apk_indent indent;
+			struct apk_name *name = missing->item[i];
+
+			if (i == 0) {
+				apk_warning("The following package names no longer exists in repository:");
+				indent.x = 0;
+				indent.indent = 2;
+			}
+			apk_print_indented(&indent, APK_BLOB_STR(name->name));
+		}
+		if (i != 0)
+			printf("\n");
+
 		r = apk_state_commit(state, db);
-	else
+	} else
 		apk_state_print_errors(state);
 err:
 	if (state != NULL)
 		apk_state_unref(state);
+	apk_name_array_free(&missing);
 	return r;
 }
 
