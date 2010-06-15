@@ -1,3 +1,4 @@
+-include conf.mk
 
 repos	:= repo1 repo2
 
@@ -6,8 +7,8 @@ testroot = $(tmproot)/$(basename $@)
 
 SUDO	:= sudo
 APK	:= ../src/apk --keys-dir /etc/apk/keys
-#SYSREPO ?= http://alpinelinux.org/cgi-bin/dl.cgi/edge/main
-SYSREPO ?= http://192.168.8.4/main
+
+SYSREPO ?= http://alpinelinux.org/cgi-bin/dl.cgi/edge/main
 
 LD_LIBRARY_PATH = ../src
 export LD_LIBRARY_PATH SYSREPO
@@ -41,7 +42,7 @@ repos.stamp: $(repos)
 	@echo -n "$<"; \
 		rm -rf "$(testroot)" ;\
 		mkdir -p "$(testroot)"; \
-		if ! APK="$(APK)" ROOT="$(testroot)" SYSREPO="$(SYSREPO)" sh -e $< > $(basename $@).out 2>&1; then\
+		if ! APK="$(APK)" ROOT="$(testroot)" SYSREPO="$(SYSREPO)" ./$< > $(basename $@).out 2>&1; then\
 			echo " FAIL";\
 			exit 1;\
 		fi ;\

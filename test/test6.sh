@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 # desc: test triggers in kernel package
 
