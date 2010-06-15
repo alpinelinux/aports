@@ -178,6 +178,8 @@ static void ns_free(apk_name_state_t name)
 static inline int apk_state_pkg_available(struct apk_state *state,
 					  struct apk_package *pkg)
 {
+	if (pkg->ipkg != NULL)
+		return TRUE;
 	if (pkg->installed_size == 0)
 		return TRUE;
 	if (pkg->filename != NULL)
@@ -316,6 +318,7 @@ int apk_state_prune_dependency(struct apk_state *state,
 	if (c->num <= 1) {
 		name_choices_unref(c);
 		state->name[name->id] = ns_from_pkg(NULL);
+		*apk_name_array_add(&state->missing) = name;
 		return -1;
 	}
 
