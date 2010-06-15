@@ -2113,6 +2113,7 @@ int apk_db_install_pkg(struct apk_database *db,
 	ipkg->flags |= APK_IPKGF_RUN_ALL_TRIGGERS;
 	if (ipkg->triggers->num != 0) {
 		list_del(&ipkg->trigger_pkgs_list);
+		list_init(&ipkg->trigger_pkgs_list);
 		apk_string_array_free(&ipkg->triggers);
 	}
 
