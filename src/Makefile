@@ -1,12 +1,9 @@
-PKGDEPS := openssl zlib lua
-
-ifeq ($(shell pkg-config --print-errors --exists $(PKGDEPS) || echo fail),fail)
-$(error Build dependencies are not met)
-endif
+PKGDEPS := openssl zlib
 
 # lua module
 ifneq ($(LUAAPK),)
 LIBAPK			:= YesPlease
+PKGDEPS			+= lua
 shlibs-y		+= apk.so
 apk.so-objs		:= lua-apk.o
 CFLAGS_lua-apk.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\"
@@ -14,6 +11,10 @@ LIBS_apk.so		:= -L$(obj) -lapk
 LUA_LIB-y		:= $(obj)/apk.so
 install-LUA_LIB-y	:= $(INSTALLDIR) $(DESTDIR)$(LUA_LIBDIR) \
 			   $(INSTALL) $(LUA_LIB-y) $(DESTDIR)$(LUA_LIBDIR)
+endif
+
+ifeq ($(shell pkg-config --print-errors --exists $(PKGDEPS) || echo fail),fail)
+$(error Build dependencies are not met)
 endif
 
 progs-y			+= apk
