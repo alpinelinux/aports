@@ -1,0 +1,390 @@
+diff -upkr linux-2.6.34/include/linux/mm_types.h linux-2.6.34/include/linux/mm_types.h
+--- linux-2.6.34/include/linux/mm_types.h	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/include/linux/mm_types.h	2010-05-24 14:51:40.000000000 +0400
+@@ -100,6 +100,18 @@ struct page {
+ 	 */
+ 	void *shadow;
+ #endif
++
++#if defined(CONFIG_TCP_ZERO_COPY_TRANSFER_COMPLETION_NOTIFICATION)
++	/*
++	 * Used to implement support for notification on zero-copy TCP transfer
++	 * completion. It might look as not good to have this field here and
++	 * it's better to have it in struct sk_buff, but it would make the code
++	 * much more complicated and fragile, since all skb then would have to
++	 * contain only pages with the same value in this field.
++	 */
++	 void *net_priv;
++#endif
++
+ };
+ 
+ /*
+diff -upkr linux-2.6.34/include/linux/net.h linux-2.6.34/include/linux/net.h
+--- linux-2.6.34/include/linux/net.h	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/include/linux/net.h	2010-05-24 14:51:40.000000000 +0400
+@@ -20,6 +20,7 @@
+ 
+ #include <linux/socket.h>
+ #include <asm/socket.h>
++#include <linux/mm.h>
+ 
+ #define NPROTO		AF_MAX
+ 
+@@ -288,5 +289,44 @@ extern int kernel_sock_shutdown(struct s
+ extern struct ratelimit_state net_ratelimit_state;
+ #endif
+ 
++#if defined(CONFIG_TCP_ZERO_COPY_TRANSFER_COMPLETION_NOTIFICATION)
++/* Support for notification on zero-copy TCP transfer completion */
++typedef void (*net_get_page_callback_t)(struct page *page);
++typedef void (*net_put_page_callback_t)(struct page *page);
++
++extern net_get_page_callback_t net_get_page_callback;
++extern net_put_page_callback_t net_put_page_callback;
++
++extern int net_set_get_put_page_callbacks(
++	net_get_page_callback_t get_callback,
++	net_put_page_callback_t put_callback);
++
++/*
++ * See comment for net_set_get_put_page_callbacks() why those functions
++ * don't need any protection.
++ */
++static inline void net_get_page(struct page *page)
++{
++	if (page->net_priv != 0)
++		net_get_page_callback(page);
++	get_page(page);
++}
++static inline void net_put_page(struct page *page)
++{
++	if (page->net_priv != 0)
++		net_put_page_callback(page);
++	put_page(page);
++}
++#else
++static inline void net_get_page(struct page *page)
++{
++	get_page(page);
++}
++static inline void net_put_page(struct page *page)
++{
++	put_page(page);
++}
++#endif /* CONFIG_TCP_ZERO_COPY_TRANSFER_COMPLETION_NOTIFICATION */
++
+ #endif /* __KERNEL__ */
+ #endif	/* _LINUX_NET_H */
+diff -upkr linux-2.6.34/net/core/dev.c linux-2.6.34/net/core/dev.c
+--- linux-2.6.34/net/core/dev.c	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/net/core/dev.c	2010-05-24 14:51:40.000000000 +0400
+@@ -2732,7 +2732,7 @@ pull:
+ 		skb_shinfo(skb)->frags[0].size -= grow;
+ 
+ 		if (unlikely(!skb_shinfo(skb)->frags[0].size)) {
+-			put_page(skb_shinfo(skb)->frags[0].page);
++			net_put_page(skb_shinfo(skb)->frags[0].page);
+ 			memmove(skb_shinfo(skb)->frags,
+ 				skb_shinfo(skb)->frags + 1,
+ 				--skb_shinfo(skb)->nr_frags);
+diff -upkr linux-2.6.34/net/core/skbuff.c linux-2.6.34/net/core/skbuff.c
+--- linux-2.6.34/net/core/skbuff.c	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/net/core/skbuff.c	2010-05-24 14:51:40.000000000 +0400
+@@ -76,13 +76,13 @@ static struct kmem_cache *skbuff_fclone_
+ static void sock_pipe_buf_release(struct pipe_inode_info *pipe,
+ 				  struct pipe_buffer *buf)
+ {
+-	put_page(buf->page);
++	net_put_page(buf->page);
+ }
+ 
+ static void sock_pipe_buf_get(struct pipe_inode_info *pipe,
+ 				struct pipe_buffer *buf)
+ {
+-	get_page(buf->page);
++	net_get_page(buf->page);
+ }
+ 
+ static int sock_pipe_buf_steal(struct pipe_inode_info *pipe,
+@@ -344,7 +344,7 @@ static void skb_release_data(struct sk_b
+ 		if (skb_shinfo(skb)->nr_frags) {
+ 			int i;
+ 			for (i = 0; i < skb_shinfo(skb)->nr_frags; i++)
+-				put_page(skb_shinfo(skb)->frags[i].page);
++				net_put_page(skb_shinfo(skb)->frags[i].page);
+ 		}
+ 
+ 		if (skb_has_frags(skb))
+@@ -765,7 +765,7 @@ struct sk_buff *pskb_copy(struct sk_buff
+ 
+ 		for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
+ 			skb_shinfo(n)->frags[i] = skb_shinfo(skb)->frags[i];
+-			get_page(skb_shinfo(n)->frags[i].page);
++			net_get_page(skb_shinfo(n)->frags[i].page);
+ 		}
+ 		skb_shinfo(n)->nr_frags = i;
+ 	}
+@@ -831,7 +831,7 @@ int pskb_expand_head(struct sk_buff *skb
+ 	       sizeof(struct skb_shared_info));
+ 
+ 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++)
+-		get_page(skb_shinfo(skb)->frags[i].page);
++		net_get_page(skb_shinfo(skb)->frags[i].page);
+ 
+ 	if (skb_has_frags(skb))
+ 		skb_clone_fraglist(skb);
+@@ -1105,7 +1105,7 @@ drop_pages:
+ 		skb_shinfo(skb)->nr_frags = i;
+ 
+ 		for (; i < nfrags; i++)
+-			put_page(skb_shinfo(skb)->frags[i].page);
++			net_put_page(skb_shinfo(skb)->frags[i].page);
+ 
+ 		if (skb_has_frags(skb))
+ 			skb_drop_fraglist(skb);
+@@ -1274,7 +1274,7 @@ pull_pages:
+ 	k = 0;
+ 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
+ 		if (skb_shinfo(skb)->frags[i].size <= eat) {
+-			put_page(skb_shinfo(skb)->frags[i].page);
++			net_put_page(skb_shinfo(skb)->frags[i].page);
+ 			eat -= skb_shinfo(skb)->frags[i].size;
+ 		} else {
+ 			skb_shinfo(skb)->frags[k] = skb_shinfo(skb)->frags[i];
+@@ -1375,7 +1375,7 @@ EXPORT_SYMBOL(skb_copy_bits);
+  */
+ static void sock_spd_release(struct splice_pipe_desc *spd, unsigned int i)
+ {
+-	put_page(spd->pages[i]);
++	net_put_page(spd->pages[i]);
+ }
+ 
+ static inline struct page *linear_to_page(struct page *page, unsigned int *len,
+@@ -1399,7 +1399,7 @@ new_page:
+ 		off = sk->sk_sndmsg_off;
+ 		mlen = PAGE_SIZE - off;
+ 		if (mlen < 64 && mlen < *len) {
+-			put_page(p);
++			net_put_page(p);
+ 			goto new_page;
+ 		}
+ 
+@@ -1409,7 +1409,7 @@ new_page:
+ 	memcpy(page_address(p) + off, page_address(page) + *offset, *len);
+ 	sk->sk_sndmsg_off += *len;
+ 	*offset = off;
+-	get_page(p);
++	net_get_page(p);
+ 
+ 	return p;
+ }
+@@ -1430,7 +1430,7 @@ static inline int spd_fill_page(struct s
+ 		if (!page)
+ 			return 1;
+ 	} else
+-		get_page(page);
++		net_get_page(page);
+ 
+ 	spd->pages[spd->nr_pages] = page;
+ 	spd->partial[spd->nr_pages].len = *len;
+@@ -2060,7 +2060,7 @@ static inline void skb_split_no_header(s
+ 				 *    where splitting is expensive.
+ 				 * 2. Split is accurately. We make this.
+ 				 */
+-				get_page(skb_shinfo(skb)->frags[i].page);
++				net_get_page(skb_shinfo(skb)->frags[i].page);
+ 				skb_shinfo(skb1)->frags[0].page_offset += len - pos;
+ 				skb_shinfo(skb1)->frags[0].size -= len - pos;
+ 				skb_shinfo(skb)->frags[i].size	= len - pos;
+@@ -2182,7 +2182,7 @@ int skb_shift(struct sk_buff *tgt, struc
+ 			to++;
+ 
+ 		} else {
+-			get_page(fragfrom->page);
++			net_get_page(fragfrom->page);
+ 			fragto->page = fragfrom->page;
+ 			fragto->page_offset = fragfrom->page_offset;
+ 			fragto->size = todo;
+@@ -2204,7 +2204,7 @@ int skb_shift(struct sk_buff *tgt, struc
+ 		fragto = &skb_shinfo(tgt)->frags[merge];
+ 
+ 		fragto->size += fragfrom->size;
+-		put_page(fragfrom->page);
++		net_put_page(fragfrom->page);
+ 	}
+ 
+ 	/* Reposition in the original skb */
+@@ -2602,7 +2602,7 @@ struct sk_buff *skb_segment(struct sk_bu
+ 
+ 		while (pos < offset + len && i < nfrags) {
+ 			*frag = skb_shinfo(skb)->frags[i];
+-			get_page(frag->page);
++			net_get_page(frag->page);
+ 			size = frag->size;
+ 
+ 			if (pos < offset) {
+diff -upkr linux-2.6.34/net/ipv4/ip_output.c linux-2.6.34/net/ipv4/ip_output.c
+--- linux-2.6.34/net/ipv4/ip_output.c	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/net/ipv4/ip_output.c	2010-05-24 14:51:40.000000000 +0400
+@@ -1024,7 +1024,7 @@ alloc_new_skb:
+ 						err = -EMSGSIZE;
+ 						goto error;
+ 					}
+-					get_page(page);
++					net_get_page(page);
+ 					skb_fill_page_desc(skb, i, page, sk->sk_sndmsg_off, 0);
+ 					frag = &skb_shinfo(skb)->frags[i];
+ 				}
+@@ -1182,7 +1182,7 @@ ssize_t	ip_append_page(struct sock *sk, 
+ 		if (skb_can_coalesce(skb, i, page, offset)) {
+ 			skb_shinfo(skb)->frags[i-1].size += len;
+ 		} else if (i < MAX_SKB_FRAGS) {
+-			get_page(page);
++			net_get_page(page);
+ 			skb_fill_page_desc(skb, i, page, offset, len);
+ 		} else {
+ 			err = -EMSGSIZE;
+diff -upkr linux-2.6.34/net/ipv4/Makefile linux-2.6.34/net/ipv4/Makefile
+--- linux-2.6.34/net/ipv4/Makefile	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/net/ipv4/Makefile	2010-05-24 14:51:40.000000000 +0400
+@@ -49,6 +49,7 @@ obj-$(CONFIG_TCP_CONG_LP) += tcp_lp.o
+ obj-$(CONFIG_TCP_CONG_YEAH) += tcp_yeah.o
+ obj-$(CONFIG_TCP_CONG_ILLINOIS) += tcp_illinois.o
+ obj-$(CONFIG_NETLABEL) += cipso_ipv4.o
++obj-$(CONFIG_TCP_ZERO_COPY_TRANSFER_COMPLETION_NOTIFICATION) += tcp_zero_copy.o
+ 
+ obj-$(CONFIG_XFRM) += xfrm4_policy.o xfrm4_state.o xfrm4_input.o \
+ 		      xfrm4_output.o
+diff -upkr linux-2.6.34/net/ipv4/tcp.c linux-2.6.34/net/ipv4/tcp.c
+--- linux-2.6.34/net/ipv4/tcp.c	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/net/ipv4/tcp.c	2010-05-24 14:51:40.000000000 +0400
+@@ -800,7 +800,7 @@ new_segment:
+ 		if (can_coalesce) {
+ 			skb_shinfo(skb)->frags[i - 1].size += copy;
+ 		} else {
+-			get_page(page);
++			net_get_page(page);
+ 			skb_fill_page_desc(skb, i, page, offset, copy);
+ 		}
+ 
+@@ -1009,7 +1009,7 @@ new_segment:
+ 					goto new_segment;
+ 				} else if (page) {
+ 					if (off == PAGE_SIZE) {
+-						put_page(page);
++						net_put_page(page);
+ 						TCP_PAGE(sk) = page = NULL;
+ 						off = 0;
+ 					}
+@@ -1050,9 +1050,9 @@ new_segment:
+ 				} else {
+ 					skb_fill_page_desc(skb, i, page, off, copy);
+ 					if (TCP_PAGE(sk)) {
+-						get_page(page);
++						net_get_page(page);
+ 					} else if (off + copy < PAGE_SIZE) {
+-						get_page(page);
++						net_get_page(page);
+ 						TCP_PAGE(sk) = page;
+ 					}
+ 				}
+diff -upkr linux-2.6.34/net/ipv4/tcp_output.c linux-2.6.34/net/ipv4/tcp_output.c
+--- linux-2.6.34/net/ipv4/tcp_output.c	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/net/ipv4/tcp_output.c	2010-05-24 14:51:40.000000000 +0400
+@@ -1084,7 +1084,7 @@ static void __pskb_trim_head(struct sk_b
+ 	k = 0;
+ 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
+ 		if (skb_shinfo(skb)->frags[i].size <= eat) {
+-			put_page(skb_shinfo(skb)->frags[i].page);
++			net_put_page(skb_shinfo(skb)->frags[i].page);
+ 			eat -= skb_shinfo(skb)->frags[i].size;
+ 		} else {
+ 			skb_shinfo(skb)->frags[k] = skb_shinfo(skb)->frags[i];
+diff -upkr linux-2.6.34/net/ipv4/tcp_zero_copy.c linux-2.6.34/net/ipv4/tcp_zero_copy.c
+--- linux-2.6.34/net/ipv4/tcp_zero_copy.c	2010-03-01 17:30:31.000000000 +0300
++++ linux-2.6.34/net/ipv4/tcp_zero_copy.c	2010-05-24 14:51:40.000000000 +0400
+@@ -0,0 +1,49 @@
++/*
++ *	Support routines for TCP zero copy transmit
++ *
++ *	Created by Vladislav Bolkhovitin
++ *
++ *	This program is free software; you can redistribute it and/or
++ *      modify it under the terms of the GNU General Public License
++ *      version 2 as published by the Free Software Foundation.
++ */
++
++#include <linux/skbuff.h>
++
++net_get_page_callback_t net_get_page_callback __read_mostly;
++EXPORT_SYMBOL(net_get_page_callback);
++
++net_put_page_callback_t net_put_page_callback __read_mostly;
++EXPORT_SYMBOL(net_put_page_callback);
++
++/*
++ * Caller of this function must ensure that at the moment when it's called
++ * there are no pages in the system with net_priv field set to non-zero
++ * value. Hence, this function, as well as net_get_page() and net_put_page(),
++ * don't need any protection.
++ */
++int net_set_get_put_page_callbacks(
++	net_get_page_callback_t get_callback,
++	net_put_page_callback_t put_callback)
++{
++	int res = 0;
++
++	if ((net_get_page_callback != NULL) && (get_callback != NULL) &&
++	    (net_get_page_callback != get_callback)) {
++		res = -EBUSY;
++		goto out;
++	}
++
++	if ((net_put_page_callback != NULL) && (put_callback != NULL) &&
++	    (net_put_page_callback != put_callback)) {
++		res = -EBUSY;
++		goto out;
++	}
++
++	net_get_page_callback = get_callback;
++	net_put_page_callback = put_callback;
++
++out:
++	return res;
++}
++EXPORT_SYMBOL(net_set_get_put_page_callbacks);
+diff -upkr linux-2.6.34/net/ipv6/ip6_output.c linux-2.6.34/net/ipv6/ip6_output.c
+--- linux-2.6.34/net/ipv6/ip6_output.c	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/net/ipv6/ip6_output.c	2010-05-24 14:51:40.000000000 +0400
+@@ -1382,7 +1382,7 @@ alloc_new_skb:
+ 						err = -EMSGSIZE;
+ 						goto error;
+ 					}
+-					get_page(page);
++					net_get_page(page);
+ 					skb_fill_page_desc(skb, i, page, sk->sk_sndmsg_off, 0);
+ 					frag = &skb_shinfo(skb)->frags[i];
+ 				}
+diff -upkr linux-2.6.34/net/Kconfig linux-2.6.34/net/Kconfig
+--- linux-2.6.34/net/Kconfig	2010-05-17 01:17:36.000000000 +0400
++++ linux-2.6.34/net/Kconfig	2010-05-24 14:51:40.000000000 +0400
+@@ -72,6 +72,18 @@ config INET
+ 
+ 	  Short answer: say Y.
+ 
++config TCP_ZERO_COPY_TRANSFER_COMPLETION_NOTIFICATION
++	bool "TCP/IP zero-copy transfer completion notification"
++        depends on INET
++        default SCST_ISCSI
++	---help---
++	  Adds support for sending a notification upon completion of a
++          zero-copy TCP/IP transfer. This can speed up certain TCP/IP
++          software. Currently this is only used by the iSCSI target driver
++          iSCSI-SCST.
++
++          If unsure, say N.
++
+ if INET
+ source "net/ipv4/Kconfig"
+ source "net/ipv6/Kconfig"
