@@ -41,9 +41,10 @@ endif
 
 CFLAGS_ALL		+= -D_ATFILE_SOURCE
 CFLAGS_apk.o		:= -DAPK_VERSION=\"$(FULL_VERSION)\"
+CFLAGS_apk-static.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\" -DOPENSSL_NO_ENGINE
 
 progs-$(STATIC)		+= apk.static
-apk.static-objs		:= $(apk-objs)
+apk.static-objs		:= $(filter-out apk.o,$(apk-objs)) apk-static.o
 LDFLAGS_apk.static	:= -static
 LDFLAGS_apk		+= -nopie -L$(obj)
 

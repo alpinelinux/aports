@@ -12,13 +12,17 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
 #include <sys/stat.h>
 
+#include <openssl/crypto.h>
+#ifndef OPENSSL_NO_ENGINE
 #include <openssl/engine.h>
+#endif
 
 #include "apk_defines.h"
 #include "apk_database.h"
