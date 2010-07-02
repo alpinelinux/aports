@@ -1,9 +1,11 @@
-rootdir=$(pwd)
+rootdir=$(pwd -P)
 
 distclean () {
+    echo "Removing traces of previous builds from $rootdir"
     local allpkgs=$(find $rootdir -maxdepth 3 -name APKBUILD -print | sed -e 's/\/APKBUILD//g' | sort)
     for p in $allpkgs ; do
         cd $p
+        pwd
         abuild clean            2>&1
         abuild cleanoldpkg      2>&1
         abuild cleanpkg         2>&1
@@ -16,7 +18,7 @@ build () {
     local maintainer
     local pkgno
     local failed
-    pkgs=$(./aport.lua deplist $rootdir $1)
+    pkgs=$($rootdir/aport.lua deplist $rootdir $1)
     pktcnt=$(echo $pkgs | wc -w)
     pkgno=0
     failed=0
@@ -42,13 +44,18 @@ build () {
 
 touch START_OF_BUILD.txt
 
-if [ "$1" != "noclean" ] ; then
-    echo "Removing traces of previous builds"
+if [ "$1" = "clean" ] ; then
+    echo "Invoked with 'clean' option. This will take a while ..."
     tmp=$(distclean)
+    echo "Done"
 fi
 
 echo "Refresh aports tree"
 git pull
+
+#cd main/build-base
+#abuild -Ru
+#cd $rootdir
 
 for s in main testing unstable ; do
     echo "Building packages in $s"
