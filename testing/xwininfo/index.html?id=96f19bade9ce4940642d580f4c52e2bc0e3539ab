@@ -1,0 +1,2536 @@
+From 96f19bade9ce4940642d580f4c52e2bc0e3539ab Mon Sep 17 00:00:00 2001
+From: Alan Coopersmith <alan.coopersmith@oracle.com>
+Date: Sun, 13 Jun 2010 19:42:34 +0000
+Subject: Convert from Xlib to xcb
+
+Testing was done with a simple GNOME 2.28 session with a number of
+applications open (gnome-terminal, VirtualBox, Firefox).
+
+Primary test case was xwininfo -root -all, which listed 114 children of
+the root window.   Output was identical to Xlib version (after applying
+the fix to libxcb_icccm for always null-terminating wm_class properties).
+
+Over a local connection on the same machine:
+
+Xlib:	0.00u 0.01s 0:00.05 20.0%
+xcb:	0.00u 0.00s 0:00.02 0.0%
+
+(i.e. barely measurable difference - I had more variation between
+ repeated runs of the command)
+
+Introducing latency by running over ssh -X from California to Beijing
+and back:
+
+Xlib:	0.03u 0.02s 8:19.12 0.0%
+xcb:	0.00u 0.00s 0:45.26 0.0%
+
+Memory size when exit() is called:
+
+Xlib:
+ Address  Kbytes     RSS    Anon  Locked Mode   Mapped File
+08043000      20      20      20       - rw---    [ stack ]
+08400000     144     144     144       - rw---    [ heap ]
+total Kb    8972    8640     316       -
+
+xcb:
+ Address  Kbytes     RSS    Anon  Locked Mode   Mapped File
+08045000      12      12      12       - rwx--    [ stack ]
+0806C000     100     100     100       - rwx--    [ heap ]
+total Kb    7980    7692     288       -
+
+Bytes sent & received (counted by proxying via xscope):
+
+Xlib: Client --> Server: 21380 bytes   Client <-- Server:  54124 bytes
+xcb:  Client --> Server: 21114 bytes   Client <-- Server:  53160 bytes
+
+(The Xlib code didn't save any replies, so re-requested a couple of things
+ when running with -all - I fixed that while porting to xcb, but the same
+ could be done with Xlib easily too.)
+
+Not yet handled: WM_NAME properties that need to be converted from another
+character encoding.
+
+Signed-off-by: Alan Coopersmith <alan.coopersmith@oracle.com>
+Reviewed-by: James Cloos <cloos@jhcloos.com>
+---
+diff --git a/COPYING b/COPYING
+index 10b416d..687540f 100644
+--- a/COPYING
++++ b/COPYING
+@@ -1,4 +1,4 @@
+-Copyright © 1999 Sun Microsystems, Inc.  All rights reserved.
++Copyright (c) 1999, 2010, Oracle and/or its affiliates. All rights reserved.
+ 
+ Permission is hereby granted, free of charge, to any person obtaining a
+ copy of this software and associated documentation files (the "Software"),
+diff --git a/clientwin.c b/clientwin.c
+index cce35ad..fe6bd18 100644
+--- a/clientwin.c
++++ b/clientwin.c
+@@ -19,47 +19,59 @@
+  * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
+  * OF THIS SOFTWARE.
+  */
+-#include <X11/Xatom.h>
+-#include <X11/Xlib.h>
++#include <xcb/xcb.h>
++#include <xcb/xproto.h>
++
++#include <stdlib.h>
++#include <string.h>
+ 
+ #include "clientwin.h"
+ 
+-static Atom atom_wm_state = None;
++static xcb_atom_t atom_wm_state = XCB_ATOM_NONE;
++typedef enum { False = 0, True } Bool;
+ 
+ /*
+  * Check if window has given property
+  */
+ static Bool
+-Window_Has_Property(Display * dpy, Window win, Atom atom)
++Window_Has_Property(xcb_connection_t * dpy, xcb_window_t win, xcb_atom_t atom)
+ {
+-    Atom type_ret;
+-    int format_ret;
+-    unsigned char *prop_ret;
+-    unsigned long bytes_after, num_ret;
+-
+-    type_ret = None;
+-    prop_ret = NULL;
+-    XGetWindowProperty(dpy, win, atom, 0, 0, False, AnyPropertyType,
+-                       &type_ret, &format_ret, &num_ret,
+-                       &bytes_after, &prop_ret);
+-    if (prop_ret)
+-        XFree(prop_ret);
+-
+-    return (type_ret != None) ? True : False;
++    xcb_get_property_cookie_t prop_cookie;
++    xcb_get_property_reply_t *prop_reply;
++
++    prop_cookie = xcb_get_property (dpy, False, win, atom,
++                                    XCB_GET_PROPERTY_TYPE_ANY, 0, 0);
++
++    prop_reply = xcb_get_property_reply (dpy, prop_cookie, NULL);
++
++    if (prop_reply) {
++        xcb_atom_t reply_type = prop_reply->type;
++        free (prop_reply);
++        if (reply_type != XCB_NONE)
++            return True;
++    }
++
++    return False;
+ }
+ 
+ /*
+  * Check if window is viewable
+  */
+ static Bool
+-Window_Is_Viewable(Display * dpy, Window win)
++Window_Is_Viewable(xcb_connection_t * dpy, xcb_window_t win)
+ {
+-    Bool ok;
+-    XWindowAttributes xwa;
++    Bool ok = False;
++    xcb_get_window_attributes_cookie_t attr_cookie;
++    xcb_get_window_attributes_reply_t *xwa;
+ 
+-    XGetWindowAttributes(dpy, win, &xwa);
++    attr_cookie = xcb_get_window_attributes (dpy, win);
++    xwa = xcb_get_window_attributes_reply (dpy, attr_cookie, NULL);
+ 
+-    ok = (xwa.class == InputOutput) && (xwa.map_state == IsViewable);
++    if (xwa) {
++        ok = (xwa->_class == XCB_WINDOW_CLASS_INPUT_OUTPUT) &&
++            (xwa->map_state == XCB_MAP_STATE_VIEWABLE);
++        free (xwa);
++    }
+ 
+     return ok;
+ }
+@@ -70,24 +82,32 @@ Window_Is_Viewable(Display * dpy, Window win)
+  * Children are searched in top-down stacking order.
+  * The first matching window is returned, None if no match is found.
+  */
+-static Window
+-Find_Client_In_Children(Display * dpy, Window win)
++static xcb_window_t
++Find_Client_In_Children(xcb_connection_t * dpy, xcb_window_t win)
+ {
+-    Window root, parent;
+-    Window *children;
++    xcb_query_tree_cookie_t qt_cookie;
++    xcb_query_tree_reply_t *tree;
++    xcb_window_t *children;
+     unsigned int n_children;
+     int i;
+ 
+-    if (!XQueryTree(dpy, win, &root, &parent, &children, &n_children))
+-        return None;
+-    if (!children)
+-        return None;
++    qt_cookie = xcb_query_tree (dpy, win);
++    tree = xcb_query_tree_reply (dpy, qt_cookie, NULL);
++    if (!tree)
++        return XCB_WINDOW_NONE;
++    n_children = xcb_query_tree_children_length (tree);
++    if (!n_children) {
++        free (tree);
++        return XCB_WINDOW_NONE;
++    }
++    children = xcb_query_tree_children (tree);
+ 
+     /* Check each child for WM_STATE and other validity */
+-    win = None;
++    win = XCB_WINDOW_NONE;
+     for (i = (int) n_children - 1; i >= 0; i--) {
+         if (!Window_Is_Viewable(dpy, children[i])) {
+-            children[i] = None; /* Don't bother descending into this one */
++            /* Don't bother descending into this one */
++            children[i] = XCB_WINDOW_NONE;
+             continue;
+         }
+         if (!Window_Has_Property(dpy, children[i], atom_wm_state))
+@@ -100,15 +120,15 @@ Find_Client_In_Children(Display * dpy, Window win)
+ 
+     /* No children matched, now descend into each child */
+     for (i = (int) n_children - 1; i >= 0; i--) {
+-        if (children[i] == None)
++        if (children[i] == XCB_WINDOW_NONE)
+             continue;
+         win = Find_Client_In_Children(dpy, children[i]);
+-        if (win != None)
++        if (win != XCB_WINDOW_NONE)
+             break;
+     }
+ 
+   done:
+-    XFree(children);
++    free (tree); /* includes children */
+ 
+     return win;
+ }
+@@ -116,49 +136,68 @@ Find_Client_In_Children(Display * dpy, Window win)
+ /*
+  * Find virtual roots (_NET_VIRTUAL_ROOTS)
+  */
+-static unsigned long *
+-Find_Roots(Display * dpy, Window root, unsigned int *num)
++static xcb_window_t *
++Find_Roots(xcb_connection_t * dpy, xcb_window_t root, unsigned int *num)
+ {
+-    Atom type_ret;
+-    int format_ret;
+-    unsigned char *prop_ret;
+-    unsigned long bytes_after, num_ret;
+-    Atom atom;
++    xcb_atom_t atom = XCB_ATOM_NONE;
++    xcb_intern_atom_cookie_t atom_cookie;
++    xcb_intern_atom_reply_t *atom_reply;
++
++    xcb_get_property_cookie_t prop_cookie;
++    xcb_get_property_reply_t *prop_reply;
++
++    xcb_window_t *prop_ret = NULL;
+ 
+     *num = 0;
+-    atom = XInternAtom(dpy, "_NET_VIRTUAL_ROOTS", False);
++
++    atom_cookie = xcb_intern_atom (dpy, False, strlen("_NET_VIRTUAL_ROOTS"),
++                                   "_NET_VIRTUAL_ROOTS");
++    atom_reply = xcb_intern_atom_reply (dpy, atom_cookie, NULL);
++    if (atom_reply) {
++        atom = atom_reply->atom;
++        free (atom_reply);
++    }
+     if (!atom)
+         return NULL;
+ 
+-    type_ret = None;
+-    prop_ret = NULL;
+-    if (XGetWindowProperty(dpy, root, atom, 0, 0x7fffffff, False,
+-                           XA_WINDOW, &type_ret, &format_ret, &num_ret,
+-                           &bytes_after, &prop_ret) != Success)
++    prop_cookie = xcb_get_property (dpy, False, root, atom, XCB_ATOM_WINDOW,
++                                    0, 0x7fffffff);
++    prop_reply = xcb_get_property_reply (dpy, prop_cookie, NULL);
++    if (!prop_reply)
+         return NULL;
+ 
+-    if (prop_ret && type_ret == XA_WINDOW && format_ret == 32) {
+-        *num = num_ret;
+-        return ((unsigned long *) prop_ret);
++    if ((prop_reply->value_len > 0) && (prop_reply->type == XCB_ATOM_WINDOW)
++        && (prop_reply->format == 32)) {
++        int length = xcb_get_property_value_length (prop_reply);
++        prop_ret = malloc(length);
++        if (prop_ret) {
++            memcpy (prop_ret, xcb_get_property_value(prop_reply), length);
++            *num = prop_reply->value_len;
++        }
+     }
+-    if (prop_ret)
+-        XFree(prop_ret);
++    free (prop_reply);
+ 
+-    return NULL;
++    return prop_ret;
+ }
+ 
+ /*
+  * Find child window at pointer location
+  */
+-static Window
+-Find_Child_At_Pointer(Display * dpy, Window win)
++static xcb_window_t
++Find_Child_At_Pointer(xcb_connection_t * dpy, xcb_window_t win)
+ {
+-    Window root_return, child_return;
+-    int dummyi;
+-    unsigned int dummyu;
++    xcb_window_t child_return = XCB_WINDOW_NONE;
++
++    xcb_query_pointer_cookie_t qp_cookie;
++    xcb_query_pointer_reply_t *qp_reply;
+ 
+-    XQueryPointer(dpy, win, &root_return, &child_return,
+-                  &dummyi, &dummyi, &dummyi, &dummyi, &dummyu);
++    qp_cookie = xcb_query_pointer (dpy, win);
++    qp_reply = xcb_query_pointer_reply (dpy, qp_cookie, NULL);
++
++    if (qp_reply) {
++        child_return = qp_reply->child;
++        free (qp_reply);
++    }
+ 
+     return child_return;
+ }
+@@ -175,12 +214,12 @@ Find_Child_At_Pointer(Display * dpy, Window win)
+  * This will of course work only if the virtual roots are children of the real
+  * root.
+  */
+-Window
+-Find_Client(Display * dpy, Window root, Window subwin)
++xcb_window_t
++Find_Client(xcb_connection_t * dpy, xcb_window_t root, xcb_window_t subwin)
+ {
+-    unsigned long *roots;
++    xcb_window_t *roots;
+     unsigned int i, n_roots;
+-    Window win;
++    xcb_window_t win;
+ 
+     /* Check if subwin is a virtual root */
+     roots = Find_Roots(dpy, root, &n_roots);
+@@ -188,16 +227,24 @@ Find_Client(Display * dpy, Window root, Window subwin)
+         if (subwin != roots[i])
+             continue;
+         win = Find_Child_At_Pointer(dpy, subwin);
+-        if (win == None)
++        if (win == XCB_WINDOW_NONE)
+             return subwin;      /* No child - Return virtual root. */
+         subwin = win;
+         break;
+     }
+-    if (roots)
+-        XFree(roots);
++    free (roots);
+ 
+-    if (atom_wm_state == None) {
+-        atom_wm_state = XInternAtom(dpy, "WM_STATE", False);
++    if (atom_wm_state == XCB_ATOM_NONE) {
++        xcb_intern_atom_cookie_t atom_cookie;
++        xcb_intern_atom_reply_t *atom_reply;
++
++        atom_cookie = xcb_intern_atom (dpy, False,
++                                       strlen("WM_STATE"), "WM_STATE");
++        atom_reply = xcb_intern_atom_reply (dpy, atom_cookie, NULL);
++        if (atom_reply) {
++            atom_wm_state = atom_reply->atom;
++            free (atom_reply);
++        }
+         if (!atom_wm_state)
+             return subwin;
+     }
+@@ -208,7 +255,7 @@ Find_Client(Display * dpy, Window root, Window subwin)
+ 
+     /* Attempt to find a client window in subwin's children */
+     win = Find_Client_In_Children(dpy, subwin);
+-    if (win != None)
++    if (win != XCB_WINDOW_NONE)
+         return win;             /* Found a client */
+ 
+     /* Did not find a client */
+diff --git a/clientwin.h b/clientwin.h
+index 9fc59b5..05aa202 100644
+--- a/clientwin.h
++++ b/clientwin.h
+@@ -22,8 +22,10 @@
+ #ifndef _CLIENTWIN_H_
+ #define _CLIENTWIN_H_
+ 
+-#include <X11/Xlib.h>
++#include <xcb/xcb.h>
++#include <xcb/xproto.h>
+ 
+-extern Window Find_Client(Display * dpy, Window root, Window target_win);
++extern xcb_window_t Find_Client(xcb_connection_t * dpy, xcb_window_t root,
++				xcb_window_t target_win);
+ 
+ #endif
+diff --git a/configure.ac b/configure.ac
+index 7ef640a..3337c6c 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -41,8 +41,10 @@ XORG_DEFAULT_OPTIONS
+ AC_CHECK_FUNCS([strlcat])
+ 
+ # Checks for pkg-config packages
+-PKG_CHECK_MODULES(XWININFO, xext x11 [xproto >= 7.0.17])
+-AC_SUBST(XWININFO_CFLAGS)
+-AC_SUBST(XWININFO_LIBS)
++PKG_CHECK_MODULES(XWININFO, [xcb >= 1.6] xcb-icccm xcb-shape)
++# Even when using xcb, xproto is still required for Xfuncproto.h
++# and libX11 headers for cursorfont.h
++PKG_CHECK_MODULES(XLIB, x11 [xproto >= 7.0.17])
++XWININFO_CFLAGS="${XWININFO_CFLAGS} ${XLIB_CFLAGS}"
+ 
+ AC_OUTPUT([Makefile])
+diff --git a/dsimple.c b/dsimple.c
+index 51df01f..d1accf7 100644
+--- a/dsimple.c
++++ b/dsimple.c
+@@ -1,4 +1,26 @@
+ /*
++ * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++/*
+ 
+ Copyright 1993, 1998  The Open Group
+ 
+@@ -26,19 +48,14 @@ from The Open Group.
+ 
+ */
+ 
+-#include <X11/Xos.h>
+-#include <X11/Xlib.h>
+-#include <X11/Xutil.h>
++#include <xcb/xcb.h>
++#include <xcb/xproto.h>
++#include <xcb/xcb_icccm.h>
+ #include <X11/cursorfont.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdarg.h>
+-/*
+- * Other_stuff.h: Definitions of routines in other_stuff.
+- *
+- * Written by Mark Lillibridge.   Last updated 7/1/87
+- */
+-
++#include <string.h>
+ #include "clientwin.h"
+ #include "dsimple.h"
+ 
+@@ -46,72 +63,33 @@ from The Open Group.
+  * Just_display: A group of routines designed to make the writing of simple
+  *               X11 applications which open a display but do not open
+  *               any windows much faster and easier.  Unless a routine says
+- *               otherwise, it may be assumed to require program_name, dpy,
+- *               and screen already defined on entry.
++ *               otherwise, it may be assumed to require program_name
++ *               to be already defined on entry.
+  *
+  * Written by Mark Lillibridge.   Last updated 7/1/87
+  */
+ 
+ 
+-/* This stuff is defined in the calling program by just_display.h */
++/* This stuff is defined in the calling program by dsimple.h */
+ char    *program_name = "unknown_program";
+-Display *dpy = NULL;
+-int      screen = 0;
+-
+ 
+ /*
+- * Get_Display_Name (argc, argv) Look for -display, -d, or host:dpy (obselete)
+- * If found, remove it from command line.  Don't go past a lone -.
++ * Get_Display_Name (argc, argv) - return string representing display name
++ * that would be used given the specified argument (i.e. if it's NULL, check
++ * getenv("DISPLAY") - always returns a non-NULL pointer, though it may be
++ * an unwritable constant, so is safe to printf() on platforms that crash
++ * on NULL printf arguments.
+  */
+-char *Get_Display_Name (
+-    int *pargc,  /* MODIFIED */
+-    char **argv) /* MODIFIED */
++const char *Get_Display_Name (const char *display_name)
+ {
+-    int argc = *pargc;
+-    char **pargv = argv+1;
+-    char *displayname = NULL;
+-    int i;
+-
+-    for (i = 1; i < argc; i++) {
+-	char *arg = argv[i];
+-
+-	if (!strcmp (arg, "-display") || !strcmp (arg, "-d")) {
+-	    if (++i >= argc) usage ();
++    const char *name = display_name;
+ 
+-	    displayname = argv[i];
+-	    *pargc -= 2;
+-	    continue;
+-	}
+-	if (!strcmp (arg,"-")) {
+-	    while (i<argc)
+-		*pargv++ = argv[i++];
+-	    break;
+-	}
+-	*pargv++ = arg;
++    if (!name) {
++	name = getenv ("DISPLAY");
++	if (!name)
++	    name = "";
+     }
+-
+-    *pargv = NULL;
+-    return (displayname);
+-}
+-
+-
+-
+-/*
+- * Open_Display: Routine to open a display with correct error handling.
+- *               Does not require dpy or screen defined on entry.
+- */
+-Display *Open_Display (char *display_name)
+-{
+-	Display *d;
+-
+-	d = XOpenDisplay (display_name);
+-	if (d == NULL) {
+-	    fprintf (stderr, "%s:  unable to open display '%s'\n",
+-		     program_name, XDisplayName (display_name));
+-	    exit (1);
+-	}
+-
+-	return (d);
++    return (name);
+ }
+ 
+ 
+@@ -120,154 +98,115 @@ Display *Open_Display (char *display_name)
+  *                           it calls Get_Display_Name) and then stores a
+  *                           pointer to it in dpy.  The default screen
+  *                           for this display is then stored in screen.
+- *                           Does not require dpy or screen defined.
+  */
+ void Setup_Display_And_Screen (
+-    int *argc,      /* MODIFIED */
+-    char **argv)    /* MODIFIED */
++    const char *display_name,
++    xcb_connection_t **dpy,	/* MODIFIED */
++    xcb_screen_t **screen)	/* MODIFIED */
+ {
+-    char *displayname = NULL;
++    int screen_number, i;
+ 
+-    displayname = Get_Display_Name (argc, argv);
+-    dpy = Open_Display (displayname);
+-    screen = XDefaultScreen (dpy);
+-}
++    /* Open Display */
++    *dpy = xcb_connect (display_name, &screen_number);
++    if (xcb_connection_has_error (*dpy)) {
++	Fatal_Error ("unable to open display \"%s\"",
++		     Get_Display_Name(display_name) );
++    }
+ 
+-/*
+- * Close_Display: Close display
+- */
+-void Close_Display (void)
+-{
+-    if (dpy == NULL)
+-      return;
++    if (screen) {
++	/* find our screen */
++	const xcb_setup_t *setup = xcb_get_setup(*dpy);
++	xcb_screen_iterator_t screen_iter = xcb_setup_roots_iterator(setup);
+ 
+-    XCloseDisplay (dpy);
+-    dpy = NULL;
++	for (i = 0; i < screen_number; i++)
++	    xcb_screen_next(&screen_iter);
++	*screen = screen_iter.data;
++    }
+ }
+ 
+-
+ /*
+- * Select_Window_Args: a rountine to provide a common interface for
+- *                     applications that need to allow the user to select one
+- *                     window on the screen for special consideration.
+- *                     This routine implements the following command line
+- *                     arguments:
+- *
+- *                       -root            Selects the root window.
+- *                       -id <id>         Selects window with id <id>. <id> may
+- *                                        be either in decimal or hex.
+- *                       -name <name>     Selects the window with name <name>.
+- *
+- *                     Call as Select_Window_Args(&argc, argv) in main before
+- *                     parsing any of your program's command line arguments.
+- *                     Select_Window_Args will remove its arguments so that
+- *                     your program does not have to worry about them.
+- *                     The window returned is the window selected or 0 if
+- *                     none of the above arguments was present.  If 0 is
+- *                     returned, Select_Window should probably be called after
+- *                     all command line arguments, and other setup is done.
+- *                     For examples of usage, see xwininfo, xwd, or xprop.
++ * xcb equivalent of XCreateFontCursor
+  */
+-Window Select_Window_Args (
+-    int *rargc,
+-    char **argv)
+-#define ARGC (*rargc)
++static xcb_cursor_t
++Create_Font_Cursor (xcb_connection_t *dpy, uint16_t glyph)
+ {
+-    int nargc = 1;
+-    int argc;
+-    char **nargv;
+-    Window w = 0;
+-
+-    nargv = argv+1; argc = ARGC;
+-#define OPTION argv[0]
+-#define NXTOPTP ++argv, --argc>0
+-#define NXTOPT if (++argv, --argc==0) usage()
+-#define COPYOPT nargv++[0]=OPTION, nargc++
+-
+-    while (NXTOPTP) {
+-	if (!strcmp (OPTION, "-")) {
+-	    COPYOPT;
+-	    while (NXTOPTP)
+-		COPYOPT;
+-	    break;
+-	}
+-	if (!strcmp (OPTION, "-root")) {
+-	    w = RootWindow (dpy, screen);
+-	    continue;
+-	}
+-	if (!strcmp (OPTION, "-name")) {
+-	    NXTOPT;
+-	    w = Window_With_Name (dpy, RootWindow (dpy, screen), OPTION);
+-	    if (!w)
+-		Fatal_Error ("No window with name %s exists!", OPTION);
+-	    continue;
+-	}
+-	if (!strcmp (OPTION, "-id")) {
+-	    NXTOPT;
+-	    w = 0;
+-	    sscanf (OPTION, "0x%lx", &w);
+-	    if (!w)
+-		sscanf (OPTION, "%lu", &w);
+-	    if (!w)
+-		Fatal_Error ("Invalid window id format: %s.", OPTION);
+-	    continue;
+-	}
+-	COPYOPT;
+-    }
+-    ARGC = nargc;
++    static xcb_font_t cursor_font;
++    xcb_cursor_t cursor;
+ 
+-    return (w);
+-}
++    if (!cursor_font) {
++	cursor_font = xcb_generate_id (dpy);
++	xcb_open_font (dpy, cursor_font, strlen ("cursor"), "cursor");
++    }
+ 
+-/*
+- * Other_stuff: A group of routines which do common X11 tasks.
+- *
+- * Written by Mark Lillibridge.   Last updated 7/1/87
+- */
++    cursor = xcb_generate_id (dpy);
++    xcb_create_glyph_cursor (dpy, cursor, cursor_font, cursor_font,
++			     glyph, glyph + 1,
++                             0, 0, 0, 0xffff, 0xffff, 0xffff);  /* rgb, rgb */
+ 
++    return cursor;
++}
+ 
+ /*
+  * Routine to let user select a window using the mouse
+  */
+ 
+-Window Select_Window (Display *dpy, int descend)
++xcb_window_t Select_Window(xcb_connection_t *dpy,
++			   const xcb_screen_t *screen,
++			   int descend)
+ {
+-    int status;
+-    Cursor cursor;
+-    XEvent event;
+-    Window target_win = None, root = RootWindow (dpy,screen);
++    xcb_cursor_t cursor;
++    xcb_generic_event_t *event;
++    xcb_window_t target_win = XCB_WINDOW_NONE;
++    xcb_window_t root = screen->root;
+     int buttons = 0;
++    xcb_generic_error_t *err;
++    xcb_grab_pointer_cookie_t grab_cookie;
++    xcb_grab_pointer_reply_t *grab_reply;
+ 
+     /* Make the target cursor */
+-    cursor = XCreateFontCursor (dpy, XC_crosshair);
++    cursor = Create_Font_Cursor (dpy, XC_crosshair);
+ 
+     /* Grab the pointer using target cursor, letting it room all over */
+-    status = XGrabPointer (dpy, root, False,
+-			   ButtonPressMask|ButtonReleaseMask, GrabModeSync,
+-			   GrabModeAsync, root, cursor, CurrentTime);
+-    if (status != GrabSuccess) Fatal_Error ("Can't grab the mouse.");
++    grab_cookie = xcb_grab_pointer
++	(dpy, False, root,
++	 XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE,
++	 XCB_GRAB_MODE_SYNC, XCB_GRAB_MODE_ASYNC,
++	 root, cursor, XCB_TIME_CURRENT_TIME);
++    grab_reply = xcb_grab_pointer_reply (dpy, grab_cookie, &err);
++    if (grab_reply->status != XCB_GRAB_STATUS_SUCCESS)
++	Fatal_Error ("Can't grab the mouse.");
+ 
+     /* Let the user select a window... */
+-    while ((target_win == None) || (buttons != 0)) {
++    while ((target_win == XCB_WINDOW_NONE) || (buttons != 0)) {
+ 	/* allow one more event */
+-	XAllowEvents (dpy, SyncPointer, CurrentTime);
+-	XWindowEvent (dpy, root, ButtonPressMask|ButtonReleaseMask, &event);
+-	switch (event.type) {
+-	case ButtonPress:
+-	    if (target_win == None) {
+-		target_win = event.xbutton.subwindow; /* window selected */
+-		if (target_win == None) target_win = root;
++	xcb_allow_events (dpy, XCB_ALLOW_SYNC_POINTER, XCB_TIME_CURRENT_TIME);
++	xcb_flush (dpy);
++	event = xcb_wait_for_event (dpy);
++	switch (event->response_type & 0x7f) {
++	case XCB_BUTTON_PRESS:
++	{
++	    xcb_button_press_event_t *bp = (xcb_button_press_event_t *)event;
++
++	    if (target_win == XCB_WINDOW_NONE) {
++		target_win = bp->child; /* window selected */
++		if (target_win == XCB_WINDOW_NONE)
++		    target_win = root;
+ 	    }
+ 	    buttons++;
+ 	    break;
+-	case ButtonRelease:
++	}
++	case XCB_BUTTON_RELEASE:
+ 	    if (buttons > 0) /* there may have been some down before we started */
+ 		buttons--;
+ 	    break;
++	default:
++	    /* just discard all other events */
++	    break;
+ 	}
++	free (event);
+     }
+ 
+-    XUngrabPointer (dpy, CurrentTime);      /* Done with pointer */
++    xcb_ungrab_pointer (dpy, XCB_TIME_CURRENT_TIME); /* Done with pointer */
+ 
+     if (!descend || (target_win == root))
+ 	return (target_win);
+@@ -285,36 +224,104 @@ Window Select_Window (Display *dpy, int descend)
+  *                   one found will be returned.  Only top and its subwindows
+  *                   are looked at.  Normally, top should be the RootWindow.
+  */
+-Window Window_With_Name (
+-    Display *dpy,
+-    Window top,
+-    char *name)
++
++struct wininfo_cookies {
++    xcb_get_property_cookie_t get_wm_name;
++    xcb_query_tree_cookie_t query_tree;
++};
++
++static xcb_window_t
++recursive_Window_With_Name  (
++    xcb_connection_t *dpy,
++    xcb_window_t window,
++    struct wininfo_cookies *cookies,
++    const char *name)
+ {
+-    Window *children, dummy;
++    xcb_window_t *children;
+     unsigned int nchildren;
+     int i;
+-    Window w=0;
+-    char *window_name;
++    xcb_window_t w = 0;
++    xcb_generic_error_t *err;
++    xcb_get_text_property_reply_t prop;
++    xcb_query_tree_reply_t *tree;
++    struct wininfo_cookies *child_cookies;
++
++    if (xcb_get_wm_name_reply (dpy, cookies->get_wm_name, &prop, &err)) {
++	/* can't use strcmp, since prop.name is not null terminated */
++	if (strncmp (prop.name, name, prop.name_len) == 0) {
++	    w = window;
++	}
++
++	xcb_get_text_property_reply_wipe (&prop);
+ 
+-    if (XFetchName (dpy, top, &window_name) && !strcmp (window_name, name))
+-	return (top);
++	if (w)
++	{
++	    xcb_discard_reply (dpy, cookies->query_tree.sequence);
++	    return w;
++	}
++    } else if (err) {
++	if (err->response_type == 0)
++	    Print_X_Error (dpy, err);
++	return 0;
++    }
+ 
+-    if (!XQueryTree (dpy, top, &dummy, &dummy, &children, &nchildren))
+-	return (0);
++    tree = xcb_query_tree_reply (dpy, cookies->query_tree, &err);
++    if (!tree) {
++	if (err->response_type == 0)
++	    Print_X_Error (dpy, err);
++	return 0;
++    }
++
++    nchildren = xcb_query_tree_children_length (tree);
++    children = xcb_query_tree_children (tree);
++    child_cookies = calloc(nchildren, sizeof(struct wininfo_cookies));
++
++    if (child_cookies == NULL)
++	Fatal_Error("Failed to allocate memory in recursive_Window_With_Name");
++
++    for (i = 0; i < nchildren; i++) {
++	child_cookies[i].get_wm_name = xcb_get_wm_name (dpy, children[i]);
++	child_cookies[i].query_tree = xcb_query_tree (dpy, children[i]);
++    }
++    xcb_flush (dpy);
+ 
+     for (i = 0; i < nchildren; i++) {
+-	w = Window_With_Name (dpy, children[i], name);
++	w = recursive_Window_With_Name (dpy, children[i],
++					&child_cookies[i], name);
+ 	if (w)
+ 	    break;
+     }
+-    if (children) XFree ((char *)children);
++
++    if (w)
++    {
++	/* clean up remaining replies */
++	for (/* keep previous i */; i < nchildren; i++) {
++	    xcb_discard_reply (dpy, child_cookies[i].get_wm_name.sequence);
++	    xcb_discard_reply (dpy, child_cookies[i].query_tree.sequence);
++	}
++    }
++
++    free (child_cookies);
++    free (tree); /* includes storage for children[] */
+     return (w);
+ }
+ 
++xcb_window_t
++Window_With_Name (
++    xcb_connection_t *dpy,
++    xcb_window_t top,
++    const char *name)
++{
++    struct wininfo_cookies cookies;
++
++    cookies.get_wm_name = xcb_get_wm_name (dpy, top);
++    cookies.query_tree = xcb_query_tree (dpy, top);
++    return recursive_Window_With_Name(dpy, top, &cookies, name);
++}
++
+ 
+ /*
+  * Standard fatal error routine - call like printf
+- * Does not require dpy or screen defined.
+  */
+ void Fatal_Error (char *msg, ...)
+ {
+@@ -326,6 +333,127 @@ void Fatal_Error (char *msg, ...)
+     vfprintf (stderr, msg, args);
+     va_end (args);
+     fprintf (stderr, "\n");
+-    Close_Display ();
+     exit (EXIT_FAILURE);
+ }
++
++/*
++ * Print X error information like the default Xlib error handler
++ */
++void
++Print_X_Error (
++    xcb_connection_t *dpy,
++    xcb_generic_error_t *err
++    )
++{
++    char buffer[256] = "";
++
++    if ((err == NULL) || (err->response_type != 0)) /* not an error */
++	return;
++
++    /* Todo: find a more user friendly way to show request/extension info */
++    if (err->error_code >= 128)
++    {
++	fprintf (stderr, "X Extension Error:  Error code %d\n",
++		 err->error_code);
++    }
++    else
++    {
++	switch (err->error_code)
++	{
++	    case XCB_REQUEST:
++		snprintf (buffer, sizeof(buffer), ": Bad Request");
++		break;
++
++	    case XCB_VALUE:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Value: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_WINDOW:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Window: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_PIXMAP:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Pixmap: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_ATOM:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Atom: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_CURSOR:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Cursor: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_FONT:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Font: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_MATCH:
++		snprintf (buffer, sizeof(buffer), ": Bad Match");
++		break;
++
++	    case XCB_DRAWABLE:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Drawable: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_ACCESS:
++		snprintf (buffer, sizeof(buffer), ": Access Denied");
++		break;
++
++	    case XCB_ALLOC:
++		snprintf (buffer, sizeof(buffer),
++			  ": Server Memory Allocation Failure");
++		break;
++
++	    case XCB_COLORMAP:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Color: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_G_CONTEXT:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad GC: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_ID_CHOICE:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad XID: 0x%x", err->resource_id);
++		break;
++
++	    case XCB_NAME:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Name");
++		break;
++
++	    case XCB_LENGTH:
++		snprintf (buffer, sizeof(buffer),
++			  ": Bad Request Length");
++		break;
++
++	    case XCB_IMPLEMENTATION:
++		snprintf (buffer, sizeof(buffer),
++			  ": Server Implementation Failure");
++		break;
++
++	    default:
++		snprintf (buffer, sizeof(buffer), ": Unknown error");
++		break;
++	}
++	fprintf (stderr, "X Error: %d%s\n", err->error_code, buffer);
++    }
++
++    fprintf (stderr, "  Request Major code: %d\n", err->major_code);
++    if (err->major_code >= 128)
++    {
++	fprintf (stderr, "  Request Minor code: %d\n", err->minor_code);
++    }
++
++    fprintf (stderr, "  Request serial number: %d\n", err->full_sequence);
++}
+diff --git a/dsimple.h b/dsimple.h
+index b0d76a5..1a689e0 100644
+--- a/dsimple.h
++++ b/dsimple.h
+@@ -27,55 +27,33 @@ from The Open Group.
+ */
+ 
+ /*
+- * Just_display.h: This file contains the definitions needed to use the
+- *                 functions in just_display.c.  It also declares the global
+- *                 variables dpy, screen, and program_name which are needed to
+- *                 use just_display.c.
++ * dsimple.h: This file contains the definitions needed to use the
++ *            functions in dsimple.c.  It also declares the global
++ *            variable program_name which is needed to use dsimple.c.
+  *
+- * Written by Mark Lillibridge.   Last updated 7/1/87
+- *
+- * Send bugs, etc. to chariot@athena.mit.edu.
++ * Written by Mark Lillibridge for Xlib.   Last updated 7/1/87
++ * Ported to XCB over two decades later.
+  */
+ 
+ #include <X11/Xfuncproto.h>
++#include <xcb/xcb.h>
++#include <xcb/xproto.h>
+ 
+-    /* Simple helper macros */
+-#ifndef MAX
+-#define MAX(a,b) (((a)>(b))?(a):(b))
+-#endif /* MAX */
+-#ifndef MIN
+-#define MIN(a,b) (((a)<(b))?(a):(b))
+-#endif /* MIN */
++typedef enum { False = 0, True } Bool;
+ 
+     /* Global variables used by routines in dsimple.c */
+ 
+ extern char *program_name;                   /* Name of this program */
+-extern Display *dpy;                         /* The current display */
+-extern int screen;                           /* The current screen */
+-
+-#define INIT_NAME program_name=argv[0]        /* use this in main to setup
+-                                                 program_name */
+ 
+-    /* Declaritions for functions in dsimple.c */
++    /* Declarations for functions in dsimple.c */
+ 
+-char *Get_Display_Name(int *, char **);
+-Display *Open_Display(char *);
+-void Setup_Display_And_Screen(int *, char **);
+-void Close_Display(void);
+-Window Select_Window_Args(int *, char **);
+-void usage(void);
++const char *Get_Display_Name (const char *displayname);
++void Setup_Display_And_Screen (const char *displayname,
++			       xcb_connection_t **dpy, xcb_screen_t **screen);
+ 
+-#define X_USAGE "[host:display]"              /* X arguments handled by
+-						 Get_Display_Name */
+-
+-/*
+- * Other_stuff.h: Definitions of routines in other_stuff.
+- *
+- * Written by Mark Lillibridge.   Last updated 7/1/87
+- *
+- * Send bugs, etc. to chariot@athena.mit.edu.
+- */
++xcb_window_t Select_Window(xcb_connection_t *, const xcb_screen_t *, int);
++xcb_window_t Window_With_Name(xcb_connection_t *, xcb_window_t, const char *);
+ 
+-Window Select_Window(Display *, int);
+-Window Window_With_Name(Display *, Window, char *);
+ void Fatal_Error(char *, ...) _X_NORETURN _X_ATTRIBUTE_PRINTF(1, 2);
++
++void Print_X_Error (xcb_connection_t *, xcb_generic_error_t *);
+diff --git a/xwininfo.c b/xwininfo.c
+index 6b2f728..ea1de2d 100644
+--- a/xwininfo.c
++++ b/xwininfo.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright Â© 1999 Sun Microsystems, Inc.  All rights reserved.
++ * Copyright (c) 1999, 2010, Oracle and/or its affiliates. All rights reserved.
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining a
+  * copy of this software and associated documentation files (the "Software"),
+@@ -64,14 +64,16 @@ of the copyright holder.
+  */
+ 
+ #include "config.h"
+-#include <X11/Xlib.h>
+-#include <X11/Xutil.h>
+-#include <X11/Xatom.h>
+-#include <X11/Xos.h>
+-#include <X11/extensions/shape.h>
+-#include <X11/Xlocale.h>
++
++#include <xcb/xcb.h>
++#include <xcb/xproto.h>
++#include <xcb/xcb_icccm.h>
++#include <xcb/shape.h>
++
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
++#include <locale.h>
+ 
+ /* Include routines to handle parsing defaults */
+ #include "dsimple.h"
+@@ -81,29 +83,54 @@ typedef struct {
+     const char *name;
+ } binding;
+ 
+-static void scale_init (void);
++/* Information we keep track of for each window to allow prefetching/reusing */
++struct wininfo {
++    xcb_window_t			window;
++
++    /* cookies for requests we've sent */
++    xcb_get_geometry_cookie_t		geometry_cookie;
++    xcb_get_property_cookie_t		wm_name_cookie;
++    xcb_get_property_cookie_t		wm_class_cookie;
++    xcb_translate_coordinates_cookie_t	trans_coords_cookie;
++    xcb_query_tree_cookie_t		tree_cookie;
++    xcb_get_window_attributes_cookie_t	attr_cookie;
++    xcb_get_property_cookie_t		normal_hints_cookie;
++    xcb_get_property_cookie_t		hints_cookie;
++    xcb_get_property_cookie_t		zoom_cookie;
++
++    /* cached results from previous requests */
++    xcb_get_geometry_reply_t *		geometry;
++    xcb_get_window_attributes_reply_t *	win_attributes;
++    xcb_size_hints_t *			normal_hints;
++};
++
++static void scale_init (xcb_screen_t *scrn);
+ static char *nscale (int, int, int, char *, size_t);
+ static char *xscale (int);
+ static char *yscale (int);
+ static char *bscale (int);
+-static int bad_window_handler (Display *, XErrorEvent *);
+ int main (int, char **);
+ static const char *LookupL (long, const binding *);
+ static const char *Lookup (int, const binding *);
+-static void Display_Window_Id (Window, int);
+-static void Display_Stats_Info (Window);
+-static void Display_Bits_Info (Window);
++static void Display_Window_Id (struct wininfo *, Bool);
++static void Display_Stats_Info (struct wininfo *);
++static void Display_Bits_Info (struct wininfo *);
+ static void Display_Event_Mask (long);
+-static void Display_Events_Info (Window);
+-static void Display_Tree_Info (Window, int);
+-static void display_tree_info_1 (Window, int, int);
+-static void Display_Hints (XSizeHints *);
+-static void Display_Size_Hints (Window);
+-static void Display_Window_Shape (Window);
+-static void Display_WM_Info (Window);
++static void Display_Events_Info (struct wininfo *);
++static void Display_Tree_Info (struct wininfo *, int);
++static void display_tree_info_1 (struct wininfo *, int, int);
++static void Display_Hints (xcb_size_hints_t *);
++static void Display_Size_Hints (struct wininfo *);
++static void Display_Window_Shape (xcb_window_t);
++static void Display_WM_Info (struct wininfo *);
++static void wininfo_wipe (struct wininfo *);
+ 
+ static const char *window_id_format = "0x%lx";
+ 
++static xcb_connection_t *dpy;
++static xcb_screen_t *screen;
++static xcb_generic_error_t *err;
++
+ #ifndef HAVE_STRLCAT
+ static size_t strlcat (char *dst, const char *src, size_t dstsize)
+ {
+@@ -164,19 +191,18 @@ usage (void)
+  *
+  */
+ 
+-#define getdsp(var,fn) var = fn (dpy, DefaultScreen (dpy))
+ static int xp = 0, xmm = 0;
+ static int yp = 0, ymm = 0;
+ static int bp = 0, bmm = 0;
+ static int english = 0, metric = 0;
+ 
+ static void
+-scale_init (void)
++scale_init (xcb_screen_t *screen)
+ {
+-    getdsp (yp,  DisplayHeight);
+-    getdsp (ymm, DisplayHeightMM);
+-    getdsp (xp,  DisplayWidth);
+-    getdsp (xmm, DisplayWidthMM);
++    xp = screen->width_in_pixels;
++    yp = screen->height_in_pixels;
++    xmm = screen->width_in_millimeters;
++    ymm = screen->height_in_millimeters;
+     bp  = xp  + yp;
+     bmm = xmm + ymm;
+ }
+@@ -250,9 +276,6 @@ static char xbuf[BUFSIZ];
+ static char *
+ xscale (int x)
+ {
+-    if (!xp) {
+-	scale_init ();
+-    }
+     return (nscale (x, xp, xmm, xbuf, sizeof(xbuf)));
+ }
+ 
+@@ -260,9 +283,6 @@ static char ybuf[BUFSIZ];
+ static char *
+ yscale (int y)
+ {
+-    if (!yp) {
+-	scale_init ();
+-    }
+     return (nscale (y, yp, ymm, ybuf, sizeof(ybuf)));
+ }
+ 
+@@ -270,53 +290,57 @@ static char bbuf[BUFSIZ];
+ static char *
+ bscale (int b)
+ {
+-    if (!bp) {
+-	scale_init ();
+-    }
+     return (nscale (b, bp, bmm, bbuf, sizeof(bbuf)));
+ }
+ 
+ /* end of pixel to inch, metric converter */
+ 
+-/* This handler is enabled when we are checking
+-   to see if the -id the user specified is valid. */
+-
+-/* ARGSUSED */
+-static int
+-bad_window_handler (Display *disp, XErrorEvent *err)
+-{
+-    char badid[20];
+-
+-    snprintf (badid, sizeof(badid), window_id_format, err->resourceid);
+-    Fatal_Error ("No such window with id %s.", badid);
+-    exit (1);
+-    return 0;
+-}
+-
+-
+ int
+ main (int argc, char **argv)
+ {
+     register int i;
+     int tree = 0, stats = 0, bits = 0, events = 0, wm = 0, size = 0, shape = 0;
+     int frame = 0, children = 0;
+-    Window window;
++    int use_root = 0;
++    xcb_window_t window = 0;
++    char *display_name = NULL;
++    const char *window_name = NULL;
++    struct wininfo wininfo;
++    struct wininfo *w = &wininfo;
+ 
+-    INIT_NAME;
++    program_name = argv[0];
+ 
+     if (!setlocale (LC_ALL, ""))
+ 	fprintf (stderr, "%s: can not set locale properly\n", program_name);
+ 
+-    /* Open display, handle command line arguments */
+-    Setup_Display_And_Screen (&argc, argv);
+-
+-    /* Get window selected on command line, if any */
+-    window = Select_Window_Args (&argc, argv);
++    memset (w, 0, sizeof(struct wininfo));
+ 
+     /* Handle our command line arguments */
+     for (i = 1; i < argc; i++) {
+ 	if (!strcmp (argv[i], "-help"))
+ 	    usage ();
++	if (!strcmp (argv[i], "-display") || !strcmp (argv[i], "-d")) {
++	    if (++i >= argc)
++		Fatal_Error("-display requires argument");
++	    display_name = argv[i];
++	    continue;
++	}
++	if (!strcmp (argv[i], "-root")) {
++	    use_root = 1;
++	    continue;
++	}
++	if (!strcmp (argv[i], "-id")) {
++	    if (++i >= argc)
++		Fatal_Error("-id requires argument");
++	    window = strtoul(argv[i], NULL, 0);
++	    continue;
++	}
++	if (!strcmp (argv[i], "-name")) {
++	    if (++i >= argc)
++		Fatal_Error("-name requires argument");
++	    window_name = argv[i];
++	    continue;
++	}
+ 	if (!strcmp (argv[i], "-int")) {
+ 	    window_id_format = "%ld";
+ 	    continue;
+@@ -372,13 +396,26 @@ main (int argc, char **argv)
+ 	usage ();
+     }
+ 
++    Setup_Display_And_Screen (display_name, &dpy, &screen);
++
++    /* initialize scaling data */
++    scale_init(screen);
++
++    if (use_root)
++	window = screen->root;
++    else if (window_name) {
++	window = Window_With_Name (dpy, screen->root, window_name);
++	if (!window)
++	    Fatal_Error ("No window with name \"%s\" exists!", window_name);
++    }
++
+     /* If no window selected on command line, let user pick one the hard way */
+     if (!window) {
+ 	printf ("\n"
+ 		"xwininfo: Please select the window about which you\n"
+ 		"          would like information by clicking the\n"
+ 		"          mouse in that window.\n");
+-	window = Select_Window (dpy, !frame);
++	window = Select_Window (dpy, screen, !frame);
+     }
+ 
+     /*
+@@ -391,37 +428,102 @@ main (int argc, char **argv)
+      * make sure that the window is valid
+      */
+     {
+-	Window root;
+-	int x, y;
+-	unsigned width, height, bw, depth;
+-	XErrorHandler old_handler;
+-
+-	old_handler = XSetErrorHandler (bad_window_handler);
+-	XGetGeometry (dpy, window, &root, &x, &y, &width, &height, &bw, &depth);
+-	XSync (dpy, False);
+-	(void) XSetErrorHandler (old_handler);
++	xcb_get_geometry_cookie_t gg_cookie =
++	    xcb_get_geometry (dpy, window);
++
++	w->geometry = xcb_get_geometry_reply(dpy, gg_cookie, &err);
++
++	if (!w->geometry) {
++	    char badid[20];
++
++	    if (err)
++		Print_X_Error (dpy, err);
++
++	    snprintf (badid, sizeof(badid), window_id_format, window);
++	    Fatal_Error ("No such window with id %s.", badid);
++	}
+     }
+ 
++    /* Send requests to prefetch data we'll need */
++    w->window = window;
++    w->wm_name_cookie = xcb_get_wm_name (dpy, window);
++    if (children || tree)
++	w->tree_cookie = xcb_query_tree (dpy, window);
++    if (stats) {
++	w->trans_coords_cookie =
++	    xcb_translate_coordinates (dpy, window, w->geometry->root,
++				       -(w->geometry->border_width),
++				       -(w->geometry->border_width));
++    }
++    if (stats || bits || events)
++	w->attr_cookie = xcb_get_window_attributes (dpy, window);
++    if (stats || size)
++	w->normal_hints_cookie = xcb_get_wm_normal_hints (dpy, window);
++    if (wm)
++	w->hints_cookie = xcb_get_wm_hints(dpy, window);
++    if (size)
++	w->zoom_cookie = xcb_get_wm_size_hints (dpy, window,
++						XCB_ATOM_WM_ZOOM_HINTS);
++    xcb_flush (dpy);
++
+     printf ("\nxwininfo: Window id: ");
+-    Display_Window_Id (window, True);
++    Display_Window_Id (w, True);
+     if (children || tree)
+-	Display_Tree_Info (window, tree);
++	Display_Tree_Info (w, tree);
+     if (stats)
+-	Display_Stats_Info (window);
++	Display_Stats_Info (w);
+     if (bits)
+-	Display_Bits_Info (window);
++	Display_Bits_Info (w);
+     if (events)
+-	Display_Events_Info (window);
++	Display_Events_Info (w);
+     if (wm)
+-	Display_WM_Info (window);
++	Display_WM_Info (w);
+     if (size)
+-	Display_Size_Hints (window);
++	Display_Size_Hints (w);
+     if (shape)
+ 	Display_Window_Shape (window);
+     printf ("\n");
++
++    wininfo_wipe (w);
++    xcb_disconnect (dpy);
+     exit (0);
+ }
+ 
++/* Ensure win_attributes field is filled in */
++static xcb_get_window_attributes_reply_t *
++fetch_win_attributes (struct wininfo *w)
++{
++    if (!w->win_attributes) {
++	w->win_attributes =
++	    xcb_get_window_attributes_reply (dpy, w->attr_cookie, &err);
++
++	if (!w->win_attributes) {
++	    Print_X_Error (dpy, err);
++	    Fatal_Error ("Can't get window attributes.");
++	}
++    }
++    return w->win_attributes;
++}
++
++/* Ensure normal_hints field is filled in */
++static xcb_size_hints_t *
++fetch_normal_hints (struct wininfo *w, xcb_size_hints_t *hints_return)
++{
++    xcb_size_hints_t hints;
++
++    if (!w->normal_hints) {
++	if (xcb_get_wm_normal_hints_reply (dpy, w->normal_hints_cookie,
++					   &hints, NULL)) {
++	    w->normal_hints = malloc (sizeof(xcb_size_hints_t));
++	    if (w->normal_hints)
++		memcpy(w->normal_hints, &hints, sizeof(xcb_size_hints_t));
++	}
++    }
++    if (hints_return && w->normal_hints)
++	memcpy(hints_return, w->normal_hints, sizeof(xcb_size_hints_t));
++    return w->normal_hints;
++}
++
+ 
+ /*
+  * Lookup: lookup a code in a table.
+@@ -458,41 +560,37 @@ Lookup (int code, const binding *table)
+ 
+ /*
+  * Routine to display a window id in dec/hex with name if window has one
++ *
++ * Requires wininfo members initialized: window, wm_name_cookie
+  */
+ 
+ static void
+-Display_Window_Id (Window window, Bool newline_wanted)
++Display_Window_Id (struct wininfo *w, Bool newline_wanted)
+ {
+-    XTextProperty tp;
++    xcb_get_text_property_reply_t prop;
++    uint8_t got_reply;
+ 
+-    printf (window_id_format, window);         /* print id # in hex/dec */
++    printf (window_id_format, w->window);      /* print id # in hex/dec */
+ 
+-    if (!window) {
++    if (!w->window) {
+ 	printf (" (none)");
+     } else {
+-	if (window == RootWindow (dpy, screen)) {
++	if (w->window == screen->root) {
+ 	    printf (" (the root window)");
+ 	}
+-	if (!XGetWMName (dpy, window, &tp)) { /* Get window name if any */
++	/* Get window name if any */
++	got_reply = xcb_get_wm_name_reply (dpy, w->wm_name_cookie,
++					   &prop, NULL);
++	if (!got_reply || prop.name_len == 0) {
+ 	    printf (" (has no name)");
+-        } else if (tp.nitems > 0) {
++        } else {
+             printf (" \"");
+-            {
+-                int count = 0, i, ret;
+-                char **list = NULL;
+-                ret = XmbTextPropertyToTextList (dpy, &tp, &list, &count);
+-                if ((ret == Success || ret > 0) && list != NULL){
+-                    for (i = 0; i < count; i++)
+-                        printf ("%s", list[i]);
+-                    XFreeStringList (list);
+-                } else {
+-                    printf ("%s", tp.value);
+-                }
+-            }
++	    /* XXX: need to handle encoding */
++	    printf ("%.*s", prop.name_len, prop.name);
+             printf ("\"");
+ 	}
+-	else
+-	    printf (" (has no name)");
++	if (got_reply)
++	    xcb_get_text_property_reply_wipe (&prop);
+     }
+ 
+     if (newline_wanted)
+@@ -506,211 +604,244 @@ Display_Window_Id (Window window, Bool newline_wanted)
+  * Display Stats on window
+  */
+ static const binding _window_classes[] = {
+-	{ InputOutput, "InputOutput" },
+-	{ InputOnly, "InputOnly" },
++	{ XCB_WINDOW_CLASS_INPUT_OUTPUT, "InputOutput" },
++	{ XCB_WINDOW_CLASS_INPUT_ONLY, "InputOnly" },
+         { 0, NULL } };
+ 
+ static const binding _map_states[] = {
+-	{ IsUnmapped, "IsUnMapped" },
+-	{ IsUnviewable, "IsUnviewable" },
+-	{ IsViewable, "IsViewable" },
++	{ XCB_MAP_STATE_UNMAPPED,	"IsUnMapped" },
++	{ XCB_MAP_STATE_UNVIEWABLE,	"IsUnviewable" },
++	{ XCB_MAP_STATE_VIEWABLE,	"IsViewable" },
+ 	{ 0, NULL } };
+ 
+ static const binding _backing_store_states[] = {
+-	{ NotUseful, "NotUseful" },
+-	{ WhenMapped, "WhenMapped" },
+-	{ Always, "Always" },
++	{ XCB_BACKING_STORE_NOT_USEFUL, "NotUseful" },
++	{ XCB_BACKING_STORE_WHEN_MAPPED,"WhenMapped" },
++	{ XCB_BACKING_STORE_ALWAYS,	"Always" },
+ 	{ 0, NULL } };
+ 
+ static const binding _bit_gravity_states[] = {
+-	{ ForgetGravity, "ForgetGravity" },
+-	{ NorthWestGravity, "NorthWestGravity" },
+-	{ NorthGravity, "NorthGravity" },
+-	{ NorthEastGravity, "NorthEastGravity" },
+-	{ WestGravity, "WestGravity" },
+-	{ CenterGravity, "CenterGravity" },
+-	{ EastGravity, "EastGravity" },
+-	{ SouthWestGravity, "SouthWestGravity" },
+-	{ SouthGravity, "SouthGravity" },
+-	{ SouthEastGravity, "SouthEastGravity" },
+-	{ StaticGravity, "StaticGravity" },
++	{ XCB_GRAVITY_BIT_FORGET,	"ForgetGravity" },
++	{ XCB_GRAVITY_NORTH_WEST,	"NorthWestGravity" },
++	{ XCB_GRAVITY_NORTH,		"NorthGravity" },
++	{ XCB_GRAVITY_NORTH_EAST,	"NorthEastGravity" },
++	{ XCB_GRAVITY_WEST,		"WestGravity" },
++	{ XCB_GRAVITY_CENTER,		"CenterGravity" },
++	{ XCB_GRAVITY_EAST,		"EastGravity" },
++	{ XCB_GRAVITY_SOUTH_WEST,	"SouthWestGravity" },
++	{ XCB_GRAVITY_SOUTH,		"SouthGravity" },
++	{ XCB_GRAVITY_SOUTH_EAST,	"SouthEastGravity" },
++	{ XCB_GRAVITY_STATIC,		"StaticGravity" },
+ 	{ 0, NULL }};
+ 
+ static const binding _window_gravity_states[] = {
+-	{ UnmapGravity, "UnmapGravity" },
+-	{ NorthWestGravity, "NorthWestGravity" },
+-	{ NorthGravity, "NorthGravity" },
+-	{ NorthEastGravity, "NorthEastGravity" },
+-	{ WestGravity, "WestGravity" },
+-	{ CenterGravity, "CenterGravity" },
+-	{ EastGravity, "EastGravity" },
+-	{ SouthWestGravity, "SouthWestGravity" },
+-	{ SouthGravity, "SouthGravity" },
+-	{ SouthEastGravity, "SouthEastGravity" },
+-	{ StaticGravity, "StaticGravity" },
++	{ XCB_GRAVITY_WIN_UNMAP,	"UnmapGravity" },
++	{ XCB_GRAVITY_NORTH_WEST,	"NorthWestGravity" },
++	{ XCB_GRAVITY_NORTH,		"NorthGravity" },
++	{ XCB_GRAVITY_NORTH_EAST,	"NorthEastGravity" },
++	{ XCB_GRAVITY_WEST,		"WestGravity" },
++	{ XCB_GRAVITY_CENTER,		"CenterGravity" },
++	{ XCB_GRAVITY_EAST,		"EastGravity" },
++	{ XCB_GRAVITY_SOUTH_WEST,	"SouthWestGravity" },
++	{ XCB_GRAVITY_SOUTH,		"SouthGravity" },
++	{ XCB_GRAVITY_SOUTH_EAST,	"SouthEastGravity" },
++	{ XCB_GRAVITY_STATIC,		"StaticGravity" },
+ 	{ 0, NULL }};
+ 
+ static const binding _visual_classes[] = {
+-	{ StaticGray, "StaticGray" },
+-	{ GrayScale, "GrayScale" },
+-	{ StaticColor, "StaticColor" },
+-	{ PseudoColor, "PseudoColor" },
+-	{ TrueColor, "TrueColor" },
+-	{ DirectColor, "DirectColor" },
++	{ XCB_VISUAL_CLASS_STATIC_GRAY,	"StaticGray" },
++	{ XCB_VISUAL_CLASS_GRAY_SCALE,	"GrayScale" },
++	{ XCB_VISUAL_CLASS_STATIC_COLOR,"StaticColor" },
++	{ XCB_VISUAL_CLASS_PSEUDO_COLOR,"PseudoColor" },
++	{ XCB_VISUAL_CLASS_TRUE_COLOR,	"TrueColor" },
++	{ XCB_VISUAL_CLASS_DIRECT_COLOR,"DirectColor" },
+ 	{ 0, NULL }};
+ 
++/*
++ * Requires wininfo members initialized:
++ *   window, geometry, attr_cookie, trans_coords_cookie, normal_hints_cookie
++ */
+ static void
+-Display_Stats_Info (Window window)
++Display_Stats_Info (struct wininfo *w)
+ {
+-    XWindowAttributes win_attributes;
+-    XVisualInfo vistemplate, *vinfo;
+-    XSizeHints hints;
+-    int dw = DisplayWidth (dpy, screen), dh = DisplayHeight (dpy, screen);
++    xcb_translate_coordinates_reply_t *trans_coords;
++    xcb_get_window_attributes_reply_t *win_attributes;
++    xcb_size_hints_t hints;
++
++    int dw = screen->width_in_pixels, dh = screen->height_in_pixels;
+     int rx, ry, xright, ybelow;
+     int showright = 0, showbelow = 0;
+-    Status status;
+-    Window wmframe;
+-    int junk;
+-    long longjunk;
+-    Window junkwin;
+-
+-    if (!XGetWindowAttributes (dpy, window, &win_attributes))
+-	Fatal_Error ("Can't get window attributes.");
+-    vistemplate.visualid = XVisualIDFromVisual (win_attributes.visual);
+-    vinfo = XGetVisualInfo (dpy, VisualIDMask, &vistemplate, &junk);
+-
+-    (void) XTranslateCoordinates (dpy, window, win_attributes.root,
+-				  -win_attributes.border_width,
+-				  -win_attributes.border_width,
+-				  &rx, &ry, &junkwin);
+-
+-    xright = (dw - rx - win_attributes.border_width * 2 -
+-	      win_attributes.width);
+-    ybelow = (dh - ry - win_attributes.border_width * 2 -
+-	      win_attributes.height);
++    xcb_window_t wmframe, parent;
++
++    trans_coords =
++	xcb_translate_coordinates_reply (dpy, w->trans_coords_cookie, NULL);
++    if (!trans_coords)
++	Fatal_Error ("Can't get translated coordinates.");
++
++    rx = trans_coords->dst_x;
++    ry = trans_coords->dst_y;
++    free (trans_coords);
++
++    xright = (dw - rx - w->geometry->border_width * 2 -
++	      w->geometry->width);
++    ybelow = (dh - ry - w->geometry->border_width * 2 -
++	      w->geometry->height);
++
+ 
+     printf ("\n");
+     printf ("  Absolute upper-left X:  %s\n", xscale (rx));
+     printf ("  Absolute upper-left Y:  %s\n", yscale (ry));
+-    printf ("  Relative upper-left X:  %s\n", xscale (win_attributes.x));
+-    printf ("  Relative upper-left Y:  %s\n", yscale (win_attributes.y));
+-    printf ("  Width: %s\n", xscale (win_attributes.width));
+-    printf ("  Height: %s\n", yscale (win_attributes.height));
+-    printf ("  Depth: %d\n", win_attributes.depth);
+-    printf ("  Visual: 0x%lx\n", vinfo->visualid);
+-    printf ("  Visual Class: %s\n", Lookup (vinfo->class, _visual_classes));
+-    printf ("  Border width: %s\n", bscale (win_attributes.border_width));
++    printf ("  Relative upper-left X:  %s\n", xscale (w->geometry->x));
++    printf ("  Relative upper-left Y:  %s\n", yscale (w->geometry->y));
++    printf ("  Width: %s\n", xscale (w->geometry->width));
++    printf ("  Height: %s\n", yscale (w->geometry->height));
++    printf ("  Depth: %d\n", w->geometry->depth);
++
++    win_attributes = fetch_win_attributes (w);
++
++    printf ("  Visual: 0x%lx\n", (unsigned long) win_attributes->visual);
++    if (screen)
++    {
++	xcb_depth_iterator_t depth_iter;
++	xcb_visualtype_t  *visual_type = NULL;
++
++	depth_iter = xcb_screen_allowed_depths_iterator (screen);
++	for (; depth_iter.rem; xcb_depth_next (&depth_iter)) {
++	    xcb_visualtype_iterator_t visual_iter;
++
++	    visual_iter = xcb_depth_visuals_iterator (depth_iter.data);
++	    for (; visual_iter.rem; xcb_visualtype_next (&visual_iter)) {
++		if (screen->root_visual == visual_iter.data->visual_id) {
++		    visual_type = visual_iter.data;
++		    break;
++		}
++	    }
++	}
++	if (visual_type)
++	    printf ("  Visual Class: %s\n", Lookup (visual_type->_class,
++						    _visual_classes));
++    }
++
++    printf ("  Border width: %s\n", bscale (w->geometry->border_width));
+     printf ("  Class: %s\n",
+-	    Lookup (win_attributes.class, _window_classes));
++	    Lookup (win_attributes->_class, _window_classes));
+     printf ("  Colormap: 0x%lx (%sinstalled)\n",
+-	    win_attributes.colormap,
+-	    win_attributes.map_installed ? "" : "not ");
++	    (unsigned long) win_attributes->colormap,
++	    win_attributes->map_is_installed ? "" : "not ");
+     printf ("  Bit Gravity State: %s\n",
+-	    Lookup (win_attributes.bit_gravity, _bit_gravity_states));
++	    Lookup (win_attributes->bit_gravity, _bit_gravity_states));
+     printf ("  Window Gravity State: %s\n",
+-	    Lookup (win_attributes.win_gravity, _window_gravity_states));
++	    Lookup (win_attributes->win_gravity, _window_gravity_states));
+     printf ("  Backing Store State: %s\n",
+-	    Lookup (win_attributes.backing_store, _backing_store_states));
++	    Lookup (win_attributes->backing_store, _backing_store_states));
+     printf ("  Save Under State: %s\n",
+-	    win_attributes.save_under ? "yes" : "no");
++	    win_attributes->save_under ? "yes" : "no");
+     printf ("  Map State: %s\n",
+-	    Lookup (win_attributes.map_state, _map_states));
++	    Lookup (win_attributes->map_state, _map_states));
+     printf ("  Override Redirect State: %s\n",
+-	    win_attributes.override_redirect ? "yes" : "no");
++	    win_attributes->override_redirect ? "yes" : "no");
+     printf ("  Corners:  +%d+%d  -%d+%d  -%d-%d  +%d-%d\n",
+ 	    rx, ry, xright, ry, xright, ybelow, rx, ybelow);
+ 
+-    XFree (vinfo);
+-
+     /*
+      * compute geometry string that would recreate window
+      */
+     printf ("  -geometry ");
+ 
+     /* compute size in appropriate units */
+-    status = XGetWMNormalHints (dpy, window, &hints, &longjunk);
+-    if (status  &&  hints.flags & PResizeInc  &&
+-	hints.width_inc != 0  &&  hints.height_inc != 0) {
+-	if (hints.flags & (PBaseSize|PMinSize)) {
+-	    if (hints.flags & PBaseSize) {
+-		win_attributes.width -= hints.base_width;
+-		win_attributes.height -= hints.base_height;
++    if (!fetch_normal_hints (w, &hints))
++	hints.flags = 0;
++
++    if ((hints.flags & XCB_SIZE_HINT_P_RESIZE_INC)  &&
++	(hints.width_inc != 0)  && (hints.height_inc != 0)) {
++	if (hints.flags & (XCB_SIZE_HINT_BASE_SIZE|XCB_SIZE_HINT_P_MIN_SIZE)) {
++	    if (hints.flags & XCB_SIZE_HINT_BASE_SIZE) {
++		w->geometry->width -= hints.base_width;
++		w->geometry->height -= hints.base_height;
+ 	    } else {
+ 		/* ICCCM says MinSize is default for BaseSize */
+-		win_attributes.width -= hints.min_width;
+-		win_attributes.height -= hints.min_height;
++		w->geometry->width -= hints.min_width;
++		w->geometry->height -= hints.min_height;
+ 	    }
+ 	}
+-	printf ("%dx%d", win_attributes.width/hints.width_inc,
+-		win_attributes.height/hints.height_inc);
++	printf ("%dx%d", w->geometry->width/hints.width_inc,
++		w->geometry->height/hints.height_inc);
+     } else
+-	printf ("%dx%d", win_attributes.width, win_attributes.height);
++	printf ("%dx%d", w->geometry->width, w->geometry->height);
+ 
+-    if (!(hints.flags&PWinGravity))
+-	hints.win_gravity = NorthWestGravity; /* per ICCCM */
++    if (!(hints.flags & XCB_SIZE_HINT_P_WIN_GRAVITY))
++	hints.win_gravity = XCB_GRAVITY_NORTH_WEST; /* per ICCCM */
+     /* find our window manager frame, if any */
+-    wmframe = window;
+-    while (True) {
+-	Window root, parent;
+-	Window *childlist;
+-	unsigned int ujunk;
+-
+-	status = XQueryTree (dpy, wmframe, &root, &parent, &childlist, &ujunk);
+-	if (parent == root || !parent || !status)
++    for (wmframe = parent = w->window; parent != 0 ; wmframe = parent) {
++	xcb_query_tree_cookie_t qt_cookie;
++	xcb_query_tree_reply_t *tree;
++
++	qt_cookie = xcb_query_tree (dpy, wmframe);
++	tree = xcb_query_tree_reply (dpy, qt_cookie, &err);
++	if (!tree) {
++	    Print_X_Error (dpy, err);
++	    Fatal_Error ("Can't query window tree.");
++	}
++	parent = tree->parent;
++	free (tree);
++	if (parent == w->geometry->root || !parent)
+ 	    break;
+-	wmframe = parent;
+-	if (status && childlist)
+-	    XFree ((char *)childlist);
+     }
+-    if (wmframe != window) {
++    if (wmframe != w->window) {
+ 	/* WM reparented, so find edges of the frame */
+ 	/* Only works for ICCCM-compliant WMs, and then only if the
+ 	   window has corner gravity.  We would need to know the original width
+ 	   of the window to correctly handle the other gravities. */
++	xcb_get_geometry_cookie_t geom_cookie;
++	xcb_get_geometry_reply_t *frame_geometry;
+ 
+-	XWindowAttributes frame_attr;
++	geom_cookie = xcb_get_geometry (dpy, wmframe);
++	frame_geometry = xcb_get_geometry_reply (dpy, geom_cookie, &err);
+ 
+-	if (!XGetWindowAttributes (dpy, wmframe, &frame_attr))
+-	    Fatal_Error ("Can't get frame attributes.");
++	if (!frame_geometry) {
++	    Print_X_Error (dpy, err);
++	    Fatal_Error ("Can't get frame geometry.");
++	}
+ 	switch (hints.win_gravity) {
+-	    case NorthWestGravity: case SouthWestGravity:
+-	    case NorthEastGravity: case SouthEastGravity:
+-	    case WestGravity:
+-		rx = frame_attr.x;
++	    case XCB_GRAVITY_NORTH_WEST: case XCB_GRAVITY_SOUTH_WEST:
++	    case XCB_GRAVITY_NORTH_EAST: case XCB_GRAVITY_SOUTH_EAST:
++	    case XCB_GRAVITY_WEST:
++		rx = frame_geometry->x;
+ 	}
+ 	switch (hints.win_gravity) {
+-	    case NorthWestGravity: case SouthWestGravity:
+-	    case NorthEastGravity: case SouthEastGravity:
+-	    case EastGravity:
+-		xright = dw - frame_attr.x - frame_attr.width -
+-		    2*frame_attr.border_width;
++	    case XCB_GRAVITY_NORTH_WEST: case XCB_GRAVITY_SOUTH_WEST:
++	    case XCB_GRAVITY_NORTH_EAST: case XCB_GRAVITY_SOUTH_EAST:
++	    case XCB_GRAVITY_EAST:
++		xright = dw - frame_geometry->x - frame_geometry->width -
++		    (2 * frame_geometry->border_width);
+ 	}
+ 	switch (hints.win_gravity) {
+-	    case NorthWestGravity: case SouthWestGravity:
+-	    case NorthEastGravity: case SouthEastGravity:
+-	    case NorthGravity:
+-		ry = frame_attr.y;
++	    case XCB_GRAVITY_NORTH_WEST: case XCB_GRAVITY_SOUTH_WEST:
++	    case XCB_GRAVITY_NORTH_EAST: case XCB_GRAVITY_SOUTH_EAST:
++	    case XCB_GRAVITY_NORTH:
++		ry = frame_geometry->y;
+ 	}
+ 	switch (hints.win_gravity) {
+-	    case NorthWestGravity: case SouthWestGravity:
+-	    case NorthEastGravity: case SouthEastGravity:
+-	    case SouthGravity:
+-		ybelow = dh - frame_attr.y - frame_attr.height -
+-		    2*frame_attr.border_width;
++	    case XCB_GRAVITY_NORTH_WEST: case XCB_GRAVITY_SOUTH_WEST:
++	    case XCB_GRAVITY_NORTH_EAST: case XCB_GRAVITY_SOUTH_EAST:
++	    case XCB_GRAVITY_SOUTH:
++		ybelow = dh - frame_geometry->y - frame_geometry->height -
++		    (2 * frame_geometry->border_width);
+ 	}
++	free (frame_geometry);
+     }
+     /* If edge gravity, offer a corner on that edge (because the application
+        programmer cares about that edge), otherwise offer upper left unless
+        some other corner is close to an edge of the screen.
+        (For corner gravity, assume gravity was set by XWMGeometry.
+        For CenterGravity, it doesn't matter.) */
+-    if (hints.win_gravity == EastGravity  ||
++    if (hints.win_gravity == XCB_GRAVITY_EAST  ||
+ 	(abs (xright) <= 100  &&  abs (xright) < abs (rx)
+-	 &&  hints.win_gravity != WestGravity))
++	 &&  hints.win_gravity != XCB_GRAVITY_WEST))
+ 	showright = 1;
+-    if (hints.win_gravity == SouthGravity  ||
++    if (hints.win_gravity == XCB_GRAVITY_SOUTH  ||
+ 	(abs (ybelow) <= 100  &&  abs (ybelow) < abs (ry)
+-	 &&  hints.win_gravity != NorthGravity))
++	 &&  hints.win_gravity != XCB_GRAVITY_NORTH))
+ 	showbelow = 1;
+ 
+     if (showright)
+@@ -729,24 +860,25 @@ Display_Stats_Info (Window window)
+  * Display bits info:
+  */
+ static const binding _gravities[] = {
+-	{ UnmapGravity, "UnMapGravity" },      /* WARNING: both of these have*/
+-	{ ForgetGravity, "ForgetGravity" },    /* the same value - see code */
+-	{ NorthWestGravity, "NorthWestGravity" },
+-	{ NorthGravity, "NorthGravity" },
+-	{ NorthEastGravity, "NorthEastGravity" },
+-	{ WestGravity, "WestGravity" },
+-	{ CenterGravity, "CenterGravity" },
+-	{ EastGravity, "EastGravity" },
+-	{ SouthWestGravity, "SouthWestGravity" },
+-	{ SouthGravity, "SouthGravity" },
+-	{ SouthEastGravity, "SouthEastGravity" },
+-	{ StaticGravity, "StaticGravity" },
++    /* WARNING: the first two of these have the same value - see code */
++	{ XCB_GRAVITY_WIN_UNMAP,	"UnMapGravity" },
++	{ XCB_GRAVITY_BIT_FORGET,	"ForgetGravity" },
++	{ XCB_GRAVITY_NORTH_WEST,	"NorthWestGravity" },
++	{ XCB_GRAVITY_NORTH,		"NorthGravity" },
++	{ XCB_GRAVITY_NORTH_EAST,	"NorthEastGravity" },
++	{ XCB_GRAVITY_WEST,		"WestGravity" },
++	{ XCB_GRAVITY_CENTER,		"CenterGravity" },
++	{ XCB_GRAVITY_EAST,		"EastGravity" },
++	{ XCB_GRAVITY_SOUTH_WEST,	"SouthWestGravity" },
++	{ XCB_GRAVITY_SOUTH,		"SouthGravity" },
++	{ XCB_GRAVITY_SOUTH_EAST,	"SouthEastGravity" },
++	{ XCB_GRAVITY_STATIC,		"StaticGravity" },
+ 	{ 0, NULL } };
+ 
+ static const binding _backing_store_hint[] = {
+-	{ NotUseful, "NotUseful" },
+-	{ WhenMapped, "WhenMapped" },
+-	{ Always, "Always" },
++	{ XCB_BACKING_STORE_NOT_USEFUL, "NotUseful" },
++	{ XCB_BACKING_STORE_WHEN_MAPPED,"WhenMapped" },
++	{ XCB_BACKING_STORE_ALWAYS,	"Always" },
+ 	{ 0, NULL } };
+ 
+ static const binding _bool[] = {
+@@ -754,26 +886,29 @@ static const binding _bool[] = {
+ 	{ 1, "Yes" },
+ 	{ 0, NULL } };
+ 
++/*
++ * Requires wininfo members initialized:
++ *   window, attr_cookie (or win_attributes)
++ */
+ static void
+-Display_Bits_Info (Window window)
++Display_Bits_Info (struct wininfo * w)
+ {
+-    XWindowAttributes win_attributes;
+-
+-    if (!XGetWindowAttributes (dpy, window, &win_attributes))
+-	Fatal_Error ("Can't get window attributes.");
++    xcb_get_window_attributes_reply_t *win_attributes
++	= fetch_win_attributes (w);
+ 
+     printf ("\n");
+     printf ("  Bit gravity: %s\n",
+-	    Lookup (win_attributes.bit_gravity, _gravities+1));
++	    Lookup (win_attributes->bit_gravity, _gravities+1));
+     printf ("  Window gravity: %s\n",
+-	    Lookup (win_attributes.win_gravity, _gravities));
++	    Lookup (win_attributes->win_gravity, _gravities));
+     printf ("  Backing-store hint: %s\n",
+-	    Lookup (win_attributes.backing_store, _backing_store_hint));
++	    Lookup (win_attributes->backing_store, _backing_store_hint));
+     printf ("  Backing-planes to be preserved: 0x%lx\n",
+-	    win_attributes.backing_planes);
+-    printf ("  Backing pixel: %ld\n", win_attributes.backing_pixel);
++	    (unsigned long) win_attributes->backing_planes);
++    printf ("  Backing pixel: %ld\n",
++	    (unsigned long) win_attributes->backing_pixel);
+     printf ("  Save-unders: %s\n",
+-	    Lookup (win_attributes.save_under, _bool));
++	    Lookup (win_attributes->save_under, _bool));
+ }
+ 
+ 
+@@ -781,31 +916,31 @@ Display_Bits_Info (Window window)
+  * Routine to display all events in an event mask
+  */
+ static const binding _event_mask_names[] = {
+-	{ KeyPressMask, "KeyPress" },
+-	{ KeyReleaseMask, "KeyRelease" },
+-	{ ButtonPressMask, "ButtonPress" },
+-	{ ButtonReleaseMask, "ButtonRelease" },
+-	{ EnterWindowMask, "EnterWindow" },
+-	{ LeaveWindowMask, "LeaveWindow" },
+-	{ PointerMotionMask, "PointerMotion" },
+-	{ PointerMotionHintMask, "PointerMotionHint" },
+-	{ Button1MotionMask, "Button1Motion" },
+-	{ Button2MotionMask, "Button2Motion" },
+-	{ Button3MotionMask, "Button3Motion" },
+-	{ Button4MotionMask, "Button4Motion" },
+-	{ Button5MotionMask, "Button5Motion" },
+-	{ ButtonMotionMask, "ButtonMotion" },
+-	{ KeymapStateMask, "KeymapState" },
+-	{ ExposureMask, "Exposure" },
+-	{ VisibilityChangeMask, "VisibilityChange" },
+-	{ StructureNotifyMask, "StructureNotify" },
+-	{ ResizeRedirectMask, "ResizeRedirect" },
+-	{ SubstructureNotifyMask, "SubstructureNotify" },
+-	{ SubstructureRedirectMask, "SubstructureRedirect" },
+-	{ FocusChangeMask, "FocusChange" },
+-	{ PropertyChangeMask, "PropertyChange" },
+-	{ ColormapChangeMask, "ColormapChange" },
+-	{ OwnerGrabButtonMask, "OwnerGrabButton" },
++	{ XCB_EVENT_MASK_KEY_PRESS,		"KeyPress" },
++	{ XCB_EVENT_MASK_KEY_RELEASE,		"KeyRelease" },
++	{ XCB_EVENT_MASK_BUTTON_PRESS,		"ButtonPress" },
++	{ XCB_EVENT_MASK_BUTTON_RELEASE,	"ButtonRelease" },
++	{ XCB_EVENT_MASK_ENTER_WINDOW,		"EnterWindow" },
++	{ XCB_EVENT_MASK_LEAVE_WINDOW,		"LeaveWindow" },
++	{ XCB_EVENT_MASK_POINTER_MOTION,	"PointerMotion" },
++	{ XCB_EVENT_MASK_POINTER_MOTION_HINT,	"PointerMotionHint" },
++	{ XCB_EVENT_MASK_BUTTON_1_MOTION,	"Button1Motion" },
++	{ XCB_EVENT_MASK_BUTTON_2_MOTION,	"Button2Motion" },
++	{ XCB_EVENT_MASK_BUTTON_3_MOTION,	"Button3Motion" },
++	{ XCB_EVENT_MASK_BUTTON_4_MOTION,	"Button4Motion" },
++	{ XCB_EVENT_MASK_BUTTON_5_MOTION,	"Button5Motion" },
++	{ XCB_EVENT_MASK_BUTTON_MOTION,		"ButtonMotion" },
++	{ XCB_EVENT_MASK_KEYMAP_STATE,		"KeymapState" },
++	{ XCB_EVENT_MASK_EXPOSURE,		"Exposure" },
++	{ XCB_EVENT_MASK_VISIBILITY_CHANGE,	"VisibilityChange" },
++	{ XCB_EVENT_MASK_STRUCTURE_NOTIFY,	"StructureNotify" },
++	{ XCB_EVENT_MASK_RESIZE_REDIRECT,	"ResizeRedirect" },
++	{ XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY,	"SubstructureNotify" },
++	{ XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT,	"SubstructureRedirect" },
++	{ XCB_EVENT_MASK_FOCUS_CHANGE,		"FocusChange" },
++	{ XCB_EVENT_MASK_PROPERTY_CHANGE,	"PropertyChange" },
++	{ XCB_EVENT_MASK_COLOR_MAP_CHANGE,	"ColormapChange" },
++	{ XCB_EVENT_MASK_OWNER_GRAB_BUTTON,	"OwnerGrabButton" },
+ 	{ 0, NULL } };
+ 
+ static void
+@@ -822,24 +957,25 @@ Display_Event_Mask (long mask)
+ 
+ /*
+  * Display info on events
++ *
++ * Requires wininfo members initialized:
++ *   window, attr_cookie (or win_attributes)
+  */
+ static void
+-Display_Events_Info (Window window)
++Display_Events_Info (struct wininfo *w)
+ {
+-    XWindowAttributes win_attributes;
+-
+-    if (!XGetWindowAttributes (dpy, window, &win_attributes))
+-	Fatal_Error ("Can't get window attributes.");
++    xcb_get_window_attributes_reply_t *win_attributes
++	= fetch_win_attributes (w);
+ 
+     printf ("\n");
+     printf ("  Someone wants these events:\n");
+-    Display_Event_Mask (win_attributes.all_event_masks);
++    Display_Event_Mask (win_attributes->all_event_masks);
+ 
+     printf ("  Do not propagate these events:\n");
+-    Display_Event_Mask (win_attributes.do_not_propagate_mask);
++    Display_Event_Mask (win_attributes->do_not_propagate_mask);
+ 
+     printf ("  Override redirection?: %s\n",
+-	    Lookup (win_attributes.override_redirect, _bool));
++	    Lookup (win_attributes->override_redirect, _bool));
+ }
+ 
+ 
+@@ -851,39 +987,48 @@ Display_Events_Info (Window window)
+ /*
+  * Display root, parent, and (recursively) children information
+  * recurse - true to show children information
++ *
++ * Requires wininfo members initialized: window, tree_cookie
+  */
+ static void
+-Display_Tree_Info (Window window, int recurse)
++Display_Tree_Info (struct wininfo *w, int recurse)
+ {
+-    display_tree_info_1 (window, recurse, 0);
++    display_tree_info_1 (w, recurse, 0);
+ }
+ 
+ /*
+  * level - recursion level
+  */
+ static void
+-display_tree_info_1 (Window window, int recurse, int level)
++display_tree_info_1 (struct wininfo *w, int recurse, int level)
+ {
+     int i, j;
+-    int rel_x, rel_y, abs_x, abs_y;
+-    unsigned int width, height, border, depth;
+-    Window root_win, parent_win;
+     unsigned int num_children;
+-    Window *child_list;
+-    XClassHint classhint;
++    xcb_query_tree_reply_t *tree;
+ 
+-    if (!XQueryTree (dpy, window, &root_win, &parent_win, &child_list,
+-		     &num_children))
++    tree = xcb_query_tree_reply (dpy, w->tree_cookie, &err);
++    if (!tree) {
++	Print_X_Error (dpy, err);
+ 	Fatal_Error ("Can't query window tree.");
++    }
+ 
+     if (level == 0) {
++	struct wininfo rw, pw;
++	rw.window = tree->root;
++	rw.wm_name_cookie = xcb_get_wm_name (dpy, rw.window);
++	pw.window = tree->parent;
++	pw.wm_name_cookie = xcb_get_wm_name (dpy, pw.window);
++	xcb_flush (dpy);
++
+ 	printf ("\n");
+ 	printf ("  Root window id: ");
+-	Display_Window_Id (root_win, True);
++	Display_Window_Id (&rw, True);
+ 	printf ("  Parent window id: ");
+-	Display_Window_Id (parent_win, True);
++	Display_Window_Id (&pw, True);
+     }
+ 
++    num_children = xcb_query_tree_children_length (tree);
++
+     if (level == 0  ||  num_children > 0) {
+ 	printf ("     ");
+ 	for (j = 0; j < level; j++) printf ("   ");
+@@ -891,42 +1036,90 @@ display_tree_info_1 (Window window, int recurse, int level)
+ 		num_children ? ":" : ".");
+     }
+ 
+-    for (i = (int)num_children - 1; i >= 0; i--) {
+-	printf ("     ");
+-	for (j = 0; j < level; j++) printf ("   ");
+-	Display_Window_Id (child_list[i], False);
+-	printf (": (");
+-	if (XGetClassHint (dpy, child_list[i], &classhint)) {
+-	    if (classhint.res_name) {
+-		printf ("\"%s\" ", classhint.res_name);
+-		XFree (classhint.res_name);
+-	    } else
+-		printf ("(none) ");
+-	    if (classhint.res_class) {
+-		printf ("\"%s\") ", classhint.res_class);
+-		XFree (classhint.res_class);
++    if (num_children > 0) {
++	xcb_window_t *child_list = xcb_query_tree_children (tree);
++	struct wininfo *children
++	    = calloc (num_children, sizeof(struct wininfo));
++
++	if (children == NULL)
++	    Fatal_Error ("Failed to allocate memory in display_tree_info");
++
++	for (i = (int)num_children - 1; i >= 0; i--) {
++	    struct wininfo *cw = &children[i];
++
++	    cw->window = child_list[i];
++	    cw->wm_name_cookie = xcb_get_wm_name (dpy, child_list[i]);
++	    cw->wm_class_cookie = xcb_get_wm_class (dpy, child_list[i]);
++	    cw->geometry_cookie = xcb_get_geometry (dpy, child_list[i]);
++	    cw->trans_coords_cookie = xcb_translate_coordinates
++		(dpy, child_list[i], tree->root, 0, 0);
++	    if (recurse)
++		cw->tree_cookie = xcb_query_tree (dpy, child_list[i]);
++	}
++	xcb_flush (dpy);
++
++	for (i = (int)num_children - 1; i >= 0; i--) {
++	    struct wininfo *cw = &children[i];
++	    xcb_get_wm_class_reply_t classhint;
++	    xcb_get_geometry_reply_t *geometry;
++
++	    printf ("     ");
++	    for (j = 0; j < level; j++) printf ("   ");
++	    Display_Window_Id (cw, False);
++	    printf (": (");
++
++	    if (xcb_get_wm_class_reply (dpy, cw->wm_class_cookie,
++					&classhint, NULL)) {
++		if (classhint.instance_name)
++		    printf ("\"%s\" ", classhint.instance_name);
++		else
++		    printf ("(none) ");
++
++		if (classhint.class_name)
++		    printf ("\"%s\") ", classhint.class_name);
++		else
++		    printf ("(none)) ");
++
++		xcb_get_wm_class_reply_wipe (&classhint);
+ 	    } else
+-		printf ("(none)) ");
+-	} else
+-	    printf (") ");
+-
+-	if (XGetGeometry (dpy, child_list[i], &root_win,
+-			  &rel_x, &rel_y, &width, &height, &border, &depth)) {
+-	    Window child;
+-
+-	    printf (" %ux%u+%d+%d", width, height, rel_x, rel_y);
+-	    if (XTranslateCoordinates (dpy, child_list[i], root_win,
+-				       0 ,0, &abs_x, &abs_y, &child)) {
+-		printf ("  +%d+%d", abs_x - border, abs_y - border);
++		printf (") ");
++
++	    geometry = xcb_get_geometry_reply(dpy, cw->geometry_cookie, &err);
++	    if (geometry) {
++		xcb_translate_coordinates_reply_t *trans_coords;
++
++		printf (" %ux%u+%d+%d", geometry->width, geometry->height,
++					geometry->x, geometry->y);
++
++		trans_coords = xcb_translate_coordinates_reply
++		    (dpy, cw->trans_coords_cookie, &err);
++
++		if (trans_coords) {
++		    int16_t abs_x = (int16_t) trans_coords->dst_x;
++		    int16_t abs_y = (int16_t) trans_coords->dst_y;
++		    int border = geometry->border_width;
++
++		    printf ("  +%d+%d", abs_x - border, abs_y - border);
++		    free (trans_coords);
++		} else if (err) {
++		    Print_X_Error (dpy, err);
++		}
++
++		free (geometry);
++	    } else if (err) {
++		Print_X_Error (dpy, err);
+ 	    }
+-	}
+-	printf ("\n");
++	    printf ("\n");
+ 
+-	if (recurse)
+-	    display_tree_info_1 (child_list[i], 1, level+1);
++	    if (recurse)
++		display_tree_info_1 (cw, 1, level+1);
++
++	    wininfo_wipe (cw);
++	}
++	free (children);
+     }
+ 
+-    if (child_list) XFree ((char *)child_list);
++    free (tree); /* includes storage for child_list[] */
+ }
+ 
+ 
+@@ -934,74 +1127,74 @@ display_tree_info_1 (Window window, int recurse, int level)
+  * Display a set of size hints
+  */
+ static void
+-Display_Hints (XSizeHints *hints)
++Display_Hints (xcb_size_hints_t *hints)
+ {
+     long flags;
+ 
+     flags = hints->flags;
+ 
+-    if (flags & USPosition)
++    if (flags & XCB_SIZE_HINT_US_POSITION)
+ 	printf ("      User supplied location: %s, %s\n",
+ 		xscale (hints->x), yscale (hints->y));
+ 
+-    if (flags & PPosition)
++    if (flags & XCB_SIZE_HINT_P_POSITION)
+ 	printf ("      Program supplied location: %s, %s\n",
+ 		xscale (hints->x), yscale (hints->y));
+ 
+-    if (flags & USSize) {
++    if (flags & XCB_SIZE_HINT_US_SIZE) {
+ 	printf ("      User supplied size: %s by %s\n",
+ 		xscale (hints->width), yscale (hints->height));
+     }
+ 
+-    if (flags & PSize)
++    if (flags & XCB_SIZE_HINT_P_SIZE)
+ 	printf ("      Program supplied size: %s by %s\n",
+ 		xscale (hints->width), yscale (hints->height));
+ 
+-    if (flags & PMinSize)
++    if (flags & XCB_SIZE_HINT_P_MIN_SIZE)
+ 	printf ("      Program supplied minimum size: %s by %s\n",
+ 		xscale (hints->min_width), yscale (hints->min_height));
+ 
+-    if (flags & PMaxSize)
++    if (flags & XCB_SIZE_HINT_P_MAX_SIZE)
+ 	printf ("      Program supplied maximum size: %s by %s\n",
+ 		xscale (hints->max_width), yscale (hints->max_height));
+ 
+-    if (flags & PBaseSize) {
++    if (flags & XCB_SIZE_HINT_BASE_SIZE) {
+ 	printf ("      Program supplied base size: %s by %s\n",
+ 		xscale (hints->base_width), yscale (hints->base_height));
+     }
+ 
+-    if (flags & PResizeInc) {
++    if (flags & XCB_SIZE_HINT_P_RESIZE_INC) {
+ 	printf ("      Program supplied x resize increment: %s\n",
+ 		xscale (hints->width_inc));
+ 	printf ("      Program supplied y resize increment: %s\n",
+ 		yscale (hints->height_inc));
+ 	if (hints->width_inc != 0 && hints->height_inc != 0) {
+-	    if (flags & USSize)
++	    if (flags & XCB_SIZE_HINT_US_SIZE)
+ 		printf ("      User supplied size in resize increments:  %s by %s\n",
+ 			(xscale (hints->width / hints->width_inc)),
+ 			(yscale (hints->height / hints->height_inc)));
+-	    if (flags & PSize)
++	    if (flags & XCB_SIZE_HINT_P_SIZE)
+ 		printf ("      Program supplied size in resize increments:  %s by %s\n",
+ 			(xscale (hints->width / hints->width_inc)),
+ 			(yscale (hints->height / hints->height_inc)));
+-	    if (flags & PMinSize)
++	    if (flags & XCB_SIZE_HINT_P_MIN_SIZE)
+ 		printf ("      Program supplied minimum size in resize increments: %s by %s\n",
+ 			xscale (hints->min_width / hints->width_inc), yscale (hints->min_height / hints->height_inc));
+-	    if (flags & PBaseSize)
++	    if (flags & XCB_SIZE_HINT_BASE_SIZE)
+ 		printf ("      Program supplied base size in resize increments:  %s by %s\n",
+ 			(xscale (hints->base_width / hints->width_inc)),
+ 			(yscale (hints->base_height / hints->height_inc)));
+ 	}
+     }
+ 
+-    if (flags & PAspect) {
++    if (flags & XCB_SIZE_HINT_P_ASPECT) {
+ 	printf ("      Program supplied min aspect ratio: %s/%s\n",
+-		xscale (hints->min_aspect.x), yscale (hints->min_aspect.y));
++		xscale (hints->min_aspect_num), yscale (hints->min_aspect_den));
+ 	printf ("      Program supplied max aspect ratio: %s/%s\n",
+-		xscale (hints->max_aspect.x), yscale (hints->max_aspect.y));
++		xscale (hints->max_aspect_num), yscale (hints->max_aspect_den));
+     }
+ 
+-    if (flags & PWinGravity) {
++    if (flags & XCB_SIZE_HINT_P_WIN_GRAVITY) {
+ 	printf ("      Program supplied window gravity: %s\n",
+ 		Lookup (hints->win_gravity, _gravities));
+     }
+@@ -1012,103 +1205,137 @@ Display_Hints (XSizeHints *hints)
+  * Display Size Hints info
+  */
+ static void
+-Display_Size_Hints (Window window)
++Display_Size_Hints (struct wininfo *w)
+ {
+-    XSizeHints *hints = XAllocSizeHints ();
+-    long supplied;
++    xcb_size_hints_t hints;
+ 
+     printf ("\n");
+-    if (!XGetWMNormalHints (dpy, window, hints, &supplied))
++    if (!fetch_normal_hints (w, &hints))
+ 	printf ("  No normal window size hints defined\n");
+     else {
+ 	printf ("  Normal window size hints:\n");
+-	hints->flags &= supplied;
+-	Display_Hints (hints);
++	Display_Hints (&hints);
+     }
+ 
+-    if (!XGetWMSizeHints (dpy, window, hints, &supplied, XA_WM_ZOOM_HINTS))
++    if (!xcb_get_wm_size_hints_reply (dpy, w->zoom_cookie, &hints, NULL))
+ 	printf ("  No zoom window size hints defined\n");
+     else {
+ 	printf ("  Zoom window size hints:\n");
+-	hints->flags &= supplied;
+-	Display_Hints (hints);
++	Display_Hints (&hints);
+     }
+-    XFree ((char *)hints);
+ }
+ 
+ 
+ static void
+-Display_Window_Shape (Window window)
++Display_Window_Shape (xcb_window_t window)
+ {
+-    Bool    ws, bs;
+-    int	    xws, yws, xbs, ybs;
+-    unsigned int wws, hws, wbs, hbs;
++    const xcb_query_extension_reply_t *shape_query;
++    xcb_shape_query_extents_cookie_t extents_cookie;
++    xcb_shape_query_extents_reply_t *extents;
+ 
+-    if (!XShapeQueryExtension (dpy, &bs, &ws))
++    shape_query = xcb_get_extension_data (dpy, &xcb_shape_id);
++    if (!shape_query->present)
+ 	return;
+ 
+     printf ("\n");
+-    XShapeQueryExtents (dpy, window, &ws, &xws, &yws, &wws, &hws,
+-				     &bs, &xbs, &ybs, &wbs, &hbs);
+-    if (!ws)
++
++    extents_cookie = xcb_shape_query_extents (dpy, window);
++    extents = xcb_shape_query_extents_reply (dpy, extents_cookie, &err);
++
++    if (!extents) {
++	if (err)
++	    Print_X_Error (dpy, err);
++	else
++	{
++	    printf ("  No window shape defined\n");
++	    printf ("  No border shape defined\n");
++	}
++	return;
++    }
++
++    if (!extents->bounding_shaped)
+ 	printf ("  No window shape defined\n");
+     else {
+ 	printf ("  Window shape extents:  %sx%s",
+-		xscale (wws), yscale (hws));
+-	printf ("+%s+%s\n", xscale (xws), yscale (yws));
++		xscale (extents->bounding_shape_extents_width),
++		yscale (extents->bounding_shape_extents_height));
++	printf ("+%s+%s\n",
++		xscale (extents->bounding_shape_extents_x),
++		yscale (extents->bounding_shape_extents_y));
+     }
+-    if (!bs)
++    if (!extents->clip_shaped)
+ 	printf ("  No border shape defined\n");
+     else {
+ 	printf ("  Border shape extents:  %sx%s",
+-		xscale (wbs), yscale (hbs));
+-	printf ("+%s+%s\n", xscale (xbs), yscale (ybs));
++		xscale (extents->clip_shape_extents_width),
++		yscale (extents->clip_shape_extents_height));
++	printf ("+%s+%s\n",
++		xscale (extents->clip_shape_extents_x),
++		yscale (extents->clip_shape_extents_y));
+     }
++
++    free (extents);
+ }
+ 
+ /*
+  * Display Window Manager Info
++ *
++ * Requires wininfo members initialized:
++ *   window, hints_cookie
+  */
+ static const binding _state_hints[] = {
+-	{ DontCareState, "Don't Care State" },
+-	{ NormalState, "Normal State" },
+-	{ ZoomState, "Zoomed State" },
+-	{ IconicState, "Iconic State" },
+-	{ InactiveState, "Inactive State" },
++	{ XCB_WM_STATE_WITHDRAWN, "Withdrawn State" },
++	{ XCB_WM_STATE_NORMAL, "Normal State" },
++	{ XCB_WM_STATE_ICONIC, "Iconic State" },
++/* xwininfo previously also reported the ZoomState & InactiveState,
++   but ICCCM declared those obsolete long ago */
+ 	{ 0, NULL } };
+ 
+ static void
+-Display_WM_Info (Window window)
++Display_WM_Info (struct wininfo *w)
+ {
+-    XWMHints *wmhints;
++    xcb_wm_hints_t wmhints;
+     long flags;
+ 
+-    wmhints = XGetWMHints (dpy, window);
+     printf ("\n");
+-    if (!wmhints) {
++    if (!xcb_get_wm_hints_reply(dpy, w->hints_cookie, &wmhints, &err))
++    {
+ 	printf ("  No window manager hints defined\n");
++	if (err)
++	    Print_X_Error (dpy, err);
+ 	return;
+     }
+-    flags = wmhints->flags;
++    flags = wmhints.flags;
+ 
+     printf ("  Window manager hints:\n");
+ 
+-    if (flags & InputHint)
++    if (flags & XCB_WM_HINT_INPUT)
+ 	printf ("      Client accepts input or input focus: %s\n",
+-		Lookup (wmhints->input, _bool));
++		Lookup (wmhints.input, _bool));
++
++    if (flags & XCB_WM_HINT_ICON_WINDOW) {
++	struct wininfo iw;
++	iw.window = wmhints.icon_window;
++	iw.wm_name_cookie = xcb_get_wm_name (dpy, iw.window);
+ 
+-    if (flags & IconWindowHint) {
+ 	printf ("      Icon window id: ");
+-	Display_Window_Id (wmhints->icon_window, True);
++	Display_Window_Id (&iw, True);
+     }
+ 
+-    if (flags & IconPositionHint)
++    if (flags & XCB_WM_HINT_ICON_POSITION)
+ 	printf ("      Initial icon position: %s, %s\n",
+-		xscale (wmhints->icon_x), yscale (wmhints->icon_y));
++		xscale (wmhints.icon_x), yscale (wmhints.icon_y));
+ 
+-    if (flags & StateHint)
++    if (flags & XCB_WM_HINT_STATE)
+ 	printf ("      Initial state is %s\n",
+-		Lookup (wmhints->initial_state, _state_hints));
++		Lookup (wmhints.initial_state, _state_hints));
++}
+ 
+-    XFree (wmhints);
++/* Frees all members of a wininfo struct, but not the struct itself */
++static void
++wininfo_wipe (struct wininfo *w)
++{
++    free (w->geometry);
++    free (w->win_attributes);
++    free (w->normal_hints);
+ }
+--
+cgit v0.8.3-6-g21f6
