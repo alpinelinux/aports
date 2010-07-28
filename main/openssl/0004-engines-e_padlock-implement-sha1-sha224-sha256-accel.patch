@@ -1,12 +1,12 @@
-From 11e9d19d7c6c3461cbab5e5670d66974cd7cf819 Mon Sep 17 00:00:00 2001
+From b235a1c0686e5f4f32703c0eb0a75ee9902a7e89 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
-Date: Fri, 4 Jun 2010 15:48:16 +0300
-Subject: [PATCH 3/3] engine/padlock: implement sha1/sha224/sha256 acceleration
+Date: Wed, 28 Jul 2010 08:37:58 +0300
+Subject: [PATCH 4/5] engines/e_padlock: implement sha1/sha224/sha256 acceleration
 
 Limited support for VIA C7 that works only when EVP_MD_CTX_FLAG_ONESHOT
 is used appropriately (as done by EVP_Digest, and my previous HMAC patch).
 
-Full support for VIA Nano including partial transformation.
+Full support for VIA Nano including partial transformation and 64-bit mode.
 
 Benchmarks from VIA Nano 1.6GHz, done with including the previous HMAC and
 apps/speed patches done. From single run, error margin of about 100-200k.
@@ -24,11 +24,11 @@ sha1         37713.77k   114562.71k   259637.33k   379907.41k   438818.13k
 sha256       34262.86k   103233.75k   232476.07k   338386.60k   389860.01k
 hmac(sha1)    8424.70k    31475.11k   104036.10k   245559.30k   406667.26k
 ---
- engines/e_padlock.c |  596 +++++++++++++++++++++++++++++++++++++++++++++++----
- 1 files changed, 553 insertions(+), 43 deletions(-)
+ engines/e_padlock.c |  660 +++++++++++++++++++++++++++++++++++++++++++++++----
+ 1 files changed, 613 insertions(+), 47 deletions(-)
 
 diff --git a/engines/e_padlock.c b/engines/e_padlock.c
-index 381a746..2f8c72a 100644
+index 4300f35..3591c59 100644
 --- a/engines/e_padlock.c
 +++ b/engines/e_padlock.c
 @@ -3,6 +3,9 @@
@@ -41,7 +41,17 @@ index 381a746..2f8c72a 100644
   * Big thanks to Andy Polyakov for a help with optimization, 
   * assembler fixes, port to MS Windows and a lot of other 
   * valuable work on this engine!
-@@ -74,12 +77,23 @@
+@@ -64,7 +67,9 @@
+ 
+ 
+ #include <stdio.h>
++#include <stdint.h>
+ #include <string.h>
++#include <netinet/in.h>
+ 
+ #include <openssl/opensslconf.h>
+ #include <openssl/crypto.h>
+@@ -74,12 +79,33 @@
  #ifndef OPENSSL_NO_AES
  #include <openssl/aes.h>
  #endif
@@ -62,10 +72,20 @@ index 381a746..2f8c72a 100644
 +#define OPENSSL_NO_SHA
 +#endif
 +
++/* 64-bit mode does not need software SHA1 as fallback, we can
++ * do all operations with padlock */
++#if defined(__x86_64__) || defined(__x86_64)
++#define PADLOCK_NEED_FALLBACK_SHA	0
++#else
++#define PADLOCK_NEED_FALLBACK_SHA	1
++#endif
++
++#define PADLOCK_MAX_FINALIZING_LENGTH	0x1FFFFFFE
++
  /* Attempt to have a single source for both 0.9.7 and 0.9.8 :-) */
  #if (OPENSSL_VERSION_NUMBER >= 0x00908000L)
  #  ifndef OPENSSL_NO_DYNAMIC_ENGINE
-@@ -140,58 +154,40 @@ static int padlock_available(void);
+@@ -143,58 +169,40 @@ static int padlock_available(void);
  static int padlock_init(ENGINE *e);
  
  /* RNG Stuff */
@@ -145,7 +165,7 @@ index 381a746..2f8c72a 100644
  
  /* Constructor */
  static ENGINE *
-@@ -215,7 +211,7 @@ ENGINE_padlock(void)
+@@ -218,7 +226,7 @@ ENGINE_padlock(void)
  static int
  padlock_init(ENGINE *e)
  {
@@ -154,7 +174,7 @@ index 381a746..2f8c72a 100644
  }
  
  /* This stuff is needed if this ENGINE is being compiled into a self-contained
-@@ -367,10 +363,20 @@ padlock_available(void)
+@@ -371,10 +379,20 @@ padlock_available(void)
  		: "+a"(eax), "=d"(edx) : : "ecx");
  
  	/* Fill up some flags */
@@ -177,8 +197,27 @@ index 381a746..2f8c72a 100644
 +	return padlock_flags;
  }
  
- #ifndef OPENSSL_NO_AES
-@@ -1159,6 +1165,454 @@ padlock_aes_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out_arg,
+ /* Force key reload from memory to the CPU microcode.
+@@ -471,10 +489,14 @@ padlock_available(void)
+ 		: "+a"(eax), "=d"(edx) : : "rbx", "rcx");
+ 
+ 	/* Fill up some flags */
+-	padlock_use_ace = ((edx & (0x3<<6)) == (0x3<<6));
+-	padlock_use_rng = ((edx & (0x3<<2)) == (0x3<<2));
+-
+-	return padlock_use_ace + padlock_use_rng;
++	padlock_flags |= ((edx & (0x3<<3)) ? PADLOCK_RNG : 0);
++	padlock_flags |= ((edx & (0x3<<7)) ? PADLOCK_ACE : 0);
++	padlock_flags |= ((edx & (0x3<<9)) ? PADLOCK_ACE2 : 0);
++	padlock_flags |= ((edx & (0x3<<11)) ? PADLOCK_PHE : 0);
++	padlock_flags |= ((edx & (0x3<<13)) ? PADLOCK_PMM : 0);
++	padlock_flags |= PADLOCK_NANO;
++
++	return padlock_flags;
+ }
+ 
+ /* Force key reload from memory to the CPU microcode.
+@@ -1263,6 +1285,496 @@ padlock_aes_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out_arg,
  
  #endif /* OPENSSL_NO_AES */
  
@@ -188,23 +227,39 @@ index 381a746..2f8c72a 100644
 +padlock_copy_bswap(void *dst, void *src, size_t count)
 +{
 +	uint32_t *udst = dst, *usrc = src;
-+	unsigned int reg;
 +	int i = 0;
 +
-+	for (i = 0; i < count; i++) {
-+		reg = usrc[i];
-+		asm volatile("bswapl %0" : "+&r"(reg));
-+		udst[i] = reg;
-+	}
++	for (i = 0; i < count; i++)
++		udst[i] = htonl(usrc[i]);
++}
++
++static unsigned long padlock_sha_prepare_padding(
++		EVP_MD_CTX *ctx,
++		unsigned char *padding,
++		unsigned char *data, size_t data_len,
++		uint64_t total)
++{
++	unsigned int padding_len;
++
++	padding_len = data_len < 56 ? SHA_CBLOCK : 2 * SHA_CBLOCK;
++	if (data_len)
++		memcpy(padding, data, data_len);
++
++	memset(padding + data_len, 0, padding_len - data_len);
++	padding[data_len] = 0x80;
++	*(uint32_t *)(padding + padding_len - 8) = htonl(total >> 32);
++	*(uint32_t *)(padding + padding_len - 4) = htonl(total & 0xffffffff);
++
++	return data_len < 56 ? 1 : 2;
 +}
 +
 +#define PADLOCK_SHA_ALIGN(dd)	(uint32_t*)(((uintptr_t)(dd) + 15) & ~15)
 +#define PADLOCK_SHA_HWCTX	(128+16)
 +
 +static void
-+padlock_sha1(void *hwctx, const void *buf, uint32_t total, uint32_t now)
++padlock_sha1(void *hwctx, const void *buf, unsigned long total, unsigned long now)
 +{
-+	uint32_t pos = total - now;
++	unsigned long pos = total - now;
 +
 +	asm volatile ("xsha1"
 +			: "+S"(buf), "+D"(hwctx), "+a"(pos), "+c"(total)
@@ -212,11 +267,11 @@ index 381a746..2f8c72a 100644
 +}
 +
 +static void
-+padlock_sha1_partial(void *hwctx, const void *buf, uint32_t blocks)
++padlock_sha1_partial(void *hwctx, const void *buf, unsigned long blocks)
 +{
 +	asm volatile ("xsha1"
 +			: "+S"(buf), "+D"(hwctx), "+c"(blocks)
-+			: "a"(-1) : "memory");
++			: "a"(-1L) : "memory");
 +}
 +
 +static int padlock_sha1_init(EVP_MD_CTX *ctx)
@@ -224,22 +279,24 @@ index 381a746..2f8c72a 100644
 +	return SHA1_Init(ctx->md_data);
 +}
 +
-+static int padlock_sha1_update(EVP_MD_CTX *ctx, const void *data,
-+			       size_t len)
++#if PADLOCK_NEED_FALLBACK_SHA
++
++static int padlock_sha1_update_eden(EVP_MD_CTX *ctx, const void *data,
++				    size_t len)
 +{
 +	unsigned char hwctx[PADLOCK_SHA_HWCTX];
 +	uint32_t *aligned = PADLOCK_SHA_ALIGN(hwctx);
 +	SHA_CTX *c = ctx->md_data;
 +	uint_fast64_t total;
 +	const unsigned char *p = data;
-+	unsigned int l = 0;
++	unsigned long l = 0;
 +
 +	/* Calculate total length (Nl,Nh) is length in bits */
 +	total = (((uint_fast64_t) c->Nh) << 29) + (c->Nl >> 3);
 +	total += len;
 +
 +	if ((ctx->flags & EVP_MD_CTX_FLAG_ONESHOT) &&
-+	    (total <= 0xfffffffe)) {
++	    (total <= PADLOCK_MAX_FINALIZING_LENGTH)) {
 +		if (c->num != 0) {
 +			l = (len < SHA_CBLOCK) ? len : SHA_CBLOCK;
 +			if (!SHA1_Update(c, data, l))
@@ -260,16 +317,17 @@ index 381a746..2f8c72a 100644
 +
 +	return SHA1_Update(c, data, len);
 +}
++#endif
 +
-+static int padlock_nano_sha1_update(EVP_MD_CTX *ctx, const void *data,
-+				    size_t len)
++static int padlock_sha1_update(EVP_MD_CTX *ctx, const void *data,
++			       size_t len)
 +{
 +	unsigned char hwctx[PADLOCK_SHA_HWCTX];
 +	uint32_t *aligned = PADLOCK_SHA_ALIGN(hwctx);
 +	SHA_CTX *c = ctx->md_data;
 +	uint_fast64_t total;
 +	unsigned char *p;
-+	unsigned int n;
++	unsigned long n;
 +
 +	/* Calculate total length (Nl,Nh) is length in bits */
 +	total = (((uint_fast64_t) c->Nh) << 29) + (c->Nl >> 3);
@@ -300,7 +358,7 @@ index 381a746..2f8c72a 100644
 +
 +	/* Can we finalize straight away? */
 +	if ((ctx->flags & EVP_MD_CTX_FLAG_ONESHOT) &&
-+	    (total <= 0xfffffffe)) {
++	    (total <= PADLOCK_MAX_FINALIZING_LENGTH)) {
 +		padlock_sha1(aligned, data, total, len);
 +		memcpy(&c->h0, aligned, 5 * sizeof(SHA_LONG));
 +		c->num = -1;
@@ -327,8 +385,10 @@ index 381a746..2f8c72a 100644
 +
 +static int padlock_sha1_final(EVP_MD_CTX *ctx, unsigned char *md)
 +{
++	unsigned char hwctx[PADLOCK_SHA_HWCTX];
++	uint32_t *aligned = PADLOCK_SHA_ALIGN(hwctx);
++	uint64_t total;
 +	SHA_CTX *c = ctx->md_data;
-+	uint_fast64_t total;
 +
 +	if (c->num == -1) {
 +		padlock_copy_bswap(md, &c->h0, 5);
@@ -337,18 +397,26 @@ index 381a746..2f8c72a 100644
 +	}
 +
 +	total = (((uint_fast64_t) c->Nh) << 29) + (c->Nl >> 3);
-+	if (total <= 0xfffffffe) {
-+		unsigned char hwctx[PADLOCK_SHA_HWCTX];
-+		uint32_t *aligned = PADLOCK_SHA_ALIGN(hwctx);
++#if PADLOCK_NEED_FALLBACK_SHA
++	if ((!PADLOCK_HAVE_NANO) && (total > PADLOCK_MAX_FINALIZING_LENGTH))
++		return SHA1_Final(md, c);
++#endif
 +
-+		memcpy(aligned, &c->h0, 5 * sizeof(SHA_LONG));
++	memcpy(aligned, &c->h0, 5 * sizeof(SHA_LONG));
++	if (total > PADLOCK_MAX_FINALIZING_LENGTH) {
++		unsigned char padding[2 * SHA_CBLOCK];
++		unsigned long n;
++
++		n = padlock_sha_prepare_padding(ctx, padding,
++			(unsigned char *) c->data, c->num, total << 3);
++		padlock_sha1_partial(aligned, padding, n);
++	} else {
 +		padlock_sha1(aligned, c->data, total, c->num);
-+		padlock_copy_bswap(md, aligned, 5);
-+		c->num = 0;
-+		return 1;
 +	}
++	padlock_copy_bswap(md, aligned, 5);
++	c->num = 0;
 +
-+	return SHA1_Final(md, c);
++	return 1;
 +}
 +
 +static EVP_MD padlock_sha1_md = {
@@ -385,9 +453,9 @@ index 381a746..2f8c72a 100644
 +#if !defined(OPENSSL_NO_SHA256)
 +
 +static void
-+padlock_sha256(void *hwctx, const void *buf, uint32_t total, uint32_t now)
++padlock_sha256(void *hwctx, const void *buf, unsigned long total, unsigned long now)
 +{
-+	uint32_t pos = total - now;
++	unsigned long pos = total - now;
 +
 +	asm volatile ("xsha256"
 +			: "+S"(buf), "+D"(hwctx), "+a"(pos), "+c"(total)
@@ -395,15 +463,17 @@ index 381a746..2f8c72a 100644
 +}
 +
 +static void
-+padlock_sha256_partial(void *hwctx, const void *buf, uint32_t blocks)
++padlock_sha256_partial(void *hwctx, const void *buf, unsigned long blocks)
 +{
 +	asm volatile ("xsha256"
 +			: "+S"(buf), "+D"(hwctx), "+c"(blocks)
-+			: "a"(-1) : "memory");
++			: "a"(-1L) : "memory");
 +}
 +
-+static int padlock_sha256_update(EVP_MD_CTX *ctx, const void *data,
-+				 size_t len)
++#if PADLOCK_NEED_FALLBACK_SHA
++
++static int padlock_sha256_update_eden(EVP_MD_CTX *ctx, const void *data,
++				      size_t len)
 +{
 +	unsigned char hwctx[PADLOCK_SHA_HWCTX];
 +	uint32_t *aligned = PADLOCK_SHA_ALIGN(hwctx);
@@ -417,7 +487,7 @@ index 381a746..2f8c72a 100644
 +	total += len;
 +
 +	if ((ctx->flags & EVP_MD_CTX_FLAG_ONESHOT) &&
-+	    (total <= 0xfffffffe)) {
++	    (total <= PADLOCK_MAX_FINALIZING_LENGTH)) {
 +		if (c->num != 0) {
 +			l = (len < SHA256_CBLOCK) ? len : SHA256_CBLOCK;
 +			if (!SHA256_Update(c, data, l))
@@ -439,15 +509,17 @@ index 381a746..2f8c72a 100644
 +	return SHA256_Update(c, data, len);
 +}
 +
-+static int padlock_nano_sha256_update(EVP_MD_CTX *ctx, const void *data,
-+				      size_t len)
++#endif
++
++static int padlock_sha256_update(EVP_MD_CTX *ctx, const void *data,
++				 size_t len)
 +{
 +	unsigned char hwctx[PADLOCK_SHA_HWCTX];
 +	uint32_t *aligned = PADLOCK_SHA_ALIGN(hwctx);
 +	SHA256_CTX *c = ctx->md_data;
 +	uint_fast64_t total;
 +	unsigned char *p;
-+	unsigned int n;
++	unsigned long n;
 +
 +	/* Calculate total length (Nl,Nh) is length in bits */
 +	total = (((uint_fast64_t) c->Nh) << 29) + (c->Nl >> 3);
@@ -478,7 +550,7 @@ index 381a746..2f8c72a 100644
 +
 +	/* Can we finalize straight away? */
 +	if ((ctx->flags & EVP_MD_CTX_FLAG_ONESHOT) &&
-+	    (total <= 0xfffffffe)) {
++	    (total <= PADLOCK_MAX_FINALIZING_LENGTH)) {
 +		padlock_sha256(aligned, data, total, len);
 +		memcpy(c->h, aligned, sizeof(c->h));
 +		c->num = -1;
@@ -505,8 +577,10 @@ index 381a746..2f8c72a 100644
 +
 +static int padlock_sha256_final(EVP_MD_CTX *ctx, unsigned char *md)
 +{
++	unsigned char hwctx[PADLOCK_SHA_HWCTX];
++	uint32_t *aligned = PADLOCK_SHA_ALIGN(hwctx);
++	uint64_t total;
 +	SHA256_CTX *c = ctx->md_data;
-+	uint_fast64_t total;
 +
 +	if (c->num == -1) {
 +		padlock_copy_bswap(md, c->h, sizeof(c->h)/sizeof(c->h[0]));
@@ -515,18 +589,25 @@ index 381a746..2f8c72a 100644
 +	}
 +
 +	total = (((uint_fast64_t) c->Nh) << 29) + (c->Nl >> 3);
-+	if (total <= 0xfffffffe) {
-+		unsigned char hwctx[PADLOCK_SHA_HWCTX];
-+		uint32_t *aligned = PADLOCK_SHA_ALIGN(hwctx);
++#if PADLOCK_NEED_FALLBACK_SHA
++	if ((!PADLOCK_HAVE_NANO) && (total > PADLOCK_MAX_FINALIZING_LENGTH))
++		return SHA256_Final(md, c);
++#endif
 +
-+		memcpy(aligned, c->h, sizeof(c->h));
++	memcpy(aligned, c->h, sizeof(c->h));
++	if (total > PADLOCK_MAX_FINALIZING_LENGTH) {
++		unsigned char padding[2 * SHA_CBLOCK];
++		unsigned long n;
++
++		n = padlock_sha_prepare_padding(ctx, padding,
++			(unsigned char *) c->data, c->num, total << 3);
++		padlock_sha256_partial(aligned, padding, n);
++	} else {
 +		padlock_sha256(aligned, c->data, total, c->num);
-+		padlock_copy_bswap(md, aligned, sizeof(c->h)/sizeof(c->h[0]));
-+		c->num = 0;
-+		return 1;
 +	}
-+
-+	return SHA256_Final(md, c);
++	padlock_copy_bswap(md, aligned, sizeof(c->h)/sizeof(c->h[0]));
++	c->num = 0;
++	return 1;
 +}
 +
 +#if !defined(OPENSSL_NO_SHA224)
@@ -633,7 +714,7 @@ index 381a746..2f8c72a 100644
  /* ===== Random Number Generator ===== */
  /*
   * This code is not engaged. The reason is that it does not comply
-@@ -1215,6 +1669,62 @@ static RAND_METHOD padlock_rand = {
+@@ -1319,6 +1831,60 @@ static RAND_METHOD padlock_rand = {
  	padlock_rand_status,	/* rand status */
  };
  
@@ -649,32 +730,30 @@ index 381a746..2f8c72a 100644
 +	/* Generate a nice engine name with available features */
 +	BIO_snprintf(padlock_name, sizeof(padlock_name),
 +		"VIA PadLock: %s%s%s%s%s%s",
-+		 padlock_flags ? "" : "not supported",
-+		 PADLOCK_HAVE_RNG ? "RNG " : "",
-+		 PADLOCK_HAVE_ACE ? (PADLOCK_HAVE_ACE2 ? "ACE2 " : "ACE ") : "",
-+		 PADLOCK_HAVE_PHE ? "PHE " : "",
-+		 PADLOCK_HAVE_PMM ? "PMM " : "",
-+		 PADLOCK_HAVE_NANO ? "NANO " : ""
-+		 );
++		padlock_flags ? "" : "not supported",
++		PADLOCK_HAVE_RNG ? "RNG " : "",
++		PADLOCK_HAVE_ACE ? (PADLOCK_HAVE_ACE2 ? "ACE2 " : "ACE ") : "",
++		PADLOCK_HAVE_PHE ? "PHE " : "",
++		PADLOCK_HAVE_PMM ? "PMM " : "",
++		PADLOCK_HAVE_NANO ? "NANO " : ""
++		);
 +
-+#ifndef OPENSSL_NO_SHA
-+	/* Use Nano SHA acceleration? */
-+	if (PADLOCK_HAVE_NANO) {
-+		padlock_sha1_md.update = padlock_nano_sha1_update;
-+		padlock_dss1_md.update = padlock_nano_sha1_update;
++#if PADLOCK_NEED_FALLBACK_SHA && !defined(OPENSSL_NO_SHA)
++	if (!PADLOCK_HAVE_NANO) {
++		padlock_sha1_md.update = padlock_sha1_update_eden;
++		padlock_dss1_md.update = padlock_sha1_update_eden;
 +#if !defined(OPENSSL_NO_SHA256)
 +#if !defined(OPENSSL_NO_SHA224)
-+		padlock_sha224_md.update = padlock_nano_sha256_update;
++		padlock_sha224_md.update = padlock_sha256_update_eden;
 +#endif
-+		padlock_sha256_md.update = padlock_nano_sha256_update;
++		padlock_sha256_md.update = padlock_sha256_update_eden;
 +#endif
 +	}
-+#endif
++#endif  
 +
 +	/* Register everything or return with an error */
 +	if (!ENGINE_set_id(e, padlock_id) ||
 +	    !ENGINE_set_name(e, padlock_name) ||
-+
 +	    !ENGINE_set_init_function(e, padlock_init)
 +#ifndef OPENSSL_NO_AES
 +	    || (PADLOCK_HAVE_ACE && !ENGINE_set_ciphers (e, padlock_ciphers))
