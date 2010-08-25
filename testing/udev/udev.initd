@@ -1,5 +1,5 @@
 #!/sbin/runscript
-# Copyright 1999-2008 Gentoo Foundation
+# Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 description="Run udevd and create the device-nodes"
@@ -19,7 +19,7 @@ depend()
 	before checkfs fsck
 
 	# udev does not work inside vservers
-	keyword novserver
+	keyword novserver nolxc noopenvz
 }
 
 cleanup()
@@ -46,14 +46,13 @@ rules_disable_switch()
 	# this function disables rules files
 	# by creating new files with the same name
 	# in a temp rules directory with higher priority
-	local d=/dev/.udev/rules.d bname="$1" onoff="$2"
+	local f=/dev/.udev/rules.d/"$1" bname="$1" onoff="$2"
 
 	if yesno "${onoff}"; then
-		mkdir -p "$d"
 		echo "# This file disables ${bname} due to /etc/conf.d/udev" \
-			> "${d}/${bname}"
+			> "${f}"
 	else
-		rm -f "${d}/${bname}"
+		rm -f "${f}"
 	fi
 }
 
@@ -63,8 +62,15 @@ start_udevd()
 	if [ -e /proc/modules ] ; then
 		modprobe -q unix 2>/dev/null
 	fi
+	local opts="${udev_opts}"
+
 	ebegin "Starting udevd"
-	start-stop-daemon --start --exec /sbin/udevd -- --daemon
+	if yesno "${udev_debug:-no}"; then
+		/sbin/udevd --daemon ${opts} --debug 2>/dev/.udev/udev.log
+	else
+		start-stop-daemon --start --exec /sbin/udevd -- --daemon ${opts}
+	fi
+
 	eend $?
 }
 
@@ -77,25 +83,31 @@ populate_dev()
 	fi
 
 	ebegin "Populating /dev with existing devices through uevents"
+	udevadm control --property=STARTUP=1
 	if yesno "${rc_coldplug}"; then
-		udevadm trigger
+		udevadm trigger --action="add"
 	else
 		# Do not run any init-scripts, Bug #206518
-		udevadm control --env do_not_run_plug_service=1
+		udevadm control --property=do_not_run_plug_service=1
 
 		# only create device nodes
-		udevadm trigger --attr-match=dev
+		udevadm trigger --action="add" --attr-match=dev
 
 		# run persistent-net stuff, bug 191466
-		udevadm trigger --subsystem-match=net
+		udevadm trigger --action="add" --subsystem-match=net
 	fi
 	eend $?
 
+	# we can speed up booting under these conditions:
+	#  * using devtmpfs so kernel creates device nodes for us
+	#  * only using kernel created device nodes at boot (in /etc/fstab and elsewhere)
+	#
 	ebegin "Waiting for uevents to be processed"
 	udevadm settle --timeout=${udev_settle_timeout:-60}
 	eend $?
 
-	udevadm control --env do_not_run_plug_service=
+	udevadm control --property=do_not_run_plug_service=
+	udevadm control --property=STARTUP=
 	return 0
 }
 
@@ -131,19 +143,9 @@ display_hotplugged_services() {
 		svc="${svcfile##*/}"
 		[ -x "${svcfile}" ] || continue
 
-		# do not display this - better: do only inject it later :)
-		[ "$svc" = "udev-postmount" ] && continue
-
 		services="${services} ${svc}"
 	done
 	[ -n "${services}" ] && einfo "Device initiated services:${HILITE}${services}${NORMAL}"
-}
-
-inject_postmount_initd() {
-	if ! mark_service_hotplugged udev-postmount; then
-		IN_HOTPLUG=1 /etc/init.d/udev-postmount start >/dev/null 2>&1
-	fi
-	#einfo "Injected udev-postmount service"
 }
 
 check_persistent_net()
@@ -198,22 +200,19 @@ check_udev_works()
 
 start()
 {
-	# do not run this on old baselayout where udev-addon gets loaded
-	if [ ! -f /etc/init.d/sysfs ]; then
-		eerror "The $SVCNAME init-script is written for baselayout-2!"
-		eerror "Please do not use it with baselayout-1!".
-		return 1
-	fi
-
 	_start
 	
 	display_hotplugged_services
 
-	inject_postmount_initd
+	return 0
 }
 
 _start()
 {
+	if [ ! -e /etc/runlevels/${RC_DEFAULTLEVEL:-default}/udev-postmount ]; then
+		ewarn "You should add udev-postmount service to your default runlevel."
+	fi
+
 	root_link
 	rules_disable_switch 75-persistent-net-generator.rules "${persistent_net_disable:-no}"
 	rules_disable_switch 75-cd-aliases-generator.rules ${persistent_cd_disable:-no}
