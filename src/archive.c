@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <sysexits.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <limits.h>
 #include <stdint.h>
 

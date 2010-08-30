@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <malloc.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <pwd.h>
 #include <grp.h>
 

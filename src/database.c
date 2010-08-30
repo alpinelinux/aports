@@ -20,6 +20,7 @@
 #include <signal.h>
 #include <fnmatch.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 
 #include "apk_defines.h"
 #include "apk_package.h"
