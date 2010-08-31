@@ -1,0 +1,197 @@
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+pkgname=apache2
+pkgver=2.2.16
+pkgrel=3
+pkgdesc="A high performance Unix-based HTTP server"
+url="http://httpd.apache.org/"
+license="APACHE"
+depends=""
+pkgusers="apache"
+pkggroups="apache"
+makedepends="openssl-dev zlib-dev apr-util-dev apr-dev pcre-dev
+	autoconf automake"
+subpackages="$pkgname-dev $pkgname-doc $pkgname-utils $pkgname-ssl
+	$pkgname-ldap"
+source="http://archive.apache.org/dist/httpd/httpd-$pkgver.tar.bz2
+	http://mpm-itk.sesse.net/apache2.2-mpm-itk-2.2.11-02/02-rename-prefork-to-itk.patch
+	http://mpm-itk.sesse.net/apache2.2-mpm-itk-2.2.11-02/03-add-mpm-to-build-system.patch
+	http://mpm-itk.sesse.net/apache2.2-mpm-itk-2.2.11-02/04-correct-output-makefile-location.patch
+	http://mpm-itk.sesse.net/apache2.2-mpm-itk-2.2.11-02/05-add-copyright.patch
+	http://mpm-itk.sesse.net/apache2.2-mpm-itk-2.2.11-02/06-hook-just-after-merging-perdir-config.patch
+	http://mpm-itk.sesse.net/apache2.2-mpm-itk-2.2.11-02/07-base-functionality.patch
+	http://mpm-itk.sesse.net/apache2.2-mpm-itk-2.2.11-02/08-max-clients-per-vhost.patch
+	http://mpm-itk.sesse.net/apache2.2-mpm-itk-2.2.11-02/09-capabilities.patch
+	http://mpm-itk.sesse.net/apache2.2-mpm-itk-2.2.11-02/10-nice.patch
+	apache2.confd
+	apache2.logrotate
+	apache2.initd
+	httpd.conf
+	ssl.conf
+	ldap.conf
+	alpine.layout"
+
+prepare() {
+	cd "$srcdir"
+	cat "$srcdir/alpine.layout" >> httpd-$pkgver/config.layout
+
+	# create symlinks to soruces for prefork and worker
+	ln -s httpd-$pkgver prefork
+	ln -s httpd-$pkgver worker
+
+	# make a patched clone of itk sources
+	cp -ra httpd-$pkgver itk
+	cd itk 
+	mkdir -p server/mpm/experimental/itk
+	cp -r server/mpm/prefork/* \
+		server/mpm/experimental/itk/ || return 1
+	mv server/mpm/experimental/itk/prefork.c \
+		server/mpm/experimental/itk/itk.c || return 1
+	patch -Np1 -i "$srcdir/02-rename-prefork-to-itk.patch" || return 1
+	patch -Np1 -i "$srcdir/03-add-mpm-to-build-system.patch" || return 1
+	patch -Np1 -i "$srcdir/04-correct-output-makefile-location.patch" || return 1
+	patch -Np1 -i "$srcdir/05-add-copyright.patch" || return 1
+	patch -Np1 -i "$srcdir/06-hook-just-after-merging-perdir-config.patch" || return 1
+	patch -Np1 -i "$srcdir/07-base-functionality.patch" || return 1
+	patch -Np1 -i "$srcdir/08-max-clients-per-vhost.patch" || return 1
+	patch -Np1 -i "$srcdir/09-capabilities.patch" || return 1
+	patch -Np1 -i "$srcdir/10-nice.patch" || return 1
+	autoconf || return 1
+}
+
+_buildmpm() {
+	local mpm=$1
+	shift
+	mkdir "$srcdir"/build-${mpm}
+	cd "$srcdir"/build-${mpm}
+	"$srcdir"/$mpm/configure --prefix=/usr \
+		--enable-layout=Alpine \
+		--enable-so \
+		--enable-suexec \
+		--with-suexec-caller=http \
+		--with-suexec-docroot=/var/www/localhost/htdocs \
+		--with-suexec-logfile=/var/log/httpd/suexec.log \
+		--with-suexec-bin=/usr/sbin/suexec \
+		--with-suexec-uidmin=99 \
+		--with-suexec-gidmin=99 \
+		--with-apr=/usr/bin/apr-1-config \
+		--with-apr-util=/usr/bin/apu-1-config \
+		--with-pcre=/usr \
+		--with-mpm=${mpm} \
+		$@ \
+		|| return 1
+	make || return 1
+}
+
+build () { 
+	local mpm
+
+	# build prefork with everything
+	_buildmpm prefork \
+		--enable-mods-shared=all \
+		--enable-ssl --with-ssl \
+		--enable-proxy \
+	        --enable-cache \
+	        --enable-disk-cache \
+		--enable-mem-cache \
+		--enable-file-cache \
+	        --enable-ldap --enable-authnz-ldap \
+	        --enable-cgid \
+	        --enable-authn-anon --enable-authn-alias \
+	        --disable-imagemap \
+		--enable-proxy-connect \
+		--enable-proxy-http \
+		--enable-proxy-ftp \
+		--enable-deflate \
+		--enable-dbd \
+		|| return 1
+
+	#build the alternative mpms, but without modules
+	for mpm in worker itk; do
+		_buildmpm $mpm --enable-modules=none
+	done
+}
+
+package() {
+	cd "$srcdir"/build-prefork
+	make -j1 DESTDIR="$pkgdir" install || return 1
+	for mpm in worker itk; do
+		install -m755 "$srcdir"/build-$mpm/httpd \
+			"$pkgdir/usr/sbin/httpd.${mpm}" || return 1
+	done
+	
+	# config
+	rm -r "$pkgdir"/etc/apache2/httpd.conf \
+		"$pkgdir"/etc/apache2/extra 
+	install -D -m644 "$srcdir"/httpd.conf "$pkgdir"/etc/apache2/httpd.conf
+	install -d "$pkgdir"/etc/apache2/conf.d
+
+	# init scripts and logrotate
+	install -D -m755 "$srcdir/apache2.initd" \
+		"$pkgdir/etc/init.d/apache2" || return 1
+	install -D -m644 "$srcdir/apache2.logrotate" \
+		"$pkgdir/etc/logrotate.d/apache2" || return 1
+	install -D -m644 "$srcdir/apache2.confd" \
+		"$pkgdir/etc/conf.d/apache2" || return 1
+
+	install -d "$pkgdir"/var/www
+	ln -fs /var/log/apache2 "$pkgdir/var/www/logs"
+	ln -fs /var/run/apache2 "$pkgdir/var/www/run"
+	ln -fs /usr/lib/apache2 "$pkgdir/var/www/modules"
+	ln -fs /etc/apache2/conf.d "$pkgdir/var/www/conf.d"
+}
+
+# include the builddir and apxs in -dev package
+dev() {
+	default_dev
+	depends="$depends perl apr-util-dev"
+	install -d "$subpkgdir"/usr/share/apache2/ \
+		"$subpkgdir"/usr/sbin
+	mv "$pkgdir"/usr/sbin/apxs "$subpkgdir"/usr/sbin/ || return 1
+	mv "$pkgdir"/usr/share/apache2/build "$subpkgdir"/usr/share/apache2/
+}
+
+utils() {
+	pkgdesc="Apache utility programs for webservers"
+	install -d "$subpkgdir"/usr/bin "$subpkgdir"/usr/sbin
+	cd "$pkgdir"/usr/sbin
+	mv ab dbmmanage htdbm htdigest htpasswd logresolve "$subpkgdir"/usr/bin
+	mv checkgid htcacheclean rotatelogs "$subpkgdir"/usr/sbin
+}
+
+ssl() {
+	pkgdesc="SSL/TLS module for the Apache HTTP Server"
+	install="apache2-ssl.post-install"
+	depends="apache2 openssl"
+	install -d "$subpkgdir"/usr/lib/apache2 \
+		"$subpkgdir"/etc/ssl/apache2
+	mv "$pkgdir"/usr/lib/apache2/mod_ssl.so "$subpkgdir"/usr/lib/apache2/ \
+		|| return 1
+	install -m644 -D "$srcdir"/ssl.conf "$subpkgdir"/etc/apache2/conf.d/ssl.conf
+}
+
+ldap() {
+	pkgdesc="LDAP authentication/authorization module for the Apache HTTP Server"
+	url="http://httpd.apache.org/docs/2.2/mod/mod_authnz_ldap.html"
+	depends="apache2"
+	install -d "$subpkgdir"/usr/lib/apache2 
+	mv "$pkgdir"/usr/lib/apache2/mod_*ldap*.so "$subpkgdir"/usr/lib/apache2
+	install -m644 -D  "$srcdir"/ldap.conf "$subpkgdir"/etc/apache2/conf.d/ldap.conf
+}
+
+md5sums="c8ff2a07c884300bc7766a2e7f662d33  httpd-2.2.16.tar.bz2
+db42cfcc18ae1c32aaaff2347e35b79d  02-rename-prefork-to-itk.patch
+131408ad4dc7b18547b4e062e7e495ab  03-add-mpm-to-build-system.patch
+ee488f391054d528547c3a372faa2aa7  04-correct-output-makefile-location.patch
+b202944761b2f0516196488b12504236  05-add-copyright.patch
+78fa15f8ca3a284b7d71f942e24e47fb  06-hook-just-after-merging-perdir-config.patch
+d33e39350e987721d50e6fb8e164ab6b  07-base-functionality.patch
+9f7a8935f9cabc7b46d0052906634cef  08-max-clients-per-vhost.patch
+1b28e3363e1b0d05b738a21e7ddd264f  09-capabilities.patch
+d9667fcd2ffecc63e446edd4d6666731  10-nice.patch
+e322b5211e49511cac6e40c86af1b1da  apache2.confd
+75fe4138b98fcffd01b8c8c077b944f3  apache2.logrotate
+0261136ff734c3ae8dcf878a46ed5830  apache2.initd
+1dfc079be3fec873b67bca19b60c56b1  httpd.conf
+5d0d024ca43571b863874ab871b2c109  ssl.conf
+b70fe826486043e3953cfe21f9e6fa16  ldap.conf
+c66ff5f70260d5266e6803a59b39bd7f  alpine.layout"
