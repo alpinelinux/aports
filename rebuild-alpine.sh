@@ -39,7 +39,7 @@ build () {
             if [ -n "$mail" ] ; then
                 maintainer=$(grep Maintainer APKBUILD | cut -d " " -f 3-)
                 if [ -n "$maintainer" ] ; then
-                    recipients="$maintainer -c dev@lists.alpinelinux.org"
+                    recipients="$maintainer -cc dev@lists.alpinelinux.org"
                 else
                     recipients="dev@lists.alpinelinux.org"
                 fi
