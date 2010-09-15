@@ -26,15 +26,20 @@ build () {
         pkgno=$(expr "$pkgno" + 1)
         echo "Building $p ($pkgno of $pktcnt in $1 - $failed failed)"
         cd $rootdir/$1/$p
+        if [ -n "$debug" ] ; then
+            apk info | sort > $rootdir/packages.$1.$pkgno.$p.before
+        fi
         abuild -rm > $rootdir/$1_$p.txt 2>&1
         if [ "$?" = "0" ] ; then
-            rm $rootdir/$1_$p.txt
+    	    if [ -z "$debug" ] ; then
+                rm $rootdir/$1_$p.txt
+            fi
         else
             echo "Package $1/$p failed to build (output in $rootdir/$1_$p.txt)"
             if [ -n "$mail" ] ; then
                 maintainer=$(grep Maintainer APKBUILD | cut -d " " -f 3-)
                 if [ -n "$maintainer" ] ; then
-                    recipients="$maintainer -c dev@lists.alpinelinux.org"
+                    recipients="$maintainer -cc dev@lists.alpinelinux.org"
                 else
                     recipients="dev@lists.alpinelinux.org"
                 fi
@@ -46,6 +51,9 @@ build () {
             fi
             failed=$(expr "$failed" + 1)
         fi
+        if [ -n "$debug" ] ; then
+            apk info | sort > $rootdir/packages.$1.$pkgno.$p.after
+        fi
     done
     cd $rootdir
 }
@@ -54,10 +62,11 @@ touch START_OF_BUILD.txt
 
 unset clean
 unset mail
-while getopts "cm" opt; do
+while getopts "cmd" opt; do
 	case $opt in
 		'c') clean="--clean";;
 		'm') mail="--mail";;
+		'd') debug="--debug";;
 	esac
 done
 
