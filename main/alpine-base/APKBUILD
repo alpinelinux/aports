@@ -7,7 +7,8 @@ pkgdesc="Meta package for minimal alpine base"
 url="http://alpinelinux.org"
 license="GPL"
 depends="alpine-baselayout alpine-conf apk-tools busybox busybox-initscripts
-	openrc uclibc-utils bbsuid"
+	openrc bbsuid"
+[ "$ALPINE_LIBC" != "eglibc" ] && depends="$depends uclibc-utils"
 makedepends=
 install=
 subpackages=
