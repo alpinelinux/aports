@@ -30,6 +30,11 @@
 #include "apk_archive.h"
 #include "apk_print.h"
 
+enum {
+	APK_DISALLOW_RMDIR = 0,
+	APK_ALLOW_RMDIR = 1
+};
+
 int apk_verbosity = 1;
 unsigned int apk_flags = 0;
 
@@ -188,16 +193,19 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 	return pn;
 }
 
-static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir)
+static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir,
+			     int allow_rmdir)
 {
 	dir->refs--;
 	if (dir->refs > 0)
 		return;
 
 	db->installed.stats.dirs--;
+	if (allow_rmdir)
+		unlinkat(db->root_fd, dir->name, AT_REMOVEDIR);
 
 	if (dir->parent != NULL)
-		apk_db_dir_unref(db, dir->parent);
+		apk_db_dir_unref(db, dir->parent, allow_rmdir);
 }
 
 static struct apk_db_dir *apk_db_dir_ref(struct apk_db_dir *dir)
@@ -307,16 +315,11 @@ static void apk_db_diri_mkdir(struct apk_database *db, struct apk_db_dir_instanc
 	}
 }
 
-static void apk_db_diri_rmdir(struct apk_database *db, struct apk_db_dir_instance *diri)
-{
-	if (diri->dir->refs == 1)
-		unlinkat(db->root_fd, diri->dir->name, 1);
-}
-
 static void apk_db_diri_free(struct apk_database *db,
-			     struct apk_db_dir_instance *diri)
+			     struct apk_db_dir_instance *diri,
+			     int allow_rmdir)
 {
-	apk_db_dir_unref(db, diri->dir);
+	apk_db_dir_unref(db, diri->dir, allow_rmdir);
 	free(diri);
 }
 
@@ -1265,7 +1268,7 @@ void apk_db_close(struct apk_database *db)
 
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
-			apk_db_diri_free(db, diri);
+			apk_db_diri_free(db, diri, APK_DISALLOW_RMDIR);
 		}
 	}
 
@@ -1884,9 +1887,8 @@ static void apk_db_purge_pkg(struct apk_database *db,
 				db->installed.stats.files--;
 			}
 		}
-		apk_db_diri_rmdir(db, diri);
 		__hlist_del(dc, &ipkg->owned_dirs.first);
-		apk_db_diri_free(db, diri);
+		apk_db_diri_free(db, diri, APK_ALLOW_RMDIR);
 	}
 }
 
