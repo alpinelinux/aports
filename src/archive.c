@@ -146,8 +146,8 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 
 		entry = (struct apk_file_info){
 			.size  = GET_OCTAL(buf.size),
-			.uid   = GET_OCTAL(buf.uid),
-			.gid   = GET_OCTAL(buf.gid),
+			.uid   = apk_resolve_uid(buf.uname, GET_OCTAL(buf.uid)),
+			.gid   = apk_resolve_gid(buf.gname, GET_OCTAL(buf.gid)),
 			.mode  = GET_OCTAL(buf.mode) & 07777,
 			.mtime = GET_OCTAL(buf.mtime),
 			.name  = entry.name,
@@ -389,10 +389,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 		break;
 	}
 	if (r == 0) {
-		r = fchownat(atfd, fn,
-			     apk_resolve_uid(ae->uname, ae->uid),
-			     apk_resolve_gid(ae->gname, ae->gid),
-			     atflags);
+		r = fchownat(atfd, fn, ae->uid, ae->gid, atflags);
 		if (r < 0) {
 			apk_error("Failed to set ownership on %s: %s",
 				  fn, strerror(errno));
