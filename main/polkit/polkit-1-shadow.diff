@@ -1,0 +1,1030 @@
+diff --git a/src/polkitagent/Makefile.am b/src/polkitagent/Makefile.am
+index 3f38329..e114d01 100644
+--- a/src/polkitagent/Makefile.am
++++ b/src/polkitagent/Makefile.am
+@@ -68,8 +68,15 @@ libpolkit_agent_1_la_LDFLAGS = -export-symbols-regex '(^polkit_.*)'
+ libexec_PROGRAMS = polkit-agent-helper-1
+ 
+ polkit_agent_helper_1_SOURCES = 					\
+-	polkitagenthelper.c						\
+-	$(NULL)
++	polkitagenthelperprivate.c polkitagenthelperprivate.h		
++
++if POLKIT_AUTHFW_PAM
++polkit_agent_helper_1_SOURCES += polkitagenthelper-pam.c
++endif
++if POLKIT_AUTHFW_SHADOW
++polkit_agent_helper_1_SOURCES += polkitagenthelper-shadow.c
++endif
++polkit_agent_helper_1_SOURCES += $(NULL)
+ 
+ polkit_agent_helper_1_CFLAGS  = 					\
+         -D_POLKIT_COMPILATION                                  		\
+diff --git a/src/polkitagent/polkitagenthelper-pam.c b/src/polkitagent/polkitagenthelper-pam.c
+new file mode 100644
+index 0000000..4c6c6fb
+--- /dev/null
++++ b/src/polkitagent/polkitagenthelper-pam.c
+@@ -0,0 +1,264 @@
++/*
++ * Copyright (C) 2008, 2010 Red Hat, Inc.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General
++ * Public License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place, Suite 330,
++ * Boston, MA 02111-1307, USA.
++ *
++ * Author: David Zeuthen <davidz@redhat.com>
++ */
++
++#include "config.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <syslog.h>
++#include <security/pam_appl.h>
++
++#include <polkit/polkit.h>
++#include "polkitagenthelperprivate.h"
++
++static int conversation_function (int n, const struct pam_message **msg, struct pam_response **resp, void *data);
++
++int
++main (int argc, char *argv[])
++{
++  int rc;
++  const char *user_to_auth;
++  const char *cookie;
++  struct pam_conv pam_conversation;
++  pam_handle_t *pam_h;
++  const void *authed_user;
++
++  rc = 0;
++  pam_h = NULL;
++
++  /* clear the entire environment to avoid attacks using with libraries honoring environment variables */
++  if (clearenv () != 0)
++    goto error;
++
++  /* set a minimal environment */
++  setenv ("PATH", "/usr/sbin:/usr/bin:/sbin:/bin", 1);
++
++  /* check that we are setuid root */
++  if (geteuid () != 0)
++    {
++      fprintf (stderr, "polkit-agent-helper-1: needs to be setuid root\n");
++      goto error;
++    }
++
++  openlog ("polkit-agent-helper-1", LOG_CONS | LOG_PID, LOG_AUTHPRIV);
++
++  /* check for correct invocation */
++  if (argc != 3)
++    {
++      syslog (LOG_NOTICE, "inappropriate use of helper, wrong number of arguments [uid=%d]", getuid ());
++      fprintf (stderr, "polkit-agent-helper-1: wrong number of arguments. This incident has been logged.\n");
++      goto error;
++    }
++
++  user_to_auth = argv[1];
++  cookie = argv[2];
++
++  if (getuid () != 0)
++    {
++      /* check we're running with a non-tty stdin */
++      if (isatty (STDIN_FILENO) != 0)
++        {
++          syslog (LOG_NOTICE, "inappropriate use of helper, stdin is a tty [uid=%d]", getuid ());
++          fprintf (stderr, "polkit-agent-helper-1: inappropriate use of helper, stdin is a tty. This incident has been logged.\n");
++          goto error;
++        }
++    }
++
++#ifdef PAH_DEBUG
++  fprintf (stderr, "polkit-agent-helper-1: user to auth is '%s'.\n", user_to_auth);
++#endif /* PAH_DEBUG */
++
++  pam_conversation.conv        = conversation_function;
++  pam_conversation.appdata_ptr = NULL;
++
++  /* start the pam stack */
++  rc = pam_start ("polkit-1",
++                  user_to_auth,
++                  &pam_conversation,
++                  &pam_h);
++  if (rc != PAM_SUCCESS)
++    {
++      fprintf (stderr, "polkit-agent-helper-1: pam_start failed: %s\n", pam_strerror (pam_h, rc));
++      goto error;
++    }
++
++  /* set the requesting user */
++  rc = pam_set_item (pam_h, PAM_RUSER, user_to_auth);
++  if (rc != PAM_SUCCESS)
++    {
++      fprintf (stderr, "polkit-agent-helper-1: pam_set_item failed: %s\n", pam_strerror (pam_h, rc));
++      goto error;
++    }
++
++  /* is user really user? */
++  rc = pam_authenticate (pam_h, 0);
++  if (rc != PAM_SUCCESS)
++    {
++      fprintf (stderr, "polkit-agent-helper-1: pam_authenticated failed: %s\n", pam_strerror (pam_h, rc));
++      goto error;
++    }
++
++  /* permitted access? */
++  rc = pam_acct_mgmt (pam_h, 0);
++  if (rc != PAM_SUCCESS)
++    {
++      fprintf (stderr, "polkit-agent-helper-1: pam_acct_mgmt failed: %s\n", pam_strerror (pam_h, rc));
++      goto error;
++    }
++
++  /* did we auth the right user? */
++  rc = pam_get_item (pam_h, PAM_USER, &authed_user);
++  if (rc != PAM_SUCCESS)
++    {
++      fprintf (stderr, "polkit-agent-helper-1: pam_get_item failed: %s\n", pam_strerror (pam_h, rc));
++      goto error;
++    }
++
++  if (strcmp (authed_user, user_to_auth) != 0)
++    {
++      fprintf (stderr, "polkit-agent-helper-1: Tried to auth user '%s' but we got auth for user '%s' instead",
++               user_to_auth, (const char *) authed_user);
++      goto error;
++    }
++
++#ifdef PAH_DEBUG
++  fprintf (stderr, "polkit-agent-helper-1: successfully authenticated user '%s'.\n", user_to_auth);
++#endif /* PAH_DEBUG */
++
++  pam_end (pam_h, rc);
++  pam_h = NULL;
++
++#ifdef PAH_DEBUG
++  fprintf (stderr, "polkit-agent-helper-1: sending D-Bus message to PolicyKit daemon\n");
++#endif /* PAH_DEBUG */
++
++  /* now send a D-Bus message to the PolicyKit daemon that
++   * includes a) the cookie; and b) the user we authenticated
++   */
++  if (!send_dbus_message (cookie, user_to_auth))
++    {
++#ifdef PAH_DEBUG
++      fprintf (stderr, "polkit-agent-helper-1: error sending D-Bus message to PolicyKit daemon\n");
++#endif /* PAH_DEBUG */
++      goto error;
++    }
++
++#ifdef PAH_DEBUG
++  fprintf (stderr, "polkit-agent-helper-1: successfully sent D-Bus message to PolicyKit daemon\n");
++#endif /* PAH_DEBUG */
++
++  fprintf (stdout, "SUCCESS\n");
++  flush_and_wait();
++  return 0;
++
++error:
++  if (pam_h != NULL)
++    pam_end (pam_h, rc);
++
++  fprintf (stdout, "FAILURE\n");
++  flush_and_wait();
++  return 1;
++}
++
++static int
++conversation_function (int n, const struct pam_message **msg, struct pam_response **resp, void *data)
++{
++  struct pam_response *aresp;
++  char buf[PAM_MAX_RESP_SIZE];
++  int i;
++
++  data = data;
++  if (n <= 0 || n > PAM_MAX_NUM_MSG)
++    return PAM_CONV_ERR;
++
++  if ((aresp = calloc(n, sizeof *aresp)) == NULL)
++    return PAM_BUF_ERR;
++
++  for (i = 0; i < n; ++i)
++    {
++      aresp[i].resp_retcode = 0;
++      aresp[i].resp = NULL;
++      switch (msg[i]->msg_style)
++        {
++
++        case PAM_PROMPT_ECHO_OFF:
++          fprintf (stdout, "PAM_PROMPT_ECHO_OFF ");
++          goto conv1;
++
++        case PAM_PROMPT_ECHO_ON:
++          fprintf (stdout, "PAM_PROMPT_ECHO_ON ");
++        conv1:
++          fputs (msg[i]->msg, stdout);
++          if (strlen (msg[i]->msg) > 0 && msg[i]->msg[strlen (msg[i]->msg) - 1] != '\n')
++            fputc ('\n', stdout);
++          fflush (stdout);
++
++          if (fgets (buf, sizeof buf, stdin) == NULL)
++            goto error;
++
++          if (strlen (buf) > 0 &&
++              buf[strlen (buf) - 1] == '\n')
++            buf[strlen (buf) - 1] = '\0';
++
++          aresp[i].resp = strdup (buf);
++          if (aresp[i].resp == NULL)
++            goto error;
++          break;
++
++        case PAM_ERROR_MSG:
++          fprintf (stdout, "PAM_ERROR_MSG ");
++          goto conv2;
++
++        case PAM_TEXT_INFO:
++          fprintf (stdout, "PAM_TEXT_INFO ");
++        conv2:
++          fputs (msg[i]->msg, stdout);
++          if (strlen (msg[i]->msg) > 0 &&
++              msg[i]->msg[strlen (msg[i]->msg) - 1] != '\n')
++            fputc ('\n', stdout);
++          fflush (stdout);
++          break;
++
++        default:
++          goto error;
++        }
++    }
++
++  *resp = aresp;
++  return PAM_SUCCESS;
++
++error:
++
++  for (i = 0; i < n; ++i)
++    {
++      if (aresp[i].resp != NULL) {
++        memset (aresp[i].resp, 0, strlen(aresp[i].resp));
++        free (aresp[i].resp);
++      }
++    }
++  memset (aresp, 0, n * sizeof *aresp);
++  *resp = NULL;
++  return PAM_CONV_ERR;
++}
++
+diff --git a/src/polkitagent/polkitagenthelper-shadow.c b/src/polkitagent/polkitagenthelper-shadow.c
+new file mode 100644
+index 0000000..7435533
+--- /dev/null
++++ b/src/polkitagent/polkitagenthelper-shadow.c
+@@ -0,0 +1,189 @@
++/*
++ * Copyright (C) 2008 Red Hat, Inc.
++ * Copyright (C) 2009-2010 Andrew Psaltis <ampsaltis@gmail.com>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General
++ * Public License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place, Suite 330,
++ * Boston, MA 02111-1307, USA.
++ *
++ * Authors: Andrew Psaltis <ampsaltis@gmail.com>, based on
++ *            polkitagenthelper.c which was written by
++ *          David Zeuthen <davidz@redhat.com>
++ */
++
++#include "config.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <syslog.h>
++#include <shadow.h>
++#include <grp.h>
++#include <pwd.h>
++#include <time.h>
++
++#include <polkit/polkit.h>
++#include "polkitagenthelperprivate.h"
++
++
++extern char *crypt ();
++static int shadow_authenticate (struct spwd *shadow);
++
++int
++main (int argc, char *argv[])
++{
++  struct spwd *shadow;
++  const char *user_to_auth;
++  const char *cookie;
++  time_t tm;
++
++  /* clear the entire environment to avoid attacks with
++     libraries honoring environment variables */
++  if (clearenv () != 0)
++    goto error;
++
++  /* set a minimal environment */
++  setenv ("PATH", "/usr/sbin:/usr/bin:/sbin:/bin", 1);
++
++  /* check that we are setuid root */
++  if (geteuid () != 0)
++    {
++      fprintf (stderr, "polkit-agent-helper-1: needs to be setuid root\n");
++      goto error;
++    }
++
++  openlog ("polkit-agent-helper-1", LOG_CONS | LOG_PID, LOG_AUTHPRIV);
++
++  /* check for correct invocation */
++  if (argc != 3)
++    {
++      syslog (LOG_NOTICE, "inappropriate use of helper, wrong number of arguments [uid=%d]", getuid ());
++      fprintf (stderr, "polkit-agent-helper-1: wrong number of arguments. This incident has been logged.\n");
++      goto error;
++    }
++
++  if (getuid () != 0)
++    {
++    /* check we're running with a non-tty stdin */
++    if (isatty (STDIN_FILENO) != 0)
++      {
++        syslog (LOG_NOTICE, "inappropriate use of helper, stdin is a tty [uid=%d]", getuid ());
++        fprintf (stderr, "polkit-agent-helper-1: inappropriate use of helper, stdin is a tty. This incident has been logged.\n");
++        goto error;
++      }
++    }
++
++  user_to_auth = argv[1];
++  cookie = argv[2];
++
++#ifdef PAH_DEBUG
++  fprintf (stderr, "polkit-agent-helper-1: user to auth is '%s'.\n", user_to_auth);
++#endif /* PAH_DEBUG */
++
++  /* Ask shadow about the user requesting authentication */
++  if ((shadow = getspnam (user_to_auth)) == NULL)
++    {
++      syslog (LOG_NOTICE, "shadow file data information request for user %s [uid=%d] failed", user_to_auth, getuid());
++      fprintf(stderr, "polkit-agent-helper-1: could not get shadow information for%.100s", user_to_auth);
++      goto error;
++    }
++  
++  /* Check the user's identity */
++  if(!shadow_authenticate (shadow))
++    {
++      syslog (LOG_NOTICE, "authentication failure [uid=%d] trying to authenticate '%s'", getuid (), user_to_auth);
++      fprintf (stderr, "polkit-agent-helper-1: authentication failure. This incident has been logged.\n");
++      goto error;
++    }
++
++  /* Check whether the user's password has expired */
++  time(&tm);
++  if( shadow->sp_max >= 0 && (shadow->sp_lstchg + shadow->sp_max) * 60 * 60 * 24 <= tm)
++    {
++      syslog (LOG_NOTICE, "password expired for user '%s' [uid=%d] trying to authenticate", user_to_auth, getuid () );
++      fprintf (stderr, "polkit-agent-helper-1: authorization failure. This incident has been logged.\n");
++      goto error;
++    }
++
++  /* Check whether the user's password has aged (and account expired along
++   * with it)
++   */
++  if( shadow->sp_inact >= 0 && (shadow->sp_lstchg + shadow->sp_max + shadow->sp_inact) * 60 * 60 * 24           <= tm) 
++    {
++      syslog (LOG_NOTICE, "password aged for user '%s' [uid=%d] trying to authenticate", user_to_auth, getuid () );
++      fprintf (stderr, "polkit-agent-helper-1: authorization failure. This incident has been logged.\n");
++      goto error;
++    }
++
++  /* Check whether the user's account has expired */
++  if(shadow->sp_expire >= 0 && shadow->sp_expire * 60 * 60 * 24 <= tm) 
++    {
++      syslog (LOG_NOTICE, "account expired for user '%s' [uid=%d] trying to authenticate", user_to_auth, getuid () );
++      fprintf (stderr, "polkit-agent-helper-1: authorization failure. This incident has been logged.\n");
++      goto error;
++    }
++
++#ifdef PAH_DEBUG
++  fprintf (stderr, "polkit-agent-helper-1: sending D-Bus message to PolicyKit daemon\n");
++#endif /* PAH_DEBUG */
++
++  /* now send a D-Bus message to the PolicyKit daemon that
++   * includes a) the cookie; and b) the user we authenticated
++   */
++  if (!send_dbus_message (cookie, user_to_auth))
++    {
++#ifdef PAH_DEBUG
++      fprintf (stderr, "polkit-agent-helper-1: error sending D-Bus message to PolicyKit daemon\n");
++#endif /* PAH_DEBUG */
++      goto error;
++    }
++
++#ifdef PAH_DEBUG
++  fprintf (stderr, "polkit-agent-helper-1: successfully sent D-Bus message to PolicyKit daemon\n");
++#endif /* PAH_DEBUG */
++
++  fprintf (stdout, "SUCCESS\n");
++  flush_and_wait();
++  return 0;
++
++error:
++  fprintf (stdout, "FAILURE\n");
++  flush_and_wait();
++  return 1;
++}
++
++static int
++shadow_authenticate(struct spwd *shadow)
++{
++  /* Speak PAM to the daemon, thanks to David Zeuthen for the idea. */
++  char passwd[512];
++  fprintf(stdout, "PAM_PROMPT_ECHO_OFF password:\n");
++  fflush(stdout);
++  usleep (10 * 1000); /* since fflush(3) seems buggy */
++
++  if (fgets (passwd, sizeof (passwd), stdin) == NULL)
++    goto error;
++
++  if (strlen (passwd) > 0 && passwd[strlen (passwd) - 1] == '\n')
++    passwd[strlen (passwd) - 1] = '\0';
++  
++  if (strcmp (shadow->sp_pwdp, crypt (passwd, shadow->sp_pwdp)) != 0)
++    goto error;
++  return 1;
++error:
++  return 0;
++}
++
+diff --git a/src/polkitagent/polkitagenthelper.c b/src/polkitagent/polkitagenthelper.c
+deleted file mode 100644
+index cca86db..0000000
+--- a/src/polkitagent/polkitagenthelper.c
++++ /dev/null
+@@ -1,339 +0,0 @@
+-/*
+- * Copyright (C) 2008 Red Hat, Inc.
+- *
+- * This library is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Lesser General Public
+- * License as published by the Free Software Foundation; either
+- * version 2 of the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Lesser General Public License for more details.
+- *
+- * You should have received a copy of the GNU Lesser General
+- * Public License along with this library; if not, write to the
+- * Free Software Foundation, Inc., 59 Temple Place, Suite 330,
+- * Boston, MA 02111-1307, USA.
+- *
+- * Author: David Zeuthen <davidz@redhat.com>
+- */
+-
+-#include "config.h"
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+-#include <unistd.h>
+-#include <sys/types.h>
+-#include <sys/stat.h>
+-#include <syslog.h>
+-#include <security/pam_appl.h>
+-
+-#include <polkit/polkit.h>
+-
+-#ifdef HAVE_SOLARIS
+-#  define LOG_AUTHPRIV    (10<<3)
+-#endif
+-
+-#ifndef HAVE_CLEARENV
+-extern char **environ;
+-
+-static int
+-clearenv (void)
+-{
+-	if (environ != NULL)
+-		environ[0] = NULL;
+-	return 0;
+-}
+-#endif
+-
+-/* Development aid: define PAH_DEBUG to get debugging output. Do _NOT_
+- * enable this in production builds; it may leak passwords and other
+- * sensitive information.
+- */
+-#undef PAH_DEBUG
+-// #define PAH_DEBUG
+-
+-static gboolean send_dbus_message (const char *cookie, const char *user);
+-
+-static int conversation_function (int n, const struct pam_message **msg, struct pam_response **resp, void *data);
+-
+-int
+-main (int argc, char *argv[])
+-{
+-  int rc;
+-  const char *user_to_auth;
+-  const char *cookie;
+-  struct pam_conv pam_conversation;
+-  pam_handle_t *pam_h;
+-  const void *authed_user;
+-
+-  rc = 0;
+-  pam_h = NULL;
+-
+-  /* clear the entire environment to avoid attacks using with libraries honoring environment variables */
+-  if (clearenv () != 0)
+-    goto error;
+-
+-  /* set a minimal environment */
+-  setenv ("PATH", "/usr/sbin:/usr/bin:/sbin:/bin", 1);
+-
+-  /* check that we are setuid root */
+-  if (geteuid () != 0)
+-    {
+-      fprintf (stderr, "polkit-agent-helper-1: needs to be setuid root\n");
+-      goto error;
+-    }
+-
+-  openlog ("polkit-agent-helper-1", LOG_CONS | LOG_PID, LOG_AUTHPRIV);
+-
+-  /* check for correct invocation */
+-  if (argc != 3)
+-    {
+-      syslog (LOG_NOTICE, "inappropriate use of helper, wrong number of arguments [uid=%d]", getuid ());
+-      fprintf (stderr, "polkit-agent-helper-1: wrong number of arguments. This incident has been logged.\n");
+-      goto error;
+-    }
+-
+-  user_to_auth = argv[1];
+-  cookie = argv[2];
+-
+-  if (getuid () != 0)
+-    {
+-      /* check we're running with a non-tty stdin */
+-      if (isatty (STDIN_FILENO) != 0)
+-        {
+-          syslog (LOG_NOTICE, "inappropriate use of helper, stdin is a tty [uid=%d]", getuid ());
+-          fprintf (stderr, "polkit-agent-helper-1: inappropriate use of helper, stdin is a tty. This incident has been logged.\n");
+-          goto error;
+-        }
+-    }
+-
+-#ifdef PAH_DEBUG
+-  fprintf (stderr, "polkit-agent-helper-1: user to auth is '%s'.\n", user_to_auth);
+-#endif /* PAH_DEBUG */
+-
+-  pam_conversation.conv        = conversation_function;
+-  pam_conversation.appdata_ptr = NULL;
+-
+-  /* start the pam stack */
+-  rc = pam_start ("polkit-1",
+-                  user_to_auth,
+-                  &pam_conversation,
+-                  &pam_h);
+-  if (rc != PAM_SUCCESS)
+-    {
+-      fprintf (stderr, "polkit-agent-helper-1: pam_start failed: %s\n", pam_strerror (pam_h, rc));
+-      goto error;
+-    }
+-
+-  /* set the requesting user */
+-  rc = pam_set_item (pam_h, PAM_RUSER, user_to_auth);
+-  if (rc != PAM_SUCCESS)
+-    {
+-      fprintf (stderr, "polkit-agent-helper-1: pam_set_item failed: %s\n", pam_strerror (pam_h, rc));
+-      goto error;
+-    }
+-
+-  /* is user really user? */
+-  rc = pam_authenticate (pam_h, 0);
+-  if (rc != PAM_SUCCESS)
+-    {
+-      fprintf (stderr, "polkit-agent-helper-1: pam_authenticated failed: %s\n", pam_strerror (pam_h, rc));
+-      goto error;
+-    }
+-
+-  /* permitted access? */
+-  rc = pam_acct_mgmt (pam_h, 0);
+-  if (rc != PAM_SUCCESS)
+-    {
+-      fprintf (stderr, "polkit-agent-helper-1: pam_acct_mgmt failed: %s\n", pam_strerror (pam_h, rc));
+-      goto error;
+-    }
+-
+-  /* did we auth the right user? */
+-  rc = pam_get_item (pam_h, PAM_USER, &authed_user);
+-  if (rc != PAM_SUCCESS)
+-    {
+-      fprintf (stderr, "polkit-agent-helper-1: pam_get_item failed: %s\n", pam_strerror (pam_h, rc));
+-      goto error;
+-    }
+-
+-  if (strcmp (authed_user, user_to_auth) != 0)
+-    {
+-      fprintf (stderr, "polkit-agent-helper-1: Tried to auth user '%s' but we got auth for user '%s' instead",
+-               user_to_auth, (const char *) authed_user);
+-      goto error;
+-    }
+-
+-#ifdef PAH_DEBUG
+-  fprintf (stderr, "polkit-agent-helper-1: successfully authenticated user '%s'.\n", user_to_auth);
+-#endif /* PAH_DEBUG */
+-
+-  pam_end (pam_h, rc);
+-  pam_h = NULL;
+-
+-#ifdef PAH_DEBUG
+-  fprintf (stderr, "polkit-agent-helper-1: sending D-Bus message to PolicyKit daemon\n");
+-#endif /* PAH_DEBUG */
+-
+-  /* now send a D-Bus message to the PolicyKit daemon that
+-   * includes a) the cookie; and b) the user we authenticated
+-   */
+-  if (!send_dbus_message (cookie, user_to_auth))
+-    {
+-#ifdef PAH_DEBUG
+-      fprintf (stderr, "polkit-agent-helper-1: error sending D-Bus message to PolicyKit daemon\n");
+-#endif /* PAH_DEBUG */
+-      goto error;
+-    }
+-
+-#ifdef PAH_DEBUG
+-  fprintf (stderr, "polkit-agent-helper-1: successfully sent D-Bus message to PolicyKit daemon\n");
+-#endif /* PAH_DEBUG */
+-
+-  fprintf (stdout, "SUCCESS\n");
+-  fflush (stdout);
+-  fflush (stderr);
+-  usleep (10 * 1000); /* since fflush(3) seems buggy */
+-  return 0;
+-
+-error:
+-  if (pam_h != NULL)
+-    pam_end (pam_h, rc);
+-
+-  fprintf (stdout, "FAILURE\n");
+-  fflush (stdout);
+-  fflush (stderr);
+-  usleep (10 * 1000); /* since fflush(3) seems buggy */
+-  return 1;
+-}
+-
+-static int
+-conversation_function (int n, const struct pam_message **msg, struct pam_response **resp, void *data)
+-{
+-  struct pam_response *aresp;
+-  char buf[PAM_MAX_RESP_SIZE];
+-  int i;
+-
+-  data = data;
+-  if (n <= 0 || n > PAM_MAX_NUM_MSG)
+-    return PAM_CONV_ERR;
+-
+-  if ((aresp = calloc(n, sizeof *aresp)) == NULL)
+-    return PAM_BUF_ERR;
+-
+-  for (i = 0; i < n; ++i)
+-    {
+-      aresp[i].resp_retcode = 0;
+-      aresp[i].resp = NULL;
+-      switch (msg[i]->msg_style)
+-        {
+-
+-        case PAM_PROMPT_ECHO_OFF:
+-          fprintf (stdout, "PAM_PROMPT_ECHO_OFF ");
+-          goto conv1;
+-
+-        case PAM_PROMPT_ECHO_ON:
+-          fprintf (stdout, "PAM_PROMPT_ECHO_ON ");
+-        conv1:
+-          fputs (msg[i]->msg, stdout);
+-          if (strlen (msg[i]->msg) > 0 && msg[i]->msg[strlen (msg[i]->msg) - 1] != '\n')
+-            fputc ('\n', stdout);
+-          fflush (stdout);
+-
+-          if (fgets (buf, sizeof buf, stdin) == NULL)
+-            goto error;
+-
+-          if (strlen (buf) > 0 &&
+-              buf[strlen (buf) - 1] == '\n')
+-            buf[strlen (buf) - 1] = '\0';
+-
+-          aresp[i].resp = strdup (buf);
+-          if (aresp[i].resp == NULL)
+-            goto error;
+-          break;
+-
+-        case PAM_ERROR_MSG:
+-          fprintf (stdout, "PAM_ERROR_MSG ");
+-          goto conv2;
+-
+-        case PAM_TEXT_INFO:
+-          fprintf (stdout, "PAM_TEXT_INFO ");
+-        conv2:
+-          fputs (msg[i]->msg, stdout);
+-          if (strlen (msg[i]->msg) > 0 &&
+-              msg[i]->msg[strlen (msg[i]->msg) - 1] != '\n')
+-            fputc ('\n', stdout);
+-          fflush (stdout);
+-          break;
+-
+-        default:
+-          goto error;
+-        }
+-    }
+-
+-  *resp = aresp;
+-  return PAM_SUCCESS;
+-
+-error:
+-
+-  for (i = 0; i < n; ++i)
+-    {
+-      if (aresp[i].resp != NULL) {
+-        memset (aresp[i].resp, 0, strlen(aresp[i].resp));
+-        free (aresp[i].resp);
+-      }
+-    }
+-  memset (aresp, 0, n * sizeof *aresp);
+-  *resp = NULL;
+-  return PAM_CONV_ERR;
+-}
+-
+-static gboolean
+-send_dbus_message (const char *cookie, const char *user)
+-{
+-  PolkitAuthority *authority;
+-  PolkitIdentity *identity;
+-  GError *error;
+-  gboolean ret;
+-
+-  ret = FALSE;
+-
+-  error = NULL;
+-
+-  g_type_init ();
+-
+-  authority = polkit_authority_get ();
+-
+-  identity = polkit_unix_user_new_for_name (user, &error);
+-  if (identity == NULL)
+-    {
+-      g_printerr ("Error constructing identity: %s\n", error->message);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  if (!polkit_authority_authentication_agent_response_sync (authority,
+-                                                            cookie,
+-                                                            identity,
+-                                                            NULL,
+-                                                            &error))
+-    {
+-      g_printerr ("polkit-agent-helper-1: error response to PolicyKit daemon: %s\n", error->message);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  ret = TRUE;
+-
+- out:
+-
+-  if (identity != NULL)
+-    g_object_unref (identity);
+-
+-  if (authority != NULL)
+-    g_object_unref (authority);
+-
+-  return ret;
+-}
+diff --git a/src/polkitagent/polkitagenthelperprivate.c b/src/polkitagent/polkitagenthelperprivate.c
+new file mode 100644
+index 0000000..abf5524
+--- /dev/null
++++ b/src/polkitagent/polkitagenthelperprivate.c
+@@ -0,0 +1,97 @@
++/*
++ * Copyright (C) 2009-2010 Red Hat, Inc.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General
++ * Public License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301, USA.
++ *
++ * Authors: David Zeuthen <davidz@redhat.com>,
++ *          Andrew Psaltis <ampsaltis@gmail.com>
++ */
++
++#include "polkitagenthelperprivate.h"
++#include <stdio.h>
++
++#ifndef HAVE_CLEARENV
++extern char **environ;
++
++static int
++clearenv (void)
++{
++	if (environ != NULL)
++		environ[0] = NULL;
++	return 0;
++}
++#endif
++
++
++gboolean
++send_dbus_message (const char *cookie, const char *user)
++{
++  PolkitAuthority *authority;
++  PolkitIdentity *identity;
++  GError *error;
++  gboolean ret;
++
++  ret = FALSE;
++
++  error = NULL;
++
++  g_type_init ();
++
++  authority = polkit_authority_get ();
++
++  identity = polkit_unix_user_new_for_name (user, &error);
++  if (identity == NULL)
++    {
++      g_printerr ("Error constructing identity: %s\n", error->message);
++      g_error_free (error);
++      goto out;
++    }
++
++  if (!polkit_authority_authentication_agent_response_sync (authority,
++                                                            cookie,
++                                                            identity,
++                                                            NULL,
++                                                            &error))
++    {
++      g_printerr ("polkit-agent-helper-1: error response to PolicyKit daemon: %s\n", error->message);
++      g_error_free (error);
++      goto out;
++    }
++
++  ret = TRUE;
++
++ out:
++
++  if (identity != NULL)
++    g_object_unref (identity);
++
++  if (authority != NULL)
++    g_object_unref (authority);
++
++  return ret;
++}
++
++/* fflush(3) stdin and stdout and wait a little bit.
++ * This replaces the three-line commands at the bottom of
++ * polkit-agent-helper-1's main() function.
++ */
++void
++flush_and_wait ()
++{
++  fflush (stdout);
++  fflush (stderr);
++  usleep (10 * 1000); /* since fflush(3) seems buggy */
++}
+diff --git a/src/polkitagent/polkitagenthelperprivate.h b/src/polkitagent/polkitagenthelperprivate.h
+new file mode 100644
+index 0000000..16f7ba4
+--- /dev/null
++++ b/src/polkitagent/polkitagenthelperprivate.h
+@@ -0,0 +1,42 @@
++/*
++ * Copyright (C) 2009-2010 Red Hat, Inc.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General
++ * Public License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301, USA.
++ *
++ * Authors: David Zeuthen <davidz@redhat.com>,
++ *          Andrew Psaltis <ampsalits@gmail.com>
++ */
++#ifndef __POLKIT_AGENT_HELPER_PRIVATE_H
++#define __POLKIT_AGENT_HELPER_PRIVATE_H
++
++#include <polkit/polkit.h>
++ 
++/* Development aid: define PAH_DEBUG to get debugging output. Do _NOT_
++ * enable this in production builds; it may leak passwords and other
++ * sensitive information.
++ */
++#undef PAH_DEBUG
++// #define PAH_DEBUG
++
++#ifdef HAVE_SOLARIS
++#  define LOG_AUTHPRIV    (10<<3)
++#endif
++
++gboolean send_dbus_message (const char *cookie, const char *user);
++
++void flush_and_wait ();
++
++#endif /* __POLKIT_AGENT_HELPER_PRIVATE_H */
+diff --git a/src/programs/pkexec.c b/src/programs/pkexec.c
+index 17c191e..3e096bf 100644
+--- a/src/programs/pkexec.c
++++ b/src/programs/pkexec.c
+@@ -34,7 +34,11 @@
+ #include <grp.h>
+ #include <pwd.h>
+ #include <errno.h>
++
++#ifdef POLKIT_AUTHFW_PAM
+ #include <security/pam_appl.h>
++#endif /* POLKIT_AUTHFW_PAM */
++
+ #include <syslog.h>
+ #include <stdarg.h>
+ 
+@@ -115,6 +119,7 @@ log_message (gint     level,
+ 
+ /* ---------------------------------------------------------------------------------------------------- */
+ 
++#ifdef POLKIT_AUTHFW_PAM
+ static int
+ pam_conversation_function (int n,
+                            const struct pam_message **msg,
+@@ -167,6 +172,7 @@ out:
+     pam_end (pam_h, rc);
+   return ret;
+ }
++#endif /* POLKIT_AUTHFW_PAM */
+ 
+ /* ---------------------------------------------------------------------------------------------------- */
+ 
+@@ -741,11 +747,13 @@ main (int argc, char *argv[])
+    * TODO: The question here is whether we should clear the limits before applying them?
+    * As evident above, neither su(1) (and, for that matter, nor sudo(8)) does this.
+    */
++#ifdef POLKIT_AUTHW_PAM
+   if (!open_session (pw->pw_name))
+     {
+       goto out;
+     }
+-
++#endif /* POLKIT_AUTHFW_PAM */
++  
+   /* become the user */
+   if (setgroups (0, NULL) != 0)
+     {
