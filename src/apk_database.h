@@ -16,6 +16,7 @@
 #include "apk_hash.h"
 #include "apk_archive.h"
 #include "apk_package.h"
+#include "apk_io.h"
 
 #define APK_MAX_REPOS		32
 #define APK_CACHE_CSUM_BYTES	4
@@ -109,6 +110,7 @@ struct apk_database {
 	struct apk_dependency_array *world;
 	struct apk_string_array *protected_paths;
 	struct apk_repository repos[APK_MAX_REPOS];
+	struct apk_id_cache id_cache;
 
 	struct {
 		struct apk_hash names;

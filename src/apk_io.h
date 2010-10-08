@@ -15,6 +15,14 @@
 
 #include "apk_defines.h"
 #include "apk_blob.h"
+#include "apk_hash.h"
+
+struct apk_id_cache {
+	int root_fd;
+	unsigned int genid;
+	struct apk_hash uid_cache;
+	struct apk_hash gid_cache;
+};
 
 struct apk_file_info {
 	char *name;
@@ -95,10 +103,10 @@ int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 int apk_url_download(const char *url, int atfd, const char *file);
 const char *apk_url_local_file(const char *url);
 
-void apk_id_cache_init(void);
-void apk_id_cache_free(void);
-void apk_id_cache_reset(void);
-uid_t apk_resolve_uid(const char *username, uid_t default_uid);
-uid_t apk_resolve_gid(const char *groupname, uid_t default_gid);
+void apk_id_cache_init(struct apk_id_cache *idc, int root_fd);
+void apk_id_cache_free(struct apk_id_cache *idc);
+void apk_id_cache_reset(struct apk_id_cache *idc);
+uid_t apk_resolve_uid(struct apk_id_cache *idc, const char *username, uid_t default_uid);
+uid_t apk_resolve_gid(struct apk_id_cache *idc, const char *groupname, uid_t default_gid);
 
 #endif

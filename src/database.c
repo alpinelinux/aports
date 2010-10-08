@@ -472,7 +472,7 @@ int apk_cache_download(struct apk_database *db, const char *url,
 			apk_bstream_from_file(db->cachetmp_fd, cacheitem),
 			apk_sign_ctx_mpart_cb, &sctx);
 
-		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx, FALSE);
+		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx, FALSE, &db->id_cache);
 		is->close(is);
 		apk_sign_ctx_free(&sctx);
 		if (r != 0) {
@@ -916,7 +916,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 		is = apk_istream_from_file(db->root_fd, "var/lib/apk/scripts.tar");
 		if (is != NULL) {
 			apk_tar_parse(is, apk_read_script_archive_entry, db,
-				      FALSE);
+				      FALSE, &db->id_cache);
 		} else {
 			is = apk_istream_from_file(db->root_fd, "var/lib/apk/scripts");
 			if (is != NULL)
@@ -1177,6 +1177,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		goto ret_r;
 	}
 
+	apk_id_cache_init(&db->id_cache, db->root_fd);
+
 	return rr;
 
 ret_errno:
@@ -1266,6 +1268,8 @@ void apk_db_close(struct apk_database *db)
 	struct hlist_node *dc, *dn;
 	int i;
 
+	apk_id_cache_free(&db->id_cache);
+
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
 			apk_db_diri_free(db, diri, APK_DISALLOW_RMDIR);
@@ -1343,7 +1347,7 @@ int apk_db_run_triggers(struct apk_database *db)
 			continue;
 
 		*apk_string_array_add(&ipkg->pending_triggers) = NULL;
-		apk_ipkg_run_script(ipkg, db->root_fd, APK_SCRIPT_TRIGGER,
+		apk_ipkg_run_script(ipkg, db, APK_SCRIPT_TRIGGER,
 				    ipkg->pending_triggers->item);
 		apk_string_array_free(&ipkg->pending_triggers);
 	}
@@ -1520,7 +1524,7 @@ static int load_index(struct apk_database *db, struct apk_bstream *bs,
 		ctx.found = 0;
 		apk_sign_ctx_init(&ctx.sctx, APK_SIGN_VERIFY, NULL, db->keys_fd);
 		is = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &ctx.sctx);
-		r = apk_tar_parse(is, load_apkindex, &ctx, FALSE);
+		r = apk_tar_parse(is, load_apkindex, &ctx, FALSE, &db->id_cache);
 		is->close(is);
 		apk_sign_ctx_free(&ctx.sctx);
 		if (ctx.found == 0)
@@ -1624,7 +1628,7 @@ static int apk_db_run_pending_script(struct install_ctx *ctx)
 		return 0;
 
 	ctx->script_pending = FALSE;
-	r = apk_ipkg_run_script(ctx->ipkg, ctx->db->root_fd, ctx->script,
+	r = apk_ipkg_run_script(ctx->ipkg, ctx->db, ctx->script,
 				ctx->script_args);
 	if (r != 0)
 		apk_error("%s-%s: Failed to execute "
@@ -2043,7 +2047,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	apk_name_array_init(&ctx.replaces);
 	apk_sign_ctx_init(&ctx.sctx, APK_SIGN_VERIFY_IDENTITY, &pkg->csum, db->keys_fd);
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &ctx.sctx);
-	r = apk_tar_parse(tar, apk_db_install_archive_entry, &ctx, TRUE);
+	r = apk_tar_parse(tar, apk_db_install_archive_entry, &ctx, TRUE, &db->id_cache);
 	apk_sign_ctx_free(&ctx.sctx);
 	apk_name_array_free(&ctx.replaces);
 	tar->close(tar);
@@ -2098,13 +2102,13 @@ int apk_db_install_pkg(struct apk_database *db,
 		if (ipkg == NULL)
 			return 0;
 
-		r = apk_ipkg_run_script(ipkg, db->root_fd,
+		r = apk_ipkg_run_script(ipkg, db, 
 					APK_SCRIPT_PRE_DEINSTALL, script_args);
 		if (r != 0)
 			return r;
 
 		apk_db_purge_pkg(db, ipkg, NULL);
-		r = apk_ipkg_run_script(ipkg, db->root_fd,
+		r = apk_ipkg_run_script(ipkg, db,
 					APK_SCRIPT_POST_DEINSTALL, script_args);
 		apk_pkg_uninstall(db, oldpkg);
 
@@ -2135,7 +2139,7 @@ int apk_db_install_pkg(struct apk_database *db,
 		apk_pkg_uninstall(db, oldpkg);
 	}
 
-	r = apk_ipkg_run_script(ipkg, db->root_fd,
+	r = apk_ipkg_run_script(ipkg, db,
 				(oldpkg == NULL) ?
 				APK_SCRIPT_POST_INSTALL : APK_SCRIPT_POST_UPGRADE,
 				script_args);

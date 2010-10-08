@@ -793,7 +793,7 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	ctx.pkg->size = fi.size;
 
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, sctx);
-	r = apk_tar_parse(tar, read_info_entry, &ctx, FALSE);
+	r = apk_tar_parse(tar, read_info_entry, &ctx, FALSE, &db->id_cache);
 	tar->close(tar);
 	if (r < 0 && r != -ECANCELED)
 		goto err;
@@ -856,7 +856,8 @@ int apk_ipkg_add_script(struct apk_installed_package *ipkg,
 	return 0;
 }
 
-int apk_ipkg_run_script(struct apk_installed_package *ipkg, int root_fd,
+int apk_ipkg_run_script(struct apk_installed_package *ipkg,
+			struct apk_database *db,
 			unsigned int type, char **argv)
 {
 	static char * const environment[] = {
@@ -865,7 +866,7 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg, int root_fd,
 	};
 	struct apk_package *pkg = ipkg->pkg;
 	char fn[PATH_MAX];
-	int fd, status;
+	int fd, status, root_fd = db->root_fd;
 	pid_t pid;
 
 	if (type >= APK_SCRIPT_MAX)
@@ -911,7 +912,7 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg, int root_fd,
 	}
 	waitpid(pid, &status, 0);
 	unlinkat(root_fd, fn, 0);
-	apk_id_cache_reset();
+	apk_id_cache_reset(&db->id_cache);
 
 	if (WIFEXITED(status))
 		return WEXITSTATUS(status);

@@ -766,48 +766,55 @@ static struct cache_item *resolve_cache_item(struct apk_hash *hash, apk_blob_t n
 	return ci;
 }
 
-static unsigned int id_genid = 0;
-static struct apk_hash uid_cache, gid_cache;
-
-void apk_id_cache_init(void)
+void apk_id_cache_init(struct apk_id_cache *idc, int root_fd)
 {
-	apk_hash_init(&uid_cache, &id_hash_ops, 256);
-	apk_hash_init(&gid_cache, &id_hash_ops, 256);
-	id_genid = 1;
+	idc->root_fd = root_fd;
+	idc->genid = 1;
+	apk_hash_init(&idc->uid_cache, &id_hash_ops, 256);
+	apk_hash_init(&idc->gid_cache, &id_hash_ops, 256);
 }
 
-void apk_id_cache_free(void)
+void apk_id_cache_free(struct apk_id_cache *idc)
 {
-	apk_hash_free(&uid_cache);
-	apk_hash_free(&gid_cache);
+	apk_hash_free(&idc->uid_cache);
+	apk_hash_free(&idc->gid_cache);
 }
 
-void apk_id_cache_reset(void)
+void apk_id_cache_reset(struct apk_id_cache *idc)
 {
-	id_genid++;
-	if (id_genid == 0)
-		id_genid = 1;
+	idc->genid++;
+	if (idc->genid == 0)
+		idc->genid = 1;
 }
 
-uid_t apk_resolve_uid(const char *username, uid_t default_uid)
+uid_t apk_resolve_uid(struct apk_id_cache *idc, const char *username, uid_t default_uid)
 {
 	struct cache_item *ci;
 	struct passwd pwent, *pwd;
 	char buf[1024];
-	int r;
+	FILE *in;
 
-	ci = resolve_cache_item(&uid_cache, APK_BLOB_STR(username));
+	ci = resolve_cache_item(&idc->uid_cache, APK_BLOB_STR(username));
 	if (ci == NULL)
 		return default_uid;
 
-	if (ci->genid != id_genid) {
-		r = getpwnam_r(username, &pwent, buf, sizeof(buf), &pwd);
-		if (pwd != NULL)
-			ci->uid = pwd->pw_uid;
-		else
-			ci->uid = -1;
-		if (r == 0)
-			ci->genid = id_genid;
+	if (ci->genid != idc->genid) {
+		ci->genid = idc->genid;
+		ci->uid = -1;
+
+		in = fdopen(openat(idc->root_fd, "etc/passwd", O_RDONLY|O_CLOEXEC), "r");
+		if (in != NULL) {
+			do {
+				fgetpwent_r(in, &pwent, buf, sizeof(buf), &pwd);
+				if (pwd == NULL)
+					break;
+				if (strcmp(pwd->pw_name, username) == 0) {
+					ci->uid = pwd->pw_uid;
+					break;
+				}
+			} while (1);
+			fclose(in);
+		}
 	}
 
 	if (ci->uid != -1)
@@ -816,25 +823,34 @@ uid_t apk_resolve_uid(const char *username, uid_t default_uid)
 	return default_uid;
 }
 
-uid_t apk_resolve_gid(const char *groupname, uid_t default_gid)
+uid_t apk_resolve_gid(struct apk_id_cache *idc, const char *groupname, uid_t default_gid)
 {
 	struct cache_item *ci;
 	struct group grent, *grp;
 	char buf[1024];
-	int r;
+	FILE *in;
 
-	ci = resolve_cache_item(&gid_cache, APK_BLOB_STR(groupname));
+	ci = resolve_cache_item(&idc->gid_cache, APK_BLOB_STR(groupname));
 	if (ci == NULL)
 		return default_gid;
 
-	if (ci->genid != id_genid) {
-		r = getgrnam_r(groupname, &grent, buf, sizeof(buf), &grp);
-		if (grp != NULL)
-			ci->gid = grp->gr_gid;
-		else
-			ci->gid = -1;
-		if (r == 0)
-			ci->genid = id_genid;
+	if (ci->genid != idc->genid) {
+		ci->genid = idc->genid;
+		ci->gid = -1;
+
+		in = fdopen(openat(idc->root_fd, "etc/passwd", O_RDONLY|O_CLOEXEC), "r");
+		if (in != NULL) {
+			do {
+				fgetgrent_r(in, &grent, buf, sizeof(buf), &grp);
+				if (grp == NULL)
+					break;
+				if (strcmp(grp->gr_name, groupname) == 0) {
+					ci->gid = grp->gr_gid;
+					break;
+				}
+			} while (1);
+			fclose(in);
+		}
 	}
 
 	if (ci->gid != -1)

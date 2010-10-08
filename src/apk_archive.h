@@ -22,7 +22,7 @@ typedef int (*apk_archive_entry_parser)(void *ctx,
 
 int apk_tar_parse(struct apk_istream *,
 		  apk_archive_entry_parser parser, void *ctx,
-		  int soft_checksums);
+		  int soft_checksums, struct apk_id_cache *);
 int apk_tar_write_entry(struct apk_ostream *, const struct apk_file_info *ae,
 			const char *data);
 int apk_tar_write_padding(struct apk_ostream *, const struct apk_file_info *ae);

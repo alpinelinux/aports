@@ -117,7 +117,7 @@ static void tar_entry_close(void *stream)
 }
 
 int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
-		  void *ctx, int soft_checksums)
+		  void *ctx, int soft_checksums, struct apk_id_cache *idc)
 {
 	struct apk_file_info entry;
 	struct apk_tar_entry_istream teis = {
@@ -146,8 +146,8 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 
 		entry = (struct apk_file_info){
 			.size  = GET_OCTAL(buf.size),
-			.uid   = apk_resolve_uid(buf.uname, GET_OCTAL(buf.uid)),
-			.gid   = apk_resolve_gid(buf.gname, GET_OCTAL(buf.gid)),
+			.uid   = apk_resolve_uid(idc, buf.uname, GET_OCTAL(buf.uid)),
+			.gid   = apk_resolve_gid(idc, buf.gname, GET_OCTAL(buf.gid)),
 			.mode  = GET_OCTAL(buf.mode) & 07777,
 			.mtime = GET_OCTAL(buf.mtime),
 			.name  = entry.name,
