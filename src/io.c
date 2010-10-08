@@ -838,7 +838,7 @@ uid_t apk_resolve_gid(struct apk_id_cache *idc, const char *groupname, uid_t def
 		ci->genid = idc->genid;
 		ci->gid = -1;
 
-		in = fdopen(openat(idc->root_fd, "etc/passwd", O_RDONLY|O_CLOEXEC), "r");
+		in = fdopen(openat(idc->root_fd, "etc/group", O_RDONLY|O_CLOEXEC), "r");
 		if (in != NULL) {
 			do {
 				fgetgrent_r(in, &grent, buf, sizeof(buf), &grp);

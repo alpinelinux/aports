@@ -1079,6 +1079,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	    S_ISDIR(st.st_mode) && major(st.st_dev) != 0)
 		db->cache_dir = apk_linked_cache_dir;
 
+	apk_id_cache_init(&db->id_cache, db->root_fd);
+
 	if (dbopts->open_flags & APK_OPENF_WRITE) {
 		db->lock_fd = openat(db->root_fd, "var/lib/apk/lock",
 				     O_CREAT | O_RDWR | O_CLOEXEC, 0400);
@@ -1176,8 +1178,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		r = rr;
 		goto ret_r;
 	}
-
-	apk_id_cache_init(&db->id_cache, db->root_fd);
 
 	return rr;
 
