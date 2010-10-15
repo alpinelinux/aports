@@ -8,6 +8,7 @@
 #include "apk_version.h"
 
 #define LIBNAME "apk"
+#define APKDB_META "apk_database"
 
 struct flagmap {
        const char *name;
@@ -113,16 +114,46 @@ static int get_dbopts(lua_State *L, int i, struct apk_db_options *o)
 	return 0;
 }
 
+static struct apk_database *checkdb(lua_State *L, int index)
+{
+	struct apk_database *db;
+	luaL_checktype(L, index, LUA_TUSERDATA);
+	db = (struct apk_database  *) luaL_checkudata(L, index, APKDB_META);
+	if (db == NULL)
+		luaL_typerror(L, index, APKDB_META);
+	return db;
+}
+
 static int Papk_db_open(lua_State *L)
 {
 	struct apk_db_options opts;
+	struct apk_database *db;
+	int r;
+
 	memset(&opts, 0, sizeof(opts));
+	list_init(&opts.repository_list);
 	if (lua_istable(L, 1))
 		get_dbopts(L, 1, &opts);
+
+	db = lua_newuserdata(L, sizeof(struct apk_database));
+	luaL_getmetatable(L, APKDB_META);
+	lua_setmetatable(L, -2);
+
+	r = apk_db_open(db, &opts);
+	if (r != 0)
+		luaL_error(L, "apk_db_open() failed");
+	return 1;
+}
+
+static int Papk_db_close(lua_State *L)
+{
+	struct apk_database *db = checkdb(L, 1);
+	apk_db_close(db);
 	return 0;
 }
 
-static const luaL_reg R[] = {
+
+static const luaL_reg reg_apk_methods[] = {
 	{"version_validate",	Pversion_validate},
 	{"version_compare",	Pversion_compare},
 	{"version_is_less",	Pversion_is_less},
@@ -130,12 +161,29 @@ static const luaL_reg R[] = {
 	{NULL,		NULL}
 };
 
+static const luaL_reg reg_apk_db_meta_methods[] = {
+	{"__gc",	Papk_db_close},
+	{NULL, NULL}
+};
+
 LUALIB_API int luaopen_apk(lua_State *L)
 {
-	luaL_register(L, LIBNAME, R);
+	luaL_register(L, LIBNAME, reg_apk_methods);
 	lua_pushliteral(L, "version");
 	lua_pushliteral(L, APK_VERSION);
 	lua_settable(L, -3);
+
+	luaL_newmetatable(L, APKDB_META);
+	luaL_register(L, NULL, reg_apk_db_meta_methods);
+	lua_pushliteral(L, "__index");
+	lua_pushvalue(L, -3);
+	lua_rawset(L, -3);
+
+	lua_pushliteral(L, "__metatable");
+	lua_pushvalue(L, -3);
+	lua_rawset(L, -3);
+	lua_pop(L, 1);
+
 	return 1;
 }
 
