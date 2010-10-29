@@ -1,0 +1,179 @@
+Index: src/racoon/isakmp.c
+===================================================================
+RCS file: /cvsroot/src/crypto/dist/ipsec-tools/src/racoon/isakmp.c,v
+retrieving revision 1.63
+diff -u -r1.63 isakmp.c
+--- a/src/racoon/isakmp.c	21 Oct 2010 06:15:28 -0000	1.63
++++ b/src/racoon/isakmp.c	29 Oct 2010 10:51:28 -0000
+@@ -130,6 +130,10 @@
+ #  define SOL_UDP IPPROTO_UDP
+ # endif /* __NetBSD__ / __FreeBSD__ */
+ 
++vchar_t *postponed_buf;
++struct sockaddr_storage postponed_remote;
++struct sockaddr_storage postponed_local;
++
+ static int nostate1 __P((struct ph1handle *, vchar_t *));
+ static int nostate2 __P((struct ph2handle *, vchar_t *));
+ 
+@@ -177,7 +181,7 @@
+ 
+ static u_char r_ck0[] = { 0,0,0,0,0,0,0,0 }; /* used to verify the r_ck. */
+ 
+-static int isakmp_main __P((vchar_t *, struct sockaddr *, struct sockaddr *));
++/* static int isakmp_main __P((vchar_t *, struct sockaddr *, struct sockaddr *)); */
+ static int ph1_main __P((struct ph1handle *, vchar_t *));
+ static int quick_main __P((struct ph2handle *, vchar_t *));
+ static int isakmp_ph1begin_r __P((vchar_t *,
+@@ -374,10 +378,17 @@
+ 	}
+ 
+ 	/* isakmp main routine */
+-	if (isakmp_main(buf, (struct sockaddr *)&remote,
+-			(struct sockaddr *)&local) != 0) goto end;
+-
+-	error = 0;
++	res = isakmp_main(buf, (struct sockaddr *)&remote,
++			  (struct sockaddr *)&local);
++	if (res == 0) {
++		error = 0;
++	} else if (res == -42424 && postponed_buf == NULL) {
++		postponed_buf    = buf;
++		postponed_remote = remote;
++		postponed_local  = local;
++		buf              = NULL;
++		error = 0;
++	}
+ 
+ end:
+ 	if (tmpbuf != NULL)
+@@ -390,7 +401,7 @@
+ /*
+  * main processing to handle isakmp payload
+  */
+-static int
++int
+ isakmp_main(msg, remote, local)
+ 	vchar_t *msg;
+ 	struct sockaddr *remote, *local;
+@@ -399,6 +410,7 @@
+ 	isakmp_index *index = (isakmp_index *)isakmp;
+ 	u_int32_t msgid = isakmp->msgid;
+ 	struct ph1handle *iph1;
++	int rc;
+ 
+ #ifdef HAVE_PRINT_ISAKMP_C
+ 	isakmp_printpacket(msg, remote, local, 0);
+@@ -604,12 +616,14 @@
+ #endif
+ 
+ 		/* call main process of phase 1 */
+-		if (ph1_main(iph1, msg) < 0) {
+-			plog(LLV_ERROR, LOCATION, iph1->remote,
+-				"phase1 negotiation failed.\n");
+-			remph1(iph1);
+-			delph1(iph1);
+-			return -1;
++		if ((rc=ph1_main(iph1, msg)) < 0) {
++			if (rc != -42424) {
++				plog(LLV_ERROR, LOCATION, iph1->remote,
++					"phase1 negotiation failed.\n");
++				remph1(iph1);
++				delph1(iph1);
++			}
++			return rc;
+ 		}
+ 		break;
+ 
+@@ -813,10 +827,11 @@
+ 				"failed to pre-process ph1 packet (side: %d, status %d).\n",
+ 				iph1->side, iph1->status);
+ 			return -1;
+-		} else {
+-			/* ignore the error and keep phase 1 handler */
+-			return 0;
+ 		}
++		if (error == -42424)
++			return error;
++		/* ignore the error and keep phase 1 handler */
++		return 0;
+ 	}
+ 
+ #ifndef ENABLE_FRAG
+Index: src/racoon/isakmp_ident.c
+===================================================================
+RCS file: /cvsroot/src/crypto/dist/ipsec-tools/src/racoon/isakmp_ident.c,v
+retrieving revision 1.13
+diff -u -r1.13 isakmp_ident.c
+--- a/src/racoon/isakmp_ident.c	18 Sep 2009 10:31:11 -0000	1.13
++++ b/src/racoon/isakmp_ident.c	29 Oct 2010 10:51:29 -0000
+@@ -1128,6 +1128,11 @@
+ 		goto end;
+ 	}
+ 
++	if (postponed_buf != msg) {
++		error = -42424;
++		goto end;
++	}
++
+ 	/* validate the type of next payload */
+ 	pbuf = isakmp_parse(msg);
+ 	if (pbuf == NULL)
+Index: src/racoon/isakmp_var.h
+===================================================================
+RCS file: /cvsroot/src/crypto/dist/ipsec-tools/src/racoon/isakmp_var.h,v
+retrieving revision 1.16
+diff -u -r1.16 isakmp_var.h
+--- a/src/racoon/isakmp_var.h	3 Sep 2009 09:29:07 -0000	1.16
++++ b/src/racoon/isakmp_var.h	29 Oct 2010 10:51:29 -0000
+@@ -141,4 +141,10 @@
+ u_int32_t setscopeid __P((struct sockaddr *, struct sockaddr *));
+ #endif
+ 
++int isakmp_main __P((vchar_t *, struct sockaddr *, struct sockaddr *));
++
++extern vchar_t *postponed_buf;
++extern struct sockaddr_storage postponed_remote;
++extern struct sockaddr_storage postponed_local;
++
+ #endif /* _ISAKMP_VAR_H */
+Index: src/racoon/session.c
+===================================================================
+RCS file: /cvsroot/src/crypto/dist/ipsec-tools/src/racoon/session.c,v
+retrieving revision 1.28
+diff -u -r1.28 session.c
+--- a/src/racoon/session.c	21 Oct 2010 06:15:28 -0000	1.28
++++ b/src/racoon/session.c	29 Oct 2010 10:51:29 -0000
+@@ -172,7 +172,7 @@
+ int
+ session(void)
+ {
+-	struct timeval *timeout;
++	struct timeval *timeout, to_zero = { 0, 0 };
+ 	int error;
+ 	char pid_file[MAXPATHLEN];
+ 	FILE *fp;
+@@ -295,6 +295,8 @@
+ 
+ 		/* scheduling */
+ 		timeout = schedular();
++		if (postponed_buf != NULL)
++			timeout = &to_zero;
+ 
+ 		/* schedular can change select() mask, so we reset
+ 		 * the working copy here */
+@@ -332,6 +334,14 @@
+ 				break;
+ 		}
+ 
++		if (count == 0 && postponed_buf != NULL) {
++			(void) isakmp_main(
++				postponed_buf,
++				(struct sockaddr *) &postponed_remote,
++				(struct sockaddr *) &postponed_local);
++			vfree(postponed_buf);
++			postponed_buf = NULL;
++		}
+ 	}
+ }
+ 
