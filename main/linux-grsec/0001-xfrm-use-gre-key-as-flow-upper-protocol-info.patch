@@ -1,0 +1,139 @@
+From e4e3789c1d6d9cd30267c4395763577ceedd7015 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Thu, 18 Nov 2010 11:42:16 +0200
+Subject: [PATCH] xfrm: use gre key as flow upper protocol info
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The GRE Key field is intended to be used for identifying an individual
+traffic flow within a tunnel. It is useful to be able to have XFRM
+policy selector matches to have different policies for different
+GRE tunnels.
+
+Backported to linux-2.6.35 from the original version at:
+http://git.kernel.org/?p=linux/kernel/git/davem/net-next-2.6.git;
+a=commitdiff_plain;h=cc9ff19da9bf76a2f70bcb80225a1c587c162e52
+
+Signed-off-by: Timo Teräs <timo.teras@iki.fi>
+---
+ include/net/flow.h      |    2 ++
+ include/net/xfrm.h      |    6 ++++++
+ net/ipv4/ip_gre.c       |    9 ++++++---
+ net/ipv4/xfrm4_policy.c |   15 +++++++++++++++
+ 4 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/include/net/flow.h b/include/net/flow.h
+index bb08692..240b7f3 100644
+--- a/include/net/flow.h
++++ b/include/net/flow.h
+@@ -66,6 +66,7 @@ struct flowi {
+ 		} dnports;
+ 
+ 		__be32		spi;
++		__be32		gre_key;
+ 
+ 		struct {
+ 			__u8	type;
+@@ -77,6 +78,7 @@ struct flowi {
+ #define fl_icmp_code	uli_u.icmpt.code
+ #define fl_ipsec_spi	uli_u.spi
+ #define fl_mh_type	uli_u.mht.type
++#define fl_gre_key	uli_u.gre_key
+ 	__u32           secid;	/* used by xfrm; see secid.txt */
+ } __attribute__((__aligned__(BITS_PER_LONG/8)));
+ 
+diff --git a/include/net/xfrm.h b/include/net/xfrm.h
+index fc8f36d..1a57ff9 100644
+--- a/include/net/xfrm.h
++++ b/include/net/xfrm.h
+@@ -805,6 +805,9 @@ __be16 xfrm_flowi_sport(struct flowi *fl)
+ 	case IPPROTO_MH:
+ 		port = htons(fl->fl_mh_type);
+ 		break;
++	case IPPROTO_GRE:
++		port = htonl(fl->fl_gre_key) >> 16;
++		break;
+ 	default:
+ 		port = 0;	/*XXX*/
+ 	}
+@@ -826,6 +829,9 @@ __be16 xfrm_flowi_dport(struct flowi *fl)
+ 	case IPPROTO_ICMPV6:
+ 		port = htons(fl->fl_icmp_code);
+ 		break;
++	case IPPROTO_GRE:
++		port = htonl(fl->fl_gre_key) & 0xffff;
++		break;
+ 	default:
+ 		port = 0;	/*XXX*/
+ 	}
+diff --git a/net/ipv4/ip_gre.c b/net/ipv4/ip_gre.c
+index 32618e1..d490d67 100644
+--- a/net/ipv4/ip_gre.c
++++ b/net/ipv4/ip_gre.c
+@@ -739,7 +739,8 @@ static netdev_tx_t ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev
+ 					      { .daddr = dst,
+ 						.saddr = tiph->saddr,
+ 						.tos = RT_TOS(tos) } },
+-				    .proto = IPPROTO_GRE };
++				    .proto = IPPROTO_GRE,
++				    .fl_gre_key = tunnel->parms.o_key };
+ 		if (ip_route_output_key(dev_net(dev), &rt, &fl)) {
+ 			stats->tx_carrier_errors++;
+ 			goto tx_error;
+@@ -912,7 +913,8 @@ static int ipgre_tunnel_bind_dev(struct net_device *dev)
+ 					      { .daddr = iph->daddr,
+ 						.saddr = iph->saddr,
+ 						.tos = RT_TOS(iph->tos) } },
+-				    .proto = IPPROTO_GRE };
++				    .proto = IPPROTO_GRE,
++				    .fl_gre_key = tunnel->parms.o_key };
+ 		struct rtable *rt;
+ 		if (!ip_route_output_key(dev_net(dev), &rt, &fl)) {
+ 			tdev = rt->u.dst.dev;
+@@ -1170,7 +1172,8 @@ static int ipgre_open(struct net_device *dev)
+ 					      { .daddr = t->parms.iph.daddr,
+ 						.saddr = t->parms.iph.saddr,
+ 						.tos = RT_TOS(t->parms.iph.tos) } },
+-				    .proto = IPPROTO_GRE };
++				    .proto = IPPROTO_GRE,
++				    .fl_gre_key = t->parms.o_key };
+ 		struct rtable *rt;
+ 		if (ip_route_output_key(dev_net(dev), &rt, &fl))
+ 			return -EADDRNOTAVAIL;
+diff --git a/net/ipv4/xfrm4_policy.c b/net/ipv4/xfrm4_policy.c
+index 23883a4..ef36364 100644
+--- a/net/ipv4/xfrm4_policy.c
++++ b/net/ipv4/xfrm4_policy.c
+@@ -11,6 +11,7 @@
+ #include <linux/err.h>
+ #include <linux/kernel.h>
+ #include <linux/inetdevice.h>
++#include <linux/if_tunnel.h>
+ #include <net/dst.h>
+ #include <net/xfrm.h>
+ #include <net/ip.h>
+@@ -158,6 +159,20 @@ _decode_session4(struct sk_buff *skb, struct flowi *fl, int reverse)
+ 				fl->fl_ipsec_spi = htonl(ntohs(ipcomp_hdr[1]));
+ 			}
+ 			break;
++
++		case IPPROTO_GRE:
++			if (pskb_may_pull(skb, xprth + 12 - skb->data)) {
++				__be16 *greflags = (__be16 *)xprth;
++				__be32 *gre_hdr = (__be32 *)xprth;
++
++				if (greflags[0] & GRE_KEY) {
++					if (greflags[0] & GRE_CSUM)
++						gre_hdr++;
++					fl->fl_gre_key = gre_hdr[1];
++				}
++			}
++			break;
++
+ 		default:
+ 			fl->fl_ipsec_spi = 0;
+ 			break;
+-- 
+1.7.1
+
