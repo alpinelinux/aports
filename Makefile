@@ -86,4 +86,11 @@ $(P).tar.bz2:	$(DISTFILES)
 	tar -cjf $@ $(P)
 	rm -rf $(P)
 
+.gitignore: Makefile
+	echo "*.tar.bz2" > $@
+	for i in $(USR_BIN_FILES); do\
+		echo $$i >>$@;\
+	done
+
+
 .PHONY: install dist
