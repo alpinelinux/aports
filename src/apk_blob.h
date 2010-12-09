@@ -18,7 +18,7 @@
 #include "apk_defines.h"
 
 struct apk_blob {
-	unsigned int len;
+	long len;
 	char *ptr;
 };
 typedef struct apk_blob apk_blob_t;
@@ -56,6 +56,7 @@ static inline const EVP_MD *apk_checksum_default(void)
 #define APK_BLOB_IS_NULL(blob)		((blob).ptr == NULL)
 
 #define APK_BLOB_NULL			((apk_blob_t){0, NULL})
+#define APK_BLOB_ERROR(err)		((apk_blob_t){err, NULL})
 #define APK_BLOB_BUF(buf)		((apk_blob_t){sizeof(buf), (char *)(buf)})
 #define APK_BLOB_CSUM(csum)		((apk_blob_t){(csum).type, (char *)(csum).data})
 #define APK_BLOB_STRUCT(s)		((apk_blob_t){sizeof(s), (char*)&(s)})

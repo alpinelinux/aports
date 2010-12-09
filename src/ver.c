@@ -33,7 +33,7 @@ static int ver_indexes(struct apk_database *db, int argc, char **argv)
 			continue;
 
 		printf("%.*s [%s]\n",
-                       repo->description.len,
+                       (int) repo->description.len,
 		       repo->description.ptr,
 		       db->repos[i].url);
 	}

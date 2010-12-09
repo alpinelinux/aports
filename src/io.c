@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <malloc.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <pwd.h>
 #include <grp.h>
@@ -26,6 +27,8 @@
 struct apk_fd_istream {
 	struct apk_istream is;
 	int fd;
+	pid_t pid;
+	int (*translate_status)(int status);
 };
 
 static ssize_t fdi_read(void *stream, void *ptr, size_t size)
@@ -45,8 +48,14 @@ static ssize_t fdi_read(void *stream, void *ptr, size_t size)
 		if (r < 0)
 			return -errno;
 		if (r == 0)
-			return i;
+			break;
 		i += r;
+	}
+	if (i == 0 && fis->pid != 0) {
+		int status;
+		if (waitpid(fis->pid, &status, 0) == fis->pid)
+			i = fis->translate_status(status);
+		fis->pid = 0;
 	}
 
 	return i;
@@ -56,12 +65,15 @@ static void fdi_close(void *stream)
 {
 	struct apk_fd_istream *fis =
 		container_of(stream, struct apk_fd_istream, is);
+	int status;
 
 	close(fis->fd);
+	if (fis->pid != 0)
+		waitpid(fis->pid, &status, 0);
 	free(fis);
 }
 
-struct apk_istream *apk_istream_from_fd(int fd)
+struct apk_istream *apk_istream_from_fd_pid(int fd, pid_t pid, int (*translate_status)(int))
 {
 	struct apk_fd_istream *fis;
 
@@ -78,6 +90,8 @@ struct apk_istream *apk_istream_from_fd(int fd)
 		.is.read = fdi_read,
 		.is.close = fdi_close,
 		.fd = fd,
+		.pid = pid,
+		.translate_status = translate_status,
 	};
 
 	return &fis->is;
@@ -196,9 +210,9 @@ static apk_blob_t is_bs_read(void *stream, apk_blob_t token)
 			goto ret_all;
 	}
 
-	/* If we've exchausted earlier, it's end of stream */
+	/* If we've exchausted earlier, it's end of stream or error */
 	if (APK_BLOB_IS_NULL(isbs->left))
-		return APK_BLOB_NULL;
+		return isbs->left;
 
 	/* We need more data */
 	if (isbs->left.len != 0)
@@ -213,6 +227,10 @@ static apk_blob_t is_bs_read(void *stream, apk_blob_t token)
 		if (isbs->left.len == 0)
 			isbs->left = APK_BLOB_NULL;
 		goto ret_all;
+	} else {
+		/* cache and return error */
+		isbs->left = ret = APK_BLOB_ERROR(size);
+		goto ret;
 	}
 
 	if (!APK_BLOB_IS_NULL(token)) {
@@ -294,7 +312,6 @@ static void mmap_close(void *stream, size_t *size)
 
 	if (size != NULL)
 		*size = mbs->size;
-
 	munmap(mbs->ptr, mbs->size);
 	close(mbs->fd);
 	free(mbs);
@@ -332,18 +349,20 @@ static struct apk_bstream *apk_mmap_bstream_from_fd(int fd)
 	return &mbs->bs;
 }
 
-struct apk_bstream *apk_bstream_from_fd(int fd)
+struct apk_bstream *apk_bstream_from_fd_pid(int fd, pid_t pid, int (*translate_status)(int))
 {
 	struct apk_bstream *bs;
 
 	if (fd < 0)
 		return NULL;
 
-	bs = apk_mmap_bstream_from_fd(fd);
-	if (bs != NULL)
-		return bs;
+	if (pid == 0) {
+		bs = apk_mmap_bstream_from_fd(fd);
+		if (bs != NULL)
+			return bs;
+	}
 
-	return apk_bstream_from_istream(apk_istream_from_fd(fd));
+	return apk_bstream_from_istream(apk_istream_from_fd_pid(fd, pid, translate_status));
 }
 
 struct apk_bstream *apk_bstream_from_file(int atfd, const char *file)

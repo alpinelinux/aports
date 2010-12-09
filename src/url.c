@@ -31,7 +31,26 @@ const char *apk_url_local_file(const char *url)
 	return NULL;
 }
 
-static int fork_wget(const char *url)
+static int translate_wget(int status)
+{
+	if (!WIFEXITED(status))
+		return -EFAULT;
+
+	switch (WEXITSTATUS(status)) {
+	case 0:
+		return 0;
+	case 3:
+		return -EIO;
+	case 4:
+		return -ECONNABORTED;
+	case 8:
+		return -ENOENT;
+	default:
+		return -EFAULT;
+	}
+}
+
+static int fork_wget(const char *url, pid_t *ppid)
 {
 	pid_t pid;
 	int fds[2];
@@ -56,15 +75,23 @@ static int fork_wget(const char *url)
 	}
 
 	close(fds[1]);
+
+	if (ppid != NULL)
+		*ppid = pid;
+
 	return fds[0];
 }
 
 struct apk_istream *apk_istream_from_url(const char *url)
 {
+	pid_t pid;
+	int fd;
+
 	if (apk_url_local_file(url) != NULL)
 		return apk_istream_from_file(AT_FDCWD, apk_url_local_file(url));
 
-	return apk_istream_from_fd(fork_wget(url));
+	fd = fork_wget(url, &pid);
+	return apk_istream_from_fd_pid(fd, pid, translate_wget);
 }
 
 struct apk_istream *apk_istream_from_url_gz(const char *file)
@@ -74,10 +101,14 @@ struct apk_istream *apk_istream_from_url_gz(const char *file)
 
 struct apk_bstream *apk_bstream_from_url(const char *url)
 {
+	pid_t pid;
+	int fd;
+
 	if (apk_url_local_file(url))
 		return apk_bstream_from_file(AT_FDCWD, url);
 
-	return apk_bstream_from_fd(fork_wget(url));
+	fd = fork_wget(url, &pid);
+	return apk_bstream_from_fd_pid(fd, pid, translate_wget);
 }
 
 int apk_url_download(const char *url, int atfd, const char *file)
@@ -102,9 +133,10 @@ int apk_url_download(const char *url, int atfd, const char *file)
 	}
 
 	waitpid(pid, &status, 0);
-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+	status = translate_wget(status);
+	if (status != 0) {
 		unlinkat(atfd, file, 0);
-		return -1;
+		return status;
 	}
 
 	return 0;

@@ -61,8 +61,8 @@ static ssize_t gzi_read(void *stream, void *ptr, size_t size)
 			gis->cbprev = blob.ptr;
 			gis->zs.avail_in = blob.len;
 			gis->zs.next_in = (void *) gis->cbprev;
-			if (gis->zs.avail_in < 0) {
-				gis->err = -EIO;
+			if (blob.len < 0) {
+				gis->err = blob.len;
 				goto ret;
 			} else if (gis->zs.avail_in == 0) {
 				gis->err = 1;
