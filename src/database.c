@@ -1397,10 +1397,13 @@ static int apk_repo_is_remote(struct apk_repository *repo)
 }
 
 static struct apk_bstream *apk_repo_file_open(struct apk_repository *repo,
-					      const char *file)
+					      const char *file,
+					      char *buf, int buflen)
 {
-	char tmp[256];
 	const char *url = repo->url;
+
+	snprintf(buf, buflen, "%s%s%s",
+		 url, url[strlen(url)-1] == '/' ? "" : "/", file);
 
 	if ((apk_flags & APK_NO_NETWORK) && apk_repo_is_remote(repo))
 		return NULL;
@@ -1409,10 +1412,7 @@ static struct apk_bstream *apk_repo_file_open(struct apk_repository *repo,
 	if (strcmp(repo->url, "cache") == 0)
 		return NULL;
 
-	snprintf(tmp, sizeof(tmp), "%s%s%s",
-		 url, url[strlen(url)-1] == '/' ? "" : "/", file);
-
-	return apk_bstream_from_url(tmp);
+	return apk_bstream_from_url(buf);
 }
 
 struct apk_repository *apk_db_select_repo(struct apk_database *db,
@@ -1553,6 +1553,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	struct apk_bstream *bs = NULL;
 	struct apk_repository *repo;
 	int r, targz = 1;
+	char buf[PATH_MAX];
 
 	if (repository.ptr == NULL || repository.len == 0 ||
 	    *repository.ptr == '#')
@@ -1569,26 +1570,24 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 	};
 
 	if (apk_url_local_file(repo->url) == NULL) {
-		char cacheitem[PATH_MAX];
-
 		apk_blob_checksum(repository, apk_checksum_default(), &repo->csum);
 
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_repository_update(db, repo);
 
-		apk_cache_format_index(APK_BLOB_BUF(cacheitem), repo, 0);
-		bs = apk_bstream_from_file(db->cache_fd, cacheitem);
+		apk_cache_format_index(APK_BLOB_BUF(buf), repo, 0);
+		bs = apk_bstream_from_file(db->cache_fd, buf);
 		if (bs == NULL) {
-			apk_cache_format_index(APK_BLOB_BUF(cacheitem), repo, 1);
-			bs = apk_bstream_from_file(db->cache_fd, cacheitem);
+			apk_cache_format_index(APK_BLOB_BUF(buf), repo, 1);
+			bs = apk_bstream_from_file(db->cache_fd, buf);
 			targz = 0;
 		}
 	} else {
 		db->local_repos |= BIT(r);
 
-		bs = apk_repo_file_open(repo, apkindex_tar_gz);
+		bs = apk_repo_file_open(repo, apkindex_tar_gz, buf, sizeof(buf));
 		if (bs == NULL) {
-			bs = apk_repo_file_open(repo, apk_index_gz);
+			bs = apk_repo_file_open(repo, apk_index_gz, buf, sizeof(buf));
 			targz = 0;
 		}
 	}
@@ -1994,7 +1993,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	struct apk_bstream *bs = NULL;
 	struct apk_istream *tar;
 	struct apk_package *pkg = ipkg->pkg;
-	char file[PATH_MAX];
+	char file[PATH_MAX], item[128];
 	int r, need_copy = FALSE;
 
 	if (pkg->filename == NULL) {
@@ -2013,25 +2012,31 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		}
 
 		if (bs == NULL) {
-			apk_pkg_format_plain(pkg, APK_BLOB_BUF(file));
-			bs = apk_repo_file_open(repo, file);
+			apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
+			bs = apk_repo_file_open(repo, item, file, sizeof(file));
 			if (apk_repo_is_remote(repo))
 				need_copy = TRUE;
 		}
 	} else {
 		bs = apk_bstream_from_file(AT_FDCWD, pkg->filename);
+		strncpy(file, pkg->filename, sizeof(file));
 		need_copy = TRUE;
 	}
 	if (!apk_db_cache_active(db))
 		need_copy = FALSE;
-	if (need_copy) {
-		apk_pkg_format_cache(pkg, APK_BLOB_BUF(file));
-		bs = apk_bstream_tee(bs, db->cachetmp_fd, file);
-	}
 
 	if (bs == NULL) {
 		apk_error("%s: %s", file, strerror(errno));
 		return errno;
+	}
+	if (need_copy) {
+		apk_pkg_format_cache(pkg, APK_BLOB_BUF(item));
+		bs = apk_bstream_tee(bs, db->cachetmp_fd, item);
+		if (bs == NULL) {
+			apk_error("Unable to cache %s: %s",
+				  file, strerror(errno));
+			return errno;
+		}
 	}
 
 	ctx = (struct install_ctx) {
@@ -2060,9 +2065,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	}
 
 	if (r != 0) {
-		apk_error("%s-%s: %s",
-			  pkg->name->name, pkg->version,
-			  apk_error_str(r));
+		apk_error("%s: %s", file, apk_error_str(r));
 		goto err;
 	}
 	r = apk_db_run_pending_script(&ctx);
