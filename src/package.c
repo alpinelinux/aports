@@ -145,19 +145,6 @@ int apk_pkg_parse_name(apk_blob_t apkname,
 	return 0;
 }
 
-static apk_blob_t trim(apk_blob_t str)
-{
-	if (str.ptr == NULL || str.len < 1)
-		return str;
-
-	if (str.ptr[str.len-1] == '\n') {
-		str.ptr[str.len-1] = 0;
-		return APK_BLOB_PTR_LEN(str.ptr, str.len-1);
-	}
-
-	return str;
-}
-
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep)
 {
@@ -615,7 +602,6 @@ struct read_info_ctx {
 	struct apk_database *db;
 	struct apk_package *pkg;
 	struct apk_sign_ctx *sctx;
-	int version;
 };
 
 int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
@@ -695,21 +681,8 @@ static int read_info_line(void *ctx, apk_blob_t line)
 static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 			   struct apk_istream *is)
 {
-	static struct {
-		const char *str;
-		char field;
-	} fields[] = {
-		{ "DESC",	'T' },
-		{ "WWW",	'U' },
-		{ "LICENSE",	'L' },
-		{ "DEPEND", 	'D' },
-	};
 	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
-	struct apk_database *db = ri->db;
 	struct apk_package *pkg = ri->pkg;
-	apk_blob_t name, version;
-	char *slash;
-	int i;
 
 	/* Meta info and scripts */
 	if (apk_sign_ctx_process_file(ri->sctx, ae, is) == 0)
@@ -721,46 +694,11 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 			apk_blob_t blob = apk_blob_from_istream(is, ae->size);
 			apk_blob_for_each_segment(blob, "\n", read_info_line, ctx);
 			free(blob.ptr);
-			ri->version = 2;
 		} else if (strcmp(ae->name, ".INSTALL") == 0) {
 			apk_warning("Package '%s-%s' contains deprecated .INSTALL",
 				    pkg->name->name, pkg->version);
 		}
 		return 0;
-	}
-
-	if (strncmp(ae->name, "var/db/apk/", 11) == 0) {
-		/* APK 1.0 format */
-		ri->version = 1;
-		if (!S_ISREG(ae->mode))
-			return 0;
-
-		slash = strchr(&ae->name[11], '/');
-		if (slash == NULL)
-			return 0;
-
-		if (apk_pkg_parse_name(APK_BLOB_PTR_PTR(&ae->name[11], slash-1),
-				       &name, &version) < 0)
-			return -1;
-
-		if (pkg->name == NULL)
-			pkg->name = apk_db_get_name(db, name);
-		if (pkg->version == NULL)
-			pkg->version = apk_blob_cstr(version);
-
-		for (i = 0; i < ARRAY_SIZE(fields); i++) {
-			if (strcmp(fields[i].str, slash+1) == 0) {
-				apk_blob_t blob = apk_blob_from_istream(is, ae->size);
-				apk_pkg_add_info(ri->db, ri->pkg, fields[i].field,
-						 trim(blob));
-				free(blob.ptr);
-				break;
-			}
-		}
-	} else if (ri->version < 2) {
-		/* Version 1.x packages do not contain installed size
-		 * in metadata, so we calculate it here */
-		pkg->installed_size += apk_calc_installed_size(ae->size);
 	}
 
 	return 0;
@@ -939,7 +877,6 @@ struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_
 		return NULL;
 
 	ctx.db = db;
-	ctx.version = 0;
 
 	apk_blob_for_each_segment(blob, "\n", parse_index_line, &ctx);
 
