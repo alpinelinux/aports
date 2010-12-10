@@ -39,7 +39,6 @@ int apk_verbosity = 1;
 unsigned int apk_flags = 0;
 
 const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
-const char * const apk_index_gz = "APK_INDEX.gz";
 static const char * const apk_static_cache_dir = "var/lib/apk";
 static const char * const apk_linked_cache_dir = "etc/apk/cache";
 
@@ -429,20 +428,13 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 	return idb;
 }
 
-void apk_cache_format_index(apk_blob_t to, struct apk_repository *repo, int ver)
+void apk_cache_format_index(apk_blob_t to, struct apk_repository *repo)
 {
 	/* APKINDEX.12345678.tar.gz */
-	/* APK_INDEX.12345678.gz */
-	if (ver == 0)
-		apk_blob_push_blob(&to, APK_BLOB_STR("APKINDEX."));
-	else
-		apk_blob_push_blob(&to, APK_BLOB_STR("APK_INDEX."));
+	apk_blob_push_blob(&to, APK_BLOB_STR("APKINDEX."));
 	apk_blob_push_hexdump(&to, APK_BLOB_PTR_LEN((char *) repo->csum.data,
 						    APK_CACHE_CSUM_BYTES));
-	if (ver == 0)
-		apk_blob_push_blob(&to, APK_BLOB_STR(".tar.gz"));
-	else
-		apk_blob_push_blob(&to, APK_BLOB_STR(".gz"));
+	apk_blob_push_blob(&to, APK_BLOB_STR(".tar.gz"));
 	apk_blob_push_blob(&to, APK_BLOB_PTR_LEN("", 1));
 }
 
@@ -1462,21 +1454,13 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 	if (!apk_repo_is_remote(repo))
 		return 0;
 
-	apk_cache_format_index(APK_BLOB_BUF(cacheitem), repo, 0);
+	apk_cache_format_index(APK_BLOB_BUF(cacheitem), repo);
 	r = apk_cache_download(db, repo->url, apkindex_tar_gz, cacheitem,
 			       (apk_flags & APK_ALLOW_UNTRUSTED) ?
 			       APK_SIGN_NONE : APK_SIGN_VERIFY);
-	if (r == 0 || r == -ENOKEY || r == -EKEYREJECTED) {
-		if (r != 0)
-			apk_error("%s: %s", repo->url, apk_error_str(r));
-		return r;
-	}
-
-	apk_cache_format_index(APK_BLOB_BUF(cacheitem), repo, 1);
-	r = apk_cache_download(db, repo->url, apk_index_gz, cacheitem,
-			       APK_SIGN_NONE);
 	if (r != 0)
-		apk_error("Failed to update %s: download failed", repo->url);
+		apk_error("%s: %s", repo->url, apk_error_str(r));
+
 	return r;
 }
 
@@ -1575,21 +1559,11 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_repository_update(db, repo);
 
-		apk_cache_format_index(APK_BLOB_BUF(buf), repo, 0);
+		apk_cache_format_index(APK_BLOB_BUF(buf), repo);
 		bs = apk_bstream_from_file(db->cache_fd, buf);
-		if (bs == NULL) {
-			apk_cache_format_index(APK_BLOB_BUF(buf), repo, 1);
-			bs = apk_bstream_from_file(db->cache_fd, buf);
-			targz = 0;
-		}
 	} else {
 		db->local_repos |= BIT(r);
-
 		bs = apk_repo_file_open(repo, apkindex_tar_gz, buf, sizeof(buf));
-		if (bs == NULL) {
-			bs = apk_repo_file_open(repo, apk_index_gz, buf, sizeof(buf));
-			targz = 0;
-		}
 	}
 	if (bs == NULL) {
 		apk_warning("Failed to open index for %s", repo->url);

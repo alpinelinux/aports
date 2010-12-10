@@ -97,12 +97,9 @@ static int cache_clean(struct apk_database *db)
 			if (apk_pkg_parse_name(b, &bname, &bver) < 0) {
 				/* Index - check for matching repository */
 				for (i = 0; i < db->num_repos; i++) {
-					apk_cache_format_index(APK_BLOB_BUF(tmp), &db->repos[i], 0);
-					if (apk_blob_compare(b, APK_BLOB_STR(tmp)) != 0) {
-						apk_cache_format_index(APK_BLOB_BUF(tmp), &db->repos[i], 1);
-						if (apk_blob_compare(b, APK_BLOB_STR(tmp)) != 0)
-							continue;
-					}
+					apk_cache_format_index(APK_BLOB_BUF(tmp), &db->repos[i]);
+					if (apk_blob_compare(b, APK_BLOB_STR(tmp)) != 0)
+						continue;
 					delete = 0;
 					break;
 				}
