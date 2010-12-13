@@ -7,6 +7,7 @@ url=http://git.alpinelinux.org/cgit/alpine-baselayout
 depends=
 source="http://git.alpinelinux.org/cgit/$pkgname/snapshot/$pkgname-$pkgver.tar.bz2
 	"
+arch="x86 x86_64"
 license=GPL-2
 
 build() {
