@@ -7,8 +7,11 @@ sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
 abuildrepo	?= ~/.cache/apks
 
+LUA_VERSION	= 5.1
+LUA_SHAREDIR	?= $(prefix)/share/lua/$(LUA_VERSION)/
+
 SCRIPTS		:= abuild devbuild buildrepo abuild-keygen \
-		abuild-sign newapkbuild abump
+		abuild-sign newapkbuild abump ap
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
@@ -65,7 +68,7 @@ help:
 	@echo "usage: make install [ DESTDIR=<path> ]"
 	@echo "       make dist"
 
-install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
+install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh aports.lua
 	mkdir -p $(DESTDIR)/$(prefix)/bin $(DESTDIR)/$(sysconfdir) \
 		$(DESTDIR)/$(datadir)
 	for i in $(USR_BIN_FILES); do\
@@ -76,6 +79,8 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	fi
 	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild
 	cp functions.sh $(DESTDIR)/$(datadir)/
+	mkdir -p $(DESTDIR)$(LUA_SHAREDIR)
+	cp aports.lua $(DESTDIR)$(LUA_SHAREDIR)/
 
 dist:	$(P).tar.bz2
 
