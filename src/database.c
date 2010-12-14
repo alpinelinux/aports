@@ -30,6 +30,14 @@
 #include "apk_archive.h"
 #include "apk_print.h"
 
+#if defined(__x86_64__)
+#define APK_DEFAULT_ARCH	"x86_64"
+#elif defined(__i386__)
+#define APK_DEFAULT_ARCH	"x86"
+#else
+#define APK_DEFAULT_ARCH	"noarch"
+#endif
+
 enum {
 	APK_DISALLOW_RMDIR = 0,
 	APK_ALLOW_RMDIR = 1
@@ -37,6 +45,7 @@ enum {
 
 int apk_verbosity = 1;
 unsigned int apk_flags = 0;
+const char *apk_arch = APK_DEFAULT_ARCH;
 
 const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
 static const char * const apk_static_cache_dir = "var/lib/apk";
@@ -444,8 +453,9 @@ int apk_cache_download(struct apk_database *db, const char *url,
 	char fullurl[PATH_MAX];
 	int r;
 
-	snprintf(fullurl, sizeof(fullurl), "%s%s%s",
-		 url, url[strlen(url)-1] == '/' ? "" : "/", item);
+	snprintf(fullurl, sizeof(fullurl), "%s%s%s/%s",
+		 url, url[strlen(url)-1] == '/' ? "" : "/",
+		 db->arch, item);
 	apk_message("fetch %s", fullurl);
 
 	if (apk_flags & APK_SIMULATE)
@@ -1112,6 +1122,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	blob = APK_BLOB_STR("etc:*etc/init.d");
 	apk_blob_for_each_segment(blob, ":", add_protected_path, db);
 
+	db->arch = apk_arch;
+
 	db->cache_fd = openat(db->root_fd, db->cache_dir, O_RDONLY | O_CLOEXEC);
 	mkdirat(db->cache_fd, "tmp", 0644);
 	db->cachetmp_fd = openat(db->cache_fd, "tmp", O_RDONLY | O_CLOEXEC);
@@ -1389,13 +1401,15 @@ static int apk_repo_is_remote(struct apk_repository *repo)
 }
 
 static struct apk_bstream *apk_repo_file_open(struct apk_repository *repo,
+					      const char *arch,
 					      const char *file,
 					      char *buf, int buflen)
 {
 	const char *url = repo->url;
 
-	snprintf(buf, buflen, "%s%s%s",
-		 url, url[strlen(url)-1] == '/' ? "" : "/", file);
+	snprintf(buf, buflen, "%s%s%s/%s",
+		 url, url[strlen(url)-1] == '/' ? "" : "/",
+		 arch, file);
 
 	if ((apk_flags & APK_NO_NETWORK) && apk_repo_is_remote(repo))
 		return NULL;
@@ -1563,7 +1577,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		bs = apk_bstream_from_file(db->cache_fd, buf);
 	} else {
 		db->local_repos |= BIT(r);
-		bs = apk_repo_file_open(repo, apkindex_tar_gz, buf, sizeof(buf));
+		bs = apk_repo_file_open(repo, db->arch, apkindex_tar_gz, buf, sizeof(buf));
 	}
 	if (bs == NULL) {
 		apk_warning("Failed to open index for %s", repo->url);
@@ -1987,7 +2001,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 
 		if (bs == NULL) {
 			apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
-			bs = apk_repo_file_open(repo, item, file, sizeof(file));
+			bs = apk_repo_file_open(repo, pkg->arch ?: db->arch, item, file, sizeof(file));
 			if (apk_repo_is_remote(repo))
 				need_copy = TRUE;
 		}

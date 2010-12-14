@@ -85,7 +85,7 @@ struct apk_package {
 	apk_hash_node hash_node;
 	unsigned repos;
 	struct apk_name *name;
-	char *version;
+	char *version, *arch;
 	char *url, *description, *license;
 	struct apk_dependency_array *depends;
 	size_t installed_size, size;
