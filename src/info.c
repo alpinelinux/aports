@@ -45,7 +45,7 @@ static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
 
 	printf("%s", pkg->name->name);
 	if (apk_verbosity > 1)
-		printf("-%s", pkg->version);
+		printf("-" BLOB_FMT, BLOB_PRINTF(*pkg->version));
 	if (apk_verbosity > 2)
 		printf(" - %s", pkg->description);
 	printf("\n");
@@ -84,7 +84,7 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 		if (j >= name->pkgs->num)
 			continue;
 
-		if (!(apk_version_compare(pkg->version, dep.version)
+		if (!(apk_version_compare_blob(*pkg->version, *dep.version)
 		      & dep.result_mask))
 			continue;
 
@@ -116,8 +116,8 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 			};
 			apk_deps_add(&deps, &dep);
 		} else {
-			printf("%s is owned by %s-%s\n", argv[i],
-			       pkg->name->name, pkg->version);
+			printf("%s is owned by " PKG_VER_FMT "\n",
+			       argv[i], PKG_VER_PRINTF(pkg));
 		}
 	}
 	if (apk_verbosity < 1 && deps->num != 0) {
@@ -138,8 +138,9 @@ static void info_print_description(struct apk_package *pkg)
 	if (apk_verbosity > 1)
 		printf("%s: %s", pkg->name->name, pkg->description);
 	else
-		printf("%s-%s description:\n%s\n", pkg->name->name,
-		       pkg->version, pkg->description);
+		printf(PKG_VER_FMT " description:\n%s\n",
+		       PKG_VER_PRINTF(pkg),
+		       pkg->description);
 }
 
 static void info_print_url(struct apk_package *pkg)
@@ -147,7 +148,8 @@ static void info_print_url(struct apk_package *pkg)
 	if (apk_verbosity > 1)
 		printf("%s: %s", pkg->name->name, pkg->url);
 	else
-		printf("%s-%s webpage:\n%s\n", pkg->name->name, pkg->version,
+		printf(PKG_VER_FMT " webpage:\n%s\n",
+		       PKG_VER_PRINTF(pkg),
 		       pkg->url);
 }
 
@@ -156,7 +158,8 @@ static void info_print_size(struct apk_package *pkg)
 	if (apk_verbosity > 1)
 		printf("%s: %zu", pkg->name->name, pkg->installed_size);
 	else
-		printf("%s-%s installed size:\n%zu\n", pkg->name->name, pkg->version,
+		printf(PKG_VER_FMT " installed size:\n%zu\n",
+		       PKG_VER_PRINTF(pkg),
 		       pkg->installed_size);
 }
 
@@ -165,7 +168,8 @@ static void info_print_depends(struct apk_package *pkg)
 	int i;
 	char *separator = apk_verbosity > 1 ? " " : "\n";
 	if (apk_verbosity == 1)
-		printf("%s-%s depends on:\n", pkg->name->name, pkg->version);
+		printf(PKG_VER_FMT " depends on:\n",
+		       PKG_VER_PRINTF(pkg));
 	if (apk_verbosity > 1)
 		printf("%s: ", pkg->name->name);
 	for (i = 0; i < pkg->depends->num; i++)
@@ -178,7 +182,8 @@ static void info_print_required_by(struct apk_package *pkg)
 	char *separator = apk_verbosity > 1 ? " " : "\n";
 
 	if (apk_verbosity == 1)
-		printf("%s-%s is required by:\n", pkg->name->name, pkg->version);
+		printf(PKG_VER_FMT " is required by:\n",
+		       PKG_VER_PRINTF(pkg));
 	if (apk_verbosity > 1)
 		printf("%s: ", pkg->name->name);
 	for (i = 0; i < pkg->name->rdepends->num; i++) {
@@ -194,8 +199,9 @@ static void info_print_required_by(struct apk_package *pkg)
 			for (k = 0; k < pkg0->depends->num; k++) {
 				if (pkg0->depends->item[k].name != pkg->name)
 					continue;
-				printf("%s-%s%s", pkg0->name->name,
-				       pkg0->version, separator);
+				printf(PKG_VER_FMT "%s",
+				       PKG_VER_PRINTF(pkg0),
+				       separator);
 				break;
 			}
 		}
@@ -210,7 +216,8 @@ static void info_print_contents(struct apk_package *pkg)
 	struct hlist_node *dc, *dn, *fc, *fn;
 
 	if (apk_verbosity == 1)
-		printf("%s-%s contains:\n", pkg->name->name, pkg->version);
+		printf(PKG_VER_FMT " contains:\n",
+		       PKG_VER_PRINTF(pkg));
 
 	hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs,
 				  pkg_dirs_list) {
@@ -229,7 +236,8 @@ static void info_print_triggers(struct apk_package *pkg)
 	int i;
 
 	if (apk_verbosity == 1)
-		printf("%s-%s triggers:\n", pkg->name->name, pkg->version);
+		printf(PKG_VER_FMT " triggers:\n",
+		       PKG_VER_PRINTF(pkg));
 
 	for (i = 0; i < ipkg->triggers->num; i++) {
 		if (apk_verbosity > 1)

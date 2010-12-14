@@ -35,7 +35,7 @@ void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to)
 	/* pkgname-1.0.apk */
 	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->name->name));
 	apk_blob_push_blob(&to, APK_BLOB_STR("-"));
-	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->version));
+	apk_blob_push_blob(&to, *pkg->version);
 	apk_blob_push_blob(&to, APK_BLOB_STR(".apk"));
 	apk_blob_push_blob(&to, APK_BLOB_PTR_LEN("", 1));
 }
@@ -45,7 +45,7 @@ void apk_pkg_format_cache(struct apk_package *pkg, apk_blob_t to)
 	/* pkgname-1.0_alpha1.12345678.apk */
 	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->name->name));
 	apk_blob_push_blob(&to, APK_BLOB_STR("-"));
-	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->version));
+	apk_blob_push_blob(&to, *pkg->version);
 	apk_blob_push_blob(&to, APK_BLOB_STR("."));
 	apk_blob_push_hexdump(&to, APK_BLOB_PTR_LEN((char *) pkg->csum.data,
 						    APK_CACHE_CSUM_BYTES));
@@ -238,7 +238,7 @@ int apk_dep_from_blob(struct apk_dependency *dep, struct apk_database *db,
 
 	*dep = (struct apk_dependency){
 		.name = name,
-		.version = APK_BLOB_IS_NULL(bver) ? NULL : apk_blob_cstr(bver),
+		.version = apk_blob_atomize_dup(bver),
 		.result_mask = mask,
 	};
 	return 0;
@@ -295,7 +295,7 @@ void apk_blob_push_dep(apk_blob_t *to, struct apk_dependency *dep)
 	if (dep->result_mask != APK_DEPMASK_CONFLICT &&
 	    dep->result_mask != APK_DEPMASK_REQUIRE) {
 		apk_blob_push_blob(to, APK_BLOB_STR(apk_version_op_string(dep->result_mask)));
-		apk_blob_push_blob(to, APK_BLOB_STR(dep->version));
+		apk_blob_push_blob(to, *dep->version);
 	}
 }
 
@@ -612,7 +612,7 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		pkg->name = apk_db_get_name(db, value);
 		break;
 	case 'V':
-		pkg->version = apk_blob_cstr(value);
+		pkg->version = apk_blob_atomize_dup(value);
 		break;
 	case 'T':
 		pkg->description = apk_blob_cstr(value);
@@ -621,10 +621,10 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		pkg->url = apk_blob_cstr(value);
 		break;
 	case 'L':
-		pkg->license = apk_blob_cstr(value);
+		pkg->license = apk_blob_atomize_dup(value);
 		break;
 	case 'A':
-		pkg->arch = apk_blob_cstr(value);
+		pkg->arch = apk_blob_atomize_dup(value);
 		break;
 	case 'D':
 		apk_deps_parse(db, &pkg->depends, value);
@@ -763,16 +763,10 @@ void apk_pkg_free(struct apk_package *pkg)
 
 	apk_pkg_uninstall(NULL, pkg);
 	apk_dependency_array_free(&pkg->depends);
-	if (pkg->version)
-		free(pkg->version);
 	if (pkg->url)
 		free(pkg->url);
 	if (pkg->description)
 		free(pkg->description);
-	if (pkg->license)
-		free(pkg->license);
-	if (pkg->arch)
-		free(pkg->arch);
 	free(pkg);
 }
 
@@ -822,8 +816,8 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg,
 	argv[0] = (char *) apk_script_types[type];
 
 	/* Avoid /tmp as it can be mounted noexec */
-	snprintf(fn, sizeof(fn), "var/cache/misc/%s-%s.%s",
-		pkg->name->name, pkg->version,
+	snprintf(fn, sizeof(fn), "var/cache/misc/" PKG_VER_FMT ".%s",
+		PKG_VER_PRINTF(pkg),
 		apk_script_types[type]);
 
 	apk_message("Executing %s", &fn[15]);
@@ -888,8 +882,8 @@ struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_
 
 	if (ctx.pkg->name == NULL) {
 		apk_pkg_free(ctx.pkg);
-		apk_error("Failed to parse index entry: %.*s",
-			  blob.len, blob.ptr);
+		apk_error("Failed to parse index entry: " BLOB_FMT,
+			  BLOB_PRINTF(blob));
 		ctx.pkg = NULL;
 	}
 
@@ -908,10 +902,10 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nP:"));
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->name->name));
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nV:"));
-	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->version));
+	apk_blob_push_blob(&bbuf, *info->version);
 	if (info->arch != NULL) {
 		apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nA:"));
-		apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->arch));
+		apk_blob_push_blob(&bbuf, *info->arch);
 	}
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nS:"));
 	apk_blob_push_uint(&bbuf, info->size, 10);
@@ -922,7 +916,7 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nU:"));
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->url));
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nL:"));
-	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->license));
+	apk_blob_push_blob(&bbuf, *info->license);
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
 	if (APK_BLOB_IS_NULL(bbuf))
@@ -947,5 +941,8 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 
 int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b)
 {
-	return apk_version_compare(a->version, b->version);
+	if (a->version == b->version)
+		return APK_VERSION_EQUAL;
+
+	return apk_version_compare_blob(*a->version, *b->version);
 }

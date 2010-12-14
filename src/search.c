@@ -28,10 +28,9 @@ static int print_match(struct apk_package *pkg)
 {
 	printf("%s", pkg->name->name);
 	if (apk_verbosity > 0)
-		printf("-%s", pkg->version);
-	if (apk_verbosity > 1) {
+		printf("-" BLOB_FMT, BLOB_PRINTF(*pkg->version));
+	if (apk_verbosity > 1)
 		printf(" - %s", pkg->description);
-	}
 	printf("\n");
 
 	return 0;
@@ -46,7 +45,7 @@ static int print_rdepends(struct apk_package *pkg)
 
 	name = pkg->name;
 
-	printf("%s-%s:", pkg->name->name, pkg->version);
+	printf(PKG_VER_FMT ":", PKG_VER_PRINTF(pkg));
 	for (i = 0; i < name->rdepends->num; i++) {
 		name0 = name->rdepends->item[i];
 		for (j = 0; j < name0->pkgs->num; j++) {
@@ -54,9 +53,10 @@ static int print_rdepends(struct apk_package *pkg)
 			for (k = 0; k < pkg0->depends->num; k++) {
 				dep = &pkg0->depends->item[k];
 				if (name == dep->name &&
-				    (apk_version_compare(pkg->version, dep->version)
+				    (apk_version_compare_blob(*pkg->version, *dep->version)
 				      & dep->result_mask)) {
-					printf(" %s-%s", pkg0->name->name, pkg0->version);
+					printf(" " PKG_VER_FMT,
+					       PKG_VER_PRINTF(pkg0));
 				}
 			}
 		}

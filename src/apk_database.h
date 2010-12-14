@@ -103,7 +103,8 @@ struct apk_database {
 	char *root;
 	int root_fd, lock_fd, cache_fd, cachetmp_fd, keys_fd;
 	unsigned name_id, num_repos;
-	const char *cache_dir, *arch;
+	const char *cache_dir;
+	apk_blob_t *arch;
 	int permanent;
 	unsigned int local_repos;
 

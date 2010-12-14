@@ -24,6 +24,9 @@ struct apk_blob {
 typedef struct apk_blob apk_blob_t;
 typedef int (*apk_blob_cb)(void *ctx, apk_blob_t blob);
 
+#define BLOB_FMT		"%.*s"
+#define BLOB_PRINTF(b)		(int)(b).len, (b).ptr
+
 #define APK_CHECKSUM_NONE	0
 #define APK_CHECKSUM_MD5	16
 #define APK_CHECKSUM_SHA1	20
@@ -113,5 +116,9 @@ struct apk_indent {
 
 void apk_print_indented_words(struct apk_indent *i, const char *text);
 int apk_print_indented(struct apk_indent *i, apk_blob_t blob);
+
+void apk_atom_init(void);
+apk_blob_t *apk_blob_atomize(apk_blob_t blob);
+apk_blob_t *apk_blob_atomize_dup(apk_blob_t blob);
 
 #endif

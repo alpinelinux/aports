@@ -130,7 +130,7 @@ static struct apk_name_choices *name_choices_new(struct apk_database *db,
 			continue;
 
 		for (j = 0; j < nc->num; ) {
-			if (apk_version_compare(nc->pkgs[j]->version, dep->version)
+			if (apk_version_compare_blob(*nc->pkgs[j]->version, *dep->version)
 			    & dep->result_mask) {
 			    	j++;
 			} else {
@@ -284,7 +284,7 @@ int apk_state_prune_dependency(struct apk_state *state,
 				return -1;
 			}
 		} else {
-			if (!(apk_version_compare(pkg->version, dep->version)
+			if (!(apk_version_compare_blob(*pkg->version, *dep->version)
 			      & dep->result_mask))
 				return -1;
 		}
@@ -299,7 +299,7 @@ int apk_state_prune_dependency(struct apk_state *state,
 	c = ns_to_choices(state->name[name->id]);
 	i = 0;
 	while (i < c->num) {
-		if (apk_version_compare(c->pkgs[i]->version, dep->version)
+		if (apk_version_compare_blob(*c->pkgs[i]->version, *dep->version)
 		    & dep->result_mask) {
 		    	i++;
 			continue;
@@ -442,7 +442,7 @@ static int call_if_dependency_broke(struct apk_state *state,
 		    dep->result_mask == APK_DEPMASK_CONFLICT)
 			continue;
 		if (dep_pkg != NULL &&
-		    (apk_version_compare(dep_pkg->version, dep->version)
+		    (apk_version_compare_blob(*dep_pkg->version, *dep->version)
 		     & dep->result_mask))
 			continue;
 		return cb(state, pkg, dep, ctx);
@@ -602,11 +602,13 @@ static void apk_print_change(struct apk_database *db,
 		name = newpkg->name;
 
 	if (oldpkg == NULL) {
-		apk_message("%s Installing %s (%s)",
-			    status, name->name, newpkg->version);
+		apk_message("%s Installing %s (" BLOB_FMT ")",
+			    status, name->name,
+			    BLOB_PRINTF(*newpkg->version));
 	} else if (newpkg == NULL) {
-		apk_message("%s Purging %s (%s)",
-			    status, name->name, oldpkg->version);
+		apk_message("%s Purging %s (" BLOB_FMT ")",
+			    status, name->name,
+			    BLOB_PRINTF(*oldpkg->version));
 	} else {
 		r = apk_pkg_version_compare(newpkg, oldpkg);
 		switch (r) {
@@ -624,9 +626,10 @@ static void apk_print_change(struct apk_database *db,
 			msg = "Upgrading";
 			break;
 		}
-		apk_message("%s %s %s (%s -> %s)",
-			    status, msg, name->name, oldpkg->version,
-			    newpkg->version);
+		apk_message("%s %s %s (" BLOB_FMT " -> " BLOB_FMT ")",
+			    status, msg, name->name,
+			    BLOB_PRINTF(*oldpkg->version),
+			    BLOB_PRINTF(*newpkg->version));
 	}
 }
 
@@ -810,8 +813,8 @@ static int print_dep(struct apk_state *state,
 	if (pkg != es->prevpkg) {
 		printf("\n");
 		es->indent.x = 0;
-		len = snprintf(buf, sizeof(buf), "%s-%s:",
-			       pkg->name->name, pkg->version);
+		len = snprintf(buf, sizeof(buf), PKG_VER_FMT ":",
+			       PKG_VER_PRINTF(pkg));
 		apk_print_indented(&es->indent, APK_BLOB_PTR_LEN(buf, len));
 		es->prevpkg = pkg;
 	}
@@ -836,7 +839,7 @@ void apk_state_print_errors(struct apk_state *state)
 
 		es.prevpkg = pkg = state->conflicts->item[i];
 		es.indent.x =
-		printf("  %s-%s:", pkg->name->name, pkg->version);
+		printf("  " PKG_VER_FMT ":", PKG_VER_PRINTF(pkg));
 		es.indent.indent = es.indent.x + 1;
 		for (j = 0; j < pkg->depends->num; j++) {
 			r = apk_state_lock_dependency(state,

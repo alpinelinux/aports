@@ -30,9 +30,8 @@ static int update_main(void *ctx, struct apk_database *db, int argc, char **argv
 		if (APK_BLOB_IS_NULL(repo->description))
 			continue;
 
-		apk_message("%.*s [%s]",
-			    repo->description.len,
-			    repo->description.ptr,
+		apk_message(BLOB_FMT " [%s]",
+			    BLOB_PRINTF(repo->description),
 			    db->repos[i].url);
 	}
 

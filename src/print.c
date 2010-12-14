@@ -26,7 +26,7 @@ int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
 		i->x = i->indent;
 		printf("\n%*s", i->indent - 1, "");
 	}
-	i->x += printf(" %.*s", (int) blob.len, blob.ptr);
+	i->x += printf(" " BLOB_FMT, BLOB_PRINTF(blob));
 	return 0;
 }
 

@@ -32,9 +32,8 @@ static int ver_indexes(struct apk_database *db, int argc, char **argv)
 		if (APK_BLOB_IS_NULL(repo->description))
 			continue;
 
-		printf("%.*s [%s]\n",
-                       (int) repo->description.len,
-		       repo->description.ptr,
+		printf(BLOB_FMT " [%s]\n",
+		       BLOB_PRINTF(repo->description),
 		       db->repos[i].url);
 	}
 
@@ -94,7 +93,8 @@ static void ver_print_package_status(struct apk_package *pkg, const char *limit)
 	struct apk_name *name;
 	struct apk_package *tmp;
 	char pkgname[256];
-	const char *opstr, *latest = "";
+	const char *opstr;
+	apk_blob_t *latest = apk_blob_atomize(APK_BLOB_STR(""));
 	int i, r = -1;
 
 	name = pkg->name;
@@ -102,16 +102,18 @@ static void ver_print_package_status(struct apk_package *pkg, const char *limit)
 		tmp = name->pkgs->item[i];
 		if (tmp->name != name || tmp->repos == 0)
 			continue;
-		r = apk_version_compare(tmp->version, latest);
+		r = apk_version_compare_blob(*tmp->version, *latest);
 		if (r == APK_VERSION_GREATER)
 			latest = tmp->version;
 	}
-	r = apk_version_compare(pkg->version, latest);
+	r = apk_version_compare_blob(*pkg->version, *latest);
 	opstr = apk_version_op_string(r);
 	if ((limit != NULL) && (strchr(limit, *opstr) == NULL))
 		return;
-	snprintf(pkgname, sizeof(pkgname), "%s-%s", name->name, pkg->version);
-	printf("%-40s%s %s\n", pkgname, opstr, latest);
+	snprintf(pkgname, sizeof(pkgname), PKG_VER_FMT,
+		 PKG_VER_PRINTF(pkg));
+	printf("%-40s%s " BLOB_FMT "\n", pkgname, opstr,
+	       BLOB_PRINTF(*latest));
 }
 
 static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)

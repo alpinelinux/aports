@@ -63,8 +63,8 @@ struct apk_sign_ctx {
 
 struct apk_dependency {
 	struct apk_name *name;
+	apk_blob_t *version;
 	int result_mask;
-	char *version;
 };
 APK_ARRAY(apk_dependency_array, struct apk_dependency);
 
@@ -83,17 +83,20 @@ struct apk_installed_package {
 
 struct apk_package {
 	apk_hash_node hash_node;
-	unsigned repos;
 	struct apk_name *name;
-	char *version, *arch;
-	char *url, *description, *license;
+	struct apk_installed_package *ipkg;
+	apk_blob_t *version, *arch, *license;
+	char *url, *description;
+	char *filename;
 	struct apk_dependency_array *depends;
 	size_t installed_size, size;
-	char *filename;
+	unsigned repos;
 	struct apk_checksum csum;
-	struct apk_installed_package *ipkg;
 };
 APK_ARRAY(apk_package_array, struct apk_package *);
+
+#define PKG_VER_FMT		"%s-" BLOB_FMT
+#define PKG_VER_PRINTF(pkg)	pkg->name->name, BLOB_PRINTF(*pkg->version)
 
 extern const char *apk_script_types[];
 

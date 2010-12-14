@@ -145,7 +145,7 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 			for (j = 0; j < name->pkgs->num; j++) {
 				struct apk_package *pkg = name->pkgs->item[j];
-				if (apk_blob_compare(bver, APK_BLOB_STR(pkg->version)) != 0)
+				if (apk_blob_compare(bver, *pkg->version) != 0)
 					continue;
 				if (pkg->size != fi.size)
 					continue;
