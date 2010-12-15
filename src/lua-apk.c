@@ -1,3 +1,4 @@
+#include <features.h>
 #include <lua.h>
 #include <lualib.h>
 #include <lauxlib.h>
@@ -83,6 +84,14 @@ static const char *get_opt_string_field(lua_State *L, int index,
 	return value;
 }
 
+static void set_string_field(lua_State *L, int index, const char *key,
+			     const char *value)
+{
+	lua_pushstring(L, key);
+	lua_pushstring(L, value);
+	lua_settable(L, index);
+}
+
 static int get_opt_int_field(lua_State *L, int index, const char *key, int def)
 {
 	int value;
@@ -90,6 +99,13 @@ static int get_opt_int_field(lua_State *L, int index, const char *key, int def)
 	value = luaL_optinteger(L, -1, def);
 	lua_pop(L, 1);
 	return value;
+}
+
+static void set_int_field(lua_State *L, int index, const char *key, int value)
+{
+	lua_pushstring(L, key);
+	lua_pushinteger(L, value);
+	lua_settable(L, index);
 }
 
 static int get_boolean_field(lua_State *L, int index, const char *key)
@@ -153,11 +169,36 @@ static int Papk_db_close(lua_State *L)
 }
 
 
+static int push_package(lua_State *L, struct apk_package *pkg)
+{
+	if (pkg == NULL) {
+		lua_pushnil(L);
+		return 1;
+	}
+	lua_newtable(L);
+	set_string_field(L, -3, "name", pkg->name->name);
+	set_string_field(L, -3, "version", apk_blob_cstr(*pkg->version));
+	set_string_field(L, -3, "url", pkg->url);
+	set_string_field(L, -3, "license", apk_blob_cstr(*pkg->license));
+	set_string_field(L, -3, "description", pkg->description);
+	set_string_field(L, -3, "filename", pkg->filename);
+	set_int_field(L, -3, "size", pkg->size);
+	return 1;
+}
+static int Papk_who_owns(lua_State *L)
+{
+	struct apk_database *db = checkdb(L, 1);
+	const char *path = luaL_checkstring(L, 2);
+	struct apk_package *pkg = apk_db_get_file_owner(db, APK_BLOB_STR(path));
+	return push_package(L, pkg);
+}
+
 static const luaL_reg reg_apk_methods[] = {
 	{"version_validate",	Pversion_validate},
 	{"version_compare",	Pversion_compare},
 	{"version_is_less",	Pversion_is_less},
 	{"db_open",		Papk_db_open},
+	{"who_owns",		Papk_who_owns},
 	{NULL,		NULL}
 };
 
