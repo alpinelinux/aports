@@ -101,13 +101,16 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 	struct apk_package *pkg;
 	struct apk_dependency_array *deps;
 	struct apk_dependency dep;
-	int i;
+	int i, r=0;
 
 	apk_dependency_array_init(&deps);
 	for (i = 0; i < argc; i++) {
 		pkg = apk_db_get_file_owner(db, APK_BLOB_STR(argv[i]));
-		if (pkg == NULL)
+		if (pkg == NULL) {
+			apk_error("%s: Could not find owner package", argv[i]);
+			r++;
 			continue;
+		}
 
 		if (apk_verbosity < 1) {
 			dep = (struct apk_dependency) {
@@ -130,7 +133,7 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 	}
 	apk_dependency_array_free(&deps);
 
-	return 0;
+	return r;
 }
 
 static void info_print_description(struct apk_package *pkg)
