@@ -466,8 +466,14 @@ EOF
 prepare_tracedeps() {
 	local dir=${subpkgdir:-$pkgdir}
 	options_has "!tracedeps" && return 0
+	# lets tell all the .so files this package provides in .provides-so
 	find -name '*.so' -o -name '*.so.[0-9]*' | sed 's:.*/::' \
 		>"$controldir"/.provides-so
+	# lets tell all the places we should look for .so files - all rpaths
+	scanelf -q -Rr "$dir" | sed -e 's/[[:space:]].*//' -e 's/:/\n/' \
+		| sort | uniq \
+		>"$controldir"/.rpaths
+	# now find the so dependencies
 	scanelf -Rn "$dir" | tr ' ' ':' | awk -F ":" '$1 == "ET_DYN" || $1 == "ET_EXEC" {print $2}'  \
 		| sed 's:,:\n:g' | sort | uniq \
 	| while read i; do
@@ -489,10 +495,33 @@ pkginfo_val() {
 	awk -F ' = ' "\$1 == \"$key\" {print \$2}" "$file"
 }
 
+# find real path to so files
+real_so_path() {
+	local so="$1"
+	shift
+	while [ $# -gt 0 ]; do
+		[ -e "$1"/$so ] && realpath "$1/$so" && return 0
+		shift
+	done
+	error "$so: path not found"
+	return 1
+}
+
+# search rpaths and /usr/lib /lib for given so files
+find_so_files() {
+	local rpaths=$(cat "$1")
+	shift
+	while [ $# -gt 0 ]; do
+		real_so_path "$1" /usr/lib /lib $rpaths || return 1
+		shift
+	done
+	return 0
+}
+
 trace_apk_deps() {
 	local name="$1"
 	local dir="$2"
-	local i j found autodeps=
+	local i= j= found= autodeps= deppkgs= missing= so_paths=
 	msg "Tracing dependencies for $name..."
 	# add pkgconfig if usr/lib/pkgconfig is found
 	if [ -d "$pkgbasedir"/$name/usr/lib/pkgconfig ] \
@@ -516,20 +545,28 @@ trace_apk_deps() {
 			found=${found##*/.control.}
 			break
 		done
-		# check apk db if not provided by a subpackage
-		if [ -z "$found" ]; then
-			found=$($APK info -q -W /lib/$i /usr/lib/$i)
+		if [ -n "$found" ]; then
+			if ! list_has "$found" $self_provided; then
+				self_provided="$self_provided $found"
+			fi
+		else
+			missing="$missing $i"
 		fi
-		if [ -z "$found" ]; then
-			error "Could not find dependency for $i"
-			return 1
-		fi
+	done
+
+	# find all packages that holds the so files
+	so_files=$(find_so_files "$dir"/.rpaths $missing) || return 1
+	deppkgs=$($APK info -q -W $so_files) || return 1
+	
+	for found in $self_provided $deppkgs; do
 		if grep -w "^depend = ${found}$" "$dir"/.PKGINFO >/dev/null ; then
 			warning "You can remove '$found' from depends"
 			continue
 		fi
-		list_has "$found" $autodeps || autodeps="$autodeps $found"
-		msg "Added '$found' as dependency as it has $i"
+		if [ "$found" != "$name" ] && ! list_has "$found" $autodeps; then
+			autodeps="$autodeps $found"
+			msg "Added '$found' as dependency"
+		fi
 	done
 
 	[ -z "$autodeps" ] && return 0
