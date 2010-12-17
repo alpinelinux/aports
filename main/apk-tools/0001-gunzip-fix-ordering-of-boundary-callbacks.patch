@@ -1,0 +1,81 @@
+From f126316c791371bd3dfd7c348b10e93e49f5e2d4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Fri, 17 Dec 2010 09:36:19 +0200
+Subject: [PATCH] gunzip: fix ordering of boundary callbacks
+
+The boundary callback should not happen until all the uncompressed
+data has been consumed. This previously seems to have worked
+because normally gzip library returns "no error" instead of the
+"stream end" if we extract exactly the amount of bytes remaining
+in the archive. (Perhaps this was changed in new zlib.) In any
+case, verification was broken with some apks due to this callback
+ordering issue.
+---
+ src/gunzip.c |   32 ++++++++++++++++++++++++--------
+ 1 files changed, 24 insertions(+), 8 deletions(-)
+
+diff --git a/src/gunzip.c b/src/gunzip.c
+index aebaf76..df2bbbb 100644
+--- a/src/gunzip.c
++++ b/src/gunzip.c
+@@ -27,6 +27,7 @@ struct apk_gzip_istream {
+ 	apk_multipart_cb cb;
+ 	void *cbctx;
+ 	void *cbprev;
++	apk_blob_t cbarg;
+ };
+ 
+ static ssize_t gzi_read(void *stream, void *ptr, size_t size)
+@@ -48,6 +49,18 @@ static ssize_t gzi_read(void *stream, void *ptr, size_t size)
+ 	gis->zs.next_out  = ptr;
+ 
+ 	while (gis->zs.avail_out != 0 && gis->err == 0) {
++		if (!APK_BLOB_IS_NULL(gis->cbarg)) {
++			r = gis->cb(gis->cbctx,
++				    gis->err ? APK_MPART_END : APK_MPART_BOUNDARY,
++				    gis->cbarg);
++			if (r > 0)
++				r = -ECANCELED;
++			if (r != 0) {
++				gis->err = r;
++				goto ret;
++			}
++			gis->cbarg = APK_BLOB_NULL;
++		}
+ 		if (gis->zs.avail_in == 0) {
+ 			apk_blob_t blob;
+ 
+@@ -86,19 +99,22 @@ static ssize_t gzi_read(void *stream, void *ptr, size_t size)
+ 			    gis->zs.avail_in == 0)
+ 				gis->err = 1;
+ 			if (gis->cb != NULL) {
++				gis->cbarg = APK_BLOB_PTR_LEN(gis->cbprev, (void *) gis->zs.next_in - gis->cbprev); 
++				gis->cbprev = gis->zs.next_in;
++			}
++			/* If we hit end of the bitstream (not end
++			 * of just this gzip), we need to do the
++			 * callback here, as we won't be called again.
++			 * For boundaries it should be postponed to not
++			 * be called until next gzip read is started. */
++			if (gis->err) {
+ 				r = gis->cb(gis->cbctx,
+ 					    gis->err ? APK_MPART_END : APK_MPART_BOUNDARY,
+-					    APK_BLOB_PTR_LEN(gis->cbprev, (void *) gis->zs.next_in - gis->cbprev));
++					    gis->cbarg);
+ 				if (r > 0)
+ 					r = -ECANCELED;
+-				if (r != 0) {
+-					gis->err = r;
+-					goto ret;
+-				}
+-				gis->cbprev = gis->zs.next_in;
+-			}
+-			if (gis->err)
+ 				goto ret;
++			}
+ 			inflateEnd(&gis->zs);
+ 			if (inflateInit2(&gis->zs, 15+32) != Z_OK)
+ 				return -ENOMEM;
+-- 
+1.7.3.3
+
