@@ -10,16 +10,15 @@ pkgver=VERSION
 pkgrel=0
 pkgdesc=""
 url=""
+arch="all"
 license="GPL"
 depends=
-makedepends=
+depends_dev=
+makedepends="$depends_dev"
 install=
 subpackages="$pkgname-dev $pkgname-doc"
 source="http://downloads.sourceforge.net/$pkgname/$pkgname-$pkgver.tar.gz"
 
-# append extra dependencies to -dev subpackage
-# remove if not used.
-# depends_dev="somepackage-dev"
 
 _builddir="$srcdir"/$pkgname-$pkgver
 
