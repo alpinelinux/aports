@@ -43,7 +43,7 @@ int apk_do_self_upgrade(struct apk_database *db, struct apk_state *state)
 			if (dep0->name != dep.name)
 				continue;
 			dep0->version = apk_blob_atomize(APK_BLOB_NULL);
-			dep0->result_mask = APK_VERSION_EQUAL | APK_VERSION_LESS | APK_VERSION_GREATER;
+			dep0->result_mask = APK_DEPMASK_REQUIRE;
 			break;
 		}
 	}
@@ -94,7 +94,7 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 		struct apk_dependency *dep = &db->world->item[i];
 		if (dep->version != null_atom &&
 		    (apk_flags & APK_PREFER_AVAILABLE)) {
-			dep->result_mask = APK_VERSION_EQUAL | APK_VERSION_LESS | APK_VERSION_GREATER;
+			dep->result_mask = APK_DEPMASK_REQUIRE;
 			dep->version = null_atom;
 		}
 		if (dep->name->pkgs->num != 0)

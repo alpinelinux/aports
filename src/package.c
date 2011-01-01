@@ -193,7 +193,7 @@ int apk_dep_from_blob(struct apk_dependency *dep, struct apk_database *db,
 {
 	struct apk_name *name;
 	apk_blob_t bname, bop, bver = APK_BLOB_NULL;
-	int mask = APK_VERSION_LESS | APK_VERSION_EQUAL | APK_VERSION_GREATER;
+	int mask = APK_DEPMASK_REQUIRE;
 
 	/* [!]name[<,<=,=,>=,>]ver */
 	if (blob.ptr[0] == '!') {
