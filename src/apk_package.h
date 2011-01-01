@@ -32,7 +32,6 @@ struct apk_name;
 #define APK_SIGN_NONE			0
 #define APK_SIGN_VERIFY			1
 #define APK_SIGN_VERIFY_IDENTITY	2
-#define APK_SIGN_GENERATE_V1		3
 #define APK_SIGN_GENERATE		4
 #define APK_SIGN_VERIFY_AND_GENERATE	5
 

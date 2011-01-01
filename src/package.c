@@ -367,11 +367,6 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
 		}
 		memcpy(&ctx->identity, identity, sizeof(ctx->identity));
 		break;
-	case APK_SIGN_GENERATE_V1:
-		ctx->md = EVP_md5();
-		ctx->control_started = 1;
-		ctx->data_started = 1;
-		break;
 	case APK_SIGN_GENERATE:
 	case APK_SIGN_VERIFY_AND_GENERATE:
 		ctx->md = EVP_sha1();
@@ -574,7 +569,6 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 			sctx->data_verified = 1;
 		break;
 	case APK_SIGN_GENERATE:
-	case APK_SIGN_GENERATE_V1:
 		/* Package identity is the checksum */
 		sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
 		EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);

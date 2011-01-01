@@ -17,8 +17,6 @@
 #include "apk_database.h"
 #include "apk_print.h"
 
-#define INDEX_OLD_FORMAT	0x10000
-
 struct counts {
 	int unsatisfied;
 };
@@ -45,9 +43,6 @@ static int index_parse(void *ctx, struct apk_db_options *dbopts,
 		break;
 	case 'd':
 		ictx->description = optarg;
-		break;
-	case INDEX_OLD_FORMAT:
-		ictx->method = APK_SIGN_GENERATE_V1;
 		break;
 	default:
 		return -1;
@@ -219,8 +214,6 @@ static struct apk_option index_options[] = {
 	{ 'd', "description", "Embed TEXT as description and version "
 	  "information of the repository index",
 	  required_argument, "TEXT" },
-	{ INDEX_OLD_FORMAT, "old-format",
-	  "Specify to create old style index files" }
 };
 
 static struct apk_applet apk_index = {
