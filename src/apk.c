@@ -30,6 +30,8 @@
 #include "apk_blob.h"
 #include "apk_print.h"
 
+char **apk_argv;
+
 static struct apk_option generic_options[] = {
 	{ 'h', "help",		"Show generic help or applet specific help" },
 	{ 'p', "root",		"Install packages to DIR",
@@ -244,6 +246,10 @@ int main(int argc, char **argv)
 	struct apk_repository_list *repo = NULL;
 	struct apk_database db;
 	struct apk_db_options dbopts;
+
+	apk_argv = malloc(sizeof(char*[argc+1]));
+	memcpy(apk_argv, argv, sizeof(char*[argc]));
+	apk_argv[argc] = NULL;
 
 	memset(&dbopts, 0, sizeof(dbopts));
 	list_init(&dbopts.repository_list);

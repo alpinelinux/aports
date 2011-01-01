@@ -199,6 +199,7 @@ struct apk_state *apk_state_new(struct apk_database *db)
 	state->refs = 1;
 	state->num_names = db->name_id;
 	state->db = db;
+	state->print_ok = 1;
 	list_init(&state->change_list_head);
 
 	apk_name_array_init(&state->missing);
@@ -235,6 +236,7 @@ static int apk_state_add_change(struct apk_state *state,
 
 	list_init(&change->change_list);
 	list_add_tail(&change->change_list, &state->change_list_head);
+	state->num_changes++;
 	change->oldpkg = oldpkg;
 	change->newpkg = newpkg;
 
@@ -873,13 +875,11 @@ int apk_state_commit(struct apk_state *state,
 {
 	struct progress prog;
 	struct apk_change *change;
-	int r = 0, size_diff = 0, toplevel = FALSE, deleteonly = TRUE;
-	int n = 0, numpkg = 0;
+	int n = 0, r = 0, size_diff = 0, toplevel = FALSE, deleteonly = TRUE;
 
 	/* Count what needs to be done */
 	memset(&prog, 0, sizeof(prog));
 	list_for_each_entry(change, &state->change_list_head, change_list) {
-		numpkg++;
 		if (change->newpkg == NULL) {
 			if (change->oldpkg->name->flags & APK_NAME_TOPLEVEL)
 				toplevel = TRUE;
@@ -935,7 +935,7 @@ int apk_state_commit(struct apk_state *state,
 	n = 0;
 	list_for_each_entry(change, &state->change_list_head, change_list) {
 		n++;
-		apk_print_change(db, change->oldpkg, change->newpkg, n, numpkg);
+		apk_print_change(db, change->oldpkg, change->newpkg, n, state->num_changes);
 		prog.pkg = change->newpkg;
 
 		if (!(apk_flags & APK_SIMULATE)) {
@@ -963,7 +963,7 @@ update_state:
 	apk_db_run_triggers(db);
 	apk_db_write_config(db);
 
-	if (r == 0)
+	if (r == 0 && state->print_ok)
 		apk_message("OK: %d packages, %d dirs, %d files",
 			    db->installed.stats.packages,
 			    db->installed.stats.dirs,

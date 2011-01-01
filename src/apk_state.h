@@ -23,7 +23,8 @@ struct apk_change {
 };
 
 struct apk_state {
-	unsigned int refs, num_names;
+	unsigned int refs, num_names, num_changes;
+	int print_ok;
 	struct apk_database *db;
 	struct list_head change_list_head;
 	struct apk_package_array *conflicts;

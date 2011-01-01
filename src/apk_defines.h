@@ -50,6 +50,7 @@
 extern int apk_verbosity;
 extern unsigned int apk_flags;
 extern const char *apk_arch;
+extern char **apk_argv;
 
 #define APK_FORCE		0x0001
 #define APK_SIMULATE		0x0002

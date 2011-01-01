@@ -30,6 +30,46 @@ static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
 	return 0;
 }
 
+int apk_do_self_upgrade(struct apk_database *db, struct apk_state *state)
+{
+	struct apk_dependency dep;
+	int r, i;
+
+	apk_dep_from_blob(&dep, db, APK_BLOB_STR("apk-tools"));
+
+	if (apk_flags & APK_PREFER_AVAILABLE) {
+		for (i = 0; i < db->world->num; i++) {
+			struct apk_dependency *dep0 = &db->world->item[i];
+			if (dep0->name != dep.name)
+				continue;
+			dep0->version = apk_blob_atomize(APK_BLOB_NULL);
+			dep0->result_mask = APK_VERSION_EQUAL | APK_VERSION_LESS | APK_VERSION_GREATER;
+			break;
+		}
+	}
+
+	r = apk_state_lock_dependency(state, &dep);
+	if (r != 0 || state->num_changes == 0)
+		return r;
+
+	if (apk_flags & APK_SIMULATE) {
+		apk_warning("This simulation is not reliable as apk-tools upgrade is available.");
+		return 0;
+	}
+
+	apk_message("Uprading first to new apk-tools:");
+	state->print_ok = 0;
+	r = apk_state_commit(state, db);
+	apk_state_unref(state);
+	apk_db_close(db);
+
+	apk_message("Performing rest of the operation:");
+	execvp(apk_argv[0], apk_argv);
+
+	apk_error("PANIC! Failed to re-execute new apk-tools!");
+	exit(1);
+}
+
 static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct apk_state *state = NULL;
@@ -38,11 +78,17 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 	int i, r = 0;
 
 	apk_flags |= APK_UPGRADE;
-
 	apk_name_array_init(&missing);
+
 	state = apk_state_new(db);
 	if (state == NULL)
 		goto err;
+
+	r = apk_do_self_upgrade(db, state);
+	if (r != 0) {
+		apk_state_print_errors(state);
+		goto err;
+	}
 
 	for (i = 0; i < db->world->num; i++) {
 		struct apk_dependency *dep = &db->world->item[i];
