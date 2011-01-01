@@ -51,6 +51,7 @@ static int del_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 		dep = (struct apk_dependency) {
 			.name = name,
+			.version = apk_blob_atomize(APK_BLOB_NULL),
 			.result_mask = APK_DEPMASK_CONFLICT,
 		};
 

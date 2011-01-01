@@ -34,6 +34,7 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 {
 	struct apk_state *state = NULL;
 	struct apk_name_array *missing;
+	apk_blob_t *null_atom = apk_blob_atomize(APK_BLOB_NULL);
 	int i, r = 0;
 
 	apk_flags |= APK_UPGRADE;
@@ -45,9 +46,10 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 
 	for (i = 0; i < db->world->num; i++) {
 		struct apk_dependency *dep = &db->world->item[i];
-		if (dep->version && (apk_flags & APK_PREFER_AVAILABLE)) {
+		if (dep->version != null_atom &&
+		    (apk_flags & APK_PREFER_AVAILABLE)) {
 			dep->result_mask = APK_VERSION_EQUAL | APK_VERSION_LESS | APK_VERSION_GREATER;
-			dep->version = NULL;
+			dep->version = null_atom;
 		}
 		if (dep->name->pkgs->num != 0)
 			r |= apk_state_lock_dependency(state, dep);

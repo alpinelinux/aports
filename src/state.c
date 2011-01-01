@@ -523,6 +523,7 @@ static int reinstall_broken_package(struct apk_state *state,
 {
 	struct apk_dependency dep0 = {
 		.name = pkg->name,
+		.version = apk_blob_atomize(APK_BLOB_NULL),
 		.result_mask = APK_DEPMASK_REQUIRE,
 	};
 	return apk_state_lock_dependency(state, &dep0);
