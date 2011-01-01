@@ -222,11 +222,8 @@ int apk_dep_from_blob(struct apk_dependency *dep, struct apk_database *db,
 				break;
 			}
 		}
-		if ((mask & (APK_VERSION_LESS|APK_VERSION_GREATER))
-		    == (APK_VERSION_LESS|APK_VERSION_GREATER))
-			return -EINVAL;
-
-		if (!apk_version_validate(bver))
+		if ((mask & APK_DEPMASK_CHECKSUM) != APK_DEPMASK_CHECKSUM &&
+		    !apk_version_validate(bver))
 			return -EINVAL;
 
 		blob = bname;
@@ -247,10 +244,16 @@ int apk_dep_from_blob(struct apk_dependency *dep, struct apk_database *db,
 void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		      struct apk_package *pkg)
 {
+	char buf[64];
+	apk_blob_t b = APK_BLOB_BUF(buf);
+
+	apk_blob_push_csum(&b, &pkg->csum);
+	b = apk_blob_pushed(APK_BLOB_BUF(buf), b);
+
 	*dep = (struct apk_dependency) {
 		.name = pkg->name,
-		.version = pkg->version,
-		.result_mask = APK_VERSION_EQUAL,
+		.version = apk_blob_atomize_dup(b),
+		.result_mask = APK_DEPMASK_CHECKSUM,
 	};
 }
 
@@ -270,6 +273,25 @@ static int parse_depend(void *ctx, apk_blob_t blob)
 		return -1;
 	*dep = p;
 
+	return 0;
+}
+
+int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg)
+{
+	if (dep->name != pkg->name)
+		return 0;
+	if (dep->result_mask == APK_DEPMASK_CHECKSUM) {
+		struct apk_checksum csum;
+		apk_blob_t b = *dep->version;
+
+		apk_blob_pull_csum(&b, &csum);
+		if (apk_checksum_compare(&csum, &pkg->csum) == 0)
+			return 1;
+	} else {
+		if (apk_version_compare_blob(*pkg->version, *dep->version)
+		    & dep->result_mask)
+			return 1;
+	}
 	return 0;
 }
 

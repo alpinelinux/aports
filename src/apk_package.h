@@ -56,10 +56,6 @@ struct apk_sign_ctx {
 	} signature;
 };
 
-#define APK_DEPMASK_REQUIRE	(APK_VERSION_EQUAL|APK_VERSION_LESS|\
-				 APK_VERSION_GREATER)
-#define APK_DEPMASK_CONFLICT	(0)
-
 struct apk_dependency {
 	struct apk_name *name;
 	apk_blob_t *version;
@@ -114,6 +110,7 @@ int apk_dep_from_blob(struct apk_dependency *dep, struct apk_database *db,
 		      apk_blob_t blob);
 void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		      struct apk_package *pkg);
+int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg);
 void apk_blob_push_dep(apk_blob_t *to, struct apk_dependency *dep);
 
 int apk_deps_add(struct apk_dependency_array **depends,

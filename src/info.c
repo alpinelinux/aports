@@ -84,8 +84,7 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 		if (j >= name->pkgs->num)
 			continue;
 
-		if (!(apk_version_compare_blob(*pkg->version, *dep.version)
-		      & dep.result_mask))
+		if (!apk_dep_is_satisfied(&dep, pkg))
 			continue;
 
 		verbose_print_pkg(pkg, 0);

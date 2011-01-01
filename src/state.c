@@ -130,8 +130,7 @@ static struct apk_name_choices *name_choices_new(struct apk_database *db,
 			continue;
 
 		for (j = 0; j < nc->num; ) {
-			if (apk_version_compare_blob(*nc->pkgs[j]->version, *dep->version)
-			    & dep->result_mask) {
+			if (apk_dep_is_satisfied(dep, nc->pkgs[j])) {
 			    	j++;
 			} else {
 				nc->pkgs[j] = nc->pkgs[nc->num - 1];
@@ -286,8 +285,7 @@ int apk_state_prune_dependency(struct apk_state *state,
 				return -1;
 			}
 		} else {
-			if (!(apk_version_compare_blob(*pkg->version, *dep->version)
-			      & dep->result_mask))
+			if (!apk_dep_is_satisfied(dep, pkg))
 				return -1;
 		}
 
@@ -301,9 +299,8 @@ int apk_state_prune_dependency(struct apk_state *state,
 	c = ns_to_choices(state->name[name->id]);
 	i = 0;
 	while (i < c->num) {
-		if (apk_version_compare_blob(*c->pkgs[i]->version, *dep->version)
-		    & dep->result_mask) {
-		    	i++;
+		if (apk_dep_is_satisfied(dep, c->pkgs[i])) {
+			i++;
 			continue;
 		}
 
@@ -444,8 +441,7 @@ static int call_if_dependency_broke(struct apk_state *state,
 		    dep->result_mask == APK_DEPMASK_CONFLICT)
 			continue;
 		if (dep_pkg != NULL &&
-		    (apk_version_compare_blob(*dep_pkg->version, *dep->version)
-		     & dep->result_mask))
+		    apk_dep_is_satisfied(dep, dep_pkg))
 			continue;
 		return cb(state, pkg, dep, ctx);
 	}
@@ -619,12 +615,11 @@ static void apk_print_change(struct apk_database *db,
 			msg = "Downgrading";
 			break;
 		case APK_VERSION_EQUAL:
-			if (newpkg == oldpkg) {
+			if (newpkg == oldpkg)
 				msg = "Re-installing";
-				break;
-			}
-			/* fallthrough - equal version, but different
-			 * package is counted as upgrade */
+			else
+				msg = "Replacing";
+			break;
 		case APK_VERSION_GREATER:
 			msg = "Upgrading";
 			break;

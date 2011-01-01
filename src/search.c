@@ -53,8 +53,7 @@ static int print_rdepends(struct apk_package *pkg)
 			for (k = 0; k < pkg0->depends->num; k++) {
 				dep = &pkg0->depends->item[k];
 				if (name == dep->name &&
-				    (apk_version_compare_blob(*pkg->version, *dep->version)
-				      & dep->result_mask)) {
+				    apk_dep_is_satisfied(dep, pkg)) {
 					printf(" " PKG_VER_FMT,
 					       PKG_VER_PRINTF(pkg0));
 				}
