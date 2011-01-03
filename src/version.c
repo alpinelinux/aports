@@ -85,7 +85,7 @@ static int get_token(int *type, apk_blob_t *blob)
 	case TOKEN_DIGIT_OR_ZERO:
 		/* Leading zero digits get a special treatment */
 		if (blob->ptr[i] == '0') {
-			while (blob->ptr[i] == '0' && i < blob->len)
+			while (i < blob->len && blob->ptr[i] == '0')
 				i++;
 			nt = TOKEN_DIGIT;
 			v = -i;
@@ -94,7 +94,7 @@ static int get_token(int *type, apk_blob_t *blob)
 	case TOKEN_DIGIT:
 	case TOKEN_SUFFIX_NO:
 	case TOKEN_REVISION_NO:
-		while (isdigit(blob->ptr[i]) && i < blob->len) {
+		while (i < blob->len && isdigit(blob->ptr[i])) {
 			v *= 10;
 			v += blob->ptr[i++] - '0';
 		}
