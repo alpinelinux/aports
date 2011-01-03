@@ -15,7 +15,7 @@ datadir=@datadir@
 prog=${0##*/}
 
 # source $PACKAGER
-for i in /etc/abuild.conf $HOME/.abuild/abuild.conf; do
+for i in $sysconfdir/abuild.conf $HOME/.abuild/abuild.conf; do
 	if [ -f "$i" ]; then
 		. $i
 	fi
@@ -51,45 +51,133 @@ newaport() {
 	fi
 	mkdir -p "$pn"
 	cd "$pn"
-	sed 	-e '1,/^\#*$/d' \
-		-e "s/^\(# Contributor: \).*/\1$PACKAGER/" \
-		-e "s/^\(# Maintainer: \).*/\1$PACKAGER/" \
-		-e "s/^pkgname=.*/pkgname=$pn/" \
-		-e "s/^pkgver=.*/pkgver=$pv/" \
-		"$datadir"/sample.APKBUILD > APKBUILD || return 1
+
+	# replace pkgver in $source
 	if [ -n "$source" ]; then
 		source=$(echo "$source" | sed "s/$pv/\$pkgver/g")
-		sed -i -e "/^source=/s|=.*|=\"$source\"|" APKBUILD || return 1
 	fi
-	#-e '1,/^\#$/d' \
+
+	# copy init.d scripts if requested
 	if [ -n "$cpinitd" ]; then
 		cp "$datadir"/sample.initd $pn.initd
 		cp "$datadir"/sample.confd $pn.confd
 		cp "$datadir"/sample.pre-install $pn.pre-install
 		cp "$datadir"/sample.post-install $pn.post-install
-		sed -i -e "s/^install=.*/install=\"\$pkgname.pre-install \$pkgname.post-install\"/" \
-			-e "s/^source=\"\(.*\)\"/source=\"\1\n\t$pn.initd\n\t$pn.confd\n\t\$install\n\t\"/" \
-			APKBUILD
-		
+		install="\$pkgname.pre-install \$pkgname.post-install"
+		source="$source
+	$pn.initd
+	$pn.confd
+	"
 	fi
+
+	# generate header with standard variables
+	cat >APKBUILD<<__EOF__
+# Contributor:${PACKAGER:+" "}${PACKAGER}
+# Maintainer:${MAINTAINER:+" "}${MAINTAINER}
+pkgname=$pn
+pkgver=$pv
+pkgrel=0
+pkgdesc="$pkgdesc"
+url="$url"
+arch="all"
+license="$license"
+depends=
+depends_dev=
+makedepends="\$depends_dev"
+install="$install"
+subpackages="\$pkgname-dev \$pkgname-doc"
+source="$source"
+
+__EOF__
+
+	abuild -f fetch unpack
+	# figure out the _builddir
+	for i in src/*; do
+		if [ -d "$i" ]; then
+			sdir=$i
+			_builddir=$(echo ${i#*/} | sed "s/$pv/\$pkgver/g")
+			_builddir="\"\$srcdir\"/$_builddir"
+		fi
+	done
+	echo "_builddir=$_builddir" >> APKBUILD
+
+	# create the prepare() template
+	cat >>APKBUILD<<__EOF__
+prepare() {
+	local i
+	cd "\$_builddir"
+	for i in \$source; do
+		case \$i in
+		*.patch) msg \$i; patch -p1 -i "\$srcdir"/\$i || return 1;;
+		esac
+	done
+}
+
+__EOF__
+
+	# create build()
+	cat >>APKBUILD<<__EOF__
+build() {
+	cd "\$_builddir"
+__EOF__
+	if [ -x "$sdir"/configure ]; then
+		cat >>APKBUILD<<__EOF__
+	./configure --prefix=/usr \\
+		--sysconfdir=/etc \\
+		--mandir=/usr/share/man \\
+		--infodir=/usr/share/info \\
+		--localstatedir=/var \\
+		|| return 1
+__EOF__
+	fi
+	cat >>APKBUILD<<__EOF__
+	make || return 1
+}
+
+__EOF__
+
+	# create package() function
+	cat >>APKBUILD<<__EOF__
+package() {
+	make DESTDIR="\$pkgdir" install || return 1
+__EOF__
+	if [ -n "$cpinitd" ]; then
+		cat >>APKBUILD<<__EOF__
+
+	install -m755 -D "\$srcdir"/\$pkgname.initd \\
+		"\$pkgdir"/etc/init.d/\$pkgname || return 1
+	install -m644 -D "\$srcdir"/\$pkgname.confd \\
+		"\$pkgdir"/etc/conf.d/\$pkgname || return 1
+__EOF__
+	fi
+	cat >>APKBUILD<<__EOF__
+}
+
+__EOF__
 }
 
 usage() {
 	echo "$prog $version"
-	echo "usage: $prog [-cfh] PKGNAME[-PKGVER]"
+	echo "usage: $prog [-cfh] [-d DESC] [-l LICENSE] [-u URL] PKGNAME[-PKGVER]"
 	echo "Options:"
 	echo " -c  Copy a sample init.d, conf.d and install script to new directory"
+	echo " -d  Set package description (pkgdesc) to DESC"
 	echo " -f  Force even if directory already exist"
 	echo " -h  Show this help"
+	echo " -l  Set package license to LICENSE"
+	echo " -u  Set package URL"
 	echo ""
 	exit 0
 }
 
-while getopts "cfh" opt; do
+while getopts "cd:fhl:u:" opt; do
 	case $opt in
 		'c') cpinitd=1;;
+		'd') pkgdesc="$OPTARG";;
 		'f') force=1;;
 		'h') usage;;
+		'l') license="$OPTARG";;
+		'u') url="$OPTARG";;
 	esac
 done
 shift $(( $OPTIND - 1 ))
