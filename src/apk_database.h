@@ -105,8 +105,10 @@ struct apk_database {
 	unsigned name_id, num_repos;
 	const char *cache_dir;
 	apk_blob_t *arch;
-	int permanent;
 	unsigned int local_repos;
+	int permanent : 1;
+	int compat_newfeatures : 1;
+	int compat_notinstallable : 1;
 
 	struct apk_dependency_array *world;
 	struct apk_string_array *protected_paths;

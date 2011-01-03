@@ -654,8 +654,17 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 	case 'I':
 		pkg->installed_size = apk_blob_pull_uint(&value, 10);
 		break;
+	case 'F': case 'M': case 'R': case 'Z':
+		/* installed db entries which are handled in database.c */
+		return 1;
 	default:
-		return -1;
+		/* lower case index entries are safe to be ignored */
+		if (!islower(field)) {
+			pkg->filename = APK_PKG_UNINSTALLABLE;
+			db->compat_notinstallable = 1;
+		}
+		db->compat_newfeatures = 1;
+		return 1;
 	}
 	if (APK_BLOB_IS_NULL(value))
 		return -1;
@@ -755,8 +764,9 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	tar->close(tar);
 	if (r < 0 && r != -ECANCELED)
 		goto err;
-	if (ctx.pkg->name == NULL) {
-		r = -ENOMSG;
+	if (ctx.pkg->name == NULL ||
+	    ctx.pkg->filename == APK_PKG_UNINSTALLABLE) {
+		r = -ENOTSUP;
 		goto err;
 	}
 	if (sctx->action != APK_SIGN_VERIFY)

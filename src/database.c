@@ -562,7 +562,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 	struct hlist_node **diri_node = NULL;
 	struct hlist_node **file_diri_node = NULL;
 	apk_blob_t token = APK_BLOB_STR("\n"), l;
-	int field;
+	int field, r;
 
 	while (!APK_BLOB_IS_NULL(l = bs->read(bs, token))) {
 		if (l.len < 2 || l.ptr[1] != ':') {
@@ -589,27 +589,25 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		/* If no package, create new */
 		if (pkg == NULL) {
 			pkg = apk_pkg_new();
-                        ipkg = NULL;
+			ipkg = NULL;
 			diri = NULL;
 			file_diri_node = NULL;
 		}
 
 		/* Standard index line? */
-		if (apk_pkg_add_info(db, pkg, field, l) == 0) {
-		        if (repo == -1 && field == 'S') {
-                                /* Instert to installed database; this needs to
-                                 * happen after package name has been read, but
-                                 * before first FDB entry. */
-                                ipkg = apk_pkg_install(db, pkg);
-                                diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
-		        }
+		r = apk_pkg_add_info(db, pkg, field, l);
+		if (r == 0) {
+			if (repo == -1 && field == 'S') {
+				/* Instert to installed database; this needs to
+				 * happen after package name has been read, but
+				 * before first FDB entry. */
+				ipkg = apk_pkg_install(db, pkg);
+				diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
+			}
 			continue;
-                }
-
-		if (repo != -1 || ipkg == NULL) {
-			apk_error("Invalid index entry '%c'", field);
-			return -1;
 		}
+		if (repo != -1 || ipkg == NULL)
+			continue;
 
 		/* Check FDB special entries */
 		switch (field) {
@@ -647,8 +645,14 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			apk_blob_pull_csum(&l, &file->csum);
 			break;
 		default:
-			apk_error("FDB entry '%c' unsupported", field);
-			return -1;
+			if (r != 0 && !(apk_flags & APK_FORCE)) {
+				/* Installed db should not have unsupported fields */
+				apk_error("This apk-tools is too old to handle installed packages");
+				return -1;
+			}
+			/* Installed. So mark the package as installable. */
+			pkg->filename = NULL;
+			continue;
 		}
 		if (APK_BLOB_IS_NULL(l)) {
 			apk_error("FDB format error in entry '%c'", field);
@@ -879,7 +883,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	struct apk_istream *is;
 	struct apk_bstream *bs;
 	apk_blob_t blob;
-	int i;
+	int i, r;
 
 	/* Read:
 	 * 1. installed repository
@@ -903,8 +907,10 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	if (!(flags & APK_OPENF_NO_INSTALLED)) {
 		bs = apk_bstream_from_file(db->root_fd, "var/lib/apk/installed");
 		if (bs != NULL) {
-			apk_db_index_read(db, bs, -1);
+			r = apk_db_index_read(db, bs, -1);
 			bs->close(bs, NULL);
+			if (r != 0)
+				return -1;
 		}
 
 		bs = apk_bstream_from_file(db->root_fd, "var/lib/apk/triggers");
@@ -1180,6 +1186,13 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	if (rr != 0) {
 		r = rr;
 		goto ret_r;
+	}
+
+	if (db->compat_newfeatures) {
+		apk_warning("This apk-tools is OLD! Some packages %s.",
+			    db->compat_notinstallable ?
+			    "are not installable" :
+			    "might not function properly");
 	}
 
 	return rr;

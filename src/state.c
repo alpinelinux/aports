@@ -119,6 +119,15 @@ static struct apk_name_choices *name_choices_new(struct apk_database *db,
 	memcpy(nc->pkgs, name->pkgs->item,
 	       name->pkgs->num * sizeof(struct apk_package *));
 
+	for (j = 0; j < nc->num; ) {
+		if (nc->pkgs[j]->filename != APK_PKG_UNINSTALLABLE) {
+			j++;
+		} else {
+			nc->pkgs[j] = nc->pkgs[nc->num - 1];
+			nc->num--;
+		}
+	}
+
 	if (name->flags & APK_NAME_TOPLEVEL_OVERRIDE)
 		return nc;
 
@@ -131,7 +140,7 @@ static struct apk_name_choices *name_choices_new(struct apk_database *db,
 
 		for (j = 0; j < nc->num; ) {
 			if (apk_dep_is_satisfied(dep, nc->pkgs[j])) {
-			    	j++;
+				j++;
 			} else {
 				nc->pkgs[j] = nc->pkgs[nc->num - 1];
 				nc->num--;
