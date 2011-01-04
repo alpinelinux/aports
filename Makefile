@@ -1,6 +1,8 @@
 ##
 # Building apk-tools
 
+-include config.mk
+
 PACKAGE := apk-tools
 VERSION := 2.0.7
 
