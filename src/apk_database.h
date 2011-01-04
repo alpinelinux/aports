@@ -76,6 +76,7 @@ struct apk_name {
 	char *name;
 	struct apk_package_array *pkgs;
 	struct apk_name_array *rdepends;
+	struct apk_name_array *rinstall_if;
 };
 
 struct apk_repository {

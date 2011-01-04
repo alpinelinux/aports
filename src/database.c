@@ -84,6 +84,7 @@ static void pkg_name_free(struct apk_name *name)
 	free(name->name);
 	apk_package_array_free(&name->pkgs);
 	apk_name_array_free(&name->rdepends);
+	apk_name_array_free(&name->rinstall_if);
 	free(name);
 }
 
@@ -196,6 +197,7 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 	pn->id = db->name_id++;
 	apk_package_array_init(&pn->pkgs);
 	apk_name_array_init(&pn->rdepends);
+	apk_name_array_init(&pn->rinstall_if);
 	apk_hash_insert_hashed(&db->available.names, pn, hash);
 
 	return pn;
@@ -399,16 +401,25 @@ static struct apk_db_file *apk_db_file_get(struct apk_database *db,
 static void apk_db_pkg_rdepends(struct apk_database *db, struct apk_package *pkg)
 {
 	int i, j;
+	struct apk_name *rname;
 
 	for (i = 0; i < pkg->depends->num; i++) {
-		struct apk_name *rname = pkg->depends->item[i].name;
-
+		rname = pkg->depends->item[i].name;
 		for (j = 0; j < rname->rdepends->num; j++)
 			if (rname->rdepends->item[j] == pkg->name)
-				return;
-
+				goto rdeps_done;
 		*apk_name_array_add(&rname->rdepends) = pkg->name;
 	}
+rdeps_done:
+	for (i = 0; i < pkg->install_if->num; i++) {
+		rname = pkg->install_if->item[i].name;
+		for (j = 0; j < rname->rinstall_if->num; j++)
+			if (rname->rinstall_if->item[j] == pkg->name)
+				goto riif_done;
+		*apk_name_array_add(&rname->rinstall_if) = pkg->name;
+	}
+riif_done:
+	return;
 }
 
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)

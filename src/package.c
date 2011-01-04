@@ -58,8 +58,10 @@ struct apk_package *apk_pkg_new(void)
 	struct apk_package *pkg;
 
 	pkg = calloc(1, sizeof(struct apk_package));
-	if (pkg != NULL)
+	if (pkg != NULL) {
 		apk_dependency_array_init(&pkg->depends);
+		apk_dependency_array_init(&pkg->install_if);
+	}
 
 	return pkg;
 }
@@ -654,6 +656,9 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 	case 'I':
 		pkg->installed_size = apk_blob_pull_uint(&value, 10);
 		break;
+	case 'i':
+		apk_deps_parse(db, &pkg->install_if, value);
+		break;
 	case 'F': case 'M': case 'R': case 'Z':
 		/* installed db entries which are handled in database.c */
 		return 1;
@@ -677,14 +682,15 @@ static int read_info_line(void *ctx, apk_blob_t line)
 		const char *str;
 		char field;
 	} fields[] = {
-		{ "pkgname", 'P' },
-		{ "pkgver",  'V' },
-		{ "pkgdesc", 'T' },
-		{ "url",     'U' },
-		{ "size",    'I' },
-		{ "license", 'L' },
-		{ "arch",    'A' },
-		{ "depend",  'D' },
+		{ "pkgname",	'P' },
+		{ "pkgver", 	'V' },
+		{ "pkgdesc",	'T' },
+		{ "url",	'U' },
+		{ "size",	'I' },
+		{ "license",	'L' },
+		{ "arch",	'A' },
+		{ "depend",	'D' },
+		{ "install_if",	'i' },
 	};
 	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
 	apk_blob_t l, r;
@@ -789,6 +795,7 @@ void apk_pkg_free(struct apk_package *pkg)
 
 	apk_pkg_uninstall(NULL, pkg);
 	apk_dependency_array_free(&pkg->depends);
+	apk_dependency_array_free(&pkg->install_if);
 	if (pkg->url)
 		free(pkg->url);
 	if (pkg->description)
@@ -916,12 +923,30 @@ struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_
 	return ctx.pkg;
 }
 
+static int write_depends(struct apk_ostream *os, const char *field,
+			 struct apk_dependency_array *deps)
+{
+	int r;
+
+	if (deps->num == 0)
+		return 0;
+
+	if (os->write(os, field, 2) != 2)
+		return -1;
+	r = apk_deps_write(deps, os);
+	if (r < 0)
+		return r;
+	if (os->write(os, "\n", 1) != 1)
+		return -1;
+
+	return 0;
+}
+
 int apk_pkg_write_index_entry(struct apk_package *info,
 			      struct apk_ostream *os)
 {
 	char buf[512];
 	apk_blob_t bbuf = APK_BLOB_BUF(buf);
-	int r;
 
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("C:"));
 	apk_blob_push_csum(&bbuf, &info->csum);
@@ -949,18 +974,10 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 		return -1;
 
 	bbuf = apk_blob_pushed(APK_BLOB_BUF(buf), bbuf);
-	if (os->write(os, bbuf.ptr, bbuf.len) != bbuf.len)
+	if (os->write(os, bbuf.ptr, bbuf.len) != bbuf.len ||
+	    write_depends(os, "D:", info->depends) ||
+	    write_depends(os, "i:", info->install_if))
 		return -1;
-
-	if (info->depends->num > 0) {
-		if (os->write(os, "D:", 2) != 2)
-			return -1;
-		r = apk_deps_write(info->depends, os);
-		if (r < 0)
-			return r;
-		if (os->write(os, "\n", 1) != 1)
-			return -1;
-	}
 
 	return 0;
 }

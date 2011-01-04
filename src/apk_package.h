@@ -85,7 +85,7 @@ struct apk_package {
 	apk_blob_t *version, *arch, *license;
 	char *url, *description;
 	char *filename;
-	struct apk_dependency_array *depends;
+	struct apk_dependency_array *depends, *install_if;
 	size_t installed_size, size;
 	unsigned repos;
 	struct apk_checksum csum;
