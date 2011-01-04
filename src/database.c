@@ -426,6 +426,11 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 {
 	struct apk_package *idb;
 
+	if (pkg->license == NULL)
+	        pkg->license = apk_blob_atomize(APK_BLOB_NULL);
+        if (pkg->arch == NULL)
+                pkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
+
 	idb = apk_hash_get(&db->available.packages, APK_BLOB_CSUM(pkg->csum));
 	if (idb == NULL) {
 		idb = pkg;
