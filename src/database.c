@@ -429,7 +429,7 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 	if (pkg->license == NULL)
 	        pkg->license = apk_blob_atomize(APK_BLOB_NULL);
         if (pkg->arch == NULL)
-                pkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
+                pkg->arch = apk_blob_atomize(APK_BLOB_STR(APK_DEFAULT_ARCH));
 
 	idb = apk_hash_get(&db->available.packages, APK_BLOB_CSUM(pkg->csum));
 	if (idb == NULL) {
@@ -1608,13 +1608,13 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		bs = apk_repo_file_open(repo, *db->arch, apkindex_tar_gz, buf, sizeof(buf));
 	}
 	if (bs == NULL) {
-		apk_warning("Failed to open index for %s", repo->url);
+		apk_warning("%s: index failed to open", buf);
 		return 0;
 	}
 
 	r = load_index(db, bs, targz, r);
 	if (r != 0)
-		apk_error("%s: Bad repository signature", repo->url);
+		apk_error("%s: BAD signature", buf);
 	return r;
 }
 

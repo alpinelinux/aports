@@ -80,6 +80,7 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 				  apk_checksum_default(), &virtpkg->csum);
 		virtpkg->version = apk_blob_atomize(APK_BLOB_STR("0"));
 		virtpkg->description = strdup("virtual meta package");
+		virtpkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
 		apk_dep_from_pkg(&virtdep, db, virtpkg);
 		virtdep.name->flags |= APK_NAME_TOPLEVEL;
 		virtpkg = apk_db_pkg_add(db, virtpkg);
