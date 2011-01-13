@@ -7,7 +7,7 @@ FETCH_WITH_LFS = true
 
 WARNINGS = -Wall -Wstrict-prototypes -Wsign-compare -Wchar-subscripts \
 	   -Wpointer-arith -Wcast-align -Wsign-compare
-CFLAGS   ?= -O2 -pipe -I. -fPIC $(WARNINGS)
+CFLAGS   += -O2 -pipe -I. -fPIC $(WARNINGS)
 
 
 CFLAGS	+= -DFTP_COMBINE_CWDS -DNETBSD
