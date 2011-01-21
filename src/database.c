@@ -2061,9 +2061,9 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 
 	if (need_copy) {
 		if (r == 0)
-			renameat(db->cachetmp_fd, file, db->cache_fd, file);
+			renameat(db->cachetmp_fd, item, db->cache_fd, item);
 		else
-			unlinkat(db->cachetmp_fd, file, 0);
+			unlinkat(db->cachetmp_fd, item, 0);
 	}
 
 	if (r != 0) {
