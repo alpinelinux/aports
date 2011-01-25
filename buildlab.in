@@ -1,0 +1,222 @@
+#!/bin/sh
+
+abuild_ver=@VERSION@
+sysconfdir=@sysconfdir@
+abuildrepo=/var/lib/buildlab/result
+datadir=@datadir@
+
+BUILD_BASE="build-base"
+SUDO=${SUDO:-"sudo"}
+FAKEROOT=${FAKEROOT:-"fakeroot"}
+APK=${APK:-apk}
+
+default_colors() {
+        NORMAL="\033[1;0m"
+        STRONG="\033[1;1m"
+        RED="\033[1;31m"
+        GREEN="\033[1;32m"
+        YELLOW="\033[1;33m"
+        BLUE="\033[1;34m"
+}
+
+default_colors
+
+is_local() {
+        case "$1" in
+                http://*|ftp://*|https://*|saveas-*://*)
+                        return 1;;
+        esac
+        return 0
+}
+
+msg() {
+	local prompt="$GREEN>>>${NORMAL}"
+        [ -z "$quiet" ] && printf "${prompt} $@\n" >&2
+}
+
+error() {
+	local prompt="$RED>>>${NORMAL}"
+        printf "${prompt} $@\n" >&2
+}
+
+die() {
+	error "$@"
+	exit 1
+}
+
+runpart() {
+        local part=$1
+	msg "Running part $part"
+        $part || die "$part failed"
+}
+
+do_chroot_action() {
+	local path="$1"
+	local command="$2"
+
+	msg "Doing chroot action '$command' in '$path'..."
+
+	mount -o bind /dev "$path"/dev
+	mount -o bind /proc "$path"/proc
+	mount -o bind /sys "$path"/sys
+
+	shift;
+
+	# XXX: we have to do this because busybox clobbers us, bleah.
+	echo $* > "$path"/.chroot-action.sh
+	chroot "$path" /bin/sh /.chroot-action.sh
+	rm "$path"/.chroot-action.sh
+
+	umount "$path"/dev
+	umount "$path"/proc
+	umount "$path"/sys
+}
+
+prepare_chroot() {
+	local path="$1"
+	local version="$2"
+	local mirror="$3"
+	local arch="$4"
+
+	msg "Setting up repositories for mirror $mirror with version $version at $path..."
+
+	mkdir -p "$path"/etc/apk
+	echo "http://$mirror/alpine/$version/packages/$arch/main" >> "$path"/etc/apk/repositories
+	echo "http://$mirror/alpine/$version/packages/$arch/testing" >> "$path"/etc/apk/repositories
+
+	mkdir -p "$path"/var/lib/apk
+	echo "alpine-base" > "$path"/var/lib/apk/world
+
+	mkdir -p "$path"/etc
+	cp /etc/resolv.conf "$path"/etc/resolv.conf
+
+	msg "Updating package lists..."
+
+	apk --root $path --repositories "$path"/etc/apk/repositories update
+
+	msg "Installing alpine-base..."
+
+	apk --root $path --repositories "$path"/etc/apk/repositories add --initdb alpine-base
+
+	msg "Installing abuild..."
+
+	apk --root $path --repositories "$path"/etc/apk/repositories add --initdb abuild
+
+	msg "Installing build-base..."
+
+	apk --root $path --repositories "$path"/etc/apk/repositories add --initdb build-base
+
+	msg "Adding abuild user..."
+
+	do_chroot_action "$path" adduser -D -G abuild abuild
+	echo "abuild ALL=NOPASSWD: ALL" >> "$path"/etc/sudoers
+
+	msg "Generating buildlab signing keys..."
+	do_chroot_action "$path" su abuild -c "'abuild-keygen -ai'"
+	
+	msg "Setting up repository symlink..."
+	mkdir -p "$path"/home/abuild/.cache/apks	
+	do_chroot_action "$path" chown abuild:abuild /home/abuild/${src}
+	do_chroot_action "$path" ln -sf .cache/apks /home/abuild/repo
+
+	msg "Build chroot is ready!"
+}
+
+build_package() {
+	local path="$1"
+	local apkbuild="$2"
+	srcdir="$(dirname $apkbuild)"
+
+	msg "Parsing $apkbuild..."
+	. "$apkbuild"
+
+	msg "Copying local sources..."
+
+	mkdir -p "$path"/home/abuild/src
+	chmod 666 "$path"/home/abuild/src
+
+	for src in $source $install; do
+		is_local $src || continue
+
+		msg "${srcdir}/${src} -> ${path}/home/abuild/src/${src} ..."
+		cp ${srcdir}/${src} "${path}"/home/abuild/${src}
+		do_chroot_action "$path" chown abuild:abuild /home/abuild/${src}
+	done
+
+	cp $apkbuild "$path"/home/abuild
+	do_chroot_action "$path" chown abuild:abuild /home/abuild/$(basename $apkbuild)
+
+	msg "Invoking abuild..."
+	do_chroot_action "$path" su abuild -c "'cd /home/abuild; abuild -r'"
+
+	msg "Copying back results to ${abuildrepo}..."
+	mkdir -p ${abuildrepo}
+	for papk in "${path}"/home/abuild/*.apk; do
+		apk=$(basename $papk)
+		msg "$papk -> ${abuildrepo}/${apk}"
+		cp $papk ${abuildrepo}/${apk}
+	done
+
+	msg "Cleaning up..."
+	rm -rf "$path"/home/abuild/src
+	rm -rf "$path"/home/abuild/pkg
+	rm -f "$path"/home/abuild/APKBUILD
+}
+
+usage() {
+	echo "buildlab $abuild_ver"
+	echo " "
+	echo "Common options:"
+	echo " "
+	echo " -q	Quiet operation"
+	echo " -p	Path to buildroot"
+	echo " "
+	echo "Creating build roots (buildlab -C):"
+	echo " "
+	echo " -m	APK repository mirror"
+	echo " -v	APK distribution version"
+	echo " -a	APK repository architecture"
+	echo " "
+	echo "Updating build roots (buildlab -u):"
+	echo " "
+	echo " No special options."
+	echo " "
+	echo "Building packages (buildlab -b):"
+	echo " "
+	echo " -b	APKBUILD file"
+	echo " "
+	echo "Examples:"
+	echo " "
+	echo "sudo ./buildlab -C -p /home/nenolod/buildroot -m dl-3.alpinelinux.org -v edge -a x86_64"
+	echo "sudo ./buildlab -b /home/nenolod/aports/main/gnome-panel/APKBUILD -p /home/nenolod/buildroot"
+}
+
+unset force
+unset recursive
+while getopts "chqCp:v:m:a:b:" opt; do
+	case $opt in
+		'c') default_colors
+		     color_opt="-c";;
+                'h') usage;;
+                'q') quiet="-q";;
+		'C') create="-c";;
+		'p') buildpath="$OPTARG";;
+		'm') buildmirror="$OPTARG";;
+		'v') buildver="$OPTARG";;
+		'a') buildarch="$OPTARG";;
+		'b') buildpkg="$OPTARG";;
+        esac
+done
+shift $(( $OPTIND - 1 ))
+
+if [ ! -z "$create" ]; then
+	msg "Creating new chroot at $buildpath..."
+	prepare_chroot $buildpath $buildver $buildmirror $buildarch
+	exit 0
+fi
+
+if [ ! -z "$buildpkg" ]; then
+	msg "Building APKBUILD $buildpkg in chroot $buildpath..."
+	build_package $buildpath $buildpkg
+	exit 0
+fi
