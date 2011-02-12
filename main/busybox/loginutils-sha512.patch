@@ -1,0 +1,154 @@
+--- busybox-1.18.3/include/usage.src.h
++++ busybox.mod/include/usage.src.h
+@@ -2798,23 +2798,25 @@
+        "Change USER's password. If no USER is specified,\n" \
+        "changes the password for the current user.\n" \
+      "\nOptions:" \
+-     "\n	-a ALG	Algorithm to use for password (des, md5)" /* ", sha1)" */ \
++     "\n	-a ALG	Algorithm to use for password (des, md5, sha512)" /* ", sha1)" */ \
+      "\n	-d	Delete password for the account" \
+      "\n	-l	Lock (disable) account" \
+      "\n	-u	Unlock (re-enable) account" \
+ 
+ #define chpasswd_trivial_usage \
+-	IF_LONG_OPTS("[--md5|--encrypted]") IF_NOT_LONG_OPTS("[-m|-e]")
++	IF_LONG_OPTS("[--des|--md5|--encrypted]") IF_NOT_LONG_OPTS("[-d|-m|-e]")
+ #define chpasswd_full_usage "\n\n" \
+        "Read user:password from stdin and update /etc/passwd\n" \
+      "\nOptions:" \
+ 	IF_LONG_OPTS( \
+      "\n	-e,--encrypted	Supplied passwords are in encrypted form" \
+-     "\n	-m,--md5	Use MD5 encryption instead of DES" \
++     "\n	-m,--md5	Use MD5 encryption instead of SHA512" \
++     "\n	-d,--des	Use DES encryption instead of SHA512" \
+ 	) \
+ 	IF_NOT_LONG_OPTS( \
+      "\n	-e	Supplied passwords are in encrypted form" \
+-     "\n	-m	Use MD5 encryption instead of DES" \
++     "\n	-m	Use MD5 encryption instead of SHA512" \
++     "\n	-d	Use DES encryption instead of SHA512" \
+ 	)
+ 
+ #define pgrep_trivial_usage \
+--- busybox-1.18.3/loginutils/chpasswd.c
++++ busybox.mod/loginutils/chpasswd.c
+@@ -11,11 +11,13 @@
+ static const char chpasswd_longopts[] ALIGN1 =
+ 	"encrypted\0" No_argument "e"
+ 	"md5\0"       No_argument "m"
++	"des\0"       No_argument "d"
+ 	;
+ #endif
+ 
+-#define OPT_ENC  1
+-#define OPT_MD5  2
++#define OPT_ENC    1
++#define OPT_MD5    2
++#define OPT_DES    4
+ 
+ int chpasswd_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
+ int chpasswd_main(int argc UNUSED_PARAM, char **argv)
+@@ -28,9 +30,9 @@
+ 	if (getuid())
+ 		bb_error_msg_and_die(bb_msg_perm_denied_are_you_root);
+ 
+-	opt_complementary = "m--e:e--m";
++	opt_complementary = "m--e:e--m:d--e:e--d:m--d:d--m";
+ 	IF_LONG_OPTS(applet_long_options = chpasswd_longopts;)
+-	opt = getopt32(argv, "em");
++	opt = getopt32(argv, "emd");
+ 
+ 	while ((name = xmalloc_fgetline(stdin)) != NULL) {
+ 		pass = strchr(name, ':');
+@@ -41,9 +43,13 @@
+ 		xuname2uid(name); /* dies if there is no such user */
+ 
+ 		if (!(opt & OPT_ENC)) {
+-			rnd = crypt_make_salt(salt, 1, rnd);
+ 			if (opt & OPT_MD5) {
+ 				strcpy(salt, "$1$");
++				rnd = crypt_make_salt(salt + 3, 4, rnd);
++			} else if (opt & OPT_DES) {
++				rnd = crypt_make_salt(salt, 1, rnd);
++			} else { // OPT_SHA512
++				strcpy(salt, "$6$");
+ 				rnd = crypt_make_salt(salt + 3, 4, rnd);
+ 			}
+ 			pass = pw_encrypt(pass, salt, 0);
+--- busybox-1.18.3/loginutils/cryptpw.c
++++ busybox.mod/loginutils/cryptpw.c
+@@ -91,7 +91,7 @@
+ 		*salt_ptr++ = '$';
+ #if !ENABLE_USE_BB_CRYPT || ENABLE_USE_BB_CRYPT_SHA
+ 		if (opt_m[0] == 's') { /* sha */
+-			salt[1] = '5' + (strcmp(opt_m, "sha512") == 0);
++			salt[1] = '6' + (strcmp(opt_m, "sha512") == 0);
+ 			len = 16/2;
+ 		}
+ #endif
+--- busybox-1.18.3/loginutils/passwd.c
++++ busybox.mod/loginutils/passwd.c
+@@ -12,6 +12,11 @@
+ 
+ static char* new_password(const struct passwd *pw, uid_t myuid, int algo)
+ {
++	enum {
++		STATE_ALGO_md5 = 0x10,
++		STATE_ALGO_des = 0x20,
++		STATE_ALGO_sha512 = 0x40,
++	};
+ 	char salt[sizeof("$N$XXXXXXXX")]; /* "$N$XXXXXXXX" or "XX" */
+ 	char *orig = (char*)"";
+ 	char *newp = NULL;
+@@ -51,10 +56,14 @@
+ 		goto err_ret;
+ 	}
+ 
+-	crypt_make_salt(salt, 1, 0); /* des */
+-	if (algo) { /* MD5 */
++	if (algo & STATE_ALGO_md5) { /* md5 */
+ 		strcpy(salt, "$1$");
+ 		crypt_make_salt(salt + 3, 4, 0);
++	} else if (algo & STATE_ALGO_des) { /* des */
++		crypt_make_salt(salt, 1, 0);
++	} else if (algo & STATE_ALGO_sha512) { /* sha512 */
++		strcpy(salt, "$6$");
++		crypt_make_salt(salt + 3, 4, 0);
+ 	}
+ 	/* pw_encrypt returns malloced str */
+ 	ret = pw_encrypt(newp, salt, 1);
+@@ -79,7 +88,8 @@
+ 		OPT_delete = 0x8, /* -d - delete password */
+ 		OPT_lud = 0xe,
+ 		STATE_ALGO_md5 = 0x10,
+-		//STATE_ALGO_des = 0x20, not needed yet
++		STATE_ALGO_des = 0x20,
++		STATE_ALGO_sha512 = 0x40,
+ 	};
+ 	unsigned opt;
+ 	int rc;
+@@ -104,10 +114,12 @@
+ 	//argc -= optind;
+ 	argv += optind;
+ 
+-	if (strcasecmp(opt_a, "des") != 0) /* -a */
++	if (strcasecmp(opt_a, "md5") == 0) /* -a */
+ 		opt |= STATE_ALGO_md5;
+-	//else
+-	//	opt |= STATE_ALGO_des;
++	else if (strcasecmp(opt_a, "des") == 0)
++		opt |= STATE_ALGO_des;
++	else //if (strcasecmp(opt_a, "sha512") == 0)
++		opt |= STATE_ALGO_sha512;
+ 	myuid = getuid();
+ 	/* -l, -u, -d require root priv and username argument */
+ 	if ((opt & OPT_lud) && (myuid || !argv[0]))
+@@ -158,7 +170,7 @@
+ 					"locked password for %s", name);
+ 		}
+ 		printf("Changing password for %s\n", name);
+-		newp = new_password(pw, myuid, opt & STATE_ALGO_md5);
++		newp = new_password(pw, myuid, opt);
+ 		if (!newp) {
+ 			logmode = LOGMODE_STDIO;
+ 			bb_error_msg_and_die("password for %s is unchanged", name);
