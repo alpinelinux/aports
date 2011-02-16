@@ -1,0 +1,238 @@
+#!/sbin/runscript
+# Copyright 1999-2010 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+
+description="Run udevd and create the device-nodes"
+
+[ -e /etc/udev/udev.conf ] && . /etc/udev/udev.conf
+
+rc_coldplug=${rc_coldplug:-${RC_COLDPLUG:-YES}}
+
+depend()
+{
+	provide dev
+	if yesno "${rc_device_tarball:-no}"; then
+		need sysfs udev-mount udev-dev-tarball
+	else
+		need sysfs udev-mount
+	fi
+	before checkfs fsck
+
+	# udev does not work inside vservers
+	keyword novserver nolxc noopenvz
+}
+
+cleanup()
+{
+	# fail more gracely and not leave udevd running
+	start-stop-daemon --stop --exec /sbin/udevd
+	exit 1
+}
+
+disable_hotplug_agent()
+{
+	if [ -e /proc/sys/kernel/hotplug ]; then
+		echo "" >/proc/sys/kernel/hotplug
+	fi
+}
+
+root_link()
+{
+	/lib/udev/write_root_link_rule
+}
+
+rules_disable_switch()
+{
+	# this function disables rules files
+	# by creating new files with the same name
+	# in a temp rules directory with higher priority
+	local f=/dev/.udev/rules.d/"$1" bname="$1" onoff="$2"
+
+	if yesno "${onoff}"; then
+		echo "# This file disables ${bname} due to /etc/conf.d/udev" \
+			> "${f}"
+	else
+		rm -f "${f}"
+	fi
+}
+
+start_udevd()
+{
+	# load unix domain sockets if built as module, Bug #221253
+	if [ -e /proc/modules ] ; then
+		modprobe -q unix 2>/dev/null
+	fi
+	local opts="${udev_opts}"
+
+	ebegin "Starting udevd"
+	if yesno "${udev_debug:-no}"; then
+		/sbin/udevd --daemon ${opts} --debug 2>/dev/.udev/udev.log
+	else
+		start-stop-daemon --start --exec /sbin/udevd -- --daemon ${opts}
+	fi
+
+	eend $?
+}
+
+# populate /dev with devices already found by the kernel
+populate_dev()
+{
+	if get_bootparam "nocoldplug" ; then
+		rc_coldplug="NO"
+		ewarn "Skipping udev coldplug as requested in kernel cmdline"
+	fi
+
+	ebegin "Populating /dev with existing devices through uevents"
+	udevadm control --property=STARTUP=1
+	if yesno "${rc_coldplug}"; then
+		udevadm trigger --action="add"
+	else
+		# Do not run any init-scripts, Bug #206518
+		udevadm control --property=do_not_run_plug_service=1
+
+		# only create device nodes
+		udevadm trigger --action="add" --attr-match=dev
+
+		# run persistent-net stuff, bug 191466
+		udevadm trigger --action="add" --subsystem-match=net
+	fi
+	eend $?
+
+	# we can speed up booting under these conditions:
+	#  * using devtmpfs so kernel creates device nodes for us
+	#  * only using kernel created device nodes at boot (in /etc/fstab and elsewhere)
+	#
+	ebegin "Waiting for uevents to be processed"
+	udevadm settle --timeout=${udev_settle_timeout:-60}
+	eend $?
+
+	udevadm control --property=do_not_run_plug_service=
+	udevadm control --property=STARTUP=
+	return 0
+}
+
+# for debugging
+start_udevmonitor()
+{
+	yesno "${udev_monitor:-no}" || return 0
+
+	udevmonitor_log=/dev/.udev/udevmonitor.log
+	udevmonitor_pid=/dev/.udev/udevmonitor.pid
+
+	einfo "udev: Running udevadm monitor ${udev_monitor_opts} to get a log of all events"
+	start-stop-daemon --start --stdout "${udevmonitor_log}" \
+		--make-pidfile --pidfile "${udevmonitor_pid}" \
+		--background --exec /sbin/udevadm -- monitor ${udev_monitor_opts}
+}
+
+stop_udevmonitor()
+{
+	yesno "${udev_monitor:-no}" || return 0
+
+	if yesno "${udev_monitor_keep_running:-no}"; then
+		ewarn "udev: udevmonitor is still running and writing into ${udevmonitor_log}"
+	else
+		einfo "udev: Stopping udevmonitor: Log is in ${udevmonitor_log}"
+		start-stop-daemon --stop --pidfile "${udevmonitor_pid}" --exec /sbin/udevadm
+	fi
+}
+
+display_hotplugged_services() {
+	local svcfile= svc= services=
+	for svcfile in "${RC_SVCDIR}"/hotplugged/*; do
+		svc="${svcfile##*/}"
+		[ -x "${svcfile}" ] || continue
+
+		services="${services} ${svc}"
+	done
+	[ -n "${services}" ] && einfo "Device initiated services:${HILITE}${services}${NORMAL}"
+}
+
+check_persistent_net()
+{
+	# check if there are problems with persistent-net
+	local syspath= devs= problem=false
+	for syspath in /sys/class/net/*_rename*; do
+		if [ -d "${syspath}" ]; then
+			devs="${devs} ${syspath##*/}"
+			problem=true
+		fi
+	done
+
+	${problem} || return 0
+
+	eerror "UDEV: Your system has a problem assigning persistent names"
+	eerror "to these network interfaces: ${devs}"
+
+	einfo "Checking persistent-net rules:"
+	# the sed-expression lists all duplicate lines
+	# from the input, like "uniq -d" does, but uniq
+	# is installed into /usr/bin and not available at boot.
+	dups=$(
+	RULES_FILE='/etc/udev/rules.d/70-persistent-net.rules'
+	. /lib/udev/rule_generator.functions
+	find_all_rules 'NAME=' '.*' | \
+	tr ' ' '\n' | \
+	sort | \
+	sed '$!N; s/^\(.*\)\n\1$/\1/; t; D'
+	)
+	if [ -n "${dups}" ]; then
+		ewarn "The rules create multiple entries assigning these names:"
+		eindent
+		ewarn "${dups}"
+		eoutdent
+	else
+		ewarn "Found no duplicate names in persistent-net rules,"
+		ewarn "there must be some other problem!"
+	fi
+	return 1
+}
+
+check_udev_works()
+{
+	# should exist on every system, else udev failed
+	if [ ! -e /dev/zero ]; then
+		eerror "Assuming udev failed somewhere, as /dev/zero does not exist."
+		return 1
+	fi
+	return 0
+}
+
+start()
+{
+	_start
+	
+	display_hotplugged_services
+
+	return 0
+}
+
+_start()
+{
+	if [ ! -e /etc/runlevels/${RC_DEFAULTLEVEL:-default}/udev-postmount ]; then
+		ewarn "You should add udev-postmount service to your default runlevel."
+	fi
+
+	root_link
+	rules_disable_switch 75-persistent-net-generator.rules "${persistent_net_disable:-no}"
+	rules_disable_switch 75-cd-aliases-generator.rules ${persistent_cd_disable:-no}
+	
+	disable_hotplug_agent
+	start_udevd || cleanup
+	start_udevmonitor
+	populate_dev || cleanup
+
+	check_persistent_net
+
+	check_udev_works || cleanup
+	stop_udevmonitor
+
+	return 0
+}
+
+stop() {
+	ebegin "Stopping udevd"
+	start-stop-daemon --stop --exec /sbin/udevd
+	eend $?
+}
+

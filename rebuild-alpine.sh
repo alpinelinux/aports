@@ -1,9 +1,11 @@
-rootdir=$(pwd)
+rootdir=$(pwd -P)
 
 distclean () {
+    echo "Removing traces of previous builds from $rootdir"
     local allpkgs=$(find $rootdir -maxdepth 3 -name APKBUILD -print | sed -e 's/\/APKBUILD//g' | sort)
     for p in $allpkgs ; do
         cd $p
+        pwd
         abuild clean            2>&1
         abuild cleanoldpkg      2>&1
         abuild cleanpkg         2>&1
@@ -11,12 +13,12 @@ distclean () {
     done
 }
 
-build () { 
+build () {
     local pkgs
     local maintainer
     local pkgno
     local failed
-    pkgs=$(./aport.lua deplist $rootdir $1)
+    pkgs=$($rootdir/aport.lua deplist $rootdir $1)
     pktcnt=$(echo $pkgs | wc -w)
     pkgno=0
     failed=0
@@ -24,17 +26,33 @@ build () {
         pkgno=$(expr "$pkgno" + 1)
         echo "Building $p ($pkgno of $pktcnt in $1 - $failed failed)"
         cd $rootdir/$1/$p
-        abuild -rm > $rootdir/$1_$p.txt 2>&1 
+        if [ -n "$debug" ] ; then
+            apk info | sort > $rootdir/packages.$1.$pkgno.$p.before
+        fi
+        abuild -rm > $rootdir/$1_$p.txt 2>&1
         if [ "$?" = "0" ] ; then
-            rm $rootdir/$1_$p.txt
-        else
-            maintainer=$(grep Maintainer APKBUILD | cut -d " " -f 3-)
-            if [ -z "$maintainer" ] ; then
-                maintainer="default maintainer"
+    	    if [ -z "$debug" ] ; then
+                rm $rootdir/$1_$p.txt
             fi
+        else
             echo "Package $1/$p failed to build (output in $rootdir/$1_$p.txt)"
-#            echo "Package $1/$p failed to build. Notify $maintainer. Output is attached" | email -s "NOT SPAM $p build report" -a $rootdir/$1_$p.txt -n AlpineBuildBot -f build@alpinelinux.org amanison@anselsystems.com
-             failed=$(expr "$failed" + 1)
+            if [ -n "$mail" ] ; then
+                maintainer=$(grep Maintainer APKBUILD | cut -d " " -f 3-)
+                if [ -n "$maintainer" ] ; then
+                    recipients="$maintainer -cc dev@lists.alpinelinux.org"
+                else
+                    recipients="dev@lists.alpinelinux.org"
+                fi
+    	        if [ -n "$mail" ] ; then
+                    echo "Package $1/$p failed to build. Build output is attached" | \
+                        email -s "NOT SPAM $p build report" -a $rootdir/$1_$p.txt \
+                              -n AlpineBuildBot -f buildbot@alpinelinux.org $recipients
+                fi
+            fi
+            failed=$(expr "$failed" + 1)
+        fi
+        if [ -n "$debug" ] ; then
+            apk info | sort > $rootdir/packages.$1.$pkgno.$p.after
         fi
     done
     cd $rootdir
@@ -42,13 +60,28 @@ build () {
 
 touch START_OF_BUILD.txt
 
-if [ "$1" != "noclean" ] ; then
-    echo "Removing traces of previous builds"
+unset clean
+unset mail
+while getopts "cmd" opt; do
+	case $opt in
+		'c') clean="--clean";;
+		'm') mail="--mail";;
+		'd') debug="--debug";;
+	esac
+done
+
+if [ -n "$clean" ] ; then
+    echo "Invoked with 'clean' option. This will take a while ..."
     tmp=$(distclean)
+    echo "Done"
 fi
 
 echo "Refresh aports tree"
 git pull
+
+#cd main/build-base
+#abuild -Ru
+#cd $rootdir
 
 for s in main testing unstable ; do
     echo "Building packages in $s"
