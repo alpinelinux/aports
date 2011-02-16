@@ -5,7 +5,7 @@ pkgver=2.1.0_git20101221
 pkgrel=0
 pkgdesc="Meta package for minimal alpine base"
 url="http://alpinelinux.org"
-arch="x86 x86_64"
+arch="all"
 license="GPL"
 depends="alpine-baselayout alpine-conf apk-tools busybox busybox-initscripts
 	openrc bbsuid"
