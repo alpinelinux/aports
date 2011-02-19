@@ -196,12 +196,45 @@ static int Papk_who_owns(lua_State *L)
 	return push_package(L, pkg);
 }
 
+static int Papk_exists(lua_State *L)
+{
+	struct apk_database *db = checkdb(L, 1);
+	const char *depstr = luaL_checkstring(L, 2);
+	struct apk_dependency dep;
+	struct apk_name *name;
+	struct apk_package *pkg;
+	int i, r;
+
+	r = apk_dep_from_blob(&dep, db, APK_BLOB_STR(depstr));
+	if (r != 0)
+		goto ret_nil;
+
+	name = dep.name;
+	for (i = 0; i < name->pkgs->num; i++) {
+		pkg = name->pkgs->item[i];
+		if (pkg->ipkg != NULL)
+			break;
+	}
+	if (i >= name->pkgs->num)
+		goto ret_nil;
+
+	if (!apk_dep_is_satisfied(&dep, pkg))
+		goto ret_nil;
+
+	return push_package(L, pkg);
+ret_nil:
+	lua_pushnil(L);
+	return 1;
+}
+
 static const luaL_reg reg_apk_methods[] = {
 	{"version_validate",	Pversion_validate},
 	{"version_compare",	Pversion_compare},
 	{"version_is_less",	Pversion_is_less},
 	{"db_open",		Papk_db_open},
 	{"who_owns",		Papk_who_owns},
+	{"exists",		Papk_exists},
+	{"is_installed",	Papk_exists},
 	{NULL,		NULL}
 };
 
