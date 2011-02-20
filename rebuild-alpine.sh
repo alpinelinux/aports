@@ -73,6 +73,7 @@ build () {
         fi
     done
     cd $rootdir
+    if [ -n $(apk info | grep libiconv) ]; then echo "***** libiconv stuck *****"; sudo apk del libiconv; fi
 }
 
 touch START_OF_BUILD.txt
