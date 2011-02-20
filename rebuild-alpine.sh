@@ -39,14 +39,31 @@ build () {
             if [ -n "$mail" ] ; then
                 maintainer=$(grep Maintainer APKBUILD | cut -d " " -f 3-)
                 if [ -n "$maintainer" ] ; then
-                    recipients="$maintainer -cc dev@lists.alpinelinux.org"
+                    recipients="'$maintainer' -cc dev@lists.alpinelinux.org"
                 else
                     recipients="dev@lists.alpinelinux.org"
                 fi
     	        if [ -n "$mail" ] ; then
-                    echo "Package $1/$p failed to build. Build output is attached" | \
-                        email -s "NOT SPAM $p build report" -a $rootdir/$1_$p.txt \
-                              -n AlpineBuildBot -f buildbot@alpinelinux.org $recipients
+    	            echo "sending mail to [$recipients]"
+                    if [ $(wc -l $rootdir/$1_$p.txt | cut -f 1 -d ' ') -gt 200 ]; then
+    		            TMPFILE='mktemp' || exit 1
+                        head -n 100 $rootdir/$1_$p.txt >> $TMPFILE
+                        echo "-------" >> $TMPFILE
+                        echo "snip..." >> $TMPFILE
+                        echo "-------" >> $TMPFILE
+                        tail -n 100 $rootdir/$1_$p.txt >> $TMPFILE
+                        BUILDLOG="$TMPFILE"
+                    else
+                        BUILDLOG="$rootdir/$1_$p.txt"
+                    fi
+
+#                    echo "Package $1/$p failed to build. Build output is attached" | \
+#                        email -s "NOT SPAM $p build report" -a $BUILDLOG \
+#                              -n AlpineBuildBot -f buildbot@alpinelinux.org $recipients
+                    if [ "$BUILDLOG" = "$TMPFILE" ]; then
+#                        rm $BUILDLOG
+                        mv $BUILDLOG $rootdir/$1_$p-short.txt
+                    fi
                 fi
             fi
             failed=$(expr "$failed" + 1)
