@@ -9,7 +9,8 @@
 #include "apk_version.h"
 
 #define LIBNAME "apk"
-#define APKDB_META "apk_database"
+#define APK_DB_META "apk_database"
+#define APK_IPKG_META "apk_installed_package"
 
 struct flagmap {
        const char *name;
@@ -134,9 +135,9 @@ static struct apk_database *checkdb(lua_State *L, int index)
 {
 	struct apk_database *db;
 	luaL_checktype(L, index, LUA_TUSERDATA);
-	db = (struct apk_database  *) luaL_checkudata(L, index, APKDB_META);
+	db = (struct apk_database  *) luaL_checkudata(L, index, APK_DB_META);
 	if (db == NULL)
-		luaL_typerror(L, index, APKDB_META);
+		luaL_typerror(L, index, APK_DB_META);
 	return db;
 }
 
@@ -155,7 +156,7 @@ static int Papk_db_open(lua_State *L)
 		opts.open_flags |= APK_OPENF_READ;
 
 	db = lua_newuserdata(L, sizeof(struct apk_database));
-	luaL_getmetatable(L, APKDB_META);
+	luaL_getmetatable(L, APK_DB_META);
 	lua_setmetatable(L, -2);
 
 	r = apk_db_open(db, &opts);
@@ -227,6 +228,42 @@ ret_nil:
 	return 1;
 }
 
+// Iterator of all installed packages
+struct apk_installed_package_iterator {
+	struct list_head *end;
+	struct apk_installed_package *node;
+};
+
+static int iterate_installed(lua_State *L)
+{
+	struct apk_installed_package_iterator *i;
+	struct apk_installed_package *ipkg;
+	i = (struct apk_installed_package_iterator *)lua_touserdata(L, lua_upvalueindex(1));
+	ipkg = i->node;
+
+	if (&ipkg->installed_pkgs_list == i->end)
+		return 0;
+
+	i->node = list_entry(ipkg->installed_pkgs_list.next,
+			  typeof(*ipkg), installed_pkgs_list);
+	return push_package(L, ipkg->pkg);
+
+}
+static int Pinstalled(lua_State *L)
+{
+	struct apk_database *db = checkdb(L, 1);
+	struct apk_installed_package_iterator *i;
+
+	i = (struct apk_installed_package_iterator *) lua_newuserdata(L, sizeof(*i));
+	i->end = &db->installed.packages;
+	i->node = list_entry((&db->installed.packages)->next,
+			   struct apk_installed_package,
+			   installed_pkgs_list);
+
+	lua_pushcclosure(L, iterate_installed, 1);
+	return 1;
+}
+
 static const luaL_reg reg_apk_methods[] = {
 	{"version_validate",	Pversion_validate},
 	{"version_compare",	Pversion_compare},
@@ -235,6 +272,7 @@ static const luaL_reg reg_apk_methods[] = {
 	{"who_owns",		Papk_who_owns},
 	{"exists",		Papk_exists},
 	{"is_installed",	Papk_exists},
+	{"installed",		Pinstalled},
 	{NULL,		NULL}
 };
 
@@ -250,7 +288,7 @@ LUALIB_API int luaopen_apk(lua_State *L)
 	lua_pushliteral(L, APK_VERSION);
 	lua_settable(L, -3);
 
-	luaL_newmetatable(L, APKDB_META);
+	luaL_newmetatable(L, APK_DB_META);
 	luaL_register(L, NULL, reg_apk_db_meta_methods);
 	lua_pushliteral(L, "__index");
 	lua_pushvalue(L, -3);
