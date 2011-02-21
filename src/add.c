@@ -142,7 +142,7 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		apk_state_print_errors(state);
 		r = -1;
 	} else {
-		r = apk_state_commit(state, db);
+		r = apk_state_commit(state);
 	}
 	if (state != NULL)
 		apk_state_unref(state);

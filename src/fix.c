@@ -89,7 +89,7 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 		r |= apk_state_lock_dependency(state, &deps[i]);
 
 	if (r == 0 || (apk_flags & APK_FORCE))
-		r = apk_state_commit(state, db);
+		r = apk_state_commit(state);
 	else
 		apk_state_print_errors(state);
 err:

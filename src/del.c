@@ -58,7 +58,7 @@ static int del_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		r |= apk_state_lock_dependency(state, &dep);
 	}
 	if (r == 0)
-		r = apk_state_commit(state, db);
+		r = apk_state_commit(state);
 	else
 		apk_state_print_errors(state);
 err:

@@ -937,11 +937,11 @@ void apk_state_print_errors(struct apk_state *state)
 		printf("\n");
 }
 
-int apk_state_commit(struct apk_state *state,
-		     struct apk_database *db)
+int apk_state_commit(struct apk_state *state)
 {
 	struct progress prog;
 	struct apk_change *change;
+	struct apk_database *db = state->db;
 	int n = 0, r = 0, size_diff = 0, toplevel = FALSE, deleteonly = TRUE;
 
 	/* Count what needs to be done */

@@ -48,7 +48,7 @@ int apk_do_self_upgrade(struct apk_database *db, struct apk_state *state)
 
 	apk_message("Uprading first to new apk-tools:");
 	state->print_ok = 0;
-	r = apk_state_commit(state, db);
+	r = apk_state_commit(state);
 	apk_state_unref(state);
 	apk_db_close(db);
 
@@ -101,7 +101,7 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 		if (i != 0)
 			printf("\n");
 
-		r = apk_state_commit(state, db);
+		r = apk_state_commit(state);
 	} else
 		apk_state_print_errors(state);
 err:
