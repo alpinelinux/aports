@@ -45,13 +45,13 @@ build () {
                 fi
     	        if [ -n "$mail" ] ; then
     	            echo "sending mail to [$recipients]"
-                    if [ $(wc -l $rootdir/$1_$p.txt | cut -f 1 -d ' ') -gt 200 ]; then
+                    if [ $(wc -l $rootdir/$1_$p.txt | cut -f 1 -d ' ') -gt 400 ]; then
     		            TMPFILE='mktemp' || exit 1
-                        head -n 100 $rootdir/$1_$p.txt >> $TMPFILE
+                        head -n 200 $rootdir/$1_$p.txt >> $TMPFILE
                         echo "-------" >> $TMPFILE
                         echo "snip..." >> $TMPFILE
                         echo "-------" >> $TMPFILE
-                        tail -n 100 $rootdir/$1_$p.txt >> $TMPFILE
+                        tail -n 200 $rootdir/$1_$p.txt >> $TMPFILE
                         BUILDLOG="$TMPFILE"
                     else
                         BUILDLOG="$rootdir/$1_$p.txt"
