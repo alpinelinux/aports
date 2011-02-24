@@ -57,12 +57,11 @@ build () {
                         BUILDLOG="$rootdir/$1_$p.txt"
                     fi
 
-#                    echo "Package $1/$p failed to build. Build output is attached" | \
-#                        email -s "NOT SPAM $p build report" -a $BUILDLOG \
-#                              -n AlpineBuildBot -f buildbot@alpinelinux.org $recipients
+                    echo "Package $1/$p failed to build. Build output is attached" | \
+                        email -s "NOT SPAM $p build report" -a $BUILDLOG \
+                              -n AlpineBuildBot -f buildbot@alpinelinux.org $recipients
                     if [ "$BUILDLOG" = "$TMPFILE" ]; then
-#                        rm $BUILDLOG
-                        mv $BUILDLOG $rootdir/$1_$p-short.txt
+                        rm $BUILDLOG
                     fi
                 fi
             fi
