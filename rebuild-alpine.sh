@@ -37,11 +37,11 @@ build () {
         else
             echo "Package $1/$p failed to build (output in $rootdir/$1_$p.txt)"
             if [ -n "$mail" ] ; then
-                maintainer=$(grep Maintainer APKBUILD | cut -d " " -f 3-)
+                maintainer=$(grep Maintainer APKBUILD | cut -d " " -f 3- | sed 's/.*< *//;s/ *>.*//;' )
                 if [ -n "$maintainer" ] ; then
-                    recipients="'$maintainer' -cc dev@lists.alpinelinux.org"
+                    recipients="$maintainer -cc alpine-devel@lists.alpinelinux.org"
                 else
-                    recipients="dev@lists.alpinelinux.org"
+                    recipients="alpine-devel@lists.alpinelinux.org"
                 fi
     	        if [ -n "$mail" ] ; then
     	            echo "sending mail to [$recipients]"
