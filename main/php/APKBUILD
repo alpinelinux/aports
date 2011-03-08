@@ -3,12 +3,12 @@
 pkgname=php
 pkgver=5.3.5
 _suhosinver=5.3.4-0.9.10
-pkgrel=6
+pkgrel=7
 pkgdesc="The PHP language runtime engine"
 url="http://www.php.net/"
 arch="all"
 license="PHP-3"
-depends="$pkgname-common $pkgname-cgi"
+depends="$pkgname-cgi"
 install="$pkgname.post-upgrade"
 makedepends="pcre-dev libxml2-dev libiconv-dev openssl-dev zlib-dev bzip2-dev
 	curl-dev libpng-dev jpeg-dev freetype-dev libmcrypt-dev mysql-dev
@@ -71,7 +71,6 @@ source="http://www.php.net/distributions/${pkgname}-${pkgver}.tar.bz2
 	suhosin-patch-5.3.4-0.9.10.patch
 	php-fpm.init
 	php5-module.conf
-	$install
 	"
 
 _apiver="20090626"
@@ -95,6 +94,17 @@ prepare() {
 	fi
 }
 
+_do_build() {
+	local _flavor="$1"
+	shift
+	local _builddir="$srcdir"/build-$_flavor
+	mkdir -p "$_builddir"
+	cd "$_builddir"
+	"$_srcdir"/configure $@ || return 1
+	sed -ri "s/^(EXTRA_LDFLAGS[ ]*\=.*)/\1 -lpthread/" Makefile  # see #183
+	make || return 1
+}
+
 build() {
 	_phpconfig="--build=${CHOST:-i486-alpine-linux-uclibc} \
 		--prefix=/usr \
@@ -108,8 +118,7 @@ build() {
 		--disable-static \
 		--enable-shared \
 		--mandir=/usr/share/man \
-		--with-pic \
-		--without-pear \
+		--with-pic
 		"
 
 	_phpextensions="--enable-bcmath=shared \
@@ -174,85 +183,86 @@ build() {
 		--without-db3 \
 		--without-qdbm \
 		"
-#		--with-enchant=shared,/usr \
-#		--with-tidy=shared \
 
-	# cgi and fcgi
-	cp -a "$srcdir"/$pkgname-$pkgver "$srcdir"/$pkgname-cgi
-	cd "$srcdir"/$pkgname-cgi
-	./configure ${_phpconfig} \
+	# cgi, fcgi, cli, pear and extensions
+	_do_build cgi \
+		${_phpconfig} \
 		--disable-cli \
 		--enable-cgi \
-		${_phpextensions}
-	sed -ri "s/^(EXTRA_LDFLAGS[ ]*\=.*)/\1 -lpthread/" Makefile  # see #183
-	make || return 1
+		--enable-cli \
+		--with-pcntl \
+		--with-pear \
+		${_phpextensions} \
+		|| return 1
 
 	# fpm
-	cp -a "$srcdir"/$pkgname-cgi "$srcdir"/$pkgname-fpm
-	cd "$srcdir"/$pkgname-fpm
-	./configure ${_phpconfig} \
+	cp -a "$srcdir"/build-cgi "$srcdir"/build-fpm
+	_do_build fpm \
+		${_phpconfig} \
 		--disable-cli \
 		--enable-fpm \
-		${_phpextensions}
-	sed -ri "s/^(EXTRA_LDFLAGS[ ]*\=.*)/\1 -lpthread/" Makefile  # see #183
-	make || return 1
+		${_phpextensions} \
+		|| return 1
 
 	# apache2
-	cp -a "$srcdir"/$pkgname-cgi "$srcdir"/$pkgname-apache2
-	cd "$srcdir"/$pkgname-apache2
-	./configure ${_phpconfig} \
+	cp -a "$srcdir"/build-cgi "$srcdir"/build-apache2
+	_do_build apache2 \
+		${_phpconfig} \
 		--disable-cli \
 		--with-apxs2 \
-		${_phpextensions}
-	sed -ri "s/^(EXTRA_LDFLAGS[ ]*\=.*)/\1 -lpthread/" Makefile  # see #183
-	make || return 1
+		${_phpextensions} \
+		|| return 1
 
 	# embed
-	cp -a "$srcdir"/$pkgname-cgi "$srcdir"/$pkgname-embed
-	cd "$srcdir"/$pkgname-embed
-	./configure ${_phpconfig} \
+	cp -a "$srcdir"/build-cgi "$srcdir"/build-embed
+	_do_build embed \
+		${_phpconfig} \
 		--disable-cli \
 		--enable-embed=shared \
-		${_phpextensions}
-	sed -ri "s/^(EXTRA_LDFLAGS[ ]*\=.*)/\1 -lpthread/" Makefile  # see #183
-	make || return 1
-
-	# cli and pear
-	cp -a "$srcdir"/$pkgname-cgi "$srcdir"/$pkgname-cli-pear
-	cd "$srcdir"/$pkgname-cli-pear
-	./configure ${_phpconfig} \
-		--disable-cgi \
-		--with-readline \
-		--enable-pcntl \
-		--with-pear \
-		${_phpextensions}
-	sed -ri "s/^(EXTRA_LDFLAGS[ ]*\=.*)/\1 -lpthread/" Makefile  # see #183
-	make || return 1
+		${_phpextensions} \
+		|| return 1
 }
 
 package() {
-	mkdir -p "$pkgdir" && return 0
+	cd "$srcdir"/build-cgi
+
+	# install php-cgi, cli, pear and modules
+	make -j1 install install-pear INSTALL_ROOT="$pkgdir" || return 1
+
+	# cleanup after pear
+	find "$pkgdir" -name '.*' | xargs rm -rf || return 1
+
+	# install fpm
+	install -D -m755 "$srcdir"/build-fpm/sapi/fpm/php-fpm \
+		"$pkgdir"/usr/bin/php-fpm || return 1
+	install -D -m644 "$srcdir"/build-fpm/sapi/fpm/php-fpm.conf \
+		"$pkgdir"/etc/php/php-fpm.conf || return 1
+	install -D -m755 "$srcdir"/php-fpm.init "$pkgdir"/etc/init.d/php-fpm
+	# enable some default options
+	sed -ri -e "s~^;(error_log)(.*)~\1 = /var/log/php-fpm.log~" \
+		-e "s/^;(pm.start_servers)/\1/" \
+	 	-e "s/^;(pm.min_spare_servers)/\1/" \
+		-e "s/^;(pm.max_spare_servers)/\1/" \
+		"$pkgdir"/etc/php/php-fpm.conf || return 1
+	
+	# install apache2
+	install -D -m755 "$srcdir"/build-apache2/libs/libphp5.so \
+		"$pkgdir"/usr/lib/apache2/libphp5.so || return 1
+	install -D -m644 "$srcdir"/php5-module.conf \
+		"$pkgdir"/etc/apache2/conf.d/php5-module.conf || return 1
+
+	# install embed
+	install -D -m755 "$srcdir"/build-embed/libs/libphp5.so \
+		"$pkgdir"/usr/lib/libphp5.so || return 1
+	install -D -m644 "$_srcdir"/sapi/embed/php_embed.h \
+		"$pkgdir"/usr/include/php/sapi/embed/php_embed.h || return 1
 }
 
 dev() {
-	pkgdesc="PHP Development Files"
-	mkdir -p "$subpkgdir"/usr/lib/php/ "$subpkgdir"/usr/bin/
-	cp -a "$srcdir"/php-cli-pear/build "$subpkgdir"/usr/lib/php/build-cli-pear
-	cp -a "$srcdir"/php-cgi/build "$subpkgdir"/usr/lib/php/build-cgi
-	cp -a "$srcdir"/php-fpm/build "$subpkgdir"/usr/lib/php/build-fpm
-	cp -a "$srcdir"/php-apache2/build "$subpkgdir"/usr/lib/php/build-apache2
-	cp -a "$srcdir"/php-embed/build "$subpkgdir"/usr/lib/php/build-embed
-	ln -fs /usr/lib/php/build-cgi "$subpkgdir"/usr/lib/php/build
-
-	install -m 755  "$srcdir"/php-cli-pear/scripts/phpize "$subpkgdir"/usr/bin/
-}
-
-doc() {
-	pkgdesc="PHP Documentation"
-	install -D -m644 "$srcdir"/$pkgname-cli-pear/sapi/cli/php.1 "$subpkgdir"/usr/share/man/man1/php.1
-	install -D -m644 "$srcdir"/$pkgname-cli-pear/scripts/man1/phpize.1 "$subpkgdir"/usr/share/man/man1/phpize.1
-	install -D -m644 "$srcdir"/$pkgname-cli-pear/scripts/man1/php-config.1 "$subpkgdir"/usr/share/man/man1/php-config.1
-	install -D -m644 "$srcdir"/$pkgname-fpm/sapi/fpm/php-fpm.8 "$subpkgdir"/usr/share/man/man8/php-fpm.8
+	default_dev
+	mkdir -p "$subpkgdir"/usr/lib/php
+	mv "$pkgdir"/usr/lib/php/build \
+		"$subpkgdir"/usr/lib/php/ || return 1
 }
 
 common() {
@@ -267,57 +277,68 @@ common() {
 
 cgi() {
 	pkgdesc="PHP Common Gateway Interface (CGI)"
-	install -D -m755 "$srcdir"/$pkgname-cgi/sapi/cgi/php-cgi "$subpkgdir"/usr/bin/php-cgi
+	replaces="php"
+	depends="php-common"
+	mkdir -p "$subpkgdir"/usr/bin
+	mv "$pkgdir"/usr/bin/php-cgi "$subpkgdir"/usr/bin/
 }
 
 cli() {
 	pkgdesc="PHP Command Line Interface (CLI)"
-	install -D -m755 "$srcdir"/$pkgname-cli-pear/sapi/cli/php "$subpkgdir"/usr/bin/php
+	replaces="php-dev"
+	depends="php-common"
+	mkdir -p "$subpkgdir"/usr/bin
+	mv "$pkgdir"/usr/bin/php "$subpkgdir"/usr/bin/ || return 1
+	# provide phpize here instead of -dev due to pecl command
+	mv "$pkgdir"/usr/bin/phpize "$subpkgdir"/usr/bin/ || return 1
 }
 
 fpm() {
 	pkgdesc="PHP FastCGI Process Manager (FPM)"
-
-	install -D -m755 "$srcdir"/$pkgname-fpm/sapi/fpm/php-fpm "$subpkgdir"/usr/bin/php-fpm
-	install -D -m644 "$srcdir"/$pkgname-fpm/sapi/fpm/php-fpm.conf "$subpkgdir"/etc/php/php-fpm.conf
-	install -D -m755 "$srcdir"/php-fpm.init "$subpkgdir"/etc/init.d/php-fpm
-
-	# enable some default options
-	sed -ri "s~^;(error_log)(.*)~\1 = /var/log/php-fpm.log~" "$subpkgdir"/etc/php/php-fpm.conf
-	sed -ri "s/^;(pm.start_servers)/\1/" "$subpkgdir"/etc/php/php-fpm.conf
-	sed -ri "s/^;(pm.min_spare_servers)/\1/" "$subpkgdir"/etc/php/php-fpm.conf
-	sed -ri "s/^;(pm.max_spare_servers)/\1/" "$subpkgdir"/etc/php/php-fpm.conf
+	depends="php-common"
+	mkdir -p "$subpkgdir"/usr/bin "$subpkgdir"/etc/php
+	mv "$pkgdir"/usr/bin/php-fpm "$subpkgdir"/usr/bin/ || return 1
+	mv "$pkgdir"/etc/init.d "$subpkgdir"/etc/ || return 1
+	mv "$pkgdir"/etc/php/php-fpm.conf "$subpkgdir"/etc/php/
+	
 }
 
 apache2() {
 	pkgdesc="PHP Module for Apache2"
-	install -D -m755 "$srcdir"/$pkgname-apache2/libs/libphp5.so "$subpkgdir"/usr/lib/apache2/libphp5.so
-	install -D -m644 "$srcdir"/php5-module.conf "$subpkgdir"/etc/apache2/conf.d/php5-module.conf
+	depends="php-common"
+	mkdir -p "$subpkgdir"/usr/lib "$subpkgdir"/etc
+	mv "$pkgdir"/usr/lib/apache2 "$subpkgdir"/usr/lib/ &&\
+		mv "$pkgdir"/etc/apache2 "$subpkgdir"/etc
 }
 
 embed() {
 	pkgdesc="PHP Embed Library"
-	install -D -m755 "$srcdir"/$pkgname-embed/libs/libphp5.so "$subpkgdir"/usr/lib/libphp5.so
-	install -D -m644 "$srcdir"/$pkgname-$pkgver/sapi/embed/php_embed.h "$subpkgdir"/usr/include/php/sapi/embed/php_embed.h
+	depends="php-common"
+	mkdir -p "$subpkgdir"/usr/lib
+	mv "$pkgdir"/usr/lib/libphp5.so "$subpkgdir"/usr/lib/
 }
 
 pear() {
 	pkgdesc="PHP Extension and Application Repository (PEAR)"
-	depends="php"
-	cd "$srcdir"/$pkgname-cli-pear
-	make INSTALL_ROOT="$subpkgdir" install-pear || return 1
-	for _rmpear in `find "$subpkgdir" -name '.*'`; do
-		rm -rf ${_rmpear}
-	done
+	depends="php-cli"
+	mkdir -p "$subpkgdir"/usr/share "$subpkgdir"/etc/php \
+		"$subpkgdir"/usr/bin
+	mv "$pkgdir"/usr/bin/pecl \
+		"$pkgdir"/usr/bin/pear \
+		"$pkgdir"/usr/bin/peardev \
+		"$subpkgdir"/usr/bin/ || return 1
+	mv "$pkgdir"/etc/php/pear.conf \
+		"$subpkgdir"/etc/php/ || return 1
+	mv "$pkgdir"/usr/share/pear \
+		"$subpkgdir"/usr/share/ || return 1
 }
 
 _mv_mod() {
 	pkgdesc="$1 php extension"
 	mkdir -p "$subpkgdir"/$_extdir
-	mv "$srcdir"/php-cgi/modules/${1}.so "$subpkgdir"/$_extdir/ || return 1
+	mv "$pkgdir"/$_extdir/${1}.so "$subpkgdir"/$_extdir/ || return 1
 	install -d "$subpkgdir"/etc/php/conf.d
 	echo "extension=${1}.so" > "$subpkgdir"/etc/php/conf.d/${1}.ini
-	return 0
 }
 
 bcmath()	{ _mv_mod bcmath; }
@@ -348,8 +369,8 @@ pdo_pgsql()	{ _mv_mod pdo_pgsql; }
 pdo_sqlite()	{ _mv_mod pdo_sqlite; }
 phar()		{
 			_mv_mod phar;
-			cd "$srcdir"/$pkgname-cli-pear
-			make INSTALL_ROOT="$subpkgdir" install-pharcmd || return 1
+			mkdir -p "$subpkgdir"/usr/bin
+			mv "$pkgdir"/usr/bin/phar* "$subpkgdir"/usr/bin/
 		}
 posix()		{ _mv_mod posix; }
 pgsql()		{ _mv_mod pgsql; }
@@ -375,5 +396,4 @@ md5sums="8aaf20c95e91f25c5b6a591e5d6d61b9  php-5.3.5.tar.bz2
 26adfe0e744ec05fa9e368bbdee83176  php-uclibc.patch
 289ca647771170f096985951047174e7  suhosin-patch-5.3.4-0.9.10.patch
 8f2bb2b744a2de50025842cb51fb6a3a  php-fpm.init
-67719f428f44ec004da18705cbabe2ee  php5-module.conf
-6b7ebe6e1eedaada03d830bcf2fdc575  php.post-upgrade"
+67719f428f44ec004da18705cbabe2ee  php5-module.conf"
