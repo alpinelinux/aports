@@ -72,7 +72,16 @@ build () {
         fi
     done
     cd $rootdir
-    if [ -n $(apk info | grep libiconv) ]; then echo "***** libiconv stuck *****"; sudo apk del libiconv; fi
+    
+    if [ -n "$(apk info | grep libiconv)" ]; then 
+        echo "***** libiconv stuck *****"
+        sudo apk del libiconv
+    fi
+    
+    if [ -n "$(apk info | grep gettext)" ]; then 
+        echo "***** gettext stuck *****"
+        sudo apk del gettext
+    fi
 }
 
 touch START_OF_BUILD.txt
@@ -99,6 +108,14 @@ git pull
 #cd main/build-base
 #abuild -Ru
 #cd $rootdir
+
+if [ -n "$(apk info | grep libiconv)" ]; then 
+    sudo apk del libiconv
+fi
+    
+if [ -n "$(apk info | grep gettext)" ]; then 
+    sudo apk del gettext
+fi
 
 for s in main testing unstable ; do
     echo "Building packages in $s"
