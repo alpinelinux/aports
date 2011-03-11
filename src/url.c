@@ -70,6 +70,10 @@ static int fork_wget(const char *url, pid_t *ppid)
 		close(fds[0]);
 		dup2(open("/dev/null", O_RDONLY), STDIN_FILENO);
 		dup2(fds[1], STDOUT_FILENO);
+		execlp("wget", "wget", "-q", "-O", "-", url, NULL);
+		/* fall back to busybox wget 
+		 * See http://redmine.alpinelinux.org/issues/347 
+		 */
 		execlp("busybox", "wget", "-q", "-O", "-", url, NULL);
 		exit(0);
 	}
