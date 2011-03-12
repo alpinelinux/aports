@@ -1,14 +1,38 @@
-commit a6b79e8091c5e75d5d0a6b45b6652f0378583686
-Author: Natanael Copa <ncopa@alpinelinux.org>
-Date:   Tue Jul 6 08:16:25 2010 +0000
+From 7e51893c53eca9bb0e952941e5f50163131c21eb Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Fri, 11 Mar 2011 15:33:18 +0000
+Subject: [PATCH] support for dynamic maps
 
-    patch for dynamic maps
+forward ported
+---
+ conf/postfix-files       |   11 +++
+ src/dns/Makefile.in      |    5 +-
+ src/global/Makefile.in   |   44 +++++++++--
+ src/global/mail_conf.c   |    6 ++
+ src/global/mail_dict.c   |    2 +
+ src/global/mail_params.c |    4 +
+ src/global/mkmap_open.c  |   11 +++-
+ src/master/Makefile.in   |    6 +-
+ src/milter/Makefile.in   |    6 +-
+ src/postconf/postconf.c  |   10 +++
+ src/postmap/postmap.c    |   51 +++++++++++--
+ src/tls/Makefile.in      |    6 +-
+ src/util/Makefile.in     |   29 +++++---
+ src/util/dict.h          |    6 ++
+ src/util/dict_db.c       |    6 ++
+ src/util/dict_dbm.c      |    4 +
+ src/util/dict_open.c     |  183 +++++++++++++++++++++++++++++++++++++++++++++-
+ src/util/load_lib.c      |  135 ++++++++++++++++++++++++++++++++++
+ src/util/load_lib.h      |   41 ++++++++++
+ 19 files changed, 520 insertions(+), 46 deletions(-)
+ create mode 100644 src/util/load_lib.c
+ create mode 100644 src/util/load_lib.h
 
 diff --git a/conf/postfix-files b/conf/postfix-files
-index 7ff93ea..7cae109 100644
+index d3911d6..7a7b619 100644
 --- a/conf/postfix-files
 +++ b/conf/postfix-files
-@@ -65,6 +65,10 @@ $queue_directory/saved:d:$mail_owner:-:700:ucr
+@@ -65,6 +65,11 @@ $queue_directory/saved:d:$mail_owner:-:700:ucr
  $queue_directory/trace:d:$mail_owner:-:700:ucr
  $daemon_directory/anvil:f:root:-:755
  $daemon_directory/bounce:f:root:-:755
@@ -16,10 +40,11 @@ index 7ff93ea..7cae109 100644
 +$daemon_directory/dict_pcre.so:f:root:-:755
 +$daemon_directory/dict_mysql.so:f:root:-:755
 +$daemon_directory/dict_pgsql.so:f:root:-:755
++$daemon_directory/dict_sqlite.so:f:root:-:755
  $daemon_directory/cleanup:f:root:-:755
  $daemon_directory/discard:f:root:-:755
- $daemon_directory/error:f:root:-:755
-@@ -94,6 +98,11 @@ $daemon_directory/tlsmgr:f:root:-:755
+ $daemon_directory/dnsblog:f:root:-:755
+@@ -97,6 +102,11 @@ $daemon_directory/tlsmgr:f:root:-:755
  $daemon_directory/trivial-rewrite:f:root:-:755
  $daemon_directory/verify:f:root:-:755
  $daemon_directory/virtual:f:root:-:755
@@ -31,7 +56,7 @@ index 7ff93ea..7cae109 100644
  $daemon_directory/nqmgr:h:$daemon_directory/qmgr
  $daemon_directory/lmtp:h:$daemon_directory/smtp
  $command_directory/postalias:f:root:-:755
-@@ -117,6 +126,7 @@ $config_directory/access:f:root:-:644:p1
+@@ -120,6 +130,7 @@ $config_directory/access:f:root:-:644:p1
  $config_directory/aliases:f:root:-:644:p1
  $config_directory/bounce.cf.default:f:root:-:644:1
  $config_directory/canonical:f:root:-:644:p1
@@ -40,7 +65,7 @@ index 7ff93ea..7cae109 100644
  $config_directory/generic:f:root:-:644:p1
  $config_directory/generics:f:root:-:644:o
 diff --git a/src/dns/Makefile.in b/src/dns/Makefile.in
-index bbc5e98..f70cb96 100644
+index bbc5e98..b71082e 100644
 --- a/src/dns/Makefile.in
 +++ b/src/dns/Makefile.in
 @@ -14,7 +14,7 @@ LIBS	= ../../lib/libutil.a
@@ -52,13 +77,12 @@ index bbc5e98..f70cb96 100644
  
  all: $(LIB)
  
-@@ -31,12 +31,10 @@ tests:	test dns_rr_to_pa_test dns_rr_to_sa_test dns_sa_to_rr_test \
- root_tests:
+@@ -32,11 +32,10 @@ root_tests:
  
  $(LIB):	$(OBJS)
--	$(AR) $(ARFL) $(LIB) $?
+ 	$(AR) $(ARFL) $(LIB) $?
 -	$(RANLIB) $(LIB)
-+	gcc -shared -Wl,-soname,libpostfix-dns.so.1 -o $(LIB) $(OBJS) $(LIBS) $(SYSLIBS)
++	$(CC) -shared -Wl,-soname,libpostfix-dns.so.1 -o $(LIB) $(OBJS) $(LIBS) $(SYSLIBS)
  
  $(LIB_DIR)/$(LIB): $(LIB)
  	cp $(LIB) $(LIB_DIR)
@@ -67,50 +91,56 @@ index bbc5e98..f70cb96 100644
  update: $(LIB_DIR)/$(LIB) $(HDRS)
  	-for i in $(HDRS); \
 diff --git a/src/global/Makefile.in b/src/global/Makefile.in
-index 56c9b6c..b0c83d6 100644
+index 1a35114..bc4b643 100644
 --- a/src/global/Makefile.in
 +++ b/src/global/Makefile.in
-@@ -34,7 +34,7 @@ OBJS	= abounce.o anvil_clnt.o been_here.o bounce.o bounce_log.o \
+@@ -35,8 +35,8 @@ OBJS	= abounce.o anvil_clnt.o been_here.o bounce.o bounce_log.o \
  	canon_addr.o cfg_parser.o cleanup_strerror.o cleanup_strflags.o \
  	clnt_stream.o conv_time.o db_common.o debug_peer.o debug_process.o \
  	defer.o deliver_completed.o deliver_flock.o deliver_pass.o \
 -	deliver_request.o dict_ldap.o dict_mysql.o dict_pgsql.o \
+-	dict_proxy.o dict_sqlite.o domain_list.o dot_lockfile.o dot_lockfile_as.o \
 +	deliver_request.o \
- 	dict_proxy.o domain_list.o dot_lockfile.o dot_lockfile_as.o \
++	dict_proxy.o domain_list.o dot_lockfile.o dot_lockfile_as.o \
  	dsb_scan.o dsn.o dsn_buf.o dsn_mask.o dsn_print.o dsn_util.o \
  	ehlo_mask.o ext_prop.o file_id.o flush_clnt.o header_opts.o \
-@@ -104,10 +104,13 @@ LIBS	= ../../lib/libutil.a
+ 	header_token.o input_transp.o int_filt.o is_header.o log_adhoc.o \
+@@ -106,10 +106,14 @@ LIBS	= ../../lib/libutil.a
  LIB_DIR	= ../../lib
  INC_DIR	= ../../include
  MAKES	=
 +LDAPSO  = dict_ldap.so
 +MYSQLSO = dict_mysql.so
 +PGSQLSO = dict_pgsql.so
++SQLITESO = dict_sqlite.so
  
 -.c.o:;	$(CC) $(CFLAGS) -c $*.c
 +.c.o:;	$(CC) -fPIC $(CFLAGS) -c $*.c
  
 -all: $(LIB)
-+all: $(LIB) $(LDAPSO) $(MYSQLSO) $(PGSQLSO) 
++all: $(LIB) $(LDAPSO) $(MYSQLSO) $(PGSQLSO) $(SQLITESO)
  
  $(OBJS): ../../conf/makedefs.out
  
-@@ -117,14 +120,30 @@ Makefile: Makefile.in
+@@ -119,14 +123,36 @@ Makefile: Makefile.in
  test:	$(TESTPROG)
  
  $(LIB):	$(OBJS)
 -	$(AR) $(ARFL) $(LIB) $?
 -	$(RANLIB) $(LIB)
-+	gcc -shared -Wl,-soname,libpostfix-global.so.1 -o $(LIB) $(OBJS) $(LIBS) $(SYSLIBS)
++	$(CC) -shared -Wl,-soname,libpostfix-global.so.1 -o $(LIB) $(OBJS) $(LIBS) $(SYSLIBS)
 +
 +$(LDAPSO): dict_ldap.o $(LIB) ../../lib/libglobal.a
-+	gcc -shared -Wl,-soname,dict_ldap.so -o $@ $? -lldap -llber -L../../lib -lutil -L. -lglobal
++	$(CC) -shared -Wl,-soname,dict_ldap.so -o $@ $? -lldap -llber -L../../lib -lutil -L. -lglobal
 +
 +$(MYSQLSO): dict_mysql.o $(LIB) ../../lib/libglobal.a
-+	gcc -shared -Wl,-soname,dict_mysql.so -o $@ $? -lmysqlclient -L. -lutil -lglobal
++	$(CC) -shared -Wl,-soname,dict_mysql.so -o $@ $? -lmysqlclient -L. -lutil -lglobal
 +
 +$(PGSQLSO): dict_pgsql.o $(LIB) ../../lib/libglobal.a
-+	gcc -shared -Wl,-soname,dict_pgsql.so -o $@ $? -lpq -L. -lutil -lglobal
++	$(CC) -shared -Wl,-soname,dict_pgsql.so -o $@ $? -lpq -L. -lutil -lglobal
++
++$(SQLITESO): dict_sqlite.o $(LIB) ../../lib/libglobal.a
++	$(CC) -shared -Wl,-soname,dict_sqlite.so -o $@ $? -lsqlite3 -L. -lutil -lglobal
  
  $(LIB_DIR)/$(LIB): $(LIB)
  	cp $(LIB) $(LIB_DIR)
@@ -126,24 +156,27 @@ index 56c9b6c..b0c83d6 100644
 +../../libexec/$(PGSQLSO): $(PGSQLSO)
 +	cp $(PGSQLSO) ../../libexec
 +
-+update: $(LIB_DIR)/$(LIB) ../../libexec/$(LDAPSO) ../../libexec/$(MYSQLSO) ../../libexec/$(PGSQLSO) $(HDRS)
++../../libexec/$(SQLITESO): $(SQLITESO)
++	cp $(SQLITESO) ../../libexec
++
++update: $(LIB_DIR)/$(LIB) ../../libexec/$(LDAPSO) ../../libexec/$(MYSQLSO) ../../libexec/$(PGSQLSO) ../../libexec/$(SQLITESO) $(HDRS)
  	-for i in $(HDRS); \
  	do \
  	  cmp -s $$i $(INC_DIR)/$$i 2>/dev/null || cp $$i $(INC_DIR); \
-@@ -492,7 +511,7 @@ lint:
+@@ -497,7 +523,7 @@ lint:
  	lint $(DEFS) $(SRCS) $(LINTFIX)
  
  clean:
 -	rm -f *.o $(LIB) *core $(TESTPROG) junk
-+	rm -f *.o $(LIB) $(LDAPSO) $(MYSQLSO) $(PGSQLSO) *core $(TESTPROG) junk
++	rm -f *.o $(LIB) $(LDAPSO) $(MYSQLSO) $(PGSQLSO) $(SQLITESO) *core $(TESTPROG) junk
  	rm -rf printfck
  
  tidy:	clean
 diff --git a/src/global/mail_conf.c b/src/global/mail_conf.c
-index c5d3d43..feb7d66 100644
+index 1fc7847..2af757f 100644
 --- a/src/global/mail_conf.c
 +++ b/src/global/mail_conf.c
-@@ -182,6 +182,13 @@ void    mail_conf_suck(void)
+@@ -190,6 +190,12 @@ void    mail_conf_suck(void)
      path = concatenate(var_config_dir, "/", "main.cf", (char *) 0);
      dict_load_file(CONFIG_DICT, path);
      myfree(path);
@@ -153,15 +186,14 @@ index c5d3d43..feb7d66 100644
 +    dict_open_dlinfo(path);
 +    myfree(path);
 +#endif
-+
  }
  
  /* mail_conf_flush - discard configuration dictionary */
 diff --git a/src/global/mail_dict.c b/src/global/mail_dict.c
-index 35ecffb..c1ff165 100644
+index 337861d..663f90f 100644
 --- a/src/global/mail_dict.c
 +++ b/src/global/mail_dict.c
-@@ -45,6 +45,7 @@ typedef struct {
+@@ -46,6 +46,7 @@ typedef struct {
  
  static const DICT_OPEN_INFO dict_open_info[] = {
      DICT_TYPE_PROXY, dict_proxy_open,
@@ -169,35 +201,43 @@ index 35ecffb..c1ff165 100644
  #ifdef HAS_LDAP
      DICT_TYPE_LDAP, dict_ldap_open,
  #endif
-@@ -54,6 +55,7 @@ static const DICT_OPEN_INFO dict_open_info[] = {
- #ifdef HAS_PGSQL
-     DICT_TYPE_PGSQL, dict_pgsql_open,
+@@ -58,6 +59,7 @@ static const DICT_OPEN_INFO dict_open_info[] = {
+ #ifdef HAS_SQLITE
+     DICT_TYPE_SQLITE, dict_sqlite_open,
  #endif
 +#endif /* NO_DYNAMIC_MAPS */
      0,
  };
  
 diff --git a/src/global/mail_params.c b/src/global/mail_params.c
-index f5350a1..1bbad7a 100644
+index f5350a1..db33da1 100644
 --- a/src/global/mail_params.c
 +++ b/src/global/mail_params.c
 @@ -79,6 +79,7 @@
  /*	char	*var_export_environ;
  /*	char	*var_debug_peer_list;
  /*	int	var_debug_peer_level;
-+/*	int	var_command_maxtime;
++/*     int     var_command_maxtime;
  /*	int	var_in_flow_delay;
  /*	int	var_fault_inj_code;
  /*	char   *var_bounce_service;
-@@ -265,6 +266,7 @@ char   *var_import_environ;
+@@ -91,6 +92,7 @@
+ /*	char   *var_error_service;
+ /*	char   *var_flush_service;
+ /*	char   *var_verify_service;
++/*	char   *var_scache_service;
+ /*	char   *var_trace_service;
+ /*	char   *var_proxymap_service;
+ /*	char   *var_proxywrite_service;
+@@ -265,6 +267,7 @@ char   *var_import_environ;
  char   *var_export_environ;
  char   *var_debug_peer_list;
  int     var_debug_peer_level;
-+int	var_command_maxtime;
++int    var_command_maxtime;
  int     var_fault_inj_code;
  char   *var_bounce_service;
  char   *var_cleanup_service;
-@@ -276,6 +278,7 @@ char   *var_showq_service;
+@@ -276,6 +279,7 @@ char   *var_showq_service;
  char   *var_error_service;
  char   *var_flush_service;
  char   *var_verify_service;
@@ -236,7 +276,7 @@ index 69a0d57..eb8de71 100644
  	    break;
      }
 diff --git a/src/master/Makefile.in b/src/master/Makefile.in
-index 53f65bd..48ca35e 100644
+index 53f65bd..6a562cf 100644
 --- a/src/master/Makefile.in
 +++ b/src/master/Makefile.in
 @@ -20,7 +20,7 @@ LIB_DIR	= ../../lib
@@ -244,7 +284,7 @@ index 53f65bd..48ca35e 100644
  BIN_DIR	= ../../libexec
  
 -.c.o:;	$(CC) $(CFLAGS) -c $*.c
-+.c.o:;	$(CC) `for i in $(LIB_OBJ); do [ $$i = $@ ] && echo -fPIC; done` $(CFLAGS) -c $*.c
++.c.o:; $(CC) -fPIC $(CFLAGS) -c $*.c
  
  all:	$(PROG) $(LIB)
  
@@ -254,7 +294,7 @@ index 53f65bd..48ca35e 100644
  $(LIB):	$(LIB_OBJ)
 -	$(AR) $(ARFL) $(LIB) $?
 -	$(RANLIB) $(LIB)
-+	gcc -shared -Wl,-soname,libpostfix-master.so.1 -o $(LIB) $(LIB_OBJ) $(LIBS) $(SYSLIBS)
++	$(CC) -shared -Wl,-soname,libpostfix-master.so.1 -o $(LIB) $(LIB_OBJ) $(LIBS) $(SYSLIBS)
  
  $(LIB_DIR)/$(LIB): $(LIB)
  	cp $(LIB) $(LIB_DIR)/$(LIB)
@@ -263,7 +303,7 @@ index 53f65bd..48ca35e 100644
  $(BIN_DIR)/$(PROG): $(PROG)
  	 cp $(PROG) $(BIN_DIR)
 diff --git a/src/milter/Makefile.in b/src/milter/Makefile.in
-index c28263a..549b868 100644
+index c28263a..c475629 100644
 --- a/src/milter/Makefile.in
 +++ b/src/milter/Makefile.in
 @@ -14,7 +14,7 @@ LIB_DIR	= ../../lib
@@ -281,7 +321,7 @@ index c28263a..549b868 100644
  $(LIB):	$(OBJS)
 -	$(AR) $(ARFL) $(LIB) $?
 -	$(RANLIB) $(LIB)
-+	 gcc -shared -Wl,-soname,libpostfix-milter.so.1 -o $(LIB) $(OBJS) $(LIBS) $(SYSLIBS)
++	$(CC) -shared -Wl,-soname,libpostfix-milter.so.1 -o $(LIB) $(OBJS) $(LIBS) $(SYSLIBS)
  
  $(LIB_DIR)/$(LIB): $(LIB)
  	cp $(LIB) $(LIB_DIR)
@@ -290,10 +330,10 @@ index c28263a..549b868 100644
  update: $(LIB_DIR)/$(LIB) $(HDRS)
  	-for i in $(HDRS); \
 diff --git a/src/postconf/postconf.c b/src/postconf/postconf.c
-index d1ae434..dd604bb 100644
+index 82d8be0..e12baa9 100644
 --- a/src/postconf/postconf.c
 +++ b/src/postconf/postconf.c
-@@ -965,6 +965,16 @@ static void show_maps(void)
+@@ -1013,6 +1013,16 @@ static void show_maps(void)
  {
      ARGV   *maps_argv;
      int     i;
@@ -302,7 +342,7 @@ index d1ae434..dd604bb 100644
 +    char   *config_dir;
 +
 +    var_config_dir = mystrdup((config_dir = safe_getenv(CONF_ENV_PATH)) != 0 ?
-+			      config_dir : DEF_CONFIG_DIR);	/* XXX */
++                             config_dir : DEF_CONFIG_DIR);     /* XXX */
 +    path = concatenate(var_config_dir, "/", "dynamicmaps.cf", (char *) 0);
 +    dict_open_dlinfo(path);
 +    myfree(path);
@@ -311,7 +351,7 @@ index d1ae434..dd604bb 100644
      maps_argv = dict_mapnames();
      for (i = 0; i < maps_argv->argc; i++)
 diff --git a/src/postmap/postmap.c b/src/postmap/postmap.c
-index e956aed..712d041 100644
+index e956aed..0981c7e 100644
 --- a/src/postmap/postmap.c
 +++ b/src/postmap/postmap.c
 @@ -5,7 +5,7 @@
@@ -328,7 +368,7 @@ index e956aed..712d041 100644
  /*	This feature is available in Postfix version 2.2 and later,
  /*	and is not available for all database types.
 +/* .IP \fB-u\fR
-+/*     Upgrade the database to the current version.
++/*	Upgrade the database to the current version.
  /* .IP \fB-v\fR
  /*	Enable verbose logging for debugging purposes. Multiple \fB-v\fR
  /*	options make the software increasingly verbose.
@@ -397,14 +437,14 @@ index e956aed..712d041 100644
 -	    if (query || delkey)
 -		msg_fatal("specify only one of -s or -q or -d");
 +	    if (query || delkey || upgrade)
-+		msg_fatal("specify only one of -s or -q or -u or -d");
++		msg_fatal("specify only one of -s -q -u or -d");
  	    sequence = 1;
  	    break;
-+       case 'u':
-+           if (sequence || query || delkey || upgrade)
-+               msg_fatal("specify only one of -s -q -u or -d");
-+           upgrade=1;
-+           break;
++	case 'u':
++	    if (sequence || query || delkey || upgrade)
++		msg_fatal("specify only one of -s -q -u or -d");
++	    upgrade=1;
++	    break;
  	case 'v':
  	    msg_verbose++;
  	    break;
@@ -431,10 +471,10 @@ index e956aed..712d041 100644
  	if (optind + 1 > argc)
  	    usage(argv[0]);
 diff --git a/src/tls/Makefile.in b/src/tls/Makefile.in
-index 1a8e26d..1f26fd8 100644
+index 1dbe154..b952aa4 100644
 --- a/src/tls/Makefile.in
 +++ b/src/tls/Makefile.in
-@@ -22,7 +22,7 @@ LIB_DIR	= ../../lib
+@@ -24,7 +24,7 @@ LIB_DIR	= ../../lib
  INC_DIR	= ../../include
  MAKES	=
  
@@ -443,13 +483,13 @@ index 1a8e26d..1f26fd8 100644
  
  all: $(LIB)
  
-@@ -38,12 +38,10 @@ tests:
+@@ -40,12 +40,10 @@ tests:
  root_tests:
  
  $(LIB):	$(OBJS)
 -	$(AR) $(ARFL) $(LIB) $?
 -	$(RANLIB) $(LIB)
-+	gcc -shared -Wl,-soname,libpostfix-tls.so.1 -o $(LIB) $(OBJS) $(LIBS) $(SYSLIBS)
++	$(CC) -shared -Wl,-soname,libpostfix-tls.so.1 -o $(LIB) $(OBJS) $(LIBS) $(SYSLIBS)
  
  $(LIB_DIR)/$(LIB): $(LIB)
  	cp $(LIB) $(LIB_DIR)
@@ -458,15 +498,15 @@ index 1a8e26d..1f26fd8 100644
  update: $(LIB_DIR)/$(LIB) $(HDRS)
  	-for i in $(HDRS); \
 diff --git a/src/util/Makefile.in b/src/util/Makefile.in
-index 653919c..21e918a 100644
+index 4455fbf..481ec42 100644
 --- a/src/util/Makefile.in
 +++ b/src/util/Makefile.in
-@@ -32,21 +32,22 @@ SRCS	= alldig.c allprint.c argv.c argv_split.c attr_clnt.c attr_print0.c \
- 	write_buf.c write_wait.c sane_basename.c format_tv.c allspace.c \
- 	allascii.c load_file.c killme_after.c vstream_tweak.c upass_connect.c \
- 	upass_listen.c upass_trigger.c edit_file.c inet_windowsize.c \
--	unix_pass_fd_fix.c dict_cache.c
-+	unix_pass_fd_fix.c dict_cache.c load_lib.c
+@@ -33,21 +33,22 @@ SRCS	= alldig.c allprint.c argv.c argv_split.c attr_clnt.c attr_print0.c \
+ 	allascii.c load_file.c killme_after.c vstream_tweak.c \
+ 	unix_pass_listen.c unix_pass_trigger.c edit_file.c inet_windowsize.c \
+ 	unix_pass_fd_fix.c dict_cache.c valid_utf_8.c dict_thash.c \
+-	ip_match.c nbbio.c stream_pass_connect.c
++	ip_match.c nbbio.c stream_pass_connect.c load_lib.c
  OBJS	= alldig.o allprint.o argv.o argv_split.o attr_clnt.o attr_print0.o \
  	attr_print64.o attr_print_plain.o attr_scan0.o attr_scan64.o \
  	attr_scan_plain.o auto_clnt.o base64_code.o basename.o binhash.o \
@@ -475,7 +515,7 @@ index 653919c..21e918a 100644
  	dict_dbm.o dict_debug.o dict_env.o dict_ht.o dict_ni.o dict_nis.o \
 -	dict_nisplus.o dict_open.o dict_pcre.o dict_regexp.o dict_sdbm.o \
 -	dict_static.o dict_tcp.o dict_unix.o dir_forest.o doze.o dummy_read.o \
-+	dict_nisplus.o dict_open.o dict_regexp.o \
++	dict_nisplus.o dict_open.o dict_regexp.o dict_sdbm.o \
 +	dict_static.o dict_unix.o dir_forest.o doze.o dummy_read.o \
  	dummy_write.o duplex_pipe.o environ.o events.o exec_command.o \
  	fifo_listen.o fifo_trigger.o file_limit.o find_inet.o fsspace.o \
@@ -487,28 +527,27 @@ index 653919c..21e918a 100644
  	mac_parse.o make_dirs.o mask_addr.o match_list.o match_ops.o msg.o \
  	msg_output.o msg_syslog.o msg_vstream.o mvect.o myaddrinfo.o myflock.o \
  	mymalloc.o myrand.o mystrtok.o name_code.o name_mask.o netstring.o \
-@@ -80,7 +81,7 @@ HDRS	= argv.h attr.h attr_clnt.h auto_clnt.h base64_code.h binhash.h \
- 	msg_output.h msg_syslog.h msg_vstream.h mvect.h myaddrinfo.h myflock.h \
- 	mymalloc.h myrand.h name_code.h name_mask.h netstring.h nvtable.h \
- 	open_as.h open_lock.h percentm.h posix_signals.h readlline.h ring.h \
--	safe.h safe_open.h sane_accept.h sane_connect.h sane_fsops.h \
-+	safe.h safe_open.h sane_accept.h sane_connect.h sane_fsops.h load_lib.h \
- 	sane_socketpair.h sane_time.h scan_dir.h set_eugid.h set_ugid.h \
- 	sigdelay.h sock_addr.h spawn_command.h split_at.h stat_as.h \
- 	stringops.h sys_defs.h timed_connect.h timed_wait.h trigger.h \
-@@ -93,6 +94,7 @@ DEFS	= -I. -D$(SYSTYPE)
+@@ -89,13 +90,14 @@ HDRS	= argv.h attr.h attr_clnt.h auto_clnt.h base64_code.h binhash.h \
+ 	username.h valid_hostname.h vbuf.h vbuf_print.h vstream.h vstring.h \
+ 	vstring_vstream.h watchdog.h format_tv.h load_file.h killme_after.h \
+ 	edit_file.h dict_cache.h dict_thash.h \
+-	ip_match.h nbbio.h
++	ip_match.h nbbio.h load_lib.h
+ TESTSRC	= fifo_open.c fifo_rdwr_bug.c fifo_rdonly_bug.c select_bug.c \
+ 	stream_test.c dup2_pass_on_exec.c
+ DEFS	= -I. -D$(SYSTYPE)
  CFLAGS	= $(DEBUG) $(OPT) $(DEFS)
  FILES	= Makefile $(SRCS) $(HDRS)
  INCL	=
-+PCRESO  = dict_pcre.so
++PCRESO	= dict_pcre.so
  LIB	= libutil.a
  TESTPROG= dict_open dup2_pass_on_exec events exec_command fifo_open \
  	fifo_rdonly_bug fifo_rdwr_bug fifo_trigger fsspace fullname \
-@@ -108,10 +110,11 @@ TESTPROG= dict_open dup2_pass_on_exec events exec_command fifo_open \
+@@ -111,10 +113,11 @@ TESTPROG= dict_open dup2_pass_on_exec events exec_command fifo_open \
  
  LIB_DIR	= ../../lib
  INC_DIR	= ../../include
-+LIBS    = $(LIB_DIR)/$(LIB) $(PCRESO)
++LIBS	= $(LIB_DIR)/$(LIB) $(PCRESO)
  
 -.c.o:;	$(CC) $(CFLAGS) -c $*.c
 +.c.o:;	$(CC) -fPIC $(CFLAGS) -c $*.c
@@ -518,17 +557,17 @@ index 653919c..21e918a 100644
  
  $(OBJS): ../../conf/makedefs.out
  
-@@ -120,15 +123,19 @@ Makefile: Makefile.in
+@@ -123,15 +126,19 @@ Makefile: Makefile.in
  
  test:	$(TESTPROG)
  
 +$(PCRESO): dict_pcre.o libutil.a
-+	gcc -shared -Wl,-soname,dict_pcre.so -o $@ $? -lpcre -L. -lutil
++	$(CC) -shared -Wl,-soname,dict_pcre.so -o $@ $? -lpcre -L. -lutil
 +
  $(LIB):	$(OBJS)
 -	$(AR) $(ARFL) $(LIB) $?
 -	$(RANLIB) $(LIB)
-+	gcc -shared -Wl,-soname,libpostfix-util.so.1 -o $(LIB) $(OBJS) -ldl $(SYSLIBS)
++	$(CC) -shared -Wl,-soname,libpostfix-util.so.1 -o $(LIB) $(OBJS) -ldl $(SYSLIBS)
  
  $(LIB_DIR)/$(LIB): $(LIB)
  	cp $(LIB) $(LIB_DIR)
@@ -538,17 +577,16 @@ index 653919c..21e918a 100644
 +../../libexec/$(PCRESO): $(PCRESO)
 +	cp $(PCRESO) ../../libexec
 +
-+update: $(LIBS) ../../libexec/$(PCRESO) $(HDRS)
++update: $(LIBS) $(HDRS) ../../libexec/$(PCRESO)
  	-for i in $(HDRS); \
  	do \
  	  cmp -s $$i $(INC_DIR)/$$i 2>/dev/null || cp $$i $(INC_DIR); \
-@@ -150,7 +157,8 @@ lint:
- 	lint $(SRCS)
+@@ -153,7 +160,7 @@ lint:
+ 	lint $(DEFS) $(SRCS) $(LINTFIX)
  
  clean:
 -	rm -f *.o $(LIB) *core $(TESTPROG) junk $(MAKES) *.tmp
-+	rm -f *.o $(LIB) $(PCRESO) *core $(TESTPROG) \
-+		junk $(MAKES) *.tmp
++	rm -f *.o $(LIB) $(PCRESO) *core $(TESTPROG) junk $(MAKES) *.tmp
  	rm -rf printfck
  
  tidy:	clean
@@ -577,10 +615,10 @@ index 9829d28..d7dc53c 100644
  #define dict_get(dp, key)	((const char *) (dp)->lookup((dp), (key)))
  #define dict_put(dp, key, val)	(dp)->update((dp), (key), (val))
 diff --git a/src/util/dict_db.c b/src/util/dict_db.c
-index 9e82f9b..93264e6 100644
+index c827b8d..e33fc24 100644
 --- a/src/util/dict_db.c
 +++ b/src/util/dict_db.c
-@@ -675,6 +675,12 @@ static DICT *dict_db_open(const char *class, const char *path, int open_flags,
+@@ -676,6 +676,12 @@ static DICT *dict_db_open(const char *class, const char *path, int open_flags,
  	msg_fatal("set DB cache size %d: %m", dict_db_cache_size);
      if (type == DB_HASH && db->set_h_nelem(db, DICT_DB_NELM) != 0)
  	msg_fatal("set DB hash element count %d: %m", DICT_DB_NELM);
@@ -594,7 +632,7 @@ index 9e82f9b..93264e6 100644
      if ((errno = db->open(db, 0, db_path, 0, type, db_flags, 0644)) != 0)
  	msg_fatal("open database %s: %m", db_path);
 diff --git a/src/util/dict_dbm.c b/src/util/dict_dbm.c
-index 3603e44..adc5258 100644
+index 3603e44..1958556 100644
 --- a/src/util/dict_dbm.c
 +++ b/src/util/dict_dbm.c
 @@ -409,6 +409,10 @@ DICT   *dict_dbm_open(const char *path, int open_flags, int dict_flags)
@@ -603,13 +641,13 @@ index 3603e44..adc5258 100644
  
 +#ifdef HAVE_GDBM
 +    msg_fatal("%s: gdbm maps use locking that is incompatible with postfix.  Use a hash map instead.",
-+		 path);
++                path);
 +#endif
      /*
       * Note: DICT_FLAG_LOCK is used only by programs that do fine-grained (in
       * the time domain) locking while accessing individual database records.
 diff --git a/src/util/dict_open.c b/src/util/dict_open.c
-index b807bc2..0f4e382 100644
+index 9e1358f..19e40bf 100644
 --- a/src/util/dict_open.c
 +++ b/src/util/dict_open.c
 @@ -44,6 +44,8 @@
@@ -617,21 +655,21 @@ index b807bc2..0f4e382 100644
  /*
  /*	ARGV	*dict_mapnames()
 +/*
-+/*	void (*)() dict_mkmap_func(const char *dict_type)
++/*     void (*)() dict_mkmap_func(const char *dict_type)
  /* DESCRIPTION
  /*	This module implements a low-level interface to multiple
  /*	physical dictionary types.
-@@ -159,6 +161,9 @@
+@@ -161,6 +163,9 @@
  /*
  /*	dict_mapnames() returns a sorted list with the names of all available
  /*	dictionary types.
 +/*
-+/*	dict_mkmap_func() returns a pointer to the mkmap setup function
-+/*	for the given map type, as given in /etc/dynamicmaps.cf
++/*     dict_mkmap_func() returns a pointer to the mkmap setup function
++/*     for the given map type, as given in /etc/dynamicmaps.cf
  /* DIAGNOSTICS
  /*	Fatal error: open error, unsupported dictionary type, attempt to
  /*	update non-writable dictionary.
-@@ -183,6 +188,9 @@
+@@ -185,6 +190,9 @@
  #include <strings.h>
  #endif
  
@@ -641,7 +679,7 @@ index b807bc2..0f4e382 100644
  /* Utility library. */
  
  #include <argv.h>
-@@ -208,6 +216,27 @@
+@@ -211,6 +219,27 @@
  #include <split_at.h>
  #include <htable.h>
  
@@ -669,7 +707,7 @@ index b807bc2..0f4e382 100644
   /*
    * lookup table for available map types.
    */
-@@ -223,7 +252,9 @@ static const DICT_OPEN_INFO dict_open_info[] = {
+@@ -226,7 +255,9 @@ static const DICT_OPEN_INFO dict_open_info[] = {
      DICT_TYPE_ENVIRON, dict_env_open,
      DICT_TYPE_HT, dict_ht_open,
      DICT_TYPE_UNIX, dict_unix_open,
@@ -679,7 +717,7 @@ index b807bc2..0f4e382 100644
  #ifdef HAS_SDBM
      DICT_TYPE_SDBM, dict_sdbm_open,
  #endif
-@@ -243,9 +274,11 @@ static const DICT_OPEN_INFO dict_open_info[] = {
+@@ -246,9 +277,11 @@ static const DICT_OPEN_INFO dict_open_info[] = {
  #ifdef HAS_NETINFO
      DICT_TYPE_NETINFO, dict_ni_open,
  #endif
@@ -691,7 +729,7 @@ index b807bc2..0f4e382 100644
  #ifdef HAS_POSIX_REGEXP
      DICT_TYPE_REGEXP, dict_regexp_open,
  #endif
-@@ -303,8 +336,31 @@ DICT   *dict_open3(const char *dict_type, const char *dict_name,
+@@ -307,8 +340,31 @@ DICT   *dict_open3(const char *dict_type, const char *dict_name,
  		  dict_type, dict_name);
      if (dict_open_hash == 0)
  	dict_open_init();
@@ -699,33 +737,33 @@ index b807bc2..0f4e382 100644
 -	msg_fatal("unsupported dictionary type: %s", dict_type);
 +    if ((dp = (DICT_OPEN_INFO *) htable_find(dict_open_hash, dict_type)) == 0) {
 +#ifdef NO_DYNAMIC_MAPS
-+	msg_fatal("%s: unsupported dictionary type: %s", myname, dict_type);
++       msg_fatal("%s: unsupported dictionary type: %s", myname, dict_type);
 +#else
-+	struct stat st;
-+	LIB_FN fn[2];
-+	DICT *(*open) (const char *, int, int);
-+	DLINFO *dl=dict_open_dlfind(dict_type);
-+	if (!dl)
-+	    msg_fatal("%s: unsupported dictionary type: %s:  Is the postfix-%s package installed?", myname, dict_type, dict_type);
-+	if (stat(dl->soname,&st) < 0) {
-+	    msg_fatal("%s: unsupported dictionary type: %s (%s not found.  Is the postfix-%s package installed?)",
-+		myname, dict_type, dl->soname, dict_type);
-+	}
-+	fn[0].name = dl->openfunc;
-+	fn[0].ptr  = (void**)&open;
-+	fn[1].name = NULL;
-+	load_library_symbols(dl->soname, fn, NULL);
-+	dict_open_register(dict_type, open);
-+	dp = (DICT_OPEN_INFO *) htable_find(dict_open_hash, dict_type);
++       struct stat st;
++       LIB_FN fn[2];
++       DICT *(*open) (const char *, int, int);
++       DLINFO *dl=dict_open_dlfind(dict_type);
++       if (!dl)
++           msg_fatal("%s: unsupported dictionary type: %s:  Is the postfix-%s package installed?", myname, dict_type, dict_type);
++       if (stat(dl->soname,&st) < 0) {
++           msg_fatal("%s: unsupported dictionary type: %s (%s not found.  Is the postfix-%s package installed?)",
++               myname, dict_type, dl->soname, dict_type);
++       }
++       fn[0].name = dl->openfunc;
++       fn[0].ptr  = (void**)&open;
++       fn[1].name = NULL;
++       load_library_symbols(dl->soname, fn, NULL);
++       dict_open_register(dict_type, open);
++       dp = (DICT_OPEN_INFO *) htable_find(dict_open_hash, dict_type);
 +#endif
 +    }
 +    if (msg_verbose>1) {
-+	msg_info("%s: calling %s open routine",myname,dict_type);
++       msg_info("%s: calling %s open routine",myname,dict_type);
 +    }
      if ((dict = dp->open(dict_name, open_flags, dict_flags)) == 0)
  	msg_fatal("opening %s:%s %m", dict_type, dict_name);
      if (msg_verbose)
-@@ -312,6 +368,36 @@ DICT   *dict_open3(const char *dict_type, const char *dict_name,
+@@ -316,6 +372,36 @@ DICT   *dict_open3(const char *dict_type, const char *dict_name,
      return (dict);
  }
  
@@ -738,16 +776,16 @@ index b807bc2..0f4e382 100644
 +    DLINFO *dl;
 +#ifndef NO_DYNAMIC_MAPS
 +    if (!dict_dlinfo)
-+	msg_fatal("dlinfo==NULL");
++       msg_fatal("dlinfo==NULL");
 +    dl=dict_open_dlfind(dict_type);
 +    if (!dl)
-+	msg_fatal("%s: unsupported dictionary type: %s:  Is the postfix-%s package installed?", myname, dict_type, dict_type);
++       msg_fatal("%s: unsupported dictionary type: %s:  Is the postfix-%s package installed?", myname, dict_type, dict_type);
 +    if (stat(dl->soname,&st) < 0) {
-+	msg_fatal("%s: unsupported dictionary type: %s (%s not found.  Is the postfix-%s package installed?)",
-+	    myname, dict_type, dl->soname, dict_type);
++       msg_fatal("%s: unsupported dictionary type: %s (%s not found.  Is the postfix-%s package installed?)",
++           myname, dict_type, dl->soname, dict_type);
 +    }
 +    if (!dl->mkmapfunc)
-+	msg_fatal("%s: unsupported dictionary type: %s does not allow map creation.", myname, dict_type);
++       msg_fatal("%s: unsupported dictionary type: %s does not allow map creation.", myname, dict_type);
 +
 +    fn[0].name = dl->mkmapfunc;
 +    fn[0].ptr  = (void**)&mkmap;
@@ -762,7 +800,7 @@ index b807bc2..0f4e382 100644
  /* dict_open_register - register dictionary type */
  
  void    dict_open_register(const char *type,
-@@ -345,6 +431,9 @@ ARGV   *dict_mapnames()
+@@ -349,6 +435,9 @@ ARGV   *dict_mapnames()
      HTABLE_INFO **ht;
      DICT_OPEN_INFO *dp;
      ARGV   *mapnames;
@@ -772,26 +810,26 @@ index b807bc2..0f4e382 100644
  
      if (dict_open_hash == 0)
  	dict_open_init();
-@@ -353,6 +442,13 @@ ARGV   *dict_mapnames()
+@@ -357,6 +446,13 @@ ARGV   *dict_mapnames()
  	dp = (DICT_OPEN_INFO *) ht[0]->value;
  	argv_add(mapnames, dp->type, ARGV_END);
      }
 +#ifndef NO_DYNAMIC_MAPS
 +    if (!dict_dlinfo)
-+	msg_fatal("dlinfo==NULL");
++       msg_fatal("dlinfo==NULL");
 +    for (dlp=dict_dlinfo; dlp->pattern; dlp++) {
-+	argv_add(mapnames, dlp->pattern, ARGV_END);
++       argv_add(mapnames, dlp->pattern, ARGV_END);
 +    }
 +#endif
      qsort((void *) mapnames->argv, mapnames->argc, sizeof(mapnames->argv[0]),
  	  dict_sort_alpha_cpp);
      myfree((char *) ht_info);
-@@ -360,6 +456,87 @@ ARGV   *dict_mapnames()
+@@ -364,6 +460,89 @@ ARGV   *dict_mapnames()
      return mapnames;
  }
  
 +#ifndef NO_DYNAMIC_MAPS
-+#define	STREQ(x,y) (x == y || (x[0] == y[0] && strcmp(x,y) == 0))
++#define        STREQ(x,y) (x == y || (x[0] == y[0] && strcmp(x,y) == 0))
 +
 +void dict_open_dlinfo(const char *path)
 +{
@@ -807,51 +845,51 @@ index b807bc2..0f4e382 100644
 +    dict_dlinfo=(DLINFO*)mvect_alloc(&vector,sizeof(DLINFO),3,NULL,NULL);
 +
 +    if (!conf_fp) {
-+	msg_warn("%s: cannot open %s.  No dynamic maps will be allowed.",
-+		myname, path);
++       msg_warn("%s: cannot open %s.  No dynamic maps will be allowed.",
++               myname, path);
 +    } else {
-+	while (vstring_get_nonl(buf,conf_fp) != VSTREAM_EOF) {
-+	    cp = vstring_str(buf);
-+	    linenum++;
-+	    if (*cp == '#' || *cp == '\0')
-+		continue;
-+	    argv = argv_split(cp, " \t");
-+	    if (argv->argc != 3 && argv->argc != 4) {
-+		msg_fatal("%s: Expected \"pattern .so-name open-function [mkmap-function]\" at line %d",
-+			  myname, linenum);
-+	    }
-+	    if (STREQ(argv->argv[0],"*")) {
-+		msg_warn("%s: wildcard dynamic map entry no longer supported.",
-+			  myname);
-+		continue;
-+	    }
-+	    if (argv->argv[1][0] != '/') {
-+		msg_fatal("%s: .so name must begin with a \"/\" at line %d",
-+			  myname, linenum);
-+	    }
-+	    if (nelm >= vector.nelm) {
-+		dict_dlinfo=(DLINFO*)mvect_realloc(&vector,vector.nelm+3);
-+	    }
-+	    dict_dlinfo[nelm].pattern  = mystrdup(argv->argv[0]);
-+	    dict_dlinfo[nelm].soname   = mystrdup(argv->argv[1]);
-+	    dict_dlinfo[nelm].openfunc = mystrdup(argv->argv[2]);
-+	    if (argv->argc==4)
-+		dict_dlinfo[nelm].mkmapfunc = mystrdup(argv->argv[3]);
-+	    else
-+		dict_dlinfo[nelm].mkmapfunc = NULL;
-+	    nelm++;
-+	    argv_free(argv);
-+	}
++       while (vstring_get_nonl(buf,conf_fp) != VSTREAM_EOF) {
++           cp = vstring_str(buf);
++           linenum++;
++           if (*cp == '#' || *cp == '\0')
++               continue;
++           argv = argv_split(cp, " \t");
++           if (argv->argc != 3 && argv->argc != 4) {
++               msg_fatal("%s: Expected \"pattern .so-name open-function [mkmap-function]\" at line %d",
++                         myname, linenum);
++           }
++           if (STREQ(argv->argv[0],"*")) {
++               msg_warn("%s: wildcard dynamic map entry no longer supported.",
++                         myname);
++               continue;
++           }
++           if (argv->argv[1][0] != '/') {
++               msg_fatal("%s: .so name must begin with a \"/\" at line %d",
++                         myname, linenum);
++           }
++           if (nelm >= vector.nelm) {
++               dict_dlinfo=(DLINFO*)mvect_realloc(&vector,vector.nelm+3);
++           }
++           dict_dlinfo[nelm].pattern  = mystrdup(argv->argv[0]);
++           dict_dlinfo[nelm].soname   = mystrdup(argv->argv[1]);
++           dict_dlinfo[nelm].openfunc = mystrdup(argv->argv[2]);
++           if (argv->argc==4)
++               dict_dlinfo[nelm].mkmapfunc = mystrdup(argv->argv[3]);
++           else
++               dict_dlinfo[nelm].mkmapfunc = NULL;
++           nelm++;
++           argv_free(argv);
++       }
 +    }
 +    if (nelm >= vector.nelm) {
-+	dict_dlinfo=(DLINFO*)mvect_realloc(&vector,vector.nelm+1);
++       dict_dlinfo=(DLINFO*)mvect_realloc(&vector,vector.nelm+1);
 +    }
 +    dict_dlinfo[nelm].pattern  = NULL;
 +    dict_dlinfo[nelm].soname   = NULL;
 +    dict_dlinfo[nelm].openfunc = NULL;
 +    dict_dlinfo[nelm].mkmapfunc = NULL;
 +    if (conf_fp)
-+	vstream_fclose(conf_fp);
++       vstream_fclose(conf_fp);
 +    vstring_free(buf);
 +}
 +
@@ -860,16 +898,18 @@ index b807bc2..0f4e382 100644
 +    DLINFO *dp;
 +
 +    if (!dict_dlinfo)
-+	return NULL;
++       return NULL;
 +
 +    for (dp=dict_dlinfo; dp->pattern; dp++) {
-+	if (STREQ(dp->pattern,type))
-+	    return dp;
++       if (STREQ(dp->pattern,type))
++           return dp;
 +    }
 +    return NULL;
 +}
 +
 +#endif /* !NO_DYNAMIC_MAPS */
++
++
 +
  #ifdef TEST
  
@@ -1062,3 +1102,6 @@ index 0000000..adebd25
 +/*--*/
 +
 +#endif
+-- 
+1.7.4.1
+
