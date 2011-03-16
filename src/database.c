@@ -54,6 +54,7 @@ const char *apk_arch = APK_DEFAULT_ARCH;
 const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
 static const char * const apk_static_cache_dir = "var/lib/apk";
 static const char * const apk_linked_cache_dir = "etc/apk/cache";
+static const char * const apk_lock_file = "var/lock/apkdb";
 
 struct install_ctx {
 	struct apk_database *db;
@@ -1051,6 +1052,7 @@ static int apk_db_create(struct apk_database *db)
 	mkdirat(db->root_fd, "var/lib/apk", 0755);
 	mkdirat(db->root_fd, "var/cache", 0755);
 	mkdirat(db->root_fd, "var/cache/misc", 0755);
+	mkdirat(db->root_fd, "var/lock", 0755);
 
 	fd = openat(db->root_fd, "var/lib/apk/world", O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0644);
 	if (fd < 0)
@@ -1162,7 +1164,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_id_cache_init(&db->id_cache, db->root_fd);
 
 	if (dbopts->open_flags & APK_OPENF_WRITE) {
-		db->lock_fd = openat(db->root_fd, "var/lib/apk/lock",
+		db->lock_fd = openat(db->root_fd, apk_lock_file,
 				     O_CREAT | O_RDWR | O_CLOEXEC, 0400);
 		if (db->lock_fd < 0 && errno == ENOENT &&
 		    (dbopts->open_flags & APK_OPENF_CREATE)) {
@@ -1171,7 +1173,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 				msg = "Unable to create database";
 				goto ret_r;
 			}
-			db->lock_fd = openat(db->root_fd, "var/lib/apk/lock",
+			db->lock_fd = openat(db->root_fd, apk_lock_file,
 					     O_CREAT | O_RDWR | O_CLOEXEC, 0400);
 		}
 		if (db->lock_fd < 0 ||
