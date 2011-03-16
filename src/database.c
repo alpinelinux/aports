@@ -428,9 +428,7 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 	struct apk_package *idb;
 
 	if (pkg->license == NULL)
-	        pkg->license = apk_blob_atomize(APK_BLOB_NULL);
-        if (pkg->arch == NULL)
-                pkg->arch = apk_blob_atomize(APK_BLOB_STR(APK_DEFAULT_ARCH));
+		pkg->license = apk_blob_atomize(APK_BLOB_NULL);
 
 	idb = apk_hash_get(&db->available.packages, APK_BLOB_CSUM(pkg->csum));
 	if (idb == NULL) {
@@ -464,15 +462,20 @@ void apk_cache_format_index(apk_blob_t to, struct apk_repository *repo)
 	apk_blob_push_blob(&to, APK_BLOB_PTR_LEN("", 1));
 }
 
-int apk_cache_download(struct apk_database *db, const char *url,
+int apk_cache_download(struct apk_database *db, const char *url, apk_blob_t *arch,
 		       const char *item, const char *cacheitem, int verify)
 {
 	char fullurl[PATH_MAX];
 	int r;
 
-	snprintf(fullurl, sizeof(fullurl), "%s%s" BLOB_FMT "/%s",
-		 url, url[strlen(url)-1] == '/' ? "" : "/",
-		 BLOB_PRINTF(*db->arch), item);
+	if (arch != NULL)
+		snprintf(fullurl, sizeof(fullurl), "%s%s" BLOB_FMT "/%s",
+			 url, url[strlen(url)-1] == '/' ? "" : "/",
+			 BLOB_PRINTF(*arch), item);
+	else
+		snprintf(fullurl, sizeof(fullurl), "%s%s/%s",
+			 url, url[strlen(url)-1] == '/' ? "" : "/",
+			 item);
 	apk_message("fetch %s", fullurl);
 
 	if (apk_flags & APK_SIMULATE)
@@ -1432,15 +1435,20 @@ static int apk_repo_is_remote(struct apk_repository *repo)
 }
 
 static struct apk_bstream *apk_repo_file_open(struct apk_repository *repo,
-					      apk_blob_t arch,
+					      apk_blob_t *arch,
 					      const char *file,
 					      char *buf, int buflen)
 {
 	const char *url = repo->url;
 
-	snprintf(buf, buflen, "%s%s" BLOB_FMT "/%s",
-		 url, url[strlen(url)-1] == '/' ? "" : "/",
-		 BLOB_PRINTF(arch), file);
+	if (arch != NULL)
+		snprintf(buf, buflen, "%s%s" BLOB_FMT "/%s",
+			 url, url[strlen(url)-1] == '/' ? "" : "/",
+			 BLOB_PRINTF(*arch), file);
+	else
+		snprintf(buf, buflen, "%s%s/%s",
+			 url, url[strlen(url)-1] == '/' ? "" : "/",
+			 file);
 
 	if ((apk_flags & APK_NO_NETWORK) && apk_repo_is_remote(repo))
 		return NULL;
@@ -1500,7 +1508,7 @@ int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
 		return 0;
 
 	apk_cache_format_index(APK_BLOB_BUF(cacheitem), repo);
-	r = apk_cache_download(db, repo->url, apkindex_tar_gz, cacheitem,
+	r = apk_cache_download(db, repo->url, db->arch, apkindex_tar_gz, cacheitem,
 			       (apk_flags & APK_ALLOW_UNTRUSTED) ?
 			       APK_SIGN_NONE : APK_SIGN_VERIFY);
 	if (r != 0)
@@ -1608,7 +1616,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		bs = apk_bstream_from_file(db->cache_fd, buf);
 	} else {
 		db->local_repos |= BIT(r);
-		bs = apk_repo_file_open(repo, *db->arch, apkindex_tar_gz, buf, sizeof(buf));
+		bs = apk_repo_file_open(repo, db->arch, apkindex_tar_gz, buf, sizeof(buf));
 	}
 	if (bs == NULL) {
 		apk_warning("%s: index failed to open", buf);
@@ -2018,7 +2026,8 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 
 		if (bs == NULL) {
 			apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
-			bs = apk_repo_file_open(repo, *(pkg->arch ?: db->arch), item, file, sizeof(file));
+			bs = apk_repo_file_open(repo, pkg->arch,
+						item, file, sizeof(file));
 			if (apk_repo_is_remote(repo))
 				need_copy = TRUE;
 		}

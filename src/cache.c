@@ -58,7 +58,8 @@ static int cache_download(struct apk_database *db)
 			continue;
 
 		apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
-		apk_cache_download(db, repo->url, item, cacheitem,
+		apk_cache_download(db, repo->url, pkg->arch,
+				   item, cacheitem,
 				   APK_SIGN_VERIFY_IDENTITY);
 	}
 
