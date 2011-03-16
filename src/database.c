@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <fnmatch.h>
+#include <sys/vfs.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 
@@ -1061,6 +1062,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	struct apk_repository_list *repo = NULL;
 	struct apk_bstream *bs;
 	struct stat64 st;
+	struct statfs stfs;
 	apk_blob_t blob;
 	int r, rr = 0;
 
@@ -1096,7 +1098,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		msg = "Unable to open root";
 		goto ret_errno;
 	}
-	if (fstat64(db->root_fd, &st) != 0 || major(st.st_dev) == 0)
+	if (fstatfs(db->root_fd, &stfs) == 0 &&
+	    stfs.f_type == 0x01021994 /* TMPFS_MAGIC */)
 		db->permanent = 0;
 
 	if (fstatat64(db->root_fd, apk_linked_cache_dir, &st, 0) == 0 &&
