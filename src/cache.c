@@ -172,7 +172,7 @@ static struct apk_applet apk_cache = {
 		"making /etc/apk/cache a symlink to the directory (on boot "
 		"media) that will be used as package cache.",
 	.arguments = "sync | clean | download",
-	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_NO_INSTALLED,
+	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_NO_INSTALLED|APK_OPENF_CACHE_WRITE,
 	.main = cache_main,
 };
 

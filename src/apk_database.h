@@ -105,9 +105,11 @@ struct apk_database {
 	int root_fd, lock_fd, cache_fd, cachetmp_fd, keys_fd;
 	unsigned name_id, num_repos;
 	const char *cache_dir;
+	char *cache_remount_dir;
 	apk_blob_t *arch;
 	unsigned int local_repos;
 	int permanent : 1;
+	int ro_cache : 1;
 	int compat_newfeatures : 1;
 	int compat_notinstallable : 1;
 
@@ -155,6 +157,7 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 #define APK_OPENF_NO_WORLD		0x0040
 #define APK_OPENF_NO_SYS_REPOS		0x0100
 #define APK_OPENF_NO_INSTALLED_REPO	0x0200
+#define APK_OPENF_CACHE_WRITE		0x0400
 
 #define APK_OPENF_NO_REPOS	(APK_OPENF_NO_SYS_REPOS |	\
 				 APK_OPENF_NO_INSTALLED_REPO)

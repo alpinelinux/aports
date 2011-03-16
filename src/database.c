@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <mntent.h>
 #include <limits.h>
 #include <unistd.h>
 #include <malloc.h>
@@ -21,7 +22,9 @@
 #include <fnmatch.h>
 #include <sys/vfs.h>
 #include <sys/file.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 
 #include "apk_defines.h"
 #include "apk_package.h"
@@ -503,8 +506,10 @@ int apk_cache_download(struct apk_database *db, const char *url, apk_blob_t *arc
 		}
 	}
 
-	if (renameat(db->cachetmp_fd, cacheitem, db->cache_fd, cacheitem) < 0)
-		return -errno;
+	if (db->cachetmp_fd != db->cache_fd) {
+		if (renameat(db->cachetmp_fd, cacheitem, db->cache_fd, cacheitem) < 0)
+			return -errno;
+	}
 
 	return 0;
 }
@@ -1059,15 +1064,65 @@ static void handle_alarm(int sig)
 {
 }
 
+static char *find_mountpoint(int atfd, const char *rel_path)
+{
+	struct mntent *me;
+	struct stat64 st;
+	FILE *f;
+	char *ret = NULL;
+	dev_t dev;
+
+	if (fstatat64(atfd, rel_path, &st, 0) != 0)
+		return NULL;
+	dev = st.st_dev;
+
+	f = setmntent("/proc/mounts", "r");
+	if (f == NULL)
+		return NULL;
+	while ((me = getmntent(f)) != NULL) {
+		if (strcmp(me->mnt_fsname, "rootfs") == 0)
+			continue;
+		if (fstatat64(atfd, me->mnt_dir, &st, 0) == 0 &&
+		    st.st_dev == dev) {
+			ret = strdup(me->mnt_dir);
+			break;
+		}
+	}
+	endmntent(f);
+
+	return ret;
+}
+
+static int do_remount(const char *path, const char *option)
+{
+	pid_t pid;
+	int status;
+
+	pid = fork();
+	if (pid < 0)
+		return -errno;
+
+	if (pid == 0) {
+		execl("/bin/mount", "mount", "-o", "remount", "-o",
+		      option, path, NULL);
+		return 1;
+	}
+
+	waitpid(pid, &status, 0);
+	if (!WIFEXITED(status))
+		return -1;
+
+	return WEXITSTATUS(status);
+}
+
 int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 {
 	const char *msg = NULL;
 	struct apk_repository_list *repo = NULL;
 	struct apk_bstream *bs;
-	struct stat64 st;
 	struct statfs stfs;
 	apk_blob_t blob;
-	int r, rr = 0;
+	int r, fd, rr = 0;
 
 	memset(db, 0, sizeof(*db));
 	if (apk_flags & APK_SIMULATE) {
@@ -1088,7 +1143,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	list_init(&db->installed.triggers);
 	apk_dependency_array_init(&db->world);
 	apk_string_array_init(&db->protected_paths);
-	db->cache_dir = apk_static_cache_dir;
 	db->permanent = 1;
 
 	db->root = strdup(dbopts->root ?: "/");
@@ -1104,10 +1158,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	if (fstatfs(db->root_fd, &stfs) == 0 &&
 	    stfs.f_type == 0x01021994 /* TMPFS_MAGIC */)
 		db->permanent = 0;
-
-	if (fstatat64(db->root_fd, apk_linked_cache_dir, &st, 0) == 0 &&
-	    S_ISDIR(st.st_mode) && major(st.st_dev) != 0)
-		db->cache_dir = apk_linked_cache_dir;
 
 	apk_id_cache_init(&db->id_cache, db->root_fd);
 
@@ -1150,10 +1200,26 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	blob = APK_BLOB_STR("etc:*etc/init.d");
 	apk_blob_for_each_segment(blob, ":", add_protected_path, db);
 
+	/* figure out where to have the cache */
+	fd = openat(db->root_fd, apk_linked_cache_dir, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0 && fstatfs(fd, &stfs) == 0 /*&& stfs.f_type != 0x01021994*/ /* TMPFS_MAGIC */) {
+		struct statvfs stvfs;
+
+		db->cache_dir = apk_linked_cache_dir;
+		db->cache_fd = fd;
+		mkdirat(db->cache_fd, "tmp", 0644);
+		db->cachetmp_fd = openat(db->cache_fd, "tmp", O_RDONLY | O_CLOEXEC);
+		if (fstatvfs(fd, &stvfs) == 0 && (stvfs.f_flag & ST_RDONLY) != 0)
+			db->ro_cache = 1;
+	} else {
+		if (fd >= 0)
+			close(fd);
+		db->cache_dir = apk_static_cache_dir;
+		db->cache_fd = openat(db->root_fd, db->cache_dir, O_RDONLY | O_CLOEXEC);
+		db->cachetmp_fd = db->cache_fd;
+	}
+
 	db->arch = apk_blob_atomize(APK_BLOB_STR(apk_arch));
-	db->cache_fd = openat(db->root_fd, db->cache_dir, O_RDONLY | O_CLOEXEC);
-	mkdirat(db->cache_fd, "tmp", 0644);
-	db->cachetmp_fd = openat(db->cache_fd, "tmp", O_RDONLY | O_CLOEXEC);
 	db->keys_fd = openat(db->root_fd,
 			     dbopts->keys_dir ?: "etc/apk/keys",
 			     O_RDONLY | O_CLOEXEC);
@@ -1215,6 +1281,21 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			    db->compat_notinstallable ?
 			    "are not installable" :
 			    "might not function properly");
+	}
+
+	if ((dbopts->open_flags & (APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE)) && 
+	    db->ro_cache) {
+		/* remount cache read-write */
+		db->cache_remount_dir = find_mountpoint(db->root_fd, db->cache_dir);
+		if (db->cache_remount_dir == NULL) {
+			apk_warning("Unable to find cache directory mount point");
+		} else if (do_remount(db->cache_remount_dir, "rw") != 0) {
+			free(db->cache_remount_dir);
+			db->cache_remount_dir = NULL;
+			apk_error("Unable to remount cache read-write");
+			r = EROFS;
+			goto ret_r;
+		}
 	}
 
 	return rr;
@@ -1306,6 +1387,12 @@ void apk_db_close(struct apk_database *db)
 	struct hlist_node *dc, *dn;
 	int i;
 
+	if (db->cache_remount_dir) {
+		do_remount(db->cache_remount_dir, "ro");
+		free(db->cache_remount_dir);
+		db->cache_remount_dir = NULL;
+	}
+
 	apk_id_cache_free(&db->id_cache);
 
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
@@ -1329,7 +1416,7 @@ void apk_db_close(struct apk_database *db)
 
 	if (db->keys_fd)
 		close(db->keys_fd);
-	if (db->cachetmp_fd)
+	if (db->cachetmp_fd && db->cachetmp_fd != db->cache_fd)
 		close(db->cachetmp_fd);
 	if (db->cache_fd)
 		close(db->cache_fd);
