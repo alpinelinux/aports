@@ -655,7 +655,7 @@ static void apk_count_change(struct apk_change *change, struct apk_stats *stats)
 		stats->packages ++;
 }
 
-static inline void apk_draw_progress(int percent, int last)
+static inline void apk_draw_progress(int percent)
 {
 	char tmp[128];
 	char reset[128];
@@ -666,10 +666,7 @@ static inline void apk_draw_progress(int percent, int last)
 		tmp[2+i] = '#';
 	memset(reset, '\b', strlen(tmp));
 	fwrite(tmp, strlen(tmp), 1, stderr);
-	if (!last)
-		fwrite(reset, strlen(tmp), 1, stderr);
-	else if (apk_verbosity > 0)
-		fwrite("\n", 1, 1, stderr);
+	fwrite(reset, strlen(tmp), 1, stderr);
 	fflush(stderr);
 }
 
@@ -692,7 +689,7 @@ static void progress_cb(void *ctx, size_t progress)
 		       prog->total.bytes + prog->total.packages);
 
 	if (prog->count != count)
-		apk_draw_progress(count, 0);
+		apk_draw_progress(count);
 	prog->count = count;
 }
 
@@ -961,7 +958,7 @@ int apk_state_commit(struct apk_state *state,
 		apk_count_change(change, &prog.done);
 	}
 	if (apk_flags & APK_PROGRESS)
-		apk_draw_progress(100, 1);
+		apk_draw_progress(100);
 
 update_state:
 	apk_db_run_triggers(db);

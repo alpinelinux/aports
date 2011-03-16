@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#include <unistd.h>
 #include <sys/stat.h>
 
 #include <openssl/crypto.h>
@@ -45,6 +46,7 @@ static struct apk_option generic_options[] = {
 	{ 'f', "force",		"Do what was asked even if it looks dangerous" },
 	{ 'U', "update-cache",	"Update the repository cache" },
 	{ 0x101, "progress",	"Show a progress bar" },
+	{ 0x110, "no-progress",	"Disable progress bar even for TTYs" },
 	{ 0x102, "clean-protected", "Do not create .apk-new files to "
 				"configuration dirs" },
 	{ 0x106, "purge",	"Delete also modified configuration files on "
@@ -256,6 +258,9 @@ int main(int argc, char **argv)
 	apk_atom_init();
 	umask(0);
 
+	if (isatty(STDOUT_FILENO) && isatty(STDERR_FILENO) && isatty(STDIN_FILENO))
+		apk_flags |= APK_PROGRESS;
+
 	applet = deduce_applet(argc, argv);
 	num_options = ARRAY_SIZE(generic_options) + 1;
 	if (applet != NULL)
@@ -325,6 +330,9 @@ int main(int argc, char **argv)
 			break;
 		case 0x101:
 			apk_flags |= APK_PROGRESS;
+			break;
+		case 0x110:
+			apk_flags &= ~APK_PROGRESS;
 			break;
 		case 0x102:
 			apk_flags |= APK_CLEAN_PROTECTED;
