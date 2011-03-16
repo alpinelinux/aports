@@ -110,6 +110,7 @@ apk_blob_t apk_blob_from_file(int atfd, const char *file);
 
 int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 		      struct apk_file_info *fi);
+int apk_move_file(int atfd, const char *from, const char *to);
 int apk_url_download(const char *url, int atfd, const char *file);
 const char *apk_url_local_file(const char *url);
 

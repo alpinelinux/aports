@@ -52,9 +52,26 @@ unsigned int apk_flags = 0;
 const char *apk_arch = APK_DEFAULT_ARCH;
 
 const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
-static const char * const apk_static_cache_dir = "var/lib/apk";
+static const char * const apk_static_cache_dir = "var/cache/apk";
 static const char * const apk_linked_cache_dir = "etc/apk/cache";
+
 static const char * const apk_lock_file = "var/lock/apkdb";
+
+static const char * const apk_world_file = "etc/apk/world";
+static const char * const apk_world_file_tmp = "etc/apk/world.new";
+static const char * const apk_world_file_old = "var/lib/apk/world";
+
+static const char * const apk_scripts_file = "lib/apk/db/scripts.tar";
+static const char * const apk_scripts_file_tmp = "lib/apk/db/scripts.tar.new";
+static const char * const apk_scripts_file_old = "var/lib/apk/scripts.tar";
+
+static const char * const apk_triggers_file = "lib/apk/db/triggers";
+static const char * const apk_triggers_file_tmp = "lib/apk/db/triggers.new";
+static const char * const apk_triggers_file_old = "var/lib/apk/triggers";
+
+static const char * const apk_installed_file = "lib/apk/db/installed";
+static const char * const apk_installed_file_tmp = "lib/apk/db/installed.new";
+static const char * const apk_installed_file_old = "var/lib/apk/installed";
 
 struct install_ctx {
 	struct apk_database *db;
@@ -784,30 +801,6 @@ static int apk_db_scriptdb_write(struct apk_database *db, struct apk_ostream *os
 	return apk_tar_write_entry(os, NULL, NULL);
 }
 
-static int apk_db_scriptdb_read_v1(struct apk_database *db, struct apk_istream *is)
-{
-	struct apk_package *pkg;
-	struct {
-		unsigned char md5sum[16];
-		unsigned int type;
-		unsigned int size;
-	} hdr;
-	struct apk_checksum csum;
-
-	while (is->read(is, &hdr, sizeof(hdr)) == sizeof(hdr)) {
-		memcpy(csum.data, hdr.md5sum, sizeof(hdr.md5sum));
-		csum.type = APK_CHECKSUM_MD5;
-
-		pkg = apk_db_get_pkg(db, &csum);
-		if (pkg != NULL && pkg->ipkg != NULL)
-			apk_ipkg_add_script(pkg->ipkg, is, hdr.type, hdr.size);
-		else
-			apk_istream_skip(is, hdr.size);
-	}
-
-	return 0;
-}
-
 static int apk_read_script_archive_entry(void *ctx,
 					 const struct apk_file_info *ae,
 					 struct apk_istream *is)
@@ -920,7 +913,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	 * 6. script db
 	 */
 	if (!(flags & APK_OPENF_NO_WORLD)) {
-		blob = apk_blob_from_file(db->root_fd, "var/lib/apk/world");
+		blob = apk_blob_from_file(db->root_fd, apk_world_file);
 		if (APK_BLOB_IS_NULL(blob))
 			return -ENOENT;
 		apk_deps_parse(db, &db->world, blob);
@@ -931,7 +924,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	}
 
 	if (!(flags & APK_OPENF_NO_INSTALLED)) {
-		bs = apk_bstream_from_file(db->root_fd, "var/lib/apk/installed");
+		bs = apk_bstream_from_file(db->root_fd, apk_installed_file);
 		if (bs != NULL) {
 			r = apk_db_index_read(db, bs, -1);
 			bs->close(bs, NULL);
@@ -939,7 +932,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 				return -1;
 		}
 
-		bs = apk_bstream_from_file(db->root_fd, "var/lib/apk/triggers");
+		bs = apk_bstream_from_file(db->root_fd, apk_triggers_file);
 		if (bs != NULL) {
 			apk_db_triggers_read(db, bs);
 			bs->close(bs, NULL);
@@ -947,17 +940,12 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	}
 
 	if (!(flags & APK_OPENF_NO_SCRIPTS)) {
-		is = apk_istream_from_file(db->root_fd, "var/lib/apk/scripts.tar");
+		is = apk_istream_from_file(db->root_fd, apk_scripts_file);
 		if (is != NULL) {
 			apk_tar_parse(is, apk_read_script_archive_entry, db,
 				      FALSE, &db->id_cache);
-		} else {
-			is = apk_istream_from_file(db->root_fd, "var/lib/apk/scripts");
-			if (is != NULL)
-				apk_db_scriptdb_read_v1(db, is);
-		}
-		if (is != NULL)
 			is->close(is);
+		}
 	}
 
 	return 0;
@@ -1047,14 +1035,18 @@ static int apk_db_create(struct apk_database *db)
 	mkdirat(db->root_fd, "tmp", 01777);
 	mkdirat(db->root_fd, "dev", 0755);
 	mknodat(db->root_fd, "dev/null", 0666, makedev(1, 3));
+	mkdirat(db->root_fd, "etc", 0755);
+	mkdirat(db->root_fd, "etc/apk", 0755);
+	mkdirat(db->root_fd, "lib", 0755);
+	mkdirat(db->root_fd, "lib/apk", 0755);
+	mkdirat(db->root_fd, "lib/apk/db", 0755);
 	mkdirat(db->root_fd, "var", 0755);
-	mkdirat(db->root_fd, "var/lib", 0755);
-	mkdirat(db->root_fd, "var/lib/apk", 0755);
 	mkdirat(db->root_fd, "var/cache", 0755);
+	mkdirat(db->root_fd, "var/cache/apk", 0755);
 	mkdirat(db->root_fd, "var/cache/misc", 0755);
 	mkdirat(db->root_fd, "var/lock", 0755);
 
-	fd = openat(db->root_fd, "var/lib/apk/world", O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0644);
+	fd = openat(db->root_fd, apk_world_file, O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0644);
 	if (fd < 0)
 		return -errno;
 	close(fd);
@@ -1117,6 +1109,24 @@ static int do_remount(const char *path, const char *option)
 	return WEXITSTATUS(status);
 }
 
+static void relocate_database(struct apk_database *db)
+{
+	mkdirat(db->root_fd, "etc", 0755);
+	mkdirat(db->root_fd, "etc/apk", 0755);
+	mkdirat(db->root_fd, "lib", 0755);
+	mkdirat(db->root_fd, "lib/apk", 0755);
+	mkdirat(db->root_fd, "lib/apk/db", 0755);
+	mkdirat(db->root_fd, "var", 0755);
+	mkdirat(db->root_fd, "var/cache", 0755);
+	mkdirat(db->root_fd, "var/cache/apk", 0755);
+	mkdirat(db->root_fd, "var/cache/misc", 0755);
+	mkdirat(db->root_fd, "var/lock", 0755);
+	apk_move_file(db->root_fd, apk_world_file_old, apk_world_file);
+	apk_move_file(db->root_fd, apk_scripts_file_old, apk_scripts_file);
+	apk_move_file(db->root_fd, apk_triggers_file_old, apk_triggers_file);
+	apk_move_file(db->root_fd, apk_installed_file_old, apk_installed_file);
+}
+
 int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 {
 	const char *msg = NULL;
@@ -1164,6 +1174,9 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_id_cache_init(&db->id_cache, db->root_fd);
 
 	if (dbopts->open_flags & APK_OPENF_WRITE) {
+		if (faccessat(db->root_fd, apk_installed_file_old, F_OK, 0) == 0)
+			relocate_database(db);
+
 		db->lock_fd = openat(db->root_fd, apk_lock_file,
 				     O_CREAT | O_RDWR | O_CLOEXEC, 0400);
 		if (db->lock_fd < 0 && errno == ENOENT &&
@@ -1331,8 +1344,8 @@ int apk_db_write_config(struct apk_database *db)
 	}
 
 	os = apk_ostream_to_file(db->root_fd,
-				 "var/lib/apk/world",
-				 "var/lib/apk/world.new",
+				 apk_world_file,
+				 apk_world_file_tmp,
 				 0644);
 	if (os == NULL)
 		return -1;
@@ -1344,8 +1357,8 @@ int apk_db_write_config(struct apk_database *db)
 		return r;
 
 	os = apk_ostream_to_file(db->root_fd,
-				 "var/lib/apk/installed",
-				 "var/lib/apk/installed.new",
+				 apk_installed_file,
+				 apk_installed_file_tmp,
 				 0644);
 	if (os == NULL)
 		return -1;
@@ -1355,8 +1368,8 @@ int apk_db_write_config(struct apk_database *db)
 		return r;
 
 	os = apk_ostream_to_file(db->root_fd,
-				 "var/lib/apk/scripts.tar",
-				 "var/lib/apk/scripts.tar.new",
+				 apk_scripts_file,
+				 apk_scripts_file_tmp,
 				 0644);
 	if (os == NULL)
 		return -1;
@@ -1365,12 +1378,11 @@ int apk_db_write_config(struct apk_database *db)
 	if (r < 0)
 		return r;
 
-	unlinkat(db->root_fd, "var/lib/apk/scripts", 0);
 	apk_db_index_write_nr_cache(db);
 
 	os = apk_ostream_to_file(db->root_fd,
-				 "var/lib/apk/triggers",
-				 "var/lib/apk/triggers.new",
+				 apk_triggers_file,
+				 apk_triggers_file_tmp,
 				 0644);
 	if (os == NULL)
 		return -1;

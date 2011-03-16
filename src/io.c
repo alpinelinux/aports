@@ -739,6 +739,37 @@ size_t apk_ostream_write_string(struct apk_ostream *os, const char *string)
 	return len;
 }
 
+int apk_move_file(int atfd, const char *from, const char *to)
+{
+	struct apk_istream *is;
+	struct stat64 st;
+	int rc, tofd;
+
+	if (renameat(atfd, from, atfd, to) == 0)
+		return 0;
+
+	if (fstatat64(atfd, from, &st, 0) != 0)
+		return -errno;
+
+	is = apk_istream_from_file(atfd, from);
+	if (is == NULL)
+		return -ENOENT;
+
+	tofd = openat(atfd, to, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC,
+		      S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	if (tofd < 0) {
+		rc = -errno;
+		goto close_is;
+	}
+
+	rc = apk_istream_splice(is, tofd, st.st_size, NULL, NULL);
+	close(tofd);
+	unlinkat(atfd, from, 0);
+close_is:
+	is->close(is);
+	return rc;
+}
+
 struct cache_item {
 	apk_hash_node hash_node;
 	unsigned int genid;
