@@ -1202,7 +1202,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 
 	/* figure out where to have the cache */
 	fd = openat(db->root_fd, apk_linked_cache_dir, O_RDONLY | O_CLOEXEC);
-	if (fd >= 0 && fstatfs(fd, &stfs) == 0 /*&& stfs.f_type != 0x01021994*/ /* TMPFS_MAGIC */) {
+	if (fd >= 0 && fstatfs(fd, &stfs) == 0 && stfs.f_type != 0x01021994 /* TMPFS_MAGIC */) {
 		struct statvfs stvfs;
 
 		db->cache_dir = apk_linked_cache_dir;
