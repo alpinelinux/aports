@@ -33,20 +33,9 @@ static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
 int apk_do_self_upgrade(struct apk_database *db, struct apk_state *state)
 {
 	struct apk_dependency dep;
-	int r, i;
+	int r;
 
 	apk_dep_from_blob(&dep, db, APK_BLOB_STR("apk-tools"));
-
-	if (apk_flags & APK_PREFER_AVAILABLE) {
-		for (i = 0; i < db->world->num; i++) {
-			struct apk_dependency *dep0 = &db->world->item[i];
-			if (dep0->name != dep.name)
-				continue;
-			dep0->version = apk_blob_atomize(APK_BLOB_NULL);
-			dep0->result_mask = APK_DEPMASK_REQUIRE;
-			break;
-		}
-	}
 
 	r = apk_state_lock_dependency(state, &dep);
 	if (r != 0 || state->num_changes == 0)
@@ -74,7 +63,6 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 {
 	struct apk_state *state = NULL;
 	struct apk_name_array *missing;
-	apk_blob_t *null_atom = apk_blob_atomize(APK_BLOB_NULL);
 	int i, r = 0;
 
 	apk_flags |= APK_UPGRADE;
@@ -92,11 +80,7 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 
 	for (i = 0; i < db->world->num; i++) {
 		struct apk_dependency *dep = &db->world->item[i];
-		if (dep->version != null_atom &&
-		    (apk_flags & APK_PREFER_AVAILABLE)) {
-			dep->result_mask = APK_DEPMASK_REQUIRE;
-			dep->version = null_atom;
-		}
+
 		if (dep->name->pkgs->num != 0)
 			r |= apk_state_lock_dependency(state, dep);
 		else

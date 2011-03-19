@@ -138,14 +138,20 @@ static struct apk_name_choices *name_choices_new(struct apk_database *db,
 		if (dep->name != name)
 			continue;
 
-		for (j = 0; j < nc->num; ) {
-			if (apk_dep_is_satisfied(dep, nc->pkgs[j])) {
-				j++;
-			} else {
-				nc->pkgs[j] = nc->pkgs[nc->num - 1];
-				nc->num--;
+		if (apk_flags & APK_PREFER_AVAILABLE) {
+			dep->version = apk_blob_atomize(APK_BLOB_NULL);
+			dep->result_mask = APK_DEPMASK_REQUIRE;
+		} else {
+			for (j = 0; j < nc->num; ) {
+				if (apk_dep_is_satisfied(dep, nc->pkgs[j])) {
+					j++;
+				} else {
+					nc->pkgs[j] = nc->pkgs[nc->num - 1];
+					nc->num--;
+				}
 			}
 		}
+		break;
 	}
 
 	return nc;
