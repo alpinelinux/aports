@@ -668,19 +668,19 @@ static void apk_count_change(struct apk_change *change, struct apk_stats *stats)
 		stats->packages ++;
 }
 
-static inline void apk_draw_progress(int percent)
+static void apk_draw_progress(int percent)
 {
-	char tmp[128];
-	char reset[128];
+	const int bar_width = (apk_screen_width - 15);
 	int i;
 
-	snprintf(tmp, sizeof(tmp), "-[                    ]- %3i%%", percent);
-	for (i = 0; (i < (percent/5)) && (i < (sizeof(tmp)-2)); i++)
-		tmp[2+i] = '#';
-	memset(reset, '\b', strlen(tmp));
-	fwrite(tmp, strlen(tmp), 1, stderr);
-	fwrite(reset, strlen(tmp), 1, stderr);
+	fputs("\e7-[", stderr);
+	for (i = 0; i < bar_width * percent / 100; i++)
+		fputc('#', stderr);
+	for (; i < bar_width; i++)
+		fputc(' ', stderr);
+	fprintf(stderr, "]- %3i%%", percent);
 	fflush(stderr);
+	fputs("\e8\e[0K", stderr);
 }
 
 struct progress {
@@ -950,6 +950,8 @@ int apk_state_commit(struct apk_state *state,
 	list_for_each_entry(change, &state->change_list_head, change_list) {
 		n++;
 		apk_print_change(db, change->oldpkg, change->newpkg, n, state->num_changes);
+		if (apk_flags & APK_PROGRESS)
+			apk_draw_progress(prog.count);
 		prog.pkg = change->newpkg;
 
 		if (!(apk_flags & APK_SIMULATE)) {

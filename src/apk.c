@@ -19,6 +19,7 @@
 #include <getopt.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 
 #include <openssl/crypto.h>
 #ifndef OPENSSL_NO_ENGINE
@@ -32,6 +33,7 @@
 #include "apk_print.h"
 
 char **apk_argv;
+int apk_screen_width;
 
 static struct apk_option generic_options[] = {
 	{ 'h', "help",		"Show generic help or applet specific help" },
@@ -238,6 +240,20 @@ static void init_openssl(void)
 #endif
 }
 
+static void setup_terminal(void)
+{
+	struct winsize w;
+
+	setvbuf(stderr, NULL, _IOLBF, BUFSIZ);
+	if (ioctl(STDERR_FILENO,TIOCGWINSZ, &w) == 0)
+		apk_screen_width = w.ws_col;
+	else
+		apk_screen_width = 70;
+	if (isatty(STDOUT_FILENO) && isatty(STDERR_FILENO) && isatty(STDIN_FILENO))
+		apk_flags |= APK_PROGRESS;
+
+}
+
 int main(int argc, char **argv)
 {
 	struct apk_applet *applet;
@@ -257,9 +273,7 @@ int main(int argc, char **argv)
 	list_init(&dbopts.repository_list);
 	apk_atom_init();
 	umask(0);
-
-	if (isatty(STDOUT_FILENO) && isatty(STDERR_FILENO) && isatty(STDIN_FILENO))
-		apk_flags |= APK_PROGRESS;
+	setup_terminal();
 
 	applet = deduce_applet(argc, argv);
 	num_options = ARRAY_SIZE(generic_options) + 1;
