@@ -420,10 +420,17 @@ static int apk_state_fix_package(struct apk_state *state,
 		return 0;
 
 	for (i = 0; i < pkg->depends->num; i++) {
-		r = apk_state_lock_dependency(state,
-					      &pkg->depends->item[i]);
-		if (r != 0)
-			ret = -1;
+		if (pkg->name->flags & APK_NAME_TOPLEVEL_OVERRIDE) {
+			r = apk_state_prune_dependency(state,
+						       &pkg->depends->item[i]);
+			if (r < 0)
+				ret = -1;
+		} else {
+			r = apk_state_lock_dependency(state,
+						      &pkg->depends->item[i]);
+			if (r != 0)
+				ret = -1;
+		}
 	}
 
 	return ret;
