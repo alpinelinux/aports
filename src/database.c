@@ -563,7 +563,6 @@ int apk_db_read_overlay(struct apk_database *db, struct apk_bstream *bs)
 	struct hlist_node **diri_node = NULL, **file_diri_node = NULL;
 	struct apk_package *pkg;
 	struct apk_installed_package *ipkg;
-	struct apk_db_file *file;
 	apk_blob_t token = APK_BLOB_STR("\n"), line, bdir, bfile;
 
 	pkg = apk_pkg_new();
@@ -589,7 +588,7 @@ int apk_db_read_overlay(struct apk_database *db, struct apk_bstream *bs)
 				diri = apk_db_diri_new(db, pkg, bdir, &diri_node);
 				file_diri_node = &diri->owned_files.first;
 			}
-			file = apk_db_file_get(db, diri, bfile, &file_diri_node);
+			(void) apk_db_file_get(db, diri, bfile, &file_diri_node);
 		}
 	}
 
