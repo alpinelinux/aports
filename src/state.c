@@ -426,7 +426,7 @@ static int apk_state_fix_package(struct apk_state *state,
 		return 0;
 
 	for (i = 0; i < pkg->depends->num; i++) {
-		if (pkg->name->flags & APK_NAME_TOPLEVEL_OVERRIDE) {
+		if (pkg->depends->item[i].name->flags & APK_NAME_TOPLEVEL_OVERRIDE) {
 			r = apk_state_prune_dependency(state,
 						       &pkg->depends->item[i]);
 			if (r < 0)
