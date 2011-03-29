@@ -238,6 +238,50 @@ void apk_state_unref(struct apk_state *state)
 	free(state);
 }
 
+static struct apk_package *get_locked_or_installed_package(
+					struct apk_state *state,
+					struct apk_name *name)
+{
+	int i;
+
+	if (ns_locked(state->name[name->id]))
+		return ns_to_pkg(state->name[name->id]);
+
+	if (!ns_empty(state->name[name->id])) {
+		struct apk_name_choices *ns =
+			ns_to_choices(state->name[name->id]);
+
+		for (i = 0; i < ns->num; i++) {
+			if (ns->pkgs[i]->ipkg != NULL)
+				return ns->pkgs[i];
+		}
+		return NULL;
+	}
+
+	for (i = 0; i < name->pkgs->num; i++) {
+		if (name->pkgs->item[i]->ipkg != NULL)
+			return name->pkgs->item[i];
+	}
+	return NULL;
+}
+
+static int check_dependency_array(struct apk_state *state,
+				  struct apk_dependency_array *da)
+{
+	struct apk_package *pkg;
+	int i;
+
+	for (i = 0; i < da->num; i++) {
+		pkg = get_locked_or_installed_package(state, da->item[i].name);
+		if (pkg == NULL && da->item[i].result_mask != APK_DEPMASK_CONFLICT)
+			return 0;
+		if (!apk_dep_is_satisfied(&da->item[i], pkg))
+			return 0;
+	}
+
+	return da->num;
+}
+
 static int apk_state_add_change(struct apk_state *state,
 				struct apk_package *oldpkg,
 				struct apk_package *newpkg)
@@ -340,26 +384,32 @@ int apk_state_prune_dependency(struct apk_state *state,
 	return c->num;
 }
 
-int apk_state_lock_dependency(struct apk_state *state,
-			      struct apk_dependency *dep)
+int apk_state_autolock_name(struct apk_state *state, struct apk_name *name,
+			    int install_if)
 {
-	struct apk_name *name = dep->name;
 	struct apk_name_choices *c;
-        struct apk_package *installed = NULL, *latest = NULL, *use;
-	int i, r;
-
-	r = apk_state_prune_dependency(state, dep);
-	if (r <= 0)
-		return r;
+	struct apk_package *installed = NULL, *latest = NULL, *use;
+	int i;
 
 	if (ns_pending(state->name[name->id]))
 		return apk_state_lock_name(state, name, ns_to_pkg(state->name[name->id]));
+	if (ns_locked(state->name[name->id]))
+		return 0;
+	if (ns_empty(state->name[name->id])) {
+		/* This name has not been visited yet.
+		 * Construct list of candidates. */
+		state->name[name->id] = ns_from_choices(name_choices_new(state->db, name));
+	}
 
 	c = ns_to_choices(state->name[name->id]);
 #if 1
 	/* Get latest and installed packages */
 	for (i = 0; i < c->num; i++) {
 		struct apk_package *pkg = c->pkgs[i];
+
+		if (install_if &&
+		    !check_dependency_array(state, pkg->install_if))
+			continue;
 
 		if (pkg->ipkg != NULL)
 			installed = pkg;
@@ -402,7 +452,7 @@ int apk_state_lock_dependency(struct apk_state *state,
 			use = latest;
 	}
 	if (use == NULL)
-		return -1;
+		return -2;
 
 	return apk_state_lock_name(state, name, use);
 #else
@@ -415,6 +465,18 @@ int apk_state_lock_dependency(struct apk_state *state,
 	/* Queue for deferred solution. */
 	return 0;
 #endif
+}
+
+int apk_state_lock_dependency(struct apk_state *state,
+			      struct apk_dependency *dep)
+{
+	int r;
+
+	r = apk_state_prune_dependency(state, dep);
+	if (r <= 0)
+		return r;
+
+	return apk_state_autolock_name(state, dep->name, FALSE);
 }
 
 static int apk_state_fix_package(struct apk_state *state,
@@ -438,7 +500,6 @@ static int apk_state_fix_package(struct apk_state *state,
 				ret = -1;
 		}
 	}
-
 	return ret;
 }
 
@@ -480,48 +541,19 @@ static int for_each_broken_reverse_depency(struct apk_state *state,
 					   void *ctx)
 {
 	struct apk_package *pkg0;
-	int i, j, r;
+	int i, r;
 
 	for (i = 0; i < name->rdepends->num; i++) {
 		struct apk_name *name0 = name->rdepends->item[i];
 
-		if (ns_locked(state->name[name0->id])) {
-			pkg0 = ns_to_pkg(state->name[name0->id]);
-			if (pkg0 == NULL)
-				continue;
-			r = call_if_dependency_broke(state, pkg0, name,
-						     cb, ctx);
-			if (r != 0)
-				return r;
-		} else if (!ns_empty(state->name[name0->id])) {
-			struct apk_name_choices *ns =
-				ns_to_choices(state->name[name0->id]);
+		pkg0 = get_locked_or_installed_package(state, name0);
+		if (pkg0 == NULL)
+			continue;
 
-			for (j = 0; j < ns->num; j++) {
-				if (ns->pkgs[j]->ipkg == NULL)
-					continue;
-				r = call_if_dependency_broke(state,
-							     ns->pkgs[j],
-							     name, cb, ctx);
-				if (r != 0)
-					return r;
-				break;
-			}
-		} else {
-			for (j = 0; j < name0->pkgs->num; j++) {
-				pkg0 = name0->pkgs->item[j];
-
-				if (pkg0->ipkg == NULL)
-					continue;
-
-				r = call_if_dependency_broke(state,
-							     name0->pkgs->item[j],
-							     name, cb, ctx);
-				if (r != 0)
-					return r;
-				break;
-			}
-		}
+		r = call_if_dependency_broke(state, pkg0, name,
+					     cb, ctx);
+		if (r != 0)
+			return r;
 	}
 
 	return 0;
@@ -591,15 +623,19 @@ int apk_state_lock_name(struct apk_state *state,
 	}
 
 	/* If the chosen package is installed, all is done here */
-	if (oldpkg == newpkg &&
-	    (newpkg == NULL ||
-	     !(newpkg->name->flags & APK_NAME_REINSTALL)))
-		return 0;
+	if ((oldpkg != newpkg) ||
+	    (newpkg != NULL && (newpkg->name->flags & APK_NAME_REINSTALL))) {
+		/* Track change */
+		r = apk_state_add_change(state, oldpkg, newpkg);
+		if (r != 0)
+			return r;
+	}
 
-	/* Track change */
-	r = apk_state_add_change(state, oldpkg, newpkg);
-	if (r != 0)
-		return r;
+	/* Check all reverse install_if's */
+	if (newpkg != NULL) {
+		for (i = 0; i < newpkg->name->rinstall_if->num; i++)
+			apk_state_autolock_name(state, newpkg->name->rinstall_if->item[i], TRUE);
+	}
 
 	return 0;
 }
@@ -809,6 +845,23 @@ static int apk_state_autoclean(struct apk_state *state,
 				return r;
 		}
 	}
+
+	for (i = 0; i < pkg->name->rinstall_if->num; i++) {
+		struct apk_name *n = pkg->name->rinstall_if->item[i];
+
+		if (ns_locked(state->name[n->id]))
+			continue;
+		if (n->flags & APK_NAME_TOPLEVEL)
+			continue;
+
+		r = apk_state_autolock_name(state, n, TRUE);
+		if (r == -2) {
+			r = apk_state_lock_name(state, n, NULL);
+			if (r != 0)
+				return r;
+		}
+	}
+
 	return 0;
 }
 

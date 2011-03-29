@@ -33,6 +33,8 @@ struct info_ctx {
 #define APK_INFO_RDEPENDS	0x10
 #define APK_INFO_CONTENTS	0x20
 #define APK_INFO_TRIGGERS	0x40
+#define APK_INFO_INSTALL_IF	0x80
+#define APK_INFO_RINSTALL_IF	0x100
 
 static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
 {
@@ -168,15 +170,22 @@ static void info_print_size(struct apk_package *pkg)
 
 static void info_print_depends(struct apk_package *pkg)
 {
+	apk_blob_t separator = APK_BLOB_STR(apk_verbosity > 1 ? " " : "\n");
+	char dep[256];
 	int i;
-	char *separator = apk_verbosity > 1 ? " " : "\n";
+
 	if (apk_verbosity == 1)
 		printf(PKG_VER_FMT " depends on:\n",
 		       PKG_VER_PRINTF(pkg));
 	if (apk_verbosity > 1)
 		printf("%s: ", pkg->name->name);
-	for (i = 0; i < pkg->depends->num; i++)
-		printf("%s%s", pkg->depends->item[i].name->name, separator);
+	for (i = 0; i < pkg->depends->num; i++) {
+		apk_blob_t b = APK_BLOB_BUF(dep);
+		apk_blob_push_dep(&b, &pkg->depends->item[i]);
+		apk_blob_push_blob(&b, separator);
+		b = apk_blob_pushed(APK_BLOB_BUF(dep), b);
+		fwrite(b.ptr, b.len, 1, stdout);
+	}
 }
 
 static void info_print_required_by(struct apk_package *pkg)
@@ -201,6 +210,58 @@ static void info_print_required_by(struct apk_package *pkg)
 				continue;
 			for (k = 0; k < pkg0->depends->num; k++) {
 				if (pkg0->depends->item[k].name != pkg->name)
+					continue;
+				printf(PKG_VER_FMT "%s",
+				       PKG_VER_PRINTF(pkg0),
+				       separator);
+				break;
+			}
+		}
+	}
+}
+
+static void info_print_install_if(struct apk_package *pkg)
+{
+	apk_blob_t separator = APK_BLOB_STR(apk_verbosity > 1 ? " " : "\n");
+	char dep[256];
+	int i;
+
+	if (apk_verbosity == 1)
+		printf(PKG_VER_FMT " has auto-install rule:\n",
+		       PKG_VER_PRINTF(pkg));
+	if (apk_verbosity > 1)
+		printf("%s: ", pkg->name->name);
+	for (i = 0; i < pkg->install_if->num; i++) {
+		apk_blob_t b = APK_BLOB_BUF(dep);
+		apk_blob_push_dep(&b, &pkg->install_if->item[i]);
+		apk_blob_push_blob(&b, separator);
+		b = apk_blob_pushed(APK_BLOB_BUF(dep), b);
+		fwrite(b.ptr, b.len, 1, stdout);
+	}
+}
+
+static void info_print_rinstall_if(struct apk_package *pkg)
+{
+	int i, j, k;
+	char *separator = apk_verbosity > 1 ? " " : "\n";
+
+	if (apk_verbosity == 1)
+		printf(PKG_VER_FMT " affects auto-installation of:\n",
+		       PKG_VER_PRINTF(pkg));
+	if (apk_verbosity > 1)
+		printf("%s: ", pkg->name->name);
+	for (i = 0; i < pkg->name->rinstall_if->num; i++) {
+		struct apk_name *name0 = pkg->name->rinstall_if->item[i];
+
+		/* Check only the package that is installed, and that
+		 * it actually has this package in install_if. */
+		for (j = 0; j < name0->pkgs->num; j++) {
+			struct apk_package *pkg0 = name0->pkgs->item[j];
+
+			if (pkg0->ipkg == NULL)
+				continue;
+			for (k = 0; k < pkg0->install_if->num; k++) {
+				if (pkg0->install_if->item[k].name != pkg->name)
 					continue;
 				printf(PKG_VER_FMT "%s",
 				       PKG_VER_PRINTF(pkg0),
@@ -260,9 +321,12 @@ static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 		info_print_required_by,
 		info_print_contents,
 		info_print_triggers,
+		info_print_install_if,
+		info_print_rinstall_if,
 	};
 	const int requireipkg =
-		APK_INFO_CONTENTS | APK_INFO_TRIGGERS | APK_INFO_RDEPENDS;
+		APK_INFO_CONTENTS | APK_INFO_TRIGGERS | APK_INFO_RDEPENDS |
+		APK_INFO_RINSTALL_IF;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(subactions); i++) {
@@ -317,6 +381,12 @@ static int info_parse(void *ctx, struct apk_db_options *dbopts,
 	case 'r':
 		ictx->subaction_mask |= APK_INFO_RDEPENDS;
 		break;
+	case 'I':
+		ictx->subaction_mask |= APK_INFO_INSTALL_IF;
+		break;
+	case 'i':
+		ictx->subaction_mask |= APK_INFO_RINSTALL_IF;
+		break;
 	case 's':
 		ictx->subaction_mask |= APK_INFO_SIZE;
 		break;
@@ -354,6 +424,8 @@ static struct apk_option info_options[] = {
 	{ 'W', "who-owns",	"Print the package owning the specified file" },
 	{ 'R', "depends",	"List packages that the PACKAGE depends on" },
 	{ 'r', "rdepends",	"List all packages depending on PACKAGE" },
+	{ 'i', "install-if",	"List the PACKAGE's install-if rule" },
+	{ 'I', "rinstall-if",	"List all packages having install-if referencing PACKAGE" },
 	{ 'w', "webpage",	"Show URL for more information about PACKAGE" },
 	{ 's', "size",		"Show installed size of PACKAGE" },
 	{ 'd', "description",	"Print description for PACKAGE" },
