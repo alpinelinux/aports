@@ -4,7 +4,7 @@
 -include config.mk
 
 PACKAGE := apk-tools
-VERSION := 2.0.7
+VERSION := 2.1.0_pre1
 
 ##
 # Default directories
