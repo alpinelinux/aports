@@ -109,11 +109,12 @@ static int fetch_package(struct fetch_ctx *fctx,
 			return 0;
 	}
 
-	apk_message("Downloading %s-%s", pkg->name->name, pkg->version);
+	apk_message("Downloading %s-" BLOB_FMT, pkg->name->name,
+		    BLOB_PRINTF(*pkg->version));
 	repo = apk_db_select_repo(db, pkg);
 	if (repo == NULL) {
-		apk_error("%s-%s: package is not currently available",
-			  pkg->name->name, pkg->version);
+		apk_error("%s-" BLOB_FMT ": package is not currently available",
+			  pkg->name->name, BLOB_PRINTF(*pkg->version));
 		return -1;
 	}
 
