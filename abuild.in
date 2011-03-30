@@ -359,7 +359,7 @@ cleanpkg() {
 	for i in $(listpkgnames); do
 		local p="${i%:*}-$pkgver-r$pkgrel"
 		rm -f "$PKGDEST/$p.apk" "$PKGDEST/$p.src.tar.gz" \
-			"$abuildrepo"/$p.apk
+			"$abuildrepo"/$p.apk "$abuildrepo"/*/$p.apk
 	done
 	# remove given packages from index
 }
@@ -370,9 +370,11 @@ cleanoldpkg() {
 	getpkgver || return 1
 	msg "Cleaning all packages except $pkgver-r$pkgrel..."
 	for i in $(listpkgnames); do
-		for j in "$PKGDEST"/${i%:*}-[0-9]*.apk; do
-			[ "$j" != "$PKGDEST/${i%:*}-$pkgver-r$pkgrel.apk" ] \
-				&& rm -f "$j"
+		local pn=${i%:*}
+		for j in "$PKGDEST"/$pn-[0-9]*.apk ; do
+			[ "$j" = "$PKGDEST/$pn-$pkgver-r$pkgrel.apk" ] \
+				&& continue
+			rm -f "$j" "$abuildrepo"/*/${j##*/}
 		done
 	done
 	return 0
@@ -769,41 +771,67 @@ create_apks() {
 	done
 }
 
+# fish out the arch from an apk file
+apk_arch_prefix() {
+	apk index -q "$1" | tar -zxO | awk -F: '$1 == "A" { print $2 }'
+}
+
+clean_abuildrepo() {
+	local apk
+	cd "$abuildrepo" || return 1
+	
+	# remove compat symlink
+	for d in "$abuildrepo/$CARCH" "$abuildrepo"/noarch; do
+		[ -L "$d" ] && rm "$d"
+	done
+
+	# remove broken links from abuildrepo
+	for apk in *.apk */*.apk; do
+		if [ -L "$apk" ] && [ ! -f "$apk" ]; then
+			rm -f "$apk"
+		fi
+	done
+}
+
+mklinks_abuildrepo() {
+	local apk
+	mkdir -p "$abuildrepo"
+	cd "$abuildrepo" || return 1
+	# create links for this package
+	for apk in $(listpkg); do
+		[ -f "$PKGDEST"/$apk ] || continue
+		local prefix=$(apk_arch_prefix "$PKGDEST"/$apk)
+		mkdir -p "$abuildrepo"/$prefix
+		ln -sf "$PKGDEST"/$apk "$abuildrepo"/$prefix/$apk
+	done
+}
+
 update_abuildrepo() {
+	local d apk
 	if ! apk_up2date || [ -n "$force" ]; then
 		sanitycheck && builddeps && clean && fetch && unpack \
 			&& prepare && mkusers && rootpkg || return 1
 	fi
 
-	local apk
-	mkdir -p "$abuildrepo" || return 1
+	clean_abuildrepo
+	mklinks_abuildrepo
+
 	cd "$abuildrepo"
-
-	# remove broken links
-	for apk in *.apk; do
-		if [ -L "$apk" ] && [ ! -f "$apk" ]; then
-			rm -f "$apk"
-		fi
-	done
-
-	# create links for this package
-	for apk in $(listpkg); do
-		ln -sf "$PKGDEST"/$apk "$abuildrepo"/$apk
-	done
+	local index=$CARCH/APKINDEX.tar.gz
 
 	msg "Updating the cached abuild repository index..."
 	local sign=".SIGN.RSA.${SIGN_PUBLIC_KEY##*/}"
 	local oldindex=
-	if [ -f APKINDEX.tar.gz ]; then
-		oldindex="--index APKINDEX.tar.gz"
+	if [ -f "$index" ]; then
+		oldindex="--index $index"
 	fi
-	$APK index $oldindex --output APKINDEX.tar.gz.unsigned \
+	$APK index --quiet $oldindex --output "$index".unsigned \
 		--description "$repo $(cd $startdir && git describe)" \
-		*.apk || exit 1
+		noarch/*.apk $CARCH/*.apk || exit 1
 	msg "Signing the index..."
-	abuild-sign -q APKINDEX.tar.gz.unsigned || exit 1
-	mv APKINDEX.tar.gz.unsigned APKINDEX.tar.gz
-	chmod 644 APKINDEX.tar.gz
+	abuild-sign -q "$index".unsigned || exit 1
+	mv "$index".unsigned "$index"
+	chmod 644 "$index"
 }
 
 # predefined splitfunc doc
@@ -969,11 +997,17 @@ apk_up2date() {
 }
 
 abuildindex_up2date() {
-	local i apk
+	local i j apk
 	getpkgver || return 1
 	for i in $pkgname $subpackages; do
 		apk="${i%:*}-$pkgver-r$pkgrel.apk"
-		[ "$abuildrepo"/APKINDEX.tar.gz -nt "$abuildrepo"/$apk ] || return 1
+		for j in "$abuildrepo"/*/$apk; do
+			[ -r "$j" ] || continue # ignore missing files
+			local idx="${j%/*}"/APKINDEX.tar.gz
+			if ! [ "$idx" -nt "$j" ]; then
+				return 1
+			fi
+		done
 	done
 	return 0
 }
