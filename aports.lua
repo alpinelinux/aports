@@ -103,3 +103,45 @@ function init_apkdb(repodirs)
 	return pkgdb, revdeps
 end
 
+-- return a key list with makedepends and depends
+function all_deps(p)
+	local m = {}
+	local k,v
+	if p == nil then
+		return m
+	end
+	if type(p.depends) == "table" then
+		for k,v in pairs(p.depends) do
+			m[v] = true
+		end
+	end
+	if type(p.makedepends) == "table" then
+		for k,v in pairs(p.makedepends) do
+			m[v] = true
+		end
+	end
+	return m
+end
+
+
+function recurs_until(apkdb, pn, func)
+	local visited={}
+	function recurs(pn)
+		if pn == nil or visited[pn] or apkdb[pn] == nil then
+			return false
+		end
+		visited[pn] = true
+		local _, p
+		for _, p in pairs(apkdb[pn]) do
+			local d
+			for d in pairs(all_deps(p)) do
+				if recurs(d) then
+					return true
+				end
+			end
+		end
+		return func(pn)
+	end
+	return recurs(pn)
+end
+
