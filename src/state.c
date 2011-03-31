@@ -454,6 +454,12 @@ int apk_state_autolock_name(struct apk_state *state, struct apk_name *name,
 	if (use == NULL)
 		return -2;
 
+	/* Install_if check did not result in package selection change:
+	 * do not lock the package yet as the preferency might change
+	 * later. */
+	if (install_if && use->ipkg != NULL)
+		return 0;
+
 	return apk_state_lock_name(state, name, use);
 #else
 	/* If any of the choices is installed, we are good. Otherwise,
