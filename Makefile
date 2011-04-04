@@ -5,7 +5,7 @@ VERSION		:= 2.8.2
 prefix		?= /usr
 sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
-abuildrepo	?= ~/.cache/apks
+abuildrepo	?= ~/.cache/abuild
 
 LUA_VERSION	= 5.1
 LUA_SHAREDIR	?= $(prefix)/share/lua/$(LUA_VERSION)/
