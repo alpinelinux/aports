@@ -25,6 +25,7 @@ struct index_ctx {
 	const char *index;
 	const char *output;
 	const char *description;
+	apk_blob_t *rewrite_arch;
 	time_t index_mtime;
 	int method;
 };
@@ -43,6 +44,9 @@ static int index_parse(void *ctx, struct apk_db_options *dbopts,
 		break;
 	case 'd':
 		ictx->description = optarg;
+		break;
+	case 0x10000:
+		ictx->rewrite_arch = apk_blob_atomize(APK_BLOB_STR(optarg));
 		break;
 	default:
 		return -1;
@@ -88,6 +92,7 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	struct apk_file_info fi;
 	int total, r, i, j, found, newpkgs = 0;
 	struct index_ctx *ictx = (struct index_ctx *) ctx;
+	struct apk_package *pkg;
 
 	if (isatty(STDOUT_FILENO) && ictx->output == NULL &&
 	    !(apk_flags & APK_FORCE)) {
@@ -139,12 +144,14 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 				break;
 
 			for (j = 0; j < name->pkgs->num; j++) {
-				struct apk_package *pkg = name->pkgs->item[j];
+				pkg = name->pkgs->item[j];
 				if (apk_blob_compare(bver, *pkg->version) != 0)
 					continue;
 				if (pkg->size != fi.size)
 					continue;
 				pkg->filename = strdup(argv[i]);
+				if (ictx->rewrite_arch != NULL)
+					pkg->arch = ictx->rewrite_arch;
 				found = TRUE;
 				break;
 			}
@@ -153,8 +160,10 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		if (!found) {
 			struct apk_sign_ctx sctx;
 			apk_sign_ctx_init(&sctx, ictx->method, NULL, db->keys_fd);
-			if (apk_pkg_read(db, argv[i], &sctx, NULL) == 0)
+			if (apk_pkg_read(db, argv[i], &sctx, &pkg) == 0)
 				newpkgs++;
+			if (ictx->rewrite_arch != NULL)
+				pkg->arch = ictx->rewrite_arch;
 			apk_sign_ctx_free(&sctx);
 		}
 	}
@@ -214,6 +223,8 @@ static struct apk_option index_options[] = {
 	{ 'd', "description", "Embed TEXT as description and version "
 	  "information of the repository index",
 	  required_argument, "TEXT" },
+	{ 0x10000, "rewrite-arch", "Use ARCH as architery for all packages",
+	  required_argument, "ARCH" },
 };
 
 static struct apk_applet apk_index = {
