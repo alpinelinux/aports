@@ -83,10 +83,12 @@ struct apk_package {
 	struct apk_name *name;
 	struct apk_installed_package *ipkg;
 	apk_blob_t *version, *arch, *license;
-	char *url, *description;
+	apk_blob_t *origin, *maintainer;
+	char *url, *description, *commit;
 	char *filename;
 	struct apk_dependency_array *depends, *install_if;
 	size_t installed_size, size;
+	time_t build_time;
 	unsigned repos;
 	struct apk_checksum csum;
 };

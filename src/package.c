@@ -659,6 +659,18 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 	case 'i':
 		apk_deps_parse(db, &pkg->install_if, value);
 		break;
+	case 'o':
+		pkg->origin = apk_blob_atomize_dup(value);
+		break;
+	case 'm':
+		pkg->maintainer = apk_blob_atomize_dup(value);
+		break;
+	case 't':
+		pkg->build_time = apk_blob_pull_uint(&value, 10);
+		break;
+	case 'c':
+		pkg->commit = apk_blob_cstr(value);
+		break;
 	case 'F': case 'M': case 'R': case 'Z':
 		/* installed db entries which are handled in database.c */
 		return 1;
@@ -691,6 +703,10 @@ static int read_info_line(void *ctx, apk_blob_t line)
 		{ "arch",	'A' },
 		{ "depend",	'D' },
 		{ "install_if",	'i' },
+		{ "origin",	'o' },
+		{ "maintainer",	'm' },
+		{ "builddate",	't' },
+		{ "commit",	'c' },
 	};
 	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
 	apk_blob_t l, r;
@@ -800,6 +816,8 @@ void apk_pkg_free(struct apk_package *pkg)
 		free(pkg->url);
 	if (pkg->description)
 		free(pkg->description);
+	if (pkg->commit)
+		free(pkg->commit);
 	free(pkg);
 }
 
@@ -968,6 +986,22 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->url));
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nL:"));
 	apk_blob_push_blob(&bbuf, *info->license);
+	if (info->origin) {
+		apk_blob_push_blob(&bbuf, APK_BLOB_STR("\no:"));
+		apk_blob_push_blob(&bbuf, *info->origin);
+	}
+	if (info->maintainer) {
+		apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nm:"));
+		apk_blob_push_blob(&bbuf, *info->maintainer);
+	}
+	if (info->build_time) {
+		apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nt:"));
+		apk_blob_push_uint(&bbuf, info->build_time, 10);
+	}
+	if (info->commit) {
+		apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nc:"));
+		apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->commit));
+	}
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
 	if (APK_BLOB_IS_NULL(bbuf))
