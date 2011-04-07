@@ -183,6 +183,9 @@ int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 struct apk_repository *apk_db_select_repo(struct apk_database *db,
 					  struct apk_package *pkg);
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo);
+int apk_repo_format_filename(char *buf, size_t len,
+			     const char *repourl, apk_blob_t *arch,
+			     const char *pkgfile);
 
 int apk_db_cache_active(struct apk_database *db);
 void apk_cache_format_index(apk_blob_t to, struct apk_repository *repo);

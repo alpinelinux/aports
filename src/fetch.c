@@ -120,9 +120,7 @@ static int fetch_package(struct fetch_ctx *fctx,
 	if (apk_flags & APK_SIMULATE)
 		return 0;
 
-	snprintf(url, sizeof(url), "%s%s%s", repo->url,
-		 repo->url[strlen(repo->url)-1] == '/' ? "" : "/",
-		 pkgfile);
+	apk_repo_format_filename(url, sizeof(url), repo->url, pkg->arch, pkgfile);
 
 	if (fctx->flags & FETCH_STDOUT) {
 		fd = STDOUT_FILENO;

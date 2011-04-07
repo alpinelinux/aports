@@ -489,14 +489,7 @@ int apk_cache_download(struct apk_database *db, const char *url, apk_blob_t *arc
 	char fullurl[PATH_MAX];
 	int r;
 
-	if (arch != NULL)
-		snprintf(fullurl, sizeof(fullurl), "%s%s" BLOB_FMT "/%s",
-			 url, url[strlen(url)-1] == '/' ? "" : "/",
-			 BLOB_PRINTF(*arch), item);
-	else
-		snprintf(fullurl, sizeof(fullurl), "%s%s/%s",
-			 url, url[strlen(url)-1] == '/' ? "" : "/",
-			 item);
+	apk_repo_format_filename(fullurl, sizeof(fullurl), url, arch, item);
 	apk_message("fetch %s", fullurl);
 
 	if (apk_flags & APK_SIMULATE)
@@ -1529,6 +1522,24 @@ struct apk_package *apk_db_get_file_owner(struct apk_database *db,
 	return dbf->diri->pkg;
 }
 
+int apk_repo_format_filename(char *buf, size_t len,
+			     const char *repourl, apk_blob_t *arch,
+			     const char *item)
+{
+	int n;
+
+	if (arch != NULL)
+		n = snprintf(buf, len, "%s%s" BLOB_FMT "/%s",
+			     repourl, repourl[strlen(repourl)-1] == '/' ? "" : "/",
+			     BLOB_PRINTF(*arch), item);
+	else
+		n = snprintf(buf, len, "%s%s%s",
+			     repourl, repourl[strlen(repourl)-1] == '/' ? "" : "/",
+			     item);
+
+	return n;
+}
+
 static int apk_repo_is_remote(struct apk_repository *repo)
 {
 	return repo->csum.type != APK_CHECKSUM_NONE;
@@ -1541,14 +1552,7 @@ static struct apk_bstream *apk_repo_file_open(struct apk_repository *repo,
 {
 	const char *url = repo->url;
 
-	if (arch != NULL)
-		snprintf(buf, buflen, "%s%s" BLOB_FMT "/%s",
-			 url, url[strlen(url)-1] == '/' ? "" : "/",
-			 BLOB_PRINTF(*arch), file);
-	else
-		snprintf(buf, buflen, "%s%s/%s",
-			 url, url[strlen(url)-1] == '/' ? "" : "/",
-			 file);
+	apk_repo_format_filename(buf, buflen, url, arch, file);
 
 	if ((apk_flags & APK_NO_NETWORK) && apk_repo_is_remote(repo))
 		return NULL;
