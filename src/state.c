@@ -712,15 +712,15 @@ static void apk_count_change(struct apk_change *change, struct apk_stats *stats)
 
 static void apk_draw_progress(int percent)
 {
-	const int bar_width = (apk_screen_width - 15);
+	const int bar_width = (apk_screen_width - 7);
 	int i;
 
-	fputs("\e7-[", stderr);
+	fprintf(stderr, "\e7%3i%% [", percent);
 	for (i = 0; i < bar_width * percent / 100; i++)
 		fputc('#', stderr);
 	for (; i < bar_width; i++)
 		fputc(' ', stderr);
-	fprintf(stderr, "]- %3i%%", percent);
+	fputc(']', stderr);
 	fflush(stderr);
 	fputs("\e8\e[0K", stderr);
 }
