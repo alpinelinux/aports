@@ -46,13 +46,13 @@ int apk_do_self_upgrade(struct apk_database *db, struct apk_state *state)
 		return 0;
 	}
 
-	apk_message("Uprading first to new apk-tools:");
+	apk_message("Upgrading critical system libraries and apk-tools:");
 	state->print_ok = 0;
 	r = apk_state_commit(state);
 	apk_state_unref(state);
 	apk_db_close(db);
 
-	apk_message("Performing rest of the operation:");
+	apk_message("Continuing the upgrade transaction with new apk-tools:");
 	execvp(apk_argv[0], apk_argv);
 
 	apk_error("PANIC! Failed to re-execute new apk-tools!");
