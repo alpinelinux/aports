@@ -66,6 +66,8 @@ static struct apk_option generic_options[] = {
 				required_argument, "REPOFILE" },
 	{ 0x109, "no-network",	"Do not use network (cache is still used)" },
 	{ 0x111, "overlay-from-stdin", "Read list of overlay files from stdin" },
+	{ 0x112, "arch", 	"Use architecture with --root",
+				required_argument, "ARCH" },
 };
 
 static int version(void)
@@ -368,6 +370,9 @@ int main(int argc, char **argv)
 			break;
 		case 0x111:
 			apk_flags |= APK_OVERLAY_FROM_STDIN;
+			break;
+		case 0x112:
+			dbopts.arch = optarg;
 			break;
 		default:
 			if (applet == NULL || applet->parse == NULL ||

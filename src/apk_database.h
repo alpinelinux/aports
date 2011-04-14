@@ -95,6 +95,7 @@ struct apk_db_options {
 	int lock_wait;
 	unsigned long open_flags;
 	char *root;
+	char *arch;
 	char *keys_dir;
 	char *repositories_file;
 	struct list_head repository_list;

@@ -49,7 +49,6 @@ enum {
 
 int apk_verbosity = 1;
 unsigned int apk_flags = 0;
-const char *apk_arch = APK_DEFAULT_ARCH;
 
 const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
 static const char * const apk_static_cache_dir = "var/cache/apk";
@@ -1149,6 +1148,11 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_string_array_init(&db->protected_paths);
 	db->permanent = 1;
 
+	if (dbopts->root && dbopts->arch) {
+		db->arch = apk_blob_atomize(APK_BLOB_STR(dbopts->arch));
+	} else {
+		db->arch = apk_blob_atomize(APK_BLOB_STR(APK_DEFAULT_ARCH));
+	}
 	db->root = strdup(dbopts->root ?: "/");
 	db->root_fd = openat(AT_FDCWD, db->root, O_RDONLY | O_CLOEXEC);
 	if (db->root_fd < 0 && (dbopts->open_flags & APK_OPENF_CREATE)) {
@@ -1226,7 +1230,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		db->cachetmp_fd = db->cache_fd;
 	}
 
-	db->arch = apk_blob_atomize(APK_BLOB_STR(apk_arch));
 	db->keys_fd = openat(db->root_fd,
 			     dbopts->keys_dir ?: "etc/apk/keys",
 			     O_RDONLY | O_CLOEXEC);
