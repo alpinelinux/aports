@@ -249,7 +249,7 @@ static void setup_terminal(void)
 	setvbuf(stderr, NULL, _IOLBF, BUFSIZ);
 	if (ioctl(STDERR_FILENO,TIOCGWINSZ, &w) == 0)
 		apk_screen_width = w.ws_col;
-	else
+	if (apk_screen_width == 0)
 		apk_screen_width = 70;
 	if (isatty(STDOUT_FILENO) && isatty(STDERR_FILENO) && isatty(STDIN_FILENO))
 		apk_flags |= APK_PROGRESS;
