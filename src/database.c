@@ -1263,6 +1263,22 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			}
 		}
 	}
+
+	if ((dbopts->open_flags & (APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE)) &&
+	    db->ro_cache) {
+		/* remount cache read-write */
+		db->cache_remount_dir = find_mountpoint(db->root_fd, db->cache_dir);
+		if (db->cache_remount_dir == NULL) {
+			apk_warning("Unable to find cache directory mount point");
+		} else if (do_remount(db->cache_remount_dir, "rw") != 0) {
+			free(db->cache_remount_dir);
+			db->cache_remount_dir = NULL;
+			apk_error("Unable to remount cache read-write");
+			r = EROFS;
+			goto ret_r;
+		}
+	}
+
 	if (!(dbopts->open_flags & APK_OPENF_NO_SYS_REPOS)) {
 		list_for_each_entry(repo, &dbopts->repository_list, list) {
 			r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
@@ -1291,21 +1307,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			    db->compat_notinstallable ?
 			    "are not installable" :
 			    "might not function properly");
-	}
-
-	if ((dbopts->open_flags & (APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE)) && 
-	    db->ro_cache) {
-		/* remount cache read-write */
-		db->cache_remount_dir = find_mountpoint(db->root_fd, db->cache_dir);
-		if (db->cache_remount_dir == NULL) {
-			apk_warning("Unable to find cache directory mount point");
-		} else if (do_remount(db->cache_remount_dir, "rw") != 0) {
-			free(db->cache_remount_dir);
-			db->cache_remount_dir = NULL;
-			apk_error("Unable to remount cache read-write");
-			r = EROFS;
-			goto ret_r;
-		}
 	}
 
 	return rr;
