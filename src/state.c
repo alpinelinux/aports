@@ -989,10 +989,10 @@ int apk_state_commit(struct apk_state *state)
 				      "The following NEW packages will be installed");
 			dump_packages(state, cmp_upgrade,
 				      "The following packages will be upgraded");
-			printf("%d kB of %s\n", abs(size_diff),
+			printf("After this operation, %d kB of %s\n", abs(size_diff),
 			       (size_diff < 0) ?
-			       "disk space will be freed" :
-			       "additional disk space will be used");
+			       "disk space will be freed." :
+			       "additional disk space will be used.");
 		}
 		if (apk_flags & APK_INTERACTIVE) {
 			printf("Do you want to continue [Y/n]? ");
