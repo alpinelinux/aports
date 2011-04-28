@@ -1,0 +1,262 @@
+From 7b5b79f09f0bffe1fccda00d4c5cdf7a7be45413 Mon Sep 17 00:00:00 2001
+From: Carmelo Amoroso <carmelo.amoroso@st.com>
+Date: Fri, 22 Apr 2011 10:55:43 +0000
+Subject: libubacktrace: generic implementation based dwarf
+
+Use the initial implementation for SH4 based on dwarf for all archs.
+Indeed there are not obvious reason for which it should not work in general.
+
+Signed-off-by: Carmelo Amoroso <carmelo.amoroso@st.com>
+---
+diff --git a/libubacktrace/Makefile.in b/libubacktrace/Makefile.in
+index c1dd5d7..fac684e 100644
+--- a/libubacktrace/Makefile.in
++++ b/libubacktrace/Makefile.in
+@@ -18,29 +18,16 @@ libubacktrace_FULL_NAME := libubacktrace-$(VERSION).so
+ 
+ libubacktrace_DIR := $(top_srcdir)libubacktrace
+ libubacktrace_OUT := $(top_builddir)libubacktrace
+-libubacktrace_ARCH_DIR := $(libubacktrace_DIR)/sysdeps/$(TARGET_ARCH)
+-libubacktrace_ARCH_OUT := $(libubacktrace_OUT)/sysdeps/$(TARGET_ARCH)
+-
+--include $(libubacktrace_ARCH_DIR)/Makefile.arch
+ 
+ libubacktrace_SRC-y :=
+ libubacktrace_SRC-$(UCLIBC_HAS_BACKTRACE) := backtrace.c backtracesyms.c backtracesymsfd.c
+ 
+-CFLAGS-libubacktrace/sysdeps/$(TARGET_ARCH)/ := $(CFLAGS-libubacktrace)
+-
+-# remove generic sources, if arch specific version is present
+-ifneq ($(strip $(libubacktrace_ARCH_SRC-y)),)
+-libubacktrace_SRC-y := $(filter-out $(notdir $(libubacktrace_ARCH_SRC-y)),$(libubacktrace_SRC-y))
+-libubacktrace_ARCH_SRC := $(addprefix $(libubacktrace_ARCH_DIR)/,$(libubacktrace_ARCH_SRC-y))
+-libubacktrace_ARCH_OBJ := $(patsubst $(libubacktrace_ARCH_DIR)/%.c,$(libubacktrace_ARCH_OUT)/%.o,$(libubacktrace_ARCH_SRC))
+-endif
+-
++# -fexections is required for backtrace to work using dwarf2
++CFLAGS-backtrace.c := -fexceptions
+ 
+-libubacktrace_SRC := $(addprefix $(libubacktrace_DIR)/,$(libubacktrace_SRC-y))
+-libubacktrace_OBJ := $(patsubst $(libubacktrace_DIR)/%.c,$(libubacktrace_OUT)/%.o,$(libubacktrace_SRC))
+ 
+-libubacktrace_SRCS := $(libubacktrace_SRC) $(libubacktrace_ARCH_SRC)
+-libubacktrace_OBJS := $(libubacktrace_OBJ) $(libubacktrace_ARCH_OBJ)
++libubacktrace_SRCS := $(addprefix $(libubacktrace_DIR)/,$(libubacktrace_SRC-y))
++libubacktrace_OBJS := $(patsubst $(libubacktrace_DIR)/%.c,$(libubacktrace_OUT)/%.o,$(libubacktrace_SRCS))
+ 
+ ifeq ($(DOPIC),y)
+ libubacktrace-a-y := $(libubacktrace_OBJS:.o=.os)
+diff --git a/libubacktrace/backtrace.c b/libubacktrace/backtrace.c
+index 8721800..18b91b1 100644
+--- a/libubacktrace/backtrace.c
++++ b/libubacktrace/backtrace.c
+@@ -4,16 +4,81 @@
+  * User application that wants to use backtrace needs to be
+  * compiled with -fexceptions option and -rdynamic to get full
+  * symbols printed.
+-
+- * Copyright (C) 2010 STMicroelectronics Ltd
++ *
++ * Copyright (C) 2009, 2010 STMicroelectronics Ltd.
++ *
++ * Author(s): Giuseppe Cavallaro <peppe.cavallaro@st.com>
++ * - Initial implementation for glibc
++ *
+  * Author(s): Carmelo Amoroso <carmelo.amoroso@st.com>
++ * - Reworked for uClibc
++ *   - use dlsym/dlopen from libdl
++ *   - rewrite initialisation to not use libc_once
++ *   - make it available in static link too
+  *
+  * Licensed under the LGPL v2.1, see the file COPYING.LIB in this tarball.
+  *
+  */
+-#error "Arch specific implementation must be provided to properly work"
+-int backtrace (void **array, int size)
++
++#include <execinfo.h>
++#include <dlfcn.h>
++#include <stdlib.h>
++#include <unwind.h>
++#include <assert.h>
++#include <stdio.h>
++
++struct trace_arg
+ {
+-	return -1;
++  void **array;
++  int cnt, size;
++};
++
++static _Unwind_Reason_Code (*unwind_backtrace) (_Unwind_Trace_Fn, void *);
++static _Unwind_Ptr (*unwind_getip) (struct _Unwind_Context *);
++
++static void backtrace_init (void)
++{
++	void *handle = dlopen ("libgcc_s.so.1", RTLD_LAZY);
++
++	if (handle == NULL
++		|| ((unwind_backtrace = dlsym (handle, "_Unwind_Backtrace")) == NULL)
++		|| ((unwind_getip = dlsym (handle, "_Unwind_GetIP")) == NULL)) {
++		printf("libgcc_s.so.1 must be installed for backtrace to work\n");
++		abort();
++	}
+ }
+ 
++static _Unwind_Reason_Code
++backtrace_helper (struct _Unwind_Context *ctx, void *a)
++{
++	struct trace_arg *arg = a;
++
++	assert (unwind_getip != NULL);
++
++	/* We are first called with address in the __backtrace function. Skip it. */
++	if (arg->cnt != -1)
++		arg->array[arg->cnt] = (void *) unwind_getip (ctx);
++	if (++arg->cnt == arg->size)
++		return _URC_END_OF_STACK;
++	return _URC_NO_REASON;
++}
++
++/*
++ * Perform stack unwinding by using the _Unwind_Backtrace.
++ *
++ * User application that wants to use backtrace needs to be
++ * compiled with -fexceptions option and -rdynamic to get full
++ * symbols printed.
++ */
++int backtrace (void **array, int size)
++{
++	struct trace_arg arg = { .array = array, .size = size, .cnt = -1 };
++
++	if (unwind_backtrace == NULL)
++		backtrace_init();
++
++	if (size >= 1)
++		unwind_backtrace (backtrace_helper, &arg);
++
++	return arg.cnt != -1 ? arg.cnt : 0;
++}
+diff --git a/libubacktrace/sysdeps/sh/Makefile.arch b/libubacktrace/sysdeps/sh/Makefile.arch
+deleted file mode 100644
+index 9b0de38..0000000
+--- a/libubacktrace/sysdeps/sh/Makefile.arch
++++ b/dev/null
+@@ -1,12 +0,0 @@
+-# Makefile for uClibc (sh/libubacktrace)
+-#
+-# Copyright (C) 2010 STMicroelectronics Ltd
+-# Author: Carmelo Amoroso <carmelo.amoroso@st.com>
+-
+-# Licensed under the LGPL v2.1, see the file COPYING.LIB in this tarball.
+-#
+-
+-libubacktrace_ARCH_SRC-y := backtrace.c
+-
+-# -fexections is required for backtrace to work using dwarf2
+-CFLAGS-backtrace.c := -fexceptions
+diff --git a/libubacktrace/sysdeps/sh/backtrace.c b/libubacktrace/sysdeps/sh/backtrace.c
+deleted file mode 100644
+index 18b91b1..0000000
+--- a/libubacktrace/sysdeps/sh/backtrace.c
++++ b/dev/null
+@@ -1,84 +0,0 @@
+-/*
+- * Perform stack unwinding by using the _Unwind_Backtrace.
+- *
+- * User application that wants to use backtrace needs to be
+- * compiled with -fexceptions option and -rdynamic to get full
+- * symbols printed.
+- *
+- * Copyright (C) 2009, 2010 STMicroelectronics Ltd.
+- *
+- * Author(s): Giuseppe Cavallaro <peppe.cavallaro@st.com>
+- * - Initial implementation for glibc
+- *
+- * Author(s): Carmelo Amoroso <carmelo.amoroso@st.com>
+- * - Reworked for uClibc
+- *   - use dlsym/dlopen from libdl
+- *   - rewrite initialisation to not use libc_once
+- *   - make it available in static link too
+- *
+- * Licensed under the LGPL v2.1, see the file COPYING.LIB in this tarball.
+- *
+- */
+-
+-#include <execinfo.h>
+-#include <dlfcn.h>
+-#include <stdlib.h>
+-#include <unwind.h>
+-#include <assert.h>
+-#include <stdio.h>
+-
+-struct trace_arg
+-{
+-  void **array;
+-  int cnt, size;
+-};
+-
+-static _Unwind_Reason_Code (*unwind_backtrace) (_Unwind_Trace_Fn, void *);
+-static _Unwind_Ptr (*unwind_getip) (struct _Unwind_Context *);
+-
+-static void backtrace_init (void)
+-{
+-	void *handle = dlopen ("libgcc_s.so.1", RTLD_LAZY);
+-
+-	if (handle == NULL
+-		|| ((unwind_backtrace = dlsym (handle, "_Unwind_Backtrace")) == NULL)
+-		|| ((unwind_getip = dlsym (handle, "_Unwind_GetIP")) == NULL)) {
+-		printf("libgcc_s.so.1 must be installed for backtrace to work\n");
+-		abort();
+-	}
+-}
+-
+-static _Unwind_Reason_Code
+-backtrace_helper (struct _Unwind_Context *ctx, void *a)
+-{
+-	struct trace_arg *arg = a;
+-
+-	assert (unwind_getip != NULL);
+-
+-	/* We are first called with address in the __backtrace function. Skip it. */
+-	if (arg->cnt != -1)
+-		arg->array[arg->cnt] = (void *) unwind_getip (ctx);
+-	if (++arg->cnt == arg->size)
+-		return _URC_END_OF_STACK;
+-	return _URC_NO_REASON;
+-}
+-
+-/*
+- * Perform stack unwinding by using the _Unwind_Backtrace.
+- *
+- * User application that wants to use backtrace needs to be
+- * compiled with -fexceptions option and -rdynamic to get full
+- * symbols printed.
+- */
+-int backtrace (void **array, int size)
+-{
+-	struct trace_arg arg = { .array = array, .size = size, .cnt = -1 };
+-
+-	if (unwind_backtrace == NULL)
+-		backtrace_init();
+-
+-	if (size >= 1)
+-		unwind_backtrace (backtrace_helper, &arg);
+-
+-	return arg.cnt != -1 ? arg.cnt : 0;
+-}
+--
+cgit v0.8.2.1
+
+Fix up config file reference.
+--- uClibc-0.9.32-rc3.orig/extra/Configs/Config.in
++++ uClibc-0.9.32-rc3/extra/Configs/Config.in
+@@ -2322,7 +2322,7 @@
+ 
+ config UCLIBC_HAS_BACKTRACE
+ 	bool "Add support for application self-debugging"
+-	depends on HAVE_SHARED && TARGET_sh
++	depends on HAVE_SHARED
+ 	default n
+ 	help
+ 	  Answer Y here to compile support for application self-debugging, by adding
