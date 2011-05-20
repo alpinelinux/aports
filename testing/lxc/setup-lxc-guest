@@ -1,0 +1,282 @@
+#!/bin/sh
+
+# simple script to set up a new lxc guest
+# test the first argument against the remaining ones, return success on a match
+isin() {
+	local	_a=$1 _b
+
+	shift
+	for _b; do
+		[ "$_a" = "$_b" ] && return 0
+	done
+	return 1
+}
+
+# remove all occurrences of first argument from list formed by
+# the remaining arguments
+rmel() {
+	local	_a=$1 _b
+
+	shift
+	for _b; do
+		[ "$_a" != "$_b" ] && echo -n "$_b "
+	done
+}
+
+# Issue a read into the global variable $resp. 
+_ask() {
+	local _redo=0
+
+	read resp
+	case "$resp" in
+	!)	echo "Type 'exit' to return to setup."
+		sh
+		_redo=1
+		;;
+	!*)	eval "${resp#?}"
+		_redo=1
+		;;
+	esac
+	return $_redo
+}
+
+# Ask for user input.
+#
+#    $1    = the question to ask the user
+#    $2    = the default answer
+#
+# Save the user input (or the default) in $resp.
+#
+# Allow the user to escape to shells ('!') or execute commands
+# ('!foo') before entering the input.
+ask() {
+	local _question=$1 _default=$2
+
+	while :; do
+		echo -n "$_question "
+		[ -z "$_default" ] || echo -n "[$_default] "
+		_ask && : ${resp:=$_default} && break
+	done
+}
+
+# Ask for user input until a non-empty reply is entered.
+#
+#    $1    = the question to ask the user
+#    $2    = the default answer
+#
+# Save the user input (or the default) in $resp.
+ask_until() {
+	resp=
+	while [ -z "$resp" ] ; do
+		ask "$1" "$2"
+	done
+}
+
+# Ask for the user to select one value from a list, or 'done'.
+#
+# $1 = name of the list items (disk, cd, etc.)
+# $2 = question to ask
+# $3 = list of valid choices
+# $4 = default choice, if it is not specified use the first item in $3
+#
+# N.B.! $3 and $4 will be "expanded" using eval, so be sure to escape them
+#       if they contain spooky stuff
+#
+# At exit $resp holds selected item, or 'done'
+ask_which() {
+	local _name=$1 _query=$2 _list=$3 _def=$4 _dynlist _dyndef
+
+	while :; do
+		# Put both lines in ask prompt, rather than use a
+		# separate 'echo' to ensure the entire question is
+		# re-ask'ed after a '!' or '!foo' shell escape.
+		eval "_dynlist=\"$_list\""
+		eval "_dyndef=\"$_def\""
+
+		# Clean away whitespace and determine the default
+		set -o noglob
+		set -- $_dyndef; _dyndef="$1"
+		set -- $_dynlist; _dynlist="$*"
+		set +o noglob
+		[ $# -lt 1 ] && resp=done && return
+
+		: ${_dyndef:=$1}
+		echo "Available ${_name}s are: $_dynlist."
+		echo -n "Which one $_query? (or 'done') "
+		[ -n "$_dyndef" ] && echo -n "[$_dyndef] "
+		_ask || continue
+		[ -z "$resp" ] && resp="$_dyndef"
+
+		# Quote $resp to prevent user from confusing isin() by
+		# entering something like 'a a'.
+		isin "$resp" $_dynlist done && break
+		echo "'$resp' is not a valid choice."
+	done
+}
+
+# Ask for user input until a non-empty reply is entered.
+#
+#    $1    = the question to ask the user
+#    $2    = the default answer
+#
+# Save the user input (or the default) in $resp.
+ask_until() {
+	resp=
+	while [ -z "$resp" ] ; do
+		ask "$1" "$2"
+	done
+}
+
+# http://en.wikipedia.org/wiki/Hostname#Restrictions_on_valid_host_names
+valid_hostname() {
+        # check length
+        if [ $(echo "$1" | wc -c) -gt 63 ]; then
+                echo "Hostname '$1' is too long."
+                return 1
+        fi
+        # check that it only contains valid chars
+        if ! [ -z "$(echo $1 | sed 's/[0-9a-z-]//g')" ]; then
+                echo "Hostname must only contain letters (a-z), digits (0-9) or -"
+                return 1
+        fi
+        # must not start with -
+        case "$1" in
+                -*) echo "Hostname must not start with a '-'"; return 1;;
+        esac
+        return 0
+}
+
+# return last ipv4 address and mask
+#
+# $1 = interface
+#
+last_ipv4_addr_mask() {
+	local _iface=$1
+	ip addr show dev $_iface | awk '$1 == "inet" {print $2}' | tail -n1
+}
+
+valid_ip_and_prefix() {
+	[ "$1" ] || return 0
+	ipcalc -s -m $1 >/dev/null 2>&1 && ! ipcalc -s -m $1/0 >/dev/null 2>&1
+}
+
+# ask for hostname
+# 
+# $1 = default
+#
+# retrusn hostname in global var $resp
+#
+ask_hostname() {
+	while true; do
+		ask "Hostname for new lxc container:" $1
+		if [ -d /var/lib/lxc/$resp ]; then
+			echo "/var/lib/lxc/$resp already exist"
+			continue
+		fi
+		if [ -d /lxc/$resp ]; then
+			echo "/lxc/$resp already exist"
+			continue
+		fi
+		valid_hostname $resp && break
+	done
+}
+
+ask_ifaceopts() {
+	# get ip address(es)
+	resp=
+	local ifaceopts= _def= _iface=
+	local ifaces=$(ip addr | awk -F: '$1 ~ /^[0-9]/ {printf "%s" $2} END {printf "\n"}')
+	local last_iface=$(echo $ifaces | sed 's/.* //')
+	while [ "$resp" != "done" ]; do
+		if [ -z "$ifaces" ] || [ "$ifaces" = "lo " ] || [ -n "$ifaceopts" ]; then
+			_def="done"
+		else
+			_def=$(echo $ifaces | sed 's/.* //')
+		fi
+		ask_which "network interface" "to use for $_hostname" \
+			"$ifaces" $_def
+		[ "$resp" = "done" ] && break
+
+		_iface=$resp
+		ifaces=$(rmel $_iface $ifaces)
+		# suggested ip by last digit + 1
+		_last_ip_mask=$(last_ipv4_addr_mask $_iface)
+		_last_ip=${_last_ip_mask%/*}
+		_last_ip_digit=${_last_ip##*.}
+		_ip=${_last_ip%.*}.$((($_last_ip_digit + 1) % 256))
+		_mask=${_last_ip_mask#*/}
+		while true; do
+			ask "Enter IP address/mask for $_iface:" $_ip/$_mask
+			valid_ip_and_prefix "$resp" 2>&1 && break
+			echo "$resp is not a valid IPv4 address/mask"
+		done
+		_ip_mask=$resp
+		ifaceopts="$ifaceopts --interface $_iface:$_ip_mask"
+		echo "lxc.network.ipv4 = $_iface/$_ip_mask" >> /tmp/lxc-$hostname.conf
+		conffile=/tmp/lxc-$hostname.conf
+	done
+	resp="$conffile"
+}
+
+ask_template() {
+	local temp
+	# get template
+	while true; do
+		ask "Enter template file (or empty for generate a new):" \
+			$_template
+		if [ -z "$resp" ] || [ -r "$resp" ]; then
+			break
+		fi
+		echo "Can not read $resp"
+	done
+	temp=$resp
+	if [ -z "$temp" ]; then
+		temp=/tmp/template.tar.gz
+		echo "Generating template..."
+		if setup-lxc-template -q -o $temp; then
+			echo "ok"
+		else
+			echo "Failed to create template"
+			exit 1
+		fi
+	fi
+	resp=$temp
+}
+
+usage() {
+	echo "Usage: ${0##*/} [-h] [HOSTNAME...]"
+	exit 1
+}
+
+while getopts "h" opt; do
+	case "$opt" in
+		h) usage;;
+		?) usage;;
+	esac
+done
+
+shift $(($OPTIND - 1))
+
+if [ "$(whoami)" != "root" ]; then
+	echo "Need to be root. Sorry."
+	exit 1
+fi
+
+while true; do
+	ask_hostname $1
+	_hostname=$resp
+
+	ask_ifaceopts
+	_conffile=$resp
+
+	ask_template
+	_template=$resp
+
+	lxc-create -n $_hostname \
+		-f $_conffile \
+		-t "$_template" \
+		|| exit 1
+	
+	shift
+	[ $# -le 0 ] && exit 0
+done
