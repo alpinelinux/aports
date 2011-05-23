@@ -265,17 +265,27 @@ static struct apk_package *get_locked_or_installed_package(
 	return NULL;
 }
 
+static int check_dependency(struct apk_state *state,
+			    struct apk_dependency *dep)
+{
+	struct apk_package *pkg;
+
+	pkg = get_locked_or_installed_package(state, dep->name);
+	if (pkg == NULL && dep->result_mask != APK_DEPMASK_CONFLICT)
+		return 0;
+	if (!apk_dep_is_satisfied(dep, pkg))
+		return 0;
+
+	return 1;
+}
+
 static int check_dependency_array(struct apk_state *state,
 				  struct apk_dependency_array *da)
 {
-	struct apk_package *pkg;
 	int i;
 
 	for (i = 0; i < da->num; i++) {
-		pkg = get_locked_or_installed_package(state, da->item[i].name);
-		if (pkg == NULL && da->item[i].result_mask != APK_DEPMASK_CONFLICT)
-			return 0;
-		if (!apk_dep_is_satisfied(&da->item[i], pkg))
+		if (!check_dependency(state, &da->item[i]))
 			return 0;
 	}
 
@@ -494,7 +504,8 @@ static int apk_state_fix_package(struct apk_state *state,
 		return 0;
 
 	for (i = 0; i < pkg->depends->num; i++) {
-		if (pkg->depends->item[i].name->flags & APK_NAME_TOPLEVEL_OVERRIDE) {
+		if ((pkg->depends->item[i].name->flags & APK_NAME_TOPLEVEL_OVERRIDE) &&
+		    check_dependency(state, &pkg->depends->item[i])) {
 			r = apk_state_prune_dependency(state,
 						       &pkg->depends->item[i]);
 			if (r < 0)
