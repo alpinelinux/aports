@@ -2268,8 +2268,8 @@ int apk_db_install_pkg(struct apk_database *db,
 				APK_SCRIPT_POST_INSTALL : APK_SCRIPT_POST_UPGRADE,
 				script_args);
 	if (r != 0) {
-		apk_error("%s-%s: Failed to execute post-install/upgrade script",
-			  newpkg->name->name, newpkg->version);
+		apk_error(PKG_VER_FMT ": Failed to execute post-install/upgrade script",
+		          PKG_VER_PRINTF(newpkg));
 	}
 ret_r:
 	free(script_args[1]);
