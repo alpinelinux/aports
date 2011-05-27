@@ -1397,12 +1397,6 @@ void apk_db_close(struct apk_database *db)
 	struct hlist_node *dc, *dn;
 	int i;
 
-	if (db->cache_remount_dir) {
-		do_remount(db->cache_remount_dir, "ro");
-		free(db->cache_remount_dir);
-		db->cache_remount_dir = NULL;
-	}
-
 	apk_id_cache_free(&db->id_cache);
 
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
@@ -1436,6 +1430,12 @@ void apk_db_close(struct apk_database *db)
 		close(db->lock_fd);
 	if (db->root != NULL)
 		free(db->root);
+
+	if (db->cache_remount_dir) {
+		do_remount(db->cache_remount_dir, "ro");
+		free(db->cache_remount_dir);
+		db->cache_remount_dir = NULL;
+	}
 }
 
 static int fire_triggers(apk_hash_item item, void *ctx)
