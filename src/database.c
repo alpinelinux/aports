@@ -1218,10 +1218,22 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 
 		db->cache_dir = apk_linked_cache_dir;
 		db->cache_fd = fd;
+		if ((dbopts->open_flags & (APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE)) &&
+		    fstatvfs(fd, &stvfs) == 0 && (stvfs.f_flag & ST_RDONLY) != 0) {
+			/* remount cache read-write */
+			db->cache_remount_dir = find_mountpoint(db->root_fd, db->cache_dir);
+			if (db->cache_remount_dir == NULL) {
+				apk_warning("Unable to find cache directory mount point");
+			} else if (do_remount(db->cache_remount_dir, "rw") != 0) {
+				free(db->cache_remount_dir);
+				db->cache_remount_dir = NULL;
+				apk_error("Unable to remount cache read-write");
+				r = EROFS;
+				goto ret_r;
+			}
+		}
 		mkdirat(db->cache_fd, "tmp", 0644);
 		db->cachetmp_fd = openat(db->cache_fd, "tmp", O_RDONLY | O_CLOEXEC);
-		if (fstatvfs(fd, &stvfs) == 0 && (stvfs.f_flag & ST_RDONLY) != 0)
-			db->ro_cache = 1;
 	} else {
 		if (fd >= 0)
 			close(fd);
@@ -1261,21 +1273,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 				apk_db_index_read(db, bs, -2);
 				bs->close(bs, NULL);
 			}
-		}
-	}
-
-	if ((dbopts->open_flags & (APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE)) &&
-	    db->ro_cache) {
-		/* remount cache read-write */
-		db->cache_remount_dir = find_mountpoint(db->root_fd, db->cache_dir);
-		if (db->cache_remount_dir == NULL) {
-			apk_warning("Unable to find cache directory mount point");
-		} else if (do_remount(db->cache_remount_dir, "rw") != 0) {
-			free(db->cache_remount_dir);
-			db->cache_remount_dir = NULL;
-			apk_error("Unable to remount cache read-write");
-			r = EROFS;
-			goto ret_r;
 		}
 	}
 

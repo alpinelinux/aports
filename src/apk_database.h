@@ -110,7 +110,6 @@ struct apk_database {
 	apk_blob_t *arch;
 	unsigned int local_repos;
 	int permanent : 1;
-	int ro_cache : 1;
 	int compat_newfeatures : 1;
 	int compat_notinstallable : 1;
 

@@ -136,6 +136,7 @@ int apk_url_download(const char *url, int atfd, const char *file)
 		exit(0);
 	}
 
+	close(fd);
 	waitpid(pid, &status, 0);
 	status = translate_wget(status);
 	if (status != 0) {
