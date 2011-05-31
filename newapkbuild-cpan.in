@@ -1,0 +1,196 @@
+#!/bin/sh
+
+# script to generate a new APKBUILD
+# Copyright (c) 2009 Natanael Copa <natanael.copa@gmail.com>
+#
+# Distributed under GPL-2
+#
+# Depends on: busybox utilities, fakeroot, 
+#
+
+version=@VERSION@
+sysconfdir=@sysconfdir@
+datadir=@datadir@
+
+prog=${0##*/}
+
+# source $PACKAGER
+for i in $sysconfdir/abuild.conf $HOME/.abuild/abuild.conf; do
+	if [ -f "$i" ]; then
+		. $i
+	fi
+done
+
+error() {
+	echo "$@" >&2
+}
+
+is_url() {
+	case "$1" in
+	http://*|ftp://*) return 0;;
+	esac
+	return 1
+}
+
+get_cpan_source() {
+	local mod="$1"
+	wget -q -O - http://search.cpan.org/dist/$mod/ \
+		| grep "href.*$mod-[0-9].*Download" \
+		| sed "s|.*href=\"\(.*\)\".*|http://search.cpan.org\1|"
+}
+
+# create new aport from templates
+newaport() {
+	local newname= pv= source= pn= mod=
+	
+	if is_url "$1"; then
+		source="$1"
+		newname="${1##*/}"
+		mod=$(echo $pn | sed 's/-/::/g')
+	else
+		if echo $1 | grep -q '::'; then
+			mod=$1
+			pn=$(echo $mod | sed 's/::/-/g')
+		else
+			pn=$1
+			mod=$(echo $pn | sed 's/-/::/g')
+		fi
+		source=$(get_cpan_source $pn)
+		newname="${source##*/}"
+	fi
+	if [ -z "$source" ]; then
+		error "source not found"
+		exit 1
+	fi
+	pn=${newname%-[0-9]*}
+	pv=${newname#$pn-}
+
+	if [ "$pn" != "$newname" ]; then
+		pv=${newname#$pn-}
+		pv=${pv%.t*} #strip .tar.gz .tgz .tar.bz2 etc
+	fi
+	pkgname=perl-$(echo $pn | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+
+	if [ -e "$pkgname"/APKBUILD ] && [ -z "$force" ]; then
+		error "$pkgname/APKBUILD already exist"
+		return 1
+	fi
+	mkdir -p "$pkgname"
+	cd "$pkgname"
+
+	# replace pkgver in $source
+	if [ -n "$source" ]; then
+		source=$(echo "$source" | sed "s/$pv/\$pkgver/g")
+	fi
+
+	if [ -z "$url" ]; then
+		url="http://search.cpan.org/dist/$pn/"
+	fi
+
+	if [ -z "$license" ]; then
+		license="GPLv2 or Artistic"
+	fi
+
+	if [ -z "$pkgdesc" ]; then
+		pkgdesc="$mod perl module"
+	fi
+	
+	# generate header with standard variables
+	cat >APKBUILD<<__EOF__
+# Contributor:${PACKAGER:+" "}${PACKAGER}
+# Maintainer:${MAINTAINER:+" "}${MAINTAINER}
+pkgname=$pkgname
+pkgver=$pv
+pkgrel=0
+pkgdesc="$pkgdesc"
+url="$url"
+arch="noarch"
+license="$license"
+depends="perl"
+makedepends="perl-dev"
+install="$install"
+subpackages="\$pkgname-doc"
+source="$source"
+
+__EOF__
+
+	abuild -f fetch unpack
+	# figure out the _builddir
+	for i in src/*; do
+		if [ -d "$i" ]; then
+			sdir=$i
+			_builddir=$(echo ${i#*/} | sed "s/$pv/\$pkgver/g")
+			_builddir="\"\$srcdir\"/$_builddir"
+		fi
+	done
+	echo "_builddir=$_builddir" >> APKBUILD
+
+	# create the prepare() template
+	cat >>APKBUILD<<__EOF__
+prepare() {
+	local i
+	cd "\$_builddir"
+	for i in \$source; do
+		case \$i in
+		*.patch) msg \$i; patch -p1 -i "\$srcdir"/\$i || return 1;;
+		esac
+	done
+}
+
+__EOF__
+
+	# create build()
+	cat >>APKBUILD<<__EOF__
+build() {
+	cd "\$_builddir"
+	PERL_MM_USE_DEFAULT=1 perl Makefile.PL INSTALLDIRS=vendor || return 1
+	make && make test || return 1
+}
+
+package() {
+	cd "\$_builddir"
+	make DESTDIR="\$pkgdir" install || return 1
+	find "\$pkgdir" \\( -name perllocal.pod -o -name .packlist \\) -delete
+}
+
+__EOF__
+	abuild -r checksum all
+}
+
+usage() {
+	echo "$prog $version"
+	echo "usage: $prog [-cfh] [-d DESC] [-l LICENSE] [-u URL] PKGNAME[-PKGVER]"
+	echo "Options:"
+	echo " -a  Create autotools (use ./configure ...)"
+	echo " -c  Copy a sample init.d, conf.d and install script to new directory"
+	echo " -d  Set package description (pkgdesc) to DESC"
+	echo " -f  Force even if directory already exist"
+	echo " -h  Show this help"
+	echo " -l  Set package license to LICENSE"
+	echo " -p  Create perl package (Assume Makefile.PL is there)"
+	echo " -u  Set package URL"
+	echo " -s  Use sourceforge source url"
+	echo ""
+	exit 0
+}
+
+while getopts "acd:fhl:pu:s" opt; do
+	case $opt in
+		'a') buildtype="autotools";;
+		'c') cpinitd=1;;
+		'd') pkgdesc="$OPTARG";;
+		'f') force=1;;
+		'h') usage;;
+		'l') license="$OPTARG";;
+		'p') buildtype="perl";;
+		'u') url="$OPTARG";;
+		's') sourceforge=1;;
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+while [ $# -gt 0 ]; do 
+	(newaport $1) || exit 1
+	shift
+done
+
