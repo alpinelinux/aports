@@ -30,6 +30,7 @@ for i in "$@"; do
 		  -e "s:initrd /$flavor.gz:initrd /boot/initramfs-$flavor:" \
 		  $f
 	fi
+
 done
 
 # extlinux will use path relative partition, so if /boot is on a
@@ -38,3 +39,12 @@ if ! [ -e /boot/boot ]; then
 	ln -sf / /boot/boot
 fi
 
+# cleanup unused initramfs
+for i in /boot/initramfs-[0-9]*; do
+	[ -f $i ] || continue
+	if ! [ -f /boot/vmlinuz-${i#/boot/initramfs-} ]; then
+		rm "$i"
+	fi
+done
+
+exit 0
