@@ -1,6 +1,6 @@
 module(..., package.seeall)
 
-function split(str)
+local function split(str)
 	local t = {}
 	local e
 	if (str == nil) then
@@ -12,7 +12,7 @@ function split(str)
 	return t
 end
 
-function split_apkbuild(line)
+local function split_apkbuild(line)
 	local r = {}
 	local dir,pkgname, pkgver, pkgrel, arch, depends, makedepends, subpackages, source = string.match(line, "([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)")
 	r.dir = dir
@@ -27,7 +27,7 @@ function split_apkbuild(line)
 end
 
 -- parse the APKBUILDs and return an iterator
-function parse_apkbuilds(dirs)
+local function parse_apkbuilds(dirs)
 	local i,v, p
 	local str=""
 	if dirs == nil then
@@ -65,43 +65,6 @@ function parse_apkbuilds(dirs)
 end
 
 
-function target_packages(pkgdb, pkgname)
-	local i,v
-	local t = {}
-	for i,v in ipairs(pkgdb[pkgname]) do
-		table.insert(t, pkgname.."-"..v.pkgver.."-r"..v.pkgrel..".apk")
-	end
-	return t
-end
-
-function init_apkdb(repodirs)
-	local pkgdb = {}
-	local revdeps = {}
-	local a
-	for a in parse_apkbuilds(repodirs) do
-	--	io.write(a.pkgname.." "..a.pkgver.."\t"..a.dir.."\n")
-		if pkgdb[a.pkgname] == nil then
-			pkgdb[a.pkgname] = {}
-		end
-		table.insert(pkgdb[a.pkgname], a)
-		-- add subpackages to package db
-		local k,v
-		for k,v in pairs(a.subpackages) do
-			if pkgdb[v] == nil then
-				pkgdb[v] = {}
-			end
-			table.insert(pkgdb[v], a)
-		end
-		-- add to reverse dependencies
-		for k,v in pairs(a.makedepends) do
-			if revdeps[v] == nil then
-				revdeps[v] = {}
-			end
-			table.insert(revdeps[v], a)
-		end
-	end
-	return pkgdb, revdeps
-end
 
 -- return a key list with makedepends and depends
 function all_deps(p)
@@ -123,9 +86,40 @@ function all_deps(p)
 	return m
 end
 
+local function init_apkdb(repodirs)
+	local pkgdb = {}
+	local revdeps = {}
+	local a
+	for a in parse_apkbuilds(repodirs) do
+	--	io.write(a.pkgname.." "..a.pkgver.."\t"..a.dir.."\n")
+		if pkgdb[a.pkgname] == nil then
+			pkgdb[a.pkgname] = {}
+		end
+		a.all_deps = all_deps
+		table.insert(pkgdb[a.pkgname], a)
+		-- add subpackages to package db
+		local k,v
+		for k,v in pairs(a.subpackages) do
+			if pkgdb[v] == nil then
+				pkgdb[v] = {}
+			end
+			table.insert(pkgdb[v], a)
+		end
+		-- add to reverse dependencies
+		for v in pairs(all_deps(a)) do
+			if revdeps[v] == nil then
+				revdeps[v] = {}
+			end
+			table.insert(revdeps[v], a)
+		end
+	end
+	return pkgdb, revdeps
+end
 
-function recurs_until(apkdb, pn, func)
+local Aports = {}
+function Aports:recurs_until(pn, func)
 	local visited={}
+	local apkdb = self.apks
 	function recurs(pn)
 		if pn == nil or visited[pn] or apkdb[pn] == nil then
 			return false
@@ -143,5 +137,42 @@ function recurs_until(apkdb, pn, func)
 		return func(pn)
 	end
 	return recurs(pn)
+end
+
+function Aports:target_packages(pkgname)
+	local i,v
+	local t = {}
+	for k,v in pairs(self.apks[pkgname]) do
+		table.insert(t, pkgname.."-"..v.pkgver.."-r"..v.pkgrel..".apk")
+	end
+	return t
+end
+
+function Aports:foreach(f)
+	local k,v
+	for k,v in pairs(self.apks) do
+		f(k,v) 
+	end
+end
+
+function Aports:foreach_revdep(pkg, f)
+	local k,v
+	for k,v in pairs(self.revdeps[pkg] or {}) do
+		f(k,v)
+	end
+end
+
+function Aports:foreach_pkg(pkg, f)
+	local k,v
+	for k,v in pairs(self.apks[pkg]) do
+		f(k,v)
+	end
+end
+
+function new(repodirs)
+	local h = Aports
+	h.repodirs = repodirs
+	h.apks, h.revdeps = init_apkdb(repodirs)
+	return h
 end
 
