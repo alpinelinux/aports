@@ -90,7 +90,7 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	struct counts counts = {0};
 	struct apk_ostream *os;
 	struct apk_file_info fi;
-	int total, r, i, j, found, newpkgs = 0;
+	int total, r, i, j, found, newpkgs = 0, errors = 0;
 	struct index_ctx *ictx = (struct index_ctx *) ctx;
 	struct apk_package *pkg;
 
@@ -160,13 +160,20 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		if (!found) {
 			struct apk_sign_ctx sctx;
 			apk_sign_ctx_init(&sctx, ictx->method, NULL, db->keys_fd);
-			if (apk_pkg_read(db, argv[i], &sctx, &pkg) == 0)
+			r = apk_pkg_read(db, argv[i], &sctx, &pkg);
+			if (r < 0) {
+				apk_error("%s: %s", argv[i], apk_error_str(r));
+				errors++;
+			} else {
 				newpkgs++;
+			}
 			if (ictx->rewrite_arch != NULL)
 				pkg->arch = ictx->rewrite_arch;
 			apk_sign_ctx_free(&sctx);
 		}
 	}
+	if (errors)
+		return -1;
 
 	if (ictx->output != NULL)
 		os = apk_ostream_to_file(AT_FDCWD, ictx->output, NULL, 0644);
@@ -201,6 +208,11 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		total = apk_db_index_write(db, os);
 	}
 	os->close(os);
+
+	if (total < 0) {
+		apk_error("Index generation failed: %s", apk_error_str(r));
+		return total;
+	}
 
 	apk_hash_foreach(&db->available.names, warn_if_no_providers, &counts);
 

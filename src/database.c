@@ -1005,8 +1005,11 @@ static int apk_db_index_write_nr_cache(struct apk_database *db)
 int apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
 {
 	struct index_write_ctx ctx = { os, 0, FALSE };
+	int r;
 
-	apk_hash_foreach(&db->available.packages, write_index_entry, &ctx);
+	r = apk_hash_foreach(&db->available.packages, write_index_entry, &ctx);
+	if (r < 0)
+		return r;
 
 	return ctx.count;
 }
@@ -1634,9 +1637,11 @@ static int load_apkindex(void *sctx, const struct apk_file_info *fi,
 	struct apkindex_ctx *ctx = (struct apkindex_ctx *) sctx;
 	struct apk_bstream *bs;
 	struct apk_repository *repo;
+	int r;
 
-	if (apk_sign_ctx_process_file(&ctx->sctx, fi, is) == 0)
-		return 0;
+	r = apk_sign_ctx_process_file(&ctx->sctx, fi, is);
+	if (r <= 0)
+		return r;
 
 	repo = &ctx->db->repos[ctx->repo];
 
@@ -1819,12 +1824,14 @@ static int apk_db_install_archive_entry(void *_ctx,
 	apk_blob_t name = APK_BLOB_STR(ae->name), bdir, bfile;
 	struct apk_db_dir_instance *diri = ctx->diri;
 	struct apk_db_file *file;
-	int r = 0, type = APK_SCRIPT_INVALID;
+	int r, type = APK_SCRIPT_INVALID;
 
-	if (apk_sign_ctx_process_file(&ctx->sctx, ae, is) == 0)
-		return 0;
+	r = apk_sign_ctx_process_file(&ctx->sctx, ae, is);
+	if (r <= 0)
+		return r;
 
 	/* Package metainfo and script processing */
+	r = 0;
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
 		if (strcmp(ae->name, ".PKGINFO") == 0) {

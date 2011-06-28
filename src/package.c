@@ -424,6 +424,12 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 		return 1;
 
 	if (fi->name[0] != '.' || strchr(fi->name, '/') != NULL) {
+		/* APKv1.0 compatibility - first non-hidden file is
+		 * considered to start the data section of the file.
+		 * This does not make any sense if the file has v2.0
+		 * style .PKGINFO */
+		if (ctx->has_data_checksum)
+			return -ENOMSG;
 		ctx->data_started = 1;
 		ctx->control_started = 1;
 		return 1;
@@ -502,9 +508,11 @@ int apk_sign_ctx_verify_tar(void *sctx, const struct apk_file_info *fi,
 			    struct apk_istream *is)
 {
 	struct apk_sign_ctx *ctx = (struct apk_sign_ctx *) sctx;
+	int r;
 
-	if (apk_sign_ctx_process_file(ctx, fi, is) == 0)
-		return 0;
+	r = apk_sign_ctx_process_file(ctx, fi, is);
+	if (r <= 0)
+		return r;
 
 	if (strcmp(fi->name, ".PKGINFO") == 0) {
 		apk_blob_t blob = apk_blob_from_istream(is, fi->size);
@@ -734,10 +742,12 @@ static int read_info_entry(void *ctx, const struct apk_file_info *ae,
 {
 	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
 	struct apk_package *pkg = ri->pkg;
+	int r;
 
 	/* Meta info and scripts */
-	if (apk_sign_ctx_process_file(ri->sctx, ae, is) == 0)
-		return 0;
+	r = apk_sign_ctx_process_file(ri->sctx, ae, is);
+	if (r <= 0)
+		return r;
 
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
