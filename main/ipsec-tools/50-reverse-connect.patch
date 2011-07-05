@@ -1,0 +1,197 @@
+When new ISAKMP is required, allow incoming reverse connection to take
+
+From: Timo Teras <timo.teras@iki.fi>
+
+over pending phase1:s. Useful when the other party is firewalled or NATted.
+---
+
+ src/racoon/admin.c   |   12 ++++++++++++
+ src/racoon/evt.c     |   13 +++++++++++++
+ src/racoon/evt.h     |    3 +++
+ src/racoon/handler.c |   28 +++++++++++++++++++++-------
+ src/racoon/isakmp.c  |   39 ++++++++++++++++++++++++++++++++++-----
+ 5 files changed, 83 insertions(+), 12 deletions(-)
+
+
+Index: ipsec-tools-cvs-HEAD/src/racoon/admin.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/admin.c	2011-03-03 21:16:47.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/admin.c	2011-03-04 13:50:30.000000000 +0200
+@@ -414,11 +414,23 @@
+ 		struct sockaddr *dst;
+ 		struct sockaddr *src;
+ 		char *name = NULL;
++		char *loc, *rem;
+ 
+ 		ndx = (struct admin_com_indexes *) ((caddr_t)com + sizeof(*com));
+ 		src = (struct sockaddr *) &ndx->src;
+ 		dst = (struct sockaddr *) &ndx->dst;
+ 
++		loc = racoon_strdup(saddr2str(src));
++		rem = racoon_strdup(saddr2str(dst));
++		STRDUP_FATAL(loc);
++		STRDUP_FATAL(rem);
++
++		plog(LLV_INFO, LOCATION, NULL,
++			"admin establish-sa %x %s %s\n",
++			com->ac_proto, loc, rem);
++		racoon_free(loc);
++		racoon_free(rem);
++
+ 		if (com->ac_cmd == ADMIN_ESTABLISH_SA &&
+ 		    com->ac_len > sizeof(*com) + sizeof(*ndx))
+ 			name = (char *) ((caddr_t) ndx + sizeof(*ndx));
+Index: ipsec-tools-cvs-HEAD/src/racoon/evt.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/evt.c	2011-03-03 19:25:50.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/evt.c	2011-03-04 13:50:30.000000000 +0200
+@@ -396,4 +396,17 @@
+ 		evt_unsubscribe(LIST_FIRST(list));
+ }
+ 
++void
++evt_list_move(from, to)
++	struct evt_listener_list *from, *to;
++{
++	struct evt_listener *l;
++
++	while (!LIST_EMPTY(from)) {
++		l = LIST_FIRST(from);
++		LIST_REMOVE(l, ll_chain);
++		LIST_INSERT_HEAD(to, l, ll_chain);
++	}
++}
++
+ #endif /* ENABLE_ADMINPORT */
+Index: ipsec-tools-cvs-HEAD/src/racoon/evt.h
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/evt.h	2011-03-03 19:25:50.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/evt.h	2011-03-04 13:50:30.000000000 +0200
+@@ -124,6 +124,8 @@
+ vchar_t *evt_dump __P((void));
+ 
+ int  evt_subscribe __P((struct evt_listener_list *list, int fd));
++void evt_list_move __P((struct evt_listener_list *from,
++			struct evt_listener_list *to));
+ void evt_list_init __P((struct evt_listener_list *list));
+ void evt_list_cleanup __P((struct evt_listener_list *list));
+ 
+@@ -136,6 +138,7 @@
+ #define evt_phase2(ph2, type, optdata) ;
+ 
+ #define evt_subscribe(eventlist, fd) ;
++#deifne evt_list_move(from, to) ;
+ #define evt_list_init(eventlist) ;
+ #define evt_list_cleanup(eventlist) ;
+ #define evt_get_fdmask(nfds, fdset) nfds
+Index: ipsec-tools-cvs-HEAD/src/racoon/handler.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/handler.c	2011-03-03 19:29:31.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/handler.c	2011-03-04 13:53:01.000000000 +0200
+@@ -292,17 +292,32 @@
+ void migrate_dying_ph12(iph1)
+ 	struct ph1handle *iph1;
+ {
+-	struct ph1handle *p;
++	struct ph1handle *p, *next;
+ 
+-	LIST_FOREACH(p, &ph1tree, chain) {
++	for (p = LIST_FIRST(&ph1tree); p; p = next) {
++		next = LIST_NEXT(p, chain);
+ 		if (p == iph1)
+ 			continue;
+-		if (p->status < PHASE1ST_DYING)
++
++		/* Same remote? */
++		if (cmpsaddr(iph1->local, p->local) > CMPSADDR_WOP_MATCH ||
++		    cmpsaddr(iph1->remote, p->remote) > CMPSADDR_WOP_MATCH ||
++		    iph1->rmconf != p->rmconf)
+ 			continue;
+ 
+-		if (cmpsaddr(iph1->local, p->local) == CMPSADDR_MATCH
+-		 && cmpsaddr(iph1->remote, p->remote) == CMPSADDR_MATCH)
++		/* migrate phase2:s from expiring entries */
++		if (p->status >= PHASE1ST_DYING)
+ 			migrate_ph12(p, iph1);
++
++		/* and allow reverse connections to release
++		 * pending connections that do not work due
++		 * to firewall or nat */
++		if (iph1->side == RESPONDER && p->side == INITIATOR &&
++		    p->status < PHASE1ST_MSG3RECEIVED) {
++			/* Do not delete ph1, since if the node is not NATted,
++			 * and we delete it we might get phase2's lost */
++			evt_list_move(&p->evt_listeners, &iph1->evt_listeners);
++		}
+ 	}
+ }
+ 
+Index: ipsec-tools-cvs-HEAD/src/racoon/isakmp.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/isakmp.c	2011-03-03 21:14:13.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/isakmp.c	2011-03-04 13:50:30.000000000 +0200
+@@ -2138,13 +2138,33 @@
+ 
+ 	remph2(iph2);
+ 	delph2(iph2);
+-
+-	return;
+ }
+ 
+ /* %%%
+  * Interface between PF_KEYv2 and ISAKMP
+  */
++
++static void
++isakmp_chkph2there(p)
++	struct sched *p;
++{
++	struct ph2handle *iph2 = container_of(p, struct ph2handle, sce);
++	struct ph2handle *tmp;
++
++	/* Check if a similar phase2 appared meanwhile */
++	remph2(iph2);
++	tmp = getph2byid(iph2->src, iph2->dst, iph2->spid);
++	if (tmp == NULL) {
++		/* Nope, lets start this then */
++		insph2(iph2);
++		isakmp_chkph1there(iph2);
++	} else {
++		/* Yes, delete this initiation attempt as redundant */
++		evt_phase2(iph2, EVT_PHASE2_UP, NULL);
++		delph2(iph2);
++	}
++}
++
+ /*
+  * receive ACQUIRE from kernel, and begin either phase1 or phase2.
+  * if phase1 has been finished, begin phase2.
+@@ -2235,8 +2255,14 @@
+ 		/*NOTREACHED*/
+ 	}
+ 
+-	/* found established ISAKMP-SA */
+-	/* i.e. iph1->status == PHASE1ST_ESTABLISHED */
++	/* found established ISAKMP-SA, if this is a RESPONDER ISAKMP-SA
++	 * add a small delay; this will make sure the initiator gets
++	 * an first attempt at rekeying, and usually avoids duplicate ph2:s */
++	if (iph1->side == RESPONDER) {
++		iph2->retry_checkph1 = 1;
++		sched_schedule(&iph2->sce, 1, isakmp_chkph2there);
++		return 0;
++	}
+ 
+ 	/* found ISAKMP-SA. */
+ 	plog(LLV_DEBUG, LOCATION, NULL, "begin QUICK mode.\n");
+@@ -2403,7 +2429,10 @@
+ 		plog(LLV_DEBUG2, LOCATION, NULL, "dst: %s\n", saddr2str(iph2->dst));
+ 
+ 		/* begin quick mode */
+-		(void)isakmp_ph2begin_i(iph1, iph2);
++		if (isakmp_ph2begin_i(iph1, iph2)) {
++			remph2(iph2);
++			delph2(iph2);
++		}
+ 		return;
+ 	}
+ 

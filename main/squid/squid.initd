@@ -1,0 +1,115 @@
+#!/sbin/runscript
+# Copyright 1999-2006 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+# $Header: /var/www/viewcvs.gentoo.org/raw_cvs/gentoo-x86/net-proxy/squid/files/squid.initd,v 1.10 2008/11/30 19:20:44 mrness Exp $
+
+opts="${opts} reload rotate"
+
+conf=/etc/squid/squid.conf
+
+depend() {
+	need net
+	after firewall
+}
+
+# Try to increase the # of filedescriptors we can open.
+maxfds() {
+	[ -n "$SQUID_MAXFD" ] || return
+	[ -f /proc/sys/fs/file-max ] || return 0
+	[ $SQUID_MAXFD -le 8192 ] || SQUID_MAXFD=8192
+	local global_file_max=`cat /proc/sys/fs/file-max`
+	local minimal_file_max=$(($SQUID_MAXFD + 4096))
+	if [ "$global_file_max" -lt $minimal_file_max ]; then
+		echo $minimal_file_max > /proc/sys/fs/file-max
+	fi
+	ulimit -n $SQUID_MAXFD
+}
+
+checkconfig() {
+	maxfds
+	
+	local CACHE_SWAP=$(awk '/^[ \t]*cache_dir[ \t]+/ { if ($2 == "coss" ) printf "%s/stripe ", $3 ; else printf "%s/00 ", $3; }' < $conf)
+	[ -z "$CACHE_SWAP" ] && CACHE_SWAP="/var/cache/squid/00"
+	
+	local x
+	for x in $CACHE_SWAP ; do
+		if [ ! -e $x ] ; then
+			ebegin "Initializing cache directories"
+			local ORIG_UMASK=$(umask)
+			umask 027
+			local INIT_CACHE_RESPONSE="$(/usr/sbin/squid -z -N -D 2>&1)"
+			if [ $? != 0 ] || echo "$INIT_CACHE_RESPONSE" | grep -q "erminated abnormally" ; then
+				umask $ORIG_UMASK
+				eend 1
+				echo "$INIT_CACHE_RESPONSE"
+				return 1
+			fi
+			umask $ORIG_UMASK
+			eend 0
+			break
+		fi
+	done
+	
+	squid -k parse
+}
+
+get_pidfile() {
+	PIDFILE=$(awk '/^[ \t]*pid_filename[ \t]+/ {print $2}' $conf)
+	[ -z "$PIDFILE" ] && PIDFILE=/var/run/squid/squid.pid
+}
+
+start() {
+	get_pidfile
+	checkconfig || return 1
+	ebegin "Starting squid"
+	start-stop-daemon --start --pidfile "$PIDFILE" \
+		--env KRB5_KTNAME="${SQUID_KEYTAB}" \
+		--exec /usr/sbin/squid -- ${SQUID_OPTS}
+	eend $? && sleep 1
+}
+
+stop() {
+	local rc=0 pid
+	ebegin "Stopping squid"
+	get_pidfile
+	/usr/sbin/squid -k shutdown
+
+	# Now we have to wait until squid has _really_ stopped.
+	if [ -f "$PIDFILE" ] ; then
+		pid=$(cat "$PIDFILE")
+		if [ -d /proc/$pid ]; then
+			einfon "Waiting for squid to shutdown ."
+		else
+			rm -f "$PIDFILE"
+		fi
+		cnt=0
+		while [ -f "$PIDFILE" ] ; do
+			cnt=$(expr $cnt + 1)
+			if [ $cnt -gt 60 ] ; then
+				# Waited 120 seconds now. Fail.
+				echo
+				rc=1
+				break
+			fi
+			sleep 2
+			echo -n "."
+		done
+		echo
+	fi
+	eend $rc
+}
+
+reload() {
+	checkconfig || return 1
+	ebegin "Reloading squid"
+	/usr/sbin/squid -k reconfigure
+	eend $?
+}
+
+rotate() {
+	service_started squid || return 1
+	ebegin "Rotating logs"
+	/usr/sbin/squid -k rotate
+	eend $?
+}
+

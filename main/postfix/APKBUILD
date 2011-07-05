@@ -1,0 +1,163 @@
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+pkgname=postfix
+pkgver=2.8.3
+pkgrel=0
+pkgdesc="Secure and fast drop-in replacement for Sendmail (MTA)"
+url="http://www.postfix.org/"
+arch="all"
+license="IPL-1"
+depends=
+makedepends="db-dev pcre-dev openssl-dev postgresql-dev mysql-dev openldap-dev
+	cyrus-sasl-dev perl file sqlite-dev"
+install="$pkgname.pre-install $pkgname.post-install"
+subpackages="$pkgname-doc $pkgname-ldap $pkgname-mysql $pkgname-pcre
+	$pkgname-pgsql $pkgname-sqlite"
+source="ftp://ftp.porcupine.org/mirrors/$pkgname-release/official/$pkgname-$pkgver.tar.gz
+	$pkgname.initd
+	0001-support-for-dynamic-maps.patch
+	dynamicmaps.cf
+	postfix-ldap.post-install
+	postfix-mysql.post-install
+	postfix-pcre.post-install
+	postfix-pgsql.post-install
+	postfix-sqlite.post-install
+	"
+
+# the dynamic maps patch is taken from mandriva
+# http://svn.mandriva.com/cgi-bin/viewvc.cgi/packages/cooker/postfix/current/SOURCES
+
+_shared_libs() {
+	file --mime-type "$@" | \
+		awk '$2 == "application/x-sharedlib" {print $1}' | \
+		tr -d :
+}
+
+build () { 
+	cd "$srcdir/$pkgname-$pkgver"
+	for i in ../*.patch; do
+		msg "Applying $i..."
+		patch -p1 < $i || return 1
+	done
+	cp ../dynamicmaps.cf conf/
+
+	sed -i -e "s|#define HAS_NIS|//#define HAS_NIS|g" \
+		-e "/^#define ALIAS_DB_MAP/s|:/etc/aliases|:/etc/postfix/aliases|" \
+		src/util/sys_defs.h || return 1
+	sed -i -e "s:/usr/local/:/usr/:g" conf/master.cf || return 1
+
+	# needed for dynamic maps.
+	local ccargs="-DHAS_DLOPEN -DHAS_SHL_LOAD"
+	local auxlibs="$LDFLAGS -lpthread -lcrypt"
+
+	ccargs="$ccargs -DDEF_DAEMON_DIR=\\\"/usr/lib/postfix\\\""
+
+	# pcre
+	ccargs="$ccargs -DHAS_PCRE"
+	#auxlibs="$auxlibs -lpcre"
+
+	# ssl
+	ccargs="$ccargs -DUSE_TLS"
+	auxlibs="$auxlibs -lssl -lcrypto" 
+
+	## dovecot-sasl
+	#ccargs="$ccargs -DUSE_SASL_AUTH -DDEF_SERVER_SASL_TYPE=\\\"dovecot\\\""
+
+	# cyrus sasl
+	ccargs="$ccargs	-DUSE_SASL_AUTH -DUSE_CYRUS_SASL -I/usr/include/sasl"
+	auxlibs="$auxlibs -lsasl2"
+
+	# postgresql
+	ccargs="$ccargs -DHAS_PGSQL -I$(pg_config --includedir)"
+	#auxlibs="$auxlibs -lpq -L$(pg_config --libdir)"
+
+	# mysql
+	ccargs="$ccargs -DHAS_MYSQL $(mysql_config --include)"
+	#auxlibs="$auxlibs -lmysqlclient -lm -lz"
+
+	# ldap
+	ccargs="$ccargs -DHAS_LDAP"
+	#auxlibs="$auxlibs -lldap -llber"
+	
+	# ldap
+	ccargs="$ccargs -DHAS_SQLITE"
+
+	# compile
+	make DEBUG="" \
+		OPT="$CFLAGS" \
+		CCARGS="$ccargs" \
+		AUXLIBS="$auxlibs" \
+		makefiles || return 1
+	
+	make OPT="$CFLAGS" || return 1
+}
+
+package() {
+	cd "$srcdir/$pkgname-$pkgver"
+	for i in $(_shared_libs lib/*.a); do
+		j=${i#lib/lib}
+		ln -s ${i#lib/} lib/libpostfix-${j%.a}.so.1
+	done
+
+	# install to pkgdir
+	LD_LIBRARY_PATH=$PWD/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} make \
+		non-interactive-package \
+		install_root="$pkgdir" \
+		config_directory=/usr/share/doc/$pkgname/defaults \
+		readme_directory=/usr/share/doc/$pkgname/readme \
+		manpage_directory=/usr/share/man \
+		|| return 1
+
+	install -d "$pkgdir"/usr/lib
+	for i in $(_shared_libs lib/*.a); do
+		j=${i#lib/lib}
+		install $i "$pkgdir"/usr/lib/libpostfix-${j%.a}.so.1 || return 1
+	done
+
+	# fix permissions
+	for i in postdrop postqueue; do
+		chgrp postdrop "$pkgdir"/usr/sbin/$i
+		chmod g+s "$pkgdir"/usr/sbin/$i
+	done
+
+	mkdir -p "$pkgdir"/etc/postfix
+	mv "$pkgdir"/usr/share/doc/$pkgname/defaults/*.cf \
+		"$pkgdir"/usr/share/doc/$pkgname/defaults/aliases \
+		"$pkgdir"/usr/share/doc/$pkgname/defaults/canonical \
+		"$pkgdir"/usr/share/doc/$pkgname/defaults/generic \
+		"$pkgdir"/usr/share/doc/$pkgname/defaults/header_checks \
+		"$pkgdir"/usr/share/doc/$pkgname/defaults/relocated \
+		"$pkgdir"/usr/share/doc/$pkgname/defaults/transport \
+		"$pkgdir"/usr/share/doc/$pkgname/defaults/virtual \
+		"$pkgdir"/etc/postfix/ || return 1
+
+	install -d -o postfix -g postfix "$pkgdir"/var/spool/postfix
+	install -Dm755 "$srcdir"/$pkgname.initd "$pkgdir"/etc/init.d/$pkgname
+	install -Dm644 LICENSE "$pkgdir"/usr/share/licenses/${pkgname}/LICENSE
+}
+
+_mv_dict() {
+	local m=$1
+	shift
+	pkgdesc="$m map support for postfix"
+	depends=
+	install="postfix-${m}.post-install"
+	mkdir -p "$subpkgdir"/usr/lib/postfix
+	mv "$pkgdir"/usr/lib/postfix/dict_${m}.so \
+		"$subpkgdir"/usr/lib/postfix/
+}
+
+ldap()  { _mv_dict ldap ; }
+mysql() { _mv_dict mysql ;}
+pcre()  { _mv_dict pcre ; }
+pgsql() { _mv_dict pgsql ; }
+sqlite() { _mv_dict sqlite ; }
+
+md5sums="b3922ededd3fd6051f759e58a4ada3ae  postfix-2.8.3.tar.gz
+6bbabcd041aefaf40e1f3ee1fc1d6d7e  postfix.initd
+632fce950f64aa0794f9c2af85d45423  0001-support-for-dynamic-maps.patch
+442efd1a95b0c061dfb8ab75456e0f24  dynamicmaps.cf
+2ebe51a882eb9d6d7866583eb6af3969  postfix-ldap.post-install
+2ebe51a882eb9d6d7866583eb6af3969  postfix-mysql.post-install
+fd16ec00b60269c4ede4a0a0a514cefa  postfix-pcre.post-install
+2ebe51a882eb9d6d7866583eb6af3969  postfix-pgsql.post-install
+2ebe51a882eb9d6d7866583eb6af3969  postfix-sqlite.post-install"

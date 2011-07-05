@@ -1,0 +1,1054 @@
+From 14f1112bec18ccece8e732fe6c200a56546230c7 Mon Sep 17 00:00:00 2001
+From: Adam Jackson <ajax@redhat.com>
+Date: Thu, 17 Mar 2011 13:56:17 -0400
+Subject: [PATCH] CRTC confine and pointer barriers
+
+---
+ dix/events.c                |    7 +
+ dix/getevents.c             |   12 +-
+ include/dix.h               |    1 +
+ include/protocol-versions.h |    2 +-
+ mi/mipointer.c              |   16 ++-
+ mi/mipointer.h              |    6 +
+ randr/randr.c               |    2 +
+ randr/randrstr.h            |    4 +
+ randr/rrcrtc.c              |  155 ++++++++++++++++
+ test/Makefile.am            |    4 +-
+ xfixes/cursor.c             |  408 ++++++++++++++++++++++++++++++++++++++++++-
+ xfixes/xfixes.c             |   24 ++-
+ xfixes/xfixes.h             |   17 ++
+ xfixes/xfixesint.h          |   16 ++
+ 14 files changed, 658 insertions(+), 16 deletions(-)
+
+diff --git a/dix/events.c b/dix/events.c
+index 07f8b05..d2be84f 100644
+--- a/dix/events.c
++++ b/dix/events.c
+@@ -328,6 +328,13 @@ IsMaster(DeviceIntPtr dev)
+     return dev->type == MASTER_POINTER || dev->type == MASTER_KEYBOARD;
+ }
+ 
++Bool
++IsFloating(DeviceIntPtr dev)
++{
++    return GetMaster(dev, MASTER_KEYBOARD) == NULL;
++}
++
++
+ /**
+  * Max event opcode.
+  */
+diff --git a/dix/getevents.c b/dix/getevents.c
+index 794df42..c66e516 100644
+--- a/dix/getevents.c
++++ b/dix/getevents.c
+@@ -812,7 +812,11 @@ accelPointer(DeviceIntPtr dev, int first, int num, int *valuators, CARD32 ms)
+  * miPointerSetPosition() and then scale back into device coordinates (if
+  * needed). miPSP will change x/y if the screen was crossed.
+  *
++ * The coordinates provided are always absolute. The parameter mode whether
++ * it was relative or absolute movement that landed us at those coordinates.
++ *
+  * @param dev The device to be moved.
++ * @param mode Movement mode (Absolute or Relative)
+  * @param x Pointer to current x-axis value, may be modified.
+  * @param y Pointer to current y-axis value, may be modified.
+  * @param x_frac Fractional part of current x-axis value, may be modified.
+@@ -824,7 +828,8 @@ accelPointer(DeviceIntPtr dev, int first, int num, int *valuators, CARD32 ms)
+  * @param screeny_frac Fractional part of screen y coordinate, as above.
+  */
+ static void
+-positionSprite(DeviceIntPtr dev, int *x, int *y, float x_frac, float y_frac,
++positionSprite(DeviceIntPtr dev, int mode,
++               int *x, int *y, float x_frac, float y_frac,
+                ScreenPtr scr, int *screenx, int *screeny, float *screenx_frac, float *screeny_frac)
+ {
+     int old_screenx, old_screeny;
+@@ -863,7 +868,7 @@ positionSprite(DeviceIntPtr dev, int *x, int *y, float x_frac, float y_frac,
+     old_screeny = *screeny;
+     /* This takes care of crossing screens for us, as well as clipping
+      * to the current screen. */
+-    miPointerSetPosition(dev, screenx, screeny);
++    _miPointerSetPosition(dev, mode, screenx, screeny);
+ 
+     if (dev->u.master) {
+         dev->u.master->last.valuators[0] = *screenx;
+@@ -1193,7 +1198,8 @@ GetPointerEvents(EventList *events, DeviceIntPtr pDev, int type, int buttons,
+ 
+     set_raw_valuators(raw, &mask, raw->valuators.data);
+ 
+-    positionSprite(pDev, &x, &y, x_frac, y_frac, scr, &cx, &cy, &cx_frac, &cy_frac);
++    positionSprite(pDev, (flags & POINTER_ABSOLUTE) ? Absolute : Relative,
++                   &x, &y, x_frac, y_frac, scr, &cx, &cy, &cx_frac, &cy_frac);
+     updateHistory(pDev, &mask, ms);
+ 
+     /* Update the valuators with the true value sent to the client*/
+diff --git a/include/dix.h b/include/dix.h
+index 12e4b59..3f99098 100644
+--- a/include/dix.h
++++ b/include/dix.h
+@@ -570,6 +570,7 @@ extern Bool _X_EXPORT IsPointerDevice( DeviceIntPtr dev);
+ extern Bool _X_EXPORT IsKeyboardDevice(DeviceIntPtr dev);
+ extern Bool IsPointerEvent(InternalEvent *event);
+ extern _X_EXPORT Bool IsMaster(DeviceIntPtr dev);
++extern _X_EXPORT Bool IsFloating(DeviceIntPtr dev);
+ 
+ extern _X_HIDDEN void CopyKeyClass(DeviceIntPtr device, DeviceIntPtr master);
+ extern _X_HIDDEN int CorePointerProc(DeviceIntPtr dev, int what);
+diff --git a/include/protocol-versions.h b/include/protocol-versions.h
+index 1d33bdd..1dc66ad 100644
+--- a/include/protocol-versions.h
++++ b/include/protocol-versions.h
+@@ -126,7 +126,7 @@
+ #define SERVER_XF86VIDMODE_MINOR_VERSION	2
+ 
+ /* Fixes */
+-#define SERVER_XFIXES_MAJOR_VERSION		4
++#define SERVER_XFIXES_MAJOR_VERSION		5
+ #define SERVER_XFIXES_MINOR_VERSION		0
+ 
+ /* X Input */
+diff --git a/mi/mipointer.c b/mi/mipointer.c
+index 554397a..85f1949 100644
+--- a/mi/mipointer.c
++++ b/mi/mipointer.c
+@@ -229,6 +229,10 @@ miPointerSetCursorPosition(DeviceIntPtr pDev, ScreenPtr pScreen,
+     SetupScreen (pScreen);
+ 
+     GenerateEvent = generateEvent;
++
++    if (pScreen->ConstrainCursorHarder)
++	pScreen->ConstrainCursorHarder(pDev, pScreen, Absolute, &x, &y);
++
+     /* device dependent - must pend signal and call miPointerWarpCursor */
+     (*pScreenPriv->screenFuncs->WarpCursor) (pDev, pScreen, x, y);
+     if (!generateEvent)
+@@ -484,7 +488,7 @@ miPointerMoveNoEvent (DeviceIntPtr pDev, ScreenPtr pScreen,
+ }
+ 
+ void
+-miPointerSetPosition(DeviceIntPtr pDev, int *x, int *y)
++_miPointerSetPosition(DeviceIntPtr pDev, int mode, int *x, int *y)
+ {
+     miPointerScreenPtr	pScreenPriv;
+     ScreenPtr		pScreen;
+@@ -529,6 +533,9 @@ miPointerSetPosition(DeviceIntPtr pDev, int *x, int *y)
+     if (*y >= pPointer->limits.y2)
+ 	*y = pPointer->limits.y2 - 1;
+ 
++    if (pScreen->ConstrainCursorHarder)
++       pScreen->ConstrainCursorHarder(pDev, pScreen, mode, x, y);
++
+     if (pPointer->x == *x && pPointer->y == *y && 
+             pPointer->pScreen == pScreen) 
+         return;
+@@ -536,6 +543,13 @@ miPointerSetPosition(DeviceIntPtr pDev, int *x, int *y)
+     miPointerMoveNoEvent(pDev, pScreen, *x, *y);
+ }
+ 
++/* ABI hack */
++void
++miPointerSetPosition(DeviceIntPtr pDev, int *x, int *y)
++{
++    _miPointerSetPosition(pDev, Absolute, x, y);
++}
++
+ void
+ miPointerGetPosition(DeviceIntPtr pDev, int *x, int *y)
+ {
+diff --git a/mi/mipointer.h b/mi/mipointer.h
+index 3c86110..6b6010c 100644
+--- a/mi/mipointer.h
++++ b/mi/mipointer.h
+@@ -131,6 +131,12 @@ extern _X_EXPORT void miPointerGetPosition(
+ 
+ /* Moves the cursor to the specified position.  May clip the co-ordinates:
+  * x and y are modified in-place. */
++extern _X_EXPORT void _miPointerSetPosition(
++    DeviceIntPtr pDev,
++    int mode,
++    int *x,
++    int *y);
++
+ extern _X_EXPORT void miPointerSetPosition(
+     DeviceIntPtr pDev,
+     int *x,
+diff --git a/randr/randr.c b/randr/randr.c
+index 6077705..d337129 100644
+--- a/randr/randr.c
++++ b/randr/randr.c
+@@ -270,6 +270,8 @@ Bool RRScreenInit(ScreenPtr pScreen)
+     
+     wrap (pScrPriv, pScreen, CloseScreen, RRCloseScreen);
+ 
++    pScreen->ConstrainCursorHarder = RRConstrainCursorHarder;
++
+     pScrPriv->numOutputs = 0;
+     pScrPriv->outputs = NULL;
+     pScrPriv->numCrtcs = 0;
+diff --git a/randr/randrstr.h b/randr/randrstr.h
+index 7ea6080..d8dd37d 100644
+--- a/randr/randrstr.h
++++ b/randr/randrstr.h
+@@ -297,6 +297,7 @@ typedef struct _rrScrPriv {
+     int			    rate;
+     int			    size;
+ #endif
++    Bool                   discontiguous;
+ } rrScrPrivRec, *rrScrPrivPtr;
+ 
+ extern _X_EXPORT DevPrivateKeyRec rrPrivKeyRec;
+@@ -700,6 +701,9 @@ ProcRRGetPanning (ClientPtr client);
+ int
+ ProcRRSetPanning (ClientPtr client);
+ 
++void
++RRConstrainCursorHarder (DeviceIntPtr, ScreenPtr, int, int *, int *);
++
+ /* rrdispatch.c */
+ extern _X_EXPORT Bool
+ RRClientKnowsRates (ClientPtr	pClient);
+diff --git a/randr/rrcrtc.c b/randr/rrcrtc.c
+index 98206a2..d4d8f2a 100644
+--- a/randr/rrcrtc.c
++++ b/randr/rrcrtc.c
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright © 2006 Keith Packard
++ * Copyright 2010 Red Hat, Inc
+  *
+  * Permission to use, copy, modify, distribute, and sell this software and its
+  * documentation for any purpose is hereby granted without fee, provided that
+@@ -22,6 +23,7 @@
+ 
+ #include "randrstr.h"
+ #include "swaprep.h"
++#include "mipointer.h"
+ 
+ RESTYPE	RRCrtcType;
+ 
+@@ -292,6 +294,92 @@ RRCrtcPendingProperties (RRCrtcPtr crtc)
+     return FALSE;
+ }
+ 
++static void
++crtc_bounds(RRCrtcPtr crtc, int *left, int *right, int *top, int *bottom)
++{
++    *left = crtc->x;
++    *top = crtc->y;
++
++    switch (crtc->rotation) {
++    case RR_Rotate_0:
++    case RR_Rotate_180:
++    default:
++       *right = crtc->x + crtc->mode->mode.width;
++       *bottom = crtc->y + crtc->mode->mode.height;
++       return;
++    case RR_Rotate_90:
++    case RR_Rotate_270:
++       *right = crtc->x + crtc->mode->mode.height;
++       *bottom = crtc->y + crtc->mode->mode.width;
++       return;
++    }
++}
++
++/* overlapping counts as adjacent */
++static Bool
++crtcs_adjacent(const RRCrtcPtr a, const RRCrtcPtr b)
++{
++    /* left, right, top, bottom... */
++    int al, ar, at, ab;
++    int bl, br, bt, bb;
++    int cl, cr, ct, cb; /* the overlap, if any */
++
++    crtc_bounds(a, &al, &ar, &at, &ab);
++    crtc_bounds(b, &bl, &br, &bt, &bb);
++
++    cl = max(al, bl);
++    cr = min(ar, br);
++    ct = max(at, bt);
++    cb = min(ab, bb);
++
++    return (cl <= cr) && (ct <= cb);
++}
++
++/* Depth-first search and mark all CRTCs reachable from cur */
++static void
++mark_crtcs (rrScrPrivPtr pScrPriv, int *reachable, int cur)
++{
++    int i;
++    reachable[cur] = TRUE;
++    for (i = 0; i < pScrPriv->numCrtcs; ++i) {
++        if (reachable[i] || !pScrPriv->crtcs[i]->mode)
++            continue;
++        if (crtcs_adjacent(pScrPriv->crtcs[cur], pScrPriv->crtcs[i]))
++            mark_crtcs(pScrPriv, reachable, i);
++    }
++}
++
++static void
++RRComputeContiguity (ScreenPtr pScreen)
++{
++    rrScrPriv(pScreen);
++    Bool discontiguous = TRUE;
++    int i, n = pScrPriv->numCrtcs;
++
++    int *reachable = calloc(n, sizeof(int));
++    if (!reachable)
++        goto out;
++
++    /* Find first enabled CRTC and start search for reachable CRTCs from it */
++    for (i = 0; i < n; ++i) {
++        if (pScrPriv->crtcs[i]->mode) {
++            mark_crtcs(pScrPriv, reachable, i);
++            break;
++        }
++    }
++
++    /* Check that all enabled CRTCs were marked as reachable */
++    for (i = 0; i < n; ++i)
++        if (pScrPriv->crtcs[i]->mode && !reachable[i])
++            goto out;
++
++    discontiguous = FALSE;
++
++out:
++    free(reachable);
++    pScrPriv->discontiguous = discontiguous;
++}
++
+ /*
+  * Request that the Crtc be reconfigured
+  */
+@@ -306,6 +394,7 @@ RRCrtcSet (RRCrtcPtr    crtc,
+ {
+     ScreenPtr	pScreen = crtc->pScreen;
+     Bool	ret = FALSE;
++    Bool	recompute = TRUE;
+     rrScrPriv(pScreen);
+ 
+     /* See if nothing changed */
+@@ -318,6 +407,7 @@ RRCrtcSet (RRCrtcPtr    crtc,
+ 	!RRCrtcPendingProperties (crtc) &&
+ 	!RRCrtcPendingTransform (crtc))
+     {
++	recompute = FALSE;
+ 	ret = TRUE;
+     }
+     else
+@@ -381,6 +471,10 @@ RRCrtcSet (RRCrtcPtr    crtc,
+ 		RRPostPendingProperties (outputs[o]);
+ 	}
+     }
++
++    if (recompute)
++       RRComputeContiguity(pScreen);
++
+     return ret;
+ }
+ 
+@@ -1349,3 +1443,64 @@ ProcRRGetCrtcTransform (ClientPtr client)
+     free(reply);
+     return Success;
+ }
++
++void
++RRConstrainCursorHarder(DeviceIntPtr pDev, ScreenPtr pScreen, int mode, int *x, int *y)
++{
++    rrScrPriv (pScreen);
++    int i;
++
++    /* intentional dead space -> let it float */
++    if (pScrPriv->discontiguous)
++       return;
++
++    /* if we're moving inside a crtc, we're fine */
++    for (i = 0; i < pScrPriv->numCrtcs; i++) {
++       RRCrtcPtr crtc = pScrPriv->crtcs[i];
++
++       int left, right, top, bottom;
++
++       if (!crtc->mode)
++           continue;
++
++       crtc_bounds(crtc, &left, &right, &top, &bottom);
++
++       if ((*x >= left) && (*x <= right) && (*y >= top) && (*y <= bottom))
++           return;
++    }
++
++    /* if we're trying to escape, clamp to the CRTC we're coming from */
++    for (i = 0; i < pScrPriv->numCrtcs; i++) {
++       RRCrtcPtr crtc = pScrPriv->crtcs[i];
++       int nx, ny;
++       int left, right, top, bottom;
++
++       if (!crtc->mode)
++           continue;
++
++       crtc_bounds(crtc, &left, &right, &top, &bottom);
++       miPointerGetPosition(pDev, &nx, &ny);
++
++       if ((nx >= left) && (nx <= right) && (ny >= top) && (ny <= bottom)) {
++           if ((*x <= left) || (*x >= right)) {
++               int dx = *x - nx;
++
++               if (dx > 0)
++                   *x = right;
++               else if (dx < 0)
++                   *x = left;
++           }
++
++           if ((*y <= top) || (*y >= bottom)) {
++               int dy = *y - ny;
++
++               if (dy > 0)
++                   *y = bottom;
++               else if (dy < 0)
++                   *y = top;
++           }
++
++           return;
++       }
++    }
++}
+diff --git a/test/Makefile.am b/test/Makefile.am
+index 456221e..ccdb859 100644
+--- a/test/Makefile.am
++++ b/test/Makefile.am
+@@ -1,6 +1,6 @@
+ if UNITTESTS
+ SUBDIRS= . xi2
+-check_PROGRAMS = xkb input xtest
++check_PROGRAMS = xkb input xtest list fixes
+ check_LTLIBRARIES = libxservertest.la
+ 
+ TESTS=$(check_PROGRAMS)
+@@ -16,6 +16,8 @@ endif
+ xkb_LDADD=$(TEST_LDADD)
+ input_LDADD=$(TEST_LDADD)
+ xtest_LDADD=$(TEST_LDADD)
++list_LDADD=$(TEST_LDADD)
++fixes_LDADD=$(TEST_LDADD)
+ 
+ libxservertest_la_LIBADD = \
+             $(XSERVER_LIBS) \
+diff --git a/xfixes/cursor.c b/xfixes/cursor.c
+index fb608f6..5c55c95 100644
+--- a/xfixes/cursor.c
++++ b/xfixes/cursor.c
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (c) 2006, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2010 Red Hat, Inc.
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining a
+  * copy of this software and associated documentation files (the "Software"),
+@@ -50,13 +51,16 @@
+ #include "cursorstr.h"
+ #include "dixevents.h"
+ #include "servermd.h"
++#include "mipointer.h"
+ #include "inputstr.h"
+ #include "windowstr.h"
+ #include "xace.h"
++#include "list.h"
+ 
+ static RESTYPE		CursorClientType;
+ static RESTYPE		CursorHideCountType;
+ static RESTYPE		CursorWindowType;
++RESTYPE			PointerBarrierType;
+ static CursorPtr	CursorCurrent[MAXDEVICES];
+ 
+ static DevPrivateKeyRec CursorScreenPrivateKeyRec;
+@@ -107,6 +111,14 @@ typedef struct _CursorHideCountRec {
+     XID			 resource;
+ } CursorHideCountRec;
+ 
++typedef struct PointerBarrierClient *PointerBarrierClientPtr;
++
++struct PointerBarrierClient {
++    ScreenPtr screen;
++    struct PointerBarrier barrier;
++    struct list entry;
++};
++
+ /*
+  * Wrap DisplayCursor to catch cursor change events
+  */
+@@ -114,7 +126,9 @@ typedef struct _CursorHideCountRec {
+ typedef struct _CursorScreen {
+     DisplayCursorProcPtr	DisplayCursor;
+     CloseScreenProcPtr		CloseScreen;
++    ConstrainCursorHarderProcPtr ConstrainCursorHarder;
+     CursorHideCountPtr          pCursorHideCounts;
++    struct list                 barriers;
+ } CursorScreenRec, *CursorScreenPtr;
+ 
+ #define GetCursorScreen(s) ((CursorScreenPtr)dixLookupPrivate(&(s)->devPrivates, CursorScreenPrivateKey))
+@@ -184,9 +198,11 @@ CursorCloseScreen (int index, ScreenPtr pScreen)
+     Bool		ret;
+     CloseScreenProcPtr	close_proc;
+     DisplayCursorProcPtr display_proc;
++    ConstrainCursorHarderProcPtr constrain_proc;
+ 
+     Unwrap (cs, pScreen, CloseScreen, close_proc);
+     Unwrap (cs, pScreen, DisplayCursor, display_proc);
++    Unwrap (cs, pScreen, ConstrainCursorHarder, constrain_proc);
+     deleteCursorHideCountsForScreen(pScreen);
+     ret = (*pScreen->CloseScreen) (index, pScreen);
+     free(cs);
+@@ -1029,6 +1045,391 @@ CursorFreeWindow (pointer data, XID id)
+     return 1;
+ }
+ 
++static BOOL
++barrier_is_horizontal(const struct PointerBarrier *barrier)
++{
++    return barrier->y1 == barrier->y2;
++}
++
++static BOOL
++barrier_is_vertical(const struct PointerBarrier *barrier)
++{
++    return barrier->x1 == barrier->x2;
++}
++
++/**
++ * @return The set of barrier movement directions the movement vector
++ * x1/y1 → x2/y2 represents.
++ */
++int
++barrier_get_direction(int x1, int y1, int x2, int y2)
++{
++    int direction = 0;
++
++    /* which way are we trying to go */
++    if (x2 > x1)
++	direction |= BarrierPositiveX;
++    if (x2 < x1)
++	direction |= BarrierNegativeX;
++    if (y2 > y1)
++	direction |= BarrierPositiveY;
++    if (y2 < y1)
++	direction |= BarrierNegativeY;
++
++    return direction;
++}
++
++/**
++ * Test if the barrier may block movement in the direction defined by
++ * x1/y1 → x2/y2. This function only tests whether the directions could be
++ * blocked, it does not test if the barrier actually blocks the movement.
++ *
++ * @return TRUE if the barrier blocks the direction of movement or FALSE
++ * otherwise.
++ */
++BOOL
++barrier_is_blocking_direction(const struct PointerBarrier *barrier, int direction)
++{
++    /* Barriers define which way is ok, not which way is blocking */
++    return (barrier->directions & direction) != direction;
++}
++
++/**
++ * Test if the movement vector x1/y1 → x2/y2 is intersecting with the
++ * barrier. A movement vector with the startpoint or endpoint on the barrier
++ * itself counts as intersecting.
++ *
++ * @param x1 X start coordinate of movement vector
++ * @param y1 Y start coordinate of movement vector
++ * @param x2 X end coordinate of movement vector
++ * @param y2 Y end coordinate of movement vector
++ * @param[out] distance The distance between the start point and the
++ * intersection with the barrier (if applicable).
++ * @return TRUE if the barrier intersects with the given vector
++ */
++BOOL
++barrier_is_blocking(const struct PointerBarrier *barrier,
++		    int x1, int y1, int x2, int y2,
++		    double *distance)
++{
++    BOOL rc = FALSE;
++    float ua, ub, ud;
++    int dir = barrier_get_direction(x1, y1, x2, y2);
++
++    /* Algorithm below doesn't handle edge cases well, hence the extra
++     * checks. */
++    if (barrier_is_vertical(barrier)) {
++	/* handle immediate barrier adjacency, moving away */
++	if (dir & BarrierPositiveX && x1 == barrier->x1)
++	    return FALSE;
++	if (dir & BarrierNegativeX && x1 == (barrier->x1 - 1))
++	    return FALSE;
++	/* startpoint on barrier */
++	if (x1 == barrier->x1 && y1 >= barrier->y1 && y1 <= barrier->y2) {
++	    *distance = 0;
++	    return TRUE;
++	}
++	/* endpoint on barrier */
++	if (x2 == barrier->x1 && y2 >= barrier->y1 && y2 <= barrier->y2) {
++	    *distance = abs(x2 - x1);
++	    return TRUE;
++        }
++    } else {
++	/* handle immediate barrier adjacency, moving away */
++	if (dir & BarrierPositiveY && y1 == barrier->y1)
++	    return FALSE;
++	if (dir & BarrierNegativeY && y1 == (barrier->y1 - 1))
++	    return FALSE;
++	/* startpoint on barrier */
++	if (y1 == barrier->y1 && x1 >= barrier->x1 && x1 <= barrier->x2) {
++	    *distance = 0;
++	    return TRUE;
++        }
++	/* endpoint on barrier */
++	if (y2 == barrier->y1 && x2 >= barrier->x1 && x2 <= barrier->x2) {
++	    *distance = abs(y2 - y1);
++	    return TRUE;
++        }
++    }
++
++    /* not an edge case, compute distance */
++    ua = 0;
++    ud = (barrier->y2 - barrier->y1) * (x2 - x1) - (barrier->x2 - barrier->x1) * (y2 - y1);
++    if (ud != 0) {
++	ua = ((barrier->x2 - barrier->x1) * (y1 - barrier->y1) -
++	     (barrier->y2 - barrier->y1) * (x1 - barrier->x1)) / ud;
++	ub = ((x2 - x1) * (y1 - barrier->y1) -
++	     (y2 - y1) * (x1 - barrier->x1)) / ud;
++	if (ua < 0 || ua > 1 || ub < 0 || ub > 1)
++	    ua = 0;
++    }
++
++    if (ua > 0 && ua <= 1)
++    {
++	double ix = barrier->x1 + ua * (barrier->x2 - barrier->x1);
++	double iy = barrier->y1 + ua * (barrier->y2 - barrier->y1);
++
++	*distance = sqrt(pow(x1 - ix, 2) + pow(y1 - iy, 2));
++	rc = TRUE;
++    }
++
++    return rc;
++}
++
++/**
++ * Find the nearest barrier that is blocking movement from x1/y1 to x2/y2.
++ *
++ * @param dir Only barriers blocking movement in direction dir are checked
++ * @param x1 X start coordinate of movement vector
++ * @param y1 Y start coordinate of movement vector
++ * @param x2 X end coordinate of movement vector
++ * @param y2 Y end coordinate of movement vector
++ * @return The barrier nearest to the movement origin that blocks this movement.
++ */
++static struct PointerBarrier*
++barrier_find_nearest(CursorScreenPtr cs, int dir,
++		     int x1, int y1, int x2, int y2)
++{
++    struct PointerBarrierClient *c;
++    struct PointerBarrier *nearest = NULL;
++    double min_distance = INT_MAX; /* can't get higher than that in X anyway */
++
++    list_for_each_entry(c, &cs->barriers, entry) {
++	struct PointerBarrier *b = &c->barrier;
++	double distance;
++
++	if (!barrier_is_blocking_direction(b, dir))
++	    continue;
++
++	if (barrier_is_blocking(b, x1, y1, x2, y2, &distance))
++	{
++	    if (min_distance > distance)
++	    {
++		min_distance = distance;
++		nearest = b;
++	    }
++	}
++    }
++
++    return nearest;
++}
++
++/**
++ * Clamp to the given barrier given the movement direction specified in dir.
++ *
++ * @param barrier The barrier to clamp to
++ * @param dir The movement direction
++ * @param[out] x The clamped x coordinate.
++ * @param[out] y The clamped x coordinate.
++ */
++void
++barrier_clamp_to_barrier(struct PointerBarrier *barrier, int dir, int *x, int *y)
++{
++    if (barrier_is_vertical(barrier)) {
++	if ((dir & BarrierNegativeX) & ~barrier->directions)
++	    *x = barrier->x1;
++	if ((dir & BarrierPositiveX) & ~barrier->directions)
++	    *x = barrier->x1 - 1;
++    }
++    if (barrier_is_horizontal(barrier))
++    {
++	if ((dir & BarrierNegativeY) & ~barrier->directions)
++	    *y = barrier->y1;
++	if ((dir & BarrierPositiveY) & ~barrier->directions)
++	    *y = barrier->y1 - 1;
++    }
++}
++
++static void
++CursorConstrainCursorHarder(DeviceIntPtr dev, ScreenPtr screen, int mode, int *x, int *y)
++{
++    CursorScreenPtr cs = GetCursorScreen(screen);
++
++    if (!list_is_empty(&cs->barriers) && !IsFloating(dev) && mode == Relative) {
++	int ox, oy;
++	int dir;
++	struct PointerBarrier *nearest = NULL;
++
++	/* where are we coming from */
++	miPointerGetPosition(dev, &ox, &oy);
++
++	/* How this works:
++	 * Given the origin and the movement vector, get the nearest barrier
++	 * to the origin that is blocking the movement.
++	 * Clamp to that barrier.
++	 * Then, check from the clamped position to the original
++	 * destination, again finding the nearest barrier and clamping.
++	 */
++	dir = barrier_get_direction(ox, oy, *x, *y);
++
++	nearest = barrier_find_nearest(cs, dir, ox, oy, *x, *y);
++	if (nearest) {
++	    barrier_clamp_to_barrier(nearest, dir, x, y);
++
++	    if (barrier_is_vertical(nearest)) {
++		dir &= ~(BarrierNegativeX | BarrierPositiveX);
++		ox = *x;
++	    } else if (barrier_is_horizontal(nearest)) {
++		dir &= ~(BarrierNegativeY | BarrierPositiveY);
++		oy = *y;
++	    }
++
++	    nearest = barrier_find_nearest(cs, dir, ox, oy, *x, *y);
++	    if (nearest) {
++		barrier_clamp_to_barrier(nearest, dir, x, y);
++	    }
++	}
++    }
++
++    if (cs->ConstrainCursorHarder) {
++	screen->ConstrainCursorHarder = cs->ConstrainCursorHarder;
++	screen->ConstrainCursorHarder(dev, screen, mode, x, y);
++	screen->ConstrainCursorHarder = CursorConstrainCursorHarder;
++    }
++}
++
++static struct PointerBarrierClient *
++CreatePointerBarrierClient(ScreenPtr screen, ClientPtr client,
++			   xXFixesCreatePointerBarrierReq *stuff)
++{
++    CursorScreenPtr cs = GetCursorScreen(screen);
++    struct PointerBarrierClient *ret = malloc(sizeof(*ret));
++
++    if (ret) {
++	ret->screen = screen;
++	ret->barrier.x1 = min(stuff->x1, stuff->x2);
++	ret->barrier.x2 = max(stuff->x1, stuff->x2);
++	ret->barrier.y1 = min(stuff->y1, stuff->y2);
++	ret->barrier.y2 = max(stuff->y1, stuff->y2);
++	ret->barrier.directions = stuff->directions & 0x0f;
++	if (barrier_is_horizontal(&ret->barrier))
++	    ret->barrier.directions &= ~(BarrierPositiveX | BarrierNegativeX);
++	if (barrier_is_vertical(&ret->barrier))
++	    ret->barrier.directions &= ~(BarrierPositiveY | BarrierNegativeY);
++	list_add(&ret->entry, &cs->barriers);
++    }
++
++    return ret;
++}
++
++int
++ProcXFixesCreatePointerBarrier (ClientPtr client)
++{
++    int err;
++    WindowPtr pWin;
++    struct PointerBarrierClient *barrier;
++    struct PointerBarrier b;
++    REQUEST (xXFixesCreatePointerBarrierReq);
++
++    REQUEST_SIZE_MATCH(xXFixesCreatePointerBarrierReq);
++    LEGAL_NEW_RESOURCE(stuff->barrier, client);
++
++    err = dixLookupWindow(&pWin, stuff->window, client, DixReadAccess);
++    if (err != Success) {
++	client->errorValue = stuff->window;
++	return err;
++    }
++
++    /* This sure does need fixing. */
++    if (stuff->num_devices)
++	return BadImplementation;
++
++    b.x1 = stuff->x1;
++    b.x2 = stuff->x2;
++    b.y1 = stuff->y1;
++    b.y2 = stuff->y2;
++
++    if (!barrier_is_horizontal(&b) && !barrier_is_vertical(&b))
++	return BadValue;
++
++    /* no 0-sized barriers */
++    if (barrier_is_horizontal(&b) && barrier_is_vertical(&b))
++	return BadValue;
++
++    if (!(barrier = CreatePointerBarrierClient(pWin->drawable.pScreen,
++					       client, stuff)))
++	return BadAlloc;
++
++    if (!AddResource(stuff->barrier, PointerBarrierType, &barrier->barrier))
++	return BadAlloc;
++
++    return Success;
++}
++
++int
++SProcXFixesCreatePointerBarrier (ClientPtr client)
++{
++    int n;
++    REQUEST(xXFixesCreatePointerBarrierReq);
++
++    swaps(&stuff->length, n);
++    REQUEST_SIZE_MATCH(xXFixesCreatePointerBarrierReq);
++    swapl(&stuff->barrier, n);
++    swapl(&stuff->window, n);
++    swaps(&stuff->x1, n);
++    swaps(&stuff->y1, n);
++    swaps(&stuff->x2, n);
++    swaps(&stuff->y2, n);
++    swapl(&stuff->directions, n);
++    return ProcXFixesVector[stuff->xfixesReqType](client);
++}
++
++static int
++CursorFreeBarrier(void *data, XID id)
++{
++    struct PointerBarrierClient *b = NULL, *barrier;
++    ScreenPtr screen;
++    CursorScreenPtr cs;
++
++    barrier = container_of(data, struct PointerBarrierClient, barrier);
++    screen = barrier->screen;
++    cs = GetCursorScreen(screen);
++
++    /* find and unlink from the screen private */
++    list_for_each_entry(b, &cs->barriers, entry) {
++	if (b == barrier) {
++	    list_del(&b->entry);
++	    break;
++	}
++    }
++
++    free(barrier);
++    return Success;
++}
++
++int
++ProcXFixesDestroyPointerBarrier (ClientPtr client)
++{
++    int err;
++    void *barrier;
++    REQUEST (xXFixesDestroyPointerBarrierReq);
++
++    REQUEST_SIZE_MATCH(xXFixesDestroyPointerBarrierReq);
++
++    err = dixLookupResourceByType((void **)&barrier, stuff->barrier,
++				  PointerBarrierType, client,
++				  DixDestroyAccess);
++    if (err != Success) {
++	client->errorValue = stuff->barrier;
++	return err;
++    }
++
++    FreeResource(stuff->barrier, RT_NONE);
++    return Success;
++}
++
++int
++SProcXFixesDestroyPointerBarrier (ClientPtr client)
++{
++    int n;
++    REQUEST(xXFixesDestroyPointerBarrierReq);
++
++    swaps(&stuff->length, n);
++    REQUEST_SIZE_MATCH(xXFixesDestroyPointerBarrierReq);
++    swapl(&stuff->barrier, n);
++    return ProcXFixesVector[stuff->xfixesReqType](client);
++}
++
+ Bool
+ XFixesCursorInit (void)
+ {
+@@ -1048,8 +1449,10 @@ XFixesCursorInit (void)
+ 	cs = (CursorScreenPtr) calloc(1, sizeof (CursorScreenRec));
+ 	if (!cs)
+ 	    return FALSE;
++	list_init(&cs->barriers);
+ 	Wrap (cs, pScreen, CloseScreen, CursorCloseScreen);
+ 	Wrap (cs, pScreen, DisplayCursor, CursorDisplayCursor);
++	Wrap (cs, pScreen, ConstrainCursorHarder, CursorConstrainCursorHarder);
+ 	cs->pCursorHideCounts = NULL;
+ 	SetCursorScreen (pScreen, cs);
+     }
+@@ -1059,7 +1462,10 @@ XFixesCursorInit (void)
+ 						"XFixesCursorHideCount");
+     CursorWindowType = CreateNewResourceType(CursorFreeWindow,
+ 					     "XFixesCursorWindow");
++    PointerBarrierType = CreateNewResourceType(CursorFreeBarrier,
++					      "XFixesPointerBarrier");
+ 
+-    return CursorClientType && CursorHideCountType && CursorWindowType;
++    return CursorClientType && CursorHideCountType && CursorWindowType &&
++	   PointerBarrierType;
+ }
+ 
+diff --git a/xfixes/xfixes.c b/xfixes/xfixes.c
+index e8c7bf1..a57884b 100644
+--- a/xfixes/xfixes.c
++++ b/xfixes/xfixes.c
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (c) 2006, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2010 Red Hat, Inc.
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining a
+  * copy of this software and associated documentation files (the "Software"),
+@@ -47,10 +48,6 @@
+ 
+ #include "xfixesint.h"
+ #include "protocol-versions.h"
+-/*
+- * Must use these instead of the constants from xfixeswire.h.  They advertise
+- * what we implement, not what the protocol headers define.
+- */
+ 
+ static unsigned char	XFixesReqCode;
+ int		XFixesEventBase;
+@@ -97,11 +94,12 @@ ProcXFixesQueryVersion(ClientPtr client)
+ 
+ /* Major version controls available requests */
+ static const int version_requests[] = {
+-    X_XFixesQueryVersion,	/* before client sends QueryVersion */
+-    X_XFixesGetCursorImage,	/* Version 1 */
+-    X_XFixesChangeCursorByName,	/* Version 2 */
+-    X_XFixesExpandRegion,	/* Version 3 */
+-    X_XFixesShowCursor,	        /* Version 4 */
++    X_XFixesQueryVersion,	    /* before client sends QueryVersion */
++    X_XFixesGetCursorImage,	    /* Version 1 */
++    X_XFixesChangeCursorByName,	    /* Version 2 */
++    X_XFixesExpandRegion,	    /* Version 3 */
++    X_XFixesShowCursor,		    /* Version 4 */
++    X_XFixesDestroyPointerBarrier,  /* Version 5 */
+ };
+ 
+ #define NUM_VERSION_REQUESTS	(sizeof (version_requests) / sizeof (version_requests[0]))
+@@ -142,6 +140,9 @@ int	(*ProcXFixesVector[XFixesNumberRequests])(ClientPtr) = {
+ /*************** Version 4 ****************/
+     ProcXFixesHideCursor,
+     ProcXFixesShowCursor,
++/*************** Version 5 ****************/
++    ProcXFixesCreatePointerBarrier,
++    ProcXFixesDestroyPointerBarrier,
+ };
+ 
+ static int
+@@ -205,6 +206,9 @@ static int (*SProcXFixesVector[XFixesNumberRequests])(ClientPtr) = {
+ /*************** Version 4 ****************/
+     SProcXFixesHideCursor,
+     SProcXFixesShowCursor,
++/*************** Version 5 ****************/
++    SProcXFixesCreatePointerBarrier,
++    SProcXFixesDestroyPointerBarrier,
+ };
+ 
+ static int
+@@ -260,6 +264,8 @@ XFixesExtensionInit(void)
+ 	EventSwapVector[XFixesEventBase + XFixesCursorNotify] =
+ 	    (EventSwapPtr) SXFixesCursorNotifyEvent;
+ 	SetResourceTypeErrorValue(RegionResType, XFixesErrorBase + BadRegion);
++	SetResourceTypeErrorValue(PointerBarrierType,
++				  XFixesErrorBase + BadBarrier);
+     }
+ }
+ 
+diff --git a/xfixes/xfixes.h b/xfixes/xfixes.h
+index 1638350..5765e64 100644
+--- a/xfixes/xfixes.h
++++ b/xfixes/xfixes.h
+@@ -30,6 +30,7 @@
+ #include "resource.h"
+ 
+ extern _X_EXPORT RESTYPE RegionResType;
++extern _X_EXPORT RESTYPE PointerBarrierType;
+ extern _X_EXPORT int XFixesErrorBase;
+ 
+ #define VERIFY_REGION(pRegion, rid, client, mode)			\
+@@ -51,5 +52,21 @@ extern _X_EXPORT int XFixesErrorBase;
+ extern _X_EXPORT RegionPtr
+ XFixesRegionCopy (RegionPtr pRegion);
+ 
++struct PointerBarrier {
++    CARD16 x1, x2, y1, y2;
++    CARD32 directions;
++};
++
++
++extern int
++barrier_get_direction(int, int, int, int);
++extern BOOL
++barrier_is_blocking(const struct PointerBarrier*, int, int, int, int, double*);
++extern BOOL
++barrier_is_blocking_direction(const struct PointerBarrier*, int);
++extern void
++barrier_clamp_to_barrier(struct PointerBarrier *barrier, int dir, int *x, int *y);
++
++
+ 
+ #endif /* _XFIXES_H_ */
+diff --git a/xfixes/xfixesint.h b/xfixes/xfixesint.h
+index d005369..6ba276e 100644
+--- a/xfixes/xfixesint.h
++++ b/xfixes/xfixesint.h
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (c) 2006, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2010 Red Hat, Inc.
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining a
+  * copy of this software and associated documentation files (the "Software"),
+@@ -278,6 +279,21 @@ ProcXFixesShowCursor (ClientPtr client);
+ int 
+ SProcXFixesShowCursor (ClientPtr client);
+ 
++/* Version 5 */
++
++int
++ProcXFixesCreatePointerBarrier (ClientPtr client);
++
++int
++SProcXFixesCreatePointerBarrier (ClientPtr client);
++
++int
++ProcXFixesDestroyPointerBarrier (ClientPtr client);
++
++int
++SProcXFixesDestroyPointerBarrier (ClientPtr client);
++
++/* Xinerama */
+ extern int (*PanoramiXSaveXFixesVector[XFixesNumberRequests])(ClientPtr);
+ void PanoramiXFixesInit (void);
+ void PanoramiXFixesReset (void);
+-- 
+1.7.4
+

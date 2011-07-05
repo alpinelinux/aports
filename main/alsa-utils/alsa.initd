@@ -1,0 +1,218 @@
+#!/sbin/runscript
+# $Header: /var/cvsroot/gentoo-x86/media-sound/alsa-utils/files/alsasound.initd-r4,v 1.1 2009/08/02 11:27:26 ssuominen Exp $
+# Copyright 2007 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+
+alsastatedir=/var/lib/alsa
+alsascrdir=/etc/alsa.d
+
+opts="save restore"
+
+depend() {
+	need localmount
+	after bootmisc modules isapnp coldplug hotplug hwdrivers
+}
+
+load_modules() {
+	# List of drivers for each card.
+	local DRIVERS="$(modprobe | sed -n -e 's/^alias \(snd-card-[[:digit:]]\+\) .*/\1/p')"
+
+	# Fall back on the automated aliases if we don't have ALSA configured properly...
+	if [ -z "${DRIVERS}" ] && \
+	( [ ! -r /proc/asound/cards ] || grep -q ' no soundcards ' /proc/asound/cards 2>/dev/null ) ; then
+		ewarn "Could not detect custom ALSA settings.  Loading all detected alsa drivers."
+		DRIVERS="$(modprobe | sed -n -e '/^alias pci:.* snd.*/ s/^alias pci:[^ ]* \(.*\)/\1/p' | sort | uniq)"
+		if [ -z "${DRIVERS}" ] ; then
+			eerror "Unable to find any ALSA drivers. Have you compiled alsa-drivers correctly?"
+		fi
+	fi
+
+	if [ "${ENABLE_OSS_EMUL}" = "yes" ] ; then
+		DRIVERS="${DRIVERS} $(modprobe -l | sed -n -e '/snd.*oss/ s:.*\/\([[:alnum:]_-]\+\).ko:\1:p')"
+	fi
+
+	# We want to ensure snd-seq is loaded as it is needed for things like
+	# timidity even if we don't use a real sequencer.
+	DRIVERS="${DRIVERS} $(modprobe -l | sed -n -e '/snd.seq\./ s:.*\/\([[:alnum:]_-]\+\).ko:\1:p')"
+
+	# We want to ensure snd-ioctl32 is loaded as it is needed for 32bit
+	# compatibility
+	DRIVERS="${DRIVERS} $(modprobe -l | sed -n -e '/snd.ioctl32\./ s:.*\/\([[:alnum:]_-]\+\).ko:\1:p')"
+
+	local DRIVER= DMOD=
+	for DRIVER in ${DRIVERS} ; do
+		[ "${DRIVER}" = "off" ] && continue
+		DMOD="$(echo "${DRIVER}" | sed -e 's/-/_/g')"
+		if ! grep -q "^${DMOD} " /proc/modules ; then
+			ebegin "Loading: ${DRIVER}"
+			modprobe ${DRIVER}
+			eend $?
+		fi
+	done
+
+	if [ -f /proc/asound/seq/drivers ] ; then
+		local SEQUENCERS="$(sed -n -e 's/\([^,]*\),empty,.*/\1/p' /proc/asound/seq/drivers)"
+		local SEQUENCER
+		for SEQUENCER in ${SEQUENCERS} ; do
+			DMOD="$(echo "${SEQUENCER}" | sed -e 's/-/_/g')"
+			if ! grep -q "^${DMOD} " /proc/modules ; then
+				ebegin "Loading: ${SEQUENCER}"
+				modprobe ${SEQUENCER}
+				eend $?
+			fi
+		done
+	fi
+
+	for DRIVER in ${DRIVERS}
+	do
+		local TMP=${DRIVER##snd-}
+		TMP=${TMP##snd_}
+		if [ -x "${alsascrdir}/${TMP}" ] ; then
+			ebegin "Running: ${alsascrdir}/${TMP}"
+			"${alsascrdir}/${TMP}"
+			eend $?
+		fi
+	done
+
+	if [ ! -d /proc/asound ] || grep -q ' no soundcards ' /proc/asound/cards ; then
+		eerror "ERROR: Failed to load necessary drivers"
+		return 1
+	fi
+}
+
+unload_modules_24() {
+	local LOADED_MODULES="$(lsmod | sed -n -e 's/^\(snd[^ ]*\) .*/\1/p')"
+	local MODULE
+	for MODULE in ${LOADED_MODULES} ; do
+	    rmmod "${MODULE}"
+	done
+	rmmod soundcore 2>/dev/null
+	rmmod gameport 2>/dev/null
+
+	lsmod | grep -vq '^snd'
+}
+
+unload_modules_recursive() {
+	local revdeps="$(lsmod | sed -n -e "s/,/ /g" -e "s/^$1 *[0-9]* *[0-9]* \(.*\)/\1/p")"
+
+	for module in ${revdeps} ; do
+		unload_modules_recursive "${module}"
+	done
+
+	vebegin "Unloading: $1"
+	rmmod --wait "$1"
+	veend $?
+}
+
+unload_modules_26() {
+	# First of all, remove the snd module and all the modules depending
+	# on it, this should remove already most of ALSA modules.
+	lsmod | grep -q "^snd[[:space:]]" && unload_modules_recursive snd
+
+	# Then find the remaining ones, and handle them too.
+	for module in $(lsmod | sed -n -e 's/^\(snd[^ ]*\) .*/\1/p'); do
+		unload_modules_recursive "${module}"
+	done
+
+	lsmod | grep -vq "^snd"
+}
+
+terminate() {
+	#
+	# Kill processes holding open sound devices
+	#
+	# DEVS=`find /dev/ -follow -type c -maxdepth 1 -print 2>/dev/null | xargs ls -dils | grep "1*1[46]," | cut -d: -f2 | cut -d" " -f2; echo /proc/asound/dev/*`
+	local ossdevs="/dev/admmidi* /dev/adsp* /dev/amidi* /dev/audio* /dev/dmfm* \
+			/dev/dmmidi* /dev/dsp* /dev/dspW* /dev/midi0* /dev/mixer* /dev/music \
+			/dev/patmgr* /dev/sequencer* /dev/sndstat"
+	local alsadevs="/proc/asound/dev/* /dev/sound/* /dev/snd/*"
+	fuser -k ${ossdevs} ${alsadevs} >/dev/null 2>/dev/null
+
+	# remove all sequencer connections if any
+	[ -f /proc/asound/seq/clients ] && type aconnect >/dev/null 2>/dev/null && aconnect --removeall
+}
+
+restore() {
+	ebegin "Restoring Mixer Levels"
+
+	if [ ! -r "${alsastatedir}/asound.state" ] ; then
+		ewarn "No mixer config in ${alsastatedir}/asound.state, you have to unmute your card!"
+		eend 0
+		return 0
+	fi
+
+	local cards="$(sed -n -e 's/ *\([[:digit:]]*\) .*/\1/p' /proc/asound/cards)"
+	local CARDNUM
+	for cardnum in ${cards}; do
+		[ -e /dev/snd/controlC${cardnum} ] || sleep 2
+		[ -e /dev/snd/controlC${cardnum} ] || sleep 2
+		[ -e /dev/snd/controlC${cardnum} ] || sleep 2
+		[ -e /dev/snd/controlC${cardnum} ] || sleep 2
+		alsactl -f "${alsastatedir}/asound.state" restore ${cardnum} \
+			|| ewarn "Errors while restoring defaults, ignoring"
+	done
+
+	for ossfile in "${alsastatedir}"/oss/card*_pcm* ; do
+		[ -e "${ossfile}" ] || continue
+		# We use cat because I'm not sure if cp works properly on /proc
+		local procfile=${ossfile##${alsastatedir}/oss}
+		procfile="$(echo "${procfile}" | sed -e 's,_,/,g')"
+		if [ -e /proc/asound/"${procfile}"/oss ] ; then
+		    cat "${ossfile}" > /proc/asound/"${procfile}"/oss 
+		fi
+	done
+
+	eend 0
+}
+
+save() {
+	ebegin "Storing ALSA Mixer Levels"
+
+	mkdir -p "${alsastatedir}"
+	if ! alsactl -f "${alsastatedir}/asound.state" store; then
+		eerror "Error saving levels."
+		eend 1
+		return 1
+	fi
+
+	for ossfile in /proc/asound/card*/pcm*/oss; do
+		[ -e "${ossfile}" ] || continue
+		local device=${ossfile##/proc/asound/} ; device=${device%%/oss}
+		device="$(echo "${device}" | sed -e 's,/,_,g')"
+		mkdir -p "${alsastatedir}/oss/"
+		cp "${ossfile}" "${alsastatedir}/oss/${device}"
+	done
+
+	eend 0
+}
+
+start() {
+	if [ -f /proc/modules ] && [ "${LOAD_ON_START}" = "yes" ]; then
+		ebegin "Loading ALSA modules"
+		eindent
+		load_modules
+		eoutdent
+		eend $? || return 1
+	fi
+
+	if [ ! -d /proc/asound ]; then
+		eerror "ALSA failed to load."
+		eend 1
+		return 1
+	elif [ "${RESTORE_ON_START}" = "yes" ]; then
+		restore
+	fi
+
+	return 0
+}
+
+stop() {
+	if [ ! -d /proc/asound ] ; then
+		eerror "ALSA is not loaded"
+		return 0
+	fi
+
+	[ "${SAVE_ON_STOP}" = "yes" ] && save
+
+	return 0
+}

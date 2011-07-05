@@ -1,0 +1,463 @@
+#!/sbin/runscript
+#
+###########################################################################################################
+# Traffic Control startup script
+#
+# Copyright (c) 2009 iilluzion
+#
+# Distributed under GPL-2
+###########################################################################################################
+
+PROGRAM=$SVCNAME
+CONFIG=/etc/conf.d/$SVCNAME
+DEBUG=0 #1
+
+opts="describe compile"
+
+###########################################################################################################
+#
+#
+depend() 
+{
+	need net
+	after firewall
+}
+
+###########################################################################################################
+#
+#
+checkconfig() {
+	if [ ! -e $CONFIG ] ; then
+		eerror "You need to create $CONFIG first."
+	return 1
+	fi
+}
+
+###########################################################################################################
+#
+#
+bits()
+{
+        RATE=0
+        R_RATE=$1
+
+        R_NUMBER=`echo "$R_RATE" | sed -e "s/[^0-9]//g"`
+        R_UNIT=`echo "$R_RATE" | sed -e "s/[0-9]//g"`
+
+        if [ "$R_UNIT" == "" ]; then
+                R_UNIT="kbit"
+        fi
+
+        if [ "$R_UNIT" == "kbps" ]; then   R_RATE=$(($R_NUMBER * 1024 * 8))
+        elif [ "$R_UNIT" == "mbps" ]; then R_RATE=$(($R_NUMBER * 1024 * 1024 * 8))
+        elif [ "$R_UNIT" == "mbit" ]; then R_RATE=$(($R_NUMBER * 1024 * 1024))
+        elif [ "$R_UNIT" == "kbit" ]; then R_RATE=$(($R_NUMBER * 1024))
+        elif [ "$R_UNIT" == "bps" ]; then  R_RATE=$(($R_NUMBER * 8))
+        else
+                echo "Unknown unit '$R_UNIT' (mbps, mbit, kbit, kbps, bps)"
+        fi
+
+        echo "$R_RATE"
+}
+
+###########################################################################################################
+#
+#
+expand_leaf_qdisc()
+{
+	case "$1" in
+		pfifo)	echo "pfifo limit 5";;
+		sfq)	echo "sfq perturb 10";;
+		red)	echo "red min $RED_MIN max $RED_MAX burst $RED_BURST limit $RED_LIMIT probability $RED_PROB avpkt $RED_AVPKT";;
+	esac
+}
+
+###########################################################################################################
+#
+#
+configure()
+{
+	if [ ! -z $1 ]; then
+		eval WAN_RATE="\$$1"_RATE
+			WAN_RATE=`bits $WAN_RATE`
+
+		# Calculaton of WAN classes rates
+		WAN_SUB_RATE=$((WAN_RATE - (RATE_SUB_PERCENT * WAN_RATE / 100)))
+			INTERACTIVE_RATE=$((WAN_SUB_RATE / 5))
+		if [ $INTERACTIVE_RATE -lt 75000 ]; then
+			INTERACTIVE_RATE=75000
+			PRIVILEGED_RATE=$(((WAN_SUB_RATE - 75000) / 2))
+			BESTEFFORT_RATE=$(((WAN_SUB_RATE - 75000) / 2))
+		else
+			PRIVILEGED_RATE=$((WAN_SUB_RATE / 2))
+			BESTEFFORT_RATE=$((WAN_SUB_RATE / 3))
+		fi
+
+		DEV_RATE=${DEV_RATE:-$EGRESS_RATE}
+			DEV_RATE=`bits $DEV_RATE`
+				if [ $DEV_RATE -lt $WAN_RATE ]; then
+					DEV_RATE=$WAN_RATE
+				fi
+		OUT_OF_WAN_RATE=$((DEV_RATE - WAN_RATE))
+
+		# Calculation of Queuing Discipline parameters
+		INTERACTIVE_PRIO_LATENCY=50000
+		INTERACTIVE_PRIO_BURST=$((INTERACTIVE_RATE / 100 / 8))
+
+		INTERACTIVE_HFSC_DMAX=50000
+		INTERACTIVE_HFSC_UMAX=1500
+
+		PRIVILEGED_HFSC_DMAX=100000
+		PRIVILEGED_HFSC_UMAX=1500
+
+		# Random Early Detect (RED) parameters calculation:
+		#  min         = maximum delay * rate (dalay ~ 200ms = 0.2sec) [b]
+		#  max         = 3 * min [b]
+		#  avpkt       = 1000 (MTU 1500)
+		#  limit       = 8 * max [b]
+		#  burst       = (min + min + max)/(3 * avpkt) [b]
+		#  probability = 0.02
+
+		RED_DELAY=200
+		RED_MIN=$((RED_DELAY * BESTEFFORT_RATE / 1000 / 8)) # devided on 8 since rate given in bit/s so we get bytes
+		RED_MAX=$((3 * RED_MIN))
+		RED_AVPKT=1000
+		RED_PROB=0.02
+		RED_BURST=$(((RED_MIN + RED_MIN + RED_MAX) / (3 * RED_AVPKT)))
+		RED_LIMIT=$((8 * RED_MAX))
+
+		# Setting leaf Queuing Disciplines parameters
+		INTERACTIVE_LEAF_QDISC=pfifo
+			INTERACTIVE_LEAF_QDISC=`expand_leaf_qdisc $INTERACTIVE_LEAF_QDISC`
+		PRIVILEGED_LEAF_QDISC=pfifo
+			PRIVILEGED_LEAF_QDISC=`expand_leaf_qdisc $PRIVILEGED_LEAF_QDISC`
+		
+		# Force using SFQ in case rate is less than 2mbit	
+		if [ $BESTEFFORT_RATE -lt 2097152 ]; then
+			BESTEFFORT_LEAF_QDISC=sfq
+		fi
+		BESTEFFORT_LEAF_QDISC=`expand_leaf_qdisc $BESTEFFORT_LEAF_QDISC`
+
+		LAN_LEAF_QDISC=sfq
+		LAN_LEAF_QDISC=`expand_leaf_qdisc $LAN_LEAF_QDISC`
+	fi
+}
+
+###########################################################################################################
+#
+#
+reset()
+{
+	# Supported Queuing Disciplines
+	QDISCS="prio|tbf|htb|hfsc|sfq|red|pfifo"
+
+	tc qdisc show dev $DEV | grep -v "pfifo_fast" | egrep -q "$QDISCS" && $ECHO tc qdisc del dev $DEV root
+	tc qdisc show dev $DEV | grep -v "pfifo_fast" | grep  -q ingress && $ECHO tc qdisc del dev $DEV ingress
+
+	if [ "$INGRESS_ALG" = "ifb" ] && [ ! -z $IFB_DEV ]; then 
+		$ECHO ip link set dev $IFB_DEV down
+	fi
+}
+
+###########################################################################################################
+#
+#
+set_leaf_qdisc()
+{
+	PARENT_CLASSID=$1
+		PARENT_CLASSID=${PARENT_CLASSID:-1}
+
+	if [ ! "$QDISC_CMD" = "prio" ]; then 
+		$ECHO tc qdisc add dev $DEV parent $PARENT_CLASSID:40 handle 40 $INTERACTIVE_LEAF_QDISC
+	fi
+
+	$ECHO tc qdisc add dev $DEV parent $PARENT_CLASSID:50 handle 50 $PRIVILEGED_LEAF_QDISC
+	$ECHO tc qdisc add dev $DEV parent $PARENT_CLASSID:60 handle 60 $BESTEFFORT_LEAF_QDISC
+
+	if [ $OUT_OF_WAN_RATE -gt 0 ]; then
+		$ECHO tc qdisc add dev $DEV parent $PARENT_CLASSID:70 handle 70 $LAN_LEAF_QDISC
+	fi
+
+	$ECHO
+}
+
+###########################################################################################################
+#
+#
+set_filters()
+{
+	CLASS_TYPES="INTERACTIVE PRIVILEGED BESTEFFORT"
+		if [ $OUT_OF_WAN_RATE -gt 0 ]; then
+			CLASS_TYPES=$CLASS_TYPES" LAN"
+		fi
+
+		PRIVILEGED_FILTER_FLOWID=50
+		BESTEFFORT_FILTER_FLOWID=60
+		LAN_FILTER_FLOWID=70
+
+	{
+		for CLASS_TYPE in $CLASS_TYPES; do
+			if [ "$QDISC_CMD" = "prio" -a "$CLASS_TYPE" = "INTERACTIVE" ]; then
+				PARENT_CLASSID=1
+				INTERACTIVE_FILTER_FLOWID=1
+			else
+				PARENT_CLASSID=$1
+					PARENT_CLASSID=${PARENT_CLASSID:-1}
+				INTERACTIVE_FILTER_FLOWID=40
+			fi
+
+			for FILTER_NUM in `seq 1 100`; do
+				eval FILTER="\$$CLASS_TYPE"_FILTER_$FILTER_NUM
+				if [ ! -z "$FILTER" ]; then
+					eval FILTER_FLOWID="\$$CLASS_TYPE"_FILTER_FLOWID
+						$ECHO tc filter add dev $DEV parent $PARENT_CLASSID:0 $FILTER flowid $PARENT_CLASSID:$FILTER_FLOWID
+				fi
+			done
+		done
+	} | sort -g
+
+	$ECHO
+}
+
+###########################################################################################################
+#
+#
+set_htb()
+{
+	$ECHO tc qdisc add dev $DEV root handle 1 htb default 60
+		$ECHO tc class add dev $DEV parent 1: classid 1:2 htb rate $DEV_RATE burst $(($DEV_RATE*5/4))
+			$ECHO tc class add dev $DEV parent 1:2 classid 1:30 htb rate $WAN_SUB_RATE burst $(($WAN_SUB_RATE*5/4))
+				$ECHO tc class add dev $DEV parent 1:30 classid 1:40 htb rate $INTERACTIVE_RATE ceil $WAN_SUB_RATE prio 1
+				$ECHO tc class add dev $DEV parent 1:30 classid 1:50 htb rate $PRIVILEGED_RATE ceil $WAN_SUB_RATE prio 3 burst $(($WAN_SUB_RATE*5/4))
+				$ECHO tc class add dev $DEV parent 1:30 classid 1:60 htb rate $BESTEFFORT_RATE ceil $WAN_SUB_RATE prio 6 burst $(($WAN_SUB_RATE*5/4))
+
+				if [ $OUT_OF_WAN_RATE -gt 0 ]; then
+					$ECHO tc class add dev $DEV parent 1:2 classid 1:70 htb rate $OUT_OF_WAN_RATE prio 7
+				fi
+	
+	set_leaf_qdisc
+
+	$ECHO
+
+	set_filters
+}
+
+###########################################################################################################
+#
+#
+set_hfsc()
+{
+	$ECHO tc qdisc add dev $DEV root handle 1 hfsc default 60
+		$ECHO tc class add dev $DEV parent 1: classid 1:2 hfsc sc rate $DEV_RATE ul rate $DEV_RATE
+			$ECHO tc class add dev $DEV parent 1:2 classid 1:30 hfsc sc rate $WAN_SUB_RATE ul rate $WAN_SUB_RATE
+				$ECHO tc class add dev $DEV parent 1:30 classid 1:40 hfsc sc umax $INTERACTIVE_HFSC_UMAX dmax $INTERACTIVE_HFSC_DMAX rate $INTERACTIVE_RATE ul rate $WAN_SUB_RATE
+				$ECHO tc class add dev $DEV parent 1:30 classid 1:50 hfsc sc umax $PRIVILEGED_HFSC_UMAX dmax $PRIVILEGED_HFSC_DMAX rate $PRIVILEGED_RATE ul rate $WAN_SUB_RATE
+				$ECHO tc class add dev $DEV parent 1:30 classid 1:60 hfsc sc rate $BESTEFFORT_RATE ul rate $WAN_SUB_RATE
+
+				if [ $OUT_OF_WAN_RATE -gt 0 ]; then
+					$ECHO tc class add dev $DEV parent 1:2 classid 1:70 hfsc sc rate $OUT_OF_WAN_RATE ul rate $OUT_OF_WAN_RATE
+				fi
+
+	set_leaf_qdisc
+
+	$ECHO
+
+	set_filters
+}
+
+###########################################################################################################
+#
+#
+set_prio()
+{
+	PARENT_CLASSID=10
+	$ECHO tc qdisc add dev $DEV root handle 1 prio bands 2 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 # by default unclassified traffic goes to flowid 1:2
+		$ECHO tc qdisc add dev $DEV parent 1:1 handle 40: tbf rate $INTERACTIVE_RATE burst $WAN_SUB_RATE latency $INTERACTIVE_PRIO_LATENCY
+		$ECHO tc qdisc add dev $DEV parent 1:2 handle $PARENT_CLASSID: htb default 60
+			$ECHO tc class add dev $DEV parent $PARENT_CLASSID: classid $PARENT_CLASSID:30 htb rate $WAN_SUB_RATE
+				$ECHO tc class add dev $DEV parent $PARENT_CLASSID:30 classid $PARENT_CLASSID:50 htb rate $PRIVILEGED_RATE ceil $WAN_SUB_RATE prio 3
+				$ECHO tc class add dev $DEV parent $PARENT_CLASSID:30 classid $PARENT_CLASSID:60 htb rate $BESTEFFORT_RATE ceil $WAN_SUB_RATE prio 6
+
+				if [ $OUT_OF_WAN_RATE -gt 0 ]; then
+					$ECHO tc class add dev $DEV parent 10:1 classid $PARENT_CLASSID:70 htb rate $OUT_OF_WAN_RATE prio 7
+				fi
+
+	set_leaf_qdisc $PARENT_CLASSID
+
+	$ECHO
+
+	set_filters $PARENT_CLASSID
+}
+
+###########################################################################################################
+#
+#
+set_ifb()
+{
+	$ECHO ip link set dev $IFB_DEV up
+		$ECHO tc qdisc add dev $DEV ingress handle ffff:
+			$ECHO tc filter add dev $DEV parent ffff: protocol ip prio 10 u32 match u32 0 0 action mirred egress redirect dev $IFB_DEV > /dev/null 2>&1
+}
+
+###########################################################################################################
+#
+#
+set_police()
+{
+
+# Calculation of policing bursts
+#       burst = rate / 17 (taken basing on experemental results)
+
+	POLICE_BURST_SCALE=17
+	WAN_POLICE_BURST=$((WAN_RATE / POLICE_BURST_SCALE))
+
+	WAN_POLICE_FLOWID=1
+
+	$ECHO tc qdisc add dev $DEV handle ffff: ingress
+	$ECHO tc filter add dev $DEV parent ffff: protocol ip prio 999 u32 match ip src 0.0.0.0/0 police rate $WAN_RATE burst $WAN_POLICE_BURST drop flowid :$WAN_POLICE_FLOWID
+ 
+	$ECHO
+}
+
+###########################################################################################################
+#
+#
+set_cpolice()
+{
+
+	# Calculation of policing bursts
+	#       burst = rate / 17 (taken basing on experemental results)
+
+	POLICE_BURST_SCALE=17
+		INTERACTIVE_POLICE_BURST=$((INTERACTIVE_RATE / POLICE_BURST_SCALE))
+		PRIVILEGED_POLICE_BURST=$((PRIVILEGED_RATE / POLICE_BURST_SCALE))
+		BESTEFFORT_POLICE_BURST=$((BESTEFFORT_RATE / POLICE_BURST_SCALE))
+
+	CLASS_TYPES="INTERACTIVE PRIVILEGED"
+		INTERACTIVE_POLICE_FLOWID=1
+		PRIVILEGED_POLICE_FLOWID=2
+
+	$ECHO tc qdisc add dev $DEV handle ffff: ingress
+
+	for CLASS_TYPE in $CLASS_TYPES; do
+		for FILTER_NUM in `seq 1 100`; do
+			eval FILTER="\$$CLASS_TYPE"_FILTER_$FILTER_NUM
+				[ -z "$FILTER" ] && break
+			eval FILTER_FLOWID="\$$CLASS_TYPE"_POLICE_FLOWID
+			eval FILTER_RATE="\$$CLASS_TYPE"_RATE
+			eval FILTER_BURST="\$$CLASS_TYPE"_POLICE_BURST
+				$ECHO tc filter add dev $DEV parent ffff: $FILTER police rate $FILTER_RATE burst $FILTER_BURST continue flowid :$FILTER_FLOWID
+		done
+	done
+
+	$ECHO tc filter add dev $DEV parent ffff: protocol ip prio 999 u32 match ip src 0.0.0.0/0 police rate $BESTEFFORT_RATE burst $BESTEFFORT_POLICE_BURST drop flowid :3
+ 
+	$ECHO
+}
+
+###########################################################################################################
+#
+#
+get_stats()
+{
+	echo $DEV Statistics
+	echo
+	echo "   Classes:"
+	echo "--------------------------"
+		$ECHO tc -s class show dev $DEV
+
+	echo
+	echo "   Leaf Queuing Disciplines:"
+	echo "--------------------------"
+		$ECHO tc -s qdisc show dev $DEV
+
+	echo
+	echo "   EGRESS Filters:"
+	echo "--------------------------"
+		$ECHO tc -s filter show dev $DEV
+			$ECHO tc -s filter show dev $DEV parent 10: # if PRIO qdisc is applied
+		
+	echo
+	echo "   INGRESS Policing Filters:"
+	echo "--------------------------"
+		$ECHO tc -s filter show dev $DEV parent ffff:
+
+	echo
+}
+
+###########################################################################################################
+#
+#
+compile()
+{
+	DEBUG=1
+	
+	start
+}
+
+###########################################################################################################
+#
+#
+start()
+{
+	checkconfig || return 1
+
+	if [ $DEBUG -gt 0 ]; then 
+		ECHO="echo"
+	else
+		ebegin "Starting QoS at $DEV"
+	fi
+
+	reset
+
+	for LINK_DIRECTION in EGRESS INGRESS; do
+		configure $LINK_DIRECTION
+			eval ALG_CMD="\$$LINK_DIRECTION"_ALG
+				if [ ! "$ALG_CMD" = "none" ]; then
+					set_$ALG_CMD
+				fi
+	done
+
+	if [ $DEBUG -eq 0 ]; then
+	 	eend $?
+	fi
+}
+
+###########################################################################################################
+#
+#
+stop()
+{
+	checkconfig || return 1
+
+	if [ $DEBUG -gt 0 ]; then
+		ECHO="echo"
+	else
+		ebegin "Stopping QoS at $DEV"
+	fi
+
+	reset
+
+	if [ $DEBUG -eq 0 ]; then
+		eend $?
+	fi
+}
+
+###########################################################################################################
+#
+#
+restart()
+{
+	stop
+	start
+}
+
+###########################################################################################################
+#
+#
+describe()
+{
+	checkconfig || return 1
+
+	get_stats
+}

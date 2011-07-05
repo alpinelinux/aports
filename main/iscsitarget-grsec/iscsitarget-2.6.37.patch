@@ -1,0 +1,283 @@
+diff --git a/kernel/config.c b/kernel/config.c
+index 87fa44b..672a1e3 100644
+--- a/kernel/config.c
++++ b/kernel/config.c
+@@ -9,7 +9,7 @@
+ #include "iscsi.h"
+ #include "iscsi_dbg.h"
+
+-static DECLARE_MUTEX(ioctl_sem);
++static DEFINE_MUTEX(ioctl_mutex);
+
+ struct proc_entries {
+ 	const char *name;
+@@ -258,7 +258,7 @@ static long ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 	long err;
+ 	u32 id;
+
+-	err = down_interruptible(&ioctl_sem);
++	err = mutex_lock_interruptible(&ioctl_mutex);
+ 	if (err < 0)
+ 		return err;
+
+@@ -339,7 +339,7 @@ static long ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+
+ 	target_unlock(target);
+ done:
+-	up(&ioctl_sem);
++	mutex_unlock(&ioctl_mutex);
+
+ 	return err;
+ }
+@@ -347,9 +347,9 @@ done:
+ static int release(struct inode *i __attribute__((unused)),
+ 		   struct file *f __attribute__((unused)))
+ {
+-	down(&ioctl_sem);
++	mutex_lock(&ioctl_mutex);
+ 	target_del_all();
+-	up(&ioctl_sem);
++	mutex_unlock(&ioctl_mutex);
+
+ 	return 0;
+ }
+diff --git a/kernel/iscsi.h b/kernel/iscsi.h
+index 9ded23a..f9076f2 100644
+--- a/kernel/iscsi.h
++++ b/kernel/iscsi.h
+@@ -8,7 +8,6 @@
+ #ifndef __ISCSI_H__
+ #define __ISCSI_H__
+
+-#include <linux/blkdev.h>
+ #include <linux/completion.h>
+ #include <linux/pagemap.h>
+ #include <linux/seq_file.h>
+@@ -94,8 +93,6 @@ struct worker_thread_info {
+ 	struct list_head work_queue;
+
+ 	wait_queue_head_t wthread_sleep;
+-
+-	struct io_context *wthread_ioc;
+ };
+
+ struct iscsi_cmnd;
+@@ -130,7 +127,7 @@ struct iscsi_target {
+ 	/* Points either to own list or global pool */
+ 	struct worker_thread_info * wthread_info;
+
+-	struct semaphore target_sem;
++	struct mutex target_mutex;
+ };
+
+ struct iscsi_queue {
+diff --git a/kernel/target.c b/kernel/target.c
+index 43326dc..2df633b 100644
+--- a/kernel/target.c
++++ b/kernel/target.c
+@@ -4,6 +4,8 @@
+  * Released under the terms of the GNU GPL v2.0.
+  */
+
++#include <linux/mutex.h>
++
+ #include "iscsi.h"
+ #include "digest.h"
+ #include "iscsi_dbg.h"
+@@ -11,7 +13,7 @@
+ #define	MAX_NR_TARGETS	(1UL << 30)
+
+ static LIST_HEAD(target_list);
+-static DECLARE_MUTEX(target_list_sem);
++static DEFINE_MUTEX(target_list_mutex);
+ static u32 next_target_id;
+ static u32 nr_targets;
+
+@@ -48,16 +50,16 @@ inline int target_lock(struct iscsi_target *target, int interruptible)
+ 	int err = 0;
+
+ 	if (interruptible)
+-		err = down_interruptible(&target->target_sem);
++		err = mutex_lock_interruptible(&target->target_mutex);
+ 	else
+-		down(&target->target_sem);
++		mutex_lock(&target->target_mutex);
+
+ 	return err;
+ }
+
+ inline void target_unlock(struct iscsi_target *target)
+ {
+-	up(&target->target_sem);
++	mutex_unlock(&target->target_mutex);
+ }
+
+ static struct iscsi_target *__target_lookup_by_id(u32 id)
+@@ -86,9 +88,9 @@ struct iscsi_target *target_lookup_by_id(u32 id)
+ {
+ 	struct iscsi_target *target;
+
+-	down(&target_list_sem);
++	mutex_lock(&target_list_mutex);
+ 	target = __target_lookup_by_id(id);
+-	up(&target_list_sem);
++	mutex_unlock(&target_list_mutex);
+
+ 	return target;
+ }
+@@ -157,7 +159,7 @@ static int iscsi_target_create(struct target_info *info, u32 tid)
+
+ 	strncpy(target->name, name, sizeof(target->name) - 1);
+
+-	init_MUTEX(&target->target_sem);
++	mutex_init(&target->target_mutex);
+ 	spin_lock_init(&target->session_list_lock);
+
+ 	INIT_LIST_HEAD(&target->session_list);
+@@ -195,7 +197,7 @@ int target_add(struct target_info *info)
+ 	u32 tid = info->tid;
+ 	int err;
+
+-	err = down_interruptible(&target_list_sem);
++	err = mutex_lock_interruptible(&target_list_mutex);
+ 	if (err < 0)
+ 		return err;
+
+@@ -204,7 +206,7 @@ int target_add(struct target_info *info)
+ 		goto out;
+ 	}
+
+-	if (__target_lookup_by_name(info->name) || 
++	if (__target_lookup_by_name(info->name) ||
+ 			(tid && __target_lookup_by_id(tid))) {
+ 		err = -EEXIST;
+ 		goto out;
+@@ -223,7 +225,7 @@ int target_add(struct target_info *info)
+ 	if (!err)
+ 		nr_targets++;
+ out:
+-	up(&target_list_sem);
++	mutex_unlock(&target_list_mutex);
+
+ 	return err;
+ }
+@@ -248,7 +250,7 @@ static void target_destroy(struct iscsi_target *target)
+ 	module_put(THIS_MODULE);
+ }
+
+-/* @locking: target_list_sem must be locked */
++/* @locking: target_list_mutex must be locked */
+ static int __target_del(struct iscsi_target *target)
+ {
+ 	int err;
+@@ -283,7 +285,7 @@ int target_del(u32 id)
+ 	struct iscsi_target *target;
+ 	int err;
+
+-	err = down_interruptible(&target_list_sem);
++	err = mutex_lock_interruptible(&target_list_mutex);
+ 	if (err < 0)
+ 		return err;
+
+@@ -295,7 +297,7 @@ int target_del(u32 id)
+
+ 	err = __target_del(target);
+ out:
+-	up(&target_list_sem);
++	mutex_unlock(&target_list_mutex);
+
+ 	return err;
+ }
+@@ -305,7 +307,7 @@ void target_del_all(void)
+ 	struct iscsi_target *target, *tmp;
+ 	int err;
+
+-	down(&target_list_sem);
++	mutex_lock(&target_list_mutex);
+
+ 	if (!list_empty(&target_list))
+ 		iprintk("Removing all connections, sessions and targets\n");
+@@ -319,7 +321,7 @@ void target_del_all(void)
+
+ 	next_target_id = 0;
+
+-	up(&target_list_sem);
++	mutex_unlock(&target_list_mutex);
+ }
+
+ static void *iet_seq_start(struct seq_file *m, loff_t *pos)
+@@ -327,7 +329,7 @@ static void *iet_seq_start(struct seq_file *m, loff_t *pos)
+ 	int err;
+
+ 	/* are you sure this is to be interruptible? */
+-	err = down_interruptible(&target_list_sem);
++	err = mutex_lock_interruptible(&target_list_mutex);
+ 	if (err < 0)
+ 		return ERR_PTR(err);
+
+@@ -341,7 +343,7 @@ static void *iet_seq_next(struct seq_file *m, void *v, loff_t *pos)
+
+ static void iet_seq_stop(struct seq_file *m, void *v)
+ {
+-	up(&target_list_sem);
++	mutex_unlock(&target_list_mutex);
+ }
+
+ static int iet_seq_show(struct seq_file *m, void *p)
+diff --git a/kernel/volume.c b/kernel/volume.c
+index 2c9a698..ecffa21 100644
+--- a/kernel/volume.c
++++ b/kernel/volume.c
+@@ -6,6 +6,7 @@
+
+ #include <linux/types.h>
+ #include <linux/parser.h>
++#include <linux/blkdev.h>
+
+ #include "iscsi.h"
+ #include "iscsi_dbg.h"
+diff --git a/kernel/wthread.c b/kernel/wthread.c
+index 997a3d6..884c03a 100644
+--- a/kernel/wthread.c
++++ b/kernel/wthread.c
+@@ -67,15 +67,6 @@ static int worker_thread(void *arg)
+ 	struct iscsi_conn *conn;
+ 	DECLARE_WAITQUEUE(wait, current);
+
+-	get_io_context(GFP_KERNEL, -1);
+-
+-	if (!current->io_context)
+-		eprintk("%s\n", "Failed to get IO context");
+-	else if (info->wthread_ioc)
+-		copy_io_context(&current->io_context, &info->wthread_ioc);
+-	else
+-		info->wthread_ioc = current->io_context;
+-
+ 	add_wait_queue(&info->wthread_sleep, &wait);
+
+ 	__set_current_state(TASK_RUNNING);
+@@ -100,16 +91,6 @@ static int worker_thread(void *arg)
+
+ 	remove_wait_queue(&info->wthread_sleep, &wait);
+
+-	if (current->io_context) {
+-		struct io_context *ioc = current->io_context;
+-
+-		task_lock(current);
+-		current->io_context = NULL;
+-		task_unlock(current);
+-
+-		put_io_context(ioc);
+-	}
+-
+ 	return 0;
+ }
+
+@@ -160,7 +141,6 @@ int wthread_init(struct worker_thread_info *info)
+ 	spin_lock_init(&info->wthread_lock);
+
+ 	info->nr_running_wthreads = 0;
+-	info->wthread_ioc = NULL;
+
+ 	INIT_LIST_HEAD(&info->work_queue);
+ 	INIT_LIST_HEAD(&info->wthread_list);

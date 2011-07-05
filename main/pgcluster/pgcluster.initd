@@ -1,0 +1,173 @@
+#!/sbin/runscript
+# Copyright 1999-2008 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+# $Header: /var/cvsroot/gentoo-x86/dev-db/postgresql-server/files/postgresql.init-8.3,v 1.4 2008/09/28 22:53:02 caleb Exp $
+
+opts="${opts} reload setup"
+
+depend() {
+	use net
+	after firewall
+	provide postgresql
+}
+
+checkconfig() {
+	if [ ! -d "$PGDATA" ] ; then
+		eerror "Directory not found: $PGDATA"
+		eerror "Please make sure that PGDATA points to the right path."
+		eerror "You can run '/etc/init.d/pgcluster setup' to setup a new database cluster."
+		return 1
+	fi
+}
+
+start() {
+	checkconfig || return 1
+
+	#ebegin "Starting PostgreSQL"
+
+	if [ -f "$PGDATA/postmaster.pid" ] ; then
+		rm -f "$PGDATA/postmaster.pid"
+	fi
+
+	local retval
+
+	if [ ${PG_START_DB} == "yes" ]; then 
+		ebegin "Starting PGCluster database instance"
+		su -l ${PGUSER} \
+			-c "env PGDATA=\"${PGDATA}\" /usr/bin/pg_ctl start ${WAIT_FOR_START} -o '--silent-mode=true ${PGOPTS}'" >/dev/null
+		retval=$?
+		if [ $retval -ne 0 ]; then
+			eend $retval 
+		else
+
+			# The following is to catch the case of an already running server
+			# in which pg_ctl doesn't know to which server it connected to and false reports the server as 'up'
+			sleep 2
+			if [ ! -f "$PGDATA/postmaster.pid" ] ; then
+				eerror "The pid-file doesn't exist but pg_ctl reported a running server."
+				eerror "Please check whether there is another server running on the same port or read the log-file."
+				eend 1 
+			else
+				local pid=$(grep "^[0-9]\+" "$PGDATA/postmaster.pid")
+				test -d /proc/"${pid}" 
+				eend $?
+			fi
+		fi
+	fi
+
+	if [ ${PG_START_REPLICATE} == "yes" ]; then
+		ebegin "Starting PGCluster replicate instance"
+		su -l ${PGUSER} \
+			-c "env PGDATA=\"${PGDATA}\" /usr/bin/pgreplicate -D ${PGDATA} -l" >/dev/null
+		retval=$?
+		sleep 1
+		if [ ! -f "$PGDATA/pgreplicate.pid" ] ; then
+			eerror "Where's the pid file?"
+			eend 1 
+		else
+			local pid=$(grep "^[0-9]\+" "$PGDATA/pgreplicate.pid")
+			test -d /proc/"${pid}" 
+			eend $?
+		fi
+	fi
+
+	if [ ${PG_START_LB} == "yes" ]; then
+		ebegin "Starting PGCluster load balancer instance"
+		su -l ${PGUSER} \
+			-c "env PGDATA=\"${PGDATA}\" /usr/bin/pglb -D ${PGDATA} -l" >/dev/null
+		retval=$?
+		sleep 1
+		if [ ! -f "$PGDATA/pglb.pid" ] ; then
+			eerror "Where's the pid file?"
+			eend 1 
+		else
+			local pid=$(grep "^[0-9]\+" "$PGDATA/pglb.pid")
+			test -d /proc/"${pid}" 
+			eend $?
+		fi
+	fi
+	return
+}
+
+stop() {
+	local retval
+
+	if [ ${PG_START_LB} == "yes" ]; then
+		ebegin "Stopping PGCluster Load Balancer instance"
+		su -l ${PGUSER} \
+			-c "env PGDATA=\"${PGDATA}\" /usr/bin/pglb -D ${PGDATA} -l stop" >/dev/null
+		eend $?
+	fi
+	if [ ${PG_START_REPLICATE} == "yes" ]; then
+		ebegin "Stopping PGCluster Replicate instance"
+		su -l ${PGUSER} \
+			-c "env PGDATA=\"${PGDATA}\" /usr/bin/pgreplicate -D ${PGDATA} -l stop" >/dev/null
+		eend $?
+	fi
+
+
+	if [ ${PG_START_DB} == "yes" ]; then 
+		ebegin "Stopping PGCLuster database (this can take up to $(( ${WAIT_FOR_DISCONNECT} + ${WAIT_FOR_CLEANUP} )) seconds)"
+		if [ ! -f "$PGDATA/postmaster.pid" ] ; then
+			ewarn "$PGDATA/postmaster.pid not found. Was it running?"
+			eend 1
+			return 0
+		fi
+		su -l ${PGUSER} \
+			-c "env PGDATA=\"${PGDATA}\" /usr/bin/pg_ctl stop -t ${WAIT_FOR_DISCONNECT} -m smart" >/dev/null
+
+		retval=$?
+		[ $retval -eq 0 ] && eend $retval && return $retval
+
+		ewarn "Some clients did not disconnect within ${WAIT_FOR_DISCONNECT} seconds."
+		ewarn "Going to shutdown the server anyway."
+
+		su -l ${PGUSER} \
+			-c "env PGDATA=\"${PGDATA}\" /usr/bin/pg_ctl stop -m fast" >/dev/null
+
+		retval=$?
+		[ $retval -eq 0 ] && eend $retval && return $retval
+
+		if [ ${WAIT_FOR_QUIT} -eq 0 ] ; then
+			eerror "Server did not shut down and sending the SIGQUIT has been disabled."
+			eend $retval
+			return $retval
+		fi
+
+		ewarn "Shutting down the server gracefully failed."
+		ewarn "Forcing it to shutdown which leads to a recover-run on next startup."
+
+		su -l ${PGUSER} \
+			-c "env PGDATA=\"${PGDATA}\" /usr/bin/pg_ctl stop -m immediate" >/dev/null
+
+		retval=$?
+		[ $retval -eq 0 ] && eend $retval && return $retval
+
+		eerror "Forced shutdown failed!!! Something is wrong with your system, please take care of it manually."
+		eend $?
+	fi
+}
+
+reload() {
+	ebegin "Reloading PostgreSQL configuration"
+	su -l ${PGUSER} \
+		-c "env PGDATA=\"${PGDATA}\" /usr/bin/pg_ctl reload" >/dev/null
+	eend $?
+}
+
+setup() { 
+	ebegin "Creating a new PGCluster database cluster" 
+	if [ -d "${PGDATA}" ] ; then 
+		eend 1 "${PGDATA} already exist" 
+		return 
+	fi 
+	mkdir -p "${PGDATA}" 
+	chown -Rf postgres:postgres "${PGDATA}" 
+	chmod 0700 "${PGDATA}" 
+	cd "${PGDATA}" # to avoid the: could not change directory to "/root" 
+	su -c "/usr/bin/initdb --pgdata ${PGDATA}" postgres
+	einfo "You can use the '/etc/init.d/pgcluster' script to run PostgreSQL instead"
+	einfo "of 'pg_ctl'."
+	eend $? 
+} 
+

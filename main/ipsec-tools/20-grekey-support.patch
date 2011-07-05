@@ -1,0 +1,786 @@
+Index: ipsec-tools-cvs-HEAD/src/racoon/racoonctl.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/racoonctl.c	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/racoonctl.c	2011-03-29 22:08:43.000000000 +0300
+@@ -232,7 +232,7 @@
+ "\n"
+ "    <saopts>: \"isakmp\" <family> <src> <dst>\n"
+ "            : {\"esp\",\"ah\"} <family> <src/prefixlen/port> <dst/prefixlen/port>\n"
+-"                              <ul_proto>\n"
++"                              <ul_proto> [grekey <grekey>]\n"
+ "    <family>: \"inet\" or \"inet6\"\n"
+ "    <ul_proto>: \"icmp\", \"tcp\", \"udp\", \"gre\" or \"any\"\n"
+ "\n",
+@@ -819,7 +819,7 @@
+ {
+ 	int family;
+ 
+-	if (ac != 3 && ac != 4) {
++	if (ac < 3) {
+ 		errno = EINVAL;
+ 		return NULL;
+ 	}
+@@ -861,10 +861,8 @@
+ 	struct sockaddr *src = NULL, *dst = NULL;
+ 	int ulproto;
+ 
+-	if (ac != 2 && ac != 3) {
+-		errno = EINVAL;
+-		return NULL;
+-	}
++	if (ac < 2)
++		goto bad_args;
+ 
+ 	if (get_comindex(*av, &p_name, &p_port, &p_prefs) == -1)
+ 		goto bad;
+@@ -901,13 +899,34 @@
+ 
+ 	av++;
+ 	ac--;
+-	if(ac){
++	if (ac) {
+ 		ulproto = get_ulproto(*av);
+ 		if (ulproto == -1)
+ 			goto bad;
+-	}else
++		av++;
++		ac--;
++	} else
+ 		ulproto=0;
+ 
++	if (ac == 2 && strcmp(av[0], "grekey") == 0) {
++		int a, b, c, d;
++		unsigned long u;
++
++		if (sscanf(av[1], "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
++			set_port(src, (a << 8) + b);
++			set_port(dst, (c << 8) + d);
++		} else if (sscanf(av[1], "%lu", &u) == 1) {
++			set_port(src, u >> 16);
++			set_port(dst, u & 0xffff);
++		} else
++			goto bad_args;
++		av += 2;
++		ac -= 2;
++	}
++
++	if (ac != 0)
++		goto bad_args;
++
+ 	ci = (struct admin_com_indexes *)buf->v;
+ 	if(p_prefs)
+ 		ci->prefs = (u_int8_t)atoi(p_prefs); /* XXX should be handled error. */
+@@ -926,7 +945,9 @@
+ 
+ 	return buf;
+ 
+-   bad:
++bad_args:
++	errno = EINVAL;
++bad:
+ 	if (p_name)
+ 		racoon_free(p_name);
+ 	if (p_port)
+Index: ipsec-tools-cvs-HEAD/src/racoon/admin.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/admin.c	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/admin.c	2011-03-30 09:41:46.000000000 +0300
+@@ -444,7 +444,7 @@
+ 
+ 			/* search appropreate configuration */
+ 			if (name == NULL)
+-				rmconf = getrmconf(dst, 0);
++				rmconf = getrmconf(dst, 0, 0);
+ 			else
+ 				rmconf = getrmconf_by_name(name);
+ 			if (rmconf == NULL) {
+@@ -536,6 +536,7 @@
+ 			spidx.prefs = ndx->prefd;
+ 			spidx.prefd = ndx->prefs;
+ 			spidx.ul_proto = ndx->ul_proto;
++			spidx_normalize_ulports(&spidx);
+ 
+ 			sp_in = getsp_r(&spidx);
+ 			if (sp_in) {
+Index: ipsec-tools-cvs-HEAD/src/racoon/cftoken.l
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/cftoken.l	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/cftoken.l	2011-03-29 22:08:43.000000000 +0300
+@@ -288,6 +288,7 @@
+ <S_SAINF>any		{ YYD; return(ANY); }
+ <S_SAINF>from		{ YYD; return(FROM); }
+ <S_SAINF>group		{ YYD; return(GROUP); }
++<S_SAINF>grekey		{ YYD; return(GREKEY); }
+ 	/* sainfo spec */
+ <S_SAINF>{bcl}		{ BEGIN S_SAINFS; return(BOC); }
+ <S_SAINF>{semi}		{ BEGIN S_INI; return(EOS); }
+Index: ipsec-tools-cvs-HEAD/src/racoon/cfparse.y
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/cfparse.y	2011-03-14 19:12:41.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/cfparse.y	2011-03-29 22:08:43.000000000 +0300
+@@ -214,7 +214,7 @@
+ 	/* algorithm */
+ %token ALGORITHM_CLASS ALGORITHMTYPE STRENGTHTYPE
+ 	/* sainfo */
+-%token SAINFO FROM
++%token SAINFO FROM GREKEY
+ 	/* remote */
+ %token REMOTE ANONYMOUS CLIENTADDR INHERIT REMOTE_ADDRESS
+ %token EXCHANGE_MODE EXCHANGETYPE DOI DOITYPE SITUATION SITUATIONTYPE
+@@ -1302,6 +1302,35 @@
+ 			cur_sainfo->idsrc = $1;
+ 			cur_sainfo->iddst = $2;
+ 		}
++	|	sainfo_id sainfo_id GREKEY ADDRSTRING
++		{
++			int a, b, c, d;
++
++			if (sscanf($4->v, "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
++				a = ipsecdoi_fixup_id_uldata(
++					$1, $2, IPPROTO_GRE,
++					(a << 8) + b, (c << 8) + d);
++			} else {
++				yyerror("grekey format unrecognized.");
++				return -1;
++			}
++			if (a != 0) {
++				yyerror("ul_proto needs to be 'gre' to use grekey.");
++				return -1;
++			}
++			cur_sainfo->idsrc = $1;
++			cur_sainfo->iddst = $2;
++		}
++	|	sainfo_id sainfo_id GREKEY NUMBER
++		{
++			if (ipsecdoi_fixup_id_uldata($1, $2, IPPROTO_GRE,
++						     ($4) >> 16, ($4) & 0xffff) != 0) {
++				yyerror("ul_proto needs to be 'gre' to use grekey.");
++				return -1;
++			}
++			cur_sainfo->idsrc = $1;
++			cur_sainfo->iddst = $2;
++		}
+ 	;
+ sainfo_id
+ 	:	IDENTIFIERTYPE ADDRSTRING prefix port ul_proto
+@@ -1668,7 +1697,7 @@
+ 		{
+ 			struct remoteconf *from, *new;
+ 
+-			from = getrmconf($4, GETRMCONF_F_NO_ANONYMOUS);
++			from = getrmconf($4, GETRMCONF_F_NO_ANONYMOUS, 0);
+ 			if (from == NULL) {
+ 				yyerror("failed to get remoteconf for %s.",
+ 					saddr2str($4));
+Index: ipsec-tools-cvs-HEAD/src/racoon/ipsec_doi.h
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/ipsec_doi.h	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/ipsec_doi.h	2011-03-30 09:22:13.000000000 +0300
+@@ -227,6 +227,10 @@
+ extern int set_identifier_qual __P((vchar_t **, int, vchar_t *, int));
+ extern int ipsecdoi_setid2 __P((struct ph2handle *));
+ extern vchar_t *ipsecdoi_sockaddr2id __P((struct sockaddr *, u_int, u_int));
++extern int ipsecdoi_fixup_id_uldata __P((vchar_t *, vchar_t *, u_int16_t, u_int16_t, u_int16_t));
++extern int ipsecdoi_normalize_id_uldata __P((vchar_t *, vchar_t *));
++extern int ipsecdoi_id_has_port __P((vchar_t *));
++
+ extern int ipsecdoi_id2sockaddr __P((vchar_t *, struct sockaddr *,
+ 	u_int8_t *, u_int16_t *));
+ extern char *ipsecdoi_id2str __P((const vchar_t *));
+Index: ipsec-tools-cvs-HEAD/src/racoon/ipsec_doi.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/ipsec_doi.c	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/ipsec_doi.c	2011-03-30 16:59:49.000000000 +0300
+@@ -3308,6 +3308,7 @@
+ 	const vchar_t *subnet;
+ 	const vchar_t *address;
+ {
++	struct in_addr *a, *b;
+ 	struct in_addr *mask;
+ 
+ 	if (address->l != sizeof(struct in_addr))
+@@ -3316,12 +3317,15 @@
+ 	if (subnet->l != (sizeof(struct in_addr)*2))
+ 		return 1;
+ 
++	a = (struct in_addr*)(subnet->v);
++	b = (struct in_addr*)(address->v);
+ 	mask = (struct in_addr*)(subnet->v + sizeof(struct in_addr));
+ 
+-	if (mask->s_addr!=0xffffffff)
+-		return 1;
++	//if (mask->s_addr!=0xffffffff)
++	//	return 1;
++	//return memcmp(subnet->v,address->v,address->l);
+ 
+-	return memcmp(subnet->v,address->v,address->l);
++	return (a->s_addr & mask->s_addr) != (b->s_addr & mask->s_addr);
+ }
+ 
+ #ifdef INET6
+@@ -3371,6 +3375,7 @@
+ 	vchar_t ident_t;
+ 	vchar_t ident_s;
+ 	int result;
++	int check_ports = 0;
+ 
+ 	/* handle wildcard IDs */
+ 
+@@ -3410,12 +3415,14 @@
+ 
+ 		if ((id_bs->type == IPSECDOI_ID_IPV4_ADDR)&&
+ 		    (id_bt->type == IPSECDOI_ID_IPV4_ADDR_SUBNET)) {
++			check_ports = 1;
+ 			result = ipsecdoi_subnetisaddr_v4(&ident_t,&ident_s);
+ 			goto cmpid_result;
+ 		}
+ 
+ 		if ((id_bs->type == IPSECDOI_ID_IPV4_ADDR_SUBNET)&&
+ 		    (id_bt->type == IPSECDOI_ID_IPV4_ADDR)) {
++			check_ports = 1;
+ 			result = ipsecdoi_subnetisaddr_v4(&ident_s,&ident_t);
+ 			goto cmpid_result;
+ 		}
+@@ -3423,12 +3430,14 @@
+ #ifdef INET6
+ 		if ((id_bs->type == IPSECDOI_ID_IPV6_ADDR)&&
+ 		    (id_bt->type == IPSECDOI_ID_IPV6_ADDR_SUBNET)) {
++			check_ports = 1;
+ 			result = ipsecdoi_subnetisaddr_v6(&ident_t,&ident_s);
+ 			goto cmpid_result;
+ 		}
+ 
+ 		if ((id_bs->type == IPSECDOI_ID_IPV6_ADDR_SUBNET)&&
+ 		    (id_bt->type == IPSECDOI_ID_IPV6_ADDR)) {
++			check_ports = 1;
+ 			result = ipsecdoi_subnetisaddr_v6(&ident_s,&ident_t);
+ 			goto cmpid_result;
+ 		}
+@@ -3460,6 +3469,7 @@
+ 
+ 		case IPSECDOI_ID_IPV4_ADDR:
+ 			/* validate lengths */
++			check_ports = 1;
+ 			if ((ident_t.l != sizeof(struct in_addr))||
+ 			    (ident_s.l != sizeof(struct in_addr)))
+ 				goto cmpid_invalid;
+@@ -3468,6 +3478,7 @@
+ 		case IPSECDOI_ID_IPV4_ADDR_SUBNET:
+ 		case IPSECDOI_ID_IPV4_ADDR_RANGE:
+ 			/* validate lengths */
++			check_ports = 1;
+ 			if ((ident_t.l != (sizeof(struct in_addr)*2))||
+ 			    (ident_s.l != (sizeof(struct in_addr)*2)))
+ 				goto cmpid_invalid;
+@@ -3476,6 +3487,7 @@
+ #ifdef INET6
+ 		case IPSECDOI_ID_IPV6_ADDR:
+ 			/* validate lengths */
++			check_ports = 1;
+ 			if ((ident_t.l != sizeof(struct in6_addr))||
+ 			    (ident_s.l != sizeof(struct in6_addr)))
+ 				goto cmpid_invalid;
+@@ -3484,6 +3496,7 @@
+ 		case IPSECDOI_ID_IPV6_ADDR_SUBNET:
+ 		case IPSECDOI_ID_IPV6_ADDR_RANGE:
+ 			/* validate lengths */
++			check_ports = 1;
+ 			if ((ident_t.l != (sizeof(struct in6_addr)*2))||
+ 			    (ident_s.l != (sizeof(struct in6_addr)*2)))
+ 				goto cmpid_invalid;
+@@ -3502,12 +3515,18 @@
+ 	}
+ 
+ 	/* validate matching data and length */
+-	if (ident_t.l == ident_s.l)
+-		result = memcmp(ident_t.v,ident_s.v,ident_t.l);
+-	else
++	if (ident_t.l != ident_s.l)
+ 		result = 1;
++	else
++		result = memcmp(ident_t.v,ident_s.v,ident_t.l);
+ 
+ cmpid_result:
++	if (check_ports &&
++	    (id_bt->port != id_bs->port && id_bs->port != 0))  {
++		/* if target is wildcard, source should be too, otherwise
++		 * specific rule matches wildcard request */
++		result = 1;
++	}
+ 
+ 	/* debug level output */
+ 	if(loglevel >= LLV_DEBUG) {
+@@ -4089,6 +4108,67 @@
+ 	return new;
+ }
+ 
++int ipsecdoi_fixup_id_uldata(srcid, dstid, ul_proto, ul_data1, ul_data2)
++	vchar_t *srcid, *dstid;
++	u_int16_t ul_proto;
++	u_int16_t ul_data1, ul_data2;
++{
++	struct ipsecdoi_id_b *src = (struct ipsecdoi_id_b *) srcid->v;
++	struct ipsecdoi_id_b *dst = (struct ipsecdoi_id_b *) dstid->v;
++
++	if (src->proto_id != ul_proto ||
++	    dst->proto_id != ul_proto)
++		return -1;
++
++	src->port = htons(ul_data1);
++	dst->port = htons(ul_data2);
++
++	return 0;
++}
++
++int ipsecdoi_normalize_id_uldata(srcid, dstid)
++	vchar_t *srcid, *dstid;
++{
++	struct ipsecdoi_id_b *src = (struct ipsecdoi_id_b *) srcid->v;
++	struct ipsecdoi_id_b *dst = (struct ipsecdoi_id_b *) dstid->v;
++	u_int16_t tmp;
++
++	if (src->proto_id != dst->proto_id)
++		return -1;
++
++	switch (src->proto_id) {
++	case IPPROTO_ICMP:
++	case IPPROTO_ICMPV6:
++	case IPPROTO_GRE:
++		tmp = src->port;
++		src->port = dst->port;
++		dst->port = tmp;
++		break;
++	}
++
++	return 0;
++}
++
++int ipsecdoi_id_has_port(id)
++	vchar_t *id;
++{
++	struct ipsecdoi_id_b *id_b = (struct ipsecdoi_id_b *) id->v;
++
++	switch (id_b->type) {
++	case IPSECDOI_ID_IPV4_ADDR:
++	case IPSECDOI_ID_IPV4_ADDR_SUBNET:
++	case IPSECDOI_ID_IPV4_ADDR_RANGE:
++	case IPSECDOI_ID_IPV6_ADDR:
++	case IPSECDOI_ID_IPV6_ADDR_SUBNET:
++	case IPSECDOI_ID_IPV6_ADDR_RANGE:
++		if (ntohs(id_b->port) != 0)
++			return 1;
++		break;
++	}
++	return 0;
++}
++
++
+ vchar_t *
+ ipsecdoi_sockrange2id(laddr, haddr, ul_proto)
+ 	struct sockaddr *laddr, *haddr;
+@@ -4318,7 +4398,7 @@
+ 		saddr.sa.sa_len = sizeof(struct sockaddr_in);
+ #endif
+ 		saddr.sa.sa_family = AF_INET;
+-		saddr.sin.sin_port = IPSEC_PORT_ANY;
++		saddr.sin.sin_port = id_b->port;
+ 		memcpy(&saddr.sin.sin_addr,
+ 			id->v + sizeof(*id_b), sizeof(struct in_addr));
+ 		break;
+@@ -4331,7 +4411,7 @@
+ 		saddr.sa.sa_len = sizeof(struct sockaddr_in6);
+ #endif
+ 		saddr.sa.sa_family = AF_INET6;
+-		saddr.sin6.sin6_port = IPSEC_PORT_ANY;
++		saddr.sin6.sin6_port = id_b->port;
+ 		memcpy(&saddr.sin6.sin6_addr,
+ 			id->v + sizeof(*id_b), sizeof(struct in6_addr));
+ 		saddr.sin6.sin6_scope_id =
+@@ -4347,7 +4427,7 @@
+ #ifdef INET6
+ 	case IPSECDOI_ID_IPV6_ADDR:
+ #endif
+-		len = snprintf( buf, BUFLEN, "%s", saddrwop2str(&saddr.sa));
++		len = snprintf( buf, BUFLEN, "%s", saddr2str(&saddr.sa));
+ 		break;
+ 
+ 	case IPSECDOI_ID_IPV4_ADDR_SUBNET:
+@@ -4403,7 +4483,9 @@
+ 			plen += l;
+ 		}
+ 
+-		len = snprintf( buf, BUFLEN, "%s/%i", saddrwop2str(&saddr.sa), plen);
++		len = snprintf(buf, BUFLEN, "%s/%i[%d]",
++			       saddrwop2str(&saddr.sa), plen,
++			       ntohs(id_b->port));
+ 	    }
+ 		break;
+ 
+@@ -4415,12 +4497,12 @@
+ 		saddr.sa.sa_len = sizeof(struct sockaddr_in);
+ #endif
+ 		saddr.sa.sa_family = AF_INET;
+-		saddr.sin.sin_port = IPSEC_PORT_ANY;
++		saddr.sin.sin_port = id_b->port;
+ 		memcpy(&saddr.sin.sin_addr,
+ 			id->v + sizeof(*id_b) + sizeof(struct in_addr),
+ 			sizeof(struct in_addr));
+ 
+-		len += snprintf(buf + len, BUFLEN - len, "%s", saddrwop2str(&saddr.sa));
++		len += snprintf(buf + len, BUFLEN - len, "%s", saddr2str(&saddr.sa));
+ 		break;
+ 
+ #ifdef INET6
+@@ -4431,7 +4513,7 @@
+ 		saddr.sa.sa_len = sizeof(struct sockaddr_in6);
+ #endif
+ 		saddr.sa.sa_family = AF_INET6;
+-		saddr.sin6.sin6_port = IPSEC_PORT_ANY;
++		saddr.sin6.sin6_port = id_b->port;
+ 		memcpy(&saddr.sin6.sin6_addr,
+ 			id->v + sizeof(*id_b) + sizeof(struct in6_addr),
+ 			sizeof(struct in6_addr));
+@@ -4440,7 +4522,7 @@
+ 				? ((struct sockaddr_in6 *)id_b)->sin6_scope_id
+ 				: 0);
+ 
+-		len += snprintf(buf + len, BUFLEN - len, "%s", saddrwop2str(&saddr.sa));
++		len += snprintf(buf + len, BUFLEN - len, "%s", saddr2str(&saddr.sa));
+ 		break;
+ #endif
+ 
+Index: ipsec-tools-cvs-HEAD/src/racoon/sainfo.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/sainfo.c	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/sainfo.c	2011-03-29 22:08:44.000000000 +0300
+@@ -124,7 +124,7 @@
+ 		plog(LLV_DEBUG, LOCATION, NULL,
+ 			"evaluating sainfo: %s\n", sainfostr);
+ 
+-		if(s->remoteid != remoteid) {
++		if (remoteid != -1 && s->remoteid != remoteid) {
+ 			plog(LLV_DEBUG, LOCATION, NULL,
+ 				"remoteid mismatch: %u != %u\n",
+ 				s->remoteid, remoteid);
+@@ -234,16 +234,22 @@
+ 	int pri = 0;
+ 
+ 	if(s->remoteid)
+-		pri += 3;
++		pri += 7;
+ 
+ 	if(s->id_i)
+-		pri += 3;
++		pri += 7;
+ 
+-	if(s->idsrc)
++	if(s->idsrc) {
+ 		pri++;
++		if (ipsecdoi_id_has_port(s->idsrc))
++			pri += 2;
++	}
+ 
+-	if(s->iddst)
++	if(s->iddst) {
+ 		pri++;
++		if (ipsecdoi_id_has_port(s->iddst))
++			pri += 2;
++	}
+ 
+ 	return pri;
+ }
+Index: ipsec-tools-cvs-HEAD/src/racoon/isakmp.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/isakmp.c	2011-03-14 19:18:12.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/isakmp.c	2011-03-30 09:41:46.000000000 +0300
+@@ -2173,7 +2173,15 @@
+ 	 * so no need to bother yet. --arno */
+ 
+ 	if (iph1hint == NULL || iph1hint->rmconf == NULL) {
+-		rmconf = getrmconf(iph2->dst, nopassive ? GETRMCONF_F_NO_PASSIVE : 0);
++		int flags = 0;
++		uint32_t remoteid;
++		if (nopassive)
++			flags |= GETRMCONF_F_NO_PASSIVE;
++		if (iph2->sainfo != NULL) {
++			flags |= GETRMCONF_F_HAS_REMOTEID;
++			remoteid = iph2->sainfo->remoteid;
++		}
++		rmconf = getrmconf(iph2->dst, flags, remoteid);
+ 		if (rmconf == NULL) {
+ 			plog(LLV_ERROR, LOCATION, NULL,
+ 				"no configuration found for %s.\n",
+@@ -2249,7 +2257,7 @@
+ 	struct secpolicy *sp_out, *sp_in;
+ {
+ 	struct remoteconf *conf;
+-	uint32_t remoteid = 0;
++	uint32_t remoteid = -1;
+ 
+ 	plog(LLV_DEBUG, LOCATION, NULL,
+ 		"new acquire %s\n", spidx2str(&sp_out->spidx));
+@@ -2276,7 +2284,7 @@
+ 			return -1;
+ 		}
+ 
+-		conf = getrmconf(iph2->dst, 0);
++		conf = getrmconf(iph2->dst, 0, 0);
+ 		if (conf != NULL)
+ 			remoteid = conf->ph1id;
+ 		else
+@@ -3582,6 +3590,8 @@
+ 
+ #undef _XIDT
+ 
++	spidx_normalize_ulports(&spidx);
++
+ 	plog(LLV_DEBUG, LOCATION, NULL,
+ 		 "get a src address from ID payload "
+ 		 "%s prefixlen=%u ul_proto=%u\n",
+@@ -3654,6 +3664,7 @@
+ 	pref = spidx.prefs;
+ 	spidx.prefs = spidx.prefd;
+ 	spidx.prefd = pref;
++	spidx_normalize_ulports(&spidx);
+ 
+ 	if (pk_sendspddelete(iph2) < 0) {
+ 		plog(LLV_ERROR, LOCATION, NULL,
+Index: ipsec-tools-cvs-HEAD/src/racoon/remoteconf.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/remoteconf.c	2011-03-14 19:12:41.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/remoteconf.c	2011-03-29 22:08:44.000000000 +0300
+@@ -217,6 +217,13 @@
+ 		return MATCH_NONE;
+ 	}
+ 
++	if ((rmsel->flags & GETRMCONF_F_HAS_REMOTEID) &&
++	    rmsel->remoteid != rmconf->ph1id){
++		plog(LLV_DEBUG2, LOCATION, rmsel->remote,
++		     "Not matched: remote_id did not match.\n");
++		return MATCH_NONE;
++	}
++
+ 	ret |= MATCH_BASIC;
+ 
+ 	/* Check address */
+@@ -387,9 +394,10 @@
+  */
+ 
+ struct remoteconf *
+-getrmconf(remote, flags)
++getrmconf(remote, flags, remoteid)
+ 	struct sockaddr *remote;
+ 	int flags;
++	uint32_t remoteid;
+ {
+ 	struct rmconf_find_context ctx;
+ 	int n = 0;
+@@ -397,6 +405,7 @@
+ 	memset(&ctx, 0, sizeof(ctx));
+ 	ctx.sel.flags = flags;
+ 	ctx.sel.remote = remote;
++	ctx.sel.remoteid = remoteid;
+ 
+ 	if (enumrmconf(&ctx.sel, rmconf_find, &ctx) != 0) {
+ 		plog(LLV_ERROR, LOCATION, remote,
+Index: ipsec-tools-cvs-HEAD/src/racoon/remoteconf.h
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/remoteconf.h	2011-03-14 19:12:41.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/remoteconf.h	2011-03-29 22:08:44.000000000 +0300
+@@ -178,6 +178,7 @@
+ 	int flags;
+ 	struct sockaddr *remote;
+ 	int etype;
++	uint32_t remoteid;
+ 	struct isakmpsa *approval;
+ 	vchar_t *identity;
+ 	vchar_t *certificate_request;
+@@ -191,12 +192,13 @@
+ 
+ #define GETRMCONF_F_NO_ANONYMOUS	0x0001
+ #define GETRMCONF_F_NO_PASSIVE		0x0002
++#define GETRMCONF_F_HAS_REMOTEID	0x0004
+ 
+ #define RMCONF_ERR_MULTIPLE		((struct remoteconf *) -1)
+ 
+ extern int rmconf_match_identity __P((struct remoteconf *rmconf,
+ 				      vchar_t *id_p));
+-extern struct remoteconf *getrmconf __P((struct sockaddr *remote, int flags));
++extern struct remoteconf *getrmconf __P((struct sockaddr *remote, int flags, uint32_t remoteid));
+ extern struct remoteconf *getrmconf_by_ph1 __P((struct ph1handle *iph1));
+ extern struct remoteconf *getrmconf_by_name __P((const char *name));
+ 
+Index: ipsec-tools-cvs-HEAD/src/racoon/pfkey.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/pfkey.c	2011-03-14 19:18:13.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/pfkey.c	2011-03-30 08:21:09.000000000 +0300
+@@ -1886,6 +1886,7 @@
+ 	spidx.prefs = sp_out->spidx.prefd;
+ 	spidx.prefd = sp_out->spidx.prefs;
+ 	spidx.ul_proto = sp_out->spidx.ul_proto;
++	spidx_normalize_ulports(&spidx);
+ 
+ #ifdef HAVE_SECCTX
+ 	if (m_sec_ctx) {
+@@ -2898,7 +2899,7 @@
+ 
+ 		/* If we are not acting as initiator, let's just leave and
+ 		 * let the remote peer handle the restart */
+-		rmconf = getrmconf(ma->remote, 0);
++		rmconf = getrmconf(ma->remote, 0, 0);
+ 		if (rmconf == NULL || !rmconf->passive) {
+ 			iph1->status = PHASE1ST_EXPIRED;
+ 			sched_schedule(&iph1->sce, 1, isakmp_ph1delete_stub);
+@@ -3068,8 +3069,10 @@
+ 
+ 		if (iph2->ph1 && iph2->ph1->rmconf)
+ 			rmconf = iph2->ph1->rmconf;
++		else if (iph2->sainfo != NULL)
++			rmconf = getrmconf(iph2->dst, GETRMCONF_F_HAS_REMOTEID, iph2->sainfo->remoteid);
+ 		else
+-			rmconf = getrmconf(iph2->dst, 0);
++			rmconf = getrmconf(iph2->dst, 0, 0);
+ 
+ 		if (rmconf && !rmconf->passive) {
+ 			struct ph1handle *iph1hint;
+Index: ipsec-tools-cvs-HEAD/src/setkey/setkey.8
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/setkey/setkey.8	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/setkey/setkey.8	2011-03-29 22:08:44.000000000 +0300
+@@ -453,7 +453,7 @@
+ .Pp
+ A second example of requiring transport mode encryption of specific
+ GRE tunnel:
+-.Dl spdadd 0.0.0.0 0.0.0.0 gre 1234 ipsec esp/transport//require ;
++.Dl spdadd 0.0.0.0 0.0.0.0 gre 1234 -P in ipsec esp/transport//require ;
+ .Pp
+ .Em Note :
+ .Ar upperspec
+Index: ipsec-tools-cvs-HEAD/src/racoon/racoon.conf.5
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/racoon.conf.5	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/racoon.conf.5	2011-03-29 22:08:44.000000000 +0300
+@@ -981,6 +981,7 @@
+ .Bl -tag -width Ds -compact
+ .It Ic sainfo Po Ar local_id | Ic anonymous Pc \
+ Po Ar remote_id | Ic clientaddr | Ic anonymous Pc \
++Bo Ic grekey Ar key Bc \
+ Bo Ic from Ar idtype Bo Ar string Bc Bc Bo Ic group Ar string Bc \
+ Ic { Ar statements Ic }
+ Defines the parameters of the IKE phase 2 (IPsec-SA establishment).
+@@ -1026,6 +1027,15 @@
+ to restrict policy generation when racoon is acting as a client gateway
+ for peers with dynamic ip addresses.
+ .Pp
++If both
++.Ar local_id
++and
++.Ar remote_id
++are specified with GRE as upper layer protocol, the upper layer GRE
++key match can be specified with
++.Ic grekey
++.Ar key .
++.Pp
+ The
+ .Ic from
+ keyword allows an sainfo to only match for peers that use a specific phase1
+Index: ipsec-tools-cvs-HEAD/src/setkey/parse.y
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/setkey/parse.y	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/setkey/parse.y	2011-03-29 22:08:44.000000000 +0300
+@@ -856,6 +856,17 @@
+ 			}
+ 			$$.len = strlen($$.buf);
+ 		}
++	|	DECSTRING
++		{
++			char tmp[16];
++			sprintf(tmp, "%lu", $1);
++			$$.buf = strdup(tmp);
++			if (!$$.buf) {
++				yyerror("insufficient memory");
++				return -1;
++			}
++			$$.len = strlen(tmp);
++		}
+ 	;
+ 
+ context_spec
+Index: ipsec-tools-cvs-HEAD/src/racoon/racoonctl.8
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/racoonctl.8	2011-03-05 09:23:59.000000000 +0200
++++ ipsec-tools-cvs-HEAD/src/racoon/racoonctl.8	2011-03-29 22:08:44.000000000 +0300
+@@ -158,8 +158,8 @@
+ has the following format:
+ .Bl -tag -width Bl
+ .It isakmp {inet|inet6} Ar src Ar dst
+-.It {esp|ah} {inet|inet6} Ar src/prefixlen/port Ar dst/prefixlen/port
+-{icmp|tcp|udp|gre|any}
++.It {esp|ah} {inet|inet6} Ar src/prefixlen/port Ar dst/prefixlen/port \
++  {icmp|tcp|udp|gre|any} Oo grekey Ar key Oc
+ .El
+ .It vpn-connect Oo Fl u Ar username Oc Ar vpn_gateway
+ This is a particular case of the previous command.
+Index: ipsec-tools-cvs-HEAD/src/racoon/isakmp_quick.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/isakmp_quick.c	2011-03-29 22:18:12.000000000 +0300
++++ ipsec-tools-cvs-HEAD/src/racoon/isakmp_quick.c	2011-03-30 09:23:13.000000000 +0300
+@@ -2168,6 +2168,8 @@
+ 		goto end;
+ 	}
+ 
++	ipsecdoi_normalize_id_uldata(idsrc, iddst);
++
+ #ifdef ENABLE_HYBRID
+ 
+ 	/* clientaddr check : obtain modecfg address */
+@@ -2494,6 +2496,7 @@
+ 	pref = spidx.prefs;
+ 	spidx.prefs = spidx.prefd;
+ 	spidx.prefd = pref;
++	spidx_normalize_ulports(&spidx);
+ 
+ 	sp_out = getsp_r(&spidx);
+ 	if (!sp_out) {
+Index: ipsec-tools-cvs-HEAD/src/racoon/policy.c
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/policy.c	2011-03-30 08:03:15.000000000 +0300
++++ ipsec-tools-cvs-HEAD/src/racoon/policy.c	2011-03-30 08:05:23.000000000 +0300
+@@ -444,6 +444,25 @@
+ 	return new;
+ }
+ 
++void
++spidx_normalize_ulports(spidx)
++	struct policyindex *spidx;
++{
++	u_int16_t tmp;
++
++	switch (spidx->ul_proto) {
++	case IPPROTO_ICMP:
++	case IPPROTO_ICMPV6:
++	case IPPROTO_GRE:
++		/* Ports are UL specific data, and should not get swapped */
++		tmp = extract_port((struct sockaddr *) &spidx->src);
++		set_port((struct sockaddr *) &spidx->src,
++			 extract_port((struct sockaddr *) &spidx->dst));
++		set_port((struct sockaddr *) &spidx->dst, tmp);
++		break;
++	}
++}
++
+ const char *
+ spidx2str(spidx)
+ 	const struct policyindex *spidx;
+Index: ipsec-tools-cvs-HEAD/src/racoon/policy.h
+===================================================================
+--- ipsec-tools-cvs-HEAD.orig/src/racoon/policy.h	2011-03-30 08:15:44.000000000 +0300
++++ ipsec-tools-cvs-HEAD/src/racoon/policy.h	2011-03-30 08:16:21.000000000 +0300
+@@ -156,6 +156,7 @@
+ extern void flushsp __P((void));
+ extern void initsp __P((void));
+ extern struct ipsecrequest *newipsecreq __P((void));
++extern void spidx_normalize_ulports __P((struct policyindex *));
+ 
+ extern const char *spidx2str __P((const struct policyindex *));
+ #ifdef HAVE_SECCTX

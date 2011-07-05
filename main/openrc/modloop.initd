@@ -1,0 +1,100 @@
+#!/sbin/runscript
+
+# script that will mount image with modules
+
+depend() {
+	need dev
+	before checkfs fsck hwdrivers modules hwclock
+	keyword novserver
+}
+
+# read kernel options
+init_KOPT() {
+	eval set -- $(cat /proc/cmdline 2>/dev/null)
+	while [ $# -gt 0 ]; do
+	        case "$1" in
+                	*=*)    eval "KOPT_${1%%=*}='${1#*=}'" ;;
+	                *)      eval "KOPT_$(echo $1 | sed 's: :_:g')=yes" ;;
+        	esac
+        	shift
+	done
+}
+
+find_mnt() {
+	local dev="$1"
+	local fsfile="$2"
+	awk "\$ == \"$dev\" {print \$2}\"" "$fsfile" 2>/dev/null
+}
+
+# initialies: alpine_dev, alpine_mnt, alpine_fs, alpine_mounted
+find_media() {
+	init_KOPT
+	alpine_mounted=
+	alpine_dev=${KOPT_alpine_dev%%:*}
+	alpine_fs=${KOPT_alpine_dev#*:}
+	[ "$alpine_fs" = "$KOPT_alpine_dev" ] && unset alpine_fs
+	# first we check if alpine_dev is mounted and use this
+	alpine_mnt=$(find_mnt /dev/$alpine_dev /proc/mounts)
+	if [ -z "$alpine_mnt" ]; then
+		# then we check fstab
+		alpine_mnt=$(find_mnt /dev/$alpine_dev /etc/fstab)
+	else
+		alpine_mounted=yes
+	fi
+	# finally we fallback to /media/<devicename>
+	[ -z "$alpine_mnt" ] && alpine_mnt=/media/$alpine_dev
+}
+
+start() {
+	local modloop mount_opts
+	find_media
+	if [ -z "$alpine_dev" ] ; then
+		return 0
+	fi
+
+        modloop=${KOPT_modloop:-$KOPT_BOOT_IMAGE.cmg}
+	[ -n "$alpine_fs" ] && mount_opts="-t $alpine_fs"
+
+	ebegin "Mounting loopback device for kernel modules"
+	if [ -z "$alpine_mounted" ]; then
+		mount $mount_opts /dev/$alpine_dev $alpine_mnt 2>/dev/null
+	fi
+	mkdir -p /.modloop /lib
+
+	mount -o loop,ro -t cramfs  $alpine_mnt/$modloop /.modloop
+	
+	eend $? || return 1
+	
+	#use unionfs is available and configured
+	if grep -q -w "unionfs$" /proc/filesystems && [ -n "$unionfs_size" ]; then
+		ebegin "UnionFS detected. Mounting modloop rw"
+		mkdir -p /.modunisonfs/modules /lib/modules
+		mount -t tmpfs -o size="$unionfs_size" tmpfs /.modunisonfs/modules
+		mount -t unionfs -o dirs=/.modunisonfs/modules=rw:/.modloop/modules=ro unionfs /lib/modules
+		eend $? || return 1
+	else
+		rm -rf /lib/modules && ln -sf /.modloop/modules /lib/
+	fi
+
+	# copy firmware if there are any
+	if [ -d $alpine_mnt/firmware ]; then
+	        ebegin "Copying firmware from $alpine_mnt/firmware"
+	        cp -R -a $alpine_mnt/firmware /lib/
+	        eend $?
+	fi
+}
+
+stop() {
+	local rc=0
+	find_media
+	[ -z "$alpine_dev" ] && return 0
+	ebegin "Unmounting loopback device for kernel modules"
+	if mountinfo --quiet /.modloop; then
+		umount -d /.modloop || rc=1
+	fi
+	if mountinfo --quiet $alpine_mnt; then
+		umount $alpine_mnt || rc=1
+	fi
+	eend $rc 
+}
+
