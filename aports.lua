@@ -164,6 +164,9 @@ end
 
 function Aports:foreach_pkg(pkg, f)
 	local k,v
+	if self.apks[pkg] == nil then
+		io.stderr:write("WARNING: "..pkg.." has no data\n")
+	end
 	for k,v in pairs(self.apks[pkg]) do
 		f(k,v)
 	end
