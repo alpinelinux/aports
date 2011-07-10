@@ -1,0 +1,341 @@
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+pkgname=gcc
+pkgver=4.6.1
+_piepatchver=0.4.5
+_specs_ver=0.2.0
+_specs_gcc_ver=4.4.3
+
+_uclibc_abiver=0.9.32
+
+pkgrel=0
+pkgdesc="The GNU Compiler Collection"
+url="http://gcc.gnu.org"
+arch="all"
+license="GPL LGPL"
+depends="binutils libgcc libgomp libobjc"
+makedepends="bison flex gmp-dev mpfr-dev texinfo libmpc-dev gawk zlib-dev zip
+	cloog-dev"
+subpackages="$pkgname-doc libstdc++:libcxx g++:gpp libgcc libgomp"
+replaces="libstdc++"
+
+if [ -n "$BOOTSTRAP" ]; then
+	LANG_OBJC=off
+	LANG_JAVA=off
+fi
+
+if [ "$LANG_OBJC" != "off" ]; then
+	subpackages="$subpackages libobjc"
+fi
+if [ "$LANG_JAVA" != "off" ]; then
+	subpackages="$subpackages $pkgname-java libgcj"
+fi
+
+source="ftp://gcc.gnu.org/pub/gcc/releases/gcc-$pkgver/gcc-core-$pkgver.tar.bz2
+	ftp://gcc.gnu.org/pub/gcc/releases/gcc-$pkgver/gcc-g++-$pkgver.tar.bz2
+	ftp://gcc.gnu.org/pub/gcc/releases/gcc-$pkgver/gcc-objc-$pkgver.tar.bz2
+	ftp://gcc.gnu.org/pub/gcc/releases/gcc-$pkgver/gcc-java-$pkgver.tar.bz2
+	http://distfiles.gentoo.org/distfiles/gcc-4.6.1-piepatches-v${_piepatchver}.tar.bz2
+	http://distfiles.gentoo.org/distfiles/gcc-$_specs_gcc_ver-specs-$_specs_ver.tar.bz2
+	ftp://sourceware.org/pub/java/ecj-latest.jar
+	
+	08_all_cross-compile.patch
+	11_all_default-warn-format-security.patch
+	12_all_default-warn-trampolines.patch
+	15_all_libgomp-Werror.patch
+	34_all_ia64_note.GNU-stack.patch
+	51_all_libiberty-pic.patch
+	74_all_gcc46_cloog-dl.patch
+
+	gcc-spec-env.patch
+	pt_gnu_eh_frame.patch
+	uclibc-getipinfo.patch
+	gcc-4.6-dynamic-linker.patch
+	gcc-4.6-pr32219.patch
+	boehem-gc-uclibc.patch
+	gcc-pure64.patch
+	"
+
+# we build out-of-tree
+_gccdir="$srcdir"/gcc-$pkgver
+_builddir="$srcdir/build"
+
+prepare() {
+	cd "$_gccdir"
+	# verify we have set CHOST
+	if [ -z "$CHOST" ]; then
+		error "CHOST not set"
+		return 1
+	fi
+
+	# PIE patches from gentoo
+	# thanks to Zorry for hard work on those patches
+	for i in "$srcdir"/piepatch/*.patch; do
+		msg "Applying $i"
+		patch -p0 -i $i || patch -p1 -i $i || return 1
+	done
+
+	# Gentoo and uclibc patches
+	_err=
+	for i in $source; do
+		case "$i" in
+		*.patch)
+			msg "Applying $i"
+			patch -p1 -i "$srcdir"/$i || _err="$_err $i"
+			;;
+		esac
+	done
+	
+	if [ -n "$_err" ]; then
+		error "The following patches failed:"
+		for i in $_err; do
+			echo "  $i"
+		done
+		return 1
+	fi
+
+	#PR33200
+	sed -i 's/use_fixproto=yes/:/' gcc/config.gcc || return 1
+
+	# enable hardened cflags by default
+	# building gcc wih PIE seem to hit some strange bug. we probably run
+	# out of some resource. so we disable PIE for gcc while enabling it
+	# by default for everything else.
+	local _hard_cflags="-DEFAULT_PIE_SSP -DEFAULT_RELRO -DEFAULT_BIND_NOW"
+	sed -e "/^ALL_CFLAGS/iHARD_CFLAGS = ${_hard_cflags}" \
+		-e 's|^ALL_CFLAGS = |ALL_CFLAGS = $(HARD_CFLAGS) -fno-PIE |' \
+		-i gcc/Makefile.in || return 1
+	sed -e "/stage1_cflags=/s/-fno-stack-protector/-fno-stack-protector -fno-PIE/" \
+		-i configure
+
+	# see http://gcc.gnu.org/ml/java/2008-04/msg00027.html
+	mv "$srcdir"/ecj-latest.jar ecj.jar
+	
+	echo ${pkgver} > gcc/BASE-VER
+}
+
+build() {
+	local _languages= _dynamic_linker=
+	cd "$_gccdir"
+	export CFLAGS="-fno-stack-protector"
+	[ -z "$CBUILD" ] && CBUILD="$CHOST"
+	[ -z "$CTARGET" ] && CTARGET="$CHOST"
+
+	case "$CHOST" in
+		x86_64-*-uclibc)
+			_dynamic_linker="--with-dynamic-linker=ld64-uClibc.so.$_uclibc_abiver"
+			;;
+		*-uclibc)
+			_dynamic_linker="--with-dynamic-linker=ld-uClibc.so.$_uclibc_abiver"
+			;;
+		*)	_dynamic_linker=
+			;;
+	esac
+
+	_languages=c,c++
+	# we can disable OBJC with LANG_OBJC=off
+	if [ "$LANG_OBJC" != "off" ]; then
+		_languages=$_languages,objc
+	fi
+
+	# and disable java with LANG_JAVA=off
+	if [ "$LANG_JAVA" != "off" ]; then
+		_languages="$_languages,java"
+	fi
+
+	# --enable-target-optspace is broken on powerpc
+	if [ "$CARCH" != "powerpc" ]; then
+		_target_optspace="--enable-target-optspace"
+	fi
+
+	msg "Building the following:"
+	echo ""
+	echo "  CBUILD=$CBUILD"
+	echo "  CHOST=$CHOST"
+	echo "  CTARGET=$CTARGET"
+	echo "  languages=$_languages"
+	echo "  dynamic_linker=$_dynamic_linker"
+	echo "  target_optspace=$_target_optspace"
+	echo ""
+
+	mkdir -p "$_builddir"
+	cd "$_builddir"
+	"$_gccdir"/configure --prefix=/usr \
+		--mandir=/usr/share/man \
+		--infodir=/usr/share/info \
+		--build=${CBUILD} \
+		--host=${CHOST} \
+		--target=${CTARGET} \
+		--with-pkgversion='Alpine' \
+		--disable-altivec \
+		--disable-checking \
+		--disable-fixed-point \
+		--disable-libssp \
+		--disable-libstdcxx-pch \
+		--disable-multilib \
+		--disable-nls \
+		--disable-werror \
+		--enable-__cxa_atexit \
+		--enable-cld \
+		--enable-esp \
+		--enable-cloog-backend \
+		--enable-languages=$_languages \
+		--enable-shared \
+		$_target_optspace \
+		--enable-tls \
+		--enable-threads \
+		$_dynamic_linker \
+		--with-dynamic-linker-prefix=/lib \
+		--with-system-zlib \
+		--without-system-libunwind 
+
+	make || return 1
+}
+
+package() {
+	cd "$_builddir"
+	make -j1 DESTDIR="${pkgdir}" install || return 1
+	find "$pkgdir" -name '*.la' -delete || return 1
+
+	ln -s gcc "$pkgdir"/usr/bin/cc
+
+	# binutils provides libiberty.a
+	rm -f "$pkgdir"/usr/lib/libiberty.a
+
+	# install the specs
+	cd "$srcdir"/specs
+	install -d "$pkgdir"/usr/share/gcc
+	for i in *.specs; do
+		install -m644 $i "$pkgdir"/usr/share/gcc/$i || return 1
+	done
+
+	# we dont support gcj -static
+	# and saving 35MB is not bad.
+	find "$pkgdir" -name libgcj.a -o -name libgtkpeer.a \
+		-o -name libgjsmalsa.a -o -name libgcj-tools.a \
+		-o -name libjvm.a -o -name libgij.a -o -name libgcj_bc.a \
+		-o -name libjavamath.a \
+		| xargs rm -f \
+		|| return 1
+	
+	[ "$LANG_JAVA" = "on" ] && \
+		sed -i -e 's/lib: /&%{static:%eJava programs cannot be linked statically}/' \
+		"$pkdir"/usr/lib/libgcj.spec
+
+	# remove ffi
+	rm "$pkgdir"/usr/lib/libffi*
+	find "$pkgdir" -name 'ffi*.h' | xargs rm -f
+
+	mkdir -p "$pkgdir"/usr/share/gdb/python/auto-load/usr/lib
+	mv "$pkgdir"/usr/lib/*-gdb.py \
+		"$pkgdir"/usr/share/gdb/python/auto-load/usr/lib/
+}
+
+libcxx() {
+	pkgdesc="GNU C++ standard runtime library"
+	depends=
+	mkdir -p "$subpkgdir"/usr/lib
+	mv "$pkgdir"/usr/lib/libstdc++.so.* "$subpkgdir"/usr/lib/
+}
+
+gpp() {
+	pkgdesc="GNU C++ standard library and compiler"
+	depends="libstdc++"
+	local libexec=usr/libexec/gcc/${CHOST:-$_chost}/$pkgver
+	mkdir -p "$subpkgdir/$libexec" \
+		"$subpkgdir"/usr/bin \
+		"$subpkgdir"/usr/include \
+		"$subpkgdir"/usr/lib \
+
+	mv "$pkgdir/$libexec/cc1plus" "$subpkgdir/$libexec/"
+	mv "$pkgdir"/usr/lib/*++* "$subpkgdir"/usr/lib/
+	mv "$pkgdir"/usr/include/c++ "$subpkgdir"/usr/include/
+	mv "$pkgdir"/usr/bin/*++ "$subpkgdir"/usr/bin/
+}
+
+libobjc() {
+	pkgdesc="GNU ObjectiveC library"
+	replaces="objc"
+	mkdir -p "$subpkgdir"/usr/lib
+
+	mv "$pkgdir"/usr/lib/*objc* "$subpkgdir"/usr/lib/
+}
+
+libgcc() {
+	pkgdesc="GNU C compiler runtime libraries"
+	depends=
+	mkdir -p "$subpkgdir"/usr/lib
+	mv "$pkgdir"/usr/lib/libgcc_s.so.* "$subpkgdir"/usr/lib/
+}
+
+libgomp() {
+	pkgdesc="GCC shared-memory parallel programming API library"
+	depends=
+	replaces="gcc"
+	mkdir -p "$subpkgdir"/usr/lib
+	mv "$pkgdir"/usr/lib/libgomp.so.* "$subpkgdir"/usr/lib/
+}
+
+java() {
+	pkgdesc="Java support for GCC"
+	mkdir -p "$subpkgdir"/usr/bin "$subpkgdir"/usr/lib
+	cd "$pkgdir"/usr/bin
+	mv gcj gcj-dbtool gjavah gcjh jcf-dump "$subpkgdir"/usr/bin/
+	cd "$pkgdir"
+	for i in $(find usr/ -name ecj1 -o -name jc1 -o -name jvgenmain); do
+		mkdir -p "$subpkgdir"/${i%/*}
+		mv "$pkgdir"/$i "$subpkgdir"/$i || return 1
+	done
+	mv \
+		"$pkgdir"/usr/lib/libgcj*.so \
+		"$pkgdir"/usr/lib/libgij.so \
+		"$pkgdir"/usr/lib/libgcj.spec \
+		"$subpkgdir"/usr/lib/
+}
+
+libgcj() {
+	pkgdesc="Java runtime library for gcc"
+	mkdir -p "$subpkgdir"/usr/bin
+	cd "$pkgdir"/usr/bin
+	mv aot-compile gappletviewer gc-analyze gij gjar gjarsigner gkeytool\
+		gnative2ascii gorbd grmic grmid grmiregistry gserialver \
+		gtnameserv i486-alpine-linux-uclibc-gcj jv-convert \
+		rebuild-gcj-db \
+		"$subpkgdir"/usr/bin/
+	cd "$pkgdir"
+	for i in $(find usr/lib -name jc1 -o -name jvgenmain); do
+		mkdir -p "$subpkgdir"/${i%/*}
+		mv "$pkgdir"/$i "$subpkgdir"/$i || return 1
+	done
+	mkdir -p "$subpkgdir"/usr/lib
+	mv "$pkgdir"/usr/lib/gcj-* \
+		"$pkgdir"/usr/lib/libgcj*.so.* \
+		"$pkgdir"/usr/lib/libgij.so.* \
+		"$pkgdir"/usr/lib/logging.properties \
+		"$pkgdir"/usr/lib/security \
+		"$subpkgdir"/usr/lib/
+
+	mkdir -p "$subpkgdir"/usr/share/
+	mv "$pkgdir"/usr/share/java "$subpkgdir"/usr/share/
+}
+	
+md5sums="0c0e7e35d2215e19de9c97efba507553  gcc-core-4.6.1.tar.bz2
+0d75ca7ca35b1e7f252223f9d23a6ad1  gcc-g++-4.6.1.tar.bz2
+cbf0d4b701827922cf37ba6a4ace0079  gcc-objc-4.6.1.tar.bz2
+32431ba42c1d18e64f2abfdfc834ef94  gcc-java-4.6.1.tar.bz2
+5dc7efd84b526801b94fed21462aea62  gcc-4.6.1-piepatches-v0.4.5.tar.bz2
+441c76504e1d97170117c294e65c7a72  gcc-4.4.3-specs-0.2.0.tar.bz2
+d7cd6a27c8801e66cbaa964a039ecfdb  ecj-latest.jar
+b1b5987e7c53f2c8a0fa929444bd9129  08_all_cross-compile.patch
+34e4a0260e9dbd434ac84b9dda381240  11_all_default-warn-format-security.patch
+a78022925c0ecb1f13384238b81adbe7  12_all_default-warn-trampolines.patch
+6862cb5268fef68a4a1906e0c4ea0d46  15_all_libgomp-Werror.patch
+1a8ce6b7a0b9a115e37fdda311704451  34_all_ia64_note.GNU-stack.patch
+d8692c56f04b92667096f59d843e95c5  51_all_libiberty-pic.patch
+656565d2e2c30ea12a398ef6959a9391  74_all_gcc46_cloog-dl.patch
+a695d7648509b4f8e18b389a19e6037c  gcc-spec-env.patch
+2db1e3482c5dd59dab70f701afa2ca80  pt_gnu_eh_frame.patch
+6cc2385c5bbd6d0da6eaedd53c8bf547  uclibc-getipinfo.patch
+3be85df859fa1d5c875bbfcc2dee8288  gcc-4.6-dynamic-linker.patch
+32e8e4c0e23ed8f5de95a591cb30f1da  gcc-4.6-pr32219.patch
+2c6cb49bb9bfd8b6e690222e66ccc901  boehem-gc-uclibc.patch
+d1d3ad2b0c185b5548125a1b81bee154  gcc-pure64.patch"
