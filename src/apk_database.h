@@ -23,6 +23,12 @@
 #define APK_DEFAULT_ARCH        "x86_64"
 #elif defined(__i386__)
 #define APK_DEFAULT_ARCH        "x86"
+#elif defined(__powerpc__) && !defined(__powerpc64__)
+#define APK_DEFAULT_ARCH	"ppc"
+#elif defined(__powerpc64__)
+#define APK_DEFAULT_ARCH	"ppc64"
+#elif defined(__arm__)
+#define APK_DEFAULT_ARCH	"arm"
 #else   
 #warning APK_DEFAULT_ARCH is not set for this architecture
 #define APK_DEFAULT_ARCH        "noarch"
