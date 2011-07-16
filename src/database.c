@@ -34,14 +34,6 @@
 #include "apk_archive.h"
 #include "apk_print.h"
 
-#if defined(__x86_64__)
-#define APK_DEFAULT_ARCH	"x86_64"
-#elif defined(__i386__)
-#define APK_DEFAULT_ARCH	"x86"
-#else
-#define APK_DEFAULT_ARCH	"noarch"
-#endif
-
 enum {
 	APK_DISALLOW_RMDIR = 0,
 	APK_ALLOW_RMDIR = 1

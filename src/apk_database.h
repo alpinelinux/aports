@@ -18,6 +18,16 @@
 #include "apk_package.h"
 #include "apk_io.h"
 
+/* default architecture for APK packages. */
+#if defined(__x86_64__)
+#define APK_DEFAULT_ARCH        "x86_64"
+#elif defined(__i386__)
+#define APK_DEFAULT_ARCH        "x86"
+#else   
+#warning APK_DEFAULT_ARCH is not set for this architecture
+#define APK_DEFAULT_ARCH        "noarch"
+#endif
+
 #define APK_MAX_REPOS		32
 #define APK_CACHE_CSUM_BYTES	4
 
