@@ -72,7 +72,7 @@ static struct apk_option generic_options[] = {
 
 static int version(void)
 {
-	printf("apk-tools " APK_VERSION "\n");
+	printf("apk-tools " APK_VERSION ", compiled for " APK_DEFAULT_ARCH ".\n");
 	return 0;
 }
 
