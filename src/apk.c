@@ -139,23 +139,28 @@ static int usage(struct apk_applet *applet)
 		print_usage("COMMAND", "[ARGS]...",
 			    ARRAY_SIZE(generic_options), generic_options);
 
-		printf("\navailable commands:\n  ");
-		for (a = &__start_apkapplets; a < &__stop_apkapplets; a++)
-			printf("%s ", (*a)->name);
+		printf("\nThe following commands are available:\n");
+		for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
+			struct apk_indent sub_indent = { 20, 26 };
+
+			printf("  %-*s", sub_indent.indent - 3, (*a)->name);
+			apk_print_indented_words(&sub_indent, (*a)->help);
+			printf("\n");
+		}
 	} else {
 		print_usage(applet->name, applet->arguments,
 			    applet->num_options, applet->options);
 		printf("\ndescription:\n%*s", indent.indent - 1, "");
 		apk_print_indented_words(&indent, applet->help);
 	}
-	printf("\n\ngeneric options:\n");
+	printf("\nGeneric options:\n");
 	print_options(ARRAY_SIZE(generic_options), generic_options);
 
 	if (applet != NULL && applet->num_options > 0) {
 		printf("\noptions for %s command:\n", applet->name);
 		print_options(applet->num_options, applet->options);
 	}
-	printf("\nThis apk has coffee making abilities.\n\n");
+	printf("\nThis apk has coffee making abilities.\n");
 
 	return 1;
 }
