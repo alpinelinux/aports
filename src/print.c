@@ -14,15 +14,34 @@
 #include <unistd.h>
 #include <malloc.h>
 #include <errno.h>
+#include <sys/ioctl.h>
 
 #include "apk_defines.h"
 #include "apk_print.h"
 
+static int apk_screen_width = 0;
+
+void apk_reset_screen_width(void)
+{
+	apk_screen_width = 0;
+}
+
+int apk_get_screen_width(void)
+{
+	struct winsize w;
+
+	if (apk_screen_width == 0) {
+		apk_screen_width = 70;
+		if (ioctl(STDERR_FILENO,TIOCGWINSZ, &w) == 0)
+			apk_screen_width = w.ws_col;
+	}
+
+	return apk_screen_width;
+}
+
 int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
 {
-	static const int wrap_length = 80;
-
-	if (i->x + blob.len + 1 >= wrap_length) {
+	if (i->x + blob.len + 1 >= apk_get_screen_width()) {
 		i->x = i->indent;
 		printf("\n%*s", i->indent - 1, "");
 	}

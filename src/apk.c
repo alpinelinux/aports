@@ -13,13 +13,13 @@
 #include <fcntl.h>
 #include <ctype.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <sys/ioctl.h>
 
 #include <openssl/crypto.h>
 #ifndef OPENSSL_NO_ENGINE
@@ -130,8 +130,6 @@ static void print_options(int num_opts, struct apk_option *opts)
 
 static int usage(struct apk_applet *applet)
 {
-	struct apk_indent indent = { 0, 2 };
-
 	version();
 	if (applet == NULL) {
 		struct apk_applet **a;
@@ -141,23 +139,27 @@ static int usage(struct apk_applet *applet)
 
 		printf("\nThe following commands are available:\n");
 		for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
-			struct apk_indent sub_indent = { 20, 26 };
+			struct apk_indent indent = { 0, 26 };
 
-			printf("  %-*s", sub_indent.indent - 3, (*a)->name);
-			apk_print_indented_words(&sub_indent, (*a)->help);
+			indent.x = printf("  %-*s", indent.indent - 3, (*a)->name);
+			apk_print_indented_words(&indent, (*a)->help);
 			printf("\n");
 		}
 	} else {
+		struct apk_indent indent = { 0, 2 };
+
 		print_usage(applet->name, applet->arguments,
 			    applet->num_options, applet->options);
-		printf("\ndescription:\n%*s", indent.indent - 1, "");
+		printf("\nDescription:\n%*s", indent.indent - 1, "");
+		indent.x = indent.indent - 1;
 		apk_print_indented_words(&indent, applet->help);
+		printf("\n");
 	}
 	printf("\nGeneric options:\n");
 	print_options(ARRAY_SIZE(generic_options), generic_options);
 
 	if (applet != NULL && applet->num_options > 0) {
-		printf("\noptions for %s command:\n", applet->name);
+		printf("\nOptions for %s command:\n", applet->name);
 		print_options(applet->num_options, applet->options);
 	}
 	printf("\nThis apk has coffee making abilities.\n");
@@ -247,18 +249,17 @@ static void init_openssl(void)
 #endif
 }
 
+static void on_sigwinch(int s)
+{
+	apk_reset_screen_width();
+}
+
 static void setup_terminal(void)
 {
-	struct winsize w;
-
 	setvbuf(stderr, NULL, _IOLBF, BUFSIZ);
-	if (ioctl(STDERR_FILENO,TIOCGWINSZ, &w) == 0)
-		apk_screen_width = w.ws_col;
-	if (apk_screen_width == 0)
-		apk_screen_width = 70;
 	if (isatty(STDOUT_FILENO) && isatty(STDERR_FILENO) && isatty(STDIN_FILENO))
 		apk_flags |= APK_PROGRESS;
-
+	signal(SIGWINCH, on_sigwinch);
 }
 
 int main(int argc, char **argv)

@@ -723,7 +723,7 @@ static void apk_count_change(struct apk_change *change, struct apk_stats *stats)
 
 static void apk_draw_progress(int percent)
 {
-	const int bar_width = (apk_screen_width - 7);
+	const int bar_width = apk_get_screen_width() - 7;
 	int i;
 
 	fprintf(stderr, "\e7%3i%% [", percent);
