@@ -75,9 +75,11 @@ static int ver_parse(void *ctx, struct apk_db_options *dbopts,
 		break;
 	case 't':
 		ictx->action = ver_test;
+		dbopts->open_flags |= APK_OPENF_NO_STATE | APK_OPENF_NO_REPOS;
 		break;
 	case 'c':
 		ictx->action = ver_validate;
+		dbopts->open_flags |= APK_OPENF_NO_STATE | APK_OPENF_NO_REPOS;
 		break;
 	case 'l':
 		ictx->limchars = optarg;
