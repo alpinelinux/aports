@@ -1,4 +1,5 @@
 rootdir=$(pwd -P)
+pkglist="$rootdir/acceptable-package-list.txt"
 
 distclean () {
     echo "Removing traces of previous builds from $rootdir"
@@ -13,6 +14,17 @@ distclean () {
     done
 }
 
+pkgcheck () {
+    local installed
+    installed=$(apk info)
+    for q in $installed ; do
+        if [ -z "$(grep $q $pkglist)" ] ; then
+            echo "Removing unwanted installed package $q"
+            sudo apk del $q
+        fi
+    done
+}
+
 build () {
     local pkgs
     local maintainer
@@ -23,6 +35,11 @@ build () {
     pkgno=0
     failed=0
     for p in $pkgs ; do
+        if [ ! -d "$rootdir/$1/$p" ] ; then
+            continue
+        fi
+        
+        pkgcheck
         pkgno=$(expr "$pkgno" + 1)
         echo "Building $p ($pkgno of $pktcnt in $1 - $failed failed)"
         cd $rootdir/$1/$p
@@ -46,7 +63,7 @@ build () {
     	        if [ -n "$mail" ] ; then
     	            echo "sending mail to [$recipients]"
                     if [ $(wc -l $rootdir/$1_$p.txt | cut -f 1 -d ' ') -gt 400 ]; then
-    		            TMPFILE='mktemp' || exit 1
+    		            TMPFILE="$(mktemp $1_$p.XXXXXX).txt" || exit 1
                         head -n 200 $rootdir/$1_$p.txt >> $TMPFILE
                         echo "-------" >> $TMPFILE
                         echo "snip..." >> $TMPFILE
@@ -71,17 +88,12 @@ build () {
             apk info | sort > $rootdir/packages.$1.$pkgno.$p.after
         fi
     done
+    
+    if [ "$failed" = "0" ] ; then
+        echo "All $pktcnt packages in $1 built successfully" >> aport-build-log.txt
+    fi
+    
     cd $rootdir
-    
-    if [ -n "$(apk info | grep libiconv)" ]; then 
-        echo "***** libiconv stuck *****"
-        sudo apk del libiconv
-    fi
-    
-    if [ -n "$(apk info | grep gettext)" ]; then 
-        echo "***** gettext stuck *****"
-        sudo apk del gettext
-    fi
 }
 
 touch START_OF_BUILD.txt
@@ -105,20 +117,11 @@ fi
 echo "Refresh aports tree"
 git pull
 
-#cd main/build-base
-#abuild -Ru
-#cd $rootdir
-
-if [ -n "$(apk info | grep libiconv)" ]; then 
-    sudo apk del libiconv
-fi
-    
-if [ -n "$(apk info | grep gettext)" ]; then 
-    sudo apk del gettext
-fi
+sudo apk -U upgrade
 
 for s in main testing unstable ; do
     echo "Building packages in $s"
+    pkgcheck
     build $s
 done
 
