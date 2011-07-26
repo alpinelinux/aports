@@ -13,7 +13,7 @@ SYSREPO ?= http://alpinelinux.org/cgi-bin/dl.cgi/edge/main
 LD_LIBRARY_PATH = ../src
 export LD_LIBRARY_PATH SYSREPO
 
-all:	tests
+all: tests
 
 $(repos):
 	@echo "Building $@"
@@ -50,11 +50,17 @@ repos.stamp: $(repos)
 		$(SUDO) rm -rf $(testroot); \
 		touch $@
 
-tests: repos.stamp
-	@echo "== Testing `$(APK) --version` =="
+root-tests: repos.stamp
+	@echo "== Testing `$(APK) --version` (tests that require root permission) =="
 	@for i in test*.sh; do \
 		rm -f $${i%.sh}.ok ;\
 		$(SUDO) $(MAKE) --no-print-directory $${i%.sh}.ok SYSREPO=$(SYSREPO); \
 	done
 
-.PHONY:	$(repos)
+tests:
+	@echo "== Testing `$(APK) --version` =="
+	@for i in $(sort $(filter-out test%.sh,$(wildcard *.sh))); do \
+		./$$i || exit 1 ; \
+	done
+
+.PHONY:	$(repos) tests

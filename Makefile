@@ -36,5 +36,9 @@ install:
 	$(INSTALLDIR) $(DESTDIR)$(DOCDIR)
 	$(INSTALL) README $(DESTDIR)$(DOCDIR)
 
+test: FORCE
+	$(Q)$(MAKE) TEST=y
+	$(Q)$(MAKE) -C test
+
 static:
 	$(Q)$(MAKE) STATIC=y

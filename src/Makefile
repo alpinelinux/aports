@@ -23,7 +23,13 @@ apk-objs		:= apk.o add.o del.o fix.o update.o info.o \
 			   audit.o verify.o dot.o
 
 libapk.so-objs		:= common.o state.o database.o package.o archive.o \
-			   version.o io.o url.o gunzip.o blob.o hash.o print.o
+			   version.o io.o url.o gunzip.o blob.o hash.o print.o \
+			   solver.o topology.o
+
+ifeq ($(TEST),y)
+progs-y			+= apk_test
+apk_test-objs		:= apk.o test.o $(libapk.so-objs)
+endif
 
 ifeq ($(SHARED_LIBAPK),)
 apk-objs		+= $(libapk.so-objs)
@@ -47,15 +53,16 @@ progs-$(STATIC)		+= apk.static
 apk.static-objs		:= $(filter-out apk.o,$(apk-objs)) apk-static.o
 LDFLAGS_apk.static	:= -static
 LDFLAGS_apk		+= -nopie -L$(obj)
+LDFLAGS_apk_test	+= -nopie -L$(obj)
 
 CFLAGS_ALL		+= $(shell pkg-config --cflags $(PKGDEPS))
 LIBS			:= -Wl,--as-needed \
 				$(shell pkg-config --libs $(PKGDEPS)) \
 			   -Wl,--no-as-needed
 
-$(obj)/apk:	$(LIBAPK-y)
+$(obj)/apk: $(LIBAPK-y)
 
-$(obj)/apk.so:	$(obj)/libapk.so
+$(obj)/apk.so: $(obj)/libapk.so
 
 install: $(obj)/apk $(LIBAPK-y) $(LUA_LIB-y)
 	$(INSTALLDIR) $(DESTDIR)$(SBINDIR)
