@@ -39,9 +39,9 @@ tty -s <&1 || PAGER=cat
 
 case "$pagefile" in
 *.bz2)
-	exec bzcat "$pagefile" | "$PAGER" ;;
+	exec bzcat "$pagefile" | mandoc -Tutf8 | "$PAGER" ;;
 *.gz)
-	exec zcat "$pagefile" | "$PAGER" ;;
+	exec zcat "$pagefile" | mandoc -Tutf8 | "$PAGER" ;;
 *)
 	exec mandoc -Tutf8 "$pagefile" | "$PAGER" ;;
 esac
