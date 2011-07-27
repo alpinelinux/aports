@@ -1,4 +1,5 @@
 PKGDEPS := openssl zlib
+PKG_CONFIG ?= pkg-config
 
 # lua module
 ifneq ($(LUAAPK),)
@@ -13,7 +14,7 @@ install-LUA_LIB-y	:= $(INSTALLDIR) $(DESTDIR)$(LUA_LIBDIR) \
 			   $(INSTALL) $(LUA_LIB-y) $(DESTDIR)$(LUA_LIBDIR)
 endif
 
-ifeq ($(shell pkg-config --print-errors --exists $(PKGDEPS) || echo fail),fail)
+ifeq ($(shell $(PKG_CONFIG) --print-errors --exists $(PKGDEPS) || echo fail),fail)
 $(error Build dependencies are not met)
 endif
 
@@ -55,9 +56,9 @@ LDFLAGS_apk.static	:= -static
 LDFLAGS_apk		+= -nopie -L$(obj)
 LDFLAGS_apk_test	+= -nopie -L$(obj)
 
-CFLAGS_ALL		+= $(shell pkg-config --cflags $(PKGDEPS))
+CFLAGS_ALL		+= $(shell $(PKG_CONFIG) --cflags $(PKGDEPS))
 LIBS			:= -Wl,--as-needed \
-				$(shell pkg-config --libs $(PKGDEPS)) \
+				$(shell $(PKG_CONFIG) --libs $(PKGDEPS)) \
 			   -Wl,--no-as-needed
 
 $(obj)/apk: $(LIBAPK-y)
