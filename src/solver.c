@@ -35,9 +35,11 @@ struct apk_package_state {
 	unsigned short conflicts;
 };
 
+#define APK_NAMESTF_AVAILABILITY_CHECKED	1
 struct apk_name_state {
 	struct list_head unsolved_list;
 	struct apk_package *chosen;
+	unsigned short flags;
 	unsigned short requirers;
 };
 
@@ -61,8 +63,6 @@ static int push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
 
 static inline int pkg_available(struct apk_database *db, struct apk_package *pkg)
 {
-	if (pkg->ipkg != NULL)
-		return TRUE;
 	if (pkg->installed_size == 0)
 		return TRUE;
 	if (pkg->filename != NULL)
@@ -70,6 +70,29 @@ static inline int pkg_available(struct apk_database *db, struct apk_package *pkg
 	if (apk_db_select_repo(db, pkg) != NULL)
 		return TRUE;
 	return FALSE;
+}
+
+static void prepare_name(struct apk_solver_state *ss, struct apk_name *name,
+			 struct apk_name_state *ns)
+{
+	int i;
+
+	if (ns->flags & APK_NAMESTF_AVAILABILITY_CHECKED)
+		return;
+
+	for (i = 0; i < name->pkgs->num; i++) {
+		struct apk_package *pkg = name->pkgs->item[i];
+		struct apk_package_state *ps = &ss->pkg_state[pkg->topology_sort];
+
+		/* if package is needed for (re-)install */
+		if ((name->flags & APK_NAME_REINSTALL) || (pkg->ipkg == NULL)) {
+			/* and it's not available, we can't use it */
+			if (!pkg_available(ss->db, pkg))
+				ps->conflicts++;
+		}
+	}
+
+	ns->flags |= APK_NAMESTF_AVAILABILITY_CHECKED;
 }
 
 static int foreach_dependency(struct apk_solver_state *ss, struct apk_dependency_array *deps,
@@ -276,6 +299,7 @@ static int apply_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	struct apk_package *pkg_best = NULL;
 	int i, options = 0;
 
+	prepare_name(ss, name, ns);
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
 		struct apk_package_state *ps0 = &ss->pkg_state[pkg0->topology_sort];
