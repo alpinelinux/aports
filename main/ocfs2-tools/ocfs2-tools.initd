@@ -1,0 +1,193 @@
+#!/sbin/runscript
+
+: ${OCFS2_FSCK:="-fy"}
+
+depend() {
+	need net localmount
+	before netmount
+	after drbd
+}
+
+pseudofs() {
+	[ -n "`mount -t $1`" ] && return 0
+	ewarn "OCFS2: Pseudo-filesystem $1 are not mounted."
+	ewarn "Make sure you have following lines in your /etc/fstab:"
+	ewarn "none         $2         $1        defaults                0 0"
+
+	# Why not?
+	ebegin "Mounting $1"
+	mount -t $1 none $2 && [ -n "`mount -t $1`" ]
+	eend $? || return 1
+}
+
+fmod() {
+	[[ -e "$1" ]] && return 0
+	modprobe -s $2 && [[ -e "$1" ]] &&  return 0
+	eerror "OCFS2: Module '$2' failed, '$1' not found"
+	return 1
+}
+
+# unsure about possibility to keep heartbeat unclean after correct umount
+# but Oracle do so
+clean_heartbeat(){
+	local err=0 id
+	for i in "/sys/kernel/config/cluster/$1/heartbeat"/*; do
+		[[ -d "$i" ]] || continue
+		id="${i##*/}"
+		ebegin "Cleaning OCFS2 heartbeat region $1/$id"
+		[[ "`/sbin/ocfs2_hb_ctl -I -u "$id" | grep -o " [0-9]* refs$"`" == " 0 refs" ]] && /sbin/ocfs2_hb_ctl -K -u "$id"  || ! [[ -d "$i" ]]
+		eend $? || err=1
+	done
+	return $err
+}
+
+UUID(){
+	local dev fs stack uuid label
+	/sbin/mounted.ocfs2 -d|while read dev fs stack uuid label; do
+		[[ "$stack" == "o2cb" ]] && echo "$uuid"
+	done|sort -u
+}
+
+clusters(){
+	[[ -z "${OCFS2_CLUSTER}" ]] && for i in /sys/kernel/config/cluster/*; do
+		OCFS2_CLUSTER="${OCFS2_CLUSTER} ${i##*/}"
+	done
+	echo "${OCFS2_CLUSTER}"
+}
+
+stop_cluster(){
+	if clean_heartbeat $1 || [[ "${OCFS2_FORCE_STOP}" == yes ]]; then
+		ebegin "Stopping OCFS2 cluster '$1'"
+		/sbin/o2cb_ctl -H -n $1 -t cluster -a online=no >/dev/null
+		eend $? || return 1
+	else
+		return 1
+	fi
+}
+
+online(){
+	local cluster
+	for cluster in ${*:-$(clusters)}; do
+		grep -q "^1\$" /sys/kernel/config/cluster/$cluster/node/*/local 2>/dev/null || return 1
+	done
+	return 0
+}
+
+start() {
+	(	fmod /sys/fs/ocfs2 ocfs2 &&
+		fmod /sys/fs/ocfs2/cluster_stack ocfs2_stackglue &&
+		pseudofs configfs /sys/kernel/config &&
+		pseudofs ocfs2_dlmfs /dlm
+	) || return 1
+	echo o2cb >/sys/fs/ocfs2/cluster_stack 2>/dev/null
+	if [[ "`cat /sys/fs/ocfs2/cluster_stack`" != "o2cb" ]]; then
+		eerror "OCFS2: Stack 'o2cb' not loaded. Check your kernel config."
+		return 1
+	fi
+
+	# autodetect
+	: ${OCFS2_CLUSTER:=$(UUID)}
+
+	for cluster in $(clusters); do
+		ebegin "Starting OCFS2 cluster '${cluster}'"
+		online $cluster || /sbin/o2cb_ctl -H -n ${cluster} -t cluster -a online=yes >/dev/null
+		if ! eend $? ; then
+			local OCFS2_FORCE_STOP=no
+			stop_cluster $cluster
+			return 1
+		fi
+
+		# Some heartbeat tweaks to prevent self-fencing quite so much during heavy load.
+		# http://oss.oracle.com/projects/ocfs2/dist/documentation/ocfs2_faq.html
+
+		# How long to wait before a node is considered dead from lack of network activity.
+		echo $OCFS2_IDLE_TIMEOUT_MS > /sys/kernel/config/cluster/${cluster}/idle_timeout_ms
+		# How often we should attempt to send heartbeats.
+		echo $OCFS2_KEEPALIVE_DELAY_MS > /sys/kernel/config/cluster/${cluster}/keepalive_delay_ms
+		echo $OCFS2_RECONNECT_DELAY_MS > /sys/kernel/config/cluster/${cluster}/reconnect_delay_ms
+		# How many interations before a node is considered dead from lack of IO activity.
+		# (dead_threshold - 1) * 2s
+		echo $OCFS2_DEAD_THRESHOLD > /sys/kernel/config/cluster/${cluster}/heartbeat/dead_threshold
+	done
+
+	local i
+	for i in 9 8 7 6 5 4 3 2 1 0; do
+		online && break
+		echo -n "$i"
+		sleep 1
+	done
+	# usure: IMHO locking not starts here
+#	let i=OCFS2_RECONNECT_DELAY_MS*2/1000
+#	sleep $i
+
+	# Voluntary fsck. Will be happened only ondemand -
+	# on both unmounted/double fault, placed in fstab.
+	[[ "$OCFS2_FSCK_SWAPOFF" == "yes" ]] && swapoff -a
+	for i in `mount -invfat ocfs2 2>/dev/null|sed -e 's: .*::g'` ; do
+		[[ -e "$i" ]] || continue
+		einfo "OCFS2: Trying 'fsck.ocfs2 $OCFS2_FSCK $i' (fs check if possible)"
+		/sbin/fsck.ocfs2 $OCFS2_FSCK "$i" 2>/dev/null
+	done
+	[[ "$OCFS2_FSCK_SWAPOFF" == "yes" ]] && swapon -a
+
+	# Any behaviour
+	ebegin "Mounting OCFS2 filesystems"
+	mount -at ocfs2
+	eend $?
+	return $?
+}
+
+_fuser(){
+	fuser -"${OCFS2_UMOUNT_KILL}" -v"${OCFS2_UMOUNT_KILL:+k}" $*
+	return $?
+}
+
+_umount(){
+	local i m
+	i=`umount $* 2>&1` && {
+		echo -n "$i"
+		return 0
+	}
+	echo "$i"
+	_fuser -mM `echo "$i"|grep "^umount: .* device is busy\.\$"|sed -e 's%^umount: \([^ 	]*\): device is busy\.$%\1%g'` || return 1
+	[[ -z "${OCFS2_UMOUNT_KILL}" ]] && return 1
+	umount $* && return 0
+	sleep 1
+	umount $*
+	return $?
+}
+
+stop() {
+	local ret=0 dev m i
+	# now umount only clusters - under heartbeat. others later
+#	ebegin "Unmounting OCFS2 filesystems"
+#	_umount -at ocfs2
+#	eend $?
+#	ret=$?
+
+	for cluster in $(clusters); do
+		for dev in `cat /sys/kernel/config/cluster/$cluster/heartbeat/*/dev 2>/dev/null`; do
+			m=`grep "/dev/$dev " /proc/mounts|sed -e 's:^[^ ]* \([^ ]*\) .*$:\1:g'`
+			[[ -z "$m" ]] && continue
+			ebegin "Unmounting OCFS2 cluster '$cluster' filesystems '$dev' from '$m'"
+			if _umount $m; then
+				eend 0
+				continue
+			elif umount $m; then
+				einfon "Lazy unmounted. Waiting "
+				for i in 9 8 7 6 5 4 3 2 1 0; do
+					( /sbin/ocfs2_hb_ctl -I -d /dev/$dev || break ) | grep -q " 0 refs\$" && break
+					echo -n "$i"
+					_fuser $m
+					sleep 1
+				done
+				echo
+				[[ "$i" != 0 ]] && continue
+			fi
+			eend 1
+			ret=1
+		done
+		stop_cluster $cluster || ret=1
+	done
+	return $ret
+}
