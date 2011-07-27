@@ -104,16 +104,20 @@ static int test_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	/* load installed db */
 	if (ctx->installed_db != NULL) {
 		bs = apk_bstream_from_file(AT_FDCWD, ctx->installed_db);
-		apk_db_index_read(db, bs, -1);
-		bs->close(bs, NULL);
+		if (bs != NULL) {
+			apk_db_index_read(db, bs, -1);
+			bs->close(bs, NULL);
+		}
 	}
 
 	/* load additional indexes */
 	if (ctx->repos) {
 		for (i = 0; i < ctx->repos->num; i++) {
 			bs = apk_bstream_from_file(AT_FDCWD, ctx->repos->item[i]);
-			apk_db_index_read(db, bs, i);
-			bs->close(bs, NULL);
+			if (bs != NULL) {
+				apk_db_index_read(db, bs, i);
+				bs->close(bs, NULL);
+			}
 		}
 	}
 
