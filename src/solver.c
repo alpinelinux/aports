@@ -38,7 +38,6 @@ struct apk_package_state {
 struct apk_name_state {
 	struct list_head unsolved_list;
 	struct apk_package *chosen;
-	struct apk_package *preferred;
 	unsigned short requirers;
 };
 
@@ -82,53 +81,62 @@ static int foreach_dependency(struct apk_solver_state *ss, struct apk_dependency
 	return r;
 }
 
-static void calculate_preferred(struct apk_database *db,
-			        struct apk_name *name,
-			        struct apk_name_state *ns)
+static int inline can_consider_package(struct apk_solver_state *ss, struct apk_package *pkg)
 {
-	struct apk_package *installed = NULL, *latest = NULL;
+	struct apk_package_state *ps = &ss->pkg_state[pkg->topology_sort];
+	if (pkg->topology_sort >= ss->topology_position)
+		return FALSE;
+	if (ps->conflicts)
+		return FALSE;
+	return TRUE;
+}
+
+static int is_pkg_preferred(struct apk_solver_state *ss, struct apk_package *pkg)
+{
+	struct apk_name *name = pkg->name;
 	int i;
 
-	/* Get latest and installed packages */
+	if (!(apk_flags & APK_UPGRADE)) {
+		/* not upgrading, prefer the installed package; unless we
+		 * need additional availability checks */
+		if (pkg->ipkg != NULL) {
+			if (pkg->repos != 0 ||
+			    !(apk_flags & APK_PREFER_AVAILABLE))
+				return TRUE;
+		}
+	}
+
+	/* check if the suggested package is the most preferred one of
+	 * available packages for the name */
 	for (i = 0; i < name->pkgs->num; i++) {
-		struct apk_package *pkg = name->pkgs->item[i];
+		struct apk_package *pkg0 = name->pkgs->item[i];
 
-		if (pkg->ipkg != NULL)
-			installed = pkg;
-		else if (!pkg_available(db, pkg))
+		if (pkg0 == pkg || !can_consider_package(ss, pkg0))
 			continue;
-		if (latest == NULL) {
-			latest = pkg;
-			continue;
+
+		if (apk_flags & APK_PREFER_AVAILABLE) {
+			/* pkg available, pkg0 not */
+			if (pkg->repos != 0 && pkg0->repos == 0)
+				continue;
+			/* pkg0 available, pkg not */
+			if (pkg0->repos != 0 && pkg->repos == 0)
+				return FALSE;
 		}
 
-		if ((apk_flags & APK_PREFER_AVAILABLE) ||
-		    (name->flags & APK_NAME_REINSTALL)) {
-			if (latest->repos != 0 && pkg->repos == 0)
-				continue;
-			if (latest->repos == 0 && pkg->repos != 0) {
-				latest = pkg;
-				continue;
-			}
-			/* Otherwise both are not available, or both are
-			 * available and we just compare the versions then */
+		if (!(apk_flags & APK_UPGRADE)) {
+			/* not upgrading, prefer the installed package */
+			if (pkg0->ipkg != NULL)
+				return FALSE;
 		}
-		if (apk_pkg_version_compare(pkg, latest) == APK_VERSION_GREATER)
-			latest = pkg;
+
+		/* upgrading, or neither of the package is installed, so
+		 * we just fall back comparing to versions */
+		if (apk_pkg_version_compare(pkg0, pkg) == APK_VERSION_GREATER)
+			return FALSE;
 	}
 
-	/* Choose the best looking candidate. */
-	if (apk_flags & APK_UPGRADE) {
-		ns->preferred = latest;
-	} else {
-		if (installed != NULL &&
-		    (installed->repos != 0 ||
-		     !(name->flags & APK_NAME_REINSTALL)))
-			ns->preferred = installed;
-		else
-			ns->preferred = latest;
-	}
-
+	/* no package greater than the selected */
+	return TRUE;
 }
 
 static int update_name_state(struct apk_solver_state *ss,
@@ -139,10 +147,8 @@ static int update_name_state(struct apk_solver_state *ss,
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
-		struct apk_package_state *ps0 = &ss->pkg_state[pkg0->topology_sort];
 
-		if (pkg0->topology_sort >= ss->topology_position ||
-		    ps0->conflicts != 0)
+		if (!can_consider_package(ss, pkg0))
 			continue;
 
 		options++;
@@ -274,12 +280,8 @@ static int apply_constraint(struct apk_solver_state *ss, struct apk_dependency *
 		struct apk_package *pkg0 = name->pkgs->item[i];
 		struct apk_package_state *ps0 = &ss->pkg_state[pkg0->topology_sort];
 
-		if (pkg0->topology_sort >= ss->topology_position) {
-			dbg_printf(PKG_VER_FMT ": topology skip %d > %d\n",
-				   PKG_VER_PRINTF(pkg0),
-				   pkg0->topology_sort, ss->topology_position);
+		if (pkg0->topology_sort >= ss->topology_position)
 			continue;
-		}
 
 		if (!apk_dep_is_satisfied(dep, pkg0)) {
 			ps0->conflicts++;
@@ -407,14 +409,10 @@ static int expand_branch(struct apk_solver_state *ss)
 		ns = &ss->name_state[pkg0->name->id];
 		dbg_printf("expand_branch: %s %d\n", pkg0->name->name, pkg0->topology_sort);
 
-		/* Is there something we can still use? */
-		if (ns->preferred == NULL)
-			calculate_preferred(ss->db, pkg0->name, ns);
-
 		r = push_decision(ss, pkg0,
-			(pkg0 == ns->preferred) ?
-			 (APK_PKGSTF_INSTALL | APK_PKGSTF_BRANCH) :
-			 (APK_PKGSTF_NOINSTALL | APK_PKGSTF_BRANCH));
+			is_pkg_preferred(ss, pkg0) ?
+			  (APK_PKGSTF_INSTALL | APK_PKGSTF_BRANCH) :
+			  (APK_PKGSTF_NOINSTALL | APK_PKGSTF_BRANCH));
 
 		if (/*no_error_reporting &&*/ r)
 			return r;
@@ -462,14 +460,14 @@ int apk_solver_solve(struct apk_database *db, struct apk_dependency_array *world
 	r = foreach_dependency(ss, world, apply_constraint);
 	while (r == 0) {
 		if (expand_branch(ss) == 0) {
-			/* found solution*/
-			/* FIXME: we should check other permutations if they
-			 * have smaller cost to find optimal changeset */
+			/* found solution - it is optimal because we permutate
+			 * each preferred local option first, and permutations
+			 * happen in topologally sorted order. */
 			break;
-		} else {
-			/* conflicting constraints -- backtrack */
-			r = next_branch(ss);
 		}
+
+		/* conflicting constraints -- backtrack */
+		r = next_branch(ss);
 	}
 
 	/* collect packages */
