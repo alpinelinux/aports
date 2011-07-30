@@ -24,7 +24,7 @@ struct apk_changeset {
 
 void apk_solver_sort(struct apk_database *db);
 int apk_solver_solve(struct apk_database *db, struct apk_dependency_array *world,
-		 struct apk_package_array **solution);
+		     struct apk_package_array **solution, int allow_errors);
 int apk_solver_generate_changeset(struct apk_database *db,
 				  struct apk_package_array *solution,
 				  struct apk_changeset *changeset);

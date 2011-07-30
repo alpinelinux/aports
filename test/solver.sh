@@ -5,8 +5,12 @@ APK_TEST=../src/apk_test
 fail=0
 for test in *.test; do
 	bn=$(basename $test .test)
-	$APK_TEST $(cat $test) &> $bn.got
-	if ! cmp $bn.expect $bn.got 2> /dev/null; then
+	(
+		read options
+		read world
+		$APK_TEST $options "$world" &> $bn.got
+	) < $bn.test
+	if ! cmp $bn.expect $bn.got &> /dev/null; then
 		fail=$((fail+1))
 		echo "FAIL: $test"
 		diff -ru $bn.expect $bn.got
