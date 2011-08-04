@@ -1,6 +1,6 @@
 module(..., package.seeall)
 
-local function split(str)
+local function split_subpkgs(str)
 	local t = {}
 	local e
 	if (str == nil) then
@@ -12,16 +12,28 @@ local function split(str)
 	return t
 end
 
+local function split(str)
+	local t = {}
+	local e
+	if (str == nil) then
+		return nil
+	end
+	for e in string.gmatch(str, "%S+") do
+		t[#t + 1] = e
+	end
+	return t
+end
+
 local function split_apkbuild(line)
 	local r = {}
-	local dir,pkgname, pkgver, pkgrel, arch, depends, makedepends, subpackages, source = string.match(line, "([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)")
+	local dir,pkgname, pkgver, pkgrel, arch, depends, makedepends, subpackages, source = string.match(line, "([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)")
 	r.dir = dir
 	r.pkgname = pkgname
 	r.pkgver = pkgver
 	r.pkgrel = pkgrel
 	r.depends = split(depends)
 	r.makedepends = split(makedepends)
-	r.subpackages = split(subpackages)
+	r.subpackages = split_subpkgs(subpackages)
 	r.source = split(source)
 	return r
 end
@@ -84,6 +96,29 @@ function all_deps(p)
 		end
 	end
 	return m
+end
+
+function is_remote(url)
+	local _,pref
+	for _,pref in pairs{ "^http://", "^ftp://", "^https://" } do
+		if string.match(url, pref) then
+			return true
+		end
+	end
+	return false
+end
+
+-- iterate over all entries in source and execute the function for remote
+function foreach_remote_source(p, func)
+	local _,s
+	if p == nil or type(p.source) ~= "table" then
+		return
+	end
+	for _,url in pairs(p.source) do
+		if is_remote(url) then
+			func(url)
+		end
+	end
 end
 
 local function init_apkdb(repodirs)
