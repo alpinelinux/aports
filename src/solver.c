@@ -9,8 +9,6 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
-/* FIXME: install-if not supported yet */
-
 #include <stdlib.h>
 #include "apk_defines.h"
 #include "apk_database.h"
@@ -31,6 +29,7 @@
 
 struct apk_package_state {
 	struct apk_package *backtrack;
+	unsigned int topology_depends;
 	unsigned short flags;
 	unsigned short conflicts;
 	unsigned short cur_unsatisfiable;
@@ -48,8 +47,9 @@ struct apk_name_state {
 
 struct apk_solver_state {
 	struct apk_database *db;
-	struct apk_package_state *pkg_state;
 	struct apk_name_state *name_state;
+	unsigned num_topology_positions;
+
 	struct list_head unsolved_list_head;
 	struct apk_package *latest_decision;
 	unsigned int topology_position;
@@ -66,6 +66,11 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 static void push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
 			  int flags);
 
+static inline struct apk_package_state *pkg_to_ps(struct apk_package *pkg)
+{
+	return (struct apk_package_state*) pkg->state_ptr;
+}
+
 static inline int pkg_available(struct apk_database *db, struct apk_package *pkg)
 {
 	if (pkg->installed_size == 0)
@@ -75,6 +80,47 @@ static inline int pkg_available(struct apk_database *db, struct apk_package *pkg
 	if (apk_db_select_repo(db, pkg) != NULL)
 		return TRUE;
 	return FALSE;
+}
+
+static void sort_pkg(struct apk_solver_state *ss, struct apk_package *pkg)
+{
+	struct apk_package_state *ps;
+	int i, j;
+
+	/* Avoid recursion to same package */
+	if (pkg->state_ptr != NULL)
+		return;
+
+	pkg->state_ptr = calloc(1, sizeof(struct apk_package_state));
+	ps = pkg_to_ps(pkg);
+
+	/* Sort all dependants before self */
+	for (i = 0; i < pkg->depends->num; i++) {
+		struct apk_dependency *dep = &pkg->depends->item[i];
+		struct apk_name *name0 = dep->name;
+
+		for (j = 0; j < name0->pkgs->num; j++) {
+			struct apk_package *pkg0 = name0->pkgs->item[j];
+			/* conflict depends on all to be not installed */
+			if (dep->result_mask != APK_DEPMASK_CONFLICT &&
+			    !apk_dep_is_satisfied(dep, pkg0))
+				continue;
+			sort_pkg(ss, pkg0);
+		}
+	}
+
+	/* Assign a topology sorting order */
+	ps->topology_depends = ++ss->num_topology_positions;
+
+	/* FIXME: install_if */
+}
+
+static void sort_name(struct apk_solver_state *ss, struct apk_name *name)
+{
+	int i;
+
+	for (i = 0; i < name->pkgs->num; i++)
+		sort_pkg(ss, name->pkgs->item[i]);
 }
 
 static void prepare_name(struct apk_solver_state *ss, struct apk_name *name,
@@ -87,7 +133,7 @@ static void prepare_name(struct apk_solver_state *ss, struct apk_name *name,
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg = name->pkgs->item[i];
-		struct apk_package_state *ps = &ss->pkg_state[pkg->topology_sort];
+		struct apk_package_state *ps = pkg_to_ps(pkg);
 
 		/* if package is needed for (re-)install */
 		if ((name->flags & APK_NAME_REINSTALL) || (pkg->ipkg == NULL)) {
@@ -108,10 +154,11 @@ static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependenc
 		func(ss, &deps->item[i]);
 }
 
-static int inline can_consider_package(struct apk_solver_state *ss, struct apk_package *pkg)
+static int inline can_consider_package(struct apk_solver_state *ss, struct apk_package_state *ps)
 {
-	struct apk_package_state *ps = &ss->pkg_state[pkg->topology_sort];
-	if (pkg->topology_sort > ss->topology_position)
+	if (ps == NULL)
+		return FALSE;
+	if (ps->topology_depends > ss->topology_position)
 		return FALSE;
 	if (ps->conflicts)
 		return FALSE;
@@ -127,8 +174,9 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 	 * available packages for the name */
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
+		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
-		if (pkg0 == pkg || !can_consider_package(ss, pkg0))
+		if (pkg0 == pkg || !can_consider_package(ss, ps0))
 			continue;
 
 		if (apk_flags & APK_PREFER_AVAILABLE) {
@@ -165,21 +213,23 @@ static int update_name_state(struct apk_solver_state *ss,
 			     struct apk_name *name, struct apk_name_state *ns,
 			     int requirers_adjustment)
 {
-	struct apk_package *pkg_best = NULL;
+	struct apk_package *best_pkg = NULL;
+	unsigned int best_topology = 0;
 	int i, options = 0;
 
 	ns->requirers += requirers_adjustment;
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
+		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
-		if (!can_consider_package(ss, pkg0))
+		if (!can_consider_package(ss, ps0))
 			continue;
 
 		options++;
-		if (pkg_best == NULL ||
-		    pkg0->topology_sort > pkg_best->topology_sort)
-			pkg_best = pkg0;
+		if (best_pkg == NULL ||
+		    ps0->topology_depends > best_topology)
+			best_pkg = pkg0, best_topology = ps0->topology_depends;
 	}
 
 	if (options == 0) {
@@ -202,10 +252,10 @@ static int update_name_state(struct apk_solver_state *ss,
 			   name->name, ns->requirers, options);
 	} else {
 		dbg_printf("%s: added to unsolved: %d requirers, %d options (next topology %d)\n",
-			   name->name, ns->requirers, options, pkg_best->topology_sort);
+			   name->name, ns->requirers, options, best_topology);
 		if (!list_hashed(&ns->unsolved_list))
 			list_add(&ns->unsolved_list, &ss->unsolved_list_head);
-		ns->chosen = pkg_best;
+		ns->chosen = best_pkg;
 	}
 
 	return options;
@@ -248,7 +298,7 @@ static void undo_decision(struct apk_solver_state *ss,
 
 	ss->cur_unsatisfiable = ps->cur_unsatisfiable;
 	if (ps->flags & APK_PKGSTF_BRANCH)
-		ss->topology_position = pkg->topology_sort;
+		ss->topology_position = ps->topology_depends;
 
 	if (ps->flags & APK_PKGSTF_INSTALL) {
 		ss->assigned_names--;
@@ -266,7 +316,7 @@ static void undo_decision(struct apk_solver_state *ss,
 static void push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
 			  int flags)
 {
-	struct apk_package_state *ps = &ss->pkg_state[pkg->topology_sort];
+	struct apk_package_state *ps = pkg_to_ps(pkg);
 
 	ps->backtrack = ss->latest_decision;
 	ps->flags = flags;
@@ -274,7 +324,7 @@ static void push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
 	ss->latest_decision = pkg;
 
 	if (flags & APK_PKGSTF_BRANCH) {
-		ss->topology_position = pkg->topology_sort;
+		ss->topology_position = ps->topology_depends;
 		dbg_printf("push_decision: adding new BRANCH at topology_position %d\n",
 			   ss->topology_position);
 	} else
@@ -288,18 +338,14 @@ static int next_branch(struct apk_solver_state *ss)
 	struct apk_package *pkg;
 	struct apk_package_state *ps;
 
-	while (1) {
+	while (ss->latest_decision != NULL) {
 		pkg = ss->latest_decision;
-		ps = &ss->pkg_state[pkg->topology_sort];
+		ps = pkg_to_ps(pkg);
 		undo_decision(ss, pkg, ps);
 
 		if (ps->flags & APK_PKGSTF_ALT_BRANCH) {
 			pkg = ps->backtrack;
 			ss->latest_decision = pkg;
-			if (pkg == NULL) {
-				dbg_printf("next_branch: no more branches\n");
-				return 1;
-			}
 			dbg_printf("next_branch: undo decision at topology_position %d\n",
 				   ss->topology_position);
 		} else {
@@ -313,6 +359,9 @@ static int next_branch(struct apk_solver_state *ss)
 			return 0;
 		}
 	}
+
+	dbg_printf("next_branch: no more branches\n");
+	return 1;
 }
 
 static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
@@ -333,9 +382,10 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
-		struct apk_package_state *ps0 = &ss->pkg_state[pkg0->topology_sort];
+		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
-		if (pkg0->topology_sort >= ss->topology_position)
+		if (ps0 == NULL ||
+		    ps0->topology_depends >= ss->topology_position)
 			continue;
 
 		if (!apk_dep_is_satisfied(dep, pkg0)) {
@@ -364,9 +414,9 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
-		struct apk_package_state *ps0 = &ss->pkg_state[pkg0->topology_sort];
+		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
-		if (pkg0->topology_sort >= ss->topology_position)
+		if (ps0->topology_depends >= ss->topology_position)
 			continue;
 
 		if (!apk_dep_is_satisfied(dep, pkg0)) {
@@ -385,12 +435,13 @@ static int expand_branch(struct apk_solver_state *ss)
 {
 	struct apk_name_state *ns;
 	struct apk_package *pkg0 = NULL;
+	unsigned int topology0 = 0;
 
 	/* FIXME: change unsolved_list to a priority queue */
 	list_for_each_entry(ns, &ss->unsolved_list_head, unsolved_list) {
 		if (pkg0 == NULL ||
-		    ns->chosen->topology_sort > pkg0->topology_sort)
-			pkg0 = ns->chosen;
+		    pkg_to_ps(ns->chosen)->topology_depends > topology0)
+			pkg0 = ns->chosen, topology0 = pkg_to_ps(pkg0)->topology_depends;
 	}
 	if (pkg0 == NULL) {
 		dbg_printf("expand_branch: list is empty (%d unsatisfied)\n",
@@ -401,7 +452,7 @@ static int expand_branch(struct apk_solver_state *ss)
 	/* someone needs to provide this name -- find next eligible
 	 * provider candidate */
 	ns = &ss->name_state[pkg0->name->id];
-	dbg_printf("expand_branch: %s %d\n", pkg0->name->name, pkg0->topology_sort);
+	dbg_printf("expand_branch: %s\n", pkg0->name->name);
 
 	push_decision(ss, pkg0, get_pkg_expansion_flags(ss, pkg0));
 	#if 0
@@ -424,7 +475,7 @@ static void record_solution(struct apk_solver_state *ss)
 	i = 0;
 	pkg = ss->latest_decision;
 	while (pkg != NULL) {
-		ps = &ss->pkg_state[pkg->topology_sort];
+		ps = pkg_to_ps(pkg);
 		if ((ps->flags & APK_PKGSTF_INSTALL) &&
 		    (ps->conflicts == 0))
 			ss->best_solution->item[i++] = pkg;
@@ -451,7 +502,7 @@ int apk_solver_solve(struct apk_database *db, struct apk_dependency_array *world
 		     struct apk_package_array **solution, int allow_errors)
 {
 	struct apk_solver_state *ss;
-	int r;
+	int i, r;
 
 	ss = calloc(1, sizeof(struct apk_solver_state));
 	ss->db = db;
@@ -459,8 +510,10 @@ int apk_solver_solve(struct apk_database *db, struct apk_dependency_array *world
 	ss->best_unsatisfiable = -1;
 	ss->allow_errors = allow_errors;
 	list_init(&ss->unsolved_list_head);
-	ss->pkg_state = calloc(db->available.packages.num_items+1, sizeof(struct apk_package_state));
-	ss->name_state = calloc(db->available.names.num_items+1, sizeof(struct apk_name_state));
+	ss->name_state = calloc(db->available.names.num_items + 1, sizeof(struct apk_name_state));
+
+	for (i = 0; i < world->num; i++)
+		sort_name(ss, world->item[i].name);
 
 	foreach_dependency(ss, world, apply_constraint);
 	do {
@@ -497,7 +550,6 @@ int apk_solver_solve(struct apk_database *db, struct apk_dependency_array *world
 		r = -1;
 
 	free(ss->name_state);
-	free(ss->pkg_state);
 	free(ss);
 
 	return r;
@@ -511,7 +563,8 @@ static int compare_change(const void *p1, const void *p2)
 	if (c1->newpkg == NULL) {
 		if (c2->newpkg == NULL)
 			/* both deleted - reverse topology order */
-			return c1->oldpkg->topology_sort - c2->oldpkg->topology_sort;
+			return  pkg_to_ps(c1->oldpkg)->topology_depends -
+				pkg_to_ps(c2->oldpkg)->topology_depends;
 
 		/* c1 deleted, c2 installed -> c2 first*/
 		return -1;
@@ -520,7 +573,8 @@ static int compare_change(const void *p1, const void *p2)
 		/* c1 installed, c2 deleted -> c1 first*/
 		return 1;
 
-	return c2->newpkg->topology_sort - c1->newpkg->topology_sort;
+	return  pkg_to_ps(c2->newpkg)->topology_depends -
+		pkg_to_ps(c1->newpkg)->topology_depends;
 }
 
 int apk_solver_generate_changeset(struct apk_database *db,

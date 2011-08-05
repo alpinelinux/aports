@@ -53,16 +53,15 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 {
 	int i, j, r, ret = 0;
 
-	/* Succesfully vandalize the apk_package by reusing
-	 * size field for our evil purposes ;) */
-	if (pkg->size == S_EVALUATED)
+	if (pkg->state_int == S_EVALUATED)
 		return 0;
-	if (((ssize_t)pkg->size) <= S_EVALUATING) {
-		pkg->size--;
+
+	if (pkg->state_int <= S_EVALUATING) {
+		pkg->state_int--;
 		return 1;
 	}
 
-	pkg->size = S_EVALUATING;
+	pkg->state_int = S_EVALUATING;
 	for (i = 0; i < pkg->depends->num; i++) {
 		struct apk_dependency *dep = &pkg->depends->item[i];
 		struct apk_name *name = dep->name;
@@ -96,8 +95,8 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 			}
 		}
 	}
-	ret -= S_EVALUATING - pkg->size;
-	pkg->size = S_EVALUATED;
+	ret -= S_EVALUATING - pkg->state_int;
+	pkg->state_int = S_EVALUATED;
 
 	return ret;
 }

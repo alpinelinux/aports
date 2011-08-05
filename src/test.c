@@ -179,7 +179,6 @@ static int test_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	apk_deps_parse(db, &db->world, APK_BLOB_STR(argv[0]));
 
 	/* run solver */
-	apk_solver_sort(db);
 	r = apk_solver_solve(db, db->world, &solution, TRUE);
 	if (r == 0) {
 		memset(&changeset, 0, sizeof(changeset));

@@ -80,7 +80,10 @@ struct apk_installed_package {
 
 struct apk_package {
 	apk_hash_node hash_node;
-	unsigned int topology_sort;
+	union {
+		int state_int;
+		void *state_ptr;
+	};
 	struct apk_name *name;
 	struct apk_installed_package *ipkg;
 	apk_blob_t *version, *arch, *license;
