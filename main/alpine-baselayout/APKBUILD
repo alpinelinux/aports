@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.1.1
-pkgrel=0
+pkgrel=1
 pkgdesc="Alpine base dir structure and init scripts"
 url=http://git.alpinelinux.org/cgit/alpine-baselayout
 depends=
@@ -25,6 +25,6 @@ build() {
 package() {
 	cd "$_builddir"
 	make install PREFIX= DESTDIR="$pkgdir" || return 1
-	rm -f "$pkgdir"/etc/issue
+	rm -rf "$pkgdir"/etc/issue "$pkgdir"/usr/share/udhcpc
 }
 md5sums="4f47c32a0e88ae0bd4673a07478525c0  alpine-baselayout-2.1.1.tar.bz2"
