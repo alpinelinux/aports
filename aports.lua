@@ -207,6 +207,16 @@ function Aports:foreach_pkg(pkg, f)
 	end
 end
 
+function Aports:foreach_aport(f)
+	self:foreach(function(pkgname)
+		self:foreach_pkg(pkgname, function(i, pkg)
+			if pkgname == pkg.pkgname then
+				f(pkg)
+			end
+		end)
+	end)
+end
+
 function new(repodirs)
 	local h = Aports
 	h.repodirs = repodirs
