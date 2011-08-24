@@ -121,6 +121,26 @@ function foreach_remote_source(p, func)
 	end
 end
 
+function get_maintainer(pkg)
+	if pkg == nil or pkg.dir == nil then
+		return nil
+	end
+	local f = io.open(pkg.dir.."/APKBUILD")
+	if f == nil then
+		return nil
+	end
+	local line
+	for line in f:lines() do
+		local maintainer = line:match("^%s*#%s*Maintainer:%s*(.*)")
+		if maintainer then
+			f:close()
+			return maintainer
+		end
+	end
+	f:close()
+	return nil
+end
+
 local function init_apkdb(repodirs)
 	local pkgdb = {}
 	local revdeps = {}
