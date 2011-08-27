@@ -1,7 +1,7 @@
 # Contributor: Natanael Copa <ncopa@alpinelinux.org>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
-pkgver=2.2.0_git20110825
+pkgver=2.2.0_git20110827
 pkgrel=0
 pkgdesc="Meta package for minimal alpine base"
 url="http://alpinelinux.org"
