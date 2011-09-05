@@ -27,6 +27,7 @@
 #define APK_PKGSTF_BRANCH		2
 #define APK_PKGSTF_ALT_BRANCH		4
 #define APK_PKGSTF_INSTALLIF		8
+#define APK_PKGSTF_DECIDED		16
 
 struct apk_package_state {
 	struct apk_package *backtrack;
@@ -219,17 +220,6 @@ static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependenc
 		func(ss, &deps->item[i]);
 }
 
-static int inline can_consider_package(struct apk_solver_state *ss, struct apk_package_state *ps)
-{
-	if (ps == NULL)
-		return FALSE;
-	if (ps->topology_hard > ss->topology_position)
-		return FALSE;
-	if (ps->conflicts)
-		return FALSE;
-	return TRUE;
-}
-
 static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_package *pkg)
 {
 	struct apk_name *name = pkg->name;
@@ -241,7 +231,10 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 		struct apk_package *pkg0 = name->pkgs->item[i];
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
-		if (pkg0 == pkg || !can_consider_package(ss, ps0))
+		if (pkg0 == pkg || ps0 == NULL ||
+		    ps0->topology_hard > ss->topology_position ||
+		    (ps0->flags & APK_PKGSTF_DECIDED) ||
+		    ps0->conflicts != 0)
 			continue;
 
 		if (apk_flags & APK_PREFER_AVAILABLE) {
@@ -305,7 +298,9 @@ static int update_name_state(struct apk_solver_state *ss,
 		struct apk_package *pkg0 = name->pkgs->item[i];
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
-		if (!can_consider_package(ss, ps0))
+		if (ps0 == NULL ||
+		    ps0->topology_hard >= ss->topology_position ||
+		    (ps0->flags & APK_PKGSTF_DECIDED))
 			continue;
 
 		if (ns->requirers == 0 && ns->install_ifs != 0 &&
@@ -334,14 +329,15 @@ static int update_name_state(struct apk_solver_state *ss,
 	} else
 		ns->flags &= ~APK_NAMESTF_NO_OPTIONS;
 
-	if (options == 0 || (ns->requirers == 0 && ns->install_ifs == 0)) {
+	if ((options == 0 && skipped_options == 0) ||
+	    (ns->requirers == 0 && ns->install_ifs == 0)) {
 		if (list_hashed(&ns->unsolved_list)) {
 			list_del(&ns->unsolved_list);
 			list_init(&ns->unsolved_list);
 			ns->chosen = NULL;
 		}
-		dbg_printf("%s: deleted from unsolved: %d requirers, %d install_ifs, %d options\n",
-			   name->name, ns->requirers, ns->install_ifs, options);
+		dbg_printf("%s: deleted from unsolved: %d requirers, %d install_ifs, %d options, %d skipped\n",
+			   name->name, ns->requirers, ns->install_ifs, options, skipped_options);
 	} else {
 		dbg_printf("%s: added to unsolved: %d requirers, %d install_ifs, %d options (next topology %d)\n",
 			   name->name, ns->requirers, ns->install_ifs, options,
@@ -351,7 +347,7 @@ static int update_name_state(struct apk_solver_state *ss,
 		ns->chosen = best_pkg;
 	}
 
-	return options;
+	return options + skipped_options;
 }
 
 static void trigger_install_if(struct apk_solver_state *ss,
@@ -391,6 +387,7 @@ static void apply_decision(struct apk_solver_state *ss,
 
 	if (ps->flags & APK_PKGSTF_INSTALL) {
 		ss->assigned_names++;
+		ss->cur_unsatisfiable += ps->conflicts;
 		ns->chosen = pkg;
 		ns->flags |= APK_NAMESTF_LOCKED;
 
@@ -402,7 +399,6 @@ static void apply_decision(struct apk_solver_state *ss,
 		foreach_dependency(ss, pkg->depends, apply_constraint);
 		foreach_rinstall_if_pkg(ss, pkg, trigger_install_if);
 	} else {
-		ps->conflicts++;
 		update_name_state(ss, pkg->name, ns, 0);
 	}
 }
@@ -416,7 +412,6 @@ static void undo_decision(struct apk_solver_state *ss,
 	dbg_printf("undo_decision: " PKG_VER_FMT " %s\n", PKG_VER_PRINTF(pkg),
 		   (ps->flags & APK_PKGSTF_INSTALL) ? "INSTALL" : "NO_INSTALL");
 
-	ss->cur_unsatisfiable = ps->cur_unsatisfiable;
 	if (ps->flags & APK_PKGSTF_INSTALLIF)
 		ss->topology_position = ps->topology_soft;
 	else
@@ -430,10 +425,9 @@ static void undo_decision(struct apk_solver_state *ss,
 
 		ns->flags &= ~APK_NAMESTF_LOCKED;
 		ns->chosen = NULL;
-	} else {
-		ps->conflicts--;
 	}
 
+	ss->cur_unsatisfiable = ps->cur_unsatisfiable;
 	update_name_state(ss, pkg->name, ns, 0);
 }
 
@@ -443,7 +437,7 @@ static void push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
 	struct apk_package_state *ps = pkg_to_ps(pkg);
 
 	ps->backtrack = ss->latest_decision;
-	ps->flags = flags;
+	ps->flags = flags | APK_PKGSTF_DECIDED;
 	ps->cur_unsatisfiable = ss->cur_unsatisfiable;
 
 	if (ps->topology_soft < ss->topology_position) {
@@ -480,10 +474,10 @@ static int next_branch(struct apk_solver_state *ss)
 		undo_decision(ss, pkg, ps);
 
 		if (ps->flags & APK_PKGSTF_ALT_BRANCH) {
-			pkg = ps->backtrack;
-			ss->latest_decision = pkg;
 			dbg_printf("next_branch: undo decision at topology_position %d\n",
 				   ss->topology_position);
+			ps->flags &= ~(APK_PKGSTF_ALT_BRANCH | APK_PKGSTF_DECIDED);
+			ss->latest_decision = ps->backtrack;
 		} else {
 			dbg_printf("next_branch: swapping BRANCH at topology_position %d\n",
 				   ss->topology_position);
@@ -512,7 +506,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		dbg_printf(PKG_VER_FMT " selected already for %s\n",
 			   PKG_VER_PRINTF(ns->chosen), dep->name->name);
 		if (!apk_dep_is_satisfied(dep, ns->chosen))
-			ss->cur_unsatisfiable += 200;
+			ss->cur_unsatisfiable++;
 		return;
 	}
 
@@ -615,9 +609,11 @@ static void record_solution(struct apk_solver_state *ss)
 	pkg = ss->latest_decision;
 	while (pkg != NULL) {
 		ps = pkg_to_ps(pkg);
-		if ((ps->flags & APK_PKGSTF_INSTALL) &&
-		    (ps->conflicts == 0))
+		if (ps->flags & APK_PKGSTF_INSTALL) {
+			if (i >= ss->assigned_names)
+				abort();
 			ss->best_solution->item[i++] = pkg;
+		}
 
 		dbg_printf("record_solution: " PKG_VER_FMT ": %sINSTALL\n",
 			   PKG_VER_PRINTF(pkg),
@@ -656,9 +652,12 @@ int apk_solver_solve(struct apk_database *db, struct apk_dependency_array *world
 
 	foreach_dependency(ss, world, apply_constraint);
 	do {
-		if (ss->allow_errors || ss->cur_unsatisfiable < ss->best_unsatisfiable) {
+		if (ss->allow_errors ||
+		    ss->cur_unsatisfiable < ss->best_unsatisfiable) {
 			r = expand_branch(ss);
 			if (r) {
+				dbg_printf("solution with %d unsatisfiable\n",
+					   ss->cur_unsatisfiable);
 				if (ss->cur_unsatisfiable == 0) {
 					/* found solution - it is optimal because we permutate
 					 * each preferred local option first, and permutations
