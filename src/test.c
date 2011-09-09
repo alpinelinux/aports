@@ -19,6 +19,7 @@
 struct test_ctx {
 	const char *installed_db;
 	struct apk_string_array *repos;
+	unsigned short solver_flags;
 };
 
 static int test_parse(void *pctx, struct apk_db_options *dbopts,
@@ -36,10 +37,10 @@ static int test_parse(void *pctx, struct apk_db_options *dbopts,
 		*apk_string_array_add(&ctx->repos) = (char*) optarg;
 		break;
 	case 'u':
-		apk_flags |= APK_UPGRADE;
+		ctx->solver_flags |= APK_SOLVERF_UPGRADE;
 		break;
 	case 'a':
-		apk_flags |= APK_PREFER_AVAILABLE;
+		ctx->solver_flags |= APK_SOLVERF_AVAILABLE;
 		break;
 	default:
 		return -1;
@@ -90,8 +91,7 @@ static inline void print_change(struct apk_package *oldpkg,
 	}
 }
 
-static void print_dep_errors(char *label, struct apk_dependency_array *deps,
-			     struct apk_package **name_pkgs)
+static void print_dep_errors(char *label, struct apk_dependency_array *deps)
 {
 	int i, print_label = 1;
 	char buf[256];
@@ -99,7 +99,7 @@ static void print_dep_errors(char *label, struct apk_dependency_array *deps,
 
 	for (i = 0; i < deps->num; i++) {
 		struct apk_dependency *dep = &deps->item[i];
-		struct apk_package *pkg = name_pkgs[dep->name->id];
+		struct apk_package *pkg = dep->name->state_ptr;
 
 		if (pkg != NULL && apk_dep_is_satisfied(dep, pkg))
 			continue;
@@ -121,25 +121,22 @@ static void print_dep_errors(char *label, struct apk_dependency_array *deps,
 static void print_errors_in_solution(struct apk_database *db, int unsatisfiable,
 				     struct apk_package_array *solution)
 {
-	struct apk_package **name_pkg;
 	int i;
 
 	printf("%d unsatisfiable dependencies (solution with %d names)\n",
 		unsatisfiable, solution->num);
 
-	name_pkg = alloca(sizeof(struct apk_package*) * db->available.names.num_items);
-	memset(name_pkg, 0, sizeof(struct apk_package*) * db->available.names.num_items);
 	for (i = 0; i < solution->num; i++) {
 		struct apk_package *pkg = solution->item[i];
-		name_pkg[pkg->name->id] = pkg;
+		pkg->name->state_ptr = pkg;
 	}
 
-	print_dep_errors("world", db->world, name_pkg);
+	print_dep_errors("world", db->world);
 	for (i = 0; i < solution->num; i++) {
 		struct apk_package *pkg = solution->item[i];
 		char pkgtext[256];
 		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(solution->item[i]));
-		print_dep_errors(pkgtext, pkg->depends, name_pkg);
+		print_dep_errors(pkgtext, pkg->depends);
 	}
 
 }
@@ -149,7 +146,7 @@ static int test_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	struct test_ctx *ctx = (struct test_ctx *) pctx;
 	struct apk_bstream *bs;
 	struct apk_package_array *solution = NULL;
-	struct apk_changeset changeset;
+	struct apk_changeset changeset = {};
 	int i, r;
 
 	if (argc != 1)
@@ -179,15 +176,12 @@ static int test_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	apk_deps_parse(db, &db->world, APK_BLOB_STR(argv[0]));
 
 	/* run solver */
-	r = apk_solver_solve(db, db->world, &solution, TRUE);
+	r = apk_solver_solve(db, ctx->solver_flags, db->world, &solution, &changeset);
 	if (r == 0) {
-		memset(&changeset, 0, sizeof(changeset));
-		if (apk_solver_generate_changeset(db, solution, &changeset) == 0) {
-			/* dump changeset */
-			for (i = 0; i < changeset.changes->num; i++) {
-				struct apk_change *c = &changeset.changes->item[i];
-				print_change(c->oldpkg, c->newpkg);
-			}
+		/* dump changeset */
+		for (i = 0; i < changeset.changes->num; i++) {
+			struct apk_change *c = &changeset.changes->item[i];
+			print_change(c->oldpkg, c->newpkg);
 		}
 	} else { /* r >= 1*/
 		print_errors_in_solution(db, r, solution);
