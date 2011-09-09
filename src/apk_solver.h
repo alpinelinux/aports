@@ -31,7 +31,13 @@ int apk_solver_solve(struct apk_database *db,
 		     struct apk_dependency_array *world,
 		     struct apk_package_array **solution,
 		     struct apk_changeset *changeset);
-
+int apk_solver_commit_changeset(struct apk_database *db,
+				struct apk_changeset *changeset,
+				struct apk_dependency_array *world);
+void apk_solver_print_errors(struct apk_database *db,
+			     struct apk_package_array *solution,
+			     struct apk_dependency_array *world,
+			     int unsatisfiable);
 int apk_solver_commit(struct apk_database *db,
 		      unsigned short solver_flags,
 		      struct apk_dependency_array *world);

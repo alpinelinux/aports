@@ -974,13 +974,16 @@ static int cmp_upgrade(struct apk_change *change)
 	return 0;
 }
 
-static int commit_changeset(struct apk_database *db,
-			    struct apk_changeset *changeset,
-			    struct apk_dependency_array *world)
+int apk_solver_commit_changeset(struct apk_database *db,
+				struct apk_changeset *changeset,
+				struct apk_dependency_array *world)
 {
 	struct progress prog;
 	struct apk_change *change;
 	int i, r = 0, size_diff = 0;
+
+	if (changeset->changes == NULL)
+		goto all_done;
 
 	/* Count what needs to be done */
 	memset(&prog, 0, sizeof(prog));
@@ -1044,6 +1047,7 @@ static int commit_changeset(struct apk_database *db,
 
 	apk_db_run_triggers(db);
 
+all_done:
 	apk_dependency_array_copy(&db->world, world);
 	apk_db_write_config(db);
 
@@ -1085,10 +1089,10 @@ static void print_dep_errors(char *label, struct apk_dependency_array *deps)
 		printf("\n");
 }
 
-static void print_errors(struct apk_database *db,
-			 struct apk_package_array *solution,
-			 struct apk_dependency_array *world,
-			 int unsatisfiable)
+void apk_solver_print_errors(struct apk_database *db,
+			     struct apk_package_array *solution,
+			     struct apk_dependency_array *world,
+			     int unsatisfiable)
 {
 	int i;
 
@@ -1120,16 +1124,13 @@ int apk_solver_commit(struct apk_database *db,
 	if (r < 0)
 		return r;
 
-	if (changeset.changes == NULL)
-		apk_change_array_init(&changeset.changes);
-
 	if (r == 0 || (apk_flags & APK_FORCE)) {
 		/* Success -- or forced installation of bad graph */
-		commit_changeset(db, &changeset, world);
+		apk_solver_commit_changeset(db, &changeset, world);
 		r = 0;
 	} else {
 		/* Failure -- print errors */
-		print_errors(db, solution, world, r);
+		apk_solver_print_errors(db, solution, world, r);
 	}
 	apk_package_array_free(&solution);
 
