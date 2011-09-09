@@ -915,7 +915,7 @@ static int dump_packages(struct apk_changeset *changeset,
 {
 	struct apk_change *change;
 	struct apk_name *name;
-	struct apk_indent indent = { 0, 2 };
+	struct apk_indent indent = { .indent = 2 };
 	int match = 0, i;
 
 	for (i = 0; i < changeset->changes->num; i++) {

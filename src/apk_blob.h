@@ -109,14 +109,6 @@ void apk_blob_pull_csum(apk_blob_t *b, struct apk_checksum *csum);
 void apk_blob_pull_base64(apk_blob_t *b, apk_blob_t to);
 void apk_blob_pull_hexdump(apk_blob_t *b, apk_blob_t to);
 
-struct apk_indent {
-	int x;
-	int indent;
-};
-
-void apk_print_indented_words(struct apk_indent *i, const char *text);
-int apk_print_indented(struct apk_indent *i, apk_blob_t blob);
-
 void apk_atom_init(void);
 apk_blob_t *apk_blob_atomize(apk_blob_t blob);
 apk_blob_t *apk_blob_atomize_dup(apk_blob_t blob);

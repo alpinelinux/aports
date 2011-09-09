@@ -41,11 +41,12 @@ int apk_get_screen_width(void)
 
 int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
 {
-	if (i->x + blob.len + 1 >= apk_get_screen_width()) {
-		i->x = i->indent;
-		printf("\n%*s", i->indent - 1, "");
-	}
-	i->x += printf(" " BLOB_FMT, BLOB_PRINTF(blob));
+	if (i->x + blob.len + 1 >= apk_get_screen_width())
+		i->x = printf("\n%*s" BLOB_FMT, i->indent, "", BLOB_PRINTF(blob)) - 1;
+	else if (i->x <= i->indent)
+		i->x += printf("%*s" BLOB_FMT, i->indent - i->x, "", BLOB_PRINTF(blob));
+	else
+		i->x += printf(" " BLOB_FMT, BLOB_PRINTF(blob));
 	return 0;
 }
 

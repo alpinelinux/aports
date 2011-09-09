@@ -23,6 +23,12 @@ const char *apk_error_str(int error);
 
 void apk_reset_screen_width(void);
 int apk_get_screen_width(void);
+
+struct apk_indent {
+	int x;
+	int indent;
+};
+
 int apk_print_indented(struct apk_indent *i, apk_blob_t blob);
 void apk_print_indented_words(struct apk_indent *i, const char *text);
 

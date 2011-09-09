@@ -97,7 +97,7 @@ static int format_option(char *buf, size_t len, struct apk_option *o,
 static void print_usage(const char *cmd, const char *args, int num_opts,
 		        struct apk_option *opts)
 {
-	struct apk_indent indent = { 0, 11 };
+	struct apk_indent indent = { .indent = 11 };
 	char word[128];
 	int i, j;
 
@@ -116,7 +116,7 @@ static void print_usage(const char *cmd, const char *args, int num_opts,
 
 static void print_options(int num_opts, struct apk_option *opts)
 {
-	struct apk_indent indent = { 0, 26 };
+	struct apk_indent indent = { .indent = 26 };
 	char word[128];
 	int i;
 
@@ -139,19 +139,18 @@ static int usage(struct apk_applet *applet)
 
 		printf("\nThe following commands are available:\n");
 		for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
-			struct apk_indent indent = { 0, 26 };
+			struct apk_indent indent = { .indent = 26 };
 
 			indent.x = printf("  %-*s", indent.indent - 3, (*a)->name);
 			apk_print_indented_words(&indent, (*a)->help);
 			printf("\n");
 		}
 	} else {
-		struct apk_indent indent = { 0, 2 };
+		struct apk_indent indent = { .indent = 2 };
 
 		print_usage(applet->name, applet->arguments,
 			    applet->num_options, applet->options);
-		printf("\nDescription:\n%*s", indent.indent - 1, "");
-		indent.x = indent.indent - 1;
+		printf("\nDescription:\n");
 		apk_print_indented_words(&indent, applet->help);
 		printf("\n");
 	}
