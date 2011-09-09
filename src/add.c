@@ -13,11 +13,12 @@
 #include <stdio.h>
 #include "apk_applet.h"
 #include "apk_database.h"
-#include "apk_state.h"
 #include "apk_print.h"
+#include "apk_solver.h"
 
 struct add_ctx {
 	const char *virtpkg;
+	unsigned short solver_flags;
 };
 
 static int add_parse(void *ctx, struct apk_db_options *dbopts,
@@ -30,7 +31,7 @@ static int add_parse(void *ctx, struct apk_db_options *dbopts,
 		dbopts->open_flags |= APK_OPENF_CREATE;
 		break;
 	case 'u':
-		apk_flags |= APK_UPGRADE;
+		actx->solver_flags |= APK_SOLVERF_UPGRADE;
 		break;
 	case 't':
 		actx->virtpkg = optarg;
@@ -60,11 +61,12 @@ static int non_repository_check(struct apk_database *db)
 static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct add_ctx *actx = (struct add_ctx *) ctx;
-	struct apk_state *state = NULL;
 	struct apk_package *virtpkg = NULL;
 	struct apk_dependency virtdep;
-	struct apk_dependency *deps;
-	int i, r = 0, num_deps = 0, errors = 0;
+	struct apk_dependency_array *world = NULL;
+	int i, r = 0;
+
+	apk_dependency_array_copy(&world, db->world);
 
 	if (actx->virtpkg) {
 		if (non_repository_check(db))
@@ -82,13 +84,8 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		virtpkg->description = strdup("virtual meta package");
 		virtpkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
 		apk_dep_from_pkg(&virtdep, db, virtpkg);
-		virtdep.name->flags |= APK_NAME_TOPLEVEL;
 		virtpkg = apk_db_pkg_add(db, virtpkg);
-		num_deps = 1;
-	} else
-		num_deps = argc;
-
-	deps = alloca(sizeof(struct apk_dependency) * num_deps);
+	}
 
 	for (i = 0; i < argc; i++) {
 		struct apk_dependency dep;
@@ -117,35 +114,15 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 		if (virtpkg)
 			apk_deps_add(&virtpkg->depends, &dep);
-		else {
-			deps[i] = dep;
-			deps[i].name->flags |= APK_NAME_TOPLEVEL_OVERRIDE;
-		}
+		else
+			apk_deps_add(&world, &dep);
 	}
 	if (virtpkg)
-		deps[0] = virtdep;
+		apk_deps_add(&world, &virtdep);
 
-	state = apk_state_new(db);
-	if (state == NULL)
-		return -1;
+	r = apk_solver_commit(db, actx->solver_flags, world);
+	apk_dependency_array_free(&world);
 
-	for (i = 0; i < num_deps; i++) {
-		r = apk_state_lock_dependency(state, &deps[i]);
-		if (r == 0) {
-			apk_deps_add(&db->world, &deps[i]);
-			deps[i].name->flags |= APK_NAME_TOPLEVEL;
-		} else {
-			errors++;
-		}
-	}
-	if (errors && !(apk_flags & APK_FORCE)) {
-		apk_state_print_errors(state);
-		r = -1;
-	} else {
-		r = apk_state_commit(state);
-	}
-	if (state != NULL)
-		apk_state_unref(state);
 	return r;
 }
 

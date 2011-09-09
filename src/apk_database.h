@@ -81,15 +81,12 @@ struct apk_db_dir_instance {
 	gid_t gid;
 };
 
-#define APK_NAME_TOPLEVEL		0x0001
-#define APK_NAME_REINSTALL		0x0002
-#define APK_NAME_TOPLEVEL_OVERRIDE	0x0004
-#define APK_NAME_VISITED		0x8000
-
 struct apk_name {
 	apk_hash_node hash_node;
-	unsigned int id;
-	unsigned int flags;
+	union {
+		int state_int;
+		void *state_ptr;
+	};
 	char *name;
 	struct apk_package_array *pkgs;
 	struct apk_name_array *rdepends;
@@ -121,7 +118,7 @@ struct apk_db_options {
 struct apk_database {
 	char *root;
 	int root_fd, lock_fd, cache_fd, cachetmp_fd, keys_fd;
-	unsigned name_id, num_repos;
+	unsigned num_repos;
 	const char *cache_dir;
 	char *cache_remount_dir;
 	apk_blob_t *arch;

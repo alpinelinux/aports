@@ -22,12 +22,19 @@ struct apk_changeset {
 	struct apk_change_array *changes;
 };
 
-void apk_solver_sort(struct apk_database *db);
-int apk_solver_solve(struct apk_database *db, struct apk_dependency_array *world,
-		     struct apk_package_array **solution, int allow_errors);
-int apk_solver_generate_changeset(struct apk_database *db,
-				  struct apk_package_array *solution,
-				  struct apk_changeset *changeset);
+#define APK_SOLVERF_UPGRADE		0x0001
+#define APK_SOLVERF_AVAILABLE		0x0002
+#define APK_SOLVERF_REINSTALL		0x0004
+
+int apk_solver_solve(struct apk_database *db,
+		     unsigned short solver_flags,
+		     struct apk_dependency_array *world,
+		     struct apk_package_array **solution,
+		     struct apk_changeset *changeset);
+
+int apk_solver_commit(struct apk_database *db,
+		      unsigned short solver_flags,
+		      struct apk_dependency_array *world);
 
 #endif
 

@@ -29,7 +29,6 @@
 #include "apk_defines.h"
 #include "apk_package.h"
 #include "apk_database.h"
-#include "apk_state.h"
 #include "apk_applet.h"
 #include "apk_archive.h"
 #include "apk_print.h"
@@ -207,7 +206,6 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 		return NULL;
 
 	pn->name = apk_blob_cstr(name);
-	pn->id = db->name_id++;
 	apk_package_array_init(&pn->pkgs);
 	apk_name_array_init(&pn->rdepends);
 	apk_name_array_init(&pn->rinstall_if);
@@ -885,7 +883,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	struct apk_istream *is;
 	struct apk_bstream *bs;
 	apk_blob_t blob;
-	int i, r;
+	int r;
 
 	/* Read:
 	 * 1. installed repository
@@ -901,9 +899,6 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 			return -ENOENT;
 		apk_deps_parse(db, &db->world, blob);
 		free(blob.ptr);
-
-		for (i = 0; i < db->world->num; i++)
-			db->world->item[i].name->flags |= APK_NAME_TOPLEVEL;
 	}
 
 	if (!(flags & APK_OPENF_NO_INSTALLED)) {

@@ -15,7 +15,6 @@
 #include "apk_applet.h"
 #include "apk_package.h"
 #include "apk_database.h"
-#include "apk_state.h"
 #include "apk_print.h"
 
 struct info_ctx {

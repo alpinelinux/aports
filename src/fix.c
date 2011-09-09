@@ -16,6 +16,8 @@
 #include "apk_state.h"
 #include "apk_print.h"
 
+/* FIXME: reimplement fix applet */
+
 struct fix_ctx {
 	unsigned int reinstall : 1;
 };

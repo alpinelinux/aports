@@ -15,6 +15,8 @@
 #include "apk_package.h"
 #include "apk_solver.h"
 
+#include "apk_print.h"
+
 #if 0
 #include <stdio.h>
 #define dbg_printf(args...) fprintf(stderr, args)
@@ -43,6 +45,7 @@ struct apk_package_state {
 struct apk_name_state {
 	struct list_head unsolved_list;
 	struct apk_package *chosen;
+	unsigned short solver_flags;
 	unsigned short flags;
 	unsigned short requirers;
 	unsigned short install_ifs;
@@ -50,15 +53,14 @@ struct apk_name_state {
 
 struct apk_solver_state {
 	struct apk_database *db;
-	struct apk_name_state *name_state;
 	unsigned num_topology_positions;
 
 	struct list_head unsolved_list_head;
 	struct apk_package *latest_decision;
 	unsigned int topology_position;
 	unsigned int assigned_names;
+	unsigned short solver_flags;
 	unsigned short cur_unsatisfiable;
-	unsigned short allow_errors;
 
 	struct apk_package_array *best_solution;
 	unsigned short best_unsatisfiable;
@@ -69,9 +71,16 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 static void push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
 			  int flags);
 
-static inline struct apk_package_state *pkg_to_ps(struct apk_package *pkg)
+static struct apk_package_state *pkg_to_ps(struct apk_package *pkg)
 {
 	return (struct apk_package_state*) pkg->state_ptr;
+}
+
+static struct apk_name_state *name_to_ns(struct apk_name *name)
+{
+	if (name->state_ptr == NULL)
+		name->state_ptr = calloc(1, sizeof(struct apk_name_state));
+	return (struct apk_name_state*) name->state_ptr;
 }
 
 static inline int pkg_available(struct apk_database *db, struct apk_package *pkg)
@@ -151,6 +160,7 @@ static void sort_hard_dependencies(struct apk_solver_state *ss, struct apk_packa
 	ps = pkg_to_ps(pkg);
 	if (ps->topology_hard)
 		return;
+	ps->topology_hard = -1;
 
 	/* Consider hard dependencies only */
 	foreach_dependency_pkg(ss, pkg->depends, sort_hard_dependencies);
@@ -170,6 +180,7 @@ static void sort_soft_dependencies(struct apk_solver_state *ss, struct apk_packa
 	ps = pkg_to_ps(pkg);
 	if (ps->topology_soft != ps->topology_hard)
 		return;
+	ps->topology_soft = -1;
 
 	/* Soft reverse dependencies aka. install_if */
 	foreach_rinstall_if_pkg(ss, pkg, sort_hard_dependencies);
@@ -200,9 +211,11 @@ static void prepare_name(struct apk_solver_state *ss, struct apk_name *name,
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg = name->pkgs->item[i];
 		struct apk_package_state *ps = pkg_to_ps(pkg);
+		struct apk_name_state *ns = name_to_ns(pkg->name);
 
 		/* if package is needed for (re-)install */
-		if ((name->flags & APK_NAME_REINSTALL) || (pkg->ipkg == NULL)) {
+		if ((pkg->ipkg == NULL) ||
+		    (ns->solver_flags & APK_SOLVERF_REINSTALL)) {
 			/* and it's not available, we can't use it */
 			if (!pkg_available(ss->db, pkg))
 				ps->conflicts++;
@@ -237,7 +250,7 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 		    ps0->conflicts != 0)
 			continue;
 
-		if (apk_flags & APK_PREFER_AVAILABLE) {
+		if (ss->solver_flags & APK_SOLVERF_AVAILABLE) {
 			/* pkg available, pkg0 not */
 			if (pkg->repos != 0 && pkg0->repos == 0)
 				continue;
@@ -246,7 +259,7 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 				return APK_PKGSTF_NOINSTALL | APK_PKGSTF_BRANCH;
 		}
 
-		if (!(apk_flags & APK_UPGRADE)) {
+		if (!(ss->solver_flags & APK_SOLVERF_UPGRADE)) {
 			/* not upgrading, prefer the installed package */
 			if (pkg->ipkg == NULL && pkg0->ipkg != NULL)
 				return APK_PKGSTF_NOINSTALL | APK_PKGSTF_BRANCH;
@@ -269,13 +282,13 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 
 static int install_if_missing(struct apk_solver_state *ss, struct apk_package *pkg)
 {
-	struct apk_name_state *ns = &ss->name_state[pkg->name->id];
+	struct apk_name_state *ns;
 	int i, missing = 0;
 
 	for (i = 0; i < pkg->install_if->num; i++) {
 		struct apk_dependency *dep = &pkg->install_if->item[i];
 
-		ns = &ss->name_state[dep->name->id];
+		ns = name_to_ns(dep->name);
 		if (!(ns->flags & APK_NAMESTF_LOCKED) ||
 		    !apk_dep_is_satisfied(dep, ns->chosen))
 			missing++;
@@ -354,7 +367,7 @@ static void trigger_install_if(struct apk_solver_state *ss,
 			       struct apk_package *pkg)
 {
 	if (install_if_missing(ss, pkg) == 0) {
-		struct apk_name_state *ns = ns = &ss->name_state[pkg->name->id];
+		struct apk_name_state *ns = ns = name_to_ns(pkg->name);
 
 		dbg_printf("trigger_install_if: " PKG_VER_FMT " triggered\n",
 			   PKG_VER_PRINTF(pkg));
@@ -367,7 +380,7 @@ static void untrigger_install_if(struct apk_solver_state *ss,
 			       struct apk_package *pkg)
 {
 	if (install_if_missing(ss, pkg) != 1) {
-		struct apk_name_state *ns = ns = &ss->name_state[pkg->name->id];
+		struct apk_name_state *ns = name_to_ns(pkg->name);
 
 		dbg_printf("untrigger_install_if: " PKG_VER_FMT " no longer triggered\n",
 			   PKG_VER_PRINTF(pkg));
@@ -380,7 +393,7 @@ static void apply_decision(struct apk_solver_state *ss,
 			   struct apk_package *pkg,
 			   struct apk_package_state *ps)
 {
-	struct apk_name_state *ns = &ss->name_state[pkg->name->id];
+	struct apk_name_state *ns = name_to_ns(pkg->name);
 
 	dbg_printf("apply_decision: " PKG_VER_FMT " %s\n", PKG_VER_PRINTF(pkg),
 		   (ps->flags & APK_PKGSTF_INSTALL) ? "INSTALL" : "NO_INSTALL");
@@ -407,7 +420,7 @@ static void undo_decision(struct apk_solver_state *ss,
 			  struct apk_package *pkg,
 			  struct apk_package_state *ps)
 {
-	struct apk_name_state *ns = &ss->name_state[pkg->name->id];
+	struct apk_name_state *ns = name_to_ns(pkg->name);
 
 	dbg_printf("undo_decision: " PKG_VER_FMT " %s\n", PKG_VER_PRINTF(pkg),
 		   (ps->flags & APK_PKGSTF_INSTALL) ? "INSTALL" : "NO_INSTALL");
@@ -497,7 +510,7 @@ static int next_branch(struct apk_solver_state *ss)
 static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
 {
 	struct apk_name *name = dep->name;
-	struct apk_name_state *ns = &ss->name_state[name->id];
+	struct apk_name_state *ns = name_to_ns(name);
 	int i;
 
 	prepare_name(ss, name, ns);
@@ -533,7 +546,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
 {
 	struct apk_name *name = dep->name;
-	struct apk_name_state *ns = &ss->name_state[name->id];
+	struct apk_name_state *ns = name_to_ns(name);
 	int i;
 
 	if (ns->flags & APK_NAMESTF_LOCKED) {
@@ -589,7 +602,7 @@ static int expand_branch(struct apk_solver_state *ss)
 
 	/* someone needs to provide this name -- find next eligible
 	 * provider candidate */
-	ns = &ss->name_state[pkg0->name->id];
+	ns = name_to_ns(pkg0->name);
 	dbg_printf("expand_branch: %s\n", pkg0->name->name);
 
 	push_decision(ss, pkg0, get_pkg_expansion_flags(ss, pkg0));
@@ -633,27 +646,123 @@ static int compare_package_name(const void *p1, const void *p2)
 	return strcmp((*c1)->name->name, (*c2)->name->name);
 }
 
-int apk_solver_solve(struct apk_database *db, struct apk_dependency_array *world,
-		     struct apk_package_array **solution, int allow_errors)
+static int compare_change(const void *p1, const void *p2)
+{
+	const struct apk_change *c1 = (const struct apk_change *) p1;
+	const struct apk_change *c2 = (const struct apk_change *) p2;
+
+	if (c1->newpkg == NULL) {
+		if (c2->newpkg == NULL)
+			/* both deleted - reverse topology order */
+			return  pkg_to_ps(c2->oldpkg)->topology_hard -
+				pkg_to_ps(c1->oldpkg)->topology_hard;
+
+		/* c1 deleted, c2 installed -> c2 first*/
+		return -1;
+	}
+	if (c2->newpkg == NULL)
+		/* c1 installed, c2 deleted -> c1 first*/
+		return 1;
+
+	return  pkg_to_ps(c1->newpkg)->topology_hard -
+		pkg_to_ps(c2->newpkg)->topology_hard;
+}
+
+static int generate_changeset(struct apk_database *db,
+			      struct apk_package_array *solution,
+			      struct apk_changeset *changeset)
+{
+	struct apk_name *name;
+	struct apk_name_state *ns;
+	struct apk_package *pkg, *pkg0;
+	struct apk_installed_package *ipkg;
+	int i, j, num_installs = 0, num_removed = 0, ci = 0;
+
+	/* calculate change set size */
+	for (i = 0; i < solution->num; i++) {
+		pkg = solution->item[i];
+		if ((pkg->ipkg == NULL) ||
+		    (name_to_ns(pkg->name)->solver_flags & APK_SOLVERF_REINSTALL))
+			num_installs++;
+	}
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
+		name = ipkg->pkg->name;
+		ns = name_to_ns(name);
+		if ((ns->chosen == NULL) || !(ns->flags & APK_NAMESTF_LOCKED))
+			num_removed++;
+	}
+
+	/* construct changeset */
+	apk_change_array_resize(&changeset->changes, num_installs + num_removed);
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
+		name = ipkg->pkg->name;
+		ns = name_to_ns(name);
+		if ((ns->chosen == NULL) || !(ns->flags & APK_NAMESTF_LOCKED)) {
+			changeset->changes->item[ci].oldpkg = ipkg->pkg;
+			ci++;
+		}
+	}
+	for (i = 0; i < solution->num; i++) {
+		pkg = solution->item[i];
+		name = pkg->name;
+
+		if ((pkg->ipkg == NULL) ||
+		    (name_to_ns(name)->solver_flags & APK_SOLVERF_REINSTALL)) {
+			for (j = 0; j < name->pkgs->num; j++) {
+				pkg0 = name->pkgs->item[j];
+				if (pkg0->ipkg == NULL)
+					continue;
+				changeset->changes->item[ci].oldpkg = pkg0;
+				break;
+			}
+			changeset->changes->item[ci].newpkg = pkg;
+			ci++;
+		}
+	}
+
+	/* sort changeset to topology order */
+	qsort(changeset->changes->item, changeset->changes->num,
+	      sizeof(struct apk_change), compare_change);
+
+	return 0;
+}
+
+static int free_state(apk_hash_item item, void *ctx)
+{
+	struct apk_name *name = (struct apk_name *) item;
+
+	if (name->state_ptr != NULL) {
+		free(name->state_ptr);
+		name->state_ptr = NULL;
+	}
+	return 0;
+}
+
+int apk_solver_solve(struct apk_database *db,
+		     unsigned short solver_flags,
+		     struct apk_dependency_array *world,
+		     struct apk_package_array **solution,
+		     struct apk_changeset *changeset)
 {
 	struct apk_solver_state *ss;
+	struct apk_installed_package *ipkg;
 	int i, r;
 
 	ss = calloc(1, sizeof(struct apk_solver_state));
 	ss->db = db;
+	ss->solver_flags = solver_flags;
 	ss->topology_position = -1;
 	ss->best_unsatisfiable = -1;
-	ss->allow_errors = allow_errors;
 	list_init(&ss->unsolved_list_head);
-	ss->name_state = calloc(db->available.names.num_items + 1, sizeof(struct apk_name_state));
 
 	for (i = 0; i < world->num; i++)
 		sort_name(ss, world->item[i].name);
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list)
+		sort_name(ss, ipkg->pkg->name);
 
 	foreach_dependency(ss, world, apply_constraint);
 	do {
-		if (ss->allow_errors ||
-		    ss->cur_unsatisfiable < ss->best_unsatisfiable) {
+		if (ss->cur_unsatisfiable < ss->best_unsatisfiable) {
 			r = expand_branch(ss);
 			if (r) {
 				dbg_printf("solution with %d unsatisfiable\n",
@@ -677,97 +786,352 @@ int apk_solver_solve(struct apk_database *db, struct apk_dependency_array *world
 	/* collect packages */
 	if (r == 0 && ss->cur_unsatisfiable == 0) {
 		record_solution(ss);
-		*solution = ss->best_solution;
+		if (changeset != NULL)
+			generate_changeset(db, ss->best_solution, changeset);
 		r = 0;
-	} else if (ss->allow_errors) {
-		*solution = ss->best_solution;
+	} else {
 		qsort(ss->best_solution->item, ss->best_solution->num,
 		      sizeof(struct apk_package *), compare_package_name);
 		r = ss->best_unsatisfiable;
-	} else
-		r = -1;
+	}
 
-	free(ss->name_state);
+	if (solution != NULL)
+		*solution = ss->best_solution;
+	else
+		apk_package_array_free(&ss->best_solution);
+
+	apk_hash_foreach(&db->available.names, free_state, NULL);
 	free(ss);
 
 	return r;
 }
 
-static int compare_change(const void *p1, const void *p2)
-{
-	const struct apk_change *c1 = (const struct apk_change *) p1;
-	const struct apk_change *c2 = (const struct apk_change *) p2;
-
-	if (c1->newpkg == NULL) {
-		if (c2->newpkg == NULL)
-			/* both deleted - reverse topology order */
-			return  pkg_to_ps(c2->oldpkg)->topology_hard -
-				pkg_to_ps(c1->oldpkg)->topology_hard;
-
-		/* c1 deleted, c2 installed -> c2 first*/
-		return -1;
-	}
-	if (c2->newpkg == NULL)
-		/* c1 installed, c2 deleted -> c1 first*/
-		return 1;
-
-	return  pkg_to_ps(c1->newpkg)->topology_hard -
-		pkg_to_ps(c2->newpkg)->topology_hard;
-}
-
-int apk_solver_generate_changeset(struct apk_database *db,
-				  struct apk_package_array *solution,
-				  struct apk_changeset *changeset)
+static void print_change(struct apk_database *db,
+			 struct apk_change *change,
+			 int cur, int total)
 {
 	struct apk_name *name;
-	struct apk_package *pkg, *pkg0;
-	struct apk_installed_package *ipkg;
-	int num_installs = 0, num_removed = 0, ci = 0;
-	int i, j;
+	struct apk_package *oldpkg = change->oldpkg;
+	struct apk_package *newpkg = change->newpkg;
+	const char *msg = NULL;
+	char status[64];
+	int r;
 
-	/* calculate change set size */
-	for (i = 0; i < solution->num; i++) {
-		pkg = solution->item[i];
-		name = pkg->name;
-		if (pkg->ipkg == NULL || (name->flags & APK_NAME_REINSTALL))
-			num_installs++;
-		name->flags |= APK_NAME_VISITED;
-	}
+	snprintf(status, sizeof(status), "(%i/%i)", cur+1, total);
+	status[sizeof(status) - 1] = '\0';
 
-	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
-		if (!(ipkg->pkg->name->flags & APK_NAME_VISITED))
-			num_removed++;
-	}
+	if (oldpkg != NULL)
+		name = oldpkg->name;
+	else
+		name = newpkg->name;
 
-	/* construct changeset */
-	apk_change_array_resize(&changeset->changes, num_installs + num_removed);
-	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
-		if (ipkg->pkg->name->flags & APK_NAME_VISITED)
-			continue;
-		changeset->changes->item[ci].oldpkg = ipkg->pkg;
-		ci++;
-	}
-	for (i = 0; i < solution->num; i++) {
-		pkg = solution->item[i];
-		name = pkg->name;
-
-		if (pkg->ipkg == NULL || (name->flags & APK_NAME_REINSTALL)) {
-			for (j = 0; j < name->pkgs->num; j++) {
-				pkg0 = name->pkgs->item[j];
-				if (pkg0->ipkg == NULL)
-					continue;
-				changeset->changes->item[ci].oldpkg = pkg0;
-				break;
-			}
-			changeset->changes->item[ci].newpkg = pkg;
-			ci++;
+	if (oldpkg == NULL) {
+		apk_message("%s Installing %s (" BLOB_FMT ")",
+			    status, name->name,
+			    BLOB_PRINTF(*newpkg->version));
+	} else if (newpkg == NULL) {
+		apk_message("%s Purging %s (" BLOB_FMT ")",
+			    status, name->name,
+			    BLOB_PRINTF(*oldpkg->version));
+	} else {
+		r = apk_pkg_version_compare(newpkg, oldpkg);
+		switch (r) {
+		case APK_VERSION_LESS:
+			msg = "Downgrading";
+			break;
+		case APK_VERSION_EQUAL:
+			if (newpkg == oldpkg)
+				msg = "Re-installing";
+			else
+				msg = "Replacing";
+			break;
+		case APK_VERSION_GREATER:
+			msg = "Upgrading";
+			break;
 		}
-		name->flags &= ~APK_NAME_VISITED;
+		apk_message("%s %s %s (" BLOB_FMT " -> " BLOB_FMT ")",
+			    status, msg, name->name,
+			    BLOB_PRINTF(*oldpkg->version),
+			    BLOB_PRINTF(*newpkg->version));
 	}
+}
 
-	/* sort changeset to topology order */
-	qsort(changeset->changes->item, changeset->changes->num,
-	      sizeof(struct apk_change), compare_change);
+struct apk_stats {
+	unsigned int bytes;
+	unsigned int packages;
+};
+
+static void count_change(struct apk_change *change, struct apk_stats *stats)
+{
+	if (change->newpkg != NULL) {
+		stats->bytes += change->newpkg->installed_size;
+		stats->packages ++;
+	}
+	if (change->oldpkg != NULL)
+		stats->packages ++;
+}
+
+static void draw_progress(int percent)
+{
+	const int bar_width = apk_get_screen_width() - 7;
+	int i;
+
+	fprintf(stderr, "\e7%3i%% [", percent);
+	for (i = 0; i < bar_width * percent / 100; i++)
+		fputc('#', stderr);
+	for (; i < bar_width; i++)
+		fputc(' ', stderr);
+	fputc(']', stderr);
+	fflush(stderr);
+	fputs("\e8\e[0K", stderr);
+}
+
+struct progress {
+	struct apk_stats done;
+	struct apk_stats total;
+	struct apk_package *pkg;
+	size_t count;
+};
+
+static void progress_cb(void *ctx, size_t progress)
+{
+	struct progress *prog = (struct progress *) ctx;
+	size_t partial = 0, count;
+
+	if (prog->pkg != NULL)
+		partial = muldiv(progress, prog->pkg->installed_size, APK_PROGRESS_SCALE);
+
+        count = muldiv(100, prog->done.bytes + prog->done.packages + partial,
+		       prog->total.bytes + prog->total.packages);
+
+	if (prog->count != count)
+		draw_progress(count);
+	prog->count = count;
+}
+
+static int dump_packages(struct apk_changeset *changeset,
+			 int (*cmp)(struct apk_change *change),
+			 const char *msg)
+{
+	struct apk_change *change;
+	struct apk_name *name;
+	struct apk_indent indent = { 0, 2 };
+	int match = 0, i;
+
+	for (i = 0; i < changeset->changes->num; i++) {
+		change = &changeset->changes->item[i];
+		if (!cmp(change))
+			continue;
+		if (match == 0)
+			printf("%s:\n ", msg);
+		if (change->newpkg != NULL)
+			name = change->newpkg->name;
+		else
+			name = change->oldpkg->name;
+
+		apk_print_indented(&indent, APK_BLOB_STR(name->name));
+		match++;
+	}
+	if (match)
+		printf("\n");
+	return match;
+}
+
+static int cmp_remove(struct apk_change *change)
+{
+	return change->newpkg == NULL;
+}
+
+static int cmp_new(struct apk_change *change)
+{
+	return change->oldpkg == NULL;
+}
+
+static int cmp_downgrade(struct apk_change *change)
+{
+	if (change->newpkg == NULL || change->oldpkg == NULL)
+		return 0;
+	if (apk_pkg_version_compare(change->newpkg, change->oldpkg)
+	    & APK_VERSION_LESS)
+		return 1;
+	return 0;
+}
+
+static int cmp_upgrade(struct apk_change *change)
+{
+	if (change->newpkg == NULL || change->oldpkg == NULL)
+		return 0;
+
+	/* Count swapping package as upgrade too - this can happen if
+	 * same package version is used after it was rebuilt against
+	 * newer libraries. Basically, different (and probably newer)
+	 * package, but equal version number. */
+	if ((apk_pkg_version_compare(change->newpkg, change->oldpkg) &
+	     (APK_VERSION_GREATER | APK_VERSION_EQUAL)) &&
+	    (change->newpkg != change->oldpkg))
+		return 1;
 
 	return 0;
+}
+
+static int commit_changeset(struct apk_database *db,
+			    struct apk_changeset *changeset,
+			    struct apk_dependency_array *world)
+{
+	struct progress prog;
+	struct apk_change *change;
+	int i, r = 0, size_diff = 0;
+
+	/* Count what needs to be done */
+	memset(&prog, 0, sizeof(prog));
+	for (i = 0; i < changeset->changes->num; i++) {
+		change = &changeset->changes->item[i];
+		count_change(change, &prog.total);
+		if (change->newpkg)
+			size_diff += change->newpkg->installed_size;
+		if (change->oldpkg)
+			size_diff -= change->oldpkg->installed_size;
+	}
+	size_diff /= 1024;
+
+	if (apk_verbosity > 1 || (apk_flags & APK_INTERACTIVE)) {
+		r = dump_packages(changeset, cmp_remove,
+				  "The following packages will be REMOVED");
+		r += dump_packages(changeset, cmp_downgrade,
+				   "The following packages will be DOWNGRADED");
+		if (r || (apk_flags & APK_INTERACTIVE) || apk_verbosity > 2) {
+			dump_packages(changeset, cmp_new,
+				      "The following NEW packages will be installed");
+			dump_packages(changeset, cmp_upgrade,
+				      "The following packages will be upgraded");
+			printf("After this operation, %d kB of %s\n", abs(size_diff),
+			       (size_diff < 0) ?
+			       "disk space will be freed." :
+			       "additional disk space will be used.");
+		}
+		if (apk_flags & APK_INTERACTIVE) {
+			printf("Do you want to continue [Y/n]? ");
+			fflush(stdout);
+			r = fgetc(stdin);
+			if (r != 'y' && r != 'Y' && r != '\n')
+				return -1;
+		}
+	}
+
+	/* Go through changes */
+	r = 0;
+	for (i = 0; i < changeset->changes->num; i++) {
+		change = &changeset->changes->item[i];
+
+		print_change(db, change, i, changeset->changes->num);
+		if (apk_flags & APK_PROGRESS)
+			draw_progress(prog.count);
+		prog.pkg = change->newpkg;
+
+		if (!(apk_flags & APK_SIMULATE)) {
+			r = apk_db_install_pkg(db,
+					       change->oldpkg, change->newpkg,
+					       (apk_flags & APK_PROGRESS) ? progress_cb : NULL,
+					       &prog);
+			if (r != 0)
+				break;
+		}
+
+		count_change(change, &prog.done);
+	}
+	if (apk_flags & APK_PROGRESS)
+		draw_progress(100);
+
+	apk_db_run_triggers(db);
+
+	apk_dependency_array_copy(&db->world, world);
+	apk_db_write_config(db);
+
+	if (r == 0) {
+		apk_message("OK: %d packages, %d dirs, %d files",
+			    db->installed.stats.packages,
+			    db->installed.stats.dirs,
+			    db->installed.stats.files);
+	}
+
+	return r;
+}
+
+static void print_dep_errors(char *label, struct apk_dependency_array *deps)
+{
+	int i, print_label = 1;
+	char buf[256];
+	apk_blob_t p;
+	struct apk_indent indent;
+
+	for (i = 0; i < deps->num; i++) {
+		struct apk_dependency *dep = &deps->item[i];
+		struct apk_package *pkg = (struct apk_package*) dep->name->state_ptr;
+
+		if (pkg != NULL && apk_dep_is_satisfied(dep, pkg))
+			continue;
+
+		if (print_label) {
+			print_label = 0;
+			indent.x = printf("  %s:", label);
+			indent.indent = indent.x + 1;
+		}
+		p = APK_BLOB_BUF(buf);
+		apk_blob_push_dep(&p, dep);
+		p = apk_blob_pushed(APK_BLOB_BUF(buf), p);
+		apk_print_indented(&indent, p);
+	}
+	if (!print_label)
+		printf("\n");
+}
+
+static void print_errors(struct apk_database *db,
+			 struct apk_package_array *solution,
+			 struct apk_dependency_array *world,
+			 int unsatisfiable)
+{
+	int i;
+
+	apk_error("%d unsatisfiable dependencies:", unsatisfiable);
+
+	for (i = 0; i < solution->num; i++) {
+		struct apk_package *pkg = solution->item[i];
+		pkg->name->state_ptr = pkg;
+	}
+
+	print_dep_errors("world", world);
+	for (i = 0; i < solution->num; i++) {
+		struct apk_package *pkg = solution->item[i];
+		char pkgtext[256];
+		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(solution->item[i]));
+		print_dep_errors(pkgtext, pkg->depends);
+	}
+}
+
+int apk_solver_commit(struct apk_database *db,
+		      unsigned short solver_flags,
+		      struct apk_dependency_array *world)
+{
+	struct apk_changeset changeset = {};
+	struct apk_package_array *solution = NULL;
+	int r;
+
+	r = apk_solver_solve(db, solver_flags, world, &solution, &changeset);
+	if (r < 0)
+		return r;
+
+	if (changeset.changes == NULL)
+		apk_change_array_init(&changeset.changes);
+
+	if (r == 0 || (apk_flags & APK_FORCE)) {
+		/* Success -- or forced installation of bad graph */
+		commit_changeset(db, &changeset, world);
+		r = 0;
+	} else {
+		/* Failure -- print errors */
+		print_errors(db, solution, world, r);
+	}
+	apk_package_array_free(&solution);
+
+	return r;
 }

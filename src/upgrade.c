@@ -14,15 +14,21 @@
 #include <zlib.h>
 #include "apk_applet.h"
 #include "apk_database.h"
-#include "apk_state.h"
 #include "apk_print.h"
+#include "apk_solver.h"
+
+struct upgrade_ctx {
+	unsigned short solver_flags;
+};
 
 static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
 			 int optch, int optindex, const char *optarg)
 {
+	struct upgrade_ctx *uctx = (struct upgrade_ctx *) ctx;
+
 	switch (optch) {
 	case 'a':
-		apk_flags |= APK_PREFER_AVAILABLE;
+		uctx->solver_flags |= APK_SOLVERF_AVAILABLE;
 		break;
 	default:
 		return -1;
@@ -30,8 +36,10 @@ static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
 	return 0;
 }
 
-int apk_do_self_upgrade(struct apk_database *db, struct apk_state *state)
+int apk_do_self_upgrade(struct apk_database *db)
 {
+#if 0
+	/* FIXME: Reimplement self-upgrade. */
 	struct apk_dependency dep;
 	int r;
 
@@ -57,58 +65,24 @@ int apk_do_self_upgrade(struct apk_database *db, struct apk_state *state)
 
 	apk_error("PANIC! Failed to re-execute new apk-tools!");
 	exit(1);
+#else
+	return 0;
+#endif
 }
 
 static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
-	struct apk_state *state = NULL;
-	struct apk_name_array *missing;
-	int i, r = 0;
+	struct upgrade_ctx *uctx = (struct upgrade_ctx *) ctx;
+	unsigned short solver_flags;
+	int r;
 
-	apk_flags |= APK_UPGRADE;
-	apk_name_array_init(&missing);
+	solver_flags = APK_SOLVERF_UPGRADE | uctx->solver_flags;
 
-	state = apk_state_new(db);
-	if (state == NULL)
-		goto err;
+	r = apk_do_self_upgrade(db);
+	if (r != 0)
+		return r;
 
-	r = apk_do_self_upgrade(db, state);
-	if (r != 0) {
-		apk_state_print_errors(state);
-		goto err;
-	}
-
-	for (i = 0; i < db->world->num; i++) {
-		struct apk_dependency *dep = &db->world->item[i];
-
-		if (dep->name->pkgs->num != 0)
-			r |= apk_state_lock_dependency(state, dep);
-		else
-			*apk_name_array_add(&missing) = dep->name;
-	}
-	if (r == 0) {
-		for (i = 0; i < missing->num; i++) {
-			struct apk_indent indent;
-			struct apk_name *name = missing->item[i];
-
-			if (i == 0) {
-				apk_warning("The following package names no longer exists in repository:");
-				indent.x = 0;
-				indent.indent = 2;
-			}
-			apk_print_indented(&indent, APK_BLOB_STR(name->name));
-		}
-		if (i != 0)
-			printf("\n");
-
-		r = apk_state_commit(state);
-	} else
-		apk_state_print_errors(state);
-err:
-	if (state != NULL)
-		apk_state_unref(state);
-	apk_name_array_free(&missing);
-	return r;
+	return apk_solver_commit(db, solver_flags, db->world);
 }
 
 static struct apk_option upgrade_options[] = {

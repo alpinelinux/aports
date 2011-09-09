@@ -15,7 +15,6 @@
 #include "apk_applet.h"
 #include "apk_package.h"
 #include "apk_database.h"
-#include "apk_state.h"
 
 struct search_ctx {
 	int (*match)(struct apk_package *pkg, const char *str);

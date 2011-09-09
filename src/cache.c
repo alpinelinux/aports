@@ -17,36 +17,30 @@
 #include "apk_defines.h"
 #include "apk_applet.h"
 #include "apk_database.h"
-#include "apk_state.h"
 #include "apk_package.h"
 #include "apk_print.h"
+#include "apk_solver.h"
 
 #define CACHE_CLEAN	BIT(0)
 #define CACHE_DOWNLOAD	BIT(1)
 
 static int cache_download(struct apk_database *db)
 {
-	struct apk_state *state;
+	struct apk_changeset changeset;
 	struct apk_change *change;
 	struct apk_package *pkg;
 	struct apk_repository *repo;
 	char item[PATH_MAX], cacheitem[PATH_MAX];
 	int i, r = 0;
 
-	state = apk_state_new(db);
-	if (state == NULL)
-		goto err;
-
-	for (i = 0; i < db->world->num; i++) {
-		r = apk_state_lock_dependency(state, &db->world->item[i]);
-		if (r != 0) {
-			apk_error("Unable to select version for '%s': %d",
-				  db->world->item[i].name->name, r);
-			goto err;
-		}
+	r = apk_solver_solve(db, 0, db->world, NULL, &changeset);
+	if (r != 0) {
+		apk_error("Unable to select packages. Run apk fix.");
+		return r;
 	}
 
-	list_for_each_entry(change, &state->change_list_head, change_list) {
+	for (i = 0; i < changeset.changes->num; i++) {
+		change = &changeset.changes->item[i];
 		pkg = change->newpkg;
 
 		apk_pkg_format_cache(pkg, APK_BLOB_BUF(cacheitem));
@@ -63,9 +57,6 @@ static int cache_download(struct apk_database *db)
 					APK_SIGN_VERIFY_IDENTITY);
 	}
 
-err:
-	if (state != NULL)
-		apk_state_unref(state);
 	return r;
 }
 

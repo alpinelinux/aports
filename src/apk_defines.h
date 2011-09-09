@@ -56,14 +56,11 @@ extern char **apk_argv;
 #define APK_SIMULATE		0x0002
 #define APK_CLEAN_PROTECTED	0x0004
 #define APK_PROGRESS		0x0008
-#define APK_UPGRADE		0x0010
 #define APK_RECURSIVE		0x0020
-#define APK_PREFER_AVAILABLE	0x0040
 #define APK_UPDATE_CACHE	0x0080
 #define APK_ALLOW_UNTRUSTED	0x0100
 #define APK_PURGE		0x0200
 #define APK_INTERACTIVE		0x0400
-#define APK_RECURSIVE_DELETE	0x0800
 #define APK_NO_NETWORK		0x1000
 #define APK_OVERLAY_FROM_STDIN	0x2000
 
@@ -107,6 +104,12 @@ void *apk_array_resize(void *array, size_t new_size, size_t elem_size);
 	array_type_name##_resize(struct array_type_name **a, size_t size)\
 	{								\
 		*a = apk_array_resize(*a, size, sizeof(elem_type_name));\
+	}								\
+	static inline void						\
+	array_type_name##_copy(struct array_type_name **a, struct array_type_name *b)\
+	{								\
+		*a = apk_array_resize(*a, b->num, sizeof(elem_type_name));\
+		memcpy((*a)->item, b->item, b->num * sizeof(elem_type_name));\
 	}								\
 	static inline elem_type_name *					\
 	array_type_name##_add(struct array_type_name **a)		\

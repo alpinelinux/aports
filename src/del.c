@@ -11,17 +11,16 @@
 
 #include <stdio.h>
 #include "apk_applet.h"
-#include "apk_state.h"
 #include "apk_database.h"
 #include "apk_print.h"
+#include "apk_solver.h"
 
 static int del_parse(void *ctx, struct apk_db_options *db,
 		     int optch, int optindex, const char *optarg)
 {
 	switch (optch) {
 	case 'r':
-		apk_flags |= APK_RECURSIVE_DELETE;
-		break;
+		/* FIXME: Reimplement recursive delete. */
 	default:
 		return -1;
 	}
@@ -30,40 +29,17 @@ static int del_parse(void *ctx, struct apk_db_options *db,
 
 static int del_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
-	struct apk_state *state;
 	struct apk_name *name;
+	struct apk_dependency_array *world = NULL;
 	int i, r = 0;
 
+	apk_dependency_array_copy(&world, db->world);
 	for (i = 0; i < argc; i++) {
 		name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
-		name->flags &= ~APK_NAME_TOPLEVEL;
-		name->flags |= APK_NAME_TOPLEVEL_OVERRIDE;
-		apk_deps_del(&db->world, name);
+		apk_deps_del(&world, name);
 	}
-
-	state = apk_state_new(db);
-	if (state == NULL)
-		goto err;
-
-	for (i = 0; i < argc; i++) {
-		struct apk_dependency dep;
-
-		name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
-		dep = (struct apk_dependency) {
-			.name = name,
-			.version = apk_blob_atomize(APK_BLOB_NULL),
-			.result_mask = APK_DEPMASK_CONFLICT,
-		};
-
-		r |= apk_state_lock_dependency(state, &dep);
-	}
-	if (r == 0)
-		r = apk_state_commit(state);
-	else
-		apk_state_print_errors(state);
-err:
-	if (state != NULL)
-		apk_state_unref(state);
+	r = apk_solver_commit(db, 0, world);
+	apk_dependency_array_free(&world);
 
 	return r;
 }

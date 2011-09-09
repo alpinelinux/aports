@@ -18,7 +18,6 @@
 
 #include "apk_applet.h"
 #include "apk_database.h"
-#include "apk_state.h"
 #include "apk_io.h"
 #include "apk_print.h"
 
@@ -180,6 +179,7 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			.result_mask = APK_DEPMASK_REQUIRE,
 		};
 
+#if 0
 		if (fctx->flags & FETCH_RECURSIVE) {
 			struct apk_state *state;
 			struct apk_change *change;
@@ -203,7 +203,9 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			}
 
 			apk_state_unref(state);
-		} else {
+		} else
+#endif
+		{
 			struct apk_package *pkg = NULL;
 
 			for (j = 0; j < dep.name->pkgs->num; j++)

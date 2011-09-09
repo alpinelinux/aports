@@ -71,10 +71,10 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 			printf("  \"" PKG_VER_FMT "\" -> \"%s\" [color=red];\n",
 				PKG_VER_PRINTF(pkg),
 				name->name);
-			if (!(name->flags & APK_NAME_VISITED)) {
+			if (!name->state_int) {
 				printf("  \"%s\" [style=dashed, color=red, fontcolor=red, shape=octagon];\n",
 					name->name);
-				name->flags |= APK_NAME_VISITED;
+				name->state_int = 1;
 			}
 		} else {
 			for (j = 0; j < name->pkgs->num; j++) {
