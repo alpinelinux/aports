@@ -96,6 +96,7 @@ static struct apk_applet apk_upgrade = {
 	.help = "Upgrade (or downgrade with -a) the currently installed "
 		"packages to versions available in repositories.",
 	.open_flags = APK_OPENF_WRITE,
+	.context_size = sizeof(struct upgrade_ctx),
 	.num_options = ARRAY_SIZE(upgrade_options),
 	.options = upgrade_options,
 	.parse = upgrade_parse,
