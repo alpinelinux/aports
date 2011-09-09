@@ -912,8 +912,12 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg,
 	unlinkat(root_fd, fn, 0);
 	apk_id_cache_reset(&db->id_cache);
 
-	if (WIFEXITED(status))
-		return WEXITSTATUS(status);
+	if (WIFEXITED(status)) {
+		int rc = WEXITSTATUS(status);
+		if (rc != 0)
+			apk_warning("%s: returned error %d", &fn[15], rc);
+		return 0;
+	}
 	return -1;
 }
 
