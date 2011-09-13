@@ -1,7 +1,7 @@
 /* solver.c - Alpine Package Keeper (APK)
  * A backtracking, forward checking dependency graph solver.
  *
- * Copyright (C) 2011 Timo Teräs <timo.teras@iki.fi>
+ * Copyright (C) 2008-2011 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it

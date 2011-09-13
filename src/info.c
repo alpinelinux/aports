@@ -1,7 +1,7 @@
 /* info.c - Alpine Package Keeper (APK)
  *
  * Copyright (C) 2005-2009 Natanael Copa <n@tanael.org>
- * Copyright (C) 2009 Timo Teräs <timo.teras@iki.fi>
+ * Copyright (C) 2008-2011 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
