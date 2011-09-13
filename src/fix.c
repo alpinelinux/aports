@@ -13,13 +13,13 @@
 #include <stdio.h>
 #include "apk_applet.h"
 #include "apk_database.h"
-#include "apk_state.h"
 #include "apk_print.h"
+#include "apk_solver.h"
 
 /* FIXME: reimplement fix applet */
 
 struct fix_ctx {
-	unsigned int reinstall : 1;
+	unsigned short solver_flags;
 };
 
 static int fix_parse(void *pctx, struct apk_db_options *dbopts,
@@ -28,10 +28,10 @@ static int fix_parse(void *pctx, struct apk_db_options *dbopts,
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
 	switch (optch) {
 	case 'u':
-		apk_flags |= APK_UPGRADE;
+		ctx->solver_flags |= APK_SOLVERF_UPGRADE;
 		break;
 	case 'r':
-		ctx->reinstall = 1;
+		ctx->solver_flags |= APK_SOLVERF_REINSTALL;
 		break;
 	default:
 		return -1;
@@ -42,17 +42,13 @@ static int fix_parse(void *pctx, struct apk_db_options *dbopts,
 static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 {
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
-	struct apk_state *state = NULL;
 	struct apk_name *name;
 	struct apk_package *pkg;
-	struct apk_dependency *deps;
 	int r = 0, i, j;
 
-	state = apk_state_new(db);
-	if (state == NULL)
-		return -1;
+	if (!ctx->solver_flags)
+		ctx->solver_flags = APK_SOLVERF_REINSTALL;
 
-	deps = alloca(sizeof(struct apk_dependency) * argc);
 	for (i = 0; i < argc; i++) {
 		pkg = NULL;
 		if (strstr(argv[i], ".apk") != NULL) {
@@ -66,12 +62,9 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 				apk_error("%s: %s", argv[i], apk_error_str(r));
 				goto err;
 			}
-			apk_dep_from_pkg(&deps[i], db, pkg);
-			name = deps[i].name;
+			name = pkg->name;
 		} else {
-			apk_dep_from_blob(&deps[i], db, APK_BLOB_STR(argv[i]));
-			name = deps[i].name;
-
+			name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 			for (j = 0; j < name->pkgs->num; j++) {
 				if (name->pkgs->item[j]->ipkg != NULL) {
 					pkg = name->pkgs->item[j];
@@ -83,22 +76,11 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 			apk_error("%s is not installed", name->name);
 			goto err;
 		}
-		if (ctx->reinstall)
-			name->flags |= APK_NAME_REINSTALL;
+		apk_solver_set_name_flags(name, ctx->solver_flags);
 	}
 
-	for (i = 0; i < argc; i++)
-		r |= apk_state_lock_dependency(state, &deps[i]);
-
-	if (r == 0 || (apk_flags & APK_FORCE))
-		r = apk_state_commit(state);
-	else
-		apk_state_print_errors(state);
+	r = apk_solver_commit(db, 0, db->world);
 err:
-	if (r != 0 && i < argc)
-		apk_error("Error while processing '%s'", argv[i]);
-	if (state != NULL)
-		apk_state_unref(state);
 	return r;
 }
 

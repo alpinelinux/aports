@@ -26,6 +26,8 @@ struct apk_changeset {
 #define APK_SOLVERF_AVAILABLE		0x0002
 #define APK_SOLVERF_REINSTALL		0x0004
 
+void apk_solver_set_name_flags(struct apk_name *name,
+			       unsigned short solver_flags);
 int apk_solver_solve(struct apk_database *db,
 		     unsigned short solver_flags,
 		     struct apk_dependency_array *world,

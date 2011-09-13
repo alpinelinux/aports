@@ -19,7 +19,7 @@ $(error Build dependencies are not met)
 endif
 
 progs-y			+= apk
-apk-objs		:= apk.o add.o del.o update.o info.o \
+apk-objs		:= apk.o add.o del.o fix.o update.o info.o \
 			   search.o upgrade.o cache.o ver.o index.o fetch.o \
 			   audit.o verify.o dot.o
 

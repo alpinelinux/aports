@@ -215,10 +215,10 @@ static void prepare_name(struct apk_solver_state *ss, struct apk_name *name,
 
 		/* if package is needed for (re-)install */
 		if ((pkg->ipkg == NULL) ||
-		    (ns->solver_flags & APK_SOLVERF_REINSTALL)) {
+		    ((ns->solver_flags | ss->solver_flags) & APK_SOLVERF_REINSTALL)) {
 			/* and it's not available, we can't use it */
 			if (!pkg_available(ss->db, pkg))
-				ps->conflicts++;
+				ps->conflicts = 1024;
 		}
 	}
 
@@ -236,6 +236,7 @@ static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependenc
 static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_package *pkg)
 {
 	struct apk_name *name = pkg->name;
+	struct apk_name_state *ns = name_to_ns(name);
 	int i, options = 0;
 
 	/* check if the suggested package is the most preferred one of
@@ -250,7 +251,9 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 		    ps0->conflicts != 0)
 			continue;
 
-		if (ss->solver_flags & APK_SOLVERF_AVAILABLE) {
+		options++;
+
+		if ((ns->solver_flags | ss->solver_flags) & APK_SOLVERF_AVAILABLE) {
 			/* pkg available, pkg0 not */
 			if (pkg->repos != 0 && pkg0->repos == 0)
 				continue;
@@ -259,16 +262,19 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 				return APK_PKGSTF_NOINSTALL | APK_PKGSTF_BRANCH;
 		}
 
-		if (!(ss->solver_flags & APK_SOLVERF_UPGRADE)) {
-			/* not upgrading, prefer the installed package */
-			if (pkg->ipkg == NULL && pkg0->ipkg != NULL)
+		if ((ns->solver_flags | ss->solver_flags) & APK_SOLVERF_UPGRADE) {
+			/* upgrading, or neither of the package is installed, so
+			 * we just fall back comparing to versions */
+			switch (apk_pkg_version_compare(pkg0, pkg)) {
+			case APK_VERSION_GREATER:
 				return APK_PKGSTF_NOINSTALL | APK_PKGSTF_BRANCH;
+			case APK_VERSION_LESS:
+				continue;
+			}
 		}
 
-		/* upgrading, or neither of the package is installed, so
-		 * we just fall back comparing to versions */
-		options++;
-		if (apk_pkg_version_compare(pkg0, pkg) == APK_VERSION_GREATER)
+		/* not upgrading, prefer the installed package */
+		if (pkg->ipkg == NULL && pkg0->ipkg != NULL)
 			return APK_PKGSTF_NOINSTALL | APK_PKGSTF_BRANCH;
 	}
 
@@ -670,7 +676,8 @@ static int compare_change(const void *p1, const void *p2)
 
 static int generate_changeset(struct apk_database *db,
 			      struct apk_package_array *solution,
-			      struct apk_changeset *changeset)
+			      struct apk_changeset *changeset,
+			      unsigned short solver_flags)
 {
 	struct apk_name *name;
 	struct apk_name_state *ns;
@@ -682,7 +689,7 @@ static int generate_changeset(struct apk_database *db,
 	for (i = 0; i < solution->num; i++) {
 		pkg = solution->item[i];
 		if ((pkg->ipkg == NULL) ||
-		    (name_to_ns(pkg->name)->solver_flags & APK_SOLVERF_REINSTALL))
+		    ((solver_flags | name_to_ns(pkg->name)->solver_flags) & APK_SOLVERF_REINSTALL))
 			num_installs++;
 	}
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
@@ -707,7 +714,7 @@ static int generate_changeset(struct apk_database *db,
 		name = pkg->name;
 
 		if ((pkg->ipkg == NULL) ||
-		    (name_to_ns(name)->solver_flags & APK_SOLVERF_REINSTALL)) {
+		    ((solver_flags | name_to_ns(name)->solver_flags) & APK_SOLVERF_REINSTALL)) {
 			for (j = 0; j < name->pkgs->num; j++) {
 				pkg0 = name->pkgs->item[j];
 				if (pkg0->ipkg == NULL)
@@ -736,6 +743,13 @@ static int free_state(apk_hash_item item, void *ctx)
 		name->state_ptr = NULL;
 	}
 	return 0;
+}
+
+void apk_solver_set_name_flags(struct apk_name *name,
+			       unsigned short solver_flags)
+{
+	struct apk_name_state *ns = name_to_ns(name);
+	ns->solver_flags = solver_flags;
 }
 
 int apk_solver_solve(struct apk_database *db,
@@ -787,7 +801,8 @@ int apk_solver_solve(struct apk_database *db,
 	if (r == 0 && ss->cur_unsatisfiable == 0) {
 		record_solution(ss);
 		if (changeset != NULL)
-			generate_changeset(db, ss->best_solution, changeset);
+			generate_changeset(db, ss->best_solution, changeset,
+					   ss->solver_flags);
 		r = 0;
 	} else {
 		qsort(ss->best_solution->item, ss->best_solution->num,
