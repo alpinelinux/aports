@@ -17,9 +17,13 @@
 #include "apk_database.h"
 
 struct search_ctx {
-	int (*match)(struct apk_package *pkg, const char *str);
 	void (*print_result)(struct search_ctx *ctx, struct apk_package *pkg);
 	void (*print_package)(struct search_ctx *ctx, struct apk_package *pkg);
+
+	int show_all : 1;
+	int search_exact : 1;
+	int search_description : 1;
+
 	int argc;
 	char **argv;
 };
@@ -69,31 +73,28 @@ static void print_rdepends(struct search_ctx *ctx, struct apk_package *pkg)
 	}
 }
 
-static int search_pkgname(struct apk_package *pkg, const char *str)
-{
-	return fnmatch(str, pkg->name->name, 0) == 0;
-}
-
-static int search_desc(struct apk_package *pkg, const char *str)
-{
-	return  strstr(pkg->name->name, str) != NULL ||
-		strstr(pkg->description, str) != NULL;
-}
-
 static int search_parse(void *ctx, struct apk_db_options *dbopts,
 		        int optch, int optindex, const char *optarg)
 {
 	struct search_ctx *ictx = (struct search_ctx *) ctx;
 
 	switch (optch) {
-	case 'd':
-		ictx->match = search_desc;
+	case 'a':
+		ictx->show_all = 1;
 		break;
-	case 'r':
-		ictx->print_result = print_rdepends;
+	case 'd':
+		ictx->search_description = 1;
+		ictx->search_exact = 1;
+		ictx->show_all = 1;
+		break;
+	case 'e':
+		ictx->search_exact = 1;
 		break;
 	case 'o':
 		ictx->print_package = print_origin_name;
+		break;
+	case 'r':
+		ictx->print_result = print_rdepends;
 		break;
 	default:
 		return -1;
@@ -101,71 +102,93 @@ static int search_parse(void *ctx, struct apk_db_options *dbopts,
 	return 0;
 }
 
-static int match_packages(apk_hash_item item, void *ctx)
+static void print_result(struct search_ctx *ctx, struct apk_package *pkg)
 {
-	struct search_ctx *ictx = (struct search_ctx *) ctx;
-	struct apk_package *pkg = (struct apk_package *) item;
 	int i;
 
-	for (i = 0; i < ictx->argc; i++)
-		if (ictx->match(pkg, ictx->argv[i]))
-			break;
-	if (ictx->argc == 0 || i < ictx->argc) {
-		ictx->print_result(ictx, pkg);
-		printf("\n");
+	if (pkg == NULL)
+		return;
+
+	if (ctx->search_description) {
+		for (i = 0; i < ctx->argc; i++) {
+			if (strstr(pkg->description, ctx->argv[i]) != NULL ||
+			    strstr(pkg->name->name, ctx->argv[i]) != NULL)
+				break;
+		}
+		if (i >= ctx->argc)
+			return;
 	}
 
+	ctx->print_result(ctx, pkg);
+	printf("\n");
+}
+
+static int match_names(apk_hash_item item, void *ctx)
+{
+	struct search_ctx *ictx = (struct search_ctx *) ctx;
+	struct apk_name *name = (struct apk_name *) item;
+	int i;
+
+	if (!ictx->search_description) {
+		for (i = 0; i < ictx->argc; i++)
+			if (fnmatch(ictx->argv[i], name->name, FNM_CASEFOLD) == 0)
+				break;
+		if (ictx->argc > 0 && i >= ictx->argc)
+			return 0;
+	}
+
+	if (ictx->show_all) {
+		for (i = 0; i < name->pkgs->num; i++)
+			print_result(ictx, name->pkgs->item[i]);
+	} else {
+		struct apk_package *pkg = NULL;
+
+		for (i = 0; i < name->pkgs->num; i++) {
+			if (pkg == NULL ||
+			    apk_pkg_version_compare(name->pkgs->item[i], pkg) == APK_VERSION_GREATER)
+				pkg = name->pkgs->item[i];
+		}
+		print_result(ictx, pkg);
+	}
 	return 0;
 }
 
 static int search_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct search_ctx *ictx = (struct search_ctx *) ctx;
-	struct apk_name *name;
-	int rc = 0, i, j, slow_search;
+	char s[256];
+	int i, l;
 
-	slow_search = ictx->match != NULL || argc == 0;
-	if (!slow_search) {
-		for (i = 0; i < argc; i++)
-			if (strcspn(argv[i], "*?[") != strlen(argv[i])) {
-				slow_search = 1;
-				break;
-			}
-	}
-
-	if (ictx->match == NULL)
-		ictx->match = search_pkgname;
 	if (ictx->print_package == NULL)
 		ictx->print_package = print_package_name;
 	if (ictx->print_result == NULL)
 		ictx->print_result = ictx->print_package;
-	else if (argc == 0)
+
+	if (argc == 0 && ictx->search_description)
 		return -1;
 
-	if (slow_search) {
-		ictx->argc = argc;
-		ictx->argv = argv;
-		rc = apk_hash_foreach(&db->available.packages,
-				      match_packages, ictx);
-	} else {
+	ictx->argc = argc;
+	if (!ictx->search_exact) {
+		ictx->argv = alloca(argc * sizeof(char*));
 		for (i = 0; i < argc; i++) {
-			name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-			if (name == NULL)
-				continue;
-			for (j = 0; j < name->pkgs->num; j++) {
-				ictx->print_result(ctx, name->pkgs->item[j]);
-				printf("\n");
-			}
+			l = snprintf(s, sizeof(s), "*%s*", argv[i]);
+			ictx->argv[i] = alloca(l+1);
+			memcpy(ictx->argv[i], s, l);
+			ictx->argv[i][l] = 0;
 		}
+	} else {
+		ictx->argv = argv;
 	}
 
-	return rc;
+	return apk_hash_foreach(&db->available.names, match_names, ictx);
 }
 
 static struct apk_option search_options[] = {
-	{ 'd', "description",	"Search also package descriptions" },
-	{ 'r', "rdepends",	"Print reverse dependencies of package" },
+	{ 'a', "all",		"Show all package versions (instead of latest only)" },
+	{ 'd', "description",	"Search package descriptions (implies -a)" },
+	{ 'e', "exact",		"Require exact match (instead of substring match)" },
 	{ 'o', "origin",	"Print origin package name instead of the subpackage" },
+	{ 'r', "rdepends",	"Print reverse dependencies of package" },
 };
 
 static struct apk_applet apk_search = {
