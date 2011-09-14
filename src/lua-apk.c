@@ -2,11 +2,33 @@
 #include <lualib.h>
 #include <lauxlib.h>
 
+#include "apk_blob.h"
+#include "apk_database.h"
 #include "apk_defines.h"
 #include "apk_version.h"
-#include "apk_blob.h"
 
 #define LIBNAME "apk"
+
+struct flagmap {
+       const char *name;
+       int flag;
+};
+
+struct flagmap opendb_flagmap[] = {
+       {"read",                APK_OPENF_READ},
+       {"write",               APK_OPENF_WRITE},
+       {"create",              APK_OPENF_CREATE},
+       {"no_installed",        APK_OPENF_NO_INSTALLED},
+       {"no_scripts",          APK_OPENF_NO_SCRIPTS},
+       {"no_world",            APK_OPENF_NO_WORLD},
+       {"no_sys_repos",        APK_OPENF_NO_SYS_REPOS},
+       {"no_installed_repo",   APK_OPENF_NO_INSTALLED_REPO},
+       {"no_repos",            APK_OPENF_NO_REPOS},
+       {"no_state",            APK_OPENF_NO_STATE},
+       {"no_scripts",          APK_OPENF_NO_SCRIPTS},
+       {"no_world",            APK_OPENF_NO_WORLD},
+       {NULL, 0}
+};
 
 static apk_blob_t check_blob(lua_State *L, int index)
 {
@@ -48,11 +70,63 @@ static int Pversion_is_less(lua_State *L)
 	return 1;
 }
 
+//static getfield(lua_State *L, const char *key)
+//{
+static const char *get_opt_string_field(lua_State *L, int index,
+				        const char *key, const char *def)
+{
+	const char *value;
+	lua_getfield(L, index, key);
+	value = luaL_optstring(L, -1, def);
+	lua_pop(L, 1);
+	return value;
+}
+
+static int get_opt_int_field(lua_State *L, int index, const char *key, int def)
+{
+	int value;
+	lua_getfield(L, index, key);
+	value = luaL_optinteger(L, -1, def);
+	lua_pop(L, 1);
+	return value;
+}
+
+static int get_boolean_field(lua_State *L, int index, const char *key)
+{
+	int value;
+	lua_getfield(L, index, key);
+	value = lua_toboolean(L, -1);
+	lua_pop(L, 1);
+	return value;
+}
+
+static int get_dbopts(lua_State *L, int i, struct apk_db_options *o)
+{
+	struct flagmap *f;
+	o->root = (char *)get_opt_string_field(L, i, "root", NULL);
+	o->repositories_file = (char *)get_opt_string_field(L, i, "repositories_file", NULL);
+	o->keys_dir = (char *)get_opt_string_field(L, i, "keys_dir", NULL);
+	o->lock_wait = get_opt_int_field(L, i, "lock_wait", 0);
+	for (f = opendb_flagmap; f->name != NULL; f++)
+		if (get_boolean_field(L, i, f->name))
+			o->open_flags |= f->flag;
+	return 0;
+}
+
+static int Papk_db_open(lua_State *L)
+{
+	struct apk_db_options opts;
+	memset(&opts, 0, sizeof(opts));
+	if (lua_istable(L, 1))
+		get_dbopts(L, 1, &opts);
+	return 0;
+}
 
 static const luaL_reg R[] = {
 	{"version_validate",	Pversion_validate},
 	{"version_compare",	Pversion_compare},
 	{"version_is_less",	Pversion_is_less},
+	{"db_open",		Papk_db_open},
 	{NULL,		NULL}
 };
 
