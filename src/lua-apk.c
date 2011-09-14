@@ -11,12 +11,19 @@
 int apk_verbosity;
 unsigned int apk_flags;
 
+
+static apk_blob_t check_blob(lua_State *L, int index)
+{
+	apk_blob_t blob;
+	blob.ptr = (char *)luaL_checklstring(L, index, (size_t *)&blob.len);
+	return blob;
+}
+
 /* version_validate(verstr) */
 /* returns boolean */
 static int Pversion_validate(lua_State *L)
 {
-	apk_blob_t ver;
-	ver.ptr = (char *)luaL_checklstring(L, 1, &ver.len);
+	apk_blob_t ver = check_blob(L, 1);
 	lua_pushboolean(L, apk_version_validate(ver));
 	return 1;
 }
@@ -27,8 +34,8 @@ static int Pversion_validate(lua_State *L)
 static int Pversion_compare(lua_State *L)
 {
 	apk_blob_t a, b;
-	a.ptr = (char *)luaL_checklstring(L, 1, &a.len);
-	b.ptr = (char *)luaL_checklstring(L, 2, &b.len);
+	a = check_blob(L, 1);
+	b = check_blob(L, 2);
 	lua_pushstring(L, apk_version_op_string(apk_version_compare_blob(a, b)));
 	return 1;
 }
@@ -39,8 +46,8 @@ static int Pversion_compare(lua_State *L)
 static int Pversion_is_less(lua_State *L)
 {
 	apk_blob_t a, b;
-	a.ptr = (char *)luaL_checklstring(L, 1, &a.len);
-	b.ptr = (char *)luaL_checklstring(L, 2, &b.len);
+	a = check_blob(L, 1);
+	b = check_blob(L, 2);
 	lua_pushboolean(L, apk_version_compare_blob(a, b) == APK_VERSION_LESS);
 	return 1;
 }
