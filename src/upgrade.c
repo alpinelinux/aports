@@ -11,7 +11,8 @@
 
 #include <errno.h>
 #include <stdio.h>
-#include <zlib.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include "apk_applet.h"
 #include "apk_database.h"
 #include "apk_print.h"
@@ -19,6 +20,7 @@
 
 struct upgrade_ctx {
 	unsigned short solver_flags;
+	int no_self_upgrade : 1;
 };
 
 static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
@@ -27,6 +29,9 @@ static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
 	struct upgrade_ctx *uctx = (struct upgrade_ctx *) ctx;
 
 	switch (optch) {
+	case 0x10000:
+		uctx->no_self_upgrade = 1;
+		break;
 	case 'a':
 		uctx->solver_flags |= APK_SOLVERF_AVAILABLE;
 		break;
@@ -69,6 +74,9 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 	apk_db_close(db);
 
 	apk_message("Continuing the upgrade transaction with new apk-tools:");
+	for (r = 0; apk_argv[r] != NULL; r++)
+		;
+	apk_argv[r] = "--no-self-upgrade";
 	execvp(apk_argv[0], apk_argv);
 
 	apk_error("PANIC! Failed to re-execute new apk-tools!");
@@ -89,10 +97,11 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 	int r;
 
 	solver_flags = APK_SOLVERF_UPGRADE | uctx->solver_flags;
-
-	r = apk_do_self_upgrade(db, solver_flags);
-	if (r != 0)
-		return r;
+	if (!uctx->no_self_upgrade) {
+		r = apk_do_self_upgrade(db, solver_flags);
+		if (r != 0)
+			return r;
+	}
 
 	return apk_solver_commit(db, solver_flags, db->world);
 }
@@ -101,6 +110,8 @@ static struct apk_option upgrade_options[] = {
 	{ 'a', "available",
 	  "Re-install or downgrade if currently installed package is not "
 	  "currently available from any repository" },
+	{ 0x10000, "no-self-upgrade",
+	  "Do not do early upgrade of 'apk-tools' package" },
 };
 
 static struct apk_applet apk_upgrade = {

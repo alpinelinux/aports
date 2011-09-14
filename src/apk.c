@@ -272,9 +272,10 @@ int main(int argc, char **argv)
 	struct apk_database db;
 	struct apk_db_options dbopts;
 
-	apk_argv = malloc(sizeof(char*[argc+1]));
+	apk_argv = malloc(sizeof(char*[argc+2]));
 	memcpy(apk_argv, argv, sizeof(char*[argc]));
 	apk_argv[argc] = NULL;
+	apk_argv[argc+1] = NULL;
 
 	memset(&dbopts, 0, sizeof(dbopts));
 	list_init(&dbopts.repository_list);
