@@ -33,7 +33,7 @@
 
 struct apk_package_state {
 	struct apk_package *backtrack;
-	unsigned int topology_hard, topology_soft;
+	unsigned int topology_soft;
 	unsigned short flags;
 	unsigned short conflicts;
 	unsigned short cur_unsatisfiable;
@@ -158,17 +158,17 @@ static void sort_hard_dependencies(struct apk_solver_state *ss, struct apk_packa
 		pkg->state_ptr = calloc(1, sizeof(struct apk_package_state));
 
 	ps = pkg_to_ps(pkg);
-	if (ps->topology_hard)
+	if (pkg->topology_hard)
 		return;
-	ps->topology_hard = -1;
+	pkg->topology_hard = -1;
 
 	/* Consider hard dependencies only */
 	foreach_dependency_pkg(ss, pkg->depends, sort_hard_dependencies);
 	foreach_dependency_pkg(ss, pkg->install_if, sort_hard_dependencies);
 
-	ps->topology_soft = ps->topology_hard = ++ss->num_topology_positions;
+	ps->topology_soft = pkg->topology_hard = ++ss->num_topology_positions;
 	dbg_printf(PKG_VER_FMT ": topology_hard=%d\n",
-		   PKG_VER_PRINTF(pkg), ps->topology_hard);
+		   PKG_VER_PRINTF(pkg), pkg->topology_hard);
 }
 
 static void sort_soft_dependencies(struct apk_solver_state *ss, struct apk_package *pkg)
@@ -178,7 +178,7 @@ static void sort_soft_dependencies(struct apk_solver_state *ss, struct apk_packa
 	sort_hard_dependencies(ss, pkg);
 
 	ps = pkg_to_ps(pkg);
-	if (ps->topology_soft != ps->topology_hard)
+	if (ps->topology_soft != pkg->topology_hard)
 		return;
 	ps->topology_soft = -1;
 
@@ -246,7 +246,7 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
 		if (pkg0 == pkg || ps0 == NULL ||
-		    ps0->topology_hard > ss->topology_position ||
+		    pkg0->topology_hard > ss->topology_position ||
 		    (ps0->flags & APK_PKGSTF_DECIDED) ||
 		    ps0->conflicts != 0)
 			continue;
@@ -318,7 +318,7 @@ static int update_name_state(struct apk_solver_state *ss,
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
 		if (ps0 == NULL ||
-		    ps0->topology_hard >= ss->topology_position ||
+		    pkg0->topology_hard >= ss->topology_position ||
 		    (ps0->flags & APK_PKGSTF_DECIDED))
 			continue;
 
@@ -332,8 +332,8 @@ static int update_name_state(struct apk_solver_state *ss,
 		if (ps0->topology_soft < ss->topology_position &&
 		    ps0->topology_soft > best_topology)
 			best_pkg = pkg0, best_topology = ps0->topology_soft;
-		else if (ps0->topology_hard > best_topology)
-			best_pkg = pkg0, best_topology = ps0->topology_hard;
+		else if (pkg0->topology_hard > best_topology)
+			best_pkg = pkg0, best_topology = pkg0->topology_hard;
 	}
 
 	if (options == 0 && skipped_options == 0) {
@@ -434,7 +434,7 @@ static void undo_decision(struct apk_solver_state *ss,
 	if (ps->flags & APK_PKGSTF_INSTALLIF)
 		ss->topology_position = ps->topology_soft;
 	else
-		ss->topology_position = ps->topology_hard;
+		ss->topology_position = pkg->topology_hard;
 
 	if (ps->flags & APK_PKGSTF_INSTALL) {
 		ss->assigned_names--;
@@ -465,7 +465,7 @@ static void push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
 		ss->topology_position = ps->topology_soft;
 	} else {
 		ps->flags &= ~APK_PKGSTF_INSTALLIF;
-		ss->topology_position = ps->topology_hard;
+		ss->topology_position = pkg->topology_hard;
 	}
 	ss->latest_decision = pkg;
 
@@ -534,7 +534,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
 		if (ps0 == NULL ||
-		    ps0->topology_hard >= ss->topology_position)
+		    pkg0->topology_hard >= ss->topology_position)
 			continue;
 
 		if (!apk_dep_is_satisfied(dep, pkg0)) {
@@ -565,7 +565,7 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 		struct apk_package *pkg0 = name->pkgs->item[i];
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
-		if (ps0->topology_hard >= ss->topology_position)
+		if (pkg0->topology_hard >= ss->topology_position)
 			continue;
 
 		if (!apk_dep_is_satisfied(dep, pkg0)) {
@@ -597,8 +597,8 @@ static int expand_branch(struct apk_solver_state *ss)
 		if (pkg_to_ps(ns->chosen)->topology_soft < ss->topology_position &&
 		    pkg_to_ps(ns->chosen)->topology_soft > topology0)
 			pkg0 = ns->chosen, topology0 = pkg_to_ps(pkg0)->topology_soft;
-		else if (pkg_to_ps(ns->chosen)->topology_hard > topology0)
-			pkg0 = ns->chosen, topology0 = pkg_to_ps(pkg0)->topology_hard;
+		else if (ns->chosen->topology_hard > topology0)
+			pkg0 = ns->chosen, topology0 = pkg0->topology_hard;
 	}
 	if (pkg0 == NULL) {
 		dbg_printf("expand_branch: list is empty (%d unsatisfied)\n",
@@ -660,8 +660,8 @@ static int compare_change(const void *p1, const void *p2)
 	if (c1->newpkg == NULL) {
 		if (c2->newpkg == NULL)
 			/* both deleted - reverse topology order */
-			return  pkg_to_ps(c2->oldpkg)->topology_hard -
-				pkg_to_ps(c1->oldpkg)->topology_hard;
+			return  c2->oldpkg->topology_hard -
+				c1->oldpkg->topology_hard;
 
 		/* c1 deleted, c2 installed -> c2 first*/
 		return -1;
@@ -670,8 +670,8 @@ static int compare_change(const void *p1, const void *p2)
 		/* c1 installed, c2 deleted -> c1 first*/
 		return 1;
 
-	return  pkg_to_ps(c1->newpkg)->topology_hard -
-		pkg_to_ps(c2->newpkg)->topology_hard;
+	return  c1->newpkg->topology_hard -
+		c2->newpkg->topology_hard;
 }
 
 static int generate_changeset(struct apk_database *db,
@@ -763,6 +763,12 @@ void apk_solver_set_name_flags(struct apk_name *name,
 	ns->solver_flags = solver_flags;
 }
 
+static void apk_solver_free(struct apk_database *db)
+{
+	apk_hash_foreach(&db->available.names, free_state, NULL);
+	apk_hash_foreach(&db->available.packages, free_package, NULL);
+}
+
 int apk_solver_solve(struct apk_database *db,
 		     unsigned short solver_flags,
 		     struct apk_dependency_array *world,
@@ -826,18 +832,10 @@ int apk_solver_solve(struct apk_database *db,
 	else
 		apk_package_array_free(&ss->best_solution);
 
-	if (!(solver_flags & APK_SOLVERF_KEEP_STATE))
-		apk_solver_free(db);
-
+	apk_solver_free(db);
 	free(ss);
 
 	return r;
-}
-
-void apk_solver_free(struct apk_database *db)
-{
-	apk_hash_foreach(&db->available.names, free_state, NULL);
-	apk_hash_foreach(&db->available.packages, free_package, NULL);
 }
 
 static void print_change(struct apk_database *db,
@@ -1013,7 +1011,7 @@ static int compare_package(const void *p1, const void *p2)
 	struct apk_package *pkg1 = *(struct apk_package **) p1;
 	struct apk_package *pkg2 = *(struct apk_package **) p2;
 
-	return pkg_to_ps(pkg1)->topology_hard - pkg_to_ps(pkg2)->topology_hard;
+	return pkg1->topology_hard - pkg2->topology_hard;
 }
 
 static void run_triggers(struct apk_database *db)
@@ -1186,7 +1184,7 @@ int apk_solver_commit(struct apk_database *db,
 	struct apk_package_array *solution = NULL;
 	int r;
 
-	r = apk_solver_solve(db, APK_SOLVERF_KEEP_STATE | solver_flags, 
+	r = apk_solver_solve(db, solver_flags,
 			     world, &solution, &changeset);
 	if (r < 0)
 		return r;
@@ -1200,7 +1198,6 @@ int apk_solver_commit(struct apk_database *db,
 		apk_solver_print_errors(db, solution, world, r);
 	}
 	apk_package_array_free(&solution);
-	apk_solver_free(db);
 
 	return r;
 }

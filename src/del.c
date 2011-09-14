@@ -142,8 +142,7 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 					delete_from_world, ctx);
 	}
 
-	r = apk_solver_solve(db, APK_SOLVERF_KEEP_STATE,
-			     ctx->world, &solution, &changeset);
+	r = apk_solver_solve(db, 0, ctx->world, &solution, &changeset);
 	if (r == 0 || (apk_flags & APK_FORCE)) {
 		/* check for non-deleted package names */
 		for (i = 0; i < solution->num; i++) {
@@ -167,7 +166,6 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	} else {
 		apk_solver_print_errors(db, solution, ctx->world, r);
 	}
-	apk_solver_free(db);
 	apk_package_array_free(&solution);
 	apk_dependency_array_free(&ctx->world);
 

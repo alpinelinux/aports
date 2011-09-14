@@ -94,6 +94,7 @@ struct apk_package {
 	size_t installed_size, size;
 	time_t build_time;
 	unsigned repos;
+	unsigned int topology_hard;
 	struct apk_checksum csum;
 };
 APK_ARRAY(apk_package_array, struct apk_package *);

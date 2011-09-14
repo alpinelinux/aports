@@ -52,8 +52,7 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 	apk_solver_set_name_flags(name, solver_flags);
 	db->performing_self_update = 1;
 
-	r = apk_solver_solve(db, APK_SOLVERF_KEEP_STATE,
-			     db->world, &solution, &changeset);
+	r = apk_solver_solve(db, 0, db->world, &solution, &changeset);
 	if (r != 0) {
 		if (apk_flags & APK_FORCE)
 			r = 0;
@@ -72,7 +71,6 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 
 	apk_message("Upgrading critical system libraries and apk-tools:");
 	apk_solver_commit_changeset(db, &changeset, db->world);
-	apk_solver_free(db);
 	apk_db_close(db);
 
 	apk_message("Continuing the upgrade transaction with new apk-tools:");
@@ -85,7 +83,6 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 	exit(1);
 
 ret:
-	apk_solver_free(db);
 	apk_package_array_free(&solution);
 	apk_change_array_free(&changeset.changes);
 	db->performing_self_update = 0;
