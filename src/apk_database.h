@@ -123,6 +123,7 @@ struct apk_database {
 	char *cache_remount_dir;
 	apk_blob_t *arch;
 	unsigned int local_repos;
+	int performing_self_update : 1;
 	int permanent : 1;
 	int compat_newfeatures : 1;
 	int compat_notinstallable : 1;

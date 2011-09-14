@@ -745,6 +745,17 @@ static int free_state(apk_hash_item item, void *ctx)
 	return 0;
 }
 
+static int free_package(apk_hash_item item, void *ctx)
+{
+	struct apk_package *pkg = (struct apk_package *) item;
+
+	if (pkg->state_ptr != NULL) {
+		free(pkg->state_ptr);
+		pkg->state_ptr = NULL;
+	}
+	return 0;
+}
+
 void apk_solver_set_name_flags(struct apk_name *name,
 			       unsigned short solver_flags)
 {
@@ -816,6 +827,7 @@ int apk_solver_solve(struct apk_database *db,
 		apk_package_array_free(&ss->best_solution);
 
 	apk_hash_foreach(&db->available.names, free_state, NULL);
+	apk_hash_foreach(&db->available.packages, free_package, NULL);
 	free(ss);
 
 	return r;
@@ -1066,7 +1078,7 @@ all_done:
 	apk_dependency_array_copy(&db->world, world);
 	apk_db_write_config(db);
 
-	if (r == 0) {
+	if (r == 0 && !db->performing_self_update) {
 		apk_message("OK: %d packages, %d dirs, %d files",
 			    db->installed.stats.packages,
 			    db->installed.stats.dirs,
