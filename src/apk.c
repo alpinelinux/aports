@@ -33,7 +33,6 @@
 #include "apk_print.h"
 
 char **apk_argv;
-int apk_screen_width;
 
 static struct apk_option generic_options[] = {
 	{ 'h', "help",		"Show generic help or applet specific help" },
