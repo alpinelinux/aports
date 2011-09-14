@@ -18,24 +18,32 @@
 
 struct search_ctx {
 	int (*match)(struct apk_package *pkg, const char *str);
-	int (*print)(struct apk_package *pkg);
+	void (*print_result)(struct search_ctx *ctx, struct apk_package *pkg);
+	void (*print_package)(struct search_ctx *ctx, struct apk_package *pkg);
 	int argc;
 	char **argv;
 };
 
-static int print_match(struct apk_package *pkg)
+static void print_package_name(struct search_ctx *ctx, struct apk_package *pkg)
 {
 	printf("%s", pkg->name->name);
 	if (apk_verbosity > 0)
 		printf("-" BLOB_FMT, BLOB_PRINTF(*pkg->version));
 	if (apk_verbosity > 1)
 		printf(" - %s", pkg->description);
-	printf("\n");
-
-	return 0;
 }
 
-static int print_rdepends(struct apk_package *pkg)
+static void print_origin_name(struct search_ctx *ctx, struct apk_package *pkg)
+{
+	if (pkg->origin != NULL)
+		printf(BLOB_FMT, BLOB_PRINTF(*pkg->origin));
+	else
+		printf("%s", pkg->name->name);
+	if (apk_verbosity > 0)
+		printf("-" BLOB_FMT, BLOB_PRINTF(*pkg->version));
+}
+
+static void print_rdepends(struct search_ctx *ctx, struct apk_package *pkg)
 {
 	struct apk_name *name, *name0;
 	struct apk_package *pkg0;
@@ -53,15 +61,12 @@ static int print_rdepends(struct apk_package *pkg)
 				dep = &pkg0->depends->item[k];
 				if (name == dep->name &&
 				    apk_dep_is_satisfied(dep, pkg)) {
-					printf(" " PKG_VER_FMT,
-					       PKG_VER_PRINTF(pkg0));
+					printf(" ");
+					ctx->print_package(ctx, pkg0);
 				}
 			}
 		}
 	}
-	printf("\n");
-
-	return 0;
 }
 
 static int search_pkgname(struct apk_package *pkg, const char *str)
@@ -85,7 +90,10 @@ static int search_parse(void *ctx, struct apk_db_options *dbopts,
 		ictx->match = search_desc;
 		break;
 	case 'r':
-		ictx->print = print_rdepends;
+		ictx->print_result = print_rdepends;
+		break;
+	case 'o':
+		ictx->print_package = print_origin_name;
 		break;
 	default:
 		return -1;
@@ -102,8 +110,10 @@ static int match_packages(apk_hash_item item, void *ctx)
 	for (i = 0; i < ictx->argc; i++)
 		if (ictx->match(pkg, ictx->argv[i]))
 			break;
-	if (ictx->argc == 0 || i < ictx->argc)
-		ictx->print(pkg);
+	if (ictx->argc == 0 || i < ictx->argc) {
+		ictx->print_result(ictx, pkg);
+		printf("\n");
+	}
 
 	return 0;
 }
@@ -125,8 +135,10 @@ static int search_main(void *ctx, struct apk_database *db, int argc, char **argv
 
 	if (ictx->match == NULL)
 		ictx->match = search_pkgname;
-	if (ictx->print == NULL)
-		ictx->print = print_match;
+	if (ictx->print_package == NULL)
+		ictx->print_package = print_package_name;
+	if (ictx->print_result == NULL)
+		ictx->print_result = ictx->print_package;
 	else if (argc == 0)
 		return -1;
 
@@ -140,8 +152,10 @@ static int search_main(void *ctx, struct apk_database *db, int argc, char **argv
 			name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
 			if (name == NULL)
 				continue;
-			for (j = 0; j < name->pkgs->num; j++)
-				ictx->print(name->pkgs->item[j]);
+			for (j = 0; j < name->pkgs->num; j++) {
+				ictx->print_result(ctx, name->pkgs->item[j]);
+				printf("\n");
+			}
 		}
 	}
 
@@ -151,6 +165,7 @@ static int search_main(void *ctx, struct apk_database *db, int argc, char **argv
 static struct apk_option search_options[] = {
 	{ 'd', "description",	"Search also package descriptions" },
 	{ 'r', "rdepends",	"Print reverse dependencies of package" },
+	{ 'o', "origin",	"Print origin package name instead of the subpackage" },
 };
 
 static struct apk_applet apk_search = {
