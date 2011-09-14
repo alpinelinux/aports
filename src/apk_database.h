@@ -183,8 +183,8 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts);
 void apk_db_close(struct apk_database *db);
 int apk_db_write_config(struct apk_database *db);
-int apk_db_run_triggers(struct apk_database *db);
 int apk_db_permanent(struct apk_database *db);
+struct apk_package_array *apk_db_get_pending_triggers(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);
 struct apk_package *apk_db_get_pkg(struct apk_database *db, struct apk_checksum *csum);

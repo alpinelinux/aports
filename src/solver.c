@@ -826,11 +826,18 @@ int apk_solver_solve(struct apk_database *db,
 	else
 		apk_package_array_free(&ss->best_solution);
 
-	apk_hash_foreach(&db->available.names, free_state, NULL);
-	apk_hash_foreach(&db->available.packages, free_package, NULL);
+	if (!(solver_flags & APK_SOLVERF_KEEP_STATE))
+		apk_solver_free(db);
+
 	free(ss);
 
 	return r;
+}
+
+void apk_solver_free(struct apk_database *db)
+{
+	apk_hash_foreach(&db->available.names, free_state, NULL);
+	apk_hash_foreach(&db->available.packages, free_package, NULL);
 }
 
 static void print_change(struct apk_database *db,
@@ -1001,6 +1008,38 @@ static int cmp_upgrade(struct apk_change *change)
 	return 0;
 }
 
+static int compare_package(const void *p1, const void *p2)
+{
+	struct apk_package *pkg1 = *(struct apk_package **) p1;
+	struct apk_package *pkg2 = *(struct apk_package **) p2;
+
+	return pkg_to_ps(pkg1)->topology_hard - pkg_to_ps(pkg2)->topology_hard;
+}
+
+static void run_triggers(struct apk_database *db)
+{
+	struct apk_package_array *pkgs;
+	int i;
+
+	pkgs = apk_db_get_pending_triggers(db);
+	if (pkgs == NULL || pkgs->num == 0)
+		return;
+
+	qsort(pkgs->item, pkgs->num, sizeof(struct apk_package *),
+	      compare_package);
+
+	for (i = 0; i < pkgs->num; i++) {
+		struct apk_package *pkg = pkgs->item[i];
+		struct apk_installed_package *ipkg = pkg->ipkg;
+
+		*apk_string_array_add(&ipkg->pending_triggers) = NULL;
+		apk_ipkg_run_script(ipkg, db, APK_SCRIPT_TRIGGER,
+				    ipkg->pending_triggers->item);
+		apk_string_array_free(&ipkg->pending_triggers);
+	}
+	apk_package_array_free(&pkgs);
+}
+
 int apk_solver_commit_changeset(struct apk_database *db,
 				struct apk_changeset *changeset,
 				struct apk_dependency_array *world)
@@ -1072,7 +1111,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 	if (apk_flags & APK_PROGRESS)
 		draw_progress(100);
 
-	apk_db_run_triggers(db);
+	run_triggers(db);
 
 all_done:
 	apk_dependency_array_copy(&db->world, world);
@@ -1147,7 +1186,8 @@ int apk_solver_commit(struct apk_database *db,
 	struct apk_package_array *solution = NULL;
 	int r;
 
-	r = apk_solver_solve(db, solver_flags, world, &solution, &changeset);
+	r = apk_solver_solve(db, APK_SOLVERF_KEEP_STATE | solver_flags, 
+			     world, &solution, &changeset);
 	if (r < 0)
 		return r;
 
@@ -1160,6 +1200,7 @@ int apk_solver_commit(struct apk_database *db,
 		apk_solver_print_errors(db, solution, world, r);
 	}
 	apk_package_array_free(&solution);
+	apk_solver_free(db);
 
 	return r;
 }

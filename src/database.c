@@ -1458,23 +1458,20 @@ static int fire_triggers(apk_hash_item item, void *ctx)
 	return 0;
 }
 
-int apk_db_run_triggers(struct apk_database *db)
+struct apk_package_array *apk_db_get_pending_triggers(struct apk_database *db)
 {
 	struct apk_installed_package *ipkg;
+	struct apk_package_array *pkgs = NULL;
 
+	apk_package_array_init(&pkgs);
 	apk_hash_foreach(&db->installed.dirs, fire_triggers, db);
-
 	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
 		if (ipkg->pending_triggers->num == 0)
 			continue;
-
-		*apk_string_array_add(&ipkg->pending_triggers) = NULL;
-		apk_ipkg_run_script(ipkg, db, APK_SCRIPT_TRIGGER,
-				    ipkg->pending_triggers->item);
-		apk_string_array_free(&ipkg->pending_triggers);
+		*apk_package_array_add(&pkgs) = ipkg->pkg;
 	}
 
-	return 0;
+	return pkgs;
 }
 
 int apk_db_cache_active(struct apk_database *db)
