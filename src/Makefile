@@ -8,7 +8,6 @@ PKGDEPS			+= lua
 shlibs-y		+= apk.so
 apk.so-objs		:= lua-apk.o
 CFLAGS_lua-apk.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\"
-LIBS_apk.so		:= -L$(obj) -lapk
 LUA_LIB-y		:= $(obj)/apk.so
 install-LUA_LIB-y	:= $(INSTALLDIR) $(DESTDIR)$(LUA_LIBDIR) \
 			   $(INSTALL) $(LUA_LIB-y) $(DESTDIR)$(LUA_LIBDIR)
@@ -34,12 +33,14 @@ endif
 
 ifeq ($(SHARED_LIBAPK),)
 apk-objs		+= $(libapk.so-objs)
+apk.so-objs		+= $(libapk.so-objs)
 else
 LIBAPK			:= YesPlease
 LIBS_apk		:= -lapk
+LIBS_apk.so		:= -L$(obj) -lapk
 endif
 
-ifneq ($(LIBAPK),)
+ifneq ($(SHARED_LIBAPK),)
 shlibs-y		+= libapk.so
 LIBAPK-y		:= $(obj)/libapk.so
 install-LIBAPK-y	:= $(INSTALLDIR) $(DESTDIR)$(LIBDIR) \
@@ -63,7 +64,7 @@ LIBS			:= -Wl,--as-needed \
 
 $(obj)/apk: $(LIBAPK-y)
 
-$(obj)/apk.so: $(obj)/libapk.so
+$(obj)/apk.so: $(LIBAPK-y)
 
 install: $(obj)/apk $(LIBAPK-y) $(LUA_LIB-y)
 	$(INSTALLDIR) $(DESTDIR)$(SBINDIR)
