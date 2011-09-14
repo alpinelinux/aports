@@ -8,10 +8,6 @@
 
 #define LIBNAME "apk"
 
-int apk_verbosity;
-unsigned int apk_flags;
-
-
 static apk_blob_t check_blob(lua_State *L, int index)
 {
 	apk_blob_t blob;
