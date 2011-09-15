@@ -158,9 +158,10 @@ static void sort_hard_dependencies(struct apk_solver_state *ss, struct apk_packa
 		pkg->state_ptr = calloc(1, sizeof(struct apk_package_state));
 
 	ps = pkg_to_ps(pkg);
-	if (pkg->topology_hard)
+	if (ps->topology_soft)
 		return;
 	pkg->topology_hard = -1;
+	ps->topology_soft = -1;
 
 	/* Consider hard dependencies only */
 	foreach_dependency_pkg(ss, pkg->depends, sort_hard_dependencies);
