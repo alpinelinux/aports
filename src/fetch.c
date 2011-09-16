@@ -20,6 +20,7 @@
 #include "apk_database.h"
 #include "apk_io.h"
 #include "apk_print.h"
+#include "apk_solver.h"
 
 #define FETCH_RECURSIVE		1
 #define FETCH_STDOUT		2
@@ -179,33 +180,26 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			.result_mask = APK_DEPMASK_REQUIRE,
 		};
 
-#if 0
 		if (fctx->flags & FETCH_RECURSIVE) {
-			struct apk_state *state;
-			struct apk_change *change;
+			struct apk_dependency_array *world;
+			struct apk_changeset changeset = {};
 
-			state = apk_state_new(db);
-			if (state == NULL)
-				goto err;
-
-			r = apk_state_lock_dependency(state, &dep);
+			apk_dependency_array_init(&world);
+			*apk_dependency_array_add(&world) = dep;
+			r = apk_solver_solve(db, 0, world, NULL, &changeset);
+			apk_dependency_array_free(&world);
 			if (r != 0) {
-				apk_state_unref(state);
-				apk_error("Unable to install '%s'",
-					  dep.name->name);
+				apk_error("Unable to install '%s'", argv[i]);
 				goto err;
 			}
 
-			list_for_each_entry(change, &state->change_list_head, change_list) {
+			for (j = 0; j < changeset.changes->num; j++) {
+				struct apk_change *change = &changeset.changes->item[j];
 				r = fetch_package(fctx, db, change->newpkg);
 				if (r != 0)
 					goto err;
 			}
-
-			apk_state_unref(state);
-		} else
-#endif
-		{
+		} else {
 			struct apk_package *pkg = NULL;
 
 			for (j = 0; j < dep.name->pkgs->num; j++)
