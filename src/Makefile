@@ -9,7 +9,7 @@ shlibs-y		+= apk.so
 apk.so-objs		:= lua-apk.o
 CFLAGS_lua-apk.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\"
 LUA_LIB-y		:= $(obj)/apk.so
-install-LUA_LIB-y	:= $(INSTALLDIR) $(DESTDIR)$(LUA_LIBDIR) \
+install-LUA_LIB-y	:= $(INSTALLDIR) $(DESTDIR)$(LUA_LIBDIR) && \
 			   $(INSTALL) $(LUA_LIB-y) $(DESTDIR)$(LUA_LIBDIR)
 endif
 
@@ -43,7 +43,7 @@ endif
 ifneq ($(SHARED_LIBAPK),)
 shlibs-y		+= libapk.so
 LIBAPK-y		:= $(obj)/libapk.so
-install-LIBAPK-y	:= $(INSTALLDIR) $(DESTDIR)$(LIBDIR) \
+install-LIBAPK-y	:= $(INSTALLDIR) $(DESTDIR)$(LIBDIR) && \
 			   $(INSTALL) $(LIBAPK-y) $(DESTDIR)$(LIBDIR)
 endif
 
