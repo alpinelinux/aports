@@ -114,14 +114,18 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 		if (virtpkg == NULL) {
 			apk_deps_add(&world, &dep);
-			apk_solver_set_name_flags(dep.name, actx->solver_flags);
+			apk_solver_set_name_flags(dep.name,
+						  actx->solver_flags,
+						  actx->solver_flags);
 		} else {
 			apk_deps_add(&virtpkg->depends, &dep);
 		}
 	}
 	if (virtpkg) {
 		apk_deps_add(&world, &virtdep);
-		apk_solver_set_name_flags(virtdep.name, actx->solver_flags);
+		apk_solver_set_name_flags(virtdep.name,
+					  actx->solver_flags,
+					  actx->solver_flags);
 	}
 
 	r = apk_solver_commit(db, 0, world);

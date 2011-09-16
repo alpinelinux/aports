@@ -20,6 +20,7 @@
 
 struct fix_ctx {
 	unsigned short solver_flags;
+	int fix_depends : 1;
 };
 
 static int fix_parse(void *pctx, struct apk_db_options *dbopts,
@@ -27,6 +28,9 @@ static int fix_parse(void *pctx, struct apk_db_options *dbopts,
 {
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
 	switch (optch) {
+	case 'd':
+		ctx->fix_depends = 1;
+		break;
 	case 'u':
 		ctx->solver_flags |= APK_SOLVERF_UPGRADE;
 		break;
@@ -76,7 +80,10 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 			apk_error("%s is not installed", name->name);
 			goto err;
 		}
-		apk_solver_set_name_flags(name, ctx->solver_flags);
+		apk_solver_set_name_flags(
+				name,
+				ctx->solver_flags,
+				ctx->fix_depends ? ctx->solver_flags : 0);
 	}
 
 	r = apk_solver_commit(db, 0, db->world);
@@ -85,6 +92,7 @@ err:
 }
 
 static struct apk_option fix_options[] = {
+	{ 'd',		"depends",	"Fix all dependencies too" },
 	{ 'u',		"upgrade",	"Upgrade package if possible" },
 	{ 'r',		"reinstall",	"Reinstall the package" },
 };

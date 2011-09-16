@@ -39,16 +39,19 @@ struct apk_package_state {
 	unsigned short cur_unsatisfiable;
 };
 
-#define APK_NAMESTF_AVAILABILITY_CHECKED	1
-#define APK_NAMESTF_LOCKED			2
-#define APK_NAMESTF_NO_OPTIONS			4
 struct apk_name_state {
 	struct list_head unsolved_list;
 	struct apk_package *chosen;
-	unsigned short solver_flags;
-	unsigned short flags;
 	unsigned short requirers;
 	unsigned short install_ifs;
+
+	unsigned int solver_flags_local : 4;
+	unsigned int solver_flags_local_mask : 4;
+	unsigned int solver_flags_inherited : 4;
+
+	unsigned int availability_checked : 1;
+	unsigned int locked : 1;
+	unsigned int no_options : 1;
 };
 
 struct apk_solver_state {
@@ -59,8 +62,9 @@ struct apk_solver_state {
 	struct apk_package *latest_decision;
 	unsigned int topology_position;
 	unsigned int assigned_names;
-	unsigned short solver_flags;
 	unsigned short cur_unsatisfiable;
+
+	unsigned short solver_flags;
 
 	struct apk_package_array *best_solution;
 	unsigned short best_unsatisfiable;
@@ -206,7 +210,7 @@ static void prepare_name(struct apk_solver_state *ss, struct apk_name *name,
 {
 	int i;
 
-	if (ns->flags & APK_NAMESTF_AVAILABILITY_CHECKED)
+	if (ns->availability_checked)
 		return;
 
 	for (i = 0; i < name->pkgs->num; i++) {
@@ -216,14 +220,44 @@ static void prepare_name(struct apk_solver_state *ss, struct apk_name *name,
 
 		/* if package is needed for (re-)install */
 		if ((pkg->ipkg == NULL) ||
-		    ((ns->solver_flags | ss->solver_flags) & APK_SOLVERF_REINSTALL)) {
+		    ((ns->solver_flags_local | ns->solver_flags_inherited |
+		      ss->solver_flags) & APK_SOLVERF_REINSTALL)) {
 			/* and it's not available, we can't use it */
 			if (!pkg_available(ss->db, pkg))
 				ps->conflicts = 1024;
 		}
 	}
 
-	ns->flags |= APK_NAMESTF_AVAILABILITY_CHECKED;
+	ns->availability_checked = 1;
+}
+
+static void foreach_locked_reverse_dependency(
+	struct apk_name *name,
+	void (*cb)(struct apk_package *rdepend, void *ctx), void *ctx)
+{
+	int i, j;
+
+	if (name == NULL)
+		return;
+
+	for (i = 0; i < name->rdepends->num; i++) {
+		struct apk_name *name0 = name->rdepends->item[i];
+		struct apk_name_state *ns0 = name_to_ns(name0);
+		struct apk_package *pkg0 = ns0->chosen;
+
+		if (!ns0->locked || ns0->chosen == NULL)
+			continue;
+
+		for (j = 0; j < pkg0->depends->num; j++) {
+			struct apk_dependency *dep = &pkg0->depends->item[j];
+			if (dep->name == name)
+				break;
+		}
+		if (j >= pkg0->depends->num)
+			continue;
+
+		cb(pkg0, ctx);
+	}
 }
 
 static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependency_array *deps,
@@ -254,7 +288,8 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 
 		options++;
 
-		if ((ns->solver_flags | ss->solver_flags) & APK_SOLVERF_AVAILABLE) {
+		if ((ns->solver_flags_local | ns->solver_flags_inherited |
+		     ss->solver_flags) & APK_SOLVERF_AVAILABLE) {
 			/* pkg available, pkg0 not */
 			if (pkg->repos != 0 && pkg0->repos == 0)
 				continue;
@@ -263,7 +298,8 @@ static int get_pkg_expansion_flags(struct apk_solver_state *ss, struct apk_packa
 				return APK_PKGSTF_NOINSTALL | APK_PKGSTF_BRANCH;
 		}
 
-		if ((ns->solver_flags | ss->solver_flags) & APK_SOLVERF_UPGRADE) {
+		if ((ns->solver_flags_local | ns->solver_flags_inherited |
+		     ss->solver_flags) & APK_SOLVERF_UPGRADE) {
 			/* upgrading, or neither of the package is installed, so
 			 * we just fall back comparing to versions */
 			switch (apk_pkg_version_compare(pkg0, pkg)) {
@@ -296,8 +332,7 @@ static int install_if_missing(struct apk_solver_state *ss, struct apk_package *p
 		struct apk_dependency *dep = &pkg->install_if->item[i];
 
 		ns = name_to_ns(dep->name);
-		if (!(ns->flags & APK_NAMESTF_LOCKED) ||
-		    !apk_dep_is_satisfied(dep, ns->chosen))
+		if (!ns->locked || !apk_dep_is_satisfied(dep, ns->chosen))
 			missing++;
 	}
 
@@ -338,16 +373,16 @@ static int update_name_state(struct apk_solver_state *ss,
 	}
 
 	if (options == 0 && skipped_options == 0) {
-		if (!(ns->flags & APK_NAMESTF_NO_OPTIONS)) {
+		if (!ns->no_options) {
 			ss->cur_unsatisfiable += ns->requirers;
 			if (ns->install_ifs)
 				ss->cur_unsatisfiable++;
-			ns->flags |= APK_NAMESTF_NO_OPTIONS;
+			ns->no_options = 1;
 		} else if (requirers_adjustment > 0) {
 			ss->cur_unsatisfiable += requirers_adjustment;
 		}
 	} else
-		ns->flags &= ~APK_NAMESTF_NO_OPTIONS;
+		ns->no_options = 0;
 
 	if ((options == 0 && skipped_options == 0) ||
 	    (ns->requirers == 0 && ns->install_ifs == 0)) {
@@ -409,7 +444,7 @@ static void apply_decision(struct apk_solver_state *ss,
 		ss->assigned_names++;
 		ss->cur_unsatisfiable += ps->conflicts;
 		ns->chosen = pkg;
-		ns->flags |= APK_NAMESTF_LOCKED;
+		ns->locked = 1;
 
 		list_del(&ns->unsolved_list);
 		list_init(&ns->unsolved_list);
@@ -443,7 +478,7 @@ static void undo_decision(struct apk_solver_state *ss,
 		foreach_rinstall_if_pkg(ss, pkg, untrigger_install_if);
 		foreach_dependency(ss, pkg->depends, undo_constraint);
 
-		ns->flags &= ~APK_NAMESTF_LOCKED;
+		ns->locked = 0;
 		ns->chosen = NULL;
 	}
 
@@ -514,6 +549,41 @@ static int next_branch(struct apk_solver_state *ss)
 	return 1;
 }
 
+static void inherit_name_state(struct apk_name *to, struct apk_name *from)
+{
+	struct apk_name_state *tns = name_to_ns(to);
+	struct apk_name_state *fns = name_to_ns(from);
+
+	tns->solver_flags_inherited |=
+		fns->solver_flags_inherited |
+		(fns->solver_flags_local & fns->solver_flags_local_mask);
+}
+
+static void inherit_name_state_wrapper(struct apk_package *rdepend, void *ctx)
+{
+	struct apk_name *name = (struct apk_name *) ctx;
+	inherit_name_state(name, rdepend->name);
+}
+
+static int has_inherited_state(struct apk_name *name)
+{
+	struct apk_name_state *ns = name_to_ns(name);
+
+	if (name == NULL)
+		return 0;
+	if (ns->solver_flags_inherited || (ns->solver_flags_local & ns->solver_flags_local_mask))
+		return 1;
+	return 0;
+}
+
+static void recalculate_inherted_name_state(struct apk_name *name)
+{
+	struct apk_name_state *ns = name_to_ns(name);
+
+	ns->solver_flags_inherited = 0;
+	foreach_locked_reverse_dependency(name, inherit_name_state_wrapper, name);
+}
+
 static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
 {
 	struct apk_name *name = dep->name;
@@ -522,7 +592,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 
 	prepare_name(ss, name, ns);
 
-	if (ns->flags & APK_NAMESTF_LOCKED) {
+	if (ns->locked) {
 		dbg_printf(PKG_VER_FMT " selected already for %s\n",
 			   PKG_VER_PRINTF(ns->chosen), dep->name->name);
 		if (!apk_dep_is_satisfied(dep, ns->chosen))
@@ -546,6 +616,9 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		}
 	}
 
+	if (ss->latest_decision != NULL)
+		inherit_name_state(name, ss->latest_decision->name);
+
 	update_name_state(ss, name, ns,
 			  (dep->result_mask != APK_DEPMASK_CONFLICT) ? 1 : 0);
 }
@@ -556,7 +629,7 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	struct apk_name_state *ns = name_to_ns(name);
 	int i;
 
-	if (ns->flags & APK_NAMESTF_LOCKED) {
+	if (ns->locked) {
 		dbg_printf(PKG_VER_FMT " selected already for %s\n",
 			   PKG_VER_PRINTF(ns->chosen), dep->name->name);
 		return;
@@ -576,6 +649,9 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 				   ps0->conflicts);
 		}
 	}
+
+	if (ss->latest_decision && has_inherited_state(ss->latest_decision->name))
+		recalculate_inherted_name_state(name);
 
 	update_name_state(ss, name, ns,
 		(dep->result_mask != APK_DEPMASK_CONFLICT) ? -1 : 0);
@@ -689,14 +765,16 @@ static int generate_changeset(struct apk_database *db,
 	/* calculate change set size */
 	for (i = 0; i < solution->num; i++) {
 		pkg = solution->item[i];
+		ns = name_to_ns(pkg->name);
 		if ((pkg->ipkg == NULL) ||
-		    ((solver_flags | name_to_ns(pkg->name)->solver_flags) & APK_SOLVERF_REINSTALL))
+		    ((ns->solver_flags_local | ns->solver_flags_inherited |
+		      solver_flags) & APK_SOLVERF_REINSTALL))
 			num_installs++;
 	}
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		name = ipkg->pkg->name;
 		ns = name_to_ns(name);
-		if ((ns->chosen == NULL) || !(ns->flags & APK_NAMESTF_LOCKED))
+		if ((ns->chosen == NULL) || !ns->locked)
 			num_removed++;
 	}
 
@@ -705,7 +783,7 @@ static int generate_changeset(struct apk_database *db,
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		name = ipkg->pkg->name;
 		ns = name_to_ns(name);
-		if ((ns->chosen == NULL) || !(ns->flags & APK_NAMESTF_LOCKED)) {
+		if ((ns->chosen == NULL) || !ns->locked) {
 			changeset->changes->item[ci].oldpkg = ipkg->pkg;
 			ci++;
 		}
@@ -713,9 +791,11 @@ static int generate_changeset(struct apk_database *db,
 	for (i = 0; i < solution->num; i++) {
 		pkg = solution->item[i];
 		name = pkg->name;
+		ns = name_to_ns(name);
 
 		if ((pkg->ipkg == NULL) ||
-		    ((solver_flags | name_to_ns(name)->solver_flags) & APK_SOLVERF_REINSTALL)) {
+		    ((ns->solver_flags_local | ns->solver_flags_inherited |
+		      solver_flags) & APK_SOLVERF_REINSTALL)) {
 			for (j = 0; j < name->pkgs->num; j++) {
 				pkg0 = name->pkgs->item[j];
 				if (pkg0->ipkg == NULL)
@@ -758,10 +838,12 @@ static int free_package(apk_hash_item item, void *ctx)
 }
 
 void apk_solver_set_name_flags(struct apk_name *name,
-			       unsigned short solver_flags)
+			       unsigned short solver_flags,
+			       unsigned short solver_flags_inheritable)
 {
 	struct apk_name_state *ns = name_to_ns(name);
-	ns->solver_flags = solver_flags;
+	ns->solver_flags_local = solver_flags;
+	ns->solver_flags_local_mask = solver_flags_inheritable;
 }
 
 static void apk_solver_free(struct apk_database *db)
