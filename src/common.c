@@ -31,11 +31,11 @@ void *apk_array_resize(void *array, size_t new_size, size_t elem_size)
 	if (array == &dummy_array)
 		array = NULL;
 
-	tmp = realloc(array, sizeof(int) + new_size * elem_size);
+	tmp = realloc(array, sizeof(size_t) + new_size * elem_size);
 	if (diff > 0)
-		memset(tmp + sizeof(int) + old_size * elem_size, 0,
+		memset(tmp + sizeof(size_t) + old_size * elem_size, 0,
 		       diff * elem_size);
-	*((int*) tmp) = new_size;
+	*((size_t*) tmp) = new_size;
 
 	return tmp;
 }

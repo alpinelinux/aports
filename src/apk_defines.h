@@ -87,7 +87,7 @@ void *apk_array_resize(void *array, size_t new_size, size_t elem_size);
 
 #define APK_ARRAY(array_type_name, elem_type_name)			\
 	struct array_type_name {					\
-		int num;						\
+		size_t num;						\
 		elem_type_name item[];					\
 	};								\
 	static inline void						\
