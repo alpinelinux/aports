@@ -279,6 +279,11 @@ static int parse_depend(void *ctx, apk_blob_t blob)
 
 int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg)
 {
+	if (pkg == NULL) {
+		if (dep->result_mask == APK_DEPMASK_CONFLICT)
+			return 1;
+		return 0;
+	}
 	if (dep->name != pkg->name)
 		return 0;
 	if (dep->result_mask == APK_DEPMASK_CHECKSUM) {
