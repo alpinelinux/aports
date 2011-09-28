@@ -1287,8 +1287,7 @@ int apk_solver_commit(struct apk_database *db,
 
 	if (r == 0 || (apk_flags & APK_FORCE)) {
 		/* Success -- or forced installation of bad graph */
-		apk_solver_commit_changeset(db, &changeset, world);
-		r = 0;
+		r = apk_solver_commit_changeset(db, &changeset, world);
 	} else {
 		/* Failure -- print errors */
 		apk_solver_print_errors(db, solution, world, r);
