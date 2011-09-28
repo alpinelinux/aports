@@ -377,6 +377,15 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 			best_pkg = pkg0, best_topology = pkg0->topology_hard;
 	}
 
+	if (skipped_options == 0 && options == 0) {
+		if (!ns->locked)
+			ss->cur_unsatisfiable += ns->requirers;
+		ns->locked = 1;
+		ns->chosen = NULL;
+	} else {
+		ns->locked = 0;
+	}
+
 	if (ns->requirers == 0 && ns->install_ifs == 0) {
 		if (list_hashed(&ns->unsolved_list)) {
 			list_del(&ns->unsolved_list);
@@ -624,8 +633,13 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	int i;
 
 	if (ns->locked) {
-		dbg_printf(PKG_VER_FMT " selected already for %s\n",
-			   PKG_VER_PRINTF(ns->chosen), dep->name->name);
+		if (ns->chosen != NULL) {
+			dbg_printf(PKG_VER_FMT " selected already for %s\n",
+				   PKG_VER_PRINTF(ns->chosen), dep->name->name);
+		} else {
+			dbg_printf("%s selected to not be satisfied\n",
+				   dep->name->name);
+		}
 		return;
 	}
 
@@ -677,8 +691,6 @@ static int expand_branch(struct apk_solver_state *ss)
 	}
 	ss->refresh_name_states = 0;
 	if (pkg0 == NULL) {
-		list_for_each_entry(ns, &ss->unsolved_list_head, unsolved_list)
-			ss->cur_unsatisfiable += ns->requirers;
 		dbg_printf("expand_branch: list is empty (%d unsatisfied)\n",
 			   ss->cur_unsatisfiable);
 		return 1;
