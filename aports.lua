@@ -154,6 +154,31 @@ function get_maintainer(pkg)
 	return nil
 end
 
+function get_repo_name(pkg)
+	if pkg == nil or pkg.dir == nil then
+		return nil
+	end
+	return string.match(pkg.dir, ".*/(.*)/.*")
+end
+
+function get_apk_filename(pkg)
+	return pkg.pkgname.."-"..pkg.pkgver.."-r"..pkg.pkgrel..".apk"
+end
+
+function get_apk_file_path(pkg)
+	local pkgdest = get_abuild_conf("PKGDEST")
+	if pkgdest ~= nil and pkgdest ~= "" then
+		return pkgdest.."/"..get_apk_filename(pkg)
+	end
+	local repodest = get_abuild_conf("REPODEST")
+	if repodest ~= nil and repodest ~= "" then
+		local arch = get_abuild_conf("CARCH")
+		return repodest.."/"..get_repo_name(pkg).."/"..arch.."/"..get_apk_filename(pkg)
+	end
+	return pkg.dir.."/"..get_apk_filename(pkg)
+end
+
+
 local function init_apkdb(repodirs)
 	local pkgdb = {}
 	local revdeps = {}
