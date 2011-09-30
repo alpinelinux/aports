@@ -1,5 +1,18 @@
 module(..., package.seeall)
 
+abuild_conf_file = "/etc/abuild.conf"
+
+local abuild_conf = {}
+
+function get_abuild_conf(var)
+	if abuild_conf[var] == nil then
+		local f = io.popen(" . "..abuild_conf_file..' ; echo -n "$'..var..'"')
+		abuild_conf[var] = f:read("*all")
+		f:close()
+	end
+	return abuild_conf[var]
+end
+
 local function split_subpkgs(str)
 	local t = {}
 	local e
