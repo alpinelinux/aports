@@ -107,8 +107,9 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			}
 			apk_dep_from_pkg(&dep, db, pkg);
 		} else {
-			r = apk_dep_from_blob(&dep, db, APK_BLOB_STR(argv[i]));
-			if (r != 0)
+			apk_blob_t b = APK_BLOB_STR(argv[i]);
+			apk_blob_pull_dep(&b, db, &dep);
+			if (APK_BLOB_IS_NULL(b))
 				return -1;
 		}
 

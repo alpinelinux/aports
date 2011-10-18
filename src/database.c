@@ -75,7 +75,6 @@ struct install_ctx {
 	struct apk_db_dir_instance *diri;
 	struct apk_checksum data_csum;
 	struct apk_sign_ctx sctx;
-	struct apk_name_array *replaces;
 
 	apk_progress_cb cb;
 	void *cb_ctx;
@@ -668,6 +667,10 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			}
 			apk_blob_pull_csum(&l, &file->csum);
 			break;
+		case 'r':
+			if (ipkg != NULL)
+				apk_blob_pull_deps(&l, db, &ipkg->replaces);
+			break;
 		default:
 			if (r != 0 && !(apk_flags & APK_FORCE)) {
 				/* Installed db should not have unsupported fields */
@@ -703,6 +706,12 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 		r = apk_pkg_write_index_entry(pkg, os);
 		if (r < 0)
 			return r;
+
+		if (ipkg->replaces->num) {
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("r:"));
+			apk_blob_push_deps(&bbuf, ipkg->replaces);
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
+		}
 
 		hlist_for_each_entry(diri, c1, &ipkg->owned_dirs, pkg_dirs_list) {
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("F:"));
@@ -897,7 +906,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 		blob = apk_blob_from_file(db->root_fd, apk_world_file);
 		if (APK_BLOB_IS_NULL(blob))
 			return -ENOENT;
-		apk_deps_parse(db, &db->world, blob);
+		apk_blob_pull_deps(&blob, db, &db->world);
 		free(blob.ptr);
 	}
 
@@ -1757,17 +1766,6 @@ static int apk_db_run_pending_script(struct install_ctx *ctx)
 	return r;
 }
 
-static int parse_replaces(void *_ctx, apk_blob_t blob)
-{
-	struct install_ctx *ctx = (struct install_ctx *) _ctx;
-
-	if (blob.len == 0)
-		return 0;
-
-	*apk_name_array_add(&ctx->replaces) = apk_db_get_name(ctx->db, blob);
-	return 0;
-}
-
 static int read_info_line(void *_ctx, apk_blob_t line)
 {
 	struct install_ctx *ctx = (struct install_ctx *) _ctx;
@@ -1782,7 +1780,7 @@ static int read_info_line(void *_ctx, apk_blob_t line)
 		return 0;
 
 	if (apk_blob_compare(APK_BLOB_STR("replaces"), l) == 0) {
-		apk_blob_for_each_segment(r, " ", parse_replaces, ctx);
+		apk_blob_pull_deps(&r, db, &ctx->ipkg->replaces);
 	} else if (apk_blob_compare(APK_BLOB_STR("triggers"), l) == 0) {
 		apk_string_array_resize(&ipkg->triggers, 0);
 		apk_blob_for_each_segment(r, " ", parse_triggers, ctx->ipkg);
@@ -1878,11 +1876,20 @@ static int apk_db_install_archive_entry(void *_ctx,
 				/* Upgrading package? */
 				if (opkg->name == pkg->name)
 					break;
+				/* If we have been replaced, skip file silently. */
+				for (i = 0; i < opkg->ipkg->replaces->num; i++) {
+					if (apk_dep_is_satisfied(&opkg->ipkg->replaces->item[i], pkg)) {
+						apk_warning("%s: Dropping silently %s owned by %s.",
+							    pkg->name->name, ae->name,
+							    opkg->name->name);
+						return 0;
+					}
+				}
 				/* Overwriting with permission? */
-				for (i = 0; i < ctx->replaces->num; i++)
-					if (opkg->name == ctx->replaces->item[i])
+				for (i = 0; i < ctx->ipkg->replaces->num; i++)
+					if (apk_dep_is_satisfied(&ctx->ipkg->replaces->item[i], opkg))
 						break;
-				if (i < ctx->replaces->num)
+				if (i < ctx->ipkg->replaces->num)
 					break;
 
 				if (!(apk_flags & APK_FORCE)) {
@@ -2159,12 +2166,10 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		.cb = cb,
 		.cb_ctx = cb_ctx,
 	};
-	apk_name_array_init(&ctx.replaces);
 	apk_sign_ctx_init(&ctx.sctx, APK_SIGN_VERIFY_IDENTITY, &pkg->csum, db->keys_fd);
 	tar = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &ctx.sctx);
 	r = apk_tar_parse(tar, apk_db_install_archive_entry, &ctx, TRUE, &db->id_cache);
 	apk_sign_ctx_free(&ctx.sctx);
-	apk_name_array_free(&ctx.replaces);
 	tar->close(tar);
 
 	if (need_copy) {

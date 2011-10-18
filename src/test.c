@@ -147,6 +147,7 @@ static int test_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	struct apk_bstream *bs;
 	struct apk_package_array *solution = NULL;
 	struct apk_changeset changeset = {};
+	apk_blob_t b;
 	int i, r;
 
 	if (argc != 1)
@@ -173,7 +174,8 @@ static int test_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	}
 
 	/* construct new world */
-	apk_deps_parse(db, &db->world, APK_BLOB_STR(argv[0]));
+	b = APK_BLOB_STR(argv[0]);
+	apk_blob_pull_deps(&b, db, &db->world);
 
 	/* run solver */
 	r = apk_solver_solve(db, ctx->solver_flags, db->world, &solution, &changeset);

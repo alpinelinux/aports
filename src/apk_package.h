@@ -74,6 +74,7 @@ struct apk_installed_package {
 	apk_blob_t script[APK_SCRIPT_MAX];
 	struct apk_string_array *triggers;
 	struct apk_string_array *pending_triggers;
+	struct apk_dependency_array *replaces;
 };
 
 #define APK_PKG_UNINSTALLABLE		((char*) -1)
@@ -115,22 +116,21 @@ int apk_sign_ctx_verify_tar(void *ctx, const struct apk_file_info *fi,
 			    struct apk_istream *is);
 int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t blob);
 
-int apk_dep_from_blob(struct apk_dependency *dep, struct apk_database *db,
-		      apk_blob_t blob);
 void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		      struct apk_package *pkg);
 int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg);
+
 void apk_blob_push_dep(apk_blob_t *to, struct apk_dependency *dep);
+void apk_blob_push_deps(apk_blob_t *to, struct apk_dependency_array *deps);
+void apk_blob_pull_dep(apk_blob_t *from, struct apk_database *, struct apk_dependency *);
+void apk_blob_pull_deps(apk_blob_t *from, struct apk_database *, struct apk_dependency_array **);
+
+int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os);
 
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep);
 void apk_deps_del(struct apk_dependency_array **deps,
 		  struct apk_name *name);
-void apk_deps_parse(struct apk_database *db,
-		    struct apk_dependency_array **depends,
-		    apk_blob_t blob);
-
-int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os);
 int apk_script_type(const char *name);
 
 void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to);

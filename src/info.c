@@ -34,6 +34,7 @@ struct info_ctx {
 #define APK_INFO_TRIGGERS	0x40
 #define APK_INFO_INSTALL_IF	0x80
 #define APK_INFO_RINSTALL_IF	0x100
+#define APK_INFO_REPLACES	0x200
 
 static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
 {
@@ -69,14 +70,15 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 	struct apk_name *name;
 	struct apk_package *pkg = NULL;
 	struct apk_dependency dep;
-	int r, i, j, ok = 0;
+	int i, j, ok = 0;
 
 	for (i = 0; i < argc; i++) {
-		r = apk_dep_from_blob(&dep, db, APK_BLOB_STR(argv[i]));
-		if (r != 0)
+		apk_blob_t b = APK_BLOB_STR(argv[i]);
+		apk_blob_pull_dep(&b, db, &dep);
+		name = dep.name;
+		if (name == NULL)
 			continue;
 
-		name = dep.name;
 		for (j = 0; j < name->pkgs->num; j++) {
 			pkg = name->pkgs->item[j];
 			if (pkg->ipkg != NULL)
@@ -309,6 +311,26 @@ static void info_print_triggers(struct apk_package *pkg)
 	}
 }
 
+static void info_print_replaces(struct apk_package *pkg)
+{
+	apk_blob_t separator = APK_BLOB_STR(apk_verbosity > 1 ? " " : "\n");
+	char dep[256];
+	int i;
+
+	if (apk_verbosity == 1)
+		printf(PKG_VER_FMT " replaces:\n",
+		       PKG_VER_PRINTF(pkg));
+	if (apk_verbosity > 1)
+		printf("%s: ", pkg->name->name);
+	for (i = 0; i < pkg->ipkg->replaces->num; i++) {
+		apk_blob_t b = APK_BLOB_BUF(dep);
+		apk_blob_push_dep(&b, &pkg->ipkg->replaces->item[i]);
+		apk_blob_push_blob(&b, separator);
+		b = apk_blob_pushed(APK_BLOB_BUF(dep), b);
+		fwrite(b.ptr, b.len, 1, stdout);
+	}
+}
+
 static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 {
 	typedef void (*subaction_t)(struct apk_package *);
@@ -322,10 +344,11 @@ static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 		info_print_triggers,
 		info_print_install_if,
 		info_print_rinstall_if,
+		info_print_replaces,
 	};
 	const int requireipkg =
 		APK_INFO_CONTENTS | APK_INFO_TRIGGERS | APK_INFO_RDEPENDS |
-		APK_INFO_RINSTALL_IF;
+		APK_INFO_RINSTALL_IF | APK_INFO_REPLACES;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(subactions); i++) {
@@ -398,6 +421,9 @@ static int info_parse(void *ctx, struct apk_db_options *dbopts,
 	case 't':
 		ictx->subaction_mask |= APK_INFO_TRIGGERS;
 		break;
+	case 0x10000:
+		ictx->subaction_mask |= APK_INFO_REPLACES;
+		break;
 	case 'a':
 		ictx->subaction_mask = 0xffffffff;
 		break;
@@ -423,6 +449,7 @@ static struct apk_option info_options[] = {
 	{ 'W', "who-owns",	"Print the package owning the specified file" },
 	{ 'R', "depends",	"List packages that the PACKAGE depends on" },
 	{ 'r', "rdepends",	"List all packages depending on PACKAGE" },
+	{ 0x10000, "replaces",	"List packages whom files PACKAGE might replace" },
 	{ 'i', "install-if",	"List the PACKAGE's install-if rule" },
 	{ 'I', "rinstall-if",	"List all packages having install-if referencing PACKAGE" },
 	{ 'w', "webpage",	"Show URL for more information about PACKAGE" },
