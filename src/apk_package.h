@@ -63,11 +63,9 @@ struct apk_dependency {
 };
 APK_ARRAY(apk_dependency_array, struct apk_dependency);
 
-#define APK_IPKGF_RUN_ALL_TRIGGERS	0x00000001
-
 struct apk_installed_package {
 	struct apk_package *pkg;
-	unsigned int flags;
+	unsigned int run_all_triggers : 1;
 	unsigned short replaces_priority;
 	struct list_head installed_pkgs_list;
 	struct list_head trigger_pkgs_list;

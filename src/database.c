@@ -1451,7 +1451,7 @@ static int fire_triggers(apk_hash_item item, void *ctx)
 	int i;
 
 	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
-		if (((ipkg->flags & APK_IPKGF_RUN_ALL_TRIGGERS) == 0) &&
+		if ((!ipkg->run_all_triggers) &&
 		    ((dbd->flags & APK_DBDIRF_MODIFIED) == 0))
 			continue;
 
@@ -2254,7 +2254,7 @@ int apk_db_install_pkg(struct apk_database *db,
 
 	/* Install the new stuff */
 	ipkg = apk_pkg_install(db, newpkg);
-	ipkg->flags |= APK_IPKGF_RUN_ALL_TRIGGERS;
+	ipkg->run_all_triggers = 1;
 	if (ipkg->triggers->num != 0) {
 		list_del(&ipkg->trigger_pkgs_list);
 		list_init(&ipkg->trigger_pkgs_list);
