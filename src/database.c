@@ -671,6 +671,10 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			if (ipkg != NULL)
 				apk_blob_pull_deps(&l, db, &ipkg->replaces);
 			break;
+		case 'q':
+			if (ipkg != NULL)
+				ipkg->replaces_priority = apk_blob_pull_uint(&l, 10);
+			break;
 		default:
 			if (r != 0 && !(apk_flags & APK_FORCE)) {
 				/* Installed db should not have unsupported fields */
@@ -710,6 +714,11 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 		if (ipkg->replaces->num) {
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("r:"));
 			apk_blob_push_deps(&bbuf, ipkg->replaces);
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
+		}
+		if (ipkg->replaces_priority) {
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("q:"));
+			apk_blob_push_uint(&bbuf, ipkg->replaces_priority, 10);
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 		}
 
@@ -1780,7 +1789,9 @@ static int read_info_line(void *_ctx, apk_blob_t line)
 		return 0;
 
 	if (apk_blob_compare(APK_BLOB_STR("replaces"), l) == 0) {
-		apk_blob_pull_deps(&r, db, &ctx->ipkg->replaces);
+		apk_blob_pull_deps(&r, db, &ipkg->replaces);
+	} else if (apk_blob_compare(APK_BLOB_STR("replaces_priority"), l) == 0) {
+		ipkg->replaces_priority = apk_blob_pull_uint(&r, 10);
 	} else if (apk_blob_compare(APK_BLOB_STR("triggers"), l) == 0) {
 		apk_string_array_resize(&ipkg->triggers, 0);
 		apk_blob_for_each_segment(r, " ", parse_triggers, ctx->ipkg);
@@ -1870,26 +1881,35 @@ static int apk_db_install_archive_entry(void *_ctx,
 
 			opkg = file->diri->pkg;
 			do {
+				int opkg_prio = -1, pkg_prio = -1;
+
 				/* Overlay file? */
 				if (opkg->name == NULL)
 					break;
 				/* Upgrading package? */
 				if (opkg->name == pkg->name)
 					break;
-				/* If we have been replaced, skip file silently. */
+				/* Does the original package replace the new one? */
 				for (i = 0; i < opkg->ipkg->replaces->num; i++) {
 					if (apk_dep_is_satisfied(&opkg->ipkg->replaces->item[i], pkg)) {
-						apk_warning("%s: Dropping silently %s owned by %s.",
-							    pkg->name->name, ae->name,
-							    opkg->name->name);
-						return 0;
+						opkg_prio = opkg->ipkg->replaces_priority;
+						break;
 					}
 				}
-				/* Overwriting with permission? */
-				for (i = 0; i < ctx->ipkg->replaces->num; i++)
-					if (apk_dep_is_satisfied(&ctx->ipkg->replaces->item[i], opkg))
+				/* Does the new package replace the original one? */
+				for (i = 0; i < ctx->ipkg->replaces->num; i++) {
+					if (apk_dep_is_satisfied(&ctx->ipkg->replaces->item[i], opkg)) {
+						pkg_prio = ctx->ipkg->replaces_priority;
 						break;
-				if (i < ctx->ipkg->replaces->num)
+					}
+				}
+				/* If the original package is more important,
+				 * skip this file */
+				if (opkg_prio > pkg_prio)
+					return 0;
+				/* If the new package has valid 'replaces', we
+				 * will overwrite the file without warnings. */
+				if (pkg_prio >= 0)
 					break;
 
 				if (!(apk_flags & APK_FORCE)) {
