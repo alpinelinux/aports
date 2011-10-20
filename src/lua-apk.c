@@ -204,10 +204,11 @@ static int Papk_exists(lua_State *L)
 	struct apk_dependency dep;
 	struct apk_name *name;
 	struct apk_package *pkg;
-	int i, r;
+	int i;
+	apk_blob_t blob = APK_BLOB_STR(depstr);
+	apk_blob_pull_dep(&blob, db, &dep);
 
-	r = apk_dep_from_blob(&dep, db, APK_BLOB_STR(depstr));
-	if (r != 0)
+	if (APK_BLOB_IS_NULL(blob))
 		goto ret_nil;
 
 	name = dep.name;
