@@ -126,8 +126,7 @@ static void foreach_dependency_pkg(
 			struct apk_package *pkg0 = name0->pkgs->item[j];
 
 			/* conflict depends on all to be not installed */
-			if (dep->result_mask != APK_DEPMASK_CONFLICT &&
-			    !apk_dep_is_satisfied(dep, pkg0))
+			if (!apk_dep_is_satisfied(dep, pkg0))
 				continue;
 
 			cb(ss, pkg0);
@@ -154,8 +153,7 @@ static void foreach_rinstall_if_pkg(
 			for (k = 0; k < pkg0->install_if->num; k++) {
 				struct apk_dependency *dep = &pkg0->install_if->item[k];
 				if (dep->name == name &&
-				    (dep->result_mask == APK_DEPMASK_CONFLICT ||
-				     apk_dep_is_satisfied(dep, pkg)))
+				    apk_dep_is_satisfied(dep, pkg))
 					break;
 			}
 			if (k >= pkg0->install_if->num)
@@ -635,7 +633,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	if (ss->latest_decision != NULL)
 		inherit_name_state(name, ss->latest_decision->name);
 
-	if (dep->result_mask != APK_DEPMASK_CONFLICT)
+	if (!dep->optional)
 		ns->requirers++;
 	update_name_state(ss, name);
 }
@@ -675,7 +673,7 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	if (ss->latest_decision && has_inherited_state(ss->latest_decision->name))
 		recalculate_inherted_name_state(name);
 
-	if (dep->result_mask != APK_DEPMASK_CONFLICT)
+	if (!dep->optional)
 		ns->requirers--;
 	update_name_state(ss, name);
 }

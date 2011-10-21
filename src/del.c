@@ -58,8 +58,7 @@ static void foreach_installed_reverse_dependency(
 			for (k = 0; k < pkg0->depends->num; k++) {
 				struct apk_dependency *dep = &pkg0->depends->item[k];
 				if (dep->name == name &&
-				    (dep->result_mask == APK_DEPMASK_CONFLICT ||
-				     apk_dep_is_satisfied(dep, pkg)))
+				    apk_dep_is_satisfied(dep, pkg))
 					break;
 			}
 			if (k >= pkg0->depends->num)

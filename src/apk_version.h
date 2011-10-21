@@ -21,7 +21,6 @@
 #define APK_DEPMASK_REQUIRE	(APK_VERSION_EQUAL|APK_VERSION_LESS|\
 				 APK_VERSION_GREATER)
 #define APK_DEPMASK_CHECKSUM	(APK_VERSION_LESS|APK_VERSION_GREATER)
-#define APK_DEPMASK_CONFLICT	(0)
 
 const char *apk_version_op_string(int result_mask);
 int apk_version_result_mask(const char *str);

@@ -195,16 +195,16 @@ void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_depend
 {
 	struct apk_name *name;
 	apk_blob_t bname, bop, bver = APK_BLOB_NULL;
-	int mask = APK_DEPMASK_REQUIRE;
+	int mask = APK_DEPMASK_REQUIRE, optional = 0;
 	size_t len;
 
 	/* [!]name[<,<=,=,>=,>]ver */
 	if (APK_BLOB_IS_NULL(*b))
 		goto fail;
 	if (b->ptr[0] == '!') {
-		mask = 0;
 		b->ptr++;
 		b->len--;
+		optional = 1;
 	}
 	if (apk_blob_cspn(*b, "<>= ", &bname, &bop)) {
 		int i;
@@ -243,10 +243,14 @@ void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_depend
 	if (name == NULL)
 		goto fail;
 
+	if (optional)
+		mask ^= APK_DEPMASK_REQUIRE;
+
 	*dep = (struct apk_dependency){
 		.name = name,
 		.version = apk_blob_atomize_dup(bver),
 		.result_mask = mask,
+		.optional = optional,
 	};
 	return;
 fail:
@@ -292,11 +296,8 @@ static int parse_depend(void *ctx, apk_blob_t blob)
 
 int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg)
 {
-	if (pkg == NULL) {
-		if (dep->result_mask == APK_DEPMASK_CONFLICT)
-			return 1;
-		return 0;
-	}
+	if (pkg == NULL)
+		return dep->optional;
 	if (dep->name != pkg->name)
 		return 0;
 	if (dep->result_mask == APK_DEPMASK_CHECKSUM) {
@@ -326,13 +327,16 @@ void apk_blob_pull_deps(apk_blob_t *b, struct apk_database *db, struct apk_depen
 
 void apk_blob_push_dep(apk_blob_t *to, struct apk_dependency *dep)
 {
-	if (dep->result_mask == APK_DEPMASK_CONFLICT)
+	int result_mask = dep->result_mask;
+
+	if (dep->optional) {
 		apk_blob_push_blob(to, APK_BLOB_PTR_LEN("!", 1));
+		result_mask ^= APK_DEPMASK_REQUIRE;
+	}
 
 	apk_blob_push_blob(to, APK_BLOB_STR(dep->name->name));
 
-	if (dep->result_mask != APK_DEPMASK_CONFLICT &&
-	    dep->result_mask != APK_DEPMASK_REQUIRE) {
+	if (!APK_BLOB_IS_NULL(*dep->version)) {
 		apk_blob_push_blob(to, APK_BLOB_STR(apk_version_op_string(dep->result_mask)));
 		apk_blob_push_blob(to, *dep->version);
 	}

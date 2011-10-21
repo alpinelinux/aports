@@ -59,7 +59,8 @@ struct apk_sign_ctx {
 struct apk_dependency {
 	struct apk_name *name;
 	apk_blob_t *version;
-	int result_mask;
+	unsigned optional : 1;
+	unsigned result_mask : 3;
 };
 APK_ARRAY(apk_dependency_array, struct apk_dependency);
 
