@@ -1115,7 +1115,7 @@ static int dump_packages(struct apk_changeset *changeset,
 		if (!cmp(change))
 			continue;
 		if (match == 0)
-			printf("%s:\n ", msg);
+			printf("%s:\n", msg);
 		if (change->newpkg != NULL)
 			name = change->newpkg->name;
 		else
