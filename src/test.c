@@ -91,7 +91,7 @@ static inline void print_change(struct apk_package *oldpkg,
 	}
 }
 
-static void print_dep_errors(char *label, struct apk_dependency_array *deps)
+static void print_dep_errors(struct apk_database *db, char *label, struct apk_dependency_array *deps)
 {
 	int i, print_label = 1;
 	char buf[256];
@@ -110,7 +110,7 @@ static void print_dep_errors(char *label, struct apk_dependency_array *deps)
 		} else {
 			printf(" ");
 		}
-		apk_blob_push_dep(&p, dep);
+		apk_blob_push_dep(&p, db, dep);
 		p = apk_blob_pushed(APK_BLOB_BUF(buf), p);
 		fwrite(p.ptr, p.len, 1, stdout);
 	}
@@ -131,12 +131,12 @@ static void print_errors_in_solution(struct apk_database *db, int unsatisfiable,
 		pkg->name->state_ptr = pkg;
 	}
 
-	print_dep_errors("world", db->world);
+	print_dep_errors(db, "world", db->world);
 	for (i = 0; i < solution->num; i++) {
 		struct apk_package *pkg = solution->item[i];
 		char pkgtext[256];
 		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(solution->item[i]));
-		print_dep_errors(pkgtext, pkg->depends);
+		print_dep_errors(db, pkgtext, pkg->depends);
 	}
 
 }
@@ -153,6 +153,8 @@ static int test_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	if (argc != 1)
 		return -EINVAL;
 
+	apk_db_get_tag_id(db, APK_BLOB_STR("testing"));
+
 	/* load installed db */
 	if (ctx->installed_db != NULL) {
 		bs = apk_bstream_from_file(AT_FDCWD, ctx->installed_db);
@@ -165,9 +167,16 @@ static int test_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	/* load additional indexes */
 	if (ctx->repos) {
 		for (i = 0; i < ctx->repos->num; i++) {
-			bs = apk_bstream_from_file(AT_FDCWD, ctx->repos->item[i]);
+			char *fn = ctx->repos->item[i];
+			int repo = 0;
+			if (fn[0] == '+') {
+				fn++;
+				repo = 1;
+			}
+			bs = apk_bstream_from_file(AT_FDCWD, fn);
 			if (bs != NULL) {
 				apk_db_index_read(db, bs, i);
+				db->repo_tags[repo].allowed_repos |= BIT(i);
 				bs->close(bs, NULL);
 			}
 		}

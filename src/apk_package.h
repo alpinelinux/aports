@@ -59,6 +59,7 @@ struct apk_sign_ctx {
 struct apk_dependency {
 	struct apk_name *name;
 	apk_blob_t *version;
+	unsigned short repository_tag;
 	unsigned optional : 1;
 	unsigned result_mask : 3;
 };
@@ -120,12 +121,13 @@ void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		      struct apk_package *pkg);
 int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg);
 
-void apk_blob_push_dep(apk_blob_t *to, struct apk_dependency *dep);
-void apk_blob_push_deps(apk_blob_t *to, struct apk_dependency_array *deps);
+void apk_blob_push_dep(apk_blob_t *to, struct apk_database *, struct apk_dependency *dep);
+void apk_blob_push_deps(apk_blob_t *to, struct apk_database *, struct apk_dependency_array *deps);
 void apk_blob_pull_dep(apk_blob_t *from, struct apk_database *, struct apk_dependency *);
 void apk_blob_pull_deps(apk_blob_t *from, struct apk_database *, struct apk_dependency_array **);
 
-int apk_deps_write(struct apk_dependency_array *deps, struct apk_ostream *os);
+int apk_deps_write(struct apk_database *db, struct apk_dependency_array *deps,
+		   struct apk_ostream *os);
 
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep);

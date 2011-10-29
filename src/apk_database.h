@@ -115,10 +115,15 @@ struct apk_db_options {
 	struct list_head repository_list;
 };
 
+struct apk_repository_tag {
+	unsigned int allowed_repos;
+	apk_blob_t *name;
+};
+
 struct apk_database {
 	char *root;
 	int root_fd, lock_fd, cache_fd, cachetmp_fd, keys_fd;
-	unsigned num_repos;
+	unsigned num_repos, num_repo_tags;
 	const char *cache_dir;
 	char *cache_remount_dir;
 	apk_blob_t *arch;
@@ -131,6 +136,7 @@ struct apk_database {
 	struct apk_dependency_array *world;
 	struct apk_string_array *protected_paths;
 	struct apk_repository repos[APK_MAX_REPOS];
+	struct apk_repository_tag repo_tags[APK_MAX_REPOS];
 	struct apk_id_cache id_cache;
 
 	struct {
@@ -158,6 +164,7 @@ typedef union apk_database_or_void {
 
 struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name);
 struct apk_name *apk_db_query_name(struct apk_database *db, apk_blob_t name);
+int apk_db_get_tag_id(struct apk_database *db, apk_blob_t tag);
 struct apk_db_dir *apk_db_dir_query(struct apk_database *db,
 				    apk_blob_t name);
 struct apk_db_file *apk_db_file_query(struct apk_database *db,

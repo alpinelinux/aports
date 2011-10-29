@@ -44,8 +44,10 @@ int apk_blob_spn(apk_blob_t blob, const char *accept, apk_blob_t *l, apk_blob_t 
 
 	for (i = 0; i < blob.len; i++) {
 		if (strchr(accept, blob.ptr[i]) == NULL) {
-			*l = APK_BLOB_PTR_LEN(blob.ptr, i);
-			*r = APK_BLOB_PTR_LEN(blob.ptr+i, blob.len-i);
+			if (l != NULL)
+				*l = APK_BLOB_PTR_LEN(blob.ptr, i);
+			if (r != NULL)
+				*r = APK_BLOB_PTR_LEN(blob.ptr+i, blob.len-i);
 			return 1;
 		}
 	}
@@ -58,8 +60,10 @@ int apk_blob_cspn(apk_blob_t blob, const char *reject, apk_blob_t *l, apk_blob_t
 
 	for (i = 0; i < blob.len; i++) {
 		if (strchr(reject, blob.ptr[i]) != NULL) {
-			*l = APK_BLOB_PTR_LEN(blob.ptr, i);
-			*r = APK_BLOB_PTR_LEN(blob.ptr+i, blob.len-i);
+			if (l != NULL)
+				*l = APK_BLOB_PTR_LEN(blob.ptr, i);
+			if (r != NULL)
+				*r = APK_BLOB_PTR_LEN(blob.ptr+i, blob.len-i);
 			return 1;
 		}
 	}

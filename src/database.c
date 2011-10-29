@@ -713,7 +713,7 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 
 		if (ipkg->replaces->num) {
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("r:"));
-			apk_blob_push_deps(&bbuf, ipkg->replaces);
+			apk_blob_push_deps(&bbuf, db, ipkg->replaces);
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 		}
 		if (ipkg->replaces_priority) {
@@ -1156,6 +1156,9 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_string_array_init(&db->protected_paths);
 	db->permanent = 1;
 
+	/* Get first repository tag (the NULL tag) */
+	apk_db_get_tag_id(db, APK_BLOB_NULL);
+
 	if (dbopts->root && dbopts->arch) {
 		db->arch = apk_blob_atomize(APK_BLOB_STR(dbopts->arch));
 	} else {
@@ -1351,7 +1354,7 @@ int apk_db_write_config(struct apk_database *db)
 	if (os == NULL)
 		return -1;
 
-	apk_deps_write(db->world, os);
+	apk_deps_write(db, db->world, os);
 	os->write(os, "\n", 1);
 	r = os->close(os);
 	if (r < 0)
@@ -1441,6 +1444,25 @@ void apk_db_close(struct apk_database *db)
 		free(db->cache_remount_dir);
 		db->cache_remount_dir = NULL;
 	}
+}
+
+int apk_db_get_tag_id(struct apk_database *db, apk_blob_t tag)
+{
+	apk_blob_t *b = apk_blob_atomize_dup(tag);
+	int i;
+
+	for (i = 0; i < db->num_repo_tags; i++) {
+		if (db->repo_tags[i].name == b)
+			return i;
+	}
+	if (i < ARRAY_SIZE(db->repo_tags)) {
+		db->num_repo_tags++;
+		db->repo_tags[i] = (struct apk_repository_tag) {
+			.name = b
+		};
+		return i;
+	}
+	return -1;
 }
 
 static int fire_triggers(apk_hash_item item, void *ctx)
@@ -1696,30 +1718,38 @@ int apk_db_index_read_file(struct apk_database *db, const char *file, int repo)
 	return load_index(db, apk_bstream_from_file(AT_FDCWD, file), targz, repo);
 }
 
-int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
+int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 {
 	struct apk_database *db = _db.db;
 	struct apk_bstream *bs = NULL;
 	struct apk_repository *repo;
-	int r, targz = 1;
+	apk_blob_t brepo, btag;
+	int r, targz = 1, tag_id = 0;
 	char buf[PATH_MAX];
-
-	if (repository.ptr == NULL || repository.len == 0 ||
-	    *repository.ptr == '#')
-		return 0;
 
 	if (db->num_repos >= APK_MAX_REPOS)
 		return -1;
 
-	r = db->num_repos++;
+	brepo = _repository;
+	btag = APK_BLOB_NULL;
+	if (brepo.ptr == NULL || brepo.len == 0 || *brepo.ptr == '#')
+		return 0;
 
+	if (brepo.ptr[0] == '@') {
+		apk_blob_pull_char(&brepo, '@');
+		apk_blob_cspn(brepo, ": ", &btag, &brepo);
+		apk_blob_spn(brepo, ": ", NULL, &brepo);
+		tag_id = apk_db_get_tag_id(db, btag);
+	}
+
+	r = db->num_repos++;
 	repo = &db->repos[r];
 	*repo = (struct apk_repository) {
-		.url = apk_blob_cstr(repository),
+		.url = apk_blob_cstr(brepo),
 	};
 
 	if (apk_url_local_file(repo->url) == NULL) {
-		apk_blob_checksum(repository, apk_checksum_default(), &repo->csum);
+		apk_blob_checksum(brepo, apk_checksum_default(), &repo->csum);
 
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_repository_update(db, repo);
@@ -1730,6 +1760,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t repository)
 		db->local_repos |= BIT(r);
 		bs = apk_repo_file_open(repo, db->arch, apkindex_tar_gz, buf, sizeof(buf));
 	}
+	db->repo_tags[tag_id].allowed_repos |= BIT(r);
 	if (bs == NULL) {
 		apk_warning("%s: index failed to open", buf);
 		return 0;

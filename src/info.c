@@ -18,6 +18,7 @@
 #include "apk_print.h"
 
 struct info_ctx {
+	struct apk_database *db;
 	int (*action)(struct info_ctx *ctx, struct apk_database *db,
 		      int argc, char **argv);
 	int subaction_mask;
@@ -130,7 +131,7 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 		struct apk_ostream *os;
 
 		os = apk_ostream_to_fd(STDOUT_FILENO);
-		apk_deps_write(deps, os);
+		apk_deps_write(db, deps, os);
 		os->write(os, "\n", 1);
 		os->close(os);
 	}
@@ -139,7 +140,7 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 	return r;
 }
 
-static void info_print_description(struct apk_package *pkg)
+static void info_print_description(struct apk_database *db, struct apk_package *pkg)
 {
 	if (apk_verbosity > 1)
 		printf("%s: %s", pkg->name->name, pkg->description);
@@ -149,7 +150,7 @@ static void info_print_description(struct apk_package *pkg)
 		       pkg->description);
 }
 
-static void info_print_url(struct apk_package *pkg)
+static void info_print_url(struct apk_database *db, struct apk_package *pkg)
 {
 	if (apk_verbosity > 1)
 		printf("%s: %s", pkg->name->name, pkg->url);
@@ -159,7 +160,7 @@ static void info_print_url(struct apk_package *pkg)
 		       pkg->url);
 }
 
-static void info_print_size(struct apk_package *pkg)
+static void info_print_size(struct apk_database *db, struct apk_package *pkg)
 {
 	if (apk_verbosity > 1)
 		printf("%s: %zu", pkg->name->name, pkg->installed_size);
@@ -169,7 +170,7 @@ static void info_print_size(struct apk_package *pkg)
 		       pkg->installed_size);
 }
 
-static void info_print_depends(struct apk_package *pkg)
+static void info_print_depends(struct apk_database *db, struct apk_package *pkg)
 {
 	apk_blob_t separator = APK_BLOB_STR(apk_verbosity > 1 ? " " : "\n");
 	char dep[256];
@@ -182,14 +183,14 @@ static void info_print_depends(struct apk_package *pkg)
 		printf("%s: ", pkg->name->name);
 	for (i = 0; i < pkg->depends->num; i++) {
 		apk_blob_t b = APK_BLOB_BUF(dep);
-		apk_blob_push_dep(&b, &pkg->depends->item[i]);
+		apk_blob_push_dep(&b, db, &pkg->depends->item[i]);
 		apk_blob_push_blob(&b, separator);
 		b = apk_blob_pushed(APK_BLOB_BUF(dep), b);
 		fwrite(b.ptr, b.len, 1, stdout);
 	}
 }
 
-static void info_print_required_by(struct apk_package *pkg)
+static void info_print_required_by(struct apk_database *db, struct apk_package *pkg)
 {
 	int i, j, k;
 	char *separator = apk_verbosity > 1 ? " " : "\n";
@@ -221,7 +222,7 @@ static void info_print_required_by(struct apk_package *pkg)
 	}
 }
 
-static void info_print_install_if(struct apk_package *pkg)
+static void info_print_install_if(struct apk_database *db, struct apk_package *pkg)
 {
 	apk_blob_t separator = APK_BLOB_STR(apk_verbosity > 1 ? " " : "\n");
 	char dep[256];
@@ -234,14 +235,14 @@ static void info_print_install_if(struct apk_package *pkg)
 		printf("%s: ", pkg->name->name);
 	for (i = 0; i < pkg->install_if->num; i++) {
 		apk_blob_t b = APK_BLOB_BUF(dep);
-		apk_blob_push_dep(&b, &pkg->install_if->item[i]);
+		apk_blob_push_dep(&b, db, &pkg->install_if->item[i]);
 		apk_blob_push_blob(&b, separator);
 		b = apk_blob_pushed(APK_BLOB_BUF(dep), b);
 		fwrite(b.ptr, b.len, 1, stdout);
 	}
 }
 
-static void info_print_rinstall_if(struct apk_package *pkg)
+static void info_print_rinstall_if(struct apk_database *db, struct apk_package *pkg)
 {
 	int i, j, k;
 	char *separator = apk_verbosity > 1 ? " " : "\n";
@@ -273,7 +274,7 @@ static void info_print_rinstall_if(struct apk_package *pkg)
 	}
 }
 
-static void info_print_contents(struct apk_package *pkg)
+static void info_print_contents(struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_installed_package *ipkg = pkg->ipkg;
 	struct apk_db_dir_instance *diri;
@@ -295,7 +296,7 @@ static void info_print_contents(struct apk_package *pkg)
 	}
 }
 
-static void info_print_triggers(struct apk_package *pkg)
+static void info_print_triggers(struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_installed_package *ipkg = pkg->ipkg;
 	int i;
@@ -311,7 +312,7 @@ static void info_print_triggers(struct apk_package *pkg)
 	}
 }
 
-static void info_print_replaces(struct apk_package *pkg)
+static void info_print_replaces(struct apk_database *db, struct apk_package *pkg)
 {
 	apk_blob_t separator = APK_BLOB_STR(apk_verbosity > 1 ? " " : "\n");
 	char dep[256];
@@ -324,7 +325,7 @@ static void info_print_replaces(struct apk_package *pkg)
 		printf("%s: ", pkg->name->name);
 	for (i = 0; i < pkg->ipkg->replaces->num; i++) {
 		apk_blob_t b = APK_BLOB_BUF(dep);
-		apk_blob_push_dep(&b, &pkg->ipkg->replaces->item[i]);
+		apk_blob_push_dep(&b, db, &pkg->ipkg->replaces->item[i]);
 		apk_blob_push_blob(&b, separator);
 		b = apk_blob_pushed(APK_BLOB_BUF(dep), b);
 		fwrite(b.ptr, b.len, 1, stdout);
@@ -333,7 +334,7 @@ static void info_print_replaces(struct apk_package *pkg)
 
 static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 {
-	typedef void (*subaction_t)(struct apk_package *);
+	typedef void (*subaction_t)(struct apk_database *, struct apk_package *);
 	static subaction_t subactions[] = {
 		info_print_description,
 		info_print_url,
@@ -358,7 +359,7 @@ static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 		if (pkg->ipkg == NULL && (BIT(i) & requireipkg))
 			continue;
 
-		subactions[i](pkg);
+		subactions[i](ctx->db, pkg);
 		puts("");
 	}
 }
@@ -437,6 +438,7 @@ static int info_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
 
+	ictx->db = db;
 	if (ictx->action != NULL)
 		return ictx->action(ictx, db, argc, argv);
 

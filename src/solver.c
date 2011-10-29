@@ -47,6 +47,7 @@ struct apk_name_state {
 	struct list_head unsolved_list;
 	struct apk_name *name;
 	struct apk_package *chosen;
+	unsigned int allowed_repos, preferred_repos;
 	unsigned short requirers;
 	unsigned short install_ifs;
 
@@ -280,9 +281,18 @@ static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependenc
 }
 
 static int compare_package_preference(unsigned short solver_flags,
+				      unsigned int preferred_repos,
 				      struct apk_package *pkgA,
 				      struct apk_package *pkgB)
 {
+	/* preferred repository pinning */
+	if ((pkgA->ipkg || (pkgA->repos & preferred_repos)) &&
+	    !(pkgB->ipkg || (pkgB->repos & preferred_repos)))
+		return 1;
+	if ((pkgB->ipkg || (pkgB->repos & preferred_repos)) &&
+	    !(pkgA->ipkg || (pkgA->repos & preferred_repos)))
+		return -1;
+
 	if (solver_flags & APK_SOLVERF_AVAILABLE) {
 		if (pkgA->repos != 0 && pkgB->repos == 0)
 			return 1;
@@ -320,6 +330,7 @@ static int get_preference(struct apk_solver_state *ss,
 	unsigned short name_flags = ns->solver_flags_local
 		| ns->solver_flags_inherited
 		| ss->solver_flags;
+	unsigned int preferred_repos = ns->preferred_repos | ss->db->repo_tags[0].allowed_repos;
 	unsigned short preference = 0;
 	int i;
 
@@ -330,7 +341,9 @@ static int get_preference(struct apk_solver_state *ss,
 		if (pkg0 == pkg || ps0 == NULL)
 			continue;
 
-		if (compare_package_preference(name_flags, pkg, pkg0) < 0) {
+		if (compare_package_preference(name_flags,
+					       preferred_repos,
+					       pkg, pkg0) < 0) {
 			if (installable_only) {
 				if (ss->topology_position > pkg0->topology_hard &&
 				    !(ps0->flags & APK_PKGSTF_DECIDED))
@@ -364,6 +377,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_name_state *ns = name_to_ns(name);
 	struct apk_package *best_pkg = NULL;
 	unsigned int best_topology = 0;
+	unsigned int allowed_repos = ns->allowed_repos | ss->db->repo_tags[0].allowed_repos;
 	int i, options = 0, skipped_options = 0;
 
 	for (i = 0; i < name->pkgs->num; i++) {
@@ -372,6 +386,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 
 		if (ps0 == NULL ||
 		    pkg0->topology_hard >= ss->topology_position ||
+		    ((pkg0->repos != 0) && (pkg0->ipkg == NULL) && !(pkg0->repos & allowed_repos)) ||
 		    (ps0->flags & APK_PKGSTF_DECIDED))
 			continue;
 
@@ -571,6 +586,7 @@ static void inherit_name_state(struct apk_name *to, struct apk_name *from)
 	tns->solver_flags_inherited |=
 		fns->solver_flags_inherited |
 		(fns->solver_flags_local & fns->solver_flags_local_mask);
+	tns->allowed_repos |= fns->allowed_repos;
 }
 
 static void inherit_name_state_wrapper(struct apk_package *rdepend, void *ctx)
@@ -587,6 +603,8 @@ static int has_inherited_state(struct apk_name *name)
 		return 0;
 	if (ns->solver_flags_inherited || (ns->solver_flags_local & ns->solver_flags_local_mask))
 		return 1;
+	if (ns->allowed_repos)
+		return 1;
 	return 0;
 }
 
@@ -595,6 +613,7 @@ static void recalculate_inherted_name_state(struct apk_name *name)
 	struct apk_name_state *ns = name_to_ns(name);
 
 	ns->solver_flags_inherited = 0;
+	ns->allowed_repos = 0;
 	foreach_locked_reverse_dependency(name, inherit_name_state_wrapper, name);
 }
 
@@ -612,6 +631,16 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		if (!apk_dep_is_satisfied(dep, ns->chosen))
 			ss->score.unsatisfiable++;
 		return;
+	}
+
+	if (dep->repository_tag) {
+		unsigned int allowed_repos;
+
+		dbg_printf("%s: enabling repository tag %d\n",
+			   dep->name->name, dep->repository_tag);
+		allowed_repos = ss->db->repo_tags[dep->repository_tag].allowed_repos;
+		ns->allowed_repos |= allowed_repos;
+		ns->preferred_repos |= allowed_repos;
 	}
 
 	for (i = 0; i < name->pkgs->num; i++) {
@@ -1256,7 +1285,7 @@ all_done:
 	return r;
 }
 
-static void print_dep_errors(char *label, struct apk_dependency_array *deps)
+static void print_dep_errors(struct apk_database *db, char *label, struct apk_dependency_array *deps)
 {
 	int i, print_label = 1;
 	char buf[256];
@@ -1276,7 +1305,7 @@ static void print_dep_errors(char *label, struct apk_dependency_array *deps)
 			indent.indent = indent.x + 1;
 		}
 		p = APK_BLOB_BUF(buf);
-		apk_blob_push_dep(&p, dep);
+		apk_blob_push_dep(&p, db, dep);
 		p = apk_blob_pushed(APK_BLOB_BUF(buf), p);
 		apk_print_indented(&indent, p);
 	}
@@ -1298,12 +1327,12 @@ void apk_solver_print_errors(struct apk_database *db,
 		pkg->name->state_ptr = pkg;
 	}
 
-	print_dep_errors("world", world);
+	print_dep_errors(db, "world", world);
 	for (i = 0; i < solution->num; i++) {
 		struct apk_package *pkg = solution->item[i];
 		char pkgtext[256];
 		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(solution->item[i]));
-		print_dep_errors(pkgtext, pkg->depends);
+		print_dep_errors(db, pkgtext, pkg->depends);
 	}
 }
 
