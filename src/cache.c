@@ -26,7 +26,7 @@
 
 static int cache_download(struct apk_database *db)
 {
-	struct apk_changeset changeset;
+	struct apk_changeset changeset = {};
 	struct apk_change *change;
 	struct apk_package *pkg;
 	struct apk_repository *repo;
