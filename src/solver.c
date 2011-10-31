@@ -286,11 +286,11 @@ static int compare_package_preference(unsigned short solver_flags,
 				      struct apk_package *pkgB)
 {
 	/* preferred repository pinning */
-	if ((pkgA->ipkg || (pkgA->repos & preferred_repos)) &&
-	    !(pkgB->ipkg || (pkgB->repos & preferred_repos)))
+	if ((pkgA->ipkg || pkgA->filename || (pkgA->repos & preferred_repos)) &&
+	    !(pkgB->ipkg || pkgB->filename || (pkgB->repos & preferred_repos)))
 		return 1;
-	if ((pkgB->ipkg || (pkgB->repos & preferred_repos)) &&
-	    !(pkgA->ipkg || (pkgA->repos & preferred_repos)))
+	if ((pkgB->ipkg || pkgA->filename || (pkgB->repos & preferred_repos)) &&
+	    !(pkgA->ipkg || pkgB->filename || (pkgA->repos & preferred_repos)))
 		return -1;
 
 	if (solver_flags & APK_SOLVERF_AVAILABLE) {
@@ -386,9 +386,14 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 
 		if (ps0 == NULL ||
 		    pkg0->topology_hard >= ss->topology_position ||
-		    ((pkg0->repos != 0) && (pkg0->ipkg == NULL) && !(pkg0->repos & allowed_repos)) ||
 		    (ps0->flags & APK_PKGSTF_DECIDED))
 			continue;
+
+		if ((pkg0->repos != 0) && (pkg0->ipkg == NULL) && (pkg0->filename == NULL) &&
+		    !(pkg0->repos & allowed_repos)) {
+			skipped_options++;
+			continue;
+		}
 
 		if (ns->requirers == 0 && ns->install_ifs != 0 &&
 		    install_if_missing(ss, pkg0)) {
@@ -429,7 +434,8 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 			   best_topology);
 		if (!list_hashed(&ns->unsolved_list))
 			list_add(&ns->unsolved_list, &ss->unsolved_list_head);
-		ns->chosen = best_pkg;
+		if (!ns->locked)
+			ns->chosen = best_pkg;
 	}
 
 	return options + skipped_options;
@@ -554,17 +560,20 @@ static int next_branch(struct apk_solver_state *ss)
 	while (ss->latest_decision != NULL) {
 		pkg = ss->latest_decision;
 		ps = pkg_to_ps(pkg);
-		undo_decision(ss, pkg, ps);
 
 		if (ps->flags & APK_PKGSTF_ALT_BRANCH) {
 			dbg_printf("next_branch: undo decision at topology_position %d\n",
 				   ss->topology_position);
 			ps->flags &= ~(APK_PKGSTF_ALT_BRANCH | APK_PKGSTF_DECIDED);
+			undo_decision(ss, pkg, ps);
+
 			ss->latest_decision = ps->backtrack;
 			ss->refresh_name_states = 1;
 		} else {
 			dbg_printf("next_branch: swapping BRANCH at topology_position %d\n",
 				   ss->topology_position);
+
+			undo_decision(ss, pkg, ps);
 
 			ps->flags |= APK_PKGSTF_ALT_BRANCH;
 			ps->flags ^= APK_PKGSTF_INSTALL;
@@ -626,8 +635,12 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	prepare_name(ss, name, ns);
 
 	if (ns->locked) {
-		dbg_printf(PKG_VER_FMT " selected already for %s\n",
-			   PKG_VER_PRINTF(ns->chosen), dep->name->name);
+		if (ns->chosen)
+			dbg_printf("%s: locked to " PKG_VER_FMT " already\n",
+				   dep->name->name, PKG_VER_PRINTF(ns->chosen));
+		else
+			dbg_printf("%s: locked to empty\n",
+				   dep->name->name);
 		if (!apk_dep_is_satisfied(dep, ns->chosen))
 			ss->score.unsatisfiable++;
 		return;
