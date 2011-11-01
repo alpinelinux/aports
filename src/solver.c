@@ -947,6 +947,7 @@ int apk_solver_solve(struct apk_database *db,
 {
 	struct apk_solver_state *ss;
 	struct apk_installed_package *ipkg;
+	struct apk_score zero_score;
 	int i, r;
 
 	ss = calloc(1, sizeof(struct apk_solver_state));
@@ -962,6 +963,8 @@ int apk_solver_solve(struct apk_database *db,
 		sort_name(ss, ipkg->pkg->name);
 
 	foreach_dependency(ss, world, apply_constraint);
+	zero_score = ss->score;
+
 	do {
 		if (cmpscore(&ss->score, &ss->best_score) < 0) {
 			r = expand_branch(ss);
@@ -973,8 +976,7 @@ int apk_solver_solve(struct apk_database *db,
 				if (cmpscore(&ss->score, &ss->best_score) < 0)
 					record_solution(ss);
 
-				if (ss->score.unsatisfiable == 0 &&
-				    ss->score.preference == 0) {
+				if (cmpscore(&zero_score, &ss->score) <= 0) {
 					/* found solution - it is optimal because we permutate
 					 * each preferred local option first, and permutations
 					 * happen in topologally sorted order. */
