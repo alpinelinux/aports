@@ -976,7 +976,7 @@ int apk_solver_solve(struct apk_database *db,
 				if (cmpscore(&ss->score, &ss->best_score) < 0)
 					record_solution(ss);
 
-				if (cmpscore(&zero_score, &ss->score) <= 0) {
+				if (cmpscore(&zero_score, &ss->score) >= 0) {
 					/* found solution - it is optimal because we permutate
 					 * each preferred local option first, and permutations
 					 * happen in topologally sorted order. */
