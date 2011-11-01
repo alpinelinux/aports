@@ -991,22 +991,18 @@ int apk_solver_solve(struct apk_database *db,
 	} while (r == 0);
 
 	/* collect packages */
-	if (ss->best_score.unsatisfiable == 0) {
-		if (changeset != NULL)
-			generate_changeset(db, ss->best_solution, changeset,
-					   ss->solver_flags);
-		r = 0;
-	} else {
+	if (changeset != NULL) {
+		generate_changeset(db, ss->best_solution, changeset,
+				   ss->solver_flags);
+	}
+	if (solution != NULL) {
 		qsort(ss->best_solution->item, ss->best_solution->num,
 		      sizeof(struct apk_package *), compare_package_name);
-		r = ss->best_score.unsatisfiable;
-	}
-
-	if (solution != NULL)
 		*solution = ss->best_solution;
-	else
+	} else {
 		apk_package_array_free(&ss->best_solution);
-
+	}
+	r = ss->best_score.unsatisfiable;
 	apk_solver_free(db);
 	free(ss);
 
