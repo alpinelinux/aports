@@ -1,0 +1,239 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use autodie qw(:all);
+use feature qw(:5.14);
+use LWP::UserAgent;
+use LWP::ConnCache;
+use JSON;
+
+our $packager = '';
+my %pkgmap = ();
+my %licenses = ();
+
+my $template = <<'EOF';
+# Contributor: [% contributor %]
+# Maintainer: [% maintainer %]
+pkgname=[% pkgname %]
+_pkg_real=[% pkgreal %]
+pkgver=[% pkgver %]
+pkgrel=0
+pkgdesc=[% pkgdesc %]
+url="http://packages.python.org/pypi/[% pkgreal %]"
+arch="noarch"
+license="PSF"
+pydepends=""
+pymakedepends=""
+depends="python $pydepends"
+makedepends="python-dev $pymakedepends"
+subpackages="$pkgname-doc"
+source="[% source %]"
+
+_builddir="$srcdir/$_pkgreal-$pkgver"
+build() {
+	cd "$_builddir"
+	python setup.py build || return 1
+}
+
+package() {
+	cd "$_builddir"
+	python setup.py install \
+		--prefix=/usr \
+		--root="$pkgdir" \
+		--single-version-externally-managed \
+		|| return 1
+}
+EOF
+
+my $ua = LWP::UserAgent->new();
+my $json = JSON->new;
+$ua->env_proxy;
+$ua->conn_cache(LWP::ConnCache->new);
+
+sub read_file {
+    my ($filename) = @_;
+    open my $fh, '<:utf8', $filename;
+    local $/;
+    my $text = <$fh>;
+    return $text;
+}
+
+sub read_assignments_from_file {
+    my ($filename) = @_;
+    my $text = read_file($filename);
+    my %sline = $text =~ /^(\w+)\s*=\s*([^\"\n]*)$/mg;
+    my %mline = $text =~ /^(\w+)\s*=\s*\"([^\"]*)\"$/mg;
+
+    my %temp = (%sline, %mline);
+
+    return \%temp;
+}
+
+sub map_pypi_to_apk {
+    my ($pypi) = @_;
+    return $pkgmap{$pypi} unless !exists($pkgmap{$pypi});
+    return 'py-'.lc($pypi);
+}
+
+sub map_license {
+    my ($license) = @_;
+
+    $license =~ s/ or / /g;
+
+    return $license;
+}
+
+sub get_source {
+    my ($distdata) = @_;
+
+    for my $url (@{$distdata->{urls}}) {
+        return $url->{url} if $url->{python_version} eq 'source'
+    }
+    die "Unable to locate sources for $distdata->{name}.\n";
+}
+
+sub read_apkbuild {
+    return read_assignments_from_file('APKBUILD');
+}
+
+sub write_apkbuild {
+    my ($distdata) = @_;
+
+    my %repl = (
+        packager => $packager,
+        pkgname  => map_pypi_to_apk($distdata->{info}{name}),
+        pkgreal  => $distdata->{info}{name},
+        pkgver   => $distdata->{info}{version},
+        source   => get_source($distdata),
+        license  => map_license($distdata->{info}{license}),
+    );
+    $template =~ s/\[% (.*?) %\]/$repl{$1}/g;
+
+    open my $fh, '>:utf8', 'APKBUILD';
+    print {$fh} $template;
+    close $fh;
+
+    say "Wrote $repl{pkgname}/APKBUILD";
+
+    return \%repl;
+}
+
+sub prepare_tree {
+    system('abuild checksum unpack prepare');
+}
+
+sub get_data {
+    my ($package) = @_;
+    my $response = $ua->get("http://pypi.python.org/pypi/$package/json");
+    $response->is_success or die $response->status_line;
+    my $distdata = $json->decode($response->decoded_content);
+
+    return $distdata;
+}
+
+sub get_deps {
+    my ($data) = @_;
+
+    chdir "src/$data->{pkgreal}-$data->{pkgver}";
+    my $reqs = `python ./setup.py --requires`;
+
+    my @reqs = split /\n/, $reqs;
+
+    foreach my $i (0 .. $#reqs) {
+        $reqs[$i] =~ s/(\(|\s+).*$//;
+        $reqs[$i] = map_pypi_to_apk($reqs[$i]);
+    }
+
+    chdir '../..';
+
+    my $apk = read_file('APKBUILD');
+
+    $reqs = join ' ', @reqs;
+
+    $apk =~ s/pymakedepends=""/pymakedepends="$reqs"/;
+
+    open my $fh, '>:utf8', 'APKBUILD';
+
+    print $fh $apk;
+
+    say "Requires: $reqs";
+}
+
+my $abuild_conf = read_assignments_from_file('/etc/abuild.conf');
+$packager = $abuild_conf->{PACKAGER} if $abuild_conf->{PACKAGER};
+
+sub usage {
+    say <<'EOF';
+Usage: apkbuild-pypi [create <package> | check | recreate | upgrade | update]
+
+In the repository root:
+    create <package>: Creates an APKBUILD for <package>
+
+In the package root:
+    check           : Reports current & latest version of the package
+    recreate        : Recreates the APKBUILD
+    upgrade         : Upgrades to the latest version of the package
+    update          : Updates APKBUILD metadata
+EOF
+}
+
+given ($ARGV[0]) {
+    when ('create') {
+        my $package = $ARGV[1];
+        $package or die usage;
+
+        my $distdata = get_data($package);
+        my $apkname = map_pypi_to_apk($package);
+
+        mkdir $apkname;
+        chdir $apkname;
+
+        my $data = write_apkbuild($distdata);
+        prepare_tree;
+
+        get_deps($data);
+    } when ('recreate') {
+        my $apkbuild = read_apkbuild;
+        my $distdata = get_data($apkbuild->{_pkgreal});
+
+        prepare_tree;
+        get_deps;
+    } when ('upgrade') {
+        my $apkbuild = read_apkbuild;
+        my $distdata = get_data($apkbuild->{_pkgreal});
+
+        my $pkgver = $distdata->{info}{version};
+
+        if ($pkgver ne $apkbuild->{pkgver}) {
+            say "Upgrading PyPI package from $apkbuild->{pkgver} to $pkgver";
+
+            my $text = read_file('APKBUILD');
+
+            $text =~ s/^(pkgver)=.*$/$1=$pkgver/mg or
+                die "Can't find pkgver line in APKBUILD";
+            $text =~ s/^(pkgrel)=.*$/$1=0/mg or
+                die "Can't find pkgrel line in APKBUILD";
+
+            open my $fh, '>:utf8', 'APKBUILD';
+            print $fh $text;
+            close $fh;
+        } else {
+            say "Already up to date with PyPI";
+        }
+    } when ('check') {
+        my $apkbuild = read_apkbuild;
+        my $distdata = get_data($apkbuild->{_pkgreal});
+
+        my $pkgver = $distdata->{info}{version};
+
+        say "$apkbuild->{pkgname}: Latest version: $pkgver Packaged version: $apkbuild->{pkgver}";
+        if ($pkgver ne $apkbuild->{pkgver}) {
+            exit(1);
+        }
+    } when ('update') {
+        prepare_tree;
+    } default {
+        die usage;
+    }
+}
