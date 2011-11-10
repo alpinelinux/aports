@@ -1,0 +1,190 @@
+From 80db5b343bd44806881d400a8627cb526ffccee7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Thu, 10 Nov 2011 09:36:44 +0200
+Subject: [PATCH] libc/x86: fix stack unwinding and backtrace information
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When compiled without framepointer, the DWARF-2 CFI data is required
+for proper stack unwinding.
+
+This patch adds the CFI information to:
+ * syscalls (so we get proper backtrace even for release builds)
+ * new thread stub function (so the backtrace is clean for user
+   created threads)
+
+Also pads the signal return trampolines separate from other functions.
+If CFI info was found for signal return code (which seems to happen if
+it's located right next a valid function), it will not be recognized
+as signal trampoline (gcc unwinder and gdb check first CFI info, and
+only if it does not exists it compares the exact opcode sequence to
+see if we are at signal return code block). This fixes a real crash
+if thread is cancelled and the cancellation handler fails to detect the
+signal return frame.
+
+Signed-off-by: Timo Teräs <timo.teras@iki.fi>
+---
+ libc/sysdeps/linux/i386/bits/syscalls.h |   13 +++++++++----
+ libc/sysdeps/linux/i386/clone.S         |   17 +++++++++++++++++
+ libc/sysdeps/linux/i386/sigaction.c     |    4 ++++
+ 3 files changed, 30 insertions(+), 4 deletions(-)
+
+diff --git a/libc/sysdeps/linux/i386/bits/syscalls.h b/libc/sysdeps/linux/i386/bits/syscalls.h
+index eeafb3a..47d0b4c 100644
+--- a/libc/sysdeps/linux/i386/bits/syscalls.h
++++ b/libc/sysdeps/linux/i386/bits/syscalls.h
+@@ -13,6 +13,7 @@
+ #ifndef __ASSEMBLER__
+ 
+ #include <errno.h>
++#include <common/sysdep.h>
+ 
+ #define INTERNAL_SYSCALL_NCS(name, err, nr, args...) \
+ ({ \
+@@ -71,6 +72,8 @@ __asm__ (
+ 	".if 1 - \\name\n\t"    /* if reg!=ebx... */
+ 	".if 2 - \\name\n\t"    /* if reg can't be clobbered... */
+ 	"pushl %ebx\n\t"        /* save ebx on stack */
++	CFI_ADJUST_CFA_OFFSET(4) "\n\t"
++	CFI_REL_OFFSET(ebx, 0) "\n\t"
+ 	".else\n\t"
+ 	"xchgl \\reg, %ebx\n\t" /* else save ebx in reg, and load reg to ebx */
+ 	".endif\n\t"
+@@ -89,6 +92,8 @@ __asm__ (
+ 	".if 1 - \\name\n\t"
+ 	".if 2 - \\name\n\t"    /* if reg can't be clobbered... */
+ 	"popl %ebx\n\t"         /* restore ebx from stack */
++	CFI_ADJUST_CFA_OFFSET(-4) "\n\t"
++	CFI_RESTORE(ebx) "\n\t"
+ 	".else\n\t"
+ 	"xchgl \\reg, %ebx\n\t" /* else restore ebx from reg */
+ 	".endif\n\t"
+@@ -106,7 +111,7 @@ __asm__ (
+ #define LOADARGS_3  LOADARGS_1
+ #define LOADARGS_4  LOADARGS_1
+ #define LOADARGS_5  LOADARGS_1
+-#define LOADARGS_6  LOADARGS_1 "push %%ebp\n\t" "movl %7, %%ebp\n\t"
++#define LOADARGS_6  LOADARGS_1 "push %%ebp\n\t" CFI_ADJUST_CFA_OFFSET(4) "\n\t" CFI_REL_OFFSET(ebp, 0) "\n\t" "movl %7, %%ebp\n\t"
+ 
+ #define RESTOREARGS_0
+ #define RESTOREARGS_1  "bpopl .L__X'%k2, %k2\n\t"
+@@ -114,7 +119,7 @@ __asm__ (
+ #define RESTOREARGS_3  RESTOREARGS_1
+ #define RESTOREARGS_4  RESTOREARGS_1
+ #define RESTOREARGS_5  RESTOREARGS_1
+-#define RESTOREARGS_6  "pop %%ebp\n\t" RESTOREARGS_1
++#define RESTOREARGS_6  "pop %%ebp\n\t" CFI_ADJUST_CFA_OFFSET(-4) "\n\t" CFI_RESTORE(ebp) "\n\t" RESTOREARGS_1
+ 
+ #define ASMFMT_0()
+ /* "acdSD" constraint would work too, but "SD" would use esi/edi and cause
+@@ -162,7 +167,7 @@ __asm__ (
+ #define LOADARGS_3
+ #define LOADARGS_4
+ #define LOADARGS_5
+-#define LOADARGS_6  "push %%ebp\n\t" "movl %7, %%ebp\n\t"
++#define LOADARGS_6  "push %%ebp\n\t" CFI_ADJUST_CFA_OFFSET(4) "\n\t" CFI_REL_OFFSET(ebp, 0) "\n\t" "movl %7, %%ebp\n\t"
+ 
+ #define RESTOREARGS_0
+ #define RESTOREARGS_1
+@@ -170,7 +175,7 @@ __asm__ (
+ #define RESTOREARGS_3
+ #define RESTOREARGS_4
+ #define RESTOREARGS_5
+-#define RESTOREARGS_6  "pop %%ebp\n\t"
++#define RESTOREARGS_6  "pop %%ebp\n\t" CFI_ADJUST_CFA_OFFSET(-4) "\n\t" CFI_RESTORE(ebp) "\n\t"
+ 
+ #define ASMFMT_0()
+ #define ASMFMT_1(arg1) \
+diff --git a/libc/sysdeps/linux/i386/clone.S b/libc/sysdeps/linux/i386/clone.S
+index a7de3fe..cf6cd35 100644
+--- a/libc/sysdeps/linux/i386/clone.S
++++ b/libc/sysdeps/linux/i386/clone.S
+@@ -25,6 +25,7 @@
+ 
+ #define _ERRNO_H	1
+ #include <bits/errno.h>
++#include <sysdep.h>
+ #include <sys/syscall.h>
+ 
+ /* int clone(int (*fn)(void *arg), void *child_stack, int flags, void *arg,
+@@ -45,6 +46,7 @@
+ .global clone
+ .type   clone,%function
+ clone:
++	cfi_startproc;
+ 	/* Sanity check arguments.  */
+ 	movl	$-EINVAL,%eax
+ 
+@@ -86,17 +88,28 @@ clone:
+ 
+ 	/* Do the system call */
+ 	pushl	%ebx
++	cfi_adjust_cfa_offset (4)
+ 	pushl	%esi
++	cfi_adjust_cfa_offset (4)
+ 	pushl	%edi
++	cfi_adjust_cfa_offset (4)
++
+ 	movl	TLS+12(%esp),%esi
++	cfi_rel_offset (esi, 4)
+ 	movl	PTID+12(%esp),%edx
+ 	movl	FLAGS+12(%esp),%ebx
++	cfi_rel_offset (ebx, 8)
+ 	movl	CTID+12(%esp),%edi
++	cfi_rel_offset (edi, 0)
+ 	movl	$__NR_clone,%eax
+ #ifdef RESET_PID
+ 	/* Remember the flag value.  */
+ 	movl	%ebx, (%ecx)
+ #endif
++	/* End FDE now, because in the child the unwind info will be
++	   wrong.  */
++	cfi_endproc
++
+ 	int	$0x80
+ 	popl	%edi
+ 	popl	%esi
+@@ -108,6 +121,9 @@ clone:
+ 	ret
+ 
+ .Lthread_start:
++	cfi_startproc;
++	/* Clearing frame pointer is insufficient, use CFI.  */
++	cfi_undefined (eip);
+ 	/* Note: %esi is zero.  */
+ 	movl	%esi,%ebp	/* terminate the stack frame */
+ 	call	*%ebx
+@@ -120,6 +136,7 @@ clone:
+ 	movl	%eax, %ebx
+ 	movl	$__NR_exit, %eax
+ 	int	$0x80
++	cfi_endproc;
+ 
+ /* Need to indirect jump to syscall error 
+  * or we end up with TEXTREL's
+diff --git a/libc/sysdeps/linux/i386/sigaction.c b/libc/sysdeps/linux/i386/sigaction.c
+index de0c75d..f9af3f7 100644
+--- a/libc/sysdeps/linux/i386/sigaction.c
++++ b/libc/sysdeps/linux/i386/sigaction.c
+@@ -112,6 +112,9 @@ libc_hidden_weak(sigaction)
+ #define RESTORE2(name, syscall) \
+ __asm__	(						\
+ 	".text\n"					\
++	".align 8\n"					\
++	"	nop\n"					\
++	".align 16\n"					\
+ 	"__" #name ":\n"				\
+ 	"	movl	$" #syscall ", %eax\n"		\
+ 	"	int	$0x80\n"			\
+@@ -128,6 +131,7 @@ RESTORE(restore_rt, __NR_rt_sigreturn)
+ # define RESTORE2(name, syscall) \
+ __asm__ (						\
+ 	".text\n"					\
++	".align 8\n"					\
+ 	"__" #name ":\n"				\
+ 	"	popl	%eax\n"				\
+ 	"	movl	$" #syscall ", %eax\n"		\
+-- 
+1.7.7
+
