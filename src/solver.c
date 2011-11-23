@@ -9,7 +9,6 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
-#include <stdlib.h>
 #include "apk_defines.h"
 #include "apk_database.h"
 #include "apk_package.h"
@@ -47,6 +46,7 @@ struct apk_name_state {
 	struct list_head unsolved_list;
 	struct apk_name *name;
 	struct apk_package *chosen;
+	unsigned int topology_last_touched;
 	unsigned int allowed_repos, preferred_repos;
 	unsigned short requirers;
 	unsigned short install_ifs;
@@ -67,8 +67,10 @@ struct apk_solver_state {
 	struct list_head unsolved_list_head;
 	struct apk_package *latest_decision;
 	unsigned int topology_position;
+	unsigned int penalty_topology;
 	unsigned int assigned_names;
 	struct apk_score score;
+	struct apk_score penalty_score;
 
 	unsigned int solver_flags : 4;
 	unsigned int refresh_name_states : 1;
@@ -449,6 +451,7 @@ static void trigger_install_if(struct apk_solver_state *ss,
 
 		dbg_printf("trigger_install_if: " PKG_VER_FMT " triggered\n",
 			   PKG_VER_PRINTF(pkg));
+		ns->topology_last_touched = ss->topology_position;
 		ns->install_ifs++;
 		update_name_state(ss, pkg->name);
 	}
@@ -462,6 +465,7 @@ static void untrigger_install_if(struct apk_solver_state *ss,
 
 		dbg_printf("untrigger_install_if: " PKG_VER_FMT " no longer triggered\n",
 			   PKG_VER_PRINTF(pkg));
+		ns->topology_last_touched = ss->topology_position;
 		ns->install_ifs--;
 		update_name_state(ss, pkg->name);
 	}
@@ -677,6 +681,8 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 
 	if (!dep->optional)
 		ns->requirers++;
+	ns->topology_last_touched = ss->topology_position;
+
 	update_name_state(ss, name);
 }
 
@@ -717,6 +723,8 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 
 	if (!dep->optional)
 		ns->requirers--;
+	ns->topology_last_touched = ss->topology_position;
+
 	update_name_state(ss, name);
 }
 
@@ -746,6 +754,24 @@ static int expand_branch(struct apk_solver_state *ss)
 	}
 	ss->refresh_name_states = 0;
 	if (pkg0 == NULL) {
+		struct apk_score penalty_score = {0,0};
+		int penalty_topology = 0;
+
+		list_for_each_entry(ns, &ss->unsolved_list_head, unsolved_list) {
+			if (!ns->locked) {
+				penalty_score.unsatisfiable += ns->requirers;
+				penalty_score.preference += ns->name->pkgs->num;
+				if (penalty_topology < ns->topology_last_touched)
+					penalty_topology = ns->topology_last_touched;
+			}
+		}
+		if (ss->penalty_topology < penalty_topology) {
+			ss->penalty_topology = penalty_topology;
+			ss->penalty_score = penalty_score;
+		}
+		ss->score.unsatisfiable += penalty_score.unsatisfiable;
+		ss->score.preference    += penalty_score.preference;
+
 		dbg_printf("expand_branch: list is empty (%d unsatisfied)\n",
 			   ss->score.unsatisfiable);
 		return 1;
@@ -939,6 +965,19 @@ static int cmpscore(struct apk_score *a, struct apk_score *b)
 	return 0;
 }
 
+static int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct apk_score *b)
+{
+	if (a1->unsatisfiable+a2->unsatisfiable < b->unsatisfiable)
+		return -1;
+	if (a1->unsatisfiable+a2->unsatisfiable > b->unsatisfiable)
+		return 1;
+	if (a1->preference+a2->preference < b->preference)
+		return -1;
+	if (a1->preference+a2->preference > b->preference)
+		return 1;
+	return 0;
+}
+
 int apk_solver_solve(struct apk_database *db,
 		     unsigned short solver_flags,
 		     struct apk_dependency_array *world,
@@ -966,7 +1005,12 @@ int apk_solver_solve(struct apk_database *db,
 	zero_score = ss->score;
 
 	do {
-		if (cmpscore(&ss->score, &ss->best_score) < 0) {
+		if (ss->topology_position <= ss->penalty_topology) {
+			ss->penalty_score = zero_score;
+			ss->penalty_topology = 0;
+		}
+
+		if (cmpscore2(&ss->score, &ss->penalty_score, &ss->best_score) < 0) {
 			r = expand_branch(ss);
 			if (r) {
 				dbg_printf("solution with: %d unsatisfiable, %d preference\n",
