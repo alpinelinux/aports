@@ -10,9 +10,8 @@ abuildrepo	?= ~/.cache/abuild
 LUA_VERSION	= 5.1
 LUA_SHAREDIR	?= $(prefix)/share/lua/$(LUA_VERSION)/
 
-SCRIPTS		:= abuild devbuild buildrepo abuild-keygen \
-		abuild-sign newapkbuild abump apkgrel ap buildlab \
-		apkbuild-cpan
+SCRIPTS		:= abuild buildrepo abuild-keygen abuild-sign newapkbuild \
+		   abump apkgrel ap buildlab apkbuild-cpan
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
