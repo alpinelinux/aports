@@ -391,9 +391,11 @@ static int info_parse(void *ctx, struct apk_db_options *dbopts,
 	switch (optch) {
 	case 'e':
 		ictx->action = info_exists;
+		dbopts->open_flags |= APK_OPENF_NO_REPOS;
 		break;
 	case 'W':
 		ictx->action = info_who_owns;
+		dbopts->open_flags |= APK_OPENF_NO_REPOS;
 		break;
 	case 'w':
 		ictx->subaction_mask |= APK_INFO_URL;
