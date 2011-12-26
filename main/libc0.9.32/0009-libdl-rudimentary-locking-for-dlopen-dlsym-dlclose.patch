@@ -1,0 +1,154 @@
+From e3f3de389e28f2585d1a1e57989440ffea67e689 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Thu, 24 Mar 2011 13:27:36 +0200
+Subject: [PATCH] libdl: rudimentary locking for dlopen/dlsym/dlclose
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This implements big-dlfcn lock to allow multithreaded usage of
+dlopen/dlsym/dlclose. We should really clean up the dl code so
+we can use more fine grained locking or even RCU where appropriate.
+But at least we won't crash now.
+
+Signed-off-by: Timo Teräs <timo.teras@iki.fi>
+Signed-off-by: Bernhard Reutner-Fischer <rep.dot.nop@gmail.com>
+(cherry picked from commit f69319d5a7d3a3ccb46b28ee2b0fd9053c6415ac)
+---
+ TODO               |    1 +
+ ldso/libdl/libdl.c |   54 +++++++++++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 50 insertions(+), 5 deletions(-)
+
+diff --git a/TODO b/TODO
+index ae305a5..95cabd5 100644
+--- a/TODO
++++ b/TODO
+@@ -101,6 +101,7 @@ TODO list for AFTER the uClibc 1.0.0 release:
+     *) run 'nm -D --size-sort -t d libuClibc-0.9.26.so' and work on the
+ 	biggest things (i.e. stuff at the end of the list) to make
+ 	them smaller.
++    *) Fix dlopen/dlsym/dlclose locking to more fine grained or use RCU
+     <more wishlist items here>
+ 
+ 
+diff --git a/ldso/libdl/libdl.c b/ldso/libdl/libdl.c
+index 49e90d0..8b243c6 100644
+--- a/ldso/libdl/libdl.c
++++ b/ldso/libdl/libdl.c
+@@ -34,6 +34,7 @@
+ #include <stdio.h>
+ #include <string.h> /* Needed for 'strstr' prototype' */
+ #include <stdbool.h>
++#include <bits/uClibc_mutex.h>
+ 
+ #ifdef __UCLIBC_HAS_TLS__
+ #include <tls.h>
+@@ -44,6 +45,10 @@
+ extern void _dl_add_to_slotinfo(struct link_map  *l);
+ #endif
+ 
++/* TODO: get rid of global lock and use more finegrained locking, or
++ * perhaps RCU for the global structures */
++__UCLIBC_MUTEX_STATIC(_dl_mutex, PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP);
++
+ #ifdef SHARED
+ # if defined(USE_TLS) && USE_TLS
+ # include <dl-tls.h>
+@@ -271,7 +276,7 @@ void dl_cleanup(void)
+ 	}
+ }
+ 
+-void *dlopen(const char *libname, int flag)
++static void *do_dlopen(const char *libname, int flag)
+ {
+ 	struct elf_resolve *tpnt, *tfrom;
+ 	struct dyn_elf *dyn_chain, *rpnt = NULL, *dyn_ptr, *relro_ptr, *handle;
+@@ -606,7 +611,18 @@ oops:
+ 	return NULL;
+ }
+ 
+-void *dlsym(void *vhandle, const char *name)
++void *dlopen(const char *libname, int flag)
++{
++	void *ret;
++
++	__UCLIBC_MUTEX_CONDITIONAL_LOCK(_dl_mutex, 1);
++	ret = do_dlopen(libname, flag);
++	__UCLIBC_MUTEX_CONDITIONAL_UNLOCK(_dl_mutex, 1);
++
++	return ret;
++}
++
++static void *do_dlsym(void *vhandle, const char *name, void *caller_address)
+ {
+ 	struct elf_resolve *tpnt, *tfrom;
+ 	struct dyn_elf *handle;
+@@ -654,7 +670,7 @@ void *dlsym(void *vhandle, const char *name)
+ 		 * dynamic loader itself, as it doesn't know
+ 		 * how to properly treat it.
+ 		 */
+-		from = (ElfW(Addr)) __builtin_return_address(0);
++		from = (ElfW(Addr)) caller_address;
+ 
+ 		tfrom = NULL;
+ 		for (rpnt = _dl_symbol_tables; rpnt; rpnt = rpnt->next) {
+@@ -691,6 +707,17 @@ out:
+ 	return ret;
+ }
+ 
++void *dlsym(void *vhandle, const char *name)
++{
++	void *ret;
++
++	__UCLIBC_MUTEX_CONDITIONAL_LOCK(_dl_mutex, 1);
++	ret = do_dlsym(vhandle, name, __builtin_return_address(0));
++	__UCLIBC_MUTEX_CONDITIONAL_UNLOCK(_dl_mutex, 1);
++
++	return ret;
++}
++
+ #if 0
+ void *dlvsym(void *vhandle, const char *name, const char *version)
+ {
+@@ -958,7 +985,13 @@ static int do_dlclose(void *vhandle, int need_fini)
+ 
+ int dlclose(void *vhandle)
+ {
+-	return do_dlclose(vhandle, 1);
++	int ret;
++
++	__UCLIBC_MUTEX_CONDITIONAL_LOCK(_dl_mutex, 1);
++	ret = do_dlclose(vhandle, 1);
++	__UCLIBC_MUTEX_CONDITIONAL_UNLOCK(_dl_mutex, 1);
++
++	return ret;
+ }
+ 
+ char *dlerror(void)
+@@ -1005,7 +1038,7 @@ int dlinfo(void)
+ 	return 0;
+ }
+ 
+-int dladdr(const void *__address, Dl_info * __info)
++static int do_dladdr(const void *__address, Dl_info * __info)
+ {
+ 	struct elf_resolve *pelf;
+ 	struct elf_resolve *rpnt;
+@@ -1117,3 +1150,14 @@ int dladdr(const void *__address, Dl_info * __info)
+ 	}
+ }
+ #endif
++
++int dladdr(const void *__address, Dl_info * __info)
++{
++	int ret;
++
++	__UCLIBC_MUTEX_CONDITIONAL_LOCK(_dl_mutex, 1);
++	ret = do_dladdr(__address, __info);
++	__UCLIBC_MUTEX_CONDITIONAL_UNLOCK(_dl_mutex, 1);
++
++	return ret;
++}
+-- 
+1.7.8
+
