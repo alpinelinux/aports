@@ -56,30 +56,27 @@ build () {
             if [ -n "$mail" ] ; then
                 maintainer=$(grep Maintainer APKBUILD | cut -d " " -f 3- | sed 's/.*< *//;s/ *>.*//;' )
                 if [ -n "$maintainer" ] ; then
-                    recipients="$maintainer -cc alpine-devel@lists.alpinelinux.org"
+                    recipients="$maintainer,alpine-devel@lists.alpinelinux.org"
                 else
                     recipients="alpine-devel@lists.alpinelinux.org"
                 fi
-    	        if [ -n "$mail" ] ; then
-    	            echo "sending mail to [$recipients]"
-                    if [ $(wc -l $rootdir/$1_$p.txt | cut -f 1 -d ' ') -gt 400 ]; then
-    		            TMPFILE="$(mktemp $1_$p.XXXXXX).txt" || exit 1
-                        head -n 200 $rootdir/$1_$p.txt >> $TMPFILE
-                        echo "-------" >> $TMPFILE
-                        echo "snip..." >> $TMPFILE
-                        echo "-------" >> $TMPFILE
-                        tail -n 200 $rootdir/$1_$p.txt >> $TMPFILE
-                        BUILDLOG="$TMPFILE"
-                    else
-                        BUILDLOG="$rootdir/$1_$p.txt"
-                    fi
+                echo "$1/$p: sending mail to [$recipients]" >> $rootdir/mail.lst
+                if [ $(wc -l $rootdir/$1_$p.txt | cut -f 1 -d ' ') -gt 400 ]; then
+                    TMPFILE="$(mktemp $1_$p.XXXXXX).txt" || exit 1
+                    head -n 200 $rootdir/$1_$p.txt >> $TMPFILE
+                    echo "-------" >> $TMPFILE
+                    echo "snip..." >> $TMPFILE
+                    echo "-------" >> $TMPFILE
+                    tail -n 200 $rootdir/$1_$p.txt >> $TMPFILE
+                    BUILDLOG="$TMPFILE"
+                else
+                    BUILDLOG="$rootdir/$1_$p.txt"
+                fi
 
-                    echo "Package $1/$p failed to build. Build output is attached" | \
-                        email -s "NOT SPAM $p build report" -a $BUILDLOG \
-                              -n AlpineBuildBot -f buildbot@alpinelinux.org $recipients
-                    if [ "$BUILDLOG" = "$TMPFILE" ]; then
-                        rm $BUILDLOG
-                    fi
+                echo "Package $1/$p failed to build. Build output is attached" | \
+                    email -s "NOT SPAM $p build report" -n "AlpineBuildBot" -f "buildbot@alpinelinux.org" -a "$BUILDLOG" "$recipients"
+                if [ "$BUILDLOG" = "$TMPFILE" ]; then
+                    rm $BUILDLOG
                 fi
             fi
             failed=$(expr "$failed" + 1)
@@ -97,6 +94,7 @@ build () {
 }
 
 touch START_OF_BUILD.txt
+rm -f mail.lst
 
 unset clean
 unset mail
