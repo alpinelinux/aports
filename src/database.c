@@ -592,8 +592,12 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			if (pkg == NULL)
 				continue;
 
-			if (repo >= 0)
+			if (repo >= 0) {
 				pkg->repos |= BIT(repo);
+			} else if (repo == -1 && ipkg == NULL) {
+				/* Installed package without files */
+				ipkg = apk_pkg_install(db, pkg);
+			}
 
 			if (apk_db_pkg_add(db, pkg) == NULL) {
 				apk_error("Installed database load failed");
@@ -620,14 +624,14 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		/* Standard index line? */
 		r = apk_pkg_add_info(db, pkg, field, l);
 		if (r == 0) {
-			if (repo == -1 && field == 'S') {
-				/* Instert to installed database; this needs to
-				 * happen after package name has been read, but
-				 * before first FDB entry. */
-				ipkg = apk_pkg_install(db, pkg);
-				diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
-			}
 			continue;
+		}
+		if (r == 1 && repo == -1) {
+			/* Instert to installed database; this needs to
+			 * happen after package name has been read, but
+			 * before first FDB entry. */
+			ipkg = apk_pkg_install(db, pkg);
+			diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
 		}
 		if (repo != -1 || ipkg == NULL)
 			continue;
@@ -668,12 +672,10 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			apk_blob_pull_csum(&l, &file->csum);
 			break;
 		case 'r':
-			if (ipkg != NULL)
-				apk_blob_pull_deps(&l, db, &ipkg->replaces);
+			apk_blob_pull_deps(&l, db, &ipkg->replaces);
 			break;
 		case 'q':
-			if (ipkg != NULL)
-				ipkg->replaces_priority = apk_blob_pull_uint(&l, 10);
+			ipkg->replaces_priority = apk_blob_pull_uint(&l, 10);
 			break;
 		default:
 			if (r != 0 && !(apk_flags & APK_FORCE)) {

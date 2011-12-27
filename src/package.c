@@ -82,6 +82,7 @@ struct apk_installed_package *apk_pkg_install(struct apk_database *db,
 	/* Overlay override information resides in a nameless package */
 	if (pkg->name != NULL) {
 		db->installed.stats.packages++;
+		db->installed.stats.bytes += pkg->installed_size;
 		list_add_tail(&ipkg->installed_pkgs_list,
 			      &db->installed.packages);
 	}
@@ -97,8 +98,10 @@ void apk_pkg_uninstall(struct apk_database *db, struct apk_package *pkg)
 	if (ipkg == NULL)
 		return;
 
-	if (db != NULL)
+	if (db != NULL) {
 		db->installed.stats.packages--;
+		db->installed.stats.bytes -= pkg->installed_size;
+	}
 
 	list_del(&ipkg->installed_pkgs_list);
 
@@ -729,7 +732,7 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 			db->compat_notinstallable = 1;
 		}
 		db->compat_newfeatures = 1;
-		return 1;
+		return 2;
 	}
 	if (APK_BLOB_IS_NULL(value))
 		return -1;

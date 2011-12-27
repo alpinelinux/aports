@@ -153,6 +153,7 @@ struct apk_database {
 			unsigned files;
 			unsigned dirs;
 			unsigned packages;
+			size_t bytes;
 		} stats;
 	} installed;
 };
