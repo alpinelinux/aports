@@ -1,0 +1,449 @@
+diff --git a/apps/app_confbridge.c b/apps/app_confbridge.c
+index 42c0a4c..ae26518 100644
+--- a/apps/app_confbridge.c
++++ b/apps/app_confbridge.c
+@@ -184,6 +184,31 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
+ 		<description>
+ 		</description>
+ 	</manager>
++	<manager name="ConfbridgeDeafen" language="en_US">
++		<synopsis>
++			Deafen a Confbridge user.
++		</synopsis>
++		<syntax>
++			<xi:include xpointer="xpointer(/docs/manager[@name='Login']/syntax/parameter[@name='ActionID'])" />
++			<parameter name="Conference" required="true" />
++			<parameter name="Channel" required="true" />
++		</syntax>
++		<description>
++		</description>
++	</manager>
++	<manager name="ConfbridgeUndeafen" language="en_US">
++		<synopsis>
++			Un
++			Undefaen a Confbridge user.
++		</synopsis>
++		<syntax>
++			<xi:include xpointer="xpointer(/docs/manager[@name='Login']/syntax/parameter[@name='ActionID'])" />
++			<parameter name="Conference" required="true" />
++			<parameter name="Channel" required="true" />
++		</syntax>
++		<description>
++		</description>
++	</manager>
+ 	<manager name="ConfbridgeKick" language="en_US">
+ 		<synopsis>
+ 			Kick a Confbridge user.
+@@ -310,6 +335,10 @@ const char *conf_get_sound(enum conf_sounds sound, struct bridge_profile_sounds
+ 		return S_OR(custom_sounds->muted, "conf-muted");
+ 	case CONF_SOUND_UNMUTED:
+ 		return S_OR(custom_sounds->unmuted, "conf-unmuted");
++	case CONF_SOUND_DEAFENED:
++		return S_OR(custom_sounds->deafened, "conf-deafened");
++	case CONF_SOUND_UNDEAFENED:
++		return S_OR(custom_sounds->undeafened, "conf-undeafened");
+ 	case CONF_SOUND_ONLY_ONE:
+ 		return S_OR(custom_sounds->onlyone, "conf-onlyone");
+ 	case CONF_SOUND_THERE_ARE:
+@@ -1416,10 +1445,13 @@ static int confbridge_exec(struct ast_channel *chan, const char *data)
+ 	volume_adjustments[0] = ast_audiohook_volume_get(chan, AST_AUDIOHOOK_DIRECTION_READ);
+ 	volume_adjustments[1] = ast_audiohook_volume_get(chan, AST_AUDIOHOOK_DIRECTION_WRITE);
+ 
+-	/* If the caller should be joined already muted, make it so */
++	/* If the caller should be joined already muted or deaf, make it so */
+ 	if (ast_test_flag(&conference_bridge_user.u_profile, USER_OPT_STARTMUTED)) {
+ 		conference_bridge_user.features.mute = 1;
+ 	}
++	if (ast_test_flag(&conference_bridge_user.u_profile, USER_OPT_STARTDEAF)) {
++		conference_bridge_user.features.deaf = 1;
++	}
+ 
+ 	if (ast_test_flag(&conference_bridge_user.u_profile, USER_OPT_DROP_SILENCE)) {
+ 		conference_bridge_user.tech_args.drop_silence = 1;
+@@ -1548,6 +1580,19 @@ static int action_toggle_mute(struct conference_bridge *conference_bridge,
+ 		"");
+ }
+ 
++static int action_toggle_deaf(struct conference_bridge *conference_bridge,
++	struct conference_bridge_user *conference_bridge_user,
++	struct ast_channel *chan)
++{
++	/* Deafen or undeafen yourself */
++	conference_bridge_user->features.deaf = (!conference_bridge_user->features.deaf ? 1 : 0);
++
++	return ast_stream_and_wait(chan, (conference_bridge_user->features.deaf ?
++		conf_get_sound(CONF_SOUND_DEAFENED, conference_bridge_user->b_profile.sounds) :
++		conf_get_sound(CONF_SOUND_UNDEAFENED, conference_bridge_user->b_profile.sounds)),
++		"");
++}
++
+ static int action_playback(struct ast_bridge_channel *bridge_channel, const char *playback_file)
+ {
+ 	char *file_copy = ast_strdupa(playback_file);
+@@ -1727,6 +1772,11 @@ static int execute_menu_entry(struct conference_bridge *conference_bridge,
+ 				conference_bridge_user,
+ 				bridge_channel->chan);
+ 			break;
++		case MENU_ACTION_TOGGLE_DEAF:
++			res |= action_toggle_deaf(conference_bridge,
++				conference_bridge_user,
++				bridge_channel->chan);
++			break;
+ 		case MENU_ACTION_PLAYBACK:
+ 			if (!stop_prompts) {
+ 				res |= action_playback(bridge_channel, menu_action->data.playback_file);
+@@ -1988,13 +2038,13 @@ static int generic_lock_unlock_helper(int lock, const char *conference)
+ }
+ 
+ /* \internal
+- * \brief finds a conference user by channel name and mutes/unmutes them.
++ * \brief finds a conference user by channel name and mutes/unmutes and deafens/undeafens them.
+  *
+  * \retval 0 success
+  * \retval -1 conference not found
+  * \retval -2 user not found
+  */
+-static int generic_mute_unmute_helper(int mute, const char *conference, const char *user)
++static int generic_mute_deafen_helper(int mute, int deaf, const char *conference, const char *user)
+ {
+ 	struct conference_bridge *bridge = NULL;
+ 	struct conference_bridge tmp;
+@@ -2012,9 +2062,14 @@ static int generic_mute_unmute_helper(int mute, const char *conference, const ch
+ 		}
+ 	}
+ 	if (participant) {
+-		participant->features.mute = mute;
++		if (mute >= 0) {
++			participant->features.mute = mute;
++		}
++		if (deaf >= 0) {
++			participant->features.deaf = deaf;
++		}
+ 	} else {
+-		res = -2;;
++		res = -2;
+ 	}
+ 	ao2_unlock(bridge);
+ 	ao2_ref(bridge, -1);
+@@ -2022,9 +2077,10 @@ static int generic_mute_unmute_helper(int mute, const char *conference, const ch
+ 	return res;
+ }
+ 
+-static int cli_mute_unmute_helper(int mute, struct ast_cli_args *a)
++static int cli_mute_deafen_helper(int mute, int deaf, struct ast_cli_args *a)
+ {
+-	int res = generic_mute_unmute_helper(mute, a->argv[2], a->argv[3]);
++	const char *verb;
++	int res = generic_mute_deafen_helper(mute, deaf, a->argv[2], a->argv[3]);
+ 
+ 	if (res == -1) {
+ 		ast_cli(a->fd, "No conference bridge named '%s' found!\n", a->argv[2]);
+@@ -2033,7 +2089,16 @@ static int cli_mute_unmute_helper(int mute, struct ast_cli_args *a)
+ 		ast_cli(a->fd, "No channel named '%s' found in conference %s\n", a->argv[3], a->argv[2]);
+ 		return -1;
+ 	}
+-	ast_cli(a->fd, "%s %s from confbridge %s\n", mute ? "Muting" : "Unmuting", a->argv[3], a->argv[2]);
++	if (mute == 1) {
++		verb = "Muting";
++	} else if (mute == 0) {
++		verb = "Unmuting";
++	} else if (deaf == 1) {
++		verb = "Deafening";
++	} else {
++		verb = "Undeafening";
++	}
++	ast_cli(a->fd, "%s %s from confbridge %s\n", verb, a->argv[3], a->argv[2]);
+ 	return 0;
+ }
+ 
+@@ -2055,7 +2120,7 @@ static char *handle_cli_confbridge_mute(struct ast_cli_entry *e, int cmd, struct
+ 		return CLI_SHOWUSAGE;
+ 	}
+ 
+-	cli_mute_unmute_helper(1, a);
++	cli_mute_deafen_helper(1, -1, a);
+ 
+ 	return CLI_SUCCESS;
+ }
+@@ -2078,7 +2143,53 @@ static char *handle_cli_confbridge_unmute(struct ast_cli_entry *e, int cmd, stru
+ 		return CLI_SHOWUSAGE;
+ 	}
+ 
+-	cli_mute_unmute_helper(0, a);
++	cli_mute_deafen_helper(0, -1, a);
++
++	return CLI_SUCCESS;
++}
++
++static char *handle_cli_confbridge_deafen(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
++{
++	switch (cmd) {
++	case CLI_INIT:
++		e->command = "confbridge deafen";
++		e->usage =
++			"Usage: confbridge deafen <conference> <channel>\n";
++		return NULL;
++	case CLI_GENERATE:
++		if (a->pos == 2) {
++			return complete_confbridge_name(a->line, a->word, a->pos, a->n);
++		}
++		return NULL;
++	}
++	if (a->argc != 4) {
++		return CLI_SHOWUSAGE;
++	}
++
++	cli_mute_deafen_helper(-1, 1, a);
++
++	return CLI_SUCCESS;
++}
++
++static char *handle_cli_confbridge_undeafen(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
++{
++	switch (cmd) {
++	case CLI_INIT:
++		e->command = "confbridge undeafen";
++		e->usage =
++			"Usage: confbridge undeafen <conference> <channel>\n";
++		return NULL;
++	case CLI_GENERATE:
++		if (a->pos == 2) {
++			return complete_confbridge_name(a->line, a->word, a->pos, a->n);
++		}
++		return NULL;
++	}
++	if (a->argc != 4) {
++		return CLI_SHOWUSAGE;
++	}
++
++	cli_mute_deafen_helper(-1, 0, a);
+ 
+ 	return CLI_SUCCESS;
+ }
+@@ -2226,6 +2337,8 @@ static struct ast_cli_entry cli_confbridge[] = {
+ 	AST_CLI_DEFINE(handle_cli_confbridge_kick, "Kick participants out of conference bridges."),
+ 	AST_CLI_DEFINE(handle_cli_confbridge_mute, "Mute a participant."),
+ 	AST_CLI_DEFINE(handle_cli_confbridge_unmute, "Unmute a participant."),
++	AST_CLI_DEFINE(handle_cli_confbridge_deafen, "Deafen a participant."),
++	AST_CLI_DEFINE(handle_cli_confbridge_undeafen, "Undeafen a participant."),
+ 	AST_CLI_DEFINE(handle_cli_confbridge_lock, "Lock a conference."),
+ 	AST_CLI_DEFINE(handle_cli_confbridge_unlock, "Unlock a conference."),
+ 	AST_CLI_DEFINE(handle_cli_confbridge_start_record, "Start recording a conference"),
+@@ -2360,10 +2473,11 @@ static int action_confbridgelistrooms(struct mansession *s, const struct message
+ 	return 0;
+ }
+ 
+-static int action_mute_unmute_helper(struct mansession *s, const struct message *m, int mute)
++static int action_mute_deafen_helper(struct mansession *s, const struct message *m, int mute, int deaf)
+ {
+ 	const char *conference = astman_get_header(m, "Conference");
+ 	const char *channel = astman_get_header(m, "Channel");
++	char *verb;
+ 	int res = 0;
+ 
+ 	if (ast_strlen_zero(conference)) {
+@@ -2379,7 +2493,7 @@ static int action_mute_unmute_helper(struct mansession *s, const struct message
+ 		return 0;
+ 	}
+ 
+-	res = generic_mute_unmute_helper(mute, conference, channel);
++	res = generic_mute_deafen_helper(mute, deaf, conference, channel);
+ 
+ 	if (res == -1) {
+ 		astman_send_error(s, m, "No Conference by that name found.");
+@@ -2389,17 +2503,35 @@ static int action_mute_unmute_helper(struct mansession *s, const struct message
+ 		return 0;
+ 	}
+ 
+-	astman_send_ack(s, m, mute ? "User muted" : "User unmuted");
++	if (mute == 1) {
++		verb = "User muted";
++	} else if (mute == 0) {
++		verb = "User unmuted";
++	} else if (deaf == 1) {
++		verb = "User deafened";
++	} else {
++		verb = "User undeafened";
++	}
++
++	astman_send_ack(s, m, verb);
+ 	return 0;
+ }
+ 
+ static int action_confbridgeunmute(struct mansession *s, const struct message *m)
+ {
+-	return action_mute_unmute_helper(s, m, 0);
++	return action_mute_deafen_helper(s, m, 0, -1);
+ }
+ static int action_confbridgemute(struct mansession *s, const struct message *m)
+ {
+-	return action_mute_unmute_helper(s, m, 1);
++	return action_mute_deafen_helper(s, m, 1, -1);
++}
++static int action_confbridgeundeafen(struct mansession *s, const struct message *m)
++{
++	return action_mute_deafen_helper(s, m, -1, 0);
++}
++static int action_confbridgedeafen(struct mansession *s, const struct message *m)
++{
++	return action_mute_deafen_helper(s, m, -1, 1);
+ }
+ 
+ static int action_lock_unlock_helper(struct mansession *s, const struct message *m, int lock)
+@@ -2685,6 +2817,8 @@ static int unload_module(void)
+ 	res |= ast_manager_unregister("ConfbridgeListRooms");
+ 	res |= ast_manager_unregister("ConfbridgeMute");
+ 	res |= ast_manager_unregister("ConfbridgeUnmute");
++	res |= ast_manager_unregister("ConfbridgeDeafen");
++	res |= ast_manager_unregister("ConfbridgeUndeafen");
+ 	res |= ast_manager_unregister("ConfbridgeKick");
+ 	res |= ast_manager_unregister("ConfbridgeUnlock");
+ 	res |= ast_manager_unregister("ConfbridgeLock");
+@@ -2726,6 +2860,8 @@ static int load_module(void)
+ 	res |= ast_manager_register_xml("ConfbridgeListRooms", EVENT_FLAG_REPORTING, action_confbridgelistrooms);
+ 	res |= ast_manager_register_xml("ConfbridgeMute", EVENT_FLAG_CALL, action_confbridgemute);
+ 	res |= ast_manager_register_xml("ConfbridgeUnmute", EVENT_FLAG_CALL, action_confbridgeunmute);
++	res |= ast_manager_register_xml("ConfbridgeDeafen", EVENT_FLAG_CALL, action_confbridgedeafen);
++	res |= ast_manager_register_xml("ConfbridgeUndeafen", EVENT_FLAG_CALL, action_confbridgeundeafen);
+ 	res |= ast_manager_register_xml("ConfbridgeKick", EVENT_FLAG_CALL, action_confbridgekick);
+ 	res |= ast_manager_register_xml("ConfbridgeUnlock", EVENT_FLAG_CALL, action_confbridgeunlock);
+ 	res |= ast_manager_register_xml("ConfbridgeLock", EVENT_FLAG_CALL, action_confbridgelock);
+diff --git a/apps/confbridge/conf_config_parser.c b/apps/confbridge/conf_config_parser.c
+index d11b825..df1997a 100644
+--- a/apps/confbridge/conf_config_parser.c
++++ b/apps/confbridge/conf_config_parser.c
+@@ -153,6 +153,8 @@ static int set_user_option(const char *name, const char *value, struct user_prof
+ 		ast_set2_flag(u_profile, ast_true(value), USER_OPT_MARKEDUSER);
+ 	} else if (!strcasecmp(name, "startmuted")) {
+ 		ast_set2_flag(u_profile, ast_true(value), USER_OPT_STARTMUTED);
++	} else if (!strcasecmp(name, "startdeaf")) {
++		ast_set2_flag(u_profile, ast_true(value), USER_OPT_STARTDEAF);
+ 	} else if (!strcasecmp(name, "music_on_hold_when_empty")) {
+ 		ast_set2_flag(u_profile, ast_true(value), USER_OPT_MUSICONHOLD);
+ 	} else if (!strcasecmp(name, "quiet")) {
+@@ -229,6 +231,10 @@ static int set_sound(const char *sound_name, const char *sound_file, struct brid
+ 		ast_string_field_set(sounds, muted, sound_file);
+ 	} else if (!strcasecmp(sound_name, "sound_unmuted")) {
+ 		ast_string_field_set(sounds, unmuted, sound_file);
++	} else if (!strcasecmp(sound_name, "sound_deafened")) {
++		ast_string_field_set(sounds, deafened, sound_file);
++	} else if (!strcasecmp(sound_name, "sound_undeafened")) {
++		ast_string_field_set(sounds, undeafened, sound_file);
+ 	} else if (!strcasecmp(sound_name, "sound_there_are")) {
+ 		ast_string_field_set(sounds, thereare, sound_file);
+ 	} else if (!strcasecmp(sound_name, "sound_other_in_party")) {
+@@ -533,6 +539,7 @@ static int add_action_to_menu_entry(struct conf_menu_entry *menu_entry, enum con
+ 	switch (id) {
+ 	case MENU_ACTION_NOOP:
+ 	case MENU_ACTION_TOGGLE_MUTE:
++	case MENU_ACTION_TOGGLE_DEAF:
+ 	case MENU_ACTION_INCREASE_LISTENING:
+ 	case MENU_ACTION_DECREASE_LISTENING:
+ 	case MENU_ACTION_INCREASE_TALKING:
+@@ -1015,6 +1022,8 @@ static char *handle_cli_confbridge_show_bridge_profile(struct ast_cli_entry *e,
+ 	ast_cli(a->fd,"sound_kicked:         %s\n", conf_get_sound(CONF_SOUND_KICKED, b_profile.sounds));
+ 	ast_cli(a->fd,"sound_muted:          %s\n", conf_get_sound(CONF_SOUND_MUTED, b_profile.sounds));
+ 	ast_cli(a->fd,"sound_unmuted:        %s\n", conf_get_sound(CONF_SOUND_UNMUTED, b_profile.sounds));
++	ast_cli(a->fd,"sound_deafened:       %s\n", conf_get_sound(CONF_SOUND_DEAFENED, b_profile.sounds));
++	ast_cli(a->fd,"sound_undeafened:     %s\n", conf_get_sound(CONF_SOUND_UNDEAFENED, b_profile.sounds));
+ 	ast_cli(a->fd,"sound_there_are:      %s\n", conf_get_sound(CONF_SOUND_THERE_ARE, b_profile.sounds));
+ 	ast_cli(a->fd,"sound_other_in_party: %s\n", conf_get_sound(CONF_SOUND_OTHER_IN_PARTY, b_profile.sounds));
+ 	ast_cli(a->fd,"sound_place_into_conference: %s\n", conf_get_sound(CONF_SOUND_PLACE_IN_CONF, b_profile.sounds));
+@@ -1124,6 +1133,9 @@ static char *handle_cli_confbridge_show_menu(struct ast_cli_entry *e, int cmd, s
+ 			case MENU_ACTION_TOGGLE_MUTE:
+ 				ast_cli(a->fd, "toggle_mute");
+ 				break;
++			case MENU_ACTION_TOGGLE_DEAF:
++				ast_cli(a->fd, "toggle_deaf");
++				break;
+ 			case MENU_ACTION_NOOP:
+ 				ast_cli(a->fd, "no_op");
+ 				break;
+diff --git a/apps/confbridge/include/confbridge.h b/apps/confbridge/include/confbridge.h
+index ab4a8c4..f733b49 100644
+--- a/apps/confbridge/include/confbridge.h
++++ b/apps/confbridge/include/confbridge.h
+@@ -57,6 +57,7 @@ enum user_profile_flags {
+ 	USER_OPT_DTMF_PASS    =  (1 << 13), /*!< Sets if dtmf should be passed into the conference or not */
+ 	USER_OPT_ANNOUNCEUSERCOUNTALL = (1 << 14), /*!< Sets if the number of users should be announced to everyone. */
+ 	USER_OPT_JITTERBUFFER =  (1 << 15), /*!< Places a jitterbuffer on the user. */
++	USER_OPT_STARTDEAF =     (1 << 16), /*!< Set if the caller should be initially set deaf */
+ };
+ 
+ enum bridge_profile_flags {
+@@ -68,6 +69,7 @@ enum bridge_profile_flags {
+ 
+ enum conf_menu_action_id {
+ 	MENU_ACTION_TOGGLE_MUTE = 1,
++	MENU_ACTION_TOGGLE_DEAF,
+ 	MENU_ACTION_PLAYBACK,
+ 	MENU_ACTION_PLAYBACK_AND_CONTINUE,
+ 	MENU_ACTION_INCREASE_LISTENING,
+@@ -141,6 +143,8 @@ enum conf_sounds {
+ 	CONF_SOUND_KICKED,
+ 	CONF_SOUND_MUTED,
+ 	CONF_SOUND_UNMUTED,
++	CONF_SOUND_DEAFENED,
++	CONF_SOUND_UNDEAFENED,
+ 	CONF_SOUND_ONLY_ONE,
+ 	CONF_SOUND_THERE_ARE,
+ 	CONF_SOUND_OTHER_IN_PARTY,
+@@ -165,6 +169,8 @@ struct bridge_profile_sounds {
+ 		AST_STRING_FIELD(kicked);
+ 		AST_STRING_FIELD(muted);
+ 		AST_STRING_FIELD(unmuted);
++		AST_STRING_FIELD(deafened);
++		AST_STRING_FIELD(undeafened);
+ 		AST_STRING_FIELD(onlyone);
+ 		AST_STRING_FIELD(thereare);
+ 		AST_STRING_FIELD(otherinparty);
+diff --git a/bridges/bridge_softmix.c b/bridges/bridge_softmix.c
+index 7632f36..103e3be 100644
+--- a/bridges/bridge_softmix.c
++++ b/bridges/bridge_softmix.c
+@@ -850,16 +850,23 @@ static int softmix_bridge_thread(struct ast_bridge *bridge)
+ 
+ 			ast_mutex_lock(&sc->lock);
+ 
+-			/* Make SLINEAR write frame from local buffer */
+-			if (sc->write_frame.subclass.format.id != cur_slin_id) {
+-				ast_format_set(&sc->write_frame.subclass.format, cur_slin_id, 0);
++			if (bridge->features.deaf ||
++			    (bridge_channel->features && bridge_channel->features->deaf)) {
++				/* For deaf channels post a null frame */
++				sc->write_frame.frametype = AST_FRAME_NULL;
++			} else {
++				/* Make SLINEAR write frame from local buffer */
++				sc->write_frame.frametype = AST_FRAME_VOICE;
++				if (sc->write_frame.subclass.format.id != cur_slin_id) {
++					ast_format_set(&sc->write_frame.subclass.format, cur_slin_id, 0);
++				}
++				sc->write_frame.datalen = softmix_datalen;
++				sc->write_frame.samples = softmix_samples;
++				memcpy(sc->final_buf, buf, softmix_datalen);
++
++				/* process the softmix channel's new write audio */
++				softmix_process_write_audio(&trans_helper, &bridge_channel->chan->rawwriteformat, sc);
+ 			}
+-			sc->write_frame.datalen = softmix_datalen;
+-			sc->write_frame.samples = softmix_samples;
+-			memcpy(sc->final_buf, buf, softmix_datalen);
+-
+-			/* process the softmix channel's new write audio */
+-			softmix_process_write_audio(&trans_helper, &bridge_channel->chan->rawwriteformat, sc);
+ 
+ 			/* The frame is now ready for use... */
+ 			sc->have_frame = 1;
+diff --git a/include/asterisk/bridging_features.h b/include/asterisk/bridging_features.h
+index e377ca6..5ce3d56 100644
+--- a/include/asterisk/bridging_features.h
++++ b/include/asterisk/bridging_features.h
+@@ -127,6 +127,8 @@ struct ast_bridge_features {
+ 	unsigned int usable:1;
+ 	/*! Bit to indicate whether the channel/bridge is muted or not */
+ 	unsigned int mute:1;
++	/*! Bit to indicate whether the channel/bridge is deaf or not */
++	unsigned int deaf:1;
+ 	/*! Bit to indicate whether DTMF should be passed into the bridge tech or not.  */
+ 	unsigned int dtmf_passthrough:1;
+ 
