@@ -35,6 +35,9 @@ static int update_main(void *ctx, struct apk_database *db, int argc, char **argv
 			    db->repos[i].url);
 	}
 
+	apk_message("OK: %d distinct packages available",
+		db->available.packages.num_items);
+
 	return 0;
 }
 
