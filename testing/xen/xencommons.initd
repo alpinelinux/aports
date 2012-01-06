@@ -1,0 +1,102 @@
+#!/sbin/runscript
+# Copyright 1999-2011 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+# $Header: $
+
+if [ -d /etc/sysconfig ]; then
+	xencommons_config=/etc/sysconfig
+else
+	xencommons_config=/etc/default
+fi
+
+test -f $xencommons_config/xencommons && . $xencommons_config/xencommons
+
+XENCONSOLED_PIDFILE=/var/run/xenconsoled.pid
+
+# not running in Xen dom0 or domU
+if ! test -d /proc/xen ; then
+	exit 0
+fi
+
+# mount xenfs in dom0 or domU with a pv_ops kernel
+if test "x$1" = xstart && \
+	! test -f /proc/xen/capabilities && \
+	! grep '^xenfs ' /proc/mounts >/dev/null;
+then
+	mount -t xenfs xenfs /proc/xen
+fi
+
+# run this script only in dom0:
+# no capabilities file in xenlinux domU kernel
+# empty capabilities file in pv_ops domU kernel
+if test -f /proc/xen/capabilities && \
+   ! grep -q "control_d" /proc/xen/capabilities ; then
+	exit 0
+fi
+
+depend() {
+	need udev
+	before xend
+}
+
+start() {
+	local time=0
+	local timeout=30
+
+	modprobe xen-evtchn 2>/dev/null
+	modprobe xen-gntdev 2>/dev/null
+	modprobe evtchn 2>/dev/null
+	modprobe gntdev 2>/dev/null
+
+	if ! `xenstore-read -s / >/dev/null 2>&1`
+	then
+		test -z "$XENSTORED_ROOTDIR" || XENSTORED_ROOTDIR="/var/lib/xenstored"
+		rm -f "$XENSTORED_ROOTDIR"/tdb* &>/dev/null
+		test -z "$XENSTORED_TRACE" || XENSTORED_ARGS=" -T /var/log/xen/xenstored-trace.log"
+
+		ebegin "Starting xenstored..."
+		xenstored --pid-file=/var/run/xenstored.pid $XENSTORED_ARGS
+
+		# Wait for xenstored to actually come up, timing out after 30 seconds
+		while [ $time -lt $timeout ] && ! `xenstore-read -s / >/dev/null 2>&1` ; do
+			time=$(($time+1))
+			sleep 1
+		done
+
+		# Exit if we timed out
+		if ! [ $time -lt $timeout ] ; then
+			eend 1
+			echo Could not start xenstored
+			exit 1
+		fi
+		eend 0
+
+		ebegin "Setting domain 0 name..."
+		xenstore-write "/local/domain/0/name" "Domain-0"
+		eend $?
+	fi
+
+	ebegin "Starting xenconsoled..."
+	test -z "$XENCONSOLED_TRACE" || XENCONSOLED_ARGS=" --log=$XENCONSOLED_TRACE"
+	xenconsoled --pid-file=$XENCONSOLED_PIDFILE $XENCONSOLED_ARGS
+	eend $?
+
+	test -z "$XENBACKENDD_DEBUG" || XENBACKENDD_ARGS="-d"
+	test "`uname`" != "NetBSD" || xenbackendd $XENBACKENDD_ARGS
+}
+
+stop() {
+	ebegin "Stopping xenconsoled"
+	if read 2>/dev/null <$XENCONSOLED_PIDFILE pid; then
+		kill $pid
+		while kill -9 $pid >/dev/null 2>&1; do sleep 0.1; done
+		rm -f $XENCONSOLED_PIDFILE
+	fi
+	eend 0
+
+	echo WARNING: Not stopping xenstored, as it cannot be restarted.
+}
+
+status() {
+	xenstore-read -s / >/dev/null 2>&1
+}
