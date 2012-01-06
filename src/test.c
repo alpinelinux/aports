@@ -123,7 +123,7 @@ static void print_errors_in_solution(struct apk_database *db, int unsatisfiable,
 {
 	int i;
 
-	printf("%d unsatisfiable dependencies (solution with %d names)\n",
+	printf("%d unsatisfiable dependencies (solution with %zu names)\n",
 		unsatisfiable, solution->num);
 
 	for (i = 0; i < solution->num; i++) {
