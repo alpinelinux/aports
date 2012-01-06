@@ -108,6 +108,7 @@ void *apk_array_resize(void *array, size_t new_size, size_t elem_size);
 	static inline void						\
 	array_type_name##_copy(struct array_type_name **a, struct array_type_name *b)\
 	{								\
+		if (*a == b) return;					\
 		*a = apk_array_resize(*a, b->num, sizeof(elem_type_name));\
 		memcpy((*a)->item, b->item, b->num * sizeof(elem_type_name));\
 	}								\

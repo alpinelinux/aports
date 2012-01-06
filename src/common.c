@@ -10,13 +10,15 @@
 
 #include <malloc.h>
 #include <string.h>
+#include <unistd.h>
 #include "apk_defines.h"
 
 static int *dummy_array = 0;
 
 void *apk_array_resize(void *array, size_t new_size, size_t elem_size)
 {
-	int old_size, diff;
+	size_t old_size;
+	ssize_t diff;
 	void *tmp;
 
 	if (new_size == 0) {
@@ -25,7 +27,7 @@ void *apk_array_resize(void *array, size_t new_size, size_t elem_size)
 		return &dummy_array;
 	}
 
-	old_size = array ? *((int*) array) : 0;
+	old_size = array ? *((size_t *) array) : 0;
 	diff = new_size - old_size;
 
 	if (array == &dummy_array)
