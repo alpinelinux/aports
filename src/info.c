@@ -436,6 +436,13 @@ static int info_parse(void *ctx, struct apk_db_options *dbopts,
 	return 0;
 }
 
+static int info_package_short(struct info_ctx *ictx, struct apk_database *db,
+			      int argc, char **argv)
+{
+	ictx->subaction_mask |= APK_INFO_DESC | APK_INFO_URL | APK_INFO_SIZE;
+	return info_package(ictx, db, argc, argv);
+}
+
 static int info_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
@@ -443,6 +450,9 @@ static int info_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	ictx->db = db;
 	if (ictx->action != NULL)
 		return ictx->action(ictx, db, argc, argv);
+
+	if (argc > 0)
+		return info_package_short(ictx, db, argc, argv);
 
 	return info_list(ictx, db, argc, argv);
 }
