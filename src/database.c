@@ -626,7 +626,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		if (r == 0) {
 			continue;
 		}
-		if (r == 1 && repo == -1) {
+		if (r == 1 && repo == -1 && ipkg == NULL) {
 			/* Instert to installed database; this needs to
 			 * happen after package name has been read, but
 			 * before first FDB entry. */
