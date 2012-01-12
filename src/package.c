@@ -189,27 +189,36 @@ void apk_deps_del(struct apk_dependency_array **pdeps,
 	}
 }
 
-struct parse_depend_ctx {
-	struct apk_database *db;
-	struct apk_dependency_array **depends;
-};
-
 void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_dependency *dep)
 {
 	struct apk_name *name;
-	apk_blob_t bname, bop, bver = APK_BLOB_NULL, btag;
+	apk_blob_t bdep, bname, bop, bver = APK_BLOB_NULL, btag;
 	int mask = APK_DEPMASK_REQUIRE, optional = 0, tag = 0;
-	size_t len;
 
-	/* [!]name[<,<=,=,>=,>]ver */
+	/* [!]name[<,<=,=,>=,>,><]ver */
 	if (APK_BLOB_IS_NULL(*b))
 		goto fail;
-	if (b->ptr[0] == '!') {
-		b->ptr++;
-		b->len--;
+
+	/* grap one token */
+	if (!apk_blob_cspn(*b, " \n", &bdep, NULL))
+		bdep = *b;
+	b->ptr += bdep.len;
+	b->len -= bdep.len;
+
+	/* skip also all separator chars */
+	if (!apk_blob_spn(*b, " \n", NULL, b)) {
+		b->ptr += b->len;
+		b->len = 0;
+	}
+
+	/* parse the version */
+	if (bdep.ptr[0] == '!') {
+		bdep.ptr++;
+		bdep.len--;
 		optional = 1;
 	}
-	if (apk_blob_cspn(*b, "<>= ", &bname, &bop)) {
+
+	if (apk_blob_cspn(bdep, "<>=", &bname, &bop)) {
 		int i;
 
 		if (mask == 0)
@@ -234,17 +243,15 @@ void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_depend
 		    !apk_version_validate(bver))
 			goto fail;
 	} else {
-		bname = *b;
+		bname = bdep;
 		bop = APK_BLOB_NULL;
 		bver = APK_BLOB_NULL;
 	}
-	len = bname.len + bop.len + bver.len;
-	b->ptr += len;
-	b->len -= len;
 
 	if (apk_blob_split(bname, APK_BLOB_STR("@"), &bname, &btag))
 		tag = apk_db_get_tag_id(db, btag);
 
+	/* convert to apk_dependency */
 	name = apk_db_get_name(db, bname);
 	if (name == NULL)
 		goto fail;
@@ -265,6 +272,19 @@ fail:
 	*b = APK_BLOB_NULL;
 }
 
+void apk_blob_pull_deps(apk_blob_t *b, struct apk_database *db, struct apk_dependency_array **deps)
+{
+	struct apk_dependency dep;
+
+	while (b->len > 0) {
+		apk_blob_pull_dep(b, db, &dep);
+		if (APK_BLOB_IS_NULL(*b) || dep.name == NULL)
+			break;
+
+		*apk_dependency_array_add(deps) = dep;
+	}
+}
+
 void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		      struct apk_package *pkg)
 {
@@ -279,26 +299,6 @@ void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		.version = apk_blob_atomize_dup(b),
 		.result_mask = APK_DEPMASK_CHECKSUM,
 	};
-}
-
-static int parse_depend(void *ctx, apk_blob_t blob)
-{
-	struct parse_depend_ctx *pctx = (struct parse_depend_ctx *) ctx;
-	struct apk_dependency *dep, p;
-
-	if (blob.len == 0)
-		return 0;
-
-	apk_blob_pull_dep(&blob, pctx->db, &p);
-	if (p.name == NULL || blob.len != 0)
-		return -1;
-
-	dep = apk_dependency_array_add(pctx->depends);
-	if (dep == NULL)
-		return -1;
-	*dep = p;
-
-	return 0;
 }
 
 int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg)
@@ -320,16 +320,6 @@ int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg)
 			return 1;
 	}
 	return 0;
-}
-
-void apk_blob_pull_deps(apk_blob_t *b, struct apk_database *db, struct apk_dependency_array **deps)
-{
-	struct parse_depend_ctx ctx = { db, deps };
-
-	if (b->len > 0 && b->ptr[b->len-1] == '\n')
-		b->len--;
-
-	apk_blob_for_each_segment(*b, " ", parse_depend, &ctx);
 }
 
 void apk_blob_push_dep(apk_blob_t *to, struct apk_database *db, struct apk_dependency *dep)
@@ -366,7 +356,7 @@ void apk_blob_push_deps(apk_blob_t *to, struct apk_database *db, struct apk_depe
 	}
 }
 
-int apk_deps_write(struct apk_database *db, struct apk_dependency_array *deps, struct apk_ostream *os)
+int apk_deps_write(struct apk_database *db, struct apk_dependency_array *deps, struct apk_ostream *os, apk_blob_t separator)
 {
 	apk_blob_t blob;
 	char tmp[256];
@@ -378,7 +368,7 @@ int apk_deps_write(struct apk_database *db, struct apk_dependency_array *deps, s
 	for (i = 0; i < deps->num; i++) {
 		blob = APK_BLOB_BUF(tmp);
 		if (i)
-			apk_blob_push_blob(&blob, APK_BLOB_PTR_LEN(" ", 1));
+			apk_blob_push_blob(&blob, separator);
 		apk_blob_push_dep(&blob, db, &deps->item[i]);
 
 		blob = apk_blob_pushed(APK_BLOB_BUF(tmp), blob);
@@ -1008,7 +998,7 @@ static int write_depends(struct apk_ostream *os, const char *field,
 
 	if (os->write(os, field, 2) != 2)
 		return -1;
-	r = apk_deps_write(NULL, deps, os);
+	r = apk_deps_write(NULL, deps, os, APK_BLOB_PTR_LEN(" ", 1));
 	if (r < 0)
 		return r;
 	if (os->write(os, "\n", 1) != 1)

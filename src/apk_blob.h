@@ -12,6 +12,7 @@
 #ifndef APK_BLOB_H
 #define APK_BLOB_H
 
+#include <ctype.h>
 #include <string.h>
 #include <openssl/evp.h>
 
@@ -73,6 +74,14 @@ static inline apk_blob_t APK_BLOB_STR(const char *str)
 	return ((apk_blob_t){strlen(str), (void *)(str)});
 }
 
+static inline apk_blob_t apk_blob_trim(apk_blob_t blob)
+{
+	apk_blob_t b = blob;
+	while (b.len > 0 && isspace(b.ptr[b.len-1]))
+		b.len--;
+	return b;
+}
+
 char *apk_blob_cstr(apk_blob_t str);
 int apk_blob_spn(apk_blob_t blob, const char *accept, apk_blob_t *l, apk_blob_t *r);
 int apk_blob_cspn(apk_blob_t blob, const char *reject, apk_blob_t *l, apk_blob_t *r);
@@ -90,6 +99,11 @@ static inline void apk_blob_checksum(apk_blob_t b, const EVP_MD *md, struct apk_
 	csum->type = EVP_MD_size(md);
 	EVP_Digest(b.ptr, b.len, csum->data, NULL, md, NULL);
 }
+static inline char *apk_blob_chr(apk_blob_t b, unsigned char ch)
+{
+	return memchr(b.ptr, ch, b.len);
+}
+
 static inline const int apk_checksum_compare(const struct apk_checksum *a,
 					     const struct apk_checksum *b)
 {

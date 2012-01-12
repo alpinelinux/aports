@@ -208,7 +208,7 @@ static int Papk_exists(lua_State *L)
 	apk_blob_t blob = APK_BLOB_STR(depstr);
 	apk_blob_pull_dep(&blob, db, &dep);
 
-	if (APK_BLOB_IS_NULL(blob))
+	if (APK_BLOB_IS_NULL(blob) || b.len > 0)
 		goto ret_nil;
 
 	name = dep.name;

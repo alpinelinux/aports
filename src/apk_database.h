@@ -133,6 +133,7 @@ struct apk_database {
 	int missing_tags : 1;
 	int compat_newfeatures : 1;
 	int compat_notinstallable : 1;
+	int compat_old_world : 1;
 
 	struct apk_dependency_array *world;
 	struct apk_string_array *protected_paths;

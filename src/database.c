@@ -917,6 +917,9 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 		blob = apk_blob_from_file(db->root_fd, apk_world_file);
 		if (APK_BLOB_IS_NULL(blob))
 			return -ENOENT;
+		blob = apk_blob_trim(blob);
+		if (apk_blob_chr(blob, ' '))
+			db->compat_old_world = 1;
 		apk_blob_pull_deps(&blob, db, &db->world);
 		free(blob.ptr);
 	}
@@ -1312,10 +1315,11 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		goto ret_r;
 	}
 
-	for (i = 0; i < db->num_repo_tags; i++) {
+	/* repository id 0 is the no-tag repo */
+	for (i = 1; i < db->num_repo_tags; i++) {
 		if (!db->repo_tags[i].allowed_repos) {
-			apk_warning("Repository tag '" BLOB_FMT "' used in world is no longer available",
-				    BLOB_PRINTF(*db->repo_tags[i].name));
+			apk_warning("Repository tag (%d) '" BLOB_FMT "' used in world is no longer available",
+				    i, BLOB_PRINTF(*db->repo_tags[i].name));
 			db->missing_tags = 1;
 		}
 	}
@@ -1364,7 +1368,7 @@ int apk_db_write_config(struct apk_database *db)
 	if (os == NULL)
 		return -1;
 
-	apk_deps_write(db, db->world, os);
+	apk_deps_write(db, db->world, os, APK_BLOB_PTR_LEN(db->compat_old_world ? " " : "\n", 1));
 	os->write(os, "\n", 1);
 	r = os->close(os);
 	if (r < 0)

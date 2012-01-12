@@ -127,7 +127,7 @@ void apk_blob_pull_dep(apk_blob_t *from, struct apk_database *, struct apk_depen
 void apk_blob_pull_deps(apk_blob_t *from, struct apk_database *, struct apk_dependency_array **);
 
 int apk_deps_write(struct apk_database *db, struct apk_dependency_array *deps,
-		   struct apk_ostream *os);
+		   struct apk_ostream *os, apk_blob_t separator);
 
 int apk_deps_add(struct apk_dependency_array **depends,
 		 struct apk_dependency *dep);

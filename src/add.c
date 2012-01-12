@@ -111,7 +111,7 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			apk_blob_t b = APK_BLOB_STR(argv[i]);
 
 			apk_blob_pull_dep(&b, db, &dep);
-			if (APK_BLOB_IS_NULL(b)) {
+			if (APK_BLOB_IS_NULL(b) || b.len > 0) {
 				apk_error("'%s' is not a valid dependency, format is name(@tag)([<>=]version)",
 					  argv[i]);
 				return -1;

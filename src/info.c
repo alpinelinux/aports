@@ -75,7 +75,11 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 
 	for (i = 0; i < argc; i++) {
 		apk_blob_t b = APK_BLOB_STR(argv[i]);
+
 		apk_blob_pull_dep(&b, db, &dep);
+		if (APK_BLOB_IS_NULL(b) || b.len > 0)
+			continue;
+
 		name = dep.name;
 		if (name == NULL)
 			continue;
@@ -131,7 +135,7 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 		struct apk_ostream *os;
 
 		os = apk_ostream_to_fd(STDOUT_FILENO);
-		apk_deps_write(db, deps, os);
+		apk_deps_write(db, deps, os, APK_BLOB_PTR_LEN(" ", 1));
 		os->write(os, "\n", 1);
 		os->close(os);
 	}
