@@ -130,6 +130,7 @@ struct apk_database {
 	unsigned int local_repos;
 	int performing_self_update : 1;
 	int permanent : 1;
+	int missing_tags : 1;
 	int compat_newfeatures : 1;
 	int compat_notinstallable : 1;
 

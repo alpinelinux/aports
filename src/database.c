@@ -1135,7 +1135,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	struct apk_bstream *bs;
 	struct statfs stfs;
 	apk_blob_t blob;
-	int r, fd, rr = 0;
+	int i, r, fd, rr = 0;
 
 	memset(db, 0, sizeof(*db));
 	if (apk_flags & APK_SIMULATE) {
@@ -1310,6 +1310,14 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	if (rr != 0) {
 		r = rr;
 		goto ret_r;
+	}
+
+	for (i = 0; i < db->num_repo_tags; i++) {
+		if (!db->repo_tags[i].allowed_repos) {
+			apk_warning("Repository tag '" BLOB_FMT "' used in world is no longer available",
+				    BLOB_PRINTF(*db->repo_tags[i].name));
+			db->missing_tags = 1;
+		}
 	}
 
 	if (db->compat_newfeatures) {

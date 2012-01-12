@@ -1261,6 +1261,11 @@ int apk_solver_commit_changeset(struct apk_database *db,
 	struct apk_change *change;
 	int i, r = 0, size_diff = 0;
 
+	if (db->missing_tags && !(apk_flags & APK_FORCE)) {
+		apk_error("Not committing changes due to missing repository tags. Use --force to override.");
+		return -1;
+	}
+
 	if (changeset->changes == NULL)
 		goto all_done;
 
@@ -1405,6 +1410,11 @@ int apk_solver_commit(struct apk_database *db,
 	struct apk_changeset changeset = {};
 	struct apk_package_array *solution = NULL;
 	int r;
+
+	if (db->missing_tags && !(apk_flags & APK_FORCE)) {
+		apk_error("Not committing changes due to missing repository tags. Use --force to override.");
+		return -1;
+	}
 
 	r = apk_solver_solve(db, solver_flags,
 			     world, &solution, &changeset);
