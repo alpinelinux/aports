@@ -107,11 +107,19 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			}
 			apk_dep_from_pkg(&dep, db, pkg);
 		} else {
+			struct apk_repository_tag *tag;
 			apk_blob_t b = APK_BLOB_STR(argv[i]);
+
 			apk_blob_pull_dep(&b, db, &dep);
 			if (APK_BLOB_IS_NULL(b)) {
-				apk_error("'%s' is not a valid dependency, format is name(@tag)([<>=]version)", 
+				apk_error("'%s' is not a valid dependency, format is name(@tag)([<>=]version)",
 					  argv[i]);
+				return -1;
+			}
+			tag = &db->repo_tags[dep.repository_tag];
+			if (!tag->allowed_repos) {
+				apk_error("Repository tag '" BLOB_FMT "' is not defined",
+					  BLOB_PRINTF(*tag->name));
 				return -1;
 			}
 		}
