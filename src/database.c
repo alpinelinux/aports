@@ -1475,6 +1475,17 @@ int apk_db_get_tag_id(struct apk_database *db, apk_blob_t tag)
 	return -1;
 }
 
+int apk_db_get_tag_id_by_repos(struct apk_database *db, unsigned int repos)
+{
+	int i;
+
+	for (i = 0; i < db->num_repo_tags; i++) {
+		if (db->repo_tags[i].allowed_repos & repos)
+			return i;
+	}
+	return -1;
+}
+
 static int fire_triggers(apk_hash_item item, void *ctx)
 {
 	struct apk_database *db = (struct apk_database *) ctx;

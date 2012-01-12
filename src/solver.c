@@ -1061,24 +1061,37 @@ static void print_change(struct apk_database *db,
 	struct apk_package *oldpkg = change->oldpkg;
 	struct apk_package *newpkg = change->newpkg;
 	const char *msg = NULL;
-	char status[64];
-	int r;
+	char status[32], n[512], *nameptr;
+	int r, tag;
 
 	snprintf(status, sizeof(status), "(%i/%i)", cur+1, total);
-	status[sizeof(status) - 1] = '\0';
+	status[sizeof(status) - 1] = 0;
 
-	if (oldpkg != NULL)
-		name = oldpkg->name;
-	else
+	if (newpkg != NULL) {
 		name = newpkg->name;
+		tag = apk_db_get_tag_id_by_repos(db, newpkg->repos);
+	} else {
+		name = oldpkg->name;
+		tag = apk_db_get_tag_id_by_repos(db, oldpkg->repos);
+	}
+
+	if (tag > 0) {
+		snprintf(n, sizeof(n), "%s@" BLOB_FMT,
+			 name->name,
+			 BLOB_PRINTF(*db->repo_tags[tag].name));
+		n[sizeof(n) - 1] = 0;
+		nameptr = n;
+	} else {
+		nameptr = name->name;
+	}
 
 	if (oldpkg == NULL) {
 		apk_message("%s Installing %s (" BLOB_FMT ")",
-			    status, name->name,
+			    status, nameptr,
 			    BLOB_PRINTF(*newpkg->version));
 	} else if (newpkg == NULL) {
 		apk_message("%s Purging %s (" BLOB_FMT ")",
-			    status, name->name,
+			    status, nameptr,
 			    BLOB_PRINTF(*oldpkg->version));
 	} else {
 		r = apk_pkg_version_compare(newpkg, oldpkg);
@@ -1097,7 +1110,7 @@ static void print_change(struct apk_database *db,
 			break;
 		}
 		apk_message("%s %s %s (" BLOB_FMT " -> " BLOB_FMT ")",
-			    status, msg, name->name,
+			    status, msg, nameptr,
 			    BLOB_PRINTF(*oldpkg->version),
 			    BLOB_PRINTF(*newpkg->version));
 	}
