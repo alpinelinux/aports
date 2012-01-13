@@ -287,13 +287,21 @@ static int compare_package_preference(unsigned short solver_flags,
 				      struct apk_package *pkgA,
 				      struct apk_package *pkgB)
 {
-	/* preferred repository pinning */
-	if ((pkgA->ipkg || pkgA->filename || (pkgA->repos & preferred_repos)) &&
-	    !(pkgB->ipkg || pkgB->filename || (pkgB->repos & preferred_repos)))
-		return 1;
-	if ((pkgB->ipkg || pkgA->filename || (pkgB->repos & preferred_repos)) &&
-	    !(pkgA->ipkg || pkgB->filename || (pkgA->repos & preferred_repos)))
-		return -1;
+	if (solver_flags & APK_SOLVERF_PREFER_TAG) {
+		/* preferred repository pinning */
+		if ((pkgA->repos & preferred_repos) && !(pkgB->repos & preferred_repos))
+			return 1;
+		if ((pkgB->repos & preferred_repos) && !(pkgA->repos & preferred_repos))
+			return -1;
+	} else {
+		/* preferred repository pinning */
+		if ((pkgA->ipkg || pkgA->filename || (pkgA->repos & preferred_repos)) &&
+		    !(pkgB->ipkg || pkgB->filename || (pkgB->repos & preferred_repos)))
+			return 1;
+		if ((pkgB->ipkg || pkgA->filename || (pkgB->repos & preferred_repos)) &&
+		    !(pkgA->ipkg || pkgB->filename || (pkgA->repos & preferred_repos)))
+			return -1;
+	}
 
 	if (solver_flags & APK_SOLVERF_AVAILABLE) {
 		if (pkgA->repos != 0 && pkgB->repos == 0)
@@ -332,9 +340,12 @@ static int get_preference(struct apk_solver_state *ss,
 	unsigned short name_flags = ns->solver_flags_local
 		| ns->solver_flags_inherited
 		| ss->solver_flags;
-	unsigned int preferred_repos = ns->preferred_repos | ss->db->repo_tags[0].allowed_repos;
+	unsigned int preferred_repos = ns->preferred_repos;
 	unsigned short preference = 0;
 	int i;
+
+	if (preferred_repos == 0)
+		preferred_repos = ss->db->repo_tags[0].allowed_repos;
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
