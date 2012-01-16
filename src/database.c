@@ -902,7 +902,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 {
 	struct apk_istream *is;
 	struct apk_bstream *bs;
-	apk_blob_t blob;
+	apk_blob_t blob, world;
 	int r;
 
 	/* Read:
@@ -914,14 +914,14 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	 * 6. script db
 	 */
 	if (!(flags & APK_OPENF_NO_WORLD)) {
-		blob = apk_blob_from_file(db->root_fd, apk_world_file);
+		blob = world = apk_blob_from_file(db->root_fd, apk_world_file);
 		if (APK_BLOB_IS_NULL(blob))
 			return -ENOENT;
 		blob = apk_blob_trim(blob);
 		if (apk_blob_chr(blob, ' '))
 			db->compat_old_world = 1;
 		apk_blob_pull_deps(&blob, db, &db->world);
-		free(blob.ptr);
+		free(world.ptr);
 	}
 
 	if (!(flags & APK_OPENF_NO_INSTALLED)) {
