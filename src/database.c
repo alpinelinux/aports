@@ -1138,7 +1138,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	struct apk_bstream *bs;
 	struct statfs stfs;
 	apk_blob_t blob;
-	int i, r, fd, rr = 0;
+	int r, fd, rr = 0;
 
 	memset(db, 0, sizeof(*db));
 	if (apk_flags & APK_SIMULATE) {
@@ -1313,20 +1313,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	if (rr != 0) {
 		r = rr;
 		goto ret_r;
-	}
-
-	/* repository id 0 is the no-tag repo */
-	for (i = 0; i < db->world->num; i++) {
-		struct apk_dependency *dep = &db->world->item[i];
-		int tag = dep->repository_tag;
-
-		if (tag == 0 || db->repo_tags[tag].allowed_repos != 0)
-			continue;
-
-		apk_warning("The repository tag for world dependency '%s@" BLOB_FMT "' does not exist",
-			    dep->name->name,
-			    BLOB_PRINTF(*db->repo_tags[tag].name));
-		db->missing_tags = 1;
 	}
 
 	if (db->compat_newfeatures) {
@@ -1552,6 +1538,29 @@ int apk_db_cache_active(struct apk_database *db)
 int apk_db_permanent(struct apk_database *db)
 {
 	return db->permanent;
+}
+
+int apk_db_check_world(struct apk_database *db, struct apk_dependency_array *world)
+{
+	int i, bad = 0;
+
+	if (apk_flags & APK_FORCE)
+		return 0;
+
+	for (i = 0; i < world->num; i++) {
+		struct apk_dependency *dep = &world->item[i];
+		int tag = dep->repository_tag;
+
+		if (tag == 0 || db->repo_tags[tag].allowed_repos != 0)
+			continue;
+
+		apk_warning("The repository tag for world dependency '%s@" BLOB_FMT "' does not exist",
+			    dep->name->name,
+			    BLOB_PRINTF(*db->repo_tags[tag].name));
+		bad++;
+	}
+
+	return bad;
 }
 
 struct apk_package *apk_db_get_pkg(struct apk_database *db,

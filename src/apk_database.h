@@ -130,7 +130,6 @@ struct apk_database {
 	unsigned int local_repos;
 	int performing_self_update : 1;
 	int permanent : 1;
-	int missing_tags : 1;
 	int compat_newfeatures : 1;
 	int compat_notinstallable : 1;
 	int compat_old_world : 1;
@@ -195,6 +194,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts);
 void apk_db_close(struct apk_database *db);
 int apk_db_write_config(struct apk_database *db);
 int apk_db_permanent(struct apk_database *db);
+int apk_db_check_world(struct apk_database *db, struct apk_dependency_array *world);
 struct apk_package_array *apk_db_get_pending_triggers(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);

@@ -97,6 +97,11 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 	struct apk_dependency_array *world = NULL;
 	int i, r;
 
+	if (apk_db_check_world(db, db->world) != 0) {
+		apk_error("Not continuing with upgrade due to missing repository tags. Use --force to override.");
+		return -1;
+	}
+
 	solver_flags = APK_SOLVERF_UPGRADE | uctx->solver_flags;
 	if (!uctx->no_self_upgrade) {
 		r = apk_do_self_upgrade(db, solver_flags);
