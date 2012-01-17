@@ -94,7 +94,8 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 {
 	struct upgrade_ctx *uctx = (struct upgrade_ctx *) ctx;
 	unsigned short solver_flags;
-	int r;
+	struct apk_dependency_array *world = NULL;
+	int i, r;
 
 	solver_flags = APK_SOLVERF_UPGRADE | uctx->solver_flags;
 	if (!uctx->no_self_upgrade) {
@@ -103,7 +104,25 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 			return r;
 	}
 
-	return apk_solver_commit(db, solver_flags, db->world);
+	if (solver_flags & APK_SOLVERF_AVAILABLE) {
+		apk_dependency_array_copy(&world, db->world);
+		for (i = 0; i < world->num; i++) {
+			struct apk_dependency *dep = &world->item[i];
+			if (dep->result_mask == APK_DEPMASK_CHECKSUM) {
+				dep->result_mask = APK_DEPMASK_REQUIRE;
+				dep->version = apk_blob_atomize(APK_BLOB_NULL);
+			}
+		}
+	} else {
+		world = db->world;
+	}
+
+	r = apk_solver_commit(db, solver_flags, world);
+
+	if (solver_flags & APK_SOLVERF_AVAILABLE)
+		apk_dependency_array_free(&world);
+
+	return r;
 }
 
 static struct apk_option upgrade_options[] = {
