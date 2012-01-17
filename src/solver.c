@@ -913,19 +913,20 @@ static int compare_change(const void *p1, const void *p2)
 	const struct apk_change *c2 = (const struct apk_change *) p2;
 
 	if (c1->newpkg == NULL) {
-		if (c2->newpkg == NULL)
+		if (c2->newpkg == NULL) {
 			/* both deleted - reverse topology order */
-			return  c2->oldpkg->topology_hard -
+			return	c2->oldpkg->topology_hard -
 				c1->oldpkg->topology_hard;
+		}
 
 		/* c1 deleted, c2 installed -> c2 first*/
-		return -1;
+		return 1;
 	}
 	if (c2->newpkg == NULL)
 		/* c1 installed, c2 deleted -> c1 first*/
-		return 1;
+		return -1;
 
-	return  c1->newpkg->topology_hard -
+	return	c1->newpkg->topology_hard -
 		c2->newpkg->topology_hard;
 }
 
