@@ -46,6 +46,7 @@ struct apk_name_state {
 	struct list_head unsolved_list;
 	struct apk_name *name;
 	struct apk_package *chosen;
+	struct apk_score minimum_penalty;
 	unsigned int topology_last_touched;
 	unsigned int allowed_repos, preferred_repos;
 	unsigned short requirers;
@@ -67,10 +68,9 @@ struct apk_solver_state {
 	struct list_head unsolved_list_head;
 	struct apk_package *latest_decision;
 	unsigned int topology_position;
-	unsigned int penalty_topology;
 	unsigned int assigned_names;
 	struct apk_score score;
-	struct apk_score penalty_score;
+	struct apk_score minimum_penalty;
 
 	unsigned int solver_flags : 4;
 	unsigned int refresh_name_states : 1;
@@ -83,6 +83,44 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *dep);
 static void push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
 			  int flags);
+
+static void addscore(struct apk_score *a, struct apk_score *b)
+{
+	a->unsatisfiable += b->unsatisfiable;
+	a->preference += b->preference;
+}
+
+static void subscore(struct apk_score *a, struct apk_score *b)
+{
+	a->unsatisfiable -= b->unsatisfiable;
+	a->preference -= b->preference;
+}
+
+static int cmpscore(struct apk_score *a, struct apk_score *b)
+{
+	if (a->unsatisfiable < b->unsatisfiable)
+		return -1;
+	if (a->unsatisfiable > b->unsatisfiable)
+		return 1;
+	if (a->preference < b->preference)
+		return -1;
+	if (a->preference > b->preference)
+		return 1;
+	return 0;
+}
+
+static int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct apk_score *b)
+{
+	if (a1->unsatisfiable+a2->unsatisfiable < b->unsatisfiable)
+		return -1;
+	if (a1->unsatisfiable+a2->unsatisfiable > b->unsatisfiable)
+		return 1;
+	if (a1->preference+a2->preference < b->preference)
+		return -1;
+	if (a1->preference+a2->preference > b->preference)
+		return 1;
+	return 0;
+}
 
 static struct apk_package_state *pkg_to_ps(struct apk_package *pkg)
 {
@@ -327,6 +365,12 @@ static int compare_package_preference(unsigned short solver_flags,
 		return -1;
 	}
 
+	/* upgrading, prefer the installed package */
+	if (pkgA->ipkg != NULL && pkgB->ipkg == NULL)
+		return 1;
+	if (pkgB->ipkg != NULL && pkgA->ipkg == NULL)
+		return -1;
+
 	/* prefer the one with lowest available repository */
 	return ffsl(pkgB->repos) - ffsl(pkgA->repos);
 }
@@ -388,10 +432,18 @@ static int install_if_missing(struct apk_solver_state *ss, struct apk_package *p
 static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name_state *ns = name_to_ns(name);
-	struct apk_package *best_pkg = NULL;
+	struct apk_package *best_pkg = NULL, *preferred_pkg = NULL;
+	struct apk_package_state *preferred_ps = NULL;
 	unsigned int best_topology = 0;
 	unsigned int allowed_repos = ns->allowed_repos | ss->db->repo_tags[0].allowed_repos;
+	unsigned int preferred_repos = ns->preferred_repos;
+	unsigned short name_flags = ns->solver_flags_local
+		| ns->solver_flags_inherited
+		| ss->solver_flags;
 	int i, options = 0, skipped_options = 0;
+
+	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
+	ns->minimum_penalty = (struct apk_score) { 0, 0 };
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
@@ -406,6 +458,16 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		    !(pkg0->repos & allowed_repos)) {
 			skipped_options++;
 			continue;
+		}
+
+		if ((preferred_pkg == NULL) ||
+		    (ps0->conflicts < preferred_ps->conflicts) ||
+		    (ps0->conflicts == preferred_ps->conflicts &&
+		     compare_package_preference(name_flags,
+					        preferred_repos,
+					        pkg0, preferred_pkg) > 0)) {
+			preferred_pkg = pkg0;
+			preferred_ps = ps0;
 		}
 
 		if (ns->requirers == 0 && ns->install_ifs != 0 &&
@@ -447,8 +509,22 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 			   best_topology);
 		if (!list_hashed(&ns->unsolved_list))
 			list_add(&ns->unsolved_list, &ss->unsolved_list_head);
-		if (!ns->locked)
+		if (!ns->locked) {
 			ns->chosen = best_pkg;
+			if (preferred_pkg != NULL &&
+			    preferred_ps->conflicts < ns->requirers) {
+				ns->minimum_penalty = (struct apk_score) {
+					.unsatisfiable = preferred_ps->conflicts,
+					.preference = get_preference(ss, preferred_pkg, FALSE),
+				};
+			} else {
+				ns->minimum_penalty = (struct apk_score) {
+					.unsatisfiable = ns->requirers,
+					.preference = name->pkgs->num,
+				};
+			}
+			addscore(&ss->minimum_penalty, &ns->minimum_penalty);
+		}
 	}
 
 	return options + skipped_options;
@@ -557,8 +633,10 @@ static void push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
 	}
 	ss->latest_decision = pkg;
 
-	dbg_printf("push_decision: adding new BRANCH at topology_position %d\n",
-		   ss->topology_position);
+	dbg_printf("push_decision: adding new BRANCH at topology_position %d (score: unsatisfied %d, preference %d)\n",
+		   ss->topology_position,
+		   ss->score.unsatisfiable,
+		   ss->score.preference);
 
 	if (ps->flags & APK_PKGSTF_INSTALLIF)
 		dbg_printf("triggers due to " PKG_VER_FMT "\n",
@@ -585,10 +663,10 @@ static int next_branch(struct apk_solver_state *ss)
 			ss->latest_decision = ps->backtrack;
 			ss->refresh_name_states = 1;
 		} else {
+			undo_decision(ss, pkg, ps);
+
 			dbg_printf("next_branch: swapping BRANCH at topology_position %d\n",
 				   ss->topology_position);
-
-			undo_decision(ss, pkg, ps);
 
 			ps->flags |= APK_PKGSTF_ALT_BRANCH;
 			ps->flags ^= APK_PKGSTF_INSTALL;
@@ -765,26 +843,17 @@ static int expand_branch(struct apk_solver_state *ss)
 	}
 	ss->refresh_name_states = 0;
 	if (pkg0 == NULL) {
-		struct apk_score penalty_score = {0,0};
-		int penalty_topology = 0;
-
 		list_for_each_entry(ns, &ss->unsolved_list_head, unsolved_list) {
-			if (!ns->locked) {
-				penalty_score.unsatisfiable += ns->requirers;
-				penalty_score.preference += ns->name->pkgs->num;
-				if (penalty_topology < ns->topology_last_touched)
-					penalty_topology = ns->topology_last_touched;
-			}
+			if (ns->locked)
+				continue;
+
+			ss->score.unsatisfiable += ns->requirers;
+			ss->score.preference += ns->name->pkgs->num;
 		}
-		if (ss->penalty_topology < penalty_topology) {
-			ss->penalty_topology = penalty_topology;
-			ss->penalty_score = penalty_score;
-		}
-		ss->score.unsatisfiable += penalty_score.unsatisfiable;
-		ss->score.preference    += penalty_score.preference;
 
 		dbg_printf("expand_branch: list is empty (%d unsatisfied)\n",
 			   ss->score.unsatisfiable);
+
 		return 1;
 	}
 
@@ -963,32 +1032,6 @@ static void apk_solver_free(struct apk_database *db)
 	apk_hash_foreach(&db->available.packages, free_package, NULL);
 }
 
-static int cmpscore(struct apk_score *a, struct apk_score *b)
-{
-	if (a->unsatisfiable < b->unsatisfiable)
-		return -1;
-	if (a->unsatisfiable > b->unsatisfiable)
-		return 1;
-	if (a->preference < b->preference)
-		return -1;
-	if (a->preference > b->preference)
-		return 1;
-	return 0;
-}
-
-static int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct apk_score *b)
-{
-	if (a1->unsatisfiable+a2->unsatisfiable < b->unsatisfiable)
-		return -1;
-	if (a1->unsatisfiable+a2->unsatisfiable > b->unsatisfiable)
-		return 1;
-	if (a1->preference+a2->preference < b->preference)
-		return -1;
-	if (a1->preference+a2->preference > b->preference)
-		return 1;
-	return 0;
-}
-
 int apk_solver_solve(struct apk_database *db,
 		     unsigned short solver_flags,
 		     struct apk_dependency_array *world,
@@ -1015,13 +1058,12 @@ int apk_solver_solve(struct apk_database *db,
 	foreach_dependency(ss, world, apply_constraint);
 	zero_score = ss->score;
 
-	do {
-		if (ss->topology_position <= ss->penalty_topology) {
-			ss->penalty_score = zero_score;
-			ss->penalty_topology = 0;
-		}
+	dbg_printf("solver_solve: zero score: %d unsatisfiable, %d preference\n",
+		   zero_score.unsatisfiable,
+		   zero_score.preference);
 
-		if (cmpscore2(&ss->score, &ss->penalty_score, &ss->best_score) < 0) {
+	do {
+		if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) < 0) {
 			r = expand_branch(ss);
 			if (r) {
 				dbg_printf("solution with: %d unsatisfiable, %d preference\n",
