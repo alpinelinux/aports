@@ -1316,12 +1316,17 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	}
 
 	/* repository id 0 is the no-tag repo */
-	for (i = 1; i < db->num_repo_tags; i++) {
-		if (!db->repo_tags[i].allowed_repos) {
-			apk_warning("Repository tag (%d) '" BLOB_FMT "' used in world is no longer available",
-				    i, BLOB_PRINTF(*db->repo_tags[i].name));
-			db->missing_tags = 1;
-		}
+	for (i = 0; i < db->world->num; i++) {
+		struct apk_dependency *dep = &db->world->item[i];
+		int tag = dep->repository_tag;
+
+		if (tag == 0 || db->repo_tags[tag].allowed_repos != 0)
+			continue;
+
+		apk_warning("The repository tag for world dependency '%s@" BLOB_FMT "' does not exist",
+			    dep->name->name,
+			    BLOB_PRINTF(*db->repo_tags[tag].name));
+		db->missing_tags = 1;
 	}
 
 	if (db->compat_newfeatures) {
