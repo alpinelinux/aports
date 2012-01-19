@@ -1,11 +1,11 @@
 #!/sbin/runscript
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
-# $Header: /var/cvsroot/gentoo-x86/net-misc/dhcp/files/dhcpd.init2,v 1.1 2009/07/09 14:45:22 chainsaw Exp $
+# $Header: /var/cvsroot/gentoo-x86/net-misc/dhcp/files/dhcpd.init5,v 1.1 2011/12/04 22:45:07 vapier Exp $
 
-opts="configtest"
+extra_commands="configtest"
 
-DHCPD_CONF=${DHCPD_CONF:-/etc/dhcp/dhcpd.conf}
+: ${DHCPD_CONF:=/etc/dhcp/${SVCNAME}.conf}
 
 depend() {
 	need net
@@ -14,31 +14,37 @@ depend() {
 }
 
 get_var() {
-	sed -n 's/^[[:blank:]]\?'"$1"' "*\([^#";]\+\).*/\1/p' \
-		"${DHCPD_CHROOT}/${DHCPD_CONF}"
+	local var="$(sed -n 's/^[[:blank:]]\?'"$1"' "*\([^#";]\+\).*/\1/p' "${chroot}${DHCPD_CONF}")"
+	echo ${var:-$2}
 }
 
 checkconfig() {
-	/usr/sbin/dhcpd -cf ${DHCPD_CHROOT}/${DHCPD_CONF} -t 1>/dev/null 2>&1
-	ret=$?
-	if [ $ret -ne 0 ]; then
+	set -- ${DHCPD_OPTS} ${chroot:+-chroot} ${chroot} -t
+
+	dhcpd "$@" 1>/dev/null 2>&1
+	local ret=$?
+	if [ ${ret} -ne 0 ] ; then
 		eerror "${SVCNAME} has detected a syntax error in your configuration files:"
-		/usr/sbin/dhcpd -cf ${DHCPD_CHROOT}/${DHCPD_CONF} -t
+		dhcpd "$@"
 	fi
 
-	return $ret
+	return ${ret}
 }
 
 configtest() {
+	local chroot=${DHCPD_CHROOT%/}
+
 	ebegin "Checking ${SVCNAME} configuration"
 	checkconfig
 	eend $?
 }
 
 start() {
-	# Work out our cffile if it's on our DHCPD_OPTS
+	local chroot=${DHCPD_CHROOT%/}
+
+	# Work out our cffile if it's in our DHCPD_OPTS
 	case " ${DHCPD_OPTS} " in
-		*" -cf "*) 
+		*" -cf "*)
 			DHCPD_CONF=" ${DHCPD_OPTS} "
 			DHCPD_CONF="${DHCPD_CONF##* -cf }"
 			DHCPD_CONF="${DHCPD_CONF%% *}"
@@ -47,49 +53,63 @@ start() {
 			;;
 	esac
 
-	if [ ! -f "${DHCPD_CHROOT}/${DHCPD_CONF}" ] ; then
-		eerror "${DHCPD_CHROOT}/${DHCPD_CONF} does not exist"
+	if [ -n "${chroot}" ] ; then
+		# the config test want's these to exist
+		mkdir -p \
+			"${chroot}"/var/run/dhcp \
+			"${chroot}"/var/lib/dhcp \
+			"${chroot}"/etc/dhcp
+	fi
+
+	# see comment in get_var() above
+	if [ ! -f "${chroot}${DHCPD_CONF}" ] ; then
+		eerror "${chroot}${DHCPD_CONF} does not exist"
 		return 1
 	fi
 
 	checkconfig || return 1
 
-	local leasefile="$(get_var lease-file-name)"
-	leasefile="${DHCPD_CHROOT}/${leasefile:-/var/lib/dhcp/dhcpd.leases}"
-	if [ ! -f "${leasefile}" ] ; then
-		ebegin "Creating ${leasefile}"
-		touch "${leasefile}"
-		chown dhcp:dhcp "${leasefile}"
-		eend $? || return 1
-	fi
+	checkpath -d -o dhcp:dhcp "${chroot}"/var/run/dhcp "${chroot}"/var/lib/dhcp
+
+	local leasefile="$(get_var lease-file-name /var/lib/dhcp/${SVCNAME}.leases)"
+	checkpath -f -o dhcp:dhcp "${chroot}${leasefile}"
 
 	# Setup LD_PRELOAD so name resolution works in our chroot.
-	if [ -n "${DHCPD_CHROOT}" ] ; then
-	    LD_PRELOAD="${LD_PRELOAD} /usr/lib/libresolv.so"
-	    export LD_PRELOAD="${LD_PRELOAD} /usr/lib/libnss_dns.so"
+	if [ -n "${chroot}" ] ; then
+		checkpath -d -o root:root -m 755 "${chroot}"/dev "${chroot}"/etc "${chroot}"/proc
+		cp -pP /etc/localtime /etc/resolv.conf "${chroot}"/etc/
+		export LD_PRELOAD="${LD_PRELOAD} libresolv.so libnss_dns.so"
+		if ! mountinfo -q "${chroot}/proc" ; then
+			mount --bind /proc "${chroot}/proc"
+		fi
 	fi
 
-	local pidfile="$(get_var pid-file-name)"
-	pidfile="${pidfile:-/var/run/dhcp/dhcpd.pid}"
+	local pidfile="$(get_var pid-file-name /var/run/dhcp/${SVCNAME}.pid)"
 
-	ebegin "Starting ${DHCPD_CHROOT:+chrooted }${SVCNAME}"
+	ebegin "Starting ${chroot:+chrooted }${SVCNAME}"
 	start-stop-daemon --start --exec /usr/sbin/dhcpd \
-		--pidfile "${DHCPD_CHROOT}/${pidfile}" \
-		-- ${DHCPD_OPTS} -q -pf "${pidfile}" \
+		--pidfile "${chroot}/${pidfile}" \
+		-- ${DHCPD_OPTS} -q -pf "${pidfile}" -lf "${leasefile}" \
 		-user dhcp -group dhcp \
-		${DHCPD_CHROOT:+-chroot} ${DHCPD_CHROOT} ${DHCPD_IFACE}
+		${chroot:+-chroot} ${chroot} ${DHCPD_IFACE}
 	eend $? \
-	    && save_options chroot "${DHCPD_CHROOT}" \
-	    && save_options pidfile "${pidfile}"
+		&& save_options chroot "${chroot}" \
+		&& save_options pidfile "${pidfile}"
 }
 
 stop() {
 	local chroot="$(get_options chroot)"
-	
-	checkconfig || return 1
 
 	ebegin "Stopping ${chroot:+chrooted }${SVCNAME}"
 	start-stop-daemon --stop --exec /usr/sbin/dhcpd \
-	    --pidfile "${chroot}/$(get_options pidfile)"
-	eend $?
+		--pidfile "${chroot}/$(get_options pidfile)"
+	res=$?
+
+	if [ ${res} -eq 0 ] && [ -n "${chroot}" ] ; then
+		if mountinfo -q "${chroot}/proc" ; then
+			umount "${chroot}/proc"
+		fi
+	fi
+
+	eend $res
 }
