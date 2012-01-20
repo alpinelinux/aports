@@ -325,6 +325,12 @@ static int compare_package_preference(unsigned short solver_flags,
 				      struct apk_package *pkgA,
 				      struct apk_package *pkgB)
 {
+	/* specified on command line directly */
+	if (pkgA->filename && !pkgB->filename)
+		return 1;
+	if (pkgB->filename && !pkgA->filename)
+		return -1;
+
 	if (solver_flags & APK_SOLVERF_PREFER_TAG) {
 		/* preferred repository pinning */
 		if ((pkgA->repos & preferred_repos) && !(pkgB->repos & preferred_repos))
@@ -333,11 +339,11 @@ static int compare_package_preference(unsigned short solver_flags,
 			return -1;
 	} else {
 		/* preferred repository pinning */
-		if ((pkgA->ipkg || pkgA->filename || (pkgA->repos & preferred_repos)) &&
-		    !(pkgB->ipkg || pkgB->filename || (pkgB->repos & preferred_repos)))
+		if ((pkgA->ipkg || (pkgA->repos & preferred_repos)) &&
+		    !(pkgB->ipkg || (pkgB->repos & preferred_repos)))
 			return 1;
-		if ((pkgB->ipkg || pkgA->filename || (pkgB->repos & preferred_repos)) &&
-		    !(pkgA->ipkg || pkgB->filename || (pkgA->repos & preferred_repos)))
+		if ((pkgB->ipkg || (pkgB->repos & preferred_repos)) &&
+		    !(pkgA->ipkg || (pkgA->repos & preferred_repos)))
 			return -1;
 	}
 
@@ -504,9 +510,6 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		dbg_printf("%s: deleted from unsolved: %d requirers, %d install_ifs, %d options, %d skipped\n",
 			   name->name, ns->requirers, ns->install_ifs, options, skipped_options);
 	} else {
-		dbg_printf("%s: added to unsolved: %d requirers, %d install_ifs, %d options (next topology %d)\n",
-			   name->name, ns->requirers, ns->install_ifs, options,
-			   best_topology);
 		if (!list_hashed(&ns->unsolved_list))
 			list_add(&ns->unsolved_list, &ss->unsolved_list_head);
 		if (!ns->locked) {
@@ -517,6 +520,11 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 					.unsatisfiable = preferred_ps->conflicts,
 					.preference = get_preference(ss, preferred_pkg, FALSE),
 				};
+				dbg_printf("%s: min.penalty for name {%d, %d} from pkg " PKG_VER_FMT "\n",
+					   name->name,
+					   ns->minimum_penalty.unsatisfiable,
+					   ns->minimum_penalty.preference,
+					   PKG_VER_PRINTF(preferred_pkg));
 			} else {
 				ns->minimum_penalty = (struct apk_score) {
 					.unsatisfiable = ns->requirers,
@@ -525,6 +533,9 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 			}
 			addscore(&ss->minimum_penalty, &ns->minimum_penalty);
 		}
+		dbg_printf("%s: added to unsolved: %d requirers, %d install_ifs, %d options (next topology %d)\n",
+			   name->name, ns->requirers, ns->install_ifs, options,
+			   best_topology);
 	}
 
 	return options + skipped_options;
@@ -568,6 +579,9 @@ static void apply_decision(struct apk_solver_state *ss,
 		   (ps->flags & APK_PKGSTF_INSTALL) ? "INSTALL" : "NO_INSTALL");
 
 	if (ps->flags & APK_PKGSTF_INSTALL) {
+		subscore(&ss->minimum_penalty, &ns->minimum_penalty);
+		ns->minimum_penalty = (struct apk_score) { 0, 0 };
+
 		ss->assigned_names++;
 		ss->score.unsatisfiable += ps->conflicts;
 		ss->score.preference += get_preference(ss, pkg, FALSE);
