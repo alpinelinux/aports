@@ -1,8 +1,150 @@
 Index: channels/chan_sip.c
 ===================================================================
---- a/channels/chan_sip.c	(revision 351503)
+--- a/channels/chan_sip.c	(revision 352352)
 +++ b/channels/chan_sip.c	(working copy)
-@@ -13246,17 +13246,8 @@
+@@ -2883,6 +2883,11 @@
+ 
+ 	if (which == SIP_PEERS_ALL || peer->the_mark) {
+ 		peer_sched_cleanup(peer);
++		if (peer->dnsmgr) {
++			ast_dnsmgr_release(peer->dnsmgr);
++			ao2_t_ref(peer, -1, "Release peer from dnsmgr");
++			peer->dnsmgr = NULL;
++		}
+ 		return CMP_MATCH;
+ 	}
+ 	return 0;
+@@ -4661,8 +4666,6 @@
+ 		ao2_t_ref(peer->auth, -1, "Removing peer authentication");
+ 		peer->auth = NULL;
+ 	}
+-	if (peer->dnsmgr)
+-		ast_dnsmgr_release(peer->dnsmgr);
+ 
+ 	if (peer->socket.tcptls_session) {
+ 		ao2_ref(peer->socket.tcptls_session, -1);
+@@ -5401,6 +5404,12 @@
+ 	return 0;
+ }
+ 
++/*! \brief The default sip port for the given transport */
++static inline int default_sip_port(enum sip_transport type)
++{
++	return type == SIP_TRANSPORT_TLS ? STANDARD_TLS_PORT : STANDARD_SIP_PORT;
++}
++
+ /*! \brief create address structure from device name
+  *      Or, if peer not found, find it in the global DNS
+  *      returns TRUE (-1) on failure, FALSE on success */
+@@ -5503,9 +5512,7 @@
+ 	}
+ 
+ 	if (!ast_sockaddr_port(&dialog->sa)) {
+-		ast_sockaddr_set_port(&dialog->sa,
+-				      (dialog->socket.type == SIP_TRANSPORT_TLS) ?
+-				      STANDARD_TLS_PORT : STANDARD_SIP_PORT);
++		ast_sockaddr_set_port(&dialog->sa, default_sip_port(dialog->socket.type));
+ 	}
+ 	ast_sockaddr_copy(&dialog->recv, &dialog->sa);
+ 	return 0;
+@@ -5725,7 +5732,6 @@
+ 
+ 	ast_string_field_free_memory(reg);
+ 	ast_atomic_fetchadd_int(&regobjs, -1);
+-	ast_dnsmgr_release(reg->dnsmgr);
+ 	ast_free(reg);
+ }
+ 
+@@ -5739,7 +5745,6 @@
+ 	
+ 	AST_SCHED_DEL(sched, mwi->resub);
+ 	ast_string_field_free_memory(mwi);
+-	ast_dnsmgr_release(mwi->dnsmgr);
+ 	ast_free(mwi);
+ }
+ 
+@@ -12565,6 +12570,67 @@
+ 	return 0;
+ }
+ 
++static void on_dns_update_registry(struct ast_sockaddr *old, struct ast_sockaddr *new, void *data)
++{
++	struct sip_registry *reg = data;
++
++	/* This shouldn't happen, but just in case */
++	if (ast_sockaddr_isnull(new)) {
++		ast_debug(1, "Empty sockaddr change...ignoring!\n");
++		return;
++	}
++
++	if (!ast_sockaddr_port(new)) {
++		ast_sockaddr_set_port(new, reg->portno);
++	}
++	
++	ast_debug(1, "Changing registry %s from %s to %s\n", S_OR(reg->peername, reg->hostname), ast_sockaddr_stringify(old), ast_sockaddr_stringify(new));
++	ast_sockaddr_copy(&reg->us, new);
++}
++
++static void on_dns_update_peer(struct ast_sockaddr *old, struct ast_sockaddr *new, void *data)
++{
++	struct sip_peer *peer = data;
++
++	/* This shouldn't happen, but just in case */
++	if (ast_sockaddr_isnull(new)) {
++		ast_debug(1, "Empty sockaddr change...ignoring!\n");
++		return;
++	}
++
++	ao2_ref(peer, +1);
++	if (!ast_sockaddr_isnull(&peer->addr)) {
++		ao2_unlink(peers_by_ip, peer);
++	}
++
++	if (!ast_sockaddr_port(new)) {
++		ast_sockaddr_set_port(new, default_sip_port(peer->socket.type));
++	}
++
++	ast_debug(1, "Changing peer %s address from %s to %s\n", peer->name, ast_sockaddr_stringify(old), ast_sockaddr_stringify(new));
++
++	ao2_lock(peer);
++	ast_sockaddr_copy(&peer->addr, new);
++	ao2_unlock(peer);
++
++	ao2_link(peers_by_ip, peer);
++	ao2_ref(peer, -1);
++}
++
++static void on_dns_update_mwi(struct ast_sockaddr *old, struct ast_sockaddr *new, void *data)
++{
++	struct sip_subscription_mwi *mwi = data;
++
++	/* This shouldn't happen, but just in case */
++	if (ast_sockaddr_isnull(new)) {
++		ast_debug(1, "Empty sockaddr change...ignoring!\n");
++		return;
++	}
++
++	ast_debug(1, "Changing mwi %s from %s to %s\n", mwi->hostname, ast_sockaddr_stringify(old), ast_sockaddr_stringify(new));
++	ast_sockaddr_copy(&mwi->us, new);
++}
++
+ /*! \brief Actually setup an MWI subscription or resubscribe */
+ static int __sip_subscribe_mwi_do(struct sip_subscription_mwi *mwi)
+ {
+@@ -12574,7 +12640,11 @@
+ 		snprintf(transport, sizeof(transport), "_%s._%s", get_srv_service(mwi->transport), get_srv_protocol(mwi->transport));
+ 
+ 		mwi->us.ss.ss_family = get_address_family_filter(&bindaddr); /* Filter address family */
+-		ast_dnsmgr_lookup(mwi->hostname, &mwi->us, &mwi->dnsmgr, sip_cfg.srvlookup ? transport : NULL);
++		ASTOBJ_REF(mwi); /* Add aref for storing the mwi on the dnsmgr for updates */
++		ast_dnsmgr_lookup(mwi->hostname, &mwi->us, &mwi->dnsmgr, sip_cfg.srvlookup ? transport : NULL, on_dns_update_mwi, mwi);
++		if (!mwi->dnsmgr) {
++			ASTOBJ_UNREF(mwi, sip_subscribe_mwi_destroy); /* dnsmgr disabled, remove reference */
++		}
+ 	}
+ 
+ 	/* If we already have a subscription up simply send a resubscription */
+@@ -13255,17 +13325,8 @@
  	}
  
  	if (r->dnsmgr) {
@@ -20,31 +162,226 @@ Index: channels/chan_sip.c
  	}
  
  	/* If the initial tranmission failed, we may not have an existing dialog,
-@@ -13371,15 +13362,15 @@
+@@ -13348,10 +13409,16 @@
+ 		peer = sip_find_peer(r->hostname, NULL, TRUE, FINDPEERS, FALSE, 0);
+ 		snprintf(transport, sizeof(transport), "_%s._%s",get_srv_service(r->transport), get_srv_protocol(r->transport)); /* have to use static sip_get_transport function */
+ 		r->us.ss.ss_family = get_address_family_filter(&bindaddr); /* Filter address family */
+-		ast_dnsmgr_lookup(peer ? peer->tohost : r->hostname, &r->us, &r->dnsmgr, sip_cfg.srvlookup ? transport : NULL);
++		registry_addref(r, "add reg ref for dnsmgr");
++		ast_dnsmgr_lookup(peer ? peer->tohost : r->hostname, &r->us, &r->dnsmgr, sip_cfg.srvlookup ? transport : NULL, on_dns_update_registry, r);
+ 		if (peer) {
+ 			peer = sip_unref_peer(peer, "removing peer ref for dnsmgr_lookup");
+ 		}
++		if (!r->dnsmgr) {
++			/* dnsmgr refresh disabled, no reference added! */
++			registry_unref(r, "remove reg ref, dnsmgr disabled");
++		}
++
+ 	}
+ 
+ 	if (r->call) {	/* We have a registration */
+@@ -13380,18 +13447,21 @@
  		}
  
  		/* Use port number specified if no SRV record was found */
 -		if (!ast_sockaddr_port(&r->us) && r->portno) {
-+		if (!ast_sockaddr_isnull(&r->us) && !ast_sockaddr_port(&r->us) && r->portno) {
- 			ast_sockaddr_set_port(&r->us, r->portno);
- 		}
+-			ast_sockaddr_set_port(&r->us, r->portno);
+-		}
++		if (!ast_sockaddr_isnull(&r->us)) {
++			if (!ast_sockaddr_port(&r->us) && r->portno) {
++				ast_sockaddr_set_port(&r->us, r->portno);
++			}
++			/* It is possible that DNS was unavailable at the time the peer was created.
++			 * Here, if we've update the address in the registry via manually calling
++			 * ast_dnsmgr_lookup() above, then we call the same function that dnsmgr would
++			 * call if it was updating a peer's address */
  
- 		/* It is possible that DNS is unavailable at the time the peer is created. Here, if
- 		 * we've updated the address in the registry, we copy it to the peer so that
- 		 * create_addr() can copy it to the dialog via create_addr_from_peer */
+-		/* It is possible that DNS is unavailable at the time the peer is created. Here, if
+-		 * we've updated the address in the registry, we copy it to the peer so that
+-		 * create_addr() can copy it to the dialog via create_addr_from_peer */
 -		if ((peer = sip_find_peer(r->hostname, NULL, TRUE, FINDPEERS, FALSE, 0))) {
 -			if (ast_sockaddr_isnull(&peer->addr) && !(ast_sockaddr_isnull(&r->us))) {
-+		if ((peer = sip_find_peer(S_OR(r->peername, r->hostname), NULL, TRUE, FINDPEERS, FALSE, 0))) {
-+			if ((ast_sockaddr_isnull(&peer->addr) || !ast_sockaddr_port(&peer->addr)) && !(ast_sockaddr_isnull(&r->us))) {
- 				ast_sockaddr_copy(&peer->addr, &r->us);
+-				ast_sockaddr_copy(&peer->addr, &r->us);
++			if ((peer = sip_find_peer(S_OR(r->peername, r->hostname), NULL, TRUE, FINDPEERS, FALSE, 0))) {
++				if (ast_sockaddr_cmp(&peer->addr, &r->us)) {
++					on_dns_update_peer(&peer->addr, &r->us, peer);
++				}
++				peer = sip_unref_peer(peer, "unref after sip_find_peer");
  			}
- 			peer = sip_unref_peer(peer, "unref after sip_find_peer");
-@@ -14244,7 +14235,7 @@
- 		/* Don't trust the contact field.  Just use what they came to us
- 		   with */
- 		ast_debug(1, "Store REGISTER's src-IP:port for call routing.\n");
--		peer->addr = pvt->recv;
-+		ast_sockaddr_copy(&peer->addr, &pvt->recv);
+-			peer = sip_unref_peer(peer, "unref after sip_find_peer");
+ 		}
+ 
+ 		/* Find address to hostname */
+@@ -14243,9 +14313,7 @@
+ 		peer->portinuri = ast_sockaddr_port(&testsa) ? TRUE : FALSE;
+ 
+ 		if (!ast_sockaddr_port(&testsa)) {
+-			ast_sockaddr_set_port(&testsa,
+-						  transport_type == SIP_TRANSPORT_TLS ?
+-						  STANDARD_TLS_PORT : STANDARD_SIP_PORT);
++			ast_sockaddr_set_port(&testsa, default_sip_port(transport_type));
+ 		}
+ 
+ 		ast_sockaddr_copy(&peer->addr, &testsa);
+@@ -28327,11 +28395,16 @@
+ 		snprintf(transport, sizeof(transport), "_%s._%s", get_srv_service(peer->socket.type), get_srv_protocol(peer->socket.type));
+ 
+ 		peer->addr.ss.ss_family = get_address_family_filter(&bindaddr); /* Filter address family */
+-		if (ast_dnsmgr_lookup(_srvlookup, &peer->addr, &peer->dnsmgr, sip_cfg.srvlookup && !peer->portinuri ? transport : NULL)) {
++		ao2_t_ref(peer, +1, "Store peer on dnsmgr"); /* Ref for storing peer (and peer->addr) on the dnsmgr for the callback */
++		if (ast_dnsmgr_lookup(_srvlookup, &peer->addr, &peer->dnsmgr, sip_cfg.srvlookup && !peer->portinuri ? transport : NULL, on_dns_update_peer, peer)) {
+ 			ast_log(LOG_ERROR, "srvlookup failed for host: %s, on peer %s, removing peer\n", _srvlookup, peer->name);
+ 			sip_unref_peer(peer, "getting rid of a peer pointer");
+ 			return NULL;
+ 		}
++		if (!peer->dnsmgr) {
++			/* dnsmgr refresh disabeld, release reference */
++			ao2_t_ref(peer, -1, "dnsmgr disabled, unref peer");
++		}
+ 
+ 		ast_string_field_set(peer, tohost, srvlookup);
+ 
+@@ -28549,6 +28622,11 @@
+ 				if (iterator->timeout > -1) {
+ 					AST_SCHED_DEL_UNREF(sched, iterator->timeout, registry_unref(iterator, "reg ptr unref from reload config"));
+ 				}
++				if (iterator->dnsmgr) {
++					ast_dnsmgr_release(iterator->dnsmgr);
++					registry_unref(iterator, "reg ptr unref from dnsmgr");
++					iterator->dnsmgr = NULL;
++				}
+ 				ASTOBJ_UNLOCK(iterator);
+ 		} while(0));
+ 
+@@ -31105,8 +31183,29 @@
+ 		ast_free(default_tls_cfg.capath);
  	}
  
- 	/* Check that they're allowed to register at this IP */
++	ASTOBJ_CONTAINER_TRAVERSE(&regl, 1, do {  /* regl is locked */
++			ASTOBJ_RDLOCK(iterator); /* now regl is locked, and the object is also locked */
++			if (iterator->dnsmgr) {
++				ast_dnsmgr_release(iterator->dnsmgr);
++				registry_unref(iterator, "reg ptr unref from dnsmgr");
++				iterator->dnsmgr = NULL;
++			}
++			ASTOBJ_UNLOCK(iterator);
++	} while(0));
++
+ 	ASTOBJ_CONTAINER_DESTROYALL(&regl, sip_registry_destroy);
+ 	ASTOBJ_CONTAINER_DESTROY(&regl);
++
++	ASTOBJ_CONTAINER_TRAVERSE(&submwil, 1, do {
++		ASTOBJ_RDLOCK(iterator);
++		if (iterator->dnsmgr) {
++			ast_dnsmgr_release(iterator->dnsmgr);
++			ASTOBJ_UNREF(iterator, sip_subscribe_mwi_destroy);
++			iterator->dnsmgr = NULL;
++		}
++		ASTOBJ_UNLOCK(iterator);
++	} while(0));
++
+ 	ASTOBJ_CONTAINER_DESTROYALL(&submwil, sip_subscribe_mwi_destroy);
+ 	ASTOBJ_CONTAINER_DESTROY(&submwil);
+ 
+Index: channels/chan_iax2.c
+===================================================================
+--- a/channels/chan_iax2.c	(revision 352352)
++++ b/channels/chan_iax2.c	(working copy)
+@@ -8587,7 +8587,7 @@
+ 		return -1;
+ 
+ 	reg->addr.ss.ss_family = AF_INET;
+-	if (ast_dnsmgr_lookup(hostname, &reg->addr, &reg->dnsmgr, srvlookup ? "_iax._udp" : NULL) < 0) {
++	if (ast_dnsmgr_lookup(hostname, &reg->addr, &reg->dnsmgr, srvlookup ? "_iax._udp" : NULL, NULL, NULL) < 0) {
+ 		ast_free(reg);
+ 		return -1;
+ 	}
+@@ -12595,7 +12595,7 @@
+ 					/* Non-dynamic.  Make sure we become that way if we're not */
+ 					AST_SCHED_DEL(sched, peer->expire);
+ 					ast_clear_flag64(peer, IAX_DYNAMIC);
+-					if (ast_dnsmgr_lookup(v->value, &peer->addr, &peer->dnsmgr, srvlookup ? "_iax._udp" : NULL))
++					if (ast_dnsmgr_lookup(v->value, &peer->addr, &peer->dnsmgr, srvlookup ? "_iax._udp" : NULL, NULL, NULL))
+ 						return peer_unref(peer);
+ 					if (!ast_sockaddr_port(&peer->addr)) {
+ 						ast_sockaddr_set_port(&peer->addr, IAX_DEFAULT_PORTNO);
+Index: include/asterisk/dnsmgr.h
+===================================================================
+--- a/include/asterisk/dnsmgr.h	(revision 352352)
++++ b/include/asterisk/dnsmgr.h	(working copy)
+@@ -37,6 +37,8 @@
+  */
+ struct ast_dnsmgr_entry;
+ 
++typedef void (*dns_update_func)(struct ast_sockaddr *old_addr, struct ast_sockaddr *new_addr, void *data);
++
+ /*!
+  * \brief Allocate a new DNS manager entry
+  *
+@@ -102,7 +104,7 @@
+  * \retval non-zero failure
+  * \version 1.6.1 result changed from struct in_addr to struct aockaddr_in to store port number
+  */
+-int ast_dnsmgr_lookup(const char *name, struct ast_sockaddr *result, struct ast_dnsmgr_entry **dnsmgr, const char *service);
++int ast_dnsmgr_lookup(const char *name, struct ast_sockaddr *result, struct ast_dnsmgr_entry **dnsmgr, const char *service, dns_update_func func, void *data);
+ 
+ /*!
+  * \brief Force a refresh of a dnsmgr entry
+Index: main/dnsmgr.c
+===================================================================
+--- a/main/dnsmgr.c	(revision 352352)
++++ b/main/dnsmgr.c	(working copy)
+@@ -58,6 +58,10 @@
+ 	unsigned int family;
+ 	/*! Set to 1 if the entry changes */
+ 	unsigned int changed:1;
++	/*! Data to pass back to update_func */
++	void *data;
++	/*! The callback function to execute on address update */
++	dns_update_func update_func;
+ 	ast_mutex_t lock;
+ 	AST_RWLIST_ENTRY(ast_dnsmgr_entry) list;
+ 	/*! just 1 here, but we use calloc to allocate the correct size */
+@@ -129,7 +133,7 @@
+ 	ast_free(entry);
+ }
+ 
+-int ast_dnsmgr_lookup(const char *name, struct ast_sockaddr *result, struct ast_dnsmgr_entry **dnsmgr, const char *service)
++int ast_dnsmgr_lookup(const char *name, struct ast_sockaddr *result, struct ast_dnsmgr_entry **dnsmgr, const char *service, dns_update_func func, void *data)
+ {
+ 	unsigned int family;
+ 
+@@ -164,6 +168,8 @@
+ 	
+ 	ast_verb(3, "adding dns manager for '%s'\n", name);
+ 	*dnsmgr = ast_dnsmgr_get(name, result, service);
++	(*dnsmgr)->update_func = func;
++	(*dnsmgr)->data = data;
+ 	return !*dnsmgr;
+ }
+ 
+@@ -186,16 +192,19 @@
+ 		if (!ast_sockaddr_port(&tmp)) {
+ 			ast_sockaddr_set_port(&tmp, ast_sockaddr_port(entry->result));
+ 		}
+-
+ 		if (ast_sockaddr_cmp(&tmp, entry->result)) {
+ 			const char *old_addr = ast_strdupa(ast_sockaddr_stringify(entry->result));
+ 			const char *new_addr = ast_strdupa(ast_sockaddr_stringify(&tmp));
+ 
+-			ast_log(LOG_NOTICE, "dnssrv: host '%s' changed from %s to %s\n",
+-					entry->name, old_addr, new_addr);
++			if (entry->update_func) {
++				entry->update_func(entry->result, &tmp, entry->data);
++			} else {
++				ast_log(LOG_NOTICE, "dnssrv: host '%s' changed from %s to %s\n",
++						entry->name, old_addr, new_addr);
+ 
+-			ast_sockaddr_copy(entry->result, &tmp);
+-			changed = entry->changed = 1;
++				ast_sockaddr_copy(entry->result, &tmp);
++				changed = entry->changed = 1;
++			}
+ 		}
+ 	}
+ 
