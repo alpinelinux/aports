@@ -1,0 +1,232 @@
+#!/sbin/runscript
+#
+# Copyright (C) 2008 Mark Buechler <mark.buechler@gmail.com>
+# Copyright (C) 2009-2011 Bart Van Assche <bvanassche@acm.org>
+# This software is made available under the GPLv2 license.
+#
+# System startup script for SCST.
+#
+# See also:
+# * http://refspecs.freestandards.org/LSB_4.1.0/LSB-Core-generic/LSB-Core-generic/iniscrptact.html
+# * http://www.opengroup.org/onlinepubs/009695399/utilities/xcu_chap02.html
+#
+
+SCST_CFG=/etc/scst.conf
+
+if [ ! -e /lib/lsb/init-functions ]; then
+    # Slackware and Gentoo.
+rc_status() {
+  _rc_status_ret=$?
+  for i; do
+    case "$i" in
+      -v)
+        case "${_rc_status_ret}" in
+          0) echo "OK";;
+          *) echo "Not running";;
+        esac
+        ;;
+    esac
+  done
+  return ${_rc_status_ret}
+}
+start_daemon() {
+    "$@" >/dev/null 2>&1 &
+}
+killproc() {
+    local exe="`basename "$1"`"
+    killall $exe
+    rm -f "/var/run/$exe.pid"
+}
+fi
+
+# Whether or not there is a "TARGET_DRIVER iscsi" section in scst.conf.
+using_iscsi() {
+    for m in $SCST_MODULES; do
+        if [ $m = "iscsi_scst" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Parse scst.conf and assign the list of associated kernel modules to
+# SCST_MODULES.
+parse_scst_conf() {
+    SCST_MODULES="scst"
+    SCST_OPT_MODULES=""
+    SCST_DAEMONS=""
+    if [ ! -e $SCST_CFG ]; then
+        return 0
+    fi
+    local nonblanks="[^ 	]\{1,\}"
+    local blanks="[ 	]\{1,\}"
+    SCST_MODULES="$SCST_MODULES `sed -n -e 's/^HANDLER'"$blanks"'\('"$nonblanks"'\)'"$blanks"'{$/\1/p' \
+                         -e 's/^\[HANDLER'"$blanks"'\('"$nonblanks"'\)\]$/\1/p' $SCST_CFG \
+        | while read h; do
+            case "$h" in
+                dev_cdrom)      echo scst_cdrom;;
+                dev_changer)    echo scst_changer;;
+                dev_disk*)      echo scst_disk;;
+                dev_modisk*)    echo scst_modisk;;
+                dev_processor)  echo scst_processor;;
+                dev_raid)       echo scst_raid;;
+                dev_tape*)      echo scst_tape;;
+                dev_user)       echo scst_user;;
+                vdisk*|vcdrom)  echo scst_vdisk;;
+                *)              echo "$h";;
+            esac
+        done | sort -u` \
+        `sed -n 's/^TARGET_DRIVER'"$blanks"'\('"$nonblanks"'\)'"$blanks"'{$/\1/p' $SCST_CFG | while read d; do
+            case "$d" in
+                iscsi)    echo iscsi_scst;;
+                qla2x00t) echo qla2x00tgt;;
+                *)        echo "$d";;
+            esac
+        done | sort -u` \
+        $SCST_TARGET_MODULES"
+    if using_iscsi; then
+        case "`uname -m`" in
+            x86_64|i686)
+                SCST_OPT_MODULES="crc32c-intel $SCST_OPT_MODULES";;
+        esac
+        SCST_OPT_MODULES="crc32c $SCST_OPT_MODULES"
+        SCST_DAEMONS="/usr/local/sbin/iscsi-scstd $SCST_DAEMONS"
+    fi
+}
+
+# Unload SCST. parse_scst_conf must already have been invoked.
+unload_scst() {
+    for d in $SCST_DAEMONS; do
+        killproc $d
+    done
+
+    reverse_list=""
+    for m in $SCST_MODULES; do
+        reverse_list="$m $reverse_list"
+    done
+    for m in $reverse_list; do
+        refcnt="`cat /sys/module/$m/refcnt 2>/dev/null`"
+        if [ ! -z "$refcnt" ] && [ "$refcnt" -gt 0 ]; then
+            # Apparently it can happen that the iscsi_scst refcnt is only
+            # decremented a short time after killproc finished. If that
+            # occurs, sleep for a short time.
+            sleep 1
+        fi
+        if [ -e /sys/module/$m/refcnt ] && ! rmmod $m; then
+            return 1
+        fi
+    done
+    for m in $SCST_OPT_MODULES; do
+        reverse_list="$m $reverse_list"
+    done
+    for m in $reverse_list; do
+        rmmod $m >/dev/null 2>&1
+    done
+
+    # Clear the config in case unloading failed or SCST has been built into the
+    # kernel
+    if [ -e /sys/module/scst ]; then
+        scstadmin -noprompt -force -clear_config >/dev/null 2>&1
+    fi
+
+    return 0
+}
+
+start_scst() {
+        if [ -e /sys/module/scst -a -e /sys/module/scst/refcnt ]; then
+            echo Already started
+            return 1
+        fi
+
+        parse_scst_conf
+
+        for m in $SCST_OPT_MODULES; do
+            modprobe $m >/dev/null 2>&1
+        done
+
+        for m in $SCST_MODULES; do
+            if [ ! -e /sys/module/$m ]; then
+                if ! modprobe $m; then
+                    echo modprobe $m failed.
+                    unload_scst
+                    return 5
+                fi
+            fi
+        done
+
+        for d in $SCST_DAEMONS; do
+            options=""
+            if [ "$(basename "$d")" = "iscsi-scstd" ]; then
+                options="${ISCSID_OPTIONS}"
+            fi            
+            if ! start_daemon $d $options; then
+                echo "Starting $d failed"
+                unload_scst
+                return 1
+            fi
+        done
+
+        if [ -f $SCST_CFG ]; then
+            scstadmin -force -noprompt -clear_config >/dev/null 2>&1
+            tmpout=/tmp/scstadmin-output-$$
+            if scstadmin -config $SCST_CFG >$tmpout 2>&1; then
+                rm -f $tmpout
+       	        return 0
+            else
+                cat $tmpout
+                rm -f $tmpout
+                unload_scst
+                return 1
+            fi
+        else
+            echo "SCST configuration file $SCST_CFG missing"
+	    return 0
+        fi
+}
+
+stop_scst() {
+        if ! parse_scst_conf; then
+            return 1
+        fi
+
+        unload_scst
+}
+
+scst_status() {
+        # Status has a slightly different meaning for the status command:
+        # 0 - service running
+        # 1 - service dead, but /var/run/  pid  file exists
+        # 2 - service dead, but /var/lock/ lock file exists
+        # 3 - service not running
+
+        parse_scst_conf
+
+        for m in $SCST_MODULES; do
+            if [ ! -e /sys/module/$m ]; then
+                echo "$m: not loaded"
+                return 3
+            fi
+        done
+	return 0
+}
+
+depend() {
+    need localmount
+    need net
+}
+
+checkconfig() {
+     true
+}
+
+start() {
+    ebegin "Starting SCST"
+    start_scst
+    eend $?
+}
+
+stop() {
+    ebegin "Stopping SCST"
+    stop_scst
+    eend $?
+}
