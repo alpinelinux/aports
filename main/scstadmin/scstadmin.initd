@@ -1,232 +1,174 @@
 #!/sbin/runscript
 #
 # Copyright (C) 2008 Mark Buechler <mark.buechler@gmail.com>
-# Copyright (C) 2009-2011 Bart Van Assche <bvanassche@acm.org>
+# Copyright (C) 2009 Bart Van Assche <bvanassche@acm.org>
+# Copyright (C) 2010 Scott Bowe <scottb@sentania.net>
 # This software is made available under the GPLv2 license.
 #
-# System startup script for SCST.
+# System startup script for the SCST core functionality.
 #
-# See also:
-# * http://refspecs.freestandards.org/LSB_4.1.0/LSB-Core-generic/LSB-Core-generic/iniscrptact.html
-# * http://www.opengroup.org/onlinepubs/009695399/utilities/xcu_chap02.html
+# Customized for gentoo linux by Scott Bowe.
 #
+# Note: on most Linux distributions /bin/sh is a soft link to /bin/bash, while
+# on a default Ubuntu setup /bin/sh is a soft link to /bin/dash !
 
+opts="${opts} try_restart reload force_reload"
+depend() {
+        use logger
+}
+
+DEFAULTFILE="/etc/conf.d/scst"
 SCST_CFG=/etc/scst.conf
+MODPROBE="/sbin/modprobe"
+RMMOD="/sbin/rmmod"
 
-if [ ! -e /lib/lsb/init-functions ]; then
-    # Slackware and Gentoo.
-rc_status() {
-  _rc_status_ret=$?
-  for i; do
-    case "$i" in
-      -v)
-        case "${_rc_status_ret}" in
-          0) echo "OK";;
-          *) echo "Not running";;
-        esac
-        ;;
-    esac
-  done
-  return ${_rc_status_ret}
-}
-start_daemon() {
-    "$@" >/dev/null 2>&1 &
-}
-killproc() {
-    local exe="`basename "$1"`"
-    killall $exe
-    rm -f "/var/run/$exe.pid"
-}
+if [ -f $DEFAULTFILE ]; then
+  . $DEFAULTFILE
 fi
 
-# Whether or not there is a "TARGET_DRIVER iscsi" section in scst.conf.
-using_iscsi() {
-    for m in $SCST_MODULES; do
-        if [ $m = "iscsi_scst" ]; then
-            return 0
-        fi
-    done
-    return 1
-}
+# Modules to load/unload.
+#
+# !!! DON'T ADD HERE TARGET DRIVERS, WHICH IMMEDIATELLY START ACCEPTING
+# !!! NEW CONNECTIONS, BECAUSE AT THIS POINT ACCESS CONTROL HASN'T CONFIGURED
+# !!! YET!
+#
+SCST_MODULES="scst scst_disk scst_vdisk"
 
-# Parse scst.conf and assign the list of associated kernel modules to
-# SCST_MODULES.
-parse_scst_conf() {
-    SCST_MODULES="scst"
-    SCST_OPT_MODULES=""
-    SCST_DAEMONS=""
-    if [ ! -e $SCST_CFG ]; then
-        return 0
-    fi
-    local nonblanks="[^ 	]\{1,\}"
-    local blanks="[ 	]\{1,\}"
-    SCST_MODULES="$SCST_MODULES `sed -n -e 's/^HANDLER'"$blanks"'\('"$nonblanks"'\)'"$blanks"'{$/\1/p' \
-                         -e 's/^\[HANDLER'"$blanks"'\('"$nonblanks"'\)\]$/\1/p' $SCST_CFG \
-        | while read h; do
-            case "$h" in
-                dev_cdrom)      echo scst_cdrom;;
-                dev_changer)    echo scst_changer;;
-                dev_disk*)      echo scst_disk;;
-                dev_modisk*)    echo scst_modisk;;
-                dev_processor)  echo scst_processor;;
-                dev_raid)       echo scst_raid;;
-                dev_tape*)      echo scst_tape;;
-                dev_user)       echo scst_user;;
-                vdisk*|vcdrom)  echo scst_vdisk;;
-                *)              echo "$h";;
-            esac
-        done | sort -u` \
-        `sed -n 's/^TARGET_DRIVER'"$blanks"'\('"$nonblanks"'\)'"$blanks"'{$/\1/p' $SCST_CFG | while read d; do
-            case "$d" in
-                iscsi)    echo iscsi_scst;;
-                qla2x00t) echo qla2x00tgt;;
-                *)        echo "$d";;
-            esac
-        done | sort -u` \
-        $SCST_TARGET_MODULES"
-    if using_iscsi; then
-        case "`uname -m`" in
-            x86_64|i686)
-                SCST_OPT_MODULES="crc32c-intel $SCST_OPT_MODULES";;
-        esac
-        SCST_OPT_MODULES="crc32c $SCST_OPT_MODULES"
-        SCST_DAEMONS="/usr/local/sbin/iscsi-scstd $SCST_DAEMONS"
-    fi
-}
-
-# Unload SCST. parse_scst_conf must already have been invoked.
-unload_scst() {
-    for d in $SCST_DAEMONS; do
-        killproc $d
-    done
-
-    reverse_list=""
-    for m in $SCST_MODULES; do
-        reverse_list="$m $reverse_list"
-    done
-    for m in $reverse_list; do
-        refcnt="`cat /sys/module/$m/refcnt 2>/dev/null`"
-        if [ ! -z "$refcnt" ] && [ "$refcnt" -gt 0 ]; then
-            # Apparently it can happen that the iscsi_scst refcnt is only
-            # decremented a short time after killproc finished. If that
-            # occurs, sleep for a short time.
-            sleep 1
-        fi
-        if [ -e /sys/module/$m/refcnt ] && ! rmmod $m; then
-            return 1
-        fi
-    done
-    for m in $SCST_OPT_MODULES; do
-        reverse_list="$m $reverse_list"
-    done
-    for m in $reverse_list; do
-        rmmod $m >/dev/null 2>&1
-    done
-
-    # Clear the config in case unloading failed or SCST has been built into the
-    # kernel
-    if [ -e /sys/module/scst ]; then
-        scstadmin -noprompt -force -clear_config >/dev/null 2>&1
-    fi
-
-    return 0
-}
-
-start_scst() {
-        if [ -e /sys/module/scst -a -e /sys/module/scst/refcnt ]; then
-            echo Already started
-            return 1
-        fi
-
-        parse_scst_conf
-
-        for m in $SCST_OPT_MODULES; do
-            modprobe $m >/dev/null 2>&1
-        done
-
-        for m in $SCST_MODULES; do
-            if [ ! -e /sys/module/$m ]; then
-                if ! modprobe $m; then
-                    echo modprobe $m failed.
-                    unload_scst
-                    return 5
-                fi
-            fi
-        done
-
-        for d in $SCST_DAEMONS; do
-            options=""
-            if [ "$(basename "$d")" = "iscsi-scstd" ]; then
-                options="${ISCSID_OPTIONS}"
-            fi            
-            if ! start_daemon $d $options; then
-                echo "Starting $d failed"
-                unload_scst
-                return 1
-            fi
-        done
-
-        if [ -f $SCST_CFG ]; then
-            scstadmin -force -noprompt -clear_config >/dev/null 2>&1
-            tmpout=/tmp/scstadmin-output-$$
-            if scstadmin -config $SCST_CFG >$tmpout 2>&1; then
-                rm -f $tmpout
-       	        return 0
-            else
-                cat $tmpout
-                rm -f $tmpout
-                unload_scst
-                return 1
-            fi
-        else
-            echo "SCST configuration file $SCST_CFG missing"
-	    return 0
-        fi
-}
-
-stop_scst() {
-        if ! parse_scst_conf; then
-            return 1
-        fi
-
-        unload_scst
-}
-
-scst_status() {
-        # Status has a slightly different meaning for the status command:
-        # 0 - service running
-        # 1 - service dead, but /var/run/  pid  file exists
-        # 2 - service dead, but /var/lock/ lock file exists
-        # 3 - service not running
-
-        parse_scst_conf
-
-        for m in $SCST_MODULES; do
-            if [ ! -e /sys/module/$m ]; then
-                echo "$m: not loaded"
-                return 3
-            fi
-        done
-	return 0
-}
-
-depend() {
-    need localmount
-    need net
-}
+# Return values according to LSB for all commands but status:
+# 0 - success
+# 1 - generic or unspecified error
+# 2 - invalid or excess argument(s)
+# 3 - unimplemented feature (e.g. "reload")
+# 4 - insufficient privilege
+# 5 - program is not installed
+# 6 - program is not configured
+# 7 - program is not running
+#
 
 checkconfig() {
-     true
+        if [ ! -f $SCST_CFG ] ; then
+                eerror "Please create $SCST_CFG"
+                return 1
+        fi
+        return 0
+}
+
+checkinstall() {
+        if [ ! -x `which scstadmin` ] ; then
+                eerror "scstadmin is not intalled"
+                return 1
+        fi
+        return 0
 }
 
 start() {
-    ebegin "Starting SCST"
-    start_scst
-    eend $?
+        ebegin "Loading and configuring the mid-level SCSI target SCST"
+        eindent
+        checkconfig
+        checkinstall || return $?
+        ret=0
+        for module in ${SCST_MODULES}; do
+                einfo "Loading SCST module ${module}..."
+                if ! modprobe "${module}"; then
+                        eerror "${module} failed to load"
+                        eend $? "Failed to load SCST"
+                        return $?
+                fi
+        done
+        einfo "Configuring SCST..."
+        eindent
+        if [ -f $SCST_CFG ]; then
+                if scstadmin -config $SCST_CFG >/dev/null 2>&1; then
+                        einfo "SCST config was loaded"
+                else
+                        eend $? "SCST config could not be loaded"
+                        return $?
+                fi
+        else
+                einfo "SCST configuration file $SCST_CFG missing, skipping"
+                return 0
+        fi
+        eoutdent
+        eoutdent
+        einfo "SCST loaded!!!"
+        eend $?
 }
 
 stop() {
-    ebegin "Stopping SCST"
-    stop_scst
-    eend $?
+        ## Stop the service.
+        ebegin "Stopping the mid-level SCSI target SCST"
+                eindent
+        reverse_list=""
+        for module in ${SCST_MODULES}; do
+                reverse_list="${module} ${reverse_list}"
+        done
+        for module in ${reverse_list}; do
+                einfo "Unloading ${module}"
+                if [ -e "/sys/module/${module}" ] && ! rmmod "${module}"; then
+                        eindent
+                        eend $? "Failed to unload ${module}"
+                        return $?
+                fi
+        done
+        eoutdent
+        einfo "SCST unloaded!!!"
+        eend $?
+}
+
+restart() {
+        ## Stop and restart the service if the service is already running,
+        ## otherwise start the service.
+        stop
+        sleep 3
+        start
+}
+
+try_restart() {
+        ## Restart the service if the service is already running.
+        status >/dev/null 2>&1 && restart
+}
+
+reload() {
+        ## Cause the configuration of the service to be reloaded without
+        ## actually stopping and restarting the service.
+        einfo "Reloading SCST configuration"
+        eindent
+        if scstadmin -config $SCST_CFG >/dev/null 2>&1; then
+                ret=0
+                ebegin "SCST config reloaded"
+        else
+                eend $? "SCST config could not be releaded"
+                exit 1
+        fi
+}
+
+force_reload() {
+        ## Cause the configuration to be reloaded if the service supports this,
+        ## otherwise restart the service if it is running.
+        einfo "Reloading SCST configuration"
+        eindent
+        if scstadmin -config $SCST_CFG >/dev/null 2>&1; then
+                ret=0
+                ebegin "SCST config reloaded"
+        else
+                restart
+        fi
+}
+
+status() {
+        ## Print the current status of the service.
+        einfo "SCST status: "
+        eindent
+
+        for module in ${SCST_MODULES}; do
+                if [ ! -e "/sys/module/${module}" ]; then
+                        einfo "${module} not loaded"
+                        ret=3
+                        eend $ret
+                        return $ret
+                fi
+        done
+        ret=0
+        ebegin "SCST modules loaded OK"
+        eend $ret
 }
