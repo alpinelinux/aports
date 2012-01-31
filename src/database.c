@@ -1138,7 +1138,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	struct apk_bstream *bs;
 	struct statfs stfs;
 	apk_blob_t blob;
-	int r, fd, rr = 0;
+	int r, fd;
 
 	memset(db, 0, sizeof(*db));
 	if (apk_flags & APK_SIMULATE) {
@@ -1293,25 +1293,23 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	}
 
 	if (!(dbopts->open_flags & APK_OPENF_NO_SYS_REPOS)) {
-		list_for_each_entry(repo, &dbopts->repository_list, list) {
-			r = apk_db_add_repository(db, APK_BLOB_STR(repo->url));
-			rr = r ?: rr;
-		}
+		list_for_each_entry(repo, &dbopts->repository_list, list)
+			apk_db_add_repository(db, APK_BLOB_STR(repo->url));
 		blob = apk_blob_from_file(
 			db->root_fd,
 			dbopts->repositories_file ?: "etc/apk/repositories");
 		if (!APK_BLOB_IS_NULL(blob)) {
-			r = apk_blob_for_each_segment(
+			apk_blob_for_each_segment(
 				blob, "\n",
 				apk_db_add_repository, db);
-			rr = r ?: rr;
 			free(blob.ptr);
 		}
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_db_index_write_nr_cache(db);
 	}
-	if (rr != 0) {
-		r = rr;
+	if (db->bad_repos && !(apk_flags & APK_FORCE)) {
+		apk_error("Aborting due to some repositories failed to load. Use --force to ignore this error.");
+		r = -EBADMSG;
 		goto ret_r;
 	}
 
@@ -1322,7 +1320,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			    "might not function properly");
 	}
 
-	return rr;
+	return 0;
 
 ret_errno:
 	r = -errno;
@@ -1641,7 +1639,7 @@ struct apk_repository *apk_db_select_repo(struct apk_database *db,
 			0xf5,0xa7,0x0a,0x7c,0x17,0x26,0x69,0xb0,0x05,0x38 },
 		.csum.type = APK_CHECKSUM_SHA1,
 	};
-	unsigned int repos = pkg->repos;
+	unsigned int repos = pkg->repos & ~(db->bad_repos);
 	int i;
 
 	/* Always prefer local repositories */
@@ -1737,7 +1735,8 @@ static int load_index(struct apk_database *db, struct apk_bstream *bs,
 		r = apk_tar_parse(is, load_apkindex, &ctx, FALSE, &db->id_cache);
 		is->close(is);
 		apk_sign_ctx_free(&ctx.sctx);
-		if (ctx.found == 0)
+
+		if (r >= 0 && ctx.found == 0)
 			r = -ENOMSG;
 	} else {
 		bs = apk_bstream_from_istream(apk_bstream_gunzip(bs));
@@ -1799,16 +1798,20 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 		db->local_repos |= BIT(r);
 		bs = apk_repo_file_open(repo, db->arch, apkindex_tar_gz, buf, sizeof(buf));
 	}
-	db->repo_tags[tag_id].allowed_repos |= BIT(r);
-	if (bs == NULL) {
-		apk_warning("%s: index failed to open", buf);
-		return 0;
+	if (bs != NULL)
+		r = load_index(db, bs, targz, r);
+	else
+		r = -ENOENT;
+
+	if (r != 0) {
+		apk_warning("Ignoring %s: %s", buf, apk_error_str(r));
+		db->bad_repos |= BIT(r);
+		r = 0;
+	} else {
+		db->repo_tags[tag_id].allowed_repos |= BIT(r);
 	}
 
-	r = load_index(db, bs, targz, r);
-	if (r != 0)
-		apk_error("%s: BAD signature", buf);
-	return r;
+	return 0;
 }
 
 static void extract_cb(void *_ctx, size_t progress)

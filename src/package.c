@@ -449,10 +449,26 @@ void apk_sign_ctx_free(struct apk_sign_ctx *ctx)
 	EVP_MD_CTX_cleanup(&ctx->mdctx);
 }
 
+static int check_signing_key_trust(struct apk_sign_ctx *sctx)
+{
+	switch (sctx->action) {
+	case APK_SIGN_VERIFY:
+	case APK_SIGN_VERIFY_AND_GENERATE:
+		if (sctx->signature.pkey == NULL) {
+			if (apk_flags & APK_ALLOW_UNTRUSTED)
+				break;
+			return -ENOKEY;
+		}
+	}
+	return 0;
+}
+
 int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 			      const struct apk_file_info *fi,
 			      struct apk_istream *is)
 {
+	int r;
+
 	if (ctx->data_started)
 		return 1;
 
@@ -465,6 +481,9 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 			return -ENOMSG;
 		ctx->data_started = 1;
 		ctx->control_started = 1;
+		r = check_signing_key_trust(ctx);
+		if (r < 0)
+			return r;
 		return 1;
 	}
 
@@ -491,7 +510,7 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 	if (strncmp(&fi->name[6], "RSA.", 4) == 0 ||
 	    strncmp(&fi->name[6], "DSA.", 4) == 0) {
 		int fd = openat(ctx->keys_fd, &fi->name[10], O_RDONLY|O_CLOEXEC);
-	        BIO *bio;
+		BIO *bio;
 
 		if (fd < 0)
 			return 0;
@@ -604,15 +623,13 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 		return 0;
 	}
 
+	r = check_signing_key_trust(sctx);
+	if (r < 0)
+		return r;
+
 	switch (sctx->action) {
 	case APK_SIGN_VERIFY:
 	case APK_SIGN_VERIFY_AND_GENERATE:
-		if (sctx->signature.pkey == NULL) {
-			if (apk_flags & APK_ALLOW_UNTRUSTED)
-				break;
-			return -ENOKEY;
-		}
-
 		r = EVP_VerifyFinal(&sctx->mdctx,
 			(unsigned char *) sctx->signature.data.ptr,
 			sctx->signature.data.len,
