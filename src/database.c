@@ -1762,7 +1762,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 	struct apk_bstream *bs = NULL;
 	struct apk_repository *repo;
 	apk_blob_t brepo, btag;
-	int r, targz = 1, tag_id = 0;
+	int repo_num, r, targz = 1, tag_id = 0;
 	char buf[PATH_MAX];
 
 	if (db->num_repos >= APK_MAX_REPOS)
@@ -1780,8 +1780,8 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 		tag_id = apk_db_get_tag_id(db, btag);
 	}
 
-	r = db->num_repos++;
-	repo = &db->repos[r];
+	repo_num = db->num_repos++;
+	repo = &db->repos[repo_num];
 	*repo = (struct apk_repository) {
 		.url = apk_blob_cstr(brepo),
 	};
@@ -1795,20 +1795,20 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 		apk_cache_format_index(APK_BLOB_BUF(buf), repo);
 		bs = apk_bstream_from_file(db->cache_fd, buf);
 	} else {
-		db->local_repos |= BIT(r);
+		db->local_repos |= BIT(repo_num);
 		bs = apk_repo_file_open(repo, db->arch, apkindex_tar_gz, buf, sizeof(buf));
 	}
-	if (bs != NULL)
-		r = load_index(db, bs, targz, r);
-	else
+	if (bs != NULL) {
+		r = load_index(db, bs, targz, repo_num);
+	} else
 		r = -ENOENT;
 
 	if (r != 0) {
 		apk_warning("Ignoring %s: %s", buf, apk_error_str(r));
-		db->bad_repos |= BIT(r);
+		db->bad_repos |= BIT(repo_num);
 		r = 0;
 	} else {
-		db->repo_tags[tag_id].allowed_repos |= BIT(r);
+		db->repo_tags[tag_id].allowed_repos |= BIT(repo_num);
 	}
 
 	return 0;
