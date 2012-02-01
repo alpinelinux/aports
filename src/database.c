@@ -1307,11 +1307,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_db_index_write_nr_cache(db);
 	}
-	if (db->bad_repos && !(apk_flags & APK_FORCE)) {
-		apk_error("Aborting due to some repositories failed to load. Use --force to ignore this error.");
-		r = -EBADMSG;
-		goto ret_r;
-	}
 
 	if (db->compat_newfeatures) {
 		apk_warning("This apk-tools is OLD! Some packages %s.",
