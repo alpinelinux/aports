@@ -1151,10 +1151,10 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		goto ret_r;
 	}
 
-	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 1000);
-	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 4000);
-	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 2000);
-	apk_hash_init(&db->installed.files, &file_hash_ops, 10000);
+	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 4000);
+	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 10000);
+	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 10000);
+	apk_hash_init(&db->installed.files, &file_hash_ops, 20000);
 	list_init(&db->installed.packages);
 	list_init(&db->installed.triggers);
 	apk_dependency_array_init(&db->world);
