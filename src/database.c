@@ -33,6 +33,11 @@
 #include "apk_archive.h"
 #include "apk_print.h"
 
+static const apk_spn_match_def apk_spn_repo_separators = {
+	[4] = (1<<0) /* */,
+	[7] = (1<<2) /*:*/,
+};
+
 enum {
 	APK_DISALLOW_RMDIR = 0,
 	APK_ALLOW_RMDIR = 1
@@ -1770,8 +1775,8 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 
 	if (brepo.ptr[0] == '@') {
 		apk_blob_pull_char(&brepo, '@');
-		apk_blob_cspn(brepo, ": ", &btag, &brepo);
-		apk_blob_spn(brepo, ": ", NULL, &brepo);
+		apk_blob_cspn(brepo, apk_spn_repo_separators, &btag, &brepo);
+		apk_blob_spn(brepo, apk_spn_repo_separators, NULL, &brepo);
 		tag_id = apk_db_get_tag_id(db, btag);
 	}
 

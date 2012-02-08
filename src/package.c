@@ -29,6 +29,15 @@
 #include "apk_database.h"
 #include "apk_print.h"
 
+static const apk_spn_match_def apk_spn_dependency_comparer = {
+	[7] = (1<<4) /*<*/ | (1<<5) /*=*/ | (1<<6) /*<*/,
+};
+
+static const apk_spn_match_def apk_spn_dependency_separator = {
+	[1] = (1<<2) /*\n*/,
+	[4] = (1<<0) /* */,
+};
+
 void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to)
 {
 	/* pkgname-1.0.apk */
@@ -200,13 +209,13 @@ void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_depend
 		goto fail;
 
 	/* grap one token */
-	if (!apk_blob_cspn(*b, " \n", &bdep, NULL))
+	if (!apk_blob_cspn(*b, apk_spn_dependency_separator, &bdep, NULL))
 		bdep = *b;
 	b->ptr += bdep.len;
 	b->len -= bdep.len;
 
 	/* skip also all separator chars */
-	if (!apk_blob_spn(*b, " \n", NULL, b)) {
+	if (!apk_blob_spn(*b, apk_spn_dependency_separator, NULL, b)) {
 		b->ptr += b->len;
 		b->len = 0;
 	}
@@ -218,12 +227,12 @@ void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_depend
 		optional = 1;
 	}
 
-	if (apk_blob_cspn(bdep, "<>=", &bname, &bop)) {
+	if (apk_blob_cspn(bdep, apk_spn_dependency_comparer, &bname, &bop)) {
 		int i;
 
 		if (mask == 0)
 			goto fail;
-		if (!apk_blob_spn(bop, "<>=", &bop, &bver))
+		if (!apk_blob_spn(bop, apk_spn_dependency_comparer, &bop, &bver))
 			goto fail;
 		mask = 0;
 		for (i = 0; i < bop.len; i++) {
