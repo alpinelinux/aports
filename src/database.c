@@ -2112,7 +2112,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 						   &ctx->diri_node);
 		ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
 
-		apk_db_diri_set(diri, ae->mode & 0777, ae->uid, ae->gid);
+		apk_db_diri_set(diri, ae->mode, ae->uid, ae->gid);
 		apk_db_dir_mkdir(db, diri->dir);
 	}
 	ctx->installed_size += ctx->current_file_size;
