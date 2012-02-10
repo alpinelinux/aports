@@ -534,7 +534,7 @@ int pull_b64_chunk(unsigned char *to, const unsigned char *from, int len)
 	unsigned char tmp[4];
 	int i, r = 0;
 
-	for (i = 0; i < len; i++) {
+	for (i = 0; i < 4; i++) {
 		tmp[i] = b64decode[from[i]];
 		r |= tmp[i];
 	}
