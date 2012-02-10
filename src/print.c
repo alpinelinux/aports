@@ -31,8 +31,9 @@ int apk_get_screen_width(void)
 	struct winsize w;
 
 	if (apk_screen_width == 0) {
-		apk_screen_width = 70;
-		if (ioctl(STDERR_FILENO,TIOCGWINSZ, &w) == 0)
+		apk_screen_width = 50;
+		if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 &&
+		    w.ws_col > 50)
 			apk_screen_width = w.ws_col;
 	}
 
