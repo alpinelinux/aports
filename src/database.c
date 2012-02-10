@@ -239,24 +239,27 @@ static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir,
 	if (dir->refs > 0) {
 		if (allow_rmdir) {
 			dir->flags |= APK_DBDIRF_RECALC_MODE;
+			dir->mode = 0;
+			dir->uid = (uid_t) -1;
+			dir->gid = (gid_t) -1;
 		}
 		return;
-	}
-
-	if ((allow_rmdir == APK_DISALLOW_RMDIR) &&
-	    (dir->flags & APK_DBDIRF_RECALC_MODE)) {
-		apk_db_dir_mkdir(db, dir);
 	}
 
 	db->installed.stats.dirs--;
 
 	if (allow_rmdir) {
+		/* The final instance of this directory was removed,
+		 * so this directory gets deleted in reality too. */
 		dir->flags &= ~APK_DBDIRF_RECALC_MODE;
 		dir->mode = 0;
 		dir->uid = (uid_t) -1;
 		dir->gid = (gid_t) -1;
 
 		unlinkat(db->root_fd, dir->name, AT_REMOVEDIR);
+	} else if (dir->flags & APK_DBDIRF_RECALC_MODE) {
+		/* Directory permissions need a reset. */
+		apk_db_dir_mkdir(db, dir);
 	}
 
 	if (dir->parent != NULL)
