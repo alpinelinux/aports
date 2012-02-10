@@ -218,16 +218,46 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 	return pn;
 }
 
+static void apk_db_dir_mkdir(struct apk_database *db, struct apk_db_dir *dir)
+{
+	if ((dir->refs == 1) ||
+	    (fchmodat(db->root_fd, dir->name, dir->mode, AT_SYMLINK_NOFOLLOW) != 0 &&
+	     errno == ENOENT))
+		if ((mkdirat(db->root_fd, dir->name, dir->mode) != 0 &&
+		     errno == EEXIST))
+			if (fchmodat(db->root_fd, dir->name, dir->mode, AT_SYMLINK_NOFOLLOW) != 0)
+				;
+
+	if (fchownat(db->root_fd, dir->name, dir->uid, dir->gid, 0) != 0)
+		;
+}
+
 static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir,
 			     int allow_rmdir)
 {
 	dir->refs--;
-	if (dir->refs > 0)
+	if (dir->refs > 0) {
+		if (allow_rmdir) {
+			dir->flags |= APK_DBDIRF_RECALC_MODE;
+		}
 		return;
+	}
+
+	if ((allow_rmdir == APK_DISALLOW_RMDIR) &&
+	    (dir->flags & APK_DBDIRF_RECALC_MODE)) {
+		apk_db_dir_mkdir(db, dir);
+	}
 
 	db->installed.stats.dirs--;
-	if (allow_rmdir)
+
+	if (allow_rmdir) {
+		dir->flags &= ~APK_DBDIRF_RECALC_MODE;
+		dir->mode = 0;
+		dir->uid = (uid_t) -1;
+		dir->gid = (gid_t) -1;
+
 		unlinkat(db->root_fd, dir->name, AT_REMOVEDIR);
+	}
 
 	if (dir->parent != NULL)
 		apk_db_dir_unref(db, dir->parent, allow_rmdir);
@@ -264,6 +294,8 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 	dir = malloc(sizeof(*dir) + name.len + 1);
 	memset(dir, 0, sizeof(*dir));
 	dir->refs = 1;
+	dir->uid = (uid_t) -1;
+	dir->gid = (gid_t) -1;
 	dir->rooted_name[0] = '/';
 	memcpy(dir->name, name.ptr, name.len);
 	dir->name[name.len] = 0;
@@ -324,26 +356,42 @@ static struct apk_db_dir_instance *apk_db_diri_new(struct apk_database *db,
 	return diri;
 }
 
+static void apk_db_dir_apply_diri_permissions(struct apk_db_dir_instance *diri)
+{
+	struct apk_db_dir *dir = diri->dir;
+
+	if (diri->uid < dir->uid) {
+		dir->uid = diri->uid;
+		dir->mode = (dir->mode & ~S_IRWXU) | (diri->mode & S_IRWXU);
+	} else if (diri->uid == dir->uid) {
+		dir->mode |= diri->mode & S_IRWXU;
+	}
+	if (diri->gid < dir->gid) {
+		dir->gid = diri->gid;
+		dir->mode = (dir->mode & ~S_IRWXG) | (diri->mode & S_IRWXG);
+	} else if (diri->gid == dir->gid) {
+		dir->mode |= diri->mode & S_IRWXG;
+	}
+	dir->mode |= diri->mode & S_IRWXO;
+}
+
 static void apk_db_diri_set(struct apk_db_dir_instance *diri, mode_t mode,
 			    uid_t uid, gid_t gid)
 {
 	diri->mode = mode;
 	diri->uid = uid;
 	diri->gid = gid;
-}
-
-static void apk_db_diri_mkdir(struct apk_database *db, struct apk_db_dir_instance *diri)
-{
-	if (mkdirat(db->root_fd, diri->dir->name, diri->mode) == 0) {
-		if (fchownat(db->root_fd, diri->dir->name, diri->uid, diri->gid, 0) != 0)
-			;
-	}
+	apk_db_dir_apply_diri_permissions(diri);
 }
 
 static void apk_db_diri_free(struct apk_database *db,
 			     struct apk_db_dir_instance *diri,
 			     int allow_rmdir)
 {
+	if ((allow_rmdir == APK_DISALLOW_RMDIR) &&
+	    (diri->dir->flags & APK_DBDIRF_RECALC_MODE))
+		apk_db_dir_apply_diri_permissions(diri);
+
 	apk_db_dir_unref(db, diri->dir, allow_rmdir);
 	free(diri);
 }
@@ -590,6 +638,9 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 	struct hlist_node **diri_node = NULL;
 	struct hlist_node **file_diri_node = NULL;
 	apk_blob_t token = APK_BLOB_STR("\n"), l;
+	mode_t mode;
+	uid_t uid;
+	gid_t gid;
 	int field, r;
 
 	while (!APK_BLOB_IS_NULL(l = bs->read(bs, token))) {
@@ -656,11 +707,12 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 				apk_error("FDB directory metadata entry before directory entry");
 				return -1;
 			}
-			diri->uid = apk_blob_pull_uint(&l, 10);
+			uid = apk_blob_pull_uint(&l, 10);
 			apk_blob_pull_char(&l, ':');
-			diri->gid = apk_blob_pull_uint(&l, 10);
+			gid = apk_blob_pull_uint(&l, 10);
 			apk_blob_pull_char(&l, ':');
-			diri->mode = apk_blob_pull_uint(&l, 8);
+			mode = apk_blob_pull_uint(&l, 8);
+			apk_db_diri_set(diri, mode, uid, gid);
 			break;
 		case 'R':
 			if (diri == NULL) {
@@ -1410,6 +1462,9 @@ void apk_db_close(struct apk_database *db)
 
 	apk_id_cache_free(&db->id_cache);
 
+	/* Cleaning up the directory tree will cause mode, uid and gid
+	 * of all modified (package providing that directory got removed)
+	 * directories to be reset. */
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
 			apk_db_diri_free(db, diri, APK_DISALLOW_RMDIR);
@@ -2053,7 +2108,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 		ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
 
 		apk_db_diri_set(diri, ae->mode & 0777, ae->uid, ae->gid);
-		apk_db_diri_mkdir(db, diri);
+		apk_db_dir_mkdir(db, diri->dir);
 	}
 	ctx->installed_size += ctx->current_file_size;
 

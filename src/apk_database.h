@@ -56,16 +56,18 @@ struct apk_db_file {
 #define APK_DBDIRF_PROTECTED		0x01
 #define APK_DBDIRF_SYMLINKS_ONLY	0x02
 #define APK_DBDIRF_MODIFIED		0x04
+#define APK_DBDIRF_RECALC_MODE		0x08
 
 struct apk_db_dir {
 	apk_hash_node hash_node;
 
 	unsigned long hash;
-	struct hlist_head files;
 	struct apk_db_dir *parent;
-
 	unsigned short refs;
 	unsigned short namelen;
+	mode_t mode;
+	uid_t uid;
+	gid_t gid;
 	unsigned char flags;
 	char rooted_name[1];
 	char name[];
