@@ -21,6 +21,7 @@
 struct fix_ctx {
 	unsigned short solver_flags;
 	int fix_depends : 1;
+	int fix_directory_permissions : 1;
 };
 
 static int fix_parse(void *pctx, struct apk_db_options *dbopts,
@@ -37,9 +38,19 @@ static int fix_parse(void *pctx, struct apk_db_options *dbopts,
 	case 'r':
 		ctx->solver_flags |= APK_SOLVERF_REINSTALL;
 		break;
+	case 0x10000:
+		ctx->fix_directory_permissions = 1;
+		break;
 	default:
 		return -1;
 	}
+	return 0;
+}
+
+static int mark_recalculate(apk_hash_item item, void *ctx)
+{
+	struct apk_db_dir *dir = (struct apk_db_dir *) item;
+	dir->flags |= APK_DBDIRF_RECALC_MODE;
 	return 0;
 }
 
@@ -52,6 +63,9 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 
 	if (!ctx->solver_flags)
 		ctx->solver_flags = APK_SOLVERF_REINSTALL;
+
+	if (ctx->fix_directory_permissions)
+		apk_hash_foreach(&db->installed.dirs, mark_recalculate, db);
 
 	for (i = 0; i < argc; i++) {
 		pkg = NULL;
@@ -95,6 +109,7 @@ static struct apk_option fix_options[] = {
 	{ 'd',		"depends",	"Fix all dependencies too" },
 	{ 'u',		"upgrade",	"Upgrade package if possible" },
 	{ 'r',		"reinstall",	"Reinstall the package" },
+	{ 0x10000,	"directory-permissions", "Reset all directory permissions" },
 };
 
 static struct apk_applet apk_fix = {

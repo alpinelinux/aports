@@ -38,6 +38,8 @@ static int audit_file(struct apk_database *db, struct apk_db_file *dbf,
 	if (S_ISLNK(fi.mode) && dbf->csum.type == APK_CHECKSUM_NONE)
 		return 0;
 
+	/* FIXME: check uid/gid/mode; but they are not in DB */
+
 	return 1;
 }
 
@@ -74,8 +76,10 @@ static int audit_directory(apk_hash_item item, void *ctx)
 			continue;
 
 		if (S_ISDIR(fi.mode)) {
-			if (apk_db_dir_query(db, APK_BLOB_STR(tmp)) != NULL)
+			if (apk_db_dir_query(db, APK_BLOB_STR(tmp)) != NULL) {
+				/* FIXME: check uid/gid/mode */
 				continue;
+			}
 
 			reason = 'D';
 		} else {

@@ -220,6 +220,13 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 
 static void apk_db_dir_mkdir(struct apk_database *db, struct apk_db_dir *dir)
 {
+	if (apk_flags & APK_SIMULATE)
+		return;
+
+	/* Don't mess with root, as no package provides it directly */
+	if (dir->namelen == 0)
+		return;
+
 	if ((dir->refs == 1) ||
 	    (fchmodat(db->root_fd, dir->name, dir->mode, AT_SYMLINK_NOFOLLOW) != 0 &&
 	     errno == ENOENT))
@@ -363,19 +370,14 @@ static void apk_db_dir_apply_diri_permissions(struct apk_db_dir_instance *diri)
 {
 	struct apk_db_dir *dir = diri->dir;
 
-	if (diri->uid < dir->uid) {
+	if (diri->uid < dir->uid ||
+	    (diri->uid == dir->uid && diri->gid < dir->gid)) {
 		dir->uid = diri->uid;
-		dir->mode = (dir->mode & ~S_IRWXU) | (diri->mode & S_IRWXU);
-	} else if (diri->uid == dir->uid) {
-		dir->mode |= diri->mode & S_IRWXU;
-	}
-	if (diri->gid < dir->gid) {
 		dir->gid = diri->gid;
-		dir->mode = (dir->mode & ~S_IRWXG) | (diri->mode & S_IRWXG);
-	} else if (diri->gid == dir->gid) {
-		dir->mode |= diri->mode & S_IRWXG;
+		dir->mode = diri->mode;
+	} else if (diri->uid == dir->uid && diri->gid == dir->gid) {
+		dir->mode &= diri->mode;
 	}
-	dir->mode |= diri->mode & S_IRWXO;
 }
 
 static void apk_db_diri_set(struct apk_db_dir_instance *diri, mode_t mode,
