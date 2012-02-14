@@ -20,34 +20,71 @@
 
 struct audit_ctx {
 	unsigned int open_flags;
-	int (*audit)(struct apk_database *db);
+	int check_permissions : 1;
+	int (*audit)(struct audit_ctx *actx, struct apk_database *db);
 };
 
-static int audit_file(struct apk_database *db, struct apk_db_file *dbf,
+static int audit_file(struct audit_ctx *actx,
+		      struct apk_database *db,
+		      struct apk_db_file *dbf,
 		      const char *name)
 {
 	struct apk_file_info fi;
 
+	if (dbf == NULL)
+		return 'A';
+
 	if (apk_file_get_info(db->root_fd, name, APK_FI_NOFOLLOW | dbf->csum.type, &fi) != 0)
-		return 1;
+		return 0;
 
 	if (dbf->csum.type != APK_CHECKSUM_NONE &&
 	    apk_checksum_compare(&fi.csum, &dbf->csum) == 0)
-		return 0;
+		return 'U';
 
 	if (S_ISLNK(fi.mode) && dbf->csum.type == APK_CHECKSUM_NONE)
-		return 0;
+		return 'U';
 
-	/* FIXME: check uid/gid/mode; but they are not in DB */
+	if (actx->check_permissions &&
+	    (dbf->mode != 0 || dbf->uid != 0 || dbf->gid != 0)) {
+		if ((fi.mode & 07777) != (dbf->mode & 07777))
+			return 'M';
+		if (fi.uid != dbf->uid || fi.gid != dbf->gid)
+			return 'M';
+	}
 
-	return 1;
+	return 0;
 }
 
-static int audit_directory(apk_hash_item item, void *ctx)
+static int audit_directory(struct audit_ctx *actx,
+			   struct apk_database *db,
+			   struct apk_db_dir *dbd,
+			   struct apk_file_info *fi)
 {
-	struct apk_database *db = (struct apk_database *) ctx;
+	if (dbd == NULL)
+		return 'D';
+
+	if (actx->check_permissions &&
+	    (dbd->mode != 0 || dbd->uid != 0 || dbd->gid != 0)) {
+		if ((fi->mode & 07777) != (dbd->mode & 07777))
+			return 'm';
+		if (fi->uid != dbd->uid || fi->gid != dbd->gid)
+			return 'm';
+	}
+
+	return 0;
+}
+
+struct audit_tree_ctx {
+	struct audit_ctx *actx;
+	struct apk_database *db;
+};
+
+static int audit_directory_tree(apk_hash_item item, void *ctx)
+{
+	struct audit_tree_ctx *atctx = (struct audit_tree_ctx *) ctx;
+	struct audit_ctx *actx = atctx->actx;
+	struct apk_database *db = atctx->db;
 	struct apk_db_dir *dbd = (struct apk_db_dir *) item;
-	struct apk_db_file *dbf;
 	struct apk_file_info fi;
 	struct dirent *de;
 	apk_blob_t bdir = APK_BLOB_PTR_LEN(dbd->name, dbd->namelen);
@@ -76,39 +113,37 @@ static int audit_directory(apk_hash_item item, void *ctx)
 			continue;
 
 		if (S_ISDIR(fi.mode)) {
-			if (apk_db_dir_query(db, APK_BLOB_STR(tmp)) != NULL) {
-				/* FIXME: check uid/gid/mode */
-				continue;
-			}
-
-			reason = 'D';
+			struct apk_db_dir *dbd;
+			dbd = apk_db_dir_query(db, APK_BLOB_STR(tmp));
+			reason = audit_directory(actx, db, dbd, &fi);
 		} else {
+			struct apk_db_file *dbf;
 			dbf = apk_db_file_query(db, bdir, APK_BLOB_STR(de->d_name));
-			if (dbf != NULL) {
-				if (audit_file(db, dbf, tmp) == 0)
-					continue;
-				reason = 'U';
-			} else {
-				reason = 'A';
-			}
+			reason = audit_file(actx, db, dbf, tmp);
 		}
 
-		if (apk_verbosity < 1)
-			printf("%s\n", tmp);
-		else
-			printf("%c %s\n", reason, tmp);
+		if (reason) {
+			if (apk_verbosity < 1)
+				printf("%s\n", tmp);
+			else
+				printf("%c %s\n", reason, tmp);
+		}
 	}
 	closedir(dir);
 
 	return 0;
 }
 
-static int audit_backup(struct apk_database *db)
+static int audit_backup(struct audit_ctx *actx, struct apk_database *db)
 {
-	return apk_hash_foreach(&db->installed.dirs, audit_directory, db);
+	struct audit_tree_ctx atctx = {
+		.actx = actx,
+		.db = db,
+	};
+	return apk_hash_foreach(&db->installed.dirs, audit_directory_tree, &atctx);
 }
 
-static int audit_system(struct apk_database *db)
+static int audit_system(struct audit_ctx *actx, struct apk_database *db)
 {
 	struct apk_installed_package *ipkg;
 	struct apk_package *pkg;
@@ -131,7 +166,7 @@ static int audit_system(struct apk_database *db)
 				snprintf(name, sizeof(name), "%s/%s",
 					 diri->dir->name, file->name);
 
-				if (audit_file(db, file, name) == 0)
+				if (audit_file(actx, db, file, name) == 0)
 					continue;
 
 				if (apk_verbosity < 1) {
@@ -162,6 +197,9 @@ static int audit_parse(void *ctx, struct apk_db_options *dbopts,
 	case 0x10001:
 		actx->audit = audit_system;
 		break;
+	case 0x10002:
+		actx->check_permissions = 1;
+		break;
 	default:
 		return -1;
 	}
@@ -175,7 +213,7 @@ static int audit_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	if (actx->audit == NULL)
 		return -EINVAL;
 
-	return actx->audit(db);
+	return actx->audit(actx, db);
 }
 
 static struct apk_option audit_options[] = {
@@ -183,6 +221,7 @@ static struct apk_option audit_options[] = {
 	  "List all modified configuration files that need to be backed up" },
 	{ 0x10001, "system", "Verify checksums of all installed files "
 		             "(-q to print only modfied packages)" },
+	{ 0x10002, "check-permissions", "Check file and directory uid/gid/mode too" },
 };
 
 static struct apk_applet apk_audit = {
