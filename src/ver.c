@@ -125,6 +125,12 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	struct apk_name *name;
 	int i, j, ret = 0;
 
+	if (ictx->limchars) {
+		if (strlen(ictx->limchars) == 0)
+			ictx->limchars = NULL;
+	} else {
+		ictx->limchars = "<";
+	}
 
 	if (ictx->action != NULL)
 		return ictx->action(db, argc, argv);
