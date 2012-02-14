@@ -48,6 +48,10 @@ struct apk_db_file {
 	struct hlist_node diri_files_list;
 
 	struct apk_db_dir_instance *diri;
+	mode_t mode;
+	uid_t uid;
+	gid_t gid;
+
 	unsigned short namelen;
 	struct apk_checksum csum;
 	char name[];
@@ -60,14 +64,14 @@ struct apk_db_file {
 
 struct apk_db_dir {
 	apk_hash_node hash_node;
-
 	unsigned long hash;
 	struct apk_db_dir *parent;
-	unsigned short refs;
-	unsigned short namelen;
 	mode_t mode;
 	uid_t uid;
 	gid_t gid;
+
+	unsigned short refs;
+	unsigned short namelen;
 	unsigned char flags;
 	char rooted_name[1];
 	char name[];

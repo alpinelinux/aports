@@ -383,7 +383,7 @@ static void apk_db_dir_apply_diri_permissions(struct apk_db_dir_instance *diri)
 static void apk_db_diri_set(struct apk_db_dir_instance *diri, mode_t mode,
 			    uid_t uid, gid_t gid)
 {
-	diri->mode = mode;
+	diri->mode = mode & 07777;
 	diri->uid = uid;
 	diri->gid = gid;
 	apk_db_dir_apply_diri_permissions(diri);
@@ -436,6 +436,13 @@ static struct apk_db_file *apk_db_file_new(struct apk_db_dir_instance *diri,
 	*after = &file->diri_files_list.next;
 
 	return file;
+}
+
+static void apk_db_file_set(struct apk_db_file *file, mode_t mode, uid_t uid, gid_t gid)
+{
+	file->mode = mode & 07777;
+	file->uid = uid;
+	file->gid = gid;
 }
 
 static struct apk_db_file *apk_db_file_get(struct apk_database *db,
@@ -707,6 +714,11 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			diri = apk_db_diri_new(db, pkg, l, &diri_node);
 			file_diri_node = &diri->owned_files.first;
 			break;
+		case 'a':
+			if (file == NULL) {
+				apk_error("FDB file attribute metadata entry before file entry");
+				return -1;
+			}
 		case 'M':
 			if (diri == NULL) {
 				apk_error("FDB directory metadata entry before directory entry");
@@ -717,7 +729,10 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			gid = apk_blob_pull_uint(&l, 10);
 			apk_blob_pull_char(&l, ':');
 			mode = apk_blob_pull_uint(&l, 8);
-			apk_db_diri_set(diri, mode, uid, gid);
+			if (field == 'M')
+				apk_db_diri_set(diri, mode, uid, gid);
+			else
+				apk_db_file_set(file, mode, uid, gid);
 			break;
 		case 'R':
 			if (diri == NULL) {
@@ -800,6 +815,14 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 			hlist_for_each_entry(file, c2, &diri->owned_files, diri_files_list) {
 				apk_blob_push_blob(&bbuf, APK_BLOB_STR("R:"));
 				apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(file->name, file->namelen));
+				if (file->mode != 0 || file->uid != 0 || file->gid != 0) {
+					apk_blob_push_blob(&bbuf, APK_BLOB_STR("\na:"));
+					apk_blob_push_uint(&bbuf, file->uid, 10);
+					apk_blob_push_blob(&bbuf, APK_BLOB_STR(":"));
+					apk_blob_push_uint(&bbuf, file->gid, 10);
+					apk_blob_push_blob(&bbuf, APK_BLOB_STR(":"));
+					apk_blob_push_uint(&bbuf, file->mode, 8);
+				}
 				if (file->csum.type != APK_CHECKSUM_NONE) {
 					apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nZ:"));
 					apk_blob_push_csum(&bbuf, &file->csum);
@@ -2067,6 +2090,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			apk_message("%s", ae->name);
 
 		/* Extract the file as name.apk-new */
+		apk_db_file_set(file, ae->mode, ae->uid, ae->gid);
 		r = apk_archive_entry_extract(db->root_fd, ae, ".apk-new", is,
 					      extract_cb, ctx);
 
