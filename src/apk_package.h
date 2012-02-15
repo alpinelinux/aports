@@ -68,6 +68,7 @@ APK_ARRAY(apk_dependency_array, struct apk_dependency);
 struct apk_installed_package {
 	struct apk_package *pkg;
 	unsigned int run_all_triggers : 1;
+	unsigned int repository_tag : 6;
 	unsigned short replaces_priority;
 	struct list_head installed_pkgs_list;
 	struct list_head trigger_pkgs_list;

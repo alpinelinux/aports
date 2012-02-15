@@ -739,7 +739,7 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		pkg->commit = apk_blob_cstr(value);
 		break;
 	case 'F': case 'M': case 'R': case 'Z': case 'r': case 'q':
-	case 'a':
+	case 'a': case 'p':
 		/* installed db entries which are handled in database.c */
 		return 1;
 	default:

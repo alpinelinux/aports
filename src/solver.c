@@ -48,9 +48,11 @@ struct apk_name_state {
 	struct apk_package *chosen;
 	struct apk_score minimum_penalty;
 	unsigned int topology_last_touched;
-	unsigned int allowed_repos, preferred_repos;
 	unsigned short requirers;
 	unsigned short install_ifs;
+
+	unsigned short preferred_pinning;
+	unsigned short allowed_pinning;
 
 	unsigned int solver_flags_local : 4;
 	unsigned int solver_flags_local_mask : 4;
@@ -320,32 +322,41 @@ static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependenc
 		func(ss, &deps->item[i]);
 }
 
+static unsigned int get_pinning_mask_repos(struct apk_database *db, unsigned short pinning_mask)
+{
+	unsigned int repository_mask = 0;
+	int i;
+
+	for (i = 0; i < db->num_repo_tags && pinning_mask; i++) {
+		if (!(BIT(i) & pinning_mask))
+			continue;
+		pinning_mask &= ~BIT(i);
+		repository_mask |= db->repo_tags[i].allowed_repos;
+	}
+	return repository_mask;
+}
+
 static int compare_package_preference(unsigned short solver_flags,
 				      unsigned int preferred_repos,
 				      struct apk_package *pkgA,
-				      struct apk_package *pkgB)
+				      struct apk_package *pkgB,
+				      struct apk_database *db)
 {
+	unsigned int a_repos, b_repos;
+
 	/* specified on command line directly */
 	if (pkgA->filename && !pkgB->filename)
 		return 1;
 	if (pkgB->filename && !pkgA->filename)
 		return -1;
 
-	if (solver_flags & APK_SOLVERF_PREFER_TAG) {
-		/* preferred repository pinning */
-		if ((pkgA->repos & preferred_repos) && !(pkgB->repos & preferred_repos))
-			return 1;
-		if ((pkgB->repos & preferred_repos) && !(pkgA->repos & preferred_repos))
-			return -1;
-	} else {
-		/* preferred repository pinning */
-		if ((pkgA->ipkg || (pkgA->repos & preferred_repos)) &&
-		    !(pkgB->ipkg || (pkgB->repos & preferred_repos)))
-			return 1;
-		if ((pkgB->ipkg || (pkgB->repos & preferred_repos)) &&
-		    !(pkgA->ipkg || (pkgA->repos & preferred_repos)))
-			return -1;
-	}
+	/* Is there a difference in pinning preference? */
+	a_repos = pkgA->repos | (pkgA->ipkg ? db->repo_tags[pkgA->ipkg->repository_tag].allowed_repos : 0);
+	b_repos = pkgB->repos | (pkgB->ipkg ? db->repo_tags[pkgB->ipkg->repository_tag].allowed_repos : 0);
+	if ((a_repos & preferred_repos) && !(b_repos & preferred_repos))
+		return 1;
+	if ((b_repos & preferred_repos) && !(a_repos & preferred_repos))
+		return -1;
 
 	if (solver_flags & APK_SOLVERF_AVAILABLE) {
 		if (pkgA->repos != 0 && pkgB->repos == 0)
@@ -390,12 +401,13 @@ static int get_preference(struct apk_solver_state *ss,
 	unsigned short name_flags = ns->solver_flags_local
 		| ns->solver_flags_inherited
 		| ss->solver_flags;
-	unsigned int preferred_repos = ns->preferred_repos;
+	unsigned short preferred_pinning;
+	unsigned int preferred_repos;
 	unsigned short preference = 0;
 	int i;
 
-	if (preferred_repos == 0)
-		preferred_repos = ss->db->repo_tags[0].allowed_repos;
+	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
+	preferred_repos = get_pinning_mask_repos(ss->db, preferred_pinning);
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
@@ -404,9 +416,8 @@ static int get_preference(struct apk_solver_state *ss,
 		if (pkg0 == pkg || ps0 == NULL)
 			continue;
 
-		if (compare_package_preference(name_flags,
-					       preferred_repos,
-					       pkg, pkg0) < 0) {
+		if (compare_package_preference(name_flags, preferred_repos,
+					       pkg, pkg0, ss->db) < 0) {
 			if (installable_only) {
 				if (ss->topology_position > pkg0->topology_hard &&
 				    !(ps0->flags & APK_PKGSTF_DECIDED))
@@ -441,12 +452,20 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_package *best_pkg = NULL, *preferred_pkg = NULL;
 	struct apk_package_state *preferred_ps = NULL;
 	unsigned int best_topology = 0;
-	unsigned int allowed_repos = ns->allowed_repos | ss->db->repo_tags[0].allowed_repos;
-	unsigned int preferred_repos = ns->preferred_repos;
 	unsigned short name_flags = ns->solver_flags_local
 		| ns->solver_flags_inherited
 		| ss->solver_flags;
+	unsigned short preferred_pinning, allowed_pinning;
+	unsigned int preferred_repos, allowed_repos;
 	int i, options = 0, skipped_options = 0;
+
+	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
+	preferred_repos = get_pinning_mask_repos(ss->db, preferred_pinning);
+	allowed_pinning = ns->allowed_pinning | ns->preferred_pinning | APK_DEFAULT_PINNING_MASK;
+	if (preferred_pinning != allowed_pinning)
+		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
+	else
+		allowed_repos = preferred_repos;
 
 	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
 	ns->minimum_penalty = (struct apk_score) { 0, 0 };
@@ -469,9 +488,8 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		if ((preferred_pkg == NULL) ||
 		    (ps0->conflicts < preferred_ps->conflicts) ||
 		    (ps0->conflicts == preferred_ps->conflicts &&
-		     compare_package_preference(name_flags,
-					        preferred_repos,
-					        pkg0, preferred_pkg) > 0)) {
+		     compare_package_preference(name_flags, preferred_repos,
+						pkg0, preferred_pkg, ss->db) > 0)) {
 			preferred_pkg = pkg0;
 			preferred_ps = ps0;
 		}
@@ -702,7 +720,8 @@ static void inherit_name_state(struct apk_name *to, struct apk_name *from)
 	tns->solver_flags_inherited |=
 		fns->solver_flags_inherited |
 		(fns->solver_flags_local & fns->solver_flags_local_mask);
-	tns->allowed_repos |= fns->allowed_repos;
+
+	tns->allowed_pinning |= fns->allowed_pinning | fns->preferred_pinning;
 }
 
 static void inherit_name_state_wrapper(struct apk_package *rdepend, void *ctx)
@@ -719,7 +738,7 @@ static int has_inherited_state(struct apk_name *name)
 		return 0;
 	if (ns->solver_flags_inherited || (ns->solver_flags_local & ns->solver_flags_local_mask))
 		return 1;
-	if (ns->allowed_repos)
+	if (ns->allowed_pinning)
 		return 1;
 	return 0;
 }
@@ -729,7 +748,7 @@ static void recalculate_inherted_name_state(struct apk_name *name)
 	struct apk_name_state *ns = name_to_ns(name);
 
 	ns->solver_flags_inherited = 0;
-	ns->allowed_repos = 0;
+	ns->allowed_pinning = 0;
 	foreach_locked_reverse_dependency(name, inherit_name_state_wrapper, name);
 }
 
@@ -754,13 +773,10 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	}
 
 	if (dep->repository_tag) {
-		unsigned int allowed_repos;
-
-		dbg_printf("%s: enabling repository tag %d\n",
+		dbg_printf("%s: adding pinnings %d\n",
 			   dep->name->name, dep->repository_tag);
-		allowed_repos = ss->db->repo_tags[dep->repository_tag].allowed_repos;
-		ns->allowed_repos |= allowed_repos;
-		ns->preferred_repos |= allowed_repos;
+		ns->preferred_pinning = BIT(dep->repository_tag);
+		ns->allowed_pinning |= BIT(dep->repository_tag);
 	}
 
 	for (i = 0; i < name->pkgs->num; i++) {
@@ -944,6 +960,19 @@ static int compare_change(const void *p1, const void *p2)
 		c2->newpkg->topology_hard;
 }
 
+static int get_tag(struct apk_database *db, unsigned short pinning_mask, unsigned int repos)
+{
+	int i;
+
+	for (i = 0; i < db->num_repo_tags; i++) {
+		if (!(BIT(i) & pinning_mask))
+			continue;
+		if (db->repo_tags[i].allowed_repos & repos)
+			return i;
+	}
+	return APK_DEFAULT_REPOSITORY_TAG;
+}
+
 static int generate_changeset(struct apk_database *db,
 			      struct apk_package_array *solution,
 			      struct apk_changeset *changeset,
@@ -999,6 +1028,7 @@ static int generate_changeset(struct apk_database *db,
 				break;
 			}
 			changeset->changes->item[ci].newpkg = pkg;
+			changeset->changes->item[ci].repository_tag = get_tag(db, ns->allowed_pinning, pkg->repos);
 			ci++;
 		}
 	}
@@ -1130,23 +1160,16 @@ static void print_change(struct apk_database *db,
 	struct apk_package *newpkg = change->newpkg;
 	const char *msg = NULL;
 	char status[32], n[512], *nameptr;
-	int r, tag;
+	int r;
 
 	snprintf(status, sizeof(status), "(%i/%i)", cur+1, total);
 	status[sizeof(status) - 1] = 0;
 
-	if (newpkg != NULL) {
-		name = newpkg->name;
-		tag = apk_db_get_tag_id_by_repos(db, newpkg->repos);
-	} else {
-		name = oldpkg->name;
-		tag = apk_db_get_tag_id_by_repos(db, oldpkg->repos);
-	}
-
-	if (tag > 0) {
+	name = newpkg ? newpkg->name : oldpkg->name;
+	if (change->repository_tag > 0) {
 		snprintf(n, sizeof(n), "%s@" BLOB_FMT,
 			 name->name,
-			 BLOB_PRINTF(*db->repo_tags[tag].name));
+			 BLOB_PRINTF(*db->repo_tags[change->repository_tag].name));
 		n[sizeof(n) - 1] = 0;
 		nameptr = n;
 	} else {
@@ -1403,6 +1426,8 @@ int apk_solver_commit_changeset(struct apk_database *db,
 					       &prog);
 			if (r != 0)
 				break;
+			if (change->newpkg)
+				change->newpkg->ipkg->repository_tag = change->repository_tag;
 		}
 
 		count_change(change, &prog.done);

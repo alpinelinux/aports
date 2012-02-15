@@ -754,6 +754,9 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		case 'q':
 			ipkg->replaces_priority = apk_blob_pull_uint(&l, 10);
 			break;
+		case 'p':
+			ipkg->repository_tag = apk_db_get_tag_id(db, l);
+			break;
 		default:
 			if (r != 0 && !(apk_flags & APK_FORCE)) {
 				/* Installed db should not have unsupported fields */
@@ -800,7 +803,11 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 			apk_blob_push_uint(&bbuf, ipkg->replaces_priority, 10);
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 		}
-
+		if (ipkg->repository_tag) {
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("p:"));
+			apk_blob_push_blob(&bbuf, *db->repo_tags[ipkg->repository_tag].name);
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
+		}
 		hlist_for_each_entry(diri, c1, &ipkg->owned_dirs, pkg_dirs_list) {
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("F:"));
 			apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen));
@@ -1547,17 +1554,6 @@ int apk_db_get_tag_id(struct apk_database *db, apk_blob_t tag)
 			.name = b
 		};
 		return i;
-	}
-	return -1;
-}
-
-int apk_db_get_tag_id_by_repos(struct apk_database *db, unsigned int repos)
-{
-	int i;
-
-	for (i = 0; i < db->num_repo_tags; i++) {
-		if (db->repo_tags[i].allowed_repos & repos)
-			return i;
 	}
 	return -1;
 }
