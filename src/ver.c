@@ -19,6 +19,7 @@
 struct ver_ctx {
 	int (*action)(struct apk_database *db, int argc, char **argv);
 	const char *limchars;
+	int all_tags : 1;
 };
 
 static int ver_indexes(struct apk_database *db, int argc, char **argv)
@@ -84,38 +85,65 @@ static int ver_parse(void *ctx, struct apk_db_options *dbopts,
 	case 'l':
 		ictx->limchars = optarg;
 		break;
+	case 'a':
+		ictx->all_tags = 1;
+		break;
 	default:
 		return -1;
 	}
 	return 0;
 }
 
-static void ver_print_package_status(struct apk_package *pkg, const char *limit)
+static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_name *name;
 	struct apk_package *tmp;
 	char pkgname[256];
 	const char *opstr;
 	apk_blob_t *latest = apk_blob_atomize(APK_BLOB_STR(""));
+	unsigned int latest_repos = 0;
 	int i, r = -1;
+	unsigned short tag, allowed_repos;
+
+	tag = pkg->ipkg ? pkg->ipkg->repository_tag : 0;
+	allowed_repos = db->repo_tags[tag].allowed_repos;
 
 	name = pkg->name;
 	for (i = 0; i < name->pkgs->num; i++) {
 		tmp = name->pkgs->item[i];
 		if (tmp->name != name || tmp->repos == 0)
 			continue;
+		if (!(ictx->all_tags  || (tmp->repos & allowed_repos)))
+			continue;
 		r = apk_version_compare_blob(*tmp->version, *latest);
-		if (r == APK_VERSION_GREATER)
+		switch (r) {
+		case APK_VERSION_GREATER:
 			latest = tmp->version;
+			latest_repos = tmp->repos;
+			break;
+		case APK_VERSION_EQUAL:
+			latest_repos |= tmp->repos;
+			break;
+		}
 	}
 	r = apk_version_compare_blob(*pkg->version, *latest);
 	opstr = apk_version_op_string(r);
-	if ((limit != NULL) && (strchr(limit, *opstr) == NULL))
+	if ((ictx->limchars != NULL) && (strchr(ictx->limchars, *opstr) == NULL))
 		return;
 	snprintf(pkgname, sizeof(pkgname), PKG_VER_FMT,
 		 PKG_VER_PRINTF(pkg));
-	printf("%-40s%s " BLOB_FMT "\n", pkgname, opstr,
-	       BLOB_PRINTF(*latest));
+	printf("%-40s%s " BLOB_FMT, pkgname, opstr, BLOB_PRINTF(*latest));
+	if (!(latest_repos & db->repo_tags[APK_DEFAULT_REPOSITORY_TAG].allowed_repos)) {
+		for (i = 1; i < db->num_repo_tags; i++) {
+			if (!(latest_repos & db->repo_tags[i].allowed_repos))
+				continue;
+			if (!(ictx->all_tags || i == tag))
+				continue;
+			printf(" @" BLOB_FMT,
+			       BLOB_PRINTF(*db->repo_tags[i].name));
+		}
+	}
+	printf("\n");
 }
 
 static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
@@ -141,7 +169,7 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	if (argc == 0) {
 		list_for_each_entry(ipkg, &db->installed.packages,
 				    installed_pkgs_list) {
-			ver_print_package_status(ipkg->pkg, ictx->limchars);
+			ver_print_package_status(ictx, db, ipkg->pkg);
 		}
 		goto ver_exit;
 	}
@@ -156,7 +184,7 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		for (j = 0; j < name->pkgs->num; j++) {
 			struct apk_package *pkg = name->pkgs->item[j];
 			if (pkg->ipkg != NULL)
-				ver_print_package_status(pkg, ictx->limchars);
+				ver_print_package_status(ictx, db, pkg);
 		}
 	}
 
@@ -168,6 +196,7 @@ static struct apk_option ver_options[] = {
 	{ 'I', "indexes",	"Print description and versions of indexes" },
 	{ 't', "test",		"Compare two given versions" },
 	{ 'c', "check", 	"Check if the given version string is valid" },
+	{ 'a', "all",		"Consider packages from all repository tags" },
 	{ 'l', "limit",		"Limit output to packages whos status matches LIMCHAR",
 	  required_argument, "LIMCHAR" },
 };
