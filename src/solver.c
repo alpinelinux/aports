@@ -26,8 +26,6 @@
 #define APK_PKGSTF_NOINSTALL		0
 #define APK_PKGSTF_INSTALL		1
 #define APK_PKGSTF_ALT_BRANCH		2
-#define APK_PKGSTF_INSTALLIF		4
-#define APK_PKGSTF_DECIDED		8
 
 struct apk_score {
 	unsigned short unsatisfiable;
@@ -42,7 +40,9 @@ struct apk_package_state {
 	unsigned availability_checked : 1;
 	unsigned unavailable : 1;
 	unsigned install_applied : 1;
-	unsigned flags : 4;
+	unsigned handle_install_if : 1;
+	unsigned locked : 1;
+	unsigned flags : 2;
 };
 
 struct apk_name_state {
@@ -411,7 +411,7 @@ static int get_preference(struct apk_solver_state *ss,
 
 		if (installable_only &&
 		    (ss->topology_position < pkg0->topology_hard ||
-		     (ps0->flags & APK_PKGSTF_DECIDED)))
+		     ps0->locked))
 			continue;
 
 		r = compare_package_preference(name_flags,
@@ -498,7 +498,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 
 		if (ps0 == NULL ||
 		    ss->topology_position < pkg0->topology_hard ||
-		    (ps0->flags & APK_PKGSTF_DECIDED) ||
+		    ps0->locked ||
 		    check_if_package_unavailable(ss, pkg0))
 			continue;
 
@@ -673,7 +673,7 @@ static void undo_decision(struct apk_solver_state *ss,
 	dbg_printf("-->undo_decision: " PKG_VER_FMT " %s\n", PKG_VER_PRINTF(pkg),
 		   (ps->flags & APK_PKGSTF_INSTALL) ? "INSTALL" : "NO_INSTALL");
 
-	if (ps->flags & APK_PKGSTF_INSTALLIF)
+	if (ps->handle_install_if)
 		ss->topology_position = ps->topology_soft;
 	else
 		ss->topology_position = pkg->topology_hard;
@@ -705,15 +705,16 @@ static solver_result_t push_decision(struct apk_solver_state *ss, struct apk_pac
 	struct apk_package_state *ps = pkg_to_ps(pkg);
 
 	ps->backtrack = ss->latest_decision;
-	ps->flags = flags | APK_PKGSTF_DECIDED;
+	ps->locked = 1;
+	ps->flags = flags;
 	ps->saved_score = ss->score;
 
 	if (ps->topology_soft < ss->topology_position) {
 		if (flags & APK_PKGSTF_INSTALL)
-			ps->flags |= APK_PKGSTF_INSTALLIF;
+			ps->handle_install_if = 1;
 		ss->topology_position = ps->topology_soft;
 	} else {
-		ps->flags &= ~APK_PKGSTF_INSTALLIF;
+		ps->handle_install_if = 0;
 		ss->topology_position = pkg->topology_hard;
 	}
 	ss->latest_decision = pkg;
@@ -723,7 +724,7 @@ static solver_result_t push_decision(struct apk_solver_state *ss, struct apk_pac
 		   ss->score.unsatisfiable,
 		   ss->score.preference);
 
-	if (ps->flags & APK_PKGSTF_INSTALLIF)
+	if (ps->handle_install_if)
 		dbg_printf("triggers due to " PKG_VER_FMT "\n",
 			   PKG_VER_PRINTF(pkg));
 
@@ -742,7 +743,8 @@ static int next_branch(struct apk_solver_state *ss)
 		if (ps->flags & APK_PKGSTF_ALT_BRANCH) {
 			dbg_printf("-->next_branch: undo decision at topology_position %d\n",
 				   ss->topology_position);
-			ps->flags &= ~(APK_PKGSTF_ALT_BRANCH | APK_PKGSTF_DECIDED);
+			ps->flags &= ~APK_PKGSTF_ALT_BRANCH;
+			ps->locked = 0;
 			undo_decision(ss, pkg, ps);
 
 			ss->latest_decision = ps->backtrack;
