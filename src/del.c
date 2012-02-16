@@ -125,7 +125,7 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	struct del_ctx *ctx = (struct del_ctx *) pctx;
 	struct apk_name **name;
 	struct apk_changeset changeset = {};
-	struct apk_package_array *solution = NULL;
+	struct apk_solution_array *solution = NULL;
 	struct not_deleted_ctx ndctx = {};
 	int i, r = 0;
 
@@ -145,7 +145,7 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	if (r == 0 || (apk_flags & APK_FORCE)) {
 		/* check for non-deleted package names */
 		for (i = 0; i < solution->num; i++) {
-			struct apk_package *pkg = solution->item[i];
+			struct apk_package *pkg = solution->item[i].pkg;
 			pkg->name->state_ptr = pkg;
 			pkg->state_int = 0;
 		}
@@ -165,7 +165,7 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	} else {
 		apk_solver_print_errors(db, solution, ctx->world, r);
 	}
-	apk_package_array_free(&solution);
+	apk_solution_array_free(&solution);
 	apk_dependency_array_free(&ctx->world);
 
 	return r;

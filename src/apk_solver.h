@@ -12,10 +12,18 @@
 #ifndef APK_SOLVER_H
 #define APK_SOLVER_H
 
+struct apk_solution_entry {
+	struct apk_package *pkg;
+	unsigned short repository_tag : 15;
+	unsigned reinstall : 1;
+};
+APK_ARRAY(apk_solution_array, struct apk_solution_entry);
+
 struct apk_change {
 	struct apk_package *oldpkg;
 	struct apk_package *newpkg;
-	unsigned short repository_tag;
+	unsigned short repository_tag : 15;
+	unsigned reinstall : 1;
 };
 APK_ARRAY(apk_change_array, struct apk_change);
 
@@ -33,13 +41,13 @@ void apk_solver_set_name_flags(struct apk_name *name,
 int apk_solver_solve(struct apk_database *db,
 		     unsigned short solver_flags,
 		     struct apk_dependency_array *world,
-		     struct apk_package_array **solution,
+		     struct apk_solution_array **solution,
 		     struct apk_changeset *changeset);
 int apk_solver_commit_changeset(struct apk_database *db,
 				struct apk_changeset *changeset,
 				struct apk_dependency_array *world);
 void apk_solver_print_errors(struct apk_database *db,
-			     struct apk_package_array *solution,
+			     struct apk_solution_array *solution,
 			     struct apk_dependency_array *world,
 			     int unsatisfiable);
 int apk_solver_commit(struct apk_database *db,

@@ -76,7 +76,7 @@ struct apk_solver_state {
 	unsigned int solver_flags : 4;
 	unsigned int refresh_name_states : 1;
 
-	struct apk_package_array *best_solution;
+	struct apk_solution_array *best_solution;
 	struct apk_score best_score;
 };
 
@@ -337,6 +337,7 @@ static unsigned int get_pinning_mask_repos(struct apk_database *db, unsigned sho
 
 static int compare_package_preference(unsigned short solver_flags,
 				      unsigned int preferred_repos,
+				      unsigned int allowed_repos,
 				      struct apk_package *pkgA,
 				      struct apk_package *pkgB,
 				      struct apk_database *db)
@@ -355,6 +356,12 @@ static int compare_package_preference(unsigned short solver_flags,
 	if ((a_repos & preferred_repos) && !(b_repos & preferred_repos))
 		return 1;
 	if ((b_repos & preferred_repos) && !(a_repos & preferred_repos))
+		return -1;
+
+	/* Difference in allowed repositories? */
+	if ((a_repos & allowed_repos) && !(b_repos & allowed_repos))
+		return 1;
+	if ((b_repos & allowed_repos) && !(a_repos & allowed_repos))
 		return -1;
 
 	if (solver_flags & APK_SOLVERF_AVAILABLE) {
@@ -400,13 +407,18 @@ static int get_preference(struct apk_solver_state *ss,
 	unsigned short name_flags = ns->solver_flags_local
 		| ns->solver_flags_inherited
 		| ss->solver_flags;
-	unsigned short preferred_pinning;
-	unsigned int preferred_repos;
+	unsigned short preferred_pinning, allowed_pinning;
+	unsigned int preferred_repos, allowed_repos;
 	unsigned short preference = 0;
-	int i;
+	int i, r;
 
 	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
 	preferred_repos = get_pinning_mask_repos(ss->db, preferred_pinning);
+	allowed_pinning = ns->allowed_pinning | ns->preferred_pinning | APK_DEFAULT_PINNING_MASK;
+	if (preferred_pinning != allowed_pinning)
+		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
+	else
+		allowed_repos = preferred_repos;
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
@@ -415,15 +427,17 @@ static int get_preference(struct apk_solver_state *ss,
 		if (pkg0 == pkg || ps0 == NULL)
 			continue;
 
-		if (compare_package_preference(name_flags, preferred_repos,
-					       pkg, pkg0, ss->db) < 0) {
-			if (installable_only) {
-				if (ss->topology_position > pkg0->topology_hard &&
-				    !(ps0->flags & APK_PKGSTF_DECIDED))
-					preference++;
-			} else
-				preference++;
-		}
+		if (installable_only &&
+		    (ss->topology_position <= pkg0->topology_hard ||
+		     (ps0->flags & APK_PKGSTF_DECIDED)))
+			continue;
+
+		r = compare_package_preference(name_flags,
+					       preferred_repos,
+					       allowed_repos,
+					       pkg, pkg0, ss->db);
+		if (r < 0)
+			preference += -r;
 	}
 
 	return preference;
@@ -487,7 +501,9 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		if ((preferred_pkg == NULL) ||
 		    (ps0->conflicts < preferred_ps->conflicts) ||
 		    (ps0->conflicts == preferred_ps->conflicts &&
-		     compare_package_preference(name_flags, preferred_repos,
+		     compare_package_preference(name_flags,
+						preferred_repos,
+						allowed_repos,
 						pkg0, preferred_pkg, ss->db) > 0)) {
 			preferred_pkg = pkg0;
 			preferred_ps = ps0;
@@ -896,22 +912,50 @@ static int expand_branch(struct apk_solver_state *ss)
 	return 0;
 }
 
-static void record_solution(struct apk_solver_state *ss)
+static int get_tag(struct apk_database *db, unsigned short pinning_mask, unsigned int repos)
 {
-	struct apk_package *pkg;
-	struct apk_package_state *ps;
 	int i;
 
-	apk_package_array_resize(&ss->best_solution, ss->assigned_names);
+	for (i = 0; i < db->num_repo_tags; i++) {
+		if (!(BIT(i) & pinning_mask))
+			continue;
+		if (db->repo_tags[i].allowed_repos & repos)
+			return i;
+	}
+	return APK_DEFAULT_REPOSITORY_TAG;
+}
+
+static void record_solution(struct apk_solver_state *ss)
+{
+	struct apk_database *db = ss->db;
+	struct apk_package *pkg;
+	struct apk_package_state *ps;
+	struct apk_name_state *ns;
+	int i;
+
+	apk_solution_array_resize(&ss->best_solution, ss->assigned_names);
 
 	i = 0;
 	pkg = ss->latest_decision;
 	while (pkg != NULL) {
 		ps = pkg_to_ps(pkg);
+		ns = name_to_ns(pkg->name);
 		if (ps->flags & APK_PKGSTF_INSTALL) {
+			unsigned short pinning;
+			unsigned int repos;
+
 			if (i >= ss->assigned_names)
 				abort();
-			ss->best_solution->item[i++] = pkg;
+
+			pinning = ns->allowed_pinning | ns->preferred_pinning | APK_DEFAULT_PINNING_MASK;
+			repos = pkg->repos | (pkg->ipkg ? db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
+
+			ss->best_solution->item[i++] = (struct apk_solution_entry){
+				.pkg = pkg,
+				.reinstall = !!((ns->solver_flags_local | ns->solver_flags_inherited |
+					         ss->solver_flags) & APK_SOLVERF_REINSTALL),
+				.repository_tag = get_tag(db, pinning, repos),
+			};
 		}
 
 		dbg_printf("record_solution: " PKG_VER_FMT ": %sINSTALL\n",
@@ -920,16 +964,16 @@ static void record_solution(struct apk_solver_state *ss)
 
 		pkg = ps->backtrack;
 	}
-	apk_package_array_resize(&ss->best_solution, i);
+	apk_solution_array_resize(&ss->best_solution, i);
 	ss->best_score = ss->score;
 }
 
-static int compare_package_name(const void *p1, const void *p2)
+static int compare_solution_entry(const void *p1, const void *p2)
 {
-	const struct apk_package **c1 = (const struct apk_package **) p1;
-	const struct apk_package **c2 = (const struct apk_package **) p2;
+	const struct apk_solution_entry *c1 = (const struct apk_solution_entry *) p1;
+	const struct apk_solution_entry *c2 = (const struct apk_solution_entry *) p2;
 
-	return strcmp((*c1)->name->name, (*c2)->name->name);
+	return strcmp(c1->pkg->name->name, c2->pkg->name->name);
 }
 
 static int compare_change(const void *p1, const void *p2)
@@ -955,21 +999,8 @@ static int compare_change(const void *p1, const void *p2)
 		c2->newpkg->topology_hard;
 }
 
-static int get_tag(struct apk_database *db, unsigned short pinning_mask, unsigned int repos)
-{
-	int i;
-
-	for (i = 0; i < db->num_repo_tags; i++) {
-		if (!(BIT(i) & pinning_mask))
-			continue;
-		if (db->repo_tags[i].allowed_repos & repos)
-			return i;
-	}
-	return APK_DEFAULT_REPOSITORY_TAG;
-}
-
 static int generate_changeset(struct apk_database *db,
-			      struct apk_package_array *solution,
+			      struct apk_solution_array *solution,
 			      struct apk_changeset *changeset,
 			      unsigned short solver_flags)
 {
@@ -981,13 +1012,13 @@ static int generate_changeset(struct apk_database *db,
 
 	/* calculate change set size */
 	for (i = 0; i < solution->num; i++) {
-		pkg = solution->item[i];
+		pkg = solution->item[i].pkg;
 		ns = name_to_ns(pkg->name);
 		ns->chosen = pkg;
 		ns->in_changeset = 1;
 		if ((pkg->ipkg == NULL) ||
-		    ((ns->solver_flags_local | ns->solver_flags_inherited |
-		      solver_flags) & APK_SOLVERF_REINSTALL))
+		    solution->item[i].reinstall ||
+		    solution->item[i].repository_tag != pkg->ipkg->repository_tag)
 			num_installs++;
 	}
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
@@ -1008,13 +1039,13 @@ static int generate_changeset(struct apk_database *db,
 		}
 	}
 	for (i = 0; i < solution->num; i++) {
-		pkg = solution->item[i];
+		pkg = solution->item[i].pkg;
 		name = pkg->name;
 		ns = name_to_ns(name);
 
 		if ((pkg->ipkg == NULL) ||
-		    ((ns->solver_flags_local | ns->solver_flags_inherited |
-		      solver_flags) & APK_SOLVERF_REINSTALL)) {
+		    solution->item[i].reinstall ||
+		    solution->item[i].repository_tag != pkg->ipkg->repository_tag){
 			for (j = 0; j < name->pkgs->num; j++) {
 				pkg0 = name->pkgs->item[j];
 				if (pkg0->ipkg == NULL)
@@ -1023,7 +1054,8 @@ static int generate_changeset(struct apk_database *db,
 				break;
 			}
 			changeset->changes->item[ci].newpkg = pkg;
-			changeset->changes->item[ci].repository_tag = get_tag(db, ns->allowed_pinning, pkg->repos);
+			changeset->changes->item[ci].repository_tag = solution->item[i].repository_tag;
+			changeset->changes->item[ci].reinstall = solution->item[i].reinstall;
 			ci++;
 		}
 	}
@@ -1075,7 +1107,7 @@ static void apk_solver_free(struct apk_database *db)
 int apk_solver_solve(struct apk_database *db,
 		     unsigned short solver_flags,
 		     struct apk_dependency_array *world,
-		     struct apk_package_array **solution,
+		     struct apk_solution_array **solution,
 		     struct apk_changeset *changeset)
 {
 	struct apk_solver_state *ss;
@@ -1134,10 +1166,10 @@ int apk_solver_solve(struct apk_database *db,
 	}
 	if (solution != NULL) {
 		qsort(ss->best_solution->item, ss->best_solution->num,
-		      sizeof(struct apk_package *), compare_package_name);
+		      sizeof(struct apk_solution_entry), compare_solution_entry);
 		*solution = ss->best_solution;
 	} else {
-		apk_package_array_free(&ss->best_solution);
+		apk_solution_array_free(&ss->best_solution);
 	}
 	r = ss->best_score.unsatisfiable;
 	apk_solver_free(db);
@@ -1177,6 +1209,10 @@ static void print_change(struct apk_database *db,
 			    BLOB_PRINTF(*newpkg->version));
 	} else if (newpkg == NULL) {
 		apk_message("%s Purging %s (" BLOB_FMT ")",
+			    status, nameptr,
+			    BLOB_PRINTF(*oldpkg->version));
+	} else if (newpkg == oldpkg && !change->reinstall) {
+		apk_message("%s Updating pinning %s (" BLOB_FMT ")",
 			    status, nameptr,
 			    BLOB_PRINTF(*oldpkg->version));
 	} else {
@@ -1415,10 +1451,11 @@ int apk_solver_commit_changeset(struct apk_database *db,
 		prog.pkg = change->newpkg;
 
 		if (!(apk_flags & APK_SIMULATE)) {
-			r = apk_db_install_pkg(db,
-					       change->oldpkg, change->newpkg,
-					       (apk_flags & APK_PROGRESS) ? progress_cb : NULL,
-					       &prog);
+			if (change->oldpkg != change->newpkg || change->reinstall)
+				r = apk_db_install_pkg(db,
+						       change->oldpkg, change->newpkg,
+						       (apk_flags & APK_PROGRESS) ? progress_cb : NULL,
+						       &prog);
 			if (r != 0)
 				break;
 			if (change->newpkg)
@@ -1482,7 +1519,7 @@ static void print_dep_errors(struct apk_database *db, char *label, struct apk_de
 }
 
 void apk_solver_print_errors(struct apk_database *db,
-			     struct apk_package_array *solution,
+			     struct apk_solution_array *solution,
 			     struct apk_dependency_array *world,
 			     int unsatisfiable)
 {
@@ -1491,15 +1528,15 @@ void apk_solver_print_errors(struct apk_database *db,
 	apk_error("%d unsatisfiable dependencies:", unsatisfiable);
 
 	for (i = 0; i < solution->num; i++) {
-		struct apk_package *pkg = solution->item[i];
+		struct apk_package *pkg = solution->item[i].pkg;
 		pkg->name->state_ptr = pkg;
 	}
 
 	print_dep_errors(db, "world", world);
 	for (i = 0; i < solution->num; i++) {
-		struct apk_package *pkg = solution->item[i];
+		struct apk_package *pkg = solution->item[i].pkg;
 		char pkgtext[256];
-		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(solution->item[i]));
+		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
 		print_dep_errors(db, pkgtext, pkg->depends);
 	}
 }
@@ -1509,7 +1546,7 @@ int apk_solver_commit(struct apk_database *db,
 		      struct apk_dependency_array *world)
 {
 	struct apk_changeset changeset = {};
-	struct apk_package_array *solution = NULL;
+	struct apk_solution_array *solution = NULL;
 	int r;
 
 	if (apk_db_check_world(db, world) != 0) {
@@ -1529,7 +1566,7 @@ int apk_solver_commit(struct apk_database *db,
 		/* Failure -- print errors */
 		apk_solver_print_errors(db, solution, world, r);
 	}
-	apk_package_array_free(&solution);
+	apk_solution_array_free(&solution);
 
 	return r;
 }

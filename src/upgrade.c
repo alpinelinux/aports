@@ -45,7 +45,7 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 {
 	struct apk_name *name;
 	struct apk_changeset changeset = {};
-	struct apk_package_array *solution = NULL;
+	struct apk_solution_array *solution = NULL;
 	int r;
 
 	name = apk_db_get_name(db, APK_BLOB_STR("apk-tools"));
@@ -83,7 +83,7 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 	exit(1);
 
 ret:
-	apk_package_array_free(&solution);
+	apk_solution_array_free(&solution);
 	apk_change_array_free(&changeset.changes);
 	db->performing_self_update = 0;
 

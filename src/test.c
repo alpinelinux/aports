@@ -119,7 +119,7 @@ static void print_dep_errors(struct apk_database *db, char *label, struct apk_de
 }
 
 static void print_errors_in_solution(struct apk_database *db, int unsatisfiable,
-				     struct apk_package_array *solution)
+				     struct apk_solution_array *solution)
 {
 	int i;
 
@@ -127,15 +127,15 @@ static void print_errors_in_solution(struct apk_database *db, int unsatisfiable,
 		unsatisfiable, solution->num);
 
 	for (i = 0; i < solution->num; i++) {
-		struct apk_package *pkg = solution->item[i];
+		struct apk_package *pkg = solution->item[i].pkg;
 		pkg->name->state_ptr = pkg;
 	}
 
 	print_dep_errors(db, "world", db->world);
 	for (i = 0; i < solution->num; i++) {
-		struct apk_package *pkg = solution->item[i];
+		struct apk_package *pkg = solution->item[i].pkg;
 		char pkgtext[256];
-		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(solution->item[i]));
+		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
 		print_dep_errors(db, pkgtext, pkg->depends);
 	}
 
@@ -145,7 +145,7 @@ static int test_main(void *pctx, struct apk_database *db, int argc, char **argv)
 {
 	struct test_ctx *ctx = (struct test_ctx *) pctx;
 	struct apk_bstream *bs;
-	struct apk_package_array *solution = NULL;
+	struct apk_solution_array *solution = NULL;
 	struct apk_changeset changeset = {};
 	apk_blob_t b;
 	int i, r;
