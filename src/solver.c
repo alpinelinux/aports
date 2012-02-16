@@ -47,7 +47,6 @@ struct apk_name_state {
 	struct apk_name *name;
 	struct apk_package *chosen;
 	struct apk_score minimum_penalty;
-	unsigned int topology_last_touched;
 	unsigned short requirers;
 	unsigned short install_ifs;
 
@@ -567,7 +566,6 @@ static void trigger_install_if(struct apk_solver_state *ss,
 
 		dbg_printf("trigger_install_if: " PKG_VER_FMT " triggered\n",
 			   PKG_VER_PRINTF(pkg));
-		ns->topology_last_touched = ss->topology_position;
 		ns->install_ifs++;
 		update_name_state(ss, pkg->name);
 	}
@@ -581,7 +579,6 @@ static void untrigger_install_if(struct apk_solver_state *ss,
 
 		dbg_printf("untrigger_install_if: " PKG_VER_FMT " no longer triggered\n",
 			   PKG_VER_PRINTF(pkg));
-		ns->topology_last_touched = ss->topology_position;
 		ns->install_ifs--;
 		update_name_state(ss, pkg->name);
 	}
@@ -800,7 +797,6 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 
 	if (!dep->optional)
 		ns->requirers++;
-	ns->topology_last_touched = ss->topology_position;
 
 	update_name_state(ss, name);
 }
@@ -842,7 +838,6 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 
 	if (!dep->optional)
 		ns->requirers--;
-	ns->topology_last_touched = ss->topology_position;
 
 	update_name_state(ss, name);
 }
