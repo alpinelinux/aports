@@ -61,7 +61,6 @@ struct apk_name_state {
 	unsigned int solver_flags_inherited : 4;
 
 	unsigned int locked : 1;
-	unsigned int no_choices_left : 1;
 	unsigned int in_changeset : 1;
 };
 
@@ -477,7 +476,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		| ss->solver_flags;
 	unsigned short preferred_pinning, allowed_pinning;
 	unsigned int preferred_repos, allowed_repos;
-	int i, options = 0, skipped_options = 0;
+	int i, options = 0;
 
 	if (ns->locked)
 		return ns->chosen != NULL;
@@ -503,6 +502,9 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		    check_if_package_unavailable(ss, pkg0))
 			continue;
 
+		options++;
+
+		/* preferred - currently most optimal for end solution */
 		if ((preferred_pkg == NULL) ||
 		    (ps0->conflicts < preferred_ps->conflicts) ||
 		    (ps0->conflicts == preferred_ps->conflicts &&
@@ -514,23 +516,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 			preferred_ps = ps0;
 		}
 
-		/* pinning has not enabled the package */
-		if ((pkg0->repos != 0) && (pkg0->ipkg == NULL) &&
-		    (pkg0->filename == NULL) && !(pkg0->repos & allowed_repos)) {
-			skipped_options++;
-			continue;
-		}
-
-		/* not directly required, there's at least one
-		 * valid install_if, but for not this specific pkg;
-		 * this might get enabled later */
-		if (ns->requirers == 0 && ns->install_ifs != 0 &&
-		    install_if_missing(ss, pkg0)) {
-			skipped_options++;
-			continue;
-		}
-
-		options++;
+		/* next in topology order - next to get locked in */
 		if (ps0->topology_soft < ss->topology_position &&
 		    ps0->topology_soft > best_topology)
 			best_pkg = pkg0, best_topology = ps0->topology_soft;
@@ -544,8 +530,8 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 			list_init(&ns->unsolved_list);
 			ns->chosen = NULL;
 		}
-		dbg_printf("%s: deleted from unsolved: %d requirers, %d install_ifs, %d options, %d skipped\n",
-			   name->name, ns->requirers, ns->install_ifs, options, skipped_options);
+		dbg_printf("%s: deleted from unsolved: %d requirers, %d install_ifs, %d options\n",
+			   name->name, ns->requirers, ns->install_ifs, options);
 	} else {
 		if (!list_hashed(&ns->unsolved_list))
 			list_add(&ns->unsolved_list, &ss->unsolved_list_head);
@@ -574,15 +560,12 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		}
 		addscore(&ss->minimum_penalty, &ns->minimum_penalty);
 
-		dbg_printf("%s: added to unsolved: %d requirers, %d install_ifs, %d options, %d skipped options (next topology %d)\n",
+		dbg_printf("%s: added to unsolved: %d requirers, %d install_ifs, %d options (next topology %d)\n",
 			   name->name, ns->requirers, ns->install_ifs,
-			   options, skipped_options,
-			   best_topology);
+			   options, best_topology);
 	}
 
-	ns->no_choices_left = (options == 0 && skipped_options == 0);
-
-	return options + skipped_options;
+	return options;
 }
 
 static void trigger_install_if(struct apk_solver_state *ss,
@@ -919,16 +902,12 @@ static int expand_branch(struct apk_solver_state *ss)
 	struct apk_name_state *ns;
 	struct apk_package *pkg0 = NULL;
 	unsigned int topology0 = 0;
+	unsigned short allowed_pinning, preferred_pinning;
+	unsigned int allowed_repos;
 	int flags;
 
 	/* FIXME: change unsolved_list to a priority queue */
 	list_for_each_entry(ns, &ss->unsolved_list_head, unsolved_list) {
-		if (ns->chosen == NULL && !ns->no_choices_left) {
-			/* we have not been able to determine candidate
-			 * for the package, but is not yet completely
-			 * excluded either. try updating it. */
-			update_name_state(ss, ns->name);
-		}
 		if (ns->chosen == NULL)
 			continue;
 		if (pkg_to_ps(ns->chosen)->topology_soft < ss->topology_position &&
@@ -955,10 +934,24 @@ static int expand_branch(struct apk_solver_state *ss)
 	ns = name_to_ns(pkg0->name);
 	dbg_printf("expand_branch: %s\n", pkg0->name->name);
 
-	if (get_preference(ss, pkg0, TRUE) == 0)
+	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
+	allowed_pinning = ns->allowed_pinning | preferred_pinning;
+	allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
+
+	if ((pkg0->repos != 0) && (pkg0->ipkg == NULL) &&
+	    (pkg0->filename == NULL) && !(pkg0->repos & allowed_repos)) {
+		/* pinning has not enabled the package */
+		flags = APK_PKGSTF_NOINSTALL | APK_PKGSTF_ALT_BRANCH;
+	} else if (ns->requirers == 0 && ns->install_ifs != 0 &&
+		   install_if_missing(ss, pkg0)) {
+		/* not directly required, and package specific
+		 * install_if never triggered */
+		flags = APK_PKGSTF_NOINSTALL | APK_PKGSTF_ALT_BRANCH;
+	} else if (get_preference(ss, pkg0, TRUE) == 0) {
 		flags = APK_PKGSTF_INSTALL;
-	else
+	} else {
 		flags = APK_PKGSTF_NOINSTALL;
+	}
 
 	return push_decision(ss, pkg0, flags);
 }
