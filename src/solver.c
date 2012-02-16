@@ -414,7 +414,7 @@ static int get_preference(struct apk_solver_state *ss,
 
 	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
 	preferred_repos = get_pinning_mask_repos(ss->db, preferred_pinning);
-	allowed_pinning = ns->allowed_pinning | ns->preferred_pinning | APK_DEFAULT_PINNING_MASK;
+	allowed_pinning = ns->allowed_pinning | preferred_pinning;
 	if (preferred_pinning != allowed_pinning)
 		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
 	else
@@ -474,7 +474,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 
 	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
 	preferred_repos = get_pinning_mask_repos(ss->db, preferred_pinning);
-	allowed_pinning = ns->allowed_pinning | ns->preferred_pinning | APK_DEFAULT_PINNING_MASK;
+	allowed_pinning = ns->allowed_pinning | preferred_pinning;
 	if (preferred_pinning != allowed_pinning)
 		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
 	else
