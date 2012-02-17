@@ -3,6 +3,7 @@ PACKAGE		:= abuild
 VERSION		:= 2.11.2
 
 prefix		?= /usr
+bindir		?= $(prefix)/bin
 sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
 abuildrepo	?= ~/.cache/abuild
@@ -12,7 +13,7 @@ LUA_SHAREDIR	?= $(prefix)/share/lua/$(LUA_VERSION)/
 
 SCRIPTS		:= abuild buildrepo abuild-keygen abuild-sign newapkbuild \
 		   abump apkgrel ap buildlab apkbuild-cpan
-USR_BIN_FILES	:= $(SCRIPTS) abuild-tar
+USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
 
@@ -31,6 +32,7 @@ endif
 CHMOD		:= chmod
 SED		:= sed
 TAR		:= tar
+LINK		= $(CC) $(OBJS-$@) -o $@ $(LDFLAGS) $(LDFLAGS-$@) $(LIBS-$@)
 
 SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@prefix@:$(prefix):g' \
@@ -38,15 +40,23 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@datadir@:$(datadir):g' \
 			-e 's:@abuildrepo@:$(abuildrepo):g'
 
-SSL_CFLAGS	:= $(shell pkg-config --cflags openssl)
-SSL_LIBS	:= $(shell pkg-config --libs openssl)
+SSL_CFLAGS	= $(shell pkg-config --cflags openssl)
+SSL_LIBS	= $(shell pkg-config --libs openssl)
+
+LDFLAGS ?= 
+
+OBJS-abuild-tar  = abuild-tar.o
+LIBS-abuild-tar = $(SSL_LIBS)
+CFLAGS-abuild-tar = $(SSL_CFLAGS)
+
+OBJS-abuild-sudo = abuild-sudo.o
 
 .SUFFIXES:	.sh.in .in
-.sh.in.sh:
+%.sh: %.sh.in
 	${SED} ${SED_REPLACE} ${SED_EXTRA} $< > $@
 	${CHMOD} +x $@
 
-.in:
+%: %.in
 	${SED} ${SED_REPLACE} ${SED_EXTRA} $< > $@
 	${CHMOD} +x $@
 
@@ -57,11 +67,17 @@ all: 	$(USR_BIN_FILES)
 clean:
 	@rm -f $(USR_BIN_FILES)
 
-abuild-tar:	abuild-tar.c
-	$(CC) -o $@ $^ -Wl,--as-needed $(SSL_LIBS)
+%.o: %.c
+	$(CC) $(CFLAGS) $(CFLAGS-$@) -o $@ -c $<
 
-abuild-tar.static: abuild-tar.c
-	$(CC) -o $@ -static $(SSL_LIBS) $^
+abuild-sudo: abuild-sudo.o
+	$(LINK)
+
+abuild-tar: abuild-tar.o
+	$(LINK)
+
+abuild-tar.static: abuild-tar.o
+	$(CC) $(CFLAGS) $(CFLAGS-$@) -o $@ -static $(LIBS-$@) $^
 
 help:
 	@echo "$(P) makefile"
@@ -69,10 +85,14 @@ help:
 	@echo "       make dist"
 
 install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh aports.lua
-	mkdir -p $(DESTDIR)/$(prefix)/bin $(DESTDIR)/$(sysconfdir) \
+	install -d $(DESTDIR)/$(bindir) $(DESTDIR)/$(sysconfdir) \
 		$(DESTDIR)/$(datadir)
 	for i in $(USR_BIN_FILES); do\
-		install -m 755 $$i $(DESTDIR)/$(prefix)/bin/$$i;\
+		install -m 755 $$i $(DESTDIR)/$(bindir)/$$i;\
+	done
+	chmod 4111 $(DESTDIR)/$(prefix)/bin/abuild-sudo
+	for i in adduser addgroup apk; do \
+		ln -fs abuild-sudo $(DESTDIR)/$(bindir)/abuild-$$i; \
 	done
 	if [ -n "$(DESTDIR)" ] || [ ! -f "/$(sysconfdir)"/abuild.conf ]; then\
 		cp abuild.conf $(DESTDIR)/$(sysconfdir)/; \
