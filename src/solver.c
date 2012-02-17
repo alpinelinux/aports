@@ -35,7 +35,6 @@ struct apk_score {
 struct apk_package_state {
 	struct apk_package *backtrack;
 	unsigned int topology_soft;
-	struct apk_score saved_score;
 	unsigned short conflicts;
 	unsigned availability_checked : 1;
 	unsigned unavailable : 1;
@@ -441,7 +440,7 @@ static int install_if_missing(struct apk_solver_state *ss, struct apk_package *p
 	return missing;
 }
 
-static int check_if_package_unavailable(struct apk_solver_state *ss, struct apk_package *pkg)
+static int check_if_package_unavailable(struct apk_solver_state *ss, struct apk_package *pkg, int do_check)
 {
 	struct apk_name *name = pkg->name;
 	struct apk_package_state *ps = pkg_to_ps(pkg);
@@ -454,7 +453,7 @@ static int check_if_package_unavailable(struct apk_solver_state *ss, struct apk_
 		return 0;
 
 	/* done already? */
-	if (ps->availability_checked)
+	if (ps->availability_checked && !do_check)
 		return ps->unavailable;
 
 	/* and it's not available, we can't use it */
@@ -499,7 +498,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		if (ps0 == NULL ||
 		    ss->topology_position < pkg0->topology_hard ||
 		    ps0->locked ||
-		    check_if_package_unavailable(ss, pkg0))
+		    check_if_package_unavailable(ss, pkg0, 0))
 			continue;
 
 		options++;
@@ -600,21 +599,21 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 {
 	struct apk_name *name = pkg->name;
 	struct apk_name_state *ns = name_to_ns(name);
+	unsigned short preference;
 
 	dbg_printf("-->apply_decision: " PKG_VER_FMT " %s\n", PKG_VER_PRINTF(pkg),
 		   (ps->flags & APK_PKGSTF_INSTALL) ? "INSTALL" : "NO_INSTALL");
 
 	if (ps->flags & APK_PKGSTF_INSTALL) {
-		unsigned short preference;
-
 		subscore(&ss->minimum_penalty, &ns->minimum_penalty);
 		ns->minimum_penalty = (struct apk_score) { 0, 0 };
 
 		preference = get_preference(ss, pkg, FALSE);
 		ss->score.unsatisfiable += ps->conflicts;
 		ss->score.preference += preference;
-		if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0) {
-			dbg_printf("install causing {%d,%d}, penalty too big: {%d,%d}+{%d,%d}>={%d,%d}\n",
+		if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0 ||
+		    check_if_package_unavailable(ss, pkg, 1)) {
+			dbg_printf("install causing {%d,%d}, penalty too big (or unavailable %d): {%d,%d}+{%d,%d}>={%d,%d}\n",
 				ps->conflicts, preference,
 				ss->score.unsatisfiable, ss->score.preference,
 				ss->minimum_penalty.unsatisfiable, ss->minimum_penalty.preference,
@@ -639,7 +638,7 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 		foreach_dependency(ss, pkg->depends, apply_constraint);
 		foreach_rinstall_if_pkg(ss, pkg, trigger_install_if);
 	} else {
-		if (ns->locked == 0 && update_name_state(ss, pkg->name) == 0) {
+		if (update_name_state(ss, pkg->name) == 0) {
 			subscore(&ss->minimum_penalty, &ns->minimum_penalty);
 			ns->minimum_penalty = (struct apk_score) { 0, 0 };
 
@@ -668,7 +667,8 @@ static void undo_decision(struct apk_solver_state *ss,
 			  struct apk_package *pkg,
 			  struct apk_package_state *ps)
 {
-	struct apk_name_state *ns = name_to_ns(pkg->name);
+	struct apk_name *name = pkg->name;
+	struct apk_name_state *ns = name_to_ns(name);
 
 	dbg_printf("-->undo_decision: " PKG_VER_FMT " %s\n", PKG_VER_PRINTF(pkg),
 		   (ps->flags & APK_PKGSTF_INSTALL) ? "INSTALL" : "NO_INSTALL");
@@ -680,22 +680,28 @@ static void undo_decision(struct apk_solver_state *ss,
 
 	if (ps->flags & APK_PKGSTF_INSTALL) {
 		if (ps->install_applied) {
+			unsigned short preference;
+
 			ps->install_applied = 0;
 			ss->assigned_names--;
 			foreach_rinstall_if_pkg(ss, pkg, untrigger_install_if);
 			foreach_dependency(ss, pkg->depends, undo_constraint);
+
+			preference = get_preference(ss, pkg, FALSE);
+			ss->score.unsatisfiable -= ps->conflicts;
+			ss->score.preference -= preference;
 		}
-
-		ns->locked = 0;
-		ns->chosen = NULL;
 	} else {
-		/* UNINSTALL decision removed - either name is unlocked
-		 * or locked to none */
-		ns->locked = 0;
-		ns->chosen = NULL;
+		if (ns->locked) {
+			/* UNINSTALL decision removed - either name is unlocked
+			 * or locked to none */
+			ss->score.unsatisfiable -= ns->requirers;
+			ss->score.preference -= name->pkgs->num;
+		}
 	}
+	ns->locked = 0;
+	ns->chosen = NULL;
 
-	ss->score = ps->saved_score;
 	update_name_state(ss, pkg->name);
 }
 
@@ -705,16 +711,15 @@ static solver_result_t push_decision(struct apk_solver_state *ss, struct apk_pac
 	struct apk_package_state *ps = pkg_to_ps(pkg);
 
 	ps->backtrack = ss->latest_decision;
-	ps->locked = 1;
 	ps->flags = flags;
-	ps->saved_score = ss->score;
+	ps->locked = 1;
+	ps->handle_install_if = 0;
 
 	if (ps->topology_soft < ss->topology_position) {
 		if (flags & APK_PKGSTF_INSTALL)
 			ps->handle_install_if = 1;
 		ss->topology_position = ps->topology_soft;
 	} else {
-		ps->handle_install_if = 0;
 		ss->topology_position = pkg->topology_hard;
 	}
 	ss->latest_decision = pkg;
@@ -814,11 +819,16 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	if (ns->locked) {
 		if (ns->chosen)
 			dbg_printf("%s: locked to " PKG_VER_FMT " already\n",
-				   dep->name->name, PKG_VER_PRINTF(ns->chosen));
+				   name->name, PKG_VER_PRINTF(ns->chosen));
 		else
 			dbg_printf("%s: locked to empty\n",
-				   dep->name->name);
+				   name->name);
 		if (!apk_dep_is_satisfied(dep, ns->chosen))
+			ss->score.unsatisfiable++;
+		return;
+	}
+	if (name->pkgs->num == 0) {
+		if (!dep->optional)
 			ss->score.unsatisfiable++;
 		return;
 	}
@@ -828,6 +838,12 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 			   dep->name->name, dep->repository_tag);
 		ns->preferred_pinning = BIT(dep->repository_tag);
 		ns->allowed_pinning |= BIT(dep->repository_tag);
+	}
+
+	if (ss->latest_decision != NULL) {
+		dbg_printf("%s: inheriting flags and pinning from %s\n",
+			   name->name, ss->latest_decision->name->name);
+		inherit_name_state(name, ss->latest_decision->name);
 	}
 
 	for (i = 0; i < name->pkgs->num; i++) {
@@ -846,12 +862,6 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		}
 	}
 
-	if (ss->latest_decision != NULL) {
-		dbg_printf("%s: inheriting flags and pinning from %s\n",
-			   name->name, ss->latest_decision->name->name);
-		inherit_name_state(name, ss->latest_decision->name);
-	}
-
 	if (!dep->optional)
 		ns->requirers++;
 
@@ -867,11 +877,18 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	if (ns->locked) {
 		if (ns->chosen != NULL) {
 			dbg_printf(PKG_VER_FMT " selected already for %s\n",
-				   PKG_VER_PRINTF(ns->chosen), dep->name->name);
+				   PKG_VER_PRINTF(ns->chosen), name->name);
 		} else {
 			dbg_printf("%s selected to not be satisfied\n",
-				   dep->name->name);
+				   name->name);
 		}
+		if (!apk_dep_is_satisfied(dep, ns->chosen))
+			ss->score.unsatisfiable--;
+		return;
+	}
+	if (name->pkgs->num == 0) {
+		if (!dep->optional)
+			ss->score.unsatisfiable--;
 		return;
 	}
 
@@ -919,13 +936,6 @@ static int expand_branch(struct apk_solver_state *ss)
 			pkg0 = ns->chosen, topology0 = pkg0->topology_hard;
 	}
 	if (pkg0 == NULL) {
-		list_for_each_entry(ns, &ss->unsolved_list_head, unsolved_list) {
-			if (ns->locked)
-				continue;
-			ss->score.unsatisfiable += ns->requirers;
-			ss->score.preference += ns->name->pkgs->num;
-		}
-
 		dbg_printf("expand_branch: list is empty (%d unsatisfied)\n",
 			   ss->score.unsatisfiable);
 		return SOLVERR_SOLUTION;
@@ -1011,7 +1021,6 @@ static void record_solution(struct apk_solver_state *ss)
 		pkg = ps->backtrack;
 	}
 	apk_solution_array_resize(&ss->best_solution, i);
-	ss->best_score = ss->score;
 }
 
 static int compare_solution_entry(const void *p1, const void *p2)
@@ -1185,14 +1194,21 @@ int apk_solver_solve(struct apk_database *db,
 		/* need EXPAND if here, can return SOLUTION|PRUNED|EXPAND */
 		r = expand_branch(ss);
 		if (r == SOLVERR_SOLUTION) {
+			struct apk_score score;
+
 			dbg_printf("solution with: %d unsatisfiable, %d preference\n",
 				   ss->score.unsatisfiable,
 				   ss->score.preference);
 
-			if (cmpscore(&ss->score, &ss->best_score) < 0)
-				record_solution(ss);
+			score = ss->score;
+			addscore(&score, &ss->minimum_penalty);
 
-			if (cmpscore(&zero_score, &ss->score) >= 0) {
+			if (cmpscore(&score, &ss->best_score) < 0) {
+				record_solution(ss);
+				ss->best_score = score;
+			}
+
+			if (cmpscore(&zero_score, &score) >= 0) {
 				/* found solution - it is optimal because we permutate
 				 * each preferred local option first, and permutations
 				 * happen in topologally sorted order. */
