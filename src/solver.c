@@ -1630,6 +1630,7 @@ int apk_solver_commit(struct apk_database *db,
 		apk_solver_print_errors(db, solution, world, r);
 	}
 	apk_solution_array_free(&solution);
+	apk_change_array_free(&changeset.changes);
 
 	return r;
 }

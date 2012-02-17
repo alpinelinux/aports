@@ -1508,6 +1508,7 @@ void apk_db_close(struct apk_database *db)
 
 	for (i = 0; i < db->num_repos; i++) {
 		free(db->repos[i].url);
+		free(db->repos[i].description.ptr);
 	}
 	for (i = 0; i < db->protected_paths->num; i++)
 		free(db->protected_paths->item[i]);

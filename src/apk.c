@@ -316,8 +316,8 @@ int main(int argc, char **argv)
 		case 0:
 			break;
 		case 'h':
-			return usage(applet);
-			break;
+			r = usage(applet);
+			goto err;
 		case 'p':
 			dbopts.root = optarg;
 			break;
@@ -339,7 +339,8 @@ int main(int argc, char **argv)
 			apk_verbosity++;
 			break;
 		case 'V':
-			return version();
+			r = version();
+			goto err;
 		case 'f':
 			apk_flags |= APK_FORCE;
 			break;
@@ -383,14 +384,18 @@ int main(int argc, char **argv)
 			if (applet == NULL || applet->parse == NULL ||
 			    applet->parse(ctx, &dbopts, r,
 					  optindex - ARRAY_SIZE(generic_options),
-					  optarg) != 0)
-				return usage(applet);
+					  optarg) != 0) {
+				r = usage(applet);
+				goto err;
+			}
 			break;
 		}
 	}
 
-	if (applet == NULL)
-		return usage(NULL);
+	if (applet == NULL) {
+		r = usage(NULL);
+		goto err;
+	}
 
 	argc -= optind;
 	argv += optind;
@@ -403,13 +408,16 @@ int main(int argc, char **argv)
 	if (r != 0) {
 		apk_error("Failed to open apk database: %s",
 			  apk_error_str(r));
-		return r;
+		goto err;
 	}
 
 	r = applet->main(ctx, &db, argc, argv);
 	apk_db_close(&db);
 
 	if (r == -EINVAL)
-		return usage(applet);
+		r = usage(applet);
+err:
+	if (ctx)
+		free(ctx);
 	return r;
 }
