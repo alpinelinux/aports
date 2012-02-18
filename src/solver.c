@@ -1,7 +1,7 @@
 /* solver.c - Alpine Package Keeper (APK)
  * A backtracking, forward checking dependency graph solver.
  *
- * Copyright (C) 2008-2011 Timo Teräs <timo.teras@iki.fi>
+ * Copyright (C) 2008-2012 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -16,68 +16,116 @@
 
 #include "apk_print.h"
 
-#if 0
+//#define DEBUG_PRINT
+#define DEBUG_CHECKS
+
+#ifdef DEBUG_PRINT
 #include <stdio.h>
 #define dbg_printf(args...) fprintf(stderr, args)
 #else
 #define dbg_printf(args...)
 #endif
 
-#define APK_PKGSTF_NOINSTALL		0
-#define APK_PKGSTF_INSTALL		1
-#define APK_PKGSTF_ALT_BRANCH		2
+#if defined(DEBUG_PRINT) || defined(DEBUG_CHECKS)
+#define ASSERT(cond, fmt...) \
+	if (!(cond)) { fprintf(stderr, fmt); *(char*)NULL = 0; }
+#else
+#define ASSERT(cond, fmt...)
+#endif
 
 struct apk_score {
-	unsigned short unsatisfiable;
+	unsigned short conflicts;
+	unsigned short non_preferred_actions;
 	unsigned short preference;
 };
 
+#define SCORE_FMT		"{%d/%d/%d}"
+#define SCORE_PRINTF(s)		(s)->conflicts, (s)->non_preferred_actions, (s)->preference
+
+enum {
+	DECISION_ASSIGN = 0,
+	DECISION_EXCLUDE
+};
+
+enum {
+	BRANCH_NO,
+	BRANCH_YES,
+};
+
+struct apk_decision {
+	union {
+		struct apk_name *name;
+		struct apk_package *pkg;
+	};
+#ifdef DEBUG_CHECKS
+	struct apk_score saved_score;
+#endif
+
+	unsigned no_package : 1;
+	unsigned type : 1;
+	unsigned branching_point : 1;
+	unsigned topology_position : 1;
+};
+
 struct apk_package_state {
-	struct apk_package *backtrack;
 	unsigned int topology_soft;
 	unsigned short conflicts;
+	unsigned char preference;
 	unsigned availability_checked : 1;
 	unsigned unavailable : 1;
 	unsigned install_applied : 1;
 	unsigned handle_install_if : 1;
 	unsigned locked : 1;
-	unsigned flags : 2;
 };
 
 struct apk_name_state {
 	struct list_head unsolved_list;
 	struct apk_name *name;
 	struct apk_package *chosen;
+
 	struct apk_score minimum_penalty;
+	unsigned short merge_index;
+	unsigned short prerequires;
 	unsigned short requirers;
 	unsigned short install_ifs;
 
 	unsigned short preferred_pinning;
 	unsigned short allowed_pinning;
 
-	unsigned int solver_flags_local : 4;
-	unsigned int solver_flags_local_mask : 4;
-	unsigned int solver_flags_inherited : 4;
+	unsigned solver_flags_local : 4;
+	unsigned solver_flags_local_mask : 4;
+	unsigned solver_flags_inherited : 4;
 
-	unsigned int locked : 1;
-	unsigned int in_changeset : 1;
+	/* one time prepare/finish flags */
+	unsigned decision_counted : 1;
+	unsigned originally_installed : 1;
+	unsigned prepared : 1;
+	unsigned in_changeset : 1;
+
+	/* dynamic state flags */
+	unsigned none_excluded : 1;
+	unsigned locked : 1;
 };
 
 struct apk_solver_state {
 	struct apk_database *db;
-	unsigned num_topology_positions;
+	struct apk_decision *decisions;
 
 	struct list_head unsolved_list_head;
-	struct apk_package *latest_decision;
+
+	unsigned int num_topology_positions;
+	unsigned int num_decisions, max_decisions;
 	unsigned int topology_position;
 	unsigned int assigned_names;
-	struct apk_score score;
-	struct apk_score minimum_penalty;
-
-	unsigned int solver_flags : 4;
 
 	struct apk_solution_array *best_solution;
+
+	struct apk_score score;
+	struct apk_score minimum_penalty;
 	struct apk_score best_score;
+
+	unsigned solver_flags : 4;
+	unsigned impossible_constraints : 1;
 };
 
 typedef enum {
@@ -89,45 +137,66 @@ typedef enum {
 
 static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency *dep);
 static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *dep);
-static solver_result_t push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
-				     int flags);
+static solver_result_t push_decision(struct apk_solver_state *ss,
+				     struct apk_name *name,
+				     struct apk_package *pkg,
+				     int primary_decision,
+				     int branching_point,
+				     int topology_position);
 
 static void addscore(struct apk_score *a, struct apk_score *b)
 {
-	a->unsatisfiable += b->unsatisfiable;
+	a->conflicts += b->conflicts;
+	a->non_preferred_actions += b->non_preferred_actions;
 	a->preference += b->preference;
 }
 
 static void subscore(struct apk_score *a, struct apk_score *b)
 {
-	a->unsatisfiable -= b->unsatisfiable;
+	a->conflicts -= b->conflicts;
+	a->non_preferred_actions -= b->non_preferred_actions;
 	a->preference -= b->preference;
 }
 
 static int cmpscore(struct apk_score *a, struct apk_score *b)
 {
-	if (a->unsatisfiable < b->unsatisfiable)
+	if (a->conflicts < b->conflicts)
 		return -1;
-	if (a->unsatisfiable > b->unsatisfiable)
+	if (a->conflicts > b->conflicts)
 		return 1;
+
+	if (a->non_preferred_actions < b->non_preferred_actions)
+		return -1;
+	if (a->non_preferred_actions > b->non_preferred_actions)
+		return 1;
+
 	if (a->preference < b->preference)
 		return -1;
 	if (a->preference > b->preference)
 		return 1;
+
 	return 0;
 }
 
 static int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct apk_score *b)
 {
-	if (a1->unsatisfiable+a2->unsatisfiable < b->unsatisfiable)
-		return -1;
-	if (a1->unsatisfiable+a2->unsatisfiable > b->unsatisfiable)
-		return 1;
-	if (a1->preference+a2->preference < b->preference)
-		return -1;
-	if (a1->preference+a2->preference > b->preference)
-		return 1;
-	return 0;
+	struct apk_score tmp = *a1;
+	addscore(&tmp, a2);
+	return cmpscore(&tmp, b);
+}
+
+static struct apk_name *decision_to_name(struct apk_decision *d)
+{
+	if (d->no_package)
+		return d->name;
+	return d->pkg->name;
+}
+
+static struct apk_package *decision_to_pkg(struct apk_decision *d)
+{
+	if (d->no_package)
+		return NULL;
+	return d->pkg;
 }
 
 static struct apk_package_state *pkg_to_ps(struct apk_package *pkg)
@@ -214,9 +283,149 @@ static void foreach_rinstall_if_pkg(
 	}
 }
 
+static unsigned int get_pinning_mask_repos(struct apk_database *db, unsigned short pinning_mask)
+{
+	unsigned int repository_mask = 0;
+	int i;
+
+	for (i = 0; i < db->num_repo_tags && pinning_mask; i++) {
+		if (!(BIT(i) & pinning_mask))
+			continue;
+		pinning_mask &= ~BIT(i);
+		repository_mask |= db->repo_tags[i].allowed_repos;
+	}
+	return repository_mask;
+}
+
+static void get_topology_score(
+		struct apk_solver_state *ss,
+		struct apk_name_state *ns,
+		struct apk_package *pkg,
+		int lock_score,
+		struct apk_score *_score)
+{
+	struct apk_name *name = pkg->name;
+	struct apk_package_state *ps = pkg_to_ps(pkg);
+	struct apk_score score;
+	unsigned short name_flags;
+	unsigned int repos;
+	unsigned short preferred_pinning, allowed_pinning;
+	unsigned int preferred_repos, allowed_repos;
+
+	/* effective dynamic flags */
+	name_flags = ns->solver_flags_local | ns->solver_flags_inherited | ss->solver_flags;
+
+	score = (struct apk_score) {
+		.conflicts = ps->conflicts,
+		.preference = ps->preference,
+	};
+
+	if ((name_flags & APK_SOLVERF_AVAILABLE) && (pkg->repos == 0)) {
+		score.non_preferred_actions ++;
+		score.preference += name->pkgs->num;
+	} else if (lock_score && !(name_flags & APK_SOLVERF_UPGRADE)) {
+		/* not upgrading: it is not preferred to change package */
+		struct apk_name_state *ns = name_to_ns(name);
+		if (pkg->ipkg == NULL && ns->originally_installed)
+			score.non_preferred_actions++;
+	}
+
+	repos = pkg->repos | (pkg->ipkg ? ss->db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
+	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
+	preferred_repos = get_pinning_mask_repos(ss->db, preferred_pinning);
+
+	if (!(repos & preferred_repos))
+		score.non_preferred_actions++;
+
+	if (lock_score) {
+		allowed_pinning = ns->allowed_pinning | preferred_pinning;
+		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
+
+		if (!(repos & allowed_repos))
+			score.non_preferred_actions += 2;
+	}
+
+	*_score = score;
+}
+
+static int is_topology_optimum(struct apk_solver_state *ss,
+			       struct apk_package *pkg)
+{
+	struct apk_name *name = pkg->name;
+	struct apk_name_state *ns = name_to_ns(name);
+	struct apk_score score;
+	int i;
+
+	/* FIXME: should not use absolute topology score */
+	get_topology_score(ss, ns, pkg, 1, &score);
+	for (i = 0; i < name->pkgs->num; i++) {
+		struct apk_package *pkg0 = name->pkgs->item[i];
+		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
+		struct apk_score score0;
+
+		if (pkg0 == pkg)
+			continue;
+
+		if (ps0 == NULL || ps0->locked ||
+		    ss->topology_position < pkg->topology_hard)
+			continue;
+
+		get_topology_score(ss, ns, pkg0, 1, &score0);
+		if (cmpscore(&score0, &score) < 0)
+			return 0;
+	}
+
+	return 1;
+}
+
+static int compare_absolute_package_preference(
+		struct apk_package *pkgA,
+		struct apk_package *pkgB)
+{
+	/* specified on command line directly */
+	if (pkgA->filename && !pkgB->filename)
+		return 1;
+	if (pkgB->filename && !pkgA->filename)
+		return -1;
+
+	/* upgrading, or neither of the package is installed, so
+	 * we just fall back comparing to versions */
+	switch (apk_pkg_version_compare(pkgA, pkgB)) {
+	case APK_VERSION_GREATER:
+		return 1;
+	case APK_VERSION_LESS:
+		return -1;
+	}
+
+	/* prefer the installed package */
+	if (pkgA->ipkg != NULL && pkgB->ipkg == NULL)
+		return 1;
+	if (pkgB->ipkg != NULL && pkgA->ipkg == NULL)
+		return -1;
+
+	/* prefer the one with lowest available repository */
+	return ffsl(pkgB->repos) - ffsl(pkgA->repos);
+}
+
+static void calculate_pkg_preference(struct apk_package *pkg)
+{
+	struct apk_name *name = pkg->name;
+	struct apk_package_state *ps = pkg_to_ps(pkg);
+	int i;
+
+	for (i = 0; i < name->pkgs->num; i++) {
+		struct apk_package *pkg0 = name->pkgs->item[i];
+		if (pkg == pkg0)
+			continue;
+		if (compare_absolute_package_preference(pkg, pkg0) < 0)
+			ps->preference++;
+	}
+}
+
 static void sort_hard_dependencies(struct apk_solver_state *ss, struct apk_package *pkg)
 {
 	struct apk_package_state *ps;
+	struct apk_name_state *ns;
 
 	if (pkg->state_ptr == NULL)
 		pkg->state_ptr = calloc(1, sizeof(struct apk_package_state));
@@ -226,10 +435,19 @@ static void sort_hard_dependencies(struct apk_solver_state *ss, struct apk_packa
 		return;
 	pkg->topology_hard = -1;
 	ps->topology_soft = -1;
+	calculate_pkg_preference(pkg);
 
 	/* Consider hard dependencies only */
 	foreach_dependency_pkg(ss, pkg->depends, sort_hard_dependencies);
 	foreach_dependency_pkg(ss, pkg->install_if, sort_hard_dependencies);
+
+	ss->max_decisions++;
+
+	ns = name_to_ns(pkg->name);
+	if (!ns->decision_counted) {
+		ss->max_decisions++;
+		ns->decision_counted = 1;
+	}
 
 	ps->topology_soft = pkg->topology_hard = ++ss->num_topology_positions;
 	dbg_printf(PKG_VER_FMT ": topology_hard=%d\n",
@@ -302,128 +520,6 @@ static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependenc
 		func(ss, &deps->item[i]);
 }
 
-static unsigned int get_pinning_mask_repos(struct apk_database *db, unsigned short pinning_mask)
-{
-	unsigned int repository_mask = 0;
-	int i;
-
-	for (i = 0; i < db->num_repo_tags && pinning_mask; i++) {
-		if (!(BIT(i) & pinning_mask))
-			continue;
-		pinning_mask &= ~BIT(i);
-		repository_mask |= db->repo_tags[i].allowed_repos;
-	}
-	return repository_mask;
-}
-
-static int compare_package_preference(unsigned short solver_flags,
-				      unsigned int preferred_repos,
-				      unsigned int allowed_repos,
-				      struct apk_package *pkgA,
-				      struct apk_package *pkgB,
-				      struct apk_database *db)
-{
-	unsigned int a_repos, b_repos;
-
-	/* specified on command line directly */
-	if (pkgA->filename && !pkgB->filename)
-		return 1;
-	if (pkgB->filename && !pkgA->filename)
-		return -1;
-
-	/* Is there a difference in pinning preference? */
-	a_repos = pkgA->repos | (pkgA->ipkg ? db->repo_tags[pkgA->ipkg->repository_tag].allowed_repos : 0);
-	b_repos = pkgB->repos | (pkgB->ipkg ? db->repo_tags[pkgB->ipkg->repository_tag].allowed_repos : 0);
-	if ((a_repos & preferred_repos) && !(b_repos & preferred_repos))
-		return 1;
-	if ((b_repos & preferred_repos) && !(a_repos & preferred_repos))
-		return -1;
-
-	/* Difference in allowed repositories? */
-	if ((a_repos & allowed_repos) && !(b_repos & allowed_repos))
-		return 1;
-	if ((b_repos & allowed_repos) && !(a_repos & allowed_repos))
-		return -1;
-
-	if (solver_flags & APK_SOLVERF_AVAILABLE) {
-		if (pkgA->repos != 0 && pkgB->repos == 0)
-			return 1;
-		if (pkgB->repos != 0 && pkgA->repos == 0)
-			return -1;
-	}
-
-	if (!(solver_flags & APK_SOLVERF_UPGRADE)) {
-		/* not upgrading, prefer the installed package */
-		if (pkgA->ipkg != NULL && pkgB->ipkg == NULL)
-			return 1;
-		if (pkgB->ipkg != NULL && pkgA->ipkg == NULL)
-			return -1;
-	}
-
-	/* upgrading, or neither of the package is installed, so
-	 * we just fall back comparing to versions */
-	switch (apk_pkg_version_compare(pkgA, pkgB)) {
-	case APK_VERSION_GREATER:
-		return 1;
-	case APK_VERSION_LESS:
-		return -1;
-	}
-
-	/* upgrading, prefer the installed package */
-	if (pkgA->ipkg != NULL && pkgB->ipkg == NULL)
-		return 1;
-	if (pkgB->ipkg != NULL && pkgA->ipkg == NULL)
-		return -1;
-
-	/* prefer the one with lowest available repository */
-	return ffsl(pkgB->repos) - ffsl(pkgA->repos);
-}
-
-static int get_preference(struct apk_solver_state *ss,
-			  struct apk_package *pkg,
-			  int installable_only)
-{
-	struct apk_name *name = pkg->name;
-	struct apk_name_state *ns = name_to_ns(name);
-	unsigned short name_flags = ns->solver_flags_local
-		| ns->solver_flags_inherited
-		| ss->solver_flags;
-	unsigned short preferred_pinning, allowed_pinning;
-	unsigned int preferred_repos, allowed_repos;
-	unsigned short preference = 0;
-	int i, r;
-
-	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
-	preferred_repos = get_pinning_mask_repos(ss->db, preferred_pinning);
-	allowed_pinning = ns->allowed_pinning | preferred_pinning;
-	if (preferred_pinning != allowed_pinning)
-		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
-	else
-		allowed_repos = preferred_repos;
-
-	for (i = 0; i < name->pkgs->num; i++) {
-		struct apk_package *pkg0 = name->pkgs->item[i];
-		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
-
-		if (pkg0 == pkg || ps0 == NULL)
-			continue;
-
-		if (installable_only &&
-		    (ss->topology_position < pkg0->topology_hard ||
-		     ps0->locked))
-			continue;
-
-		r = compare_package_preference(name_flags,
-					       preferred_repos,
-					       allowed_repos,
-					       pkg, pkg0, ss->db);
-		if (r < 0)
-			preference += -r;
-	}
-
-	return preference;
-}
-
 static int install_if_missing(struct apk_solver_state *ss, struct apk_package *pkg)
 {
 	struct apk_name_state *ns;
@@ -464,55 +560,116 @@ static int check_if_package_unavailable(struct apk_solver_state *ss, struct apk_
 	return ps->unavailable;
 }
 
+static void foreach_common_dependency(
+		struct apk_solver_state *ss, struct apk_name *name,
+		void (*cb)(struct apk_solver_state *ss, struct apk_name *common_dependency))
+{
+	struct apk_name *name0;
+	struct apk_name_state *ns0;
+	struct apk_package *pkg;
+	struct apk_package_state *ps;
+	struct apk_dependency *dep;
+	int i, j, first_found = -1, last_found = 0;
+
+	for (i = 0; i < name->pkgs->num; i++) {
+		pkg = name->pkgs->item[i];
+		ps = pkg_to_ps(pkg);
+		if (ps == NULL || ps->locked)
+			continue;
+		if (first_found == -1)
+			first_found = i;
+		for (j = 0; j < pkg->depends->num; j++) {
+			dep = &pkg->depends->item[j];
+			if (dep->optional)
+				continue;
+			name0 = dep->name;
+			ns0   = name_to_ns(name0);
+			if (ns0->merge_index == last_found)
+				ns0->merge_index = i + 1;
+		}
+		last_found = i + 1;
+	}
+	if (first_found == -1)
+		return;
+
+	pkg = name->pkgs->item[first_found];
+	for (j = 0; j < pkg->depends->num; j++) {
+		dep = &pkg->depends->item[j];
+		if (dep->optional)
+			continue;
+		name0 = dep->name;
+		ns0   = name_to_ns(name0);
+		if (ns0->merge_index == last_found)
+			cb(ss, name0);
+		ns0->merge_index = 0;
+	}
+}
+
+#if 0
+static void prepare_name(struct apk_solver_state *ss, struct apk_name *name)
+{
+	struct apk_name_state *ns = name_to_ns(name);
+	int i, j;
+
+	if (ns->prepared)
+		return;
+	ns->prepared = 1;
+
+	for (i = 0; i < name->pkgs->num; i++) {
+		struct apk_package *pkg = name->pkgs->item[i];
+		if (pkg_to_ps(pkg) == NULL)
+			continue;
+		for (j = 0; j < pkg->depends->num; j++) {
+			struct apk_dependency *dep = &pkg->depends->item[j];
+			prepare_name(ss, dep->name);
+		}
+	}
+}
+#endif
+
+static void get_unassigned_score(struct apk_name *name, struct apk_score *score)
+{
+	struct apk_name_state *ns = name_to_ns(name);
+
+	*score = (struct apk_score){
+		.conflicts = ns->requirers + ns->prerequires,
+		.preference = name->pkgs->num,
+	};
+}
+
 static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name_state *ns = name_to_ns(name);
 	struct apk_package *best_pkg = NULL, *preferred_pkg = NULL;
-	struct apk_package_state *preferred_ps = NULL;
+	struct apk_score preferred_score;
 	unsigned int best_topology = 0;
-	unsigned short name_flags = ns->solver_flags_local
-		| ns->solver_flags_inherited
-		| ss->solver_flags;
-	unsigned short preferred_pinning, allowed_pinning;
-	unsigned int preferred_repos, allowed_repos;
 	int i, options = 0;
 
 	if (ns->locked)
 		return ns->chosen != NULL;
 
-	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
-	preferred_repos = get_pinning_mask_repos(ss->db, preferred_pinning);
-	allowed_pinning = ns->allowed_pinning | preferred_pinning;
-	if (preferred_pinning != allowed_pinning)
-		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
-	else
-		allowed_repos = preferred_repos;
-
 	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
 	ns->minimum_penalty = (struct apk_score) { 0, 0 };
 
+	get_unassigned_score(name, &preferred_score);
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
+		struct apk_score pkg0_score;
 
-		if (ps0 == NULL ||
+		if (ps0 == NULL || ps0->locked ||
 		    ss->topology_position < pkg0->topology_hard ||
-		    ps0->locked ||
 		    check_if_package_unavailable(ss, pkg0, 0))
 			continue;
 
-		options++;
-
 		/* preferred - currently most optimal for end solution */
-		if ((preferred_pkg == NULL) ||
-		    (ps0->conflicts < preferred_ps->conflicts) ||
-		    (ps0->conflicts == preferred_ps->conflicts &&
-		     compare_package_preference(name_flags,
-						preferred_repos,
-						allowed_repos,
-						pkg0, preferred_pkg, ss->db) > 0)) {
+		/* FIXME: should not use absolute topology score */
+		get_topology_score(ss, ns, pkg0, 1, &pkg0_score);
+
+		if (preferred_pkg == NULL ||
+		    cmpscore(&pkg0_score, &preferred_score) < 0) {
 			preferred_pkg = pkg0;
-			preferred_ps = ps0;
+			preferred_score = pkg0_score;
 		}
 
 		/* next in topology order - next to get locked in */
@@ -521,47 +678,44 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 			best_pkg = pkg0, best_topology = ps0->topology_soft;
 		else if (pkg0->topology_hard > best_topology)
 			best_pkg = pkg0, best_topology = pkg0->topology_hard;
+
+		options++;
 	}
 
-	if (ns->requirers == 0 && ns->install_ifs == 0) {
+	if (ns->prerequires == 0 && ns->requirers == 0 && ns->install_ifs == 0) {
+		/* No one really needs this name (anymore). */
 		if (list_hashed(&ns->unsolved_list)) {
 			list_del(&ns->unsolved_list);
 			list_init(&ns->unsolved_list);
-			ns->chosen = NULL;
 		}
-		dbg_printf("%s: deleted from unsolved: %d requirers, %d install_ifs, %d options\n",
-			   name->name, ns->requirers, ns->install_ifs, options);
-	} else {
-		if (!list_hashed(&ns->unsolved_list))
-			list_add(&ns->unsolved_list, &ss->unsolved_list_head);
+		ns->chosen = NULL;
+		dbg_printf("%s: not required\n", name->name);
+		return options + 1;
+	}
 
-		ns->chosen = best_pkg;
-		if (preferred_pkg != NULL &&
-		    preferred_ps->conflicts < ns->requirers) {
-			ns->minimum_penalty = (struct apk_score) {
-				.unsatisfiable = preferred_ps->conflicts,
-				.preference = get_preference(ss, preferred_pkg, FALSE),
-			};
-			dbg_printf("%s: min.penalty for name {%d, %d} from pkg " PKG_VER_FMT "\n",
-				   name->name,
-				   ns->minimum_penalty.unsatisfiable,
-				   ns->minimum_penalty.preference,
-				   PKG_VER_PRINTF(preferred_pkg));
-		} else {
-			ns->minimum_penalty = (struct apk_score) {
-				.unsatisfiable = ns->requirers,
-				.preference = name->pkgs->num,
-			};
-			dbg_printf("%s: min.penalty for name {%d, %d} from no pkg\n",
-				   name->name,
-				   ns->minimum_penalty.unsatisfiable,
-				   ns->minimum_penalty.preference);
-		}
-		addscore(&ss->minimum_penalty, &ns->minimum_penalty);
+	if (!list_hashed(&ns->unsolved_list))
+		list_add_tail(&ns->unsolved_list, &ss->unsolved_list_head);
 
-		dbg_printf("%s: added to unsolved: %d requirers, %d install_ifs, %d options (next topology %d)\n",
-			   name->name, ns->requirers, ns->install_ifs,
-			   options, best_topology);
+	/* So far decided that something will be installed for this
+	 * name. So assign the minimum penalty, and next position. */
+	ns->chosen = best_pkg;
+	ns->minimum_penalty = preferred_score;
+	addscore(&ss->minimum_penalty, &ns->minimum_penalty);
+
+	dbg_printf("%s:  min.pen. " SCORE_FMT ", %d prerequirers, %d requirers, %d install_ifs, %d options (next topology %d)\n",
+		   name->name,
+		   SCORE_PRINTF(&ns->minimum_penalty),
+		   ns->prerequires, ns->requirers, ns->install_ifs,
+		   options, best_topology);
+
+	if (!ns->none_excluded) {
+		dbg_printf("%s: none not excluded yet\n", name->name);
+		return options + 1;
+	}
+
+	if (options == 0) {
+		ss->impossible_constraints = 1;
+		dbg_printf("%s: impossible constraints\n", name->name);
 	}
 
 	return options;
@@ -593,70 +747,124 @@ static void untrigger_install_if(struct apk_solver_state *ss,
 	}
 }
 
-static solver_result_t apply_decision(struct apk_solver_state *ss,
-				      struct apk_package *pkg,
-				      struct apk_package_state *ps)
+static void increment_prerequires(struct apk_solver_state *ss, struct apk_name *name)
 {
-	struct apk_name *name = pkg->name;
 	struct apk_name_state *ns = name_to_ns(name);
-	unsigned short preference;
+	ns->prerequires++;
+	update_name_state(ss, name);
+}
 
-	dbg_printf("-->apply_decision: " PKG_VER_FMT " %s\n", PKG_VER_PRINTF(pkg),
-		   (ps->flags & APK_PKGSTF_INSTALL) ? "INSTALL" : "NO_INSTALL");
+static void decrement_prerequires(struct apk_solver_state *ss, struct apk_name *name)
+{
+	struct apk_name_state *ns = name_to_ns(name);
+	ns->prerequires--;
+	update_name_state(ss, name);
+}
 
-	if (ps->flags & APK_PKGSTF_INSTALL) {
-		subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-		ns->minimum_penalty = (struct apk_score) { 0, 0 };
+static solver_result_t apply_decision(struct apk_solver_state *ss,
+				      struct apk_decision *d)
+{
+	struct apk_name *name = decision_to_name(d);
+	struct apk_name_state *ns = name_to_ns(name);
+	struct apk_package *pkg = decision_to_pkg(d);
+	struct apk_score score;
 
-		preference = get_preference(ss, pkg, FALSE);
-		ss->score.unsatisfiable += ps->conflicts;
-		ss->score.preference += preference;
-		if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0 ||
-		    check_if_package_unavailable(ss, pkg, 1)) {
-			dbg_printf("install causing {%d,%d}, penalty too big (or unavailable %d): {%d,%d}+{%d,%d}>={%d,%d}\n",
-				ps->conflicts, preference,
-				ss->score.unsatisfiable, ss->score.preference,
-				ss->minimum_penalty.unsatisfiable, ss->minimum_penalty.preference,
-				ss->best_score.unsatisfiable, ss->best_score.preference
-				);
+	ss->impossible_constraints = 0;
+	if (pkg != NULL) {
+		struct apk_package_state *ps = pkg_to_ps(pkg);
 
-			ss->score.unsatisfiable -= ps->conflicts;
-			ss->score.preference -= preference;
-			return SOLVERR_PRUNED;
+		dbg_printf("-->apply_decision: " PKG_VER_FMT " %s\n",
+			   PKG_VER_PRINTF(pkg),
+			   (d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE");
+
+		ps->locked = 1;
+		ps->handle_install_if = 0;
+
+		if (d->topology_position) {
+			if (ps->topology_soft < ss->topology_position) {
+				if (d->type == DECISION_ASSIGN) {
+					ps->handle_install_if = 1;
+					dbg_printf("triggers due to " PKG_VER_FMT "\n",
+						   PKG_VER_PRINTF(pkg));
+				}
+				ss->topology_position = ps->topology_soft;
+			} else {
+				ss->topology_position = pkg->topology_hard;
+			}
 		}
 
-		ps->install_applied = 1;
-		ss->assigned_names++;
-		ns->chosen = pkg;
-		ns->locked = 1;
-
-		list_del(&ns->unsolved_list);
-		list_init(&ns->unsolved_list);
-		dbg_printf("%s: deleting from unsolved list\n",
-			   pkg->name->name);
-
-		foreach_dependency(ss, pkg->depends, apply_constraint);
-		foreach_rinstall_if_pkg(ss, pkg, trigger_install_if);
-	} else {
-		if (update_name_state(ss, pkg->name) == 0) {
+		if (d->type == DECISION_ASSIGN) {
 			subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-			ns->minimum_penalty = (struct apk_score) { 0, 0 };
+			ns->minimum_penalty = (struct apk_score) { 0 };
 
-			dbg_printf("%s: out of candidates, locking to none\n",
-				   pkg->name->name);
+			get_topology_score(ss, ns, pkg, 1, &score);
+			addscore(&ss->score, &score);
 
-			ss->score.unsatisfiable += ns->requirers;
-			ss->score.preference += name->pkgs->num;
+			if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0 ||
+			    check_if_package_unavailable(ss, pkg, 1)) {
+				dbg_printf("install causing "SCORE_FMT", penalty too big: "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
+					   SCORE_PRINTF(&score),
+					   SCORE_PRINTF(&ss->score),
+					   SCORE_PRINTF(&ss->minimum_penalty),
+					   SCORE_PRINTF(&ss->best_score));
+
+				subscore(&ss->score, &score);
+				return SOLVERR_PRUNED;
+			}
+
+			ps->install_applied = 1;
+			ss->assigned_names++;
+			ns->chosen = pkg;
+
 			ns->locked = 1;
+			list_del(&ns->unsolved_list);
+			list_init(&ns->unsolved_list);
+
+			foreach_dependency(ss, pkg->depends, apply_constraint);
+			foreach_rinstall_if_pkg(ss, pkg, trigger_install_if);
+		}
+	} else {
+		dbg_printf("-->apply_decision: %s %s NOTHING\n",
+			   name->name,
+			   (d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE");
+
+		if (d->type == DECISION_ASSIGN) {
+			subscore(&ss->minimum_penalty, &ns->minimum_penalty);
+			ns->minimum_penalty = (struct apk_score) { 0 };
+
+			get_unassigned_score(name, &score);
+			addscore(&ss->score, &score);
+
+			ns->chosen = NULL;
+			ns->locked = 1;
+			list_del(&ns->unsolved_list);
+			list_init(&ns->unsolved_list);
+		} else {
+			ns->none_excluded = 1;
+		}
+	}
+
+	if (ss->impossible_constraints)
+		return SOLVERR_PRUNED;
+
+	if (d->type == DECISION_EXCLUDE) {
+		foreach_common_dependency(ss, name, increment_prerequires);
+
+		if (update_name_state(ss, name) == 0) {
+			dbg_printf("%s: %s would prune name to empty\n",
+				name->name,
+				(d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE");
+			return SOLVERR_PRUNED;
 		}
 	}
 
 	if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0) {
-		dbg_printf("install/uninstall finished penalty too big: {%d,%d}+{%d,%d}>={%d,%d}\n",
-			ss->score.unsatisfiable, ss->score.preference,
-			ss->minimum_penalty.unsatisfiable, ss->minimum_penalty.preference,
-			ss->best_score.unsatisfiable, ss->best_score.preference
-			);
+		dbg_printf("%s: %s penalty too big: "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
+			name->name,
+			(d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE",
+			SCORE_PRINTF(&ss->score),
+			SCORE_PRINTF(&ss->minimum_penalty),
+			SCORE_PRINTF(&ss->best_score));
 		return SOLVERR_PRUNED;
 	}
 
@@ -664,106 +872,113 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 }
 
 static void undo_decision(struct apk_solver_state *ss,
-			  struct apk_package *pkg,
-			  struct apk_package_state *ps)
+			  struct apk_decision *d)
 {
-	struct apk_name *name = pkg->name;
+	struct apk_name *name = decision_to_name(d);
 	struct apk_name_state *ns = name_to_ns(name);
+	struct apk_package *pkg = decision_to_pkg(d);
+	struct apk_score score;
 
-	dbg_printf("-->undo_decision: " PKG_VER_FMT " %s\n", PKG_VER_PRINTF(pkg),
-		   (ps->flags & APK_PKGSTF_INSTALL) ? "INSTALL" : "NO_INSTALL");
+	if (d->type == DECISION_EXCLUDE) {
+		foreach_common_dependency(ss, name, decrement_prerequires);
+	}
 
-	if (ps->handle_install_if)
-		ss->topology_position = ps->topology_soft;
-	else
-		ss->topology_position = pkg->topology_hard;
+	if (pkg != NULL) {
+		struct apk_package_state *ps = pkg_to_ps(pkg);
 
-	if (ps->flags & APK_PKGSTF_INSTALL) {
+		dbg_printf("-->undo_decision: " PKG_VER_FMT " %s\n",
+			   PKG_VER_PRINTF(pkg),
+			   (d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE");
+
+		if (d->topology_position) {
+			if (ps->handle_install_if)
+				ss->topology_position = ps->topology_soft;
+			else
+				ss->topology_position = pkg->topology_hard;
+		}
+
 		if (ps->install_applied) {
-			unsigned short preference;
-
 			ps->install_applied = 0;
 			ss->assigned_names--;
 			foreach_rinstall_if_pkg(ss, pkg, untrigger_install_if);
 			foreach_dependency(ss, pkg->depends, undo_constraint);
 
-			preference = get_preference(ss, pkg, FALSE);
-			ss->score.unsatisfiable -= ps->conflicts;
-			ss->score.preference -= preference;
+			get_topology_score(ss, ns, pkg, 1, &score);
+			subscore(&ss->score, &score);
 		}
+		ps->locked = 0;
 	} else {
-		if (ns->locked) {
-			/* UNINSTALL decision removed - either name is unlocked
-			 * or locked to none */
-			ss->score.unsatisfiable -= ns->requirers;
-			ss->score.preference -= name->pkgs->num;
+		dbg_printf("-->undo_decision: %s %s NOTHING\n",
+			   name->name,
+			   (d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE");
+
+		if (d->type == DECISION_ASSIGN) {
+			get_unassigned_score(name, &score);
+			subscore(&ss->score, &score);
+		} else {
+			ns->none_excluded = 0;
 		}
 	}
+
 	ns->locked = 0;
 	ns->chosen = NULL;
 
-	update_name_state(ss, pkg->name);
+	update_name_state(ss, name);
 }
 
-static solver_result_t push_decision(struct apk_solver_state *ss, struct apk_package *pkg,
-				     int flags)
+static solver_result_t push_decision(struct apk_solver_state *ss,
+				     struct apk_name *name,
+				     struct apk_package *pkg,
+				     int primary_decision,
+				     int branching_point,
+				     int topology_position)
 {
-	struct apk_package_state *ps = pkg_to_ps(pkg);
+	struct apk_decision *d;
 
-	ps->backtrack = ss->latest_decision;
-	ps->flags = flags;
-	ps->locked = 1;
-	ps->handle_install_if = 0;
+	ASSERT(ss->num_decisions <= ss->max_decisions,
+	       "Decision tree overflow.\n");
 
-	if (ps->topology_soft < ss->topology_position) {
-		if (flags & APK_PKGSTF_INSTALL)
-			ps->handle_install_if = 1;
-		ss->topology_position = ps->topology_soft;
+	ss->num_decisions++;
+	d = &ss->decisions[ss->num_decisions];
+
+#ifdef DEBUG_CHECKS
+	d->saved_score = ss->score;
+#endif
+	d->type = primary_decision;
+	d->branching_point = branching_point;
+	d->topology_position = topology_position;
+	if (pkg == NULL) {
+		d->name = name;
+		d->no_package = 1;
 	} else {
-		ss->topology_position = pkg->topology_hard;
+		d->pkg = pkg;
+		d->no_package = 0;
 	}
-	ss->latest_decision = pkg;
 
-	dbg_printf("-->push_decision: adding new BRANCH at topology_position %d (score: unsatisfied %d, preference %d)\n",
-		   ss->topology_position,
-		   ss->score.unsatisfiable,
-		   ss->score.preference);
-
-	if (ps->handle_install_if)
-		dbg_printf("triggers due to " PKG_VER_FMT "\n",
-			   PKG_VER_PRINTF(pkg));
-
-	return apply_decision(ss, pkg, ps);
+	return apply_decision(ss, d);
 }
 
 static int next_branch(struct apk_solver_state *ss)
 {
-	struct apk_package *pkg;
-	struct apk_package_state *ps;
+	while (ss->num_decisions > 0) {
+		struct apk_decision *d = &ss->decisions[ss->num_decisions];
 
-	while (ss->latest_decision != NULL) {
-		pkg = ss->latest_decision;
-		ps = pkg_to_ps(pkg);
+		undo_decision(ss, d);
 
-		if (ps->flags & APK_PKGSTF_ALT_BRANCH) {
-			dbg_printf("-->next_branch: undo decision at topology_position %d\n",
-				   ss->topology_position);
-			ps->flags &= ~APK_PKGSTF_ALT_BRANCH;
-			ps->locked = 0;
-			undo_decision(ss, pkg, ps);
+#ifdef DEBUG_CHECKS
+		ASSERT(cmpscore(&d->saved_score, &ss->score) == 0,
+			"ERROR! saved_score "SCORE_FMT" != score "SCORE_FMT"\n",
+			SCORE_PRINTF(&d->saved_score),
+			SCORE_PRINTF(&ss->score));
+#endif
 
-			ss->latest_decision = ps->backtrack;
-		} else {
-			dbg_printf("-->next_branch: swapping BRANCH at topology_position %d\n",
-				   ss->topology_position);
-
-			undo_decision(ss, pkg, ps);
-
-			ps->flags |= APK_PKGSTF_ALT_BRANCH;
-			ps->flags ^= APK_PKGSTF_INSTALL;
-
-			return apply_decision(ss, pkg, ps);
+		if (d->branching_point == BRANCH_YES) {
+			d->branching_point = BRANCH_NO;
+			d->type = (d->type == DECISION_ASSIGN) ? DECISION_EXCLUDE : DECISION_ASSIGN;
+			return apply_decision(ss, d);
 		}
+
+		ss->num_decisions--;
 	}
 
 	dbg_printf("-->next_branch: no more branches\n");
@@ -824,12 +1039,12 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 			dbg_printf("%s: locked to empty\n",
 				   name->name);
 		if (!apk_dep_is_satisfied(dep, ns->chosen))
-			ss->score.unsatisfiable++;
+			ss->score.conflicts++;
 		return;
 	}
 	if (name->pkgs->num == 0) {
 		if (!dep->optional)
-			ss->score.unsatisfiable++;
+			ss->score.conflicts++;
 		return;
 	}
 
@@ -840,18 +1055,19 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		ns->allowed_pinning |= BIT(dep->repository_tag);
 	}
 
-	if (ss->latest_decision != NULL) {
+	if (ss->num_decisions > 0) {
+		struct apk_name *name0 = decision_to_name(&ss->decisions[ss->num_decisions]);
 		dbg_printf("%s: inheriting flags and pinning from %s\n",
-			   name->name, ss->latest_decision->name->name);
-		inherit_name_state(name, ss->latest_decision->name);
+			   name->name, name0->name);
+		inherit_name_state(name, name0);
 	}
 
 	for (i = 0; i < name->pkgs->num; i++) {
 		struct apk_package *pkg0 = name->pkgs->item[i];
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
-		if (ps0 == NULL ||
-		    pkg0->topology_hard >= ss->topology_position)
+		if (ps0 == NULL || ps0->locked ||
+		    ss->topology_position < pkg0->topology_hard)
 			continue;
 
 		if (!apk_dep_is_satisfied(dep, pkg0)) {
@@ -863,7 +1079,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	}
 
 	if (!dep->optional)
-		ns->requirers++;
+		ns->requirers++; 
 
 	update_name_state(ss, name);
 }
@@ -883,12 +1099,12 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 				   name->name);
 		}
 		if (!apk_dep_is_satisfied(dep, ns->chosen))
-			ss->score.unsatisfiable--;
+			ss->score.conflicts--;
 		return;
 	}
 	if (name->pkgs->num == 0) {
 		if (!dep->optional)
-			ss->score.unsatisfiable--;
+			ss->score.conflicts--;
 		return;
 	}
 
@@ -896,7 +1112,8 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 		struct apk_package *pkg0 = name->pkgs->item[i];
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
-		if (pkg0->topology_hard >= ss->topology_position)
+		if (ps0 == NULL || ps0->locked ||
+		    ss->topology_position < pkg0->topology_hard)
 			continue;
 
 		if (!apk_dep_is_satisfied(dep, pkg0)) {
@@ -907,7 +1124,8 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 		}
 	}
 
-	if (ss->latest_decision && has_inherited_state(ss->latest_decision->name))
+	if (ss->num_decisions > 0 &&
+	    has_inherited_state(decision_to_name(&ss->decisions[ss->num_decisions])))
 		recalculate_inherted_name_state(name);
 
 	if (!dep->optional)
@@ -918,54 +1136,110 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 
 static int expand_branch(struct apk_solver_state *ss)
 {
+	struct apk_name *name;
 	struct apk_name_state *ns;
 	struct apk_package *pkg0 = NULL;
-	unsigned int topology0 = 0;
+	unsigned int i, topology0 = 0;
 	unsigned short allowed_pinning, preferred_pinning;
 	unsigned int allowed_repos;
-	int flags;
+	int primary_decision, branching_point;
 
 	/* FIXME: change unsolved_list to a priority queue */
 	list_for_each_entry(ns, &ss->unsolved_list_head, unsolved_list) {
-		if (ns->chosen == NULL)
-			continue;
+		struct apk_score score;
+		struct apk_score pkgscore;
+
+		name = ns->name;
+
+		/* no options left */
+		if (ns->chosen == NULL) {
+			if (ns->none_excluded)
+				return SOLVERR_PRUNED;
+			return push_decision(ss, name, NULL, DECISION_ASSIGN, BRANCH_NO, FALSE);
+		}
+
 		if (pkg_to_ps(ns->chosen)->topology_soft < ss->topology_position &&
 		    pkg_to_ps(ns->chosen)->topology_soft > topology0)
 			pkg0 = ns->chosen, topology0 = pkg_to_ps(pkg0)->topology_soft;
 		else if (ns->chosen->topology_hard > topology0)
 			pkg0 = ns->chosen, topology0 = pkg0->topology_hard;
+
+		score = ss->score;
+		subscore(&score, &ns->minimum_penalty);
+
+		if (!ns->none_excluded) {
+			get_unassigned_score(name, &pkgscore);
+			if (cmpscore2(&score, &pkgscore, &ss->best_score) >= 0)
+				return push_decision(ss, name, NULL, DECISION_EXCLUDE, BRANCH_NO, FALSE);
+		}
+
+		for (i = 0; i < name->pkgs->num; i++) {
+			struct apk_package *pkg0 = name->pkgs->item[i];
+			struct apk_package_state *ps0 = pkg_to_ps(pkg0);
+
+			if (ps0 == NULL || ps0->locked ||
+			    ss->topology_position < pkg0->topology_hard)
+				continue;
+
+			get_topology_score(ss, ns, pkg0, 0, &pkgscore);
+			if (cmpscore2(&score, &pkgscore, &ss->best_score) >= 0)
+				return push_decision(ss, name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
+		}
+
 	}
 	if (pkg0 == NULL) {
-		dbg_printf("expand_branch: list is empty (%d unsatisfied)\n",
-			   ss->score.unsatisfiable);
+		dbg_printf("expand_branch: solution with score "SCORE_FMT"\n",
+			   SCORE_PRINTF(&ss->score));
 		return SOLVERR_SOLUTION;
 	}
 
 	/* someone needs to provide this name -- find next eligible
 	 * provider candidate */
-	ns = name_to_ns(pkg0->name);
-	dbg_printf("expand_branch: %s\n", pkg0->name->name);
+	name = pkg0->name;
+	ns = name_to_ns(name);
+	dbg_printf("expand_branch: %-30s score: "SCORE_FMT"\tminpenalty: "SCORE_FMT"\tbest: "SCORE_FMT"\n",
+		pkg0->name->name,
+		SCORE_PRINTF(&ss->score),
+		SCORE_PRINTF(&ss->minimum_penalty),
+		SCORE_PRINTF(&ss->best_score));
+
+	if (!ns->none_excluded) {
+		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
+		if (ps0->conflicts > ns->requirers)
+			primary_decision = DECISION_ASSIGN;
+		else
+			primary_decision = DECISION_EXCLUDE;
+		return push_decision(ss, name, NULL, primary_decision, BRANCH_YES, FALSE);
+	}
 
 	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
 	allowed_pinning = ns->allowed_pinning | preferred_pinning;
 	allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
 
-	if ((pkg0->repos != 0) && (pkg0->ipkg == NULL) &&
-	    (pkg0->filename == NULL) && !(pkg0->repos & allowed_repos)) {
+	if ((pkg0->repos != 0) && !(pkg0->repos & allowed_repos)) {
 		/* pinning has not enabled the package */
-		flags = APK_PKGSTF_NOINSTALL | APK_PKGSTF_ALT_BRANCH;
+		primary_decision = DECISION_EXCLUDE;
+		/* but if it is installed, we might consider it */
+		if ((pkg0->ipkg == NULL) && (pkg0->filename == NULL))
+			branching_point = BRANCH_NO;
+		else
+			branching_point = BRANCH_YES;
 	} else if (ns->requirers == 0 && ns->install_ifs != 0 &&
 		   install_if_missing(ss, pkg0)) {
 		/* not directly required, and package specific
 		 * install_if never triggered */
-		flags = APK_PKGSTF_NOINSTALL | APK_PKGSTF_ALT_BRANCH;
-	} else if (get_preference(ss, pkg0, TRUE) == 0) {
-		flags = APK_PKGSTF_INSTALL;
+		primary_decision = DECISION_EXCLUDE;
+		branching_point = BRANCH_NO;
+	} else if (is_topology_optimum(ss, pkg0)) {
+		primary_decision = DECISION_ASSIGN;
+		branching_point = BRANCH_YES;
 	} else {
-		flags = APK_PKGSTF_NOINSTALL;
+		primary_decision = DECISION_EXCLUDE;
+		branching_point = BRANCH_YES;
 	}
 
-	return push_decision(ss, pkg0, flags);
+	return push_decision(ss, pkg0->name, pkg0,
+			     primary_decision, branching_point, TRUE);
 }
 
 static int get_tag(struct apk_database *db, unsigned short pinning_mask, unsigned int repos)
@@ -984,43 +1258,44 @@ static int get_tag(struct apk_database *db, unsigned short pinning_mask, unsigne
 static void record_solution(struct apk_solver_state *ss)
 {
 	struct apk_database *db = ss->db;
-	struct apk_package *pkg;
-	struct apk_package_state *ps;
 	struct apk_name_state *ns;
-	int i;
+	int i, n;
 
 	apk_solution_array_resize(&ss->best_solution, ss->assigned_names);
 
-	i = 0;
-	pkg = ss->latest_decision;
-	while (pkg != NULL) {
-		ps = pkg_to_ps(pkg);
-		ns = name_to_ns(pkg->name);
-		if (ps->flags & APK_PKGSTF_INSTALL) {
-			unsigned short pinning;
-			unsigned int repos;
+	n = 0;
+	for (i = ss->num_decisions; i > 0; i--) {
+		struct apk_decision *d = &ss->decisions[i];
+		struct apk_package *pkg = decision_to_pkg(d);
+		unsigned short pinning;
+		unsigned int repos;
 
-			if (i >= ss->assigned_names)
-				abort();
-
-			pinning = ns->allowed_pinning | ns->preferred_pinning | APK_DEFAULT_PINNING_MASK;
-			repos = pkg->repos | (pkg->ipkg ? db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
-
-			ss->best_solution->item[i++] = (struct apk_solution_entry){
-				.pkg = pkg,
-				.reinstall = !!((ns->solver_flags_local | ns->solver_flags_inherited |
-					         ss->solver_flags) & APK_SOLVERF_REINSTALL),
-				.repository_tag = get_tag(db, pinning, repos),
-			};
+		if (pkg == NULL) {
+			dbg_printf("record_solution: %s: NOTHING\n",
+				   decision_to_name(d)->name);
+			continue;
 		}
 
-		dbg_printf("record_solution: " PKG_VER_FMT ": %sINSTALL\n",
+		dbg_printf("record_solution: " PKG_VER_FMT ": %s\n",
 			   PKG_VER_PRINTF(pkg),
-			   (ps->flags & APK_PKGSTF_INSTALL) ? "" : "NO_");
+			   d->type == DECISION_ASSIGN ? "INSTALL" : "no install");
 
-		pkg = ps->backtrack;
+		if (d->type != DECISION_ASSIGN)
+			continue;
+
+		ns = name_to_ns(pkg->name);
+		pinning = ns->allowed_pinning | ns->preferred_pinning | APK_DEFAULT_PINNING_MASK;
+		repos = pkg->repos | (pkg->ipkg ? db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
+
+		ASSERT(n < ss->assigned_names, "Name assignment overflow\n");
+		ss->best_solution->item[n++] = (struct apk_solution_entry){
+			.pkg = pkg,
+			.reinstall = !!((ns->solver_flags_local | ns->solver_flags_inherited |
+					 ss->solver_flags) & APK_SOLVERF_REINSTALL),
+			.repository_tag = get_tag(db, pinning, repos),
+		};
 	}
-	apk_solution_array_resize(&ss->best_solution, i);
+	apk_solution_array_resize(&ss->best_solution, n);
 }
 
 static int compare_solution_entry(const void *p1, const void *p2)
@@ -1125,9 +1400,10 @@ static int generate_changeset(struct apk_database *db,
 static int free_state(apk_hash_item item, void *ctx)
 {
 	struct apk_name *name = (struct apk_name *) item;
+	struct apk_name_state *ns = (struct apk_name_state *) name->state_ptr;
 
-	if (name->state_ptr != NULL) {
-		free(name->state_ptr);
+	if (ns != NULL) {
+		free(ns);
 		name->state_ptr = NULL;
 	}
 	return 0;
@@ -1167,7 +1443,6 @@ int apk_solver_solve(struct apk_database *db,
 {
 	struct apk_solver_state *ss;
 	struct apk_installed_package *ipkg;
-	struct apk_score zero_score;
 	solver_result_t r = SOLVERR_STOP;
 	int i;
 
@@ -1175,20 +1450,30 @@ int apk_solver_solve(struct apk_database *db,
 	ss->db = db;
 	ss->solver_flags = solver_flags;
 	ss->topology_position = -1;
-	ss->best_score = (struct apk_score){ .unsatisfiable = -1, .preference = -1 };
+	ss->best_score = (struct apk_score){
+		.conflicts = -1,
+		.non_preferred_actions = -1,
+		.preference = -1,
+	};
 	list_init(&ss->unsolved_list_head);
 
 	for (i = 0; i < world->num; i++)
 		sort_name(ss, world->item[i].name);
-	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list)
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		sort_name(ss, ipkg->pkg->name);
+		name_to_ns(ipkg->pkg->name)->originally_installed = 1;
+	}
+#if 0
+	for (i = 0; i < world->num; i++)
+		prepare_name(ss, world->item[i].name);
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list)
+		prepare_name(ss, ipkg->pkg->name);
+#endif
+
+	ss->max_decisions ++;
+	ss->decisions = calloc(1, sizeof(struct apk_decision[ss->max_decisions]));
 
 	foreach_dependency(ss, world, apply_constraint);
-	zero_score = ss->score;
-
-	dbg_printf("solver_solve: zero score: %d unsatisfiable, %d preference\n",
-		   zero_score.unsatisfiable,
-		   zero_score.preference);
 
 	do {
 		/* need EXPAND if here, can return SOLUTION|PRUNED|EXPAND */
@@ -1196,24 +1481,18 @@ int apk_solver_solve(struct apk_database *db,
 		if (r == SOLVERR_SOLUTION) {
 			struct apk_score score;
 
-			dbg_printf("solution with: %d unsatisfiable, %d preference\n",
-				   ss->score.unsatisfiable,
-				   ss->score.preference);
-
 			score = ss->score;
 			addscore(&score, &ss->minimum_penalty);
 
 			if (cmpscore(&score, &ss->best_score) < 0) {
+				dbg_printf("updating best score "SCORE_FMT" (was: "SCORE_FMT")\n",
+					SCORE_PRINTF(&score),
+					SCORE_PRINTF(&ss->best_score));
+
 				record_solution(ss);
 				ss->best_score = score;
 			}
 
-			if (cmpscore(&zero_score, &score) >= 0) {
-				/* found solution - it is optimal because we permutate
-				 * each preferred local option first, and permutations
-				 * happen in topologally sorted order. */
-				break;
-			}
 			r = SOLVERR_PRUNED;
 		}
 		/* next_branch() returns PRUNED, STOP or EXPAND */
@@ -1223,6 +1502,10 @@ int apk_solver_solve(struct apk_database *db,
 	} while (r != SOLVERR_STOP);
 
 	/* collect packages */
+	dbg_printf("finished. best score "SCORE_FMT". solution has %d packages.\n",
+		SCORE_PRINTF(&ss->best_score),
+		ss->best_solution->num);
+
 	if (changeset != NULL) {
 		generate_changeset(db, ss->best_solution, changeset,
 				   ss->solver_flags);
@@ -1234,8 +1517,9 @@ int apk_solver_solve(struct apk_database *db,
 	} else {
 		apk_solution_array_free(&ss->best_solution);
 	}
-	i = ss->best_score.unsatisfiable;
+	i = ss->best_score.conflicts;
 	apk_solver_free(db);
+	free(ss->decisions);
 	free(ss);
 
 	return i;

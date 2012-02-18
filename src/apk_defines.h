@@ -257,6 +257,11 @@ static inline int list_hashed(const struct list_head *n)
 	return n->next != n && n->next != NULL;
 }
 
+static inline int list_empty(const struct list_head *n)
+{
+	return n->next == n;
+}
+
 #define list_entry(ptr, type, member) container_of(ptr,type,member)
 
 #define list_for_each(pos, head) \
