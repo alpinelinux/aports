@@ -316,17 +316,26 @@ int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg)
 		return dep->optional;
 	if (dep->name != pkg->name)
 		return 0;
-	if (dep->result_mask == APK_DEPMASK_CHECKSUM) {
+
+	switch (dep->result_mask) {
+	case APK_DEPMASK_CHECKSUM: {
 		struct apk_checksum csum;
 		apk_blob_t b = *dep->version;
 
 		apk_blob_pull_csum(&b, &csum);
 		if (apk_checksum_compare(&csum, &pkg->csum) == 0)
 			return 1;
-	} else {
+		break;
+		}
+	case APK_DEPMASK_CONFLICT:
+		return 0;
+	case APK_DEPMASK_REQUIRE:
+		return 1;
+	default:
 		if (apk_version_compare_blob(*pkg->version, *dep->version)
 		    & dep->result_mask)
 			return 1;
+		break;
 	}
 	return 0;
 }
