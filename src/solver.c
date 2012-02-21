@@ -9,6 +9,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <stdint.h>
 #include "apk_defines.h"
 #include "apk_database.h"
 #include "apk_package.h"
@@ -34,9 +35,22 @@
 #endif
 
 struct apk_score {
-	unsigned short conflicts;
-	unsigned short non_preferred_actions;
-	unsigned short preference;
+	union {
+		struct {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+			unsigned short preference;
+			unsigned short non_preferred_actions;
+			unsigned int conflicts;
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+			unsigned int conflicts;
+			unsigned short non_preferred_actions;
+			unsigned short preference;
+#else
+#error Unknown endianess.
+#endif
+		};
+		uint64_t score;
+	};
 };
 
 #define SCORE_FMT		"{%d/%d/%d}"
@@ -153,6 +167,7 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 				     int branching_point,
 				     int topology_position);
 
+#if 0
 static void addscore(struct apk_score *a, struct apk_score *b)
 {
 	a->conflicts += b->conflicts;
@@ -206,6 +221,33 @@ static inline int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct a
 
 	return 0;
 }
+#else
+static void addscore(struct apk_score *a, struct apk_score *b)
+{
+	a->score += b->score;
+}
+
+static void subscore(struct apk_score *a, struct apk_score *b)
+{
+	a->score -= b->score;
+}
+
+static inline int cmpscore(struct apk_score *a, struct apk_score *b)
+{
+	if (a->score < b->score) return -1;
+	if (a->score > b->score) return 1;
+	return 0;
+}
+
+static inline int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct apk_score *b)
+{
+	struct apk_score a;
+	a.score = a1->score + a2->score;
+	if (a.score < b->score) return -1;
+	if (a.score > b->score) return 1;
+	return 0;
+}
+#endif
 
 static struct apk_name *decision_to_name(struct apk_decision *d)
 {
@@ -665,7 +707,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		return ns->chosen != NULL;
 
 	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-	ns->minimum_penalty = (struct apk_score) { 0, 0 };
+	ns->minimum_penalty = (struct apk_score) { .score = 0 };
 
 	ns->name_touched = 1;
 
@@ -865,7 +907,7 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 
 		if (d->type == DECISION_ASSIGN) {
 			subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-			ns->minimum_penalty = (struct apk_score) { 0 };
+			ns->minimum_penalty = (struct apk_score) { .score = 0 };
 
 			ns->locked = 1;
 			get_topology_score(ss, ns, pkg, &score);
@@ -901,7 +943,7 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 
 		if (d->type == DECISION_ASSIGN) {
 			subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-			ns->minimum_penalty = (struct apk_score) { 0 };
+			ns->minimum_penalty = (struct apk_score) { .score = 0 };
 
 			get_unassigned_score(name, &score);
 			addscore(&ss->score, &score);
@@ -1515,9 +1557,7 @@ int apk_solver_solve(struct apk_database *db,
 	ss->db = db;
 	ss->solver_flags = solver_flags;
 	ss->topology_position = -1;
-	ss->best_score = (struct apk_score){
-		.conflicts = -1,
-	};
+	ss->best_score = (struct apk_score){ .conflicts = -1 };
 	list_init(&ss->unsolved_list_head);
 
 	for (i = 0; i < world->num; i++)
