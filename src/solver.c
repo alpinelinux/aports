@@ -74,7 +74,6 @@ struct apk_package_state {
 	unsigned char preference;
 	unsigned availability_checked : 1;
 	unsigned unavailable : 1;
-	unsigned install_applied : 1;
 	unsigned handle_install_if : 1;
 	unsigned locked : 1;
 };
@@ -886,7 +885,6 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 				return SOLVERR_PRUNED;
 			}
 
-			ps->install_applied = 1;
 			ss->assigned_names++;
 			ns->chosen = pkg;
 
@@ -968,8 +966,7 @@ static void undo_decision(struct apk_solver_state *ss,
 				ss->topology_position = pkg->topology_hard;
 		}
 
-		if (ps->install_applied) {
-			ps->install_applied = 0;
+		if (ns->locked) {
 			ss->assigned_names--;
 			foreach_rinstall_if_pkg(ss, pkg, untrigger_install_if);
 			foreach_dependency(ss, pkg->depends, undo_constraint);
