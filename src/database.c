@@ -1896,10 +1896,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 	struct apk_repository *repo;
 	apk_blob_t brepo, btag;
 	int repo_num, r, targz = 1, tag_id = 0;
-	char buf[PATH_MAX];
-
-	if (db->num_repos >= APK_MAX_REPOS)
-		return -1;
+	char buf[PATH_MAX], *url;
 
 	brepo = _repository;
 	btag = APK_BLOB_NULL;
@@ -1913,10 +1910,25 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 		tag_id = apk_db_get_tag_id(db, btag);
 	}
 
+	url = apk_blob_cstr(brepo);
+	for (repo_num = 0; repo_num < db->num_repos; repo_num++) {
+		repo = &db->repos[repo_num];
+		if (strcmp(url, repo->url) == 0) {
+			db->repo_tags[tag_id].allowed_repos |=
+				BIT(repo_num) & ~db->bad_repos;
+			free(url);
+			return 0;
+		}
+	}
+	if (db->num_repos >= APK_MAX_REPOS) {
+		free(url);
+		return -1;
+	}
+
 	repo_num = db->num_repos++;
 	repo = &db->repos[repo_num];
 	*repo = (struct apk_repository) {
-		.url = apk_blob_cstr(brepo),
+		.url = url,
 	};
 
 	if (apk_url_local_file(repo->url) == NULL) {
