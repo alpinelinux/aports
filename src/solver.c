@@ -73,6 +73,7 @@ struct apk_decision {
 	};
 #ifdef DEBUG_CHECKS
 	struct apk_score saved_score;
+	unsigned short saved_requirers;
 #endif
 
 	unsigned no_package : 1;
@@ -119,6 +120,7 @@ struct apk_name_state {
 	unsigned originally_installed : 1;
 	unsigned has_available_pkgs : 1;
 	unsigned in_changeset : 1;
+	unsigned in_world_dependency : 1;
 
 	/* dynamic state flags */
 	unsigned none_excluded : 1;
@@ -636,7 +638,6 @@ static void get_unassigned_score(struct apk_name *name, struct apk_score *score)
 
 	*score = (struct apk_score){
 		.conflicts = ns->requirers,
-		.non_preferred_actions = 1,
 		.preference = name->pkgs->num,
 	};
 }
@@ -973,6 +974,7 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 
 #ifdef DEBUG_CHECKS
 	d->saved_score = ss->score;
+	d->saved_requirers = name_to_ns(name)->requirers;
 #endif
 	d->type = primary_decision;
 	d->branching_point = branching_point;
@@ -995,6 +997,8 @@ static int next_branch(struct apk_solver_state *ss)
 
 	while (ss->num_decisions > 0) {
 		struct apk_decision *d = &ss->decisions[ss->num_decisions];
+		struct apk_name *name = decision_to_name(d);
+		struct apk_name_state *ns = name_to_ns(name);
 
 		undo_decision(ss, d);
 
@@ -1003,6 +1007,8 @@ static int next_branch(struct apk_solver_state *ss)
 			"ERROR! saved_score "SCORE_FMT" != score "SCORE_FMT"\n",
 			SCORE_PRINTF(&d->saved_score),
 			SCORE_PRINTF(&ss->score));
+		ASSERT(d->saved_requirers == ns->requirers,
+			"ERROR! requirers not restored between decisions\n");
 #endif
 
 		if (backup_until >= ss->num_decisions &&
@@ -1013,8 +1019,6 @@ static int next_branch(struct apk_solver_state *ss)
 		}
 
 		if (d->no_package && !d->found_solution) {
-			struct apk_name *name = decision_to_name(d);
-			struct apk_name_state *ns = name_to_ns(name);
 			if (ns->last_touched_decision < backup_until)
 				backup_until = ns->last_touched_decision;
 		}
@@ -1030,7 +1034,15 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 {
 	struct apk_name *name = dep->name;
 	struct apk_name_state *ns = name_to_ns(name);
-	int i;
+	int i, strength;
+
+	if (ss->num_decisions > 0) {
+		struct apk_name *name0 = decision_to_name(&ss->decisions[ss->num_decisions]);
+		struct apk_name_state *ns0 = name_to_ns(name0);
+		strength = ns0->requirers ?: 1;
+	} else {
+		strength = 1;
+	}
 
 	if (ns->locked) {
 		if (ns->chosen)
@@ -1040,12 +1052,12 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 			dbg_printf("%s: locked to empty\n",
 				   name->name);
 		if (!apk_dep_is_satisfied(dep, ns->chosen))
-			ss->score.conflicts++;
+			ss->score.conflicts += strength;
 		return;
 	}
 	if (name->pkgs->num == 0) {
 		if (!dep->optional)
-			ss->score.conflicts++;
+			ss->score.conflicts += strength;
 		return;
 	}
 
@@ -1083,7 +1095,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	}
 
 	if (!dep->optional)
-		ns->requirers++; 
+		ns->requirers += strength;
 
 	update_name_state(ss, name);
 }
@@ -1092,7 +1104,15 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 {
 	struct apk_name *name = dep->name;
 	struct apk_name_state *ns = name_to_ns(name);
-	int i;
+	int i, strength;
+
+	if (ss->num_decisions > 0) {
+		struct apk_name *name0 = decision_to_name(&ss->decisions[ss->num_decisions]);
+		struct apk_name_state *ns0 = name_to_ns(name0);
+		strength = ns0->requirers ?: 1;
+	} else {
+		strength = 1;
+	}
 
 	if (ns->locked) {
 		if (ns->chosen != NULL) {
@@ -1103,12 +1123,12 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 				   name->name);
 		}
 		if (!apk_dep_is_satisfied(dep, ns->chosen))
-			ss->score.conflicts--;
+			ss->score.conflicts -= strength;
 		return;
 	}
 	if (name->pkgs->num == 0) {
 		if (!dep->optional)
-			ss->score.conflicts--;
+			ss->score.conflicts -= strength;
 		return;
 	}
 
@@ -1142,7 +1162,7 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	}
 
 	if (!dep->optional)
-		ns->requirers--;
+		ns->requirers -= strength;
 
 	update_name_state(ss, name);
 }
@@ -1431,6 +1451,9 @@ static int free_state(apk_hash_item item, void *ctx)
 	struct apk_name_state *ns = (struct apk_name_state *) name->state_ptr;
 
 	if (ns != NULL) {
+#ifdef DEBUG_CHECKS
+		ASSERT(ns->requirers == 0, "Requirers is not zero after cleanup\n");
+#endif
 		free(ns);
 		name->state_ptr = NULL;
 	}
@@ -1481,8 +1504,10 @@ int apk_solver_solve(struct apk_database *db,
 	ss->best_score = (struct apk_score){ .conflicts = -1 };
 	list_init(&ss->unsolved_list_head);
 
-	for (i = 0; i < world->num; i++)
+	for (i = 0; i < world->num; i++) {
 		sort_name(ss, world->item[i].name);
+		name_to_ns(world->item[i].name)->in_world_dependency = 1;
+	}
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		sort_name(ss, ipkg->pkg->name);
 		name_to_ns(ipkg->pkg->name)->originally_installed = 1;
@@ -1524,6 +1549,10 @@ int apk_solver_solve(struct apk_database *db,
 			r = next_branch(ss);
 		/* STOP or EXPAND */
 	} while (r != SOLVERR_STOP);
+
+#ifdef DEBUG_CHECKS
+	foreach_dependency(ss, world, undo_constraint);
+#endif
 
 	/* collect packages */
 	dbg_printf("finished. best score "SCORE_FMT". solution has %d packages.\n",
