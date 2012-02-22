@@ -1420,9 +1420,13 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		list_for_each_entry(repo, &dbopts->repository_list, list)
 			apk_db_add_repository(db, APK_BLOB_STR(repo->url));
 
-		add_repos_from_file(db, db->root_fd, dbopts->repositories_file ?: "etc/apk/repositories");
-		apk_dir_foreach_file(openat(db->root_fd, "etc/apk/repositories.d", O_RDONLY | O_CLOEXEC),
-				     add_repos_from_file, db);
+		if (dbopts->repositories_file == NULL) {
+			add_repos_from_file(db, db->root_fd, "etc/apk/repositories");
+			apk_dir_foreach_file(openat(db->root_fd, "etc/apk/repositories.d", O_RDONLY | O_CLOEXEC),
+					     add_repos_from_file, db);
+		} else {
+			add_repos_from_file(db, db->root_fd, dbopts->repositories_file);
+		}
 
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_db_index_write_nr_cache(db);
