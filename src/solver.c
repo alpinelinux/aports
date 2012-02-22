@@ -337,7 +337,7 @@ static unsigned int get_pinning_mask_repos(struct apk_database *db, unsigned sho
 	return repository_mask;
 }
 
-static void get_topology_score(
+static int get_topology_score(
 		struct apk_solver_state *ss,
 		struct apk_name_state *ns,
 		struct apk_package *pkg,
@@ -348,6 +348,7 @@ static void get_topology_score(
 	unsigned int repos;
 	unsigned short preferred_pinning, allowed_pinning;
 	unsigned int preferred_repos, allowed_repos;
+	int score_locked = TRUE;
 
 	score = (struct apk_score) {
 		.conflicts = ps->conflicts,
@@ -369,6 +370,8 @@ static void get_topology_score(
 		/* not upgrading: it is not preferred to change package */
 		if (pkg->ipkg == NULL && ns->originally_installed)
 			score.non_preferred_actions++;
+	} else {
+		score_locked = FALSE;
 	}
 
 	repos = pkg->repos | (pkg->ipkg ? ss->db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
@@ -383,9 +386,12 @@ static void get_topology_score(
 		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
 		if (!(repos & allowed_repos))
 			score.non_preferred_actions+=2;
+	} else {
+		score_locked = FALSE;
 	}
 
 	*_score = score;
+	return score_locked;
 }
 
 static int is_topology_optimum(struct apk_solver_state *ss,
@@ -1086,7 +1092,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_score minscore, score;
 	struct apk_package *next_pkg = NULL;
 	unsigned int next_topology = 0, options = 0;
-	int i;
+	int i, score_locked = FALSE;
 
 	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
 	ns->minimum_penalty = (struct apk_score) { .score = 0 };
@@ -1118,7 +1124,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		    ((pkg0->ipkg == NULL && !pkg_available(ss->db, pkg0))))
 			continue;
 
-		get_topology_score(ss, ns, pkg0, &pkg0_score);
+		score_locked = get_topology_score(ss, ns, pkg0, &pkg0_score);
 
 		/* viable alternative? */
 		if (cmpscore2(&score, &pkg0_score, &ss->best_score) >= 0)
@@ -1145,6 +1151,10 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		if (ns->none_excluded)
 			return SOLVERR_PRUNED;
 		return push_decision(ss, name, NULL, DECISION_ASSIGN, BRANCH_NO, FALSE);
+	} else if (options == 1 && score_locked && ns->none_excluded) {
+		dbg_printf("reconsider_name: %s: only one choice left with known score, locking.\n",
+			name->name);
+		return push_decision(ss, name, next_pkg, DECISION_ASSIGN, BRANCH_NO, FALSE);
 	}
 
 	ns->chosen = next_pkg;
