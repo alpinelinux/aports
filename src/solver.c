@@ -291,24 +291,16 @@ static struct apk_name_state *name_to_ns_alloc(struct apk_name *name)
 	return ns;
 }
 
-static inline int pkg_available(struct apk_solver_state *ss, struct apk_package *pkg)
+static inline int pkg_available(struct apk_database *db, struct apk_package *pkg)
 {
-	struct apk_database *db = ss->db;
-	struct apk_name_state *ns = name_to_ns(pkg->name);
-
 	/* virtual packages - only deps used; no real .apk */
 	if (pkg->installed_size == 0)
 		return TRUE;
 	/* obviously present */
-	if (pkg->in_cache || pkg->filename != NULL)
+	if (pkg->in_cache || pkg->filename != NULL || (pkg->repos & db->local_repos))
 		return TRUE;
 	/* can download */
 	if ((pkg->repos & ~db->bad_repos) && !(apk_flags & APK_NO_NETWORK))
-		return TRUE;
-	/* installed, and no reinstall needed */
-	if ((pkg->ipkg != NULL) &&
-	    (ns->inherited_reinstall == 0) &&
-	    ((ns->solver_flags_local|ss->solver_flags) & APK_SOLVERF_REINSTALL) == 0)
 		return TRUE;
 	return FALSE;
 }
@@ -402,7 +394,12 @@ static void get_topology_score(
 		/* not upgrading: it is not preferred to change package */
 		if ((pkg->repos == 0) && ns->has_available_pkgs)
 			score.non_preferred_actions++;
-	} else if ((ns->inherited_upgrade) == 0 &&
+	} else if (ns->inherited_reinstall ||
+		   (((ns->solver_flags_local|ss->solver_flags) & APK_SOLVERF_REINSTALL))) {
+		/* reinstall requested, but not available */
+		if (!pkg_available(ss->db, pkg))
+			score.non_preferred_actions++;
+	} else if ((ns->inherited_upgrade == 0) &&
 		   ((ns->solver_flags_local|ss->solver_flags) & APK_SOLVERF_UPGRADE) == 0 &&
 		   ((ns->solver_flags_maybe & APK_SOLVERF_UPGRADE) == 0 || (ps->locked))) {
 		/* not upgrading: it is not preferred to change package */
@@ -666,7 +663,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 
 		if (ps0 == NULL || ps0->locked ||
 		    ss->topology_position < pkg0->topology_hard ||
-		    !pkg_available(ss, pkg0))
+		    (pkg0->ipkg == NULL && !pkg_available(ss->db, pkg0)))
 			continue;
 
 		/* preferred - currently most optimal for end solution */
@@ -1222,12 +1219,12 @@ static int expand_branch(struct apk_solver_state *ss)
 			struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
 			if (ps0 == NULL || ps0->locked ||
-			    ss->topology_position < pkg0->topology_hard)
+			    ss->topology_position < pkg0->topology_hard ||
+			    ((pkg0->ipkg == NULL && !pkg_available(ss->db, pkg0))))
 				continue;
 
 			get_topology_score(ss, ns, pkg0, &pkgscore);
-			if (cmpscore2(&score, &pkgscore, &ss->best_score) >= 0 ||
-			    !pkg_available(ss, pkg0))
+			if (cmpscore2(&score, &pkgscore, &ss->best_score) >= 0)
 				return push_decision(ss, name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
 		}
 
@@ -1587,6 +1584,7 @@ static void print_change(struct apk_database *db,
 	struct apk_package *newpkg = change->newpkg;
 	const char *msg = NULL;
 	char status[32], n[512], *nameptr;
+	apk_blob_t *oneversion = NULL;
 	int r;
 
 	snprintf(status, sizeof(status), "(%i/%i)", cur+1, total);
@@ -1604,17 +1602,21 @@ static void print_change(struct apk_database *db,
 	}
 
 	if (oldpkg == NULL) {
-		apk_message("%s Installing %s (" BLOB_FMT ")",
-			    status, nameptr,
-			    BLOB_PRINTF(*newpkg->version));
+		msg = "Installing";
+		oneversion = newpkg->version;
 	} else if (newpkg == NULL) {
-		apk_message("%s Purging %s (" BLOB_FMT ")",
-			    status, nameptr,
-			    BLOB_PRINTF(*oldpkg->version));
-	} else if (newpkg == oldpkg && !change->reinstall) {
-		apk_message("%s Updating pinning %s (" BLOB_FMT ")",
-			    status, nameptr,
-			    BLOB_PRINTF(*oldpkg->version));
+		msg = "Purging";
+		oneversion = oldpkg->version;
+	} else if (newpkg == oldpkg) {
+		if (change->reinstall) {
+			if (pkg_available(db, change->newpkg))
+				msg = "Re-installing";
+			else
+				msg = "[APK unavailable, skipped] Re-installing";
+		} else {
+			msg = "Updating pinning";
+		}
+		oneversion = newpkg->version;
 	} else {
 		r = apk_pkg_version_compare(newpkg, oldpkg);
 		switch (r) {
@@ -1622,15 +1624,18 @@ static void print_change(struct apk_database *db,
 			msg = "Downgrading";
 			break;
 		case APK_VERSION_EQUAL:
-			if (newpkg == oldpkg)
-				msg = "Re-installing";
-			else
-				msg = "Replacing";
+			msg = "Replacing";
 			break;
 		case APK_VERSION_GREATER:
 			msg = "Upgrading";
 			break;
 		}
+	}
+	if (oneversion) {
+		apk_message("%s %s %s (" BLOB_FMT ")",
+			    status, msg, nameptr,
+			    BLOB_PRINTF(*oneversion));
+	} else {
 		apk_message("%s %s %s (" BLOB_FMT " -> " BLOB_FMT ")",
 			    status, msg, nameptr,
 			    BLOB_PRINTF(*oldpkg->version),
@@ -1851,7 +1856,8 @@ int apk_solver_commit_changeset(struct apk_database *db,
 		prog.pkg = change->newpkg;
 
 		if (!(apk_flags & APK_SIMULATE)) {
-			if (change->oldpkg != change->newpkg || change->reinstall)
+			if (change->oldpkg != change->newpkg ||
+			    (change->reinstall && pkg_available(db, change->newpkg)))
 				r = apk_db_install_pkg(db,
 						       change->oldpkg, change->newpkg,
 						       (apk_flags & APK_PROGRESS) ? progress_cb : NULL,
