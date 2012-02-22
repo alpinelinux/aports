@@ -18,7 +18,7 @@
 #include "apk_print.h"
 
 //#define DEBUG_PRINT
-#define DEBUG_CHECKS
+//#define DEBUG_CHECKS
 
 #ifdef DEBUG_PRINT
 #include <stdio.h>
@@ -164,59 +164,23 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 				     int branching_point,
 				     int topology_position);
 
-#if 0
+#ifdef DEBUG_CHECKS
 static void addscore(struct apk_score *a, struct apk_score *b)
 {
-	a->conflicts += b->conflicts;
-	a->non_preferred_actions += b->non_preferred_actions;
-	a->preference += b->preference;
+	struct apk_score orig = *a;
+	a->score += b->score;
+	ASSERT(a->conflicts >= orig.conflicts, "Conflict overflow");
+	ASSERT(a->non_preferred_actions >= orig.non_preferred_actions, "Preferred action overflow");
+	ASSERT(a->preference >= orig.preference, "Preference overflow");
 }
 
 static void subscore(struct apk_score *a, struct apk_score *b)
 {
-	a->conflicts -= b->conflicts;
-	a->non_preferred_actions -= b->non_preferred_actions;
-	a->preference -= b->preference;
-}
-
-static inline int cmpscore(struct apk_score *a, struct apk_score *b)
-{
-	if (a->conflicts < b->conflicts)
-		return -1;
-	if (a->conflicts > b->conflicts)
-		return 1;
-
-	if (a->non_preferred_actions < b->non_preferred_actions)
-		return -1;
-	if (a->non_preferred_actions > b->non_preferred_actions)
-		return 1;
-
-	if (a->preference < b->preference)
-		return -1;
-	if (a->preference > b->preference)
-		return 1;
-
-	return 0;
-}
-
-static inline int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct apk_score *b)
-{
-	if (a1->conflicts + a2->conflicts < b->conflicts)
-		return -1;
-	if (a1->conflicts + a2->conflicts > b->conflicts)
-		return 1;
-
-	if (a1->non_preferred_actions + a2->non_preferred_actions < b->non_preferred_actions)
-		return -1;
-	if (a1->non_preferred_actions + a2->non_preferred_actions > b->non_preferred_actions)
-		return 1;
-
-	if (a1->preference + a2->preference < b->preference)
-		return -1;
-	if (a1->preference + a2->preference > b->preference)
-		return 1;
-
-	return 0;
+	struct apk_score orig = *a;
+	a->score -= b->score;
+	ASSERT(a->conflicts <= orig.conflicts, "Conflict underflow");
+	ASSERT(a->non_preferred_actions <= orig.non_preferred_actions, "Preferred action underflow");
+	ASSERT(a->preference <= orig.preference, "Preference underflow");
 }
 #else
 static void addscore(struct apk_score *a, struct apk_score *b)
@@ -228,6 +192,7 @@ static void subscore(struct apk_score *a, struct apk_score *b)
 {
 	a->score -= b->score;
 }
+#endif
 
 static inline int cmpscore(struct apk_score *a, struct apk_score *b)
 {
@@ -244,7 +209,6 @@ static inline int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct a
 	if (a.score > b->score) return 1;
 	return 0;
 }
-#endif
 
 static struct apk_name *decision_to_name(struct apk_decision *d)
 {
@@ -639,84 +603,44 @@ static void get_unassigned_score(struct apk_name *name, struct apk_score *score)
 	};
 }
 
-static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
+static void promote_name(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name_state *ns = name_to_ns(name);
-	struct apk_package *best_pkg = NULL, *preferred_pkg = NULL;
-	struct apk_score preferred_score;
-	unsigned int best_topology = 0;
-	int i, options = 0;
 
 	if (ns->locked)
-		return ns->chosen != NULL;
+		return;
 
-	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-	ns->minimum_penalty = (struct apk_score) { .score = 0 };
-
-	ns->name_touched = 1;
-
-	get_unassigned_score(name, &preferred_score);
-	for (i = 0; i < name->pkgs->num; i++) {
-		struct apk_package *pkg0 = name->pkgs->item[i];
-		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
-		struct apk_score pkg0_score;
-
-		if (ps0 == NULL || ps0->locked ||
-		    ss->topology_position < pkg0->topology_hard ||
-		    (pkg0->ipkg == NULL && !pkg_available(ss->db, pkg0)))
-			continue;
-
-		/* preferred - currently most optimal for end solution */
-		get_topology_score(ss, ns, pkg0, &pkg0_score);
-
-		if (preferred_pkg == NULL ||
-		    cmpscore(&pkg0_score, &preferred_score) < 0) {
-			preferred_pkg = pkg0;
-			preferred_score = pkg0_score;
-		}
-
-		/* next in topology order - next to get locked in */
-		if (ps0->topology_soft < ss->topology_position &&
-		    ps0->topology_soft > best_topology)
-			best_pkg = pkg0, best_topology = ps0->topology_soft;
-		else if (pkg0->topology_hard > best_topology)
-			best_pkg = pkg0, best_topology = pkg0->topology_hard;
-
-		options++;
-	}
-
-	if (ns->requirers == 0 && ns->install_ifs == 0) {
-		/* No one really needs this name (anymore). */
-		if (list_hashed(&ns->unsolved_list)) {
-			list_del(&ns->unsolved_list);
-			list_init(&ns->unsolved_list);
-		}
-		ns->chosen = NULL;
-		dbg_printf("%s: not required\n", name->name);
-		return options + 1;
-	}
-
+	/* queue for handling if needed */
 	if (!list_hashed(&ns->unsolved_list))
 		list_add_tail(&ns->unsolved_list, &ss->unsolved_list_head);
 
-	/* So far decided that something will be installed for this
-	 * name. So assign the minimum penalty, and next position. */
-	ns->chosen = best_pkg;
-	ns->minimum_penalty = preferred_score;
-	addscore(&ss->minimum_penalty, &ns->minimum_penalty);
+	/* update info, but no cached information flush is required, as
+	 * minimum_penalty can only go up */
+	ns->name_touched = 1;
+}
 
-	dbg_printf("%s:  min.pen. " SCORE_FMT ", %d requirers, %d install_ifs, %d options (next topology %d)\n",
-		   name->name,
-		   SCORE_PRINTF(&ns->minimum_penalty),
-		   ns->requirers, ns->install_ifs,
-		   options, best_topology);
+static void demote_name(struct apk_solver_state *ss, struct apk_name *name)
+{
+	struct apk_name_state *ns = name_to_ns(name);
 
-	if (!ns->none_excluded) {
-		dbg_printf("%s: none not excluded yet\n", name->name);
-		return options + 1;
+	if (ns->locked)
+		return;
+
+	/* remove cached information */
+	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
+	ns->minimum_penalty = (struct apk_score) { .score = 0 };
+	ns->chosen = NULL;
+
+	/* and remove list, or request refresh */
+	if (ns->requirers == 0 && ns->install_ifs == 0) {
+		if (list_hashed(&ns->unsolved_list)) {
+			list_del(&ns->unsolved_list);
+			list_init(&ns->unsolved_list);
+			dbg_printf("%s: not required\n", name->name);
+		}
+	} else {
+		ns->name_touched = 1;
 	}
-
-	return options;
 }
 
 static void inherit_name_state(struct apk_database *db, struct apk_name *to, struct apk_name *from)
@@ -778,7 +702,7 @@ static void trigger_install_if(struct apk_solver_state *ss,
 			   PKG_VER_PRINTF(pkg));
 		ns->install_ifs++;
 		inherit_name_state(ss->db, pkg->name, name0);
-		update_name_state(ss, pkg->name);
+		promote_name(ss, pkg->name);
 	}
 }
 
@@ -793,7 +717,7 @@ static void untrigger_install_if(struct apk_solver_state *ss,
 			   PKG_VER_PRINTF(pkg));
 		ns->install_ifs--;
 		uninherit_name_state(ss->db, pkg->name, name0);
-		update_name_state(ss, pkg->name);
+		demote_name(ss, pkg->name);
 	}
 }
 
@@ -880,15 +804,6 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 		}
 	}
 
-	if (d->type == DECISION_EXCLUDE) {
-		if (update_name_state(ss, name) == 0) {
-			dbg_printf("%s: %s would prune name to empty\n",
-				name->name,
-				(d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE");
-			return SOLVERR_PRUNED;
-		}
-	}
-
 	if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0) {
 		dbg_printf("%s: %s penalty too big: "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
 			name->name,
@@ -951,7 +866,8 @@ static void undo_decision(struct apk_solver_state *ss,
 	ns->locked = 0;
 	ns->chosen = NULL;
 
-	update_name_state(ss, name);
+	/* Put back the name to unsolved list */
+	promote_name(ss, name);
 }
 
 static solver_result_t push_decision(struct apk_solver_state *ss,
@@ -1094,7 +1010,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	if (!dep->optional)
 		ns->requirers += strength;
 
-	update_name_state(ss, name);
+	promote_name(ss, name);
 }
 
 static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
@@ -1161,7 +1077,84 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	if (!dep->optional)
 		ns->requirers -= strength;
 
-	update_name_state(ss, name);
+	demote_name(ss, name);
+}
+
+static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
+{
+	struct apk_name_state *ns = name_to_ns(name);
+	struct apk_score minscore, score;
+	struct apk_package *next_pkg = NULL;
+	unsigned int next_topology = 0, options = 0;
+	int i;
+
+	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
+	ns->minimum_penalty = (struct apk_score) { .score = 0 };
+
+	score = ss->score;
+	addscore(&score, &ss->minimum_penalty);
+
+	if (!ns->none_excluded) {
+		get_unassigned_score(name, &minscore);
+		if (cmpscore2(&score, &minscore, &ss->best_score) >= 0) {
+			dbg_printf("%s: pruning none, score too high "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
+				name->name,
+				SCORE_PRINTF(&score),
+				SCORE_PRINTF(&minscore),
+				SCORE_PRINTF(&ss->best_score));
+			return push_decision(ss, name, NULL, DECISION_EXCLUDE, BRANCH_NO, FALSE);
+		}
+	} else {
+		minscore.score = -1;
+	}
+
+	for (i = 0; i < name->pkgs->num; i++) {
+		struct apk_package *pkg0 = name->pkgs->item[i];
+		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
+		struct apk_score pkg0_score;
+
+		if (ps0 == NULL || ps0->locked ||
+		    ss->topology_position < pkg0->topology_hard ||
+		    ((pkg0->ipkg == NULL && !pkg_available(ss->db, pkg0))))
+			continue;
+
+		get_topology_score(ss, ns, pkg0, &pkg0_score);
+
+		/* viable alternative? */
+		if (cmpscore2(&score, &pkg0_score, &ss->best_score) >= 0)
+			return push_decision(ss, name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
+
+		/* find the minimum penalty */
+		if (cmpscore(&pkg0_score, &minscore) < 0)
+			minscore = pkg0_score;
+
+		/* next in topology order - next to get locked in */
+		if (ps0->topology_soft < ss->topology_position &&
+		    ps0->topology_soft > next_topology)
+			next_pkg = pkg0, next_topology = ps0->topology_soft;
+		else if (pkg0->topology_hard > next_topology)
+			next_pkg = pkg0, next_topology = pkg0->topology_hard;
+
+		options++;
+	}
+
+	/* no options left */
+	if (options == 0) {
+		dbg_printf("reconsider_name: %s: no options locking none\n",
+			name->name);
+		if (ns->none_excluded)
+			return SOLVERR_PRUNED;
+		return push_decision(ss, name, NULL, DECISION_ASSIGN, BRANCH_NO, FALSE);
+	}
+
+	ns->chosen = next_pkg;
+	ns->minimum_penalty = minscore;
+	addscore(&ss->minimum_penalty, &ns->minimum_penalty);
+
+	dbg_printf("reconsider_name: %s: min penalty " SCORE_FMT ", next_pkg=%p\n",
+		name->name, SCORE_PRINTF(&minscore), next_pkg);
+
+	return SOLVERR_SOLUTION;
 }
 
 static int expand_branch(struct apk_solver_state *ss)
@@ -1169,65 +1162,26 @@ static int expand_branch(struct apk_solver_state *ss)
 	struct apk_name *name;
 	struct apk_name_state *ns;
 	struct apk_package *pkg0 = NULL;
-	unsigned int i, topology0 = 0;
+	unsigned int r, topology0 = 0;
 	unsigned short allowed_pinning, preferred_pinning;
 	unsigned int allowed_repos;
 	int primary_decision, branching_point;
 
-	/* FIXME: change unsolved_list to a priority queue */
 	list_for_each_entry(ns, &ss->unsolved_list_head, unsolved_list) {
-		struct apk_score score;
-		struct apk_score pkgscore;
-
 		name = ns->name;
-
-		/* no options left */
-		if (ns->chosen == NULL) {
-			if (ns->none_excluded)
-				return SOLVERR_PRUNED;
-			return push_decision(ss, name, NULL, DECISION_ASSIGN, BRANCH_NO, FALSE);
+		if (ns->name_touched) {
+			dbg_printf("%s: reconsidering things\n",
+				   name->name);
+			r = reconsider_name(ss, name);
+			if (r != SOLVERR_SOLUTION)
+				return r;
+			ns->name_touched = 0;
 		}
-
 		if (pkg_to_ps(ns->chosen)->topology_soft < ss->topology_position &&
 		    pkg_to_ps(ns->chosen)->topology_soft > topology0)
 			pkg0 = ns->chosen, topology0 = pkg_to_ps(pkg0)->topology_soft;
 		else if (ns->chosen->topology_hard > topology0)
 			pkg0 = ns->chosen, topology0 = pkg0->topology_hard;
-
-		if (!ns->name_touched)
-			continue;
-		ns->name_touched = 0;
-
-		score = ss->score;
-		addscore(&score, &ss->minimum_penalty);
-		subscore(&score, &ns->minimum_penalty);
-
-		if (!ns->none_excluded) {
-			get_unassigned_score(name, &pkgscore);
-			if (cmpscore2(&score, &pkgscore, &ss->best_score) >= 0) {
-				dbg_printf("%s: pruning none, score too high "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
-					name->name,
-					SCORE_PRINTF(&score),
-					SCORE_PRINTF(&pkgscore),
-					SCORE_PRINTF(&ss->best_score));
-				return push_decision(ss, name, NULL, DECISION_EXCLUDE, BRANCH_NO, FALSE);
-			}
-		}
-
-		for (i = 0; i < name->pkgs->num; i++) {
-			struct apk_package *pkg0 = name->pkgs->item[i];
-			struct apk_package_state *ps0 = pkg_to_ps(pkg0);
-
-			if (ps0 == NULL || ps0->locked ||
-			    ss->topology_position < pkg0->topology_hard ||
-			    ((pkg0->ipkg == NULL && !pkg_available(ss->db, pkg0))))
-				continue;
-
-			get_topology_score(ss, ns, pkg0, &pkgscore);
-			if (cmpscore2(&score, &pkgscore, &ss->best_score) >= 0)
-				return push_decision(ss, name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
-		}
-
 	}
 	if (pkg0 == NULL) {
 		dbg_printf("expand_branch: solution with score "SCORE_FMT"\n",
