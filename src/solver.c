@@ -96,8 +96,6 @@ struct apk_name_state {
 	struct apk_package *chosen;
 
 	struct apk_score minimum_penalty;
-	unsigned short merge_index;
-	unsigned short prerequires;
 	unsigned short requirers;
 	unsigned short install_ifs;
 
@@ -120,7 +118,6 @@ struct apk_name_state {
 	unsigned decision_counted : 1;
 	unsigned originally_installed : 1;
 	unsigned has_available_pkgs : 1;
-	unsigned prepared : 1;
 	unsigned in_changeset : 1;
 
 	/* dynamic state flags */
@@ -633,57 +630,12 @@ static int install_if_missing(struct apk_solver_state *ss, struct apk_package *p
 	return missing;
 }
 
-static void foreach_common_dependency(
-		struct apk_solver_state *ss, struct apk_name *name,
-		void (*cb)(struct apk_solver_state *ss, struct apk_name *common_dependency))
-{
-	struct apk_name *name0;
-	struct apk_name_state *ns0;
-	struct apk_package *pkg;
-	struct apk_package_state *ps;
-	struct apk_dependency *dep;
-	int i, j, first_found = -1, last_found = 0;
-
-	for (i = 0; i < name->pkgs->num; i++) {
-		pkg = name->pkgs->item[i];
-		ps = pkg_to_ps(pkg);
-		if (ps == NULL || ps->locked)
-			continue;
-		if (first_found == -1)
-			first_found = i;
-		for (j = 0; j < pkg->depends->num; j++) {
-			dep = &pkg->depends->item[j];
-			if (dep->optional)
-				continue;
-			name0 = dep->name;
-			ns0   = name_to_ns(name0);
-			if (ns0->merge_index == last_found)
-				ns0->merge_index = i + 1;
-		}
-		last_found = i + 1;
-	}
-	if (first_found == -1)
-		return;
-
-	pkg = name->pkgs->item[first_found];
-	for (j = 0; j < pkg->depends->num; j++) {
-		dep = &pkg->depends->item[j];
-		if (dep->optional)
-			continue;
-		name0 = dep->name;
-		ns0   = name_to_ns(name0);
-		if (ns0->merge_index == last_found)
-			cb(ss, name0);
-		ns0->merge_index = 0;
-	}
-}
-
 static void get_unassigned_score(struct apk_name *name, struct apk_score *score)
 {
 	struct apk_name_state *ns = name_to_ns(name);
 
 	*score = (struct apk_score){
-		.conflicts = ns->requirers ? : (ns->prerequires ? 1 : 0),
+		.conflicts = ns->requirers,
 		.non_preferred_actions = 1,
 		.preference = name->pkgs->num,
 	};
@@ -735,7 +687,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 		options++;
 	}
 
-	if (ns->prerequires == 0 && ns->requirers == 0 && ns->install_ifs == 0) {
+	if (ns->requirers == 0 && ns->install_ifs == 0) {
 		/* No one really needs this name (anymore). */
 		if (list_hashed(&ns->unsolved_list)) {
 			list_del(&ns->unsolved_list);
@@ -755,10 +707,10 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 	ns->minimum_penalty = preferred_score;
 	addscore(&ss->minimum_penalty, &ns->minimum_penalty);
 
-	dbg_printf("%s:  min.pen. " SCORE_FMT ", %d prerequirers, %d requirers, %d install_ifs, %d options (next topology %d)\n",
+	dbg_printf("%s:  min.pen. " SCORE_FMT ", %d requirers, %d install_ifs, %d options (next topology %d)\n",
 		   name->name,
 		   SCORE_PRINTF(&ns->minimum_penalty),
-		   ns->prerequires, ns->requirers, ns->install_ifs,
+		   ns->requirers, ns->install_ifs,
 		   options, best_topology);
 
 	if (!ns->none_excluded) {
@@ -847,26 +799,6 @@ static void untrigger_install_if(struct apk_solver_state *ss,
 	}
 }
 
-static void increment_prerequires(struct apk_solver_state *ss, struct apk_name *name)
-{
-	struct apk_name *name0 = decision_to_name(&ss->decisions[ss->num_decisions]);
-	struct apk_name_state *ns = name_to_ns(name);
-
-	ns->prerequires++;
-	inherit_name_state(ss->db, name, name0);
-	update_name_state(ss, name);
-}
-
-static void decrement_prerequires(struct apk_solver_state *ss, struct apk_name *name)
-{
-	struct apk_name *name0 = decision_to_name(&ss->decisions[ss->num_decisions]);
-	struct apk_name_state *ns = name_to_ns(name);
-
-	ns->prerequires--;
-	uninherit_name_state(ss->db, name, name0);
-	update_name_state(ss, name);
-}
-
 static solver_result_t apply_decision(struct apk_solver_state *ss,
 				      struct apk_decision *d)
 {
@@ -951,8 +883,6 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 	}
 
 	if (d->type == DECISION_EXCLUDE) {
-		foreach_common_dependency(ss, name, increment_prerequires);
-
 		if (update_name_state(ss, name) == 0) {
 			dbg_printf("%s: %s would prune name to empty\n",
 				name->name,
@@ -983,9 +913,6 @@ static void undo_decision(struct apk_solver_state *ss,
 	struct apk_score score;
 
 	ns->name_touched = 1;
-	if (d->type == DECISION_EXCLUDE) {
-		foreach_common_dependency(ss, name, decrement_prerequires);
-	}
 
 	if (pkg != NULL) {
 		struct apk_package_state *ps = pkg_to_ps(pkg);
