@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <malloc.h>
+#include <dirent.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -538,6 +539,32 @@ int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 
 		bs->close(bs, NULL);
 	}
+
+	return 0;
+}
+
+int apk_dir_foreach_file(int dirfd, apk_dir_file_cb cb, void *ctx)
+{
+	struct dirent *de;
+	DIR *dir;
+
+	if (dirfd < 0)
+		return -1;
+
+	dir = fdopendir(dirfd);
+	if (dir == NULL)
+		return -1;
+
+	/* We get called here with dup():ed fd. Since they all refer to
+	 * same object, we need to rewind so subsequent calls work. */
+	rewinddir(dir);
+
+	while ((de = readdir(dir)) != NULL) {
+		if (de->d_name[0] == '.')
+			continue;
+		cb(ctx, de->d_name);
+	}
+	closedir(dir);
 
 	return 0;
 }

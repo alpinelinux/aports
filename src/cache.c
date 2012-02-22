@@ -31,10 +31,10 @@ static int cache_download(struct apk_database *db)
 	struct apk_package *pkg;
 	struct apk_repository *repo;
 	char item[PATH_MAX], cacheitem[PATH_MAX];
-	int i, r = 0;
+	int i, r, ret = 0;
 
 	r = apk_solver_solve(db, 0, db->world, NULL, &changeset);
-	if (r != 0) {
+	if (r < 0) {
 		apk_error("Unable to select packages. Run apk fix.");
 		return r;
 	}
@@ -43,86 +43,53 @@ static int cache_download(struct apk_database *db)
 		change = &changeset.changes->item[i];
 		pkg = change->newpkg;
 
-		apk_pkg_format_cache(pkg, APK_BLOB_BUF(cacheitem));
-		if (faccessat(db->cache_fd, cacheitem, R_OK, 0) == 0)
+		if (pkg->in_cache)
 			continue;
 
 		repo = apk_db_select_repo(db, pkg);
-		if (repo == NULL || apk_url_local_file(repo->url) != NULL)
+		if (repo == NULL || !apk_repo_is_remote(repo))
 			continue;
 
+		apk_pkg_format_cache(pkg, APK_BLOB_BUF(cacheitem));
 		apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
-		r |= apk_cache_download(db, repo->url, pkg->arch,
+		r = apk_cache_download(db, repo->url, pkg->arch,
 					item, cacheitem,
 					APK_SIGN_VERIFY_IDENTITY);
+		if (r) {
+			apk_error("%s: %s", item, apk_error_str(r));
+			ret++;
+		}
 	}
 
-	return r;
+	return ret;
+}
+
+static void cache_clean_item(struct apk_database *db, const char *filename, struct apk_package *pkg)
+{
+	char tmp[PATH_MAX];
+	apk_blob_t b;
+	int i;
+
+	if (pkg != NULL || strcmp(filename, "installed") == 0)
+		return;
+
+	b = APK_BLOB_STR(filename);
+	for (i = 0; i < db->num_repos; i++) {
+		/* Check if this is a valid index */
+		apk_cache_format_index(APK_BLOB_BUF(tmp), &db->repos[i]);
+		if (apk_blob_compare(b, APK_BLOB_STR(tmp)) == 0)
+			return;
+	}
+
+	if (apk_verbosity >= 2)
+		apk_message("deleting %s", filename);
+	if (!(apk_flags & APK_SIMULATE))
+		unlinkat(db->cache_fd, filename, 0);
 }
 
 static int cache_clean(struct apk_database *db)
 {
-	char tmp[PATH_MAX];
-	DIR *dir;
-	struct dirent *de;
-	int delete, i;
-	apk_blob_t b, bname, bver;
-	struct apk_name *name;
-
-	dir = fdopendir(dup(db->cache_fd));
-	if (dir == NULL)
-		return -1;
-
-	while ((de = readdir(dir)) != NULL) {
-		if (de->d_name[0] == '.')
-			continue;
-
-		delete = TRUE;
-		do {
-			b = APK_BLOB_STR(de->d_name);
-
-			if (apk_blob_compare(b, APK_BLOB_STR("installed")) == 0) {
-				delete = FALSE;
-				break;
-			}
-
-			if (apk_pkg_parse_name(b, &bname, &bver) < 0) {
-				/* Index - check for matching repository */
-				for (i = 0; i < db->num_repos; i++) {
-					apk_cache_format_index(APK_BLOB_BUF(tmp), &db->repos[i]);
-					if (apk_blob_compare(b, APK_BLOB_STR(tmp)) != 0)
-						continue;
-					delete = 0;
-					break;
-				}
-			} else {
-				/* Package - search for it */
-				name = apk_db_get_name(db, bname);
-				if (name == NULL)
-					break;
-				for (i = 0; i < name->pkgs->num; i++) {
-					struct apk_package *pkg = name->pkgs->item[i];
-
-					apk_pkg_format_cache(pkg, APK_BLOB_BUF(tmp));
-					if (apk_blob_compare(b, APK_BLOB_STR(tmp)) != 0)
-						continue;
-
-					delete = 0;
-					break;
-				}
-			}
-		} while (0);
-
-		if (delete) {
-			if (apk_verbosity >= 2)
-				apk_message("deleting %s", de->d_name);
-			if (!(apk_flags & APK_SIMULATE))
-				unlinkat(db->cache_fd, de->d_name, 0);
-		}
-	}
-
-	closedir(dir);
-	return 0;
+	return apk_db_cache_foreach_item(db, cache_clean_item);
 }
 
 static int cache_main(void *ctx, struct apk_database *db, int argc, char **argv)

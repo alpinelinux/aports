@@ -64,6 +64,26 @@ extern char **apk_argv;
 #define APK_NO_NETWORK		0x1000
 #define APK_OVERLAY_FROM_STDIN	0x2000
 
+/* default architecture for APK packages. */
+#if defined(__x86_64__)
+#define APK_DEFAULT_ARCH        "x86_64"
+#elif defined(__i386__)
+#define APK_DEFAULT_ARCH        "x86"
+#elif defined(__powerpc__) && !defined(__powerpc64__)
+#define APK_DEFAULT_ARCH	"ppc"
+#elif defined(__powerpc64__)
+#define APK_DEFAULT_ARCH	"ppc64"
+#elif defined(__arm__)
+#define APK_DEFAULT_ARCH	"arm"
+#else
+#warning APK_DEFAULT_ARCH is not set for this architecture
+#define APK_DEFAULT_ARCH        "noarch"
+#endif
+
+#define APK_MAX_REPOS		31	/* see struct apk_package */
+#define APK_MAX_TAGS		16	/* see solver; unsigned short */
+#define APK_CACHE_CSUM_BYTES	4
+
 static inline size_t apk_calc_installed_size(size_t size)
 {
 	const size_t bsize = 4 * 1024;

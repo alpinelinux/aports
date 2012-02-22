@@ -1091,9 +1091,10 @@ static int apk_db_index_write_nr_cache(struct apk_database *db)
 
 	ctx.os = os;
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
-		if (ipkg->pkg->repos != 0)
+		struct apk_package *pkg = ipkg->pkg;
+		if (pkg->repos != 0 || !pkg->in_cache)
 			continue;
-		r = write_index_entry(ipkg->pkg, &ctx);
+		r = write_index_entry(pkg, &ctx);
 		if (r != 0)
 			return r;
 	}
@@ -1223,6 +1224,14 @@ static void relocate_database(struct apk_database *db)
 	apk_move_file(db->root_fd, apk_installed_file_old, apk_installed_file);
 }
 
+static void mark_in_cache(struct apk_database *db, const char *name, struct apk_package *pkg)
+{
+	if (pkg == NULL)
+		return;
+
+	pkg->in_cache = 1;
+}
+
 int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 {
 	const char *msg = NULL;
@@ -1245,8 +1254,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 4000);
 	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 10000);
-	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 10000);
-	apk_hash_init(&db->installed.files, &file_hash_ops, 20000);
+	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 5000);
+	apk_hash_init(&db->installed.files, &file_hash_ops, 100000);
 	list_init(&db->installed.packages);
 	list_init(&db->installed.triggers);
 	apk_dependency_array_init(&db->world);
@@ -1399,6 +1408,9 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_db_index_write_nr_cache(db);
 	}
+
+	if (apk_db_cache_active(db))
+		apk_db_cache_foreach_item(db, mark_in_cache);
 
 	if (db->compat_newfeatures) {
 		apk_warning("This apk-tools is OLD! Some packages %s.",
@@ -1613,6 +1625,48 @@ int apk_db_cache_active(struct apk_database *db)
 	return db->cache_dir != apk_static_cache_dir;
 }
 
+struct foreach_cache_item_ctx {
+	struct apk_database *db;
+	apk_cache_item_cb cb;
+};
+
+static int foreach_cache_file(void *pctx, const char *name)
+{
+	struct foreach_cache_item_ctx *ctx = (struct foreach_cache_item_ctx *) pctx;
+	struct apk_database *db = ctx->db;
+	struct apk_package *pkg = NULL;
+	apk_blob_t b = APK_BLOB_STR(name), bname, bver;
+	int i;
+
+	if (apk_pkg_parse_name(b, &bname, &bver) == 0) {
+		/* Package - search for it */
+		struct apk_name *name = apk_db_get_name(db, bname);
+		char tmp[PATH_MAX];
+		if (name == NULL)
+			goto no_pkg;
+		for (i = 0; i < name->pkgs->num; i++) {
+			struct apk_package *pkg0 = name->pkgs->item[i];
+
+			apk_pkg_format_cache(pkg0, APK_BLOB_BUF(tmp));
+			if (apk_blob_compare(b, APK_BLOB_STR(tmp)) == 0) {
+				pkg = pkg0;
+				break;
+			}
+		}
+	}
+no_pkg:
+	ctx->cb(db, name, pkg);
+
+	return 0;
+}
+
+int apk_db_cache_foreach_item(struct apk_database *db, apk_cache_item_cb cb)
+{
+	struct foreach_cache_item_ctx ctx = { db, cb };
+
+	return apk_dir_foreach_file(dup(db->cache_fd), foreach_cache_file, &ctx);
+}
+
 int apk_db_permanent(struct apk_database *db)
 {
 	return db->permanent;
@@ -1685,7 +1739,7 @@ int apk_repo_format_filename(char *buf, size_t len,
 	return n;
 }
 
-static int apk_repo_is_remote(struct apk_repository *repo)
+int apk_repo_is_remote(struct apk_repository *repo)
 {
 	return repo->csum.type != APK_CHECKSUM_NONE;
 }
@@ -1722,30 +1776,29 @@ struct apk_repository *apk_db_select_repo(struct apk_database *db,
 	unsigned int repos = pkg->repos & ~(db->bad_repos);
 	int i;
 
-	/* Always prefer local repositories */
-	if ((repos & db->local_repos) != 0)
-		repos &= db->local_repos;
+	/* Uninstalled and unavailable? */
+	if (repos == 0 && pkg->ipkg == NULL)
+		return NULL;
 
-	/* Pick first repository providing this package */
-	for (i = 0; i < APK_MAX_REPOS; i++)
-		if (repos & BIT(i))
-			break;
-
-	/* If this is a remote repository, and we have no network,
-	 * check that we have it in cache */
-	if ((i >= APK_MAX_REPOS) ||
-	    ((db->local_repos & BIT(i)) == 0 && (apk_flags & APK_NO_NETWORK))) {
-		char cacheitem[PATH_MAX];
-
-		apk_pkg_format_cache(pkg, APK_BLOB_BUF(cacheitem));
-		if (faccessat(db->cache_fd, cacheitem, R_OK, 0) != 0)
+	if ((repos & db->local_repos) == 0) {
+		/* Network repository (or installed and unavailable) */
+		if (apk_flags & APK_NO_NETWORK) {
+			if (pkg->in_cache)
+				return &cache_repo;
 			return NULL;
+		}
+	} else {
+		/* Local repositories; don't use network */
+		repos &= db->local_repos;
 	}
 
-	if (i >= APK_MAX_REPOS)
-		return &cache_repo;
+	/* Pick first repository providing this package */
+	for (i = 0; i < APK_MAX_REPOS; i++) {
+		if (repos & BIT(i))
+			return &db->repos[i];
+	}
 
-	return &db->repos[i];
+	return NULL;
 }
 
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo)
@@ -2347,10 +2400,12 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	tar->close(tar);
 
 	if (need_copy) {
-		if (r == 0)
+		if (r == 0) {
 			renameat(db->cachetmp_fd, item, db->cache_fd, item);
-		else
+			pkg->in_cache = 1;
+		} else {
 			unlinkat(db->cachetmp_fd, item, 0);
+		}
 	}
 
 	if (r != 0) {

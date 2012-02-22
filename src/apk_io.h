@@ -106,10 +106,13 @@ size_t apk_ostream_write_string(struct apk_ostream *ostream, const char *string)
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
 apk_blob_t apk_blob_from_file(int atfd, const char *file);
 
+typedef int apk_dir_file_cb(void *ctx, const char *entry);
+
 #define APK_FI_NOFOLLOW		0x80000000
 
 int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 		      struct apk_file_info *fi);
+int apk_dir_foreach_file(int dirfd, apk_dir_file_cb cb, void *ctx);
 int apk_move_file(int atfd, const char *from, const char *to);
 int apk_url_download(const char *url, int atfd, const char *file);
 const char *apk_url_local_file(const char *url);

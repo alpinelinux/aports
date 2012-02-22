@@ -18,26 +18,6 @@
 #include "apk_package.h"
 #include "apk_io.h"
 
-/* default architecture for APK packages. */
-#if defined(__x86_64__)
-#define APK_DEFAULT_ARCH        "x86_64"
-#elif defined(__i386__)
-#define APK_DEFAULT_ARCH        "x86"
-#elif defined(__powerpc__) && !defined(__powerpc64__)
-#define APK_DEFAULT_ARCH	"ppc"
-#elif defined(__powerpc64__)
-#define APK_DEFAULT_ARCH	"ppc64"
-#elif defined(__arm__)
-#define APK_DEFAULT_ARCH	"arm"
-#else   
-#warning APK_DEFAULT_ARCH is not set for this architecture
-#define APK_DEFAULT_ARCH        "noarch"
-#endif
-
-#define APK_MAX_REPOS		32
-#define APK_MAX_TAGS		16
-#define APK_CACHE_CSUM_BYTES	4
-
 extern const char * const apk_index_gz;
 extern const char * const apkindex_tar_gz;
 
@@ -219,6 +199,7 @@ int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 struct apk_repository *apk_db_select_repo(struct apk_database *db,
 					  struct apk_package *pkg);
 int apk_repository_update(struct apk_database *db, struct apk_repository *repo);
+int apk_repo_is_remote(struct apk_repository *repo);
 int apk_repo_format_filename(char *buf, size_t len,
 			     const char *repourl, apk_blob_t *arch,
 			     const char *pkgfile);
@@ -227,6 +208,11 @@ int apk_db_cache_active(struct apk_database *db);
 void apk_cache_format_index(apk_blob_t to, struct apk_repository *repo);
 int apk_cache_download(struct apk_database *db, const char *url, apk_blob_t *arch,
 		       const char *item, const char *cache_item, int verify);
+
+typedef void (*apk_cache_item_cb)(struct apk_database *db,
+				  const char *filename,
+				  struct apk_package *pkg);
+int apk_db_cache_foreach_item(struct apk_database *db, apk_cache_item_cb cb);
 
 int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *oldpkg,

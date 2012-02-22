@@ -86,8 +86,6 @@ struct apk_package_state {
 	unsigned int topology_soft;
 	unsigned short conflicts;
 	unsigned char preference;
-	unsigned availability_checked : 1;
-	unsigned unavailable : 1;
 	unsigned handle_install_if : 1;
 	unsigned locked : 1;
 };
@@ -294,13 +292,24 @@ static struct apk_name_state *name_to_ns_alloc(struct apk_name *name)
 	return ns;
 }
 
-static inline int pkg_available(struct apk_database *db, struct apk_package *pkg)
+static inline int pkg_available(struct apk_solver_state *ss, struct apk_package *pkg)
 {
+	struct apk_database *db = ss->db;
+	struct apk_name_state *ns = name_to_ns(pkg->name);
+
+	/* virtual packages - only deps used; no real .apk */
 	if (pkg->installed_size == 0)
 		return TRUE;
-	if (pkg->filename != NULL)
+	/* obviously present */
+	if (pkg->in_cache || pkg->filename != NULL)
 		return TRUE;
-	if (apk_db_select_repo(db, pkg) != NULL)
+	/* can download */
+	if ((pkg->repos & ~db->bad_repos) && !(apk_flags & APK_NO_NETWORK))
+		return TRUE;
+	/* installed, and no reinstall needed */
+	if ((pkg->ipkg != NULL) &&
+	    (ns->inherited_reinstall == 0) &&
+	    ((ns->solver_flags_local|ss->solver_flags) & APK_SOLVERF_REINSTALL) == 0)
 		return TRUE;
 	return FALSE;
 }
@@ -410,7 +419,7 @@ static void get_topology_score(
 		score.non_preferred_actions++;
 
 	if (ns->locked || (ns->allowed_pinning | ns->maybe_pinning) == ns->allowed_pinning) {
-		allowed_pinning = ns->allowed_pinning | preferred_pinning;
+		allowed_pinning = ns->allowed_pinning | preferred_pinning | APK_DEFAULT_PINNING_MASK;
 		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
 		if (!(repos & allowed_repos))
 			score.non_preferred_actions+=2;
@@ -492,6 +501,14 @@ static void calculate_pkg_preference(struct apk_package *pkg)
 	}
 }
 
+static void count_name(struct apk_solver_state *ss, struct apk_name_state *ns)
+{
+	if (!ns->decision_counted) {
+		ss->max_decisions++;
+		ns->decision_counted = 1;
+	}
+}
+
 static void sort_hard_dependencies(struct apk_solver_state *ss, struct apk_package *pkg)
 {
 	struct apk_package_state *ps;
@@ -505,19 +522,15 @@ static void sort_hard_dependencies(struct apk_solver_state *ss, struct apk_packa
 		return;
 	pkg->topology_hard = -1;
 	ps->topology_soft = -1;
-	calculate_pkg_preference(pkg);
 
+	calculate_pkg_preference(pkg);
 	/* Consider hard dependencies only */
 	foreach_dependency_pkg(ss, pkg->depends, sort_hard_dependencies);
 	foreach_dependency_pkg(ss, pkg->install_if, sort_hard_dependencies);
 
 	ss->max_decisions++;
-
 	ns = name_to_ns_alloc(pkg->name);
-	if (!ns->decision_counted) {
-		ss->max_decisions++;
-		ns->decision_counted = 1;
-	}
+	count_name(ss, ns);
 
 	ps->topology_soft = pkg->topology_hard = ++ss->num_topology_positions;
 	dbg_printf(PKG_VER_FMT ": topology_hard=%d\n",
@@ -587,6 +600,7 @@ static void sort_name(struct apk_solver_state *ss, struct apk_name *name)
 	for (i = 0; i < name->pkgs->num; i++)
 		sort_soft_dependencies(ss, name->pkgs->item[i]);
 
+	count_name(ss, ns);
 	recalculate_maybe(ss, name,
 			  ns->solver_flags_local & ns->solver_flags_local_mask,
 			  ns->maybe_pinning);
@@ -609,34 +623,14 @@ static int install_if_missing(struct apk_solver_state *ss, struct apk_package *p
 		struct apk_dependency *dep = &pkg->install_if->item[i];
 
 		ns = name_to_ns(dep->name);
-		if (!ns->locked || !apk_dep_is_satisfied(dep, ns->chosen))
+
+		/* ns can be NULL, if the install_if has a name with
+		 * no packages */
+		if (ns == NULL || !ns->locked || !apk_dep_is_satisfied(dep, ns->chosen))
 			missing++;
 	}
 
 	return missing;
-}
-
-static int check_if_package_unavailable(struct apk_solver_state *ss, struct apk_package *pkg, int do_check)
-{
-	struct apk_name *name = pkg->name;
-	struct apk_package_state *ps = pkg_to_ps(pkg);
-	struct apk_name_state *ns = name_to_ns(name);
-
-	/* installed and no-reinstall required? no check needed. */
-	if ((pkg->ipkg != NULL) && (ns->inherited_reinstall == 0) &&
-	    ((ns->solver_flags_local|ss->solver_flags) & APK_SOLVERF_REINSTALL) == 0)
-		return 0;
-
-	/* done already? */
-	if (ps->availability_checked && !do_check)
-		return ps->unavailable;
-
-	/* and it's not available, we can't use it */
-	if (!pkg_available(ss->db, pkg))
-		ps->unavailable = 1;
-
-	ps->availability_checked = 1;
-	return ps->unavailable;
 }
 
 static void foreach_common_dependency(
@@ -719,7 +713,7 @@ static int update_name_state(struct apk_solver_state *ss, struct apk_name *name)
 
 		if (ps0 == NULL || ps0->locked ||
 		    ss->topology_position < pkg0->topology_hard ||
-		    check_if_package_unavailable(ss, pkg0, 0))
+		    !pkg_available(ss, pkg0))
 			continue;
 
 		/* preferred - currently most optimal for end solution */
@@ -828,7 +822,7 @@ static void trigger_install_if(struct apk_solver_state *ss,
 {
 	if (install_if_missing(ss, pkg) == 0) {
 		struct apk_name *name0 = decision_to_name(&ss->decisions[ss->num_decisions]);
-		struct apk_name_state *ns = ns = name_to_ns(pkg->name);
+		struct apk_name_state *ns = name_to_ns(pkg->name);
 
 		dbg_printf("trigger_install_if: " PKG_VER_FMT " triggered\n",
 			   PKG_VER_PRINTF(pkg));
@@ -913,8 +907,7 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 			get_topology_score(ss, ns, pkg, &score);
 			addscore(&ss->score, &score);
 
-			if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0 ||
-			    check_if_package_unavailable(ss, pkg, 1)) {
+			if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0) {
 				dbg_printf("install causing "SCORE_FMT", penalty too big: "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
 					   SCORE_PRINTF(&score),
 					   SCORE_PRINTF(&ss->score),
@@ -1286,7 +1279,8 @@ static int expand_branch(struct apk_solver_state *ss)
 				continue;
 
 			get_topology_score(ss, ns, pkg0, &pkgscore);
-			if (cmpscore2(&score, &pkgscore, &ss->best_score) >= 0)
+			if (cmpscore2(&score, &pkgscore, &ss->best_score) >= 0 ||
+			    !pkg_available(ss, pkg0))
 				return push_decision(ss, name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
 		}
 
@@ -1318,7 +1312,7 @@ static int expand_branch(struct apk_solver_state *ss)
 		SCORE_PRINTF(&ss->best_score));
 
 	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
-	allowed_pinning = ns->allowed_pinning | preferred_pinning;
+	allowed_pinning = ns->allowed_pinning | preferred_pinning | APK_DEFAULT_PINNING_MASK;
 	allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
 
 	if ((pkg0->repos != 0) && !(pkg0->repos & allowed_repos)) {
