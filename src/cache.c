@@ -64,16 +64,16 @@ static int cache_download(struct apk_database *db)
 	return ret;
 }
 
-static void cache_clean_item(struct apk_database *db, const char *filename, struct apk_package *pkg)
+static void cache_clean_item(struct apk_database *db, int dirfd, const char *name, struct apk_package *pkg)
 {
 	char tmp[PATH_MAX];
 	apk_blob_t b;
 	int i;
 
-	if (pkg != NULL || strcmp(filename, "installed") == 0)
+	if (pkg != NULL || strcmp(name, "installed") == 0)
 		return;
 
-	b = APK_BLOB_STR(filename);
+	b = APK_BLOB_STR(name);
 	for (i = 0; i < db->num_repos; i++) {
 		/* Check if this is a valid index */
 		apk_cache_format_index(APK_BLOB_BUF(tmp), &db->repos[i]);
@@ -82,9 +82,9 @@ static void cache_clean_item(struct apk_database *db, const char *filename, stru
 	}
 
 	if (apk_verbosity >= 2)
-		apk_message("deleting %s", filename);
+		apk_message("deleting %s", name);
 	if (!(apk_flags & APK_SIMULATE))
-		unlinkat(db->cache_fd, filename, 0);
+		unlinkat(dirfd, name, 0);
 }
 
 static int cache_clean(struct apk_database *db)

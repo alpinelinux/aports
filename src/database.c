@@ -1224,12 +1224,35 @@ static void relocate_database(struct apk_database *db)
 	apk_move_file(db->root_fd, apk_installed_file_old, apk_installed_file);
 }
 
-static void mark_in_cache(struct apk_database *db, const char *name, struct apk_package *pkg)
+static void mark_in_cache(struct apk_database *db, int dirfd, const char *name, struct apk_package *pkg)
 {
 	if (pkg == NULL)
 		return;
 
 	pkg->in_cache = 1;
+}
+
+static int add_repos_from_file(void *ctx, int dirfd, const char *file)
+{
+	struct apk_database *db = (struct apk_database *) ctx;
+	apk_blob_t blob;
+
+	if (dirfd != db->root_fd) {
+		/* if loading from repositories.d,
+		 * the name must end in .list */
+		const char *ext = strrchr(file, '.');
+		if (ext == NULL || strcmp(ext, ".list") != 0)
+			return 0;
+	}
+
+	blob = apk_blob_from_file(dirfd, file);
+	if (APK_BLOB_IS_NULL(blob))
+		return 0;
+
+	apk_blob_for_each_segment(blob, "\n", apk_db_add_repository, db);
+	free(blob.ptr);
+
+	return 0;
 }
 
 int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
@@ -1396,15 +1419,11 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	if (!(dbopts->open_flags & APK_OPENF_NO_SYS_REPOS)) {
 		list_for_each_entry(repo, &dbopts->repository_list, list)
 			apk_db_add_repository(db, APK_BLOB_STR(repo->url));
-		blob = apk_blob_from_file(
-			db->root_fd,
-			dbopts->repositories_file ?: "etc/apk/repositories");
-		if (!APK_BLOB_IS_NULL(blob)) {
-			apk_blob_for_each_segment(
-				blob, "\n",
-				apk_db_add_repository, db);
-			free(blob.ptr);
-		}
+
+		add_repos_from_file(db, db->root_fd, dbopts->repositories_file ?: "etc/apk/repositories");
+		apk_dir_foreach_file(openat(db->root_fd, "etc/apk/repositories.d", O_RDONLY | O_CLOEXEC),
+				     add_repos_from_file, db);
+
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_db_index_write_nr_cache(db);
 	}
@@ -1630,7 +1649,7 @@ struct foreach_cache_item_ctx {
 	apk_cache_item_cb cb;
 };
 
-static int foreach_cache_file(void *pctx, const char *name)
+static int foreach_cache_file(void *pctx, int dirfd, const char *name)
 {
 	struct foreach_cache_item_ctx *ctx = (struct foreach_cache_item_ctx *) pctx;
 	struct apk_database *db = ctx->db;
@@ -1655,7 +1674,7 @@ static int foreach_cache_file(void *pctx, const char *name)
 		}
 	}
 no_pkg:
-	ctx->cb(db, name, pkg);
+	ctx->cb(db, dirfd, name, pkg);
 
 	return 0;
 }

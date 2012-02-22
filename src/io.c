@@ -562,7 +562,7 @@ int apk_dir_foreach_file(int dirfd, apk_dir_file_cb cb, void *ctx)
 	while ((de = readdir(dir)) != NULL) {
 		if (de->d_name[0] == '.')
 			continue;
-		cb(ctx, de->d_name);
+		cb(ctx, dirfd, de->d_name);
 	}
 	closedir(dir);
 

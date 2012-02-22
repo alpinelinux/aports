@@ -210,7 +210,7 @@ int apk_cache_download(struct apk_database *db, const char *url, apk_blob_t *arc
 		       const char *item, const char *cache_item, int verify);
 
 typedef void (*apk_cache_item_cb)(struct apk_database *db,
-				  const char *filename,
+				  int dirfd, const char *name,
 				  struct apk_package *pkg);
 int apk_db_cache_foreach_item(struct apk_database *db, apk_cache_item_cb cb);
 

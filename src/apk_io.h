@@ -106,7 +106,7 @@ size_t apk_ostream_write_string(struct apk_ostream *ostream, const char *string)
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
 apk_blob_t apk_blob_from_file(int atfd, const char *file);
 
-typedef int apk_dir_file_cb(void *ctx, const char *entry);
+typedef int apk_dir_file_cb(void *ctx, int dirfd, const char *entry);
 
 #define APK_FI_NOFOLLOW		0x80000000
 
