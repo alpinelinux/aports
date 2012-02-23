@@ -245,7 +245,7 @@ static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir,
 	dir->refs--;
 	if (dir->refs > 0) {
 		if (allow_rmdir) {
-			dir->flags |= APK_DBDIRF_RECALC_MODE;
+			dir->recalc_mode = 1;
 			dir->mode = 0;
 			dir->uid = (uid_t) -1;
 			dir->gid = (gid_t) -1;
@@ -258,13 +258,13 @@ static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir,
 	if (allow_rmdir) {
 		/* The final instance of this directory was removed,
 		 * so this directory gets deleted in reality too. */
-		dir->flags &= ~APK_DBDIRF_RECALC_MODE;
+		dir->recalc_mode = 0;
 		dir->mode = 0;
 		dir->uid = (uid_t) -1;
 		dir->gid = (gid_t) -1;
 
 		unlinkat(db->root_fd, dir->name, AT_REMOVEDIR);
-	} else if (dir->flags & APK_DBDIRF_RECALC_MODE) {
+	} else if (dir->recalc_mode) {
 		/* Directory permissions need a reset. */
 		apk_db_dir_mkdir(db, dir);
 	}
@@ -285,12 +285,13 @@ struct apk_db_dir *apk_db_dir_query(struct apk_database *db,
 	return (struct apk_db_dir *) apk_hash_get(&db->installed.dirs, name);
 }
 
-static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
-					 apk_blob_t name)
+struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name)
 {
 	struct apk_db_dir *dir;
+	struct apk_protected_path_array *ppaths;
 	apk_blob_t bparent;
 	unsigned long hash = apk_hash_from_key(&db->installed.dirs, name);
+	char *relative_name;
 	int i;
 
 	if (name.len && name.ptr[name.len-1] == '/')
@@ -311,38 +312,54 @@ static struct apk_db_dir *apk_db_dir_get(struct apk_database *db,
 	dir->name[name.len] = 0;
 	dir->namelen = name.len;
 	dir->hash = hash;
+	apk_protected_path_array_init(&dir->protected_paths);
 	apk_hash_insert_hashed(&db->installed.dirs, dir, hash);
 
-	if (name.len == 0)
+	if (name.len == 0) {
 		dir->parent = NULL;
-	else if (apk_blob_rsplit(name, '/', &bparent, NULL))
+		dir->has_protected_children = 1;
+		ppaths = NULL;
+	} else if (apk_blob_rsplit(name, '/', &bparent, NULL)) {
 		dir->parent = apk_db_dir_get(db, bparent);
-	else
+		dir->protected = dir->parent->protected;
+		dir->has_protected_children = dir->protected;
+		dir->symlinks_only = dir->parent->symlinks_only;
+		ppaths = dir->parent->protected_paths;
+	} else {
 		dir->parent = apk_db_dir_get(db, APK_BLOB_NULL);
+		ppaths = db->protected_paths;
+	}
 
-	if (dir->parent != NULL)
-		dir->flags = dir->parent->flags;
+	if (ppaths == NULL)
+		return dir;
 
-	for (i = 0; i < db->protected_paths->num; i++) {
-		int flags = dir->flags, j;
+	relative_name = strrchr(dir->rooted_name, '/') + 1;
+	for (i = 0; i < ppaths->num; i++) {
+		struct apk_protected_path *ppath = &ppaths->item[i];
+		char *slash;
 
-		flags |= APK_DBDIRF_PROTECTED;
-		for (j = 0; ; j++) {
-			switch (db->protected_paths->item[i][j]) {
-			case '-':
-				flags &= ~(APK_DBDIRF_PROTECTED |
-					   APK_DBDIRF_SYMLINKS_ONLY);
-				continue;
-			case '*':
-				flags |= APK_DBDIRF_SYMLINKS_ONLY |
-					 APK_DBDIRF_PROTECTED;
+		slash = strchr(ppath->relative_pattern, '/');
+		if (slash != NULL) {
+			*slash = 0;
+			if (fnmatch(ppath->relative_pattern, relative_name, FNM_PATHNAME) != 0) {
+				*slash = '/';
 				continue;
 			}
-			break;
-		}
+			*slash = '/';
 
-		if (strcmp(&db->protected_paths->item[i][j], dir->name) == 0)
-			dir->flags = flags;
+			*apk_protected_path_array_add(&dir->protected_paths) = (struct apk_protected_path) {
+				.relative_pattern = slash + 1,
+				.protected = ppath->protected,
+				.symlinks_only = ppath->symlinks_only,
+			};
+			dir->has_protected_children |= ppath->protected;
+		} else {
+			if (fnmatch(ppath->relative_pattern, relative_name, FNM_PATHNAME) != 0)
+				continue;
+
+			dir->protected = ppath->protected;
+			dir->symlinks_only = ppath->symlinks_only;
+		}
 	}
 
 	return dir;
@@ -393,8 +410,8 @@ static void apk_db_diri_free(struct apk_database *db,
 			     struct apk_db_dir_instance *diri,
 			     int allow_rmdir)
 {
-	if ((allow_rmdir == APK_DISALLOW_RMDIR) &&
-	    (diri->dir->flags & APK_DBDIRF_RECALC_MODE))
+	if (allow_rmdir == APK_DISALLOW_RMDIR &&
+	    diri->dir->recalc_mode)
 		apk_db_dir_apply_diri_permissions(diri);
 
 	apk_db_dir_unref(db, diri->dir, allow_rmdir);
@@ -406,6 +423,9 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 				      apk_blob_t name)
 {
 	struct apk_db_file_hash_key key;
+
+	if (dir.len && dir.ptr[dir.len-1] == '/')
+		dir.len--;
 
 	key = (struct apk_db_file_hash_key) {
 		.dirname = dir,
@@ -1120,8 +1140,67 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
 static int add_protected_path(void *ctx, apk_blob_t blob)
 {
 	struct apk_database *db = (struct apk_database *) ctx;
+	int protected = 0, symlinks_only = 0;
 
-	*apk_string_array_add(&db->protected_paths) = apk_blob_cstr(blob);
+	/* skip empty lines and comments */
+	if (blob.len == 0)
+		return 0;
+
+	switch (blob.ptr[0]) {
+	case '#':
+		return 0;
+	case '-':
+		blob.ptr++;
+		blob.len--;
+		break;
+	case '@':
+		protected = 1;
+		symlinks_only = 1;
+		blob.ptr++;
+		blob.len--;
+		break;
+	case '+':
+		protected = 1;
+		blob.ptr++;
+		blob.len--;
+		break;
+	default:
+		protected = 1;
+		break;
+	}
+
+	*apk_protected_path_array_add(&db->protected_paths) = (struct apk_protected_path) {
+		.relative_pattern = apk_blob_cstr(blob),
+		.protected = protected,
+		.symlinks_only = symlinks_only,
+	};
+
+	return 0;
+}
+
+static int file_ends_with_dot_list(const char *file)
+{
+	const char *ext = strrchr(file, '.');
+	if (ext == NULL || strcmp(ext, ".list") != 0)
+		return FALSE;
+	return TRUE;
+}
+
+static int add_protected_paths_from_file(void *ctx, int dirfd, const char *file)
+{
+	struct apk_database *db = (struct apk_database *) ctx;
+	apk_blob_t blob;
+
+	if (!file_ends_with_dot_list(file))
+		return 0;
+
+	blob = apk_blob_from_file(dirfd, file);
+	if (APK_BLOB_IS_NULL(blob))
+		return 0;
+
+	apk_blob_for_each_segment(blob, "\n", add_protected_path, db);
+	free(blob.ptr);
+
 	return 0;
 }
 
@@ -1238,10 +1317,8 @@ static int add_repos_from_file(void *ctx, int dirfd, const char *file)
 	apk_blob_t blob;
 
 	if (dirfd != db->root_fd) {
-		/* if loading from repositories.d,
-		 * the name must end in .list */
-		const char *ext = strrchr(file, '.');
-		if (ext == NULL || strcmp(ext, ".list") != 0)
+		/* loading from repositories.d; check extension */
+		if (!file_ends_with_dot_list(file))
 			return 0;
 	}
 
@@ -1282,7 +1359,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	list_init(&db->installed.packages);
 	list_init(&db->installed.triggers);
 	apk_dependency_array_init(&db->world);
-	apk_string_array_init(&db->protected_paths);
+	apk_protected_path_array_init(&db->protected_paths);
 	db->permanent = 1;
 
 	/* Get first repository tag (the NULL tag) */
@@ -1348,8 +1425,11 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		}
 	}
 
-	blob = APK_BLOB_STR("etc:*etc/init.d");
-	apk_blob_for_each_segment(blob, ":", add_protected_path, db);
+	blob = APK_BLOB_STR("+etc\n" "@etc/init.d\n");
+	apk_blob_for_each_segment(blob, "\n", add_protected_path, db);
+
+	apk_dir_foreach_file(openat(db->root_fd, "etc/apk/protected_paths.d", O_RDONLY | O_CLOEXEC),
+			     add_protected_paths_from_file, db);
 
 	/* figure out where to have the cache */
 	fd = openat(db->root_fd, apk_linked_cache_dir, O_RDONLY | O_CLOEXEC);
@@ -1546,9 +1626,10 @@ void apk_db_close(struct apk_database *db)
 		free(db->repos[i].description.ptr);
 	}
 	for (i = 0; i < db->protected_paths->num; i++)
-		free(db->protected_paths->item[i]);
+		free(db->protected_paths->item[i].relative_pattern);
+	apk_protected_path_array_free(&db->protected_paths);
+
 	apk_dependency_array_free(&db->world);
-	apk_string_array_free(&db->protected_paths);
 
 	apk_hash_free(&db->available.packages);
 	apk_hash_free(&db->available.names);
@@ -1602,8 +1683,7 @@ static int fire_triggers(apk_hash_item item, void *ctx)
 	int i;
 
 	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
-		if ((!ipkg->run_all_triggers) &&
-		    ((dbd->flags & APK_DBDIRF_MODIFIED) == 0))
+		if (!ipkg->run_all_triggers && !dbd->modified)
 			continue;
 
 		for (i = 0; i < ipkg->triggers->num; i++) {
@@ -2243,7 +2323,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 
 	hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
 		if (exten == NULL)
-			diri->dir->flags |= APK_DBDIRF_MODIFIED;
+			diri->dir->modified = 1;
 
 		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
 			snprintf(name, sizeof(name), "%s/%s%s",
@@ -2254,7 +2334,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 				.filename = APK_BLOB_PTR_LEN(file->name, file->namelen),
 			};
 			hash = apk_blob_hash_seed(key.filename, diri->dir->hash);
-			if (!(diri->dir->flags & APK_DBDIRF_PROTECTED) ||
+			if ((!diri->dir->protected) ||
 			    (apk_flags & APK_PURGE) ||
 			    (file->csum.type != APK_CHECKSUM_NONE &&
 			     apk_file_get_info(db->root_fd, name, APK_FI_NOFOLLOW | file->csum.type, &fi) == 0 &&
@@ -2289,7 +2369,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 
 	hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
 		dir = diri->dir;
-		dir->flags |= APK_DBDIRF_MODIFIED;
+		dir->modified = 1;
 
 		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
 			snprintf(name, sizeof(name), "%s/%s",
@@ -2311,8 +2391,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 			/* We want to compare checksums only if one exists
 			 * in db, and the file is in a protected path */
 			cstype = APK_CHECKSUM_NONE;
-			if (ofile != NULL &&
-			    (diri->dir->flags & APK_DBDIRF_PROTECTED))
+			if (ofile != NULL && diri->dir->protected)
 				cstype = ofile->csum.type;
 			cstype |= APK_FI_NOFOLLOW;
 
@@ -2321,7 +2400,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 				/* File was from overlay, delete the
 				 * packages version */
 				unlinkat(db->root_fd, tmpname, 0);
-			} else if ((diri->dir->flags & APK_DBDIRF_PROTECTED) &&
+			} else if ((diri->dir->protected) &&
 				   (r == 0) &&
 				   (ofile == NULL ||
 				    ofile->csum.type == APK_CHECKSUM_NONE ||

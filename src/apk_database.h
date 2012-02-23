@@ -38,22 +38,32 @@ struct apk_db_file {
 	char name[];
 };
 
-#define APK_DBDIRF_PROTECTED		0x01
-#define APK_DBDIRF_SYMLINKS_ONLY	0x02
-#define APK_DBDIRF_MODIFIED		0x04
-#define APK_DBDIRF_RECALC_MODE		0x08
+struct apk_protected_path {
+	char *relative_pattern;
+	unsigned protected : 1;
+	unsigned symlinks_only : 1;
+};
+APK_ARRAY(apk_protected_path_array, struct apk_protected_path);
 
 struct apk_db_dir {
 	apk_hash_node hash_node;
 	unsigned long hash;
+
 	struct apk_db_dir *parent;
+	struct apk_protected_path_array *protected_paths;
 	mode_t mode;
 	uid_t uid;
 	gid_t gid;
 
 	unsigned short refs;
 	unsigned short namelen;
-	unsigned char flags;
+
+	unsigned protected : 1;
+	unsigned symlinks_only : 1;
+	unsigned has_protected_children : 1;
+	unsigned modified : 1;
+	unsigned recalc_mode : 1;
+
 	char rooted_name[1];
 	char name[];
 };
@@ -125,7 +135,7 @@ struct apk_database {
 	int compat_old_world : 1;
 
 	struct apk_dependency_array *world;
-	struct apk_string_array *protected_paths;
+	struct apk_protected_path_array *protected_paths;
 	struct apk_repository repos[APK_MAX_REPOS];
 	struct apk_repository_tag repo_tags[APK_MAX_TAGS];
 	struct apk_id_cache id_cache;
@@ -158,11 +168,10 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name);
 struct apk_name *apk_db_query_name(struct apk_database *db, apk_blob_t name);
 int apk_db_get_tag_id(struct apk_database *db, apk_blob_t tag);
 
-struct apk_db_dir *apk_db_dir_query(struct apk_database *db,
-				    apk_blob_t name);
+struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name);
+struct apk_db_dir *apk_db_dir_query(struct apk_database *db, apk_blob_t name);
 struct apk_db_file *apk_db_file_query(struct apk_database *db,
-				      apk_blob_t dir,
-				      apk_blob_t name);
+				      apk_blob_t dir, apk_blob_t name);
 
 #define APK_OPENF_READ			0x0001
 #define APK_OPENF_WRITE			0x0002

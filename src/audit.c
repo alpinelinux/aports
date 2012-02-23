@@ -17,28 +17,69 @@
 #include <sys/stat.h>
 #include "apk_applet.h"
 #include "apk_database.h"
+#include "apk_print.h"
+
+enum {
+	MODE_BACKUP = 0,
+	MODE_SYSTEM
+};
 
 struct audit_ctx {
-	unsigned int open_flags;
-	int check_permissions : 1;
-	int (*audit)(struct audit_ctx *actx, struct apk_database *db);
+	unsigned mode : 1;
+	unsigned recursive : 1;
+	unsigned check_permissions : 1;
+	unsigned packages_only : 1;
+};
+
+static int audit_parse(void *ctx, struct apk_db_options *dbopts,
+		       int optch, int optindex, const char *optarg)
+{
+	struct audit_ctx *actx = (struct audit_ctx *) ctx;
+
+	switch (optch) {
+	case 0x10000:
+		actx->mode = MODE_BACKUP;
+		break;
+	case 0x10001:
+		actx->mode = MODE_SYSTEM;
+		break;
+	case 0x10002:
+		actx->check_permissions = 1;
+		break;
+	case 0x10003:
+		actx->packages_only = 1;
+		break;
+	case 'r':
+		actx->recursive = 1;
+		break;
+	default:
+		return -1;
+	}
+	return 0;
+}
+
+struct audit_tree_ctx {
+	struct audit_ctx *actx;
+	struct apk_database *db;
+	size_t pathlen;
+	char path[PATH_MAX];
 };
 
 static int audit_file(struct audit_ctx *actx,
 		      struct apk_database *db,
 		      struct apk_db_file *dbf,
-		      const char *name)
+		      int dirfd, const char *name)
 {
 	struct apk_file_info fi;
 
 	if (dbf == NULL)
 		return 'A';
 
-	if (apk_file_get_info(db->root_fd, name, APK_FI_NOFOLLOW | dbf->csum.type, &fi) != 0)
-		return 0;
+	if (apk_file_get_info(dirfd, name, APK_FI_NOFOLLOW | dbf->csum.type, &fi) != 0)
+		return -EPERM;
 
 	if (dbf->csum.type != APK_CHECKSUM_NONE &&
-	    apk_checksum_compare(&fi.csum, &dbf->csum) == 0)
+	    apk_checksum_compare(&fi.csum, &dbf->csum) != 0)
 		return 'U';
 
 	if (S_ISLNK(fi.mode) && dbf->csum.type == APK_CHECKSUM_NONE)
@@ -74,160 +115,163 @@ static int audit_directory(struct audit_ctx *actx,
 	return 0;
 }
 
-struct audit_tree_ctx {
-	struct audit_ctx *actx;
-	struct apk_database *db;
-};
+static void report_audit(struct audit_ctx *actx,
+			 char reason, apk_blob_t bfull, struct apk_package *pkg)
+{
+	if (!reason)
+		return;
 
-static int audit_directory_tree(apk_hash_item item, void *ctx)
+	if (actx->packages_only) {
+		if (pkg == NULL || pkg->state_int != 0)
+			return;
+		pkg->state_int = 1;
+		if (apk_verbosity < 1)
+			printf("%s\n", pkg->name->name);
+		else
+			printf(PKG_VER_FMT "\n", PKG_VER_PRINTF(pkg));
+	} else if (apk_verbosity < 1) {
+		printf(BLOB_FMT "\n", BLOB_PRINTF(bfull));
+	} else
+		printf("%c " BLOB_FMT "\n", reason, BLOB_PRINTF(bfull));
+}
+
+static int audit_directory_tree_item(void *ctx, int dirfd, const char *name)
 {
 	struct audit_tree_ctx *atctx = (struct audit_tree_ctx *) ctx;
+	apk_blob_t bdir = APK_BLOB_PTR_LEN(atctx->path, atctx->pathlen);
+	apk_blob_t bent = APK_BLOB_STR(name);
+	apk_blob_t bfull;
 	struct audit_ctx *actx = atctx->actx;
 	struct apk_database *db = atctx->db;
-	struct apk_db_dir *dbd = (struct apk_db_dir *) item;
+	struct apk_db_dir *dbd;
 	struct apk_file_info fi;
-	struct dirent *de;
-	apk_blob_t bdir = APK_BLOB_PTR_LEN(dbd->name, dbd->namelen);
-	char tmp[PATH_MAX], reason;
-	DIR *dir;
+	int reason = 0;
 
-	if (!(dbd->flags & APK_DBDIRF_PROTECTED))
-		return 0;
+	if (bdir.len + bent.len + 1 >= sizeof(atctx->path))
+		return -ENOMEM;
 
-	dir = fdopendir(openat(db->root_fd, dbd->name, O_RDONLY | O_CLOEXEC));
-	if (dir == NULL)
-		return 0;
+	dbd = apk_db_dir_get(db, bdir);
+	if (dbd == NULL)
+		return -ENOMEM;
 
-	while ((de = readdir(dir)) != NULL) {
-		if (strcmp(de->d_name, ".") == 0 ||
-		    strcmp(de->d_name, "..") == 0)
-			continue;
+	if (apk_file_get_info(dirfd, name, APK_FI_NOFOLLOW, &fi) < 0)
+		return -EPERM;
 
-		snprintf(tmp, sizeof(tmp), "%s/%s", dbd->name, de->d_name);
+	memcpy(&atctx->path[atctx->pathlen], bent.ptr, bent.len);
+	atctx->pathlen += bent.len;
+	bfull = APK_BLOB_PTR_LEN(atctx->path, atctx->pathlen);
 
-		if (apk_file_get_info(db->root_fd, tmp, APK_FI_NOFOLLOW, &fi) < 0)
-			continue;
+	if (S_ISDIR(fi.mode)) {
+		struct apk_db_dir *child;
+		int recurse = TRUE;
 
-		if ((dbd->flags & APK_DBDIRF_SYMLINKS_ONLY) &&
-		    !S_ISLNK(fi.mode))
-			continue;
-
-		if (S_ISDIR(fi.mode)) {
-			struct apk_db_dir *dbd;
-			dbd = apk_db_dir_query(db, APK_BLOB_STR(tmp));
-			reason = audit_directory(actx, db, dbd, &fi);
+		child = apk_db_dir_query(db, bfull);
+		if (actx->mode == MODE_BACKUP) {
+			if (!dbd->has_protected_children)
+				recurse = FALSE;
+			if (!dbd->protected)
+				goto recurse_check;
 		} else {
-			struct apk_db_file *dbf;
-			dbf = apk_db_file_query(db, bdir, APK_BLOB_STR(de->d_name));
-			reason = audit_file(actx, db, dbf, tmp);
+			if (child == NULL)
+				recurse = FALSE;
 		}
 
-		if (reason) {
-			if (apk_verbosity < 1)
-				printf("%s\n", tmp);
-			else
-				printf("%c %s\n", reason, tmp);
+		reason = audit_directory(actx, db, child, &fi);
+		if (reason < 0)
+			goto done;
+		if (reason == 'D') {
+			if (actx->mode == MODE_SYSTEM)
+				goto done;
+			if (!actx->recursive)
+				recurse = FALSE;
 		}
-	}
-	closedir(dir);
 
-	return 0;
-}
-
-static int audit_backup(struct audit_ctx *actx, struct apk_database *db)
-{
-	struct audit_tree_ctx atctx = {
-		.actx = actx,
-		.db = db,
-	};
-	return apk_hash_foreach(&db->installed.dirs, audit_directory_tree, &atctx);
-}
-
-static int audit_system(struct audit_ctx *actx, struct apk_database *db)
-{
-	struct apk_installed_package *ipkg;
-	struct apk_package *pkg;
-	struct apk_db_dir_instance *diri;
-	struct apk_db_file *file;
-	struct hlist_node *dn, *fn;
-	char name[PATH_MAX];
-	int done;
-
-	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
-		pkg = ipkg->pkg;
-		hlist_for_each_entry(diri, dn, &ipkg->owned_dirs, pkg_dirs_list) {
-			if (diri->dir->flags & APK_DBDIRF_PROTECTED)
-				continue;
-
-			done = 0;
-			hlist_for_each_entry(file, fn, &diri->owned_files,
-					     diri_files_list) {
-
-				snprintf(name, sizeof(name), "%s/%s",
-					 diri->dir->name, file->name);
-
-				if (audit_file(actx, db, file, name) == 0)
-					continue;
-
-				if (apk_verbosity < 1) {
-					printf("%s\n", pkg->name->name);
-					done = 1;
-					break;
-				}
-
-				printf("M %s\n", name);
-			}
-			if (done)
-				break;
+recurse_check:
+		atctx->path[atctx->pathlen++] = '/';
+		bfull.len++;
+		report_audit(actx, reason, bfull, NULL);
+		if (recurse) {
+			reason = apk_dir_foreach_file(
+				openat(dirfd, name, O_RDONLY|O_CLOEXEC),
+				audit_directory_tree_item, atctx);
 		}
+		bfull.len--;
+		atctx->pathlen--;
+	} else {
+		struct apk_db_file *dbf;
+
+		if (actx->mode == MODE_BACKUP) {
+			if (!dbd->protected)
+				goto done;
+			if (dbd->symlinks_only && !S_ISLNK(fi.mode))
+				goto done;
+		} else {
+			if (dbd->protected)
+				goto done;
+		}
+
+		dbf = apk_db_file_query(db, bdir, bent);
+		reason = audit_file(actx, db, dbf, dirfd, name);
+		if (reason < 0)
+			goto done;
+		if (reason == 'A' && actx->mode == MODE_SYSTEM)
+			goto done;
+		report_audit(actx, reason, bfull, dbf ? dbf->diri->pkg : NULL);
 	}
 
-	return 0;
-}
-
-static int audit_parse(void *ctx, struct apk_db_options *dbopts,
-		       int optch, int optindex, const char *optarg)
-{
-	struct audit_ctx *actx = (struct audit_ctx *) ctx;
-
-	switch (optch) {
-	case 0x10000:
-		actx->audit = audit_backup;
-		break;
-	case 0x10001:
-		actx->audit = audit_system;
-		break;
-	case 0x10002:
-		actx->check_permissions = 1;
-		break;
-	default:
-		return -1;
-	}
-	return 0;
+done:
+	atctx->pathlen -= bent.len;
+	return reason < 0 ? reason : 0;
 }
 
 static int audit_main(void *ctx, struct apk_database *db, int argc, char **argv)
 {
-	struct audit_ctx *actx = (struct audit_ctx *) ctx;
+	struct audit_tree_ctx atctx;
+	int i, r = 0;
 
-	if (actx->audit == NULL)
-		return -EINVAL;
+	atctx.db = db;
+	atctx.actx = (struct audit_ctx *) ctx;
+	atctx.pathlen = 0;
+	atctx.path[0] = 0;
 
-	return actx->audit(actx, db);
+	if (argc == 0) {
+		r = apk_dir_foreach_file(dup(db->root_fd), audit_directory_tree_item, &atctx);
+	} else {
+		for (i = 0; i < argc; i++) {
+			if (argv[i][0] != '/') {
+				apk_warning("%s: relative path skipped.\n",
+					    argv[i]);
+				continue;
+			}
+			argv[i]++;
+			atctx.pathlen = strlen(argv[i]);
+			memcpy(atctx.path, argv[i], atctx.pathlen);
+			if (atctx.path[atctx.pathlen-1] != '/')
+				atctx.path[atctx.pathlen++] = '/';
+
+			r |= apk_dir_foreach_file(
+				openat(db->root_fd, argv[i], O_RDONLY|O_CLOEXEC),
+				audit_directory_tree_item, &atctx);
+		}
+	}
+	return r;
 }
 
 static struct apk_option audit_options[] = {
-	{ 0x10000, "backup",
-	  "List all modified configuration files that need to be backed up" },
-	{ 0x10001, "system", "Verify checksums of all installed files "
-		             "(-q to print only modfied packages)" },
+	{ 0x10000, "backup", "List all modified configuration files (in "
+			     "protected_paths.d) that need to be backed up" },
+	{ 0x10001, "system", "Verify checksums of all installed non-configuration files " },
 	{ 0x10002, "check-permissions", "Check file and directory uid/gid/mode too" },
+	{ 'r', "recursive",  "List individually all entries in new directories" },
+	{ 0x10003, "packages", "List only the changed packages (or names only with -q)" },
 };
 
 static struct apk_applet apk_audit = {
 	.name = "audit",
-	.help = "Audit the filesystem for changes compared to installed "
-		"database.",
+	.help = "Audit the directories (defaults to all) for changes "
+		"compared to installed database. Use -q to list only "
+		"package names instead of files.",
+	.arguments = "[directory to audit]...",
 	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_NO_REPOS,
 	.context_size = sizeof(struct audit_ctx),
 	.num_options = ARRAY_SIZE(audit_options),

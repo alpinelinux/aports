@@ -50,7 +50,7 @@ static int fix_parse(void *pctx, struct apk_db_options *dbopts,
 static int mark_recalculate(apk_hash_item item, void *ctx)
 {
 	struct apk_db_dir *dir = (struct apk_db_dir *) item;
-	dir->flags |= APK_DBDIRF_RECALC_MODE;
+	dir->recalc_mode = 1;
 	return 0;
 }
 
