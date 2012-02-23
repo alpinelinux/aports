@@ -1877,7 +1877,7 @@ static void print_dep_errors(struct apk_database *db, char *label, struct apk_de
 		struct apk_dependency *dep = &deps->item[i];
 		struct apk_package *pkg = (struct apk_package*) dep->name->state_ptr;
 
-		if (pkg != NULL && apk_dep_is_satisfied(dep, pkg))
+		if (apk_dep_is_satisfied(dep, pkg))
 			continue;
 
 		if (print_label) {
