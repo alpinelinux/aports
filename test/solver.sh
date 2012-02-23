@@ -1,26 +1,26 @@
 #!/bin/sh
 
-APK_TEST=../src/apk_test
+APK_TEST=../src/apk-test
 
 fail=0
+pass=0
 for test in *.test; do
-	bn=$(basename $test .test)
-	(
-		read options
-		read world
-		$APK_TEST $options "$world" &> $bn.got
-	) < $bn.test
-	if ! cmp $bn.expect $bn.got &> /dev/null; then
+	awk '/^@ARGS/{p=1;next} /^@/{p=0} p{print}' < $test | xargs $APK_TEST &> .$test.got
+
+	if ! awk '/^@EXPECT/{p=1;next} /^@/{p=0} p{print}' < $test | cmp .$test.got &> /dev/null; then
 		fail=$((fail+1))
 		echo "FAIL: $test"
-		diff -ru $bn.expect $bn.got
+		awk '/^@EXPECT/{p=1;next} /^@/{p=0} p{print}' < $test | diff -ru - .$test.got
 	else
-		echo "OK: $test"
+		pass=$((pass+1))
 	fi
 done
 
+total=$((fail+pass))
 if [ "$fail" != "0" ]; then
-	echo "FAIL: $fail failed test cases"
+	echo "FAIL: $fail of $total test cases failed"
+else
+	echo "OK: all $total solver test cases passed"
 fi
 
 exit $fail

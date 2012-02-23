@@ -27,16 +27,18 @@ libapk.so-objs		:= common.o database.o package.o archive.o \
 			   solver.o
 
 ifeq ($(TEST),y)
-progs-y			+= apk_test
-apk_test-objs		:= apk.o test.o $(libapk.so-objs)
+progs-y			+= apk-test
+apk-test-objs		:= apk-test.o $(filter-out apk.o, $(apk-objs))
 endif
 
 ifeq ($(SHARED_LIBAPK),)
 apk-objs		+= $(libapk.so-objs)
+apk-test-objs		+= $(libapk.so-objs)
 apk.so-objs		+= $(libapk.so-objs)
 else
 LIBAPK			:= YesPlease
 LIBS_apk		:= -lapk
+LIBS_apk-test		:= -lapk
 LIBS_apk.so		:= -L$(obj) -lapk
 endif
 
@@ -50,12 +52,13 @@ endif
 CFLAGS_ALL		+= -D_ATFILE_SOURCE
 CFLAGS_apk.o		:= -DAPK_VERSION=\"$(FULL_VERSION)\"
 CFLAGS_apk-static.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\" -DOPENSSL_NO_ENGINE
+CFLAGS_apk-test.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\" -DOPENSSL_NO_ENGINE -DTEST_MODE
 
 progs-$(STATIC)		+= apk.static
 apk.static-objs		:= $(filter-out apk.o,$(apk-objs)) apk-static.o
 LDFLAGS_apk.static	:= -static
 LDFLAGS_apk		+= -nopie -L$(obj)
-LDFLAGS_apk_test	+= -nopie -L$(obj)
+LDFLAGS_apk-test	+= -nopie -L$(obj)
 
 CFLAGS_ALL		+= $(shell $(PKG_CONFIG) --cflags $(PKGDEPS))
 LIBS			:= -Wl,--as-needed \

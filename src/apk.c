@@ -31,6 +31,7 @@
 #include "apk_applet.h"
 #include "apk_blob.h"
 #include "apk_print.h"
+#include "apk_io.h"
 
 char **apk_argv;
 
@@ -67,11 +68,19 @@ static struct apk_option generic_options[] = {
 	{ 0x111, "overlay-from-stdin", "Read list of overlay files from stdin" },
 	{ 0x112, "arch", 	"Use architecture with --root",
 				required_argument, "ARCH" },
+#ifdef TEST_MODE
+	{ 0x200, "test-repo",	"Repository", required_argument, "REPO" },
+	{ 0x201, "test-instdb",	"Installed db", required_argument, "INSTALLED" },
+	{ 0x202, "test-world",	"World", required_argument, "WORLD DEPS" },
+#endif
 };
 
 static int version(void)
 {
 	printf("apk-tools " APK_VERSION ", compiled for " APK_DEFAULT_ARCH ".\n");
+#ifdef TEST_MODE
+	printf("TEST MODE BUILD. NOT FOR PRODUCTION USE.\n");
+#endif
 	return 0;
 }
 
@@ -273,6 +282,14 @@ int main(int argc, char **argv)
 	struct apk_repository_list *repo = NULL;
 	struct apk_database db;
 	struct apk_db_options dbopts;
+#ifdef TEST_MODE
+	const char *test_installed_db = NULL;
+	const char *test_world = NULL;
+	struct apk_string_array *test_repos;
+	int i;
+
+	apk_string_array_init(&test_repos);
+#endif
 
 	apk_argv = malloc(sizeof(char*[argc+2]));
 	memcpy(apk_argv, argv, sizeof(char*[argc]));
@@ -383,6 +400,17 @@ int main(int argc, char **argv)
 		case 0x112:
 			dbopts.arch = optarg;
 			break;
+#ifdef TEST_MODE
+		case 0x200:
+			*apk_string_array_add(&test_repos) = (char*) optarg;
+			break;
+		case 0x201:
+			test_installed_db = optarg;
+			break;
+		case 0x202:
+			test_world = optarg;
+			break;
+#endif
 		default:
 			if (applet == NULL || applet->parse == NULL ||
 			    applet->parse(ctx, &dbopts, r,
@@ -407,12 +435,47 @@ int main(int argc, char **argv)
 		argv++;
 	}
 
+#ifdef TEST_MODE
+	dbopts.open_flags &= ~(APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE | APK_OPENF_CREATE);
+	dbopts.open_flags |= APK_OPENF_READ | APK_OPENF_NO_STATE | APK_OPENF_NO_REPOS;
+	apk_flags |= APK_SIMULATE;
+	apk_flags &= ~APK_INTERACTIVE;
+#endif
 	r = apk_db_open(&db, &dbopts);
 	if (r != 0) {
 		apk_error("Failed to open apk database: %s",
 			  apk_error_str(r));
 		goto err;
 	}
+
+#ifdef TEST_MODE
+	if (test_world != NULL) {
+		apk_blob_t b = APK_BLOB_STR(test_world);
+		apk_blob_pull_deps(&b, &db, &db.world);
+	}
+	if (test_installed_db != NULL) {
+		struct apk_bstream *bs = apk_bstream_from_file(AT_FDCWD, test_installed_db);
+		if (bs != NULL) {
+			apk_db_index_read(&db, bs, -1);
+			bs->close(bs, NULL);
+		}
+	}
+	for (i = 0; i < test_repos->num; i++) {
+		struct apk_bstream *bs;
+		char *fn = test_repos->item[i];
+		int repo_tag = 0;
+		if (fn[0] == '+') {
+			repo_tag = apk_db_get_tag_id(&db, APK_BLOB_STR("testing"));
+			fn++;
+		}
+		bs = apk_bstream_from_file(AT_FDCWD, fn);
+		if (bs != NULL) {
+			apk_db_index_read(&db, bs, i);
+			db.repo_tags[repo_tag].allowed_repos |= BIT(i);
+			bs->close(bs, NULL);
+		}
+	}
+#endif
 
 	r = applet->main(ctx, &db, argc, argv);
 	apk_db_close(&db);
