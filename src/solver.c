@@ -1763,7 +1763,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 {
 	struct progress prog;
 	struct apk_change *change;
-	int i, r = 0, size_diff = 0;
+	int i, r = 0, size_diff = 0, size_unit;
 
 	if (apk_db_check_world(db, world) != 0) {
 		apk_error("Not committing changes due to missing repository tags. Use --force to override.");
@@ -1784,6 +1784,11 @@ int apk_solver_commit_changeset(struct apk_database *db,
 			size_diff -= change->oldpkg->installed_size;
 	}
 	size_diff /= 1024;
+	size_unit = 'K';
+	if (abs(size_diff) > 10000) {
+		size_diff /= 1024;
+		size_unit = 'M';
+	}
 
 	if (apk_verbosity > 1 || (apk_flags & APK_INTERACTIVE)) {
 		r = dump_packages(changeset, cmp_remove,
@@ -1795,10 +1800,11 @@ int apk_solver_commit_changeset(struct apk_database *db,
 				      "The following NEW packages will be installed");
 			dump_packages(changeset, cmp_upgrade,
 				      "The following packages will be upgraded");
-			printf("After this operation, %d kB of %s\n", abs(size_diff),
-			       (size_diff < 0) ?
-			       "disk space will be freed." :
-			       "additional disk space will be used.");
+			printf("After this operation, %d %ciB of %s\n",
+				abs(size_diff), size_unit,
+				(size_diff < 0) ?
+				"disk space will be freed." :
+				"additional disk space will be used.");
 		}
 		if (apk_flags & APK_INTERACTIVE) {
 			printf("Do you want to continue [Y/n]? ");
