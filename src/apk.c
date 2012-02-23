@@ -255,8 +255,11 @@ static void on_sigwinch(int s)
 static void setup_terminal(void)
 {
 	setvbuf(stderr, NULL, _IOLBF, BUFSIZ);
-	if (isatty(STDOUT_FILENO) && isatty(STDERR_FILENO) && isatty(STDIN_FILENO))
+	if (isatty(STDOUT_FILENO) && isatty(STDERR_FILENO) && isatty(STDIN_FILENO)) {
 		apk_flags |= APK_PROGRESS;
+		if (access("/etc/apk/interactive", F_OK) == 0)
+			apk_flags |= APK_INTERACTIVE;
+	}
 	signal(SIGWINCH, on_sigwinch);
 }
 
