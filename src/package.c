@@ -355,7 +355,7 @@ void apk_blob_push_dep(apk_blob_t *to, struct apk_database *db, struct apk_depen
 		apk_blob_push_blob(to, *db->repo_tags[dep->repository_tag].name);
 	}
 	if (!APK_BLOB_IS_NULL(*dep->version)) {
-		apk_blob_push_blob(to, APK_BLOB_STR(apk_version_op_string(dep->result_mask)));
+		apk_blob_push_blob(to, APK_BLOB_STR(apk_version_op_string(result_mask)));
 		apk_blob_push_blob(to, *dep->version);
 	}
 }
