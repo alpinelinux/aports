@@ -486,6 +486,36 @@ err_fd:
 	return APK_BLOB_NULL;
 }
 
+int apk_blob_to_file(int atfd, const char *file, apk_blob_t b, unsigned int flags)
+{
+	int fd, r, len;
+
+	fd = openat(atfd, file, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+	if (fd < 0)
+		return -errno;
+
+	len = b.len;
+	r = write(fd, b.ptr, len);
+	if ((r == len) &&
+	    (flags & APK_BTF_ADD_EOL) && (b.len == 0 || b.ptr[b.len-1] != '\n')) {
+		len = 1;
+		r = write(fd, "\n", len);
+	}
+
+	if (r < 0)
+		r = -errno;
+	else if (r != len)
+		r = -ENOSPC;
+	else
+		r = 0;
+	close(fd);
+
+	if (r != 0)
+		unlinkat(atfd, file, 0);
+
+	return r;
+}
+
 int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 		      struct apk_file_info *fi)
 {

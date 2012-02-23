@@ -55,6 +55,7 @@ static const char * const apk_lock_file = "var/lock/apkdb";
 static const char * const apk_world_file = "etc/apk/world";
 static const char * const apk_world_file_tmp = "etc/apk/world.new";
 static const char * const apk_world_file_old = "var/lib/apk/world";
+static const char * const apk_arch_file = "etc/apk/arch";
 
 static const char * const apk_scripts_file = "lib/apk/db/scripts.tar";
 static const char * const apk_scripts_file_tmp = "lib/apk/db/scripts.tar.new";
@@ -1339,7 +1340,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	struct apk_bstream *bs;
 	struct statfs stfs;
 	apk_blob_t blob;
-	int r, fd;
+	int r, fd, write_arch = FALSE;
 
 	memset(db, 0, sizeof(*db));
 	if (apk_flags & APK_SIMULATE) {
@@ -1365,11 +1366,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	/* Get first repository tag (the NULL tag) */
 	apk_db_get_tag_id(db, APK_BLOB_NULL);
 
-	if (dbopts->root && dbopts->arch) {
-		db->arch = apk_blob_atomize(APK_BLOB_STR(dbopts->arch));
-	} else {
-		db->arch = apk_blob_atomize(APK_BLOB_STR(APK_DEFAULT_ARCH));
-	}
 	db->root = strdup(dbopts->root ?: "/");
 	db->root_fd = openat(AT_FDCWD, db->root, O_RDONLY | O_CLOEXEC);
 	if (db->root_fd < 0 && (dbopts->open_flags & APK_OPENF_CREATE)) {
@@ -1383,6 +1379,21 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	if (fstatfs(db->root_fd, &stfs) == 0 &&
 	    stfs.f_type == 0x01021994 /* TMPFS_MAGIC */)
 		db->permanent = 0;
+
+	if (dbopts->root && dbopts->arch) {
+		db->arch = apk_blob_atomize(APK_BLOB_STR(dbopts->arch));
+		write_arch = TRUE;
+	} else {
+		apk_blob_t arch;
+		arch = apk_blob_from_file(db->root_fd, apk_arch_file);
+		if (!APK_BLOB_IS_NULL(arch)) {
+			db->arch = apk_blob_atomize_dup(apk_blob_trim(arch));
+			free(arch.ptr);
+		} else {
+			db->arch = apk_blob_atomize(APK_BLOB_STR(APK_DEFAULT_ARCH));
+			write_arch = TRUE;
+		}
+	}
 
 	apk_id_cache_init(&db->id_cache, db->root_fd);
 
@@ -1423,6 +1434,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			} else
 				goto ret_errno;
 		}
+		if (write_arch)
+			apk_blob_to_file(db->root_fd, apk_arch_file, *db->arch, APK_BTF_ADD_EOL);
 	}
 
 	blob = APK_BLOB_STR("+etc\n" "@etc/init.d\n");
