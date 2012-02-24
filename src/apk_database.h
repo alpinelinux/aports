@@ -78,8 +78,8 @@ struct apk_db_dir_instance {
 	gid_t gid;
 };
 
-#define PROVIDER_FMT		"%s-"BLOB_FMT
-#define PROVIDER_PRINTF(p)	(p)->pkg->name->name, BLOB_PRINTF(*(p)->version)
+#define PROVIDER_FMT		"%s%s"BLOB_FMT
+#define PROVIDER_PRINTF(n,p)	(n)->name, (p)->version->len ? "-" : "", BLOB_PRINTF(*(p)->version)
 
 struct apk_provider {
 	struct apk_package *pkg;

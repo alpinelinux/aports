@@ -518,9 +518,15 @@ riif_done:
 	return;
 }
 
+static inline void add_provider(struct apk_name *name, struct apk_provider p)
+{
+	*apk_provider_array_add(&name->providers) = p;
+}
+
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_package *idb;
+	int i;
 
 	if (pkg->license == NULL)
 		pkg->license = apk_blob_atomize(APK_BLOB_NULL);
@@ -529,8 +535,11 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 	if (idb == NULL) {
 		idb = pkg;
 		apk_hash_insert(&db->available.packages, pkg);
-		*apk_provider_array_add(&pkg->name->providers) =
-			APK_PROVIDER_FROM_PACKAGE(pkg);
+		add_provider(pkg->name, APK_PROVIDER_FROM_PACKAGE(pkg));
+		for (i = 0; i < pkg->provides->num; i++) {
+			struct apk_dependency *dep = &pkg->provides->item[i];
+			add_provider(dep->name, APK_PROVIDER_FROM_PROVIDES(pkg, dep));
+		}
 		apk_db_pkg_rdepends(db, pkg);
 	} else {
 		idb->repos |= pkg->repos;

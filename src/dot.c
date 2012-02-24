@@ -49,6 +49,19 @@ static void start_graph(struct dot_ctx *ctx)
 		"  node [shape=box];\n");
 }
 
+static void dump_name(struct dot_ctx *ctx, struct apk_name *name)
+{
+	if (name->state_int)
+		return;
+	name->state_int = 1;
+
+	if (name->providers->num == 0) {
+		start_graph(ctx);
+		printf("  \"%s\" [style=dashed, color=red, fontcolor=red, shape=octagon];\n",
+			name->name);
+	}
+}
+
 static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 {
 	int i, j, r, ret = 0;
@@ -66,40 +79,33 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 		struct apk_dependency *dep = &pkg->depends->item[i];
 		struct apk_name *name = dep->name;
 
+		dump_name(ctx, name);
+
 		if (name->providers->num == 0) {
-			start_graph(ctx);
 			printf("  \"" PKG_VER_FMT "\" -> \"%s\" [color=red];\n",
-				PKG_VER_PRINTF(pkg),
-				name->name);
-			if (!name->state_int) {
-				printf("  \"%s\" [style=dashed, color=red, fontcolor=red, shape=octagon];\n",
-					name->name);
-				name->state_int = 1;
-			}
-		} else {
-			for (j = 0; j < name->providers->num; j++) {
-				struct apk_provider *p0 = &name->providers->item[j];
+				PKG_VER_PRINTF(pkg), name->name);
+			continue;
+		}
 
-				if (!apk_dep_is_provided(dep, p0))
-					continue;
+		for (j = 0; j < name->providers->num; j++) {
+			struct apk_provider *p0 = &name->providers->item[j];
 
-				r = dump_pkg(ctx, p0->pkg);
-				ret += r;
-				if (r || (!ctx->errors_only)) {
-					start_graph(ctx);
+			if (!apk_dep_is_provided(dep, p0))
+				continue;
 
-					if (p0->pkg->name != dep->name) {
-						/* provided package */
-						printf("  \"" PROVIDER_FMT "\" -> \"" PKG_VER_FMT "\"[arrowhead=inv,color=green];\n",
-							PROVIDER_PRINTF(p0),
-							PKG_VER_PRINTF(p0->pkg));
-					}
+			r = dump_pkg(ctx, p0->pkg);
+			ret += r;
+			if (r || (!ctx->errors_only)) {
+				start_graph(ctx);
 
-					printf("  \"" PKG_VER_FMT "\" -> \"" PROVIDER_FMT "\"%s;\n",
-						PKG_VER_PRINTF(pkg),
-						PROVIDER_PRINTF(p0),
-						r ? "[color=red]" : "");
-				}
+				printf("  \"" PKG_VER_FMT "\" -> \"" PKG_VER_FMT "\"[",
+					PKG_VER_PRINTF(pkg),
+					PKG_VER_PRINTF(p0->pkg));
+				if (r)
+					printf("color=red,");
+				if (p0->pkg->name != dep->name)
+					printf("arrowhead=inv,label=\"%s\",", dep->name->name);
+				printf("];\n");
 			}
 		}
 	}
