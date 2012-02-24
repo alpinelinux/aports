@@ -69,6 +69,7 @@ struct apk_package *apk_pkg_new(void)
 	if (pkg != NULL) {
 		apk_dependency_array_init(&pkg->depends);
 		apk_dependency_array_init(&pkg->install_if);
+		apk_dependency_array_init(&pkg->provides);
 	}
 
 	return pkg;
@@ -732,6 +733,9 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 	case 'I':
 		pkg->installed_size = apk_blob_pull_uint(&value, 10);
 		break;
+	case 'p':
+		apk_blob_pull_deps(&value, db, &pkg->provides);
+		break;
 	case 'i':
 		apk_blob_pull_deps(&value, db, &pkg->install_if);
 		break;
@@ -748,7 +752,7 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		pkg->commit = apk_blob_cstr(value);
 		break;
 	case 'F': case 'M': case 'R': case 'Z': case 'r': case 'q':
-	case 'a': case 'p': case 's':
+	case 'a': case 's':
 		/* installed db entries which are handled in database.c */
 		return 1;
 	default:
@@ -780,6 +784,7 @@ static int read_info_line(void *ctx, apk_blob_t line)
 		{ "arch",	'A' },
 		{ "depend",	'D' },
 		{ "install_if",	'i' },
+		{ "provides",	'p' },
 		{ "origin",	'o' },
 		{ "maintainer",	'm' },
 		{ "builddate",	't' },
@@ -1093,6 +1098,7 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	bbuf = apk_blob_pushed(APK_BLOB_BUF(buf), bbuf);
 	if (os->write(os, bbuf.ptr, bbuf.len) != bbuf.len ||
 	    write_depends(os, "D:", info->depends) ||
+	    write_depends(os, "p:", info->provides) ||
 	    write_depends(os, "i:", info->install_if))
 		return -1;
 
