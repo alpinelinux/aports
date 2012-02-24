@@ -776,6 +776,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			ipkg->replaces_priority = apk_blob_pull_uint(&l, 10);
 			break;
 		case 'p':
+		case 's':
 			ipkg->repository_tag = apk_db_get_tag_id(db, l);
 			break;
 		default:
@@ -825,7 +826,7 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 		}
 		if (ipkg->repository_tag) {
-			apk_blob_push_blob(&bbuf, APK_BLOB_STR("p:"));
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("s:"));
 			apk_blob_push_blob(&bbuf, *db->repo_tags[ipkg->repository_tag].name);
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 		}
