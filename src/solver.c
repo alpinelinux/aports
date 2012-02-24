@@ -356,7 +356,7 @@ static int get_topology_score(
 	};
 
 	if (ss->solver_flags & APK_SOLVERF_AVAILABLE) {
-		/* not upgrading: it is not preferred to change package */
+		/* available preferred */
 		if ((pkg->repos == 0) && ns->has_available_pkgs)
 			score.non_preferred_actions++;
 	} else if (ns->inherited_reinstall ||
@@ -364,6 +364,9 @@ static int get_topology_score(
 		/* reinstall requested, but not available */
 		if (!pkg_available(ss->db, pkg))
 			score.non_preferred_actions++;
+	} else if (ns->inherited_upgrade ||
+		   ((ns->solver_flags_local|ss->solver_flags) & APK_SOLVERF_UPGRADE)) {
+		/* upgrading - score is just locked here */
 	} else if ((ns->inherited_upgrade == 0) &&
 		   ((ns->solver_flags_local|ss->solver_flags) & APK_SOLVERF_UPGRADE) == 0 &&
 		   ((ns->solver_flags_maybe & APK_SOLVERF_UPGRADE) == 0 || (ps->locked))) {

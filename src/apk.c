@@ -462,13 +462,16 @@ int main(int argc, char **argv)
 	}
 	for (i = 0; i < test_repos->num; i++) {
 		struct apk_bstream *bs;
-		char *fn = test_repos->item[i];
+		apk_blob_t spec = APK_BLOB_STR(test_repos->item[i]), name, tag;
 		int repo_tag = 0;
-		if (fn[0] == '+') {
-			repo_tag = apk_db_get_tag_id(&db, APK_BLOB_STR("testing"));
-			fn++;
+
+		if (apk_blob_split(spec, APK_BLOB_STR(":"), &tag, &name)) {
+			repo_tag = apk_db_get_tag_id(&db, tag);
+		} else {
+			name = spec;
 		}
-		bs = apk_bstream_from_file(AT_FDCWD, fn);
+
+		bs = apk_bstream_from_file(AT_FDCWD, name.ptr);
 		if (bs != NULL) {
 			apk_db_index_read(&db, bs, i);
 			db.repo_tags[repo_tag].allowed_repos |= BIT(i);
