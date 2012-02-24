@@ -350,7 +350,7 @@ static int get_topology_score(
 	unsigned int repos;
 	unsigned short preferred_pinning, allowed_pinning;
 	unsigned int preferred_repos, allowed_repos;
-	int score_locked = TRUE;
+	int score_locked = TRUE, sticky_installed = FALSE;
 
 	score = (struct apk_score) {
 		.conflicts = ps->conflicts,
@@ -375,6 +375,8 @@ static int get_topology_score(
 		/* not upgrading: it is not preferred to change package */
 		if (pkg->ipkg == NULL && ns->originally_installed)
 			score.non_preferred_actions++;
+		else
+			sticky_installed = TRUE;
 	} else {
 		score_locked = FALSE;
 	}
@@ -389,16 +391,11 @@ static int get_topology_score(
 	if (ns->locked || (ns->allowed_pinning | ns->maybe_pinning) == ns->allowed_pinning) {
 		allowed_pinning = ns->allowed_pinning | preferred_pinning | APK_DEFAULT_PINNING_MASK;
 		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
-		if (!(repos & allowed_repos))
+		if (!(repos & allowed_repos)) {
+			if (sticky_installed)
+				score.non_preferred_actions++;
 			score.non_preferred_pinnings += 16;
-
-#if 0
-		if (allowed_pinning & ~APK_DEFAULT_PINNING_MASK)
-			fprintf(stdout, PKG_VER_FMT": allow: %x, in: %x, reallyin: %x. score="SCORE_FMT"\n",
-				PKG_VER_PRINTF(pkg),
-				allowed_repos, repos, pkg->repos,
-				SCORE_PRINTF(&score));
-#endif
+		}
 	} else {
 		score_locked = FALSE;
 	}
