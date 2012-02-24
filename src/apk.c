@@ -264,12 +264,19 @@ static void on_sigwinch(int s)
 static void setup_terminal(void)
 {
 	setvbuf(stderr, NULL, _IOLBF, BUFSIZ);
-	if (isatty(STDOUT_FILENO) && isatty(STDERR_FILENO) && isatty(STDIN_FILENO)) {
-		apk_flags |= APK_PROGRESS;
-		if (access("/etc/apk/interactive", F_OK) == 0)
-			apk_flags |= APK_INTERACTIVE;
-	}
 	signal(SIGWINCH, on_sigwinch);
+}
+
+static void setup_automatic_flags(void)
+{
+	if (!isatty(STDOUT_FILENO) || !isatty(STDERR_FILENO) ||
+	    !isatty(STDIN_FILENO))
+		return;
+
+	apk_flags |= APK_PROGRESS;
+	if (!(apk_flags & APK_SIMULATE) &&
+	    access("/etc/apk/interactive", F_OK) == 0)
+		apk_flags |= APK_INTERACTIVE;
 }
 
 int main(int argc, char **argv)
@@ -422,6 +429,7 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
+	setup_automatic_flags();
 
 	if (applet == NULL) {
 		r = usage(NULL);
