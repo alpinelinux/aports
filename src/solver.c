@@ -39,11 +39,13 @@ struct apk_score {
 		struct {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 			unsigned short preference;
+			unsigned short non_preferred_pinnings;
 			unsigned short non_preferred_actions;
-			unsigned int conflicts;
+			unsigned short conflicts;
 #elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-			unsigned int conflicts;
+			unsigned short conflicts;
 			unsigned short non_preferred_actions;
+			unsigned short non_preferred_pinnings;
 			unsigned short preference;
 #else
 #error Unknown endianess.
@@ -53,8 +55,8 @@ struct apk_score {
 	};
 };
 
-#define SCORE_FMT		"{%d/%d/%d}"
-#define SCORE_PRINTF(s)		(s)->conflicts, (s)->non_preferred_actions, (s)->preference
+#define SCORE_FMT		"{%d/%d/%d,%d}"
+#define SCORE_PRINTF(s)		(s)->conflicts, (s)->non_preferred_actions, (s)->non_preferred_pinnings, (s)->preference
 
 enum {
 	DECISION_ASSIGN = 0,
@@ -382,13 +384,21 @@ static int get_topology_score(
 	preferred_repos = get_pinning_mask_repos(ss->db, preferred_pinning);
 
 	if (!(repos & preferred_repos))
-		score.non_preferred_actions++;
+		score.non_preferred_pinnings++;
 
 	if (ns->locked || (ns->allowed_pinning | ns->maybe_pinning) == ns->allowed_pinning) {
 		allowed_pinning = ns->allowed_pinning | preferred_pinning | APK_DEFAULT_PINNING_MASK;
 		allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
 		if (!(repos & allowed_repos))
-			score.non_preferred_actions+=2;
+			score.non_preferred_pinnings += 16;
+
+#if 0
+		if (allowed_pinning & ~APK_DEFAULT_PINNING_MASK)
+			fprintf(stdout, PKG_VER_FMT": allow: %x, in: %x, reallyin: %x. score="SCORE_FMT"\n",
+				PKG_VER_PRINTF(pkg),
+				allowed_repos, repos, pkg->repos,
+				SCORE_PRINTF(&score));
+#endif
 	} else {
 		score_locked = FALSE;
 	}
