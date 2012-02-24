@@ -1,16 +1,21 @@
 #!/bin/sh
 
+get_block() {
+	awk '/^@'$1'/{p=1;next} /^@/{p=0} p{print}'
+}
+
 APK_TEST=../src/apk-test
+TEST_TO_RUN="$@"
 
 fail=0
 pass=0
-for test in *.test; do
-	awk '/^@ARGS/{p=1;next} /^@/{p=0} p{print}' < $test | xargs $APK_TEST &> .$test.got
+for test in ${TEST_TO_RUN:-*.test}; do
+	get_block ARGS < $test | xargs $APK_TEST &> .$test.got
 
-	if ! awk '/^@EXPECT/{p=1;next} /^@/{p=0} p{print}' < $test | cmp .$test.got &> /dev/null; then
+	if ! get_block EXPECT < $test | cmp .$test.got &> /dev/null; then
 		fail=$((fail+1))
 		echo "FAIL: $test"
-		awk '/^@EXPECT/{p=1;next} /^@/{p=0} p{print}' < $test | diff -ru - .$test.got
+		get_block EXPECT < $test | diff -ru - .$test.got
 	else
 		pass=$((pass+1))
 	fi
@@ -24,4 +29,3 @@ else
 fi
 
 exit $fail
-
