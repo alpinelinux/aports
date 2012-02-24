@@ -18,6 +18,7 @@
 
 struct apk_database;
 struct apk_name;
+struct apk_provider;
 
 #define APK_SCRIPT_INVALID		-1
 #define APK_SCRIPT_PRE_INSTALL		0
@@ -103,6 +104,9 @@ struct apk_package {
 };
 APK_ARRAY(apk_package_array, struct apk_package *);
 
+#define APK_PROVIDER_FROM_PACKAGE(pkg)	  (struct apk_provider){(pkg),(pkg)->version}
+#define APK_PROVIDER_FROM_PROVIDES(pkg,p) (struct apk_provider){(pkg),(p)->version}
+
 #define PKG_VER_FMT		"%s-" BLOB_FMT
 #define PKG_VER_PRINTF(pkg)	pkg->name->name, BLOB_PRINTF(*pkg->version)
 
@@ -121,7 +125,9 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t blob);
 
 void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		      struct apk_package *pkg);
-int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg);
+int apk_dep_is_materialized(struct apk_dependency *dep, struct apk_package *pkg);
+int apk_dep_is_materialized_or_provided(struct apk_dependency *dep, struct apk_package *pkg);
+int apk_dep_is_provided(struct apk_dependency *dep, struct apk_provider *p);
 
 void apk_blob_push_dep(apk_blob_t *to, struct apk_database *, struct apk_dependency *dep);
 void apk_blob_push_deps(apk_blob_t *to, struct apk_database *, struct apk_dependency_array *deps);
@@ -136,6 +142,8 @@ int apk_deps_add(struct apk_dependency_array **depends,
 void apk_deps_del(struct apk_dependency_array **deps,
 		  struct apk_name *name);
 int apk_script_type(const char *name);
+
+struct apk_package *apk_pkg_get_installed(struct apk_name *name);
 
 void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to);
 void apk_pkg_format_cache(struct apk_package *pkg, apk_blob_t to);

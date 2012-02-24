@@ -66,7 +66,7 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 		struct apk_dependency *dep = &pkg->depends->item[i];
 		struct apk_name *name = dep->name;
 
-		if (name->pkgs->num == 0) {
+		if (name->providers->num == 0) {
 			start_graph(ctx);
 			printf("  \"" PKG_VER_FMT "\" -> \"%s\" [color=red];\n",
 				PKG_VER_PRINTF(pkg),
@@ -77,19 +77,27 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 				name->state_int = 1;
 			}
 		} else {
-			for (j = 0; j < name->pkgs->num; j++) {
-				struct apk_package *pkg0 = name->pkgs->item[j];
+			for (j = 0; j < name->providers->num; j++) {
+				struct apk_provider *p0 = &name->providers->item[j];
 
-				if (!apk_dep_is_satisfied(dep, pkg0))
+				if (!apk_dep_is_provided(dep, p0))
 					continue;
 
-				r = dump_pkg(ctx, pkg0);
+				r = dump_pkg(ctx, p0->pkg);
 				ret += r;
 				if (r || (!ctx->errors_only)) {
 					start_graph(ctx);
-					printf("  \"" PKG_VER_FMT "\" -> \"" PKG_VER_FMT "\"%s;\n",
+
+					if (p0->pkg->name != dep->name) {
+						/* provided package */
+						printf("  \"" PROVIDER_FMT "\" -> \"" PKG_VER_FMT "\"[arrowhead=inv,color=green];\n",
+							PROVIDER_PRINTF(p0),
+							PKG_VER_PRINTF(p0->pkg));
+					}
+
+					printf("  \"" PKG_VER_FMT "\" -> \"" PROVIDER_FMT "\"%s;\n",
 						PKG_VER_PRINTF(pkg),
-						PKG_VER_PRINTF(pkg0),
+						PROVIDER_PRINTF(p0),
 						r ? "[color=red]" : "");
 				}
 			}
@@ -117,8 +125,8 @@ static int dot_main(void *pctx, struct apk_database *db, int argc, char **argv)
 			struct apk_name *name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 			if (!name)
 				continue;
-			for (j = 0; j < name->pkgs->num; j++)
-				dump_pkg(ctx, name->pkgs->item[j]);
+			for (j = 0; j < name->providers->num; j++)
+				dump_pkg(ctx, name->providers->item[j].pkg);
 		}
 	} else {
 		apk_hash_foreach(&db->available.packages, foreach_pkg, pctx);

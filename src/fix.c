@@ -59,7 +59,7 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
 	struct apk_name *name;
 	struct apk_package *pkg;
-	int r = 0, i, j;
+	int r = 0, i;
 
 	if (!ctx->solver_flags)
 		ctx->solver_flags = APK_SOLVERF_REINSTALL;
@@ -83,12 +83,7 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 			name = pkg->name;
 		} else {
 			name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
-			for (j = 0; j < name->pkgs->num; j++) {
-				if (name->pkgs->item[j]->ipkg != NULL) {
-					pkg = name->pkgs->item[j];
-					break;
-				}
-			}
+			pkg = apk_pkg_get_installed(name);
 		}
 		if (pkg == NULL || pkg->ipkg == NULL) {
 			apk_error("%s is not installed", name->name);

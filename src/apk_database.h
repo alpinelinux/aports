@@ -78,6 +78,15 @@ struct apk_db_dir_instance {
 	gid_t gid;
 };
 
+#define PROVIDER_FMT		"%s-"BLOB_FMT
+#define PROVIDER_PRINTF(p)	(p)->pkg->name->name, BLOB_PRINTF(*(p)->version)
+
+struct apk_provider {
+	struct apk_package *pkg;
+	apk_blob_t *version;
+};
+APK_ARRAY(apk_provider_array, struct apk_provider);
+
 struct apk_name {
 	apk_hash_node hash_node;
 	union {
@@ -85,7 +94,7 @@ struct apk_name {
 		void *state_ptr;
 	};
 	char *name;
-	struct apk_package_array *pkgs;
+	struct apk_provider_array *providers;
 	struct apk_name_array *rdepends;
 	struct apk_name_array *rinstall_if;
 };

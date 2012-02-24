@@ -15,6 +15,11 @@
 #include "apk_print.h"
 #include "apk_solver.h"
 
+enum {
+	INSTALLED_PACKAGES,
+	MARKED_PACKAGES,
+};
+
 struct del_ctx {
 	int recursive_delete : 1;
 	struct apk_dependency_array *world;
@@ -35,7 +40,7 @@ static int del_parse(void *pctx, struct apk_db_options *db,
 	return 0;
 }
 
-static void foreach_installed_reverse_dependency(
+static void foreach_package_reverse_dependency(
 	struct apk_package *pkg,
 	void (*cb)(struct apk_package *rdepend, void *ctx), void *ctx)
 {
@@ -46,19 +51,18 @@ static void foreach_installed_reverse_dependency(
 		return;
 
 	name = pkg->name;
-	for (i = 0; i < pkg->name->rdepends->num; i++) {
-		struct apk_name *name0 = pkg->name->rdepends->item[i];
+	for (i = 0; i < name->rdepends->num; i++) {
+		struct apk_name *name0 = name->rdepends->item[i];
 
-		for (j = 0; j < name0->pkgs->num; j++) {
-			struct apk_package *pkg0 = name0->pkgs->item[j];
+		for (j = 0; j < name0->providers->num; j++) {
+			struct apk_package *pkg0 = name0->providers->item[j].pkg;
 
 			if (pkg0->ipkg == NULL)
 				continue;
 
 			for (k = 0; k < pkg0->depends->num; k++) {
 				struct apk_dependency *dep = &pkg0->depends->item[k];
-				if (dep->name == name &&
-				    apk_dep_is_satisfied(dep, pkg))
+				if (apk_dep_is_materialized_or_provided(dep, pkg))
 					break;
 			}
 			if (k >= pkg0->depends->num)
@@ -66,6 +70,24 @@ static void foreach_installed_reverse_dependency(
 
 			cb(pkg0, ctx);
 		}
+	}
+}
+
+static void foreach_reverse_dependency(
+	struct apk_name *name, int mode,
+	void (*cb)(struct apk_package *rdepend, void *ctx), void *ctx)
+{
+	int i;
+
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_package *pkg0 = name->providers->item[i].pkg;
+
+		if (mode == INSTALLED_PACKAGES && pkg0->ipkg == NULL)
+			continue;
+		else if (mode == MARKED_PACKAGES && pkg0->state_int == 0)
+			continue;
+
+		foreach_package_reverse_dependency(pkg0, cb, ctx);
 	}
 }
 
@@ -82,7 +104,6 @@ static void print_not_deleted_message(struct apk_package *pkg,
 
 	if (pkg == NULL)
 		return;
-
 	if (pkg->state_ptr == ctx->pkg)
 		return;
 	pkg->state_ptr = ctx->pkg;
@@ -97,19 +118,7 @@ static void print_not_deleted_message(struct apk_package *pkg,
 	}
 
 	apk_print_indented(&ctx->indent, APK_BLOB_STR(pkg->name->name));
-	foreach_installed_reverse_dependency(pkg, print_not_deleted_message, pctx);
-}
-
-static struct apk_package *name_to_pkg(struct apk_name *name)
-{
-	int i;
-
-	for (i = 0; i < name->pkgs->num; i++) {
-		if (name->pkgs->item[i]->ipkg != NULL)
-			return name->pkgs->item[i];
-	}
-
-	return NULL;
+	foreach_package_reverse_dependency(pkg, print_not_deleted_message, pctx);
 }
 
 static void delete_from_world(struct apk_package *pkg, void *pctx)
@@ -117,7 +126,7 @@ static void delete_from_world(struct apk_package *pkg, void *pctx)
 	struct del_ctx *ctx = (struct del_ctx *) pctx;
 
 	apk_deps_del(&ctx->world, pkg->name);
-	foreach_installed_reverse_dependency(pkg, delete_from_world, pctx);
+	foreach_package_reverse_dependency(pkg, delete_from_world, pctx);
 }
 
 static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
@@ -136,9 +145,9 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 		name[i] = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 		apk_deps_del(&ctx->world, name[i]);
 		if (ctx->recursive_delete)
-			foreach_installed_reverse_dependency(
-					name_to_pkg(name[i]),
-					delete_from_world, ctx);
+			foreach_reverse_dependency(
+				name[i], INSTALLED_PACKAGES,
+				delete_from_world, ctx);
 	}
 
 	r = apk_solver_solve(db, 0, ctx->world, &solution, &changeset);
@@ -147,14 +156,14 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 		for (i = 0; i < solution->num; i++) {
 			struct apk_package *pkg = solution->item[i].pkg;
 			pkg->name->state_ptr = pkg;
-			pkg->state_int = 0;
+			pkg->state_int = 1;
 		}
 		for (i = 0; i < argc; i++) {
 			ndctx.pkg = name[i]->state_ptr;
 			ndctx.indent.indent = 0;
-			foreach_installed_reverse_dependency(
-					name[i]->state_ptr,
-					print_not_deleted_message, &ndctx);
+			foreach_reverse_dependency(
+				name[i], MARKED_PACKAGES,
+				print_not_deleted_message, &ndctx);
 			if (ndctx.indent.indent)
 				printf("\n");
 		}

@@ -93,10 +93,12 @@ struct apk_package_state {
 	unsigned locked : 1;
 };
 
+#define CHOSEN_NONE	(struct apk_provider) { .pkg = NULL, .version = NULL }
+
 struct apk_name_state {
 	struct list_head unsolved_list;
 	struct apk_name *name;
-	struct apk_package *chosen;
+	struct apk_provider chosen;
 
 	struct apk_score minimum_penalty;
 	unsigned short requirers;
@@ -244,8 +246,8 @@ static struct apk_name_state *name_to_ns_alloc(struct apk_name *name)
 	if (name->state_ptr == NULL) {
 		ns = calloc(1, sizeof(struct apk_name_state));
 		ns->name = name;
-		for (i = 0; i < name->pkgs->num; i++) {
-			if (name->pkgs->item[i]->repos != 0) {
+		for (i = 0; i < name->providers->num; i++) {
+			if (name->providers->item[i].pkg->repos != 0) {
 				ns->has_available_pkgs = 1;
 				break;
 			}
@@ -282,14 +284,14 @@ static void foreach_dependency_pkg(
 		struct apk_dependency *dep = &depends->item[i];
 		struct apk_name *name0 = dep->name;
 
-		for (j = 0; j < name0->pkgs->num; j++) {
-			struct apk_package *pkg0 = name0->pkgs->item[j];
+		for (j = 0; j < name0->providers->num; j++) {
+			struct apk_provider *p0 = &name0->providers->item[j];
 
 			/* conflict depends on all to be not installed */
-			if (!apk_dep_is_satisfied(dep, pkg0))
+			if (!apk_dep_is_provided(dep, p0))
 				continue;
 
-			cb(ss, pkg0);
+			cb(ss, p0->pkg);
 		}
 	}
 }
@@ -307,20 +309,21 @@ static void foreach_rinstall_if_pkg(
 		dbg_printf(PKG_VER_FMT ": rinstall_if %s\n",
 			   PKG_VER_PRINTF(pkg), name0->name);
 
-		for (j = 0; j < name0->pkgs->num; j++) {
-			struct apk_package *pkg0 = name0->pkgs->item[j];
+		for (j = 0; j < name0->providers->num; j++) {
+			struct apk_provider *p0 = &name0->providers->item[j];
 
-			for (k = 0; k < pkg0->install_if->num; k++) {
-				struct apk_dependency *dep = &pkg0->install_if->item[k];
+			for (k = 0; k < p0->pkg->install_if->num; k++) {
+				struct apk_dependency *dep = &p0->pkg->install_if->item[k];
+
 				if (dep->name == name &&
-				    apk_dep_is_satisfied(dep, pkg))
+				    apk_dep_is_provided(dep, p0))
 					break;
 			}
-			if (k >= pkg0->install_if->num)
+			if (k >= p0->pkg->install_if->num)
 				continue;
 
 			/* pkg depends (via install_if) on pkg0 */
-			cb(ss, pkg0);
+			cb(ss, p0->pkg);
 		}
 	}
 }
@@ -413,8 +416,8 @@ static int is_topology_optimum(struct apk_solver_state *ss,
 	int i;
 
 	get_topology_score(ss, ns, pkg, &score);
-	for (i = 0; i < name->pkgs->num; i++) {
-		struct apk_package *pkg0 = name->pkgs->item[i];
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_package *pkg0 = name->providers->item[i].pkg;
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 		struct apk_score score0;
 
@@ -434,9 +437,12 @@ static int is_topology_optimum(struct apk_solver_state *ss,
 }
 
 static int compare_absolute_package_preference(
-		struct apk_package *pkgA,
-		struct apk_package *pkgB)
+		struct apk_provider *pA,
+		struct apk_provider *pB)
 {
+	struct apk_package *pkgA = pA->pkg;
+	struct apk_package *pkgB = pB->pkg;
+
 	/* specified on command line directly */
 	if (pkgA->filename && !pkgB->filename)
 		return 1;
@@ -445,7 +451,7 @@ static int compare_absolute_package_preference(
 
 	/* upgrading, or neither of the package is installed, so
 	 * we just fall back comparing to versions */
-	switch (apk_pkg_version_compare(pkgA, pkgB)) {
+	switch (apk_version_compare_blob(*pA->version, *pB->version)) {
 	case APK_VERSION_GREATER:
 		return 1;
 	case APK_VERSION_LESS:
@@ -466,15 +472,17 @@ static void calculate_pkg_preference(struct apk_package *pkg)
 {
 	struct apk_name *name = pkg->name;
 	struct apk_package_state *ps = pkg_to_ps(pkg);
+	struct apk_provider p = APK_PROVIDER_FROM_PACKAGE(pkg);
 	int i;
 
-	for (i = 0; i < name->pkgs->num; i++) {
-		struct apk_package *pkg0 = name->pkgs->item[i];
-		if (pkg == pkg0)
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_provider *p0 = &name->providers->item[i];
+		if (pkg == p0->pkg)
 			continue;
-		if (compare_absolute_package_preference(pkg, pkg0) < 0)
+		if (compare_absolute_package_preference(&p, p0) < 0)
 			ps->preference++;
 	}
+	/* FIXME: consider all provided names too */
 }
 
 static void count_name(struct apk_solver_state *ss, struct apk_name_state *ns)
@@ -552,8 +560,8 @@ static void recalculate_maybe(struct apk_solver_state *ss, struct apk_name *name
 	if (!propagate)
 		return;
 
-	for (i = 0; i < name->pkgs->num; i++) {
-		struct apk_package *pkg = name->pkgs->item[i];
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_package *pkg = name->providers->item[i].pkg;
 
 		for (j = 0; j < pkg->depends->num; j++) {
 			struct apk_dependency *dep = &pkg->depends->item[j];
@@ -573,8 +581,8 @@ static void sort_name(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_name_state *ns = name_to_ns_alloc(name);
 	int i;
 
-	for (i = 0; i < name->pkgs->num; i++)
-		sort_soft_dependencies(ss, name->pkgs->item[i]);
+	for (i = 0; i < name->providers->num; i++)
+		sort_soft_dependencies(ss, name->providers->item[i].pkg);
 
 	count_name(ss, ns);
 	recalculate_maybe(ss, name,
@@ -602,7 +610,8 @@ static int install_if_missing(struct apk_solver_state *ss, struct apk_package *p
 
 		/* ns can be NULL, if the install_if has a name with
 		 * no packages */
-		if (ns == NULL || !ns->locked || !apk_dep_is_satisfied(dep, ns->chosen))
+		if (ns == NULL || !ns->locked ||
+		    !apk_dep_is_provided(dep, &ns->chosen))
 			missing++;
 	}
 
@@ -615,7 +624,7 @@ static void get_unassigned_score(struct apk_name *name, struct apk_score *score)
 
 	*score = (struct apk_score){
 		.conflicts = ns->requirers,
-		.preference = name->pkgs->num,
+		.preference = name->providers->num,
 	};
 }
 
@@ -645,7 +654,7 @@ static void demote_name(struct apk_solver_state *ss, struct apk_name *name)
 	/* remove cached information */
 	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
 	ns->minimum_penalty = (struct apk_score) { .score = 0 };
-	ns->chosen = NULL;
+	ns->chosen = CHOSEN_NONE;
 
 	/* and remove list, or request refresh */
 	if (ns->requirers == 0 && ns->install_ifs == 0) {
@@ -791,7 +800,7 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 			}
 
 			ss->assigned_names++;
-			ns->chosen = pkg;
+			ns->chosen = APK_PROVIDER_FROM_PACKAGE(pkg);
 
 			list_del(&ns->unsolved_list);
 			list_init(&ns->unsolved_list);
@@ -811,7 +820,7 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 			get_unassigned_score(name, &score);
 			addscore(&ss->score, &score);
 
-			ns->chosen = NULL;
+			ns->chosen = CHOSEN_NONE;
 			ns->locked = 1;
 			list_del(&ns->unsolved_list);
 			list_init(&ns->unsolved_list);
@@ -880,7 +889,7 @@ static void undo_decision(struct apk_solver_state *ss,
 	}
 
 	ns->locked = 0;
-	ns->chosen = NULL;
+	ns->chosen = CHOSEN_NONE;
 
 	/* Put back the name to unsolved list */
 	promote_name(ss, name);
@@ -974,17 +983,17 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	}
 
 	if (ns->locked) {
-		if (ns->chosen)
+		if (ns->chosen.pkg)
 			dbg_printf("%s: locked to " PKG_VER_FMT " already\n",
-				   name->name, PKG_VER_PRINTF(ns->chosen));
+				   name->name, PKG_VER_PRINTF(ns->chosen.pkg));
 		else
 			dbg_printf("%s: locked to empty\n",
 				   name->name);
-		if (!apk_dep_is_satisfied(dep, ns->chosen))
+		if (!apk_dep_is_provided(dep, &ns->chosen))
 			ss->score.conflicts += strength;
 		return;
 	}
-	if (name->pkgs->num == 0) {
+	if (name->providers->num == 0) {
 		if (!dep->optional)
 			ss->score.conflicts += strength;
 		return;
@@ -1007,15 +1016,16 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		ns->last_touched_decision = ss->num_decisions;
 	}
 
-	for (i = 0; i < name->pkgs->num; i++) {
-		struct apk_package *pkg0 = name->pkgs->item[i];
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_provider *p0 = &name->providers->item[i];
+		struct apk_package *pkg0 = p0->pkg;
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
 		if (ps0 == NULL || ps0->locked ||
 		    ss->topology_position < pkg0->topology_hard)
 			continue;
 
-		if (!apk_dep_is_satisfied(dep, pkg0)) {
+		if (!apk_dep_is_provided(dep, p0)) {
 			ps0->conflicts++;
 			dbg_printf(PKG_VER_FMT ": conflicts++ -> %d\n",
 				   PKG_VER_PRINTF(pkg0),
@@ -1044,18 +1054,18 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	}
 
 	if (ns->locked) {
-		if (ns->chosen != NULL) {
+		if (ns->chosen.pkg != NULL) {
 			dbg_printf(PKG_VER_FMT " selected already for %s\n",
-				   PKG_VER_PRINTF(ns->chosen), name->name);
+				   PKG_VER_PRINTF(ns->chosen.pkg), name->name);
 		} else {
 			dbg_printf("%s selected to not be satisfied\n",
 				   name->name);
 		}
-		if (!apk_dep_is_satisfied(dep, ns->chosen))
+		if (!apk_dep_is_provided(dep, &ns->chosen))
 			ss->score.conflicts -= strength;
 		return;
 	}
-	if (name->pkgs->num == 0) {
+	if (name->providers->num == 0) {
 		if (!dep->optional)
 			ss->score.conflicts -= strength;
 		return;
@@ -1074,15 +1084,16 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 			ns->last_touched_decision = ss->num_decisions;
 	}
 
-	for (i = 0; i < name->pkgs->num; i++) {
-		struct apk_package *pkg0 = name->pkgs->item[i];
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_provider *p0 = &name->providers->item[i];
+		struct apk_package *pkg0 = p0->pkg;
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 
 		if (ps0 == NULL || ps0->locked ||
 		    ss->topology_position < pkg0->topology_hard)
 			continue;
 
-		if (!apk_dep_is_satisfied(dep, pkg0)) {
+		if (!apk_dep_is_provided(dep, p0)) {
 			ps0->conflicts--;
 			dbg_printf(PKG_VER_FMT ": conflicts-- -> %d\n",
 				   PKG_VER_PRINTF(pkg0),
@@ -1100,7 +1111,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name_state *ns = name_to_ns(name);
 	struct apk_score minscore, score;
-	struct apk_package *next_pkg = NULL;
+	struct apk_provider *next_p = NULL;
 	unsigned int next_topology = 0, options = 0;
 	int i, score_locked = FALSE;
 
@@ -1124,8 +1135,9 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		minscore.score = -1;
 	}
 
-	for (i = 0; i < name->pkgs->num; i++) {
-		struct apk_package *pkg0 = name->pkgs->item[i];
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_provider *p0 = &name->providers->item[i];
+		struct apk_package *pkg0 = p0->pkg;
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 		struct apk_score pkg0_score;
 
@@ -1147,9 +1159,9 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		/* next in topology order - next to get locked in */
 		if (ps0->topology_soft < ss->topology_position &&
 		    ps0->topology_soft > next_topology)
-			next_pkg = pkg0, next_topology = ps0->topology_soft;
+			next_p = p0, next_topology = ps0->topology_soft;
 		else if (pkg0->topology_hard > next_topology)
-			next_pkg = pkg0, next_topology = pkg0->topology_hard;
+			next_p = p0, next_topology = pkg0->topology_hard;
 
 		options++;
 	}
@@ -1164,15 +1176,15 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	} else if (options == 1 && score_locked && ns->none_excluded) {
 		dbg_printf("reconsider_name: %s: only one choice left with known score, locking.\n",
 			name->name);
-		return push_decision(ss, name, next_pkg, DECISION_ASSIGN, BRANCH_NO, FALSE);
+		return push_decision(ss, name, next_p->pkg, DECISION_ASSIGN, BRANCH_NO, FALSE);
 	}
 
-	ns->chosen = next_pkg;
+	ns->chosen = *next_p;
 	ns->minimum_penalty = minscore;
 	addscore(&ss->minimum_penalty, &ns->minimum_penalty);
 
 	dbg_printf("reconsider_name: %s: min penalty " SCORE_FMT ", next_pkg=%p\n",
-		name->name, SCORE_PRINTF(&minscore), next_pkg);
+		name->name, SCORE_PRINTF(&minscore), next_p->pkg);
 
 	return SOLVERR_SOLUTION;
 }
@@ -1197,11 +1209,11 @@ static int expand_branch(struct apk_solver_state *ss)
 				return r;
 			ns->name_touched = 0;
 		}
-		if (pkg_to_ps(ns->chosen)->topology_soft < ss->topology_position &&
-		    pkg_to_ps(ns->chosen)->topology_soft > topology0)
-			pkg0 = ns->chosen, topology0 = pkg_to_ps(pkg0)->topology_soft;
-		else if (ns->chosen->topology_hard > topology0)
-			pkg0 = ns->chosen, topology0 = pkg0->topology_hard;
+		if (pkg_to_ps(ns->chosen.pkg)->topology_soft < ss->topology_position &&
+		    pkg_to_ps(ns->chosen.pkg)->topology_soft > topology0)
+			pkg0 = ns->chosen.pkg, topology0 = pkg_to_ps(pkg0)->topology_soft;
+		else if (ns->chosen.pkg->topology_hard > topology0)
+			pkg0 = ns->chosen.pkg, topology0 = pkg0->topology_hard;
 	}
 	if (pkg0 == NULL) {
 		dbg_printf("expand_branch: solution with score "SCORE_FMT"\n",
@@ -1355,15 +1367,15 @@ static int generate_changeset(struct apk_database *db,
 {
 	struct apk_name *name;
 	struct apk_name_state *ns;
-	struct apk_package *pkg, *pkg0;
+	struct apk_package *pkg;
 	struct apk_installed_package *ipkg;
-	int i, j, num_installs = 0, num_removed = 0, ci = 0;
+	int i, num_installs = 0, num_removed = 0, ci = 0;
 
 	/* calculate change set size */
 	for (i = 0; i < solution->num; i++) {
 		pkg = solution->item[i].pkg;
 		ns = name_to_ns(pkg->name);
-		ns->chosen = pkg;
+		ns->chosen = APK_PROVIDER_FROM_PACKAGE(pkg);
 		ns->in_changeset = 1;
 		if ((pkg->ipkg == NULL) ||
 		    solution->item[i].reinstall ||
@@ -1373,7 +1385,7 @@ static int generate_changeset(struct apk_database *db,
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		name = ipkg->pkg->name;
 		ns = name_to_ns(name);
-		if ((ns->chosen == NULL) || !ns->in_changeset)
+		if ((ns->chosen.pkg == NULL) || !ns->in_changeset)
 			num_removed++;
 	}
 
@@ -1382,7 +1394,7 @@ static int generate_changeset(struct apk_database *db,
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		name = ipkg->pkg->name;
 		ns = name_to_ns(name);
-		if ((ns->chosen == NULL) || !ns->in_changeset) {
+		if ((ns->chosen.pkg == NULL) || !ns->in_changeset) {
 			changeset->changes->item[ci].oldpkg = ipkg->pkg;
 			ci++;
 		}
@@ -1395,13 +1407,7 @@ static int generate_changeset(struct apk_database *db,
 		if ((pkg->ipkg == NULL) ||
 		    solution->item[i].reinstall ||
 		    solution->item[i].repository_tag != pkg->ipkg->repository_tag){
-			for (j = 0; j < name->pkgs->num; j++) {
-				pkg0 = name->pkgs->item[j];
-				if (pkg0->ipkg == NULL)
-					continue;
-				changeset->changes->item[ci].oldpkg = pkg0;
-				break;
-			}
+			changeset->changes->item[ci].oldpkg = apk_pkg_get_installed(name);
 			changeset->changes->item[ci].newpkg = pkg;
 			changeset->changes->item[ci].repository_tag = solution->item[i].repository_tag;
 			changeset->changes->item[ci].reinstall = solution->item[i].reinstall;
@@ -1887,7 +1893,7 @@ static void print_dep_errors(struct apk_database *db, char *label, struct apk_de
 		struct apk_dependency *dep = &deps->item[i];
 		struct apk_package *pkg = (struct apk_package*) dep->name->state_ptr;
 
-		if (apk_dep_is_satisfied(dep, pkg))
+		if (apk_dep_is_materialized_or_provided(dep, pkg))
 			continue;
 
 		if (print_label) {

@@ -99,7 +99,7 @@ static apk_blob_t pkg_name_get_key(apk_hash_item item)
 static void pkg_name_free(struct apk_name *name)
 {
 	free(name->name);
-	apk_package_array_free(&name->pkgs);
+	apk_provider_array_free(&name->providers);
 	apk_name_array_free(&name->rdepends);
 	apk_name_array_free(&name->rinstall_if);
 	free(name);
@@ -211,7 +211,7 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 		return NULL;
 
 	pn->name = apk_blob_cstr(name);
-	apk_package_array_init(&pn->pkgs);
+	apk_provider_array_init(&pn->providers);
 	apk_name_array_init(&pn->rdepends);
 	apk_name_array_init(&pn->rinstall_if);
 	apk_hash_insert_hashed(&db->available.names, pn, hash);
@@ -529,7 +529,8 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 	if (idb == NULL) {
 		idb = pkg;
 		apk_hash_insert(&db->available.packages, pkg);
-		*apk_package_array_add(&pkg->name->pkgs) = pkg;
+		*apk_provider_array_add(&pkg->name->providers) =
+			APK_PROVIDER_FROM_PACKAGE(pkg);
 		apk_db_pkg_rdepends(db, pkg);
 	} else {
 		idb->repos |= pkg->repos;
@@ -1761,8 +1762,12 @@ static int foreach_cache_file(void *pctx, int dirfd, const char *name)
 		char tmp[PATH_MAX];
 		if (name == NULL)
 			goto no_pkg;
-		for (i = 0; i < name->pkgs->num; i++) {
-			struct apk_package *pkg0 = name->pkgs->item[i];
+
+		for (i = 0; i < name->providers->num; i++) {
+			struct apk_package *pkg0 = name->providers->item[i].pkg;
+
+			if (pkg0->name != name)
+				continue;
 
 			apk_pkg_format_cache(pkg0, APK_BLOB_BUF(tmp));
 			if (apk_blob_compare(b, APK_BLOB_STR(tmp)) == 0) {
@@ -2226,14 +2231,14 @@ static int apk_db_install_archive_entry(void *_ctx,
 					break;
 				/* Does the original package replace the new one? */
 				for (i = 0; i < opkg->ipkg->replaces->num; i++) {
-					if (apk_dep_is_satisfied(&opkg->ipkg->replaces->item[i], pkg)) {
+					if (apk_dep_is_materialized(&opkg->ipkg->replaces->item[i], pkg)) {
 						opkg_prio = opkg->ipkg->replaces_priority;
 						break;
 					}
 				}
 				/* Does the new package replace the original one? */
 				for (i = 0; i < ctx->ipkg->replaces->num; i++) {
-					if (apk_dep_is_satisfied(&ctx->ipkg->replaces->item[i], opkg)) {
+					if (apk_dep_is_materialized(&ctx->ipkg->replaces->item[i], opkg)) {
 						pkg_prio = ctx->ipkg->replaces_priority;
 						break;
 					}

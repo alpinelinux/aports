@@ -202,12 +202,12 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		} else {
 			struct apk_package *pkg = NULL;
 
-			for (j = 0; j < dep.name->pkgs->num; j++)
+			for (j = 0; j < dep.name->providers->num; j++)
 				if (pkg == NULL ||
-				    apk_pkg_version_compare(dep.name->pkgs->item[j],
+				    apk_pkg_version_compare(dep.name->providers->item[j].pkg,
 							    pkg)
 				    == APK_VERSION_GREATER)
-					pkg = dep.name->pkgs->item[j];
+					pkg = dep.name->providers->item[j].pkg;
 
 			if (pkg == NULL) {
 				apk_message("Unable to get '%s'", dep.name->name);

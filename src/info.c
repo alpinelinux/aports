@@ -69,7 +69,6 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 		       int argc, char **argv)
 {
 	struct apk_name *name;
-	struct apk_package *pkg = NULL;
 	struct apk_dependency dep;
 	int i, j, ok = 0;
 
@@ -84,18 +83,14 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 		if (name == NULL)
 			continue;
 
-		for (j = 0; j < name->pkgs->num; j++) {
-			pkg = name->pkgs->item[j];
-			if (pkg->ipkg != NULL)
-				break;
+		for (j = 0; j < name->providers->num; j++) {
+			struct apk_provider *p = &name->providers->item[j];
+			if (p->pkg->ipkg == NULL)
+				continue;
+			if (!apk_dep_is_provided(&dep, p))
+				continue;
+			verbose_print_pkg(p->pkg, 0);
 		}
-		if (j >= name->pkgs->num)
-			continue;
-
-		if (!apk_dep_is_satisfied(&dep, pkg))
-			continue;
-
-		verbose_print_pkg(pkg, 0);
 		ok++;
 	}
 
@@ -196,7 +191,7 @@ static void info_print_depends(struct apk_database *db, struct apk_package *pkg)
 
 static void info_print_required_by(struct apk_database *db, struct apk_package *pkg)
 {
-	int i, j, k;
+	int i, j;
 	char *separator = apk_verbosity > 1 ? " " : "\n";
 
 	if (apk_verbosity == 1)
@@ -205,23 +200,23 @@ static void info_print_required_by(struct apk_database *db, struct apk_package *
 	if (apk_verbosity > 1)
 		printf("%s: ", pkg->name->name);
 	for (i = 0; i < pkg->name->rdepends->num; i++) {
-		struct apk_name *name0 = pkg->name->rdepends->item[i];
+		struct apk_name *name0;
+		struct apk_package *pkg0;
 
 		/* Check only the package that is installed, and that
 		 * it actually has this package as dependency. */
-		for (j = 0; j < name0->pkgs->num; j++) {
-			struct apk_package *pkg0 = name0->pkgs->item[j];
+		name0 = pkg->name->rdepends->item[i];
+		pkg0 = apk_pkg_get_installed(name0);
+		if (pkg0 == NULL)
+			continue;
 
-			if (pkg0->ipkg == NULL)
+		for (j = 0; j < pkg0->depends->num; j++) {
+			if (pkg0->depends->item[j].name != pkg->name)
 				continue;
-			for (k = 0; k < pkg0->depends->num; k++) {
-				if (pkg0->depends->item[k].name != pkg->name)
-					continue;
-				printf(PKG_VER_FMT "%s",
-				       PKG_VER_PRINTF(pkg0),
-				       separator);
-				break;
-			}
+			printf(PKG_VER_FMT "%s",
+			       PKG_VER_PRINTF(pkg0),
+			       separator);
+			break;
 		}
 	}
 }
@@ -248,7 +243,7 @@ static void info_print_install_if(struct apk_database *db, struct apk_package *p
 
 static void info_print_rinstall_if(struct apk_database *db, struct apk_package *pkg)
 {
-	int i, j, k;
+	int i, j;
 	char *separator = apk_verbosity > 1 ? " " : "\n";
 
 	if (apk_verbosity == 1)
@@ -257,23 +252,23 @@ static void info_print_rinstall_if(struct apk_database *db, struct apk_package *
 	if (apk_verbosity > 1)
 		printf("%s: ", pkg->name->name);
 	for (i = 0; i < pkg->name->rinstall_if->num; i++) {
-		struct apk_name *name0 = pkg->name->rinstall_if->item[i];
+		struct apk_name *name0;
+		struct apk_package *pkg0;
 
 		/* Check only the package that is installed, and that
 		 * it actually has this package in install_if. */
-		for (j = 0; j < name0->pkgs->num; j++) {
-			struct apk_package *pkg0 = name0->pkgs->item[j];
+		name0 = pkg->name->rinstall_if->item[i];
+		pkg0 = apk_pkg_get_installed(name0);
+		if (pkg0 == NULL)
+			continue;
 
-			if (pkg0->ipkg == NULL)
+		for (j = 0; j < pkg0->install_if->num; j++) {
+			if (pkg0->install_if->item[j].name != pkg->name)
 				continue;
-			for (k = 0; k < pkg0->install_if->num; k++) {
-				if (pkg0->install_if->item[k].name != pkg->name)
-					continue;
-				printf(PKG_VER_FMT "%s",
-				       PKG_VER_PRINTF(pkg0),
-				       separator);
-				break;
-			}
+			printf(PKG_VER_FMT "%s",
+			       PKG_VER_PRINTF(pkg0),
+			       separator);
+			break;
 		}
 	}
 }
@@ -376,12 +371,12 @@ static int info_package(struct info_ctx *ctx, struct apk_database *db,
 
 	for (i = 0; i < argc; i++) {
 		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
-		if (name == NULL || name->pkgs->num == 0) {
+		if (name == NULL || name->providers->num == 0) {
 			apk_error("Not found: %s", argv[i]);
 			return 1;
 		}
-		for (j = 0; j < name->pkgs->num; j++)
-			info_subaction(ctx, name->pkgs->item[j]);
+		for (j = 0; j < name->providers->num; j++)
+			info_subaction(ctx, name->providers->item[j].pkg);
 	}
 	return 0;
 }

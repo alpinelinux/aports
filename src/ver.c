@@ -97,7 +97,6 @@ static int ver_parse(void *ctx, struct apk_db_options *dbopts,
 static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_name *name;
-	struct apk_package *tmp;
 	char pkgname[256];
 	const char *opstr;
 	apk_blob_t *latest = apk_blob_atomize(APK_BLOB_STR(""));
@@ -109,20 +108,20 @@ static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *
 	allowed_repos = db->repo_tags[tag].allowed_repos;
 
 	name = pkg->name;
-	for (i = 0; i < name->pkgs->num; i++) {
-		tmp = name->pkgs->item[i];
-		if (tmp->name != name || tmp->repos == 0)
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_package *pkg0 = name->providers->item[i].pkg;
+		if (pkg0->name != name || pkg0->repos == 0)
 			continue;
-		if (!(ictx->all_tags  || (tmp->repos & allowed_repos)))
+		if (!(ictx->all_tags  || (pkg0->repos & allowed_repos)))
 			continue;
-		r = apk_version_compare_blob(*tmp->version, *latest);
+		r = apk_version_compare_blob(*pkg0->version, *latest);
 		switch (r) {
 		case APK_VERSION_GREATER:
-			latest = tmp->version;
-			latest_repos = tmp->repos;
+			latest = pkg0->version;
+			latest_repos = pkg0->repos;
 			break;
 		case APK_VERSION_EQUAL:
-			latest_repos |= tmp->repos;
+			latest_repos |= pkg0->repos;
 			break;
 		}
 	}
@@ -151,7 +150,8 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
 	struct apk_installed_package *ipkg;
 	struct apk_name *name;
-	int i, j, ret = 0;
+	struct apk_package *pkg;
+	int i, ret = 0;
 
 	if (ictx->limchars) {
 		if (strlen(ictx->limchars) == 0)
@@ -181,11 +181,9 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			ret = 1;
 			goto ver_exit;
 		}
-		for (j = 0; j < name->pkgs->num; j++) {
-			struct apk_package *pkg = name->pkgs->item[j];
-			if (pkg->ipkg != NULL)
-				ver_print_package_status(ictx, db, pkg);
-		}
+		pkg = apk_pkg_get_installed(name);
+		if (pkg != NULL)
+			ver_print_package_status(ictx, db, pkg);
 	}
 
 ver_exit:

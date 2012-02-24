@@ -72,7 +72,7 @@ static int warn_if_no_providers(apk_hash_item item, void *ctx)
 	struct counts *counts = (struct counts *) ctx;
 	struct apk_name *name = (struct apk_name *) item;
 
-	if (name->pkgs->num == 0) {
+	if (name->providers->num == 0) {
 		if (++counts->unsatisfied < 10) {
 			apk_warning("No provider for dependency '%s'",
 				    name->name);
@@ -143,8 +143,10 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			if (name == NULL)
 				break;
 
-			for (j = 0; j < name->pkgs->num; j++) {
-				pkg = name->pkgs->item[j];
+			for (j = 0; j < name->providers->num; j++) {
+				pkg = name->providers->item[j].pkg;
+				if (pkg->name != name)
+					continue;
 				if (apk_blob_compare(bver, *pkg->version) != 0)
 					continue;
 				if (pkg->size != fi.size)

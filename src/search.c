@@ -59,12 +59,12 @@ static void print_rdepends(struct search_ctx *ctx, struct apk_package *pkg)
 	printf(PKG_VER_FMT ":", PKG_VER_PRINTF(pkg));
 	for (i = 0; i < name->rdepends->num; i++) {
 		name0 = name->rdepends->item[i];
-		for (j = 0; j < name0->pkgs->num; j++) {
-			pkg0 = name0->pkgs->item[j];
+
+		for (j = 0; j < name0->providers->num; j++) {
+			pkg0 = name0->providers->item[j].pkg;
 			for (k = 0; k < pkg0->depends->num; k++) {
 				dep = &pkg0->depends->item[k];
-				if (name == dep->name &&
-				    apk_dep_is_satisfied(dep, pkg)) {
+				if (apk_dep_is_materialized_or_provided(dep, pkg)) {
 					printf(" ");
 					ctx->print_package(ctx, pkg0);
 				}
@@ -138,15 +138,16 @@ static int match_names(apk_hash_item item, void *ctx)
 	}
 
 	if (ictx->show_all) {
-		for (i = 0; i < name->pkgs->num; i++)
-			print_result(ictx, name->pkgs->item[i]);
+		for (i = 0; i < name->providers->num; i++)
+			print_result(ictx, name->providers->item[i].pkg);
 	} else {
 		struct apk_package *pkg = NULL;
+		apk_blob_t *version = NULL;
 
-		for (i = 0; i < name->pkgs->num; i++) {
-			if (pkg == NULL ||
-			    apk_pkg_version_compare(name->pkgs->item[i], pkg) == APK_VERSION_GREATER)
-				pkg = name->pkgs->item[i];
+		for (i = 0; i < name->providers->num; i++) {
+			if (version == NULL ||
+			    apk_version_compare_blob(*name->providers->item[i].version, *version) == APK_VERSION_GREATER)
+				pkg = name->providers->item[i].pkg;
 		}
 		print_result(ictx, pkg);
 	}

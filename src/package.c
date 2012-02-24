@@ -38,6 +38,21 @@ static const apk_spn_match_def apk_spn_dependency_separator = {
 	[4] = (1<<0) /* */,
 };
 
+struct apk_package *apk_pkg_get_installed(struct apk_name *name)
+{
+	int i;
+
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_package *pkg = name->providers->item[i].pkg;
+		if (pkg->name != name)
+			continue;
+		if (pkg->ipkg == NULL)
+			continue;
+		return pkg;
+	}
+	return NULL;
+}
+
 void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to)
 {
 	/* pkgname-1.0.apk */
@@ -311,7 +326,40 @@ void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 	};
 }
 
-int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg)
+static int apk_dep_match_checksum(struct apk_dependency *dep, struct apk_package *pkg)
+{
+	struct apk_checksum csum;
+	apk_blob_t b = *dep->version;
+
+	apk_blob_pull_csum(&b, &csum);
+	if (apk_checksum_compare(&csum, &pkg->csum) == 0)
+		return 1;
+
+	return 0;
+}
+
+int apk_dep_is_provided(struct apk_dependency *dep, struct apk_provider *p)
+{
+	if (p == NULL)
+		return dep->optional;
+
+	switch (dep->result_mask) {
+	case APK_DEPMASK_CHECKSUM:
+		return apk_dep_match_checksum(dep, p->pkg);
+	case APK_DEPMASK_CONFLICT:
+		return 0;
+	case APK_DEPMASK_REQUIRE:
+		return 1;
+	default:
+		if (apk_version_compare_blob(*p->version, *dep->version)
+		    & dep->result_mask)
+			return 1;
+		return 0;
+	}
+	return 0;
+}
+
+int apk_dep_is_materialized(struct apk_dependency *dep, struct apk_package *pkg)
 {
 	if (pkg == NULL)
 		return dep->optional;
@@ -319,15 +367,8 @@ int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg)
 		return 0;
 
 	switch (dep->result_mask) {
-	case APK_DEPMASK_CHECKSUM: {
-		struct apk_checksum csum;
-		apk_blob_t b = *dep->version;
-
-		apk_blob_pull_csum(&b, &csum);
-		if (apk_checksum_compare(&csum, &pkg->csum) == 0)
-			return 1;
-		break;
-		}
+	case APK_DEPMASK_CHECKSUM:
+		return apk_dep_match_checksum(dep, pkg);
 	case APK_DEPMASK_CONFLICT:
 		return 0;
 	case APK_DEPMASK_REQUIRE:
@@ -336,9 +377,31 @@ int apk_dep_is_satisfied(struct apk_dependency *dep, struct apk_package *pkg)
 		if (apk_version_compare_blob(*pkg->version, *dep->version)
 		    & dep->result_mask)
 			return 1;
-		break;
+		return 0;
 	}
 	return 0;
+}
+
+int apk_dep_is_materialized_or_provided(struct apk_dependency *dep, struct apk_package *pkg)
+{
+	int i;
+
+	if (pkg == NULL)
+		return dep->optional;
+
+	if (dep->name == pkg->name)
+		return apk_dep_is_materialized(dep, pkg);
+
+	for (i = 0; i < pkg->provides->num; i++) {
+		struct apk_provider p;
+
+		if (pkg->provides->item[i].name != dep->name)
+			continue;
+		p = APK_PROVIDER_FROM_PROVIDES(pkg, &pkg->provides->item[i]);
+		return apk_dep_is_provided(dep, &p);
+	}
+
+	return dep->optional;
 }
 
 void apk_blob_push_dep(apk_blob_t *to, struct apk_database *db, struct apk_dependency *dep)
