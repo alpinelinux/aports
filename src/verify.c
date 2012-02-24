@@ -28,7 +28,10 @@ static int verify_main(void *ctx, struct apk_database *db, int argc, char **argv
 		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(AT_FDCWD, argv[i]),
 					      apk_sign_ctx_mpart_cb, &sctx);
 		if (is == NULL) {
-			apk_error("%s: %s", strerror(errno), argv[i]);
+			if (apk_verbosity >= 1)
+				apk_error("%s: %s", argv[i], strerror(errno));
+			else
+				printf("%s\n", argv[i]);
 			apk_sign_ctx_free(&sctx);
 			rc++;
 			continue;
@@ -39,7 +42,9 @@ static int verify_main(void *ctx, struct apk_database *db, int argc, char **argv
 		if (apk_verbosity >= 1)
 			apk_message("%s: %d - %s", argv[i], r,
 				ok ? "OK" :
-				sctx.data_verified ? "UNTRUSTED" : "FAILED");
+				!sctx.control_verified ? "UNTRUSTED" : "FAILED");
+		else if (!ok)
+			printf("%s\n", argv[i]);
 		if (!ok)
 			rc++;
 		apk_sign_ctx_free(&sctx);
