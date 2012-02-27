@@ -29,7 +29,7 @@
 
 #if defined(DEBUG_PRINT) || defined(DEBUG_CHECKS)
 #define ASSERT(cond, fmt...) \
-	if (!(cond)) { fprintf(stderr, fmt); *(char*)NULL = 0; }
+	if (!(cond)) { apk_error(fmt); *(char*)NULL = 0; }
 #else
 #define ASSERT(cond, fmt...)
 #endif
@@ -567,8 +567,6 @@ static void sort_name(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_name_state *ns = name_to_ns_alloc(name);
 	int i, j;
 
-	count_name(ss, name);
-
 	for (i = 0; i < name->providers->num; i++) {
 		struct apk_package *pkg = name->providers->item[i].pkg;
 		struct apk_package_state *ps = pkg_to_ps_alloc(pkg);
@@ -802,6 +800,9 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 			   PKG_VER_PRINTF(pkg),
 			   (d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE");
 
+		for (i = 0; i < pkg->provides->num; i++)
+			name_to_ns(pkg->provides->item[i].name)->name_touched = 1;
+
 		ps->locked = 1;
 		ps->handle_install_if = 0;
 
@@ -930,7 +931,7 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 	struct apk_decision *d;
 
 	ASSERT(ss->num_decisions <= ss->max_decisions,
-	       "Decision tree overflow.\n");
+	       "Decision tree overflow.");
 
 	ss->num_decisions++;
 	d = &ss->decisions[ss->num_decisions];
@@ -967,11 +968,11 @@ static int next_branch(struct apk_solver_state *ss)
 
 #ifdef DEBUG_CHECKS
 		ASSERT(cmpscore(&d->saved_score, &ss->score) == 0,
-			"ERROR! saved_score "SCORE_FMT" != score "SCORE_FMT"\n",
+			"ERROR! saved_score "SCORE_FMT" != score "SCORE_FMT,
 			SCORE_PRINTF(&d->saved_score),
 			SCORE_PRINTF(&ss->score));
 		ASSERT(d->saved_requirers == ns->requirers,
-			"ERROR! requirers not restored between decisions\n");
+			"ERROR! requirers not restored between decisions");
 #endif
 
 		if (backup_until >= ss->num_decisions &&
@@ -1043,8 +1044,9 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 				   ps0->conflicts);
 			changed |= 1;
 		} else if (requirer_pkg != NULL) {
-			dbg_printf("%s: inheriting flags and pinning from %s\n",
-				   name->name, name0->name);
+			dbg_printf(PKG_VER_FMT ": inheriting flags and pinning from"PKG_VER_FMT"\n",
+				   PKG_VER_PRINTF(pkg0),
+				   PKG_VER_PRINTF(requirer_pkg));
 			changed |= inherit_package_state(ss->db, pkg0, requirer_pkg);
 		}
 	}
@@ -1107,8 +1109,9 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 				   PKG_VER_PRINTF(pkg0),
 				   ps0->conflicts);
 		} else if (requirer_pkg != NULL) {
-			dbg_printf("%s: uninheriting flags and pinning from %s\n",
-				   name->name, name0->name);
+			dbg_printf(PKG_VER_FMT ": uninheriting flags and pinning from "PKG_VER_FMT"\n",
+				   PKG_VER_PRINTF(pkg0),
+				   PKG_VER_PRINTF(requirer_pkg));
 			uninherit_package_state(ss->db, pkg0, requirer_pkg);
 		}
 	}
@@ -1139,7 +1142,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		if (cmpscore2(&ss->score, &minscore, &ss->best_score) >= 0) {
 			dbg_printf("%s: pruning none, score too high "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
 				name->name,
-				SCORE_PRINTF(&score),
+				SCORE_PRINTF(&ss->score),
 				SCORE_PRINTF(&minscore),
 				SCORE_PRINTF(&ss->best_score));
 			return push_decision(ss, name, NULL, DECISION_EXCLUDE, BRANCH_NO, FALSE);
@@ -1180,7 +1183,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		if (ns->none_excluded)
 			return SOLVERR_PRUNED;
 		return push_decision(ss, name, NULL, DECISION_ASSIGN, BRANCH_NO, FALSE);
-	} else if (options == 1 && score_locked && ns->none_excluded) {
+	} else if (options == 1 && score_locked && ns->none_excluded && name == next_p->pkg->name) {
 		dbg_printf("reconsider_name: %s: only one choice left with known score, locking.\n",
 			name->name);
 		return push_decision(ss, name, next_p->pkg, DECISION_ASSIGN, BRANCH_NO, FALSE);
@@ -1188,15 +1191,15 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 
 	ns->chosen = *next_p;
 
-	dbg_printf("reconsider_name: %s: min penalty " SCORE_FMT ", next_pkg=%p\n",
-		name->name, SCORE_PRINTF(&minscore), next_p->pkg);
+	dbg_printf("reconsider_name: %s: next_pkg=%p [ version="BLOB_FMT" ]\n",
+		name->name, next_p->pkg, BLOB_PRINTF(*ns->chosen.version));
 
 	return SOLVERR_SOLUTION;
 }
 
 static int expand_branch(struct apk_solver_state *ss)
 {
-	struct apk_name *name;
+	struct apk_name *name0, *name;
 	struct apk_name_state *ns;
 	struct apk_package *pkg0 = NULL;
 	struct apk_package_state *ps0;
@@ -1204,6 +1207,7 @@ static int expand_branch(struct apk_solver_state *ss)
 	unsigned short allowed_pinning, preferred_pinning;
 	unsigned int allowed_repos;
 	int primary_decision, branching_point;
+	int can_install = FALSE;
 
 	list_for_each_entry(ns, &ss->unsolved_list_head, unsolved_list) {
 		name = ns->name;
@@ -1216,10 +1220,22 @@ static int expand_branch(struct apk_solver_state *ss)
 			ns->name_touched = 0;
 		}
 		if (pkg_to_ps(ns->chosen.pkg)->topology_soft < ss->topology_position &&
-		    pkg_to_ps(ns->chosen.pkg)->topology_soft > topology0)
-			pkg0 = ns->chosen.pkg, topology0 = pkg_to_ps(pkg0)->topology_soft;
-		else if (ns->chosen.pkg->topology_hard > topology0)
-			pkg0 = ns->chosen.pkg, topology0 = pkg0->topology_hard;
+		    pkg_to_ps(ns->chosen.pkg)->topology_soft >= topology0) {
+			topology0 = pkg_to_ps(ns->chosen.pkg)->topology_soft;
+		} else if (ns->chosen.pkg->topology_hard >= topology0) {
+			topology0 = ns->chosen.pkg->topology_hard;
+		} else {
+			continue;
+		}
+		if (pkg0 != ns->chosen.pkg) {
+			can_install = FALSE;
+			name0 = name;
+		}
+		pkg0 = ns->chosen.pkg;
+		if (ns->chosen.version != &apk_null_blob) {
+			can_install |= TRUE;
+			name0 = name;
+		}
 	}
 	if (pkg0 == NULL) {
 		dbg_printf("expand_branch: solution with score "SCORE_FMT"\n",
@@ -1230,7 +1246,7 @@ static int expand_branch(struct apk_solver_state *ss)
 	/* someone needs to provide this name -- find next eligible
 	 * provider candidate */
 	ps0 = pkg_to_ps(pkg0);
-	name = pkg0->name;
+	name = name0;
 	ns = name_to_ns(name);
 
 	if (!ns->none_excluded) {
@@ -1242,10 +1258,14 @@ static int expand_branch(struct apk_solver_state *ss)
 		return push_decision(ss, name, NULL, primary_decision, BRANCH_YES, FALSE);
 	}
 
-	dbg_printf("expand_branch: "PKG_VER_FMT" score: "SCORE_FMT"\tminpenalty: "SCORE_FMT"\tbest: "SCORE_FMT"\n",
+	if (!can_install) {
+		/* provides with no version; not eglible to auto install */
+		return push_decision(ss, pkg0->name, pkg0, DECISION_EXCLUDE, BRANCH_NO, TRUE);
+	}
+
+	dbg_printf("expand_branch: "PKG_VER_FMT" score: "SCORE_FMT"\tbest: "SCORE_FMT"\n",
 		PKG_VER_PRINTF(pkg0),
 		SCORE_PRINTF(&ss->score),
-		SCORE_PRINTF(&ss->minimum_penalty),
 		SCORE_PRINTF(&ss->best_score));
 
 	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
@@ -1327,7 +1347,7 @@ static void record_solution(struct apk_solver_state *ss)
 		pinning = ps->allowed_pinning | ns->preferred_pinning | APK_DEFAULT_PINNING_MASK;
 		repos = pkg->repos | (pkg->ipkg ? db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
 
-		ASSERT(n < ss->assigned_names, "Name assignment overflow\n");
+		ASSERT(n < ss->assigned_names, "Name assignment overflow");
 		ss->best_solution->item[n++] = (struct apk_solution_entry){
 			.pkg = pkg,
 			.reinstall = ps->inherited_reinstall ||
@@ -1438,7 +1458,7 @@ static int free_state(apk_hash_item item, void *ctx)
 
 	if (ns != NULL) {
 #ifdef DEBUG_CHECKS
-		ASSERT(ns->requirers == 0, "Requirers is not zero after cleanup\n");
+		ASSERT(ns->requirers == 0, "Requirers is not zero after cleanup");
 #endif
 		free(ns);
 		name->state_ptr = NULL;
@@ -1518,7 +1538,7 @@ int apk_solver_solve(struct apk_database *db,
 		if (r == SOLVERR_SOLUTION) {
 			if (cmpscore(&ss->score, &ss->best_score) < 0) {
 				dbg_printf("updating best score "SCORE_FMT" (was: "SCORE_FMT")\n",
-					SCORE_PRINTF(&score),
+					SCORE_PRINTF(&ss->score),
 					SCORE_PRINTF(&ss->best_score));
 
 				record_solution(ss);
@@ -1888,7 +1908,27 @@ all_done:
 	return r;
 }
 
-static void print_dep_errors(struct apk_database *db, char *label, struct apk_dependency_array *deps)
+static void add_name_if_virtual(struct apk_name_array **names, struct apk_name *name)
+{
+	int i;
+
+	if (name->state_int == 1)
+		return;
+	name->state_int = 1;
+
+	if (name->providers->num == 0)
+		return;
+
+	for (i = 0; i < name->providers->num; i++)
+		if (name->providers->item[i].pkg->name == name)
+			return;
+
+	*apk_name_array_add(names) = name;
+}
+
+static void print_dep_errors(struct apk_database *db, char *label,
+			     struct apk_dependency_array *deps,
+			     struct apk_name_array **names)
 {
 	int i, print_label = 1;
 	char buf[256];
@@ -1901,6 +1941,9 @@ static void print_dep_errors(struct apk_database *db, char *label, struct apk_de
 
 		if (apk_dep_is_materialized_or_provided(dep, pkg))
 			continue;
+
+		if (pkg == NULL)
+			add_name_if_virtual(names, dep->name);
 
 		if (print_label) {
 			print_label = 0;
@@ -1921,8 +1964,11 @@ void apk_solver_print_errors(struct apk_database *db,
 			     struct apk_dependency_array *world,
 			     int unsatisfiable)
 {
-	int i;
+	struct apk_name_array *names;
+	char pkgtext[256];
+	int i, j;
 
+	apk_name_array_init(&names);
 	apk_error("%d unsatisfiable dependencies:", unsatisfiable);
 
 	for (i = 0; i < solution->num; i++) {
@@ -1930,13 +1976,29 @@ void apk_solver_print_errors(struct apk_database *db,
 		pkg->name->state_ptr = pkg;
 	}
 
-	print_dep_errors(db, "world", world);
+	print_dep_errors(db, "world", world, &names);
 	for (i = 0; i < solution->num; i++) {
 		struct apk_package *pkg = solution->item[i].pkg;
-		char pkgtext[256];
 		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
-		print_dep_errors(db, pkgtext, pkg->depends);
+		print_dep_errors(db, pkgtext, pkg->depends, &names);
 	}
+
+	for (i = 0; i < names->num; i++) {
+		struct apk_indent indent;
+		struct apk_name *name = names->item[i];
+
+		printf("\n  %s is a virtual package provided by:\n    ", name->name);
+		indent.x = 4;
+		indent.indent = 4;
+
+		for (j = 0; j < name->providers->num; j++) {
+			struct apk_package *pkg = name->providers->item[j].pkg;
+			snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
+			apk_print_indented(&indent, APK_BLOB_STR(pkgtext));
+		}
+		printf("\n");
+	}
+	apk_name_array_free(&names);
 }
 
 int apk_solver_commit(struct apk_database *db,

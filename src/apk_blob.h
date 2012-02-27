@@ -27,6 +27,7 @@ struct apk_blob {
 };
 typedef struct apk_blob apk_blob_t;
 typedef int (*apk_blob_cb)(void *ctx, apk_blob_t blob);
+extern apk_blob_t apk_null_blob;
 
 #define BLOB_FMT		"%.*s"
 #define BLOB_PRINTF(b)		(int)(b).len, (b).ptr

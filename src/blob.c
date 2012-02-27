@@ -609,7 +609,8 @@ static struct apk_hash_ops atom_ops = {
 	.compare = apk_blob_compare,
 	.delete_item = (apk_hash_delete_f) free,
 };
-static apk_blob_t null_blob = {0,0};
+
+apk_blob_t apk_null_blob = {0,0};
 
 void apk_atom_init(void)
 {
@@ -622,7 +623,7 @@ apk_blob_t *apk_blob_atomize(apk_blob_t blob)
 	unsigned long hash = apk_hash_from_key(&atom_hash, blob);
 
 	if (blob.len < 0 || blob.ptr == NULL)
-		return &null_blob;
+		return &apk_null_blob;
 
 	atom = (struct apk_blob_atom *) apk_hash_get_hashed(&atom_hash, blob, hash);
 	if (atom != NULL)
@@ -642,7 +643,7 @@ apk_blob_t *apk_blob_atomize_dup(apk_blob_t blob)
 	char *ptr;
 
 	if (blob.len < 0 || blob.ptr == NULL)
-		return &null_blob;
+		return &apk_null_blob;
 	atom = (struct apk_blob_atom *) apk_hash_get_hashed(&atom_hash, blob, hash);
 	if (atom != NULL)
 		return &atom->blob;
