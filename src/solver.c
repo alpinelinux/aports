@@ -100,7 +100,6 @@ struct apk_name_state {
 	struct apk_name *name;
 	struct apk_provider chosen;
 
-	struct apk_score minimum_penalty;
 	unsigned short requirers;
 	unsigned short install_ifs;
 
@@ -146,7 +145,6 @@ struct apk_solver_state {
 	struct apk_solution_array *best_solution;
 
 	struct apk_score score;
-	struct apk_score minimum_penalty;
 	struct apk_score best_score;
 
 	unsigned solver_flags : 4;
@@ -655,8 +653,6 @@ static void demote_name(struct apk_solver_state *ss, struct apk_name *name)
 		return;
 
 	/* remove cached information */
-	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-	ns->minimum_penalty = (struct apk_score) { .score = 0 };
 	ns->chosen = CHOSEN_NONE;
 
 	/* and remove list, or request refresh */
@@ -811,23 +807,8 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 		}
 
 		if (d->type == DECISION_ASSIGN) {
-			subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-			ns->minimum_penalty = (struct apk_score) { .score = 0 };
-
 			get_topology_score(ss, ns, pkg, &score);
 			addscore(&ss->score, &score);
-
-			if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0) {
-				dbg_printf("install causing "SCORE_FMT", penalty too big: "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
-					   SCORE_PRINTF(&score),
-					   SCORE_PRINTF(&ss->score),
-					   SCORE_PRINTF(&ss->minimum_penalty),
-					   SCORE_PRINTF(&ss->best_score));
-
-				subscore(&ss->score, &score);
-
-				return SOLVERR_PRUNED;
-			}
 
 			ss->assigned_names++;
 			assign_name(ss, name, APK_PROVIDER_FROM_PACKAGE(pkg));
@@ -845,9 +826,6 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 			   (d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE");
 
 		if (d->type == DECISION_ASSIGN) {
-			subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-			ns->minimum_penalty = (struct apk_score) { .score = 0 };
-
 			get_unassigned_score(name, &score);
 			addscore(&ss->score, &score);
 
@@ -860,12 +838,11 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 		}
 	}
 
-	if (cmpscore2(&ss->score, &ss->minimum_penalty, &ss->best_score) >= 0) {
-		dbg_printf("%s: %s penalty too big: "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
+	if (cmpscore(&ss->score, &ss->best_score) >= 0) {
+		dbg_printf("%s: %s penalty too big: "SCORE_FMT">="SCORE_FMT"\n",
 			name->name,
 			(d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE",
 			SCORE_PRINTF(&ss->score),
-			SCORE_PRINTF(&ss->minimum_penalty),
 			SCORE_PRINTF(&ss->best_score));
 		return SOLVERR_PRUNED;
 	}
@@ -1146,20 +1123,14 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name_state *ns = name_to_ns(name);
-	struct apk_score minscore, score;
 	struct apk_provider *next_p = NULL;
 	unsigned int next_topology = 0, options = 0;
 	int i, score_locked = FALSE;
 
-	subscore(&ss->minimum_penalty, &ns->minimum_penalty);
-	ns->minimum_penalty = (struct apk_score) { .score = 0 };
-
-	score = ss->score;
-	addscore(&score, &ss->minimum_penalty);
-
 	if (!ns->none_excluded) {
+		struct apk_score minscore;
 		get_unassigned_score(name, &minscore);
-		if (cmpscore2(&score, &minscore, &ss->best_score) >= 0) {
+		if (cmpscore2(&ss->score, &minscore, &ss->best_score) >= 0) {
 			dbg_printf("%s: pruning none, score too high "SCORE_FMT"+"SCORE_FMT">="SCORE_FMT"\n",
 				name->name,
 				SCORE_PRINTF(&score),
@@ -1167,8 +1138,6 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 				SCORE_PRINTF(&ss->best_score));
 			return push_decision(ss, name, NULL, DECISION_EXCLUDE, BRANCH_NO, FALSE);
 		}
-	} else {
-		minscore.score = -1;
 	}
 
 	for (i = 0; i < name->providers->num; i++) {
@@ -1185,12 +1154,8 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		score_locked = get_topology_score(ss, ns, pkg0, &pkg0_score);
 
 		/* viable alternative? */
-		if (cmpscore2(&score, &pkg0_score, &ss->best_score) >= 0)
+		if (cmpscore2(&ss->score, &pkg0_score, &ss->best_score) >= 0)
 			return push_decision(ss, name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
-
-		/* find the minimum penalty */
-		if (cmpscore(&pkg0_score, &minscore) < 0)
-			minscore = pkg0_score;
 
 		/* next in topology order - next to get locked in */
 		if (ps0->topology_soft < ss->topology_position &&
@@ -1216,8 +1181,6 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	}
 
 	ns->chosen = *next_p;
-	ns->minimum_penalty = minscore;
-	addscore(&ss->minimum_penalty, &ns->minimum_penalty);
 
 	dbg_printf("reconsider_name: %s: min penalty " SCORE_FMT ", next_pkg=%p\n",
 		name->name, SCORE_PRINTF(&minscore), next_p->pkg);
@@ -1541,18 +1504,13 @@ int apk_solver_solve(struct apk_database *db,
 		/* need EXPAND if here, can return SOLUTION|PRUNED|EXPAND */
 		r = expand_branch(ss);
 		if (r == SOLVERR_SOLUTION) {
-			struct apk_score score;
-
-			score = ss->score;
-			addscore(&score, &ss->minimum_penalty);
-
-			if (cmpscore(&score, &ss->best_score) < 0) {
+			if (cmpscore(&ss->score, &ss->best_score) < 0) {
 				dbg_printf("updating best score "SCORE_FMT" (was: "SCORE_FMT")\n",
 					SCORE_PRINTF(&score),
 					SCORE_PRINTF(&ss->best_score));
 
 				record_solution(ss);
-				ss->best_score = score;
+				ss->best_score = ss->score;
 			}
 
 			r = SOLVERR_PRUNED;
