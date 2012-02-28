@@ -69,21 +69,31 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	apk_dependency_array_copy(&world, db->world);
 
 	if (actx->virtpkg) {
+		apk_blob_t b = APK_BLOB_STR(actx->virtpkg);
+
 		if (non_repository_check(db))
 			return -1;
+
+		apk_blob_pull_dep(&b, db, &virtdep);
+		if (APK_BLOB_IS_NULL(b) ||
+		    virtdep.result_mask != APK_DEPMASK_REQUIRE ||
+		    virtdep.version != &apk_null_blob) {
+			apk_error("%s: bad package specifier");
+			return -1;
+		}
 
 		virtpkg = apk_pkg_new();
 		if (virtpkg == NULL) {
 			apk_error("Failed to allocate virtual meta package");
 			return -1;
 		}
-		virtpkg->name = apk_db_get_name(db, APK_BLOB_STR(actx->virtpkg));
+		virtpkg->name = virtdep.name;
 		apk_blob_checksum(APK_BLOB_STR(virtpkg->name->name),
 				  apk_checksum_default(), &virtpkg->csum);
 		virtpkg->version = apk_blob_atomize(APK_BLOB_STR("0"));
 		virtpkg->description = strdup("virtual meta package");
 		virtpkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
-		apk_dep_from_pkg(&virtdep, db, virtpkg);
+		virtpkg->repos |= db->repo_tags[virtdep.repository_tag].allowed_repos;
 		virtpkg = apk_db_pkg_add(db, virtpkg);
 	}
 
