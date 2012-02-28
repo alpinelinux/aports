@@ -116,6 +116,7 @@ struct apk_name_state {
 	unsigned short requirers;
 	unsigned short install_ifs;
 	unsigned short preferred_pinning;
+	unsigned short locked;
 
 	/* one time prepare/finish flags */
 	unsigned solver_flags_local : 4;
@@ -129,7 +130,6 @@ struct apk_name_state {
 
 	/* dynamic state flags */
 	unsigned none_excluded : 1;
-	unsigned locked : 1;
 	unsigned name_touched : 1;
 };
 
@@ -761,9 +761,14 @@ static inline void assign_name(
 {
 	struct apk_name_state *ns = name_to_ns(name);
 
-	ASSERT(!ns->locked, "Assigning locked name");
-	ns->locked = 1;
+	if (p.version == &apk_null_blob) {
+		ASSERT(!ns->locked || ns->chosen.version == &apk_null_blob,
+		       "Assigning locked name with version");
+	} else {
+		ASSERT(!ns->locked, "Assigning locked name");
+	}
 	ns->chosen = p;
+	ns->locked++;
 	if (list_hashed(&ns->unsolved_list)) {
 		list_del(&ns->unsolved_list);
 		list_init(&ns->unsolved_list);
@@ -775,11 +780,12 @@ static inline void unassign_name(struct apk_solver_state *ss, struct apk_name *n
 	struct apk_name_state *ns = name_to_ns(name);
 
 	ASSERT(ns->locked, "Unassigning unlocked name");
-	ns->locked = 0;
-	ns->chosen = CHOSEN_NONE;
-	ns->name_touched = 1;
-
-	demote_name(ss, name);
+	ns->locked--;
+	if (ns->locked == 0) {
+		ns->chosen = CHOSEN_NONE;
+		ns->name_touched = 1;
+		demote_name(ss, name);
+	}
 }
 
 
