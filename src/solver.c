@@ -99,6 +99,7 @@ struct apk_package_state {
 	unsigned short conflicts;
 	unsigned char preference;
 	unsigned handle_install_if : 1;
+	unsigned allowed : 1;
 	unsigned locked : 1;
 
 	unsigned solver_flags_maybe : 4;
@@ -131,6 +132,7 @@ struct apk_name_state {
 	/* dynamic state flags */
 	unsigned none_excluded : 1;
 	unsigned name_touched : 1;
+	unsigned preferred_chosen : 1;
 };
 
 struct apk_solver_state {
@@ -416,35 +418,6 @@ static int get_topology_score(
 	return score_locked;
 }
 
-static int is_topology_optimum(struct apk_solver_state *ss,
-			       struct apk_package *pkg)
-{
-	struct apk_name *name = pkg->name;
-	struct apk_name_state *ns = name_to_ns(name);
-	struct apk_score score;
-	int i;
-
-	get_topology_score(ss, ns, pkg, &score);
-	for (i = 0; i < name->providers->num; i++) {
-		struct apk_package *pkg0 = name->providers->item[i].pkg;
-		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
-		struct apk_score score0;
-
-		if (pkg0 == pkg)
-			continue;
-
-		if (ps0 == NULL || ps0->locked ||
-		    ss->topology_position < pkg->topology_hard)
-			continue;
-
-		get_topology_score(ss, ns, pkg0, &score0);
-		if (cmpscore(&score0, &score) < 0)
-			return 0;
-	}
-
-	return 1;
-}
-
 static int compare_absolute_package_preference(
 		struct apk_provider *pA,
 		struct apk_provider *pB)
@@ -573,6 +546,15 @@ static void sort_soft_dependencies(struct apk_solver_state *ss,
 		   PKG_VER_PRINTF(pkg), ps->topology_soft);
 }
 
+static void update_allowed(struct apk_database *db, struct apk_package *pkg)
+{
+	struct apk_package_state *ps = pkg_to_ps(pkg);
+	if (pkg->repos & get_pinning_mask_repos(db, ps->allowed_pinning | APK_DEFAULT_PINNING_MASK))
+		ps->allowed = 1;
+	else
+		ps->allowed = 0;
+}
+
 static void sort_name(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name_state *ns = name_to_ns_alloc(name);
@@ -593,7 +575,7 @@ static void sort_name(struct apk_solver_state *ss, struct apk_name *name)
 			allowed_pinning &= ~BIT(j);
 			ps->inherited_pinning[j]++;
 		}
-
+		update_allowed(ss->db, pkg);
 		sort_soft_dependencies(ss, name->providers->item[i].pkg, pkg);
 	}
 }
@@ -702,9 +684,11 @@ static int inherit_package_state(struct apk_database *db, struct apk_package *to
 			allowed_pinning &= ~BIT(i);
 			if (tps->inherited_pinning[i]++ == 0) {
 				tps->allowed_pinning |= BIT(i);
-				changed = 1;
+				changed = 2;
 			}
 		}
+		if (changed == 2)
+			update_allowed(db, to);
 	}
 
 	return changed;
@@ -715,7 +699,7 @@ static void uninherit_package_state(struct apk_database *db, struct apk_package 
 	struct apk_package_state *tps = pkg_to_ps(to);
 	struct apk_name_state *fns = name_to_ns(from->name);
 	struct apk_package_state *fps = pkg_to_ps(from);
-	int i;
+	int i, changed = 0;
 
 	if ((fns->solver_flags_inheritable & APK_SOLVERF_REINSTALL) ||
 	    fps->inherited_reinstall)
@@ -731,9 +715,13 @@ static void uninherit_package_state(struct apk_database *db, struct apk_package 
 			if (!(allowed_pinning & BIT(i)))
 				continue;
 			allowed_pinning &= ~BIT(i);
-			if (--tps->inherited_pinning[i] == 0)
+			if (--tps->inherited_pinning[i] == 0) {
 				tps->allowed_pinning &= ~BIT(i);
+				changed = 2;
+			}
 		}
+		if (changed == 2)
+			update_allowed(db, to);
 	}
 }
 
@@ -1151,9 +1139,10 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name_state *ns = name_to_ns(name);
-	struct apk_provider *next_p = NULL;
+	struct apk_provider *next_p = NULL, *best_p = NULL;
 	unsigned int next_topology = 0, options = 0;
 	int i, j, score_locked = FALSE;
+	struct apk_score best_score = (struct apk_score) { .conflicts = -1 };
 
 	if (!ns->none_excluded) {
 		struct apk_score minscore;
@@ -1176,7 +1165,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 
 		if (ps0 == NULL || ps0->locked ||
 		    ss->topology_position < pkg0->topology_hard ||
-		    ((pkg0->ipkg == NULL && !pkg_available(ss->db, pkg0))))
+		    (pkg0->ipkg == NULL && (!ps0->allowed || !pkg_available(ss->db, pkg0))))
 			continue;
 
 		for (j = 0; j < pkg0->provides->num; j++) {
@@ -1195,6 +1184,11 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		/* viable alternative? */
 		if (cmpscore2(&ss->score, &pkg0_score, &ss->best_score) >= 0)
 			return push_decision(ss, name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
+
+		if (cmpscore(&pkg0_score, &best_score) < 0) {
+			best_score = pkg0_score;
+			best_p = p0;
+		}
 
 		/* next in topology order - next to get locked in */
 		if (ps0->topology_soft < ss->topology_position &&
@@ -1220,6 +1214,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	}
 
 	ns->chosen = *next_p;
+	ns->preferred_chosen = (best_p == next_p);
 
 	dbg_printf("reconsider_name: %s: next_pkg=%p [ version="BLOB_FMT" ]\n",
 		name->name, next_p->pkg, BLOB_PRINTF(*ns->chosen.version));
@@ -1234,8 +1229,6 @@ static int expand_branch(struct apk_solver_state *ss)
 	struct apk_package *pkg0 = NULL;
 	struct apk_package_state *ps0;
 	unsigned int r, topology0 = 0;
-	unsigned short allowed_pinning, preferred_pinning;
-	unsigned int allowed_repos;
 	int primary_decision, branching_point;
 	int can_install = FALSE;
 
@@ -1298,11 +1291,7 @@ static int expand_branch(struct apk_solver_state *ss)
 		SCORE_PRINTF(&ss->score),
 		SCORE_PRINTF(&ss->best_score));
 
-	preferred_pinning = ns->preferred_pinning ?: APK_DEFAULT_PINNING_MASK;
-	allowed_pinning = ps0->allowed_pinning | preferred_pinning | APK_DEFAULT_PINNING_MASK;
-	allowed_repos = get_pinning_mask_repos(ss->db, allowed_pinning);
-
-	if ((pkg0->repos != 0) && !(pkg0->repos & allowed_repos)) {
+	if (!ps0->allowed) {
 		/* pinning has not enabled the package */
 		primary_decision = DECISION_EXCLUDE;
 		/* but if it is installed, we might consider it */
@@ -1316,7 +1305,7 @@ static int expand_branch(struct apk_solver_state *ss)
 		 * install_if never triggered */
 		primary_decision = DECISION_EXCLUDE;
 		branching_point = BRANCH_NO;
-	} else if (is_topology_optimum(ss, pkg0)) {
+	} else if (ns->preferred_chosen) {
 		primary_decision = DECISION_ASSIGN;
 		branching_point = BRANCH_YES;
 	} else {
