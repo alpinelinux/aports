@@ -788,7 +788,6 @@ static inline void unassign_name(struct apk_solver_state *ss, struct apk_name *n
 	}
 }
 
-
 static solver_result_t apply_decision(struct apk_solver_state *ss,
 				      struct apk_decision *d)
 {
@@ -893,6 +892,9 @@ static void undo_decision(struct apk_solver_state *ss,
 			else
 				ss->topology_position = pkg->topology_hard;
 		}
+
+		for (i = 0; i < pkg->provides->num; i++)
+			name_to_ns(pkg->provides->item[i].name)->name_touched = 1;
 
 		if (ns->locked) {
 			foreach_rinstall_if_pkg(ss, pkg, untrigger_install_if);
@@ -1140,7 +1142,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_name_state *ns = name_to_ns(name);
 	struct apk_provider *next_p = NULL;
 	unsigned int next_topology = 0, options = 0;
-	int i, score_locked = FALSE;
+	int i, j, score_locked = FALSE;
 
 	if (!ns->none_excluded) {
 		struct apk_score minscore;
@@ -1164,6 +1166,17 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		if (ps0 == NULL || ps0->locked ||
 		    ss->topology_position < pkg0->topology_hard ||
 		    ((pkg0->ipkg == NULL && !pkg_available(ss->db, pkg0))))
+			continue;
+
+		for (j = 0; j < pkg0->provides->num; j++) {
+			struct apk_dependency *p00 = &pkg0->provides->item[j];
+			if (!name_to_ns(p00->name)->locked)
+				continue;
+			if (name_to_ns(p00->name)->chosen.version != &apk_null_blob ||
+			    p00->version != &apk_null_blob)
+				break;
+		}
+		if (j < pkg0->provides->num)
 			continue;
 
 		score_locked = get_topology_score(ss, ns, pkg0, &pkg0_score);
