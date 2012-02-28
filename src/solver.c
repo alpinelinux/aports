@@ -482,7 +482,7 @@ static void calculate_pkg_preference(struct apk_package *pkg)
 	struct apk_name *name = pkg->name;
 	struct apk_package_state *ps = pkg_to_ps(pkg);
 	struct apk_provider p = APK_PROVIDER_FROM_PACKAGE(pkg);
-	int i;
+	int i, j;
 
 	for (i = 0; i < name->providers->num; i++) {
 		struct apk_provider *p0 = &name->providers->item[i];
@@ -491,7 +491,18 @@ static void calculate_pkg_preference(struct apk_package *pkg)
 		if (compare_absolute_package_preference(&p, p0) < 0)
 			ps->preference++;
 	}
-	/* FIXME: consider all provided names too */
+	for (i = 0; i < pkg->provides->num; i++) {
+		struct apk_dependency *d0 = &pkg->provides->item[i];
+		if (d0->version == &apk_null_blob)
+			continue;
+		for (j = 0; j < d0->name->providers->num; j++) {
+			struct apk_provider *p0 = &d0->name->providers->item[j];
+			if (pkg == p0->pkg)
+				continue;
+			if (compare_absolute_package_preference(&p, p0) < 0)
+				ps->preference++;
+		}
+	}
 }
 
 static void count_name(struct apk_solver_state *ss, struct apk_name *name)
