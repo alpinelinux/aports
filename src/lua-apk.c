@@ -202,25 +202,18 @@ static int Papk_exists(lua_State *L)
 	struct apk_database *db = checkdb(L, 1);
 	const char *depstr = luaL_checkstring(L, 2);
 	struct apk_dependency dep;
-	struct apk_name *name;
 	struct apk_package *pkg;
-	int i;
 	apk_blob_t blob = APK_BLOB_STR(depstr);
 	apk_blob_pull_dep(&blob, db, &dep);
 
 	if (APK_BLOB_IS_NULL(blob) || blob.len > 0)
 		goto ret_nil;
 
-	name = dep.name;
-	for (i = 0; i < name->pkgs->num; i++) {
-		pkg = name->pkgs->item[i];
-		if (pkg->ipkg != NULL)
-			break;
-	}
-	if (i >= name->pkgs->num)
+	pkg = apk_pkg_get_installed(dep.name);
+	if (pkg == NULL)
 		goto ret_nil;
 
-	if (!apk_dep_is_satisfied(&dep, pkg))
+	if (!apk_dep_is_materialized_or_provided(&dep, pkg))
 		goto ret_nil;
 
 	return push_package(L, pkg);

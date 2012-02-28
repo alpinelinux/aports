@@ -1,5 +1,6 @@
 PKGDEPS := openssl zlib
 PKG_CONFIG ?= pkg-config
+LUAAPK ?= yes
 
 # lua module
 ifneq ($(LUAAPK),)
