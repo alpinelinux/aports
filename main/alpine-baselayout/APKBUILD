@@ -5,6 +5,7 @@ pkgrel=3
 pkgdesc="Alpine base dir structure and init scripts"
 url=http://git.alpinelinux.org/cgit/alpine-baselayout
 depends=
+options="!fhs"
 install="$pkgname.pre-upgrade"
 source="http://git.alpinelinux.org/cgit/$pkgname.git/snapshot/$pkgname-$pkgver.tar.bz2
 	0001-blacklist-viafb-and-e_powersaver.patch
