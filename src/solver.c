@@ -96,7 +96,9 @@ struct apk_package_state {
 	unsigned short inherited_upgrade;
 	unsigned short inherited_reinstall;
 
-	unsigned short conflicts;
+	unsigned short must_not;
+	unsigned short incompat_dep;
+
 	unsigned char preference;
 	unsigned handle_install_if : 1;
 	unsigned allowed : 1;
@@ -152,6 +154,7 @@ struct apk_solver_state {
 	struct apk_score best_score;
 
 	unsigned solver_flags : 4;
+	unsigned impossible_state : 1;
 };
 
 typedef enum {
@@ -367,7 +370,7 @@ static int get_topology_score(
 	int score_locked = TRUE, sticky_installed = FALSE;
 
 	score = (struct apk_score) {
-		.conflicts = ps->conflicts,
+		.conflicts = ps->incompat_dep,
 		.preference = ps->preference,
 	};
 
@@ -796,6 +799,7 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 	struct apk_score score;
 	int i;
 
+	ss->impossible_state = 0;
 	ns->name_touched = 1;
 	if (pkg != NULL) {
 		struct apk_package_state *ps = pkg_to_ps(pkg);
@@ -853,6 +857,13 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 		} else {
 			ns->none_excluded = 1;
 		}
+	}
+
+	if (ss->impossible_state) {
+		dbg_printf("%s: %s impossible constraints\n",
+			name->name,
+			(d->type == DECISION_ASSIGN) ? "ASSIGN" : "EXCLUDE");
+		return SOLVERR_PRUNED;
 	}
 
 	if (cmpscore(&ss->score, &ss->best_score) >= 0) {
@@ -1024,13 +1035,18 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		else
 			dbg_printf("%s: locked to empty\n",
 				   name->name);
-		if (!apk_dep_is_provided(dep, &ns->chosen))
+		if (!apk_dep_is_provided(dep, &ns->chosen)) {
+			dbg_printf("%s: constraint violation %d\n",
+				   name->name, strength);
 			ss->score.conflicts += strength;
+			if (dep->conflict)
+				ss->impossible_state = 1;
+		}
 		return;
 	}
 
 	if (name->providers->num == 0) {
-		if (!dep->optional)
+		if (!dep->conflict)
 			ss->score.conflicts += strength;
 		return;
 	}
@@ -1045,10 +1061,14 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 			continue;
 
 		if (!apk_dep_is_provided(dep, p0)) {
-			ps0->conflicts++;
+			if (dep->conflict)
+				ps0->must_not++;
+			else
+				ps0->incompat_dep++;
+
 			dbg_printf(PKG_VER_FMT ": conflicts++ -> %d\n",
 				   PKG_VER_PRINTF(pkg0),
-				   ps0->conflicts);
+				   ps0->must_not);
 			changed |= 1;
 		} else if (requirer_pkg != NULL) {
 			dbg_printf(PKG_VER_FMT ": inheriting flags and pinning from"PKG_VER_FMT"\n",
@@ -1061,7 +1081,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	if (changed)
 		ns->last_touched_decision = ss->num_decisions;
 
-	if (!dep->optional)
+	if (!dep->conflict)
 		ns->requirers += strength;
 
 	promote_name(ss, name);
@@ -1096,7 +1116,7 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 		return;
 	}
 	if (name->providers->num == 0) {
-		if (!dep->optional)
+		if (!dep->conflict)
 			ss->score.conflicts -= strength;
 		return;
 	}
@@ -1111,10 +1131,13 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 			continue;
 
 		if (!apk_dep_is_provided(dep, p0)) {
-			ps0->conflicts--;
+			if (dep->conflict)
+				ps0->must_not--;
+			else
+				ps0->incompat_dep--;
 			dbg_printf(PKG_VER_FMT ": conflicts-- -> %d\n",
 				   PKG_VER_PRINTF(pkg0),
-				   ps0->conflicts);
+				   ps0->must_not);
 		} else if (requirer_pkg != NULL) {
 			dbg_printf(PKG_VER_FMT ": uninheriting flags and pinning from "PKG_VER_FMT"\n",
 				   PKG_VER_PRINTF(pkg0),
@@ -1130,7 +1153,7 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	if (ns->last_touched_decision > ss->num_decisions)
 		ns->last_touched_decision = ss->num_decisions;
 
-	if (!dep->optional)
+	if (!dep->conflict)
 		ns->requirers -= strength;
 
 	demote_name(ss, name);
@@ -1163,7 +1186,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 		struct apk_score pkg0_score;
 
-		if (ps0 == NULL || ps0->locked ||
+		if (ps0 == NULL || ps0->locked || ps0->must_not ||
 		    ss->topology_position < pkg0->topology_hard ||
 		    (pkg0->ipkg == NULL && (!ps0->allowed || !pkg_available(ss->db, pkg0))))
 			continue;
@@ -1274,7 +1297,7 @@ static int expand_branch(struct apk_solver_state *ss)
 
 	if (!ns->none_excluded) {
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
-		if (ps0->conflicts > ns->requirers)
+		if (ps0->incompat_dep > ns->requirers)
 			primary_decision = DECISION_ASSIGN;
 		else
 			primary_decision = DECISION_EXCLUDE;

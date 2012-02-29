@@ -61,7 +61,7 @@ struct apk_dependency {
 	struct apk_name *name;
 	apk_blob_t *version;
 	unsigned short repository_tag;
-	unsigned optional : 1;
+	unsigned conflict : 1;
 	unsigned result_mask : 3;
 };
 APK_ARRAY(apk_dependency_array, struct apk_dependency);

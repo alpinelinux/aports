@@ -177,7 +177,7 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		struct apk_dependency dep = (struct apk_dependency) {
 			.name = apk_db_get_name(db, APK_BLOB_STR(argv[i])),
 			.version = apk_blob_atomize(APK_BLOB_NULL),
-			.result_mask = APK_DEPMASK_REQUIRE,
+			.result_mask = APK_DEPMASK_ANY,
 		};
 
 		if (fctx->flags & FETCH_RECURSIVE) {

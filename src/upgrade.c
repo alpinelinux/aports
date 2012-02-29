@@ -114,7 +114,7 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 		for (i = 0; i < world->num; i++) {
 			struct apk_dependency *dep = &world->item[i];
 			if (dep->result_mask == APK_DEPMASK_CHECKSUM) {
-				dep->result_mask = APK_DEPMASK_REQUIRE;
+				dep->result_mask = APK_DEPMASK_ANY;
 				dep->version = apk_blob_atomize(APK_BLOB_NULL);
 			}
 		}

@@ -75,8 +75,8 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			return -1;
 
 		apk_blob_pull_dep(&b, db, &virtdep);
-		if (APK_BLOB_IS_NULL(b) ||
-		    virtdep.result_mask != APK_DEPMASK_REQUIRE ||
+		if (APK_BLOB_IS_NULL(b) || virtdep.conflict ||
+		    virtdep.result_mask != APK_DEPMASK_ANY ||
 		    virtdep.version != &apk_null_blob) {
 			apk_error("%s: bad package specifier");
 			return -1;
