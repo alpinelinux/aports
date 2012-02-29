@@ -12,6 +12,9 @@
 #ifndef APK_SOLVER_H
 #define APK_SOLVER_H
 
+struct apk_name;
+struct apk_package;
+
 struct apk_solution_entry {
 	struct apk_package *pkg;
 	unsigned short repository_tag : 15;

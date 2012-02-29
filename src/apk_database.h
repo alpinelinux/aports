@@ -18,6 +18,9 @@
 #include "apk_package.h"
 #include "apk_io.h"
 
+#include "apk_provider_data.h"
+#include "apk_solver_data.h"
+
 extern const char * const apk_index_gz;
 extern const char * const apkindex_tar_gz;
 
@@ -78,25 +81,18 @@ struct apk_db_dir_instance {
 	gid_t gid;
 };
 
-#define PROVIDER_FMT		"%s%s"BLOB_FMT
-#define PROVIDER_PRINTF(n,p)	(n)->name, (p)->version->len ? "-" : "", BLOB_PRINTF(*(p)->version)
-
-struct apk_provider {
-	struct apk_package *pkg;
-	apk_blob_t *version;
-};
-APK_ARRAY(apk_provider_array, struct apk_provider);
-
 struct apk_name {
 	apk_hash_node hash_node;
-	union {
-		int state_int;
-		void *state_ptr;
-	};
 	char *name;
 	struct apk_provider_array *providers;
 	struct apk_name_array *rdepends;
 	struct apk_name_array *rinstall_if;
+
+	union {
+		struct apk_solver_name_state ss;
+		void *state_ptr;
+		int state_int;
+	};
 };
 
 struct apk_repository {
