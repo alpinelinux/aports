@@ -41,9 +41,9 @@ struct apk_score {
 			unsigned short preference;
 			unsigned short non_preferred_pinnings;
 			unsigned short non_preferred_actions;
-			unsigned short conflicts;
+			unsigned short unsatisfied;
 #elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-			unsigned short conflicts;
+			unsigned short unsatisfied;
 			unsigned short non_preferred_actions;
 			unsigned short non_preferred_pinnings;
 			unsigned short preference;
@@ -55,8 +55,9 @@ struct apk_score {
 	};
 };
 
+#define SCORE_MAX		(struct apk_score) { .unsatisfied = -1 }
 #define SCORE_FMT		"{%d/%d/%d,%d}"
-#define SCORE_PRINTF(s)		(s)->conflicts, (s)->non_preferred_actions, (s)->non_preferred_pinnings, (s)->preference
+#define SCORE_PRINTF(s)		(s)->unsatisfied, (s)->non_preferred_actions, (s)->non_preferred_pinnings, (s)->preference
 
 enum {
 	DECISION_ASSIGN = 0,
@@ -96,8 +97,8 @@ struct apk_package_state {
 	unsigned short inherited_upgrade;
 	unsigned short inherited_reinstall;
 
-	unsigned short must_not;
-	unsigned short incompat_dep;
+	unsigned short conflicts;
+	unsigned short unsatisfied;
 
 	unsigned char preference;
 	unsigned handle_install_if : 1;
@@ -150,7 +151,7 @@ static void addscore(struct apk_score *a, struct apk_score *b)
 {
 	struct apk_score orig = *a;
 	a->score += b->score;
-	ASSERT(a->conflicts >= orig.conflicts, "Conflict overflow");
+	ASSERT(a->unsatisfied >= orig.unsatisfied, "Unsatisfied overflow");
 	ASSERT(a->non_preferred_actions >= orig.non_preferred_actions, "Preferred action overflow");
 	ASSERT(a->non_preferred_pinnings >= orig.non_preferred_pinnings, "Preferred pinning overflow");
 	ASSERT(a->preference >= orig.preference, "Preference overflow");
@@ -160,7 +161,7 @@ static void subscore(struct apk_score *a, struct apk_score *b)
 {
 	struct apk_score orig = *a;
 	a->score -= b->score;
-	ASSERT(a->conflicts <= orig.conflicts, "Conflict underflow");
+	ASSERT(a->unsatisfied <= orig.unsatisfied, "Unsatisfied underflow");
 	ASSERT(a->non_preferred_actions <= orig.non_preferred_actions, "Preferred action underflow");
 	ASSERT(a->non_preferred_pinnings <= orig.non_preferred_pinnings, "Preferred pinning overflow");
 	ASSERT(a->preference <= orig.preference, "Preference underflow");
@@ -316,7 +317,7 @@ static int get_topology_score(
 	int score_locked = TRUE, sticky_installed = FALSE;
 
 	score = (struct apk_score) {
-		.conflicts = ps->incompat_dep,
+		.unsatisfied = ps->unsatisfied,
 		.preference = ps->preference,
 	};
 
@@ -556,7 +557,7 @@ static int install_if_missing(struct apk_solver_state *ss, struct apk_package *p
 static void get_unassigned_score(struct apk_name *name, struct apk_score *score)
 {
 	*score = (struct apk_score){
-		.conflicts = name->ss.requirers,
+		.unsatisfied = name->ss.requirers,
 		.preference = name->providers->num,
 	};
 }
@@ -965,7 +966,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		if (!apk_dep_is_provided(dep, &name->ss.chosen)) {
 			dbg_printf("%s: constraint violation %d\n",
 				   name->name, strength);
-			ss->score.conflicts += strength;
+			ss->score.unsatisfied += strength;
 			if (dep->conflict)
 				ss->impossible_state = 1;
 		}
@@ -974,7 +975,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 
 	if (name->providers->num == 0) {
 		if (!dep->conflict)
-			ss->score.conflicts += strength;
+			ss->score.unsatisfied += strength;
 		return;
 	}
 
@@ -989,13 +990,13 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 
 		if (!apk_dep_is_provided(dep, p0)) {
 			if (dep->conflict)
-				ps0->must_not++;
+				ps0->conflicts++;
 			else
-				ps0->incompat_dep++;
+				ps0->unsatisfied++;
 
 			dbg_printf(PKG_VER_FMT ": conflicts++ -> %d\n",
 				   PKG_VER_PRINTF(pkg0),
-				   ps0->must_not);
+				   ps0->conflicts);
 			changed |= 1;
 		} else if (requirer_pkg != NULL) {
 			dbg_printf(PKG_VER_FMT ": inheriting flags and pinning from"PKG_VER_FMT"\n",
@@ -1037,12 +1038,12 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 				   name->name);
 		}
 		if (!apk_dep_is_provided(dep, &name->ss.chosen))
-			ss->score.conflicts -= strength;
+			ss->score.unsatisfied -= strength;
 		return;
 	}
 	if (name->providers->num == 0) {
 		if (!dep->conflict)
-			ss->score.conflicts -= strength;
+			ss->score.unsatisfied -= strength;
 		return;
 	}
 
@@ -1057,12 +1058,12 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 
 		if (!apk_dep_is_provided(dep, p0)) {
 			if (dep->conflict)
-				ps0->must_not--;
+				ps0->conflicts--;
 			else
-				ps0->incompat_dep--;
+				ps0->unsatisfied--;
 			dbg_printf(PKG_VER_FMT ": conflicts-- -> %d\n",
 				   PKG_VER_PRINTF(pkg0),
-				   ps0->must_not);
+				   ps0->conflicts);
 		} else if (requirer_pkg != NULL) {
 			dbg_printf(PKG_VER_FMT ": uninheriting flags and pinning from "PKG_VER_FMT"\n",
 				   PKG_VER_PRINTF(pkg0),
@@ -1089,7 +1090,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_provider *next_p = NULL, *best_p = NULL;
 	unsigned int next_topology = 0, options = 0;
 	int i, j, score_locked = FALSE;
-	struct apk_score best_score = (struct apk_score) { .conflicts = -1 };
+	struct apk_score best_score = SCORE_MAX;
 
 	if (!name->ss.none_excluded) {
 		struct apk_score minscore;
@@ -1110,7 +1111,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
 		struct apk_score pkg0_score;
 
-		if (ps0 == NULL || ps0->locked || ps0->must_not ||
+		if (ps0 == NULL || ps0->locked || ps0->conflicts ||
 		    ss->topology_position < pkg0->topology_hard ||
 		    (pkg0->ipkg == NULL && (!ps0->allowed || !pkg_available(ss->db, pkg0))))
 			continue;
@@ -1223,7 +1224,7 @@ static int expand_branch(struct apk_solver_state *ss)
 
 	if (!name->ss.none_excluded) {
 		struct apk_package_state *ps0 = pkg_to_ps(pkg0);
-		if (ps0->incompat_dep > name->ss.requirers)
+		if (ps0->unsatisfied > name->ss.requirers)
 			primary_decision = DECISION_ASSIGN;
 		else
 			primary_decision = DECISION_EXCLUDE;
@@ -1464,7 +1465,7 @@ int apk_solver_solve(struct apk_database *db,
 	ss->db = db;
 	ss->solver_flags = solver_flags;
 	ss->topology_position = -1;
-	ss->best_score = (struct apk_score){ .conflicts = -1 };
+	ss->best_score = SCORE_MAX;
 	list_init(&ss->unsolved_list_head);
 
 	for (i = 0; i < world->num; i++) {
@@ -1528,7 +1529,7 @@ int apk_solver_solve(struct apk_database *db,
 	} else {
 		apk_solution_array_free(&ss->best_solution);
 	}
-	i = ss->best_score.conflicts;
+	i = ss->best_score.unsatisfied;
 	apk_solver_free(db);
 	free(ss->decisions);
 	free(ss);
