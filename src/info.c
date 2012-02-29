@@ -30,12 +30,13 @@ struct info_ctx {
 #define APK_INFO_URL		0x02
 #define APK_INFO_SIZE		0x04
 #define APK_INFO_DEPENDS	0x08
-#define APK_INFO_RDEPENDS	0x10
-#define APK_INFO_CONTENTS	0x20
-#define APK_INFO_TRIGGERS	0x40
-#define APK_INFO_INSTALL_IF	0x80
-#define APK_INFO_RINSTALL_IF	0x100
-#define APK_INFO_REPLACES	0x200
+#define APK_INFO_PROVIDES	0x10
+#define APK_INFO_RDEPENDS	0x20
+#define APK_INFO_CONTENTS	0x40
+#define APK_INFO_TRIGGERS	0x80
+#define APK_INFO_INSTALL_IF	0x100
+#define APK_INFO_RINSTALL_IF	0x200
+#define APK_INFO_REPLACES	0x400
 
 static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
 {
@@ -183,6 +184,26 @@ static void info_print_depends(struct apk_database *db, struct apk_package *pkg)
 	for (i = 0; i < pkg->depends->num; i++) {
 		apk_blob_t b = APK_BLOB_BUF(dep);
 		apk_blob_push_dep(&b, db, &pkg->depends->item[i]);
+		apk_blob_push_blob(&b, separator);
+		b = apk_blob_pushed(APK_BLOB_BUF(dep), b);
+		fwrite(b.ptr, b.len, 1, stdout);
+	}
+}
+
+static void info_print_provides(struct apk_database *db, struct apk_package *pkg)
+{
+	apk_blob_t separator = APK_BLOB_STR(apk_verbosity > 1 ? " " : "\n");
+	char dep[256];
+	int i;
+
+	if (apk_verbosity == 1)
+		printf(PKG_VER_FMT " provides:\n",
+		       PKG_VER_PRINTF(pkg));
+	if (apk_verbosity > 1)
+		printf("%s: ", pkg->name->name);
+	for (i = 0; i < pkg->provides->num; i++) {
+		apk_blob_t b = APK_BLOB_BUF(dep);
+		apk_blob_push_dep(&b, db, &pkg->provides->item[i]);
 		apk_blob_push_blob(&b, separator);
 		b = apk_blob_pushed(APK_BLOB_BUF(dep), b);
 		fwrite(b.ptr, b.len, 1, stdout);
@@ -339,6 +360,7 @@ static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 		info_print_url,
 		info_print_size,
 		info_print_depends,
+		info_print_provides,
 		info_print_required_by,
 		info_print_contents,
 		info_print_triggers,
@@ -402,6 +424,9 @@ static int info_parse(void *ctx, struct apk_db_options *dbopts,
 	case 'R':
 		ictx->subaction_mask |= APK_INFO_DEPENDS;
 		break;
+	case 'p':
+		ictx->subaction_mask |= APK_INFO_PROVIDES;
+		break;
 	case 'r':
 		ictx->subaction_mask |= APK_INFO_RDEPENDS;
 		break;
@@ -461,6 +486,7 @@ static struct apk_option info_options[] = {
 	{ 'e', "installed",	"Check if PACKAGE is installed" },
 	{ 'W', "who-owns",	"Print the package owning the specified file" },
 	{ 'R', "depends",	"List packages that the PACKAGE depends on" },
+	{ 'p', "provides",	"List virtual packages provided by PACKAGE" },
 	{ 'r', "rdepends",	"List all packages depending on PACKAGE" },
 	{ 0x10000, "replaces",	"List packages whom files PACKAGE might replace" },
 	{ 'i', "install-if",	"List the PACKAGE's install-if rule" },
