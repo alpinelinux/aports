@@ -501,7 +501,10 @@ static void sort_soft_dependencies(struct apk_solver_state *ss,
 static void update_allowed(struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_package_state *ps = pkg_to_ps(pkg);
-	if (pkg->repos & get_pinning_mask_repos(db, ps->allowed_pinning | APK_DEFAULT_PINNING_MASK))
+	unsigned int repos;
+
+	repos = pkg->repos | (pkg->ipkg ? db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
+	if (repos & get_pinning_mask_repos(db, ps->allowed_pinning | APK_DEFAULT_PINNING_MASK))
 		ps->allowed = 1;
 	else
 		ps->allowed = 0;
@@ -1164,8 +1167,8 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	name->ss.chosen = *next_p;
 	name->ss.preferred_chosen = (best_p == next_p);
 
-	dbg_printf("reconsider_name: %s: next_pkg=%p [ version="BLOB_FMT" ]\n",
-		name->name, next_p->pkg, BLOB_PRINTF(*name->ss.chosen.version));
+	dbg_printf("reconsider_name: %s: next_pkg="PKG_VER_FMT", preferred_chosen=%d\n",
+		name->name, PKG_VER_PRINTF(next_p->pkg), name->ss.preferred_chosen);
 
 	return SOLVERR_SOLUTION;
 }
