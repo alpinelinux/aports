@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.1.1
-pkgrel=3
+pkgrel=4
 pkgdesc="Alpine base dir structure and init scripts"
 url=http://git.alpinelinux.org/cgit/alpine-baselayout
 depends=
@@ -28,7 +28,8 @@ package() {
 	cd "$_builddir"
 	make install PREFIX= DESTDIR="$pkgdir" || return 1
 	mkdir "$pkgdir"/run
-	rm -rf "$pkgdir"/etc/issue "$pkgdir"/usr/share/udhcpc
+	rm -rf "$pkgdir"/etc/issue "$pkgdir"/usr/share/udhcpc \
+		"$pkgdir"/etc/init.d/vlan
 }
 md5sums="4f47c32a0e88ae0bd4673a07478525c0  alpine-baselayout-2.1.1.tar.bz2
 3e219db536b13811c34e03c9c32229cb  0001-blacklist-viafb-and-e_powersaver.patch"
