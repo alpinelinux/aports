@@ -58,6 +58,7 @@ CFLAGS_apk-test.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\" -DOPENSSL_NO_ENGINE -DTES
 progs-$(STATIC)		+= apk.static
 apk.static-objs		:= $(filter-out apk.o,$(apk-objs)) apk-static.o
 LDFLAGS_apk.static	:= -static
+LIBS_apk.static		:= -Wl,--as-needed -ldl -Wl,--no-as-needed
 LDFLAGS_apk		+= -nopie -L$(obj)
 LDFLAGS_apk-test	+= -nopie -L$(obj)
 
