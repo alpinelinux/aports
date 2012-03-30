@@ -71,7 +71,7 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 {
 	struct apk_name *name;
 	struct apk_dependency dep;
-	int i, j, ok = 0;
+	int i, j, ok, rc = 0;
 
 	for (i = 0; i < argc; i++) {
 		apk_blob_t b = APK_BLOB_STR(argv[i]);
@@ -84,6 +84,7 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 		if (name == NULL)
 			continue;
 
+		ok = 0;
 		for (j = 0; j < name->providers->num; j++) {
 			struct apk_provider *p = &name->providers->item[j];
 			if (p->pkg->ipkg == NULL)
@@ -91,11 +92,13 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 			if (!apk_dep_is_provided(&dep, p))
 				continue;
 			verbose_print_pkg(p->pkg, 0);
+			ok = 1;
 		}
-		ok++;
+		if (!ok)
+			rc++;
 	}
 
-	return argc - ok;
+	return rc;
 }
 
 static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
