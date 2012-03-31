@@ -1116,7 +1116,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 
 		if (ps0 == NULL || ps0->locked || ps0->conflicts ||
 		    ss->topology_position < pkg0->topology_hard ||
-		    (pkg0->ipkg == NULL && pkg->filename == NULL &&
+		    (pkg0->ipkg == NULL && pkg0->filename == NULL &&
 		     (!ps0->allowed || !pkg_available(ss->db, pkg0))))
 			continue;
 
