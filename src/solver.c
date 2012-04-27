@@ -542,7 +542,7 @@ static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependenc
 		func(ss, &deps->item[i]);
 }
 
-static int install_if_missing(struct apk_solver_state *ss, struct apk_package *pkg)
+static int install_if_missing(struct apk_solver_state *ss, struct apk_package *pkg, struct apk_name *exclude)
 {
 	int i, missing = 0;
 
@@ -550,7 +550,8 @@ static int install_if_missing(struct apk_solver_state *ss, struct apk_package *p
 		struct apk_dependency *dep = &pkg->install_if->item[i];
 		struct apk_name *name = dep->name;
 
-		if (!name->ss.locked || !apk_dep_is_provided(dep, &name->ss.chosen))
+		if (name == exclude ||
+		    !name->ss.locked || !apk_dep_is_provided(dep, &name->ss.chosen))
 			missing++;
 	}
 
@@ -674,13 +675,14 @@ static void trigger_install_if(struct apk_solver_state *ss,
 {
 	struct apk_name *name = pkg->name;
 
-	if (install_if_missing(ss, pkg) == 0) {
-		dbg_printf("trigger_install_if: " PKG_VER_FMT " triggered\n",
-			   PKG_VER_PRINTF(pkg));
-		name->ss.install_ifs++;
-		inherit_package_state(ss->db, pkg, parent_pkg);
-		promote_name(ss, name);
-	}
+	if (install_if_missing(ss, pkg, NULL) != 0)
+		return;
+
+	dbg_printf("trigger_install_if: " PKG_VER_FMT " triggered\n",
+		   PKG_VER_PRINTF(pkg));
+	name->ss.install_ifs++;
+	inherit_package_state(ss->db, pkg, parent_pkg);
+	promote_name(ss, name);
 }
 
 static void untrigger_install_if(struct apk_solver_state *ss,
@@ -689,13 +691,14 @@ static void untrigger_install_if(struct apk_solver_state *ss,
 {
 	struct apk_name *name = pkg->name;
 
-	if (install_if_missing(ss, pkg) != 1) {
-		dbg_printf("untrigger_install_if: " PKG_VER_FMT " no longer triggered\n",
-			   PKG_VER_PRINTF(pkg));
-		name->ss.install_ifs--;
-		uninherit_package_state(ss->db, pkg, parent_pkg);
-		demote_name(ss, name);
-	}
+	if (install_if_missing(ss, pkg, parent_pkg->name) != 0)
+		return;
+
+	dbg_printf("untrigger_install_if: " PKG_VER_FMT " no longer triggered\n",
+		   PKG_VER_PRINTF(pkg));
+	name->ss.install_ifs--;
+	uninherit_package_state(ss->db, pkg, parent_pkg);
+	demote_name(ss, name);
 }
 
 static inline void assign_name(
@@ -1254,7 +1257,7 @@ static int expand_branch(struct apk_solver_state *ss)
 		else
 			branching_point = BRANCH_YES;
 	} else if (name->ss.requirers == 0 && name->ss.install_ifs != 0 &&
-		   install_if_missing(ss, pkg0)) {
+		   install_if_missing(ss, pkg0, NULL)) {
 		/* not directly required, and package specific
 		 * install_if never triggered */
 		primary_decision = DECISION_EXCLUDE;
