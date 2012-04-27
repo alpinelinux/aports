@@ -750,19 +750,21 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 			pkg->provides->item[i].name->ss.name_touched = 1;
 
 		ps->locked = 1;
-		ps->handle_install_if = 0;
+
+		if (d->type == DECISION_ASSIGN &&
+		    ps->topology_soft < ss->topology_position) {
+			ps->handle_install_if = 1;
+			dbg_printf("triggers due to " PKG_VER_FMT "\n",
+				   PKG_VER_PRINTF(pkg));
+		} else {
+			ps->handle_install_if = 0;
+		}
 
 		if (d->topology_position) {
-			if (ps->topology_soft < ss->topology_position) {
-				if (d->type == DECISION_ASSIGN) {
-					ps->handle_install_if = 1;
-					dbg_printf("triggers due to " PKG_VER_FMT "\n",
-						   PKG_VER_PRINTF(pkg));
-				}
+			if (ps->topology_soft < ss->topology_position)
 				ss->topology_position = ps->topology_soft;
-			} else {
+			else
 				ss->topology_position = pkg->topology_hard;
-			}
 		}
 
 		if (d->type == DECISION_ASSIGN) {
@@ -777,7 +779,8 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 			}
 
 			foreach_dependency(ss, pkg->depends, apply_constraint);
-			foreach_rinstall_if_pkg(ss, pkg, trigger_install_if);
+			if (ps->handle_install_if)
+				foreach_rinstall_if_pkg(ss, pkg, trigger_install_if);
 		}
 	} else {
 		dbg_printf("-->apply_decision: %s %s NOTHING\n",
@@ -844,7 +847,8 @@ static void undo_decision(struct apk_solver_state *ss,
 			pkg->provides->item[i].name->ss.name_touched = 1;
 
 		if (name->ss.locked) {
-			foreach_rinstall_if_pkg(ss, pkg, untrigger_install_if);
+			if (ps->handle_install_if)
+				foreach_rinstall_if_pkg(ss, pkg, untrigger_install_if);
 			foreach_dependency(ss, pkg->depends, undo_constraint);
 
 			get_topology_score(ss, pkg, &score);
