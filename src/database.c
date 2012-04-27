@@ -353,7 +353,6 @@ struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name)
 				.protected = ppath->protected,
 				.symlinks_only = ppath->symlinks_only,
 			};
-			dir->has_protected_children |= ppath->protected;
 		} else {
 			if (fnmatch(ppath->relative_pattern, relative_name, FNM_PATHNAME) != 0)
 				continue;
@@ -361,6 +360,7 @@ struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name)
 			dir->protected = ppath->protected;
 			dir->symlinks_only = ppath->symlinks_only;
 		}
+		dir->has_protected_children |= ppath->protected;
 	}
 
 	return dir;
