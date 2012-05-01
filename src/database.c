@@ -1181,6 +1181,12 @@ static int add_protected_path(void *ctx, apk_blob_t blob)
 		break;
 	}
 
+	/* skip leading and trailing path separators */
+	while (blob.len && blob.ptr[0] == '/')
+		blob.ptr++, blob.len--;
+	while (blob.len && blob.ptr[blob.len-1] == '/')
+		blob.len--;
+
 	*apk_protected_path_array_add(&db->protected_paths) = (struct apk_protected_path) {
 		.relative_pattern = apk_blob_cstr(blob),
 		.protected = protected,
