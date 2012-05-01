@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <fnmatch.h>
 #include <sys/stat.h>
 #include "apk_applet.h"
 #include "apk_database.h"
@@ -199,14 +200,28 @@ recurse_check:
 		atctx->pathlen--;
 	} else {
 		struct apk_db_file *dbf;
+		struct apk_protected_path_array *ppaths = dbd->protected_paths;
+		int i, protected = dbd->protected, symlinks_only = dbd->symlinks_only;
+
+		/* inherit file's protection mask */
+		for (i = 0; i < ppaths->num; i++) {
+			struct apk_protected_path *ppath = &ppaths->item[i];
+			char *slash = strchr(ppath->relative_pattern, '/');
+			if (slash == NULL) {
+				if (fnmatch(ppath->relative_pattern, name, FNM_PATHNAME) != 0)
+					continue;
+				protected = ppath->protected;
+				symlinks_only = ppath->symlinks_only;
+			}
+		}
 
 		if (actx->mode == MODE_BACKUP) {
-			if (!dbd->protected)
+			if (!protected)
 				goto done;
-			if (dbd->symlinks_only && !S_ISLNK(fi.mode))
+			if (symlinks_only && !S_ISLNK(fi.mode))
 				goto done;
 		} else {
-			if (dbd->protected)
+			if (protected)
 				goto done;
 		}
 
