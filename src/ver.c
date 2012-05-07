@@ -130,6 +130,10 @@ static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *
 	opstr = apk_version_op_string(r);
 	if ((ictx->limchars != NULL) && (strchr(ictx->limchars, *opstr) == NULL))
 		return;
+	if (apk_verbosity <= 0) {
+		printf("%s\n", pkg->name->name);
+		return;
+	}
 	snprintf(pkgname, sizeof(pkgname), PKG_VER_FMT,
 		 PKG_VER_PRINTF(pkg));
 	printf("%-40s%s " BLOB_FMT, pkgname, opstr, BLOB_PRINTF(*latest));
