@@ -125,7 +125,8 @@ static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *
 			break;
 		}
 	}
-	r = apk_version_compare_blob(*pkg->version, *latest);
+	r = latest->len ? apk_version_compare_blob(*pkg->version, *latest)
+			: APK_VERSION_UNKNOWN;
 	opstr = apk_version_op_string(r);
 	if ((ictx->limchars != NULL) && (strchr(ictx->limchars, *opstr) == NULL))
 		return;

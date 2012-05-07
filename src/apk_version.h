@@ -14,6 +14,7 @@
 
 #include "apk_blob.h"
 
+#define APK_VERSION_UNKNOWN		0
 #define APK_VERSION_EQUAL		1
 #define APK_VERSION_LESS		2
 #define APK_VERSION_GREATER		4
