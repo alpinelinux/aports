@@ -161,7 +161,7 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	if (ictx->limchars) {
 		if (strlen(ictx->limchars) == 0)
 			ictx->limchars = NULL;
-	} else if (argc == 0) {
+	} else if (argc == 0 && apk_verbosity == 1) {
 		ictx->limchars = "<";
 	}
 
