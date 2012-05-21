@@ -11386,10 +11386,67 @@ index 98391db..8f6984e 100644
  
  static inline void native_set_pte_atomic(pte_t *ptep, pte_t pte)
 diff --git a/arch/x86/include/asm/pgtable-3level.h b/arch/x86/include/asm/pgtable-3level.h
-index effff47..f9e4035 100644
+index effff47..bbb8295 100644
 --- a/arch/x86/include/asm/pgtable-3level.h
 +++ b/arch/x86/include/asm/pgtable-3level.h
-@@ -38,12 +38,16 @@ static inline void native_set_pte_atomic(pte_t *ptep, pte_t pte)
+@@ -31,6 +31,56 @@ static inline void native_set_pte(pte_t *ptep, pte_t pte)
+ 	ptep->pte_low = pte.pte_low;
+ }
+ 
++#define  __HAVE_ARCH_READ_PMD_ATOMIC
++/*
++ * pte_offset_map_lock on 32bit PAE kernels was reading the pmd_t with
++ * a "*pmdp" dereference done by gcc. Problem is, in certain places
++ * where pte_offset_map_lock is called, concurrent page faults are
++ * allowed, if the mmap_sem is hold for reading. An example is mincore
++ * vs page faults vs MADV_DONTNEED. On the page fault side
++ * pmd_populate rightfully does a set_64bit, but if we're reading the
++ * pmd_t with a "*pmdp" on the mincore side, a SMP race can happen
++ * because gcc will not read the 64bit of the pmd atomically. To fix
++ * this all places running pmd_offset_map_lock() while holding the
++ * mmap_sem in read mode, shall read the pmdp pointer using this
++ * function to know if the pmd is null nor not, and in turn to know if
++ * they can run pmd_offset_map_lock or pmd_trans_huge or other pmd
++ * operations.
++ *
++ * Without THP if the mmap_sem is hold for reading, the
++ * pmd can only transition from null to not null while read_pmd_atomic runs.
++ * So there's no need of literally reading it atomically.
++ *
++ * With THP if the mmap_sem is hold for reading, the pmd can become
++ * THP or null or point to a pte (and in turn become "stable") at any
++ * time under read_pmd_atomic, so it's mandatory to read it atomically
++ * with cmpxchg8b.
++ */
++#ifndef CONFIG_TRANSPARENT_HUGEPAGE
++static inline pmd_t read_pmd_atomic(pmd_t *pmdp)
++{
++	pmdval_t ret;
++	u32 *tmp = (u32 *)pmdp;
++
++	ret = (pmdval_t) (*tmp);
++	if (ret) {
++		/*
++		 * If the low part is null, we must not read the high part
++		 * or we can end up with a partial pmd.
++		 */
++		smp_rmb();
++		ret |= ((pmdval_t)*(tmp + 1)) << 32;
++	}
++
++	return __pmd(ret);
++}
++#else /* CONFIG_TRANSPARENT_HUGEPAGE */
++static inline pmd_t read_pmd_atomic(pmd_t *pmdp)
++{
++	return __pmd(atomic64_read((atomic64_t *)pmdp));
++}
++#endif /* CONFIG_TRANSPARENT_HUGEPAGE */
++
+ static inline void native_set_pte_atomic(pte_t *ptep, pte_t pte)
+ {
+ 	set_64bit((unsigned long long *)(ptep), native_pte_val(pte));
+@@ -38,12 +88,16 @@ static inline void native_set_pte_atomic(pte_t *ptep, pte_t pte)
  
  static inline void native_set_pmd(pmd_t *pmdp, pmd_t pmd)
  {
@@ -24949,18 +25006,19 @@ index 8ecbb4b..a269cab 100644
  	}
  	if (mm->get_unmapped_area == arch_get_unmapped_area)
 diff --git a/arch/x86/mm/init.c b/arch/x86/mm/init.c
-index 6cabf65..77e9c1c 100644
+index 6cabf65..00139c4 100644
 --- a/arch/x86/mm/init.c
 +++ b/arch/x86/mm/init.c
-@@ -17,6 +17,7 @@
+@@ -17,6 +17,8 @@
  #include <asm/tlb.h>
  #include <asm/proto.h>
  #include <asm/dma.h>		/* for MAX_DMA_PFN */
 +#include <asm/desc.h>
++#include <asm/bios_ebda.h>
  
  unsigned long __initdata pgt_buf_start;
  unsigned long __meminitdata pgt_buf_end;
-@@ -33,7 +34,7 @@ int direct_gbpages
+@@ -33,7 +35,7 @@ int direct_gbpages
  static void __init find_early_table_space(unsigned long end, int use_pse,
  					  int use_gbpages)
  {
@@ -24969,8 +25027,16 @@ index 6cabf65..77e9c1c 100644
  	phys_addr_t base;
  
  	puds = (end + PUD_SIZE - 1) >> PUD_SHIFT;
-@@ -314,8 +315,29 @@ unsigned long __init_refok init_memory_mapping(unsigned long start,
+@@ -312,10 +314,37 @@ unsigned long __init_refok init_memory_mapping(unsigned long start,
+  * Access has to be given to non-kernel-ram areas as well, these contain the PCI
+  * mmio resources as well as potential bios/acpi data regions.
   */
++
++#ifdef CONFIG_GRKERNSEC_KMEM
++static unsigned int ebda_start __read_only;
++static unsigned int ebda_end __read_only;
++#endif
++
  int devmem_is_allowed(unsigned long pagenr)
  {
 +#ifdef CONFIG_GRKERNSEC_KMEM
@@ -24978,7 +25044,7 @@ index 6cabf65..77e9c1c 100644
 +	if (!pagenr)
 +		return 1;
 +	/* allow EBDA */
-+	if ((0x9f000 >> PAGE_SHIFT) == pagenr)
++	if (pagenr >= ebda_start && pagenr < ebda_end)
 +		return 1;
 +#else
 +	if (!pagenr)
@@ -25000,18 +25066,48 @@ index 6cabf65..77e9c1c 100644
  	if (iomem_is_exclusive(pagenr << PAGE_SHIFT))
  		return 0;
  	if (!page_is_ram(pagenr))
-@@ -374,6 +396,86 @@ void free_init_pages(char *what, unsigned long begin, unsigned long end)
+@@ -372,8 +401,116 @@ void free_init_pages(char *what, unsigned long begin, unsigned long end)
+ #endif
+ }
  
++#ifdef CONFIG_GRKERNSEC_KMEM
++static inline void gr_init_ebda(void)
++{
++	unsigned int ebda_addr;
++	unsigned int ebda_size = 0;
++
++	ebda_addr = get_bios_ebda();
++	if (ebda_addr) {
++		ebda_size = *(unsigned char *)phys_to_virt(ebda_addr);
++		ebda_size <<= 10;
++	}
++	if (ebda_addr && ebda_size) {
++		ebda_start = ebda_addr >> PAGE_SHIFT;
++		ebda_end = min(PAGE_ALIGN(ebda_addr + ebda_size), 0xa0000) >> PAGE_SHIFT;
++	} else {
++		ebda_start = 0x9f000 >> PAGE_SHIFT;
++		ebda_end = 0xa0000 >> PAGE_SHIFT;
++	}
++}
++#else
++static inline void gr_init_ebda(void) { }
++#endif
++
  void free_initmem(void)
  {
-+
 +#ifdef CONFIG_PAX_KERNEXEC
 +#ifdef CONFIG_X86_32
 +	/* PaX: limit KERNEL_CS to actual size */
 +	unsigned long addr, limit;
 +	struct desc_struct d;
 +	int cpu;
++#endif
++#endif
 +
++	gr_init_ebda();
++
++#ifdef CONFIG_PAX_KERNEXEC
++#ifdef CONFIG_X86_32
 +	limit = paravirt_enabled() ? ktva_ktla(0xffffffff) : (unsigned long)&_etext;
 +	limit = (limit - 1UL) >> PAGE_SHIFT;
 +
@@ -29479,9 +29575,18 @@ index 211fc44..c5116f1 100644
  	mdev->bm_writ_cnt  =
  	mdev->read_cnt     =
 diff --git a/drivers/block/drbd/drbd_nl.c b/drivers/block/drbd/drbd_nl.c
-index af2a250..219c74b 100644
+index af2a250..0fdeb75 100644
 --- a/drivers/block/drbd/drbd_nl.c
 +++ b/drivers/block/drbd/drbd_nl.c
+@@ -2297,7 +2297,7 @@ static void drbd_connector_callback(struct cn_msg *req, struct netlink_skb_parms
+ 		return;
+ 	}
+ 
+-	if (!cap_raised(current_cap(), CAP_SYS_ADMIN)) {
++	if (!capable(CAP_SYS_ADMIN)) {
+ 		retcode = ERR_PERM;
+ 		goto fail;
+ 	}
 @@ -2359,7 +2359,7 @@ static void drbd_connector_callback(struct cn_msg *req, struct netlink_skb_parms
  	module_put(THIS_MODULE);
  }
@@ -33774,6 +33879,19 @@ index 1ce84ed..0fdd40a 100644
  		if (!*param->name) {
  			DMWARN("name not supplied when creating device");
  			return -EINVAL;
+diff --git a/drivers/md/dm-log-userspace-transfer.c b/drivers/md/dm-log-userspace-transfer.c
+index 1f23e04..08d9a20 100644
+--- a/drivers/md/dm-log-userspace-transfer.c
++++ b/drivers/md/dm-log-userspace-transfer.c
+@@ -134,7 +134,7 @@ static void cn_ulog_callback(struct cn_msg *msg, struct netlink_skb_parms *nsp)
+ {
+ 	struct dm_ulog_request *tfr = (struct dm_ulog_request *)(msg + 1);
+ 
+-	if (!cap_raised(current_cap(), CAP_SYS_ADMIN))
++	if (!capable(CAP_SYS_ADMIN))
+ 		return;
+ 
+ 	spin_lock(&receiving_list_lock);
 diff --git a/drivers/md/dm-raid1.c b/drivers/md/dm-raid1.c
 index 9bfd057..5373ff3 100644
 --- a/drivers/md/dm-raid1.c
@@ -35603,6 +35721,23 @@ index c82d444..0007fb4 100644
   	{ "100/10M Ethernet PCI Adapter",	HAS_MII_XCVR },
  	{ "100/10M Ethernet PCI Adapter",	HAS_CHIP_XCVR },
  	{ "1000/100/10M Ethernet PCI Adapter",	HAS_MII_XCVR },
+diff --git a/drivers/net/ethernet/intel/e1000/e1000_main.c b/drivers/net/ethernet/intel/e1000/e1000_main.c
+index b444f21..b72d976 100644
+--- a/drivers/net/ethernet/intel/e1000/e1000_main.c
++++ b/drivers/net/ethernet/intel/e1000/e1000_main.c
+@@ -492,7 +492,11 @@ out:
+ static void e1000_down_and_stop(struct e1000_adapter *adapter)
+ {
+ 	set_bit(__E1000_DOWN, &adapter->flags);
+-	cancel_work_sync(&adapter->reset_task);
++
++	/* Only kill reset task if adapter is not resetting */
++	if (!test_bit(__E1000_RESETTING, &adapter->flags))
++		cancel_work_sync(&adapter->reset_task);
++
+ 	cancel_delayed_work_sync(&adapter->watchdog_task);
+ 	cancel_delayed_work_sync(&adapter->phy_info_task);
+ 	cancel_delayed_work_sync(&adapter->fifo_stall_task);
 diff --git a/drivers/net/ethernet/intel/e1000e/80003es2lan.c b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
 index e1159e5..e18684d 100644
 --- a/drivers/net/ethernet/intel/e1000e/80003es2lan.c
@@ -42391,7 +42526,7 @@ index a40c05e..785c583 100644
  	return count;
  }
 diff --git a/drivers/video/uvesafb.c b/drivers/video/uvesafb.c
-index 8408543..357841c 100644
+index 8408543..d6f20f1 100644
 --- a/drivers/video/uvesafb.c
 +++ b/drivers/video/uvesafb.c
 @@ -19,6 +19,7 @@
@@ -42402,6 +42537,15 @@ index 8408543..357841c 100644
  #include <video/edid.h>
  #include <video/uvesafb.h>
  #ifdef CONFIG_X86
+@@ -73,7 +74,7 @@ static void uvesafb_cn_callback(struct cn_msg *msg, struct netlink_skb_parms *ns
+ 	struct uvesafb_task *utask;
+ 	struct uvesafb_ktask *task;
+ 
+-	if (!cap_raised(current_cap(), CAP_SYS_ADMIN))
++	if (!capable(CAP_SYS_ADMIN))
+ 		return;
+ 
+ 	if (msg->seq >= UVESAFB_TASKS_MAX)
 @@ -121,7 +122,7 @@ static int uvesafb_helper_start(void)
  		NULL,
  	};
@@ -48031,6 +48175,96 @@ index f649fba..236bf92 100644
  }
  
  void nfs_fattr_init(struct nfs_fattr *fattr)
+diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
+index 2612223..e0ab779 100644
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -3588,19 +3588,23 @@ static ssize_t __nfs4_get_acl_uncached(struct inode *inode, void *buf, size_t bu
+ 	if (npages == 0)
+ 		npages = 1;
+ 
++	/* Add an extra page to handle the bitmap returned */
++	npages++;
++
+ 	for (i = 0; i < npages; i++) {
+ 		pages[i] = alloc_page(GFP_KERNEL);
+ 		if (!pages[i])
+ 			goto out_free;
+ 	}
+-	if (npages > 1) {
+-		/* for decoding across pages */
+-		res.acl_scratch = alloc_page(GFP_KERNEL);
+-		if (!res.acl_scratch)
+-			goto out_free;
+-	}
++
++	/* for decoding across pages */
++	res.acl_scratch = alloc_page(GFP_KERNEL);
++	if (!res.acl_scratch)
++		goto out_free;
++
+ 	args.acl_len = npages * PAGE_SIZE;
+ 	args.acl_pgbase = 0;
++
+ 	/* Let decode_getfacl know not to fail if the ACL data is larger than
+ 	 * the page we send as a guess */
+ 	if (buf == NULL)
+diff --git a/fs/nfs/nfs4xdr.c b/fs/nfs/nfs4xdr.c
+index 33bd8d0..9b26eaf 100644
+--- a/fs/nfs/nfs4xdr.c
++++ b/fs/nfs/nfs4xdr.c
+@@ -4975,11 +4975,19 @@ static int decode_getacl(struct xdr_stream *xdr, struct rpc_rqst *req,
+ 		 bitmap[3] = {0};
+ 	struct kvec *iov = req->rq_rcv_buf.head;
+ 	int status;
++	size_t page_len = xdr->buf->page_len;
+ 
+ 	res->acl_len = 0;
+ 	if ((status = decode_op_hdr(xdr, OP_GETATTR)) != 0)
+ 		goto out;
++
+ 	bm_p = xdr->p;
++	res->acl_data_offset = be32_to_cpup(bm_p) + 2;
++	res->acl_data_offset <<= 2;
++	/* Check if the acl data starts beyond the allocated buffer */
++	if (res->acl_data_offset > page_len)
++		return -ERANGE;
++
+ 	if ((status = decode_attr_bitmap(xdr, bitmap)) != 0)
+ 		goto out;
+ 	if ((status = decode_attr_length(xdr, &attrlen, &savep)) != 0)
+@@ -4989,28 +4997,24 @@ static int decode_getacl(struct xdr_stream *xdr, struct rpc_rqst *req,
+ 		return -EIO;
+ 	if (likely(bitmap[0] & FATTR4_WORD0_ACL)) {
+ 		size_t hdrlen;
+-		u32 recvd;
+ 
+ 		/* The bitmap (xdr len + bitmaps) and the attr xdr len words
+ 		 * are stored with the acl data to handle the problem of
+ 		 * variable length bitmaps.*/
+ 		xdr->p = bm_p;
+-		res->acl_data_offset = be32_to_cpup(bm_p) + 2;
+-		res->acl_data_offset <<= 2;
+ 
+ 		/* We ignore &savep and don't do consistency checks on
+ 		 * the attr length.  Let userspace figure it out.... */
+ 		hdrlen = (u8 *)xdr->p - (u8 *)iov->iov_base;
+ 		attrlen += res->acl_data_offset;
+-		recvd = req->rq_rcv_buf.len - hdrlen;
+-		if (attrlen > recvd) {
++		if (attrlen > page_len) {
+ 			if (res->acl_flags & NFS4_ACL_LEN_REQUEST) {
+ 				/* getxattr interface called with a NULL buf */
+ 				res->acl_len = attrlen;
+ 				goto out;
+ 			}
+-			dprintk("NFS: acl reply: attrlen %u > recvd %u\n",
+-					attrlen, recvd);
++			dprintk("NFS: acl reply: attrlen %zu > page_len %u\n",
++					attrlen, page_len);
+ 			return -EINVAL;
+ 		}
+ 		xdr_read_pages(xdr, attrlen);
 diff --git a/fs/nfsd/vfs.c b/fs/nfsd/vfs.c
 index b96fe94..a4dbece 100644
 --- a/fs/nfsd/vfs.c
@@ -60785,10 +61019,49 @@ index 810431d..ccc3638 100644
   * The "pgd_xxx()" functions here are trivial for a folded two-level
   * setup: the pud is never bad, and a pud always exists (as it's folded
 diff --git a/include/asm-generic/pgtable.h b/include/asm-generic/pgtable.h
-index a03c098..7e5b223 100644
+index a03c098..19751cf 100644
 --- a/include/asm-generic/pgtable.h
 +++ b/include/asm-generic/pgtable.h
-@@ -502,6 +502,14 @@ static inline int pmd_trans_unstable(pmd_t *pmd)
+@@ -445,6 +445,18 @@ static inline int pmd_write(pmd_t pmd)
+ #endif /* __HAVE_ARCH_PMD_WRITE */
+ #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
+ 
++#ifndef  __HAVE_ARCH_READ_PMD_ATOMIC
++static inline pmd_t read_pmd_atomic(pmd_t *pmdp)
++{
++	/*
++	 * Depend on compiler for an atomic pmd read. NOTE: this is
++	 * only going to work, if the pmdval_t isn't larger than
++	 * an unsigned long.
++	 */
++	return *pmdp;
++}
++#endif /* __HAVE_ARCH_READ_PMD_ATOMIC */
++
+ /*
+  * This function is meant to be used by sites walking pagetables with
+  * the mmap_sem hold in read mode to protect against MADV_DONTNEED and
+@@ -458,11 +470,17 @@ static inline int pmd_write(pmd_t pmd)
+  * undefined so behaving like if the pmd was none is safe (because it
+  * can return none anyway). The compiler level barrier() is critically
+  * important to compute the two checks atomically on the same pmdval.
++ *
++ * For 32bit kernels with a 64bit large pmd_t this automatically takes
++ * care of reading the pmd atomically to avoid SMP race conditions
++ * against pmd_populate() when the mmap_sem is hold for reading by the
++ * caller (a special atomic read not done by "gcc" as in the generic
++ * version above, is also needed when THP is disabled because the page
++ * fault can populate the pmd from under us).
+  */
+ static inline int pmd_none_or_trans_huge_or_clear_bad(pmd_t *pmd)
+ {
+-	/* depend on compiler for an atomic pmd read */
+-	pmd_t pmdval = *pmd;
++	pmd_t pmdval = read_pmd_atomic(pmd);
+ 	/*
+ 	 * The barrier will stabilize the pmdval in a register or on
+ 	 * the stack so that it will stop changing under the code.
+@@ -502,6 +520,14 @@ static inline int pmd_trans_unstable(pmd_t *pmd)
  #endif
  }
  
@@ -76614,6 +76887,20 @@ index 0197747..7adb0dc 100644
  		if (peer->tcp_ts_stamp) {
  			ts = peer->tcp_ts;
  			tsage = get_seconds() - peer->tcp_ts_stamp;
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index e2327db..bf29e7c 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -849,8 +849,7 @@ new_segment:
+ wait_for_sndbuf:
+ 		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
+ wait_for_memory:
+-		if (copied)
+-			tcp_push(sk, flags & ~MSG_MORE, mss_now, TCP_NAGLE_PUSH);
++		tcp_push(sk, flags & ~MSG_MORE, mss_now, TCP_NAGLE_PUSH);
+ 
+ 		if ((err = sk_stream_wait_memory(sk, &timeo)) != 0)
+ 			goto do_error;
 diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
 index fd54c5f..96d6407 100644
 --- a/net/ipv4/tcp_ipv4.c
@@ -77911,6 +78198,19 @@ index 7dab229..212156f 100644
  		sax->fsa_ax25.sax25_call   = nr->source_addr;
  		*uaddr_len = sizeof(struct sockaddr_ax25);
  	}
+diff --git a/net/openvswitch/datapath.c b/net/openvswitch/datapath.c
+index 2c03050..5cf68c1 100644
+--- a/net/openvswitch/datapath.c
++++ b/net/openvswitch/datapath.c
+@@ -322,7 +322,7 @@ static int queue_userspace_packet(int dp_ifindex, struct sk_buff *skb,
+ 			return -ENOMEM;
+ 
+ 		nskb = __vlan_put_tag(nskb, vlan_tx_tag_get(nskb));
+-		if (!skb)
++		if (!nskb)
+ 			return -ENOMEM;
+ 
+ 		nskb->vlan_tci = 0;
 diff --git a/net/packet/af_packet.c b/net/packet/af_packet.c
 index 2dbb32b..a1b4722 100644
 --- a/net/packet/af_packet.c
