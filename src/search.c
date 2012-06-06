@@ -56,7 +56,9 @@ static void print_rdepends(struct search_ctx *ctx, struct apk_package *pkg)
 
 	name = pkg->name;
 
-	printf(PKG_VER_FMT ":", PKG_VER_PRINTF(pkg));
+	if (apk_verbosity > 0)
+		printf(PKG_VER_FMT " is required by:\n",
+		       PKG_VER_PRINTF(pkg));
 	for (i = 0; i < name->rdepends->num; i++) {
 		name0 = name->rdepends->item[i];
 
@@ -65,8 +67,8 @@ static void print_rdepends(struct search_ctx *ctx, struct apk_package *pkg)
 			for (k = 0; k < pkg0->depends->num; k++) {
 				dep = &pkg0->depends->item[k];
 				if (apk_dep_is_materialized_or_provided(dep, pkg)) {
-					printf(" ");
 					ctx->print_package(ctx, pkg0);
+					printf("\n");
 				}
 			}
 		}
