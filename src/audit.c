@@ -167,14 +167,22 @@ static int audit_directory_tree_item(void *ctx, int dirfd, const char *name)
 		int recurse = TRUE;
 
 		child = apk_db_dir_query(db, bfull);
-		if (actx->mode == MODE_BACKUP) {
-			if (!dbd->has_protected_children)
-				recurse = FALSE;
-			if (!dbd->protected)
-				goto recurse_check;
+		if (child != NULL) {
+			if (actx->mode == MODE_BACKUP) {
+				if (!child->has_protected_children)
+					recurse = FALSE;
+				if (!child->protected)
+					goto recurse_check;
+			}
 		} else {
-			if (child == NULL)
+			if (actx->mode == MODE_BACKUP) {
+				if (!dbd->has_protected_children)
+					recurse = FALSE;
+				if (!dbd->protected)
+					goto recurse_check;
+			} else {
 				recurse = FALSE;
+			}
 		}
 
 		reason = audit_directory(actx, db, child, &fi);
