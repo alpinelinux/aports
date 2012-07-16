@@ -62,6 +62,7 @@ static int audit_parse(void *ctx, struct apk_db_options *dbopts,
 struct audit_tree_ctx {
 	struct audit_ctx *actx;
 	struct apk_database *db;
+	struct apk_db_dir *dir;
 	size_t pathlen;
 	char path[PATH_MAX];
 };
@@ -144,15 +145,11 @@ static int audit_directory_tree_item(void *ctx, int dirfd, const char *name)
 	apk_blob_t bfull;
 	struct audit_ctx *actx = atctx->actx;
 	struct apk_database *db = atctx->db;
-	struct apk_db_dir *dbd;
+	struct apk_db_dir *dir = atctx->dir, *child = NULL;
 	struct apk_file_info fi;
 	int reason = 0;
 
 	if (bdir.len + bent.len + 1 >= sizeof(atctx->path))
-		return -ENOMEM;
-
-	dbd = apk_db_dir_get(db, bdir);
-	if (dbd == NULL)
 		return -ENOMEM;
 
 	if (apk_file_get_info(dirfd, name, APK_FI_NOFOLLOW, &fi) < 0)
@@ -163,26 +160,20 @@ static int audit_directory_tree_item(void *ctx, int dirfd, const char *name)
 	bfull = APK_BLOB_PTR_LEN(atctx->path, atctx->pathlen);
 
 	if (S_ISDIR(fi.mode)) {
-		struct apk_db_dir *child;
 		int recurse = TRUE;
 
-		child = apk_db_dir_query(db, bfull);
-		if (child != NULL) {
-			if (actx->mode == MODE_BACKUP) {
-				if (!child->has_protected_children)
-					recurse = FALSE;
-				if (!child->protected)
-					goto recurse_check;
-			}
-		} else {
-			if (actx->mode == MODE_BACKUP) {
-				if (!dbd->has_protected_children)
-					recurse = FALSE;
-				if (!dbd->protected)
-					goto recurse_check;
-			} else {
+		if (actx->mode == MODE_BACKUP) {
+			child = apk_db_dir_get(db, bfull);
+			if (!child->has_protected_children)
 				recurse = FALSE;
-			}
+			if (!child->protected)
+				goto recurse_check;
+		} else {
+			child = apk_db_dir_query(db, bfull);
+			if (child == NULL)
+				recurse = FALSE;
+			else
+				child = apk_db_dir_ref(child);
 		}
 
 		reason = audit_directory(actx, db, child, &fi);
@@ -200,16 +191,18 @@ recurse_check:
 		bfull.len++;
 		report_audit(actx, reason, bfull, NULL);
 		if (recurse) {
+			atctx->dir = child;
 			reason = apk_dir_foreach_file(
 				openat(dirfd, name, O_RDONLY|O_CLOEXEC),
 				audit_directory_tree_item, atctx);
+			atctx->dir = dir;
 		}
 		bfull.len--;
 		atctx->pathlen--;
 	} else {
 		struct apk_db_file *dbf;
-		struct apk_protected_path_array *ppaths = dbd->protected_paths;
-		int i, protected = dbd->protected, symlinks_only = dbd->symlinks_only;
+		struct apk_protected_path_array *ppaths = dir->protected_paths;
+		int i, protected = dir->protected, symlinks_only = dir->symlinks_only;
 
 		/* inherit file's protection mask */
 		for (i = 0; i < ppaths->num; i++) {
@@ -243,6 +236,9 @@ recurse_check:
 	}
 
 done:
+	if (child)
+		apk_db_dir_unref(db, child, FALSE);
+
 	atctx->pathlen -= bent.len;
 	return reason < 0 ? reason : 0;
 }
@@ -258,7 +254,9 @@ static int audit_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	atctx.path[0] = 0;
 
 	if (argc == 0) {
+		atctx.dir = apk_db_dir_get(db, APK_BLOB_PTR_LEN(atctx.path, atctx.pathlen));
 		r = apk_dir_foreach_file(dup(db->root_fd), audit_directory_tree_item, &atctx);
+		apk_db_dir_unref(db, atctx.dir, FALSE);
 	} else {
 		for (i = 0; i < argc; i++) {
 			if (argv[i][0] != '/') {
@@ -272,9 +270,11 @@ static int audit_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			if (atctx.path[atctx.pathlen-1] != '/')
 				atctx.path[atctx.pathlen++] = '/';
 
+			atctx.dir = apk_db_dir_get(db, APK_BLOB_PTR_LEN(atctx.path, atctx.pathlen));
 			r |= apk_dir_foreach_file(
 				openat(db->root_fd, argv[i], O_RDONLY|O_CLOEXEC),
 				audit_directory_tree_item, &atctx);
+			apk_db_dir_unref(db, atctx.dir, FALSE);
 		}
 	}
 	return r;

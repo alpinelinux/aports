@@ -173,6 +173,8 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name);
 struct apk_name *apk_db_query_name(struct apk_database *db, apk_blob_t name);
 int apk_db_get_tag_id(struct apk_database *db, apk_blob_t tag);
 
+struct apk_db_dir *apk_db_dir_ref(struct apk_db_dir *dir);
+void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir, int allow_rmdir);
 struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name);
 struct apk_db_dir *apk_db_dir_query(struct apk_database *db, apk_blob_t name);
 struct apk_db_file *apk_db_file_query(struct apk_database *db,

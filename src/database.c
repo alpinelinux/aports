@@ -240,8 +240,7 @@ static void apk_db_dir_mkdir(struct apk_database *db, struct apk_db_dir *dir)
 		;
 }
 
-static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir,
-			     int allow_rmdir)
+void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir, int allow_rmdir)
 {
 	dir->refs--;
 	if (dir->refs > 0) {
@@ -274,7 +273,7 @@ static void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir,
 		apk_db_dir_unref(db, dir->parent, allow_rmdir);
 }
 
-static struct apk_db_dir *apk_db_dir_ref(struct apk_db_dir *dir)
+struct apk_db_dir *apk_db_dir_ref(struct apk_db_dir *dir)
 {
 	dir->refs++;
 	return dir;
