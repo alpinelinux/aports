@@ -103,8 +103,8 @@ static int audit_directory(struct audit_ctx *actx,
 			   struct apk_db_dir *dbd,
 			   struct apk_file_info *fi)
 {
-	if (dbd == NULL)
-		return 'D';
+	if (dbd == NULL || dbd->refs == 1)
+		return actx->recursive ? 'd' : 'D';
 
 	if (actx->check_permissions &&
 	    (dbd->mode != 0 || dbd->uid != 0 || dbd->gid != 0)) {
@@ -171,26 +171,19 @@ static int audit_directory_tree_item(void *ctx, int dirfd, const char *name)
 		} else {
 			child = apk_db_dir_query(db, bfull);
 			if (child == NULL)
-				recurse = FALSE;
-			else
-				child = apk_db_dir_ref(child);
+				goto done;
+			child = apk_db_dir_ref(child);
 		}
 
 		reason = audit_directory(actx, db, child, &fi);
 		if (reason < 0)
 			goto done;
-		if (reason == 'D') {
-			if (actx->mode == MODE_SYSTEM)
-				goto done;
-			if (!actx->recursive)
-				recurse = FALSE;
-		}
 
 recurse_check:
 		atctx->path[atctx->pathlen++] = '/';
 		bfull.len++;
 		report_audit(actx, reason, bfull, NULL);
-		if (recurse) {
+		if (reason != 'D' && recurse) {
 			atctx->dir = child;
 			reason = apk_dir_foreach_file(
 				openat(dirfd, name, O_RDONLY|O_CLOEXEC),
