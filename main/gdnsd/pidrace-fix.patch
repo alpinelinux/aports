@@ -1,0 +1,353 @@
+diff --git a/gdnsd/libgdnsd/libdmn/dmn.h b/gdnsd/libgdnsd/libdmn/dmn.h
+index ff4d6a5..6ddfeef 100644
+--- a/gdnsd/libgdnsd/libdmn/dmn.h
++++ b/gdnsd/libgdnsd/libdmn/dmn.h
+@@ -25,6 +25,7 @@
+ #include <errno.h>
+ #include <stdarg.h>
+ #include <syslog.h>
++#include <sys/types.h>
+ 
+ // gcc function attributes
+ #if defined __GNUC__ && __GNUC__ >= 3 // gcc 3.0+
+@@ -53,15 +54,17 @@
+ 
+ // Attempt to daemonize the current process using "pidfile"
+ //  as the pidfile pathname.  logname is used as the daemon's
+-//  official name for openlog() purposes.
++//  official name for openlog() purposes.  If "restart" is
++//  true, attempt unracy shutdown of any previous instance and
++//  take over.
+ DMN_F_NONNULL
+-void dmn_daemonize(const char* logname, const char* pidfile);
++void dmn_daemonize(const char* logname, const char* pidfile, const bool restart);
+ 
+ // Check the status of a daemon using "pidfile".  Return value
+ //  of zero means not running, otherwise the return value is
+ //  the pid of the running daemon
+ DMN_F_NONNULL
+-int dmn_status(const char* pidfile);
++pid_t dmn_status(const char* pidfile);
+ 
+ // Attempt to stop any running daemon using "pidfile".  This function
+ //  will make several attempts (with an increasing delay) to terminate
+@@ -69,7 +72,7 @@ int dmn_status(const char* pidfile);
+ // retval == 0 means daemon was not running, or was successfully killed.
+ // retval != 0 means daemon is still running (and the pid is the retval)
+ DMN_F_NONNULL
+-int dmn_stop(const char* pidfile);
++pid_t dmn_stop(const char* pidfile);
+ 
+ // Send an aribtrary signal to a running daemon using "pidfile".
+ DMN_F_NONNULL
+diff --git a/gdnsd/libgdnsd/libdmn/dmn_daemon.c b/gdnsd/libgdnsd/libdmn/dmn_daemon.c
+index 4d77844..bf74959 100644
+--- a/gdnsd/libgdnsd/libdmn/dmn_daemon.c
++++ b/gdnsd/libgdnsd/libdmn/dmn_daemon.c
+@@ -35,89 +35,103 @@
+ 
+ #include "dmn.h"
+ 
+-static bool dmn_daemonized = false;
++// this simply trusts fcntl pid info
++//  on the lock we hold for daemon lifetime
++//  to inform us of a running daemon's pid.
++// the string pid stored in the file is just
++//  for reference for humans or other tools.
+ 
++static bool dmn_daemonized = false;
+ static const size_t pblen = 22;
+ 
+-static int check_pidfile(const char* pidfile) {
++static pid_t check_pidfile(const char* pidfile) {
+     dmn_assert(pidfile);
+ 
+-    char pidbuf[pblen];
+-
+     const int pidfd = open(pidfile, O_RDONLY);
+     if(pidfd == -1) {
+         if (errno == ENOENT) return 0;
+         else dmn_log_fatal("open() of pidfile '%s' failed: %s", pidfile, dmn_strerror(errno));
+     }
+ 
+-    const int readrv = read(pidfd, pidbuf, (size_t) 15);
+-    if(readrv == -1) {
+-        close(pidfd);
+-        dmn_log_fatal("read() from pidfile '%s' failed: %s", pidfile, dmn_strerror(errno));
+-    }
++    struct flock pidlock_info;
++    memset(&pidlock_info, 0, sizeof(struct flock));
++    pidlock_info.l_type = F_WRLCK;
++    pidlock_info.l_whence = SEEK_SET;
++
++    // should not fail unless something's horribly wrong
++    if(fcntl(pidfd, F_GETLK, &pidlock_info))
++        dmn_log_fatal("bug: fcntl(%s, F_GETLK) failed: %s", pidfile, dmn_strerror(errno));
+ 
+     close(pidfd);
+ 
+-    if(readrv == 0) {
+-        dmn_log_info("empty pidfile '%s', wiping it out", pidfile);
+-        unlink(pidfile);
++    if(pidlock_info.l_type == F_UNLCK) {
++        dmn_log_debug("Found stale pidfile at %s, ignoring", pidfile);
+         return 0;
+     }
+-    pidbuf[readrv] = '\0';
+ 
+-    errno = 0;
+-    const int pidnum = strtol(pidbuf, NULL, 10);
+-    if(errno) {
+-        dmn_log_info("wiping out pidfile '%s': %s", pidfile, dmn_strerror(errno));
+-        unlink(pidfile);
+-        return 0;
+-    }
++    return pidlock_info.l_pid;
++}
+ 
+-    if(pidnum <= 0) {
+-        dmn_log_info("invalid pid found in pidfile in '%s', wiping it out", pidfile);
+-        unlink(pidfile);
+-        return 0;
+-    }
++static bool pidrace_inner(const pid_t pid, const int pidfd) {
++    bool rv = true; // cannot get lock
+ 
+-    if(kill(pidnum, 0)) {
+-        dmn_log_info("Found stale pidfile for pid %i in %s, wiping it out", pidnum, pidfile);
+-        unlink(pidfile);
+-        return 0;
++    char pidbuf[pblen];
++    const ssize_t pidlen = snprintf(pidbuf, pblen, "%li\n", (long)pid);
++    if(pidlen < 2)
++        dmn_log_fatal("snprintf() for pidfile failed");
++
++    struct flock pidlock_set;
++    memset(&pidlock_set, 0, sizeof(struct flock));
++    pidlock_set.l_type = F_WRLCK;
++    pidlock_set.l_whence = SEEK_SET;
++    if(fcntl(pidfd, F_SETLK, &pidlock_set)) {
++        if(errno != EAGAIN && errno != EACCES)
++            dmn_log_fatal("bug? fcntl(pidfile, F_SETLK) failed: %s", dmn_strerror(errno));
++    }
++    else {
++        rv = false; // got lock
++        if(ftruncate(pidfd, 0))
++            dmn_log_fatal("truncating pidfile failed: %s", dmn_strerror(errno));
++        if(write(pidfd, pidbuf, (size_t) pidlen) != pidlen)
++            dmn_log_fatal("writing to pidfile failed: %s", dmn_strerror(errno));
+     }
+ 
+-    return pidnum;
++    return rv;
+ }
+ 
+-static long make_pidfile(const char* pidfile) {
++static pid_t startup_pidrace(const char* pidfile, const bool restart) {
+     dmn_assert(pidfile);
+ 
+-    long pid = (long)getpid();
+-    char pidbuf[pblen];
+-
+-    int pidfd = open(pidfile, O_WRONLY | O_CREAT | O_EXCL, 0666);
+-    if(pidfd == -1) dmn_log_fatal("creation of new pidfile %s failed: %s", pidfile, dmn_strerror(errno));
+-
+-    const ssize_t pidlen = snprintf(pidbuf, pblen, "%li\n", pid);
+-    if(pidlen < 2) {
+-        close(pidfd);
+-        unlink(pidfile);
+-        dmn_log_fatal("snprintf() for pidfile failed");
+-    }
+-    if(write(pidfd, pidbuf, (size_t) pidlen) != pidlen) {
+-        close(pidfd);
+-        unlink(pidfile);
+-        dmn_log_fatal("writing to new pidfile %s failed: %s", pidfile, dmn_strerror(errno));
++    pid_t pid = getpid();
++
++    int pidfd = open(pidfile, O_WRONLY | O_CREAT, 0666);
++    if(pidfd == -1) dmn_log_fatal("open(%s, O_WRONLY|O_CREAT) failed: %s", pidfile, dmn_strerror(errno));
++
++    if(restart) {
++        struct timeval tv;
++        unsigned tries = 1;
++        unsigned maxtries = 10;
++        while(tries++ <= maxtries) {
++            const pid_t old_pid = check_pidfile(pidfile);
++            if(old_pid && !kill(old_pid, SIGTERM)) {
++                tv.tv_sec = 0;
++                tv.tv_usec = 100000 * tries;
++                select(0, NULL, NULL, NULL, &tv);
++            }
++            if(!pidrace_inner(pid, pidfd))
++                return pid;
++        }
++        dmn_log_fatal("Could not restart: failed to shut down previous instance and acquire pidfile lock");
+     }
+-    if(close(pidfd) == -1) {
+-        unlink(pidfile);
+-        dmn_log_fatal("closing new pidfile %s failed: %s", pidfile, dmn_strerror(errno));
++    else if(pidrace_inner(pid, pidfd)) {
++        dmn_log_fatal("Could not start: lost startup race to another daemon");
+     }
+ 
+     return pid;
+ }
+ 
+-static int fork_and_exit(void) {
+-    const int mypid = fork();
++static pid_t fork_and_exit(void) {
++    const pid_t mypid = fork();
+     if (mypid == -1)     // parent: failure
+         return 0;
+     else if (mypid != 0) // parent: success
+@@ -126,12 +140,12 @@ static int fork_and_exit(void) {
+         return 1;
+ }
+ 
+-void dmn_daemonize(const char* logname, const char* pidfile) {
++void dmn_daemonize(const char* logname, const char* pidfile, const bool restart) {
+     dmn_assert(pidfile);
+ 
+-    const int oldpid = check_pidfile(pidfile);
+-    if(oldpid)
+-        dmn_log_fatal("I am already running at pid %i in %s, failing", oldpid, pidfile);
++    const pid_t oldpid = check_pidfile(pidfile);
++    if(oldpid && !restart)
++        dmn_log_fatal("I am already running at pid %li in %s, failing", (long)oldpid, pidfile);
+ 
+     if(!fork_and_exit()) dmn_log_fatal("fork() failed: %s", dmn_strerror(errno));
+ 
+@@ -156,41 +170,40 @@ void dmn_daemonize(const char* logname, const char* pidfile) {
+ 
+     umask(022);
+ 
+-    long pid = make_pidfile(pidfile);
++    const pid_t pid = startup_pidrace(pidfile, restart);
+ 
+     if(!freopen("/dev/null", "r", stdin))
+         dmn_log_fatal("Cannot open /dev/null: %s", dmn_strerror(errno));
+     if(!freopen("/dev/null", "w", stdout))
+         dmn_log_fatal("Cannot open /dev/null: %s", dmn_strerror(errno));
+ 
+-    dmn_log_info("Daemonizing at pid %li ...", pid);
++    dmn_log_info("Daemonizing at pid %li ...", (long)pid);
+ 
+     if(!freopen("/dev/null", "r+", stderr))
+         dmn_log_fatal("Cannot open /dev/null: %s", dmn_strerror(errno));
+     openlog(logname, LOG_NDELAY|LOG_PID, LOG_DAEMON);
+     dmn_daemonized = true;
+-    dmn_log_info("Daemonized succesfully, pid is %li", pid);
++    dmn_log_info("Daemonized succesfully, pid is %li", (long)pid);
+ }
+ 
+-int dmn_status(const char* pidfile) { dmn_assert(pidfile); return check_pidfile(pidfile); }
++pid_t dmn_status(const char* pidfile) { dmn_assert(pidfile); return check_pidfile(pidfile); }
+ 
+-int dmn_stop(const char* pidfile) {
++pid_t dmn_stop(const char* pidfile) {
+     dmn_assert(pidfile);
+ 
+-    const int pid = check_pidfile(pidfile);
++    const pid_t pid = check_pidfile(pidfile);
+     if(!pid) {
+         dmn_log_info("Did not find a running daemon to stop!");
+         return 0;
+     }
+ 
+-    struct timeval tv;
+-
+     // This will basically do a kill/sleep
+     //  loop for a total of 10 attempts over
+     //  the course of 5.5 seconds before giving
+     //  up, with the sleep delay increasing from
+     //  100ms at the start up to 1s at the end.
+ 
++    struct timeval tv;
+     unsigned tries = 1;
+     unsigned maxtries = 10;
+     while(tries++ <= maxtries && !kill(pid, SIGTERM)) {
+@@ -200,23 +213,21 @@ int dmn_stop(const char* pidfile) {
+     }
+ 
+     if(!kill(pid, 0)) {
+-        dmn_log_err("Cannot stop daemon at pid %i", pid);
++        dmn_log_err("Cannot stop daemon at pid %li", (long)pid);
+         return pid;
+     }
+ 
+-    unlink(pidfile);
+-
+     return 0;
+ }
+ 
+ void dmn_signal(const char* pidfile, int sig) {
+     dmn_assert(pidfile);
+ 
+-    const int pid = check_pidfile(pidfile);
++    const pid_t pid = check_pidfile(pidfile);
+     if(!pid)
+         dmn_log_err("Did not find a running daemon to signal!");
+     else if(kill(pid, sig))
+-        dmn_log_err("Cannot signal daemon at pid %i", pid);
++        dmn_log_err("Cannot signal daemon at pid %li", (long)pid);
+ }
+ 
+ bool dmn_is_daemonized(void) { return dmn_daemonized; }
+diff --git a/gdnsd/main.c b/gdnsd/main.c
+index 50a0aa8..677edef 100644
+--- a/gdnsd/main.c
++++ b/gdnsd/main.c
+@@ -211,7 +211,7 @@ typedef enum {
+     ACT_START,
+     ACT_STOP,
+     ACT_RESTART,
+-    ACT_CRESTART,
++    ACT_CRESTART, // downgrades to ACT_RESTART after checking...
+     ACT_STATUS,
+     ACT_LPE_ON,
+     ACT_LPE_OFF,
+@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
+     free(conf_arg);
+ 
+     // Check if we're already running...
+-    const int oldpid = dmn_status(gconfig.pidfile);
++    const pid_t oldpid = dmn_status(gconfig.pidfile);
+ 
+     // Take action
+     if(action == ACT_STATUS) {
+@@ -295,7 +295,7 @@ int main(int argc, char** argv) {
+             log_info("status: not running");
+             exit(3);
+         }
+-        log_info("status: running at pid %i", oldpid);
++        log_info("status: running at pid %li", (long)oldpid);
+         exit(0);
+     }
+ 
+@@ -334,12 +334,11 @@ int main(int argc, char** argv) {
+         exit(0);
+     }
+ 
+-    if(action == ACT_RESTART) {
+-        log_info("Attempting to stop the running daemon instance for restart...");
+-        if(dmn_stop(gconfig.pidfile))
+-            log_fatal("...Running daemon failed to stop, cannot continue with restart...");
+-        log_info("...Previous daemon successfully shut down (or was not up), this instance coming online");
+-    }
++    // from here out, all actions are attempting startup...
++    dmn_assert(action == ACT_STARTFG
++            || action == ACT_START
++            || action == ACT_RESTART
++    );
+ 
+     const bool started_as_root = !geteuid();
+ 
+@@ -413,7 +412,7 @@ int main(int argc, char** argv) {
+         // so that the daemonization fork+exit pairs don't
+         //   execute the plugins' exit handlers
+         skip_plugins_cleanup = true;
+-        dmn_daemonize(PACKAGE_NAME, gconfig.pidfile);
++        dmn_daemonize(PACKAGE_NAME, gconfig.pidfile, (action == ACT_RESTART));
+         skip_plugins_cleanup = false;
+     }
+ 
