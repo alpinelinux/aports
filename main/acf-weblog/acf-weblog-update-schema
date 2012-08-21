@@ -1,0 +1,168 @@
+#!/bin/sh
+
+DB=webproxylog
+DBUSER=weblogowner
+
+psql_args="$@"
+
+runsql() {
+	local cmd="$1"
+	shift
+	psql -U $DBUSER --dbname=$DB --no-align --tuples-only -c "$cmd" $psql_args
+}
+
+# check if table exists or not
+# based on http://www.peterbe.com/plog/pg_class/
+has_table() {
+	local tbl="$1"
+	local res=$(runsql "
+		SELECT count(relname) FROM pg_class
+		WHERE relname = '$tbl'")
+	test $res -ge 1
+}
+
+# test if column exist in given table
+# based on http://www.tequilafish.com/2007/02/23/postgresql-determine-if-a-column-exists-or-not/
+has_column() {
+	local tbl=$1 col=$2
+	local res=$(runsql "
+	SELECT count(attname) FROM pg_attribute
+	WHERE attrelid = (SELECT oid FROM pg_class WHERE relname = '$tbl')
+	AND attname = '$col';")
+	test $res -ge 1
+}
+
+# add column if its missing
+check_column() {
+	local tbl="$1" col="$2" datatype="$3"
+	echo -n "Checking column '$col' in table '$tbl' ... "
+	if has_column "$tbl" "$col"; then
+		echo "Ok"
+	else
+		runsql "ALTER TABLE $tbl ADD COLUMN $col $datatype"
+	fi
+}
+
+# get data type for column
+# based on http://stackoverflow.com/questions/2146705/select-datatype-of-the-field-in-postgres
+get_data_type() {
+	local tbl="$1" col="$2"
+	runsql "SELECT data_type FROM information_schema.columns
+		WHERE table_name = '$tbl' AND column_name = '$col'"
+}
+
+# get data precision for column
+get_data_precision() {
+	local tbl="$1" col="$2" datatype="$3"
+	runsql "SELECT ${datatype}_precision FROM information_schema.columns
+		WHERE table_name = '$tbl' AND column_name = '$col'"
+}
+
+
+check_column_timestamp() {
+	local tbl="$1" col="$2"
+	local precision=3
+	echo -n "Checking column '$col' in table '$tbl' ... "
+	if [ "$(get_data_type $tbl $col)" = "timestamp without time zone" ] \
+		&& [ "$(get_data_precision $tbl $col datetime)" = "$precision" ]; then
+		echo "Ok"
+	else
+		runsql "ALTER TABLE $tbl ALTER $col
+			TYPE timestamp($precision) without time zone"
+	fi
+}
+
+check_column_type() {
+	local tbl="$1" col="$2" datatype="$3"
+	echo -n "Checking column '$col' in table '$tbl' ... "
+	if [ "$(get_data_type $tbl $col)" = "$datatype" ]; then
+		echo "Ok"
+	else
+		runsql "ALTER TABLE $tbl ALTER $col TYPE $datatype"
+	fi
+}
+
+drop_table() {
+	local tbl="$1"
+	echo -n  "Dropping table '$tbl' ... "
+	runsql "DROP TABLE $tbl"
+}
+
+# for older than 0.4.0
+check_column weblog shortreason text
+check_column pubweblog shortreason text
+check_column pubblocklog shortreason text
+check_column blocklog shortreason text
+
+# for older than 0.4.5
+check_column_timestamp dbhistlog logdatetime
+
+# for older than 0.5.4
+check_column_type weblog bytes bigint
+check_column_type pubweblog bytes bigint
+check_column_type blocklog bytes bigint
+check_column_type pubblocklog bytes bigint
+
+# for older than 0.6.0
+check_column pubweblog badyesno int
+check_column pubweblog deniedyesno int
+check_column pubweblog bypassyesno int
+check_column pubweblog wordloc text
+check_column pubweblog goodwordloc text
+check_column pubweblog selected boolean
+check_column pubweblog id "SERIAL PRIMARY KEY"
+
+if has_table pubblocklog; then
+	echo -n "Importing pubblocklog ... "
+	runsql "INSERT INTO pubweblog SELECT *,'0','1','0','','','false'
+		FROM pubblocklog"
+	drop_table "pubblocklog"
+fi
+
+if has_table blocklog; then
+	echo -n "Importing blocklog ... "
+	runsql "INSERT INTO pubweblog SELECT *,'0','1','0','','','false'
+		FROM blocklog"
+	drop_table blocklog
+fi
+
+# we dont import this
+if has_table watchlist; then
+	drop_table watchlist
+fi
+
+if ! has_column weblog badyesno; then
+	echo -n "Importing weblog ..."
+	runsql "INSERT INTO pubweblog SELECT *,'0','0','0','','','false'
+		FROM weblog"
+fi
+check_column weblog badyesno int
+check_column weblog deniedyesno int
+check_column weblog bypassyesno int
+check_column weblog wordloc text
+check_column weblog goodwordloc text
+
+if ! has_table pubweblog_history; then
+	echo -n "Creating table 'pubweblog_history' ... "
+	runsql "
+	CREATE TABLE pubweblog_history(
+		sourcename character varying(40),
+		clientip inet NOT NULL,
+		clientuserid character varying(64) NOT NULL,
+		logdatetime timestamp(3) without time zone NOT NULL,
+		uri text NOT NULL,
+		bytes bigint NOT NULL,
+		reason text,
+		score integer,
+		shortreason text,
+		badyesno int,
+		deniedyesno int,
+		bypassyesno int,
+		wordloc text,
+		goodwordloc text,
+		selected boolean,
+		id int)"
+	echo -n "Setting permissions on pubweblog_history ... "
+	runsql "GRANT SELECT ON pubweblog_history TO webloguser"
+fi
+
