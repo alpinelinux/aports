@@ -15,7 +15,7 @@ install=
 subpackages=
 replaces="alpine-baselayout"
 source="http://dev.alpinelinux.org/~ncopa/alpine/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub
-	http://nenolod.net/~nenolod/alpine-keys/alpine-devel@lists.alpinelinux.org-4d07755e.rsa.pub
+	alpine-devel@lists.alpinelinux.org-4d07755e.rsa.pub
 	"
 
 build() {
