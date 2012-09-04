@@ -229,11 +229,11 @@ static void apk_db_dir_mkdir(struct apk_database *db, struct apk_db_dir *dir)
 		return;
 
 	if ((dir->refs == 1) ||
-	    (fchmodat(db->root_fd, dir->name, dir->mode, AT_SYMLINK_NOFOLLOW) != 0 &&
+	    (fchmodat(db->root_fd, dir->name, dir->mode, 0) != 0 &&
 	     errno == ENOENT))
 		if ((mkdirat(db->root_fd, dir->name, dir->mode) != 0 &&
 		     errno == EEXIST))
-			if (fchmodat(db->root_fd, dir->name, dir->mode, AT_SYMLINK_NOFOLLOW) != 0)
+			if (fchmodat(db->root_fd, dir->name, dir->mode, 0) != 0)
 				;
 
 	if (fchownat(db->root_fd, dir->name, dir->uid, dir->gid, 0) != 0)
