@@ -778,33 +778,10 @@ prepare_tracedeps() {
 	local etype= soname= file= sover=
 	[ "$arch" = "noarch" ] && return 0
 	options_has "!tracedeps" && return 0
-	# lets tell all the .so files this package provides in .provides-so
-	scanelf --recursive --nobanner --soname "$dir" | while read etype soname file; do
-		# if soname field is missing, soname will be the filepath
-		# we only want shared libs
-		sover=0
-		case $soname in
-		*.so|*.so.[0-9]*)
-			soname=${soname##*/}
-			case "$file" in
-			*.so.[0-9]*) sover=${file##*.so.};;
-			esac
-			echo "$soname $sover"
-			;;
-		esac
-	done >"$controldir"/.provides-so
 	# lets tell all the places we should look for .so files - all rpaths
-	scanelf -q -Rr "$dir" | sed -e 's/[[:space:]].*//' -e 's/:/\n/' \
-		| sort | uniq \
+	scanelf --quiet --recursive --rpath "$dir" \
+		| sed -e 's/[[:space:]].*//' -e 's/:/\n/' | sort -u \
 		>"$controldir"/.rpaths
-	# now find the so dependencies
-	scanelf -Rn "$dir" | tr ' ' ':' | awk -F ":" '$1 == "ET_DYN" || $1 == "ET_EXEC" {print $2}'  \
-		| sed 's:,:\n:g' | sort | uniq \
-	| while read i; do
-		# only add files that are not self provided
-		grep -q -w "^$i" "$controldir"/.provides-so \
-			|| echo $i >> "$controldir"/.needs-so
-	done
 }
 
 # check if dir has arch specific binaries
@@ -878,7 +855,7 @@ trace_apk_deps() {
 	local name="$1"
 	local dir="$2"
 	local i= j= found= autodeps= deppkgs= missing= so_paths= self_provided=
-	msg "Tracing dependencies for $name..."
+	msg "Tracing dependencies..."
 	# add pkgconfig if usr/lib/pkgconfig is found
 	if [ -d "$pkgbasedir"/$name/usr/lib/pkgconfig ] \
 			&& ! grep -q '^depend = pkgconfig' "$dir"/.PKGINFO; then
@@ -938,19 +915,83 @@ trace_apk_deps() {
 	done
 }
 
+find_scanelf_paths() {
+	local controldir="$1" datadir="$2"
+	local paths="$datadir/lib:$datadir/usr/lib" i= rpath=
+	if [ -n "$ldpath" ]; then
+		paths="$paths:$ldpath"
+	fi
+	# search in all rpaths
+	for rpath in "$pkgbasedir"/.control.*/.rpath; do
+		[ -f "$rpath" ] || continue
+		while read i; do
+			if [ -d "$datadir/$i" ]; then
+				paths="$paths:$datadir/$i"
+			fi
+		done < "$rpath"
+	done
+	echo "$paths"
+}
+
+scan_shared_objects() {
+	local name="$1" controldir="$2" datadir="$3"
+
+	# allow spaces in paths
+	IFS=:
+	set -- $(find_scanelf_paths "$controldir" "$datadir")
+	unset IFS
+
+	msg "Scanning shared objects"
+	# lets tell all the .so files this package provides in .provides-so
+	scanelf --nobanner --soname "$@" | while read etype soname file; do
+		# if soname field is missing, soname will be the filepath
+		# we only want shared libs
+		sover=0
+		case $soname in
+		*.so|*.so.[0-9]*)
+			soname=${soname##*/}
+			case "$file" in
+			*.so.[0-9]*) sover=${file##*.so.};;
+			esac
+			echo "$soname $sover"
+			;;
+		esac
+	done > "$controldir"/.provides-so
+
+	# now find the so dependencies
+	scanelf --nobanner --recursive --needed "$datadir"  | tr ' ' ':' \
+		| awk -F ":" '$1 == "ET_DYN" || $1 == "ET_EXEC" {print $2}'  \
+		| sed 's:,:\n:g' | sort -u \
+	| while read i; do
+		# only add files that are not self provided
+		grep -q -w "^$i" "$controldir"/.provides-so \
+			|| echo $i
+	done > "$controldir"/.needs-so
+}
+
 create_apks() {
-	local file
+	local file= dir= name= ver= apk= datadir=
 	getpkgver || return 1
 	mkdir -p "$PKGDEST"
+	if [ "$arch" != "noarch" ] && ! options_has "!tracedeps"; then
+		for file in "$pkgbasedir"/.control.*/.PKGINFO; do
+			dir="${file%/.PKGINFO}"
+			name="$(pkginfo_val pkgname $file)"
+			datadir="$pkgbasedir"/$name
+			subpkgname=$name
+			scan_shared_objects "$name" "$dir" "$datadir"
+		done
+	fi
 	for file in "$pkgbasedir"/.control.*/.PKGINFO; do
-		local dir="${file%/.PKGINFO}"
-		local name=$(pkginfo_val pkgname $file)
-		local ver=$(pkginfo_val pkgver $file)
-		local apk=$name-$ver.apk
-		local datadir="$pkgbasedir"/$name
+		dir="${file%/.PKGINFO}"
+		name=$(pkginfo_val pkgname $file)
+		ver=$(pkginfo_val pkgver $file)
+		apk=$name-$ver.apk
+		datadir="$pkgbasedir"/$name
+		subpkgname=$name
 
 		trace_apk_deps "$name" "$dir" || return 1
-		msg "Creating $apk..."
+		msg "Compressing data..."
 		(
 		cd "$datadir"
 		# data.tar.gz
@@ -961,6 +1002,7 @@ create_apks() {
 		fi
 		tar -c "$@" | abuild-tar --hash | gzip -9 >"$dir"/data.tar.gz
 
+		msg "Create checksum..."
 		# append the hash for data.tar.gz
 		local sha256=$(sha256sum "$dir"/data.tar.gz | cut -f1 -d' ')
 		echo "datahash = $sha256" >> "$dir"/.PKGINFO
@@ -971,10 +1013,12 @@ create_apks() {
 			| gzip -9 > control.tar.gz
 		abuild-sign -q control.tar.gz || exit 1
 
+		msg "Create $apk"
 		# create the final apk
 		cat control.tar.gz data.tar.gz > "$PKGDEST"/$apk
-	)
+		)
 	done
+	subpkgname=
 }
 
 clean_abuildrepo() {
