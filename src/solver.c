@@ -10,6 +10,7 @@
  */
 
 #include <stdint.h>
+#include <unistd.h>
 #include "apk_defines.h"
 #include "apk_database.h"
 #include "apk_package.h"
@@ -1650,23 +1651,34 @@ struct progress {
 	struct apk_stats done;
 	struct apk_stats total;
 	struct apk_package *pkg;
-	size_t count;
+	size_t percent;
+	int progress_fd;
 };
 
-static void progress_cb(void *ctx, size_t progress)
+static void update_progress(struct progress *prog, size_t percent)
+{
+	if (prog->percent == percent)
+		return;
+	prog->percent = percent;
+	if (apk_flags & APK_PROGRESS)
+		draw_progress(percent);
+	if (prog->progress_fd != 0) {
+		char buf[8];
+		size_t n = snprintf(buf, sizeof(buf), "%d\n", percent);
+		write(prog->progress_fd, buf, n);
+	}
+}
+
+static void progress_cb(void *ctx, size_t pkg_percent)
 {
 	struct progress *prog = (struct progress *) ctx;
-	size_t partial = 0, count;
+	size_t partial = 0, percent;
 
 	if (prog->pkg != NULL)
-		partial = muldiv(progress, prog->pkg->installed_size, APK_PROGRESS_SCALE);
-
-        count = muldiv(100, prog->done.bytes + prog->done.packages + partial,
-		       prog->total.bytes + prog->total.packages);
-
-	if (prog->count != count)
-		draw_progress(count);
-	prog->count = count;
+		partial = muldiv(pkg_percent, prog->pkg->installed_size, APK_PROGRESS_SCALE);
+	percent = muldiv(100, prog->done.bytes + prog->done.packages + partial,
+			 prog->total.bytes + prog->total.packages);
+	update_progress(prog, percent);
 }
 
 static int dump_packages(struct apk_changeset *changeset,
@@ -1784,6 +1796,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 
 	/* Count what needs to be done */
 	memset(&prog, 0, sizeof(prog));
+	prog.progress_fd = db->progress_fd;
 	for (i = 0; i < changeset->changes->num; i++) {
 		change = &changeset->changes->item[i];
 		count_change(change, &prog.total);
@@ -1831,17 +1844,15 @@ int apk_solver_commit_changeset(struct apk_database *db,
 		change = &changeset->changes->item[i];
 
 		print_change(db, change, i, changeset->changes->num);
-		if (apk_flags & APK_PROGRESS)
-			draw_progress(prog.count);
 		prog.pkg = change->newpkg;
+		progress_cb(&prog, 0);
 
 		if (!(apk_flags & APK_SIMULATE)) {
 			if (change->oldpkg != change->newpkg ||
 			    (change->reinstall && pkg_available(db, change->newpkg)))
 				r = apk_db_install_pkg(db,
 						       change->oldpkg, change->newpkg,
-						       (apk_flags & APK_PROGRESS) ? progress_cb : NULL,
-						       &prog);
+						       progress_cb, &prog);
 			if (r != 0)
 				break;
 			if (change->newpkg)
@@ -1850,8 +1861,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 
 		count_change(change, &prog.done);
 	}
-	if (apk_flags & APK_PROGRESS)
-		draw_progress(100);
+	update_progress(&prog, 100);
 
 	run_triggers(db);
 

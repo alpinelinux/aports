@@ -1359,6 +1359,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	int r, fd, write_arch = FALSE;
 
 	memset(db, 0, sizeof(*db));
+	db->progress_fd = dbopts->progress_fd;
 	if (apk_flags & APK_SIMULATE) {
 		dbopts->open_flags &= ~(APK_OPENF_CREATE | APK_OPENF_WRITE);
 		dbopts->open_flags |= APK_OPENF_READ;

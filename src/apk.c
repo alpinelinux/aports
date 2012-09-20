@@ -48,6 +48,7 @@ static struct apk_option generic_options[] = {
 	{ 'f', "force",		"Do what was asked even if it looks dangerous" },
 	{ 'U', "update-cache",	"Update the repository cache" },
 	{ 0x101, "progress",	"Show a progress bar" },
+	{ 0x10f, "progress-fd",	"Write progress to fd", required_argument, "FD" },
 	{ 0x110, "no-progress",	"Disable progress bar even for TTYs" },
 	{ 0x102, "clean-protected", "Do not create .apk-new files to "
 				"configuration dirs" },
@@ -265,6 +266,7 @@ static void setup_terminal(void)
 {
 	setvbuf(stderr, NULL, _IOLBF, BUFSIZ);
 	signal(SIGWINCH, on_sigwinch);
+	signal(SIGPIPE, SIG_IGN);
 }
 
 static void setup_automatic_flags(void)
@@ -382,6 +384,9 @@ int main(int argc, char **argv)
 			break;
 		case 0x110:
 			apk_flags &= ~APK_PROGRESS;
+			break;
+		case 0x10f:
+			dbopts.progress_fd = atoi(optarg);
 			break;
 		case 0x102:
 			apk_flags |= APK_CLEAN_PROTECTED;
