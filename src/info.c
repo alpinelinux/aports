@@ -427,7 +427,7 @@ static int info_parse(void *ctx, struct apk_db_options *dbopts,
 	case 'R':
 		ictx->subaction_mask |= APK_INFO_DEPENDS;
 		break;
-	case 'p':
+	case 'P':
 		ictx->subaction_mask |= APK_INFO_PROVIDES;
 		break;
 	case 'r':
@@ -489,7 +489,7 @@ static struct apk_option info_options[] = {
 	{ 'e', "installed",	"Check if PACKAGE is installed" },
 	{ 'W', "who-owns",	"Print the package owning the specified file" },
 	{ 'R', "depends",	"List packages that the PACKAGE depends on" },
-	{ 'p', "provides",	"List virtual packages provided by PACKAGE" },
+	{ 'P', "provides",	"List virtual packages provided by PACKAGE" },
 	{ 'r', "rdepends",	"List all packages depending on PACKAGE" },
 	{ 0x10000, "replaces",	"List packages whom files PACKAGE might replace" },
 	{ 'i', "install-if",	"List the PACKAGE's install-if rule" },
