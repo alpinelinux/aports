@@ -1,0 +1,892 @@
+From 401e0912400d7274f163302baed9af63b4d3bbb2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Wed, 26 Sep 2012 13:41:13 +0300
+Subject: [PATCH] lib: Add support for DigitalPersona URU4500
+
+By adding native encryption support, rather than poking at
+the firmware to disable it.
+
+This also makes the URU4000B use native encryption.
+
+https://bugs.freedesktop.org/show_bug.cgi?id=55351
+---
+ libfprint/drivers/uru4000.c | 579 +++++++++++++++++++++++++-------------------
+ libfprint/fp_internal.h     |   2 +
+ 2 files changed, 333 insertions(+), 248 deletions(-)
+
+diff --git a/libfprint/drivers/uru4000.c b/libfprint/drivers/uru4000.c
+index 0dbea96..f42b609 100644
+--- a/libfprint/drivers/uru4000.c
++++ b/libfprint/drivers/uru4000.c
+@@ -1,6 +1,7 @@
+ /*
+- * Digital Persona U.are.U 4000/4000B driver for libfprint
++ * Digital Persona U.are.U 4000/4000B/4500 driver for libfprint
+  * Copyright (C) 2007-2008 Daniel Drake <dsd@gentoo.org>
++ * Copyright (C) 2012 Timo Teräs <timo.teras@iki.fi>
+  *
+  * This library is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU Lesser General Public
+@@ -34,14 +35,14 @@
+ #define USB_RQ			0x04
+ #define CTRL_IN			(LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN)
+ #define CTRL_OUT		(LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_OUT)
+-#define CTRL_TIMEOUT	5000
+-#define BULK_TIMEOUT	5000
+-#define DATABLK_RQLEN	0x1b340
+-#define DATABLK_EXPECT	0x1b1c0
+-#define CAPTURE_HDRLEN	64
++#define CTRL_TIMEOUT		5000
++#define BULK_TIMEOUT		5000
+ #define IRQ_LENGTH		64
+ #define CR_LENGTH		16
+ 
++#define IMAGE_HEIGHT		290
++#define IMAGE_WIDTH		384
++
+ enum {
+ 	IRQDATA_SCANPWR_ON = 0x56aa,
+ 	IRQDATA_FINGER_ON = 0x0101,
+@@ -51,7 +52,10 @@ enum {
+ 
+ enum {
+ 	REG_HWSTAT = 0x07,
++	REG_SCRAMBLE_DATA_INDEX = 0x33,
++	REG_SCRAMBLE_DATA_KEY = 0x34,
+ 	REG_MODE = 0x4e,
++	REG_DEVICE_INFO = 0xf0,
+ 	/* firmware starts at 0x100 */
+ 	REG_RESPONSE = 0x2000,
+ 	REG_CHALLENGE = 0x2010,
+@@ -62,7 +66,8 @@ enum {
+ 	MODE_AWAIT_FINGER_ON = 0x10,
+ 	MODE_AWAIT_FINGER_OFF = 0x12,
+ 	MODE_CAPTURE = 0x20,
+-	MODE_SHUT_UP = 0x30,
++	MODE_CAPTURE_AUX = 0x30,
++	MODE_OFF = 0x70,
+ 	MODE_READY = 0x80,
+ };
+ 
+@@ -78,6 +83,7 @@ enum {
+ static const struct uru4k_dev_profile {
+ 	const char *name;
+ 	gboolean auth_cr;
++	gboolean encryption;
+ } uru4k_dev_info[] = {
+ 	[MS_KBD] = {
+ 		.name = "Microsoft Keyboard with Fingerprint Reader",
+@@ -102,21 +108,10 @@ static const struct uru4k_dev_profile {
+ 	[DP_URU4000B] = {
+ 		.name = "Digital Persona U.are.U 4000B",
+ 		.auth_cr = FALSE,
++		.encryption = TRUE,
+ 	},
+ };
+ 
+-/* As we don't know the encryption scheme, we have to disable encryption
+- * by powering the device down and modifying the firmware. The location of
+- * the encryption control byte changes based on device revision.
+- *
+- * We use a search approach to find it: we look at the 3 bytes of data starting
+- * from these addresses, looking for a pattern "ff X7 41" (where X is dontcare)
+- * When we find a pattern we know that the encryption byte ius the X7 byte.
+- */
+-static const uint16_t fwenc_offsets[] = {
+-	0x510, 0x62d, 0x792, 0x7f4,
+-};
+-
+ typedef void (*irq_cb_fn)(struct fp_img_dev *dev, int status, uint16_t type,
+ 	void *user_data);
+ typedef void (*irqs_stopped_cb_fn)(struct fp_img_dev *dev);
+@@ -125,11 +120,14 @@ struct uru4k_dev {
+ 	const struct uru4k_dev_profile *profile;
+ 	uint8_t interface;
+ 	enum fp_imgdev_state activate_state;
+-	unsigned char last_reg_rd;
++	unsigned char last_reg_rd[16];
+ 	unsigned char last_hwstat;
+ 
+ 	struct libusb_transfer *irq_transfer;
+ 	struct libusb_transfer *img_transfer;
++	void *img_data;
++	uint16_t img_lines_done, img_block;
++	uint32_t img_enc_seed;
+ 
+ 	irq_cb_fn irq_cb;
+ 	void *irq_cb_data;
+@@ -225,7 +223,7 @@ static int write_reg(struct fp_img_dev *dev, uint16_t reg,
+ }
+ 
+ typedef void (*read_regs_cb_fn)(struct fp_img_dev *dev, int status,
+-	unsigned char *data, void *user_data);
++	uint16_t num_regs, unsigned char *data, void *user_data);
+ 
+ struct read_regs_data {
+ 	struct fp_img_dev *dev;
+@@ -248,7 +246,7 @@ static void read_regs_cb(struct libusb_transfer *transfer)
+ 	else
+ 		data = libusb_control_transfer_get_data(transfer);
+ 
+-	rrdata->callback(rrdata->dev, r, data, rrdata->user_data);
++	rrdata->callback(rrdata->dev, r, transfer->actual_length, data, rrdata->user_data);
+ 	g_free(rrdata);
+ 	g_free(transfer->buffer);
+ 	libusb_free_transfer(transfer);
+@@ -284,12 +282,6 @@ static int read_regs(struct fp_img_dev *dev, uint16_t first_reg,
+ 	return r;
+ }
+ 
+-static int read_reg(struct fp_img_dev *dev, uint16_t reg,
+-	read_regs_cb_fn callback, void *user_data)
+-{
+-	return read_regs(dev, reg, 1, callback, user_data);
+-}
+-
+ /*
+  * HWSTAT
+  *
+@@ -325,7 +317,7 @@ static void response_cb(struct fp_img_dev *dev, int status, void *user_data)
+ }
+ 
+ static void challenge_cb(struct fp_img_dev *dev, int status,
+-	unsigned char *data, void *user_data)
++	uint16_t num_regs, unsigned char *data, void *user_data)
+ {
+ 	struct fpi_ssm *ssm = user_data;
+ 	struct uru4k_dev *urudev = dev->priv;
+@@ -469,95 +461,10 @@ static void stop_irq_handler(struct fp_img_dev *dev, irqs_stopped_cb_fn cb)
+ 	}
+ }
+ 
+-/***** IMAGING LOOP *****/
+-
+-static int start_imaging_loop(struct fp_img_dev *dev);
+-
+-static void image_cb(struct libusb_transfer *transfer)
+-{
+-	struct fp_img_dev *dev = transfer->user_data;
+-	struct uru4k_dev *urudev = dev->priv;
+-	int hdr_skip = CAPTURE_HDRLEN;
+-	int image_size = DATABLK_EXPECT - CAPTURE_HDRLEN;
+-	struct fp_img *img;
+-	int r = 0;
+-
+-	/* remove the global reference early: otherwise we may report results,
+-	 * leading to immediate deactivation of driver, which will potentially
+-	 * try to cancel an already-completed transfer */
+-	urudev->img_transfer = NULL;
+-
+-	if (transfer->status == LIBUSB_TRANSFER_CANCELLED) {
+-		fp_dbg("cancelled");
+-		g_free(transfer->buffer);
+-		libusb_free_transfer(transfer);
+-		return;
+-	} else if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
+-		r = -EIO;
+-		goto out;
+-	}
+-
+-	if (transfer->actual_length == image_size) {
+-		/* no header! this is rather odd, but it happens sometimes with my MS
+-		 * keyboard */
+-		fp_dbg("got image with no header!");
+-		hdr_skip = 0;
+-	} else if (transfer->actual_length != DATABLK_EXPECT) {
+-		fp_err("unexpected image capture size (%d)", transfer->actual_length);
+-		r = -EPROTO;
+-		goto out;
+-	}
+-
+-	img = fpi_img_new(image_size);
+-	memcpy(img->data, transfer->buffer + hdr_skip, image_size);
+-	img->flags = FP_IMG_V_FLIPPED | FP_IMG_H_FLIPPED | FP_IMG_COLORS_INVERTED;
+-	fpi_imgdev_image_captured(dev, img);
+-
+-out:
+-	g_free(transfer->buffer);
+-	libusb_free_transfer(transfer);
+-	if (r == 0)
+-		r = start_imaging_loop(dev);
+-
+-	if (r)
+-		fpi_imgdev_session_error(dev, r);
+-}
+-
+-static int start_imaging_loop(struct fp_img_dev *dev)
+-{
+-	struct uru4k_dev *urudev = dev->priv;
+-	struct libusb_transfer *transfer = libusb_alloc_transfer(0);
+-	unsigned char *data;
+-	int r;
+-
+-	if (!transfer)
+-		return -ENOMEM;
+-	
+-	data = g_malloc(DATABLK_RQLEN);
+-	libusb_fill_bulk_transfer(transfer, dev->udev, EP_DATA, data,
+-		DATABLK_RQLEN, image_cb, dev, 0);
+-
+-	urudev->img_transfer = transfer;
+-	r = libusb_submit_transfer(transfer);
+-	if (r < 0) {
+-		g_free(data);
+-		libusb_free_transfer(transfer);
+-	}
+-
+-	return r;
+-}
+-
+-static void stop_imaging_loop(struct fp_img_dev *dev)
+-{
+-	struct uru4k_dev *urudev = dev->priv;
+-	struct libusb_transfer *transfer = urudev->img_transfer;
+-	if (transfer)
+-		libusb_cancel_transfer(transfer);
+-	/* FIXME: should probably wait for cancellation to complete */
+-}
+-
+ /***** STATE CHANGING *****/
+ 
++static int execute_state_change(struct fp_img_dev *dev);
++
+ static void finger_presence_irq_cb(struct fp_img_dev *dev, int status,
+ 	uint16_t type, void *user_data)
+ {
+@@ -582,33 +489,22 @@ static int dev_change_state(struct fp_img_dev *dev, enum fp_imgdev_state state)
+ {
+ 	struct uru4k_dev *urudev = dev->priv;
+ 
+-	stop_imaging_loop(dev);
+-
+ 	switch (state) {
++	case IMGDEV_STATE_INACTIVE:
+ 	case IMGDEV_STATE_AWAIT_FINGER_ON:
+-		if (!IRQ_HANDLER_IS_RUNNING(urudev))
+-			return -EIO;
+-		urudev->irq_cb = finger_presence_irq_cb;
+-		return write_reg(dev, REG_MODE, MODE_AWAIT_FINGER_ON,
+-			change_state_write_reg_cb, NULL);
+-
+-	case IMGDEV_STATE_CAPTURE:
+-		urudev->irq_cb = NULL;
+-		start_imaging_loop(dev);
+-		return write_reg(dev, REG_MODE, MODE_CAPTURE, change_state_write_reg_cb,
+-			NULL);
+-
+ 	case IMGDEV_STATE_AWAIT_FINGER_OFF:
+-		if (!IRQ_HANDLER_IS_RUNNING(urudev))
+-			return -EIO;
+-		urudev->irq_cb = finger_presence_irq_cb;
+-		return write_reg(dev, REG_MODE, MODE_AWAIT_FINGER_OFF,
+-			change_state_write_reg_cb, NULL);
+-
++	case IMGDEV_STATE_CAPTURE:
++		break;
+ 	default:
+ 		fp_err("unrecognised state %d", state);
+ 		return -EINVAL;
+ 	}
++
++	urudev->activate_state = state;
++	if (urudev->img_transfer != NULL)
++		return 0;
++
++	return execute_state_change(dev);
+ }
+ 
+ /***** GENERIC STATE MACHINE HELPER FUNCTIONS *****/
+@@ -623,17 +519,23 @@ static void sm_write_reg_cb(struct fp_img_dev *dev, int result, void *user_data)
+ 		fpi_ssm_next_state(ssm);
+ }
+ 
+-static void sm_write_reg(struct fpi_ssm *ssm, uint16_t reg,
+-	unsigned char value)
++static void sm_write_regs(struct fpi_ssm *ssm, uint16_t first_reg, uint16_t num_regs,
++	void *data)
+ {
+ 	struct fp_img_dev *dev = ssm->priv;
+-	int r = write_reg(dev, reg, value, sm_write_reg_cb, ssm);
++	int r = write_regs(dev, first_reg, num_regs, data, sm_write_reg_cb, ssm);
+ 	if (r < 0)
+ 		fpi_ssm_mark_aborted(ssm, r);
+ }
+ 
++static void sm_write_reg(struct fpi_ssm *ssm, uint16_t reg,
++	unsigned char value)
++{
++	sm_write_regs(ssm, reg, 1, &value);
++}
++
+ static void sm_read_reg_cb(struct fp_img_dev *dev, int result,
+-	unsigned char *data, void *user_data)
++	uint16_t num_regs, unsigned char *data, void *user_data)
+ {
+ 	struct fpi_ssm *ssm = user_data;
+ 	struct uru4k_dev *urudev = dev->priv;
+@@ -641,27 +543,32 @@ static void sm_read_reg_cb(struct fp_img_dev *dev, int result,
+ 	if (result) {
+ 		fpi_ssm_mark_aborted(ssm, result);
+ 	} else {
+-		urudev->last_reg_rd = *data;
+-		fp_dbg("reg value %x", urudev->last_reg_rd);
++		memcpy(urudev->last_reg_rd, data, num_regs);
++		fp_dbg("reg value %x", urudev->last_reg_rd[0]);
+ 		fpi_ssm_next_state(ssm);
+ 	}
+ }
+ 
+-static void sm_read_reg(struct fpi_ssm *ssm, uint16_t reg)
++static void sm_read_regs(struct fpi_ssm *ssm, uint16_t reg, uint16_t num_regs)
+ {
+ 	struct fp_img_dev *dev = ssm->priv;
++	struct uru4k_dev *urudev = dev->priv;
+ 	int r;
+-	
+-	fp_dbg("read reg %x", reg);
+-	r = read_reg(dev, reg, sm_read_reg_cb, ssm);
++
++	if (num_regs > sizeof(urudev->last_reg_rd)) {
++		fpi_ssm_mark_aborted(ssm, -EIO);
++		return;
++	}
++
++	fp_dbg("read %d regs at %x", num_regs, reg);
++	r = read_regs(dev, reg, num_regs, sm_read_reg_cb, ssm);
+ 	if (r < 0)
+ 		fpi_ssm_mark_aborted(ssm, r);
+ }
+ 
+-static void sm_set_mode(struct fpi_ssm *ssm, unsigned char mode)
++static void sm_read_reg(struct fpi_ssm *ssm, uint16_t reg)
+ {
+-	fp_dbg("mode %02x", mode);
+-	sm_write_reg(ssm, REG_MODE, mode);
++	sm_read_regs(ssm, reg, 1);
+ }
+ 
+ static void sm_set_hwstat(struct fpi_ssm *ssm, unsigned char value)
+@@ -670,77 +577,232 @@ static void sm_set_hwstat(struct fpi_ssm *ssm, unsigned char value)
+ 	sm_write_reg(ssm, REG_HWSTAT, value);
+ }
+ 
+-/***** INITIALIZATION *****/
++/***** IMAGING LOOP *****/
+ 
+-enum fwfixer_states {
+-	FWFIXER_INIT,
+-	FWFIXER_READ_NEXT,
+-	FWFIXER_WRITE,
+-	FWFIXER_NUM_STATES,
++enum imaging_states {
++	IMAGING_CAPTURE,
++	IMAGING_SEND_INDEX,
++	IMAGING_READ_KEY,
++	IMAGING_DECODE,
++	IMAGING_REPORT_IMAGE,
++	IMAGING_NUM_STATES
+ };
+ 
+-static void fwfixer_read_cb(struct fp_img_dev *dev, int status,
+-	unsigned char *data, void *user_data)
++static void image_transfer_cb(struct libusb_transfer *transfer)
+ {
+-	struct fpi_ssm *ssm = user_data;
+-	struct uru4k_dev *urudev = dev->priv;
+-
+-	if (status != 0)
+-		fpi_ssm_mark_aborted(ssm, status);
++	struct fpi_ssm *ssm = transfer->user_data;
+ 
+-	fp_dbg("data: %02x %02x %02x", data[0], data[1], data[2]);
+-	if (data[0] == 0xff && (data[1] & 0x0f) == 0x07 && data[2] == 0x41) {
+-		fp_dbg("using offset %x", fwenc_offsets[urudev->fwfixer_offset]);
+-		urudev->fwfixer_value = data[1];
+-		fpi_ssm_jump_to_state(ssm, FWFIXER_WRITE);
++	if (transfer->status == LIBUSB_TRANSFER_CANCELLED) {
++		fp_dbg("cancelled");
++		fpi_ssm_mark_aborted(ssm, -ECANCELED);
++	} else if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
++		fp_dbg("error");
++		fpi_ssm_mark_aborted(ssm, -EIO);
+ 	} else {
+-		fpi_ssm_jump_to_state(ssm, FWFIXER_READ_NEXT);
++		fpi_ssm_next_state(ssm);
++	}
++}
++
++enum {
++	BLOCKF_CHANGE_KEY	= 0x80,
++	BLOCKF_NO_KEY_UPDATE	= 0x04,
++	BLOCKF_ENCRYPTED		= 0x02,
++	BLOCKF_NOT_PRESENT	= 0x01,
++};
++
++struct uru4k_image {
++	uint8_t		unknown_00[4];
++	uint16_t	num_lines;
++	uint8_t		key_number;
++	uint8_t		unknown_07[9];
++	struct {
++		uint8_t	flags;
++		uint8_t	num_lines;
++	} block_info[15];
++	uint8_t		unknown_2E[18];
++	uint8_t		data[IMAGE_HEIGHT][IMAGE_WIDTH];
++};
++
++static uint32_t update_key(uint32_t key)
++{
++	/* linear feedback shift register
++	 * taps at bit positions 1 3 4 7 11 13 20 23 26 29 32 */
++	uint32_t bit = key & 0x9248144d;
++	bit ^= bit << 16;
++	bit ^= bit << 8;
++	bit ^= bit << 4;
++	bit ^= bit << 2;
++	bit ^= bit << 1;
++	return (bit & 0x80000000) | (key >> 1);
++}
++
++static uint32_t do_decode(uint8_t *data, int num_bytes, uint32_t key)
++{
++	uint8_t xorbyte;
++	int i;
++
++	for (i = 0; i < num_bytes - 1; i++) {
++		/* calculate xor byte and update key */
++		xorbyte  = ((key >>  4) & 1) << 0;
++		xorbyte |= ((key >>  8) & 1) << 1;
++		xorbyte |= ((key >> 11) & 1) << 2;
++		xorbyte |= ((key >> 14) & 1) << 3;
++		xorbyte |= ((key >> 18) & 1) << 4;
++		xorbyte |= ((key >> 21) & 1) << 5;
++		xorbyte |= ((key >> 24) & 1) << 6;
++		xorbyte |= ((key >> 29) & 1) << 7;
++		key = update_key(key);
++
++		/* decrypt data */
++		data[i] = data[i+1] ^ xorbyte;
+ 	}
++
++	/* the final byte is implictly zero */
++	data[i] = 0;
++	return update_key(key);
+ }
+ 
+-static void fwfixer_run_state(struct fpi_ssm *ssm)
++static void imaging_run_state(struct fpi_ssm *ssm)
+ {
+ 	struct fp_img_dev *dev = ssm->priv;
+ 	struct uru4k_dev *urudev = dev->priv;
+-	int r;
++	struct uru4k_image *img = urudev->img_data;
++	struct fp_img *fpimg;
++	uint32_t key;
++	uint8_t flags, num_lines;
++	int i, r, to;
++	char buf[5];
+ 
+ 	switch (ssm->cur_state) {
+-	case FWFIXER_INIT:
+-		urudev->fwfixer_offset = -1;
+-		fpi_ssm_next_state(ssm);
++	case IMAGING_CAPTURE:
++		urudev->img_lines_done = 0;
++		urudev->img_block = 0;
++		libusb_fill_bulk_transfer(urudev->img_transfer, dev->udev, EP_DATA,
++			urudev->img_data, sizeof(struct uru4k_image), image_transfer_cb, ssm, 0);
++		r = libusb_submit_transfer(urudev->img_transfer);
++		if (r < 0)
++			fpi_ssm_mark_aborted(ssm, -EIO);
+ 		break;
+-	case FWFIXER_READ_NEXT: ;
+-		int offset = ++urudev->fwfixer_offset;
+-		uint16_t try_addr;
+-
+-		if (offset == G_N_ELEMENTS(fwenc_offsets)) {
+-			fp_err("could not find encryption byte");
+-			fpi_ssm_mark_aborted(ssm, -ENODEV);
++	case IMAGING_SEND_INDEX:
++		fp_dbg("hw header lines %d", img->num_lines);
++
++		if (img->num_lines >= IMAGE_HEIGHT ||
++		    urudev->img_transfer->actual_length != img->num_lines * IMAGE_WIDTH + 64) {
++			fp_err("bad captured image (%d lines) or size mismatch %d != %d",
++				img->num_lines,
++				urudev->img_transfer->actual_length,
++				img->num_lines * IMAGE_WIDTH + 64);
++			fpi_ssm_jump_to_state(ssm, IMAGING_CAPTURE);
+ 			return;
+ 		}
+-
+-		try_addr = fwenc_offsets[offset];
+-		fp_dbg("looking for encryption byte at %x", try_addr);
+-
+-		r = read_regs(dev, try_addr, 3, fwfixer_read_cb, ssm);
+-		if (r < 0)
+-			fpi_ssm_mark_aborted(ssm, r);
++		if (!urudev->profile->encryption) {
++			fpi_ssm_jump_to_state(ssm, IMAGING_REPORT_IMAGE);
++			return;
++		}
++		buf[0] = img->key_number;
++		buf[1] = urudev->img_enc_seed;
++		buf[2] = urudev->img_enc_seed >> 8;
++		buf[3] = urudev->img_enc_seed >> 16;
++		buf[4] = urudev->img_enc_seed >> 24;
++		sm_write_regs(ssm, REG_SCRAMBLE_DATA_INDEX, 5, buf);
+ 		break;
+-	case FWFIXER_WRITE: ;
+-		uint16_t enc_addr = fwenc_offsets[urudev->fwfixer_offset] + 1;
+-		unsigned char cur = urudev->fwfixer_value;
+-		unsigned char new = cur & 0xef;
+-		if (new == cur) {
+-			fp_dbg("encryption is already disabled");
+-			fpi_ssm_next_state(ssm);
+-		} else {
+-			fp_dbg("fixing encryption byte at %x to %02x", enc_addr, new);
+-			sm_write_reg(ssm, enc_addr, new);
++	case IMAGING_READ_KEY:
++		sm_read_regs(ssm, REG_SCRAMBLE_DATA_KEY, 4);
++		break;
++	case IMAGING_DECODE:
++		key  = urudev->last_reg_rd[0];
++		key |= urudev->last_reg_rd[1] << 8;
++		key |= urudev->last_reg_rd[2] << 16;
++		key |= urudev->last_reg_rd[3] << 24;
++		key ^= urudev->img_enc_seed;
++
++		fp_dbg("encryption id %02x -> key %08x", img->key_number, key);
++		while (urudev->img_block < array_n_elements(img->block_info) &&
++				urudev->img_lines_done < img->num_lines) {
++			flags = img->block_info[urudev->img_block].flags;
++			num_lines = img->block_info[urudev->img_block].num_lines;
++			if (num_lines == 0)
++				break;
++
++			fp_dbg("%d %02x %d", urudev->img_block, flags, num_lines);
++			if (flags & BLOCKF_CHANGE_KEY) {
++				fp_dbg("changing encryption keys.\n");
++				img->block_info[urudev->img_block].flags &= ~BLOCKF_CHANGE_KEY;
++				img->key_number++;
++				urudev->img_enc_seed = rand();
++				fpi_ssm_jump_to_state(ssm, IMAGING_SEND_INDEX);
++				return;
++			}
++			switch (flags & (BLOCKF_NO_KEY_UPDATE | BLOCKF_ENCRYPTED)) {
++			case BLOCKF_ENCRYPTED:
++				fp_dbg("decoding %d lines", num_lines);
++				key = do_decode(&img->data[urudev->img_lines_done][0],
++						IMAGE_WIDTH*num_lines, key);
++				break;
++			case 0:
++				fp_dbg("skipping %d lines", num_lines);
++				for (r = 0; r < IMAGE_WIDTH*num_lines; r++)
++					key = update_key(key);
++				break;
++			}
++			if ((flags & BLOCKF_NOT_PRESENT) == 0)
++				urudev->img_lines_done += num_lines;
++			urudev->img_block++;
++		}
++		fpi_ssm_next_state(ssm);
++		break;
++	case IMAGING_REPORT_IMAGE:
++		fpimg = fpi_img_new_for_imgdev(dev);
++
++		to = r = 0;
++		for (i = 0; i < array_n_elements(img->block_info) && r < img->num_lines; i++) {
++			flags = img->block_info[i].flags;
++			num_lines = img->block_info[i].num_lines;
++			if (num_lines == 0)
++				break;
++			memcpy(&fpimg->data[to], &img->data[r][0],
++				num_lines * IMAGE_WIDTH);
++			if (!(flags & BLOCKF_NOT_PRESENT))
++				r += num_lines;
++			to += num_lines * IMAGE_WIDTH;
+ 		}
++
++		fpimg->flags = FP_IMG_COLORS_INVERTED;
++		if (!urudev->profile->encryption)
++			fpimg->flags |= FP_IMG_V_FLIPPED | FP_IMG_H_FLIPPED;
++		fpi_imgdev_image_captured(dev, fpimg);
++
++		if (urudev->activate_state == IMGDEV_STATE_CAPTURE)
++			fpi_ssm_jump_to_state(ssm, IMAGING_CAPTURE);
++		else
++			fpi_ssm_mark_completed(ssm);
+ 		break;
+ 	}
+ }
+ 
++static void imaging_complete(struct fpi_ssm *ssm)
++{
++	struct fp_img_dev *dev = ssm->priv;
++	struct uru4k_dev *urudev = dev->priv;
++	int r = ssm->error;
++	fpi_ssm_free(ssm);
++
++	g_free(urudev->img_data);
++	urudev->img_data = NULL;
++
++	libusb_free_transfer(urudev->img_transfer);
++	urudev->img_transfer = NULL;
++
++	if (r)
++		fpi_imgdev_session_error(dev, r);
++
++	r = execute_state_change(dev);
++	if (r)
++		fpi_imgdev_session_error(dev, r);
++}
++
++/***** INITIALIZATION *****/
++
+ /* After closing an app and setting hwstat to 0x80, my ms keyboard gets in a
+  * confused state and returns hwstat 0x85. On next app run, we don't get the
+  * 56aa interrupt. This is the best way I've found to fix it: mess around
+@@ -793,7 +855,7 @@ static void rebootpwr_run_state(struct fpi_ssm *ssm)
+ 		sm_read_reg(ssm, REG_HWSTAT);
+ 		break;
+ 	case REBOOTPWR_CHECK_HWSTAT:
+-		urudev->last_hwstat = urudev->last_reg_rd;
++		urudev->last_hwstat = urudev->last_reg_rd[0];
+ 		if (urudev->last_hwstat & 0x1)
+ 			fpi_ssm_mark_completed(ssm);
+ 		else
+@@ -876,8 +938,8 @@ static void powerup_run_state(struct fpi_ssm *ssm)
+ 		sm_read_reg(ssm, REG_HWSTAT);
+ 		break;
+ 	case POWERUP_CHECK_HWSTAT:
+-		urudev->last_hwstat = urudev->last_reg_rd;
+-		if ((urudev->last_reg_rd & 0x80) == 0)
++		urudev->last_hwstat = urudev->last_reg_rd[0];
++		if ((urudev->last_reg_rd[0] & 0x80) == 0)
+ 			fpi_ssm_mark_completed(ssm);
+ 		else
+ 			fpi_ssm_next_state(ssm);
+@@ -890,7 +952,7 @@ static void powerup_run_state(struct fpi_ssm *ssm)
+ 		sm_do_challenge_response(ssm);
+ 		break;
+ 	case POWERUP_CHALLENGE_RESPONSE_SUCCESS:
+-		fpi_ssm_jump_to_state(ssm, POWERUP_SET_HWSTAT);		
++		fpi_ssm_jump_to_state(ssm, POWERUP_SET_HWSTAT);
+ 		break;
+ 	}
+ }
+@@ -908,12 +970,6 @@ static void powerup_run_state(struct fpi_ssm *ssm)
+ 	if ((status & 0x80) == 0)
+ 		set_hwstat(status | 0x80);
+ 
+-	// disable encryption
+-	fwenc = read_firmware_encryption_byte();
+-	new = fwenc & 0xef;
+-	if (new != fwenc)
+-		write_firmware_encryption_byte(new);
+-
+ 	// power device up
+ 	run_powerup_sm();
+ 	await_irq(IRQDATA_SCANPWR_ON);
+@@ -924,10 +980,11 @@ enum init_states {
+ 	INIT_CHECK_HWSTAT_REBOOT,
+ 	INIT_REBOOT_POWER,
+ 	INIT_CHECK_HWSTAT_POWERDOWN,
+-	INIT_FIX_FIRMWARE,
+ 	INIT_POWERUP,
+ 	INIT_AWAIT_SCAN_POWER,
+ 	INIT_DONE,
++	INIT_GET_VERSION,
++	INIT_REPORT_VERSION,
+ 	INIT_NUM_STATES,
+ };
+ 
+@@ -975,7 +1032,7 @@ static void init_run_state(struct fpi_ssm *ssm)
+ 		sm_read_reg(ssm, REG_HWSTAT);
+ 		break;
+ 	case INIT_CHECK_HWSTAT_REBOOT:
+-		urudev->last_hwstat = urudev->last_reg_rd;
++		urudev->last_hwstat = urudev->last_reg_rd[0];
+ 		if ((urudev->last_hwstat & 0x84) == 0x84)
+ 			fpi_ssm_next_state(ssm);
+ 		else
+@@ -993,12 +1050,6 @@ static void init_run_state(struct fpi_ssm *ssm)
+ 		else
+ 			fpi_ssm_next_state(ssm);
+ 		break;
+-	case INIT_FIX_FIRMWARE: ;
+-		struct fpi_ssm *fwsm = fpi_ssm_new(dev->dev, fwfixer_run_state,
+-			FWFIXER_NUM_STATES);
+-		fwsm->priv = dev;
+-		fpi_ssm_start_subsm(ssm, fwsm);
+-		break;
+ 	case INIT_POWERUP: ;
+ 		struct fpi_ssm *powerupsm = fpi_ssm_new(dev->dev, powerup_run_state,
+ 			POWERUP_NUM_STATES);
+@@ -1029,6 +1080,17 @@ static void init_run_state(struct fpi_ssm *ssm)
+ 		urudev->scanpwr_irq_timeout = NULL;
+ 		urudev->irq_cb_data = NULL;
+ 		urudev->irq_cb = NULL;
++		fpi_ssm_next_state(ssm);
++		break;
++	case INIT_GET_VERSION:
++		sm_read_regs(ssm, REG_DEVICE_INFO, 16);
++		break;
++	case INIT_REPORT_VERSION:
++		/* Likely hardware revision, and firmware version.
++		 * Not sure which is which. */
++		fp_info("Versions %02x%02x and %02x%02x",
++			urudev->last_reg_rd[10], urudev->last_reg_rd[11],
++			urudev->last_reg_rd[4],  urudev->last_reg_rd[5]);
+ 		fpi_ssm_mark_completed(ssm);
+ 		break;
+ 	}
+@@ -1037,7 +1099,6 @@ static void init_run_state(struct fpi_ssm *ssm)
+ static void activate_initsm_complete(struct fpi_ssm *ssm)
+ {
+ 	struct fp_img_dev *dev = ssm->priv;
+-	struct uru4k_dev *urudev = dev->priv;
+ 	int r = ssm->error;
+ 	fpi_ssm_free(ssm);
+ 
+@@ -1046,7 +1107,7 @@ static void activate_initsm_complete(struct fpi_ssm *ssm)
+ 		return;
+ 	}
+ 
+-	r = dev_change_state(dev, urudev->activate_state);
++	r = execute_state_change(dev);
+ 	fpi_imgdev_activate_complete(dev, r);
+ }
+ 
+@@ -1074,47 +1135,69 @@ static int dev_activate(struct fp_img_dev *dev, enum fp_imgdev_state state)
+ 
+ /***** DEINITIALIZATION *****/
+ 
+-enum deinit_states {
+-	DEINIT_SET_MODE_INIT = 0,
+-	DEINIT_POWERDOWN,
+-	DEINIT_NUM_STATES,
+-};
+-
+-static void deinit_run_state(struct fpi_ssm *ssm)
+-{
+-	switch (ssm->cur_state) {
+-	case DEINIT_SET_MODE_INIT:
+-		sm_set_mode(ssm, MODE_INIT);
+-		break;
+-	case DEINIT_POWERDOWN:
+-		sm_set_hwstat(ssm, 0x80);
+-		break;
+-	}
+-}
+-
+ static void deactivate_irqs_stopped(struct fp_img_dev *dev)
+ {
+ 	fpi_imgdev_deactivate_complete(dev);
+ }
+ 
+-static void deactivate_deinitsm_complete(struct fpi_ssm *ssm)
++static void deactivate_write_reg_cb(struct fp_img_dev *dev, int status,
++	void *user_data)
+ {
+-	struct fp_img_dev *dev = ssm->priv;
+-	fpi_ssm_free(ssm);
+ 	stop_irq_handler(dev, deactivate_irqs_stopped);
+ }
+ 
+ static void dev_deactivate(struct fp_img_dev *dev)
+ {
++	dev_change_state(dev, IMGDEV_STATE_INACTIVE);
++}
++
++static int execute_state_change(struct fp_img_dev *dev)
++{
+ 	struct uru4k_dev *urudev = dev->priv;
+-	struct fpi_ssm *ssm = fpi_ssm_new(dev->dev, deinit_run_state,
+-		DEINIT_NUM_STATES);
++	struct fpi_ssm *ssm;
+ 
+-	stop_imaging_loop(dev);
+-	urudev->irq_cb = NULL;
+-	urudev->irq_cb_data = NULL;
+-	ssm->priv = dev;
+-	fpi_ssm_start(ssm, deactivate_deinitsm_complete);
++	switch (urudev->activate_state) {
++	case IMGDEV_STATE_INACTIVE:
++		fp_dbg("deactivating");
++		urudev->irq_cb = NULL;
++		urudev->irq_cb_data = NULL;
++		return write_reg(dev, REG_MODE, MODE_OFF,
++			deactivate_write_reg_cb, NULL);
++		break;
++
++	case IMGDEV_STATE_AWAIT_FINGER_ON:
++		fp_dbg("wait finger on");
++		if (!IRQ_HANDLER_IS_RUNNING(urudev))
++			return -EIO;
++		urudev->irq_cb = finger_presence_irq_cb;
++		return write_reg(dev, REG_MODE, MODE_AWAIT_FINGER_ON,
++			change_state_write_reg_cb, NULL);
++
++	case IMGDEV_STATE_CAPTURE:
++		fp_dbg("starting capture");
++		urudev->irq_cb = NULL;
++
++		urudev->img_transfer = libusb_alloc_transfer(0);
++		urudev->img_data = g_malloc(sizeof(struct uru4k_image));
++		urudev->img_enc_seed = rand();
++
++		ssm = fpi_ssm_new(dev->dev, imaging_run_state, IMAGING_NUM_STATES);
++		ssm->priv = dev;
++		fpi_ssm_start(ssm, imaging_complete);
++
++		return write_reg(dev, REG_MODE, MODE_CAPTURE,
++			change_state_write_reg_cb, NULL);
++
++	case IMGDEV_STATE_AWAIT_FINGER_OFF:
++		fp_dbg("await finger off");
++		if (!IRQ_HANDLER_IS_RUNNING(urudev))
++			return -EIO;
++		urudev->irq_cb = finger_presence_irq_cb;
++		return write_reg(dev, REG_MODE, MODE_AWAIT_FINGER_OFF,
++			change_state_write_reg_cb, NULL);
++	}
++
++	return 0;
+ }
+ 
+ /***** LIBRARY STUFF *****/
+@@ -1278,13 +1361,13 @@ struct fp_img_driver uru4000_driver = {
+ 	.driver = {
+ 		.id = 2,
+ 		.name = FP_COMPONENT,
+-		.full_name = "Digital Persona U.are.U 4000/4000B",
++		.full_name = "Digital Persona U.are.U 4000/4000B/4500",
+ 		.id_table = id_table,
+ 		.scan_type = FP_SCAN_TYPE_PRESS,
+ 	},
+ 	.flags = FP_IMGDRV_SUPPORTS_UNCONDITIONAL_CAPTURE,
+-	.img_height = 289,
+-	.img_width = 384,
++	.img_height = IMAGE_HEIGHT,
++	.img_width = IMAGE_WIDTH,
+ 
+ 	.open = dev_init,
+ 	.close = dev_deinit,
+diff --git a/libfprint/fp_internal.h b/libfprint/fp_internal.h
+index 44881cd..8e714ec 100644
+--- a/libfprint/fp_internal.h
++++ b/libfprint/fp_internal.h
+@@ -28,6 +28,8 @@
+ 
+ #include <fprint.h>
+ 
++#define array_n_elements(array) (sizeof(array) / sizeof(array[0]))
++
+ #define container_of(ptr, type, member) ({                      \
+         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+         (type *)( (char *)__mptr - offsetof(type,member) );})
+-- 
+1.7.12
+
