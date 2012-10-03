@@ -1664,7 +1664,7 @@ static void update_progress(struct progress *prog, size_t percent)
 		draw_progress(percent);
 	if (prog->progress_fd != 0) {
 		char buf[8];
-		size_t n = snprintf(buf, sizeof(buf), "%d\n", percent);
+		size_t n = snprintf(buf, sizeof(buf), "%zu\n", percent);
 		write(prog->progress_fd, buf, n);
 	}
 }
