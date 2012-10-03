@@ -927,11 +927,12 @@ static int next_branch(struct apk_solver_state *ss)
 
 #ifdef DEBUG_CHECKS
 		ASSERT(cmpscore(&d->saved_score, &ss->score) == 0,
-			"ERROR! saved_score "SCORE_FMT" != score "SCORE_FMT,
+			"Saved_score "SCORE_FMT" != score "SCORE_FMT,
 			SCORE_PRINTF(&d->saved_score),
 			SCORE_PRINTF(&ss->score));
 		ASSERT(d->saved_requirers == name->ss.requirers,
-			"ERROR! requirers not restored between decisions");
+			"Requirers not restored between decisions (%s)",
+			name->name);
 #endif
 
 		if (backup_until >= ss->num_decisions &&
