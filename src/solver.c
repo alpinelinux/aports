@@ -706,10 +706,14 @@ static inline void assign_name(
 	struct apk_solver_state *ss, struct apk_name *name, struct apk_provider p)
 {
 	if (p.version == &apk_null_blob) {
-		ASSERT(!name->ss.locked || name->ss.chosen.version == &apk_null_blob,
-		       "Assigning locked name with version");
+		/* Assigning locked name with version is a problem;
+		 * generally package providing same name twice */
+		if (name->ss.locked && name->ss.chosen.version != &apk_null_blob)
+			ss->impossible_state = 1;
 	} else {
-		ASSERT(!name->ss.locked, "Assigning locked name");
+		/* Similar to above */
+		if (name->ss.locked)
+			ss->impossible_state = 1;
 	}
 	name->ss.chosen = p;
 	name->ss.locked++;
@@ -721,7 +725,7 @@ static inline void assign_name(
 
 static inline void unassign_name(struct apk_solver_state *ss, struct apk_name *name)
 {
-	ASSERT(name->ss.locked, "Unassigning unlocked name");
+	ASSERT(name->ss.locked, "Unassigning unlocked name %s", name->name);
 	name->ss.locked--;
 	if (name->ss.locked == 0) {
 		name->ss.chosen = CHOSEN_NONE;
@@ -793,7 +797,7 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 			addscore(&ss->score, &score);
 
 			name->ss.chosen = CHOSEN_NONE;
-			name->ss.locked = 1;
+			name->ss.locked++;
 			list_del(&name->ss.unsolved_list);
 			list_init(&name->ss.unsolved_list);
 		} else {
@@ -847,7 +851,7 @@ static void undo_decision(struct apk_solver_state *ss,
 		for (i = 0; i < pkg->provides->num; i++)
 			pkg->provides->item[i].name->ss.name_touched = 1;
 
-		if (name->ss.locked) {
+		if (d->type == DECISION_ASSIGN) {
 			if (ps->handle_install_if)
 				foreach_rinstall_if_pkg(ss, pkg, untrigger_install_if);
 			foreach_dependency(ss, pkg->depends, undo_constraint);
@@ -871,12 +875,12 @@ static void undo_decision(struct apk_solver_state *ss,
 		if (d->type == DECISION_ASSIGN) {
 			get_unassigned_score(name, &score);
 			subscore(&ss->score, &score);
+			name->ss.locked--;
 		} else {
 			name->ss.none_excluded = 0;
 		}
 
 		/* Put back the name to unsolved list */
-		name->ss.locked = 0;
 		promote_name(ss, name);
 	}
 }
@@ -890,6 +894,9 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 {
 	struct apk_decision *d;
 
+	ASSERT(pkg == NULL || pkg->name == name,
+		"push_decision got non-primary name: %s != %s",
+		pkg->name->name, name->name);
 	ASSERT(ss->num_decisions <= ss->max_decisions,
 	       "Decision tree overflow.");
 
@@ -897,6 +904,8 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 	d = &ss->decisions[ss->num_decisions];
 
 #ifdef DEBUG_CHECKS
+	dbg_printf("Saving score ("SCORE_FMT") and requirers (%d) for %s\n",
+		SCORE_PRINTF(&ss->score), name->ss.requirers, name->name);
 	d->saved_score = ss->score;
 	d->saved_requirers = name->ss.requirers;
 #endif
@@ -911,6 +920,12 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 		d->pkg = pkg;
 		d->no_package = 0;
 	}
+	/* FIXME: this is needed for virtual packages - should possible
+	 * consider making backtracking information also keep the 
+	 * virtual apk_name causing the touched information to be more
+	 * accurate */
+	if (name->ss.last_touched_decision == 0)
+		name->ss.last_touched_decision = ss->num_decisions;
 
 	return apply_decision(ss, d);
 }
@@ -931,8 +946,8 @@ static int next_branch(struct apk_solver_state *ss)
 			SCORE_PRINTF(&d->saved_score),
 			SCORE_PRINTF(&ss->score));
 		ASSERT(d->saved_requirers == name->ss.requirers,
-			"Requirers not restored between decisions (%s)",
-			name->name);
+			"Requirers not restored between decisions (%s), %d != %d",
+			name->name, d->saved_requirers, name->ss.requirers);
 #endif
 
 		if (backup_until >= ss->num_decisions &&
@@ -940,6 +955,10 @@ static int next_branch(struct apk_solver_state *ss)
 			d->branching_point = BRANCH_NO;
 			d->type = (d->type == DECISION_ASSIGN) ? DECISION_EXCLUDE : DECISION_ASSIGN;
 			return apply_decision(ss, d);
+		} else {
+			if (d->branching_point == BRANCH_YES)
+				dbg_printf("skipping %s, %d < %d\n",
+					name->name, backup_until, ss->num_decisions);
 		}
 
 		if (d->no_package && !d->found_solution) {
@@ -963,10 +982,14 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	if (ss->num_decisions > 0) {
 		requirer_name = decision_to_name(&ss->decisions[ss->num_decisions]);
 		requirer_pkg  = decision_to_pkg(&ss->decisions[ss->num_decisions]);
+		/* FIXME: should probably take into account the requirer
+		 * package's provided name's 'requirer strength' */
 		strength = requirer_name->ss.requirers ?: 1;
 	} else {
 		strength = 1;
 	}
+
+	dbg_printf("--->apply_constraint: %s (strength %d)\n", name->name, strength);
 
 	if (name->ss.locked) {
 		if (name->ss.chosen.pkg)
@@ -1021,8 +1044,10 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	if (changed)
 		name->ss.last_touched_decision = ss->num_decisions;
 
-	if (!dep->conflict)
+	if (!dep->conflict) {
+		dbg_printf("%s requirers += %d\n", name->name, strength);
 		name->ss.requirers += strength;
+	}
 
 	promote_name(ss, name);
 }
@@ -1040,6 +1065,8 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	} else {
 		strength = 1;
 	}
+
+	dbg_printf("--->undo_constraint: %s (strength %d)\n", name->name, strength);
 
 	if (name->ss.locked) {
 		if (name->ss.chosen.pkg != NULL) {
@@ -1091,8 +1118,16 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	if (name->ss.last_touched_decision > ss->num_decisions)
 		name->ss.last_touched_decision = ss->num_decisions;
 
-	if (!dep->conflict)
+	if (requirer_name && requirer_name->ss.requirers != strength) {
+		dbg_printf("requirer %s, dependency %s: strength mismatch %d != %d\n",
+			requirer_name->name, name->name,
+			requirer_name->ss.requirers, strength);
+	}
+
+	if (!dep->conflict) {
 		name->ss.requirers -= strength;
+		dbg_printf("%s requirers -= %d\n", name->name, strength);
+	}
 
 	demote_name(ss, name);
 }
@@ -1144,7 +1179,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 
 		/* viable alternative? */
 		if (cmpscore2(&ss->score, &pkg0_score, &ss->best_score) >= 0)
-			return push_decision(ss, name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
+			return push_decision(ss, pkg0->name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
 
 		if (cmpscore(&pkg0_score, &best_score) < 0) {
 			best_score = pkg0_score;
@@ -1169,9 +1204,10 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 			return SOLVERR_PRUNED;
 		return push_decision(ss, name, NULL, DECISION_ASSIGN, BRANCH_NO, FALSE);
 	} else if (options == 1 && score_locked && name->ss.none_excluded && name == next_p->pkg->name) {
+		struct apk_package *pkg0 = next_p->pkg;
 		dbg_printf("reconsider_name: %s: only one choice left with known score, locking.\n",
 			name->name);
-		return push_decision(ss, name, next_p->pkg, DECISION_ASSIGN, BRANCH_NO, FALSE);
+		return push_decision(ss, pkg0->name, pkg0, DECISION_ASSIGN, BRANCH_NO, FALSE);
 	}
 
 	name->ss.chosen = *next_p;
@@ -1916,7 +1952,10 @@ static void print_dep_errors(struct apk_database *db, char *label,
 
 	for (i = 0; i < deps->num; i++) {
 		struct apk_dependency *dep = &deps->item[i];
-		struct apk_package *pkg = (struct apk_package*) dep->name->state_ptr;
+		struct apk_package *pkg = NULL;
+
+		if (dep->name->state_int != 1)
+			pkg = (struct apk_package*) dep->name->state_ptr;
 
 		if (apk_dep_is_materialized_or_provided(dep, pkg))
 			continue;
@@ -1953,6 +1992,11 @@ void apk_solver_print_errors(struct apk_database *db,
 	for (i = 0; i < solution->num; i++) {
 		struct apk_package *pkg = solution->item[i].pkg;
 		pkg->name->state_ptr = pkg;
+		for (j = 0; j < pkg->provides->num; j++) {
+			if (pkg->provides->item[j].version == &apk_null_blob)
+				continue;
+			pkg->provides->item[j].name->state_ptr = pkg;
+		}
 	}
 
 	print_dep_errors(db, "world", world, &names);
