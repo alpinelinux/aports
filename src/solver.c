@@ -71,16 +71,13 @@ enum {
 };
 
 struct apk_decision {
-	union {
-		struct apk_name *name;
-		struct apk_package *pkg;
-	};
+	struct apk_name *name;
+	struct apk_package *pkg;
 #ifdef DEBUG_CHECKS
 	struct apk_score saved_score;
 	unsigned short saved_requirers;
 #endif
 
-	unsigned no_package : 1;
 	unsigned type : 1;
 	unsigned branching_point : 1;
 	unsigned topology_position : 1;
@@ -193,20 +190,6 @@ static inline int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct a
 	if (a.score < b->score) return -1;
 	if (a.score > b->score) return 1;
 	return 0;
-}
-
-static struct apk_name *decision_to_name(struct apk_decision *d)
-{
-	if (d->no_package)
-		return d->name;
-	return d->pkg->name;
-}
-
-static struct apk_package *decision_to_pkg(struct apk_decision *d)
-{
-	if (d->no_package)
-		return NULL;
-	return d->pkg;
 }
 
 static struct apk_package_state *pkg_to_ps(struct apk_package *pkg)
@@ -737,8 +720,8 @@ static inline void unassign_name(struct apk_solver_state *ss, struct apk_name *n
 static solver_result_t apply_decision(struct apk_solver_state *ss,
 				      struct apk_decision *d)
 {
-	struct apk_name *name = decision_to_name(d);
-	struct apk_package *pkg = decision_to_pkg(d);
+	struct apk_name *name = d->name;
+	struct apk_package *pkg = d->pkg;
 	struct apk_score score;
 	int i;
 
@@ -827,8 +810,8 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 static void undo_decision(struct apk_solver_state *ss,
 			  struct apk_decision *d)
 {
-	struct apk_name *name = decision_to_name(d);
-	struct apk_package *pkg = decision_to_pkg(d);
+	struct apk_name *name = d->name;
+	struct apk_package *pkg = d->pkg;
 	struct apk_score score;
 	int i;
 
@@ -859,7 +842,7 @@ static void undo_decision(struct apk_solver_state *ss,
 			get_topology_score(ss, pkg, &score);
 			subscore(&ss->score, &score);
 
-			unassign_name(ss, name);
+			unassign_name(ss, pkg->name);
 			for (i = 0; i < pkg->provides->num; i++) {
 				struct apk_dependency *p = &pkg->provides->item[i];
 				unassign_name(ss, p->name);
@@ -894,9 +877,6 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 {
 	struct apk_decision *d;
 
-	ASSERT(pkg == NULL || pkg->name == name,
-		"push_decision got non-primary name: %s != %s",
-		pkg->name->name, name->name);
 	ASSERT(ss->num_decisions <= ss->max_decisions,
 	       "Decision tree overflow.");
 
@@ -913,19 +893,8 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 	d->branching_point = branching_point;
 	d->topology_position = topology_position;
 	d->found_solution = 0;
-	if (pkg == NULL) {
-		d->name = name;
-		d->no_package = 1;
-	} else {
-		d->pkg = pkg;
-		d->no_package = 0;
-	}
-	/* FIXME: this is needed for virtual packages - should possible
-	 * consider making backtracking information also keep the 
-	 * virtual apk_name causing the touched information to be more
-	 * accurate */
-	if (name->ss.last_touched_decision == 0)
-		name->ss.last_touched_decision = ss->num_decisions;
+	d->name = name;
+	d->pkg = pkg;
 
 	return apply_decision(ss, d);
 }
@@ -936,7 +905,7 @@ static int next_branch(struct apk_solver_state *ss)
 
 	while (ss->num_decisions > 0) {
 		struct apk_decision *d = &ss->decisions[ss->num_decisions];
-		struct apk_name *name = decision_to_name(d);
+		struct apk_name *name = d->name;
 
 		undo_decision(ss, d);
 
@@ -961,7 +930,7 @@ static int next_branch(struct apk_solver_state *ss)
 					name->name, backup_until, ss->num_decisions);
 		}
 
-		if (d->no_package && !d->found_solution) {
+		if (d->pkg == NULL && !d->found_solution) {
 			if (name->ss.last_touched_decision < backup_until)
 				backup_until = name->ss.last_touched_decision;
 		}
@@ -980,8 +949,8 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	int i, strength, changed = 0;
 
 	if (ss->num_decisions > 0) {
-		requirer_name = decision_to_name(&ss->decisions[ss->num_decisions]);
-		requirer_pkg  = decision_to_pkg(&ss->decisions[ss->num_decisions]);
+		requirer_name = ss->decisions[ss->num_decisions].name;
+		requirer_pkg  = ss->decisions[ss->num_decisions].pkg;
 		/* FIXME: should probably take into account the requirer
 		 * package's provided name's 'requirer strength' */
 		strength = requirer_name->ss.requirers ?: 1;
@@ -1059,8 +1028,8 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	int i, strength;
 
 	if (ss->num_decisions > 0) {
-		requirer_name = decision_to_name(&ss->decisions[ss->num_decisions]);
-		requirer_pkg  = decision_to_pkg(&ss->decisions[ss->num_decisions]);
+		requirer_name = ss->decisions[ss->num_decisions].name;
+		requirer_pkg  = ss->decisions[ss->num_decisions].pkg;
 		strength = requirer_name->ss.requirers ?: 1;
 	} else {
 		strength = 1;
@@ -1179,7 +1148,7 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 
 		/* viable alternative? */
 		if (cmpscore2(&ss->score, &pkg0_score, &ss->best_score) >= 0)
-			return push_decision(ss, pkg0->name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
+			return push_decision(ss, name, pkg0, DECISION_EXCLUDE, BRANCH_NO, FALSE);
 
 		if (cmpscore(&pkg0_score, &best_score) < 0) {
 			best_score = pkg0_score;
@@ -1204,10 +1173,9 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 			return SOLVERR_PRUNED;
 		return push_decision(ss, name, NULL, DECISION_ASSIGN, BRANCH_NO, FALSE);
 	} else if (options == 1 && score_locked && name->ss.none_excluded && name == next_p->pkg->name) {
-		struct apk_package *pkg0 = next_p->pkg;
 		dbg_printf("reconsider_name: %s: only one choice left with known score, locking.\n",
 			name->name);
-		return push_decision(ss, pkg0->name, pkg0, DECISION_ASSIGN, BRANCH_NO, FALSE);
+		return push_decision(ss, name, next_p->pkg, DECISION_ASSIGN, BRANCH_NO, FALSE);
 	}
 
 	name->ss.chosen = *next_p;
@@ -1339,8 +1307,8 @@ static void record_solution(struct apk_solver_state *ss)
 	n = 0;
 	for (i = ss->num_decisions; i > 0; i--) {
 		struct apk_decision *d = &ss->decisions[i];
-		struct apk_name *name = decision_to_name(d);
-		struct apk_package *pkg = decision_to_pkg(d);
+		struct apk_name *name = d->name;
+		struct apk_package *pkg = d->pkg;
 		struct apk_package_state *ps;
 		unsigned short pinning;
 		unsigned int repos;
