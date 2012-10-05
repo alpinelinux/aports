@@ -72,13 +72,17 @@ enum {
 
 struct apk_decision {
 	struct apk_name *name;
-	struct apk_package *pkg;
+	union {
+		struct apk_package *pkg;
+		unsigned backup_until;
+	};
 #ifdef DEBUG_CHECKS
 	struct apk_score saved_score;
 	unsigned short saved_requirers;
 #endif
 
 	unsigned type : 1;
+	unsigned has_package : 1;
 	unsigned branching_point : 1;
 	unsigned topology_position : 1;
 	unsigned found_solution : 1;
@@ -202,6 +206,11 @@ static struct apk_package_state *pkg_to_ps_alloc(struct apk_package *pkg)
 	if (pkg->state_ptr == NULL)
 		pkg->state_ptr = calloc(1, sizeof(struct apk_package_state));
 	return pkg_to_ps(pkg);
+}
+
+static inline struct apk_package *decision_to_pkg(struct apk_decision *d)
+{
+	return d->has_package ? d->pkg : NULL;
 }
 
 static inline int pkg_available(struct apk_database *db, struct apk_package *pkg)
@@ -721,7 +730,7 @@ static solver_result_t apply_decision(struct apk_solver_state *ss,
 				      struct apk_decision *d)
 {
 	struct apk_name *name = d->name;
-	struct apk_package *pkg = d->pkg;
+	struct apk_package *pkg = decision_to_pkg(d);
 	struct apk_score score;
 	int i;
 
@@ -811,7 +820,7 @@ static void undo_decision(struct apk_solver_state *ss,
 			  struct apk_decision *d)
 {
 	struct apk_name *name = d->name;
-	struct apk_package *pkg = d->pkg;
+	struct apk_package *pkg = decision_to_pkg(d);
 	struct apk_score score;
 	int i;
 
@@ -894,7 +903,13 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 	d->topology_position = topology_position;
 	d->found_solution = 0;
 	d->name = name;
-	d->pkg = pkg;
+	if (pkg) {
+		d->has_package = 1;
+		d->pkg = pkg;
+	} else {
+		d->has_package = 0;
+		d->backup_until = name->ss.last_touched_decision;
+	}
 
 	return apply_decision(ss, d);
 }
@@ -930,9 +945,11 @@ static int next_branch(struct apk_solver_state *ss)
 					name->name, backup_until, ss->num_decisions);
 		}
 
-		if (d->pkg == NULL && !d->found_solution) {
-			if (name->ss.last_touched_decision < backup_until)
-				backup_until = name->ss.last_touched_decision;
+		/* When undoing the initial "exclude none" decision, check if
+		 * we can backjump. */
+		if (d->has_package == 0 && !d->found_solution) {
+			if (d->backup_until && backup_until > d->backup_until)
+				backup_until = d->backup_until;
 		}
 
 		ss->num_decisions--;
@@ -950,7 +967,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 
 	if (ss->num_decisions > 0) {
 		requirer_name = ss->decisions[ss->num_decisions].name;
-		requirer_pkg  = ss->decisions[ss->num_decisions].pkg;
+		requirer_pkg  = decision_to_pkg(&ss->decisions[ss->num_decisions]);
 		/* FIXME: should probably take into account the requirer
 		 * package's provided name's 'requirer strength' */
 		strength = requirer_name->ss.requirers ?: 1;
@@ -1010,7 +1027,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		}
 	}
 
-	if (changed)
+	if (name->ss.last_touched_decision == 0 || changed)
 		name->ss.last_touched_decision = ss->num_decisions;
 
 	if (!dep->conflict) {
@@ -1029,7 +1046,7 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 
 	if (ss->num_decisions > 0) {
 		requirer_name = ss->decisions[ss->num_decisions].name;
-		requirer_pkg  = ss->decisions[ss->num_decisions].pkg;
+		requirer_pkg  = decision_to_pkg(&ss->decisions[ss->num_decisions]);
 		strength = requirer_name->ss.requirers ?: 1;
 	} else {
 		strength = 1;
@@ -1082,10 +1099,10 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 
 	/* note: for perfection, we should revert here to the
 	 * *previous* value, but that'd require keeping track
-	 * of it which would require dynamic memory allocations.
-	 * in practice this is good enough. */
-	if (name->ss.last_touched_decision > ss->num_decisions)
-		name->ss.last_touched_decision = ss->num_decisions;
+	 * of it which would require dynamic memory allocations
+	 * or additional solver state field in apk_dependency
+	 * to store it (or hefty recalculations). */
+	name->ss.last_touched_decision = 0;
 
 	if (requirer_name && requirer_name->ss.requirers != strength) {
 		dbg_printf("requirer %s, dependency %s: strength mismatch %d != %d\n",
@@ -1308,7 +1325,7 @@ static void record_solution(struct apk_solver_state *ss)
 	for (i = ss->num_decisions; i > 0; i--) {
 		struct apk_decision *d = &ss->decisions[i];
 		struct apk_name *name = d->name;
-		struct apk_package *pkg = d->pkg;
+		struct apk_package *pkg = decision_to_pkg(d);
 		struct apk_package_state *ps;
 		unsigned short pinning;
 		unsigned int repos;
@@ -1316,8 +1333,7 @@ static void record_solution(struct apk_solver_state *ss)
 		d->found_solution = 1;
 
 		if (pkg == NULL) {
-			dbg_printf("record_solution: %s: NOTHING\n",
-				   decision_to_name(d)->name);
+			dbg_printf("record_solution: %s: NOTHING\n", name->name);
 			continue;
 		}
 
