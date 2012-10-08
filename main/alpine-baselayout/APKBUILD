@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.2.0
-pkgrel=3
+pkgrel=4
 pkgdesc="Alpine base dir structure and init scripts"
 url=http://git.alpinelinux.org/cgit/alpine-baselayout
 depends=
@@ -29,6 +29,9 @@ package() {
 	make install PREFIX= DESTDIR="$pkgdir" || return 1
 	rm -rf "$pkgdir"/etc/issue "$pkgdir"/usr/share/udhcpc \
 		"$pkgdir"/etc/init.d/vlan
+	
+	# lets blacklist microcode
+	echo "blacklist microcode" > "$pkgdir"/etc/modprobe.d/microcode.conf
 }
 md5sums="225dbf5b50ae6d3d188ff92c5746bc36  alpine-baselayout-2.2.0.tar.bz2
 3e219db536b13811c34e03c9c32229cb  0001-blacklist-viafb-and-e_powersaver.patch"
