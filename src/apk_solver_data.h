@@ -40,6 +40,7 @@ struct apk_solver_name_state {
 	unsigned none_excluded : 1;
 	unsigned name_touched : 1;
 	unsigned preferred_chosen : 1;
+	unsigned backjump_enabled : 1;
 };
 
 #endif
