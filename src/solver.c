@@ -1029,8 +1029,10 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		}
 	}
 
-	if (name->ss.last_touched_decision == 0 || changed)
+	if (name->ss.last_touched_decision == 0 || changed) {
+		dep->solver_state = name->ss.last_touched_decision;
 		name->ss.last_touched_decision = ss->num_decisions;
+	}
 
 	if (!dep->conflict) {
 		dbg_printf("%s requirers += %d\n", name->name, strength);
@@ -1099,12 +1101,10 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 		}
 	}
 
-	/* note: for perfection, we should revert here to the
-	 * *previous* value, but that'd require keeping track
-	 * of it which would require dynamic memory allocations
-	 * or additional solver state field in apk_dependency
-	 * to store it (or hefty recalculations). */
-	name->ss.last_touched_decision = 0;
+	if (dep->solver_state) {
+		name->ss.last_touched_decision = dep->solver_state;
+		dep->solver_state = 0;
+	}
 
 	if (!dep->conflict) {
 		name->ss.requirers -= strength;

@@ -60,7 +60,8 @@ struct apk_sign_ctx {
 struct apk_dependency {
 	struct apk_name *name;
 	apk_blob_t *version;
-	unsigned short repository_tag;
+	unsigned solver_state : 22;
+	unsigned repository_tag : 6;
 	unsigned conflict : 1;
 	unsigned result_mask : 3;
 };
