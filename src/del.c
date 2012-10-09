@@ -40,19 +40,17 @@ static int del_parse(void *pctx, struct apk_db_options *db,
 	return 0;
 }
 
-static void foreach_package_reverse_dependency(
-	struct apk_package *pkg,
+static void foreach_package_reverse_dependency2(
+	struct apk_package *pkg, struct apk_name_array *rdepends,
 	void (*cb)(struct apk_package *rdepend, void *ctx), void *ctx)
 {
-	struct apk_name *name;
 	int i, j, k;
 
 	if (pkg == NULL)
 		return;
 
-	name = pkg->name;
-	for (i = 0; i < name->rdepends->num; i++) {
-		struct apk_name *name0 = name->rdepends->item[i];
+	for (i = 0; i < rdepends->num; i++) {
+		struct apk_name *name0 = rdepends->item[i];
 
 		for (j = 0; j < name0->providers->num; j++) {
 			struct apk_package *pkg0 = name0->providers->item[j].pkg;
@@ -73,6 +71,17 @@ static void foreach_package_reverse_dependency(
 	}
 }
 
+static void foreach_package_reverse_dependency(
+        struct apk_package *pkg,
+        void (*cb)(struct apk_package *rdepend, void *ctx), void *ctx)
+{
+	int i;
+
+	foreach_package_reverse_dependency2(pkg, pkg->name->rdepends, cb, ctx);
+	for (i = 0; i < pkg->provides->num; i++)
+		foreach_package_reverse_dependency2(pkg, pkg->provides->item[i].name->rdepends, cb, ctx);
+}
+
 static void foreach_reverse_dependency(
 	struct apk_name *name, int mode,
 	void (*cb)(struct apk_package *rdepend, void *ctx), void *ctx)
@@ -84,7 +93,7 @@ static void foreach_reverse_dependency(
 
 		if (mode == INSTALLED_PACKAGES && pkg0->ipkg == NULL)
 			continue;
-		else if (mode == MARKED_PACKAGES && pkg0->state_int == 0)
+		if (mode == MARKED_PACKAGES && pkg0->state_int == 0)
 			continue;
 
 		foreach_package_reverse_dependency(pkg0, cb, ctx);
@@ -136,7 +145,7 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	struct apk_changeset changeset = {};
 	struct apk_solution_array *solution = NULL;
 	struct not_deleted_ctx ndctx = {};
-	int i, r = 0;
+	int i, j, r = 0;
 
 	apk_dependency_array_copy(&ctx->world, db->world);
 
@@ -156,6 +165,8 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 		for (i = 0; i < solution->num; i++) {
 			struct apk_package *pkg = solution->item[i].pkg;
 			pkg->name->state_ptr = pkg;
+			for (j = 0; j < pkg->provides->num; j++)
+				pkg->provides->item[j].name->state_ptr = pkg;
 			pkg->state_int = 1;
 		}
 		for (i = 0; i < argc; i++) {
