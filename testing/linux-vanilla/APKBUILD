@@ -1,0 +1,141 @@
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+
+_flavor=vanilla
+pkgname=linux-${_flavor}
+pkgver=3.6.2
+_kernver=3.6
+pkgrel=0
+pkgdesc="Linux kernel with grsecurity"
+url=http://grsecurity.net
+depends="mkinitfs linux-firmware"
+makedepends="perl installkernel bash gmp-dev"
+options="!strip"
+_config=${config:-kernelconfig.${CARCH}}
+install=
+source="http://ftp.kernel.org/pub/linux/kernel/v3.x/linux-$_kernver.tar.xz
+	http://ftp.kernel.org/pub/linux/kernel/v3.x/patch-$pkgver.xz
+
+	kernelconfig.x86
+	kernelconfig.x86_64
+	"
+subpackages="$pkgname-dev"
+arch="x86 x86_64"
+license="GPL-2"
+
+_abi_release=${pkgver}
+
+prepare() {
+	local _patch_failed=
+	cd "$srcdir"/linux-$_kernver
+	if [ "${pkgver%.0}" = "$pkgver" ]; then
+		msg "Applying patch-$pkgver.xz"
+		unxz -c < "$srcdir"/patch-$pkgver.xz | patch -p1 -N || return 1
+	fi
+
+	# first apply patches in specified order
+	for i in $source; do
+		case $i in
+		*.patch)
+			msg "Applying $i..."
+			if ! patch -s -p1 -N -i "$srcdir"/$i; then
+				echo $i >>failed
+				_patch_failed=1
+			fi
+			;;
+		esac
+	done
+
+	if ! [ -z "$_patch_failed" ]; then
+		error "The following patches failed:"
+		cat failed
+		return 1
+	fi
+
+	mkdir -p "$srcdir"/build
+	cp "$srcdir"/$_config "$srcdir"/build/.config || return 1
+	make -C "$srcdir"/linux-$_kernver O="$srcdir"/build HOSTCC="${CC:-gcc}" \
+		silentoldconfig
+}
+
+# this is so we can do: 'abuild menuconfig' to reconfigure kernel
+menuconfig() {
+	cd "$srcdir"/build || return 1
+	make menuconfig
+	cp .config "$startdir"/$_config
+}
+
+build() {
+	cd "$srcdir"/build
+	export GCC_SPECS=/usr/share/gcc/hardenednopie.specs
+	make CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
+		|| return 1
+}
+
+package() {
+	cd "$srcdir"/build
+	mkdir -p "$pkgdir"/boot "$pkgdir"/lib/modules
+	make -j1 modules_install firmware_install install \
+		INSTALL_MOD_PATH="$pkgdir" \
+		INSTALL_PATH="$pkgdir"/boot \
+		|| return 1
+
+	rm -f "$pkgdir"/lib/modules/${_abi_release}/build \
+		"$pkgdir"/lib/modules/${_abi_release}/source
+	rm -rf "$pkgdir"/lib/firmware
+
+	install -D include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+}
+
+dev() {
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# simlar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for grsec kernel"
+	depends="gmp-dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	cp "$srcdir"/$_config "$dir"/.config
+	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" HOSTCC="${CC:-gcc}" \
+		silentoldconfig prepare modules_prepare scripts 
+
+	# remove the stuff that poits to real sources. we want 3rd party
+	# modules to believe this is the soruces
+	rm "$dir"/Makefile "$dir"/source
+
+	# copy the needed stuff from real sources
+	#
+	# this is taken from ubuntu kernel build script
+	# http://kernel.ubuntu.com/git?p=ubuntu/ubuntu-jaunty.git;a=blob;f=debian/rules.d/3-binary-indep.mk;hb=HEAD
+	cd "$srcdir"/linux-$_kernver
+	find . -path './include/*' -prune -o -path './scripts/*' -prune \
+		-o -type f \( -name 'Makefile*' -o -name 'Kconfig*' \
+		-o -name 'Kbuild*' -o -name '*.sh' -o -name '*.pl' \
+		-o -name '*.lds' \) | cpio -pdm "$dir"
+	cp -a drivers/media/dvb/dvb-core/*.h "$dir"/drivers/media/dvb/dvb-core
+	cp -a drivers/media/video/*.h "$dir"/drivers/media/video
+	cp -a drivers/media/dvb/frontends/*.h "$dir"/drivers/media/dvb/frontends
+	cp -a scripts include "$dir"
+	find $(find arch -name include -type d -print) -type f \
+		| cpio -pdm "$dir"
+
+	install -Dm644 "$srcdir"/build/Module.symvers \
+		"$dir"/Module.symvers
+
+	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
+	ln -sf /usr/src/linux-headers-${_abi_release} \
+		"$subpkgdir"/lib/modules/${_abi_release}/build
+}
+
+md5sums="1a1760420eac802c541a20ab51a093d1  linux-3.6.tar.xz
+ad1020c82a71ee1ef2416a0d12e724df  patch-3.6.2.xz
+ea6b7a5af95a50107565c31cf505bf1e  kernelconfig.x86
+26cbb12158bb32e599363033581e3f3d  kernelconfig.x86_64"
