@@ -11,6 +11,7 @@
 #   ...
 #
 
+config.log_path = "/var/log/redmine/redmine.log"
 config.logger = Logger.new(config.log_path, 2, 1000000)
 config.logger.level = Logger::WARN
 
