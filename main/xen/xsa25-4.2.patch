@@ -1,0 +1,365 @@
+libxc: builder: limit maximum size of kernel/ramdisk.
+
+Allowing user supplied kernels of arbitrary sizes, especially during
+decompression, can swallow up dom0 memory leading to either virtual
+address space exhaustion in the builder process or allocation
+failures/OOM killing of both toolstack and unrelated processes.
+
+We disable these checks when building in a stub domain for pvgrub
+since this uses the guest's own memory and is isolated.
+
+Decompression of gzip compressed kernels and ramdisks has been safe
+since 14954:58205257517d (Xen 3.1.0 onwards).
+
+This is XSA-25 / CVE-2012-4544.
+
+Also make explicit checks for buffer overflows in various
+decompression routines. These were already ruled out due to other
+properties of the code but check them as a belt-and-braces measure.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Acked-by: Ian Jackson <ian.jackson@eu.citrix.com>
+
+diff --git a/stubdom/grub/kexec.c b/stubdom/grub/kexec.c
+index 06bef52..b21c91a 100644
+--- a/stubdom/grub/kexec.c
++++ b/stubdom/grub/kexec.c
+@@ -137,6 +137,10 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char
+     dom = xc_dom_allocate(xc_handle, cmdline, features);
+     dom->allocate = kexec_allocate;
+ 
++    /* We are using guest owned memory, therefore no limits. */
++    xc_dom_kernel_max_size(dom, 0);
++    xc_dom_ramdisk_max_size(dom, 0);
++
+     dom->kernel_blob = kernel;
+     dom->kernel_size = kernel_size;
+ 
+diff --git a/tools/libxc/xc_dom.h b/tools/libxc/xc_dom.h
+index 2aef64a..6a72aa9 100644
+--- a/tools/libxc/xc_dom.h
++++ b/tools/libxc/xc_dom.h
+@@ -55,6 +55,9 @@ struct xc_dom_image {
+     void *ramdisk_blob;
+     size_t ramdisk_size;
+ 
++    size_t max_kernel_size;
++    size_t max_ramdisk_size;
++
+     /* arguments and parameters */
+     char *cmdline;
+     uint32_t f_requested[XENFEAT_NR_SUBMAPS];
+@@ -180,6 +183,23 @@ void xc_dom_release_phys(struct xc_dom_image *dom);
+ void xc_dom_release(struct xc_dom_image *dom);
+ int xc_dom_mem_init(struct xc_dom_image *dom, unsigned int mem_mb);
+ 
++/* Set this larger if you have enormous ramdisks/kernels. Note that
++ * you should trust all kernels not to be maliciously large (e.g. to
++ * exhaust all dom0 memory) if you do this (see CVE-2012-4544 /
++ * XSA-25). You can also set the default independently for
++ * ramdisks/kernels in xc_dom_allocate() or call
++ * xc_dom_{kernel,ramdisk}_max_size.
++ */
++#ifndef XC_DOM_DECOMPRESS_MAX
++#define XC_DOM_DECOMPRESS_MAX (1024*1024*1024) /* 1GB */
++#endif
++
++int xc_dom_kernel_check_size(struct xc_dom_image *dom, size_t sz);
++int xc_dom_kernel_max_size(struct xc_dom_image *dom, size_t sz);
++
++int xc_dom_ramdisk_check_size(struct xc_dom_image *dom, size_t sz);
++int xc_dom_ramdisk_max_size(struct xc_dom_image *dom, size_t sz);
++
+ size_t xc_dom_check_gzip(xc_interface *xch,
+                      void *blob, size_t ziplen);
+ int xc_dom_do_gunzip(xc_interface *xch,
+@@ -240,7 +260,8 @@ void xc_dom_log_memory_footprint(struct xc_dom_image *dom);
+ void *xc_dom_malloc(struct xc_dom_image *dom, size_t size);
+ void *xc_dom_malloc_page_aligned(struct xc_dom_image *dom, size_t size);
+ void *xc_dom_malloc_filemap(struct xc_dom_image *dom,
+-                            const char *filename, size_t * size);
++                            const char *filename, size_t * size,
++                            const size_t max_size);
+ char *xc_dom_strdup(struct xc_dom_image *dom, const char *str);
+ 
+ /* --- alloc memory pool ------------------------------------------- */
+diff --git a/tools/libxc/xc_dom_bzimageloader.c b/tools/libxc/xc_dom_bzimageloader.c
+index 113d40f..b1b2eb0 100644
+--- a/tools/libxc/xc_dom_bzimageloader.c
++++ b/tools/libxc/xc_dom_bzimageloader.c
+@@ -47,13 +47,19 @@ static int xc_try_bzip2_decode(
+     char *out_buf;
+     char *tmp_buf;
+     int retval = -1;
+-    int outsize;
++    unsigned int outsize;
+     uint64_t total;
+ 
+     stream.bzalloc = NULL;
+     stream.bzfree = NULL;
+     stream.opaque = NULL;
+ 
++    if ( dom->kernel_size == 0)
++    {
++        DOMPRINTF("BZIP2: Input is 0 size");
++        return -1;
++    }
++
+     ret = BZ2_bzDecompressInit(&stream, 0, 0);
+     if ( ret != BZ_OK )
+     {
+@@ -66,6 +72,17 @@ static int xc_try_bzip2_decode(
+      * the input buffer to start, and we'll realloc as needed.
+      */
+     outsize = dom->kernel_size;
++
++    /*
++     * stream.avail_in and outsize are unsigned int, while kernel_size
++     * is a size_t. Check we aren't overflowing.
++     */
++    if ( outsize != dom->kernel_size )
++    {
++        DOMPRINTF("BZIP2: Input too large");
++        goto bzip2_cleanup;
++    }
++
+     out_buf = malloc(outsize);
+     if ( out_buf == NULL )
+     {
+@@ -98,13 +115,20 @@ static int xc_try_bzip2_decode(
+         if ( stream.avail_out == 0 )
+         {
+             /* Protect against output buffer overflow */
+-            if ( outsize > INT_MAX / 2 )
++            if ( outsize > UINT_MAX / 2 )
+             {
+                 DOMPRINTF("BZIP2: output buffer overflow");
+                 free(out_buf);
+                 goto bzip2_cleanup;
+             }
+ 
++            if ( xc_dom_kernel_check_size(dom, outsize * 2) )
++            {
++                DOMPRINTF("BZIP2: output too large");
++                free(out_buf);
++                goto bzip2_cleanup;
++            }
++
+             tmp_buf = realloc(out_buf, outsize * 2);
+             if ( tmp_buf == NULL )
+             {
+@@ -172,9 +196,15 @@ static int _xc_try_lzma_decode(
+     unsigned char *out_buf;
+     unsigned char *tmp_buf;
+     int retval = -1;
+-    int outsize;
++    size_t outsize;
+     const char *msg;
+ 
++    if ( dom->kernel_size == 0)
++    {
++        DOMPRINTF("%s: Input is 0 size", what);
++        return -1;
++    }
++
+     /* sigh.  We don't know up-front how much memory we are going to need
+      * for the output buffer.  Allocate the output buffer to be equal
+      * the input buffer to start, and we'll realloc as needed.
+@@ -244,13 +274,20 @@ static int _xc_try_lzma_decode(
+         if ( stream->avail_out == 0 )
+         {
+             /* Protect against output buffer overflow */
+-            if ( outsize > INT_MAX / 2 )
++            if ( outsize > SIZE_MAX / 2 )
+             {
+                 DOMPRINTF("%s: output buffer overflow", what);
+                 free(out_buf);
+                 goto lzma_cleanup;
+             }
+ 
++            if ( xc_dom_kernel_check_size(dom, outsize * 2) )
++            {
++                DOMPRINTF("%s: output too large", what);
++                free(out_buf);
++                goto lzma_cleanup;
++            }
++
+             tmp_buf = realloc(out_buf, outsize * 2);
+             if ( tmp_buf == NULL )
+             {
+@@ -359,6 +396,12 @@ static int xc_try_lzo1x_decode(
+         0x89, 0x4c, 0x5a, 0x4f, 0x00, 0x0d, 0x0a, 0x1a, 0x0a
+     };
+ 
++    /*
++     * lzo_uint should match size_t. Check that this is the case to be
++     * sure we won't overflow various lzo_uint fields.
++     */
++    XC_BUILD_BUG_ON(sizeof(lzo_uint) != sizeof(size_t));
++
+     ret = lzo_init();
+     if ( ret != LZO_E_OK )
+     {
+@@ -438,6 +481,14 @@ static int xc_try_lzo1x_decode(
+         if ( src_len <= 0 || src_len > dst_len || src_len > left )
+             break;
+ 
++        msg = "Output buffer overflow";
++        if ( *size > SIZE_MAX - dst_len )
++            break;
++
++        msg = "Decompressed image too large";
++        if ( xc_dom_kernel_check_size(dom, *size + dst_len) )
++            break;
++
+         msg = "Failed to (re)alloc memory";
+         tmp_buf = realloc(out_buf, *size + dst_len);
+         if ( tmp_buf == NULL )
+diff --git a/tools/libxc/xc_dom_core.c b/tools/libxc/xc_dom_core.c
+index fea9de5..2a01d7c 100644
+--- a/tools/libxc/xc_dom_core.c
++++ b/tools/libxc/xc_dom_core.c
+@@ -159,7 +159,8 @@ void *xc_dom_malloc_page_aligned(struct xc_dom_image *dom, size_t size)
+ }
+ 
+ void *xc_dom_malloc_filemap(struct xc_dom_image *dom,
+-                            const char *filename, size_t * size)
++                            const char *filename, size_t * size,
++                            const size_t max_size)
+ {
+     struct xc_dom_mem *block = NULL;
+     int fd = -1;
+@@ -171,6 +172,13 @@ void *xc_dom_malloc_filemap(struct xc_dom_image *dom,
+     lseek(fd, 0, SEEK_SET);
+     *size = lseek(fd, 0, SEEK_END);
+ 
++    if ( max_size && *size > max_size )
++    {
++        xc_dom_panic(dom->xch, XC_OUT_OF_MEMORY,
++                     "tried to map file which is too large");
++        goto err;
++    }
++
+     block = malloc(sizeof(*block));
+     if ( block == NULL )
+         goto err;
+@@ -222,6 +230,40 @@ char *xc_dom_strdup(struct xc_dom_image *dom, const char *str)
+ }
+ 
+ /* ------------------------------------------------------------------------ */
++/* decompression buffer sizing                                              */
++int xc_dom_kernel_check_size(struct xc_dom_image *dom, size_t sz)
++{
++    /* No limit */
++    if ( !dom->max_kernel_size )
++        return 0;
++
++    if ( sz > dom->max_kernel_size )
++    {
++        xc_dom_panic(dom->xch, XC_INVALID_KERNEL,
++                     "kernel image too large");
++        return 1;
++    }
++
++    return 0;
++}
++
++int xc_dom_ramdisk_check_size(struct xc_dom_image *dom, size_t sz)
++{
++    /* No limit */
++    if ( !dom->max_ramdisk_size )
++        return 0;
++
++    if ( sz > dom->max_ramdisk_size )
++    {
++        xc_dom_panic(dom->xch, XC_INVALID_KERNEL,
++                     "ramdisk image too large");
++        return 1;
++    }
++
++    return 0;
++}
++
++/* ------------------------------------------------------------------------ */
+ /* read files, copy memory blocks, with transparent gunzip                  */
+ 
+ size_t xc_dom_check_gzip(xc_interface *xch, void *blob, size_t ziplen)
+@@ -235,7 +277,7 @@ size_t xc_dom_check_gzip(xc_interface *xch, void *blob, size_t ziplen)
+ 
+     gzlen = blob + ziplen - 4;
+     unziplen = gzlen[3] << 24 | gzlen[2] << 16 | gzlen[1] << 8 | gzlen[0];
+-    if ( (unziplen < 0) || (unziplen > (1024*1024*1024)) ) /* 1GB limit */
++    if ( (unziplen < 0) || (unziplen > XC_DOM_DECOMPRESS_MAX) )
+     {
+         xc_dom_printf
+             (xch,
+@@ -288,6 +330,9 @@ int xc_dom_try_gunzip(struct xc_dom_image *dom, void **blob, size_t * size)
+     if ( unziplen == 0 )
+         return 0;
+ 
++    if ( xc_dom_kernel_check_size(dom, unziplen) )
++        return 0;
++
+     unzip = xc_dom_malloc(dom, unziplen);
+     if ( unzip == NULL )
+         return -1;
+@@ -588,6 +633,9 @@ struct xc_dom_image *xc_dom_allocate(xc_interface *xch,
+     memset(dom, 0, sizeof(*dom));
+     dom->xch = xch;
+ 
++    dom->max_kernel_size = XC_DOM_DECOMPRESS_MAX;
++    dom->max_ramdisk_size = XC_DOM_DECOMPRESS_MAX;
++
+     if ( cmdline )
+         dom->cmdline = xc_dom_strdup(dom, cmdline);
+     if ( features )
+@@ -608,10 +656,25 @@ struct xc_dom_image *xc_dom_allocate(xc_interface *xch,
+     return NULL;
+ }
+ 
++int xc_dom_kernel_max_size(struct xc_dom_image *dom, size_t sz)
++{
++    DOMPRINTF("%s: kernel_max_size=%zx", __FUNCTION__, sz);
++    dom->max_kernel_size = sz;
++    return 0;
++}
++
++int xc_dom_ramdisk_max_size(struct xc_dom_image *dom, size_t sz)
++{
++    DOMPRINTF("%s: ramdisk_max_size=%zx", __FUNCTION__, sz);
++    dom->max_ramdisk_size = sz;
++    return 0;
++}
++
+ int xc_dom_kernel_file(struct xc_dom_image *dom, const char *filename)
+ {
+     DOMPRINTF("%s: filename=\"%s\"", __FUNCTION__, filename);
+-    dom->kernel_blob = xc_dom_malloc_filemap(dom, filename, &dom->kernel_size);
++    dom->kernel_blob = xc_dom_malloc_filemap(dom, filename, &dom->kernel_size,
++                                             dom->max_kernel_size);
+     if ( dom->kernel_blob == NULL )
+         return -1;
+     return xc_dom_try_gunzip(dom, &dom->kernel_blob, &dom->kernel_size);
+@@ -621,7 +684,9 @@ int xc_dom_ramdisk_file(struct xc_dom_image *dom, const char *filename)
+ {
+     DOMPRINTF("%s: filename=\"%s\"", __FUNCTION__, filename);
+     dom->ramdisk_blob =
+-        xc_dom_malloc_filemap(dom, filename, &dom->ramdisk_size);
++        xc_dom_malloc_filemap(dom, filename, &dom->ramdisk_size,
++                              dom->max_ramdisk_size);
++
+     if ( dom->ramdisk_blob == NULL )
+         return -1;
+ //    return xc_dom_try_gunzip(dom, &dom->ramdisk_blob, &dom->ramdisk_size);
+@@ -781,7 +846,11 @@ int xc_dom_build_image(struct xc_dom_image *dom)
+         void *ramdiskmap;
+ 
+         unziplen = xc_dom_check_gzip(dom->xch, dom->ramdisk_blob, dom->ramdisk_size);
++        if ( xc_dom_ramdisk_check_size(dom, unziplen) != 0 )
++            unziplen = 0;
++
+         ramdisklen = unziplen ? unziplen : dom->ramdisk_size;
++
+         if ( xc_dom_alloc_segment(dom, &dom->ramdisk_seg, "ramdisk", 0,
+                                   ramdisklen) != 0 )
+             goto err;
