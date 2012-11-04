@@ -413,12 +413,14 @@ static void calculate_pkg_preference(struct apk_package *pkg)
 			continue;
 		for (j = 0; j < d0->name->providers->num; j++) {
 			struct apk_provider *p0 = &d0->name->providers->item[j];
-			if (pkg == p0->pkg)
+			if (name == p0->pkg->name)
 				continue;
 			if (compare_absolute_package_preference(&p, p0) < 0)
 				ps->preference++;
 		}
 	}
+
+	dbg_printf(PKG_VER_FMT ": preference=%d\n", PKG_VER_PRINTF(pkg), ps->preference);
 }
 
 static void count_name(struct apk_solver_state *ss, struct apk_name *name)
