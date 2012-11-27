@@ -251,7 +251,7 @@ index ad7e2e5..199f49e 100644
  
  	pcd.		[PARIDE]
 diff --git a/Makefile b/Makefile
-index 07f2308..7271d99 100644
+index c5cc2f0..6570abb 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -241,8 +241,9 @@ CONFIG_SHELL := $(shell if [ -x "$$BASH" ]; then echo $$BASH; \
@@ -3470,6 +3470,30 @@ index 5e34ccf..672bc9c 100644
  
  	DEBUGP("register_unwind_table(), sect = %d at 0x%p - 0x%p (gp=0x%lx)\n",
  	       me->arch.unwind_section, table, end, gp);
+diff --git a/arch/parisc/kernel/signal32.c b/arch/parisc/kernel/signal32.c
+index fd49aed..5dede04 100644
+--- a/arch/parisc/kernel/signal32.c
++++ b/arch/parisc/kernel/signal32.c
+@@ -65,7 +65,8 @@ put_sigset32(compat_sigset_t __user *up, sigset_t *set, size_t sz)
+ {
+ 	compat_sigset_t s;
+ 
+-	if (sz != sizeof *set) panic("put_sigset32()");
++	if (sz != sizeof *set)
++		return -EINVAL;
+ 	sigset_64to32(&s, set);
+ 
+ 	return copy_to_user(up, &s, sizeof s);
+@@ -77,7 +78,8 @@ get_sigset32(compat_sigset_t __user *up, sigset_t *set, size_t sz)
+ 	compat_sigset_t s;
+ 	int r;
+ 
+-	if (sz != sizeof *set) panic("put_sigset32()");
++	if (sz != sizeof *set)
++		return -EINVAL;
+ 
+ 	if ((r = copy_from_user(&s, up, sz)) == 0) {
+ 		sigset_32to64(set, &s);
 diff --git a/arch/parisc/kernel/sys_parisc.c b/arch/parisc/kernel/sys_parisc.c
 index 7426e40..30c8dbe 100644
 --- a/arch/parisc/kernel/sys_parisc.c
@@ -20537,7 +20561,7 @@ index baead95..90feeb4 100644
  
  	local_irq_disable();
 diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
-index b1eb202..254e292 100644
+index ff66a3b..48ad872 100644
 --- a/arch/x86/kvm/vmx.c
 +++ b/arch/x86/kvm/vmx.c
 @@ -1331,7 +1331,11 @@ static void reload_tss(void)
@@ -26100,10 +26124,139 @@ index 877b9a1..a8ecf42 100644
 +	pax_force_retaddr
  	ret
 diff --git a/arch/x86/net/bpf_jit_comp.c b/arch/x86/net/bpf_jit_comp.c
-index 33643a8..8e44870 100644
+index 33643a8..f6211a0 100644
 --- a/arch/x86/net/bpf_jit_comp.c
 +++ b/arch/x86/net/bpf_jit_comp.c
-@@ -120,6 +120,11 @@ static inline void bpf_flush_icache(void *start, void *end)
+@@ -11,6 +11,7 @@
+ #include <asm/cacheflush.h>
+ #include <linux/netdevice.h>
+ #include <linux/filter.h>
++#include <linux/random.h>
+ 
+ /*
+  * Conventions :
+@@ -48,13 +49,87 @@ static inline u8 *emit_code(u8 *ptr, u32 bytes, unsigned int len)
+ 	return ptr + len;
+ }
+ 
++#ifdef CONFIG_GRKERNSEC_JIT_HARDEN
++#define MAX_INSTR_CODE_SIZE 96
++#else
++#define MAX_INSTR_CODE_SIZE 64
++#endif
++
+ #define EMIT(bytes, len)	do { prog = emit_code(prog, bytes, len); } while (0)
+ 
+ #define EMIT1(b1)		EMIT(b1, 1)
+ #define EMIT2(b1, b2)		EMIT((b1) + ((b2) << 8), 2)
+ #define EMIT3(b1, b2, b3)	EMIT((b1) + ((b2) << 8) + ((b3) << 16), 3)
+ #define EMIT4(b1, b2, b3, b4)   EMIT((b1) + ((b2) << 8) + ((b3) << 16) + ((b4) << 24), 4)
++
++#ifdef CONFIG_GRKERNSEC_JIT_HARDEN
++/* original constant will appear in ecx */
++#define DILUTE_CONST_SEQUENCE(_off, _key) 	\
++do {						\
++	/* mov ecx, randkey */			\
++	EMIT1(0xb9);				\
++	EMIT(_key, 4);				\
++	/* xor ecx, randkey ^ off */		\
++	EMIT2(0x81, 0xf1);			\
++	EMIT((_key) ^ (_off), 4);		\
++} while (0)
++
++#define EMIT1_off32(b1, _off)								\
++do { 											\
++	switch (b1) {									\
++		case 0x05: /* add eax, imm32 */						\
++		case 0x2d: /* sub eax, imm32 */						\
++		case 0x25: /* and eax, imm32 */						\
++		case 0x0d: /* or eax, imm32 */						\
++		case 0xb8: /* mov eax, imm32 */						\
++		case 0x3d: /* cmp eax, imm32 */						\
++		case 0xa9: /* test eax, imm32 */					\
++			DILUTE_CONST_SEQUENCE(_off, randkey);				\
++			EMIT2((b1) - 4, 0xc8); /* convert imm instruction to eax, ecx */\
++			break;								\
++		case 0xbb: /* mov ebx, imm32 */						\
++			DILUTE_CONST_SEQUENCE(_off, randkey);				\
++			/* mov ebx, ecx */						\
++			EMIT2(0x89, 0xcb);						\
++			break;								\
++		case 0xbe: /* mov esi, imm32 */						\
++			DILUTE_CONST_SEQUENCE(_off, randkey);				\
++			/* mov esi, ecx	*/						\
++			EMIT2(0x89, 0xce);						\
++			break;								\
++		case 0xe9: /* jmp rel imm32 */						\
++			EMIT1(b1);							\
++			EMIT(_off, 4);							\
++			/* prevent fall-through, we're not called if off = 0 */		\
++			EMIT(0xcccccccc, 4);						\
++			EMIT(0xcccccccc, 4);						\
++			break;								\
++		default:								\
++			EMIT1(b1);							\
++			EMIT(_off, 4);							\
++	}										\
++} while (0)
++
++#define EMIT2_off32(b1, b2, _off) 					\
++do { 									\
++	if ((b1) == 0x8d && (b2) == 0xb3) { /* lea esi, [rbx+imm32] */	\
++		EMIT2(0x8d, 0xb3); /* lea esi, [rbx+randkey] */		\
++		EMIT(randkey, 4);					\
++		EMIT2(0x8d, 0xb6); /* lea esi, [esi+off-randkey] */	\
++		EMIT((_off) - randkey, 4);				\
++	} else if ((b1) == 0x69 && (b2) == 0xc0) { /* imul eax, imm32 */\
++		DILUTE_CONST_SEQUENCE(_off, randkey);			\
++		/* imul eax, ecx */					\
++		EMIT3(0x0f, 0xaf, 0xc1);				\
++	} else {							\
++		EMIT2(b1, b2);						\
++		EMIT(_off, 4);						\
++	}								\
++} while (0)
++#else
+ #define EMIT1_off32(b1, off)	do { EMIT1(b1); EMIT(off, 4);} while (0)
++#define EMIT2_off32(b1, b2, off) do { EMIT2(b1, b2); EMIT(off, 4);} while (0)
++#endif
+ 
+ #define CLEAR_A() EMIT2(0x31, 0xc0) /* xor %eax,%eax */
+ #define CLEAR_X() EMIT2(0x31, 0xdb) /* xor %ebx,%ebx */
+@@ -89,6 +164,24 @@ do {									\
+ #define X86_JBE 0x76
+ #define X86_JA  0x77
+ 
++#ifdef CONFIG_GRKERNSEC_JIT_HARDEN
++#define APPEND_FLOW_VERIFY()	\
++do {				\
++	/* mov ecx, randkey */	\
++	EMIT1(0xb9);		\
++	EMIT(randkey, 4);	\
++	/* cmp ecx, randkey */	\
++	EMIT2(0x81, 0xf9);	\
++	EMIT(randkey, 4);	\
++	/* jz after 8 int 3s */ \
++	EMIT2(0x74, 0x08);	\
++	EMIT(0xcccccccc, 4);	\
++	EMIT(0xcccccccc, 4);	\
++} while (0)
++#else
++#define APPEND_FLOW_VERIFY() do { } while (0)
++#endif
++
+ #define EMIT_COND_JMP(op, offset)				\
+ do {								\
+ 	if (is_near(offset))					\
+@@ -96,6 +189,7 @@ do {								\
+ 	else {							\
+ 		EMIT2(0x0f, op + 0x10);				\
+ 		EMIT(offset, 4); /* jxx .+off32 */		\
++		APPEND_FLOW_VERIFY();				\
+ 	}							\
+ } while (0)
+ 
+@@ -120,12 +214,17 @@ static inline void bpf_flush_icache(void *start, void *end)
  	set_fs(old_fs);
  }
  
@@ -26115,7 +26268,24 @@ index 33643a8..8e44870 100644
  #define CHOOSE_LOAD_FUNC(K, func) \
  	((int)K < 0 ? ((int)K >= SKF_LL_OFF ? func##_negative_offset : func) : func##_positive_offset)
  
-@@ -146,6 +151,10 @@ void bpf_jit_compile(struct sk_filter *fp)
+ void bpf_jit_compile(struct sk_filter *fp)
+ {
+-	u8 temp[64];
++	u8 temp[MAX_INSTR_CODE_SIZE];
+ 	u8 *prog;
+ 	unsigned int proglen, oldproglen = 0;
+ 	int ilen, i;
+@@ -138,6 +237,9 @@ void bpf_jit_compile(struct sk_filter *fp)
+ 	unsigned int *addrs;
+ 	const struct sock_filter *filter = fp->insns;
+ 	int flen = fp->len;
++#ifdef CONFIG_GRKERNSEC_JIT_HARDEN
++	unsigned int randkey;
++#endif
+ 
+ 	if (!bpf_jit_enable)
+ 		return;
+@@ -146,11 +248,19 @@ void bpf_jit_compile(struct sk_filter *fp)
  	if (addrs == NULL)
  		return;
  
@@ -26123,10 +26293,59 @@ index 33643a8..8e44870 100644
 +	if (!fp->work)
 +		goto out;
 +
++#ifdef CONFIG_GRKERNSEC_JIT_HARDEN
++	randkey = get_random_int();
++#endif
++
  	/* Before first pass, make a rough estimation of addrs[]
- 	 * each bpf instruction is translated to less than 64 bytes
+-	 * each bpf instruction is translated to less than 64 bytes
++	 * each bpf instruction is translated to less than MAX_INSTR_CODE_SIZE bytes
  	 */
-@@ -593,17 +602,18 @@ cond_branch:			f_offset = addrs[i + filter[i].jf] - addrs[i];
+ 	for (proglen = 0, i = 0; i < flen; i++) {
+-		proglen += 64;
++		proglen += MAX_INSTR_CODE_SIZE;
+ 		addrs[i] = proglen;
+ 	}
+ 	cleanup_addr = proglen; /* epilogue address */
+@@ -258,10 +368,8 @@ void bpf_jit_compile(struct sk_filter *fp)
+ 			case BPF_S_ALU_MUL_K: /* A *= K */
+ 				if (is_imm8(K))
+ 					EMIT3(0x6b, 0xc0, K); /* imul imm8,%eax,%eax */
+-				else {
+-					EMIT2(0x69, 0xc0);		/* imul imm32,%eax */
+-					EMIT(K, 4);
+-				}
++				else
++					EMIT2_off32(0x69, 0xc0, K); /* imul imm32,%eax */
+ 				break;
+ 			case BPF_S_ALU_DIV_X: /* A /= X; */
+ 				seen |= SEEN_XREG;
+@@ -281,8 +389,14 @@ void bpf_jit_compile(struct sk_filter *fp)
+ 				EMIT4(0x31, 0xd2, 0xf7, 0xf3); /* xor %edx,%edx; div %ebx */
+ 				break;
+ 			case BPF_S_ALU_DIV_K: /* A = reciprocal_divide(A, K); */
++#ifdef CONFIG_GRKERNSEC_JIT_HARDEN
++				DILUTE_CONST_SEQUENCE(K, randkey);
++				// imul rax, rcx
++				EMIT4(0x48, 0x0f, 0xaf, 0xc1);
++#else
+ 				EMIT3(0x48, 0x69, 0xc0); /* imul imm32,%rax,%rax */
+ 				EMIT(K, 4);
++#endif
+ 				EMIT4(0x48, 0xc1, 0xe8, 0x20); /* shr $0x20,%rax */
+ 				break;
+ 			case BPF_S_ALU_AND_X:
+@@ -509,8 +623,7 @@ common_load_ind:		seen |= SEEN_DATAREF | SEEN_XREG;
+ 					if (is_imm8(K)) {
+ 						EMIT3(0x8d, 0x73, K); /* lea imm8(%rbx), %esi */
+ 					} else {
+-						EMIT2(0x8d, 0xb3); /* lea imm32(%rbx),%esi */
+-						EMIT(K, 4);
++						EMIT2_off32(0x8d, 0xb3, K); /* lea imm32(%rbx),%esi */
+ 					}
+ 				} else {
+ 					EMIT2(0x89,0xde); /* mov %ebx,%esi */
+@@ -593,17 +706,18 @@ cond_branch:			f_offset = addrs[i + filter[i].jf] - addrs[i];
  				break;
  			default:
  				/* hmm, too complex filter, give up with jit compiler */
@@ -26149,7 +26368,7 @@ index 33643a8..8e44870 100644
  			}
  			proglen += ilen;
  			addrs[i] = proglen;
-@@ -624,11 +634,9 @@ cond_branch:			f_offset = addrs[i + filter[i].jf] - addrs[i];
+@@ -624,11 +738,9 @@ cond_branch:			f_offset = addrs[i + filter[i].jf] - addrs[i];
  			break;
  		}
  		if (proglen == oldproglen) {
@@ -26163,7 +26382,7 @@ index 33643a8..8e44870 100644
  		}
  		oldproglen = proglen;
  	}
-@@ -644,7 +652,10 @@ cond_branch:			f_offset = addrs[i + filter[i].jf] - addrs[i];
+@@ -644,7 +756,10 @@ cond_branch:			f_offset = addrs[i + filter[i].jf] - addrs[i];
  		bpf_flush_icache(image, image + proglen);
  
  		fp->bpf_func = (void *)image;
@@ -26175,7 +26394,7 @@ index 33643a8..8e44870 100644
  out:
  	kfree(addrs);
  	return;
-@@ -652,18 +663,20 @@ out:
+@@ -652,18 +767,20 @@ out:
  
  static void jit_free_defer(struct work_struct *arg)
  {
@@ -27822,7 +28041,7 @@ index 9a87daa..fb17486 100644
  		goto error;
  
 diff --git a/crypto/cryptd.c b/crypto/cryptd.c
-index 671d4d6..afec999 100644
+index 7bdd61b..afec999 100644
 --- a/crypto/cryptd.c
 +++ b/crypto/cryptd.c
 @@ -63,7 +63,7 @@ struct cryptd_blkcipher_ctx {
@@ -27843,28 +28062,6 @@ index 671d4d6..afec999 100644
  
  static void cryptd_queue_worker(struct work_struct *work);
  
-@@ -137,13 +137,18 @@ static void cryptd_queue_worker(struct work_struct *work)
- 	struct crypto_async_request *req, *backlog;
- 
- 	cpu_queue = container_of(work, struct cryptd_cpu_queue, work);
--	/* Only handle one request at a time to avoid hogging crypto
--	 * workqueue. preempt_disable/enable is used to prevent
--	 * being preempted by cryptd_enqueue_request() */
-+	/*
-+	 * Only handle one request at a time to avoid hogging crypto workqueue.
-+	 * preempt_disable/enable is used to prevent being preempted by
-+	 * cryptd_enqueue_request(). local_bh_disable/enable is used to prevent
-+	 * cryptd_enqueue_request() being accessed from software interrupts.
-+	 */
-+	local_bh_disable();
- 	preempt_disable();
- 	backlog = crypto_get_backlog(&cpu_queue->queue);
- 	req = crypto_dequeue_request(&cpu_queue->queue);
- 	preempt_enable();
-+	local_bh_enable();
- 
- 	if (!req)
- 		return;
 diff --git a/drivers/acpi/apei/cper.c b/drivers/acpi/apei/cper.c
 index e6defd8..c26a225 100644
 --- a/drivers/acpi/apei/cper.c
@@ -31360,7 +31557,7 @@ index 3b663fc..57850f4 100644
  		if (rdev->pm.max_bandwidth.full > rdev->pm.k8_bandwidth.full &&
  			rdev->pm.k8_bandwidth.full)
 diff --git a/drivers/gpu/drm/ttm/ttm_page_alloc.c b/drivers/gpu/drm/ttm/ttm_page_alloc.c
-index ebc6fac..a8313ed 100644
+index 578207e..1073f25 100644
 --- a/drivers/gpu/drm/ttm/ttm_page_alloc.c
 +++ b/drivers/gpu/drm/ttm/ttm_page_alloc.c
 @@ -394,9 +394,9 @@ static int ttm_pool_get_num_unused_pages(void)
@@ -35401,7 +35598,7 @@ index 4a518a3..936b334 100644
  #define VXGE_HW_VIRTUAL_PATH_HANDLE(vpath)				\
  		((struct __vxge_hw_vpath_handle *)(vpath)->vpath_handles.next)
 diff --git a/drivers/net/ethernet/realtek/r8169.c b/drivers/net/ethernet/realtek/r8169.c
-index b47d5b3..273a516 100644
+index df7bbba..162f850 100644
 --- a/drivers/net/ethernet/realtek/r8169.c
 +++ b/drivers/net/ethernet/realtek/r8169.c
 @@ -745,22 +745,22 @@ struct rtl8169_private {
@@ -36386,10 +36583,10 @@ index 61859d0..124539e 100644
  	/* No printks while decoding is disabled! */
  	if (!dev->mmio_always_on) {
 diff --git a/drivers/pci/proc.c b/drivers/pci/proc.c
-index 27911b5..5b6db88 100644
+index af028c7..654cdfc 100644
 --- a/drivers/pci/proc.c
 +++ b/drivers/pci/proc.c
-@@ -476,7 +476,16 @@ static const struct file_operations proc_bus_pci_dev_operations = {
+@@ -484,7 +484,16 @@ static const struct file_operations proc_bus_pci_dev_operations = {
  static int __init pci_proc_init(void)
  {
  	struct pci_dev *dev = NULL;
@@ -42737,22 +42934,6 @@ index 88714ae..16c2e11 100644
  
  
  static inline u32 get_pll_internal_frequency(u32 ref_freq,
-diff --git a/drivers/virtio/virtio.c b/drivers/virtio/virtio.c
-index c3b3f7f..abd47c7 100644
---- a/drivers/virtio/virtio.c
-+++ b/drivers/virtio/virtio.c
-@@ -225,8 +225,10 @@ EXPORT_SYMBOL_GPL(register_virtio_device);
- 
- void unregister_virtio_device(struct virtio_device *dev)
- {
-+	int index = dev->index; /* save for after device release */
-+
- 	device_unregister(&dev->dev);
--	ida_simple_remove(&virtio_index_ida, dev->index);
-+	ida_simple_remove(&virtio_index_ida, index);
- }
- EXPORT_SYMBOL_GPL(unregister_virtio_device);
- 
 diff --git a/drivers/virtio/virtio_mmio.c b/drivers/virtio/virtio_mmio.c
 index 453db0c..604973e 100644
 --- a/drivers/virtio/virtio_mmio.c
@@ -45008,7 +45189,7 @@ index b2a34a1..162fa69 100644
  	return rc;
  }
 diff --git a/fs/exec.c b/fs/exec.c
-index fab2c6d..4fa20c0 100644
+index fab2c6d..6a13dff 100644
 --- a/fs/exec.c
 +++ b/fs/exec.c
 @@ -55,6 +55,15 @@
@@ -45034,7 +45215,7 @@ index fab2c6d..4fa20c0 100644
 +#ifdef CONFIG_PAX_HAVE_ACL_FLAGS
 +void __weak pax_set_initial_flags(struct linux_binprm *bprm)
 +{
-+	WARN_ONCE(1, "PAX: PAX_HAVE_ACL_FLAGS was enabled without providing the pax_set_initial_flags callback, this is probably not what you wanted.\n");
++	pr_warn_once("PAX: PAX_HAVE_ACL_FLAGS was enabled without providing the pax_set_initial_flags callback, this is probably not what you wanted.\n");
 +}
 +#endif
 +
@@ -45847,7 +46028,7 @@ index cf18217..8f6b9c3 100644
  		if (free_clusters >= (nclusters + dirty_clusters))
  			return 1;
 diff --git a/fs/ext4/ext4.h b/fs/ext4/ext4.h
-index 5c69f2b..05dec7f 100644
+index b686b43..4b46d01 100644
 --- a/fs/ext4/ext4.h
 +++ b/fs/ext4/ext4.h
 @@ -1248,19 +1248,19 @@ struct ext4_sb_info {
@@ -46151,7 +46332,7 @@ index 96f2428..f5eeb8e 100644
  
  	if (dot && fs && !(fs->fs_flags & FS_HAS_SUBTYPE)) {
 diff --git a/fs/fs_struct.c b/fs/fs_struct.c
-index 5df4775..9d9336f 100644
+index 5df4775..f656176 100644
 --- a/fs/fs_struct.c
 +++ b/fs/fs_struct.c
 @@ -4,6 +4,7 @@
@@ -46201,7 +46382,14 @@ index 5df4775..9d9336f 100644
  			hits += replace_path(&fs->pwd, old_root, new_root);
  			write_seqcount_end(&fs->seq);
  			while (hits--) {
-@@ -99,7 +116,8 @@ void exit_fs(struct task_struct *tsk)
+@@ -94,12 +111,15 @@ void exit_fs(struct task_struct *tsk)
+ {
+ 	struct fs_struct *fs = tsk->fs;
+ 
++	gr_put_exec_file(tsk);
++	
+ 	if (fs) {
+ 		int kill;
  		task_lock(tsk);
  		spin_lock(&fs->lock);
  		tsk->fs = NULL;
@@ -46211,7 +46399,7 @@ index 5df4775..9d9336f 100644
  		spin_unlock(&fs->lock);
  		task_unlock(tsk);
  		if (kill)
-@@ -112,7 +130,7 @@ struct fs_struct *copy_fs_struct(struct fs_struct *old)
+@@ -112,7 +132,7 @@ struct fs_struct *copy_fs_struct(struct fs_struct *old)
  	struct fs_struct *fs = kmem_cache_alloc(fs_cachep, GFP_KERNEL);
  	/* We don't need to lock fs - think why ;-) */
  	if (fs) {
@@ -46220,7 +46408,7 @@ index 5df4775..9d9336f 100644
  		fs->in_exec = 0;
  		spin_lock_init(&fs->lock);
  		seqcount_init(&fs->seq);
-@@ -121,6 +139,9 @@ struct fs_struct *copy_fs_struct(struct fs_struct *old)
+@@ -121,6 +141,9 @@ struct fs_struct *copy_fs_struct(struct fs_struct *old)
  		spin_lock(&old->lock);
  		fs->root = old->root;
  		path_get(&fs->root);
@@ -46230,7 +46418,7 @@ index 5df4775..9d9336f 100644
  		fs->pwd = old->pwd;
  		path_get(&fs->pwd);
  		spin_unlock(&old->lock);
-@@ -139,8 +160,9 @@ int unshare_fs_struct(void)
+@@ -139,8 +162,9 @@ int unshare_fs_struct(void)
  
  	task_lock(current);
  	spin_lock(&fs->lock);
@@ -46241,7 +46429,7 @@ index 5df4775..9d9336f 100644
  	spin_unlock(&fs->lock);
  	task_unlock(current);
  
-@@ -153,13 +175,13 @@ EXPORT_SYMBOL_GPL(unshare_fs_struct);
+@@ -153,13 +177,13 @@ EXPORT_SYMBOL_GPL(unshare_fs_struct);
  
  int current_umask(void)
  {
@@ -46257,7 +46445,15 @@ index 5df4775..9d9336f 100644
  	.lock		= __SPIN_LOCK_UNLOCKED(init_fs.lock),
  	.seq		= SEQCNT_ZERO,
  	.umask		= 0022,
-@@ -175,12 +197,13 @@ void daemonize_fs_struct(void)
+@@ -169,18 +193,21 @@ void daemonize_fs_struct(void)
+ {
+ 	struct fs_struct *fs = current->fs;
+ 
++	gr_put_exec_file(current);
++
+ 	if (fs) {
+ 		int kill;
+ 
  		task_lock(current);
  
  		spin_lock(&init_fs.lock);
@@ -48545,18 +48741,6 @@ index a9269f1..5490437 100644
  	set_fs(oldfs);
  
  	if (host_err < 0)
-diff --git a/fs/notify/fanotify/fanotify.c b/fs/notify/fanotify/fanotify.c
-index f35794b..a506360 100644
---- a/fs/notify/fanotify/fanotify.c
-+++ b/fs/notify/fanotify/fanotify.c
-@@ -21,6 +21,7 @@ static bool should_merge(struct fsnotify_event *old, struct fsnotify_event *new)
- 			if ((old->path.mnt == new->path.mnt) &&
- 			    (old->path.dentry == new->path.dentry))
- 				return true;
-+			break;
- 		case (FSNOTIFY_EVENT_NONE):
- 			return true;
- 		default:
 diff --git a/fs/notify/fanotify/fanotify_user.c b/fs/notify/fanotify/fanotify_user.c
 index d438036..0ecadde 100644
 --- a/fs/notify/fanotify/fanotify_user.c
@@ -50187,25 +50371,6 @@ index 1ccfa53..0848f95 100644
  	} else if (mm) {
  		pid_t tid = vm_is_stack(priv->task, vma, is_pid);
  
-diff --git a/fs/pstore/platform.c b/fs/pstore/platform.c
-index 29996e8..2d1e0f3 100644
---- a/fs/pstore/platform.c
-+++ b/fs/pstore/platform.c
-@@ -161,12 +161,13 @@ static void pstore_console_write(struct console *con, const char *s, unsigned c)
- 
- 	while (s < e) {
- 		unsigned long flags;
-+		u64 id;
- 
- 		if (c > psinfo->bufsize)
- 			c = psinfo->bufsize;
- 		spin_lock_irqsave(&psinfo->buf_lock, flags);
- 		memcpy(psinfo->buf, s, c);
--		psinfo->write(PSTORE_TYPE_CONSOLE, 0, NULL, 0, c, psinfo);
-+		psinfo->write(PSTORE_TYPE_CONSOLE, 0, &id, 0, c, psinfo);
- 		spin_unlock_irqrestore(&psinfo->buf_lock, flags);
- 		s += c;
- 		c = e - s;
 diff --git a/fs/quota/netlink.c b/fs/quota/netlink.c
 index d67908b..d13f6a6 100644
 --- a/fs/quota/netlink.c
@@ -50872,10 +51037,10 @@ index 4e00cf0..3374374 100644
  		kfree(s);
 diff --git a/grsecurity/Kconfig b/grsecurity/Kconfig
 new file mode 100644
-index 0000000..d38b430
+index 0000000..10c36fb
 --- /dev/null
 +++ b/grsecurity/Kconfig
-@@ -0,0 +1,947 @@
+@@ -0,0 +1,964 @@
 +#
 +# grecurity configuration
 +#
@@ -50938,6 +51103,23 @@ index 0000000..d38b430
 +	  IF YOU USE XFree86.  If you use XFree86 and you still want to 
 +	  protect your kernel against modification, use the RBAC system.
 +
++config GRKERNSEC_JIT_HARDEN
++	bool "Harden BPF JIT against spray attacks"
++	default y if GRKERNSEC_CONFIG_AUTO
++	depends on BPF_JIT
++	help
++	  If you say Y here, the native code generated by the kernel's Berkeley
++	  Packet Filter (BPF) JIT engine will be hardened against JIT-spraying
++	  attacks that attempt to fit attacker-beneficial instructions in
++	  32bit immediate fields of JIT-generated native instructions.  The
++	  attacker will generally aim to cause an unintended instruction sequence
++	  of JIT-generated native code to execute by jumping into the middle of
++	  a generated instruction.  This feature effectively randomizes the 32bit
++	  immediate constants present in the generated code to thwart such attacks.
++
++	  If you're using KERNEXEC, it's recommended that you enable this option
++	  to supplement the hardening of the kernel.
++  
 +config GRKERNSEC_PROC_MEMMAP
 +	bool "Harden ASLR against information leaks and entropy reduction"
 +	default y if (GRKERNSEC_CONFIG_AUTO || PAX_NOEXEC || PAX_ASLR)
@@ -51869,10 +52051,10 @@ index 0000000..1b9afa9
 +endif
 diff --git a/grsecurity/gracl.c b/grsecurity/gracl.c
 new file mode 100644
-index 0000000..b736032
+index 0000000..4428c82
 --- /dev/null
 +++ b/grsecurity/gracl.c
-@@ -0,0 +1,4040 @@
+@@ -0,0 +1,4056 @@
 +#include <linux/kernel.h>
 +#include <linux/module.h>
 +#include <linux/sched.h>
@@ -55903,6 +56085,22 @@ index 0000000..b736032
 +	return (obj->mode & GR_FIND) ? 1 : 0;
 +}
 +
++void gr_put_exec_file(struct task_struct *task)
++{
++	struct file *filp;  
++
++	write_lock(&grsec_exec_file_lock);
++	filp = task->exec_file;   
++	task->exec_file = NULL;
++	write_unlock(&grsec_exec_file_lock);
++
++	if (filp)
++		fput(filp);
++
++	return;
++}
++
++
 +#ifdef CONFIG_NETFILTER_XT_MATCH_GRADM_MODULE
 +EXPORT_SYMBOL(gr_acl_is_enabled);
 +#endif
@@ -58012,10 +58210,10 @@ index 0000000..9807ee2
 +}
 diff --git a/grsecurity/grsec_disabled.c b/grsecurity/grsec_disabled.c
 new file mode 100644
-index 0000000..213ad8b
+index 0000000..b79fe50
 --- /dev/null
 +++ b/grsecurity/grsec_disabled.c
-@@ -0,0 +1,437 @@
+@@ -0,0 +1,442 @@
 +#include <linux/kernel.h>
 +#include <linux/module.h>
 +#include <linux/sched.h>
@@ -58445,6 +58643,11 @@ index 0000000..213ad8b
 +dev_t gr_get_dev_from_dentry(struct dentry *dentry)
 +{
 +	return dentry->d_inode->i_sb->s_dev;
++}
++
++void gr_put_exec_file(struct task_struct *task)
++{
++	return;
 +}
 +
 +EXPORT_SYMBOL(gr_learn_resource);
@@ -62887,10 +63090,10 @@ index 0000000..54f4e85
 +#define GR_SYMLINKOWNER_MSG "denied following symlink %.950s since symlink owner %u does not match target owner %u, by "
 diff --git a/include/linux/grsecurity.h b/include/linux/grsecurity.h
 new file mode 100644
-index 0000000..f9b9a21
+index 0000000..187b3ed
 --- /dev/null
 +++ b/include/linux/grsecurity.h
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,239 @@
 +#ifndef GR_SECURITY_H
 +#define GR_SECURITY_H
 +#include <linux/fs.h>
@@ -63103,6 +63306,7 @@ index 0000000..f9b9a21
 +int gr_handle_rofs_blockwrite(struct dentry *dentry, struct vfsmount *mnt, int acc_mode);
 +void gr_audit_ptrace(struct task_struct *task);
 +dev_t gr_get_dev_from_dentry(struct dentry *dentry);
++void gr_put_exec_file(struct task_struct *task);
 +
 +int gr_ptrace_readexec(struct file *file, int unsafe_flags);
 +
@@ -63237,50 +63441,68 @@ index aa2e167..84024ce 100644
  };
  
 diff --git a/include/linux/init.h b/include/linux/init.h
-index 5e664f6..0a1225c 100644
+index 5e664f6..15ae326 100644
 --- a/include/linux/init.h
 +++ b/include/linux/init.h
-@@ -39,9 +39,15 @@
+@@ -39,9 +39,33 @@
   * Also note, that this data cannot be "const".
   */
  
 +#ifdef MODULE
-+#define add_latent_entropy
++#define add_init_latent_entropy
 +#else
-+#define add_latent_entropy __latent_entropy
++#define add_init_latent_entropy __latent_entropy
++#endif
++
++#ifdef CONFIG_HOTPLUG
++#define add_devinit_latent_entropy
++#else
++#define add_devinit_latent_entropy __latent_entropy
++#endif
++
++#ifdef CONFIG_HOTPLUG_CPU
++#define add_cpuinit_latent_entropy
++#else
++#define add_cpuinit_latent_entropy __latent_entropy
++#endif
++
++#ifdef CONFIG_MEMORY_HOTPLUG
++#define add_meminit_latent_entropy
++#else
++#define add_meminit_latent_entropy __latent_entropy
 +#endif
 +
  /* These are for everybody (although not all archs will actually
     discard it in modules) */
 -#define __init		__section(.init.text) __cold notrace
-+#define __init		__section(.init.text) __cold notrace add_latent_entropy
++#define __init		__section(.init.text) __cold notrace add_init_latent_entropy
  #define __initdata	__section(.init.data)
  #define __initconst	__section(.init.rodata)
  #define __exitdata	__section(.exit.data)
-@@ -83,7 +89,7 @@
+@@ -83,7 +107,7 @@
  #define __exit          __section(.exit.text) __exitused __cold notrace
  
  /* Used for HOTPLUG */
 -#define __devinit        __section(.devinit.text) __cold notrace
-+#define __devinit        __section(.devinit.text) __cold notrace add_latent_entropy
++#define __devinit        __section(.devinit.text) __cold notrace add_devinit_latent_entropy
  #define __devinitdata    __section(.devinit.data)
  #define __devinitconst   __section(.devinit.rodata)
  #define __devexit        __section(.devexit.text) __exitused __cold notrace
-@@ -91,7 +97,7 @@
+@@ -91,7 +115,7 @@
  #define __devexitconst   __section(.devexit.rodata)
  
  /* Used for HOTPLUG_CPU */
 -#define __cpuinit        __section(.cpuinit.text) __cold notrace
-+#define __cpuinit        __section(.cpuinit.text) __cold notrace add_latent_entropy
++#define __cpuinit        __section(.cpuinit.text) __cold notrace add_cpuinit_latent_entropy
  #define __cpuinitdata    __section(.cpuinit.data)
  #define __cpuinitconst   __section(.cpuinit.rodata)
  #define __cpuexit        __section(.cpuexit.text) __exitused __cold notrace
-@@ -99,7 +105,7 @@
+@@ -99,7 +123,7 @@
  #define __cpuexitconst   __section(.cpuexit.rodata)
  
  /* Used for MEMORY_HOTPLUG */
 -#define __meminit        __section(.meminit.text) __cold notrace
-+#define __meminit        __section(.meminit.text) __cold notrace add_latent_entropy
++#define __meminit        __section(.meminit.text) __cold notrace add_meminit_latent_entropy
  #define __meminitdata    __section(.meminit.data)
  #define __meminitconst   __section(.meminit.rodata)
  #define __memexit        __section(.memexit.text) __exitused __cold notrace
@@ -63762,7 +63984,7 @@ index 1d1b1e1..2a13c78 100644
  
  #define pmdp_clear_flush_notify(__vma, __address, __pmdp)		\
 diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
-index 2daa54f..bfdf2f5 100644
+index a16d929..860ae00 100644
 --- a/include/linux/mmzone.h
 +++ b/include/linux/mmzone.h
 @@ -414,7 +414,7 @@ struct zone {
@@ -67384,21 +67606,10 @@ index 7fee567..8affa2c 100644
  
  	/*
 diff --git a/kernel/exit.c b/kernel/exit.c
-index f65345f9..9c28dab 100644
+index f65345f9..1423231 100644
 --- a/kernel/exit.c
 +++ b/kernel/exit.c
-@@ -59,6 +59,10 @@
- #include <asm/pgtable.h>
- #include <asm/mmu_context.h>
- 
-+#ifdef CONFIG_GRKERNSEC
-+extern rwlock_t grsec_exec_file_lock;
-+#endif
-+
- static void exit_mm(struct task_struct * tsk);
- 
- static void __unhash_process(struct task_struct *p, bool group_dead)
-@@ -182,6 +186,10 @@ void release_task(struct task_struct * p)
+@@ -182,6 +182,10 @@ void release_task(struct task_struct * p)
  	struct task_struct *leader;
  	int zap_leader;
  repeat:
@@ -67409,7 +67620,7 @@ index f65345f9..9c28dab 100644
  	/* don't need to get the RCU readlock here - the process is dead and
  	 * can't be modifying its own credentials. But shut RCU-lockdep up */
  	rcu_read_lock();
-@@ -394,7 +402,7 @@ int allow_signal(int sig)
+@@ -394,7 +398,7 @@ int allow_signal(int sig)
  	 * know it'll be handled, so that they don't get converted to
  	 * SIGKILL or just silently dropped.
  	 */
@@ -67418,25 +67629,16 @@ index f65345f9..9c28dab 100644
  	recalc_sigpending();
  	spin_unlock_irq(&current->sighand->siglock);
  	return 0;
-@@ -430,6 +438,17 @@ void daemonize(const char *name, ...)
+@@ -430,6 +434,8 @@ void daemonize(const char *name, ...)
  	vsnprintf(current->comm, sizeof(current->comm), name, args);
  	va_end(args);
  
-+#ifdef CONFIG_GRKERNSEC
-+	write_lock(&grsec_exec_file_lock);
-+	if (current->exec_file) {
-+		fput(current->exec_file);
-+		current->exec_file = NULL;
-+	}
-+	write_unlock(&grsec_exec_file_lock);
-+#endif
-+
 +	gr_set_kernel_label(current);
 +
  	/*
  	 * If we were started as result of loading a module, close all of the
  	 * user space pages.  We don't need them, and if we didn't close them
-@@ -907,6 +926,8 @@ void do_exit(long code)
+@@ -907,6 +913,8 @@ void do_exit(long code)
  	struct task_struct *tsk = current;
  	int group_dead;
  
@@ -67445,7 +67647,7 @@ index f65345f9..9c28dab 100644
  	profile_task_exit(tsk);
  
  	WARN_ON(blk_needs_flush_plug(tsk));
-@@ -923,7 +944,6 @@ void do_exit(long code)
+@@ -923,7 +931,6 @@ void do_exit(long code)
  	 * mm_release()->clear_child_tid() from writing to a user-controlled
  	 * kernel address.
  	 */
@@ -67453,7 +67655,7 @@ index f65345f9..9c28dab 100644
  
  	ptrace_event(PTRACE_EVENT_EXIT, code);
  
-@@ -982,6 +1002,9 @@ void do_exit(long code)
+@@ -982,6 +989,9 @@ void do_exit(long code)
  	tsk->exit_code = code;
  	taskstats_exit(tsk, group_dead);
  
@@ -67463,7 +67665,7 @@ index f65345f9..9c28dab 100644
  	exit_mm(tsk);
  
  	if (group_dead)
-@@ -1099,7 +1122,7 @@ SYSCALL_DEFINE1(exit, int, error_code)
+@@ -1099,7 +1109,7 @@ SYSCALL_DEFINE1(exit, int, error_code)
   * Take down every thread in the group.  This is called by fatal signals
   * as well as by sys_exit_group (below).
   */
@@ -68331,7 +68533,7 @@ index 91c32a0..7b88d63 100644
  		seq_printf(m, "%40s %14lu %29s %pS\n",
  			   name, stats->contending_point[i],
 diff --git a/kernel/module.c b/kernel/module.c
-index 9ad9ee9..731c128 100644
+index 2a15c59..731c128 100644
 --- a/kernel/module.c
 +++ b/kernel/module.c
 @@ -58,6 +58,7 @@
@@ -68620,7 +68822,7 @@ index 9ad9ee9..731c128 100644
  	}
  }
  
-@@ -2266,28 +2284,33 @@ static void layout_symtab(struct module *mod, struct load_info *info)
+@@ -2266,7 +2284,7 @@ static void layout_symtab(struct module *mod, struct load_info *info)
  
  	/* Put symbol section at end of init part of module. */
  	symsect->sh_flags |= SHF_ALLOC;
@@ -68629,23 +68831,8 @@ index 9ad9ee9..731c128 100644
  					 info->index.sym) | INIT_OFFSET_MASK;
  	pr_debug("\t%s\n", info->secstrings + symsect->sh_name);
  
- 	src = (void *)info->hdr + symsect->sh_offset;
- 	nsrc = symsect->sh_size / sizeof(*src);
- 
-+	/* strtab always starts with a nul, so offset 0 is the empty string. */
-+	strtab_size = 1;
-+
- 	/* Compute total space required for the core symbols' strtab. */
--	for (ndst = i = strtab_size = 1; i < nsrc; ++i, ++src)
--		if (is_core_symbol(src, info->sechdrs, info->hdr->e_shnum)) {
--			strtab_size += strlen(&info->strtab[src->st_name]) + 1;
-+	for (ndst = i = 0; i < nsrc; i++) {
-+		if (i == 0 ||
-+		    is_core_symbol(src+i, info->sechdrs, info->hdr->e_shnum)) {
-+			strtab_size += strlen(&info->strtab[src[i].st_name])+1;
- 			ndst++;
- 		}
-+	}
+@@ -2286,13 +2304,13 @@ static void layout_symtab(struct module *mod, struct load_info *info)
+ 	}
  
  	/* Append room for core symbols at end of core part. */
 -	info->symoffs = ALIGN(mod->core_size, symsect->sh_addralign ?: 1);
@@ -68662,7 +68849,7 @@ index 9ad9ee9..731c128 100644
  					 info->index.str) | INIT_OFFSET_MASK;
  	pr_debug("\t%s\n", info->secstrings + strsect->sh_name);
  }
-@@ -2305,24 +2328,28 @@ static void add_kallsyms(struct module *mod, const struct load_info *info)
+@@ -2310,12 +2328,14 @@ static void add_kallsyms(struct module *mod, const struct load_info *info)
  	/* Make sure we get permanent strtab: don't use info->strtab. */
  	mod->strtab = (void *)info->sechdrs[info->index.str].sh_addr;
  
@@ -68677,23 +68864,10 @@ index 9ad9ee9..731c128 100644
 +	mod->core_symtab = dst = mod->module_core_rx + info->symoffs;
 +	mod->core_strtab = s = mod->module_core_rx + info->stroffs;
  	src = mod->symtab;
--	*dst = *src;
  	*s++ = 0;
--	for (ndst = i = 1; i < mod->num_symtab; ++i, ++src) {
--		if (!is_core_symbol(src, info->sechdrs, info->hdr->e_shnum))
--			continue;
--
--		dst[ndst] = *src;
--		dst[ndst++].st_name = s - mod->core_strtab;
--		s += strlcpy(s, &mod->strtab[src->st_name], KSYM_NAME_LEN) + 1;
-+	for (ndst = i = 0; i < mod->num_symtab; i++) {
-+		if (i == 0 ||
-+		    is_core_symbol(src+i, info->sechdrs, info->hdr->e_shnum)) {
-+			dst[ndst] = src[i];
-+			dst[ndst++].st_name = s - mod->core_strtab;
-+			s += strlcpy(s, &mod->strtab[src[i].st_name],
-+				     KSYM_NAME_LEN) + 1;
-+		}
+ 	for (ndst = i = 0; i < mod->num_symtab; i++) {
+@@ -2328,6 +2348,8 @@ static void add_kallsyms(struct module *mod, const struct load_info *info)
+ 		}
  	}
  	mod->core_num_syms = ndst;
 +
@@ -68701,7 +68875,7 @@ index 9ad9ee9..731c128 100644
  }
  #else
  static inline void layout_symtab(struct module *mod, struct load_info *info)
-@@ -2356,17 +2383,33 @@ void * __weak module_alloc(unsigned long size)
+@@ -2361,17 +2383,33 @@ void * __weak module_alloc(unsigned long size)
  	return size == 0 ? NULL : vmalloc_exec(size);
  }
  
@@ -68740,7 +68914,7 @@ index 9ad9ee9..731c128 100644
  		mutex_unlock(&module_mutex);
  	}
  	return ret;
-@@ -2544,8 +2587,14 @@ static struct module *setup_load_info(struct load_info *info)
+@@ -2549,8 +2587,14 @@ static struct module *setup_load_info(struct load_info *info)
  static int check_modinfo(struct module *mod, struct load_info *info)
  {
  	const char *modmagic = get_modinfo(info, "vermagic");
@@ -68755,7 +68929,7 @@ index 9ad9ee9..731c128 100644
  	/* This is allowed: modprobe --force will invalidate it. */
  	if (!modmagic) {
  		err = try_to_force_load(mod, "bad vermagic");
-@@ -2568,7 +2617,7 @@ static int check_modinfo(struct module *mod, struct load_info *info)
+@@ -2573,7 +2617,7 @@ static int check_modinfo(struct module *mod, struct load_info *info)
  	}
  
  	/* Set up license info based on the info section */
@@ -68764,7 +68938,7 @@ index 9ad9ee9..731c128 100644
  
  	return 0;
  }
-@@ -2662,7 +2711,7 @@ static int move_module(struct module *mod, struct load_info *info)
+@@ -2667,7 +2711,7 @@ static int move_module(struct module *mod, struct load_info *info)
  	void *ptr;
  
  	/* Do the allocs. */
@@ -68773,7 +68947,7 @@ index 9ad9ee9..731c128 100644
  	/*
  	 * The pointer to this block is stored in the module structure
  	 * which is inside the block. Just mark it as not being a
-@@ -2672,23 +2721,50 @@ static int move_module(struct module *mod, struct load_info *info)
+@@ -2677,23 +2721,50 @@ static int move_module(struct module *mod, struct load_info *info)
  	if (!ptr)
  		return -ENOMEM;
  
@@ -68832,7 +69006,7 @@ index 9ad9ee9..731c128 100644
  
  	/* Transfer each section which specifies SHF_ALLOC */
  	pr_debug("final section addresses:\n");
-@@ -2699,16 +2775,45 @@ static int move_module(struct module *mod, struct load_info *info)
+@@ -2704,16 +2775,45 @@ static int move_module(struct module *mod, struct load_info *info)
  		if (!(shdr->sh_flags & SHF_ALLOC))
  			continue;
  
@@ -68885,7 +69059,7 @@ index 9ad9ee9..731c128 100644
  		pr_debug("\t0x%lx %s\n",
  			 (long)shdr->sh_addr, info->secstrings + shdr->sh_name);
  	}
-@@ -2763,12 +2868,12 @@ static void flush_module_icache(const struct module *mod)
+@@ -2768,12 +2868,12 @@ static void flush_module_icache(const struct module *mod)
  	 * Do it before processing of module parameters, so the module
  	 * can provide parameter accessor functions of its own.
  	 */
@@ -68904,7 +69078,7 @@ index 9ad9ee9..731c128 100644
  
  	set_fs(old_fs);
  }
-@@ -2838,8 +2943,10 @@ out:
+@@ -2843,8 +2943,10 @@ out:
  static void module_deallocate(struct module *mod, struct load_info *info)
  {
  	percpu_modfree(mod);
@@ -68917,7 +69091,7 @@ index 9ad9ee9..731c128 100644
  }
  
  int __weak module_finalize(const Elf_Ehdr *hdr,
-@@ -2852,7 +2959,9 @@ int __weak module_finalize(const Elf_Ehdr *hdr,
+@@ -2857,7 +2959,9 @@ int __weak module_finalize(const Elf_Ehdr *hdr,
  static int post_relocation(struct module *mod, const struct load_info *info)
  {
  	/* Sort exception table now relocations are done. */
@@ -68927,7 +69101,7 @@ index 9ad9ee9..731c128 100644
  
  	/* Copy relocated percpu area over. */
  	percpu_modcopy(mod, (void *)info->sechdrs[info->index.pcpu].sh_addr,
-@@ -2903,9 +3012,38 @@ static struct module *load_module(void __user *umod,
+@@ -2908,9 +3012,38 @@ static struct module *load_module(void __user *umod,
  	if (err)
  		goto free_unload;
  
@@ -68966,7 +69140,7 @@ index 9ad9ee9..731c128 100644
  	/* Fix up syms, so that st_value is a pointer to location. */
  	err = simplify_symbols(mod, &info);
  	if (err < 0)
-@@ -2921,13 +3059,6 @@ static struct module *load_module(void __user *umod,
+@@ -2926,13 +3059,6 @@ static struct module *load_module(void __user *umod,
  
  	flush_module_icache(mod);
  
@@ -68980,7 +69154,7 @@ index 9ad9ee9..731c128 100644
  	/* Mark state as coming so strong_try_module_get() ignores us. */
  	mod->state = MODULE_STATE_COMING;
  
-@@ -2985,11 +3116,10 @@ static struct module *load_module(void __user *umod,
+@@ -2990,11 +3116,10 @@ static struct module *load_module(void __user *umod,
   unlock:
  	mutex_unlock(&module_mutex);
  	synchronize_sched();
@@ -68993,7 +69167,7 @@ index 9ad9ee9..731c128 100644
   free_unload:
  	module_unload_free(mod);
   free_module:
-@@ -3030,16 +3160,16 @@ SYSCALL_DEFINE3(init_module, void __user *, umod,
+@@ -3035,16 +3160,16 @@ SYSCALL_DEFINE3(init_module, void __user *, umod,
  			MODULE_STATE_COMING, mod);
  
  	/* Set RO and NX regions for core */
@@ -69018,7 +69192,7 @@ index 9ad9ee9..731c128 100644
  
  	do_mod_ctors(mod);
  	/* Start the module */
-@@ -3085,11 +3215,12 @@ SYSCALL_DEFINE3(init_module, void __user *, umod,
+@@ -3090,11 +3215,12 @@ SYSCALL_DEFINE3(init_module, void __user *, umod,
  	mod->strtab = mod->core_strtab;
  #endif
  	unset_module_init_ro_nx(mod);
@@ -69036,7 +69210,7 @@ index 9ad9ee9..731c128 100644
  	mutex_unlock(&module_mutex);
  
  	return 0;
-@@ -3120,10 +3251,16 @@ static const char *get_ksymbol(struct module *mod,
+@@ -3125,10 +3251,16 @@ static const char *get_ksymbol(struct module *mod,
  	unsigned long nextval;
  
  	/* At worse, next value is at end of module */
@@ -69056,7 +69230,7 @@ index 9ad9ee9..731c128 100644
  
  	/* Scan for closest preceding symbol, and next symbol. (ELF
  	   starts real symbols at 1). */
-@@ -3358,7 +3495,7 @@ static int m_show(struct seq_file *m, void *p)
+@@ -3363,7 +3495,7 @@ static int m_show(struct seq_file *m, void *p)
  	char buf[8];
  
  	seq_printf(m, "%s %u",
@@ -69065,7 +69239,7 @@ index 9ad9ee9..731c128 100644
  	print_unload_info(m, mod);
  
  	/* Informative for users. */
-@@ -3367,7 +3504,7 @@ static int m_show(struct seq_file *m, void *p)
+@@ -3372,7 +3504,7 @@ static int m_show(struct seq_file *m, void *p)
  		   mod->state == MODULE_STATE_COMING ? "Loading":
  		   "Live");
  	/* Used by oprofile and other similar tools. */
@@ -69074,7 +69248,7 @@ index 9ad9ee9..731c128 100644
  
  	/* Taints info */
  	if (mod->taints)
-@@ -3403,7 +3540,17 @@ static const struct file_operations proc_modules_operations = {
+@@ -3408,7 +3540,17 @@ static const struct file_operations proc_modules_operations = {
  
  static int __init proc_modules_init(void)
  {
@@ -69092,7 +69266,7 @@ index 9ad9ee9..731c128 100644
  	return 0;
  }
  module_init(proc_modules_init);
-@@ -3462,12 +3609,12 @@ struct module *__module_address(unsigned long addr)
+@@ -3467,12 +3609,12 @@ struct module *__module_address(unsigned long addr)
  {
  	struct module *mod;
  
@@ -69108,7 +69282,7 @@ index 9ad9ee9..731c128 100644
  			return mod;
  	return NULL;
  }
-@@ -3501,11 +3648,20 @@ bool is_module_text_address(unsigned long addr)
+@@ -3506,11 +3648,20 @@ bool is_module_text_address(unsigned long addr)
   */
  struct module *__module_text_address(unsigned long addr)
  {
@@ -71861,9 +72035,18 @@ index 9ed4fd4..c42648d 100644
  	 * Make sure the vma is shared, that it supports prefaulting,
  	 * and that the remapped range is valid and fully within
 diff --git a/mm/highmem.c b/mm/highmem.c
-index d517cd1..006a1c5 100644
+index d517cd1..9568fec 100644
 --- a/mm/highmem.c
 +++ b/mm/highmem.c
+@@ -98,7 +98,7 @@ struct page *kmap_to_page(void *vaddr)
+ {
+ 	unsigned long addr = (unsigned long)vaddr;
+ 
+-	if (addr >= PKMAP_ADDR(0) && addr <= PKMAP_ADDR(LAST_PKMAP)) {
++	if (addr >= PKMAP_ADDR(0) && addr < PKMAP_ADDR(LAST_PKMAP)) {
+ 		int i = (addr - PKMAP_ADDR(0)) >> PAGE_SHIFT;
+ 		return pte_page(pkmap_page_table[i]);
+ 	}
 @@ -137,9 +137,10 @@ static void flush_all_zero_pkmaps(void)
  		 * So no dangers, even with speculative execution.
  		 */
@@ -74671,7 +74854,7 @@ index d4b0c10..ed421b5 100644
  	new->vm_region = region;
  
 diff --git a/mm/page_alloc.c b/mm/page_alloc.c
-index c13ea75..081ab2c 100644
+index d2d8f54..be2a87c 100644
 --- a/mm/page_alloc.c
 +++ b/mm/page_alloc.c
 @@ -340,7 +340,7 @@ out:
@@ -74887,7 +75070,7 @@ index aa95e59..b681a63 100644
  	struct anon_vma_chain *avc;
  	struct anon_vma *anon_vma;
 diff --git a/mm/shmem.c b/mm/shmem.c
-index d2eeca1..92f3123 100644
+index 31e1506..dbf3647 100644
 --- a/mm/shmem.c
 +++ b/mm/shmem.c
 @@ -31,7 +31,7 @@
@@ -74908,7 +75091,7 @@ index d2eeca1..92f3123 100644
  
  struct shmem_xattr {
  	struct list_head list;	/* anchored by shmem_inode_info->xattr_list */
-@@ -2207,6 +2207,11 @@ static const struct xattr_handler *shmem_xattr_handlers[] = {
+@@ -2219,6 +2219,11 @@ static const struct xattr_handler *shmem_xattr_handlers[] = {
  static int shmem_xattr_validate(const char *name)
  {
  	struct { const char *prefix; size_t len; } arr[] = {
@@ -74920,7 +75103,7 @@ index d2eeca1..92f3123 100644
  		{ XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN },
  		{ XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN }
  	};
-@@ -2260,6 +2265,15 @@ static int shmem_setxattr(struct dentry *dentry, const char *name,
+@@ -2272,6 +2277,15 @@ static int shmem_setxattr(struct dentry *dentry, const char *name,
  	if (err)
  		return err;
  
@@ -74936,7 +75119,7 @@ index d2eeca1..92f3123 100644
  	if (size == 0)
  		value = "";  /* empty EA, do not remove */
  
-@@ -2594,8 +2608,7 @@ int shmem_fill_super(struct super_block *sb, void *data, int silent)
+@@ -2606,8 +2620,7 @@ int shmem_fill_super(struct super_block *sb, void *data, int silent)
  	int err = -ENOMEM;
  
  	/* Round up to L1_CACHE_BYTES to resist false sharing */
@@ -76125,19 +76308,6 @@ index 2bb90b1..3795e47 100644
  		v->addr, v->addr + v->size, v->size);
  
  	if (v->caller)
-diff --git a/mm/vmscan.c b/mm/vmscan.c
-index 99b434b..a018dfc 100644
---- a/mm/vmscan.c
-+++ b/mm/vmscan.c
-@@ -2953,6 +2953,8 @@ static int kswapd(void *p)
- 						&balanced_classzone_idx);
- 		}
- 	}
-+
-+	current->reclaim_state = NULL;
- 	return 0;
- }
- 
 diff --git a/mm/vmstat.c b/mm/vmstat.c
 index df7a674..8b4a4f3 100644
 --- a/mm/vmstat.c
@@ -76823,7 +76993,7 @@ index 0337e2b..47914a0 100644
  
  	return err;
 diff --git a/net/core/dev.c b/net/core/dev.c
-index aed87a4..72cc526 100644
+index 1dce5b5..363a522 100644
 --- a/net/core/dev.c
 +++ b/net/core/dev.c
 @@ -1138,9 +1138,13 @@ void dev_load(struct net *net, const char *name)
@@ -76867,7 +77037,7 @@ index aed87a4..72cc526 100644
  
  #define DEV_GSO_CB(skb) ((struct dev_gso_cb *)(skb)->cb)
  
-@@ -2928,7 +2932,7 @@ enqueue:
+@@ -2930,7 +2934,7 @@ enqueue:
  
  	local_irq_restore(flags);
  
@@ -76876,7 +77046,7 @@ index aed87a4..72cc526 100644
  	kfree_skb(skb);
  	return NET_RX_DROP;
  }
-@@ -3000,7 +3004,7 @@ int netif_rx_ni(struct sk_buff *skb)
+@@ -3002,7 +3006,7 @@ int netif_rx_ni(struct sk_buff *skb)
  }
  EXPORT_SYMBOL(netif_rx_ni);
  
@@ -76885,7 +77055,7 @@ index aed87a4..72cc526 100644
  {
  	struct softnet_data *sd = &__get_cpu_var(softnet_data);
  
-@@ -3331,7 +3335,7 @@ ncls:
+@@ -3333,7 +3337,7 @@ ncls:
  			ret = pt_prev->func(skb, skb->dev, pt_prev, orig_dev);
  	} else {
  drop:
@@ -76894,7 +77064,7 @@ index aed87a4..72cc526 100644
  		kfree_skb(skb);
  		/* Jamal, now you will not able to escape explaining
  		 * me how you were going to use this. :-)
-@@ -3898,7 +3902,7 @@ void netif_napi_del(struct napi_struct *napi)
+@@ -3900,7 +3904,7 @@ void netif_napi_del(struct napi_struct *napi)
  }
  EXPORT_SYMBOL(netif_napi_del);
  
@@ -76903,7 +77073,7 @@ index aed87a4..72cc526 100644
  {
  	struct softnet_data *sd = &__get_cpu_var(softnet_data);
  	unsigned long time_limit = jiffies + 2;
-@@ -4368,8 +4372,13 @@ static int ptype_seq_show(struct seq_file *seq, void *v)
+@@ -4370,8 +4374,13 @@ static int ptype_seq_show(struct seq_file *seq, void *v)
  		else
  			seq_printf(seq, "%04x", ntohs(pt->type));
  
@@ -76917,7 +77087,7 @@ index aed87a4..72cc526 100644
  	}
  
  	return 0;
-@@ -5922,7 +5931,7 @@ struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
+@@ -5924,7 +5933,7 @@ struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
  	} else {
  		netdev_stats_to_stats64(storage, &dev->stats);
  	}
@@ -77291,10 +77461,10 @@ index 8d07c97..d0812ef 100644
  
  	rc = qp->q.fragments && (end - start) > max;
 diff --git a/net/ipv4/ip_sockglue.c b/net/ipv4/ip_sockglue.c
-index 5eea4a8..49819c2 100644
+index 14bbfcf..644f472 100644
 --- a/net/ipv4/ip_sockglue.c
 +++ b/net/ipv4/ip_sockglue.c
-@@ -1142,7 +1142,8 @@ static int do_ip_getsockopt(struct sock *sk, int level, int optname,
+@@ -1151,7 +1151,8 @@ static int do_ip_getsockopt(struct sock *sk, int level, int optname,
  		len = min_t(unsigned int, len, opt->optlen);
  		if (put_user(len, optlen))
  			return -EFAULT;
@@ -77304,7 +77474,7 @@ index 5eea4a8..49819c2 100644
  			return -EFAULT;
  		return 0;
  	}
-@@ -1273,7 +1274,7 @@ static int do_ip_getsockopt(struct sock *sk, int level, int optname,
+@@ -1282,7 +1283,7 @@ static int do_ip_getsockopt(struct sock *sk, int level, int optname,
  		if (sk->sk_type != SOCK_STREAM)
  			return -ENOPROTOOPT;
  
@@ -77849,10 +78019,10 @@ index b10374d..0baa1f9 100644
  		if (ops->ndo_do_ioctl) {
  			mm_segment_t oldfs = get_fs();
 diff --git a/net/ipv6/ipv6_sockglue.c b/net/ipv6/ipv6_sockglue.c
-index ba6d13d..6899122 100644
+index e02faed..9780f28 100644
 --- a/net/ipv6/ipv6_sockglue.c
 +++ b/net/ipv6/ipv6_sockglue.c
-@@ -989,7 +989,7 @@ static int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
+@@ -990,7 +990,7 @@ static int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
  		if (sk->sk_type != SOCK_STREAM)
  			return -ENOPROTOOPT;
  
@@ -78332,7 +78502,7 @@ index 34e4185..8823368 100644
  	return res;
  }
 diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
-index bb61f77..3788d63 100644
+index 642a2a3..9dcc3dd 100644
 --- a/net/mac80211/ieee80211_i.h
 +++ b/net/mac80211/ieee80211_i.h
 @@ -28,6 +28,7 @@
@@ -78490,7 +78660,7 @@ index c97a065..ff61928 100644
  
  	return p;
 diff --git a/net/mac80211/util.c b/net/mac80211/util.c
-index 1cfe6d5..c428ba3 100644
+index 7883449..17c6a9a 100644
 --- a/net/mac80211/util.c
 +++ b/net/mac80211/util.c
 @@ -1279,7 +1279,7 @@ int ieee80211_reconfig(struct ieee80211_local *local)
@@ -83091,7 +83261,7 @@ index 0000000..92ed719
 +	return 0;
 +}
 diff --git a/tools/gcc/generate_size_overflow_hash.sh b/tools/gcc/generate_size_overflow_hash.sh
-new file mode 100644
+new file mode 100755
 index 0000000..02c6bec
 --- /dev/null
 +++ b/tools/gcc/generate_size_overflow_hash.sh
@@ -83365,10 +83535,10 @@ index 0000000..a86e422
 +}
 diff --git a/tools/gcc/kernexec_plugin.c b/tools/gcc/kernexec_plugin.c
 new file mode 100644
-index 0000000..98011fa
+index 0000000..8856202
 --- /dev/null
 +++ b/tools/gcc/kernexec_plugin.c
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,432 @@
 +/*
 + * Copyright 2011 by the PaX Team <pageexec@freemail.hu>
 + * Licensed under the GPL v2
@@ -83408,6 +83578,10 @@ index 0000000..98011fa
 +
 +extern void print_gimple_stmt(FILE *, gimple, int, int);
 +extern rtx emit_move_insn(rtx x, rtx y);
++
++#if BUILDING_GCC_VERSION <= 4006
++#define ANY_RETURN_P(rtx) (GET_CODE(rtx) == RETURN)
++#endif
 +
 +int plugin_is_GPL_compatible;
 +
@@ -83713,6 +83887,7 @@ index 0000000..98011fa
 +	for (insn = get_insns(); insn; insn = NEXT_INSN(insn)) {
 +		// rtl match: (jump_insn 41 40 42 2 (return) fptr.c:42 634 {return_internal} (nil))
 +		//            (jump_insn 12 9 11 2 (parallel [ (return) (unspec [ (0) ] UNSPEC_REP) ]) fptr.c:46 635 {return_internal_long} (nil))
++		//            (jump_insn 97 96 98 6 (simple_return) fptr.c:50 -1 (nil) -> simple_return)
 +		rtx body;
 +
 +		// is it a retn
@@ -83721,7 +83896,7 @@ index 0000000..98011fa
 +		body = PATTERN(insn);
 +		if (GET_CODE(body) == PARALLEL)
 +			body = XVECEXP(body, 0, 0);
-+		if (GET_CODE(body) != RETURN)
++		if (!ANY_RETURN_P(body))
 +			continue;
 +		kernexec_instrument_retaddr(insn);
 +	}
@@ -84099,10 +84274,10 @@ index 0000000..b8008f7
 +}
 diff --git a/tools/gcc/size_overflow_hash.data b/tools/gcc/size_overflow_hash.data
 new file mode 100644
-index 0000000..9332f17
+index 0000000..67468e3
 --- /dev/null
 +++ b/tools/gcc/size_overflow_hash.data
-@@ -0,0 +1,3597 @@
+@@ -0,0 +1,3600 @@
 +_000001_hash alloc_dr 2 65495 _000001_hash NULL
 +_000002_hash __copy_from_user 3 10918 _000002_hash NULL
 +_000003_hash copy_from_user 3 17559 _000003_hash NULL
@@ -87700,6 +87875,9 @@ index 0000000..9332f17
 +_003894_hash io_mapping_map_wc 2 19284 _003894_hash NULL
 +_003895_hash nfs_dns_resolve_name 3 25036 _003895_hash NULL
 +_003896_hash nfs_parse_server_name 2 1899 _003896_hash NULL
++_003897_hash acl_alloc 1 35979 _003897_hash NULL
++_003898_hash acl_alloc_stack_init 1 60630 _003898_hash NULL
++_003899_hash create_table 2 16213 _003899_hash NULL
 diff --git a/tools/gcc/size_overflow_plugin.c b/tools/gcc/size_overflow_plugin.c
 new file mode 100644
 index 0000000..1aa0dce
