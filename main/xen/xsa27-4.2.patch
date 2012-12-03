@@ -1,0 +1,136 @@
+hvm: Limit the size of large HVM op batches
+
+Doing large p2m updates for HVMOP_track_dirty_vram without preemption
+ties up the physical processor. Integrating preemption into the p2m
+updates is hard so simply limit to 1GB which is sufficient for a 15000
+* 15000 * 32bpp framebuffer.
+
+For HVMOP_modified_memory and HVMOP_set_mem_type preemptible add the
+necessary machinery to handle preemption.
+
+This is CVE-2012-5511 / XSA-27.
+
+Signed-off-by: Tim Deegan <tim@xen.org>
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Acked-by: Ian Jackson <ian.jackson@eu.citrix.com>
+
+v2: Provide definition of GB to fix x86-32 compile.
+
+Signed-off-by: Jan Beulich <JBeulich@suse.com>
+Acked-by: Ian Jackson <ian.jackson@eu.citrix.com>
+
+
+diff -r 7c4d806b3753 xen/arch/x86/hvm/hvm.c
+--- a/xen/arch/x86/hvm/hvm.c	Fri Nov 16 15:56:14 2012 +0000
++++ b/xen/arch/x86/hvm/hvm.c	Mon Nov 19 14:42:10 2012 +0000
+@@ -3969,6 +3969,9 @@ long do_hvm_op(unsigned long op, XEN_GUE
+         if ( !is_hvm_domain(d) )
+             goto param_fail2;
+ 
++        if ( a.nr > GB(1) >> PAGE_SHIFT )
++            goto param_fail2;
++
+         rc = xsm_hvm_param(d, op);
+         if ( rc )
+             goto param_fail2;
+@@ -3995,7 +3998,6 @@ long do_hvm_op(unsigned long op, XEN_GUE
+     {
+         struct xen_hvm_modified_memory a;
+         struct domain *d;
+-        unsigned long pfn;
+ 
+         if ( copy_from_guest(&a, arg, 1) )
+             return -EFAULT;
+@@ -4022,9 +4024,11 @@ long do_hvm_op(unsigned long op, XEN_GUE
+         if ( !paging_mode_log_dirty(d) )
+             goto param_fail3;
+ 
+-        for ( pfn = a.first_pfn; pfn < a.first_pfn + a.nr; pfn++ )
++        while ( a.nr > 0 )
+         {
++            unsigned long pfn = a.first_pfn;
+             struct page_info *page;
++
+             page = get_page_from_gfn(d, pfn, NULL, P2M_UNSHARE);
+             if ( page )
+             {
+@@ -4034,6 +4038,19 @@ long do_hvm_op(unsigned long op, XEN_GUE
+                 sh_remove_shadows(d->vcpu[0], _mfn(page_to_mfn(page)), 1, 0);
+                 put_page(page);
+             }
++
++            a.first_pfn++;
++            a.nr--;
++
++            /* Check for continuation if it's not the last interation */
++            if ( a.nr > 0 && hypercall_preempt_check() )
++            {
++                if ( copy_to_guest(arg, &a, 1) )
++                    rc = -EFAULT;
++                else
++                    rc = -EAGAIN;
++                break;
++            }
+         }
+ 
+     param_fail3:
+@@ -4089,7 +4106,6 @@ long do_hvm_op(unsigned long op, XEN_GUE
+     {
+         struct xen_hvm_set_mem_type a;
+         struct domain *d;
+-        unsigned long pfn;
+         
+         /* Interface types to internal p2m types */
+         p2m_type_t memtype[] = {
+@@ -4122,8 +4138,9 @@ long do_hvm_op(unsigned long op, XEN_GUE
+         if ( a.hvmmem_type >= ARRAY_SIZE(memtype) )
+             goto param_fail4;
+ 
+-        for ( pfn = a.first_pfn; pfn < a.first_pfn + a.nr; pfn++ )
++        while ( a.nr )
+         {
++            unsigned long pfn = a.first_pfn;
+             p2m_type_t t;
+             p2m_type_t nt;
+             mfn_t mfn;
+@@ -4163,6 +4180,19 @@ long do_hvm_op(unsigned long op, XEN_GUE
+                 }
+             }
+             put_gfn(d, pfn);
++
++            a.first_pfn++;
++            a.nr--;
++
++            /* Check for continuation if it's not the last interation */
++            if ( a.nr > 0 && hypercall_preempt_check() )
++            {
++                if ( copy_to_guest(arg, &a, 1) )
++                    rc = -EFAULT;
++                else
++                    rc = -EAGAIN;
++                goto param_fail4;
++            }
+         }
+ 
+         rc = 0;
+diff -r 7c4d806b3753 xen/include/asm-x86/config.h
+--- a/xen/include/asm-x86/config.h	Fri Nov 16 15:56:14 2012 +0000
++++ b/xen/include/asm-x86/config.h	Mon Nov 19 14:42:10 2012 +0000
+@@ -119,6 +119,9 @@ extern char wakeup_start[];
+ extern unsigned int video_mode, video_flags;
+ extern unsigned short boot_edid_caps;
+ extern unsigned char boot_edid_info[128];
++
++#define GB(_gb) (_gb ## UL << 30)
++
+ #endif
+ 
+ #define asmlinkage
+@@ -134,7 +137,6 @@ extern unsigned char boot_edid_info[128]
+ #define PML4_ADDR(_slot)                             \
+     ((((_slot ## UL) >> 8) * 0xffff000000000000UL) | \
+      (_slot ## UL << PML4_ENTRY_BITS))
+-#define GB(_gb) (_gb ## UL << 30)
+ #else
+ #define PML4_ENTRY_BYTES (1 << PML4_ENTRY_BITS)
+ #define PML4_ADDR(_slot)                             \
