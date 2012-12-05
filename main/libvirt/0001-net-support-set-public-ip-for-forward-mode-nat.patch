@@ -1,0 +1,277 @@
+From da1e7fe01acdaf13b3fb9e3cda53627063014da9 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Tue, 4 Dec 2012 17:03:51 +0100
+Subject: [PATCH] net: support set public ip for forward mode nat
+
+Support setting which public ip to use for NAT via attribute
+publicaddr. This will construct an iptables line using '-j SNAT
+--to-source <publicaddr>' instead of '-j MASQUERADE'.
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ docs/formatnetwork.html.in  |  4 +++-
+ src/conf/network_conf.c     | 33 +++++++++++++++++++++++++++++++++
+ src/conf/network_conf.h     |  1 +
+ src/network/bridge_driver.c | 24 ++++++++++++++++--------
+ src/util/iptables.c         | 31 ++++++++++++++++++++++++-------
+ src/util/iptables.h         |  6 ++++--
+ 6 files changed, 81 insertions(+), 18 deletions(-)
+
+diff --git a/docs/formatnetwork.html.in b/docs/formatnetwork.html.in
+index 49206dd..07f9783 100644
+--- a/docs/formatnetwork.html.in
++++ b/docs/formatnetwork.html.in
+@@ -125,7 +125,9 @@
+             other network device whether ethernet, wireless, dialup,
+             or VPN. If the <code>dev</code> attribute is set, the
+             firewall rules will restrict forwarding to the named
+-            device only. Inbound connections from other networks are
++            device only. If the <code>publicaddr</code> attribute is set,
++	    the given source address will be used with iptables' SNAT
++	    target. Inbound connections from other networks are
+             all prohibited; all connections between guests on the same
+             network, and to/from the host to the guests, are
+             unrestricted and not NATed.<span class="since">Since
+diff --git a/src/conf/network_conf.c b/src/conf/network_conf.c
+index 6ce2e63..36128ac 100644
+--- a/src/conf/network_conf.c
++++ b/src/conf/network_conf.c
+@@ -174,6 +174,7 @@ void virNetworkDefFree(virNetworkDefPtr def)
+     VIR_FREE(def->name);
+     VIR_FREE(def->bridge);
+     VIR_FREE(def->domain);
++    VIR_FREE(def->publicaddr);
+ 
+     for (ii = 0 ; ii < def->nForwardPfs && def->forwardPfs ; ii++) {
+         virNetworkForwardPfDefClear(&def->forwardPfs[ii]);
+@@ -1211,6 +1212,22 @@ error:
+     return result;
+ }
+ 
++static  int
++virValidPublicaddr(const char *publicaddr)
++{
++    /* only check for max len and valid chars for now */
++    const int maxlen = sizeof("123.123.123.123-123.123.123.123:65535-65534")-1;
++    int len = strlen(publicaddr);
++
++    if (len > maxlen)
++        return 0;
++
++    if (strspn(publicaddr, "0123456789.-:") < len)
++        return 0;
++
++    return 1;
++}
++
+ static virNetworkDefPtr
+ virNetworkDefParseXML(xmlXPathContextPtr ctxt)
+ {
+@@ -1387,6 +1404,21 @@ virNetworkDefParseXML(xmlXPathContextPtr ctxt)
+                 def->managed = 1;
+         }
+ 
++        def->publicaddr = virXPathString("string(./@publicaddr)", ctxt);
++	if (def->publicaddr != NULL) {
++	    char *errstr = NULL;
++            if (def->forwardType != VIR_NETWORK_FORWARD_NAT) {
++	        errstr = "Attribute 'publicaddr' is only valid with mode='nat'";
++	    } else if (!virValidPublicaddr(def->publicaddr)) {
++	        errstr = "Attribute 'publicaddr' must be in the format: ipaddr[-ipaddr][:port[-port]]";
++	    }
++
++	    if (errstr != NULL) {
++                virReportError(VIR_ERR_XML_ERROR, "%s", _(errstr));
++                goto error;
++	    }
++	}
++
+         /* all of these modes can use a pool of physical interfaces */
+         nForwardIfs = virXPathNodeSet("./interface", ctxt, &forwardIfNodes);
+         nForwardPfs = virXPathNodeSet("./pf", ctxt, &forwardPfNodes);
+@@ -1861,6 +1893,7 @@ char *virNetworkDefFormat(const virNetworkDefPtr def, unsigned int flags)
+         }
+         virBufferAddLit(&buf, "<forward");
+         virBufferEscapeString(&buf, " dev='%s'", dev);
++        virBufferEscapeString(&buf, " publicaddr='%s'", def->publicaddr);
+         virBufferAsprintf(&buf, " mode='%s'", mode);
+         if (def->forwardType == VIR_NETWORK_FORWARD_HOSTDEV) {
+             if (def->managed == 1)
+diff --git a/src/conf/network_conf.h b/src/conf/network_conf.h
+index 3e46304..76fb591 100644
+--- a/src/conf/network_conf.h
++++ b/src/conf/network_conf.h
+@@ -206,6 +206,7 @@ struct _virNetworkDef {
+     virPortGroupDefPtr portGroups;
+     virNetDevBandwidthPtr bandwidth;
+     virNetDevVlan vlan;
++    char *publicaddr;
+ };
+ 
+ typedef struct _virNetworkObj virNetworkObj;
+diff --git a/src/network/bridge_driver.c b/src/network/bridge_driver.c
+index 75f3c3a..04f178b 100644
+--- a/src/network/bridge_driver.c
++++ b/src/network/bridge_driver.c
+@@ -1438,7 +1438,8 @@ networkAddMasqueradingIptablesRules(struct network_driver *driver,
+                                      &ipdef->address,
+                                      prefix,
+                                      forwardIf,
+-                                     NULL) < 0) {
++                                     NULL,
++				     network->def->publicaddr) < 0) {
+         virReportError(VIR_ERR_SYSTEM_ERROR,
+                        forwardIf ?
+                        _("failed to add iptables rule to enable masquerading to %s") :
+@@ -1452,7 +1453,8 @@ networkAddMasqueradingIptablesRules(struct network_driver *driver,
+                                      &ipdef->address,
+                                      prefix,
+                                      forwardIf,
+-                                     "udp") < 0) {
++                                     "udp",
++				     network->def->publicaddr) < 0) {
+         virReportError(VIR_ERR_SYSTEM_ERROR,
+                        forwardIf ?
+                        _("failed to add iptables rule to enable UDP masquerading to %s") :
+@@ -1466,7 +1468,8 @@ networkAddMasqueradingIptablesRules(struct network_driver *driver,
+                                      &ipdef->address,
+                                      prefix,
+                                      forwardIf,
+-                                     "tcp") < 0) {
++                                     "tcp",
++				     network->def->publicaddr) < 0) {
+         virReportError(VIR_ERR_SYSTEM_ERROR,
+                        forwardIf ?
+                        _("failed to add iptables rule to enable TCP masquerading to %s") :
+@@ -1482,13 +1485,15 @@ networkAddMasqueradingIptablesRules(struct network_driver *driver,
+                                     &ipdef->address,
+                                     prefix,
+                                     forwardIf,
+-                                    "udp");
++                                    "udp",
++				    network->def->publicaddr);
+  masqerr4:
+     iptablesRemoveForwardMasquerade(driver->iptables,
+                                     &ipdef->address,
+                                     prefix,
+                                     forwardIf,
+-                                    NULL);
++                                    NULL,
++				    network->def->publicaddr);
+  masqerr3:
+     iptablesRemoveForwardAllowRelatedIn(driver->iptables,
+                                         &ipdef->address,
+@@ -1518,17 +1523,20 @@ networkRemoveMasqueradingIptablesRules(struct network_driver *driver,
+                                         &ipdef->address,
+                                         prefix,
+                                         forwardIf,
+-                                        "tcp");
++                                        "tcp",
++					network->def->publicaddr);
+         iptablesRemoveForwardMasquerade(driver->iptables,
+                                         &ipdef->address,
+                                         prefix,
+                                         forwardIf,
+-                                        "udp");
++                                        "udp",
++					network->def->publicaddr);
+         iptablesRemoveForwardMasquerade(driver->iptables,
+                                         &ipdef->address,
+                                         prefix,
+                                         forwardIf,
+-                                        NULL);
++					NULL,
++					network->def->publicaddr);
+ 
+         iptablesRemoveForwardAllowRelatedIn(driver->iptables,
+                                             &ipdef->address,
+diff --git a/src/util/iptables.c b/src/util/iptables.c
+index 407ca3a..4a89673 100644
+--- a/src/util/iptables.c
++++ b/src/util/iptables.c
+@@ -804,6 +804,7 @@ iptablesForwardMasquerade(iptablesContext *ctx,
+                           unsigned int prefix,
+                           const char *physdev,
+                           const char *protocol,
++			  const char *publicaddr,
+                           int action)
+ {
+     int ret;
+@@ -833,10 +834,24 @@ iptablesForwardMasquerade(iptablesContext *ctx,
+     if (physdev && physdev[0])
+         virCommandAddArgList(cmd, "--out-interface", physdev, NULL);
+ 
+-    virCommandAddArgList(cmd, "--jump", "MASQUERADE", NULL);
++    /* Use --jump SNAT if public addr is specified */
++    if (publicaddr && publicaddr[0]) {
++        char tmpstr[sizeof("123.123.123.123-123.123.123.123:65535-65535")];
++	const char *portstr = "";
+ 
+-    if (protocol && protocol[0])
+-        virCommandAddArgList(cmd, "--to-ports", "1024-65535", NULL);
++	memset(tmpstr, 0, sizeof(tmpstr));
++        if (protocol && protocol[0] && (strchr(publicaddr, ':') == NULL))
++	    portstr = ":1024-65535";
++	snprintf(tmpstr, sizeof(tmpstr), "%s%s", publicaddr, portstr);
++
++        virCommandAddArgList(cmd, "--jump", "SNAT",
++	                          "--to-source", tmpstr, NULL);
++    } else {
++        virCommandAddArgList(cmd, "--jump", "MASQUERADE", NULL);
++
++        if (protocol && protocol[0])
++            virCommandAddArgList(cmd, "--to-ports", "1024-65535", NULL);
++    }
+ 
+     ret = iptablesCommandRunAndFree(cmd);
+     VIR_FREE(networkstr);
+@@ -861,9 +876,10 @@ iptablesAddForwardMasquerade(iptablesContext *ctx,
+                              virSocketAddr *netaddr,
+                              unsigned int prefix,
+                              const char *physdev,
+-                             const char *protocol)
++                             const char *protocol,
++			     const char *publicaddr)
+ {
+-    return iptablesForwardMasquerade(ctx, netaddr, prefix, physdev, protocol, ADD);
++    return iptablesForwardMasquerade(ctx, netaddr, prefix, physdev, protocol, publicaddr, ADD);
+ }
+ 
+ /**
+@@ -884,9 +900,10 @@ iptablesRemoveForwardMasquerade(iptablesContext *ctx,
+                                 virSocketAddr *netaddr,
+                                 unsigned int prefix,
+                                 const char *physdev,
+-                                const char *protocol)
++                                const char *protocol,
++			        const char *publicaddr)
+ {
+-    return iptablesForwardMasquerade(ctx, netaddr, prefix, physdev, protocol, REMOVE);
++    return iptablesForwardMasquerade(ctx, netaddr, prefix, physdev, protocol, publicaddr, REMOVE);
+ }
+ 
+ 
+diff --git a/src/util/iptables.h b/src/util/iptables.h
+index e54f8b1..a9d2772 100644
+--- a/src/util/iptables.h
++++ b/src/util/iptables.h
+@@ -105,12 +105,14 @@ int              iptablesAddForwardMasquerade    (iptablesContext *ctx,
+                                                   virSocketAddr *netaddr,
+                                                   unsigned int prefix,
+                                                   const char *physdev,
+-                                                  const char *protocol);
++                                                  const char *protocol,
++						  const char *publicaddr);
+ int              iptablesRemoveForwardMasquerade (iptablesContext *ctx,
+                                                   virSocketAddr *netaddr,
+                                                   unsigned int prefix,
+                                                   const char *physdev,
+-                                                  const char *protocol);
++                                                  const char *protocol,
++						  const char *publicaddr);
+ int              iptablesAddOutputFixUdpChecksum (iptablesContext *ctx,
+                                                   const char *iface,
+                                                   int port);
+-- 
+1.8.0.1
+
