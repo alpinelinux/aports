@@ -1,0 +1,87 @@
+From 7e1646c382bbd6dc21a167bf7f0e45afa5ea217e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Tue, 4 Dec 2012 10:50:30 +0200
+Subject: [PATCH 1/3] uru4000: fix race condition on waiting power up irq
+
+It can come before we finish reading the status register on some
+cases. Arm the irq handler early, and fix the state machine to
+handle early irq properly.
+
+https://bugs.freedesktop.org/show_bug.cgi?id=57834
+---
+ libfprint/drivers/uru4000.c | 31 ++++++++++++++++++++-----------
+ 1 file changed, 20 insertions(+), 11 deletions(-)
+
+diff --git a/libfprint/drivers/uru4000.c b/libfprint/drivers/uru4000.c
+index 541245a..07e26a4 100644
+--- a/libfprint/drivers/uru4000.c
++++ b/libfprint/drivers/uru4000.c
+@@ -994,16 +994,19 @@ static void init_scanpwr_irq_cb(struct fp_img_dev *dev, int status,
+ 	uint16_t type, void *user_data)
+ {
+ 	struct fpi_ssm *ssm = user_data;
++	struct uru4k_dev *urudev = dev->priv;
+ 
+ 	if (status)
+ 		fpi_ssm_mark_aborted(ssm, status);
+ 	else if (type != IRQDATA_SCANPWR_ON)
+ 		fp_dbg("ignoring interrupt");
+-	else if (ssm->cur_state != INIT_AWAIT_SCAN_POWER)
+-		fp_err("ignoring scanpwr interrupt due to being in wrong state %d",
+-			ssm->cur_state);
+-	else
++	else if (ssm->cur_state != INIT_AWAIT_SCAN_POWER) {
++		fp_dbg("early scanpwr interrupt");
++		urudev->scanpwr_irq_timeouts = -1;
++	} else {
++		fp_dbg("late scanpwr interrupt");
+ 		fpi_ssm_next_state(ssm);
++	}
+ }
+ 
+ static void init_scanpwr_timeout(void *user_data)
+@@ -1053,14 +1056,21 @@ static void init_run_state(struct fpi_ssm *ssm)
+ 			fpi_ssm_next_state(ssm);
+ 		break;
+ 	case INIT_POWERUP: ;
++		if (!IRQ_HANDLER_IS_RUNNING(urudev)) {
++			fpi_ssm_mark_aborted(ssm, -EIO);
++			break;
++		}
++		urudev->irq_cb_data = ssm;
++		urudev->irq_cb = init_scanpwr_irq_cb;
++
+ 		struct fpi_ssm *powerupsm = fpi_ssm_new(dev->dev, powerup_run_state,
+ 			POWERUP_NUM_STATES);
+ 		powerupsm->priv = dev;
+ 		fpi_ssm_start_subsm(ssm, powerupsm);
+ 		break;
+ 	case INIT_AWAIT_SCAN_POWER:
+-		if (!IRQ_HANDLER_IS_RUNNING(urudev)) {
+-			fpi_ssm_mark_aborted(ssm, -EIO);
++		if (urudev->scanpwr_irq_timeouts < 0) {
++			fpi_ssm_next_state(ssm);
+ 			break;
+ 		}
+ 
+@@ -1073,13 +1083,12 @@ static void init_run_state(struct fpi_ssm *ssm)
+ 			fpi_ssm_mark_aborted(ssm, -ETIME);
+ 			break;
+ 		}
+-
+-		urudev->irq_cb_data = ssm;
+-		urudev->irq_cb = init_scanpwr_irq_cb;
+ 		break;
+ 	case INIT_DONE:
+-		fpi_timeout_cancel(urudev->scanpwr_irq_timeout);
+-		urudev->scanpwr_irq_timeout = NULL;
++		if (urudev->scanpwr_irq_timeout) {
++			fpi_timeout_cancel(urudev->scanpwr_irq_timeout);
++			urudev->scanpwr_irq_timeout = NULL;
++		}
+ 		urudev->irq_cb_data = NULL;
+ 		urudev->irq_cb = NULL;
+ 		fpi_ssm_next_state(ssm);
+-- 
+1.8.0.1
+
