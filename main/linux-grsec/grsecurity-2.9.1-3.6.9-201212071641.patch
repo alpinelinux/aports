@@ -45262,7 +45262,7 @@ index b2a34a1..162fa69 100644
  	return rc;
  }
 diff --git a/fs/exec.c b/fs/exec.c
-index fab2c6d..6a13dff 100644
+index fab2c6d..9b2fad8 100644
 --- a/fs/exec.c
 +++ b/fs/exec.c
 @@ -55,6 +55,15 @@
@@ -46010,7 +46010,7 @@ index fab2c6d..6a13dff 100644
  	audit_core_dumps(signr);
  
 +	if (signr == SIGSEGV || signr == SIGBUS || signr == SIGKILL || signr == SIGILL)
-+		gr_handle_brute_attach(current, cprm.mm_flags);
++		gr_handle_brute_attach(cprm.mm_flags);
 +
  	binfmt = mm->binfmt;
  	if (!binfmt || !binfmt->core_dump)
@@ -59887,10 +59887,10 @@ index 0000000..f7f29aa
 +}
 diff --git a/grsecurity/grsec_sig.c b/grsecurity/grsec_sig.c
 new file mode 100644
-index 0000000..b4ac94c
+index 0000000..5c00416
 --- /dev/null
 +++ b/grsecurity/grsec_sig.c
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,222 @@
 +#include <linux/kernel.h>
 +#include <linux/sched.h>
 +#include <linux/delay.h>
@@ -59968,6 +59968,7 @@ index 0000000..b4ac94c
 +
 +#ifdef CONFIG_GRKERNSEC_BRUTE
 +#define GR_USER_BAN_TIME (15 * 60)
++#define GR_DAEMON_BRUTE_TIME (30 * 60)
 +
 +static int __get_dumpable(unsigned long mm_flags)
 +{
@@ -59978,10 +59979,12 @@ index 0000000..b4ac94c
 +}
 +#endif
 +
-+void gr_handle_brute_attach(struct task_struct *p, unsigned long mm_flags)
++void gr_handle_brute_attach(unsigned long mm_flags)
 +{
 +#ifdef CONFIG_GRKERNSEC_BRUTE
++	struct task_struct *p = current;
 +	kuid_t uid = GLOBAL_ROOT_UID;
++	int daemon = 0;
 +
 +	if (!grsec_enable_brute)
 +		return;
@@ -59989,9 +59992,11 @@ index 0000000..b4ac94c
 +	rcu_read_lock();
 +	read_lock(&tasklist_lock);
 +	read_lock(&grsec_exec_file_lock);
-+	if (p->real_parent && p->real_parent->exec_file == p->exec_file)
++	if (p->real_parent && p->real_parent->exec_file == p->exec_file) {
++		p->real_parent->brute_expires = get_seconds() + GR_DAEMON_BRUTE_TIME;
 +		p->real_parent->brute = 1;
-+	else {
++		daemon = 1;
++	} else {
 +		const struct cred *cred = __task_cred(p), *cred2;
 +		struct task_struct *tsk, *tsk2;
 +
@@ -60024,6 +60029,8 @@ index 0000000..b4ac94c
 +	if (!uid_eq(uid, GLOBAL_ROOT_UID))
 +		printk(KERN_ALERT "grsec: bruteforce prevention initiated against uid %u, banning for %d minutes\n",
 +			from_kuid_munged(&init_user_ns, uid), GR_USER_BAN_TIME / 60);
++	else if (daemon)
++		gr_log_noargs(GR_DONT_AUDIT, GR_BRUTE_DAEMON_MSG);
 +
 +#endif
 +	return;
@@ -60032,8 +60039,14 @@ index 0000000..b4ac94c
 +void gr_handle_brute_check(void)
 +{
 +#ifdef CONFIG_GRKERNSEC_BRUTE
-+	if (current->brute)
-+		msleep(30 * 1000);
++	struct task_struct *p = current;
++
++	if (unlikely(p->brute)) {
++		if (!grsec_enable_brute)
++			p->brute = 0;
++		else if (time_before(get_seconds(), p->brute_expires))
++			msleep(30 * 1000);
++	}
 +#endif
 +	return;
 +}
@@ -63091,10 +63104,10 @@ index 0000000..c9292f7
 +#endif
 diff --git a/include/linux/grmsg.h b/include/linux/grmsg.h
 new file mode 100644
-index 0000000..54f4e85
+index 0000000..2bd4c8d
 --- /dev/null
 +++ b/include/linux/grmsg.h
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,111 @@
 +#define DEFAULTSECMSG "%.256s[%.16s:%d] uid/euid:%u/%u gid/egid:%u/%u, parent %.256s[%.16s:%d] uid/euid:%u/%u gid/egid:%u/%u"
 +#define GR_ACL_PROCACCT_MSG "%.256s[%.16s:%d] IP:%pI4 TTY:%.64s uid/euid:%u/%u gid/egid:%u/%u run time:[%ud %uh %um %us] cpu time:[%ud %uh %um %us] %s with exit code %ld, parent %.256s[%.16s:%d] IP:%pI4 TTY:%.64s uid/euid:%u/%u gid/egid:%u/%u"
 +#define GR_PTRACE_ACL_MSG "denied ptrace of %.950s(%.16s:%d) by "
@@ -63205,9 +63218,10 @@ index 0000000..54f4e85
 +#define GR_INIT_TRANSFER_MSG "persistent special role transferred privilege to init by "
 +#define GR_BADPROCPID_MSG "denied read of sensitive /proc/pid/%s entry via fd passed across exec by "
 +#define GR_SYMLINKOWNER_MSG "denied following symlink %.950s since symlink owner %u does not match target owner %u, by "
++#define GR_BRUTE_DAEMON_MSG "bruteforce prevention initiated for the next 30 minutes or until service restarted, stalling each fork 30 seconds.  Please investigate the crash report for "
 diff --git a/include/linux/grsecurity.h b/include/linux/grsecurity.h
 new file mode 100644
-index 0000000..187b3ed
+index 0000000..28d8b19
 --- /dev/null
 +++ b/include/linux/grsecurity.h
 @@ -0,0 +1,239 @@
@@ -63246,7 +63260,7 @@ index 0000000..187b3ed
 +	} ptr;
 +};
 +
-+void gr_handle_brute_attach(struct task_struct *p, unsigned long mm_flags);
++void gr_handle_brute_attach(unsigned long mm_flags);
 +void gr_handle_brute_check(void);
 +void gr_handle_kernel_exploit(void);
 +int gr_process_user_ban(void);
@@ -64691,7 +64705,7 @@ index 3fce545..b4fed6e 100644
  static inline void anon_vma_merge(struct vm_area_struct *vma,
  				  struct vm_area_struct *next)
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 23bddac..5976055 100644
+index 23bddac..e08f087 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
 @@ -101,6 +101,7 @@ struct bio_list;
@@ -64802,7 +64816,7 @@ index 23bddac..5976055 100644
  #ifdef CONFIG_FUTEX
  	struct robust_list_head __user *robust_list;
  #ifdef CONFIG_COMPAT
-@@ -1589,8 +1616,74 @@ struct task_struct {
+@@ -1589,8 +1616,75 @@ struct task_struct {
  #ifdef CONFIG_UPROBES
  	struct uprobe_task *utask;
  #endif
@@ -64819,6 +64833,7 @@ index 23bddac..5976055 100644
 +	struct acl_subject_label *acl;
 +	struct acl_role_label *role;
 +	struct file *exec_file;
++	unsigned long brute_expires;
 +	u16 acl_role_id;
 +	/* is this the task that authenticated to the special role */
 +	u8 acl_sp_role;
@@ -64877,7 +64892,7 @@ index 23bddac..5976055 100644
  /* Future-safe accessor for struct task_struct's cpus_allowed. */
  #define tsk_cpus_allowed(tsk) (&(tsk)->cpus_allowed)
  
-@@ -2125,7 +2218,9 @@ void yield(void);
+@@ -2125,7 +2219,9 @@ void yield(void);
  extern struct exec_domain	default_exec_domain;
  
  union thread_union {
@@ -64887,7 +64902,7 @@ index 23bddac..5976055 100644
  	unsigned long stack[THREAD_SIZE/sizeof(long)];
  };
  
-@@ -2158,6 +2253,7 @@ extern struct pid_namespace init_pid_ns;
+@@ -2158,6 +2254,7 @@ extern struct pid_namespace init_pid_ns;
   */
  
  extern struct task_struct *find_task_by_vpid(pid_t nr);
@@ -64895,7 +64910,7 @@ index 23bddac..5976055 100644
  extern struct task_struct *find_task_by_pid_ns(pid_t nr,
  		struct pid_namespace *ns);
  
-@@ -2314,7 +2410,7 @@ extern void __cleanup_sighand(struct sighand_struct *);
+@@ -2314,7 +2411,7 @@ extern void __cleanup_sighand(struct sighand_struct *);
  extern void exit_itimers(struct signal_struct *);
  extern void flush_itimer_signals(void);
  
@@ -64904,7 +64919,7 @@ index 23bddac..5976055 100644
  
  extern void daemonize(const char *, ...);
  extern int allow_signal(int);
-@@ -2515,9 +2611,9 @@ static inline unsigned long *end_of_stack(struct task_struct *p)
+@@ -2515,9 +2612,9 @@ static inline unsigned long *end_of_stack(struct task_struct *p)
  
  #endif
  
