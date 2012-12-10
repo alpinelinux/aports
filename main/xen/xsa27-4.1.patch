@@ -1,0 +1,168 @@
+hvm: Limit the size of large HVM op batches
+
+Doing large p2m updates for HVMOP_track_dirty_vram without preemption
+ties up the physical processor. Integrating preemption into the p2m
+updates is hard so simply limit to 1GB which is sufficient for a 15000
+* 15000 * 32bpp framebuffer.
+
+For HVMOP_modified_memory and HVMOP_set_mem_type preemptible add the
+necessary machinery to handle preemption.
+
+This is CVE-2012-5511 / XSA-27.
+
+Signed-off-by: Tim Deegan <tim@xen.org>
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Acked-by: Ian Jackson <ian.jackson@eu.citrix.com>
+
+x86/paging: Don't allocate user-controlled amounts of stack memory.
+
+This is XSA-27 / CVE-2012-5511.
+
+Signed-off-by: Tim Deegan <tim@xen.org>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+v2: Provide definition of GB to fix x86-32 compile.
+
+Signed-off-by: Jan Beulich <JBeulich@suse.com>
+Acked-by: Ian Jackson <ian.jackson@eu.citrix.com>
+
+
+diff -r 5639047d6c9f xen/arch/x86/hvm/hvm.c
+--- a/xen/arch/x86/hvm/hvm.c	Mon Nov 19 09:43:48 2012 +0100
++++ b/xen/arch/x86/hvm/hvm.c	Mon Nov 19 16:00:33 2012 +0000
+@@ -3471,6 +3471,9 @@ long do_hvm_op(unsigned long op, XEN_GUE
+         if ( !is_hvm_domain(d) )
+             goto param_fail2;
+ 
++        if ( a.nr > GB(1) >> PAGE_SHIFT )
++            goto param_fail2;
++
+         rc = xsm_hvm_param(d, op);
+         if ( rc )
+             goto param_fail2;
+@@ -3498,7 +3501,6 @@ long do_hvm_op(unsigned long op, XEN_GUE
+         struct xen_hvm_modified_memory a;
+         struct domain *d;
+         struct p2m_domain *p2m;
+-        unsigned long pfn;
+ 
+         if ( copy_from_guest(&a, arg, 1) )
+             return -EFAULT;
+@@ -3526,8 +3528,9 @@ long do_hvm_op(unsigned long op, XEN_GUE
+             goto param_fail3;
+ 
+         p2m = p2m_get_hostp2m(d);
+-        for ( pfn = a.first_pfn; pfn < a.first_pfn + a.nr; pfn++ )
++        while ( a.nr > 0 )
+         {
++            unsigned long pfn = a.first_pfn;
+             p2m_type_t t;
+             mfn_t mfn = gfn_to_mfn(p2m, pfn, &t);
+             if ( p2m_is_paging(t) )
+@@ -3548,6 +3551,19 @@ long do_hvm_op(unsigned long op, XEN_GUE
+                 /* don't take a long time and don't die either */
+                 sh_remove_shadows(d->vcpu[0], mfn, 1, 0);
+             }
++
++            a.first_pfn++;
++            a.nr--;
++
++            /* Check for continuation if it's not the last interation */
++            if ( a.nr > 0 && hypercall_preempt_check() )
++            {
++                if ( copy_to_guest(arg, &a, 1) )
++                    rc = -EFAULT;
++                else
++                    rc = -EAGAIN;
++                break;
++            }
+         }
+ 
+     param_fail3:
+@@ -3595,7 +3611,6 @@ long do_hvm_op(unsigned long op, XEN_GUE
+         struct xen_hvm_set_mem_type a;
+         struct domain *d;
+         struct p2m_domain *p2m;
+-        unsigned long pfn;
+         
+         /* Interface types to internal p2m types */
+         p2m_type_t memtype[] = {
+@@ -3625,8 +3640,9 @@ long do_hvm_op(unsigned long op, XEN_GUE
+             goto param_fail4;
+ 
+         p2m = p2m_get_hostp2m(d);
+-        for ( pfn = a.first_pfn; pfn < a.first_pfn + a.nr; pfn++ )
++        while ( a.nr > 0 )
+         {
++            unsigned long pfn = a.first_pfn;
+             p2m_type_t t;
+             p2m_type_t nt;
+             mfn_t mfn;
+@@ -3662,6 +3678,19 @@ long do_hvm_op(unsigned long op, XEN_GUE
+                     goto param_fail4;
+                 }
+             }
++
++            a.first_pfn++;
++            a.nr--;
++
++            /* Check for continuation if it's not the last interation */
++            if ( a.nr > 0 && hypercall_preempt_check() )
++            {
++                if ( copy_to_guest(arg, &a, 1) )
++                    rc = -EFAULT;
++                else
++                    rc = -EAGAIN;
++                goto param_fail4;
++            }
+         }
+ 
+         rc = 0;
+diff -r 5639047d6c9f xen/arch/x86/mm/paging.c
+--- a/xen/arch/x86/mm/paging.c	Mon Nov 19 09:43:48 2012 +0100
++++ b/xen/arch/x86/mm/paging.c	Mon Nov 19 16:00:33 2012 +0000
+@@ -529,13 +529,18 @@ int paging_log_dirty_range(struct domain
+ 
+     if ( !d->arch.paging.log_dirty.fault_count &&
+          !d->arch.paging.log_dirty.dirty_count ) {
+-        int size = (nr + BITS_PER_LONG - 1) / BITS_PER_LONG;
+-        unsigned long zeroes[size];
+-        memset(zeroes, 0x00, size * BYTES_PER_LONG);
++        static uint8_t zeroes[PAGE_SIZE];
++        int off, size;
++
++        size = ((nr + BITS_PER_LONG - 1) / BITS_PER_LONG) * sizeof (long);
+         rv = 0;
+-        if ( copy_to_guest_offset(dirty_bitmap, 0, (uint8_t *) zeroes,
+-                                  size * BYTES_PER_LONG) != 0 )
+-            rv = -EFAULT;
++        for ( off = 0; !rv && off < size; off += sizeof zeroes )
++        {
++            int todo = min(size - off, (int) PAGE_SIZE);
++            if ( copy_to_guest_offset(dirty_bitmap, off, zeroes, todo) )
++                rv = -EFAULT;
++            off += todo;
++        }
+         goto out;
+     }
+     d->arch.paging.log_dirty.fault_count = 0;
+diff -r 5639047d6c9f xen/include/asm-x86/config.h
+--- a/xen/include/asm-x86/config.h	Mon Nov 19 09:43:48 2012 +0100
++++ b/xen/include/asm-x86/config.h	Mon Nov 19 16:00:33 2012 +0000
+@@ -108,6 +108,9 @@ extern unsigned int trampoline_xen_phys_
+ extern unsigned char trampoline_cpu_started;
+ extern char wakeup_start[];
+ extern unsigned int video_mode, video_flags;
++
++#define GB(_gb) (_gb ## UL << 30)
++
+ #endif
+ 
+ #define asmlinkage
+@@ -123,7 +126,6 @@ extern unsigned int video_mode, video_fl
+ #define PML4_ADDR(_slot)                             \
+     ((((_slot ## UL) >> 8) * 0xffff000000000000UL) | \
+      (_slot ## UL << PML4_ENTRY_BITS))
+-#define GB(_gb) (_gb ## UL << 30)
+ #else
+ #define PML4_ENTRY_BYTES (1 << PML4_ENTRY_BITS)
+ #define PML4_ADDR(_slot)                             \
