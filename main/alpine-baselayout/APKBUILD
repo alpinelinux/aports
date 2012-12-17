@@ -1,14 +1,14 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.2.0
-pkgrel=4
+pkgrel=5
 pkgdesc="Alpine base dir structure and init scripts"
 url=http://git.alpinelinux.org/cgit/alpine-baselayout
 depends=
 options="!fhs"
 install="$pkgname.pre-upgrade $pkgname.post-upgrade"
 source="http://git.alpinelinux.org/cgit/$pkgname.git/snapshot/$pkgname-$pkgver.tar.bz2
-	0001-blacklist-viafb-and-e_powersaver.patch
+	0001-mount-media-usb-as-ro-by-default.patch
 	"
 arch="all"
 license=GPL-2
@@ -16,6 +16,11 @@ license=GPL-2
 _builddir="$srcdir"/$pkgname-$pkgver
 prepare() {
 	cd "$_builddir"
+	for i in $source; do
+		case $i in
+		*.patch) msg $i; patch -p1 -i "$srcdir"/$i || return 1;;
+		esac
+	done
 }
 
 build() {
@@ -34,4 +39,4 @@ package() {
 	echo "blacklist microcode" > "$pkgdir"/etc/modprobe.d/microcode.conf
 }
 md5sums="225dbf5b50ae6d3d188ff92c5746bc36  alpine-baselayout-2.2.0.tar.bz2
-3e219db536b13811c34e03c9c32229cb  0001-blacklist-viafb-and-e_powersaver.patch"
+0619f806d91a5293a95debe9fb0124b5  0001-mount-media-usb-as-ro-by-default.patch"
