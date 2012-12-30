@@ -12,7 +12,7 @@ LUA_VERSION	= 5.1
 LUA_SHAREDIR	?= $(prefix)/share/lua/$(LUA_VERSION)/
 
 SCRIPTS		:= abuild buildrepo abuild-keygen abuild-sign newapkbuild \
-		   abump apkgrel ap buildlab apkbuild-cpan
+		   abump apkgrel ap buildlab apkbuild-cpan checkapk
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install

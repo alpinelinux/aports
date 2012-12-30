@@ -1,0 +1,74 @@
+#!/bin/sh
+
+die() {
+	echo "$@" >&2
+	exit 1
+}
+
+msg() {
+	echo "$@"
+}
+
+have_abuild_conf=
+
+for conf in /etc/abuild.conf ~/.abuild/abuild.conf; do
+	if [ -f "$conf" ]; then
+		. $conf && have_abuild_conf=yes
+	fi
+done
+
+[ -z "$have_abuild_conf" ] && die "no abuild.conf found"
+
+if ! [ -f APKBUILD ]; then
+	die 'This must be run in the directory of a built package.'
+fi
+
+. ./APKBUILD
+
+startdir="$PWD"
+tmpdir=$(mktemp -d -t checkpkg-script.XXXXXX)
+cd "$tmpdir" || die "Failed to create temp dir"
+
+for i in $pkgname $subpackages; do
+	_pkgname=${i%:*}
+	pkg=${_pkgname}-$pkgver-r$pkgrel
+	pkgfile=${pkg}.apk
+	repo=${startdir##*/}
+
+	for filepath in "$PKGDEST"/$pkgfile "$REPODEST"/$repo/$pkgfile "$startdir"/$pkgfile; do
+		if [ -f "$filepath" ]; then
+			break
+		fi
+	done
+	[ -f "$filepath" ] || die "could not find $pkgfile"
+
+	# generate a temp repositories file with only the http repos
+	grep ^http: /etc/apk/repositories > $tmpdir/repositories
+
+	oldpkg=$(apk fetch --repositories-file $tmpdir/repositories --simulate 2>&1 | sed 's/^Downloading //')
+	if [ "${oldpkg}" = "${pkg}" ]; then
+		die "The built package ($_pkgname) is the one in the repo right now!"
+	fi
+
+	apk fetch --repositories-file $tmpdir/repositories --stdout $_pkgname \
+		| tar -zt | grep -v '^\.SIGN\.' | sort > filelist-$_pkgname-old \
+		|| die "Failed to download old pkg. Maybe run 'apk update'?"
+
+	tar -ztf "$filepath" | grep -v '^\.SIGN\.' | sort > "filelist-$_pkgname"
+
+	diff -u "filelist-$_pkgname-old" "filelist-$_pkgname"
+
+	if diff "filelist-$_pkgname-old" "filelist-$_pkgname" | grep '\.so' > /dev/null 2>&1; then
+		mkdir -p pkg
+		cd pkg
+		tar -zxf "$filepath" > /dev/null
+		diff "../filelist-$_pkgname-old" "../filelist-$_pkgname" | awk '/>.*\.so/{$1 = ""; print $0}' | while read i; do
+			echo "${i}: " "$(objdump -p "$i" | grep SONAME)"
+		done
+		cd ..
+	else
+		msg "No soname differences for $_pkgname."
+	fi
+done
+
+msg "Files saved to $tmpdir"
