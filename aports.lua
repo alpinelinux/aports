@@ -49,7 +49,7 @@ end
 
 local function split_apkbuild(line)
 	local r = {}
-	local dir,pkgname, pkgver, pkgrel, arch, depends, makedepends, subpackages, source = string.match(line, "([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)")
+	local dir,pkgname, pkgver, pkgrel, arch, depends, makedepends, subpackages, source, url = string.match(line, "([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)")
 	r.dir = dir
 	r.pkgname = pkgname
 	r.pkgver = pkgver
@@ -58,6 +58,7 @@ local function split_apkbuild(line)
 	r.makedepends = split(makedepends)
 	r.subpackages = split_subpkgs(subpackages)
 	r.source = split(source)
+	r.url = url
 	return r
 end
 
@@ -83,10 +84,11 @@ local function parse_apkbuilds(dirs)
 			makedepends=
 			subpackages=
 			source=
+			url=
 			dir="${i%/APKBUILD}"
 			cd "$dir"
 			. ./APKBUILD
-			echo $dir\|$pkgname\|$pkgver\|$pkgrel\|$arch\|$depends\|$makedepends\|$subpackages\|$source
+			echo $dir\|$pkgname\|$pkgver\|$pkgrel\|$arch\|$depends\|$makedepends\|$subpackages\|$source\|$url
 		done
 	]])
 	return function()
