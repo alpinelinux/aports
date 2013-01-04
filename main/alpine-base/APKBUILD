@@ -9,7 +9,11 @@ arch="noarch"
 license="GPL"
 depends="alpine-baselayout alpine-conf apk-tools busybox busybox-initscripts
 	openrc"
-[ "$ALPINE_LIBC" != "eglibc" ] && depends="$depends uclibc-utils"
+if [ "$ALPINE_LIBC" = "eglibc" ]; then
+	depends="$depends eglibc-utils"
+else
+	depends="$depends uclibc-utils"
+fi
 makedepends=
 install=
 subpackages=
