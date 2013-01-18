@@ -2,18 +2,13 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=2.6.0_alpha2
-pkgrel=1
+pkgrel=2
 pkgdesc="Meta package for minimal alpine base"
 url="http://alpinelinux.org"
 arch="noarch"
 license="GPL"
 depends="alpine-baselayout alpine-conf apk-tools busybox busybox-initscripts
-	openrc"
-if [ "$ALPINE_LIBC" = "eglibc" ]; then
-	depends="$depends eglibc-utils"
-else
-	depends="$depends uclibc-utils"
-fi
+	openrc libc-utils"
 makedepends=
 install=
 subpackages=
