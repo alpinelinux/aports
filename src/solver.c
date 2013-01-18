@@ -1049,7 +1049,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 	}
 
 	if (name->ss.last_touched_decision == 0 || changed) {
-		dep->solver_state = name->ss.last_touched_decision;
+		dep->solver_state = name->ss.last_touched_decision + 1;
 		name->ss.last_touched_decision = ss->num_decisions;
 	}
 
@@ -1122,7 +1122,7 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 	}
 
 	if (dep->solver_state) {
-		name->ss.last_touched_decision = dep->solver_state;
+		name->ss.last_touched_decision = dep->solver_state - 1;
 		dep->solver_state = 0;
 	}
 
