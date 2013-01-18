@@ -699,17 +699,16 @@ static void untrigger_install_if(struct apk_solver_state *ss,
 static inline void assign_name(
 	struct apk_solver_state *ss, struct apk_name *name, struct apk_provider p)
 {
-	if (p.version == &apk_null_blob) {
+	if (name->ss.locked &&
+	    (p.version != &apk_null_blob || name->ss.chosen.version != &apk_null_blob)) {
 		/* Assigning locked name with version is a problem;
 		 * generally package providing same name twice */
-		if (name->ss.locked && name->ss.chosen.version != &apk_null_blob)
-			ss->impossible_state = 1;
-	} else {
-		/* Similar to above */
-		if (name->ss.locked)
-			ss->impossible_state = 1;
+		name->ss.locked++;
+		ss->impossible_state = 1;
+		return;
 	}
-	name->ss.chosen = p;
+	if (!name->ss.locked)
+		name->ss.chosen = p;
 	name->ss.locked++;
 	if (list_hashed(&name->ss.unsolved_list)) {
 		list_del(&name->ss.unsolved_list);
@@ -850,15 +849,15 @@ static void undo_decision(struct apk_solver_state *ss,
 				foreach_rinstall_if_pkg(ss, pkg, untrigger_install_if);
 			foreach_dependency(ss, pkg->depends, undo_constraint);
 
-			get_topology_score(ss, pkg, &score);
-			subscore(&ss->score, &score);
-
 			unassign_name(ss, pkg->name);
 			for (i = 0; i < pkg->provides->num; i++) {
 				struct apk_dependency *p = &pkg->provides->item[i];
 				unassign_name(ss, p->name);
 			}
 			ss->assigned_names--;
+
+			get_topology_score(ss, pkg, &score);
+			subscore(&ss->score, &score);
 		}
 		ps->locked = 0;
 	} else {
