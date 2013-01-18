@@ -1581,7 +1581,7 @@ int apk_solver_solve(struct apk_database *db,
 #endif
 
 	/* collect packages */
-	dbg_printf("finished. best score "SCORE_FMT". solution has %d packages.\n",
+	dbg_printf("finished. best score "SCORE_FMT". solution has %zu packages.\n",
 		SCORE_PRINTF(&ss->best_score),
 		ss->best_solution->num);
 
