@@ -1580,6 +1580,12 @@ int apk_solver_solve(struct apk_database *db,
 	foreach_dependency(ss, world, undo_constraint);
 #endif
 
+
+	if (ss->best_solution == NULL) {
+		apk_error("Internal error: no solution at all found.");
+		return -1;
+	}
+
 	/* collect packages */
 	dbg_printf("finished. best score "SCORE_FMT". solution has %zu packages.\n",
 		SCORE_PRINTF(&ss->best_score),
