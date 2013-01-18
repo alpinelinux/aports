@@ -945,7 +945,7 @@ static int next_branch(struct apk_solver_state *ss)
 			name->name, d->saved_requirers, name->ss.requirers);
 #endif
 
-		if ((backjump_name == NULL || backjump_name == d->name) &&
+		if ((backjump_name == NULL || backjump_name == name) &&
 		    backup_until >= ss->num_decisions &&
 		    d->branching_point == BRANCH_YES) {
 			d->branching_point = BRANCH_NO;
@@ -955,19 +955,19 @@ static int next_branch(struct apk_solver_state *ss)
 			if (backup_until < ss->num_decisions)
 				dbg_printf("skipping %s, %d < %d\n",
 					name->name, backup_until, ss->num_decisions);
-			else if (backjump_name != NULL && backjump_name != d->name)
+			else if (backjump_name != NULL && backjump_name != name)
 				dbg_printf("backjumping to find new assign candidate for %s\n",
 					backjump_name->name);
 		}
 
 		/* Back jump to find assign candidate for this name */
-		if (d->name->ss.backjump_enabled && backjump_name == NULL)
-			backjump_name = d->name;
+		if (name->ss.backjump_enabled && backjump_name == NULL)
+			backjump_name = name;
 
 		/* When undoing the initial "exclude none" decision, check if
 		 * we can backjump. */
 		if (d->has_package == 0 && !d->found_solution) {
-			if (backjump_name == d->name) {
+			if (backjump_name == name) {
 				d->name->ss.backjump_enabled = 0;
 				backjump_name = NULL;
 			}
