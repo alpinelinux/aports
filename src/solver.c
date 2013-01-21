@@ -984,17 +984,10 @@ static int next_branch(struct apk_solver_state *ss)
 
 static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
 {
-	struct apk_package *requirer_pkg = NULL;
+	struct apk_decision *d = &ss->decisions[ss->num_decisions];
+	struct apk_package *requirer_pkg = decision_to_pkg(d);
 	struct apk_name *name = dep->name;
-	int i, strength, changed = 0;
-
-	if (ss->num_decisions > 0) {
-		struct apk_decision *d = &ss->decisions[ss->num_decisions];
-		requirer_pkg  = decision_to_pkg(d);
-		strength      = d->requirers;
-	} else {
-		strength = 1;
-	}
+	int i, changed = 0, strength = d->requirers;
 
 	dbg_printf("--->apply_constraint: %s (strength %d)\n", name->name, strength);
 
@@ -1063,17 +1056,10 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 
 static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
 {
+	struct apk_decision *d = &ss->decisions[ss->num_decisions];
 	struct apk_name *name = dep->name;
-	struct apk_package *requirer_pkg = NULL;
-	int i, strength;
-
-	if (ss->num_decisions > 0) {
-		struct apk_decision *d = &ss->decisions[ss->num_decisions];
-		requirer_pkg  = decision_to_pkg(d);
-		strength      = d->requirers;
-	} else {
-		strength = 1;
-	}
+	struct apk_package *requirer_pkg = decision_to_pkg(d);
+	int i, strength = d->requirers;
 
 	dbg_printf("--->undo_constraint: %s (strength %d)\n", name->name, strength);
 
@@ -1553,6 +1539,8 @@ int apk_solver_solve(struct apk_database *db,
 	ss->max_decisions ++;
 	ss->decisions = calloc(1, sizeof(struct apk_decision[ss->max_decisions]));
 
+	/* "Initial decision" is used as dummy for world constraints. */
+	ss->decisions[0].requirers = 1;
 	foreach_dependency(ss, world, apply_constraint);
 
 	do {
