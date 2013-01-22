@@ -971,8 +971,15 @@ static int next_branch(struct apk_solver_state *ss)
 				d->name->ss.backjump_enabled = 0;
 				backjump_name = NULL;
 			}
-			if (d->backup_until && backup_until > d->backup_until)
+			if (d->backup_until && d->backup_until < backup_until) {
 				backup_until = d->backup_until;
+				/* We can't backtrack over the immediate
+				 * EXCLUDE decisions, as they are in a sense
+				 * part of the bundle. */
+				while (backup_until < ss->num_decisions &&
+				       !ss->decisions[backup_until+1].has_package)
+					backup_until++;
+			}
 		}
 
 		ss->num_decisions--;
