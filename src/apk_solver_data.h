@@ -12,12 +12,35 @@
 #ifndef APK_SOLVER_DATA_H
 #define APK_SOLVER_DATA_H
 
+#include <stdint.h>
 #include "apk_defines.h"
 #include "apk_provider_data.h"
+
+struct apk_score {
+	union {
+		struct {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+			unsigned short preference;
+			unsigned short non_preferred_pinnings;
+			unsigned short non_preferred_actions;
+			unsigned short unsatisfied;
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+			unsigned short unsatisfied;
+			unsigned short non_preferred_actions;
+			unsigned short non_preferred_pinnings;
+			unsigned short preference;
+#else
+#error Unknown endianess.
+#endif
+		};
+		uint64_t score;
+	};
+};
 
 struct apk_solver_name_state {
 	/* dynamic */
 	struct list_head unsolved_list;
+	struct apk_score minimum_penalty;
 	struct apk_provider chosen;
 
 	unsigned int last_touched_decision;
