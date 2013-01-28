@@ -913,18 +913,12 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 static int next_branch(struct apk_solver_state *ss)
 {
 	unsigned int backup_until = ss->num_decisions;
-	struct apk_name *backjump_name = NULL;
 
 	while (ss->num_decisions > 0) {
 		struct apk_decision *d = &ss->decisions[ss->num_decisions];
 		struct apk_name *name = d->name;
 
 		undo_decision(ss, d);
-
-		/* If we undoed constraints on the backjump name, we
-		 * cannot backjump on it anymore. */
-		if (backjump_name && !backjump_name->ss.backjump_enabled)
-			backjump_name = NULL;
 
 #ifdef DEBUG_CHECKS
 		ASSERT(cmpscore(&d->saved_score, &ss->score) == 0,
@@ -936,32 +930,19 @@ static int next_branch(struct apk_solver_state *ss)
 			name->name, d->saved_requirers, name->ss.requirers);
 #endif
 
-		if ((backjump_name == NULL || backjump_name == name) &&
-		    backup_until >= ss->num_decisions &&
+		if (backup_until >= ss->num_decisions &&
 		    d->branching_point == BRANCH_YES) {
 			d->branching_point = BRANCH_NO;
 			d->type = (d->type == DECISION_ASSIGN) ? DECISION_EXCLUDE : DECISION_ASSIGN;
 			return apply_decision(ss, d);
 		} else if (d->branching_point == BRANCH_YES) {
-			if (backup_until < ss->num_decisions)
-				dbg_printf("skipping %s, %d < %d\n",
-					name->name, backup_until, ss->num_decisions);
-			else if (backjump_name != NULL && backjump_name != name)
-				dbg_printf("backjumping to find new assign candidate for %s\n",
-					backjump_name->name);
+			dbg_printf("skipping %s, %d < %d\n",
+				name->name, backup_until, ss->num_decisions);
 		}
-
-		/* Back jump to find assign candidate for this name */
-		if (name->ss.backjump_enabled && backjump_name == NULL)
-			backjump_name = name;
 
 		/* When undoing the initial "exclude none" decision, check if
 		 * we can backjump. */
 		if (d->has_package == 0 && !d->found_solution) {
-			if (backjump_name == name) {
-				d->name->ss.backjump_enabled = 0;
-				backjump_name = NULL;
-			}
 			if (d->backup_until && d->backup_until < backup_until) {
 				backup_until = d->backup_until;
 				/* We can't backtrack over the immediate
@@ -1093,7 +1074,6 @@ static void undo_constraint(struct apk_solver_state *ss, struct apk_dependency *
 				ps0->conflicts--;
 			else
 				ps0->unsatisfied--;
-			pkg0->name->ss.backjump_enabled = 0;
 			dbg_printf(PKG_VER_FMT ": conflicts-- -> %d\n",
 				   PKG_VER_PRINTF(pkg0),
 				   ps0->conflicts);
@@ -1144,7 +1124,6 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 			return push_decision(ss, name, NULL, DECISION_EXCLUDE, BRANCH_NO, FALSE);
 		}
 
-		name->ss.backjump_enabled = 0;
 		return push_decision(ss, name, NULL, DECISION_EXCLUDE, BRANCH_YES, FALSE);
 	}
 
@@ -1200,7 +1179,6 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 
 	/* no options left */
 	if (options == 0) {
-		name->ss.backjump_enabled = 1;
 		if (name->ss.none_excluded) {
 			dbg_printf("reconsider_name: %s: no options pruning branch\n",
 				name->name);
@@ -1212,7 +1190,6 @@ static int reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	} else if (options == 1 && score_locked && name->ss.none_excluded && name == next_p->pkg->name) {
 		dbg_printf("reconsider_name: %s: only one choice left with known score, locking.\n",
 			name->name);
-		name->ss.backjump_enabled = 1;
 		return push_decision(ss, name, next_p->pkg, DECISION_ASSIGN, BRANCH_NO, FALSE);
 	}
 
@@ -1290,7 +1267,6 @@ static int expand_branch(struct apk_solver_state *ss)
 			primary_decision = DECISION_ASSIGN;
 		else
 			primary_decision = DECISION_EXCLUDE;
-		name->ss.backjump_enabled = 0;
 		return push_decision(ss, name, NULL, primary_decision, BRANCH_YES, FALSE);
 	}
 
@@ -1362,7 +1338,6 @@ static void record_solution(struct apk_solver_state *ss)
 		unsigned short pinning;
 		unsigned int repos;
 
-		name->ss.backjump_enabled = 0;
 		d->found_solution = 1;
 
 		if (pkg == NULL) {
