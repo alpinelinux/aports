@@ -2,6 +2,7 @@
 
 install_alpine() {
     rootfs="$1"
+    shift
     mkdir -p "$rootfs"/etc/apk || return 1
     cp -r ${keys_dir:-/etc/apk/keys} "$rootfs"/etc/apk/
     if [ -n "$repository" ]; then
@@ -9,7 +10,11 @@ install_alpine() {
     else
         cp /etc/apk/repositories "$rootfs"/etc/apk/repositories || return 1
     fi
-    ${APK:-apk} add -U --initdb --root $rootfs alpine-base
+    opt_arch=
+    if [ -n "$apk_arch" ]; then
+        opt_arch="--arch $apk_arch"
+    fi
+    ${APK:-apk} add -U --initdb --root $rootfs $opt_arch "$@" alpine-base
 }
 
 configure_alpine() {
@@ -68,22 +73,45 @@ copy_configuration() {
 
     grep -q "^lxc.rootfs" $path/config 2>/dev/null \
         || echo "lxc.rootfs = $rootfs" >> $path/config
+    if [ -n "$lxc_arch" ]; then
+        echo "lxc.arch = $lxc_arch" >> $path/config
+    fi
+
+    lxc_network_link_line="# lxc.network.link = br0"
+    for br in lxcbr0 virbr0 br0; do
+        if [ -d /sys/class/net/$br/bridge ]; then
+            lxc_network_link_line="lxc.network.link = $br"
+            break
+        fi
+    done
+
+    if ! grep -q "^lxc.network.type" $path/config 2>/dev/null; then
+        cat <<EOF >> $path/config
+lxc.network.type = veth
+$lxc_network_link_line
+lxc.network.flags = up
+EOF
+    fi
+
+    # if there is exactly one veth network entry, make sure it has an
+    # associated mac address.
+    nics=$(grep -e '^lxc\.network\.type[ \t]*=[ \t]*veth' $path/config | wc -l)
+    if [ "$nics" -eq 1 ] && ! grep -q "^lxc.network.hwaddr" $path/config; then
+        # see http://sourceforge.net/tracker/?func=detail&aid=3411497&group_id=163076&atid=826303
+        hwaddr="fe:$(dd if=/dev/urandom bs=8 count=1 2>/dev/null |od -t x8 | \
+                      head -1 |awk '{print $2}' | cut -c1-10 |\
+                      sed 's/\(..\)/\1:/g; s/.$//')"
+        echo "lxc.network.hwaddr = $hwaddr" >> $path/config
+    fi
+
     cat <<EOF >> $path/config
+
 lxc.tty = 4
 lxc.pts = 1024
 lxc.utsname = $hostname
 
 # When using LXC with apparmor, uncomment the next line to run unconfined:
 #lxc.aa_profile = unconfined
-
-# network interface
-#lxc.network.name = eth0
-lxc.network.type = veth
-lxc.network.flags = up
-# enable for bridging
-#lxc.network.link = br0
-#lxc.network.ipv4 = n.n.n.n
-#lxc.network.ipv4.gateway = auto
 
 # devices
 lxc.cgroup.devices.deny = a
@@ -119,7 +147,10 @@ die() {
 }
 
 usage() {
-    echo "Usage: $(basename $0) [-h|--help] -p|--path <path> -n|--name <name>" >&2
+    cat >&2 <<EOF
+Usage: $(basename $0) [-h|--help] [-r|--repository <url>] [-a|--arch <arch>]
+                   -p|--path <path> -n|--name <name> [PKG...]
+EOF
 }
 
 usage_err() {
@@ -136,41 +167,47 @@ optarg_check() {
 default_path=/var/lib/lxc
 
 while [ $# -gt 0 ]; do
-        opt="$1"
-        shift
-        case "$opt" in
-        -h|--help)
+    opt="$1"
+    shift
+    case "$opt" in
+    -h|--help)
         usage
         exit 0
         ;;
-        -n|--name)
+    -n|--name)
         optarg_check $opt "$1"
         name=$1
         shift
         ;;
-        -p|--path)
+    -p|--path)
         optarg_check $opt "$1"
         path=$1
         shift
         ;;
-            --)
+    -r|--repository)
+        optarg_check $opt "$1"
+        repository=$1
+        shift
+	;;
+    -a|--arch)
+        optarg_check $opt "$1"
+        arch=$1
+        shift
+	;;
+    --)
         break;;
-        --*=*)
-            # split --myopt=foo=bar into --myopt foo=bar
-            set -- ${opt%=*} ${opt#*=} "$@"
+    --*=*)
+        # split --myopt=foo=bar into --myopt foo=bar
+        set -- ${opt%=*} ${opt#*=} "$@"
         ;;
-        -?)
+    -?)
         usage_err "unknown option '$opt'"
         ;;
-        -*)
+    -*)
         # split opts -abc into -a -b -c
         set -- $(echo "${opt#-}" | sed 's/\(.\)/ -\1/g') "$@"
         ;;
-            *)
-        usage
-        exit 1
-        ;;
-        esac
+    esac
 done
 
 
@@ -185,6 +222,18 @@ if [ -z "$rootfs" ]; then
     rootfs="${path}/rootfs"
 fi
 
-install_alpine "$rootfs" || die "Failed to install rootfs for $name"
+lxc_arch=$arch
+apk_arch=$arch
+
+case "$arch" in
+	i[3-6]86)
+		apk_arch=x86;;
+	x86)
+		lxc_arch=i686;;
+	x86_64|"") ;;
+	*)	die "unsupported architecture: $arch";;
+esac
+
+install_alpine "$rootfs" "$@" || die "Failed to install rootfs for $name"
 configure_alpine "$rootfs" "$name" || die "Failed to configure $name"
 copy_configuration "$path" "$rootfs" "$name"
