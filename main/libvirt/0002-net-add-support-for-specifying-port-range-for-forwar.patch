@@ -1,0 +1,379 @@
+From acca897f2d0631e2acd4c5c53fd57a4d0a3eb712 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Mon, 11 Feb 2013 10:08:56 +0100
+Subject: [PATCH 2/2] net: add support for specifying port range for forward
+ mode nat
+
+Let users set the port range to be used for forward mode NAT:
+
+...
+  <forward mode='nat'>
+    <nat>
+      <port start='1024' end='65535'/>
+    </nat>
+  </forward>
+...
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ docs/formatnetwork.html.in  | 21 ++++++++++++++---
+ src/conf/network_conf.c     | 57 +++++++++++++++++++++++++++++++++++++++------
+ src/conf/network_conf.h     |  3 ++-
+ src/network/bridge_driver.c | 16 +++++++++++++
+ src/util/viriptables.c      | 39 ++++++++++++++++++++++++-------
+ src/util/viriptables.h      |  4 ++++
+ 6 files changed, 120 insertions(+), 20 deletions(-)
+
+diff --git a/docs/formatnetwork.html.in b/docs/formatnetwork.html.in
+index 5fbd0a9..adb5bb9 100644
+--- a/docs/formatnetwork.html.in
++++ b/docs/formatnetwork.html.in
+@@ -138,9 +138,11 @@
+             0.4.2</span>
+ 
+             <p><span class="since">Since 1.0.3</span> it is possible to
+-            specify a public IPv4 address range to be used for the NAT by
+-            using the <code>&lt;nat&gt;</code> and
+-            <code>&lt;address&gt;</code> subelements.
++            specify a public IPv4 address and port range to be used for
++            the NAT by using the <code>&lt;nat&gt;</code> subelement.
++            The address range is set with the <code>&lt;address&gt;</code>
++            subelements and <code>start</code> and <code>stop</code>
++            attributes:
+             <pre>
+ ...
+   &lt;forward mode='nat'&gt;
+@@ -154,6 +156,19 @@
+             <code>start</code> and <code>end</code> attributes to
+             the same value.
+             </p>
++            <p>
++            The port range to be used for the <code>&lt;nat&gt;</code> can
++            be set via the subelement <code>&lt;port&gt;</code>:
++            <pre>
++...
++  &lt;forward mode='nat'&gt;
++    &lt;nat&gt;
++      &lt;port start='500' end='1000'/&gt;
++    &lt;/nat&gt;
++  &lt;/forward&gt;
++...
++            </pre>
++            </p>
+           </dd>
+ 
+           <dt><code>route</code></dt>
+diff --git a/src/conf/network_conf.c b/src/conf/network_conf.c
+index 61d086a..5725800 100644
+--- a/src/conf/network_conf.c
++++ b/src/conf/network_conf.c
+@@ -1332,7 +1332,8 @@ virNetworkForwardNatDefParseXML(const char *networkName,
+ {
+     int ret = -1;
+     xmlNodePtr *natAddrNodes = NULL;
+-    int nNatAddrs;
++    xmlNodePtr *natPortNodes = NULL;
++    int nNatAddrs, nNatPorts;
+     char *addr_start = NULL;
+     char *addr_end = NULL;
+     xmlNodePtr save = ctxt->node;
+@@ -1389,6 +1390,36 @@ virNetworkForwardNatDefParseXML(const char *networkName,
+         goto cleanup;
+     }
+ 
++    /* ports for SNAT and MASQUERADE */
++    nNatPorts = virXPathNodeSet("./port", ctxt, &natPortNodes);
++    if (nNatPorts < 0) {
++        virReportError(VIR_ERR_XML_ERROR,
++                       _("invalid <port> element found in <forward> of "
++                         "network %s"), networkName);
++        goto cleanup;
++    } else if (nNatPorts > 1) {
++        virReportError(VIR_ERR_XML_ERROR,
++                       _("Only one <port> element is allowed in <nat> in "
++                         "<forward> in network %s"), networkName);
++        goto cleanup;
++    } else if (nNatPorts == 1) {
++        if (virXPathUInt("string(./port[1]/@start)", ctxt, &def->port_start) < 0
++            || def->port_start > 65535) {
++
++            virReportError(VIR_ERR_XML_DETAIL,
++                           _("Missing or invalid 'start' attribute in <port> "
++                             "in <nat> in <forward> in network %s"),
++                             networkName);
++            goto cleanup;
++        }
++        if (virXPathUInt("string(./port[1]/@end)", ctxt, &def->port_end) < 0
++            || def->port_end > 65535 || def->port_end < def->port_start) {
++            virReportError(VIR_ERR_XML_DETAIL,
++                           _("Missing or invalid 'end' attribute in <port> in "
++                             "<nat> in <forward> in network %s"), networkName);
++            goto cleanup;
++        }
++    }
+     ret = 0;
+ 
+ cleanup:
+@@ -2179,6 +2210,7 @@ virNatDefFormat(virBufferPtr buf,
+     char *addr_start = NULL;
+     char *addr_end = NULL;
+     int ret = -1;
++    int longdef;
+ 
+     if (VIR_SOCKET_ADDR_VALID(&fwd->addr_start)) {
+         addr_start = virSocketAddrFormat(&fwd->addr_start);
+@@ -2192,16 +2224,25 @@ virNatDefFormat(virBufferPtr buf,
+             goto cleanup;
+     }
+ 
+-    if (!addr_end && !addr_start)
++    if (!addr_start && !addr_end && !fwd->port_start && !fwd->port_end)
+         return 0;
+ 
+     virBufferAddLit(buf, "<nat>\n");
+     virBufferAdjustIndent(buf, 2);
+ 
+-    virBufferAsprintf(buf, "<address start='%s'", addr_start);
+-    if (addr_end)
+-        virBufferAsprintf(buf, " end='%s'", addr_end);
+-    virBufferAsprintf(buf, "/>\n");
++    if (addr_start) {
++        virBufferAsprintf(buf, "<address start='%s'", addr_start);
++        if (addr_end)
++            virBufferAsprintf(buf, " end='%s'", addr_end);
++        virBufferAsprintf(buf, "/>\n");
++    }
++
++    if (fwd->port_start || fwd->port_end) {
++        virBufferAsprintf(buf, "<port start='%d'", fwd->port_start);
++        if (fwd->port_end)
++            virBufferAsprintf(buf, " end='%d'", fwd->port_end);
++        virBufferAsprintf(buf, "/>\n");
++    }
+ 
+     virBufferAdjustIndent(buf, -2);
+     virBufferAsprintf(buf, "</nat>\n");
+@@ -2259,7 +2300,9 @@ virNetworkDefFormatInternal(virBufferPtr buf,
+         }
+         shortforward = !(def->forward.nifs || def->forward.npfs
+                          || VIR_SOCKET_ADDR_VALID(&def->forward.addr_start)
+-                         || VIR_SOCKET_ADDR_VALID(&def->forward.addr_end));
++                         || VIR_SOCKET_ADDR_VALID(&def->forward.addr_end)
++                         || def->forward.port_start
++                         || def->forward.port_end);
+         virBufferAsprintf(buf, "%s>\n", shortforward ? "/" : "");
+         virBufferAdjustIndent(buf, 2);
+ 
+diff --git a/src/conf/network_conf.h b/src/conf/network_conf.h
+index 1a598e3..7df2426 100644
+--- a/src/conf/network_conf.h
++++ b/src/conf/network_conf.h
+@@ -175,8 +175,9 @@ struct _virNetworkForwardDef {
+     size_t nifs;
+     virNetworkForwardIfDefPtr ifs;
+ 
+-    /* adresses for SNAT */
++    /* ranges for NAT */
+     virSocketAddr addr_start, addr_end;
++    unsigned int port_start, port_end;
+ };
+ 
+ typedef struct _virPortGroupDef virPortGroupDef;
+diff --git a/src/network/bridge_driver.c b/src/network/bridge_driver.c
+index 6d74c1f..5c83085 100644
+--- a/src/network/bridge_driver.c
++++ b/src/network/bridge_driver.c
+@@ -1589,6 +1589,8 @@ networkAddMasqueradingIptablesRules(struct network_driver *driver,
+                                      forwardIf,
+                                      &network->def->forward.addr_start,
+                                      &network->def->forward.addr_end,
++                                     network->def->forward.port_start,
++                                     network->def->forward.port_end,
+                                      NULL) < 0) {
+         virReportError(VIR_ERR_SYSTEM_ERROR,
+                        forwardIf ?
+@@ -1605,6 +1607,8 @@ networkAddMasqueradingIptablesRules(struct network_driver *driver,
+                                      forwardIf,
+                                      &network->def->forward.addr_start,
+                                      &network->def->forward.addr_end,
++                                     network->def->forward.port_start,
++                                     network->def->forward.port_end,
+                                      "udp") < 0) {
+         virReportError(VIR_ERR_SYSTEM_ERROR,
+                        forwardIf ?
+@@ -1621,6 +1625,8 @@ networkAddMasqueradingIptablesRules(struct network_driver *driver,
+                                      forwardIf,
+                                      &network->def->forward.addr_start,
+                                      &network->def->forward.addr_end,
++                                     network->def->forward.port_start,
++                                     network->def->forward.port_end,
+                                      "tcp") < 0) {
+         virReportError(VIR_ERR_SYSTEM_ERROR,
+                        forwardIf ?
+@@ -1639,6 +1645,8 @@ networkAddMasqueradingIptablesRules(struct network_driver *driver,
+                                     forwardIf,
+                                     &network->def->forward.addr_start,
+                                     &network->def->forward.addr_end,
++                                    network->def->forward.port_start,
++                                    network->def->forward.port_end,
+                                     "udp");
+  masqerr4:
+     iptablesRemoveForwardMasquerade(driver->iptables,
+@@ -1647,6 +1655,8 @@ networkAddMasqueradingIptablesRules(struct network_driver *driver,
+                                     forwardIf,
+                                     &network->def->forward.addr_start,
+                                     &network->def->forward.addr_end,
++                                    network->def->forward.port_start,
++                                    network->def->forward.port_end,
+                                     NULL);
+  masqerr3:
+     iptablesRemoveForwardAllowRelatedIn(driver->iptables,
+@@ -1679,6 +1689,8 @@ networkRemoveMasqueradingIptablesRules(struct network_driver *driver,
+                                         forwardIf,
+                                         &network->def->forward.addr_start,
+                                         &network->def->forward.addr_end,
++                                        network->def->forward.port_start,
++                                        network->def->forward.port_end,
+                                         "tcp");
+         iptablesRemoveForwardMasquerade(driver->iptables,
+                                         &ipdef->address,
+@@ -1686,6 +1698,8 @@ networkRemoveMasqueradingIptablesRules(struct network_driver *driver,
+                                         forwardIf,
+                                         &network->def->forward.addr_start,
+                                         &network->def->forward.addr_end,
++                                        network->def->forward.port_start,
++                                        network->def->forward.port_end,
+                                         "udp");
+         iptablesRemoveForwardMasquerade(driver->iptables,
+                                         &ipdef->address,
+@@ -1693,6 +1707,8 @@ networkRemoveMasqueradingIptablesRules(struct network_driver *driver,
+                                         forwardIf,
+                                         &network->def->forward.addr_start,
+                                         &network->def->forward.addr_end,
++                                        network->def->forward.port_start,
++                                        network->def->forward.port_end,
+                                         NULL);
+ 
+         iptablesRemoveForwardAllowRelatedIn(driver->iptables,
+diff --git a/src/util/viriptables.c b/src/util/viriptables.c
+index 3f0dcf0..aa48520 100644
+--- a/src/util/viriptables.c
++++ b/src/util/viriptables.c
+@@ -807,6 +807,8 @@ iptablesForwardMasquerade(iptablesContext *ctx,
+                           const char *physdev,
+                           virSocketAddr *addr_start,
+                           virSocketAddr *addr_end,
++                          unsigned int port_start,
++                          unsigned int port_end,
+                           const char *protocol,
+                           int action)
+ {
+@@ -815,6 +817,7 @@ iptablesForwardMasquerade(iptablesContext *ctx,
+     char *addr_start_str = NULL;
+     char *addr_end_str = NULL;
+     virCommandPtr cmd = NULL;
++    char port_str[sizeof(":65535-65535")] = "";
+ 
+     if (!(networkstr = iptablesFormatNetwork(netaddr, prefix)))
+         return -1;
+@@ -849,19 +852,27 @@ iptablesForwardMasquerade(iptablesContext *ctx,
+     if (physdev && physdev[0])
+         virCommandAddArgList(cmd, "--out-interface", physdev, NULL);
+ 
++    if (protocol && protocol[0]) {
++        if (port_start == 0 && port_end == 0) {
++            port_start = 1024;
++            port_end = 65535;
++        }
++
++        if (port_start < port_end && port_end < 65536)
++            snprintf(port_str, sizeof(port_str), ":%d-%d",
++                     port_start, port_end);
++    }
++
+     /* Use --jump SNAT if public addr is specified */
+     if (addr_start_str && addr_start_str[0]) {
+         char tmpstr[sizeof("123.123.123.123-123.123.123.123:65535-65535")];
+-        const char *portstr = "";
+ 
+         memset(tmpstr, 0, sizeof(tmpstr));
+-        if (protocol && protocol[0])
+-            portstr = ":1024-65535";
+         if (addr_end_str && addr_end_str[0]) {
+             snprintf(tmpstr, sizeof(tmpstr), "%s-%s%s",
+-                     addr_start_str, addr_end_str, portstr);
++                     addr_start_str, addr_end_str, port_str);
+         } else {
+-            snprintf(tmpstr, sizeof(tmpstr), "%s%s", addr_start_str, portstr);
++            snprintf(tmpstr, sizeof(tmpstr), "%s%s", addr_start_str, port_str);
+         }
+ 
+         virCommandAddArgList(cmd, "--jump", "SNAT",
+@@ -869,8 +880,8 @@ iptablesForwardMasquerade(iptablesContext *ctx,
+      } else {
+          virCommandAddArgList(cmd, "--jump", "MASQUERADE", NULL);
+ 
+-         if (protocol && protocol[0])
+-             virCommandAddArgList(cmd, "--to-ports", "1024-65535", NULL);
++         if (port_str[0])
++             virCommandAddArgList(cmd, "--to-ports", &port_str[1], NULL);
+      }
+ 
+     ret = iptablesCommandRunAndFree(cmd);
+@@ -899,9 +910,14 @@ iptablesAddForwardMasquerade(iptablesContext *ctx,
+                              const char *physdev,
+                              virSocketAddr *addr_start,
+                              virSocketAddr *addr_end,
++                             unsigned int port_start,
++                             unsigned int port_end,
+                              const char *protocol)
+ {
+-    return iptablesForwardMasquerade(ctx, netaddr, prefix, physdev, addr_start, addr_end, protocol, ADD);
++    return iptablesForwardMasquerade(ctx, netaddr, prefix, physdev,
++                                     addr_start, addr_end,
++                                     port_start, port_end,
++                                     protocol, ADD);
+ }
+ 
+ /**
+@@ -924,9 +940,14 @@ iptablesRemoveForwardMasquerade(iptablesContext *ctx,
+                                 const char *physdev,
+                                 virSocketAddr *addr_start,
+                                 virSocketAddr *addr_end,
++                                unsigned int port_start,
++                                unsigned int port_end,
+                                 const char *protocol)
+ {
+-    return iptablesForwardMasquerade(ctx, netaddr, prefix, physdev, addr_start, addr_end, protocol, REMOVE);
++    return iptablesForwardMasquerade(ctx, netaddr, prefix, physdev,
++                                     addr_start, addr_end,
++                                     port_start, port_end,
++                                     protocol, REMOVE);
+ }
+ 
+ 
+diff --git a/src/util/viriptables.h b/src/util/viriptables.h
+index 4241380..f2db368 100644
+--- a/src/util/viriptables.h
++++ b/src/util/viriptables.h
+@@ -109,6 +109,8 @@ int              iptablesAddForwardMasquerade    (iptablesContext *ctx,
+                                                   const char *physdev,
+                                                   virSocketAddr *addr_start,
+                                                   virSocketAddr *addr_end,
++                                                  unsigned int port_start,
++                                                  unsigned int port_end,
+                                                   const char *protocol);
+ int              iptablesRemoveForwardMasquerade (iptablesContext *ctx,
+                                                   virSocketAddr *netaddr,
+@@ -116,6 +118,8 @@ int              iptablesRemoveForwardMasquerade (iptablesContext *ctx,
+                                                   const char *physdev,
+                                                   virSocketAddr *addr_start,
+                                                   virSocketAddr *addr_end,
++                                                  unsigned int port_start,
++                                                  unsigned int port_end,
+                                                   const char *protocol);
+ int              iptablesAddOutputFixUdpChecksum (iptablesContext *ctx,
+                                                   const char *iface,
+-- 
+1.8.1.2
+
