@@ -125,7 +125,7 @@ end
 
 function is_remote(url)
 	local _,pref
-	for _,pref in pairs{ "^http://", "^ftp://", "^https://" } do
+	for _,pref in pairs{ "^http://", "^ftp://", "^https://", ".*::.*" } do
 		if string.match(url, pref) then
 			return true
 		end
