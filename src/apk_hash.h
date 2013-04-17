@@ -12,7 +12,7 @@
 #ifndef APK_HASH_H
 #define APK_HASH_H
 
-#include <malloc.h>
+#include <stdlib.h>
 #include "apk_defines.h"
 #include "apk_blob.h"
 

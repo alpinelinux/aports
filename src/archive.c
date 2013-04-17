@@ -15,7 +15,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <utime.h>
-#include <malloc.h>
 #include <string.h>
 #include <unistd.h>
 #include <sysexits.h>
@@ -23,6 +22,7 @@
 #include <sys/stat.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "apk_defines.h"
 #include "apk_print.h"
