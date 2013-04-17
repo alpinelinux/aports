@@ -13,6 +13,7 @@
 #define APK_HASH_H
 
 #include <stdlib.h>
+#include <stddef.h>
 #include "apk_defines.h"
 #include "apk_blob.h"
 
