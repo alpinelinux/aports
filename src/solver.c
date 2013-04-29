@@ -129,11 +129,15 @@ static solver_result_t push_decision(struct apk_solver_state *ss,
 				     int branching_point,
 				     int topology_position);
 
-#ifdef DEBUG_CHECKS
 static void addscore(struct apk_score *a, struct apk_score *b)
 {
 	struct apk_score orig = *a;
-	a->score += b->score;
+
+	a->unsatisfied			+= b->unsatisfied;
+	a->non_preferred_actions	+= b->non_preferred_actions;
+	a->non_preferred_pinnings	+= b->non_preferred_pinnings;
+	a->preference			+= b->preference;
+
 	ASSERT(a->unsatisfied >= orig.unsatisfied, "Unsatisfied overflow");
 	ASSERT(a->non_preferred_actions >= orig.non_preferred_actions, "Preferred action overflow");
 	ASSERT(a->non_preferred_pinnings >= orig.non_preferred_pinnings, "Preferred pinning overflow");
@@ -143,38 +147,36 @@ static void addscore(struct apk_score *a, struct apk_score *b)
 static void subscore(struct apk_score *a, struct apk_score *b)
 {
 	struct apk_score orig = *a;
-	a->score -= b->score;
+
+	a->unsatisfied			-= b->unsatisfied;
+	a->non_preferred_actions	-= b->non_preferred_actions;
+	a->non_preferred_pinnings	-= b->non_preferred_pinnings;
+	a->preference			-= b->preference;
+
 	ASSERT(a->unsatisfied <= orig.unsatisfied, "Unsatisfied underflow");
 	ASSERT(a->non_preferred_actions <= orig.non_preferred_actions, "Preferred action underflow");
 	ASSERT(a->non_preferred_pinnings <= orig.non_preferred_pinnings, "Preferred pinning overflow");
 	ASSERT(a->preference <= orig.preference, "Preference underflow");
 }
-#else
-static void addscore(struct apk_score *a, struct apk_score *b)
-{
-	a->score += b->score;
-}
-
-static void subscore(struct apk_score *a, struct apk_score *b)
-{
-	a->score -= b->score;
-}
-#endif
 
 static inline int cmpscore(struct apk_score *a, struct apk_score *b)
 {
-	if (a->score < b->score) return -1;
-	if (a->score > b->score) return 1;
+	if (a->unsatisfied != b->unsatisfied)
+		return a->unsatisfied < b->unsatisfied ? -1 : 1;
+	if (a->non_preferred_actions != b->non_preferred_actions)
+		return a->non_preferred_actions < b->non_preferred_actions ? -1 : 1;
+	if (a->non_preferred_pinnings != b->non_preferred_pinnings)
+		return a->non_preferred_pinnings < b->non_preferred_pinnings ? -1 : 1;
+	if (a->preference != b->preference)
+		return a->preference < b->preference ? -1 : 1;
 	return 0;
 }
 
 static inline int cmpscore2(struct apk_score *a1, struct apk_score *a2, struct apk_score *b)
 {
-	struct apk_score a;
-	a.score = a1->score + a2->score;
-	if (a.score < b->score) return -1;
-	if (a.score > b->score) return 1;
-	return 0;
+	struct apk_score a = *a1;
+	addscore(&a, a2);
+	return cmpscore(&a, b);
 }
 
 static struct apk_package_state *pkg_to_ps(struct apk_package *pkg)
@@ -1985,6 +1987,10 @@ void apk_solver_print_errors(struct apk_database *db,
 	struct apk_name_array *names;
 	char pkgtext[256];
 	int i, j;
+
+	/* negative for hard failure without partial solution */
+	if (unsatisfiable <= 0)
+		return;
 
 	apk_name_array_init(&names);
 	apk_error("%d unsatisfiable dependencies:", unsatisfiable);
