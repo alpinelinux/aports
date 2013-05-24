@@ -1,0 +1,134 @@
+From a89b1ad3377bfef9bab52f15f98b00f6540d531a Mon Sep 17 00:00:00 2001
+From: Alan Coopersmith <alan.coopersmith@oracle.com>
+Date: Sat, 13 Apr 2013 17:40:24 -0700
+Subject: [PATCH 2/8] Improve error handling in XF86VidModeGetMonitor()
+
+Ensure that when we return an error we unlock the display first, and
+NULL out any pointers we freed in error cleanup.
+
+Instead of adding these fixes to every error check, instead combine
+the error handling cleanup into a single copy.
+
+Signed-off-by: Alan Coopersmith <alan.coopersmith@oracle.com>
+Reviewed-by: Peter Hutterer <peter.hutterer@who-t.net>
+---
+ src/XF86VMode.c | 82 +++++++++++++++++++++++++++------------------------------
+ 1 file changed, 39 insertions(+), 43 deletions(-)
+
+diff --git a/src/XF86VMode.c b/src/XF86VMode.c
+index c0e50e6..165f8ba 100644
+--- a/src/XF86VMode.c
++++ b/src/XF86VMode.c
+@@ -856,6 +856,7 @@ XF86VidModeGetMonitor(Display* dpy, int screen, XF86VidModeMonitor* monitor)
+     xXF86VidModeGetMonitorReq *req;
+     CARD32 syncrange;
+     int i;
++    Bool result = True;
+ 
+     XF86VidModeCheckExtension (dpy, info, False);
+ 
+@@ -875,63 +876,58 @@ XF86VidModeGetMonitor(Display* dpy, int screen, XF86VidModeMonitor* monitor)
+     monitor->bandwidth = (float)rep.bandwidth / 1e6;
+ #endif
+     if (rep.vendorLength) {
+-	if (!(monitor->vendor = (char *)Xcalloc(rep.vendorLength + 1, 1))) {
+-	    _XEatData(dpy, (rep.nhsync + rep.nvsync) * 4 +
+-		      ((rep.vendorLength+3) & ~3) + ((rep.modelLength+3) & ~3));
+-	    return False;
+-	}
++	monitor->vendor = Xcalloc(rep.vendorLength + 1, 1);
++	if (monitor->vendor == NULL)
++	    result = False;
+     } else {
+ 	monitor->vendor = NULL;
+     }
+-    if (rep.modelLength) {
+-	if (!(monitor->model = Xcalloc(rep.modelLength + 1, 1))) {
+-	    _XEatData(dpy, (rep.nhsync + rep.nvsync) * 4 +
+-		      ((rep.vendorLength+3) & ~3) + ((rep.modelLength+3) & ~3));
+-	    if (monitor->vendor)
+-		Xfree(monitor->vendor);
+-	    return False;
+-	}
++    if (result && rep.modelLength) {
++	monitor->model = Xcalloc(rep.modelLength + 1, 1);
++	if (monitor->model == NULL)
++	    result = False;
+     } else {
+ 	monitor->model = NULL;
+     }
+-    if (!(monitor->hsync = Xcalloc(rep.nhsync, sizeof(XF86VidModeSyncRange)))) {
+-	_XEatData(dpy, (rep.nhsync + rep.nvsync) * 4 +
+-		  ((rep.vendorLength+3) & ~3) + ((rep.modelLength+3) & ~3));
+-
+-	if (monitor->vendor)
+-	    Xfree(monitor->vendor);
+-	if (monitor->model)
+-	    Xfree(monitor->model);
+-	return False;
++    if (result) {
++	monitor->hsync = Xcalloc(rep.nhsync, sizeof(XF86VidModeSyncRange));
++	monitor->vsync = Xcalloc(rep.nvsync, sizeof(XF86VidModeSyncRange));
++	if ((monitor->hsync == NULL) || (monitor->vsync == NULL))
++	    result = False;
++    } else {
++	monitor->hsync = monitor->vsync = NULL;
+     }
+-    if (!(monitor->vsync = Xcalloc(rep.nvsync, sizeof(XF86VidModeSyncRange)))) {
++    if (result == False) {
+ 	_XEatData(dpy, (rep.nhsync + rep.nvsync) * 4 +
+ 		  ((rep.vendorLength+3) & ~3) + ((rep.modelLength+3) & ~3));
+-	if (monitor->vendor)
+-	    Xfree(monitor->vendor);
+-	if (monitor->model)
+-	    Xfree(monitor->model);
++	Xfree(monitor->vendor);
++	monitor->vendor = NULL;
++	Xfree(monitor->model);
++	monitor->model = NULL;
+ 	Xfree(monitor->hsync);
+-	return False;
+-    }
+-    for (i = 0; i < rep.nhsync; i++) {
+-	_XRead(dpy, (char *)&syncrange, 4);
+-	monitor->hsync[i].lo = (float)(syncrange & 0xFFFF) / 100.0;
+-	monitor->hsync[i].hi = (float)(syncrange >> 16) / 100.0;
++	monitor->hsync = NULL;
++	Xfree(monitor->vsync);
++	monitor->vsync = NULL;
+     }
+-    for (i = 0; i < rep.nvsync; i++) {
+-	_XRead(dpy, (char *)&syncrange, 4);
+-	monitor->vsync[i].lo = (float)(syncrange & 0xFFFF) / 100.0;
+-	monitor->vsync[i].hi = (float)(syncrange >> 16) / 100.0;
++    else {
++	for (i = 0; i < rep.nhsync; i++) {
++	    _XRead(dpy, (char *)&syncrange, 4);
++	    monitor->hsync[i].lo = (float)(syncrange & 0xFFFF) / 100.0;
++	    monitor->hsync[i].hi = (float)(syncrange >> 16) / 100.0;
++	}
++	for (i = 0; i < rep.nvsync; i++) {
++	    _XRead(dpy, (char *)&syncrange, 4);
++	    monitor->vsync[i].lo = (float)(syncrange & 0xFFFF) / 100.0;
++	    monitor->vsync[i].hi = (float)(syncrange >> 16) / 100.0;
++	}
++	if (rep.vendorLength)
++	    _XReadPad(dpy, monitor->vendor, rep.vendorLength);
++	if (rep.modelLength)
++	    _XReadPad(dpy, monitor->model, rep.modelLength);
+     }
+-    if (rep.vendorLength)
+-	_XReadPad(dpy, monitor->vendor, rep.vendorLength);
+-    if (rep.modelLength)
+-	_XReadPad(dpy, monitor->model, rep.modelLength);
+-
+     UnlockDisplay(dpy);
+     SyncHandle();
+-    return True;
++    return result;
+ }
+ 
+ Bool
+-- 
+1.8.2.3
+
