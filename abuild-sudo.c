@@ -49,7 +49,6 @@ int is_in_group(gid_t group)
 	free(buf);
 	return i < ngroups;
 }
-	
 
 int main(int argc, const char *argv[])
 {
@@ -77,5 +76,6 @@ int main(int argc, const char *argv[])
 	/* set our uid to root soo bbsuid --install works */
 	setuid(0);
 	execv(path, (char * const*)argv);
+	perror(path);
 	return 1;
 }
