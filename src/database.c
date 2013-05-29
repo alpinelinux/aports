@@ -263,7 +263,8 @@ void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir, int allow
 		dir->uid = (uid_t) -1;
 		dir->gid = (gid_t) -1;
 
-		unlinkat(db->root_fd, dir->name, AT_REMOVEDIR);
+		if (dir->namelen)
+			unlinkat(db->root_fd, dir->name, AT_REMOVEDIR);
 	} else if (dir->recalc_mode) {
 		/* Directory permissions need a reset. */
 		apk_db_dir_mkdir(db, dir);
@@ -1847,8 +1848,10 @@ struct apk_package *apk_db_get_file_owner(struct apk_database *db,
 	if (filename.len && filename.ptr[0] == '/')
 		filename.len--, filename.ptr++;
 
-	if (!apk_blob_rsplit(filename, '/', &key.dirname, &key.filename))
-		return NULL;
+	if (!apk_blob_rsplit(filename, '/', &key.dirname, &key.filename)) {
+		key.dirname = APK_BLOB_NULL;
+		key.filename = filename;
+	}
 
 	dbf = (struct apk_db_file *) apk_hash_get(&db->installed.files,
 						  APK_BLOB_BUF(&key));
@@ -2161,6 +2164,21 @@ static int read_info_line(void *_ctx, apk_blob_t line)
 	return 0;
 }
 
+static struct apk_db_dir_instance *apk_db_install_directory_entry(struct install_ctx * ctx, apk_blob_t dir)
+{
+	struct apk_database *db = ctx->db;
+	struct apk_package *pkg = ctx->pkg;
+	struct apk_installed_package *ipkg = pkg->ipkg;
+	struct apk_db_dir_instance *diri;
+
+	if (ctx->diri_node == NULL)
+		ctx->diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
+	ctx->diri = diri = apk_db_diri_new(db, pkg, dir, &ctx->diri_node);
+	ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
+
+	return diri;
+}
+
 static int apk_db_install_archive_entry(void *_ctx,
 					const struct apk_file_info *ae,
 					struct apk_istream *is)
@@ -2215,8 +2233,10 @@ static int apk_db_install_archive_entry(void *_ctx,
 	/* Installable entry */
 	ctx->current_file_size = apk_calc_installed_size(ae->size);
 	if (!S_ISDIR(ae->mode)) {
-		if (!apk_blob_rsplit(name, '/', &bdir, &bfile))
-			return 0;
+		if (!apk_blob_rsplit(name, '/', &bdir, &bfile)) {
+			bdir = APK_BLOB_NULL;
+			bfile = name;
+		}
 
 		if (bfile.len > 6 && memcmp(bfile.ptr, ".keep_", 6) == 0)
 			return 0;
@@ -2224,9 +2244,12 @@ static int apk_db_install_archive_entry(void *_ctx,
 		/* Make sure the file is part of the cached directory tree */
 		diri = find_diri(ipkg, bdir, diri, &ctx->file_diri_node);
 		if (diri == NULL) {
-			apk_error("%s: File '%*s' entry without directory entry.\n",
-				  pkg->name->name, name.len, name.ptr);
-			return -1;
+			if (!APK_BLOB_IS_NULL(bdir)) {
+				apk_error("%s: File '%*s' entry without directory entry.\n",
+					  pkg->name->name, name.len, name.ptr);
+				return -1;
+			}
+			diri = apk_db_install_directory_entry(ctx, bdir);
 		}
 
 		opkg = NULL;
@@ -2329,12 +2352,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 		if (name.ptr[name.len-1] == '/')
 			name.len--;
 
-		if (ctx->diri_node == NULL)
-			ctx->diri_node = hlist_tail_ptr(&ipkg->owned_dirs);
-		ctx->diri = diri = apk_db_diri_new(db, pkg, name,
-						   &ctx->diri_node);
-		ctx->file_diri_node = hlist_tail_ptr(&diri->owned_files);
-
+		diri = apk_db_install_directory_entry(ctx, name);
 		apk_db_diri_set(diri, ae->mode, ae->uid, ae->gid);
 		apk_db_dir_mkdir(db, diri->dir);
 	}
@@ -2360,8 +2378,10 @@ static void apk_db_purge_pkg(struct apk_database *db,
 			diri->dir->modified = 1;
 
 		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
-			snprintf(name, sizeof(name), "%s/%s%s",
-				 diri->dir->name, file->name, exten ?: "");
+			snprintf(name, sizeof(name),
+				 PKG_FILE_FMT "%s",
+				 PKG_FILE_PRINTF(diri->dir, file),
+				 exten ?: "");
 
 			key = (struct apk_db_file_hash_key) {
 				.dirname = APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen),
@@ -2406,10 +2426,10 @@ static void apk_db_migrate_files(struct apk_database *db,
 		dir->modified = 1;
 
 		hlist_for_each_entry_safe(file, fc, fn, &diri->owned_files, diri_files_list) {
-			snprintf(name, sizeof(name), "%s/%s",
-				 diri->dir->name, file->name);
-			snprintf(tmpname, sizeof(tmpname), "%s/%s.apk-new",
-				 diri->dir->name, file->name);
+			snprintf(name, sizeof(name), PKG_FILE_FMT,
+				 PKG_FILE_PRINTF(diri->dir, file));
+			snprintf(tmpname, sizeof(tmpname), PKG_FILE_FMT ".apk-new",
+				 PKG_FILE_PRINTF(diri->dir, file));
 
 			key = (struct apk_db_file_hash_key) {
 				.dirname = APK_BLOB_PTR_LEN(dir->name, dir->namelen),

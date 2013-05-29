@@ -71,6 +71,9 @@ struct apk_db_dir {
 	char name[];
 };
 
+#define PKG_FILE_FMT			"%s%s%s"
+#define PKG_FILE_PRINTF(dir,file)	(dir)->name, (dir)->namelen ? "/" : "", (file)->name
+
 struct apk_db_dir_instance {
 	struct hlist_node pkg_dirs_list;
 	struct hlist_head owned_files;
