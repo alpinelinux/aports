@@ -1156,15 +1156,18 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	}
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
-	if (APK_BLOB_IS_NULL(bbuf))
-		return -1;
+	if (APK_BLOB_IS_NULL(bbuf)) {
+		apk_error("Metadata for package " PKG_VER_FMT " is too long.",
+			  PKG_VER_PRINTF(info));
+		return -ENOBUFS;
+	}
 
 	bbuf = apk_blob_pushed(APK_BLOB_BUF(buf), bbuf);
 	if (os->write(os, bbuf.ptr, bbuf.len) != bbuf.len ||
 	    write_depends(os, "D:", info->depends) ||
 	    write_depends(os, "p:", info->provides) ||
 	    write_depends(os, "i:", info->install_if))
-		return -1;
+		return -EIO;
 
 	return 0;
 }

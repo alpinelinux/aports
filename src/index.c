@@ -9,6 +9,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -61,7 +62,7 @@ static int index_read_file(struct apk_database *db, struct index_ctx *ictx)
 	if (ictx->index == NULL)
 		return 0;
 	if (apk_file_get_info(AT_FDCWD, ictx->index, APK_CHECKSUM_NONE, &fi) < 0)
-		return -1;
+		return -EIO;
 	ictx->index_mtime = fi.mtime;
 
 	return apk_db_index_read_file(db, ictx->index, 0);
@@ -185,37 +186,41 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	if (ictx->method == APK_SIGN_GENERATE) {
 		struct apk_ostream *counter;
 
-		os = apk_ostream_gzip(os);
-
-		if (ictx->description != NULL) {
-			memset(&fi, 0, sizeof(fi));
-			fi.mode = 0644 | S_IFREG;
-			fi.name = "DESCRIPTION";
-			fi.size = strlen(ictx->description);
-			apk_tar_write_entry(os, &fi, ictx->description);
-		}
-
 		memset(&fi, 0, sizeof(fi));
 		fi.mode = 0644 | S_IFREG;
 		fi.name = "APKINDEX";
 		counter = apk_ostream_counter(&fi.size);
-		apk_db_index_write(db, counter);
+		r = apk_db_index_write(db, counter);
 		counter->close(counter);
-		apk_tar_write_entry(os, &fi, NULL);
-		total = apk_db_index_write(db, os);
-		apk_tar_write_padding(os, &fi);
 
-		apk_tar_write_entry(os, NULL, NULL);
+		if (r >= 0) {
+			os = apk_ostream_gzip(os);
+			if (ictx->description != NULL) {
+				struct apk_file_info fi_desc;
+				memset(&fi_desc, 0, sizeof(fi));
+				fi_desc.mode = 0644 | S_IFREG;
+				fi_desc.name = "DESCRIPTION";
+				fi_desc.size = strlen(ictx->description);
+				apk_tar_write_entry(os, &fi_desc, ictx->description);
+			}
+
+			apk_tar_write_entry(os, &fi, NULL);
+			r = apk_db_index_write(db, os);
+			apk_tar_write_padding(os, &fi);
+
+			apk_tar_write_entry(os, NULL, NULL);
+		}
 	} else {
-		total = apk_db_index_write(db, os);
+		r = apk_db_index_write(db, os);
 	}
 	os->close(os);
 
-	if (total < 0) {
+	if (r < 0) {
 		apk_error("Index generation failed: %s", apk_error_str(r));
-		return total;
+		return r;
 	}
 
+	total = r;
 	apk_hash_foreach(&db->available.names, warn_if_no_providers, &counts);
 
 	if (counts.unsatisfied != 0)

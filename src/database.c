@@ -874,11 +874,11 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 				apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
 				if (os->write(os, buf, bbuf.ptr - buf) != bbuf.ptr - buf)
-					return -1;
+					return -EIO;
 				bbuf = APK_BLOB_BUF(buf);
 			}
 			if (os->write(os, buf, bbuf.ptr - buf) != bbuf.ptr - buf)
-				return -1;
+				return -EIO;
 			bbuf = APK_BLOB_BUF(buf);
 		}
 		os->write(os, "\n", 1);
@@ -1101,7 +1101,7 @@ static int write_index_entry(apk_hash_item item, void *ctx)
 		return r;
 
 	if (iwctx->os->write(iwctx->os, "\n", 1) != 1)
-		return -1;
+		return -EIO;
 
 	iwctx->count++;
 	return 0;
@@ -1124,7 +1124,7 @@ static int apk_db_index_write_nr_cache(struct apk_database *db)
 				 "installed.new",
 				 0644);
 	if (os == NULL)
-		return -1;
+		return -EIO;
 
 	ctx.os = os;
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
