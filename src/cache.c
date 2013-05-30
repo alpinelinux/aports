@@ -43,11 +43,11 @@ static int cache_download(struct apk_database *db)
 		change = &changeset.changes->item[i];
 		pkg = change->newpkg;
 
-		if (pkg->in_cache)
+		if (pkg->repos & db->local_repos)
 			continue;
 
 		repo = apk_db_select_repo(db, pkg);
-		if (repo == NULL || !apk_repo_is_remote(repo))
+		if (repo == NULL)
 			continue;
 
 		apk_pkg_format_cache(pkg, APK_BLOB_BUF(cacheitem));

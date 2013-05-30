@@ -93,7 +93,6 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		virtpkg->version = apk_blob_atomize(APK_BLOB_STR("0"));
 		virtpkg->description = strdup("virtual meta package");
 		virtpkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
-		virtpkg->repos |= db->repo_tags[virtdep.repository_tag].allowed_repos;
 		virtpkg = apk_db_pkg_add(db, virtpkg);
 	}
 

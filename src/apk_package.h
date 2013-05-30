@@ -99,7 +99,6 @@ struct apk_package {
 	size_t installed_size, size;
 	time_t build_time;
 	unsigned int topology_hard;
-	unsigned in_cache : 1;
 	unsigned repos : APK_MAX_REPOS;
 	struct apk_checksum csum;
 };

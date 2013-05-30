@@ -198,14 +198,7 @@ static inline struct apk_package *decision_to_pkg(struct apk_decision *d)
 
 static inline int pkg_available(struct apk_database *db, struct apk_package *pkg)
 {
-	/* virtual packages - only deps used; no real .apk */
-	if (pkg->installed_size == 0)
-		return TRUE;
-	/* obviously present */
-	if (pkg->in_cache || pkg->filename != NULL || (pkg->repos & db->local_repos))
-		return TRUE;
-	/* can download */
-	if ((pkg->repos & ~db->bad_repos) && !(apk_flags & APK_NO_NETWORK))
+	if (pkg->repos & db->available_repos)
 		return TRUE;
 	return FALSE;
 }
@@ -686,6 +679,7 @@ static inline void assign_name(
 	    (p.version != &apk_null_blob || name->ss.chosen.version != &apk_null_blob)) {
 		/* Assigning locked name with version is a problem;
 		 * generally package providing same name twice */
+		dbg_printf("%s: re-provided by %s\n", name->name, p.pkg->name->name);
 		name->ss.locked++;
 		ss->impossible_state = 1;
 		return;

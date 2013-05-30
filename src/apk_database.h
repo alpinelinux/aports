@@ -101,7 +101,6 @@ struct apk_name {
 struct apk_repository {
 	char *url;
 	struct apk_checksum csum;
-
 	apk_blob_t description;
 };
 
@@ -120,6 +119,9 @@ struct apk_db_options {
 	struct list_head repository_list;
 };
 
+#define APK_REPOSITORY_CACHED		0
+#define APK_REPOSITORY_FIRST_CONFIGURED	1
+
 #define APK_DEFAULT_REPOSITORY_TAG	0
 #define APK_DEFAULT_PINNING_MASK	BIT(APK_DEFAULT_REPOSITORY_TAG)
 
@@ -135,7 +137,7 @@ struct apk_database {
 	const char *cache_dir;
 	char *cache_remount_dir;
 	apk_blob_t *arch;
-	unsigned int local_repos, bad_repos;
+	unsigned int local_repos, available_repos;
 	int performing_self_update : 1;
 	int permanent : 1;
 	int compat_newfeatures : 1;
@@ -217,8 +219,6 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 struct apk_repository *apk_db_select_repo(struct apk_database *db,
 					  struct apk_package *pkg);
-int apk_repository_update(struct apk_database *db, struct apk_repository *repo);
-int apk_repo_is_remote(struct apk_repository *repo);
 int apk_repo_format_filename(char *buf, size_t len,
 			     const char *repourl, apk_blob_t *arch,
 			     const char *pkgfile);

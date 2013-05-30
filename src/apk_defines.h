@@ -80,7 +80,7 @@ extern char **apk_argv;
 #define APK_DEFAULT_ARCH        "noarch"
 #endif
 
-#define APK_MAX_REPOS		31	/* see struct apk_package */
+#define APK_MAX_REPOS		32	/* see struct apk_package */
 #define APK_MAX_TAGS		16	/* see solver; unsigned short */
 #define APK_CACHE_CSUM_BYTES	4
 

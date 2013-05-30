@@ -476,7 +476,7 @@ int main(int argc, char **argv)
 	for (i = 0; i < test_repos->num; i++) {
 		struct apk_bstream *bs;
 		apk_blob_t spec = APK_BLOB_STR(test_repos->item[i]), name, tag;
-		int repo_tag = 0;
+		int repo_tag = 0, repo = APK_REPOSITORY_FIRST_CONFIGURED + i;
 
 		if (apk_blob_split(spec, APK_BLOB_STR(":"), &tag, &name)) {
 			repo_tag = apk_db_get_tag_id(&db, tag);
@@ -486,9 +486,11 @@ int main(int argc, char **argv)
 
 		bs = apk_bstream_from_file(AT_FDCWD, name.ptr);
 		if (bs != NULL) {
-			apk_db_index_read(&db, bs, i);
-			db.repo_tags[repo_tag].allowed_repos |= BIT(i);
+			apk_db_index_read(&db, bs, repo);
 			bs->close(bs, NULL);
+			if (!(apk_flags & APK_NO_NETWORK))
+				db.available_repos |= BIT(repo);
+			db.repo_tags[repo_tag].allowed_repos |= BIT(repo);
 		}
 	}
 #endif
