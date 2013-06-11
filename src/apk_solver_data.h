@@ -17,10 +17,24 @@
 #include "apk_provider_data.h"
 
 struct apk_score {
-	uint32_t unsatisfied;
-	uint32_t non_preferred_actions;
-	uint32_t non_preferred_pinnings;
-	uint32_t preference;
+	union {
+		struct {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+			unsigned short preference;
+			unsigned short non_preferred_pinnings;
+			unsigned short non_preferred_actions;
+			unsigned short unsatisfied;
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+			unsigned short unsatisfied;
+			unsigned short non_preferred_actions;
+			unsigned short non_preferred_pinnings;
+			unsigned short preference;
+#else
+#error Unknown endianess.
+#endif
+		};
+		uint64_t score;
+	};
 };
 
 struct apk_solver_name_state {
