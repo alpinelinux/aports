@@ -1,14 +1,10 @@
-From patchwork Thu May 23 13:15:46 2013
-Content-Type: text/plain; charset="utf-8"
+From 87151ab93a08bcc4abe23aa2e87fbc2b956ae2cc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Mon, 27 May 2013 08:40:22 +0300
+Subject: [PATCH 6/6] ipv4: use next hop exceptions also for input routes
 MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-Subject: [RFC] net/ipv4: Use next hop exceptions also for input routes
-Date: Thu, 23 May 2013 03:15:46 -0000
-From: =?utf-8?q?Timo_Ter=C3=A4s?= <timo.teras@iki.fi>
-X-Patchwork-Id: 245949
-Message-Id: <1369314946-12692-1-git-send-email-timo.teras@iki.fi>
-To: netdev@vger.kernel.org
-Cc: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
 
 Commit d2d68ba9 (ipv4: Cache input routes in fib_info nexthops)
 assmued that "locally destined, and routed packets, never trigger
@@ -22,39 +18,23 @@ next hop exceptions are not consulted for pmtu, IP fragmentation will
 not be done properly for these routes.
 
 It also seems that we really need to have the PMTU information always
-for netfilter TCPMSS' clamp-to-pmtu feature to work properly.
+for netfilter TCPMSS clamp-to-pmtu feature to work properly.
 
 So for the time being, cache separate copies of input routes for
 each next hop exception.
 
 Signed-off-by: Timo Teräs <timo.teras@iki.fi>
-
 ---
-I had ideas to make optimizations where pmtu information would not
-be needed. This includes:
-- Target devices with IFF_XMIT_DST_RELEASE set (practically all devices
-  except tunnels). If skb_dst() is early freed the target device cannot
-  generate PMTU events
-- Add flag for input route generation if pmtu info is needed for
-  fragmentation. Basically a flag saying if DF bit was set in ip_hdr.
-
-However, TCPMSS clamp-to-pmtu prevents both optimizations.
-
-I'm not yet all familiar with the recent changes in routing caching,
-so there might be caveats that I missed. Basic testing shows this fixes
-the fragmentation issues I'm seeing, and I have not yet found any ill
-side effects either.
-
  include/net/ip_fib.h     |  3 ++-
  net/ipv4/fib_semantics.c |  3 ++-
- net/ipv4/route.c         | 41 +++++++++++++++++++++++++++++++----------
- 3 files changed, 35 insertions(+), 12 deletions(-)
+ net/ipv4/route.c         | 65 +++++++++++++++++++++++++++++++++++++-----------
+ 3 files changed, 54 insertions(+), 17 deletions(-)
 
 diff --git a/include/net/ip_fib.h b/include/net/ip_fib.h
-index e49db91..20529a6 100644
+index 44424e9..aac8553 100644
 --- a/include/net/ip_fib.h
 +++ b/include/net/ip_fib.h
-@@ -55,7 +55,8 @@ struct fib_nh_exception {
+@@ -56,7 +56,8 @@ struct fib_nh_exception {
  	u32				fnhe_pmtu;
  	__be32				fnhe_gw;
  	unsigned long			fnhe_expires;
@@ -79,45 +59,97 @@ index 8f6cb7a..d5dbca5 100644
  			kfree(fnhe);
  
 diff --git a/net/ipv4/route.c b/net/ipv4/route.c
-index 550781a..073df96 100644
+index f44a4bb..a7a36f7 100644
 --- a/net/ipv4/route.c
 +++ b/net/ipv4/route.c
-@@ -576,9 +576,14 @@ static struct fib_nh_exception *fnhe_oldest(struct fnhe_hash_bucket *hash)
+@@ -565,10 +565,25 @@ static inline void rt_free(struct rtable *rt)
+ 
+ static DEFINE_SPINLOCK(fnhe_lock);
+ 
++static void fnhe_flush_routes(struct fib_nh_exception *fnhe)
++{
++	struct rtable *rt;
++
++	rt = rcu_dereference(fnhe->fnhe_rth_input);
++	if (rt) {
++		RCU_INIT_POINTER(fnhe->fnhe_rth_input, NULL);
++		rt_free(rt);
++	}
++	rt = rcu_dereference(fnhe->fnhe_rth_output);
++	if (rt) {
++		RCU_INIT_POINTER(fnhe->fnhe_rth_output, NULL);
++		rt_free(rt);
++	}
++}
++
+ static struct fib_nh_exception *fnhe_oldest(struct fnhe_hash_bucket *hash)
+ {
+ 	struct fib_nh_exception *fnhe, *oldest;
+-	struct rtable *orig;
+ 
+ 	oldest = rcu_dereference(hash->chain);
+ 	for (fnhe = rcu_dereference(oldest->fnhe_next); fnhe;
+@@ -576,11 +591,7 @@ static struct fib_nh_exception *fnhe_oldest(struct fnhe_hash_bucket *hash)
  		if (time_before(fnhe->fnhe_stamp, oldest->fnhe_stamp))
  			oldest = fnhe;
  	}
 -	orig = rcu_dereference(oldest->fnhe_rth);
-+	orig = rcu_dereference(oldest->fnhe_rth_input);
- 	if (orig) {
+-	if (orig) {
 -		RCU_INIT_POINTER(oldest->fnhe_rth, NULL);
-+		RCU_INIT_POINTER(oldest->fnhe_rth_input, NULL);
-+		rt_free(orig);
-+	}
-+	orig = rcu_dereference(oldest->fnhe_rth_output);
-+	if (orig) {
-+		RCU_INIT_POINTER(oldest->fnhe_rth_output, NULL);
- 		rt_free(orig);
- 	}
+-		rt_free(orig);
+-	}
++	fnhe_flush_routes(oldest);
  	return oldest;
-@@ -1209,7 +1214,15 @@ static bool rt_bind_exception(struct rtable *rt, struct fib_nh_exception *fnhe,
+ }
+ 
+@@ -644,7 +655,10 @@ static void update_or_create_fnhe(struct fib_nh *nh, __be32 daddr, __be32 gw,
+ 			fnhe->fnhe_expires = max(1UL, expires);
+ 		}
+ 		/* Update all cached dsts too */
+-		rt = rcu_dereference(fnhe->fnhe_rth);
++		rt = rcu_dereference(fnhe->fnhe_rth_input);
++		if (rt)
++			fill_route_from_fnhe(rt, fnhe);
++		rt = rcu_dereference(fnhe->fnhe_rth_output);
+ 		if (rt)
+ 			fill_route_from_fnhe(rt, fnhe);
+ 	} else {
+@@ -668,6 +682,10 @@ static void update_or_create_fnhe(struct fib_nh *nh, __be32 daddr, __be32 gw,
+ 		 * stale, so anyone caching it rechecks if this exception
+ 		 * applies to them.
+ 		 */
++		rt = rcu_dereference(nh->nh_rth_input);
++		if (rt)
++			rt->dst.obsolete = DST_OBSOLETE_KILL;
++
+ 		for_each_possible_cpu(i) {
+ 			struct rtable __rcu **prt;
+ 			prt = per_cpu_ptr(nh->nh_pcpu_rth_output, i);
+@@ -1237,25 +1255,36 @@ static bool rt_bind_exception(struct rtable *rt, struct fib_nh_exception *fnhe,
  	spin_lock_bh(&fnhe_lock);
  
  	if (daddr == fnhe->fnhe_daddr) {
--		struct rtable *orig = rcu_dereference(fnhe->fnhe_rth);
 +		struct rtable __rcu **porig;
 +		struct rtable *orig;
+ 		int genid = fnhe_genid(dev_net(rt->dst.dev));
+-		struct rtable *orig = rcu_dereference(fnhe->fnhe_rth);
 +
 +		if (rt_is_input_route(rt))
 +			porig = &fnhe->fnhe_rth_input;
 +		else
 +			porig = &fnhe->fnhe_rth_output;
-+
 +		orig = rcu_dereference(*porig);
- 		if (orig && rt_is_expired(orig)) {
+ 
+ 		if (fnhe->fnhe_genid != genid) {
+ 			fnhe->fnhe_genid = genid;
  			fnhe->fnhe_gw = 0;
  			fnhe->fnhe_pmtu = 0;
-@@ -1231,12 +1244,14 @@ static bool rt_bind_exception(struct rtable *rt, struct fib_nh_exception *fnhe,
- 		} else if (!rt->rt_gateway)
+ 			fnhe->fnhe_expires = 0;
++			fnhe_flush_routes(fnhe);
++			orig = NULL;
+ 		}
+ 		fill_route_from_fnhe(rt, fnhe);
+ 		if (!rt->rt_gateway)
  			rt->rt_gateway = daddr;
  
 -		rcu_assign_pointer(fnhe->fnhe_rth, rt);
@@ -135,7 +167,7 @@ index 550781a..073df96 100644
  	}
  	spin_unlock_bh(&fnhe_lock);
  
-@@ -1468,6 +1483,7 @@ static int __mkroute_input(struct sk_buff *skb,
+@@ -1487,6 +1516,7 @@ static int __mkroute_input(struct sk_buff *skb,
  			   struct in_device *in_dev,
  			   __be32 daddr, __be32 saddr, u32 tos)
  {
@@ -143,7 +175,7 @@ index 550781a..073df96 100644
  	struct rtable *rth;
  	int err;
  	struct in_device *out_dev;
-@@ -1514,8 +1530,13 @@ static int __mkroute_input(struct sk_buff *skb,
+@@ -1533,8 +1563,13 @@ static int __mkroute_input(struct sk_buff *skb,
  		}
  	}
  
@@ -158,7 +190,7 @@ index 550781a..073df96 100644
  		if (rt_cache_valid(rth)) {
  			skb_dst_set_noref(skb, &rth->dst);
  			goto out;
-@@ -1543,7 +1564,7 @@ static int __mkroute_input(struct sk_buff *skb,
+@@ -1562,7 +1597,7 @@ static int __mkroute_input(struct sk_buff *skb,
  	rth->dst.input = ip_forward;
  	rth->dst.output = ip_output;
  
@@ -167,7 +199,7 @@ index 550781a..073df96 100644
  	skb_dst_set(skb, &rth->dst);
  out:
  	err = 0;
-@@ -1858,7 +1879,7 @@ static struct rtable *__mkroute_output(const struct fib_result *res,
+@@ -1877,7 +1912,7 @@ static struct rtable *__mkroute_output(const struct fib_result *res,
  
  		fnhe = find_exception(nh, fl4->daddr);
  		if (fnhe)
@@ -176,3 +208,6 @@ index 550781a..073df96 100644
  		else {
  			if (unlikely(fl4->flowi4_flags &
  				     FLOWI_FLAG_KNOWN_NH &&
+-- 
+1.8.2.3
+
