@@ -186,7 +186,7 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 			apk_dependency_array_init(&world);
 			*apk_dependency_array_add(&world) = dep;
-			r = apk_solver_solve(db, 0, world, NULL, &changeset);
+			r = apk_solver_solve(db, 0, world, &changeset);
 			apk_dependency_array_free(&world);
 			if (r != 0) {
 				apk_error("Unable to install '%s'", argv[i]);
@@ -195,7 +195,7 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 			for (j = 0; j < changeset.changes->num; j++) {
 				struct apk_change *change = &changeset.changes->item[j];
-				r = fetch_package(fctx, db, change->newpkg);
+				r = fetch_package(fctx, db, change->new_pkg);
 				if (r != 0)
 					goto err;
 			}

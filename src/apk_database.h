@@ -138,6 +138,7 @@ struct apk_database {
 	char *cache_remount_dir;
 	apk_blob_t *arch;
 	unsigned int local_repos, available_repos;
+	unsigned int pending_triggers;
 	int performing_self_update : 1;
 	int permanent : 1;
 	int compat_newfeatures : 1;
@@ -206,7 +207,7 @@ void apk_db_close(struct apk_database *db);
 int apk_db_write_config(struct apk_database *db);
 int apk_db_permanent(struct apk_database *db);
 int apk_db_check_world(struct apk_database *db, struct apk_dependency_array *world);
-struct apk_package_array *apk_db_get_pending_triggers(struct apk_database *db);
+int apk_db_fire_triggers(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);
 struct apk_package *apk_db_get_pkg(struct apk_database *db, struct apk_checksum *csum);
@@ -222,6 +223,7 @@ struct apk_repository *apk_db_select_repo(struct apk_database *db,
 int apk_repo_format_filename(char *buf, size_t len,
 			     const char *repourl, apk_blob_t *arch,
 			     const char *pkgfile);
+unsigned int apk_db_get_pinning_mask_repos(struct apk_database *db, unsigned short pinning_mask);
 
 int apk_db_cache_active(struct apk_database *db);
 void apk_cache_format_index(apk_blob_t to, struct apk_repository *repo);

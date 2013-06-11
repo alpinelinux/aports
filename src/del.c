@@ -143,7 +143,6 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	struct del_ctx *ctx = (struct del_ctx *) pctx;
 	struct apk_name **name;
 	struct apk_changeset changeset = {};
-	struct apk_solution_array *solution = NULL;
 	struct not_deleted_ctx ndctx = {};
 	int i, j, r = 0;
 
@@ -159,11 +158,13 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 				delete_from_world, ctx);
 	}
 
-	r = apk_solver_solve(db, 0, ctx->world, &solution, &changeset);
+	r = apk_solver_solve(db, 0, ctx->world, &changeset);
 	if (r == 0 || (apk_flags & APK_FORCE)) {
 		/* check for non-deleted package names */
-		for (i = 0; i < solution->num; i++) {
-			struct apk_package *pkg = solution->item[i].pkg;
+		for (i = 0; i < changeset.changes->num; i++) {
+			struct apk_package *pkg = changeset.changes->item[i].new_pkg;
+			if (pkg == NULL)
+				continue;
 			pkg->name->state_ptr = pkg;
 			for (j = 0; j < pkg->provides->num; j++)
 				pkg->provides->item[j].name->state_ptr = pkg;
@@ -183,9 +184,8 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 		apk_solver_commit_changeset(db, &changeset, ctx->world);
 		r = 0;
 	} else {
-		apk_solver_print_errors(db, solution, ctx->world, r);
+		apk_solver_print_errors(db, &changeset, ctx->world);
 	}
-	apk_solution_array_free(&solution);
 	apk_dependency_array_free(&ctx->world);
 
 	return r;

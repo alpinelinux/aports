@@ -15,6 +15,7 @@
 #include "apk_version.h"
 #include "apk_hash.h"
 #include "apk_io.h"
+#include "apk_solver_data.h"
 
 struct apk_database;
 struct apk_name;
@@ -60,7 +61,6 @@ struct apk_sign_ctx {
 struct apk_dependency {
 	struct apk_name *name;
 	apk_blob_t *version;
-	unsigned solver_state : 22;
 	unsigned repository_tag : 6;
 	unsigned conflict : 1;
 	unsigned result_mask : 3;
@@ -86,6 +86,7 @@ struct apk_installed_package {
 struct apk_package {
 	apk_hash_node hash_node;
 	union {
+		struct apk_solver_package_state ss;
 		int state_int;
 		void *state_ptr;
 	};
@@ -98,7 +99,6 @@ struct apk_package {
 	struct apk_dependency_array *depends, *install_if, *provides;
 	size_t installed_size, size;
 	time_t build_time;
-	unsigned int topology_hard;
 	unsigned repos : APK_MAX_REPOS;
 	struct apk_checksum csum;
 };

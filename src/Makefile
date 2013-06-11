@@ -25,7 +25,7 @@ apk-objs		:= apk.o add.o del.o fix.o update.o info.o \
 
 libapk.so-objs		:= common.o database.o package.o archive.o \
 			   version.o io.o url.o gunzip.o blob.o hash.o print.o \
-			   solver.o
+			   commit.o solver.o
 
 ifeq ($(TEST),y)
 progs-y			+= apk-test

@@ -45,23 +45,22 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 {
 	struct apk_name *name;
 	struct apk_changeset changeset = {};
-	struct apk_solution_array *solution = NULL;
 	int r;
 
 	name = apk_db_get_name(db, APK_BLOB_STR("apk-tools"));
 	apk_solver_set_name_flags(name, solver_flags, solver_flags);
 	db->performing_self_update = 1;
 
-	r = apk_solver_solve(db, 0, db->world, &solution, &changeset);
+	r = apk_solver_solve(db, 0, db->world, &changeset);
 	if (r != 0) {
 		if ((r > 0) && (apk_flags & APK_FORCE))
 			r = 0;
 		else
-			apk_solver_print_errors(db, solution, db->world, r);
+			apk_solver_print_errors(db, &changeset, db->world);
 		goto ret;
 	}
 
-	if (changeset.changes->num == 0)
+	if (changeset.num_install + changeset.num_remove + changeset.num_adjust == 0)
 		goto ret;
 
 	if (apk_flags & APK_SIMULATE) {
@@ -83,7 +82,6 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 	exit(1);
 
 ret:
-	apk_solution_array_free(&solution);
 	apk_change_array_free(&changeset.changes);
 	db->performing_self_update = 0;
 

@@ -34,7 +34,7 @@ static int cache_download(struct apk_database *db)
 	char item[PATH_MAX], cacheitem[PATH_MAX];
 	int i, r, ret = 0;
 
-	r = apk_solver_solve(db, 0, db->world, NULL, &changeset);
+	r = apk_solver_solve(db, 0, db->world, &changeset);
 	if (r < 0) {
 		apk_error("Unable to select packages. Run apk fix.");
 		return r;
@@ -42,9 +42,8 @@ static int cache_download(struct apk_database *db)
 
 	for (i = 0; i < changeset.changes->num; i++) {
 		change = &changeset.changes->item[i];
-		pkg = change->newpkg;
-
-		if (pkg->repos & db->local_repos)
+		pkg = change->new_pkg;
+		if ((pkg == NULL) || (pkg->repos & db->local_repos))
 			continue;
 
 		repo = apk_db_select_repo(db, pkg);

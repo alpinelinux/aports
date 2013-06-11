@@ -16,8 +16,6 @@
 #include "apk_print.h"
 #include "apk_solver.h"
 
-/* FIXME: reimplement fix applet */
-
 struct fix_ctx {
 	unsigned short solver_flags;
 	int fix_depends : 1;

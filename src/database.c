@@ -1751,9 +1751,11 @@ static int fire_triggers(apk_hash_item item, void *ctx)
 				continue;
 
 			/* And place holder for script name */
-			if (ipkg->pending_triggers->num == 0)
+			if (ipkg->pending_triggers->num == 0) {
 				*apk_string_array_add(&ipkg->pending_triggers) =
 					NULL;
+				db->pending_triggers++;
+			}
 			*apk_string_array_add(&ipkg->pending_triggers) =
 				dbd->rooted_name;
 			break;
@@ -1763,20 +1765,10 @@ static int fire_triggers(apk_hash_item item, void *ctx)
 	return 0;
 }
 
-struct apk_package_array *apk_db_get_pending_triggers(struct apk_database *db)
+int apk_db_fire_triggers(struct apk_database *db)
 {
-	struct apk_installed_package *ipkg;
-	struct apk_package_array *pkgs = NULL;
-
-	apk_package_array_init(&pkgs);
 	apk_hash_foreach(&db->installed.dirs, fire_triggers, db);
-	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
-		if (ipkg->pending_triggers->num == 0)
-			continue;
-		*apk_package_array_add(&pkgs) = ipkg->pkg;
-	}
-
-	return pkgs;
+	return db->pending_triggers;
 }
 
 int apk_db_cache_active(struct apk_database *db)
@@ -1902,6 +1894,20 @@ int apk_repo_format_filename(char *buf, size_t len,
 			     item);
 
 	return n;
+}
+
+unsigned int apk_db_get_pinning_mask_repos(struct apk_database *db, unsigned short pinning_mask)
+{
+	unsigned int repository_mask = 0;
+	int i;
+
+	for (i = 0; i < db->num_repo_tags && pinning_mask; i++) {
+		if (!(BIT(i) & pinning_mask))
+			continue;
+		pinning_mask &= ~BIT(i);
+		repository_mask |= db->repo_tags[i].allowed_repos;
+	}
+	return repository_mask;
 }
 
 static struct apk_bstream *apk_repo_file_open(struct apk_repository *repo,
