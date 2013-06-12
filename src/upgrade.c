@@ -60,7 +60,7 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 		goto ret;
 	}
 
-	if (changeset.num_install + changeset.num_remove + changeset.num_adjust == 0)
+	if (changeset.num_total_changes == 0)
 		goto ret;
 
 	if (apk_flags & APK_SIMULATE) {
@@ -130,16 +130,17 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 
 static struct apk_option upgrade_options[] = {
 	{ 'a', "available",
-	  "Re-install or downgrade if currently installed package is not "
-	  "currently available from any repository" },
+	  "Resets versioned world dependencies, and changes to prefer "
+	  "replacing or downgrading packages (instead of holding them) "
+	  "if the currently installed package is no longer available "
+	  "from any repository" },
 	{ 0x10000, "no-self-upgrade",
 	  "Do not do early upgrade of 'apk-tools' package" },
 };
 
 static struct apk_applet apk_upgrade = {
 	.name = "upgrade",
-	.help = "Upgrade (or downgrade with -a) the currently installed "
-		"packages to versions available in repositories.",
+	.help = "Upgrade currently installed packages to match repositories.",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct upgrade_ctx),
 	.num_options = ARRAY_SIZE(upgrade_options),

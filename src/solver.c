@@ -329,6 +329,7 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		struct apk_package *pkg = p0->pkg;
 
 		/* check if this pkg's dependencies have become unsatisfiable */
+		pkg->ss.dependencies_merged = 0;
 		if (reevaluate_deps) {
 			if (!pkg->ss.available)
 				continue;
@@ -360,6 +361,7 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		num_tag_not_ok += !pkg->ss.tag_ok;
 
 		/* merge common dependencies */
+		pkg->ss.dependencies_merged = 1;
 		if (first_candidate == -1)
 			first_candidate = i;
 		for (j = 0; j < pkg->depends->num; j++) {
@@ -377,6 +379,10 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	queue_unresolved(ss, name);
 
 	if (first_candidate != -1) {
+		for (i = 0; i < name->providers->num; i++) {
+			struct apk_package *pkg = name->providers->item[i].pkg;
+			pkg->ss.dependencies_used = pkg->ss.dependencies_merged;
+		}
 		/* TODO: could merge versioning bits too */
 		/* propagate down common dependencies */
 		pkg = name->providers->item[first_candidate].pkg;
@@ -418,13 +424,25 @@ static int compare_providers(struct apk_solver_state *ss,
 	if (r)
 		return r;
 
+	/* Prefer those that were in last dependency merging group */
+	r = (int)pkgA->ss.dependencies_used - (int)pkgB->ss.dependencies_used;
+	if (r)
+		return r;
+
+	/* Prefer installed on self-upgrade */
+	solver_flags = pkgA->ss.solver_flags | pkgB->ss.solver_flags;
+	if (db->performing_self_update && !(solver_flags & APK_SOLVERF_UPGRADE)) {
+		r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
+		if (r)
+			return r;
+	}
+
 	/* Prefer allowed pinning */
 	r = (int)pkgA->ss.tag_ok - (int)pkgB->ss.tag_ok;
 	if (r)
 		return r;
 
 	/* Prefer available */
-	solver_flags = pkgA->ss.solver_flags | pkgB->ss.solver_flags;
 	if (solver_flags & APK_SOLVERF_AVAILABLE) {
 		r = !!(pkgA->repos & db->available_repos) -
 		    !!(pkgB->repos & db->available_repos);
@@ -711,8 +729,6 @@ int apk_solver_solve(struct apk_database *db,
 	list_init(&ss->unresolved_head);
 
 	foreach_dependency(ss, world, discover_names);
-
-	/* FIXME: If filename specified, force to use it */
 
 	dbg_printf("applying world\n");
 	ss->prefer_pinning = 1;
