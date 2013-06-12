@@ -398,7 +398,7 @@ static void print_pinning_errors(struct apk_database *db, char *label,
 	if (pkg->repos & apk_db_get_pinning_mask_repos(db, APK_DEFAULT_PINNING_MASK | BIT(tag)))
 		return;
 
-	printf("  %s: but needs pinning:", label);
+	printf("  %s: not pinned:", label);
 	for (i = 0; i < db->num_repo_tags; i++) {
 		if (pkg->repos & db->repo_tags[i].allowed_repos)
 			printf(" @" BLOB_FMT, BLOB_PRINTF(*db->repo_tags[i].name));

@@ -37,6 +37,9 @@ struct apk_solver_state {
 	unsigned int errors;
 	unsigned int num_selections, num_solution_entries;
 	unsigned int solver_flags_inherit;
+	unsigned int pinning_inherit;
+	unsigned int default_repos;
+	unsigned prefer_pinning : 1;
 };
 
 static struct apk_provider provider_none = {
@@ -57,6 +60,24 @@ void apk_solver_set_name_flags(struct apk_name *name,
 	}
 }
 
+static int get_tag(struct apk_database *db, unsigned int pinning_mask, unsigned int repos)
+{
+	int i;
+
+	for (i = 0; i < db->num_repo_tags; i++) {
+		if (!(BIT(i) & pinning_mask))
+			continue;
+		if (db->repo_tags[i].allowed_repos & repos)
+			return i;
+	}
+	return APK_DEFAULT_REPOSITORY_TAG;
+}
+
+static unsigned int get_pkg_repos(struct apk_database *db, struct apk_package *pkg)
+{
+	return pkg->repos | (pkg->ipkg ? db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
+}
+
 static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependency_array *deps,
 			       void (*func)(struct apk_solver_state *ss, struct apk_dependency *dep))
 {
@@ -72,6 +93,37 @@ static void foreach_name(struct apk_solver_state *ss, struct apk_name_array *nam
 	for (i = 0; i < names->num; i++)
 		if (names->item[i]->ss.seen)
 			func(ss, names->item[i]);
+}
+
+static void foreach_rinstall_if_pkg(
+	struct apk_solver_state *ss, struct apk_package *pkg,
+	void (*cb)(struct apk_solver_state *ss, struct apk_package *rinstall_if, struct apk_package *parent_pkg))
+{
+	struct apk_name *name = pkg->name;
+	int i, j, k;
+
+	for (i = 0; i < pkg->name->rinstall_if->num; i++) {
+		struct apk_name *name0 = pkg->name->rinstall_if->item[i];
+
+		dbg_printf(PKG_VER_FMT ": rinstall_if %s\n", PKG_VER_PRINTF(pkg), name0->name);
+
+		for (j = 0; j < name0->providers->num; j++) {
+			struct apk_provider *p0 = &name0->providers->item[j];
+
+			for (k = 0; k < p0->pkg->install_if->num; k++) {
+				struct apk_dependency *dep = &p0->pkg->install_if->item[k];
+
+				if (dep->name == name &&
+				    apk_dep_is_provided(dep, p0))
+					break;
+			}
+			if (k >= p0->pkg->install_if->num)
+				continue;
+
+			/* pkg depends (via install_if) on pkg0 */
+			cb(ss, p0->pkg, pkg);
+		}
+	}
 }
 
 static void queue_dirty(struct apk_solver_state *ss, struct apk_name *name)
@@ -155,24 +207,37 @@ static void discover_names(struct apk_solver_state *ss, struct apk_dependency *d
 static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_database *db = ss->db;
+	unsigned int repos;
 	int i, j;
-	unsigned long mask = apk_db_get_pinning_mask_repos(ss->db, APK_DEFAULT_PINNING_MASK);
 
 	if (name->ss.seen)
 		return;
+
 	name->ss.seen = 1;
 	for (i = 0; i < name->providers->num; i++) {
 		struct apk_package *pkg = name->providers->item[i].pkg;
 		if (pkg->ss.seen)
 			continue;
 		pkg->ss.seen = 1;
-		if ((pkg->ipkg != NULL) ||
-		    (pkg->repos & db->available_repos & mask))
-			pkg->ss.available = 1;
+		pkg->ss.available = pkg->ipkg || (pkg->repos & db->available_repos);
+		pkg->ss.pinning_allowed = APK_DEFAULT_PINNING_MASK;
+		pkg->ss.pinning_preferred = APK_DEFAULT_PINNING_MASK;
+
+		repos = get_pkg_repos(db, pkg);
+		pkg->ss.tag_ok = !!(repos & ss->default_repos);
+		pkg->ss.tag_preferred = !!(repos & ss->default_repos);
+
 		foreach_dependency(ss, pkg->depends, discover_names);
 		for (j = 0; j < pkg->depends->num; j++)
-			pkg->ss.max_dep_chain = max(pkg->ss.max_dep_chain, name->ss.max_dep_chain+1);
+			pkg->ss.max_dep_chain = max(pkg->ss.max_dep_chain,
+						    pkg->depends->item[j].name->ss.max_dep_chain+1);
 		name->ss.max_dep_chain = max(name->ss.max_dep_chain, pkg->ss.max_dep_chain);
+
+		dbg_printf("discover " PKG_VER_FMT ": tag_ok=%d, tag_pref=%d max_dep_chain=%d\n",
+			PKG_VER_PRINTF(pkg),
+			pkg->ss.tag_ok,
+			pkg->ss.tag_preferred,
+			pkg->ss.max_dep_chain);
 	}
 	/* Can't use foreach_name, as it checks the seen flag */
 	for (i = 0; i < name->rinstall_if->num; i++)
@@ -186,10 +251,23 @@ static void name_requirers_changed(struct apk_solver_state *ss, struct apk_name 
 	queue_dirty(ss, name);
 }
 
+static void inherit_pinning(struct apk_solver_state *ss, struct apk_package *pkg, unsigned int pinning, int prefer)
+{
+	unsigned int repo_mask = apk_db_get_pinning_mask_repos(ss->db, pinning);
+	unsigned int repos = get_pkg_repos(ss->db, pkg);
+
+	pkg->ss.pinning_allowed |= pinning;
+	pkg->ss.tag_ok |= !!(repos & repo_mask);
+	if (prefer) {
+		pkg->ss.pinning_preferred |= pinning;
+		pkg->ss.tag_preferred = !!(repos & apk_db_get_pinning_mask_repos(ss->db, pkg->ss.pinning_preferred));
+	}
+}
+
 static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
 {
-	unsigned int solver_flags_inherit = ss->solver_flags_inherit;
 	struct apk_name *name = dep->name;
+	unsigned int solver_flags_inherit = ss->solver_flags_inherit;
 	int i;
 
 	dbg_printf("apply_constraint: %s%s%s" BLOB_FMT "\n",
@@ -213,9 +291,16 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		pkg0->ss.conflicts += !is_provided;
 		if (unlikely(pkg0->ss.available && pkg0->ss.conflicts))
 			disqualify_package(ss, pkg0, "conflicting dependency");
+
 		if (is_provided) {
 			pkg0->ss.solver_flags |= solver_flags_inherit;
 			pkg0->ss.solver_flags_inheritable |= solver_flags_inherit;
+			inherit_pinning(ss, pkg0, ss->pinning_inherit, ss->prefer_pinning);
+
+			dbg_printf(PKG_VER_FMT ": tag_ok=%d, tag_pref=%d\n",
+				PKG_VER_PRINTF(pkg0),
+				pkg0->ss.tag_ok,
+				pkg0->ss.tag_preferred);
 		}
 	}
 }
@@ -227,7 +312,7 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_package *pkg;
 	int i, j, reevaluate_deps, reevaluate_iif;
 	int first_candidate = -1, last_candidate = 0;
-	int num_options = 0, has_iif = 0;
+	int num_options = 0, num_tag_not_ok = 0, has_iif = 0;
 
 	dbg_printf("reconsider_name: %s\n", name->name);
 
@@ -272,6 +357,7 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 			continue;
 
 		num_options++;
+		num_tag_not_ok += !pkg->ss.tag_ok;
 
 		/* merge common dependencies */
 		if (first_candidate == -1)
@@ -286,7 +372,7 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		}
 		last_candidate = i + 1;
 	}
-	name->ss.has_options = (num_options > 1);
+	name->ss.has_options = (num_options > 1 || num_tag_not_ok > 0);
 	name->ss.has_iif = has_iif;
 	queue_unresolved(ss, name);
 
@@ -311,7 +397,8 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 			name0->ss.merge_index = 0;
 		}
 	}
-	dbg_printf("reconsider_name: %s [finished]\n", name->name);
+	dbg_printf("reconsider_name: %s [finished], has_options=%d\n",
+		name->name, name->ss.has_options);
 }
 
 static int compare_providers(struct apk_solver_state *ss,
@@ -331,6 +418,11 @@ static int compare_providers(struct apk_solver_state *ss,
 	if (r)
 		return r;
 
+	/* Prefer allowed pinning */
+	r = (int)pkgA->ss.tag_ok - (int)pkgB->ss.tag_ok;
+	if (r)
+		return r;
+
 	/* Prefer available */
 	solver_flags = pkgA->ss.solver_flags | pkgB->ss.solver_flags;
 	if (solver_flags & APK_SOLVERF_AVAILABLE) {
@@ -340,8 +432,12 @@ static int compare_providers(struct apk_solver_state *ss,
 			return r;
 	}
 
+	/* Prefer preferred pinning */
+	r = (int)pkgA->ss.tag_preferred - (int)pkgB->ss.tag_preferred;
+	if (r)
+		return r;
+
 	/* Prefer installed */
-	/* FIXME: check-per-name flags here too */
 	if (!(solver_flags & APK_SOLVERF_UPGRADE)) {
 		r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
 		if (r)
@@ -375,7 +471,12 @@ static int compare_providers(struct apk_solver_state *ss,
 	return ffsl(pkgB->repos) - ffsl(pkgA->repos);
 }
 
-static inline void assign_name(struct apk_solver_state *ss, struct apk_name *name, struct apk_provider p)
+static void inherit_pinning_from_pkg(struct apk_solver_state *ss, struct apk_package *rinstall_if, struct apk_package *parent_pkg)
+{
+	inherit_pinning(ss, rinstall_if, parent_pkg->ss.pinning_allowed, 0);
+}
+
+static void assign_name(struct apk_solver_state *ss, struct apk_name *name, struct apk_provider p)
 {
 	int i;
 
@@ -389,7 +490,8 @@ static inline void assign_name(struct apk_solver_state *ss, struct apk_name *nam
 		return;
 	}
 
-	dbg_printf("assign %s to "PKG_VER_FMT"\n", name->name, PKG_VER_PRINTF(p.pkg));
+	if (p.pkg)
+		dbg_printf("assign %s to "PKG_VER_FMT"\n", name->name, PKG_VER_PRINTF(p.pkg));
 
 	name->ss.locked = 1;
 	name->ss.chosen = p;
@@ -397,6 +499,10 @@ static inline void assign_name(struct apk_solver_state *ss, struct apk_name *nam
 		list_del(&name->ss.unresolved_list);
 	if (list_hashed(&name->ss.dirty_list))
 		list_del(&name->ss.dirty_list);
+
+	/* propagate pinning to install_if candidates */
+	if (p.pkg)
+		foreach_rinstall_if_pkg(ss, p.pkg, inherit_pinning_from_pkg);
 
 	/* disqualify all conflicting packages */
 	for (i = 0; i < name->providers->num; i++) {
@@ -422,7 +528,9 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 
 	if (name->ss.requirers || name->ss.has_iif) {
 		for (i = 0; i < name->providers->num; i++) {
-			if (name->ss.requirers == 0 && !name->providers->item[i].pkg->ss.iif_triggered)
+			if (name->ss.requirers == 0 &&
+			    (!name->providers->item[i].pkg->ss.iif_triggered ||
+			     !name->providers->item[i].pkg->ss.tag_ok))
 				continue;
 			if (compare_providers(ss, &name->providers->item[i], &chosen) > 0)
 				chosen = name->providers->item[i];
@@ -437,7 +545,7 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 			ss->errors++;
 			return;
 		}
-		if (!pkg->ss.available)
+		if (!pkg->ss.available || !pkg->ss.tag_ok)
 			ss->errors++;
 		dbg_printf("selecting: " PKG_VER_FMT ", available: %d\n", PKG_VER_PRINTF(pkg), pkg->ss.available);
 		assign_name(ss, pkg->name, APK_PROVIDER_FROM_PACKAGE(pkg));
@@ -446,8 +554,10 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 			assign_name(ss, p->name, APK_PROVIDER_FROM_PROVIDES(pkg, p));
 		}
 		ss->solver_flags_inherit = pkg->ss.solver_flags_inheritable;
+		ss->pinning_inherit = pkg->ss.pinning_allowed;
 		foreach_dependency(ss, pkg->depends, apply_constraint);
 		ss->solver_flags_inherit = 0;
+		ss->pinning_inherit = 0;
 		ss->num_selections++;
 	} else {
 		dbg_printf("selecting: %s [unassigned]\n", name->name);
@@ -483,12 +593,8 @@ static void generate_change(struct apk_solver_state *ss, struct apk_name *name)
 		.old_pkg = opkg,
 		.old_repository_tag = opkg ? opkg->ipkg->repository_tag : 0,
 		.new_pkg = pkg,
-		.new_repository_tag = pkg->ipkg ? pkg->ipkg->repository_tag : 0,
+		.new_repository_tag = get_tag(ss->db, pkg->ss.pinning_allowed, get_pkg_repos(ss->db, pkg)),
 		.reinstall = !!(pkg->ss.solver_flags & APK_SOLVERF_REINSTALL),
-#if 0
-		/* FIXME: repository_tag from pinning */
-		.new_repository_tag = get_tag(db, pinning, repos),
-#endif
 	};
 	if (change->new_pkg == NULL)
 		changeset->num_remove++;
@@ -600,6 +706,7 @@ int apk_solver_solve(struct apk_database *db,
 	memset(ss, 0, sizeof(*ss));
 	ss->db = db;
 	ss->changeset = changeset;
+	ss->default_repos = apk_db_get_pinning_mask_repos(db, APK_DEFAULT_PINNING_MASK);
 	list_init(&ss->dirty_head);
 	list_init(&ss->unresolved_head);
 
@@ -608,15 +715,18 @@ int apk_solver_solve(struct apk_database *db,
 	/* FIXME: If filename specified, force to use it */
 
 	dbg_printf("applying world\n");
+	ss->prefer_pinning = 1;
 	ss->solver_flags_inherit = solver_flags;
 	for (i = 0; i < world->num; i++) {
 		struct apk_dependency *dep = &world->item[i];
 		name = dep->name;
 		name->ss.in_world_dependency = 1;
-		name->ss.preferred_pinning = BIT(dep->repository_tag);
+		ss->pinning_inherit = BIT(dep->repository_tag);
 		apply_constraint(ss, dep);
 	}
 	ss->solver_flags_inherit = 0;
+	ss->pinning_inherit = 0;
+	ss->prefer_pinning = 0;
 	dbg_printf("applying world [finished]\n");
 
 	do {
@@ -627,19 +737,18 @@ int apk_solver_solve(struct apk_database *db,
 
 		name = NULL;
 		list_for_each_entry(name0, &ss->unresolved_head, ss.unresolved_list) {
-			if (!name0->ss.has_options && name0->ss.requirers > 0) {
+			if ((!name0->ss.has_options) && name0->ss.requirers > 0) {
 				name = name0;
 				break;
 			}
 			if (name == NULL)
 				goto prefer;
-			if (name->ss.requirers > 0 && name0->ss.requirers == 0)
+			if (name0->ss.requirers == 0 && name->ss.requirers > 0)
 				continue;
-			if (name->ss.requirers == 0 && name0->ss.requirers > 0)
+			if (name0->ss.requirers > 0 && name->ss.requirers == 0)
 				goto prefer;
-			if (name0->ss.max_dep_chain > name->ss.max_dep_chain)
-				goto prefer;
-			continue;
+			if (name0->ss.max_dep_chain < name->ss.max_dep_chain)
+				continue;
 		prefer:
 			name = name0;
 		}

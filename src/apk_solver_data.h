@@ -21,8 +21,6 @@ struct apk_solver_name_state {
 	struct list_head unresolved_list;
 	struct apk_provider chosen;
 
-	unsigned int preferred_pinning;
-
 	unsigned short requirers;
 	unsigned short merge_index;
 	unsigned short max_dep_chain;
@@ -39,9 +37,13 @@ struct apk_solver_name_state {
 struct apk_solver_package_state {
 	unsigned int conflicts;
 	unsigned short max_dep_chain;
+	unsigned short pinning_allowed;
+	unsigned short pinning_preferred;
 	unsigned solver_flags : 4;
 	unsigned solver_flags_inheritable : 4;
 	unsigned seen : 1;
+	unsigned tag_ok : 1;
+	unsigned tag_preferred : 1;
 	unsigned available : 1;
 	unsigned in_changeset : 1;
 	unsigned iif_triggered : 1;
