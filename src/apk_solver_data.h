@@ -37,12 +37,14 @@ struct apk_solver_name_state {
 };
 
 struct apk_solver_package_state {
-	unsigned short conflicts;
+	unsigned int conflicts;
+	unsigned short max_dep_chain;
+	unsigned solver_flags : 4;
+	unsigned solver_flags_inheritable : 4;
 	unsigned seen : 1;
 	unsigned available : 1;
 	unsigned in_changeset : 1;
 	unsigned iif_triggered : 1;
-	unsigned max_dep_chain : 10;
 };
 
 #endif

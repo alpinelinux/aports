@@ -34,9 +34,9 @@ struct apk_solver_state {
 	struct apk_changeset *changeset;
 	struct list_head dirty_head;
 	struct list_head unresolved_head;
-	unsigned int solver_flags;
 	unsigned int errors;
 	unsigned int num_selections, num_solution_entries;
+	unsigned int solver_flags_inherit;
 };
 
 static struct apk_provider provider_none = {
@@ -48,6 +48,13 @@ void apk_solver_set_name_flags(struct apk_name *name,
 			       unsigned short solver_flags,
 			       unsigned short solver_flags_inheritable)
 {
+	int i;
+
+	for (i = 0; i < name->providers->num; i++) {
+		struct apk_package *pkg = name->providers->item[i].pkg;
+		pkg->ss.solver_flags |= solver_flags;
+		pkg->ss.solver_flags_inheritable |= solver_flags_inheritable;
+	}
 }
 
 static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependency_array *deps,
@@ -181,6 +188,7 @@ static void name_requirers_changed(struct apk_solver_state *ss, struct apk_name 
 
 static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
 {
+	unsigned int solver_flags_inherit = ss->solver_flags_inherit;
 	struct apk_name *name = dep->name;
 	int i;
 
@@ -205,6 +213,10 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency 
 		pkg0->ss.conflicts += !is_provided;
 		if (unlikely(pkg0->ss.available && pkg0->ss.conflicts))
 			disqualify_package(ss, pkg0, "conflicting dependency");
+		if (is_provided) {
+			pkg0->ss.solver_flags |= solver_flags_inherit;
+			pkg0->ss.solver_flags_inheritable |= solver_flags_inherit;
+		}
 	}
 }
 
@@ -307,6 +319,7 @@ static int compare_providers(struct apk_solver_state *ss,
 {
 	struct apk_database *db = ss->db;
 	struct apk_package *pkgA = pA->pkg, *pkgB = pB->pkg;
+	unsigned int solver_flags;
 	int r;
 
 	/* Prefer existing package */
@@ -319,7 +332,8 @@ static int compare_providers(struct apk_solver_state *ss,
 		return r;
 
 	/* Prefer available */
-	if (ss->solver_flags & APK_SOLVERF_AVAILABLE) {
+	solver_flags = pkgA->ss.solver_flags | pkgB->ss.solver_flags;
+	if (solver_flags & APK_SOLVERF_AVAILABLE) {
 		r = !!(pkgA->repos & db->available_repos) -
 		    !!(pkgB->repos & db->available_repos);
 		if (r)
@@ -328,7 +342,7 @@ static int compare_providers(struct apk_solver_state *ss,
 
 	/* Prefer installed */
 	/* FIXME: check-per-name flags here too */
-	if (!(ss->solver_flags & APK_SOLVERF_UPGRADE)) {
+	if (!(solver_flags & APK_SOLVERF_UPGRADE)) {
 		r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
 		if (r)
 			return r;
@@ -431,7 +445,9 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 			struct apk_dependency *p = &pkg->provides->item[i];
 			assign_name(ss, p->name, APK_PROVIDER_FROM_PROVIDES(pkg, p));
 		}
+		ss->solver_flags_inherit = pkg->ss.solver_flags_inheritable;
 		foreach_dependency(ss, pkg->depends, apply_constraint);
+		ss->solver_flags_inherit = 0;
 		ss->num_selections++;
 	} else {
 		dbg_printf("selecting: %s [unassigned]\n", name->name);
@@ -468,11 +484,10 @@ static void generate_change(struct apk_solver_state *ss, struct apk_name *name)
 		.old_repository_tag = opkg ? opkg->ipkg->repository_tag : 0,
 		.new_pkg = pkg,
 		.new_repository_tag = pkg->ipkg ? pkg->ipkg->repository_tag : 0,
+		.reinstall = !!(pkg->ss.solver_flags & APK_SOLVERF_REINSTALL),
 #if 0
-		/* FIXME: setup reinstall and repository_tag for solution */
-		.reinstall = ps->inherited_reinstall ||
-			((name->ss.solver_flags_local | ss->solver_flags) & APK_SOLVERF_REINSTALL),
-		.repository_tag = get_tag(db, pinning, repos),
+		/* FIXME: repository_tag from pinning */
+		.new_repository_tag = get_tag(db, pinning, repos),
 #endif
 	};
 	if (change->new_pkg == NULL)
@@ -585,7 +600,6 @@ int apk_solver_solve(struct apk_database *db,
 	memset(ss, 0, sizeof(*ss));
 	ss->db = db;
 	ss->changeset = changeset;
-	ss->solver_flags = solver_flags;
 	list_init(&ss->dirty_head);
 	list_init(&ss->unresolved_head);
 
@@ -594,6 +608,7 @@ int apk_solver_solve(struct apk_database *db,
 	/* FIXME: If filename specified, force to use it */
 
 	dbg_printf("applying world\n");
+	ss->solver_flags_inherit = solver_flags;
 	for (i = 0; i < world->num; i++) {
 		struct apk_dependency *dep = &world->item[i];
 		name = dep->name;
@@ -601,6 +616,7 @@ int apk_solver_solve(struct apk_database *db,
 		name->ss.preferred_pinning = BIT(dep->repository_tag);
 		apply_constraint(ss, dep);
 	}
+	ss->solver_flags_inherit = 0;
 	dbg_printf("applying world [finished]\n");
 
 	do {

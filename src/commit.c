@@ -104,15 +104,16 @@ struct apk_stats {
 
 static void count_change(struct apk_change *change, struct apk_stats *stats)
 {
-	if (change->new_pkg != change->old_pkg) {
+	if (change->new_pkg != change->old_pkg || change->reinstall) {
 		if (change->new_pkg != NULL) {
 			stats->bytes += change->new_pkg->installed_size;
-			stats->packages ++;
+			stats->packages++;
 		}
 		if (change->old_pkg != NULL)
-			stats->packages ++;
+			stats->packages++;
 		stats->changes++;
-	} else if (change->reinstall || change->new_repository_tag != change->old_repository_tag) {
+	} else if (change->new_repository_tag != change->old_repository_tag) {
+		stats->packages++;
 		stats->changes++;
 	}
 }
@@ -157,12 +158,16 @@ static void update_progress(struct progress *prog, size_t percent, int force)
 static void progress_cb(void *ctx, size_t pkg_percent)
 {
 	struct progress *prog = (struct progress *) ctx;
-	size_t partial = 0, percent;
+	size_t partial = 0, percent, total;
 
 	if (prog->pkg != NULL)
 		partial = muldiv(pkg_percent, prog->pkg->installed_size, APK_PROGRESS_SCALE);
-	percent = muldiv(100, prog->done.bytes + prog->done.packages + partial,
-			 prog->total.bytes + prog->total.packages);
+	total = prog->total.bytes + prog->total.packages;
+	if (total > 0)
+		percent = muldiv(100, prog->done.bytes + prog->done.packages + partial,
+				 prog->total.bytes + prog->total.packages);
+	else
+		percent = 0;
 	update_progress(prog, percent, pkg_percent == 0);
 }
 
