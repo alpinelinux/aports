@@ -11,6 +11,7 @@
 #ifndef APK_IO
 #define APK_IO
 
+#include <sys/types.h>
 #include <openssl/evp.h>
 
 #include "apk_defines.h"

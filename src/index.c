@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "apk_applet.h"
 #include "apk_database.h"

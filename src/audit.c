@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <fnmatch.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include "apk_applet.h"
 #include "apk_database.h"
