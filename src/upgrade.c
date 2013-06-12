@@ -53,10 +53,7 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 
 	r = apk_solver_solve(db, 0, db->world, &changeset);
 	if (r != 0) {
-		if ((r > 0) && (apk_flags & APK_FORCE))
-			r = 0;
-		else
-			apk_solver_print_errors(db, &changeset, db->world);
+		apk_solver_print_errors(db, &changeset, db->world);
 		goto ret;
 	}
 

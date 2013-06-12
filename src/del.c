@@ -159,7 +159,7 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	}
 
 	r = apk_solver_solve(db, 0, ctx->world, &changeset);
-	if (r == 0 || (apk_flags & APK_FORCE)) {
+	if (r == 0) {
 		/* check for non-deleted package names */
 		for (i = 0; i < changeset.changes->num; i++) {
 			struct apk_package *pkg = changeset.changes->item[i].new_pkg;

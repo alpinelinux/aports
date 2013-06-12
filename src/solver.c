@@ -78,12 +78,12 @@ static unsigned int get_pkg_repos(struct apk_database *db, struct apk_package *p
 	return pkg->repos | (pkg->ipkg ? db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
 }
 
-static void foreach_dependency(struct apk_solver_state *ss, struct apk_dependency_array *deps,
-			       void (*func)(struct apk_solver_state *ss, struct apk_dependency *dep))
+static void foreach_dependency(struct apk_solver_state *ss, struct apk_package *ppkg, struct apk_dependency_array *deps,
+			       void (*func)(struct apk_solver_state *ss, struct apk_package *ppkg, struct apk_dependency *dep))
 {
 	int i;
 	for (i = 0; i < deps->num; i++)
-		func(ss, &deps->item[i]);
+		func(ss, ppkg, &deps->item[i]);
 }
 
 static void foreach_name(struct apk_solver_state *ss, struct apk_name_array *names,
@@ -124,6 +124,14 @@ static void foreach_rinstall_if_pkg(
 			cb(ss, p0->pkg, pkg);
 		}
 	}
+}
+
+static void mark_error(struct apk_solver_state *ss, struct apk_package *pkg)
+{
+	if (pkg == NULL || pkg->ss.error)
+		return;
+	pkg->ss.error = 1;
+	ss->errors++;
 }
 
 static void queue_dirty(struct apk_solver_state *ss, struct apk_name *name)
@@ -199,7 +207,8 @@ static int dependency_satisfiable(struct apk_solver_state *ss, struct apk_depend
 }
 
 static void discover_name(struct apk_solver_state *ss, struct apk_name *name);
-static void discover_names(struct apk_solver_state *ss, struct apk_dependency *dep)
+
+static void discover_names(struct apk_solver_state *ss, struct apk_package *ppkg, struct apk_dependency *dep)
 {
 	discover_name(ss, dep->name);
 }
@@ -227,7 +236,7 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 		pkg->ss.tag_ok = !!(repos & ss->default_repos);
 		pkg->ss.tag_preferred = !!(repos & ss->default_repos);
 
-		foreach_dependency(ss, pkg->depends, discover_names);
+		foreach_dependency(ss, pkg, pkg->depends, discover_names);
 		for (j = 0; j < pkg->depends->num; j++)
 			pkg->ss.max_dep_chain = max(pkg->ss.max_dep_chain,
 						    pkg->depends->item[j].name->ss.max_dep_chain+1);
@@ -264,7 +273,7 @@ static void inherit_pinning(struct apk_solver_state *ss, struct apk_package *pkg
 	}
 }
 
-static void apply_constraint(struct apk_solver_state *ss, struct apk_dependency *dep)
+static void apply_constraint(struct apk_solver_state *ss, struct apk_package *ppkg, struct apk_dependency *dep)
 {
 	struct apk_name *name = dep->name;
 	unsigned int solver_flags_inherit = ss->solver_flags_inherit;
@@ -503,8 +512,9 @@ static void assign_name(struct apk_solver_state *ss, struct apk_name *name, stru
 		if (p.version == &apk_null_blob &&
 		    name->ss.chosen.version == &apk_null_blob)
 			return;
-		/* Othewise providing locked item is an error */
-		ss->errors++;
+		/* Conflict: providing same name */
+		mark_error(ss, p.pkg);
+		mark_error(ss, name->ss.chosen.pkg);
 		return;
 	}
 
@@ -560,11 +570,13 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 		if (chosen.version == &apk_null_blob) {
 			/* Pure virtual package */
 			assign_name(ss, name, provider_none);
-			ss->errors++;
+			ss->errors += (name->ss.requirers > 0);
 			return;
 		}
-		if (!pkg->ss.available || !pkg->ss.tag_ok)
-			ss->errors++;
+		if (!pkg->ss.available || !pkg->ss.tag_ok) {
+			/* Selecting broken or unallowed package */
+			mark_error(ss, pkg);
+		}
 		dbg_printf("selecting: " PKG_VER_FMT ", available: %d\n", PKG_VER_PRINTF(pkg), pkg->ss.available);
 		assign_name(ss, pkg->name, APK_PROVIDER_FROM_PACKAGE(pkg));
 		for (i = 0; i < pkg->provides->num; i++) {
@@ -573,19 +585,18 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 		}
 		ss->solver_flags_inherit = pkg->ss.solver_flags_inheritable;
 		ss->pinning_inherit = pkg->ss.pinning_allowed;
-		foreach_dependency(ss, pkg->depends, apply_constraint);
+		foreach_dependency(ss, pkg, pkg->depends, apply_constraint);
 		ss->solver_flags_inherit = 0;
 		ss->pinning_inherit = 0;
 		ss->num_selections++;
 	} else {
 		dbg_printf("selecting: %s [unassigned]\n", name->name);
 		assign_name(ss, name, provider_none);
-		if (name->ss.requirers)
-			ss->errors++;
+		ss->errors += (name->ss.requirers > 0);
 	}
 }
 
-static void generate_change_dep(struct apk_solver_state *ss, struct apk_dependency *dep);
+static void generate_change_dep(struct apk_solver_state *ss, struct apk_package *ppkg, struct apk_dependency *dep);
 static void generate_change_iif(struct apk_solver_state *ss, struct apk_name *name);
 
 static void generate_change(struct apk_solver_state *ss, struct apk_name *name)
@@ -602,7 +613,7 @@ static void generate_change(struct apk_solver_state *ss, struct apk_name *name)
 	pkg->ss.in_changeset = 1;
 	pkg->name->ss.in_changeset = 1;
 
-	foreach_dependency(ss, pkg->depends, generate_change_dep);
+	foreach_dependency(ss, pkg, pkg->depends, generate_change_dep);
 
 	change = &changeset->changes->item[ss->num_solution_entries++];
 	dbg_printf("Selecting: "PKG_VER_FMT"%s\n", PKG_VER_PRINTF(pkg), pkg->ss.available ? "" : " [NOT AVAILABLE]");
@@ -646,14 +657,18 @@ static void generate_change_iif(struct apk_solver_state *ss, struct apk_name *na
 	generate_change(ss, name);
 }
 
-static void generate_change_dep(struct apk_solver_state *ss, struct apk_dependency *dep)
+static void generate_change_dep(struct apk_solver_state *ss, struct apk_package *ppkg, struct apk_dependency *dep)
 {
 	struct apk_name *name = dep->name;
+	struct apk_package *pkg = name->ss.chosen.pkg;
 
 	if (!apk_dep_is_provided(dep, &name->ss.chosen))
-		ss->errors++;
+		mark_error(ss, ppkg);
 
 	generate_change(ss, name);
+
+	if (pkg && pkg->ss.error)
+		mark_error(ss, ppkg);
 }
 
 static void generate_changeset(struct apk_solver_state *ss, struct apk_dependency_array *world)
@@ -668,7 +683,7 @@ static void generate_changeset(struct apk_solver_state *ss, struct apk_dependenc
 	}
 
 	apk_change_array_resize(&ss->changeset->changes, ss->num_selections);
-	foreach_dependency(ss, world, generate_change_dep);
+	foreach_dependency(ss, NULL, world, generate_change_dep);
 
 	/* FIXME: could order better the removals of unneeded packages */
 	list_for_each_entry(ipkg, &ss->db->installed.packages, installed_pkgs_list) {
@@ -721,6 +736,7 @@ int apk_solver_solve(struct apk_database *db,
 	struct apk_solver_state ss_data, *ss = &ss_data;
 	int i;
 
+restart:
 	memset(ss, 0, sizeof(*ss));
 	ss->db = db;
 	ss->changeset = changeset;
@@ -728,17 +744,19 @@ int apk_solver_solve(struct apk_database *db,
 	list_init(&ss->dirty_head);
 	list_init(&ss->unresolved_head);
 
-	foreach_dependency(ss, world, discover_names);
+	foreach_dependency(ss, NULL, world, discover_names);
 
 	dbg_printf("applying world\n");
 	ss->prefer_pinning = 1;
 	ss->solver_flags_inherit = solver_flags;
 	for (i = 0; i < world->num; i++) {
 		struct apk_dependency *dep = &world->item[i];
+		if (dep->broken)
+			continue;
 		name = dep->name;
 		name->ss.in_world_dependency = 1;
 		ss->pinning_inherit = BIT(dep->repository_tag);
-		apply_constraint(ss, dep);
+		apply_constraint(ss, NULL, dep);
 	}
 	ss->solver_flags_inherit = 0;
 	ss->pinning_inherit = 0;
@@ -776,9 +794,23 @@ int apk_solver_solve(struct apk_database *db,
 
 	generate_changeset(ss, world);
 
+	if (ss->errors && (apk_flags & APK_FORCE)) {
+		for (i = 0; i < world->num; i++) {
+			struct apk_dependency *dep = &world->item[i];
+			struct apk_name *name = dep->name;
+			struct apk_package *pkg = name->ss.chosen.pkg;
+			if (pkg == NULL || pkg->ss.error) {
+				dep->broken = 1;
+				dbg_printf("disabling broken world dep: %s", name->name);
+			}
+		}
+		apk_hash_foreach(&db->available.names, free_state, NULL);
+		apk_hash_foreach(&db->available.packages, free_package, NULL);
+		goto restart;
+	}
+
 	apk_hash_foreach(&db->available.names, free_state, NULL);
 	apk_hash_foreach(&db->available.packages, free_package, NULL);
-
 	dbg_printf("solver done, errors=%d\n", ss->errors);
 
 	return ss->errors;

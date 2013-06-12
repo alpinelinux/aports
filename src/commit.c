@@ -536,17 +536,11 @@ int apk_solver_commit(struct apk_database *db,
 	}
 
 	r = apk_solver_solve(db, solver_flags, world, &changeset);
-	if (r < 0)
-		return r;
-
-	if (r == 0 || (apk_flags & APK_FORCE)) {
-		/* Success -- or forced installation of bad graph */
+	if (r == 0)
 		r = apk_solver_commit_changeset(db, &changeset, world);
-	} else {
-		/* Failure -- print errors */
+	else
 		apk_solver_print_errors(db, &changeset, world);
-	}
-	apk_change_array_free(&changeset.changes);
 
+	apk_change_array_free(&changeset.changes);
 	return r;
 }
