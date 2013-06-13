@@ -97,7 +97,7 @@ static int search_parse(void *ctx, struct apk_db_options *dbopts,
 	return 0;
 }
 
-static void print_result(struct search_ctx *ctx, struct apk_package *pkg)
+static void print_result_pkg(struct search_ctx *ctx, struct apk_package *pkg)
 {
 	int i;
 
@@ -117,6 +117,27 @@ static void print_result(struct search_ctx *ctx, struct apk_package *pkg)
 	ctx->print_result(ctx, pkg);
 }
 
+static void print_result(struct search_ctx *ctx, struct apk_name *name)
+{
+	int i;
+
+	if (ctx->show_all) {
+		for (i = 0; i < name->providers->num; i++)
+			print_result_pkg(ctx, name->providers->item[i].pkg);
+	} else {
+		struct apk_package *pkg = NULL;
+		struct apk_provider *p;
+		apk_blob_t *version = NULL;
+
+		foreach_array_item(p, name->providers) {
+			if (version == NULL ||
+			    apk_version_compare_blob(*p->version, *version) == APK_VERSION_GREATER)
+				pkg = p->pkg;
+		}
+		print_result_pkg(ctx, pkg);
+	}
+}
+
 static int match_names(apk_hash_item item, void *pctx)
 {
 	struct search_ctx *ctx = (struct search_ctx *) pctx;
@@ -130,22 +151,8 @@ static int match_names(apk_hash_item item, void *pctx)
 		if (ctx->argc > 0 && i >= ctx->argc)
 			return 0;
 	}
+	print_result(ctx, name);
 
-	if (ctx->show_all) {
-		for (i = 0; i < name->providers->num; i++)
-			print_result(ctx, name->providers->item[i].pkg);
-	} else {
-		struct apk_package *pkg = NULL;
-		struct apk_provider *p;
-		apk_blob_t *version = NULL;
-
-		foreach_array_item(p, name->providers) {
-			if (version == NULL ||
-			    apk_version_compare_blob(*p->version, *version) == APK_VERSION_GREATER)
-				pkg = p->pkg;
-		}
-		print_result(ctx, pkg);
-	}
 	return 0;
 }
 
@@ -175,8 +182,11 @@ static int search_main(void *pctx, struct apk_database *db, int argc, char **arg
 		}
 	} else {
 		ctx->argv = argv;
-		/* FIXME: if not searching descriptions, we can just
-		 * do direct name lookups here */
+		if (!ctx->search_description) {
+			for (i = 0; i < argc; i++)
+				print_result(ctx, apk_db_get_name(db, APK_BLOB_STR(argv[i])));
+			return 0;
+		}
 	}
 
 	return apk_hash_foreach(&db->available.names, match_names, ctx);
