@@ -470,8 +470,8 @@ static void print_dep(struct apk_package *pkg0, struct apk_dependency *d0, struc
 static void print_deps(struct print_state *ps, struct apk_package *pkg, int match)
 {
 	ps->match = match;
-	apk_pkg_foreach_matching_dependency(NULL, ps->world, ps->match, pkg, print_dep, ps);
-	apk_pkg_foreach_reverse_dependency(pkg, ps->match, print_dep, ps);
+	apk_pkg_foreach_matching_dependency(NULL, ps->world, match, pkg, print_dep, ps);
+	apk_pkg_foreach_reverse_dependency(pkg, match, print_dep, ps);
 	label_end(ps);
 }
 

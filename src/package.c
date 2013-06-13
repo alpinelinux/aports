@@ -401,7 +401,8 @@ int apk_dep_is_materialized_or_provided(struct apk_dependency *dep, struct apk_p
 
 int apk_dep_analyze(struct apk_dependency *dep, struct apk_package *pkg)
 {
-	int i;
+	struct apk_dependency *p;
+	struct apk_provider provider;
 
 	if (pkg == NULL)
 		return APK_DEP_IRRELEVANT;
@@ -409,14 +410,11 @@ int apk_dep_analyze(struct apk_dependency *dep, struct apk_package *pkg)
 	if (dep->name == pkg->name)
 		return apk_dep_is_materialized(dep, pkg) ? APK_DEP_SATISFIES : APK_DEP_CONFLICTS;
 
-	for (i = 0; i < pkg->provides->num; i++) {
-		struct apk_provider p;
-
-		if (pkg->provides->item[i].name != dep->name)
+	foreach_array_item(p, pkg->provides) {
+		if (p->name != dep->name)
 			continue;
-
-		p = APK_PROVIDER_FROM_PROVIDES(pkg, &pkg->provides->item[i]);
-		return apk_dep_is_provided(dep, &p) ? APK_DEP_SATISFIES : APK_DEP_CONFLICTS;
+		provider = APK_PROVIDER_FROM_PROVIDES(pkg, p);
+		return apk_dep_is_provided(dep, &provider) ? APK_DEP_SATISFIES : APK_DEP_CONFLICTS;
 	}
 
 	return APK_DEP_IRRELEVANT;
