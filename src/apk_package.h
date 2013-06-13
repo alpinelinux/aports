@@ -37,9 +37,11 @@ struct apk_provider;
 #define APK_SIGN_GENERATE		4
 #define APK_SIGN_VERIFY_AND_GENERATE	5
 
-#define APK_DEP_IRRELEVANT		0
-#define APK_DEP_SATISFIED		1
-#define APK_DEP_CONFLICTED		2
+#define APK_DEP_IRRELEVANT		0x00001
+#define APK_DEP_SATISFIES		0x00002
+#define APK_DEP_CONFLICTS		0x00004
+#define APK_FOREACH_INSTALLED		0x10000
+#define APK_FOREACH_MARKED		0x20000
 
 struct apk_sign_ctx {
 	int keys_fd;
@@ -92,8 +94,13 @@ struct apk_package {
 	apk_hash_node hash_node;
 	union {
 		struct apk_solver_package_state ss;
-		int state_int;
-		void *state_ptr;
+		struct {
+			int marked;
+			union {
+				int state_int;
+				void *state_ptr;
+			};
+		};
 	};
 	struct apk_name *name;
 	struct apk_installed_package *ipkg;
@@ -178,5 +185,14 @@ struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_
 int apk_pkg_write_index_entry(struct apk_package *pkg, struct apk_ostream *os);
 
 int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b);
+
+void apk_pkg_foreach_matching_dependency(
+		struct apk_package *pkg, struct apk_dependency_array *deps, int match, struct apk_package *mpkg,
+		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
+		void *ctx);
+void apk_pkg_foreach_reverse_dependency(
+		struct apk_package *pkg, int match,
+		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
+		void *ctx);
 
 #endif

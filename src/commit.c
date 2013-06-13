@@ -18,46 +18,6 @@
 
 #include "apk_print.h"
 
-static void foreach_package_reverse_dependency2(
-		struct apk_package *pkg,
-		struct apk_name_array *rdepends,
-		int match,
-		void cb(struct apk_package *pkg0, struct apk_dependency *d0, void *ctx),
-		void *ctx)
-{
-	int i, j, k;
-
-	for (i = 0; i < rdepends->num; i++) {
-		struct apk_name *name0 = rdepends->item[i];
-
-		for (j = 0; j < name0->providers->num; j++) {
-			struct apk_package *pkg0 = name0->providers->item[j].pkg;
-
-			for (k = 0; k < pkg0->depends->num; k++) {
-				struct apk_dependency *d0 = &pkg0->depends->item[k];
-				if (apk_dep_analyze(d0, pkg) == match)
-					cb(pkg0, d0, ctx);
-			}
-		}
-	}
-}
-
-static void foreach_package_reverse_dependency(
-		struct apk_package *pkg,
-		int match,
-		void cb(struct apk_package *pkg0, struct apk_dependency *d0, void *ctx),
-		void *ctx)
-{
-	int i;
-
-	if (pkg == NULL)
-		return;
-
-	foreach_package_reverse_dependency2(pkg, pkg->name->rdepends, match, cb, ctx);
-	for (i = 0; i < pkg->provides->num; i++)
-		foreach_package_reverse_dependency2(pkg, pkg->provides->item[i].name->rdepends, match, cb, ctx);
-}
-
 static inline int pkg_available(struct apk_database *db, struct apk_package *pkg)
 {
 	if (pkg->repos & db->available_repos)
@@ -472,14 +432,14 @@ static void print_conflicts(struct print_state *ps, struct apk_package *pkg)
 	struct apk_dependency *d;
 
 	foreach_array_item(p, pkg->name->providers) {
-		if (p->pkg == pkg || p->pkg->state_ptr == STATE_UNSET)
+		if (p->pkg == pkg || !p->pkg->marked)
 			continue;
 		label_start(ps, "conflicts:");
 		apk_print_indented_fmt(&ps->i, PKG_VER_FMT, PKG_VER_PRINTF(p->pkg));
 	}
 	foreach_array_item(d, pkg->provides) {
 		foreach_array_item(p, d->name->providers) {
-			if (p->pkg == pkg || p->pkg->state_ptr == STATE_UNSET)
+			if (p->pkg == pkg || !p->pkg->marked)
 				continue;
 			label_start(ps, "conflicts:");
 			apk_print_indented_fmt(
@@ -492,14 +452,11 @@ static void print_conflicts(struct print_state *ps, struct apk_package *pkg)
 	label_end(ps);
 }
 
-static void print_dep(struct apk_package *pkg0, struct apk_dependency *d0, void *ctx)
+static void print_dep(struct apk_package *pkg0, struct apk_dependency *d0, struct apk_package *pkg, void *ctx)
 {
 	struct print_state *ps = (struct print_state *) ctx;
-	const char *label = (ps->match == APK_DEP_SATISFIED) ? "satisfies:" : "breaks:";
+	const char *label = (ps->match & APK_DEP_SATISFIES) ? "satisfies:" : "breaks:";
 	char tmp[256];
-
-	if (pkg0 != NULL && pkg0->state_ptr == STATE_UNSET)
-		return;
 
 	label_start(ps, label);
 	if (pkg0 == NULL)
@@ -512,14 +469,9 @@ static void print_dep(struct apk_package *pkg0, struct apk_dependency *d0, void 
 
 static void print_deps(struct print_state *ps, struct apk_package *pkg, int match)
 {
-	struct apk_dependency *d0;
-
 	ps->match = match;
-	foreach_array_item(d0, ps->world) {
-		if (apk_dep_analyze(d0, pkg) == match)
-			print_dep(NULL, d0, ps);
-	}
-	foreach_package_reverse_dependency(pkg, ps->match, print_dep, ps);
+	apk_pkg_foreach_matching_dependency(NULL, ps->world, ps->match, pkg, print_dep, ps);
+	apk_pkg_foreach_reverse_dependency(pkg, ps->match, print_dep, ps);
 	label_end(ps);
 }
 
@@ -532,9 +484,9 @@ static void analyze_package(struct print_state *ps, struct apk_package *pkg, uns
 
 	print_pinning_errors(ps, pkg, tag);
 	print_conflicts(ps, pkg);
-	print_deps(ps, pkg, APK_DEP_CONFLICTED);
+	print_deps(ps, pkg, APK_DEP_CONFLICTS | APK_FOREACH_MARKED);
 	if (ps->label == NULL)
-		print_deps(ps, pkg, APK_DEP_SATISFIED);
+		print_deps(ps, pkg, APK_DEP_SATISFIES | APK_FOREACH_MARKED);
 }
 
 static void analyze_name(struct print_state *ps, struct apk_name *name)
@@ -570,7 +522,7 @@ static void analyze_name(struct print_state *ps, struct apk_name *name)
 	foreach_array_item(pname0, name->rdepends) {
 		name0 = *pname0;
 		foreach_array_item(p0, name0->providers) {
-			if (p0->pkg->state_ptr == STATE_UNSET)
+			if (!p0->pkg->marked)
 				continue;
 			foreach_array_item(d0, p0->pkg->depends) {
 				if (d0->name != name || d0->conflict)
@@ -652,7 +604,7 @@ void apk_solver_print_errors(struct apk_database *db,
 		struct apk_package *pkg = change->new_pkg;
 		if (pkg == NULL)
 			continue;
-		pkg->state_int = STATE_PRESENT;
+		pkg->marked = 1;
 		pkg->name->state_int = STATE_PRESENT;
 		foreach_array_item(p, pkg->provides)
 			p->name->state_int = STATE_PRESENT;

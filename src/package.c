@@ -407,7 +407,7 @@ int apk_dep_analyze(struct apk_dependency *dep, struct apk_package *pkg)
 		return APK_DEP_IRRELEVANT;
 
 	if (dep->name == pkg->name)
-		return apk_dep_is_materialized(dep, pkg) ? APK_DEP_SATISFIED : APK_DEP_CONFLICTED;
+		return apk_dep_is_materialized(dep, pkg) ? APK_DEP_SATISFIES : APK_DEP_CONFLICTS;
 
 	for (i = 0; i < pkg->provides->num; i++) {
 		struct apk_provider p;
@@ -416,7 +416,7 @@ int apk_dep_analyze(struct apk_dependency *dep, struct apk_package *pkg)
 			continue;
 
 		p = APK_PROVIDER_FROM_PROVIDES(pkg, &pkg->provides->item[i]);
-		return apk_dep_is_provided(dep, &p) ? APK_DEP_SATISFIED : APK_DEP_CONFLICTED;
+		return apk_dep_is_provided(dep, &p) ? APK_DEP_SATISFIES : APK_DEP_CONFLICTS;
 	}
 
 	return APK_DEP_IRRELEVANT;
@@ -1212,4 +1212,59 @@ int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b)
 		return APK_VERSION_EQUAL;
 
 	return apk_version_compare_blob(*a->version, *b->version);
+}
+
+void apk_pkg_foreach_matching_dependency(
+		struct apk_package *pkg, struct apk_dependency_array *deps, int match, struct apk_package *mpkg,
+		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
+		void *ctx)
+{
+	struct apk_dependency *d;
+
+	foreach_array_item(d, deps) {
+		if (apk_dep_analyze(d, mpkg) & match)
+			cb(pkg, d, mpkg, ctx);
+	}
+}
+
+static void foreach_reverse_dependency(
+		struct apk_package *pkg,
+		struct apk_name_array *rdepends,
+		int match,
+		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
+		void *ctx)
+{
+	int installed = match & APK_FOREACH_INSTALLED;
+	int marked = match & APK_FOREACH_MARKED;
+	struct apk_name **pname0, *name0;
+	struct apk_provider *p0;
+	struct apk_package *pkg0;
+	struct apk_dependency *d0;
+
+	foreach_array_item(pname0, rdepends) {
+		name0 = *pname0;
+		foreach_array_item(p0, name0->providers) {
+			pkg0 = p0->pkg;
+			if (installed && pkg0->ipkg == NULL)
+				continue;
+			if (marked && !pkg0->marked)
+				continue;
+			foreach_array_item(d0, pkg0->depends) {
+				if (apk_dep_analyze(d0, pkg) & match)
+					cb(pkg0, d0, pkg, ctx);
+			}
+		}
+	}
+}
+
+void apk_pkg_foreach_reverse_dependency(
+		struct apk_package *pkg, int match,
+		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
+		void *ctx)
+{
+	struct apk_dependency *p;
+
+	foreach_reverse_dependency(pkg, pkg->name->rdepends, match, cb, ctx);
+	foreach_array_item(p, pkg->provides)
+		foreach_reverse_dependency(pkg, p->name->rdepends, match, cb, ctx);
 }
