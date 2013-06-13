@@ -12,6 +12,10 @@
 #define APK_DB_META "apk_database"
 #define APK_IPKG_META "apk_installed_package"
 
+#if LUA_VERSION_NUM < 502
+# define luaL_newlib(L,l) (lua_newtable(L), luaL_register(L,NULL,l))
+#endif
+
 struct flagmap {
        const char *name;
        int flag;
@@ -32,6 +36,15 @@ struct flagmap opendb_flagmap[] = {
        {"no_world",            APK_OPENF_NO_WORLD},
        {NULL, 0}
 };
+
+/* implemented as luaL_typerror until lua 5.1, dropped in 5.2
+ * (C) 1994-2012 Lua.org, PUC-Rio. MIT license
+ */
+static int typerror (lua_State *L, int narg, const char *tname) {
+	const char *msg = lua_pushfstring(L, "%s expected, got %s",
+					  tname, luaL_typename(L, narg));
+	return luaL_argerror(L, narg, msg);
+}
 
 static apk_blob_t check_blob(lua_State *L, int index)
 {
@@ -137,7 +150,7 @@ static struct apk_database *checkdb(lua_State *L, int index)
 	luaL_checktype(L, index, LUA_TUSERDATA);
 	db = (struct apk_database  *) luaL_checkudata(L, index, APK_DB_META);
 	if (db == NULL)
-		luaL_typerror(L, index, APK_DB_META);
+		typerror(L, index, APK_DB_META);
 	return db;
 }
 
@@ -258,7 +271,7 @@ static int Pinstalled(lua_State *L)
 	return 1;
 }
 
-static const luaL_reg reg_apk_methods[] = {
+static const luaL_Reg reg_apk_methods[] = {
 	{"version_validate",	Pversion_validate},
 	{"version_compare",	Pversion_compare},
 	{"version_is_less",	Pversion_is_less},
@@ -270,28 +283,32 @@ static const luaL_reg reg_apk_methods[] = {
 	{NULL,		NULL}
 };
 
-static const luaL_reg reg_apk_db_meta_methods[] = {
+static const luaL_Reg reg_apk_db_meta_methods[] = {
 	{"__gc",	Papk_db_close},
 	{NULL, NULL}
 };
 
+static int db_create_meta(lua_State *L)
+{
+	luaL_newmetatable(L, APK_DB_META);
+	lua_newtable(L);
+
+	lua_setfield(L, -2, "__index");
+	lua_pushcfunction(L, Papk_db_close);
+	lua_setfield(L, -2, "__gc");
+	return 1;
+}
+
 LUALIB_API int luaopen_apk(lua_State *L)
 {
-	luaL_register(L, LIBNAME, reg_apk_methods);
+	db_create_meta(L);
+	luaL_newlib(L, reg_apk_methods);
+	lua_pushvalue(L, -1);
+	lua_setglobal(L, LIBNAME);
+
 	lua_pushliteral(L, "version");
 	lua_pushliteral(L, APK_VERSION);
 	lua_settable(L, -3);
-
-	luaL_newmetatable(L, APK_DB_META);
-	luaL_register(L, NULL, reg_apk_db_meta_methods);
-	lua_pushliteral(L, "__index");
-	lua_pushvalue(L, -3);
-	lua_rawset(L, -3);
-
-	lua_pushliteral(L, "__metatable");
-	lua_pushvalue(L, -3);
-	lua_rawset(L, -3);
-	lua_pop(L, 1);
 
 	return 1;
 }
