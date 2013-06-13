@@ -31,5 +31,6 @@ struct apk_indent {
 
 int apk_print_indented(struct apk_indent *i, apk_blob_t blob);
 void apk_print_indented_words(struct apk_indent *i, const char *text);
+void apk_print_indented_fmt(struct apk_indent *i, const char *fmt, ...);
 
 #endif

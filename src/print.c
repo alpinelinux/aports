@@ -57,6 +57,18 @@ void apk_print_indented_words(struct apk_indent *i, const char *text)
 		(apk_blob_cb) apk_print_indented, i);
 }
 
+void apk_print_indented_fmt(struct apk_indent *i, const char *fmt, ...)
+{
+	char tmp[256];
+	size_t n;
+	va_list va;
+
+	va_start(va, fmt);
+	n = vsnprintf(tmp, sizeof(tmp), fmt, va);
+	apk_print_indented(i, APK_BLOB_PTR_LEN(tmp, n));
+	va_end(va);
+}
+
 const char *apk_error_str(int error)
 {
 	if (error < 0)

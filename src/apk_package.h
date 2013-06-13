@@ -37,6 +37,10 @@ struct apk_provider;
 #define APK_SIGN_GENERATE		4
 #define APK_SIGN_VERIFY_AND_GENERATE	5
 
+#define APK_DEP_IRRELEVANT		0
+#define APK_DEP_SATISFIED		1
+#define APK_DEP_CONFLICTED		2
+
 struct apk_sign_ctx {
 	int keys_fd;
 	int action;
@@ -129,6 +133,8 @@ void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 int apk_dep_is_materialized(struct apk_dependency *dep, struct apk_package *pkg);
 int apk_dep_is_materialized_or_provided(struct apk_dependency *dep, struct apk_package *pkg);
 int apk_dep_is_provided(struct apk_dependency *dep, struct apk_provider *p);
+int apk_dep_analyze(struct apk_dependency *dep, struct apk_package *pkg);
+char *apk_dep_snprintf(char *buf, size_t n, struct apk_dependency *dep);
 
 void apk_blob_push_dep(apk_blob_t *to, struct apk_database *, struct apk_dependency *dep);
 void apk_blob_push_deps(apk_blob_t *to, struct apk_database *, struct apk_dependency_array *deps);

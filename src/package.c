@@ -399,6 +399,40 @@ int apk_dep_is_materialized_or_provided(struct apk_dependency *dep, struct apk_p
 	return dep->conflict;
 }
 
+int apk_dep_analyze(struct apk_dependency *dep, struct apk_package *pkg)
+{
+	int i;
+
+	if (pkg == NULL)
+		return APK_DEP_IRRELEVANT;
+
+	if (dep->name == pkg->name)
+		return apk_dep_is_materialized(dep, pkg) ? APK_DEP_SATISFIED : APK_DEP_CONFLICTED;
+
+	for (i = 0; i < pkg->provides->num; i++) {
+		struct apk_provider p;
+
+		if (pkg->provides->item[i].name != dep->name)
+			continue;
+
+		p = APK_PROVIDER_FROM_PROVIDES(pkg, &pkg->provides->item[i]);
+		return apk_dep_is_provided(dep, &p) ? APK_DEP_SATISFIED : APK_DEP_CONFLICTED;
+	}
+
+	return APK_DEP_IRRELEVANT;
+}
+
+char *apk_dep_snprintf(char *buf, size_t n, struct apk_dependency *dep)
+{
+	apk_blob_t b = APK_BLOB_PTR_LEN(buf, n);
+	apk_blob_push_dep(&b, NULL, dep);
+	if (b.len)
+		apk_blob_push_blob(&b, APK_BLOB_PTR_LEN("", 1));
+	else
+		b.ptr[-1] = 0;
+	return buf;
+}
+
 void apk_blob_push_dep(apk_blob_t *to, struct apk_database *db, struct apk_dependency *dep)
 {
 	int result_mask = dep->result_mask;

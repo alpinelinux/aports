@@ -437,6 +437,9 @@ static int compare_providers(struct apk_solver_state *ss,
 	r = (int)pkgA->ss.dependencies_used - (int)pkgB->ss.dependencies_used;
 	if (r)
 		return r;
+	r = pkgB->ss.conflicts - pkgA->ss.conflicts;
+	if (r)
+		return r;
 
 	/* Prefer installed on self-upgrade */
 	solver_flags = pkgA->ss.solver_flags | pkgB->ss.solver_flags;

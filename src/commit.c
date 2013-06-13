@@ -18,6 +18,46 @@
 
 #include "apk_print.h"
 
+static void foreach_package_reverse_dependency2(
+		struct apk_package *pkg,
+		struct apk_name_array *rdepends,
+		int match,
+		void cb(struct apk_package *pkg0, struct apk_dependency *d0, void *ctx),
+		void *ctx)
+{
+	int i, j, k;
+
+	for (i = 0; i < rdepends->num; i++) {
+		struct apk_name *name0 = rdepends->item[i];
+
+		for (j = 0; j < name0->providers->num; j++) {
+			struct apk_package *pkg0 = name0->providers->item[j].pkg;
+
+			for (k = 0; k < pkg0->depends->num; k++) {
+				struct apk_dependency *d0 = &pkg0->depends->item[k];
+				if (apk_dep_analyze(d0, pkg) == match)
+					cb(pkg0, d0, ctx);
+			}
+		}
+	}
+}
+
+static void foreach_package_reverse_dependency(
+		struct apk_package *pkg,
+		int match,
+		void cb(struct apk_package *pkg0, struct apk_dependency *d0, void *ctx),
+		void *ctx)
+{
+	int i;
+
+	if (pkg == NULL)
+		return;
+
+	foreach_package_reverse_dependency2(pkg, pkg->name->rdepends, match, cb, ctx);
+	for (i = 0; i < pkg->provides->num; i++)
+		foreach_package_reverse_dependency2(pkg, pkg->provides->item[i].name->rdepends, match, cb, ctx);
+}
+
 static inline int pkg_available(struct apk_database *db, struct apk_package *pkg)
 {
 	if (pkg->repos & db->available_repos)
@@ -370,27 +410,46 @@ all_done:
 	return r;
 }
 
-static void add_name_if_virtual(struct apk_name_array **names, struct apk_name *name)
+enum {
+	STATE_UNSET = 0,
+	STATE_PRESENT,
+	STATE_MISSING
+};
+
+struct print_state {
+	struct apk_database *db;
+	struct apk_dependency_array *world;
+	struct apk_indent i;
+	struct apk_name_array *missing;
+	const char *label;
+	int num_labels;
+	int match;
+};
+
+static void label_start(struct print_state *ps, const char *text)
 {
-	int i;
-
-	if (name->providers->num == 0)
-		return;
-
-	for (i = 0; i < name->providers->num; i++)
-		if (name->providers->item[i].pkg->name == name)
-			return;
-
-	for (i = 0; i < (*names)->num; i++)
-		if ((*names)->item[i] == name)
-			return;
-
-	*apk_name_array_add(names) = name;
+	if (ps->label) {
+		printf("  %s:\n", ps->label);
+		ps->label = NULL;
+		ps->i.x = ps->i.indent = 0;
+		ps->num_labels++;
+	}
+	if (ps->i.x == 0) {
+		ps->i.x = printf("    %s", text);
+		ps->i.indent = ps->i.x + 1;
+	}
+}
+static void label_end(struct print_state *ps)
+{
+	if (ps->i.x != 0) {
+		printf("\n");
+		ps->i.x = ps->i.indent = 0;
+	}
 }
 
-static void print_pinning_errors(struct apk_database *db, char *label,
-				 struct apk_package *pkg, unsigned int tag)
+static void print_pinning_errors(struct print_state *ps, struct apk_package *pkg, unsigned int tag)
 {
+	struct apk_database *db = ps->db;
 	int i;
 
 	if (pkg->ipkg != NULL)
@@ -398,68 +457,146 @@ static void print_pinning_errors(struct apk_database *db, char *label,
 	if (pkg->repos & apk_db_get_pinning_mask_repos(db, APK_DEFAULT_PINNING_MASK | BIT(tag)))
 		return;
 
-	printf("  %s: not pinned:", label);
 	for (i = 0; i < db->num_repo_tags; i++) {
-		if (pkg->repos & db->repo_tags[i].allowed_repos)
-			printf(" @" BLOB_FMT, BLOB_PRINTF(*db->repo_tags[i].name));
+		if (pkg->repos & db->repo_tags[i].allowed_repos) {
+			label_start(ps, "masked in:");
+			apk_print_indented(&ps->i, *db->repo_tags[i].name);
+		}
 	}
-	printf("\n");
+	label_end(ps);
 }
 
-static void print_dep_errors(struct apk_database *db, char *label,
-			     struct apk_dependency_array *deps,
-			     struct apk_name_array **names)
+static void print_conflicts(struct print_state *ps, struct apk_package *pkg)
 {
-	int i, print_label = 1;
-	char buf[256];
-	apk_blob_t p;
-	struct apk_indent indent;
+	struct apk_provider *p;
+	struct apk_dependency *d;
 
-	for (i = 0; i < deps->num; i++) {
-		struct apk_dependency *dep = &deps->item[i];
-		struct apk_package *pkg;
-
-		pkg = (struct apk_package*) (dep->name->state_int & ~1);
-		if (apk_dep_is_materialized_or_provided(dep, pkg))
+	foreach_array_item(p, pkg->name->providers) {
+		if (p->pkg == pkg || p->pkg->state_ptr == STATE_UNSET)
 			continue;
-
-		if (pkg == NULL)
-			add_name_if_virtual(names, dep->name);
-
-		if (print_label) {
-			print_label = 0;
-			indent.x = printf("  %s:", label);
-			indent.indent = indent.x + 1;
-		}
-		p = APK_BLOB_BUF(buf);
-		apk_blob_push_dep(&p, db, dep);
-		p = apk_blob_pushed(APK_BLOB_BUF(buf), p);
-		apk_print_indented(&indent, p);
+		label_start(ps, "conflicts:");
+		apk_print_indented_fmt(&ps->i, PKG_VER_FMT, PKG_VER_PRINTF(p->pkg));
 	}
-	if (!print_label)
-		printf("\n");
+	foreach_array_item(d, pkg->provides) {
+		foreach_array_item(p, d->name->providers) {
+			if (p->pkg == pkg || p->pkg->state_ptr == STATE_UNSET)
+				continue;
+			label_start(ps, "conflicts:");
+			apk_print_indented_fmt(
+				&ps->i,
+				PKG_VER_FMT "[%s]",
+				PKG_VER_PRINTF(p->pkg),
+				d->name->name);
+		}
+	}
+	label_end(ps);
 }
 
-static void print_provides_errors(struct apk_database *db, char *label,
-				  struct apk_package *pkg)
+static void print_dep(struct apk_package *pkg0, struct apk_dependency *d0, void *ctx)
 {
-	int i;
+	struct print_state *ps = (struct print_state *) ctx;
+	const char *label = (ps->match == APK_DEP_SATISFIED) ? "satisfies:" : "breaks:";
+	char tmp[256];
 
-	for (i = 0; i < pkg->provides->num; i++) {
-		struct apk_name *pn = pkg->provides->item[i].name;
-		struct apk_provider p = APK_PROVIDER_FROM_PROVIDES(pkg, &pkg->provides->item[i]);
-		struct apk_package *pkgC = (struct apk_package *) (pn->state_int & ~1);
+	if (pkg0 != NULL && pkg0->state_ptr == STATE_UNSET)
+		return;
 
-		if (pkgC == NULL && p.version == &apk_null_blob)
-			continue;
+	label_start(ps, label);
+	if (pkg0 == NULL)
+		apk_print_indented_fmt(&ps->i, "world[%s]", apk_dep_snprintf(tmp, sizeof(tmp), d0));
+	else
+		apk_print_indented_fmt(&ps->i, PKG_VER_FMT "[%s]",
+				       PKG_VER_PRINTF(pkg0),
+				       apk_dep_snprintf(tmp, sizeof(tmp), d0));
+}
 
-		if ((pkgC == pkg) && (pn->state_int & 1) == 0) {
-			pn->state_int |= 1;
-			continue;
+static void print_deps(struct print_state *ps, struct apk_package *pkg, int match)
+{
+	struct apk_dependency *d0;
+
+	ps->match = match;
+	foreach_array_item(d0, ps->world) {
+		if (apk_dep_analyze(d0, pkg) == match)
+			print_dep(NULL, d0, ps);
+	}
+	foreach_package_reverse_dependency(pkg, ps->match, print_dep, ps);
+	label_end(ps);
+}
+
+static void analyze_package(struct print_state *ps, struct apk_package *pkg, unsigned int tag)
+{
+	char pkgtext[256];
+
+	snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
+	ps->label = pkgtext;
+
+	print_pinning_errors(ps, pkg, tag);
+	print_conflicts(ps, pkg);
+	print_deps(ps, pkg, APK_DEP_CONFLICTED);
+	if (ps->label == NULL)
+		print_deps(ps, pkg, APK_DEP_SATISFIED);
+}
+
+static void analyze_name(struct print_state *ps, struct apk_name *name)
+{
+	struct apk_name **pname0, *name0;
+	struct apk_provider *p0;
+	struct apk_dependency *d0;
+	char tmp[256];
+
+	if (name->providers->num) {
+		snprintf(tmp, sizeof(tmp), "%s (virtual)", name->name);
+		ps->label = tmp;
+
+		label_start(ps, "provided by:");
+		foreach_array_item(p0, name->providers) {
+			/* FIXME: print only name if all pkgs provide it */
+			struct apk_package *pkg = p0->pkg;
+			apk_print_indented_fmt(&ps->i, PKG_VER_FMT, PKG_VER_PRINTF(pkg));
 		}
+		label_end(ps);
+	} else {
+		snprintf(tmp, sizeof(tmp), "%s (missing)", name->name);
+		ps->label = tmp;
+	}
 
-		printf("  %s provides " PROVIDER_FMT " conflicting with " PKG_VER_FMT "\n",
-			label, PROVIDER_PRINTF(pn, &p), PKG_VER_PRINTF(pkgC));
+	label_start(ps, "required by:");
+	foreach_array_item(d0, ps->world) {
+		if (d0->name != name || d0->conflict)
+			continue;
+		apk_print_indented_fmt(&ps->i, "world[%s]",
+			apk_dep_snprintf(tmp, sizeof(tmp), d0));
+	}
+	foreach_array_item(pname0, name->rdepends) {
+		name0 = *pname0;
+		foreach_array_item(p0, name0->providers) {
+			if (p0->pkg->state_ptr == STATE_UNSET)
+				continue;
+			foreach_array_item(d0, p0->pkg->depends) {
+				if (d0->name != name || d0->conflict)
+					continue;
+				apk_print_indented_fmt(&ps->i,
+					PKG_VER_FMT "[%s]",
+					PKG_VER_PRINTF(p0->pkg),
+					apk_dep_snprintf(tmp, sizeof(tmp), d0));
+				break;
+			}
+			if (d0 != NULL)
+				break;
+		}
+	}
+	label_end(ps);
+}
+
+static void analyze_deps(struct print_state *ps, struct apk_dependency_array *deps)
+{
+	struct apk_dependency *d0;
+
+	foreach_array_item(d0, deps) {
+		if (d0->name->state_int != STATE_UNSET)
+			continue;
+		d0->name->state_int = STATE_MISSING;
+		analyze_name(ps, d0->name);
 	}
 }
 
@@ -467,60 +604,76 @@ void apk_solver_print_errors(struct apk_database *db,
 			     struct apk_changeset *changeset,
 			     struct apk_dependency_array *world)
 {
-	struct apk_name_array *names;
-	char pkgtext[256];
-	int i, j;
+	struct print_state ps;
+	struct apk_change *change;
+	struct apk_dependency *p;
 
-	apk_name_array_init(&names);
-	/* FIXME: Print more rational error messages. Group failed
-	 * dependencies by package name. As in,
-	 * pkg-1.2 selected, but:
-	 *   world: pkg>2
+	/* ERROR: unsatisfiable dependencies:
+	 *   name:
+	 *     required by: a b c d e
+	 *     not available in any repository
+	 *   name (virtual):
+	 *     required by: a b c d e
+	 *     provided by: foo bar zed
+	 *   pkg-1.2:
+	 *     masked by: @testing
+	 *     satisfies: a[pkg]
+	 *     conflicts: pkg-2.0 foo-1.2 bar-1.2
+	 *     breaks: b[pkg>2] c[foo>2] d[!pkg]
+	 *
+	 * When two packages provide same name 'foo':
+	 *   a-1:
+	 *     satisfies: world[a]
+	 *     conflicts: b-1[foo]
+	 *   b-1:
+	 *     satisfies: world[b]
+	 *     conflicts: a-1[foo]
+	 * 
+	 *   c-1:
+	 *     satisfies: world[a]
+	 *     conflicts: c-1[foo]  (self-conflict by providing foo twice)
+	 *
+	 * When two packages get pulled in:
+	 *   a-1:
+	 *     satisfies: app1[so:a.so.1]
+	 *     conflicts: a-2
+	 *   a-2:
+	 *     satisfies: app2[so:a.so.2]
+	 *     conflicts: a-1
+	 *
+	 * satisfies lists all dependencies that is not satisfiable by
+	 * any other selected version. or all of them with -v.
 	 */
-	apk_error("unsatisfiable dependencies:");
+ 
+	apk_error("unsatisfiable constraints:");
 
-	for (i = 0; i < changeset->changes->num; i++) {
-		struct apk_package *pkg = changeset->changes->item[i].new_pkg;
-		if (pkg == NULL)
-			continue;
-		pkg->state_int = 1;
-		pkg->name->state_ptr = pkg;
-		for (j = 0; j < pkg->provides->num; j++) {
-			if (pkg->provides->item[j].version == &apk_null_blob)
-				continue;
-			if (pkg->provides->item[j].name->state_ptr == NULL)
-				pkg->provides->item[j].name->state_ptr = pkg;
-		}
-	}
-
-	print_dep_errors(db, "world", world, &names);
-	for (i = 0; i < changeset->changes->num; i++) {
-		struct apk_change *change = &changeset->changes->item[i];
+	/* Construct information about names */
+	foreach_array_item(change, changeset->changes) {
 		struct apk_package *pkg = change->new_pkg;
 		if (pkg == NULL)
 			continue;
-		snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
-		print_pinning_errors(db, pkgtext, pkg, change->new_repository_tag);
-		print_dep_errors(db, pkgtext, pkg->depends, &names);
-		print_provides_errors(db, pkgtext, pkg);
+		pkg->state_int = STATE_PRESENT;
+		pkg->name->state_int = STATE_PRESENT;
+		foreach_array_item(p, pkg->provides)
+			p->name->state_int = STATE_PRESENT;
 	}
 
-	for (i = 0; i < names->num; i++) {
-		struct apk_indent indent;
-		struct apk_name *name = names->item[i];
-
-		printf("\n  %s is a virtual package provided by:\n    ", name->name);
-		indent.x = 4;
-		indent.indent = 4;
-
-		for (j = 0; j < name->providers->num; j++) {
-			struct apk_package *pkg = name->providers->item[j].pkg;
-			snprintf(pkgtext, sizeof(pkgtext), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
-			apk_print_indented(&indent, APK_BLOB_STR(pkgtext));
-		}
-		printf("\n");
+	/* Analyze is package, and missing names referred to */
+	ps = (struct print_state) {
+		.db = db,
+		.world = world,
+	};
+	analyze_deps(&ps, world);
+	foreach_array_item(change, changeset->changes) {
+		struct apk_package *pkg = change->new_pkg;
+		if (pkg == NULL)
+			continue;
+		analyze_package(&ps, pkg, change->new_repository_tag);
+		analyze_deps(&ps, pkg->depends);
 	}
-	apk_name_array_free(&names);
+
+	if (ps.num_labels == 0)
+		printf("  Huh? Error reporter did not find the broken constraints.\n");
 }
 
 int apk_solver_commit(struct apk_database *db,
