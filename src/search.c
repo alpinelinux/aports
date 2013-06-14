@@ -119,16 +119,14 @@ static void print_result_pkg(struct search_ctx *ctx, struct apk_package *pkg)
 
 static void print_result(struct search_ctx *ctx, struct apk_name *name)
 {
-	int i;
+	struct apk_provider *p;
+	struct apk_package *pkg = NULL;
+	apk_blob_t *version = NULL;
 
 	if (ctx->show_all) {
-		for (i = 0; i < name->providers->num; i++)
-			print_result_pkg(ctx, name->providers->item[i].pkg);
+		foreach_array_item(p, name->providers)
+			print_result_pkg(ctx, p->pkg);
 	} else {
-		struct apk_package *pkg = NULL;
-		struct apk_provider *p;
-		apk_blob_t *version = NULL;
-
 		foreach_array_item(p, name->providers) {
 			if (version == NULL ||
 			    apk_version_compare_blob(*p->version, *version) == APK_VERSION_GREATER)

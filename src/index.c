@@ -92,7 +92,7 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 	struct counts counts = {0};
 	struct apk_ostream *os;
 	struct apk_file_info fi;
-	int total, r, i, j, found, newpkgs = 0, errors = 0;
+	int total, r, i, found, newpkgs = 0, errors = 0;
 	struct index_ctx *ictx = (struct index_ctx *) ctx;
 	struct apk_package *pkg;
 
@@ -119,6 +119,7 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 		found = FALSE;
 		do {
+			struct apk_provider *p;
 			struct apk_name *name;
 			char *fname, *fend;
 			apk_blob_t bname, bver;
@@ -145,8 +146,8 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			if (name == NULL)
 				break;
 
-			for (j = 0; j < name->providers->num; j++) {
-				pkg = name->providers->item[j].pkg;
+			foreach_array_item(p, name->providers) {
+				pkg = p->pkg;
 				if (pkg->name != name)
 					continue;
 				if (apk_blob_compare(bver, *pkg->version) != 0)

@@ -195,12 +195,11 @@ recurse_check:
 		atctx->pathlen--;
 	} else {
 		struct apk_db_file *dbf;
-		struct apk_protected_path_array *ppaths = dir->protected_paths;
-		int i, protected = dir->protected, symlinks_only = dir->symlinks_only;
+		struct apk_protected_path *ppath;
+		int protected = dir->protected, symlinks_only = dir->symlinks_only;
 
 		/* inherit file's protection mask */
-		for (i = 0; i < ppaths->num; i++) {
-			struct apk_protected_path *ppath = &ppaths->item[i];
+		foreach_array_item(ppath, dir->protected_paths) {
 			char *slash = strchr(ppath->relative_pattern, '/');
 			if (slash == NULL) {
 				if (fnmatch(ppath->relative_pattern, name, FNM_PATHNAME) != 0)

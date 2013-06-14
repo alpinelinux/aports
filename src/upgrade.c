@@ -89,8 +89,9 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 {
 	struct upgrade_ctx *uctx = (struct upgrade_ctx *) ctx;
 	unsigned short solver_flags;
+	struct apk_dependency *dep;
 	struct apk_dependency_array *world = NULL;
-	int i, r;
+	int r;
 
 	if (apk_db_check_world(db, db->world) != 0) {
 		apk_error("Not continuing with upgrade due to missing repository tags. Use --force to override.");
@@ -106,8 +107,7 @@ static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **arg
 
 	if (solver_flags & APK_SOLVERF_AVAILABLE) {
 		apk_dependency_array_copy(&world, db->world);
-		for (i = 0; i < world->num; i++) {
-			struct apk_dependency *dep = &world->item[i];
+		foreach_array_item(dep, world) {
 			if (dep->result_mask == APK_DEPMASK_CHECKSUM) {
 				dep->result_mask = APK_DEPMASK_ANY;
 				dep->version = apk_blob_atomize(APK_BLOB_NULL);
