@@ -430,6 +430,7 @@ static void print_conflicts(struct print_state *ps, struct apk_package *pkg)
 {
 	struct apk_provider *p;
 	struct apk_dependency *d;
+	char tmp[256];
 
 	foreach_array_item(p, pkg->name->providers) {
 		if (p->pkg == pkg || !p->pkg->marked)
@@ -439,14 +440,15 @@ static void print_conflicts(struct print_state *ps, struct apk_package *pkg)
 	}
 	foreach_array_item(d, pkg->provides) {
 		foreach_array_item(p, d->name->providers) {
-			if (p->pkg == pkg || !p->pkg->marked)
+			if (!p->pkg->marked)
+				continue;
+			if (p->pkg == pkg && p->version == d->version)
 				continue;
 			label_start(ps, "conflicts:");
 			apk_print_indented_fmt(
-				&ps->i,
-				PKG_VER_FMT "[%s]",
+				&ps->i, PKG_VER_FMT "[%s]",
 				PKG_VER_PRINTF(p->pkg),
-				d->name->name);
+				apk_dep_snprintf(tmp, sizeof(tmp), d));
 		}
 	}
 	label_end(ps);
