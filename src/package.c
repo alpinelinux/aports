@@ -1190,28 +1190,46 @@ int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b)
 	return apk_version_compare_blob(*a->version, *b->version);
 }
 
+unsigned int apk_foreach_genid(void)
+{
+	static unsigned int foreach_genid;
+	foreach_genid += (~APK_FOREACH_GENID_MASK) + 1;
+	return foreach_genid;
+}
+
 void apk_pkg_foreach_matching_dependency(
-		struct apk_package *pkg, struct apk_dependency_array *deps, int match, struct apk_package *mpkg,
+		struct apk_package *pkg, struct apk_dependency_array *deps,
+		unsigned int match, struct apk_package *mpkg,
 		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
 		void *ctx)
 {
+	unsigned int genid = match & APK_FOREACH_GENID_MASK;
 	struct apk_dependency *d;
 
+	if (genid && pkg->foreach_genid >= genid)
+		return;
+	if (pkg)
+		pkg->foreach_genid = genid;
+
 	foreach_array_item(d, deps) {
-		if (apk_dep_analyze(d, mpkg) & match)
+		if (apk_dep_analyze(d, mpkg) & match) {
 			cb(pkg, d, mpkg, ctx);
+			if (genid)
+				break;
+		}
 	}
 }
 
 static void foreach_reverse_dependency(
 		struct apk_package *pkg,
 		struct apk_name_array *rdepends,
-		int match,
+		unsigned int match,
 		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
 		void *ctx)
 {
-	int installed = match & APK_FOREACH_INSTALLED;
-	int marked = match & APK_FOREACH_MARKED;
+	unsigned int installed = match & APK_FOREACH_INSTALLED;
+	unsigned int marked = match & APK_FOREACH_MARKED;
+	unsigned int genid = match & APK_FOREACH_GENID_MASK;
 	struct apk_name **pname0, *name0;
 	struct apk_provider *p0;
 	struct apk_package *pkg0;
@@ -1225,6 +1243,9 @@ static void foreach_reverse_dependency(
 				continue;
 			if (marked && !pkg0->marked)
 				continue;
+			if (genid && pkg0->foreach_genid >= genid)
+				continue;
+			pkg0->foreach_genid = genid;
 			foreach_array_item(d0, pkg0->depends) {
 				if (apk_dep_analyze(d0, pkg) & match)
 					cb(pkg0, d0, pkg, ctx);
@@ -1234,7 +1255,7 @@ static void foreach_reverse_dependency(
 }
 
 void apk_pkg_foreach_reverse_dependency(
-		struct apk_package *pkg, int match,
+		struct apk_package *pkg, unsigned int match,
 		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
 		void *ctx)
 {

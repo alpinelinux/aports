@@ -23,8 +23,8 @@ struct search_ctx {
 	int show_all : 1;
 	int search_exact : 1;
 	int search_description : 1;
-	int rdep_generation;
 
+	unsigned int matches;
 	int argc;
 	char **argv;
 };
@@ -53,19 +53,16 @@ static void print_origin_name(struct search_ctx *ctx, struct apk_package *pkg)
 static void print_rdep_pkg(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *pctx)
 {
 	struct search_ctx *ctx = (struct search_ctx *) pctx;
-	if (pkg0->state_int == ctx->rdep_generation)
-		return;
-	pkg0->state_int = ctx->rdep_generation;
 	ctx->print_package(ctx, pkg0);
 }
 
 static void print_rdepends(struct search_ctx *ctx, struct apk_package *pkg)
 {
 	if (apk_verbosity > 0) {
-		ctx->rdep_generation++;
+		ctx->matches = apk_foreach_genid() | APK_DEP_SATISFIES;
 		printf(PKG_VER_FMT " is required by:\n", PKG_VER_PRINTF(pkg));
 	}
-	apk_pkg_foreach_reverse_dependency(pkg, APK_DEP_SATISFIES, print_rdep_pkg, ctx);
+	apk_pkg_foreach_reverse_dependency(pkg, ctx->matches, print_rdep_pkg, ctx);
 }
 
 static int search_parse(void *ctx, struct apk_db_options *dbopts,
@@ -160,7 +157,7 @@ static int search_main(void *pctx, struct apk_database *db, int argc, char **arg
 	char s[256];
 	int i, l;
 
-	ctx->rdep_generation = 1;
+	ctx->matches = apk_foreach_genid() | APK_DEP_SATISFIES;
 	if (ctx->print_package == NULL)
 		ctx->print_package = print_package_name;
 	if (ctx->print_result == NULL)

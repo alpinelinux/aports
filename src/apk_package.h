@@ -37,11 +37,12 @@ struct apk_provider;
 #define APK_SIGN_GENERATE		4
 #define APK_SIGN_VERIFY_AND_GENERATE	5
 
-#define APK_DEP_IRRELEVANT		0x00001
-#define APK_DEP_SATISFIES		0x00002
-#define APK_DEP_CONFLICTS		0x00004
-#define APK_FOREACH_INSTALLED		0x10000
-#define APK_FOREACH_MARKED		0x20000
+#define APK_DEP_IRRELEVANT		0x01
+#define APK_DEP_SATISFIES		0x02
+#define APK_DEP_CONFLICTS		0x04
+#define APK_FOREACH_INSTALLED		0x10
+#define APK_FOREACH_MARKED		0x20
+#define APK_FOREACH_GENID_MASK		0xffffff00
 
 struct apk_sign_ctx {
 	int keys_fd;
@@ -95,7 +96,8 @@ struct apk_package {
 	union {
 		struct apk_solver_package_state ss;
 		struct {
-			int marked;
+			unsigned int marked;
+			unsigned int foreach_genid;
 			union {
 				int state_int;
 				void *state_ptr;
@@ -185,12 +187,14 @@ int apk_pkg_write_index_entry(struct apk_package *pkg, struct apk_ostream *os);
 
 int apk_pkg_version_compare(struct apk_package *a, struct apk_package *b);
 
+unsigned int apk_foreach_genid(void);
 void apk_pkg_foreach_matching_dependency(
-		struct apk_package *pkg, struct apk_dependency_array *deps, int match, struct apk_package *mpkg,
+		struct apk_package *pkg, struct apk_dependency_array *deps,
+		unsigned int match, struct apk_package *mpkg,
 		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
 		void *ctx);
 void apk_pkg_foreach_reverse_dependency(
-		struct apk_package *pkg, int match,
+		struct apk_package *pkg, unsigned int match,
 		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
 		void *ctx);
 
