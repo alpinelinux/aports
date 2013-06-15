@@ -138,7 +138,6 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t blob);
 void apk_dep_from_pkg(struct apk_dependency *dep, struct apk_database *db,
 		      struct apk_package *pkg);
 int apk_dep_is_materialized(struct apk_dependency *dep, struct apk_package *pkg);
-int apk_dep_is_materialized_or_provided(struct apk_dependency *dep, struct apk_package *pkg);
 int apk_dep_is_provided(struct apk_dependency *dep, struct apk_provider *p);
 int apk_dep_analyze(struct apk_dependency *dep, struct apk_package *pkg);
 char *apk_dep_snprintf(char *buf, size_t n, struct apk_dependency *dep);

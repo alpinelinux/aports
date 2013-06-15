@@ -377,28 +377,6 @@ int apk_dep_is_materialized(struct apk_dependency *dep, struct apk_package *pkg)
 	return dep->conflict;
 }
 
-int apk_dep_is_materialized_or_provided(struct apk_dependency *dep, struct apk_package *pkg)
-{
-	int i;
-
-	if (pkg == NULL)
-		return dep->conflict;
-
-	if (dep->name == pkg->name)
-		return apk_dep_is_materialized(dep, pkg);
-
-	for (i = 0; i < pkg->provides->num; i++) {
-		struct apk_provider p;
-
-		if (pkg->provides->item[i].name != dep->name)
-			continue;
-		p = APK_PROVIDER_FROM_PROVIDES(pkg, &pkg->provides->item[i]);
-		return apk_dep_is_provided(dep, &p);
-	}
-
-	return dep->conflict;
-}
-
 int apk_dep_analyze(struct apk_dependency *dep, struct apk_package *pkg)
 {
 	struct apk_dependency *p;
