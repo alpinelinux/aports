@@ -2133,19 +2133,12 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 	return 0;
 }
 
-static void extract_cb(void *_ctx, size_t progress)
+static void extract_cb(void *_ctx, size_t bytes_done)
 {
 	struct install_ctx *ctx = (struct install_ctx *) _ctx;
-
-	if (ctx->cb) {
-		size_t size = ctx->installed_size;
-
-		size += muldiv(progress, ctx->current_file_size, APK_PROGRESS_SCALE);
-		if (size > ctx->pkg->installed_size)
-			size = ctx->pkg->installed_size;
-
-		ctx->cb(ctx->cb_ctx, muldiv(APK_PROGRESS_SCALE, size, ctx->pkg->installed_size));
-	}
+	if (!ctx->cb)
+		return;
+	ctx->cb(ctx->cb_ctx, min(ctx->installed_size + bytes_done, ctx->pkg->installed_size));
 }
 
 static int apk_db_run_pending_script(struct install_ctx *ctx)
@@ -2255,14 +2248,6 @@ static int apk_db_install_archive_entry(void *_ctx,
 	r = apk_db_run_pending_script(ctx);
 	if (r != 0)
 		return r;
-
-	/* Show progress */
-	if (ctx->cb) {
-		size_t size = ctx->installed_size;
-		if (size > pkg->installed_size)
-			size = pkg->installed_size;
-		ctx->cb(ctx->cb_ctx, muldiv(APK_PROGRESS_SCALE, size, pkg->installed_size));
-	}
 
 	/* Installable entry */
 	ctx->current_file_size = apk_calc_installed_size(ae->size);

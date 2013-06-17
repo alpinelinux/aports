@@ -16,6 +16,7 @@
 
 #define ARRAY_SIZE(x)	(sizeof(x) / sizeof((x)[0]))
 #define BIT(x)		(1 << (x))
+#define min(a, b)	((a) < (b) ? (a) : (b))
 #define max(a, b)	((a) > (b) ? (a) : (b))
 
 #ifndef TRUE
@@ -101,8 +102,6 @@ static inline size_t muldiv(size_t a, size_t b, size_t c)
 }
 
 typedef void (*apk_progress_cb)(void *cb_ctx, size_t);
-
-#define APK_PROGRESS_SCALE 0x100
 
 void *apk_array_resize(void *array, size_t new_size, size_t elem_size);
 

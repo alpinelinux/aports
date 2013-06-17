@@ -363,8 +363,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 				r = -1;
 				break;
 			}
-			if (apk_istream_splice(is, fd, ae->size, cb, cb_ctx)
-			    == ae->size)
+			if (apk_istream_splice(is, fd, ae->size, cb, cb_ctx) == ae->size)
 				r = 0;
 			close(fd);
 		} else {

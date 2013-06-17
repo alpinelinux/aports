@@ -125,16 +125,14 @@ struct progress {
 	int flags;
 };
 
-static void progress_cb(void *ctx, size_t pkg_percent)
+static void progress_cb(void *ctx, size_t installed_bytes)
 {
 	struct progress *prog = (struct progress *) ctx;
-	size_t partial = 0, percent, total;
+	size_t percent, total;
 
-	if (prog->pkg != NULL)
-		partial = muldiv(pkg_percent, prog->pkg->installed_size, APK_PROGRESS_SCALE);
 	total = prog->total.bytes + prog->total.packages;
 	if (total > 0)
-		percent = muldiv(100, prog->done.bytes + prog->done.packages + partial,
+		percent = muldiv(100, prog->done.bytes + prog->done.packages + installed_bytes,
 				 prog->total.bytes + prog->total.packages);
 	else
 		percent = 0;

@@ -156,8 +156,8 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 	}
 
 	while (done < size) {
-		if (done != 0 && cb != NULL)
-			cb(cb_ctx, muldiv(APK_PROGRESS_SCALE, done, size));
+		if (cb != NULL)
+			cb(cb_ctx, done);
 
 		togo = size - done;
 		if (togo > bufsz)
