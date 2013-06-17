@@ -118,42 +118,11 @@ static void count_change(struct apk_change *change, struct apk_stats *stats)
 	}
 }
 
-static void draw_progress(int percent)
-{
-	const int bar_width = apk_get_screen_width() - 7;
-	int i;
-
-	fprintf(stderr, "\e7%3i%% [", percent);
-	for (i = 0; i < bar_width * percent / 100; i++)
-		fputc('#', stderr);
-	for (; i < bar_width; i++)
-		fputc(' ', stderr);
-	fputc(']', stderr);
-	fflush(stderr);
-	fputs("\e8\e[0K", stderr);
-}
-
 struct progress {
 	struct apk_stats done;
 	struct apk_stats total;
 	struct apk_package *pkg;
-	size_t percent;
-	int progress_fd;
 };
-
-static void update_progress(struct progress *prog, size_t percent, int force)
-{
-	if (prog->percent == percent && !force)
-		return;
-	prog->percent = percent;
-	if (apk_flags & APK_PROGRESS)
-		draw_progress(percent);
-	if (prog->progress_fd != 0) {
-		char buf[8];
-		size_t n = snprintf(buf, sizeof(buf), "%zu\n", percent);
-		write(prog->progress_fd, buf, n);
-	}
-}
 
 static void progress_cb(void *ctx, size_t pkg_percent)
 {
@@ -168,7 +137,9 @@ static void progress_cb(void *ctx, size_t pkg_percent)
 				 prog->total.bytes + prog->total.packages);
 	else
 		percent = 0;
-	update_progress(prog, percent, pkg_percent == 0);
+	if (pkg_percent == 0)
+		percent |= APK_PRINT_PROGRESS_FORCE;
+	apk_print_progress(percent);
 }
 
 static int dump_packages(struct apk_changeset *changeset,
@@ -279,7 +250,6 @@ int apk_solver_commit_changeset(struct apk_database *db,
 
 	/* Count what needs to be done */
 	memset(&prog, 0, sizeof(prog));
-	prog.progress_fd = db->progress_fd;
 	for (i = 0; i < changeset->changes->num; i++) {
 		change = &changeset->changes->item[i];
 		count_change(change, &prog.total);
@@ -345,7 +315,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 
 		count_change(change, &prog.done);
 	}
-	update_progress(&prog, 100, 1);
+	apk_print_progress(100 | APK_PRINT_PROGRESS_FORCE);
 
 	run_triggers(db, changeset);
 

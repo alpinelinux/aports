@@ -18,6 +18,8 @@
 #define apk_warning(args...)	do { if (apk_verbosity > 0) { apk_log("WARNING: ", args); } } while (0)
 #define apk_message(args...)	do { if (apk_verbosity > 0) { apk_log(NULL, args); } } while (0)
 
+extern int apk_progress_fd;
+
 void apk_log(const char *prefix, const char *format, ...);
 const char *apk_error_str(int error);
 
@@ -29,7 +31,11 @@ struct apk_indent {
 	int indent;
 };
 
-int apk_print_indented(struct apk_indent *i, apk_blob_t blob);
+#define APK_PRINT_PROGRESS_MASK		0xff
+#define APK_PRINT_PROGRESS_FORCE	0x100
+
+void apk_print_progress(int percent);
+int  apk_print_indented(struct apk_indent *i, apk_blob_t blob);
 void apk_print_indented_words(struct apk_indent *i, const char *text);
 void apk_print_indented_fmt(struct apk_indent *i, const char *fmt, ...);
 

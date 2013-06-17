@@ -19,6 +19,7 @@
 #include "apk_defines.h"
 #include "apk_print.h"
 
+int apk_progress_fd;
 static int apk_screen_width = 0;
 
 void apk_reset_screen_width(void)
@@ -38,6 +39,37 @@ int apk_get_screen_width(void)
 	}
 
 	return apk_screen_width;
+}
+
+void apk_print_progress(int percent_flags)
+{
+	static int last_written = 0;
+	const int bar_width = apk_get_screen_width() - 7;
+	char buf[8];
+	int i, percent;
+
+	percent = percent_flags & APK_PRINT_PROGRESS_MASK;
+
+	if (last_written == percent && !(percent_flags & APK_PRINT_PROGRESS_FORCE))
+		return;
+
+	last_written = percent;
+
+	if (apk_flags & APK_PROGRESS) {
+		fprintf(stderr, "\e7%3i%% [", percent);
+		for (i = 0; i < bar_width * percent / 100; i++)
+			fputc('#', stderr);
+		for (; i < bar_width; i++)
+			fputc(' ', stderr);
+		fputc(']', stderr);
+		fflush(stderr);
+		fputs("\e8\e[0K", stderr);
+	}
+
+	if (apk_progress_fd != 0) {
+		i = snprintf(buf, sizeof(buf), "%zu\n", percent);
+		write(apk_progress_fd, buf, i);
+	}
 }
 
 int apk_print_indented(struct apk_indent *i, apk_blob_t blob)

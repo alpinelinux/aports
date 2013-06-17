@@ -386,7 +386,7 @@ int main(int argc, char **argv)
 			apk_flags &= ~APK_PROGRESS;
 			break;
 		case 0x10f:
-			dbopts.progress_fd = atoi(optarg);
+			apk_progress_fd = atoi(optarg);
 			break;
 		case 0x102:
 			apk_flags |= APK_CLEAN_PROTECTED;
