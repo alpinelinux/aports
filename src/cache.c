@@ -9,6 +9,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <fcntl.h>
 #include <errno.h>
 #include <stdio.h>
 #include <dirent.h>
@@ -78,8 +79,10 @@ static void cache_clean_item(struct apk_database *db, int dirfd, const char *nam
 
 	if (apk_verbosity >= 2)
 		apk_message("deleting %s", name);
-	if (!(apk_flags & APK_SIMULATE))
-		unlinkat(dirfd, name, 0);
+	if (!(apk_flags & APK_SIMULATE)) {
+		if (unlinkat(dirfd, name, 0) < 0 && errno == EISDIR)
+			unlinkat(dirfd, name, AT_REMOVEDIR);
+	}
 }
 
 static int cache_clean(struct apk_database *db)

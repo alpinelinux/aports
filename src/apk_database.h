@@ -129,7 +129,7 @@ struct apk_repository_tag {
 
 struct apk_database {
 	char *root;
-	int root_fd, lock_fd, cache_fd, cachetmp_fd, keys_fd, progress_fd;
+	int root_fd, lock_fd, cache_fd, keys_fd, progress_fd;
 	unsigned num_repos, num_repo_tags;
 	const char *cache_dir;
 	char *cache_remount_dir;

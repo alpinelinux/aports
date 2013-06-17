@@ -46,6 +46,8 @@ enum {
 int apk_verbosity = 1;
 unsigned int apk_flags = 0;
 
+static apk_blob_t tmpprefix = { .len=8, .ptr = ".apknew." };
+
 static const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
 
 static const char * const apk_static_cache_dir = "var/cache/apk";
@@ -624,16 +626,19 @@ int apk_repo_format_item(struct apk_database *db, struct apk_repository *repo, s
 int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 		       struct apk_package *pkg, int verify)
 {
-	char cacheitem[128], url[PATH_MAX];
 	struct apk_istream *is;
 	struct apk_bstream *bs;
 	struct apk_sign_ctx sctx;
+	char url[PATH_MAX];
+	char tmpcacheitem[128], *cacheitem = &tmpcacheitem[tmpprefix.len];
+	apk_blob_t b = APK_BLOB_BUF(tmpcacheitem);
 	int r, fd;
 
+	apk_blob_push_blob(&b, tmpprefix);
 	if (pkg != NULL)
-		r = apk_pkg_format_cache_pkg(APK_BLOB_BUF(cacheitem), pkg);
+		r = apk_pkg_format_cache_pkg(b, pkg);
 	else
-		r = apk_repo_format_cache_index(APK_BLOB_BUF(cacheitem), repo);
+		r = apk_repo_format_cache_index(b, repo);
 	if (r < 0)
 		return r;
 
@@ -649,13 +654,13 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 	if (verify != APK_SIGN_NONE) {
 		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL, db->keys_fd);
 		bs = apk_bstream_from_url(url);
-		bs = apk_bstream_tee(bs, db->cachetmp_fd, cacheitem);
+		bs = apk_bstream_tee(bs, db->cache_fd, tmpcacheitem);
 		is = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &sctx);
 		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx, FALSE, &db->id_cache);
 		apk_sign_ctx_free(&sctx);
 	} else {
 		is = apk_istream_from_url(url);
-		fd = openat(db->cachetmp_fd, cacheitem, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+		fd = openat(db->cache_fd, tmpcacheitem, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (fd >= 0) {
 			r = apk_istream_splice(is, fd, APK_SPLICE_ALL, NULL, NULL);
 			close(fd);
@@ -665,14 +670,12 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 	}
 	is->close(is);
 	if (r < 0) {
-		unlinkat(db->cachetmp_fd, cacheitem, 0);
+		unlinkat(db->cache_fd, tmpcacheitem, 0);
 		return r;
 	}
 
-	if (db->cachetmp_fd != db->cache_fd) {
-		if (renameat(db->cachetmp_fd, cacheitem, db->cache_fd, cacheitem) < 0)
-			return -errno;
-	}
+	if (renameat(db->cache_fd, tmpcacheitem, db->cache_fd, cacheitem) < 0)
+		return -errno;
 
 	return 0;
 }
@@ -1445,6 +1448,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	struct apk_repository_list *repo = NULL;
 	struct apk_bstream *bs;
 	struct statfs stfs;
+	struct statvfs stvfs;
 	apk_blob_t blob;
 	int r, fd, write_arch = FALSE;
 
@@ -1553,8 +1557,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	/* figure out where to have the cache */
 	fd = openat(db->root_fd, apk_linked_cache_dir, O_RDONLY | O_CLOEXEC);
 	if (fd >= 0 && fstatfs(fd, &stfs) == 0 && stfs.f_type != 0x01021994 /* TMPFS_MAGIC */) {
-		struct statvfs stvfs;
-
 		db->cache_dir = apk_linked_cache_dir;
 		db->cache_fd = fd;
 		if ((dbopts->open_flags & (APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE)) &&
@@ -1571,14 +1573,11 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 				goto ret_r;
 			}
 		}
-		mkdirat(db->cache_fd, "tmp", 0644);
-		db->cachetmp_fd = openat(db->cache_fd, "tmp", O_RDONLY | O_CLOEXEC);
 	} else {
 		if (fd >= 0)
 			close(fd);
 		db->cache_dir = apk_static_cache_dir;
 		db->cache_fd = openat(db->root_fd, db->cache_dir, O_RDONLY | O_CLOEXEC);
-		db->cachetmp_fd = db->cache_fd;
 	}
 
 	db->keys_fd = openat(db->root_fd,
@@ -1757,8 +1756,6 @@ void apk_db_close(struct apk_database *db)
 
 	if (db->keys_fd)
 		close(db->keys_fd);
-	if (db->cachetmp_fd && db->cachetmp_fd != db->cache_fd)
-		close(db->cachetmp_fd);
 	if (db->cache_fd)
 		close(db->cache_fd);
 	if (db->root_fd)
@@ -2540,7 +2537,8 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	struct apk_repository *repo;
 	struct apk_package *pkg = ipkg->pkg;
 	const char *action = "";
-	char file[PATH_MAX], item[128];
+	char file[PATH_MAX];
+	char tmpcacheitem[128], *cacheitem = &tmpcacheitem[tmpprefix.len];
 	int r, filefd = AT_FDCWD, need_copy = FALSE;
 
 	if (pkg->filename == NULL) {
@@ -2568,8 +2566,10 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		goto err_msg;
 	}
 	if (need_copy) {
-		apk_pkg_format_cache_pkg(APK_BLOB_BUF(item), pkg);
-		bs = apk_bstream_tee(bs, db->cachetmp_fd, item);
+		apk_blob_t b = APK_BLOB_BUF(tmpcacheitem);
+		apk_blob_push_blob(&b, tmpprefix);
+		apk_pkg_format_cache_pkg(b, pkg);
+		bs = apk_bstream_tee(bs, db->cache_fd, tmpcacheitem);
 		if (bs == NULL) {
 			action = "unable cache package: ";
 			r = -errno;
@@ -2595,10 +2595,10 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 
 	if (need_copy) {
 		if (r == 0) {
-			renameat(db->cachetmp_fd, item, db->cache_fd, item);
+			renameat(db->cache_fd, tmpcacheitem, db->cache_fd, cacheitem);
 			pkg->repos |= BIT(APK_REPOSITORY_CACHED);
 		} else {
-			unlinkat(db->cachetmp_fd, item, 0);
+			unlinkat(db->cache_fd, tmpcacheitem, 0);
 		}
 	}
 	if (r != 0)
