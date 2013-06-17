@@ -84,6 +84,8 @@ const char *apk_error_str(int error)
 		return "BAD archive";
 	case ENOMSG:
 		return "archive does not contain expected data";
+	case ENOPKG:
+		return "package not available";
 	default:
 		return strerror(error);
 	}

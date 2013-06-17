@@ -123,6 +123,8 @@ APK_ARRAY(apk_package_array, struct apk_package *);
 
 #define PKG_VER_FMT		"%s-" BLOB_FMT
 #define PKG_VER_PRINTF(pkg)	pkg->name->name, BLOB_PRINTF(*pkg->version)
+#define PKG_FILE_FMT		PKG_VER_FMT ".apk"
+#define PKG_FILE_PRINTF(pkg)	PKG_VER_PRINTF(pkg)
 
 extern const char *apk_script_types[];
 
@@ -160,8 +162,6 @@ int apk_script_type(const char *name);
 
 struct apk_package *apk_pkg_get_installed(struct apk_name *name);
 
-void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to);
-void apk_pkg_format_cache(struct apk_package *pkg, apk_blob_t to);
 struct apk_package *apk_pkg_new(void);
 int apk_pkg_read(struct apk_database *db, const char *name,
 		 struct apk_sign_ctx *ctx, struct apk_package **pkg);

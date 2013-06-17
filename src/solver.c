@@ -427,7 +427,7 @@ static int compare_providers(struct apk_solver_state *ss,
 		return r;
 
 	/* Prefer available */
-	if (solver_flags & APK_SOLVERF_AVAILABLE) {
+	if (solver_flags & (APK_SOLVERF_AVAILABLE | APK_SOLVERF_REINSTALL)) {
 		r = !!(pkgA->repos & db->available_repos) -
 		    !!(pkgB->repos & db->available_repos);
 		if (r)

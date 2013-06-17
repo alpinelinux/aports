@@ -95,67 +95,74 @@ static int fetch_package(struct fetch_ctx *fctx,
 {
 	struct apk_istream *is;
 	struct apk_repository *repo;
-	char pkgfile[PATH_MAX], url[PATH_MAX];
-	int r, fd;
+	struct apk_file_info fi;
+	char url[PATH_MAX], filename[256];
+	int r, fd, urlfd;
 
-	apk_pkg_format_plain(pkg, APK_BLOB_BUF(pkgfile));
+	repo = apk_db_select_repo(db, pkg);
+	if (repo == NULL) {
+		r = -ENOPKG;
+		goto err;
+	}
+
+	if (snprintf(filename, sizeof(filename), PKG_FILE_FMT, PKG_FILE_PRINTF(pkg)) >= sizeof(filename)) {
+		r = -ENOBUFS;
+		goto err;
+	}
 
 	if (!(fctx->flags & FETCH_STDOUT)) {
-		struct apk_file_info fi;
-
-		if (apk_file_get_info(fctx->outdir_fd, pkgfile,
-				      APK_CHECKSUM_NONE, &fi) == 0 &&
+		if (apk_file_get_info(fctx->outdir_fd, filename, APK_CHECKSUM_NONE, &fi) == 0 &&
 		    fi.size == pkg->size)
 			return 0;
 	}
 
 	apk_message("Downloading " PKG_VER_FMT, PKG_VER_PRINTF(pkg));
-	repo = apk_db_select_repo(db, pkg);
-	if (repo == NULL) {
-		apk_error(PKG_VER_FMT ": package is not currently available",
-			  PKG_VER_PRINTF(pkg));
-		return -1;
-	}
-
 	if (apk_flags & APK_SIMULATE)
 		return 0;
 
-	apk_repo_format_filename(url, sizeof(url), repo->url, pkg->arch, pkgfile);
+	r = apk_repo_format_item(db, repo, pkg, &urlfd, url, sizeof(url));
+	if (r < 0)
+		goto err;
 
 	if (fctx->flags & FETCH_STDOUT) {
 		fd = STDOUT_FILENO;
 	} else {
-		if ((fctx->flags & FETCH_LINK) && apk_url_local_file(url)) {
-			if (linkat(AT_FDCWD, url,
-				   fctx->outdir_fd, pkgfile,
+		if ((fctx->flags & FETCH_LINK) && urlfd >= 0) {
+			if (linkat(urlfd, url,
+				   fctx->outdir_fd, filename,
 				   AT_SYMLINK_FOLLOW) == 0)
 				return 0;
 		}
-		fd = openat(fctx->outdir_fd, pkgfile,
+		fd = openat(fctx->outdir_fd, filename,
 			    O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0644);
 		if (fd < 0) {
-			apk_error("%s: %s", pkgfile, strerror(errno));
-			return -1;
+			r = -errno;
+			goto err;
 		}
 	}
 
-	is = apk_istream_from_url(url);
+	is = apk_istream_from_fd_url(urlfd, url);
 	if (is == NULL) {
-		apk_error("Unable to download '%s'", url);
-		return -1;
+		r = -EIO;
+		goto err;
 	}
 
 	r = apk_istream_splice(is, fd, pkg->size, NULL, NULL);
 	is->close(is);
 	if (fd != STDOUT_FILENO)
 		close(fd);
+
 	if (r != pkg->size) {
-		apk_error("Unable to download '%s'", url);
-		unlinkat(fctx->outdir_fd, pkgfile, 0);
-		return -1;
+		unlinkat(fctx->outdir_fd, filename, 0);
+		if (r >= 0) r = -EIO;
+		goto err;
 	}
 
 	return 0;
+
+err:
+	apk_error(PKG_VER_FMT ": %s", PKG_VER_PRINTF(pkg), apk_error_str(r));
+	return r;
 }
 
 static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)

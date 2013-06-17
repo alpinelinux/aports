@@ -314,7 +314,7 @@ static void info_print_contents(struct apk_database *db, struct apk_package *pkg
 					  diri_files_list) {
 			if (apk_verbosity > 1)
 				printf("%s: ", pkg->name->name);
-			printf(PKG_FILE_FMT "\n", PKG_FILE_PRINTF(diri->dir, file));
+			printf(DIR_FILE_FMT "\n", DIR_FILE_PRINTF(diri->dir, file));
 		}
 	}
 }

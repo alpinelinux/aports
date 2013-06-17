@@ -31,7 +31,6 @@ static int cache_download(struct apk_database *db)
 	struct apk_change *change;
 	struct apk_package *pkg;
 	struct apk_repository *repo;
-	char item[PATH_MAX], cacheitem[PATH_MAX];
 	int i, r, ret = 0;
 
 	r = apk_solver_solve(db, 0, db->world, &changeset);
@@ -50,13 +49,9 @@ static int cache_download(struct apk_database *db)
 		if (repo == NULL)
 			continue;
 
-		apk_pkg_format_cache(pkg, APK_BLOB_BUF(cacheitem));
-		apk_pkg_format_plain(pkg, APK_BLOB_BUF(item));
-		r = apk_cache_download(db, repo->url, pkg->arch,
-					item, cacheitem,
-					APK_SIGN_VERIFY_IDENTITY);
+		r = apk_cache_download(db, repo, pkg, APK_SIGN_VERIFY_IDENTITY);
 		if (r) {
-			apk_error("%s: %s", item, apk_error_str(r));
+			apk_error(PKG_VER_FMT ": %s", PKG_VER_PRINTF(pkg), apk_error_str(r));
 			ret++;
 		}
 	}
@@ -76,7 +71,7 @@ static void cache_clean_item(struct apk_database *db, int dirfd, const char *nam
 	b = APK_BLOB_STR(name);
 	for (i = 0; i < db->num_repos; i++) {
 		/* Check if this is a valid index */
-		apk_cache_format_index(APK_BLOB_BUF(tmp), &db->repos[i]);
+		apk_repo_format_cache_index(APK_BLOB_BUF(tmp), &db->repos[i]);
 		if (apk_blob_compare(b, APK_BLOB_STR(tmp)) == 0)
 			return;
 	}

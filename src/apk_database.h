@@ -21,9 +21,6 @@
 #include "apk_provider_data.h"
 #include "apk_solver_data.h"
 
-extern const char * const apk_index_gz;
-extern const char * const apkindex_tar_gz;
-
 struct apk_name;
 APK_ARRAY(apk_name_array, struct apk_name *);
 
@@ -71,8 +68,8 @@ struct apk_db_dir {
 	char name[];
 };
 
-#define PKG_FILE_FMT			"%s%s%s"
-#define PKG_FILE_PRINTF(dir,file)	(dir)->name, (dir)->namelen ? "/" : "", (file)->name
+#define DIR_FILE_FMT			"%s%s%s"
+#define DIR_FILE_PRINTF(dir,file)	(dir)->name, (dir)->namelen ? "/" : "", (file)->name
 
 struct apk_db_dir_instance {
 	struct hlist_node pkg_dirs_list;
@@ -220,15 +217,16 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os);
 int apk_db_add_repository(apk_database_t db, apk_blob_t repository);
 struct apk_repository *apk_db_select_repo(struct apk_database *db,
 					  struct apk_package *pkg);
-int apk_repo_format_filename(char *buf, size_t len,
-			     const char *repourl, apk_blob_t *arch,
-			     const char *pkgfile);
+
+int apk_repo_format_cache_index(apk_blob_t to, struct apk_repository *repo);
+int apk_repo_format_item(struct apk_database *db, struct apk_repository *repo, struct apk_package *pkg,
+			 int *fd, char *buf, size_t len);
+
 unsigned int apk_db_get_pinning_mask_repos(struct apk_database *db, unsigned short pinning_mask);
 
 int apk_db_cache_active(struct apk_database *db);
-void apk_cache_format_index(apk_blob_t to, struct apk_repository *repo);
-int apk_cache_download(struct apk_database *db, const char *url, apk_blob_t *arch,
-		       const char *item, const char *cache_item, int verify);
+int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
+		       struct apk_package *pkg, int verify);
 
 typedef void (*apk_cache_item_cb)(struct apk_database *db,
 				  int dirfd, const char *name,

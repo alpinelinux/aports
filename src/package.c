@@ -53,29 +53,6 @@ struct apk_package *apk_pkg_get_installed(struct apk_name *name)
 	return NULL;
 }
 
-void apk_pkg_format_plain(struct apk_package *pkg, apk_blob_t to)
-{
-	/* pkgname-1.0.apk */
-	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->name->name));
-	apk_blob_push_blob(&to, APK_BLOB_STR("-"));
-	apk_blob_push_blob(&to, *pkg->version);
-	apk_blob_push_blob(&to, APK_BLOB_STR(".apk"));
-	apk_blob_push_blob(&to, APK_BLOB_PTR_LEN("", 1));
-}
-
-void apk_pkg_format_cache(struct apk_package *pkg, apk_blob_t to)
-{
-	/* pkgname-1.0_alpha1.12345678.apk */
-	apk_blob_push_blob(&to, APK_BLOB_STR(pkg->name->name));
-	apk_blob_push_blob(&to, APK_BLOB_STR("-"));
-	apk_blob_push_blob(&to, *pkg->version);
-	apk_blob_push_blob(&to, APK_BLOB_STR("."));
-	apk_blob_push_hexdump(&to, APK_BLOB_PTR_LEN((char *) pkg->csum.data,
-						    APK_CACHE_CSUM_BYTES));
-	apk_blob_push_blob(&to, APK_BLOB_STR(".apk"));
-	apk_blob_push_blob(&to, APK_BLOB_PTR_LEN("", 1));
-}
-
 struct apk_package *apk_pkg_new(void)
 {
 	struct apk_package *pkg;
