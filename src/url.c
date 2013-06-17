@@ -114,36 +114,3 @@ struct apk_bstream *apk_bstream_from_fd_url(int atfd, const char *url)
 	fd = fork_wget(url, &pid);
 	return apk_bstream_from_fd_pid(fd, pid, translate_wget);
 }
-
-int apk_url_download(const char *url, int atfd, const char *file)
-{
-	pid_t pid;
-	int status, fd;
-
-	fd = openat(atfd, file, O_CREAT|O_RDWR|O_TRUNC, 0644);
-	if (fd < 0)
-		return -errno;
-
-	pid = fork();
-	if (pid == -1)
-		return -1;
-
-	if (pid == 0) {
-		setsid();
-		dup2(open("/dev/null", O_RDONLY), STDIN_FILENO);
-		dup2(fd, STDOUT_FILENO);
-		execlp("wget", "wget", "-q", "-O", "-", url, NULL);
-		exit(0);
-	}
-
-	close(fd);
-	waitpid(pid, &status, 0);
-	status = translate_wget(status);
-	if (status != 0) {
-		unlinkat(atfd, file, 0);
-		return status;
-	}
-
-	return 0;
-}
-
