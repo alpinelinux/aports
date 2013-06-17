@@ -86,13 +86,13 @@ static int fork_wget(const char *url, pid_t *ppid)
 	return fds[0];
 }
 
-struct apk_istream *apk_istream_from_url(const char *url)
+struct apk_istream *apk_istream_from_fd_url(int atfd, const char *url)
 {
 	pid_t pid;
 	int fd;
 
-	if (apk_url_local_file(url) != NULL)
-		return apk_istream_from_file(AT_FDCWD, apk_url_local_file(url));
+	if (atfd >= 0 && apk_url_local_file(url) != NULL)
+		return apk_istream_from_file(atfd, apk_url_local_file(url));
 
 	fd = fork_wget(url, &pid);
 	return apk_istream_from_fd_pid(fd, pid, translate_wget);
@@ -103,13 +103,13 @@ struct apk_istream *apk_istream_from_url_gz(const char *file)
 	return apk_bstream_gunzip(apk_bstream_from_url(file));
 }
 
-struct apk_bstream *apk_bstream_from_url(const char *url)
+struct apk_bstream *apk_bstream_from_fd_url(int atfd, const char *url)
 {
 	pid_t pid;
 	int fd;
 
-	if (apk_url_local_file(url))
-		return apk_bstream_from_file(AT_FDCWD, url);
+	if (atfd >= 0 && apk_url_local_file(url))
+		return apk_bstream_from_file(atfd, url);
 
 	fd = fork_wget(url, &pid);
 	return apk_bstream_from_fd_pid(fd, pid, translate_wget);
