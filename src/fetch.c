@@ -28,7 +28,9 @@
 
 struct fetch_ctx {
 	unsigned int flags;
-	int outdir_fd;
+	int outdir_fd, errors, prog_flags;
+	struct apk_database *db;
+	size_t done, total;
 };
 
 static int cup(void)
@@ -89,15 +91,26 @@ static int fetch_parse(void *ctx, struct apk_db_options *dbopts,
 	return 0;
 }
 
-static int fetch_package(struct fetch_ctx *fctx,
-			 struct apk_database *db,
-			 struct apk_package *pkg)
+static void progress_cb(void *pctx, size_t bytes_done)
 {
+	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
+	apk_print_progress(muldiv(100, ctx->done + bytes_done, ctx->total) | ctx->prog_flags);
+	ctx->prog_flags = 0;
+}
+
+static int fetch_package(apk_hash_item item, void *pctx)
+{
+	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
+	struct apk_database *db = ctx->db;
+	struct apk_package *pkg = (struct apk_package *) item;
 	struct apk_istream *is;
 	struct apk_repository *repo;
 	struct apk_file_info fi;
 	char url[PATH_MAX], filename[256];
 	int r, fd, urlfd;
+
+	if (!pkg->marked)
+		return 0;
 
 	repo = apk_db_select_repo(db, pkg);
 	if (repo == NULL) {
@@ -110,8 +123,8 @@ static int fetch_package(struct fetch_ctx *fctx,
 		goto err;
 	}
 
-	if (!(fctx->flags & FETCH_STDOUT)) {
-		if (apk_file_get_info(fctx->outdir_fd, filename, APK_CHECKSUM_NONE, &fi) == 0 &&
+	if (!(ctx->flags & FETCH_STDOUT)) {
+		if (apk_file_get_info(ctx->outdir_fd, filename, APK_CHECKSUM_NONE, &fi) == 0 &&
 		    fi.size == pkg->size)
 			return 0;
 	}
@@ -120,20 +133,22 @@ static int fetch_package(struct fetch_ctx *fctx,
 	if (apk_flags & APK_SIMULATE)
 		return 0;
 
+	ctx->prog_flags = APK_PRINT_PROGRESS_FORCE;
+
 	r = apk_repo_format_item(db, repo, pkg, &urlfd, url, sizeof(url));
 	if (r < 0)
 		goto err;
 
-	if (fctx->flags & FETCH_STDOUT) {
+	if (ctx->flags & FETCH_STDOUT) {
 		fd = STDOUT_FILENO;
 	} else {
-		if ((fctx->flags & FETCH_LINK) && urlfd >= 0) {
+		if ((ctx->flags & FETCH_LINK) && urlfd >= 0) {
 			if (linkat(urlfd, url,
-				   fctx->outdir_fd, filename,
+				   ctx->outdir_fd, filename,
 				   AT_SYMLINK_FOLLOW) == 0)
 				return 0;
 		}
-		fd = openat(fctx->outdir_fd, filename,
+		fd = openat(ctx->outdir_fd, filename,
 			    O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0644);
 		if (fd < 0) {
 			r = -errno;
@@ -147,31 +162,43 @@ static int fetch_package(struct fetch_ctx *fctx,
 		goto err;
 	}
 
-	r = apk_istream_splice(is, fd, pkg->size, NULL, NULL);
+	r = apk_istream_splice(is, fd, pkg->size, progress_cb, ctx);
 	is->close(is);
 	if (fd != STDOUT_FILENO)
 		close(fd);
 
 	if (r != pkg->size) {
-		unlinkat(fctx->outdir_fd, filename, 0);
+		unlinkat(ctx->outdir_fd, filename, 0);
 		if (r >= 0) r = -EIO;
 		goto err;
 	}
 
+	ctx->done += pkg->size;
 	return 0;
 
 err:
 	apk_error(PKG_VER_FMT ": %s", PKG_VER_PRINTF(pkg), apk_error_str(r));
-	return r;
+	ctx->errors++;
+	return 0;
 }
 
-static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static void mark_package(struct fetch_ctx *ctx, struct apk_package *pkg)
 {
-	struct fetch_ctx *fctx = (struct fetch_ctx *) ctx;
-	int r = 0, i, j;
+	if (pkg == NULL || pkg->marked)
+		return;
+	ctx->total += pkg->size;
+	pkg->marked = 1;
+}
 
-	if (fctx->outdir_fd == 0)
-		fctx->outdir_fd = AT_FDCWD;
+static int fetch_main(void *pctx, struct apk_database *db, int argc, char **argv)
+{
+	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
+	struct apk_dependency_array *world;
+	struct apk_change *change;
+	int r = 0, i;
+
+	if (ctx->outdir_fd == 0)
+		ctx->outdir_fd = AT_FDCWD;
 
 	if ((argc > 0) && (strcmp(argv[0], "coffee") == 0)) {
 		if (apk_flags & APK_FORCE)
@@ -187,8 +214,7 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			.result_mask = APK_DEPMASK_ANY,
 		};
 
-		if (fctx->flags & FETCH_RECURSIVE) {
-			struct apk_dependency_array *world;
+		if (ctx->flags & FETCH_RECURSIVE) {
 			struct apk_changeset changeset = {};
 
 			apk_dependency_array_init(&world);
@@ -196,40 +222,34 @@ static int fetch_main(void *ctx, struct apk_database *db, int argc, char **argv)
 			r = apk_solver_solve(db, 0, world, &changeset);
 			apk_dependency_array_free(&world);
 			if (r != 0) {
-				apk_error("Unable to install '%s'", argv[i]);
-				goto err;
+				apk_error("%s: unable to get dependencies", argv[i]);
+				ctx->errors++;
+			} else {
+				foreach_array_item(change, changeset.changes)
+					mark_package(ctx, change->new_pkg);
 			}
-
-			for (j = 0; j < changeset.changes->num; j++) {
-				struct apk_change *change = &changeset.changes->item[j];
-				r = fetch_package(fctx, db, change->new_pkg);
-				if (r != 0)
-					goto err;
-			}
+			apk_change_array_free(&changeset.changes);
 		} else {
 			struct apk_package *pkg = NULL;
+			struct apk_provider *p;
 
-			for (j = 0; j < dep.name->providers->num; j++)
-				if (pkg == NULL ||
-				    apk_pkg_version_compare(dep.name->providers->item[j].pkg,
-							    pkg)
-				    == APK_VERSION_GREATER)
-					pkg = dep.name->providers->item[j].pkg;
+			foreach_array_item(p, dep.name->providers)
+				if (pkg == NULL || apk_pkg_version_compare(p->pkg, pkg) == APK_VERSION_GREATER)
+					pkg = p->pkg;
 
 			if (pkg == NULL) {
-				apk_message("Unable to get '%s'", dep.name->name);
-				r = -1;
-				break;
+				apk_message("%s: unable to select a version", dep.name->name);
+				ctx->errors++;
+			} else {
+				mark_package(ctx, pkg);
 			}
-
-			r = fetch_package(fctx, db, pkg);
-			if (r != 0)
-				goto err;
 		}
 	}
 
-err:
-	return r;
+	ctx->db = db;
+	apk_hash_foreach(&db->available.packages, fetch_package, ctx);
+
+	return ctx->errors;
 }
 
 static struct apk_option fetch_options[] = {

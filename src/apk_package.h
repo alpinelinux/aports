@@ -96,7 +96,6 @@ struct apk_package {
 	union {
 		struct apk_solver_package_state ss;
 		struct {
-			unsigned int marked;
 			unsigned int foreach_genid;
 			union {
 				int state_int;
@@ -113,6 +112,7 @@ struct apk_package {
 	struct apk_dependency_array *depends, *install_if, *provides;
 	size_t installed_size, size;
 	time_t build_time;
+	unsigned marked : 1;
 	unsigned repos : APK_MAX_REPOS;
 	struct apk_checksum csum;
 };
