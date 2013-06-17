@@ -385,6 +385,8 @@ struct apk_tee_bstream {
 	struct apk_bstream *inner_bs;
 	int fd;
 	size_t size;
+	apk_progress_cb cb;
+	void *cb_ctx;
 };
 
 static apk_blob_t tee_read(void *stream, apk_blob_t token)
@@ -394,8 +396,11 @@ static apk_blob_t tee_read(void *stream, apk_blob_t token)
 	apk_blob_t blob;
 
 	blob = tbs->inner_bs->read(tbs->inner_bs, token);
-	if (!APK_BLOB_IS_NULL(blob))
+	if (!APK_BLOB_IS_NULL(blob)) {
 		tbs->size += write(tbs->fd, blob.ptr, blob.len);
+		if (tbs->cb)
+			tbs->cb(tbs->cb_ctx, tbs->size);
+	}
 
 	return blob;
 }
@@ -412,7 +417,7 @@ static void tee_close(void *stream, size_t *size)
 	free(tbs);
 }
 
-struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to)
+struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to, apk_progress_cb cb, void *cb_ctx)
 {
 	struct apk_tee_bstream *tbs;
 	int fd;
@@ -435,6 +440,8 @@ struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const ch
 	tbs->inner_bs = from;
 	tbs->fd = fd;
 	tbs->size = 0;
+	tbs->cb = cb;
+	tbs->cb_ctx = cb_ctx;
 
 	return &tbs->bs;
 }

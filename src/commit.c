@@ -122,6 +122,7 @@ struct progress {
 	struct apk_stats done;
 	struct apk_stats total;
 	struct apk_package *pkg;
+	int flags;
 };
 
 static void progress_cb(void *ctx, size_t pkg_percent)
@@ -137,9 +138,8 @@ static void progress_cb(void *ctx, size_t pkg_percent)
 				 prog->total.bytes + prog->total.packages);
 	else
 		percent = 0;
-	if (pkg_percent == 0)
-		percent |= APK_PRINT_PROGRESS_FORCE;
-	apk_print_progress(percent);
+	apk_print_progress(percent | prog->flags);
+	prog->flags = 0;
 }
 
 static int dump_packages(struct apk_changeset *changeset,
@@ -298,6 +298,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 
 		if (print_change(db, change, prog.done.changes, prog.total.changes)) {
 			prog.pkg = change->new_pkg;
+			prog.flags = APK_PRINT_PROGRESS_FORCE;
 			progress_cb(&prog, 0);
 
 			if (!(apk_flags & APK_SIMULATE)) {

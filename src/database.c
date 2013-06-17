@@ -624,7 +624,8 @@ int apk_repo_format_item(struct apk_database *db, struct apk_repository *repo, s
 }
 
 int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
-		       struct apk_package *pkg, int verify)
+		       struct apk_package *pkg, int verify,
+		       apk_progress_cb cb, void *cb_ctx)
 {
 	struct apk_istream *is;
 	struct apk_bstream *bs;
@@ -651,10 +652,13 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 	if (apk_flags & APK_SIMULATE)
 		return 0;
 
+	if (cb)
+		cb(cb_ctx, 0);
+
 	if (verify != APK_SIGN_NONE) {
 		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL, db->keys_fd);
 		bs = apk_bstream_from_url(url);
-		bs = apk_bstream_tee(bs, db->cache_fd, tmpcacheitem);
+		bs = apk_bstream_tee(bs, db->cache_fd, tmpcacheitem, cb, cb_ctx);
 		is = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &sctx);
 		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx, FALSE, &db->id_cache);
 		apk_sign_ctx_free(&sctx);
@@ -662,7 +666,7 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 		is = apk_istream_from_url(url);
 		fd = openat(db->cache_fd, tmpcacheitem, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (fd >= 0) {
-			r = apk_istream_splice(is, fd, APK_SPLICE_ALL, NULL, NULL);
+			r = apk_istream_splice(is, fd, APK_SPLICE_ALL, cb, cb_ctx);
 			close(fd);
 		} else {
 			r = -errno;
@@ -1977,7 +1981,7 @@ static int apk_repository_update(struct apk_database *db, struct apk_repository 
 {
 	int r, verify = (apk_flags & APK_ALLOW_UNTRUSTED) ? APK_SIGN_NONE : APK_SIGN_VERIFY;
 
-	r = apk_cache_download(db, repo, NULL, verify);
+	r = apk_cache_download(db, repo, NULL, verify, NULL, NULL);
 	if (r != 0)
 		apk_error("%s: %s", repo->url, apk_error_str(r));
 
@@ -2568,7 +2572,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		apk_blob_t b = APK_BLOB_BUF(tmpcacheitem);
 		apk_blob_push_blob(&b, tmpprefix);
 		apk_pkg_format_cache_pkg(b, pkg);
-		bs = apk_bstream_tee(bs, db->cache_fd, tmpcacheitem);
+		bs = apk_bstream_tee(bs, db->cache_fd, tmpcacheitem, NULL, NULL);
 		if (bs == NULL) {
 			action = "unable cache package: ";
 			r = -errno;

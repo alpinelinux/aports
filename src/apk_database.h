@@ -226,7 +226,8 @@ unsigned int apk_db_get_pinning_mask_repos(struct apk_database *db, unsigned sho
 
 int apk_db_cache_active(struct apk_database *db);
 int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
-		       struct apk_package *pkg, int verify);
+		       struct apk_package *pkg, int verify,
+		       apk_progress_cb cb, void *cb_ctx);
 
 typedef void (*apk_cache_item_cb)(struct apk_database *db,
 				  int dirfd, const char *name,

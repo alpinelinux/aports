@@ -26,13 +26,26 @@
 #define CACHE_CLEAN	BIT(0)
 #define CACHE_DOWNLOAD	BIT(1)
 
+struct progress {
+	size_t done, total;
+	int flags;
+};
+
+static void progress_cb(void *ctx, size_t bytes_done)
+{
+	struct progress *prog = (struct progress *) ctx;
+	apk_print_progress(muldiv(100, prog->done + bytes_done, prog->total) | prog->flags);
+	prog->flags = 0;
+}
+
 static int cache_download(struct apk_database *db)
 {
 	struct apk_changeset changeset = {};
 	struct apk_change *change;
 	struct apk_package *pkg;
 	struct apk_repository *repo;
-	int i, r, ret = 0;
+	struct progress prog = { 0, 0 };
+	int r, ret = 0;
 
 	r = apk_solver_solve(db, 0, db->world, &changeset);
 	if (r < 0) {
@@ -40,8 +53,13 @@ static int cache_download(struct apk_database *db)
 		return r;
 	}
 
-	for (i = 0; i < changeset.changes->num; i++) {
-		change = &changeset.changes->item[i];
+	foreach_array_item(change, changeset.changes) {
+		pkg = change->new_pkg;
+		if ((pkg != NULL) && !(pkg->repos & db->local_repos))
+			prog.total += pkg->size;
+	}
+
+	foreach_array_item(change, changeset.changes) {
 		pkg = change->new_pkg;
 		if ((pkg == NULL) || (pkg->repos & db->local_repos))
 			continue;
@@ -50,11 +68,14 @@ static int cache_download(struct apk_database *db)
 		if (repo == NULL)
 			continue;
 
-		r = apk_cache_download(db, repo, pkg, APK_SIGN_VERIFY_IDENTITY);
+		prog.flags = APK_PRINT_PROGRESS_FORCE;
+		r = apk_cache_download(db, repo, pkg, APK_SIGN_VERIFY_IDENTITY,
+				       progress_cb, &prog);
 		if (r) {
 			apk_error(PKG_VER_FMT ": %s", PKG_VER_PRINTF(pkg), apk_error_str(r));
 			ret++;
 		}
+		prog.done += pkg->size;
 	}
 
 	return ret;

@@ -98,7 +98,8 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream);
 struct apk_bstream *apk_bstream_from_fd_pid(int fd, pid_t pid, int (*translate_status)(int));
 struct apk_bstream *apk_bstream_from_file(int atfd, const char *file);
 struct apk_bstream *apk_bstream_from_fd_url(int atfd, const char *url);
-struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to);
+struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to,
+				    apk_progress_cb cb, void *cb_ctx);
 
 static inline struct apk_bstream *apk_bstream_from_fd(int fd)
 {
