@@ -529,9 +529,13 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 
 	if (name->ss.requirers || name->ss.has_iif) {
 		foreach_array_item(p, name->providers) {
+			/* Ensure valid pinning and install-if trigger */
 			if (name->ss.requirers == 0 &&
 			    (!p->pkg->ss.iif_triggered ||
 			     !p->pkg->ss.tag_ok))
+				continue;
+			/* Virtual packages cannot be autoselected */
+			if (p->version == &apk_null_blob && p->pkg->name->ss.requirers == 0)
 				continue;
 			if (compare_providers(ss, p, &chosen) > 0)
 				chosen = *p;
@@ -540,12 +544,6 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 
 	pkg = chosen.pkg;
 	if (pkg) {
-		if (chosen.version == &apk_null_blob) {
-			/* Pure virtual package */
-			assign_name(ss, name, provider_none);
-			ss->errors += (name->ss.requirers > 0);
-			return;
-		}
 		if (!pkg->ss.available || !pkg->ss.tag_ok) {
 			/* Selecting broken or unallowed package */
 			mark_error(ss, pkg);

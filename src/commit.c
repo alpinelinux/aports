@@ -334,9 +334,9 @@ all_done:
 }
 
 enum {
-	STATE_UNSET = 0,
-	STATE_PRESENT,
-	STATE_MISSING
+	STATE_PRESENT		= 0x80000000,
+	STATE_MISSING		= 0x40000000,
+	STATE_COUNT_MASK	= 0x0000ffff,
 };
 
 struct print_state {
@@ -460,16 +460,27 @@ static void analyze_name(struct print_state *ps, struct apk_name *name)
 	struct apk_provider *p0;
 	struct apk_dependency *d0;
 	char tmp[256];
+	int refs;
 
 	if (name->providers->num) {
 		snprintf(tmp, sizeof(tmp), "%s (virtual)", name->name);
 		ps->label = tmp;
 
 		label_start(ps, "provided by:");
+		foreach_array_item(p0, name->providers)
+			p0->pkg->name->state_int++;
 		foreach_array_item(p0, name->providers) {
-			/* FIXME: print only name if all pkgs provide it */
-			struct apk_package *pkg = p0->pkg;
-			apk_print_indented_fmt(&ps->i, PKG_VER_FMT, PKG_VER_PRINTF(pkg));
+			name0 = p0->pkg->name;
+			refs = (name0->state_int & STATE_COUNT_MASK);
+			if (refs == name0->providers->num) {
+				/* name only */
+				apk_print_indented(&ps->i, APK_BLOB_STR(name0->name));
+				name0->state_int &= ~STATE_COUNT_MASK;
+			} else if (refs > 0) {
+				/* individual package */
+				apk_print_indented_fmt(&ps->i, PKG_VER_FMT, PKG_VER_PRINTF(p0->pkg));
+				name0->state_int--;
+			}
 		}
 		label_end(ps);
 	} else {
@@ -508,12 +519,14 @@ static void analyze_name(struct print_state *ps, struct apk_name *name)
 static void analyze_deps(struct print_state *ps, struct apk_dependency_array *deps)
 {
 	struct apk_dependency *d0;
+	struct apk_name *name0;
 
 	foreach_array_item(d0, deps) {
-		if (d0->name->state_int != STATE_UNSET)
+		name0 = d0->name;
+		if ((name0->state_int & (STATE_PRESENT | STATE_MISSING)) != 0)
 			continue;
-		d0->name->state_int = STATE_MISSING;
-		analyze_name(ps, d0->name);
+		name0->state_int |= STATE_MISSING;
+		analyze_name(ps, name0);
 	}
 }
 
@@ -570,9 +583,9 @@ void apk_solver_print_errors(struct apk_database *db,
 		if (pkg == NULL)
 			continue;
 		pkg->marked = 1;
-		pkg->name->state_int = STATE_PRESENT;
+		pkg->name->state_int |= STATE_PRESENT;
 		foreach_array_item(p, pkg->provides)
-			p->name->state_int = STATE_PRESENT;
+			p->name->state_int |= STATE_PRESENT;
 	}
 
 	/* Analyze is package, and missing names referred to */
