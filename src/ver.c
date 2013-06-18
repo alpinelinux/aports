@@ -96,9 +96,11 @@ static int ver_parse(void *ctx, struct apk_db_options *dbopts,
 	return 0;
 }
 
-static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *db, struct apk_package *pkg)
+static void ver_print_package_status(struct apk_database *db, const char *match, struct apk_name *name, void *pctx)
 {
-	struct apk_name *name;
+	struct ver_ctx *ctx = (struct ver_ctx *) pctx;
+	struct apk_package *pkg;
+	struct apk_provider *p0;
 	char pkgname[256];
 	const char *opstr;
 	apk_blob_t *latest = apk_blob_atomize(APK_BLOB_STR(""));
@@ -106,15 +108,18 @@ static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *
 	int i, r = -1;
 	unsigned short tag, allowed_repos;
 
-	tag = pkg->ipkg ? pkg->ipkg->repository_tag : 0;
+	pkg = apk_pkg_get_installed(name);
+	if (pkg == NULL)
+		return;
+
+	tag = pkg->ipkg->repository_tag;
 	allowed_repos = db->repo_tags[tag].allowed_repos;
 
-	name = pkg->name;
-	for (i = 0; i < name->providers->num; i++) {
-		struct apk_package *pkg0 = name->providers->item[i].pkg;
+	foreach_array_item(p0, name->providers) {
+		struct apk_package *pkg0 = p0->pkg;
 		if (pkg0->name != name || pkg0->repos == 0)
 			continue;
-		if (!(ictx->all_tags  || (pkg0->repos & allowed_repos)))
+		if (!(ctx->all_tags  || (pkg0->repos & allowed_repos)))
 			continue;
 		r = apk_version_compare_blob(*pkg0->version, *latest);
 		switch (r) {
@@ -130,20 +135,19 @@ static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *
 	r = latest->len ? apk_version_compare_blob(*pkg->version, *latest)
 			: APK_VERSION_UNKNOWN;
 	opstr = apk_version_op_string(r);
-	if ((ictx->limchars != NULL) && (strchr(ictx->limchars, *opstr) == NULL))
+	if ((ctx->limchars != NULL) && (strchr(ctx->limchars, *opstr) == NULL))
 		return;
 	if (apk_verbosity <= 0) {
 		printf("%s\n", pkg->name->name);
 		return;
 	}
-	snprintf(pkgname, sizeof(pkgname), PKG_VER_FMT,
-		 PKG_VER_PRINTF(pkg));
+	snprintf(pkgname, sizeof(pkgname), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
 	printf("%-40s%s " BLOB_FMT, pkgname, opstr, BLOB_PRINTF(*latest));
 	if (!(latest_repos & db->repo_tags[APK_DEFAULT_REPOSITORY_TAG].allowed_repos)) {
 		for (i = 1; i < db->num_repo_tags; i++) {
 			if (!(latest_repos & db->repo_tags[i].allowed_repos))
 				continue;
-			if (!(ictx->all_tags || i == tag))
+			if (!(ctx->all_tags || i == tag))
 				continue;
 			printf(" @" BLOB_FMT,
 			       BLOB_PRINTF(*db->repo_tags[i].name));
@@ -152,50 +156,27 @@ static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *
 	printf("\n");
 }
 
-static int ver_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
+static int ver_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
-	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
-	struct apk_installed_package *ipkg;
-	struct apk_name *name;
-	struct apk_package *pkg;
-	char **parg;
-	int ret = 0;
+	struct ver_ctx *ctx = (struct ver_ctx *) pctx;
 
-	if (ictx->limchars) {
-		if (strlen(ictx->limchars) == 0)
-			ictx->limchars = NULL;
+	if (ctx->limchars) {
+		if (strlen(ctx->limchars) == 0)
+			ctx->limchars = NULL;
 	} else if (args->num == 0 && apk_verbosity == 1) {
-		ictx->limchars = "<";
+		ctx->limchars = "<";
 	}
 
-	if (ictx->action != NULL)
-		return ictx->action(db, args);
+	if (ctx->action != NULL)
+		return ctx->action(db, args);
 
 	if (apk_verbosity > 0)
 		printf("%-42sAvailable:\n", "Installed:");
 
-	if (args->num == 0) {
-		list_for_each_entry(ipkg, &db->installed.packages,
-				    installed_pkgs_list) {
-			ver_print_package_status(ictx, db, ipkg->pkg);
-		}
-		goto ver_exit;
-	}
+	apk_name_foreach_matching(db, args, apk_foreach_genid(),
+				  ver_print_package_status, ctx);
 
-	foreach_array_item(parg, args) {
-		name = apk_db_query_name(db, APK_BLOB_STR(*parg));
-		if (name == NULL) {
-			apk_error("Not found: %s", *parg);
-			ret = 1;
-			goto ver_exit;
-		}
-		pkg = apk_pkg_get_installed(name);
-		if (pkg != NULL)
-			ver_print_package_status(ictx, db, pkg);
-	}
-
-ver_exit:
-	return ret;
+	return 0;
 }
 
 static struct apk_option ver_options[] = {
@@ -220,4 +201,3 @@ static struct apk_applet apk_ver = {
 };
 
 APK_DEFINE_APPLET(apk_ver);
-

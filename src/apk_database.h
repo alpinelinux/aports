@@ -87,16 +87,12 @@ struct apk_name {
 	struct apk_provider_array *providers;
 	struct apk_name_array *rdepends;
 	struct apk_name_array *rinstall_if;
+	unsigned int foreach_genid;
 
 	union {
 		struct apk_solver_name_state ss;
-		struct {
-			unsigned int foreach_genid;
-			union {
-				void *state_ptr;
-				int state_int;
-			};
-		};
+		void *state_ptr;
+		int state_int;
 	};
 };
 

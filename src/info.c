@@ -320,75 +320,65 @@ static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 	}
 }
 
-static int info_package(struct info_ctx *ctx, struct apk_database *db,
-			struct apk_string_array *args)
+static void print_name_info(struct apk_database *db, const char *match, struct apk_name *name, void *pctx)
 {
-	struct apk_name *name;
+	struct info_ctx *ctx = (struct info_ctx *) pctx;
 	struct apk_provider *p;
-	char **parg;
 
-	foreach_array_item(parg, args) {
-		name = apk_db_query_name(db, APK_BLOB_STR(*parg));
-		if (name == NULL || name->providers->num == 0) {
-			apk_error("Not found: %s", *parg);
-			return 1;
-		}
-		foreach_array_item(p, name->providers)
-			info_subaction(ctx, p->pkg);
-	}
-	return 0;
+	foreach_array_item(p, name->providers)
+		info_subaction(ctx, p->pkg);
 }
 
-static int info_parse(void *ctx, struct apk_db_options *dbopts,
+static int info_parse(void *pctx, struct apk_db_options *dbopts,
 		      int optch, int optindex, const char *optarg)
 {
-	struct info_ctx *ictx = (struct info_ctx *) ctx;
+	struct info_ctx *ctx = (struct info_ctx *) pctx;
 
-	ictx->action = info_package;
+	ctx->action = NULL;
 	switch (optch) {
 	case 'e':
-		ictx->action = info_exists;
+		ctx->action = info_exists;
 		dbopts->open_flags |= APK_OPENF_NO_REPOS;
 		break;
 	case 'W':
-		ictx->action = info_who_owns;
+		ctx->action = info_who_owns;
 		dbopts->open_flags |= APK_OPENF_NO_REPOS;
 		break;
 	case 'w':
-		ictx->subaction_mask |= APK_INFO_URL;
+		ctx->subaction_mask |= APK_INFO_URL;
 		break;
 	case 'R':
-		ictx->subaction_mask |= APK_INFO_DEPENDS;
+		ctx->subaction_mask |= APK_INFO_DEPENDS;
 		break;
 	case 'P':
-		ictx->subaction_mask |= APK_INFO_PROVIDES;
+		ctx->subaction_mask |= APK_INFO_PROVIDES;
 		break;
 	case 'r':
-		ictx->subaction_mask |= APK_INFO_RDEPENDS;
+		ctx->subaction_mask |= APK_INFO_RDEPENDS;
 		break;
 	case 'I':
-		ictx->subaction_mask |= APK_INFO_INSTALL_IF;
+		ctx->subaction_mask |= APK_INFO_INSTALL_IF;
 		break;
 	case 'i':
-		ictx->subaction_mask |= APK_INFO_RINSTALL_IF;
+		ctx->subaction_mask |= APK_INFO_RINSTALL_IF;
 		break;
 	case 's':
-		ictx->subaction_mask |= APK_INFO_SIZE;
+		ctx->subaction_mask |= APK_INFO_SIZE;
 		break;
 	case 'd':
-		ictx->subaction_mask |= APK_INFO_DESC;
+		ctx->subaction_mask |= APK_INFO_DESC;
 		break;
 	case 'L':
-		ictx->subaction_mask |= APK_INFO_CONTENTS;
+		ctx->subaction_mask |= APK_INFO_CONTENTS;
 		break;
 	case 't':
-		ictx->subaction_mask |= APK_INFO_TRIGGERS;
+		ctx->subaction_mask |= APK_INFO_TRIGGERS;
 		break;
 	case 0x10000:
-		ictx->subaction_mask |= APK_INFO_REPLACES;
+		ctx->subaction_mask |= APK_INFO_REPLACES;
 		break;
 	case 'a':
-		ictx->subaction_mask = 0xffffffff;
+		ctx->subaction_mask = 0xffffffff;
 		break;
 	default:
 		return -1;
@@ -402,13 +392,14 @@ static int info_main(void *ctx, struct apk_database *db, struct apk_string_array
 	struct apk_installed_package *ipkg;
 
 	ictx->db = db;
+	if (ictx->subaction_mask == 0)
+		ictx->subaction_mask = APK_INFO_DESC | APK_INFO_URL | APK_INFO_SIZE;
 	if (ictx->action != NULL)
 		return ictx->action(ictx, db, args);
 
 	if (args->num > 0) {
 		/* Print info on given names */
-		ictx->subaction_mask |= APK_INFO_DESC | APK_INFO_URL | APK_INFO_SIZE;
-		return info_package(ictx, db, args);
+		apk_name_foreach_matching(db, args, apk_foreach_genid(), print_name_info, ctx);
 	} else {
 		/* Print all installed packages */
 		list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list)
