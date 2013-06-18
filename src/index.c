@@ -87,14 +87,15 @@ static int warn_if_no_providers(apk_hash_item item, void *ctx)
 	return 0;
 }
 
-static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static int index_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct counts counts = {0};
 	struct apk_ostream *os;
 	struct apk_file_info fi;
-	int total, r, i, found, newpkgs = 0, errors = 0;
+	int total, r, found, newpkgs = 0, errors = 0;
 	struct index_ctx *ictx = (struct index_ctx *) ctx;
 	struct apk_package *pkg;
+	char **parg;
 
 	if (isatty(STDOUT_FILENO) && ictx->output == NULL &&
 	    !(apk_flags & APK_FORCE)) {
@@ -111,9 +112,9 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		return r;
 	}
 
-	for (i = 0; i < argc; i++) {
-		if (apk_file_get_info(AT_FDCWD, argv[i], APK_CHECKSUM_NONE, &fi) < 0) {
-			apk_warning("File '%s' is unaccessible", argv[i]);
+	foreach_array_item(parg, args) {
+		if (apk_file_get_info(AT_FDCWD, *parg, APK_CHECKSUM_NONE, &fi) < 0) {
+			apk_warning("File '%s' is unaccessible", *parg);
 			continue;
 		}
 
@@ -129,9 +130,9 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 				break;
 
 			/* Check that it looks like a package name */
-			fname = strrchr(argv[i], '/');
+			fname = strrchr(*parg, '/');
 			if (fname == NULL)
-				fname = argv[i];
+				fname = *parg;
 			else
 				fname++;
 			fend = strstr(fname, ".apk");
@@ -154,7 +155,7 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 					continue;
 				if (pkg->size != fi.size)
 					continue;
-				pkg->filename = strdup(argv[i]);
+				pkg->filename = strdup(*parg);
 				if (ictx->rewrite_arch != NULL)
 					pkg->arch = ictx->rewrite_arch;
 				found = TRUE;
@@ -165,9 +166,9 @@ static int index_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		if (!found) {
 			struct apk_sign_ctx sctx;
 			apk_sign_ctx_init(&sctx, ictx->method, NULL, db->keys_fd);
-			r = apk_pkg_read(db, argv[i], &sctx, &pkg);
+			r = apk_pkg_read(db, *parg, &sctx, &pkg);
 			if (r < 0) {
-				apk_error("%s: %s", argv[i], apk_error_str(r));
+				apk_error("%s: %s", *parg, apk_error_str(r));
 				errors++;
 			} else {
 				newpkgs++;

@@ -120,15 +120,15 @@ static int foreach_pkg(apk_hash_item item, void *ctx)
 	return 0;
 }
 
-static int dot_main(void *pctx, struct apk_database *db, int argc, char **argv)
+static int dot_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct dot_ctx *ctx = (struct dot_ctx *) pctx;
 	struct apk_provider *p;
-	int i;
+	char **parg;
 
-	if (argc) {
-		for (i = 0; i < argc; i++) {
-			struct apk_name *name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
+	if (args->num) {
+		foreach_array_item(parg, args) {
+			struct apk_name *name = apk_db_get_name(db, APK_BLOB_STR(*parg));
 			if (!name)
 				continue;
 			foreach_array_item(p, name->providers)

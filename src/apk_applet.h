@@ -36,7 +36,7 @@ struct apk_applet {
 
 	int (*parse)(void *ctx, struct apk_db_options *dbopts,
 		     int optch, int optindex, const char *optarg);
-	int (*main)(void *ctx, struct apk_database *db, int argc, char **argv);
+	int (*main)(void *ctx, struct apk_database *db, struct apk_string_array *args);
 };
 
 extern struct apk_applet *__start_apkapplets, *__stop_apkapplets;

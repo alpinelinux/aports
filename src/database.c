@@ -2673,3 +2673,80 @@ ret_r:
 	free(script_args[2]);
 	return r;
 }
+
+struct match_ctx {
+	struct apk_database *db;
+	struct apk_string_array *filter;
+	unsigned int match;
+	void (*cb)(struct apk_database *db, const char *match, struct apk_name *name, void *ctx);
+	void *cb_ctx;
+};
+
+static int match_names(apk_hash_item item, void *pctx)
+{
+	struct match_ctx *ctx = (struct match_ctx *) pctx;
+	struct apk_name *name = (struct apk_name *) item;
+	unsigned int genid = ctx->match & APK_FOREACH_GENID_MASK;
+	char **pmatch;
+
+	if (genid) {
+		if (name->foreach_genid >= genid)
+			return 0;
+		name->foreach_genid = genid;
+	}
+
+	if (ctx->filter->num == 0) {
+		ctx->cb(ctx->db, NULL, name, ctx->cb_ctx);
+		return 0;
+	}
+
+	foreach_array_item(pmatch, ctx->filter) {
+		if (fnmatch(*pmatch, name->name, FNM_CASEFOLD) == 0) {
+			ctx->cb(ctx->db, *pmatch, name, ctx->cb_ctx);
+			if (genid)
+				break;
+		}
+	}
+
+	return 0;
+}
+
+void apk_name_foreach_matching(struct apk_database *db, struct apk_string_array *filter, unsigned int match,
+			       void (*cb)(struct apk_database *db, const char *match, struct apk_name *name, void *ctx),
+			       void *ctx)
+{
+	char **pmatch;
+	unsigned int genid = match & APK_FOREACH_GENID_MASK;
+	struct apk_name *name;
+	struct match_ctx mctx = {
+		.db = db,
+		.filter = filter,
+		.match = match,
+		.cb = cb,
+		.cb_ctx = ctx,
+	};
+
+	if (filter == NULL || filter->num == 0) {
+		apk_string_array_init(&mctx.filter);
+		goto all;
+	}
+	foreach_array_item(pmatch, filter)
+		if (strchr(*pmatch, '*') != NULL)
+			goto all;
+
+	foreach_array_item(pmatch, filter) {
+		name = (struct apk_name *) apk_hash_get(&db->available.names, APK_BLOB_STR(*pmatch));
+		if (name == NULL)
+			continue;
+		if (genid) {
+			if (name->foreach_genid >= genid)
+				continue;
+			name->foreach_genid = genid;
+		}
+		cb(db, *pmatch, name, ctx);
+	}
+	return;
+
+all:
+	apk_hash_foreach(&db->available.names, match_names, &mctx);
+}

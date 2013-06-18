@@ -17,12 +17,12 @@
 #include "apk_print.h"
 
 struct ver_ctx {
-	int (*action)(struct apk_database *db, int argc, char **argv);
+	int (*action)(struct apk_database *db, struct apk_string_array *args);
 	const char *limchars;
 	int all_tags : 1;
 };
 
-static int ver_indexes(struct apk_database *db, int argc, char **argv)
+static int ver_indexes(struct apk_database *db, struct apk_string_array *args)
 {
 	struct apk_repository *repo;
 	int i;
@@ -41,29 +41,31 @@ static int ver_indexes(struct apk_database *db, int argc, char **argv)
 	return 0;
 }
 
-static int ver_test(struct apk_database *db, int argc, char **argv)
+static int ver_test(struct apk_database *db, struct apk_string_array *args)
 {
 	int r;
 
-	if (argc != 2)
+	if (args->num != 2)
 		return 1;
 
-	r = apk_version_compare(argv[0], argv[1]);
+	r = apk_version_compare(args->item[0], args->item[1]);
 	printf("%s\n", apk_version_op_string(r));
 	return 0;
 }
 
-static int ver_validate(struct apk_database *db, int argc, char **argv)
+static int ver_validate(struct apk_database *db, struct apk_string_array *args)
 {
-	int i, r = 0;
-	for (i = 0; i < argc; i++) {
-		if (!apk_version_validate(APK_BLOB_STR(argv[i]))) {
+	char **parg;
+	int errors = 0;
+
+	foreach_array_item(parg, args) {
+		if (!apk_version_validate(APK_BLOB_STR(*parg))) {
 			if (apk_verbosity > 0)
-				printf("%s\n", argv[i]);
-			r++;
+				printf("%s\n", *parg);
+			errors++;
 		}
 	}
-	return r;
+	return errors;
 }
 
 static int ver_parse(void *ctx, struct apk_db_options *dbopts,
@@ -150,28 +152,29 @@ static void ver_print_package_status(struct ver_ctx *ictx, struct apk_database *
 	printf("\n");
 }
 
-static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static int ver_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
 	struct apk_installed_package *ipkg;
 	struct apk_name *name;
 	struct apk_package *pkg;
-	int i, ret = 0;
+	char **parg;
+	int ret = 0;
 
 	if (ictx->limchars) {
 		if (strlen(ictx->limchars) == 0)
 			ictx->limchars = NULL;
-	} else if (argc == 0 && apk_verbosity == 1) {
+	} else if (args->num == 0 && apk_verbosity == 1) {
 		ictx->limchars = "<";
 	}
 
 	if (ictx->action != NULL)
-		return ictx->action(db, argc, argv);
+		return ictx->action(db, args);
 
 	if (apk_verbosity > 0)
 		printf("%-42sAvailable:\n", "Installed:");
 
-	if (argc == 0) {
+	if (args->num == 0) {
 		list_for_each_entry(ipkg, &db->installed.packages,
 				    installed_pkgs_list) {
 			ver_print_package_status(ictx, db, ipkg->pkg);
@@ -179,10 +182,10 @@ static int ver_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		goto ver_exit;
 	}
 
-	for (i = 0; i < argc; i++) {
-		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
+	foreach_array_item(parg, args) {
+		name = apk_db_query_name(db, APK_BLOB_STR(*parg));
 		if (name == NULL) {
-			apk_error("Not found: %s", name);
+			apk_error("Not found: %s", *parg);
 			ret = 1;
 			goto ver_exit;
 		}

@@ -111,18 +111,20 @@ static int cache_clean(struct apk_database *db)
 	return apk_db_cache_foreach_item(db, cache_clean_item);
 }
 
-static int cache_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static int cache_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
+	char *arg;
 	int r = 0, actions = 0;
 
-	if (argc != 1)
+	if (args->num != 1)
 		return -EINVAL;
 
-	if (strcmp(argv[0], "sync") == 0)
+	arg = args->item[0];
+	if (strcmp(arg, "sync") == 0)
 		actions = CACHE_CLEAN | CACHE_DOWNLOAD;
-	else if (strcmp(argv[0], "clean") == 0)
+	else if (strcmp(arg, "clean") == 0)
 		actions = CACHE_CLEAN;
-	else if (strcmp(argv[0], "download") == 0)
+	else if (strcmp(arg, "download") == 0)
 		actions = CACHE_DOWNLOAD;
 	else
 		return -EINVAL;
@@ -137,7 +139,6 @@ static int cache_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		r = cache_clean(db);
 	if (r == 0 && (actions & CACHE_DOWNLOAD))
 		r = cache_download(db);
-
 err:
 	return r;
 }

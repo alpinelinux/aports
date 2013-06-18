@@ -236,39 +236,40 @@ done:
 	return reason < 0 ? reason : 0;
 }
 
-static int audit_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static int audit_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct audit_tree_ctx atctx;
-	int i, r = 0;
+	char **parg, *arg;
+	int r = 0;
 
 	atctx.db = db;
 	atctx.actx = (struct audit_ctx *) ctx;
 	atctx.pathlen = 0;
 	atctx.path[0] = 0;
 
-	if (argc == 0) {
+	if (args->num == 0) {
 		atctx.dir = apk_db_dir_get(db, APK_BLOB_PTR_LEN(atctx.path, atctx.pathlen));
 		r = apk_dir_foreach_file(dup(db->root_fd), audit_directory_tree_item, &atctx);
 		apk_db_dir_unref(db, atctx.dir, FALSE);
-	} else {
-		for (i = 0; i < argc; i++) {
-			if (argv[i][0] != '/') {
-				apk_warning("%s: relative path skipped.\n",
-					    argv[i]);
-				continue;
-			}
-			argv[i]++;
-			atctx.pathlen = strlen(argv[i]);
-			memcpy(atctx.path, argv[i], atctx.pathlen);
-			if (atctx.path[atctx.pathlen-1] != '/')
-				atctx.path[atctx.pathlen++] = '/';
+		return r;
+	}
 
-			atctx.dir = apk_db_dir_get(db, APK_BLOB_PTR_LEN(atctx.path, atctx.pathlen));
-			r |= apk_dir_foreach_file(
-				openat(db->root_fd, argv[i], O_RDONLY|O_CLOEXEC),
-				audit_directory_tree_item, &atctx);
-			apk_db_dir_unref(db, atctx.dir, FALSE);
+	foreach_array_item(parg, args) {
+		arg = *parg;
+		if (arg[0] != '/') {
+			apk_warning("%s: relative path skipped.\n", arg);
+			continue;
 		}
+		arg++;
+		atctx.pathlen = strlen(arg);
+		memcpy(atctx.path, arg, atctx.pathlen);
+		if (atctx.path[atctx.pathlen-1] != '/')
+			atctx.path[atctx.pathlen++] = '/';
+
+		atctx.dir = apk_db_dir_get(db, APK_BLOB_PTR_LEN(atctx.path, atctx.pathlen));
+		r |= apk_dir_foreach_file(openat(db->root_fd, arg, O_RDONLY|O_CLOEXEC),
+					  audit_directory_tree_item, &atctx);
+		apk_db_dir_unref(db, atctx.dir, FALSE);
 	}
 	return r;
 }

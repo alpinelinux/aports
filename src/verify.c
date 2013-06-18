@@ -17,21 +17,22 @@
 #include "apk_database.h"
 #include "apk_print.h"
 
-static int verify_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static int verify_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct apk_sign_ctx sctx;
 	struct apk_istream *is;
-	int i, r, ok, rc = 0;
+	char **parg;
+	int r, ok, rc = 0;
 
-	for (i = 0; i < argc; i++) {
+	foreach_array_item(parg, args) {
 		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL, db->keys_fd);
-		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(AT_FDCWD, argv[i]),
+		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(AT_FDCWD, *parg),
 					      apk_sign_ctx_mpart_cb, &sctx);
 		if (is == NULL) {
 			if (apk_verbosity >= 1)
-				apk_error("%s: %s", argv[i], strerror(errno));
+				apk_error("%s: %s", *parg, strerror(errno));
 			else
-				printf("%s\n", argv[i]);
+				printf("%s\n", *parg);
 			apk_sign_ctx_free(&sctx);
 			rc++;
 			continue;
@@ -40,11 +41,11 @@ static int verify_main(void *ctx, struct apk_database *db, int argc, char **argv
 		is->close(is);
 		ok = sctx.control_verified && sctx.data_verified;
 		if (apk_verbosity >= 1)
-			apk_message("%s: %d - %s", argv[i], r,
+			apk_message("%s: %d - %s", *parg, r,
 				ok ? "OK" :
 				!sctx.control_verified ? "UNTRUSTED" : "FAILED");
 		else if (!ok)
-			printf("%s\n", argv[i]);
+			printf("%s\n", *parg);
 		if (!ok)
 			rc++;
 		apk_sign_ctx_free(&sctx);

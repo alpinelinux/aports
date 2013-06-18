@@ -90,8 +90,13 @@ struct apk_name {
 
 	union {
 		struct apk_solver_name_state ss;
-		void *state_ptr;
-		int state_int;
+		struct {
+			unsigned int foreach_genid;
+			union {
+				void *state_ptr;
+				int state_int;
+			};
+		};
 	};
 };
 
@@ -238,5 +243,9 @@ int apk_db_install_pkg(struct apk_database *db,
 		       struct apk_package *oldpkg,
 		       struct apk_package *newpkg,
 		       apk_progress_cb cb, void *cb_ctx);
+
+void apk_name_foreach_matching(struct apk_database *db, struct apk_string_array *filter, unsigned int match,
+			       void (*cb)(struct apk_database *db, const char *match, struct apk_name *name, void *ctx),
+			       void *ctx);
 
 #endif

@@ -52,12 +52,13 @@ static int mark_recalculate(apk_hash_item item, void *ctx)
 	return 0;
 }
 
-static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
+static int fix_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
 	struct apk_name *name;
 	struct apk_package *pkg;
-	int r = 0, i;
+	char **parg;
+	int r = 0;
 
 	if (!ctx->solver_flags)
 		ctx->solver_flags = APK_SOLVERF_REINSTALL;
@@ -65,22 +66,22 @@ static int fix_main(void *pctx, struct apk_database *db, int argc, char **argv)
 	if (ctx->fix_directory_permissions)
 		apk_hash_foreach(&db->installed.dirs, mark_recalculate, db);
 
-	for (i = 0; i < argc; i++) {
+	foreach_array_item(parg, args) {
 		pkg = NULL;
-		if (strstr(argv[i], ".apk") != NULL) {
+		if (strstr(*parg, ".apk") != NULL) {
 			struct apk_sign_ctx sctx;
 
 			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY_AND_GENERATE,
 					  NULL, db->keys_fd);
-			r = apk_pkg_read(db, argv[i], &sctx, &pkg);
+			r = apk_pkg_read(db, *parg, &sctx, &pkg);
 			apk_sign_ctx_free(&sctx);
 			if (r != 0) {
-				apk_error("%s: %s", argv[i], apk_error_str(r));
+				apk_error("%s: %s", *parg, apk_error_str(r));
 				goto err;
 			}
 			name = pkg->name;
 		} else {
-			name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
+			name = apk_db_get_name(db, APK_BLOB_STR(*parg));
 			pkg = apk_pkg_get_installed(name);
 		}
 		if (pkg == NULL || pkg->ipkg == NULL) {

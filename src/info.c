@@ -19,8 +19,7 @@
 
 struct info_ctx {
 	struct apk_database *db;
-	int (*action)(struct info_ctx *ctx, struct apk_database *db,
-		      int argc, char **argv);
+	int (*action)(struct info_ctx *ctx, struct apk_database *db, struct apk_string_array *args);
 	int subaction_mask;
 };
 
@@ -55,27 +54,17 @@ static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
 	printf("\n");
 }
 
-
-static int info_list(struct info_ctx *ctx, struct apk_database *db,
-		     int argc, char **argv)
-{
-	struct apk_installed_package *ipkg;
-
-	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list)
-		verbose_print_pkg(ipkg->pkg, 1);
-	return 0;
-}
-
 static int info_exists(struct info_ctx *ctx, struct apk_database *db,
-		       int argc, char **argv)
+		       struct apk_string_array *args)
 {
 	struct apk_name *name;
 	struct apk_dependency dep;
 	struct apk_provider *p;
-	int i, ok, rc = 0;
+	char **parg;
+	int ok, errors = 0;
 
-	for (i = 0; i < argc; i++) {
-		apk_blob_t b = APK_BLOB_STR(argv[i]);
+	foreach_array_item(parg, args) {
+		apk_blob_t b = APK_BLOB_STR(*parg);
 
 		apk_blob_pull_dep(&b, db, &dep);
 		if (APK_BLOB_IS_NULL(b) || b.len > 0)
@@ -93,26 +82,28 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 			ok = 1;
 		}
 		if (!ok)
-			rc++;
+			errors++;
 	}
 
-	return rc;
+	return errors;
 }
 
 static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
-			 int argc, char **argv)
+			 struct apk_string_array *args)
 {
 	struct apk_package *pkg;
 	struct apk_dependency_array *deps;
 	struct apk_dependency dep;
-	int i, r=0;
+	struct apk_ostream *os;
+	char **parg;
+	int errors = 0;
 
 	apk_dependency_array_init(&deps);
-	for (i = 0; i < argc; i++) {
-		pkg = apk_db_get_file_owner(db, APK_BLOB_STR(argv[i]));
+	foreach_array_item(parg, args) {
+		pkg = apk_db_get_file_owner(db, APK_BLOB_STR(*parg));
 		if (pkg == NULL) {
-			apk_error("%s: Could not find owner package", argv[i]);
-			r++;
+			apk_error("%s: Could not find owner package", *parg);
+			errors++;
 			continue;
 		}
 
@@ -125,12 +116,10 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 			apk_deps_add(&deps, &dep);
 		} else {
 			printf("%s is owned by " PKG_VER_FMT "\n",
-			       argv[i], PKG_VER_PRINTF(pkg));
+			       *parg, PKG_VER_PRINTF(pkg));
 		}
 	}
 	if (apk_verbosity < 1 && deps->num != 0) {
-		struct apk_ostream *os;
-
 		os = apk_ostream_to_fd(STDOUT_FILENO);
 		apk_deps_write(db, deps, os, APK_BLOB_PTR_LEN(" ", 1));
 		os->write(os, "\n", 1);
@@ -138,7 +127,7 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 	}
 	apk_dependency_array_free(&deps);
 
-	return r;
+	return errors;
 }
 
 static void info_print_description(struct apk_database *db, struct apk_package *pkg)
@@ -332,16 +321,16 @@ static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 }
 
 static int info_package(struct info_ctx *ctx, struct apk_database *db,
-			int argc, char **argv)
+			struct apk_string_array *args)
 {
 	struct apk_name *name;
 	struct apk_provider *p;
-	int i;
+	char **parg;
 
-	for (i = 0; i < argc; i++) {
-		name = apk_db_query_name(db, APK_BLOB_STR(argv[i]));
+	foreach_array_item(parg, args) {
+		name = apk_db_query_name(db, APK_BLOB_STR(*parg));
 		if (name == NULL || name->providers->num == 0) {
-			apk_error("Not found: %s", argv[i]);
+			apk_error("Not found: %s", *parg);
 			return 1;
 		}
 		foreach_array_item(p, name->providers)
@@ -407,25 +396,26 @@ static int info_parse(void *ctx, struct apk_db_options *dbopts,
 	return 0;
 }
 
-static int info_package_short(struct info_ctx *ictx, struct apk_database *db,
-			      int argc, char **argv)
-{
-	ictx->subaction_mask |= APK_INFO_DESC | APK_INFO_URL | APK_INFO_SIZE;
-	return info_package(ictx, db, argc, argv);
-}
-
-static int info_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static int info_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct info_ctx *ictx = (struct info_ctx *) ctx;
+	struct apk_installed_package *ipkg;
 
 	ictx->db = db;
 	if (ictx->action != NULL)
-		return ictx->action(ictx, db, argc, argv);
+		return ictx->action(ictx, db, args);
 
-	if (argc > 0)
-		return info_package_short(ictx, db, argc, argv);
+	if (args->num > 0) {
+		/* Print info on given names */
+		ictx->subaction_mask |= APK_INFO_DESC | APK_INFO_URL | APK_INFO_SIZE;
+		return info_package(ictx, db, args);
+	} else {
+		/* Print all installed packages */
+		list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list)
+			verbose_print_pkg(ipkg->pkg, 1);
+	}
 
-	return info_list(ictx, db, argc, argv);
+	return 0;
 }
 
 static struct apk_option info_options[] = {

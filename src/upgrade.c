@@ -85,7 +85,7 @@ ret:
 	return r;
 }
 
-static int upgrade_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static int upgrade_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct upgrade_ctx *uctx = (struct upgrade_ctx *) ctx;
 	unsigned short solver_flags;

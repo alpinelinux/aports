@@ -16,7 +16,7 @@
 #include "apk_version.h"
 #include "apk_print.h"
 
-static int update_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static int update_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct apk_repository *repo;
 	int i;

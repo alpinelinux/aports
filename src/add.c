@@ -58,13 +58,14 @@ static int non_repository_check(struct apk_database *db)
 	return 1;
 }
 
-static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
+static int add_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct add_ctx *actx = (struct add_ctx *) ctx;
 	struct apk_package *virtpkg = NULL;
 	struct apk_dependency virtdep;
 	struct apk_dependency_array *world = NULL;
-	int i, r = 0;
+	char **parg;
+	int r = 0;
 
 	apk_dependency_array_copy(&world, db->world);
 
@@ -96,10 +97,10 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 		virtpkg = apk_db_pkg_add(db, virtpkg);
 	}
 
-	for (i = 0; i < argc; i++) {
+	foreach_array_item(parg, args) {
 		struct apk_dependency dep;
 
-		if (strstr(argv[i], ".apk") != NULL) {
+		if (strstr(*parg, ".apk") != NULL) {
 			struct apk_package *pkg = NULL;
 			struct apk_sign_ctx sctx;
 
@@ -108,20 +109,20 @@ static int add_main(void *ctx, struct apk_database *db, int argc, char **argv)
 
 			apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY_AND_GENERATE,
 					  NULL, db->keys_fd);
-			r = apk_pkg_read(db, argv[i], &sctx, &pkg);
+			r = apk_pkg_read(db, *parg, &sctx, &pkg);
 			apk_sign_ctx_free(&sctx);
 			if (r != 0) {
-				apk_error("%s: %s", argv[i], apk_error_str(r));
+				apk_error("%s: %s", *parg, apk_error_str(r));
 				return -1;
 			}
 			apk_dep_from_pkg(&dep, db, pkg);
 		} else {
-			apk_blob_t b = APK_BLOB_STR(argv[i]);
+			apk_blob_t b = APK_BLOB_STR(*parg);
 
 			apk_blob_pull_dep(&b, db, &dep);
 			if (APK_BLOB_IS_NULL(b) || b.len > 0) {
 				apk_error("'%s' is not a valid dependency, format is name(@tag)([<>=]version)",
-					  argv[i]);
+					  *parg);
 				return -1;
 			}
 		}

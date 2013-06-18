@@ -190,26 +190,27 @@ static void mark_package(struct fetch_ctx *ctx, struct apk_package *pkg)
 	pkg->marked = 1;
 }
 
-static int fetch_main(void *pctx, struct apk_database *db, int argc, char **argv)
+static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
 	struct apk_dependency_array *world;
 	struct apk_change *change;
-	int r = 0, i;
+	char **parg;
+	int r = 0;
 
 	if (ctx->outdir_fd == 0)
 		ctx->outdir_fd = AT_FDCWD;
 
-	if ((argc > 0) && (strcmp(argv[0], "coffee") == 0)) {
+	if ((args->num == 1) && (strcmp(args->item[0], "coffee") == 0)) {
 		if (apk_flags & APK_FORCE)
 			return cup();
 		apk_message("Go and fetch your own coffee.");
 		return 0;
 	}
 
-	for (i = 0; i < argc; i++) {
+	foreach_array_item(parg, args) {
 		struct apk_dependency dep = (struct apk_dependency) {
-			.name = apk_db_get_name(db, APK_BLOB_STR(argv[i])),
+			.name = apk_db_get_name(db, APK_BLOB_STR(*parg)),
 			.version = apk_blob_atomize(APK_BLOB_NULL),
 			.result_mask = APK_DEPMASK_ANY,
 		};
@@ -222,7 +223,7 @@ static int fetch_main(void *pctx, struct apk_database *db, int argc, char **argv
 			r = apk_solver_solve(db, 0, world, &changeset);
 			apk_dependency_array_free(&world);
 			if (r != 0) {
-				apk_error("%s: unable to get dependencies", argv[i]);
+				apk_error("%s: unable to get dependencies", dep.name->name);
 				ctx->errors++;
 			} else {
 				foreach_array_item(change, changeset.changes)

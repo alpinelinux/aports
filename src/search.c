@@ -25,8 +25,7 @@ struct search_ctx {
 	int search_description : 1;
 
 	unsigned int matches;
-	int argc;
-	char **argv;
+	struct apk_string_array *filter;
 };
 
 static void print_package_name(struct search_ctx *ctx, struct apk_package *pkg)
@@ -96,95 +95,70 @@ static int search_parse(void *ctx, struct apk_db_options *dbopts,
 
 static void print_result_pkg(struct search_ctx *ctx, struct apk_package *pkg)
 {
-	int i;
-
-	if (pkg == NULL)
-		return;
+	char **pmatch;
 
 	if (ctx->search_description) {
-		for (i = 0; i < ctx->argc; i++) {
-			if (strstr(pkg->description, ctx->argv[i]) != NULL ||
-			    strstr(pkg->name->name, ctx->argv[i]) != NULL)
-				break;
+		foreach_array_item(pmatch, ctx->filter) {
+			if (strstr(*pmatch, pkg->description) != NULL ||
+			    strstr(*pmatch, pkg->name->name) != NULL)
+				goto match;
 		}
-		if (i >= ctx->argc)
-			return;
+		return;
 	}
-
+match:
 	ctx->print_result(ctx, pkg);
 }
 
-static void print_result(struct search_ctx *ctx, struct apk_name *name)
+static void print_result(struct apk_database *db, const char *match, struct apk_name *name, void *pctx)
 {
+	struct search_ctx *ctx = pctx;
 	struct apk_provider *p;
 	struct apk_package *pkg = NULL;
-	apk_blob_t *version = NULL;
 
 	if (ctx->show_all) {
 		foreach_array_item(p, name->providers)
 			print_result_pkg(ctx, p->pkg);
 	} else {
 		foreach_array_item(p, name->providers) {
-			if (version == NULL ||
-			    apk_version_compare_blob(*p->version, *version) == APK_VERSION_GREATER)
+			if (pkg == NULL ||
+			    apk_version_compare_blob(*p->version, *pkg->version) == APK_VERSION_GREATER)
 				pkg = p->pkg;
 		}
-		print_result_pkg(ctx, pkg);
+		if (pkg)
+			print_result_pkg(ctx, pkg);
 	}
 }
 
-static int match_names(apk_hash_item item, void *pctx)
+static int print_pkg(apk_hash_item item, void *pctx)
 {
-	struct search_ctx *ctx = (struct search_ctx *) pctx;
-	struct apk_name *name = (struct apk_name *) item;
-	int i;
-
-	if (!ctx->search_description) {
-		for (i = 0; i < ctx->argc; i++)
-			if (fnmatch(ctx->argv[i], name->name, FNM_CASEFOLD) == 0)
-				break;
-		if (ctx->argc > 0 && i >= ctx->argc)
-			return 0;
-	}
-	print_result(ctx, name);
-
+	print_result_pkg((struct search_ctx *) pctx, (struct apk_package *) item);
 	return 0;
 }
 
-static int search_main(void *pctx, struct apk_database *db, int argc, char **argv)
+static int search_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct search_ctx *ctx = (struct search_ctx *) pctx;
-	char s[256];
-	int i, l;
+	char *tmp, **pmatch;
 
+	ctx->filter = args;
 	ctx->matches = apk_foreach_genid() | APK_DEP_SATISFIES;
 	if (ctx->print_package == NULL)
 		ctx->print_package = print_package_name;
 	if (ctx->print_result == NULL)
 		ctx->print_result = ctx->print_package;
 
-	if (argc == 0 && ctx->search_description)
-		return -1;
+	if (ctx->search_description)
+		return apk_hash_foreach(&db->available.packages, print_pkg, ctx);
 
-	ctx->argc = argc;
 	if (!ctx->search_exact) {
-		ctx->argv = alloca(argc * sizeof(char*));
-		for (i = 0; i < argc; i++) {
-			l = snprintf(s, sizeof(s), "*%s*", argv[i]);
-			ctx->argv[i] = alloca(l+1);
-			memcpy(ctx->argv[i], s, l);
-			ctx->argv[i][l] = 0;
-		}
-	} else {
-		ctx->argv = argv;
-		if (!ctx->search_description) {
-			for (i = 0; i < argc; i++)
-				print_result(ctx, apk_db_get_name(db, APK_BLOB_STR(argv[i])));
-			return 0;
+		foreach_array_item(pmatch, ctx->filter) {
+			tmp = alloca(strlen(*pmatch) + 3);
+			sprintf(tmp, "*%s*", *pmatch);
+			*pmatch = tmp;
 		}
 	}
-
-	return apk_hash_foreach(&db->available.names, match_names, ctx);
+	apk_name_foreach_matching(db, args, apk_foreach_genid(), print_result, ctx);
+	return 0;
 }
 
 static struct apk_option search_options[] = {

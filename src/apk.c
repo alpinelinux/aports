@@ -291,6 +291,7 @@ int main(int argc, char **argv)
 	struct apk_repository_list *repo = NULL;
 	struct apk_database db;
 	struct apk_db_options dbopts;
+	struct apk_string_array *args;
 #ifdef TEST_MODE
 	const char *test_installed_db = NULL;
 	const char *test_world = NULL;
@@ -495,7 +496,11 @@ int main(int argc, char **argv)
 	}
 #endif
 
-	r = applet->main(ctx, &db, argc, argv);
+	apk_string_array_init(&args);
+	apk_string_array_resize(&args, argc);
+	memcpy(args->item, argv, argc * sizeof(*argv));
+
+	r = applet->main(ctx, &db, args);
 	apk_db_close(&db);
 
 	if (r == -EINVAL)

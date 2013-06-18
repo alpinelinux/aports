@@ -75,22 +75,24 @@ static void delete_from_world(
 			delete_from_world, pctx);
 }
 
-static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
+static int del_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct del_ctx *ctx = (struct del_ctx *) pctx;
 	struct not_deleted_ctx ndctx = {};
-	struct apk_name **name;
+	struct apk_name_array *names;
+	struct apk_name **pname;
 	struct apk_changeset changeset = {};
 	struct apk_change *change;
 	struct apk_provider *p;
-	int i, r = 0;
+	int r = 0, i;
 
+	apk_name_array_init(&names);
+	apk_name_array_resize(&names, args->num);
 	apk_dependency_array_copy(&ctx->world, db->world);
 
-	name = alloca(argc * sizeof(struct apk_name*));
-	for (i = 0; i < argc; i++) {
-		name[i] = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
-		delete_from_world(apk_pkg_get_installed(name[i]), NULL, NULL, ctx);
+	for (i = 0; i < args->num; i++) {
+		names->item[i] = apk_db_get_name(db, APK_BLOB_STR(args->item[i]));
+		delete_from_world(apk_pkg_get_installed(names->item[i]), NULL, NULL, ctx);
 	}
 
 	r = apk_solver_solve(db, 0, ctx->world, &changeset);
@@ -102,11 +104,11 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 				continue;
 			pkg->marked = 1;
 		}
-		for (i = 0; i < argc; i++) {
+		foreach_array_item(pname, names) {
 			ndctx.indent.indent = 0;
-			ndctx.name = name[i];
+			ndctx.name = *pname;
 			ndctx.matches = apk_foreach_genid() | APK_FOREACH_MARKED | APK_DEP_SATISFIES;
-			foreach_array_item(p, name[i]->providers) {
+			foreach_array_item(p, (*pname)->providers) {
 				if (!p->pkg->marked)
 					continue;
 				print_not_deleted_message(p->pkg, NULL, NULL, &ndctx);
@@ -122,6 +124,7 @@ static int del_main(void *pctx, struct apk_database *db, int argc, char **argv)
 		apk_solver_print_errors(db, &changeset, ctx->world);
 	}
 	apk_dependency_array_free(&ctx->world);
+	apk_name_array_free(&names);
 
 	return r;
 }
@@ -144,4 +147,3 @@ static struct apk_applet apk_del = {
 };
 
 APK_DEFINE_APPLET(apk_del);
-

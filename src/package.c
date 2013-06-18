@@ -1174,10 +1174,11 @@ void apk_pkg_foreach_matching_dependency(
 	unsigned int genid = match & APK_FOREACH_GENID_MASK;
 	struct apk_dependency *d;
 
-	if (genid && pkg->foreach_genid >= genid)
-		return;
-	if (pkg)
+	if (pkg && genid) {
+		if (pkg->foreach_genid >= genid)
+			return;
 		pkg->foreach_genid = genid;
+	}
 
 	foreach_array_item(d, deps) {
 		if (apk_dep_analyze(d, mpkg) & match) {
@@ -1211,9 +1212,11 @@ static void foreach_reverse_dependency(
 				continue;
 			if (marked && !pkg0->marked)
 				continue;
-			if (genid && pkg0->foreach_genid >= genid)
-				continue;
-			pkg0->foreach_genid = genid;
+			if (genid) {
+				if (pkg0->foreach_genid >= genid)
+					continue;
+				pkg0->foreach_genid = genid;
+			}
 			foreach_array_item(d0, pkg0->depends) {
 				if (apk_dep_analyze(d0, pkg) & match)
 					cb(pkg0, d0, pkg, ctx);
