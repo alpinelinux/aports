@@ -68,7 +68,7 @@ static const char * const apk_triggers_file = "lib/apk/db/triggers";
 static const char * const apk_triggers_file_tmp = "lib/apk/db/triggers.new";
 static const char * const apk_triggers_file_old = "var/lib/apk/triggers";
 
-static const char * const apk_installed_file = "lib/apk/db/installed";
+const char * const apk_installed_file = "lib/apk/db/installed";
 static const char * const apk_installed_file_tmp = "lib/apk/db/installed.new";
 static const char * const apk_installed_file_old = "var/lib/apk/installed";
 
@@ -609,7 +609,7 @@ int apk_repo_format_real_url(struct apk_database *db, struct apk_repository *rep
 int apk_repo_format_item(struct apk_database *db, struct apk_repository *repo, struct apk_package *pkg,
 			 int *fd, char *buf, size_t len)
 {
-	if (strcmp(repo->url, "cache") == 0) {
+	if (repo->url == apk_linked_cache_dir) {
 		*fd = db->cache_fd;
 		return apk_pkg_format_cache_pkg(APK_BLOB_PTR_LEN(buf, len), pkg);
 	} else {
@@ -1423,7 +1423,7 @@ static int add_repos_from_file(void *ctx, int dirfd, const char *file)
 static void apk_db_setup_repositories(struct apk_database *db)
 {
 	db->repos[APK_REPOSITORY_CACHED] = (struct apk_repository) {
-		.url = "cache",
+		.url = apk_linked_cache_dir,
 		.csum.data = {
 			0xb0,0x35,0x92,0x80,0x6e,0xfa,0xbf,0xee,0xb7,0x09,
 			0xf5,0xa7,0x0a,0x7c,0x17,0x26,0x69,0xb0,0x05,0x38 },
@@ -1737,7 +1737,7 @@ void apk_db_close(struct apk_database *db)
 	}
 
 	for (i = APK_REPOSITORY_FIRST_CONFIGURED; i < db->num_repos; i++) {
-		free(db->repos[i].url);
+		free((void*) db->repos[i].url);
 		free(db->repos[i].description.ptr);
 	}
 	foreach_array_item(ppath, db->protected_paths)
