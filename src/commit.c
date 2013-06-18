@@ -32,24 +32,13 @@ static int print_change(struct apk_database *db, struct apk_change *change,
 	struct apk_package *oldpkg = change->old_pkg;
 	struct apk_package *newpkg = change->new_pkg;
 	const char *msg = NULL;
-	char status[32], n[512], *nameptr;
+	char status[32];
 	apk_blob_t *oneversion = NULL;
 	int r;
 
 	snprintf(status, sizeof(status), "(%i/%i)", cur+1, total);
-	status[sizeof(status) - 1] = 0;
 
 	name = newpkg ? newpkg->name : oldpkg->name;
-	if (change->new_repository_tag > 0) {
-		snprintf(n, sizeof(n), "%s@" BLOB_FMT,
-			 name->name,
-			 BLOB_PRINTF(*db->repo_tags[change->new_repository_tag].name));
-		n[sizeof(n) - 1] = 0;
-		nameptr = n;
-	} else {
-		nameptr = name->name;
-	}
-
 	if (oldpkg == NULL) {
 		msg = "Installing";
 		oneversion = newpkg->version;
@@ -84,12 +73,16 @@ static int print_change(struct apk_database *db, struct apk_change *change,
 		return FALSE;
 
 	if (oneversion) {
-		apk_message("%s %s %s (" BLOB_FMT ")",
-			    status, msg, nameptr,
+		apk_message("%s %s %s" BLOB_FMT " (" BLOB_FMT ")",
+			    status, msg,
+			    name->name,
+			    BLOB_PRINTF(db->repo_tags[change->new_repository_tag].tag),
 			    BLOB_PRINTF(*oneversion));
 	} else {
-		apk_message("%s %s %s (" BLOB_FMT " -> " BLOB_FMT ")",
-			    status, msg, nameptr,
+		apk_message("%s %s %s" BLOB_FMT " (" BLOB_FMT " -> " BLOB_FMT ")",
+			    status, msg,
+			    name->name,
+			    BLOB_PRINTF(db->repo_tags[change->new_repository_tag].tag),
 			    BLOB_PRINTF(*oldpkg->version),
 			    BLOB_PRINTF(*newpkg->version));
 	}
@@ -383,7 +376,7 @@ static void print_pinning_errors(struct print_state *ps, struct apk_package *pkg
 	for (i = 0; i < db->num_repo_tags; i++) {
 		if (pkg->repos & db->repo_tags[i].allowed_repos) {
 			label_start(ps, "masked in:");
-			apk_print_indented(&ps->i, *db->repo_tags[i].name);
+			apk_print_indented(&ps->i, db->repo_tags[i].tag);
 		}
 	}
 	label_end(ps);

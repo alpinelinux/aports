@@ -101,7 +101,7 @@ static void ver_print_package_status(struct apk_database *db, const char *match,
 	struct ver_ctx *ctx = (struct ver_ctx *) pctx;
 	struct apk_package *pkg;
 	struct apk_provider *p0;
-	char pkgname[256];
+	char pkgname[41];
 	const char *opstr;
 	apk_blob_t *latest = apk_blob_atomize(APK_BLOB_STR(""));
 	unsigned int latest_repos = 0;
@@ -119,7 +119,7 @@ static void ver_print_package_status(struct apk_database *db, const char *match,
 		struct apk_package *pkg0 = p0->pkg;
 		if (pkg0->name != name || pkg0->repos == 0)
 			continue;
-		if (!(ctx->all_tags  || (pkg0->repos & allowed_repos)))
+		if (!(ctx->all_tags || (pkg0->repos & allowed_repos)))
 			continue;
 		r = apk_version_compare_blob(*pkg0->version, *latest);
 		switch (r) {
@@ -141,19 +141,20 @@ static void ver_print_package_status(struct apk_database *db, const char *match,
 		printf("%s\n", pkg->name->name);
 		return;
 	}
-	snprintf(pkgname, sizeof(pkgname), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
-	printf("%-40s%s " BLOB_FMT, pkgname, opstr, BLOB_PRINTF(*latest));
-	if (!(latest_repos & db->repo_tags[APK_DEFAULT_REPOSITORY_TAG].allowed_repos)) {
-		for (i = 1; i < db->num_repo_tags; i++) {
-			if (!(latest_repos & db->repo_tags[i].allowed_repos))
-				continue;
-			if (!(ctx->all_tags || i == tag))
-				continue;
-			printf(" @" BLOB_FMT,
-			       BLOB_PRINTF(*db->repo_tags[i].name));
+
+	tag = APK_DEFAULT_REPOSITORY_TAG;
+	for (i = 1; i < db->num_repo_tags; i++) {
+		if (latest_repos & db->repo_tags[i].allowed_repos) {
+			tag = i;
+			break;
 		}
 	}
-	printf("\n");
+
+	snprintf(pkgname, sizeof(pkgname), PKG_VER_FMT, PKG_VER_PRINTF(pkg));
+	printf("%-40s%s " BLOB_FMT " " BLOB_FMT "\n",
+		pkgname, opstr,
+		BLOB_PRINTF(*latest),
+		BLOB_PRINTF(db->repo_tags[tag].tag));
 }
 
 static int ver_main(void *pctx, struct apk_database *db, struct apk_string_array *args)

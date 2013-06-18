@@ -125,7 +125,7 @@ struct apk_db_options {
 
 struct apk_repository_tag {
 	unsigned int allowed_repos;
-	apk_blob_t *name;
+	apk_blob_t tag, plain_name;
 };
 
 struct apk_database {

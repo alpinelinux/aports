@@ -38,6 +38,10 @@ static const apk_spn_match_def apk_spn_dependency_separator = {
 	[4] = (1<<0) /* */,
 };
 
+static const apk_spn_match_def apk_spn_repotag_separator = {
+	[8] = (1<<0) /*@*/
+};
+
 struct apk_package *apk_pkg_get_installed(struct apk_name *name)
 {
 	struct apk_provider *p;
@@ -241,7 +245,7 @@ void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_depend
 		bver = APK_BLOB_NULL;
 	}
 
-	if (apk_blob_split(bname, APK_BLOB_STR("@"), &bname, &btag))
+	if (apk_blob_cspn(bname, apk_spn_repotag_separator, &bname, &btag))
 		tag = apk_db_get_tag_id(db, btag);
 
 	/* convert to apk_dependency */
@@ -385,10 +389,8 @@ void apk_blob_push_dep(apk_blob_t *to, struct apk_database *db, struct apk_depen
 		apk_blob_push_blob(to, APK_BLOB_PTR_LEN("!", 1));
 
 	apk_blob_push_blob(to, APK_BLOB_STR(dep->name->name));
-	if (dep->repository_tag && db != NULL) {
-		apk_blob_push_blob(to, APK_BLOB_PTR_LEN("@", 1));
-		apk_blob_push_blob(to, *db->repo_tags[dep->repository_tag].name);
-	}
+	if (dep->repository_tag && db != NULL)
+		apk_blob_push_blob(to, db->repo_tags[dep->repository_tag].tag);
 	if (!APK_BLOB_IS_NULL(*dep->version)) {
 		apk_blob_push_blob(to, APK_BLOB_STR(apk_version_op_string(result_mask)));
 		apk_blob_push_blob(to, *dep->version);
