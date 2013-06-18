@@ -40,16 +40,12 @@ static const apk_spn_match_def apk_spn_dependency_separator = {
 
 struct apk_package *apk_pkg_get_installed(struct apk_name *name)
 {
-	int i;
+	struct apk_provider *p;
 
-	for (i = 0; i < name->providers->num; i++) {
-		struct apk_package *pkg = name->providers->item[i].pkg;
-		if (pkg->name != name)
-			continue;
-		if (pkg->ipkg == NULL)
-			continue;
-		return pkg;
-	}
+	foreach_array_item(p, name->providers)
+		if (p->pkg->name == name && p->pkg->ipkg != NULL)
+			return p->pkg;
+
 	return NULL;
 }
 
@@ -95,6 +91,7 @@ struct apk_installed_package *apk_pkg_install(struct apk_database *db,
 void apk_pkg_uninstall(struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_installed_package *ipkg = pkg->ipkg;
+	char **trigger;
 	int i;
 
 	if (ipkg == NULL)
@@ -110,8 +107,8 @@ void apk_pkg_uninstall(struct apk_database *db, struct apk_package *pkg)
 	if (ipkg->triggers->num) {
 		list_del(&ipkg->trigger_pkgs_list);
 		list_init(&ipkg->trigger_pkgs_list);
-		for (i = 0; i < ipkg->triggers->num; i++)
-			free(ipkg->triggers->item[i]);
+		foreach_array_item(trigger, ipkg->triggers)
+			free(*trigger);
 	}
 	apk_string_array_free(&ipkg->triggers);
 	apk_string_array_free(&ipkg->pending_triggers);
@@ -153,41 +150,35 @@ int apk_pkg_parse_name(apk_blob_t apkname,
 	return 0;
 }
 
-int apk_deps_add(struct apk_dependency_array **depends,
-		 struct apk_dependency *dep)
+void apk_deps_add(struct apk_dependency_array **depends, struct apk_dependency *dep)
 {
-	struct apk_dependency_array *deps = *depends;
-	int i;
+	struct apk_dependency *d0;
 
-	if (deps != NULL) {
-		for (i = 0; i < deps->num; i++) {
-			if (deps->item[i].name == dep->name) {
-				deps->item[i] = *dep;
-				return 0;
+	if (*depends) {
+		foreach_array_item(d0, *depends) {
+			if (d0->name == dep->name) {
+				*d0 = *dep;
+				return;
 			}
 		}
 	}
-
 	*apk_dependency_array_add(depends) = *dep;
-	return 0;
 }
 
-void apk_deps_del(struct apk_dependency_array **pdeps,
-		  struct apk_name *name)
+void apk_deps_del(struct apk_dependency_array **pdeps, struct apk_name *name)
 {
 	struct apk_dependency_array *deps = *pdeps;
-	int i;
+	struct apk_dependency *d0;
 
 	if (deps == NULL)
 		return;
 
-	for (i = 0; i < deps->num; i++) {
-		if (deps->item[i].name != name)
-			continue;
-
-		deps->item[i] = deps->item[deps->num-1];
-		apk_dependency_array_resize(pdeps, deps->num-1);
-		break;
+	foreach_array_item(d0, deps) {
+		if (d0->name == name) {
+			*d0 = deps->item[deps->num - 1];
+			apk_dependency_array_resize(pdeps, deps->num - 1);
+			break;
+		}
 	}
 }
 

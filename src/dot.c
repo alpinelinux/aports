@@ -64,7 +64,9 @@ static void dump_name(struct dot_ctx *ctx, struct apk_name *name)
 
 static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 {
-	int i, j, r, ret = 0;
+	struct apk_dependency *dep;
+	struct apk_provider *p0;
+	int r, ret = 0;
 
 	if (pkg->state_int == S_EVALUATED)
 		return 0;
@@ -75,8 +77,7 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 	}
 
 	pkg->state_int = S_EVALUATING;
-	for (i = 0; i < pkg->depends->num; i++) {
-		struct apk_dependency *dep = &pkg->depends->item[i];
+	foreach_array_item(dep, pkg->depends) {
 		struct apk_name *name = dep->name;
 
 		dump_name(ctx, name);
@@ -87,9 +88,7 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 			continue;
 		}
 
-		for (j = 0; j < name->providers->num; j++) {
-			struct apk_provider *p0 = &name->providers->item[j];
-
+		foreach_array_item(p0, name->providers) {
 			if (!apk_dep_is_provided(dep, p0))
 				continue;
 
@@ -124,15 +123,16 @@ static int foreach_pkg(apk_hash_item item, void *ctx)
 static int dot_main(void *pctx, struct apk_database *db, int argc, char **argv)
 {
 	struct dot_ctx *ctx = (struct dot_ctx *) pctx;
-	int i, j;
+	struct apk_provider *p;
+	int i;
 
 	if (argc) {
 		for (i = 0; i < argc; i++) {
 			struct apk_name *name = apk_db_get_name(db, APK_BLOB_STR(argv[i]));
 			if (!name)
 				continue;
-			for (j = 0; j < name->providers->num; j++)
-				dump_pkg(ctx, name->providers->item[j].pkg);
+			foreach_array_item(p, name->providers)
+				dump_pkg(ctx, p->pkg);
 		}
 	} else {
 		apk_hash_foreach(&db->available.packages, foreach_pkg, pctx);

@@ -147,10 +147,9 @@ static int dump_packages(struct apk_changeset *changeset,
 	struct apk_change *change;
 	struct apk_name *name;
 	struct apk_indent indent = { .indent = 2 };
-	int match = 0, i;
+	int match = 0;
 
-	for (i = 0; i < changeset->changes->num; i++) {
-		change = &changeset->changes->item[i];
+	foreach_array_item(change, changeset->changes) {
 		if (!cmp(change))
 			continue;
 		if (match == 0)
@@ -207,18 +206,16 @@ static int cmp_upgrade(struct apk_change *change)
 
 static void run_triggers(struct apk_database *db, struct apk_changeset *changeset)
 {
-	int i;
+	struct apk_change *change;
+	struct apk_installed_package *ipkg;
 
 	if (apk_db_fire_triggers(db) == 0)
 		return;
 
-	for (i = 0; i < changeset->changes->num; i++) {
-		struct apk_package *pkg = changeset->changes->item[i].new_pkg;
-		struct apk_installed_package *ipkg;
-
+	foreach_array_item(change, changeset->changes) {
+		struct apk_package *pkg = change->new_pkg;
 		if (pkg == NULL)
 			continue;
-
 		ipkg = pkg->ipkg;
 		if (ipkg->pending_triggers->num == 0)
 			continue;
@@ -236,7 +233,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 {
 	struct progress prog;
 	struct apk_change *change;
-	int i, r = 0, size_diff = 0, size_unit;
+	int r = 0, size_diff = 0, size_unit;
 
 	if (apk_db_check_world(db, world) != 0) {
 		apk_error("Not committing changes due to missing repository tags. Use --force to override.");
@@ -248,8 +245,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 
 	/* Count what needs to be done */
 	memset(&prog, 0, sizeof(prog));
-	for (i = 0; i < changeset->changes->num; i++) {
-		change = &changeset->changes->item[i];
+	foreach_array_item(change, changeset->changes) {
 		count_change(change, &prog.total);
 		if (change->new_pkg)
 			size_diff += change->new_pkg->installed_size;
@@ -291,9 +287,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 
 	/* Go through changes */
 	r = 0;
-	for (i = 0; i < changeset->changes->num; i++) {
-		change = &changeset->changes->item[i];
-
+	foreach_array_item(change, changeset->changes) {
 		if (print_change(db, change, prog.done.changes, prog.total.changes)) {
 			prog.pkg = change->new_pkg;
 			prog.flags = APK_PRINT_PROGRESS_FORCE;

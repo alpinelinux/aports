@@ -293,10 +293,10 @@ struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name)
 {
 	struct apk_db_dir *dir;
 	struct apk_protected_path_array *ppaths;
+	struct apk_protected_path *ppath;
 	apk_blob_t bparent;
 	unsigned long hash = apk_hash_from_key(&db->installed.dirs, name);
 	char *relative_name;
-	int i;
 
 	if (name.len && name.ptr[name.len-1] == '/')
 		name.len--;
@@ -338,11 +338,8 @@ struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name)
 		return dir;
 
 	relative_name = strrchr(dir->rooted_name, '/') + 1;
-	for (i = 0; i < ppaths->num; i++) {
-		struct apk_protected_path *ppath = &ppaths->item[i];
-		char *slash;
-
-		slash = strchr(ppath->relative_pattern, '/');
+	foreach_array_item(ppath, ppaths) {
+		char *slash = strchr(ppath->relative_pattern, '/');
 		if (slash != NULL) {
 			*slash = 0;
 			if (fnmatch(ppath->relative_pattern, relative_name, FNM_PATHNAME) != 0) {
@@ -529,7 +526,7 @@ static inline void add_provider(struct apk_name *name, struct apk_provider p)
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg)
 {
 	struct apk_package *idb;
-	int i;
+	struct apk_dependency *dep;
 
 	if (pkg->license == NULL)
 		pkg->license = apk_blob_atomize(APK_BLOB_NULL);
@@ -544,10 +541,8 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 		idb = pkg;
 		apk_hash_insert(&db->available.packages, pkg);
 		add_provider(pkg->name, APK_PROVIDER_FROM_PACKAGE(pkg));
-		for (i = 0; i < pkg->provides->num; i++) {
-			struct apk_dependency *dep = &pkg->provides->item[i];
+		foreach_array_item(dep, pkg->provides)
 			add_provider(dep->name, APK_PROVIDER_FROM_PROVIDES(pkg, dep));
-		}
 		apk_db_pkg_rdepends(db, pkg);
 	} else {
 		idb->repos |= pkg->repos;
@@ -1057,7 +1052,7 @@ static void apk_db_triggers_write(struct apk_database *db, struct apk_ostream *o
 	struct apk_installed_package *ipkg;
 	char buf[APK_BLOB_CHECKSUM_BUF];
 	apk_blob_t bfn;
-	int i;
+	char **trigger;
 
 	list_for_each_entry(ipkg, &db->installed.triggers, trigger_pkgs_list) {
 		bfn = APK_BLOB_BUF(buf);
@@ -1065,9 +1060,9 @@ static void apk_db_triggers_write(struct apk_database *db, struct apk_ostream *o
 		bfn = apk_blob_pushed(APK_BLOB_BUF(buf), bfn);
 		os->write(os, bfn.ptr, bfn.len);
 
-		for (i = 0; i < ipkg->triggers->num; i++) {
+		foreach_array_item(trigger, ipkg->triggers) {
 			os->write(os, " ", 1);
-			apk_ostream_write_string(os, ipkg->triggers->item[i]);
+			apk_ostream_write_string(os, *trigger);
 		}
 		os->write(os, "\n", 1);
 	}
@@ -1728,6 +1723,7 @@ void apk_db_close(struct apk_database *db)
 {
 	struct apk_installed_package *ipkg;
 	struct apk_db_dir_instance *diri;
+	struct apk_protected_path *ppath;
 	struct hlist_node *dc, *dn;
 	int i;
 
@@ -1746,8 +1742,8 @@ void apk_db_close(struct apk_database *db)
 		free(db->repos[i].url);
 		free(db->repos[i].description.ptr);
 	}
-	for (i = 0; i < db->protected_paths->num; i++)
-		free(db->protected_paths->item[i].relative_pattern);
+	foreach_array_item(ppath, db->protected_paths)
+		free(ppath->relative_pattern);
 	apk_protected_path_array_free(&db->protected_paths);
 
 	apk_dependency_array_free(&db->world);
@@ -1849,8 +1845,8 @@ static int foreach_cache_file(void *pctx, int dirfd, const char *name)
 	struct foreach_cache_item_ctx *ctx = (struct foreach_cache_item_ctx *) pctx;
 	struct apk_database *db = ctx->db;
 	struct apk_package *pkg = NULL;
+	struct apk_provider *p0;
 	apk_blob_t b = APK_BLOB_STR(name), bname, bver;
-	int i;
 
 	if (apk_pkg_parse_name(b, &bname, &bver) == 0) {
 		/* Package - search for it */
@@ -1859,15 +1855,13 @@ static int foreach_cache_file(void *pctx, int dirfd, const char *name)
 		if (name == NULL)
 			goto no_pkg;
 
-		for (i = 0; i < name->providers->num; i++) {
-			struct apk_package *pkg0 = name->providers->item[i].pkg;
-
-			if (pkg0->name != name)
+		foreach_array_item(p0, name->providers) {
+			if (p0->pkg->name != name)
 				continue;
 
-			apk_pkg_format_cache_pkg(APK_BLOB_BUF(tmp), pkg0);
+			apk_pkg_format_cache_pkg(APK_BLOB_BUF(tmp), p0->pkg);
 			if (apk_blob_compare(b, APK_BLOB_STR(tmp)) == 0) {
-				pkg = pkg0;
+				pkg = p0->pkg;
 				break;
 			}
 		}
@@ -1892,15 +1886,14 @@ int apk_db_permanent(struct apk_database *db)
 
 int apk_db_check_world(struct apk_database *db, struct apk_dependency_array *world)
 {
-	int i, bad = 0;
+	struct apk_dependency *dep;
+	int bad = 0, tag;
 
 	if (apk_flags & APK_FORCE)
 		return 0;
 
-	for (i = 0; i < world->num; i++) {
-		struct apk_dependency *dep = &world->item[i];
-		int tag = dep->repository_tag;
-
+	foreach_array_item(dep, world) {
+		tag = dep->repository_tag;
 		if (tag == 0 || db->repo_tags[tag].allowed_repos != 0)
 			continue;
 
@@ -2213,6 +2206,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 	struct install_ctx *ctx = (struct install_ctx *) _ctx;
 	struct apk_database *db = ctx->db;
 	struct apk_package *pkg = ctx->pkg, *opkg;
+	struct apk_dependency *dep;
 	struct apk_installed_package *ipkg = pkg->ipkg;
 	apk_blob_t name = APK_BLOB_STR(ae->name), bdir, bfile;
 	struct apk_db_dir_instance *diri = ctx->diri;
@@ -2274,8 +2268,6 @@ static int apk_db_install_archive_entry(void *_ctx,
 		opkg = NULL;
 		file = apk_db_file_query(db, bdir, bfile);
 		if (file != NULL) {
-			int i;
-
 			opkg = file->diri->pkg;
 			do {
 				int opkg_prio = -1, pkg_prio = -1;
@@ -2287,15 +2279,15 @@ static int apk_db_install_archive_entry(void *_ctx,
 				if (opkg->name == pkg->name)
 					break;
 				/* Does the original package replace the new one? */
-				for (i = 0; i < opkg->ipkg->replaces->num; i++) {
-					if (apk_dep_is_materialized(&opkg->ipkg->replaces->item[i], pkg)) {
+				foreach_array_item(dep, opkg->ipkg->replaces) {
+					if (apk_dep_is_materialized(dep, pkg)) {
 						opkg_prio = opkg->ipkg->replaces_priority;
 						break;
 					}
 				}
 				/* Does the new package replace the original one? */
-				for (i = 0; i < ctx->ipkg->replaces->num; i++) {
-					if (apk_dep_is_materialized(&ctx->ipkg->replaces->item[i], opkg)) {
+				foreach_array_item(dep, ctx->ipkg->replaces) {
+					if (apk_dep_is_materialized(dep, opkg)) {
 						pkg_prio = ctx->ipkg->replaces_priority;
 						break;
 					}

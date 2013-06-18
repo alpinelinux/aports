@@ -29,12 +29,13 @@ void apk_hash_free(struct apk_hash *h)
 
 int apk_hash_foreach(struct apk_hash *h, apk_hash_enumerator_f e, void *ctx)
 {
+	struct hlist_head *bucket;
 	apk_hash_node *pos, *n;
 	ptrdiff_t offset = h->ops->node_offset;
-	int i, r;
+	int r;
 
-	for (i = 0; i < h->buckets->num; i++) {
-		hlist_for_each_safe(pos, n, &h->buckets->item[i]) {
+	foreach_array_item(bucket, h->buckets) {
+		hlist_for_each_safe(pos, n, bucket) {
 			r = e(((void *) pos) - offset, ctx);
 			if (r != 0 && ctx != NULL)
 				return r;

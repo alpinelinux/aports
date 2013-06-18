@@ -154,10 +154,8 @@ void apk_blob_pull_deps(apk_blob_t *from, struct apk_database *, struct apk_depe
 int apk_deps_write(struct apk_database *db, struct apk_dependency_array *deps,
 		   struct apk_ostream *os, apk_blob_t separator);
 
-int apk_deps_add(struct apk_dependency_array **depends,
-		 struct apk_dependency *dep);
-void apk_deps_del(struct apk_dependency_array **deps,
-		  struct apk_name *name);
+void apk_deps_add(struct apk_dependency_array **depends, struct apk_dependency *dep);
+void apk_deps_del(struct apk_dependency_array **deps, struct apk_name *name);
 int apk_script_type(const char *name);
 
 struct apk_package *apk_pkg_get_installed(struct apk_name *name);
