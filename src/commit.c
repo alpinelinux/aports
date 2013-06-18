@@ -516,6 +516,8 @@ static void analyze_deps(struct print_state *ps, struct apk_dependency_array *de
 
 	foreach_array_item(d0, deps) {
 		name0 = d0->name;
+		if (d0->conflict)
+			continue;
 		if ((name0->state_int & (STATE_PRESENT | STATE_MISSING)) != 0)
 			continue;
 		name0->state_int |= STATE_MISSING;
