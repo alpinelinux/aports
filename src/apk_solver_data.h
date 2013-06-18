@@ -32,6 +32,7 @@ struct apk_solver_name_state {
 	unsigned locked : 1;
 	unsigned has_iif : 1;
 	unsigned has_options : 1;
+	unsigned reverse_deps_done : 1;
 };
 
 struct apk_solver_package_state {

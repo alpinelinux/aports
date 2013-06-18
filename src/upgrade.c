@@ -35,6 +35,9 @@ static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
 	case 'a':
 		uctx->solver_flags |= APK_SOLVERF_AVAILABLE;
 		break;
+	case 'l':
+		uctx->solver_flags |= APK_SOLVERF_LATEST;
+		break;
 	default:
 		return -1;
 	}
@@ -131,6 +134,9 @@ static struct apk_option upgrade_options[] = {
 	  "replacing or downgrading packages (instead of holding them) "
 	  "if the currently installed package is no longer available "
 	  "from any repository" },
+	{ 'l', "latest",
+	  "Select latest version of package (if it is not pinned), and "
+	  "print error if it cannot be installed due to other dependencies" },
 	{ 0x10000, "no-self-upgrade",
 	  "Do not do early upgrade of 'apk-tools' package" },
 };

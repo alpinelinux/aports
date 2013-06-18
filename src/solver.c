@@ -222,11 +222,12 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 		}
 		name->ss.max_dep_chain = max(name->ss.max_dep_chain, pkg->ss.max_dep_chain);
 
-		dbg_printf("discover " PKG_VER_FMT ": tag_ok=%d, tag_pref=%d max_dep_chain=%d\n",
+		dbg_printf("discover " PKG_VER_FMT ": tag_ok=%d, tag_pref=%d max_dep_chain=%d available=%d\n",
 			PKG_VER_PRINTF(pkg),
 			pkg->ss.tag_ok,
 			pkg->ss.tag_preferred,
-			pkg->ss.max_dep_chain);
+			pkg->ss.max_dep_chain,
+			pkg->ss.available);
 	}
 	foreach_array_item(pname0, name->rinstall_if)
 		discover_name(ss, *pname0);
@@ -266,7 +267,8 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 		BLOB_PRINTF(*dep->version));
 
 	name->ss.requirers += !dep->conflict;
-	name_requirers_changed(ss, name);
+	if (name->ss.requirers == 1 && !dep->conflict)
+		name_requirers_changed(ss, name);
 
 	foreach_array_item(p0, name->providers) {
 		struct apk_package *pkg0 = p0->pkg;
@@ -294,7 +296,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 
 static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 {
-	struct apk_name *name0;
+	struct apk_name *name0, **pname0;
 	struct apk_dependency *dep;
 	struct apk_package *first_candidate = NULL;
 	struct apk_provider *p;
@@ -366,26 +368,41 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		foreach_array_item(p, name->providers)
 			p->pkg->ss.dependencies_used = p->pkg->ss.dependencies_merged;
 
-		/* TODO: could merge versioning bits too */
 		/* propagate down common dependencies */
-		foreach_array_item(dep, first_candidate->depends) {
-			if (dep->conflict)
-				continue;
-			name0 = dep->name;
-			if (name0->ss.merge_index == num_options) {
-				/* common dependency name with all */
-				if (name0->ss.requirers == 0) {
-					dbg_printf("%s common dependency: %s\n",
-						   name->name, name0->name);
-					name0->ss.requirers++;
-					name_requirers_changed(ss, name0);
+		if (num_options == 1) {
+			/* FIXME: keeps increasing counts, use bit fields instead? */
+			foreach_array_item(dep, first_candidate->depends)
+				apply_constraint(ss, first_candidate, dep);
+		} else {
+			/* FIXME: could merge versioning bits too */
+			foreach_array_item(dep, first_candidate->depends) {
+				if (dep->conflict)
+					continue;
+				name0 = dep->name;
+				if (name0->ss.merge_index == num_options) {
+					/* common dependency name with all */
+					if (name0->ss.requirers == 0) {
+						dbg_printf("%s common dependency: %s\n",
+							   name->name, name0->name);
+						name0->ss.requirers++;
+						name_requirers_changed(ss, name0);
+					}
 				}
+				name0->ss.merge_index = 0;
 			}
-			name0->ss.merge_index = 0;
 		}
 	}
-	dbg_printf("reconsider_name: %s [finished], has_options=%d\n",
-		name->name, name->ss.has_options);
+	name->ss.reverse_deps_done = 1;
+	foreach_array_item(pname0, name->rdepends) {
+		name0 = *pname0;
+		if (name0->ss.seen && !name0->ss.locked) {
+			name->ss.reverse_deps_done = 0;
+			break;
+		}
+	}
+
+	dbg_printf("reconsider_name: %s [finished], has_options=%d, reverse_deps_done=%d\n",
+		name->name, name->ss.has_options, name->ss.reverse_deps_done);
 }
 
 static int compare_providers(struct apk_solver_state *ss,
@@ -400,50 +417,66 @@ static int compare_providers(struct apk_solver_state *ss,
 	if (pkgA == NULL || pkgB == NULL)
 		return (pkgA != NULL) - (pkgB != NULL);
 
-	/* Prefer without errors */
-	r = (int)pkgA->ss.available - (int)pkgB->ss.available;
-	if (r)
-		return r;
-
-	/* Prefer those that were in last dependency merging group */
-	r = (int)pkgA->ss.dependencies_used - (int)pkgB->ss.dependencies_used;
-	if (r)
-		return r;
-	r = pkgB->ss.conflicts - pkgA->ss.conflicts;
-	if (r)
-		return r;
-
-	/* Prefer installed on self-upgrade */
+	/* Latest version required? */
 	solver_flags = pkgA->ss.solver_flags | pkgB->ss.solver_flags;
-	if (db->performing_self_update && !(solver_flags & APK_SOLVERF_UPGRADE)) {
-		r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
+	if ((solver_flags & APK_SOLVERF_LATEST) &&
+	    (pkgA->ss.pinning_allowed == APK_DEFAULT_PINNING_MASK) &&
+	    (pkgB->ss.pinning_allowed == APK_DEFAULT_PINNING_MASK)) {
+		/* Prefer allowed pinning */
+		r = (int)pkgA->ss.tag_ok - (int)pkgB->ss.tag_ok;
 		if (r)
 			return r;
-	}
 
-	/* Prefer allowed pinning */
-	r = (int)pkgA->ss.tag_ok - (int)pkgB->ss.tag_ok;
-	if (r)
-		return r;
-
-	/* Prefer available */
-	if (solver_flags & (APK_SOLVERF_AVAILABLE | APK_SOLVERF_REINSTALL)) {
-		r = !!(pkgA->repos & db->available_repos) -
-		    !!(pkgB->repos & db->available_repos);
+		/* Prefer available */
+		if (solver_flags & (APK_SOLVERF_AVAILABLE | APK_SOLVERF_REINSTALL)) {
+			r = !!(pkgA->repos & db->available_repos) - !!(pkgB->repos & db->available_repos);
+			if (r)
+				return r;
+		}
+	} else {
+		/* Prefer without errors */
+		r = (int)pkgA->ss.available - (int)pkgB->ss.available;
 		if (r)
 			return r;
-	}
 
-	/* Prefer preferred pinning */
-	r = (int)pkgA->ss.tag_preferred - (int)pkgB->ss.tag_preferred;
-	if (r)
-		return r;
-
-	/* Prefer installed */
-	if (!(solver_flags & APK_SOLVERF_UPGRADE)) {
-		r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
+		/* Prefer those that were in last dependency merging group */
+		r = (int)pkgA->ss.dependencies_used - (int)pkgB->ss.dependencies_used;
 		if (r)
 			return r;
+		r = pkgB->ss.conflicts - pkgA->ss.conflicts;
+		if (r)
+			return r;
+
+		/* Prefer installed on self-upgrade */
+		if (db->performing_self_update && !(solver_flags & APK_SOLVERF_UPGRADE)) {
+			r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
+			if (r)
+				return r;
+		}
+
+		/* Prefer allowed pinning */
+		r = (int)pkgA->ss.tag_ok - (int)pkgB->ss.tag_ok;
+		if (r)
+			return r;
+
+		/* Prefer available */
+		if (solver_flags & (APK_SOLVERF_AVAILABLE | APK_SOLVERF_REINSTALL)) {
+			r = !!(pkgA->repos & db->available_repos) - !!(pkgB->repos & db->available_repos);
+			if (r)
+				return r;
+		}
+
+		/* Prefer preferred pinning */
+		r = (int)pkgA->ss.tag_preferred - (int)pkgB->ss.tag_preferred;
+		if (r)
+			return r;
+
+		/* Prefer installed */
+		if (!(solver_flags & APK_SOLVERF_UPGRADE)) {
+			r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
+			if (r)
+				return r;
+		}
 	}
 
 	/* Select latest by requested name */
@@ -747,17 +780,15 @@ restart:
 
 		name = NULL;
 		list_for_each_entry(name0, &ss->unresolved_head, ss.unresolved_list) {
-			if ((!name0->ss.has_options) && name0->ss.requirers > 0) {
+			if (name0->ss.reverse_deps_done && name0->ss.requirers && !name0->ss.has_options) {
 				name = name0;
 				break;
 			}
 			if (name == NULL)
 				goto prefer;
-			if (name0->ss.requirers == 0 && name->ss.requirers > 0)
+			if ((!!name0->ss.requirers) - (!!name->ss.requirers) < 0)
 				continue;
-			if (name0->ss.requirers > 0 && name->ss.requirers == 0)
-				goto prefer;
-			if (name0->ss.max_dep_chain < name->ss.max_dep_chain)
+			if (name0->ss.max_dep_chain - name->ss.max_dep_chain < 0)
 				continue;
 		prefer:
 			name = name0;

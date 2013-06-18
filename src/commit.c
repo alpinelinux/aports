@@ -370,13 +370,18 @@ static void print_pinning_errors(struct print_state *ps, struct apk_package *pkg
 
 	if (pkg->ipkg != NULL)
 		return;
-	if (pkg->repos & apk_db_get_pinning_mask_repos(db, APK_DEFAULT_PINNING_MASK | BIT(tag)))
-		return;
 
-	for (i = 0; i < db->num_repo_tags; i++) {
-		if (pkg->repos & db->repo_tags[i].allowed_repos) {
-			label_start(ps, "masked in:");
-			apk_print_indented(&ps->i, db->repo_tags[i].tag);
+	if (!(pkg->repos & db->available_repos)) {
+		label_start(ps, "masked in:");
+		apk_print_indented_fmt(&ps->i, "--no-network");
+	} else {
+		if (pkg->repos & apk_db_get_pinning_mask_repos(db, APK_DEFAULT_PINNING_MASK | BIT(tag)))
+			return;
+		for (i = 0; i < db->num_repo_tags; i++) {
+			if (pkg->repos & db->repo_tags[i].allowed_repos) {
+				label_start(ps, "masked in:");
+				apk_print_indented(&ps->i, db->repo_tags[i].tag);
+			}
 		}
 	}
 	label_end(ps);
