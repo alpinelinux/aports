@@ -91,7 +91,7 @@ struct apk_istream *apk_istream_from_fd_url(int atfd, const char *url)
 	pid_t pid;
 	int fd;
 
-	if (atfd >= 0 && apk_url_local_file(url) != NULL)
+	if (apk_url_local_file(url) != NULL)
 		return apk_istream_from_file(atfd, apk_url_local_file(url));
 
 	fd = fork_wget(url, &pid);
@@ -108,8 +108,8 @@ struct apk_bstream *apk_bstream_from_fd_url(int atfd, const char *url)
 	pid_t pid;
 	int fd;
 
-	if (atfd >= 0 && apk_url_local_file(url))
-		return apk_bstream_from_file(atfd, url);
+	if (apk_url_local_file(url) != NULL)
+		return apk_bstream_from_file(atfd, apk_url_local_file(url));
 
 	fd = fork_wget(url, &pid);
 	return apk_bstream_from_fd_pid(fd, pid, translate_wget);

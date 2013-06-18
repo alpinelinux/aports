@@ -13,6 +13,7 @@
 
 #include <sys/types.h>
 #include <openssl/evp.h>
+#include <fcntl.h>
 
 #include "apk_defines.h"
 #include "apk_blob.h"
@@ -91,7 +92,7 @@ static inline struct apk_istream *apk_istream_from_fd(int fd)
 }
 static inline struct apk_istream *apk_istream_from_url(const char *url)
 {
-	return apk_istream_from_fd_url(-1, url);
+	return apk_istream_from_fd_url(AT_FDCWD, url);
 }
 
 struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream);
@@ -108,7 +109,7 @@ static inline struct apk_bstream *apk_bstream_from_fd(int fd)
 
 static inline struct apk_bstream *apk_bstream_from_url(const char *url)
 {
-	return apk_bstream_from_fd_url(-1, url);
+	return apk_bstream_from_fd_url(AT_FDCWD, url);
 }
 
 struct apk_ostream *apk_ostream_to_fd(int fd);
