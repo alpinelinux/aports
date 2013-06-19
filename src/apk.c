@@ -338,6 +338,7 @@ int main(int argc, char **argv)
 	}
 
 	init_openssl();
+	setup_automatic_flags();
 
 	optindex = 0;
 	while ((r = getopt_long(argc, argv, short_options,
@@ -435,7 +436,6 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
-	setup_automatic_flags();
 
 	if (applet == NULL) {
 		r = usage(NULL);
