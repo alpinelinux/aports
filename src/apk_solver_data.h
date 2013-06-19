@@ -22,7 +22,8 @@ struct apk_solver_name_state {
 	struct apk_provider chosen;
 
 	unsigned short requirers;
-	unsigned short merge_index;
+	unsigned short merge_depends;
+	unsigned short merge_provides;
 	unsigned short max_dep_chain;
 	unsigned seen : 1;
 	unsigned in_world_dependency : 1;

@@ -294,11 +294,45 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 	}
 }
 
+static void exclude_non_providers(struct apk_solver_state *ss, struct apk_name *name, struct apk_name *must_provide)
+{
+	struct apk_provider *p;
+	struct apk_dependency *d;
+
+	dbg_printf("%s must provide %s\n", name->name, must_provide->name);
+
+	foreach_array_item(p, name->providers) {
+		if (p->pkg->name == must_provide)
+			goto next;
+		foreach_array_item(d, p->pkg->provides)
+			if (d->name == must_provide)
+				goto next;
+		disqualify_package(ss, p->pkg, "provides transitivity");
+	next: ;
+	}
+}
+
+static inline void merge_index(unsigned short *index, int num_options)
+{
+	if (*index == num_options)
+		*index = num_options + 1;
+}
+
+static inline int merge_index_complete(unsigned short *index, int num_options)
+{
+	int ret;
+
+	ret = (*index == num_options);
+	*index = 0;
+
+	return ret;
+}
+
 static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name *name0, **pname0;
 	struct apk_dependency *dep;
-	struct apk_package *first_candidate = NULL;
+	struct apk_package *first_candidate = NULL, *pkg;
 	struct apk_provider *p;
 	int reevaluate_deps, reevaluate_iif;
 	int num_options = 0, num_tag_not_ok = 0, has_iif = 0;
@@ -313,9 +347,8 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	/* propagate down by merging common dependencies and
 	 * applying new constraints */
 	foreach_array_item(p, name->providers) {
-		struct apk_package *pkg = p->pkg;
-
 		/* check if this pkg's dependencies have become unsatisfiable */
+		pkg = p->pkg;
 		pkg->ss.dependencies_merged = 0;
 		if (reevaluate_deps) {
 			if (!pkg->ss.available)
@@ -348,14 +381,16 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		pkg->ss.dependencies_merged = 1;
 		if (first_candidate == NULL)
 			first_candidate = pkg;
-		foreach_array_item(dep, pkg->depends) {
-			/* FIXME: can merge also conflicts */
-			if (dep->conflict)
-				continue;
-			name0 = dep->name;
-			if (name0->ss.merge_index == num_options)
-				name0->ss.merge_index = num_options + 1;
-		}
+
+		/* FIXME: can merge also conflicts */
+		foreach_array_item(dep, pkg->depends)
+			if (!dep->conflict)
+				merge_index(&dep->name->ss.merge_depends, num_options);
+
+		merge_index(&pkg->name->ss.merge_provides, num_options);
+		foreach_array_item(dep, pkg->provides)
+			if (dep->version != &apk_null_blob)
+				merge_index(&dep->name->ss.merge_provides, num_options);
 
 		num_tag_not_ok += !pkg->ss.tag_ok;
 		num_options++;
@@ -365,33 +400,39 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	queue_unresolved(ss, name);
 
 	if (first_candidate != NULL) {
+		pkg = first_candidate;
 		foreach_array_item(p, name->providers)
 			p->pkg->ss.dependencies_used = p->pkg->ss.dependencies_merged;
 
 		/* propagate down common dependencies */
 		if (num_options == 1) {
 			/* FIXME: keeps increasing counts, use bit fields instead? */
-			foreach_array_item(dep, first_candidate->depends)
-				apply_constraint(ss, first_candidate, dep);
+			foreach_array_item(dep, pkg->depends)
+				if (merge_index_complete(&dep->name->ss.merge_depends, num_options))
+					apply_constraint(ss, pkg, dep);
 		} else {
 			/* FIXME: could merge versioning bits too */
-			foreach_array_item(dep, first_candidate->depends) {
-				if (dep->conflict)
-					continue;
+			foreach_array_item(dep, pkg->depends) {
 				name0 = dep->name;
-				if (name0->ss.merge_index == num_options) {
+				if (merge_index_complete(&name0->ss.merge_depends, num_options) &&
+				    name0->ss.requirers == 0) {
 					/* common dependency name with all */
-					if (name0->ss.requirers == 0) {
-						dbg_printf("%s common dependency: %s\n",
-							   name->name, name0->name);
-						name0->ss.requirers++;
-						name_requirers_changed(ss, name0);
-					}
+					dbg_printf("%s common dependency: %s\n",
+						   name->name, name0->name);
+					name0->ss.requirers++;
+					name_requirers_changed(ss, name0);
 				}
-				name0->ss.merge_index = 0;
 			}
 		}
+
+		/* provides transitivity */
+		if (merge_index_complete(&pkg->name->ss.merge_provides, num_options))
+			exclude_non_providers(ss, pkg->name, name);
+		foreach_array_item(dep, pkg->provides)
+			if (merge_index_complete(&dep->name->ss.merge_provides, num_options))
+				exclude_non_providers(ss, dep->name, name);
 	}
+
 	name->ss.reverse_deps_done = 1;
 	foreach_array_item(pname0, name->rdepends) {
 		name0 = *pname0;
