@@ -187,13 +187,59 @@ static void mark_package(struct fetch_ctx *ctx, struct apk_package *pkg)
 	pkg->marked = 1;
 }
 
+static void mark_error(struct fetch_ctx *ctx, const char *match, struct apk_name *name)
+{
+	if (strchr(match, '*') != NULL)
+		return;
+
+	apk_message("%s: unable to select package (or it's dependencies)", name->name);
+	ctx->errors++;
+}
+
+static void mark_name_recursive(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
+{
+	struct apk_changeset changeset = {};
+	struct apk_dependency dep = (struct apk_dependency) {
+		.name = name,
+		.version = &apk_null_blob,
+		.result_mask = APK_DEPMASK_ANY,
+	};
+	struct apk_dependency_array *world;
+	struct apk_change *change;
+	int r;
+
+	apk_dependency_array_init(&world);
+	*apk_dependency_array_add(&world) = dep;
+	r = apk_solver_solve(db, 0, world, &changeset);
+	apk_dependency_array_free(&world);
+	if (r == 0) {
+		foreach_array_item(change, changeset.changes)
+			mark_package(ctx, change->new_pkg);
+	} else
+		mark_error(ctx, match, name);
+
+	apk_change_array_free(&changeset.changes);
+}
+
+static void mark_name(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
+{
+	struct apk_package *pkg = NULL;
+	struct apk_provider *p;
+
+	foreach_array_item(p, name->providers)
+		if (pkg == NULL || apk_pkg_version_compare(p->pkg, pkg) == APK_VERSION_GREATER)
+			pkg = p->pkg;
+
+	if (pkg != NULL)
+		mark_package(ctx, pkg);
+	else
+		mark_error(ctx, match, name);
+}
+
 static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
-	struct apk_dependency_array *world;
-	struct apk_change *change;
-	char **parg;
-	int r = 0;
+	void *mark = (ctx->flags & FETCH_RECURSIVE) ? mark_name_recursive : mark_name;
 
 	if (ctx->outdir_fd == 0)
 		ctx->outdir_fd = AT_FDCWD;
@@ -205,46 +251,8 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 		return 0;
 	}
 
-	foreach_array_item(parg, args) {
-		struct apk_dependency dep = (struct apk_dependency) {
-			.name = apk_db_get_name(db, APK_BLOB_STR(*parg)),
-			.version = apk_blob_atomize(APK_BLOB_NULL),
-			.result_mask = APK_DEPMASK_ANY,
-		};
-
-		if (ctx->flags & FETCH_RECURSIVE) {
-			struct apk_changeset changeset = {};
-
-			apk_dependency_array_init(&world);
-			*apk_dependency_array_add(&world) = dep;
-			r = apk_solver_solve(db, 0, world, &changeset);
-			apk_dependency_array_free(&world);
-			if (r != 0) {
-				apk_error("%s: unable to get dependencies", dep.name->name);
-				ctx->errors++;
-			} else {
-				foreach_array_item(change, changeset.changes)
-					mark_package(ctx, change->new_pkg);
-			}
-			apk_change_array_free(&changeset.changes);
-		} else {
-			struct apk_package *pkg = NULL;
-			struct apk_provider *p;
-
-			foreach_array_item(p, dep.name->providers)
-				if (pkg == NULL || apk_pkg_version_compare(p->pkg, pkg) == APK_VERSION_GREATER)
-					pkg = p->pkg;
-
-			if (pkg == NULL) {
-				apk_message("%s: unable to select a version", dep.name->name);
-				ctx->errors++;
-			} else {
-				mark_package(ctx, pkg);
-			}
-		}
-	}
-
 	ctx->db = db;
+	apk_name_foreach_matching(db, args, apk_foreach_genid(), mark, ctx);
 	apk_hash_foreach(&db->available.packages, fetch_package, ctx);
 
 	return ctx->errors;
