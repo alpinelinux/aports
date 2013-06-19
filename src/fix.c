@@ -84,7 +84,7 @@ static struct apk_option fix_options[] = {
 static struct apk_applet apk_fix = {
 	.name = "fix",
 	.help = "Repair package or upgrade it without modifying main "
-		"dependencies.",
+		"dependencies",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct fix_ctx),

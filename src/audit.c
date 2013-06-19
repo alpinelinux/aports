@@ -285,9 +285,7 @@ static struct apk_option audit_options[] = {
 
 static struct apk_applet apk_audit = {
 	.name = "audit",
-	.help = "Audit the directories (defaults to all) for changes "
-		"compared to installed database. Use -q to list only "
-		"package names instead of files.",
+	.help = "Audit the directories for changes",
 	.arguments = "[directory to audit]...",
 	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_NO_REPOS,
 	.context_size = sizeof(struct audit_ctx),

@@ -130,12 +130,12 @@ static int del_main(void *pctx, struct apk_database *db, struct apk_string_array
 
 static struct apk_option del_options[] = {
 	{ 'r', "rdepends",	"Recursively delete all top-level reverse "
-				"dependencies too." },
+				"dependencies too" },
 };
 
 static struct apk_applet apk_del = {
 	.name = "del",
-	.help = "Remove PACKAGEs from the main dependencies and uninstall them.",
+	.help = "Remove PACKAGEs from the main dependencies and uninstall them",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct del_ctx),

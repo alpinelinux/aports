@@ -171,7 +171,7 @@ static struct apk_option search_options[] = {
 
 static struct apk_applet apk_search = {
 	.name = "search",
-	.help = "Search package by PATTERNs or by indexed dependencies.",
+	.help = "Search package by PATTERNs or by indexed dependencies",
 	.arguments = "PATTERN",
 	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE,
 	.context_size = sizeof(struct search_ctx),

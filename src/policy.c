@@ -67,7 +67,7 @@ static int policy_main(void *ctx, struct apk_database *db, struct apk_string_arr
 
 static struct apk_applet apk_policy = {
 	.name = "policy",
-	.help = "Show repository policy for packages.",
+	.help = "Show repository policy for packages",
 	.open_flags = APK_OPENF_READ,
 	.main = policy_main,
 };

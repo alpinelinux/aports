@@ -191,8 +191,7 @@ static struct apk_option ver_options[] = {
 
 static struct apk_applet apk_ver = {
 	.name = "version",
-	.help = "Compare package versions (in installed database vs. available)"
-		" or do tests on version strings given on command line.",
+	.help = "Compare package versions",
 	.open_flags = APK_OPENF_READ,
 	.context_size = sizeof(struct ver_ctx),
 	.num_options = ARRAY_SIZE(ver_options),

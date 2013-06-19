@@ -143,7 +143,7 @@ static struct apk_option upgrade_options[] = {
 
 static struct apk_applet apk_upgrade = {
 	.name = "upgrade",
-	.help = "Upgrade currently installed packages to match repositories.",
+	.help = "Upgrade currently installed packages to match repositories",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct upgrade_ctx),
 	.num_options = ARRAY_SIZE(upgrade_options),

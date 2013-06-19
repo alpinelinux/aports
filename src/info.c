@@ -428,7 +428,7 @@ static struct apk_option info_options[] = {
 
 static struct apk_applet apk_info = {
 	.name = "info",
-	.help = "Give detailed information about PACKAGEs or repositores.",
+	.help = "Give detailed information about PACKAGEs or repositores",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_READ,
 	.context_size = sizeof(struct info_ctx),
