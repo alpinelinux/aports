@@ -26,11 +26,10 @@ struct apk_solver_name_state {
 	unsigned short merge_provides;
 	unsigned short max_dep_chain;
 	unsigned seen : 1;
-	unsigned in_world_dependency : 1;
+	unsigned locked : 1;
 	unsigned in_changeset : 1;
 	unsigned reevaluate_deps : 1;
 	unsigned reevaluate_iif : 1;
-	unsigned locked : 1;
 	unsigned has_iif : 1;
 	unsigned has_options : 1;
 	unsigned reverse_deps_done : 1;
