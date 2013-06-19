@@ -259,7 +259,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 				"disk space will be freed." :
 				"additional disk space will be used.");
 		}
-		if (changeset->changes->num > 0 &&
+		if (changeset->num_total_changes > 0 &&
 		    (apk_flags & APK_INTERACTIVE)) {
 			printf("Do you want to continue [Y/n]? ");
 			fflush(stdout);

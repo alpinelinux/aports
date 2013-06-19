@@ -174,8 +174,9 @@ static int ver_main(void *pctx, struct apk_database *db, struct apk_string_array
 	if (apk_verbosity > 0)
 		printf("%-42sAvailable:\n", "Installed:");
 
-	apk_name_foreach_matching(db, args, apk_foreach_genid(),
-				  ver_print_package_status, ctx);
+	apk_name_foreach_matching(
+		db, args, APK_FOREACH_NULL_MATCHES_ALL | apk_foreach_genid(),
+		ver_print_package_status, ctx);
 
 	return 0;
 }

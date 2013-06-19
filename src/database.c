@@ -2741,6 +2741,8 @@ void apk_name_foreach_matching(struct apk_database *db, struct apk_string_array 
 	};
 
 	if (filter == NULL || filter->num == 0) {
+		if (!(match & APK_FOREACH_NULL_MATCHES_ALL))
+			return;
 		apk_string_array_init(&mctx.filter);
 		goto all;
 	}

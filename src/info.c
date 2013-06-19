@@ -399,7 +399,9 @@ static int info_main(void *ctx, struct apk_database *db, struct apk_string_array
 
 	if (args->num > 0) {
 		/* Print info on given names */
-		apk_name_foreach_matching(db, args, apk_foreach_genid(), print_name_info, ctx);
+		apk_name_foreach_matching(
+			db, args, APK_FOREACH_NULL_MATCHES_ALL | apk_foreach_genid(),
+			print_name_info, ctx);
 	} else {
 		/* Print all installed packages */
 		list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list)

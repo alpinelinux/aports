@@ -157,7 +157,9 @@ static int search_main(void *pctx, struct apk_database *db, struct apk_string_ar
 			*pmatch = tmp;
 		}
 	}
-	apk_name_foreach_matching(db, args, apk_foreach_genid(), print_result, ctx);
+	apk_name_foreach_matching(
+		db, args, APK_FOREACH_NULL_MATCHES_ALL | apk_foreach_genid(),
+		print_result, ctx);
 	return 0;
 }
 
