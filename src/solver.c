@@ -665,13 +665,15 @@ static void cset_gen_name_change(struct apk_solver_state *ss, struct apk_name *n
 static void cset_gen_name_remove(struct apk_solver_state *ss, struct apk_package *pkg);
 static void cset_gen_dep(struct apk_solver_state *ss, struct apk_package *ppkg, struct apk_dependency *dep);
 
-static void cset_track_deps_added(struct apk_dependency_array *deps)
+static void cset_track_deps_added(struct apk_package *pkg)
 {
 	struct apk_dependency *d;
 
-	foreach_array_item(d, deps)
-		if (!d->conflict)
-			d->name->ss.requirers++;
+	foreach_array_item(d, pkg->depends) {
+		if (d->conflict || !d->name->ss.installed_name)
+			continue;
+		d->name->ss.installed_name->ss.requirers++;
+	}
 }
 
 static void cset_track_deps_removed(struct apk_solver_state *ss, struct apk_package *pkg)
@@ -680,12 +682,11 @@ static void cset_track_deps_removed(struct apk_solver_state *ss, struct apk_pack
 	struct apk_package *pkg0;
 
 	foreach_array_item(d, pkg->depends) {
-		if (d->conflict)
+		if (d->conflict || !d->name->ss.installed_name)
 			continue;
-		d->name->ss.requirers--;
-		if (d->name->ss.requirers > 0)
+		if (--d->name->ss.installed_name->ss.requirers > 0)
 			continue;
-		pkg0 = apk_pkg_get_installed(d->name);
+		pkg0 = d->name->ss.installed_pkg;
 		if (pkg0 != NULL)
 			cset_gen_name_remove(ss, pkg0);
 	}
@@ -717,14 +718,10 @@ static void cset_check_install_by_iif(struct apk_solver_state *ss, struct apk_na
 
 static void cset_check_removal_by_iif(struct apk_solver_state *ss, struct apk_name *name)
 {
-	struct apk_package *pkg;
+	struct apk_package *pkg = name->ss.installed_pkg;
 	struct apk_dependency *dep0;
 
-	if (name->ss.in_changeset || name->ss.chosen.pkg != NULL)
-		return;
-
-	pkg = apk_pkg_get_installed(name);
-	if (pkg == NULL)
+	if (pkg == NULL || name->ss.in_changeset || name->ss.chosen.pkg != NULL)
 		return;
 
 	foreach_array_item(dep0, pkg->install_if) {
@@ -748,7 +745,7 @@ static void cset_gen_name_change(struct apk_solver_state *ss, struct apk_name *n
 	pkg->ss.in_changeset = 1;
 	pkg->name->ss.in_changeset = 1;
 
-	opkg = apk_pkg_get_installed(pkg->name);
+	opkg = pkg->name->ss.installed_pkg;
 	if (opkg) {
 		foreach_array_item(pname, opkg->name->rinstall_if)
 			cset_check_removal_by_iif(ss, *pname);
@@ -763,7 +760,7 @@ static void cset_gen_name_change(struct apk_solver_state *ss, struct apk_name *n
 	foreach_array_item(pname, pkg->name->rinstall_if)
 		cset_check_install_by_iif(ss, *pname);
 
-	cset_track_deps_added(pkg->depends);
+	cset_track_deps_added(pkg);
 	if (opkg)
 		cset_track_deps_removed(ss, opkg);
 }
@@ -796,18 +793,35 @@ static void cset_gen_dep(struct apk_solver_state *ss, struct apk_package *ppkg, 
 		mark_error(ss, ppkg);
 }
 
+static int cset_reset_name(apk_hash_item item, void *ctx)
+{
+	struct apk_name *name = (struct apk_name *) item;
+	name->ss.installed_pkg = NULL;
+	name->ss.installed_name = NULL;
+	name->ss.requirers = 0;
+	return 0;
+}
+
 static void generate_changeset(struct apk_solver_state *ss, struct apk_dependency_array *world)
 {
 	struct apk_changeset *changeset = ss->changeset;
+	struct apk_package *pkg;
 	struct apk_installed_package *ipkg;
 	struct apk_dependency *d;
 
 	apk_change_array_init(&changeset->changes);
 
+	apk_hash_foreach(&ss->db->available.names, cset_reset_name, NULL);
+	list_for_each_entry(ipkg, &ss->db->installed.packages, installed_pkgs_list) {
+		pkg = ipkg->pkg;
+		pkg->name->ss.installed_pkg = pkg;
+		pkg->name->ss.installed_name = pkg->name;
+		foreach_array_item(d, pkg->provides)
+			if (d->version != &apk_null_blob)
+				d->name->ss.installed_name = pkg->name;
+	}
 	list_for_each_entry(ipkg, &ss->db->installed.packages, installed_pkgs_list)
-		ipkg->pkg->name->ss.requirers = 0;
-	list_for_each_entry(ipkg, &ss->db->installed.packages, installed_pkgs_list)
-		cset_track_deps_added(ipkg->pkg->depends);
+		cset_track_deps_added(ipkg->pkg);
 	list_for_each_entry(ipkg, &ss->db->installed.packages, installed_pkgs_list)
 		cset_check_removal_by_deps(ss, ipkg->pkg);
 
@@ -823,7 +837,7 @@ static void generate_changeset(struct apk_solver_state *ss, struct apk_dependenc
 		changeset->num_adjust;
 }
 
-static int free_state(apk_hash_item item, void *ctx)
+static int free_name(apk_hash_item item, void *ctx)
 {
 	struct apk_name *name = (struct apk_name *) item;
 	memset(&name->ss, 0, sizeof(name->ss));
@@ -909,12 +923,12 @@ restart:
 				dbg_printf("disabling broken world dep: %s", name->name);
 			}
 		}
-		apk_hash_foreach(&db->available.names, free_state, NULL);
+		apk_hash_foreach(&db->available.names, free_name, NULL);
 		apk_hash_foreach(&db->available.packages, free_package, NULL);
 		goto restart;
 	}
 
-	apk_hash_foreach(&db->available.names, free_state, NULL);
+	apk_hash_foreach(&db->available.names, free_name, NULL);
 	apk_hash_foreach(&db->available.packages, free_package, NULL);
 	dbg_printf("solver done, errors=%d\n", ss->errors);
 

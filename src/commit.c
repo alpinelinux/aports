@@ -232,11 +232,10 @@ int apk_solver_commit_changeset(struct apk_database *db,
 	foreach_array_item(change, changeset->changes) {
 		count_change(change, &prog.total);
 		if (change->new_pkg)
-			size_diff += change->new_pkg->installed_size;
+			size_diff += change->new_pkg->installed_size / 1024;
 		if (change->old_pkg)
-			size_diff -= change->old_pkg->installed_size;
+			size_diff -= change->old_pkg->installed_size / 1024;
 	}
-	size_diff /= 1024;
 	size_unit = 'K';
 	if (abs(size_diff) > 10000) {
 		size_diff /= 1024;

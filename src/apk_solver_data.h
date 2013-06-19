@@ -17,10 +17,17 @@
 #include "apk_provider_data.h"
 
 struct apk_solver_name_state {
-	struct list_head dirty_list;
-	struct list_head unresolved_list;
 	struct apk_provider chosen;
-
+	union {
+		struct {
+			struct list_head dirty_list;
+			struct list_head unresolved_list;
+		};
+		struct {
+			struct apk_name *installed_name;
+			struct apk_package *installed_pkg;
+		};
+	};
 	unsigned short requirers;
 	unsigned short merge_depends;
 	unsigned short merge_provides;
