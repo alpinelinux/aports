@@ -19,8 +19,9 @@
 #define S_EVALUATING	-2
 
 struct dot_ctx {
-	int errors_only;
-	int not_empty;
+	int not_empty : 1;
+	int errors_only : 1;
+	int installed_only : 1;
 };
 
 static int dot_parse(void *pctx, struct apk_db_options *dbopts,
@@ -31,6 +32,10 @@ static int dot_parse(void *pctx, struct apk_db_options *dbopts,
 	switch (optch) {
 	case 0x10000:
 		ctx->errors_only = 1;
+		break;
+	case 0x10001:
+		ctx->installed_only = 1;
+		dbopts->open_flags &= ~APK_OPENF_NO_INSTALLED;
 		break;
 	default:
 		return -1;
@@ -68,6 +73,9 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 	struct apk_provider *p0;
 	int r, ret = 0;
 
+	if (ctx->installed_only && pkg->ipkg == NULL)
+		return 0;
+
 	if (pkg->state_int == S_EVALUATED)
 		return 0;
 
@@ -89,6 +97,8 @@ static int dump_pkg(struct dot_ctx *ctx, struct apk_package *pkg)
 		}
 
 		foreach_array_item(p0, name->providers) {
+			if (ctx->installed_only && p0->pkg->ipkg == NULL)
+				continue;
 			if (!apk_dep_is_provided(dep, p0))
 				continue;
 
@@ -148,6 +158,7 @@ static int dot_main(void *pctx, struct apk_database *db, struct apk_string_array
 static struct apk_option dot_options[] = {
 	{ 0x10000,	"errors",	"Output only parts of the graph which are considered "
 					"errorneus: e.g. cycles and missing packages" },
+	{ 0x10001,	"installed",	"Consider only installed packages" },
 };
 
 static struct apk_applet apk_dot = {
