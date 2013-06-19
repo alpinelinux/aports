@@ -81,6 +81,7 @@ static int del_main(void *pctx, struct apk_database *db, struct apk_string_array
 	struct not_deleted_ctx ndctx = {};
 	struct apk_name_array *names;
 	struct apk_name **pname;
+	struct apk_package *pkg;
 	struct apk_changeset changeset = {};
 	struct apk_change *change;
 	struct apk_provider *p;
@@ -92,7 +93,9 @@ static int del_main(void *pctx, struct apk_database *db, struct apk_string_array
 
 	for (i = 0; i < args->num; i++) {
 		names->item[i] = apk_db_get_name(db, APK_BLOB_STR(args->item[i]));
-		delete_from_world(apk_pkg_get_installed(names->item[i]), NULL, NULL, ctx);
+		pkg = apk_pkg_get_installed(names->item[i]);
+		if (pkg != NULL)
+			delete_from_world(pkg, NULL, NULL, ctx);
 	}
 
 	r = apk_solver_solve(db, 0, ctx->world, &changeset);
