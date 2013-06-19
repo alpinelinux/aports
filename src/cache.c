@@ -28,14 +28,12 @@
 
 struct progress {
 	size_t done, total;
-	int flags;
 };
 
 static void progress_cb(void *ctx, size_t bytes_done)
 {
 	struct progress *prog = (struct progress *) ctx;
-	apk_print_progress(muldiv(100, prog->done + bytes_done, prog->total) | prog->flags);
-	prog->flags = 0;
+	apk_print_progress(prog->done + bytes_done, prog->total);
 }
 
 static int cache_download(struct apk_database *db)
@@ -68,7 +66,6 @@ static int cache_download(struct apk_database *db)
 		if (repo == NULL)
 			continue;
 
-		prog.flags = APK_PRINT_PROGRESS_FORCE;
 		r = apk_cache_download(db, repo, pkg, APK_SIGN_VERIFY_IDENTITY,
 				       progress_cb, &prog);
 		if (r) {

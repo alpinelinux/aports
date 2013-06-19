@@ -21,10 +21,12 @@
 
 int apk_progress_fd;
 static int apk_screen_width = 0;
+static int apk_progress_force = 1;
 
 void apk_reset_screen_width(void)
 {
 	apk_screen_width = 0;
+	apk_progress_force = 1;
 }
 
 int apk_get_screen_width(void)
@@ -41,35 +43,48 @@ int apk_get_screen_width(void)
 	return apk_screen_width;
 }
 
-void apk_print_progress(int percent_flags)
+void apk_print_progress(size_t done, size_t total)
 {
-	static int last_written = 0;
-	const int bar_width = apk_get_screen_width() - 7;
-	char buf[8];
-	int i, percent;
+	static size_t last_done = 0;
+	static int last_bar = 0, last_percent = 0;
+	int bar_width;
+	int bar = 0;
+	char buf[64]; /* enough for petabytes... */
+	int i, percent = 0;
 
-	percent = percent_flags & APK_PRINT_PROGRESS_MASK;
-
-	if (last_written == percent && !(percent_flags & APK_PRINT_PROGRESS_FORCE))
+	if (last_done == done && !apk_progress_force)
 		return;
 
-	last_written = percent;
-
-	if (apk_flags & APK_PROGRESS) {
-		fprintf(stderr, "\e7%3i%% [", percent);
-		for (i = 0; i < bar_width * percent / 100; i++)
-			fputc('#', stderr);
-		for (; i < bar_width; i++)
-			fputc(' ', stderr);
-		fputc(']', stderr);
-		fflush(stderr);
-		fputs("\e8\e[0K", stderr);
-	}
-
 	if (apk_progress_fd != 0) {
-		i = snprintf(buf, sizeof(buf), "%i\n", percent);
+		i = snprintf(buf, sizeof(buf), "%zu/%zu\n", done, total);
 		write(apk_progress_fd, buf, i);
 	}
+	last_done = done;
+
+	if (!(apk_flags & APK_PROGRESS))
+		return;
+
+	bar_width = apk_get_screen_width() - 7;
+	if (total > 0) {
+		bar = muldiv(bar_width, done, total);
+		percent = muldiv(100, done, total);
+	}
+
+	if (bar  == last_bar && percent == last_percent && !apk_progress_force)
+		return;
+
+	last_bar = bar;
+	last_percent = percent;
+	apk_progress_force = 0;
+
+	fprintf(stderr, "\e7%3i%% [", percent);
+	for (i = 0; i < bar; i++)
+		fputc('#', stderr);
+	for (; i < bar_width; i++)
+		fputc(' ', stderr);
+	fputc(']', stderr);
+	fflush(stderr);
+	fputs("\e8\e[0K", stderr);
 }
 
 int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
@@ -80,6 +95,7 @@ int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
 		i->x += printf("%*s" BLOB_FMT, i->indent - i->x, "", BLOB_PRINTF(blob));
 	else
 		i->x += printf(" " BLOB_FMT, BLOB_PRINTF(blob));
+	apk_progress_force = 1;
 	return 0;
 }
 
@@ -133,5 +149,6 @@ void apk_log(const char *prefix, const char *format, ...)
 	vfprintf(stderr, format, va);
 	va_end(va);
 	fprintf(stderr, "\n");
+	apk_progress_force = 1;
 }
 

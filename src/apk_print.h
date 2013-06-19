@@ -31,10 +31,7 @@ struct apk_indent {
 	int indent;
 };
 
-#define APK_PRINT_PROGRESS_MASK		0xff
-#define APK_PRINT_PROGRESS_FORCE	0x100
-
-void apk_print_progress(int percent);
+void apk_print_progress(size_t done, size_t total);
 int  apk_print_indented(struct apk_indent *i, apk_blob_t blob);
 void apk_print_indented_words(struct apk_indent *i, const char *text);
 void apk_print_indented_fmt(struct apk_indent *i, const char *fmt, ...);

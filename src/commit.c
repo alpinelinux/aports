@@ -91,7 +91,7 @@ static int print_change(struct apk_database *db, struct apk_change *change,
 
 struct apk_stats {
 	unsigned int changes;
-	unsigned int bytes;
+	size_t bytes;
 	unsigned int packages;
 };
 
@@ -115,22 +115,13 @@ struct progress {
 	struct apk_stats done;
 	struct apk_stats total;
 	struct apk_package *pkg;
-	int flags;
 };
 
 static void progress_cb(void *ctx, size_t installed_bytes)
 {
 	struct progress *prog = (struct progress *) ctx;
-	size_t percent, total;
-
-	total = prog->total.bytes + prog->total.packages;
-	if (total > 0)
-		percent = muldiv(100, prog->done.bytes + prog->done.packages + installed_bytes,
-				 prog->total.bytes + prog->total.packages);
-	else
-		percent = 0;
-	apk_print_progress(percent | prog->flags);
-	prog->flags = 0;
+	apk_print_progress(prog->done.bytes + prog->done.packages + installed_bytes,
+			   prog->total.bytes + prog->total.packages);
 }
 
 static int dump_packages(struct apk_changeset *changeset,
@@ -283,7 +274,6 @@ int apk_solver_commit_changeset(struct apk_database *db,
 	foreach_array_item(change, changeset->changes) {
 		if (print_change(db, change, prog.done.changes, prog.total.changes)) {
 			prog.pkg = change->new_pkg;
-			prog.flags = APK_PRINT_PROGRESS_FORCE;
 			progress_cb(&prog, 0);
 
 			if (!(apk_flags & APK_SIMULATE)) {
@@ -301,7 +291,8 @@ int apk_solver_commit_changeset(struct apk_database *db,
 
 		count_change(change, &prog.done);
 	}
-	apk_print_progress(100 | APK_PRINT_PROGRESS_FORCE);
+	apk_print_progress(prog.total.bytes + prog.total.packages,
+			   prog.total.bytes + prog.total.packages);
 
 	run_triggers(db, changeset);
 

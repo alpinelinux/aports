@@ -28,7 +28,7 @@
 
 struct fetch_ctx {
 	unsigned int flags;
-	int outdir_fd, errors, prog_flags;
+	int outdir_fd, errors;
 	struct apk_database *db;
 	size_t done, total;
 };
@@ -94,8 +94,7 @@ static int fetch_parse(void *ctx, struct apk_db_options *dbopts,
 static void progress_cb(void *pctx, size_t bytes_done)
 {
 	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
-	apk_print_progress(muldiv(100, ctx->done + bytes_done, ctx->total) | ctx->prog_flags);
-	ctx->prog_flags = 0;
+	apk_print_progress(ctx->done + bytes_done, ctx->total);
 }
 
 static int fetch_package(apk_hash_item item, void *pctx)
@@ -132,8 +131,6 @@ static int fetch_package(apk_hash_item item, void *pctx)
 	apk_message("Downloading " PKG_VER_FMT, PKG_VER_PRINTF(pkg));
 	if (apk_flags & APK_SIMULATE)
 		return 0;
-
-	ctx->prog_flags = APK_PRINT_PROGRESS_FORCE;
 
 	r = apk_repo_format_item(db, repo, pkg, &urlfd, url, sizeof(url));
 	if (r < 0)
