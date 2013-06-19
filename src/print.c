@@ -67,7 +67,7 @@ void apk_print_progress(int percent_flags)
 	}
 
 	if (apk_progress_fd != 0) {
-		i = snprintf(buf, sizeof(buf), "%zu\n", percent);
+		i = snprintf(buf, sizeof(buf), "%i\n", percent);
 		write(apk_progress_fd, buf, i);
 	}
 }
