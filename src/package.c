@@ -796,7 +796,7 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 		pkg->commit = apk_blob_cstr(value);
 		break;
 	case 'F': case 'M': case 'R': case 'Z': case 'r': case 'q':
-	case 'a': case 's':
+	case 'a': case 's': case 'f':
 		/* installed db entries which are handled in database.c */
 		return 1;
 	default:
@@ -973,9 +973,9 @@ int apk_ipkg_add_script(struct apk_installed_package *ipkg,
 	return 0;
 }
 
-int apk_ipkg_run_script(struct apk_installed_package *ipkg,
-			struct apk_database *db,
-			unsigned int type, char **argv)
+void apk_ipkg_run_script(struct apk_installed_package *ipkg,
+			 struct apk_database *db,
+			 unsigned int type, char **argv)
 {
 	static char * const environment[] = {
 		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
@@ -986,11 +986,8 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg,
 	int fd, status, root_fd = db->root_fd;
 	pid_t pid;
 
-	if (type >= APK_SCRIPT_MAX)
-		return -1;
-
-	if (ipkg->script[type].ptr == NULL)
-		return 0;
+	if (type >= APK_SCRIPT_MAX || ipkg->script[type].ptr == NULL)
+		return;
 
 	argv[0] = (char *) apk_script_types[type];
 
@@ -1001,43 +998,41 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg,
 
 	apk_message("Executing %s", &fn[15]);
 	if (apk_flags & APK_SIMULATE)
-		return 0;
+		return;
 
 	fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0755);
 	if (fd < 0) {
 		mkdirat(root_fd, "var/cache/misc", 0755);
 		fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0755);
 		if (fd < 0)
-			return -errno;
+			goto error;
 	}
 	if (write(fd, ipkg->script[type].ptr, ipkg->script[type].len) < 0) {
 		close(fd);
-		return -errno;
+		goto error;
 	}
 	close(fd);
 
 	pid = fork();
 	if (pid == -1)
-		return -1;
+		goto error;
 	if (pid == 0) {
-		if (fchdir(root_fd) < 0 || chroot(".") < 0) {
-			apk_error("chroot: %s", strerror(errno));
-		} else {
+		if (fchdir(root_fd) == 0 && chroot(".") == 0)
 			execve(fn, argv, environment);
-		}
 		exit(1);
 	}
 	waitpid(pid, &status, 0);
 	unlinkat(root_fd, fn, 0);
 	apk_id_cache_reset(&db->id_cache);
 
-	if (WIFEXITED(status)) {
-		int rc = WEXITSTATUS(status);
-		if (rc != 0)
-			apk_warning("%s: returned error %d", &fn[15], rc);
-		return 0;
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		apk_error("%s: script exited with error %d", &fn[15], WEXITSTATUS(status));
+		ipkg->broken_script = 1;
 	}
-	return -1;
+	return;
+error:
+	apk_error("%s: failed to execute: %s", &fn[15], apk_error_str(errno));
+	ipkg->broken_script = 1;
 }
 
 static int parse_index_line(void *ctx, apk_blob_t line)

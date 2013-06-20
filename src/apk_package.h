@@ -78,9 +78,6 @@ APK_ARRAY(apk_dependency_array, struct apk_dependency);
 
 struct apk_installed_package {
 	struct apk_package *pkg;
-	unsigned int run_all_triggers : 1;
-	unsigned int repository_tag : 6;
-	unsigned short replaces_priority;
 	struct list_head installed_pkgs_list;
 	struct list_head trigger_pkgs_list;
 	struct hlist_head owned_dirs;
@@ -88,6 +85,12 @@ struct apk_installed_package {
 	struct apk_string_array *triggers;
 	struct apk_string_array *pending_triggers;
 	struct apk_dependency_array *replaces;
+
+	unsigned short replaces_priority;
+	unsigned repository_tag : 6;
+	unsigned run_all_triggers : 1;
+	unsigned broken_files : 1;
+	unsigned broken_script : 1;
 };
 
 #define APK_PKG_UNINSTALLABLE		((char*) -1)
@@ -177,9 +180,8 @@ void apk_pkg_uninstall(struct apk_database *db, struct apk_package *pkg);
 int apk_ipkg_add_script(struct apk_installed_package *ipkg,
 			struct apk_istream *is,
 			unsigned int type, unsigned int size);
-int apk_ipkg_run_script(struct apk_installed_package *ipkg,
-			struct apk_database *db,
-			unsigned int type, char **argv);
+void apk_ipkg_run_script(struct apk_installed_package *ipkg, struct apk_database *db,
+			 unsigned int type, char **argv);
 
 struct apk_package *apk_pkg_parse_index_entry(struct apk_database *db, apk_blob_t entry);
 int apk_pkg_write_index_entry(struct apk_package *pkg, struct apk_ostream *os);

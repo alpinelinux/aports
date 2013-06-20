@@ -48,7 +48,7 @@ static int print_change(struct apk_database *db, struct apk_change *change,
 	} else if (newpkg == oldpkg) {
 		if (change->reinstall) {
 			if (pkg_available(db, newpkg))
-				msg = "Re-installing";
+				msg = "Reinstalling";
 			else
 				msg = "[APK unavailable, skipped] Re-installing";
 		} else if (change->old_repository_tag != change->new_repository_tag) {
@@ -161,6 +161,11 @@ static int cmp_new(struct apk_change *change)
 	return change->old_pkg == NULL;
 }
 
+static int cmp_reinstall(struct apk_change *change)
+{
+	return change->reinstall;
+}
+
 static int cmp_downgrade(struct apk_change *change)
 {
 	if (change->new_pkg == NULL || change->old_pkg == NULL)
@@ -217,7 +222,9 @@ int apk_solver_commit_changeset(struct apk_database *db,
 {
 	struct progress prog;
 	struct apk_change *change;
-	int r = 0, size_diff = 0, size_unit;
+	char buf[32], size_unit;
+	ssize_t size_diff = 0;
+	int r, errors = 0;
 
 	if (apk_db_check_world(db, world) != 0) {
 		apk_error("Not committing changes due to missing repository tags. Use --force to override.");
@@ -252,7 +259,9 @@ int apk_solver_commit_changeset(struct apk_database *db,
 				      "The following NEW packages will be installed");
 			dump_packages(changeset, cmp_upgrade,
 				      "The following packages will be upgraded");
-			printf("After this operation, %d %ciB of %s\n",
+			dump_packages(changeset, cmp_reinstall,
+				      "The following packages will be reinstalled");
+			printf("After this operation, %zd %ciB of %s\n",
 				abs(size_diff), size_unit,
 				(size_diff < 0) ?
 				"disk space will be freed." :
@@ -269,25 +278,24 @@ int apk_solver_commit_changeset(struct apk_database *db,
 	}
 
 	/* Go through changes */
-	r = 0;
 	foreach_array_item(change, changeset->changes) {
+		r = change->old_pkg &&
+			(change->old_pkg->ipkg->broken_files ||
+			 change->old_pkg->ipkg->broken_script);
 		if (print_change(db, change, prog.done.changes, prog.total.changes)) {
 			prog.pkg = change->new_pkg;
 			progress_cb(&prog, 0);
 
-			if (!(apk_flags & APK_SIMULATE)) {
-				if (change->old_pkg != change->new_pkg ||
-				    (change->reinstall && pkg_available(db, change->new_pkg)))
-					r = apk_db_install_pkg(db,
-							       change->old_pkg, change->new_pkg,
-							       progress_cb, &prog);
-				if (r != 0)
-					break;
-				if (change->new_pkg)
-					change->new_pkg->ipkg->repository_tag = change->new_repository_tag;
+			if (!(apk_flags & APK_SIMULATE) &&
+			    ((change->old_pkg != change->new_pkg) ||
+			     (change->reinstall && pkg_available(db, change->new_pkg)))) {
+				r = apk_db_install_pkg(db, change->old_pkg, change->new_pkg,
+						       progress_cb, &prog) != 0;
 			}
+			if (r == 0 && change->new_pkg && change->new_pkg->ipkg)
+				change->new_pkg->ipkg->repository_tag = change->new_repository_tag;
 		}
-
+		errors += r;
 		count_change(change, &prog.done);
 	}
 	apk_print_progress(prog.total.bytes + prog.total.packages,
@@ -299,21 +307,27 @@ all_done:
 	apk_dependency_array_copy(&db->world, world);
 	apk_db_write_config(db);
 
-	if (r == 0 && !db->performing_self_update) {
+	if (!db->performing_self_update) {
+		if (errors)
+			snprintf(buf, sizeof(buf), "%d errors;", errors);
+		else
+			strcpy(buf, "OK:");
 		if (apk_verbosity > 1) {
-			apk_message("OK: %d packages, %d dirs, %d files, %zu MiB",
+			apk_message("%s %d packages, %d dirs, %d files, %zu MiB",
+				    buf,
 				    db->installed.stats.packages,
 				    db->installed.stats.dirs,
 				    db->installed.stats.files,
 				    db->installed.stats.bytes / (1024 * 1024));
 		} else {
-			apk_message("OK: %zu MiB in %d packages",
+			apk_message("%s %zu MiB in %d packages",
+				    buf,
 				    db->installed.stats.bytes / (1024 * 1024),
 				    db->installed.stats.packages);
 		}
 	}
 
-	return r;
+	return 0;
 }
 
 enum {

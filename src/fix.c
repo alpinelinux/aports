@@ -52,16 +52,20 @@ static int mark_recalculate(apk_hash_item item, void *ctx)
 	return 0;
 }
 
-static void set_solver_flags(struct apk_database *db, const char *match, struct apk_name *name, void *pctx)
+static void mark_fix(struct fix_ctx *ctx, struct apk_name *name)
 {
-	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
-
 	apk_solver_set_name_flags(name, ctx->solver_flags, ctx->fix_depends ? ctx->solver_flags : 0);
+}
+
+static void set_solver_flags(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
+{
+	mark_fix(ctx, name);
 }
 
 static int fix_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
+	struct apk_installed_package *ipkg;
 
 	if (!ctx->solver_flags)
 		ctx->solver_flags = APK_SOLVERF_REINSTALL;
@@ -69,7 +73,13 @@ static int fix_main(void *pctx, struct apk_database *db, struct apk_string_array
 	if (ctx->fix_directory_permissions)
 		apk_hash_foreach(&db->installed.dirs, mark_recalculate, db);
 
-	apk_name_foreach_matching(db, args, apk_foreach_genid(), set_solver_flags, ctx);
+	if (args->num == 0) {
+		list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
+			if (ipkg->broken_files || ipkg->broken_script)
+				mark_fix(ctx, ipkg->pkg->name);
+		}
+	} else
+		apk_name_foreach_matching(db, args, apk_foreach_genid(), set_solver_flags, ctx);
 
 	return apk_solver_commit(db, 0, db->world);
 }
