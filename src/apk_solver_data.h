@@ -50,9 +50,10 @@ struct apk_solver_package_state {
 	unsigned solver_flags : 4;
 	unsigned solver_flags_inheritable : 4;
 	unsigned seen : 1;
+	unsigned pkg_available : 1;
+	unsigned pkg_selectable : 1;
 	unsigned tag_ok : 1;
 	unsigned tag_preferred : 1;
-	unsigned available : 1;
 	unsigned dependencies_used : 1;
 	unsigned dependencies_merged : 1;
 	unsigned in_changeset : 1;

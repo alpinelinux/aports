@@ -1452,8 +1452,6 @@ static void apk_db_setup_repositories(struct apk_database *db)
 	db->local_repos |= BIT(APK_REPOSITORY_CACHED);
 	db->available_repos |= BIT(APK_REPOSITORY_CACHED);
 
-	/* Get first repository tag (the NULL tag) */
-	db->repo_tags[APK_DEFAULT_REPOSITORY_TAG].allowed_repos |= BIT(APK_REPOSITORY_CACHED);
 	db->num_repo_tags = 1;
 }
 

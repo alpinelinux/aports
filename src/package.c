@@ -802,7 +802,7 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 	default:
 		/* lower case index entries are safe to be ignored */
 		if (!islower(field)) {
-			pkg->filename = APK_PKG_UNINSTALLABLE;
+			pkg->uninstallable = 1;
 			db->compat_notinstallable = 1;
 		}
 		db->compat_newfeatures = 1;
@@ -914,8 +914,7 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	tar->close(tar);
 	if (r < 0 && r != -ECANCELED)
 		goto err;
-	if (ctx.pkg->name == NULL ||
-	    ctx.pkg->filename == APK_PKG_UNINSTALLABLE) {
+	if (ctx.pkg->name == NULL || ctx.pkg->uninstallable) {
 		r = -ENOTSUP;
 		goto err;
 	}

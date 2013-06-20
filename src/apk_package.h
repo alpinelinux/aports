@@ -93,8 +93,6 @@ struct apk_installed_package {
 	unsigned broken_script : 1;
 };
 
-#define APK_PKG_UNINSTALLABLE		((char*) -1)
-
 struct apk_package {
 	apk_hash_node hash_node;
 	union {
@@ -117,6 +115,7 @@ struct apk_package {
 	size_t installed_size, size;
 	time_t build_time;
 	unsigned marked : 1;
+	unsigned uninstallable : 1;
 	unsigned repos : APK_MAX_REPOS;
 	struct apk_checksum csum;
 };

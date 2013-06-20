@@ -164,7 +164,7 @@ static void disqualify_package(struct apk_solver_state *ss, struct apk_package *
 	struct apk_dependency *p;
 
 	dbg_printf("disqualify_package: " PKG_VER_FMT " (%s)\n", PKG_VER_PRINTF(pkg), reason);
-	pkg->ss.available = 0;
+	pkg->ss.pkg_selectable = 0;
 	reevaluate_reverse_deps(ss, pkg->name);
 	foreach_array_item(p, pkg->provides)
 		reevaluate_reverse_deps(ss, p->name);
@@ -183,7 +183,7 @@ static int dependency_satisfiable(struct apk_solver_state *ss, struct apk_depend
 		return TRUE;
 
 	foreach_array_item(p, name->providers)
-		if (p->pkg->ss.available && apk_dep_is_provided(dep, p))
+		if (p->pkg->ss.pkg_selectable && apk_dep_is_provided(dep, p))
 			return TRUE;
 
 	return FALSE;
@@ -205,14 +205,22 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 		struct apk_package *pkg = p->pkg;
 		if (pkg->ss.seen)
 			continue;
+
 		pkg->ss.seen = 1;
-		pkg->ss.available = pkg->ipkg || (pkg->repos & db->available_repos);
 		pkg->ss.pinning_allowed = APK_DEFAULT_PINNING_MASK;
 		pkg->ss.pinning_preferred = APK_DEFAULT_PINNING_MASK;
+		pkg->ss.pkg_available =
+			(pkg->filename != NULL) ||
+			(pkg->installed_size == 0) ||
+			(pkg->repos & db->available_repos);
+		pkg->ss.pkg_selectable = pkg->ss.pkg_available || pkg->ipkg;
 
 		repos = get_pkg_repos(db, pkg);
-		pkg->ss.tag_ok = !!(repos & ss->default_repos);
-		pkg->ss.tag_preferred = !!(repos & ss->default_repos);
+		pkg->ss.tag_preferred =
+			(pkg->filename != NULL) ||
+			(pkg->installed_size == 0) ||
+			!!(repos & ss->default_repos);
+		pkg->ss.tag_ok = pkg->ss.tag_preferred || pkg->ipkg;
 
 		foreach_array_item(dep, pkg->depends) {
 			discover_name(ss, dep->name);
@@ -221,12 +229,12 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 		}
 		name->ss.max_dep_chain = max(name->ss.max_dep_chain, pkg->ss.max_dep_chain);
 
-		dbg_printf("discover " PKG_VER_FMT ": tag_ok=%d, tag_pref=%d max_dep_chain=%d available=%d\n",
+		dbg_printf("discover " PKG_VER_FMT ": tag_ok=%d, tag_pref=%d max_dep_chain=%d selectable=%d\n",
 			PKG_VER_PRINTF(pkg),
 			pkg->ss.tag_ok,
 			pkg->ss.tag_preferred,
 			pkg->ss.max_dep_chain,
-			pkg->ss.available);
+			pkg->ss.pkg_selectable);
 	}
 	foreach_array_item(pname0, name->rinstall_if)
 		discover_name(ss, *pname0);
@@ -277,7 +285,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 			pkg0->name->name, BLOB_PRINTF(*p0->version), is_provided);
 
 		pkg0->ss.conflicts += !is_provided;
-		if (unlikely(pkg0->ss.available && pkg0->ss.conflicts))
+		if (unlikely(pkg0->ss.pkg_selectable && pkg0->ss.conflicts))
 			disqualify_package(ss, pkg0, "conflicting dependency");
 
 		if (is_provided) {
@@ -297,6 +305,9 @@ static void exclude_non_providers(struct apk_solver_state *ss, struct apk_name *
 {
 	struct apk_provider *p;
 	struct apk_dependency *d;
+
+	if (name == must_provide)
+		return;
 
 	dbg_printf("%s must provide %s\n", name->name, must_provide->name);
 
@@ -350,7 +361,7 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		pkg = p->pkg;
 		pkg->ss.dependencies_merged = 0;
 		if (reevaluate_deps) {
-			if (!pkg->ss.available)
+			if (!pkg->ss.pkg_selectable)
 				continue;
 			foreach_array_item(dep, pkg->depends) {
 				if (!dependency_satisfiable(ss, dep)) {
@@ -359,7 +370,7 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 				}
 			}
 		}
-		if (!pkg->ss.available)
+		if (!pkg->ss.pkg_selectable)
 			continue;
 
 		if (reevaluate_iif) {
@@ -469,13 +480,13 @@ static int compare_providers(struct apk_solver_state *ss,
 
 		/* Prefer available */
 		if (solver_flags & (APK_SOLVERF_AVAILABLE | APK_SOLVERF_REINSTALL)) {
-			r = !!(pkgA->repos & db->available_repos) - !!(pkgB->repos & db->available_repos);
+			r = (int)pkgA->ss.pkg_available - (int)pkgB->ss.pkg_available;
 			if (r)
 				return r;
 		}
 	} else {
 		/* Prefer without errors */
-		r = (int)pkgA->ss.available - (int)pkgB->ss.available;
+		r = (int)pkgA->ss.pkg_selectable - (int)pkgB->ss.pkg_selectable;
 		if (r)
 			return r;
 
@@ -501,7 +512,7 @@ static int compare_providers(struct apk_solver_state *ss,
 
 		/* Prefer available */
 		if (solver_flags & (APK_SOLVERF_AVAILABLE | APK_SOLVERF_REINSTALL)) {
-			r = !!(pkgA->repos & db->available_repos) - !!(pkgB->repos & db->available_repos);
+			r = (int)pkgA->ss.pkg_available - (int)pkgB->ss.pkg_available;
 			if (r)
 				return r;
 		}
@@ -617,11 +628,11 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 
 	pkg = chosen.pkg;
 	if (pkg) {
-		if (!pkg->ss.available || !pkg->ss.tag_ok) {
+		if (!pkg->ss.pkg_selectable || !pkg->ss.tag_ok) {
 			/* Selecting broken or unallowed package */
 			mark_error(ss, pkg);
 		}
-		dbg_printf("selecting: " PKG_VER_FMT ", available: %d\n", PKG_VER_PRINTF(pkg), pkg->ss.available);
+		dbg_printf("selecting: " PKG_VER_FMT ", available: %d\n", PKG_VER_PRINTF(pkg), pkg->ss.pkg_selectable);
 
 		assign_name(ss, pkg->name, APK_PROVIDER_FROM_PACKAGE(pkg));
 		foreach_array_item(d, pkg->provides)
@@ -754,7 +765,7 @@ static void cset_gen_name_change(struct apk_solver_state *ss, struct apk_name *n
 	foreach_array_item(d, pkg->depends)
 		cset_gen_dep(ss, pkg, d);
 
-	dbg_printf("Selecting: "PKG_VER_FMT"%s\n", PKG_VER_PRINTF(pkg), pkg->ss.available ? "" : " [NOT AVAILABLE]");
+	dbg_printf("Selecting: "PKG_VER_FMT"%s\n", PKG_VER_PRINTF(pkg), pkg->ss.pkg_selectable ? "" : " [NOT SELECTABLE]");
 	record_change(ss, opkg, pkg);
 
 	foreach_array_item(pname, pkg->name->rinstall_if)
