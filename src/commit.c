@@ -261,11 +261,12 @@ int apk_solver_commit_changeset(struct apk_database *db,
 				      "The following packages will be upgraded");
 			dump_packages(changeset, cmp_reinstall,
 				      "The following packages will be reinstalled");
-			printf("After this operation, %zd %ciB of %s\n",
-				abs(size_diff), size_unit,
+			printf("After this operation, %zd %ciB of %s.\n",
+				(size_diff < 0) ? -size_diff : size_diff,
+				size_unit,
 				(size_diff < 0) ?
-				"disk space will be freed." :
-				"additional disk space will be used.");
+				"disk space will be freed" :
+				"additional disk space will be used");
 		}
 		if (changeset->num_total_changes > 0 &&
 		    (apk_flags & APK_INTERACTIVE)) {
