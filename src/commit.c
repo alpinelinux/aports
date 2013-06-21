@@ -50,7 +50,7 @@ static int print_change(struct apk_database *db, struct apk_change *change,
 			if (pkg_available(db, newpkg))
 				msg = "Reinstalling";
 			else
-				msg = "[APK unavailable, skipped] Re-installing";
+				msg = "[APK unavailable, skipped] Reinstalling";
 		} else if (change->old_repository_tag != change->new_repository_tag) {
 			msg = "Updating pinning";
 		}
