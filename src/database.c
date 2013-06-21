@@ -921,6 +921,14 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 			apk_blob_push_blob(&bbuf, db->repo_tags[ipkg->repository_tag].plain_name);
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 		}
+		if (ipkg->broken_files || ipkg->broken_script) {
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("f:"));
+			if (ipkg->broken_files)
+				apk_blob_push_blob(&bbuf, APK_BLOB_STR("f"));
+			if (ipkg->broken_script)
+				apk_blob_push_blob(&bbuf, APK_BLOB_STR("s"));
+			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
+		}
 		hlist_for_each_entry(diri, c1, &ipkg->owned_dirs, pkg_dirs_list) {
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("F:"));
 			apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen));
@@ -930,13 +938,6 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 			apk_blob_push_uint(&bbuf, diri->gid, 10);
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR(":"));
 			apk_blob_push_uint(&bbuf, diri->mode, 8);
-			if (ipkg->broken_files || ipkg->broken_script) {
-				apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nf:"));
-				if (ipkg->broken_files)
-					apk_blob_push_blob(&bbuf, APK_BLOB_STR("f"));
-				if (ipkg->broken_script)
-					apk_blob_push_blob(&bbuf, APK_BLOB_STR("s"));
-			}
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
 			hlist_for_each_entry(file, c2, &diri->owned_files, diri_files_list) {
