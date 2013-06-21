@@ -2635,6 +2635,8 @@ int apk_db_install_pkg(struct apk_database *db, struct apk_package *oldpkg,
 	/* Install the new stuff */
 	ipkg = apk_pkg_install(db, newpkg);
 	ipkg->run_all_triggers = 1;
+	ipkg->broken_script = 0;
+	ipkg->broken_files = 0;
 	if (ipkg->triggers->num != 0) {
 		list_del(&ipkg->trigger_pkgs_list);
 		list_init(&ipkg->trigger_pkgs_list);
