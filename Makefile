@@ -15,9 +15,8 @@ LIBDIR		:= /lib
 CONFDIR		:= /etc/apk
 MANDIR		:= /usr/share/man
 DOCDIR		:= /usr/share/doc/apk
-LUA_LIBDIR	:= /usr/lib/lua/5.1
 
-export DESTDIR SBINDIR LIBDIR CONFDIR MANDIR DOCDIR LUA_LIBDIR
+export DESTDIR SBINDIR LIBDIR CONFDIR MANDIR DOCDIR
 
 ##
 # Top-level rules and targets

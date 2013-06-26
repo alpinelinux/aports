@@ -4,11 +4,14 @@ LUAAPK ?= yes
 
 # lua module
 ifneq ($(LUAAPK),)
+LUA_VERSION		?= 5.2
+LUA_PC			?= lua$(LUA_VERSION)
+LUA_LIBDIR		?= /usr/lib/lua/$(LUA_VERSION)
 LIBAPK			:= YesPlease
-PKGDEPS			+= lua
 shlibs-y		+= apk.so
 apk.so-objs		:= lua-apk.o
-CFLAGS_lua-apk.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\"
+CFLAGS_lua-apk.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\" \
+			   $(shell $(PKG_CONFIG) $(LUA_PC) --cflags)
 LUA_LIB-y		:= $(obj)/apk.so
 install-LUA_LIB-y	:= $(INSTALLDIR) $(DESTDIR)$(LUA_LIBDIR) && \
 			   $(INSTALL) $(LUA_LIB-y) $(DESTDIR)$(LUA_LIBDIR)
