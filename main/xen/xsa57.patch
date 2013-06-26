@@ -1,0 +1,333 @@
+libxl: Restrict permissions on PV console device xenstore nodes
+
+Matthew Daley has observed that the PV console protocol places sensitive host
+state into a guest writeable xenstore locations, this includes:
+
+ - The pty used to communicate between the console backend daemon and its
+   client, allowing the guest administrator to read and write arbitrary host
+   files.
+ - The output file, allowing the guest administrator to write arbitrary host
+   files or to target arbitrary qemu chardevs which include sockets, udp, ptr,
+   pipes etc (see -chardev in qemu(1) for a more complete list).
+ - The maximum buffer size, allowing the guest administrator to consume more
+   resources than the host administrator has configured.
+ - The backend to use (qemu vs xenconsoled), potentially allowing the guest
+   administrator to confuse host software.
+
+So we arrange to make the sensitive keys in the xenstore frontend directory
+read only for the guest. This is safe since the xenstore permissions model,
+unlike POSIX directory permissions, does not allow the guest to remove and
+recreate a node if it has write access to the containing directory.
+
+There are a few associated wrinkles:
+
+ - The primary PV console is "special". It's xenstore node is not under the
+   usual /devices/ subtree and it does not use the customary xenstore state
+   machine protocol. Unfortunately its directory is used for other things,
+   including the vnc-port node, which we do not want the guest to be able to
+   write to. Rather than trying to track down all the possible secondary uses
+   of this directory just make it r/o to the guest. All newly created
+   subdirectories inherit these permissions and so are now safe by default.
+
+ - The other serial consoles do use the customary xenstore state machine and
+   therefore need write access to at least the "protocol" and "state" nodes,
+   however they may also want to use arbitrary "feature-foo" nodes (although
+   I'm not aware of any) and therefore we cannot simply lock down the entire
+   frontend directory. Instead we add support to libxl__device_generic_add for
+   frontend keys which are explicitly read only and use that to lock down the
+   sensitive keys.
+
+ - Minios' console frontend wants to write the "type" node, which it has no
+   business doing since this is a host/toolstack level decision. This fails
+   now that the node has become read only to the PV guest. Since the toolstack
+   already writes this node just remove the attempt to set it.
+
+This is CVE-XXXX-XXX / XSA-57
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+
+Conflicts:
+	tools/libxl/libxl.c (no vtpm, free front_ro on error in
+	                     libxl__device_console_add)
+
+diff --git a/extras/mini-os/console/xenbus.c b/extras/mini-os/console/xenbus.c
+index 77de82a..e65baf7 100644
+--- a/extras/mini-os/console/xenbus.c
++++ b/extras/mini-os/console/xenbus.c
+@@ -122,12 +122,6 @@ again:
+         goto abort_transaction;
+     }
+ 
+-    err = xenbus_printf(xbt, nodename, "type", "%s", "ioemu");
+-    if (err) {
+-        message = "writing type";
+-        goto abort_transaction;
+-    }
+-
+     snprintf(path, sizeof(path), "%s/state", nodename);
+     err = xenbus_switch_state(xbt, path, XenbusStateConnected);
+     if (err) {
+diff --git a/tools/libxl/libxl.c b/tools/libxl/libxl.c
+index a6e9601..32d788a 100644
+--- a/tools/libxl/libxl.c
++++ b/tools/libxl/libxl.c
+@@ -1920,8 +1920,9 @@ static void device_disk_add(libxl__egc *egc, uint32_t domid,
+         flexarray_append(front, disk->is_cdrom ? "cdrom" : "disk");
+ 
+         libxl__device_generic_add(gc, t, device,
+-                            libxl__xs_kvs_of_flexarray(gc, back, back->count),
+-                            libxl__xs_kvs_of_flexarray(gc, front, front->count));
++                                  libxl__xs_kvs_of_flexarray(gc, back, back->count),
++                                  libxl__xs_kvs_of_flexarray(gc, front, front->count),
++                                  NULL);
+ 
+         rc = libxl__xs_transaction_commit(gc, &t);
+         if (!rc) break;
+@@ -2633,8 +2634,9 @@ void libxl__device_nic_add(libxl__egc *egc, uint32_t domid,
+     flexarray_append(front, libxl__sprintf(gc,
+                                     LIBXL_MAC_FMT, LIBXL_MAC_BYTES(nic->mac)));
+     libxl__device_generic_add(gc, XBT_NULL, device,
+-                             libxl__xs_kvs_of_flexarray(gc, back, back->count),
+-                             libxl__xs_kvs_of_flexarray(gc, front, front->count));
++                              libxl__xs_kvs_of_flexarray(gc, back, back->count),
++                              libxl__xs_kvs_of_flexarray(gc, front, front->count),
++                              NULL);
+ 
+     aodev->dev = device;
+     aodev->action = DEVICE_CONNECT;
+@@ -2830,7 +2832,7 @@ int libxl__device_console_add(libxl__gc *gc, uint32_t domid,
+                               libxl__device_console *console,
+                               libxl__domain_build_state *state)
+ {
+-    flexarray_t *front;
++    flexarray_t *front, *ro_front;
+     flexarray_t *back;
+     libxl__device device;
+     int rc;
+@@ -2845,6 +2847,11 @@ int libxl__device_console_add(libxl__gc *gc, uint32_t domid,
+         rc = ERROR_NOMEM;
+         goto out;
+     }
++    ro_front = flexarray_make(16, 1);
++    if (!ro_front) {
++        rc = ERROR_NOMEM;
++        goto out;
++    }
+     back = flexarray_make(16, 1);
+     if (!back) {
+         rc = ERROR_NOMEM;
+@@ -2871,21 +2878,24 @@ int libxl__device_console_add(libxl__gc *gc, uint32_t domid,
+ 
+     flexarray_append(front, "backend-id");
+     flexarray_append(front, libxl__sprintf(gc, "%d", console->backend_domid));
+-    flexarray_append(front, "limit");
+-    flexarray_append(front, libxl__sprintf(gc, "%d", LIBXL_XENCONSOLE_LIMIT));
+-    flexarray_append(front, "type");
++
++    flexarray_append(ro_front, "limit");
++    flexarray_append(ro_front, libxl__sprintf(gc, "%d", LIBXL_XENCONSOLE_LIMIT));
++    flexarray_append(ro_front, "type");
+     if (console->consback == LIBXL__CONSOLE_BACKEND_XENCONSOLED)
+-        flexarray_append(front, "xenconsoled");
++        flexarray_append(ro_front, "xenconsoled");
+     else
+-        flexarray_append(front, "ioemu");
+-    flexarray_append(front, "output");
+-    flexarray_append(front, console->output);
++        flexarray_append(ro_front, "ioemu");
++    flexarray_append(ro_front, "output");
++    flexarray_append(ro_front, console->output);
++    flexarray_append(ro_front, "tty");
++    flexarray_append(ro_front, "");
+ 
+     if (state) {
+-        flexarray_append(front, "port");
+-        flexarray_append(front, libxl__sprintf(gc, "%"PRIu32, state->console_port));
+-        flexarray_append(front, "ring-ref");
+-        flexarray_append(front, libxl__sprintf(gc, "%lu", state->console_mfn));
++        flexarray_append(ro_front, "port");
++        flexarray_append(ro_front, libxl__sprintf(gc, "%"PRIu32, state->console_port));
++        flexarray_append(ro_front, "ring-ref");
++        flexarray_append(ro_front, libxl__sprintf(gc, "%lu", state->console_mfn));
+     } else {
+         flexarray_append(front, "state");
+         flexarray_append(front, libxl__sprintf(gc, "%d", 1));
+@@ -2894,11 +2904,13 @@ int libxl__device_console_add(libxl__gc *gc, uint32_t domid,
+     }
+ 
+     libxl__device_generic_add(gc, XBT_NULL, &device,
+-                             libxl__xs_kvs_of_flexarray(gc, back, back->count),
+-                             libxl__xs_kvs_of_flexarray(gc, front, front->count));
++                              libxl__xs_kvs_of_flexarray(gc, back, back->count),
++                              libxl__xs_kvs_of_flexarray(gc, front, front->count),
++                              libxl__xs_kvs_of_flexarray(gc, ro_front, ro_front->count));
+     rc = 0;
+ out_free:
+     flexarray_free(back);
++    flexarray_free(ro_front);
+     flexarray_free(front);
+ out:
+     return rc;
+@@ -2982,8 +2994,9 @@ int libxl__device_vkb_add(libxl__gc *gc, uint32_t domid,
+     flexarray_append(front, libxl__sprintf(gc, "%d", 1));
+ 
+     libxl__device_generic_add(gc, XBT_NULL, &device,
+-                             libxl__xs_kvs_of_flexarray(gc, back, back->count),
+-                             libxl__xs_kvs_of_flexarray(gc, front, front->count));
++                              libxl__xs_kvs_of_flexarray(gc, back, back->count),
++                              libxl__xs_kvs_of_flexarray(gc, front, front->count),
++                              NULL);
+     rc = 0;
+ out_free:
+     flexarray_free(back);
+@@ -3096,8 +3109,9 @@ int libxl__device_vfb_add(libxl__gc *gc, uint32_t domid, libxl_device_vfb *vfb)
+     flexarray_append_pair(front, "state", libxl__sprintf(gc, "%d", 1));
+ 
+     libxl__device_generic_add(gc, XBT_NULL, &device,
+-                             libxl__xs_kvs_of_flexarray(gc, back, back->count),
+-                             libxl__xs_kvs_of_flexarray(gc, front, front->count));
++                              libxl__xs_kvs_of_flexarray(gc, back, back->count),
++                              libxl__xs_kvs_of_flexarray(gc, front, front->count),
++                              NULL);
+     rc = 0;
+ out_free:
+     flexarray_free(front);
+diff --git a/tools/libxl/libxl_device.c b/tools/libxl/libxl_device.c
+index c3283f1..1c04a21 100644
+--- a/tools/libxl/libxl_device.c
++++ b/tools/libxl/libxl_device.c
+@@ -84,11 +84,12 @@ out:
+ }
+ 
+ int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
+-        libxl__device *device, char **bents, char **fents)
++        libxl__device *device, char **bents, char **fents, char **ro_fents)
+ {
+     libxl_ctx *ctx = libxl__gc_owner(gc);
+     char *frontend_path, *backend_path;
+     struct xs_permissions frontend_perms[2];
++    struct xs_permissions ro_frontend_perms[2];
+     struct xs_permissions backend_perms[2];
+     int create_transaction = t == XBT_NULL;
+ 
+@@ -100,22 +101,37 @@ int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
+     frontend_perms[1].id = device->backend_domid;
+     frontend_perms[1].perms = XS_PERM_READ;
+ 
+-    backend_perms[0].id = device->backend_domid;
+-    backend_perms[0].perms = XS_PERM_NONE;
+-    backend_perms[1].id = device->domid;
+-    backend_perms[1].perms = XS_PERM_READ;
++    ro_frontend_perms[0].id = backend_perms[0].id = device->backend_domid;
++    ro_frontend_perms[0].perms = backend_perms[0].perms = XS_PERM_NONE;
++    ro_frontend_perms[1].id = backend_perms[1].id = device->domid;
++    ro_frontend_perms[1].perms = backend_perms[1].perms = XS_PERM_READ;
+ 
+ retry_transaction:
+     if (create_transaction)
+         t = xs_transaction_start(ctx->xsh);
+     /* FIXME: read frontend_path and check state before removing stuff */
+ 
+-    if (fents) {
++    if (fents || ro_fents) {
+         xs_rm(ctx->xsh, t, frontend_path);
+         xs_mkdir(ctx->xsh, t, frontend_path);
+-        xs_set_permissions(ctx->xsh, t, frontend_path, frontend_perms, ARRAY_SIZE(frontend_perms));
++        /* Console 0 is a special case. It doesn't use the regular PV
++         * state machine but also the frontend directory has
++         * historically contained other information, such as the
++         * vnc-port, which we don't want the guest fiddling with.
++         */
++        if (device->kind == LIBXL__DEVICE_KIND_CONSOLE && device->devid == 0)
++            xs_set_permissions(ctx->xsh, t, frontend_path,
++                               ro_frontend_perms, ARRAY_SIZE(ro_frontend_perms));
++        else
++            xs_set_permissions(ctx->xsh, t, frontend_path,
++                               frontend_perms, ARRAY_SIZE(frontend_perms));
+         xs_write(ctx->xsh, t, libxl__sprintf(gc, "%s/backend", frontend_path), backend_path, strlen(backend_path));
+-        libxl__xs_writev(gc, t, frontend_path, fents);
++        if (fents)
++            libxl__xs_writev_perms(gc, t, frontend_path, fents,
++                                   frontend_perms, ARRAY_SIZE(frontend_perms));
++        if (ro_fents)
++            libxl__xs_writev_perms(gc, t, frontend_path, ro_fents,
++                                   ro_frontend_perms, ARRAY_SIZE(ro_frontend_perms));
+     }
+ 
+     if (bents) {
+diff --git a/tools/libxl/libxl_internal.h b/tools/libxl/libxl_internal.h
+index 13fa509..ae96a74 100644
+--- a/tools/libxl/libxl_internal.h
++++ b/tools/libxl/libxl_internal.h
+@@ -516,6 +516,11 @@ _hidden char **libxl__xs_kvs_of_flexarray(libxl__gc *gc, flexarray_t *array, int
+ /* treats kvs as pairs of keys and values and writes each to dir. */
+ _hidden int libxl__xs_writev(libxl__gc *gc, xs_transaction_t t,
+                              const char *dir, char **kvs);
++/* as writev but also sets the permissions on each path */
++_hidden int libxl__xs_writev_perms(libxl__gc *gc, xs_transaction_t t,
++                                   const char *dir, char *kvs[],
++                                   struct xs_permissions *perms,
++                                   unsigned int num_perms);
+ /* _atonce creates a transaction and writes all keys at once */
+ _hidden int libxl__xs_writev_atonce(libxl__gc *gc,
+                              const char *dir, char **kvs);
+@@ -930,7 +935,7 @@ _hidden int libxl__device_console_add(libxl__gc *gc, uint32_t domid,
+                                       libxl__domain_build_state *state);
+ 
+ _hidden int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
+-        libxl__device *device, char **bents, char **fents);
++        libxl__device *device, char **bents, char **fents, char **ro_fents);
+ _hidden char *libxl__device_backend_path(libxl__gc *gc, libxl__device *device);
+ _hidden char *libxl__device_frontend_path(libxl__gc *gc, libxl__device *device);
+ _hidden int libxl__parse_backend_path(libxl__gc *gc, const char *path,
+diff --git a/tools/libxl/libxl_pci.c b/tools/libxl/libxl_pci.c
+index 48986f3..d373b4d 100644
+--- a/tools/libxl/libxl_pci.c
++++ b/tools/libxl/libxl_pci.c
+@@ -106,7 +106,8 @@ int libxl__create_pci_backend(libxl__gc *gc, uint32_t domid,
+ 
+     libxl__device_generic_add(gc, XBT_NULL, &device,
+                               libxl__xs_kvs_of_flexarray(gc, back, back->count),
+-                              libxl__xs_kvs_of_flexarray(gc, front, front->count));
++                              libxl__xs_kvs_of_flexarray(gc, front, front->count),
++                              NULL);
+ 
+ out:
+     if (back)
+diff --git a/tools/libxl/libxl_xshelp.c b/tools/libxl/libxl_xshelp.c
+index 52af484..d7eaa66 100644
+--- a/tools/libxl/libxl_xshelp.c
++++ b/tools/libxl/libxl_xshelp.c
+@@ -41,8 +41,10 @@ char **libxl__xs_kvs_of_flexarray(libxl__gc *gc, flexarray_t *array, int length)
+     return kvs;
+ }
+ 
+-int libxl__xs_writev(libxl__gc *gc, xs_transaction_t t,
+-                     const char *dir, char *kvs[])
++int libxl__xs_writev_perms(libxl__gc *gc, xs_transaction_t t,
++                           const char *dir, char *kvs[],
++                           struct xs_permissions *perms,
++                           unsigned int num_perms)
+ {
+     libxl_ctx *ctx = libxl__gc_owner(gc);
+     char *path;
+@@ -56,11 +58,19 @@ int libxl__xs_writev(libxl__gc *gc, xs_transaction_t t,
+         if (path && kvs[i + 1]) {
+             int length = strlen(kvs[i + 1]);
+             xs_write(ctx->xsh, t, path, kvs[i + 1], length);
++            if (perms)
++                xs_set_permissions(ctx->xsh, t, path, perms, num_perms);
+         }
+     }
+     return 0;
+ }
+ 
++int libxl__xs_writev(libxl__gc *gc, xs_transaction_t t,
++                     const char *dir, char *kvs[])
++{
++    return libxl__xs_writev_perms(gc, t, dir, kvs, NULL, 0);
++}
++
+ int libxl__xs_writev_atonce(libxl__gc *gc,
+                             const char *dir, char *kvs[])
+ {
