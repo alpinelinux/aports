@@ -86,8 +86,8 @@ static int fix_main(void *pctx, struct apk_database *db, struct apk_string_array
 
 static struct apk_option fix_options[] = {
 	{ 'd',		"depends",	"Fix all dependencies too" },
-	{ 'u',		"upgrade",	"Upgrade package if possible" },
-	{ 'r',		"reinstall",	"Reinstall the package" },
+	{ 'r',		"reinstall",	"Reinstall the package (default)" },
+	{ 'u',		"upgrade",	"Prefer to upgrade package" },
 	{ 0x10000,	"directory-permissions", "Reset all directory permissions" },
 };
 
