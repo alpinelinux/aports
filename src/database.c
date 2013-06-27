@@ -1119,12 +1119,10 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 	int r;
 
 	/* Read:
-	 * 1. installed repository
-	 * 2. source repositories
-	 * 3. master dependencies
-	 * 4. package statuses
-	 * 5. files db
-	 * 6. script db
+	 * 1. /etc/apk/world
+	 * 2. installed packages db
+	 * 3. triggers db
+	 * 4. scripts db
 	 */
 	if (!(flags & APK_OPENF_NO_WORLD)) {
 		blob = world = apk_blob_from_file(db->root_fd, apk_world_file);
@@ -1574,14 +1572,14 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		db->cache_fd = fd;
 		if ((dbopts->open_flags & (APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE)) &&
 		    fstatvfs(fd, &stvfs) == 0 && (stvfs.f_flag & ST_RDONLY) != 0) {
-			/* remount cache read-write */
+			/* remount cache read/write */
 			db->cache_remount_dir = find_mountpoint(db->root_fd, db->cache_dir);
 			if (db->cache_remount_dir == NULL) {
 				apk_warning("Unable to find cache directory mount point");
 			} else if (do_remount(db->cache_remount_dir, "rw") != 0) {
 				free(db->cache_remount_dir);
 				db->cache_remount_dir = NULL;
-				apk_error("Unable to remount cache read-write");
+				apk_error("Unable to remount cache read/write");
 				r = EROFS;
 				goto ret_r;
 			}

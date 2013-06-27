@@ -186,8 +186,8 @@ static struct apk_option ver_options[] = {
 	{ 't', "test",		"Compare two given versions" },
 	{ 'c', "check", 	"Check if the given version string is valid" },
 	{ 'a', "all",		"Consider packages from all repository tags" },
-	{ 'l', "limit",		"Limit output to packages with status matching one of LIMCHARS",
-	  required_argument, "LIMCHARS" },
+	{ 'l', "limit",		"Limit output to packages with status matching one of LIMCHARs",
+	  required_argument, "LIMCHARs" },
 };
 
 static struct apk_applet apk_ver = {

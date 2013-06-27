@@ -260,7 +260,7 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 
 static struct apk_option fetch_options[] = {
 	{ 'L', "link",		"Create hard links if possible" },
-	{ 'R', "recursive",	"Fetch the PACKAGE and all it's dependencies" },
+	{ 'R', "recursive",	"Fetch the PACKAGE and all its dependencies" },
 	{ 's', "stdout",
 	  "Dump the .apk to stdout (incompatible with -o and -R)" },
 	{ 'o', "output",	"Directory to place the PACKAGEs to",

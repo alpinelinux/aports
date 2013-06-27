@@ -157,7 +157,7 @@ static int dot_main(void *pctx, struct apk_database *db, struct apk_string_array
 
 static struct apk_option dot_options[] = {
 	{ 0x10000,	"errors",	"Output only parts of the graph which are considered "
-					"errorneus: e.g. cycles and missing packages" },
+					"erroneous: e.g. cycles and missing packages" },
 	{ 0x10001,	"installed",	"Consider only installed packages" },
 };
 

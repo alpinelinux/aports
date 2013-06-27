@@ -245,7 +245,7 @@ static struct apk_option index_options[] = {
 	{ 'd', "description", "Embed TEXT as description and version "
 	  "information of the repository index",
 	  required_argument, "TEXT" },
-	{ 0x10000, "rewrite-arch", "Use ARCH as architery for all packages",
+	{ 0x10000, "rewrite-arch", "Use ARCH as architecture for all packages",
 	  required_argument, "ARCH" },
 };
 

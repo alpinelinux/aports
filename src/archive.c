@@ -45,7 +45,7 @@ struct tar_header {
 	char devmajor[8];   /* 329-336 */
 	char devminor[8];   /* 337-344 */
 	char prefix[155];   /* 345-499 */
-	char padding[12];   /* 500-512 */
+	char padding[12];   /* 500-511 */
 };
 
 struct apk_tar_digest_info {

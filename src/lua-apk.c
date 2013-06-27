@@ -75,7 +75,7 @@ static int Pversion_compare(lua_State *L)
 }
 
 /* version_is_less(verstr1, verstr2)
-   returns either '<', '=' or '>'
+   returns whether version is '<'
 */
 static int Pversion_is_less(lua_State *L)
 {

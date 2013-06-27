@@ -154,14 +154,15 @@ static struct apk_option add_options[] = {
 	{ 'u',		"upgrade",	"Prefer to upgrade package" },
 	{ 't',		"virtual",
 	  "Instead of adding all the packages to 'world', create a new virtual "
-	  "package with the listed dependencies and add that to 'world'. The "
+	  "package with the listed dependencies and add that to 'world'; the "
 	  "actions of the command are easily reverted by deleting the virtual "
 	  "package", required_argument, "NAME" },
 };
 
 static struct apk_applet apk_add = {
 	.name = "add",
-	.help = "Add/update PACKAGEs to main dependencies and install them",
+	.help = "Add PACKAGEs to main dependencies and install (or upgrade) "
+		"them, while ensuring that all dependencies are met",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct add_ctx),

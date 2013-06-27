@@ -42,7 +42,7 @@ static struct apk_option generic_options[] = {
 	{ 'X', "repository",	"Use packages from REPO",
 				required_argument, "REPO" },
 	{ 'q', "quiet",		"Print less information" },
-	{ 'v', "verbose",	"Print more information" },
+	{ 'v', "verbose",	"Print more information (can be doubled)" },
 	{ 'i', "interactive",	"Ask confirmation for certain operations" },
 	{ 'V', "version",	"Print program version and exit" },
 	{ 'f', "force",		"Do what was asked even if it looks dangerous" },
