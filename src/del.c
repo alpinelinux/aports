@@ -135,7 +135,7 @@ static struct apk_option del_options[] = {
 
 static struct apk_applet apk_del = {
 	.name = "del",
-	.help = "Remove PACKAGEs from the main dependencies and uninstall them",
+	.help = "Remove PACKAGEs from 'world' and uninstall them",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct del_ctx),

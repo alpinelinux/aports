@@ -161,7 +161,7 @@ static struct apk_option add_options[] = {
 
 static struct apk_applet apk_add = {
 	.name = "add",
-	.help = "Add PACKAGEs to main dependencies and install (or upgrade) "
+	.help = "Add PACKAGEs to 'world' and install (or upgrade) "
 		"them, while ensuring that all dependencies are met",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
