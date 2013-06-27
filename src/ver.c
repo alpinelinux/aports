@@ -183,8 +183,8 @@ static int ver_main(void *pctx, struct apk_database *db, struct apk_string_array
 
 static struct apk_option ver_options[] = {
 	{ 'I', "indexes",	"Print description and versions of indexes" },
-	{ 't', "test",		"Compare two given versions" },
-	{ 'c', "check", 	"Check if the given version string is valid" },
+	{ 't', "test",		"Compare two given versions, output '<', '=' or '>'" },
+	{ 'c', "check", 	"Check the given version strings, output any that are invalid" },
 	{ 'a', "all",		"Consider packages from all repository tags" },
 	{ 'l', "limit",		"Limit output to packages with status matching one of LIMCHARs",
 	  required_argument, "LIMCHARs" },
@@ -192,7 +192,8 @@ static struct apk_option ver_options[] = {
 
 static struct apk_applet apk_ver = {
 	.name = "version",
-	.help = "Compare package versions",
+	.help = "Compare package versions (in installed database vs. available) "
+		"or do tests on literal version strings",
 	.open_flags = APK_OPENF_READ,
 	.context_size = sizeof(struct ver_ctx),
 	.num_options = ARRAY_SIZE(ver_options),
