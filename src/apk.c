@@ -111,13 +111,14 @@ static void print_usage(const char *cmd, const char *args, int num_opts,
 	int i, j;
 
 	indent.x = printf("\nusage: apk %s", cmd) - 1;
-	for (i = 0; i < num_opts; i++) {
-		j = 0;
-		word[j++] = '[';
-		j += format_option(&word[j], sizeof(word) - j, &opts[i], "|");
-		word[j++] = ']';
-		apk_print_indented(&indent, APK_BLOB_PTR_LEN(word, j));
-	}
+	for (i = 0; i < num_opts; i++)
+		if (opts[i].name != NULL) {
+			j = 0;
+			word[j++] = '[';
+			j += format_option(&word[j], sizeof(word) - j, &opts[i], "|");
+			word[j++] = ']';
+			apk_print_indented(&indent, APK_BLOB_PTR_LEN(word, j));
+		}
 	if (args != NULL)
 		apk_print_indented(&indent, APK_BLOB_STR(args));
 	printf("\n");
@@ -230,7 +231,7 @@ static void merge_options(struct option *opts, struct apk_option *ao, int num)
 	int i;
 
 	for (i = 0; i < num; i++, opts++, ao++) {
-		opts->name = ao->name;
+		opts->name = ao->name ?: "";
 		opts->has_arg = ao->has_arg;
 		opts->flag = NULL;
 		opts->val = ao->val;
