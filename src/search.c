@@ -79,6 +79,7 @@ static int search_parse(void *ctx, struct apk_db_options *dbopts,
 		ictx->show_all = 1;
 		break;
 	case 'e':
+	case 'x':
 		ictx->search_exact = 1;
 		break;
 	case 'o':
@@ -166,7 +167,8 @@ static int search_main(void *pctx, struct apk_database *db, struct apk_string_ar
 static struct apk_option search_options[] = {
 	{ 'a', "all",		"Show all package versions (instead of latest only)" },
 	{ 'd', "description",	"Search package descriptions (implies -a)" },
-	{ 'e', "exact",		"Require exact match (instead of substring match)" },
+	{ 'x', "exact",		"Require exact match (instead of substring match)" },
+	{ 'e', NULL,	        "Synonym for -x (deprecated)" },
 	{ 'o', "origin",	"Print origin package name instead of the subpackage" },
 	{ 'r', "rdepends",	"Print reverse dependencies of package" },
 };
