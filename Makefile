@@ -16,10 +16,11 @@ SCRIPTS		:= abuild buildrepo abuild-keygen abuild-sign newapkbuild \
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
+AUTOTOOLS_TOOLCHAIN_FILES := config.sub config.guess
 
 SCRIPT_SOURCES	:= $(addsuffix .in,$(SCRIPTS))
 
-DISTFILES=$(SCRIPT_SOURCES) $(SAMPLES) Makefile abuild.conf 
+DISTFILES=$(SCRIPT_SOURCES) $(SAMPLES) Makefile abuild.conf
 
 GIT_REV		:= $(shell test -d .git && git describe || echo exported)
 ifneq ($(GIT_REV), exported)
@@ -43,7 +44,7 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 SSL_CFLAGS	= $(shell pkg-config --cflags openssl)
 SSL_LIBS	= $(shell pkg-config --libs openssl)
 
-LDFLAGS ?= 
+LDFLAGS ?=
 
 OBJS-abuild-tar  = abuild-tar.o
 LIBS-abuild-tar = $(SSL_LIBS)
@@ -62,7 +63,7 @@ OBJS-abuild-sudo = abuild-sudo.o
 
 P=$(PACKAGE)-$(VERSION)
 
-all: 	$(USR_BIN_FILES)
+all:	$(USR_BIN_FILES)
 
 clean:
 	@rm -f $(USR_BIN_FILES)
@@ -97,7 +98,8 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh aports.lua
 	if [ -n "$(DESTDIR)" ] || [ ! -f "/$(sysconfdir)"/abuild.conf ]; then\
 		cp abuild.conf $(DESTDIR)/$(sysconfdir)/; \
 	fi
-	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild
+	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild/
+	cp $(AUTOTOOLS_TOOLCHAIN_FILES) $(DESTDIR)/$(prefix)/share/abuild/
 	cp functions.sh $(DESTDIR)/$(datadir)/
 	mkdir -p $(DESTDIR)$(LUA_SHAREDIR)
 	cp aports.lua $(DESTDIR)$(LUA_SHAREDIR)/
