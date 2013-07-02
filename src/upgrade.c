@@ -51,7 +51,7 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 	int r;
 
 	name = apk_db_get_name(db, APK_BLOB_STR("apk-tools"));
-	apk_solver_set_name_flags(name, solver_flags, solver_flags);
+	apk_solver_set_name_flags(name, solver_flags, 0);
 	db->performing_self_update = 1;
 
 	r = apk_solver_solve(db, 0, db->world, &changeset);
