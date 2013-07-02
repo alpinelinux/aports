@@ -12,6 +12,7 @@
 #ifndef APK_DEFINES_H
 #define APK_DEFINES_H
 
+#include <endian.h>
 #include <string.h>
 
 #define ARRAY_SIZE(x)	(sizeof(x) / sizeof((x)[0]))
@@ -75,6 +76,8 @@ extern char **apk_argv;
 #define APK_DEFAULT_ARCH	"ppc"
 #elif defined(__powerpc64__)
 #define APK_DEFAULT_ARCH	"ppc64"
+#elif defined(__arm__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define APK_DEFAULT_ARCH	"armel"
 #elif defined(__arm__)
 #define APK_DEFAULT_ARCH	"arm"
 #else
