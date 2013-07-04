@@ -25,6 +25,11 @@
 #include "apk_io.h"
 #include "apk_hash.h"
 
+#if defined(__GLIBC__) || defined(__UCLIBC__)
+#define HAVE_FGETPWENT_R
+#define HAVE_FGETGRENT_R
+#endif
+
 struct apk_fd_istream {
 	struct apk_istream is;
 	int fd;
@@ -908,9 +913,12 @@ void apk_id_cache_reset(struct apk_id_cache *idc)
 
 uid_t apk_resolve_uid(struct apk_id_cache *idc, const char *username, uid_t default_uid)
 {
-	struct cache_item *ci;
-	struct passwd pwent, *pwd;
+#ifdef HAVE_FGETPWENT_R
 	char buf[1024];
+	struct passwd pwent;
+#endif
+	struct cache_item *ci;
+	struct passwd *pwd;
 	FILE *in;
 
 	ci = resolve_cache_item(&idc->uid_cache, APK_BLOB_STR(username));
@@ -924,7 +932,11 @@ uid_t apk_resolve_uid(struct apk_id_cache *idc, const char *username, uid_t defa
 		in = fdopen(openat(idc->root_fd, "etc/passwd", O_RDONLY|O_CLOEXEC), "r");
 		if (in != NULL) {
 			do {
+#ifdef HAVE_FGETPWENT_R
 				fgetpwent_r(in, &pwent, buf, sizeof(buf), &pwd);
+#else
+				pwd = fgetpwent(in);
+#endif
 				if (pwd == NULL)
 					break;
 				if (strcmp(pwd->pw_name, username) == 0) {
@@ -944,9 +956,12 @@ uid_t apk_resolve_uid(struct apk_id_cache *idc, const char *username, uid_t defa
 
 uid_t apk_resolve_gid(struct apk_id_cache *idc, const char *groupname, uid_t default_gid)
 {
-	struct cache_item *ci;
-	struct group grent, *grp;
+#ifdef HAVE_FGETGRENT_R
 	char buf[1024];
+	struct group grent;
+#endif
+	struct cache_item *ci;
+	struct group *grp;
 	FILE *in;
 
 	ci = resolve_cache_item(&idc->gid_cache, APK_BLOB_STR(groupname));
@@ -960,7 +975,11 @@ uid_t apk_resolve_gid(struct apk_id_cache *idc, const char *groupname, uid_t def
 		in = fdopen(openat(idc->root_fd, "etc/group", O_RDONLY|O_CLOEXEC), "r");
 		if (in != NULL) {
 			do {
+#ifdef HAVE_FGETGRENT_R
 				fgetgrent_r(in, &grent, buf, sizeof(buf), &grp);
+#else
+				grp = fgetgrent(in);
+#endif
 				if (grp == NULL)
 					break;
 				if (strcmp(grp->gr_name, groupname) == 0) {
