@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <unistd.h>
+#include <strings.h>
 #include "apk_defines.h"
 #include "apk_database.h"
 #include "apk_package.h"
@@ -554,7 +555,7 @@ static int compare_providers(struct apk_solver_state *ss,
 		return r;
 
 	/* Prefer lowest available repository */
-	return ffsl(pkgB->repos) - ffsl(pkgA->repos);
+	return ffs(pkgB->repos) - ffs(pkgA->repos);
 }
 
 static void inherit_pinning_from_pkg(struct apk_solver_state *ss, struct apk_package *rinstall_if, struct apk_package *parent_pkg)
