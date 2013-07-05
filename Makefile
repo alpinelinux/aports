@@ -69,7 +69,7 @@ clean:
 	@rm -f $(USR_BIN_FILES)
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(CFLAGS-$@) -o $@ -c $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS-$@) -o $@ -c $<
 
 abuild-sudo: abuild-sudo.o
 	$(LINK)
@@ -78,7 +78,7 @@ abuild-tar: abuild-tar.o
 	$(LINK)
 
 abuild-tar.static: abuild-tar.o
-	$(CC) $(CFLAGS) $(CFLAGS-$@) -o $@ -static $(LIBS-$@) $^
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS-$@) -o $@ -static $(LIBS-$@) $^
 
 help:
 	@echo "$(P) makefile"
