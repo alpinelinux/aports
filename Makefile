@@ -20,8 +20,6 @@ AUTOTOOLS_TOOLCHAIN_FILES := config.sub config.guess
 
 SCRIPT_SOURCES	:= $(addsuffix .in,$(SCRIPTS))
 
-DISTFILES=$(SCRIPT_SOURCES) $(SAMPLES) Makefile abuild.conf
-
 GIT_REV		:= $(shell test -d .git && git describe || echo exported)
 ifneq ($(GIT_REV), exported)
 FULL_VERSION    := $(patsubst $(PACKAGE)-%,%,$(GIT_REV))
@@ -83,7 +81,6 @@ abuild-tar.static: abuild-tar.o
 help:
 	@echo "$(P) makefile"
 	@echo "usage: make install [ DESTDIR=<path> ]"
-	@echo "       make dist"
 
 install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh aports.lua
 	install -d $(DESTDIR)/$(bindir) $(DESTDIR)/$(sysconfdir) \
@@ -104,15 +101,6 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh aports.lua
 	mkdir -p $(DESTDIR)$(LUA_SHAREDIR)
 	cp aports.lua $(DESTDIR)$(LUA_SHAREDIR)/
 
-dist:	$(P).tar.bz2
-
-$(P).tar.bz2:	$(DISTFILES)
-	rm -rf $(P)
-	mkdir -p $(P)
-	cp $(DISTFILES) $(P)/
-	tar -cjf $@ $(P)
-	rm -rf $(P)
-
 .gitignore: Makefile
 	echo "*.tar.bz2" > $@
 	for i in $(USR_BIN_FILES); do\
@@ -120,4 +108,4 @@ $(P).tar.bz2:	$(DISTFILES)
 	done
 
 
-.PHONY: install dist
+.PHONY: install
