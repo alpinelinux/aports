@@ -68,7 +68,7 @@ int main(int argc, const char *argv[])
 		errx(1, "Not a member of group %s\n", ABUILD_GROUP);
 
 	cmd = strrchr(argv[0], '-');
-	if (cmd == NULL) 
+	if (cmd == NULL)
 		errx(1, "Calling command has no '-'");
 	cmd++;
 
@@ -77,7 +77,7 @@ int main(int argc, const char *argv[])
 		errx(1, "%s: Not a valid subcommand", cmd);
 
 	argv[0] = path;
-	/* set our uid to root soo bbsuid --install works */
+	/* set our uid to root so bbsuid --install works */
 	setuid(0);
 	execv(path, (char * const*)argv);
 	perror(path);
