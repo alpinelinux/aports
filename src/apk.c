@@ -149,7 +149,7 @@ static int usage(struct apk_applet *applet)
 
 		printf("\nThe following commands are available:\n");
 		for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
-			struct apk_indent indent = { .indent = 26 };
+			struct apk_indent indent = { .indent = 12 };
 
 			indent.x = printf("  %-*s", indent.indent - 3, (*a)->name);
 			apk_print_indented_words(&indent, (*a)->help);
