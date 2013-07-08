@@ -47,6 +47,9 @@ static void print_not_deleted_pkg(struct apk_package *pkg0, struct apk_dependenc
 {
 	struct not_deleted_ctx *ctx = (struct not_deleted_ctx *) pctx;
 
+	if (pkg0->name == ctx->name)
+		goto no_print;
+
 	if (!ctx->header) {
 		apk_message("World updated, but the following packages are not removed due to:");
 		ctx->header = 1;
@@ -57,6 +60,7 @@ static void print_not_deleted_pkg(struct apk_package *pkg0, struct apk_dependenc
 	}
 
 	apk_print_indented(&ctx->indent, APK_BLOB_STR(pkg0->name->name));
+no_print:
 	apk_pkg_foreach_reverse_dependency(pkg0, ctx->matches, print_not_deleted_pkg, pctx);
 }
 
@@ -114,8 +118,10 @@ static int del_main(void *pctx, struct apk_database *db, struct apk_string_array
 		foreach_array_item(change, changeset.changes)
 			if (change->new_pkg != NULL)
 				change->new_pkg->marked = 1;
-		apk_name_foreach_matching(db, args, apk_foreach_genid(),
-					  print_not_deleted_name, &ndctx);
+		apk_name_foreach_matching(
+			db, args,
+			apk_foreach_genid() | APK_FOREACH_MARKED | APK_DEP_SATISFIES,
+			print_not_deleted_name, &ndctx);
 		if (ndctx.header)
 			printf("\n");
 
