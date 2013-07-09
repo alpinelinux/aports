@@ -61,10 +61,10 @@ OBJS-abuild-sudo = abuild-sudo.o
 
 P=$(PACKAGE)-$(VERSION)
 
-all:	$(USR_BIN_FILES)
+all:	$(USR_BIN_FILES) functions.sh
 
 clean:
-	@rm -f $(USR_BIN_FILES)
+	@rm -f $(USR_BIN_FILES) functions.sh
 
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS-$@) -o $@ -c $<
