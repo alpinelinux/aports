@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.3.0
-pkgrel=0
+pkgrel=1
 pkgdesc="Alpine base dir structure and init scripts"
 url="http://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 depends=
@@ -37,11 +37,10 @@ build() {
 		"$srcdir"/mkmntdirs.c -o "$_builddir"/mkmntdirs
 
 	# generate shadow
-	local lastchange=$(( $( date +%s ) / ( 24 * 3600 ) ))
-	awk -v lastchange="$lastchange" -F: '{
+	awk -F: '{
 		pw = ":!:"
 		if ($1 == "root") { pw = "::" }
-		print($1 pw lastchange ":0:::::")
+		print($1 pw ":0:::::")
 	}' "$srcdir"/passwd > shadow
 
 }
