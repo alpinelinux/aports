@@ -1,6 +1,6 @@
 
 PACKAGE		:= abuild
-VERSION		:= 2.14.3
+VERSION		:= 2.15.0
 
 prefix		?= /usr
 bindir		?= $(prefix)/bin
