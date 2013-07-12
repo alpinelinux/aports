@@ -8,8 +8,9 @@ sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
 abuildrepo	?= ~/.cache/abuild
 
-LUA_VERSION	= 5.1
+LUA_VERSION	= 5.2
 LUA_SHAREDIR	?= $(prefix)/share/lua/$(LUA_VERSION)/
+LUA_SHEBANG	?= /usr/bin/lua$(LUA_VERSION)
 
 SCRIPTS		:= abuild buildrepo abuild-keygen abuild-sign newapkbuild \
 		   abump apkgrel ap buildlab apkbuild-cpan checkapk
@@ -37,7 +38,8 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@prefix@:$(prefix):g' \
 			-e 's:@sysconfdir@:$(sysconfdir):g' \
 			-e 's:@datadir@:$(datadir):g' \
-			-e 's:@abuildrepo@:$(abuildrepo):g'
+			-e 's:@abuildrepo@:$(abuildrepo):g' \
+			-e 's:@LUA_SHEBANG@:$(LUA_SHEBANG):g'
 
 SSL_CFLAGS	= $(shell pkg-config --cflags openssl)
 SSL_LIBS	= $(shell pkg-config --libs openssl)
