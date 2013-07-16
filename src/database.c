@@ -1740,7 +1740,9 @@ void apk_db_close(struct apk_database *db)
 	struct hlist_node *dc, *dn;
 	int i;
 
-	apk_id_cache_free(&db->id_cache);
+	/* the id cache was never initialized if root_fd failed */
+	if (db->root_fd >= 0)
+		apk_id_cache_free(&db->id_cache);
 
 	/* Cleaning up the directory tree will cause mode, uid and gid
 	 * of all modified (package providing that directory got removed)
