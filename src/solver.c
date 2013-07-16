@@ -313,7 +313,7 @@ static void exclude_non_providers(struct apk_solver_state *ss, struct apk_name *
 	dbg_printf("%s must provide %s\n", name->name, must_provide->name);
 
 	foreach_array_item(p, name->providers) {
-		if (p->pkg->name == must_provide)
+		if (p->pkg->name == must_provide || !p->pkg->ss.pkg_selectable)
 			goto next;
 		foreach_array_item(d, p->pkg->provides)
 			if (d->name == must_provide)
