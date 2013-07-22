@@ -338,7 +338,7 @@ parse_long_options(char * const *nargv, const char *options,
 	if (idx)
 		*idx = match;
 	if (long_options[match].flag) {
-		*long_options[match].flag |= long_options[match].val;
+		*long_options[match].flag = long_options[match].val;
 		return (0);
 	} else
 		return (long_options[match].val);
