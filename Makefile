@@ -17,7 +17,7 @@ SCRIPTS		:= abuild buildrepo abuild-keygen abuild-sign newapkbuild \
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
-AUTOTOOLS_TOOLCHAIN_FILES := config.sub config.guess
+AUTOTOOLS_TOOLCHAIN_FILES := config.sub
 
 SCRIPT_SOURCES	:= $(addsuffix .in,$(SCRIPTS))
 
