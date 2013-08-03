@@ -249,18 +249,19 @@ int apk_solver_commit_changeset(struct apk_database *db,
 		size_unit = 'M';
 	}
 
-	if (apk_verbosity > 1 || (apk_flags & APK_INTERACTIVE)) {
+	if ((apk_verbosity > 1 || (apk_flags & APK_INTERACTIVE)) &&
+	    !(apk_flags & APK_SIMULATE)) {
 		r = dump_packages(changeset, cmp_remove,
 				  "The following packages will be REMOVED");
 		r += dump_packages(changeset, cmp_downgrade,
 				   "The following packages will be DOWNGRADED");
 		if (r || (apk_flags & APK_INTERACTIVE) || apk_verbosity > 2) {
-			dump_packages(changeset, cmp_new,
-				      "The following NEW packages will be installed");
-			dump_packages(changeset, cmp_upgrade,
-				      "The following packages will be upgraded");
-			dump_packages(changeset, cmp_reinstall,
-				      "The following packages will be reinstalled");
+			r += dump_packages(changeset, cmp_new,
+					   "The following NEW packages will be installed");
+			r += dump_packages(changeset, cmp_upgrade,
+					   "The following packages will be upgraded");
+			r += dump_packages(changeset, cmp_reinstall,
+					   "The following packages will be reinstalled");
 			printf("After this operation, %zd %ciB of %s.\n",
 				(size_diff < 0) ? -size_diff : size_diff,
 				size_unit,
@@ -268,8 +269,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 				"disk space will be freed" :
 				"additional disk space will be used");
 		}
-		if (changeset->num_total_changes > 0 &&
-		    (apk_flags & APK_INTERACTIVE)) {
+		if (r > 0 && (apk_flags & APK_INTERACTIVE)) {
 			printf("Do you want to continue [Y/n]? ");
 			fflush(stdout);
 			r = fgetc(stdin);
