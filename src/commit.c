@@ -206,7 +206,7 @@ static void run_triggers(struct apk_database *db, struct apk_changeset *changese
 		if (pkg == NULL)
 			continue;
 		ipkg = pkg->ipkg;
-		if (ipkg->pending_triggers->num == 0)
+		if (ipkg == NULL || ipkg->pending_triggers->num == 0)
 			continue;
 
 		*apk_string_array_add(&ipkg->pending_triggers) = NULL;
