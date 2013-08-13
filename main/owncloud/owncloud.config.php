@@ -1,7 +1,7 @@
 <?php
 $CONFIG = array(
 "datadirectory" => '/var/lib/owncloud/data',
-"version" => '5.0.9',
+"version" => '5.0.10',
 "dbname" => 'owncloud',
 "dbhost" => 'localhost',
 "dbuser" => 'owncloud',
