@@ -23,6 +23,7 @@ struct search_ctx {
 	int show_all : 1;
 	int search_exact : 1;
 	int search_description : 1;
+	int search_origin : 1;
 
 	unsigned int matches;
 	struct apk_string_array *filter;
@@ -88,6 +89,11 @@ static int search_parse(void *ctx, struct apk_db_options *dbopts,
 	case 'r':
 		ictx->print_result = print_rdepends;
 		break;
+	case 0x10000:
+		ictx->search_origin = 1;
+		ictx->search_exact = 1;
+		ictx->show_all = 1;
+		break;
 	default:
 		return -1;
 	}
@@ -102,6 +108,13 @@ static void print_result_pkg(struct search_ctx *ctx, struct apk_package *pkg)
 		foreach_array_item(pmatch, ctx->filter) {
 			if (strstr(*pmatch, pkg->description) != NULL ||
 			    strstr(*pmatch, pkg->name->name) != NULL)
+				goto match;
+		}
+		return;
+	}
+	if (ctx->search_origin) {
+		foreach_array_item(pmatch, ctx->filter) {
+			if (pkg->origin != NULL && strcmp(*pmatch, apk_blob_cstr(*pkg->origin)) == 0)
 				goto match;
 		}
 		return;
@@ -148,7 +161,7 @@ static int search_main(void *pctx, struct apk_database *db, struct apk_string_ar
 	if (ctx->print_result == NULL)
 		ctx->print_result = ctx->print_package;
 
-	if (ctx->search_description)
+	if (ctx->search_description || ctx->search_origin)
 		return apk_hash_foreach(&db->available.packages, print_pkg, ctx);
 
 	if (!ctx->search_exact) {
@@ -171,6 +184,7 @@ static struct apk_option search_options[] = {
 	{ 'e', NULL,	        "Synonym for -x (deprecated)" },
 	{ 'o', "origin",	"Print origin package name instead of the subpackage" },
 	{ 'r', "rdepends",	"Print reverse dependencies of package" },
+	{ 0x10000, "has-origin","List packages that have the given origin" },
 };
 
 static struct apk_applet apk_search = {
