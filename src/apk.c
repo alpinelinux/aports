@@ -50,7 +50,7 @@ static struct apk_option generic_options[] = {
 	{ 0x101, "progress",	"Show a progress bar" },
 	{ 0x10f, "progress-fd",	"Write progress to fd", required_argument, "FD" },
 	{ 0x110, "no-progress",	"Disable progress bar even for TTYs" },
-	{ 0x102, "clean-protected", "Do not create .apk-new files to "
+	{ 0x102, "clean-protected", "Do not create .apk-new files in "
 				"configuration dirs" },
 	{ 0x106, "purge",	"Delete also modified configuration files on "
 				"package removal" },
@@ -67,7 +67,7 @@ static struct apk_option generic_options[] = {
 				required_argument, "REPOFILE" },
 	{ 0x109, "no-network",	"Do not use network (cache is still used)" },
 	{ 0x111, "overlay-from-stdin", "Read list of overlay files from stdin" },
-	{ 0x112, "arch", 	"Use architecture with --root",
+	{ 0x112, "arch",	"Use architecture with --root",
 				required_argument, "ARCH" },
 #ifdef TEST_MODE
 	{ 0x200, "test-repo",	"Repository", required_argument, "REPO" },
