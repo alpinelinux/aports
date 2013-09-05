@@ -117,8 +117,9 @@ cleanup() {
 		deps)
 			if [ -z "$install_after" ] && [ -n "$uninstall_after" ]; then
 				msg "Uninstalling dependencies..."
-				$SUDO_APK del --quiet $apk_opt_wait \
-					$uninstall_after
+				$SUDO_APK del --quiet $apk_opt_wait $uninstall_after
+				[ "$CBUILD" != "$CHOST" -a -n "$CBUILDROOT" ] && \
+					$SUDO_APK del --root "$CBUILDROOT" --quiet $apk_opt_wait $uninstall_after
 			fi
 			;;
 		esac
@@ -1521,24 +1522,45 @@ deptrace() {
 
 # build and install dependencies
 builddeps() {
-	local deps= alldeps= pkg= i= dir= ver= missing= installed_deps=
-	local filtered_deps= conflicts=
+	local pkg= i= missing= conflicts=
+	local hostdeps= builddeps= installed_hostdeps= installed_builddeps=
 	[ -n "$nodeps" ] && return 0
 	msg "Analyzing dependencies..."
 
 	# add depends unless it is a subpackage or package itself
-	for i in $BUILD_BASE $depends $makedepends; do
-		[ "$pkgname" = "${i%%[<>=]*}" ] && continue
-		subpackages_has ${i%%[<>=]*} || deps="$deps $i"
-	done
+	if [ "$CBUILD" != "$CHOST" -a -n "$CBUILDROOT" ] && [ -n "$makedepends_build" -o -n "$makedepends_host" ]; then
+		for i in $BUILD_BASE $makedepends_build; do
+			[ "$pkgname" = "${i%%[<>=]*}" ] && continue
+			subpackages_has ${i%%[<>=]*} || builddeps="$builddeps $i"
+		done
+		for i in $depends $makedepends_host; do
+			[ "$pkgname" = "${i%%[<>=]*}" ] && continue
+			subpackages_has ${i%%[<>=]*} || hostdeps="$hostdeps $i"
+		done
+	else
+		for i in $BUILD_BASE $depends $makedepends; do
+			[ "$pkgname" = "${i%%[<>=]*}" ] && continue
+			subpackages_has ${i%%[<>=]*} || builddeps="$builddeps $i"
+		done
+	fi
 
-	installed_deps=$($APK info --installed $deps)
+	installed_builddeps=$($APK info --installed $builddeps)
+	[ -n "$hostdeps" ] && installed_hostdeps=$($APK info --root "$CBUILDROOT" --installed $hostdeps)
+
 	# find which deps are missing
-	for i in $deps; do
+	for i in $builddeps; do
 		if [ "${i#\!}" != "$i" ]; then
 			$APK info --quiet --installed "${i#\!}" \
 				&& conflicts="$conflicts ${i#\!}"
-		elif ! deplist_has $i $installed_deps || [ -n "$upgrade" ]; then
+		elif ! deplist_has $i $installed_builddeps || [ -n "$upgrade" ]; then
+			missing="$missing $i"
+		fi
+	done
+	for i in $hostdeps; do
+		if [ "${i#\!}" != "$i" ]; then
+			$APK info --quiet --installed --root "$CBUILDROOT" "${i#\!}" \
+				&& conflicts="$conflicts ${i#\!}"
+		elif ! deplist_has $i $installed_hostdeps || [ -n "$upgrade" ]; then
 			missing="$missing $i"
 		fi
 	done
@@ -1556,18 +1578,28 @@ builddeps() {
 	fi
 
 	uninstall_after=".makedepends-$pkgname $uninstall_after"
-	if [ -n "$install_deps" ] && [ -z "$recursive" ] && [ -n "$deps" ]; then
-		# make a --simluate run first to detect missing deps
+	if [ -n "$install_deps" ] && [ -z "$recursive" ]; then
+		# make a --simulate run first to detect missing deps
 		# apk-tools --virtual is no goot at reporting those.
-		$SUDO_APK add --repository "$abuildrepo" \
-			$apk_opt_wait \
-			--simulate --quiet $deps || return 1
-		$SUDO_APK add --repository "$abuildrepo" \
-			$apk_opt_wait \
-			--virtual .makedepends-$pkgname $deps \
-			&& return 0
+		msg "Installing packages on builder: $builddeps"
+		$SUDO_APK add --repository "$abuildrepo" $apk_opt_wait \
+			--simulate --quiet $builddeps || return 1
+		$SUDO_APK add --repository "$abuildrepo" $apk_opt_wait \
+			--virtual .makedepends-$pkgname $builddeps || return 1
+		if [ -n "$hostdeps" ]; then
+			msg "Installing packages on target host: $hostdeps"
+			$SUDO_APK add --root "$CBUILDROOT" --repository "$abuildrepo" $apk_opt_wait \
+				--simulate --quiet $hostdeps || return 1
+			$SUDO_APK add --root "$CBUILDROOT" --repository "$abuildrepo" $apk_opt_wait \
+				--virtual .makedepends-$pkgname $hostdeps || return 1
+		fi
+		return 0
 	fi
 
+	if [ -n "$CBUILDROOT" ]; then
+		error "Recursive rebuilding is not supported when cross compiling."
+		return 1
+	fi
 	[ -z "$recursive" ] && return 1
 
 	# find dependencies that are installed but missing in repo.
@@ -1739,6 +1771,8 @@ deps() {
 
 undeps (){
 	$SUDO_APK del $apk_opt_wait .makedepends-$pkgname
+	[ "$CBUILD" != "$CHOST" -a -n "$CBUILDROOT" ] &&
+		$SUDO_APK del --root "$CBUILDROOT" $apk_opt_wait .makedepends-$pkgname
 }
 
 # compat
