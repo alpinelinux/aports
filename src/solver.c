@@ -256,7 +256,7 @@ static void inherit_pinning(struct apk_solver_state *ss, struct apk_package *pkg
 	pkg->ss.pinning_allowed |= pinning;
 	pkg->ss.tag_ok |= !!(repos & repo_mask);
 	if (prefer) {
-		pkg->ss.pinning_preferred |= pinning;
+		pkg->ss.pinning_preferred = pinning;
 		pkg->ss.tag_preferred = !!(repos & apk_db_get_pinning_mask_repos(ss->db, pkg->ss.pinning_preferred));
 	}
 }
