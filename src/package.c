@@ -995,10 +995,10 @@ void apk_ipkg_run_script(struct apk_installed_package *ipkg,
 		PKG_VER_PRINTF(pkg),
 		apk_script_types[type]);
 
-	apk_message("Executing %s", &fn[15]);
-	if (apk_flags & APK_SIMULATE)
+	if ((apk_flags & (APK_NO_SCRIPTS | APK_SIMULATE)) != 0)
 		return;
 
+	apk_message("Executing %s", &fn[15]);
 	fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0755);
 	if (fd < 0) {
 		mkdirat(root_fd, "var/cache/misc", 0755);

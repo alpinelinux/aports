@@ -66,6 +66,7 @@ static struct apk_option generic_options[] = {
 	{ 0x108, "repositories-file", "Override repositories file",
 				required_argument, "REPOFILE" },
 	{ 0x109, "no-network",	"Do not use network (cache is still used)" },
+	{ 0x113, "no-scripts",	"Do not execute any scripts" },
 	{ 0x111, "overlay-from-stdin", "Read list of overlay files from stdin" },
 	{ 0x112, "arch",	"Use architecture with --root",
 				required_argument, "ARCH" },
@@ -408,6 +409,9 @@ int main(int argc, char **argv)
 			break;
 		case 0x109:
 			apk_flags |= APK_NO_NETWORK;
+			break;
+		case 0x113:
+			apk_flags |= APK_NO_SCRIPTS;
 			break;
 		case 0x111:
 			apk_flags |= APK_OVERLAY_FROM_STDIN;
