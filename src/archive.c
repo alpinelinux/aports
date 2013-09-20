@@ -158,6 +158,9 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		};
 		teis.csum = NULL;
 
+		buf.mode[0] = 0; /* to nul terminate 100-byte buf.name */
+		buf.magic[0] = 0; /* to nul terminate 100-byte buf.linkname */
+
 		if (memcmp(di->id, "APK2", 4) == 0 &&
 		    di->size <= sizeof(entry.csum.data)) {
 			entry.csum.type = di->size;
