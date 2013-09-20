@@ -2278,7 +2278,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 		if (diri == NULL) {
 			if (!APK_BLOB_IS_NULL(bdir)) {
 				apk_error(PKG_VER_FMT": "BLOB_FMT": no dirent in archive\n",
-					  pkg, BLOB_PRINTF(name));
+					  PKG_VER_PRINTF(pkg), BLOB_PRINTF(name));
 				ipkg->broken_files = 1;
 				return 0;
 			}
