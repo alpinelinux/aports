@@ -2277,7 +2277,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 		diri = find_diri(ipkg, bdir, diri, &ctx->file_diri_node);
 		if (diri == NULL) {
 			if (!APK_BLOB_IS_NULL(bdir)) {
-				apk_error(PKG_VER_FMT": "BLOB_FMT": no dirent in archive\n",
+				apk_error(PKG_VER_FMT": "BLOB_FMT": no dirent in archive",
 					  PKG_VER_PRINTF(pkg), BLOB_PRINTF(name));
 				ipkg->broken_files = 1;
 				return 0;
@@ -2376,7 +2376,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			memcpy(&file->csum, &ae->csum, sizeof(file->csum));
 	} else {
 		if (apk_verbosity >= 3)
-			apk_message("%s", ae->name);
+			apk_message("%s (dir)", ae->name);
 
 		if (name.ptr[name.len-1] == '/')
 			name.len--;
