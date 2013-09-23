@@ -1,0 +1,295 @@
+http://gcc.gnu.org/bugzilla/show_bug.cgi?id=57748
+(comment #36, attachment 30782)
+
+--- a/gcc/expr.c	2013-08-06 00:09:45.000000000 +0200
++++ b/gcc/expr.c	2013-09-10 08:23:09.570951685 +0200
+@@ -4691,8 +4691,6 @@ expand_assignment (tree to, tree from, b
+       int unsignedp;
+       int volatilep = 0;
+       tree tem;
+-      bool misalignp;
+-      rtx mem = NULL_RTX;
+ 
+       push_temp_slots ();
+       tem = get_inner_reference (to, &bitsize, &bitpos, &offset, &mode1,
+@@ -4702,40 +4700,7 @@ expand_assignment (tree to, tree from, b
+ 	  && DECL_BIT_FIELD_TYPE (TREE_OPERAND (to, 1)))
+ 	get_bit_range (&bitregion_start, &bitregion_end, to, &bitpos, &offset);
+ 
+-      /* If we are going to use store_bit_field and extract_bit_field,
+-	 make sure to_rtx will be safe for multiple use.  */
+-      mode = TYPE_MODE (TREE_TYPE (tem));
+-      if (TREE_CODE (tem) == MEM_REF
+-	  && mode != BLKmode
+-	  && ((align = get_object_alignment (tem))
+-	      < GET_MODE_ALIGNMENT (mode))
+-	  && ((icode = optab_handler (movmisalign_optab, mode))
+-	      != CODE_FOR_nothing))
+-	{
+-	  struct expand_operand ops[2];
+-
+-	  misalignp = true;
+-	  to_rtx = gen_reg_rtx (mode);
+-	  mem = expand_expr (tem, NULL_RTX, VOIDmode, EXPAND_WRITE);
+-
+-	  /* If the misaligned store doesn't overwrite all bits, perform
+-	     rmw cycle on MEM.  */
+-	  if (bitsize != GET_MODE_BITSIZE (mode))
+-	    {
+-	      create_input_operand (&ops[0], to_rtx, mode);
+-	      create_fixed_operand (&ops[1], mem);
+-	      /* The movmisalign<mode> pattern cannot fail, else the assignment
+-		 would silently be omitted.  */
+-	      expand_insn (icode, 2, ops);
+-
+-	      mem = copy_rtx (mem);
+-	    }
+-	}
+-      else
+-	{
+-	  misalignp = false;
+-	  to_rtx = expand_expr (tem, NULL_RTX, VOIDmode, EXPAND_WRITE);
+-	}
++      to_rtx = expand_expr (tem, NULL_RTX, VOIDmode, EXPAND_WRITE);
+ 
+       /* If the bitfield is volatile, we want to access it in the
+ 	 field's mode, not the computed mode.
+@@ -4773,6 +4738,8 @@ expand_assignment (tree to, tree from, b
+ 	  if (MEM_P (to_rtx)
+ 	      && GET_MODE (to_rtx) == BLKmode
+ 	      && GET_MODE (XEXP (to_rtx, 0)) != VOIDmode
++	      && bitregion_start == 0
++	      && bitregion_end == 0
+ 	      && bitsize > 0
+ 	      && (bitpos % bitsize) == 0
+ 	      && (bitsize % GET_MODE_ALIGNMENT (mode1)) == 0
+@@ -4874,17 +4841,6 @@ expand_assignment (tree to, tree from, b
+ 				  get_alias_set (to), nontemporal);
+ 	}
+ 
+-      if (misalignp)
+-	{
+-	  struct expand_operand ops[2];
+-
+-	  create_fixed_operand (&ops[0], mem);
+-	  create_input_operand (&ops[1], to_rtx, mode);
+-	  /* The movmisalign<mode> pattern cannot fail, else the assignment
+-	     would silently be omitted.  */
+-	  expand_insn (icode, 2, ops);
+-	}
+-
+       if (result)
+ 	preserve_temp_slots (result);
+       pop_temp_slots ();
+@@ -9905,7 +9861,7 @@ expand_expr_real_1 (tree exp, rtx target
+ 			  && modifier != EXPAND_STACK_PARM
+ 			  ? target : NULL_RTX),
+ 			 VOIDmode,
+-			 modifier == EXPAND_SUM ? EXPAND_NORMAL : modifier);
++			 EXPAND_MEMORY);
+ 
+ 	/* If the bitfield is volatile, we want to access it in the
+ 	   field's mode, not the computed mode.
+--- a/gcc/testsuite/gcc.dg/torture/pr57748-1.c	1970-01-01 01:00:00.000000000 +0100
++++ b/gcc/testsuite/gcc.dg/torture/pr57748-1.c	2013-09-06 08:38:03.718686940 +0200
+@@ -0,0 +1,49 @@ 
++/* PR middle-end/57748 */
++/* { dg-do run } */
++/* ICE in expand_assignment:
++   misalignp == true, !MEM_P (to_rtx), offset != 0,
++   => gcc_assert (TREE_CODE (offset) == INTEGER_CST) */
++
++#include <stdlib.h>
++
++extern void abort (void);
++
++typedef long long V
++  __attribute__ ((vector_size (2 * sizeof (long long)), may_alias));
++
++typedef struct S { V a; V b[0]; } P __attribute__((aligned (1)));
++
++struct __attribute__((packed)) T { char c; P s; };
++
++void __attribute__((noinline, noclone))
++check (struct T *t)
++{
++  if (t->s.b[0][0] != 3 || t->s.b[0][1] != 4)
++    abort ();
++}
++
++int __attribute__((noinline, noclone))
++get_i (void)
++{
++  return 0;
++}
++
++void __attribute__((noinline, noclone))
++foo (P *p)
++{
++  V a = { 3, 4 };
++  int i = get_i ();
++  p->b[i] = a;
++}
++
++int
++main ()
++{
++  struct T *t = (struct T *) calloc (128, 1);
++
++  foo (&t->s);
++  check (t);
++
++  free (t);
++  return 0;
++}
+--- a/gcc/testsuite/gcc.dg/torture/pr57748-2.c	1970-01-01 01:00:00.000000000 +0100
++++ b/gcc/testsuite/gcc.dg/torture/pr57748-2.c	2013-09-06 08:38:03.718686940 +0200
+@@ -0,0 +1,43 @@ 
++/* PR middle-end/57748 */
++/* { dg-do run } */
++/* wrong code in expand_assignment:
++   misalignp == true, !MEM_P (to_rtx),
++   offset == 0, bitpos >= GET_MODE_PRECISION,
++   => result = NULL.  */
++
++#include <stdlib.h>
++
++extern void abort (void);
++
++typedef long long V
++  __attribute__ ((vector_size (2 * sizeof (long long)), may_alias));
++
++typedef struct S { V a; V b[0]; } P __attribute__((aligned (1)));
++
++struct __attribute__((packed)) T { char c; P s; };
++
++void __attribute__((noinline, noclone))
++check (struct T *t)
++{
++  if (t->s.b[0][0] != 3 || t->s.b[0][1] != 4)
++    abort ();
++}
++
++void __attribute__((noinline, noclone))
++foo (P *p)
++{
++  V a = { 3, 4 };
++  p->b[0] = a;
++}
++
++int
++main ()
++{
++  struct T *t = (struct T *) calloc (128, 1);
++
++  foo (&t->s);
++  check (t);
++
++  free (t);
++  return 0;
++}
+--- a/gcc/testsuite/gcc.dg/torture/pr57748-3.c	1970-01-01 01:00:00.000000000 +0100
++++ b/gcc/testsuite/gcc.dg/torture/pr57748-3.c	2013-09-09 09:54:28.937891452 +0200
+@@ -0,0 +1,49 @@ 
++/* PR middle-end/57748 */
++/* { dg-do run } */
++/* { dg-final { scan-assembler-not "movdqu" } } */
++/* data store race in expand_assignment:
++   misalignp == true, !MEM_P (to_rtx),
++   offset == 0, bitsize < GET_MODE_BITSIZE,
++   => rmw cycle on MEM.  */
++
++#include <stdlib.h>
++
++typedef long long V
++  __attribute__ ((vector_size (2 * sizeof (long long)), may_alias));
++
++union x
++{
++  long long a;
++  float b;
++} __attribute__((aligned (1)));
++
++struct s
++{
++  union x xx[0];
++  V x;
++} __attribute__((packed));
++
++void __attribute__((noinline, noclone))
++check (union x *xx)
++{
++  if (xx[0].b != 3.14F || xx[1].a != 0x123456789ABCDEF)
++    abort ();
++}
++
++void __attribute__((noinline, noclone))
++foo (struct s * x)
++{
++  x->xx[0].a = -1;
++  x->xx[0].b = 3.14F;
++  x->x[1] = 0x123456789ABCDEF;
++}
++
++struct s ss;
++
++int
++main ()
++{
++  foo (&ss);
++  check (ss.xx);
++  return 0;
++}
+--- a/gcc/testsuite/gcc.dg/torture/pr57748-4.c	1970-01-01 01:00:00.000000000 +0100
++++ b/gcc/testsuite/gcc.dg/torture/pr57748-4.c	2013-09-10 08:36:37.182962269 +0200
+@@ -0,0 +1,50 @@ 
++/* PR middle-end/57748 */
++/* { dg-do run } */
++/* { dg-final { scan-assembler-not "movdqu" } } */
++/* wrong code in expand_expr_real_1:
++   read whole structure instead of only one member.  */
++
++#include <stdlib.h>
++
++typedef long long V
++  __attribute__ ((vector_size (2 * sizeof (long long)), may_alias));
++
++union x
++{
++  long long a;
++  float b;
++} __attribute__((aligned (1)));
++
++struct s
++{
++  union x xx[0];
++  V x;
++} __attribute__((packed));
++
++void __attribute__((noinline, noclone))
++check (struct s *x)
++{
++  if (x->xx[0].b != 3.14F || x->xx[1].a != 0x123456789ABCDEF)
++    abort ();
++  if (x->xx[2].b != 3.14F || x->xx[3].a != 0x123456789ABCDEF)
++    abort ();
++}
++
++void __attribute__((noinline, noclone))
++foo (struct s * x)
++{
++  x->xx[0].a = -1;
++  x->xx[0].b = 3.14F;
++  x->x[1] = 0x123456789ABCDEF;
++}
++
++struct s ss[2];
++
++int
++main ()
++{
++  foo (ss);
++  foo (ss+1);
++  check (ss);
++  return 0;
++}
