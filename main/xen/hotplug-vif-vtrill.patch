@@ -1,0 +1,138 @@
+--- xen-4.3.0/tools/hotplug/Linux/Makefile
++++ xen-4.3.0.mod/tools/hotplug/Linux/Makefile
+@@ -14,6 +14,7 @@
+ XEN_SCRIPTS += network-route vif-route
+ XEN_SCRIPTS += network-nat vif-nat
+ XEN_SCRIPTS += vif-openvswitch
++XEN_SCRIPTS += vif-vtrill
+ XEN_SCRIPTS += vif2
+ XEN_SCRIPTS += vif-setup
+ XEN_SCRIPTS += block
+--- xen-4.3.0/tools/hotplug/Linux/vif-common.sh
++++ xen-4.3.0.mod/tools/hotplug/Linux/vif-common.sh
+@@ -213,3 +213,31 @@
+   fi
+   echo "$result"
+ }
++
++ip6_of()
++{
++  ip -6 -o addr show scope global dev "$1" | awk '$3 == "inet6" { split($4,i,"/"); print i[1]; exit }'
++}
++
++dom0_ip6_gateway()
++{
++  ip -6 -o route show "default" | awk '$1 == "default" { print $3; exit }'
++}
++
++dom0_ip6()
++{
++  local nd=${netdev:-eth0}
++  local result=$(ip6_of "$nd")
++  if [ -z "$result" ]
++  then
++        echo ""
++  else
++        echo "$result"
++  fi
++}
++
++is_ipv6()
++{
++  echo "${1}" | grep -q ':' && echo "ipv6"
++}
++
+--- /dev/null
++++ xen-4.3.0.mod/tools/hotplug/Linux/vif-vtrill
+@@ -0,0 +1,91 @@
++#!/bin/bash
++#============================================================================
++# ${XEN_SCRIPT_DIR}/vif-vtrill
++# Based on ${XEN_SCRIPT_DIR}/vif-openvswitch
++#
++# Script for configuring a vif in routed + bridged mode.
++# The hotplugging system will call this script if it is specified either in
++# the device configuration given to Xend, or the default Xend configuration
++# in ${XEN_CONFIG_DIR}/xend-config.sxp.  If the script is specified in
++# neither of those places, then this script is the default.
++#
++# Usage:
++# vif-openvswitch (add|remove|online|offline)
++#
++# Environment vars:
++# vif         vif interface name (required).
++# XENBUS_PATH path to this device's details in the XenStore (required).
++#
++# Read from the store:
++# ip      list of IP networks for the vif, space-separated (optional).
++#
++# up:
++# Enslaves the vif interface to a VM-specific bridge and adds iptables rules
++# for its ip addresses (if any).
++#
++# down:
++# Removes the vif interface from the VM-bridge bridge and removes the iptables
++# rules for its ip addresses (if any).
++#============================================================================
++
++dir=$(dirname "$0")
++. "${dir}/vif-common.sh"
++
++main_ip=$(dom0_ip)
++main_ip6=$(dom0_ip6)
++gateway_ip6=$(dom0_ip6_gateway)
++vlanname=$(echo ${dev} | cut -d'.' -f1)
++
++case "${command}" in
++    online)
++        create_bridge ${vlanname}
++        add_to_bridge ${vlanname} ${dev}
++        ifconfig ${vlanname} ${main_ip} netmask 255.255.255.255 up
++        if [ ! -z "${main_ip6}" ]
++        then
++                ip -6 addr add ${main_ip6} dev ${vlanname}
++                ip -6 neighbor add proxy ${gateway_ip6} dev ${vlanname}
++                echo 1 >/proc/sys/net/ipv6/conf/${vlanname}/proxy_ndp
++        fi
++        echo 1 >/proc/sys/net/ipv4/conf/${vlanname}/proxy_arp
++        ipcmd='add'
++        cmdprefix=''
++        ;;
++    offline)
++        ifconfig ${vlanname} down
++        brctl delbr ${vlanname}
++        ipcmd='del'
++        cmdprefix='do_without_error'
++        ;;
++    add)
++        create_bridge ${vlanname}
++        add_to_bridge ${vlanname} ${dev}
++        ;;
++    remove)
++        ;;
++esac
++
++if [ "${ip}" -a "$type_if" != "tap" ] ; then
++    # If we've been given a list of IP addresses, then add routes from dom0 to
++    # the guest using those addresses.
++    for addr in ${ip} ; do
++      do_without_error ip route del ${addr}
++      if [ "$(is_ipv6 ${addr})" = "ipv6" ]; then
++        ${cmdprefix} ip -6 route ${ipcmd} ${addr} dev ${vlanname} src ${main_ip6}
++        ${cmdprefix} ip -6 neighbor ${ipcmd} proxy ${addr} dev ${netdev:-eth0}
++      else
++        do_without_error ip route ${ipcmd} ${addr} dev ${vlanname} src ${main_ip}
++      fi
++    done
++fi
++
++log "iptable"
++handle_iptable
++
++call_hooks vif post
++
++log debug "Successful vif-vtrill ${command} for ${dev}."
++if [ "${command}" = "online" ]
++then
++  success
++fi
