@@ -1379,7 +1379,7 @@ static int do_remount(const char *path, const char *option)
 
 	if (pid == 0) {
 		execl("/bin/mount", "mount", "-o", "remount", "-o",
-		      option, path, NULL);
+		      option, path, (void*) 0);
 		return 1;
 	}
 
