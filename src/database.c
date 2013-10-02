@@ -2151,7 +2151,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 		db->available_repos &= ~BIT(repo_num);
 		r = 0;
 	} else {
-		db->repo_tags[tag_id].allowed_repos |= BIT(repo_num) & db->available_repos;
+		db->repo_tags[tag_id].allowed_repos |= BIT(repo_num);
 	}
 
 	return 0;
