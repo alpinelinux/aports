@@ -266,7 +266,6 @@ static void on_sigwinch(int s)
 
 static void setup_terminal(void)
 {
-	setvbuf(stderr, NULL, _IOLBF, BUFSIZ);
 	signal(SIGWINCH, on_sigwinch);
 	signal(SIGPIPE, SIG_IGN);
 }

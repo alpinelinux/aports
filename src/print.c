@@ -35,7 +35,7 @@ int apk_get_screen_width(void)
 
 	if (apk_screen_width == 0) {
 		apk_screen_width = 50;
-		if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 &&
+		if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 &&
 		    w.ws_col > 50)
 			apk_screen_width = w.ws_col;
 	}
@@ -77,14 +77,14 @@ void apk_print_progress(size_t done, size_t total)
 	last_percent = percent;
 	apk_progress_force = 0;
 
-	fprintf(stderr, "\e7%3i%% [", percent);
+	fprintf(stdout, "\e7%3i%% [", percent);
 	for (i = 0; i < bar; i++)
-		fputc('#', stderr);
+		fputc('#', stdout);
 	for (; i < bar_width; i++)
-		fputc(' ', stderr);
-	fputc(']', stderr);
-	fflush(stderr);
-	fputs("\e8\e[0K", stderr);
+		fputc(' ', stdout);
+	fputc(']', stdout);
+	fflush(stdout);
+	fputs("\e8\e[0K", stdout);
 }
 
 int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
@@ -144,11 +144,11 @@ void apk_log(const char *prefix, const char *format, ...)
 	va_list va;
 
 	if (prefix != NULL)
-		fprintf(stderr, "%s", prefix);
+		fprintf(stdout, "%s", prefix);
 	va_start(va, format);
-	vfprintf(stderr, format, va);
+	vfprintf(stdout, format, va);
 	va_end(va);
-	fprintf(stderr, "\n");
+	fprintf(stdout, "\n");
 	apk_progress_force = 1;
 }
 
