@@ -1,0 +1,272 @@
+From cc449aebaa572fbea2d400d1ee058f03f2638df2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Mon, 14 Oct 2013 10:01:01 +0300
+Subject: [PATCH] add basic dns record parsing functions
+
+---
+ include/arpa/nameser.h |  89 ++++++++++++++++++-------------
+ src/network/ns_parse.c | 140 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 192 insertions(+), 37 deletions(-)
+ create mode 100644 src/network/ns_parse.c
+
+diff --git a/include/arpa/nameser.h b/include/arpa/nameser.h
+index b9ee665..1fc7339 100644
+--- a/include/arpa/nameser.h
++++ b/include/arpa/nameser.h
+@@ -1,6 +1,11 @@
+ #ifndef _ARPA_NAMESER_H
+ #define _ARPA_NAMESER_H
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include <sys/types.h>
+ #include <stdint.h>
+ 
+ #define __NAMESER	19991006
+@@ -296,43 +301,49 @@ typedef enum __ns_cert_types {
+ #define NS_OPT_DNSSEC_OK        0x8000U
+ #define NS_OPT_NSID		3
+ 
+-#define NS_GET16(s, cp) do { \
+-	register const unsigned char *t_cp = (const unsigned char *)(cp); \
+-	(s) = ((uint16_t)t_cp[0] << 8) \
+-	    | ((uint16_t)t_cp[1]) \
+-	    ; \
+-	(cp) += NS_INT16SZ; \
+-} while (0)
+-
+-#define NS_GET32(l, cp) do { \
+-	register const unsigned char *t_cp = (const unsigned char *)(cp); \
+-	(l) = ((uint32_t)t_cp[0] << 24) \
+-	    | ((uint32_t)t_cp[1] << 16) \
+-	    | ((uint32_t)t_cp[2] << 8) \
+-	    | ((uint32_t)t_cp[3]) \
+-	    ; \
+-	(cp) += NS_INT32SZ; \
+-} while (0)
+-
+-#define NS_PUT16(s, cp) do { \
+-	register uint16_t t_s = (uint16_t)(s); \
+-	register unsigned char *t_cp = (unsigned char *)(cp); \
+-	*t_cp++ = t_s >> 8; \
+-	*t_cp   = t_s; \
+-	(cp) += NS_INT16SZ; \
+-} while (0)
+-
+-#define NS_PUT32(l, cp) do { \
+-	register uint32_t t_l = (uint32_t)(l); \
+-	register unsigned char *t_cp = (unsigned char *)(cp); \
+-	*t_cp++ = t_l >> 24; \
+-	*t_cp++ = t_l >> 16; \
+-	*t_cp++ = t_l >> 8; \
+-	*t_cp   = t_l; \
+-	(cp) += NS_INT32SZ; \
+-} while (0)
+-
+-
++static __inline uint16_t ns_get16(const unsigned char *cp)
++{
++	return ((uint16_t)cp[0] << 8)
++	     | ((uint16_t)cp[1]);
++}
++
++#define NS_GET16(s, cp) do { (s) = ns_get16(cp); (cp) += NS_INT16SZ; } while (0)
++
++static __inline uint32_t ns_get32(const unsigned char *cp)
++{
++	return ((uint32_t)cp[0] << 24)
++	     | ((uint32_t)cp[1] << 16)
++	     | ((uint32_t)cp[2] << 8)
++	     | ((uint32_t)cp[3]);
++}
++
++#define NS_GET32(s, cp) do { (s) = ns_get32(cp); (cp) += NS_INT32SZ; } while (0)
++
++static __inline void ns_put16(uint16_t s, unsigned char *cp)
++{
++	cp[0] = s >> 8;
++	cp[1] = s;
++}
++
++#define NS_PUT16(s, cp) do { ns_put16(s, cp); (cp) += NS_INT16SZ; } while (0)
++
++static __inline void ns_put32(uint32_t l, unsigned char *cp)
++{
++	cp[0] = l >> 24;
++	cp[1] = l >> 16;
++	cp[2] = l >> 8;
++	cp[3] = l;
++}
++
++#define NS_PUT32(s, cp) do { ns_put32(s, cp); (cp) += NS_INT32SZ; } while (0)
++
++#if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
++int ns_initparse(const u_char *msg, int msglen, ns_msg *handle);
++int ns_parserr(ns_msg *handle, ns_sect section, int rrnum, ns_rr *rr);
++int ns_skiprr(const u_char *msg, const u_char *eom, ns_sect section, int count);
++int ns_name_uncompress(const u_char *msg, const u_char *eom,
++		       const u_char *comp_dn, char *exp_dn, size_t length);
++#endif
+ 
+ 
+ #define	__BIND		19950621
+@@ -464,4 +475,8 @@ typedef struct {
+ #define	PUTSHORT		NS_PUT16
+ #define	PUTLONG			NS_PUT32
+ 
++#ifdef __cplusplus
++}
++#endif
++
+ #endif
+diff --git a/src/network/ns_parse.c b/src/network/ns_parse.c
+new file mode 100644
+index 0000000..5ef0d90
+--- /dev/null
++++ b/src/network/ns_parse.c
+@@ -0,0 +1,140 @@
++#define _BSD_SOURCE
++#include <errno.h>
++#include <stddef.h>
++#include <resolv.h>
++#include <arpa/nameser.h>
++
++int ns_initparse(const unsigned char *msg, int msglen, ns_msg *handle)
++{
++	int i, r;
++
++	handle->_msg = msg;
++	handle->_eom = msg + msglen;
++	if (msglen < (2 + ns_s_max) * NS_INT16SZ)
++		goto bad;
++
++	NS_GET16(handle->_id, msg);
++	NS_GET16(handle->_flags, msg);
++	for (i = 0; i < ns_s_max; i++)
++		NS_GET16(handle->_counts[i], msg);
++	for (i = 0; i < ns_s_max; i++) {
++		if (handle->_counts[i]) {
++			handle->_sections[i] = msg;
++			r = ns_skiprr(msg, handle->_eom, i, handle->_counts[i]);
++			if (r < 0) return -1;
++			msg += r;
++		} else {
++			handle->_sections[i] = NULL;
++		}
++	}
++	if (msg != handle->_eom)
++		goto bad;
++
++	handle->_sect = ns_s_max;
++	handle->_rrnum = -1;
++	handle->_msg_ptr = NULL;
++	return 0;
++bad:
++	errno = EMSGSIZE;
++	return -1;
++}
++
++int ns_skiprr(const u_char *ptr, const u_char *eom, ns_sect section, int count)
++{
++	const u_char *p = ptr;
++	int r;
++
++	while (count--) {
++		r = dn_skipname(p, eom);
++		if (r < 0) goto bad;
++		p += r + 2 * NS_INT16SZ;
++		if (section != ns_s_qd) {
++			if (p + NS_INT32SZ + NS_INT16SZ > eom) goto bad;
++			p += NS_INT32SZ;
++			NS_GET16(r, p);
++			p += r;
++		}
++	}
++	if (p > eom) goto bad;
++	return ptr - p;
++bad:
++	errno = EMSGSIZE;
++	return -1;
++}
++
++int ns_parserr(ns_msg *handle, ns_sect section, int rrnum, ns_rr *rr)
++{
++	int r;
++
++	if (section < 0 || section >= ns_s_max)
++		goto bad;
++	if (section != handle->_sect) {
++		handle->_sect = section;
++		handle->_rrnum = 0;
++		handle->_msg_ptr = handle->_sections[section];
++	}
++	if (rrnum == -1)
++		rrnum = handle->_rrnum;
++	if (rrnum < 0 || rrnum >= handle->_counts[section])
++		goto bad;
++	if (rrnum < handle->_rrnum) {
++		handle->_rrnum = 0;
++		handle->_msg_ptr = handle->_sections[section];
++	}
++	if (rrnum > handle->_rrnum) {
++		r = ns_skiprr(handle->_msg_ptr, handle->_eom, section, rrnum - handle->_rrnum);
++		if (r < 0) return -1;
++		handle->_msg_ptr += r;
++		handle->_rrnum = rrnum;
++	}
++	r = dn_expand(handle->_msg, handle->_eom, handle->_msg_ptr, rr->name, NS_MAXDNAME);
++	if (r < 0) return -1;
++	handle->_msg_ptr += r;
++	if (handle->_msg_ptr + 2 * NS_INT16SZ > handle->_eom)
++		goto size;
++	NS_GET16(rr->type, handle->_msg_ptr);
++	NS_GET16(rr->rr_class, handle->_msg_ptr);
++	if (section != ns_s_qd) {
++		if (handle->_msg_ptr + NS_INT32SZ + NS_INT16SZ > handle->_eom)
++			goto size;
++		NS_GET32(rr->ttl, handle->_msg_ptr);
++		NS_GET16(rr->rdlength, handle->_msg_ptr);
++		if (handle->_msg_ptr + rr->rdlength > handle->_eom)
++			goto size;
++		rr->rdata = handle->_msg_ptr;
++		handle->_msg_ptr += rr->rdlength;
++	} else {
++		rr->ttl = 0;
++		rr->rdlength = 0;
++		rr->rdata = NULL;
++	}
++	handle->_rrnum++;
++	if (handle->_rrnum > handle->_counts[section]) {
++		handle->_sect = section + 1;
++		if (handle->_sect == ns_s_max) {
++			handle->_rrnum = -1;
++			handle->_msg_ptr = NULL;
++		} else {
++			handle->_rrnum = 0;
++		}
++	}
++	return 0;
++bad:
++	errno = ENODEV;
++	return -1;
++size:
++	errno = EMSGSIZE;
++	return -1;
++}
++
++int __dn_expand(const unsigned char *, const unsigned char *, const unsigned char *, char *, int);
++
++int ns_name_uncompress(const u_char *msg, const u_char *eom,
++		       const u_char *src, char *dst, size_t dstsiz)
++{
++	int r;
++	r = __dn_expand(msg, eom, src, dst, dstsiz);
++	if (r < 0) errno = EMSGSIZE;
++	return r;
++}
++
+-- 
+1.8.4
+
