@@ -9,9 +9,9 @@ arch="noarch"
 license="GPL"
 depends="alpine-baselayout alpine-conf apk-tools busybox busybox-initscripts
 	openrc libc-utils alpine-keys"
-makedepends=
-install=
-subpackages=
+makedepends=""
+install=""
+subpackages=""
 replaces="alpine-baselayout"
 source=""
 
@@ -31,4 +31,3 @@ Kernel \\r on an \\m (\\l)
 
 EOF
 }
-
