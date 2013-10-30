@@ -6,10 +6,10 @@ pkgdesc="Public keys for Alpine Linux packages"
 url="http://alpinelinux.org"
 arch="noarch"
 license="GPL"
-depends=
-makedepends=
-install=
-subpackages=
+depends=""
+makedepends=""
+install=""
+subpackages=""
 replaces="alpine-base"
 source="http://dev.alpinelinux.org/~ncopa/alpine/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub
 	alpine-devel@lists.alpinelinux.org-4d07755e.rsa.pub
