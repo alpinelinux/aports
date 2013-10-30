@@ -1,10 +1,12 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.3.1
-pkgrel=1
+pkgrel=2
 pkgdesc="Alpine base dir structure and init scripts"
 url="http://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
-depends=
+arch="all"
+license="GPL2"
+depends=""
 options="!fhs"
 install="$pkgname.pre-upgrade $pkgname.post-upgrade $pkgname.post-install"
 source="mkmntdirs.c
@@ -23,12 +25,11 @@ source="mkmntdirs.c
 	protocols
 	services
 	"
-arch="all"
-license=GPL-2
 
 _builddir="$srcdir"/build
 prepare() {
 	mkdir -p "$_builddir"
+	
 }
 
 build() {
