@@ -29,43 +29,46 @@ static void __attribute__((destructor)) __geoip_on_unload(void)
 		MMDB_close(&mmdb);
 }
 
-static inline void __geoip_set_header(struct sess *sp, const char *hdr, MMDB_lookup_result_s *res, char **path)
+static inline void __geoip_set_header(struct sess *sp, const char *hdr, MMDB_lookup_result_s *res, const char * const* path)
 {
 	MMDB_entry_data_s entry;
+	const char *value = "FAIL";
 	char buf[64];
 	int s;
 
+	if (!res->found_entry)
+		goto set_and_exit;
+
 	s = MMDB_aget_value(&res->entry, &entry, path);
 	if (s != MMDB_SUCCESS || !entry.has_data)
-		return;
+		goto set_and_exit;
 
-	if (entry.type != MMDB_DATA_TYPE_UTF8_STRING)
-		return;
-
-	if (entry.data_size+1 >= sizeof(buf))
-		return;
+	if (entry.type != MMDB_DATA_TYPE_UTF8_STRING || entry.data_size+1 >= sizeof(buf))
+		goto set_and_exit;
 
 	memcpy(buf, entry.utf8_string, entry.data_size);
 	buf[entry.data_size] = 0;
+	value = buf;
 
-	VRT_SetHdr(sp, HDR_REQ, hdr, buf, vrt_magic_string_end);
+set_and_exit:
+	VRT_SetHdr(sp, HDR_REQ, hdr, value, vrt_magic_string_end);
 }
 
 static void __geoip_set_headers(struct sess *sp)
 {
 	static const char *continent_path[] = { "continent", "code", NULL };
 	static const char *country_path[] = { "country", "iso_code", NULL };
-	MMDB_lookup_result_s res;
-	int mmdb_error;
+	MMDB_lookup_result_s res = {0};
+	int e = MMDB_FILE_OPEN_ERROR;
 
-	if (mmdb.filename == NULL)
-		return;
+	if (mmdb.filename != NULL)
+		res = MMDB_lookup_sockaddr(&mmdb, (struct sockaddr*) VRT_r_client_ip(sp), &e);
 
-	res = MMDB_lookup_sockaddr(&mmdb, (struct sockaddr*) VRT_r_client_ip(sp), &mmdb_error);
-	if (mmdb_error == MMDB_SUCCESS) {
-		__geoip_set_header(sp, "\022X-GeoIP-Continent:", &res, continent_path);
-		__geoip_set_header(sp, "\020X-GeoIP-Country:", &res, country_path);
-	}
+	if (e != MMDB_SUCCESS)
+		VRT_SetHdr(sp, HDR_REQ, "\016X-GeoIP-Error:", MMDB_strerror(e), vrt_magic_string_end);
+
+	__geoip_set_header(sp, "\022X-GeoIP-Continent:", &res, continent_path);
+	__geoip_set_header(sp, "\020X-GeoIP-Country:", &res, country_path);
 }
 
 }C
