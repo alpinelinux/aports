@@ -75,5 +75,4 @@ static void __geoip_set_headers(struct sess *sp)
 
 sub maxminddb_lookup {
 	C{ __geoip_set_headers(sp); }C
-	return(lookup);
 }
