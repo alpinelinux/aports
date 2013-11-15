@@ -1,14 +1,16 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.3.1
-pkgrel=2
+pkgrel=3
 pkgdesc="Alpine base dir structure and init scripts"
 url="http://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
 license="GPL2"
 depends=""
+pkggroups="shadow"
 options="!fhs"
-install="$pkgname.pre-upgrade $pkgname.post-upgrade $pkgname.post-install"
+install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
+	$pkgname.post-install"
 source="mkmntdirs.c
 	crontab
 	color_prompt
@@ -29,7 +31,6 @@ source="mkmntdirs.c
 _builddir="$srcdir"/build
 prepare() {
 	mkdir -p "$_builddir"
-	
 }
 
 build() {
@@ -151,7 +152,7 @@ EOF
 		"$srcdir"/services \
 		"$pkgdir"/etc/ || return 1
 
-	install -m600 "$_builddir"/shadow \
+	install -m640 -g shadow "$_builddir"/shadow \
 		"$pkgdir"/etc/ || return 1
 
 	# symlinks
@@ -166,7 +167,7 @@ d7da26e76752b2e31c66b63f40a73397  color_prompt
 0ea6be55b18804f166e6939e9d5f4099  blacklist.conf
 f9e3eac60200d41dd5569eeabb4eddff  i386.conf
 17ba4f49c51dd2ba49ccceb0ecadaca4  kms.conf
-286a137ba3b0a79dac2ff1b5da0d8110  group
+67ee12ef936978ec0e7d295eaba1e420  group
 d93ca19f6867a1a3918fa782d9b7c512  inittab
 d05579984e737021401d8c40153c5b5d  passwd
 dcb55fbc491316cdb3874f3ddae8f566  profile
@@ -179,7 +180,7 @@ a00b56dbd437d3f2c32ced50974daa3cfc84a8dd1cbaf75cf307be20b398fc75  color_prompt
 70becab743ff2071247bd144499eadbb1b42a5436dcc63991d69aa63ee2fe755  blacklist.conf
 6c46c4cbfb8b7594f19eb94801a350fa2221ae9ac5239a8819d15555caa76ae8  i386.conf
 079f74b93a4df310f55f60fea5e05996d3267c50076ae16402fa9e497ea5fdb2  kms.conf
-b62991a782171451461b42c182722f1a165cb4f1638005f233547cecd394a4da  group
+591fce261465cd838bcfddc9a4e560cc4f0c1d603921c200c350b935213b9ca1  group
 8a54b20451ba9469b5260f76faa90fbde96915bf33e7f03f88bdbaf813400485  inittab
 348e451c8d4d2d9807d78114d100942f1c5481fd52550c821922b84a16f02d42  passwd
 8165abfa26a1754c317228e78142f4a89dd72a669951d269f0b68d7a92faf1e8  profile
@@ -192,7 +193,7 @@ sha512sums="670fce7a9d5c492289b7dca06077a5109672fbec2accf21bfb3531651f0434939ff0
 2b8e55339955c9670b5b9832bf57e711aca70cd2ebf815a9623fbb7fcd440cca4dd6a4862750885f779080d5c5416de197ff9a250cf116b1c8cf130fafbdaae8  blacklist.conf
 49109d434b577563849c43dd8141961ca798dada74d4d3f49003dac1911f522c43438b8241fa254e4faacdd90058f4d39a7d69b1f493f6d57422c1f706547c95  i386.conf
 b407351a5a64b00100753a13a91f4b1cb51017ae918a91fd37f3a6e76e3b6f562be643e74f969a888bdd54b0ad2d09e3b283d44ae4b5efccca7d7e9f735c5afb  kms.conf
-e732d715968a4dc3bf6492964080fb71df900f3fbc6ca0ed11f114ca66ec01c18501e4a9978c85eee133c6249a9c2ecb327c473397d05e2f1ad2b5a950cfa632  group
+214d7b26bfdefbe08d150974d1e1635ee4b8ca68a04a22eacf2e465f3a191421fb453ad93f14a1c70f98b628a509d623e005f912270e7552513daa1e50bb1859  group
 bdb6fe1f3e07466d9badf9a18b1f3fc9585f0a4cb69c00f1fa6d8b1e9903a3c497edefbfd345e324961013999e5692d2ed68ae7defaf1c6e57cc7916f206fd75  inittab
 3b9be283e171516dd45ee29775a1149ba20d5672bef422a698ed944ce66697e5a80dec21a9a20c079cca895890dbfa73ccbb8000a55504d95ced4e7436d8e16b  passwd
 9e197ec99c97ec2b03b97546d632a865d6e7abe5742ac48bcb458a505ce38abd1010ef93ea8a752251578ea993708324e1d36ccf77ee3e7cde7e8db98cc42d67  profile
