@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.3.1
-pkgrel=4
+pkgrel=5
 pkgdesc="Alpine base dir structure and init scripts"
 url="http://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
