@@ -1,0 +1,184 @@
+#!/bin/sh
+
+lockfile=/var/run/aports-build/aports-build.pid
+pid=$(cat $lockfile 2>/dev/null)
+
+if [ -n "$pid" ]; then
+	if [ -d /proc/"$pid" ]; then
+		# already running
+		exit 0
+	fi
+fi
+echo $$ > $lockfile || exit 1
+
+logurl=
+conf=/etc/conf.d/aports-build
+. $conf || exit 1
+
+if [ -z "$git_branch" ]; then
+	echo "Please set 'git_branch' in $conf" >&2
+	exit 1
+fi
+
+rel=$upload_release
+
+if [ -z "$rel" ]; then
+	case "$git_branch" in
+		master)		rel="edge";;
+		[0-9]*-stable)	rel=v${git_branch%-stable} ;;
+	esac
+fi
+
+arch=x86
+case "$(uname -m)" in
+	x86_64) arch=x86_64;;
+esac
+
+aports=${APORTS:-$HOME/aports}
+isodir=$HOME/alpine-iso
+packages=${REPOSDIR:-$HOME/packages}
+repos=${REPOS:-"main testing"}
+
+: ${upload_prefix:="nl.alpinelinux.org:alpine"}
+upload_pkg="$upload_prefix/$rel/"
+upload_iso="$upload_prefix/$rel/releases/$arch/"
+
+: ${ircchannel:="#alpine-devel"}
+: ${hostname:=$(hostname)}
+: ${mqtt_broker:="msg.alpinelinux.org"}
+: ${status_msg:="mosquitto_pub -h $mqtt_broker -t build/$hostname -r -m"}
+: ${irc_msg:="mosquitto_pub -h $mqtt_broker -t irc/${ircchannel//#/%} -m"}
+: ${logdir:="/var/cache/distfiles/buildlogs"}
+: ${logurlprefix:="http://bld1.alpinelinux.org/buildlogs"}
+
+export ABUILD_LOG_CMD="$status_msg"
+log() {
+	echo "$hostname: $@"
+	$status_msg "$1"
+}
+
+send_irc() {
+	#echo "$1" | sircbot-send "$ircchannel"
+	$irc_msg "$hostname: $1"
+}
+
+# create new_release
+new_release() {
+	local new=$1
+	local target="all-release"
+	if [ "$rel" = "edge" ]; then
+		target="edge"
+	fi
+	cd "$isodir"
+	echo "$new" > current
+	rm -rf isotmp.*
+	sudo apk add --virtual .alpine-release xdelta3 lua
+	if ! make $target; then
+		rm current
+		return 1
+	fi
+	sh mklatest.sh || return 1
+	mkdir -p "$upload_iso"
+	rsync -ruv .latest.txt *"$new"* "$upload_iso" || return 1
+	sudo apk del .alpine-release
+	mv current previous
+	return 0
+}
+
+cd $aports || return 1
+[ -z "$repos" ] && return 1
+
+# parse opts
+while getopts "fu:" opt; do
+	case $opt in
+	'f') force=true;;
+	'u') logurl=" $OPTARG";;
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+while true; do
+	cd $aports || return 1
+	# check if we need to rebuild
+	log "pulling git"
+	_old=$(git describe)
+	_old_tag=$(git describe --abbrev=0)
+	git checkout $git_branch
+	git pull || return 1
+	_current=$(git describe)
+	_current_tag=$(git describe --abbrev=0)
+	if [ "$_old_tag" != "$_current_tag" ]; then
+		log "$_old_tag -> $_current_tag"
+	fi
+	if [ "$_old" = "$_current" ] && [ -f /tmp/uploaded ] && [ -z "$force" ] && [ "$_current_tag" = "$_old_tag" ]; then
+		break
+	fi
+
+	force=
+
+	# check if we need make new release
+	if [ "$_current_tag" != "$_old_tag" ]; then
+		_new_release=1
+		# we want build the realease from this tag
+		git checkout "$_current_tag"
+		_current=$(git describe)
+	fi
+
+	rm -f /tmp/uploaded
+
+	# do the compile, send output to log
+	log "building $_current"
+#	# temp workaround - abuild does not resolve the linux kernel dep
+#	(
+#		cd $HOME/aports/main
+#		for i in linux-*; do
+#			(
+#			export REPODEST=$HOME/packages
+#			cd $i && abuild -Rk )||break
+#		done
+#	)
+	if ! buildrepo -p $repos >"$logdir"/$hostname.log 2>&1 ; then
+		local errlog=$hostname.$_current.log
+		cp "$logdir"/$hostname.log "$logdir"/$errlog
+		# todo: revert last commit?
+#		log "building $repos ($_current) failed"
+#		send_irc "failed to build $_current: $logurlprefix/$errlog"
+#		log "idle"
+		exit 1
+	fi
+
+	# upgrade our running system
+	log "upgrading system"
+	sudo apk upgrade -U -a --quiet || log 'failed to apk upgrade'
+
+	# copy for distribution
+	cd "$packages" || return 1
+	if [ -z "$upload_pkg" ]; then
+		break
+	fi
+	log "uploading packages"
+	rc=0
+	for i in $upload_pkg; do
+		local repo
+		for repo in $repos; do
+			rsync -ruv --delete-delay --delay-updates $repo/$arch $i/$repo/
+			rc=$(( $rc + $? ))
+		done
+	done
+	[ $rc -eq 0 ] && touch /tmp/uploaded && sudo apk update
+
+	# report to irc that we are done
+	send_irc "files from $_current uploaded"
+
+	# if
+	if [ "$_current_tag" != "$_old_tag" ]; then
+		if new_release ${_current_tag#v}; then
+			send_irc "release $_current_tag uploaded"
+		fi
+	fi
+done
+
+# cleanup
+log "idle"
+rm -f $lockfile
+
