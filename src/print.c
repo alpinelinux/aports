@@ -149,6 +149,7 @@ void apk_log(const char *prefix, const char *format, ...)
 	vfprintf(stdout, format, va);
 	va_end(va);
 	fprintf(stdout, "\n");
+	fflush(stdout);
 	apk_progress_force = 1;
 }
 
