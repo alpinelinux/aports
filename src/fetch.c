@@ -78,6 +78,7 @@ static int fetch_parse(void *ctx, struct apk_db_options *dbopts,
 		break;
 	case 's':
 		fctx->flags |= FETCH_STDOUT;
+		apk_verbosity--;
 		break;
 	case 'L':
 		fctx->flags |= FETCH_LINK;
