@@ -68,6 +68,7 @@ int main(int argc, const char *argv[])
 	struct group *grent;
 	const char *cmd;
 	const char *path;
+	int i;
 
 	grent = getgrnam(ABUILD_GROUP);
 	if (grent == NULL)
@@ -84,6 +85,11 @@ int main(int argc, const char *argv[])
 	path = get_command_path(cmd);
 	if (path == NULL)
 		errx(1, "%s: Not a valid subcommand", cmd);
+
+	/* we dont allow --allow-untrusted option */
+	for (i = 1; i < argc; i++)
+		if (strcmp(argv[i], "--allow-untrusted") == 0)
+			errx(1, "%s: not allowed option", "--allow-untrusted");
 
 	argv[0] = path;
 	/* set our uid to root so bbsuid --install works */
