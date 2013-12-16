@@ -1,6 +1,7 @@
 module(..., package.seeall)
 
 abuild_conf_file = "/etc/abuild.conf"
+abuild_functions = "/usr/share/abuild/functions.sh"
 
 local abuild_conf = {}
 
@@ -72,9 +73,9 @@ local function parse_apkbuilds(dirs)
 	--expand repos
 	for i,v in ipairs(dirs) do
 		str = str..v.."/*/APKBUILD "
-	end	
-		
-	local p = io.popen([[ 
+	end
+
+	local p = io.popen(". "..abuild_functions..";"..[[
 		for i in ]]..str..[[; do
 			pkgname=
 			pkgver=
@@ -85,11 +86,12 @@ local function parse_apkbuilds(dirs)
 			subpackages=
 			source=
 			url=
-			dir="${i%/APKBUILD}"
-			cd "$dir"
-			. ./APKBUILD
-			echo $dir\|$pkgname\|$pkgver\|$pkgrel\|$arch\|$depends\|$makedepends\|$subpackages\|$source\|$url
-		done
+			dir="${i%/APKBUILD}";
+			[ -n "$dir" ] || exit 1;
+			cd "$dir";
+			. ./APKBUILD;
+			echo $dir\|$pkgname\|$pkgver\|$pkgrel\|$arch\|$depends\|$makedepends\|$subpackages\|$source\|$url ;
+		done;
 	]])
 	return function()
 		local line = p:read("*line")
@@ -97,7 +99,7 @@ local function parse_apkbuilds(dirs)
 			p:close()
 			return nil
 		end
-		return split_apkbuild(line) 
+		return split_apkbuild(line)
 	end
 end
 
@@ -256,7 +258,7 @@ end
 function Aports:foreach(f)
 	local k,v
 	for k,v in pairs(self.apks) do
-		f(k,v) 
+		f(k,v)
 	end
 end
 
