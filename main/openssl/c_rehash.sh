@@ -14,55 +14,6 @@
 # default certificate location
 DIR=/etc/openssl
 
-# for filetype bitfield
-IS_CERT=$(( 1 << 0 ))
-IS_CRL=$(( 1 << 1 ))
-
-
-# check to see if a file is a certificate file or a CRL file
-# arguments:
-#       1. the filename to be scanned
-# returns:
-#       bitfield of file type; uses ${IS_CERT} and ${IS_CRL}
-#
-check_file()
-{
-    local IS_TYPE=0
-
-    # make IFS a newline so we can process grep output line by line
-    local OLDIFS=${IFS}
-    IFS=$( printf "\n" )
-
-    # XXX: could be more efficient to have two 'grep -m' but is -m portable?
-    for LINE in $( grep '^-----BEGIN .*-----' ${1} )
-    do
-	if echo ${LINE} \
-	    | grep -q -E '^-----BEGIN (X509 |TRUSTED )?CERTIFICATE-----'
-	then
-	    IS_TYPE=$(( ${IS_TYPE} | ${IS_CERT} ))
-
-	    if [ $(( ${IS_TYPE} & ${IS_CRL} )) -ne 0 ]
-	    then
-	    	break
-	    fi
-	elif echo ${LINE} | grep -q '^-----BEGIN X509 CRL-----'
-	then
-	    IS_TYPE=$(( ${IS_TYPE} | ${IS_CRL} ))
-
-	    if [ $(( ${IS_TYPE} & ${IS_CERT} )) -ne 0 ]
-	    then
-	    	break
-	    fi
-	fi
-    done
-
-    # restore IFS
-    IFS=${OLDIFS}
-
-    return ${IS_TYPE}
-}
-
-
 #
 # use openssl to fingerprint a file
 #    arguments:
@@ -75,7 +26,7 @@ check_file()
 #
 fingerprint()
 {
-    ${SSL_CMD} ${2} -fingerprint -noout -in ${1} | sed 's/^.*=//' | tr -d ':'
+    ${SSL_CMD} ${2} -fingerprint -noout -in ${1} | sed -e 's/^.*=//' -e 's/://g'
 }
 
 
@@ -89,7 +40,6 @@ fingerprint()
 #
 link_hash()
 {
-    local FINGERPRINT=$( fingerprint ${1} ${2} )
     local HASH=$( ${SSL_CMD} ${2} -hash -noout -in ${1} )
     local SUFFIX=0
     local LINKFILE=''
@@ -102,17 +52,22 @@ link_hash()
 
     LINKFILE=${HASH}.${TAG}${SUFFIX}
 
-    while [ -f ${LINKFILE} ]
-    do
-	if [ ${FINGERPRINT} = $( fingerprint ${LINKFILE} ${2} ) ]
-	then
-	    echo "WARNING: Skipping duplicate file ${1}" >&2
-	    return 1
-	fi	
+    if [ -f ${LINKFILE} ]
+    then
+	local FINGERPRINT=$( fingerprint ${1} ${2} )
 
-	SUFFIX=$(( ${SUFFIX} + 1 ))
-	LINKFILE=${HASH}.${TAG}${SUFFIX}
-    done
+	while [ -f ${LINKFILE} ]
+	do
+	if [ ${FINGERPRINT} = $( fingerprint ${LINKFILE} ${2} ) ]
+	    then
+	        echo "WARNING: Skipping duplicate file ${1}" >&2
+	        return 1
+	    fi
+
+	    SUFFIX=$(( ${SUFFIX} + 1 ))
+	    LINKFILE=${HASH}.${TAG}${SUFFIX}
+	done
+    fi
 
     echo "${1} => ${LINKFILE}"
 
@@ -131,31 +86,23 @@ hash_dir()
 
     cd ${1}
 
-    ls -1 * 2>/dev/null | while read FILE
+    ls -1 * 2>/dev/null | grep -E '^[[:xdigit:]]{8}\.r?[[:digit:]]+$' | while read FILE
     do
-        if echo ${FILE} | grep -q -E '^[[:xdigit:]]{8}\.r?[[:digit:]]+$' \
-	    	&& [ -h "${FILE}" ]
-        then
-            rm ${FILE}
-        fi
+        [ -h "${FILE}" ] && rm "${FILE}"
     done
 
     ls -1 *.pem 2>/dev/null | while read FILE
     do
-	check_file ${FILE}
-        local FILE_TYPE=${?}
-	local TYPE_STR=''
+	local TYPE_STR=
 
-        if [ $(( ${FILE_TYPE} & ${IS_CERT} )) -ne 0 ]
-        then
-            TYPE_STR='x509'
-        elif [ $(( ${FILE_TYPE} & ${IS_CRL} )) -ne 0 ]
-        then
-            TYPE_STR='crl'
-        else
-            echo "WARNING: ${FILE} does not contain a certificate or CRL: skipping" >&2
+	if grep -q '^-----BEGIN X509 CRL-----' ${FILE}; then
+	    TYPE_STR="crl"
+	elif grep -q -E '^-----BEGIN (X509 |TRUSTED )?CERTIFICATE-----' ${FILE}; then 
+	    TYPE_STR="x509"
+	else
+	    echo "WARNING: ${FILE} does not contain a certificate or CRL: skipping" >&2
 	    continue
-        fi
+	fi
 
 	link_hash ${FILE} ${TYPE_STR}
     done
