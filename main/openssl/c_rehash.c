@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <fnmatch.h>
+#include <sys/stat.h>
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
