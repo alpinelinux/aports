@@ -70,6 +70,7 @@ static struct apk_option generic_options[] = {
 	{ 0x111, "overlay-from-stdin", "Read list of overlay files from stdin" },
 	{ 0x112, "arch",	"Use architecture with --root",
 				required_argument, "ARCH" },
+	{ 0x114, "print-arch",	"Print default arch and exit" },
 #ifdef TEST_MODE
 	{ 0x200, "test-repo",	"Repository", required_argument, "REPO" },
 	{ 0x201, "test-instdb",	"Installed db", required_argument, "INSTALLED" },
@@ -83,6 +84,12 @@ static int version(void)
 #ifdef TEST_MODE
 	printf("TEST MODE BUILD. NOT FOR PRODUCTION USE.\n");
 #endif
+	return 0;
+}
+
+static int show_arch(void)
+{
+	puts(APK_DEFAULT_ARCH);
 	return 0;
 }
 
@@ -418,6 +425,9 @@ int main(int argc, char **argv)
 		case 0x112:
 			dbopts.arch = optarg;
 			break;
+		case 0x114:
+			r = show_arch();
+			goto err;
 #ifdef TEST_MODE
 		case 0x200:
 			*apk_string_array_add(&test_repos) = (char*) optarg;
