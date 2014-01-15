@@ -29,4 +29,5 @@ for i in /boot/initramfs-[0-9]*; do
 	fi
 done
 
+sync
 exit 0
