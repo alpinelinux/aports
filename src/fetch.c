@@ -241,6 +241,9 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
 	void *mark = (ctx->flags & FETCH_RECURSIVE) ? mark_name_recursive : mark_name;
 
+	if (ctx->flags & FETCH_STDOUT)
+		apk_flags &= ~APK_PROGRESS;
+
 	if (ctx->outdir_fd == 0)
 		ctx->outdir_fd = AT_FDCWD;
 
@@ -262,7 +265,7 @@ static struct apk_option fetch_options[] = {
 	{ 'L', "link",		"Create hard links if possible" },
 	{ 'R', "recursive",	"Fetch the PACKAGE and all its dependencies" },
 	{ 's', "stdout",
-	  "Dump the .apk to stdout (incompatible with -o and -R)" },
+	  "Dump the .apk to stdout (incompatible with -o, -R, --progress)" },
 	{ 'o', "output",	"Directory to place the PACKAGEs to",
 	  required_argument, "DIR" },
 };
