@@ -241,8 +241,10 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
 	void *mark = (ctx->flags & FETCH_RECURSIVE) ? mark_name_recursive : mark_name;
 
-	if (ctx->flags & FETCH_STDOUT)
+	if (ctx->flags & FETCH_STDOUT) {
 		apk_flags &= ~APK_PROGRESS;
+		apk_verbosity = 0;
+	}
 
 	if (ctx->outdir_fd == 0)
 		ctx->outdir_fd = AT_FDCWD;
