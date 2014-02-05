@@ -1,6 +1,6 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-keys
-pkgver=1.0
+pkgver=1.1
 pkgrel=0
 pkgdesc="Public keys for Alpine Linux packages"
 url="http://alpinelinux.org"
@@ -13,6 +13,9 @@ subpackages=""
 replaces="alpine-base"
 source="http://dev.alpinelinux.org/~ncopa/alpine/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub
 	alpine-devel@lists.alpinelinux.org-4d07755e.rsa.pub
+	alpine-devel@lists.alpinelinux.org-5243ef4b.rsa.pub
+	alpine-devel@lists.alpinelinux.org-524d27bb.rsa.pub
+	alpine-devel@lists.alpinelinux.org-5261cecb.rsa.pub
 	buildozer-50d1ba71.rsa.pub"
 
 build() {
@@ -24,10 +27,6 @@ package() {
 	mkdir -p "$pkgdir"/etc/apk/keys
 	install -m644 "$srcdir"/alpine-devel*.pub \
 		"$pkgdir"/etc/apk/keys/ || return 1
-	if [ "$ALPINE_LIBC" = "eglibc" ]; then
-		install -m644 "$srcdir"/buildozer-50d1ba71.rsa.pub \
-			"$pkgdir"/etc/apk/keys/ || return 1
-	fi
 }
 
 md5sums="75ee19ea2b03c12bc171647edc677f6f  alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub
