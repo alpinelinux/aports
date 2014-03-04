@@ -1,42 +1,21 @@
-From 806946c35cf0560248e63fea53c4d82426a2034a Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
-Date: Wed, 5 Sep 2012 10:07:05 +0300
-Subject: [PATCH] ASTERISK-19109: Implement deaf participant support for
- ConfBridge
-
----
- CHANGES                                |   3 +
- apps/app_confbridge.c                  | 218 ++++++++++++++++++++++++++++++---
- apps/confbridge/conf_config_parser.c   |  14 +++
- apps/confbridge/include/confbridge.h   |   6 +
- bridges/bridge_multiplexed.c           |   2 +-
- bridges/bridge_simple.c                |   2 +-
- bridges/bridge_softmix.c               |  38 +++---
- configs/confbridge.conf.sample         |   5 +
- include/asterisk/bridging_features.h   |   2 +
- include/asterisk/bridging_technology.h |  15 +++
- main/bridging.c                        |  22 ++++
- 11 files changed, 294 insertions(+), 33 deletions(-)
-
-diff --git a/CHANGES b/CHANGES
-index c3c9891..2efa17b 100644
---- a/CHANGES
-+++ b/CHANGES
-@@ -66,6 +66,9 @@ ConfBridge
-    file will be played to the user, and only the user, upon joining the
-    conference bridge.
+diff -ru asterisk-12.1.0.orig/CHANGES asterisk-12.1.0/CHANGES
+--- asterisk-12.1.0.orig/CHANGES	2014-03-04 12:28:27.967573113 +0000
++++ asterisk-12.1.0/CHANGES	2014-03-04 12:25:54.994802007 +0000
+@@ -8,6 +8,10 @@
+ ===
+ ==============================================================================
  
++
 + * Added support for deaf participants with CLI commands, manager actions
 +   and ConfBridge DTMF actions to toggle the deaf state.
 +
- 
- Dial
- -------------------
-diff --git a/apps/app_confbridge.c b/apps/app_confbridge.c
-index 90954b8..0455be4 100644
---- a/apps/app_confbridge.c
-+++ b/apps/app_confbridge.c
-@@ -185,6 +185,30 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
+ ------------------------------------------------------------------------------
+ --- Functionality changes from Asterisk 12.0.0 to Asterisk 12.1.0 ------------
+ ------------------------------------------------------------------------------
+diff -ru asterisk-12.1.0.orig/apps/app_confbridge.c asterisk-12.1.0/apps/app_confbridge.c
+--- asterisk-12.1.0.orig/apps/app_confbridge.c	2014-03-04 12:28:27.970906507 +0000
++++ asterisk-12.1.0/apps/app_confbridge.c	2014-03-04 12:35:39.105383185 +0000
+@@ -215,6 +215,30 @@
  		<description>
  		</description>
  	</manager>
@@ -67,9 +46,9 @@ index 90954b8..0455be4 100644
  	<manager name="ConfbridgeKick" language="en_US">
  		<synopsis>
  			Kick a Confbridge user.
-@@ -273,6 +297,13 @@ static const char app[] = "ConfBridge";
- /* Number of buckets our conference bridges container can have */
- #define CONFERENCE_BRIDGE_BUCKETS 53
+@@ -311,6 +335,13 @@
+ 	CONF_RECORD_STOP,
+ };
  
 +enum confbridge_feature_action {
 +	CONFBRIDGE_FEATURE_MUTE,
@@ -79,9 +58,9 @@ index 90954b8..0455be4 100644
 +};
 +
  /*! \brief Container to hold all conference bridges in progress */
- static struct ao2_container *conference_bridges;
+ struct ao2_container *conference_bridges;
  
-@@ -311,6 +342,10 @@ const char *conf_get_sound(enum conf_sounds sound, struct bridge_profile_sounds
+@@ -382,6 +413,10 @@
  		return S_OR(custom_sounds->muted, "conf-muted");
  	case CONF_SOUND_UNMUTED:
  		return S_OR(custom_sounds->unmuted, "conf-unmuted");
@@ -92,57 +71,101 @@ index 90954b8..0455be4 100644
  	case CONF_SOUND_ONLY_ONE:
  		return S_OR(custom_sounds->onlyone, "conf-onlyone");
  	case CONF_SOUND_THERE_ARE:
-@@ -1504,10 +1539,13 @@ static int confbridge_exec(struct ast_channel *chan, const char *data)
+@@ -493,6 +528,16 @@
+ 	send_conf_stasis(conference, chan, confbridge_unmute_type(), NULL, 1);
+ }
+ 
++static void send_deafen_event(struct ast_channel *chan, struct confbridge_conference *conference)
++{
++	send_conf_stasis(conference, chan, confbridge_deafen_type(), NULL, 1);
++}
++
++static void send_undeafen_event(struct ast_channel *chan, struct confbridge_conference *conference)
++{
++	send_conf_stasis(conference, chan, confbridge_undeafen_type(), NULL, 1);
++}
++
+ static void set_rec_filename(struct confbridge_conference *conference, struct ast_str **filename, int is_new)
+ {
+ 	char *rec_file = conference->b_profile.rec_file;
+@@ -1661,11 +1706,14 @@
  	volume_adjustments[0] = ast_audiohook_volume_get(chan, AST_AUDIOHOOK_DIRECTION_READ);
  	volume_adjustments[1] = ast_audiohook_volume_get(chan, AST_AUDIOHOOK_DIRECTION_WRITE);
  
 -	/* If the caller should be joined already muted, make it so */
 +	/* If the caller should be joined already muted or deaf, make it so */
- 	if (ast_test_flag(&conference_bridge_user.u_profile, USER_OPT_STARTMUTED)) {
- 		conference_bridge_user.features.mute = 1;
+ 	if (ast_test_flag(&user.u_profile, USER_OPT_STARTMUTED)) {
+ 		/* Set user level mute request. */
+ 		user.muted = 1;
  	}
-+	if (ast_test_flag(&conference_bridge_user.u_profile, USER_OPT_STARTDEAF)) {
-+		conference_bridge_user.features.deaf = 1;
++	if (ast_test_flag(&user.u_profile, USER_OPT_STARTDEAF)) {
++		user.features.deaf = 1;
 +	}
  
- 	if (ast_test_flag(&conference_bridge_user.u_profile, USER_OPT_DROP_SILENCE)) {
- 		conference_bridge_user.tech_args.drop_silence = 1;
-@@ -1668,6 +1706,20 @@ static int action_toggle_mute_participants(struct conference_bridge *conference_
+ 	if (ast_test_flag(&user.u_profile, USER_OPT_DROP_SILENCE)) {
+ 		user.tech_args.drop_silence = 1;
+@@ -1845,6 +1893,30 @@
  	return 0;
  }
  
-+static int action_toggle_deaf(struct conference_bridge *conference_bridge,
-+	struct conference_bridge_user *conference_bridge_user,
-+	struct ast_channel *chan)
++static int action_toggle_deaf(struct confbridge_conference *conference,
++	struct confbridge_user *user, struct ast_channel *chan)
 +{
 +	/* Deafen or undeafen yourself */
-+	conference_bridge_user->features.deaf = (!conference_bridge_user->features.deaf ? 1 : 0);
-+	ast_test_suite_event_notify("CONF_DEAF", "Message: participant %s %s\r\nConference: %s\r\nChannel: %s", chan->name, conference_bridge_user->features.deaf ? "deafened" : "undeafened", conference_bridge_user->b_profile.name, chan->name);
-+
-+	return ast_stream_and_wait(chan, (conference_bridge_user->features.deaf ?
-+		conf_get_sound(CONF_SOUND_DEAFENED, conference_bridge_user->b_profile.sounds) :
-+		conf_get_sound(CONF_SOUND_UNDEAFENED, conference_bridge_user->b_profile.sounds)),
++	user->features.deaf = !user->features.deaf;
++	ast_test_suite_event_notify("CONF_DEAF",
++		"Message: participant %s %s\r\n"
++		"Conference: %s\r\n"
++		"Channel: %s",
++		ast_channel_name(chan),
++		user->features.deaf ? "deafened" : "undeafened",
++		user->b_profile.name,
++		ast_channel_name(chan));
++	if (user->features.deaf) {
++		send_deafen_event(chan, conference);
++	} else {
++		send_undeafen_event(chan, conference);
++	}
++	return ast_stream_and_wait(chan, (user->features.deaf ?
++		conf_get_sound(CONF_SOUND_DEAFENED, user->b_profile.sounds) :
++		conf_get_sound(CONF_SOUND_UNDEAFENED, user->b_profile.sounds)),
 +		"");
 +}
 +
  static int action_playback(struct ast_bridge_channel *bridge_channel, const char *playback_file)
  {
  	char *file_copy = ast_strdupa(playback_file);
-@@ -1856,6 +1908,11 @@ static int execute_menu_entry(struct conference_bridge *conference_bridge,
+@@ -2033,6 +2105,11 @@
  		case MENU_ACTION_PARTICIPANT_COUNT:
- 			announce_user_count(conference_bridge, conference_bridge_user);
+ 			announce_user_count(conference, user);
  			break;
 +		case MENU_ACTION_TOGGLE_DEAF:
-+			res |= action_toggle_deaf(conference_bridge,
-+				conference_bridge_user,
++			res |= action_toggle_deaf(conference,
++				user,
 +				bridge_channel->chan);
 +			break;
  		case MENU_ACTION_PLAYBACK:
  			if (!stop_prompts) {
  				res |= action_playback(bridge_channel, menu_action->data.playback_file);
-@@ -2119,13 +2176,13 @@ static int generic_lock_unlock_helper(int lock, const char *conference)
+@@ -2379,14 +2456,29 @@
+ 	return res;
  }
  
++static void test_suite_feature_action_event_notify(
++	struct confbridge_conference *conference,
++	struct confbridge_user *user,
++	const char *state, const char *verb)
++{
++	ast_test_suite_event_notify(state,
++		"Message: participant %s %s\r\n"
++		"Conference: %s\r\n"
++		"Channel: %s",
++		ast_channel_name(user->chan),
++		verb,
++		conference->b_profile.name,
++		ast_channel_name(user->chan));
++}
++
  /* \internal
 - * \brief finds a conference user by channel name and mutes/unmutes them.
 + * \brief finds a conference user by channel name and changes feature bits on it.
@@ -151,60 +174,61 @@ index 90954b8..0455be4 100644
   * \retval -1 conference not found
   * \retval -2 user not found
   */
--static int generic_mute_unmute_helper(int mute, const char *conference, const char *user)
-+static int generic_feature_action_helper(enum confbridge_feature_action action, const char *conference, const char *user)
+-static int generic_mute_unmute_helper(int mute, const char *conference_name, const char *chan_name)
++static int generic_feature_action_helper(enum confbridge_feature_action action, const char *conference_name, const char *chan_name)
  {
- 	struct conference_bridge *bridge = NULL;
- 	struct conference_bridge tmp;
-@@ -2143,10 +2200,44 @@ static int generic_mute_unmute_helper(int mute, const char *conference, const ch
+ 	struct confbridge_conference *conference;
+ 	struct confbridge_user *user;
+@@ -2403,25 +2495,33 @@
  		}
  	}
- 	if (participant) {
--		participant->features.mute = mute;
--		ast_test_suite_event_notify("CONF_MUTE", "Message: participant %s %s\r\nConference: %s\r\nChannel: %s", ast_channel_name(participant->chan), participant->features.mute ? "muted" : "unmuted", bridge->b_profile.name, ast_channel_name(participant->chan));
-+		const char *state, *verb;
-+
+ 	if (user) {
+-		/* Set user level mute request. */
+-		user->muted = mute ? 1 : 0;
+-
+-		conf_update_user_mute(user);
+-		ast_test_suite_event_notify("CONF_MUTE",
+-			"Message: participant %s %s\r\n"
+-			"Conference: %s\r\n"
+-			"Channel: %s",
+-			ast_channel_name(user->chan),
+-			mute ? "muted" : "unmuted",
+-			conference->b_profile.name,
+-			ast_channel_name(user->chan));
+-		if (mute) {
 +		switch (action) {
 +		case CONFBRIDGE_FEATURE_DEAFEN:
-+			participant->features.deaf = 1;
-+			state = "CONF_DEAF";
-+			verb = "deafened";
++			user->features.deaf = 1;
++			test_suite_feature_action_event_notify(conference, user, "CONF_DEAF", "deafened");
++			send_deafen_event(user->chan, conference);
 +			break;
 +		case CONFBRIDGE_FEATURE_UNDEAFEN:
-+			participant->features.deaf = 0;
-+			state = "CONF_DEAF";
-+			verb = "undeafened";
++			user->features.deaf = 0;
++			test_suite_feature_action_event_notify(conference, user, "CONF_DEAF", "undeafened");
++			send_undeafen_event(user->chan, conference);
 +			break;
 +		case CONFBRIDGE_FEATURE_MUTE:
-+			participant->features.mute = 1;
-+			state = "CONF_MUTE";
-+			verb = "muted";
++			user->muted = 1;
++			conf_update_user_mute(user);
++			test_suite_feature_action_event_notify(conference, user, "CONF_MUTE", "muted");
+ 			send_mute_event(user->chan, conference);
+-		} else {
 +			break;
 +		case CONFBRIDGE_FEATURE_UNMUTE:
 +		default:
-+			participant->features.mute = 0;
-+			state = "CONF_MUTE";
-+			verb = "unmuted";
++			user->muted = 0;
++			conf_update_user_mute(user);
++			test_suite_feature_action_event_notify(conference, user, "CONF_MUTE", "unmuted");
+ 			send_unmute_event(user->chan, conference);
 +			break;
-+		}
-+
-+		if (state != NULL && verb != NULL) {
-+			ast_test_suite_event_notify(state,
-+				"Message: participant %s %s\r\n"
-+				"Conference: %s\r\n"
-+				"Channel: %s",
-+				ast_channel_name(participant->chan),
-+				verb,
-+				bridge->b_profile.name,
-+				ast_channel_name(participant->chan));
-+		}
+ 		}
  	} else {
 -		res = -2;;
 +		res = -2;
  	}
- 	ao2_unlock(bridge);
- 	ao2_ref(bridge, -1);
-@@ -2154,9 +2245,10 @@ static int generic_mute_unmute_helper(int mute, const char *conference, const ch
+ 	ao2_unlock(conference);
+ 	ao2_ref(conference, -1);
+@@ -2429,9 +2529,10 @@
  	return res;
  }
  
@@ -217,7 +241,7 @@ index 90954b8..0455be4 100644
  
  	if (res == -1) {
  		ast_cli(a->fd, "No conference bridge named '%s' found!\n", a->argv[2]);
-@@ -2165,7 +2257,24 @@ static int cli_mute_unmute_helper(int mute, struct ast_cli_args *a)
+@@ -2440,7 +2541,24 @@
  		ast_cli(a->fd, "No channel named '%s' found in conference %s\n", a->argv[3], a->argv[2]);
  		return -1;
  	}
@@ -243,7 +267,7 @@ index 90954b8..0455be4 100644
  	return 0;
  }
  
-@@ -2187,7 +2296,7 @@ static char *handle_cli_confbridge_mute(struct ast_cli_entry *e, int cmd, struct
+@@ -2469,7 +2587,7 @@
  		return CLI_SHOWUSAGE;
  	}
  
@@ -252,7 +276,7 @@ index 90954b8..0455be4 100644
  
  	return CLI_SUCCESS;
  }
-@@ -2210,7 +2319,53 @@ static char *handle_cli_confbridge_unmute(struct ast_cli_entry *e, int cmd, stru
+@@ -2499,7 +2617,53 @@
  		return CLI_SHOWUSAGE;
  	}
  
@@ -307,7 +331,7 @@ index 90954b8..0455be4 100644
  
  	return CLI_SUCCESS;
  }
-@@ -2358,6 +2513,8 @@ static struct ast_cli_entry cli_confbridge[] = {
+@@ -2654,6 +2818,8 @@
  	AST_CLI_DEFINE(handle_cli_confbridge_kick, "Kick participants out of conference bridges."),
  	AST_CLI_DEFINE(handle_cli_confbridge_mute, "Mute a participant."),
  	AST_CLI_DEFINE(handle_cli_confbridge_unmute, "Unmute a participant."),
@@ -316,29 +340,29 @@ index 90954b8..0455be4 100644
  	AST_CLI_DEFINE(handle_cli_confbridge_lock, "Lock a conference."),
  	AST_CLI_DEFINE(handle_cli_confbridge_unlock, "Unlock a conference."),
  	AST_CLI_DEFINE(handle_cli_confbridge_start_record, "Start recording a conference"),
-@@ -2492,10 +2649,11 @@ static int action_confbridgelistrooms(struct mansession *s, const struct message
+@@ -2804,10 +2970,11 @@
  	return 0;
  }
  
 -static int action_mute_unmute_helper(struct mansession *s, const struct message *m, int mute)
 +static int action_feature_action_helper(struct mansession *s, const struct message *m, enum confbridge_feature_action action)
  {
- 	const char *conference = astman_get_header(m, "Conference");
- 	const char *channel = astman_get_header(m, "Channel");
+ 	const char *conference_name = astman_get_header(m, "Conference");
+ 	const char *channel_name = astman_get_header(m, "Channel");
 +	char *verb;
  	int res = 0;
  
- 	if (ast_strlen_zero(conference)) {
-@@ -2511,7 +2669,7 @@ static int action_mute_unmute_helper(struct mansession *s, const struct message
+ 	if (ast_strlen_zero(conference_name)) {
+@@ -2823,7 +2990,7 @@
  		return 0;
  	}
  
--	res = generic_mute_unmute_helper(mute, conference, channel);
-+	res = generic_feature_action_helper(action, conference, channel);
+-	res = generic_mute_unmute_helper(mute, conference_name, channel_name);
++	res = generic_feature_action_helper(action, conference_name, channel_name);
  
  	if (res == -1) {
  		astman_send_error(s, m, "No Conference by that name found.");
-@@ -2521,17 +2679,41 @@ static int action_mute_unmute_helper(struct mansession *s, const struct message
+@@ -2833,17 +3000,41 @@
  		return 0;
  	}
  
@@ -383,16 +407,16 @@ index 90954b8..0455be4 100644
  }
  
  static int action_lock_unlock_helper(struct mansession *s, const struct message *m, int lock)
-@@ -2818,6 +3000,8 @@ static int unload_module(void)
- 	res |= ast_manager_unregister("ConfbridgeListRooms");
- 	res |= ast_manager_unregister("ConfbridgeMute");
- 	res |= ast_manager_unregister("ConfbridgeUnmute");
-+	res |= ast_manager_unregister("ConfbridgeDeafen");
-+	res |= ast_manager_unregister("ConfbridgeUndeafen");
- 	res |= ast_manager_unregister("ConfbridgeKick");
- 	res |= ast_manager_unregister("ConfbridgeUnlock");
- 	res |= ast_manager_unregister("ConfbridgeLock");
-@@ -2860,6 +3044,8 @@ static int load_module(void)
+@@ -3196,6 +3387,8 @@
+ 	ast_manager_unregister("ConfbridgeListRooms");
+ 	ast_manager_unregister("ConfbridgeMute");
+ 	ast_manager_unregister("ConfbridgeUnmute");
++	ast_manager_unregister("ConfbridgeDeafen");
++	ast_manager_unregister("ConfbridgeUndeafen");
+ 	ast_manager_unregister("ConfbridgeKick");
+ 	ast_manager_unregister("ConfbridgeUnlock");
+ 	ast_manager_unregister("ConfbridgeLock");
+@@ -3265,6 +3458,8 @@
  	res |= ast_manager_register_xml("ConfbridgeListRooms", EVENT_FLAG_REPORTING, action_confbridgelistrooms);
  	res |= ast_manager_register_xml("ConfbridgeMute", EVENT_FLAG_CALL, action_confbridgemute);
  	res |= ast_manager_register_xml("ConfbridgeUnmute", EVENT_FLAG_CALL, action_confbridgeunmute);
@@ -401,11 +425,10 @@ index 90954b8..0455be4 100644
  	res |= ast_manager_register_xml("ConfbridgeKick", EVENT_FLAG_CALL, action_confbridgekick);
  	res |= ast_manager_register_xml("ConfbridgeUnlock", EVENT_FLAG_CALL, action_confbridgeunlock);
  	res |= ast_manager_register_xml("ConfbridgeLock", EVENT_FLAG_CALL, action_confbridgelock);
-diff --git a/apps/confbridge/conf_config_parser.c b/apps/confbridge/conf_config_parser.c
-index f4a9604..8a02de7 100644
---- a/apps/confbridge/conf_config_parser.c
-+++ b/apps/confbridge/conf_config_parser.c
-@@ -279,6 +279,10 @@ static int set_sound(const char *sound_name, const char *sound_file, struct brid
+diff -ru asterisk-12.1.0.orig/apps/confbridge/conf_config_parser.c asterisk-12.1.0/apps/confbridge/conf_config_parser.c
+--- asterisk-12.1.0.orig/apps/confbridge/conf_config_parser.c	2014-03-04 12:28:27.970906507 +0000
++++ asterisk-12.1.0/apps/confbridge/conf_config_parser.c	2014-03-04 12:25:54.998135400 +0000
+@@ -862,6 +862,10 @@
  		ast_string_field_set(sounds, muted, sound_file);
  	} else if (!strcasecmp(sound_name, "sound_unmuted")) {
  		ast_string_field_set(sounds, unmuted, sound_file);
@@ -416,7 +439,7 @@ index f4a9604..8a02de7 100644
  	} else if (!strcasecmp(sound_name, "sound_there_are")) {
  		ast_string_field_set(sounds, thereare, sound_file);
  	} else if (!strcasecmp(sound_name, "sound_other_in_party")) {
-@@ -418,6 +422,7 @@ static int add_action_to_menu_entry(struct conf_menu_entry *menu_entry, enum con
+@@ -1001,6 +1005,7 @@
  	switch (id) {
  	case MENU_ACTION_NOOP:
  	case MENU_ACTION_TOGGLE_MUTE:
@@ -424,7 +447,7 @@ index f4a9604..8a02de7 100644
  	case MENU_ACTION_INCREASE_LISTENING:
  	case MENU_ACTION_DECREASE_LISTENING:
  	case MENU_ACTION_INCREASE_TALKING:
-@@ -708,6 +713,9 @@ static char *handle_cli_confbridge_show_user_profile(struct ast_cli_entry *e, in
+@@ -1291,6 +1296,9 @@
  	ast_cli(a->fd,"Start Muted:             %s\n",
  		u_profile.flags & USER_OPT_STARTMUTED?
  		"true" : "false");
@@ -434,7 +457,7 @@ index f4a9604..8a02de7 100644
  	ast_cli(a->fd,"MOH When Empty:          %s\n",
  		u_profile.flags & USER_OPT_MUSICONHOLD ?
  		"enabled" : "disabled");
-@@ -896,6 +904,8 @@ static char *handle_cli_confbridge_show_bridge_profile(struct ast_cli_entry *e,
+@@ -1494,6 +1502,8 @@
  	ast_cli(a->fd,"sound_kicked:         %s\n", conf_get_sound(CONF_SOUND_KICKED, b_profile.sounds));
  	ast_cli(a->fd,"sound_muted:          %s\n", conf_get_sound(CONF_SOUND_MUTED, b_profile.sounds));
  	ast_cli(a->fd,"sound_unmuted:        %s\n", conf_get_sound(CONF_SOUND_UNMUTED, b_profile.sounds));
@@ -443,7 +466,7 @@ index f4a9604..8a02de7 100644
  	ast_cli(a->fd,"sound_there_are:      %s\n", conf_get_sound(CONF_SOUND_THERE_ARE, b_profile.sounds));
  	ast_cli(a->fd,"sound_other_in_party: %s\n", conf_get_sound(CONF_SOUND_OTHER_IN_PARTY, b_profile.sounds));
  	ast_cli(a->fd,"sound_place_into_conference: %s\n", conf_get_sound(CONF_SOUND_PLACE_IN_CONF, b_profile.sounds));
-@@ -1021,6 +1031,9 @@ static char *handle_cli_confbridge_show_menu(struct ast_cli_entry *e, int cmd, s
+@@ -1621,6 +1631,9 @@
  			case MENU_ACTION_TOGGLE_MUTE:
  				ast_cli(a->fd, "toggle_mute");
  				break;
@@ -453,7 +476,7 @@ index f4a9604..8a02de7 100644
  			case MENU_ACTION_NOOP:
  				ast_cli(a->fd, "no_op");
  				break;
-@@ -1268,6 +1281,7 @@ int conf_load_config(int reload)
+@@ -1917,6 +1930,7 @@
  	aco_option_register(&cfg_info, "admin", ACO_EXACT, user_types, "no", OPT_BOOLFLAG_T, 1, FLDSET(struct user_profile, flags), USER_OPT_ADMIN);
  	aco_option_register(&cfg_info, "marked", ACO_EXACT, user_types, "no", OPT_BOOLFLAG_T, 1, FLDSET(struct user_profile, flags), USER_OPT_MARKEDUSER);
  	aco_option_register(&cfg_info, "startmuted", ACO_EXACT, user_types, "no", OPT_BOOLFLAG_T, 1, FLDSET(struct user_profile, flags), USER_OPT_STARTMUTED);
@@ -461,11 +484,140 @@ index f4a9604..8a02de7 100644
  	aco_option_register(&cfg_info, "music_on_hold_when_empty", ACO_EXACT, user_types, "no", OPT_BOOLFLAG_T, 1, FLDSET(struct user_profile, flags), USER_OPT_MUSICONHOLD);
  	aco_option_register(&cfg_info, "quiet", ACO_EXACT, user_types, "no", OPT_BOOLFLAG_T, 1, FLDSET(struct user_profile, flags), USER_OPT_QUIET);
  	aco_option_register_custom(&cfg_info, "announce_user_count_all", ACO_EXACT, user_types, "no", announce_user_count_all_handler, 0);
-diff --git a/apps/confbridge/include/confbridge.h b/apps/confbridge/include/confbridge.h
-index d3ead35..3d773c5 100644
---- a/apps/confbridge/include/confbridge.h
-+++ b/apps/confbridge/include/confbridge.h
-@@ -57,6 +57,7 @@ enum user_profile_flags {
+diff -ru asterisk-12.1.0.orig/apps/confbridge/confbridge_manager.c asterisk-12.1.0/apps/confbridge/confbridge_manager.c
+--- asterisk-12.1.0.orig/apps/confbridge/confbridge_manager.c	2014-03-04 12:28:27.970906507 +0000
++++ asterisk-12.1.0/apps/confbridge/confbridge_manager.c	2014-03-04 12:25:54.998135400 +0000
+@@ -161,6 +161,38 @@
+ 			</see-also>
+ 		</managerEventInstance>
+ 	</managerEvent>
++	<managerEvent language="en_US" name="ConfbridgeDeafen">
++		<managerEventInstance class="EVENT_FLAG_CALL">
++			<synopsis>Raised when a Confbridge participant deafens.</synopsis>
++			<syntax>
++				<parameter name="Conference">
++					<para>The name of the Confbridge conference.</para>
++				</parameter>
++				<bridge_snapshot/>
++				<channel_snapshot/>
++			</syntax>
++			<see-also>
++				<ref type="managerEvent">ConfbridgeUndeafen</ref>
++				<ref type="application">ConfBridge</ref>
++			</see-also>
++		</managerEventInstance>
++	</managerEvent>
++	<managerEvent language="en_US" name="ConfbridgeUndeafen">
++		<managerEventInstance class="EVENT_FLAG_CALL">
++			<synopsis>Raised when a confbridge participant undeafens.</synopsis>
++			<syntax>
++				<parameter name="Conference">
++					<para>The name of the Confbridge conference.</para>
++				</parameter>
++				<bridge_snapshot/>
++				<channel_snapshot/>
++			</syntax>
++			<see-also>
++				<ref type="managerEvent">ConfbridgeMute</ref>
++				<ref type="application">ConfBridge</ref>
++			</see-also>
++		</managerEventInstance>
++	</managerEvent>
+ 	<managerEvent language="en_US" name="ConfbridgeTalking">
+ 		<managerEventInstance class="EVENT_FLAG_CALL">
+ 			<synopsis>Raised when a confbridge participant unmutes.</synopsis>
+@@ -271,6 +303,18 @@
+ 	confbridge_publish_manager_event(message, "ConfbridgeUnmute", NULL);
+ }
+ 
++static void confbridge_deafen_cb(void *data, struct stasis_subscription *sub,
++	struct stasis_message *message)
++{
++	confbridge_publish_manager_event(message, "ConfbridgeDeafen", NULL);
++}
++
++static void confbridge_undeafen_cb(void *data, struct stasis_subscription *sub,
++	struct stasis_message *message)
++{
++	confbridge_publish_manager_event(message, "ConfbridgeUndeafen", NULL);
++}
++
+ static void confbridge_talking_cb(void *data, struct stasis_subscription *sub,
+ 	struct stasis_message *message)
+ {
+@@ -297,6 +341,8 @@
+ STASIS_MESSAGE_TYPE_DEFN(confbridge_stop_record_type);
+ STASIS_MESSAGE_TYPE_DEFN(confbridge_mute_type);
+ STASIS_MESSAGE_TYPE_DEFN(confbridge_unmute_type);
++STASIS_MESSAGE_TYPE_DEFN(confbridge_deafen_type);
++STASIS_MESSAGE_TYPE_DEFN(confbridge_undeafen_type);
+ STASIS_MESSAGE_TYPE_DEFN(confbridge_talking_type);
+ 
+ void manager_confbridge_shutdown(void) {
+@@ -308,6 +354,8 @@
+ 	STASIS_MESSAGE_TYPE_CLEANUP(confbridge_stop_record_type);
+ 	STASIS_MESSAGE_TYPE_CLEANUP(confbridge_mute_type);
+ 	STASIS_MESSAGE_TYPE_CLEANUP(confbridge_unmute_type);
++	STASIS_MESSAGE_TYPE_CLEANUP(confbridge_deafen_type);
++	STASIS_MESSAGE_TYPE_CLEANUP(confbridge_undeafen_type);
+ 	STASIS_MESSAGE_TYPE_CLEANUP(confbridge_talking_type);
+ 
+ 	if (bridge_state_router) {
+@@ -331,6 +379,8 @@
+ 	STASIS_MESSAGE_TYPE_INIT(confbridge_stop_record_type);
+ 	STASIS_MESSAGE_TYPE_INIT(confbridge_mute_type);
+ 	STASIS_MESSAGE_TYPE_INIT(confbridge_unmute_type);
++	STASIS_MESSAGE_TYPE_INIT(confbridge_deafen_type);
++	STASIS_MESSAGE_TYPE_INIT(confbridge_undeafen_type);
+ 	STASIS_MESSAGE_TYPE_INIT(confbridge_talking_type);
+ 
+ 	bridge_state_router = stasis_message_router_create(
+@@ -397,6 +447,20 @@
+ 		return -1;
+ 	}
+ 	if (stasis_message_router_add(bridge_state_router,
++			confbridge_deafen_type(),
++			confbridge_deafen_cb,
++			NULL)) {
++		manager_confbridge_shutdown();
++		return -1;
++	}
++	if (stasis_message_router_add(bridge_state_router,
++			confbridge_undeafen_type(),
++			confbridge_undeafen_cb,
++			NULL)) {
++		manager_confbridge_shutdown();
++		return -1;
++	}
++	if (stasis_message_router_add(bridge_state_router,
+ 			confbridge_talking_type(),
+ 			confbridge_talking_cb,
+ 			NULL)) {
+@@ -467,6 +531,20 @@
+ 			NULL)) {
+ 		manager_confbridge_shutdown();
+ 		return -1;
++	}
++	if (stasis_message_router_add(channel_state_router,
++			confbridge_deafen_type(),
++			confbridge_deafen_cb,
++			NULL)) {
++		manager_confbridge_shutdown();
++		return -1;
++	}
++	if (stasis_message_router_add(channel_state_router,
++			confbridge_undeafen_type(),
++			confbridge_undeafen_cb,
++			NULL)) {
++		manager_confbridge_shutdown();
++		return -1;
+ 	}
+ 	if (stasis_message_router_add(channel_state_router,
+ 			confbridge_talking_type(),
+diff -ru asterisk-12.1.0.orig/apps/confbridge/include/confbridge.h asterisk-12.1.0/apps/confbridge/include/confbridge.h
+--- asterisk-12.1.0.orig/apps/confbridge/include/confbridge.h	2014-03-04 12:28:27.970906507 +0000
++++ asterisk-12.1.0/apps/confbridge/include/confbridge.h	2014-03-04 12:25:54.998135400 +0000
+@@ -58,6 +58,7 @@
  	USER_OPT_DTMF_PASS    =  (1 << 13), /*!< Sets if dtmf should be passed into the conference or not */
  	USER_OPT_ANNOUNCEUSERCOUNTALL = (1 << 14), /*!< Sets if the number of users should be announced to everyone. */
  	USER_OPT_JITTERBUFFER =  (1 << 15), /*!< Places a jitterbuffer on the user. */
@@ -473,7 +625,7 @@ index d3ead35..3d773c5 100644
  };
  
  enum bridge_profile_flags {
-@@ -68,6 +69,7 @@ enum bridge_profile_flags {
+@@ -70,6 +71,7 @@
  
  enum conf_menu_action_id {
  	MENU_ACTION_TOGGLE_MUTE = 1,
@@ -481,7 +633,7 @@ index d3ead35..3d773c5 100644
  	MENU_ACTION_PLAYBACK,
  	MENU_ACTION_PLAYBACK_AND_CONTINUE,
  	MENU_ACTION_INCREASE_LISTENING,
-@@ -142,6 +144,8 @@ enum conf_sounds {
+@@ -144,6 +146,8 @@
  	CONF_SOUND_KICKED,
  	CONF_SOUND_MUTED,
  	CONF_SOUND_UNMUTED,
@@ -490,7 +642,7 @@ index d3ead35..3d773c5 100644
  	CONF_SOUND_ONLY_ONE,
  	CONF_SOUND_THERE_ARE,
  	CONF_SOUND_OTHER_IN_PARTY,
-@@ -168,6 +172,8 @@ struct bridge_profile_sounds {
+@@ -170,6 +174,8 @@
  		AST_STRING_FIELD(kicked);
  		AST_STRING_FIELD(muted);
  		AST_STRING_FIELD(unmuted);
@@ -499,99 +651,30 @@ index d3ead35..3d773c5 100644
  		AST_STRING_FIELD(onlyone);
  		AST_STRING_FIELD(thereare);
  		AST_STRING_FIELD(otherinparty);
-diff --git a/bridges/bridge_multiplexed.c b/bridges/bridge_multiplexed.c
-index cd30266..190f790 100644
---- a/bridges/bridge_multiplexed.c
-+++ b/bridges/bridge_multiplexed.c
-@@ -386,7 +386,7 @@ static enum ast_bridge_write_result multiplexed_bridge_write(struct ast_bridge *
- 	}
+@@ -344,6 +350,8 @@
+ 	struct conf_menu_entry *menu_entry,
+ 	struct conf_menu *menu);
  
- 	if (other->state == AST_BRIDGE_CHANNEL_STATE_WAIT) {
--		ast_write(other->chan, frame);
-+		ast_bridge_handle_channel_write(bridge, other, frame);
- 	}
++struct stasis_message_type *confbridge_deafen_type(void);
++struct stasis_message_type *confbridge_undeafen_type(void);
  
- 	return AST_BRIDGE_WRITE_SUCCESS;
-diff --git a/bridges/bridge_simple.c b/bridges/bridge_simple.c
-index 69e4114..1623ce0 100644
---- a/bridges/bridge_simple.c
-+++ b/bridges/bridge_simple.c
-@@ -81,7 +81,7 @@ static enum ast_bridge_write_result simple_bridge_write(struct ast_bridge *bridg
- 
- 	/* Write the frame out if they are in the waiting state... don't worry about freeing it, the bridging core will take care of it */
- 	if (other->state == AST_BRIDGE_CHANNEL_STATE_WAIT) {
--		ast_write(other->chan, frame);
-+		ast_bridge_handle_channel_write(bridge, other, frame);
- 	}
- 
- 	return AST_BRIDGE_WRITE_SUCCESS;
-diff --git a/bridges/bridge_softmix.c b/bridges/bridge_softmix.c
-index 52e5551..5754e41 100644
---- a/bridges/bridge_softmix.c
-+++ b/bridges/bridge_softmix.c
-@@ -435,7 +435,7 @@ static void softmix_pass_dtmf(struct ast_bridge *bridge, struct ast_bridge_chann
- 		if (tmp == bridge_channel) {
- 			continue;
- 		}
--		ast_write(tmp->chan, frame);
-+		ast_bridge_handle_channel_write(bridge, tmp, frame);
- 	}
- }
- 
-@@ -447,7 +447,7 @@ static void softmix_pass_video_top_priority(struct ast_bridge *bridge, struct as
- 			continue;
- 		}
- 		if (ast_bridge_is_video_src(bridge, tmp->chan) == 1) {
--			ast_write(tmp->chan, frame);
-+			ast_bridge_handle_channel_write(bridge, tmp, frame);
- 			break;
- 		}
- 	}
-@@ -463,7 +463,7 @@ static void softmix_pass_video_all(struct ast_bridge *bridge, struct ast_bridge_
- 		if ((tmp->chan == bridge_channel->chan) && !echo) {
- 			continue;
- 		}
--		ast_write(tmp->chan, frame);
-+		ast_bridge_handle_channel_write(bridge, tmp, frame);
- 	}
- }
- 
-@@ -563,7 +563,7 @@ static enum ast_bridge_write_result softmix_bridge_write(struct ast_bridge *brid
- 
- 	/* If a frame is ready to be written out, do so */
- 	if (sc->have_frame) {
--		ast_write(bridge_channel->chan, &sc->write_frame);
-+		ast_bridge_handle_channel_write(bridge, bridge_channel, &sc->write_frame);
- 		sc->have_frame = 0;
- 	}
- 
-@@ -582,7 +582,7 @@ bridge_write_cleanup:
- 	 * the conference to the channel. */
- 	ast_mutex_lock(&sc->lock);
- 	if (sc->have_frame) {
--		ast_write(bridge_channel->chan, &sc->write_frame);
-+		ast_bridge_handle_channel_write(bridge, bridge_channel, &sc->write_frame);
- 		sc->have_frame = 0;
- 	}
- 	ast_mutex_unlock(&sc->lock);
-@@ -598,7 +598,7 @@ static int softmix_bridge_poke(struct ast_bridge *bridge, struct ast_bridge_chan
- 	ast_mutex_lock(&sc->lock);
- 
- 	if (sc->have_frame) {
--		ast_write(bridge_channel->chan, &sc->write_frame);
-+		ast_bridge_handle_channel_write(bridge, bridge_channel, &sc->write_frame);
- 		sc->have_frame = 0;
- 	}
- 
-@@ -850,16 +850,24 @@ static int softmix_bridge_thread(struct ast_bridge *bridge)
+ /*! \brief Looks to see if sound file is stored in bridge profile sounds, if not
+  *  default sound is provided.*/
+diff -ru asterisk-12.1.0.orig/bridges/bridge_softmix.c asterisk-12.1.0/bridges/bridge_softmix.c
+--- asterisk-12.1.0.orig/bridges/bridge_softmix.c	2014-03-04 12:28:27.970906507 +0000
++++ asterisk-12.1.0/bridges/bridge_softmix.c	2014-03-04 12:38:29.791808091 +0000
+@@ -923,16 +923,23 @@
  
  			ast_mutex_lock(&sc->lock);
  
 -			/* Make SLINEAR write frame from local buffer */
 -			if (sc->write_frame.subclass.format.id != cur_slin_id) {
 -				ast_format_set(&sc->write_frame.subclass.format, cur_slin_id, 0);
-+			if (bridge->features.deaf ||
-+			    (bridge_channel->features && bridge_channel->features->deaf)) {
+-			}
+-			sc->write_frame.datalen = softmix_datalen;
+-			sc->write_frame.samples = softmix_samples;
+-			memcpy(sc->final_buf, buf, softmix_datalen);
++			if (bridge_channel->features && bridge_channel->features->deaf) {
 +				/* For deaf channels post a null frame */
 +				sc->write_frame.frametype = AST_FRAME_NULL;
 +			} else {
@@ -603,25 +686,20 @@ index 52e5551..5754e41 100644
 +				sc->write_frame.datalen = softmix_datalen;
 +				sc->write_frame.samples = softmix_samples;
 +				memcpy(sc->final_buf, buf, softmix_datalen);
-+
+ 
+-			/* process the softmix channel's new write audio */
+-			softmix_process_write_audio(&trans_helper, ast_channel_rawwriteformat(bridge_channel->chan), sc);
 +				/* process the softmix channel's new write audio */
 +				softmix_process_write_audio(&trans_helper,
 +					ast_channel_rawwriteformat(bridge_channel->chan), sc);
- 			}
--			sc->write_frame.datalen = softmix_datalen;
--			sc->write_frame.samples = softmix_samples;
--			memcpy(sc->final_buf, buf, softmix_datalen);
--
--			/* process the softmix channel's new write audio */
--			softmix_process_write_audio(&trans_helper, ast_channel_rawwriteformat(bridge_channel->chan), sc);
++			}
  
- 			/* The frame is now ready for use... */
- 			sc->have_frame = 1;
-diff --git a/configs/confbridge.conf.sample b/configs/confbridge.conf.sample
-index 7484b28..3b0ce85 100644
---- a/configs/confbridge.conf.sample
-+++ b/configs/confbridge.conf.sample
-@@ -16,6 +16,7 @@ type=user
+ 			ast_mutex_unlock(&sc->lock);
+ 
+diff -ru asterisk-12.1.0.orig/configs/confbridge.conf.sample asterisk-12.1.0/configs/confbridge.conf.sample
+--- asterisk-12.1.0.orig/configs/confbridge.conf.sample	2014-03-04 12:28:27.970906507 +0000
++++ asterisk-12.1.0/configs/confbridge.conf.sample	2014-03-04 12:25:54.998135400 +0000
+@@ -20,6 +20,7 @@
  ;admin=yes     ; Sets if the user is an admin or not. Off by default.
  ;marked=yes    ; Sets if this is a marked user or not. Off by default.
  ;startmuted=yes; Sets if all users should start out muted. Off by default
@@ -629,7 +707,7 @@ index 7484b28..3b0ce85 100644
  ;music_on_hold_when_empty=yes  ; Sets whether MOH should be played when only
                                 ; one person is in the conference or when the
                                 ; the user is waiting on a marked user to enter
-@@ -210,6 +211,8 @@ type=bridge
+@@ -217,6 +218,8 @@
  ;sound_kicked ; The sound played to a user who has been kicked from the conference.
  ;sound_muted  ; The sound played when the mute option it toggled on.
  ;sound_unmuted  ; The sound played when the mute option it toggled off.
@@ -638,87 +716,50 @@ index 7484b28..3b0ce85 100644
  ;sound_only_person ; The sound played when the user is the only person in the conference.
  ;sound_only_one ; The sound played to a user when there is only one other
                  ; person is in the conference.
-@@ -264,6 +267,8 @@ type=bridge
+@@ -275,6 +278,8 @@
+                                        ; using the '&' character as a delimiter.
  ; toggle_mute      ; Toggle turning on and off mute.  Mute will make the user silent
                     ; to everyone else, but the user will still be able to listen in.
-                    ; continue to collect the dtmf sequence.
 +; toggle_deaf      ; Toggle turning on and off deaf.  Deaf will make the user to hear
 +                   ; only silence, but the user will still be able to talk.
+ 
  ; no_op ; This action does nothing (No Operation). Its only real purpose exists for
          ; being able to reserve a sequence in the config as a menu exit sequence.
- ; decrease_listening_volume ; Decreases the channel's listening volume.
-diff --git a/include/asterisk/bridging_features.h b/include/asterisk/bridging_features.h
-index e377ca6..5ce3d56 100644
---- a/include/asterisk/bridging_features.h
-+++ b/include/asterisk/bridging_features.h
-@@ -127,6 +127,8 @@ struct ast_bridge_features {
+diff -ru asterisk-12.1.0.orig/include/asterisk/bridge_features.h asterisk-12.1.0/include/asterisk/bridge_features.h
+--- asterisk-12.1.0.orig/include/asterisk/bridge_features.h	2014-03-04 12:28:27.970906507 +0000
++++ asterisk-12.1.0/include/asterisk/bridge_features.h	2014-03-04 12:25:54.998135400 +0000
+@@ -253,6 +253,8 @@
  	unsigned int usable:1;
- 	/*! Bit to indicate whether the channel/bridge is muted or not */
+ 	/*! TRUE if the channel/bridge is muted. */
  	unsigned int mute:1;
-+	/*! Bit to indicate whether the channel/bridge is deaf or not */
++	/*! TRUE if the channel/bridge is deaf. */
 +	unsigned int deaf:1;
- 	/*! Bit to indicate whether DTMF should be passed into the bridge tech or not.  */
+ 	/*! TRUE if DTMF should be passed into the bridge tech.  */
  	unsigned int dtmf_passthrough:1;
+ };
+diff -ru asterisk-12.1.0.orig/main/bridge_channel.c asterisk-12.1.0/main/bridge_channel.c
+--- asterisk-12.1.0.orig/main/bridge_channel.c	2014-03-04 12:28:27.974239900 +0000
++++ asterisk-12.1.0/main/bridge_channel.c	2014-03-04 12:40:23.980543471 +0000
+@@ -549,7 +549,21 @@
+ 		return 0;
+ 	}
  
-diff --git a/include/asterisk/bridging_technology.h b/include/asterisk/bridging_technology.h
-index 3d2e870..1ecb4c1 100644
---- a/include/asterisk/bridging_technology.h
-+++ b/include/asterisk/bridging_technology.h
-@@ -143,6 +143,21 @@ int ast_bridge_technology_unregister(struct ast_bridge_technology *technology);
-  */
- void ast_bridge_handle_trip(struct ast_bridge *bridge, struct ast_bridge_channel *bridge_channel, struct ast_channel *chan, int outfd);
- 
-+/*! \brief Used by bridging technologies to hand off a frame to be written to a bridge_channel.
-+ *
-+ * \param bridge The bridge that the channel is part of.
-+ * \param bridge_channel The bridge channel to which the frame is written to.
-+ * \param frame The frame to write.
-+ *
-+ * \retval 0 on success
-+ * \retval -1 on failure
-+ *
-+ * \note This function is essentially a wrapper for ast_write(). The bridging core has some features associated with it
-+ * that requires it to have control over how frames are written into a channel.  For these features to be available, the bridging
-+ * technology must use this wrapper function over ast_write when pushing a frame out a channel.
-+ */
-+int ast_bridge_handle_channel_write(struct ast_bridge *bridge, struct ast_bridge_channel *bridge_channel, struct ast_frame *frame);
-+
- /*! \brief Lets the bridging indicate when a bridge channel has stopped or started talking.
-  *
-  * \note All DSP functionality on the bridge has been pushed down to the lowest possible
-diff --git a/main/bridging.c b/main/bridging.c
-index 465d033..4f67e90 100644
---- a/main/bridging.c
-+++ b/main/bridging.c
-@@ -337,6 +337,28 @@ void ast_bridge_handle_trip(struct ast_bridge *bridge, struct ast_bridge_channel
- 	return;
- }
- 
-+int ast_bridge_handle_channel_write(struct ast_bridge *bridge, struct ast_bridge_channel *bridge_channel, struct ast_frame *frame)
-+{
-+	if (frame->frametype == AST_FRAME_VOICE &&
-+	    (bridge->features.deaf ||
-+	     (bridge_channel->features && bridge_channel->features->deaf))) {
-+		short buf[frame->samples];
+-	dup = ast_frdup(fr);
++	if (fr->frametype == AST_FRAME_VOICE &&
++	    (bridge_channel->features && bridge_channel->features->deaf)) {
++		short buf[fr->samples];
 +		struct ast_frame sframe = {
 +			.frametype = AST_FRAME_VOICE,
 +			.data.ptr = buf,
-+			.samples = frame->samples,
++			.samples = fr->samples,
 +			.datalen = sizeof(buf),
 +		};
 +		ast_format_set(&sframe.subclass.format, AST_FORMAT_SLINEAR, 0);
 +		memset(buf, 0, sizeof(buf));
-+
-+		return ast_write(bridge_channel->chan, &sframe);
++		dup = ast_frdup(&sframe);
++	} else {
++		dup = ast_frdup(fr);
 +	}
-+
-+	return ast_write(bridge_channel->chan, frame);
-+}
-+
-+
- /*! \brief Generic thread loop, TODO: Rethink this/improve it */
- static int generic_thread_loop(struct ast_bridge *bridge)
- {
--- 
-1.7.12
-
+ 	if (!dup) {
+ 		return -1;
+ 	}
