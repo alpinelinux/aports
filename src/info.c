@@ -284,7 +284,7 @@ static void info_print_triggers(struct apk_database *db, struct apk_package *pkg
 
 static void info_print_replaces(struct apk_database *db, struct apk_package *pkg)
 {
-	info_print_dep_array(db, pkg, pkg->provides, "replaces");
+	info_print_dep_array(db, pkg, pkg->ipkg->replaces, "replaces");
 }
 
 static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
