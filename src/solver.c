@@ -127,7 +127,7 @@ static void queue_unresolved(struct apk_solver_state *ss, struct apk_name *name)
 		return;
 
 	want = (name->ss.requirers > 0) || (name->ss.has_iif);
-	dbg_printf("queue_unresolved: %s, want=%d\n", name->name, want);
+	dbg_printf("queue_unresolved: %s, want=%d (requirers=%d, has_iif=%d)\n", name->name, want, name->ss.requirers, name->ss.has_iif);
 	if (want && !list_hashed(&name->ss.unresolved_list))
 		list_add(&name->ss.unresolved_list, &ss->unresolved_head);
 	else if (!want && list_hashed(&name->ss.unresolved_list))
@@ -268,7 +268,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 	unsigned int solver_flags_inherit = ss->solver_flags_inherit;
 	int is_provided;
 
-	dbg_printf("apply_constraint: %s%s%s" BLOB_FMT "\n",
+	dbg_printf("    apply_constraint: %s%s%s" BLOB_FMT "\n",
 		dep->conflict ? "!" : "",
 		name->name,
 		apk_version_op_string(dep->result_mask),
@@ -282,7 +282,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 		struct apk_package *pkg0 = p0->pkg;
 
 		is_provided = apk_dep_is_provided(dep, p0);
-		dbg_printf("apply_constraint: provider: %s-" BLOB_FMT ": %d\n",
+		dbg_printf("    apply_constraint: provider: %s-" BLOB_FMT ": %d\n",
 			pkg0->name->name, BLOB_PRINTF(*p0->version), is_provided);
 
 		pkg0->ss.conflicts += !is_provided;
@@ -377,15 +377,16 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		if (reevaluate_iif) {
 			pkg->ss.iif_triggered = 1;
 			foreach_array_item(dep, pkg->install_if) {
-				if (!dependency_satisfiable(ss, dep)) {
+				if (!(dep->name->ss.locked &&
+				      apk_dep_is_provided(dep, &dep->name->ss.chosen))) {
 					pkg->ss.iif_triggered = 0;
 					break;
 				}
 			}
-			has_iif |= pkg->ss.iif_triggered;
 		}
+		has_iif |= pkg->ss.iif_triggered;
 
-		if (name->ss.requirers == 0 && !pkg->ss.iif_triggered)
+		if (name->ss.requirers == 0)
 			continue;
 
 		/* merge common dependencies */
@@ -602,6 +603,7 @@ static void assign_name(struct apk_solver_state *ss, struct apk_name *name, stru
 		disqualify_package(ss, p0->pkg, "conflicting provides");
 	}
 	reevaluate_reverse_deps(ss, name);
+	reevaluate_reverse_installif(ss, name);
 }
 
 static void select_package(struct apk_solver_state *ss, struct apk_name *name)
@@ -610,7 +612,7 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_package *pkg = NULL;
 	struct apk_dependency *d;
 
-	dbg_printf("select_package: %s\n", name->name);
+	dbg_printf("select_package: %s (requirers=%d, iif=%d)\n", name->name, name->ss.requirers, name->ss.has_iif);
 
 	if (name->ss.requirers || name->ss.has_iif) {
 		foreach_array_item(p, name->providers) {
@@ -756,6 +758,8 @@ static void cset_gen_name_change(struct apk_solver_state *ss, struct apk_name *n
 
 	pkg->ss.in_changeset = 1;
 	pkg->name->ss.in_changeset = 1;
+	foreach_array_item(d, pkg->provides)
+		d->name->ss.in_changeset = 1;
 
 	opkg = pkg->name->ss.installed_pkg;
 	if (opkg) {
@@ -881,16 +885,19 @@ restart:
 	list_init(&ss->dirty_head);
 	list_init(&ss->unresolved_head);
 
-	dbg_printf("applying world\n");
+	dbg_printf("discovering world\n");
 	ss->prefer_pinning = 1;
 	ss->solver_flags_inherit = solver_flags;
 	foreach_array_item(d, world) {
-		if (d->broken)
-			continue;
-		name = d->name;
-		discover_name(ss, d->name);
-		ss->pinning_inherit = BIT(d->repository_tag);
-		apply_constraint(ss, NULL, d);
+		if (!d->broken)
+			discover_name(ss, d->name);
+	}
+	dbg_printf("applying world\n");
+	foreach_array_item(d, world) {
+		if (!d->broken) {
+			ss->pinning_inherit = BIT(d->repository_tag);
+			apply_constraint(ss, NULL, d);
+		}
 	}
 	ss->solver_flags_inherit = 0;
 	ss->pinning_inherit = 0;
