@@ -325,9 +325,8 @@ struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name)
 		ppaths = NULL;
 	} else if (apk_blob_rsplit(name, '/', &bparent, NULL)) {
 		dir->parent = apk_db_dir_get(db, bparent);
-		dir->protected = dir->parent->protected;
-		dir->has_protected_children = dir->protected;
-		dir->symlinks_only = dir->parent->symlinks_only;
+		dir->protect_mode = dir->parent->protect_mode;
+		dir->has_protected_children = (dir->protect_mode != APK_PROTECT_NONE);
 		ppaths = dir->parent->protected_paths;
 	} else {
 		dir->parent = apk_db_dir_get(db, APK_BLOB_NULL);
@@ -350,17 +349,15 @@ struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name)
 
 			*apk_protected_path_array_add(&dir->protected_paths) = (struct apk_protected_path) {
 				.relative_pattern = slash + 1,
-				.protected = ppath->protected,
-				.symlinks_only = ppath->symlinks_only,
+				.protect_mode = ppath->protect_mode,
 			};
 		} else {
 			if (fnmatch(ppath->relative_pattern, relative_name, FNM_PATHNAME) != 0)
 				continue;
 
-			dir->protected = ppath->protected;
-			dir->symlinks_only = ppath->symlinks_only;
+			dir->protect_mode = ppath->protect_mode;
 		}
-		dir->has_protected_children |= ppath->protected;
+		dir->has_protected_children |= (ppath->protect_mode != APK_PROTECT_NONE);
 	}
 
 	return dir;
@@ -1239,7 +1236,7 @@ int apk_db_index_write(struct apk_database *db, struct apk_ostream *os)
 static int add_protected_path(void *ctx, apk_blob_t blob)
 {
 	struct apk_database *db = (struct apk_database *) ctx;
-	int protected = 0, symlinks_only = 0;
+	int protect_mode = APK_PROTECT_NONE;
 
 	/* skip empty lines and comments */
 	if (blob.len == 0)
@@ -1249,25 +1246,25 @@ static int add_protected_path(void *ctx, apk_blob_t blob)
 	case '#':
 		return 0;
 	case '-':
-		blob.ptr++;
-		blob.len--;
-		break;
-	case '@':
-		protected = 1;
-		symlinks_only = 1;
-		blob.ptr++;
-		blob.len--;
+		protect_mode = APK_PROTECT_NONE;
 		break;
 	case '+':
-		protected = 1;
-		blob.ptr++;
-		blob.len--;
+		protect_mode = APK_PROTECT_CHANGED;
+		break;
+	case '@':
+		protect_mode = APK_PROTECT_SYMLINKS_ONLY;
+		break;
+	case '!':
+		protect_mode = APK_PROTECT_ALL;
 		break;
 	default:
-		protected = 1;
-		break;
+		protect_mode = APK_PROTECT_CHANGED;
+		goto no_mode_char;
 	}
+	blob.ptr++;
+	blob.len--;
 
+no_mode_char:
 	/* skip leading and trailing path separators */
 	while (blob.len && blob.ptr[0] == '/')
 		blob.ptr++, blob.len--;
@@ -1276,8 +1273,7 @@ static int add_protected_path(void *ctx, apk_blob_t blob)
 
 	*apk_protected_path_array_add(&db->protected_paths) = (struct apk_protected_path) {
 		.relative_pattern = apk_blob_cstr(blob),
-		.protected = protected,
-		.symlinks_only = symlinks_only,
+		.protect_mode = protect_mode,
 	};
 
 	return 0;
@@ -1559,7 +1555,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			apk_blob_to_file(db->root_fd, apk_arch_file, *db->arch, APK_BTF_ADD_EOL);
 	}
 
-	blob = APK_BLOB_STR("+etc\n" "@etc/init.d\n");
+	blob = APK_BLOB_STR("+etc\n" "@etc/init.d\n" "!etc/apk\n");
 	apk_blob_for_each_segment(blob, "\n", add_protected_path, db);
 
 	apk_dir_foreach_file(openat(db->root_fd, "etc/apk/protected_paths.d", O_RDONLY | O_CLOEXEC),
@@ -2417,7 +2413,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 				.filename = APK_BLOB_PTR_LEN(file->name, file->namelen),
 			};
 			hash = apk_blob_hash_seed(key.filename, diri->dir->hash);
-			if ((!diri->dir->protected) ||
+			if ((diri->dir->protect_mode == APK_PROTECT_NONE) ||
 			    (apk_flags & APK_PURGE) ||
 			    (file->csum.type != APK_CHECKSUM_NONE &&
 			     apk_file_get_info(db->root_fd, name, APK_FI_NOFOLLOW | file->csum.type, &fi) == 0 &&
@@ -2474,7 +2470,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 			/* We want to compare checksums only if one exists
 			 * in db, and the file is in a protected path */
 			cstype = APK_CHECKSUM_NONE;
-			if (ofile != NULL && diri->dir->protected)
+			if (ofile != NULL && diri->dir->protect_mode != APK_PROTECT_NONE)
 				cstype = ofile->csum.type;
 			cstype |= APK_FI_NOFOLLOW;
 
@@ -2483,7 +2479,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 				/* File was from overlay, delete the
 				 * packages version */
 				unlinkat(db->root_fd, tmpname, 0);
-			} else if ((diri->dir->protected) &&
+			} else if ((diri->dir->protect_mode != APK_PROTECT_NONE) &&
 				   (r == 0) &&
 				   (ofile == NULL ||
 				    ofile->csum.type == APK_CHECKSUM_NONE ||

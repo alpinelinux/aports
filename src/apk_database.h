@@ -38,10 +38,16 @@ struct apk_db_file {
 	char name[];
 };
 
+enum apk_protect_mode {
+	APK_PROTECT_NONE = 0,
+	APK_PROTECT_CHANGED,
+	APK_PROTECT_SYMLINKS_ONLY,
+	APK_PROTECT_ALL,
+};
+
 struct apk_protected_path {
 	char *relative_pattern;
-	unsigned protected : 1;
-	unsigned symlinks_only : 1;
+	unsigned protect_mode : 4;
 };
 APK_ARRAY(apk_protected_path_array, struct apk_protected_path);
 
@@ -58,8 +64,7 @@ struct apk_db_dir {
 	unsigned short refs;
 	unsigned short namelen;
 
-	unsigned protected : 1;
-	unsigned symlinks_only : 1;
+	unsigned protect_mode : 4;
 	unsigned has_protected_children : 1;
 	unsigned modified : 1;
 	unsigned recalc_mode : 1;

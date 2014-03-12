@@ -167,7 +167,7 @@ static int audit_directory_tree_item(void *ctx, int dirfd, const char *name)
 			child = apk_db_dir_get(db, bfull);
 			if (!child->has_protected_children)
 				recurse = FALSE;
-			if (!child->protected)
+			if (child->protect_mode == APK_PROTECT_NONE)
 				goto recurse_check;
 		} else {
 			child = apk_db_dir_query(db, bfull);
@@ -196,7 +196,7 @@ recurse_check:
 	} else {
 		struct apk_db_file *dbf;
 		struct apk_protected_path *ppath;
-		int protected = dir->protected, symlinks_only = dir->symlinks_only;
+		int protect_mode = dir->protect_mode;
 
 		/* inherit file's protection mask */
 		foreach_array_item(ppath, dir->protected_paths) {
@@ -204,23 +204,32 @@ recurse_check:
 			if (slash == NULL) {
 				if (fnmatch(ppath->relative_pattern, name, FNM_PATHNAME) != 0)
 					continue;
-				protected = ppath->protected;
-				symlinks_only = ppath->symlinks_only;
+				protect_mode = ppath->protect_mode;
 			}
 		}
 
 		if (actx->mode == MODE_BACKUP) {
-			if (!protected)
+			switch (protect_mode) {
+			case APK_PROTECT_NONE:
 				goto done;
-			if (symlinks_only && !S_ISLNK(fi.mode))
-				goto done;
+			case APK_PROTECT_CHANGED:
+				break;
+			case APK_PROTECT_SYMLINKS_ONLY:
+				if (!S_ISLNK(fi.mode))
+					goto done;
+				break;
+			case APK_PROTECT_ALL:
+				reason = 'A';
+				break;
+			}
 		} else {
-			if (protected)
+			if (protect_mode != APK_PROTECT_NONE)
 				goto done;
 		}
 
 		dbf = apk_db_file_query(db, bdir, bent);
-		reason = audit_file(actx, db, dbf, dirfd, name);
+		if (reason == 0)
+			reason = audit_file(actx, db, dbf, dirfd, name);
 		if (reason < 0)
 			goto done;
 		if (reason == 'A' && actx->mode == MODE_SYSTEM)
