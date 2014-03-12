@@ -21,6 +21,10 @@
 #include "apk_database.h"
 #include "apk_print.h"
 
+/* Use (unused) highest bit of mode_t as seen flag of our internal
+ * database file entries */
+#define S_SEENFLAG	0x80000000
+
 enum {
 	MODE_BACKUP = 0,
 	MODE_SYSTEM
@@ -78,6 +82,8 @@ static int audit_file(struct audit_ctx *actx,
 	if (dbf == NULL)
 		return 'A';
 
+	dbf->mode |= S_SEENFLAG;
+
 	if (apk_file_get_info(dirfd, name, APK_FI_NOFOLLOW | dbf->csum.type, &fi) != 0)
 		return -EPERM;
 
@@ -104,6 +110,8 @@ static int audit_directory(struct audit_ctx *actx,
 			   struct apk_db_dir *dbd,
 			   struct apk_file_info *fi)
 {
+	if (dbd != NULL) dbd->mode |= S_SEENFLAG;
+
 	if (dbd == NULL || dbd->refs == 1)
 		return actx->recursive ? 'd' : 'D';
 
@@ -245,41 +253,76 @@ done:
 	return reason < 0 ? reason : 0;
 }
 
+static int audit_directory_tree(struct audit_tree_ctx *atctx, int dirfd)
+{
+	apk_blob_t path;
+	int r;
+
+	path = APK_BLOB_PTR_LEN(atctx->path, atctx->pathlen);
+	if (path.len && path.ptr[path.len-1] == '/')
+		path.len--;
+
+	atctx->dir = apk_db_dir_get(atctx->db, path);
+	atctx->dir->mode |= S_SEENFLAG;
+	r = apk_dir_foreach_file(dirfd, audit_directory_tree_item, atctx);
+	apk_db_dir_unref(atctx->db, atctx->dir, FALSE);
+
+	return r;
+}
+
+static int audit_missing_files(apk_hash_item item, void *pctx)
+{
+	struct audit_ctx *actx = pctx;
+	struct apk_db_file *file = item;
+	struct apk_db_dir *dir;
+	char path[PATH_MAX];
+	int len;
+
+	if (file->mode & S_SEENFLAG)
+		return 0;
+
+	dir = file->diri->dir;
+	if (dir->mode & S_SEENFLAG) {
+		len = snprintf(path, sizeof(path), DIR_FILE_FMT, DIR_FILE_PRINTF(dir, file));
+		report_audit(actx, 'X', APK_BLOB_PTR_LEN(path, len), file->diri->pkg);
+	}
+
+	return 0;
+}
+
 static int audit_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct audit_tree_ctx atctx;
+	struct audit_ctx *actx = (struct audit_ctx *) ctx;
 	char **parg, *arg;
 	int r = 0;
 
 	atctx.db = db;
-	atctx.actx = (struct audit_ctx *) ctx;
+	atctx.actx = actx;
 	atctx.pathlen = 0;
 	atctx.path[0] = 0;
 
 	if (args->num == 0) {
-		atctx.dir = apk_db_dir_get(db, APK_BLOB_PTR_LEN(atctx.path, atctx.pathlen));
-		r = apk_dir_foreach_file(dup(db->root_fd), audit_directory_tree_item, &atctx);
-		apk_db_dir_unref(db, atctx.dir, FALSE);
-		return r;
-	}
+		r |= audit_directory_tree(&atctx, dup(db->root_fd));
+	} else {
+		foreach_array_item(parg, args) {
+			arg = *parg;
+			if (arg[0] != '/') {
+				apk_warning("%s: relative path skipped.\n", arg);
+				continue;
+			}
+			arg++;
+			atctx.pathlen = strlen(arg);
+			memcpy(atctx.path, arg, atctx.pathlen);
+			if (atctx.path[atctx.pathlen-1] != '/')
+				atctx.path[atctx.pathlen++] = '/';
 
-	foreach_array_item(parg, args) {
-		arg = *parg;
-		if (arg[0] != '/') {
-			apk_warning("%s: relative path skipped.\n", arg);
-			continue;
+			r |= audit_directory_tree(&atctx, openat(db->root_fd, arg, O_RDONLY|O_CLOEXEC));
 		}
-		arg++;
-		atctx.pathlen = strlen(arg);
-		memcpy(atctx.path, arg, atctx.pathlen);
-		if (atctx.path[atctx.pathlen-1] != '/')
-			atctx.path[atctx.pathlen++] = '/';
-
-		atctx.dir = apk_db_dir_get(db, APK_BLOB_PTR_LEN(atctx.path, atctx.pathlen));
-		r |= apk_dir_foreach_file(openat(db->root_fd, arg, O_RDONLY|O_CLOEXEC),
-					  audit_directory_tree_item, &atctx);
-		apk_db_dir_unref(db, atctx.dir, FALSE);
 	}
+	if (actx->mode == MODE_SYSTEM)
+		apk_hash_foreach(&db->installed.files, audit_missing_files, ctx);
+
 	return r;
 }
 
