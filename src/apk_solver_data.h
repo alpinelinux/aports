@@ -38,6 +38,7 @@ struct apk_solver_name_state {
 	unsigned reevaluate_deps : 1;
 	unsigned reevaluate_iif : 1;
 	unsigned has_iif : 1;
+	unsigned no_iif : 1;
 	unsigned has_options : 1;
 	unsigned reverse_deps_done : 1;
 };
@@ -58,6 +59,7 @@ struct apk_solver_package_state {
 	unsigned dependencies_merged : 1;
 	unsigned in_changeset : 1;
 	unsigned iif_triggered : 1;
+	unsigned iif_failed : 1;
 	unsigned error : 1;
 };
 

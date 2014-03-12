@@ -155,6 +155,8 @@ static void reevaluate_reverse_installif(struct apk_solver_state *ss, struct apk
 		name0 = *pname0;
 		if (!name0->ss.seen)
 			continue;
+		if (name0->ss.no_iif)
+			continue;
 		name0->ss.reevaluate_iif = 1;
 		queue_dirty(ss, name0);
 	}
@@ -202,12 +204,16 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 		return;
 
 	name->ss.seen = 1;
+	name->ss.no_iif = 1;
 	foreach_array_item(p, name->providers) {
 		struct apk_package *pkg = p->pkg;
 		if (pkg->ss.seen)
 			continue;
 
 		pkg->ss.seen = 1;
+		pkg->ss.iif_failed = (pkg->install_if->num == 0);
+		name->ss.no_iif &= pkg->ss.iif_failed;
+
 		pkg->ss.pinning_allowed = APK_DEFAULT_PINNING_MASK;
 		pkg->ss.pinning_preferred = APK_DEFAULT_PINNING_MASK;
 		pkg->ss.pkg_available =
@@ -346,7 +352,7 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	struct apk_package *first_candidate = NULL, *pkg;
 	struct apk_provider *p;
 	int reevaluate_deps, reevaluate_iif;
-	int num_options = 0, num_tag_not_ok = 0, has_iif = 0;
+	int num_options = 0, num_tag_not_ok = 0, has_iif = 0, no_iif = 1;
 
 	dbg_printf("reconsider_name: %s\n", name->name);
 
@@ -374,17 +380,26 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		if (!pkg->ss.pkg_selectable)
 			continue;
 
-		if (reevaluate_iif) {
+		if (reevaluate_iif &&
+		    (pkg->ss.iif_triggered == 0 &&
+		     pkg->ss.iif_failed == 0)) {
 			pkg->ss.iif_triggered = 1;
+			pkg->ss.iif_failed = 0;
 			foreach_array_item(dep, pkg->install_if) {
-				if (!(dep->name->ss.locked &&
-				      apk_dep_is_provided(dep, &dep->name->ss.chosen))) {
+				if (!dep->name->ss.locked) {
 					pkg->ss.iif_triggered = 0;
+					pkg->ss.iif_failed = 0;
+					break;
+				}
+				if (!apk_dep_is_provided(dep, &dep->name->ss.chosen)) {
+					pkg->ss.iif_triggered = 0;
+					pkg->ss.iif_failed = 1;
 					break;
 				}
 			}
 		}
 		has_iif |= pkg->ss.iif_triggered;
+		no_iif  &= pkg->ss.iif_failed;
 
 		if (name->ss.requirers == 0)
 			continue;
@@ -409,6 +424,7 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 	}
 	name->ss.has_options = (num_options > 1 || num_tag_not_ok > 0);
 	name->ss.has_iif = has_iif;
+	name->ss.no_iif = no_iif;
 	queue_unresolved(ss, name);
 
 	if (first_candidate != NULL) {
