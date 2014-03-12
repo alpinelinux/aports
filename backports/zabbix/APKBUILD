@@ -1,0 +1,225 @@
+# Contributor: Jeff Bilyk <jbilyk at gmail>
+# Contributor: Leonardo Arena <rnalrd@alpinelinux.org>
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+pkgname=zabbix
+pkgver=2.2.2
+pkgrel=0
+pkgdesc="Enterprise-class open source distributed monitoring"
+url="http://www.zabbix.com"
+arch="all"
+license="GPL"
+depends="fping"
+makedepends="postgresql-dev curl-dev libiconv-dev net-snmp-dev
+	sqlite-dev mysql-dev curl-dev
+	autoconf automake"
+install="$pkgname.pre-install"
+pkgusers="zabbix"
+pkggroups="zabbix"
+subpackages="$pkgname-doc $pkgname-agent $pkgname-pgsql $pkgname-mysql
+	$pkgname-webif $pkgname-sqlite $pkgname-utils $pkgname-setup"
+source="http://downloads.sourceforge.net/$pkgname/$pkgname-$pkgver.tar.gz
+	zabbix_server.conf
+	zabbix_trapper.conf
+	zabbix_proxy.conf
+	zabbix_agentd.conf
+	zabbix-getloadavg.patch
+	automake.patch
+	musl-fix-includes.patch
+	zabbix-server.initd
+	zabbix-server.confd
+	zabbix-agentd.initd
+	zabbix-proxy.initd
+	002-fix-res_send-on-uclibc.patch
+	"
+
+_builddir="$srcdir"/$pkgname-$pkgver
+
+prepare() {
+	cd "$_builddir"
+	update_config_sub || return 1
+	for i in $source; do
+		case $i in
+		*uclibc*.patch)
+			if [ "$ALPINE_LIBC" != "eglibc" ]; then
+				msg "Applying $i"
+				patch -p1 -i "$srcdir"/$i || return 1
+			fi
+			;;
+		*eglibc*.patch)
+			if [ "$ALPINE_LIBC" = "eglibc" ]; then
+				msg "Applying $i"
+				patch -p1 -i "$srcdir"/$i || return 1
+			fi
+			;;
+		*.patch)
+			msg "Applying $i"
+			patch -p1 -i "$srcdir"/$i || return 1
+			;;
+		esac
+	done
+	aclocal -I m4 && autoconf && autoheader \
+		&& automake --add-missing || return 1
+}
+
+build() {
+	# set default configure flags
+	_configure="--prefix=/usr \i
+			--sysconfdir=/etc/zabbix \
+			--mandir=/usr/share/man \
+			--infodir=/usr/share/info \
+			--enable-server \
+			--enable-agent \
+			--enable-proxy \
+			--enable-ipv6 \
+			--with-net-snmp \
+			--with-libcurl
+			"
+        # we run build for each db type
+        # make sure prepare is same for each db
+	for db in postgresql mysql sqlite3; do
+		cd "$srcdir"
+		msg "Building for $db"
+		cp -r "$pkgname-$pkgver" "$pkgname-$pkgver-$db"
+		cd "$_builddir-$db"
+		./configure \
+			--build=$CBUILD \
+			--host=$CHOST \
+			--with-$db \
+			$_configure \
+			|| return 1
+		make || return 1
+	done
+}
+
+
+package() {
+        # doing manual install
+	for i in agentd proxy server; do
+		install -D -m755 "$_builddir"/man/zabbix_$i.man \
+			"$pkgdir"/usr/share/man/man8/zabbix_$i.8
+	done
+	for i in get sender; do
+		install -D -m755 "$_builddir"/man/zabbix_$i.man \
+			"$pkgdir"/usr/share/man/man1/zabbix_$i.1
+	done
+	install -d -m0750 -o zabbix -g zabbix \
+                "$pkgdir"/var/run/zabbix "$pkgdir"/var/log/zabbix
+        install -D -m0644 "$srcdir"/zabbix_server.conf \
+		"$pkgdir"/etc/zabbix/zabbix_server.conf
+	install -D -m0644 "$srcdir"/zabbix_trapper.conf \
+		"$pkgdir"/etc/zabbix/zabbix_trapper.conf
+        for i in server proxy; do
+                install -D -m0755 "$srcdir"/zabbix-$i.initd \
+                        "$pkgdir"/etc/init.d/zabbix-$i || return 1
+        done
+	install -D -m0644 "$srcdir"/zabbix-server.confd \
+		"$pkgdir"/etc/conf.d/zabbix-server || return 1
+}
+
+setup() {
+	arch="noarch"
+	pkgdesc="Zabbix images and sql files"
+	depends=
+	mkdir -p "$subpkgdir"/usr/share/zabbix/ || return 1
+	mv "$_builddir"/database "$subpkgdir"/usr/share/zabbix/
+}
+
+_do_db() {
+        pkgdesc="Zabbix server with $1 database support"
+        depends=$pkgname
+	local i=
+	mkdir -p "$subpkgdir"/usr/sbin
+	mv "$_builddir-$1"/src/zabbix_server/zabbix_server \
+		"$subpkgdir"/usr/sbin/ || return 1
+	mv "$_builddir-$1"/src/zabbix_proxy/zabbix_proxy \
+		"$subpkgdir"/usr/sbin/ || return 1
+	cd "$_builddir"
+	for i in upgrades/dbpatches/*/$1; do
+		[ -e $i ] || continue
+		mkdir -p "$subpkgdir"/usr/share/zabbix/${i%/*}
+		mv "$i" "$subpkgdir"/usr/share/zabbix/$i
+	done
+        return 0
+}
+
+pgsql()		{ _do_db postgresql; }
+mysql()		{ _do_db mysql; }
+sqlite()	{ _do_db sqlite3; }
+
+utils() {
+	pkgdesc="Zabbix client utilities"
+	depends=
+	mkdir -p "$subpkgdir"/usr/bin
+	mv "$_builddir-postgresql"/src/zabbix_get/zabbix_get \
+		"$subpkgdir"/usr/bin
+        mv "$_builddir-postgresql"/src/zabbix_sender/zabbix_sender \
+	                "$subpkgdir"/usr/bin
+}
+
+webif() {
+	arch="noarch"
+	pkgdesc="Zabbix web-interface"
+	depends="php php-pgsql php-gd php-curl php-bcmath php-sockets php-iconv
+		php-xmlreader php-ctype php-gettext"
+	_wwwdir="$subpkgdir"/usr/share/webapps/zabbix
+	mkdir -p $_wwwdir
+	mv "$_builddir"/frontends/php/* "$_wwwdir"
+}
+
+agent() {
+	pkgdesc="Zabbix Network Monitoring Agent"
+	depends=
+	install="$subpkgname.pre-install"
+        install -d -m0750 -o zabbix -g zabbix \
+                "$subpkgdir"/var/run/zabbix "$subpkgdir"/var/log/zabbix
+	install -D -m0644 "$srcdir"/zabbix_agentd.conf \
+		"$subpkgdir"/etc/zabbix/zabbix_agentd.conf
+	install -D -m0755 "$srcdir"/zabbix-agentd.initd \
+		"$subpkgdir"/etc/init.d/zabbix-agentd
+	mkdir -p "$subpkgdir"/usr/sbin
+	mv "$_builddir-postgresql"/src/zabbix_agent/zabbix_agent \
+		"$subpkgdir"/usr/sbin/
+        mv "$_builddir-postgresql"/src/zabbix_agent/zabbix_agentd \
+	                "$subpkgdir"/usr/sbin/
+
+}
+
+md5sums="7f680ad3ef7145840e3de5c7a0f19b7c  zabbix-2.2.2.tar.gz
+26b0401a83bdb1dce29338e5b2786620  zabbix_server.conf
+9832a81e134c8e2c11e2a06b7adbf88f  zabbix_trapper.conf
+0310b92afb3f35c1075fff53db737212  zabbix_proxy.conf
+721c18077fa739f956340afca9f067f4  zabbix_agentd.conf
+3a71e310bd2b38498a7c6830169f7480  zabbix-getloadavg.patch
+bf62c539870874e11de39c60cb974786  automake.patch
+40c81bdec85815f4ba637eb6528cc5e8  musl-fix-includes.patch
+8fe442b55584dd5ba784a3140bb980aa  zabbix-server.initd
+bd91d0243cf8f72b86b9bf0b91963663  zabbix-server.confd
+1a5c718bcf815fcf659e14fb0b576a1a  zabbix-agentd.initd
+a99978139481e69434f78fc3e8c53441  zabbix-proxy.initd
+c3b399a406f7dd1df0de7b3fae3ed081  002-fix-res_send-on-uclibc.patch"
+sha256sums="e00ef9a1d667284a2bc2ce04966204ee094ade2c0bc6a94efb9436a9aa5cb2be  zabbix-2.2.2.tar.gz
+3b09a8fdc38216d859022c5966c36f0bcb6984974208cf4c69c17129649efdf5  zabbix_server.conf
+3ae307895c9a7189e29c4ebf7479ce08d4c3bbe1a7f0a3554828170dac417bab  zabbix_trapper.conf
+0cd9cab17d1a2f791262b683aeedc5115722478a4847cb438aadb51198f67287  zabbix_proxy.conf
+98343193215c9e1bc79ff332688c684f7023da38583bba800acc404b12c6cc51  zabbix_agentd.conf
+d2c0651c5fa67a1857707552e79ecece7ca95c149042460c40456634bf7611dc  zabbix-getloadavg.patch
+b347ca77660e69bea353c50e2fce0c7c4cc837f782c9f84f74ba92c1a62b4c1b  automake.patch
+38b4e1a5d5c16c7d9b31347acf710d84b693f6e1df365d1072548e897e034884  musl-fix-includes.patch
+311a29f05a58cfe67c273f7cf25092fab23423feb07e8ee1344141a146f0ccc3  zabbix-server.initd
+ddf75041fb0afc5b211dd79a934341cc9db4325447ad33a42cbf09bdfb5cad42  zabbix-server.confd
+4f93c4868726a3e8fed12a030cfce8911f105217a59187d6b3e1565d8d3e76b5  zabbix-agentd.initd
+60a01c08df054a0c1bcfb71e378544b4c4e489e6a6779d96383387ed34ddc0b0  zabbix-proxy.initd
+c796e9aa371f50155b396da53504375f35f77bd3941440525dcaf92da33dac99  002-fix-res_send-on-uclibc.patch"
+sha512sums="603bab20c1b37591e4e2b17fdc9e28eff119ae6cc7b9aa2fe1841956c192da56d3c43b9f85deb4268d5d12a698237ffd80c3f596e62f9dbae1a1f316a1dd8016  zabbix-2.2.2.tar.gz
+3170d56a61871e6efadf705c19f864fdecf9420c4263f2a1129245b3b55bd730d1ba5a6a26ea866fc7842c86f7745e51ea28878bb9e9267ed9176499cb75e8bb  zabbix_server.conf
+cd08d907838de646f65316950e8c71deae25be1701e0cc22e5fd2f636c21ef2365a537d247277bafb694cae8c5dbd22eb725c1647797ad3e4ac4b3df2084ef07  zabbix_trapper.conf
+a3703641125dda8c13d658ad4e1cf2cde94af01ed953480a37006e354ff58ade4a99b3575e3f095d8639ac9c481be52e25120353d9a4cd2104a68aff4a5596e5  zabbix_proxy.conf
+8a3298cb98787f89b4cc0faa6168a1ab59860c60bec159ecd341db25c0903e89061b40d2b37df9e2df99e08b71b57089bcb25f352e7edf09fbc1b0bd3f1034f6  zabbix_agentd.conf
+b65c6ba7701d98ae7f6fe2124c1d2b8b8fea3c3cc7ee080bf99f5afff0aaa6a025c2a1f5136b4700b53d1b7609e6185642650d7edd013c554b2af37fddae771c  zabbix-getloadavg.patch
+9bff8966cb8b3f1767bfb1b3f3529bca5c9957f2c8179a40ded3b4e43615ba9fb408aef43092fd119b7df80b042555d05c9780fac3760176b95524aa48252fee  automake.patch
+9b87ec1ea4a9cbb501c16012d498cdae82a696f4cd495e1e8cb201d9e31c6e135da5bb264c6273f2de87297bd3e4bd16f66703610686f5d610e3316ee24aac91  musl-fix-includes.patch
+790760ddde503b3cf188fbf58e05587756fbf09c4d3cda8493b3b87b44a9a9ed00d4685045f83249c9714bd8afb6a184412ddfff865c073bbed5c513a78ded1c  zabbix-server.initd
+a91821c6086a1fc0197750cc68073419defcb7d775b11b14a993409a8f61c7a1a0a0af95de27eed9f3b8357f8362640cb1b26b91b56f4f1d714ca6f222d02b80  zabbix-server.confd
+3ef0fe0c1c94f2f01a0c335a45ee0f3c0cd4b125d96b5eefa869a17efb352087a5dd18ef8e87c35e6816b6fb705b829f0a25452e7285637d3595ff4c103b7c21  zabbix-agentd.initd
+b305ea06641c6a331273f065a4a85fac92c45e107a30e85cb41be4ea36e2efbf5442c69cc6605ea3734a851808f7abba20042058d4b07832d858cdb63e98d405  zabbix-proxy.initd
+cc00603b26a4bd49fba5d8b5e2aaaa7c947c888f4970a4a582a201012aee956f926251eb85236014660fe0b3fa1a22a7ac27b4331e00af64d2a658e972d2d7df  002-fix-res_send-on-uclibc.patch"
