@@ -8,12 +8,8 @@ sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
 abuildrepo	?= ~/.cache/abuild
 
-LUA_VERSION	= 5.2
-LUA_SHAREDIR	?= $(prefix)/share/lua/$(LUA_VERSION)/
-LUA_SHEBANG	?= /usr/bin/lua$(LUA_VERSION)
-
 SCRIPTS		:= abuild buildrepo abuild-keygen abuild-sign newapkbuild \
-		   abump apkgrel ap buildlab apkbuild-cpan checkapk
+		   abump apkgrel buildlab apkbuild-cpan checkapk
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
@@ -38,8 +34,7 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@prefix@:$(prefix):g' \
 			-e 's:@sysconfdir@:$(sysconfdir):g' \
 			-e 's:@datadir@:$(datadir):g' \
-			-e 's:@abuildrepo@:$(abuildrepo):g' \
-			-e 's:@LUA_SHEBANG@:$(LUA_SHEBANG):g'
+			-e 's:@abuildrepo@:$(abuildrepo):g'
 
 SSL_CFLAGS	= $(shell pkg-config --cflags openssl)
 SSL_LIBS	= $(shell pkg-config --libs openssl)
@@ -84,7 +79,7 @@ help:
 	@echo "$(P) makefile"
 	@echo "usage: make install [ DESTDIR=<path> ]"
 
-install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh aports.lua
+install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	install -d $(DESTDIR)/$(bindir) $(DESTDIR)/$(sysconfdir) \
 		$(DESTDIR)/$(datadir)
 	for i in $(USR_BIN_FILES); do\
@@ -100,8 +95,6 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh aports.lua
 	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild/
 	cp $(AUTOTOOLS_TOOLCHAIN_FILES) $(DESTDIR)/$(prefix)/share/abuild/
 	cp functions.sh $(DESTDIR)/$(datadir)/
-	mkdir -p $(DESTDIR)$(LUA_SHAREDIR)
-	cp aports.lua $(DESTDIR)$(LUA_SHAREDIR)/
 
 .gitignore: Makefile
 	echo "*.tar.bz2" > $@
