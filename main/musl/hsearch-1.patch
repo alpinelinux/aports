@@ -1,0 +1,213 @@
+From fe1ba7dbf187e34985896b40d469d84a7a4a98d0 Mon Sep 17 00:00:00 2001
+From: sin <sin@2f30.org>
+Date: Tue, 25 Mar 2014 16:37:51 +0000
+Subject: implement hcreate_r, hdestroy_r and hsearch_r
+
+the size and alignment of struct hsearch_data are matched to the glibc
+definition for binary compatibility. the members of the structure do
+not match, which should not be a problem as long as applications
+correctly treat the structure as opaque.
+
+unlike the glibc implementation, this version of hcreate_r does not
+require the caller to zero-fill the structure before use.
+---
+diff --git a/include/search.h b/include/search.h
+index 27f6107..02e407e 100644
+--- a/include/search.h
++++ b/include/search.h
+@@ -22,6 +22,18 @@ int hcreate(size_t);
+ void hdestroy(void);
+ ENTRY *hsearch(ENTRY, ACTION);
+ 
++#ifdef _GNU_SOURCE
++struct hsearch_data {
++	struct __tab *__tab;
++	unsigned int __unused1;
++	unsigned int __unused2;
++};
++
++int hcreate_r(size_t, struct hsearch_data *);
++void hdestroy_r(struct hsearch_data *);
++int hsearch_r(ENTRY, ACTION, ENTRY **, struct hsearch_data *);
++#endif
++
+ void insque(void *, void *);
+ void remque(void *);
+ 
+diff --git a/src/search/hsearch.c b/src/search/hsearch.c
+index 6fe5ced..88edb26 100644
+--- a/src/search/hsearch.c
++++ b/src/search/hsearch.c
+@@ -1,6 +1,8 @@
++#define _GNU_SOURCE
+ #include <stdlib.h>
+ #include <string.h>
+ #include <search.h>
++#include "libc.h"
+ 
+ /*
+ open addressing hash table with 2^n table size
+@@ -19,9 +21,17 @@ struct elem {
+ 	size_t hash;
+ };
+ 
+-static size_t mask;
+-static size_t used;
+-static struct elem *tab;
++struct __tab {
++	struct elem *elems;
++	size_t mask;
++	size_t used;
++};
++
++static struct hsearch_data htab;
++
++int __hcreate_r(size_t, struct hsearch_data *);
++void __hdestroy_r(struct hsearch_data *);
++int __hsearch_r(ENTRY, ACTION, ENTRY **, struct hsearch_data *);
+ 
+ static size_t keyhash(char *k)
+ {
+@@ -33,29 +43,29 @@ static size_t keyhash(char *k)
+ 	return h;
+ }
+ 
+-static int resize(size_t nel)
++static int resize(size_t nel, struct hsearch_data *htab)
+ {
+ 	size_t newsize;
+ 	size_t i, j;
+ 	struct elem *e, *newe;
+-	struct elem *oldtab = tab;
+-	struct elem *oldend = tab + mask + 1;
++	struct elem *oldtab = htab->__tab->elems;
++	struct elem *oldend = htab->__tab->elems + htab->__tab->mask + 1;
+ 
+ 	if (nel > MAXSIZE)
+ 		nel = MAXSIZE;
+ 	for (newsize = MINSIZE; newsize < nel; newsize *= 2);
+-	tab = calloc(newsize, sizeof *tab);
+-	if (!tab) {
+-		tab = oldtab;
++	htab->__tab->elems = calloc(newsize, sizeof *htab->__tab->elems);
++	if (!htab->__tab->elems) {
++		htab->__tab->elems = oldtab;
+ 		return 0;
+ 	}
+-	mask = newsize - 1;
++	htab->__tab->mask = newsize - 1;
+ 	if (!oldtab)
+ 		return 1;
+ 	for (e = oldtab; e < oldend; e++)
+ 		if (e->item.key) {
+ 			for (i=e->hash,j=1; ; i+=j++) {
+-				newe = tab + (i & mask);
++				newe = htab->__tab->elems + (i & htab->__tab->mask);
+ 				if (!newe->item.key)
+ 					break;
+ 			}
+@@ -67,27 +77,21 @@ static int resize(size_t nel)
+ 
+ int hcreate(size_t nel)
+ {
+-	mask = 0;
+-	used = 0;
+-	tab = 0;
+-	return resize(nel);
++	return __hcreate_r(nel, &htab);
+ }
+ 
+ void hdestroy(void)
+ {
+-	free(tab);
+-	tab = 0;
+-	mask = 0;
+-	used = 0;
++	__hdestroy_r(&htab);
+ }
+ 
+-static struct elem *lookup(char *key, size_t hash)
++static struct elem *lookup(char *key, size_t hash, struct hsearch_data *htab)
+ {
+ 	size_t i, j;
+ 	struct elem *e;
+ 
+ 	for (i=hash,j=1; ; i+=j++) {
+-		e = tab + (i & mask);
++		e = htab->__tab->elems + (i & htab->__tab->mask);
+ 		if (!e->item.key ||
+ 		    (e->hash==hash && strcmp(e->item.key, key)==0))
+ 			break;
+@@ -97,22 +101,61 @@ static struct elem *lookup(char *key, size_t hash)
+ 
+ ENTRY *hsearch(ENTRY item, ACTION action)
+ {
++	ENTRY *e;
++
++	__hsearch_r(item, action, &e, &htab);
++	return e;
++}
++
++int __hcreate_r(size_t nel, struct hsearch_data *htab)
++{
++	int r;
++
++	htab->__tab = calloc(1, sizeof *htab->__tab);
++	if (!htab->__tab)
++		return 0;
++	r = resize(nel, htab);
++	if (r == 0) {
++		free(htab->__tab);
++		htab->__tab = 0;
++	}
++	return r;
++}
++weak_alias(__hcreate_r, hcreate_r);
++
++void __hdestroy_r(struct hsearch_data *htab)
++{
++	if (htab->__tab) free(htab->__tab->elems);
++	free(htab->__tab);
++	htab->__tab = 0;
++}
++weak_alias(__hdestroy_r, hdestroy_r);
++
++int __hsearch_r(ENTRY item, ACTION action, ENTRY **retval, struct hsearch_data *htab)
++{
+ 	size_t hash = keyhash(item.key);
+-	struct elem *e = lookup(item.key, hash);
++	struct elem *e = lookup(item.key, hash, htab);
+ 
+-	if (e->item.key)
+-		return &e->item;
+-	if (action == FIND)
++	if (e->item.key) {
++		*retval = &e->item;
++		return 1;
++	}
++	if (action == FIND) {
++		*retval = 0;
+ 		return 0;
++	}
+ 	e->item = item;
+ 	e->hash = hash;
+-	if (++used > mask - mask/4) {
+-		if (!resize(2*used)) {
+-			used--;
++	if (++htab->__tab->used > htab->__tab->mask - htab->__tab->mask/4) {
++		if (!resize(2*htab->__tab->used, htab)) {
++			htab->__tab->used--;
+ 			e->item.key = 0;
++			*retval = 0;
+ 			return 0;
+ 		}
+-		e = lookup(item.key, hash);
++		e = lookup(item.key, hash, htab);
+ 	}
+-	return &e->item;
++	*retval = &e->item;
++	return 1;
+ }
++weak_alias(__hsearch_r, hsearch_r);
+--
+cgit v0.9.0.3-65-g4555
