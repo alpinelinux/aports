@@ -218,9 +218,12 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 		pkg->ss.pinning_preferred = APK_DEFAULT_PINNING_MASK;
 		pkg->ss.pkg_available =
 			(pkg->filename != NULL) ||
-			(pkg->installed_size == 0) ||
-			(pkg->repos & db->available_repos);
-		pkg->ss.pkg_selectable = pkg->ss.pkg_available || pkg->ipkg;
+			(pkg->repos & db->available_repos & ~BIT(APK_REPOSITORY_CACHED));
+		/* Package is in 'cached' repository if filename is provided,
+		 * or it's a 'virtual' package with install_size zero */
+		pkg->ss.pkg_selectable =
+			(pkg->repos & db->available_repos) ||
+			pkg->ipkg;
 
 		repos = get_pkg_repos(db, pkg);
 		pkg->ss.tag_preferred =
@@ -497,8 +500,12 @@ static int compare_providers(struct apk_solver_state *ss,
 			return r;
 
 		/* Prefer available */
-		if (solver_flags & (APK_SOLVERF_AVAILABLE | APK_SOLVERF_REINSTALL)) {
+		if (solver_flags & APK_SOLVERF_AVAILABLE) {
 			r = (int)pkgA->ss.pkg_available - (int)pkgB->ss.pkg_available;
+			if (r)
+				return r;
+		} else if (solver_flags & APK_SOLVERF_REINSTALL) {
+			r = (int)pkgA->ss.pkg_selectable - (int)pkgB->ss.pkg_selectable;
 			if (r)
 				return r;
 		}
@@ -529,8 +536,12 @@ static int compare_providers(struct apk_solver_state *ss,
 			return r;
 
 		/* Prefer available */
-		if (solver_flags & (APK_SOLVERF_AVAILABLE | APK_SOLVERF_REINSTALL)) {
+		if (solver_flags & APK_SOLVERF_AVAILABLE) {
 			r = (int)pkgA->ss.pkg_available - (int)pkgB->ss.pkg_available;
+			if (r)
+				return r;
+		} else if (solver_flags & APK_SOLVERF_REINSTALL) {
+			r = (int)pkgA->ss.pkg_selectable - (int)pkgB->ss.pkg_selectable;
 			if (r)
 				return r;
 		}
