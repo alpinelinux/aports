@@ -786,10 +786,13 @@ static void cset_gen_name_remove(struct apk_solver_state *ss, struct apk_package
 {
 	struct apk_name *name = pkg->name, **pname;
 
-	if (name->ss.chosen.pkg != NULL || name->ss.in_changeset)
+	if (pkg->ss.in_changeset ||
+	    (name->ss.chosen.pkg != NULL &&
+	     name->ss.chosen.pkg->name == name))
 		return;
 
 	name->ss.in_changeset = 1;
+	pkg->ss.in_changeset = 1;
 	foreach_array_item(pname, pkg->name->rinstall_if)
 		cset_check_removal_by_iif(ss, *pname);
 	record_change(ss, pkg, NULL);
