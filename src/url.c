@@ -75,6 +75,7 @@ static int fork_wget(const char *url, pid_t *ppid)
 		 * See http://redmine.alpinelinux.org/issues/347 
 		 */
 		execlp("busybox", "wget", "-q", "-O", "-", url, (void*) 0);
+		execlp("busybox.static", "wget", "-q", "-O", "-", url, (void*) 0);
 		exit(0);
 	}
 
