@@ -1214,8 +1214,11 @@ static void foreach_reverse_dependency(
 				pkg0->foreach_genid = genid;
 			}
 			foreach_array_item(d0, pkg0->depends) {
-				if (apk_dep_analyze(d0, pkg) & match)
+				if (apk_dep_analyze(d0, pkg) & match) {
 					cb(pkg0, d0, pkg, ctx);
+					if (genid)
+						break;
+				}
 			}
 		}
 	}
