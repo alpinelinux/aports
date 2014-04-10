@@ -187,8 +187,6 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 			continue;
 
 		pkg->ss.seen = 1;
-		pkg->ss.iif_failed = (pkg->install_if->num == 0);
-		name->ss.no_iif &= pkg->ss.iif_failed;
 
 		pkg->ss.pinning_allowed = APK_DEFAULT_PINNING_MASK;
 		pkg->ss.pinning_preferred = APK_DEFAULT_PINNING_MASK;
@@ -200,6 +198,15 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 		pkg->ss.pkg_selectable =
 			(pkg->repos & db->available_repos) ||
 			pkg->ipkg;
+
+		/* Prune install_if packages that are no longer available,
+		 * currently works only if SOLVERF_AVAILABLE is set in the
+		 * global solver flags. */
+		pkg->ss.iif_failed =
+			(pkg->install_if->num == 0) ||
+			((ss->solver_flags_inherit & APK_SOLVERF_AVAILABLE) &&
+			 !pkg->ss.pkg_available);
+		name->ss.no_iif &= pkg->ss.iif_failed;
 
 		repos = get_pkg_repos(db, pkg);
 		pkg->ss.tag_preferred =
