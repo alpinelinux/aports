@@ -1,85 +1,55 @@
-From 274b49ab1c7296fc13076b3ed8ca30050487a343 Mon Sep 17 00:00:00 2001
+From c3d5cce5c550896fd8e9cf856f66f5f264b49ef7 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
 Date: Tue, 8 Apr 2014 14:03:16 +0000
 Subject: [PATCH] reimplement if_nameindex and getifaddrs using netlink
 
 ---
- src/network/__netlink.c    |  68 ++++++++++
- src/network/__netlink.h    | 143 ++++++++++++++++++++
- src/network/getifaddrs.c   | 322 ++++++++++++++++++++++++---------------------
- src/network/if_nameindex.c | 105 +++++++++------
- 4 files changed, 451 insertions(+), 187 deletions(-)
+ src/network/__netlink.c    |  38 ++++++
+ src/network/__netlink.h    |  99 ++++++++++++++
+ src/network/getifaddrs.c   | 325 +++++++++++++++++++++++++--------------------
+ src/network/if_nameindex.c | 107 +++++++++------
+ 4 files changed, 382 insertions(+), 187 deletions(-)
  create mode 100644 src/network/__netlink.c
  create mode 100644 src/network/__netlink.h
 
 diff --git a/src/network/__netlink.c b/src/network/__netlink.c
 new file mode 100644
-index 0000000..d0c9fab
+index 0000000..e75f374
 --- /dev/null
 +++ b/src/network/__netlink.c
-@@ -0,0 +1,68 @@
-+#define _GNU_SOURCE
+@@ -0,0 +1,38 @@
 +#include <errno.h>
 +#include <string.h>
-+#include <stdlib.h>
-+#include <unistd.h>
 +#include <sys/socket.h>
-+#include <sys/param.h>
 +#include "__netlink.h"
 +
-+struct __netlink_handle {
-+	int fd;
-+	unsigned int seq;
-+	size_t bufsize;
-+};
-+
-+struct __netlink_handle *__netlink_open(int type)
-+{
-+	struct __netlink_handle *nh;
-+	int bufsize = getpagesize();
-+	/* required buffer size is MIN(8192,pagesize)-sizeof(struct skb_shared_info)
-+	 * the estimate for skb_shared_info size is conservative, but gives enough
-+	 * space to fit struct __netlink_handle including malloc overhead in one page . */
-+	if (bufsize > 8192) bufsize = 8192;
-+	bufsize -= 128;
-+	nh = malloc(sizeof(struct __netlink_handle) + bufsize);
-+	if (!nh) return 0;
-+	nh->fd = socket(PF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, type);
-+	if (nh->fd < 0) { free(nh); return 0; }
-+	nh->seq = 1;
-+	nh->bufsize = bufsize;
-+	return nh;
-+}
-+
-+void __netlink_close(struct __netlink_handle *nh)
-+{
-+	close(nh->fd);
-+	free(nh);
-+}
-+
-+int __netlink_enumerate(struct __netlink_handle *nh, int type, int (*cb)(void *ctx, struct nlmsghdr *h), void *ctx)
++int __netlink_enumerate(int fd, unsigned int seq, int type, int af,
++	int (*cb)(void *ctx, struct nlmsghdr *h), void *ctx)
 +{
 +	struct nlmsghdr *h;
-+	void *buf = (void*)(nh+1);
-+	struct {
-+		struct nlmsghdr nlh;
-+		struct rtgenmsg g;
-+	} *req = buf;
++	union {
++		uint8_t buf[8192];
++		struct {
++			struct nlmsghdr nlh;
++			struct rtgenmsg g;
++		} req;
++		struct nlmsghdr reply;
++	} u;
 +	int r, ret = 0;
 +
-+	memset(req, 0, NETLINK_ALIGN(sizeof(*req)));
-+	req->nlh.nlmsg_len = sizeof(*req);
-+	req->nlh.nlmsg_type = type;
-+	req->nlh.nlmsg_flags = NLM_F_ROOT | NLM_F_MATCH | NLM_F_REQUEST;
-+	req->nlh.nlmsg_seq = nh->seq++;
-+	req->g.rtgen_family = AF_UNSPEC;
-+	r = send(nh->fd, req, sizeof(*req), 0);
++	memset(&u.req, 0, sizeof(u.req));
++	u.req.nlh.nlmsg_len = sizeof(u.req);
++	u.req.nlh.nlmsg_type = type;
++	u.req.nlh.nlmsg_flags = NLM_F_ROOT | NLM_F_MATCH | NLM_F_REQUEST;
++	u.req.nlh.nlmsg_seq = seq;
++	u.req.g.rtgen_family = af;
++	r = send(fd, &u.req, sizeof(u.req), 0);
 +	if (r < 0) return r;
 +
 +	while (1) {
-+		r = recv(nh->fd, buf, nh->bufsize, MSG_DONTWAIT);
++		r = recv(fd, u.buf, sizeof(u.buf), MSG_DONTWAIT);
 +		if (r <= 0) return -1;
-+		for (h = (struct nlmsghdr*) buf; NLMSG_OK(h, (void*)((uint8_t*)buf+r)); h = NLMSG_NEXT(h)) {
++		for (h = &u.reply; NLMSG_OK(h, (void*)&u.buf[r]); h = NLMSG_NEXT(h)) {
 +			if (h->nlmsg_type == NLMSG_DONE) return ret;
 +			if (h->nlmsg_type == NLMSG_ERROR) return -1;
 +			if (!ret) ret = cb(ctx, h);
@@ -88,10 +58,10 @@ index 0000000..d0c9fab
 +}
 diff --git a/src/network/__netlink.h b/src/network/__netlink.h
 new file mode 100644
-index 0000000..94728f3
+index 0000000..40b12a2
 --- /dev/null
 +++ b/src/network/__netlink.h
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,99 @@
 +#include <stdint.h>
 +
 +/* linux/netlink.h */
@@ -147,44 +117,10 @@ index 0000000..94728f3
 +
 +/* linux/if_link.h */
 +
-+enum {
-+	IFLA_UNSPEC,
-+	IFLA_ADDRESS,
-+	IFLA_BROADCAST,
-+	IFLA_IFNAME,
-+	IFLA_MTU,
-+	IFLA_LINK,
-+	IFLA_QDISC,
-+	IFLA_STATS,
-+	IFLA_COST,
-+	IFLA_PRIORITY,
-+	IFLA_MASTER,
-+	IFLA_WIRELESS,
-+	IFLA_PROTINFO,
-+	IFLA_TXQLEN,
-+	IFLA_MAP,
-+	IFLA_WEIGHT,
-+	IFLA_OPERSTATE,
-+	IFLA_LINKMODE,
-+	IFLA_LINKINFO,
-+	IFLA_NET_NS_PID,
-+	IFLA_IFALIAS,
-+	IFLA_NUM_VF,
-+	IFLA_VFINFO_LIST,
-+	IFLA_STATS64,
-+	IFLA_VF_PORTS,
-+	IFLA_PORT_SELF,
-+	IFLA_AF_SPEC,
-+	IFLA_GROUP,
-+	IFLA_NET_NS_FD,
-+	IFLA_EXT_MASK,
-+	IFLA_PROMISCUITY,
-+	IFLA_NUM_TX_QUEUES,
-+	IFLA_NUM_RX_QUEUES,
-+	IFLA_CARRIER,
-+	IFLA_PHYS_PORT_ID,
-+	__IFLA_MAX
-+};
++#define IFLA_ADDRESS	1
++#define IFLA_BROADCAST	2
++#define IFLA_IFNAME	3
++#define IFLA_STATS	7
 +
 +/* linux/if_addr.h */
 +
@@ -196,50 +132,40 @@ index 0000000..94728f3
 +	uint32_t	ifa_index;
 +};
 +
-+enum {
-+	IFA_UNSPEC,
-+	IFA_ADDRESS,
-+	IFA_LOCAL,
-+	IFA_LABEL,
-+	IFA_BROADCAST,
-+	IFA_ANYCAST,
-+	IFA_CACHEINFO,
-+	IFA_MULTICAST,
-+	__IFA_MAX
-+};
++#define IFA_ADDRESS	1
++#define IFA_LOCAL	2
++#define IFA_LABEL	3
++#define IFA_BROADCAST	4
 +
 +/* musl */
 +
 +#define NETLINK_ALIGN(len)	(((len)+3) & ~3)
-+#define NLMSG_DATA(nlh)		((void*)((char*)(nlh)+NETLINK_ALIGN(sizeof(struct nlmsghdr))))
-+#define NLMSG_DATALEN(nlh)	((nlh)->nlmsg_len-NETLINK_ALIGN(sizeof(struct nlmsghdr)))
++#define NLMSG_DATA(nlh)		((void*)((char*)(nlh)+sizeof(struct nlmsghdr)))
++#define NLMSG_DATALEN(nlh)	((nlh)->nlmsg_len-sizeof(struct nlmsghdr))
 +#define NLMSG_DATAEND(nlh)	((char*)(nlh)+(nlh)->nlmsg_len)
 +#define NLMSG_NEXT(nlh)		(struct nlmsghdr*)((char*)(nlh)+NETLINK_ALIGN((nlh)->nlmsg_len))
 +#define NLMSG_OK(nlh,end)	(NLMSG_DATA(nlh) <= (end) && \
 +				 (nlh)->nlmsg_len >= sizeof(struct nlmsghdr) && \
 +				 (void*)NLMSG_NEXT(nlh) <= (end))
 +
-+#define RTA_DATA(rta)		((void*)((char*)(rta)+NETLINK_ALIGN(sizeof(struct rtattr))))
-+#define RTA_DATALEN(rta)	((rta)->rta_len-NETLINK_ALIGN(sizeof(struct rtattr)))
++#define RTA_DATA(rta)		((void*)((char*)(rta)+sizeof(struct rtattr)))
++#define RTA_DATALEN(rta)	((rta)->rta_len-sizeof(struct rtattr))
 +#define RTA_DATAEND(rta)	((char*)(rta)+(rta)->rta_len)
 +#define RTA_NEXT(rta)		(struct rtattr*)((char*)(rta)+NETLINK_ALIGN((rta)->rta_len))
 +#define RTA_OK(rta,end)		(RTA_DATA(rta) <= (void*)(end) && \
 +				 (rta)->rta_len >= sizeof(struct rtattr) && \
 +				 (void*)RTA_NEXT(rta) <= (void*)(end))
 +
-+#define NLMSG_RTA(nlh,len)	((void*)((char*)(nlh)+NETLINK_ALIGN(sizeof(struct nlmsghdr))+NETLINK_ALIGN(len)))
++#define NLMSG_RTA(nlh,len)	((void*)((char*)(nlh)+sizeof(struct nlmsghdr)+NETLINK_ALIGN(len)))
 +#define NLMSG_RTAOK(rta,nlh)	RTA_OK(rta,NLMSG_DATAEND(nlh))
 +
-+struct __netlink_handle;
-+
-+struct __netlink_handle *__netlink_open(int type);
-+void __netlink_close(struct __netlink_handle *h);
-+int __netlink_enumerate(struct __netlink_handle *h, int type, int (*cb)(void *ctx, struct nlmsghdr *h), void *ctx);
++int __netlink_enumerate(int fd, unsigned int seq, int type, int af,
++	int (*cb)(void *ctx, struct nlmsghdr *h), void *ctx);
 diff --git a/src/network/getifaddrs.c b/src/network/getifaddrs.c
-index 5a94cc7..5b1ebe7 100644
+index 5a94cc7..9d4bd5b 100644
 --- a/src/network/getifaddrs.c
 +++ b/src/network/getifaddrs.c
-@@ -1,181 +1,209 @@
+@@ -1,181 +1,212 @@
 -/* (C) 2013 John Spencer. released under musl's standard MIT license. */
 -#undef _GNU_SOURCE
  #define _GNU_SOURCE
@@ -257,14 +183,16 @@ index 5a94cc7..5b1ebe7 100644
 -#include <sys/ioctl.h>
 -#include <sys/socket.h>
 +#include <ifaddrs.h>
++#include <syscall.h>
 +#include <net/if.h>
 +#include "__netlink.h"
  
 -typedef union {
 -	struct sockaddr_in6 v6;
-+/* getifaddrs() uses PF_PACKET to relay hardware addresses.
-+ * But Infiniband socket address length is longer, so use this hack
-+ * (like glibc) to return it anyway. */
++/* getifaddrs() reports hardware addresses with PF_PACKET that implies
++ * struct sockaddr_ll.  But e.g. Infiniband socket address length is
++ * longer than sockaddr_ll.ssl_addr[8] can hold. Use this hack struct
++ * to extend ssl_addr - callers should be able to still use it. */
 +struct sockaddr_ll_hack {
 +	unsigned short sll_family, sll_protocol;
 +	int sll_ifindex;
@@ -336,10 +264,21 @@ index 5a94cc7..5b1ebe7 100644
 +	if (!ctx->first) ctx->first = add;
 +	if (ctx->last) ctx->last->ifa.ifa_next = &add->ifa;
 +	ctx->last = add;
++}
++
++static struct sockaddr* copy_lladdr(union sockany *sa, struct rtattr *rta, struct ifinfomsg *ifi)
++{
++	if (RTA_DATALEN(rta) > sizeof(sa->ll.sll_addr)) return 0;
++	sa->ll.sll_family = AF_PACKET;
++	sa->ll.sll_ifindex = ifi->ifi_index;
++	sa->ll.sll_hatype = ifi->ifi_type;
++	sa->ll.sll_halen = RTA_DATALEN(rta);
++	memcpy(sa->ll.sll_addr, RTA_DATA(rta), RTA_DATALEN(rta));
++	return &sa->sa;
  }
  
 -static void ipv6netmask(unsigned prefix_length, struct sockaddr_in6 *sa)
-+static struct sockaddr* copy_lladdr(union sockany *sa, struct rtattr *rta, struct ifinfomsg *ifi)
++static uint8_t *sockany_addr(int af, union sockany *sa, int *len)
  {
 -	unsigned char* hb = sa->sin6_addr.s6_addr;
 -	unsigned onebytes = prefix_length / 8;
@@ -351,17 +290,6 @@ index 5a94cc7..5b1ebe7 100644
 -		unsigned char x = -1;
 -		x <<= 8 - bits;
 -		hb[onebytes] = x;
-+	if (RTA_DATALEN(rta) > sizeof(sa->ll.sll_addr)) return 0;
-+	sa->ll.sll_family = AF_PACKET;
-+	sa->ll.sll_ifindex = ifi->ifi_index;
-+	sa->ll.sll_hatype = ifi->ifi_type;
-+	sa->ll.sll_halen = RTA_DATALEN(rta);
-+	memcpy(sa->ll.sll_addr, RTA_DATA(rta), RTA_DATALEN(rta));
-+	return &sa->sa;
-+}
-+
-+static uint8_t *sockany_addr(int af, union sockany *sa, int *len)
-+{
 +	switch (af) {
 +	case AF_INET: *len = 4; return (uint8_t*) &sa->v4.sin_addr;
 +	case AF_INET6: *len = 16; return (uint8_t*) &sa->v6.sin6_addr;
@@ -583,24 +511,25 @@ index 5a94cc7..5b1ebe7 100644
 +int getifaddrs(struct ifaddrs **ifap)
 +{
 +	struct ifaddrs_ctx _ctx, *ctx = &_ctx;
-+	struct __netlink_handle *nh;
-+	int r = 0;
++	int r = 0, fd;
 +
-+	nh = __netlink_open(NETLINK_ROUTE);
-+	if (!nh) return -1;
++	fd = socket(PF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE);
++	if (fd < 0) return -1;
++
 +	memset(ctx, 0, sizeof(*ctx));
-+	if (__netlink_enumerate(nh, RTM_GETLINK, __handle_link, ctx)) r = -1;
-+	if (__netlink_enumerate(nh, RTM_GETADDR, __handle_addr, ctx)) r = -1;
-+	__netlink_close(nh);
++	if (__netlink_enumerate(fd, 1, RTM_GETLINK, AF_UNSPEC, __handle_link, ctx)) r = -1;
++	if (__netlink_enumerate(fd, 1, RTM_GETADDR, AF_UNSPEC, __handle_addr, ctx)) r = -1;
++	__syscall(SYS_close,fd);
++
 +	if (r == 0) *ifap = &ctx->first->ifa;
 +	else freeifaddrs(&ctx->first->ifa);
 +	return r;
 +}
 diff --git a/src/network/if_nameindex.c b/src/network/if_nameindex.c
-index 53b80b2..d4e8b2d 100644
+index 53b80b2..cb5587c 100644
 --- a/src/network/if_nameindex.c
 +++ b/src/network/if_nameindex.c
-@@ -1,55 +1,80 @@
+@@ -1,55 +1,82 @@
  #define _GNU_SOURCE
  #include <net/if.h>
 -#include <stdlib.h>
@@ -611,6 +540,7 @@ index 53b80b2..d4e8b2d 100644
 +#include <unistd.h>
 +#include <stdlib.h>
 +#include <string.h>
++#include <syscall.h>
 +#include "__netlink.h"
 +
 +struct ifnamemap {
@@ -618,14 +548,14 @@ index 53b80b2..d4e8b2d 100644
 +	unsigned char namelen;
 +	char name[IFNAMSIZ];
 +};
- 
--static void *do_nameindex(int s, size_t n)
++
 +struct ifnameindexctx {
 +	unsigned int num;
 +	unsigned int str_bytes;
 +	struct ifnamemap *list;
 +};
-+
+ 
+-static void *do_nameindex(int s, size_t n)
 +static int __handle_link(void *pctx, struct nlmsghdr *h)
  {
 -	size_t i, len, k;
@@ -649,6 +579,10 @@ index 53b80b2..d4e8b2d 100644
 +	struct ifinfomsg *ifim = NLMSG_DATA(h);
 +	struct rtattr *rta;
 +	struct ifnamemap *e;
++
++	for (rta = NLMSG_RTA(h, sizeof(*ifim)); NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
++		if (rta->rta_type != IFLA_IFNAME) continue;
++		if (RTA_DATALEN(rta) > IFNAMSIZ) return -ENOBUFS;
  
 -	n = conf.ifc_len / sizeof(struct ifreq);
 -	for (i=k=0; i<n; i++) {
@@ -658,10 +592,6 @@ index 53b80b2..d4e8b2d 100644
 -		}
 -		idx[i-k].if_index = conf.ifc_req[i].ifr_ifindex;
 -		idx[i-k].if_name = conf.ifc_req[i].ifr_name;
-+	for (rta = NLMSG_RTA(h, sizeof(*ifim)); NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
-+		if (rta->rta_type != IFLA_IFNAME) continue;
-+		if (RTA_DATALEN(rta) > IFNAMSIZ) return -ENOBUFS;
-+
 +		ctx->num++;
 +		ctx->str_bytes += RTA_DATALEN(rta) + 1;
 +		e = realloc(ctx->list, sizeof(struct ifnamemap[ctx->num]));
@@ -690,15 +620,16 @@ index 53b80b2..d4e8b2d 100644
 -		__syscall(SYS_close, s);
 +	struct ifnameindexctx _ctx, *ctx = &_ctx;
 +	struct if_nameindex *ifs = NULL;
-+	struct __netlink_handle *nh;
-+	int r, i;
++	int fd, r, i;
 +	char *p;
 +
-+	nh = __netlink_open(NETLINK_ROUTE);
-+	if (!nh) goto err;
++	fd = socket(PF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE);
++	if (fd < 0) goto err;
++
 +	memset(ctx, 0, sizeof(*ctx));
-+	r = __netlink_enumerate(nh, RTM_GETLINK, __handle_link, ctx);
-+	__netlink_close(nh);
++	r = __netlink_enumerate(fd, 1, RTM_GETLINK, AF_UNSPEC, __handle_link, ctx);
++	__syscall(SYS_close,fd);
++
 +	if (r < 0) goto err;
 +
 +	ifs = malloc(sizeof(struct if_nameindex[ctx->num+1]) + ctx->str_bytes);
@@ -722,5 +653,5 @@ index 53b80b2..d4e8b2d 100644
 +	return ifs;
  }
 -- 
-1.9.1
+1.9.2
 
