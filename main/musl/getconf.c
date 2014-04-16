@@ -168,6 +168,8 @@ static const struct conf_variable conf_table[] =
   { "GETPW_R_SIZE_MAX",		SYSCONF,	_SC_GETPW_R_SIZE_MAX	},
 
   /* Commonly provided extensions */
+  { "_SC_PHYS_PAGES",		SYSCONF,	_SC_PHYS_PAGES		},
+  { "_SC_AVPHYS_PAGES",		SYSCONF,	_SC_AVPHYS_PAGES	},
   { "_NPROCESSORS_CONF",	SYSCONF,	_SC_NPROCESSORS_CONF	},
   { "_NPROCESSORS_ONLN",	SYSCONF,	_SC_NPROCESSORS_ONLN	},
 
