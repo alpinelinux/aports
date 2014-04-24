@@ -1,0 +1,136 @@
+From a672a1b8cacc0353d08770763461bc2a38cfa2cc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Thu, 24 Apr 2014 10:22:37 +0300
+Subject: [PATCH v2] bgpd: implement "next-hop-self all"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+As specified in:
+http://www.cisco.com/c/en/us/td/docs/ios-xml/ios/iproute_bgp/command/irg-cr-book/bgp-m1.html#wp4972925610
+
+This allows overriding next-hop for ibgp learned routes on an
+RR for reflected routes.
+
+Especially useful for using iBGP in DMVPN setups. See:
+http://blog.ipspace.net/2014/04/changes-in-ibgp-next-hop-processing.html
+
+Signed-off-by: Timo Teräs <timo.teras@iki.fi>
+---
+Update to work have similar semantics as Cisco. The 'no' prefixed forms all cancel
+any active next-hop-self. And the regular form can be updated to change the form
+that is active.
+
+Also some stylistic improvements done.
+
+ bgpd/bgp_route.c |  3 ++-
+ bgpd/bgp_vty.c   | 30 +++++++++++++++++++++++-------
+ bgpd/bgpd.c      |  5 ++++-
+ bgpd/bgpd.h      |  1 +
+ 4 files changed, 30 insertions(+), 9 deletions(-)
+
+diff --git a/bgpd/bgp_route.c b/bgpd/bgp_route.c
+index 335543e..e0ecd36 100644
+--- a/bgpd/bgp_route.c
++++ b/bgpd/bgp_route.c
+@@ -962,7 +962,8 @@ bgp_announce_check (struct bgp_info *ri, struct peer *peer, struct prefix *p,
+     }
+ 
+   /* next-hop-set */
+-  if (transparent || reflect
++  if (transparent
++      || (reflect && ! CHECK_FLAG (peer->af_flags[afi][safi], PEER_FLAG_NEXTHOP_SELF_ALL))
+       || (CHECK_FLAG (peer->af_flags[afi][safi], PEER_FLAG_NEXTHOP_UNCHANGED)
+ 	  && ((p->family == AF_INET && attr->nexthop.s_addr)
+ #ifdef HAVE_IPV6
+diff --git a/bgpd/bgp_vty.c b/bgpd/bgp_vty.c
+index 0f28894..fcbe8e4 100644
+--- a/bgpd/bgp_vty.c
++++ b/bgpd/bgp_vty.c
+@@ -2061,25 +2061,41 @@ DEFUN (no_neighbor_capability_orf_prefix,
+ /* neighbor next-hop-self. */
+ DEFUN (neighbor_nexthop_self,
+        neighbor_nexthop_self_cmd,
+-       NEIGHBOR_CMD2 "next-hop-self",
++       NEIGHBOR_CMD2 "next-hop-self {all}",
+        NEIGHBOR_STR
+        NEIGHBOR_ADDR_STR2
+-       "Disable the next hop calculation for this neighbor\n")
++       "Disable the next hop calculation for this neighbor\n"
++       "Apply also to ibgp-learned routes when acting as a route reflector\n")
+ {
+-  return peer_af_flag_set_vty (vty, argv[0], bgp_node_afi (vty),
+-			       bgp_node_safi (vty), PEER_FLAG_NEXTHOP_SELF);
++  u_int32_t flags = PEER_FLAG_NEXTHOP_SELF, unset = 0;
++  int rc;
++
++  /* Check if "all" is specified */
++  if (argv[1] != NULL)
++    flags |= PEER_FLAG_NEXTHOP_SELF_ALL;
++  else
++    unset |= PEER_FLAG_NEXTHOP_SELF_ALL;
++
++  rc = peer_af_flag_set_vty (vty, argv[0], bgp_node_afi (vty),
++			     bgp_node_safi (vty), flags);
++  if ( rc == CMD_SUCCESS && unset )
++    rc = peer_af_flag_unset_vty (vty, argv[0], bgp_node_afi (vty),
++				 bgp_node_safi (vty), unset);
++  return rc;
+ }
+ 
+ DEFUN (no_neighbor_nexthop_self,
+        no_neighbor_nexthop_self_cmd,
+-       NO_NEIGHBOR_CMD2 "next-hop-self",
++       NO_NEIGHBOR_CMD2 "next-hop-self {all}",
+        NO_STR
+        NEIGHBOR_STR
+        NEIGHBOR_ADDR_STR2
+-       "Disable the next hop calculation for this neighbor\n")
++       "Disable the next hop calculation for this neighbor\n"
++       "Apply also to ibgp-learned routes when acting as a route reflector\n")
+ {
+   return peer_af_flag_unset_vty (vty, argv[0], bgp_node_afi (vty),
+-				 bgp_node_safi (vty), PEER_FLAG_NEXTHOP_SELF);
++				 bgp_node_safi (vty),
++				 PEER_FLAG_NEXTHOP_SELF|PEER_FLAG_NEXTHOP_SELF_ALL);
+ }
+ 
+ /* neighbor remove-private-AS. */
+diff --git a/bgpd/bgpd.c b/bgpd/bgpd.c
+index c9a04ff..fbc40df 100644
+--- a/bgpd/bgpd.c
++++ b/bgpd/bgpd.c
+@@ -2331,6 +2331,7 @@ static const struct peer_flag_action peer_af_flag_action_list[] =
+     { PEER_FLAG_ORF_PREFIX_SM,            1, peer_change_reset },
+     { PEER_FLAG_ORF_PREFIX_RM,            1, peer_change_reset },
+     { PEER_FLAG_NEXTHOP_LOCAL_UNCHANGED,  0, peer_change_reset_out },
++    { PEER_FLAG_NEXTHOP_SELF_ALL,         1, peer_change_reset_out },
+     { 0, 0, 0 }
+   };
+ 
+@@ -4965,7 +4966,9 @@ bgp_config_write_peer (struct vty *vty, struct bgp *bgp,
+   /* Nexthop self. */
+   if (peer_af_flag_check (peer, afi, safi, PEER_FLAG_NEXTHOP_SELF)
+       && ! peer->af_group[afi][safi])
+-    vty_out (vty, " neighbor %s next-hop-self%s", addr, VTY_NEWLINE);
++    vty_out (vty, " neighbor %s next-hop-self%s%s", addr,
++	     peer_af_flag_check (peer, afi, safi, PEER_FLAG_NEXTHOP_SELF_ALL) ?
++	     " all" : "", VTY_NEWLINE);
+ 
+   /* Remove private AS. */
+   if (peer_af_flag_check (peer, afi, safi, PEER_FLAG_REMOVE_PRIVATE_AS)
+diff --git a/bgpd/bgpd.h b/bgpd/bgpd.h
+index 0746f0d..1e41c00 100644
+--- a/bgpd/bgpd.h
++++ b/bgpd/bgpd.h
+@@ -405,6 +405,7 @@ struct peer
+ #define PEER_FLAG_MAX_PREFIX                (1 << 14) /* maximum prefix */
+ #define PEER_FLAG_MAX_PREFIX_WARNING        (1 << 15) /* maximum prefix warning-only */
+ #define PEER_FLAG_NEXTHOP_LOCAL_UNCHANGED   (1 << 16) /* leave link-local nexthop unchanged */
++#define PEER_FLAG_NEXTHOP_SELF_ALL          (1 << 17) /* next-hop-self all */
+ 
+   /* MD5 password */
+   char *password;
+-- 
+1.9.2
+
