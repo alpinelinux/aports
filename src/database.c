@@ -2294,6 +2294,9 @@ static int apk_db_install_archive_entry(void *_ctx,
 				/* Upgrading package? */
 				if (opkg->name == pkg->name)
 					break;
+				/* Or same source package? */
+				if (opkg->origin == pkg->origin && pkg->origin)
+					break;
 				/* Does the original package replace the new one? */
 				foreach_array_item(dep, opkg->ipkg->replaces) {
 					if (apk_dep_is_materialized(dep, pkg)) {
