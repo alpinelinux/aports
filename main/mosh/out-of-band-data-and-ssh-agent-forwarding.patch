@@ -1,0 +1,2301 @@
+From 0c1b247b616bd4810041f48f4d903828af0ba837 Mon Sep 17 00:00:00 2001
+From: "Timo J. Rinne" <tri@iki.fi>
+Date: Sat, 11 May 2013 21:52:40 +0000
+Subject: [PATCH] Pluggable out of band communication mechanism over Mosh
+ transport layer and agent forwarding support in top of out of band mechanism.
+
+I contrubute this code to Mosh project under the same license that
+Mosh itself is distributed. All licensing options and clauses
+included.
+
+Signed-off-by: Timo J. Rinne <tri@iki.fi>
+---
+ configure.ac                             |  17 +-
+ man/mosh.1                               |   9 +
+ scripts/mosh                             |  20 +-
+ src/Makefile.am                          |   2 +-
+ src/agent/Makefile.am                    |   7 +
+ src/agent/agent.cc                       | 486 +++++++++++++++++++++++++++++++
+ src/agent/agent.h                        | 110 +++++++
+ src/frontend/Makefile.am                 |   4 +-
+ src/frontend/mosh-client.cc              |   9 +-
+ src/frontend/mosh-server.cc              |  62 +++-
+ src/frontend/stmclient.cc                |  31 +-
+ src/frontend/stmclient.h                 |   5 +-
+ src/network/Makefile.am                  |   2 +-
+ src/network/networktransport.cc          |   5 +
+ src/network/networktransport.h           |   3 +
+ src/network/outofband.cc                 | 265 +++++++++++++++++
+ src/network/outofband.h                  | 107 +++++++
+ src/network/transportsender.cc           |  21 +-
+ src/network/transportsender.h            |   8 +-
+ src/protobufs/Makefile.am                |   2 +-
+ src/protobufs/agent.proto                |   8 +
+ src/protobufs/oob.proto                  |  11 +
+ src/protobufs/transportinstruction.proto |   2 +
+ src/util/Makefile.am                     |   2 +-
+ src/util/swrite.cc                       |  45 +++
+ src/util/swrite.h                        |   3 +
+ 26 files changed, 1217 insertions(+), 29 deletions(-)
+ create mode 100644 src/agent/Makefile.am
+ create mode 100644 src/agent/agent.cc
+ create mode 100644 src/agent/agent.h
+ create mode 100644 src/network/outofband.cc
+ create mode 100644 src/network/outofband.h
+ create mode 100644 src/protobufs/agent.proto
+ create mode 100644 src/protobufs/oob.proto
+
+diff --git a/configure.ac b/configure.ac
+index b07291a..bf1a841 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -164,19 +164,28 @@ AS_IF([test x"$with_utempter" != xno],
+       [AC_MSG_WARN([Unable to find libutempter; utmp entries will not be made.])],
+       [AC_MSG_ERROR([--with-utempter was given but libutempter was not found.])])])])
+ 
++# Handle --disable-agent-forwarding
++AC_ARG_ENABLE(agent-forwarding,
++              AS_HELP_STRING([--disable-agent-forwarding],
++                             [disable ssh agent forwarding in compile time]),
++              , enable_agent_forwarding=yes)
++
++
+ AC_SEARCH_LIBS([compress], [z], , [AC_MSG_ERROR([Unable to find zlib.])])
+ 
+ AC_SEARCH_LIBS([socket], [socket])
+ AC_SEARCH_LIBS([inet_addr], [nsl])
+ 
+ # Checks for header files.
+-AC_CHECK_HEADERS([arpa/inet.h fcntl.h langinfo.h limits.h locale.h netinet/in.h stddef.h stdint.h inttypes.h stdlib.h string.h sys/ioctl.h sys/resource.h sys/socket.h sys/stat.h sys/time.h termios.h unistd.h wchar.h wctype.h], [], [AC_MSG_ERROR([Missing required header file.])])
++AC_CHECK_HEADERS([arpa/inet.h fcntl.h langinfo.h limits.h locale.h netinet/in.h stddef.h stdint.h inttypes.h stdlib.h string.h sys/ioctl.h sys/resource.h sys/socket.h sys/stat.h sys/time.h termios.h unistd.h wchar.h wctype.h errno.h], [], [AC_MSG_ERROR([Missing required header file.])])
+ 
+ AC_CHECK_HEADERS([pty.h util.h libutil.h paths.h])
+ AC_CHECK_HEADERS([endian.h sys/endian.h])
+ AC_CHECK_HEADERS([utmpx.h])
+ AC_CHECK_HEADERS([termio.h])
+ AC_CHECK_HEADERS([sys/uio.h])
++AC_CHECK_HEADERS([sys/un.h])
++AC_CHECK_HEADERS([sys/types.h])
+ 
+ # Checks for typedefs, structures, and compiler characteristics.
+ AC_HEADER_STDBOOL
+@@ -322,6 +331,11 @@ AC_CHECK_DECL([IUTF8],
+   [AC_MSG_WARN([No IUTF8 termios mode; character-erase of multibyte character sequence probably does not work properly in canonical mode on this platform.])],
+   [[#include <termios.h>]])
+ 
++if test "$enable_agent_forwarding" = "yes"; then
++  AC_DEFINE([SUPPORT_AGENT_FORWARDING], [], [
++    Define to enable support for SSH agent forwarding])
++fi
++
+ # Checks for protobuf
+ PKG_CHECK_MODULES([protobuf], [protobuf])
+ 
+@@ -334,6 +348,7 @@ AC_CONFIG_FILES([
+   src/protobufs/Makefile
+   src/statesync/Makefile
+   src/terminal/Makefile
++  src/agent/Makefile
+   src/util/Makefile
+   scripts/Makefile
+   src/examples/Makefile
+diff --git a/man/mosh.1 b/man/mosh.1
+index 14405bf..5d98053 100644
+--- a/man/mosh.1
++++ b/man/mosh.1
+@@ -99,6 +99,11 @@ OpenSSH command to remotely execute mosh-server on remote machine (default: "ssh
+ An alternate ssh port can be specified with, \fIe.g.\fP, \-\-ssh="ssh \-p 2222".
+ 
+ .TP
++.B \-\-forward-agent
++Enable ssh authentication agent forwarding. If you use this, please be
++aware of the security implications.
++
++.TP
+ .B \-\-predict=\fIWHEN\fP
+ Controls use of speculative local echo. WHEN defaults to `adaptive'
+ (show predictions on slower links and to smooth out network glitches)
+@@ -113,6 +118,10 @@ of the terminal has been confirmed by the server, without any
+ intervening control character keystrokes.
+ 
+ .TP
++.B \-A
++Synonym for \-\-forward-agent
++
++.TP
+ .B \-a
+ Synonym for \-\-predict=always
+ 
+diff --git a/scripts/mosh b/scripts/mosh
+index 4e8b796..3c7f197 100755
+--- a/scripts/mosh
++++ b/scripts/mosh
+@@ -52,6 +52,8 @@ my $ssh = 'ssh';
+ 
+ my $term_init = 1;
+ 
++my $forward_agent = 0;
++
+ my $help = undef;
+ my $version = undef;
+ 
+@@ -78,6 +80,8 @@ qq{Usage: $0 [options] [--] [user@]host [command...]
+                                 (example: "ssh -p 2222")
+                                 (default: "ssh")
+ 
++-A      --forward-agent      enable ssh agent forwarding
++
+         --no-init            do not send terminal initialization string
+ 
+         --help               this message
+@@ -112,6 +116,8 @@ GetOptions( 'client=s' => \$client,
+ 	    'n' => sub { $predict = 'never' },
+ 	    'p=s' => \$port_request,
+ 	    'ssh=s' => \$ssh,
++            'A' => \$forward_agent,
++            'forward-agent!' => \$forward_agent,
+ 	    'init!' => \$term_init,
+ 	    'help' => \$help,
+ 	    'version' => \$version,
+@@ -242,6 +248,10 @@ if ( $pid == 0 ) { # child
+ 
+   my @server = ( 'new' );
+ 
++  if ( $forward_agent ) {
++    push @server, ( '-A' );
++  }
++
+   push @server, ( '-c', $colors );
+ 
+   push @server, @bind_arguments;
+@@ -259,6 +269,7 @@ if ( $pid == 0 ) { # child
+   }
+ 
+   my $quoted_self = shell_quote( $0 );
++
+   exec "$ssh " . shell_quote( '-S', 'none', '-o', "ProxyCommand=$quoted_self --fake-proxy -- %h %p", '-n', '-tt', $userhost, '--', "$server " . shell_quote( @server ) );
+   die "Cannot exec ssh: $!\n";
+ } else { # parent
+@@ -302,7 +313,14 @@ if ( $pid == 0 ) { # child
+   $ENV{ 'MOSH_KEY' } = $key;
+   $ENV{ 'MOSH_PREDICTION_DISPLAY' } = $predict;
+   $ENV{ 'MOSH_NO_TERM_INIT' } = '1' if !$term_init;
+-  exec {$client} ("$client @cmdline |", $ip, $port);
++  
++  my @client_av = ();
++  if ( $forward_agent ) {
++    push @client_av, ( '-A' );
++  }
++  push @client_av, ( $ip, $port );
++
++  exec {$client} ("$client @cmdline |", @client_av);
+ }
+ 
+ sub shell_quote { join ' ', map {(my $a = $_) =~ s/'/'\\''/g; "'$a'"} @_ }
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 2390f7c..332bb2c 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -1 +1 @@
+-SUBDIRS = protobufs util crypto terminal network statesync frontend examples tests
++SUBDIRS = protobufs util crypto terminal network statesync agent frontend examples tests
+diff --git a/src/agent/Makefile.am b/src/agent/Makefile.am
+new file mode 100644
+index 0000000..7ec93ea
+--- /dev/null
++++ b/src/agent/Makefile.am
+@@ -0,0 +1,7 @@
++AM_CPPFLAGS = -I$(srcdir)/../util -I$(srcdir)/../network -I$(srcdir)/../protobufs -I$(srcdir)/../crypto $(TINFO_CFLAGS)
++AM_CXXFLAGS = $(WARNING_CXXFLAGS) $(PICKY_CXXFLAGS) $(HARDEN_CFLAGS) $(MISC_CXXFLAGS)
++
++noinst_LIBRARIES = libmoshagent.a
++
++libmoshagent_a_SOURCES = agent.h agent.cc
++
+diff --git a/src/agent/agent.cc b/src/agent/agent.cc
+new file mode 100644
+index 0000000..12cd31b
+--- /dev/null
++++ b/src/agent/agent.cc
+@@ -0,0 +1,486 @@
++/*
++    Mosh: the mobile shell
++    Copyright 2012 Keith Winstein
++
++    SSH Agent forwarding for Mosh
++    Copyright 2013 Timo J. Rinne
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++    In addition, as a special exception, the copyright holders give
++    permission to link the code of portions of this program with the
++    OpenSSL library under certain conditions as described in each
++    individual source file, and distribute linked combinations including
++    the two.
++
++    You must obey the GNU General Public License in all respects for all
++    of the code used other than OpenSSL. If you modify file(s) with this
++    exception, you may extend this exception to your version of the
++    file(s), but you are not obligated to do so. If you do not wish to do
++    so, delete this exception statement from your version. If you delete
++    this exception statement from all source files in the program, then
++    also delete it here.
++*/
++
++#include "config.h"
++
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <sys/stat.h>
++#ifdef HAVE_SYS_TYPES_H
++#include <sys/types.h>
++#endif
++#include <sys/socket.h>
++
++#ifdef SUPPORT_AGENT_FORWARDING
++#ifdef HAVE_SYS_UN_H
++#include <sys/un.h>
++#else
++#undef SUPPORT_AGENT_FORWARDING
++#endif
++#endif
++
++#include "prng.h"
++#include "network.h"
++#include "swrite.h"
++#include "select.h"
++#include "outofband.h"
++#include "agent.h"
++#include "agent.pb.h"
++#include "fatal_assert.h"
++
++using namespace Agent;
++using std::string;
++using std::map;
++using Network::OutOfBand;
++using Network::OutOfBandCommunicator;
++
++ProxyAgent::ProxyAgent( bool is_server, bool dummy ) {
++  server = is_server;
++  ok = false;
++  l_sock = -1;
++  l_dir = "";
++  l_path = "";
++  cnt = 0;
++  oob_ctl_ptr = NULL;
++  comm = NULL;
++#ifdef SUPPORT_AGENT_FORWARDING
++  if ( dummy ) {
++    return;
++  }
++  if (server) {
++    PRNG prng;
++    string dir("/tmp/ma-");
++    string voc = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
++    int i;
++    for ( i = 0; i < 10; i++ ) {
++      dir += voc.substr( prng.uint32() % voc.length(), 1 );
++    }
++    if ( mkdir( dir.c_str(), 0700 ) != 0 ) {
++      return;
++    }
++    string path(dir + "/");
++    for ( i = 0; i < 12; i++ ) {
++      path += voc.substr( prng.uint32() % voc.length(), 1 );
++    }
++    int sock = socket( AF_UNIX, SOCK_STREAM, 0 );
++    if ( sock < 0 ) {
++      (void) rmdir( dir.c_str() );
++      return;
++    }
++    if ( fcntl( sock, F_SETFD, FD_CLOEXEC ) != 0 ) {
++      (void) rmdir( dir.c_str() );
++      return;
++    }
++    struct sockaddr_un sunaddr;
++    memset( &sunaddr, 0, sizeof (sunaddr) );
++    sunaddr.sun_family = AF_UNIX;
++    if ( path.length() >= sizeof (sunaddr.sun_path) ) {
++      (void) close( sock );
++      (void) rmdir( dir.c_str() );
++      return;
++    }
++    strncpy( sunaddr.sun_path, path.c_str(), sizeof (sunaddr.sun_path) );
++    if ( bind( sock, (struct sockaddr *) &sunaddr, sizeof (sunaddr) ) < 0 ) {
++      (void) close( sock );
++      (void) rmdir( dir.c_str() );
++      return;
++    }
++    if ( listen( sock, AGENT_PROXY_LISTEN_QUEUE_LENGTH ) < 0) {
++      (void) close( sock );
++      (void) unlink( path.c_str() );
++      (void) rmdir( dir.c_str() );
++      return;
++    }
++    l_sock = sock;
++    l_path = path;
++    l_dir = dir;
++  }
++  ok = true;
++#endif
++}
++
++ProxyAgent::~ProxyAgent( void ) {
++#ifdef SUPPORT_AGENT_FORWARDING
++  shutdown_server();
++#endif
++}
++
++void ProxyAgent::close_sessions( void ) {
++#ifdef SUPPORT_AGENT_FORWARDING
++  map< uint64_t, AgentConnection * >::iterator i = agent_sessions.begin();
++  while ( i != agent_sessions.end() ) {
++    AgentConnection *ac = i->second;
++    agent_sessions.erase( i );
++    delete ac;
++    i = agent_sessions.begin();
++  } 
++#endif
++}
++
++void ProxyAgent::shutdown_server( void ) {
++#ifdef SUPPORT_AGENT_FORWARDING
++  detach_oob();
++  if (ok) {
++    if ( server && l_sock >= 0 ) {
++      (void) close( l_sock );
++      (void) unlink( l_path.c_str() );
++      (void) rmdir( l_dir.c_str() );
++      l_sock = -1;
++      l_path = "";
++      l_dir = "";
++    }
++    close_sessions();
++    ok = false;
++  }
++#endif
++}
++
++void ProxyAgent::attach_oob(OutOfBand *oob_ctl) {
++  detach_oob();
++  fatal_assert(oob_ctl != NULL);
++  oob_ctl_ptr = oob_ctl;
++  comm = oob_ctl_ptr->init(AGENT_FORWARD_OOB_NAME, Network::OOB_MODE_RELIABLE_DATAGRAM);
++  fatal_assert(comm != NULL);
++}
++
++void ProxyAgent::detach_oob(void) {
++  if (oob_ctl_ptr != NULL) {
++    oob_ctl_ptr->uninit(AGENT_FORWARD_OOB_NAME);
++  }
++  oob_ctl_ptr = NULL;
++}
++
++void ProxyAgent::pre_poll( void ) {
++#ifdef SUPPORT_AGENT_FORWARDING
++  if ( ! ok ) {
++    return;
++  }
++  Select &sel = Select::get_instance();
++  if ( server && l_sock >= 0 ) {
++    sel.add_fd( l_sock );
++  }
++  for ( map< uint64_t, AgentConnection * >::iterator i = agent_sessions.begin(); i != agent_sessions.end(); i++ ) {
++    AgentConnection *ac = i->second;
++    if ( ac->sock() >= 0 ) {
++      sel.add_fd( ac->sock() );
++      ac->mark_in_read_set(true);
++    } else {
++      ac->mark_in_read_set(false);
++    }
++  }
++#endif
++}
++
++void ProxyAgent::post_poll( void ) {
++#ifdef SUPPORT_AGENT_FORWARDING
++  if ( ! ok ) {
++    return;
++  }
++  Select &sel = Select::get_instance();
++  // First handle possible incoming data from local sockets
++  map< uint64_t, AgentConnection * >::iterator i =  agent_sessions.begin();
++  while ( ((! server) || (l_sock >= 0)) && i != agent_sessions.end() ) {
++    AgentConnection *ac = i->second;
++    if ( (comm == NULL) || (oob_ctl_ptr == NULL) || ac->eof() || (ac->idle_time() > AGENT_IDLE_TIMEOUT) ) {
++      agent_sessions.erase( i++ );
++      delete ac;
++      continue;
++    } 
++
++    if ( ac->in_read_set() && sel.read( ac->sock() ) ) {
++      while ( true ) {
++	string packet = ac->recv_packet();
++	if ( ! packet.empty() ) {
++	  AgentBuffers::Instruction inst;
++	  inst.set_agent_id(ac->s_id);
++	  inst.set_agent_data(packet);
++	  string pb_packet;
++	  fatal_assert(inst.SerializeToString(&pb_packet));
++	  comm->send(pb_packet);
++	  continue;
++	}
++	if ( ac->eof() ) {
++	  notify_eof(ac->s_id);
++	  agent_sessions.erase( i++ );
++	  delete ac;
++	  break;
++	}
++	i++;
++	break;
++      }
++    } else {
++      i++;
++    }
++  }
++  if ( ! server ) {
++    return;
++  }
++  // Then see if we have mysteriously died in between.
++  if ( l_sock < 0 ) {
++    return;
++  }
++  // Then check for new incoming connections.
++  if ( sel.read( l_sock ) ) {
++    AgentConnection *new_as = get_session();
++    if ( new_as != NULL ) {
++      agent_sessions[new_as->s_id] = new_as;
++    }
++  }
++#endif
++}
++
++void ProxyAgent::post_tick( void ) {
++#ifdef SUPPORT_AGENT_FORWARDING
++  if ( (! ok) || (comm == NULL) ) {
++    return;
++  }
++  while (comm->readable()) {
++    string pb_packet = comm->recv();
++    AgentBuffers::Instruction inst;
++    fatal_assert( inst.ParseFromString(pb_packet) );
++    uint64_t agent_id = inst.agent_id();
++    string agent_data = inst.has_agent_data() ? inst.agent_data() : "";
++    if (agent_data.empty()) {
++      map < uint64_t, AgentConnection* >::iterator i = agent_sessions.find(agent_id);
++      if (i != agent_sessions.end()) {
++	AgentConnection *ac = i->second;
++	agent_sessions.erase( i );
++	delete ac;
++      }
++    } else {
++      map < uint64_t, AgentConnection* >::iterator i = agent_sessions.find(agent_id);
++      if (i == agent_sessions.end()) {
++	AgentConnection *new_as = NULL;
++	if (! server) {
++	  const char *ap = getenv( "SSH_AUTH_SOCK" );
++	  if ( ap != NULL ) {
++	    string agent_path(ap);
++	    if ( ! agent_path.empty() ) {
++	      new_as = new AgentConnection ( agent_path, agent_id, this );
++	    }
++	  }
++	}
++	if (new_as == NULL) {
++	  notify_eof(agent_id);
++	} else {
++	  agent_sessions[agent_id] = new_as;
++	}
++	i = agent_sessions.find(agent_id);
++      }
++      if (i != agent_sessions.end()) {
++	AgentConnection *ac = i->second;
++	uint64_t idle = ac->idle_time();
++	uint64_t timeout = idle < AGENT_IDLE_TIMEOUT ? (AGENT_IDLE_TIMEOUT - idle) * 1000 : 1;
++	if ( swrite_timeout( ac->sock(), timeout, agent_data.c_str(), agent_data.length() ) != 0 ) {
++	  agent_sessions.erase( i );
++	  delete ac;
++	  notify_eof(agent_id);
++	}
++      }
++    }
++  }
++#endif
++}
++
++void ProxyAgent::notify_eof(uint64_t agent_id) {
++#ifdef SUPPORT_AGENT_FORWARDING
++  if (comm == NULL) {
++    return;
++  }
++  AgentBuffers::Instruction inst;
++  inst.set_agent_id(agent_id);
++  string pb_packet;
++  fatal_assert(inst.SerializeToString(&pb_packet));
++  comm->send(pb_packet);
++#endif
++}
++
++
++AgentConnection *ProxyAgent::get_session() {
++#ifdef SUPPORT_AGENT_FORWARDING
++  if ( (! server) || l_sock < 0) {
++    return NULL;
++  }
++  struct sockaddr_un sunaddr; 
++  socklen_t slen = sizeof ( sunaddr );
++  memset( &sunaddr, 0, slen );
++  int sock = accept ( l_sock, (struct sockaddr *)&sunaddr, &slen );
++  if ( sock < 0 ) {
++    return NULL;
++  } 
++
++  if ( (comm == NULL) || (oob_ctl_ptr == NULL) ) {
++     (void) close( sock );
++     return NULL;
++  }
++
++  /* Here we should check that peer effective uid matches with the
++     euid of this process.  Skipping however and trusting the file
++     system to protect the socket. This would basically catch root
++     accessing the socket, but root can change its effective uid to
++     match the socket anyways, so it doesn't really help at all. */
++
++  /* If can't set the socket  mode, discard it. */
++  if ( fcntl( sock, F_SETFD, FD_CLOEXEC ) != 0 || fcntl( sock, F_SETFL, O_NONBLOCK ) != 0 ) {
++     (void) close( sock );
++     return NULL;
++  }
++  return new AgentConnection ( sock, ++cnt, this );
++#else
++  return NULL;
++#endif
++}
++
++AgentConnection::AgentConnection(int sock, uint64_t id, ProxyAgent *s_agent_ptr) {
++  agent_ptr = s_agent_ptr;
++  s_sock = sock;
++  s_id = id;
++  s_in_read_set = false;
++#ifndef SUPPORT_AGENT_FORWARDING
++  if (sock >= 0) {
++    (void) close( sock );
++  }
++  s_sock = -1;
++#endif
++  idle_start = Network::timestamp();
++  packet_buf = "";
++  packet_len = 0;
++}
++
++AgentConnection::AgentConnection(std::string agent_path, uint64_t id, ProxyAgent *s_agent_ptr) {
++  agent_ptr = s_agent_ptr;
++  s_sock = -1;
++  s_id = id;
++  s_in_read_set = false;
++#ifdef SUPPORT_AGENT_FORWARDING
++  int sock = socket( AF_UNIX, SOCK_STREAM, 0 );
++  struct sockaddr_un sunaddr;
++  memset( &sunaddr, 0, sizeof (sunaddr) );
++  sunaddr.sun_family = AF_UNIX;
++  if ( agent_path.length() >= sizeof (sunaddr.sun_path) ) {
++    (void) close( sock );
++    return;
++  }
++  if ( fcntl( sock, F_SETFD, FD_CLOEXEC ) != 0 ) {
++    (void) close( sock );
++    return;
++  }
++  strncpy( sunaddr.sun_path, agent_path.c_str(), sizeof (sunaddr.sun_path) );
++  if ( connect(sock, (struct sockaddr *)&sunaddr, sizeof (sunaddr)) < 0 ) {
++    (void) close( sock );
++    return;
++  }
++  if ( fcntl( sock, F_SETFL, O_NONBLOCK ) != 0 ) {
++    (void) close( sock );
++    return;
++  }
++  s_sock = sock;
++#endif
++  idle_start = Network::timestamp();
++  packet_buf = "";
++  packet_len = 0;
++}
++
++AgentConnection::~AgentConnection() {
++  if ( s_sock >= 0 ) {
++    (void) close ( s_sock );
++  }
++}
++
++uint64_t AgentConnection::idle_time() {
++  return (Network::timestamp() - idle_start) / 1000;
++}
++
++string AgentConnection::recv_packet() {
++#ifdef SUPPORT_AGENT_FORWARDING
++  if (eof()) {
++    return "";
++  }
++  ssize_t rv;
++  if (packet_len < 1) {
++    unsigned char buf[4];
++    rv = read( s_sock, buf, 4 );
++    if ( (rv < 0) && ( errno == EAGAIN || errno == EWOULDBLOCK ) ) {
++      return "";
++    }
++    if ( rv != 4 ) {
++      (void) close(s_sock);
++      s_sock = -1;
++      return "";
++    }
++    if ( buf[0] != 0 ) {
++      (void) close(s_sock);
++      s_sock = -1;
++      return "";
++    }
++
++    packet_len = (((size_t)buf[1]) << 16) | (((size_t)buf[2]) << 8) | ((size_t)buf[3]);
++    if ( packet_len < 1 || packet_len > AGENT_MAXIMUM_PACKET_LENGTH ) {
++      (void) close(s_sock);
++      s_sock = -1;
++      return "";
++    }
++    packet_buf.append((char *)buf, 4);
++    idle_start = Network::timestamp();
++  }
++  /* read in loop until the entire packet is read or EAGAIN happens */
++  do {
++    unsigned char buf[1024];
++    size_t len = packet_len + 4 - packet_buf.length();
++    if (len > sizeof (buf)) {
++      len = sizeof (buf);
++    }
++    rv = read(s_sock, buf, len);
++    if ( (rv < 0) && ( errno == EAGAIN || errno == EWOULDBLOCK ) ) { 
++      return ""; 
++    }
++    if ( rv < 1 ) {
++      (void) close(s_sock);
++      s_sock = -1;
++      return "";
++    }
++    packet_buf.append((char *)buf, rv);    
++    idle_start = Network::timestamp();
++  } while (packet_buf.length() < (packet_len + 4));
++  string packet(packet_buf);
++  packet_buf = "";
++  packet_len = 0;
++  return packet;
++#endif
++  return "";
++}
+diff --git a/src/agent/agent.h b/src/agent/agent.h
+new file mode 100644
+index 0000000..d8f98d4
+--- /dev/null
++++ b/src/agent/agent.h
+@@ -0,0 +1,110 @@
++/*
++    Mosh: the mobile shell
++    Copyright 2012 Keith Winstein
++
++    SSH Agent forwarding for Mosh
++    Copyright 2013 Timo J. Rinne
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++    In addition, as a special exception, the copyright holders give
++    permission to link the code of portions of this program with the
++    OpenSSL library under certain conditions as described in each
++    individual source file, and distribute linked combinations including
++    the two.
++
++    You must obey the GNU General Public License in all respects for all
++    of the code used other than OpenSSL. If you modify file(s) with this
++    exception, you may extend this exception to your version of the
++    file(s), but you are not obligated to do so. If you do not wish to do
++    so, delete this exception statement from your version. If you delete
++    this exception statement from all source files in the program, then
++    also delete it here.
++*/
++
++#ifndef AGENT_HPP
++#define AGENT_HPP
++
++#include <string>
++#include <map>
++
++#include "outofband.h"
++
++#define AGENT_MAXIMUM_PACKET_LENGTH 32768 // Not counting the length field.
++#define AGENT_MAXIMUM_OUTPUT_BUFFER_LENGTH (AGENT_MAXIMUM_PACKET_LENGTH * 4) // Counting all data
++#define AGENT_IDLE_TIMEOUT 30 // In seconds. Must be enforced by the caller.
++#define AGENT_PROXY_LISTEN_QUEUE_LENGTH 4
++#define AGENT_FORWARD_OOB_NAME "ssh-agent-forward"
++
++namespace Agent {
++
++  class ProxyAgent;
++
++  class AgentConnection
++  {
++  private:
++    bool s_in_read_set;
++    int s_sock;
++    uint64_t s_id;
++    uint64_t idle_start;
++    string packet_buf;
++    size_t packet_len;
++    AgentConnection(int sock, uint64_t id, ProxyAgent *s_agent_ptr);
++    AgentConnection(std::string agent_path, uint64_t id, ProxyAgent *s_agent_ptr);
++    ~AgentConnection();
++    int sock() { return s_sock; }
++    bool eof() { return (s_sock < 0); }
++    std::string recv_packet();
++    uint64_t idle_time();
++    void mark_in_read_set(bool val) { s_in_read_set = val; }
++    bool in_read_set( void ) { return s_in_read_set; }
++    ProxyAgent *agent_ptr;
++
++  public:
++    friend ProxyAgent;
++  };
++
++  class ProxyAgent {
++  private:
++    Network::OutOfBand *oob_ctl_ptr;
++    Network::OutOfBand *oob( void ) { return oob_ctl_ptr; }
++    void detach_oob(void);
++    void notify_eof(uint64_t agent_id);
++    AgentConnection *get_session();
++    bool server;
++    bool ok;
++    int l_sock;
++    string l_dir;
++    string l_path;
++    uint64_t cnt;
++    std::map< uint64_t, AgentConnection * > agent_sessions;
++    Network::OutOfBandCommunicator *comm;
++  public:
++    ProxyAgent( bool is_server, bool dummy = false );
++    ~ProxyAgent( void );
++    void attach_oob(Network::OutOfBand *oob_ctl);
++    bool active() { return ok && ((! server) || (l_sock >= 0)); }
++    std::string listener_path( void ) { if ( ok && server && l_sock >= 0 ) return l_path; return ""; }
++    void pre_poll( void );
++    void post_poll( void );
++    void post_tick( void );
++    void close_sessions( void );
++    void shutdown_server( void );
++
++    friend AgentConnection;
++  };
++
++}
++
++#endif
+diff --git a/src/frontend/Makefile.am b/src/frontend/Makefile.am
+index a0345ae..91b5a7b 100644
+--- a/src/frontend/Makefile.am
++++ b/src/frontend/Makefile.am
+@@ -1,7 +1,7 @@
+-AM_CPPFLAGS = -I$(srcdir)/../statesync -I$(srcdir)/../terminal -I$(srcdir)/../network -I$(srcdir)/../crypto -I../protobufs -I$(srcdir)/../util $(TINFO_CFLAGS) $(protobuf_CFLAGS) $(OPENSSL_CFLAGS)
++AM_CPPFLAGS = -I$(srcdir)/../statesync -I$(srcdir)/../terminal -I$(srcdir)/../network -I$(srcdir)/../crypto -I$(srcdir)/../protobufs -I$(srcdir)/../agent -I$(srcdir)/../util $(TINFO_CFLAGS) $(protobuf_CFLAGS) $(OPENSSL_CFLAGS)
+ AM_CXXFLAGS = $(WARNING_CXXFLAGS) $(PICKY_CXXFLAGS) $(HARDEN_CFLAGS) $(MISC_CXXFLAGS)
+ AM_LDFLAGS  = $(HARDEN_LDFLAGS)
+-LDADD = ../crypto/libmoshcrypto.a ../network/libmoshnetwork.a ../statesync/libmoshstatesync.a ../terminal/libmoshterminal.a ../util/libmoshutil.a ../protobufs/libmoshprotos.a -lm $(TINFO_LIBS) $(protobuf_LIBS) $(OPENSSL_LIBS)
++LDADD = ../crypto/libmoshcrypto.a ../network/libmoshnetwork.a ../statesync/libmoshstatesync.a ../terminal/libmoshterminal.a ../agent/libmoshagent.a ../util/libmoshutil.a ../protobufs/libmoshprotos.a -lm $(TINFO_LIBS) $(protobuf_LIBS) $(OPENSSL_LIBS)
+ 
+ mosh_server_LDADD = $(LDADD) $(LIBUTIL)
+ 
+diff --git a/src/frontend/mosh-client.cc b/src/frontend/mosh-client.cc
+index e338682..970cd22 100644
+--- a/src/frontend/mosh-client.cc
++++ b/src/frontend/mosh-client.cc
+@@ -101,10 +101,15 @@ int main( int argc, char *argv[] )
+   /* Detect edge case */
+   fatal_assert( argc > 0 );
+ 
++  bool forward_agent = false;
++
+   /* Get arguments */
+   int opt;
+-  while ( (opt = getopt( argc, argv, "c" )) != -1 ) {
++  while ( (opt = getopt( argc, argv, "cA" )) != -1 ) {
+     switch ( opt ) {
++    case 'A':
++      forward_agent = true;
++      break;
+     case 'c':
+       print_colorcount();
+       exit( 0 );
+@@ -170,7 +175,7 @@ int main( int argc, char *argv[] )
+   set_native_locale();
+ 
+   try {
+-    STMClient client( ip, port, key, predict_mode );
++    STMClient client( ip, port, key, predict_mode, forward_agent );
+     client.init();
+ 
+     try {
+diff --git a/src/frontend/mosh-server.cc b/src/frontend/mosh-server.cc
+index ae2505f..0c54547 100644
+--- a/src/frontend/mosh-server.cc
++++ b/src/frontend/mosh-server.cc
+@@ -80,6 +80,7 @@
+ #include "locale_utils.h"
+ #include "pty_compat.h"
+ #include "select.h"
++#include "agent.h"
+ #include "timestamp.h"
+ #include "fatal_assert.h"
+ 
+@@ -93,11 +94,13 @@ typedef Network::Transport< Terminal::Complete, Network::UserStream > ServerConn
+ 
+ void serve( int host_fd,
+ 	    Terminal::Complete &terminal,
+-	    ServerConnection &network );
++	    ServerConnection &network,
++	    Agent::ProxyAgent &agent );
+ 
+ int run_server( const char *desired_ip, const char *desired_port,
+ 		const string &command_path, char *command_argv[],
+-		const int colors, bool verbose, bool with_motd );
++		const int colors, bool verbose, bool with_motd,
++		bool with_agent_fwd );
+ 
+ using namespace std;
+ 
+@@ -166,6 +169,7 @@ int main( int argc, char *argv[] )
+   string command_path;
+   char **command_argv = NULL;
+   int colors = 0;
++  bool with_agent_fwd = false;
+   bool verbose = false; /* don't close stdin/stdout/stderr */
+   /* Will cause mosh-server not to correctly detach on old versions of sshd. */
+   list<string> locale_vars;
+@@ -186,8 +190,11 @@ int main( int argc, char *argv[] )
+        && (strcmp( argv[ 1 ], "new" ) == 0) ) {
+     /* new option syntax */
+     int opt;
+-    while ( (opt = getopt( argc - 1, argv + 1, "i:p:c:svl:" )) != -1 ) {
++    while ( (opt = getopt( argc - 1, argv + 1, "i:p:c:svl:A" )) != -1 ) {
+       switch ( opt ) {
++      case 'A':
++	with_agent_fwd = true;
++        break;
+       case 'i':
+ 	desired_ip = optarg;
+ 	break;
+@@ -316,7 +323,7 @@ int main( int argc, char *argv[] )
+   }
+ 
+   try {
+-    return run_server( desired_ip, desired_port, command_path, command_argv, colors, verbose, with_motd );
++    return run_server( desired_ip, desired_port, command_path, command_argv, colors, verbose, with_motd, with_agent_fwd );
+   } catch ( const Network::NetworkException& e ) {
+     fprintf( stderr, "Network exception: %s: %s\n",
+ 	     e.function.c_str(), strerror( e.the_errno ) );
+@@ -330,7 +337,8 @@ int main( int argc, char *argv[] )
+ 
+ int run_server( const char *desired_ip, const char *desired_port,
+ 		const string &command_path, char *command_argv[],
+-		const int colors, bool verbose, bool with_motd ) {
++		const int colors, bool verbose, bool with_motd,
++		bool with_agent_fwd ) {
+   /* get initial window size */
+   struct winsize window_size;
+   if ( ioctl( STDIN_FILENO, TIOCGWINSZ, &window_size ) < 0 ) {
+@@ -383,6 +391,13 @@ int run_server( const char *desired_ip, const char *desired_port,
+ 
+   fprintf( stderr, "[mosh-server detached, pid = %d]\n", (int)getpid() );
+ 
++  /* initialize agent listener if requested */
++  Agent::ProxyAgent agent( true, ! with_agent_fwd );
++  if ( with_agent_fwd && (! agent.active()) ) {
++    fprintf( stderr, "Warning: Agent listener initialization failed. Disabling agent forwarding.\n" );
++    with_agent_fwd = false;
++  }
++
+   int master;
+ 
+ #ifdef HAVE_IUTF8
+@@ -453,6 +468,14 @@ int run_server( const char *desired_ip, const char *desired_port,
+       exit( 1 );
+     }
+ 
++    /* set SSH_AUTH_SOCK */
++    if ( agent.active() ) {
++      if ( setenv( "SSH_AUTH_SOCK", agent.listener_path().c_str(), true ) < 0 ) {
++	perror( "setenv" );
++	exit( 1 );
++      }
++    }
++
+     /* ask ncurses to send UTF-8 instead of ISO 2022 for line-drawing chars */
+     if ( setenv( "NCURSES_NO_UTF8_ACS", "1", true ) < 0 ) {
+       perror( "setenv" );
+@@ -487,7 +510,7 @@ int run_server( const char *desired_ip, const char *desired_port,
+ #endif
+ 
+     try {
+-      serve( master, terminal, *network );
++      serve( master, terminal, *network, agent );
+     } catch ( const Network::NetworkException& e ) {
+       fprintf( stderr, "Network exception: %s: %s\n",
+ 	       e.function.c_str(), strerror( e.the_errno ) );
+@@ -513,7 +536,7 @@ int run_server( const char *desired_ip, const char *desired_port,
+   return 0;
+ }
+ 
+-void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network )
++void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network, Agent::ProxyAgent &agent )
+ {
+   /* prepare to poll for events */
+   Select &sel = Select::get_instance();
+@@ -529,6 +552,10 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+   saved_addr.s_addr = 0;
+   #endif
+ 
++  if ( agent.active() ) {
++    agent.attach_oob( network.oob() );
++  }
++
+   while ( 1 ) {
+     try {
+       uint64_t now = Network::timestamp();
+@@ -550,6 +577,10 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+ 	sel.add_fd( host_fd );
+       }
+ 
++      if ( agent.active() ) {
++	agent.pre_poll();
++      }
++
+       int active_fds = sel.select( timeout );
+       if ( active_fds < 0 ) {
+ 	perror( "select" );
+@@ -635,6 +666,7 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+         /* If the pty slave is closed, reading from the master can fail with
+            EIO (see #264).  So we treat errors on read() like EOF. */
+         if ( bytes_read <= 0 ) {
++	  agent.shutdown_server();
+ 	  network.start_shutdown();
+ 	} else {
+ 	  string terminal_to_host = terminal.act( string( buf, bytes_read ) );
+@@ -652,6 +684,7 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+       if ( sel.any_signal() ) {
+ 	/* shutdown signal */
+ 	if ( network.has_remote_addr() && (!network.shutdown_in_progress()) ) {
++	  agent.shutdown_server();
+ 	  network.start_shutdown();
+ 	} else {
+ 	  break;
+@@ -665,6 +698,7 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+ 
+       if ( (!network.shutdown_in_progress()) && sel.error( host_fd ) ) {
+ 	/* host problem */
++	agent.shutdown_server();
+ 	network.start_shutdown();
+       }
+ 
+@@ -709,15 +743,29 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+            && time_since_remote_state >= uint64_t( timeout_if_no_client ) ) {
+         fprintf( stderr, "No connection within %d seconds.\n",
+                  timeout_if_no_client / 1000 );
++	agent.shutdown_server();
+         break;
+       }
+ 
++      if ( agent.active() ) {
++	if ( time_since_remote_state > (AGENT_IDLE_TIMEOUT * 1000) || time_since_remote_state > 30000 ) {
++	  agent.close_sessions();
++	}
++	agent.post_poll();
++      }
++
+       network.tick();
++
++      if ( agent.active() ) {
++	agent.post_tick();
++      }
++
+     } catch ( const Network::NetworkException& e ) {
+       fprintf( stderr, "%s: %s\n", e.function.c_str(), strerror( e.the_errno ) );
+       spin();
+     } catch ( const Crypto::CryptoException& e ) {
+       if ( e.fatal ) {
++	agent.shutdown_server();
+         throw;
+       } else {
+         fprintf( stderr, "Crypto exception: %s\n", e.text.c_str() );
+diff --git a/src/frontend/stmclient.cc b/src/frontend/stmclient.cc
+index 7d68ab1..791300c 100644
+--- a/src/frontend/stmclient.cc
++++ b/src/frontend/stmclient.cc
+@@ -59,6 +59,7 @@
+ #include "pty_compat.h"
+ #include "select.h"
+ #include "timestamp.h"
++#include "agent.h"
+ 
+ #include "networktransport.cc"
+ 
+@@ -346,6 +347,11 @@ void STMClient::main( void )
+   /* initialize signal handling and structures */
+   main_init();
+ 
++  Agent::ProxyAgent agent( false, ! forward_agent );
++  if ( agent.active() ) {
++    agent.attach_oob( network->oob() );
++  }
++
+   /* prepare to poll for events */
+   Select &sel = Select::get_instance();
+ 
+@@ -371,6 +377,10 @@ void STMClient::main( void )
+       }
+       sel.add_fd( STDIN_FILENO );
+ 
++      if ( agent.active() ) {
++	agent.pre_poll();
++      }
++
+       int active_fds = sel.select( wait_time );
+       if ( active_fds < 0 ) {
+ 	perror( "select" );
+@@ -390,6 +400,7 @@ void STMClient::main( void )
+ 
+ 	if ( sel.error( *it ) ) {
+ 	  /* network problem */
++	  agent.shutdown_server();
+ 	  break;
+ 	}
+       }
+@@ -403,9 +414,12 @@ void STMClient::main( void )
+ 	if ( !process_user_input( STDIN_FILENO ) ) {
+ 	  if ( !network->has_remote_addr() ) {
+ 	    break;
+-	  } else if ( !network->shutdown_in_progress() ) {
+-	    overlays.get_notification_engine().set_notification_string( wstring( L"Exiting..." ), true );
+-	    network->start_shutdown();
++	  } else {
++	    agent.shutdown_server();
++	    if ( !network->shutdown_in_progress() ) {
++	      overlays.get_notification_engine().set_notification_string( wstring( L"Exiting..." ), true );
++	      network->start_shutdown();
++	    }
+ 	  }
+ 	}
+       }
+@@ -428,6 +442,7 @@ void STMClient::main( void )
+           break;
+         } else if ( !network->shutdown_in_progress() ) {
+           overlays.get_notification_engine().set_notification_string( wstring( L"Signal received, shutting down..." ), true );
++	  agent.shutdown_server();
+           network->start_shutdown();
+         }
+       }
+@@ -438,6 +453,7 @@ void STMClient::main( void )
+ 	  break;
+ 	} else if ( !network->shutdown_in_progress() ) {
+ 	  overlays.get_notification_engine().set_notification_string( wstring( L"Exiting..." ), true );
++	  agent.shutdown_server();
+ 	  network->start_shutdown();
+ 	}
+       }
+@@ -466,6 +482,7 @@ void STMClient::main( void )
+ 	if ( timestamp() - network->get_latest_remote_state().timestamp > 15000 ) {
+ 	  if ( !network->shutdown_in_progress() ) {
+ 	    overlays.get_notification_engine().set_notification_string( wstring( L"Timed out waiting for server..." ), true );
++	    agent.shutdown_server();
+ 	    network->start_shutdown();
+ 	  }
+ 	} else {
+@@ -477,8 +494,16 @@ void STMClient::main( void )
+ 	overlays.get_notification_engine().set_notification_string( L"" );
+       }
+ 
++      if ( agent.active() ) {
++	agent.post_poll();
++      }
++
+       network->tick();
+ 
++      if ( agent.active() ) {
++	agent.post_tick();
++      }
++
+       const Network::NetworkException *exn = network->get_send_exception();
+       if ( exn ) {
+         overlays.get_notification_engine().set_network_exception( *exn );
+diff --git a/src/frontend/stmclient.h b/src/frontend/stmclient.h
+index 51150c6..6946243 100644
+--- a/src/frontend/stmclient.h
++++ b/src/frontend/stmclient.h
+@@ -47,6 +47,7 @@ class STMClient {
+   std::string ip;
+   int port;
+   std::string key;
++  bool forward_agent;
+ 
+   struct termios saved_termios, raw_termios;
+ 
+@@ -77,8 +78,8 @@ class STMClient {
+   void resume( void ); /* restore state after SIGCONT */
+ 
+ public:
+-  STMClient( const char *s_ip, int s_port, const char *s_key, const char *predict_mode )
+-    : ip( s_ip ), port( s_port ), key( s_key ),
++   STMClient( const char *s_ip, int s_port, const char *s_key, const char *predict_mode, bool s_forward_agent )
++     : ip( s_ip ), port( s_port ), key( s_key ), forward_agent( s_forward_agent ),
+       saved_termios(), raw_termios(),
+       window_size(),
+       local_framebuffer( NULL ),
+diff --git a/src/network/Makefile.am b/src/network/Makefile.am
+index 3143cc4..fe8e3ed 100644
+--- a/src/network/Makefile.am
++++ b/src/network/Makefile.am
+@@ -3,4 +3,4 @@ AM_CXXFLAGS = $(WARNING_CXXFLAGS) $(PICKY_CXXFLAGS) $(HARDEN_CFLAGS) $(MISC_CXXF
+ 
+ noinst_LIBRARIES = libmoshnetwork.a
+ 
+-libmoshnetwork_a_SOURCES = network.cc network.h networktransport.cc networktransport.h transportfragment.cc transportfragment.h transportsender.cc transportsender.h transportstate.h compressor.cc compressor.h
++libmoshnetwork_a_SOURCES = network.cc network.h networktransport.cc networktransport.h transportfragment.cc transportfragment.h transportsender.cc transportsender.h transportstate.h compressor.cc compressor.h outofband.h outofband.cc
+diff --git a/src/network/networktransport.cc b/src/network/networktransport.cc
+index 127e80c..6b62e2d 100644
+--- a/src/network/networktransport.cc
++++ b/src/network/networktransport.cc
+@@ -130,6 +130,11 @@ void Transport<MyState, RemoteState>::recv( void )
+       }
+     }
+ 
++    /* Deliver out of band data */
++    if (inst.has_oob()) {
++      oob()->input(inst.oob());
++    }
++
+     /* apply diff to reference state */
+     TimestampedState<RemoteState> new_state = *reference_state;
+     new_state.timestamp = timestamp();
+diff --git a/src/network/networktransport.h b/src/network/networktransport.h
+index c23d0bd..aca5d38 100644
+--- a/src/network/networktransport.h
++++ b/src/network/networktransport.h
+@@ -83,6 +83,9 @@ namespace Network {
+     /* Find diff between last receiver state and current remote state, then rationalize states. */
+     string get_remote_diff( void );
+ 
++    /* Get refenrece to out of band control object */
++    OutOfBand *oob( void ) { return sender.oob(); }
++
+     /* Shut down other side of connection. */
+     /* Illegal to change current_state after this. */
+     void start_shutdown( void ) { sender.start_shutdown(); }
+diff --git a/src/network/outofband.cc b/src/network/outofband.cc
+new file mode 100644
+index 0000000..41511ef
+--- /dev/null
++++ b/src/network/outofband.cc
+@@ -0,0 +1,265 @@
++/*
++    Mosh: the mobile shell
++    Copyright 2012 Keith Winstein
++
++    Out of band protocol extension for Mosh
++    Copyright 2013 Timo J. Rinne
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++    In addition, as a special exception, the copyright holders give
++    permission to link the code of portions of this program with the
++    OpenSSL library under certain conditions as described in each
++    individual source file, and distribute linked combinations including
++    the two.
++
++    You must obey the GNU General Public License in all respects for all
++    of the code used other than OpenSSL. If you modify file(s) with this
++    exception, you may extend this exception to your version of the
++    file(s), but you are not obligated to do so. If you do not wish to do
++    so, delete this exception statement from your version. If you delete
++    this exception statement from all source files in the program, then
++    also delete it here.
++*/
++
++#include <list>
++#include <stdio.h>
++#include <stdlib.h>
++#include <time.h>
++
++#include "fatal_assert.h"
++
++#include "outofband.h"
++#include "oob.pb.h"
++
++#include <limits.h>
++
++using namespace Network;
++using namespace OutOfBandBuffers;
++using namespace std;
++
++
++OutOfBand::OutOfBand() {
++  seq_num_out = 0;
++  ack_num_out = 0;
++}
++
++OutOfBandCommunicator *OutOfBand::init(string name, OutOfBandMode mode) {
++  map < string, OutOfBandCommunicator * >::iterator i = comms.find(name);
++  if (i != comms.end()) {
++    return NULL;
++  }
++  OutOfBandCommunicator *comm = new OutOfBandCommunicator(mode, name, this);
++  comms[name] = comm;
++  return comm;
++}
++
++void OutOfBand::uninit(string name) {
++  map < string, OutOfBandCommunicator * >::iterator i = comms.find(name);
++  if (i == comms.end()) {
++    return;
++  }
++  OutOfBandCommunicator *comm = i->second;
++  comms.erase(i);
++  delete comm;
++}
++
++void OutOfBand::uninit(OutOfBandCommunicator *comm) {
++  uninit(comm->name);
++}
++
++void OutOfBand::uninit(void) {
++  map < string, OutOfBandCommunicator * >::iterator i;
++  while ((i = comms.begin()) != comms.end()) {
++    OutOfBandCommunicator *comm = i->second;
++    comms.erase(i);
++    delete comm;
++  }
++}
++
++void OutOfBand::input(string data) {
++  Instruction inst;
++  fatal_assert( inst.ParseFromString(data) );
++  if (inst.has_ack_num()) {
++    uint64_t ack_num = inst.ack_num();
++    if (ack_num != 0) {
++      list < OutOfBandBuffers::Instruction >::iterator i = reliable_instruction_out_sent.begin();
++      while (i != reliable_instruction_out_sent.end()) {
++	fatal_assert((*i).has_seq_num());
++	if ((*i).seq_num() <= ack_num) {
++	  i = reliable_instruction_out_sent.erase(i);
++	  continue;
++	}
++	break;
++      }
++    }
++  }
++
++  bool ack = false;
++
++  if (inst.has_payload_type() && inst.has_payload_data()) {
++    string payload_type = inst.payload_type();
++    string payload_data = inst.payload_data();
++    uint64_t seq_num = inst.has_seq_num() ? inst.seq_num() : 0;
++    uint64_t oob_mode = inst.has_oob_mode() ? inst.oob_mode() : 0;
++    OutOfBandCommunicator *comm = NULL;
++    map < string, OutOfBandCommunicator * >::iterator i = comms.find(payload_type);
++    if (i != comms.end()) {
++      comm = i->second;
++      fatal_assert(oob_mode == (uint64_t)comm->mode);
++    }
++    if (seq_num == 0) {
++      fatal_assert(oob_mode == (uint64_t)OOB_MODE_DATAGRAM);
++      if (comm != NULL) {
++	comm->datagram_queue.push(payload_data);
++      }
++    } else {
++      fatal_assert(oob_mode == (uint64_t)OOB_MODE_STREAM || oob_mode == (uint64_t)OOB_MODE_RELIABLE_DATAGRAM);
++      if (seq_num == next_seq_num(ack_num_out)) {
++	if (comm != NULL) {
++	  switch (comm->mode) {
++	  case OOB_MODE_STREAM:
++	    comm->stream_buf += payload_data;
++	    break;
++	  case OOB_MODE_RELIABLE_DATAGRAM:
++	    comm->datagram_queue.push(payload_data);
++	    break;
++	  default:
++	    //NOTREACHED
++	    fatal_assert(comm->mode == OOB_MODE_STREAM || comm->mode == OOB_MODE_RELIABLE_DATAGRAM);
++	  }
++	}
++	ack_num_out = seq_num;
++      }
++      ack = true;
++    }
++  }
++  
++  if (ack && (! has_unsent_output())) {
++    Instruction inst;
++    datagram_instruction_out.push(inst);
++  }
++}
++
++bool OutOfBand::has_output(void) {
++  return (! (datagram_instruction_out.empty() && reliable_instruction_out_sent.empty() && reliable_instruction_out_unsent.empty()));
++}
++
++bool OutOfBand::has_unsent_output(void) {
++  return (! (datagram_instruction_out.empty() && reliable_instruction_out_unsent.empty()));
++}
++
++string OutOfBand::output(void) {
++  string rv("");
++  if (! datagram_instruction_out.empty()) {
++    Instruction inst = datagram_instruction_out.front();
++    if (ack_num_out != 0) {
++      inst.set_ack_num(ack_num_out);
++    }
++    fatal_assert(inst.SerializeToString(&rv));
++    datagram_instruction_out.pop();
++    return rv;
++  }
++  if (! reliable_instruction_out_sent.empty()) {
++    Instruction inst = reliable_instruction_out_sent.front();
++    if (ack_num_out != 0) {
++      inst.set_ack_num(ack_num_out);
++    }
++    fatal_assert(inst.SerializeToString(&rv));
++    return rv;
++  }
++  if (! reliable_instruction_out_unsent.empty()) {
++    Instruction inst = reliable_instruction_out_unsent.front();
++    reliable_instruction_out_sent.push_back(inst);
++    reliable_instruction_out_unsent.pop_front();
++    if (ack_num_out != 0) {
++      inst.set_ack_num(ack_num_out);
++    }
++    fatal_assert(inst.SerializeToString(&rv));
++    return rv;
++  }
++  return "";
++}
++
++OutOfBandCommunicator::OutOfBandCommunicator(OutOfBandMode oob_mode, string oob_name, OutOfBand *oob_ctl) {
++  mode = oob_mode;
++  name = oob_name;
++  oob_ctl_ptr = oob_ctl;
++  stream_buf = "";
++}
++
++void OutOfBandCommunicator::send(string data) {
++  Instruction inst;
++  if (oob()->ack_num_out != 0) {
++    inst.set_ack_num(oob()->ack_num_out);
++  }
++  inst.set_payload_type(name);
++  inst.set_payload_data(data);
++  inst.set_oob_mode((uint64_t)mode);
++  switch (mode) {
++  case OOB_MODE_STREAM:
++  case OOB_MODE_RELIABLE_DATAGRAM:
++    inst.set_seq_num(oob()->increment_seq_num_out());
++    oob()->reliable_instruction_out_unsent.push_back(inst);
++    break;
++    //FALLTHROUGH
++  case OOB_MODE_DATAGRAM:
++    oob()->datagram_instruction_out.push(inst);
++  }
++}
++
++bool OutOfBandCommunicator::readable(void) {
++  switch (mode) {
++  case OOB_MODE_STREAM:
++    return (! stream_buf.empty());
++  case OOB_MODE_DATAGRAM:
++  case OOB_MODE_RELIABLE_DATAGRAM:
++    return (! datagram_queue.empty());
++  }
++  //NOTREACHED
++  return false;
++}
++
++string OutOfBandCommunicator::recv(void) {
++  string rv("");
++  switch (mode) {
++  case OOB_MODE_STREAM:
++    if (stream_buf.empty()) {
++      return rv;
++    }
++    rv = stream_buf;
++    stream_buf = "";
++    return rv;
++  case OOB_MODE_RELIABLE_DATAGRAM:
++  case OOB_MODE_DATAGRAM:
++    if (datagram_queue.empty()) {
++      return rv;
++    }
++    rv = datagram_queue.front();
++    datagram_queue.pop();
++    return rv;
++  }
++  //NOTREACHED
++  return "";
++}
++
++string OutOfBandCommunicator::read(size_t len) {
++  fatal_assert(mode == OOB_MODE_STREAM);
++  if (stream_buf.length() < len) {
++    return "";
++  }
++  string rv = stream_buf.substr(0, len);
++  stream_buf = stream_buf.substr(len);
++  return rv;
++}
+diff --git a/src/network/outofband.h b/src/network/outofband.h
+new file mode 100644
+index 0000000..1c95ed5
+--- /dev/null
++++ b/src/network/outofband.h
+@@ -0,0 +1,107 @@
++/*
++    Mosh: the mobile shell
++    Copyright 2012 Keith Winstein
++
++    Out of band protocol extension for Mosh
++    Copyright 2013 Timo J. Rinne
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++    In addition, as a special exception, the copyright holders give
++    permission to link the code of portions of this program with the
++    OpenSSL library under certain conditions as described in each
++    individual source file, and distribute linked combinations including
++    the two.
++
++    You must obey the GNU General Public License in all respects for all
++    of the code used other than OpenSSL. If you modify file(s) with this
++    exception, you may extend this exception to your version of the
++    file(s), but you are not obligated to do so. If you do not wish to do
++    so, delete this exception statement from your version. If you delete
++    this exception statement from all source files in the program, then
++    also delete it here.
++*/
++
++
++#ifndef OUT_OF_BAND_HPP
++#define OUT_OF_BAND_HPP
++
++#include <string>
++#include <queue>
++#include <list>
++#include <map>
++
++#include "oob.pb.h"
++
++using std::string;
++using std::queue;
++using std::list;
++using std::map;
++
++namespace Network {
++
++  enum OutOfBandMode { OOB_MODE_STREAM = 1, OOB_MODE_DATAGRAM = 2, OOB_MODE_RELIABLE_DATAGRAM = 3 };
++
++  class OutOfBand;
++
++  class OutOfBandCommunicator
++  {
++  private:
++    OutOfBandMode mode;
++    string name;
++    string stream_buf;
++    queue < string > datagram_queue;
++    OutOfBand *oob_ctl_ptr;
++    OutOfBand *oob(void) { return oob_ctl_ptr; }
++    OutOfBandCommunicator(OutOfBandMode oob_mode, string oob_name, OutOfBand *oob_ctl);
++
++  public:
++    void send(string data);
++    bool readable(void);
++    string recv(void);
++    string read(size_t len);
++
++    friend class OutOfBand;
++  };
++
++  class OutOfBand
++  {
++  private:
++    map < string, OutOfBandCommunicator * > comms;
++    queue < OutOfBandBuffers::Instruction > datagram_instruction_out;
++    list < OutOfBandBuffers::Instruction > reliable_instruction_out_sent;
++    list < OutOfBandBuffers::Instruction > reliable_instruction_out_unsent;
++    uint64_t seq_num_out;
++    uint64_t ack_num_out;
++    uint64_t next_seq_num(uint64_t sn) { sn++; if (sn == 0) sn++; return sn; }
++    uint64_t increment_seq_num_out(void) { seq_num_out = next_seq_num(seq_num_out); return seq_num_out; }
++
++  public:
++    OutOfBand();
++    ~OutOfBand() { uninit(); }
++    OutOfBandCommunicator *init(string name, OutOfBandMode mode);
++    void uninit(string name);
++    void uninit(OutOfBandCommunicator *comm);
++    void uninit(void);
++    bool has_output(void);
++    bool has_unsent_output(void);
++    // input and output are to be called from transport code only
++    void input(string data);
++    string output(void);
++
++    friend class OutOfBandCommunicator;
++  };
++}
++
++#endif
+diff --git a/src/network/transportsender.cc b/src/network/transportsender.cc
+index e641655..816b76d 100644
+--- a/src/network/transportsender.cc
++++ b/src/network/transportsender.cc
+@@ -96,14 +96,18 @@ void TransportSender<MyState>::calculate_timers( void )
+     next_ack_time = now + ACK_DELAY;
+   }
+ 
+-  if ( !(current_state == sent_states.back().state) ) {
++  if ( oob()->has_unsent_output() ) {
++    next_send_time = sent_states.back().timestamp + send_interval();
++    if ( mindelay_clock != uint64_t( -1 ) ) {
++      next_send_time = max( next_send_time, mindelay_clock + SEND_MINDELAY );
++    }
++  } else if ( !(current_state == sent_states.back().state) ) {
+     if ( mindelay_clock == uint64_t( -1 ) ) {
+       mindelay_clock = now;
+     }
+-
+     next_send_time = max( mindelay_clock + SEND_MINDELAY,
+ 			  sent_states.back().timestamp + send_interval() );
+-  } else if ( !(current_state == assumed_receiver_state->state)
++  } else if ( ((!(current_state == assumed_receiver_state->state)) || (oob()->has_output()))
+ 	      && (last_heard + ACTIVE_RETRY_TIMEOUT > now) ) {
+     next_send_time = sent_states.back().timestamp + send_interval();
+     if ( mindelay_clock != uint64_t( -1 ) ) {
+@@ -181,11 +185,12 @@ void TransportSender<MyState>::tick( void )
+   if ( diff.empty() && (now >= next_ack_time) ) {
+     send_empty_ack();
+     mindelay_clock = uint64_t( -1 );
+-  } else if ( !diff.empty() && ( (now >= next_send_time)
+-			  || (now >= next_ack_time) ) ) {
++  } else if ( !diff.empty() && ((now >= next_send_time) || (now >= next_ack_time)) ) {
+     /* Send diffs or ack */
+     send_to_receiver( diff );
+     mindelay_clock = uint64_t( -1 );
++  } else if ( oob()->has_output() && ((now >= next_send_time) || (now >= next_ack_time)) ) {
++    send_empty_ack();
+   }
+ }
+ 
+@@ -194,7 +199,7 @@ void TransportSender<MyState>::send_empty_ack( void )
+ {
+   uint64_t now = timestamp();
+ 
+-  assert( now >= next_ack_time );
++  assert( now >= next_ack_time || oob()->has_output() );
+ 
+   uint64_t new_num = sent_states.back().num + 1;
+ 
+@@ -316,6 +321,10 @@ void TransportSender<MyState>::send_in_fragments( string diff, uint64_t new_num
+   inst.set_diff( diff );
+   inst.set_chaff( make_chaff() );
+ 
++  if (oob()->has_output()) {
++    inst.set_oob(oob()->output());
++  }
++
+   if ( new_num == uint64_t(-1) ) {
+     shutdown_tries++;
+   }
+diff --git a/src/network/transportsender.h b/src/network/transportsender.h
+index 572c47f..3d4285b 100644
+--- a/src/network/transportsender.h
++++ b/src/network/transportsender.h
+@@ -42,6 +42,7 @@
+ #include "transportstate.h"
+ #include "transportfragment.h"
+ #include "prng.h"
++#include "outofband.h"
+ 
+ using std::list;
+ using std::pair;
+@@ -104,6 +105,8 @@ namespace Network {
+ 
+     uint64_t last_heard; /* last time received new state */
+ 
++    OutOfBand oob_ctl; /* out of band protocol object */
++
+     /* chaff to disguise instruction length */
+     PRNG prng;
+     const string make_chaff( void );
+@@ -133,7 +136,10 @@ namespace Network {
+     void remote_heard( uint64_t ts ) { last_heard = ts; }
+ 
+     /* Starts shutdown sequence */
+-    void start_shutdown( void ) { if ( !shutdown_in_progress ) { shutdown_start = timestamp(); shutdown_in_progress = true; } }
++    void start_shutdown( void ) { if ( !shutdown_in_progress ) { oob_ctl.uninit(); shutdown_start = timestamp(); shutdown_in_progress = true; } }
++
++    /* Get refenrece to out of band control object */
++    OutOfBand *oob( void ) { return &oob_ctl; }
+ 
+     /* Misc. getters and setters */
+     /* Cannot modify current_state while shutdown in progress */
+diff --git a/src/protobufs/Makefile.am b/src/protobufs/Makefile.am
+index 131ec4e..419525a 100644
+--- a/src/protobufs/Makefile.am
++++ b/src/protobufs/Makefile.am
+@@ -1,4 +1,4 @@
+-source = userinput.proto hostinput.proto transportinstruction.proto
++source = userinput.proto hostinput.proto transportinstruction.proto oob.proto agent.proto
+ 
+ AM_CPPFLAGS = $(protobuf_CFLAGS)
+ AM_CXXFLAGS = $(WARNING_CXXFLAGS) $(HARDEN_CFLAGS) $(MISC_CXXFLAGS)
+diff --git a/src/protobufs/agent.proto b/src/protobufs/agent.proto
+new file mode 100644
+index 0000000..b350331
+--- /dev/null
++++ b/src/protobufs/agent.proto
+@@ -0,0 +1,8 @@
++option optimize_for = LITE_RUNTIME;
++
++package AgentBuffers;
++
++message Instruction {
++  required uint64 agent_id = 1;
++  optional bytes agent_data = 2;
++}
+diff --git a/src/protobufs/oob.proto b/src/protobufs/oob.proto
+new file mode 100644
+index 0000000..561ca31
+--- /dev/null
++++ b/src/protobufs/oob.proto
+@@ -0,0 +1,11 @@
++option optimize_for = LITE_RUNTIME;
++
++package OutOfBandBuffers;
++
++message Instruction {
++  optional uint64 seq_num = 1;
++  optional uint64 ack_num = 2;
++  optional uint64 oob_mode = 3;
++  optional bytes payload_type = 4;
++  optional bytes payload_data = 5;
++}
+diff --git a/src/protobufs/transportinstruction.proto b/src/protobufs/transportinstruction.proto
+index d4a76f7..bb22a8c 100644
+--- a/src/protobufs/transportinstruction.proto
++++ b/src/protobufs/transportinstruction.proto
+@@ -13,4 +13,6 @@ message Instruction {
+   optional bytes diff = 6;
+ 
+   optional bytes chaff = 7;
++
++  optional bytes oob = 8;
+ }
+diff --git a/src/util/Makefile.am b/src/util/Makefile.am
+index 25dc3dd..ea41058 100644
+--- a/src/util/Makefile.am
++++ b/src/util/Makefile.am
+@@ -2,4 +2,4 @@ AM_CXXFLAGS = $(WARNING_CXXFLAGS) $(PICKY_CXXFLAGS) $(HARDEN_CFLAGS) $(MISC_CXXF
+ 
+ noinst_LIBRARIES = libmoshutil.a
+ 
+-libmoshutil_a_SOURCES = locale_utils.cc locale_utils.h swrite.cc swrite.h dos_assert.h fatal_assert.h select.h select.cc timestamp.h timestamp.cc pty_compat.cc pty_compat.h
++libmoshutil_a_SOURCES = locale_utils.cc locale_utils.h swrite.cc swrite.h dos_assert.h fatal_assert.h select.h select.cc timestamp.h timestamp.cc pty_compat.cc pty_compat.h 
+diff --git a/src/util/swrite.cc b/src/util/swrite.cc
+index 64a772c..458477c 100644
+--- a/src/util/swrite.cc
++++ b/src/util/swrite.cc
+@@ -30,11 +30,17 @@
+     also delete it here.
+ */
+ 
++#include "config.h"
++
+ #include <unistd.h>
+ #include <string.h>
+ #include <stdio.h>
++#include <errno.h>
++#include <time.h>
+ 
++#include "timestamp.h"
+ #include "swrite.h"
++#include "fatal_assert.h"
+ 
+ int swrite( int fd, const char *str, ssize_t len )
+ {
+@@ -53,3 +59,42 @@ int swrite( int fd, const char *str, ssize_t len )
+ 
+   return 0;
+ }
++
++
++int swrite_timeout( int fd, uint64_t timeout_ms, const char *str, ssize_t len )
++{
++  size_t total_bytes_written = 0;
++  size_t bytes_to_write = ( len >= 0 ) ? len : (ssize_t) strlen( str );
++  uint64_t t0 = frozen_timestamp();
++  uint64_t iteration = 0;
++
++  while ( total_bytes_written < bytes_to_write ) {
++    iteration++;
++    ssize_t rv = write( fd, str + total_bytes_written, bytes_to_write - total_bytes_written);
++    if ( rv > 0 ) {
++      total_bytes_written += rv;
++      continue;
++    } else if ( rv < 0 && ( errno == EAGAIN || errno == EWOULDBLOCK ) ) {
++      uint64_t t1 = frozen_timestamp();
++      fatal_assert( t1 >= t0 );
++      uint64_t total_time_spent = t1 - t0;
++      if ( total_time_spent > timeout_ms ) {
++	perror( "write" );
++	return -1;
++      }
++      uint64_t time_left = timeout_ms - total_time_spent;
++      uint64_t sleep_time = 999;
++      if ( time_left < sleep_time ) sleep_time = time_left;
++      if ( iteration * 50 < sleep_time ) sleep_time = iteration * 50;
++      fatal_assert( sleep_time > 0 );
++      struct timespec req;
++      req.tv_sec = 0;
++      req.tv_nsec = sleep_time * 1000000;
++      nanosleep( &req, NULL );
++      continue;
++    } else {
++      perror( "write" );
++    }
++  }
++  return 0;
++}
+diff --git a/src/util/swrite.h b/src/util/swrite.h
+index e75bf7e..2f72782 100644
+--- a/src/util/swrite.h
++++ b/src/util/swrite.h
+@@ -33,6 +33,9 @@
+ #ifndef SWRITE_HPP
+ #define SWRITE_HPP
+ 
++#include <stdint.h>
++
+ int swrite( int fd, const char *str, ssize_t len = -1 );
++int swrite_timeout( int fd, uint64_t timeout_ms, const char *str, ssize_t len = -1 );
+ 
+ #endif
+-- 
+1.9.1
+
+From 42da0db244f79be4218fb7aa0edf801bf4d2e1f3 Mon Sep 17 00:00:00 2001
+From: "Timo J. Rinne" <tri@iki.fi>
+Date: Tue, 14 May 2013 07:57:44 +0000
+Subject: [PATCH] Fixed broken friend declaration.
+
+Signed-off-by: Timo J. Rinne <tri@iki.fi>
+---
+ src/agent/agent.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/agent/agent.h b/src/agent/agent.h
+index d8f98d4..835e29c 100644
+--- a/src/agent/agent.h
++++ b/src/agent/agent.h
+@@ -72,7 +72,7 @@ namespace Agent {
+     ProxyAgent *agent_ptr;
+ 
+   public:
+-    friend ProxyAgent;
++    friend class ProxyAgent;
+   };
+ 
+   class ProxyAgent {
+@@ -102,7 +102,7 @@ namespace Agent {
+     void close_sessions( void );
+     void shutdown_server( void );
+ 
+-    friend AgentConnection;
++    friend class AgentConnection;
+   };
+ 
+ }
+-- 
+1.9.1
+
+From 3052df6e3cb41db932e7dd940ab39b83a14b4f29 Mon Sep 17 00:00:00 2001
+From: "Timo J. Rinne" <tri@iki.fi>
+Date: Tue, 14 May 2013 12:18:51 +0000
+Subject: [PATCH] Added some generalization to handling oob objects in event
+ loop. Does not add any new functionality as such, but makes it easier to add
+ new stuff in future.
+
+Signed-off-by: Timo J. Rinne <tri@iki.fi>
+---
+ src/agent/agent.cc          |  6 ++---
+ src/agent/agent.h           | 23 ++++++++++++--------
+ src/frontend/mosh-server.cc | 30 ++++++++++---------------
+ src/frontend/stmclient.cc   | 27 +++++++++--------------
+ src/network/outofband.cc    | 53 ++++++++++++++++++++++++++++++++++++++++++---
+ src/network/outofband.h     | 29 +++++++++++++++++++++++--
+ 6 files changed, 115 insertions(+), 53 deletions(-)
+
+diff --git a/src/agent/agent.cc b/src/agent/agent.cc
+index 12cd31b..5316f05 100644
+--- a/src/agent/agent.cc
++++ b/src/agent/agent.cc
+@@ -136,7 +136,7 @@ ProxyAgent::ProxyAgent( bool is_server, bool dummy ) {
+ 
+ ProxyAgent::~ProxyAgent( void ) {
+ #ifdef SUPPORT_AGENT_FORWARDING
+-  shutdown_server();
++  shutdown();
+ #endif
+ }
+ 
+@@ -152,7 +152,7 @@ void ProxyAgent::close_sessions( void ) {
+ #endif
+ }
+ 
+-void ProxyAgent::shutdown_server( void ) {
++void ProxyAgent::shutdown( void ) {
+ #ifdef SUPPORT_AGENT_FORWARDING
+   detach_oob();
+   if (ok) {
+@@ -174,7 +174,7 @@ void ProxyAgent::attach_oob(OutOfBand *oob_ctl) {
+   detach_oob();
+   fatal_assert(oob_ctl != NULL);
+   oob_ctl_ptr = oob_ctl;
+-  comm = oob_ctl_ptr->init(AGENT_FORWARD_OOB_NAME, Network::OOB_MODE_RELIABLE_DATAGRAM);
++  comm = oob_ctl_ptr->init(AGENT_FORWARD_OOB_NAME, Network::OOB_MODE_RELIABLE_DATAGRAM, this);
+   fatal_assert(comm != NULL);
+ }
+ 
+diff --git a/src/agent/agent.h b/src/agent/agent.h
+index 835e29c..64bbf8a 100644
+--- a/src/agent/agent.h
++++ b/src/agent/agent.h
+@@ -75,11 +75,13 @@ namespace Agent {
+     friend class ProxyAgent;
+   };
+ 
+-  class ProxyAgent {
++  class ProxyAgent : public Network::OutOfBandPlugin
++  {
+   private:
++    void detach_oob(void);
++    Network::OutOfBandCommunicator *comm;
+     Network::OutOfBand *oob_ctl_ptr;
+     Network::OutOfBand *oob( void ) { return oob_ctl_ptr; }
+-    void detach_oob(void);
+     void notify_eof(uint64_t agent_id);
+     AgentConnection *get_session();
+     bool server;
+@@ -89,18 +91,21 @@ namespace Agent {
+     string l_path;
+     uint64_t cnt;
+     std::map< uint64_t, AgentConnection * > agent_sessions;
+-    Network::OutOfBandCommunicator *comm;
++
+   public:
+-    ProxyAgent( bool is_server, bool dummy = false );
+-    ~ProxyAgent( void );
+-    void attach_oob(Network::OutOfBand *oob_ctl);
+-    bool active() { return ok && ((! server) || (l_sock >= 0)); }
+-    std::string listener_path( void ) { if ( ok && server && l_sock >= 0 ) return l_path; return ""; }
++    // Required by parent class
++    bool active( void ) { return ok && ((! server) || (l_sock >= 0)); }
+     void pre_poll( void );
+     void post_poll( void );
+     void post_tick( void );
+     void close_sessions( void );
+-    void shutdown_server( void );
++    void shutdown( void );
++    void attach_oob(Network::OutOfBand *oob_ctl);
++
++    // Class specific stuff
++    ProxyAgent( bool is_server, bool dummy = false );
++    ~ProxyAgent( void );
++    std::string listener_path( void ) { if ( ok && server && l_sock >= 0 ) return l_path; return ""; }
+ 
+     friend class AgentConnection;
+   };
+diff --git a/src/frontend/mosh-server.cc b/src/frontend/mosh-server.cc
+index 0c54547..65c18f7 100644
+--- a/src/frontend/mosh-server.cc
++++ b/src/frontend/mosh-server.cc
+@@ -552,9 +552,7 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+   saved_addr.s_addr = 0;
+   #endif
+ 
+-  if ( agent.active() ) {
+-    agent.attach_oob( network.oob() );
+-  }
++  agent.attach_oob(network.oob());
+ 
+   while ( 1 ) {
+     try {
+@@ -577,9 +575,7 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+ 	sel.add_fd( host_fd );
+       }
+ 
+-      if ( agent.active() ) {
+-	agent.pre_poll();
+-      }
++      network.oob()->pre_poll();
+ 
+       int active_fds = sel.select( timeout );
+       if ( active_fds < 0 ) {
+@@ -666,7 +662,7 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+         /* If the pty slave is closed, reading from the master can fail with
+            EIO (see #264).  So we treat errors on read() like EOF. */
+         if ( bytes_read <= 0 ) {
+-	  agent.shutdown_server();
++	  network.oob()->shutdown();
+ 	  network.start_shutdown();
+ 	} else {
+ 	  string terminal_to_host = terminal.act( string( buf, bytes_read ) );
+@@ -684,7 +680,7 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+       if ( sel.any_signal() ) {
+ 	/* shutdown signal */
+ 	if ( network.has_remote_addr() && (!network.shutdown_in_progress()) ) {
+-	  agent.shutdown_server();
++	  network.oob()->shutdown();
+ 	  network.start_shutdown();
+ 	} else {
+ 	  break;
+@@ -698,7 +694,7 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+ 
+       if ( (!network.shutdown_in_progress()) && sel.error( host_fd ) ) {
+ 	/* host problem */
+-	agent.shutdown_server();
++	network.oob()->shutdown();
+ 	network.start_shutdown();
+       }
+ 
+@@ -743,29 +739,25 @@ void serve( int host_fd, Terminal::Complete &terminal, ServerConnection &network
+            && time_since_remote_state >= uint64_t( timeout_if_no_client ) ) {
+         fprintf( stderr, "No connection within %d seconds.\n",
+                  timeout_if_no_client / 1000 );
+-	agent.shutdown_server();
++	network.oob()->shutdown();
+         break;
+       }
+ 
+-      if ( agent.active() ) {
+-	if ( time_since_remote_state > (AGENT_IDLE_TIMEOUT * 1000) || time_since_remote_state > 30000 ) {
+-	  agent.close_sessions();
+-	}
+-	agent.post_poll();
++      if ( time_since_remote_state > (AGENT_IDLE_TIMEOUT * 1000) || time_since_remote_state > 30000 ) {
++	network.oob()->close_sessions();
+       }
++      network.oob()->post_poll();
+ 
+       network.tick();
+ 
+-      if ( agent.active() ) {
+-	agent.post_tick();
+-      }
++      network.oob()->post_tick();
+ 
+     } catch ( const Network::NetworkException& e ) {
+       fprintf( stderr, "%s: %s\n", e.function.c_str(), strerror( e.the_errno ) );
+       spin();
+     } catch ( const Crypto::CryptoException& e ) {
+       if ( e.fatal ) {
+-	agent.shutdown_server();
++	network.oob()->shutdown();
+         throw;
+       } else {
+         fprintf( stderr, "Crypto exception: %s\n", e.text.c_str() );
+diff --git a/src/frontend/stmclient.cc b/src/frontend/stmclient.cc
+index 791300c..ceba763 100644
+--- a/src/frontend/stmclient.cc
++++ b/src/frontend/stmclient.cc
+@@ -348,9 +348,8 @@ void STMClient::main( void )
+   main_init();
+ 
+   Agent::ProxyAgent agent( false, ! forward_agent );
+-  if ( agent.active() ) {
+-    agent.attach_oob( network->oob() );
+-  }
++
++  agent.attach_oob(network->oob());
+ 
+   /* prepare to poll for events */
+   Select &sel = Select::get_instance();
+@@ -377,9 +376,7 @@ void STMClient::main( void )
+       }
+       sel.add_fd( STDIN_FILENO );
+ 
+-      if ( agent.active() ) {
+-	agent.pre_poll();
+-      }
++      network->oob()->pre_poll();
+ 
+       int active_fds = sel.select( wait_time );
+       if ( active_fds < 0 ) {
+@@ -400,7 +397,7 @@ void STMClient::main( void )
+ 
+ 	if ( sel.error( *it ) ) {
+ 	  /* network problem */
+-	  agent.shutdown_server();
++	  network->oob()->shutdown();
+ 	  break;
+ 	}
+       }
+@@ -415,7 +412,7 @@ void STMClient::main( void )
+ 	  if ( !network->has_remote_addr() ) {
+ 	    break;
+ 	  } else {
+-	    agent.shutdown_server();
++	    network->oob()->shutdown();
+ 	    if ( !network->shutdown_in_progress() ) {
+ 	      overlays.get_notification_engine().set_notification_string( wstring( L"Exiting..." ), true );
+ 	      network->start_shutdown();
+@@ -442,7 +439,7 @@ void STMClient::main( void )
+           break;
+         } else if ( !network->shutdown_in_progress() ) {
+           overlays.get_notification_engine().set_notification_string( wstring( L"Signal received, shutting down..." ), true );
+-	  agent.shutdown_server();
++	  network->oob()->shutdown();
+           network->start_shutdown();
+         }
+       }
+@@ -453,7 +450,7 @@ void STMClient::main( void )
+ 	  break;
+ 	} else if ( !network->shutdown_in_progress() ) {
+ 	  overlays.get_notification_engine().set_notification_string( wstring( L"Exiting..." ), true );
+-	  agent.shutdown_server();
++	  network->oob()->shutdown();
+ 	  network->start_shutdown();
+ 	}
+       }
+@@ -482,7 +479,7 @@ void STMClient::main( void )
+ 	if ( timestamp() - network->get_latest_remote_state().timestamp > 15000 ) {
+ 	  if ( !network->shutdown_in_progress() ) {
+ 	    overlays.get_notification_engine().set_notification_string( wstring( L"Timed out waiting for server..." ), true );
+-	    agent.shutdown_server();
++	    network->oob()->shutdown();
+ 	    network->start_shutdown();
+ 	  }
+ 	} else {
+@@ -494,15 +491,11 @@ void STMClient::main( void )
+ 	overlays.get_notification_engine().set_notification_string( L"" );
+       }
+ 
+-      if ( agent.active() ) {
+-	agent.post_poll();
+-      }
++      network->oob()->post_poll();
+ 
+       network->tick();
+ 
+-      if ( agent.active() ) {
+-	agent.post_tick();
+-      }
++      network->oob()->post_tick();
+ 
+       const Network::NetworkException *exn = network->get_send_exception();
+       if ( exn ) {
+diff --git a/src/network/outofband.cc b/src/network/outofband.cc
+index 41511ef..d03a689 100644
+--- a/src/network/outofband.cc
++++ b/src/network/outofband.cc
+@@ -55,16 +55,62 @@ OutOfBand::OutOfBand() {
+   ack_num_out = 0;
+ }
+ 
+-OutOfBandCommunicator *OutOfBand::init(string name, OutOfBandMode mode) {
++OutOfBandCommunicator *OutOfBand::init(string name, OutOfBandMode mode, OutOfBandPlugin *plugin) {
+   map < string, OutOfBandCommunicator * >::iterator i = comms.find(name);
+   if (i != comms.end()) {
+     return NULL;
+   }
+-  OutOfBandCommunicator *comm = new OutOfBandCommunicator(mode, name, this);
++  OutOfBandCommunicator *comm = new OutOfBandCommunicator(mode, name, this, plugin);
+   comms[name] = comm;
+   return comm;
+ }
+ 
++void OutOfBand::pre_poll( void ) {
++  map < string, OutOfBandCommunicator * >::iterator i = comms.begin();
++  while (i != comms.end()) {
++    OutOfBandCommunicator *comm = (i++)->second;
++    if (comm->plugin_ptr->active()) {
++      comm->plugin_ptr->pre_poll();
++    }
++  }
++}
++
++void OutOfBand::post_poll( void ) {
++  map < string, OutOfBandCommunicator * >::iterator i = comms.begin();
++  while (i != comms.end()) {
++    OutOfBandCommunicator *comm = (i++)->second;
++    if (comm->plugin_ptr->active()) {
++      comm->plugin_ptr->post_poll();
++    }
++  }
++}
++
++void OutOfBand::post_tick( void ) {
++  map < string, OutOfBandCommunicator * >::iterator i = comms.begin();
++  while (i != comms.end()) {
++    OutOfBandCommunicator *comm = (i++)->second;
++    if (comm->plugin_ptr->active()) {
++      comm->plugin_ptr->post_tick();
++    }
++  }
++}
++
++void OutOfBand::close_sessions( void ) {
++  map < string, OutOfBandCommunicator * >::iterator i = comms.begin();
++  while (i != comms.end()) {
++    OutOfBandCommunicator *comm = (i++)->second;
++    comm->plugin_ptr->close_sessions();
++  }
++}
++
++void OutOfBand::shutdown( void ) {
++  map < string, OutOfBandCommunicator * >::iterator i = comms.begin();
++  while (i != comms.end()) {
++    OutOfBandCommunicator *comm = (i++)->second;
++    comm->plugin_ptr->shutdown();
++  }
++}
++
+ void OutOfBand::uninit(string name) {
+   map < string, OutOfBandCommunicator * >::iterator i = comms.find(name);
+   if (i == comms.end()) {
+@@ -192,10 +238,11 @@ string OutOfBand::output(void) {
+   return "";
+ }
+ 
+-OutOfBandCommunicator::OutOfBandCommunicator(OutOfBandMode oob_mode, string oob_name, OutOfBand *oob_ctl) {
++OutOfBandCommunicator::OutOfBandCommunicator(OutOfBandMode oob_mode, string oob_name, OutOfBand *oob_ctl, OutOfBandPlugin *plugin) {
+   mode = oob_mode;
+   name = oob_name;
+   oob_ctl_ptr = oob_ctl;
++  plugin_ptr = plugin;
+   stream_buf = "";
+ }
+ 
+diff --git a/src/network/outofband.h b/src/network/outofband.h
+index 1c95ed5..e43b271 100644
+--- a/src/network/outofband.h
++++ b/src/network/outofband.h
+@@ -54,6 +54,8 @@ namespace Network {
+   enum OutOfBandMode { OOB_MODE_STREAM = 1, OOB_MODE_DATAGRAM = 2, OOB_MODE_RELIABLE_DATAGRAM = 3 };
+ 
+   class OutOfBand;
++  class OutOfBandPlugin;
++  class OutOfBandCommunicator;
+ 
+   class OutOfBandCommunicator
+   {
+@@ -62,9 +64,10 @@ namespace Network {
+     string name;
+     string stream_buf;
+     queue < string > datagram_queue;
++    OutOfBandPlugin *plugin_ptr;
+     OutOfBand *oob_ctl_ptr;
+     OutOfBand *oob(void) { return oob_ctl_ptr; }
+-    OutOfBandCommunicator(OutOfBandMode oob_mode, string oob_name, OutOfBand *oob_ctl);
++    OutOfBandCommunicator(OutOfBandMode oob_mode, string oob_name, OutOfBand *oob_ctl, OutOfBandPlugin *plugin);
+ 
+   public:
+     void send(string data);
+@@ -90,7 +93,14 @@ namespace Network {
+   public:
+     OutOfBand();
+     ~OutOfBand() { uninit(); }
+-    OutOfBandCommunicator *init(string name, OutOfBandMode mode);
++
++    void pre_poll( void );
++    void post_poll( void );
++    void post_tick( void );
++    void close_sessions( void );
++    void shutdown( void );
++
++    OutOfBandCommunicator *init(string name, OutOfBandMode mode, OutOfBandPlugin *plugin);
+     void uninit(string name);
+     void uninit(OutOfBandCommunicator *comm);
+     void uninit(void);
+@@ -102,6 +112,21 @@ namespace Network {
+ 
+     friend class OutOfBandCommunicator;
+   };
++
++  class OutOfBandPlugin
++  {
++  public:
++    virtual bool active( void ) = 0;
++    virtual void pre_poll( void ) = 0;
++    virtual void post_poll( void ) = 0;
++    virtual void post_tick( void ) = 0;
++    virtual void close_sessions( void ) = 0;
++    virtual void shutdown( void ) = 0;
++    virtual void attach_oob(Network::OutOfBand *oob_ctl) = 0;
++
++    friend class OutOfBand;
++  };
++
+ }
+ 
+ #endif
+-- 
+1.9.1
+
