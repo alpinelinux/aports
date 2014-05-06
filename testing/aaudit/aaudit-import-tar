@@ -1,0 +1,173 @@
+#!/usr/bin/lua5.2
+
+local posix = require 'posix'
+local branch_ref = "refs/heads/import"
+local from_ref = "refs/heads/master"
+local config_file = "/etc/aaudit/aaudit.conf"
+
+local function load_config(filename)
+	local F = io.open(filename, "r")
+	local cfg = "return {" .. F:read("*all").. "}"
+	F:close()
+	return loadstring(cfg, "config:"..filename)()
+end
+
+local function match_file(fn, match_list)
+	if not match_list then return false end
+	local i, m
+	for i, pattern in ipairs(match_list) do
+		if posix.fnmatch(pattern, fn) then return true end
+	end
+	return false
+end
+
+local function checksum_header(block)
+	local sum = 256
+	for i = 1,148 do sum = sum + block:byte(i) end
+	for i = 157,500 do sum = sum + block:byte(i) end
+	return sum
+end
+
+local function nullterm(s) return s:match("^[^%z]*") end
+local function octal_to_number(str) return tonumber(nullterm(str), 8) end
+
+local function read_header_block(block)
+	local header = {
+		name = nullterm(block:sub(1,100)),
+		mode = octal_to_number(block:sub(101,108)),
+		uid = octal_to_number(block:sub(109,116)),
+		gid = octal_to_number(block:sub(117,124)),
+		size = octal_to_number(block:sub(125,136)),
+		mtime = octal_to_number(block:sub(137,148)),
+		chksum = octal_to_number(block:sub(149,156)),
+		typeflag = block:sub(157,157),
+		linkname = nullterm(block:sub(158,257)),
+		magic = block:sub(258,263),
+		version = block:sub(264,265),
+		uname = nullterm(block:sub(266,297)),
+		gname = nullterm(block:sub(298,329)),
+		devmajor = octal_to_number(block:sub(330,337)),
+		devminor = octal_to_number(block:sub(338,345)),
+		prefix = nullterm(block:sub(346,500)),
+	}
+	if header.magic ~= "ustar " and header.magic ~= "ustar\0" then
+		return false, "Invalid header magic "..header.magic
+	end
+	if header.version ~= "00" and header.version ~= " \0" then
+		return false, "Unknown version "..header.version
+	end
+	if not checksum_header(block) == header.chksum then
+		return false, "Failed header checksum"
+	end
+	return header
+end
+
+function import_tar(CONF, TAR, GIT, initial_commit)
+	local blocksize = 512
+	local zeroblock = string.rep("\0", blocksize)
+	local nextmark = 1
+	local author_time = 0
+	local all_files = {}
+	local long_name, long_link_name
+	local symlinkmode = tonumber('0120000', 8)
+	local rwmode = tonumber('0755', 8)
+	local romode = tonumber('0644', 8)
+	local wandmode = tonumber('0111', 8)
+
+	local author_name = CONF.author_name or "Alpine Auditor"
+	local author_email = CONF.author_email or "auditor@alpine.local"
+
+	while true do
+		local block = TAR:read(blocksize)
+		if not block then
+			return false, "Premature end of archive"
+		end
+		if block == zeroblock then break end
+
+		local header, err = read_header_block(block)
+		if not header then return false, err end
+
+		local file_data = TAR:read(math.ceil(header.size / blocksize) * blocksize):sub(1,header.size)
+		if header.typeflag == "L" then
+			long_name = nullterm(file_data)
+		elseif header.typeflag == "K" then
+			long_link_name = nullterm(file_data)
+		else
+			if long_name then
+				header.name = long_name
+				long_name = nil
+			end
+			if long_link_name then
+				header.linkname = long_link_name
+				long_link_name = nil
+			end
+		end
+
+		if header.typeflag:match("^[0-46]$") and
+		   not match_file(header.name, CONF.no_track_files) then
+			GIT:write('blob\nmark :'..nextmark..'\n')
+			if header.typeflag == "2" then
+				GIT:write('data '..#header.linkname..'\n'..header.linkname)
+				header.mode = symlinkmode
+			else
+				GIT:write('data '..header.size..'\n')
+				GIT:write(file_data)
+			end
+			GIT:write('\n')
+
+			local fn = header.prefix..header.name
+			all_files[fn] = { mark=nextmark, mode=header.mode }
+			nextmark = nextmark + 1
+			if header.mtime > author_time then author_time = header.mtime end
+		end
+	end
+
+	GIT:write(string.format([[
+commit %s
+author %s <%s> %d +0000
+committer %s <%s> %d +0000
+data <<END_OF_COMMIT_MESSAGE
+%s
+END_OF_COMMIT_MESSAGE
+
+]],
+	branch_ref,
+	author_name, author_email, author_time,
+	author_name, author_email, os.time(),
+	CONF.commit_message or "Changes"
+	))
+
+	if not initial_commit then GIT:write(string.format("from %s^0\n", from_ref)) end
+	GIT:write("deleteall\n")
+	local path, v
+	for path, v in pairs(all_files) do
+		local mode = v.mode
+		if mode ~= symlinkmode then
+			if bit32.band(mode, wandmode) then
+				mode = rwmode
+			else
+				mode = romode
+			end
+		end
+		GIT:write(string.format("M %o :%i %s\n", mode, v.mark, path))
+	end
+	GIT:write("\n")
+
+	return true
+end
+
+local initial_commit = false
+local a
+for _, a in ipairs(arg) do
+	if a == '--initial-commit' then
+		initial_commit = true
+	else
+		os.exit(1)
+	end
+end
+
+local GI = io.popen("git fast-import --quiet", "w")
+local rc = import_tar(load_config(config_file), io.stdin, GI, initial_commit)
+GI:close()
+
+if not rc then os.exit(1) end
