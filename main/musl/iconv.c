@@ -48,9 +48,9 @@ int main(int argc, char **argv)
 	cd = iconv_open(to, from);
 	if (cd == (iconv_t)-1) {
 		if (iconv_open(to, "WCHAR_T") == (iconv_t)-1)
-			fprintf(stderr, "iconv: destination charset %s", to);
+			fprintf(stderr, "iconv: destination charset %s: ", to);
 		else
-			fprintf(stderr, "iconv: source charset %s", from);
+			fprintf(stderr, "iconv: source charset %s: ", from);
 		perror("");
 		exit(1);
 	}
@@ -61,7 +61,7 @@ int main(int argc, char **argv)
 			f = stdin;
 			argv[optind] = "(stdin)";
 		} else if (!(f = fopen(argv[optind], "rb"))) {
-			fprintf(stderr, "iconv: %s", argv[optind]);
+			fprintf(stderr, "iconv: %s: ", argv[optind]);
 			perror("");
 			err = 1;
 			continue;
@@ -101,7 +101,7 @@ int main(int argc, char **argv)
 			if (inb) memmove(buf, in, inb);
 		}
 		if (ferror(f)) {
-			fprintf(stderr, "iconv: %s", argv[optind]);
+			fprintf(stderr, "iconv: %s: ", argv[optind]);
 			perror("");
 			err = 1;
 		}
