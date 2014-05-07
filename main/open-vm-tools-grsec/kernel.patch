@@ -1,0 +1,364 @@
+From 34503f06e284eed7be41801bc6f1dbe9920ee4b2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?D=C4=81vis?= <davispuh@gmail.com>
+Date: Mon, 5 May 2014 22:32:43 +0300
+Subject: [PATCH] Update for changes in latest kernel ~ 3.11
+
+---
+ .../modules/linux/vmblock/linux/control.c          | 26 +++++++++++++++++-----
+ open-vm-tools/modules/linux/vmblock/linux/dentry.c | 14 ++++++++++++
+ open-vm-tools/modules/linux/vmblock/linux/file.c   | 18 +++++++++++++++
+ open-vm-tools/modules/linux/vmblock/linux/inode.c  | 12 ++++++++--
+ open-vm-tools/modules/linux/vmhgfs/inode.c         | 15 ++++++++++---
+ open-vm-tools/modules/linux/vmsync/sync.c          | 25 ++++++++++++++++++++-
+ 6 files changed, 99 insertions(+), 11 deletions(-)
+
+diff --git a/modules/linux/vmblock/linux/control.c b/modules/linux/vmblock/linux/control.c
+index 79716bd..306f193 100644
+--- a/modules/linux/vmblock/linux/control.c
++++ b/modules/linux/vmblock/linux/control.c
+@@ -208,17 +208,23 @@ SetupProcDevice(void)
+    VMBlockSetProcEntryOwner(controlProcMountpoint);
+ 
+    /* Create /proc/fs/vmblock/dev */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
++   controlProcEntry = proc_create(VMBLOCK_CONTROL_DEVNAME, VMBLOCK_CONTROL_MODE, controlProcDirEntry, &ControlFileOps);
++#else
+    controlProcEntry = create_proc_entry(VMBLOCK_CONTROL_DEVNAME,
+                                         VMBLOCK_CONTROL_MODE,
+                                         controlProcDirEntry);
+-   if (!controlProcEntry) {
++#endif
++   if (controlProcEntry == NULL) {
+       Warning("SetupProcDevice: could not create " VMBLOCK_DEVICE "\n");
+       remove_proc_entry(VMBLOCK_CONTROL_MOUNTPOINT, controlProcDirEntry);
+       remove_proc_entry(VMBLOCK_CONTROL_PROC_DIRNAME, NULL);
+       return -EINVAL;
+    }
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 10, 0)
+    controlProcEntry->proc_fops = &ControlFileOps;
++#endif
+    return 0;
+ }
+ 
+@@ -278,22 +284,32 @@ ExecuteBlockOp(const char __user *buf,                // IN: buffer with name
+                int (*blockOp)(const char *filename,   // IN: block operation
+                               const os_blocker_id_t blocker))
+ {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
++   struct filename *fname;
++#else
++   char *fname;
++#endif
+    char *name;
+    int i;
+    int retval;
+ 
+-   name = getname(buf);
+-   if (IS_ERR(name)) {
+-      return PTR_ERR(name);
++   fname = getname(buf);
++   if (IS_ERR(fname)) {
++      return PTR_ERR(fname);
+    }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
++   name = (char *)fname->name;
++#else
++   name = fname;
++#endif
+    for (i = strlen(name) - 1; i >= 0 && name[i] == '/'; i--) {
+       name[i] = '\0';
+    }
+ 
+    retval = i < 0 ? -EINVAL : blockOp(name, blocker);
+ 
+-   putname(name);
++   __putname(name);
+ 
+    return retval;
+ }
+diff --git a/modules/linux/vmblock/linux/dentry.c b/modules/linux/vmblock/linux/dentry.c
+index 05ea95a..3d43c5e 100644
+--- a/modules/linux/vmblock/linux/dentry.c
++++ b/modules/linux/vmblock/linux/dentry.c
+@@ -32,7 +32,11 @@
+ #include "block.h"
+ 
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
++static int DentryOpRevalidate(struct dentry *dentry, unsigned int flags);
++#else
+ static int DentryOpRevalidate(struct dentry *dentry, struct nameidata *nd);
++#endif
+ 
+ struct dentry_operations LinkDentryOps = {
+    .d_revalidate = DentryOpRevalidate,
+@@ -58,9 +62,15 @@ struct dentry_operations LinkDentryOps = {
+  *----------------------------------------------------------------------------
+  */
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
++static int
++DentryOpRevalidate(struct dentry *dentry,  // IN: dentry revalidating
++                   unsigned int flags)     // IN: lookup flags
++#else
+ static int
+ DentryOpRevalidate(struct dentry *dentry,  // IN: dentry revalidating
+                    struct nameidata *nd)   // IN: lookup flags & intent
++#endif
+ {
+    VMBlockInodeInfo *iinfo;
+    struct nameidata actualNd;
+@@ -101,7 +111,11 @@ DentryOpRevalidate(struct dentry *dentry,  // IN: dentry revalidating
+    if (actualDentry &&
+        actualDentry->d_op &&
+        actualDentry->d_op->d_revalidate) {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
++      return actualDentry->d_op->d_revalidate(actualDentry, flags);
++#else
+       return actualDentry->d_op->d_revalidate(actualDentry, nd);
++#endif
+    }
+ 
+    if (compat_path_lookup(iinfo->name, 0, &actualNd)) {
+diff --git a/modules/linux/vmblock/linux/file.c b/modules/linux/vmblock/linux/file.c
+index d7ac1f6..513f2d5 100644
+--- a/modules/linux/vmblock/linux/file.c
++++ b/modules/linux/vmblock/linux/file.c
+@@ -38,6 +38,7 @@ typedef u64 inode_num_t;
+ typedef ino_t inode_num_t;
+ #endif
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0)
+ /* Specifically for our filldir_t callback */
+ typedef struct FilldirInfo {
+    filldir_t filldir;
+@@ -76,6 +77,7 @@ Filldir(void *buf,              // IN: Dirent buffer passed from FileOpReaddir
+    /* Specify DT_LNK regardless */
+    return info->filldir(info->dirent, name, namelen, offset, ino, DT_LNK);
+ }
++#endif
+ 
+ 
+ /* File operations */
+@@ -164,13 +166,21 @@ FileOpOpen(struct inode *inode,  // IN
+  *----------------------------------------------------------------------------
+  */
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)
++static int
++FileOpIterate(struct file *file,  // IN
++              struct dir_context *ctx)  // IN
++#else
+ static int
+ FileOpReaddir(struct file *file,  // IN
+               void *dirent,       // IN
+               filldir_t filldir)  // IN
++#endif
+ {
+    int ret;
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0)
+    FilldirInfo info;
++#endif
+    struct file *actualFile;
+ 
+    if (!file) {
+@@ -184,12 +194,16 @@ FileOpReaddir(struct file *file,  // IN
+       return -EINVAL;
+    }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)
++   ret = iterate_dir(actualFile, ctx);
++#else
+    info.filldir = filldir;
+    info.dirent = dirent;
+ 
+    actualFile->f_pos = file->f_pos;
+    ret = vfs_readdir(actualFile, Filldir, &info);
+    file->f_pos = actualFile->f_pos;
++#endif
+ 
+    return ret;
+ }
+@@ -237,7 +251,11 @@ FileOpRelease(struct inode *inode, // IN
+ 
+ 
+ struct file_operations RootFileOps = {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)
++   .iterate = FileOpIterate,
++#else
+    .readdir = FileOpReaddir,
++#endif
+    .open    = FileOpOpen,
+    .release = FileOpRelease,
+ };
+diff --git a/modules/linux/vmblock/linux/inode.c b/modules/linux/vmblock/linux/inode.c
+index 098c94c..37dc0fc 100644
+--- a/modules/linux/vmblock/linux/inode.c
++++ b/modules/linux/vmblock/linux/inode.c
+@@ -36,7 +36,11 @@
+ 
+ /* Inode operations */
+ static struct dentry *InodeOpLookup(struct inode *dir,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
++                                    struct dentry *dentry, unsigned int flags);
++#else
+                                     struct dentry *dentry, struct nameidata *nd);
++#endif
+ static int InodeOpReadlink(struct dentry *dentry, char __user *buffer, int buflen);
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 13)
+ static void *InodeOpFollowlink(struct dentry *dentry, struct nameidata *nd);
+@@ -75,7 +79,11 @@ static struct inode_operations LinkInodeOps = {
+ static struct dentry *
+ InodeOpLookup(struct inode *dir,      // IN: parent directory's inode
+               struct dentry *dentry,  // IN: dentry to lookup
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
++              unsigned int flags)     // IN: lookup flags
++#else
+               struct nameidata *nd)   // IN: lookup intent and information
++#endif
+ {
+    char *filename;
+    struct inode *inode;
+@@ -206,7 +214,7 @@ static int
+ InodeOpFollowlink(struct dentry *dentry,  // IN : dentry of symlink
+                   struct nameidata *nd)   // OUT: stores result
+ {
+-   int ret;
++   int ret = 0;
+    VMBlockInodeInfo *iinfo;
+ 
+    if (!dentry) {
+@@ -221,7 +229,7 @@ InodeOpFollowlink(struct dentry *dentry,  // IN : dentry of symlink
+       goto out;
+    }
+ 
+-   ret = vfs_follow_link(nd, iinfo->name);
++   nd_set_link(nd, iinfo->name);
+ 
+ out:
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 13)
+diff --git a/modules/linux/vmhgfs/inode.c b/modules/linux/vmhgfs/inode.c
+index 2999b94..f82a57b 100644
+--- a/modules/linux/vmhgfs/inode.c
++++ b/modules/linux/vmhgfs/inode.c
+@@ -31,6 +31,9 @@
+ #include <linux/namei.h>
+ #endif
+ #include <linux/highmem.h>
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)
++#include <linux/dcache.h>
++#endif
+ 
+ #include "compat_cred.h"
+ #include "compat_fs.h"
+@@ -1890,7 +1893,11 @@ HgfsPermission(struct inode *inode,
+ #endif
+                            &inode->i_dentry,
+                            d_alias) {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)
++         int dcount = d_count(dentry);
++#else
+          int dcount = dentry->d_count;
++#endif
+          if (dcount) {
+             LOG(4, ("Found %s %d \n", dentry->d_name.name, dcount));
+             return HgfsAccessInt(dentry, mask & (MAY_READ | MAY_WRITE | MAY_EXEC));
+@@ -1943,10 +1950,12 @@ HgfsPermission(struct inode *inode,
+       list_for_each(pos, &inode->i_dentry) {
+          int dcount;
+          struct dentry *dentry = list_entry(pos, struct dentry, d_alias);
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 38)
+-         dcount = atomic_read(&dentry->d_count);
+-#else
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)
++         dcount = d_count(dentry);
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
+          dcount = dentry->d_count;
++#else
++         dcount = atomic_read(&dentry->d_count);
+ #endif
+          if (dcount) {
+             LOG(4, ("Found %s %d \n", (dentry)->d_name.name, dcount));
+diff --git a/modules/linux/vmsync/sync.c b/modules/linux/vmsync/sync.c
+index d05ccad..1869771 100644
+--- a/modules/linux/vmsync/sync.c
++++ b/modules/linux/vmsync/sync.c
+@@ -162,7 +162,11 @@ VmSyncThawDevices(void  *_state)  // IN
+    cancel_delayed_work(&state->thawTask);
+    list_for_each_safe(cur, tmp, &state->devices) {
+       dev = list_entry(cur, VmSyncBlockDevice, list);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
++      if (dev->sb != NULL && dev->sb->s_writers.frozen != SB_UNFROZEN) {
++#else
+       if (dev->sb != NULL && dev->sb->s_frozen != SB_UNFROZEN) {
++#endif
+          thaw_bdev(dev->bdev, dev->sb);
+          atomic_dec(&gFreezeCount);
+       }
+@@ -237,7 +241,11 @@ VmSyncAddPath(const VmSyncState *state,   // IN
+     * the superblock is already frozen.
+     */
+    if (inode->i_sb->s_bdev == NULL ||
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
++       inode->i_sb->s_writers.frozen != SB_UNFROZEN) {
++#else
+        inode->i_sb->s_frozen != SB_UNFROZEN) {
++#endif
+       result = (inode->i_sb->s_bdev == NULL) ? -EINVAL : -EALREADY;
+       compat_path_release(&nd);
+       goto exit;
+@@ -303,7 +311,11 @@ VmSyncFreezeDevices(VmSyncState *state,            // IN
+                     const char __user *userPaths)  // IN
+ {
+    int result = 0;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
++   struct filename *paths;
++#else
+    char *paths;
++#endif
+    char *currPath;
+    char *nextSep;
+    struct list_head *cur, *tmp;
+@@ -328,7 +340,11 @@ VmSyncFreezeDevices(VmSyncState *state,            // IN
+    /*
+     * First, try to add all paths to the list of paths to be frozen.
+     */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
++   currPath = (char *)paths->name;
++#else
+    currPath = paths;
++#endif
+    do {
+       nextSep = strchr(currPath, ':');
+       if (nextSep != NULL) {
+@@ -670,17 +686,24 @@ init_module(void)
+    }
+ 
+    /* Create /proc/driver/vmware-sync */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
++   controlProcEntry = proc_create("driver/vmware-sync", S_IFREG | S_IRUSR | S_IRGRP | S_IROTH,
++				  NULL, &VmSyncFileOps);
++#else
+    controlProcEntry = create_proc_entry("driver/vmware-sync",
+                                         S_IFREG | S_IRUSR | S_IRGRP | S_IROTH,
+                                         NULL);
+-   if (!controlProcEntry) {
++#endif
++   if (controlProcEntry == NULL) {
+       printk(KERN_ERR "vmsync: could not create /proc/driver/vmware-sync\n");
+       kmem_cache_destroy(gSyncStateCache);
+       kmem_cache_destroy(gBlockDeviceCache);
+       return -EINVAL;
+    }
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 10, 0)
+    controlProcEntry->proc_fops = &VmSyncFileOps;
++#endif
+    return 0;
+ }
+ 
+-- 
+1.9.1
+
