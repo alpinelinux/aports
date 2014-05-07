@@ -1,0 +1,134 @@
+diff -ru squid-3.4.5.orig/src/HttpRequest.cc squid-3.4.5/src/HttpRequest.cc
+--- squid-3.4.5.orig/src/HttpRequest.cc	2014-05-02 15:09:05.000000000 -0300
++++ squid-3.4.5/src/HttpRequest.cc	2014-05-07 10:38:04.849927660 -0300
+@@ -116,6 +116,7 @@
+     peer_domain = NULL;		// not allocated/deallocated by this class
+     peer_host = NULL;
+     vary_headers = NULL;
++    urlgroup = null_string;
+     myportname = null_string;
+     tag = null_string;
+ #if USE_AUTH
+@@ -164,6 +165,7 @@
+         range = NULL;
+     }
+ 
++    urlgroup.clean();
+     myportname.clean();
+ 
+     notes = NULL;
+@@ -228,6 +230,7 @@
+     copy->vary_headers = vary_headers ? xstrdup(vary_headers) : NULL;
+     // XXX: what to do with copy->peer_domain?
+ 
++    copy->urlgroup = urlgroup;
+     copy->tag = tag;
+     copy->extacl_log = extacl_log;
+     copy->extacl_message = extacl_message;
+diff -ru squid-3.4.5.orig/src/HttpRequest.h squid-3.4.5/src/HttpRequest.h
+--- squid-3.4.5.orig/src/HttpRequest.h	2014-05-02 15:09:05.000000000 -0300
++++ squid-3.4.5/src/HttpRequest.h	2014-05-07 10:38:04.853260996 -0300
+@@ -201,6 +201,8 @@
+ 
+     char *peer_domain;		/* Configured peer forceddomain */
+ 
++    String urlgroup;
++
+     String myportname; // Internal tag name= value from port this requests arrived in.
+ 
+     NotePairs::Pointer notes; ///< annotations added by the note directive and helpers
+diff -ru squid-3.4.5.orig/src/client_side_request.cc squid-3.4.5/src/client_side_request.cc
+--- squid-3.4.5.orig/src/client_side_request.cc	2014-05-02 15:09:05.000000000 -0300
++++ squid-3.4.5/src/client_side_request.cc	2014-05-07 11:34:39.291538415 -0300
+@@ -1265,6 +1265,10 @@
+         // #2: redirect with a default status code     OK url="..."
+         // #3: re-write the URL                        OK rewrite-url="..."
+ 
++        const char *urlgroupNote = reply.notes.findFirst("urlgroup");
++        if (urlgroupNote != NULL)
++            old_request->urlgroup.reset(urlgroupNote);
++
+         const char *statusNote = reply.notes.findFirst("status");
+         const char *urlNote = reply.notes.findFirst("url");
+ 
+diff -ru squid-3.4.5.orig/src/format/ByteCode.h squid-3.4.5/src/format/ByteCode.h
+--- squid-3.4.5.orig/src/format/ByteCode.h	2014-05-02 15:09:05.000000000 -0300
++++ squid-3.4.5/src/format/ByteCode.h	2014-05-07 10:38:04.853260996 -0300
+@@ -69,6 +69,7 @@
+     /*LFT_REQUEST_QUERY, */
+     LFT_REQUEST_VERSION_OLD_2X,
+     LFT_REQUEST_VERSION,
++    LFT_REQUEST_URLGROUP,
+ 
+     /* request header details pre-adaptation */
+     LFT_REQUEST_HEADER,
+diff -ru squid-3.4.5.orig/src/format/Format.cc squid-3.4.5/src/format/Format.cc
+--- squid-3.4.5.orig/src/format/Format.cc	2014-05-02 15:09:05.000000000 -0300
++++ squid-3.4.5/src/format/Format.cc	2014-05-07 10:38:04.853260996 -0300
+@@ -951,6 +951,12 @@
+             out = tmp;
+             break;
+ 
++        case LFT_REQUEST_URLGROUP:
++            if (al->request)
++                out = al->request->urlgroup.termedBuf();
++            quote = 1;
++            break;
++
+         case LFT_SERVER_REQ_METHOD:
+             if (al->adapted_request) {
+                 out = al->adapted_request->method.image();
+diff -ru squid-3.4.5.orig/src/format/Token.cc squid-3.4.5/src/format/Token.cc
+--- squid-3.4.5.orig/src/format/Token.cc	2014-05-02 15:09:05.000000000 -0300
++++ squid-3.4.5/src/format/Token.cc	2014-05-07 10:38:04.853260996 -0300
+@@ -89,6 +89,7 @@
+     {"rp", LFT_REQUEST_URLPATH_OLD_31},
+     /* { "rq", LFT_REQUEST_QUERY }, * /     / * the query-string, INCLUDING the leading ? */
+     {"rv", LFT_REQUEST_VERSION},
++    {"rG", LFT_REQUEST_URLGROUP},
+ 
+     {"<rm", LFT_SERVER_REQ_METHOD},
+     {"<ru", LFT_SERVER_REQ_URI},
+diff -ru squid-3.4.5.orig/src/redirect.cc squid-3.4.5/src/redirect.cc
+--- squid-3.4.5.orig/src/redirect.cc	2014-05-02 15:09:05.000000000 -0300
++++ squid-3.4.5/src/redirect.cc	2014-05-07 13:09:56.813897270 -0300
+@@ -112,8 +112,7 @@
+                  * At this point altering the helper buffer in that way is not harmful, but annoying.
+                  * When Bug 1961 is resolved and urlParse has a const API, this needs to die.
+                  */
+-                const char * result = reply.other().content();
+-                const Http::StatusCode status = static_cast<Http::StatusCode>(atoi(result));
++                char * result = reply.modifiableOther().content();
+ 
+                 HelperReply newReply;
+                 // BACKWARD COMPATIBILITY 2012-06-15:
+@@ -123,6 +122,18 @@
+                 newReply.result = HelperReply::Okay;
+                 newReply.notes.append(&reply.notes);
+ 
++                // check and parse for urlgroup=
++                if (*result == '!') {
++                   char *t = strchr(result+1, '!');
++                   if (t != NULL) {
++                       *t = 0;
++                       newReply.notes.add("urlgroup", result+1);
++                       result = t + 1;
++                   }
++                }
++
++                const Http::StatusCode status = static_cast<Http::StatusCode>(atoi(result));
++
+                 if (status == Http::scMovedPermanently
+                         || status == Http::scFound
+                         || status == Http::scSeeOther
+@@ -143,7 +154,8 @@
+                     // status code is not a redirect code (or does not exist)
+                     // treat as a re-write URL request
+                     // TODO: validate the URL produced here is RFC 2616 compliant URI
+-                    newReply.notes.add("rewrite-url", reply.other().content());
++                    if (*result)
++                        newReply.notes.add("rewrite-url", result);
+                 }
+ 
+                 void *cbdata;
+
