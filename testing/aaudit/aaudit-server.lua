@@ -1,40 +1,13 @@
 local M = {}
 
 local posix = require 'posix'
+local json = require 'cjson'
+local aac = require 'aaudit.common'
 
-function M.repohome(repo)
-	return ("%s/%s.git"):format(os.getenv("HOME"), repo)
-end
-
-function M.write_file(filename, content)
-	assert(io.open(filename, "w")):write(content):close()
-end
-
-local function load_config(filename)
-	local F = assert(io.open(filename, "r"))
-	local cfg = "return {" .. F:read("*all").. "}"
-	F:close()
-	return loadstring(cfg, "config:"..filename)()
-end
+local HOME = os.getenv("HOME")
 
 local function merge_bool(a, b) return a or b end
-local function merge_dict(a, b) for k, v in pairs(b) do a[k] = v end return a end
-local function merge_array(a, b) for i=1,#b do a[#a+1] = b[i] end return a end
-
-local function load_repo_configs(repohome)
-	local G = load_config(("%s/aaudit.conf"):format(os.getenv("HOME")))
-	local R = load_config(("%s/aaudit.conf"):format(repohome))
-	-- merge global and per-repository group configs
-	local RG = (G.groups or {}).all
-	for g in pairs(R.groups or {}) do
-		RG.notify_emails = merge_dict(RG.notify_emails, g.notify_emails)
-		RG.track_filemode = merge_bool(RG.track_filemode, g.track_filemode)
-		RG.no_track = merge_array(RG.no_track, g.no_track)
-		RG.no_notify = merge_array(RG.no_notify, g.no_notify)
-		RG.no_diff = merge_array(RG.no_diff, g.no_diff)
-	end
-	return G, R, RG
-end
+local function merge_array(a, b) if b then for i=1,#b do a[#a+1] = b[i] end end return a end
 
 local function match_file(fn, match_list)
 	if not match_list then return false end
@@ -96,7 +69,7 @@ local function read_header_block(block)
 	return header
 end
 
-local function import_tar(TAR, GIT, CI, RG)
+local function import_tar(TAR, GIT, req, G)
 	local branch_ref = "refs/heads/import"
 	local from_ref = "refs/heads/master"
 	local blocksize = 512
@@ -137,7 +110,7 @@ local function import_tar(TAR, GIT, CI, RG)
 		end
 
 		if header.typeflag:match("^[0-46]$") and
-		   not match_file(header.name, RG.no_track) then
+		   not match_file(header.name, G.no_track) then
 			GIT:write('blob\n', 'mark :', nextmark, '\n')
 			if header.typeflag == "2" then
 				GIT:write('data ', tostring(#header.linkname), '\n', header.linkname, '\n')
@@ -151,7 +124,7 @@ local function import_tar(TAR, GIT, CI, RG)
 			if header.mtime > author_time then author_time = header.mtime end
 		end
 	end
-	if RG.track_filemode then
+	if G.track_filemode then
 		GIT:write('blob\n', 'mark :', nextmark, '\n',
 			'data <<END_OF_PERMISSONS\n')
 		for path, v in sortedpairs(all_files) do
@@ -162,20 +135,20 @@ local function import_tar(TAR, GIT, CI, RG)
 
 	GIT:write(([[
 commit %s
-author %s <%s> %d +0000
-committer %s <%s> %d +0000
+author %s %d +0000
+committer %s %d +0000
 data <<END_OF_COMMIT_MESSAGE
 %s
 END_OF_COMMIT_MESSAGE
 
 ]]):format(branch_ref,
-	CI.identity_name, CI.identity_email, author_time,
-	CI.identity_name, CI.identity_email, os.time(),
-	CI.message or "Changes"))
+	req.author.rfc822, author_time,
+	req.author.rfc822, os.time(),
+	req.message or "Changes"))
 
-	if not CI.initial then GIT:write(("from %s^0\n"):format(from_ref)) end
+	if not req.initial then GIT:write(("from %s^0\n"):format(from_ref)) end
 	GIT:write("deleteall\n")
-	if RG.track_filemode then
+	if G.track_filemode then
 		GIT:write(("M %o :%i %s\n"):format(romode, nextmark, '.permissions.txt'))
 	end
 	local path, v
@@ -195,8 +168,8 @@ END_OF_COMMIT_MESSAGE
 	return true
 end
 
-local function generate_diff(repohome, commit, RG)
-	local DIFF = io.popen(("cd %s; git show %s --"):format(repohome, commit), "r")
+local function generate_diff(repodir, commit, G)
+	local DIFF = io.popen(("git --git-dir='%s' show --patch-with-stat '%s' --"):format(repodir, commit), "r")
 	local visible = true
 	local has_changes, has_visible_changes = false, false
 	local text = {}
@@ -204,10 +177,10 @@ local function generate_diff(repohome, commit, RG)
 		local fn = l:match("^diff [^ \t]* a/([^ \t]*)")
 		if fn then
 			has_changes = true
-			visible = not match_file(fn, RG.no_notify)
+			visible = not match_file(fn, G.no_notify)
 			if visible then
 				has_visible_changes = true
-				visible = not match_file(fn, RG.no_diff)
+				visible = not match_file(fn, G.no_diff)
 				if not visible then
 					table.insert(text, "Private file "..fn.." changed")
 				end
@@ -220,48 +193,139 @@ local function generate_diff(repohome, commit, RG)
 	return has_changes, text
 end
 
-local function send_email(addresses, body, CI, G, R, RG)
-	if not body then return end
-	if not RG.notify_emails then return end
+local function resolve_email(identities, id)
+	if identities and identities[id] then id = identities[id] end
+	local name, email = id:match("^(.-) *<(.*)>$")
+	if email then return {name=name, email=email, rfc822=("%s <%s>"):format(name, email) } end
+	return {name="", email=name, rfc822=("<%s>"):format(name)}
+end
 
-	local EMAIL = io.popen(("sendmail -t -S %s"):format(G.smtp_server), "w")
+local function send_email(body, req, S, R, G)
+	if not body then return end
+	if not G.notify_emails then return end
+
+	local to_rfc822 = {}
+	local to_email = {}
+	for _,r in ipairs(G.notify_emails) do
+		local id = resolve_email(S.identities, r)
+		if not to_email[id.email] then
+			to_email[id.email] = true
+			table.insert(to_rfc822, id.rfc822)
+			table.insert(to_email, id.email)
+		end
+	end
+	to_rfc822 = table.concat(to_rfc822, ", ")
+	to_email  = table.concat(to_email, " ")
+
+	local EMAIL = io.popen(('/bin/busybox sendmail -f "%s" -S "%s" %s')
+		:format(req.author.email, S.smtp_server, to_email), "w")
 	EMAIL:write(([[
-From: %s <%s>
+From: %s
 To: %s
 Subject: apkovl changed - %s (%s)
 Date: %s
 
-]]):format(	CI.identity_name, CI.identity_email,
-		table.concat(RG.notify_emails, ", "),
-		R.description, R.address,
-		os.date("%a, %d %b %Y %H:%M:%S")))
+]]):format(req.author.rfc822, to_rfc822, R.description, R.address, os.date("%a, %d %b %Y %H:%M:%S")))
 
 	for _, l in ipairs(body) do EMAIL:write(l,'\n') end
 	EMAIL:close()
+
+	return to_email
 end
 
-function M.import_commit(repohome, CI)
-	local G, R, RG = load_repo_configs(repohome)
+local function load_repo_configs(repohome)
+	local S = aac.readconfig(("%s/aaudit-server.json"):format(HOME))
+	local R = aac.readconfig(("%s/aaudit-repo.json"):format(repohome))
+	-- merge global and per-repository group configs
+	local G = (S.groups or {}).all or {}
+	for _, name in pairs(R.groups or {}) do
+		local g = S.groups[name] or {}
+		G.notify_emails = merge_array(G.notify_emails, g.notify_emails)
+		G.track_filemode = merge_bool(G.track_filemode, g.track_filemode)
+		G.no_track = merge_array(G.no_track, g.no_track)
+		G.no_notify = merge_array(G.no_notify, g.no_notify)
+		G.no_diff = merge_array(G.no_diff, g.no_diff)
+	end
+	return S, R, G
+end
 
-	CI.identity_name, CI.identity_email = table.unpack(G.identities[CI.identity])
-	CI.identity_name  = CI.identity_name  or "Alpine Auditor"
-	CI.identity_email = CI.identity_email or "auditor@alpine.local"
+function M.repo_update(req)
+	local repodir = req.repositorydir
+	local S, R, G = load_repo_configs(repodir)
+
+	req.author = resolve_email(S.identities, req.identity)
 
 	local TAR = io.popen(("ssh root@%s 'lbu package -' | gunzip"):format(R.address), "r")
-	local GIT = io.popen(("cd %s; git fast-import --quiet"):format(repohome), "w")
-	local rc, err = import_tar(TAR, GIT, CI, RG)
+	local GIT = io.popen(("git --git-dir='%s' fast-import --quiet"):format(repodir), "w")
+	local rc, err = import_tar(TAR, GIT, req, G)
 	GIT:close()
 	TAR:close()
 	if not rc then return rc, err end
 
-	local has_changes, email_body = generate_diff(repohome, "import", RG)
+	local has_changes, email_body = generate_diff(repodir, "import", G)
 	if has_changes then
-		if not CI.initial then send_email(CONF, email_body, CI, G, R, RG) end
-		os.execute(("cd %s; git branch --quiet --force master import; git branch --quiet -D import"):format(repohome))
-	else
-		os.execute(("cd %s; git branch --quiet -D import; git gc --quiet --prune=now"):format(repohome))
+		os.execute(("git --git-dir='%s' branch --quiet --force master import;"..
+			    "git --git-dir='%s' branch --quiet -D import")
+			:format(repodir, repodir))
+		local to = nil
+		if not req.initial then
+			to = send_email(email_body, req, S, R, G)
+		end
+		if to then
+			return true, "Committed and notified: "..to
+		else
+			return true, "Commit successful"
+		end
 	end
 
+	os.execute(("git --git-dir='%s' branch --quiet -D import;"..
+		    "git --git-dir='%s' gc --quiet --prune=now")
+		:format(repodir, repodir))
+	return true, "No changes detected"
+end
+
+function M.repo_create(req)
+	-- Create repository + write config
+	local repodir = req.repositorydir
+	os.execute(("mkdir -p '%s'; git init --quiet --bare '%s'")
+		:format(repodir, repodir))
+	aac.writefile(
+		("%s (%s)"):format(req.description, req.target_address),
+		("%s/description"):format(repodir))
+	aac.writeconfig(
+		{ address=req.target_address,
+		  description=req.description,
+		  groups=req.groups },
+		("%s/aaudit-repo.json"):format(repodir))
+
+	-- Inject ssh identity to known_hosts
+	if req.ssh_host_key then
+		local f = io.open(("%s/.ssh/known_hosts"):format(HOME), "a")
+		f:write(("%s %s\n"):format(req.target_address, req.ssh_host_key))
+		f:close()
+	end
+end
+
+function M.handle(req)
+	req.target_address = req.target_address or req.remote_ip
+	req.repositorydir = ("%s/%s.git"):format(HOME, req.target_address)
+	req.initial = false
+	if req.command == "create" then
+		if posix.access(req.repositorydir, "rwx") then
+			return false, "Repository exists already"
+		end
+		M.repo_create(req)
+		req.initial = true
+		req.command = "commit"
+	end
+	if req.command == "commit" then
+		if not posix.access(req.repositorydir, "rwx") then
+			return false, "No such repository"
+		end
+		return M.repo_update(req)
+	else
+		return false,"Invalid request command"
+	end
 end
 
 return M
