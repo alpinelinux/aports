@@ -2,6 +2,7 @@
 
 local posix = require 'posix'
 local json = require 'cjson'
+local lpc = require 'lpc'
 local aac = require 'aaudit.common'
 
 local function usage()
@@ -13,7 +14,7 @@ Valid options for create:
 	-d DESC	Description for repository (default: hostname)
 	-t ADDR	Specify ADDR as target device (default: local source IP)
 	-m MSG	Specify message for the initial commit
-	-g GRP	Add in group GRP
+	-g GRP	Add in group GRP (can be specified multiple times)
 
 Valid options for commit:
 	-m MSG	Specify message for the commit
@@ -23,11 +24,14 @@ Valid options for commit:
 	os.exit(1)
 end
 
+local verbose = false
 local conf = aac.readconfig() or {}
 local req = {}
 
-for ret, optval in posix.getopt(arg, 's:d:t:m:g:r:c:') do
-	if ret == 's' then
+for ret, optval in posix.getopt(arg, 'vs:d:t:m:g:r:c:') do
+	if ret == 'v' then
+		verbose = true
+	elseif ret == 's' then
 		conf.server = optval
 	elseif ret == 'd' then
 		conf.description = optval
@@ -60,11 +64,48 @@ if arg[1] == "create" then
 		or aac.readfile("/etc/ssh/ssh_host_dsa_key.pub")
 		or aac.readfile("/etc/ssh/ssh_host_rsa_key.pub")
 	aac.writeconfig(conf)
-elseif arg[1] == "commit" then
-else
-	usage()
+	arg[1] = "commit"
 end
 
-local F = io.popen(("ssh -T %s@%s "):format(conf.user or "aaudit", conf.server), "w")
-F:write(json.encode(req))
-F:close()
+req.apkovl_follows = true
+
+if arg[1] ~= "commit" then usage() end
+
+local pid, SW, SR = lpc.run('ssh', '-T', ('%s@%s'):format(conf.user or "aaudit", conf.server))
+
+SW:write(json.encode(req),'\n')
+if req.apkovl_follows then
+	local APKOVL = io.popen("lbu package -", "rb")
+	while true do
+		local block = APKOVL:read(2^13)
+		if not block then break end
+		SW:write(block)
+	end
+	APKOVL:close()
+end
+SW:close()
+
+local reply
+for line in SR:lines() do
+	if line:match("^{") and line:match("}$") then
+		reply = json.decode(line)
+	elseif verbose then
+		print(line)
+	end
+end
+SR:close()
+
+lpc.wait(pid)
+
+if reply then
+	if reply.ok then
+		io.write("OK: ",reply.msg,"\n")
+	else
+		io.write("ERROR: ",reply.msg,"\n")
+	end
+	if reply.notified then
+		io.write("Notified: ",reply.notified,"\n")
+	end
+else
+	io.write("ERROR: No reply received from server\n")
+end

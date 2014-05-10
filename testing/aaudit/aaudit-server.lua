@@ -2,6 +2,7 @@ local M = {}
 
 local posix = require 'posix'
 local json = require 'cjson'
+local zlib = require 'zlib'
 local aac = require 'aaudit.common'
 
 local HOME = os.getenv("HOME")
@@ -73,7 +74,6 @@ local function import_tar(TAR, GIT, req, G)
 	local branch_ref = "refs/heads/import"
 	local from_ref = "refs/heads/master"
 	local blocksize = 512
-	local zeroblock = string.rep("\0", blocksize)
 	local nextmark = 1
 	local author_time = 0
 	local all_files = {}
@@ -85,10 +85,8 @@ local function import_tar(TAR, GIT, req, G)
 
 	while true do
 		local block = TAR:read(blocksize)
-		if not block then
-			return false, "Premature end of archive"
-		end
-		if block == zeroblock then break end
+		if not block then return false, "Premature end of archive" end
+		if not block:match("[^%z]") then break end
 
 		local header, err = read_header_block(block)
 		if not header then return false, err end
@@ -217,8 +215,11 @@ local function send_email(body, req, S, R, G)
 	to_rfc822 = table.concat(to_rfc822, ", ")
 	to_email  = table.concat(to_email, " ")
 
-	local EMAIL = io.popen(('/bin/busybox sendmail -f "%s" -S "%s" %s')
-		:format(req.author.email, S.smtp_server, to_email), "w")
+	-- Add busybox sendmail smtp server option
+	local options=""
+	if S.smtp_server then options = ('-S "%s"'):format(S.smtp_server) end
+
+	local EMAIL = io.popen(('sendmail -f "%s" %s %s'):format(req.author.email, options, to_email), "w")
 	EMAIL:write(([[
 From: %s
 To: %s
@@ -249,13 +250,19 @@ local function load_repo_configs(repohome)
 	return S, R, G
 end
 
-function M.repo_update(req)
+function M.repo_update(req,clientstream)
 	local repodir = req.repositorydir
 	local S, R, G = load_repo_configs(repodir)
 
 	req.author = resolve_email(S.identities, req.identity)
 
-	local TAR = io.popen(("ssh root@%s 'lbu package -' | gunzip"):format(R.address), "r")
+	local TAR
+	if req.apkovl_follows then
+		TAR = zlib.inflate(clientstream)
+	else
+		TAR = io.popen(("ssh -T root@%s 'lbu package -' | gunzip"):format(R.address), "r")
+	end
+
 	local GIT = io.popen(("git --git-dir='%s' fast-import --quiet"):format(repodir), "w")
 	local rc, err = import_tar(TAR, GIT, req, G)
 	GIT:close()
@@ -271,11 +278,7 @@ function M.repo_update(req)
 		if not req.initial then
 			to = send_email(email_body, req, S, R, G)
 		end
-		if to then
-			return true, "Committed and notified: "..to
-		else
-			return true, "Commit successful"
-		end
+		return true, "Committed", {notified=to}
 	end
 
 	os.execute(("git --git-dir='%s' branch --quiet -D import;"..
@@ -306,7 +309,7 @@ function M.repo_create(req)
 	end
 end
 
-function M.handle(req)
+function M.handle(req,clientstream)
 	req.target_address = req.target_address or req.remote_ip
 	req.repositorydir = ("%s/%s.git"):format(HOME, req.target_address)
 	req.initial = false
@@ -322,7 +325,7 @@ function M.handle(req)
 		if not posix.access(req.repositorydir, "rwx") then
 			return false, "No such repository"
 		end
-		return M.repo_update(req)
+		return M.repo_update(req,clientstream)
 	else
 		return false,"Invalid request command"
 	end
