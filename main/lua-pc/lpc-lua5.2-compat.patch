@@ -1,6 +1,6 @@
 diff -ru lpc-1.0.0.orig/Makefile lpc-1.0.0/Makefile
 --- lpc-1.0.0.orig/Makefile	2012-08-21 17:39:10.000000000 -0300
-+++ lpc-1.0.0/Makefile	2014-05-10 14:53:46.200555972 -0300
++++ lpc-1.0.0/Makefile	2014-05-10 14:54:26.573670586 -0300
 @@ -1,16 +1,20 @@
 -LUA_PREFIX = /usr/local/
 -PREFIX	= /usr/local/
@@ -29,8 +29,248 @@ diff -ru lpc-1.0.0.orig/Makefile lpc-1.0.0/Makefile
  
 diff -ru lpc-1.0.0.orig/lpc.c lpc-1.0.0/lpc.c
 --- lpc-1.0.0.orig/lpc.c	2012-08-21 17:39:10.000000000 -0300
-+++ lpc-1.0.0/lpc.c	2014-05-10 14:53:18.784037834 -0300
-@@ -192,7 +192,7 @@
++++ lpc-1.0.0/lpc.c	2014-05-10 16:35:47.714059553 -0300
+@@ -1,7 +1,7 @@
+ /*
+ ** LuaProcessCall
+ ** Copyright DarkGod 2007
+-**
++** lua 5.1/5.2 compat (c) 2014 Timo Teräs
+ */
+ 
+ #include <errno.h>
+@@ -15,47 +15,98 @@
+ #include "lauxlib.h"
+ #include "lualib.h"
+ 
+-#define topfile(L)	((FILE **)luaL_checkudata(L, 1, LUA_FILEHANDLE))
++#if LUA_VERSION_NUM < 502
++
++static int lua_absindex(lua_State *L, int idx) {
++	return (idx > 0 || idx <= LUA_REGISTRYINDEX)? idx : lua_gettop(L) + idx + 1;
++} /* lua_absindex() */
++
++static void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
++	int i, t = lua_absindex(L, -1 - nup);
++
++	for (; l->name; l++) {
++		for (i = 0; i < nup; i++)
++			lua_pushvalue(L, -nup);
++		lua_pushcclosure(L, l->func, nup);
++		lua_setfield(L, t, l->name);
++	}
++
++	lua_pop(L, nup);
++} /* luaL_setfuncs() */
++
++#define luaL_newlibtable(L, l) \
++	lua_createtable(L, 0, (sizeof (l) / sizeof *(l)) - 1)
++
++#define luaL_newlib(L, l) \
++	(luaL_newlibtable((L), (l)), luaL_setfuncs((L), (l), 0))
++
++#ifndef LUA_FILEHANDLE /* Not defined by earlier LuaJIT releases */
++#define LUA_FILEHANDLE "FILE*"
++#endif
++
++/*
++ * Lua 5.1 userdata is a simple FILE *, while LuaJIT is a struct with the
++ * first member a FILE *, similar to Lua 5.2.
++ */
++typedef struct luaL_Stream {
++	FILE *f;
++} luaL_Stream;
++
++static int luaL_fileresult(lua_State *L, int stat, const char *filename) {
++	int en = errno;  /* calls to Lua API may change this value */
++	if (stat) {
++		lua_pushboolean(L, 1);
++		return 1;
++	}
++	else {
++		lua_pushnil(L);
++		if (filename)
++			lua_pushfstring(L, "%s: %s", filename, strerror(en));
++		else
++			lua_pushfstring(L, "%s", strerror(en));
++		lua_pushinteger(L, en);
++		return 3;
++	}
++}
++
++#define isclosed(p) ((p)->f == NULL)
++#define markclosed(p) ((p)->f = NULL)
++
++#else
++
++#define isclosed(p) ((p)->closef == NULL)
++#define markclosed(p) ((p)->closef = NULL)
++
++#endif
++
++#define tolstream(L) ((luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE))
+ 
+ static FILE *tofile (lua_State *L) {
+-  FILE **f = topfile(L);
+-  if (*f == NULL)
+-    luaL_error(L, "attempt to use a closed file");
+-  return *f;
+-}
+-
+-static int pushresult (lua_State *L, int i, const char *filename) {
+-  int en = errno;  /* calls to Lua API may change this value */
+-  if (i) {
+-    lua_pushboolean(L, 1);
+-    return 1;
+-  }
+-  else {
+-    lua_pushnil(L);
+-    if (filename)
+-      lua_pushfstring(L, "%s: %s", filename, strerror(en));
+-    else
+-      lua_pushfstring(L, "%s", strerror(en));
+-    lua_pushinteger(L, en);
+-    return 3;
+-  }
+-}
+-
+-static int io_fclose (lua_State *L) {
+-  FILE **p = topfile(L);
+-  int ok = (fclose(*p) == 0);
+-  *p = NULL;
+-  return pushresult(L, ok, NULL);
++	luaL_Stream *p = tolstream(L);
++	if (isclosed(p))
++		luaL_error(L, "attempt to use a closed file");
++	return p->f;
+ }
+ 
+-static FILE **newfile_fd(lua_State *L, int fd, const char *mode)
++static int io_fclose (lua_State *L)
+ {
+-	FILE **pf = (FILE **)lua_newuserdata(L, sizeof(FILE *));
+-	*pf = NULL;  /* file handle is currently `closed' */
++	luaL_Stream *p = tolstream(L);
++	int res = fclose(p->f);
++	markclosed(p);
++	return luaL_fileresult(L, (res == 0), NULL);
++}
++
++static luaL_Stream *newfile_fd(lua_State *L, int fd, const char *mode)
++{
++	luaL_Stream *p = (luaL_Stream *) lua_newuserdata(L, sizeof(luaL_Stream));
++	markclosed(p);
+ 	luaL_getmetatable(L, LUA_FILEHANDLE);
+ 	lua_setmetatable(L, -2);
+-	*pf = fdopen(fd, mode);
+-	return pf;
++	p->f = fdopen(fd, mode);
++#if LUA_VERSION_NUM >= 502
++	p->closef = &io_fclose;
++#endif
++	return p;
+ }
+ 
+ static int lpc_run(lua_State *L)
+@@ -64,12 +115,12 @@
+ 	int p_in[2];
+ 	int pid;
+ 
+-	if (pipe(p_out) == -1) { lua_pushnil(L); return 1; }
+-	if (pipe(p_in) == -1)  { lua_pushnil(L); return 1; }
++	if (pipe(p_out) == -1)		goto err_noclose;
++	if (pipe(p_in) == -1)		goto err_closeout;
++	if ((pid = fork()) == -1)	goto err_closeinout;
+ 
+-	if ((pid = fork()) == -1) { lua_pushnil(L); return 1; }
+-	else if (pid == 0)
+-	{
++	if (pid == 0) {
++		/* child */
+ 		char **args;
+ 		int n = lua_gettop(L);  /* number of arguments */
+ 		int i;
+@@ -93,20 +144,24 @@
+ 		_exit(1);
+ 		return 0;
+ 	}
+-	else
+-	{
+-		FILE **in;
+-		FILE **out;
+ 
+-		/* Cleanup */
+-		close(p_out[0]);
+-		close(p_in[1]);
+-
+-		lua_pushnumber(L, pid);
+-		out = newfile_fd(L, p_out[1], "w");
+-		in = newfile_fd(L, p_in[0], "r");
+-		return 3;
+-	}
++	/* Cleanup */
++	close(p_out[0]);
++	close(p_in[1]);
++	lua_pushnumber(L, pid);
++	newfile_fd(L, p_out[1], "w");
++	newfile_fd(L, p_in[0], "r");
++	return 3;
++
++err_closeinout:
++	close(p_in[0]);
++	close(p_in[1]);
++err_closeout:
++	close(p_out[0]);
++	close(p_out[1]);
++err_noclose:
++	lua_pushnil(L);
++	return 1;
+ }
+ 
+ static int lpc_wait(lua_State *L)
+@@ -116,13 +171,9 @@
+ 	int nonblock = luaL_optinteger(L, 2, 0);
+ 
+ 	if (waitpid(pid, &ret, (nonblock == 1) ? WNOHANG : 0) == pid)
+-	{
+ 		lua_pushnumber(L, ret);
+-	}
+ 	else
+-	{
+ 		lua_pushnil(L);
+-	}
+ 	return 1;
+ }
+ 
+@@ -141,13 +192,9 @@
+ 	FD_SET(fileno(f), &rfds);
+ 	retval = select(1 + fileno(f), &rfds, NULL, NULL, &tv);
+ 	if (retval == 1)
+-	{
+ 		lua_pushboolean(L, 1);
+-	}
+ 	else
+-	{
+ 		lua_pushnil(L);
+-	}
+ 	return 1;
+ }
+ 
+@@ -166,13 +213,9 @@
+ 	FD_SET(fileno(f), &wfds);
+ 	retval = select(1 + fileno(f), NULL, &wfds, NULL, &tv);
+ 	if (retval == 1)
+-	{
+ 		lua_pushboolean(L, 1);
+-	}
+ 	else
+-	{
+ 		lua_pushboolean(L, 0);
+-	}
+ 	return 1;
+ }
+ 
+@@ -192,7 +235,7 @@
  	lua_settable (L, -3);
  }
  
@@ -39,3 +279,32 @@ diff -ru lpc-1.0.0.orig/lpc.c lpc-1.0.0/lpc.c
  {
  	{"run", lpc_run},
  	{"wait", lpc_wait},
+@@ -207,15 +250,15 @@
+ 
+ static void createmeta(lua_State *L)
+ {
+-  luaL_getmetatable(L, LUA_FILEHANDLE);  /* get IO's metatable for file handles */
+-  luaL_register(L, NULL, io_add_flib);  /* file methods */
++	luaL_getmetatable(L, LUA_FILEHANDLE);  /* get IO's metatable for file handles */
++	luaL_setfuncs(L, io_add_flib, 0);  /* file methods */
+ }
+ 
+-
+ int luaopen_lpc (lua_State *L)
+ {
+ 	createmeta(L);
+ 
++#if LUA_VERSION_NUM < 502
+ 	luaL_openlib(L, "lpc", lpclib, 0);
+ 
+ 	/* create environment for 'run' */
+@@ -225,6 +268,9 @@
+ 	lua_setfield(L, -2, "__close");
+ 	lua_setfenv(L, -2);
+ 	lua_pop(L, 1);  /* pop 'run' */
++#else
++	luaL_newlib(L, lpclib);
++#endif
+ 
+ 	set_info(L);
+ 	return 1;
