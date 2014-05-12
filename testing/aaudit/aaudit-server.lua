@@ -4,8 +4,11 @@ local posix = require 'posix'
 local json = require 'cjson'
 local zlib = require 'zlib'
 local aac = require 'aaudit.common'
+local smtp = require 'socket.smtp'
 
 local HOME = os.getenv("HOME")
+
+M.serverconfig = aac.readconfig(("%s/aaudit-server.json"):format(HOME)) or {}
 
 local function merge_bool(a, b) return a or b end
 local function merge_array(a, b) if b then for i=1,#b do a[#a+1] = b[i] end end return a end
@@ -70,6 +73,85 @@ local function read_header_block(block)
 	return header
 end
 
+local function rfc822_address(id)
+	local identities = M.serverconfig.identities
+	if id == nil then id = "_default" end
+	if identities and identities[id] then id = identities[id] end
+	local name, email = id:match("^(.-) *(<.*>)$")
+	if not email then return ("<%s>"):format(id) end
+	return ("%s %s"):format(name, email)
+end
+
+local function rfc822_email(rfc822)
+	return rfc822:match("(<.*>)$")
+
+end
+
+function M.sendemail(mail)
+	local to = {}
+	local m = {
+		headers = {
+			["Content-Type"] = 'text/plain; charset=utf8',
+			["X-RT-Command"] = mail.rtheader,
+			from = rfc822_address(mail.from),
+			subject = mail.subject,
+		},
+		body = mail.message,
+	}
+	local rcpt = {}
+	for _, addr in ipairs(mail.to) do
+		local rfc822 = rfc822_address(addr)
+		table.insert(to, rfc822)
+		table.insert(rcpt, rfc822_email(rfc822))
+	end
+	m.headers.to = table.concat(to, ", ")
+	return smtp.send{
+		from = rfc822_email(m.headers.from),
+		rcpt = rcpt,
+		source = smtp.message(m)
+	}
+end
+
+local rt_keywords = {
+	fix = true,
+	fixes = true,
+	close = true,
+	closes = true,
+	ref = false,
+	refs = false,
+	rt = false,
+}
+
+local function sendcommitdiff(body, req, R, G)
+	if not body then return end
+	if not G.notify_emails then return end
+
+	local mail = {
+		from = req.committer,
+		to = G.notify_emails,
+		subject = ("config change - %s (%s)"):format(R.description, R.address),
+		message = table.concat(body, '\n')
+	}
+
+	-- Set Request Tracker headers if relevant
+	local rtqueue = M.serverconfig.rtqueue
+	if rtqueue then
+		for k,no in req.message:gmatch("(%a+) #(%d+)") do
+			local action = rt_keywords[k]
+			if action ~= nil then
+				mail.subject = ("[%s #%s] %s"):format(rtqueue, no, mail.subject)
+				if action == true then
+					mail.rtheader = "Status: resolved"
+				end
+				break
+			end
+		end
+	end
+
+	-- Send email
+	return M.sendemail(mail)
+end
+
 local function import_tar(TAR, GIT, req, G)
 	local branch_ref = "refs/heads/import"
 	local from_ref = "refs/heads/master"
@@ -107,6 +189,17 @@ local function import_tar(TAR, GIT, req, G)
 			end
 		end
 
+		if header.name == "etc/aaudit/aaudit.json" then
+			local success, res = pcall(json.decode, file_data)
+			if success and res.contact then
+				local contact = res.contact
+				G.notify_emails = merge_array(G.notify_emails, {contact})
+				if req.local_change then
+					req.author = rfc822_address(res.contact)
+				end
+			end
+		end
+
 		if header.typeflag:match("^[0-46]$") and
 		   not match_file(header.name, G.no_track) then
 			GIT:write('blob\n', 'mark :', nextmark, '\n')
@@ -140,9 +233,9 @@ data <<END_OF_COMMIT_MESSAGE
 END_OF_COMMIT_MESSAGE
 
 ]]):format(branch_ref,
-	req.author.rfc822, author_time,
-	req.author.rfc822, os.time(),
-	req.message or "Changes"))
+	req.author, author_time,
+	req.committer, os.time(),
+	req.message))
 
 	if not req.initial then GIT:write(("from %s^0\n"):format(from_ref)) end
 	GIT:write("deleteall\n")
@@ -191,70 +284,31 @@ local function generate_diff(repodir, commit, G)
 	return has_changes, text
 end
 
-local function resolve_email(identities, id)
-	if identities and identities[id] then id = identities[id] end
-	local name, email = id:match("^(.-) *<(.*)>$")
-	if email then return {name=name, email=email, rfc822=("%s <%s>"):format(name, email) } end
-	return {name="", email=name, rfc822=("<%s>"):format(name)}
-end
-
-local function send_email(body, req, S, R, G)
-	if not body then return end
-	if not G.notify_emails then return end
-
-	local to_rfc822 = {}
-	local to_email = {}
-	for _,r in ipairs(G.notify_emails) do
-		local id = resolve_email(S.identities, r)
-		if not to_email[id.email] then
-			to_email[id.email] = true
-			table.insert(to_rfc822, id.rfc822)
-			table.insert(to_email, id.email)
-		end
-	end
-	to_rfc822 = table.concat(to_rfc822, ", ")
-	to_email  = table.concat(to_email, " ")
-
-	-- Add busybox sendmail smtp server option
-	local options=""
-	if S.smtp_server then options = ('-S "%s"'):format(S.smtp_server) end
-
-	local EMAIL = io.popen(('sendmail -f "%s" %s %s'):format(req.author.email, options, to_email), "w")
-	EMAIL:write(([[
-From: %s
-To: %s
-Subject: apkovl changed - %s (%s)
-Date: %s
-
-]]):format(req.author.rfc822, to_rfc822, R.description, R.address, os.date("%a, %d %b %Y %H:%M:%S")))
-
-	for _, l in ipairs(body) do EMAIL:write(l,'\n') end
-	EMAIL:close()
-
-	return to_email
+function M.loadrepoconfig(repohome)
+	return aac.readconfig(("%s/aaudit-repo.json"):format(repohome))
 end
 
 local function load_repo_configs(repohome)
-	local S = aac.readconfig(("%s/aaudit-server.json"):format(HOME))
-	local R = aac.readconfig(("%s/aaudit-repo.json"):format(repohome))
+	local R = M.loadrepoconfig(repohome)
 	-- merge global and per-repository group configs
-	local G = (S.groups or {}).all or {}
+	local G = (M.serverconfig.groups or {}).all or {}
 	for _, name in pairs(R.groups or {}) do
-		local g = S.groups[name] or {}
+		local g = M.serverconfig.groups[name] or {}
 		G.notify_emails = merge_array(G.notify_emails, g.notify_emails)
 		G.track_filemode = merge_bool(G.track_filemode, g.track_filemode)
 		G.no_track = merge_array(G.no_track, g.no_track)
 		G.no_notify = merge_array(G.no_notify, g.no_notify)
 		G.no_diff = merge_array(G.no_diff, g.no_diff)
 	end
-	return S, R, G
+	return R, G
 end
 
 function M.repo_update(req,clientstream)
 	local repodir = req.repositorydir
-	local S, R, G = load_repo_configs(repodir)
+	local R, G = load_repo_configs(repodir)
 
-	req.author = resolve_email(S.identities, req.identity)
+	req.committer = rfc822_address(req.identity)
+	req.author = req.committer
 
 	local TAR
 	if req.apkovl_follows then
@@ -269,16 +323,26 @@ function M.repo_update(req,clientstream)
 	TAR:close()
 	if not rc then return rc, err end
 
+	local stampfile = ("%s/lastcheck"):format(repodir)
+	if posix.utime(stampfile) ~= 0 then
+		posix.close(posix.open(stampfile, posix.O_CREAT, "0644"))
+	end
+
 	local has_changes, email_body = generate_diff(repodir, "import", G)
 	if has_changes then
+		if not req.initial then
+			local res, err = sendcommitdiff(email_body, req, R, G)
+			if not res then
+				os.execute(("git --git-dir='%s' branch --quiet -D import;"..
+					    "git --git-dir='%s' gc --quiet --prune=now")
+					:format(repodir, repodir))
+				return false, err
+			end
+		end
 		os.execute(("git --git-dir='%s' branch --quiet --force master import;"..
 			    "git --git-dir='%s' branch --quiet -D import")
 			:format(repodir, repodir))
-		local to = nil
-		if not req.initial then
-			to = send_email(email_body, req, S, R, G)
-		end
-		return true, "Committed", {notified=to}
+		return true, "Committed"
 	end
 
 	os.execute(("git --git-dir='%s' branch --quiet -D import;"..
@@ -322,6 +386,7 @@ function M.handle(req,clientstream)
 		req.command = "commit"
 	end
 	if req.command == "commit" then
+		req.message = req.message or "Configuration change"
 		if not posix.access(req.repositorydir, "rwx") then
 			return false, "No such repository"
 		end
