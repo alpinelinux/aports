@@ -62,8 +62,8 @@ progs-$(STATIC)		+= apk.static
 apk.static-objs		:= $(filter-out apk.o,$(apk-objs)) apk-static.o
 LDFLAGS_apk.static	:= -static
 LIBS_apk.static		:= -Wl,--as-needed -ldl -Wl,--no-as-needed
-LDFLAGS_apk		+= -nopie -L$(obj)
-LDFLAGS_apk-test	+= -nopie -L$(obj)
+LDFLAGS_apk		+= -L$(obj)
+LDFLAGS_apk-test	+= -L$(obj)
 
 CFLAGS_ALL		+= $(shell $(PKG_CONFIG) --cflags $(PKGDEPS))
 LIBS			:= -Wl,--as-needed \

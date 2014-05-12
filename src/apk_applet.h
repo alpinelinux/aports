@@ -25,6 +25,8 @@ struct apk_option {
 };
 
 struct apk_applet {
+	struct list_head node;
+
 	const char *name;
 	const char *arguments;
 	const char *help;
@@ -39,10 +41,11 @@ struct apk_applet {
 	int (*main)(void *ctx, struct apk_database *db, struct apk_string_array *args);
 };
 
-extern struct apk_applet *__start_apkapplets, *__stop_apkapplets;
+void apk_applet_register(struct apk_applet *);
+typedef void (*apk_init_func_t)(void);
 
 #define APK_DEFINE_APPLET(x) \
-	static struct apk_applet *__applet_##x \
-	__attribute__((__section__("apkapplets"))) __attribute((used)) = &x;
+static void __register_##x(void) { apk_applet_register(&x); } \
+static apk_init_func_t __regfunc_##x __attribute__((__section__("initapplets"))) __attribute((used)) = __register_##x;
 
 #endif

@@ -33,6 +33,9 @@
 #include "apk_print.h"
 #include "apk_io.h"
 
+static struct list_head apk_applet_list;
+#define foreach_applet(iter) list_for_each_entry(iter, &apk_applet_list, node)
+
 char **apk_argv;
 
 static struct apk_option generic_options[] = {
@@ -150,17 +153,16 @@ static int usage(struct apk_applet *applet)
 {
 	version();
 	if (applet == NULL) {
-		struct apk_applet **a;
+		struct apk_applet *a;
 
 		print_usage("COMMAND", "[ARGS]...",
 			    ARRAY_SIZE(generic_options), generic_options);
 
 		printf("\nThe following commands are available:\n");
-		for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
+		foreach_applet(a) {
 			struct apk_indent indent = { .indent = 12 };
-
-			indent.x = printf("  %-*s", indent.indent - 3, (*a)->name);
-			apk_print_indented_words(&indent, (*a)->help);
+			indent.x = printf("  %-*s", indent.indent - 3, a->name);
+			apk_print_indented_words(&indent, a->help);
 			printf("\n");
 		}
 	} else {
@@ -186,11 +188,11 @@ static int usage(struct apk_applet *applet)
 
 static struct apk_applet *find_applet(const char *name)
 {
-	struct apk_applet **a;
+	struct apk_applet *a;
 
-	for (a = &__start_apkapplets; a < &__stop_apkapplets; a++) {
-		if (strcmp(name, (*a)->name) == 0)
-			return *a;
+	foreach_applet(a) {
+		if (strcmp(name, a->name) == 0)
+			return a;
 	}
 
 	return NULL;
@@ -289,6 +291,22 @@ static void setup_automatic_flags(void)
 		apk_flags |= APK_INTERACTIVE;
 }
 
+void apk_applet_register(struct apk_applet *applet)
+{
+	list_init(&applet->node);
+	list_add_tail(&applet->node, &apk_applet_list);
+}
+
+static void apk_applet_register_builtin(void)
+{
+	extern apk_init_func_t __start_initapplets[], __stop_initapplets[];
+	apk_init_func_t *p;
+
+	list_init(&apk_applet_list);
+	for (p = __start_initapplets; p < __stop_initapplets; p++)
+		(*p)();
+}
+
 int main(int argc, char **argv)
 {
 	struct apk_applet *applet;
@@ -308,6 +326,8 @@ int main(int argc, char **argv)
 
 	apk_string_array_init(&test_repos);
 #endif
+
+	apk_applet_register_builtin();
 
 	apk_argv = malloc(sizeof(char*[argc+2]));
 	memcpy(apk_argv, argv, sizeof(char*[argc]));
