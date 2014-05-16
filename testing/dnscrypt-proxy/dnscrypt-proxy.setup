@@ -42,10 +42,9 @@ die() {
 }
 
 restart_interface(){
-
 INTERFACES=$(echo | ifconfig | grep "Link encap" | sed '/lo/d' | cut -d"L" -f1)
 print_question "\nChoose external interface to restart from the following:"
-print_question "\n\n$INTERFACES" "[ default - eth0 ]"
+print_question "\n\n$INTERFACES" "[ default: eth0 ]"
 
 while :
 do
@@ -68,9 +67,8 @@ done
 }
 
 choose_ip(){
-
 IPADDR=$(ifconfig |grep -B1 "inet addr" |awk '{ if ( $1 == "inet" ) { print $2 } else if ( $2 == "Link" ) { printf "%s:" ,$1 } }' |awk -F" " '{ print $1 ": " $3 }'| sed 's/addr//')
-if echo "$IPADDR" | grep -e "127.0.0.2" 1>/dev/null; then
+if echo "$IPADDR" | grep -e "127.0.0.2" 1>/dev/null && which unbound 1> /dev/null; then
         defaultip='127.0.0.2'
 	IPADDR_CHOICE=$(echo "$IPADDR" | sed '/lo::127.0.0.1:/d')
 else
@@ -78,13 +76,8 @@ else
 	IPADDR_CHOICE=$(echo "$IPADDR" | sed '/lo:1::127.0.0.2:/d')
 fi
 
-if [ "$removecache" = "Y" ] || [ "$removecache" = "y" ]; then
-        defaultip='127.0.0.1'
-        IPADDR_CHOICE=$(echo "$IPADDR" | sed '/lo:1::127.0.0.2:/d')
-fi
-
 print_question "\nChoose Dnscrypt IP from the following addresses:\n"
-print_question "\n$IPADDR_CHOICE\t" "[ default - $defaultip ]"
+print_question "\n$IPADDR_CHOICE\t" "[ default: $defaultip ]"
 
 while :
 do
@@ -105,14 +98,13 @@ done
 }
 
 choose_port(){
-
 if grep -e "127.0.0.2" /etc/network/interfaces 1>/dev/null; then
 	defaultport=40
 else
 	defaultport=53
 fi
 
-print_question "\nChoose Dnscrypt Port:" "[ default = $defaultport ]"
+print_question "\nChoose Dnscrypt Port:" "[ default: $defaultport ]"
 while :
 do
         read DNSPORT
@@ -158,6 +150,60 @@ print_table '  name: "."'
 print_table "  forward-addr: $IP_CLEAN@$DNSPORT_CLEAN"
 print_green "--------------------------------------------------------"
 fi
+}
+
+restart_services(){
+# add / restart services - dnscrypt must be restarted first
+echo ""
+for srv in "dnscrypt-proxy" "unbound"; do
+        if which $srv 1> /dev/null; then
+                rc-status default | grep $srv 1> /dev/null
+                if [ "$?" != "0" ]; then
+                        print_green "Adding $srv to Default Run Level"
+                        rc-update add $srv default
+                fi
+                rc-service $srv restart
+        fi
+done
+}
+
+modify_config(){
+choose_ip; choose_port
+
+# update dnscrypt listening ip & port
+LINE=$(sed -n '/DNSCRYPT_LOCALIP=/=' $config)
+sed "$LINE c DNSCRYPT_LOCALIP=$IP_CLEAN:$DNSPORT_CLEAN" $config -i
+
+# update dhclient.conf
+if [ -f $dhcpconfig ]; then
+	if grep 'supersede domain-name-servers' $dhcpconfig 1>/dev/null; then
+		LINE=$(sed -n '/supersede domain-name-servers/=' $dhcpconfig)
+		sed "$LINE c supersede domain-name-servers $IP" $dhcpconfig -i
+	else
+		echo "supersede domain-name-servers $IP" >> $dhcpconfig
+	fi
+fi
+
+# update resolv.conf & unbound
+LINE=$(sed -n '/nameserver/=' /etc/resolv.conf)
+sed "$LINE c nameserver 127.0.0.1" /etc/resolv.conf -i
+if [ "$removecache" != "Y" ] && [ "$removecache" != "y" ]; then
+	update_unbound
+fi
+
+restart_interface
+
+print_strong "\n/etc/conf.d/dnscrypt-proxy Listening Address updated to:"
+print_green "--------------------------------------------------------"
+print_table "DNSCRYPT_LOCALIP=$IP_CLEAN:$DNSPORT_CLEAN"
+print_green "--------------------------------------------------------\n"
+}
+
+rm_loopback(){
+START=$(sed -n "\%Settings from $SCRIPT%=" /etc/network/interfaces)
+LINE=$(expr $START + 4)
+sed -i ''$START','$LINE'd' /etc/network/interfaces
+print_green "2nd Loopback interface removed"
 }
 
 # END Functions ###################################################################################
@@ -216,17 +262,17 @@ clear
 
 # colour table ##################################################################################
 
-colourheading=$(awk 'BEGIN { format = "%-3s%-40s%-18s%-10s%-10s%-10s%-25s%s\n"
+colourheading=$(awk 'BEGIN { format = "%-3s%-40s%-18s%-10s%-10s%-10s%-25s\n"
 	printf format, "#", "Name", "Location", "DNSSEC", "No Logs", "Namecoin", "Resolver Address" }')
 
-colourline=$(awk 'BEGIN { format = "%-3s%-40s%-18s%-10s%-10s%-10s%-25s%s\n"
+colourline=$(awk 'BEGIN { format = "%-3s%-40s%-18s%-10s%-10s%-10s%-25s\n"
 	printf format, "---", "----------------------------------------", "------------------", "----------",\
 			"----------", "----------", "------------------------------------------" }')
 
 print_green "$colourheading"
 print_green "$colourline"
 
-awk 'BEGIN { format = "%-3s%-40s%-18s%-10s%-10s%-10s%-25s%s\n" }
+awk 'BEGIN { format = "%-3s%-40s%-18s%-10s%-10s%-10s%-25s\n" }
         { printf format,$1,$3,$5,$9,$10,$11,$12 }' FS=\| $output
 
 print_green "$colourline"
@@ -282,94 +328,60 @@ print_green "-------------------------------------------------------------------
 
 # install unbound
 if ! which unbound 1> /dev/null; then
-   print_question "Install Unbound (Caching DNS Server)" "[ Y / N ]"
+   print_question "Install Unbound (Caching DNS Server)" "[ Y / N: Default ]"
    read installsrv
-   if [ "$installsrv" = "Y" ] || [ "$installsrv" = "y" ]; then
+   if [ "$(echo $installsrv | tr '[A-Z]' '[a-z]')" = "y" ]; then
       apk add -q unbound
    else
       echo "nameserver 127.0.0.1" > /etc/resolv.conf
-      exit 0
    fi
 fi
 
 # check for / setup secondary loopback for dns caching
 if which unbound 1> /dev/null && ! grep "address 127.0.0.2" /etc/network/interfaces 1> /dev/null; then
-	print_question "Configure DNS Caching (create a 2nd loopback interface @ 127.0.0.2) " "[ Y / N ]"
-	read install2ndloop
-	if [ "$install2ndloop" = "Y" ] || [ "$install2ndloop" = "y" ]; then
+	IP=127.0.0.2
+	echo "##### Settings from $SCRIPT #####" >> /etc/network/interfaces
+	echo "auto lo:1" >> /etc/network/interfaces
+	echo "iface lo:1 inet static" >> /etc/network/interfaces
+	echo "address $IP" >> /etc/network/interfaces
+	echo "netmask 255.0.0.0" >> /etc/network/interfaces
+	ifconfig lo:1 $IP up
+fi
+
+# modify caching 
+if grep "address 127.0.0.2" /etc/network/interfaces 1> /dev/null && [ ! $installsrv ]; then
+	print_question "\nRemove DNS Caching (Unbound) / Secondary loopback device ?" "[ Y / N: Default ]"; read removecache
+	if [ "$(echo $removecache | tr '[A-Z]' '[a-z]')" = "y" ]; then
+		# remove loopback settings
+		rm_loopback
+		echo -e ""; rc-service unbound stop; apk del unbound
+	else
+		print_green "\nSecondary Loopback for DNS Caching configured @ 127.0.0.2"
 		IP=127.0.0.2
-		echo "##### Settings from $SCRIPT #####" >> /etc/network/interfaces
-		echo "auto lo:1" >> /etc/network/interfaces
-		echo "iface lo:1 inet static" >> /etc/network/interfaces
-		echo "address $IP" >> /etc/network/interfaces
-		echo "netmask 255.0.0.0" >> /etc/network/interfaces
-		ifconfig lo:1 $IP up
 	fi
 fi
 
-# modify caching / ports
-if grep "address 127.0.0.2" /etc/network/interfaces 1> /dev/null && [ ! $install2ndloop ]; then
-	print_question "\nRemove DNS Caching (Unbound) / Secondary loopback device ?" "[ Y / N ]"; read removecache
-		if [ "$removecache" = "Y" ] || [ "$removecache" = "y" ]; then
-			# remove loopback settings
-			START=$(sed -n "\%Settings from $SCRIPT%=" /etc/network/interfaces)
-                	LINE=$(expr $START + 4)
-			sed -i ''$START','$LINE'd' /etc/network/interfaces
-			echo -e ""; rc-service unbound stop; apk del unbound
-		else
-			print_green "\nSecondary Loopback for DNS Caching configured @ 127.0.0.2\n"
-			IP=127.0.0.2
-		fi
-fi
-
-print_question "\nModify dnscrypt-proxy ip / port ?" "[ Y / N ]"; read updateip
-
-# choose dnscrypt ip address port
-if [ "$updateip" = "Y" ] || [ "$updateip" = "y" ]; then
-		choose_ip; choose_port
-
-		# update dnscrypt listening ip & port
-		LINE=$(sed -n '/DNSCRYPT_LOCALIP=/=' $config)
-		sed "$LINE c DNSCRYPT_LOCALIP=$IP_CLEAN:$DNSPORT_CLEAN" $config -i
-
-		# update dhclient.conf
-		if [ -f $dhcpconfig ]; then
-			if grep 'supersede domain-name-servers' $dhcpconfig 1>/dev/null; then
-			LINE=$(sed -n '/supersede domain-name-servers/=' $dhcpconfig)
-			sed "$LINE c supersede domain-name-servers $IP" $dhcpconfig -i
-			else
-				echo "supersede domain-name-servers $IP" >> $dhcpconfig
-			fi
-		fi
-
-		# update resolv.conf & unbound
-		LINE=$(sed -n '/nameserver/=' /etc/resolv.conf)
-		sed "$LINE c nameserver 127.0.0.1" /etc/resolv.conf -i
-		if [ "$removecache" != "Y" ] && [ "$removecache" != "y" ]; then
-			update_unbound
-		fi
-		restart_interface
-
-		print_strong "\n/etc/conf.d/dnscrypt-proxy Listening Address updated to:"
-		print_green "--------------------------------------------------------"
-		print_table "DNSCRYPT_LOCALIP=$IP_CLEAN:$DNSPORT_CLEAN"
-		print_green "--------------------------------------------------------\n"
-fi
-
-# add / restart services - dnscrypt must be restarted first
-for srv in "dnscrypt-proxy" "unbound"; do
-	if which $srv 1> /dev/null; then
-		rc-status default | grep $srv 1> /dev/null
-        	if [ "$?" != "0" ]; then
-        		print_green "Adding $srv to Default Run Level"
-                	rc-update add $srv default
-        	fi
-        	rc-service $srv restart
+# modify ip / ports
+if [ $installsrv ] || [ "$(echo $removecache | tr '[A-Z]' '[a-z]')" = "y" ]; then
+	modify_config
+elif grep -q 127.0.0.2 /etc/network/interfaces && ! which unbound 1> /dev/null; then
+	rm_loopback
+	kill $(cat /var/run/unbound/unbound.pid)
+	modify_config
+else
+	print_question "\nModify dnscrypt-proxy ip / port ?" "[ Y / N: default ]"; read updateip
+	if [ "$(echo $updateip | tr '[A-Z]' '[a-z]')" = "y" ]; then
+		modify_config
 	fi
-done
+fi
 
-ifdown $RESTART_CLEAN && ifup $RESTART_CLEAN
-print_green "\nInterface $RESTART_CLEAN restarted\n"
+if [ "$RESTART_CLEAN" != "" ]; then
+	ifdown $RESTART_CLEAN && ifup $RESTART_CLEAN
+	print_green "Interface $RESTART_CLEAN restarted"
+fi
+
+restart_services
+
 exit 0
 
 
