@@ -95,11 +95,14 @@ static void delete_pkg(struct apk_package *pkg0, struct apk_dependency *dep0,
 static void delete_name(struct apk_database *db, const char *match,
 			struct apk_name *name, void *pctx)
 {
+	struct del_ctx *ctx = (struct del_ctx *) pctx;
 	struct apk_package *pkg;
 
 	pkg = apk_pkg_get_installed(name);
 	if (pkg != NULL)
 		delete_pkg(pkg, NULL, NULL, pctx);
+	else
+		apk_deps_del(&ctx->world, name);
 }
 
 static int del_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
