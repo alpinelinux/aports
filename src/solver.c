@@ -197,6 +197,7 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 		 * or it's a 'virtual' package with install_size zero */
 		pkg->ss.pkg_selectable =
 			(pkg->repos & db->available_repos) ||
+			pkg->cached_non_repository ||
 			pkg->ipkg;
 
 		/* Prune install_if packages that are no longer available,
@@ -212,8 +213,11 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 		pkg->ss.tag_preferred =
 			(pkg->filename != NULL) ||
 			(pkg->installed_size == 0) ||
-			!!(repos & ss->default_repos);
-		pkg->ss.tag_ok = pkg->ss.tag_preferred || pkg->ipkg;
+			(repos & ss->default_repos);
+		pkg->ss.tag_ok =
+			pkg->ss.tag_preferred ||
+			pkg->cached_non_repository ||
+			pkg->ipkg;
 
 		foreach_array_item(dep, pkg->depends) {
 			discover_name(ss, dep->name);

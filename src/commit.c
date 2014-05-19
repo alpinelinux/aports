@@ -379,6 +379,9 @@ static void print_pinning_errors(struct print_state *ps, struct apk_package *pkg
 	if (!(pkg->repos & db->available_repos)) {
 		label_start(ps, "masked in:");
 		apk_print_indented_fmt(&ps->i, "--no-network");
+	} else if (pkg->repos == BIT(APK_REPOSITORY_CACHED)) {
+		label_start(ps, "masked in:");
+		apk_print_indented_fmt(&ps->i, "cache");
 	} else {
 		if (pkg->repos & apk_db_get_pinning_mask_repos(db, APK_DEFAULT_PINNING_MASK | BIT(tag)))
 			return;

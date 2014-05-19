@@ -760,6 +760,8 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 
 			if (repo >= 0) {
 				pkg->repos |= BIT(repo);
+			} else if (repo == -2) {
+				pkg->cached_non_repository = 1;
 			} else if (repo == -1 && ipkg == NULL) {
 				/* Installed package without files */
 				ipkg = apk_pkg_install(db, pkg);

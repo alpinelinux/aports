@@ -114,9 +114,10 @@ struct apk_package {
 	struct apk_dependency_array *depends, *install_if, *provides;
 	size_t installed_size, size;
 	time_t build_time;
+	unsigned repos : APK_MAX_REPOS;
 	unsigned marked : 1;
 	unsigned uninstallable : 1;
-	unsigned repos : APK_MAX_REPOS;
+	unsigned cached_non_repository : 1;
 	struct apk_checksum csum;
 };
 APK_ARRAY(apk_package_array, struct apk_package *);
