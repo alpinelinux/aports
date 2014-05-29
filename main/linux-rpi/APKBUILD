@@ -1,0 +1,162 @@
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+
+_flavor=rpi
+pkgname=linux-${_flavor}
+pkgver=3.14.4
+case $pkgver in
+	*.*.*)	_kernver=${pkgver%.*};;
+	*.*) _kernver=$pkgver;;
+esac
+pkgrel=0
+pkgdesc="Linux kernel with Raspberry Pi patches"
+url=https://github.com/raspberrypi/linux
+depends="mkinitfs linux-firmware"
+makedepends="perl installkernel bash ncurses-dev gmp-dev bc"
+options="!strip"
+_config=${config:-kernelconfig.${CARCH}}
+install=
+source="http://ftp.kernel.org/pub/linux/kernel/v3.x/linux-$_kernver.tar.xz
+	http://dev.alpinelinux.org/~tteras/linux-3.14.y-rpi-20140529.patch
+	aslr-pie.patch
+	kernelconfig.armhf
+	"
+if [ "${pkgver%.0}" = "$pkgver" ]; then
+	source="$source
+	http://ftp.kernel.org/pub/linux/kernel/v3.x/patch-$pkgver.xz"
+fi
+subpackages="$pkgname-dev"
+arch="armhf"
+license="GPL-2"
+
+_abi_release=${pkgver}
+
+prepare() {
+	local _patch_failed=
+	cd "$srcdir"/linux-$_kernver
+	if [ "$_kernver" != "$pkgver" ]; then
+		msg "Applying patch-$pkgver.xz"
+		unxz -c < "$srcdir"/patch-$pkgver.xz | patch -p1 -N || return 1
+	fi
+
+	# first apply patches in specified order
+	for i in $source; do
+		case $i in
+		*.patch)
+			msg "Applying $i..."
+			if ! patch -s -p1 -N -i "$srcdir"/${i##*/}; then
+				echo $i >>failed
+				_patch_failed=1
+			fi
+			;;
+		esac
+	done
+
+	if ! [ -z "$_patch_failed" ]; then
+		error "The following patches failed:"
+		cat failed
+		return 1
+	fi
+
+	mkdir -p "$srcdir"/build
+	cp "$srcdir"/$_config "$srcdir"/build/.config || return 1
+	make -C "$srcdir"/linux-$_kernver O="$srcdir"/build HOSTCC="${CC:-gcc}" \
+		silentoldconfig
+}
+
+# this is so we can do: 'abuild menuconfig' to reconfigure kernel
+menuconfig() {
+	cd "$srcdir"/build || return 1
+	make menuconfig
+	cp .config "$startdir"/$_config
+}
+
+build() {
+	unset CPPFLAGS CFLAGS CXXFLAGS
+
+	cd "$srcdir"/build
+	export GCC_SPECS=hardenednopie.specs
+	make CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
+		|| return 1
+}
+
+package() {
+	unset CPPFLAGS CFLAGS CXXFLAGS
+
+	cd "$srcdir"/build
+	mkdir -p "$pkgdir"/boot "$pkgdir"/lib/modules
+	make -j1 modules_install firmware_install zinstall \
+		INSTALL_MOD_PATH="$pkgdir" \
+		INSTALL_PATH="$pkgdir"/boot \
+		|| return 1
+
+	rm -f "$pkgdir"/lib/modules/${_abi_release}/build \
+		"$pkgdir"/lib/modules/${_abi_release}/source
+	rm -rf "$pkgdir"/lib/firmware
+
+	install -D include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+}
+
+dev() {
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# simlar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for grsec kernel"
+	depends="gmp-dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	cp "$srcdir"/$_config "$dir"/.config
+	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" HOSTCC="${CC:-gcc}" \
+		silentoldconfig prepare modules_prepare scripts 
+
+	# remove the stuff that poits to real sources. we want 3rd party
+	# modules to believe this is the soruces
+	rm "$dir"/Makefile "$dir"/source
+
+	# copy the needed stuff from real sources
+	#
+	# this is taken from ubuntu kernel build script
+	# http://kernel.ubuntu.com/git?p=ubuntu/ubuntu-jaunty.git;a=blob;f=debian/rules.d/3-binary-indep.mk;hb=HEAD
+	cd "$srcdir"/linux-$_kernver
+	find . -path './include/*' -prune -o -path './scripts/*' -prune \
+		-o -type f \( -name 'Makefile*' -o -name 'Kconfig*' \
+		-o -name 'Kbuild*' -o -name '*.sh' -o -name '*.pl' \
+		-o -name '*.lds' \) | cpio -pdm "$dir"
+	cp -a drivers/media/dvb/dvb-core/*.h "$dir"/drivers/media/dvb/dvb-core
+	cp -a drivers/media/video/*.h "$dir"/drivers/media/video
+	cp -a drivers/media/dvb/frontends/*.h "$dir"/drivers/media/dvb/frontends
+	cp -a scripts include "$dir"
+	find $(find arch -name include -type d -print) -type f \
+		| cpio -pdm "$dir"
+
+	install -Dm644 "$srcdir"/build/Module.symvers \
+		"$dir"/Module.symvers
+
+	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
+	ln -sf /usr/src/linux-headers-${_abi_release} \
+		"$subpkgdir"/lib/modules/${_abi_release}/build
+}
+
+md5sums="b621207b3f6ecbb67db18b13258f8ea8  linux-3.14.tar.xz
+6c1584d3cc0705318f464c6ad4564b97  linux-3.14.y-rpi-20140529.patch
+f901100a661ec62aac12000872d0276c  aslr-pie.patch
+e501874c52236b9f99ec47ef80ad230b  kernelconfig.armhf
+116f27cf17c3522716b6678b17516067  patch-3.14.4.xz"
+sha256sums="61558aa490855f42b6340d1a1596be47454909629327c49a5e4e10268065dffa  linux-3.14.tar.xz
+4e566b0e236e611aa75da3a18ed38e61793bee3c7deaaa1cc91801b5e52d69d2  linux-3.14.y-rpi-20140529.patch
+07e9b089c0d5d57e91256ff6e8fe373519c8bd4ae4cba4eb4a2edad3e2cc9a8e  aslr-pie.patch
+b8dc837958a9d2052f8dfb104a35f14c5b57091ed5773451ccbf9c7b9ffa83bc  kernelconfig.armhf
+af640ea64e923d525a8238832e8452381e6dc76a3bf28046411cadd67c408114  patch-3.14.4.xz"
+sha512sums="5730d83a7a81134c1e77c0bf89e42dee4f8251ad56c1ac2be20c59e26fdfaa7bea55f277e7af156b637f22e1584914a46089af85039177cb43485089c74ac26e  linux-3.14.tar.xz
+58a6be959f480b0f9f64178b6a3f531d1cc77c7d19aaaa14908ebf2c7e752112a4a9d47638b16033439147d6829246c3bbe15d527761828b9d0414590ebb3f29  linux-3.14.y-rpi-20140529.patch
+35055eea7fce660a200cf6f56490a88f1601b4ea95d2364191ad0d890633e8811f2753b5816dad9640384a764b147a4a80b95f39e3bd7a66a15fd5b3ec0c794a  aslr-pie.patch
+7ff20c908cf005840b042e50aeaece9807df13a6be20e547e25f6bf9922c554914c18a2a377130dd8ead5b1955e98f4971db0cf8aeabdec28e319d7d23634c2f  kernelconfig.armhf
+61eca26d57f7d7caa78d157582d4b98fbba1c85af73f1773fb51eab3db4381de53f4fbfbc202083e45297c0b4487bc58880a518e7ee9c0d616cddf0b3909b303  patch-3.14.4.xz"
