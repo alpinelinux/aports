@@ -1,0 +1,311 @@
+From 327938705e9223cdc15c5e0d85b0cdfafb4b6cd7 Mon Sep 17 00:00:00 2001
+From: "Scott M. Kroll" <skroll@gmail.com>
+Date: Sun, 13 Jul 2014 18:19:35 -0400
+Subject: [PATCH 3/5] Add kuid_t/kgid_t compatibility layer
+
+---
+ open-vm-tools/modules/linux/vmhgfs/filesystem.c |  20 ++--
+ open-vm-tools/modules/linux/vmhgfs/fsutil.c     | 118 ++++++++++++++++++++----
+ open-vm-tools/modules/linux/vmhgfs/fsutil.h     |   5 +-
+ open-vm-tools/modules/linux/vmhgfs/inode.c      |  18 +++-
+ open-vm-tools/modules/linux/vmhgfs/module.h     |  14 ++-
+ 5 files changed, 145 insertions(+), 30 deletions(-)
+
+diff --git a/open-vm-tools/modules/linux/vmhgfs/filesystem.c b/open-vm-tools/modules/linux/vmhgfs/filesystem.c
+index f101ca7..c845b36 100644
+--- a/modules/linux/vmhgfs/filesystem.c
++++ b/modules/linux/vmhgfs/filesystem.c
+@@ -228,17 +228,25 @@ HgfsInitSuperInfo(HgfsMountInfo *mountInfo) // IN: Passed down from the user
+     * or gid given to us by the server.
+     */
+    si->uidSet = mountInfo->uidSet;
++   si->uid = current_uid();
+    if (si->uidSet) {
+-      si->uid = mountInfo->uid;
+-   } else {
+-      si->uid = current_uid();
++      kuid_t mntUid = make_kuid(current_user_ns(), mountInfo->uid);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
++      if (uid_valid(mntUid))
++#endif
++         si->uid = mntUid;
+    }
++
+    si->gidSet = mountInfo->gidSet;
++   si->gid = current_gid();
+    if (si->gidSet) {
+-      si->gid = mountInfo->gid;
+-   } else {
+-      si->gid = current_gid();
++      kgid_t mntGid = make_kgid(current_user_ns(), mountInfo->gid);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
++      if (gid_valid(mntGid))
++#endif
++         si->gid = mntGid;
+    }
++
+    si->fmask = mountInfo->fmask;
+    si->dmask = mountInfo->dmask;
+    si->ttl = mountInfo->ttl * HZ; // in ticks
+diff --git a/open-vm-tools/modules/linux/vmhgfs/fsutil.c b/open-vm-tools/modules/linux/vmhgfs/fsutil.c
+index 28858bc..1028cc9 100644
+--- a/modules/linux/vmhgfs/fsutil.c
++++ b/modules/linux/vmhgfs/fsutil.c
+@@ -545,6 +545,105 @@ HgfsUnpackCommonAttr(HgfsReq *req,            // IN: Reply packet
+ /*
+  *----------------------------------------------------------------------
+  *
++ * HgfsCalcBlockSize --
++ *
++ *    Calculate the number of 512 byte blocks used.
++ *
++ *    Round the size to the next whole block and divide by the block size
++ *    to get the number of 512 byte blocks.
++ *    Note, this is taken from the nfs client and is simply performing:
++ *    (size + 512-1)/ 512)
++ *
++ * Results:
++ *    The number of 512 byte blocks for the size.
++ *
++ * Side effects:
++ *    None
++ *
++ *----------------------------------------------------------------------
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 17)
++static inline blkcnt_t
++HgfsCalcBlockSize(uint64 tsize)
++{
++   blkcnt_t used = (tsize + 511) >> 9;
++   return (used > ULONG_MAX) ? ULONG_MAX : used;
++}
++#else
++static inline unsigned long
++HgfsCalcBlockSize(uint64 tsize)
++{
++   loff_t used = (tsize + 511) >> 9;
++   return (used > ULONG_MAX) ? ULONG_MAX : used;
++}
++#endif
++
++/*
++ *----------------------------------------------------------------------
++ *
++ * HgfsSetInodeUidGid --
++ *
++ *    Set the UID and GID of the inode.
++ *
++ *    Update an inode's UID and GID to match those of the HgfsAttr returned
++ *    by the server.
++ *
++ * Results:
++ *    The number of 512 byte blocks for the size.
++ *
++ * Side effects:
++ *    None
++ *
++ *----------------------------------------------------------------------
++ */
++
++static void
++HgfsSetInodeUidGid(struct inode *inode,          // IN/OUT: Inode
++                   HgfsSuperInfo *si,            // IN: New attrs
++                   HgfsAttrInfo const *attr)     // IN: New attrs
++{
++   /*
++    * Use the stored uid and gid if we were given them at mount-time, or if
++    * the server didn't give us a uid or gid.
++    */
++   if (si->uidSet || (attr->mask & HGFS_ATTR_VALID_USERID) == 0) {
++      inode->i_uid = si->uid;
++   } else {
++      kuid_t attrUid = make_kuid(&init_user_ns, attr->userId);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
++      if (uid_valid(attrUid)) {
++         inode->i_uid = attrUid;
++      } else {
++         inode->i_uid = si->uid;
++      }
++#else
++      inode->i_uid = attrUid;
++#endif
++      LOG(6, (KERN_DEBUG "VMware hgfs: %s: inode uid %u\n",
++               __func__, from_kuid(&init_user_ns, inode->i_uid)));
++   }
++   if (si->gidSet || (attr->mask & HGFS_ATTR_VALID_GROUPID) == 0) {
++      inode->i_gid = si->gid;
++   } else {
++      kgid_t attrGid = make_kgid(&init_user_ns, attr->groupId);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
++      if (gid_valid(attrGid)) {
++         inode->i_gid = attrGid;
++      } else {
++         inode->i_gid = si->gid;
++      }
++#else
++      inode->i_gid = attrGid;
++#endif
++      LOG(6, (KERN_DEBUG "VMware hgfs: %s: inode gid %u\n",
++               __func__, from_kgid(&init_user_ns, inode->i_gid)));
++   }
++}
++
++
++/*
++ *----------------------------------------------------------------------
++ *
+  * HgfsChangeFileAttributes --
+  *
+  *    Update an inode's attributes to match those of the HgfsAttr. May
+@@ -634,20 +733,7 @@ HgfsChangeFileAttributes(struct inode *inode,          // IN/OUT: Inode
+     */
+    set_nlink(inode, 1);
+ 
+-   /*
+-    * Use the stored uid and gid if we were given them at mount-time, or if
+-    * the server didn't give us a uid or gid.
+-    */
+-   if (si->uidSet || (attr->mask & HGFS_ATTR_VALID_USERID) == 0) {
+-      inode->i_uid = si->uid;
+-   } else {
+-      inode->i_uid = attr->userId;
+-   }
+-   if (si->gidSet || (attr->mask & HGFS_ATTR_VALID_GROUPID) == 0) {
+-      inode->i_gid = si->gid;
+-   } else {
+-      inode->i_gid = attr->groupId;
+-   }
++   HgfsSetInodeUidGid(inode, si, attr);
+ 
+    inode->i_rdev = 0;  /* Device nodes are not supported */
+ #if !defined VMW_INODE_2618
+@@ -1618,8 +1704,8 @@ HgfsStatusConvertToLinux(HgfsStatus hgfsStatus) // IN: Status code to convert
+ void
+ HgfsSetUidGid(struct inode *parent,     // IN: parent inode
+               struct dentry *dentry,    // IN: dentry of file to update
+-              uid_t uid,                // IN: uid to set
+-              gid_t gid)                // IN: gid to set
++              kuid_t uid,               // IN: uid to set
++              kgid_t gid)               // IN: gid to set
+ {
+    struct iattr setUidGid;
+ 
+diff --git a/open-vm-tools/modules/linux/vmhgfs/fsutil.h b/open-vm-tools/modules/linux/vmhgfs/fsutil.h
+index da5c5a1..2767099 100644
+--- a/modules/linux/vmhgfs/fsutil.h
++++ b/modules/linux/vmhgfs/fsutil.h
+@@ -32,6 +32,7 @@
+ #include <linux/signal.h>
+ #include "compat_fs.h"
+ 
++#include "module.h"                /* For kuid_t kgid_t types. */
+ #include "inode.h"
+ #include "request.h"
+ #include "vm_basic_types.h"
+@@ -91,8 +92,8 @@ int HgfsGetHandle(struct inode *inode,
+ int HgfsStatusConvertToLinux(HgfsStatus hgfsStatus);
+ void HgfsSetUidGid(struct inode *parent,
+                    struct dentry *dentry,
+-                   uid_t uid,
+-                   gid_t gid);
++                   kuid_t uid,
++                   kgid_t gid);
+ struct inode *HgfsGetInode(struct super_block *sb, ino_t ino);
+ void HgfsDoReadInode(struct inode *inode);
+ 
+diff --git a/open-vm-tools/modules/linux/vmhgfs/inode.c b/open-vm-tools/modules/linux/vmhgfs/inode.c
+index 859b3ff..caaa41a 100644
+--- a/modules/linux/vmhgfs/inode.c
++++ b/modules/linux/vmhgfs/inode.c
+@@ -404,6 +404,8 @@ HgfsPackSetattrRequest(struct iattr *iattr,   // IN: Inode attrs to update from
+    size_t reqBufferSize;
+    size_t reqSize;
+    int result = 0;
++   uid_t attrUid = -1;
++   gid_t attrGid = -1;
+ 
+    ASSERT(iattr);
+    ASSERT(dentry);
+@@ -412,6 +414,14 @@ HgfsPackSetattrRequest(struct iattr *iattr,   // IN: Inode attrs to update from
+ 
+    valid = iattr->ia_valid;
+ 
++   if (valid & ATTR_UID) {
++      attrUid = from_kuid(&init_user_ns, iattr->ia_uid);
++   }
++
++   if (valid & ATTR_GID) {
++      attrGid = from_kgid(&init_user_ns, iattr->ia_gid);
++   }
++
+    switch (opUsed) {
+    case HGFS_OP_SETATTR_V3: {
+       HgfsRequest *requestHeader;
+@@ -488,13 +498,13 @@ HgfsPackSetattrRequest(struct iattr *iattr,   // IN: Inode attrs to update from
+ 
+       if (valid & ATTR_UID) {
+          attrV2->mask |= HGFS_ATTR_VALID_USERID;
+-         attrV2->userId = iattr->ia_uid;
++         attrV2->userId = attrUid;
+          *changed = TRUE;
+       }
+ 
+       if (valid & ATTR_GID) {
+          attrV2->mask |= HGFS_ATTR_VALID_GROUPID;
+-         attrV2->groupId = iattr->ia_gid;
++         attrV2->groupId = attrGid;
+          *changed = TRUE;
+       }
+ 
+@@ -591,13 +601,13 @@ HgfsPackSetattrRequest(struct iattr *iattr,   // IN: Inode attrs to update from
+ 
+       if (valid & ATTR_UID) {
+          attrV2->mask |= HGFS_ATTR_VALID_USERID;
+-         attrV2->userId = iattr->ia_uid;
++         attrV2->userId = attrUid;
+          *changed = TRUE;
+       }
+ 
+       if (valid & ATTR_GID) {
+          attrV2->mask |= HGFS_ATTR_VALID_GROUPID;
+-         attrV2->groupId = iattr->ia_gid;
++         attrV2->groupId = attrGid;
+          *changed = TRUE;
+       }
+ 
+diff --git a/open-vm-tools/modules/linux/vmhgfs/module.h b/open-vm-tools/modules/linux/vmhgfs/module.h
+index 3e0973b..b6bcd1e 100644
+--- a/modules/linux/vmhgfs/module.h
++++ b/modules/linux/vmhgfs/module.h
+@@ -74,6 +74,16 @@ extern int LOGLEVEL_THRESHOLD;
+  * Macros for accessing members that are private to this code in
+  * sb/inode/file structs.
+  */
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
++typedef uid_t kuid_t;
++typedef gid_t kgid_t;
++#define from_kuid(_ns, _kuid)            (_kuid)
++#define from_kgid(_ns, _kgid)            (_kgid)
++#define make_kuid(_ns, _uid)             (_uid)
++#define make_kgid(_ns, _gid)             (_gid)
++#endif
++
+ #define HGFS_SET_SB_TO_COMMON(sb, common) do { (sb)->s_fs_info = (common); } while (0)
+ #define HGFS_SB_TO_COMMON(sb)             ((HgfsSuperInfo *)(sb)->s_fs_info)
+ 
+@@ -110,9 +120,9 @@ extern int LOGLEVEL_THRESHOLD;
+ 
+ /* Data kept in each superblock in sb->u. */
+ typedef struct HgfsSuperInfo {
+-   uid_t uid;                       /* UID of user who mounted this fs. */
++   kuid_t uid;                      /* UID of user who mounted this fs. */
++   kgid_t gid;                      /* GID of user who mounted this fs. */
+    Bool uidSet;                     /* Was the UID specified at mount-time? */
+-   gid_t gid;                       /* GID of user who mounted this fs. */
+    Bool gidSet;                     /* Was the GID specified at mount-time? */
+    mode_t fmask;                    /* File permission mask. */
+    mode_t dmask;                    /* Directory permission mask. */
+-- 
+2.0.1
+
