@@ -1,0 +1,72 @@
+From 1a2526fae0f3747ff7f60e60aa16b8148fd8ea07 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Thu, 24 Jul 2014 09:19:46 +0300
+Subject: [PATCH] remove ulimit fiddling from setxid
+
+It was only needed to workaround bugs in linux 3.1 and earlier.
+Incidentally, the ulimit fiddling introduced another bug: it would
+fail for non-root users.
+
+Additionally, this fixes updating c->err with atomic cas.
+---
+ src/unistd/setxid.c | 25 +++++++------------------
+ 1 file changed, 7 insertions(+), 18 deletions(-)
+
+diff --git a/src/unistd/setxid.c b/src/unistd/setxid.c
+index 2f651a1..6fcbc61 100644
+--- a/src/unistd/setxid.c
++++ b/src/unistd/setxid.c
+@@ -1,7 +1,7 @@
+ #include <unistd.h>
+ #include <errno.h>
+-#include <sys/resource.h>
+ #include "syscall.h"
++#include "atomic.h"
+ #include "libc.h"
+ 
+ struct ctx {
+@@ -9,35 +9,24 @@ struct ctx {
+ 	int nr, rlim, err;
+ };
+ 
+-/* We jump through hoops to eliminate the possibility of partial failures. */
++/* This is not reliable on kernels earlier than 3.1, as set*uid can
++ * fail with EAGAIN if ulimit is exceeded. If that happens, the process
++ * is left in inconsistent state. */
+ 
+ int __setrlimit(int, const struct rlimit *);
+ 
+ static void do_setxid(void *p)
+ {
+ 	struct ctx *c = p;
++	int r;
+ 	if (c->err) return;
+-	if (c->rlim && c->id >= 0 && c->id != getuid()) {
+-		struct rlimit inf = { RLIM_INFINITY, RLIM_INFINITY }, old;
+-		getrlimit(RLIMIT_NPROC, &old);
+-		if ((c->err = -__setrlimit(RLIMIT_NPROC, &inf)) && libc.threads_minus_1)
+-			return;
+-		c->err = -__syscall(c->nr, c->id, c->eid, c->sid);
+-		__setrlimit(RLIMIT_NPROC, &old);
+-		return;
+-	}
+-	c->err = -__syscall(c->nr, c->id, c->eid, c->sid);
++	r = __syscall(c->nr, c->id, c->eid, c->sid);
++	if (r) a_cas(&c->err, 0, -r);
+ }
+ 
+ int __setxid(int nr, int id, int eid, int sid)
+ {
+ 	struct ctx c = { .nr = nr, .id = id, .eid = eid, .sid = sid };
+-	switch (nr) {
+-	case SYS_setuid:
+-	case SYS_setreuid:
+-	case SYS_setresuid:
+-		c.rlim = 1;
+-	}
+ 	__synccall(do_setxid, &c);
+ 	if (c.err) {
+ 		errno = c.err;
+-- 
+2.0.2
+
