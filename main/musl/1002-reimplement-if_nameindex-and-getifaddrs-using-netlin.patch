@@ -1,29 +1,30 @@
-From c3d5cce5c550896fd8e9cf856f66f5f264b49ef7 Mon Sep 17 00:00:00 2001
+From 2ab2413e746a5b0e6996eeb7bc10739207b0b560 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
 Date: Tue, 8 Apr 2014 14:03:16 +0000
 Subject: [PATCH] reimplement if_nameindex and getifaddrs using netlink
 
 ---
- src/network/__netlink.c    |  38 ++++++
- src/network/__netlink.h    |  99 ++++++++++++++
- src/network/getifaddrs.c   | 325 +++++++++++++++++++++++++--------------------
- src/network/if_nameindex.c | 107 +++++++++------
- 4 files changed, 382 insertions(+), 187 deletions(-)
+ src/network/__netlink.c    |  52 ++++++++
+ src/network/__netlink.h    | 100 +++++++++++++++
+ src/network/getifaddrs.c   | 312 ++++++++++++++++++++++++---------------------
+ src/network/if_nameindex.c | 130 +++++++++++++------
+ 4 files changed, 409 insertions(+), 185 deletions(-)
  create mode 100644 src/network/__netlink.c
  create mode 100644 src/network/__netlink.h
 
 diff --git a/src/network/__netlink.c b/src/network/__netlink.c
 new file mode 100644
-index 0000000..e75f374
+index 0000000..d02714c
 --- /dev/null
 +++ b/src/network/__netlink.c
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,52 @@
 +#include <errno.h>
 +#include <string.h>
++#include <syscall.h>
 +#include <sys/socket.h>
 +#include "__netlink.h"
 +
-+int __netlink_enumerate(int fd, unsigned int seq, int type, int af,
++static int __netlink_enumerate(int fd, unsigned int seq, int type, int af,
 +	int (*cb)(void *ctx, struct nlmsghdr *h), void *ctx)
 +{
 +	struct nlmsghdr *h;
@@ -35,12 +36,12 @@ index 0000000..e75f374
 +		} req;
 +		struct nlmsghdr reply;
 +	} u;
-+	int r, ret = 0;
++	int r, ret;
 +
 +	memset(&u.req, 0, sizeof(u.req));
 +	u.req.nlh.nlmsg_len = sizeof(u.req);
 +	u.req.nlh.nlmsg_type = type;
-+	u.req.nlh.nlmsg_flags = NLM_F_ROOT | NLM_F_MATCH | NLM_F_REQUEST;
++	u.req.nlh.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
 +	u.req.nlh.nlmsg_seq = seq;
 +	u.req.g.rtgen_family = af;
 +	r = send(fd, &u.req, sizeof(u.req), 0);
@@ -50,18 +51,31 @@ index 0000000..e75f374
 +		r = recv(fd, u.buf, sizeof(u.buf), MSG_DONTWAIT);
 +		if (r <= 0) return -1;
 +		for (h = &u.reply; NLMSG_OK(h, (void*)&u.buf[r]); h = NLMSG_NEXT(h)) {
-+			if (h->nlmsg_type == NLMSG_DONE) return ret;
++			if (h->nlmsg_type == NLMSG_DONE) return 0;
 +			if (h->nlmsg_type == NLMSG_ERROR) return -1;
-+			if (!ret) ret = cb(ctx, h);
++			ret = cb(ctx, h);
++			if (ret) return ret;
 +		}
 +	}
 +}
++
++int __rtnetlink_enumerate(int link_af, int addr_af, int (*cb)(void *ctx, struct nlmsghdr *h), void *ctx)
++{
++	int fd, r;
++
++	fd = socket(PF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE);
++	if (fd < 0) return -1;
++	r = __netlink_enumerate(fd, 1, RTM_GETLINK, link_af, cb, ctx);
++	if (!r) r = __netlink_enumerate(fd, 2, RTM_GETADDR, addr_af, cb, ctx);
++	__syscall(SYS_close,fd);
++	return r;
++}
 diff --git a/src/network/__netlink.h b/src/network/__netlink.h
 new file mode 100644
-index 0000000..40b12a2
+index 0000000..2476da1
 --- /dev/null
 +++ b/src/network/__netlink.h
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,100 @@
 +#include <stdint.h>
 +
 +/* linux/netlink.h */
@@ -79,8 +93,6 @@ index 0000000..40b12a2
 +#define NLM_F_REQUEST	1
 +#define NLM_F_MULTI	2
 +#define NLM_F_ACK	4
-+#define NLM_F_ECHO	8
-+#define NLM_F_DUMP_INTR	16
 +
 +#define NLM_F_ROOT	0x100
 +#define NLM_F_MATCH	0x200
@@ -94,7 +106,9 @@ index 0000000..40b12a2
 +
 +/* linux/rtnetlink.h */
 +
++#define RTM_NEWLINK	16
 +#define RTM_GETLINK	18
++#define RTM_NEWADDR	20
 +#define RTM_GETADDR	22
 +
 +struct rtattr {
@@ -159,13 +173,14 @@ index 0000000..40b12a2
 +#define NLMSG_RTA(nlh,len)	((void*)((char*)(nlh)+sizeof(struct nlmsghdr)+NETLINK_ALIGN(len)))
 +#define NLMSG_RTAOK(rta,nlh)	RTA_OK(rta,NLMSG_DATAEND(nlh))
 +
-+int __netlink_enumerate(int fd, unsigned int seq, int type, int af,
-+	int (*cb)(void *ctx, struct nlmsghdr *h), void *ctx);
++#define IFADDRS_HASH_SIZE 64
++
++int __rtnetlink_enumerate(int link_af, int addr_af, int (*cb)(void *ctx, struct nlmsghdr *h), void *ctx);
 diff --git a/src/network/getifaddrs.c b/src/network/getifaddrs.c
-index 5a94cc7..9d4bd5b 100644
+index 5a94cc7..18fc710 100644
 --- a/src/network/getifaddrs.c
 +++ b/src/network/getifaddrs.c
-@@ -1,181 +1,212 @@
+@@ -1,181 +1,201 @@
 -/* (C) 2013 John Spencer. released under musl's standard MIT license. */
 -#undef _GNU_SOURCE
  #define _GNU_SOURCE
@@ -185,6 +200,7 @@ index 5a94cc7..9d4bd5b 100644
 +#include <ifaddrs.h>
 +#include <syscall.h>
 +#include <net/if.h>
++#include <netinet/in.h>
 +#include "__netlink.h"
  
 -typedef union {
@@ -224,7 +240,6 @@ index 5a94cc7..9d4bd5b 100644
 +};
  
 -static stor* list_add(stor** list, stor** head, char* ifname)
-+#define IFADDRS_HASH_SIZE 64
 +struct ifaddrs_ctx {
 +	struct ifaddrs_storage *first;
 +	struct ifaddrs_storage *last;
@@ -250,35 +265,38 @@ index 5a94cc7..9d4bd5b 100644
  }
  
 -void freeifaddrs(struct ifaddrs *ifp)
-+static void addifaddrs(struct ifaddrs_ctx *ctx, struct ifaddrs_storage *add)
++static void copy_addr(struct sockaddr **r, int af, union sockany *sa, void *addr, size_t addrlen, int ifindex)
  {
 -	stor *head = (stor *) ifp;
 -	while(head) {
 -		void *p = head;
 -		head = (stor *) head->next;
 -		free(p);
-+	if (!add->ifa.ifa_name) {
-+		free(add);
++	uint8_t *dst;
++	int len;
++
++	switch (af) {
++	case AF_INET:
++		dst = (uint8_t*) &sa->v4.sin_addr;
++		len = 4;
++		break;
++	case AF_INET6:
++		dst = (uint8_t*) &sa->v6.sin6_addr;
++		len = 16;
++		if (IN6_IS_ADDR_LINKLOCAL(addr) || IN6_IS_ADDR_MC_LINKLOCAL(addr))
++			sa->v6.sin6_scope_id = ifindex;
++		break;
++	default:
 +		return;
  	}
-+	if (!ctx->first) ctx->first = add;
-+	if (ctx->last) ctx->last->ifa.ifa_next = &add->ifa;
-+	ctx->last = add;
-+}
-+
-+static struct sockaddr* copy_lladdr(union sockany *sa, struct rtattr *rta, struct ifinfomsg *ifi)
-+{
-+	if (RTA_DATALEN(rta) > sizeof(sa->ll.sll_addr)) return 0;
-+	sa->ll.sll_family = AF_PACKET;
-+	sa->ll.sll_ifindex = ifi->ifi_index;
-+	sa->ll.sll_hatype = ifi->ifi_type;
-+	sa->ll.sll_halen = RTA_DATALEN(rta);
-+	memcpy(sa->ll.sll_addr, RTA_DATA(rta), RTA_DATALEN(rta));
-+	return &sa->sa;
++	if (addrlen < len) return;
++	sa->sa.sa_family = af;
++	memcpy(dst, addr, len);
++	*r = &sa->sa;
  }
  
 -static void ipv6netmask(unsigned prefix_length, struct sockaddr_in6 *sa)
-+static uint8_t *sockany_addr(int af, union sockany *sa, int *len)
++static void gen_netmask(struct sockaddr **r, int af, union sockany *sa, int prefixlen)
  {
 -	unsigned char* hb = sa->sin6_addr.s6_addr;
 -	unsigned onebytes = prefix_length / 8;
@@ -290,15 +308,19 @@ index 5a94cc7..9d4bd5b 100644
 -		unsigned char x = -1;
 -		x <<= 8 - bits;
 -		hb[onebytes] = x;
-+	switch (af) {
-+	case AF_INET: *len = 4; return (uint8_t*) &sa->v4.sin_addr;
-+	case AF_INET6: *len = 16; return (uint8_t*) &sa->v6.sin6_addr;
- 	}
-+	return 0;
+-	}
++	uint8_t addr[16] = {0};
++	int i;
++
++	if (prefixlen > 8*sizeof(addr)) prefixlen = 8*sizeof(addr);
++	i = prefixlen / 8;
++	memset(addr, 0xff, i);
++	if (i < sizeof(addr)) addr[i++] = 0xff << (8 - (prefixlen % 8));
++	copy_addr(r, af, sa, addr, sizeof(addr), 0);
  }
  
 -static void dealwithipv6(stor **list, stor** head)
-+static struct sockaddr* copy_addr(int af, union sockany *sa, struct rtattr *rta)
++static void copy_lladdr(struct sockaddr **r, union sockany *sa, void *addr, size_t addrlen, int ifindex, unsigned short hatype)
  {
 -	FILE* f = fopen("/proc/net/if_inet6", "rbe");
 -	/* 00000000000000000000000000000001 01 80 10 80 lo
@@ -341,34 +363,20 @@ index 5a94cc7..9d4bd5b 100644
 -				else curr->ifa.ifa_flags = 0;
 -			} else errno = 0;
 -		}
-+	int len;
-+	uint8_t *dst = sockany_addr(af, sa, &len);
-+	if (!dst || RTA_DATALEN(rta) != len) return 0;
-+	sa->sa.sa_family = af;
-+	memcpy(dst, RTA_DATA(rta), len);
-+	return &sa->sa;
-+}
-+
-+static struct sockaddr *gen_netmask(int af, union sockany *sa, int prefixlen)
-+{
-+	int maxlen, i;
-+	uint8_t *dst = sockany_addr(af, sa, &maxlen);
-+	if (!dst) return 0;
-+	sa->sa.sa_family = af;
-+	if (prefixlen > 8*maxlen) prefixlen = 8*maxlen;
-+	i = prefixlen / 8;
-+	memset(dst, 0xff, i);
-+	if (i<maxlen) {
-+		dst[i++] = 0xff << (8 - (prefixlen % 8));
-+		if (i<maxlen) memset(&dst[i+1], 0x00, maxlen-i);
- 	}
+-	}
 -	out:
 -	fclose(f);
-+	return &sa->sa;
++	if (addrlen > sizeof(sa->ll.sll_addr)) return;
++	sa->ll.sll_family = AF_PACKET;
++	sa->ll.sll_ifindex = ifindex;
++	sa->ll.sll_hatype = hatype;
++	sa->ll.sll_halen = addrlen;
++	memcpy(sa->ll.sll_addr, addr, addrlen);
++	*r = &sa->sa;
  }
  
 -int getifaddrs(struct ifaddrs **ifap)
-+static int __handle_link(void *pctx, struct nlmsghdr *h)
++static int __handle(void *pctx, struct nlmsghdr *h)
  {
 -	stor *list = 0, *head = 0;
 -	struct if_nameindex* ii = if_nameindex();
@@ -379,17 +387,24 @@ index 5a94cc7..9d4bd5b 100644
 -		if(!curr) {
 -			if_freenameindex(ii);
 -			goto err2;
--		}
 +	struct ifaddrs_ctx *ctx = pctx;
-+	struct ifaddrs_storage *ifs;
++	struct ifaddrs_storage *ifs, *ifs0;
 +	struct ifinfomsg *ifi = NLMSG_DATA(h);
++	struct ifaddrmsg *ifa = NLMSG_DATA(h);
 +	struct rtattr *rta;
 +	int stats_len = 0;
 +
-+	for (rta = NLMSG_RTA(h, sizeof(*ifi)); NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
-+		if (rta->rta_type != IFLA_STATS) continue;
-+		stats_len = RTA_DATALEN(rta);
-+		break;
++	if (h->nlmsg_type == RTM_NEWLINK) {
++		for (rta = NLMSG_RTA(h, sizeof(*ifi)); NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
++			if (rta->rta_type != IFLA_STATS) continue;
++			stats_len = RTA_DATALEN(rta);
++			break;
+ 		}
++	} else {
++		for (ifs0 = ctx->hash[ifa->ifa_index % IFADDRS_HASH_SIZE]; ifs0; ifs0 = ifs0->hash_next)
++			if (ifs0->index == ifa->ifa_index)
++				break;
++		if (!ifs0) return 0;
  	}
 -	if_freenameindex(ii);
 -
@@ -405,32 +420,33 @@ index 5a94cc7..9d4bd5b 100644
 -			if(!strcmp(reqs[i].ifr_name, head->name)) {
 -				head->addr.v4 = *(struct sockaddr_in*)&reqs[i].ifr_addr;
 -				head->ifa.ifa_addr = (struct sockaddr*) &head->addr;
--				break;
 +
 +	ifs = calloc(1, sizeof(struct ifaddrs_storage) + stats_len);
 +	if (ifs == 0) return -1;
 +
-+	ifs->index = ifi->ifi_index;
-+	ifs->ifa.ifa_flags = ifi->ifi_flags;
++	if (h->nlmsg_type == RTM_NEWLINK) {
++		ifs->index = ifi->ifi_index;
++		ifs->ifa.ifa_flags = ifi->ifi_flags;
 +
-+	for (rta = NLMSG_RTA(h, sizeof(*ifi)); NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
-+		switch (rta->rta_type) {
-+		case IFLA_IFNAME:
-+			if (RTA_DATALEN(rta) <= IFNAMSIZ) {
-+				strncpy(ifs->name, RTA_DATA(rta), RTA_DATALEN(rta));
-+				ifs->ifa.ifa_name = ifs->name;
++		for (rta = NLMSG_RTA(h, sizeof(*ifi)); NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
++			switch (rta->rta_type) {
++			case IFLA_IFNAME:
++				if (RTA_DATALEN(rta) < sizeof(ifs->name)) {
++					memcpy(ifs->name, RTA_DATA(rta), RTA_DATALEN(rta));
++					ifs->ifa.ifa_name = ifs->name;
++				}
++				break;
++			case IFLA_ADDRESS:
++				copy_lladdr(&ifs->ifa.ifa_addr, &ifs->addr, RTA_DATA(rta), RTA_DATALEN(rta), ifi->ifi_index, ifi->ifi_type);
++				break;
++			case IFLA_BROADCAST:
++				copy_lladdr(&ifs->ifa.ifa_broadaddr, &ifs->ifu, RTA_DATA(rta), RTA_DATALEN(rta), ifi->ifi_index, ifi->ifi_type);
++				break;
++			case IFLA_STATS:
++				ifs->ifa.ifa_data = (void*)(ifs+1);
++				memcpy(ifs->ifa.ifa_data, RTA_DATA(rta), RTA_DATALEN(rta));
+ 				break;
  			}
-+			break;
-+		case IFLA_ADDRESS:
-+			ifs->ifa.ifa_addr = copy_lladdr(&ifs->addr, rta, ifi);
-+			break;
-+		case IFLA_BROADCAST:
-+			ifs->ifa.ifa_broadaddr = copy_lladdr(&ifs->ifu, rta, ifi);
-+			break;
-+		case IFLA_STATS:
-+			ifs->ifa.ifa_data = (void*)(ifs+1);
-+			memcpy(ifs->ifa.ifa_data, RTA_DATA(rta), RTA_DATALEN(rta));
-+			break;
  		}
 -		struct ifreq req;
 -		snprintf(req.ifr_name, sizeof req.ifr_name, "%s", head->name);
@@ -450,47 +466,43 @@ index 5a94cc7..9d4bd5b 100644
 -			} else {
 -				if(-1 == ioctl(sock, SIOCGIFBRDADDR, &req)) goto err;
 -				head->dst.v4 = *(struct sockaddr_in*)&req.ifr_broadaddr;
--			}
++		if (ifs->ifa.ifa_name) {
++			unsigned int bucket = ifs->index % IFADDRS_HASH_SIZE;
++			ifs->hash_next = ctx->hash[bucket];
++			ctx->hash[bucket] = ifs;
++		}
++	} else {
++		ifs->ifa.ifa_name = ifs0->ifa.ifa_name;
++		ifs->ifa.ifa_flags = ifs0->ifa.ifa_flags;
++		for (rta = NLMSG_RTA(h, sizeof(*ifa)); NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
++			switch (rta->rta_type) {
++			case IFA_ADDRESS:
++				copy_addr(&ifs->ifa.ifa_addr, ifa->ifa_family, &ifs->addr, RTA_DATA(rta), RTA_DATALEN(rta), ifa->ifa_index);
++				break;
++			case IFA_BROADCAST:
++				/* For point-to-point links this is peer, but ifa_broadaddr
++				 * and ifa_dstaddr are union, so this works for both.  */
++				copy_addr(&ifs->ifa.ifa_broadaddr, ifa->ifa_family, &ifs->ifu, RTA_DATA(rta), RTA_DATALEN(rta), ifa->ifa_index);
++				break;
++			case IFA_LABEL:
++				if (RTA_DATALEN(rta) < sizeof(ifs->name)) {
++					memcpy(ifs->name, RTA_DATA(rta), RTA_DATALEN(rta));
++					ifs->ifa.ifa_name = ifs->name;
++				}
++				break;
+ 			}
 -			head->ifa.ifa_ifu.ifu_dstaddr = (struct sockaddr*) &head->dst;
-+	}
-+	if (ifs->ifa.ifa_name) {
-+		ifs->hash_next = ctx->hash[ifs->index%IFADDRS_HASH_SIZE];
-+		ctx->hash[ifs->index%IFADDRS_HASH_SIZE] = ifs;
-+	}
-+	addifaddrs(ctx, ifs);
-+	return 0;
-+}
-+
-+static int __handle_addr(void *pctx, struct nlmsghdr *h)
-+{
-+	struct ifaddrs_ctx *ctx = pctx;
-+	struct ifaddrs_storage *ifs, *ifs0;
-+	struct ifaddrmsg *ifa = NLMSG_DATA(h);
-+	struct rtattr *rta;
-+
-+	ifs = calloc(1, sizeof(struct ifaddrs_storage));
-+	if (ifs == 0) return -1;
-+
-+	for (ifs0 = ctx->hash[ifa->ifa_index%IFADDRS_HASH_SIZE]; ifs0; ifs0 = ifs0->hash_next)
-+		if (ifs0->index == ifa->ifa_index)
-+			break;
-+	if (!ifs0) return 0;
-+
-+	ifs->ifa.ifa_name = ifs0->ifa.ifa_name;
-+	ifs->ifa.ifa_flags = ifs0->ifa.ifa_flags;
-+	for (rta = NLMSG_RTA(h, sizeof(*ifa)); NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
-+		switch (rta->rta_type) {
-+		case IFA_ADDRESS:
-+			ifs->ifa.ifa_addr = copy_addr(ifa->ifa_family, &ifs->addr, rta);
-+			if (ifs->ifa.ifa_addr)
-+				ifs->ifa.ifa_netmask = gen_netmask(ifa->ifa_family, &ifs->netmask, ifa->ifa_prefixlen);
-+			break;
-+		case IFA_BROADCAST:
-+			/* For point-to-point links this is peer, but ifa_broadaddr
-+			 * and ifa_dstaddr are union, so this works for both.  */
-+			ifs->ifa.ifa_broadaddr = copy_addr(ifa->ifa_family, &ifs->ifu, rta);
-+			break;
  		}
++		if (ifs->ifa.ifa_addr)
++			gen_netmask(&ifs->ifa.ifa_netmask, ifa->ifa_family, &ifs->netmask, ifa->ifa_prefixlen);
++	}
++
++	if (ifs->ifa.ifa_name) {
++		if (!ctx->first) ctx->first = ifs;
++		if (ctx->last) ctx->last->ifa.ifa_next = &ifs->ifa;
++		ctx->last = ifs;
++	} else {
++		free(ifs);
  	}
 -	close(sock);
 -	void* last = 0;
@@ -498,8 +510,6 @@ index 5a94cc7..9d4bd5b 100644
 -	head = last;
 -	dealwithipv6(&list, &head);
 -	*ifap = (struct ifaddrs*) list;
-+
-+	addifaddrs(ctx, ifs);
  	return 0;
 -	err:
 -	close(sock);
@@ -511,60 +521,50 @@ index 5a94cc7..9d4bd5b 100644
 +int getifaddrs(struct ifaddrs **ifap)
 +{
 +	struct ifaddrs_ctx _ctx, *ctx = &_ctx;
-+	int r = 0, fd;
-+
-+	fd = socket(PF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE);
-+	if (fd < 0) return -1;
-+
-+	memset(ctx, 0, sizeof(*ctx));
-+	if (__netlink_enumerate(fd, 1, RTM_GETLINK, AF_UNSPEC, __handle_link, ctx)) r = -1;
-+	if (__netlink_enumerate(fd, 1, RTM_GETADDR, AF_UNSPEC, __handle_addr, ctx)) r = -1;
-+	__syscall(SYS_close,fd);
-+
++	int r;
++	memset(ctx, 0, sizeof *ctx);
++	r = __rtnetlink_enumerate(AF_UNSPEC, AF_UNSPEC, __handle, ctx);
 +	if (r == 0) *ifap = &ctx->first->ifa;
 +	else freeifaddrs(&ctx->first->ifa);
 +	return r;
 +}
 diff --git a/src/network/if_nameindex.c b/src/network/if_nameindex.c
-index 53b80b2..cb5587c 100644
+index 53b80b2..2ad7474 100644
 --- a/src/network/if_nameindex.c
 +++ b/src/network/if_nameindex.c
-@@ -1,55 +1,82 @@
+@@ -1,55 +1,107 @@
  #define _GNU_SOURCE
  #include <net/if.h>
 -#include <stdlib.h>
- #include <sys/socket.h>
+-#include <sys/socket.h>
 -#include <sys/ioctl.h>
  #include <errno.h>
 -#include "syscall.h"
 +#include <unistd.h>
 +#include <stdlib.h>
 +#include <string.h>
-+#include <syscall.h>
 +#include "__netlink.h"
-+
+ 
+-static void *do_nameindex(int s, size_t n)
+-{
+-	size_t i, len, k;
+-	struct ifconf conf;
+-	struct if_nameindex *idx;
 +struct ifnamemap {
++	unsigned int hash_next;
 +	unsigned int index;
 +	unsigned char namelen;
 +	char name[IFNAMSIZ];
 +};
-+
-+struct ifnameindexctx {
-+	unsigned int num;
-+	unsigned int str_bytes;
-+	struct ifnamemap *list;
-+};
  
--static void *do_nameindex(int s, size_t n)
-+static int __handle_link(void *pctx, struct nlmsghdr *h)
- {
--	size_t i, len, k;
--	struct ifconf conf;
--	struct if_nameindex *idx;
--
 -	idx = malloc(n * (sizeof(struct if_nameindex)+sizeof(struct ifreq)));
 -	if (!idx) return 0;
--
++struct ifnameindexctx {
++	unsigned int num, allocated, str_bytes;
++	struct ifnamemap *list;
++	unsigned int hash[IFADDRS_HASH_SIZE];
++};
+ 
 -	conf.ifc_buf = (void *)&idx[n];
 -	conf.ifc_len = len = n * sizeof(struct ifreq);
 -	if (ioctl(s, SIOCGIFCONF, &conf) < 0) {
@@ -574,39 +574,72 @@ index 53b80b2..cb5587c 100644
 -	if (conf.ifc_len == len) {
 -		free(idx);
 -		return (void *)-1;
--	}
++static int __handle(void *pctx, struct nlmsghdr *h)
++{
 +	struct ifnameindexctx *ctx = pctx;
-+	struct ifinfomsg *ifim = NLMSG_DATA(h);
++	struct ifnamemap *map;
 +	struct rtattr *rta;
-+	struct ifnamemap *e;
++	unsigned int i;
++	int index, type, namelen, bucket;
 +
-+	for (rta = NLMSG_RTA(h, sizeof(*ifim)); NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
-+		if (rta->rta_type != IFLA_IFNAME) continue;
-+		if (RTA_DATALEN(rta) > IFNAMSIZ) return -ENOBUFS;
++	if (h->nlmsg_type == RTM_NEWLINK) {
++		struct ifinfomsg *ifi = NLMSG_DATA(h);
++		index = ifi->ifi_index;
++		type = IFLA_IFNAME;
++		rta = NLMSG_RTA(h, sizeof(*ifi));
++	} else {
++		struct ifaddrmsg *ifa = NLMSG_DATA(h);
++		index = ifa->ifa_index;
++		type = IFA_LABEL;
++		rta = NLMSG_RTA(h, sizeof(*ifa));
+ 	}
++	for (; NLMSG_RTAOK(rta, h); rta = RTA_NEXT(rta)) {
++		if (rta->rta_type != type) continue;
++
++		namelen = RTA_DATALEN(rta) - 1;
++		if (namelen > IFNAMSIZ) return 0;
  
 -	n = conf.ifc_len / sizeof(struct ifreq);
 -	for (i=k=0; i<n; i++) {
 -		if (ioctl(s, SIOCGIFINDEX, &conf.ifc_req[i]) < 0) {
 -			k++;
 -			continue;
--		}
++		/* suppress duplicates */
++		bucket = index % IFADDRS_HASH_SIZE;
++		i = ctx->hash[bucket];
++		while (i) {
++			map = &ctx->list[i-1];
++			if (map->index == index &&
++			    map->namelen == namelen &&
++			    memcmp(map->name, RTA_DATA(rta), namelen) == 0)
++				return 0;
++			i = map->hash_next;
+ 		}
 -		idx[i-k].if_index = conf.ifc_req[i].ifr_ifindex;
 -		idx[i-k].if_name = conf.ifc_req[i].ifr_name;
-+		ctx->num++;
-+		ctx->str_bytes += RTA_DATALEN(rta) + 1;
-+		e = realloc(ctx->list, sizeof(struct ifnamemap[ctx->num]));
-+		if (e == 0) return -ENOMEM;
-+		ctx->list = e;
-+
-+		e = &ctx->list[ctx->num-1];
-+		e->index = ifim->ifi_index;
-+		e->namelen = RTA_DATALEN(rta);
-+		memcpy(e->name,  RTA_DATA(rta), IFNAMSIZ);
- 	}
+-	}
 -	idx[i-k].if_name = 0;
 -	idx[i-k].if_index = 0;
  
 -	return idx;
++		if (ctx->num >= ctx->allocated) {
++			size_t a = ctx->allocated ? ctx->allocated * 2 + 1 : 8;
++			if (a > SIZE_MAX/sizeof *map) return -1;
++			map = realloc(ctx->list, a * sizeof *map);
++			if (!map) return -1;
++			ctx->list = map;
++			ctx->allocated = a;
++		}
++		map = &ctx->list[ctx->num];
++		map->index = index;
++		map->namelen = namelen;
++		memcpy(map->name, RTA_DATA(rta), namelen);
++		ctx->str_bytes += namelen + 1;
++		ctx->num++;
++		map->hash_next = ctx->hash[bucket];
++		ctx->hash[bucket] = ctx->num;
++		return 0;
++	}
 +	return 0;
  }
  
@@ -619,39 +652,33 @@ index 53b80b2..cb5587c 100644
 -		for (n=0; (p=do_nameindex(s, n)) == (void *)-1; n++);
 -		__syscall(SYS_close, s);
 +	struct ifnameindexctx _ctx, *ctx = &_ctx;
-+	struct if_nameindex *ifs = NULL;
-+	int fd, r, i;
++	struct if_nameindex *ifs = 0, *d;
++	struct ifnamemap *s;
 +	char *p;
-+
-+	fd = socket(PF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE);
-+	if (fd < 0) goto err;
++	int i;
 +
 +	memset(ctx, 0, sizeof(*ctx));
-+	r = __netlink_enumerate(fd, 1, RTM_GETLINK, AF_UNSPEC, __handle_link, ctx);
-+	__syscall(SYS_close,fd);
-+
-+	if (r < 0) goto err;
++	if (__rtnetlink_enumerate(AF_UNSPEC, AF_INET, __handle, ctx) < 0) goto err;
 +
 +	ifs = malloc(sizeof(struct if_nameindex[ctx->num+1]) + ctx->str_bytes);
-+	if (ifs == 0) goto err;
++	if (!ifs) goto err;
 +
-+	p = (char*)ifs + sizeof(struct if_nameindex[ctx->num+1]);
-+	for (i = 0; i < ctx->num; i++) {
-+		ifs[i].if_index = ctx->list[i].index;
-+		ifs[i].if_name = p;
-+		memcpy(p, ctx->list[i].name, ctx->list[i].namelen);
-+		p += ctx->list[i].namelen;
++	p = (char*)(ifs + ctx->num + 1);
++	for (i = ctx->num, d = ifs, s = ctx->list; i; i--, s++, d++) {
++		d->if_index = s->index;
++		d->if_name = p;
++		memcpy(p, s->name, s->namelen);
++		p += s->namelen;
 +		*p++ = 0;
  	}
 -	errno = ENOBUFS;
 -	return p;
-+	ifs[i].if_index = 0;
-+	ifs[i].if_name = 0;
++	d->if_index = 0;
++	d->if_name = 0;
 +err:
 +	free(ctx->list);
-+	if (ifs == NULL) errno = ENOBUFS;
 +	return ifs;
  }
 -- 
-1.9.2
+2.0.2
 
