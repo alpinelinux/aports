@@ -123,8 +123,9 @@ local rt_keywords = {
 }
 
 local function sendcommitdiff(body, req, R, G)
-	if not body then return end
-	if not G.notify_emails then return end
+	if not body then return true end
+	if not G.notify_emails then return true end
+	if #G.notify_emails == 0 then return true end
 
 	local mail = {
 		from = req.committer,
@@ -336,7 +337,7 @@ function M.repo_update(req,clientstream)
 				os.execute(("git --git-dir='%s' branch --quiet -D import;"..
 					    "git --git-dir='%s' gc --quiet --prune=now")
 					:format(repodir, repodir))
-				return false, err
+				return false, err or "Sending commitdiff e-mail failed"
 			end
 		end
 		os.execute(("git --git-dir='%s' branch --quiet --force master import;"..
