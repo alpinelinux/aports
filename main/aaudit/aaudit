@@ -1,0 +1,107 @@
+#!/usr/bin/lua5.2
+
+local posix = require 'posix'
+local json = require 'cjson'
+local lpc = require 'lpc'
+local aac = require 'aaudit.common'
+
+local function usage()
+	print([[
+Usage: aaudit [create|commit] [OPTIONS...]
+
+Options for create:
+	-s SERV	Use server SERV
+	-d DESC	Description for repository (default: hostname)
+	-t ADDR	Specify ADDR as target device (default: local source IP)
+	-g GRP	Add in group GRP (can be specified multiple times)
+
+Options for create and commit:
+	-m MSG	Specify message for the commit
+	-L	Local change (use local 'contact' as change author)
+]])
+	os.exit(1)
+end
+
+local verbose = false
+local conf = aac.readconfig() or {}
+local req = {}
+
+for ret, optval in posix.getopt(arg, 'vs:d:t:m:Lg:') do
+	if ret == 'v' then
+		verbose = true
+	elseif ret == 's' then
+		conf.server = optval
+	elseif ret == 'd' then
+		conf.description = optval
+	elseif ret == 't' then
+		conf.target_address = optval
+	elseif ret == 'm' then
+		req.message = optval
+	elseif ret == 'L' then
+		req.local_change = true
+	elseif ret == 'g' then
+		req.groups = req.groups or {}
+		table.insert(req.groups, optval)
+	else
+		usage()
+	end
+end
+
+if conf.server == nil then
+	print("Error: No server configured.")
+	usage()
+end
+
+req.command = arg[1]
+if arg[1] == "create" then
+	req.description = conf.description or aac.readfile("/etc/hostname"):gsub("\n","")
+	req.ssh_host_key = aac.readfile("/etc/ssh/ssh_host_ecdsa_key.pub")
+		or aac.readfile("/etc/ssh/ssh_host_dsa_key.pub")
+		or aac.readfile("/etc/ssh/ssh_host_rsa_key.pub")
+	aac.writeconfig(conf)
+	arg[1] = "commit"
+end
+
+req.apkovl_follows = true
+
+if arg[1] ~= "commit" then usage() end
+
+local pid, SW, SR = lpc.run('ssh', '-T', ('%s@%s'):format(conf.user or "aaudit", conf.server))
+
+SW:write(json.encode(req),'\n')
+if req.apkovl_follows then
+	local APKOVL = io.popen("lbu package -", "rb")
+	while true do
+		local block = APKOVL:read(2^13)
+		if not block then break end
+		SW:write(block)
+	end
+	APKOVL:close()
+end
+SW:close()
+
+local reply
+for line in SR:lines() do
+	if line:match("^{") and line:match("}$") then
+		reply = json.decode(line)
+	elseif verbose then
+		print(line)
+	end
+end
+SR:close()
+
+lpc.wait(pid)
+
+if reply then
+	reply.msg = reply.msg or "(No message. Server error?)"
+	if reply.ok then
+		io.write("OK: ",reply.msg,"\n")
+	else
+		io.write("ERROR: ",reply.msg,"\n")
+	end
+	if reply.notified then
+		io.write("Notified: ",reply.notified,"\n")
+	end
+else
+	io.write("ERROR: No reply received from server\n")
+end
