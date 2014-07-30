@@ -207,20 +207,20 @@ static void usage(const char *p)
 
 static void print_long(const char *name, long val)
 {
-	static const char * const fmtstr[] = { "%2$ld\n", "%s = %ld\n" };
-	printf(fmtstr[all], name, val);
+	if (all) printf("%s = %ld\n", name, val);
+	else printf("%ld\n", val);
 }
 
 static void print_ulong(const char *name, unsigned long val)
 {
-	static const char * const fmtstr[] = { "%2$lu\n", "%s = %lu\n" };
-	printf(fmtstr[all], name, val);
+	if (all) printf("%s = %lu\n", name, val);
+	else printf("%lu\n", val);
 }
 
 static void print_string(const char *name, const char *val)
 {
-	static const char * const fmtstr[] = { "%2$s\n", "%s = %s\n" };
-	printf(fmtstr[all], name, val);
+	if (all) printf("%s = %s\n", name, val);
+	else printf("%s\n", val);
 }
 
 static int print_constant(const struct conf_variable *cp, const char *pathname)
