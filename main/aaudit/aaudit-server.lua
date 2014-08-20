@@ -11,7 +11,7 @@ local HOME = os.getenv("HOME")
 M.serverconfig = aac.readconfig(("%s/aaudit-server.json"):format(HOME)) or {}
 
 local function merge_bool(a, b) return a or b end
-local function merge_array(a, b) if b then for i=1,#b do a[#a+1] = b[i] end end return a end
+local function merge_array(a, b) a = a or {} if b then for i=1,#b do a[#a+1] = b[i] end end return a end
 
 local function match_file(fn, match_list)
 	if not match_list then return false end
