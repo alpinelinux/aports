@@ -1,0 +1,466 @@
+x86/mm/hap: Adjust vram tracking to play nicely with log-dirty.
+
+The previous code assumed the guest would be in one of three mutually exclusive
+modes for bookkeeping dirty pages: (1) shadow, (2) hap utilizing the log dirty
+bitmap to support functionality such as live migrate, (3) hap utilizing the
+log dirty bitmap to track dirty vram pages.
+Races arose when a guest attempted to track dirty vram while performing live
+migrate.  (The dispatch table managed by paging_log_dirty_init() might change
+in the middle of a log dirty or a vram tracking function.)
+
+This change allows hap log dirty and hap vram tracking to be concurrent.
+Vram tracking no longer uses the log dirty bitmap.  Instead it detects
+dirty vram pages by examining their p2m type.  The log dirty bitmap is only
+used by the log dirty code.  Because the two operations use different
+mechanisms, they are no longer mutually exclusive.
+
+Signed-Off-By: Robert Phillips <robert.phillips@citrix.com>
+Acked-by: Tim Deegan <tim@xen.org>
+
+Minor whitespace changes to conform with coding style
+Signed-off-by: Tim Deegan <tim@xen.org>
+
+Committed-by: Tim Deegan <tim@xen.org>
+master commit: fd91a2a662bc59677e0f217423a7a155d5465886
+master date: 2012-12-13 12:10:14 +0000
+
+--- a/xen/arch/x86/mm/hap/hap.c
++++ b/xen/arch/x86/mm/hap/hap.c
+@@ -56,132 +56,110 @@
+ /*          HAP VRAM TRACKING SUPPORT           */
+ /************************************************/
+ 
+-static int hap_enable_vram_tracking(struct domain *d)
+-{
+-    struct sh_dirty_vram *dirty_vram = d->arch.hvm_domain.dirty_vram;
+-
+-    if ( !dirty_vram )
+-        return -EINVAL;
+-
+-    /* turn on PG_log_dirty bit in paging mode */
+-    paging_lock(d);
+-    d->arch.paging.mode |= PG_log_dirty;
+-    paging_unlock(d);
+-
+-    /* set l1e entries of P2M table to be read-only. */
+-    p2m_change_type_range(d, dirty_vram->begin_pfn, dirty_vram->end_pfn, 
+-                          p2m_ram_rw, p2m_ram_logdirty);
+-
+-    flush_tlb_mask(d->domain_dirty_cpumask);
+-    return 0;
+-}
+-
+-static int hap_disable_vram_tracking(struct domain *d)
+-{
+-    struct sh_dirty_vram *dirty_vram = d->arch.hvm_domain.dirty_vram;
+-
+-    if ( !dirty_vram )
+-        return -EINVAL;
+-
+-    paging_lock(d);
+-    d->arch.paging.mode &= ~PG_log_dirty;
+-    paging_unlock(d);
+-
+-    /* set l1e entries of P2M table with normal mode */
+-    p2m_change_type_range(d, dirty_vram->begin_pfn, dirty_vram->end_pfn, 
+-                          p2m_ram_logdirty, p2m_ram_rw);
+-
+-    flush_tlb_mask(d->domain_dirty_cpumask);
+-    return 0;
+-}
+-
+-static void hap_clean_vram_tracking(struct domain *d)
+-{
+-    struct sh_dirty_vram *dirty_vram = d->arch.hvm_domain.dirty_vram;
+-
+-    if ( !dirty_vram )
+-        return;
+-
+-    /* set l1e entries of P2M table to be read-only. */
+-    p2m_change_type_range(d, dirty_vram->begin_pfn, dirty_vram->end_pfn, 
+-                          p2m_ram_rw, p2m_ram_logdirty);
+-
+-    flush_tlb_mask(d->domain_dirty_cpumask);
+-}
+-
+-static void hap_vram_tracking_init(struct domain *d)
+-{
+-    paging_log_dirty_init(d, hap_enable_vram_tracking,
+-                          hap_disable_vram_tracking,
+-                          hap_clean_vram_tracking);
+-}
++/*
++ * hap_track_dirty_vram()
++ * Create the domain's dv_dirty_vram struct on demand.
++ * Create a dirty vram range on demand when some [begin_pfn:begin_pfn+nr] is
++ * first encountered.
++ * Collect the guest_dirty bitmask, a bit mask of the dirty vram pages, by
++ * calling paging_log_dirty_range(), which interrogates each vram
++ * page's p2m type looking for pages that have been made writable.
++ */
+ 
+ int hap_track_dirty_vram(struct domain *d,
+                          unsigned long begin_pfn,
+                          unsigned long nr,
+-                         XEN_GUEST_HANDLE_64(uint8) dirty_bitmap)
++                         XEN_GUEST_HANDLE_64(uint8) guest_dirty_bitmap)
+ {
+     long rc = 0;
+-    struct sh_dirty_vram *dirty_vram = d->arch.hvm_domain.dirty_vram;
++    struct sh_dirty_vram *dirty_vram;
++    uint8_t *dirty_bitmap = NULL;
+ 
+     if ( nr )
+     {
+-        if ( paging_mode_log_dirty(d) && dirty_vram )
++        int size = (nr + BITS_PER_BYTE - 1) / BITS_PER_BYTE;
++
++        if ( !paging_mode_log_dirty(d) )
+         {
+-            if ( begin_pfn != dirty_vram->begin_pfn ||
+-                 begin_pfn + nr != dirty_vram->end_pfn )
+-            {
+-                paging_log_dirty_disable(d);
+-                dirty_vram->begin_pfn = begin_pfn;
+-                dirty_vram->end_pfn = begin_pfn + nr;
+-                rc = paging_log_dirty_enable(d);
+-                if (rc != 0)
+-                    goto param_fail;
+-            }
++            hap_logdirty_init(d);
++            rc = paging_log_dirty_enable(d);
++            if ( rc )
++                goto out;
+         }
+-        else if ( !paging_mode_log_dirty(d) && !dirty_vram )
++
++        rc = -ENOMEM;
++        dirty_bitmap = xzalloc_bytes(size);
++        if ( !dirty_bitmap )
++            goto out;
++
++        paging_lock(d);
++
++        dirty_vram = d->arch.hvm_domain.dirty_vram;
++        if ( !dirty_vram )
+         {
+             rc = -ENOMEM;
+-            if ( (dirty_vram = xmalloc(struct sh_dirty_vram)) == NULL )
+-                goto param_fail;
++            if ( (dirty_vram = xzalloc(struct sh_dirty_vram)) == NULL )
++            {
++                paging_unlock(d);
++                goto out;
++            }
+ 
++            d->arch.hvm_domain.dirty_vram = dirty_vram;
++        }
++
++        if ( begin_pfn != dirty_vram->begin_pfn ||
++             begin_pfn + nr != dirty_vram->end_pfn )
++        {
+             dirty_vram->begin_pfn = begin_pfn;
+             dirty_vram->end_pfn = begin_pfn + nr;
+-            d->arch.hvm_domain.dirty_vram = dirty_vram;
+-            hap_vram_tracking_init(d);
+-            rc = paging_log_dirty_enable(d);
+-            if (rc != 0)
+-                goto param_fail;
++
++            paging_unlock(d);
++
++            /* set l1e entries of range within P2M table to be read-only. */
++            p2m_change_type_range(d, begin_pfn, begin_pfn + nr,
++                                  p2m_ram_rw, p2m_ram_logdirty);
++
++            flush_tlb_mask(d->domain_dirty_cpumask);
++
++            memset(dirty_bitmap, 0xff, size); /* consider all pages dirty */
+         }
+         else
+         {
+-            if ( !paging_mode_log_dirty(d) && dirty_vram )
+-                rc = -EINVAL;
+-            else
+-                rc = -ENODATA;
+-            goto param_fail;
++            paging_unlock(d);
++
++            domain_pause(d);
++
++            /* get the bitmap */
++            paging_log_dirty_range(d, begin_pfn, nr, dirty_bitmap);
++
++            domain_unpause(d);
+         }
+-        /* get the bitmap */
+-        rc = paging_log_dirty_range(d, begin_pfn, nr, dirty_bitmap);
++
++        rc = -EFAULT;
++        if ( copy_to_guest(guest_dirty_bitmap, dirty_bitmap, size) == 0 )
++            rc = 0;
+     }
+     else
+     {
+-        if ( paging_mode_log_dirty(d) && dirty_vram ) {
+-            rc = paging_log_dirty_disable(d);
+-            xfree(dirty_vram);
+-            dirty_vram = d->arch.hvm_domain.dirty_vram = NULL;
+-        } else
+-            rc = 0;
+-    }
++        paging_lock(d);
+ 
+-    return rc;
++        dirty_vram = d->arch.hvm_domain.dirty_vram;
++        if ( dirty_vram )
++        {
++            /*
++             * If zero pages specified while tracking dirty vram
++             * then stop tracking
++             */
++            xfree(dirty_vram);
++            d->arch.hvm_domain.dirty_vram = NULL;
++        }
+ 
+-param_fail:
+-    if ( dirty_vram )
+-    {
+-        xfree(dirty_vram);
+-        dirty_vram = d->arch.hvm_domain.dirty_vram = NULL;
++        paging_unlock(d);
+     }
++out:
++    if ( dirty_bitmap )
++        xfree(dirty_bitmap);
++
+     return rc;
+ }
+ 
+@@ -223,13 +201,6 @@ static void hap_clean_dirty_bitmap(struc
+ 
+ void hap_logdirty_init(struct domain *d)
+ {
+-    struct sh_dirty_vram *dirty_vram = d->arch.hvm_domain.dirty_vram;
+-    if ( paging_mode_log_dirty(d) && dirty_vram )
+-    {
+-        paging_log_dirty_disable(d);
+-        xfree(dirty_vram);
+-        dirty_vram = d->arch.hvm_domain.dirty_vram = NULL;
+-    }
+ 
+     /* Reinitialize logdirty mechanism */
+     paging_log_dirty_init(d, hap_enable_log_dirty,
+--- a/xen/arch/x86/mm/paging.c
++++ b/xen/arch/x86/mm/paging.c
+@@ -447,157 +447,38 @@ int paging_log_dirty_op(struct domain *d
+     return rv;
+ }
+ 
+-int paging_log_dirty_range(struct domain *d,
+-                            unsigned long begin_pfn,
+-                            unsigned long nr,
+-                            XEN_GUEST_HANDLE_64(uint8) dirty_bitmap)
+-{
+-    int rv = 0;
+-    unsigned long pages = 0;
+-    mfn_t *l4, *l3, *l2;
+-    unsigned long *l1;
+-    int b1, b2, b3, b4;
+-    int i2, i3, i4;
+-
+-    d->arch.paging.log_dirty.clean_dirty_bitmap(d);
+-    paging_lock(d);
+-
+-    PAGING_DEBUG(LOGDIRTY, "log-dirty-range: dom %u faults=%u dirty=%u\n",
+-                 d->domain_id,
+-                 d->arch.paging.log_dirty.fault_count,
+-                 d->arch.paging.log_dirty.dirty_count);
+-
+-    if ( unlikely(d->arch.paging.log_dirty.failed_allocs) ) {
+-        printk("%s: %d failed page allocs while logging dirty pages\n",
+-               __FUNCTION__, d->arch.paging.log_dirty.failed_allocs);
+-        rv = -ENOMEM;
+-        goto out;
+-    }
++void paging_log_dirty_range(struct domain *d,
++                           unsigned long begin_pfn,
++                           unsigned long nr,
++                           uint8_t *dirty_bitmap)
++{
++    struct p2m_domain *p2m = p2m_get_hostp2m(d);
++    int i;
++    unsigned long pfn;
++
++    /*
++     * Set l1e entries of P2M table to be read-only.
++     *
++     * On first write, it page faults, its entry is changed to read-write,
++     * and on retry the write succeeds.
++     *
++     * We populate dirty_bitmap by looking for entries that have been
++     * switched to read-write.
++     */
+ 
+-    if ( !d->arch.paging.log_dirty.fault_count &&
+-         !d->arch.paging.log_dirty.dirty_count ) {
+-        unsigned int size = BITS_TO_LONGS(nr);
+-
+-        if ( clear_guest(dirty_bitmap, size * BYTES_PER_LONG) != 0 )
+-            rv = -EFAULT;
+-        goto out;
+-    }
+-    d->arch.paging.log_dirty.fault_count = 0;
+-    d->arch.paging.log_dirty.dirty_count = 0;
++    p2m_lock(p2m);
+ 
+-    b1 = L1_LOGDIRTY_IDX(begin_pfn);
+-    b2 = L2_LOGDIRTY_IDX(begin_pfn);
+-    b3 = L3_LOGDIRTY_IDX(begin_pfn);
+-    b4 = L4_LOGDIRTY_IDX(begin_pfn);
+-    l4 = paging_map_log_dirty_bitmap(d);
+-
+-    for ( i4 = b4;
+-          (pages < nr) && (i4 < LOGDIRTY_NODE_ENTRIES);
+-          i4++ )
++    for ( i = 0, pfn = begin_pfn; pfn < begin_pfn + nr; i++, pfn++ )
+     {
+-        l3 = (l4 && mfn_valid(l4[i4])) ? map_domain_page(mfn_x(l4[i4])) : NULL;
+-        for ( i3 = b3;
+-              (pages < nr) && (i3 < LOGDIRTY_NODE_ENTRIES);
+-              i3++ )
+-        {
+-            l2 = ((l3 && mfn_valid(l3[i3])) ?
+-                  map_domain_page(mfn_x(l3[i3])) : NULL);
+-            for ( i2 = b2;
+-                  (pages < nr) && (i2 < LOGDIRTY_NODE_ENTRIES);
+-                  i2++ )
+-            {
+-                unsigned int bytes = PAGE_SIZE;
+-                uint8_t *s;
+-                l1 = ((l2 && mfn_valid(l2[i2])) ?
+-                      map_domain_page(mfn_x(l2[i2])) : NULL);
+-
+-                s = ((uint8_t*)l1) + (b1 >> 3);
+-                bytes -= b1 >> 3;
+-
+-                if ( likely(((nr - pages + 7) >> 3) < bytes) )
+-                    bytes = (unsigned int)((nr - pages + 7) >> 3);
+-
+-                if ( !l1 )
+-                {
+-                    if ( clear_guest_offset(dirty_bitmap, pages >> 3,
+-                                            bytes) != 0 )
+-                    {
+-                        rv = -EFAULT;
+-                        goto out;
+-                    }
+-                }
+-                /* begin_pfn is not 32K aligned, hence we have to bit
+-                 * shift the bitmap */
+-                else if ( b1 & 0x7 )
+-                {
+-                    int i, j;
+-                    uint32_t *l = (uint32_t*) s;
+-                    int bits = b1 & 0x7;
+-                    int bitmask = (1 << bits) - 1;
+-                    int size = (bytes + BYTES_PER_LONG - 1) / BYTES_PER_LONG;
+-                    unsigned long bitmap[size];
+-                    static unsigned long printed = 0;
+-
+-                    if ( printed != begin_pfn )
+-                    {
+-                        dprintk(XENLOG_DEBUG, "%s: begin_pfn %lx is not 32K aligned!\n",
+-                                __FUNCTION__, begin_pfn);
+-                        printed = begin_pfn;
+-                    }
+-
+-                    for ( i = 0; i < size - 1; i++, l++ ) {
+-                        bitmap[i] = ((*l) >> bits) |
+-                            (((*((uint8_t*)(l + 1))) & bitmask) << (sizeof(*l) * 8 - bits));
+-                    }
+-                    s = (uint8_t*) l;
+-                    size = BYTES_PER_LONG - ((b1 >> 3) & 0x3);
+-                    bitmap[i] = 0;
+-                    for ( j = 0; j < size; j++, s++ )
+-                        bitmap[i] |= (*s) << (j * 8);
+-                    bitmap[i] = (bitmap[i] >> bits) | (bitmask << (size * 8 - bits));
+-                    if ( copy_to_guest_offset(dirty_bitmap, (pages >> 3),
+-                                (uint8_t*) bitmap, bytes) != 0 )
+-                    {
+-                        rv = -EFAULT;
+-                        goto out;
+-                    }
+-                }
+-                else
+-                {
+-                    if ( copy_to_guest_offset(dirty_bitmap, pages >> 3,
+-                                              s, bytes) != 0 )
+-                    {
+-                        rv = -EFAULT;
+-                        goto out;
+-                    }
+-                }
+-
+-                pages += bytes << 3;
+-                if ( l1 )
+-                {
+-                    clear_page(l1);
+-                    unmap_domain_page(l1);
+-                }
+-                b1 = b1 & 0x7;
+-            }
+-            b2 = 0;
+-            if ( l2 )
+-                unmap_domain_page(l2);
+-        }
+-        b3 = 0;
+-        if ( l3 )
+-            unmap_domain_page(l3);
++        p2m_type_t pt;
++        pt = p2m_change_type(d, pfn, p2m_ram_rw, p2m_ram_logdirty);
++        if ( pt == p2m_ram_rw )
++            dirty_bitmap[i >> 3] |= (1 << (i & 7));
+     }
+-    if ( l4 )
+-        unmap_domain_page(l4);
+-
+-    paging_unlock(d);
+ 
+-    return rv;
++    p2m_unlock(p2m);
+ 
+- out:
+-    paging_unlock(d);
+-    return rv;
++    flush_tlb_mask(d->domain_dirty_cpumask);
+ }
+ 
+ /* Note that this function takes three function pointers. Callers must supply
+--- a/xen/include/asm-x86/config.h
++++ b/xen/include/asm-x86/config.h
+@@ -17,6 +17,7 @@
+ 
+ #define BYTES_PER_LONG (1 << LONG_BYTEORDER)
+ #define BITS_PER_LONG (BYTES_PER_LONG << 3)
++#define BITS_PER_BYTE 8
+ 
+ #define CONFIG_X86 1
+ #define CONFIG_X86_HT 1
+--- a/xen/include/asm-x86/paging.h
++++ b/xen/include/asm-x86/paging.h
+@@ -145,10 +145,10 @@ struct paging_mode {
+ void paging_free_log_dirty_bitmap(struct domain *d);
+ 
+ /* get the dirty bitmap for a specific range of pfns */
+-int paging_log_dirty_range(struct domain *d,
+-                           unsigned long begin_pfn,
+-                           unsigned long nr,
+-                           XEN_GUEST_HANDLE_64(uint8) dirty_bitmap);
++void paging_log_dirty_range(struct domain *d,
++                            unsigned long begin_pfn,
++                            unsigned long nr,
++                            uint8_t *dirty_bitmap);
+ 
+ /* enable log dirty */
+ int paging_log_dirty_enable(struct domain *d);
