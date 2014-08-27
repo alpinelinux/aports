@@ -37,13 +37,18 @@ fi
 [ "$PAGER" ] || PAGER=less
 tty -s <&1 || PAGER=cat
 
+MANWIDTH=${MANWIDTH:-78}
+if [ $MANWIDTH = 0 ]; then
+    MANWIDTH=$(($(stty size | awk '{print $2}') - 2))
+fi
+
 case "$pagefile" in
 *.bz2)
-	exec bzcat "$pagefile" | mandoc -Tutf8 | "$PAGER" ;;
+	exec bzcat "$pagefile" | mandoc -Tutf8 -Owidth=$MANWIDTH | "$PAGER" ;;
 *.gz)
-	exec zcat "$pagefile" | mandoc -Tutf8 | "$PAGER" ;;
+	exec zcat "$pagefile" | mandoc -Tutf8 -Owidth=$MANWIDTH | "$PAGER" ;;
 *)
-	exec mandoc -Tutf8 "$pagefile" | "$PAGER" ;;
+	exec mandoc -Tutf8 -Owidth=$MANWIDTH "$pagefile" | "$PAGER" ;;
 esac
 
 paths=
