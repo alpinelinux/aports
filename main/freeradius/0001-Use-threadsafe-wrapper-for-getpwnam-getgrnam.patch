@@ -1,0 +1,288 @@
+From aa269e0e41e4c4c3213149069d8083b27967a192 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Mon, 1 Sep 2014 16:38:59 +0200
+Subject: [PATCH] Use threadsafe wrapper for getpwnam/getgrnam
+
+Even if rlm_unix is marked as RLM_TYPE_THREAD_UNSAFE, it runs in a
+separate thread than the main thread. Both main thread and rlm_unix
+uses thread unsafe getpwnam/getgrnam which causes segfault when under
+stress.
+
+We create a thread safe wrapper for those that uses TLS.
+
+ref #767
+---
+ src/include/radiusd.h                             |   5 +
+ src/main/command.c                                |   6 +-
+ src/main/util.c                                   | 144 ++++++++++++++++++++++
+ src/modules/rlm_opendirectory/rlm_opendirectory.c |   6 +-
+ src/modules/rlm_unix/rlm_unix.c                   |   6 +-
+ 5 files changed, 158 insertions(+), 9 deletions(-)
+
+diff --git a/src/include/radiusd.h b/src/include/radiusd.h
+index 2bf5173..6936305 100644
+--- a/src/include/radiusd.h
++++ b/src/include/radiusd.h
+@@ -39,6 +39,9 @@ typedef struct auth_req REQUEST;
+ #include	<pthread.h>
+ #endif
+ 
++#include <pwd.h>
++#include <grp.h>
++
+ #ifndef NDEBUG
+ #define REQUEST_MAGIC (0xdeadbeef)
+ #endif
+@@ -506,6 +509,8 @@ int		rad_copy_variable(char *dst, const char *from);
+ int		rad_expand_xlat(REQUEST *request, const char *cmd,
+ 				int max_argc, const char *argv[], int can_fail,
+ 				size_t argv_buflen, char *argv_buf);
++struct passwd	*rad_getpwnam(const char *name);
++struct group	*rad_getgrnam(const char *name);
+ 
+ /* client.c */
+ RADCLIENT_LIST	*clients_init(void);
+diff --git a/src/main/command.c b/src/main/command.c
+index bce7e9a..4debd2b 100644
+--- a/src/main/command.c
++++ b/src/main/command.c
+@@ -1975,8 +1975,8 @@ static int command_socket_parse(CONF_SECTION *cs, rad_listen_t *this)
+ #if defined(HAVE_GETPEEREID) || defined (SO_PEERCRED)
+ 	if (sock->uid_name) {
+ 		struct passwd *pw;
+-		
+-		pw = getpwnam(sock->uid_name);
++
++		pw = rad_getpwnam(sock->uid_name);
+ 		if (!pw) {
+ 			radlog(L_ERR, "Failed getting uid for %s: %s",
+ 			       sock->uid_name, strerror(errno));
+@@ -1991,7 +1991,7 @@ static int command_socket_parse(CONF_SECTION *cs, rad_listen_t *this)
+ 	if (sock->gid_name) {
+ 		struct group *gr;
+ 
+-		gr = getgrnam(sock->gid_name);
++		gr = rad_getgrnam(sock->gid_name);
+ 		if (!gr) {
+ 			radlog(L_ERR, "Failed getting gid for %s: %s",
+ 			       sock->gid_name, strerror(errno));
+diff --git a/src/main/util.c b/src/main/util.c
+index aebaff0..9ec96bb 100644
+--- a/src/main/util.c
++++ b/src/main/util.c
+@@ -31,6 +31,21 @@ RCSID("$Id$")
+ 
+ #include <sys/stat.h>
+ #include <fcntl.h>
++#include <unistd.h>
++#include <pwd.h>
++#include <grp.h>
++
++struct pwgrnam_buffer {
++	struct passwd pwd;
++	char *pwbuffer;
++	int pwsize;
++
++	struct group grp;
++	char *grbuffer;
++	int grsize;
++};
++
++fr_thread_local_setup(struct pwgrnam_buffer *, fr_pwgrnam_buffer); /* macro */
+ 
+ /*
+  *	The signal() function in Solaris 2.5.1 sets SA_NODEFER in
+@@ -778,3 +793,132 @@ int rad_expand_xlat(REQUEST *request, const char *cmd,
+ 	return argc;
+ }
+ 
++/*
++ *	Explicitly cleanup the memory allocated to the pwgrnam
++ *	buffer.
++ */
++static void _fr_pwgrnam_free(void *arg)
++{
++	struct pwgrnam_buffer *p = (struct pwgrnam_buffer *)arg;
++	free(p->pwbuffer);
++	free(p->grbuffer);
++	free(p);
++}
++
++/*
++ *	Allocate buffers for our getpwnam/getgrnam wrappers.
++ */
++static struct pwgrnam_buffer *init_pwgrnam_buffer(void) {
++	struct pwgrnam_buffer *p;
++	int ret;
++
++	p = fr_thread_local_init(fr_pwgrnam_buffer, _fr_pwgrnam_free);
++	if (p)
++		return p;
++
++	p = malloc(sizeof(struct pwgrnam_buffer));
++	if (!p) {
++		fr_perror("Failed allocating pwnam/grnam buffer");
++		return NULL;
++	}
++
++#ifdef _SC_GETPW_R_SIZE_MAX
++	p->pwsize = sysconf(_SC_GETPW_R_SIZE_MAX);
++	if (p->pwsize <= 0)
++#endif
++		p->pwsize = 16384;
++
++#ifdef _SC_GETGR_R_SIZE_MAX
++	p->grsize = sysconf(_SC_GETGR_R_SIZE_MAX);
++	if (p->grsize <= 0)
++#endif
++		p->grsize = 16384;
++
++	p->pwbuffer = malloc(p->pwsize);
++	if (!p->pwbuffer) {
++		fr_perror("Failed allocating pwnam buffer");
++		free(p);
++		return NULL;
++	}
++
++	p->grbuffer = malloc(p->grsize);
++	if (!p->grbuffer) {
++		fr_perror("Failed allocating grnam buffer");
++		free(p->pwbuffer);
++		free(p);
++		return NULL;
++	}
++
++	ret = fr_thread_local_set(fr_pwgrnam_buffer, p);
++	if (ret != 0) {
++		fr_perror("Failed setting up TLS for pwnam buffer: %s", fr_syserror(ret));
++		_fr_pwgrnam_free(p);
++		return NULL;
++	}
++
++	return p;
++}
++
++/** Wrapper around getpwnam, search user database for a name
++ *
++ * getpwnam is not threadsafe so provide a thread-safe variant that
++ * uses TLS.
++ *
++ * @param name then username to search for
++ * @return NULL on error or not found, else pointer to thread local struct passwd buffer
++ */
++struct passwd *rad_getpwnam(const char *name)
++{
++	struct pwgrnam_buffer *p;
++	struct passwd *result;
++	int ret;
++
++	p = init_pwgrnam_buffer();
++	if (!p)
++		return NULL;
++
++	while ((ret = getpwnam_r(name, &p->pwd, p->pwbuffer, p->pwsize, &result)) == ERANGE) {
++		char *tmp = realloc(p->pwbuffer, p->pwsize * 2);
++		if (!tmp) {
++			fr_perror("Failed reallocating pwnam buffer");
++			return NULL;
++		}
++		p->pwsize *= 2;
++		p->pwbuffer = tmp;
++	}
++	if (ret < 0 || result == NULL)
++		return NULL;
++	return result;
++}
++
++/** Wrapper around getgrnam, search group database for a name
++ *
++ * getgrnam is not threadsafe so provide a thread-safe variant that
++ * uses TLS.
++ *
++ * @param name the name to search for
++ * @return NULL on error or not found, else pointer to thread local struct group buffer
++ */
++struct group *rad_getgrnam(const char *name)
++{
++	struct pwgrnam_buffer *p;
++	struct group *result;
++	int ret;
++
++	p = init_pwgrnam_buffer();
++	if (!p)
++		return NULL;
++
++	while ((ret = getgrnam_r(name, &p->grp, p->grbuffer, p->grsize, &result)) == ERANGE) {
++		char *tmp = realloc(p->grbuffer, p->grsize * 2);
++		if (!tmp) {
++			fr_perror("Failed reallocating pwnam buffer");
++			return NULL;
++		}
++		p->grsize *= 2;
++		p->grbuffer = tmp;
++	}
++	if (ret < 0 || result == NULL)
++		return NULL;
++	return result;
++}
+diff --git a/src/modules/rlm_opendirectory/rlm_opendirectory.c b/src/modules/rlm_opendirectory/rlm_opendirectory.c
+index a160b81..0cacadf 100644
+--- a/src/modules/rlm_opendirectory/rlm_opendirectory.c
++++ b/src/modules/rlm_opendirectory/rlm_opendirectory.c
+@@ -352,7 +352,7 @@ static int od_authorize(UNUSED void *instance, REQUEST *request)
+ 	
+ 	/* resolve SACL */
+ 	uuid_clear(guid_sacl);
+-	groupdata = getgrnam(kRadiusSACLName);
++	groupdata = rad_getgrnam(kRadiusSACLName);
+ 	if (groupdata != NULL) {
+ 		err = mbr_gid_to_uuid(groupdata->gr_gid, guid_sacl);
+ 		if (err != 0) {
+@@ -377,7 +377,7 @@ static int od_authorize(UNUSED void *instance, REQUEST *request)
+ 		 */
+ 		if (uuid_parse(rad_client->community, guid_nasgroup) != 0) {
+ 			/* attempt to resolve the name */
+-			groupdata = getgrnam(rad_client->community);
++			groupdata = rad_getgrnam(rad_client->community);
+ 			if (groupdata == NULL) {
+ 				radlog(L_AUTH, "rlm_opendirectory: The group \"%s\" does not exist on this system.", rad_client->community);
+ 				return RLM_MODULE_FAIL;
+@@ -418,7 +418,7 @@ static int od_authorize(UNUSED void *instance, REQUEST *request)
+ 	name = (char *)request->username->vp_strvalue;
+ 	rad_assert(name != NULL);
+ 
+-	userdata = getpwnam(name);
++	userdata = rad_getpwnam(name);
+ 	if (userdata != NULL) {
+ 		err = mbr_uid_to_uuid(userdata->pw_uid, uuid);
+ 		if (err != 0)
+diff --git a/src/modules/rlm_unix/rlm_unix.c b/src/modules/rlm_unix/rlm_unix.c
+index 9caab7a..661e3d7 100644
+--- a/src/modules/rlm_unix/rlm_unix.c
++++ b/src/modules/rlm_unix/rlm_unix.c
+@@ -93,11 +93,11 @@ static int groupcmp(void *instance, REQUEST *req, VALUE_PAIR *request,
+ 		return -1;
+ 	}
+ 
+-	pwd = getpwnam(req->username->vp_strvalue);
++	pwd = rad_getpwnam(req->username->vp_strvalue);
+ 	if (pwd == NULL)
+ 		return -1;
+ 
+-	grp = getgrnam(check->vp_strvalue);
++	grp = rad_getgrnam(check->vp_strvalue);
+ 	if (grp == NULL)
+ 		return -1;
+ 	
+@@ -211,7 +211,7 @@ static int unix_getpw(UNUSED void *instance, REQUEST *request,
+ 		return RLM_MODULE_USERLOCK;
+ 	}
+ #else /* OSFC2 */
+-	if ((pwd = getpwnam(name)) == NULL) {
++	if ((pwd = rad_getpwnam(name)) == NULL) {
+ 		return RLM_MODULE_NOTFOUND;
+ 	}
+ 	encrypted_pass = pwd->pw_passwd;
+-- 
+2.1.0
+
