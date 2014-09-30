@@ -2166,6 +2166,95 @@ index 71a06b2..8bb9ae1 100644
  
  /*
   * Change these and you break ASM code in entry-common.S
+diff --git a/arch/arm/include/asm/tls.h b/arch/arm/include/asm/tls.h
+index 83259b8..8c7e01d 100644
+--- a/arch/arm/include/asm/tls.h
++++ b/arch/arm/include/asm/tls.h
+@@ -1,6 +1,9 @@
+ #ifndef __ASMARM_TLS_H
+ #define __ASMARM_TLS_H
+ 
++#include <linux/compiler.h>
++#include <asm/thread_info.h>
++
+ #ifdef __ASSEMBLY__
+ #include <asm/asm-offsets.h>
+ 	.macro switch_tls_none, base, tp, tpuser, tmp1, tmp2
+@@ -50,6 +53,50 @@
+ #endif
+ 
+ #ifndef __ASSEMBLY__
++#include <asm/pgtable.h>
++
++static inline void set_tls(unsigned long val)
++{
++	struct thread_info *thread;
++
++	thread = current_thread_info();
++
++	thread->tp_value[0] = val;
++
++	/*
++	 * This code runs with preemption enabled and therefore must
++	 * be reentrant with respect to switch_tls.
++	 *
++	 * We need to ensure ordering between the shadow state and the
++	 * hardware state, so that we don't corrupt the hardware state
++	 * with a stale shadow state during context switch.
++	 *
++	 * If we're preempted here, switch_tls will load TPIDRURO from
++	 * thread_info upon resuming execution and the following mcr
++	 * is merely redundant.
++	 */
++	barrier();
++
++	if (!tls_emu) {
++		if (has_tls_reg) {
++			asm("mcr p15, 0, %0, c13, c0, 3"
++			    : : "r" (val));
++		} else {
++			/*
++			 * User space must never try to access this
++			 * directly.  Expect your app to break
++			 * eventually if you do so.  The user helper
++			 * at 0xffff0fe0 must be used instead.  (see
++			 * entry-armv.S for details)
++			 */
++			pax_open_kernel();
++			*((unsigned int *)0xffff0ff0) = val;
++			pax_close_kernel();
++		}
++
++	}
++}
++
+ static inline unsigned long get_tpuser(void)
+ {
+ 	unsigned long reg = 0;
+@@ -59,5 +106,23 @@ static inline unsigned long get_tpuser(void)
+ 
+ 	return reg;
+ }
++
++static inline void set_tpuser(unsigned long val)
++{
++	/* Since TPIDRURW is fully context-switched (unlike TPIDRURO),
++	 * we need not update thread_info.
++	 */
++	if (has_tls_reg && !tls_emu) {
++		asm("mcr p15, 0, %0, c13, c0, 2"
++		    : : "r" (val));
++	}
++}
++
++static inline void flush_tls(void)
++{
++	set_tls(0);
++	set_tpuser(0);
++}
++
+ #endif
+ #endif	/* __ASMARM_TLS_H */
 diff --git a/arch/arm/include/asm/uaccess.h b/arch/arm/include/asm/uaccess.h
 index 7f3f3cc..bdf0665 100644
 --- a/arch/arm/include/asm/uaccess.h
@@ -2841,7 +2930,7 @@ index 07314af..c46655c 100644
  	flush_icache_range((uintptr_t)(addr),
  			   (uintptr_t)(addr) + size);
 diff --git a/arch/arm/kernel/process.c b/arch/arm/kernel/process.c
-index 92f7b15..7048500 100644
+index 92f7b15..b5e6630 100644
 --- a/arch/arm/kernel/process.c
 +++ b/arch/arm/kernel/process.c
 @@ -217,6 +217,7 @@ void machine_power_off(void)
@@ -2872,7 +2961,16 @@ index 92f7b15..7048500 100644
  	printk("pc : [<%08lx>]    lr : [<%08lx>]    psr: %08lx\n"
  	       "sp : %08lx  ip : %08lx  fp : %08lx\n",
  		regs->ARM_pc, regs->ARM_lr, regs->ARM_cpsr,
-@@ -425,12 +426,6 @@ unsigned long get_wchan(struct task_struct *p)
+@@ -334,6 +335,8 @@ void flush_thread(void)
+ 	memset(&tsk->thread.debug, 0, sizeof(struct debug_info));
+ 	memset(&thread->fpstate, 0, sizeof(union fp_state));
+ 
++	flush_tls();
++
+ 	thread_notify(THREAD_NOTIFY_FLUSH, thread);
+ }
+ 
+@@ -425,12 +428,6 @@ unsigned long get_wchan(struct task_struct *p)
  	return 0;
  }
  
@@ -2885,7 +2983,7 @@ index 92f7b15..7048500 100644
  #ifdef CONFIG_MMU
  #ifdef CONFIG_KUSER_HELPERS
  /*
-@@ -446,7 +441,7 @@ static struct vm_area_struct gate_vma = {
+@@ -446,7 +443,7 @@ static struct vm_area_struct gate_vma = {
  
  static int __init gate_vma_init(void)
  {
@@ -2894,7 +2992,7 @@ index 92f7b15..7048500 100644
  	return 0;
  }
  arch_initcall(gate_vma_init);
-@@ -472,41 +467,16 @@ int in_gate_area_no_mm(unsigned long addr)
+@@ -472,41 +469,16 @@ int in_gate_area_no_mm(unsigned long addr)
  
  const char *arch_vma_name(struct vm_area_struct *vma)
  {
@@ -3139,8 +3237,21 @@ index 7a3be1d..b00c7de 100644
  		pr_debug("CPU ITCM: copied code from %p - %p\n",
  			 start, end);
  		itcm_present = true;
+diff --git a/arch/arm/kernel/thumbee.c b/arch/arm/kernel/thumbee.c
+index 7b8403b..80f0d69 100644
+--- a/arch/arm/kernel/thumbee.c
++++ b/arch/arm/kernel/thumbee.c
+@@ -45,7 +45,7 @@ static int thumbee_notifier(struct notifier_block *self, unsigned long cmd, void
+ 
+ 	switch (cmd) {
+ 	case THREAD_NOTIFY_FLUSH:
+-		thread->thumbee_state = 0;
++		teehbr_write(0);
+ 		break;
+ 	case THREAD_NOTIFY_SWITCH:
+ 		current_thread_info()->thumbee_state = teehbr_read();
 diff --git a/arch/arm/kernel/traps.c b/arch/arm/kernel/traps.c
-index 172ee18..ce4ec3d 100644
+index 172ee18..381ce44 100644
 --- a/arch/arm/kernel/traps.c
 +++ b/arch/arm/kernel/traps.c
 @@ -62,7 +62,7 @@ static void dump_mem(const char *, const char *, unsigned long, unsigned long);
@@ -3171,17 +3282,38 @@ index 172ee18..ce4ec3d 100644
  	if (signr)
  		do_exit(signr);
  }
-@@ -642,7 +647,9 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
- 			 * The user helper at 0xffff0fe0 must be used instead.
- 			 * (see entry-armv.S for details)
- 			 */
-+			pax_open_kernel();
- 			*((unsigned int *)0xffff0ff0) = regs->ARM_r0;
-+			pax_close_kernel();
- 		}
+@@ -578,7 +583,6 @@ do_cache_op(unsigned long start, unsigned long end, int flags)
+ #define NR(x) ((__ARM_NR_##x) - __ARM_NR_BASE)
+ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
+ {
+-	struct thread_info *thread = current_thread_info();
+ 	siginfo_t info;
+ 
+ 	if ((no >> 16) != (__ARM_NR_BASE>> 16))
+@@ -629,21 +633,7 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
+ 		return regs->ARM_r0;
+ 
+ 	case NR(set_tls):
+-		thread->tp_value[0] = regs->ARM_r0;
+-		if (tls_emu)
+-			return 0;
+-		if (has_tls_reg) {
+-			asm ("mcr p15, 0, %0, c13, c0, 3"
+-				: : "r" (regs->ARM_r0));
+-		} else {
+-			/*
+-			 * User space must never try to access this directly.
+-			 * Expect your app to break eventually if you do so.
+-			 * The user helper at 0xffff0fe0 must be used instead.
+-			 * (see entry-armv.S for details)
+-			 */
+-			*((unsigned int *)0xffff0ff0) = regs->ARM_r0;
+-		}
++		set_tls(regs->ARM_r0);
  		return 0;
  
-@@ -899,7 +906,11 @@ void __init early_trap_init(void *vectors_base)
+ #ifdef CONFIG_NEEDS_SYSCALL_FOR_CMPXCHG
+@@ -899,7 +889,11 @@ void __init early_trap_init(void *vectors_base)
  	kuser_init(vectors_base);
  
  	flush_icache_range(vectors, vectors + PAGE_SIZE * 2);
@@ -18010,10 +18142,10 @@ index ed5903b..c7fe163 100644
  #define MODULES_END	VMALLOC_END
  #define MODULES_LEN	(MODULES_VADDR - MODULES_END)
 diff --git a/arch/x86/include/asm/pgtable_64.h b/arch/x86/include/asm/pgtable_64.h
-index e22c1db..23a625a 100644
+index e22c1db..82f2923 100644
 --- a/arch/x86/include/asm/pgtable_64.h
 +++ b/arch/x86/include/asm/pgtable_64.h
-@@ -16,10 +16,14 @@
+@@ -16,10 +16,15 @@
  
  extern pud_t level3_kernel_pgt[512];
  extern pud_t level3_ident_pgt[512];
@@ -18026,11 +18158,12 @@ index e22c1db..23a625a 100644
 -extern pmd_t level2_ident_pgt[512];
 -extern pgd_t init_level4_pgt[];
 +extern pmd_t level2_ident_pgt[512*2];
++extern pte_t level1_fixmap_pgt[512];
 +extern pgd_t init_level4_pgt[512];
  
  #define swapper_pg_dir init_level4_pgt
  
-@@ -61,7 +65,9 @@ static inline void native_set_pte_atomic(pte_t *ptep, pte_t pte)
+@@ -61,7 +66,9 @@ static inline void native_set_pte_atomic(pte_t *ptep, pte_t pte)
  
  static inline void native_set_pmd(pmd_t *pmdp, pmd_t pmd)
  {
@@ -18040,7 +18173,7 @@ index e22c1db..23a625a 100644
  }
  
  static inline void native_pmd_clear(pmd_t *pmd)
-@@ -97,7 +103,9 @@ static inline pmd_t native_pmdp_get_and_clear(pmd_t *xp)
+@@ -97,7 +104,9 @@ static inline pmd_t native_pmdp_get_and_clear(pmd_t *xp)
  
  static inline void native_set_pud(pud_t *pudp, pud_t pud)
  {
@@ -18050,7 +18183,7 @@ index e22c1db..23a625a 100644
  }
  
  static inline void native_pud_clear(pud_t *pud)
-@@ -107,6 +115,13 @@ static inline void native_pud_clear(pud_t *pud)
+@@ -107,6 +116,13 @@ static inline void native_pud_clear(pud_t *pud)
  
  static inline void native_set_pgd(pgd_t *pgdp, pgd_t pgd)
  {
@@ -21775,7 +21908,7 @@ index f6dfd93..892ade4 100644
  
  		.__cr3		= __pa_nodebug(swapper_pg_dir),
 diff --git a/arch/x86/kernel/dumpstack.c b/arch/x86/kernel/dumpstack.c
-index d9c12d3..7858b62 100644
+index d9c12d3..3e70198 100644
 --- a/arch/x86/kernel/dumpstack.c
 +++ b/arch/x86/kernel/dumpstack.c
 @@ -2,6 +2,9 @@
@@ -21788,7 +21921,15 @@ index d9c12d3..7858b62 100644
  #include <linux/kallsyms.h>
  #include <linux/kprobes.h>
  #include <linux/uaccess.h>
-@@ -40,16 +43,14 @@ void printk_address(unsigned long address)
+@@ -33,23 +36,21 @@ static void printk_stack_address(unsigned long address, int reliable)
+ 
+ void printk_address(unsigned long address)
+ {
+-	pr_cont(" [<%p>] %pS\n", (void *)address, (void *)address);
++	pr_cont(" [<%p>] %pA\n", (void *)address, (void *)address);
+ }
+ 
+ #ifdef CONFIG_FUNCTION_GRAPH_TRACER
  static void
  print_ftrace_graph_addr(unsigned long addr, void *data,
  			const struct stacktrace_ops *ops,
@@ -35857,7 +35998,7 @@ index 201d09a..e4723e5 100644
  
  #ifdef CONFIG_ACPI_NUMA
 diff --git a/arch/x86/xen/mmu.c b/arch/x86/xen/mmu.c
-index 2423ef0..4f6fb5b 100644
+index 2423ef0..a5f0379 100644
 --- a/arch/x86/xen/mmu.c
 +++ b/arch/x86/xen/mmu.c
 @@ -379,7 +379,7 @@ static pteval_t pte_mfn_to_pfn(pteval_t val)
@@ -35869,17 +36010,63 @@ index 2423ef0..4f6fb5b 100644
  {
  	if (val & _PAGE_PRESENT) {
  		unsigned long pfn = (val & PTE_PFN_MASK) >> PAGE_SHIFT;
-@@ -1904,6 +1904,9 @@ void __init xen_setup_kernel_pagetable(pgd_t *pgd, unsigned long max_pfn)
+@@ -1866,12 +1866,11 @@ static void __init check_pt_base(unsigned long *pt_base, unsigned long *pt_end,
+  *
+  * We can construct this by grafting the Xen provided pagetable into
+  * head_64.S's preconstructed pagetables.  We copy the Xen L2's into
+- * level2_ident_pgt, level2_kernel_pgt and level2_fixmap_pgt.  This
+- * means that only the kernel has a physical mapping to start with -
+- * but that's enough to get __va working.  We need to fill in the rest
+- * of the physical mapping once some sort of allocator has been set
+- * up.
+- * NOTE: for PVH, the page tables are native.
++ * level2_ident_pgt, and level2_kernel_pgt.  This means that only the
++ * kernel has a physical mapping to start with - but that's enough to
++ * get __va working.  We need to fill in the rest of the physical
++ * mapping once some sort of allocator has been set up.  NOTE: for
++ * PVH, the page tables are native.
+  */
+ void __init xen_setup_kernel_pagetable(pgd_t *pgd, unsigned long max_pfn)
+ {
+@@ -1902,8 +1901,14 @@ void __init xen_setup_kernel_pagetable(pgd_t *pgd, unsigned long max_pfn)
+ 		/* L3_i[0] -> level2_ident_pgt */
+ 		convert_pfn_mfn(level3_ident_pgt);
  		/* L3_k[510] -> level2_kernel_pgt
- 		 * L3_i[511] -> level2_fixmap_pgt */
+-		 * L3_i[511] -> level2_fixmap_pgt */
++		 * L3_k[511] -> level2_fixmap_pgt */
  		convert_pfn_mfn(level3_kernel_pgt);
 +		convert_pfn_mfn(level3_vmalloc_start_pgt);
 +		convert_pfn_mfn(level3_vmalloc_end_pgt);
 +		convert_pfn_mfn(level3_vmemmap_pgt);
++
++		/* L3_k[511][506] -> level1_fixmap_pgt */
++		convert_pfn_mfn(level2_fixmap_pgt);
  	}
  	/* We get [511][511] and have Xen's version of level2_kernel_pgt */
  	l3 = m2v(pgd[pgd_index(__START_KERNEL_map)].pgd);
-@@ -1933,8 +1936,12 @@ void __init xen_setup_kernel_pagetable(pgd_t *pgd, unsigned long max_pfn)
+@@ -1913,30 +1918,29 @@ void __init xen_setup_kernel_pagetable(pgd_t *pgd, unsigned long max_pfn)
+ 	addr[1] = (unsigned long)l3;
+ 	addr[2] = (unsigned long)l2;
+ 	/* Graft it onto L4[272][0]. Note that we creating an aliasing problem:
+-	 * Both L4[272][0] and L4[511][511] have entries that point to the same
++	 * Both L4[272][0] and L4[511][510] have entries that point to the same
+ 	 * L2 (PMD) tables. Meaning that if you modify it in __va space
+ 	 * it will be also modified in the __ka space! (But if you just
+ 	 * modify the PMD table to point to other PTE's or none, then you
+ 	 * are OK - which is what cleanup_highmap does) */
+ 	copy_page(level2_ident_pgt, l2);
+-	/* Graft it onto L4[511][511] */
++	/* Graft it onto L4[511][510] */
+ 	copy_page(level2_kernel_pgt, l2);
+ 
+-	/* Get [511][510] and graft that in level2_fixmap_pgt */
+-	l3 = m2v(pgd[pgd_index(__START_KERNEL_map + PMD_SIZE)].pgd);
+-	l2 = m2v(l3[pud_index(__START_KERNEL_map + PMD_SIZE)].pud);
+-	copy_page(level2_fixmap_pgt, l2);
+-	/* Note that we don't do anything with level1_fixmap_pgt which
+-	 * we don't need. */
+ 	if (!xen_feature(XENFEAT_auto_translated_physmap)) {
+ 		/* Make pagetable pieces RO */
  		set_page_prot(init_level4_pgt, PAGE_KERNEL_RO);
  		set_page_prot(level3_ident_pgt, PAGE_KERNEL_RO);
  		set_page_prot(level3_kernel_pgt, PAGE_KERNEL_RO);
@@ -35891,8 +36078,11 @@ index 2423ef0..4f6fb5b 100644
 +		set_page_prot(level2_vmemmap_pgt, PAGE_KERNEL_RO);
  		set_page_prot(level2_kernel_pgt, PAGE_KERNEL_RO);
  		set_page_prot(level2_fixmap_pgt, PAGE_KERNEL_RO);
++		set_page_prot(level1_fixmap_pgt, PAGE_KERNEL_RO);
  
-@@ -2123,6 +2130,7 @@ static void __init xen_post_allocator_init(void)
+ 		/* Pin down new L4 */
+ 		pin_pagetable_pfn(MMUEXT_PIN_L4_TABLE,
+@@ -2123,6 +2127,7 @@ static void __init xen_post_allocator_init(void)
  	pv_mmu_ops.set_pud = xen_set_pud;
  #if PAGETABLE_LEVELS == 4
  	pv_mmu_ops.set_pgd = xen_set_pgd;
@@ -35900,7 +36090,7 @@ index 2423ef0..4f6fb5b 100644
  #endif
  
  	/* This will work as long as patching hasn't happened yet
-@@ -2201,6 +2209,7 @@ static const struct pv_mmu_ops xen_mmu_ops __initconst = {
+@@ -2201,6 +2206,7 @@ static const struct pv_mmu_ops xen_mmu_ops __initconst = {
  	.pud_val = PV_CALLEE_SAVE(xen_pud_val),
  	.make_pud = PV_CALLEE_SAVE(xen_make_pud),
  	.set_pgd = xen_set_pgd_hyper,
@@ -36120,6 +36310,18 @@ index d8f80e7..5f41702 100644
  done:
  	spin_lock_init(&blkcg->lock);
  	INIT_RADIX_TREE(&blkcg->blkg_tree, GFP_ATOMIC);
+diff --git a/block/blk-exec.c b/block/blk-exec.c
+index dbf4502..3394b6e 100644
+--- a/block/blk-exec.c
++++ b/block/blk-exec.c
+@@ -56,6 +56,7 @@ void blk_execute_rq_nowait(struct request_queue *q, struct gendisk *bd_disk,
+ 	bool is_pm_resume;
+ 
+ 	WARN_ON(irqs_disabled());
++	WARN_ON(rq->cmd_type == REQ_TYPE_FS);
+ 
+ 	rq->rq_disk = bd_disk;
+ 	rq->end_io = done;
 diff --git a/block/blk-iopoll.c b/block/blk-iopoll.c
 index 1855bf5..af12b06 100644
 --- a/block/blk-iopoll.c
@@ -36146,6 +36348,28 @@ index ae4ae10..c470b8d 100644
  	if (do_copy)
  		bio = bio_copy_kern(q, kbuf, len, gfp_mask, reading);
  	else
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index 883f720..37322f0 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -710,14 +710,9 @@ void blk_mq_insert_request(struct request *rq, bool at_head, bool run_queue,
+ 
+ 	hctx = q->mq_ops->map_queue(q, ctx->cpu);
+ 
+-	if (rq->cmd_flags & (REQ_FLUSH | REQ_FUA) &&
+-	    !(rq->cmd_flags & (REQ_FLUSH_SEQ))) {
+-		blk_insert_flush(rq);
+-	} else {
+-		spin_lock(&ctx->lock);
+-		__blk_mq_insert_request(hctx, rq, at_head);
+-		spin_unlock(&ctx->lock);
+-	}
++	spin_lock(&ctx->lock);
++	__blk_mq_insert_request(hctx, rq, at_head);
++	spin_unlock(&ctx->lock);
+ 
+ 	blk_mq_put_ctx(current_ctx);
+ 
 diff --git a/block/blk-softirq.c b/block/blk-softirq.c
 index 57790c1..5e988dd 100644
 --- a/block/blk-softirq.c
@@ -38097,8 +38321,21 @@ index be73e9d..7fbf140 100644
  
  	cmdlist_t *reqQ;
  	cmdlist_t *cmpQ;
+diff --git a/drivers/block/drbd/drbd_bitmap.c b/drivers/block/drbd/drbd_bitmap.c
+index 597f111..c700970 100644
+--- a/drivers/block/drbd/drbd_bitmap.c
++++ b/drivers/block/drbd/drbd_bitmap.c
+@@ -1042,7 +1042,7 @@ static void bm_page_io_async(struct bm_aio_ctx *ctx, int page_nr, int rw) __must
+ 		submit_bio(rw, bio);
+ 		/* this should not count as user activity and cause the
+ 		 * resync to throttle -- see drbd_rs_should_slow_down(). */
+-		atomic_add(len >> 9, &mdev->rs_sect_ev);
++		atomic_add_unchecked(len >> 9, &mdev->rs_sect_ev);
+ 	}
+ }
+ 
 diff --git a/drivers/block/drbd/drbd_int.h b/drivers/block/drbd/drbd_int.h
-index 0e06f0c..c47b81d 100644
+index 0e06f0c..d98cde3 100644
 --- a/drivers/block/drbd/drbd_int.h
 +++ b/drivers/block/drbd/drbd_int.h
 @@ -582,7 +582,7 @@ struct drbd_epoch {
@@ -38119,6 +38356,17 @@ index 0e06f0c..c47b81d 100644
  	unsigned int peer_seq;
  	spinlock_t peer_seq_lock;
  	unsigned int minor;
+@@ -1032,8 +1032,8 @@ struct drbd_conf {
+ 	struct mutex own_state_mutex;
+ 	struct mutex *state_mutex; /* either own_state_mutex or mdev->tconn->cstate_mutex */
+ 	char congestion_reason;  /* Why we where congested... */
+-	atomic_t rs_sect_in; /* for incoming resync data rate, SyncTarget */
+-	atomic_t rs_sect_ev; /* for submitted resync data rate, both */
++	atomic_unchecked_t rs_sect_in; /* for incoming resync data rate, SyncTarget */
++	atomic_unchecked_t rs_sect_ev; /* for submitted resync data rate, both */
+ 	int rs_last_sect_ev; /* counter to compare with */
+ 	int rs_last_events;  /* counter of read or write "events" (unit sectors)
+ 			      * on the lower level device when we last looked. */
 @@ -1573,7 +1573,7 @@ static inline int drbd_setsockopt(struct socket *sock, int level, int optname,
  	char __user *uoptval;
  	int err;
@@ -38146,7 +38394,7 @@ index 89c497c..9c736ae 100644
  
  /**
 diff --git a/drivers/block/drbd/drbd_main.c b/drivers/block/drbd/drbd_main.c
-index 929468e..7d934eb 100644
+index 929468e..efb12f0 100644
 --- a/drivers/block/drbd/drbd_main.c
 +++ b/drivers/block/drbd/drbd_main.c
 @@ -1317,7 +1317,7 @@ static int _drbd_send_ack(struct drbd_conf *mdev, enum drbd_packet cmd,
@@ -38167,6 +38415,17 @@ index 929468e..7d934eb 100644
  	dp_flags = bio_flags_to_wire(mdev, req->master_bio->bi_rw);
  	if (mdev->state.conn >= C_SYNC_SOURCE &&
  	    mdev->state.conn <= C_PAUSED_SYNC_T)
+@@ -1886,8 +1886,8 @@ void drbd_init_set_defaults(struct drbd_conf *mdev)
+ 	atomic_set(&mdev->unacked_cnt, 0);
+ 	atomic_set(&mdev->local_cnt, 0);
+ 	atomic_set(&mdev->pp_in_use_by_net, 0);
+-	atomic_set(&mdev->rs_sect_in, 0);
+-	atomic_set(&mdev->rs_sect_ev, 0);
++	atomic_set_unchecked(&mdev->rs_sect_in, 0);
++	atomic_set_unchecked(&mdev->rs_sect_ev, 0);
+ 	atomic_set(&mdev->ap_in_flight, 0);
+ 	atomic_set(&mdev->md_io_in_use, 0);
+ 
 @@ -2577,8 +2577,8 @@ void conn_destroy(struct kref *kref)
  {
  	struct drbd_tconn *tconn = container_of(kref, struct drbd_tconn, kref);
@@ -38201,7 +38460,7 @@ index c706d50..5e1b472 100644
  	if (!msg)
  		goto failed;
 diff --git a/drivers/block/drbd/drbd_receiver.c b/drivers/block/drbd/drbd_receiver.c
-index d073305..4998fea 100644
+index d073305..958be8f 100644
 --- a/drivers/block/drbd/drbd_receiver.c
 +++ b/drivers/block/drbd/drbd_receiver.c
 @@ -834,7 +834,7 @@ int drbd_connected(struct drbd_conf *mdev)
@@ -38254,6 +38513,24 @@ index d073305..4998fea 100644
  		list_add(&epoch->list, &tconn->current_epoch->list);
  		tconn->current_epoch = epoch;
  		tconn->epochs++;
+@@ -1688,7 +1688,7 @@ static int recv_resync_read(struct drbd_conf *mdev, sector_t sector, int data_si
+ 	list_add(&peer_req->w.list, &mdev->sync_ee);
+ 	spin_unlock_irq(&mdev->tconn->req_lock);
+ 
+-	atomic_add(data_size >> 9, &mdev->rs_sect_ev);
++	atomic_add_unchecked(data_size >> 9, &mdev->rs_sect_ev);
+ 	if (drbd_submit_peer_request(mdev, peer_req, WRITE, DRBD_FAULT_RS_WR) == 0)
+ 		return 0;
+ 
+@@ -1782,7 +1782,7 @@ static int receive_RSDataReply(struct drbd_tconn *tconn, struct packet_info *pi)
+ 		drbd_send_ack_dp(mdev, P_NEG_ACK, p, pi->size);
+ 	}
+ 
+-	atomic_add(pi->size >> 9, &mdev->rs_sect_in);
++	atomic_add_unchecked(pi->size >> 9, &mdev->rs_sect_in);
+ 
+ 	return err;
+ }
 @@ -2164,7 +2164,7 @@ static int receive_Data(struct drbd_tconn *tconn, struct packet_info *pi)
  
  		err = wait_for_and_update_peer_seq(mdev, peer_seq);
@@ -38272,6 +38549,33 @@ index d073305..4998fea 100644
  	atomic_inc(&peer_req->epoch->active);
  	spin_unlock(&tconn->epoch_lock);
  
+@@ -2326,7 +2326,7 @@ int drbd_rs_should_slow_down(struct drbd_conf *mdev, sector_t sector)
+ 
+ 	curr_events = (int)part_stat_read(&disk->part0, sectors[0]) +
+ 		      (int)part_stat_read(&disk->part0, sectors[1]) -
+-			atomic_read(&mdev->rs_sect_ev);
++			atomic_read_unchecked(&mdev->rs_sect_ev);
+ 
+ 	if (!mdev->rs_last_events || curr_events - mdev->rs_last_events > 64) {
+ 		unsigned long rs_left;
+@@ -2459,7 +2459,7 @@ static int receive_DataRequest(struct drbd_tconn *tconn, struct packet_info *pi)
+ 			mdev->bm_resync_fo = BM_SECT_TO_BIT(sector);
+ 		} else if (pi->cmd == P_OV_REPLY) {
+ 			/* track progress, we may need to throttle */
+-			atomic_add(size >> 9, &mdev->rs_sect_in);
++			atomic_add_unchecked(size >> 9, &mdev->rs_sect_in);
+ 			peer_req->w.cb = w_e_end_ov_reply;
+ 			dec_rs_pending(mdev);
+ 			/* drbd_rs_begin_io done when we sent this request,
+@@ -2520,7 +2520,7 @@ static int receive_DataRequest(struct drbd_tconn *tconn, struct packet_info *pi)
+ 		goto out_free_e;
+ 
+ submit_for_resync:
+-	atomic_add(size >> 9, &mdev->rs_sect_ev);
++	atomic_add_unchecked(size >> 9, &mdev->rs_sect_ev);
+ 
+ submit:
+ 	inc_unacked(mdev);
 @@ -4345,7 +4345,7 @@ struct data_cmd {
  	int expect_payload;
  	size_t pkt_size;
@@ -38290,6 +38594,15 @@ index d073305..4998fea 100644
  	tconn->send.seen_any_write_yet = false;
  
  	conn_info(tconn, "Connection closed\n");
+@@ -4947,7 +4947,7 @@ static int got_IsInSync(struct drbd_tconn *tconn, struct packet_info *pi)
+ 		put_ldev(mdev);
+ 	}
+ 	dec_rs_pending(mdev);
+-	atomic_add(blksize >> 9, &mdev->rs_sect_in);
++	atomic_add_unchecked(blksize >> 9, &mdev->rs_sect_in);
+ 
+ 	return 0;
+ }
 @@ -5221,7 +5221,7 @@ static int tconn_finish_peer_reqs(struct drbd_tconn *tconn)
  struct asender_cmd {
  	size_t pkt_size;
@@ -38299,6 +38612,39 @@ index d073305..4998fea 100644
  
  static struct asender_cmd asender_tbl[] = {
  	[P_PING]	    = { 0, got_Ping },
+diff --git a/drivers/block/drbd/drbd_worker.c b/drivers/block/drbd/drbd_worker.c
+index 84d3175..ccea188 100644
+--- a/drivers/block/drbd/drbd_worker.c
++++ b/drivers/block/drbd/drbd_worker.c
+@@ -400,7 +400,7 @@ static int read_for_csum(struct drbd_conf *mdev, sector_t sector, int size)
+ 	list_add(&peer_req->w.list, &mdev->read_ee);
+ 	spin_unlock_irq(&mdev->tconn->req_lock);
+ 
+-	atomic_add(size >> 9, &mdev->rs_sect_ev);
++	atomic_add_unchecked(size >> 9, &mdev->rs_sect_ev);
+ 	if (drbd_submit_peer_request(mdev, peer_req, READ, DRBD_FAULT_RS_RD) == 0)
+ 		return 0;
+ 
+@@ -498,7 +498,7 @@ static int drbd_rs_controller(struct drbd_conf *mdev)
+ 	int max_sect;
+ 	struct fifo_buffer *plan;
+ 
+-	sect_in = atomic_xchg(&mdev->rs_sect_in, 0); /* Number of sectors that came in */
++	sect_in = atomic_xchg_unchecked(&mdev->rs_sect_in, 0); /* Number of sectors that came in */
+ 	mdev->rs_in_flight -= sect_in;
+ 
+ 	dc = rcu_dereference(mdev->ldev->disk_conf);
+@@ -1561,8 +1561,8 @@ void drbd_rs_controller_reset(struct drbd_conf *mdev)
+ {
+ 	struct fifo_buffer *plan;
+ 
+-	atomic_set(&mdev->rs_sect_in, 0);
+-	atomic_set(&mdev->rs_sect_ev, 0);
++	atomic_set_unchecked(&mdev->rs_sect_in, 0);
++	atomic_set_unchecked(&mdev->rs_sect_ev, 0);
+ 	mdev->rs_in_flight = 0;
+ 
+ 	/* Updating the RCU protected object in place is necessary since
 diff --git a/drivers/block/loop.c b/drivers/block/loop.c
 index 66e8c3b..9b68dd9 100644
 --- a/drivers/block/loop.c
@@ -50165,6 +50511,32 @@ index 1b3a094..068e683 100644
  	}
  }
  EXPORT_SYMBOL(fc_exch_update_stats);
+diff --git a/drivers/scsi/libiscsi.c b/drivers/scsi/libiscsi.c
+index 4046241..4549986 100644
+--- a/drivers/scsi/libiscsi.c
++++ b/drivers/scsi/libiscsi.c
+@@ -717,11 +717,21 @@ __iscsi_conn_send_pdu(struct iscsi_conn *conn, struct iscsi_hdr *hdr,
+ 			return NULL;
+ 		}
+ 
++		if (data_size > ISCSI_DEF_MAX_RECV_SEG_LEN) {
++			iscsi_conn_printk(KERN_ERR, conn, "Invalid buffer len of %u for login task. Max len is %u\n", data_size, ISCSI_DEF_MAX_RECV_SEG_LEN);
++			return NULL;
++		}
++
+ 		task = conn->login_task;
+ 	} else {
+ 		if (session->state != ISCSI_STATE_LOGGED_IN)
+ 			return NULL;
+ 
++		if (data_size != 0) {
++			iscsi_conn_printk(KERN_ERR, conn, "Can not send data buffer of len %u for op 0x%x\n", data_size, opcode);
++			return NULL;
++		}
++
+ 		BUG_ON(conn->c_stage == ISCSI_CONN_INITIAL_STAGE);
+ 		BUG_ON(conn->c_stage == ISCSI_CONN_STOPPED);
+ 
 diff --git a/drivers/scsi/libsas/sas_ata.c b/drivers/scsi/libsas/sas_ata.c
 index d289583..b745eec 100644
 --- a/drivers/scsi/libsas/sas_ata.c
@@ -51070,6 +51442,19 @@ index 52b7731..d604da0 100644
  	op_data = ll_prep_md_op_data(NULL, dir, NULL, filename,
  				     strlen(filename), mode, LUSTRE_OPC_MKDIR,
  				     lump);
+diff --git a/drivers/staging/lustre/lustre/llite/llite_lib.c b/drivers/staging/lustre/lustre/llite/llite_lib.c
+index 6cfdb9e..1ddab59 100644
+--- a/drivers/staging/lustre/lustre/llite/llite_lib.c
++++ b/drivers/staging/lustre/lustre/llite/llite_lib.c
+@@ -576,7 +576,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt,
+ 	if (sb->s_root == NULL) {
+ 		CERROR("%s: can't make root dentry\n",
+ 			ll_get_fsname(sb, NULL, 0));
+-		GOTO(out_root, err = -ENOMEM);
++		GOTO(out_lock_cn_cb, err = -ENOMEM);
+ 	}
+ 
+ 	/* kernel >= 2.6.38 store dentry operations in sb->s_d_op. */
 diff --git a/drivers/staging/media/solo6x10/solo6x10-core.c b/drivers/staging/media/solo6x10/solo6x10-core.c
 index 480b7c4..6846324 100644
 --- a/drivers/staging/media/solo6x10/solo6x10-core.c
@@ -51284,7 +51669,7 @@ index d07fcb5..358e1e1 100644
  		return;
  	}
 diff --git a/drivers/staging/vt6655/hostap.c b/drivers/staging/vt6655/hostap.c
-index 6eecd53..29317c6 100644
+index 6eecd53..1025c8b 100644
 --- a/drivers/staging/vt6655/hostap.c
 +++ b/drivers/staging/vt6655/hostap.c
 @@ -69,14 +69,13 @@ static int msglevel = MSG_LEVEL_INFO;
@@ -51313,6 +51698,16 @@ index 6eecd53..29317c6 100644
  	pDevice->apdev->netdev_ops = &apdev_netdev_ops;
  
  	pDevice->apdev->type = ARPHRD_IEEE80211;
+@@ -385,6 +386,9 @@ static int hostap_set_generic_element(PSDevice pDevice,
+ {
+ 	PSMgmtObject    pMgmt = pDevice->pMgmt;
+ 
++	if (param->u.generic_elem.len > sizeof(pMgmt->abyWPAIE))
++		return -EINVAL;
++
+ 	memcpy(pMgmt->abyWPAIE,
+ 	       param->u.generic_elem.data,
+ 	       param->u.generic_elem.len
 diff --git a/drivers/staging/vt6656/hostap.c b/drivers/staging/vt6656/hostap.c
 index 67ba48b..24e602f 100644
 --- a/drivers/staging/vt6656/hostap.c
@@ -58387,10 +58782,30 @@ index ff286f3..8153a14 100644
  			.attrs = attrs,
  		};
 diff --git a/fs/buffer.c b/fs/buffer.c
-index 27265a8..289f488 100644
+index 27265a8..8673b7b 100644
 --- a/fs/buffer.c
 +++ b/fs/buffer.c
-@@ -3428,7 +3428,7 @@ void __init buffer_init(void)
+@@ -1029,7 +1029,8 @@ grow_dev_page(struct block_device *bdev, sector_t block,
+ 		bh = page_buffers(page);
+ 		if (bh->b_size == size) {
+ 			end_block = init_page_buffers(page, bdev,
+-						index << sizebits, size);
++						(sector_t)index << sizebits,
++						size);
+ 			goto done;
+ 		}
+ 		if (!try_to_free_buffers(page))
+@@ -1050,7 +1051,8 @@ grow_dev_page(struct block_device *bdev, sector_t block,
+ 	 */
+ 	spin_lock(&inode->i_mapping->private_lock);
+ 	link_dev_buffers(page, bh);
+-	end_block = init_page_buffers(page, bdev, index << sizebits, size);
++	end_block = init_page_buffers(page, bdev, (sector_t)index << sizebits,
++			size);
+ 	spin_unlock(&inode->i_mapping->private_lock);
+ done:
+ 	ret = (block < end_block) ? 1 : -ENXIO;
+@@ -3428,7 +3430,7 @@ void __init buffer_init(void)
  	bh_cachep = kmem_cache_create("buffer_head",
  			sizeof(struct buffer_head), 0,
  				(SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|
@@ -62726,7 +63141,7 @@ index b29e42f..5ea7fdf 100644
  #define MNT_NS_INTERNAL ERR_PTR(-EINVAL) /* distinct from any mnt_namespace */
  
 diff --git a/fs/namei.c b/fs/namei.c
-index d5a4fae..d221b37 100644
+index d5a4fae..27e6c48 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
 @@ -331,17 +331,34 @@ int generic_permission(struct inode *inode, int mask)
@@ -62782,7 +63197,42 @@ index d5a4fae..d221b37 100644
  	return -EACCES;
  }
  
-@@ -823,7 +832,7 @@ follow_link(struct path *link, struct nameidata *nd, void **p)
+@@ -642,24 +651,22 @@ static int complete_walk(struct nameidata *nd)
+ 
+ static __always_inline void set_root(struct nameidata *nd)
+ {
+-	if (!nd->root.mnt)
+-		get_fs_root(current->fs, &nd->root);
++	get_fs_root(current->fs, &nd->root);
+ }
+ 
+ static int link_path_walk(const char *, struct nameidata *);
+ 
+-static __always_inline void set_root_rcu(struct nameidata *nd)
++static __always_inline unsigned set_root_rcu(struct nameidata *nd)
+ {
+-	if (!nd->root.mnt) {
+-		struct fs_struct *fs = current->fs;
+-		unsigned seq;
++	struct fs_struct *fs = current->fs;
++	unsigned seq, res;
+ 
+-		do {
+-			seq = read_seqcount_begin(&fs->seq);
+-			nd->root = fs->root;
+-			nd->seq = __read_seqcount_begin(&nd->root.dentry->d_seq);
+-		} while (read_seqcount_retry(&fs->seq, seq));
+-	}
++	do {
++		seq = read_seqcount_begin(&fs->seq);
++		nd->root = fs->root;
++		res = __read_seqcount_begin(&nd->root.dentry->d_seq);
++	} while (read_seqcount_retry(&fs->seq, seq));
++	return res;
+ }
+ 
+ static void path_put_conditional(struct path *path, struct nameidata *nd)
+@@ -823,7 +830,7 @@ follow_link(struct path *link, struct nameidata *nd, void **p)
  {
  	struct dentry *dentry = link->dentry;
  	int error;
@@ -62791,7 +63241,7 @@ index d5a4fae..d221b37 100644
  
  	BUG_ON(nd->flags & LOOKUP_RCU);
  
-@@ -844,6 +853,12 @@ follow_link(struct path *link, struct nameidata *nd, void **p)
+@@ -844,6 +851,12 @@ follow_link(struct path *link, struct nameidata *nd, void **p)
  	if (error)
  		goto out_put_nd_path;
  
@@ -62804,7 +63254,68 @@ index d5a4fae..d221b37 100644
  	nd->last_type = LAST_BIND;
  	*p = dentry->d_inode->i_op->follow_link(dentry, nd);
  	error = PTR_ERR(*p);
-@@ -1592,6 +1607,8 @@ static inline int nested_symlink(struct path *path, struct nameidata *nd)
+@@ -859,7 +872,8 @@ follow_link(struct path *link, struct nameidata *nd, void **p)
+ 			return PTR_ERR(s);
+ 		}
+ 		if (*s == '/') {
+-			set_root(nd);
++			if (!nd->root.mnt)
++				set_root(nd);
+ 			path_put(&nd->path);
+ 			nd->path = nd->root;
+ 			path_get(&nd->root);
+@@ -1132,7 +1146,9 @@ static bool __follow_mount_rcu(struct nameidata *nd, struct path *path,
+ 
+ static int follow_dotdot_rcu(struct nameidata *nd)
+ {
+-	set_root_rcu(nd);
++	struct inode *inode = nd->inode;
++	if (!nd->root.mnt)
++		set_root_rcu(nd);
+ 
+ 	while (1) {
+ 		if (nd->path.dentry == nd->root.dentry &&
+@@ -1144,6 +1160,7 @@ static int follow_dotdot_rcu(struct nameidata *nd)
+ 			struct dentry *parent = old->d_parent;
+ 			unsigned seq;
+ 
++			inode = parent->d_inode;
+ 			seq = read_seqcount_begin(&parent->d_seq);
+ 			if (read_seqcount_retry(&old->d_seq, nd->seq))
+ 				goto failed;
+@@ -1153,6 +1170,7 @@ static int follow_dotdot_rcu(struct nameidata *nd)
+ 		}
+ 		if (!follow_up_rcu(&nd->path))
+ 			break;
++		inode = nd->path.dentry->d_inode;
+ 		nd->seq = read_seqcount_begin(&nd->path.dentry->d_seq);
+ 	}
+ 	while (d_mountpoint(nd->path.dentry)) {
+@@ -1162,11 +1180,12 @@ static int follow_dotdot_rcu(struct nameidata *nd)
+ 			break;
+ 		nd->path.mnt = &mounted->mnt;
+ 		nd->path.dentry = mounted->mnt.mnt_root;
++		inode = nd->path.dentry->d_inode;
+ 		nd->seq = read_seqcount_begin(&nd->path.dentry->d_seq);
+ 		if (!read_seqretry(&mount_lock, nd->m_seq))
+ 			goto failed;
+ 	}
+-	nd->inode = nd->path.dentry->d_inode;
++	nd->inode = inode;
+ 	return 0;
+ 
+ failed:
+@@ -1244,7 +1263,8 @@ static void follow_mount(struct path *path)
+ 
+ static void follow_dotdot(struct nameidata *nd)
+ {
+-	set_root(nd);
++	if (!nd->root.mnt)
++		set_root(nd);
+ 
+ 	while(1) {
+ 		struct dentry *old = nd->path.dentry;
+@@ -1592,6 +1612,8 @@ static inline int nested_symlink(struct path *path, struct nameidata *nd)
  		if (res)
  			break;
  		res = walk_component(nd, path, LOOKUP_FOLLOW);
@@ -62813,7 +63324,7 @@ index d5a4fae..d221b37 100644
  		put_link(nd, &link, cookie);
  	} while (res > 0);
  
-@@ -1664,7 +1681,7 @@ EXPORT_SYMBOL(full_name_hash);
+@@ -1664,7 +1686,7 @@ EXPORT_SYMBOL(full_name_hash);
  static inline unsigned long hash_name(const char *name, unsigned int *hashp)
  {
  	unsigned long a, b, adata, bdata, mask, hash, len;
@@ -62822,7 +63333,32 @@ index d5a4fae..d221b37 100644
  
  	hash = a = 0;
  	len = -sizeof(unsigned long);
-@@ -1948,6 +1965,8 @@ static int path_lookupat(int dfd, const char *name,
+@@ -1842,7 +1864,7 @@ static int path_init(int dfd, const char *name, unsigned int flags,
+ 	if (*name=='/') {
+ 		if (flags & LOOKUP_RCU) {
+ 			rcu_read_lock();
+-			set_root_rcu(nd);
++			nd->seq = set_root_rcu(nd);
+ 		} else {
+ 			set_root(nd);
+ 			path_get(&nd->root);
+@@ -1893,7 +1915,14 @@ static int path_init(int dfd, const char *name, unsigned int flags,
+ 	}
+ 
+ 	nd->inode = nd->path.dentry->d_inode;
+-	return 0;
++	if (!(flags & LOOKUP_RCU))
++		return 0;
++	if (likely(!read_seqcount_retry(&nd->path.dentry->d_seq, nd->seq)))
++		return 0;
++	if (!(nd->flags & LOOKUP_ROOT))
++		nd->root.mnt = NULL;
++	rcu_read_unlock();
++	return -ECHILD;
+ }
+ 
+ static inline int lookup_last(struct nameidata *nd, struct path *path)
+@@ -1948,6 +1977,8 @@ static int path_lookupat(int dfd, const char *name,
  			if (err)
  				break;
  			err = lookup_last(nd, &path);
@@ -62831,7 +63367,7 @@ index d5a4fae..d221b37 100644
  			put_link(nd, &link, cookie);
  		}
  	}
-@@ -1955,6 +1974,13 @@ static int path_lookupat(int dfd, const char *name,
+@@ -1955,6 +1986,13 @@ static int path_lookupat(int dfd, const char *name,
  	if (!err)
  		err = complete_walk(nd);
  
@@ -62845,7 +63381,7 @@ index d5a4fae..d221b37 100644
  	if (!err && nd->flags & LOOKUP_DIRECTORY) {
  		if (!d_can_lookup(nd->path.dentry)) {
  			path_put(&nd->path);
-@@ -1982,8 +2008,15 @@ static int filename_lookup(int dfd, struct filename *name,
+@@ -1982,8 +2020,15 @@ static int filename_lookup(int dfd, struct filename *name,
  		retval = path_lookupat(dfd, name->name,
  						flags | LOOKUP_REVAL, nd);
  
@@ -62862,7 +63398,7 @@ index d5a4fae..d221b37 100644
  	return retval;
  }
  
-@@ -2558,6 +2591,13 @@ static int may_open(struct path *path, int acc_mode, int flag)
+@@ -2558,6 +2603,13 @@ static int may_open(struct path *path, int acc_mode, int flag)
  	if (flag & O_NOATIME && !inode_owner_or_capable(inode))
  		return -EPERM;
  
@@ -62876,7 +63412,7 @@ index d5a4fae..d221b37 100644
  	return 0;
  }
  
-@@ -2789,7 +2829,7 @@ looked_up:
+@@ -2789,7 +2841,7 @@ looked_up:
   * cleared otherwise prior to returning.
   */
  static int lookup_open(struct nameidata *nd, struct path *path,
@@ -62885,7 +63421,7 @@ index d5a4fae..d221b37 100644
  			const struct open_flags *op,
  			bool got_write, int *opened)
  {
-@@ -2824,6 +2864,17 @@ static int lookup_open(struct nameidata *nd, struct path *path,
+@@ -2824,6 +2876,17 @@ static int lookup_open(struct nameidata *nd, struct path *path,
  	/* Negative dentry, just create the file */
  	if (!dentry->d_inode && (op->open_flag & O_CREAT)) {
  		umode_t mode = op->mode;
@@ -62903,7 +63439,7 @@ index d5a4fae..d221b37 100644
  		if (!IS_POSIXACL(dir->d_inode))
  			mode &= ~current_umask();
  		/*
-@@ -2845,6 +2896,8 @@ static int lookup_open(struct nameidata *nd, struct path *path,
+@@ -2845,6 +2908,8 @@ static int lookup_open(struct nameidata *nd, struct path *path,
  				   nd->flags & LOOKUP_EXCL);
  		if (error)
  			goto out_dput;
@@ -62912,7 +63448,7 @@ index d5a4fae..d221b37 100644
  	}
  out_no_open:
  	path->dentry = dentry;
-@@ -2859,7 +2912,7 @@ out_dput:
+@@ -2859,7 +2924,7 @@ out_dput:
  /*
   * Handle the last step of open()
   */
@@ -62921,7 +63457,7 @@ index d5a4fae..d221b37 100644
  		   struct file *file, const struct open_flags *op,
  		   int *opened, struct filename *name)
  {
-@@ -2909,6 +2962,15 @@ static int do_last(struct nameidata *nd, struct path *path,
+@@ -2909,6 +2974,15 @@ static int do_last(struct nameidata *nd, struct path *path,
  		if (error)
  			return error;
  
@@ -62937,7 +63473,7 @@ index d5a4fae..d221b37 100644
  		audit_inode(name, dir, LOOKUP_PARENT);
  		error = -EISDIR;
  		/* trailing slashes? */
-@@ -2928,7 +2990,7 @@ retry_lookup:
+@@ -2928,7 +3002,7 @@ retry_lookup:
  		 */
  	}
  	mutex_lock(&dir->d_inode->i_mutex);
@@ -62946,7 +63482,7 @@ index d5a4fae..d221b37 100644
  	mutex_unlock(&dir->d_inode->i_mutex);
  
  	if (error <= 0) {
-@@ -2952,11 +3014,28 @@ retry_lookup:
+@@ -2952,11 +3026,28 @@ retry_lookup:
  		goto finish_open_created;
  	}
  
@@ -62976,7 +63512,7 @@ index d5a4fae..d221b37 100644
  
  	/*
  	 * If atomic_open() acquired write access it is dropped now due to
-@@ -2997,6 +3076,11 @@ finish_lookup:
+@@ -2997,6 +3088,11 @@ finish_lookup:
  			}
  		}
  		BUG_ON(inode != path->dentry->d_inode);
@@ -62988,7 +63524,7 @@ index d5a4fae..d221b37 100644
  		return 1;
  	}
  
-@@ -3006,7 +3090,6 @@ finish_lookup:
+@@ -3006,7 +3102,6 @@ finish_lookup:
  		save_parent.dentry = nd->path.dentry;
  		save_parent.mnt = mntget(path->mnt);
  		nd->path.dentry = path->dentry;
@@ -62996,7 +63532,7 @@ index d5a4fae..d221b37 100644
  	}
  	nd->inode = inode;
  	/* Why this, you ask?  _Now_ we might have grown LOOKUP_JUMPED... */
-@@ -3016,7 +3099,18 @@ finish_open:
+@@ -3016,7 +3111,18 @@ finish_open:
  		path_put(&save_parent);
  		return error;
  	}
@@ -63015,7 +63551,7 @@ index d5a4fae..d221b37 100644
  	error = -EISDIR;
  	if ((open_flag & O_CREAT) && d_is_dir(nd->path.dentry))
  		goto out;
-@@ -3179,7 +3273,7 @@ static struct file *path_openat(int dfd, struct filename *pathname,
+@@ -3179,7 +3285,7 @@ static struct file *path_openat(int dfd, struct filename *pathname,
  	if (unlikely(error))
  		goto out;
  
@@ -63024,7 +63560,7 @@ index d5a4fae..d221b37 100644
  	while (unlikely(error > 0)) { /* trailing symlink */
  		struct path link = path;
  		void *cookie;
-@@ -3197,7 +3291,7 @@ static struct file *path_openat(int dfd, struct filename *pathname,
+@@ -3197,7 +3303,7 @@ static struct file *path_openat(int dfd, struct filename *pathname,
  		error = follow_link(&link, nd, &cookie);
  		if (unlikely(error))
  			break;
@@ -63033,7 +63569,7 @@ index d5a4fae..d221b37 100644
  		put_link(nd, &link, cookie);
  	}
  out:
-@@ -3297,9 +3391,11 @@ struct dentry *kern_path_create(int dfd, const char *pathname,
+@@ -3297,9 +3403,11 @@ struct dentry *kern_path_create(int dfd, const char *pathname,
  		goto unlock;
  
  	error = -EEXIST;
@@ -63047,7 +63583,7 @@ index d5a4fae..d221b37 100644
  	/*
  	 * Special case - lookup gave negative, but... we had foo/bar/
  	 * From the vfs_mknod() POV we just have a negative dentry -
-@@ -3351,6 +3447,20 @@ struct dentry *user_path_create(int dfd, const char __user *pathname,
+@@ -3351,6 +3459,20 @@ struct dentry *user_path_create(int dfd, const char __user *pathname,
  }
  EXPORT_SYMBOL(user_path_create);
  
@@ -63068,7 +63604,7 @@ index d5a4fae..d221b37 100644
  int vfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
  {
  	int error = may_create(dir, dentry);
-@@ -3413,6 +3523,17 @@ retry:
+@@ -3413,6 +3535,17 @@ retry:
  
  	if (!IS_POSIXACL(path.dentry->d_inode))
  		mode &= ~current_umask();
@@ -63086,7 +63622,7 @@ index d5a4fae..d221b37 100644
  	error = security_path_mknod(&path, dentry, mode, dev);
  	if (error)
  		goto out;
-@@ -3429,6 +3550,8 @@ retry:
+@@ -3429,6 +3562,8 @@ retry:
  			break;
  	}
  out:
@@ -63095,7 +63631,7 @@ index d5a4fae..d221b37 100644
  	done_path_create(&path, dentry);
  	if (retry_estale(error, lookup_flags)) {
  		lookup_flags |= LOOKUP_REVAL;
-@@ -3481,9 +3604,16 @@ retry:
+@@ -3481,9 +3616,16 @@ retry:
  
  	if (!IS_POSIXACL(path.dentry->d_inode))
  		mode &= ~current_umask();
@@ -63112,7 +63648,7 @@ index d5a4fae..d221b37 100644
  	done_path_create(&path, dentry);
  	if (retry_estale(error, lookup_flags)) {
  		lookup_flags |= LOOKUP_REVAL;
-@@ -3564,6 +3694,8 @@ static long do_rmdir(int dfd, const char __user *pathname)
+@@ -3564,6 +3706,8 @@ static long do_rmdir(int dfd, const char __user *pathname)
  	struct filename *name;
  	struct dentry *dentry;
  	struct nameidata nd;
@@ -63121,7 +63657,7 @@ index d5a4fae..d221b37 100644
  	unsigned int lookup_flags = 0;
  retry:
  	name = user_path_parent(dfd, pathname, &nd, lookup_flags);
-@@ -3596,10 +3728,21 @@ retry:
+@@ -3596,10 +3740,21 @@ retry:
  		error = -ENOENT;
  		goto exit3;
  	}
@@ -63143,7 +63679,7 @@ index d5a4fae..d221b37 100644
  exit3:
  	dput(dentry);
  exit2:
-@@ -3689,6 +3832,8 @@ static long do_unlinkat(int dfd, const char __user *pathname)
+@@ -3689,6 +3844,8 @@ static long do_unlinkat(int dfd, const char __user *pathname)
  	struct nameidata nd;
  	struct inode *inode = NULL;
  	struct inode *delegated_inode = NULL;
@@ -63152,7 +63688,7 @@ index d5a4fae..d221b37 100644
  	unsigned int lookup_flags = 0;
  retry:
  	name = user_path_parent(dfd, pathname, &nd, lookup_flags);
-@@ -3715,10 +3860,22 @@ retry_deleg:
+@@ -3715,10 +3872,22 @@ retry_deleg:
  		if (d_is_negative(dentry))
  			goto slashes;
  		ihold(inode);
@@ -63175,7 +63711,7 @@ index d5a4fae..d221b37 100644
  exit2:
  		dput(dentry);
  	}
-@@ -3806,9 +3963,17 @@ retry:
+@@ -3806,9 +3975,17 @@ retry:
  	if (IS_ERR(dentry))
  		goto out_putname;
  
@@ -63193,7 +63729,7 @@ index d5a4fae..d221b37 100644
  	done_path_create(&path, dentry);
  	if (retry_estale(error, lookup_flags)) {
  		lookup_flags |= LOOKUP_REVAL;
-@@ -3911,6 +4076,7 @@ SYSCALL_DEFINE5(linkat, int, olddfd, const char __user *, oldname,
+@@ -3911,6 +4088,7 @@ SYSCALL_DEFINE5(linkat, int, olddfd, const char __user *, oldname,
  	struct dentry *new_dentry;
  	struct path old_path, new_path;
  	struct inode *delegated_inode = NULL;
@@ -63201,7 +63737,7 @@ index d5a4fae..d221b37 100644
  	int how = 0;
  	int error;
  
-@@ -3934,7 +4100,7 @@ retry:
+@@ -3934,7 +4112,7 @@ retry:
  	if (error)
  		return error;
  
@@ -63210,7 +63746,7 @@ index d5a4fae..d221b37 100644
  					(how & LOOKUP_REVAL));
  	error = PTR_ERR(new_dentry);
  	if (IS_ERR(new_dentry))
-@@ -3946,11 +4112,28 @@ retry:
+@@ -3946,11 +4124,28 @@ retry:
  	error = may_linkat(&old_path);
  	if (unlikely(error))
  		goto out_dput;
@@ -63239,7 +63775,7 @@ index d5a4fae..d221b37 100644
  	done_path_create(&new_path, new_dentry);
  	if (delegated_inode) {
  		error = break_deleg_wait(&delegated_inode);
-@@ -4237,6 +4420,12 @@ retry_deleg:
+@@ -4237,6 +4432,12 @@ retry_deleg:
  	if (new_dentry == trap)
  		goto exit5;
  
@@ -63252,7 +63788,7 @@ index d5a4fae..d221b37 100644
  	error = security_path_rename(&oldnd.path, old_dentry,
  				     &newnd.path, new_dentry);
  	if (error)
-@@ -4244,6 +4433,9 @@ retry_deleg:
+@@ -4244,6 +4445,9 @@ retry_deleg:
  	error = vfs_rename(old_dir->d_inode, old_dentry,
  				   new_dir->d_inode, new_dentry,
  				   &delegated_inode);
@@ -63262,7 +63798,7 @@ index d5a4fae..d221b37 100644
  exit5:
  	dput(new_dentry);
  exit4:
-@@ -4280,6 +4472,8 @@ SYSCALL_DEFINE2(rename, const char __user *, oldname, const char __user *, newna
+@@ -4280,6 +4484,8 @@ SYSCALL_DEFINE2(rename, const char __user *, oldname, const char __user *, newna
  
  int vfs_readlink(struct dentry *dentry, char __user *buffer, int buflen, const char *link)
  {
@@ -63271,7 +63807,7 @@ index d5a4fae..d221b37 100644
  	int len;
  
  	len = PTR_ERR(link);
-@@ -4289,7 +4483,14 @@ int vfs_readlink(struct dentry *dentry, char __user *buffer, int buflen, const c
+@@ -4289,7 +4495,14 @@ int vfs_readlink(struct dentry *dentry, char __user *buffer, int buflen, const c
  	len = strlen(link);
  	if (len > (unsigned) buflen)
  		len = buflen;
@@ -97308,7 +97844,7 @@ index cdbd312..2e1e0b9 100644
  
  /*
 diff --git a/mm/shmem.c b/mm/shmem.c
-index ff85863..6aa94ab 100644
+index ff85863..7037c25 100644
 --- a/mm/shmem.c
 +++ b/mm/shmem.c
 @@ -33,7 +33,7 @@
@@ -97329,7 +97865,19 @@ index ff85863..6aa94ab 100644
  
  /*
   * shmem_fallocate communicates with shmem_fault or shmem_writepage via
-@@ -2298,6 +2298,11 @@ static const struct xattr_handler *shmem_xattr_handlers[] = {
+@@ -2143,8 +2143,10 @@ static int shmem_rename(struct inode *old_dir, struct dentry *old_dentry, struct
+ 
+ 	if (new_dentry->d_inode) {
+ 		(void) shmem_unlink(new_dir, new_dentry);
+-		if (they_are_dirs)
++		if (they_are_dirs) {
++			drop_nlink(new_dentry->d_inode);
+ 			drop_nlink(old_dir);
++		}
+ 	} else if (they_are_dirs) {
+ 		drop_nlink(old_dir);
+ 		inc_nlink(new_dir);
+@@ -2298,6 +2300,11 @@ static const struct xattr_handler *shmem_xattr_handlers[] = {
  static int shmem_xattr_validate(const char *name)
  {
  	struct { const char *prefix; size_t len; } arr[] = {
@@ -97341,7 +97889,7 @@ index ff85863..6aa94ab 100644
  		{ XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN },
  		{ XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN }
  	};
-@@ -2353,6 +2358,15 @@ static int shmem_setxattr(struct dentry *dentry, const char *name,
+@@ -2353,6 +2360,15 @@ static int shmem_setxattr(struct dentry *dentry, const char *name,
  	if (err)
  		return err;
  
@@ -97357,7 +97905,7 @@ index ff85863..6aa94ab 100644
  	return simple_xattr_set(&info->xattrs, name, value, size, flags);
  }
  
-@@ -2665,8 +2679,7 @@ int shmem_fill_super(struct super_block *sb, void *data, int silent)
+@@ -2665,8 +2681,7 @@ int shmem_fill_super(struct super_block *sb, void *data, int silent)
  	int err = -ENOMEM;
  
  	/* Round up to L1_CACHE_BYTES to resist false sharing */
@@ -97368,7 +97916,7 @@ index ff85863..6aa94ab 100644
  		return -ENOMEM;
  
 diff --git a/mm/slab.c b/mm/slab.c
-index 6dd8d5f..2482a6d 100644
+index 6dd8d5f..673c763 100644
 --- a/mm/slab.c
 +++ b/mm/slab.c
 @@ -300,10 +300,12 @@ static void kmem_cache_node_init(struct kmem_cache_node *parent)
@@ -97421,7 +97969,32 @@ index 6dd8d5f..2482a6d 100644
  
  	slab_early_init = 0;
  
-@@ -3484,6 +3488,21 @@ static inline void __cache_free(struct kmem_cache *cachep, void *objp,
+@@ -2189,7 +2193,8 @@ static int __init_refok setup_cpu_cache(struct kmem_cache *cachep, gfp_t gfp)
+ int
+ __kmem_cache_create (struct kmem_cache *cachep, unsigned long flags)
+ {
+-	size_t left_over, freelist_size, ralign;
++	size_t left_over, freelist_size;
++	size_t ralign = BYTES_PER_WORD;
+ 	gfp_t gfp;
+ 	int err;
+ 	size_t size = cachep->size;
+@@ -2222,14 +2227,6 @@ __kmem_cache_create (struct kmem_cache *cachep, unsigned long flags)
+ 		size &= ~(BYTES_PER_WORD - 1);
+ 	}
+ 
+-	/*
+-	 * Redzoning and user store require word alignment or possibly larger.
+-	 * Note this will be overridden by architecture or caller mandated
+-	 * alignment if either is greater than BYTES_PER_WORD.
+-	 */
+-	if (flags & SLAB_STORE_USER)
+-		ralign = BYTES_PER_WORD;
+-
+ 	if (flags & SLAB_RED_ZONE) {
+ 		ralign = REDZONE_ALIGN;
+ 		/* If redzoning, ensure that the second redzone is suitably
+@@ -3484,6 +3481,21 @@ static inline void __cache_free(struct kmem_cache *cachep, void *objp,
  	struct array_cache *ac = cpu_cache_get(cachep);
  
  	check_irq_off();
@@ -97443,7 +98016,7 @@ index 6dd8d5f..2482a6d 100644
  	kmemleak_free_recursive(objp, cachep->flags);
  	objp = cache_free_debugcheck(cachep, objp, caller);
  
-@@ -3712,6 +3731,7 @@ void kfree(const void *objp)
+@@ -3712,6 +3724,7 @@ void kfree(const void *objp)
  
  	if (unlikely(ZERO_OR_NULL_PTR(objp)))
  		return;
@@ -97451,7 +98024,7 @@ index 6dd8d5f..2482a6d 100644
  	local_irq_save(flags);
  	kfree_debugcheck(objp);
  	c = virt_to_cache(objp);
-@@ -4153,14 +4173,22 @@ void slabinfo_show_stats(struct seq_file *m, struct kmem_cache *cachep)
+@@ -4153,14 +4166,22 @@ void slabinfo_show_stats(struct seq_file *m, struct kmem_cache *cachep)
  	}
  	/* cpu stats */
  	{
@@ -97478,7 +98051,7 @@ index 6dd8d5f..2482a6d 100644
  #endif
  }
  
-@@ -4381,13 +4409,69 @@ static const struct file_operations proc_slabstats_operations = {
+@@ -4381,13 +4402,69 @@ static const struct file_operations proc_slabstats_operations = {
  static int __init slab_proc_init(void)
  {
  #ifdef CONFIG_DEBUG_SLAB_LEAK
@@ -105460,11 +106033,11 @@ index 078fe1d..fbdb363 100644
  		fprintf(stderr, "fixdep: sizeof(int) != 4 or wrong endianness? %#x\n",
 diff --git a/scripts/gcc-plugin.sh b/scripts/gcc-plugin.sh
 new file mode 100644
-index 0000000..3fd3699
+index 0000000..42018ed
 --- /dev/null
 +++ b/scripts/gcc-plugin.sh
-@@ -0,0 +1,43 @@
-+#!/bin/bash
+@@ -0,0 +1,51 @@
++#!/bin/sh
 +srctree=$(dirname "$0")
 +gccplugins_dir=$($3 -print-file-name=plugin)
 +plugincc=$($1 -E - -o /dev/null -I${srctree}/../tools/gcc -I${gccplugins_dir}/include 2>&1 <<EOF
@@ -105482,15 +106055,23 @@ index 0000000..3fd3699
 +	exit 1
 +fi
 +
-+if [[ "$plugincc" =~ "$1 CC" ]]
-+then
-+	echo "$1"
-+	exit 0
-+fi
++case "$plugincc" in
++	*"$1 CC"*)
++		echo "$1"
++		exit 0
++		;;
 +
-+if [[ "$plugincc" =~ "$2 CXX" ]]
-+then
-+plugincc=$($1 -c -x c++ -std=gnu++98 - -o /dev/null -I${srctree}/../tools/gcc -I${gccplugins_dir}/include 2>&1 <<EOF
++	*"$2 CXX"*)
++		# the c++ compiler needs another test, see below
++		;;
++
++	*)
++		exit 1
++		;;
++esac
++
++# we need a c++ compiler that supports the designated initializer GNU extension
++plugincc=$($2 -c -x c++ -std=gnu++98 - -fsyntax-only -I${srctree}/../tools/gcc -I${gccplugins_dir}/include 2>&1 <<EOF
 +#include "gcc-common.h"
 +class test {
 +public:
@@ -105500,11 +106081,11 @@ index 0000000..3fd3699
 +};
 +EOF
 +)
++
 +if [ $? -eq 0 ]
 +then
 +	echo "$2"
 +	exit 0
-+fi
 +fi
 +exit 1
 diff --git a/scripts/headers_install.sh b/scripts/headers_install.sh
