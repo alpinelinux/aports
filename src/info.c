@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <limits.h>
 #include "apk_defines.h"
 #include "apk_applet.h"
 #include "apk_package.h"
@@ -95,12 +96,23 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 	struct apk_dependency_array *deps;
 	struct apk_dependency dep;
 	struct apk_ostream *os;
-	char **parg;
+	const char *via;
+	char **parg, buf[PATH_MAX];
 	int errors = 0;
+	ssize_t r;
 
 	apk_dependency_array_init(&deps);
 	foreach_array_item(parg, args) {
+		via = "";
 		pkg = apk_db_get_file_owner(db, APK_BLOB_STR(*parg));
+		if (pkg == NULL) {
+			r = readlinkat(db->root_fd, *parg, buf, sizeof(buf));
+			if (r > 0 && r < PATH_MAX && buf[0] == '/') {
+				pkg = apk_db_get_file_owner(db, APK_BLOB_STR(buf));
+				via = "symlink target ";
+			}
+		}
+
 		if (pkg == NULL) {
 			apk_error("%s: Could not find owner package", *parg);
 			errors++;
@@ -115,8 +127,8 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 			};
 			apk_deps_add(&deps, &dep);
 		} else {
-			printf("%s is owned by " PKG_VER_FMT "\n",
-			       *parg, PKG_VER_PRINTF(pkg));
+			printf("%s %sis owned by " PKG_VER_FMT "\n",
+			       *parg, via, PKG_VER_PRINTF(pkg));
 		}
 	}
 	if (apk_verbosity < 1 && deps->num != 0) {
