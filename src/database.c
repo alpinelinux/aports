@@ -498,6 +498,7 @@ static void apk_db_pkg_rdepends(struct apk_database *db, struct apk_package *pkg
 
 	foreach_array_item(d, pkg->depends) {
 		rname = d->name;
+		rname->is_dependency |= !d->conflict;
 		foreach_array_item(rd, rname->rdepends)
 			if (*rd == pkg->name)
 				goto rdeps_done;

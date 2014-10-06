@@ -92,8 +92,8 @@ struct apk_name {
 	struct apk_provider_array *providers;
 	struct apk_name_array *rdepends;
 	struct apk_name_array *rinstall_if;
+	unsigned is_dependency : 1;
 	unsigned int foreach_genid;
-
 	union {
 		struct apk_solver_name_state ss;
 		void *state_ptr;
