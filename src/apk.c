@@ -55,8 +55,8 @@ static struct apk_option generic_options[] = {
 	{ 0x110, "no-progress",	"Disable progress bar even for TTYs" },
 	{ 0x102, "clean-protected", "Do not create .apk-new files in "
 				"configuration dirs" },
-	{ 0x106, "purge",	"Delete also modified configuration files on "
-				"package removal" },
+	{ 0x106, "purge",	"Delete also modified configuration files (pkg removal) "
+				"and uninstalled packages from cache (cache clean)" },
 	{ 0x103, "allow-untrusted", "Blindly install packages with untrusted "
 				"signatures or no signature at all" },
 	{ 0x104, "simulate",	"Show what would be done without actually "

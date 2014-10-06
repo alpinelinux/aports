@@ -84,17 +84,23 @@ static void cache_clean_item(struct apk_database *db, int dirfd, const char *nam
 	apk_blob_t b;
 	int i;
 
-	if (pkg != NULL || strcmp(name, "installed") == 0)
+	if (strcmp(name, "installed") == 0) return;
+
+	if (pkg) {
+		if ((apk_flags & APK_PURGE) && pkg->ipkg == NULL) goto delete;
+		if (pkg->repos & db->local_repos & ~BIT(APK_REPOSITORY_CACHED)) goto delete;
+		if (pkg->ipkg == NULL && !(pkg->repos & ~BIT(APK_REPOSITORY_CACHED))) goto delete;
 		return;
+	}
 
 	b = APK_BLOB_STR(name);
 	for (i = 0; i < db->num_repos; i++) {
 		/* Check if this is a valid index */
 		apk_repo_format_cache_index(APK_BLOB_BUF(tmp), &db->repos[i]);
-		if (apk_blob_compare(b, APK_BLOB_STR(tmp)) == 0)
-			return;
+		if (apk_blob_compare(b, APK_BLOB_STR(tmp)) == 0) return;
 	}
 
+delete:
 	if (apk_verbosity >= 2)
 		apk_message("deleting %s", name);
 	if (!(apk_flags & APK_SIMULATE)) {
@@ -145,7 +151,7 @@ static struct apk_applet apk_cache = {
 	.help = "Download missing PACKAGEs to cache and/or delete "
 		"unneeded files from cache",
 	.arguments = "sync | clean | download",
-	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_NO_INSTALLED|APK_OPENF_CACHE_WRITE,
+	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_CACHE_WRITE,
 	.main = cache_main,
 };
 
