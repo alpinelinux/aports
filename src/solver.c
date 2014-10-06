@@ -762,11 +762,20 @@ static void cset_check_removal_by_iif(struct apk_solver_state *ss, struct apk_na
 static void cset_gen_name_change(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name **pname;
-	struct apk_package *pkg = name->ss.chosen.pkg, *opkg;
+	struct apk_package *pkg, *opkg;
 	struct apk_dependency *d;
 
-	if (pkg == NULL || pkg->ss.in_changeset)
+	if (name->ss.in_changeset) return;
+
+	pkg = name->ss.chosen.pkg;
+	if (pkg == NULL) {
+		/* Package removal */
+		opkg = name->ss.installed_pkg;
+		if (opkg) cset_gen_name_remove(ss, opkg);
+		name->ss.in_changeset = 1;
 		return;
+	}
+	if (pkg->ss.in_changeset) return;
 
 	pkg->ss.in_changeset = 1;
 	pkg->name->ss.in_changeset = 1;
