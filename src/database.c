@@ -589,16 +589,20 @@ int apk_repo_format_cache_index(apk_blob_t to, struct apk_repository *repo)
 int apk_repo_format_real_url(struct apk_database *db, struct apk_repository *repo,
 			     struct apk_package *pkg, char *buf, size_t len)
 {
+	apk_blob_t arch;
 	int r;
+
+	if (pkg && pkg->arch) arch = *pkg->arch;
+	else arch = *db->arch;
 
 	if (pkg != NULL)
 		r = snprintf(buf, len, "%s%s" BLOB_FMT "/"  PKG_FILE_FMT,
 			     repo->url, repo->url[strlen(repo->url)-1] == '/' ? "" : "/",
-			     BLOB_PRINTF(*db->arch), PKG_FILE_PRINTF(pkg));
+			     BLOB_PRINTF(arch), PKG_FILE_PRINTF(pkg));
 	else
 		r = snprintf(buf, len, "%s%s" BLOB_FMT "/%s",
 			     repo->url, repo->url[strlen(repo->url)-1] == '/' ? "" : "/",
-			     BLOB_PRINTF(*db->arch), apkindex_tar_gz);
+			     BLOB_PRINTF(arch), apkindex_tar_gz);
 	if (r >= len)
 		return -ENOBUFS;
 	return 0;
