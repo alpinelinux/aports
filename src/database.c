@@ -638,7 +638,8 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 		bs = apk_bstream_from_url(url);
 		bs = apk_bstream_tee(bs, db->cache_fd, tmpcacheitem, cb, cb_ctx);
 		is = apk_bstream_gunzip_mpart(bs, apk_sign_ctx_mpart_cb, &sctx);
-		r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx, FALSE, &db->id_cache);
+		if (is) r = apk_tar_parse(is, apk_sign_ctx_verify_tar, &sctx, FALSE, &db->id_cache);
+		else r = -errno;
 		apk_sign_ctx_free(&sctx);
 	} else {
 		is = apk_istream_from_url(url);
@@ -650,7 +651,7 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 			r = -errno;
 		}
 	}
-	is->close(is);
+	if (is) is->close(is);
 	if (r < 0) {
 		unlinkat(db->cache_fd, tmpcacheitem, 0);
 		return r;
