@@ -39,8 +39,8 @@ static const apk_spn_match_def apk_spn_repo_separators = {
 };
 
 enum {
-	APK_DISALLOW_RMDIR = 0,
-	APK_ALLOW_RMDIR = 1
+	APK_DIR_FREE = 0,
+	APK_DIR_REMOVE
 };
 
 int apk_verbosity = 1;
@@ -222,59 +222,39 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 	return pn;
 }
 
-static void apk_db_dir_mkdir(struct apk_database *db, struct apk_db_dir *dir)
+static void apk_db_dir_prepare(struct apk_database *db, struct apk_db_dir *dir, mode_t newmode)
 {
-	if (apk_flags & APK_SIMULATE)
-		return;
+	struct stat st;
 
-	/* Don't mess with root, as no package provides it directly */
-	if (dir->namelen == 0)
-		return;
+	if (dir->namelen == 0) return;
+	if (dir->created) return;
 
-	if ((dir->refs == 1) ||
-	    (fchmodat(db->root_fd, dir->name, dir->mode, 0) != 0 &&
-	     errno == ENOENT))
-		if ((mkdirat(db->root_fd, dir->name, dir->mode) != 0 &&
-		     errno == EEXIST))
-			if (fchmodat(db->root_fd, dir->name, dir->mode, 0) != 0)
-				;
-
-	if (fchownat(db->root_fd, dir->name, dir->uid, dir->gid, 0) != 0)
-		;
+	if (fstatat(db->root_fd, dir->name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+		/* If directory exists and stats match what we expect,
+		 * then we can allow auto updating the permissions */
+		dir->created = 1;
+		dir->update_permissions |=
+			(st.st_mode & 07777) == (dir->mode & 07777) &&
+			st.st_uid == dir->uid && st.st_gid == dir->gid;
+	} else if (newmode) {
+		if (!(apk_flags & APK_SIMULATE))
+			mkdirat(db->root_fd, dir->name, newmode);
+		dir->created = 1;
+		dir->update_permissions = 1;
+	}
 }
 
-void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir, int allow_rmdir)
+void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir, int rmdir_mode)
 {
-	dir->refs--;
-	if (dir->refs > 0) {
-		if (allow_rmdir) {
-			dir->recalc_mode = 1;
-			dir->mode = 0;
-			dir->uid = (uid_t) -1;
-			dir->gid = (gid_t) -1;
-		}
-		return;
-	}
-
+	if (--dir->refs > 0) return;
 	db->installed.stats.dirs--;
+	if (dir->namelen == 0) return;
 
-	if (allow_rmdir) {
-		/* The final instance of this directory was removed,
-		 * so this directory gets deleted in reality too. */
-		dir->recalc_mode = 0;
-		dir->mode = 0;
-		dir->uid = (uid_t) -1;
-		dir->gid = (gid_t) -1;
+	if (rmdir_mode == APK_DIR_REMOVE && !(apk_flags & APK_SIMULATE))
+		if (unlinkat(db->root_fd, dir->name, AT_REMOVEDIR))
+			;
 
-		if (dir->namelen)
-			unlinkat(db->root_fd, dir->name, AT_REMOVEDIR);
-	} else if (dir->recalc_mode) {
-		/* Directory permissions need a reset. */
-		apk_db_dir_mkdir(db, dir);
-	}
-
-	if (dir->parent != NULL)
-		apk_db_dir_unref(db, dir->parent, allow_rmdir);
+	apk_db_dir_unref(db, dir->parent, rmdir_mode);
 }
 
 struct apk_db_dir *apk_db_dir_ref(struct apk_db_dir *dir)
@@ -406,13 +386,14 @@ static void apk_db_diri_set(struct apk_db_dir_instance *diri, mode_t mode,
 
 static void apk_db_diri_free(struct apk_database *db,
 			     struct apk_db_dir_instance *diri,
-			     int allow_rmdir)
+			     int rmdir_mode)
 {
-	if (allow_rmdir == APK_DISALLOW_RMDIR &&
-	    diri->dir->recalc_mode)
-		apk_db_dir_apply_diri_permissions(diri);
+	struct apk_db_dir *dir = diri->dir;
 
-	apk_db_dir_unref(db, diri->dir, allow_rmdir);
+	if (rmdir_mode == APK_DIR_REMOVE)
+		apk_db_dir_prepare(db, diri->dir, 0);
+
+	apk_db_dir_unref(db, dir, rmdir_mode);
 	free(diri);
 }
 
@@ -731,6 +712,7 @@ int apk_db_read_overlay(struct apk_database *db, struct apk_bstream *bs)
 		if (bfile.len == 0) {
 			diri = apk_db_diri_new(db, pkg, bdir, &diri_node);
 			file_diri_node = &diri->owned_files.first;
+			diri->dir->created = 1;
 		} else {
 			diri = find_diri(ipkg, bdir, diri, &file_diri_node);
 			if (diri == NULL) {
@@ -1752,7 +1734,7 @@ void apk_db_close(struct apk_database *db)
 	 * directories to be reset. */
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
 		hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
-			apk_db_diri_free(db, diri, APK_DISALLOW_RMDIR);
+			apk_db_diri_free(db, diri, APK_DIR_FREE);
 		}
 	}
 
@@ -1863,6 +1845,49 @@ int apk_db_fire_triggers(struct apk_database *db)
 {
 	apk_hash_foreach(&db->installed.dirs, fire_triggers, db);
 	return db->pending_triggers;
+}
+
+static int update_permissions(apk_hash_item item, void *ctx)
+{
+	struct apk_database *db = (struct apk_database *) ctx;
+	struct apk_db_dir *dir = (struct apk_db_dir *) item;
+	struct stat st;
+	int r;
+
+	if (dir->refs == 0) return 0;
+	if (!dir->update_permissions) return 0;
+	dir->seen = 0;
+
+	r = fstatat(db->root_fd, dir->name, &st, AT_SYMLINK_NOFOLLOW);
+	if (r < 0 || (st.st_mode & 07777) != (dir->mode & 07777))
+		fchmodat(db->root_fd, dir->name, dir->mode, 0);
+	if (r < 0 || st.st_uid != dir->uid || st.st_gid != dir->gid)
+		fchownat(db->root_fd, dir->name, dir->uid, dir->gid, 0);
+
+	return 0;
+}
+
+void apk_db_update_directory_permissions(struct apk_database *db)
+{
+	struct apk_installed_package *ipkg;
+	struct apk_db_dir_instance *diri;
+	struct apk_db_dir *dir;
+	struct hlist_node *dc, *dn;
+
+	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
+		hlist_for_each_entry_safe(diri, dc, dn, &ipkg->owned_dirs, pkg_dirs_list) {
+			dir = diri->dir;
+			if (!dir->update_permissions) continue;
+			if (!dir->seen) {
+				dir->seen = 1;
+				dir->mode = 0;
+				dir->uid = (uid_t) -1;
+				dir->gid = (gid_t) -1;
+			}
+			apk_db_dir_apply_diri_permissions(diri);
+		}
+	}
+	apk_hash_foreach(&db->installed.dirs, update_permissions, db);
 }
 
 int apk_db_cache_active(struct apk_database *db)
@@ -2388,8 +2413,8 @@ static int apk_db_install_archive_entry(void *_ctx,
 			name.len--;
 
 		diri = apk_db_install_directory_entry(ctx, name);
+		apk_db_dir_prepare(db, diri->dir, ae->mode);
 		apk_db_diri_set(diri, ae->mode, ae->uid, ae->gid);
-		apk_db_dir_mkdir(db, diri->dir);
 	}
 	ctx->installed_size += ctx->current_file_size;
 
@@ -2438,7 +2463,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 			}
 		}
 		__hlist_del(dc, &ipkg->owned_dirs.first);
-		apk_db_diri_free(db, diri, APK_ALLOW_RMDIR);
+		apk_db_diri_free(db, diri, APK_DIR_REMOVE);
 	}
 }
 

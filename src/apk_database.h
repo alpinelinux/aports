@@ -47,7 +47,7 @@ enum apk_protect_mode {
 
 struct apk_protected_path {
 	char *relative_pattern;
-	unsigned protect_mode : 4;
+	unsigned protect_mode : 3;
 };
 APK_ARRAY(apk_protected_path_array, struct apk_protected_path);
 
@@ -64,10 +64,13 @@ struct apk_db_dir {
 	unsigned short refs;
 	unsigned short namelen;
 
-	unsigned protect_mode : 4;
+	unsigned protect_mode : 3;
 	unsigned has_protected_children : 1;
+
+	unsigned seen : 1;
+	unsigned created : 1;
 	unsigned modified : 1;
-	unsigned recalc_mode : 1;
+	unsigned update_permissions : 1;
 
 	char rooted_name[1];
 	char name[];
@@ -211,6 +214,7 @@ int apk_db_write_config(struct apk_database *db);
 int apk_db_permanent(struct apk_database *db);
 int apk_db_check_world(struct apk_database *db, struct apk_dependency_array *world);
 int apk_db_fire_triggers(struct apk_database *db);
+void apk_db_update_directory_permissions(struct apk_database *db);
 
 struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *pkg);
 struct apk_package *apk_db_get_pkg(struct apk_database *db, struct apk_checksum *csum);
