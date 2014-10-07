@@ -149,12 +149,10 @@ struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 {
 	struct apk_gzip_istream *gis;
 
-	if (bs == NULL)
-		return NULL;
+	if (!bs) return NULL;
 
 	gis = malloc(sizeof(struct apk_gzip_istream));
-	if (gis == NULL)
-		goto err;
+	if (!gis) goto err;
 
 	*gis = (struct apk_gzip_istream) {
 		.is.read = gzi_read,

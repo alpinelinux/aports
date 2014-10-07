@@ -427,14 +427,19 @@ struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const ch
 	struct apk_tee_bstream *tbs;
 	int fd;
 
+	if (!from) return NULL;
+
 	fd = openat(atfd, to, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC,
 		    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-	if (fd < 0)
+	if (fd < 0) {
+		from->close(from, NULL);
 		return NULL;
+	}
 
 	tbs = malloc(sizeof(struct apk_tee_bstream));
-	if (tbs == NULL) {
+	if (!tbs) {
 		close(fd);
+		from->close(from, NULL);
 		return NULL;
 	}
 
