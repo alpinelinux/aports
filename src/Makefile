@@ -66,7 +66,8 @@ LDFLAGS_apk		+= -L$(obj)
 LDFLAGS_apk-test	+= -L$(obj)
 
 CFLAGS_ALL		+= $(shell $(PKG_CONFIG) --cflags $(PKGDEPS))
-LIBS			:= -Wl,--as-needed \
+LIBS			:=  /usr/lib/libfetch.a \
+			   -Wl,--as-needed \
 				$(shell $(PKG_CONFIG) --libs $(PKGDEPS)) \
 			   -Wl,--no-as-needed
 

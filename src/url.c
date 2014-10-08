@@ -16,6 +16,8 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+#include <fetch.h>
+
 #include "apk_io.h"
 
 const char *apk_url_local_file(const char *url)
@@ -31,72 +33,64 @@ const char *apk_url_local_file(const char *url)
 	return NULL;
 }
 
-static int translate_wget(int status)
-{
-	if (!WIFEXITED(status))
-		return -EFAULT;
+struct apk_fetch_istream {
+	struct apk_istream is;
+	fetchIO *fetchIO;
+};
 
-	switch (WEXITSTATUS(status)) {
-	case 0:
-		return 0;
-	case 3:
-		return -EIO;
-	case 4:
-		return -ECONNABORTED;
-	case 8:
-		return -ENOENT;
-	default:
-		return -EFAULT;
+static ssize_t fetch_read(void *stream, void *ptr, size_t size)
+{
+	struct apk_fetch_istream *fis = container_of(stream, struct apk_fetch_istream, is);
+	ssize_t i = 0, r;
+
+	if (ptr == NULL) return apk_istream_skip(&fis->is, size);
+
+	while (i < size) {
+		r = fetchIO_read(fis->fetchIO, ptr + i, size - i);
+		if (r < 0) return -EIO;
+		if (r == 0) break;
+		i += r;
 	}
+
+	return i;
 }
 
-static int fork_wget(const char *url, pid_t *ppid)
+static void fetch_close(void *stream)
 {
-	pid_t pid;
-	int fds[2];
+	struct apk_fetch_istream *fis = container_of(stream, struct apk_fetch_istream, is);
 
-	if (pipe(fds) < 0)
-		return -1;
+	fetchIO_close(fis->fetchIO);
+	free(fis);
+}
 
-	pid = fork();
-	if (pid == -1) {
-		close(fds[0]);
-		close(fds[1]);
-		return -1;
+static struct apk_istream *apk_istream_fetch(const char *url)
+{
+	struct apk_fetch_istream *fis;
+	fetchIO *io;
+
+	io = fetchGetURL(url, "");
+	if (!io) return NULL;
+
+	fis = malloc(sizeof(*fis));
+	if (!fis) {
+		fetchIO_close(io);
+		return NULL;
 	}
 
-	if (pid == 0) {
-		setsid();
-		close(fds[0]);
-		dup2(open("/dev/null", O_RDONLY), STDIN_FILENO);
-		dup2(fds[1], STDOUT_FILENO);
-		execlp("wget", "wget", "-q", "-O", "-", url, (void*) 0);
-		/* fall back to busybox wget 
-		 * See http://redmine.alpinelinux.org/issues/347 
-		 */
-		execlp("busybox", "wget", "-q", "-O", "-", url, (void*) 0);
-		execlp("busybox.static", "wget", "-q", "-O", "-", url, (void*) 0);
-		exit(0);
-	}
+	*fis = (struct apk_fetch_istream) {
+		.is.read = fetch_read,
+		.is.close = fetch_close,
+		.fetchIO = io,
+	};
 
-	close(fds[1]);
-
-	if (ppid != NULL)
-		*ppid = pid;
-
-	return fds[0];
+	return &fis->is;
 }
 
 struct apk_istream *apk_istream_from_fd_url(int atfd, const char *url)
 {
-	pid_t pid;
-	int fd;
-
 	if (apk_url_local_file(url) != NULL)
 		return apk_istream_from_file(atfd, apk_url_local_file(url));
-
-	fd = fork_wget(url, &pid);
-	return apk_istream_from_fd_pid(fd, pid, translate_wget);
+	return apk_istream_fetch(url);
 }
 
 struct apk_istream *apk_istream_from_url_gz(const char *file)
@@ -106,12 +100,7 @@ struct apk_istream *apk_istream_from_url_gz(const char *file)
 
 struct apk_bstream *apk_bstream_from_fd_url(int atfd, const char *url)
 {
-	pid_t pid;
-	int fd;
-
 	if (apk_url_local_file(url) != NULL)
 		return apk_bstream_from_file(atfd, apk_url_local_file(url));
-
-	fd = fork_wget(url, &pid);
-	return apk_bstream_from_fd_pid(fd, pid, translate_wget);
+	return apk_bstream_from_istream(apk_istream_fetch(url));
 }

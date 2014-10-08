@@ -26,6 +26,8 @@
 #include <openssl/engine.h>
 #endif
 
+#include <fetch.h>
+
 #include "apk_defines.h"
 #include "apk_database.h"
 #include "apk_applet.h"
@@ -367,6 +369,7 @@ int main(int argc, char **argv)
 
 	init_openssl();
 	setup_automatic_flags();
+	fetchConnectionCacheInit(16, 1);
 
 	optindex = 0;
 	while ((r = getopt_long(argc, argv, short_options,
@@ -554,5 +557,7 @@ int main(int argc, char **argv)
 err:
 	if (ctx)
 		free(ctx);
+
+	fetchConnectionCacheClose();
 	return r;
 }
