@@ -32,6 +32,12 @@
 #define NULL 0L
 #endif
 
+static inline void *ERR_PTR(long error) { return (void*) error; }
+static inline void *ERR_CAST(const void *ptr) { return (void*) ptr; }
+static inline int PTR_ERR(const void *ptr) { return (int)(long) ptr; }
+static inline int IS_ERR(const void *ptr) { return (unsigned long)ptr >= (unsigned long)-4095; }
+static inline int IS_ERR_OR_NULL(const void *ptr) { return IS_ERR(ptr) || !ptr; }
+
 #if defined __GNUC__ && __GNUC__ == 2 && __GNUC_MINOR__ < 96
 #define __builtin_expect(x, expected_value) (x)
 #endif

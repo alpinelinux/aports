@@ -63,34 +63,43 @@ static void fetch_close(void *stream)
 	free(fis);
 }
 
-static struct apk_istream *apk_istream_fetch(const char *url)
+static struct apk_istream *apk_istream_fetch(const char *url, time_t since)
 {
 	struct apk_fetch_istream *fis;
+	struct url *u;
 	fetchIO *io;
 
-	io = fetchGetURL(url, "");
-	if (!io) return NULL;
-
-	fis = malloc(sizeof(*fis));
-	if (!fis) {
-		fetchIO_close(io);
+	u = fetchParseURL(url);
+	if (!u) return NULL;
+	u->last_modified = since;
+	io = fetchGet(u, "i");
+	fetchFreeURL(u);
+	if (!io) {
+		if (fetchLastErrCode == FETCH_UNCHANGED) return ERR_PTR(-EALREADY);
 		return NULL;
 	}
+
+	fis = malloc(sizeof(*fis));
+	if (!fis) goto err;
 
 	*fis = (struct apk_fetch_istream) {
 		.is.read = fetch_read,
 		.is.close = fetch_close,
 		.fetchIO = io,
 	};
+	fetchFreeURL(u);
 
 	return &fis->is;
+err:
+	if (io) fetchIO_close(io);
+	return NULL;
 }
 
-struct apk_istream *apk_istream_from_fd_url(int atfd, const char *url)
+struct apk_istream *apk_istream_from_fd_url_if_modified(int atfd, const char *url, time_t since)
 {
 	if (apk_url_local_file(url) != NULL)
 		return apk_istream_from_file(atfd, apk_url_local_file(url));
-	return apk_istream_fetch(url);
+	return apk_istream_fetch(url, since);
 }
 
 struct apk_istream *apk_istream_from_url_gz(const char *file)
@@ -98,9 +107,9 @@ struct apk_istream *apk_istream_from_url_gz(const char *file)
 	return apk_bstream_gunzip(apk_bstream_from_url(file));
 }
 
-struct apk_bstream *apk_bstream_from_fd_url(int atfd, const char *url)
+struct apk_bstream *apk_bstream_from_fd_url_if_modified(int atfd, const char *url, time_t since)
 {
 	if (apk_url_local_file(url) != NULL)
 		return apk_bstream_from_file(atfd, apk_url_local_file(url));
-	return apk_bstream_from_istream(apk_istream_fetch(url));
+	return apk_bstream_from_istream(apk_istream_fetch(url, since));
 }

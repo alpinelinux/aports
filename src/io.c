@@ -83,8 +83,7 @@ struct apk_istream *apk_istream_from_fd_pid(int fd, pid_t pid, int (*translate_s
 {
 	struct apk_fd_istream *fis;
 
-	if (fd < 0)
-		return NULL;
+	if (fd < 0) return NULL;
 
 	fis = malloc(sizeof(struct apk_fd_istream));
 	if (fis == NULL) {
@@ -108,8 +107,7 @@ struct apk_istream *apk_istream_from_file(int atfd, const char *file)
 	int fd;
 
 	fd = openat(atfd, file, O_RDONLY | O_CLOEXEC);
-	if (fd < 0)
-		return NULL;
+	if (fd < 0) return NULL;
 
 	return apk_istream_from_fd(fd);
 }
@@ -272,9 +270,10 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream)
 {
 	struct apk_istream_bstream *isbs;
 
+	if (IS_ERR_OR_NULL(istream)) return ERR_CAST(istream);
+
 	isbs = malloc(sizeof(struct apk_istream_bstream));
-	if (isbs == NULL)
-		return NULL;
+	if (isbs == NULL) return NULL;
 
 	isbs->bs = (struct apk_bstream) {
 		.read = is_bs_read,
@@ -331,12 +330,10 @@ static struct apk_bstream *apk_mmap_bstream_from_fd(int fd)
 	struct stat st;
 	void *ptr;
 
-	if (fstat(fd, &st) < 0)
-		return NULL;
+	if (fstat(fd, &st) < 0) return NULL;
 
 	ptr = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-	if (ptr == MAP_FAILED)
-		return NULL;
+	if (ptr == MAP_FAILED) return NULL;
 
 	mbs = malloc(sizeof(struct apk_mmap_bstream));
 	if (mbs == NULL) {
@@ -361,8 +358,7 @@ struct apk_bstream *apk_bstream_from_fd_pid(int fd, pid_t pid, int (*translate_s
 {
 	struct apk_bstream *bs;
 
-	if (fd < 0)
-		return NULL;
+	if (fd < 0) return NULL;
 
 	if (pid == 0) {
 		bs = apk_mmap_bstream_from_fd(fd);
@@ -378,8 +374,7 @@ struct apk_bstream *apk_bstream_from_file(int atfd, const char *file)
 	int fd;
 
 	fd = openat(atfd, file, O_RDONLY | O_CLOEXEC);
-	if (fd < 0)
-		return NULL;
+	if (fd < 0) return NULL;
 
 	return apk_bstream_from_fd(fd);
 }
@@ -427,7 +422,7 @@ struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const ch
 	struct apk_tee_bstream *tbs;
 	int fd;
 
-	if (!from) return NULL;
+	if (IS_ERR_OR_NULL(from)) return ERR_CAST(from);
 
 	fd = openat(atfd, to, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC,
 		    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -831,8 +826,8 @@ int apk_move_file(int atfd, const char *from, const char *to)
 		return -errno;
 
 	is = apk_istream_from_file(atfd, from);
-	if (is == NULL)
-		return -ENOENT;
+	if (IS_ERR(is)) return PTR_ERR(is);
+	if (!is) return -ENOENT;
 
 	tofd = openat(atfd, to, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC,
 		      S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);

@@ -149,7 +149,7 @@ struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 {
 	struct apk_gzip_istream *gis;
 
-	if (!bs) return NULL;
+	if (IS_ERR_OR_NULL(bs)) return ERR_CAST(bs);
 
 	gis = malloc(sizeof(struct apk_gzip_istream));
 	if (!gis) goto err;
@@ -233,8 +233,7 @@ struct apk_ostream *apk_ostream_gzip(struct apk_ostream *output)
 {
 	struct apk_gzip_ostream *gos;
 
-	if (output == NULL)
-		return NULL;
+	if (IS_ERR_OR_NULL(output)) return ERR_CAST(output);
 
 	gos = malloc(sizeof(struct apk_gzip_ostream));
 	if (gos == NULL)
