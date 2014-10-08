@@ -87,7 +87,6 @@ static struct apk_istream *apk_istream_fetch(const char *url, time_t since)
 		.is.close = fetch_close,
 		.fetchIO = io,
 	};
-	fetchFreeURL(u);
 
 	return &fis->is;
 err:
