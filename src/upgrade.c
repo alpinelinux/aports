@@ -23,8 +23,7 @@ struct upgrade_ctx {
 	int no_self_upgrade : 1;
 };
 
-static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
-			 int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct upgrade_ctx *uctx = (struct upgrade_ctx *) ctx;
 
@@ -43,6 +42,26 @@ static int upgrade_parse(void *ctx, struct apk_db_options *dbopts,
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 'a', "available",
+	  "Resets versioned world dependencies, and changes to prefer "
+	  "replacing or downgrading packages (instead of holding them) "
+	  "if the currently installed package is no longer available "
+	  "from any repository" },
+	{ 'l', "latest",
+	  "Select latest version of package (if it is not pinned), and "
+	  "print error if it cannot be installed due to other dependencies" },
+	{ 0x10000, "no-self-upgrade",
+	  "Do not do early upgrade of 'apk-tools' package" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Upgrade",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 {
@@ -128,27 +147,12 @@ static int upgrade_main(void *ctx, struct apk_database *db, struct apk_string_ar
 	return r;
 }
 
-static struct apk_option upgrade_options[] = {
-	{ 'a', "available",
-	  "Resets versioned world dependencies, and changes to prefer "
-	  "replacing or downgrading packages (instead of holding them) "
-	  "if the currently installed package is no longer available "
-	  "from any repository" },
-	{ 'l', "latest",
-	  "Select latest version of package (if it is not pinned), and "
-	  "print error if it cannot be installed due to other dependencies" },
-	{ 0x10000, "no-self-upgrade",
-	  "Do not do early upgrade of 'apk-tools' package" },
-};
-
 static struct apk_applet apk_upgrade = {
 	.name = "upgrade",
 	.help = "Upgrade currently installed packages to match repositories",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct upgrade_ctx),
-	.num_options = ARRAY_SIZE(upgrade_options),
-	.options = upgrade_options,
-	.parse = upgrade_parse,
+	.optgroups = { &optgroup_global, &optgroup_commit, &optgroup_applet },
 	.main = upgrade_main,
 };
 

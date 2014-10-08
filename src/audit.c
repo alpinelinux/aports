@@ -37,8 +37,7 @@ struct audit_ctx {
 	unsigned packages_only : 1;
 };
 
-static int audit_parse(void *ctx, struct apk_db_options *dbopts,
-		       int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct audit_ctx *actx = (struct audit_ctx *) ctx;
 
@@ -59,10 +58,26 @@ static int audit_parse(void *ctx, struct apk_db_options *dbopts,
 		actx->recursive = 1;
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 0x10000, "backup", "List all modified configuration files (in "
+			     "protected_paths.d) that need to be backed up" },
+	{ 0x10001, "system", "Verify checksums of all installed non-configuration files " },
+	{ 0x10002, "check-permissions", "Check file and directory uid/gid/mode too" },
+	{ 'r', "recursive",  "List individually all entries in new directories" },
+	{ 0x10003, "packages", "List only the changed packages (or names only with -q)" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Audit",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 struct audit_tree_ctx {
 	struct audit_ctx *actx;
@@ -326,24 +341,13 @@ static int audit_main(void *ctx, struct apk_database *db, struct apk_string_arra
 	return r;
 }
 
-static struct apk_option audit_options[] = {
-	{ 0x10000, "backup", "List all modified configuration files (in "
-			     "protected_paths.d) that need to be backed up" },
-	{ 0x10001, "system", "Verify checksums of all installed non-configuration files " },
-	{ 0x10002, "check-permissions", "Check file and directory uid/gid/mode too" },
-	{ 'r', "recursive",  "List individually all entries in new directories" },
-	{ 0x10003, "packages", "List only the changed packages (or names only with -q)" },
-};
-
 static struct apk_applet apk_audit = {
 	.name = "audit",
 	.help = "Audit the directories for changes",
 	.arguments = "[directory to audit]...",
 	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_NO_REPOS,
 	.context_size = sizeof(struct audit_ctx),
-	.num_options = ARRAY_SIZE(audit_options),
-	.options = audit_options,
-	.parse = audit_parse,
+	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = audit_main,
 };
 

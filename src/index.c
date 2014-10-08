@@ -32,8 +32,7 @@ struct index_ctx {
 	int method;
 };
 
-static int index_parse(void *ctx, struct apk_db_options *dbopts,
-		       int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct index_ctx *ictx = (struct index_ctx *) ctx;
 
@@ -51,10 +50,30 @@ static int index_parse(void *ctx, struct apk_db_options *dbopts,
 		ictx->rewrite_arch = apk_blob_atomize(APK_BLOB_STR(optarg));
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 'o', "output", "Write the generated index to FILE",
+	  required_argument, "FILE" },
+	{ 'x', "index", "Read INDEX to speed up new index creation by reusing "
+	  "the information from an old index",
+	  required_argument, "INDEX" },
+	{ 'd', "description", "Embed TEXT as description and version "
+	  "information of the repository index",
+	  required_argument, "TEXT" },
+	{ 0x10000, "rewrite-arch", "Use ARCH as architecture for all packages",
+	  required_argument, "ARCH" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Index",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 static int index_read_file(struct apk_database *db, struct index_ctx *ictx)
 {
@@ -237,28 +256,13 @@ static int index_main(void *ctx, struct apk_database *db, struct apk_string_arra
 	return 0;
 }
 
-static struct apk_option index_options[] = {
-	{ 'o', "output", "Write the generated index to FILE",
-	  required_argument, "FILE" },
-	{ 'x', "index", "Read INDEX to speed up new index creation by reusing "
-	  "the information from an old index",
-	  required_argument, "INDEX" },
-	{ 'd', "description", "Embed TEXT as description and version "
-	  "information of the repository index",
-	  required_argument, "TEXT" },
-	{ 0x10000, "rewrite-arch", "Use ARCH as architecture for all packages",
-	  required_argument, "ARCH" },
-};
-
 static struct apk_applet apk_index = {
 	.name = "index",
 	.help = "Create repository index file from FILEs",
 	.arguments = "FILE...",
 	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE | APK_OPENF_NO_REPOS,
 	.context_size = sizeof(struct index_ctx),
-	.num_options = ARRAY_SIZE(index_options),
-	.options = index_options,
-	.parse = index_parse,
+	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = index_main,
 };
 

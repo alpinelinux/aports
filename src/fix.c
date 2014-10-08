@@ -22,8 +22,7 @@ struct fix_ctx {
 	int fix_directory_permissions : 1;
 };
 
-static int fix_parse(void *pctx, struct apk_db_options *dbopts,
-		     int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct fix_ctx *ctx = (struct fix_ctx *) pctx;
 	switch (optch) {
@@ -40,10 +39,24 @@ static int fix_parse(void *pctx, struct apk_db_options *dbopts,
 		ctx->fix_directory_permissions = 1;
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 'd',		"depends",	"Fix all dependencies too" },
+	{ 'r',		"reinstall",	"Reinstall the package (default)" },
+	{ 'u',		"upgrade",	"Prefer to upgrade package" },
+	{ 0x10000,	"directory-permissions", "Reset all directory permissions" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Fix",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 static int mark_recalculate(apk_hash_item item, void *ctx)
 {
@@ -84,13 +97,6 @@ static int fix_main(void *pctx, struct apk_database *db, struct apk_string_array
 	return apk_solver_commit(db, 0, db->world);
 }
 
-static struct apk_option fix_options[] = {
-	{ 'd',		"depends",	"Fix all dependencies too" },
-	{ 'r',		"reinstall",	"Reinstall the package (default)" },
-	{ 'u',		"upgrade",	"Prefer to upgrade package" },
-	{ 0x10000,	"directory-permissions", "Reset all directory permissions" },
-};
-
 static struct apk_applet apk_fix = {
 	.name = "fix",
 	.help = "Repair package or upgrade it without modifying main "
@@ -98,9 +104,7 @@ static struct apk_applet apk_fix = {
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct fix_ctx),
-	.num_options = ARRAY_SIZE(fix_options),
-	.options = fix_options,
-	.parse = fix_parse,
+	.optgroups = { &optgroup_global, &optgroup_commit, &optgroup_applet },
 	.main = fix_main,
 };
 

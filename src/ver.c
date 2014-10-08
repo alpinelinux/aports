@@ -68,11 +68,10 @@ static int ver_validate(struct apk_database *db, struct apk_string_array *args)
 	return errors;
 }
 
-static int ver_parse(void *ctx, struct apk_db_options *dbopts,
-		     int opt, int optindex, const char *optarg)
+static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct ver_ctx *ictx = (struct ver_ctx *) ctx;
-	switch (opt) {
+	switch (optch) {
 	case 'I':
 		ictx->action = ver_indexes;
 		break;
@@ -95,6 +94,22 @@ static int ver_parse(void *ctx, struct apk_db_options *dbopts,
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 'I', "indexes",	"Print description and versions of indexes" },
+	{ 't', "test",		"Compare two given versions, output '<', '=' or '>'" },
+	{ 'c', "check", 	"Check the given version strings, output any that are invalid" },
+	{ 'a', "all",		"Consider packages from all repository tags" },
+	{ 'l', "limit",		"Limit output to packages with status matching one of LIMCHARs",
+	  required_argument, "LIMCHARs" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Version",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 static void ver_print_package_status(struct apk_database *db, const char *match, struct apk_name *name, void *pctx)
 {
@@ -181,24 +196,13 @@ static int ver_main(void *pctx, struct apk_database *db, struct apk_string_array
 	return 0;
 }
 
-static struct apk_option ver_options[] = {
-	{ 'I', "indexes",	"Print description and versions of indexes" },
-	{ 't', "test",		"Compare two given versions, output '<', '=' or '>'" },
-	{ 'c', "check", 	"Check the given version strings, output any that are invalid" },
-	{ 'a', "all",		"Consider packages from all repository tags" },
-	{ 'l', "limit",		"Limit output to packages with status matching one of LIMCHARs",
-	  required_argument, "LIMCHARs" },
-};
-
 static struct apk_applet apk_ver = {
 	.name = "version",
 	.help = "Compare package versions (in installed database vs. available) "
 		"or do tests on literal version strings",
 	.open_flags = APK_OPENF_READ,
 	.context_size = sizeof(struct ver_ctx),
-	.num_options = ARRAY_SIZE(ver_options),
-	.options = ver_options,
-	.parse = ver_parse,
+	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = ver_main,
 };
 

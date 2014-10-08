@@ -67,8 +67,7 @@ static int cup(void)
 	return write(STDOUT_FILENO, buf, len) != len;
 }
 
-static int fetch_parse(void *ctx, struct apk_db_options *dbopts,
-		       int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct fetch_ctx *fctx = (struct fetch_ctx *) ctx;
 
@@ -86,10 +85,26 @@ static int fetch_parse(void *ctx, struct apk_db_options *dbopts,
 		fctx->outdir_fd = openat(AT_FDCWD, optarg, O_RDONLY | O_CLOEXEC);
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 'L', "link",		"Create hard links if possible" },
+	{ 'R', "recursive",	"Fetch the PACKAGE and all its dependencies" },
+	{ 's', "stdout",
+	  "Dump the .apk to stdout (incompatible with -o, -R, --progress)" },
+	{ 'o', "output",	"Directory to place the PACKAGEs to",
+	  required_argument, "DIR" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Fetch",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 static void progress_cb(void *pctx, size_t bytes_done)
 {
@@ -263,15 +278,6 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 	return ctx->errors;
 }
 
-static struct apk_option fetch_options[] = {
-	{ 'L', "link",		"Create hard links if possible" },
-	{ 'R', "recursive",	"Fetch the PACKAGE and all its dependencies" },
-	{ 's', "stdout",
-	  "Dump the .apk to stdout (incompatible with -o, -R, --progress)" },
-	{ 'o', "output",	"Directory to place the PACKAGEs to",
-	  required_argument, "DIR" },
-};
-
 static struct apk_applet apk_fetch = {
 	.name = "fetch",
 	.help = "Download PACKAGEs from global repositories to a local directory",
@@ -279,9 +285,7 @@ static struct apk_applet apk_fetch = {
 	.open_flags =	APK_OPENF_READ | APK_OPENF_NO_STATE |
 			APK_OPENF_NO_INSTALLED_REPO,
 	.context_size = sizeof(struct fetch_ctx),
-	.num_options = ARRAY_SIZE(fetch_options),
-	.options = fetch_options,
-	.parse = fetch_parse,
+	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = fetch_main,
 };
 

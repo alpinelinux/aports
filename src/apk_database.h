@@ -118,10 +118,10 @@ struct apk_repository_list {
 struct apk_db_options {
 	int lock_wait;
 	unsigned long open_flags;
-	char *root;
-	char *arch;
-	char *keys_dir;
-	char *repositories_file;
+	const char *root;
+	const char *arch;
+	const char *keys_dir;
+	const char *repositories_file;
 	struct list_head repository_list;
 };
 

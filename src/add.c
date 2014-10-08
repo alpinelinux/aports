@@ -21,8 +21,7 @@ struct add_ctx {
 	unsigned short solver_flags;
 };
 
-static int add_parse(void *ctx, struct apk_db_options *dbopts,
-		     int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct add_ctx *actx = (struct add_ctx *) ctx;
 
@@ -37,10 +36,27 @@ static int add_parse(void *ctx, struct apk_db_options *dbopts,
 		actx->virtpkg = optarg;
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 0x10000,	"initdb",	"Initialize database" },
+	{ 'u',		"upgrade",	"Prefer to upgrade package" },
+	{ 't',		"virtual",
+	  "Instead of adding all the packages to 'world', create a new virtual "
+	  "package with the listed dependencies and add that to 'world'; the "
+	  "actions of the command are easily reverted by deleting the virtual "
+	  "package", required_argument, "NAME" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Add",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 static int non_repository_check(struct apk_database *db)
 {
@@ -149,16 +165,6 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 	return r;
 }
 
-static struct apk_option add_options[] = {
-	{ 0x10000,	"initdb",	"Initialize database" },
-	{ 'u',		"upgrade",	"Prefer to upgrade package" },
-	{ 't',		"virtual",
-	  "Instead of adding all the packages to 'world', create a new virtual "
-	  "package with the listed dependencies and add that to 'world'; the "
-	  "actions of the command are easily reverted by deleting the virtual "
-	  "package", required_argument, "NAME" },
-};
-
 static struct apk_applet apk_add = {
 	.name = "add",
 	.help = "Add PACKAGEs to 'world' and install (or upgrade) "
@@ -166,9 +172,7 @@ static struct apk_applet apk_add = {
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct add_ctx),
-	.num_options = ARRAY_SIZE(add_options),
-	.options = add_options,
-	.parse = add_parse,
+	.optgroups = { &optgroup_global, &optgroup_commit, &optgroup_applet },
 	.main = add_main,
 };
 

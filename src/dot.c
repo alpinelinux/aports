@@ -24,8 +24,7 @@ struct dot_ctx {
 	int installed_only : 1;
 };
 
-static int dot_parse(void *pctx, struct apk_db_options *dbopts,
-		     int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct dot_ctx *ctx = (struct dot_ctx *) pctx;
 
@@ -38,10 +37,23 @@ static int dot_parse(void *pctx, struct apk_db_options *dbopts,
 		dbopts->open_flags &= ~APK_OPENF_NO_INSTALLED;
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 0x10000,	"errors",	"Output only parts of the graph which are considered "
+					"erroneous: e.g. cycles and missing packages" },
+	{ 0x10001,	"installed",	"Consider only installed packages" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Dot",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 static void start_graph(struct dot_ctx *ctx)
 {
@@ -155,21 +167,13 @@ static int dot_main(void *pctx, struct apk_database *db, struct apk_string_array
 	return 0;
 }
 
-static struct apk_option dot_options[] = {
-	{ 0x10000,	"errors",	"Output only parts of the graph which are considered "
-					"erroneous: e.g. cycles and missing packages" },
-	{ 0x10001,	"installed",	"Consider only installed packages" },
-};
-
 static struct apk_applet apk_dot = {
 	.name = "dot",
 	.help = "Generate graphviz graphs",
 	.arguments = "PKGMASK...",
 	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE,
 	.context_size = sizeof(struct dot_ctx),
-	.num_options = ARRAY_SIZE(dot_options),
-	.options = dot_options,
-	.parse = dot_parse,
+	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = dot_main,
 };
 

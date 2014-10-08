@@ -65,8 +65,7 @@ static void print_rdepends(struct search_ctx *ctx, struct apk_package *pkg)
 	apk_pkg_foreach_reverse_dependency(pkg, ctx->matches, print_rdep_pkg, ctx);
 }
 
-static int search_parse(void *ctx, struct apk_db_options *dbopts,
-		        int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct search_ctx *ictx = (struct search_ctx *) ctx;
 
@@ -99,6 +98,23 @@ static int search_parse(void *ctx, struct apk_db_options *dbopts,
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 'a', "all",		"Show all package versions (instead of latest only)" },
+	{ 'd', "description",	"Search package descriptions (implies -a)" },
+	{ 'x', "exact",		"Require exact match (instead of substring match)" },
+	{ 'e', NULL,	        "Synonym for -x (deprecated)" },
+	{ 'o', "origin",	"Print origin package name instead of the subpackage" },
+	{ 'r', "rdepends",	"Print reverse dependencies of package" },
+	{ 0x10000, "has-origin","List packages that have the given origin" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Search",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 static void print_result_pkg(struct search_ctx *ctx, struct apk_package *pkg)
 {
@@ -177,25 +193,13 @@ static int search_main(void *pctx, struct apk_database *db, struct apk_string_ar
 	return 0;
 }
 
-static struct apk_option search_options[] = {
-	{ 'a', "all",		"Show all package versions (instead of latest only)" },
-	{ 'd', "description",	"Search package descriptions (implies -a)" },
-	{ 'x', "exact",		"Require exact match (instead of substring match)" },
-	{ 'e', NULL,	        "Synonym for -x (deprecated)" },
-	{ 'o', "origin",	"Print origin package name instead of the subpackage" },
-	{ 'r', "rdepends",	"Print reverse dependencies of package" },
-	{ 0x10000, "has-origin","List packages that have the given origin" },
-};
-
 static struct apk_applet apk_search = {
 	.name = "search",
 	.help = "Search package by PATTERNs or by indexed dependencies",
 	.arguments = "PATTERN",
 	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE,
 	.context_size = sizeof(struct search_ctx),
-	.num_options = ARRAY_SIZE(search_options),
-	.options = search_options,
-	.parse = search_parse,
+	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = search_main,
 };
 

@@ -12,6 +12,7 @@
 #ifndef APK_APPLET_H
 #define APK_APPLET_H
 
+#include <errno.h>
 #include <getopt.h>
 #include "apk_defines.h"
 #include "apk_database.h"
@@ -24,22 +25,30 @@ struct apk_option {
 	const char *arg_name;
 };
 
+struct apk_option_group {
+	const char *name;
+	int num_options;
+	const struct apk_option *options;
+
+	int (*parse)(void *ctx, struct apk_db_options *dbopts,
+		     int optch, const char *optarg);
+};
+
 struct apk_applet {
 	struct list_head node;
 
 	const char *name;
 	const char *arguments;
 	const char *help;
+	const struct apk_option_group *optgroups[4];
 
 	unsigned int open_flags, forced_flags;
 	int context_size;
-	int num_options;
-	struct apk_option *options;
 
-	int (*parse)(void *ctx, struct apk_db_options *dbopts,
-		     int optch, int optindex, const char *optarg);
 	int (*main)(void *ctx, struct apk_database *db, struct apk_string_array *args);
 };
+
+extern const struct apk_option_group optgroup_global, optgroup_commit;
 
 void apk_applet_register(struct apk_applet *);
 typedef void (*apk_init_func_t)(void);

@@ -341,8 +341,7 @@ static void print_name_info(struct apk_database *db, const char *match, struct a
 		info_subaction(ctx, p->pkg);
 }
 
-static int info_parse(void *pctx, struct apk_db_options *dbopts,
-		      int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct info_ctx *ctx = (struct info_ctx *) pctx;
 
@@ -423,7 +422,7 @@ static int info_main(void *ctx, struct apk_database *db, struct apk_string_array
 	return 0;
 }
 
-static struct apk_option info_options[] = {
+static const struct apk_option options_applet[] = {
 	{ 'L', "contents",	"List contents of the PACKAGE" },
 	{ 'e', "installed",	"Check if PACKAGE is installed" },
 	{ 'W', "who-owns",	"Print the package owning the specified file" },
@@ -440,15 +439,20 @@ static struct apk_option info_options[] = {
 	{ 'a', "all",		"Print all information about PACKAGE" },
 };
 
+static const struct apk_option_group optgroup_applet = {
+	.name = "Info",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
+
 static struct apk_applet apk_info = {
 	.name = "info",
 	.help = "Give detailed information about PACKAGEs or repositores",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_READ,
 	.context_size = sizeof(struct info_ctx),
-	.num_options = ARRAY_SIZE(info_options),
-	.options = info_options,
-	.parse = info_parse,
+	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = info_main,
 };
 

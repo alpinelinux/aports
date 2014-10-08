@@ -20,8 +20,7 @@ struct del_ctx {
 	struct apk_dependency_array *world;
 };
 
-static int del_parse(void *pctx, struct apk_db_options *db,
-		     int optch, int optindex, const char *optarg)
+static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	struct del_ctx *ctx = (struct del_ctx *) pctx;
 
@@ -30,10 +29,22 @@ static int del_parse(void *pctx, struct apk_db_options *db,
 		ctx->recursive_delete = 1;
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }
+
+static const struct apk_option options_applet[] = {
+	{ 'r', "rdepends",	"Recursively delete all top-level reverse "
+				"dependencies too" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Delete",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
 
 struct not_deleted_ctx {
 	struct apk_indent indent;
@@ -137,20 +148,13 @@ static int del_main(void *pctx, struct apk_database *db, struct apk_string_array
 	return r;
 }
 
-static struct apk_option del_options[] = {
-	{ 'r', "rdepends",	"Recursively delete all top-level reverse "
-				"dependencies too" },
-};
-
 static struct apk_applet apk_del = {
 	.name = "del",
 	.help = "Remove PACKAGEs from 'world' and uninstall them",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
 	.context_size = sizeof(struct del_ctx),
-	.num_options = ARRAY_SIZE(del_options),
-	.options = del_options,
-	.parse = del_parse,
+	.optgroups = { &optgroup_global, &optgroup_commit, &optgroup_applet },
 	.main = del_main,
 };
 

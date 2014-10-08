@@ -35,12 +35,116 @@
 #include "apk_print.h"
 #include "apk_io.h"
 
+static const struct apk_option_group *default_optgroups[] = { &optgroup_global, NULL };
 static struct list_head apk_applet_list;
 #define foreach_applet(iter) list_for_each_entry(iter, &apk_applet_list, node)
 
 char **apk_argv;
 
-static struct apk_option generic_options[] = {
+static void version(void)
+{
+	printf("apk-tools " APK_VERSION ", compiled for " APK_DEFAULT_ARCH ".\n"
+#ifdef TEST_MODE
+		"TEST MODE BUILD. NOT FOR PRODUCTION USE.\n"
+#endif
+		);
+}
+
+static struct apk_repository_list *apk_repository_new(const char *url)
+{
+	struct apk_repository_list *r = calloc(1, sizeof(struct apk_repository_list));
+	if (r) {
+		r->url = url;
+		list_init(&r->list);
+	}
+	return r;
+}
+
+static int option_parse_global(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
+{
+	struct apk_repository_list *repo;
+
+	switch (optch) {
+	case 'h': return -EINVAL;
+	case 'p':
+		dbopts->root = optarg;
+		break;
+	case 0x107:
+		dbopts->keys_dir = optarg;
+		break;
+	case 0x108:
+		dbopts->repositories_file = optarg;
+		break;
+	case 'X':
+		repo = apk_repository_new(optarg);
+		if (repo) list_add(&repo->list, &dbopts->repository_list);
+		break;
+	case 'q':
+		apk_verbosity--;
+		break;
+	case 'v':
+		apk_verbosity++;
+		break;
+	case 'V':
+		version();
+		return -ESHUTDOWN;
+	case 'f':
+		apk_flags |= APK_FORCE;
+		break;
+	case 'i':
+		apk_flags |= APK_INTERACTIVE;
+		break;
+	case 'U':
+		apk_flags |= APK_UPDATE_CACHE;
+		break;
+	case 0x101:
+		apk_flags |= APK_PROGRESS;
+		break;
+	case 0x110:
+		apk_flags &= ~APK_PROGRESS;
+		break;
+	case 0x10f:
+		apk_progress_fd = atoi(optarg);
+		break;
+	case 0x103:
+		apk_flags |= APK_ALLOW_UNTRUSTED;
+		break;
+	case 0x104:
+		apk_flags |= APK_SIMULATE;
+		break;
+	case 0x106:
+		apk_flags |= APK_PURGE;
+		break;
+	case 0x105:
+		dbopts->lock_wait = atoi(optarg);
+		break;
+	case 0x109:
+		apk_flags |= APK_NO_NETWORK;
+		break;
+	case 0x112:
+		dbopts->arch = optarg;
+		break;
+	case 0x114:
+		puts(APK_DEFAULT_ARCH);
+		return -ESHUTDOWN;
+#ifdef TEST_MODE
+	case 0x200:
+		*apk_string_array_add(&test_repos) = (char*) optarg;
+		break;
+	case 0x201:
+		test_installed_db = optarg;
+		break;
+	case 0x202:
+		test_world = optarg;
+		break;
+#endif
+	default:
+		return -ENOTSUP;
+	}
+	return 0;
+}
+
+static const struct apk_option options_global[] = {
 	{ 'h', "help",		"Show generic help or applet specific help" },
 	{ 'p', "root",		"Install packages to DIR",
 				required_argument, "DIR" },
@@ -55,12 +159,9 @@ static struct apk_option generic_options[] = {
 	{ 0x101, "progress",	"Show a progress bar" },
 	{ 0x10f, "progress-fd",	"Write progress to fd", required_argument, "FD" },
 	{ 0x110, "no-progress",	"Disable progress bar even for TTYs" },
-	{ 0x102, "clean-protected", "Do not create .apk-new files in "
-				"configuration dirs" },
 	{ 0x106, "purge",	"Delete also modified configuration files (pkg removal) "
 				"and uninstalled packages from cache (cache clean)" },
-	{ 0x103, "allow-untrusted", "Blindly install packages with untrusted "
-				"signatures or no signature at all" },
+	{ 0x103, "allow-untrusted", "Install packages with untrusted signature or no signature" },
 	{ 0x104, "simulate",	"Show what would be done without actually "
 				"doing it" },
 	{ 0x105, "wait",	"Wait for TIME seconds to get an exclusive "
@@ -71,8 +172,6 @@ static struct apk_option generic_options[] = {
 	{ 0x108, "repositories-file", "Override repositories file",
 				required_argument, "REPOFILE" },
 	{ 0x109, "no-network",	"Do not use network (cache is still used)" },
-	{ 0x113, "no-scripts",	"Do not execute any scripts" },
-	{ 0x111, "overlay-from-stdin", "Read list of overlay files from stdin" },
 	{ 0x112, "arch",	"Use architecture with --root",
 				required_argument, "ARCH" },
 	{ 0x114, "print-arch",	"Print default arch and exit" },
@@ -83,22 +182,45 @@ static struct apk_option generic_options[] = {
 #endif
 };
 
-static int version(void)
+const struct apk_option_group optgroup_global = {
+	.name = "Global",
+	.options = options_global,
+	.num_options = ARRAY_SIZE(options_global),
+	.parse = option_parse_global,
+};
+
+static int option_parse_commit(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
-	printf("apk-tools " APK_VERSION ", compiled for " APK_DEFAULT_ARCH ".\n");
-#ifdef TEST_MODE
-	printf("TEST MODE BUILD. NOT FOR PRODUCTION USE.\n");
-#endif
+	switch (optch) {
+	case 0x102:
+		apk_flags |= APK_CLEAN_PROTECTED;
+		break;
+	case 0x111:
+		apk_flags |= APK_OVERLAY_FROM_STDIN;
+		break;
+	case 0x113:
+		apk_flags |= APK_NO_SCRIPTS;
+		break;
+	default:
+		return -ENOTSUP;
+	}
 	return 0;
 }
 
-static int show_arch(void)
-{
-	puts(APK_DEFAULT_ARCH);
-	return 0;
-}
+static const struct apk_option options_commit[] = {
+	{ 0x102, "clean-protected",	"Do not create .apk-new files in configuration dirs" },
+	{ 0x111, "overlay-from-stdin",	"Read list of overlay files from stdin" },
+	{ 0x113, "no-scripts",		"Do not execute any scripts" },
+};
 
-static int format_option(char *buf, size_t len, struct apk_option *o,
+const struct apk_option_group optgroup_commit = {
+	.name = "Commit",
+	.options = options_commit,
+	.num_options = ARRAY_SIZE(options_commit),
+	.parse = option_parse_commit,
+};
+
+static int format_option(char *buf, size_t len, const struct apk_option *o,
 			 const char *separator)
 {
 	int i = 0;
@@ -116,28 +238,31 @@ static int format_option(char *buf, size_t len, struct apk_option *o,
 	return i;
 }
 
-static void print_usage(const char *cmd, const char *args, int num_opts,
-		        struct apk_option *opts)
+static void print_usage(const char *cmd, const char *args, const struct apk_option_group **optgroups)
 {
 	struct apk_indent indent = { .indent = 11 };
+	const struct apk_option *opts;
 	char word[128];
-	int i, j;
+	int g, i, j;
 
 	indent.x = printf("\nusage: apk %s", cmd) - 1;
-	for (i = 0; i < num_opts; i++)
-		if (opts[i].name != NULL) {
+	for (g = 0; optgroups[g]; g++) {
+		opts = optgroups[g]->options;
+		for (i = 0; i < optgroups[g]->num_options; i++) {
+			if (!opts[i].name) continue;
 			j = 0;
 			word[j++] = '[';
 			j += format_option(&word[j], sizeof(word) - j, &opts[i], "|");
 			word[j++] = ']';
 			apk_print_indented(&indent, APK_BLOB_PTR_LEN(word, j));
 		}
+	}
 	if (args != NULL)
 		apk_print_indented(&indent, APK_BLOB_STR(args));
 	printf("\n");
 }
 
-static void print_options(int num_opts, struct apk_option *opts)
+static void print_options(int num_opts, const struct apk_option *opts)
 {
 	struct apk_indent indent = { .indent = 26 };
 	char word[128];
@@ -153,12 +278,14 @@ static void print_options(int num_opts, struct apk_option *opts)
 
 static int usage(struct apk_applet *applet)
 {
+	const struct apk_option_group **optgroups = default_optgroups;
+	int i;
+
 	version();
 	if (applet == NULL) {
 		struct apk_applet *a;
 
-		print_usage("COMMAND", "[ARGS]...",
-			    ARRAY_SIZE(generic_options), generic_options);
+		print_usage("COMMAND", "[ARGS]...", default_optgroups);
 
 		printf("\nThe following commands are available:\n");
 		foreach_applet(a) {
@@ -170,19 +297,18 @@ static int usage(struct apk_applet *applet)
 	} else {
 		struct apk_indent indent = { .indent = 2 };
 
-		print_usage(applet->name, applet->arguments,
-			    applet->num_options, applet->options);
+		if (applet->optgroups[0]) optgroups = applet->optgroups;
+		print_usage(applet->name, applet->arguments, applet->optgroups);
 		printf("\nDescription:\n");
 		apk_print_indented_words(&indent, applet->help);
 		printf("\n");
 	}
-	printf("\nGeneric options:\n");
-	print_options(ARRAY_SIZE(generic_options), generic_options);
 
-	if (applet != NULL && applet->num_options > 0) {
-		printf("\nOptions for %s command:\n", applet->name);
-		print_options(applet->num_options, applet->options);
+	for (i = 0; optgroups[i]; i++) {
+		printf("\n%s options:\n", optgroups[i]->name);
+		print_options(optgroups[i]->num_options, optgroups[i]->options);
 	}
+
 	printf("\nThis apk has coffee making abilities.\n");
 
 	return 1;
@@ -227,18 +353,7 @@ static struct apk_applet *deduce_applet(int argc, char **argv)
 	return NULL;
 }
 
-static struct apk_repository_list *apk_repository_new(const char *url)
-{
-	struct apk_repository_list *r = calloc(1,
-			sizeof(struct apk_repository_list));
-	if (r) {
-		r->url = url;
-		list_init(&r->list);
-	}
-	return r;
-}
-
-static void merge_options(struct option *opts, struct apk_option *ao, int num)
+static void merge_options(struct option *opts, const struct apk_option *ao, int num)
 {
 	int i;
 
@@ -314,17 +429,16 @@ int main(int argc, char **argv)
 	struct apk_applet *applet;
 	char short_options[256], *sopt;
 	struct option *opt, *all_options;
-	int r, optindex, num_options;
+	int i, p, r, num_options;
 	void *ctx = NULL;
-	struct apk_repository_list *repo = NULL;
 	struct apk_database db;
 	struct apk_db_options dbopts;
+	const struct apk_option_group **optgroups = default_optgroups;
 	struct apk_string_array *args;
 #ifdef TEST_MODE
 	const char *test_installed_db = NULL;
 	const char *test_world = NULL;
 	struct apk_string_array *test_repos;
-	int i;
 
 	apk_string_array_init(&test_repos);
 #endif
@@ -343,21 +457,19 @@ int main(int argc, char **argv)
 	setup_terminal();
 
 	applet = deduce_applet(argc, argv);
-	num_options = ARRAY_SIZE(generic_options) + 1;
-	if (applet != NULL)
-		num_options += applet->num_options;
+	if (applet && applet->optgroups[0]) optgroups = applet->optgroups;
+
+	for (i = 0, num_options = 0; optgroups[i]; i++)
+		num_options += optgroups[i]->num_options;
 	all_options = alloca(sizeof(struct option) * num_options);
-	merge_options(&all_options[0], generic_options,
-	              ARRAY_SIZE(generic_options));
+	for (i = r = 0; optgroups[i]; r += optgroups[i]->num_options, i++)
+		merge_options(&all_options[r], optgroups[i]->options, optgroups[i]->num_options);
 	if (applet != NULL) {
-		merge_options(&all_options[ARRAY_SIZE(generic_options)],
-			      applet->options, applet->num_options);
 		if (applet->context_size != 0)
 			ctx = calloc(1, applet->context_size);
 		dbopts.open_flags = applet->open_flags;
 		apk_flags |= applet->forced_flags;
 	}
-
 	for (opt = all_options, sopt = short_options; opt->name != NULL; opt++) {
 		if (opt->flag == NULL &&
 		    opt->val <= 0xff && isalnum(opt->val)) {
@@ -371,106 +483,11 @@ int main(int argc, char **argv)
 	setup_automatic_flags();
 	fetchConnectionCacheInit(16, 1);
 
-	optindex = 0;
-	while ((r = getopt_long(argc, argv, short_options,
-				all_options, &optindex)) != -1) {
-		switch (r) {
-		case 0:
-			break;
-		case 'h':
-			r = usage(applet);
-			goto err;
-		case 'p':
-			dbopts.root = optarg;
-			break;
-		case 0x107:
-			dbopts.keys_dir = optarg;
-			break;
-		case 0x108:
-			dbopts.repositories_file = optarg;
-			break;
-		case 'X':
-			repo = apk_repository_new(optarg);
-			if (repo)
-				list_add(&repo->list, &dbopts.repository_list);
-			break;
-		case 'q':
-			apk_verbosity--;
-			break;
-		case 'v':
-			apk_verbosity++;
-			break;
-		case 'V':
-			r = version();
-			goto err;
-		case 'f':
-			apk_flags |= APK_FORCE;
-			break;
-		case 'i':
-			apk_flags |= APK_INTERACTIVE;
-			break;
-		case 'U':
-			apk_flags |= APK_UPDATE_CACHE;
-			break;
-		case 0x101:
-			apk_flags |= APK_PROGRESS;
-			break;
-		case 0x110:
-			apk_flags &= ~APK_PROGRESS;
-			break;
-		case 0x10f:
-			apk_progress_fd = atoi(optarg);
-			break;
-		case 0x102:
-			apk_flags |= APK_CLEAN_PROTECTED;
-			break;
-		case 0x103:
-			apk_flags |= APK_ALLOW_UNTRUSTED;
-			break;
-		case 0x104:
-			apk_flags |= APK_SIMULATE;
-			break;
-		case 0x106:
-			apk_flags |= APK_PURGE;
-			break;
-		case 0x105:
-			dbopts.lock_wait = atoi(optarg);
-			break;
-		case 0x109:
-			apk_flags |= APK_NO_NETWORK;
-			break;
-		case 0x113:
-			apk_flags |= APK_NO_SCRIPTS;
-			break;
-		case 0x111:
-			apk_flags |= APK_OVERLAY_FROM_STDIN;
-			break;
-		case 0x112:
-			dbopts.arch = optarg;
-			break;
-		case 0x114:
-			r = show_arch();
-			goto err;
-#ifdef TEST_MODE
-		case 0x200:
-			*apk_string_array_add(&test_repos) = (char*) optarg;
-			break;
-		case 0x201:
-			test_installed_db = optarg;
-			break;
-		case 0x202:
-			test_world = optarg;
-			break;
-#endif
-		default:
-			if (applet == NULL || applet->parse == NULL ||
-			    applet->parse(ctx, &dbopts, r,
-					  optindex - ARRAY_SIZE(generic_options),
-					  optarg) != 0) {
-				r = usage(applet);
-				goto err;
-			}
-			break;
+	while ((p = getopt_long(argc, argv, short_options, all_options, NULL)) != -1) {
+		for (i = 0; optgroups[i]; i++) {
+			r = optgroups[i]->parse(ctx, &dbopts, p, optarg);
+			if (r == 0) break;
+			if (r != -ENOTSUP) goto err_and_usage;
 		}
 	}
 
@@ -552,6 +569,7 @@ int main(int argc, char **argv)
 	r = applet->main(ctx, &db, args);
 	apk_db_close(&db);
 
+err_and_usage:
 	if (r == -EINVAL)
 		r = usage(applet);
 err:
