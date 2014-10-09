@@ -624,7 +624,9 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 	r = apk_repo_format_real_url(db, repo, pkg, url, sizeof(url));
 	if (r < 0) return r;
 
-	if (fstatat(db->cache_fd, cacheitem, &st, 0) != 0) st.st_mtime = 0;
+	if ((apk_flags & APK_FORCE) ||
+	    fstatat(db->cache_fd, cacheitem, &st, 0) != 0)
+		st.st_mtime = 0;
 
 	apk_message("fetch %s", url);
 
