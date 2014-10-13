@@ -743,9 +743,11 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 	mode_t mode;
 	uid_t uid;
 	gid_t gid;
-	int field, r;
+	int field, r, lineno = 0;
 
 	while (!APK_BLOB_IS_NULL(l = bs->read(bs, token))) {
+		lineno++;
+
 		if (l.len < 2 || l.ptr[1] != ':') {
 			if (pkg == NULL)
 				continue;
@@ -783,9 +785,8 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 
 		/* Standard index line? */
 		r = apk_pkg_add_info(db, pkg, field, l);
-		if (r == 0) {
+		if (r == 0)
 			continue;
-		}
 		if (r == 1 && repo == -1 && ipkg == NULL) {
 			/* Instert to installed database; this needs to
 			 * happen after package name has been read, but
@@ -799,23 +800,14 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		/* Check FDB special entries */
 		switch (field) {
 		case 'F':
-			if (pkg->name == NULL) {
-				apk_error("FDB directory entry before package entry");
-				return -1;
-			}
+			if (pkg->name == NULL) goto bad_entry;
 			diri = apk_db_diri_new(db, pkg, l, &diri_node);
 			file_diri_node = &diri->owned_files.first;
 			break;
 		case 'a':
-			if (file == NULL) {
-				apk_error("FDB file attribute metadata entry before file entry");
-				return -1;
-			}
+			if (file == NULL) goto bad_entry;
 		case 'M':
-			if (diri == NULL) {
-				apk_error("FDB directory metadata entry before directory entry");
-				return -1;
-			}
+			if (diri == NULL) goto bad_entry;
 			uid = apk_blob_pull_uint(&l, 10);
 			apk_blob_pull_char(&l, ':');
 			gid = apk_blob_pull_uint(&l, 10);
@@ -827,17 +819,11 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 				apk_db_file_set(file, mode, uid, gid);
 			break;
 		case 'R':
-			if (diri == NULL) {
-				apk_error("FDB file entry before directory entry");
-				return -1;
-			}
+			if (diri == NULL) goto bad_entry;
 			file = apk_db_file_get(db, diri, l, &file_diri_node);
 			break;
 		case 'Z':
-			if (file == NULL) {
-				apk_error("FDB checksum entry before file entry");
-				return -1;
-			}
+			if (file == NULL) goto bad_entry;
 			apk_blob_pull_csum(&l, &file->csum);
 			break;
 		case 'r':
@@ -868,15 +854,15 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			pkg->filename = NULL;
 			continue;
 		}
-		if (APK_BLOB_IS_NULL(l)) {
-			apk_error("FDB format error in entry '%c'", field);
-			return -1;
-		}
+		if (APK_BLOB_IS_NULL(l)) goto bad_entry;
 	}
 	return 0;
 old_apk_tools:
 	/* Installed db should not have unsupported fields */
 	apk_error("This apk-tools is too old to handle installed packages");
+	return -1;
+bad_entry:
+	apk_error("FDB format error (line %d, entry '%c')", lineno, field);
 	return -1;
 }
 
