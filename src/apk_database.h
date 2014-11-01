@@ -24,16 +24,21 @@
 struct apk_name;
 APK_ARRAY(apk_name_array, struct apk_name *);
 
+struct apk_db_acl {
+	mode_t mode;
+	uid_t uid;
+	gid_t gid;
+};
+
 struct apk_db_file {
 	struct hlist_node hash_node;
 	struct hlist_node diri_files_list;
 
 	struct apk_db_dir_instance *diri;
-	mode_t mode;
-	uid_t uid;
-	gid_t gid;
+	struct apk_db_acl *acl;
 
-	unsigned short namelen;
+	unsigned short audited : 1;
+	unsigned short namelen : 15;
 	struct apk_checksum csum;
 	char name[];
 };
@@ -84,9 +89,7 @@ struct apk_db_dir_instance {
 	struct hlist_head owned_files;
 	struct apk_package *pkg;
 	struct apk_db_dir *dir;
-	mode_t mode;
-	uid_t uid;
-	gid_t gid;
+	struct apk_db_acl *acl;
 };
 
 struct apk_name {

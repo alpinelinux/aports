@@ -72,6 +72,8 @@ const char * const apk_installed_file = "lib/apk/db/installed";
 static const char * const apk_installed_file_tmp = "lib/apk/db/installed.new";
 static const char * const apk_installed_file_old = "var/lib/apk/installed";
 
+static struct apk_db_acl *apk_default_acl_dir, *apk_default_acl_file;
+
 struct install_ctx {
 	struct apk_database *db;
 	struct apk_package *pkg;
@@ -222,6 +224,14 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 	return pn;
 }
 
+static struct apk_db_acl *apk_db_acl_atomize(mode_t mode, uid_t uid, gid_t gid)
+{
+	struct apk_db_acl acl = { .mode = mode & 07777, .uid = uid, .gid = gid };
+	apk_blob_t *b;
+	b = apk_blob_atomize_dup(APK_BLOB_STRUCT(acl));
+	return (struct apk_db_acl *) b->ptr;
+}
+
 static void apk_db_dir_prepare(struct apk_database *db, struct apk_db_dir *dir, mode_t newmode)
 {
 	struct stat st;
@@ -356,6 +366,7 @@ static struct apk_db_dir_instance *apk_db_diri_new(struct apk_database *db,
 		*after = &diri->pkg_dirs_list.next;
 		diri->dir = apk_db_dir_get(db, name);
 		diri->pkg = pkg;
+		diri->acl = apk_default_acl_dir;
 	}
 
 	return diri;
@@ -364,23 +375,20 @@ static struct apk_db_dir_instance *apk_db_diri_new(struct apk_database *db,
 static void apk_db_dir_apply_diri_permissions(struct apk_db_dir_instance *diri)
 {
 	struct apk_db_dir *dir = diri->dir;
+	struct apk_db_acl *acl = diri->acl;
 
-	if (diri->uid < dir->uid ||
-	    (diri->uid == dir->uid && diri->gid < dir->gid)) {
-		dir->uid = diri->uid;
-		dir->gid = diri->gid;
-		dir->mode = diri->mode;
-	} else if (diri->uid == dir->uid && diri->gid == dir->gid) {
-		dir->mode &= diri->mode;
+	if (acl->uid < dir->uid || (acl->uid == dir->uid && acl->gid < dir->gid)) {
+		dir->uid = acl->uid;
+		dir->gid = acl->gid;
+		dir->mode = acl->mode;
+	} else if (acl->uid == dir->uid && acl->gid == dir->gid) {
+		dir->mode &= acl->mode;
 	}
 }
 
-static void apk_db_diri_set(struct apk_db_dir_instance *diri, mode_t mode,
-			    uid_t uid, gid_t gid)
+static void apk_db_diri_set(struct apk_db_dir_instance *diri, struct apk_db_acl *acl)
 {
-	diri->mode = mode & 07777;
-	diri->uid = uid;
-	diri->gid = gid;
+	diri->acl = acl;
 	apk_db_dir_apply_diri_permissions(diri);
 }
 
@@ -431,17 +439,11 @@ static struct apk_db_file *apk_db_file_new(struct apk_db_dir_instance *diri,
 	file->namelen = name.len;
 
 	file->diri = diri;
+	file->acl = apk_default_acl_file;
 	hlist_add_after(&file->diri_files_list, *after);
 	*after = &file->diri_files_list.next;
 
 	return file;
-}
-
-static void apk_db_file_set(struct apk_db_file *file, mode_t mode, uid_t uid, gid_t gid)
-{
-	file->mode = mode & 07777;
-	file->uid = uid;
-	file->gid = gid;
 }
 
 static struct apk_db_file *apk_db_file_get(struct apk_database *db,
@@ -737,6 +739,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 	struct apk_installed_package *ipkg = NULL;
 	struct apk_db_dir_instance *diri = NULL;
 	struct apk_db_file *file = NULL;
+	struct apk_db_acl *acl;
 	struct hlist_node **diri_node = NULL;
 	struct hlist_node **file_diri_node = NULL;
 	apk_blob_t token = APK_BLOB_STR("\n"), l;
@@ -813,10 +816,11 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			gid = apk_blob_pull_uint(&l, 10);
 			apk_blob_pull_char(&l, ':');
 			mode = apk_blob_pull_uint(&l, 8);
+			acl = apk_db_acl_atomize(mode, uid, gid);
 			if (field == 'M')
-				apk_db_diri_set(diri, mode, uid, gid);
+				apk_db_diri_set(diri, acl);
 			else
-				apk_db_file_set(file, mode, uid, gid);
+				file->acl = acl;
 			break;
 		case 'R':
 			if (diri == NULL) goto bad_entry;
@@ -866,6 +870,19 @@ bad_entry:
 	return -1;
 }
 
+static void apk_blob_push_db_acl(apk_blob_t *b, char field, struct apk_db_acl *acl)
+{
+	char hdr[2] = { field, ':' };
+
+	apk_blob_push_blob(b, APK_BLOB_BUF(hdr));
+	apk_blob_push_uint(b, acl->uid, 10);
+	apk_blob_push_blob(b, APK_BLOB_STR(":"));
+	apk_blob_push_uint(b, acl->gid, 10);
+	apk_blob_push_blob(b, APK_BLOB_STR(":"));
+	apk_blob_push_uint(b, acl->mode, 8);
+	apk_blob_push_blob(b, APK_BLOB_STR("\n"));
+}
+
 static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 {
 	struct apk_installed_package *ipkg;
@@ -909,30 +926,24 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 		hlist_for_each_entry(diri, c1, &ipkg->owned_dirs, pkg_dirs_list) {
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("F:"));
 			apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen));
-			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nM:"));
-			apk_blob_push_uint(&bbuf, diri->uid, 10);
-			apk_blob_push_blob(&bbuf, APK_BLOB_STR(":"));
-			apk_blob_push_uint(&bbuf, diri->gid, 10);
-			apk_blob_push_blob(&bbuf, APK_BLOB_STR(":"));
-			apk_blob_push_uint(&bbuf, diri->mode, 8);
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
+
+			if (1 || diri->acl != apk_default_acl_dir)
+				apk_blob_push_db_acl(&bbuf, 'M', diri->acl);
 
 			hlist_for_each_entry(file, c2, &diri->owned_files, diri_files_list) {
 				apk_blob_push_blob(&bbuf, APK_BLOB_STR("R:"));
 				apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(file->name, file->namelen));
-				if (file->mode != 0 || file->uid != 0 || file->gid != 0) {
-					apk_blob_push_blob(&bbuf, APK_BLOB_STR("\na:"));
-					apk_blob_push_uint(&bbuf, file->uid, 10);
-					apk_blob_push_blob(&bbuf, APK_BLOB_STR(":"));
-					apk_blob_push_uint(&bbuf, file->gid, 10);
-					apk_blob_push_blob(&bbuf, APK_BLOB_STR(":"));
-					apk_blob_push_uint(&bbuf, file->mode, 8);
-				}
-				if (file->csum.type != APK_CHECKSUM_NONE) {
-					apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nZ:"));
-					apk_blob_push_csum(&bbuf, &file->csum);
-				}
 				apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
+
+				if (1 || file->acl != apk_default_acl_file)
+					apk_blob_push_db_acl(&bbuf, 'a', file->acl);
+
+				if (file->csum.type != APK_CHECKSUM_NONE) {
+					apk_blob_push_blob(&bbuf, APK_BLOB_STR("Z:"));
+					apk_blob_push_csum(&bbuf, &file->csum);
+					apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
+				}
 
 				if (os->write(os, buf, bbuf.ptr - buf) != bbuf.ptr - buf)
 					return -EIO;
@@ -1439,6 +1450,9 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	struct statvfs stvfs;
 	apk_blob_t blob;
 	int r, fd, write_arch = FALSE;
+
+	apk_default_acl_dir = apk_db_acl_atomize(0755, 0, 0);
+	apk_default_acl_file = apk_db_acl_atomize(0644, 0, 0);
 
 	memset(db, 0, sizeof(*db));
 	if (apk_flags & APK_SIMULATE) {
@@ -2363,7 +2377,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			apk_message("%s", ae->name);
 
 		/* Extract the file as name.apk-new */
-		apk_db_file_set(file, ae->mode, ae->uid, ae->gid);
+		file->acl = apk_db_acl_atomize(ae->mode, ae->uid, ae->gid);
 		r = apk_archive_entry_extract(db->root_fd, ae, ".apk-new", is,
 					      extract_cb, ctx);
 
@@ -2405,7 +2419,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 
 		diri = apk_db_install_directory_entry(ctx, name);
 		apk_db_dir_prepare(db, diri->dir, ae->mode);
-		apk_db_diri_set(diri, ae->mode, ae->uid, ae->gid);
+		apk_db_diri_set(diri, apk_db_acl_atomize(ae->mode, ae->uid, ae->gid));
 	}
 	ctx->installed_size += ctx->current_file_size;
 

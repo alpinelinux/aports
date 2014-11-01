@@ -97,7 +97,7 @@ static int audit_file(struct audit_ctx *actx,
 	if (dbf == NULL)
 		return 'A';
 
-	dbf->mode |= S_SEENFLAG;
+	dbf->audited = 1;
 
 	if (apk_file_get_info(dirfd, name, APK_FI_NOFOLLOW | dbf->csum.type, &fi) != 0)
 		return -EPERM;
@@ -109,11 +109,10 @@ static int audit_file(struct audit_ctx *actx,
 	if (S_ISLNK(fi.mode) && dbf->csum.type == APK_CHECKSUM_NONE)
 		return 'U';
 
-	if (actx->check_permissions &&
-	    (dbf->mode != 0 || dbf->uid != 0 || dbf->gid != 0)) {
-		if ((fi.mode & 07777) != (dbf->mode & 07777))
+	if (actx->check_permissions) {
+		if ((fi.mode & 07777) != (dbf->acl->mode & 07777))
 			return 'M';
-		if (fi.uid != dbf->uid || fi.gid != dbf->gid)
+		if (fi.uid != dbf->acl->uid || fi.gid != dbf->acl->gid)
 			return 'M';
 	}
 
@@ -293,8 +292,7 @@ static int audit_missing_files(apk_hash_item item, void *pctx)
 	char path[PATH_MAX];
 	int len;
 
-	if (file->mode & S_SEENFLAG)
-		return 0;
+	if (file->audited) return 0;
 
 	dir = file->diri->dir;
 	if (dir->mode & S_SEENFLAG) {
