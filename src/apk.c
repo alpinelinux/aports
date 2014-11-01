@@ -109,9 +109,6 @@ static int option_parse_global(void *ctx, struct apk_db_options *dbopts, int opt
 	case 0x103:
 		apk_flags |= APK_ALLOW_UNTRUSTED;
 		break;
-	case 0x104:
-		apk_flags |= APK_SIMULATE;
-		break;
 	case 0x106:
 		apk_flags |= APK_PURGE;
 		break;
@@ -162,8 +159,6 @@ static const struct apk_option options_global[] = {
 	{ 0x106, "purge",	"Delete also modified configuration files (pkg removal) "
 				"and uninstalled packages from cache (cache clean)" },
 	{ 0x103, "allow-untrusted", "Install packages with untrusted signature or no signature" },
-	{ 0x104, "simulate",	"Show what would be done without actually "
-				"doing it" },
 	{ 0x105, "wait",	"Wait for TIME seconds to get an exclusive "
 				"repository lock before failing",
 				required_argument, "TIME" },
@@ -192,6 +187,9 @@ const struct apk_option_group optgroup_global = {
 static int option_parse_commit(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	switch (optch) {
+	case 's':
+		apk_flags |= APK_SIMULATE;
+		break;
 	case 0x102:
 		apk_flags |= APK_CLEAN_PROTECTED;
 		break;
@@ -208,6 +206,7 @@ static int option_parse_commit(void *ctx, struct apk_db_options *dbopts, int opt
 }
 
 static const struct apk_option options_commit[] = {
+	{ 's', "simulate",		"Show what would be done without actually doing it" },
 	{ 0x102, "clean-protected",	"Do not create .apk-new files in configuration dirs" },
 	{ 0x111, "overlay-from-stdin",	"Read list of overlay files from stdin" },
 	{ 0x113, "no-scripts",		"Do not execute any scripts" },
