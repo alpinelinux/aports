@@ -1,6 +1,6 @@
 /* abuild-tar.c - A TAR mangling utility for .APK packages
  *
- * Copyright (C) 2009 Timo Teräs <timo.teras@iki.fi>
+ * Copyright (C) 2009-2014 Timo Teräs <timo.teras@iki.fi>
  * All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -89,6 +89,19 @@ static void put_octal(char *s, size_t l, size_t value)
 		*(ptr--) = '0';
 }
 
+static void tarhdr_checksum(struct tar_header *hdr)
+{
+	const unsigned char *src;
+	size_t chksum, i;
+
+	/* Recalculate checksum */
+	memset(hdr->chksum, ' ', sizeof(hdr->chksum));
+	src = (const unsigned char *) hdr;
+	for (i = chksum = 0; i < sizeof(*hdr); i++)
+		chksum += src[i];
+	put_octal(hdr->chksum, sizeof(hdr->chksum)-1, chksum);
+}
+
 static int usage(void)
 {
 	fprintf(stderr,
@@ -120,7 +133,7 @@ static ssize_t full_read(int fd, void *buf, size_t count)
 	} while (1);
 
 	if (total == 0 && n < 0)
-		return -1;
+		return -errno;
 
 	return total;
 }
@@ -142,7 +155,7 @@ static ssize_t full_write(int fd, const void *buf, size_t count)
 	} while (1);
 
 	if (total == 0 && n < 0)
-		return -1;
+		return -errno;
 
 	return total;
 }
@@ -163,82 +176,182 @@ static ssize_t full_splice(int from_fd, int to_fd, size_t count)
 	} while (1);
 
 	if (total == 0 && n < 0)
-		return -1;
+		return -errno;
 
 	return total;
 }
 
-static int do_it(const EVP_MD *md, int cut)
+#define BUF_INITIALIZER {0}
+struct buf {
+	char *ptr;
+	size_t size;
+	size_t alloc;
+};
+
+static void buf_free(struct buf *b)
 {
-	struct tar_header hdr;
-	size_t size, aligned_size;
+	free(b->ptr);
+}
+
+static int buf_resize(struct buf *b, size_t newsize)
+{
 	void *ptr;
-	int dohash = 0, r;
+
+	if (b->alloc >= newsize) return 0;
+	ptr = realloc(b->ptr, newsize);
+	if (!ptr) return -ENOMEM;
+	b->ptr = ptr;
+	b->alloc = newsize;
+	return 0;
+}
+
+static int buf_padto(struct buf *b, size_t alignment)
+{
+	size_t oldsize, newsize;
+	oldsize = b->size;
+	newsize = (oldsize + alignment - 1) & -alignment;
+	if (buf_resize(b, newsize)) return -ENOMEM;
+	b->size = newsize;
+	memset(b->ptr + oldsize, 0, newsize - oldsize);
+	return 0;
+}
+
+static int buf_read_fd(struct buf *b, int fd, size_t size)
+{
+	ssize_t r;
+
+	r = buf_resize(b, size);
+	if (r) return r;
+
+	r = full_read(fd, b->ptr, size);
+	if (r == size) {
+		b->size = r;
+		return 0;
+	}
+	b->size = 0;
+	if (r < 0) return r;
+	return -EIO;
+}
+
+static int buf_write_fd(struct buf *b, int fd)
+{
+	ssize_t r;
+	r = full_write(fd, b->ptr, b->size);
+	if (r == b->size) return 0;
+	if (r < 0) return r;
+	return -ENOSPC;
+}
+
+static int buf_add_ext_header_hexdump(struct buf *b, const char *hdr, const char *value, int valuelen)
+{
+	size_t oldsize = b->size;
+	int i, len;
+
+	/* "%u %s=%s\n" */
+	len = 1 + 1 + strlen(hdr) + 1 + valuelen*2 + 1;
+	for (i = len; i > 9; i /= 10) len++;
+
+	if (buf_resize(b, b->size + len)) return -ENOMEM;
+	b->size += snprintf(&b->ptr[b->size], len, "%u %s=", len, hdr);
+	for (i = 0; i < valuelen; i++)
+		b->size += snprintf(&b->ptr[b->size], 3, "%02x", (int)(unsigned char)value[i]);
+	b->ptr[b->size++] = '\n';
+
+	return 0;
+}
+
+static void add_legacy_checksum(struct tar_header *hdr, const EVP_MD *md, const char *digest)
+{
 	struct {
 		char id[4];
 		uint16_t nid;
 		uint16_t size;
 	} mdinfo;
 
-	if (md != NULL) {
-		memcpy(mdinfo.id, "APK2", 4);
-		mdinfo.nid = EVP_MD_nid(md);
-		mdinfo.size = EVP_MD_size(md);
-	}
+	memcpy(mdinfo.id, "APK2", 4);
+	mdinfo.nid = EVP_MD_nid(md);
+	mdinfo.size = EVP_MD_size(md);
+	memcpy(&hdr->linkname[3], &mdinfo, sizeof(mdinfo));
+	memcpy(&hdr->linkname[3+sizeof(mdinfo)], digest, mdinfo.size);
+	tarhdr_checksum(hdr);
+}
+
+static int do_it(const EVP_MD *md, int cut)
+{
+	char checksumhdr[32], digest[EVP_MAX_MD_SIZE];
+	struct buf data = BUF_INITIALIZER, pax = BUF_INITIALIZER;
+	struct tar_header hdr, paxhdr;
+	size_t size, aligned_size;
+	int dohash = 0, r, ret = 1;
+
+	if (md) snprintf(checksumhdr, sizeof(checksumhdr), "APK-TOOLS.checksum.%s", EVP_MD_name(md));
 
 	do {
 		if (full_read(STDIN_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
-			return 0;
+			goto err;
 
 		if (cut && hdr.name[0] == 0)
-			return 0;
+			break;
 
 		size = GET_OCTAL(hdr.size);
 		aligned_size = (size + 511) & ~511;
 
-		if (md != NULL)
-			dohash = (hdr.typeflag == '0' || hdr.typeflag == '7');
-		if (dohash) {
-			const unsigned char *src;
-			int chksum, i;
-
-			ptr = malloc(aligned_size);
-			if (full_read(STDIN_FILENO, ptr, aligned_size) != aligned_size)
-				return 1;
-
-			memcpy(&hdr.linkname[3], &mdinfo, sizeof(mdinfo));
-			EVP_Digest(ptr, size, &hdr.linkname[3+sizeof(mdinfo)],
-				   NULL, md, NULL);
-
-			/* Recalculate checksum */
-			memset(hdr.chksum, ' ', sizeof(hdr.chksum));
-			src = (const unsigned char *) &hdr;
-			for (i = chksum = 0; i < sizeof(hdr); i++)
-				chksum += src[i];
-			put_octal(hdr.chksum, sizeof(hdr.chksum)-1, chksum);
+		if (hdr.typeflag == 'x') {
+			memcpy(&paxhdr, &hdr, sizeof(hdr));
+			if (buf_read_fd(&pax, STDIN_FILENO, aligned_size)) goto err;
+			pax.size = size;
+			continue;
 		}
 
-		if (full_write(STDOUT_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
-			return 2;
+		dohash = md && (hdr.typeflag == '0' || hdr.typeflag == '7' || hdr.typeflag == '2');
+		if (dohash) {
+			if (buf_read_fd(&data, STDIN_FILENO, aligned_size)) goto err;
+
+			if (hdr.typeflag != '2') {
+				EVP_Digest(data.ptr, size, digest, NULL, md, NULL);
+				add_legacy_checksum(&hdr, md, digest);
+			} else {
+				EVP_Digest(hdr.linkname, strlen(hdr.linkname), digest, NULL, md, NULL);
+			}
+
+			buf_add_ext_header_hexdump(&pax, checksumhdr, digest, EVP_MD_size(md));
+			PUT_OCTAL(paxhdr.size, pax.size);
+			tarhdr_checksum(&paxhdr);
+		}
+
+		if (pax.size) {
+			/* write pax header + content */
+			if (full_write(STDOUT_FILENO, &paxhdr, sizeof(paxhdr)) != sizeof(paxhdr) ||
+			    buf_padto(&pax, 512) ||
+			    buf_write_fd(&pax, STDOUT_FILENO)) goto err;
+		}
+
+		if (full_write(STDOUT_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr)) goto err;
 
 		if (dohash) {
-			if (full_write(STDOUT_FILENO, ptr, aligned_size) != aligned_size)
-				return 2;
-			free(ptr);
+			if (buf_write_fd(&data, STDOUT_FILENO)) goto err;
 		} else if (aligned_size != 0) {
 			r = full_splice(STDIN_FILENO, STDOUT_FILENO, aligned_size);
 			if (r == -1) {
 				while (aligned_size > 0) {
 					if (full_read(STDIN_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
-						return 1;
+						goto err;
 					if (full_write(STDOUT_FILENO, &hdr, sizeof(hdr)) != sizeof(hdr))
-						return 2;
+						goto err;
 					aligned_size -= sizeof(hdr);
 				}
-			} else if (r != aligned_size)
-				return 2;
+			} else if (r != aligned_size) goto err;
 		}
+
+		memset(&paxhdr, 0, sizeof(paxhdr));
+		pax.size = 0;
 	} while (1);
+
+	ret = 0;
+err:
+	buf_free(&data);
+	buf_free(&pax);
+	return ret;
 }
 
 int main(int argc, char **argv)
