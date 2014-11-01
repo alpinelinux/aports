@@ -126,6 +126,7 @@ unsigned int apk_blob_pull_uint(apk_blob_t *b, int radix);
 void apk_blob_pull_csum(apk_blob_t *b, struct apk_checksum *csum);
 void apk_blob_pull_base64(apk_blob_t *b, apk_blob_t to);
 void apk_blob_pull_hexdump(apk_blob_t *b, apk_blob_t to);
+int apk_blob_pull_blob_match(apk_blob_t *b, apk_blob_t match);
 
 void apk_atom_init(void);
 apk_blob_t *apk_blob_atomize(apk_blob_t blob);

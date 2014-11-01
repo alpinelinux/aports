@@ -116,6 +116,53 @@ static void tar_entry_close(void *stream)
 {
 }
 
+static int blob_realloc(apk_blob_t *b, int newsize)
+{
+	char *tmp;
+	if (b->len >= newsize) return 0;
+	tmp = realloc(b->ptr, newsize);
+	if (!tmp) return -ENOMEM;
+	b->ptr = tmp;
+	b->len = newsize;
+	return 0;
+}
+
+static void handle_extended_header(struct apk_file_info *fi, apk_blob_t hdr)
+{
+	apk_blob_t name, value;
+
+	while (1) {
+		char *start = hdr.ptr;
+		unsigned int len = apk_blob_pull_uint(&hdr, 10);
+		apk_blob_pull_char(&hdr, ' ');
+		if (!apk_blob_split(hdr, APK_BLOB_STR("="), &name, &hdr)) break;
+		len -= hdr.ptr - start + 1;
+		if (len < 0 || hdr.len < len) break;
+		value = APK_BLOB_PTR_LEN(hdr.ptr, len);
+		hdr = APK_BLOB_PTR_LEN(hdr.ptr+len, hdr.len-len);
+		apk_blob_pull_char(&hdr, '\n');
+		if (APK_BLOB_IS_NULL(hdr)) break;
+		value.ptr[value.len] = 0;
+
+		if (apk_blob_compare(name, APK_BLOB_STR("path")) == 0) {
+			fi->name = value.ptr;
+		} else if (apk_blob_compare(name, APK_BLOB_STR("linkpath")) == 0) {
+			fi->link_target = value.ptr;
+		} else if (apk_blob_pull_blob_match(&name, APK_BLOB_STR("APK-TOOLS.checksum."))) {
+			int type = APK_CHECKSUM_NONE;
+			if (apk_blob_compare(name, APK_BLOB_STR("SHA1")) == 0)
+				type = APK_CHECKSUM_SHA1;
+			else if (apk_blob_compare(name, APK_BLOB_STR("MD5")) == 0)
+				type = APK_CHECKSUM_MD5;
+			if (type > fi->csum.type) {
+				fi->csum.type = type;
+				apk_blob_pull_hexdump(&value, APK_BLOB_CSUM(fi->csum));
+				if (APK_BLOB_IS_NULL(value)) fi->csum.type = APK_CHECKSUM_NONE;
+			}
+		}
+	}
+}
+
 int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		  void *ctx, int soft_checksums, struct apk_id_cache *idc)
 {
@@ -126,20 +173,19 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		.tar_is = is,
 	};
 	struct tar_header buf;
-	struct apk_tar_digest_info *odi, *di;
+	struct apk_tar_digest_info *odi;
 	unsigned long offset = 0;
 	int end = 0, r;
-	size_t toskip;
+	size_t toskip, paxlen = 0;
+	apk_blob_t pax = APK_BLOB_NULL, longname = APK_BLOB_NULL;
 
 	odi = (struct apk_tar_digest_info *) &buf.linkname[3];
-	di  = (struct apk_tar_digest_info *) &buf.devmajor[0];
 	EVP_MD_CTX_init(&teis.mdctx);
 	memset(&entry, 0, sizeof(entry));
 	while ((r = is->read(is, &buf, 512)) == 512) {
 		offset += 512;
 		if (buf.name[0] == '\0') {
-			if (end)
-				break;
+			if (end) break;
 			end++;
 			continue;
 		}
@@ -150,46 +196,40 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			.gid   = apk_resolve_gid(idc, buf.gname, GET_OCTAL(buf.gid)),
 			.mode  = GET_OCTAL(buf.mode) & 07777,
 			.mtime = GET_OCTAL(buf.mtime),
-			.name  = entry.name,
+			.name  = entry.name ?: buf.name,
 			.uname = buf.uname,
 			.gname = buf.gname,
 			.device = makedev(GET_OCTAL(buf.devmajor),
 					  GET_OCTAL(buf.devminor)),
 		};
-		teis.csum = NULL;
-
 		buf.mode[0] = 0; /* to nul terminate 100-byte buf.name */
 		buf.magic[0] = 0; /* to nul terminate 100-byte buf.linkname */
+		teis.csum = NULL;
 
-		if (memcmp(di->id, "APK2", 4) == 0 &&
-		    di->size <= sizeof(entry.csum.data)) {
-			entry.csum.type = di->size;
-			memcpy(&entry.csum.data[0], buf.devminor, sizeof(buf.devminor));
-			memcpy(&entry.csum.data[sizeof(buf.devminor)], buf.padding, sizeof(buf.padding));
-		}
+		if (paxlen) handle_extended_header(&entry, APK_BLOB_PTR_LEN(pax.ptr, paxlen));
 
 		switch (buf.typeflag) {
-		case 'L':
-			if (entry.name != NULL)
-				free(entry.name);
-			entry.name = malloc(entry.size+1);
+		case 'L': /* GNU long name extension */
+			if (blob_realloc(&longname, entry.size+1)) goto err_nomem;
+			entry.name = longname.ptr;
 			is->read(is, entry.name, entry.size);
 			entry.name[entry.size] = 0;
 			offset += entry.size;
 			entry.size = 0;
 			break;
+		case 'K': /* GNU long link target extension - ignored */
+			break;
 		case '0':
 		case '7': /* regular file */
-			entry.mode |= S_IFREG;
 			if (entry.csum.type == APK_CHECKSUM_NONE) {
 				if (memcmp(odi->id, "APK2", 4) == 0 &&
 				    odi->size <= sizeof(entry.csum.data)) {
 					entry.csum.type = odi->size;
-					memcpy(entry.csum.data, odi->digest,
-					       odi->size);
+					memcpy(entry.csum.data, odi->digest, odi->size);
 				} else if (soft_checksums)
 					teis.csum = &entry.csum;
 			}
+			entry.mode |= S_IFREG;
 			break;
 		case '1': /* hard link */
 			entry.mode |= S_IFREG;
@@ -198,8 +238,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		case '2': /* symbolic link */
 			entry.mode |= S_IFLNK;
 			entry.link_target = buf.linkname;
-			if (entry.csum.type == APK_CHECKSUM_NONE &&
-			    soft_checksums) {
+			if (entry.csum.type == APK_CHECKSUM_NONE && soft_checksums) {
 				EVP_Digest(buf.linkname, strlen(buf.linkname),
 					   entry.csum.data, NULL,
 					   apk_checksum_default(), NULL);
@@ -215,26 +254,31 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		case '5': /* directory */
 			entry.mode |= S_IFDIR;
 			break;
+		case 'g': /* global pax header */
+			break;
+		case 'x': /* file specific pax header */
+			paxlen = entry.size;
+			entry.size = 0;
+			if (blob_realloc(&pax, (paxlen + 511) & -512)) goto err_nomem;
+			is->read(is, pax.ptr, paxlen);
+			offset += paxlen;
+			break;
 		default:
 			break;
 		}
 
 		teis.bytes_left = entry.size;
 		if (entry.mode & S_IFMT) {
-			if (entry.name == NULL)
-				entry.name = strdup(buf.name);
-
 			/* callback parser function */
 			if (teis.csum != NULL)
 				EVP_DigestInit_ex(&teis.mdctx,
 						  apk_checksum_default(), NULL);
 
 			r = parser(ctx, &entry, &teis.is);
-			free(entry.name);
-			if (r != 0)
-				goto err;
+			if (r != 0) goto err;
 
-			entry.name = NULL;
+			entry.name = buf.name;
+			paxlen = 0;
 		}
 
 		offset += entry.size - teis.bytes_left;
@@ -245,26 +289,27 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		if (toskip != 0)
 			is->read(is, NULL, toskip);
 	}
-	EVP_MD_CTX_cleanup(&teis.mdctx);
 
 	/* Read remaining end-of-archive records, to ensure we read all of
 	 * the file. The underlying istream is likely doing checksumming. */
 	if (r == 512) {
 		while ((r = is->read(is, &buf, 512)) == 512) {
-			if (buf.name[0] != 0)
-				return -EBADMSG;
+			if (buf.name[0] != 0) break;
 		}
 	}
 
-	/* Check that there was no partial record */
-	if (r > 0)
-		r = -EBADMSG;
-
-	return r;
+	/* Check that there was no partial (or non-zero) record */
+	if (r > 0) r = -EBADMSG;
 
 err:
 	EVP_MD_CTX_cleanup(&teis.mdctx);
+	free(pax.ptr);
+	free(longname.ptr);
 	return r;
+
+err_nomem:
+	r = -ENOMEM;
+	goto err;
 }
 
 int apk_tar_write_entry(struct apk_ostream *os, const struct apk_file_info *ae,

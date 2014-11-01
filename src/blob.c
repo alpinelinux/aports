@@ -492,6 +492,15 @@ err:
 	*b = APK_BLOB_NULL;
 }
 
+int apk_blob_pull_blob_match(apk_blob_t *b, apk_blob_t match)
+{
+	if (b->len < match.len) return 0;
+	if (memcmp(b->ptr, match.ptr, match.len) != 0) return 0;
+	b->ptr += match.len;
+	b->len -= match.len;
+	return 1;
+}
+
 static unsigned char b64decode[] = {
 	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
