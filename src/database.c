@@ -1513,7 +1513,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			relocate_database(db);
 
 		db->lock_fd = openat(db->root_fd, apk_lock_file,
-				     O_CREAT | O_RDWR | O_CLOEXEC, 0400);
+				     O_CREAT | O_RDWR | O_CLOEXEC, 0600);
 		if (db->lock_fd < 0 && errno == ENOENT &&
 		    (dbopts->open_flags & APK_OPENF_CREATE)) {
 			r = apk_db_create(db);
@@ -1522,7 +1522,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 				goto ret_r;
 			}
 			db->lock_fd = openat(db->root_fd, apk_lock_file,
-					     O_CREAT | O_RDWR | O_CLOEXEC, 0400);
+					     O_CREAT | O_RDWR | O_CLOEXEC, 0600);
 		}
 		if (db->lock_fd < 0 ||
 		    flock(db->lock_fd, LOCK_EX | LOCK_NB) < 0) {
