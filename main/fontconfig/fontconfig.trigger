@@ -1,4 +1,4 @@
 #!/bin/sh
 
-fc-cache -f > /dev/null
+fc-cache --system-only > /dev/null
 
