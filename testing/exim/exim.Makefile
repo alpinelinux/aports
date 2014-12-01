@@ -133,7 +133,7 @@ CONFIGURE_FILE=/etc/mail/exim.conf
 # deliveries. (Local deliveries run as various non-root users, typically as the
 # owner of a local mailbox.) Specifying these values as root is not supported.
 
-EXIM_USER=ref:exim
+EXIM_USER=ref:mail
 
 # If you specify EXIM_USER as a name, this is looked up at build time, and the
 # uid number is built into the binary. However, you can specify that this
@@ -404,9 +404,9 @@ WITH_OLD_DEMIME=yes
 # installed on your system (www.libspf2.org). Depending on where it is installed
 # you may have to edit the CFLAGS and LDFLAGS lines.
 
-# EXPERIMENTAL_SPF=yes
-# CFLAGS  += -I/usr/local/include
-# LDFLAGS += -lspf2
+EXPERIMENTAL_SPF=yes
+CFLAGS  += -I/usr/local/include
+LDFLAGS += -lspf2
 
 # Uncomment the following lines to add SRS (Sender rewriting scheme) support.
 # You need to have libsrs_alt installed on your system (srs.mirtol.com).
