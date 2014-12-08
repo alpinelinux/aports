@@ -39,6 +39,12 @@ static const struct apk_option_group *default_optgroups[] = { &optgroup_global, 
 static struct list_head apk_applet_list;
 #define foreach_applet(iter) list_for_each_entry(iter, &apk_applet_list, node)
 
+#ifdef TEST_MODE
+static const char *test_installed_db = NULL;
+static const char *test_world = NULL;
+static struct apk_string_array *test_repos;
+#endif
+
 char **apk_argv;
 
 static void version(void)
@@ -434,14 +440,10 @@ int main(int argc, char **argv)
 	struct apk_db_options dbopts;
 	const struct apk_option_group **optgroups = default_optgroups;
 	struct apk_string_array *args;
-#ifdef TEST_MODE
-	const char *test_installed_db = NULL;
-	const char *test_world = NULL;
-	struct apk_string_array *test_repos;
 
+#ifdef TEST_MODE
 	apk_string_array_init(&test_repos);
 #endif
-
 	apk_applet_register_builtin();
 
 	apk_argv = malloc(sizeof(char*[argc+2]));
