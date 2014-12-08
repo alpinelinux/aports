@@ -20,6 +20,7 @@ struct fix_ctx {
 	unsigned short solver_flags;
 	int fix_depends : 1;
 	int fix_directory_permissions : 1;
+	int errors;
 };
 
 static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int optch, const char *optarg)
@@ -70,9 +71,15 @@ static void mark_fix(struct fix_ctx *ctx, struct apk_name *name)
 	apk_solver_set_name_flags(name, ctx->solver_flags, ctx->fix_depends ? ctx->solver_flags : 0);
 }
 
-static void set_solver_flags(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
+static void set_solver_flags(struct apk_database *db, const char *match, struct apk_name *name, void *pctx)
 {
-	mark_fix(ctx, name);
+	struct fix_ctx *ctx = pctx;
+
+	if (!name) {
+		apk_error("Package '%s' not found", match);
+		ctx->errors++;
+	} else
+		mark_fix(ctx, name);
 }
 
 static int fix_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
@@ -93,6 +100,8 @@ static int fix_main(void *pctx, struct apk_database *db, struct apk_string_array
 		}
 	} else
 		apk_name_foreach_matching(db, args, apk_foreach_genid(), set_solver_flags, ctx);
+
+	if (ctx->errors) return ctx->errors;
 
 	return apk_solver_commit(db, 0, db->world);
 }

@@ -145,6 +145,8 @@ static void print_result(struct apk_database *db, const char *match, struct apk_
 	struct apk_provider *p;
 	struct apk_package *pkg = NULL;
 
+	if (!name) return;
+
 	if (ctx->show_all) {
 		foreach_array_item(p, name->providers)
 			print_result_pkg(ctx, p->pkg);

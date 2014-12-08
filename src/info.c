@@ -20,8 +20,9 @@
 
 struct info_ctx {
 	struct apk_database *db;
-	int (*action)(struct info_ctx *ctx, struct apk_database *db, struct apk_string_array *args);
+	void (*action)(struct info_ctx *ctx, struct apk_database *db, struct apk_string_array *args);
 	int subaction_mask;
+	int errors;
 };
 
 /* These need to stay in sync with the function pointer array in
@@ -55,14 +56,14 @@ static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
 	printf("\n");
 }
 
-static int info_exists(struct info_ctx *ctx, struct apk_database *db,
-		       struct apk_string_array *args)
+static void info_exists(struct info_ctx *ctx, struct apk_database *db,
+			struct apk_string_array *args)
 {
 	struct apk_name *name;
 	struct apk_dependency dep;
 	struct apk_provider *p;
 	char **parg;
-	int ok, errors = 0;
+	int ok;
 
 	foreach_array_item(parg, args) {
 		apk_blob_t b = APK_BLOB_STR(*parg);
@@ -82,15 +83,12 @@ static int info_exists(struct info_ctx *ctx, struct apk_database *db,
 			verbose_print_pkg(p->pkg, 0);
 			ok = 1;
 		}
-		if (!ok)
-			errors++;
+		if (!ok) ctx->errors++;
 	}
-
-	return errors;
 }
 
-static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
-			 struct apk_string_array *args)
+static void info_who_owns(struct info_ctx *ctx, struct apk_database *db,
+			  struct apk_string_array *args)
 {
 	struct apk_package *pkg;
 	struct apk_dependency_array *deps;
@@ -98,7 +96,6 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 	struct apk_ostream *os;
 	const char *via;
 	char **parg, buf[PATH_MAX];
-	int errors = 0;
 	ssize_t r;
 
 	apk_dependency_array_init(&deps);
@@ -115,7 +112,7 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 
 		if (pkg == NULL) {
 			apk_error("%s: Could not find owner package", *parg);
-			errors++;
+			ctx->errors++;
 			continue;
 		}
 
@@ -138,8 +135,6 @@ static int info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 		os->close(os);
 	}
 	apk_dependency_array_free(&deps);
-
-	return errors;
 }
 
 static void info_print_description(struct apk_database *db, struct apk_package *pkg)
@@ -337,6 +332,11 @@ static void print_name_info(struct apk_database *db, const char *match, struct a
 	struct info_ctx *ctx = (struct info_ctx *) pctx;
 	struct apk_provider *p;
 
+	if (name == NULL) {
+		ctx->errors++;
+		return;
+	}
+
 	foreach_array_item(p, name->providers)
 		info_subaction(ctx, p->pkg);
 }
@@ -405,10 +405,9 @@ static int info_main(void *ctx, struct apk_database *db, struct apk_string_array
 	ictx->db = db;
 	if (ictx->subaction_mask == 0)
 		ictx->subaction_mask = APK_INFO_DESC | APK_INFO_URL | APK_INFO_SIZE;
-	if (ictx->action != NULL)
-		return ictx->action(ictx, db, args);
-
-	if (args->num > 0) {
+	if (ictx->action != NULL) {
+		ictx->action(ictx, db, args);
+	} else if (args->num > 0) {
 		/* Print info on given names */
 		apk_name_foreach_matching(
 			db, args, APK_FOREACH_NULL_MATCHES_ALL | apk_foreach_genid(),
@@ -419,7 +418,7 @@ static int info_main(void *ctx, struct apk_database *db, struct apk_string_array
 			verbose_print_pkg(ipkg->pkg, 1);
 	}
 
-	return 0;
+	return ictx->errors;
 }
 
 static const struct apk_option options_applet[] = {

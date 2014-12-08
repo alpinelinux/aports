@@ -2774,9 +2774,7 @@ void apk_name_foreach_matching(struct apk_database *db, struct apk_string_array 
 
 	foreach_array_item(pmatch, filter) {
 		name = (struct apk_name *) apk_hash_get(&db->available.names, APK_BLOB_STR(*pmatch));
-		if (name == NULL)
-			continue;
-		if (genid) {
+		if (genid && name) {
 			if (name->foreach_genid >= genid)
 				continue;
 			name->foreach_genid = genid;

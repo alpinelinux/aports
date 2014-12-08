@@ -123,9 +123,10 @@ static void ver_print_package_status(struct apk_database *db, const char *match,
 	int i, r = -1;
 	unsigned short tag, allowed_repos;
 
+	if (!name) return;
+
 	pkg = apk_pkg_get_installed(name);
-	if (pkg == NULL)
-		return;
+	if (!pkg) return;
 
 	tag = pkg->ipkg->repository_tag;
 	allowed_repos = db->repo_tags[tag].allowed_repos;

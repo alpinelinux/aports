@@ -22,6 +22,9 @@ static void print_policy(struct apk_database *db, const char *match, struct apk_
 	struct apk_provider *p;
 	struct apk_repository *repo;
 	int i, j, num = 0;
+
+	if (!name) return;
+
 /*
 zlib1g policy:
   2.0:

@@ -18,6 +18,7 @@
 struct del_ctx {
 	int recursive_delete : 1;
 	struct apk_dependency_array *world;
+	int errors;
 };
 
 static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int optch, const char *optarg)
@@ -109,6 +110,11 @@ static void delete_name(struct apk_database *db, const char *match,
 	struct del_ctx *ctx = (struct del_ctx *) pctx;
 	struct apk_package *pkg;
 
+	if (!name) {
+		ctx->errors++;
+		return;
+	}
+
 	pkg = apk_pkg_get_installed(name);
 	if (pkg != NULL)
 		delete_pkg(pkg, NULL, NULL, pctx);
@@ -126,6 +132,8 @@ static int del_main(void *pctx, struct apk_database *db, struct apk_string_array
 
 	apk_dependency_array_copy(&ctx->world, db->world);
 	apk_name_foreach_matching(db, args, apk_foreach_genid(), delete_name, ctx);
+	if (ctx->errors) return ctx->errors;
+
 	r = apk_solver_solve(db, 0, ctx->world, &changeset);
 	if (r == 0) {
 		/* check for non-deleted package names */

@@ -207,7 +207,7 @@ static void mark_error(struct fetch_ctx *ctx, const char *match, struct apk_name
 	if (strchr(match, '*') != NULL)
 		return;
 
-	apk_message("%s: unable to select package (or it's dependencies)", name->name);
+	apk_message("%s: unable to select package (or it's dependencies)", name ? name->name : match);
 	ctx->errors++;
 }
 
@@ -222,6 +222,11 @@ static void mark_name_recursive(struct apk_database *db, const char *match, stru
 	struct apk_dependency_array *world;
 	struct apk_change *change;
 	int r;
+
+	if (!name) {
+		mark_error(ctx, match, name);
+		return;
+	}
 
 	apk_dependency_array_init(&world);
 	*apk_dependency_array_add(&world) = dep;
@@ -241,14 +246,18 @@ static void mark_name(struct apk_database *db, const char *match, struct apk_nam
 	struct apk_package *pkg = NULL;
 	struct apk_provider *p;
 
+	if (!name) goto err;
+
 	foreach_array_item(p, name->providers)
 		if (pkg == NULL || apk_pkg_version_compare(p->pkg, pkg) == APK_VERSION_GREATER)
 			pkg = p->pkg;
 
-	if (pkg != NULL)
-		mark_package(ctx, pkg);
-	else
-		mark_error(ctx, match, name);
+	if (!pkg) goto err;
+	mark_package(ctx, pkg);
+	return;
+
+err:
+	mark_error(ctx, match, name);
 }
 
 static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
@@ -272,8 +281,10 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 	}
 
 	ctx->db = db;
+
 	apk_name_foreach_matching(db, args, apk_foreach_genid(), mark, ctx);
-	apk_hash_foreach(&db->available.packages, fetch_package, ctx);
+	if (!ctx->errors)
+		apk_hash_foreach(&db->available.packages, fetch_package, ctx);
 
 	return ctx->errors;
 }
