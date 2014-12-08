@@ -1,0 +1,278 @@
+#!/usr/bin/ruby
+
+# APKBUILD dependency resolver for RubyGems
+# Copyright (C) 2014 Kaarle Ritvanen
+
+require 'augeas'
+require 'rubygems/dependency'
+require 'rubygems/resolver'
+require 'rubygems/spec_fetcher'
+
+class Aport
+  RUBY_SUBPACKAGES = {
+    '2.0.0_p481' => {
+      'ruby-minitest' => ['minitest', '4.3.2'],
+      'ruby-rake' => ['rake', '0.9.6'],
+      'ruby-rdoc' => ['rdoc', '4.0.0', 'ruby-json']
+    },
+    '2.1.5' => {
+      'ruby-minitest' => ['minitest', '4.7.5'],
+      'ruby-rake' => ['rake', '10.1.0'],
+      'ruby-rdoc' => ['rdoc', '4.1.0', 'ruby-json']
+    }
+  }
+
+  @@aports = {}
+  @@subpackages = []
+
+  def self.initialize
+    Augeas::open(nil, nil, Augeas::NO_MODL_AUTOLOAD) do |aug|
+      dir = Dir.pwd
+      aug.transform(:lens => 'Shellvars.lns', :incl => dir + '/*/ruby*/APKBUILD')
+      aug.load
+
+      apath = '/files' + dir
+      fail if aug.match("/augeas#{apath}//error").length > 0
+
+      for repo in ['main', 'testing']
+        for aport in aug.match "#{apath}/#{repo}/*"
+          FileAport.new(aug, aport) unless aport.end_with? '/ruby'
+        end
+      end
+
+      for name, attrs in RUBY_SUBPACKAGES[
+        aug.get("#{apath}/main/ruby/APKBUILD/pkgver")
+      ]
+        gem, version, *deps = attrs
+        aport = new name, gem, version
+        for dep in deps
+          aport.add_dependency dep
+        end
+        @@subpackages.push aport
+      end
+    end
+
+    @@aports.each_value do |aport|
+      aport.depends do |dep|
+        dep.add_user aport
+      end
+    end
+  end
+
+  def self.get name
+    @@aports[name]
+  end
+
+  def self.ruby_subpkgs
+    for pkg in @@subpackages
+      yield pkg
+    end
+  end
+
+  def initialize name, gem, version
+    @name = name
+    @gem = gem
+    @version = version
+    @depends = []
+    @users = []
+    @@aports[name] = self
+  end
+
+  def add_dependency name
+    @depends.push name
+  end
+
+  attr_reader :gem, :name, :version
+
+  def depends
+    for dep in @depends
+      unless @@aports.has_key? dep
+        raise "Dependency for #{@name} does not exist: #{dep}"
+      end
+      yield @@aports[dep]
+    end
+  end
+
+  def users
+    for user in @users
+      yield user
+    end
+  end
+
+  def add_user user
+    @users.push user
+  end
+end
+
+class FileAport < Aport
+  def initialize aug, path
+    name = path.split('/')[-1]
+
+    get = proc{ |param|
+      res = aug.get(path + '/APKBUILD/' + param)
+      raise param + ' not defined for ' + name unless res
+      res
+    }
+
+    super name, get.call('_gemname'), get.call('pkgver')
+
+    for dep in `echo #{get.call('depends')}`.split
+      add_dependency dep if dep.start_with? 'ruby-'
+    end
+  end
+end
+
+
+Aport.initialize
+
+
+class Update
+  def initialize 
+    @gems = {}
+    @deps = []
+  end
+
+  def require_version name, version
+    aport = Aport.get name
+    raise 'Invalid package name: ' + name unless aport
+    gem = assign(aport.gem, name)
+    @deps.push gem.dependency if gem.require_version version
+  end
+
+  def resolve
+    Aport.ruby_subpkgs do |pkg|
+      require_version pkg.name, pkg.version unless @gems[pkg.gem]
+    end
+
+    def check_deps
+      @gems.clone.each_value do |gem|
+        gem.check_deps
+      end
+    end
+
+    check_deps
+
+    for req in Gem::Resolver.new(@deps).resolve
+      spec = req.spec
+      gem = @gems[spec.name]
+      gem.require_version spec.version.version if gem
+    end
+
+    check_deps
+
+    for name, gem in @gems
+      if gem.updated?
+        gem.aport.users do |user|
+          ugem = @gems[user.gem]
+          if !ugem || ugem.aport.name != user.name
+            Gem::Resolver.new(
+              [gem.dependency, Gem::Dependency.new(user.gem, user.version)]
+            ).resolve
+          end
+        end
+      end
+    end
+  end
+
+  def each
+    @gems.each_value do |gem|
+      obs = gem.obsolete_deps
+      obs = obs.length == 0 ? nil : " (obsolete dependencies: #{obs.join ', '})"
+
+      if gem.updated? || obs
+        yield "#{gem.aport.name}-#{gem.version}#{obs}"
+      end
+    end
+  end
+
+  def assign name, aport
+    aport = Aport.get aport
+
+    if @gems.has_key? name
+      gem = @gems[name]
+      return gem if aport == gem.aport
+      raise "Conflicting packages for gem #{name}: #{gem.aport.name} and #{aport.name}"
+    end
+
+    gem = AportGem.new self, name, aport
+    @gems[name] = gem
+    gem
+  end
+
+  private
+
+  class AportGem
+    def initialize update, name, aport
+      @update = update
+      @name = name
+      @aport = aport
+    end
+
+    attr_reader :aport, :obsolete_deps
+
+    def require_version version
+      if @version
+        return false if version == @version
+        raise "Conflicting versions for gem #{@name}: #{@version} and #{version}"
+      end
+      @version = version
+      true
+    end
+
+    def version
+      @version || @aport.version
+    end
+
+    def updated?
+      version != @aport.version
+    end
+
+    def dependency
+      Gem::Dependency.new(@name, version)
+    end
+
+    def check_deps
+      specs, errors = Gem::SpecFetcher::fetcher.spec_for_dependency(dependency)
+      raise "Invalid gem: #{@name}-#{version}" if specs.length == 0
+      fail if specs.length > 1
+      deps = specs[0][0].runtime_dependencies
+
+      @obsolete_deps = []
+
+      @aport.depends do |dep|
+        gem = @update.assign(dep.gem, dep.name)
+        gem.check_deps
+        unless deps.reject! { |sdep| sdep.match? dep.gem, gem.version }
+          @obsolete_deps.push dep.name
+        end
+      end
+
+      if deps.length > 0
+        raise 'Undeclared dependencies in ' + @aport.name + deps.inject('') {
+          |s, dep| "#{s}\n#{dep.name} #{dep.requirements_list.join ' '}"
+        }
+      end
+    end
+  end
+end
+
+
+latest = {}
+for source, gems in Gem::SpecFetcher::fetcher.available_specs(:latest)[0]
+  for gem in gems
+    latest[gem.name] = gem.version.version
+  end
+end
+
+update = Update.new
+for arg in ARGV
+  match = /^(([^-]|-[^\d])+)(-(\d.*))?/.match arg
+  name = match[1]
+  update.require_version name, match[4] || latest[Aport.get(name).gem]
+end
+
+update.resolve
+
+for aport in update
+  puts aport
+end

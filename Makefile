@@ -9,7 +9,8 @@ datadir		?= $(prefix)/share/$(PACKAGE)
 abuildrepo	?= ~/.cache/abuild
 
 SCRIPTS		:= abuild buildrepo abuild-keygen abuild-sign newapkbuild \
-		   abump apkgrel buildlab apkbuild-cpan checkapk
+		   abump apkgrel buildlab apkbuild-cpan checkapk \
+		   apkbuild-gem-resolver
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
