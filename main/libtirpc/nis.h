@@ -35,7 +35,9 @@
 //#include <rpc/rpc.h>
 //#include <rpcsvc/nis_tags.h>
 
-__BEGIN_DECLS
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*
  *	nis.h
@@ -536,7 +538,8 @@ typedef enum name_pos name_pos;
 #define NIS_PROG 100300
 #define NIS_VERSION 3
 
-
-__END_DECLS
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* ! _RPCSVC_NIS_H */
