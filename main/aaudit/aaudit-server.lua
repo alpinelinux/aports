@@ -89,6 +89,7 @@ end
 
 function M.sendemail(mail)
 	local to = {}
+	local tocheck = {}
 	local m = {
 		headers = {
 			["Content-Type"] = 'text/plain; charset=utf8',
@@ -100,9 +101,12 @@ function M.sendemail(mail)
 	}
 	local rcpt = {}
 	for _, addr in ipairs(mail.to) do
-		local rfc822 = rfc822_address(addr)
-		table.insert(to, rfc822)
-		table.insert(rcpt, rfc822_email(rfc822))
+		if tocheck[addr] == nil then
+			tocheck[addr] = true
+			local rfc822 = rfc822_address(addr)
+			table.insert(to, rfc822)
+			table.insert(rcpt, rfc822_email(rfc822))
+		end
 	end
 	m.headers.to = table.concat(to, ", ")
 	return smtp.send{
@@ -127,18 +131,20 @@ local function sendcommitdiff(body, req, R, G)
 	if not G.notify_emails then return true end
 	if #G.notify_emails == 0 then return true end
 
+	local subject = ("config change - %s (%s)"):format(R.description, R.address)
+
 	local mail = {
 		from = req.committer,
 		to = G.notify_emails,
-		subject = ("config change - %s (%s)"):format(R.description, R.address),
-		message = table.concat(body, '\n')
+		subject = subject,
+		message = subject .. "\n\n" .. table.concat(body, '\n')
 	}
 
 	-- Set Request Tracker headers if relevant
 	local rtqueue = M.serverconfig.rtqueue
 	if rtqueue then
 		for k,no in req.message:gmatch("(%a+) #(%d+)") do
-			local action = rt_keywords[k]
+			local action = rt_keywords[k:lower()]
 			if action ~= nil then
 				mail.subject = ("[%s #%s] %s"):format(rtqueue, no, mail.subject)
 				if action == true then
@@ -289,17 +295,25 @@ function M.loadrepoconfig(repohome)
 	return aac.readconfig(("%s/aaudit-repo.json"):format(repohome))
 end
 
+local function merge_configs(a, b)
+	a = a or {}
+	b = b or {}
+	a.notify_emails = merge_array(a.notify_emails, b.notify_emails)
+	a.track_filemode = merge_bool(a.track_filemode, b.track_filemode)
+	a.no_track = merge_array(a.no_track, b.no_track)
+	a.no_notify = merge_array(a.no_notify, b.no_notify)
+	a.no_diff = merge_array(a.no_diff, b.no_diff)
+	return a
+end
+
 local function load_repo_configs(repohome)
 	local R = M.loadrepoconfig(repohome)
 	-- merge global and per-repository group configs
-	local G = (M.serverconfig.groups or {}).all or {}
+	local G = merge_configs(nil, (M.serverconfig.groups or {}).all)
 	for _, name in pairs(R.groups or {}) do
-		local g = M.serverconfig.groups[name] or {}
-		G.notify_emails = merge_array(G.notify_emails, g.notify_emails)
-		G.track_filemode = merge_bool(G.track_filemode, g.track_filemode)
-		G.no_track = merge_array(G.no_track, g.no_track)
-		G.no_notify = merge_array(G.no_notify, g.no_notify)
-		G.no_diff = merge_array(G.no_diff, g.no_diff)
+		if name ~= "all" then
+			G = merge_configs(G, M.serverconfig.groups[name])
+		end
 	end
 	return R, G
 end
