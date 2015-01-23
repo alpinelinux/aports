@@ -1,0 +1,122 @@
+x86: limit checks in hypercall_xlat_continuation() to actual arguments
+
+HVM/PVH guests can otherwise trigger the final BUG_ON() in that
+function by entering 64-bit mode, setting the high halves of affected
+registers to non-zero values, leaving 64-bit mode, and issuing a
+hypercall that might get preempted and hence become subject to
+continuation argument translation (HYPERVISOR_memory_op being the only
+one possible for HVM, PVH also having the option of using
+HYPERVISOR_mmuext_op). This issue got introduced when HVM code was
+switched to use compat_memory_op() - neither that nor
+hypercall_xlat_continuation() were originally intended to be used by
+other than PV guests (which can't enter 64-bit mode and hence have no
+way to alter the high halves of 64-bit registers).
+
+This is XSA-111.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Tim Deegan <tim@xen.org>
+
+--- a/xen/arch/x86/domain.c
++++ b/xen/arch/x86/domain.c
+@@ -1750,7 +1750,8 @@ unsigned long hypercall_create_continuat
+     return op;
+ }
+ 
+-int hypercall_xlat_continuation(unsigned int *id, unsigned int mask, ...)
++int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
++                                unsigned int mask, ...)
+ {
+     int rc = 0;
+     struct mc_state *mcs = &current->mc_state;
+@@ -1759,7 +1760,10 @@ int hypercall_xlat_continuation(unsigned
+     unsigned long nval = 0;
+     va_list args;
+ 
+-    BUG_ON(id && *id > 5);
++    ASSERT(nr <= ARRAY_SIZE(mcs->call.args));
++    ASSERT(!(mask >> nr));
++
++    BUG_ON(id && *id >= nr);
+     BUG_ON(id && (mask & (1U << *id)));
+ 
+     va_start(args, mask);
+@@ -1772,7 +1776,7 @@ int hypercall_xlat_continuation(unsigned
+             return 0;
+         }
+ 
+-        for ( i = 0; i < 6; ++i, mask >>= 1 )
++        for ( i = 0; i < nr; ++i, mask >>= 1 )
+         {
+             if ( mask & 1 )
+             {
+@@ -1800,7 +1804,7 @@ int hypercall_xlat_continuation(unsigned
+     else
+     {
+         regs = guest_cpu_user_regs();
+-        for ( i = 0; i < 6; ++i, mask >>= 1 )
++        for ( i = 0; i < nr; ++i, mask >>= 1 )
+         {
+             unsigned long *reg;
+ 
+--- a/xen/arch/x86/x86_64/compat/mm.c
++++ b/xen/arch/x86/x86_64/compat/mm.c
+@@ -118,7 +118,7 @@ int compat_arch_memory_op(unsigned long 
+             break;
+ 
+         if ( rc == __HYPERVISOR_memory_op )
+-            hypercall_xlat_continuation(NULL, 0x2, nat, arg);
++            hypercall_xlat_continuation(NULL, 2, 0x2, nat, arg);
+ 
+         XLAT_pod_target(&cmp, nat);
+ 
+@@ -354,7 +354,7 @@ int compat_mmuext_op(XEN_GUEST_HANDLE_PA
+                 left = 1;
+                 if ( arg1 != MMU_UPDATE_PREEMPTED )
+                 {
+-                    BUG_ON(!hypercall_xlat_continuation(&left, 0x01, nat_ops,
++                    BUG_ON(!hypercall_xlat_continuation(&left, 4, 0x01, nat_ops,
+                                                         cmp_uops));
+                     if ( !test_bit(_MCSF_in_multicall, &mcs->flags) )
+                         regs->_ecx += count - i;
+@@ -362,7 +362,7 @@ int compat_mmuext_op(XEN_GUEST_HANDLE_PA
+                         mcs->compat_call.args[1] += count - i;
+                 }
+                 else
+-                    BUG_ON(hypercall_xlat_continuation(&left, 0));
++                    BUG_ON(hypercall_xlat_continuation(&left, 4, 0));
+                 BUG_ON(left != arg1);
+             }
+             else
+--- a/xen/common/compat/memory.c
++++ b/xen/common/compat/memory.c
+@@ -282,7 +282,7 @@ int compat_memory_op(unsigned int cmd, X
+             break;
+ 
+         cmd = 0;
+-        if ( hypercall_xlat_continuation(&cmd, 0x02, nat.hnd, compat) )
++        if ( hypercall_xlat_continuation(&cmd, 2, 0x02, nat.hnd, compat) )
+         {
+             BUG_ON(rc != __HYPERVISOR_memory_op);
+             BUG_ON((cmd & MEMOP_CMD_MASK) != op);
+--- a/xen/include/xen/compat.h
++++ b/xen/include/xen/compat.h
+@@ -195,6 +195,8 @@ static inline int name(k xen_ ## n *x, k
+  * This option is useful for extracting the "op" argument or similar from the
+  * hypercall to enable further xlat processing.
+  *
++ * nr: Total number of arguments the hypercall has.
++ *
+  * mask: Specifies which of the hypercall arguments require compat translation.
+  * bit 0 indicates that the 0'th argument requires translation, bit 1 indicates
+  * that the first argument requires translation and so on. Native and compat
+@@ -214,7 +216,8 @@ static inline int name(k xen_ ## n *x, k
+  *
+  * Return: Number of arguments which were actually translated.
+  */
+-int hypercall_xlat_continuation(unsigned int *id, unsigned int mask, ...);
++int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
++                                unsigned int mask, ...);
+ 
+ /* In-place translation functons: */
+ struct start_info;

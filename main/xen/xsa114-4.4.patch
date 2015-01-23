@@ -1,0 +1,498 @@
+switch to write-biased r/w locks
+
+This is to improve fairness: A permanent flow of read acquires can
+otherwise lock out eventual writers indefinitely.
+
+This is XSA-114 / CVE-2014-9065.
+
+Signed-off-by: Keir Fraser <keir@xen.org>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Tested-by: Andrew Cooper <andrew.cooper3@citrix.com>
+
+--- a/xen/common/spinlock.c
++++ b/xen/common/spinlock.c
+@@ -271,112 +271,151 @@ void _spin_unlock_recursive(spinlock_t *
+ 
+ void _read_lock(rwlock_t *lock)
+ {
++    uint32_t x;
++
+     check_lock(&lock->debug);
+-    while ( unlikely(!_raw_read_trylock(&lock->raw)) )
+-    {
+-        while ( likely(_raw_rw_is_write_locked(&lock->raw)) )
++    do {
++        while ( (x = lock->lock) & RW_WRITE_FLAG )
+             cpu_relax();
+-    }
++    } while ( cmpxchg(&lock->lock, x, x+1) != x );
+     preempt_disable();
+ }
+ 
+ void _read_lock_irq(rwlock_t *lock)
+ {
++    uint32_t x;
++
+     ASSERT(local_irq_is_enabled());
+     local_irq_disable();
+     check_lock(&lock->debug);
+-    while ( unlikely(!_raw_read_trylock(&lock->raw)) )
+-    {
+-        local_irq_enable();
+-        while ( likely(_raw_rw_is_write_locked(&lock->raw)) )
+-            cpu_relax();
+-        local_irq_disable();
+-    }
++    do {
++        if ( (x = lock->lock) & RW_WRITE_FLAG )
++        {
++            local_irq_enable();
++            while ( (x = lock->lock) & RW_WRITE_FLAG )
++                cpu_relax();
++            local_irq_disable();
++        }
++    } while ( cmpxchg(&lock->lock, x, x+1) != x );
+     preempt_disable();
+ }
+ 
+ unsigned long _read_lock_irqsave(rwlock_t *lock)
+ {
++    uint32_t x;
+     unsigned long flags;
++
+     local_irq_save(flags);
+     check_lock(&lock->debug);
+-    while ( unlikely(!_raw_read_trylock(&lock->raw)) )
+-    {
+-        local_irq_restore(flags);
+-        while ( likely(_raw_rw_is_write_locked(&lock->raw)) )
+-            cpu_relax();
+-        local_irq_save(flags);
+-    }
++    do {
++        if ( (x = lock->lock) & RW_WRITE_FLAG )
++        {
++            local_irq_restore(flags);
++            while ( (x = lock->lock) & RW_WRITE_FLAG )
++                cpu_relax();
++            local_irq_save(flags);
++        }
++    } while ( cmpxchg(&lock->lock, x, x+1) != x );
+     preempt_disable();
+     return flags;
+ }
+ 
+ int _read_trylock(rwlock_t *lock)
+ {
++    uint32_t x;
++
+     check_lock(&lock->debug);
+-    if ( !_raw_read_trylock(&lock->raw) )
+-        return 0;
++    do {
++        if ( (x = lock->lock) & RW_WRITE_FLAG )
++            return 0;
++    } while ( cmpxchg(&lock->lock, x, x+1) != x );
+     preempt_disable();
+     return 1;
+ }
+ 
+ void _read_unlock(rwlock_t *lock)
+ {
++    uint32_t x, y;
++
+     preempt_enable();
+-    _raw_read_unlock(&lock->raw);
++    x = lock->lock;
++    while ( (y = cmpxchg(&lock->lock, x, x-1)) != x )
++        x = y;
+ }
+ 
+ void _read_unlock_irq(rwlock_t *lock)
+ {
+-    preempt_enable();
+-    _raw_read_unlock(&lock->raw);
++    _read_unlock(lock);
+     local_irq_enable();
+ }
+ 
+ void _read_unlock_irqrestore(rwlock_t *lock, unsigned long flags)
+ {
+-    preempt_enable();
+-    _raw_read_unlock(&lock->raw);
++    _read_unlock(lock);
+     local_irq_restore(flags);
+ }
+ 
+ void _write_lock(rwlock_t *lock)
+ {
++    uint32_t x;
++
+     check_lock(&lock->debug);
+-    while ( unlikely(!_raw_write_trylock(&lock->raw)) )
+-    {
+-        while ( likely(_raw_rw_is_locked(&lock->raw)) )
++    do {
++        while ( (x = lock->lock) & RW_WRITE_FLAG )
+             cpu_relax();
++    } while ( cmpxchg(&lock->lock, x, x|RW_WRITE_FLAG) != x );
++    while ( x != 0 )
++    {
++        cpu_relax();
++        x = lock->lock & ~RW_WRITE_FLAG;
+     }
+     preempt_disable();
+ }
+ 
+ void _write_lock_irq(rwlock_t *lock)
+ {
++    uint32_t x;
++
+     ASSERT(local_irq_is_enabled());
+     local_irq_disable();
+     check_lock(&lock->debug);
+-    while ( unlikely(!_raw_write_trylock(&lock->raw)) )
++    do {
++        if ( (x = lock->lock) & RW_WRITE_FLAG )
++        {
++            local_irq_enable();
++            while ( (x = lock->lock) & RW_WRITE_FLAG )
++                cpu_relax();
++            local_irq_disable();
++        }
++    } while ( cmpxchg(&lock->lock, x, x|RW_WRITE_FLAG) != x );
++    while ( x != 0 )
+     {
+-        local_irq_enable();
+-        while ( likely(_raw_rw_is_locked(&lock->raw)) )
+-            cpu_relax();
+-        local_irq_disable();
++        cpu_relax();
++        x = lock->lock & ~RW_WRITE_FLAG;
+     }
+     preempt_disable();
+ }
+ 
+ unsigned long _write_lock_irqsave(rwlock_t *lock)
+ {
++    uint32_t x;
+     unsigned long flags;
++
+     local_irq_save(flags);
+     check_lock(&lock->debug);
+-    while ( unlikely(!_raw_write_trylock(&lock->raw)) )
++    do {
++        if ( (x = lock->lock) & RW_WRITE_FLAG )
++        {
++            local_irq_restore(flags);
++            while ( (x = lock->lock) & RW_WRITE_FLAG )
++                cpu_relax();
++            local_irq_save(flags);
++        }
++    } while ( cmpxchg(&lock->lock, x, x|RW_WRITE_FLAG) != x );
++    while ( x != 0 )
+     {
+-        local_irq_restore(flags);
+-        while ( likely(_raw_rw_is_locked(&lock->raw)) )
+-            cpu_relax();
+-        local_irq_save(flags);
++        cpu_relax();
++        x = lock->lock & ~RW_WRITE_FLAG;
+     }
+     preempt_disable();
+     return flags;
+@@ -384,9 +423,13 @@ unsigned long _write_lock_irqsave(rwlock
+ 
+ int _write_trylock(rwlock_t *lock)
+ {
++    uint32_t x;
++
+     check_lock(&lock->debug);
+-    if ( !_raw_write_trylock(&lock->raw) )
+-        return 0;
++    do {
++        if ( (x = lock->lock) != 0 )
++            return 0;
++    } while ( cmpxchg(&lock->lock, x, x|RW_WRITE_FLAG) != x );
+     preempt_disable();
+     return 1;
+ }
+@@ -394,33 +437,32 @@ int _write_trylock(rwlock_t *lock)
+ void _write_unlock(rwlock_t *lock)
+ {
+     preempt_enable();
+-    _raw_write_unlock(&lock->raw);
++    if ( cmpxchg(&lock->lock, RW_WRITE_FLAG, 0) != RW_WRITE_FLAG )
++        BUG();
+ }
+ 
+ void _write_unlock_irq(rwlock_t *lock)
+ {
+-    preempt_enable();
+-    _raw_write_unlock(&lock->raw);
++    _write_unlock(lock);
+     local_irq_enable();
+ }
+ 
+ void _write_unlock_irqrestore(rwlock_t *lock, unsigned long flags)
+ {
+-    preempt_enable();
+-    _raw_write_unlock(&lock->raw);
++    _write_unlock(lock);
+     local_irq_restore(flags);
+ }
+ 
+ int _rw_is_locked(rwlock_t *lock)
+ {
+     check_lock(&lock->debug);
+-    return _raw_rw_is_locked(&lock->raw);
++    return (lock->lock != 0); /* anyone in critical section? */
+ }
+ 
+ int _rw_is_write_locked(rwlock_t *lock)
+ {
+     check_lock(&lock->debug);
+-    return _raw_rw_is_write_locked(&lock->raw);
++    return (lock->lock == RW_WRITE_FLAG); /* writer in critical section? */
+ }
+ 
+ #ifdef LOCK_PROFILE
+--- a/xen/include/asm-arm/arm32/spinlock.h
++++ b/xen/include/asm-arm/arm32/spinlock.h
+@@ -55,84 +55,6 @@ static always_inline int _raw_spin_trylo
+     }
+ }
+ 
+-typedef struct {
+-    volatile unsigned int lock;
+-} raw_rwlock_t;
+-
+-#define _RAW_RW_LOCK_UNLOCKED { 0 }
+-
+-static always_inline int _raw_read_trylock(raw_rwlock_t *rw)
+-{
+-    unsigned long tmp, tmp2 = 1;
+-
+-    __asm__ __volatile__(
+-"1: ldrex   %0, [%2]\n"
+-"   adds    %0, %0, #1\n"
+-"   strexpl %1, %0, [%2]\n"
+-    : "=&r" (tmp), "+r" (tmp2)
+-    : "r" (&rw->lock)
+-    : "cc");
+-
+-    smp_mb();
+-    return tmp2 == 0;
+-}
+-
+-static always_inline int _raw_write_trylock(raw_rwlock_t *rw)
+-{
+-    unsigned long tmp;
+-
+-    __asm__ __volatile__(
+-"1: ldrex   %0, [%1]\n"
+-"   teq     %0, #0\n"
+-"   strexeq %0, %2, [%1]"
+-    : "=&r" (tmp)
+-    : "r" (&rw->lock), "r" (0x80000000)
+-    : "cc");
+-
+-    if (tmp == 0) {
+-        smp_mb();
+-        return 1;
+-    } else {
+-        return 0;
+-    }
+-}
+-
+-static inline void _raw_read_unlock(raw_rwlock_t *rw)
+-{
+-    unsigned long tmp, tmp2;
+-
+-    smp_mb();
+-
+-    __asm__ __volatile__(
+-"1: ldrex   %0, [%2]\n"
+-"   sub     %0, %0, #1\n"
+-"   strex   %1, %0, [%2]\n"
+-"   teq     %1, #0\n"
+-"   bne     1b"
+-    : "=&r" (tmp), "=&r" (tmp2)
+-    : "r" (&rw->lock)
+-    : "cc");
+-
+-    if (tmp == 0)
+-        dsb_sev();
+-}
+-
+-static inline void _raw_write_unlock(raw_rwlock_t *rw)
+-{
+-    smp_mb();
+-
+-    __asm__ __volatile__(
+-    "str    %1, [%0]\n"
+-    :
+-    : "r" (&rw->lock), "r" (0)
+-    : "cc");
+-
+-    dsb_sev();
+-}
+-
+-#define _raw_rw_is_locked(x) ((x)->lock != 0)
+-#define _raw_rw_is_write_locked(x) ((x)->lock == 0x80000000)
+-
+ #endif /* __ASM_SPINLOCK_H */
+ /*
+  * Local variables:
+--- a/xen/include/asm-arm/arm64/spinlock.h
++++ b/xen/include/asm-arm/arm64/spinlock.h
+@@ -52,69 +52,6 @@ static always_inline int _raw_spin_trylo
+     return !tmp;
+ }
+ 
+-typedef struct {
+-    volatile unsigned int lock;
+-} raw_rwlock_t;
+-
+-#define _RAW_RW_LOCK_UNLOCKED { 0 }
+-
+-static always_inline int _raw_read_trylock(raw_rwlock_t *rw)
+-{
+-    unsigned int tmp, tmp2 = 1;
+-
+-    asm volatile(
+-        "       ldaxr   %w0, %2\n"
+-        "       add     %w0, %w0, #1\n"
+-        "       tbnz    %w0, #31, 1f\n"
+-        "       stxr    %w1, %w0, %2\n"
+-        "1:\n"
+-        : "=&r" (tmp), "+r" (tmp2), "+Q" (rw->lock)
+-        :
+-        : "cc", "memory");
+-
+-    return !tmp2;
+-}
+-
+-static always_inline int _raw_write_trylock(raw_rwlock_t *rw)
+-{
+-    unsigned int tmp;
+-
+-    asm volatile(
+-        "       ldaxr   %w0, %1\n"
+-        "       cbnz    %w0, 1f\n"
+-        "       stxr    %w0, %w2, %1\n"
+-        "1:\n"
+-        : "=&r" (tmp), "+Q" (rw->lock)
+-        : "r" (0x80000000)
+-        : "cc", "memory");
+-
+-    return !tmp;
+-}
+-
+-static inline void _raw_read_unlock(raw_rwlock_t *rw)
+-{
+-    unsigned int tmp, tmp2;
+-
+-    asm volatile(
+-        "    1: ldxr    %w0, %2\n"
+-        "       sub     %w0, %w0, #1\n"
+-        "       stlxr   %w1, %w0, %2\n"
+-        "       cbnz    %w1, 1b\n"
+-        : "=&r" (tmp), "=&r" (tmp2), "+Q" (rw->lock)
+-        :
+-        : "cc", "memory");
+-}
+-
+-static inline void _raw_write_unlock(raw_rwlock_t *rw)
+-{
+-    asm volatile(
+-        "       stlr    %w1, %0\n"
+-        : "=Q" (rw->lock) : "r" (0) : "memory");
+-}
+-
+-#define _raw_rw_is_locked(x) ((x)->lock != 0)
+-#define _raw_rw_is_write_locked(x) ((x)->lock == 0x80000000)
+-
+ #endif /* __ASM_SPINLOCK_H */
+ /*
+  * Local variables:
+--- a/xen/include/asm-x86/spinlock.h
++++ b/xen/include/asm-x86/spinlock.h
+@@ -31,58 +31,4 @@ static always_inline int _raw_spin_trylo
+     return (oldval > 0);
+ }
+ 
+-typedef struct {
+-    volatile int lock;
+-} raw_rwlock_t;
+-
+-#define RW_WRITE_BIAS 0x7fffffff
+-#define _RAW_RW_LOCK_UNLOCKED /*(raw_rwlock_t)*/ { 0 }
+-
+-static always_inline int _raw_read_trylock(raw_rwlock_t *rw)
+-{
+-    int acquired;
+-
+-    asm volatile (
+-        "    lock; decl %0         \n"
+-        "    jns 2f                \n"
+-#ifdef __clang__ /* clang's builtin assember can't do .subsection */
+-        "1:  .pushsection .fixup,\"ax\"\n"
+-#else
+-        "1:  .subsection 1         \n"
+-#endif
+-        "2:  lock; incl %0         \n"
+-        "    decl %1               \n"
+-        "    jmp 1b                \n"
+-#ifdef __clang__
+-        "    .popsection           \n"
+-#else
+-        "    .subsection 0         \n"
+-#endif
+-        : "=m" (rw->lock), "=r" (acquired) : "1" (1) : "memory" );
+-
+-    return acquired;
+-}
+-
+-static always_inline int _raw_write_trylock(raw_rwlock_t *rw)
+-{
+-    return (cmpxchg(&rw->lock, 0, RW_WRITE_BIAS) == 0);
+-}
+-
+-static always_inline void _raw_read_unlock(raw_rwlock_t *rw)
+-{
+-    asm volatile (
+-        "lock ; incl %0"
+-        : "=m" ((rw)->lock) : : "memory" );
+-}
+-
+-static always_inline void _raw_write_unlock(raw_rwlock_t *rw)
+-{
+-    asm volatile (
+-        "lock ; subl %1,%0"
+-        : "=m" ((rw)->lock) : "i" (RW_WRITE_BIAS) : "memory" );
+-}
+-
+-#define _raw_rw_is_locked(x) ((x)->lock != 0)
+-#define _raw_rw_is_write_locked(x) ((x)->lock > 0)
+-
+ #endif /* __ASM_SPINLOCK_H */
+--- a/xen/include/xen/spinlock.h
++++ b/xen/include/xen/spinlock.h
+@@ -141,11 +141,13 @@ typedef struct spinlock {
+ #define spin_lock_init(l) (*(l) = (spinlock_t)SPIN_LOCK_UNLOCKED)
+ 
+ typedef struct {
+-    raw_rwlock_t raw;
++    volatile uint32_t lock;
+     struct lock_debug debug;
+ } rwlock_t;
+ 
+-#define RW_LOCK_UNLOCKED { _RAW_RW_LOCK_UNLOCKED, _LOCK_DEBUG }
++#define RW_WRITE_FLAG (1u<<31)
++
++#define RW_LOCK_UNLOCKED { 0, _LOCK_DEBUG }
+ #define DEFINE_RWLOCK(l) rwlock_t l = RW_LOCK_UNLOCKED
+ #define rwlock_init(l) (*(l) = (rwlock_t)RW_LOCK_UNLOCKED)
+ 
