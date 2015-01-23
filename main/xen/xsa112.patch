@@ -1,0 +1,88 @@
+x86/HVM: confine internally handled MMIO to solitary regions
+
+While it is generally wrong to cross region boundaries when dealing
+with MMIO accesses of repeated string instructions (currently only
+MOVS) as that would do things a guest doesn't expect (leaving aside
+that none of these regions would normally be accessed with repeated
+string instructions in the first place), this is even more of a problem
+for all virtual MSI-X page accesses (both msixtbl_{read,write}() can be
+made dereference NULL "entry" pointers this way) as well as undersized
+(1- or 2-byte) LAPIC writes (causing vlapic_read_aligned() to access
+space beyond the one memory page set up for holding LAPIC register
+values).
+
+Since those functions validly assume to be called only with addresses
+their respective checking functions indicated to be okay, it is generic
+code that needs to be fixed to clip the repetition count.
+
+To be on the safe side (and consistent), also do the same for buffered
+I/O intercepts, even if their only client (stdvga) doesn't put the
+hypervisor at risk (i.e. "only" guest misbehavior would result).
+
+This is CVE-2014-8867 / XSA-112.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Tim Deegan <tim@xen.org>
+
+--- a/xen/arch/x86/hvm/intercept.c
++++ b/xen/arch/x86/hvm/intercept.c
+@@ -181,11 +181,24 @@ int hvm_mmio_intercept(ioreq_t *p)
+     int i;
+ 
+     for ( i = 0; i < HVM_MMIO_HANDLER_NR; i++ )
+-        if ( hvm_mmio_handlers[i]->check_handler(v, p->addr) )
++    {
++        hvm_mmio_check_t check_handler =
++            hvm_mmio_handlers[i]->check_handler;
++
++        if ( check_handler(v, p->addr) )
++        {
++            if ( unlikely(p->count > 1) &&
++                 !check_handler(v, unlikely(p->df)
++                                   ? p->addr - (p->count - 1L) * p->size
++                                   : p->addr + (p->count - 1L) * p->size) )
++                p->count = 1;
++
+             return hvm_mmio_access(
+                 v, p,
+                 hvm_mmio_handlers[i]->read_handler,
+                 hvm_mmio_handlers[i]->write_handler);
++        }
++    }
+ 
+     return X86EMUL_UNHANDLEABLE;
+ }
+@@ -342,6 +355,13 @@ int hvm_io_intercept(ioreq_t *p, int typ
+             if ( type == HVM_PORTIO )
+                 return process_portio_intercept(
+                     handler->hdl_list[i].action.portio, p);
++
++            if ( unlikely(p->count > 1) &&
++                 (unlikely(p->df)
++                  ? p->addr - (p->count - 1L) * p->size < addr
++                  : p->addr + p->count * 1L * p->size - 1 >= addr + size) )
++                p->count = 1;
++
+             return handler->hdl_list[i].action.mmio(p);
+         }
+     }
+--- a/xen/arch/x86/hvm/vmsi.c
++++ b/xen/arch/x86/hvm/vmsi.c
+@@ -226,6 +226,8 @@ static int msixtbl_read(
+     rcu_read_lock(&msixtbl_rcu_lock);
+ 
+     entry = msixtbl_find_entry(v, address);
++    if ( !entry )
++        goto out;
+     offset = address & (PCI_MSIX_ENTRY_SIZE - 1);
+ 
+     if ( offset != PCI_MSIX_ENTRY_VECTOR_CTRL_OFFSET )
+@@ -268,6 +270,8 @@ static int msixtbl_write(struct vcpu *v,
+     rcu_read_lock(&msixtbl_rcu_lock);
+ 
+     entry = msixtbl_find_entry(v, address);
++    if ( !entry )
++        goto out;
+     nr_entry = (address - entry->gtable) / PCI_MSIX_ENTRY_SIZE;
+ 
+     offset = address & (PCI_MSIX_ENTRY_SIZE - 1);
