@@ -897,6 +897,12 @@ static int free_package(apk_hash_item item, void *ctx)
 	return 0;
 }
 
+static int cmp_pkgname(const void *p1, const void *p2)
+{
+	const struct apk_dependency *d1 = p1, *d2 = p2;
+	return strcmp(d1->name->name, d2->name->name);
+}
+
 int apk_solver_solve(struct apk_database *db,
 		     unsigned short solver_flags,
 		     struct apk_dependency_array *world,
@@ -906,6 +912,8 @@ int apk_solver_solve(struct apk_database *db,
 	struct apk_package *pkg;
 	struct apk_solver_state ss_data, *ss = &ss_data;
 	struct apk_dependency *d;
+
+	qsort(world->item, world->num, sizeof(world->item[0]), cmp_pkgname);
 
 restart:
 	memset(ss, 0, sizeof(*ss));
