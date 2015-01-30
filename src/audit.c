@@ -244,9 +244,6 @@ recurse_check:
 				reason = 'A';
 				break;
 			}
-		} else {
-			if (protect_mode != APK_PROTECT_NONE)
-				goto done;
 		}
 
 		dbf = apk_db_file_query(db, bdir, bent);
@@ -254,7 +251,8 @@ recurse_check:
 			reason = audit_file(actx, db, dbf, dirfd, name);
 		if (reason < 0)
 			goto done;
-		if (reason == 'A' && actx->mode == MODE_SYSTEM)
+		if (actx->mode == MODE_SYSTEM &&
+		    (reason == 'A' || protect_mode != APK_PROTECT_NONE))
 			goto done;
 		report_audit(actx, reason, bfull, dbf ? dbf->diri->pkg : NULL);
 	}
