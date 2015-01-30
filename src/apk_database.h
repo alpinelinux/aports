@@ -152,7 +152,6 @@ struct apk_database {
 	int permanent : 1;
 	int compat_newfeatures : 1;
 	int compat_notinstallable : 1;
-	int compat_old_world : 1;
 
 	struct apk_dependency_array *world;
 	struct apk_protected_path_array *protected_paths;

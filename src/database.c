@@ -1113,8 +1113,6 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 		if (APK_BLOB_IS_NULL(blob))
 			return -ENOENT;
 		blob = apk_blob_trim(blob);
-		if (apk_blob_chr(blob, ' '))
-			db->compat_old_world = 1;
 		apk_blob_pull_deps(&blob, db, &db->world);
 		free(world.ptr);
 	}
@@ -1653,7 +1651,7 @@ int apk_db_write_config(struct apk_database *db)
 	if (os == NULL)
 		return -1;
 
-	apk_deps_write(db, db->world, os, APK_BLOB_PTR_LEN(db->compat_old_world ? " " : "\n", 1));
+	apk_deps_write(db, db->world, os, APK_BLOB_PTR_LEN("\n", 1));
 	os->write(os, "\n", 1);
 	r = os->close(os);
 	if (r < 0)
