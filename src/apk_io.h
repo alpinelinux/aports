@@ -147,7 +147,6 @@ int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 typedef int apk_dir_file_cb(void *ctx, int dirfd, const char *entry);
 int apk_dir_foreach_file(int dirfd, apk_dir_file_cb cb, void *ctx);
 
-int apk_move_file(int atfd, const char *from, const char *to);
 const char *apk_url_local_file(const char *url);
 
 void apk_id_cache_init(struct apk_id_cache *idc, int root_fd);

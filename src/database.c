@@ -57,20 +57,16 @@ static const char * const apk_lock_file = "var/lock/apkdb";
 
 static const char * const apk_world_file = "etc/apk/world";
 static const char * const apk_world_file_tmp = "etc/apk/world.new";
-static const char * const apk_world_file_old = "var/lib/apk/world";
 static const char * const apk_arch_file = "etc/apk/arch";
 
 static const char * const apk_scripts_file = "lib/apk/db/scripts.tar";
 static const char * const apk_scripts_file_tmp = "lib/apk/db/scripts.tar.new";
-static const char * const apk_scripts_file_old = "var/lib/apk/scripts.tar";
 
 static const char * const apk_triggers_file = "lib/apk/db/triggers";
 static const char * const apk_triggers_file_tmp = "lib/apk/db/triggers.new";
-static const char * const apk_triggers_file_old = "var/lib/apk/triggers";
 
 const char * const apk_installed_file = "lib/apk/db/installed";
 static const char * const apk_installed_file_tmp = "lib/apk/db/installed.new";
-static const char * const apk_installed_file_old = "var/lib/apk/installed";
 
 static struct apk_db_acl *apk_default_acl_dir, *apk_default_acl_file;
 
@@ -1377,24 +1373,6 @@ static int do_remount(const char *path, const char *option)
 	return WEXITSTATUS(status);
 }
 
-static void relocate_database(struct apk_database *db)
-{
-	mkdirat(db->root_fd, "etc", 0755);
-	mkdirat(db->root_fd, "etc/apk", 0755);
-	mkdirat(db->root_fd, "lib", 0755);
-	mkdirat(db->root_fd, "lib/apk", 0755);
-	mkdirat(db->root_fd, "lib/apk/db", 0755);
-	mkdirat(db->root_fd, "var", 0755);
-	mkdirat(db->root_fd, "var/cache", 0755);
-	mkdirat(db->root_fd, "var/cache/apk", 0755);
-	mkdirat(db->root_fd, "var/cache/misc", 0755);
-	mkdirat(db->root_fd, "var/lock", 0755);
-	apk_move_file(db->root_fd, apk_world_file_old, apk_world_file);
-	apk_move_file(db->root_fd, apk_scripts_file_old, apk_scripts_file);
-	apk_move_file(db->root_fd, apk_triggers_file_old, apk_triggers_file);
-	apk_move_file(db->root_fd, apk_installed_file_old, apk_installed_file);
-}
-
 static void mark_in_cache(struct apk_database *db, int dirfd, const char *name, struct apk_package *pkg)
 {
 	if (pkg == NULL)
@@ -1509,9 +1487,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_id_cache_init(&db->id_cache, db->root_fd);
 
 	if (dbopts->open_flags & APK_OPENF_WRITE) {
-		if (faccessat(db->root_fd, apk_installed_file_old, F_OK, 0) == 0)
-			relocate_database(db);
-
 		db->lock_fd = openat(db->root_fd, apk_lock_file,
 				     O_CREAT | O_RDWR | O_CLOEXEC, 0600);
 		if (db->lock_fd < 0 && errno == ENOENT &&
