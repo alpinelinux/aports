@@ -802,6 +802,11 @@ static void cset_gen_name_change(struct apk_solver_state *ss, struct apk_name *n
 		cset_track_deps_removed(ss, opkg);
 }
 
+static void cset_gen_name_remove0(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx)
+{
+	cset_gen_name_remove(ctx, pkg0);
+}
+
 static void cset_gen_name_remove(struct apk_solver_state *ss, struct apk_package *pkg)
 {
 	struct apk_name *name = pkg->name, **pname;
@@ -813,6 +818,7 @@ static void cset_gen_name_remove(struct apk_solver_state *ss, struct apk_package
 
 	name->ss.in_changeset = 1;
 	pkg->ss.in_changeset = 1;
+	apk_pkg_foreach_reverse_dependency(pkg, APK_FOREACH_INSTALLED|APK_DEP_SATISFIES, cset_gen_name_remove0, ss);
 	foreach_array_item(pname, pkg->name->rinstall_if)
 		cset_check_removal_by_iif(ss, *pname);
 	record_change(ss, pkg, NULL);
