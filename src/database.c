@@ -832,7 +832,6 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		case 'q':
 			ipkg->replaces_priority = apk_blob_pull_uint(&l, 10);
 			break;
-		case 'p':
 		case 's':
 			ipkg->repository_tag = apk_db_get_tag_id(db, l);
 			break;
