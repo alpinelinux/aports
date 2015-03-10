@@ -1187,8 +1187,7 @@ static int apk_db_index_write_nr_cache(struct apk_database *db)
 				 "installed",
 				 "installed.new",
 				 0644);
-	if (os == NULL)
-		return -EIO;
+	if (IS_ERR_OR_NULL(os)) return PTR_ERR(os);
 
 	ctx.os = os;
 	list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
@@ -1648,36 +1647,29 @@ int apk_db_write_config(struct apk_database *db)
 				 apk_world_file,
 				 apk_world_file_tmp,
 				 0644);
-	if (os == NULL)
-		return -1;
-
+	if (IS_ERR_OR_NULL(os)) return PTR_ERR(os);
 	apk_deps_write(db, db->world, os, APK_BLOB_PTR_LEN("\n", 1));
 	os->write(os, "\n", 1);
 	r = os->close(os);
-	if (r < 0)
-		return r;
+	if (r < 0) return r;
 
 	os = apk_ostream_to_file(db->root_fd,
 				 apk_installed_file,
 				 apk_installed_file_tmp,
 				 0644);
-	if (os == NULL)
-		return -1;
+	if (IS_ERR_OR_NULL(os)) return PTR_ERR(os);
 	apk_db_write_fdb(db, os);
 	r = os->close(os);
-	if (r < 0)
-		return r;
+	if (r < 0) return r;
 
 	os = apk_ostream_to_file(db->root_fd,
 				 apk_scripts_file,
 				 apk_scripts_file_tmp,
 				 0644);
-	if (os == NULL)
-		return -1;
+	if (IS_ERR_OR_NULL(os)) return PTR_ERR(os);
 	apk_db_scriptdb_write(db, os);
 	r = os->close(os);
-	if (r < 0)
-		return r;
+	if (r < 0) return r;
 
 	apk_db_index_write_nr_cache(db);
 
@@ -1685,12 +1677,10 @@ int apk_db_write_config(struct apk_database *db)
 				 apk_triggers_file,
 				 apk_triggers_file_tmp,
 				 0644);
-	if (os == NULL)
-		return -1;
+	if (IS_ERR_OR_NULL(os)) return PTR_ERR(os);
 	apk_db_triggers_write(db, os);
 	r = os->close(os);
-	if (r < 0)
-		return r;
+	if (r < 0) return r;
 
 	return 0;
 }

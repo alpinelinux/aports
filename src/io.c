@@ -715,13 +715,12 @@ struct apk_ostream *apk_ostream_to_fd(int fd)
 {
 	struct apk_fd_ostream *fos;
 
-	if (fd < 0)
-		return NULL;
+	if (fd < 0) return ERR_PTR(-EBADF);
 
 	fos = malloc(sizeof(struct apk_fd_ostream));
 	if (fos == NULL) {
 		close(fd);
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	*fos = (struct apk_fd_ostream) {
@@ -742,14 +741,12 @@ struct apk_ostream *apk_ostream_to_file(int atfd,
 	int fd;
 
 	fd = openat(atfd, tmpfile ?: file, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, mode);
-	if (fd < 0)
-		return NULL;
+	if (fd < 0) return ERR_PTR(-errno);
 
 	fcntl(fd, F_SETFD, FD_CLOEXEC);
 
 	os = apk_ostream_to_fd(fd);
-	if (os == NULL)
-		return NULL;
+	if (IS_ERR_OR_NULL(os)) return ERR_CAST(os);
 
 	if (tmpfile != NULL) {
 		struct apk_fd_ostream *fos =
