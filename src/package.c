@@ -892,7 +892,7 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	struct apk_istream *tar;
 	int r;
 
-	r = apk_file_get_info(AT_FDCWD, file, APK_CHECKSUM_NONE, &fi);
+	r = apk_fileinfo_get(AT_FDCWD, file, APK_CHECKSUM_NONE, &fi);
 	if (r != 0)
 		return r;
 

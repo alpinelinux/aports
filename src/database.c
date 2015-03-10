@@ -2425,7 +2425,7 @@ static void apk_db_purge_pkg(struct apk_database *db,
 			if ((diri->dir->protect_mode == APK_PROTECT_NONE) ||
 			    (apk_flags & APK_PURGE) ||
 			    (file->csum.type != APK_CHECKSUM_NONE &&
-			     apk_file_get_info(db->root_fd, name, APK_FI_NOFOLLOW | file->csum.type, &fi) == 0 &&
+			     apk_fileinfo_get(db->root_fd, name, APK_FI_NOFOLLOW | file->csum.type, &fi) == 0 &&
 			     apk_checksum_compare(&file->csum, &fi.csum) == 0))
 				unlinkat(db->root_fd, name, 0);
 			if (apk_verbosity >= 3)
@@ -2483,7 +2483,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 				cstype = ofile->csum.type;
 			cstype |= APK_FI_NOFOLLOW;
 
-			r = apk_file_get_info(db->root_fd, name, cstype, &fi);
+			r = apk_fileinfo_get(db->root_fd, name, cstype, &fi);
 			if (ofile && ofile->diri->pkg->name == NULL) {
 				/* File was from overlay, delete the
 				 * packages version */
@@ -2500,7 +2500,7 @@ static void apk_db_migrate_files(struct apk_database *db,
 				 * existing file */
 				if (ofile == NULL ||
 				    ofile->csum.type != file->csum.type)
-					apk_file_get_info(db->root_fd, name,
+					apk_fileinfo_get(db->root_fd, name,
 						APK_FI_NOFOLLOW | file->csum.type, &fi);
 				if ((apk_flags & APK_CLEAN_PROTECTED) ||
 				    (file->csum.type != APK_CHECKSUM_NONE &&

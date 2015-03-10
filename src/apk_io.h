@@ -148,9 +148,9 @@ apk_blob_t apk_blob_from_file(int atfd, const char *file);
 int apk_blob_to_file(int atfd, const char *file, apk_blob_t b, unsigned int flags);
 
 #define APK_FI_NOFOLLOW		0x80000000
-int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
-		      struct apk_file_info *fi);
-void apk_file_info_free(struct apk_file_info *fi);
+int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
+		     struct apk_file_info *fi);
+void apk_fileinfo_free(struct apk_file_info *fi);
 
 typedef int apk_dir_file_cb(void *ctx, int dirfd, const char *entry);
 int apk_dir_foreach_file(int dirfd, apk_dir_file_cb cb, void *ctx);

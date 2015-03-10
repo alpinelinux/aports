@@ -138,7 +138,7 @@ static int fetch_package(apk_hash_item item, void *pctx)
 	}
 
 	if (!(ctx->flags & FETCH_STDOUT)) {
-		if (apk_file_get_info(ctx->outdir_fd, filename, APK_CHECKSUM_NONE, &fi) == 0 &&
+		if (apk_fileinfo_get(ctx->outdir_fd, filename, APK_CHECKSUM_NONE, &fi) == 0 &&
 		    fi.size == pkg->size)
 			return 0;
 	}

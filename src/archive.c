@@ -314,7 +314,7 @@ err:
 	EVP_MD_CTX_cleanup(&teis.mdctx);
 	free(pax.ptr);
 	free(longname.ptr);
-	apk_file_info_free(&entry);
+	apk_fileinfo_free(&entry);
 	return r;
 
 err_nomem:
@@ -480,7 +480,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 			} else {
 				r = errno;
 			}
-			if (r < 0) {
+			if (r) {
 				apk_error("Failed to set xattrs on %s: %s",
 					  fn, strerror(r));
 				return -r;

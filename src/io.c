@@ -529,8 +529,8 @@ int apk_blob_to_file(int atfd, const char *file, apk_blob_t b, unsigned int flag
 	return r;
 }
 
-int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
-		      struct apk_file_info *fi)
+int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
+		     struct apk_file_info *fi)
 {
 	struct stat64 st;
 	struct apk_bstream *bs;
@@ -586,7 +586,7 @@ int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 	return 0;
 }
 
-void apk_file_info_free(struct apk_file_info *fi)
+void apk_fileinfo_free(struct apk_file_info *fi)
 {
 	apk_xattr_array_free(&fi->xattrs);
 }
