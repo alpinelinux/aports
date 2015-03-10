@@ -169,8 +169,8 @@ static int fetch_package(apk_hash_item item, void *pctx)
 	}
 
 	is = apk_istream_from_fd_url(urlfd, url);
-	if (is == NULL) {
-		r = -EIO;
+	if (IS_ERR_OR_NULL(is)) {
+		r = PTR_ERR(is) ?: -EIO;
 		goto err;
 	}
 

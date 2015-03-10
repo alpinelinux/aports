@@ -524,7 +524,7 @@ int main(int argc, char **argv)
 	}
 	if (test_installed_db != NULL) {
 		struct apk_bstream *bs = apk_bstream_from_file(AT_FDCWD, test_installed_db);
-		if (bs != NULL) {
+		if (!IS_ERR_OR_NULL(bs)) {
 			apk_db_index_read(&db, bs, -1);
 			bs->close(bs, NULL);
 		}
@@ -548,7 +548,7 @@ int main(int argc, char **argv)
 		}
 
 		bs = apk_bstream_from_file(AT_FDCWD, name.ptr);
-		if (bs == NULL) {
+		if (IS_ERR_OR_NULL(bs)) {
 			apk_error("Failed to open repository: " BLOB_FMT, BLOB_PRINTF(name));
 			goto err;
 		}

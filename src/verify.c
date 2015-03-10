@@ -28,7 +28,7 @@ static int verify_main(void *ctx, struct apk_database *db, struct apk_string_arr
 		apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY, NULL, db->keys_fd);
 		is = apk_bstream_gunzip_mpart(apk_bstream_from_file(AT_FDCWD, *parg),
 					      apk_sign_ctx_mpart_cb, &sctx);
-		if (is == NULL) {
+		if (IS_ERR_OR_NULL(is)) {
 			if (apk_verbosity >= 1)
 				apk_error("%s: %s", *parg, strerror(errno));
 			else

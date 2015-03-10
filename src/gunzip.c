@@ -170,7 +170,7 @@ struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 	return &gis->is;
 err:
 	bs->close(bs, NULL);
-	return NULL;
+	return ERR_PTR(-ENOMEM);
 }
 
 struct apk_gzip_ostream {
@@ -236,8 +236,7 @@ struct apk_ostream *apk_ostream_gzip(struct apk_ostream *output)
 	if (IS_ERR_OR_NULL(output)) return ERR_CAST(output);
 
 	gos = malloc(sizeof(struct apk_gzip_ostream));
-	if (gos == NULL)
-		goto err;
+	if (gos == NULL) goto err;
 
 	*gos = (struct apk_gzip_ostream) {
 		.os.write = gzo_write,
@@ -254,6 +253,6 @@ struct apk_ostream *apk_ostream_gzip(struct apk_ostream *output)
 	return &gos->os;
 err:
 	output->close(output);
-	return NULL;
+	return ERR_PTR(-ENOMEM);
 }
 

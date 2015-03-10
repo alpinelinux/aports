@@ -83,12 +83,12 @@ struct apk_istream *apk_istream_from_fd_pid(int fd, pid_t pid, int (*translate_s
 {
 	struct apk_fd_istream *fis;
 
-	if (fd < 0) return NULL;
+	if (fd < 0) return ERR_PTR(-EBADF);
 
 	fis = malloc(sizeof(struct apk_fd_istream));
 	if (fis == NULL) {
 		close(fd);
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	*fis = (struct apk_fd_istream) {
@@ -107,7 +107,7 @@ struct apk_istream *apk_istream_from_file(int atfd, const char *file)
 	int fd;
 
 	fd = openat(atfd, file, O_RDONLY | O_CLOEXEC);
-	if (fd < 0) return NULL;
+	if (fd < 0) return ERR_PTR(-errno);
 
 	return apk_istream_from_fd(fd);
 }
@@ -273,7 +273,7 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream)
 	if (IS_ERR_OR_NULL(istream)) return ERR_CAST(istream);
 
 	isbs = malloc(sizeof(struct apk_istream_bstream));
-	if (isbs == NULL) return NULL;
+	if (isbs == NULL) return ERR_PTR(-ENOMEM);
 
 	isbs->bs = (struct apk_bstream) {
 		.read = is_bs_read,
@@ -330,15 +330,15 @@ static struct apk_bstream *apk_mmap_bstream_from_fd(int fd)
 	struct stat st;
 	void *ptr;
 
-	if (fstat(fd, &st) < 0) return NULL;
+	if (fstat(fd, &st) < 0) return ERR_PTR(-errno);
 
 	ptr = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-	if (ptr == MAP_FAILED) return NULL;
+	if (ptr == MAP_FAILED) return ERR_PTR(-errno);
 
 	mbs = malloc(sizeof(struct apk_mmap_bstream));
 	if (mbs == NULL) {
 		munmap(ptr, st.st_size);
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	mbs->bs = (struct apk_bstream) {
@@ -358,12 +358,11 @@ struct apk_bstream *apk_bstream_from_fd_pid(int fd, pid_t pid, int (*translate_s
 {
 	struct apk_bstream *bs;
 
-	if (fd < 0) return NULL;
+	if (fd < 0) return ERR_PTR(-EBADF);
 
 	if (pid == 0) {
 		bs = apk_mmap_bstream_from_fd(fd);
-		if (bs != NULL)
-			return bs;
+		if (IS_ERR_OR_NULL(bs)) return ERR_CAST(bs);
 	}
 
 	return apk_bstream_from_istream(apk_istream_from_fd_pid(fd, pid, translate_status));
@@ -374,7 +373,7 @@ struct apk_bstream *apk_bstream_from_file(int atfd, const char *file)
 	int fd;
 
 	fd = openat(atfd, file, O_RDONLY | O_CLOEXEC);
-	if (fd < 0) return NULL;
+	if (fd < 0) return ERR_PTR(-errno);
 
 	return apk_bstream_from_fd(fd);
 }
@@ -569,7 +568,7 @@ int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 	}
 
 	bs = apk_bstream_from_file(atfd, filename);
-	if (bs != NULL) {
+	if (!IS_ERR_OR_NULL(bs)) {
 		EVP_MD_CTX mdctx;
 		apk_blob_t blob;
 

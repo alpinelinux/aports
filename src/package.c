@@ -903,8 +903,10 @@ int apk_pkg_read(struct apk_database *db, const char *file,
 	if (ctx.pkg == NULL)
 		goto err;
 	bs = apk_bstream_from_file(AT_FDCWD, file);
-	if (bs == NULL)
+	if (IS_ERR_OR_NULL(bs)) {
+		r = PTR_ERR(bs) ?: -EIO;
 		goto err;
+	}
 
 	ctx.db = db;
 	ctx.pkg->size = fi.size;

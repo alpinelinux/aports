@@ -38,6 +38,34 @@ struct apk_fetch_istream {
 	fetchIO *fetchIO;
 };
 
+static int fetch_maperror(int ec)
+{
+	static const char map[] = {
+		[FETCH_ABORT] = -ECONNABORTED,
+		[FETCH_AUTH] = -EACCES,
+		[FETCH_DOWN] = -ECONNREFUSED,
+		[FETCH_EXISTS] = -EEXIST,
+		[FETCH_FULL] = -ENOSPC,
+		/* [FETCH_INFO] = , */
+		[FETCH_MEMORY] = -ENOMEM,
+		[FETCH_MOVED] = -ENOENT,
+		[FETCH_NETWORK] = -ENETUNREACH,
+		/* [FETCH_OK] = , */
+		[FETCH_PROTO] = -EPROTO,
+		[FETCH_RESOLV] = -ENXIO,
+		[FETCH_SERVER] = -EREMOTEIO,
+		[FETCH_TEMP] = -EAGAIN,
+		[FETCH_TIMEOUT] = -ETIMEDOUT,
+		[FETCH_UNAVAIL] = -ENOENT,
+		[FETCH_UNKNOWN] = -EIO,
+		[FETCH_URL] = -EINVAL,
+		[FETCH_UNCHANGED] = -EALREADY,
+	};
+
+	if (ec < 0 || ec >= ARRAY_SIZE(map) || !map[ec]) return -EIO;
+	return map[ec];
+}
+
 static ssize_t fetch_read(void *stream, void *ptr, size_t size)
 {
 	struct apk_fetch_istream *fis = container_of(stream, struct apk_fetch_istream, is);
@@ -70,14 +98,11 @@ static struct apk_istream *apk_istream_fetch(const char *url, time_t since)
 	fetchIO *io;
 
 	u = fetchParseURL(url);
-	if (!u) return NULL;
+	if (!u) return ERR_PTR(-ENOMEM);
 	u->last_modified = since;
 	io = fetchGet(u, "i");
 	fetchFreeURL(u);
-	if (!io) {
-		if (fetchLastErrCode == FETCH_UNCHANGED) return ERR_PTR(-EALREADY);
-		return NULL;
-	}
+	if (!io) return ERR_PTR(fetch_maperror(fetchLastErrCode));
 
 	fis = malloc(sizeof(*fis));
 	if (!fis) goto err;
@@ -91,7 +116,7 @@ static struct apk_istream *apk_istream_fetch(const char *url, time_t since)
 	return &fis->is;
 err:
 	if (io) fetchIO_close(io);
-	return NULL;
+	return ERR_PTR(-ENOMEM);
 }
 
 struct apk_istream *apk_istream_from_fd_url_if_modified(int atfd, const char *url, time_t since)

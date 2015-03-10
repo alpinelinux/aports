@@ -698,6 +698,8 @@ int apk_db_read_overlay(struct apk_database *db, struct apk_bstream *bs)
 	struct apk_installed_package *ipkg;
 	apk_blob_t token = APK_BLOB_STR("\n"), line, bdir, bfile;
 
+	if (IS_ERR_OR_NULL(bs)) return -1;
+
 	pkg = apk_pkg_new();
 	if (pkg == NULL)
 		return -1;
@@ -1118,15 +1120,14 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 
 	if (!(flags & APK_OPENF_NO_INSTALLED)) {
 		bs = apk_bstream_from_file(db->root_fd, apk_installed_file);
-		if (bs != NULL) {
+		if (!IS_ERR_OR_NULL(bs)) {
 			r = apk_db_index_read(db, bs, -1);
 			bs->close(bs, NULL);
-			if (r != 0)
-				return -1;
+			if (r != 0) return -1;
 		}
 
 		bs = apk_bstream_from_file(db->root_fd, apk_triggers_file);
-		if (bs != NULL) {
+		if (!IS_ERR_OR_NULL(bs)) {
 			apk_db_triggers_read(db, bs);
 			bs->close(bs, NULL);
 		}
@@ -1134,7 +1135,7 @@ static int apk_db_read_state(struct apk_database *db, int flags)
 
 	if (!(flags & APK_OPENF_NO_SCRIPTS)) {
 		is = apk_istream_from_file(db->root_fd, apk_scripts_file);
-		if (is != NULL) {
+		if (!IS_ERR_OR_NULL(is)) {
 			apk_tar_parse(is, apk_read_script_archive_entry, db,
 				      FALSE, &db->id_cache);
 			is->close(is);
@@ -1580,7 +1581,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	if (!(dbopts->open_flags & APK_OPENF_NO_INSTALLED_REPO)) {
 		if (apk_db_cache_active(db)) {
 			bs = apk_bstream_from_file(db->cache_fd, "installed");
-			if (bs != NULL) {
+			if (!IS_ERR_OR_NULL(bs)) {
 				apk_db_index_read(db, bs, -2);
 				bs->close(bs, NULL);
 			}
@@ -2043,8 +2044,10 @@ static int load_apkindex(void *sctx, const struct apk_file_info *fi,
 	} else if (strcmp(fi->name, "APKINDEX") == 0) {
 		ctx->found = 1;
 		bs = apk_bstream_from_istream(is);
-		apk_db_index_read(ctx->db, bs, ctx->repo);
-		bs->close(bs, NULL);
+		if (!IS_ERR_OR_NULL(bs)) {
+			apk_db_index_read(ctx->db, bs, ctx->repo);
+			bs->close(bs, NULL);
+		}
 	}
 
 	return 0;
@@ -2054,6 +2057,8 @@ static int load_index(struct apk_database *db, struct apk_bstream *bs,
 		      int targz, int repo)
 {
 	int r = 0;
+
+	if (IS_ERR_OR_NULL(bs)) return bs ? PTR_ERR(bs) : -EINVAL;
 
 	if (targz) {
 		struct apk_istream *is;
@@ -2072,8 +2077,10 @@ static int load_index(struct apk_database *db, struct apk_bstream *bs,
 			r = -ENOMSG;
 	} else {
 		bs = apk_bstream_from_istream(apk_bstream_gunzip(bs));
-		apk_db_index_read(db, bs, repo);
-		bs->close(bs, NULL);
+		if (!IS_ERR_OR_NULL(bs)) {
+			apk_db_index_read(db, bs, repo);
+			bs->close(bs, NULL);
+		}
 	}
 	return r;
 }
@@ -2145,10 +2152,10 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 	}
 	if (r == 0) {
 		bs = apk_bstream_from_fd_url(db->cache_fd, buf);
-		if (bs != NULL)
+		if (!IS_ERR_OR_NULL(bs))
 			r = load_index(db, bs, targz, repo_num);
 		else
-			r = -ENOENT;
+			r = PTR_ERR(bs);
 	}
 
 	if (r != 0) {
@@ -2564,8 +2571,8 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		need_copy = FALSE;
 
 	bs = apk_bstream_from_fd_url(filefd, file);
-	if (bs == NULL) {
-		r = -errno;
+	if (IS_ERR_OR_NULL(bs)) {
+		r = PTR_ERR(bs);
 		goto err_msg;
 	}
 	if (need_copy) {
