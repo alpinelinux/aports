@@ -27,6 +27,12 @@ struct apk_id_cache {
 	struct apk_hash gid_cache;
 };
 
+struct apk_xattr {
+	const char *name;
+	apk_blob_t value;
+};
+APK_ARRAY(apk_xattr_array, struct apk_xattr);
+
 struct apk_file_info {
 	char *name;
 	char *link_target;
@@ -39,6 +45,7 @@ struct apk_file_info {
 	time_t mtime;
 	dev_t device;
 	struct apk_checksum csum;
+	struct apk_xattr_array *xattrs;
 };
 
 struct apk_istream {
@@ -143,6 +150,7 @@ int apk_blob_to_file(int atfd, const char *file, apk_blob_t b, unsigned int flag
 #define APK_FI_NOFOLLOW		0x80000000
 int apk_file_get_info(int atfd, const char *filename, unsigned int flags,
 		      struct apk_file_info *fi);
+void apk_file_info_free(struct apk_file_info *fi);
 
 typedef int apk_dir_file_cb(void *ctx, int dirfd, const char *entry);
 int apk_dir_foreach_file(int dirfd, apk_dir_file_cb cb, void *ctx);

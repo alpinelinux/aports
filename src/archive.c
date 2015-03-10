@@ -20,6 +20,7 @@
 #include <sysexits.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -148,6 +149,12 @@ static void handle_extended_header(struct apk_file_info *fi, apk_blob_t hdr)
 			fi->name = value.ptr;
 		} else if (apk_blob_compare(name, APK_BLOB_STR("linkpath")) == 0) {
 			fi->link_target = value.ptr;
+		} else if (apk_blob_pull_blob_match(&name, APK_BLOB_STR("SCHILY.xattr."))) {
+			name.ptr[name.len] = 0;
+			*apk_xattr_array_add(&fi->xattrs) = (struct apk_xattr) {
+				.name = name.ptr,
+				.value = value,
+			};
 		} else if (apk_blob_pull_blob_match(&name, APK_BLOB_STR("APK-TOOLS.checksum."))) {
 			int type = APK_CHECKSUM_NONE;
 			if (apk_blob_compare(name, APK_BLOB_STR("SHA1")) == 0)
@@ -201,10 +208,12 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			.gname = buf.gname,
 			.device = makedev(GET_OCTAL(buf.devmajor),
 					  GET_OCTAL(buf.devminor)),
+			.xattrs = entry.xattrs,
 		};
 		buf.mode[0] = 0; /* to nul terminate 100-byte buf.name */
 		buf.magic[0] = 0; /* to nul terminate 100-byte buf.linkname */
 		teis.csum = NULL;
+		apk_xattr_array_resize(&entry.xattrs, 0);
 
 		if (paxlen) handle_extended_header(&entry, APK_BLOB_PTR_LEN(pax.ptr, paxlen));
 
@@ -305,6 +314,7 @@ err:
 	EVP_MD_CTX_cleanup(&teis.mdctx);
 	free(pax.ptr);
 	free(longname.ptr);
+	apk_file_info_free(&entry);
 	return r;
 
 err_nomem:
@@ -382,6 +392,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 			      const char *suffix, struct apk_istream *is,
 			      apk_progress_cb cb, void *cb_ctx)
 {
+	struct apk_xattr *xattr;
 	char *fn = ae->name;
 	int fd, r = -1, atflags = 0;
 
@@ -451,6 +462,28 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 					  "on %s: %s",
 					  fn, strerror(errno));
 				return -errno;
+			}
+		}
+
+		/* extract xattrs */
+		if (ae->xattrs && ae->xattrs->num) {
+			r = 0;
+			fd = openat(atfd, fn, O_RDWR);
+			if (fd >= 0) {
+				foreach_array_item(xattr, ae->xattrs) {
+					if (fsetxattr(fd, xattr->name, xattr->value.ptr, xattr->value.len, 0) < 0) {
+						r = errno;
+						break;
+					}
+				}
+				close(fd);
+			} else {
+				r = errno;
+			}
+			if (r < 0) {
+				apk_error("Failed to set xattrs on %s: %s",
+					  fn, strerror(r));
+				return -r;
 			}
 		}
 
