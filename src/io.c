@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <endian.h>
 #include <unistd.h>
 #include <malloc.h>
 #include <dirent.h>
@@ -527,6 +528,41 @@ int apk_blob_to_file(int atfd, const char *file, apk_blob_t b, unsigned int flag
 		unlinkat(atfd, file, 0);
 
 	return r;
+}
+
+static int cmp_xattr(const void *p1, const void *p2)
+{
+	const struct apk_xattr *d1 = p1, *d2 = p2;
+	return strcmp(d1->name, d2->name);
+}
+
+static void hash_len_data(EVP_MD_CTX *ctx, uint32_t len, const void *ptr)
+{
+	uint32_t belen = htobe32(len);
+	EVP_DigestUpdate(ctx, &belen, sizeof(belen));
+	EVP_DigestUpdate(ctx, ptr, len);
+}
+
+void apk_fileinfo_hash_xattr(struct apk_file_info *fi)
+{
+	struct apk_xattr *xattr;
+	const EVP_MD *md = apk_checksum_default();
+	EVP_MD_CTX mdctx;
+
+	if (!fi->xattrs || fi->xattrs->num == 0) {
+		fi->xattr_csum.type = APK_CHECKSUM_NONE;
+		return;
+	}
+
+	qsort(fi->xattrs->item, fi->xattrs->num, sizeof(fi->xattrs->item[0]), cmp_xattr);
+
+	EVP_DigestInit(&mdctx, md);
+	foreach_array_item(xattr, fi->xattrs) {
+		hash_len_data(&mdctx, strlen(xattr->name), xattr->name);
+		hash_len_data(&mdctx, xattr->value.len, xattr->value.ptr);
+	}
+	fi->xattr_csum.type = EVP_MD_CTX_size(&mdctx);
+	EVP_DigestFinal(&mdctx, fi->xattr_csum.data, NULL);
 }
 
 int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,

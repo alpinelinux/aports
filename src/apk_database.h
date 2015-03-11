@@ -28,6 +28,7 @@ struct apk_db_acl {
 	mode_t mode;
 	uid_t uid;
 	gid_t gid;
+	struct apk_checksum xattr_csum;
 };
 
 struct apk_db_file {

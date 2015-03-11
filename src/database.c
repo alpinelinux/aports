@@ -220,10 +220,14 @@ struct apk_name *apk_db_get_name(struct apk_database *db, apk_blob_t name)
 	return pn;
 }
 
-static struct apk_db_acl *apk_db_acl_atomize(mode_t mode, uid_t uid, gid_t gid)
+static struct apk_db_acl *apk_db_acl_atomize(mode_t mode, uid_t uid, gid_t gid, const struct apk_checksum *xattr_csum)
 {
 	struct apk_db_acl acl = { .mode = mode & 07777, .uid = uid, .gid = gid };
 	apk_blob_t *b;
+
+	if (xattr_csum && xattr_csum->type != APK_CHECKSUM_NONE)
+		acl.xattr_csum = *xattr_csum;
+
 	b = apk_blob_atomize_dup(APK_BLOB_STRUCT(acl));
 	return (struct apk_db_acl *) b->ptr;
 }
@@ -740,6 +744,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 	struct apk_db_acl *acl;
 	struct hlist_node **diri_node = NULL;
 	struct hlist_node **file_diri_node = NULL;
+	struct apk_checksum xattr_csum;
 	apk_blob_t token = APK_BLOB_STR("\n"), l;
 	mode_t mode;
 	uid_t uid;
@@ -814,7 +819,12 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			gid = apk_blob_pull_uint(&l, 10);
 			apk_blob_pull_char(&l, ':');
 			mode = apk_blob_pull_uint(&l, 8);
-			acl = apk_db_acl_atomize(mode, uid, gid);
+			if (apk_blob_pull_blob_match(&l, APK_BLOB_STR(":")))
+				apk_blob_pull_csum(&l, &xattr_csum);
+			else
+				xattr_csum.type = APK_CHECKSUM_NONE;
+
+			acl = apk_db_acl_atomize(mode, uid, gid, &xattr_csum);
 			if (field == 'M')
 				apk_db_diri_set(diri, acl);
 			else
@@ -877,6 +887,10 @@ static void apk_blob_push_db_acl(apk_blob_t *b, char field, struct apk_db_acl *a
 	apk_blob_push_uint(b, acl->gid, 10);
 	apk_blob_push_blob(b, APK_BLOB_STR(":"));
 	apk_blob_push_uint(b, acl->mode, 8);
+	if (acl->xattr_csum.type != APK_CHECKSUM_NONE) {
+		apk_blob_push_blob(b, APK_BLOB_STR(":"));
+		apk_blob_push_csum(b, &acl->xattr_csum);
+	}
 	apk_blob_push_blob(b, APK_BLOB_STR("\n"));
 }
 
@@ -1426,8 +1440,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_blob_t blob;
 	int r, fd, write_arch = FALSE;
 
-	apk_default_acl_dir = apk_db_acl_atomize(0755, 0, 0);
-	apk_default_acl_file = apk_db_acl_atomize(0644, 0, 0);
+	apk_default_acl_dir = apk_db_acl_atomize(0755, 0, 0, NULL);
+	apk_default_acl_file = apk_db_acl_atomize(0644, 0, 0, NULL);
 
 	memset(db, 0, sizeof(*db));
 	if (apk_flags & APK_SIMULATE) {
@@ -2346,7 +2360,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			apk_message("%s", ae->name);
 
 		/* Extract the file as name.apk-new */
-		file->acl = apk_db_acl_atomize(ae->mode, ae->uid, ae->gid);
+		file->acl = apk_db_acl_atomize(ae->mode, ae->uid, ae->gid, &ae->xattr_csum);
 		r = apk_archive_entry_extract(db->root_fd, ae, ".apk-new", is,
 					      extract_cb, ctx);
 
@@ -2388,7 +2402,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 
 		diri = apk_db_install_directory_entry(ctx, name);
 		apk_db_dir_prepare(db, diri->dir, ae->mode);
-		apk_db_diri_set(diri, apk_db_acl_atomize(ae->mode, ae->uid, ae->gid));
+		apk_db_diri_set(diri, apk_db_acl_atomize(ae->mode, ae->uid, ae->gid, &ae->xattr_csum));
 	}
 	ctx->installed_size += ctx->current_file_size;
 

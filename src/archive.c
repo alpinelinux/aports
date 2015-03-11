@@ -215,7 +215,10 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		teis.csum = NULL;
 		apk_xattr_array_resize(&entry.xattrs, 0);
 
-		if (paxlen) handle_extended_header(&entry, APK_BLOB_PTR_LEN(pax.ptr, paxlen));
+		if (paxlen) {
+			handle_extended_header(&entry, APK_BLOB_PTR_LEN(pax.ptr, paxlen));
+			apk_fileinfo_hash_xattr(&entry);
+		}
 
 		switch (buf.typeflag) {
 		case 'L': /* GNU long name extension */
