@@ -1,8 +1,7 @@
-From 77b32d0906eaac4d9adf3e6b7c3b52d927e10b41 Mon Sep 17 00:00:00 2001
+From 728af0306505f1ff91364ac2175fb6bf5da90ec3 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
-Date: Wed, 28 Jul 2010 08:37:58 +0300
-Subject: [PATCH 3/4] engines/e_padlock: implement sha1/sha224/sha256
- acceleration
+Date: Thu, 5 Feb 2015 09:41:12 +0200
+Subject: [PATCH] engines/e_padlock: implement sha1/sha224/sha256 acceleration
 
 Limited support for VIA C7 that works only when EVP_MD_CTX_FLAG_ONESHOT
 is used appropriately (as done by EVP_Digest, and my previous HMAC patch).
@@ -25,11 +24,11 @@ sha1         37713.77k   114562.71k   259637.33k   379907.41k   438818.13k
 sha256       34262.86k   103233.75k   232476.07k   338386.60k   389860.01k
 hmac(sha1)    8424.70k    31475.11k   104036.10k   245559.30k   406667.26k
 ---
- engines/e_padlock.c | 660 ++++++++++++++++++++++++++++++++++++++++++++++++----
- 1 file changed, 613 insertions(+), 47 deletions(-)
+ engines/e_padlock.c | 663 ++++++++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 614 insertions(+), 49 deletions(-)
 
 diff --git a/engines/e_padlock.c b/engines/e_padlock.c
-index 6ab42d2..e107d3c 100644
+index 94406cb..5e99114 100644
 --- a/engines/e_padlock.c
 +++ b/engines/e_padlock.c
 @@ -3,6 +3,9 @@
@@ -39,11 +38,11 @@ index 6ab42d2..e107d3c 100644
 + * SHA support by Timo Teras <timo.teras@iki.fi>. Portions based on
 + * code originally written by Michal Ludvig.
 + *
-  * Big thanks to Andy Polyakov for a help with optimization, 
-  * assembler fixes, port to MS Windows and a lot of other 
+  * Big thanks to Andy Polyakov for a help with optimization,
+  * assembler fixes, port to MS Windows and a lot of other
   * valuable work on this engine!
-@@ -64,7 +67,9 @@
- 
+@@ -63,7 +66,9 @@
+  */
  
  #include <stdio.h>
 +#include <stdint.h>
@@ -52,96 +51,73 @@ index 6ab42d2..e107d3c 100644
  
  #include <openssl/opensslconf.h>
  #include <openssl/crypto.h>
-@@ -74,12 +79,33 @@
+@@ -73,11 +78,32 @@
  #ifndef OPENSSL_NO_AES
- #include <openssl/aes.h>
+ # include <openssl/aes.h>
  #endif
 +#ifndef OPENSSL_NO_SHA
-+#include <openssl/sha.h>
++# include <openssl/sha.h>
 +#endif
  #include <openssl/rand.h>
  #include <openssl/err.h>
  
  #ifndef OPENSSL_NO_HW
- #ifndef OPENSSL_NO_HW_PADLOCK
- 
+-# ifndef OPENSSL_NO_HW_PADLOCK
++#  ifndef OPENSSL_NO_HW_PADLOCK
++
 +/* PadLock RNG is disabled by default */
-+#define	PADLOCK_NO_RNG	1
++#    define PADLOCK_NO_RNG	1
 +
 +/* No ASM routines for SHA in MSC yet */
-+#ifdef _MSC_VER
-+#define OPENSSL_NO_SHA
-+#endif
++#    ifdef _MSC_VER
++#      define OPENSSL_NO_SHA
++#    endif
 +
 +/* 64-bit mode does not need software SHA1 as fallback, we can
 + * do all operations with padlock */
-+#if defined(__x86_64__) || defined(__x86_64)
-+#define PADLOCK_NEED_FALLBACK_SHA	0
-+#else
-+#define PADLOCK_NEED_FALLBACK_SHA	1
-+#endif
++#    if defined(__x86_64__) || defined(__x86_64)
++#      define PADLOCK_NEED_FALLBACK_SHA 0
++#    else
++#      define PADLOCK_NEED_FALLBACK_SHA 1
++#    endif
 +
-+#define PADLOCK_MAX_FINALIZING_LENGTH	0x1FFFFFFE
-+
++#    define PADLOCK_MAX_FINALIZING_LENGTH	0x1FFFFFFE
+ 
  /* Attempt to have a single source for both 0.9.7 and 0.9.8 :-) */
- #if (OPENSSL_VERSION_NUMBER >= 0x00908000L)
- #  ifndef OPENSSL_NO_DYNAMIC_ENGINE
-@@ -149,58 +175,40 @@ static int padlock_available(void);
+ #  if (OPENSSL_VERSION_NUMBER >= 0x00908000L)
+@@ -151,60 +177,42 @@ void ENGINE_load_padlock(void)
+ static int padlock_available(void);
  static int padlock_init(ENGINE *e);
  
++#  ifndef PADLOCK_NO_RNG
  /* RNG Stuff */
-+#ifndef PADLOCK_NO_RNG
  static RAND_METHOD padlock_rand;
 -
 -/* Cipher Stuff */
--#ifndef OPENSSL_NO_AES
--static int padlock_ciphers(ENGINE *e, const EVP_CIPHER **cipher, const int **nids, int nid);
- #endif
+-#   ifndef OPENSSL_NO_AES
+-static int padlock_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
+-                           const int **nids, int nid);
+ #   endif
  
  /* Engine names */
  static const char *padlock_id = "padlock";
  static char padlock_name[100];
  
--/* Available features */
--static int padlock_use_ace = 0;	/* Advanced Cryptography Engine */
--static int padlock_use_rng = 0;	/* Random Number Generator */
--#ifndef OPENSSL_NO_AES
--static int padlock_aes_align_required = 1;
--#endif
 +static int padlock_bind_helper(ENGINE *e);
- 
--/* ===== Engine "management" functions ===== */
--
--/* Prepare the ENGINE structure for registration */
--static int
--padlock_bind_helper(ENGINE *e)
--{
--	/* Check available features */
--	padlock_available();
--
--#if 1	/* disable RNG for now, see commentary in vicinity of RNG code */
--	padlock_use_rng=0;
--#endif
--
--	/* Generate a nice engine name with available features */
--	BIO_snprintf(padlock_name, sizeof(padlock_name),
--		"VIA PadLock (%s, %s)", 
--		 padlock_use_rng ? "RNG" : "no-RNG",
--		 padlock_use_ace ? "ACE" : "no-ACE");
-+ /* Available features */
++
+ /* Available features */
+-static int padlock_use_ace = 0; /* Advanced Cryptography Engine */
+-static int padlock_use_rng = 0; /* Random Number Generator */
 +enum padlock_flags {
-+	PADLOCK_RNG  = 0x01,
-+	PADLOCK_ACE  = 0x02,
-+	PADLOCK_ACE2 = 0x04,
-+	PADLOCK_PHE  = 0x08,
-+	PADLOCK_PMM  = 0x10,
-+	PADLOCK_NANO = 0x20,
++    PADLOCK_RNG  = 0x01,
++    PADLOCK_ACE  = 0x02,
++    PADLOCK_ACE2 = 0x04,
++    PADLOCK_PHE  = 0x08,
++    PADLOCK_PMM  = 0x10,
++    PADLOCK_NANO = 0x20,
 +};
 +enum padlock_flags padlock_flags;
- 
--	/* Register everything or return with an error */ 
--	if (!ENGINE_set_id(e, padlock_id) ||
--	    !ENGINE_set_name(e, padlock_name) ||
++ 
 +#define PADLOCK_HAVE_RNG  (padlock_flags & PADLOCK_RNG)
 +#define PADLOCK_HAVE_ACE  (padlock_flags & (PADLOCK_ACE|PADLOCK_ACE2))
 +#define PADLOCK_HAVE_ACE1 (padlock_flags & PADLOCK_ACE)
@@ -149,57 +125,83 @@ index 6ab42d2..e107d3c 100644
 +#define PADLOCK_HAVE_PHE  (padlock_flags & PADLOCK_PHE)
 +#define PADLOCK_HAVE_PMM  (padlock_flags & PADLOCK_PMM)
 +#define PADLOCK_HAVE_NANO (padlock_flags & PADLOCK_NANO)
- 
--	    !ENGINE_set_init_function(e, padlock_init) ||
- #ifndef OPENSSL_NO_AES
--	    (padlock_use_ace && !ENGINE_set_ciphers (e, padlock_ciphers)) ||
-+static int padlock_aes_align_required = 1;
- #endif
--	    (padlock_use_rng && !ENGINE_set_RAND (e, &padlock_rand))) {
--		return 0;
--	}
- 
--	/* Everything looks good */
--	return 1;
--}
-+/* ===== Engine "management" functions ===== */
- 
- #ifdef OPENSSL_NO_DYNAMIC_ENGINE
- 
-@@ -228,7 +236,7 @@ ENGINE_padlock(void)
- static int
- padlock_init(ENGINE *e)
- {
--	return (padlock_use_rng || padlock_use_ace);
-+	return padlock_flags;
- }
- 
- /* This stuff is needed if this ENGINE is being compiled into a self-contained
-@@ -381,10 +389,20 @@ padlock_available(void)
- 		: "+a"(eax), "=d"(edx) : : "ecx");
- 
- 	/* Fill up some flags */
--	padlock_use_ace = ((edx & (0x3<<6)) == (0x3<<6));
--	padlock_use_rng = ((edx & (0x3<<2)) == (0x3<<2));
-+	padlock_flags |= ((edx & (0x3<<3)) ? PADLOCK_RNG : 0);
-+	padlock_flags |= ((edx & (0x3<<7)) ? PADLOCK_ACE : 0);
-+	padlock_flags |= ((edx & (0x3<<9)) ? PADLOCK_ACE2 : 0);
-+	padlock_flags |= ((edx & (0x3<<11)) ? PADLOCK_PHE : 0);
-+	padlock_flags |= ((edx & (0x3<<13)) ? PADLOCK_PMM : 0);
 +
-+	/* Check for VIA Nano CPU */
-+	eax = 0x00000001;
-+	asm volatile ("pushl %%ebx; cpuid; popl %%ebx"
-+		: "+a"(eax) : : "ecx", "edx");
-+	if ((eax | 0x000F) == 0x06FF)
-+		padlock_flags |= PADLOCK_NANO;
+ #   ifndef OPENSSL_NO_AES
+ static int padlock_aes_align_required = 1;
+ #   endif
  
--	return padlock_use_ace + padlock_use_rng;
-+	return padlock_flags;
+ /* ===== Engine "management" functions ===== */
+ 
+-/* Prepare the ENGINE structure for registration */
+-static int padlock_bind_helper(ENGINE *e)
+-{
+-    /* Check available features */
+-    padlock_available();
+-
+-#   if 1                        /* disable RNG for now, see commentary in
+-                                 * vicinity of RNG code */
+-    padlock_use_rng = 0;
+-#   endif
+-
+-    /* Generate a nice engine name with available features */
+-    BIO_snprintf(padlock_name, sizeof(padlock_name),
+-                 "VIA PadLock (%s, %s)",
+-                 padlock_use_rng ? "RNG" : "no-RNG",
+-                 padlock_use_ace ? "ACE" : "no-ACE");
+-
+-    /* Register everything or return with an error */
+-    if (!ENGINE_set_id(e, padlock_id) ||
+-        !ENGINE_set_name(e, padlock_name) ||
+-        !ENGINE_set_init_function(e, padlock_init) ||
+-#   ifndef OPENSSL_NO_AES
+-        (padlock_use_ace && !ENGINE_set_ciphers(e, padlock_ciphers)) ||
+-#   endif
+-        (padlock_use_rng && !ENGINE_set_RAND(e, &padlock_rand))) {
+-        return 0;
+-    }
+-
+-    /* Everything looks good */
+-    return 1;
+-}
+-
+ #   ifdef OPENSSL_NO_DYNAMIC_ENGINE
+ 
+ /* Constructor */
+@@ -229,7 +237,7 @@ static ENGINE *ENGINE_padlock(void)
+ /* Check availability of the engine */
+ static int padlock_init(ENGINE *e)
+ {
+-    return (padlock_use_rng || padlock_use_ace);
++    return padlock_flags;
  }
  
- /* Force key reload from memory to the CPU microcode.
-@@ -481,10 +499,14 @@ padlock_available(void)
+ /*
+@@ -377,10 +385,20 @@ static int padlock_available(void)
+                   "=d"(edx)::"ecx");
+ 
+     /* Fill up some flags */
+-    padlock_use_ace = ((edx & (0x3 << 6)) == (0x3 << 6));
+-    padlock_use_rng = ((edx & (0x3 << 2)) == (0x3 << 2));
+-
+-    return padlock_use_ace + padlock_use_rng;
++    padlock_flags |= ((edx & (0x3<<3)) ? PADLOCK_RNG : 0);
++    padlock_flags |= ((edx & (0x3<<7)) ? PADLOCK_ACE : 0);
++    padlock_flags |= ((edx & (0x3<<9)) ? PADLOCK_ACE2 : 0);
++    padlock_flags |= ((edx & (0x3<<11)) ? PADLOCK_PHE : 0);
++    padlock_flags |= ((edx & (0x3<<13)) ? PADLOCK_PMM : 0);
++
++    /* Check for VIA Nano CPU */
++    eax = 0x00000001;
++    asm volatile ("pushl %%ebx; cpuid; popl %%ebx"
++                  : "+a"(eax) : : "ecx", "edx");
++    if ((eax | 0x000F) == 0x06FF)
++        padlock_flags |= PADLOCK_NANO;
++
++    return padlock_flags;
+ }
+ 
+ /*
+@@ -473,10 +491,14 @@ padlock_available(void)
  		: "+a"(eax), "=d"(edx) : : "rbx", "rcx");
  
  	/* Fill up some flags */
@@ -218,9 +220,9 @@ index 6ab42d2..e107d3c 100644
  }
  
  /* Force key reload from memory to the CPU microcode.
-@@ -1273,6 +1295,496 @@ padlock_aes_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out_arg,
+@@ -1293,6 +1315,496 @@ padlock_aes_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out_arg,
  
- #endif /* OPENSSL_NO_AES */
+ #   endif                       /* OPENSSL_NO_AES */
  
 +#ifndef OPENSSL_NO_SHA
 +
@@ -715,10 +717,10 @@ index 6ab42d2..e107d3c 100644
  /* ===== Random Number Generator ===== */
  /*
   * This code is not engaged. The reason is that it does not comply
-@@ -1329,6 +1841,60 @@ static RAND_METHOD padlock_rand = {
- 	padlock_rand_status,	/* rand status */
+@@ -1356,6 +1868,59 @@ static RAND_METHOD padlock_rand = {
+     padlock_rand_bytes,         /* pseudorand */
+     padlock_rand_status,        /* rand status */
  };
- 
 +#endif /* PADLOCK_NO_RNG */
 +
 +/* Prepare the ENGINE structure for registration */
@@ -772,10 +774,9 @@ index 6ab42d2..e107d3c 100644
 +	/* Everything looks good */
 +	return 1;
 +}
-+
- #else  /* !COMPILE_HW_PADLOCK */
- #ifndef OPENSSL_NO_DYNAMIC_ENGINE
- OPENSSL_EXPORT
+ 
+ #  else                         /* !COMPILE_HW_PADLOCK */
+ #   ifndef OPENSSL_NO_DYNAMIC_ENGINE
 -- 
-1.7.11.3
+2.2.2
 
