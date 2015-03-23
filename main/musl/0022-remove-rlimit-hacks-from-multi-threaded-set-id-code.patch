@@ -1,0 +1,95 @@
+From 84b5c5479e8eae48c81295b55f4fa8dd342c97a9 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Mon, 12 Jan 2015 18:16:32 -0500
+Subject: [PATCH] remove rlimit hacks from multi-threaded set*id() code
+
+the code being removed was introduced to work around "partial failure"
+of multi-threaded set*id() operations, where some threads would
+succeed in changing their ids but an RLIMIT_NPROC setting would
+prevent the rest from succeeding, leaving the process in an
+inconsistent and dangerous state. however, the workaround code did not
+handle important usage cases like swapping real and effective uids
+then restoring their original values, and the wrongful kernel
+enforcement of RLIMIT_NPROC at setuid time was removed in Linux 3.1,
+making the workaround obsolete.
+
+since the partial failure still is dangerous on old kernels, and could
+in principle happen on post-fix kernels as well if set*id() syscalls
+fail for another spurious reason such as resource-related failures,
+new code is added to detect and forcibly kill the process if/when such
+a situation arises. future documentation releases should be updated to
+reflect that setting RLIMIT_NPROC to RLIM_INFINITY is necessary to
+avoid this forced-kill on old kernels. ideally, at some point the
+kernel will get proper multi-threaded set*id() syscalls capable of
+performing their actions atomically, and all of the userspace code to
+emulate them can be treated as a fallback for outdated kernels.
+---
+ src/unistd/setxid.c | 38 +++++++++++++++-----------------------
+ 1 file changed, 15 insertions(+), 23 deletions(-)
+
+diff --git a/src/unistd/setxid.c b/src/unistd/setxid.c
+index 2f651a1..9e37ddc 100644
+--- a/src/unistd/setxid.c
++++ b/src/unistd/setxid.c
+@@ -1,43 +1,35 @@
+ #include <unistd.h>
+ #include <errno.h>
+-#include <sys/resource.h>
+ #include "syscall.h"
+ #include "libc.h"
++#include "pthread_impl.h"
+ 
+ struct ctx {
+ 	int id, eid, sid;
+-	int nr, rlim, err;
++	int nr, err;
+ };
+ 
+-/* We jump through hoops to eliminate the possibility of partial failures. */
+-
+-int __setrlimit(int, const struct rlimit *);
+-
+ static void do_setxid(void *p)
+ {
+ 	struct ctx *c = p;
+-	if (c->err) return;
+-	if (c->rlim && c->id >= 0 && c->id != getuid()) {
+-		struct rlimit inf = { RLIM_INFINITY, RLIM_INFINITY }, old;
+-		getrlimit(RLIMIT_NPROC, &old);
+-		if ((c->err = -__setrlimit(RLIMIT_NPROC, &inf)) && libc.threads_minus_1)
+-			return;
+-		c->err = -__syscall(c->nr, c->id, c->eid, c->sid);
+-		__setrlimit(RLIMIT_NPROC, &old);
+-		return;
++	if (c->err>0) return;
++	int ret = -__syscall(c->nr, c->id, c->eid, c->sid);
++	if (ret && !c->err) {
++		/* If one thread fails to set ids after another has already
++		 * succeeded, forcibly killing the process is the only safe
++		 * thing to do. State is inconsistent and dangerous. Use
++		 * SIGKILL because it is uncatchable. */
++		__block_all_sigs(0);
++		__syscall(SYS_kill, __syscall(SYS_getpid), SIGKILL);
+ 	}
+-	c->err = -__syscall(c->nr, c->id, c->eid, c->sid);
++	c->err = ret;
+ }
+ 
+ int __setxid(int nr, int id, int eid, int sid)
+ {
+-	struct ctx c = { .nr = nr, .id = id, .eid = eid, .sid = sid };
+-	switch (nr) {
+-	case SYS_setuid:
+-	case SYS_setreuid:
+-	case SYS_setresuid:
+-		c.rlim = 1;
+-	}
++	/* err is initially nonzero so that failure of the first thread does not
++	 * trigger the safety kill above. */
++	struct ctx c = { .nr = nr, .id = id, .eid = eid, .sid = sid, .err = -1 };
+ 	__synccall(do_setxid, &c);
+ 	if (c.err) {
+ 		errno = c.err;
+-- 
+2.3.3
+

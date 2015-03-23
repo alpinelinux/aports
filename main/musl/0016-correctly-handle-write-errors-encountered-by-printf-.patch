@@ -1,0 +1,101 @@
+From d42269d7c85308abdbf8cee38b1a1097249eb38b Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Wed, 17 Dec 2014 03:08:53 -0500
+Subject: [PATCH] correctly handle write errors encountered by printf-family
+ functions
+
+previously, write errors neither stopped further output attempts nor
+caused the function to return an error to the caller. this could
+result in silent loss of output, possibly in the middle of output in
+the event of a non-permanent error.
+
+the simplest solution is temporarily clearing the error flag for the
+target stream, then suppressing further output when the error flag is
+set and checking/restoring it at the end of the operation to determine
+the correct return value.
+
+since the wide version of the code internally calls the narrow fprintf
+to perform some of its underlying operations, initial clearing of the
+error flag is suppressed when performing a narrow vfprintf on a
+wide-oriented stream. this is not a problem since the behavior of
+narrow operations on wide-oriented streams is undefined.
+---
+ src/stdio/vfprintf.c  | 7 ++++++-
+ src/stdio/vfwprintf.c | 7 ++++++-
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/stdio/vfprintf.c b/src/stdio/vfprintf.c
+index 39c1e86..d421817 100644
+--- a/src/stdio/vfprintf.c
++++ b/src/stdio/vfprintf.c
+@@ -158,7 +158,7 @@ static void pop_arg(union arg *arg, int type, va_list *ap)
+ 
+ static void out(FILE *f, const char *s, size_t l)
+ {
+-	__fwritex((void *)s, l, f);
++	if (!(f->flags & F_ERR)) __fwritex((void *)s, l, f);
+ }
+ 
+ static void pad(FILE *f, char c, int w, int l, int fl)
+@@ -656,6 +656,7 @@ int vfprintf(FILE *restrict f, const char *restrict fmt, va_list ap)
+ 	int nl_type[NL_ARGMAX+1] = {0};
+ 	union arg nl_arg[NL_ARGMAX+1];
+ 	unsigned char internal_buf[80], *saved_buf = 0;
++	int olderr;
+ 	int ret;
+ 
+ 	/* the copy allows passing va_list* even if va_list is an array */
+@@ -666,6 +667,8 @@ int vfprintf(FILE *restrict f, const char *restrict fmt, va_list ap)
+ 	}
+ 
+ 	FLOCK(f);
++	olderr = f->flags & F_ERR;
++	if (f->mode < 1) f->flags &= ~F_ERR;
+ 	if (!f->buf_size) {
+ 		saved_buf = f->buf;
+ 		f->wpos = f->wbase = f->buf = internal_buf;
+@@ -680,6 +683,8 @@ int vfprintf(FILE *restrict f, const char *restrict fmt, va_list ap)
+ 		f->buf_size = 0;
+ 		f->wpos = f->wbase = f->wend = 0;
+ 	}
++	if (f->flags & F_ERR) ret = -1;
++	f->flags |= olderr;
+ 	FUNLOCK(f);
+ 	va_end(ap2);
+ 	return ret;
+diff --git a/src/stdio/vfwprintf.c b/src/stdio/vfwprintf.c
+index c640059..ebdff00 100644
+--- a/src/stdio/vfwprintf.c
++++ b/src/stdio/vfwprintf.c
+@@ -149,7 +149,7 @@ static void pop_arg(union arg *arg, int type, va_list *ap)
+ 
+ static void out(FILE *f, const wchar_t *s, size_t l)
+ {
+-	while (l--) fputwc(*s++, f);
++	while (l-- && !(f->flags & F_ERR)) fputwc(*s++, f);
+ }
+ 
+ static int getint(wchar_t **s) {
+@@ -345,6 +345,7 @@ int vfwprintf(FILE *restrict f, const wchar_t *restrict fmt, va_list ap)
+ 	va_list ap2;
+ 	int nl_type[NL_ARGMAX] = {0};
+ 	union arg nl_arg[NL_ARGMAX];
++	int olderr;
+ 	int ret;
+ 
+ 	/* the copy allows passing va_list* even if va_list is an array */
+@@ -356,7 +357,11 @@ int vfwprintf(FILE *restrict f, const wchar_t *restrict fmt, va_list ap)
+ 
+ 	FLOCK(f);
+ 	f->mode |= f->mode+1;
++	olderr = f->flags & F_ERR;
++	f->flags &= ~F_ERR;
+ 	ret = wprintf_core(f, fmt, &ap2, nl_arg, nl_type);
++	if (f->flags & F_ERR) ret = -1;
++	f->flags |= olderr;
+ 	FUNLOCK(f);
+ 	va_end(ap2);
+ 	return ret;
+-- 
+2.3.3
+
