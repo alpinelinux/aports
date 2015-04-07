@@ -329,7 +329,7 @@ all_done:
 		}
 	}
 
-	return 0;
+	return errors;
 }
 
 enum {
