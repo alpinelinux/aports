@@ -2017,8 +2017,10 @@ static int apk_repository_update(struct apk_database *db, struct apk_repository 
 	int r, verify = (apk_flags & APK_ALLOW_UNTRUSTED) ? APK_SIGN_NONE : APK_SIGN_VERIFY;
 
 	r = apk_cache_download(db, repo, NULL, verify, NULL, NULL);
-	if (r != 0)
+	if (r != 0) {
 		apk_error("%s: %s", repo->url, apk_error_str(r));
+		db->repo_update_errors++;
+	}
 
 	return r;
 }

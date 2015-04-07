@@ -148,6 +148,7 @@ struct apk_database {
 	char *cache_remount_dir;
 	apk_blob_t *arch;
 	unsigned int local_repos, available_repos;
+	int repo_update_errors;
 	unsigned int pending_triggers;
 	int performing_self_update : 1;
 	int permanent : 1;

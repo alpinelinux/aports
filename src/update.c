@@ -20,6 +20,7 @@ static int update_main(void *ctx, struct apk_database *db, struct apk_string_arr
 {
 	struct apk_repository *repo;
 	int i;
+	char buf[32] = "OK:";
 
 	if (apk_verbosity < 1)
 		return 0;
@@ -35,10 +36,13 @@ static int update_main(void *ctx, struct apk_database *db, struct apk_string_arr
 			    db->repos[i].url);
 	}
 
-	apk_message("OK: %d distinct packages available",
+	if (db->repo_update_errors != 0)
+		snprintf(buf, sizeof(buf), "%d errors;",
+			 db->repo_update_errors);
+	apk_message("%s %d distinct packages available", buf,
 		db->available.packages.num_items);
 
-	return 0;
+	return db->repo_update_errors;
 }
 
 static struct apk_applet apk_update = {
