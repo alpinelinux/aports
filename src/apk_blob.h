@@ -95,6 +95,7 @@ apk_blob_t apk_blob_pushed(apk_blob_t buffer, apk_blob_t left);
 unsigned long apk_blob_hash_seed(apk_blob_t, unsigned long seed);
 unsigned long apk_blob_hash(apk_blob_t str);
 int apk_blob_compare(apk_blob_t a, apk_blob_t b);
+int apk_blob_ends_with(apk_blob_t str, apk_blob_t suffix);
 int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
 			      apk_blob_cb cb, void *ctx);
 

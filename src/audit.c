@@ -111,7 +111,7 @@ static int audit_file(struct audit_ctx *actx,
 	    apk_checksum_compare(&fi.csum, &dbf->csum) != 0)
 		rv = 'U';
 	else if (apk_checksum_compare(&fi.xattr_csum, &dbf->acl->xattr_csum) != 0)
-		rv = 'X';
+		rv = 'x';
 	else if (S_ISLNK(fi.mode) && dbf->csum.type == APK_CHECKSUM_NONE)
 		rv = 'U';
 	else if (actx->check_permissions) {
@@ -259,6 +259,10 @@ recurse_check:
 			goto done;
 		if (actx->mode == MODE_SYSTEM &&
 		    (reason == 'A' || protect_mode != APK_PROTECT_NONE))
+			goto done;
+		if (actx->mode == MODE_BACKUP &&
+		    reason == 'A' &&
+		    apk_blob_ends_with(bent, APK_BLOB_STR(".apk-new")))
 			goto done;
 		report_audit(actx, reason, bfull, dbf ? dbf->diri->pkg : NULL);
 	}

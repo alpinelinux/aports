@@ -225,6 +225,12 @@ int apk_blob_compare(apk_blob_t a, apk_blob_t b)
 	return 1;
 }
 
+int apk_blob_ends_with(apk_blob_t a, apk_blob_t b)
+{
+	if (a.len < b.len) return 0;
+	return memcmp(a.ptr+a.len-b.len, b.ptr, b.len) == 0;
+}
+
 int apk_blob_for_each_segment(apk_blob_t blob, const char *split,
 			      int (*cb)(void *ctx, apk_blob_t blob), void *ctx)
 {
