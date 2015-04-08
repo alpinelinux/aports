@@ -620,12 +620,11 @@ int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
 				}
 				apk_fileinfo_hash_xattr_array(xattrs, apk_checksum_evp(xattr_checksum), &fi->xattr_csum);
 				apk_xattr_array_free(&xattrs);
-			} else r = errno;
+			} else if (r < 0) r = errno;
 			close(fd);
 		} else r = errno;
 
 		if (r && r != ENOTSUP) return -r;
-
 	}
 
 	if (checksum == APK_CHECKSUM_NONE)
