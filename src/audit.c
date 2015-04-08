@@ -93,30 +93,36 @@ static int audit_file(struct audit_ctx *actx,
 		      int dirfd, const char *name)
 {
 	struct apk_file_info fi;
+	int rv = 0;
 
 	if (dbf == NULL)
 		return 'A';
 
 	dbf->audited = 1;
 
-	if (apk_fileinfo_get(dirfd, name, APK_FI_NOFOLLOW | dbf->csum.type, &fi) != 0)
+	if (apk_fileinfo_get(dirfd, name,
+				APK_FI_NOFOLLOW |
+				APK_FI_XATTR_CSUM(dbf->acl->xattr_csum.type ?: APK_CHECKSUM_DEFAULT) |
+				APK_FI_CSUM(dbf->csum.type),
+				&fi) != 0)
 		return -EPERM;
 
 	if (dbf->csum.type != APK_CHECKSUM_NONE &&
 	    apk_checksum_compare(&fi.csum, &dbf->csum) != 0)
-		return 'U';
-
-	if (S_ISLNK(fi.mode) && dbf->csum.type == APK_CHECKSUM_NONE)
-		return 'U';
-
-	if (actx->check_permissions) {
+		rv = 'U';
+	else if (apk_checksum_compare(&fi.xattr_csum, &dbf->acl->xattr_csum) != 0)
+		rv = 'X';
+	else if (S_ISLNK(fi.mode) && dbf->csum.type == APK_CHECKSUM_NONE)
+		rv = 'U';
+	else if (actx->check_permissions) {
 		if ((fi.mode & 07777) != (dbf->acl->mode & 07777))
-			return 'M';
-		if (fi.uid != dbf->acl->uid || fi.gid != dbf->acl->gid)
-			return 'M';
+			rv = 'M';
+		else if (fi.uid != dbf->acl->uid || fi.gid != dbf->acl->gid)
+			rv = 'M';
 	}
+	apk_fileinfo_free(&fi);
 
-	return 0;
+	return rv;
 }
 
 static int audit_directory(struct audit_ctx *actx,

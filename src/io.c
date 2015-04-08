@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <pwd.h>
 #include <grp.h>
 
@@ -543,26 +544,30 @@ static void hash_len_data(EVP_MD_CTX *ctx, uint32_t len, const void *ptr)
 	EVP_DigestUpdate(ctx, ptr, len);
 }
 
-void apk_fileinfo_hash_xattr(struct apk_file_info *fi)
+void apk_fileinfo_hash_xattr_array(struct apk_xattr_array *xattrs, const EVP_MD *md, struct apk_checksum *csum)
 {
 	struct apk_xattr *xattr;
-	const EVP_MD *md = apk_checksum_default();
 	EVP_MD_CTX mdctx;
 
-	if (!fi->xattrs || fi->xattrs->num == 0) {
-		fi->xattr_csum.type = APK_CHECKSUM_NONE;
+	if (!xattrs || xattrs->num == 0) {
+		csum->type = APK_CHECKSUM_NONE;
 		return;
 	}
 
-	qsort(fi->xattrs->item, fi->xattrs->num, sizeof(fi->xattrs->item[0]), cmp_xattr);
+	qsort(xattrs->item, xattrs->num, sizeof(xattrs->item[0]), cmp_xattr);
 
 	EVP_DigestInit(&mdctx, md);
-	foreach_array_item(xattr, fi->xattrs) {
+	foreach_array_item(xattr, xattrs) {
 		hash_len_data(&mdctx, strlen(xattr->name), xattr->name);
 		hash_len_data(&mdctx, xattr->value.len, xattr->value.ptr);
 	}
-	fi->xattr_csum.type = EVP_MD_CTX_size(&mdctx);
-	EVP_DigestFinal(&mdctx, fi->xattr_csum.data, NULL);
+	csum->type = EVP_MD_CTX_size(&mdctx);
+	EVP_DigestFinal(&mdctx, csum->data, NULL);
+}
+
+void apk_fileinfo_hash_xattr(struct apk_file_info *fi)
+{
+	apk_fileinfo_hash_xattr_array(fi->xattrs, apk_checksum_default(), &fi->xattr_csum);
 }
 
 int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
@@ -570,7 +575,9 @@ int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
 {
 	struct stat64 st;
 	struct apk_bstream *bs;
-	int checksum = flags & 0xffff, atflags = 0;
+	unsigned int checksum = flags & 0xff;
+	unsigned int xattr_checksum = (flags >> 8) & 0xff;
+	int atflags = 0;
 
 	if (flags & APK_FI_NOFOLLOW)
 		atflags |= AT_SYMLINK_NOFOLLOW;
@@ -587,9 +594,47 @@ int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
 		.device = st.st_dev,
 	};
 
-	if (checksum == APK_CHECKSUM_NONE || S_ISDIR(st.st_mode))
+	if (xattr_checksum != APK_CHECKSUM_NONE) {
+		ssize_t len, vlen;
+		int fd, i, r;
+		char val[1024], buf[1024];
+
+		r = 0;
+		fd = openat(atfd, filename, O_RDONLY);
+		if (fd >= 0) {
+			len = flistxattr(fd, buf, sizeof(buf));
+			if (len > 0) {
+				struct apk_xattr_array *xattrs = NULL;
+				apk_xattr_array_init(&xattrs);
+				for (i = 0; i < len; i += strlen(&buf[i]) + 1) {
+					vlen = fgetxattr(fd, &buf[i], val, sizeof(val));
+					if (vlen < 0) {
+						r = errno;
+						if (r == ENODATA) continue;
+						break;
+					}
+					*apk_xattr_array_add(&xattrs) = (struct apk_xattr) {
+						.name = &buf[i],
+						.value = *apk_blob_atomize_dup(APK_BLOB_PTR_LEN(val, vlen)),
+					};
+				}
+				apk_fileinfo_hash_xattr_array(xattrs, apk_checksum_evp(xattr_checksum), &fi->xattr_csum);
+				apk_xattr_array_free(&xattrs);
+			} else r = errno;
+			close(fd);
+		} else r = errno;
+
+		if (r && r != ENOTSUP) return -r;
+
+	}
+
+	if (checksum == APK_CHECKSUM_NONE)
 		return 0;
 
+	if (S_ISDIR(st.st_mode))
+		return 0;
+
+	/* Checksum file content */
 	if ((flags & APK_FI_NOFOLLOW) && S_ISLNK(st.st_mode)) {
 		char *target = alloca(st.st_size);
 		if (target == NULL)
@@ -600,23 +645,22 @@ int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
 		EVP_Digest(target, st.st_size, fi->csum.data, NULL,
 			   apk_checksum_evp(checksum), NULL);
 		fi->csum.type = checksum;
-		return 0;
-	}
+	} else {
+		bs = apk_bstream_from_file(atfd, filename);
+		if (!IS_ERR_OR_NULL(bs)) {
+			EVP_MD_CTX mdctx;
+			apk_blob_t blob;
 
-	bs = apk_bstream_from_file(atfd, filename);
-	if (!IS_ERR_OR_NULL(bs)) {
-		EVP_MD_CTX mdctx;
-		apk_blob_t blob;
+			EVP_DigestInit(&mdctx, apk_checksum_evp(checksum));
+			if (bs->flags & APK_BSTREAM_SINGLE_READ)
+				EVP_MD_CTX_set_flags(&mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+			while (!APK_BLOB_IS_NULL(blob = bs->read(bs, APK_BLOB_NULL)))
+				EVP_DigestUpdate(&mdctx, (void*) blob.ptr, blob.len);
+			fi->csum.type = EVP_MD_CTX_size(&mdctx);
+			EVP_DigestFinal(&mdctx, fi->csum.data, NULL);
 
-		EVP_DigestInit(&mdctx, apk_checksum_evp(checksum));
-		if (bs->flags & APK_BSTREAM_SINGLE_READ)
-			EVP_MD_CTX_set_flags(&mdctx, EVP_MD_CTX_FLAG_ONESHOT);
-		while (!APK_BLOB_IS_NULL(blob = bs->read(bs, APK_BLOB_NULL)))
-			EVP_DigestUpdate(&mdctx, (void*) blob.ptr, blob.len);
-		fi->csum.type = EVP_MD_CTX_size(&mdctx);
-		EVP_DigestFinal(&mdctx, fi->csum.data, NULL);
-
-		bs->close(bs, NULL);
+			bs->close(bs, NULL);
+		}
 	}
 
 	return 0;

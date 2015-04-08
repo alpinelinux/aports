@@ -149,6 +149,8 @@ apk_blob_t apk_blob_from_file(int atfd, const char *file);
 int apk_blob_to_file(int atfd, const char *file, apk_blob_t b, unsigned int flags);
 
 #define APK_FI_NOFOLLOW		0x80000000
+#define APK_FI_XATTR_CSUM(x)	(((x) & 0xff) << 8)
+#define APK_FI_CSUM(x)		(((x) & 0xff))
 int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
 		     struct apk_file_info *fi);
 void apk_fileinfo_hash_xattr(struct apk_file_info *fi);
