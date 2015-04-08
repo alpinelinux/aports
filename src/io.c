@@ -224,7 +224,7 @@ static apk_blob_t is_bs_read(void *stream, apk_blob_t token)
 
 	/* We need more data */
 	if (isbs->left.len != 0)
-		memcpy(isbs->buffer, isbs->left.ptr, isbs->left.len);
+		memmove(isbs->buffer, isbs->left.ptr, isbs->left.len);
 	isbs->left.ptr = isbs->buffer;
 	size = isbs->is->read(isbs->is, isbs->buffer + isbs->left.len,
 			      sizeof(isbs->buffer) - isbs->left.len);
