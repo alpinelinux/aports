@@ -939,7 +939,7 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 			apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(diri->dir->name, diri->dir->namelen));
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
-			if (1 || diri->acl != apk_default_acl_dir)
+			if (diri->acl != apk_default_acl_dir)
 				apk_blob_push_db_acl(&bbuf, 'M', diri->acl);
 
 			hlist_for_each_entry(file, c2, &diri->owned_files, diri_files_list) {
@@ -947,7 +947,7 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 				apk_blob_push_blob(&bbuf, APK_BLOB_PTR_LEN(file->name, file->namelen));
 				apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 
-				if (1 || file->acl != apk_default_acl_file)
+				if (file->acl != apk_default_acl_file)
 					apk_blob_push_db_acl(&bbuf, 'a', file->acl);
 
 				if (file->csum.type != APK_CHECKSUM_NONE) {
