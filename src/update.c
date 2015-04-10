@@ -23,7 +23,7 @@ static int update_main(void *ctx, struct apk_database *db, struct apk_string_arr
 	char buf[32] = "OK:";
 
 	if (apk_verbosity < 1)
-		return 0;
+		return db->repo_update_errors;
 
 	for (i = 0; i < db->num_repos; i++) {
 		repo = &db->repos[i];
