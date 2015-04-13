@@ -2586,7 +2586,7 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		apk_blob_push_blob(&b, tmpprefix);
 		apk_pkg_format_cache_pkg(b, pkg);
 		cache_bs = apk_bstream_tee(bs, db->cache_fd, tmpcacheitem, NULL, NULL);
-		if (cache_bs != NULL)
+		if (!IS_ERR_OR_NULL(cache_bs))
 			bs = cache_bs;
 		else
 			apk_warning(PKG_VER_FMT": unable to cache: %s",

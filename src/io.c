@@ -421,22 +421,24 @@ static void tee_close(void *stream, size_t *size)
 struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to, apk_progress_cb cb, void *cb_ctx)
 {
 	struct apk_tee_bstream *tbs;
-	int fd;
+	int fd, r;
 
 	if (IS_ERR_OR_NULL(from)) return ERR_CAST(from);
 
 	fd = openat(atfd, to, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC,
 		    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 	if (fd < 0) {
+		r = errno;
 		from->close(from, NULL);
-		return NULL;
+		return ERR_PTR(-r);
 	}
 
 	tbs = malloc(sizeof(struct apk_tee_bstream));
 	if (!tbs) {
+		r = errno;
 		close(fd);
 		from->close(from, NULL);
-		return NULL;
+		return ERR_PTR(-r);
 	}
 
 	tbs->bs = (struct apk_bstream) {
