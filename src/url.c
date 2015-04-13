@@ -40,7 +40,7 @@ struct apk_fetch_istream {
 
 static int fetch_maperror(int ec)
 {
-	static const char map[] = {
+	static const signed short map[] = {
 		[FETCH_ABORT] = -ECONNABORTED,
 		[FETCH_AUTH] = -EACCES,
 		[FETCH_DOWN] = -ECONNREFUSED,
