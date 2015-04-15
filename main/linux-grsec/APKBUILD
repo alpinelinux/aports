@@ -1,19 +1,18 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 
-_flavor=grsec
-pkgname=linux-${_flavor}
+_mainflavor=grsec
+pkgname=linux-$_mainflavor
 pkgver=3.18.11
 case $pkgver in
 *.*.*)	_kernver=${pkgver%.*};;
 *.*)	_kernver=${pkgver};;
 esac
-pkgrel=1
+pkgrel=2
 pkgdesc="Linux kernel with grsecurity"
 url=http://grsecurity.net
 depends="mkinitfs linux-firmware"
 makedepends="perl sed installkernel bash gmp-dev bc linux-headers"
 options="!strip"
-_config=${config:-kernelconfig.${CARCH}}
 install=
 source="http://ftp.kernel.org/pub/linux/kernel/v3.x/linux-$_kernver.tar.xz
 	http://ftp.kernel.org/pub/linux/kernel/v3.x/patch-$pkgver.xz
@@ -23,15 +22,30 @@ source="http://ftp.kernel.org/pub/linux/kernel/v3.x/linux-$_kernver.tar.xz
 	fix-spi-nor-namespace-clash.patch
 	imx6q-no-unclocked-sleep.patch
 
-	kernelconfig.x86
-	kernelconfig.x86_64
-	kernelconfig.armhf
+	config-grsec.x86
+	config-grsec.x86_64
+	config-grsec.armhf
+
+	config-virtgrsec.x86
+	config-virtgrsec.x86_64
 	"
 subpackages="$pkgname-dev"
+_flavors=
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-${_f}"
+		fi
+		;;
+	esac
+done
+
 arch="x86 x86_64 armhf"
 license="GPL-2"
-
-_abi_release=${pkgver}-${pkgrel}-${_flavor}
 
 prepare() {
 	local _patch_failed=
@@ -60,39 +74,46 @@ prepare() {
 		return 1
 	fi
 
+	# remove localversion from patch if any
 	rm -f localversion*
-	echo "-$pkgrel-$_flavor" > localversion-alpine
 
-	mkdir -p "$srcdir"/build
-	cp "$srcdir"/$_config "$srcdir"/build/.config || return 1
-	make -C "$srcdir"/linux-$_kernver O="$srcdir"/build HOSTCC="${CC:-gcc}" \
-		silentoldconfig
-}
+	for i in $_flavors; do
+		local _config=config-$i.${CARCH}
+		local _builddir="$srcdir"/build-$i
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$i" > "$srcdir"/build-$i/localversion-alpine \
+			|| return 1
 
-# this is so we can do: 'abuild menuconfig' to reconfigure kernel
-menuconfig() {
-	cd "$srcdir"/build || return 1
-	make menuconfig
-	cp .config "$startdir"/$_config
+		cp "$srcdir"/$_config "$_builddir"/.config || return 1
+		make -C "$srcdir"/linux-$_kernver \
+			O="$_builddir" \
+			HOSTCC="${CC:-gcc}" \
+			silentoldconfig || return 1
+	done
 }
 
 build() {
-	cd "$srcdir"/build
 	export GCC_SPECS=hardenednopie.specs
-	make CC="${CC:-gcc}" \
-		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
-		|| return 1
+	for i in $_flavors; do
+		cd "$srcdir"/build-$i
+		make CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
+			|| return 1
+	done
 }
 
-package() {
-	cd "$srcdir"/build
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=${pkgver}-${pkgrel}-${_buildflavor}
 
-	mkdir -p "$pkgdir"/boot "$pkgdir"/lib/modules
+	cd "$srcdir"/build-$_buildflavor || return 1
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
 
 	local _install
 	case "$CARCH" in
 	arm*)
-		local _dtbdir="$pkgdir"/usr/lib/linux-${_abi_release}
+		local _dtbdir="$_outdir"/usr/lib/linux-${_abi_release}
 		mkdir -p "$_dtbdir"
 		for i in arch/arm/boot/dts/*.dtb ; do
 			install -m644 "$i" "$_dtbdir"
@@ -106,19 +127,31 @@ package() {
 	esac
 
 	make -j1 modules_install firmware_install $_install \
-		INSTALL_MOD_PATH="$pkgdir" \
-		INSTALL_PATH="$pkgdir"/boot \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_PATH="$_outdir"/boot \
 		|| return 1
 
-	rm -f "$pkgdir"/lib/modules/${_abi_release}/build \
-		"$pkgdir"/lib/modules/${_abi_release}/source
-	rm -rf "$pkgdir"/lib/firmware
+	rm -f "$_outdir"/lib/modules/${_abi_release}/build \
+		"$_outdir"/lib/modules/${_abi_release}/source
+	rm -rf "$_outdir"/lib/firmware
 
 	install -D include/config/kernel.release \
-		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
 }
 
+# main flavor installs in $pkgdir
+package() {
+	_package grsec "$pkgdir"
+}
+
+# subflavors install in $subpkgdir
+virtgrsec() {
+	_package virtgrsec "$subpkgdir"
+}
+
+# we only provide -dev for main flavor for now
 dev() {
+	local _abi_release=${pkgver}-${pkgrel}-$_mainflavor
 	# copy the only the parts that we really need for build 3rd party
 	# kernel modules and install those as /usr/src/linux-headers,
 	# simlar to what ubuntu does
@@ -133,7 +166,7 @@ dev() {
 	# first we import config, run prepare to set up for building
 	# external modules, and create the scripts
 	mkdir -p "$dir"
-	cp "$srcdir"/$_config "$dir"/.config
+	cp "$srcdir"/config-grsec.${CARCH} "$dir"/.config
 	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" HOSTCC="${CC:-gcc}" \
 		silentoldconfig prepare modules_prepare scripts
 
@@ -157,7 +190,7 @@ dev() {
 	find $(find arch -name include -type d -print) -type f \
 		| cpio -pdm "$dir"
 
-	install -Dm644 "$srcdir"/build/Module.symvers \
+	install -Dm644 "$srcdir"/build-$_mainflavor/Module.symvers \
 		"$dir"/Module.symvers
 
 	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
@@ -171,24 +204,30 @@ ac5c93edbc9385793ccc33f4ced85950  patch-3.18.11.xz
 c6a4ae7e8ca6159e1631545515805216  fix-memory-map-for-PIE-applications.patch
 b0337a2a9abed17c37eae5db332522d2  fix-spi-nor-namespace-clash.patch
 1a307fc1d63231bf01d22493a4f14378  imx6q-no-unclocked-sleep.patch
-d487c7dd7e28a7698367ff714b68bd67  kernelconfig.x86
-688dd08f9922f808fc8ace62aa199ab7  kernelconfig.x86_64
-b76320f7372e32f37e4f528922942aad  kernelconfig.armhf"
+d487c7dd7e28a7698367ff714b68bd67  config-grsec.x86
+688dd08f9922f808fc8ace62aa199ab7  config-grsec.x86_64
+b76320f7372e32f37e4f528922942aad  config-grsec.armhf
+18cb4521f9a8847637292f9f4c9e8256  config-virtgrsec.x86
+2408367e7833084385bff42995dfcd3a  config-virtgrsec.x86_64"
 sha256sums="becc413cc9e6d7f5cc52a3ce66d65c3725bc1d1cc1001f4ce6c32b69eb188cbd  linux-3.18.tar.xz
 e4c44f887f507b2470a5c2f1c286a38fec6e84c4d433c929981abab7b83f80d5  patch-3.18.11.xz
 02b84adad6299db774013728dc4cffb95b31903b209c78fa88dcf8b1f60a0469  grsecurity-3.1-3.18.11-201504051405-alpine.patch
 500f3577310be52e87b9fecdc2e9c4ca43210fd97d69089f9005d484563f74c7  fix-memory-map-for-PIE-applications.patch
 01279cfb93273d99670c56e2465957ecde3d03693beeb929a743f03afa0b7bdc  fix-spi-nor-namespace-clash.patch
 21179fbb22a5b74af0a609350ae1a170e232908572b201d02e791d2ce0a685d3  imx6q-no-unclocked-sleep.patch
-3cdcbad352ac4e76e8802c6860fc87a168219bfbe3e2d5d475fb4171aaa5fd94  kernelconfig.x86
-519a8c925216feeeaea2b2524297b07a2eab8f05e92d7506ced5d5e0ce60246b  kernelconfig.x86_64
-1728a69d2dd8176eb6c491d728f17a6a157d2e329e09523c7c1931533e835ea6  kernelconfig.armhf"
+3cdcbad352ac4e76e8802c6860fc87a168219bfbe3e2d5d475fb4171aaa5fd94  config-grsec.x86
+519a8c925216feeeaea2b2524297b07a2eab8f05e92d7506ced5d5e0ce60246b  config-grsec.x86_64
+1728a69d2dd8176eb6c491d728f17a6a157d2e329e09523c7c1931533e835ea6  config-grsec.armhf
+47048993111506ab74db24c92d39b536cf5e684975844907d5cb6198c1dfd87f  config-virtgrsec.x86
+0ebd5cf41a8c22fb8fe0c19d38833dc3e2b0b5e58b098e31315fcb766a18570e  config-virtgrsec.x86_64"
 sha512sums="2f0b72466e9bc538a675738aa416573d41bbbd7e3e2ffd5b5b127afde609ebc278cec5a3c37e73479607e957c13f1b4ed9782a3795e0dcc2cf8e550228594009  linux-3.18.tar.xz
 cc4ac5d341ca4e9d71ef1ba45a839b18947e3e7ffdc7f7efe2c211c95483518a1983bc3637edd607e0631f14c1cc9bfb9164926261d2cf5c2bb2eb91206f43b9  patch-3.18.11.xz
 0b9b265b5b633d99eef1adf0e8284e72ee9355d6348835b15bfb8661caf96ac82d37593ef3658a0ccd47b64520195bf6c93840c1edcbc92f8ef00a8524a08e4b  grsecurity-3.1-3.18.11-201504051405-alpine.patch
 4665c56ae1bbac311f9205d64918e84ee8b01d47d6e2396ff6b8adfb10aada7f7254531ce62e31edbb65c2a54a830f09ad05d314dfcd75d6272f4068945ad7c7  fix-memory-map-for-PIE-applications.patch
 4e3aeb70712f9838afea75fe9e6c1389414d833a89286ea55441d6a8d54ce74b0e39b565721e3153443af0a614bff57c767251b7e5b81faa5e0784eddfcd2164  fix-spi-nor-namespace-clash.patch
 87d1ad59732f265a5b0db54490dc1762c14ea4b868e7eb1aedc3ce57b48046de7bbc08cf5cfcf6f1380fa84063b0edb16ba3d5e3c5670be9bbb229275c88b221  imx6q-no-unclocked-sleep.patch
-fcc7c293643b543b594f0a8c039a779101f0b131c89303adffb69cfe33a88ba65bb0a25dfcf64a59cf69621320cf5c39c92144d81e4f8edd86c8b285eed8d0a7  kernelconfig.x86
-056e84168b72a61b71447a4e601c356baa2215496344a2771f7fe38680288a22230730ac44c9f454dbcc8ab0b2a48c6dc3a7072bca3e50bed94e44cbe513e30e  kernelconfig.x86_64
-001c1db7b95e9d024d49310df69ff68186e5aed04bb4643af4e29ffd0c8c43cc45316ecde6e6d92bdf5980804b650bd7cdc0793a50c78f3adfa98d30edc4380f  kernelconfig.armhf"
+fcc7c293643b543b594f0a8c039a779101f0b131c89303adffb69cfe33a88ba65bb0a25dfcf64a59cf69621320cf5c39c92144d81e4f8edd86c8b285eed8d0a7  config-grsec.x86
+056e84168b72a61b71447a4e601c356baa2215496344a2771f7fe38680288a22230730ac44c9f454dbcc8ab0b2a48c6dc3a7072bca3e50bed94e44cbe513e30e  config-grsec.x86_64
+001c1db7b95e9d024d49310df69ff68186e5aed04bb4643af4e29ffd0c8c43cc45316ecde6e6d92bdf5980804b650bd7cdc0793a50c78f3adfa98d30edc4380f  config-grsec.armhf
+c6bebe64953a444bc7d13f932e44d081665c253121189a3ccca9d7f6145b4460e32dc0f21f4700bf6607c5c0cb79de5c8576e4da0c815d60cff0d3b90879c1d9  config-virtgrsec.x86
+0d1a243b87ec7ba7fa7d1ba1608c6bbce1cecf0b19c912f596c5574f5bc027eb71b07ed28afefc7c209bb718e137b6e11ffb3172deb41cc61f022e32acd8022e  config-virtgrsec.x86_64"
