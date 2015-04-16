@@ -1,13 +1,13 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 
-_flavor=rpi
-pkgname=linux-${_flavor}
+_mainflavor=rpi
+pkgname=linux-$_mainflavor
 pkgver=3.18.11
 case $pkgver in
 *.*.*)	_kernver=${pkgver%.*};;
 *.*)	_kernver=${pkgver};;
 esac
-pkgrel=0
+pkgrel=1
 pkgdesc="Linux kernel with Raspberry Pi patches"
 url=https://github.com/raspberrypi/linux
 depends="mkinitfs linux-firmware"
@@ -19,13 +19,27 @@ source="http://ftp.kernel.org/pub/linux/kernel/v3.x/linux-$_kernver.tar.xz
 	http://ftp.kernel.org/pub/linux/kernel/v3.x/patch-$pkgver.xz
 	http://dev.alpinelinux.org/~tteras/linux-3.18.y-rpi-20150413.patch
 	aslr-pie.patch
-	kernelconfig.armhf
+
+	config-rpi.armhf
+	config-rpi2.armhf
 	"
 subpackages="$pkgname-dev"
+_flavors=
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-${_f}"
+		fi
+		;;
+	esac
+done
+
 arch="armhf"
 license="GPL-2"
-
-_abi_release=${pkgver}-${pkgrel}-${_flavor}
 
 prepare() {
 	local _patch_failed=
@@ -54,48 +68,83 @@ prepare() {
 		return 1
 	fi
 
+	# remove localversion from patch if any
 	rm -f localversion*
-	echo "-$pkgrel-$_flavor" > localversion-alpine
+	for i in $_flavors; do
+		local _config=config-$i.${CARCH}
+		local _builddir="$srcdir"/build-$i
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$i" > "$srcdir"/build-$i/localversion-alpine \
+			|| return 1
 
-	mkdir -p "$srcdir"/build
-	cp "$srcdir"/$_config "$srcdir"/build/.config || return 1
-	make -C "$srcdir"/linux-$_kernver O="$srcdir"/build HOSTCC="${CC:-gcc}" \
-		silentoldconfig
-}
-
-# this is so we can do: 'abuild menuconfig' to reconfigure kernel
-menuconfig() {
-	cd "$srcdir"/build || return 1
-	make menuconfig
-	cp .config "$startdir"/$_config
+		cp "$srcdir"/$_config "$_builddir"/.config || return 1
+		make -C "$srcdir"/linux-$_kernver \
+			O="$_builddir" \
+			HOSTCC="${CC:-gcc}" \
+			silentoldconfig || return 1
+	done
 }
 
 build() {
-	cd "$srcdir"/build
 	export GCC_SPECS=hardenednopie.specs
-	make CC="${CC:-gcc}" \
-		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
-		|| return 1
+	for i in $_flavors; do
+		cd "$srcdir"/build-$i
+		make CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
+			|| return 1
+	done
 }
 
-package() {
-	cd "$srcdir"/build
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=${pkgver}-${pkgrel}-${_buildflavor}
 
-	mkdir -p "$pkgdir"/boot "$pkgdir"/lib/modules
-	make -j1 modules_install firmware_install zinstall \
-		INSTALL_MOD_PATH="$pkgdir" \
-		INSTALL_PATH="$pkgdir"/boot \
+	cd "$srcdir"/build-$_buildflavor || return 1
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+
+	local _install
+	case "$CARCH" in
+	arm*)
+		local _dtbdir="$_outdir"/usr/lib/linux-${_abi_release}
+		mkdir -p "$_dtbdir"
+		for i in arch/arm/boot/dts/*.dtb ; do
+			install -m644 "$i" "$_dtbdir"
+		done
+
+		_install=zinstall
+		;;
+	*)
+		_install=install
+		;;
+	esac
+
+	make -j1 modules_install firmware_install $_install \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_PATH="$_outdir"/boot \
 		|| return 1
 
-	rm -f "$pkgdir"/lib/modules/${_abi_release}/build \
-		"$pkgdir"/lib/modules/${_abi_release}/source
-	rm -rf "$pkgdir"/lib/firmware
+	rm -f "$_outdir"/lib/modules/${_abi_release}/build \
+		"$_outdir"/lib/modules/${_abi_release}/source
+	rm -rf "$_outdir"/lib/firmware
 
 	install -D include/config/kernel.release \
-		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+		"$_outdir"/usr/share/kernel/$_flavor/kernel.release
 }
 
+# main flavor installs in $pkgdir
+package() {
+	_package rpi "$pkgdir"
+}
+
+# subflavors install in $subpkgdir
+rpi2() {
+	_package rpi2 "$subpkgdir"
+}
+
+# we only provide -dev for main flavor for now
 dev() {
+	local _abi_release=${pkgver}-${pkgrel}-$_mainflavor
 	# copy the only the parts that we really need for build 3rd party
 	# kernel modules and install those as /usr/src/linux-headers,
 	# simlar to what ubuntu does
@@ -110,7 +159,7 @@ dev() {
 	# first we import config, run prepare to set up for building
 	# external modules, and create the scripts
 	mkdir -p "$dir"
-	cp "$srcdir"/$_config "$dir"/.config
+	cp "$srcdir"/config-$_mainflavor.${CARCH} "$dir"/.config
 	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" HOSTCC="${CC:-gcc}" \
 		silentoldconfig prepare modules_prepare scripts
 
@@ -134,7 +183,7 @@ dev() {
 	find $(find arch -name include -type d -print) -type f \
 		| cpio -pdm "$dir"
 
-	install -Dm644 "$srcdir"/build/Module.symvers \
+	install -Dm644 "$srcdir"/build-$_mainflavor/Module.symvers \
 		"$dir"/Module.symvers
 
 	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
@@ -146,14 +195,17 @@ md5sums="9e854df51ca3fef8bfe566dbd7b89241  linux-3.18.tar.xz
 ac5c93edbc9385793ccc33f4ced85950  patch-3.18.11.xz
 d046388e58921b2a21591acb86452d6a  linux-3.18.y-rpi-20150413.patch
 f901100a661ec62aac12000872d0276c  aslr-pie.patch
-59fa79d723f1b771229d01d15d7bcdc0  kernelconfig.armhf"
+c433bf16d5ee0ff6fc6e01c547af6542  config-rpi.armhf
+3077de01ea2f3da7c6440096e5b9e12b  config-rpi2.armhf"
 sha256sums="becc413cc9e6d7f5cc52a3ce66d65c3725bc1d1cc1001f4ce6c32b69eb188cbd  linux-3.18.tar.xz
 e4c44f887f507b2470a5c2f1c286a38fec6e84c4d433c929981abab7b83f80d5  patch-3.18.11.xz
 c2ec44791aa2c14de2c4827e69174f6ea4e10272f304895853252a021714faf9  linux-3.18.y-rpi-20150413.patch
 07e9b089c0d5d57e91256ff6e8fe373519c8bd4ae4cba4eb4a2edad3e2cc9a8e  aslr-pie.patch
-048b234d1d1100132897b033a82ad71f072fe3f3a29d68209a0ee364cc09a92b  kernelconfig.armhf"
+52796d07ad4e311410efcb5fd2e35cb54f4c4ba165f715b92abb5ce80b70edf4  config-rpi.armhf
+6eeeee7708bc708ce5a8b93a035d303cfceab10a0f86123eb67b15fa26cd1542  config-rpi2.armhf"
 sha512sums="2f0b72466e9bc538a675738aa416573d41bbbd7e3e2ffd5b5b127afde609ebc278cec5a3c37e73479607e957c13f1b4ed9782a3795e0dcc2cf8e550228594009  linux-3.18.tar.xz
 cc4ac5d341ca4e9d71ef1ba45a839b18947e3e7ffdc7f7efe2c211c95483518a1983bc3637edd607e0631f14c1cc9bfb9164926261d2cf5c2bb2eb91206f43b9  patch-3.18.11.xz
 7493bffc80921dc4a5a5472008500fd742703744d3798d0e886b64f5a67be5690ee422f188b95dcf4534249b1fedd439a5eb0a80f9572f7c3c931eb69bc36037  linux-3.18.y-rpi-20150413.patch
 35055eea7fce660a200cf6f56490a88f1601b4ea95d2364191ad0d890633e8811f2753b5816dad9640384a764b147a4a80b95f39e3bd7a66a15fd5b3ec0c794a  aslr-pie.patch
-2e7d1242a2d1834bef14a3f3f376c1cd89b9a963169043fc03ba6c9a679472b18b7ff0252f70e2853f33cd8afb4f076a5458244559de48f4eaffce91f147fc20  kernelconfig.armhf"
+e411b3eba56cf97182ccc56ea399782e9c760c701b296f63704322bef87db4693d6f6cfa067162b844d2c295723f4ad3351d11db9b3bc049069267ab39bdeb71  config-rpi.armhf
+2152114ea84ab2b71ec5f1203cb5747d79e83a70346cea61d85ba8c1706107919287d279be8d85b0c42d1e71d71f9b80eda9ebe580ade11ae137719c22db56d7  config-rpi2.armhf"
