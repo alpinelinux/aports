@@ -19,6 +19,7 @@
 struct fix_ctx {
 	unsigned short solver_flags;
 	int fix_depends : 1;
+	int fix_xattrs : 1;
 	int fix_directory_permissions : 1;
 	int errors;
 };
@@ -29,6 +30,9 @@ static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int op
 	switch (optch) {
 	case 'd':
 		ctx->fix_depends = 1;
+		break;
+	case 'x':
+		ctx->fix_xattrs = 1;
 		break;
 	case 'u':
 		ctx->solver_flags |= APK_SOLVERF_UPGRADE;
@@ -49,6 +53,7 @@ static const struct apk_option options_applet[] = {
 	{ 'd',		"depends",	"Fix all dependencies too" },
 	{ 'r',		"reinstall",	"Reinstall the package (default)" },
 	{ 'u',		"upgrade",	"Prefer to upgrade package" },
+	{ 'x',		"xattr",	"Fix packages with broken xattrs" },
 	{ 0x10000,	"directory-permissions", "Reset all directory permissions" },
 };
 
@@ -95,7 +100,8 @@ static int fix_main(void *pctx, struct apk_database *db, struct apk_string_array
 
 	if (args->num == 0) {
 		list_for_each_entry(ipkg, &db->installed.packages, installed_pkgs_list) {
-			if (ipkg->broken_files || ipkg->broken_script)
+			if (ipkg->broken_files || ipkg->broken_script ||
+			    (ipkg->broken_xattr && ctx->fix_xattrs))
 				mark_fix(ctx, ipkg->pkg->name);
 		}
 	} else

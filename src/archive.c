@@ -397,7 +397,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 {
 	struct apk_xattr *xattr;
 	char *fn = ae->name;
-	int fd, r = -1, atflags = 0;
+	int fd, r = -1, atflags = 0, ret = 0;
 
 	if (suffix != NULL) {
 		fn = alloca(PATH_MAX);
@@ -413,8 +413,8 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 	switch (ae->mode & S_IFMT) {
 	case S_IFDIR:
 		r = mkdirat(atfd, fn, ae->mode & 07777);
-		if (r < 0 && errno == EEXIST)
-			r = 0;
+		if (r < 0 && errno != EEXIST)
+			ret = -errno;
 		break;
 	case S_IFREG:
 		if (ae->link_target == NULL) {
@@ -422,11 +422,11 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 
 			fd = openat(atfd, fn, flags, ae->mode & 07777);
 			if (fd < 0) {
-				r = -1;
+				ret = -errno;
 				break;
 			}
-			if (apk_istream_splice(is, fd, ae->size, cb, cb_ctx) == ae->size)
-				r = 0;
+			r = apk_istream_splice(is, fd, ae->size, cb, cb_ctx);
+			if (r != ae->size) ret = r < 0 ? r : -ENOSPC;
 			close(fd);
 		} else {
 			char *link_target = ae->link_target;
@@ -436,10 +436,12 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 					 ae->link_target, suffix);
 			}
 			r = linkat(atfd, link_target, atfd, fn, 0);
+			if (r < 0) ret = -errno;
 		}
 		break;
 	case S_IFLNK:
 		r = symlinkat(ae->link_target, atfd, fn);
+		if (r < 0) ret = -errno;
 		atflags |= AT_SYMLINK_NOFOLLOW;
 		break;
 	case S_IFSOCK:
@@ -447,65 +449,68 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 	case S_IFCHR:
 	case S_IFIFO:
 		r = mknodat(atfd, fn, ae->mode & 07777, ae->device);
+		if (r < 0) ret = -errno;
 		break;
 	}
-	if (r == 0) {
-		r = fchownat(atfd, fn, ae->uid, ae->gid, atflags);
-		if (r < 0) {
-			apk_error("Failed to set ownership on %s: %s",
-				  fn, strerror(errno));
-			return -errno;
-		}
-
-		/* chown resets suid bit so we need set it again */
-		if (ae->mode & 07000) {
-			r = fchmodat(atfd, fn, ae->mode & 07777, atflags);
-			if (r < 0) {
-				apk_error("Failed to set file permissions "
-					  "on %s: %s",
-					  fn, strerror(errno));
-				return -errno;
-			}
-		}
-
-		/* extract xattrs */
-		if (ae->xattrs && ae->xattrs->num) {
-			r = 0;
-			fd = openat(atfd, fn, O_RDWR);
-			if (fd >= 0) {
-				foreach_array_item(xattr, ae->xattrs) {
-					if (fsetxattr(fd, xattr->name, xattr->value.ptr, xattr->value.len, 0) < 0) {
-						r = errno;
-						break;
-					}
-				}
-				close(fd);
-			} else {
-				r = errno;
-			}
-			if (r) {
-				apk_error("Failed to set xattrs on %s: %s",
-					  fn, strerror(r));
-				return -r;
-			}
-		}
-
-		if (!S_ISLNK(ae->mode)) {
-			/* preserve modification time */
-			struct timespec times[2];
-
-			times[0].tv_sec  = times[1].tv_sec  = ae->mtime;
-			times[0].tv_nsec = times[1].tv_nsec = 0;
-			r = utimensat(atfd, fn, times, atflags);
-			if (r < 0) {
-				apk_error("Failed to preserve modification time on %s: %s",
-					fn, strerror(errno));
-				return -errno;
-			}
-		}
-	} else {
-		apk_error("Failed to extract %s: %s", ae->name, strerror(errno));
-		return -errno;
+	if (ret) {
+		apk_error("Failed to create %s: %s", ae->name, strerror(-ret));
+		return ret;
 	}
+
+	r = fchownat(atfd, fn, ae->uid, ae->gid, atflags);
+	if (r < 0) {
+		apk_error("Failed to set ownership on %s: %s",
+			  fn, strerror(errno));
+		if (!ret) ret = -errno;
+	}
+
+	/* chown resets suid bit so we need set it again */
+	if (ae->mode & 07000) {
+		r = fchmodat(atfd, fn, ae->mode & 07777, atflags);
+		if (r < 0) {
+			apk_error("Failed to set file permissions "
+				  "on %s: %s",
+				  fn, strerror(errno));
+			if (!ret) ret = -errno;
+		}
+	}
+
+	/* extract xattrs */
+	if (ae->xattrs && ae->xattrs->num) {
+		r = 0;
+		fd = openat(atfd, fn, O_RDWR);
+		if (fd >= 0) {
+			foreach_array_item(xattr, ae->xattrs) {
+				if (fsetxattr(fd, xattr->name, xattr->value.ptr, xattr->value.len, 0) < 0) {
+					r = -errno;
+					if (r != -ENOTSUP) break;
+				}
+			}
+			close(fd);
+		} else {
+			r = -errno;
+		}
+		if (r) {
+			if (r != -ENOTSUP)
+				apk_error("Failed to set xattrs on %s: %s",
+					  fn, strerror(-r));
+			if (!ret) ret = -errno;
+		}
+	}
+
+	if (!S_ISLNK(ae->mode)) {
+		/* preserve modification time */
+		struct timespec times[2];
+
+		times[0].tv_sec  = times[1].tv_sec  = ae->mtime;
+		times[0].tv_nsec = times[1].tv_nsec = 0;
+		r = utimensat(atfd, fn, times, atflags);
+		if (r < 0) {
+			apk_error("Failed to preserve modification time on %s: %s",
+				fn, strerror(errno));
+			if (!ret || ret == -ENOTSUP) ret = -errno;
+		}
+	}
+
 	return 0;
 }

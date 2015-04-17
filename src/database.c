@@ -852,6 +852,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 				switch (l.ptr[r]) {
 				case 'f': ipkg->broken_files = 1; break;
 				case 's': ipkg->broken_script = 1; break;
+				case 'x': ipkg->broken_xattr = 1; break;
 				default:
 					if (!(apk_flags & APK_FORCE))
 						goto old_apk_tools;
@@ -926,12 +927,14 @@ static int apk_db_write_fdb(struct apk_database *db, struct apk_ostream *os)
 			apk_blob_push_blob(&bbuf, db->repo_tags[ipkg->repository_tag].plain_name);
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 		}
-		if (ipkg->broken_files || ipkg->broken_script) {
+		if (ipkg->broken_files || ipkg->broken_script || ipkg->broken_xattr) {
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("f:"));
 			if (ipkg->broken_files)
 				apk_blob_push_blob(&bbuf, APK_BLOB_STR("f"));
 			if (ipkg->broken_script)
 				apk_blob_push_blob(&bbuf, APK_BLOB_STR("s"));
+			if (ipkg->broken_xattr)
+				apk_blob_push_blob(&bbuf, APK_BLOB_STR("x"));
 			apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 		}
 		hlist_for_each_entry(diri, c1, &ipkg->owned_dirs, pkg_dirs_list) {
@@ -2366,35 +2369,44 @@ static int apk_db_install_archive_entry(void *_ctx,
 		r = apk_archive_entry_extract(db->root_fd, ae, ".apk-new", is,
 					      extract_cb, ctx);
 
-		/* Hardlinks need special care for checksum */
-		if (ae->csum.type == APK_CHECKSUM_NONE &&
-		    ae->link_target != NULL) {
-			do {
-				struct apk_db_file *lfile;
-				struct apk_db_dir_instance *ldiri;
-				struct hlist_node *n;
+		switch (r) {
+		case 0:
+			/* Hardlinks need special care for checksum */
+			if (ae->csum.type == APK_CHECKSUM_NONE &&
+			    ae->link_target != NULL) {
+				do {
+					struct apk_db_file *lfile;
+					struct apk_db_dir_instance *ldiri;
+					struct hlist_node *n;
 
-				if (!apk_blob_rsplit(APK_BLOB_STR(ae->link_target),
-						     '/', &bdir, &bfile))
-					break;
-
-				ldiri = find_diri(ipkg, bdir, diri, NULL);
-				if (ldiri == NULL)
-					break;
-
-				hlist_for_each_entry(lfile, n, &ldiri->owned_files,
-						     diri_files_list) {
-					if (apk_blob_compare(APK_BLOB_PTR_LEN(lfile->name, lfile->namelen),
-							     bfile) == 0) {
-						memcpy(&file->csum, &lfile->csum,
-						       sizeof(file->csum));
+					if (!apk_blob_rsplit(APK_BLOB_STR(ae->link_target),
+							     '/', &bdir, &bfile))
 						break;
-					}
-				}
-			} while (0);
 
-		} else
-			memcpy(&file->csum, &ae->csum, sizeof(file->csum));
+					ldiri = find_diri(ipkg, bdir, diri, NULL);
+					if (ldiri == NULL)
+						break;
+
+					hlist_for_each_entry(lfile, n, &ldiri->owned_files,
+							     diri_files_list) {
+						if (apk_blob_compare(APK_BLOB_PTR_LEN(lfile->name, lfile->namelen),
+								     bfile) == 0) {
+							memcpy(&file->csum, &lfile->csum,
+							       sizeof(file->csum));
+							break;
+						}
+					}
+				} while (0);
+			} else
+				memcpy(&file->csum, &ae->csum, sizeof(file->csum));
+			break;
+		case -ENOTSUP:
+			ipkg->broken_xattr = 1;
+			break;
+		default:
+			ipkg->broken_files = 1;
+			break;
+		}
 	} else {
 		if (apk_verbosity >= 3)
 			apk_message("%s (dir)", ae->name);
@@ -2408,7 +2420,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 	}
 	ctx->installed_size += ctx->current_file_size;
 
-	return r;
+	return 0;
 }
 
 static void apk_db_purge_pkg(struct apk_database *db,
@@ -2659,6 +2671,7 @@ int apk_db_install_pkg(struct apk_database *db, struct apk_package *oldpkg,
 	ipkg->run_all_triggers = 1;
 	ipkg->broken_script = 0;
 	ipkg->broken_files = 0;
+	ipkg->broken_xattr = 0;
 	if (ipkg->triggers->num != 0) {
 		list_del(&ipkg->trigger_pkgs_list);
 		list_init(&ipkg->trigger_pkgs_list);

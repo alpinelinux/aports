@@ -91,6 +91,7 @@ struct apk_installed_package {
 	unsigned run_all_triggers : 1;
 	unsigned broken_files : 1;
 	unsigned broken_script : 1;
+	unsigned broken_xattr : 1;
 };
 
 struct apk_package {
