@@ -494,7 +494,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 			if (r != -ENOTSUP)
 				apk_error("Failed to set xattrs on %s: %s",
 					  fn, strerror(-r));
-			if (!ret) ret = -errno;
+			if (!ret) ret = r;
 		}
 	}
 
@@ -512,5 +512,5 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 		}
 	}
 
-	return 0;
+	return ret;
 }
