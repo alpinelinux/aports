@@ -110,7 +110,7 @@ static int audit_file(struct audit_ctx *actx,
 	if (dbf->csum.type != APK_CHECKSUM_NONE &&
 	    apk_checksum_compare(&fi.csum, &dbf->csum) != 0)
 		rv = 'U';
-	else if (!dbf->diri->pkg->ipkg->broken_xattr &&
+	else if (!S_ISLNK(fi.mode) && !dbf->diri->pkg->ipkg->broken_xattr &&
 	         apk_checksum_compare(&fi.xattr_csum, &dbf->acl->xattr_csum) != 0)
 		rv = 'x';
 	else if (S_ISLNK(fi.mode) && dbf->csum.type == APK_CHECKSUM_NONE)

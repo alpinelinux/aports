@@ -476,7 +476,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 	}
 
 	/* extract xattrs */
-	if (ae->xattrs && ae->xattrs->num) {
+	if (!S_ISLNK(ae->mode) && ae->xattrs && ae->xattrs->num) {
 		r = 0;
 		fd = openat(atfd, fn, O_RDWR);
 		if (fd >= 0) {
