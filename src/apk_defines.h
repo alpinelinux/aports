@@ -32,6 +32,8 @@
 #define NULL 0L
 #endif
 
+#define EAPKSTALEINDEX 1024
+
 static inline void *ERR_PTR(long error) { return (void*) error; }
 static inline void *ERR_CAST(const void *ptr) { return (void*) ptr; }
 static inline int PTR_ERR(const void *ptr) { return (int)(long) ptr; }
