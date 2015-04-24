@@ -2591,6 +2591,8 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 	bs = apk_bstream_from_fd_url(filefd, file);
 	if (IS_ERR_OR_NULL(bs)) {
 		r = PTR_ERR(bs);
+		if (r == -ENOENT && pkg->filename == NULL)
+			r = -EAPKSTALEINDEX;
 		goto err_msg;
 	}
 	if (need_copy) {

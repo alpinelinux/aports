@@ -143,15 +143,15 @@ const char *apk_error_str(int error)
 	case ENXIO:
 		return "DNS lookup error";
 	case EREMOTEIO:
-		return "error code returned by repo server (try 'apk update')";
+		return "remote server returned error (try 'apk update')";
 	case ETIMEDOUT:
 		return "operation timed out";
 	case EAGAIN:
 		return "temporary error (try again later)";
-	case EINVAL:
+	case EAPKBADURL:
 		return "invalid URL (check your repositories file)";
 	case EAPKSTALEINDEX:
-		return "file not available from repo server (try 'apk update')";
+		return "package mentioned in index not found (try 'apk update')";
 	default:
 		return strerror(error);
 	}

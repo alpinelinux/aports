@@ -58,7 +58,7 @@ static int fetch_maperror(int ec)
 		[FETCH_TIMEOUT] = -ETIMEDOUT,
 		[FETCH_UNAVAIL] = -ENOENT,
 		[FETCH_UNKNOWN] = -EIO,
-		[FETCH_URL] = -EINVAL,
+		[FETCH_URL] = -EAPKBADURL,
 		[FETCH_UNCHANGED] = -EALREADY,
 	};
 
