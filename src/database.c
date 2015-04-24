@@ -2258,8 +2258,21 @@ static int apk_db_install_archive_entry(void *_ctx,
 	if (r <= 0)
 		return r;
 
-	/* Package metainfo and script processing */
 	r = 0;
+
+	/* Sanity check the file name */
+	if (ae->name[0] == '/' ||
+	    strncmp(ae->name, "/./"+1, 3) == 0 ||
+	    strncmp(ae->name, "/../"+1, 3) == 0 ||
+	    strstr(ae->name, "/./") ||
+	    strstr(ae->name, "/../")) {
+		apk_warning(PKG_VER_FMT": ignoring malicious file %s",
+			    PKG_VER_PRINTF(pkg), ae->name);
+		ipkg->broken_files = 1;
+		return 0;
+	}
+
+	/* Package metainfo and script processing */
 	if (ae->name[0] == '.') {
 		/* APK 2.0 format */
 		if (strcmp(ae->name, ".PKGINFO") == 0) {
