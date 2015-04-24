@@ -88,9 +88,6 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 	if (actx->virtpkg) {
 		apk_blob_t b = APK_BLOB_STR(actx->virtpkg);
 
-		if (non_repository_check(db))
-			return -1;
-
 		apk_blob_pull_dep(&b, db, &virtdep);
 		if (APK_BLOB_IS_NULL(b) || virtdep.conflict ||
 		    virtdep.result_mask != APK_DEPMASK_ANY ||
@@ -98,6 +95,9 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 			apk_error("%s: bad package specifier");
 			return -1;
 		}
+
+		if (virtdep.name->name[0] != '.' && non_repository_check(db))
+			return -1;
 
 		virtpkg = apk_pkg_new();
 		if (virtpkg == NULL) {
