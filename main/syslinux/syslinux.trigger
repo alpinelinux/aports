@@ -1,3 +1,3 @@
 #!/bin/sh
 
-update-extlinux
+update-extlinux --warn-only
