@@ -778,9 +778,11 @@ static int fdo_close(void *stream)
 {
 	struct apk_fd_ostream *fos =
 		container_of(stream, struct apk_fd_ostream, os);
-	int rc = fos->rc;
+	int rc;
 
 	fdo_flush(fos);
+	rc = fos->rc;
+
 	if (fos->fd > STDERR_FILENO &&
 	    close(fos->fd) < 0)
 		rc = -errno;
