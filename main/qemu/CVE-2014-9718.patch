@@ -1,0 +1,335 @@
+From: John Snow <jsnow@redhat.com>
+Date: Fri, 31 Oct 2014 16:03:39 -0400
+Subject: [PATCH] ide: Correct handling of malformed/short PRDTs
+
+This impacts both BMDMA and AHCI HBA interfaces for IDE.
+Currently, we confuse the difference between a PRDT having
+"0 bytes" and a PRDT having "0 complete sectors."
+
+When we receive an incomplete sector, inconsistent error checking
+leads to an infinite loop wherein the call succeeds, but it
+didn't give us enough bytes -- leading us to re-call the
+DMA chain over and over again. This leads to, in the BMDMA case,
+leaked memory for short PRDTs, and infinite loops and resource
+usage in the AHCI case.
+
+The .prepare_buf() callback is reworked to return the number of
+bytes that it successfully prepared. 0 is a valid, non-error
+answer that means the table was empty and described no bytes.
+-1 indicates an error.
+
+Our current implementation uses the io_buffer in IDEState to
+ultimately describe the size of a prepared scatter-gather list.
+Even though the AHCI PRDT/SGList can be as large as 256GiB, the
+AHCI command header limits transactions to just 4GiB. ATA8-ACS3,
+however, defines the largest transaction to be an LBA48 command
+that transfers 65,536 sectors. With a 512 byte sector size, this
+is just 32MiB.
+
+Since our current state structures use the int type to describe
+the size of the buffer, and this state is migrated as int32, we
+are limited to describing 2GiB buffer sizes unless we change the
+migration protocol.
+
+For this reason, this patch begins to unify the assertions in the
+IDE pathways that the scatter-gather list provided by either the
+AHCI PRDT or the PCI BMDMA PRDs can only describe, at a maximum,
+2GiB. This should be resilient enough unless we need a sector
+size that exceeds 32KiB.
+
+Further, the likelihood of any guest operating system actually
+attempting to transfer this much data in a single operation is
+very slim.
+
+To this end, the IDEState variables have been updated to more
+explicitly clarify our maximum supported size. Callers to the
+prepare_buf callback have been reworked to understand the new
+return code, and all versions of the prepare_buf callback have
+been adjusted accordingly.
+
+Lastly, the ahci_populate_sglist helper, relied upon by the
+AHCI implementation of .prepare_buf() as well as the PCI
+implementation of the callback have had overflow assertions
+added to help make clear the reasonings behind the various
+type changes.
+
+[Added %d -> %"PRId64" fix John sent because off_pos changed from int to
+int64_t.
+--Stefan]
+
+Signed-off-by: John Snow <jsnow@redhat.com>
+Reviewed-by: Paolo Bonzini <pbonzini@redhat.com>
+Message-id: 1414785819-26209-4-git-send-email-jsnow@redhat.com
+Signed-off-by: Stefan Hajnoczi <stefanha@redhat.com>
+(cherry picked from commit 3251bdcf1c67427d964517053c3d185b46e618e8)
+---
+ hw/ide/ahci.c     | 33 ++++++++++++++++++++++++++-------
+ hw/ide/core.c     | 10 ++++++++--
+ hw/ide/internal.h | 13 +++++++------
+ hw/ide/macio.c    |  7 ++++++-
+ hw/ide/pci.c      | 27 +++++++++++++++++++++------
+ 5 files changed, 68 insertions(+), 22 deletions(-)
+
+diff --git a/hw/ide/ahci.c b/hw/ide/ahci.c
+index 604152a..9674f5f 100644
+--- a/hw/ide/ahci.c
++++ b/hw/ide/ahci.c
+@@ -645,7 +645,8 @@ static int prdt_tbl_entry_size(const AHCI_SG *tbl)
+     return (le32_to_cpu(tbl->flags_size) & AHCI_PRDT_SIZE_MASK) + 1;
+ }
+ 
+-static int ahci_populate_sglist(AHCIDevice *ad, QEMUSGList *sglist, int offset)
++static int ahci_populate_sglist(AHCIDevice *ad, QEMUSGList *sglist,
++                                int32_t offset)
+ {
+     AHCICmdHdr *cmd = ad->cur_cmd;
+     uint32_t opts = le32_to_cpu(cmd->opts);
+@@ -656,13 +657,21 @@ static int ahci_populate_sglist(AHCIDevice *ad, QEMUSGList *sglist, int offset)
+     uint8_t *prdt;
+     int i;
+     int r = 0;
+-    int sum = 0;
++    uint64_t sum = 0;
+     int off_idx = -1;
+-    int off_pos = -1;
++    int64_t off_pos = -1;
+     int tbl_entry_size;
+     IDEBus *bus = &ad->port;
+     BusState *qbus = BUS(bus);
+ 
++    /*
++     * Note: AHCI PRDT can describe up to 256GiB. SATA/ATA only support
++     * transactions of up to 32MiB as of ATA8-ACS3 rev 1b, assuming a
++     * 512 byte sector size. We limit the PRDT in this implementation to
++     * a reasonably large 2GiB, which can accommodate the maximum transfer
++     * request for sector sizes up to 32K.
++     */
++
+     if (!sglist_alloc_hint) {
+         DPRINTF(ad->port_no, "no sg list given by guest: 0x%08x\n", opts);
+         return -1;
+@@ -697,7 +706,7 @@ static int ahci_populate_sglist(AHCIDevice *ad, QEMUSGList *sglist, int offset)
+         }
+         if ((off_idx == -1) || (off_pos < 0) || (off_pos > tbl_entry_size)) {
+             DPRINTF(ad->port_no, "%s: Incorrect offset! "
+-                            "off_idx: %d, off_pos: %d\n",
++                            "off_idx: %d, off_pos: %"PRId64"\n",
+                             __func__, off_idx, off_pos);
+             r = -1;
+             goto out;
+@@ -712,6 +721,13 @@ static int ahci_populate_sglist(AHCIDevice *ad, QEMUSGList *sglist, int offset)
+             /* flags_size is zero-based */
+             qemu_sglist_add(sglist, le64_to_cpu(tbl[i].addr),
+                             prdt_tbl_entry_size(&tbl[i]));
++            if (sglist->size > INT32_MAX) {
++                error_report("AHCI Physical Region Descriptor Table describes "
++                             "more than 2 GiB.\n");
++                qemu_sglist_destroy(sglist);
++                r = -1;
++                goto out;
++            }
+         }
+     }
+ 
+@@ -1056,16 +1072,19 @@ static void ahci_start_dma(IDEDMA *dma, IDEState *s,
+     dma_cb(s, 0);
+ }
+ 
+-static int ahci_dma_prepare_buf(IDEDMA *dma, int is_write)
++static int32_t ahci_dma_prepare_buf(IDEDMA *dma, int is_write)
+ {
+     AHCIDevice *ad = DO_UPCAST(AHCIDevice, dma, dma);
+     IDEState *s = &ad->port.ifs[0];
+ 
+-    ahci_populate_sglist(ad, &s->sg, 0);
++    if (ahci_populate_sglist(ad, &s->sg, 0) == -1) {
++        DPRINTF(ad->port_no, "ahci_dma_prepare_buf failed.\n");
++        return -1;
++    }
+     s->io_buffer_size = s->sg.size;
+ 
+     DPRINTF(ad->port_no, "len=%#x\n", s->io_buffer_size);
+-    return s->io_buffer_size != 0;
++    return s->io_buffer_size;
+ }
+ 
+ static int ahci_dma_rw_buf(IDEDMA *dma, int is_write)
+diff --git a/hw/ide/core.c b/hw/ide/core.c
+index fa4cafa..50691fc 100644
+--- a/hw/ide/core.c
++++ b/hw/ide/core.c
+@@ -676,10 +676,11 @@ void ide_dma_cb(void *opaque, int ret)
+     n = s->nsector;
+     s->io_buffer_index = 0;
+     s->io_buffer_size = n * 512;
+-    if (s->bus->dma->ops->prepare_buf(s->bus->dma, ide_cmd_is_read(s)) == 0) {
++    if (s->bus->dma->ops->prepare_buf(s->bus->dma, ide_cmd_is_read(s)) < 512) {
+         /* The PRDs were too short. Reset the Active bit, but don't raise an
+          * interrupt. */
+         s->status = READY_STAT | SEEK_STAT;
++        dma_buf_commit(s);
+         goto eot;
+     }
+ 
+@@ -2212,6 +2213,11 @@ static int ide_nop_int(IDEDMA *dma, int x)
+     return 0;
+ }
+ 
++static int32_t ide_nop_int32(IDEDMA *dma, int x)
++{
++    return 0;
++}
++
+ static void ide_nop_restart(void *opaque, int x, RunState y)
+ {
+ }
+@@ -2219,7 +2225,7 @@ static void ide_nop_restart(void *opaque, int x, RunState y)
+ static const IDEDMAOps ide_dma_nop_ops = {
+     .start_dma      = ide_nop_start,
+     .start_transfer = ide_nop,
+-    .prepare_buf    = ide_nop_int,
++    .prepare_buf    = ide_nop_int32,
+     .rw_buf         = ide_nop_int,
+     .set_unit       = ide_nop_int,
+     .add_status     = ide_nop_int,
+diff --git a/hw/ide/internal.h b/hw/ide/internal.h
+index 0567a52..b03045b 100644
+--- a/hw/ide/internal.h
++++ b/hw/ide/internal.h
+@@ -322,6 +322,7 @@ typedef void EndTransferFunc(IDEState *);
+ typedef void DMAStartFunc(IDEDMA *, IDEState *, BlockDriverCompletionFunc *);
+ typedef int DMAFunc(IDEDMA *);
+ typedef int DMAIntFunc(IDEDMA *, int);
++typedef int32_t DMAInt32Func(IDEDMA *, int);
+ typedef void DMARestartFunc(void *, int, RunState);
+ 
+ struct unreported_events {
+@@ -383,7 +384,7 @@ struct IDEState {
+     uint8_t cdrom_changed;
+     int packet_transfer_size;
+     int elementary_transfer_size;
+-    int io_buffer_index;
++    int32_t io_buffer_index;
+     int lba;
+     int cd_sector_size;
+     int atapi_dma; /* true if dma is requested for the packet cmd */
+@@ -392,8 +393,8 @@ struct IDEState {
+     struct iovec iov;
+     QEMUIOVector qiov;
+     /* ATA DMA state */
+-    int io_buffer_offset;
+-    int io_buffer_size;
++    int32_t io_buffer_offset;
++    int32_t io_buffer_size;
+     QEMUSGList sg;
+     /* PIO transfer handling */
+     int req_nb_sectors; /* number of sectors per interrupt */
+@@ -403,8 +404,8 @@ struct IDEState {
+     uint8_t *io_buffer;
+     /* PIO save/restore */
+     int32_t io_buffer_total_len;
+-    int cur_io_buffer_offset;
+-    int cur_io_buffer_len;
++    int32_t cur_io_buffer_offset;
++    int32_t cur_io_buffer_len;
+     uint8_t end_transfer_fn_idx;
+     QEMUTimer *sector_write_timer; /* only used for win2k install hack */
+     uint32_t irq_count; /* counts IRQs when using win2k install hack */
+@@ -428,7 +429,7 @@ struct IDEState {
+ struct IDEDMAOps {
+     DMAStartFunc *start_dma;
+     DMAFunc *start_transfer;
+-    DMAIntFunc *prepare_buf;
++    DMAInt32Func *prepare_buf;
+     DMAIntFunc *rw_buf;
+     DMAIntFunc *set_unit;
+     DMAIntFunc *add_status;
+diff --git a/hw/ide/macio.c b/hw/ide/macio.c
+index c14a1dd..68d88ac 100644
+--- a/hw/ide/macio.c
++++ b/hw/ide/macio.c
+@@ -555,6 +555,11 @@ static int ide_nop_int(IDEDMA *dma, int x)
+     return 0;
+ }
+ 
++static int32_t ide_nop_int32(IDEDMA *dma, int x)
++{
++    return 0;
++}
++
+ static void ide_nop_restart(void *opaque, int x, RunState y)
+ {
+ }
+@@ -572,7 +577,7 @@ static void ide_dbdma_start(IDEDMA *dma, IDEState *s,
+ static const IDEDMAOps dbdma_ops = {
+     .start_dma      = ide_dbdma_start,
+     .start_transfer = ide_nop,
+-    .prepare_buf    = ide_nop_int,
++    .prepare_buf    = ide_nop_int32,
+     .rw_buf         = ide_nop_int,
+     .set_unit       = ide_nop_int,
+     .add_status     = ide_nop_int,
+diff --git a/hw/ide/pci.c b/hw/ide/pci.c
+index 6257a21..6591246 100644
+--- a/hw/ide/pci.c
++++ b/hw/ide/pci.c
+@@ -28,7 +28,7 @@
+ #include <hw/isa/isa.h>
+ #include "block/block.h"
+ #include "sysemu/dma.h"
+-
++#include "qemu/error-report.h"
+ #include <hw/ide/pci.h>
+ 
+ #define BMDMA_PAGE_SIZE 4096
+@@ -51,8 +51,11 @@ static void bmdma_start_dma(IDEDMA *dma, IDEState *s,
+     }
+ }
+ 
+-/* return 0 if buffer completed */
+-static int bmdma_prepare_buf(IDEDMA *dma, int is_write)
++/**
++ * Return the number of bytes successfully prepared.
++ * -1 on error.
++ */
++static int32_t bmdma_prepare_buf(IDEDMA *dma, int is_write)
+ {
+     BMDMAState *bm = DO_UPCAST(BMDMAState, dma, dma);
+     IDEState *s = bmdma_active_if(bm);
+@@ -70,8 +73,9 @@ static int bmdma_prepare_buf(IDEDMA *dma, int is_write)
+         if (bm->cur_prd_len == 0) {
+             /* end of table (with a fail safe of one page) */
+             if (bm->cur_prd_last ||
+-                (bm->cur_addr - bm->addr) >= BMDMA_PAGE_SIZE)
+-                return s->io_buffer_size != 0;
++                (bm->cur_addr - bm->addr) >= BMDMA_PAGE_SIZE) {
++                return s->io_buffer_size;
++            }
+             pci_dma_read(pci_dev, bm->cur_addr, &prd, 8);
+             bm->cur_addr += 8;
+             prd.addr = le32_to_cpu(prd.addr);
+@@ -86,12 +90,23 @@ static int bmdma_prepare_buf(IDEDMA *dma, int is_write)
+         l = bm->cur_prd_len;
+         if (l > 0) {
+             qemu_sglist_add(&s->sg, bm->cur_prd_addr, l);
++
++            /* Note: We limit the max transfer to be 2GiB.
++             * This should accommodate the largest ATA transaction
++             * for LBA48 (65,536 sectors) and 32K sector sizes. */
++            if (s->sg.size > INT32_MAX) {
++                error_report("IDE: sglist describes more than 2GiB.\n");
++                break;
++            }
+             bm->cur_prd_addr += l;
+             bm->cur_prd_len -= l;
+             s->io_buffer_size += l;
+         }
+     }
+-    return 1;
++
++    qemu_sglist_destroy(&s->sg);
++    s->io_buffer_size = 0;
++    return -1;
+ }
+ 
+ /* return 0 if buffer completed */
