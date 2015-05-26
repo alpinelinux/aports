@@ -4,7 +4,7 @@
 -include config.mk
 
 PACKAGE := apk-tools
-VERSION := 2.6.0_rc4
+VERSION := 2.6.0
 
 ##
 # Default directories
