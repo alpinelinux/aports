@@ -21,13 +21,10 @@
 
 const static char * applets[] = {
 	"/bin/mount",
-	"/bin/ping",
-	"/bin/ping6",
 	"/bin/umount",
 	"/usr/bin/crontab",
 	"/usr/bin/passwd",
 	"/usr/bin/su",
-	"/usr/bin/traceroute",
 	NULL
 };
 
