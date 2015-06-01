@@ -758,6 +758,8 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 			if (pkg == NULL)
 				continue;
 
+			if (diri) apk_db_dir_apply_diri_permissions(diri);
+
 			if (repo >= 0) {
 				pkg->repos |= BIT(repo);
 			} else if (repo == -2) {
@@ -806,6 +808,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 		/* Check FDB special entries */
 		switch (field) {
 		case 'F':
+			if (diri) apk_db_dir_apply_diri_permissions(diri);
 			if (pkg->name == NULL) goto bad_entry;
 			diri = apk_db_diri_new(db, pkg, l, &diri_node);
 			file_diri_node = &diri->owned_files.first;
@@ -826,7 +829,7 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 
 			acl = apk_db_acl_atomize(mode, uid, gid, &xattr_csum);
 			if (field == 'M')
-				apk_db_diri_set(diri, acl);
+				diri->acl = acl;
 			else
 				file->acl = acl;
 			break;

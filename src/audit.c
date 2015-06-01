@@ -137,7 +137,7 @@ static int audit_directory(struct audit_ctx *actx,
 		return actx->recursive ? 'd' : 'D';
 
 	if (actx->check_permissions &&
-	    (dbd->mode != 0 || dbd->uid != 0 || dbd->gid != 0)) {
+	    ((dbd->mode & ~S_SEENFLAG) || dbd->uid || dbd->gid)) {
 		if ((fi->mode & 07777) != (dbd->mode & 07777))
 			return 'm';
 		if (fi->uid != dbd->uid || fi->gid != dbd->gid)
