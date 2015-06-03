@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # abuild - build apk packages (light version of makepkg)
-# Copyright (c) 2008 Natanael Copa <natanael.copa@gmail.com>
+# Copyright (c) 2008-2015 Natanael Copa <ncopa@alpinelinux.org>
 #
 # Distributed under GPL-2
 #
@@ -899,6 +899,21 @@ prepare_symlinks() {
 	done
 }
 
+prepare_pkgconfig_provides() {
+	local dir="${subpkgdir:-$pkgdir}"
+	options_has "!tracedeps" && return 0
+	cd "$dir" || return 1
+	for i in usr/lib/pkgconfig/*.pc; do
+		if ! [ -e "$i" ]; then
+			continue
+		fi
+		local f=${i##*/}
+		local v=$(PKG_CONFIG_PATH="$dir"/usr/lib/pkgconfig pkg-config \
+			--env-only --modversion ${f%.pc})
+		echo "${f%.pc}=${v:-0}" >> "$controldir"/.provides-pc
+	done
+}
+
 # check if dir has arch specific binaries
 dir_has_arch_binaries() {
 	local dir="$1"
@@ -933,7 +948,10 @@ archcheck() {
 prepare_package() {
 	msg "Preparing ${subpkgname:+sub}package ${subpkgname:-$pkgname}..."
 	stripbin
-	prepare_metafiles && prepare_trace_rpaths && prepare_symlinks \
+	prepare_metafiles \
+		&& prepare_trace_rpaths \
+		&& prepare_symlinks \
+		&& prepare_pkgconfig_provides \
 		|| return 1
 	archcheck
 }
@@ -969,6 +987,10 @@ find_so_files() {
 
 subpkg_provides_so() {
 	grep -q -w "^$1" "$pkgbasedir"/.control.*/.provides-so 2>/dev/null
+}
+
+subpkg_provides_pc() {
+	grep -q -w "^$1" "$pkgbasedir"/.control.*/.provides-pc 2>/dev/null
 }
 
 trace_apk_deps() {
@@ -1023,9 +1045,25 @@ trace_apk_deps() {
 		autodeps="$autodeps $i"
 	done
 
+	# pkg-config depends
+	for i in $(sort -u "$dir"/.needs-pc 2>/dev/null); do
+		if grep -w "^depend = ${i%[<>=]*}$" "$dir"/.PKGINFO >/dev/null ; then
+			warning "You can remove '$i' from depends"
+			continue
+		fi
+		if subpkg_provides_pc "$i" || cross_compiling \
+				|| $APK info --quiet --installed "pc:$i"; then
+			autodeps="$autodeps pc:$i"
+		fi
+	done
+
 	echo "# automatically detected:" >> "$dir"/.PKGINFO
 	if [ -f "$dir"/.provides-so ]; then
 		sed 's/^\(.*\) \([0-9].*\)/provides = so:\1=\2/' "$dir"/.provides-so \
+			>> "$dir"/.PKGINFO
+	fi
+	if [ -f "$dir"/.provides-pc ]; then
+		sed 's/^/provides = pc:/' "$dir"/.provides-pc \
 			>> "$dir"/.PKGINFO
 	fi
 	[ -z "$autodeps" ] && return 0
@@ -1152,6 +1190,27 @@ scan_symlink_targets() {
 	done
 }
 
+#find pkg-config dependencies
+scan_pkgconfig_depends() {
+	local provides_pc="$1" controldir= name= datadir=
+	[ -e "$provides_pc" ] || return 0
+	controldir="${provides_pc%/*}"
+	name="$(pkginfo_val pkgname "$controldir"/.PKGINFO)"
+	datadir="$pkgbasedir"/$name
+	for i in $(sort -u "$provides_pc"); do
+		PKG_CONFIG_PATH="$datadir"/usr/lib/pkgconfig pkg-config \
+				--print-requires \
+				--print-requires-private ${i%=*} \
+				| sed -E 's/\s*([<>=]+)\s*/\1/' \
+				| while read pc; do
+			# only add files that are not self provided
+			if ! grep -q -w "^${pc%[<>=]*}" "$provides_pc"; then
+				echo "$pc" >> "$controldir"/.needs-pc
+			fi
+		done
+	done
+}
+
 # read size in bytes from stdin and show as human readable
 human_size() {
 	awk '{  split("B KB MB GB TB PB", type)
@@ -1173,7 +1232,11 @@ create_apks() {
 			scan_shared_objects "$name" "$dir" "$datadir"
 			scan_symlink_targets "$name" "$dir" "$datadir"
 		done
+		for file in "$pkgbasedir"/.control.*/.provides-pc; do
+			scan_pkgconfig_depends "$file"
+		done
 	fi
+
 	for file in "$pkgbasedir"/.control.*/.PKGINFO; do
 		dir="${file%/.PKGINFO}"
 		name=$(pkginfo_val pkgname $file)
