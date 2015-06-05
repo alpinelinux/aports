@@ -8,7 +8,7 @@ sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
 abuildrepo	?= ~/.cache/abuild
 
-SCRIPTS		:= abuild buildrepo abuild-keygen abuild-sign newapkbuild \
+SCRIPTS		:= abuild abuild-keygen abuild-sign newapkbuild \
 		   abump apkgrel buildlab apkbuild-cpan checkapk \
 		   apkbuild-gem-resolver
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo
