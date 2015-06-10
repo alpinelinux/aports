@@ -122,8 +122,8 @@ static void print_result_pkg(struct search_ctx *ctx, struct apk_package *pkg)
 
 	if (ctx->search_description) {
 		foreach_array_item(pmatch, ctx->filter) {
-			if (strstr(*pmatch, pkg->description) != NULL ||
-			    strstr(*pmatch, pkg->name->name) != NULL)
+			if (strstr(pkg->description, *pmatch) != NULL ||
+			    strstr(pkg->name->name, *pmatch) != NULL)
 				goto match;
 		}
 		return;
