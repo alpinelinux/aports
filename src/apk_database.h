@@ -152,6 +152,7 @@ struct apk_database {
 	unsigned int pending_triggers;
 	int performing_self_update : 1;
 	int permanent : 1;
+	int open_complete : 1;
 	int compat_newfeatures : 1;
 	int compat_notinstallable : 1;
 

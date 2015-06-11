@@ -524,7 +524,8 @@ struct apk_package *apk_db_pkg_add(struct apk_database *db, struct apk_package *
 		add_provider(pkg->name, APK_PROVIDER_FROM_PACKAGE(pkg));
 		foreach_array_item(dep, pkg->provides)
 			add_provider(dep->name, APK_PROVIDER_FROM_PROVIDES(pkg, dep));
-		apk_db_pkg_rdepends(db, pkg);
+		if (db->open_complete)
+			apk_db_pkg_rdepends(db, pkg);
 	} else {
 		idb->repos |= pkg->repos;
 		if (idb->filename == NULL && pkg->filename != NULL) {
@@ -1436,6 +1437,40 @@ static void apk_db_setup_repositories(struct apk_database *db)
 	db->num_repo_tags = 1;
 }
 
+static int apk_db_name_rdepends(apk_hash_item item, void *pctx)
+{
+	struct apk_name *name = item, *rname, **n0;
+	struct apk_provider *p;
+	struct apk_dependency *dep;
+	struct apk_name_array *touched;
+
+	apk_name_array_init(&touched);
+	foreach_array_item(p, name->providers) {
+		foreach_array_item(dep, p->pkg->depends) {
+			rname = dep->name;
+			rname->is_dependency |= !dep->conflict;
+			if (!(rname->state_int & 1)) {
+				if (!rname->state_int) *apk_name_array_add(&touched) = rname;
+				rname->state_int |= 1;
+				*apk_name_array_add(&rname->rdepends) = name;
+			}
+		}
+		foreach_array_item(dep, p->pkg->install_if) {
+			rname = dep->name;
+			if (!(rname->state_int & 2)) {
+				if (!rname->state_int) *apk_name_array_add(&touched) = rname;
+				rname->state_int |= 2;
+				*apk_name_array_add(&rname->rinstall_if) = name;
+			}
+		}
+	}
+	foreach_array_item(n0, touched)
+		(*n0)->state_int = 0;
+	apk_name_array_free(&touched);
+
+	return 0;
+}
+
 int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 {
 	const char *msg = NULL;
@@ -1460,10 +1495,10 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		goto ret_r;
 	}
 
-	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 4000);
+	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 20000);
 	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 10000);
-	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 5000);
-	apk_hash_init(&db->installed.files, &file_hash_ops, 100000);
+	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 20000);
+	apk_hash_init(&db->installed.files, &file_hash_ops, 200000);
 	list_init(&db->installed.packages);
 	list_init(&db->installed.triggers);
 	apk_dependency_array_init(&db->world);
@@ -1621,10 +1656,14 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 
 		if (apk_flags & APK_UPDATE_CACHE)
 			apk_db_index_write_nr_cache(db);
+
+		apk_hash_foreach(&db->available.names, apk_db_name_rdepends, db);
 	}
 
 	if (apk_db_cache_active(db))
 		apk_db_cache_foreach_item(db, mark_in_cache);
+
+	db->open_complete = 1;
 
 	if (db->compat_newfeatures) {
 		apk_warning("This apk-tools is OLD! Some packages %s.",
