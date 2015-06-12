@@ -365,7 +365,8 @@ struct apk_bstream *apk_bstream_from_fd_pid(int fd, pid_t pid, int (*translate_s
 
 	if (pid == 0) {
 		bs = apk_mmap_bstream_from_fd(fd);
-		if (IS_ERR_OR_NULL(bs)) return ERR_CAST(bs);
+		if (!IS_ERR_OR_NULL(bs))
+			return bs;
 	}
 
 	return apk_bstream_from_istream(apk_istream_from_fd_pid(fd, pid, translate_status));
