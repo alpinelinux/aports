@@ -662,8 +662,18 @@ static struct apk_hash_ops atom_ops = {
 
 apk_blob_t apk_null_blob = {0,0};
 
+#ifdef VALGRIND
+static void apk_atom_fini(void)
+{
+	apk_hash_free(&atom_hash);
+}
+#endif
+
 void apk_atom_init(void)
 {
+#ifdef VALGRIND
+	atexit(apk_atom_fini);
+#endif
 	apk_hash_init(&atom_hash, &atom_ops, 10000);
 }
 
