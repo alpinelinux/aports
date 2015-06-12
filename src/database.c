@@ -258,6 +258,7 @@ void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir, int rmdir
 {
 	if (--dir->refs > 0) return;
 	db->installed.stats.dirs--;
+	apk_protected_path_array_free(&dir->protected_paths);
 	if (dir->namelen == 0) return;
 
 	if (rmdir_mode == APK_DIR_REMOVE && !(apk_flags & APK_SIMULATE))

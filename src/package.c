@@ -940,6 +940,7 @@ void apk_pkg_free(struct apk_package *pkg)
 
 	apk_pkg_uninstall(NULL, pkg);
 	apk_dependency_array_free(&pkg->depends);
+	apk_dependency_array_free(&pkg->provides);
 	apk_dependency_array_free(&pkg->install_if);
 	if (pkg->url)
 		free(pkg->url);
