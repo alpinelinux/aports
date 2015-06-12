@@ -583,7 +583,7 @@ static unsigned char b64decode[] = {
 };
 
 static inline __attribute__((always_inline))
-int pull_b64_chunk(unsigned char *to, const unsigned char *from, int len)
+int pull_b64_chunk(unsigned char *restrict to, const unsigned char *restrict from, int len)
 {
 	unsigned char tmp[4];
 	int i, r = 0;
@@ -610,21 +610,20 @@ int pull_b64_chunk(unsigned char *to, const unsigned char *from, int len)
 void apk_blob_pull_base64(apk_blob_t *b, apk_blob_t to)
 {
 	unsigned char tmp[4];
-	unsigned char *src = (unsigned char *) b->ptr;
-	unsigned char *dst = (unsigned char *) to.ptr;
-	int i, r, needed;
+	unsigned char *restrict src = (unsigned char *) b->ptr;
+	unsigned char *restrict dst = (unsigned char *) to.ptr;
+	unsigned char *dend;
+	int r, needed;
 
 	if (unlikely(APK_BLOB_IS_NULL(*b)))
 		return;
 
 	needed = ((to.len + 2) / 3) * 4;
-	if (unlikely(b->len < needed)) {
-		*b = APK_BLOB_NULL;
-		return;
-	}
+	if (unlikely(b->len < needed)) goto err;
 
 	r = 0;
-	for (i = 0; i < to.len / 3; i++, src += 4, dst += 3) {
+	dend = dst + to.len - 2;
+	for (; dst < dend; src += 4, dst += 3) {
 		r |= tmp[0] = b64decode[src[0]];
 		r |= tmp[1] = b64decode[src[1]];
 		r |= tmp[2] = b64decode[src[2]];
@@ -633,21 +632,18 @@ void apk_blob_pull_base64(apk_blob_t *b, apk_blob_t to)
 		dst[1] = (tmp[1] << 4 | tmp[2] >> 2);
 		dst[2] = (((tmp[2] << 6) & 0xc0) | tmp[3]);
 	}
-	if (unlikely(r == 0xff)) {
-		*b = APK_BLOB_NULL;
-		return;
-	}
+	if (unlikely(r == 0xff)) goto err;
 
-	i = to.len % 3;
-	if (i != 0) {
-		if (pull_b64_chunk(dst, src, i) != 0) {
-			*b = APK_BLOB_NULL;
-			return;
-		}
-	}
+	dend += 2;
+	if (dst != dend &&
+	    pull_b64_chunk(dst, src, dend - dst) != 0)
+		goto err;
 
 	b->ptr += needed;
 	b->len -= needed;
+	return;
+err:
+	*b = APK_BLOB_NULL;
 }
 
 static apk_blob_t atom_hash_get_key(apk_hash_item item)
