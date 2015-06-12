@@ -651,7 +651,7 @@ static apk_blob_t atom_hash_get_key(apk_hash_item item)
 	return ((struct apk_blob_atom *) item)->blob;
 }
 
-static struct apk_hash atom_hash;
+struct apk_hash atom_hash;
 static struct apk_hash_ops atom_ops = {
 	.node_offset = offsetof(struct apk_blob_atom, hash_node),
 	.get_key = atom_hash_get_key,
