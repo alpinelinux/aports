@@ -130,7 +130,7 @@ static void print_result_pkg(struct search_ctx *ctx, struct apk_package *pkg)
 	}
 	if (ctx->search_origin) {
 		foreach_array_item(pmatch, ctx->filter) {
-			if (pkg->origin != NULL && strcmp(*pmatch, apk_blob_cstr(*pkg->origin)) == 0)
+			if (pkg->origin && apk_blob_compare(APK_BLOB_STR(*pmatch), *pkg->origin) == 0)
 				goto match;
 		}
 		return;
