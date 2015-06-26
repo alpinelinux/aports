@@ -259,13 +259,13 @@ void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir, int rmdir
 	if (--dir->refs > 0) return;
 	db->installed.stats.dirs--;
 	apk_protected_path_array_free(&dir->protected_paths);
-	if (dir->namelen == 0) return;
-
-	if (rmdir_mode == APK_DIR_REMOVE && !(apk_flags & APK_SIMULATE))
-		if (unlinkat(db->root_fd, dir->name, AT_REMOVEDIR))
-			;
-
-	apk_db_dir_unref(db, dir->parent, rmdir_mode);
+	if (dir->namelen != 0) {
+		if (rmdir_mode == APK_DIR_REMOVE && !(apk_flags & APK_SIMULATE))
+			if (unlinkat(db->root_fd, dir->name, AT_REMOVEDIR))
+				;
+		apk_db_dir_unref(db, dir->parent, rmdir_mode);
+	}
+	apk_hash_delete_hashed(&db->installed.dirs, APK_BLOB_PTR_LEN(dir->name, dir->namelen), dir->hash);
 }
 
 struct apk_db_dir *apk_db_dir_ref(struct apk_db_dir *dir)
