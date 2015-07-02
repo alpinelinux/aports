@@ -53,11 +53,11 @@ static const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
 static const char * const apk_static_cache_dir = "var/cache/apk";
 static const char * const apk_linked_cache_dir = "etc/apk/cache";
 
-static const char * const apk_lock_file = "var/lock/apkdb";
-
 static const char * const apk_world_file = "etc/apk/world";
 static const char * const apk_world_file_tmp = "etc/apk/world.new";
 static const char * const apk_arch_file = "etc/apk/arch";
+
+static const char * const apk_lock_file = "lib/apk/db/lock";
 
 static const char * const apk_scripts_file = "lib/apk/db/scripts.tar";
 static const char * const apk_scripts_file_tmp = "lib/apk/db/scripts.tar.new";
@@ -1327,7 +1327,6 @@ static int apk_db_create(struct apk_database *db)
 	mkdirat(db->root_fd, "var/cache", 0755);
 	mkdirat(db->root_fd, "var/cache/apk", 0755);
 	mkdirat(db->root_fd, "var/cache/misc", 0755);
-	mkdirat(db->root_fd, "var/lock", 0755);
 
 	fd = openat(db->root_fd, apk_world_file, O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0644);
 	if (fd < 0)
