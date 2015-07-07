@@ -1,0 +1,4346 @@
+From ad3e93ea96d1cbaab00d07245dbd02f790060f85 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Stefan=20B=C3=BChler?= <stbuehler@web.de>
+Date: Sun, 8 Feb 2015 19:10:44 +0000
+Subject: [PATCH 19/29] Use buffer API to read and modify "used" member
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- a lot of code tried to handle manually adding terminating zeroes and
+  keeping track of the correct "used" count.
+  Replaced all "external" usages with simple wrapper functions:
+  * buffer_string_is_empty (used <= 1), buffer_is_empty (used == 0);
+    prefer buffer_string_is_empty
+  * buffer_string_set_length
+  * buffer_string_length
+  * CONST_BUF_LEN() macro
+- removed "static" buffer hacks (buffers pointing to constant/stack
+  memory instead of malloc()ed data)
+- buffer_append_strftime(): refactor buffer+strftime uses
+- li_tohex(): no need for a buffer for binary-to-hex conversion:
+  the output data length is easy to predict
+- remove "-Winline" from extra warnings: the "inline" keyword just
+  supresses the warning about unused but defined (static) functions;
+  don't care whether it actually gets inlined or not.
+
+From: Stefan Bühler <stbuehler@web.de>
+
+git-svn-id: svn://svn.lighttpd.net/lighttpd/branches/lighttpd-1.4.x@2979 152afb58-edef-0310-8abb-c4023f1b3aa9
+---
+ configure.ac                 |   2 +-
+ src/CMakeLists.txt           |   2 +-
+ src/array.c                  |  12 +--
+ src/buffer.c                 | 128 ++++++++++++++++++++-----------
+ src/buffer.h                 |  13 ++++
+ src/chunk.c                  |  11 +--
+ src/configfile-glue.c        |   2 +-
+ src/configfile.c             |   4 +-
+ src/connections.c            |  79 ++++---------------
+ src/data_string.c            |  11 +--
+ src/etag.c                   |   5 +-
+ src/http-header-glue.c       |   7 +-
+ src/http_auth.c              |  71 ++++++++---------
+ src/http_chunk.c             |   5 +-
+ src/log.c                    |  19 ++---
+ src/mod_access.c             |   8 +-
+ src/mod_accesslog.c          |  64 ++++++++--------
+ src/mod_alias.c              |  14 ++--
+ src/mod_auth.c               |  20 ++---
+ src/mod_cgi.c                |  47 ++++++------
+ src/mod_cml.c                |  12 ++-
+ src/mod_cml_funcs.c          |   9 +--
+ src/mod_cml_lua.c            |  22 ++----
+ src/mod_compress.c           |  34 ++++-----
+ src/mod_dirlisting.c         |  22 +++---
+ src/mod_evasive.c            |   2 +-
+ src/mod_evhost.c             |  11 +--
+ src/mod_expire.c             |  21 ++---
+ src/mod_extforward.c         |   2 +-
+ src/mod_fastcgi.c            |  99 ++++++++++++------------
+ src/mod_flv_streaming.c      |  13 ++--
+ src/mod_indexfile.c          |   4 +-
+ src/mod_magnet.c             |  43 +++++------
+ src/mod_mysql_vhost.c        |  51 ++++---------
+ src/mod_proxy.c              |  47 +++++-------
+ src/mod_redirect.c           |   4 +-
+ src/mod_rewrite.c            |   4 +-
+ src/mod_rrdtool.c            |  12 ++-
+ src/mod_scgi.c               |  61 +++++++--------
+ src/mod_secure_download.c    |   9 +--
+ src/mod_simple_vhost.c       |  16 ++--
+ src/mod_ssi.c                |  16 ++--
+ src/mod_ssi_expr.c           |   2 +-
+ src/mod_staticfile.c         |  14 ++--
+ src/mod_status.c             |   4 +-
+ src/mod_trigger_b4_dl.c      |  16 ++--
+ src/mod_userdir.c            |   4 +-
+ src/mod_usertrack.c          |  16 ++--
+ src/mod_webdav.c             | 177 ++++++++++++++++++++-----------------------
+ src/network_linux_sendfile.c |   4 +-
+ src/network_openssl.c        |   6 +-
+ src/network_write.c          |   6 +-
+ src/network_writev.c         |   4 +-
+ src/proc_open.c              |   7 +-
+ src/request.c                |  49 ++++++------
+ src/response.c               |  53 +++++--------
+ src/server.c                 |  23 +++---
+ src/stat_cache.c             |  23 +++---
+ 58 files changed, 668 insertions(+), 778 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index 63261ca..c846d1a 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -666,7 +666,7 @@ AC_ARG_ENABLE(extra-warnings,
+   esac],[extrawarnings=false])
+ 
+ if test x$extrawarnings = xtrue; then
+-  TRY_CFLAGS([-g -O2 -g2 -Wall -Wmissing-declarations -Wdeclaration-after-statement -Wcast-align -Winline -Wsign-compare -Wnested-externs -Wpointer-arith -Wl,--as-needed -D_FORTIFY_SOURCE=2 -fstack-protector --param=ssp-buffer-size=4 -Wformat -Werror=format-security])
++  TRY_CFLAGS([-g -O2 -g2 -Wall -Wmissing-declarations -Wdeclaration-after-statement -Wcast-align -Wsign-compare -Wnested-externs -Wpointer-arith -Wl,--as-needed -D_FORTIFY_SOURCE=2 -fstack-protector --param=ssp-buffer-size=4 -Wformat -Werror=format-security])
+ fi
+ 
+ dnl build version-id
+diff --git a/src/array.c b/src/array.c
+index 9a15abd..50f5e03 100644
+--- a/src/array.c
++++ b/src/array.c
+@@ -98,7 +98,7 @@ static int array_get_index(array *a, const char *key, size_t keylen, int *rndx)
+ 		} else if (pos >= (int)a->used) {
+ 			pos -= i;
+ 		} else {
+-			cmp = buffer_caseless_compare(key, keylen, a->data[a->sorted[pos]]->key->ptr, a->data[a->sorted[pos]]->key->used);
++			cmp = buffer_caseless_compare(key, keylen, CONST_BUF_LEN(a->data[a->sorted[pos]]->key));
+ 
+ 			if (cmp == 0) {
+ 				/* found */
+@@ -121,7 +121,7 @@ static int array_get_index(array *a, const char *key, size_t keylen, int *rndx)
+ data_unset *array_get_element(array *a, const char *key) {
+ 	int ndx;
+ 
+-	if (-1 != (ndx = array_get_index(a, key, strlen(key) + 1, NULL))) {
++	if (-1 != (ndx = array_get_index(a, key, strlen(key), NULL))) {
+ 		/* found, leave here */
+ 
+ 		return a->data[ndx];
+@@ -171,7 +171,7 @@ data_unset *array_replace(array *a, data_unset *du) {
+ 	int ndx;
+ 
+ 	force_assert(NULL != du);
+-	if (-1 == (ndx = array_get_index(a, du->key->ptr, du->key->used, NULL))) {
++	if (-1 == (ndx = array_get_index(a, CONST_BUF_LEN(du->key), NULL))) {
+ 		array_insert_unique(a, du);
+ 		return NULL;
+ 	} else {
+@@ -187,13 +187,13 @@ int array_insert_unique(array *a, data_unset *str) {
+ 	size_t j;
+ 
+ 	/* generate unique index if neccesary */
+-	if (str->key->used == 0 || str->is_index_key) {
++	if (buffer_is_empty(str->key) || str->is_index_key) {
+ 		buffer_copy_int(str->key, a->unique_ndx++);
+ 		str->is_index_key = 1;
+ 	}
+ 
+ 	/* try to find the string */
+-	if (-1 != (ndx = array_get_index(a, str->key->ptr, str->key->used, &pos))) {
++	if (-1 != (ndx = array_get_index(a, CONST_BUF_LEN(str->key), &pos))) {
+ 		/* found, leave here */
+ 		if (a->data[ndx]->type == str->type) {
+ 			str->insert_dup(a->data[ndx], str);
+@@ -235,7 +235,7 @@ int array_insert_unique(array *a, data_unset *str) {
+ 
+ 	if (pos != ndx &&
+ 	    ((pos < 0) ||
+-	     buffer_caseless_compare(str->key->ptr, str->key->used, a->data[a->sorted[pos]]->key->ptr, a->data[a->sorted[pos]]->key->used) > 0)) {
++	     buffer_caseless_compare(CONST_BUF_LEN(str->key), CONST_BUF_LEN(a->data[a->sorted[pos]]->key)) > 0)) {
+ 		pos++;
+ 	}
+ 
+diff --git a/src/buffer.c b/src/buffer.c
+index 979d954..d343731 100644
+--- a/src/buffer.c
++++ b/src/buffer.c
+@@ -9,7 +9,6 @@
+ 
+ static const char hex_chars[] = "0123456789abcdef";
+ 
+-
+ /**
+  * init the buffer
+  *
+@@ -83,37 +82,44 @@ static size_t buffer_align_size(size_t size) {
+ 	return size + align;
+ }
+ 
+-static char* buffer_prepare_copy(buffer *b, size_t size) {
++/* make sure buffer is at least "size" big. discard old data */
++static void buffer_alloc(buffer *b, size_t size) {
+ 	force_assert(NULL != b);
++	if (0 == size) size = 1;
+ 
+-	/* also allocate space for terminating 0 */
+-	/* check for overflow: unsigned overflow is defined to wrap around */
+-	force_assert(1 + size > size);
+-	++size;
++	if (size <= b->size) return;
+ 
+-	if (0 == b->size || size > b->size) {
+-		if (NULL != b->ptr) free(b->ptr);
+-		b->ptr = NULL;
++	if (NULL != b->ptr) free(b->ptr);
+ 
+-		b->size = buffer_align_size(size);
+-		force_assert(b->size > 0);
++	b->used = 0;
++	b->size = buffer_align_size(size);
++	b->ptr = malloc(b->size);
+ 
+-		b->ptr = malloc(b->size);
+-		force_assert(NULL != b->ptr);
+-	}
++	force_assert(NULL != b->ptr);
++}
+ 
+-	/* reset */
+-	b->used = 0;
+-	b->ptr[0] = '\0';
++/* make sure buffer is at least "size" big. keep old data */
++static void buffer_realloc(buffer *b, size_t size) {
++	force_assert(NULL != b);
++	if (0 == size) size = 1;
+ 
+-	return b->ptr;
++	if (size <= b->size) return;
++
++	b->size = buffer_align_size(size);
++	b->ptr = realloc(b->ptr, b->size);
++
++	force_assert(NULL != b->ptr);
+ }
+ 
++
+ char* buffer_string_prepare_copy(buffer *b, size_t size) {
+ 	force_assert(NULL != b);
++	force_assert(size + 1 > size);
++
++	buffer_alloc(b, size + 1);
+ 
+-	buffer_prepare_copy(b, size);
+ 	b->used = 1;
++	b->ptr[0] = '\0';
+ 
+ 	return b->ptr;
+ }
+@@ -124,28 +130,29 @@ char* buffer_string_prepare_append(buffer *b, size_t size) {
+ 	if (buffer_string_is_empty(b)) {
+ 		return buffer_string_prepare_copy(b, size);
+ 	} else {
+-		/* not empty, b->used already includes a terminating 0 */
+ 		size_t req_size = b->used + size;
+ 
+-		/* check for overflow: unsigned overflow is defined to wrap around */
++		/* not empty, b->used already includes a terminating 0 */
+ 		force_assert(req_size >= b->used);
+ 
+-		/* only append to 0-terminated string */
+-		force_assert('\0' == b->ptr[b->used - 1]);
+-
+-		if (req_size > b->size) {
+-			char *ptr;
+-			b->size = buffer_align_size(req_size);
++		/* check for overflow: unsigned overflow is defined to wrap around */
++		force_assert(req_size >= b->used);
+ 
+-			ptr = realloc(b->ptr, b->size);
+-			force_assert(NULL != ptr);
+-			b->ptr = ptr;
+-		}
++		buffer_realloc(b, req_size);
+ 
+ 		return b->ptr + b->used - 1;
+ 	}
+ }
+ 
++void buffer_string_set_length(buffer *b, size_t len) {
++	force_assert(NULL != b);
++	force_assert(len + 1 > len);
++
++	buffer_realloc(b, len + 1);
++
++	b->used = len + 1;
++	b->ptr[len] = '\0';
++}
+ 
+ void buffer_commit(buffer *b, size_t size)
+ {
+@@ -182,7 +189,8 @@ void buffer_copy_string_len(buffer *b, const char *s, size_t s_len) {
+ 
+ void buffer_copy_buffer(buffer *b, const buffer *src) {
+ 	if (NULL == src || 0 == src->used) {
+-		buffer_prepare_copy(b, 0);
++		buffer_string_prepare_copy(b, 0);
++		b->used = 0; /* keep special empty state for now */
+ 	} else {
+ 		buffer_copy_string_len(b, src->ptr, buffer_string_length(src));
+ 	}
+@@ -301,6 +309,37 @@ void buffer_copy_int(buffer *b, intmax_t val) {
+ 	buffer_append_int(b, val);
+ }
+ 
++void buffer_append_strftime(buffer *b, const char *format, const struct tm *tm) {
++	size_t r;
++	char* buf;
++	force_assert(NULL != b);
++	force_assert(NULL != tm);
++
++	if (NULL == format || '\0' == format[0]) {
++		/* empty format */
++		buffer_string_prepare_append(b, 0);
++		return;
++	}
++
++	buf = buffer_string_prepare_append(b, 255);
++	r = strftime(buf, buffer_string_space(b), format, tm);
++
++	/* 0 (in some apis buffer_string_space(b)) signals the string may have
++	 * been too small; but the format could also just have lead to an empty
++	 * string
++	 */
++	if (0 == r || r >= buffer_string_space(b)) {
++		/* give it a second try with a larger string */
++		buf = buffer_string_prepare_append(b, 4095);
++		r = strftime(buf, buffer_string_space(b), format, tm);
++	}
++
++	if (r >= buffer_string_space(b)) r = 0;
++
++	buffer_commit(b, r);
++}
++
++
+ void li_itostrn(char *buf, size_t buf_len, intmax_t val) {
+ 	char p_buf[LI_ITOSTRING_LENGTH];
+ 	char* const p_buf_end = p_buf + sizeof(p_buf);
+@@ -446,20 +485,22 @@ int buffer_is_equal_right_len(buffer *b1, buffer *b2, size_t len) {
+ 	return 0 == memcmp(b1->ptr + b1->used - 1 - len, b2->ptr + b2->used - 1 - len, len);
+ }
+ 
+-void buffer_copy_string_hex(buffer *b, const char *in, size_t in_len) {
++void li_tohex(char *buf, const char *s, size_t s_len) {
+ 	size_t i;
+ 
+-	/* overflow protection */
+-	force_assert(in_len * 2 + 1 > in_len);
++	for (i = 0; i < s_len; i++) {
++		buf[2*i] = hex_chars[(s[i] >> 4) & 0x0F];
++		buf[2*i+1] = hex_chars[s[i] & 0x0F];
++	}
++	buf[2*s_len] = '\0';
++}
+ 
+-	buffer_prepare_copy(b, in_len * 2);
++void buffer_copy_string_hex(buffer *b, const char *in, size_t in_len) {
++	/* overflow protection */
++	force_assert(in_len * 2 > in_len);
+ 
+-	b->used = 0;
+-	for (i = 0; i < in_len; i++) {
+-		b->ptr[b->used++] = hex_chars[(in[i] >> 4) & 0x0F];
+-		b->ptr[b->used++] = hex_chars[in[i] & 0x0F];
+-	}
+-	b->ptr[b->used++] = '\0';
++	buffer_string_set_length(b, 2 * in_len);
++	li_tohex(b->ptr, in, in_len);
+ }
+ 
+ /* everything except: ! ( ) * - . 0-9 A-Z _ a-z */
+@@ -882,8 +923,7 @@ void buffer_path_simplify(buffer *dest, buffer *src)
+ 		walk++;
+ 	}
+ 
+-	*out = '\0';
+-	dest->used = (out - start) + 1;
++	buffer_string_set_length(dest, out - start);
+ }
+ 
+ int light_isdigit(int c) {
+diff --git a/src/buffer.h b/src/buffer.h
+index 7ea27f1..e2ac778 100644
+--- a/src/buffer.h
++++ b/src/buffer.h
+@@ -10,6 +10,7 @@
+ #include <stdlib.h>
+ #include <sys/types.h>
+ #include <stdio.h>
++#include <time.h>
+ 
+ #if defined HAVE_STDINT_H
+ # include <stdint.h>
+@@ -71,6 +72,13 @@ char* buffer_string_prepare_append(buffer *b, size_t size);
+  */
+ void buffer_commit(buffer *b, size_t size);
+ 
++/* sets string length:
++ * - always stores a terminating zero to terminate the "new" string
++ * - does not modify the string data apart from terminating zero
++ * - reallocates the buffer iff needed
++ */
++void buffer_string_set_length(buffer *b, size_t len);
++
+ void buffer_copy_string(buffer *b, const char *s);
+ void buffer_copy_string_len(buffer *b, const char *s, size_t s_len);
+ void buffer_copy_buffer(buffer *b, const buffer *src);
+@@ -85,6 +93,8 @@ void buffer_append_long_hex(buffer *b, unsigned long len);
+ void buffer_append_int(buffer *b, intmax_t val);
+ void buffer_copy_int(buffer *b, intmax_t val);
+ 
++void buffer_append_strftime(buffer *b, const char *format, const struct tm *tm);
++
+ /* '-', log_10 (2^bits) = bits * log 2 / log 10 < bits * 0.31, terminating 0 */
+ #define LI_ITOSTRING_LENGTH (2 + (8 * sizeof(intmax_t) * 31 + 99) / 100)
+ 
+@@ -93,6 +103,9 @@ void li_itostr(char *buf, intmax_t val); /* buf must have at least LI_ITOSTRING_
+ void li_utostrn(char *buf, size_t buf_len, uintmax_t val);
+ void li_utostr(char *buf, uintmax_t val); /* buf must have at least LI_ITOSTRING_LENGTH bytes */
+ 
++/* buf must be (at least) 2*s_len + 1 big. uses lower-case hex letters. */
++void li_tohex(char *buf, const char *s, size_t s_len);
++
+ char * buffer_search_string_len(buffer *b, const char *needle, size_t len);
+ 
+ /* NULL buffer or empty buffer (used == 0);
+diff --git a/src/chunk.c b/src/chunk.c
+index 83adc15..ccdae9a 100644
+--- a/src/chunk.c
++++ b/src/chunk.c
+@@ -264,10 +264,11 @@ void chunkqueue_get_memory(chunkqueue *cq, char **mem, size_t *len, size_t min_s
+ 		}
+ 		/* if buffer is really small just make it bigger */
+ 		else if (have < min_size && b->size <= REALLOC_MAX_SIZE) {
+-			size_t new_size = b->used + min_size, append;
++			size_t cur_len = buffer_string_length(b);
++			size_t new_size = cur_len + min_size, append;
+ 			if (new_size < alloc_size) new_size = alloc_size;
+ 
+-			append = new_size - b->used;
++			append = new_size - cur_len;
+ 			if (append >= min_size) {
+ 				buffer_string_prepare_append(b, append);
+ 				have = buffer_string_space(b);
+@@ -301,12 +302,8 @@ void chunkqueue_use_memory(chunkqueue *cq, size_t len) {
+ 	force_assert(NULL != cq->last && MEM_CHUNK == cq->last->type);
+ 	b = cq->last->mem;
+ 
+-	force_assert(b->used > 0);
+-	force_assert(len <= buffer_string_space(b));
+-
+ 	if (len > 0) {
+-		b->used += len;
+-		b->ptr[b->used - 1] = '\0';
++		buffer_commit(b, len);
+ 	} else if (buffer_string_is_empty(b)) {
+ 		/* unused buffer: can't remove chunk easily from
+ 		 * end of list, so just reset the buffer
+diff --git a/src/configfile-glue.c b/src/configfile-glue.c
+index 2fb8c62..f411d72 100644
+--- a/src/configfile-glue.c
++++ b/src/configfile-glue.c
+@@ -491,7 +491,7 @@ static cond_result_t config_check_cond_nocache(server *srv, connection *con, dat
+ #ifndef elementsof
+ #define elementsof(x) (sizeof(x) / sizeof(x[0]))
+ #endif
+-		n = pcre_exec(dc->regex, dc->regex_study, l->ptr, l->used - 1, 0, 0,
++		n = pcre_exec(dc->regex, dc->regex_study, CONST_BUF_LEN(l), 0, 0,
+ 				cache->matches, elementsof(cache->matches));
+ 
+ 		cache->patterncount = n;
+diff --git a/src/configfile.c b/src/configfile.c
+index 1c36c3e..929d292 100644
+--- a/src/configfile.c
++++ b/src/configfile.c
+@@ -1130,7 +1130,7 @@ int config_read(server *srv, const char *fn) {
+ 	dcwd = data_string_init();
+ 	buffer_string_prepare_copy(dcwd->value, 1023);
+ 	if (NULL != getcwd(dcwd->value->ptr, dcwd->value->size - 1)) {
+-		dcwd->value->used = strlen(dcwd->value->ptr) + 1;
++		buffer_commit(dcwd->value, strlen(dcwd->value->ptr));
+ 		buffer_copy_string_len(dcwd->key, CONST_STR_LEN("var.CWD"));
+ 		array_insert_unique(srv->config, (data_unset *)dcwd);
+ 	} else {
+@@ -1320,7 +1320,7 @@ int config_set_defaults(server *srv) {
+ 		srv->srvconf.port = s->ssl_enabled ? 443 : 80;
+ 	}
+ 
+-	if (srv->srvconf.event_handler->used == 0) {
++	if (buffer_string_is_empty(srv->srvconf.event_handler)) {
+ 		/* choose a good default
+ 		 *
+ 		 * the event_handler list is sorted by 'goodness'
+diff --git a/src/connections.c b/src/connections.c
+index 3fab768..8f26a30 100644
+--- a/src/connections.c
++++ b/src/connections.c
+@@ -400,7 +400,7 @@ static int connection_handle_write_prepare(server *srv, connection *con) {
+ 			 * 403 is from the response handler when noone else catched it
+ 			 *
+ 			 * */
+-			if ((!con->http_status || con->http_status == 200) && con->uri.path->used &&
++			if ((!con->http_status || con->http_status == 200) && !buffer_string_is_empty(con->uri.path) &&
+ 			    con->uri.path->ptr[0] != '*') {
+ 				response_header_insert(srv, con, CONST_STR_LEN("Allow"), CONST_STR_LEN("OPTIONS, GET, HEAD, POST"));
+ 
+@@ -873,42 +873,7 @@ static int connection_handle_read_state(server *srv, connection *con)  {
+ 		}
+ 	}
+ 
+-	/* the last chunk might be empty */
+-	for (c = cq->first; c;) {
+-		if (cq->first == c && c->mem->used == 0) {
+-			/* the first node is empty */
+-			/* ... and it is empty, move it to unused */
+-
+-			cq->first = c->next;
+-			if (cq->first == NULL) cq->last = NULL;
+-
+-			c->next = cq->unused;
+-			cq->unused = c;
+-			cq->unused_chunks++;
+-
+-			c = cq->first;
+-		} else if (c->next && c->next->mem->used == 0) {
+-			chunk *fc;
+-			/* next node is the last one */
+-			/* ... and it is empty, move it to unused */
+-
+-			fc = c->next;
+-			c->next = fc->next;
+-
+-			fc->next = cq->unused;
+-			cq->unused = fc;
+-			cq->unused_chunks++;
+-
+-			/* the last node was empty */
+-			if (c->next == NULL) {
+-				cq->last = c;
+-			}
+-
+-			c = c->next;
+-		} else {
+-			c = c->next;
+-		}
+-	}
++	chunkqueue_remove_finished_chunks(cq);
+ 
+ 	/* we might have got several packets at once
+ 	 */
+@@ -927,15 +892,12 @@ static int connection_handle_read_state(server *srv, connection *con)  {
+ 		last_offset = 0;
+ 
+ 		for (c = cq->first; c; c = c->next) {
+-			buffer b;
+ 			size_t i;
++			size_t len = buffer_string_length(c->mem) - c->offset;
++			const char *b = c->mem->ptr + c->offset;
+ 
+-			b.ptr = c->mem->ptr + c->offset;
+-			b.used = c->mem->used - c->offset;
+-			if (b.used > 0) b.used--; /* buffer "used" includes terminating zero */
+-
+-			for (i = 0; i < b.used; i++) {
+-				char ch = b.ptr[i];
++			for (i = 0; i < len; ++i) {
++				char ch = b[i];
+ 
+ 				if ('\r' == ch) {
+ 					/* chec if \n\r\n follows */
+@@ -945,13 +907,11 @@ static int connection_handle_read_state(server *srv, connection *con)  {
+ 					int header_end_match_pos = 1;
+ 
+ 					for ( ; cc; cc = cc->next, j = 0 ) {
+-						buffer bb;
+-						bb.ptr = cc->mem->ptr + cc->offset;
+-						bb.used = cc->mem->used - cc->offset;
+-						if (bb.used > 0) bb.used--; /* buffer "used" includes terminating zero */
++						size_t bblen = buffer_string_length(cc->mem) - cc->offset;
++						const char *bb = c->mem->ptr + cc->offset;
+ 
+-						for ( ; j < bb.used; j++) {
+-							ch = bb.ptr[j];
++						for ( ; j < bblen; j++) {
++							ch = bb[j];
+ 
+ 							if (ch == header_end[header_end_match_pos]) {
+ 								header_end_match_pos++;
+@@ -976,25 +936,16 @@ found_header_end:
+ 			buffer_reset(con->request.request);
+ 
+ 			for (c = cq->first; c; c = c->next) {
+-				buffer b;
+-
+-				b.ptr = c->mem->ptr + c->offset;
+-				b.used = c->mem->used - c->offset;
++				size_t len = buffer_string_length(c->mem) - c->offset;
+ 
+ 				if (c == last_chunk) {
+-					b.used = last_offset + 1;
++					len = last_offset;
+ 				}
+ 
+-				buffer_append_string_buffer(con->request.request, &b);
++				buffer_append_string_len(con->request.request, c->mem->ptr + c->offset, len);
++				c->offset += len;
+ 
+-				if (c == last_chunk) {
+-					c->offset += last_offset;
+-
+-					break;
+-				} else {
+-					/* the whole packet was copied */
+-					c->offset = c->mem->used - 1;
+-				}
++				if (c == last_chunk) break;
+ 			}
+ 
+ 			connection_set_state(srv, con, CON_STATE_REQUEST_END);
+diff --git a/src/data_string.c b/src/data_string.c
+index fc57de2..d65b3be 100644
+--- a/src/data_string.c
++++ b/src/data_string.c
+@@ -36,7 +36,7 @@ static int data_string_insert_dup(data_unset *dst, data_unset *src) {
+ 	data_string *ds_dst = (data_string *)dst;
+ 	data_string *ds_src = (data_string *)src;
+ 
+-	if (ds_dst->value->used) {
++	if (!buffer_is_empty(ds_dst->value)) {
+ 		buffer_append_string_len(ds_dst->value, CONST_STR_LEN(", "));
+ 		buffer_append_string_buffer(ds_dst->value, ds_src->value);
+ 	} else {
+@@ -52,7 +52,7 @@ static int data_response_insert_dup(data_unset *dst, data_unset *src) {
+ 	data_string *ds_dst = (data_string *)dst;
+ 	data_string *ds_src = (data_string *)src;
+ 
+-	if (ds_dst->value->used) {
++	if (!buffer_is_empty(ds_dst->value)) {
+ 		buffer_append_string_len(ds_dst->value, CONST_STR_LEN("\r\n"));
+ 		buffer_append_string_buffer(ds_dst->value, ds_dst->key);
+ 		buffer_append_string_len(ds_dst->value, CONST_STR_LEN(": "));
+@@ -69,18 +69,19 @@ static int data_response_insert_dup(data_unset *dst, data_unset *src) {
+ 
+ static void data_string_print(const data_unset *d, int depth) {
+ 	data_string *ds = (data_string *)d;
+-	unsigned int i;
++	size_t i, len;
+ 	UNUSED(depth);
+ 
+ 	/* empty and uninitialized strings */
+-	if (ds->value->used < 1) {
++	if (buffer_string_is_empty(ds->value)) {
+ 		fputs("\"\"", stdout);
+ 		return;
+ 	}
+ 
+ 	/* print out the string as is, except prepend " with backslash */
+ 	putc('"', stdout);
+-	for (i = 0; i < ds->value->used - 1; i++) {
++	len = buffer_string_length(ds->value);
++	for (i = 0; i < len; i++) {
+ 		unsigned char c = ds->value->ptr[i];
+ 		if (c == '"') {
+ 			fputs("\\\"", stdout);
+diff --git a/src/etag.c b/src/etag.c
+index bf63d94..f8fb609 100644
+--- a/src/etag.c
++++ b/src/etag.c
+@@ -37,10 +37,11 @@ int etag_create(buffer *etag, struct stat *st,etag_flags_t flags) {
+ }
+ 
+ int etag_mutate(buffer *mut, buffer *etag) {
+-	size_t i;
++	size_t i, len;
+ 	uint32_t h;
+ 
+-	for (h=0, i=0; i < etag->used-1; ++i) h = (h<<5)^(h>>27)^(etag->ptr[i]);
++	len = buffer_string_length(etag);
++	for (h=0, i=0; i < len; ++i) h = (h<<5)^(h>>27)^(etag->ptr[i]);
+ 
+ 	buffer_reset(mut);
+ 	buffer_copy_string_len(mut, CONST_STR_LEN("\""));
+diff --git a/src/http-header-glue.c b/src/http-header-glue.c
+index f910f3f..752d91e 100644
+--- a/src/http-header-glue.c
++++ b/src/http-header-glue.c
+@@ -125,7 +125,7 @@ int http_response_redirect_to_directory(server *srv, connection *con) {
+ 
+ 	buffer_copy_buffer(o, con->uri.scheme);
+ 	buffer_append_string_len(o, CONST_STR_LEN("://"));
+-	if (con->uri.authority->used) {
++	if (!buffer_is_empty(con->uri.authority)) {
+ 		buffer_append_string_buffer(o, con->uri.authority);
+ 	} else {
+ 		/* get the name of the currently connected socket */
+@@ -237,10 +237,7 @@ buffer * strftime_cache_get(server *srv, time_t last_mod) {
+ 	srv->mtime_cache[i].mtime = last_mod;
+ 	buffer_string_prepare_copy(srv->mtime_cache[i].str, 1023);
+ 	tm = gmtime(&(srv->mtime_cache[i].mtime));
+-	srv->mtime_cache[i].str->used = strftime(srv->mtime_cache[i].str->ptr,
+-						 srv->mtime_cache[i].str->size - 1,
+-						 "%a, %d %b %Y %H:%M:%S GMT", tm);
+-	srv->mtime_cache[i].str->used++;
++	buffer_append_strftime(srv->mtime_cache[i].str, "%a, %d %b %Y %H:%M:%S GMT", tm);
+ 
+ 	return srv->mtime_cache[i].str;
+ }
+diff --git a/src/http_auth.c b/src/http_auth.c
+index c693645..a98ea62 100644
+--- a/src/http_auth.c
++++ b/src/http_auth.c
+@@ -39,13 +39,7 @@ typedef unsigned char HASH[HASHLEN];
+ typedef char HASHHEX[HASHHEXLEN+1];
+ 
+ static void CvtHex(const HASH Bin, char Hex[33]) {
+-	unsigned short i;
+-
+-	for (i = 0; i < 16; i++) {
+-		Hex[i*2] = int2hex((Bin[i] >> 4) & 0xf);
+-		Hex[i*2+1] = int2hex(Bin[i] & 0xf);
+-	}
+-	Hex[32] = '\0';
++	li_tohex(Hex, (const char*) Bin, 16);
+ }
+ 
+ /**
+@@ -97,9 +91,7 @@ static unsigned char * base64_decode(buffer *out, const char *in) {
+ 
+ 	size_t in_len = strlen(in);
+ 
+-	buffer_string_prepare_copy(out, in_len);
+-
+-	result = (unsigned char *)out->ptr;
++	result = (unsigned char *) buffer_string_prepare_copy(out, in_len);
+ 
+ 	/* run through the whole string, converting as we go */
+ 	for (i = 0; i < in_len; i++) {
+@@ -157,8 +149,7 @@ static unsigned char * base64_decode(buffer *out, const char *in) {
+ 		break;
+ 	}
+ 
+-	result[j] = '\0';
+-	out->used = j;
++	buffer_commit(out, j);
+ 
+ 	return result;
+ }
+@@ -166,7 +157,7 @@ static unsigned char * base64_decode(buffer *out, const char *in) {
+ static int http_auth_get_password(server *srv, mod_auth_plugin_data *p, buffer *username, buffer *realm, buffer *password) {
+ 	int ret = -1;
+ 
+-	if (!username->used|| !realm->used) return -1;
++	if (buffer_is_empty(username) || buffer_is_empty(realm)) return -1;
+ 
+ 	if (p->conf.auth_backend == AUTH_BACKEND_HTDIGEST) {
+ 		stream f;
+@@ -226,8 +217,8 @@ static int http_auth_get_password(server *srv, mod_auth_plugin_data *p, buffer *
+ 				pwd_len = f.size - (f_pwd - f.start);
+ 			}
+ 
+-			if (username->used - 1 == u_len &&
+-			    (realm->used - 1 == r_len) &&
++			if (buffer_string_length(username) == u_len &&
++			    (buffer_string_length(realm) == r_len) &&
+ 			    (0 == strncmp(username->ptr, f_user, u_len)) &&
+ 			    (0 == strncmp(realm->ptr, f_realm, r_len))) {
+ 				/* found */
+@@ -296,7 +287,7 @@ static int http_auth_get_password(server *srv, mod_auth_plugin_data *p, buffer *
+ 				pwd_len = f.size - (f_pwd - f.start);
+ 			}
+ 
+-			if (username->used - 1 == u_len &&
++			if (buffer_string_length(username) == u_len &&
+ 			    (0 == strncmp(username->ptr, f_user, u_len))) {
+ 				/* found */
+ 
+@@ -652,10 +643,10 @@ static int http_auth_basic_password_compare(server *srv, mod_auth_plugin_data *p
+ 		char a1[256];
+ 
+ 		li_MD5_Init(&Md5Ctx);
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)username->ptr, username->used - 1);
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)realm->ptr, realm->used - 1);
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++		li_MD5_Update(&Md5Ctx, CONST_BUF_LEN(username));
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
++		li_MD5_Update(&Md5Ctx, CONST_BUF_LEN(realm));
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *)pw, strlen(pw));
+ 		li_MD5_Final(HA1, &Md5Ctx);
+ 
+@@ -682,7 +673,7 @@ static int http_auth_basic_password_compare(server *srv, mod_auth_plugin_data *p
+ 			char *crypted;
+ 
+ 			/* a simple DES password is 2 + 11 characters. everything else should be longer. */
+-			if (password->used < 13 + 1) {
++			if (buffer_string_length(password) < 13) {
+ 				return -1;
+ 			}
+ 
+@@ -707,7 +698,7 @@ static int http_auth_basic_password_compare(server *srv, mod_auth_plugin_data *p
+ 		char *dn;
+ 		int ret;
+ 		char *attrs[] = { LDAP_NO_ATTRS, NULL };
+-		size_t i;
++		size_t i, len;
+ 
+ 		/* for now we stay synchronous */
+ 
+@@ -726,7 +717,8 @@ static int http_auth_basic_password_compare(server *srv, mod_auth_plugin_data *p
+ 		 * a unpleasant way
+ 		 */
+ 
+-		for (i = 0; i < username->used - 1; i++) {
++		len = buffer_string_length(username);
++		for (i = 0; i < len; i++) {
+ 			char c = username->ptr[i];
+ 
+ 			if (!isalpha(c) &&
+@@ -863,9 +855,8 @@ int http_auth_basic_check(server *srv, connection *con, mod_auth_plugin_data *p,
+ 		return 0;
+ 	}
+ 
+-	*pw++ = '\0';
+-
+-	username->used = pw - username->ptr;
++	buffer_string_set_length(username, pw - username->ptr);
++	pw++;
+ 
+ 	password = buffer_init();
+ 	/* copy password to r1 */
+@@ -1084,10 +1075,10 @@ int http_auth_digest_check(server *srv, connection *con, mod_auth_plugin_data *p
+ 		/* generate password from plain-text */
+ 		li_MD5_Init(&Md5Ctx);
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *)username, strlen(username));
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *)realm, strlen(realm));
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)password->ptr, password->used - 1);
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
++		li_MD5_Update(&Md5Ctx, CONST_BUF_LEN(password));
+ 		li_MD5_Final(HA1, &Md5Ctx);
+ 	} else if (p->conf.auth_backend == AUTH_BACKEND_HTDIGEST) {
+ 		/* HA1 */
+@@ -1109,9 +1100,9 @@ int http_auth_digest_check(server *srv, connection *con, mod_auth_plugin_data *p
+ 		/* Errata ID 1649: http://www.rfc-editor.org/errata_search.php?rfc=2617 */
+ 		CvtHex(HA1, a1);
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *)a1, 32);
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *)nonce, strlen(nonce));
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *)cnonce, strlen(cnonce));
+ 		li_MD5_Final(HA1, &Md5Ctx);
+ 	}
+@@ -1121,12 +1112,12 @@ int http_auth_digest_check(server *srv, connection *con, mod_auth_plugin_data *p
+ 	/* calculate H(A2) */
+ 	li_MD5_Init(&Md5Ctx);
+ 	li_MD5_Update(&Md5Ctx, (unsigned char *)m, strlen(m));
+-	li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++	li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 	li_MD5_Update(&Md5Ctx, (unsigned char *)uri, strlen(uri));
+ 	/* qop=auth-int not supported, already checked above */
+ /*
+ 	if (qop && strcasecmp(qop, "auth-int") == 0) {
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *) [body checksum], HASHHEXLEN);
+ 	}
+ */
+@@ -1136,16 +1127,16 @@ int http_auth_digest_check(server *srv, connection *con, mod_auth_plugin_data *p
+ 	/* calculate response */
+ 	li_MD5_Init(&Md5Ctx);
+ 	li_MD5_Update(&Md5Ctx, (unsigned char *)a1, HASHHEXLEN);
+-	li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++	li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 	li_MD5_Update(&Md5Ctx, (unsigned char *)nonce, strlen(nonce));
+-	li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++	li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 	if (qop && *qop) {
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *)nc, strlen(nc));
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *)cnonce, strlen(cnonce));
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 		li_MD5_Update(&Md5Ctx, (unsigned char *)qop, strlen(qop));
+-		li_MD5_Update(&Md5Ctx, (unsigned char *)":", 1);
++		li_MD5_Update(&Md5Ctx, CONST_STR_LEN(":"));
+ 	};
+ 	li_MD5_Update(&Md5Ctx, (unsigned char *)HA2Hex, HASHHEXLEN);
+ 	li_MD5_Final(RespHash, &Md5Ctx);
+@@ -1198,8 +1189,8 @@ int http_auth_digest_generate_nonce(server *srv, mod_auth_plugin_data *p, buffer
+ 
+ 	/* generate shared-secret */
+ 	li_MD5_Init(&Md5Ctx);
+-	li_MD5_Update(&Md5Ctx, (unsigned char *)fn->ptr, fn->used - 1);
+-	li_MD5_Update(&Md5Ctx, (unsigned char *)"+", 1);
++	li_MD5_Update(&Md5Ctx, CONST_BUF_LEN(fn));
++	li_MD5_Update(&Md5Ctx, CONST_STR_LEN("+"));
+ 
+ 	/* we assume sizeof(time_t) == 4 here, but if not it ain't a problem at all */
+ 	li_itostr(hh, srv->cur_ts);
+diff --git a/src/http_chunk.c b/src/http_chunk.c
+index dd6a043..79e4586 100644
+--- a/src/http_chunk.c
++++ b/src/http_chunk.c
+@@ -42,8 +42,7 @@ static void http_chunk_append_len(server *srv, connection *con, size_t len) {
+ 			b->ptr[j] = (len & 0xf) + (((len & 0xf) <= 9) ? '0' : 'a' - 10);
+ 			len >>= 4;
+ 		}
+-		b->used = i;
+-		b->ptr[b->used++] = '\0';
++		buffer_commit(b, i);
+ 
+ 		buffer_append_string_len(b, CONST_STR_LEN("\r\n"));
+ 	}
+@@ -82,7 +81,7 @@ void http_chunk_append_buffer(server *srv, connection *con, buffer *mem) {
+ 	cq = con->write_queue;
+ 
+ 	if (con->response.transfer_encoding & HTTP_TRANSFER_ENCODING_CHUNKED) {
+-		http_chunk_append_len(srv, con, mem->used - 1);
++		http_chunk_append_len(srv, con, buffer_string_length(mem));
+ 	}
+ 
+ 	chunkqueue_append_buffer(cq, mem);
+diff --git a/src/log.c b/src/log.c
+index 097e59e..6c9c38d 100644
+--- a/src/log.c
++++ b/src/log.c
+@@ -333,8 +333,7 @@ static int log_buffer_prepare(buffer *b, server *srv, const char *filename, unsi
+ 		/* cache the generated timestamp */
+ 		if (srv->cur_ts != srv->last_generated_debug_ts) {
+ 			buffer_string_prepare_copy(srv->ts_debug_str, 255);
+-			strftime(srv->ts_debug_str->ptr, srv->ts_debug_str->size - 1, "%Y-%m-%d %H:%M:%S", localtime(&(srv->cur_ts)));
+-			srv->ts_debug_str->used = strlen(srv->ts_debug_str->ptr) + 1;
++			buffer_append_strftime(srv->ts_debug_str, "%Y-%m-%d %H:%M:%S", localtime(&(srv->cur_ts)));
+ 
+ 			srv->last_generated_debug_ts = srv->cur_ts;
+ 		}
+@@ -362,8 +361,7 @@ static void log_write(server *srv, buffer *b) {
+ 	case ERRORLOG_FILE:
+ 	case ERRORLOG_FD:
+ 		buffer_append_string_len(b, CONST_STR_LEN("\n"));
+-		force_assert(b->used > 0);
+-		write(srv->errorlog_fd, b->ptr, b->used - 1);
++		write(srv->errorlog_fd, CONST_BUF_LEN(b));
+ 		break;
+ 	case ERRORLOG_SYSLOG:
+ 		syslog(LOG_ERR, "%s", b->ptr);
+@@ -387,11 +385,11 @@ int log_error_write(server *srv, const char *filename, unsigned int line, const
+ 
+ int log_error_write_multiline_buffer(server *srv, const char *filename, unsigned int line, buffer *multiline, const char *fmt, ...) {
+ 	va_list ap;
+-	size_t prefix_used;
++	size_t prefix_len;
+ 	buffer *b = srv->errorlog_buf;
+ 	char *pos, *end, *current_line;
+ 
+-	if (multiline->used < 2) return 0;
++	if (buffer_string_is_empty(multiline)) return 0;
+ 
+ 	if (-1 == log_buffer_prepare(b, srv, filename, line)) return 0;
+ 
+@@ -399,20 +397,19 @@ int log_error_write_multiline_buffer(server *srv, const char *filename, unsigned
+ 	log_buffer_append_printf(b, fmt, ap);
+ 	va_end(ap);
+ 
+-	prefix_used = b->used;
++	prefix_len = buffer_string_length(b);
+ 
+ 	current_line = pos = multiline->ptr;
+-	end = multiline->ptr + multiline->used;
++	end = multiline->ptr + buffer_string_length(multiline);
+ 
+-	for ( ; pos < end ; ++pos) {
++	for ( ; pos <= end ; ++pos) {
+ 		switch (*pos) {
+ 		case '\n':
+ 		case '\r':
+ 		case '\0': /* handles end of string */
+ 			if (current_line < pos) {
+ 				/* truncate to prefix */
+-				b->used = prefix_used;
+-				b->ptr[b->used - 1] = '\0';
++				buffer_string_set_length(b, prefix_len);
+ 
+ 				buffer_append_string_len(b, current_line, pos - current_line);
+ 				log_write(srv, b);
+diff --git a/src/mod_access.c b/src/mod_access.c
+index 7b88e19..a6c25a4 100644
+--- a/src/mod_access.c
++++ b/src/mod_access.c
+@@ -125,11 +125,11 @@ URIHANDLER_FUNC(mod_access_uri_handler) {
+ 	int s_len;
+ 	size_t k;
+ 
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
+ 
+ 	mod_access_patch_connection(srv, con, p);
+ 
+-	s_len = con->uri.path->used - 1;
++	s_len = buffer_string_length(con->uri.path);
+ 
+ 	if (con->conf.log_request_handling) {
+ 		log_error_write(srv, __FILE__, __LINE__, "s",
+@@ -138,12 +138,12 @@ URIHANDLER_FUNC(mod_access_uri_handler) {
+ 
+ 	for (k = 0; k < p->conf.access_deny->used; k++) {
+ 		data_string *ds = (data_string *)p->conf.access_deny->data[k];
+-		int ct_len = ds->value->used - 1;
++		int ct_len = buffer_string_length(ds->value);
+ 		int denied = 0;
+ 
+ 
+ 		if (ct_len > s_len) continue;
+-		if (ds->value->used == 0) continue;
++		if (buffer_is_empty(ds->value)) continue;
+ 
+ 		/* if we have a case-insensitive FS we have to lower-case the URI here too */
+ 
+diff --git a/src/mod_accesslog.c b/src/mod_accesslog.c
+index 20d52b9..9bb3fe2 100644
+--- a/src/mod_accesslog.c
++++ b/src/mod_accesslog.c
+@@ -223,9 +223,9 @@ static void accesslog_append_escaped(buffer *dest, buffer *str) {
+ static int accesslog_parse_format(server *srv, format_fields *fields, buffer *format) {
+ 	size_t i, j, k = 0, start = 0;
+ 
+-	if (format->used == 0) return -1;
++	if (buffer_is_empty(format)) return -1;
+ 
+-	for (i = 0; i < format->used - 1; i++) {
++	for (i = 0; i < buffer_string_length(format); i++) {
+ 		switch(format->ptr[i]) {
+ 		case '%':
+ 			if (i > 0 && start != i) {
+@@ -297,11 +297,11 @@ static int accesslog_parse_format(server *srv, format_fields *fields, buffer *fo
+ 			case '{':
+ 				/* go forward to } */
+ 
+-				for (k = i+2; k < format->used - 1; k++) {
++				for (k = i+2; k < buffer_string_length(format); k++) {
+ 					if (format->ptr[k] == '}') break;
+ 				}
+ 
+-				if (k == format->used - 1) {
++				if (k == buffer_string_length(format)) {
+ 					log_error_write(srv, __FILE__, __LINE__, "s", "%{ has to be terminated by a }");
+ 					return -1;
+ 				}
+@@ -416,9 +416,9 @@ FREE_FUNC(mod_accesslog_free) {
+ 
+ 			if (!s) continue;
+ 
+-			if (s->access_logbuffer->used) {
++			if (!buffer_string_is_empty(s->access_logbuffer)) {
+ 				if (s->log_access_fd != -1) {
+-					write(s->log_access_fd, s->access_logbuffer->ptr, s->access_logbuffer->used - 1);
++					write(s->log_access_fd, CONST_BUF_LEN(s->access_logbuffer));
+ 				}
+ 			}
+ 
+@@ -502,7 +502,7 @@ SETDEFAULTS_FUNC(log_access_open) {
+ 
+ 		/* parse */
+ 
+-		if (s->format->used) {
++		if (!buffer_is_empty(s->format)) {
+ 			size_t j, count;
+ 
+ 			s->parsed_format = calloc(1, sizeof(*(s->parsed_format)));
+@@ -572,7 +572,7 @@ SETDEFAULTS_FUNC(log_access_open) {
+ 			continue;
+ 		}
+ 
+-		if (s->access_logfile->used < 2) continue;
++		if (buffer_string_is_empty(s->access_logfile)) continue;
+ 
+ 		if (-1 == (s->log_access_fd = open_logfile_or_pipe(srv, s->access_logfile->ptr)))
+ 			return HANDLER_ERROR;
+@@ -591,17 +591,17 @@ SIGHUP_FUNC(log_access_cycle) {
+ 	for (i = 0; i < srv->config_context->used; i++) {
+ 		plugin_config *s = p->config_storage[i];
+ 
+-		if (s->access_logbuffer->used) {
++		if (!buffer_string_is_empty(s->access_logbuffer)) {
+ 			if (s->log_access_fd != -1) {
+-				write(s->log_access_fd, s->access_logbuffer->ptr, s->access_logbuffer->used - 1);
++				write(s->log_access_fd, CONST_BUF_LEN(s->access_logbuffer));
+ 			}
+ 
+ 			buffer_reset(s->access_logbuffer);
+ 		}
+ 
+-		if (s->use_syslog == 0 &&
+-		    s->access_logfile->used > 1 &&
+-		    s->access_logfile->ptr[0] != '|') {
++		if (s->use_syslog == 0
++			&& !buffer_string_is_empty(s->access_logfile)
++			&& s->access_logfile->ptr[0] != '|') {
+ 
+ 			if (-1 != s->log_access_fd) close(s->log_access_fd);
+ 
+@@ -691,8 +691,8 @@ REQUESTDONE_FUNC(log_access_write) {
+ 		b = p->conf.access_logbuffer;
+ 	}
+ 
+-	if (b->used == 0) {
+-		buffer_copy_string_len(b, CONST_STR_LEN(""));
++	if (buffer_is_empty(b)) {
++		buffer_string_set_length(b, 0);
+ 	}
+ 
+ 	for (j = 0; j < p->conf.parsed_format->used; j++) {
+@@ -715,11 +715,10 @@ REQUESTDONE_FUNC(log_access_write) {
+ #if defined(HAVE_STRUCT_TM_GMTOFF)
+ # ifdef HAVE_LOCALTIME_R
+ 					localtime_r(&(srv->cur_ts), &tm);
+-					strftime(p->conf.ts_accesslog_str->ptr, p->conf.ts_accesslog_str->size - 1, p->conf.ts_accesslog_fmt_str->ptr, &tm);
++					buffer_append_strftime(p->conf.ts_accesslog_str, p->conf.ts_accesslog_fmt_str->ptr, &tm);
+ # else /* HAVE_LOCALTIME_R */
+-					strftime(p->conf.ts_accesslog_str->ptr, p->conf.ts_accesslog_str->size - 1, p->conf.ts_accesslog_fmt_str->ptr, localtime_r(&(srv->cur_ts)));
++					buffer_append_strftime(p->conf.ts_accesslog_str, p->conf.ts_accesslog_fmt_str->ptr, localtime(&(srv->cur_ts)));
+ # endif /* HAVE_LOCALTIME_R */
+-					p->conf.ts_accesslog_str->used = strlen(p->conf.ts_accesslog_str->ptr) + 1;
+ 
+ 					if (p->conf.append_tz_offset) {
+ 						buffer_append_string_len(p->conf.ts_accesslog_str, tm.tm_gmtoff >= 0 ? "+" : "-", 1);
+@@ -739,11 +738,10 @@ REQUESTDONE_FUNC(log_access_write) {
+ #else /* HAVE_STRUCT_TM_GMTOFF */
+ # ifdef HAVE_GMTIME_R
+ 					gmtime_r(&(srv->cur_ts), &tm);
+-					strftime(p->conf.ts_accesslog_str->ptr, p->conf.ts_accesslog_str->size - 1, p->conf.ts_accesslog_fmt_str->ptr, &tm);
++					buffer_append_strftime(p->conf.ts_accesslog_str, p->conf.ts_accesslog_fmt_str->ptr, &tm);
+ # else /* HAVE_GMTIME_R */
+-					strftime(p->conf.ts_accesslog_str->ptr, p->conf.ts_accesslog_str->size - 1, p->conf.ts_accesslog_fmt_str->ptr, gmtime(&(srv->cur_ts)));
++					buffer_append_strftime(p->conf.ts_accesslog_str, p->conf.ts_accesslog_fmt_str->ptr, gmtime(&(srv->cur_ts)));
+ # endif /* HAVE_GMTIME_R */
+-					p->conf.ts_accesslog_str->used = strlen(p->conf.ts_accesslog_str->ptr) + 1;
+ #endif /* HAVE_STRUCT_TM_GMTOFF */
+ 
+ 					*(p->conf.last_generated_accesslog_ts_ptr) = srv->cur_ts;
+@@ -765,14 +763,14 @@ REQUESTDONE_FUNC(log_access_write) {
+ 				buffer_append_string_len(b, CONST_STR_LEN("-"));
+ 				break;
+ 			case FORMAT_REMOTE_USER:
+-				if (NULL != (ds = (data_string *)array_get_element(con->environment, "REMOTE_USER")) && ds->value->used > 1) {
++				if (NULL != (ds = (data_string *)array_get_element(con->environment, "REMOTE_USER")) && !buffer_string_is_empty(ds->value)) {
+ 					accesslog_append_escaped(b, ds->value);
+ 				} else {
+ 					buffer_append_string_len(b, CONST_STR_LEN("-"));
+ 				}
+ 				break;
+ 			case FORMAT_REQUEST_LINE:
+-				if (con->request.request_line->used) {
++				if (!buffer_string_is_empty(con->request.request_line)) {
+ 					accesslog_append_escaped(b, con->request.request_line);
+ 				}
+ 				break;
+@@ -810,7 +808,7 @@ REQUESTDONE_FUNC(log_access_write) {
+ 				}
+ 				break;
+ 			case FORMAT_FILENAME:
+-				if (con->physical.path->used > 1) {
++				if (!buffer_string_is_empty(con->physical.path)) {
+ 					buffer_append_string_buffer(b, con->physical.path);
+ 				} else {
+ 					buffer_append_string_len(b, CONST_STR_LEN("-"));
+@@ -834,14 +832,14 @@ REQUESTDONE_FUNC(log_access_write) {
+ 				buffer_append_int(b, srv->cur_ts - con->request_start);
+ 				break;
+ 			case FORMAT_SERVER_NAME:
+-				if (con->server_name->used > 1) {
++				if (!buffer_string_is_empty(con->server_name)) {
+ 					buffer_append_string_buffer(b, con->server_name);
+ 				} else {
+ 					buffer_append_string_len(b, CONST_STR_LEN("-"));
+ 				}
+ 				break;
+ 			case FORMAT_HTTP_HOST:
+-				if (con->uri.authority->used > 1) {
++				if (!buffer_string_is_empty(con->uri.authority)) {
+ 					accesslog_append_escaped(b, con->uri.authority);
+ 				} else {
+ 					buffer_append_string_len(b, CONST_STR_LEN("-"));
+@@ -849,7 +847,7 @@ REQUESTDONE_FUNC(log_access_write) {
+ 				break;
+ 			case FORMAT_REQUEST_PROTOCOL:
+ 				buffer_append_string_len(b,
+-						     con->request.http_version == HTTP_VERSION_1_1 ? "HTTP/1.1" : "HTTP/1.0", 8);
++					con->request.http_version == HTTP_VERSION_1_1 ? "HTTP/1.1" : "HTTP/1.0", 8);
+ 				break;
+ 			case FORMAT_REQUEST_METHOD:
+ 				buffer_append_string(b, get_http_method_name(con->request.http_method));
+@@ -904,19 +902,19 @@ REQUESTDONE_FUNC(log_access_write) {
+ 	buffer_append_string_len(b, CONST_STR_LEN("\n"));
+ 
+ 	if (p->conf.use_syslog ||  /* syslog doesn't cache */
+-	    (p->conf.access_logfile->used && p->conf.access_logfile->ptr[0] == '|') || /* pipes don't cache */
++	    (!buffer_string_is_empty(p->conf.access_logfile) && p->conf.access_logfile->ptr[0] == '|') || /* pipes don't cache */
+ 	    newts ||
+-	    b->used > BUFFER_MAX_REUSE_SIZE) {
++	    buffer_string_length(b) >= BUFFER_MAX_REUSE_SIZE) {
+ 		if (p->conf.use_syslog) {
+ #ifdef HAVE_SYSLOG_H
+-			if (b->used > 2) {
++			if (!buffer_string_is_empty(b)) {
+ 				/* syslog appends a \n on its own */
+-				syslog(p->conf.syslog_level, "%*s", (int) b->used - 2, b->ptr);
++				buffer_string_set_length(b, buffer_string_length(b) - 1);
++				syslog(p->conf.syslog_level, "%s", b->ptr);
+ 			}
+ #endif
+ 		} else if (p->conf.log_access_fd != -1) {
+-			force_assert(b->used > 0);
+-			write(p->conf.log_access_fd, b->ptr, b->used - 1);
++			write(p->conf.log_access_fd, CONST_BUF_LEN(b));
+ 		}
+ 		buffer_reset(b);
+ 	}
+diff --git a/src/mod_alias.c b/src/mod_alias.c
+index bf22b5f..4625973 100644
+--- a/src/mod_alias.c
++++ b/src/mod_alias.c
+@@ -95,10 +95,10 @@ SETDEFAULTS_FUNC(mod_alias_set_defaults) {
+ 				for (k = j + 1; k < a->used; k ++) {
+ 					const buffer *key = a->data[a->sorted[k]]->key;
+ 
+-					if (key->used < prefix->used) {
++					if (buffer_string_length(key) < buffer_string_length(prefix)) {
+ 						break;
+ 					}
+-					if (memcmp(key->ptr, prefix->ptr, prefix->used - 1) != 0) {
++					if (memcmp(key->ptr, prefix->ptr, buffer_string_length(prefix)) != 0) {
+ 						break;
+ 					}
+ 					/* ok, they have same prefix. check position */
+@@ -151,22 +151,22 @@ PHYSICALPATH_FUNC(mod_alias_physical_handler) {
+ 	char *uri_ptr;
+ 	size_t k;
+ 
+-	if (con->physical.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->physical.path)) return HANDLER_GO_ON;
+ 
+ 	mod_alias_patch_connection(srv, con, p);
+ 
+ 	/* not to include the tailing slash */
+-	basedir_len = (con->physical.basedir->used - 1);
++	basedir_len = buffer_string_length(con->physical.basedir);
+ 	if ('/' == con->physical.basedir->ptr[basedir_len-1]) --basedir_len;
+-	uri_len = con->physical.path->used - 1 - basedir_len;
++	uri_len = buffer_string_length(con->physical.path) - basedir_len;
+ 	uri_ptr = con->physical.path->ptr + basedir_len;
+ 
+ 	for (k = 0; k < p->conf.alias->used; k++) {
+ 		data_string *ds = (data_string *)p->conf.alias->data[k];
+-		int alias_len = ds->key->used - 1;
++		int alias_len = buffer_string_length(ds->key);
+ 
+ 		if (alias_len > uri_len) continue;
+-		if (ds->key->used == 0) continue;
++		if (buffer_is_empty(ds->key)) continue;
+ 
+ 		if (0 == (con->conf.force_lowercase_filenames ?
+ 					strncasecmp(uri_ptr, ds->key->ptr, alias_len) :
+diff --git a/src/mod_auth.c b/src/mod_auth.c
+index d5a3f1c..1870893 100644
+--- a/src/mod_auth.c
++++ b/src/mod_auth.c
+@@ -206,18 +206,18 @@ static handler_t mod_auth_uri_handler(server *srv, connection *con, void *p_d) {
+ 	for (k = 0; k < p->conf.auth_require->used; k++) {
+ 		buffer *require = p->conf.auth_require->data[k]->key;
+ 
+-		if (require->used == 0) continue;
+-		if (con->uri.path->used < require->used) continue;
++		if (buffer_is_empty(require)) continue;
++		if (buffer_string_length(con->uri.path) < buffer_string_length(require)) continue;
+ 
+ 		/* if we have a case-insensitive FS we have to lower-case the URI here too */
+ 
+ 		if (con->conf.force_lowercase_filenames) {
+-			if (0 == strncasecmp(con->uri.path->ptr, require->ptr, require->used - 1)) {
++			if (0 == strncasecmp(con->uri.path->ptr, require->ptr, buffer_string_length(require))) {
+ 				auth_required = 1;
+ 				break;
+ 			}
+ 		} else {
+-			if (0 == strncmp(con->uri.path->ptr, require->ptr, require->used - 1)) {
++			if (0 == strncmp(con->uri.path->ptr, require->ptr, buffer_string_length(require))) {
+ 				auth_required = 1;
+ 				break;
+ 			}
+@@ -248,7 +248,7 @@ static handler_t mod_auth_uri_handler(server *srv, connection *con, void *p_d) {
+ 
+ 	/* try to get Authorization-header */
+ 
+-	if (NULL != (ds = (data_string *)array_get_element(con->request.headers, "Authorization")) && ds->value->used) {
++	if (NULL != (ds = (data_string *)array_get_element(con->request.headers, "Authorization")) && !buffer_is_empty(ds->value)) {
+ 		char *auth_realm;
+ 
+ 		http_authorization = ds->value->ptr;
+@@ -419,7 +419,7 @@ SETDEFAULTS_FUNC(mod_auth_set_defaults) {
+ 			return HANDLER_ERROR;
+ 		}
+ 
+-		if (s->auth_backend_conf->used) {
++		if (!buffer_string_is_empty(s->auth_backend_conf)) {
+ 			if (0 == strcmp(s->auth_backend_conf->ptr, "htpasswd")) {
+ 				s->auth_backend = AUTH_BACKEND_HTPASSWD;
+ 			} else if (0 == strcmp(s->auth_backend_conf->ptr, "htdigest")) {
+@@ -436,7 +436,7 @@ SETDEFAULTS_FUNC(mod_auth_set_defaults) {
+ 		}
+ 
+ #ifdef USE_LDAP
+-		if (s->auth_ldap_filter->used) {
++		if (!buffer_string_is_empty(s->auth_ldap_filter)) {
+ 			char *dollar;
+ 
+ 			/* parse filter */
+@@ -562,7 +562,7 @@ SETDEFAULTS_FUNC(mod_auth_set_defaults) {
+ 			}
+ 		}
+ 
+-		switch(s->auth_ldap_hostname->used) {
++		switch(s->auth_backend) {
+ 		case AUTH_BACKEND_LDAP: {
+ 			handler_t ret = auth_ldap_init(srv, s);
+ 			if (ret == HANDLER_ERROR)
+@@ -588,7 +588,7 @@ handler_t auth_ldap_init(server *srv, mod_auth_plugin_config *s) {
+ 	}
+ #endif
+ 
+-	if (s->auth_ldap_hostname->used) {
++	if (!buffer_string_is_empty(s->auth_ldap_hostname)) {
+ 		/* free old context */
+ 		if (NULL != s->ldap) ldap_unbind_s(s->ldap);
+ 
+@@ -627,7 +627,7 @@ handler_t auth_ldap_init(server *srv, mod_auth_plugin_config *s) {
+ 
+ 
+ 		/* 1. */
+-		if (s->auth_ldap_binddn->used) {
++		if (!buffer_string_is_empty(s->auth_ldap_binddn)) {
+ 			if (LDAP_SUCCESS != (ret = ldap_simple_bind_s(s->ldap, s->auth_ldap_binddn->ptr, s->auth_ldap_bindpw->ptr))) {
+ 				log_error_write(srv, __FILE__, __LINE__, "ss", "ldap:", ldap_err2string(ret));
+ 
+diff --git a/src/mod_cgi.c b/src/mod_cgi.c
+index f132b8a..8a7cc2b 100644
+--- a/src/mod_cgi.c
++++ b/src/mod_cgi.c
+@@ -376,8 +376,7 @@ static int cgi_demux_response(server *srv, handler_ctx *hctx) {
+ 			return FDEVENT_HANDLED_FINISHED;
+ 		}
+ 
+-		hctx->response->ptr[n] = '\0';
+-		hctx->response->used = n+1;
++		buffer_commit(hctx->response, n);
+ 
+ 		/* split header from body */
+ 
+@@ -385,7 +384,7 @@ static int cgi_demux_response(server *srv, handler_ctx *hctx) {
+ 			int is_header = 0;
+ 			int is_header_end = 0;
+ 			size_t last_eol = 0;
+-			size_t i;
++			size_t i, header_len;
+ 
+ 			buffer_append_string_buffer(hctx->response_header, hctx->response);
+ 
+@@ -412,8 +411,9 @@ static int cgi_demux_response(server *srv, handler_ctx *hctx) {
+ 			
+ 			/* nph (non-parsed headers) */
+ 			if (0 == strncmp(hctx->response_header->ptr, "HTTP/1.", 7)) is_header = 1;
+-				
+-			for (i = 0; !is_header_end && i < hctx->response_header->used - 1; i++) {
++
++			header_len = buffer_string_length(hctx->response_header);
++			for (i = 0; !is_header_end && i < header_len; i++) {
+ 				char c = hctx->response_header->ptr[i];
+ 
+ 				switch (c) {
+@@ -463,26 +463,25 @@ static int cgi_demux_response(server *srv, handler_ctx *hctx) {
+ 				} else {
+ 					const char *bstart;
+ 					size_t blen;
+-					
++
++					/* the body starts after the EOL */
++					bstart = hctx->response_header->ptr + i;
++					blen = header_len - i;
++
+ 					/**
+ 					 * i still points to the char after the terminating EOL EOL
+ 					 *
+ 					 * put it on the last \n again
+ 					 */
+ 					i--;
+-					
+-					/* the body starts after the EOL */
+-					bstart = hctx->response_header->ptr + (i + 1);
+-					blen = (hctx->response_header->used - 1) - (i + 1);
+-					
++
+ 					/* string the last \r?\n */
+ 					if (i > 0 && (hctx->response_header->ptr[i - 1] == '\r')) {
+ 						i--;
+ 					}
+ 
+-					hctx->response_header->ptr[i] = '\0';
+-					hctx->response_header->used = i + 1; /* the string + \0 */
+-					
++					buffer_string_set_length(hctx->response_header, i);
++
+ 					/* parse the response header */
+ 					cgi_response_parse(srv, con, p, hctx->response_header);
+ 
+@@ -738,7 +737,7 @@ static int cgi_create_env(server *srv, connection *con, plugin_data *p, buffer *
+ 
+ #ifndef __WIN32
+ 
+-	if (cgi_handler->used > 1) {
++	if (!buffer_string_is_empty(cgi_handler)) {
+ 		/* stat the exec file */
+ 		if (-1 == (stat(cgi_handler->ptr, &st))) {
+ 			log_error_write(srv, __FILE__, __LINE__, "sbss",
+@@ -800,7 +799,7 @@ static int cgi_create_env(server *srv, connection *con, plugin_data *p, buffer *
+ 		}
+ 
+ 		if (!buffer_string_is_empty(con->server_name)) {
+-			size_t len = con->server_name->used - 1;
++			size_t len = buffer_string_length(con->server_name);
+ 
+ 			if (con->server_name->ptr[0] == '[') {
+ 				const char *colon = strstr(con->server_name->ptr, "]:");
+@@ -938,7 +937,7 @@ static int cgi_create_env(server *srv, connection *con, plugin_data *p, buffer *
+ 
+ 			ds = (data_string *)con->request.headers->data[n];
+ 
+-			if (ds->value->used && ds->key->used) {
++			if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key)) {
+ 				buffer_copy_string_encoded_cgi_varnames(p->tmp_buf, CONST_BUF_LEN(ds->key), 1);
+ 
+ 				cgi_env_add(&env, CONST_BUF_LEN(p->tmp_buf), CONST_BUF_LEN(ds->value));
+@@ -950,7 +949,7 @@ static int cgi_create_env(server *srv, connection *con, plugin_data *p, buffer *
+ 
+ 			ds = (data_string *)con->environment->data[n];
+ 
+-			if (ds->value->used && ds->key->used) {
++			if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key)) {
+ 				buffer_copy_string_encoded_cgi_varnames(p->tmp_buf, CONST_BUF_LEN(ds->key), 0);
+ 
+ 				cgi_env_add(&env, CONST_BUF_LEN(p->tmp_buf), CONST_BUF_LEN(ds->value));
+@@ -969,7 +968,7 @@ static int cgi_create_env(server *srv, connection *con, plugin_data *p, buffer *
+ 		args = malloc(sizeof(*args) * argc);
+ 		i = 0;
+ 
+-		if (cgi_handler->used > 1) {
++		if (!buffer_string_is_empty(cgi_handler)) {
+ 			args[i++] = cgi_handler->ptr;
+ 		}
+ 		args[i++] = con->physical.path->ptr;
+@@ -1071,7 +1070,7 @@ static int cgi_create_env(server *srv, connection *con, plugin_data *p, buffer *
+ 					}
+ 					break;
+ 				case MEM_CHUNK:
+-					if ((r = write(to_cgi_fds[1], c->mem->ptr + c->offset, c->mem->used - c->offset - 1)) < 0) {
++					if ((r = write(to_cgi_fds[1], c->mem->ptr + c->offset, buffer_string_length(c->mem) - c->offset)) < 0) {
+ 						switch(errno) {
+ 						case ENOSPC:
+ 							con->http_status = 507;
+@@ -1185,7 +1184,7 @@ URIHANDLER_FUNC(cgi_is_handled) {
+ 
+ 	if (con->mode != DIRECT) return HANDLER_GO_ON;
+ 
+-	if (fn->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(fn)) return HANDLER_GO_ON;
+ 
+ 	mod_cgi_patch_connection(srv, con, p);
+ 
+@@ -1193,13 +1192,13 @@ URIHANDLER_FUNC(cgi_is_handled) {
+ 	if (!S_ISREG(sce->st.st_mode)) return HANDLER_GO_ON;
+ 	if (p->conf.execute_x_only == 1 && (sce->st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0) return HANDLER_GO_ON;
+ 
+-	s_len = fn->used - 1;
++	s_len = buffer_string_length(fn);
+ 
+ 	for (k = 0; k < p->conf.cgi->used; k++) {
+ 		data_string *ds = (data_string *)p->conf.cgi->data[k];
+-		size_t ct_len = ds->key->used - 1;
++		size_t ct_len = buffer_string_length(ds->key);
+ 
+-		if (ds->key->used == 0) continue;
++		if (buffer_is_empty(ds->key)) continue;
+ 		if (s_len < ct_len) continue;
+ 
+ 		if (0 == strncmp(fn->ptr + s_len - ct_len, ds->key->ptr, ct_len)) {
+diff --git a/src/mod_cml.c b/src/mod_cml.c
+index 3033d42..baa23b3 100644
+--- a/src/mod_cml.c
++++ b/src/mod_cml.c
+@@ -185,20 +185,18 @@ static int cache_call_lua(server *srv, connection *con, plugin_data *p, buffer *
+ 	/* cleanup basedir */
+ 	b = p->baseurl;
+ 	buffer_copy_buffer(b, con->uri.path);
+-	for (c = b->ptr + b->used - 1; c > b->ptr && *c != '/'; c--);
++	for (c = b->ptr + buffer_string_length(b); c > b->ptr && *c != '/'; c--);
+ 
+ 	if (*c == '/') {
+-		b->used = c - b->ptr + 2;
+-		*(c+1) = '\0';
++		buffer_string_set_length(b, c - b->ptr + 1);
+ 	}
+ 
+ 	b = p->basedir;
+ 	buffer_copy_buffer(b, con->physical.path);
+-	for (c = b->ptr + b->used - 1; c > b->ptr && *c != '/'; c--);
++	for (c = b->ptr + buffer_string_length(b); c > b->ptr && *c != '/'; c--);
+ 
+ 	if (*c == '/') {
+-		b->used = c - b->ptr + 2;
+-		*(c+1) = '\0';
++		buffer_string_set_length(b, c - b->ptr + 1);
+ 	}
+ 
+ 
+@@ -274,7 +272,7 @@ URIHANDLER_FUNC(mod_cml_is_handled) {
+ 
+ 	if (buffer_string_is_empty(p->conf.ext)) return HANDLER_GO_ON;
+ 
+-	if (!buffer_is_equal_right_len(con->physical.path, p->conf.ext, p->conf.ext->used - 1)) {
++	if (!buffer_is_equal_right_len(con->physical.path, p->conf.ext, buffer_string_length(p->conf.ext))) {
+ 		return HANDLER_GO_ON;
+ 	}
+ 
+diff --git a/src/mod_cml_funcs.c b/src/mod_cml_funcs.c
+index 9d859c7..a377edd 100644
+--- a/src/mod_cml_funcs.c
++++ b/src/mod_cml_funcs.c
+@@ -35,14 +35,9 @@ typedef char HASHHEX[HASHHEXLEN+1];
+ int f_crypto_md5(lua_State *L) {
+ 	li_MD5_CTX Md5Ctx;
+ 	HASH HA1;
+-	buffer b;
+ 	char hex[33];
+ 	int n = lua_gettop(L);
+ 
+-	b.ptr = hex;
+-	b.used = 0;
+-	b.size = sizeof(hex);
+-
+ 	if (n != 1) {
+ 		lua_pushstring(L, "md5: expected one argument");
+ 		lua_error(L);
+@@ -57,9 +52,9 @@ int f_crypto_md5(lua_State *L) {
+ 	li_MD5_Update(&Md5Ctx, (unsigned char *)lua_tostring(L, 1), lua_strlen(L, 1));
+ 	li_MD5_Final(HA1, &Md5Ctx);
+ 
+-	buffer_copy_string_hex(&b, (char *)HA1, 16);
++	li_tohex(hex, (const char*) HA1, 16);
+ 
+-	lua_pushstring(L, b.ptr);
++	lua_pushstring(L, hex);
+ 
+ 	return 1;
+ }
+diff --git a/src/mod_cml_lua.c b/src/mod_cml_lua.c
+index 63dd1e7..895a709 100644
+--- a/src/mod_cml_lua.c
++++ b/src/mod_cml_lua.c
+@@ -102,13 +102,14 @@ static int c_to_lua_push(lua_State *L, int tbl, const char *key, size_t key_len,
+ 
+ static int cache_export_get_params(lua_State *L, int tbl, buffer *qrystr) {
+ 	size_t is_key = 1;
+-	size_t i;
++	size_t i, len;
+ 	char *key = NULL, *val = NULL;
+ 
+ 	key = qrystr->ptr;
+ 
+ 	/* we need the \0 */
+-	for (i = 0; i < qrystr->used; i++) {
++	len = buffer_string_length(qrystr);
++	for (i = 0; i <= len; i++) {
+ 		switch(qrystr->ptr[i]) {
+ 		case '=':
+ 			if (is_key) {
+@@ -129,8 +130,8 @@ static int cache_export_get_params(lua_State *L, int tbl, buffer *qrystr) {
+ 				qrystr->ptr[i] = '\0';
+ 
+ 				c_to_lua_push(L, tbl,
+-					      key, strlen(key),
+-					      val, strlen(val));
++					key, strlen(key),
++					val, strlen(val));
+ 			}
+ 
+ 			key = qrystr->ptr + i + 1;
+@@ -398,7 +399,6 @@ int cache_parse_lua(server *srv, connection *con, plugin_data *p, buffer *fn) {
+ 		if (ret == 0) {
+ 			data_string *ds;
+ 			char timebuf[sizeof("Sat, 23 Jul 2005 21:20:01 GMT")];
+-			buffer tbuf;
+ 
+ 			con->file_finished = 1;
+ 
+@@ -411,17 +411,11 @@ int cache_parse_lua(server *srv, connection *con, plugin_data *p, buffer *fn) {
+ 				strftime(timebuf, sizeof(timebuf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&mtime));
+ 
+ 				response_header_overwrite(srv, con, CONST_STR_LEN("Last-Modified"), timebuf, sizeof(timebuf) - 1);
+-
+-				tbuf.ptr = timebuf;
+-				tbuf.used = sizeof(timebuf);
+-				tbuf.size = sizeof(timebuf);
+-			} else {
+-				tbuf.ptr = ds->value->ptr;
+-				tbuf.used = ds->value->used;
+-				tbuf.size = ds->value->size;
++				ds = (data_string *)array_get_element(con->response.headers, "Last-Modified");
++				force_assert(NULL != ds);
+ 			}
+ 
+-			if (HANDLER_FINISHED == http_response_handle_cachable(srv, con, &tbuf)) {
++			if (HANDLER_FINISHED == http_response_handle_cachable(srv, con, ds->value)) {
+ 				/* ok, the client already has our content,
+ 				 * no need to send it again */
+ 
+diff --git a/src/mod_compress.c b/src/mod_compress.c
+index 120b379..f0ffa1c 100644
+--- a/src/mod_compress.c
++++ b/src/mod_compress.c
+@@ -244,6 +244,7 @@ static int deflate_file_to_buffer_gzip(server *srv, connection *con, plugin_data
+ 	unsigned char *c;
+ 	unsigned long crc;
+ 	z_stream z;
++	size_t outlen;
+ 
+ 	UNUSED(srv);
+ 	UNUSED(con);
+@@ -282,9 +283,9 @@ static int deflate_file_to_buffer_gzip(server *srv, connection *con, plugin_data
+ 	c[8] = 0x00; /* extra flags */
+ 	c[9] = 0x03; /* UNIX */
+ 
+-	p->b->used = 10;
+-	z.next_out = (unsigned char *)p->b->ptr + p->b->used;
+-	z.avail_out = p->b->size - p->b->used - 9;
++	outlen = 10;
++	z.next_out = (unsigned char *)p->b->ptr + outlen;
++	z.avail_out = p->b->size - outlen - 9;
+ 	z.total_out = 0;
+ 
+ 	if (Z_STREAM_END != deflate(&z, Z_FINISH)) {
+@@ -293,11 +294,11 @@ static int deflate_file_to_buffer_gzip(server *srv, connection *con, plugin_data
+ 	}
+ 
+ 	/* trailer */
+-	p->b->used += z.total_out;
++	outlen += z.total_out;
+ 
+ 	crc = generate_crc32c(start, st_size);
+ 
+-	c = (unsigned char *)p->b->ptr + p->b->used;
++	c = (unsigned char *)p->b->ptr + outlen;
+ 
+ 	c[0] = (crc >>  0) & 0xff;
+ 	c[1] = (crc >>  8) & 0xff;
+@@ -307,8 +308,8 @@ static int deflate_file_to_buffer_gzip(server *srv, connection *con, plugin_data
+ 	c[5] = (z.total_in >>  8) & 0xff;
+ 	c[6] = (z.total_in >> 16) & 0xff;
+ 	c[7] = (z.total_in >> 24) & 0xff;
+-	p->b->used += 8;
+-	p->b->ptr[p->b->used++] = '\0';
++	outlen += 8;
++	buffer_commit(p->b, outlen);
+ 
+ 	if (Z_OK != deflateEnd(&z)) {
+ 		return -1;
+@@ -398,16 +399,15 @@ static int deflate_file_to_buffer_bzip2(server *srv, connection *con, plugin_dat
+ 		return -1;
+ 	}
+ 
++	if (BZ_OK != BZ2_bzCompressEnd(&bz)) {
++		return -1;
++	}
++
+ 	/* file is too large for now */
+ 	if (bz.total_out_hi32) return -1;
+ 
+ 	/* trailer */
+-	p->b->used = bz.total_out_lo32;
+-	p->b->ptr[p->b->used++] = '\0';
+-
+-	if (BZ_OK != BZ2_bzCompressEnd(&bz)) {
+-		return -1;
+-	}
++	buffer_commit(p->b, bz.total_out_lo32);
+ 
+ 	return 0;
+ }
+@@ -434,8 +434,8 @@ static int deflate_file_to_file(server *srv, connection *con, plugin_data *p, bu
+ 	buffer_copy_buffer(p->ofn, p->conf.compress_cache_dir);
+ 	buffer_append_slash(p->ofn);
+ 
+-	if (0 == strncmp(con->physical.path->ptr, con->physical.doc_root->ptr, con->physical.doc_root->used-1)) {
+-		buffer_append_string(p->ofn, con->physical.path->ptr + con->physical.doc_root->used - 1);
++	if (0 == strncmp(con->physical.path->ptr, con->physical.doc_root->ptr, buffer_string_length(con->physical.doc_root))) {
++		buffer_append_string(p->ofn, con->physical.path->ptr + buffer_string_length(con->physical.doc_root));
+ 	} else {
+ 		buffer_append_string_buffer(p->ofn, con->uri.path);
+ 	}
+@@ -883,7 +883,7 @@ PHYSICALPATH_FUNC(mod_compress_physical) {
+ 					}
+ 
+ 					/* deflate it */
+-					if (use_etag && p->conf.compress_cache_dir->used) {
++					if (use_etag && !buffer_string_is_empty(p->conf.compress_cache_dir)) {
+ 						if (0 != deflate_file_to_file(srv, con, p, con->physical.path, sce, compression_type))
+ 							return HANDLER_GO_ON;
+ 					} else {
+@@ -897,7 +897,7 @@ PHYSICALPATH_FUNC(mod_compress_physical) {
+ 					}
+ 					response_header_overwrite(srv, con, CONST_STR_LEN("Content-Type"), CONST_BUF_LEN(sce->content_type));
+ 					/* let mod_staticfile handle the cached compressed files, physical path was modified */
+-					return (use_etag && p->conf.compress_cache_dir->used) ? HANDLER_GO_ON : HANDLER_FINISHED;
++					return (use_etag && !buffer_string_is_empty(p->conf.compress_cache_dir)) ? HANDLER_GO_ON : HANDLER_FINISHED;
+ 				}
+ 			}
+ 		}
+diff --git a/src/mod_dirlisting.c b/src/mod_dirlisting.c
+index e2e0bfa..d8bf3a3 100644
+--- a/src/mod_dirlisting.c
++++ b/src/mod_dirlisting.c
+@@ -492,7 +492,7 @@ static void http_list_directory_header(server *srv, connection *con, plugin_data
+ 		buffer_append_string_encoded(out, CONST_BUF_LEN(con->uri.path), ENCODING_MINIMAL_XML);
+ 		buffer_append_string_len(out, CONST_STR_LEN("</title>\n"));
+ 
+-		if (p->conf.external_css->used > 1) {
++		if (!buffer_string_is_empty(p->conf.external_css)) {
+ 			buffer_append_string_len(out, CONST_STR_LEN("<link rel=\"stylesheet\" type=\"text/css\" href=\""));
+ 			buffer_append_string_buffer(out, p->conf.external_css);
+ 			buffer_append_string_len(out, CONST_STR_LEN("\" />\n"));
+@@ -614,7 +614,7 @@ static void http_list_directory_footer(server *srv, connection *con, plugin_data
+ 			"<div class=\"foot\">"
+ 		));
+ 
+-		if (p->conf.set_footer->used > 1) {
++		if (buffer_string_is_empty(p->conf.set_footer)) {
+ 			buffer_append_string_buffer(out, p->conf.set_footer);
+ 		} else if (buffer_is_empty(con->conf.server_tag)) {
+ 			buffer_append_string_len(out, CONST_STR_LEN(PACKAGE_DESC));
+@@ -653,9 +653,9 @@ static int http_list_directory(server *srv, connection *con, plugin_data *p, buf
+ 	struct tm tm;
+ #endif
+ 
+-	if (dir->used == 0) return -1;
++	if (buffer_string_is_empty(dir)) return -1;
+ 
+-	i = dir->used - 1;
++	i = buffer_string_length(dir);
+ 
+ #ifdef HAVE_PATHCONF
+ 	if (0 >= (name_max = pathconf(dir->ptr, _PC_NAME_MAX))) {
+@@ -672,8 +672,8 @@ static int http_list_directory(server *srv, connection *con, plugin_data *p, buf
+ 	name_max = NAME_MAX;
+ #endif
+ 
+-	path = malloc(dir->used + name_max);
+-	force_assert(path);
++	path = malloc(buffer_string_length(dir) + name_max + 1);
++	force_assert(NULL != path);
+ 	strcpy(path, dir->ptr);
+ 	path_file = path + i;
+ 
+@@ -846,10 +846,10 @@ static int http_list_directory(server *srv, connection *con, plugin_data *p, buf
+ 				data_string *ds = (data_string *)con->conf.mimetypes->data[k];
+ 				size_t ct_len;
+ 
+-				if (ds->key->used == 0)
++				if (buffer_is_empty(ds->key))
+ 					continue;
+ 
+-				ct_len = ds->key->used - 1;
++				ct_len = buffer_string_length(ds->key);
+ 				if (tmp->namelen < ct_len)
+ 					continue;
+ 
+@@ -925,9 +925,9 @@ URIHANDLER_FUNC(mod_dirlisting_subrequest) {
+ 
+ 	if (con->mode != DIRECT) return HANDLER_GO_ON;
+ 
+-	if (con->physical.path->used == 0) return HANDLER_GO_ON;
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
+-	if (con->uri.path->ptr[con->uri.path->used - 2] != '/') return HANDLER_GO_ON;
++	if (buffer_is_empty(con->physical.path)) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
++	if (con->uri.path->ptr[buffer_string_length(con->uri.path) - 1] != '/') return HANDLER_GO_ON;
+ 
+ 	mod_dirlisting_patch_connection(srv, con, p);
+ 
+diff --git a/src/mod_evasive.c b/src/mod_evasive.c
+index a20aff5..d9b8732 100644
+--- a/src/mod_evasive.c
++++ b/src/mod_evasive.c
+@@ -138,7 +138,7 @@ URIHANDLER_FUNC(mod_evasive_uri_handler) {
+ 	size_t conns_by_ip = 0;
+ 	size_t j;
+ 
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
+ 
+ 	mod_evasive_patch_connection(srv, con, p);
+ 
+diff --git a/src/mod_evhost.c b/src/mod_evhost.c
+index 5281523..e728551 100644
+--- a/src/mod_evhost.c
++++ b/src/mod_evhost.c
+@@ -146,7 +146,7 @@ SETDEFAULTS_FUNC(mod_evhost_set_defaults) {
+ 			return HANDLER_ERROR;
+ 		}
+ 
+-		if (s->path_pieces_raw->used != 0) {
++		if (!buffer_string_is_empty(s->path_pieces_raw)) {
+ 			mod_evhost_parse_pattern(s);
+ 		}
+ 	}
+@@ -164,8 +164,7 @@ SETDEFAULTS_FUNC(mod_evhost_set_defaults) {
+  */
+ 
+ static int mod_evhost_parse_host(connection *con,array *host) {
+-	/* con->uri.authority->used is always > 0 if we come here */
+-	register char *ptr = con->uri.authority->ptr + con->uri.authority->used - 1;
++	register char *ptr = con->uri.authority->ptr + buffer_string_length(con->uri.authority);
+ 	char *colon = ptr; /* needed to filter out the colon (if exists) */
+ 	int first = 1;
+ 	data_string *ds;
+@@ -265,7 +264,7 @@ static handler_t mod_evhost_uri_handler(server *srv, connection *con, void *p_d)
+ 	stat_cache_entry *sce = NULL;
+ 
+ 	/* not authority set */
+-	if (con->uri.authority->used == 0) return HANDLER_GO_ON;
++	if (buffer_string_is_empty(con->uri.authority)) return HANDLER_GO_ON;
+ 
+ 	mod_evhost_patch_connection(srv, con, p);
+ 
+@@ -300,9 +299,7 @@ static handler_t mod_evhost_uri_handler(server *srv, connection *con, void *p_d)
+ 					buffer_append_string_len(p->tmp_buf, con->uri.authority->ptr, colon - con->uri.authority->ptr); /* adds fqdn */
+ 				}
+ 			} else if (NULL != (ds = (data_string *)array_get_element(parsed_host,p->conf.path_pieces[i]->ptr))) {
+-				if (ds->value->used) {
+-					buffer_append_string_buffer(p->tmp_buf,ds->value);
+-				}
++				buffer_append_string_buffer(p->tmp_buf,ds->value);
+ 			} else {
+ 				/* unhandled %-sequence */
+ 			}
+diff --git a/src/mod_expire.c b/src/mod_expire.c
+index 31a81b7..e26c3c6 100644
+--- a/src/mod_expire.c
++++ b/src/mod_expire.c
+@@ -90,7 +90,7 @@ static int mod_expire_get_offset(server *srv, plugin_data *p, buffer *expire, ti
+ 	 * e.g. 'access 1 years'
+ 	 */
+ 
+-	if (expire->used == 0) {
++	if (buffer_string_is_empty(expire)) {
+ 		log_error_write(srv, __FILE__, __LINE__, "s",
+ 				"empty:");
+ 		return -1;
+@@ -288,22 +288,21 @@ URIHANDLER_FUNC(mod_expire_path_handler) {
+ 	int s_len;
+ 	size_t k;
+ 
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
+ 
+ 	mod_expire_patch_connection(srv, con, p);
+ 
+-	s_len = con->uri.path->used - 1;
++	s_len = buffer_string_length(con->uri.path);
+ 
+ 	for (k = 0; k < p->conf.expire_url->used; k++) {
+ 		data_string *ds = (data_string *)p->conf.expire_url->data[k];
+-		int ct_len = ds->key->used - 1;
++		int ct_len = buffer_string_length(ds->key);
+ 
+ 		if (ct_len > s_len) continue;
+-		if (ds->key->used == 0) continue;
++		if (buffer_is_empty(ds->key)) continue;
+ 
+ 		if (0 == strncmp(con->uri.path->ptr, ds->key->ptr, ct_len)) {
+ 			time_t ts, expires;
+-			size_t len;
+ 			stat_cache_entry *sce = NULL;
+ 
+ 			/* if stat fails => sce == NULL, ignore return value */
+@@ -332,14 +331,8 @@ URIHANDLER_FUNC(mod_expire_path_handler) {
+ 			/* expires should be at least srv->cur_ts */
+ 			if (expires < srv->cur_ts) expires = srv->cur_ts;
+ 
+-			if (0 == (len = strftime(p->expire_tstmp->ptr, p->expire_tstmp->size - 1,
+-					   "%a, %d %b %Y %H:%M:%S GMT", gmtime(&(expires))))) {
+-				/* could not set expire header, out of mem */
+-
+-				return HANDLER_GO_ON;
+-			}
+-
+-			p->expire_tstmp->used = len + 1;
++			buffer_string_prepare_copy(p->expire_tstmp, 255);
++			buffer_append_strftime(p->expire_tstmp, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&(expires)));
+ 
+ 			/* HTTP/1.0 */
+ 			response_header_overwrite(srv, con, CONST_STR_LEN("Expires"), CONST_BUF_LEN(p->expire_tstmp));
+diff --git a/src/mod_extforward.c b/src/mod_extforward.c
+index 99c4af5..7f77982 100644
+--- a/src/mod_extforward.c
++++ b/src/mod_extforward.c
+@@ -236,7 +236,7 @@ static void put_string_into_array_len(array *ary, const char *str, int len)
+ static array *extract_forward_array(buffer *pbuffer)
+ {
+ 	array *result = array_init();
+-	if (pbuffer->used > 0) {
++	if (!buffer_string_is_empty(pbuffer)) {
+ 		char *base, *curr;
+ 		/* state variable, 0 means not in string, 1 means in string */
+ 		int in_str = 0;
+diff --git a/src/mod_fastcgi.c b/src/mod_fastcgi.c
+index a935961..d16306c 100644
+--- a/src/mod_fastcgi.c
++++ b/src/mod_fastcgi.c
+@@ -784,7 +784,7 @@ static int parse_binpath(char_array *env, buffer *b) {
+ 	/* search for spaces */
+ 
+ 	start = b->ptr;
+-	for (i = 0; i < b->used - 1; i++) {
++	for (i = 0; i < buffer_string_length(b); i++) {
+ 		switch(b->ptr[i]) {
+ 		case ' ':
+ 		case '\t':
+@@ -863,19 +863,19 @@ static int fcgi_spawn_connection(server *srv,
+ 
+ #ifdef HAVE_SYS_UN_H
+ 		fcgi_addr_un.sun_family = AF_UNIX;
+-		if (proc->unixsocket->used > sizeof(fcgi_addr_un.sun_path)) {
++		if (buffer_string_length(proc->unixsocket) + 1 > sizeof(fcgi_addr_un.sun_path)) {
+ 			log_error_write(srv, __FILE__, __LINE__, "sB",
+ 					"ERROR: Unix Domain socket filename too long:",
+ 					proc->unixsocket);
+ 			return -1;
+ 		}
+-		memcpy(fcgi_addr_un.sun_path, proc->unixsocket->ptr, proc->unixsocket->used);
++		memcpy(fcgi_addr_un.sun_path, proc->unixsocket->ptr, buffer_string_length(proc->unixsocket) + 1);
+ 
+ #ifdef SUN_LEN
+ 		servlen = SUN_LEN(&fcgi_addr_un);
+ #else
+ 		/* stevens says: */
+-		servlen = proc->unixsocket->used + sizeof(fcgi_addr_un.sun_family);
++		servlen = buffer_string_length(proc->unixsocket) + 1 + sizeof(fcgi_addr_un.sun_family);
+ #endif
+ 		socket_type = AF_UNIX;
+ 		fcgi_addr = (struct sockaddr *) &fcgi_addr_un;
+@@ -1324,7 +1324,7 @@ SETDEFAULTS_FUNC(mod_fastcgi_set_defaults) {
+ 						/* unix domain socket */
+ 						struct sockaddr_un un;
+ 
+-						if (host->unixsocket->used > sizeof(un.sun_path) - 2) {
++						if (buffer_string_length(host->unixsocket) + 1 > sizeof(un.sun_path) - 2) {
+ 							log_error_write(srv, __FILE__, __LINE__, "sbsbsbs",
+ 									"unixsocket is too long in:",
+ 									da->key, "= (",
+@@ -1667,19 +1667,19 @@ static connection_result_t fcgi_establish_connection(server *srv, handler_ctx *h
+ #ifdef HAVE_SYS_UN_H
+ 		/* use the unix domain socket */
+ 		fcgi_addr_un.sun_family = AF_UNIX;
+-		if (proc->unixsocket->used > sizeof(fcgi_addr_un.sun_path)) {
++		if (buffer_string_length(proc->unixsocket) + 1 > sizeof(fcgi_addr_un.sun_path)) {
+ 			log_error_write(srv, __FILE__, __LINE__, "sB",
+ 					"ERROR: Unix Domain socket filename too long:",
+ 					proc->unixsocket);
+ 			return -1;
+ 		}
+-		memcpy(fcgi_addr_un.sun_path, proc->unixsocket->ptr, proc->unixsocket->used);
++		memcpy(fcgi_addr_un.sun_path, proc->unixsocket->ptr, buffer_string_length(proc->unixsocket) + 1);
+ 
+ #ifdef SUN_LEN
+ 		servlen = SUN_LEN(&fcgi_addr_un);
+ #else
+ 		/* stevens says: */
+-		servlen = proc->unixsocket->used + sizeof(fcgi_addr_un.sun_family);
++		servlen = buffer_string_length(proc->unixsocket) + 1 + sizeof(fcgi_addr_un.sun_family);
+ #endif
+ 		fcgi_addr = (struct sockaddr *) &fcgi_addr_un;
+ 
+@@ -1774,7 +1774,7 @@ static int fcgi_env_add_request_headers(server *srv, connection *con, plugin_dat
+ 
+ 		ds = (data_string *)con->request.headers->data[i];
+ 
+-		if (ds->value->used && ds->key->used) {
++		if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key)) {
+ 			buffer_copy_string_encoded_cgi_varnames(srv->tmp_buf, CONST_BUF_LEN(ds->key), 1);
+ 
+ 			FCGI_ENV_ADD_CHECK(fcgi_env_add(p->fcgi_env, CONST_BUF_LEN(srv->tmp_buf), CONST_BUF_LEN(ds->value)),con);
+@@ -1786,7 +1786,7 @@ static int fcgi_env_add_request_headers(server *srv, connection *con, plugin_dat
+ 
+ 		ds = (data_string *)con->environment->data[i];
+ 
+-		if (ds->value->used && ds->key->used) {
++		if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key)) {
+ 			buffer_copy_string_encoded_cgi_varnames(srv->tmp_buf, CONST_BUF_LEN(ds->key), 0);
+ 
+ 			FCGI_ENV_ADD_CHECK(fcgi_env_add(p->fcgi_env, CONST_BUF_LEN(srv->tmp_buf), CONST_BUF_LEN(ds->value)), con);
+@@ -1833,8 +1833,8 @@ static int fcgi_create_env(server *srv, handler_ctx *hctx, size_t request_id) {
+ 		FCGI_ENV_ADD_CHECK(fcgi_env_add(p->fcgi_env, CONST_STR_LEN("SERVER_SOFTWARE"), CONST_BUF_LEN(con->conf.server_tag)),con)
+ 	}
+ 
+-	if (con->server_name->used) {
+-		size_t len = con->server_name->used - 1;
++	if (!buffer_is_empty(con->server_name)) {
++		size_t len = buffer_string_length(con->server_name);
+ 
+ 		if (con->server_name->ptr[0] == '[') {
+ 			const char *colon = strstr(con->server_name->ptr, "]:");
+@@ -1961,7 +1961,7 @@ static int fcgi_create_env(server *srv, handler_ctx *hctx, size_t request_id) {
+ 		FCGI_ENV_ADD_CHECK(fcgi_env_add(p->fcgi_env, CONST_STR_LEN("DOCUMENT_ROOT"), CONST_BUF_LEN(con->physical.basedir)),con)
+ 	}
+ 
+-	if (host->strip_request_uri->used > 1) {
++	if (!buffer_string_is_empty(host->strip_request_uri)) {
+ 		/* we need at least one char to strip off */
+ 		/**
+ 		 * /app1/index/list
+@@ -1971,18 +1971,18 @@ static int fcgi_create_env(server *srv, handler_ctx *hctx, size_t request_id) {
+ 		 * /index/list
+ 		 *
+ 		 */
+-		if ('/' != host->strip_request_uri->ptr[host->strip_request_uri->used - 2]) {
++		if ('/' != host->strip_request_uri->ptr[buffer_string_length(host->strip_request_uri) - 1]) {
+ 			/* fix the user-input to have / as last char */
+ 			buffer_append_string_len(host->strip_request_uri, CONST_STR_LEN("/"));
+ 		}
+ 
+-		if (con->request.orig_uri->used >= host->strip_request_uri->used &&
+-		    0 == strncmp(con->request.orig_uri->ptr, host->strip_request_uri->ptr, host->strip_request_uri->used - 1)) {
++		if (buffer_string_length(con->request.orig_uri) >= buffer_string_length(host->strip_request_uri) &&
++		    0 == strncmp(con->request.orig_uri->ptr, host->strip_request_uri->ptr, buffer_string_length(host->strip_request_uri))) {
+ 			/* the left is the same */
+ 
+ 			fcgi_env_add(p->fcgi_env, CONST_STR_LEN("REQUEST_URI"),
+-					con->request.orig_uri->ptr + (host->strip_request_uri->used - 2),
+-					con->request.orig_uri->used - (host->strip_request_uri->used - 2) - 1);
++					con->request.orig_uri->ptr + (buffer_string_length(host->strip_request_uri) - 1),
++					buffer_string_length(con->request.orig_uri) - (buffer_string_length(host->strip_request_uri) - 1));
+ 		} else {
+ 			FCGI_ENV_ADD_CHECK(fcgi_env_add(p->fcgi_env, CONST_STR_LEN("REQUEST_URI"), CONST_BUF_LEN(con->request.orig_uri)),con)
+ 		}
+@@ -2022,7 +2022,7 @@ static int fcgi_create_env(server *srv, handler_ctx *hctx, size_t request_id) {
+ 		fcgi_header(&(header), FCGI_PARAMS, request_id, 0, 0);
+ 		buffer_append_string_len(b, (const char *)&header, sizeof(header));
+ 
+-		hctx->wb->bytes_in += b->used - 1;
++		hctx->wb->bytes_in += buffer_string_length(b);
+ 		chunkqueue_append_buffer(hctx->wb, b);
+ 		buffer_free(b);
+ 	}
+@@ -2303,11 +2303,10 @@ static int fastcgi_get_packet(server *srv, handler_ctx *hctx, fastcgi_response_p
+ 		if (0 == toread) break;
+ 	}
+ 
+-	if ((packet->b->used == 0) ||
+-	    (packet->b->used - 1 < sizeof(FCGI_Header))) {
++	if (buffer_string_length(packet->b) < sizeof(FCGI_Header)) {
+ 		/* no header */
+ 		if (hctx->plugin_data->conf.debug) {
+-			log_error_write(srv, __FILE__, __LINE__, "sdsds", "FastCGI: header too small:", packet->b->used, "bytes <", sizeof(FCGI_Header), "bytes, waiting for more data");
++			log_error_write(srv, __FILE__, __LINE__, "sdsds", "FastCGI: header too small:", buffer_string_length(packet->b), "bytes <", sizeof(FCGI_Header), "bytes, waiting for more data");
+ 		}
+ 
+ 		buffer_free(packet->b);
+@@ -2324,13 +2323,13 @@ static int fastcgi_get_packet(server *srv, handler_ctx *hctx, fastcgi_response_p
+ 	packet->padding = header->paddingLength;
+ 
+ 	/* ->b should only be the content */
+-	buffer_copy_string_len(packet->b, CONST_STR_LEN("")); /* used == 1 */
++	buffer_string_set_length(packet->b, 0);
+ 
+ 	if (packet->len) {
+ 		/* copy the content */
+-		for (; c && (packet->b->used < packet->len + 1); c = c->next) {
+-			size_t weWant = packet->len - (packet->b->used - 1);
+-			size_t weHave = c->mem->used - c->offset - offset - 1;
++		for (; c && (buffer_string_length(packet->b) < packet->len); c = c->next) {
++			size_t weWant = packet->len - buffer_string_length(packet->b);
++			size_t weHave = buffer_string_length(c->mem) - c->offset - offset;
+ 
+ 			if (weHave > weWant) weHave = weWant;
+ 
+@@ -2340,24 +2339,23 @@ static int fastcgi_get_packet(server *srv, handler_ctx *hctx, fastcgi_response_p
+ 			offset = 0;
+ 		}
+ 
+-		if (packet->b->used < packet->len + 1) {
++		if (buffer_string_length(packet->b) < packet->len) {
+ 			/* we didn't get the full packet */
+ 
+ 			buffer_free(packet->b);
+ 			return -1;
+ 		}
+ 
+-		packet->b->used -= packet->padding;
+-		packet->b->ptr[packet->b->used - 1] = '\0';
++		buffer_string_set_length(packet->b, buffer_string_length(packet->b) - packet->padding);
+ 	}
+ 
+ 	/* tag the chunks as read */
+ 	toread = packet->len + sizeof(FCGI_Header);
+ 	for (c = hctx->rb->first; c && toread; c = c->next) {
+-		if (c->mem->used - c->offset - 1 <= toread) {
++		if (buffer_string_length(c->mem) - c->offset <= toread) {
+ 			/* we read this whole buffer, move it to unused */
+-			toread -= c->mem->used - c->offset - 1;
+-			c->offset = c->mem->used - 1; /* everthing has been written */
++			toread -= buffer_string_length(c->mem) - c->offset;
++			c->offset = buffer_string_length(c->mem); /* everthing has been written */
+ 		} else {
+ 			c->offset += toread;
+ 			toread = 0;
+@@ -2451,14 +2449,12 @@ static int fcgi_demux_response(server *srv, handler_ctx *hctx) {
+ 					char *hend = c + 4; /* header end == body start */
+ 					size_t hlen = hend - hctx->response_header->ptr;
+ 					buffer_copy_string_len(packet.b, hend, buffer_string_length(hctx->response_header) - hlen);
+-					hctx->response_header->used = hlen;
+-					hctx->response_header->ptr[hctx->response_header->used++] = '\0';
++					buffer_string_set_length(hctx->response_header, hlen);
+ 				} else if (NULL != (c = buffer_search_string_len(hctx->response_header, CONST_STR_LEN("\n\n")))) {
+ 					char *hend = c + 2; /* header end == body start */
+ 					size_t hlen = hend - hctx->response_header->ptr;
+ 					buffer_copy_string_len(packet.b, hend, buffer_string_length(hctx->response_header) - hlen);
+-					hctx->response_header->used = hlen;
+-					hctx->response_header->ptr[hctx->response_header->used++] = '\0';
++					buffer_string_set_length(hctx->response_header, hlen);
+ 				} else {
+ 					/* no luck, no header found */
+ 					break;
+@@ -2525,7 +2521,7 @@ static int fcgi_demux_response(server *srv, handler_ctx *hctx) {
+ 					http_chunk_append_buffer(srv, con, packet.b);
+ 					joblist_append(srv, con);
+ 				}
+-			} else if (hctx->send_content_body && packet.b->used > 1) {
++			} else if (hctx->send_content_body && !buffer_string_is_empty(packet.b)) {
+ 				if (con->request.http_version == HTTP_VERSION_1_1 &&
+ 				    !(con->parsed_response & HTTP_CONTENT_LENGTH)) {
+ 					/* enable chunked-transfer-encoding */
+@@ -2721,7 +2717,7 @@ static handler_t fcgi_write_request(server *srv, handler_ctx *hctx) {
+ 		log_error_write(srv, __FILE__, __LINE__, "s", "fatal error: host = NULL");
+ 		return HANDLER_ERROR;
+ 	}
+-	if ((!host->port && !host->unixsocket->used)) {
++	if ((!host->port && buffer_string_is_empty(host->unixsocket))) {
+ 		log_error_write(srv, __FILE__, __LINE__, "s", "fatal error: neither host->port nor host->unixsocket is set");
+ 		return HANDLER_ERROR;
+ 	}
+@@ -2794,7 +2790,7 @@ static handler_t fcgi_write_request(server *srv, handler_ctx *hctx) {
+ 			if (proc->load < hctx->proc->load) hctx->proc = proc;
+ 		}
+ 
+-		ret = host->unixsocket->used ? AF_UNIX : AF_INET;
++		ret = buffer_string_is_empty(host->unixsocket) ? AF_INET : AF_UNIX;
+ 
+ 		if (-1 == (hctx->fd = socket(ret, SOCK_STREAM, 0))) {
+ 			if (errno == EMFILE ||
+@@ -3335,7 +3331,7 @@ static handler_t fcgi_check_extension(server *srv, connection *con, void *p_d, i
+ 
+ 	if (buffer_string_is_empty(fn)) return HANDLER_GO_ON;
+ 
+-	s_len = fn->used - 1;
++	s_len = buffer_string_length(fn);
+ 
+ 	fcgi_patch_connection(srv, con, p);
+ 
+@@ -3352,9 +3348,9 @@ static handler_t fcgi_check_extension(server *srv, connection *con, void *p_d, i
+ 		data_string *ds = (data_string *)p->conf.ext_mapping->data[k];
+ 		size_t ct_len; /* length of the config entry */
+ 
+-		if (ds->key->used == 0) continue;
++		if (buffer_is_empty(ds->key)) continue;
+ 
+-		ct_len = ds->key->used - 1;
++		ct_len = buffer_string_length(ds->key);
+ 
+ 		if (s_len < ct_len) continue;
+ 
+@@ -3380,18 +3376,20 @@ static handler_t fcgi_check_extension(server *srv, connection *con, void *p_d, i
+ 	}
+ 
+ 	if (extension == NULL) {
++		size_t uri_path_len = buffer_string_length(con->uri.path);
++
+ 		/* check if extension matches */
+ 		for (k = 0; k < p->conf.exts->used; k++) {
+ 			size_t ct_len; /* length of the config entry */
+ 			fcgi_extension *ext = p->conf.exts->exts[k];
+ 
+-			if (ext->key->used == 0) continue;
++			if (buffer_is_empty(ext->key)) continue;
+ 
+-			ct_len = ext->key->used - 1;
++			ct_len = buffer_string_length(ext->key);
+ 
+ 			/* check _url_ in the form "/fcgi_pattern" */
+ 			if (ext->key->ptr[0] == '/') {
+-				if ((ct_len <= con->uri.path->used -1) &&
++				if ((ct_len <= uri_path_len) &&
+ 				    (strncmp(con->uri.path->ptr, ext->key->ptr, ct_len) == 0)) {
+ 					extension = ext;
+ 					break;
+@@ -3506,17 +3504,14 @@ static handler_t fcgi_check_extension(server *srv, connection *con, void *p_d, i
+ 				/* the rewrite is only done for /prefix/? matches */
+ 				if (host->fix_root_path_name && extension->key->ptr[0] == '/' && extension->key->ptr[1] == '\0') {
+ 					buffer_copy_string(con->request.pathinfo, con->uri.path->ptr);
+-					con->uri.path->used = 1;
+-					con->uri.path->ptr[con->uri.path->used - 1] = '\0';
++					buffer_string_set_length(con->uri.path, 0);
+ 				} else if (extension->key->ptr[0] == '/' &&
+-					con->uri.path->used > extension->key->used &&
+-					NULL != (pathinfo = strchr(con->uri.path->ptr + extension->key->used - 1, '/'))) {
++					buffer_string_length(con->uri.path) > buffer_string_length(extension->key) &&
++					NULL != (pathinfo = strchr(con->uri.path->ptr + buffer_string_length(extension->key), '/'))) {
+ 					/* rewrite uri.path and pathinfo */
+ 
+ 					buffer_copy_string(con->request.pathinfo, pathinfo);
+-
+-					con->uri.path->used -= con->request.pathinfo->used - 1;
+-					con->uri.path->ptr[con->uri.path->used - 1] = '\0';
++					buffer_string_set_length(con->uri.path, buffer_string_length(con->uri.path) - buffer_string_length(con->request.pathinfo));
+ 				}
+ 			}
+ 		}
+diff --git a/src/mod_flv_streaming.c b/src/mod_flv_streaming.c
+index 1c1a356..db041e2 100644
+--- a/src/mod_flv_streaming.c
++++ b/src/mod_flv_streaming.c
+@@ -136,13 +136,14 @@ static int mod_flv_streaming_patch_connection(server *srv, connection *con, plug
+ 
+ static int split_get_params(array *get_params, buffer *qrystr) {
+ 	size_t is_key = 1;
+-	size_t i;
++	size_t i, len;
+ 	char *key = NULL, *val = NULL;
+ 
+ 	key = qrystr->ptr;
+ 
+ 	/* we need the \0 */
+-	for (i = 0; i < qrystr->used; i++) {
++	len = buffer_string_length(qrystr);
++	for (i = 0; i <= len; i++) {
+ 		switch(qrystr->ptr[i]) {
+ 		case '=':
+ 			if (is_key) {
+@@ -195,14 +196,14 @@ URIHANDLER_FUNC(mod_flv_streaming_path_handler) {
+ 
+ 	mod_flv_streaming_patch_connection(srv, con, p);
+ 
+-	s_len = con->physical.path->used - 1;
++	s_len = buffer_string_length(con->physical.path);
+ 
+ 	for (k = 0; k < p->conf.extensions->used; k++) {
+ 		data_string *ds = (data_string *)p->conf.extensions->data[k];
+-		int ct_len = ds->value->used - 1;
++		int ct_len = buffer_string_length(ds->value);
+ 
+ 		if (ct_len > s_len) continue;
+-		if (ds->value->used == 0) continue;
++		if (buffer_is_empty(ds->value)) continue;
+ 
+ 		if (0 == strncmp(con->physical.path->ptr + s_len - ct_len, ds->value->ptr, ct_len)) {
+ 			data_string *get_param;
+@@ -221,7 +222,7 @@ URIHANDLER_FUNC(mod_flv_streaming_path_handler) {
+ 			}
+ 
+ 			/* too short */
+-			if (get_param->value->used < 2) return HANDLER_GO_ON;
++			if (buffer_string_is_empty(get_param->value)) return HANDLER_GO_ON;
+ 
+ 			/* check if it is a number */
+ 			start = strtol(get_param->value->ptr, &err, 10);
+diff --git a/src/mod_indexfile.c b/src/mod_indexfile.c
+index fe750c1..13d18e2 100644
+--- a/src/mod_indexfile.c
++++ b/src/mod_indexfile.c
+@@ -141,8 +141,8 @@ URIHANDLER_FUNC(mod_indexfile_subrequest) {
+ 
+ 	if (con->mode != DIRECT) return HANDLER_GO_ON;
+ 
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
+-	if (con->uri.path->ptr[con->uri.path->used - 2] != '/') return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
++	if (con->uri.path->ptr[buffer_string_length(con->uri.path) - 1] != '/') return HANDLER_GO_ON;
+ 
+ 	mod_indexfile_patch_connection(srv, con, p);
+ 
+diff --git a/src/mod_magnet.c b/src/mod_magnet.c
+index 80cb799..8f89d4e 100644
+--- a/src/mod_magnet.c
++++ b/src/mod_magnet.c
+@@ -189,17 +189,12 @@ static int magnet_array_next(lua_State *L) {
+ 
+ 	if (pos >= a->used) return 0;
+ 	if (NULL != (du = a->data[pos])) {
+-		if (du->key->used) {
+-			lua_pushlstring(L, du->key->ptr, du->key->used - 1);
+-		}
+-		else {
+-			lua_pushlstring(L, "", 0);
+-		}
++		lua_pushlstring(L, CONST_BUF_LEN(du->key));
+ 		switch (du->type) {
+ 			case TYPE_STRING:
+ 				ds = (data_string *)du;
+-				if (ds->value && ds->value->used) {
+-					lua_pushlstring(L, ds->value->ptr, ds->value->used - 1);
++				if (!buffer_is_empty(ds->value)) {
++					lua_pushlstring(L, CONST_BUF_LEN(ds->value));
+ 				} else {
+ 					lua_pushnil(L);
+ 				}
+@@ -252,8 +247,9 @@ static int magnet_stat(lua_State *L) {
+ 	const char *s = luaL_checkstring(L, 1);
+ 	server *srv;
+ 	connection *con;
+-	buffer sb;
++	buffer *sb;
+ 	stat_cache_entry *sce = NULL;
++	handler_t res;
+ 
+ 	lua_pushstring(L, "lighty.srv");
+ 	lua_gettable(L, LUA_REGISTRYINDEX);
+@@ -265,12 +261,12 @@ static int magnet_stat(lua_State *L) {
+ 	con = lua_touserdata(L, -1);
+ 	lua_pop(L, 1);
+ 
+-	sb.ptr = (char *)s;
+-	sb.used = sb.size = strlen(s) + 1;
+-	
+-	if (HANDLER_GO_ON != stat_cache_get_entry(srv, con, &sb, &sce)) {
+-		lua_pushnil(L);
++	sb = buffer_init_string(s);
++	res = stat_cache_get_entry(srv, con, sb, &sce);
++	buffer_free(sb);
+ 
++	if (HANDLER_GO_ON != res) {
++		lua_pushnil(L);
+ 		return 1;
+ 	}
+ 
+@@ -324,7 +320,7 @@ static int magnet_stat(lua_State *L) {
+ 		buffer *b = buffer_init();
+ 		etag_mutate(b, sce->etag);
+ 
+-		lua_pushlstring(L, b->ptr, b->used - 1);
++		lua_pushlstring(L, CONST_BUF_LEN(b));
+ 		buffer_free(b);
+ 	} else {
+ 		lua_pushnil(L);
+@@ -332,7 +328,7 @@ static int magnet_stat(lua_State *L) {
+ 	lua_setfield(L, -2, "etag");
+ 
+ 	if (!buffer_string_is_empty(sce->content_type)) {
+-		lua_pushlstring(L, sce->content_type->ptr, sce->content_type->used - 1);
++		lua_pushlstring(L, CONST_BUF_LEN(sce->content_type));
+ 	} else {
+ 		lua_pushnil(L);
+ 	}
+@@ -369,8 +365,8 @@ static int magnet_reqhdr_get(lua_State *L) {
+ 	lua_pop(L, 1);
+ 
+ 	if (NULL != (ds = (data_string *)array_get_element(con->request.headers, key))) {
+-		if (ds->value->used) {
+-			lua_pushlstring(L, ds->value->ptr, ds->value->used - 1);
++		if (!buffer_is_empty(ds->value)) {
++			lua_pushlstring(L, CONST_BUF_LEN(ds->value));
+ 		} else {
+ 			lua_pushnil(L);
+ 		}
+@@ -555,8 +551,8 @@ static int magnet_env_get(lua_State *L) {
+ 
+ 	dest = magnet_env_get_buffer(srv, con, key);
+ 
+-	if (dest && dest->used) {
+-		lua_pushlstring(L, dest->ptr, dest->used - 1);
++	if (!buffer_is_empty(dest)) {
++		lua_pushlstring(L, CONST_BUF_LEN(dest));
+ 	} else {
+ 		lua_pushnil(L);
+ 	}
+@@ -617,8 +613,8 @@ static int magnet_env_next(lua_State *L) {
+ 	lua_pushstring(L, magnet_env[pos].name);
+ 
+ 	dest = magnet_env_get_buffer_by_id(srv, con, magnet_env[pos].type);
+-	if (dest && dest->used) {
+-		lua_pushlstring(L, dest->ptr, dest->used - 1);
++	if (!buffer_is_empty(dest)) {
++		lua_pushlstring(L, CONST_BUF_LEN(dest));
+ 	} else {
+ 		lua_pushnil(L);
+ 	}
+@@ -649,7 +645,8 @@ static int magnet_cgi_get(lua_State *L) {
+ 	con = lua_touserdata(L, -1);
+ 	lua_pop(L, 1);
+ 
+-	if (NULL != (ds = (data_string *)array_get_element(con->environment, key)) && ds->value->used)
++	ds = (data_string *)array_get_element(con->environment, key);
++	if (!buffer_is_empty(ds->value))
+ 		lua_pushlstring(L, CONST_BUF_LEN(ds->value));
+ 	else
+ 		lua_pushnil(L);
+diff --git a/src/mod_mysql_vhost.c b/src/mod_mysql_vhost.c
+index 7d679fb..21260d5 100644
+--- a/src/mod_mysql_vhost.c
++++ b/src/mod_mysql_vhost.c
+@@ -25,10 +25,6 @@
+  *   for domain to directory lookups,
+  *   i.e virtual hosts (vhosts).
+  *
+- * Optionally sets fcgi_offset and fcgi_arg
+- *   in preparation for fcgi.c to handle
+- *   per-user fcgi chroot jails.
+- *
+  * /ada@riksnet.se 2004-12-06
+  */
+ 
+@@ -63,8 +59,6 @@ typedef struct {
+ typedef struct {
+ 	buffer	*server_name;
+ 	buffer	*document_root;
+-	buffer	*fcgi_arg;
+-	unsigned fcgi_offset;
+ } plugin_connection_data;
+ 
+ /* init the plugin data */
+@@ -136,8 +130,6 @@ static void* mod_mysql_vhost_connection_data(server *srv, connection *con, void
+ 
+ 	c->server_name = buffer_init();
+ 	c->document_root = buffer_init();
+-	c->fcgi_arg = buffer_init();
+-	c->fcgi_offset = 0;
+ 
+ 	return con->plugin_ctx[p->id] = c;
+ }
+@@ -158,8 +150,6 @@ CONNECTION_FUNC(mod_mysql_vhost_handle_connection_close) {
+ 
+ 	buffer_free(c->server_name);
+ 	buffer_free(c->document_root);
+-	buffer_free(c->fcgi_arg);
+-	c->fcgi_offset = 0;
+ 
+ 	free(c);
+ 
+@@ -222,7 +212,7 @@ SERVER_FUNC(mod_mysql_vhost_set_defaults) {
+ 		s->mysql_pre = buffer_init();
+ 		s->mysql_post = buffer_init();
+ 
+-		if (sel->used && (qmark = strchr(sel->ptr, '?'))) {
++		if (!buffer_string_is_empty(sel) && (qmark = strchr(sel->ptr, '?'))) {
+ 			*qmark = '\0';
+ 			buffer_copy_string(s->mysql_pre, sel->ptr);
+ 			buffer_copy_string(s->mysql_post, qmark+1);
+@@ -258,7 +248,7 @@ SERVER_FUNC(mod_mysql_vhost_set_defaults) {
+ 			mysql_options(s->mysql, MYSQL_OPT_RECONNECT, &reconnect);
+ #endif
+ 
+-#define FOO(x) (s->x->used ? s->x->ptr : NULL)
++#define FOO(x) (buffer_string_is_empty(s->x) ? NULL : s->x->ptr)
+ 
+ #if MYSQL_VERSION_ID >= 40100
+ 			/* CLIENT_MULTI_STATEMENTS first appeared in 4.1 */ 
+@@ -334,37 +324,35 @@ CONNECTION_FUNC(mod_mysql_vhost_handle_docroot) {
+ 	MYSQL_RES *result = NULL;
+ 
+ 	/* no host specified? */
+-	if (!con->uri.authority->used) return HANDLER_GO_ON;
++	if (buffer_string_is_empty(con->uri.authority)) return HANDLER_GO_ON;
+ 
+ 	mod_mysql_vhost_patch_connection(srv, con, p);
+ 
+ 	if (!p->conf.mysql) return HANDLER_GO_ON;
+-	if (0 == p->conf.mysql_pre->used) return HANDLER_GO_ON;
++	if (buffer_string_is_empty(p->conf.mysql_pre)) return HANDLER_GO_ON;
+ 
+ 	/* sets up connection data if not done yet */
+ 	c = mod_mysql_vhost_connection_data(srv, con, p_d);
+ 
+ 	/* check if cached this connection */
+-	if (c->server_name->used && /* con->uri.authority->used && */
+-	    buffer_is_equal(c->server_name, con->uri.authority)) goto GO_ON;
++	if (buffer_is_equal(c->server_name, con->uri.authority)) goto GO_ON;
+ 
+ 	/* build and run SQL query */
+ 	buffer_copy_buffer(p->tmp_buf, p->conf.mysql_pre);
+-	if (p->conf.mysql_post->used) {
++	if (!buffer_is_empty(p->conf.mysql_post)) {
+ 		/* escape the uri.authority */
+ 		unsigned long to_len;
+ 
+-		/* 'to' has to be 'from_len * 2 + 1' */
+-		buffer_string_prepare_append(p->tmp_buf, (con->uri.authority->used - 1) * 2 + 1);
++		buffer_string_prepare_append(p->tmp_buf, buffer_string_length(con->uri.authority) * 2);
+ 
+ 		to_len = mysql_real_escape_string(p->conf.mysql,
+-				p->tmp_buf->ptr + p->tmp_buf->used - 1,
+-				con->uri.authority->ptr, con->uri.authority->used - 1);
+-		p->tmp_buf->used += to_len;
++				p->tmp_buf->ptr + buffer_string_length(p->tmp_buf),
++				CONST_BUF_LEN(con->uri.authority));
++		buffer_commit(p->tmp_buf, to_len);
+ 
+ 		buffer_append_string_buffer(p->tmp_buf, p->conf.mysql_post);
+ 	}
+-	if (mysql_real_query(p->conf.mysql, p->tmp_buf->ptr, p->tmp_buf->used - 1)) {
++	if (mysql_real_query(p->conf.mysql, CONST_BUF_LEN(p->tmp_buf))) {
+ 		log_error_write(srv, __FILE__, __LINE__, "s", mysql_error(p->conf.mysql));
+ 		goto ERR500;
+ 	}
+@@ -397,18 +385,6 @@ CONNECTION_FUNC(mod_mysql_vhost_handle_docroot) {
+ 	buffer_copy_buffer(c->server_name, con->uri.authority);
+ 	buffer_copy_buffer(c->document_root, p->tmp_buf);
+ 
+-	/* fcgi_offset and fcgi_arg are optional */
+-	if (cols > 1 && row[1]) {
+-		c->fcgi_offset = atoi(row[1]);
+-
+-		if (cols > 2 && row[2]) {
+-			buffer_copy_string(c->fcgi_arg, row[2]);
+-		} else {
+-			c->fcgi_arg->used = 0;
+-		}
+-	} else {
+-		c->fcgi_offset = c->fcgi_arg->used = 0;
+-	}
+ 	mysql_free_result(result);
+ #if MYSQL_VERSION_ID >= 40100
+ 	while (mysql_next_result(p->conf.mysql) == 0);
+@@ -420,10 +396,9 @@ GO_ON:
+ 	buffer_copy_buffer(con->physical.doc_root, c->document_root);
+ 
+ #ifdef DEBUG
+-	log_error_write(srv, __FILE__, __LINE__, "sbbdb",
++	log_error_write(srv, __FILE__, __LINE__, "sbb",
+ 		result ? "NOT CACHED" : "cached",
+-		con->server_name, con->physical.doc_root,
+-		c->fcgi_offset, c->fcgi_arg);
++		con->server_name, con->physical.doc_root);
+ #endif
+ 	return HANDLER_GO_ON;
+ 
+diff --git a/src/mod_proxy.c b/src/mod_proxy.c
+index fc2ca1a..dfdc636 100644
+--- a/src/mod_proxy.c
++++ b/src/mod_proxy.c
+@@ -472,7 +472,7 @@ static int proxy_create_env(server *srv, handler_ctx *hctx) {
+ 
+ 		ds = (data_string *)con->request.headers->data[i];
+ 
+-		if (ds->value->used && ds->key->used) {
++		if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key)) {
+ 			if (buffer_is_equal_string(ds->key, CONST_STR_LEN("Connection"))) continue;
+ 			if (buffer_is_equal_string(ds->key, CONST_STR_LEN("Proxy-Connection"))) continue;
+ 
+@@ -485,7 +485,7 @@ static int proxy_create_env(server *srv, handler_ctx *hctx) {
+ 
+ 	buffer_append_string_len(b, CONST_STR_LEN("\r\n"));
+ 
+-	hctx->wb->bytes_in += b->used - 1;
++	hctx->wb->bytes_in += buffer_string_length(b);
+ 	chunkqueue_append_buffer(hctx->wb, b);
+ 	buffer_free(b);
+ 
+@@ -620,7 +620,7 @@ static int proxy_demux_response(server *srv, handler_ctx *hctx) {
+ 
+ 	if (p->conf.debug) {
+ 		log_error_write(srv, __FILE__, __LINE__, "sd",
+-			       "proxy - have to read:", b);
++				"proxy - have to read:", b);
+ 	}
+ 
+ 	if (b > 0) {
+@@ -637,8 +637,7 @@ static int proxy_demux_response(server *srv, handler_ctx *hctx) {
+ 		/* this should be catched by the b > 0 above */
+ 		force_assert(r);
+ 
+-		hctx->response->used += r;
+-		hctx->response->ptr[hctx->response->used - 1] = '\0';
++		buffer_commit(hctx->response, r);
+ 
+ #if 0
+ 		log_error_write(srv, __FILE__, __LINE__, "sdsbs",
+@@ -656,7 +655,7 @@ static int proxy_demux_response(server *srv, handler_ctx *hctx) {
+ 			/* search for the \r\n\r\n in the string */
+ 			if (NULL != (c = buffer_search_string_len(hctx->response, CONST_STR_LEN("\r\n\r\n")))) {
+ 				size_t hlen = c - hctx->response->ptr + 4;
+-				size_t blen = hctx->response->used - hlen - 1;
++				size_t blen = buffer_string_length(hctx->response) - hlen;
+ 				/* found */
+ 
+ 				buffer_append_string_len(hctx->response_header, hctx->response->ptr, hlen);
+@@ -674,13 +673,13 @@ static int proxy_demux_response(server *srv, handler_ctx *hctx) {
+ 
+ 				con->file_started = 1;
+ 				if (blen > 0) http_chunk_append_mem(srv, con, c + 4, blen);
+-				hctx->response->used = 0;
++				buffer_reset(hctx->response);
+ 				joblist_append(srv, con);
+ 			}
+ 		} else {
+ 			http_chunk_append_buffer(srv, con, hctx->response);
+ 			joblist_append(srv, con);
+-			hctx->response->used = 0;
++			buffer_reset(hctx->response);
+ 		}
+ 
+ 	} else {
+@@ -703,8 +702,7 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
+ 
+ 	int ret;
+ 
+-	if (!host ||
+-	    (!host->host->used || !host->port)) return -1;
++	if (!host || buffer_string_is_empty(host->host) || !host->port) return -1;
+ 
+ 	switch(hctx->state) {
+ 	case PROXY_STATE_CONNECT:
+@@ -721,17 +719,17 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
+ 	case PROXY_STATE_INIT:
+ #if defined(HAVE_IPV6) && defined(HAVE_INET_PTON)
+ 		if (strstr(host->host->ptr,":")) {
+-		    if (-1 == (hctx->fd = socket(AF_INET6, SOCK_STREAM, 0))) {
+-			log_error_write(srv, __FILE__, __LINE__, "ss", "socket failed: ", strerror(errno));
+-			return HANDLER_ERROR;
+-		    }
++			if (-1 == (hctx->fd = socket(AF_INET6, SOCK_STREAM, 0))) {
++				log_error_write(srv, __FILE__, __LINE__, "ss", "socket failed: ", strerror(errno));
++				return HANDLER_ERROR;
++			}
+ 		} else
+ #endif
+ 		{
+-		    if (-1 == (hctx->fd = socket(AF_INET, SOCK_STREAM, 0))) {
+-			log_error_write(srv, __FILE__, __LINE__, "ss", "socket failed: ", strerror(errno));
+-			return HANDLER_ERROR;
+-		    }
++			if (-1 == (hctx->fd = socket(AF_INET, SOCK_STREAM, 0))) {
++				log_error_write(srv, __FILE__, __LINE__, "ss", "socket failed: ", strerror(errno));
++				return HANDLER_ERROR;
++			}
+ 		}
+ 		hctx->fde_ndx = -1;
+ 
+@@ -1078,13 +1076,8 @@ static handler_t mod_proxy_check_extension(server *srv, connection *con, void *p
+ 	mod_proxy_patch_connection(srv, con, p);
+ 
+ 	fn = con->uri.path;
+-
+-	if (fn->used == 0) {
+-		return HANDLER_ERROR;
+-	}
+-
+-	s_len = fn->used - 1;
+-
++	if (buffer_string_is_empty(fn)) return HANDLER_ERROR;
++	s_len = buffer_string_length(fn);
+ 
+ 	path_info_offset = 0;
+ 
+@@ -1099,9 +1092,9 @@ static handler_t mod_proxy_check_extension(server *srv, connection *con, void *p
+ 
+ 		ext = (data_array *)p->conf.extensions->data[k];
+ 
+-		if (ext->key->used == 0) continue;
++		if (buffer_is_empty(ext->key)) continue;
+ 
+-		ct_len = ext->key->used - 1;
++		ct_len = buffer_string_length(ext->key);
+ 
+ 		if (s_len < ct_len) continue;
+ 
+diff --git a/src/mod_redirect.c b/src/mod_redirect.c
+index 93cecb7..615c7db 100644
+--- a/src/mod_redirect.c
++++ b/src/mod_redirect.c
+@@ -198,9 +198,9 @@ static handler_t mod_redirect_uri_handler(server *srv, connection *con, void *p_
+ 		match       = kv->key;
+ 		extra       = kv->key_extra;
+ 		pattern     = kv->value->ptr;
+-		pattern_len = kv->value->used - 1;
++		pattern_len = buffer_string_length(kv->value);
+ 
+-		if ((n = pcre_exec(match, extra, p->match_buf->ptr, p->match_buf->used - 1, 0, 0, ovec, 3 * N)) < 0) {
++		if ((n = pcre_exec(match, extra, CONST_BUF_LEN(p->match_buf), 0, 0, ovec, 3 * N)) < 0) {
+ 			if (n != PCRE_ERROR_NOMATCH) {
+ 				log_error_write(srv, __FILE__, __LINE__, "sd",
+ 						"execution error while matching: ", n);
+diff --git a/src/mod_rewrite.c b/src/mod_rewrite.c
+index 48c0987..5191a64 100644
+--- a/src/mod_rewrite.c
++++ b/src/mod_rewrite.c
+@@ -372,9 +372,9 @@ static int process_rewrite_rules(server *srv, connection *con, plugin_data *p, r
+ 
+ 		match       = rule->key;
+ 		pattern     = rule->value->ptr;
+-		pattern_len = rule->value->used - 1;
++		pattern_len = buffer_string_length(rule->value);
+ 
+-		if ((n = pcre_exec(match, NULL, p->match_buf->ptr, p->match_buf->used - 1, 0, 0, ovec, 3 * N)) < 0) {
++		if ((n = pcre_exec(match, NULL, CONST_BUF_LEN(p->match_buf), 0, 0, ovec, 3 * N)) < 0) {
+ 			if (n != PCRE_ERROR_NOMATCH) {
+ 				log_error_write(srv, __FILE__, __LINE__, "sd",
+ 						"execution error while matching: ", n);
+diff --git a/src/mod_rrdtool.c b/src/mod_rrdtool.c
+index 5eb0d9d..0532e4d 100644
+--- a/src/mod_rrdtool.c
++++ b/src/mod_rrdtool.c
+@@ -264,7 +264,7 @@ static int mod_rrdtool_create_rrd(server *srv, plugin_data *p, plugin_config *s)
+ 		"RRA:MIN:0.5:24:775 "
+ 		"RRA:MIN:0.5:288:797\n"));
+ 
+-	if (-1 == (safe_write(p->write_fd, p->cmd->ptr, p->cmd->used - 1))) {
++	if (-1 == (safe_write(p->write_fd, CONST_BUF_LEN(p->cmd)))) {
+ 		log_error_write(srv, __FILE__, __LINE__, "ss",
+ 			"rrdtool-write: failed", strerror(errno));
+ 
+@@ -279,8 +279,7 @@ static int mod_rrdtool_create_rrd(server *srv, plugin_data *p, plugin_config *s)
+ 		return HANDLER_ERROR;
+ 	}
+ 
+-	p->resp->used = r;
+-	p->resp->ptr[p->resp->used++] = '\0';
++	buffer_commit(p->resp, r);
+ 
+ 	if (p->resp->ptr[0] != 'O' ||
+ 		p->resp->ptr[1] != 'K') {
+@@ -426,7 +425,7 @@ TRIGGER_FUNC(mod_rrd_trigger) {
+ 		buffer_append_int(p->cmd, s->requests);
+ 		buffer_append_string_len(p->cmd, CONST_STR_LEN("\n"));
+ 
+-		if (-1 == (r = safe_write(p->write_fd, p->cmd->ptr, p->cmd->used - 1))) {
++		if (-1 == (r = safe_write(p->write_fd, CONST_BUF_LEN(p->cmd)))) {
+ 			p->rrdtool_running = 0;
+ 
+ 			log_error_write(srv, __FILE__, __LINE__, "ss",
+@@ -435,7 +434,7 @@ TRIGGER_FUNC(mod_rrd_trigger) {
+ 			return HANDLER_ERROR;
+ 		}
+ 
+-		buffer_string_prepare_copy(p->resp, 4096);
++		buffer_string_prepare_copy(p->resp, 4095);
+ 		if (-1 == (r = safe_read(p->read_fd, p->resp->ptr, p->resp->size - 1))) {
+ 			p->rrdtool_running = 0;
+ 
+@@ -445,8 +444,7 @@ TRIGGER_FUNC(mod_rrd_trigger) {
+ 			return HANDLER_ERROR;
+ 		}
+ 
+-		p->resp->used = r;
+-		p->resp->ptr[p->resp->used++] = '\0';
++		buffer_commit(p->resp, r);
+ 
+ 		if (p->resp->ptr[0] != 'O' ||
+ 		    p->resp->ptr[1] != 'K') {
+diff --git a/src/mod_scgi.c b/src/mod_scgi.c
+index 9ea16a4..9e88de3 100644
+--- a/src/mod_scgi.c
++++ b/src/mod_scgi.c
+@@ -664,19 +664,19 @@ static int scgi_spawn_connection(server *srv,
+ 
+ #ifdef HAVE_SYS_UN_H
+ 		scgi_addr_un.sun_family = AF_UNIX;
+-		if (proc->socket->used > sizeof(scgi_addr_un.sun_path)) {
++		if (buffer_string_length(proc->socket) + 1 > sizeof(scgi_addr_un.sun_path)) {
+ 			log_error_write(srv, __FILE__, __LINE__, "sB",
+ 					"ERROR: Unix Domain socket filename too long:",
+ 					proc->socket);
+ 			return -1;
+ 		}
+-		memcpy(scgi_addr_un.sun_path, proc->socket->ptr, proc->socket->used);
++		memcpy(scgi_addr_un.sun_path, proc->socket->ptr, buffer_string_length(proc->socket) + 1);
+ 
+ #ifdef SUN_LEN
+ 		servlen = SUN_LEN(&scgi_addr_un);
+ #else
+ 		/* stevens says: */
+-		servlen = proc->socket->used + sizeof(scgi_addr_un.sun_family);
++		servlen = buffer_string_length(proc->socket) + 1 + sizeof(scgi_addr_un.sun_family);
+ #endif
+ 		socket_type = AF_UNIX;
+ 		scgi_addr = (struct sockaddr *) &scgi_addr_un;
+@@ -1072,7 +1072,7 @@ SETDEFAULTS_FUNC(mod_scgi_set_defaults) {
+ 						/* unix domain socket */
+ 						struct sockaddr_un un;
+ 
+-						if (df->unixsocket->used > sizeof(un.sun_path) - 2) {
++						if (buffer_string_length(df->unixsocket) + 1 > sizeof(un.sun_path) - 2) {
+ 							log_error_write(srv, __FILE__, __LINE__, "s",
+ 									"path of the unixdomain socket is too large");
+ 							goto error;
+@@ -1338,19 +1338,19 @@ static int scgi_establish_connection(server *srv, handler_ctx *hctx) {
+ #ifdef HAVE_SYS_UN_H
+ 		/* use the unix domain socket */
+ 		scgi_addr_un.sun_family = AF_UNIX;
+-		if (proc->socket->used > sizeof(scgi_addr_un.sun_path)) {
++		if (buffer_string_length(proc->socket) + 1 > sizeof(scgi_addr_un.sun_path)) {
+ 			log_error_write(srv, __FILE__, __LINE__, "sB",
+ 					"ERROR: Unix Domain socket filename too long:",
+ 					proc->socket);
+ 			return -1;
+ 		}
+-		memcpy(scgi_addr_un.sun_path, proc->socket->ptr, proc->socket->used);
++		memcpy(scgi_addr_un.sun_path, proc->socket->ptr, buffer_string_length(proc->socket) + 1);
+ 
+ #ifdef SUN_LEN
+ 		servlen = SUN_LEN(&scgi_addr_un);
+ #else
+ 		/* stevens says: */
+-		servlen = proc->socket->used + sizeof(scgi_addr_un.sun_family);
++		servlen = buffer_string_length(proc->socket) + 1 + sizeof(scgi_addr_un.sun_family);
+ #endif
+ 		scgi_addr = (struct sockaddr *) &scgi_addr_un;
+ #else
+@@ -1416,7 +1416,7 @@ static int scgi_env_add_request_headers(server *srv, connection *con, plugin_dat
+ 
+ 		ds = (data_string *)con->request.headers->data[i];
+ 
+-		if (ds->value->used && ds->key->used) {
++		if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key)) {
+ 			buffer_copy_string_encoded_cgi_varnames(srv->tmp_buf, CONST_BUF_LEN(ds->key), 1);
+ 
+ 			scgi_env_add(p->scgi_env, CONST_BUF_LEN(srv->tmp_buf), CONST_BUF_LEN(ds->value));
+@@ -1428,7 +1428,7 @@ static int scgi_env_add_request_headers(server *srv, connection *con, plugin_dat
+ 
+ 		ds = (data_string *)con->environment->data[i];
+ 
+-		if (ds->value->used && ds->key->used) {
++		if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key)) {
+ 			buffer_copy_string_encoded_cgi_varnames(srv->tmp_buf, CONST_BUF_LEN(ds->key), 0);
+ 
+ 			scgi_env_add(p->scgi_env, CONST_BUF_LEN(srv->tmp_buf), CONST_BUF_LEN(ds->value));
+@@ -1471,8 +1471,8 @@ static int scgi_create_env(server *srv, handler_ctx *hctx) {
+ 		scgi_env_add(p->scgi_env, CONST_STR_LEN("SERVER_SOFTWARE"), CONST_BUF_LEN(con->conf.server_tag));
+ 	}
+ 
+-	if (con->server_name->used) {
+-		size_t len = con->server_name->used - 1;
++	if (!buffer_is_empty(con->server_name)) {
++		size_t len = buffer_string_length(con->server_name);
+ 
+ 		if (con->server_name->ptr[0] == '[') {
+ 			const char *colon = strstr(con->server_name->ptr, "]:");
+@@ -1611,7 +1611,7 @@ static int scgi_create_env(server *srv, handler_ctx *hctx) {
+ 	buffer_append_string_buffer(b, p->scgi_env);
+ 	buffer_append_string_len(b, CONST_STR_LEN(","));
+ 
+-	hctx->wb->bytes_in += b->used - 1;
++	hctx->wb->bytes_in += buffer_string_length(b);
+ 	chunkqueue_append_buffer(hctx->wb, b);
+ 	buffer_free(b);
+ 
+@@ -1757,8 +1757,7 @@ static int scgi_demux_response(server *srv, handler_ctx *hctx) {
+ 			return 1;
+ 		}
+ 
+-		hctx->response->ptr[n] = '\0';
+-		hctx->response->used = n+1;
++		buffer_commit(hctx->response, n);
+ 
+ 		/* split header from body */
+ 
+@@ -1776,7 +1775,7 @@ static int scgi_demux_response(server *srv, handler_ctx *hctx) {
+ 			if (0 == strncmp(hctx->response_header->ptr, "HTTP/1.", 7)) in_header = 1;
+ 
+ 			/* search for the \r\n\r\n or \n\n in the string */
+-			for (c = hctx->response_header->ptr, cp = 0, used = hctx->response_header->used - 1; used; c++, cp++, used--) {
++			for (c = hctx->response_header->ptr, cp = 0, used = buffer_string_length(hctx->response_header); used; c++, cp++, used--) {
+ 				if (*c == ':') in_header = 1;
+ 				else if (*c == '\n') {
+ 					if (in_header == 0) {
+@@ -1832,11 +1831,10 @@ static int scgi_demux_response(server *srv, handler_ctx *hctx) {
+ 					http_chunk_append_buffer(srv, con, hctx->response_header);
+ 					joblist_append(srv, con);
+ 				} else {
+-					size_t blen = hctx->response_header->used - hlen - 1;
++					size_t blen = buffer_string_length(hctx->response_header) - hlen;
+ 
+ 					/* a small hack: terminate after at the second \r */
+-					hctx->response_header->used = hlen;
+-					hctx->response_header->ptr[hlen - 1] = '\0';
++					buffer_string_set_length(hctx->response_header, hlen - 1);
+ 
+ 					/* parse the response header */
+ 					scgi_response_parse(srv, con, p, hctx->response_header, eol);
+@@ -1847,7 +1845,7 @@ static int scgi_demux_response(server *srv, handler_ctx *hctx) {
+ 						con->response.transfer_encoding = HTTP_TRANSFER_ENCODING_CHUNKED;
+ 					}
+ 
+-					if ((hctx->response->used != hlen) && blen > 0) {
++					if (blen > 0) {
+ 						http_chunk_append_mem(srv, con, hctx->response_header->ptr + hlen, blen);
+ 						joblist_append(srv, con);
+ 					}
+@@ -2110,20 +2108,20 @@ static handler_t scgi_write_request(server *srv, handler_ctx *hctx) {
+ 		log_error_write(srv, __FILE__, __LINE__, "s", "fatal error: host = NULL");
+ 		return HANDLER_ERROR;
+ 	}
+-	if (((!host->host->used || !host->port) && !host->unixsocket->used)) {
++	if (((buffer_string_is_empty(host->host) || !host->port) && buffer_string_is_empty(host->unixsocket))) {
+ 		log_error_write(srv, __FILE__, __LINE__, "sxddd",
+ 				"write-req: error",
+ 				host,
+-				host->host->used,
++				buffer_string_length(host->host),
+ 				host->port,
+-				host->unixsocket->used);
++				buffer_string_length(host->unixsocket));
+ 		return HANDLER_ERROR;
+ 	}
+ 
+ 
+ 	switch(hctx->state) {
+ 	case FCGI_STATE_INIT:
+-		ret = host->unixsocket->used ? AF_UNIX : AF_INET;
++		ret = buffer_string_is_empty(host->unixsocket) ? AF_INET : AF_UNIX;
+ 
+ 		if (-1 == (hctx->fd = socket(ret, SOCK_STREAM, 0))) {
+ 			if (errno == EMFILE ||
+@@ -2653,7 +2651,7 @@ static handler_t scgi_check_extension(server *srv, connection *con, void *p_d, i
+ 
+ 	if (buffer_string_is_empty(fn)) return HANDLER_GO_ON;
+ 
+-	s_len = fn->used - 1;
++	s_len = buffer_string_length(fn);
+ 
+ 	scgi_patch_connection(srv, con, p);
+ 
+@@ -2662,9 +2660,9 @@ static handler_t scgi_check_extension(server *srv, connection *con, void *p_d, i
+ 		size_t ct_len;
+ 		scgi_extension *ext = p->conf.exts->exts[k];
+ 
+-		if (ext->key->used == 0) continue;
++		if (buffer_is_empty(ext->key)) continue;
+ 
+-		ct_len = ext->key->used - 1;
++		ct_len = buffer_string_length(ext->key);
+ 
+ 		if (s_len < ct_len) continue;
+ 
+@@ -2778,17 +2776,14 @@ static handler_t scgi_check_extension(server *srv, connection *con, void *p_d, i
+ 			/* the rewrite is only done for /prefix/? matches */
+ 			if (host->fix_root_path_name && extension->key->ptr[0] == '/' && extension->key->ptr[1] == '\0') {
+ 				buffer_copy_string(con->request.pathinfo, con->uri.path->ptr);
+-				con->uri.path->used = 1;
+-				con->uri.path->ptr[con->uri.path->used - 1] = '\0';
++				buffer_string_set_length(con->uri.path, 0);
+ 			} else if (extension->key->ptr[0] == '/' &&
+-			    con->uri.path->used > extension->key->used &&
+-			    NULL != (pathinfo = strchr(con->uri.path->ptr + extension->key->used - 1, '/'))) {
++			    buffer_string_length(con->uri.path) > buffer_string_length(extension->key) &&
++			    NULL != (pathinfo = strchr(con->uri.path->ptr + buffer_string_length(extension->key), '/'))) {
+ 				/* rewrite uri.path and pathinfo */
+ 
+ 				buffer_copy_string(con->request.pathinfo, pathinfo);
+-
+-				con->uri.path->used -= con->request.pathinfo->used - 1;
+-				con->uri.path->ptr[con->uri.path->used - 1] = '\0';
++				buffer_string_set_length(con->uri.path, buffer_string_length(con->uri.path) - buffer_string_length(con->request.pathinfo));
+ 			}
+ 		}
+ 	} else {
+diff --git a/src/mod_secure_download.c b/src/mod_secure_download.c
+index d94482e..da98b61 100644
+--- a/src/mod_secure_download.c
++++ b/src/mod_secure_download.c
+@@ -198,7 +198,7 @@ URIHANDLER_FUNC(mod_secdownload_uri_handler) {
+ 
+ 	if (con->mode != DIRECT) return HANDLER_GO_ON;
+ 
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
+ 
+ 	mod_secdownload_patch_connection(srv, con, p);
+ 
+@@ -220,9 +220,9 @@ URIHANDLER_FUNC(mod_secdownload_uri_handler) {
+ 	 *  /<uri-prefix>[a-f0-9]{32}/[a-f0-9]{8}/<rel-path>
+ 	 */
+ 
+-	if (0 != strncmp(con->uri.path->ptr, p->conf.uri_prefix->ptr, p->conf.uri_prefix->used - 1)) return HANDLER_GO_ON;
++	if (0 != strncmp(con->uri.path->ptr, p->conf.uri_prefix->ptr, buffer_string_length(p->conf.uri_prefix))) return HANDLER_GO_ON;
+ 
+-	md5_str = con->uri.path->ptr + p->conf.uri_prefix->used - 1;
++	md5_str = con->uri.path->ptr + buffer_string_length(p->conf.uri_prefix);
+ 
+ 	if (!is_hex_len(md5_str, 32)) return HANDLER_GO_ON;
+ 	if (*(md5_str + 32) != '/') return HANDLER_GO_ON;
+@@ -255,10 +255,9 @@ URIHANDLER_FUNC(mod_secdownload_uri_handler) {
+ 	buffer_copy_buffer(p->md5, p->conf.secret);
+ 	buffer_append_string(p->md5, rel_uri);
+ 	buffer_append_string_len(p->md5, ts_str, 8);
+-	force_assert(p->md5->used > 0);
+ 
+ 	li_MD5_Init(&Md5Ctx);
+-	li_MD5_Update(&Md5Ctx, (unsigned char *)p->md5->ptr, p->md5->used - 1);
++	li_MD5_Update(&Md5Ctx, CONST_BUF_LEN(p->md5));
+ 	li_MD5_Final(HA1, &Md5Ctx);
+ 
+ 	buffer_copy_string_hex(p->md5, (char *)HA1, 16);
+diff --git a/src/mod_simple_vhost.c b/src/mod_simple_vhost.c
+index 6bb850f..fec8d54 100644
+--- a/src/mod_simple_vhost.c
++++ b/src/mod_simple_vhost.c
+@@ -124,12 +124,12 @@ SETDEFAULTS_FUNC(mod_simple_vhost_set_defaults) {
+ 
+ static int build_doc_root(server *srv, connection *con, plugin_data *p, buffer *out, buffer *host) {
+ 	stat_cache_entry *sce = NULL;
+-	force_assert(p->conf.server_root->used > 1);
++	force_assert(!buffer_string_is_empty(p->conf.server_root));
+ 
+ 	buffer_string_prepare_copy(out, 127);
+ 	buffer_copy_buffer(out, p->conf.server_root);
+ 
+-	if (host->used) {
++	if (!buffer_string_is_empty(host)) {
+ 		/* a hostname has to start with a alpha-numerical character
+ 		 * and must not contain a slash "/"
+ 		 */
+@@ -145,8 +145,8 @@ static int build_doc_root(server *srv, connection *con, plugin_data *p, buffer *
+ 	}
+ 	buffer_append_slash(out);
+ 
+-	if (p->conf.document_root->used > 2 && p->conf.document_root->ptr[0] == '/') {
+-		buffer_append_string_len(out, p->conf.document_root->ptr + 1, p->conf.document_root->used - 2);
++	if (buffer_string_length(p->conf.document_root) > 1 && p->conf.document_root->ptr[0] == '/') {
++		buffer_append_string_len(out, p->conf.document_root->ptr + 1, buffer_string_length(p->conf.document_root) - 1);
+ 	} else {
+ 		buffer_append_string_buffer(out, p->conf.document_root);
+ 		buffer_append_slash(out);
+@@ -227,17 +227,17 @@ static handler_t mod_simple_vhost_docroot(server *srv, connection *con, void *p_
+ 	/* build_doc_root() requires a server_root; skip module if simple-vhost.server-root is not set
+ 	 * or set to an empty string (especially don't cache any results!)
+ 	 */
+-	if (p->conf.server_root->used < 2) return HANDLER_GO_ON;
++	if (buffer_string_is_empty(p->conf.server_root)) return HANDLER_GO_ON;
+ 
+-	if (p->conf.docroot_cache_key->used &&
+-	    con->uri.authority->used &&
++	if (!buffer_string_is_empty(p->conf.docroot_cache_key) &&
++	    !buffer_string_is_empty(con->uri.authority) &&
+ 	    buffer_is_equal(p->conf.docroot_cache_key, con->uri.authority)) {
+ 		/* cache hit */
+ 		buffer_copy_buffer(con->server_name,       p->conf.docroot_cache_servername);
+ 		buffer_copy_buffer(con->physical.doc_root, p->conf.docroot_cache_value);
+ 	} else {
+ 		/* build document-root */
+-		if ((con->uri.authority->used == 0) ||
++		if (buffer_string_is_empty(con->uri.authority) ||
+ 		    build_doc_root(srv, con, p, p->doc_root, con->uri.authority)) {
+ 			/* not found, fallback the default-host */
+ 			if (0 == build_doc_root(srv, con, p,
+diff --git a/src/mod_ssi.c b/src/mod_ssi.c
+index 981fd76..ed3b75c 100644
+--- a/src/mod_ssi.c
++++ b/src/mod_ssi.c
+@@ -172,7 +172,7 @@ static int ssi_env_add_request_headers(server *srv, connection *con, plugin_data
+ 
+ 		ds = (data_string *)con->request.headers->data[i];
+ 
+-		if (ds->value->used && ds->key->used) {
++		if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key)) {
+ 			/* don't forward the Authorization: Header */
+ 			if (0 == strcasecmp(ds->key->ptr, "AUTHORIZATION")) {
+ 				continue;
+@@ -189,7 +189,7 @@ static int ssi_env_add_request_headers(server *srv, connection *con, plugin_data
+ 
+ 		ds = (data_string *)con->environment->data[i];
+ 
+-		if (ds->value->used && ds->key->used) {
++		if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key)) {
+ 			buffer_copy_string_encoded_cgi_varnames(srv->tmp_buf, CONST_BUF_LEN(ds->key), 0);
+ 
+ 			ssi_env_add(p->ssi_cgi_env, srv->tmp_buf->ptr, ds->value->ptr);
+@@ -264,7 +264,7 @@ static int build_ssi_cgi_vars(server *srv, connection *con, plugin_data *p) {
+ 	 * parameter.
+ 	 */
+ 
+-	if (con->request.pathinfo->used) {
++	if (!buffer_string_is_empty(con->request.pathinfo)) {
+ 		ssi_env_add(p->ssi_cgi_env, CONST_STRING("PATH_INFO"), con->request.pathinfo->ptr);
+ 	}
+ 
+@@ -272,7 +272,7 @@ static int build_ssi_cgi_vars(server *srv, connection *con, plugin_data *p) {
+ 	ssi_env_add(p->ssi_cgi_env, CONST_STRING("DOCUMENT_ROOT"), con->physical.doc_root->ptr);
+ 
+ 	ssi_env_add(p->ssi_cgi_env, CONST_STRING("REQUEST_URI"), con->request.uri->ptr);
+-	ssi_env_add(p->ssi_cgi_env, CONST_STRING("QUERY_STRING"), con->uri.query->used ? con->uri.query->ptr : "");
++	ssi_env_add(p->ssi_cgi_env, CONST_STRING("QUERY_STRING"), buffer_is_empty(con->uri.query) ? "" : con->uri.query->ptr);
+ 	ssi_env_add(p->ssi_cgi_env, CONST_STRING("REQUEST_METHOD"), get_http_method_name(con->request.http_method));
+ 	ssi_env_add(p->ssi_cgi_env, CONST_STRING("REDIRECT_STATUS"), "200");
+ 	ssi_env_add(p->ssi_cgi_env, CONST_STRING("SERVER_PROTOCOL"), get_http_version_name(con->request.http_version));
+@@ -1029,7 +1029,7 @@ static int mod_ssi_handle_request(server *srv, connection *con, plugin_data *p)
+ 	con->file_finished = 1;
+ 	con->mode = p->id;
+ 
+-	if (p->conf.content_type->used <= 1) {
++	if (buffer_string_is_empty(p->conf.content_type)) {
+ 		response_header_overwrite(srv, con, CONST_STR_LEN("Content-Type"), CONST_STR_LEN("text/html"));
+ 	} else {
+ 		response_header_overwrite(srv, con, CONST_STR_LEN("Content-Type"), CONST_BUF_LEN(p->conf.content_type));
+@@ -1100,16 +1100,16 @@ URIHANDLER_FUNC(mod_ssi_physical_path) {
+ 
+ 	if (con->mode != DIRECT) return HANDLER_GO_ON;
+ 
+-	if (con->physical.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->physical.path)) return HANDLER_GO_ON;
+ 
+ 	mod_ssi_patch_connection(srv, con, p);
+ 
+ 	for (k = 0; k < p->conf.ssi_extension->used; k++) {
+ 		data_string *ds = (data_string *)p->conf.ssi_extension->data[k];
+ 
+-		if (ds->value->used == 0) continue;
++		if (buffer_is_empty(ds->value)) continue;
+ 
+-		if (buffer_is_equal_right_len(con->physical.path, ds->value, ds->value->used - 1)) {
++		if (buffer_is_equal_right_len(con->physical.path, ds->value, buffer_string_length(ds->value))) {
+ 			/* handle ssi-request */
+ 
+ 			if (mod_ssi_handle_request(srv, con, p)) {
+diff --git a/src/mod_ssi_expr.c b/src/mod_ssi_expr.c
+index 140d086..489fde4 100644
+--- a/src/mod_ssi_expr.c
++++ b/src/mod_ssi_expr.c
+@@ -35,7 +35,7 @@ void ssi_val_free(ssi_val_t *s) {
+ 
+ int ssi_val_tobool(ssi_val_t *B) {
+ 	if (B->type == SSI_TYPE_STRING) {
+-		return B->str->used > 1 ? 1 : 0;
++		return !buffer_string_is_empty(B->str);
+ 	} else {
+ 		return B->bo;
+ 	}
+diff --git a/src/mod_staticfile.c b/src/mod_staticfile.c
+index e36c697..d40aa31 100644
+--- a/src/mod_staticfile.c
++++ b/src/mod_staticfile.c
+@@ -304,7 +304,7 @@ static int http_response_parse_range(server *srv, connection *con, plugin_data *
+ 				/* write END-OF-HEADER */
+ 				buffer_append_string_len(b, CONST_STR_LEN("\r\n\r\n"));
+ 
+-				con->response.content_length += b->used - 1;
++				con->response.content_length += buffer_string_length(b);
+ 				chunkqueue_append_buffer(con->write_queue, b);
+ 				buffer_free(b);
+ 			}
+@@ -325,7 +325,7 @@ static int http_response_parse_range(server *srv, connection *con, plugin_data *
+ 		buffer_append_string(b, boundary);
+ 		buffer_append_string_len(b, "--\r\n", 4);
+ 
+-		con->response.content_length += b->used - 1;
++		con->response.content_length += buffer_string_length(b);
+ 		chunkqueue_append_buffer(con->write_queue, b);
+ 		buffer_free(b);
+ 
+@@ -363,8 +363,8 @@ URIHANDLER_FUNC(mod_staticfile_subrequest) {
+ 
+ 	/* someone else has done a decision for us */
+ 	if (con->http_status != 0) return HANDLER_GO_ON;
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
+-	if (con->physical.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->physical.path)) return HANDLER_GO_ON;
+ 
+ 	/* someone else has handled this request */
+ 	if (con->mode != DIRECT) return HANDLER_GO_ON;
+@@ -381,7 +381,7 @@ URIHANDLER_FUNC(mod_staticfile_subrequest) {
+ 
+ 	mod_staticfile_patch_connection(srv, con, p);
+ 
+-	if (p->conf.disable_pathinfo && 0 != con->request.pathinfo->used) {
++	if (p->conf.disable_pathinfo && !buffer_string_is_empty(con->request.pathinfo)) {
+ 		if (con->conf.log_request_handling) {
+ 			log_error_write(srv, __FILE__, __LINE__,  "s",  "-- NOT handling file as static file, pathinfo forbidden");
+ 		}
+@@ -392,9 +392,9 @@ URIHANDLER_FUNC(mod_staticfile_subrequest) {
+ 	for (k = 0; k < p->conf.exclude_ext->used; k++) {
+ 		ds = (data_string *)p->conf.exclude_ext->data[k];
+ 
+-		if (ds->value->used == 0) continue;
++		if (buffer_is_empty(ds->value)) continue;
+ 
+-		if (buffer_is_equal_right_len(con->physical.path, ds->value, ds->value->used - 1)) {
++		if (buffer_is_equal_right_len(con->physical.path, ds->value, buffer_string_length(ds->value))) {
+ 			if (con->conf.log_request_handling) {
+ 				log_error_write(srv, __FILE__, __LINE__,  "s",  "-- NOT handling file as static file, extension forbidden");
+ 			}
+diff --git a/src/mod_status.c b/src/mod_status.c
+index 99b332a..daecb08 100644
+--- a/src/mod_status.c
++++ b/src/mod_status.c
+@@ -449,7 +449,7 @@ static handler_t mod_status_handle_server_status_html(server *srv, connection *c
+ 		connection *c = srv->conns->ptr[j];
+ 		const char *state;
+ 
+-		if (CON_STATE_READ == c->state && c->request.orig_uri->used > 0) {
++		if (CON_STATE_READ == c->state && !buffer_string_is_empty(c->request.orig_uri)) {
+ 			state = "k";
+ 		} else {
+ 			state = connection_get_short_state(c->state);
+@@ -501,7 +501,7 @@ static handler_t mod_status_handle_server_status_html(server *srv, connection *c
+ 
+ 		buffer_append_string_len(b, CONST_STR_LEN("</td><td class=\"string\">"));
+ 
+-		if (CON_STATE_READ == c->state && c->request.orig_uri->used > 0) {
++		if (CON_STATE_READ == c->state && !buffer_string_is_empty(c->request.orig_uri)) {
+ 			buffer_append_string_len(b, CONST_STR_LEN("keep-alive"));
+ 		} else {
+ 			buffer_append_string(b, connection_get_state(c->state));
+diff --git a/src/mod_trigger_b4_dl.c b/src/mod_trigger_b4_dl.c
+index cff125c..e1fa993 100644
+--- a/src/mod_trigger_b4_dl.c
++++ b/src/mod_trigger_b4_dl.c
+@@ -320,7 +320,7 @@ URIHANDLER_FUNC(mod_trigger_b4_dl_uri_handler) {
+ 
+ 	if (con->mode != DIRECT) return HANDLER_GO_ON;
+ 
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
+ 
+ 	mod_trigger_b4_dl_patch_connection(srv, con, p);
+ 
+@@ -356,7 +356,7 @@ URIHANDLER_FUNC(mod_trigger_b4_dl_uri_handler) {
+ 	}
+ 
+ 	/* check if URL is a trigger -> insert IP into DB */
+-	if ((n = pcre_exec(p->conf.trigger_regex, NULL, con->uri.path->ptr, con->uri.path->used - 1, 0, 0, ovec, 3 * N)) < 0) {
++	if ((n = pcre_exec(p->conf.trigger_regex, NULL, CONST_BUF_LEN(con->uri.path), 0, 0, ovec, 3 * N)) < 0) {
+ 		if (n != PCRE_ERROR_NOMATCH) {
+ 			log_error_write(srv, __FILE__, __LINE__, "sd",
+ 					"execution error while matching:", n);
+@@ -383,11 +383,12 @@ URIHANDLER_FUNC(mod_trigger_b4_dl_uri_handler) {
+ # endif
+ # if defined(HAVE_MEMCACHE_H)
+ 		if (p->conf.mc) {
+-			size_t i;
++			size_t i, len;
+ 			buffer_copy_buffer(p->tmp_buf, p->conf.mc_namespace);
+ 			buffer_append_string(p->tmp_buf, remote_ip);
+ 
+-			for (i = 0; i < p->tmp_buf->used - 1; i++) {
++			len = buffer_string_length(p->tmp_buf);
++			for (i = 0; i < len; i++) {
+ 				if (p->tmp_buf->ptr[i] == ' ') p->tmp_buf->ptr[i] = '-';
+ 			}
+ 
+@@ -407,7 +408,7 @@ URIHANDLER_FUNC(mod_trigger_b4_dl_uri_handler) {
+ 	}
+ 
+ 	/* check if URL is a download -> check IP in DB, update timestamp */
+-	if ((n = pcre_exec(p->conf.download_regex, NULL, con->uri.path->ptr, con->uri.path->used - 1, 0, 0, ovec, 3 * N)) < 0) {
++	if ((n = pcre_exec(p->conf.download_regex, NULL, CONST_BUF_LEN(con->uri.path), 0, 0, ovec, 3 * N)) < 0) {
+ 		if (n != PCRE_ERROR_NOMATCH) {
+ 			log_error_write(srv, __FILE__, __LINE__, "sd",
+ 					"execution error while matching: ", n);
+@@ -469,12 +470,13 @@ URIHANDLER_FUNC(mod_trigger_b4_dl_uri_handler) {
+ # if defined(HAVE_MEMCACHE_H)
+ 		if (p->conf.mc) {
+ 			void *r;
+-			size_t i;
++			size_t i, len;
+ 
+ 			buffer_copy_buffer(p->tmp_buf, p->conf.mc_namespace);
+ 			buffer_append_string(p->tmp_buf, remote_ip);
+ 
+-			for (i = 0; i < p->tmp_buf->used - 1; i++) {
++			len = buffer_string_length(p->tmp_buf);
++			for (i = 0; i < len; i++) {
+ 				if (p->tmp_buf->ptr[i] == ' ') p->tmp_buf->ptr[i] = '-';
+ 			}
+ 
+diff --git a/src/mod_userdir.c b/src/mod_userdir.c
+index 392f4b2..682f950 100644
+--- a/src/mod_userdir.c
++++ b/src/mod_userdir.c
+@@ -181,14 +181,14 @@ URIHANDLER_FUNC(mod_userdir_docroot_handler) {
+ 	struct passwd *pwd = NULL;
+ #endif
+ 
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
+ 
+ 	mod_userdir_patch_connection(srv, con, p);
+ 
+ 	/* enforce the userdir.path to be set in the config, ugly fix for #1587;
+ 	 * should be replaced with a clean .enabled option in 1.5
+ 	 */
+-	if (!p->conf.active || p->conf.path->used == 0) return HANDLER_GO_ON;
++	if (!p->conf.active || buffer_is_empty(p->conf.path)) return HANDLER_GO_ON;
+ 
+ 	/* /~user/foo.html -> /home/user/public_html/foo.html */
+ 
+diff --git a/src/mod_usertrack.c b/src/mod_usertrack.c
+index 29e9fdf..11aad95 100644
+--- a/src/mod_usertrack.c
++++ b/src/mod_usertrack.c
+@@ -101,8 +101,8 @@ SETDEFAULTS_FUNC(mod_usertrack_set_defaults) {
+ 		if (buffer_string_is_empty(s->cookie_name)) {
+ 			buffer_copy_string_len(s->cookie_name, CONST_STR_LEN("TRACKID"));
+ 		} else {
+-			size_t j;
+-			for (j = 0; j < s->cookie_name->used - 1; j++) {
++			size_t j, len = buffer_string_length(s->cookie_name);
++			for (j = 0; j < len; j++) {
+ 				char c = s->cookie_name->ptr[j] | 32;
+ 				if (c < 'a' || c > 'z') {
+ 					log_error_write(srv, __FILE__, __LINE__, "sb",
+@@ -115,8 +115,8 @@ SETDEFAULTS_FUNC(mod_usertrack_set_defaults) {
+ 		}
+ 
+ 		if (!buffer_string_is_empty(s->cookie_domain)) {
+-			size_t j;
+-			for (j = 0; j < s->cookie_domain->used - 1; j++) {
++			size_t j, len = buffer_string_length(s->cookie_domain);
++			for (j = 0; j < len; j++) {
+ 				char c = s->cookie_domain->ptr[j];
+ 				if (c <= 32 || c >= 127 || c == '"' || c == '\\') {
+ 					log_error_write(srv, __FILE__, __LINE__, "sb",
+@@ -175,7 +175,7 @@ URIHANDLER_FUNC(mod_usertrack_uri_handler) {
+ 	li_MD5_CTX Md5Ctx;
+ 	char hh[LI_ITOSTRING_LENGTH];
+ 
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
+ 
+ 	mod_usertrack_patch_connection(srv, con, p);
+ 
+@@ -193,7 +193,7 @@ URIHANDLER_FUNC(mod_usertrack_uri_handler) {
+ 			char *nc;
+ 
+ 			/* skip WS */
+-			for (nc = g + p->conf.cookie_name->used-1; *nc == ' ' || *nc == '\t'; nc++);
++			for (nc = g + buffer_string_length(p->conf.cookie_name); *nc == ' ' || *nc == '\t'; nc++);
+ 
+ 			if (*nc == '=') {
+ 				/* ok, found the key of our own cookie */
+@@ -219,8 +219,8 @@ URIHANDLER_FUNC(mod_usertrack_uri_handler) {
+ 
+ 	/* generate shared-secret */
+ 	li_MD5_Init(&Md5Ctx);
+-	li_MD5_Update(&Md5Ctx, (unsigned char *)con->uri.path->ptr, con->uri.path->used - 1);
+-	li_MD5_Update(&Md5Ctx, (unsigned char *)"+", 1);
++	li_MD5_Update(&Md5Ctx, CONST_BUF_LEN(con->uri.path));
++	li_MD5_Update(&Md5Ctx, CONST_STR_LEN("+"));
+ 
+ 	/* we assume sizeof(time_t) == 4 here, but if not it ain't a problem at all */
+ 	li_itostr(hh, srv->cur_ts);
+diff --git a/src/mod_webdav.c b/src/mod_webdav.c
+index 433b904..654108a 100644
+--- a/src/mod_webdav.c
++++ b/src/mod_webdav.c
+@@ -446,7 +446,7 @@ URIHANDLER_FUNC(mod_webdav_uri_handler) {
+ 
+ 	UNUSED(srv);
+ 
+-	if (con->uri.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->uri.path)) return HANDLER_GO_ON;
+ 
+ 	mod_webdav_patch_connection(srv, con, p);
+ 
+@@ -558,9 +558,8 @@ static int webdav_delete_file(server *srv, connection *con, plugin_data *p, phys
+ 			/* bind the values to the insert */
+ 
+ 			sqlite3_bind_text(stmt, 1,
+-					  dst->rel_path->ptr,
+-					  dst->rel_path->used - 1,
+-					  SQLITE_TRANSIENT);
++				CONST_BUF_LEN(dst->rel_path),
++				SQLITE_TRANSIENT);
+ 
+ 			if (SQLITE_DONE != sqlite3_step(stmt)) {
+ 				/* */
+@@ -590,7 +589,7 @@ static int webdav_delete_dir(server *srv, connection *con, plugin_data *p, physi
+ 			int status = 0;
+ 
+ 			if ((de->d_name[0] == '.' && de->d_name[1] == '\0')  ||
+-			    (de->d_name[0] == '.' && de->d_name[1] == '.' && de->d_name[2] == '\0')) {
++			  (de->d_name[0] == '.' && de->d_name[1] == '.' && de->d_name[2] == '\0')) {
+ 				continue;
+ 				/* ignore the parent dir */
+ 			}
+@@ -636,9 +635,8 @@ static int webdav_delete_dir(server *srv, connection *con, plugin_data *p, physi
+ 						/* bind the values to the insert */
+ 
+ 						sqlite3_bind_text(stmt, 1,
+-								  d.rel_path->ptr,
+-								  d.rel_path->used - 1,
+-								  SQLITE_TRANSIENT);
++							CONST_BUF_LEN(d.rel_path),
++							SQLITE_TRANSIENT);
+ 
+ 						if (SQLITE_DONE != sqlite3_step(stmt)) {
+ 							/* */
+@@ -714,14 +712,12 @@ static int webdav_copy_file(server *srv, connection *con, plugin_data *p, physic
+ 
+ 			/* bind the values to the insert */
+ 			sqlite3_bind_text(stmt, 1,
+-					  dst->rel_path->ptr,
+-					  dst->rel_path->used - 1,
+-					  SQLITE_TRANSIENT);
++				CONST_BUF_LEN(dst->rel_path),
++				SQLITE_TRANSIENT);
+ 
+ 			sqlite3_bind_text(stmt, 2,
+-					  src->rel_path->ptr,
+-					  src->rel_path->used - 1,
+-					  SQLITE_TRANSIENT);
++				CONST_BUF_LEN(src->rel_path),
++				SQLITE_TRANSIENT);
+ 
+ 			if (SQLITE_DONE != sqlite3_step(stmt)) {
+ 				/* */
+@@ -751,8 +747,8 @@ static int webdav_copy_dir(server *srv, connection *con, plugin_data *p, physica
+ 		while (NULL != (de = readdir(srcdir))) {
+ 			struct stat st;
+ 
+-			if ((de->d_name[0] == '.' && de->d_name[1] == '\0') ||
+-		            (de->d_name[0] == '.' && de->d_name[1] == '.' && de->d_name[2] == '\0')) {
++			if ((de->d_name[0] == '.' && de->d_name[1] == '\0')
++				|| (de->d_name[0] == '.' && de->d_name[1] == '.' && de->d_name[2] == '\0')) {
+ 				continue;
+ 			}
+ 
+@@ -793,14 +789,12 @@ static int webdav_copy_dir(server *srv, connection *con, plugin_data *p, physica
+ 
+ 						/* bind the values to the insert */
+ 						sqlite3_bind_text(stmt, 1,
+-							  dst->rel_path->ptr,
+-							  dst->rel_path->used - 1,
+-							  SQLITE_TRANSIENT);
++							CONST_BUF_LEN(dst->rel_path),
++							SQLITE_TRANSIENT);
+ 
+ 						sqlite3_bind_text(stmt, 2,
+-							  src->rel_path->ptr,
+-							  src->rel_path->used - 1,
+-							  SQLITE_TRANSIENT);
++							CONST_BUF_LEN(src->rel_path),
++							SQLITE_TRANSIENT);
+ 
+ 						if (SQLITE_DONE != sqlite3_step(stmt)) {
+ 							/* */
+@@ -851,9 +845,9 @@ static int webdav_get_live_property(server *srv, connection *con, plugin_data *p
+ 				for (k = 0; k < con->conf.mimetypes->used; k++) {
+ 					data_string *ds = (data_string *)con->conf.mimetypes->data[k];
+ 
+-					if (ds->key->used == 0) continue;
++					if (buffer_is_empty(ds->key)) continue;
+ 
+-					if (buffer_is_equal_right_len(dst->path, ds->key, ds->key->used - 1)) {
++					if (buffer_is_equal_right_len(dst->path, ds->key, buffer_string_length(ds->key))) {
+ 						buffer_append_string_len(b,CONST_STR_LEN("<D:getcontenttype>"));
+ 						buffer_append_string_buffer(b, ds->value);
+ 						buffer_append_string_len(b, CONST_STR_LEN("</D:getcontenttype>"));
+@@ -907,17 +901,16 @@ static int webdav_get_property(server *srv, connection *con, plugin_data *p, phy
+ 			/* bind the values to the insert */
+ 
+ 			sqlite3_bind_text(stmt, 1,
+-					  dst->rel_path->ptr,
+-					  dst->rel_path->used - 1,
+-					  SQLITE_TRANSIENT);
++				CONST_BUF_LEN(dst->rel_path),
++				SQLITE_TRANSIENT);
+ 			sqlite3_bind_text(stmt, 2,
+-					  prop_name,
+-					  strlen(prop_name),
+-					  SQLITE_TRANSIENT);
++				prop_name,
++				strlen(prop_name),
++				SQLITE_TRANSIENT);
+ 			sqlite3_bind_text(stmt, 3,
+-					  prop_ns,
+-					  strlen(prop_ns),
+-					  SQLITE_TRANSIENT);
++				prop_ns,
++				strlen(prop_ns),
++				SQLITE_TRANSIENT);
+ 
+ 			/* it is the PK */
+ 			while (SQLITE_ROW == sqlite3_step(stmt)) {
+@@ -1046,7 +1039,7 @@ static int webdav_parse_chunkqueue(server *srv, connection *con, plugin_data *p,
+ 			break;
+ 		case MEM_CHUNK:
+ 			/* append to the buffer */
+-			weHave = c->mem->used - 1 - c->offset;
++			weHave = buffer_string_length(c->mem) - c->offset;
+ 
+ 			if (weHave > weWant) weHave = weWant;
+ 
+@@ -1190,8 +1183,8 @@ static int webdav_has_lock(server *srv, connection *con, plugin_data *p, buffer
+ 		sqlite3_reset(stmt);
+ 
+ 		sqlite3_bind_text(stmt, 1,
+-			  CONST_BUF_LEN(uri),
+-			  SQLITE_TRANSIENT);
++			CONST_BUF_LEN(uri),
++			SQLITE_TRANSIENT);
+ 
+ 		while (SQLITE_ROW == sqlite3_step(stmt)) {
+ 			has_lock = 0;
+@@ -1223,7 +1216,7 @@ URIHANDLER_FUNC(mod_webdav_subrequest_handler) {
+ 
+ 	if (!p->conf.enabled) return HANDLER_GO_ON;
+ 	/* physical path is setup */
+-	if (con->physical.path->used == 0) return HANDLER_GO_ON;
++	if (buffer_is_empty(con->physical.path)) return HANDLER_GO_ON;
+ 
+ 	/* PROPFIND need them */
+ 	if (NULL != (ds = (data_string *)array_get_element(con->request.headers, "Depth"))) {
+@@ -1274,7 +1267,7 @@ URIHANDLER_FUNC(mod_webdav_subrequest_handler) {
+ 								if (prop->type == XML_TEXT_NODE) continue; /* ignore WS */
+ 
+ 								if (prop->ns &&
+-								    (0 == xmlStrcmp(prop->ns->href, BAD_CAST "")) &&
++								  (0 == xmlStrcmp(prop->ns->href, BAD_CAST "")) &&
+ 								    (0 != xmlStrcmp(prop->ns->prefix, BAD_CAST ""))) {
+ 									size_t i;
+ 									log_error_write(srv, __FILE__, __LINE__, "ss",
+@@ -1318,9 +1311,8 @@ URIHANDLER_FUNC(mod_webdav_subrequest_handler) {
+ 								/* bind the values to the insert */
+ 
+ 								sqlite3_bind_text(stmt, 1,
+-										  con->uri.path->ptr,
+-										  con->uri.path->used - 1,
+-										  SQLITE_TRANSIENT);
++									CONST_BUF_LEN(con->uri.path),
++									SQLITE_TRANSIENT);
+ 
+ 								if (SQLITE_DONE != sqlite3_step(stmt)) {
+ 								}
+@@ -1757,7 +1749,7 @@ URIHANDLER_FUNC(mod_webdav_subrequest_handler) {
+ 				}
+ 				break;
+ 			case MEM_CHUNK:
+-				if ((r = write(fd, c->mem->ptr + c->offset, c->mem->used - c->offset - 1)) < 0) {
++				if ((r = write(fd, c->mem->ptr + c->offset, buffer_string_length(c->mem) - c->offset)) < 0) {
+ 					switch(errno) {
+ 					case ENOSPC:
+ 						con->http_status = 507;
+@@ -1810,7 +1802,7 @@ URIHANDLER_FUNC(mod_webdav_subrequest_handler) {
+ 		}
+ 
+ 		if (NULL != (ds = (data_string *)array_get_element(con->request.headers, "Overwrite"))) {
+-			if (ds->value->used != 2 ||
++			if (buffer_string_length(ds->value) != 1 ||
+ 			    (ds->value->ptr[0] != 'F' &&
+ 			     ds->value->ptr[0] != 'T') )  {
+ 				con->http_status = 400;
+@@ -1884,7 +1876,7 @@ URIHANDLER_FUNC(mod_webdav_subrequest_handler) {
+ 
+ 		/* don't add a second / */
+ 		if (p->physical.rel_path->ptr[0] == '/') {
+-			buffer_append_string_len(p->physical.path, p->physical.rel_path->ptr + 1, p->physical.rel_path->used - 2);
++			buffer_append_string_len(p->physical.path, p->physical.rel_path->ptr + 1, buffer_string_length(p->physical.rel_path) - 1);
+ 		} else {
+ 			buffer_append_string_buffer(p->physical.path, p->physical.rel_path);
+ 		}
+@@ -1993,9 +1985,8 @@ URIHANDLER_FUNC(mod_webdav_subrequest_handler) {
+ 
+ 						/* bind the values to the insert */
+ 						sqlite3_bind_text(stmt, 1,
+-								  con->uri.path->ptr,
+-								  con->uri.path->used - 1,
+-								  SQLITE_TRANSIENT);
++							CONST_BUF_LEN(con->uri.path),
++							SQLITE_TRANSIENT);
+ 
+ 						if (SQLITE_DONE != sqlite3_step(stmt)) {
+ 							log_error_write(srv, __FILE__, __LINE__, "ss", "sql-move(delete old) failed:", sqlite3_errmsg(p->conf.sql));
+@@ -2009,14 +2000,12 @@ URIHANDLER_FUNC(mod_webdav_subrequest_handler) {
+ 
+ 						/* bind the values to the insert */
+ 						sqlite3_bind_text(stmt, 1,
+-								  p->uri.path->ptr,
+-								  p->uri.path->used - 1,
+-								  SQLITE_TRANSIENT);
++							CONST_BUF_LEN(p->uri.path),
++							SQLITE_TRANSIENT);
+ 
+ 						sqlite3_bind_text(stmt, 2,
+-								  con->uri.path->ptr,
+-								  con->uri.path->used - 1,
+-								  SQLITE_TRANSIENT);
++							CONST_BUF_LEN(con->uri.path),
++							SQLITE_TRANSIENT);
+ 
+ 						if (SQLITE_DONE != sqlite3_step(stmt)) {
+ 							log_error_write(srv, __FILE__, __LINE__, "ss", "sql-move failed:", sqlite3_errmsg(p->conf.sql));
+@@ -2121,29 +2110,28 @@ URIHANDLER_FUNC(mod_webdav_subrequest_handler) {
+ 									/* bind the values to the insert */
+ 
+ 									sqlite3_bind_text(stmt, 1,
+-											  con->uri.path->ptr,
+-											  con->uri.path->used - 1,
+-											  SQLITE_TRANSIENT);
++										CONST_BUF_LEN(con->uri.path),
++										SQLITE_TRANSIENT);
+ 									sqlite3_bind_text(stmt, 2,
+-											  (char *)prop->name,
+-											  strlen((char *)prop->name),
+-											  SQLITE_TRANSIENT);
++										(char *)prop->name,
++										strlen((char *)prop->name),
++										SQLITE_TRANSIENT);
+ 									if (prop->ns) {
+ 										sqlite3_bind_text(stmt, 3,
+-												  (char *)prop->ns->href,
+-												  strlen((char *)prop->ns->href),
+-												  SQLITE_TRANSIENT);
++											(char *)prop->ns->href,
++											strlen((char *)prop->ns->href),
++											SQLITE_TRANSIENT);
+ 									} else {
+ 										sqlite3_bind_text(stmt, 3,
+-												  "",
+-												  0,
+-												  SQLITE_TRANSIENT);
++											"",
++											0,
++											SQLITE_TRANSIENT);
+ 									}
+ 									if (stmt == p->conf.stmt_update_prop) {
+ 										sqlite3_bind_text(stmt, 4,
+-											  (char *)xmlNodeGetContent(prop),
+-											  strlen((char *)xmlNodeGetContent(prop)),
+-											  SQLITE_TRANSIENT);
++											(char *)xmlNodeGetContent(prop),
++											strlen((char *)xmlNodeGetContent(prop)),
++											SQLITE_TRANSIENT);
+ 									}
+ 
+ 									if (SQLITE_DONE != (r = sqlite3_step(stmt))) {
+@@ -2290,9 +2278,8 @@ propmatch_cleanup:
+ 							sqlite3_reset(stmt);
+ 
+ 							sqlite3_bind_text(stmt, 1,
+-									  p->uri.path->ptr,
+-									  p->uri.path->used - 1,
+-									  SQLITE_TRANSIENT);
++								CONST_BUF_LEN(p->uri.path),
++								SQLITE_TRANSIENT);
+ 
+ 							/* it is the PK */
+ 							while (SQLITE_ROW == sqlite3_step(stmt)) {
+@@ -2339,32 +2326,32 @@ propmatch_cleanup:
+ 							sqlite3_reset(stmt);
+ 
+ 							sqlite3_bind_text(stmt, 1,
+-									  CONST_BUF_LEN(p->tmp_buf),
+-									  SQLITE_TRANSIENT);
++									CONST_BUF_LEN(p->tmp_buf),
++									SQLITE_TRANSIENT);
+ 
+ 							sqlite3_bind_text(stmt, 2,
+-									  CONST_BUF_LEN(con->uri.path),
+-									  SQLITE_TRANSIENT);
++									CONST_BUF_LEN(con->uri.path),
++									SQLITE_TRANSIENT);
+ 
+ 							sqlite3_bind_text(stmt, 3,
+-									  (const char *)lockscope,
+-									  xmlStrlen(lockscope),
+-									  SQLITE_TRANSIENT);
++									(const char *)lockscope,
++									xmlStrlen(lockscope),
++									SQLITE_TRANSIENT);
+ 
+ 							sqlite3_bind_text(stmt, 4,
+-									  (const char *)locktype,
+-									  xmlStrlen(locktype),
+-									  SQLITE_TRANSIENT);
++									(const char *)locktype,
++									xmlStrlen(locktype),
++									SQLITE_TRANSIENT);
+ 
+ 							/* owner */
+ 							sqlite3_bind_text(stmt, 5,
+-									  "",
+-									  0,
+-									  SQLITE_TRANSIENT);
++									"",
++									0,
++									SQLITE_TRANSIENT);
+ 
+ 							/* depth */
+ 							sqlite3_bind_int(stmt, 6,
+-									 depth);
++									depth);
+ 
+ 
+ 							if (SQLITE_DONE != sqlite3_step(stmt)) {
+@@ -2394,19 +2381,19 @@ propmatch_cleanup:
+ 				sqlite3_stmt *stmt = p->conf.stmt_refresh_lock;
+ 
+ 				/* remove the < > around the token */
+-				if (locktoken->used < 6) {
++				if (buffer_string_length(locktoken) < 5) {
+ 					con->http_status = 400;
+ 
+ 					return HANDLER_FINISHED;
+ 				}
+ 
+-				buffer_copy_string_len(p->tmp_buf, locktoken->ptr + 2, locktoken->used - 5);
++				buffer_copy_string_len(p->tmp_buf, locktoken->ptr + 2, buffer_string_length(locktoken) - 4);
+ 
+ 				sqlite3_reset(stmt);
+ 
+ 				sqlite3_bind_text(stmt, 1,
+-					  CONST_BUF_LEN(p->tmp_buf),
+-					  SQLITE_TRANSIENT);
++					CONST_BUF_LEN(p->tmp_buf),
++					SQLITE_TRANSIENT);
+ 
+ 				if (SQLITE_DONE != sqlite3_step(stmt)) {
+ 					log_error_write(srv, __FILE__, __LINE__, "ss",
+@@ -2437,7 +2424,7 @@ propmatch_cleanup:
+ 			sqlite3_stmt *stmt = p->conf.stmt_remove_lock;
+ 
+ 			/* remove the < > around the token */
+-			if (locktoken->used < 4) {
++			if (buffer_string_length(locktoken) < 3) {
+ 				con->http_status = 400;
+ 
+ 				return HANDLER_FINISHED;
+@@ -2453,17 +2440,17 @@ propmatch_cleanup:
+ 			 * - 412
+ 			 *  */
+ 
+-			buffer_copy_string_len(p->tmp_buf, locktoken->ptr + 1, locktoken->used - 3);
++			buffer_copy_string_len(p->tmp_buf, locktoken->ptr + 1, buffer_string_length(locktoken) - 2);
+ 
+ 			sqlite3_reset(stmt);
+ 
+ 			sqlite3_bind_text(stmt, 1,
+-				  CONST_BUF_LEN(p->tmp_buf),
+-				  SQLITE_TRANSIENT);
++				CONST_BUF_LEN(p->tmp_buf),
++				SQLITE_TRANSIENT);
+ 
+ 			sqlite3_bind_text(stmt, 2,
+-				  CONST_BUF_LEN(con->uri.path),
+-				  SQLITE_TRANSIENT);
++				CONST_BUF_LEN(con->uri.path),
++				SQLITE_TRANSIENT);
+ 
+ 			if (SQLITE_DONE != sqlite3_step(stmt)) {
+ 				log_error_write(srv, __FILE__, __LINE__, "ss",
+diff --git a/src/network_linux_sendfile.c b/src/network_linux_sendfile.c
+index 8d7598a..b967f3c 100644
+--- a/src/network_linux_sendfile.c
++++ b/src/network_linux_sendfile.c
+@@ -54,12 +54,12 @@ int network_write_chunkqueue_linuxsendfile(server *srv, connection *con, int fd,
+ 			     tc = tc->next, num_chunks++);
+ 
+ 			for (tc = c, i = 0; i < num_chunks; tc = tc->next, i++) {
+-				if (tc->mem->used == 0) {
++				if (buffer_string_is_empty(tc->mem)) {
+ 					chunks[i].iov_base = tc->mem->ptr;
+ 					chunks[i].iov_len  = 0;
+ 				} else {
+ 					offset = tc->mem->ptr + tc->offset;
+-					toSend = tc->mem->used - 1 - tc->offset;
++					toSend = buffer_string_length(tc->mem) - tc->offset;
+ 
+ 					chunks[i].iov_base = offset;
+ 
+diff --git a/src/network_openssl.c b/src/network_openssl.c
+index 04c29c0..d9ae33c 100644
+--- a/src/network_openssl.c
++++ b/src/network_openssl.c
+@@ -67,13 +67,13 @@ int network_write_chunkqueue_openssl(server *srv, connection *con, SSL *ssl, chu
+ 			off_t toSend;
+ 			ssize_t r;
+ 
+-			if (c->mem->used == 0 || c->mem->used == 1) {
++			if (buffer_string_is_empty(c->mem)) {
+ 				chunk_finished = 1;
+ 				break;
+ 			}
+ 
+ 			offset = c->mem->ptr + c->offset;
+-			toSend = c->mem->used - 1 - c->offset;
++			toSend = buffer_string_length(c->mem) - c->offset;
+ 			if (toSend > max_bytes) toSend = max_bytes;
+ 
+ 			/**
+@@ -149,7 +149,7 @@ int network_write_chunkqueue_openssl(server *srv, connection *con, SSL *ssl, chu
+ 				max_bytes -= r;
+ 			}
+ 
+-			if (c->offset == (off_t)c->mem->used - 1) {
++			if (c->offset == (off_t)buffer_string_length(c->mem)) {
+ 				chunk_finished = 1;
+ 			}
+ 
+diff --git a/src/network_write.c b/src/network_write.c
+index d46649b..6a89b50 100644
+--- a/src/network_write.c
++++ b/src/network_write.c
+@@ -36,13 +36,13 @@ int network_write_chunkqueue_write(server *srv, connection *con, int fd, chunkqu
+ 			off_t toSend;
+ 			ssize_t r;
+ 
+-			if (c->mem->used == 0) {
++			if (buffer_string_is_empty(c->mem)) {
+ 				chunk_finished = 1;
+ 				break;
+ 			}
+ 
+ 			offset = c->mem->ptr + c->offset;
+-			toSend = c->mem->used - 1 - c->offset;
++			toSend = buffer_string_length(c->mem) - c->offset;
+ 			if (toSend > max_bytes) toSend = max_bytes;
+ 
+ #ifdef __WIN32
+@@ -75,7 +75,7 @@ int network_write_chunkqueue_write(server *srv, connection *con, int fd, chunkqu
+ 			cq->bytes_out += r;
+ 			max_bytes -= r;
+ 
+-			if (c->offset == (off_t)c->mem->used - 1) {
++			if (c->offset == (off_t)buffer_string_length(c->mem)) {
+ 				chunk_finished = 1;
+ 			}
+ 
+diff --git a/src/network_writev.c b/src/network_writev.c
+index 1b93547..895336c 100644
+--- a/src/network_writev.c
++++ b/src/network_writev.c
+@@ -69,12 +69,12 @@ int network_write_chunkqueue_writev(server *srv, connection *con, int fd, chunkq
+ 			chunks = calloc(num_chunks, sizeof(*chunks));
+ 
+ 			for(tc = c, i = 0; i < num_chunks; tc = tc->next, i++) {
+-				if (tc->mem->used == 0) {
++				if (buffer_string_is_empty(tc->mem)) {
+ 					chunks[i].iov_base = tc->mem->ptr;
+ 					chunks[i].iov_len  = 0;
+ 				} else {
+ 					offset = tc->mem->ptr + tc->offset;
+-					toSend = tc->mem->used - 1 - tc->offset;
++					toSend = buffer_string_length(tc->mem) - tc->offset;
+ 
+ 					chunks[i].iov_base = offset;
+ 
+diff --git a/src/proc_open.c b/src/proc_open.c
+index c29b9c6..167027a 100644
+--- a/src/proc_open.c
++++ b/src/proc_open.c
+@@ -284,8 +284,7 @@ static void proc_read_fd_to_buffer(int fd, buffer *b) {
+ 		if ((s = read(fd, (void *)(b->ptr + buffer_string_length(b)), buffer_string_space(b))) <= 0) {
+ 			break;
+ 		}
+-		b->used += s;
+-		b->ptr[b->used-1] = '\0';
++		buffer_commit(b, s);
+ 	}
+ }
+ /* }}} */
+@@ -298,7 +297,7 @@ int proc_open_buffer(const char *command, buffer *in, buffer *out, buffer *err)
+ 	}
+ 
+ 	if (in) {
+-		if (write(proc.in.fd, (void *)in->ptr, in->used) < 0) {
++		if (write(proc.in.fd, CONST_BUF_LEN(in)) < 0) {
+ 			perror("error writing pipe");
+ 			return -1;
+ 		}
+@@ -315,7 +314,7 @@ int proc_open_buffer(const char *command, buffer *in, buffer *out, buffer *err)
+ 	} else {
+ 		buffer *tmp = buffer_init();
+ 		proc_read_fd_to_buffer(proc.err.fd, tmp);
+-		if (tmp->used > 0 &&  write(2, (void*)tmp->ptr, tmp->used) < 0) {
++		if (!buffer_string_is_empty(tmp) &&  write(2, CONST_BUF_LEN(tmp)) < 0) {
+ 			perror("error writing pipe");
+ 			buffer_free(tmp);
+ 			return -1;
+diff --git a/src/request.c b/src/request.c
+index 65d0a0e..993cb28 100644
+--- a/src/request.c
++++ b/src/request.c
+@@ -34,9 +34,9 @@ static int request_check_hostname(server *srv, connection *con, buffer *host) {
+ 	 */
+ 
+ 	/* no Host: */
+-	if (!host || host->used == 0) return 0;
++	if (buffer_is_empty(host)) return 0;
+ 
+-	host_len = host->used - 1;
++	host_len = buffer_string_length(host);
+ 
+ 	/* IPv6 adress */
+ 	if (host->ptr[0] == '[') {
+@@ -92,10 +92,9 @@ static int request_check_hostname(server *srv, connection *con, buffer *host) {
+ 	/* if the hostname ends in a "." strip it */
+ 	if (host->ptr[host_len-1] == '.') {
+ 		/* shift port info one left */
+-		if (NULL != colon) memmove(colon-1, colon, host->used - host_len);
+-		else host->ptr[host_len-1] = '\0';
++		if (NULL != colon) memmove(colon-1, colon, buffer_string_length(host) - host_len);
++		buffer_string_set_length(host, buffer_string_length(host) - 1);
+ 		host_len -= 1;
+-		host->used -= 1;
+ 	}
+ 
+ 	if (host_len == 0) return -1;
+@@ -213,7 +212,7 @@ static int request_check_hostname(server *srv, connection *con, buffer *host) {
+ #endif
+ 
+ static int http_request_split_value(array *vals, buffer *b) {
+-	size_t i;
++	size_t i, len;
+ 	int state = 0;
+ 
+ 	const char *current;
+@@ -226,10 +225,11 @@ static int http_request_split_value(array *vals, buffer *b) {
+ 	 * into a array (more or less a explode() incl. striping of whitespaces
+ 	 */
+ 
+-	if (b->used == 0) return 0;
++	if (buffer_string_is_empty(b)) return 0;
+ 
+ 	current = b->ptr;
+-	for (i =  0; i < b->used; ++i, ++current) {
++	len = buffer_string_length(b);
++	for (i =  0; i <= len; ++i, ++current) {
+ 		data_string *ds;
+ 
+ 		switch (state) {
+@@ -297,7 +297,7 @@ int http_request_parse(server *srv, connection *con) {
+ 	int line = 0;
+ 
+ 	int request_line_stage = 0;
+-	size_t i, first;
++	size_t i, first, ilen;
+ 
+ 	int done = 0;
+ 
+@@ -310,7 +310,7 @@ int http_request_parse(server *srv, connection *con) {
+ 	if (con->conf.log_request_header) {
+ 		log_error_write(srv, __FILE__, __LINE__, "sdsdSb",
+ 				"fd:", con->fd,
+-				"request-len:", con->request.request->used,
++				"request-len:", buffer_string_length(con->request.request),
+ 				"\n", con->request.request);
+ 	}
+ 
+@@ -319,7 +319,7 @@ int http_request_parse(server *srv, connection *con) {
+ 	    con->request.request->ptr[1] == '\n') {
+ 		/* we are in keep-alive and might get \r\n after a previous POST request.*/
+ 
+-		buffer_copy_string_len(con->parse_request, con->request.request->ptr + 2, con->request.request->used - 1 - 2);
++		buffer_copy_string_len(con->parse_request, con->request.request->ptr + 2, buffer_string_length(con->request.request) - 2);
+ 	} else {
+ 		/* fill the local request buffer */
+ 		buffer_copy_buffer(con->parse_request, con->request.request);
+@@ -334,15 +334,14 @@ int http_request_parse(server *srv, connection *con) {
+ 	 *
+ 	 * <method> <uri> <protocol>\r\n
+ 	 * */
+-	for (i = 0, first = 0; i < con->parse_request->used && line == 0; i++) {
+-		char *cur = con->parse_request->ptr + i;
+-
+-		switch(*cur) {
++	ilen = buffer_string_length(con->parse_request);
++	for (i = 0, first = 0; i < ilen && line == 0; i++) {
++		switch(con->parse_request->ptr[i]) {
+ 		case '\r':
+ 			if (con->parse_request->ptr[i+1] == '\n') {
+ 				http_method_t r;
+ 				char *nuri = NULL;
+-				size_t j;
++				size_t j, jlen;
+ 
+ 				/* \r\n -> \0\0 */
+ 				con->parse_request->ptr[i] = '\0';
+@@ -476,7 +475,8 @@ int http_request_parse(server *srv, connection *con) {
+ 				}
+ 
+ 				/* check uri for invalid characters */
+-				for (j = 0; j < con->request.uri->used - 1; j++) {
++				jlen = buffer_string_length(con->request.uri);
++				for (j = 0; j < jlen; j++) {
+ 					if (!request_uri_is_valid_char(con->request.uri->ptr[j])) {
+ 						unsigned char buf[2];
+ 						con->http_status = 400;
+@@ -551,7 +551,7 @@ int http_request_parse(server *srv, connection *con) {
+ 
+ 	in_folding = 0;
+ 
+-	if (con->request.uri->used == 1) {
++	if (buffer_string_is_empty(con->request.uri)) {
+ 		con->http_status = 400;
+ 		con->response.keep_alive = 0;
+ 		con->keep_alive = 0;
+@@ -579,7 +579,7 @@ int http_request_parse(server *srv, connection *con) {
+ 		con->request.http_host = ds->value;
+ 	}
+ 
+-	for (; i < con->parse_request->used && !done; i++) {
++	for (; i <= ilen && !done; i++) {
+ 		char *cur = con->parse_request->ptr + i;
+ 
+ 		if (is_key) {
+@@ -825,7 +825,7 @@ int http_request_parse(server *srv, connection *con) {
+ 							} else if (cmp > 0 && 0 == (cmp = buffer_caseless_compare(CONST_BUF_LEN(ds->key), CONST_STR_LEN("Content-Length")))) {
+ 								char *err;
+ 								unsigned long int r;
+-								size_t j;
++								size_t j, jlen;
+ 
+ 								if (con_length_set) {
+ 									con->http_status = 400;
+@@ -842,9 +842,8 @@ int http_request_parse(server *srv, connection *con) {
+ 									return 0;
+ 								}
+ 
+-								if (ds->value->used == 0) SEGFAULT();
+-
+-								for (j = 0; j < ds->value->used - 1; j++) {
++								jlen = buffer_string_length(ds->value);
++								for (j = 0; j < jlen; j++) {
+ 									char c = ds->value->ptr[j];
+ 									if (!isdigit((unsigned char)c)) {
+ 										log_error_write(srv, __FILE__, __LINE__, "sbs",
+@@ -1177,9 +1176,9 @@ int http_request_parse(server *srv, connection *con) {
+ int http_request_header_finished(server *srv, connection *con) {
+ 	UNUSED(srv);
+ 
+-	if (con->request.request->used < 5) return 0;
++	if (buffer_string_length(con->request.request) < 4) return 0;
+ 
+-	if (0 == memcmp(con->request.request->ptr + con->request.request->used - 5, "\r\n\r\n", 4)) return 1;
++	if (0 == memcmp(con->request.request->ptr + buffer_string_length(con->request.request) - 4, CONST_STR_LEN("\r\n\r\n"))) return 1;
+ 	if (NULL != strstr(con->request.request->ptr, "\r\n\r\n")) return 1;
+ 
+ 	return 0;
+diff --git a/src/response.c b/src/response.c
+index 5072d05..357f43b 100644
+--- a/src/response.c
++++ b/src/response.c
+@@ -70,7 +70,7 @@ int http_response_write_header(server *srv, connection *con) {
+ 
+ 		ds = (data_string *)con->response.headers->data[i];
+ 
+-		if (ds->value->used && ds->key->used &&
++		if (!buffer_is_empty(ds->value) && !buffer_is_empty(ds->key) &&
+ 		    0 != strncasecmp(ds->key->ptr, CONST_STR_LEN("X-LIGHTTPD-")) &&
+ 			0 != strncasecmp(ds->key->ptr, CONST_STR_LEN("X-Sendfile"))) {
+ 			if (0 == strcasecmp(ds->key->ptr, "Date")) have_date = 1;
+@@ -99,10 +99,7 @@ int http_response_write_header(server *srv, connection *con) {
+ 		if (srv->cur_ts != srv->last_generated_date_ts) {
+ 			buffer_string_prepare_copy(srv->ts_date_str, 255);
+ 
+-			strftime(srv->ts_date_str->ptr, srv->ts_date_str->size - 1,
+-				 "%a, %d %b %Y %H:%M:%S GMT", gmtime(&(srv->cur_ts)));
+-
+-			srv->ts_date_str->used = strlen(srv->ts_date_str->ptr) + 1;
++			buffer_append_strftime(srv->ts_date_str, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&(srv->cur_ts)));
+ 
+ 			srv->last_generated_date_ts = srv->cur_ts;
+ 		}
+@@ -113,7 +110,7 @@ int http_response_write_header(server *srv, connection *con) {
+ 	if (!have_server) {
+ 		if (buffer_is_empty(con->conf.server_tag)) {
+ 			buffer_append_string_len(b, CONST_STR_LEN("\r\nServer: " PACKAGE_DESC));
+-		} else if (con->conf.server_tag->used > 1) {
++		} else if (!buffer_string_is_empty(con->conf.server_tag)) {
+ 			buffer_append_string_len(b, CONST_STR_LEN("\r\nServer: "));
+ 			buffer_append_string_encoded(b, CONST_BUF_LEN(con->conf.server_tag), ENCODING_HTTP_HEADER);
+ 		}
+@@ -121,7 +118,7 @@ int http_response_write_header(server *srv, connection *con) {
+ 
+ 	buffer_append_string_len(b, CONST_STR_LEN("\r\n\r\n"));
+ 
+-	con->bytes_header = b->used - 1;
++	con->bytes_header = buffer_string_length(b);
+ 
+ 	if (con->conf.log_response_header) {
+ 		log_error_write(srv, __FILE__, __LINE__, "sSb", "Response-Header:", "\n", b);
+@@ -204,8 +201,7 @@ static void https_add_ssl_entries(connection *con) {
+ 			buffer_string_prepare_copy(envds->value, n);
+ 			BIO_read(bio, envds->value->ptr, n);
+ 			BIO_free(bio);
+-			envds->value->ptr[n] = '\0';
+-			envds->value->used = n+1;
++			buffer_commit(envds->value, n);
+ 			array_insert_unique(con->environment, (data_unset *)envds);
+ 		}
+ 	}
+@@ -229,7 +225,7 @@ handler_t http_response_prepare(server *srv, connection *con) {
+ 	}
+ 
+ 	/* no decision yet, build conf->filename */
+-	if (con->mode == DIRECT && con->physical.path->used == 0) {
++	if (con->mode == DIRECT && buffer_is_empty(con->physical.path)) {
+ 		char *qstr;
+ 
+ 		/* we only come here when we have the parse the full request again
+@@ -294,8 +290,7 @@ handler_t http_response_prepare(server *srv, connection *con) {
+ 
+ 		/** their might be a fragment which has to be cut away */
+ 		if (NULL != (qstr = strchr(con->request.uri->ptr, '#'))) {
+-			con->request.uri->used = qstr - con->request.uri->ptr;
+-			con->request.uri->ptr[con->request.uri->used++] = '\0';
++			buffer_string_set_length(con->request.uri, qstr - con->request.uri->ptr);
+ 		}
+ 
+ 		/** extract query string from request.uri */
+@@ -451,23 +446,18 @@ handler_t http_response_prepare(server *srv, connection *con) {
+ 
+ 		if (con->physical.rel_path->used > 1) {
+ 			buffer *b = con->physical.rel_path;
++			size_t len = buffer_string_length(b);
+ 			size_t i;
+ 
+-			if (b->used > 2 &&
+-			    b->ptr[b->used-2] == '/' &&
+-			    (b->ptr[b->used-3] == ' ' ||
+-			     b->ptr[b->used-3] == '.')) {
+-				b->ptr[b->used--] = '\0';
+-			}
+-
+-			for (i = b->used - 2; b->used > 1; i--) {
+-				if (b->ptr[i] == ' ' ||
+-				    b->ptr[i] == '.') {
+-					b->ptr[b->used--] = '\0';
+-				} else {
+-					break;
+-				}
++			/* strip trailing " /" or "./" once */
++			if (len > 1 &&
++			    b->ptr[len - 1] == '/' &&
++			    (b->ptr[len - 2] == ' ' || b->ptr[len - 2] == '.')) {
++				len -= 2;
+ 			}
++			/* strip all trailing " " and "." */
++			while (len > 0 &&  ( ' ' == b->ptr[len-1] || '.' == b->ptr[len-1] ) ) --len;
++			buffer_string_set_length(b, len);
+ 		}
+ #endif
+ 
+@@ -515,9 +505,9 @@ handler_t http_response_prepare(server *srv, connection *con) {
+ 		buffer_copy_buffer(con->physical.basedir, con->physical.doc_root);
+ 		buffer_copy_buffer(con->physical.path, con->physical.doc_root);
+ 		buffer_append_slash(con->physical.path);
+-		if (con->physical.rel_path->used &&
++		if (!buffer_string_is_empty(con->physical.rel_path) &&
+ 		    con->physical.rel_path->ptr[0] == '/') {
+-			buffer_append_string_len(con->physical.path, con->physical.rel_path->ptr + 1, con->physical.rel_path->used - 2);
++			buffer_append_string_len(con->physical.path, con->physical.rel_path->ptr + 1, buffer_string_length(con->physical.rel_path) - 1);
+ 		} else {
+ 			buffer_append_string_buffer(con->physical.path, con->physical.rel_path);
+ 		}
+@@ -589,7 +579,7 @@ handler_t http_response_prepare(server *srv, connection *con) {
+ 			};
+ #endif
+ 			if (S_ISDIR(sce->st.st_mode)) {
+-				if (con->uri.path->ptr[con->uri.path->used - 2] != '/') {
++				if (con->uri.path->ptr[buffer_string_length(con->uri.path) - 1] != '/') {
+ 					/* redirect to .../ */
+ 
+ 					http_response_redirect_to_directory(srv, con);
+@@ -672,7 +662,7 @@ handler_t http_response_prepare(server *srv, connection *con) {
+ 				}
+ 
+ 				if (slash) pathinfo = slash;
+-			} while ((found == 0) && (slash != NULL) && ((size_t)(slash - srv->tmp_buf->ptr) > (con->physical.basedir->used - 2)));
++			} while ((found == 0) && (slash != NULL) && ((size_t)(slash - srv->tmp_buf->ptr) > (buffer_string_length(con->physical.basedir) - 1)));
+ 
+ 			if (found == 0) {
+ 				/* no it really doesn't exists */
+@@ -711,8 +701,7 @@ handler_t http_response_prepare(server *srv, connection *con) {
+ 				 * shorten uri.path
+ 				 */
+ 
+-				con->uri.path->used -= strlen(pathinfo);
+-				con->uri.path->ptr[con->uri.path->used - 1] = '\0';
++				buffer_string_set_length(con->uri.path, buffer_string_length(con->uri.path) - strlen(pathinfo));
+ 			}
+ 
+ 			if (con->conf.log_request_handling) {
+diff --git a/src/server.c b/src/server.c
+index 71d3538..5089375 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -666,7 +666,7 @@ int main (int argc, char **argv) {
+ #endif
+ 
+ 	/* check document-root */
+-	if (srv->config_storage[0]->document_root->used <= 1) {
++	if (buffer_string_is_empty(srv->config_storage[0]->document_root)) {
+ 		log_error_write(srv, __FILE__, __LINE__, "s",
+ 				"document-root is not set\n");
+ 
+@@ -686,7 +686,7 @@ int main (int argc, char **argv) {
+ 	}
+ 
+ 	/* open pid file BEFORE chroot */
+-	if (srv->srvconf.pid_file->used) {
++	if (!buffer_string_is_empty(srv->srvconf.pid_file)) {
+ 		if (-1 == (pid_fd = open(srv->srvconf.pid_file->ptr, O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))) {
+ 			struct stat st;
+ 			if (errno != EEXIST) {
+@@ -780,7 +780,7 @@ int main (int argc, char **argv) {
+ 
+ #ifdef HAVE_PWD_H
+ 		/* set user and group */
+-		if (srv->srvconf.username->used) {
++		if (!buffer_string_is_empty(srv->srvconf.username)) {
+ 			if (NULL == (pwd = getpwnam(srv->srvconf.username->ptr))) {
+ 				log_error_write(srv, __FILE__, __LINE__, "sb",
+ 						"can't find username", srv->srvconf.username);
+@@ -794,7 +794,7 @@ int main (int argc, char **argv) {
+ 			}
+ 		}
+ 
+-		if (srv->srvconf.groupname->used) {
++		if (!buffer_string_is_empty(srv->srvconf.groupname)) {
+ 			if (NULL == (grp = getgrnam(srv->srvconf.groupname->ptr))) {
+ 				log_error_write(srv, __FILE__, __LINE__, "sb",
+ 					"can't find groupname", srv->srvconf.groupname);
+@@ -828,13 +828,13 @@ int main (int argc, char **argv) {
+ 				log_error_write(srv, __FILE__, __LINE__, "ss", "setgroups failed: ", strerror(errno));
+ 				return -1;
+ 			}
+-			if (srv->srvconf.username->used) {
++			if (!buffer_string_is_empty(srv->srvconf.username)) {
+ 				initgroups(srv->srvconf.username->ptr, grp->gr_gid);
+ 			}
+ 		}
+ #endif
+ #ifdef HAVE_CHROOT
+-		if (srv->srvconf.changeroot->used) {
++		if (!buffer_string_is_empty(srv->srvconf.changeroot)) {
+ 			tzset();
+ 
+ 			if (-1 == chroot(srv->srvconf.changeroot->ptr)) {
+@@ -1001,8 +1001,7 @@ int main (int argc, char **argv) {
+ 	if (pid_fd != -1) {
+ 		buffer_copy_int(srv->tmp_buf, getpid());
+ 		buffer_append_string_len(srv->tmp_buf, CONST_STR_LEN("\n"));
+-		force_assert(srv->tmp_buf->used > 0);
+-		write(pid_fd, srv->tmp_buf->ptr, srv->tmp_buf->used - 1);
++		write(pid_fd, CONST_BUF_LEN(srv->tmp_buf));
+ 		close(pid_fd);
+ 		pid_fd = -1;
+ 	}
+@@ -1425,8 +1424,8 @@ int main (int argc, char **argv) {
+ 
+ 						/* network_close() will cleanup after us */
+ 
+-						if (srv->srvconf.pid_file->used &&
+-						    srv->srvconf.changeroot->used == 0) {
++						if (!buffer_string_is_empty(srv->srvconf.pid_file) &&
++						    buffer_string_is_empty(srv->srvconf.changeroot)) {
+ 							if (0 != unlink(srv->srvconf.pid_file->ptr)) {
+ 								if (errno != EACCES && errno != EPERM) {
+ 									log_error_write(srv, __FILE__, __LINE__, "sbds",
+@@ -1542,8 +1541,8 @@ int main (int argc, char **argv) {
+ 		srv->joblist->used = 0;
+ 	}
+ 
+-	if (srv->srvconf.pid_file->used &&
+-	    srv->srvconf.changeroot->used == 0 &&
++	if (!buffer_string_is_empty(srv->srvconf.pid_file) &&
++	    buffer_string_is_empty(srv->srvconf.changeroot) &&
+ 	    0 == graceful_shutdown) {
+ 		if (0 != unlink(srv->srvconf.pid_file->ptr)) {
+ 			if (errno != EACCES && errno != EPERM) {
+diff --git a/src/stat_cache.c b/src/stat_cache.c
+index b63140e..dedea4b 100644
+--- a/src/stat_cache.c
++++ b/src/stat_cache.c
+@@ -222,8 +222,7 @@ static int stat_cache_attr_get(buffer *buf, char *name) {
+ 	buffer_string_prepare_copy(buf, 1023);
+ 	attrlen = buf->size - 1;
+ 	if(0 == (ret = attr_get(name, "Content-Type", buf->ptr, &attrlen, 0))) {
+-		buf->used = attrlen + 1;
+-		buf->ptr[attrlen] = '\0';
++		buffer_commit(buf, attrlen);
+ 	}
+ 	return ret;
+ }
+@@ -332,7 +331,7 @@ static int buffer_copy_dirname(buffer *dst, buffer *file) {
+ 
+ 	if (buffer_string_is_empty(file)) return -1;
+ 
+-	for (i = file->used - 1; i+1 > 0; i--) {
++	for (i = buffer_string_length(file); i > 0; i--) {
+ 		if (file->ptr[i] == '/') {
+ 			buffer_copy_string_len(dst, file->ptr, i);
+ 			return 0;
+@@ -499,7 +498,7 @@ handler_t stat_cache_get_entry(server *srv, connection *con, buffer *name, stat_
+ 
+ 	if (S_ISREG(st.st_mode)) {
+ 		/* fix broken stat/open for symlinks to reg files with appended slash on freebsd,osx */
+-		if (name->ptr[name->used-2] == '/') {
++		if (name->ptr[buffer_string_length(name) - 1] == '/') {
+ 			errno = ENOTDIR;
+ 			return HANDLER_ERROR;
+ 		}
+@@ -571,16 +570,15 @@ handler_t stat_cache_get_entry(server *srv, connection *con, buffer *name, stat_
+ 		 * we assume "/" can not be symlink, so
+ 		 * skip the symlink stuff if our path is /
+ 		 **/
+-		else if ((name->used > 2)) {
++		else if (buffer_string_length(name) > 1) {
+ 			buffer *dname;
+ 			char *s_cur;
+ 
+ 			dname = buffer_init();
+ 			buffer_copy_buffer(dname, name);
+ 
+-			while ((s_cur = strrchr(dname->ptr,'/'))) {
+-				*s_cur = '\0';
+-				dname->used = s_cur - dname->ptr + 1;
++			while ((s_cur = strrchr(dname->ptr, '/'))) {
++				buffer_string_set_length(dname, s_cur - dname->ptr);
+ 				if (dname->ptr == s_cur) {
+ #ifdef DEBUG_STAT_CACHE
+ 					log_error_write(srv, __FILE__, __LINE__, "s", "reached /");
+@@ -615,16 +613,19 @@ handler_t stat_cache_get_entry(server *srv, connection *con, buffer *name, stat_
+ #endif
+ 		/* xattr did not set a content-type. ask the config */
+ 		if (buffer_string_is_empty(sce->content_type)) {
++			size_t namelen = buffer_string_length(name);
++
+ 			for (k = 0; k < con->conf.mimetypes->used; k++) {
+ 				data_string *ds = (data_string *)con->conf.mimetypes->data[k];
+ 				buffer *type = ds->key;
++				size_t typelen = buffer_string_length(type);
+ 
+-				if (type->used == 0) continue;
++				if (buffer_is_empty(type)) continue;
+ 
+ 				/* check if the right side is the same */
+-				if (type->used > name->used) continue;
++				if (typelen > namelen) continue;
+ 
+-				if (0 == strncasecmp(name->ptr + name->used - type->used, type->ptr, type->used - 1)) {
++				if (0 == strncasecmp(name->ptr + namelen - typelen, type->ptr, typelen)) {
+ 					buffer_copy_buffer(sce->content_type, ds->value);
+ 					break;
+ 				}
+-- 
+2.4.5
+
