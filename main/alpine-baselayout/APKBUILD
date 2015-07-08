@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.3.1
-pkgrel=5
+pkgrel=6
 pkgdesc="Alpine base dir structure and init scripts"
 url="http://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -60,6 +60,7 @@ package() {
 		etc/crontabs \
 		etc/init.d \
 		etc/modprobe.d \
+		etc/modules-load.d \
 		etc/profile.d \
 		etc/network/if-down.d \
 		etc/network/if-post-down.d \
