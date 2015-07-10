@@ -14,6 +14,7 @@
 #include <err.h>
 #include <mntent.h>
 #include <stdio.h>
+#include <string.h>
 
 
 #ifdef DEBUG
