@@ -1,10 +1,10 @@
-#!/bin/bash
+#!/bin/sh
 
 # Allow the user to override command-line flags, bug #357629.
 # This is based on Debian's chromium-browser package, and is intended
 # to be consistent with Debian.
-for f in /etc/chromium/*; do
-    [[ -f ${f} ]] && source "${f}"
+for f in /etc/chromium/*.conf; do
+    [ -f ${f} ] && . "${f}"
 done
 
 # Prefer user defined CHROMIUM_USER_FLAGS (from env) over system
@@ -26,7 +26,7 @@ case ":$PATH:" in
     ;;
 esac
 
-if [[ ${EUID} == 0 && -O ${XDG_CONFIG_HOME:-${HOME}} ]]; then
+if [ $(id -u) -eq 0 ] && [ $(stat -c %u -L ${XDG_CONFIG_HOME:-${HOME}}) -eq 0 ]; then
 	# Running as root with HOME owned by root.
 	# Pass --user-data-dir to work around upstream failsafe.
 	CHROMIUM_FLAGS="--user-data-dir=${XDG_CONFIG_HOME:-${HOME}/.config}/chromium
@@ -34,6 +34,6 @@ if [[ ${EUID} == 0 && -O ${XDG_CONFIG_HOME:-${HOME}} ]]; then
 fi
 
 # Set the .desktop file name
-export CHROME_DESKTOP="chromium-browser-chromium.desktop"
+export CHROME_DESKTOP="chromium.desktop"
 
-exec -a "chromium-browser" "$PROGDIR/chrome" --extra-plugin-dir=/usr/lib/nsbrowser/plugins ${CHROMIUM_FLAGS} "$@"
+exec "$PROGDIR/chrome" --extra-plugin-dir=/usr/lib/nsbrowser/plugins ${CHROMIUM_FLAGS} "$@"
