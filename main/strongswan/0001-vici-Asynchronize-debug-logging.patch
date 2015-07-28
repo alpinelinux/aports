@@ -1,0 +1,169 @@
+From 856ea64129cdc7ee56969524d7abaaae08c22c6a Mon Sep 17 00:00:00 2001
+From: Martin Willi <martin@revosec.ch>
+Date: Thu, 2 Jul 2015 09:10:21 +0200
+Subject: [PATCH] vici: Asynchronize debug logging
+
+The vici logger uses the listener_t.log() callback to raise vici events.
+
+When doing so, it holds the bus lock as reader while acquiring the vici socket
+mutex (1). If at the same time the vici socket enables a writer, that thread
+tries to lock the watcher mutex (2). The watcher thread uses debugging while
+holding the lock, i.e. acquires the bus read lock (3).
+
+(1) bus.rlock -> vici.lock!
+(2) vici.lock -> watcher.lock!
+(3) watcher.lock -> bus.rlock!
+
+This all actually would resolve just fine, as we have a shared read lock on the
+bus. However, under Windows we seem to have a strict writer preference when
+acquiring the rwlock (4). This results in blocking read locks until any pending
+write lock can be fulfilled, and makes the constellation deadlock. The relevant
+threads are:
+
+Thread (1)
+6  0x71313d25 in wait_ at threading/windows/mutex.c:137
+7  0x7054c8a2 in find_entry at vici_socket.c:201
+8  0x7054d690 in send_ at vici_socket.c:624
+9  0x7054f6c1 in send_op at vici_dispatcher.c:119
+10 0x705502c1 in raise_event at vici_dispatcher.c:469
+12 0x704c3878 in log_cb at bus/bus.c:332
+13 0x712c7c3a in invoke_function at collections/linked_list.c:414
+14 0x704c3a63 in vlog at bus/bus.c:400
+15 0x704c3b36 in log_ at bus/bus.c:430
+18 0x70508f1f in process_response at sa/ikev2/task_manager_v2.c:664
+20 0x704f5430 in process_message at sa/ike_sa.c:1369
+21 0x704e3823 in execute at processing/jobs/process_message_job.c:74
+22 0x712e629f in process_job at processing/processor.c:235
+
+Thread (2)
+4  0x71313b61 in lock at threading/windows/mutex.c:66
+5  0x712e81fd in add at processing/watcher.c:441
+6  0x712e1ab9 in add_watcher at networking/streams/stream.c:213
+7  0x712e1b4d in on_write at networking/streams/stream.c:237
+8  0x7054d606 in _cb_enable_writer at vici_socket.c:609
+9  0x712e5e34 in execute at processing/jobs/callback_job.c:77
+10 0x712e629f in process_job at processing/processor.c:235
+
+Thread (3)
+3  0x71313f38 in read_lock at threading/windows/rwlock.c:74
+4  0x704c3971 in vlog at bus/bus.c:373
+5  0x704cc156 in dbg_bus at daemon.c:126
+6  0x712e7bf9 in watch at processing/watcher.c:316
+7  0x712e5e34 in execute at processing/jobs/callback_job.c:77
+8  0x712e629f in process_job at processing/processor.c:235
+
+Thread (4)
+3  0x71313f70 in write_lock at threading/windows/rwlock.c:82
+4  0x704c378b in remove_logger at bus/bus.c:290
+5  0x704cb284 in listener_unregister at control/controller.c:166
+6  0x713136cd in thread_cleanup_pop at threading/windows/thread.c:558
+8  0x704cb94e in initiate at control/controller.c:435
+9  0x70553996 in _cb_initiate at vici_control.c:187
+12 0x7054d200 in _cb_process_queue at vici_socket.c:508
+13 0x712e5e34 in execute at processing/jobs/callback_job.c:77
+14 0x712e629f in process_job at processing/processor.c:235
+
+To avoid such a situation, we dissolve the (1) lock sequence. It's actually
+never good practice to acquire shared locks during bus hooks, as it is
+problematic if we raise bus events while holding the lock. We do so by
+raising vici events for log message asynchronously, but of curse must keep
+log order as is using a synchronized queue.
+---
+ src/libcharon/plugins/vici/vici_logger.c | 48 +++++++++++++++++++++++++++++++-
+ 1 file changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/src/libcharon/plugins/vici/vici_logger.c b/src/libcharon/plugins/vici/vici_logger.c
+index cffd65b..6d3584e 100644
+--- a/src/libcharon/plugins/vici/vici_logger.c
++++ b/src/libcharon/plugins/vici/vici_logger.c
+@@ -18,6 +18,7 @@
+ 
+ #include <daemon.h>
+ #include <threading/mutex.h>
++#include <processing/jobs/callback_job.h>
+ 
+ typedef struct private_vici_logger_t private_vici_logger_t;
+ 
+@@ -42,11 +43,54 @@ struct private_vici_logger_t {
+ 	int recursive;
+ 
+ 	/**
++	 * List of messages to raise async events
++	 */
++	linked_list_t *queue;
++
++	/**
+ 	 * Mutex to synchronize logging
+ 	 */
+ 	mutex_t *mutex;
+ };
+ 
++/**
++ * Async callback to raise events for queued messages
++ */
++static job_requeue_t raise_events(private_vici_logger_t *this)
++{
++	vici_message_t *message;
++	u_int count;
++
++	this->mutex->lock(this->mutex);
++	count = this->queue->get_count(this->queue);
++	this->queue->remove_first(this->queue, (void**)&message);
++	this->mutex->unlock(this->mutex);
++
++	if (count > 0)
++	{
++		this->dispatcher->raise_event(this->dispatcher, "log", 0, message);
++	}
++	if (count > 1)
++	{
++		return JOB_REQUEUE_DIRECT;
++	}
++	return JOB_REQUEUE_NONE;
++}
++
++/**
++ * Queue a message for async processing
++ */
++static void queue_messsage(private_vici_logger_t *this, vici_message_t *message)
++{
++	this->queue->insert_last(this->queue, message);
++	if (this->queue->get_count(this->queue) == 1)
++	{
++		lib->processor->queue_job(lib->processor, (job_t*)
++					callback_job_create((callback_job_cb_t)raise_events,
++										this, NULL, NULL));
++	}
++}
++
+ METHOD(logger_t, log_, void,
+ 	private_vici_logger_t *this, debug_t group, level_t level, int thread,
+ 	ike_sa_t* ike_sa, const char *msg)
+@@ -75,7 +119,7 @@ METHOD(logger_t, log_, void,
+ 		message = builder->finalize(builder);
+ 		if (message)
+ 		{
+-			this->dispatcher->raise_event(this->dispatcher, "log", 0, message);
++			queue_messsage(this, message);
+ 		}
+ 	}
+ 	this->recursive--;
+@@ -101,6 +145,7 @@ METHOD(vici_logger_t, destroy, void,
+ 	private_vici_logger_t *this)
+ {
+ 	manage_commands(this, FALSE);
++	this->queue->destroy_offset(this->queue, offsetof(vici_message_t, destroy));
+ 	this->mutex->destroy(this->mutex);
+ 	free(this);
+ }
+@@ -121,6 +166,7 @@ vici_logger_t *vici_logger_create(vici_dispatcher_t *dispatcher)
+ 			.destroy = _destroy,
+ 		},
+ 		.dispatcher = dispatcher,
++		.queue = linked_list_create(),
+ 		.mutex = mutex_create(MUTEX_TYPE_RECURSIVE),
+ 	);
+ 
+-- 
+2.4.6
+
