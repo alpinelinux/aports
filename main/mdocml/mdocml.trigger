@@ -1,4 +1,4 @@
 #!/bin/sh
 
 exec /usr/sbin/makewhatis \
-	-a /usr/share/man -T utf8
+	-a -T utf8 /usr/share/man
