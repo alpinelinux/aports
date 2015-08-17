@@ -29,7 +29,9 @@ if (ovs_vsctl --version) > /dev/null 2>&1; then :; else
     exit 0
 fi
 
-if /etc/init.d/ovs-vswitchd status > /dev/null 2>&1; then :; else
+if ! /etc/init.d/ovs-vswitchd status &>/dev/null; then
+    /etc/init.d/ovs-modules start
+    /etc/init.d/ovsdb-server start
     /etc/init.d/ovs-vswitchd start
 fi
 
@@ -42,8 +44,8 @@ if [ "${MODE}" = "start" ]; then
                          ${OVS_EXTRA+-- $OVS_EXTRA}
 
                 if [ ! -z "${IF_OVS_PORTS}" ]; then
-#                    ifup --allow="${IFACE}" ${IF_OVS_PORTS}
-                    ifup  ${IF_OVS_PORTS}
+#                   ifup --allow="${IFACE}" ${IF_OVS_PORTS}
+                    ifup ${IF_OVS_PORTS}
                 fi
                 ;;
         OVSPort)
@@ -58,7 +60,7 @@ if [ "${MODE}" = "start" ]; then
                     "${IFACE}" ${IF_OVS_OPTIONS} -- set Interface "${IFACE}"\
                     type=internal ${OVS_EXTRA+-- $OVS_EXTRA}
 
-		ip link set dev "${IFACE}" up
+                ip link set dev "${IFACE}" up
                 ;;
         OVSBond)
                 ovs_vsctl -- --fake-iface add-bond "${IF_OVS_BRIDGE}"\
@@ -85,7 +87,7 @@ elif [ "${MODE}" = "stop" ]; then
     case "${IF_OVS_TYPE}" in
         OVSBridge)
                 if [ ! -z "${IF_OVS_PORTS}" ]; then
-#                    ifdown --allow="${IFACE}" ${IF_OVS_PORTS}
+#                   ifdown --allow="${IFACE}" ${IF_OVS_PORTS}
                     ifdown ${IF_OVS_PORTS}
                 fi
 
