@@ -1,0 +1,307 @@
+diff --git a/src/dnssec/Makefile.am b/src/dnssec/Makefile.am
+index 46b4377..f6398a6 100644
+--- a/src/dnssec/Makefile.am
++++ b/src/dnssec/Makefile.am
+@@ -38,6 +38,8 @@ libshared_la_SOURCES = \
+ 	shared/pem.h \
+ 	shared/shared.h \
+ 	shared/strtonum.h \
++	shared/timestamp.c \
++	shared/timestamp.h \
+ 	shared/wire.h
+ 
+ libdnssec_la_CPPFLAGS = \
+diff --git a/src/dnssec/lib/kasp/dir/json.c b/src/dnssec/lib/kasp/dir/json.c
+index 333374a..a7f3aa9 100644
+--- a/src/dnssec/lib/kasp/dir/json.c
++++ b/src/dnssec/lib/kasp/dir/json.c
+@@ -23,9 +23,7 @@
+ #include "key.h"
+ #include "shared.h"
+ #include "strtonum.h"
+-
+-// ISO 8610
+-#define TIME_FORMAT "%Y-%m-%dT%H:%M:%S%z"
++#include "timestamp.h"
+ 
+ int decode_ignore(_unused_ const json_t *value, _unused_ void *result)
+ {
+@@ -279,14 +277,10 @@ int decode_time(const json_t *value, void *result)
+ 	}
+ 
+ 	const char *time_str = json_string_value(value);
+-	struct tm tm = { 0 };
+-	char *end = strptime(time_str, TIME_FORMAT, &tm);
+-	if (end == NULL || *end != '\0') {
++	if (!timestamp_read(time_str, time_ptr)) {
+ 		return DNSSEC_CONFIG_MALFORMED;
+ 	}
+ 
+-	*time_ptr = timegm(&tm);
+-
+ 	return DNSSEC_EOK;
+ }
+ 
+@@ -302,14 +296,8 @@ int encode_time(const void *value, json_t **result)
+ 		return DNSSEC_EOK;
+ 	}
+ 
+-	struct tm tm = { 0 };
+-	if (!gmtime_r(time_ptr, &tm)) {
+-		return DNSSEC_CONFIG_MALFORMED;
+-	}
+-
+ 	char buffer[128] = { 0 };
+-	int written = strftime(buffer, sizeof(buffer), TIME_FORMAT, &tm);
+-	if (written == 0) {
++	if (!timestamp_write(buffer, sizeof(buffer), *time_ptr)) {
+ 		return DNSSEC_CONFIG_MALFORMED;
+ 	}
+ 
+diff --git a/src/dnssec/shared/timestamp.c b/src/dnssec/shared/timestamp.c
+new file mode 100644
+index 0000000..37279a8
+--- /dev/null
++++ b/src/dnssec/shared/timestamp.c
+@@ -0,0 +1,96 @@
++/*  Copyright (C) 2015 CZ.NIC, z.s.p.o. <knot-dns@labs.nic.cz>
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include <assert.h>
++#include <stdbool.h>
++#include <time.h>
++
++#include "shared.h"
++
++/*
++ * POSIX strftime supports '%z', strptime doesn't.
++ */
++#define TIME_FORMAT "%Y-%m-%dT%H:%M:%S"
++
++/*!
++ * Read time zone offset in +hhmm or -hhmm format.
++ *
++ * Format written by '%z' specifier in \ref strftime.
++ */
++static bool read_timezone(const char *buffer, int *offset)
++{
++	assert(buffer);
++
++	if (strlen(buffer) != 5) {
++		return false;
++	}
++
++	char sign;
++	unsigned hours, mins;
++	if (sscanf(buffer, "%c%2u%2u", &sign, &hours, &mins) != 3) {
++		return false;
++	}
++
++	if (sign != '+' && sign != '-') {
++		return false;
++	}
++
++	if (hours > 23 || mins > 59) {
++		return false;
++	}
++
++	*offset = (sign == '+' ? 1 : -1) * (hours * 3600 + mins * 60);
++
++	return true;
++}
++
++_public_
++bool timestamp_write(char *buffer, size_t size, time_t timestamp)
++{
++	if (!buffer) {
++		return false;
++	}
++
++	struct tm tm = { 0 };
++	if (!gmtime_r(&timestamp, &tm)) {
++		return false;
++	}
++
++	return strftime(buffer, size, TIME_FORMAT "+0000", &tm) != 0;
++}
++
++_public_
++bool timestamp_read(const char *buffer, time_t *timestamp_ptr)
++{
++	if (!buffer || !timestamp_ptr) {
++		return false;
++	}
++
++	struct tm tm = { 0 };
++	const char *timezone = strptime(buffer, TIME_FORMAT, &tm);
++	if (timezone == NULL) {
++		return false;
++	}
++
++	int gmtoff = 0;
++	if (!read_timezone(timezone, &gmtoff)) {
++		return false;
++	}
++
++	*timestamp_ptr = timegm(&tm) - gmtoff;
++
++	return true;
++}
+diff --git a/src/dnssec/shared/timestamp.h b/src/dnssec/shared/timestamp.h
+new file mode 100644
+index 0000000..2cec029
+--- /dev/null
++++ b/src/dnssec/shared/timestamp.h
+@@ -0,0 +1,46 @@
++/*  Copyright (C) 2015 CZ.NIC, z.s.p.o. <knot-dns@labs.nic.cz>
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#pragma once
++
++#include <stdbool.h>
++#include <time.h>
++
++/*
++ * The ISO 8610 'YYYY-MM-DDThh:mm:ss+zzzz' format is used.
++ */
++
++/*!
++ * Write time stamp into a string buffer.
++ *
++ * \param buffer     Buffer to write time stamp into.
++ * \param size       Size of the output buffer.
++ * \param timestamp  Time stamp value to be written.
++ *
++ * \return Time stamp was written successfully.
++ *
++ */
++bool timestamp_write(char *buffer, size_t size, time_t timestamp);
++
++/*!
++ * Read a time stamp from a string buffer.
++ *
++ * \param[in]  buffer     Buffer to read time stamp from.
++ * \param[out] timestamp  Read time stamp value.
++ *
++ * \return Time stamp was read successfully.
++ */
++bool timestamp_read(const char *buffer, time_t *timestamp);
+diff --git a/src/dnssec/tests/Makefile.am b/src/dnssec/tests/Makefile.am
+index 0d81130..3677eb5 100644
+--- a/src/dnssec/tests/Makefile.am
++++ b/src/dnssec/tests/Makefile.am
+@@ -43,6 +43,7 @@ check_PROGRAMS = \
+ 	shared_bignum	\
+ 	shared_dname	\
+ 	shared_strtonum	\
++	shared_timestamp \
+ 	shared_wire	\
+ 	tsig
+ 
+diff --git a/src/dnssec/tests/shared_timestamp.c b/src/dnssec/tests/shared_timestamp.c
+new file mode 100644
+index 0000000..6024c80
+--- /dev/null
++++ b/src/dnssec/tests/shared_timestamp.c
+@@ -0,0 +1,75 @@
++/*  Copyright (C) 2015 CZ.NIC, z.s.p.o. <knot-dns@labs.nic.cz>
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include <string.h>
++#include <tap/basic.h>
++
++#include "timestamp.h"
++
++int main(int argc, char *argv[])
++{
++	plan_lazy();
++
++	char buffer[128] = { 0 };
++
++	ok(timestamp_write(NULL, 0, 0) == false,
++	   "timestamp_write: no buffer");
++	ok(timestamp_write(buffer, 10, 0) == false,
++	   "timestamp_write: small buffer");
++	ok(timestamp_write(buffer, sizeof(buffer), 0) &&
++	   strcmp(buffer, "1970-01-01T00:00:00+0000") == 0,
++	   "timestamp_write: epoch begin");
++	ok(timestamp_write(buffer, sizeof(buffer), 1439554225) &&
++	   strcmp(buffer, "2015-08-14T12:10:25+0000") == 0,
++	   "timestamp_write: date in past");
++	ok(timestamp_write(buffer, sizeof(buffer), 2147483646) &&
++	   strcmp(buffer, "2038-01-19T03:14:06+0000") == 0,
++	   "timestamp_write: date in future (likely)");
++
++	time_t ts = 0;
++
++	ok(timestamp_read(NULL, &ts) == false,
++	   "timestamp_read: no buffer");
++	ok(timestamp_read("", NULL) == false,
++	   "timestamp_read: no output");
++	ok(timestamp_read("", &ts) == false,
++	   "timestamp_read: empty input");
++	ok(timestamp_read("1970-01-01T00:00:00", &ts) == false,
++	   "timestamp_read: missing time zone");
++	ok(timestamp_read("1970-01-01T00:00:00+000", &ts) == false,
++	   "timestamp_read: malformed time zone");
++	ok(timestamp_read("1970-01-01T00:00:00+2400", &ts) == false,
++	   "timestamp_read: malformed time zone hours");
++	ok(timestamp_read("1970-01-01T00:00:00+0090", &ts) == false,
++	   "timestamp_read: malformed time zone minuts");
++	ok(timestamp_read("1970-01-01T00:00:01+0000", &ts) && ts == 1,
++	   "timestamp_read: first second since epoch");
++	ok(timestamp_read("2009-02-13T23:31:31+0000", &ts) && ts == 1234567891,
++	   "timestamp_read: date in past");
++	ok(timestamp_read("2034-05-05T01:24:20+0000", &ts) && ts == 2030405060,
++	   "timestamp_read: date in future (likely)");
++
++	ok(timestamp_read("2015-08-14T14:25:46+0200", &ts) &&
++	   timestamp_write(buffer, sizeof(buffer), ts) &&
++	   strcmp(buffer, "2015-08-14T12:25:46+0000") == 0,
++	   "timestamp convert time zone (east)");
++	ok(timestamp_read("2015-08-14T10:19:17-0230", &ts) &&
++	   timestamp_write(buffer, sizeof(buffer), ts) &&
++	   strcmp(buffer, "2015-08-14T12:49:17+0000") == 0,
++	   "timestamp convert time zone (west)");
++
++	return 0;
++}
