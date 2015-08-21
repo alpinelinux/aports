@@ -1,8 +1,8 @@
-all: mkbootimg fastboot adb
+all: mkbootimg fastboot adb mksdcard
 
 install:
 	install -m755 -d $(DESTDIR)/usr/bin
-	install -m755 -t $(DESTDIR)/usr/bin mkbootimg fastboot adb
+	install -m755 -t $(DESTDIR)/usr/bin mkbootimg fastboot adb mksdcard
 
 clean:
 	rm -f **/*.o
@@ -99,3 +99,12 @@ FASTBOOT_LIBS += -lz -ldl -lpcre
 
 fastboot: $(FASTBOOT_SRCS)
 	$(CC) -o $@ $(CFLAGS) $(FASTBOOT_CFLAGS) $(LDFLAGS) $(FASTBOOT_SRCS) $(FASTBOOT_LIBS)
+
+
+MKSDCARD_SRCS += $(wildcard  sdk/emulator/mksdcard/src/source/*.c)
+
+mksdcard: $(MKSDCARD_SRCS)
+	$(CC) -o $@ $(CFLAGS) $(MKSDCARD_CFLAGS) $(LDFLAGS) $(MKSDCARD_SRCS) $(MKSDCARD_LIBS)
+
+
+
