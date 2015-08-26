@@ -11,7 +11,7 @@ abuildrepo	?= ~/.cache/abuild
 SCRIPTS		:= abuild abuild-keygen abuild-sign newapkbuild \
 		   abump apkgrel buildlab apkbuild-cpan checkapk \
 		   apkbuild-gem-resolver
-USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo
+USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo abuild-fetch
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
 AUTOTOOLS_TOOLCHAIN_FILES := config.sub
@@ -47,6 +47,7 @@ LIBS-abuild-tar = $(SSL_LIBS)
 CFLAGS-abuild-tar = $(SSL_CFLAGS)
 
 OBJS-abuild-sudo = abuild-sudo.o
+OBJS-abuild-fetch = abuild-fetch.o
 
 .SUFFIXES:	.sh.in .in
 %.sh: %.sh.in
@@ -71,6 +72,9 @@ abuild-sudo: abuild-sudo.o
 	$(LINK)
 
 abuild-tar: abuild-tar.o
+	$(LINK)
+
+abuild-fetch: abuild-fetch.o
 	$(LINK)
 
 abuild-tar.static: abuild-tar.o
