@@ -144,9 +144,14 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 
 	bufsz = size;
 	if (size > 128 * 1024) {
-		if (size != APK_SPLICE_ALL && ftruncate(fd, size) == 0)
-			mmapbase = mmap(NULL, size, PROT_READ | PROT_WRITE,
-					MAP_SHARED, fd, 0);
+		if (size != APK_SPLICE_ALL) {
+			r = posix_fallocate(fd, 0, size);
+			if (r == 0)
+				mmapbase = mmap(NULL, size, PROT_READ | PROT_WRITE,
+						MAP_SHARED, fd, 0);
+			else if (r != ENOSYS)
+				return -r;
+		}
 		if (bufsz > 2*1024*1024)
 			bufsz = 2*1024*1024;
 		buf = mmapbase;
