@@ -2294,7 +2294,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 	apk_blob_t name = APK_BLOB_STR(ae->name), bdir, bfile;
 	struct apk_db_dir_instance *diri = ctx->diri;
 	struct apk_db_file *file;
-	int r, type = APK_SCRIPT_INVALID;
+	int ret = 0, r, type = APK_SCRIPT_INVALID;
 
 	r = apk_sign_ctx_process_file(&ctx->sctx, ae, is);
 	if (r <= 0)
@@ -2458,6 +2458,8 @@ static int apk_db_install_archive_entry(void *_ctx,
 		case -ENOTSUP:
 			ipkg->broken_xattr = 1;
 			break;
+		case -ENOSPC:
+			ret = r;
 		default:
 			ipkg->broken_files = 1;
 			break;
@@ -2475,7 +2477,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 	}
 	ctx->installed_size += ctx->current_file_size;
 
-	return 0;
+	return ret;
 }
 
 static void apk_db_purge_pkg(struct apk_database *db,
