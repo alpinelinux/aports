@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.3.2
-pkgrel=0
+pkgrel=1
 pkgdesc="Alpine base dir structure and init scripts"
 url="http://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -89,6 +89,7 @@ package() {
 		usr/local/share \
 		usr/share \
 		var/cache/misc \
+		var/empty \
 		var/lib/misc \
 		var/lock/subsys \
 		var/log \
