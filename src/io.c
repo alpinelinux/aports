@@ -149,7 +149,7 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 			if (r == 0)
 				mmapbase = mmap(NULL, size, PROT_READ | PROT_WRITE,
 						MAP_SHARED, fd, 0);
-			else if (r != ENOSYS)
+			else if (r == EBADF || r == EFBIG || r == ENOSPC || r == EIO)
 				return -r;
 		}
 		if (bufsz > 2*1024*1024)
