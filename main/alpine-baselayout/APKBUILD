@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=2.3.2
-pkgrel=1
+pkgrel=2
 pkgdesc="Alpine base dir structure and init scripts"
 url="http://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -103,7 +103,7 @@ package() {
 	install -m755 "$_builddir"/mkmntdirs "$pkgdir"/sbin/mkmntdirs \
 		|| return 1
 
-	install -m644 "$srcdir"/crontab "$pkgdir"/etc/crontabs/root || return 1
+	install -m600 "$srcdir"/crontab "$pkgdir"/etc/crontabs/root || return 1
 	install -m644 "$srcdir"/color_prompt "$pkgdir"/etc/profile.d/ \
 		|| return 1
 	install -m644 \
