@@ -15,6 +15,7 @@ function m.postbuild(aport, success, repodest, arch, logfile)
 		local topic = ("build/%s/errors"):format(hostname)
 		local payload =	json.encode{
 			pkgname = aport.pkgname,
+			hostname = hostname,
 			logurl = ("%s/%s/%s-%s-r%s.log"):format(
 					urlprefix,
 					(string.match(aport.dir,"[^/]+/[^/]+$")),
