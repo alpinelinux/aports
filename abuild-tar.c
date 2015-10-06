@@ -284,6 +284,8 @@ static int do_it(const EVP_MD *md, int cut)
 	size_t size, aligned_size;
 	int dohash = 0, r, ret = 1;
 
+	memset(&paxhdr, 0, sizeof(paxhdr));
+
 	if (md) snprintf(checksumhdr, sizeof(checksumhdr), "APK-TOOLS.checksum.%s", EVP_MD_name(md));
 
 	do {
