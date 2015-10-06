@@ -8,6 +8,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -17,6 +18,7 @@
 #include <string.h>
 
 #include <openssl/evp.h>
+#include <openssl/engine.h>
 
 #ifndef VERSION
 #define VERSION ""
