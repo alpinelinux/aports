@@ -12,6 +12,7 @@
 #include <malloc.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 #include "apk_blob.h"
 #include "apk_hash.h"
