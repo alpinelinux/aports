@@ -283,6 +283,7 @@ int main(int a, char **v)
 		printf("Failed to open temporary file %s for ca bundle\n", tmpfile);
 		exit(0);
 	}
+	fchmod(fd, 0644);
 
 	/* Handle global CA certs from config file */
 	file_readline(CERTSCONF, calinks, fd);
@@ -324,11 +325,10 @@ int main(int a, char **v)
 	int nullfd = open("/dev/null", O_WRONLY);
 	if (nullfd == -1)
 		return 0;
-
 	if (dup2(nullfd, STDOUT_FILENO) == -1)
 		return 0;
 
-	char* c_rehash_args[] = { "/usr/bin/c_rehash", ETCCERTSDIR, ">", "/dev/null", 0 };
+	char* c_rehash_args[] = { "/usr/bin/c_rehash", ETCCERTSDIR, 0 };
 	execve(c_rehash_args[0], c_rehash_args, NULL);
 
 	return 0;
