@@ -9,7 +9,7 @@ if [ -z "${1}" -o -z "${2}" ]; then
 	logger -t wpa_cli "this script should be called from wpa_cli(8)"
 	exit 1
 elif ! [ -x "${IFUP}" -a -x "${IFDOWN}" ]; then
-	logger -t wpa_cli "/sbin/ifup or /sbin/ifdown doesn't exist"
+	logger -t wpa_cli "${IFUP} or ${IFDOWN} doesn't exist"
 	exit 1
 fi
 
