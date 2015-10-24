@@ -831,10 +831,10 @@ index 04dc99c..14c728f 100755
  if [ -n "$list_features" ]; then
 diff --git a/nlplug-findfs.c b/nlplug-findfs.c
 new file mode 100644
-index 0000000..f1a58fd
+index 0000000..5f6dc5e
 --- /dev/null
 +++ b/nlplug-findfs.c
-@@ -0,0 +1,779 @@
+@@ -0,0 +1,888 @@
 +
 +/*
 + * Copy me if you can.
@@ -860,6 +860,7 @@ index 0000000..f1a58fd
 +#include <unistd.h>
 +
 +#include <sys/eventfd.h>
++#include <sys/signalfd.h>
 +#include <sys/mount.h>
 +#include <sys/socket.h>
 +#include <sys/stat.h>
@@ -882,6 +883,7 @@ index 0000000..f1a58fd
 +#define FOUND_APKOVL	0x4
 +
 +static int dodebug;
++static char *default_envp[2];
 +char *argv0;
 +
 +#if defined(DEBUG)
@@ -902,6 +904,107 @@ index 0000000..f1a58fd
 +#define dbg(...)
 +#endif
 +
++#define envcmp(env, key) (strncmp(env, key "=", strlen(key "=")) == 0)
++
++
++static char **clone_array(char *const *const a)
++{
++	size_t i, s;
++	char **c, *p;
++
++	if (!a) return 0;
++
++	s = sizeof(char*);
++	for (i = 0; a[i]; i++)
++		s += sizeof(char*) + strlen(a[i]) + 1;
++	c = malloc(s);
++	p = (char*)(c + i + 1);
++	for (i = 0; a[i]; i++) {
++		c[i] = p;
++		p += sprintf(p, "%s", a[i]) + 1;
++	}
++	c[i] = 0;
++	return c;
++}
++
++struct spawn_task {
++	struct spawn_task *next;
++	char **argv, **envp;
++};
++struct spawn_manager {
++	int num_running;
++	int max_running;
++	struct spawn_task *first, *last;
++};
++
++static struct spawn_manager spawnmgr;
++
++static void spawn_execute(struct spawn_manager *mgr, char **argv, char **envp)
++{
++	pid_t pid;
++
++	dbg("[%d/%d] running %s", mgr->num_running+1, mgr->max_running, argv[0]);
++	if (!(pid = fork())) {
++		if (execve(argv[0], argv, envp ? envp : default_envp) < 0)
++			err(1, argv[0]);
++		exit(0);
++	}
++	if (pid < 0)
++		err(1,"fork");
++
++	mgr->num_running++;
++}
++
++static void spawn_queue(struct spawn_manager *mgr, char **argv, char **envp)
++{
++	struct spawn_task *task;
++
++	task = malloc(sizeof *task);
++	if (!task) return;
++	*task = (struct spawn_task) {
++		.next = NULL,
++		.argv = clone_array(argv),
++		.envp = clone_array(envp),
++	};
++	if (mgr->last) {
++		mgr->last->next = task;
++		mgr->last = task;
++	} else {
++		mgr->first = mgr->last = task;
++	}
++}
++
++static void spawn_command(struct spawn_manager *mgr, char **argv, char **envp)
++{
++	if (!mgr->max_running)
++		mgr->max_running = sysconf(_SC_NPROCESSORS_ONLN);
++	if (mgr->num_running < mgr->max_running)
++		spawn_execute(mgr, argv, envp);
++	else
++		spawn_queue(mgr, argv, envp);
++}
++
++static void spawn_reap(struct spawn_manager *mgr, pid_t pid)
++{
++	mgr->num_running--;
++	if (mgr->first && mgr->num_running < mgr->max_running) {
++		struct spawn_task *task = mgr->first;
++		if (task->next)
++			mgr->first = task->next;
++		else
++			mgr->first = mgr->last = NULL;
++		spawn_execute(mgr, task->argv, task->envp);
++		free(task->argv);
++		free(task->envp);
++		free(task);
++	}
++}
++
++static int spawn_active(struct spawn_manager *mgr)
++{
++	return mgr->num_running || mgr->first;
++}
++
 +struct uevent {
 +	char *buf;
 +	size_t bufsize;
@@ -914,6 +1017,7 @@ index 0000000..f1a58fd
 +	char *minor;
 +	char *driver;
 +	char devnode[256];
++	char *envp[64];
 +};
 +
 +struct ueventconf {
@@ -932,14 +1036,13 @@ index 0000000..f1a58fd
 +
 +static void sighandler(int sig)
 +{
-+	switch(sig) {
++	switch (sig) {
 +	case SIGHUP:
 +	case SIGINT:
 +	case SIGQUIT:
 +	case SIGABRT:
 +	case SIGTERM:
 +		exit(0);
-+		break;
 +	default:
 +		break;
 +	}
@@ -952,6 +1055,7 @@ index 0000000..f1a58fd
 +	signal(SIGQUIT, sighandler);
 +	signal(SIGABRT, sighandler);
 +	signal(SIGTERM, sighandler);
++	signal(SIGCHLD, sighandler);
 +	signal(SIGPIPE, SIG_IGN);
 +}
 +
@@ -989,24 +1093,7 @@ index 0000000..f1a58fd
 +	return fd;
 +}
 +
-+void run_child(char **argv)
-+{
-+	pid_t pid;
-+
-+	if (!(pid = fork())) {
-+		dbg("running %s", argv[0]);
-+		if (execv(argv[0], argv) < 0)
-+			err(1, argv[0]);
-+		exit(0);
-+	}
-+	if (pid < 0)
-+		err(1,"fork");
-+
-+	waitpid(pid, NULL, 0);
-+}
-+
-+
-+int load_kmod(const char *modalias)
++static int load_kmod(const char *modalias)
 +{
 +	static struct kmod_ctx *ctx = NULL;
 +	struct kmod_list *list = NULL;
@@ -1049,7 +1136,7 @@ index 0000000..f1a58fd
 +	return count;
 +}
 +
-+void start_mdadm(char *devnode)
++static void start_mdadm(char *devnode)
 +{
 +	char *mdadm_argv[] = {
 +		"/sbin/mdadm",
@@ -1058,27 +1145,27 @@ index 0000000..f1a58fd
 +		devnode,
 +		NULL
 +	};
-+	run_child(mdadm_argv);
++	spawn_command(&spawnmgr, mdadm_argv, 0);
 +}
 +
-+void start_lvm2(char *devnode)
++static void start_lvm2(char *devnode)
 +{
 +	char *lvm2_argv[] = {
 +		"/sbin/lvm", "vgchange",
 +		"--activate" , "ay", "--noudevsync", "--sysinit",
 +		NULL
 +	};
-+	run_child(lvm2_argv);
++	spawn_command(&spawnmgr, lvm2_argv, 0);
 +}
 +
-+void start_cryptsetup(char *devnode, char *cryptdm)
++static void start_cryptsetup(char *devnode, char *cryptdm)
 +{
 +	char *cryptsetup_argv[] = {
 +		"/sbin/cryptsetup", "luksOpen",
 +		devnode, cryptdm ? cryptdm : "crypdm", NULL
 +	};
 +	load_kmod("dm-crypt");
-+	run_child(cryptsetup_argv);
++	spawn_command(&spawnmgr, cryptsetup_argv, 0);
 +}
 +
 +static int is_mounted(const char *devnode) {
@@ -1105,7 +1192,7 @@ index 0000000..f1a58fd
 +};
 +
 +/* pathbuf needs hold PATH_MAX chars */
-+void recurse_dir(char *pathbuf, struct recurse_opts *opts)
++static void recurse_dir(char *pathbuf, struct recurse_opts *opts)
 +{
 +	DIR *d = opendir(pathbuf);
 +	struct dirent *entry;
@@ -1163,7 +1250,7 @@ index 0000000..f1a58fd
 +	int count;
 +};
 +
-+void bootrepo_cb(const char *path, const void *data)
++static void bootrepo_cb(const char *path, const void *data)
 +{
 +	struct bootrepos *repos = (struct bootrepos *)data;
 +	int fd = open(repos->outfile, O_WRONLY | O_CREAT | O_APPEND);
@@ -1256,8 +1343,8 @@ index 0000000..f1a58fd
 +	return rc;
 +}
 +
-+int searchdev(char *devname, const char *searchdev, char *bootrepos,
-+	      const char *apkovls)
++static int searchdev(char *devname, const char *searchdev, char *bootrepos,
++		     const char *apkovls)
 +{
 +	static blkid_cache cache = NULL;
 +	char *type = NULL, *label = NULL, *uuid = NULL;
@@ -1320,7 +1407,7 @@ index 0000000..f1a58fd
 +	return rc;
 +}
 +
-+int dispatch_uevent(struct uevent *ev, struct ueventconf *conf)
++static int dispatch_uevent(struct uevent *ev, struct ueventconf *conf)
 +{
 +	static int timeout_increment = USB_STORAGE_TIMEOUT;
 +
@@ -1344,7 +1431,7 @@ index 0000000..f1a58fd
 +
 +	} else if (ev->devname != NULL) {
 +		if (conf->program_argv[0] != NULL) {
-+			run_child(conf->program_argv);
++			spawn_command(&spawnmgr, conf->program_argv, ev->envp);
 +			conf->fork_count++;
 +		}
 +
@@ -1367,21 +1454,21 @@ index 0000000..f1a58fd
 +	return 0;
 +}
 +
-+int process_uevent(char *buf, const size_t len, struct ueventconf *conf)
++static int process_uevent(char *buf, const size_t len, struct ueventconf *conf)
 +{
 +	struct uevent ev;
 +
-+	int i, slen = 0;
++	int i, nenvp, slen = 0;
 +	char *key, *value;
 +
 +	memset(&ev, 0, sizeof(ev));
 +	ev.buf = buf;
 +	ev.bufsize = len;
-+	clearenv();
-+	setenv("PATH", "/sbin:/bin", 1);
++
++	nenvp = sizeof(default_envp) / sizeof(default_envp[0]) - 1;
++	memcpy(&ev.envp, default_envp, nenvp * sizeof(default_envp[0]));
 +
 +	for (i = 0; i < len; i += slen + 1) {
-+
 +		key = buf + i;
 +		value = strchr(key, '=');
 +		slen = strlen(buf+i);
@@ -1392,43 +1479,42 @@ index 0000000..f1a58fd
 +			continue;
 +		}
 +
-+		if (!slen)
++		if (!slen || !value)
 +			continue;
 +
-+		value[0] = '\0';
 +		value++;
-+
-+		if (strcmp(key, "MODALIAS") == 0) {
++		if (envcmp(key, "MODALIAS")) {
 +			ev.modalias = value;
-+		} else if (strcmp(key, "ACTION") == 0) {
++		} else if (envcmp(key, "ACTION")) {
 +			ev.action = value;
-+		} else if (strcmp(key, "SUBSYSTEM") == 0) {
++		} else if (envcmp(key, "SUBSYSTEM")) {
 +			ev.subsystem = value;
-+		} else if (strcmp(key, "DEVNAME") == 0) {
++		} else if (envcmp(key, "DEVNAME")) {
 +			ev.devname = value;
-+		} else if (strcmp(key, "MAJOR") == 0) {
++		} else if (envcmp(key, "MAJOR")) {
 +			ev.major = value;
-+		} else if (strcmp(key, "MINOR") == 0) {
++		} else if (envcmp(key, "MINOR")) {
 +			ev.minor = value;
-+		} else if (strcmp(key, "DRIVER") == 0) {
++		} else if (envcmp(key, "DRIVER")) {
 +			ev.driver = value;
 +		}
 +
-+		if (strcmp(key, "PATH")) {
-+			setenv(key, value, 1);
-+		}
++		if (!envcmp(key, "PATH"))
++			ev.envp[nenvp++]= key;
 +	}
++	ev.envp[nenvp++] = 0;
++
 +	return dispatch_uevent(&ev, conf);
 +}
 +
-+void trigger_uevent_cb(const char *path, const void *data)
++static void trigger_uevent_cb(const char *path, const void *data)
 +{
 +	int fd = open(path, O_WRONLY);
 +	write(fd, "add", 3);
 +	close(fd);
 +}
 +
-+void *trigger_thread(void *data)
++static void *trigger_thread(void *data)
 +{
 +	int fd = *(int *)data;
 +	uint64_t ok = 1;
@@ -1446,7 +1532,7 @@ index 0000000..f1a58fd
 +	return NULL;
 +}
 +
-+void usage(int rc)
++static void usage(int rc)
 +{
 +	printf("coldplug system til given device is found\n"
 +	"usage: %s [options] DEVICE\n"
@@ -1468,15 +1554,21 @@ index 0000000..f1a58fd
 +
 +int main(int argc, char *argv[])
 +{
-+	struct pollfd fds[2];
-+	int numfds = 2;
++	struct pollfd fds[3];
++	int numfds = 3;
 +	int r;
 +	struct ueventconf conf;
 +	int event_count = 0;
-+	size_t total_bytes;
++	size_t total_bytes = 0;
 +	int found = 0, trigger_running = 0;
 +	char *program_argv[2] = {0,0};
 +	pthread_t tid;
++	sigset_t sigchldmask;
++
++	for (r = 0; environ[r]; r++) {
++		if (envcmp(environ[r], "PATH"))
++			default_envp[0] = environ[r];
++	}
 +
 +	memset(&conf, 0, sizeof(conf));
 +	conf.program_argv = program_argv;
@@ -1521,87 +1613,106 @@ index 0000000..f1a58fd
 +		conf.search_device = argv[0];
 +
 +	initsignals();
++	sigemptyset(&sigchldmask);
++	sigaddset(&sigchldmask, SIGCHLD);
++	sigprocmask(SIG_BLOCK, &sigchldmask, NULL);
 +
 +	fds[0].fd = init_netlink_socket();
 +	fds[0].events = POLLIN;
 +
-+	fds[1].fd = eventfd(0, EFD_CLOEXEC);
++	fds[1].fd = signalfd(-1, &sigchldmask, SFD_NONBLOCK|SFD_CLOEXEC);
 +	fds[1].events = POLLIN;
 +
-+	pthread_create(&tid, NULL, trigger_thread, &fds[1].fd);
++	fds[2].fd = eventfd(0, EFD_CLOEXEC);
++	fds[2].events = POLLIN;
++	pthread_create(&tid, NULL, trigger_thread, &fds[2].fd);
 +	trigger_running = 1;
 +
 +	while (1) {
-+		size_t len;
-+		struct iovec iov;
-+		char cbuf[CMSG_SPACE(sizeof(struct ucred))];
-+		char buf[16384];
-+		struct cmsghdr *chdr;
-+		struct ucred *cred;
-+		struct msghdr hdr;
-+		struct sockaddr_nl cnls;
-+
-+		r = poll(fds, numfds, trigger_running ? -1 : conf.timeout);
-+		if (r == -1)
++		r = poll(fds, numfds, (spawn_active(&spawnmgr) || trigger_running) ? -1 : conf.timeout);
++		if (r == -1) {
++			if (errno == EINTR || errno == ERESTART)
++				continue;
 +			err(1, "poll");
-+
++		}
 +		if (r == 0) {
 +			dbg("exit due to timeout");
 +			break;
 +		}
 +
-+		if (numfds > 1 && fds[1].revents & POLLIN) {
-+			close(fds[1].fd);
-+			fds[1].fd = -1;
-+			numfds--;
-+			trigger_running = 0;
-+			pthread_join(tid, NULL);
-+		}
++		if (fds[0].revents & POLLIN) {
++			size_t len;
++			struct iovec iov;
++			char cbuf[CMSG_SPACE(sizeof(struct ucred))];
++			char buf[16384];
++			struct cmsghdr *chdr;
++			struct ucred *cred;
++			struct msghdr hdr;
++			struct sockaddr_nl cnls;
 +
-+		if (!(fds[0].revents & POLLIN))
-+			continue;
++			iov.iov_base = &buf;
++			iov.iov_len = sizeof(buf);
++			memset(&hdr, 0, sizeof(hdr));
++			hdr.msg_iov = &iov;
++			hdr.msg_iovlen = 1;
++			hdr.msg_control = cbuf;
++			hdr.msg_controllen = sizeof(cbuf);
++			hdr.msg_name = &cnls;
++			hdr.msg_namelen = sizeof(cnls);
 +
-+		iov.iov_base = &buf;
-+		iov.iov_len = sizeof(buf);
-+		memset(&hdr, 0, sizeof(hdr));
-+		hdr.msg_iov = &iov;
-+		hdr.msg_iovlen = 1;
-+		hdr.msg_control = cbuf;
-+		hdr.msg_controllen = sizeof(cbuf);
-+		hdr.msg_name = &cnls;
-+		hdr.msg_namelen = sizeof(cnls);
-+
-+		len = recvmsg(fds[0].fd, &hdr, 0);
-+		if (len < 0) {
-+			if (errno == EINTR)
++			len = recvmsg(fds[0].fd, &hdr, 0);
++			if (len < 0) {
++				if (errno == EINTR)
++					continue;
++				err(1, "recvmsg");
++			}
++			if (len < 32 || len >= sizeof(buf))
 +				continue;
-+			err(1, "recvmsg");
-+		}
-+		if (len < 32 || len >= sizeof(buf))
-+			continue;
 +
-+		total_bytes += len;
-+		chdr = CMSG_FIRSTHDR(&hdr);
-+		if (chdr == NULL || chdr->cmsg_type != SCM_CREDENTIALS)
-+			continue;
++			total_bytes += len;
++			chdr = CMSG_FIRSTHDR(&hdr);
++			if (chdr == NULL || chdr->cmsg_type != SCM_CREDENTIALS)
++				continue;
 +
-+		/* filter out messages that are not from root or kernel */
-+		cred = (struct ucred *)CMSG_DATA(chdr);
-+		if (cred->uid != 0 || cnls.nl_pid > 0)
-+			continue;
++			/* filter out messages that are not from root or kernel */
++			cred = (struct ucred *)CMSG_DATA(chdr);
++			if (cred->uid != 0 || cnls.nl_pid > 0)
++				continue;
 +
-+		event_count++;
-+		found |= process_uevent(buf, len, &conf);
++			event_count++;
++			found |= process_uevent(buf, len, &conf);
 +
-+		if ((found & FOUND_DEVICE)
-+		    || ((found & FOUND_BOOTREPO) && (found & FOUND_APKOVL))) {
-+			dbg("setting timeout to 0");
-+			conf.timeout = 0;
++			if ((found & FOUND_DEVICE)
++			    || ((found & FOUND_BOOTREPO) &&
++				(found & FOUND_APKOVL))) {
++				dbg("setting timeout to 0");
++				conf.timeout = 0;
++			}
 +		}
 +
 +		if (fds[0].revents & POLLHUP) {
 +			dbg("parent hung up\n");
 +			break;
++		}
++
++		if (fds[1].revents & POLLIN) {
++			struct signalfd_siginfo fdsi;
++			pid_t pid;
++			int status;
++
++			while (read(fds[1].fd, &fdsi, sizeof fdsi) > 0)
++				;
++			while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
++				spawn_reap(&spawnmgr, pid);
++		}
++
++		if (fds[2].revents & POLLIN) {
++			close(fds[2].fd);
++			fds[2].fd = -1;
++			fds[2].revents = 0;
++			numfds--;
++			trigger_running = 0;
++			pthread_join(tid, NULL);
 +		}
 +	}
 +
@@ -1612,5 +1723,3 @@ index 0000000..f1a58fd
 +
 +	return found ? 0 : 1;
 +}
-+
-+
