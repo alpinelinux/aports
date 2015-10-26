@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.2.0
-pkgrel=0
+pkgrel=1
 pkgdesc="Meta package for minimal alpine base"
 url="http://alpinelinux.org"
 arch="noarch"
