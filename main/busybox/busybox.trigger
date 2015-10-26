@@ -14,7 +14,6 @@ for i in "$@"; do
 done
 
 if [ -n "$do_bb_install" ]; then
-	/bin/bbsuid --install
+	[ -e /bin/bbsuid ] && /bin/bbsuid --install
 	/bin/busybox --install -s
 fi
-

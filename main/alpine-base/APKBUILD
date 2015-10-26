@@ -7,7 +7,7 @@ pkgdesc="Meta package for minimal alpine base"
 url="http://alpinelinux.org"
 arch="noarch"
 license="GPL"
-depends="alpine-baselayout alpine-conf apk-tools busybox busybox-initscripts
+depends="alpine-baselayout alpine-conf apk-tools busybox busybox-suid busybox-initscripts
 	openrc libc-utils alpine-keys"
 makedepends=""
 install=""
