@@ -30,6 +30,13 @@ struct apk_gzip_istream {
 	apk_blob_t cbarg;
 };
 
+static void gzi_get_meta(void *stream, struct apk_file_meta *meta)
+{
+	struct apk_gzip_istream *gis =
+		container_of(stream, struct apk_gzip_istream, is);
+	gis->bs->get_meta(gis->bs, meta);
+}
+
 static ssize_t gzi_read(void *stream, void *ptr, size_t size)
 {
 	struct apk_gzip_istream *gis =
@@ -155,6 +162,7 @@ struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 	if (!gis) goto err;
 
 	*gis = (struct apk_gzip_istream) {
+		.is.get_meta = gzi_get_meta,
 		.is.read = gzi_read,
 		.is.close = gzi_close,
 		.bs = bs,

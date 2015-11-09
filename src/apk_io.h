@@ -33,6 +33,11 @@ struct apk_xattr {
 };
 APK_ARRAY(apk_xattr_array, struct apk_xattr);
 
+struct apk_file_meta {
+	time_t mtime, atime;
+};
+void apk_file_meta_to_fd(int fd, struct apk_file_meta *meta);
+
 struct apk_file_info {
 	char *name;
 	char *link_target;
@@ -50,6 +55,7 @@ struct apk_file_info {
 };
 
 struct apk_istream {
+	void (*get_meta)(void *stream, struct apk_file_meta *meta);
 	ssize_t (*read)(void *stream, void *ptr, size_t size);
 	void (*close)(void *stream);
 };
@@ -59,6 +65,7 @@ struct apk_istream {
 
 struct apk_bstream {
 	unsigned int flags;
+	void (*get_meta)(void *stream, struct apk_file_meta *meta);
 	apk_blob_t (*read)(void *stream, apk_blob_t token);
 	void (*close)(void *stream, size_t *size);
 };

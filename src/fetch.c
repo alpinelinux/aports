@@ -175,9 +175,13 @@ static int fetch_package(apk_hash_item item, void *pctx)
 	}
 
 	r = apk_istream_splice(is, fd, pkg->size, progress_cb, ctx);
-	is->close(is);
-	if (fd != STDOUT_FILENO)
+	if (fd != STDOUT_FILENO) {
+		struct apk_file_meta meta;
+		is->get_meta(is, &meta);
+		apk_file_meta_to_fd(fd, &meta);
 		close(fd);
+	}
+	is->close(is);
 
 	if (r != pkg->size) {
 		unlinkat(ctx->outdir_fd, filename, 0);

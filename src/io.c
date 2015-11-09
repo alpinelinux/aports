@@ -33,12 +33,40 @@
 #define HAVE_FGETGRENT_R
 #endif
 
+static void apk_file_meta_from_fd(int fd, struct apk_file_meta *meta)
+{
+	struct stat st;
+
+	if (fstat(fd, &st) == 0) {
+		meta->mtime = st.st_mtime;
+		meta->atime = st.st_atime;
+	} else {
+		memset(meta, 0, sizeof(*meta));
+	}
+}
+
+void apk_file_meta_to_fd(int fd, struct apk_file_meta *meta)
+{
+	struct timespec times[2] = {
+		{ .tv_sec = meta->atime, .tv_nsec = meta->atime ? 0 : UTIME_OMIT },
+		{ .tv_sec = meta->mtime, .tv_nsec = meta->mtime ? 0 : UTIME_OMIT }
+	};
+	futimens(fd, times);
+}
+
 struct apk_fd_istream {
 	struct apk_istream is;
 	int fd;
 	pid_t pid;
 	int (*translate_status)(int status);
 };
+
+static void fdi_get_meta(void *stream, struct apk_file_meta *meta)
+{
+	struct apk_fd_istream *fis =
+		container_of(stream, struct apk_fd_istream, is);
+	apk_file_meta_from_fd(fis->fd, meta);
+}
 
 static ssize_t fdi_read(void *stream, void *ptr, size_t size)
 {
@@ -95,6 +123,7 @@ struct apk_istream *apk_istream_from_fd_pid(int fd, pid_t pid, int (*translate_s
 	}
 
 	*fis = (struct apk_fd_istream) {
+		.is.get_meta = fdi_get_meta,
 		.is.read = fdi_read,
 		.is.close = fdi_close,
 		.fd = fd,
@@ -207,6 +236,13 @@ struct apk_istream_bstream {
 	size_t size;
 };
 
+static void is_bs_get_meta(void *stream, struct apk_file_meta *meta)
+{
+	struct apk_istream_bstream *isbs =
+		container_of(stream, struct apk_istream_bstream, bs);
+	return isbs->is->get_meta(isbs->is, meta);
+}
+
 static apk_blob_t is_bs_read(void *stream, apk_blob_t token)
 {
 	struct apk_istream_bstream *isbs =
@@ -284,6 +320,7 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream)
 	if (isbs == NULL) return ERR_PTR(-ENOMEM);
 
 	isbs->bs = (struct apk_bstream) {
+		.get_meta = is_bs_get_meta,
 		.read = is_bs_read,
 		.close = is_bs_close,
 	};
@@ -301,6 +338,13 @@ struct apk_mmap_bstream {
 	unsigned char *ptr;
 	apk_blob_t left;
 };
+
+static void mmap_get_meta(void *stream, struct apk_file_meta *meta)
+{
+	struct apk_mmap_bstream *mbs =
+		container_of(stream, struct apk_mmap_bstream, bs);
+	return apk_file_meta_from_fd(mbs->fd, meta);
+}
 
 static apk_blob_t mmap_read(void *stream, apk_blob_t token)
 {
@@ -351,6 +395,7 @@ static struct apk_bstream *apk_mmap_bstream_from_fd(int fd)
 
 	mbs->bs = (struct apk_bstream) {
 		.flags = APK_BSTREAM_SINGLE_READ,
+		.get_meta = mmap_get_meta,
 		.read = mmap_read,
 		.close = mmap_close,
 	};
@@ -397,6 +442,13 @@ struct apk_tee_bstream {
 	void *cb_ctx;
 };
 
+static void tee_get_meta(void *stream, struct apk_file_meta *meta)
+{
+	struct apk_tee_bstream *tbs =
+		container_of(stream, struct apk_tee_bstream, bs);
+	tbs->inner_bs->get_meta(tbs->inner_bs, meta);
+}
+
 static apk_blob_t tee_read(void *stream, apk_blob_t token)
 {
 	struct apk_tee_bstream *tbs =
@@ -415,8 +467,13 @@ static apk_blob_t tee_read(void *stream, apk_blob_t token)
 
 static void tee_close(void *stream, size_t *size)
 {
+	struct apk_file_meta meta;
 	struct apk_tee_bstream *tbs =
 		container_of(stream, struct apk_tee_bstream, bs);
+
+	/* copy info */
+	tbs->inner_bs->get_meta(tbs->inner_bs, &meta);
+	apk_file_meta_to_fd(tbs->fd, &meta);
 
 	tbs->inner_bs->close(tbs->inner_bs, NULL);
 	if (size != NULL)
@@ -449,6 +506,7 @@ struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const ch
 	}
 
 	tbs->bs = (struct apk_bstream) {
+		.get_meta = tee_get_meta,
 		.read = tee_read,
 		.close = tee_close,
 	};

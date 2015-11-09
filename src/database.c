@@ -655,7 +655,10 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 		} else fd = -1, r = PTR_ERR(is) ?: -EIO;
 
 		if (fd >= 0) {
+			struct apk_file_meta meta;
 			r = apk_istream_splice(is, fd, APK_SPLICE_ALL, cb, cb_ctx);
+			is->get_meta(is, &meta);
+			apk_file_meta_to_fd(fd, &meta);
 			close(fd);
 		}
 	}

@@ -84,7 +84,18 @@ struct apk_tar_entry_istream {
 	size_t bytes_left;
 	EVP_MD_CTX mdctx;
 	struct apk_checksum *csum;
+	time_t mtime;
 };
+
+static void tar_entry_get_meta(void *stream, struct apk_file_meta *meta)
+{
+	struct apk_tar_entry_istream *teis =
+		container_of(stream, struct apk_tar_entry_istream, is);
+	*meta = (struct apk_file_meta) {
+		.atime = teis->mtime,
+		.mtime = teis->mtime,
+	};
+}
 
 static ssize_t tar_entry_read(void *stream, void *ptr, size_t size)
 {
@@ -175,6 +186,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 {
 	struct apk_file_info entry;
 	struct apk_tar_entry_istream teis = {
+		.is.get_meta = tar_entry_get_meta,
 		.is.read = tar_entry_read,
 		.is.close = tar_entry_close,
 		.tar_is = is,
@@ -213,6 +225,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		buf.mode[0] = 0; /* to nul terminate 100-byte buf.name */
 		buf.magic[0] = 0; /* to nul terminate 100-byte buf.linkname */
 		teis.csum = NULL;
+		teis.mtime = entry.mtime;
 		apk_xattr_array_resize(&entry.xattrs, 0);
 
 		if (paxlen) {

@@ -36,6 +36,7 @@ const char *apk_url_local_file(const char *url)
 struct apk_fetch_istream {
 	struct apk_istream is;
 	fetchIO *fetchIO;
+	struct url_stat urlstat;
 };
 
 static int fetch_maperror(int ec)
@@ -64,6 +65,16 @@ static int fetch_maperror(int ec)
 
 	if (ec < 0 || ec >= ARRAY_SIZE(map) || !map[ec]) return -EIO;
 	return map[ec];
+}
+
+static void fetch_get_meta(void *stream, struct apk_file_meta *meta)
+{
+	struct apk_fetch_istream *fis = container_of(stream, struct apk_fetch_istream, is);
+
+	*meta = (struct apk_file_meta) {
+		.atime = fis->urlstat.atime,
+		.mtime = fis->urlstat.mtime,
+	};
 }
 
 static ssize_t fetch_read(void *stream, void *ptr, size_t size)
@@ -95,28 +106,35 @@ static struct apk_istream *apk_istream_fetch(const char *url, time_t since)
 {
 	struct apk_fetch_istream *fis;
 	struct url *u;
-	fetchIO *io;
+	fetchIO *io = NULL;
+	int rc = -ENOMEM;
 
 	u = fetchParseURL(url);
-	if (!u) return ERR_PTR(-ENOMEM);
-	u->last_modified = since;
-	io = fetchGet(u, "i");
-	fetchFreeURL(u);
-	if (!io) return ERR_PTR(fetch_maperror(fetchLastErrCode));
-
 	fis = malloc(sizeof(*fis));
-	if (!fis) goto err;
+	if (!fis || !u) goto err;
+
+	u->last_modified = since;
+	io = fetchXGet(u, &fis->urlstat, "i");
+	if (!io) {
+		rc = fetch_maperror(fetchLastErrCode);
+		goto err;
+	}
 
 	*fis = (struct apk_fetch_istream) {
+		.is.get_meta = fetch_get_meta,
 		.is.read = fetch_read,
 		.is.close = fetch_close,
 		.fetchIO = io,
+		.urlstat = fis->urlstat,
 	};
+	fetchFreeURL(u);
 
 	return &fis->is;
 err:
+	if (u) fetchFreeURL(u);
 	if (io) fetchIO_close(io);
-	return ERR_PTR(-ENOMEM);
+	if (fis) free(fis);
+	return ERR_PTR(rc);
 }
 
 struct apk_istream *apk_istream_from_fd_url_if_modified(int atfd, const char *url, time_t since)
