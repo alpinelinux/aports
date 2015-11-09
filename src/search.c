@@ -29,8 +29,16 @@ struct search_ctx {
 	struct apk_string_array *filter;
 };
 
+static int unique_match(struct apk_package *pkg)
+{
+	if (pkg->state_int) return 0;
+	pkg->state_int = 1;
+	return 1;
+}
+
 static void print_package_name(struct search_ctx *ctx, struct apk_package *pkg)
 {
+	if (!unique_match(pkg)) return;
 	printf("%s", pkg->name->name);
 	if (apk_verbosity > 0)
 		printf("-" BLOB_FMT, BLOB_PRINTF(*pkg->version));
@@ -41,6 +49,7 @@ static void print_package_name(struct search_ctx *ctx, struct apk_package *pkg)
 
 static void print_origin_name(struct search_ctx *ctx, struct apk_package *pkg)
 {
+	if (!unique_match(pkg)) return;
 	if (pkg->origin != NULL)
 		printf(BLOB_FMT, BLOB_PRINTF(*pkg->origin));
 	else
