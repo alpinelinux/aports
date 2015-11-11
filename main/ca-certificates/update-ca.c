@@ -6,10 +6,11 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <libgen.h>
 
 #include <sys/stat.h>
 #include <sys/sendfile.h>
+
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 #define CERTSDIR "/usr/share/ca-certificates/"
 #define LOCALCERTSDIR "/usr/local/share/ca-certificates/"
@@ -17,178 +18,176 @@
 #define CERTBUNDLE "ca-certificates.crt"
 #define CERTSCONF "/etc/ca-certificates.conf"
 
+static const char *last_component(const char *path)
+{
+	const char *c = strrchr(path, '/');
+	if (c) return c + 1;
+	return path;
+}
 static bool str_begins(const char* str, const char* prefix)
 {
 	return !strncmp(str, prefix, strlen(prefix));
 }
 
-/* A string pair */
-struct pair
-{
-	char** first;
-	char** second;
-
-	/* Total size */
-	unsigned size;
-	/* Fill-level */
-	unsigned count;
+struct hash_item {
+	struct hash_item *next;
+	char *key;
+	char *value;
 };
 
-static void pair_free(struct pair* data)
+struct hash {
+	struct hash_item *items[256];
+};
+
+static unsigned int hash_string(const char *str)
 {
-	int i = 0;
-	for (i = 0; i < data->size; i++) {
-		free(data->first[i]);
-		free(data->second[i]);
+	unsigned long h = 5381;
+	for (; *str; str++)
+		h = (h << 5) + h + *str;
+	return h;
+}
+
+static void hash_init(struct hash *h)
+{
+	memset(h, 0, sizeof *h);
+}
+
+static struct hash_item *hash_get(struct hash *h, const char *key)
+{
+	unsigned int bucket = hash_string(key) % ARRAY_SIZE(h->items);
+	struct hash_item *item;
+
+	for (item = h->items[bucket]; item; item = item->next)
+		if (strcmp(item->key, key) == 0)
+			return item;
+	return NULL;
+}
+
+static void hash_foreach(struct hash *h, void (*cb)(struct hash_item *))
+{
+	struct hash_item *item;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(h->items); i++) {
+		for (item = h->items[i]; item; item = item->next)
+			cb(item);
 	}
-	free(data->first);
-	free(data->second);
-	free(data);
 }
 
-static struct pair* pair_alloc(int size)
+static bool hash_add(struct hash *h, const char *key, const char *value)
 {
-       struct pair* d = (struct pair*) malloc(sizeof(struct pair));
-       d->size = size;
-       d->count = 0;
-       d->first = calloc(size, sizeof(char** ));
-       d->second = calloc(size, sizeof(char** ));
-       
-       return d;
-}
+	unsigned int bucket = hash_string(key) % ARRAY_SIZE(h->items);
+	size_t keylen = strlen(key), valuelen = strlen(value);
+	struct hash_item *i;
 
-static const char*
-get_pair(struct pair* data, const char* key, int* pos)
-{
-	int i = 0;
-	for (i = 0; i < data->size; i++) {
-		*pos = i;
-		if (data->second[i] && data->first[i]) {
-			if (str_begins(key, data->second[i]))
-				return data->first[i];
-			else if (str_begins(key, data->first[i]))
-				return data->second[i];
-		}
-	}
-	
-	return 0;
-}
-
-static bool
-add_ca_from_pem(struct pair* data, const char* ca, const char* pem)
-{
- 	int count = data->count++;
-	if (count >= data->size)
+	i = malloc(sizeof(struct hash_item) + keylen + 1 + valuelen + 1);
+	if (!i)
 		return false;
-        
-	data->first[count] = strdup(ca);
-	data->second[count] = strdup(pem);
 
+	i->key = (char*)(i+1);
+	strcpy(i->key, key);
+	i->value = i->key + keylen + 1;
+	strcpy(i->value, value);
+
+	i->next = h->items[bucket];
+	h->items[bucket] = i;
 	return true;
 }
 
 static bool
 copyfile(const char* source, int output)
 {
-	int input;
-	if ((input = open(source, O_RDONLY)) == -1)
-		return -1;
-
 	off_t bytes = 0;
 	struct stat fileinfo = {0};
-	fstat(input, &fileinfo);
-	int result = sendfile(output, input, &bytes, fileinfo.st_size);
+	ssize_t result;
+	int in_fd;
 
-	close(input);
+	if ((in_fd = open(source, O_RDONLY)) == -1)
+		return false;
 
-	return (fileinfo.st_size == result);
-}
-
-typedef void (*proc_path)(const char*, struct pair*, int);
-
-static void proc_localglobaldir(const char* path, struct pair* d, int tmpfile_fd)
-{
-	/* basename() requires we duplicate the string */
-	char* base = strdup(path);
-	char* tmp_file = strdup(basename(base));
-	int base_len = strlen(tmp_file);
-	char* actual_file = 0;
-
-	/* Snip off the .crt suffix*/
-	if (base_len > 4 && strcmp(&tmp_file[base_len - 4], ".crt") == 0)
-		tmp_file[base_len - 4] = 0;
-
-	bool build_string = asprintf(&actual_file, "%s%s%s", "ca-cert-",
-				     tmp_file, ".pem") != -1;
-
-	if (base_len > 0 && build_string) {
-		char* s;
-		for (s = actual_file; *s != 0; s++) {
-			switch(*s) {
-			case ',':
-			case ' ':
-				*s = '_';
-				break;
-			case ')':
-			case '(':
-				*s = '=';
-				break;
-			default:
-				break;
-			}
-		}
-
-		if (add_ca_from_pem(d, path, actual_file)) {
-			if (copyfile(path, tmpfile_fd) == -1)
-				printf("Cant copy %s\n", path);
-		} else {
-			printf("Warn! Cannot add: %s\n", path);
-		}
-	} else {
-		printf("Can't open path: %s\n", path);
+	if (fstat(in_fd, &fileinfo) < 0) {
+		close(in_fd);
+		return false;
 	}
 
-	free(base);
-	free(actual_file);
-	free(tmp_file);
+	result = sendfile(output, in_fd, &bytes, fileinfo.st_size);
+	close(in_fd);
+
+	return fileinfo.st_size == result;
 }
 
-static void proc_etccertsdir(const char* path, struct pair* d, int tmpfile_fd)
+typedef void (*proc_path)(const char *fullpath, struct hash *, int);
+
+static void proc_localglobaldir(const char *fullpath, struct hash *h, int tmpfile_fd)
 {
-	struct stat statbuf;
+	const char *fname = last_component(fullpath);
+	size_t flen = strlen(fname);
+	char *s, *actual_file = NULL;
 
-	if (lstat(path, &statbuf) == -1)
+	/* Snip off the .crt suffix */
+	if (flen > 4 && strcmp(&fname[flen-4], ".crt") == 0)
+		flen -= 4;
+
+	if (asprintf(&actual_file, "%s%.*s%s",
+				   "ca-cert-",
+				   flen, fname,
+				   ".pem") == -1) {
+		fprintf(stderr, "Cannot open path: %s\n", fullpath);
 		return;
+	}
 
-	char* fullpath = (char*) malloc(sizeof(char*) *  statbuf.st_size + 1);
-	if (readlink(path, fullpath, statbuf.st_size + 1) == -1)
+	for (s = actual_file; *s; s++) {
+		switch(*s) {
+		case ',':
+		case ' ':
+			*s = '_';
+			break;
+		case ')':
+		case '(':
+			*s = '=';
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (!hash_add(h, actual_file, fullpath))
+		fprintf(stderr, "Warning! Cannot hash: %s\n", fullpath);
+	if (!copyfile(fullpath, tmpfile_fd))
+		fprintf(stderr, "Warning! Cannot copy to bundle: %s\n", fullpath);
+	free(actual_file);
+}
+
+static void proc_etccertsdir(const char* fullpath, struct hash* h, int tmpfile_fd)
+{
+	char linktarget[SYMLINK_MAX];
+	ssize_t linklen;
+
+	linklen = readlink(fullpath, linktarget, sizeof(linktarget)-1);
+	if (linklen < 0)
 		return;
+	linktarget[linklen] = 0;
 
-	char* base = strdup(path);
-	const char* actual_file = basename(base);
-	int pos = -1;
-	const char* target = get_pair(d, actual_file, &pos);
-
-	if (!target) {
+	struct hash_item *item = hash_get(h, last_component(fullpath));
+	if (!item) {
 		/* Symlink exists but is not wanted
 		 * Delete it if it points to 'our' directory
 		 */
-		if (str_begins(fullpath, CERTSDIR) || str_begins(fullpath, LOCALCERTSDIR))
-			remove(fullpath);
-	} else if (strncmp(fullpath, target, strlen(fullpath)) != 0) {
+		if (str_begins(linktarget, CERTSDIR) || str_begins(linktarget, LOCALCERTSDIR))
+			unlink(fullpath);
+	} else if (strcmp(linktarget, item->value) != 0) {
 		/* Symlink exists but points wrong */
-		if (symlink(target, path) == -1)
-			printf("Warning! Can't link %s -> %s\n", target, path);
+		unlink(fullpath);
+		if (symlink(item->value, fullpath) < 0)
+			fprintf(stderr, "Warning! Cannot update symlink %s -> %s\n", item->value, fullpath);
+		item->value = 0;
 	} else {
 		/* Symlink exists and is ok */
-		memset(d->first[pos], 0, strlen(d->first[pos]));
+		item->value = 0;
 	}
-
-	free(base);
-	free(fullpath);
 }
 
-static bool file_readline(const char* file, struct pair* d, int tmpfile_fd)
+static bool read_global_ca_list(const char* file, struct hash* d, int tmpfile_fd)
 {
 	FILE * fp = fopen(file, "r");
 	if (fp == NULL)
@@ -199,13 +198,12 @@ static bool file_readline(const char* file, struct pair* d, int tmpfile_fd)
 	ssize_t read;
 
 	while ((read = getline(&line, &len, fp)) != -1) {
+		/* getline returns number of bytes in buffer, and buffer
+		 * contains delimeter if it was found */
+		if (read > 0 && line[read-1] == '\n')
+			line[read-1] = 0;
 		if (str_begins(line, "#") || str_begins(line, "!"))
 			continue;
-
-		char* newline = strstr(line, "\n");
-		if (newline) {
-			line[newline - line] = '\0';
-		}
 
 		char* fullpath = 0;
 		if (asprintf(&fullpath,"%s%s", CERTSDIR, line) != -1) {
@@ -215,9 +213,7 @@ static bool file_readline(const char* file, struct pair* d, int tmpfile_fd)
 	}
 
 	fclose(fp);
-	if (line)
-		free(line);
-
+	free(line);
 	return true;
 }
 
@@ -241,7 +237,7 @@ static bool is_filetype(const char* path, filetype file_check)
 	return false;
 }
 
-static bool dir_readfiles(struct pair* d, const char* path,
+static bool dir_readfiles(struct hash* d, const char* path,
 			  filetype allowed_file_type,
 			  proc_path path_processor,
 			  int tmpfile_fd)
@@ -255,7 +251,6 @@ static bool dir_readfiles(struct pair* d, const char* path,
 		if (str_begins(dirp->d_name, "."))
 			continue;
 
-		int size = strlen(path) + strlen(dirp->d_name);
 		char* fullpath = 0;
 		if (asprintf(&fullpath, "%s%s", path, dirp->d_name) != -1) {
 			if (is_filetype(fullpath, allowed_file_type))
@@ -268,45 +263,46 @@ static bool dir_readfiles(struct pair* d, const char* path,
 	return closedir(dp) == 0;
 }
 
+static void update_ca_symlink(struct hash_item *item)
+{
+	if (!item->value)
+		return;
+
+	char* newpath = 0;
+	bool build_str = asprintf(&newpath, "%s%s", ETCCERTSDIR, item->key);
+	if (!build_str || symlink(item->value, newpath) == -1)
+		fprintf(stderr, "Warning! Cannot symlink %s -> %s\n",
+			item->value, newpath);
+	free(newpath);
+}
+
 int main(int a, char **v)
 {
-	struct pair* calinks = pair_alloc(256);
+	struct hash _calinks, *calinks = &_calinks;
 
 	const char* bundle = "bundleXXXXXX";
-	int etccertslen = strlen(ETCCERTSDIR);
 	char* tmpfile = 0;
 	if (asprintf(&tmpfile, "%s%s", ETCCERTSDIR, bundle) == -1)
-		return 0;
+		return 1;
 
 	int fd = mkstemp(tmpfile);
 	if (fd == -1) {
-		printf("Failed to open temporary file %s for ca bundle\n", tmpfile);
-		exit(0);
+		fprintf(stderr, "Failed to open temporary file %s for ca bundle\n", tmpfile);
+		return 1;
 	}
 	fchmod(fd, 0644);
 
+	hash_init(calinks);
+
 	/* Handle global CA certs from config file */
-	file_readline(CERTSCONF, calinks, fd);
+	read_global_ca_list(CERTSCONF, calinks, fd);
 
 	/* Handle local CA certificates */
 	dir_readfiles(calinks, LOCALCERTSDIR, FILE_REGULAR, &proc_localglobaldir, fd);
 
 	/* Update etc cert dir for additions and deletions*/
 	dir_readfiles(calinks, ETCCERTSDIR, FILE_LINK, &proc_etccertsdir, fd);
-
-	int i = 0;
-	for (i = 0; i < calinks->count; i++) {
-		if (!strlen(calinks->first[i]))
-			continue;
-		int file_len = strlen(calinks->second[i]);
-		char* newpath = 0;
-		bool build_str = asprintf(&newpath, "%s%s", ETCCERTSDIR,
-					 calinks->second[i]) != -1;
-		if (!build_str || symlink(calinks->first[i], newpath) == -1)
-			printf("Warning! Can't link %s -> %s\n",
-			       calinks->first[i], newpath);
-		free(newpath);
-	}
+	hash_foreach(calinks, update_ca_symlink);
 
 	/* Update hashes and the bundle */
 	if (fd != -1) {
@@ -318,16 +314,13 @@ int main(int a, char **v)
 		}
 	}
 
-	pair_free(calinks);
 	free(tmpfile);
 
 	/* Execute c_rehash */
 	int nullfd = open("/dev/null", O_WRONLY);
 	if (nullfd == -1)
-		return 0;
-	if (dup2(nullfd, STDOUT_FILENO) == -1)
-		return 0;
-
+		return 1;
+	dup2(nullfd, STDOUT_FILENO);
 	char* c_rehash_args[] = { "/usr/bin/c_rehash", ETCCERTSDIR, 0 };
 	execve(c_rehash_args[0], c_rehash_args, NULL);
 
