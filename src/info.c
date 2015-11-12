@@ -76,12 +76,12 @@ static void info_exists(struct info_ctx *ctx, struct apk_database *db,
 		if (name == NULL)
 			continue;
 
-		ok = 0;
+		ok = apk_dep_is_provided(&dep, NULL);
 		foreach_array_item(p, name->providers) {
-			if (p->pkg->ipkg == NULL || !apk_dep_is_provided(&dep, p))
-				continue;
-			verbose_print_pkg(p->pkg, 0);
-			ok = 1;
+			if (!p->pkg->ipkg) continue;
+			ok = apk_dep_is_provided(&dep, p);
+			if (ok) verbose_print_pkg(p->pkg, 0);
+			break;
 		}
 		if (!ok) ctx->errors++;
 	}
