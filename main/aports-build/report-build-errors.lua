@@ -44,6 +44,7 @@ function m.postbuild(aport, success, repodest, arch, logfile)
 		local payload =	json.encode{
 			pkgname = aport.pkgname,
 			hostname = hostname,
+			reponame = aport:get_repo_name(),
 			logurl = ("%s/%s/%s-%s-r%s.log"):format(
 					urlprefix,
 					(string.match(aport.dir,"[^/]+/[^/]+$")),
