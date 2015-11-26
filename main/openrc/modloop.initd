@@ -11,115 +11,89 @@ depend() {
 # read kernel options
 init_KOPT() {
 	eval set -- $(cat /proc/cmdline 2>/dev/null)
-	# in case syslinux does not set BOOT_IMAGE
-	KOPT_BOOT_IMAGE="${1}"
 	for opt; do
 	        case "$opt" in
-			alpine_dev=*|modloop=*|BOOT_IMAGE=*)
+			modloop=*)
 				eval "KOPT_${opt%%=*}='${opt#*=}'" ;;
-        	esac
+		esac
 	done
 }
 
-resolve_dev() {
-	case "$1" in
-	UUID=*|LABEL=*) findfs "$1";;
-	*) readlink -f "$1";;
-	esac
+mountdirs() {
+	awk '$2 !~ /^\/(sys|proc|dev|run)/ && $2 != "/" {print $2}' /proc/mounts
 }
 
-find_mnt() {
-	local search_dev="$1" fstab="$2"
-	local dev mnt fs mntopts chk
-	case "$search_dev" in
-		UUID=*|LABEL=*|/dev/*);;
-		nfs) search_dev="${KOPT_alpine_dev#nfs:}";;
-		*) search_dev=/dev/$search_dev;;
-	esac
-	local search_real_dev=$(resolve_dev $search_dev)
-	while read dev mnt fs mntopts chk; do
-		local real_dev=$(resolve_dev $dev)
-		local i j
-		for i in "$search_dev" "$search_real_dev"; do
-			[ -z "$i" ] && continue
-			for j in "$dev" "$real_dev"; do
-				[ -z "$j" ] && continue
-				if [ "$i" = "$j" ]; then
-					echo "$mnt"
-					return
-				fi
-			done
-		done
-	done < $fstab 2>/dev/null
+find_modloop() {
+	local dir="$1"
+	local kver=$(uname -r)
+	local oifs="$IFS"
+	IFS=$'\n'
+	set -- $(blkid "$dir"/boot/* "$dir"/*)
+	IFS="$oifs"
+	for line; do
+		img=${line%%:*}
+		mount "$img" -o loop,ro /.modloop || continue
+		if [ -d /.modloop/modules/$kver ]; then
+			return 0
+		fi
+		umount /.modloop
+	done
+	return 1
 }
 
-# initialies: alpine_dev, alpine_mnt, alpine_fs, alpine_mounted
-find_media() {
-	init_KOPT
-	[ -z "$KOPT_alpine_dev" ] && return 0
-	alpine_mounted=
-	alpine_dev=${KOPT_alpine_dev%%:*}
-	alpine_fs=${KOPT_alpine_dev#*:}
-	[ "$alpine_fs" = "$KOPT_alpine_dev" ] && unset alpine_fs
-	# first we check if alpine_dev is mounted and use this
-	alpine_mnt=$(find_mnt $alpine_dev /proc/mounts)
-	if [ -z "$alpine_mnt" ]; then
-		# then we check fstab
-		alpine_mnt=$(find_mnt $alpine_dev /etc/fstab)
-	else
-		alpine_mounted=yes
+find_backing_file() {
+	local dir="$1"
+	local dev=$(df -P "$dir" | tail -1 | awk '{print $1}')
+	cat /sys/block/${dev#/dev/}/loop/backing_file 2>/dev/null
+}
+
+find_alpine_mnt() {
+	local img="$(find_backing_file $1)"
+	if [ -n "$img" ]; then
+		df -P "$img" | tail -1 | awk '{print $6}'
 	fi
-	# finally we fallback to /media/<devicename>
-	[ -z "$alpine_mnt" ] && alpine_mnt=/media/$alpine_dev
 }
 
 start() {
 	local modloop= mount_opts= modloop_dldir="/lib"
 
-	find_media
-
+	mkdir -p /.modloop /lib
 	case "$KOPT_modloop" in
 		http://*|https://|ftp://*)
 			wget -P "$modloop_dldir" "$KOPT_modloop" \
 				&& modloop=$modloop_dldir/$(basename $KOPT_modloop)
 			;;
+		"")
+			ewarn "WARNING! modloop boot option is missing."
+			;;
 		*)
-			if [ -z "$alpine_dev" ]; then
-				return 0
-			fi
-			if [ -z "$alpine_mounted" ]; then
-				ebegin "Mounting $alpine_mnt"
-				[ -n "$alpine_fs" ] && mount_opts="-t $alpine_fs"
-				mount $mount_opts /dev/$alpine_dev $alpine_mnt 2>/dev/null
-				eend $? || return 1
-			fi
-
-			bootimagedir=${KOPT_BOOT_IMAGE%/*}
-			bootdir=${alpine_mnt}${bootimagedir}
-			kver=$(uname -r)
-			case $kver in
-			*-rc[0-9]) kflavor=vanilla;;
-			*-[a-z]*)  kflavor=${kver##*-};;
-			*)         kflavor=vanilla;;
-			esac
-			for modloop in ${alpine_mnt}$KOPT_modloop \
-				${bootdir}/modloop-$kver \
-				${bootdir}/modloop-$kflavor \
-				${bootdir}/modloop \
-				${alpine_mnt}/boot/modloop-$kver \
-				${alpine_mnt}/boot/modloop-$kflavor \
-				${alpine_mnt}/boot/modloop \
-				${alpine_mnt}$KOPT_BOOT_IMAGE.modloop.*; do
-
-				[ -f "$modloop" -o -n "$KOPT_modloop" ] && break
+			for dir in $(mountdirs); do
+				if [ -f "$dir"/$KOPT_modloop ]; then
+					modloop="$dir/${KOPT_modloop##/}"
+					alpine_mnt="$dir"
+					break
+				fi
 			done
 			;;
 	esac
 
 	ebegin "Mounting modloop $modloop"
-	mkdir -p /.modloop /lib
-	mount -o loop,ro $fs_opt $modloop /.modloop
-	eend $? || return 1
+	if [ -n "$modloop" ]; then
+		mount -o loop,ro $modloop /.modloop
+		eend $? || return 1
+	else
+		for dir in $(mountdirs); do
+			if find_modloop "$dir"; then
+				alpine_mnt="$dir"
+				break
+			fi
+		done
+		if [ -d /.modloop/modules/$(uname -r) ]; then
+			eend 0
+		else
+			eend 1 || return 1
+		fi
+	fi
 
 	#use unionfs is available and configured
 	if grep -q -w "unionfs$" /proc/filesystems && [ -n "$unionfs_size" ]; then
@@ -146,14 +120,17 @@ start() {
 
 stop() {
 	local rc=0
-	find_media
-	[ -z "$alpine_dev" ] && return 0
+	alpine_mnt=$(find_alpine_mnt /.modloop)
+	if mountinfo --quiet /.modunisonfs/modules && mountinfo --quiet /lib/modules; then
+		umount /lib/modules
+		umount /.modunisonfs/modules
+	fi
 	if mountinfo --quiet /.modloop; then
 		ebegin "Unmounting /.modloop"
 		umount -d /.modloop
 		eend $? || return 1
 	fi
-	if mountinfo --quiet $alpine_mnt; then
+	if [ -n "$alpine_mnt" ] && mountinfo --quiet $alpine_mnt; then
 		ebegin "Unmounting $alpine_mnt"
 		umount $alpine_mnt
 		eend $?
