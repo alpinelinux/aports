@@ -124,6 +124,9 @@ static int option_parse_global(void *ctx, struct apk_db_options *dbopts, int opt
 	case 0x109:
 		apk_flags |= APK_NO_NETWORK;
 		break;
+	case 0x115:
+		apk_flags |= APK_NO_CACHE;
+		break;
 	case 0x112:
 		dbopts->arch = optarg;
 		break;
@@ -173,6 +176,7 @@ static const struct apk_option options_global[] = {
 	{ 0x108, "repositories-file", "Override repositories file",
 				required_argument, "REPOFILE" },
 	{ 0x109, "no-network",	"Do not use network (cache is still used)" },
+	{ 0x115, "no-cache",	"Read uncached index from network" },
 	{ 0x112, "arch",	"Use architecture with --root",
 				required_argument, "ARCH" },
 	{ 0x114, "print-arch",	"Print default arch and exit" },

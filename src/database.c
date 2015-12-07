@@ -2198,7 +2198,13 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 			if (apk_flags & APK_UPDATE_CACHE)
 				apk_repository_update(db, repo);
 		}
-		r = apk_repo_format_cache_index(APK_BLOB_BUF(buf), repo);
+		if (apk_flags & APK_NO_CACHE) {
+			r = apk_repo_format_real_url(db, repo, NULL, buf, sizeof(buf));
+			if (r == 0)
+				apk_message("fetch %s", buf);
+		} else {
+			r = apk_repo_format_cache_index(APK_BLOB_BUF(buf), repo);
+		}
 	} else {
 		db->local_repos |= BIT(repo_num);
 		db->available_repos |= BIT(repo_num);
