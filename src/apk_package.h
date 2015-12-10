@@ -43,6 +43,7 @@ struct apk_provider;
 #define APK_FOREACH_INSTALLED		0x10
 #define APK_FOREACH_MARKED		0x20
 #define APK_FOREACH_NULL_MATCHES_ALL	0x40
+#define APK_FOREACH_DEP			0x80
 #define APK_FOREACH_GENID_MASK		0xffffff00
 
 struct apk_sign_ctx {

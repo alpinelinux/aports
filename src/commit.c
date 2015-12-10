@@ -401,6 +401,7 @@ static void print_conflicts(struct print_state *ps, struct apk_package *pkg)
 	struct apk_provider *p;
 	struct apk_dependency *d;
 	char tmp[256];
+	int once;
 
 	foreach_array_item(p, pkg->name->providers) {
 		if (p->pkg == pkg || !p->pkg->marked)
@@ -409,11 +410,17 @@ static void print_conflicts(struct print_state *ps, struct apk_package *pkg)
 		apk_print_indented_fmt(&ps->i, PKG_VER_FMT, PKG_VER_PRINTF(p->pkg));
 	}
 	foreach_array_item(d, pkg->provides) {
+		once = 1;
 		foreach_array_item(p, d->name->providers) {
 			if (!p->pkg->marked)
 				continue;
-			if (p->pkg == pkg && p->version == d->version)
+			if (d->version == &apk_null_blob &&
+			    p->version == &apk_null_blob)
 				continue;
+			if (once && p->pkg == pkg) {
+				once = 0;
+				continue;
+			}
 			label_start(ps, "conflicts:");
 			apk_print_indented_fmt(
 				&ps->i, PKG_VER_FMT "[%s]",
@@ -442,8 +449,9 @@ static void print_dep(struct apk_package *pkg0, struct apk_dependency *d0, struc
 static void print_deps(struct print_state *ps, struct apk_package *pkg, int match)
 {
 	ps->match = match;
-	apk_pkg_foreach_matching_dependency(NULL, ps->world, match, pkg, print_dep, ps);
-	apk_pkg_foreach_reverse_dependency(pkg, match, print_dep, ps);
+	match |= APK_FOREACH_MARKED | APK_FOREACH_DEP;
+	apk_pkg_foreach_matching_dependency(NULL, ps->world, match|apk_foreach_genid(), pkg, print_dep, ps);
+	apk_pkg_foreach_reverse_dependency(pkg, match|apk_foreach_genid(), print_dep, ps);
 	label_end(ps);
 }
 
@@ -456,9 +464,9 @@ static void analyze_package(struct print_state *ps, struct apk_package *pkg, uns
 
 	print_pinning_errors(ps, pkg, tag);
 	print_conflicts(ps, pkg);
-	print_deps(ps, pkg, APK_DEP_CONFLICTS | APK_FOREACH_MARKED);
+	print_deps(ps, pkg, APK_DEP_CONFLICTS);
 	if (ps->label == NULL)
-		print_deps(ps, pkg, APK_DEP_SATISFIES | APK_FOREACH_MARKED);
+		print_deps(ps, pkg, APK_DEP_SATISFIES);
 }
 
 static void analyze_name(struct print_state *ps, struct apk_name *name)

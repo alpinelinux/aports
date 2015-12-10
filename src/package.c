@@ -1171,6 +1171,7 @@ void apk_pkg_foreach_matching_dependency(
 		void *ctx)
 {
 	unsigned int genid = match & APK_FOREACH_GENID_MASK;
+	unsigned int one_dep_only = genid && !(match & APK_FOREACH_DEP);
 	struct apk_dependency *d;
 
 	if (pkg && genid) {
@@ -1182,8 +1183,7 @@ void apk_pkg_foreach_matching_dependency(
 	foreach_array_item(d, deps) {
 		if (apk_dep_analyze(d, mpkg) & match) {
 			cb(pkg, d, mpkg, ctx);
-			if (genid)
-				break;
+			if (one_dep_only) break;
 		}
 	}
 }
@@ -1195,9 +1195,10 @@ static void foreach_reverse_dependency(
 		void cb(struct apk_package *pkg0, struct apk_dependency *dep0, struct apk_package *pkg, void *ctx),
 		void *ctx)
 {
-	unsigned int installed = match & APK_FOREACH_INSTALLED;
-	unsigned int marked = match & APK_FOREACH_MARKED;
 	unsigned int genid = match & APK_FOREACH_GENID_MASK;
+	unsigned int marked = match & APK_FOREACH_MARKED;
+	unsigned int installed = match & APK_FOREACH_INSTALLED;
+	unsigned int one_dep_only = genid && !(match & APK_FOREACH_DEP);
 	struct apk_name **pname0, *name0;
 	struct apk_provider *p0;
 	struct apk_package *pkg0;
@@ -1219,8 +1220,7 @@ static void foreach_reverse_dependency(
 			foreach_array_item(d0, pkg0->depends) {
 				if (apk_dep_analyze(d0, pkg) & match) {
 					cb(pkg0, d0, pkg, ctx);
-					if (genid)
-						break;
+					if (one_dep_only) break;
 				}
 			}
 		}
