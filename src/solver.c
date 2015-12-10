@@ -77,10 +77,11 @@ static unsigned int get_pkg_repos(struct apk_database *db, struct apk_package *p
 	return pkg->repos | (pkg->ipkg ? db->repo_tags[pkg->ipkg->repository_tag].allowed_repos : 0);
 }
 
-static void mark_error(struct apk_solver_state *ss, struct apk_package *pkg)
+static void mark_error(struct apk_solver_state *ss, struct apk_package *pkg, const char *reason)
 {
 	if (pkg == NULL || pkg->ss.error)
 		return;
+	dbg_printf("ERROR PKG: %s: %s\n", pkg->name->name, reason);
 	pkg->ss.error = 1;
 	ss->errors++;
 }
@@ -592,8 +593,8 @@ static void assign_name(struct apk_solver_state *ss, struct apk_name *name, stru
 		    name->ss.chosen.version == &apk_null_blob)
 			return;
 		/* Conflict: providing same name */
-		mark_error(ss, p.pkg);
-		mark_error(ss, name->ss.chosen.pkg);
+		mark_error(ss, p.pkg, "conflict: same name provided");
+		mark_error(ss, name->ss.chosen.pkg, "conflict: same name provided");
 		return;
 	}
 
@@ -649,7 +650,7 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 	if (pkg) {
 		if (!pkg->ss.pkg_selectable || !pkg->ss.tag_ok) {
 			/* Selecting broken or unallowed package */
-			mark_error(ss, pkg);
+			mark_error(ss, pkg, "broken package / tag not ok");
 		}
 		dbg_printf("selecting: " PKG_VER_FMT ", available: %d\n", PKG_VER_PRINTF(pkg), pkg->ss.pkg_selectable);
 
@@ -662,7 +663,10 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 	} else {
 		dbg_printf("selecting: %s [unassigned]\n", name->name);
 		assign_name(ss, name, provider_none);
-		ss->errors += (name->ss.requirers > 0);
+		if (name->ss.requirers > 0) {
+			dbg_printf("ERROR NO-PROVIDER: %s\n", name->name);
+			ss->errors++;
+		}
 	}
 }
 
@@ -831,12 +835,12 @@ static void cset_gen_dep(struct apk_solver_state *ss, struct apk_package *ppkg, 
 	struct apk_package *pkg = name->ss.chosen.pkg;
 
 	if (!apk_dep_is_provided(dep, &name->ss.chosen))
-		mark_error(ss, ppkg);
+		mark_error(ss, ppkg, "unfulfilled dependency");
 
 	cset_gen_name_change(ss, name);
 
 	if (pkg && pkg->ss.error)
-		mark_error(ss, ppkg);
+		mark_error(ss, ppkg, "propagation up");
 }
 
 static int cset_reset_name(apk_hash_item item, void *ctx)
