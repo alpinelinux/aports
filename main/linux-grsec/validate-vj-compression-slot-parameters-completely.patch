@@ -1,0 +1,139 @@
+From 4ab42d78e37a294ac7bc56901d563c642e03c4ae Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sun, 1 Nov 2015 16:22:53 +0000
+Subject: ppp, slip: Validate VJ compression slot parameters completely
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Currently slhc_init() treats out-of-range values of rslots and tslots
+as equivalent to 0, except that if tslots is too large it will
+dereference a null pointer (CVE-2015-7799).
+
+Add a range-check at the top of the function and make it return an
+ERR_PTR() on error instead of NULL.  Change the callers accordingly.
+
+Compile-tested only.
+
+Reported-by: 郭永刚 <guoyonggang@360.cn>
+References: http://article.gmane.org/gmane.comp.security.oss.general/17908
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/isdn/i4l/isdn_ppp.c   | 10 ++++------
+ drivers/net/ppp/ppp_generic.c |  6 ++----
+ drivers/net/slip/slhc.c       | 12 ++++++++----
+ drivers/net/slip/slip.c       |  2 +-
+ 4 files changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/isdn/i4l/isdn_ppp.c b/drivers/isdn/i4l/isdn_ppp.c
+index 86f9abe..9c1e8ad 100644
+--- a/drivers/isdn/i4l/isdn_ppp.c
++++ b/drivers/isdn/i4l/isdn_ppp.c
+@@ -322,9 +322,9 @@ isdn_ppp_open(int min, struct file *file)
+ 	 * VJ header compression init
+ 	 */
+ 	is->slcomp = slhc_init(16, 16);	/* not necessary for 2. link in bundle */
+-	if (!is->slcomp) {
++	if (IS_ERR(is->slcomp)) {
+ 		isdn_ppp_ccp_reset_free(is);
+-		return -ENOMEM;
++		return PTR_ERR(is->slcomp);
+ 	}
+ #endif
+ #ifdef CONFIG_IPPP_FILTER
+@@ -573,10 +573,8 @@ isdn_ppp_ioctl(int min, struct file *file, unsigned int cmd, unsigned long arg)
+ 			is->maxcid = val;
+ #ifdef CONFIG_ISDN_PPP_VJ
+ 			sltmp = slhc_init(16, val);
+-			if (!sltmp) {
+-				printk(KERN_ERR "ippp, can't realloc slhc struct\n");
+-				return -ENOMEM;
+-			}
++			if (IS_ERR(sltmp))
++				return PTR_ERR(sltmp);
+ 			if (is->slcomp)
+ 				slhc_free(is->slcomp);
+ 			is->slcomp = sltmp;
+diff --git a/drivers/net/ppp/ppp_generic.c b/drivers/net/ppp/ppp_generic.c
+index ed00446..9a863c6 100644
+--- a/drivers/net/ppp/ppp_generic.c
++++ b/drivers/net/ppp/ppp_generic.c
+@@ -721,10 +721,8 @@ static long ppp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 			val &= 0xffff;
+ 		}
+ 		vj = slhc_init(val2+1, val+1);
+-		if (!vj) {
+-			netdev_err(ppp->dev,
+-				   "PPP: no memory (VJ compressor)\n");
+-			err = -ENOMEM;
++		if (IS_ERR(vj)) {
++			err = PTR_ERR(vj);
+ 			break;
+ 		}
+ 		ppp_lock(ppp);
+diff --git a/drivers/net/slip/slhc.c b/drivers/net/slip/slhc.c
+index 079f7ad..27ed252 100644
+--- a/drivers/net/slip/slhc.c
++++ b/drivers/net/slip/slhc.c
+@@ -84,8 +84,9 @@ static long decode(unsigned char **cpp);
+ static unsigned char * put16(unsigned char *cp, unsigned short x);
+ static unsigned short pull16(unsigned char **cpp);
+ 
+-/* Initialize compression data structure
++/* Allocate compression data structure
+  *	slots must be in range 0 to 255 (zero meaning no compression)
++ * Returns pointer to structure or ERR_PTR() on error.
+  */
+ struct slcompress *
+ slhc_init(int rslots, int tslots)
+@@ -94,11 +95,14 @@ slhc_init(int rslots, int tslots)
+ 	register struct cstate *ts;
+ 	struct slcompress *comp;
+ 
++	if (rslots < 0 || rslots > 255 || tslots < 0 || tslots > 255)
++		return ERR_PTR(-EINVAL);
++
+ 	comp = kzalloc(sizeof(struct slcompress), GFP_KERNEL);
+ 	if (! comp)
+ 		goto out_fail;
+ 
+-	if ( rslots > 0  &&  rslots < 256 ) {
++	if (rslots > 0) {
+ 		size_t rsize = rslots * sizeof(struct cstate);
+ 		comp->rstate = kzalloc(rsize, GFP_KERNEL);
+ 		if (! comp->rstate)
+@@ -106,7 +110,7 @@ slhc_init(int rslots, int tslots)
+ 		comp->rslot_limit = rslots - 1;
+ 	}
+ 
+-	if ( tslots > 0  &&  tslots < 256 ) {
++	if (tslots > 0) {
+ 		size_t tsize = tslots * sizeof(struct cstate);
+ 		comp->tstate = kzalloc(tsize, GFP_KERNEL);
+ 		if (! comp->tstate)
+@@ -141,7 +145,7 @@ out_free2:
+ out_free:
+ 	kfree(comp);
+ out_fail:
+-	return NULL;
++	return ERR_PTR(-ENOMEM);
+ }
+ 
+ 
+diff --git a/drivers/net/slip/slip.c b/drivers/net/slip/slip.c
+index 05387b1..a17d86a 100644
+--- a/drivers/net/slip/slip.c
++++ b/drivers/net/slip/slip.c
+@@ -164,7 +164,7 @@ static int sl_alloc_bufs(struct slip *sl, int mtu)
+ 	if (cbuff == NULL)
+ 		goto err_exit;
+ 	slcomp = slhc_init(16, 16);
+-	if (slcomp == NULL)
++	if (IS_ERR(slcomp))
+ 		goto err_exit;
+ #endif
+ 	spin_lock_bh(&sl->lock);
+-- 
+cgit v0.11.2
+
