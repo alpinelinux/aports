@@ -1,16 +1,16 @@
 #!/sbin/openrc-run
-# Copyright 1999-2013 Gentoo Foundation
+# Copyright 1999-2015 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
-# $Header: /var/cvsroot/gentoo-x86/sys-fs/cryptsetup/files/1.5.1-dmcrypt.rc,v 1.1 2013/01/17 23:35:08 robbat2 Exp $
 
 depend() {
 	before checkfs fsck
+
+	if grep -qs ^swap= "${conf_file}" ; then
+		before swap
+	fi
 }
 
 # We support multiple dmcrypt instances based on $SVCNAME
-execute_hook="dm_crypt_execute_dmcrypt"
-# XXX: Should we drop this ?
-# execute_hook="dm_crypt_execute_localmount"
 conf_file="/etc/conf.d/${SVCNAME}"
 
 # Get splash helpers if available.
@@ -20,8 +20,31 @@ fi
 
 # Setup mappings for an individual target/swap
 # Note: This relies on variables localized in the main body below.
-dm_crypt_execute_dmcrypt() {
+dm_crypt_execute() {
 	local dev ret mode foo
+
+	if [ -z "${target}" -a -z "${swap}" ] ; then
+		return
+	fi
+
+	# Set up default values.
+	: ${dmcrypt_key_timeout:=1}
+	: ${dmcrypt_max_timeout:=300}
+	: ${dmcrypt_retries:=5}
+
+	# Handle automatic look up of the source path.
+	if [ -z "${source}" -a -n "${loop_file}" ] ; then
+		source=$(losetup --show -f "${loop_file}")
+	fi
+	case ${source} in
+	*=*)
+		source="$(findfs ${source})"
+		;;
+	esac
+	if [ -z "${source}" ] || [ ! -e "${source}" ] ; then
+		ewarn "source \"${source}\" for ${target} missing, skipping..."
+		return
+	fi
 
 	if [ -n "${target}" ] ; then
 		# let user set options, otherwise leave empty
@@ -36,15 +59,6 @@ dm_crypt_execute_dmcrypt() {
 		# suspend2 users should have initramfs's init handling their swap partition either way.
 		: ${options:='-c aes -h sha1 -d /dev/urandom'}
 		: ${pre_mount:='mkswap ${dev}'}
-	else
-		return
-	fi
-	if [ "x${source#UUID}" != "x${source}" ]; then
-		source="$(findfs ${source})"
-	fi
-	if [ -z "${source}" ] && [ ! -e "${source}" ] ; then
-		ewarn "source \"${source}\" for ${target} missing, skipping..."
-		return
 	fi
 
 	if [ -n "${loop_file}" ] ; then
@@ -54,11 +68,14 @@ dm_crypt_execute_dmcrypt() {
 	fi
 
 	# cryptsetup:
-	# luksOpen <device> <name>      # <device> is $source
-	# create   <name>   <device>    # <name>   is $target
-	local arg1="create" arg2="${target}" arg3="${source}" luks=0
-
-	cryptsetup isLuks ${source} 2>/dev/null && { arg1="luksOpen"; arg2="${source}"; arg3="${target}"; luks=1; }
+	# open   <device> <name>      # <device> is $source
+	# create <name>   <device>    # <name>   is $target
+	local arg1="create" arg2="${target}" arg3="${source}"
+	if cryptsetup isLuks ${source} 2>/dev/null ; then
+		arg1="open"
+		arg2="${source}"
+		arg3="${target}"
+	fi
 
 	# Older versions reported:
 	#	${target} is active:
@@ -84,7 +101,7 @@ dm_crypt_execute_dmcrypt() {
 			resettty='stty ${savetty}; trap - EXIT HUP INT TERM'
 			trap 'eval "${resettty}"' EXIT HUP INT TERM
 			stty -icanon
-			[ "${1}" = -t ] && stty min 0 time "$(( $2 * 10 ))"
+			stty min 0 time "$(( $2 * 10 ))"
 			ans=$(dd count=1 bs=1 2>/dev/null) || ans=''
 			eval "${resettty}"
 			if [ -z "${ans}" ] ; then
@@ -99,8 +116,8 @@ dm_crypt_execute_dmcrypt() {
 		}
 
 		# Notes: sed not used to avoid case where /usr partition is encrypted.
-		mode=${key/*:/} && ( [ "${mode}" = "${key}" ] || [ -z "${mode}" ] ) && mode=reg
-		key=${key/:*/}
+		mode=${key##*:} && ( [ "${mode}" = "${key}" ] || [ -z "${mode}" ] ) && mode=reg
+		key=${key%:*}
 		case "${mode}" in
 		gpg|reg)
 			# handle key on removable device
@@ -116,7 +133,7 @@ dm_crypt_execute_dmcrypt() {
 				fi
 				i=0
 				einfo "Please insert removable device for ${target}"
-				while [ ${i} -lt ${dmcrypt_max_timeout:-120} ] ; do
+				while [ ${i} -lt ${dmcrypt_max_timeout} ] ; do
 					foo=""
 					if mount -n -o ro "${remdev}" "${mntrem}" 2>/dev/null >/dev/null ; then
 						# keyfile exists?
@@ -124,7 +141,7 @@ dm_crypt_execute_dmcrypt() {
 							umount -n "${mntrem}"
 							rmdir "${mntrem}"
 							einfo "Cannot find ${key} on removable media."
-							read_abort "Abort" ${read_timeout:--t 1} && return
+							read_abort "Abort" ${dmcrypt_key_timeout} && return
 						else
 							key="${mntrem}${key}"
 							break
@@ -158,13 +175,17 @@ dm_crypt_execute_dmcrypt() {
 	if [ "${mode}" = "gpg" ] ; then
 		: ${gpg_options:='-q -d'}
 		# gpg available ?
-		if type -p gpg >/dev/null ; then
-			for i in 0 1 2 ; do
+		if command -v gpg >/dev/null ; then
+			i=0
+			while [ ${i} -lt ${dmcrypt_retries} ] ; do
 				# paranoid, don't store key in a variable, pipe it so it stays very little in ram unprotected.
 				# save stdin stdout stderr "values"
-				gpg ${gpg_options} ${key} 2>/dev/null | cryptsetup ${options} ${arg1} ${arg2} ${arg3}
+				timeout ${dmcrypt_max_timeout} gpg ${gpg_options} ${key} 2>/dev/null | \
+					cryptsetup --key-file - ${options} ${arg1} ${arg2} ${arg3}
 				ret=$?
-				[ ${ret} -eq 0 ] && break
+				# The timeout command exits 124 when it times out.
+				[ ${ret} -eq 0 -o ${ret} -eq 124 ] && break
+				: $(( i += 1 ))
 			done
 			eend ${ret} "failure running cryptsetup"
 		else
@@ -195,37 +216,10 @@ dm_crypt_execute_dmcrypt() {
 	else
 		if [ -n "${pre_mount}" ] ; then
 			dev="/dev/mapper/${target}"
-			ebegin "    pre_mount: ${pre_mount}"
+			eval ebegin \""    pre_mount: ${pre_mount}"\"
 			eval "${pre_mount}" > /dev/null
 			ewend $? || cryptfs_status=1
 		fi
-	fi
-}
-
-# Run any post_mount commands for an individual mount
-#
-# Note: This relies on variables localized in the main body below.
-dm_crypt_execute_localmount() {
-	local mount_point
-
-	[ -z "${target}" ] && [ -z "${post_mount}" ] && return
-
-	if ! cryptsetup status ${target} | egrep -q '\<active:' ; then
-		ewarn "Skipping unmapped target ${target}"
-		cryptfs_status=1
-		return
-	fi
-
-	mount_point=$(grep "/dev/mapper/${target}" /proc/mounts | cut -d' ' -f2)
-	if [ -z "${mount_point}" ] ; then
-		ewarn "Failed to find mount point for ${target}, skipping"
-		cryptfs_status=1
-	fi
-
-	if [ -n "${post_mount}" ] ; then
-		ebegin "Running post_mount commands for target ${target}"
-		eval "${post_mount}" >/dev/null
-		eend $? || cryptfs_status=1
 	fi
 }
 
@@ -235,9 +229,8 @@ get_bootparam_val() {
 	#    foo=bar=cow
 	# Return the "bar=cow" part.
 	case $1 in
-	*\=*)
-		local key=$(echo "$1" | cut -f1 -d=)
-		echo "$1" | cut -c $(( ${#key} + 2 ))
+	*=*)
+		echo "${1#*=}"
 		;;
 	esac
 }
@@ -249,16 +242,13 @@ start() {
 	local x
 	for x in $(cat /proc/cmdline) ; do
 		case "${x}" in
-		key_timeout\=*)
-			local KEY_TIMEOUT=$(get_bootparam_val "${x}")
-			if [ ${KEY_TIMEOUT} -gt 0 ] ; then
-				read_timeout="-t ${KEY_TIMEOUT}"
-			fi
-		;;
+		key_timeout=*)
+			dmcrypt_key_timeout=$(get_bootparam_val "${x}")
+			;;
 		esac
 	done
 
-	while read -u 3 targetline ; do
+	while read targetline <&3 ; do
 		case ${targetline} in
 		# skip comments and blank lines
 		""|"#"*) continue ;;
@@ -273,7 +263,7 @@ start() {
 		case ${targetline} in
 		target=*|swap=*)
 			# If we have a target queued up, then execute it
-			${execute_hook}
+			dm_crypt_execute
 
 			# Prepare for the next target/swap by resetting variables
 			unset gpg_options key loop_file target options pre_mount post_mount source swap remdev
@@ -286,7 +276,7 @@ start() {
 			fi
 			;;
 
-		dmcrypt_max_timeout=*)
+		dmcrypt_*=*)
 			# ignore global options
 			continue
 			;;
@@ -296,12 +286,12 @@ start() {
 			;;
 		esac
 
-		# Queue this setting for the next call to dm_crypt_execute_xxx
+		# Queue this setting for the next call to dm_crypt_execute
 		eval "${targetline}"
 	done 3< ${conf_file}
 
 	# If we have a target queued up, then execute it
-	${execute_hook}
+	dm_crypt_execute
 
 	ewend ${cryptfs_status} "Failed to setup dm-crypt devices"
 }
