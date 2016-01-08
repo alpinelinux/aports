@@ -1,0 +1,119 @@
+From 2683e267fa6c20d2e7a498a85f79a1dfc4301f23 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Mon, 26 Oct 2015 18:42:22 -0400
+Subject: [PATCH] safely handle failure to open hosts, services, resolv.conf
+ files
+
+previously, transient failures like fd exhaustion or other
+resource-related errors were treated the same as non-existence of
+these files, leading to fallbacks or false-negative results. in
+particular:
+
+- failure to open hosts resulted in fallback to dns, possibly yielding
+  EAI_NONAME for a hostname that should be defined locally, or an
+  unwanted result from dns that the hosts file was intended to
+  replace.
+
+- failure to open services resulted in EAI_SERVICE.
+
+- failure to open resolv.conf resulted in querying localhost rather
+  than the configured nameservers.
+
+now, only permanent errors trigger the fallback behaviors above; all
+other errors are reportable to the caller as EAI_SYSTEM.
+---
+ src/network/lookup_name.c | 10 +++++++++-
+ src/network/lookup_serv.c | 10 +++++++++-
+ src/network/res_msend.c   | 13 +++++++++++--
+ 3 files changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/src/network/lookup_name.c b/src/network/lookup_name.c
+index 0225a93..df9e623 100644
+--- a/src/network/lookup_name.c
++++ b/src/network/lookup_name.c
+@@ -9,6 +9,7 @@
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <pthread.h>
++#include <errno.h>
+ #include "lookup.h"
+ #include "stdio_impl.h"
+ #include "syscall.h"
+@@ -51,7 +52,14 @@ static int name_from_hosts(struct address buf[static MAXADDRS], char canon[stati
+ 	int cnt = 0;
+ 	unsigned char _buf[1032];
+ 	FILE _f, *f = __fopen_rb_ca("/etc/hosts", &_f, _buf, sizeof _buf);
+-	if (!f) return 0;
++	if (!f) switch (errno) {
++	case ENOENT:
++	case ENOTDIR:
++	case EACCES:
++		return 0;
++	default:
++		return EAI_SYSTEM;
++	}
+ 	while (fgets(line, sizeof line, f) && cnt < MAXADDRS) {
+ 		char *p, *z;
+ 
+diff --git a/src/network/lookup_serv.c b/src/network/lookup_serv.c
+index 4faa5bc..66ebaea 100644
+--- a/src/network/lookup_serv.c
++++ b/src/network/lookup_serv.c
+@@ -4,6 +4,7 @@
+ #include <ctype.h>
+ #include <string.h>
+ #include <fcntl.h>
++#include <errno.h>
+ #include "lookup.h"
+ #include "stdio_impl.h"
+ 
+@@ -69,7 +70,14 @@ int __lookup_serv(struct service buf[static MAXSERVS], const char *name, int pro
+ 
+ 	unsigned char _buf[1032];
+ 	FILE _f, *f = __fopen_rb_ca("/etc/services", &_f, _buf, sizeof _buf);
+-	if (!f) return EAI_SERVICE;
++	if (!f) switch (errno) {
++	case ENOENT:
++	case ENOTDIR:
++	case EACCES:
++		return EAI_SERVICE;
++	default:
++		return EAI_SYSTEM;
++	}
+ 
+ 	while (fgets(line, sizeof line, f) && cnt < MAXSERVS) {
+ 		if ((p=strchr(line, '#'))) *p++='\n', *p=0;
+diff --git a/src/network/res_msend.c b/src/network/res_msend.c
+index 35f106d..d0e8e48 100644
+--- a/src/network/res_msend.c
++++ b/src/network/res_msend.c
+@@ -54,7 +54,15 @@ int __res_msend(int nqueries, const unsigned char *const *queries,
+ 
+ 	/* Get nameservers from resolv.conf, fallback to localhost */
+ 	f = __fopen_rb_ca("/etc/resolv.conf", &_f, _buf, sizeof _buf);
+-	if (f) for (nns=0; nns<3 && fgets(line, sizeof line, f); ) {
++	if (!f) switch (errno) {
++	case ENOENT:
++	case ENOTDIR:
++	case EACCES:
++		goto no_resolv_conf;
++	default:
++		return -1;
++	}
++	for (nns=0; nns<3 && fgets(line, sizeof line, f); ) {
+ 		if (!strncmp(line, "options", 7) && isspace(line[7])) {
+ 			unsigned long x;
+ 			char *p, *z;
+@@ -92,7 +100,8 @@ int __res_msend(int nqueries, const unsigned char *const *queries,
+ 			}
+ 		}
+ 	}
+-	if (f) __fclose_ca(f);
++	__fclose_ca(f);
++no_resolv_conf:
+ 	if (!nns) {
+ 		ns[0].sin.sin_family = AF_INET;
+ 		ns[0].sin.sin_port = htons(53);
+-- 
+2.7.0
+
