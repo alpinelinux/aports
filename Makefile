@@ -37,14 +37,15 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@datadir@:$(datadir):g' \
 			-e 's:@abuildrepo@:$(abuildrepo):g'
 
-SSL_CFLAGS	= $(shell pkg-config --cflags openssl)
-SSL_LIBS	= $(shell pkg-config --libs openssl)
+SSL_CFLAGS	?= $(shell pkg-config --cflags openssl)
+SSL_LDFLAGS	?= $(shell pkg-config --cflags openssl)
+SSL_LIBS	?= $(shell pkg-config --libs openssl)
 
-LDFLAGS ?=
 
 OBJS-abuild-tar  = abuild-tar.o
+CFLAGS-abuild-tar.o = $(SSL_CFLAGS)
+LDFLAGS-abuild-tar = $(SSL_LDFLAGS)
 LIBS-abuild-tar = $(SSL_LIBS)
-CFLAGS-abuild-tar = $(SSL_CFLAGS)
 
 OBJS-abuild-sudo = abuild-sudo.o
 OBJS-abuild-fetch = abuild-fetch.o
