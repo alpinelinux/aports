@@ -258,11 +258,11 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			break;
 		case '1': /* hard link */
 			entry.mode |= S_IFREG;
-			entry.link_target = buf.linkname;
+			if (!entry.link_target) entry.link_target = buf.linkname;
 			break;
 		case '2': /* symbolic link */
 			entry.mode |= S_IFLNK;
-			entry.link_target = buf.linkname;
+			if (!entry.link_target) entry.link_target = buf.linkname;
 			if (entry.csum.type == APK_CHECKSUM_NONE && soft_checksums) {
 				EVP_Digest(buf.linkname, strlen(buf.linkname),
 					   entry.csum.data, NULL,
