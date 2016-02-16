@@ -264,6 +264,37 @@ err:
 	mark_error(ctx, match, name);
 }
 
+static int purge_package(void *pctx, int dirfd, const char *filename)
+{
+	char tmp[PATH_MAX];
+	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
+	struct apk_database *db = ctx->db;
+	struct apk_provider *p0;
+	struct apk_name *name;
+	apk_blob_t b = APK_BLOB_STR(filename), bname, bver;
+	size_t l;
+
+	if (apk_pkg_parse_name(b, &bname, &bver)) return 0;
+	name = apk_db_get_name(db, bname);
+	if (!name) return 0;
+
+	foreach_array_item(p0, name->providers) {
+		if (p0->pkg->name != name) continue;
+		l = snprintf(tmp, sizeof tmp, PKG_FILE_FMT, PKG_FILE_PRINTF(p0->pkg));
+		if (l > sizeof tmp) continue;
+		if (apk_blob_compare(b, APK_BLOB_PTR_LEN(tmp, l)) != 0) continue;
+		if (p0->pkg->marked) return 0;
+		break;
+	}
+
+	apk_message("Purging %s", filename);
+	if (apk_flags & APK_SIMULATE)
+		return 0;
+
+	unlinkat(dirfd, filename, 0);
+	return 0;
+}
+
 static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
@@ -289,6 +320,11 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 	apk_name_foreach_matching(db, args, apk_foreach_genid(), mark, ctx);
 	if (!ctx->errors)
 		apk_hash_foreach(&db->available.packages, fetch_package, ctx);
+
+	/* Remove packages not matching download spec from the output directory */
+	if (!ctx->errors && (apk_flags & APK_PURGE) &&
+	    !(ctx->flags & FETCH_STDOUT) && ctx->outdir_fd > 0)
+		apk_dir_foreach_file(ctx->outdir_fd, purge_package, ctx);
 
 	return ctx->errors;
 }
