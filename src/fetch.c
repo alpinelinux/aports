@@ -93,8 +93,9 @@ static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int opt
 static const struct apk_option options_applet[] = {
 	{ 'L', "link",		"Create hard links if possible" },
 	{ 'R', "recursive",	"Fetch the PACKAGE and all its dependencies" },
-	{ 's', "stdout",
-	  "Dump the .apk to stdout (incompatible with -o, -R, --progress)" },
+	{ 0x104, "simulate",	"Show what would be done without actually doing it" },
+	{ 's', "stdout",	"Dump the .apk to stdout (incompatible "
+				"with -o, -R, --progress)" },
 	{ 'o', "output",	"Directory to place the PACKAGEs to",
 	  required_argument, "DIR" },
 };

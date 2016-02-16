@@ -106,6 +106,9 @@ static int option_parse_global(void *ctx, struct apk_db_options *dbopts, int opt
 	case 0x101:
 		apk_flags |= APK_PROGRESS;
 		break;
+	case 0x104:
+		apk_flags |= APK_SIMULATE;
+		break;
 	case 0x110:
 		apk_flags &= ~APK_PROGRESS;
 		break;
