@@ -1,0 +1,86 @@
+From patchwork Mon Nov 16 12:36:32 2015
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+Subject: via-velocity: unconditionally drop frames with bad l2 length
+From: =?utf-8?q?Timo_Ter=C3=A4s?= <timo.teras@iki.fi>
+X-Patchwork-Id: 544990
+Message-Id: <1447677392-17400-1-git-send-email-timo.teras@iki.fi>
+To: Francois Romieu <romieu@fr.zoreil.com>, netdev@vger.kernel.org
+Cc: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Mon, 16 Nov 2015 14:36:32 +0200
+
+By default the driver allowed incorrect frames to be received. What is
+worse the code does not handle very short frames correctly. The FCS
+length is unconditionally subtracted, and the underflow can cause
+skb_put to be called with large number after implicit cast to unsigned.
+And indeed, an skb_over_panic() was observed with via-velocity.
+
+This removes the module parameter as it does not work in it's
+current state, and should be implemented via NETIF_F_RXALL if needed.
+
+Suggested-by: Francois Romieu <romieu@fr.zoreil.com>
+Signed-off-by: Timo Teräs <timo.teras@iki.fi>
+---
+Francois, is this something like you had in mind? I can try give this
+a test spin in the known bad location, if this looks otherwise ok.
+
+ drivers/net/ethernet/via/via-velocity.c | 24 +++---------------------
+ 1 file changed, 3 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/net/ethernet/via/via-velocity.c b/drivers/net/ethernet/via/via-velocity.c
+index a43e849..03ce386 100644
+--- a/drivers/net/ethernet/via/via-velocity.c
++++ b/drivers/net/ethernet/via/via-velocity.c
+@@ -345,13 +345,6 @@ VELOCITY_PARAM(flow_control, "Enable flow control ability");
+ */
+ VELOCITY_PARAM(speed_duplex, "Setting the speed and duplex mode");
+ 
+-#define VAL_PKT_LEN_DEF     0
+-/* ValPktLen[] is used for setting the checksum offload ability of NIC.
+-   0: Receive frame with invalid layer 2 length (Default)
+-   1: Drop frame with invalid layer 2 length
+-*/
+-VELOCITY_PARAM(ValPktLen, "Receiving or Drop invalid 802.3 frame");
+-
+ #define WOL_OPT_DEF     0
+ #define WOL_OPT_MIN     0
+ #define WOL_OPT_MAX     7
+@@ -494,7 +487,6 @@ static void velocity_get_options(struct velocity_opt *opts, int index,
+ 
+ 	velocity_set_int_opt(&opts->flow_cntl, flow_control[index], FLOW_CNTL_MIN, FLOW_CNTL_MAX, FLOW_CNTL_DEF, "flow_control", devname);
+ 	velocity_set_bool_opt(&opts->flags, IP_byte_align[index], IP_ALIG_DEF, VELOCITY_FLAGS_IP_ALIGN, "IP_byte_align", devname);
+-	velocity_set_bool_opt(&opts->flags, ValPktLen[index], VAL_PKT_LEN_DEF, VELOCITY_FLAGS_VAL_PKT_LEN, "ValPktLen", devname);
+ 	velocity_set_int_opt((int *) &opts->spd_dpx, speed_duplex[index], MED_LNK_MIN, MED_LNK_MAX, MED_LNK_DEF, "Media link mode", devname);
+ 	velocity_set_int_opt(&opts->wol_opts, wol_opts[index], WOL_OPT_MIN, WOL_OPT_MAX, WOL_OPT_DEF, "Wake On Lan options", devname);
+ 	opts->numrx = (opts->numrx & ~3);
+@@ -2055,8 +2047,9 @@ static int velocity_receive_frame(struct velocity_info *vptr, int idx)
+ 	int pkt_len = le16_to_cpu(rd->rdesc0.len) & 0x3fff;
+ 	struct sk_buff *skb;
+ 
+-	if (rd->rdesc0.RSR & (RSR_STP | RSR_EDP)) {
+-		VELOCITY_PRT(MSG_LEVEL_VERBOSE, KERN_ERR " %s : the received frame spans multiple RDs.\n", vptr->netdev->name);
++	if (unlikely(rd->rdesc0.RSR & (RSR_STP | RSR_EDP | RSR_RL))) {
++		if (rd->rdesc0.RSR & (RSR_STP | RSR_EDP))
++			VELOCITY_PRT(MSG_LEVEL_VERBOSE, KERN_ERR " %s : the received frame spans multiple RDs.\n", vptr->netdev->name);
+ 		stats->rx_length_errors++;
+ 		return -EINVAL;
+ 	}
+@@ -2069,17 +2062,6 @@ static int velocity_receive_frame(struct velocity_info *vptr, int idx)
+ 	dma_sync_single_for_cpu(vptr->dev, rd_info->skb_dma,
+ 				    vptr->rx.buf_sz, DMA_FROM_DEVICE);
+ 
+-	/*
+-	 *	Drop frame not meeting IEEE 802.3
+-	 */
+-
+-	if (vptr->flags & VELOCITY_FLAGS_VAL_PKT_LEN) {
+-		if (rd->rdesc0.RSR & RSR_RL) {
+-			stats->rx_length_errors++;
+-			return -EINVAL;
+-		}
+-	}
+-
+ 	velocity_rx_csum(rd, skb);
+ 
+ 	if (velocity_rx_copy(&skb, pkt_len, vptr) < 0) {
