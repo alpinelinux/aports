@@ -1,0 +1,81 @@
+From aa48314c60da1035a8e6cc05bec12838a074de98 Mon Sep 17 00:00:00 2001
+From: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Date: Mon, 2 Nov 2015 17:24:08 -0500
+Subject: [PATCH v2 XSA157 3/5] xen/pciback: Do not install an IRQ handler for
+ MSI interrupts.
+
+Otherwise an guest can subvert the generic MSI code to trigger
+an BUG_ON condition during MSI interrupt freeing:
+
+ for (i = 0; i < entry->nvec_used; i++)
+        BUG_ON(irq_has_action(entry->irq + i));
+
+Xen PCI backed installs an IRQ handler (request_irq) for
+the dev->irq whenever the guest writes PCI_COMMAND_MEMORY
+(or PCI_COMMAND_IO) to the PCI_COMMAND register. This is
+done in case the device has legacy interrupts the GSI line
+is shared by the backend devices.
+
+To subvert the backend the guest needs to make the backend
+to change the dev->irq from the GSI to the MSI interrupt line,
+make the backend allocate an interrupt handler, and then command
+the backend to free the MSI interrupt and hit the BUG_ON.
+
+Since the backend only calls 'request_irq' when the guest
+writes to the PCI_COMMAND register the guest needs to call
+XEN_PCI_OP_enable_msi before any other operation. This will
+cause the generic MSI code to setup an MSI entry and
+populate dev->irq with the new PIRQ value.
+
+Then the guest can write to PCI_COMMAND PCI_COMMAND_MEMORY
+and cause the backend to setup an IRQ handler for dev->irq
+(which instead of the GSI value has the MSI pirq). See
+'xen_pcibk_control_isr'.
+
+Then the guest disables the MSI: XEN_PCI_OP_disable_msi
+which ends up triggering the BUG_ON condition in 'free_msi_irqs'
+as there is an IRQ handler for the entry->irq (dev->irq).
+
+Note that this cannot be done using MSI-X as the generic
+code does not over-write dev->irq with the MSI-X PIRQ values.
+
+The patch inhibits setting up the IRQ handler if MSI or
+MSI-X (for symmetry reasons) code had been called successfully.
+
+P.S.
+Xen PCIBack when it sets up the device for the guest consumption
+ends up writting 0 to the PCI_COMMAND (see xen_pcibk_reset_device).
+XSA-120 addendum patch removed that - however when upstreaming said
+addendum we found that it caused issues with qemu upstream. That
+has now been fixed in qemu upstream.
+
+This is part of XSA-157
+
+CC: stable@vger.kernel.org
+Reviewed-by: David Vrabel <david.vrabel@citrix.com>
+Signed-off-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+---
+ drivers/xen/xen-pciback/pciback_ops.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/xen/xen-pciback/pciback_ops.c b/drivers/xen/xen-pciback/pciback_ops.c
+index a107928..5bb76c0 100644
+--- a/drivers/xen/xen-pciback/pciback_ops.c
++++ b/drivers/xen/xen-pciback/pciback_ops.c
+@@ -70,6 +70,13 @@ static void xen_pcibk_control_isr(struct pci_dev *dev, int reset)
+ 		enable ? "enable" : "disable");
+ 
+ 	if (enable) {
++		/*
++		 * The MSI or MSI-X should not have an IRQ handler. Otherwise
++		 * if the guest terminates we BUG_ON in free_msi_irqs.
++		 */
++		if (dev->msi_enabled || dev->msix_enabled)
++			goto out;
++
+ 		rc = request_irq(dev_data->irq,
+ 				xen_pcibk_guest_interrupt, IRQF_SHARED,
+ 				dev_data->irq_name, dev);
+-- 
+2.1.0
+
