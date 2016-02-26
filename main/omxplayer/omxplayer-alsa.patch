@@ -1,21 +1,3 @@
-From 5ff66870da7d3376cba3a927bcb173b87bff9fb5 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
-Date: Tue, 9 Feb 2016 15:25:41 +0200
-Subject: [PATCH] preliminary alsa support
-
----
- Makefile          |    5 +-
- OMXAudio.cpp      |    5 +-
- OMXAudio.h        |    1 +
- OMXCore.cpp       |   11 +
- README.md         |    1 +
- linux/OMXAlsa.cpp | 1275 +++++++++++++++++++++++++++++++++++++++++++++++++++++
- linux/OMXAlsa.h   |   11 +
- omxplayer.cpp     |    6 +-
- 8 files changed, 1310 insertions(+), 5 deletions(-)
- create mode 100644 linux/OMXAlsa.cpp
- create mode 100644 linux/OMXAlsa.h
-
 diff --git a/Makefile b/Makefile
 index 9fc45de..5337ee7 100644
 --- a/Makefile
@@ -122,10 +104,10 @@ index 726127c..cc718b1 100644
      -s  --stats                 Pts and buffer stats
 diff --git a/linux/OMXAlsa.cpp b/linux/OMXAlsa.cpp
 new file mode 100644
-index 0000000..b19ef31
+index 0000000..fe51eb1
 --- /dev/null
 +++ b/linux/OMXAlsa.cpp
-@@ -0,0 +1,1275 @@
+@@ -0,0 +1,1313 @@
 +/*
 + * OMX IL Alsa Sink component
 + * Copyright (c) 2016 Timo Teräs
@@ -136,7 +118,6 @@ index 0000000..b19ef31
 + * any later version.
 + *
 + * TODO:
-+ * - rate changing, test --live for speed control handling
 + * - timeouts for state transition failures
 + */
 +
@@ -147,6 +128,7 @@ index 0000000..b19ef31
 +#include <stdlib.h>
 +#include <pthread.h>
 +#include <alsa/asoundlib.h>
++#include <speex/speex_resampler.h>
 +#include <IL/OMX_Core.h>
 +#include <IL/OMX_Component.h>
 +#include <IL/OMX_Broadcom.h>
@@ -224,11 +206,6 @@ index 0000000..b19ef31
 +		q->head = q->tail = item;
 +	}
 +	q->num++;
-+}
-+
-+static void *gomxq_peek(GOMX_QUEUE *q)
-+{
-+	return q->head;
 +}
 +
 +static void *gomxq_dequeue(GOMX_QUEUE *q)
@@ -620,7 +597,8 @@ index 0000000..b19ef31
 +	void *buf;
 +
 +	if (port->tunnel_supplier) {
-+		CINFO(comp, port, "waiting for supplier buffers");
++		CINFO(comp, port, "waiting for supplier buffers (%d / %d)",
++			(int)port->tunnel_supplierq.num, (int)port->num_buffers);
 +		while (port->tunnel_supplierq.num != port->num_buffers)
 +			pthread_cond_wait(&port->cond_idle, &comp->mutex);
 +
@@ -634,7 +612,7 @@ index 0000000..b19ef31
 +		}
 +	} else {
 +		/* Wait client / tunnel supplier to allocate buffers */
-+		CINFO(comp, port, "waiting buffers to be freed");
++		CINFO(comp, port, "waiting %d buffers to be freed", (int)port->num_buffers);
 +		while (port->num_buffers > 0)
 +			pthread_cond_wait(&port->cond_no_buffers, &comp->mutex);
 +	}
@@ -809,8 +787,7 @@ index 0000000..b19ef31
 +
 +	switch (cmd->cmd) {
 +	case OMX_CommandFlush:
-+		if (port->flush)
-+			r = port->flush(comp, port);
++		if (port->flush) r = port->flush(comp, port);
 +		break;
 +	case OMX_CommandPortEnable:
 +		port->def.bEnabled = OMX_TRUE;
@@ -820,6 +797,7 @@ index 0000000..b19ef31
 +		break;
 +	case OMX_CommandPortDisable:
 +		port->def.bEnabled = OMX_FALSE;
++		if (port->flush) port->flush(comp, port);
 +		r = __gomx_port_unpopulate(comp, port);
 +		break;
 +	default:
@@ -995,7 +973,8 @@ index 0000000..b19ef31
 +	GOMX_QUEUE playq;
 +	pthread_cond_t cond_play;
 +	size_t frame_size, sample_rate, play_queue_size;
-+	int64_t starttime, timescale;
++	int64_t starttime;
++	int32_t timescale;
 +	OMX_AUDIO_PARAM_PCMMODETYPE pcm;
 +	snd_pcm_format_t pcm_format;
 +	char device_name[16];
@@ -1145,12 +1124,17 @@ index 0000000..b19ef31
 +	OMX_HANDLETYPE hComponent = (OMX_HANDLETYPE) comp;
 +	OMX_ALSASINK *sink = (OMX_ALSASINK *) hComponent;
 +	OMX_BUFFERHEADERTYPE *buf;
++	GOMX_PORT *audio_port = &comp->ports[OMXALSA_PORT_AUDIO];
 +	GOMX_PORT *clock_port = &comp->ports[OMXALSA_PORT_CLOCK];
-+	snd_pcm_t *dev;
++	snd_pcm_t *dev = 0;
 +	snd_pcm_sframes_t n;
 +	snd_pcm_hw_params_t *hwp;
 +	snd_pcm_uframes_t buffer_size, period_size, period_size_max;
++	SpeexResamplerState *resampler = 0;
++	spx_int16_t *resample_buf = 0;
++	size_t resample_bufsz;
 +	unsigned int rate;
++	int32_t timescale;
 +	int err;
 +
 +	CINFO(comp, 0, "worker started");
@@ -1189,19 +1173,35 @@ index 0000000..b19ef31
 +	sink->frame_size = (sink->pcm.nChannels * sink->pcm.nBitPerSample) >> 3;
 +	sink->sample_rate = rate;
 +
++	resampler = speex_resampler_init(sink->pcm.nChannels, rate, rate, 1, 0);
++	if (!resampler) goto err;
++
++	resample_bufsz = audio_port->def.nBufferSize * 2;
++	resample_buf = (spx_int16_t *) malloc(resample_bufsz);
++	if (!resample_buf) goto err;
++
 +	CINFO(comp, 0, "sample_rate %d, frame_size %d", rate, sink->frame_size);
 +
 +	pthread_mutex_lock(&comp->mutex);
 +	while (comp->wanted_state == OMX_StateExecuting) {
-+		buf = (OMX_BUFFERHEADERTYPE*) gomxq_peek(&sink->playq);
-+		if (!buf || sink->timescale == 0) {
++		buf = 0;
++		if (sink->timescale)
++			buf = (OMX_BUFFERHEADERTYPE*) gomxq_dequeue(&sink->playq);
++		if (!buf) {
 +			pthread_cond_wait(&sink->cond_play, &comp->mutex);
 +			continue;
 +		}
 +
-+		pthread_mutex_unlock(&comp->mutex);
-+		if (buf->nOffset == 0 && clock_port->tunnel_comp &&
-+		    !(buf->nFlags & OMX_BUFFERFLAG_TIME_UNKNOWN)) {
++		if (resampler && timescale != sink->timescale) {
++			int in_rate = (int64_t)rate * sink->timescale >> 16;
++			timescale = sink->timescale;
++			if (timescale > 0x20000) timescale = 0x20000;
++			CDEBUG(comp, 0, "resampler: %d -> %d", in_rate, rate);
++			speex_resampler_set_rate(resampler, in_rate, rate);
++		}
++
++		sink->play_queue_size -= buf->nFilledLen;
++		if (clock_port->tunnel_comp && !(buf->nFlags & OMX_BUFFERFLAG_TIME_UNKNOWN)) {
 +			OMX_TIME_CONFIG_TIMESTAMPTYPE tst;
 +			int64_t pts = omx_ticks_to_s64(buf->nTimeStamp);
 +			snd_pcm_sframes_t delay = 0;
@@ -1209,64 +1209,84 @@ index 0000000..b19ef31
 +			omx_init(tst);
 +			tst.nPortIndex = clock_port->tunnel_port;
 +			tst.nTimestamp = buf->nTimeStamp;
-+
++			if (resampler && buf->nFlags & OMX_BUFFERFLAG_STARTTIME)
++				speex_resampler_reset_mem(resampler);
 +			if (buf->nFlags & (OMX_BUFFERFLAG_STARTTIME|OMX_BUFFERFLAG_DISCONTINUITY)) {
-+				OMX_SetConfig(clock_port->tunnel_comp, OMX_IndexConfigTimeClientStartTime, &tst);
-+				sink->starttime = pts;
 +				CINFO(comp, 0, "STARTTIME nTimeStamp=%llx", pts);
++				sink->starttime = pts;
 +			}
++
 +			snd_pcm_delay(dev, &delay);
++			if (resampler)
++				delay += speex_resampler_get_input_latency(resampler);
++
 +			pts -= (int64_t)delay * OMX_TICKS_PER_SECOND / sink->sample_rate;
++
++			pthread_mutex_unlock(&comp->mutex);
++			if (buf->nFlags & (OMX_BUFFERFLAG_STARTTIME|OMX_BUFFERFLAG_DISCONTINUITY))
++				OMX_SetConfig(clock_port->tunnel_comp, OMX_IndexConfigTimeClientStartTime, &tst);
 +			if (pts >= sink->starttime) {
 +				tst.nTimestamp = omx_ticks_from_s64(pts);
 +				OMX_SetConfig(clock_port->tunnel_comp, OMX_IndexConfigTimeCurrentAudioReference, &tst);
 +			}
++			pthread_mutex_lock(&comp->mutex);
 +		}
 +
-+		n = 0;
 +		if (buf->nFlags & (OMX_BUFFERFLAG_DECODEONLY|OMX_BUFFERFLAG_CODECCONFIG|OMX_BUFFERFLAG_DATACORRUPT)) {
 +			CDEBUG(comp, 0, "skipping: %d bytes, flags %x", buf->nFilledLen, buf->nFlags);
-+			n = buf->nFilledLen;
-+		} else if (buf->nFilledLen) {
-+			n = snd_pcm_writei(dev, buf->pBuffer + buf->nOffset, buf->nFilledLen / sink->frame_size);
-+			if (n < 0) {
-+				if (n != -EPIPE) {
-+					CINFO(comp, 0, "alsa error: %ld", n);
-+					pthread_mutex_lock(&comp->mutex);
-+					break;
++		} else {
++			spx_int16_t *in_ptr;
++			uint8_t *out_ptr;
++			spx_uint32_t in_len, out_len;
++			pthread_mutex_unlock(&comp->mutex);
++
++			in_ptr = (spx_int16_t *)(buf->pBuffer + buf->nOffset);
++			in_len = buf->nFilledLen / sink->frame_size;
++
++			if (resampler) {
++				out_len = resample_bufsz / sink->frame_size;
++				speex_resampler_process_interleaved_int(
++					resampler,
++					in_ptr, &in_len,
++					resample_buf, &out_len);
++				out_ptr = (uint8_t *) resample_buf;
++			} else {
++				out_ptr = (uint8_t *) in_ptr;
++				out_len = in_len;
++			}
++
++			while (out_len > 0) {
++				n = snd_pcm_writei(dev, out_ptr, out_len);
++				if (n < 0) {
++					CINFO(comp, 0, "alsa error: %ld: %s", n, snd_strerror(n));
++					snd_pcm_prepare(dev);
++					n = 0;
 +				}
-+				CINFO(comp, 0, "underrun");
-+				snd_pcm_prepare(dev);
-+				n = 0;
++				out_len -= n;
++				n *= sink->frame_size;
++				out_ptr += n;
 +			}
-+			n *= sink->frame_size;
++			pthread_mutex_lock(&comp->mutex);
 +		}
-+		pthread_mutex_lock(&comp->mutex);
 +
-+		buf->nOffset += n;
-+		buf->nFilledLen -= n;
-+		sink->play_queue_size -= n;
-+
-+		if (!buf->nFilledLen) {
-+			__gomx_process_mark(comp, buf);
-+			if (buf->nFlags & OMX_BUFFERFLAG_EOS) {
-+				CDEBUG(comp, 0, "end-of-stream");
-+				__gomx_event(comp, OMX_EventBufferFlag, OMXALSA_PORT_AUDIO, buf->nFlags, 0);
-+			}
-+			if (gomxq_peek(&sink->playq) == (void*) buf) {
-+				buf = (OMX_BUFFERHEADERTYPE*) gomxq_dequeue(&sink->playq);
-+				__gomx_empty_buffer_done(comp, buf);
-+			}
++		__gomx_process_mark(comp, buf);
++		if (buf->nFlags & OMX_BUFFERFLAG_EOS) {
++			CDEBUG(comp, 0, "end-of-stream");
++			__gomx_event(comp, OMX_EventBufferFlag, OMXALSA_PORT_AUDIO, buf->nFlags, 0);
 +		}
++		__gomx_empty_buffer_done(comp, buf);
 +	}
 +	pthread_mutex_unlock(&comp->mutex);
 +cleanup:
 +	if (dev) snd_pcm_close(dev);
++	if (resampler) speex_resampler_destroy(resampler);
++	free(resample_buf);
 +	CINFO(comp, 0, "worker stopped");
 +	return 0;
 +
 +alsa_error:
 +	CINFO(comp, 0, "ALSA error: %s", snd_strerror(err));
++err:
 +	pthread_mutex_lock(&comp->mutex);
 +	/* FIXME: Current we just go to invalid state, but we might go
 +	 * back to Idle with ErrorResourcesPreempted and let the client
@@ -1280,8 +1300,8 @@ index 0000000..b19ef31
 +static OMX_ERRORTYPE omxalsasink_audio_do_buffer(GOMX_COMPONENT *comp, GOMX_PORT *port, OMX_BUFFERHEADERTYPE *buf)
 +{
 +	OMX_ALSASINK *sink = (OMX_ALSASINK *) comp;
-+	gomxq_enqueue(&sink->playq, (void *) buf);
 +	sink->play_queue_size += buf->nFilledLen;
++	gomxq_enqueue(&sink->playq, (void *) buf);
 +	pthread_cond_signal(&sink->cond_play);
 +	return OMX_ErrorNone;
 +}
@@ -1291,8 +1311,8 @@ index 0000000..b19ef31
 +	OMX_ALSASINK *sink = (OMX_ALSASINK *) comp;
 +	OMX_BUFFERHEADERTYPE *buf;
 +	while ((buf = (OMX_BUFFERHEADERTYPE *) gomxq_dequeue(&sink->playq)) != 0) {
-+		__gomx_empty_buffer_done(comp, buf);
 +		sink->play_queue_size -= buf->nFilledLen;
++		__gomx_empty_buffer_done(comp, buf);
 +	}
 +	return OMX_ErrorNone;
 +}
@@ -1449,6 +1469,3 @@ index 3b5e6d2..4032ba3 100644
        case 'i':
          m_dump_format      = true;
          m_dump_format_exit = true;
--- 
-2.7.1
-
