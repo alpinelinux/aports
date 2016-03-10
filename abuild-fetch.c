@@ -127,7 +127,7 @@ int fetch(char *url, const char *destdir)
 		execvp(wgetcmd.argv[0], wgetcmd.argv);
 		warn(wgetcmd.argv[0]);
 		unlink(lockfile);
-		exit(1);
+		_exit(1);
 	}
 	wait(&status);
 	rename(partfile, outfile);
