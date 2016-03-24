@@ -28,6 +28,7 @@ const static char * applets[] = {
 	"/usr/bin/passwd",
 	"/usr/bin/su",
 	"/usr/bin/traceroute",
+	"/usr/bin/traceroute6",
 	"/usr/bin/vlock",
 	NULL
 };
