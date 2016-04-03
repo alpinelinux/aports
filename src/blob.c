@@ -116,7 +116,7 @@ int apk_blob_cspn(apk_blob_t blob, const apk_spn_match reject, apk_blob_t *l, ap
 	return 1;
 }
 #else
-static int inline test_bit(const unsigned char *array, unsigned bit)
+static int inline test_bit(const unsigned char *array, unsigned char bit)
 {
 	return array[bit >> 3] & (1 << (bit & 7));
 }
