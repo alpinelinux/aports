@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #include <sys/stat.h>
 #include <sys/sendfile.h>
@@ -95,6 +96,37 @@ static bool hash_add(struct hash *h, const char *key, const char *value)
 	return true;
 }
 
+static ssize_t
+buffered_copyfd(int in_fd, int out_fd, ssize_t in_size)
+{
+	const size_t bufsize = 8192;
+	char *buf = NULL;
+	ssize_t r = 0, w = 0, copied = 0, n, m;
+	if ((buf = malloc(bufsize)) == NULL)
+		return -1;
+
+	while (r < in_size && (n = read(in_fd, buf, bufsize))) {
+		if (n == -1) {
+			if (errno == EINTR)
+				continue;
+			break;
+		}
+		r = n;
+		w = 0;
+		while (w < r && (n = write(out_fd, buf + w, (r - w)))) {
+			if (n == -1) {
+				if (errno == EINTR)
+					continue;
+				break;
+			}
+			w += n;
+		}
+		copied += w;
+	}
+	free(buf);
+	return copied;
+}
+
 static bool
 copyfile(const char* source, int output)
 {
@@ -112,8 +144,10 @@ copyfile(const char* source, int output)
 	}
 
 	result = sendfile(output, in_fd, &bytes, fileinfo.st_size);
-	close(in_fd);
+	if (result == EINVAL || result == ENOSYS)
+		result = buffered_copyfd(in_fd, output, fileinfo.st_size);
 
+	close(in_fd);
 	return fileinfo.st_size == result;
 }
 
