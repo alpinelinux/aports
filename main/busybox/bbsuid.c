@@ -21,13 +21,13 @@
 
 const static char * applets[] = {
 	"/bin/mount",
-	"/bin/ping",
-	"/bin/ping6",
 	"/bin/umount",
 	"/usr/bin/crontab",
 	"/usr/bin/passwd",
 	"/usr/bin/su",
 	"/usr/bin/traceroute",
+	"/usr/bin/traceroute6",
+	"/usr/bin/vlock",
 	NULL
 };
 
@@ -90,7 +90,7 @@ static int install_links(void)
 int main(int argc, char **argv)
 {
 	const char *app = applet_from_path(argv[0]);
-	
+
 	if (strcmp(app, "bbsuid") == 0) {
 		if (argc == 2 && strcmp(argv[1], "--install") == 0)
 			return install_links();
@@ -99,7 +99,7 @@ int main(int argc, char **argv)
 
 	if (is_valid_applet(app))
 		return exec_busybox(app, argc, argv);
-	
+
 	errx(1, "%s is not a valid applet", app);
 	return 1;
 }
