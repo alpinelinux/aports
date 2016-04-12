@@ -74,8 +74,10 @@ int main(int argc, const char *argv[])
 	if (grent == NULL)
 		errx(1, "%s: Group not found", ABUILD_GROUP);
 
-	if (!is_in_group(grent->gr_gid))
-		errx(1, "Not a member of group %s\n", ABUILD_GROUP);
+	if (!is_in_group(grent->gr_gid)) {
+		errx(1, "User %s is not a member of group %s\n",
+			getlogin(), ABUILD_GROUP);
+	}
 
 	cmd = strrchr(argv[0], '-');
 	if (cmd == NULL)
