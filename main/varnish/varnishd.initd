@@ -1,36 +1,23 @@
-#!/sbin/openrc-run
-# Copyright 1999-2006 Gentoo Foundation
+#!/sbin/runscript
+# Copyright 1999-2014 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
-# $Header: /var/cvsroot/gentoo-x86/www-servers/varnish/files/varnishd.initd,v 1.7 2009/08/30 06:28:07 hollow Exp $
+# $Id$
+
+VARNISHD_PID=${VARNISHD_PID:-/run/${SVCNAME}.pid}
+CONFIGFILES="${CONFIGFILE:-/etc/varnish/default.vcl}"
+
+command="${VARNISHD:-/usr/sbin/varnishd}"
+command_args="-j unix,user=varnish -P ${VARNISHD_PID} -f ${CONFIGFILE} ${VARNISHD_OPTS}"
+pidfile="${VARNISHD_PID}"
 
 extra_commands="configtest"
-extra_started_commands="reload flush"
-command=/usr/sbin/varnishd
+extra_started_commands="reload"
 
-instance=${SVCNAME#*.}
-instance_opt="-n $instance"
-if [ "$instance" = "$SVCNAME" ]; then
-	instance=""
-	instance_opt=""
-fi
-
-default_conf="${instance:-default}.vcl"
-: ${VARNISH_CONF:=${CFG_FILE:-"/etc/varnish/$default_conf"}}
-: ${VARNISHD_PID_FILE:="/var/run/varnish/${SVCNAME}.pid"}
-: ${VARNISHD_CC_COMMAND:="exec cc -fpic -shared -Wl,-x ${VARNISHD_PLUGIN_CFLAGS} -o %o %s"}
-: ${VARNISHNCSA_PID_FILE:="/var/run/varnish/varnishncsa${instance:+.}${instance}.pid"}
-
+description_configtest="Run syntax tests for configuration files."
+description_reload="Reloads the configuration."
 
 depend() {
 	need net
-	after firewall
-}
-
-checkconfig() {
-	if ! $command -C -f ${VARNISH_CONF} -p "cc_command=${VARNISHD_CC_COMMAND}" >/dev/null 2>&1; then
-		error "$SVCNAME has deteced an error in your setup:"
-		$command -C -f ${VARNISH_CONF}
-	fi
 }
 
 configtest() {
@@ -39,56 +26,24 @@ configtest() {
 	eend $?
 }
 
-start() {
-	checkconfig || return 1
-	ebegin "Starting ${SVCNAME}"
-        checkpath --directory --owner varnish:varnish \
-	          --mode 755 ${VARNISHD_PID_FILE%/*}
-	#allow varnishd to lock logfile to memory
-	ulimit -l 82000
-	start-stop-daemon --quiet --start \
-	                  --pidfile ${VARNISHD_PID_FILE} \
-			  --exec $command \
-			  -- \
-			  -j unix,user=varnish \
-			  -f ${VARNISH_CONF} \
-			  -P ${VARNISHD_PID_FILE} \
-			  -p "cc_command=${VARNISHD_CC_COMMAND}" \
-			  $instance_opt \
-			  ${VARNISHD_OPTS} &> /dev/null
-	eend $?
-
-	if [ "${VARNISHNCSA_ARGS}" != "" ]; then
-		# wait for varnish to start up
-		timeout=50
-		while [ $timeout -gt 0 ]; do
-			/usr/bin/varnishadm 'vcl.list' >/dev/null 2>&1 && break
-			sleep 0.1
-			timeout=$(( $timeout - 1 ))
-		done
-
-		ebegin "Starting varnish logging"
-		start-stop-daemon --quiet --start \
-				--pidfile ${VARNISHNCSA_PID_FILE} \
-				--exec /usr/bin/varnishncsa \
-				-- \
-				-D -P ${VARNISHNCSA_PID_FILE} \
-				$instance_opt \
-				${VARNISHNCSA_ARGS}
-		eend $?
+checkconfig() {
+	${VARNISHD} -C -f ${CONFIGFILE} >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]; then
+		eerror "${SVCNAME} has detected an error in your setup:"
+		${VARNISHD} -C -f ${CONFIGFILE}
 	fi
+
+	return $ret
 }
 
-stop() {
-	ebegin "Stopping varnish"
-	start-stop-daemon --quiet --stop --pidfile ${VARNISHD_PID_FILE}
-	eend $?
+start_pre() {
+	checkconfig || return 1
+}
 
-	if [ -e ${VARNISHNCSA_PID_FILE} ]; then
-		ebegin "Stopping varnish logging"
-		start-stop-daemon --quiet --stop \
-			--pidfile ${VARNISHNCSA_PID_FILE}
-		eend $?
+stop_pre() {
+	if [ "${RC_CMD}" = "restart" ]; then
+		checkconfig || return 1
 	fi
 }
 
@@ -97,23 +52,27 @@ reload() {
 
 	ebegin "Reloading varnish"
 
-	# purge unused old configurations
-	DISCARDS=$(/usr/bin/varnishadm -T $ADMINHOSTPORT vcl.list |
-		sed -ne "s/^available *0 *\(reload.*\)/ \\1/p")
-	for VCL in $DISCARDS ; do
-		/usr/bin/varnishadm -T $ADMINHOSTPORT vcl.discard $VCL > /dev/null
-	done
+	$VARNISHADM vcl.list >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]; then
+		eerror "${SVCNAME} cannot list configuration"
+		return 1
+	fi
 
-	# reload new one
-	NOW=$(date +%Y%m%d-%H%M%S-%s)
-	/usr/bin/varnishadm -T $ADMINHOSTPORT vcl.load reload-$NOW ${VARNISH_CONF} > /dev/null
-	/usr/bin/varnishadm -T $ADMINHOSTPORT vcl.use  reload-$NOW > /dev/null
+	new_config="reload_$(date +%FT%H:%M:%S)"
+	$VARNISHADM vcl.load $new_config $CONFIGFILE >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]; then
+		eerror "${SVCNAME} cannot load configuration"
+		return 1
+	fi
 
-	eend $?
-}
+	$VARNISHADM vcl.use $new_config >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]; then
+		eerror "${SVCNAME} cannot switch configuration"
+		return 1
+	fi
 
-flush() {
-	ebegin "Flushing varnish cache"
-	/usr/bin/varnishadm -T $ADMINHOSTPORT ban obj.http.host "~" "." > /dev/null
-	eend $?
+	eend 0
 }
