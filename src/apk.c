@@ -580,6 +580,8 @@ int main(int argc, char **argv)
 err_and_usage:
 	if (r == -EINVAL)
 		r = usage(applet);
+	if (r == -ESHUTDOWN)
+		r = 0;
 err:
 	if (ctx)
 		free(ctx);
