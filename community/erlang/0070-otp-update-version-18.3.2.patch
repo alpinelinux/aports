@@ -1,0 +1,1887 @@
+--- a/OTP_VERSION
++++ b/OTP_VERSION
+@@ -1 +1 @@
+-18.3
++18.3.2
+--- a/erts/doc/src/notes.xml
++++ b/erts/doc/src/notes.xml
+@@ -32,6 +32,71 @@
+   <p>This document describes the changes made to the ERTS application.</p>
+ 
+ 
++<section><title>Erts 7.3.1</title>
++
++    <section><title>Fixed Bugs and Malfunctions</title>
++      <list>
++        <item>
++          <p>
++	    <c>process_info(Pid, last_calls)</c> did not work for
++	    <c>Pid /= self()</c>.</p>
++          <p>
++	    Own Id: OTP-13418</p>
++        </item>
++        <item>
++          <p>
++	    Make sure to create a crash dump when running out of
++	    memory. This was accidentally removed in the erts-7.3
++	    release.</p>
++          <p>
++	    Own Id: OTP-13419</p>
++        </item>
++        <item>
++          <p>
++	    Schedulers could be woken by a premature timeout on
++	    Linux. This premature wakeup was however harmless.</p>
++          <p>
++	    Own Id: OTP-13420</p>
++        </item>
++        <item>
++          <p>
++	    A process communicating with a port via one of the
++	    <c>erlang:port_*</c> BIFs could potentially end up in an
++	    inconsistent state if the port terminated during the
++	    communication. When this occurred the process could later
++	    block in a <c>receive</c> even though it had messages
++	    matching in its message queue.</p>
++          <p>
++	    This bug was introduced in erts version 5.10 (OTP R16A).</p>
++          <p>
++	    Own Id: OTP-13424 Aux Id: OTP-10336 </p>
++        </item>
++        <item>
++          <p>
++	    The reference count of a process structure could under
++	    rare circumstances be erroneously managed. When this
++	    happened invalid memory accesses occurred.</p>
++          <p>
++	    Own Id: OTP-13446</p>
++        </item>
++        <item>
++          <p>
++	    Fix race between <c>process_flag(trap_exit,true)</c> and
++	    a received exit signal.</p>
++          <p>
++	    A process could terminate due to exit signal even though
++	    <c>process_flag(trap_exit,true)</c> had returned. A very
++	    specific timing between call to <c>process_flag/2</c> and
++	    exit signal from another scheduler was required for this
++	    to happen.</p>
++          <p>
++	    Own Id: OTP-13452</p>
++        </item>
++      </list>
++    </section>
++
++</section>
++
+ <section><title>Erts 7.3</title>
+ 
+     <section><title>Fixed Bugs and Malfunctions</title>
+--- a/erts/emulator/beam/bif.c
++++ b/erts/emulator/beam/bif.c
+@@ -1605,14 +1605,17 @@ BIF_RETTYPE process_flag_2(BIF_ALIST_2)
+ 	*       true. For more info, see implementation of
+ 	*       erts_send_exit_signal().
+ 	*/
++       erts_smp_proc_lock(BIF_P, ERTS_PROC_LOCKS_XSIG_SEND);
+        if (trap_exit)
+ 	   state = erts_smp_atomic32_read_bor_mb(&BIF_P->state,
+ 						 ERTS_PSFLG_TRAP_EXIT);
+        else
+ 	   state = erts_smp_atomic32_read_band_mb(&BIF_P->state,
+ 						  ~ERTS_PSFLG_TRAP_EXIT);
++       erts_smp_proc_unlock(BIF_P, ERTS_PROC_LOCKS_XSIG_SEND);
++
+ #ifdef ERTS_SMP
+-       if (ERTS_PROC_PENDING_EXIT(BIF_P)) {
++       if (state & ERTS_PSFLG_PENDING_EXIT) {
+ 	   erts_handle_pending_exit(BIF_P, ERTS_PROC_LOCK_MAIN);
+ 	   ERTS_BIF_EXITED(BIF_P);
+        }
+--- a/erts/emulator/beam/erl_alloc.c
++++ b/erts/emulator/beam/erl_alloc.c
+@@ -1923,7 +1923,7 @@ erts_alc_fatal_error(int error, int func, ErtsAlcType_t n, ...)
+ 	va_start(argp, n);
+ 	size = va_arg(argp, Uint);
+ 	va_end(argp);
+-	erts_exit(1,
++	erts_exit(ERTS_DUMP_EXIT,
+ 		 "%s: Cannot %s %lu bytes of memory (of type \"%s\").\n",
+ 		 allctr_str, op, size, t_str);
+ 	break;
+--- a/erts/emulator/beam/erl_bif_info.c
++++ b/erts/emulator/beam/erl_bif_info.c
+@@ -1534,7 +1534,7 @@ process_info_aux(Process *BIF_P,
+     }
+ 
+     case am_last_calls: {
+-	struct saved_calls *scb = ERTS_PROC_GET_SAVED_CALLS_BUF(BIF_P);
++	struct saved_calls *scb = ERTS_PROC_GET_SAVED_CALLS_BUF(rp);
+ 	if (!scb) {
+ 	    hp = HAlloc(BIF_P, 3);
+ 	    res = am_false;
+--- a/erts/emulator/beam/erl_process.c
++++ b/erts/emulator/beam/erl_process.c
+@@ -9807,12 +9807,14 @@ Process *schedule(Process *p, int calls)
+ 				      | ERTS_PSFLG_PENDING_EXIT
+ 				      | ERTS_PSFLG_ACTIVE_SYS))
+ 			    == ERTS_PSFLG_SUSPENDED)) {
+-			if (state & ERTS_PSFLG_FREE)
+-			    erts_proc_dec_refc(p);
+ 			if (proxy_p) {
+ 			    free_proxy_proc(proxy_p);
+ 			    proxy_p = NULL;
+ 			}
++			else if (state & ERTS_PSFLG_FREE) {
++			    /* free and not queued by proxy */
++			    erts_proc_dec_refc(p);
++			}
+ 			goto pick_next_process;
+ 		    }
+ 		    state = new;
+--- a/erts/emulator/beam/io.c
++++ b/erts/emulator/beam/io.c
+@@ -1529,8 +1529,19 @@ erts_schedule_proc2port_signal(Process *c_p,
+ 	erts_smp_proc_lock(c_p, ERTS_PROC_LOCK_MAIN);
+ 
+     if (sched_res != 0) {
+-	if (refp)
++	if (refp) {
++	    /*
++	     * We need to restore the message queue save
++	     * pointer to the beginning of the message queue
++	     * since the caller now wont wait for a message
++	     * containing the reference created above...
++	     */
++	    ASSERT(c_p);
++	    erts_smp_proc_lock(c_p, ERTS_PROC_LOCKS_MSG_RECEIVE);
++	    JOIN_MESSAGE(c_p);
++	    erts_smp_proc_unlock(c_p, ERTS_PROC_LOCKS_MSG_RECEIVE);
+ 	    *refp = NIL;
++	}
+ 	return ERTS_PORT_OP_DROPPED;
+     }
+     return ERTS_PORT_OP_SCHEDULED;
+--- a/erts/emulator/test/save_calls_SUITE.erl
++++ b/erts/emulator/test/save_calls_SUITE.erl
+@@ -156,8 +156,19 @@ save_calls_1() ->
+ 
+     ?line erlang:process_flag(self(), save_calls, 10),
+     ?line {last_calls, L3} = process_info(self(), last_calls),
++    true = (L3 /= false),
+     ?line L31 = lists:filter(fun is_local_function/1, L3),
+     ?line [] = L31,
++    erlang:process_flag(self(), save_calls, 0),
++
++    %% Also check that it works on another process ...
++    Pid = spawn(fun () -> receive after infinity -> ok end end),
++    erlang:process_flag(Pid, save_calls, 10),
++    {last_calls, L4} = process_info(Pid, last_calls),
++    true = (L4 /= false),
++    L41 = lists:filter(fun is_local_function/1, L4),
++    [] = L41,
++    exit(Pid,kill),
+     ok.
+ 
+ do_bipp() ->
+--- a/erts/lib_src/pthread/ethr_event.c
++++ b/erts/lib_src/pthread/ethr_event.c
+@@ -94,6 +94,9 @@ wait__(ethr_event *e, int spincount, ethr_sint64_t timeout)
+ 	tsp = NULL;
+     }
+     else {
++#ifdef ETHR_HAVE_ETHR_GET_MONOTONIC_TIME
++	start = ethr_get_monotonic_time();
++#endif
+ 	tsp = &ts;
+ 	time = timeout;
+ 	if (spincount == 0) {
+@@ -102,9 +105,6 @@ wait__(ethr_event *e, int spincount, ethr_sint64_t timeout)
+ 		goto return_event_on;
+ 	    goto set_timeout;
+ 	}
+-#ifdef ETHR_HAVE_ETHR_GET_MONOTONIC_TIME
+-	start = ethr_get_monotonic_time();
+-#endif
+     }
+ 
+     while (1) {
+--- a/erts/vsn.mk
++++ b/erts/vsn.mk
+@@ -18,7 +18,7 @@
+ # %CopyrightEnd%
+ # 
+ 
+-VSN = 7.3
++VSN = 7.3.1
+ 
+ # Port number 4365 in 4.2
+ # Port number 4366 in 4.3
+--- a/lib/inets/doc/src/mod_esi.xml
++++ b/lib/inets/doc/src/mod_esi.xml
+@@ -23,10 +23,6 @@
+     </legalnotice>
+ 
+     <title>mod_esi</title>
+-    <prepared>Joakim Greben&ouml;</prepared>
+-    <docno></docno>
+-    <date>1997-10-14</date>
+-    <rev>2.2</rev>
+     <file>mod_esi.sgml</file>
+   </header>
+   <module>mod_esi</module>
+@@ -39,6 +35,56 @@
+     <marker id="deliver"></marker>
+   </description>
+ 
++ <section>
++    <title>DATA TYPES</title>
++    <p>The following data types are used in the functions for mod_esi:</p>
++
++    <taglist>
++      <tag><c>env() = </c></tag>
++      <item> <p><c>{EnvKey()::atom(), Value::term()}</c></p>
++      </item>
++      
++      <p>Currently supported key value pairs</p>
++      <taglist>		
++	
++	<tag><c>{server_software, string()}</c></tag>
++	<item><p>Indicates the inets version.</p></item>
++	
++	<tag><c>{server_name, string()}</c></tag>
++	<item><p>The local hostname. </p></item>
++
++	<tag><c>{gateway_interface, string()}</c></tag>
++	<item><p>Legacy string used in CGI, just ignore.</p> </item>
++	
++	<tag><c>{server_protocol, string()}</c></tag>
++	<item><p> HTTP version, currently "HTTP/1.1"</p></item>
++	
++	<tag>{server_port, integer()}</tag>
++	<item><p>Servers port number.</p></item>
++	
++	<tag><c>{request_method, "GET | "PUT" | "DELETE | "POST" | "PATCH"}</c></tag>
++	
++	<tag><c>{remote_adress, inet:ip_address()} </c></tag>
++	<item><p>The clients ip address.</p></item>
++
++	<tag><c>{peer_cert, undefined | no_peercert | DER:binary()</c></tag>
++	<item>
++	  <p>For TLS connections where client certificates are used this will
++	  be an ASN.1 DER-encoded X509-certificate as an Erlang binary.
++	  If client certificates are not used the value will be <c>no_peercert</c>,
++	  and if TLS is not used (HTTP or connection is lost due to network failure)
++	  the value will be <c>undefined</c>.
++	</p></item>
++	
++	<tag><c>{script_name, string()}</c></tag>
++	<item><p>Request URI</p></item>
++
++	<tag><c>{http_LowerCaseHTTPHeaderName, string()}</c></tag>
++	<item><p>example: {http_content_type, "text/html"}</p></item>
++      </taglist>
++      
++    </taglist>
++
+   <funcs>
+     <func>
+       <name>deliver(SessionID, Data) -> ok | {error, Reason}</name>
+@@ -63,11 +109,11 @@
+ 	  overhead. Do not assume anything about the data type of 
+ 	  <c>SessionID</c>. <c>SessionID</c> must be the value given 
+ 	  as input to the ESI callback function that you implemented.</p>
+-	</note>
++	  </note>
+       </desc>
+     </func>
+   </funcs>
+-
++  </section>
+   <section>
+     <title>ESI Callback Functions</title>
+   </section>
+@@ -78,9 +124,7 @@
+       to the server process by calling <c>mod_esi:deliver/2</c>.</fsummary>
+       <type>
+         <v>SessionID = term()</v>
+-        <v>Env = [EnvironmentDirectives] ++ ParsedHeader</v>
+-        <v>EnvironmentDirectives = {Key,Value}</v>
+-        <v>Key = query_string | content_length | server_software | gateway_interface | server_protocol | server_port | request_method | remote_addr | script_name</v>
++        <v>Env = env()</v>
+         <v>Input = string()</v>
+       </type>
+       <desc>
+@@ -111,9 +155,7 @@
+       <fsummary>Creates a dynamic web page and returns it as a list. 
+       This function is deprecated and is only kept for backwards compatibility.</fsummary>
+       <type>
+-        <v>Env = [EnvironmentDirectives] ++ ParsedHeader</v>
+-        <v>EnvironmentDirectives = {Key,Value}</v>
+-		  <v>Key = query_string | content_length | server_software | gateway_interface | server_protocol | server_port | request_method | remote_addr | script_name.</v>
++        <v>Env = env()</v>
+         <v>Input = string()</v>
+         <v>Response = string()</v>
+       </type>
+--- a/lib/inets/doc/src/notes.xml
++++ b/lib/inets/doc/src/notes.xml
+@@ -33,7 +33,37 @@
+     <file>notes.xml</file>
+   </header>
+   
+-  <section><title>Inets 6.2</title>
++  <section><title>Inets 6.2.2</title>
++
++    <section><title>Improvements and New Features</title>
++      <list>
++        <item>
++          <p>
++	    Add environment information item peer_cert to mod_esi</p>
++          <p>
++	    Own Id: OTP-13510</p>
++        </item>
++      </list>
++    </section>
++
++</section>
++
++<section><title>Inets 6.2.1</title>
++
++    <section><title>Fixed Bugs and Malfunctions</title>
++      <list>
++        <item>
++          <p>
++	    Mend ipv6_host_with_brackets option in httpc</p>
++          <p>
++	    Own Id: OTP-13417</p>
++        </item>
++      </list>
++    </section>
++
++</section>
++
++<section><title>Inets 6.2</title>
+ 
+     <section><title>Fixed Bugs and Malfunctions</title>
+       <list>
+--- a/lib/inets/src/http_client/httpc.erl
++++ b/lib/inets/src/http_client/httpc.erl
+@@ -556,7 +556,7 @@ handle_request(Method, Url,
+ 
+ 	    Request = #request{from          = Receiver,
+ 			       scheme        = Scheme, 
+-			       address       = {Host, Port},
++			       address       = {host_address(Host, BracketedHost), Port},
+ 			       path          = MaybeEscPath,
+ 			       pquery        = MaybeEscQuery,
+ 			       method        = Method,
+@@ -1268,3 +1268,7 @@ child_name(Pid, [_ | Children]) ->
+ %% d(_, _, _) ->
+ %%     ok.
+ 
++host_address(Host, false) ->
++    Host;
++host_address(Host, true) ->
++    string:strip(string:strip(Host, right, $]), left, $[).
+--- a/lib/inets/src/http_server/httpd_example.erl
++++ b/lib/inets/src/http_server/httpd_example.erl
+@@ -20,7 +20,7 @@
+ %%
+ -module(httpd_example).
+ -export([print/1]).
+--export([get/2, post/2, yahoo/2, test1/2, get_bin/2]).
++-export([get/2, post/2, yahoo/2, test1/2, get_bin/2, peer/2]).
+ 
+ -export([newformat/3]).
+ %% These are used by the inets test-suite
+@@ -94,10 +94,26 @@ default(Env,Input) ->
+    io_lib:format("~p",[httpd:parse_query(Input)]),"\n",
+    footer()].
+ 
++peer(Env, Input) ->
++   Header = 
++     case proplists:get_value(peer_cert, Env) of
++       undefined ->
++   	 header("text/html", "Peer-Cert-Exist:false");
++      _ ->
++         header("text/html", "Peer-Cert-Exist:true")
++     end,
++   [Header,
++   top("Test peer_cert environment option"),
++   "<B>Peer cert:</B> ",
++   io_lib:format("~p",[proplists:get_value(peer_cert, Env)]),"\n",
++   footer()].	   	 
++
+ header() ->
+   header("text/html").
+ header(MimeType) ->
+   "Content-type: " ++ MimeType ++ "\r\n\r\n".
++header(MimeType, Other) ->
++  "Content-type: " ++ MimeType ++ "\r\n" ++ Other ++ "\r\n\r\n".			 
+ 
+ top(Title) ->
+   "<HTML>
+--- a/lib/inets/src/http_server/httpd_script_env.erl
++++ b/lib/inets/src/http_server/httpd_script_env.erl
+@@ -61,6 +61,19 @@ which_port(#mod{config_db = ConfigDb}) ->
+ which_peername(#mod{init_data = #init_data{peername = {_, RemoteAddr}}}) ->
+     RemoteAddr.
+ 
++which_peercert(#mod{socket_type = {Type, _}, socket = Socket}) when Type == essl;
++								    Type == ssl ->
++    case ssl:peercert(Socket) of
++	{ok, Cert} ->
++	    Cert;
++	{error, no_peercert} -> 
++	    no_peercert;
++	_  ->
++	    undefined
++    end;
++which_peercert(_) -> %% Not an ssl connection
++    undefined.
++
+ which_resolve(#mod{init_data = #init_data{resolve = Resolve}}) ->
+     Resolve.
+ 
+@@ -78,6 +91,7 @@ create_basic_elements(esi, ModData) ->
+      {server_port,       which_port(ModData)},
+      {request_method,    which_method(ModData)},
+      {remote_addr,       which_peername(ModData)},
++     {peer_cert,         which_peercert(ModData)},
+      {script_name,       which_request_uri(ModData)}];
+ 
+ create_basic_elements(cgi, ModData) ->
+--- a/lib/inets/src/inets_app/inets.appup.src
++++ b/lib/inets/src/inets_app/inets.appup.src
+@@ -18,10 +18,16 @@
+ %% %CopyrightEnd%
+ {"%VSN%",
+  [
++  {<<"6.2.1">>, [{load_module, httpd_script_env, soft_purge, soft_purge, []}]},
++  {<<"6.2">>,   [{load_module, httpd_script_env, soft_purge, soft_purge, []},
++		 {load_module, httpc, soft_purge, soft_purge, []}]},
+   {<<"6\\..*">>,[{restart_application, inets}]},
+   {<<"5\\..*">>,[{restart_application, inets}]}
+  ],
+  [
++  {<<"6.2.1">>, [{load_module, httpd_script_env, soft_purge, soft_purge, []}]},
++  {<<"6.2">>,   [{load_module, httpd_script_env, soft_purge, soft_purge, []},
++		 {load_module, httpc, soft_purge, soft_purge, []}]},
+   {<<"6\\..*">>,[{restart_application, inets}]},
+   {<<"5\\..*">>,[{restart_application, inets}]}
+  ]
+--- a/lib/inets/test/httpd_SUITE.erl
++++ b/lib/inets/test/httpd_SUITE.erl
+@@ -755,7 +755,11 @@ esi(Config) when is_list(Config) ->
+     %% Check "ErlScriptNoCache" directive (default: false)
+     ok = http_status("GET /cgi-bin/erl/httpd_example:get ",
+ 		     Config, [{statuscode, 200},
+-		      {no_header, "cache-control"}]).
++		      {no_header, "cache-control"}]),
++    ok = http_status("GET /cgi-bin/erl/httpd_example:peer ",
++	  	     Config, [{statuscode, 200},
++	 	      {header, "peer-cert-exist", peer(Config)}]).
++ 
+ %%-------------------------------------------------------------------------
+ mod_esi_chunk_timeout(Config) when is_list(Config) -> 
+     ok = httpd_1_1:mod_esi_chunk_timeout(?config(type, Config), 
+@@ -2065,3 +2069,11 @@ response_default_headers() ->
+      {"X-Frame-Options", "SAMEORIGIN"},
+      %% Override built-in default
+      {"Date", "Override-date"}].
++
++peer(Config) ->
++   case proplists:get_value(type, Config) of
++      ssl ->
++        "true";
++      _ ->
++        "false"
++   end.   
+\ No newline at end of file
+--- a/lib/inets/vsn.mk
++++ b/lib/inets/vsn.mk
+@@ -19,6 +19,6 @@
+ # %CopyrightEnd%
+ 
+ APPLICATION = inets
+-INETS_VSN   = 6.2
++INETS_VSN   = 6.2.2
+ PRE_VSN     =
+ APP_VSN     = "$(APPLICATION)-$(INETS_VSN)$(PRE_VSN)"
+--- a/lib/mnesia/doc/src/notes.xml
++++ b/lib/mnesia/doc/src/notes.xml
+@@ -39,7 +39,23 @@
+     thus constitutes one section in this document. The title of each
+     section is the version number of Mnesia.</p>
+ 
+-  <section><title>Mnesia 4.13.3</title>
++  <section><title>Mnesia 4.13.4</title>
++
++    <section><title>Fixed Bugs and Malfunctions</title>
++      <list>
++        <item>
++          <p>
++	    Mnesia transactions could hang while waiting on a
++	    response from a node who had stopped.</p>
++          <p>
++	    Own Id: OTP-13423</p>
++        </item>
++      </list>
++    </section>
++
++</section>
++
++<section><title>Mnesia 4.13.3</title>
+ 
+     <section><title>Fixed Bugs and Malfunctions</title>
+       <list>
+--- a/lib/mnesia/src/mnesia_tm.erl
++++ b/lib/mnesia/src/mnesia_tm.erl
+@@ -1692,13 +1692,10 @@ commit_participant(Coord, Tid, Bin, C0, DiscNs, _RamNs) ->
+ 			    ?eval_debug_fun({?MODULE, commit_participant, undo_prepare},
+ 					    [{tid, Tid}]);
+ 
+-			{'EXIT', _, _} ->
++			{'EXIT', _MnesiaTM, Reason} ->
++			    reply(Coord, {do_abort, Tid, self(), {bad_commit,Reason}}),
+ 			    mnesia_recover:log_decision(D#decision{outcome = aborted}),
+-			    ?eval_debug_fun({?MODULE, commit_participant, exit_log_abort},
+-					    [{tid, Tid}]),
+-			    mnesia_schema:undo_prepare_commit(Tid, C0),
+-			    ?eval_debug_fun({?MODULE, commit_participant, exit_undo_prepare},
+-					    [{tid, Tid}]);
++			    mnesia_schema:undo_prepare_commit(Tid, C0);
+ 
+ 			Msg ->
+ 			    verbose("** ERROR ** commit_participant ~p, got unexpected msg: ~p~n",
+@@ -2210,8 +2207,6 @@ reconfigure_coordinators(N, [{Tid, [Store | _]} | Coordinators]) ->
+ 		true ->
+ 		    send_mnesia_down(Tid, Store, N)
+ 	    end;
+-	aborted ->
+-	    ignore; % avoid spurious mnesia_down messages
+ 	_ ->
+ 	    %% Tell the coordinator about the mnesia_down
+ 	    send_mnesia_down(Tid, Store, N)
+--- a/lib/mnesia/vsn.mk
++++ b/lib/mnesia/vsn.mk
+@@ -1 +1 @@
+-MNESIA_VSN = 4.13.3
++MNESIA_VSN = 4.13.4
+--- a/lib/ssl/doc/src/notes.xml
++++ b/lib/ssl/doc/src/notes.xml
+@@ -28,6 +28,36 @@
+   <p>This document describes the changes made to the SSL application.</p>
+ 
+ 
++<section><title>SSL 7.3.1</title>
++
++    <section><title>Fixed Bugs and Malfunctions</title>
++      <list>
++        <item>
++          <p>
++	    Corrections to cipher suite handling using the 3 and 4
++	    tuple format in addition to commit
++	    89d7e21cf4ae988c57c8ef047bfe85127875c70c</p>
++          <p>
++	    Own Id: OTP-13511</p>
++        </item>
++      </list>
++    </section>
++
++
++    <section><title>Improvements and New Features</title>
++      <list>
++        <item>
++          <p>
++	    Make values for the TLS-1.2 signature_algorithms
++	    extension configurable</p>
++          <p>
++	    Own Id: OTP-13261</p>
++        </item>
++      </list>
++    </section>
++
++</section>
++
+ <section><title>SSL 7.3</title>
+ 
+     <section><title>Fixed Bugs and Malfunctions</title>
+--- a/lib/ssl/doc/src/ssl.xml
++++ b/lib/ssl/doc/src/ssl.xml
+@@ -421,7 +421,6 @@ fun(srp, Username :: string(), UserState :: term()) ->
+ 
+         <warning><p>Using <c>{padding_check, boolean()}</c> makes TLS
+ 	vulnerable to the Poodle attack.</p></warning>
+-
+   </section>
+   
+   <section>
+@@ -522,9 +521,45 @@ fun(srp, Username :: string(), UserState :: term()) ->
+ 	 be supported by the server for the prevention to work.
+ 	</p></warning>
+       </item>
+-    </taglist>
++      <tag><marker id="client_signature_algs"/><c>{signature_algs, [{hash(), ecdsa | rsa | dsa}]}</c></tag>
++	<item>
++	<p>In addition to the algorithms negotiated by the cipher
++	suite used for key exchange, payload encryption, message
++	authentication and pseudo random calculation, the TLS signature
++	algorithm extension <url
++	href="http://www.ietf.org/rfc/rfc5246.txt">Section 7.4.1.4.1 in RFC 5246</url> may be
++	used, from TLS 1.2, to negotiate which signature algorithm to use during the
++	TLS handshake. If no lower TLS versions than 1.2 are supported,
++	the client will send a TLS signature algorithm extension
++	with the algorithms specified by this option.
++	Defaults to
++	
++	<code>[
++%% SHA2
++{sha512, ecdsa},
++{sha512, rsa},
++{sha384, ecdsa},
++{sha384, rsa},
++{sha256, ecdsa},
++{sha256, rsa},
++{sha224, ecdsa},
++{sha224, rsa},
++%% SHA
++{sha, ecdsa},
++{sha, rsa},
++{sha, dsa},
++%% MD5
++{md5, rsa}
++]</code>
++	
++	The algorithms should be in the preferred order.
++	Selected signature algorithm can restrict which hash functions
++	that may be selected.
++	</p>
++	</item>
++      </taglist>
+    </section>
+-
++   
+   <section>
+     <title>SSL OPTION DESCRIPTIONS - SERVER SIDE</title>
+ 
+@@ -651,6 +686,14 @@ fun(srp, Username :: string(), UserState :: term()) ->
+       <item>If true, use the server's preference for cipher selection. If false
+       (the default), use the client's preference.
+       </item>
++      
++      <tag><c>{signature_algs, [{hash(), ecdsa | rsa | dsa}]}</c></tag>
++      <item><p> The algorithms specified by
++      this option will be the ones accepted by the server in a signature algorithm
++      negotiation, introduced in TLS-1.2. The algorithms will also be offered to the client if a
++      client certificate is requested. For more details see the <seealso marker="#client_signature_algs">corresponding client option</seealso>.
++      </p> </item>
++
+     </taglist>
+   </section>
+   
+--- a/lib/ssl/src/dtls_connection.erl
++++ b/lib/ssl/src/dtls_connection.erl
+@@ -196,8 +196,7 @@ hello(start, #state{host = Host, port = Port, role = client,
+     {Record, State} = next_record(State1),
+     next_state(hello, hello, Record, State);
+ 
+-hello(Hello = #client_hello{client_version = ClientVersion,
+-			    extensions = #hello_extensions{hash_signs = HashSigns}},
++hello(Hello = #client_hello{client_version = ClientVersion},
+       State = #state{connection_states = ConnectionStates0,
+ 		     port = Port, session = #session{own_certificate = Cert} = Session0,
+ 		     renegotiation = {Renegotiation, _},
+@@ -209,9 +208,7 @@ hello(Hello = #client_hello{client_version = ClientVersion,
+         {Version, {Type, Session},
+ 	 ConnectionStates,
+ 	 #hello_extensions{ec_point_formats = EcPointFormats,
+-			   elliptic_curves = EllipticCurves} = ServerHelloExt} ->
+-            HashSign = ssl_handshake:select_hashsign(HashSigns, Cert, 
+-						     dtls_v1:corresponding_tls_version(Version)),
++			   elliptic_curves = EllipticCurves} = ServerHelloExt, HashSign} ->
+             ssl_connection:hello({common_client_hello, Type, ServerHelloExt, HashSign},
+ 				 State#state{connection_states  = ConnectionStates,
+ 					     negotiated_version = Version,
+--- a/lib/ssl/src/dtls_handshake.erl
++++ b/lib/ssl/src/dtls_handshake.erl
+@@ -94,7 +94,10 @@ hello(#server_hello{server_version = Version, random = Random,
+ 
+ hello(#client_hello{client_version = ClientVersion}, _Options, {_,_,_,_,ConnectionStates,_}, _Renegotiation) ->      
+     %% Return correct typ to make dialyzer happy until we have time to make the real imp.
+-    {ClientVersion, {new, #session{}}, ConnectionStates, #hello_extensions{}}.
++    HashSigns = tls_v1:default_signature_algs(dtls_v1:corresponding_tls_version(ClientVersion)),
++    {ClientVersion, {new, #session{}}, ConnectionStates, #hello_extensions{}, 
++     %% Placeholder for real hasign handling
++     hd(HashSigns)}.
+ 
+ %% hello(Address, Port,
+ %%       #ssl_tls{epoch = _Epoch, sequence_number = _Seq,
+--- a/lib/ssl/src/ssl.appup.src
++++ b/lib/ssl/src/ssl.appup.src
+@@ -1,9 +1,6 @@
+ %% -*- erlang -*-
+ {"%VSN%",
+  [
+-  {<<"7\\.2">>, [{load_module, tls_connection, soft_purge, soft_purge, []},
+-		 {load_module, ssl_tls_dist_proxy, soft_purge, soft_purge, []}
+-		]},
+   {<<"7\\..*">>, [{restart_application, ssl}]},
+   {<<"6\\..*">>, [{restart_application, ssl}]},
+   {<<"5\\..*">>, [{restart_application, ssl}]},
+@@ -11,9 +8,6 @@
+   {<<"3\\..*">>, [{restart_application, ssl}]}
+  ], 
+  [
+-  {<<"7\\.2">>, [{load_module, tls_connection, soft_purge, soft_purge, []},
+-		 {load_module, ssl_tls_dist_proxy, soft_purge, soft_purge, []}
+-		]},
+   {<<"7\\..*">>, [{restart_application, ssl}]},
+   {<<"6\\..*">>, [{restart_application, ssl}]},
+   {<<"5\\..*">>, [{restart_application, ssl}]},
+--- a/lib/ssl/src/ssl.erl
++++ b/lib/ssl/src/ssl.erl
+@@ -700,6 +700,10 @@ handle_options(Opts0, Role) ->
+ 		    srp_identity = handle_option(srp_identity, Opts, undefined),
+ 		    ciphers    = handle_cipher_option(proplists:get_value(ciphers, Opts, []), 
+ 						      RecordCb:highest_protocol_version(Versions)),
++		    signature_algs = handle_hashsigns_option(proplists:get_value(signature_algs, Opts, 
++									     default_option_role(server, 
++												 tls_v1:default_signature_algs(Versions), Role)),
++							 RecordCb:highest_protocol_version(Versions)), 
+ 		    %% Server side option
+ 		    reuse_session = handle_option(reuse_session, Opts, ReuseSessionFun),
+ 		    reuse_sessions = handle_option(reuse_sessions, Opts, true),
+@@ -749,7 +753,7 @@ handle_options(Opts0, Role) ->
+ 		  alpn_preferred_protocols, next_protocols_advertised,
+ 		  client_preferred_next_protocols, log_alert,
+ 		  server_name_indication, honor_cipher_order, padding_check, crl_check, crl_cache,
+-		  fallback],
++		  fallback, signature_algs],
+ 
+     SockOpts = lists:foldl(fun(Key, PropList) ->
+ 				   proplists:delete(Key, PropList)
+@@ -989,6 +993,18 @@ validate_option(crl_cache, {Cb, {_Handle, Options}} = Value) when is_atom(Cb) an
+ validate_option(Opt, Value) ->
+     throw({error, {options, {Opt, Value}}}).
+ 
++handle_hashsigns_option(Value, {Major, Minor} = Version) when is_list(Value) 
++							      andalso Major >= 3 andalso Minor >= 3->
++    case tls_v1:signature_algs(Version, Value) of
++	[] ->
++	    throw({error, {options, no_supported_algorithms, {signature_algs, Value}}});
++	_ ->	
++	    Value
++    end;
++handle_hashsigns_option(_, {Major, Minor} = Version) when Major >= 3 andalso Minor >= 3->
++    handle_hashsigns_option(tls_v1:default_signature_algs(Version), Version);
++handle_hashsigns_option(_, _Version) ->
++    undefined.
+ 
+ validate_options([]) ->
+ 	[];
+@@ -1089,10 +1105,7 @@ binary_cipher_suites(Version, []) ->
+     %% Defaults to all supported suites that does
+     %% not require explicit configuration
+     ssl_cipher:filter_suites(ssl_cipher:suites(Version));
+-binary_cipher_suites(Version, [{_,_,_,_}| _] = Ciphers0) -> %% Backwards compatibility
+-    Ciphers = [{KeyExchange, Cipher, Hash} || {KeyExchange, Cipher, Hash, _} <- Ciphers0],
+-    binary_cipher_suites(Version, Ciphers);
+-binary_cipher_suites(Version, [{_,_,_}| _] = Ciphers0) ->
++binary_cipher_suites(Version, [Tuple|_] = Ciphers0) when is_tuple(Tuple) ->
+     Ciphers = [ssl_cipher:suite(C) || C <- Ciphers0],
+     binary_cipher_suites(Version, Ciphers);
+ 
+@@ -1285,6 +1298,13 @@ new_ssl_options([{server_name_indication, Value} | Rest], #ssl_options{} = Opts,
+     new_ssl_options(Rest, Opts#ssl_options{server_name_indication = validate_option(server_name_indication, Value)}, RecordCB);
+ new_ssl_options([{honor_cipher_order, Value} | Rest], #ssl_options{} = Opts, RecordCB) -> 
+     new_ssl_options(Rest, Opts#ssl_options{honor_cipher_order = validate_option(honor_cipher_order, Value)}, RecordCB);
++new_ssl_options([{signature_algs, Value} | Rest], #ssl_options{} = Opts, RecordCB) -> 
++    new_ssl_options(Rest, 
++		    Opts#ssl_options{signature_algs = 
++					 handle_hashsigns_option(Value, 
++								 RecordCB:highest_protocol_version())}, 
++		    RecordCB);
++
+ new_ssl_options([{Key, Value} | _Rest], #ssl_options{}, _) -> 
+     throw({error, {options, {Key, Value}}}).
+ 
+--- a/lib/ssl/src/ssl_cipher.erl
++++ b/lib/ssl/src/ssl_cipher.erl
+@@ -43,11 +43,12 @@
+ 
+ -export_type([cipher_suite/0,
+ 	      erl_cipher_suite/0, openssl_cipher_suite/0,
+-	      key_algo/0]).
++	      hash/0, key_algo/0, sign_algo/0]).
+ 
+ -type cipher()            :: null |rc4_128 | idea_cbc | des40_cbc | des_cbc | '3des_ede_cbc' 
+ 			   | aes_128_cbc |  aes_256_cbc | aes_128_gcm | aes_256_gcm | chacha20_poly1305.
+ -type hash()              :: null | sha | md5 | sha224 | sha256 | sha384 | sha512.
++-type sign_algo()         :: rsa | dsa | ecdsa.
+ -type key_algo()          :: null | rsa | dhe_rsa | dhe_dss | ecdhe_ecdsa| ecdh_ecdsa | ecdh_rsa| srp_rsa| srp_dss | psk | dhe_psk | rsa_psk | dh_anon | ecdh_anon | srp_anon.
+ -type erl_cipher_suite()  :: {key_algo(), cipher(), hash()} % Pre TLS 1.2 
+ 			     %% TLS 1.2, internally PRE TLS 1.2 will use default_prf
+@@ -841,17 +842,17 @@ suite({rsa_psk, aes_256_cbc,sha}) ->
+ 
+ %%% TLS 1.2 PSK Cipher Suites RFC 5487
+ 
+-suite({psk, aes_128_gcm, null}) ->
++suite({psk, aes_128_gcm, null, sha256}) ->
+     ?TLS_PSK_WITH_AES_128_GCM_SHA256;
+-suite({psk, aes_256_gcm, null}) ->
++suite({psk, aes_256_gcm, null, sha384}) ->
+     ?TLS_PSK_WITH_AES_256_GCM_SHA384;
+-suite({dhe_psk, aes_128_gcm, null}) ->
++suite({dhe_psk, aes_128_gcm, null, sha256}) ->
+     ?TLS_DHE_PSK_WITH_AES_128_GCM_SHA256;
+-suite({dhe_psk, aes_256_gcm, null}) ->
++suite({dhe_psk, aes_256_gcm, null, sha384}) ->
+     ?TLS_DHE_PSK_WITH_AES_256_GCM_SHA384;
+-suite({rsa_psk, aes_128_gcm, null}) ->
++suite({rsa_psk, aes_128_gcm, null, sha256}) ->
+     ?TLS_RSA_PSK_WITH_AES_128_GCM_SHA256;
+-suite({rsa_psk, aes_256_gcm, null}) ->
++suite({rsa_psk, aes_256_gcm, null, sha384}) ->
+     ?TLS_RSA_PSK_WITH_AES_256_GCM_SHA384;
+ 
+ suite({psk, aes_128_cbc, sha256}) ->
+@@ -958,74 +959,74 @@ suite({ecdh_anon, aes_256_cbc, sha}) ->
+     ?TLS_ECDH_anon_WITH_AES_256_CBC_SHA;
+ 
+ %%% RFC 5289 EC TLS suites
+-suite({ecdhe_ecdsa, aes_128_cbc, sha256}) ->
++suite({ecdhe_ecdsa, aes_128_cbc, sha256, sha256}) ->
+     ?TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256;
+-suite({ecdhe_ecdsa, aes_256_cbc, sha384}) ->
++suite({ecdhe_ecdsa, aes_256_cbc, sha384, sha384}) ->
+     ?TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384;
+-suite({ecdh_ecdsa, aes_128_cbc, sha256}) ->
++suite({ecdh_ecdsa, aes_128_cbc, sha256, sha256}) ->
+     ?TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA256;
+-suite({ecdh_ecdsa, aes_256_cbc, sha384}) ->
++suite({ecdh_ecdsa, aes_256_cbc, sha384, sha384}) ->
+     ?TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA384;
+-suite({ecdhe_rsa, aes_128_cbc, sha256}) ->
++suite({ecdhe_rsa, aes_128_cbc, sha256, sha256}) ->
+     ?TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256;
+-suite({ecdhe_rsa, aes_256_cbc, sha384}) ->
++suite({ecdhe_rsa, aes_256_cbc, sha384, sha384}) ->
+     ?TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384;
+-suite({ecdh_rsa, aes_128_cbc, sha256}) ->
++suite({ecdh_rsa, aes_128_cbc, sha256, sha256}) ->
+     ?TLS_ECDH_RSA_WITH_AES_128_CBC_SHA256;
+-suite({ecdh_rsa, aes_256_cbc, sha384}) ->
++suite({ecdh_rsa, aes_256_cbc, sha384, sha384}) ->
+     ?TLS_ECDH_RSA_WITH_AES_256_CBC_SHA384;
+ 
+ %% RFC 5288 AES-GCM Cipher Suites
+-suite({rsa, aes_128_gcm, null}) ->
++suite({rsa, aes_128_gcm, null, sha256}) ->
+     ?TLS_RSA_WITH_AES_128_GCM_SHA256;
+ suite({rsa, aes_256_gcm, null}) ->
+     ?TLS_RSA_WITH_AES_256_GCM_SHA384;
+-suite({dhe_rsa, aes_128_gcm, null}) ->
++suite({dhe_rsa, aes_128_gcm, null, sha384}) ->
+     ?TLS_DHE_RSA_WITH_AES_128_GCM_SHA256;
+-suite({dhe_rsa, aes_256_gcm, null}) ->
++suite({dhe_rsa, aes_256_gcm, null, sha256}) ->
+     ?TLS_DHE_RSA_WITH_AES_256_GCM_SHA384;
+-suite({dh_rsa, aes_128_gcm, null}) ->
++suite({dh_rsa, aes_128_gcm, null, sha384}) ->
+     ?TLS_DH_RSA_WITH_AES_128_GCM_SHA256;
+-suite({dh_rsa, aes_256_gcm, null}) ->
++suite({dh_rsa, aes_256_gcm, null, sha256}) ->
+     ?TLS_DH_RSA_WITH_AES_256_GCM_SHA384;
+-suite({dhe_dss, aes_128_gcm, null}) ->
++suite({dhe_dss, aes_128_gcm, null, sha384}) ->
+     ?TLS_DHE_DSS_WITH_AES_128_GCM_SHA256;
+-suite({dhe_dss, aes_256_gcm, null}) ->
++suite({dhe_dss, aes_256_gcm, null, sha256}) ->
+     ?TLS_DHE_DSS_WITH_AES_256_GCM_SHA384;
+-suite({dh_dss, aes_128_gcm, null}) ->
++suite({dh_dss, aes_128_gcm, null, sha384}) ->
+     ?TLS_DH_DSS_WITH_AES_128_GCM_SHA256;
+-suite({dh_dss, aes_256_gcm, null}) ->
++suite({dh_dss, aes_256_gcm, null, sha384}) ->
+     ?TLS_DH_DSS_WITH_AES_256_GCM_SHA384;
+-suite({dh_anon, aes_128_gcm, null}) ->
++suite({dh_anon, aes_128_gcm, null, sha256}) ->
+     ?TLS_DH_anon_WITH_AES_128_GCM_SHA256;
+-suite({dh_anon, aes_256_gcm, null}) ->
++suite({dh_anon, aes_256_gcm, null, sha384}) ->
+     ?TLS_DH_anon_WITH_AES_256_GCM_SHA384;
+ 
+ %% RFC 5289 ECC AES-GCM Cipher Suites
+-suite({ecdhe_ecdsa, aes_128_gcm, null}) ->
++suite({ecdhe_ecdsa, aes_128_gcm, null, sha256}) ->
+     ?TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
+-suite({ecdhe_ecdsa, aes_256_gcm, null}) ->
++suite({ecdhe_ecdsa, aes_256_gcm, null, sha384}) ->
+     ?TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384;
+-suite({ecdh_ecdsa, aes_128_gcm, null}) ->
++suite({ecdh_ecdsa, aes_128_gcm, null, sha256}) ->
+     ?TLS_ECDH_ECDSA_WITH_AES_128_GCM_SHA256;
+-suite({ecdh_ecdsa, aes_256_gcm, null}) ->
++suite({ecdh_ecdsa, aes_256_gcm, null, sha384}) ->
+     ?TLS_ECDH_ECDSA_WITH_AES_256_GCM_SHA384;
+-suite({ecdhe_rsa, aes_128_gcm, null}) ->
++suite({ecdhe_rsa, aes_128_gcm, null, sha256}) ->
+     ?TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+-suite({ecdhe_rsa, aes_256_gcm, null}) ->
++suite({ecdhe_rsa, aes_256_gcm, null, sha384}) ->
+     ?TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384;
+-suite({ecdh_rsa, aes_128_gcm, null}) ->
++suite({ecdh_rsa, aes_128_gcm, null, sha256}) ->
+     ?TLS_ECDH_RSA_WITH_AES_128_GCM_SHA256;
+-suite({ecdh_rsa, aes_256_gcm, null}) ->
++suite({ecdh_rsa, aes_256_gcm, null, sha384}) ->
+     ?TLS_ECDH_RSA_WITH_AES_256_GCM_SHA384;
+ 
+ 
+ %% draft-agl-tls-chacha20poly1305-04 Chacha20/Poly1305 Suites
+-suite({ecdhe_rsa, chacha20_poly1305, null}) ->
++suite({ecdhe_rsa, chacha20_poly1305, null, sha256}) ->
+     ?TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256;
+-suite({ecdhe_ecdsa, chacha20_poly1305, null}) ->
++suite({ecdhe_ecdsa, chacha20_poly1305, null, sha256}) ->
+     ?TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256;
+-suite({dhe_rsa, chacha20_poly1305, null}) ->
++suite({dhe_rsa, chacha20_poly1305, null, sha256}) ->
+     ?TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256.
+ 
+ %%--------------------------------------------------------------------
+--- a/lib/ssl/src/ssl_connection.erl
++++ b/lib/ssl/src/ssl_connection.erl
+@@ -304,13 +304,9 @@ hello(#hello_request{}, #state{role = client} = State0, Connection) ->
+     {Record, State} = Connection:next_record(State0),
+     Connection:next_state(hello, hello, Record, State);
+ 
+-hello({common_client_hello, Type, ServerHelloExt, NegotiatedHashSign},
++hello({common_client_hello, Type, ServerHelloExt},
+       State, Connection) ->
+-    do_server_hello(Type, ServerHelloExt,
+-		    %% Note NegotiatedHashSign is only negotiated for real if
+-		    %% if TLS version is at least TLS-1.2 
+-		    State#state{hashsign_algorithm = NegotiatedHashSign}, Connection);
+-
++    do_server_hello(Type, ServerHelloExt, State, Connection);
+ hello(timeout, State, _) ->
+     {next_state, hello, State, hibernate};
+ 
+@@ -442,7 +438,8 @@ certify(#server_key_exchange{exchange_keys = Keys},
+        Alg == srp_dss; Alg == srp_rsa; Alg == srp_anon ->
+ 
+     Params = ssl_handshake:decode_server_key(Keys, Alg, Version),
+-    HashSign = negotiated_hashsign(Params#server_key_params.hashsign, Alg, Version),
++    %% Use negotiated value if TLS-1.2 otherwhise return default
++    HashSign = negotiated_hashsign(Params#server_key_params.hashsign, Alg, PubKeyInfo, Version),
+     case is_anonymous(Alg) of
+ 	true ->
+ 	    calculate_secret(Params#server_key_params.params,
+@@ -464,11 +461,18 @@ certify(#server_key_exchange{} = Msg,
+ 
+ certify(#certificate_request{hashsign_algorithms = HashSigns},
+ 	#state{session = #session{own_certificate = Cert},
+-        negotiated_version = Version} = State0, Connection) ->
+-    HashSign = ssl_handshake:select_hashsign(HashSigns, Cert, Version),
+-    {Record, State} = Connection:next_record(State0#state{client_certificate_requested = true}),
+-    Connection:next_state(certify, certify, Record,
+-			  State#state{cert_hashsign_algorithm = HashSign});
++	       key_algorithm = KeyExAlg,
++	       ssl_options = #ssl_options{signature_algs = SupportedHashSigns},
++	       negotiated_version = Version} = State0, Connection) ->
++
++    case ssl_handshake:select_hashsign(HashSigns, Cert, KeyExAlg, SupportedHashSigns, Version) of
++	#alert {} = Alert ->
++	    Connection:handle_own_alert(Alert, Version, certify, State0);
++	NegotiatedHashSign -> 
++	    {Record, State} = Connection:next_record(State0#state{client_certificate_requested = true}),
++	    Connection:next_state(certify, certify, Record,
++				  State#state{cert_hashsign_algorithm = NegotiatedHashSign})
++    end;
+ 
+ %% PSK and RSA_PSK might bypass the Server-Key-Exchange
+ certify(#server_hello_done{},
+@@ -576,13 +580,15 @@ cipher(#hello_request{}, State0, Connection) ->
+ 
+ cipher(#certificate_verify{signature = Signature, hashsign_algorithm = CertHashSign},
+        #state{role = server,
+-	      public_key_info = {Algo, _, _} =PublicKeyInfo,
++	      key_algorithm = KexAlg,
++	      public_key_info = PublicKeyInfo,
+ 	      negotiated_version = Version,
+ 	      session = #session{master_secret = MasterSecret},
+ 	      tls_handshake_history = Handshake
+ 	     } = State0, Connection) ->
+-
+-    HashSign = ssl_handshake:select_hashsign_algs(CertHashSign, Algo, Version),
++    
++    %% Use negotiated value if TLS-1.2 otherwhise return default
++    HashSign = negotiated_hashsign(CertHashSign, KexAlg, PublicKeyInfo, Version),
+     case ssl_handshake:certificate_verify(Signature, PublicKeyInfo,
+ 					  Version, HashSign, MasterSecret, Handshake) of
+ 	valid ->
+@@ -1448,7 +1454,8 @@ rsa_psk_key_exchange(Version, PskIdentity, PremasterSecret, PublicKeyInfo = {Alg
+ rsa_psk_key_exchange(_, _, _, _) ->
+     throw (?ALERT_REC(?FATAL,?HANDSHAKE_FAILURE)).
+ 
+-request_client_cert(#state{ssl_options = #ssl_options{verify = verify_peer},
++request_client_cert(#state{ssl_options = #ssl_options{verify = verify_peer, 
++						      signature_algs = SupportedHashSigns},
+ 			   connection_states = ConnectionStates0,
+ 			   cert_db = CertDbHandle,
+ 			   cert_db_ref = CertDbRef,
+@@ -1456,7 +1463,9 @@ request_client_cert(#state{ssl_options = #ssl_options{verify = verify_peer},
+     #connection_state{security_parameters =
+ 			  #security_parameters{cipher_suite = CipherSuite}} =
+ 	ssl_record:pending_connection_state(ConnectionStates0, read),
+-    Msg = ssl_handshake:certificate_request(CipherSuite, CertDbHandle, CertDbRef, Version),
++    HashSigns = ssl_handshake:available_signature_algs(SupportedHashSigns, Version, [Version]),
++    Msg = ssl_handshake:certificate_request(CipherSuite, CertDbHandle, CertDbRef, 
++					    HashSigns, Version),
+     State = Connection:send_handshake(Msg, State0),
+     State#state{client_certificate_requested = true};
+ 
+@@ -1881,15 +1890,16 @@ make_premaster_secret({MajVer, MinVer}, rsa) ->
+ make_premaster_secret(_, _) ->
+     undefined.
+ 
+-negotiated_hashsign(undefined, Alg, Version) ->
++negotiated_hashsign(undefined, KexAlg, PubKeyInfo, Version) ->
+     %% Not negotiated choose default 
+-    case is_anonymous(Alg) of
++    case is_anonymous(KexAlg) of
+ 	true ->
+ 	    {null, anon};
+ 	false ->
+-	    ssl_handshake:select_hashsign_algs(Alg, Version)
++	    {PubAlg, _, _} = PubKeyInfo,
++	    ssl_handshake:select_hashsign_algs(undefined, PubAlg, Version)
+     end;
+-negotiated_hashsign(HashSign = {_, _}, _, _) ->
++negotiated_hashsign(HashSign = {_, _}, _, _, _) ->
+     HashSign.
+ 
+ ssl_options_list(SslOptions) ->
+--- a/lib/ssl/src/ssl_handshake.erl
++++ b/lib/ssl/src/ssl_handshake.erl
+@@ -46,7 +46,7 @@
+ 
+ %% Handshake messages
+ -export([hello_request/0, server_hello/4, server_hello_done/0,
+-	 certificate/4, certificate_request/4, key_exchange/3,
++	 certificate/4, certificate_request/5, key_exchange/3,
+ 	 finished/5,  next_protocol/1]).
+ 
+ %% Handle handshake messages
+@@ -64,8 +64,8 @@
+ 	]).
+ 
+ %% Cipher suites handling
+--export([available_suites/2, cipher_suites/2,
+-	 select_session/10, supported_ecc/1]).
++-export([available_suites/2, available_signature_algs/3, cipher_suites/2,
++	 select_session/11, supported_ecc/1]).
+ 
+ %% Extensions handling
+ -export([client_hello_extensions/6,
+@@ -74,8 +74,8 @@
+ 	]).
+ 
+ %% MISC
+--export([select_version/3, prf/5, select_hashsign/3, 
+-	 select_hashsign_algs/2, select_hashsign_algs/3,
++-export([select_version/3, prf/5, select_hashsign/5, 
++	 select_hashsign_algs/3,
+ 	 premaster_secret/2, premaster_secret/3, premaster_secret/4]).
+ 
+ %%====================================================================
+@@ -120,7 +120,8 @@ server_hello(SessionId, Version, ConnectionStates, Extensions) ->
+ server_hello_done() ->
+     #server_hello_done{}.
+ 
+-client_hello_extensions(Host, Version, CipherSuites, SslOpts, ConnectionStates, Renegotiation) ->
++client_hello_extensions(Host, Version, CipherSuites, 
++			#ssl_options{signature_algs = SupportedHashSigns, versions = AllVersions} = SslOpts, ConnectionStates, Renegotiation) ->
+     {EcPointFormats, EllipticCurves} =
+ 	case advertises_ec_ciphers(lists:map(fun ssl_cipher:suite_definition/1, CipherSuites)) of
+ 	    true ->
+@@ -134,7 +135,7 @@ client_hello_extensions(Host, Version, CipherSuites, SslOpts, ConnectionStates,
+        renegotiation_info = renegotiation_info(tls_record, client,
+ 					       ConnectionStates, Renegotiation),
+        srp = SRP,
+-       hash_signs = advertised_hash_signs(Version),
++       signature_algs = available_signature_algs(SupportedHashSigns, Version, AllVersions),
+        ec_point_formats = EcPointFormats,
+        elliptic_curves = EllipticCurves,
+        alpn = encode_alpn(SslOpts#ssl_options.alpn_advertised_protocols, Renegotiation),
+@@ -203,14 +204,14 @@ client_certificate_verify(OwnCert, MasterSecret, Version,
+     end.
+ 
+ %%--------------------------------------------------------------------
+--spec certificate_request(ssl_cipher:cipher_suite(), db_handle(), certdb_ref(), ssl_record:ssl_version()) ->
+-    #certificate_request{}.
++-spec certificate_request(ssl_cipher:cipher_suite(), db_handle(), 
++			  certdb_ref(),  #hash_sign_algos{}, ssl_record:ssl_version()) ->
++				 #certificate_request{}.
+ %%
+ %% Description: Creates a certificate_request message, called by the server.
+ %%--------------------------------------------------------------------
+-certificate_request(CipherSuite, CertDbHandle, CertDbRef, Version) ->
++certificate_request(CipherSuite, CertDbHandle, CertDbRef, HashSigns, Version) ->
+     Types = certificate_types(ssl_cipher:suite_definition(CipherSuite), Version),
+-    HashSigns = advertised_hash_signs(Version),
+     Authorities = certificate_authorities(CertDbHandle, CertDbRef),
+     #certificate_request{
+ 		    certificate_types = Types,
+@@ -351,6 +352,9 @@ verify_server_key(#server_key_params{params_bin = EncParams,
+ %%
+ %% Description: Checks that the certificate_verify message is valid.
+ %%--------------------------------------------------------------------
++certificate_verify(_, _, _, undefined, _, _) ->
++    ?ALERT_REC(?FATAL, ?HANDSHAKE_FAILURE);
++
+ certificate_verify(Signature, PublicKeyInfo, Version,
+ 		   HashSign = {HashAlgo, _}, MasterSecret, {_, Handshake}) ->
+     Hash = calc_certificate_verify(Version, HashAlgo, MasterSecret, Handshake),
+@@ -379,10 +383,11 @@ verify_signature(_Version, Hash, _HashAlgo, Signature, {?rsaEncryption, PubKey,
+     end;
+ verify_signature(_Version, Hash, {HashAlgo, dsa}, Signature, {?'id-dsa', PublicKey, PublicKeyParams}) ->
+     public_key:verify({digest, Hash}, HashAlgo, Signature, {PublicKey, PublicKeyParams});
+-verify_signature(_Version, Hash, {HashAlgo, ecdsa}, Signature,
++verify_signature(_, Hash, {HashAlgo, _SignAlg}, Signature,
+ 		 {?'id-ecPublicKey', PublicKey, PublicKeyParams}) ->
+     public_key:verify({digest, Hash}, HashAlgo, Signature, {PublicKey, PublicKeyParams}).
+ 
++
+ %%--------------------------------------------------------------------
+ -spec certify(#certificate{}, db_handle(), certdb_ref(), integer() | nolimit,
+ 	      verify_peer | verify_none, {fun(), term}, fun(), term(), term(),
+@@ -573,43 +578,46 @@ prf({3,_N}, Secret, Label, Seed, WantedLength) ->
+ 
+ 
+ %%--------------------------------------------------------------------
+--spec select_hashsign(#hash_sign_algos{}| undefined,  undefined | binary(), ssl_record:ssl_version()) ->
+-			      {atom(), atom()} | undefined.
++-spec select_hashsign(#hash_sign_algos{} | undefined,  undefined | binary(), 
++		      atom(), [atom()], ssl_record:ssl_version()) ->
++			     {atom(), atom()} | undefined  | #alert{}.
+ 
+ %%
+-%% Description:
++%% Description: Handles signature_algorithms extension
+ %%--------------------------------------------------------------------
+-select_hashsign(_, undefined, _Version) ->
++select_hashsign(_, undefined, _,  _, _Version) ->
+     {null, anon};
+ %% The signature_algorithms extension was introduced with TLS 1.2. Ignore it if we have
+ %% negotiated a lower version.
+-select_hashsign(#hash_sign_algos{hash_sign_algos = HashSigns}, Cert, {Major, Minor} = Version)
+-  when Major >= 3 andalso Minor >= 3 ->
+-    #'OTPCertificate'{tbsCertificate = TBSCert} =public_key:pkix_decode_cert(Cert, otp),
++select_hashsign(HashSigns, Cert, KeyExAlgo, 
++		undefined, {Major, Minor} = Version)  when Major >= 3 andalso Minor >= 3->
++    select_hashsign(HashSigns, Cert, KeyExAlgo, tls_v1:default_signature_algs(Version), Version);
++select_hashsign(#hash_sign_algos{hash_sign_algos = HashSigns}, Cert, KeyExAlgo, SupportedHashSigns,
++		{Major, Minor}) when Major >= 3 andalso Minor >= 3 ->
++    #'OTPCertificate'{tbsCertificate = TBSCert} = public_key:pkix_decode_cert(Cert, otp),
+     #'OTPSubjectPublicKeyInfo'{algorithm = {_,Algo, _}} = TBSCert#'OTPTBSCertificate'.subjectPublicKeyInfo,
+-    DefaultHashSign = {_, Sign} = select_hashsign_algs(undefined, Algo, Version),
+-    case lists:filter(fun({sha, dsa}) ->
++    Sign = cert_sign(Algo),
++    case lists:filter(fun({sha, dsa = S}) when S == Sign ->
+ 			      true;
+ 			 ({_, dsa}) ->
+ 			      false;
+-			 ({Hash, S}) when  S == Sign ->
+-			      ssl_cipher:is_acceptable_hash(Hash,
+-							    proplists:get_value(hashs, crypto:supports()));
++			 ({_, _} = Algos) ->
++			      is_acceptable_hash_sign(Algos, Sign, KeyExAlgo, SupportedHashSigns);
+ 			 (_)  ->
+ 			      false
+ 		      end, HashSigns) of
+ 	[] ->
+-	    DefaultHashSign;
+-	[HashSign| _] ->
++	    ?ALERT_REC(?FATAL, ?INSUFFICIENT_SECURITY);
++	[HashSign | _] ->
+ 	    HashSign
+     end;
+-select_hashsign(_, Cert, Version) ->
++select_hashsign(_, Cert, _, _, Version) ->
+     #'OTPCertificate'{tbsCertificate = TBSCert} = public_key:pkix_decode_cert(Cert, otp),
+     #'OTPSubjectPublicKeyInfo'{algorithm = {_,Algo, _}} = TBSCert#'OTPTBSCertificate'.subjectPublicKeyInfo,
+     select_hashsign_algs(undefined, Algo, Version).
+ 
+ %%--------------------------------------------------------------------
+--spec select_hashsign_algs(#hash_sign_algos{}| undefined, oid(), ssl_record:ssl_version()) ->
++-spec select_hashsign_algs({atom(), atom()}| undefined, oid(), ssl_record:ssl_version()) ->
+ 				  {atom(), atom()}.
+ 
+ %% Description: For TLS 1.2 hash function and signature algorithm pairs can be
+@@ -642,24 +650,6 @@ select_hashsign_algs(undefined, ?rsaEncryption, _) ->
+ select_hashsign_algs(undefined, ?'id-dsa', _) ->
+     {sha, dsa}.
+ 
+--spec select_hashsign_algs(atom(),  ssl_record:ssl_version()) -> {atom(), atom()}.
+-%% Wrap function to keep the knowledge of the default values in
+-%% one place only 
+-select_hashsign_algs(Alg, Version) when (Alg == rsa orelse
+-				    Alg == dhe_rsa orelse
+-				    Alg == dh_rsa orelse
+-				    Alg == ecdhe_rsa orelse
+-				    Alg == ecdh_rsa orelse
+-				    Alg == srp_rsa) ->    
+-    select_hashsign_algs(undefined, ?rsaEncryption, Version);
+-select_hashsign_algs(Alg, Version) when (Alg == dhe_dss orelse
+-				    Alg == dh_dss orelse
+-				    Alg == srp_dss) ->
+-    select_hashsign_algs(undefined, ?'id-dsa', Version);
+-select_hashsign_algs(Alg, Version) when (Alg == ecdhe_ecdsa orelse
+-					 Alg == ecdh_ecdsa) ->
+-    select_hashsign_algs(undefined, ?'id-ecPublicKey', Version).
+-
+ %%--------------------------------------------------------------------
+ -spec master_secret(atom(), ssl_record:ssl_version(), #session{} | binary(), #connection_states{},
+ 		   client | server) -> {binary(), #connection_states{}} | #alert{}.
+@@ -1063,9 +1053,56 @@ available_suites(UserSuites, Version) ->
+ 			    lists:member(Suite, ssl_cipher:all_suites(Version))
+ 		    end, UserSuites).
+ 
+-available_suites(ServerCert, UserSuites, Version, Curve) ->
++available_suites(ServerCert, UserSuites, Version, undefined, Curve) ->
+     ssl_cipher:filter(ServerCert, available_suites(UserSuites, Version))
+-	-- unavailable_ecc_suites(Curve).
++	-- unavailable_ecc_suites(Curve);
++available_suites(ServerCert, UserSuites, Version, HashSigns, Curve) ->
++    Suites = available_suites(ServerCert, UserSuites, Version, undefined, Curve),
++    filter_hashsigns(Suites, [ssl_cipher:suite_definition(Suite) || Suite <- Suites], HashSigns, []).
++filter_hashsigns([], [], _, Acc) ->
++    lists:reverse(Acc);
++filter_hashsigns([Suite | Suites], [{KeyExchange,_,_,_} | Algos], HashSigns,
++		 Acc) when KeyExchange == dhe_ecdsa;
++			   KeyExchange == ecdhe_ecdsa ->
++    do_filter_hashsigns(ecdsa, Suite, Suites, Algos, HashSigns, Acc);
++
++filter_hashsigns([Suite | Suites], [{KeyExchange,_,_,_} | Algos], HashSigns,
++		 Acc) when KeyExchange == rsa;
++			   KeyExchange == dhe_rsa;
++			   KeyExchange == ecdhe_rsa;
++			   KeyExchange == srp_rsa;
++			   KeyExchange == rsa_psk ->
++    do_filter_hashsigns(rsa, Suite, Suites, Algos, HashSigns, Acc);
++filter_hashsigns([Suite | Suites], [{KeyExchange,_,_,_} | Algos], HashSigns, Acc) when 
++      KeyExchange == dhe_dss;
++      KeyExchange == srp_dss ->							       
++    do_filter_hashsigns(dsa, Suite, Suites, Algos, HashSigns, Acc);
++filter_hashsigns([Suite | Suites], [{KeyExchange,_,_,_} | Algos], HashSigns, Acc) when 
++      KeyExchange == dh_dss; 
++      KeyExchange == dh_rsa; 
++      KeyExchange == dh_ecdsa;
++      KeyExchange == ecdh_rsa;    
++      KeyExchange == ecdh_ecdsa ->
++      %%  Fixed DH certificates MAY be signed with any hash/signature
++      %%  algorithm pair appearing in the hash_sign extension.  The names
++    %%  DH_DSS, DH_RSA, ECDH_ECDSA, and ECDH_RSA are historical.
++    filter_hashsigns(Suites, Algos, HashSigns, [Suite| Acc]);
++filter_hashsigns([Suite | Suites], [{KeyExchange,_,_,_} | Algos], HashSigns, Acc) when 
++      KeyExchange == dh_anon;
++      KeyExchange == ecdh_anon;
++      KeyExchange == srp_anon;
++      KeyExchange == psk;
++      KeyExchange == dhe_psk ->
++    %% In this case hashsigns is not used as the kexchange is anonaymous
++    filter_hashsigns(Suites, Algos, HashSigns, [Suite| Acc]).
++
++do_filter_hashsigns(SignAlgo, Suite, Suites, Algos, HashSigns, Acc) ->
++    case lists:keymember(SignAlgo, 2, HashSigns) of
++	true ->
++	    filter_hashsigns(Suites, Algos, HashSigns, [Suite| Acc]);
++	false ->
++	    filter_hashsigns(Suites, Algos, HashSigns, Acc)
++    end.
+ 
+ unavailable_ecc_suites(no_curve) ->
+     ssl_cipher:ec_keyed_suites();
+@@ -1077,17 +1114,17 @@ cipher_suites(Suites, false) ->
+ cipher_suites(Suites, true) ->
+     Suites.
+ 
+-select_session(SuggestedSessionId, CipherSuites, Compressions, Port, #session{ecc = ECCCurve} = 
++select_session(SuggestedSessionId, CipherSuites, HashSigns, Compressions, Port, #session{ecc = ECCCurve} = 
+ 		   Session, Version,
+-	       #ssl_options{ciphers = UserSuites, honor_cipher_order = HCO} = SslOpts,
++	       #ssl_options{ciphers = UserSuites, honor_cipher_order = HonorCipherOrder} = SslOpts,
+ 	       Cache, CacheCb, Cert) ->
+     {SessionId, Resumed} = ssl_session:server_id(Port, SuggestedSessionId,
+ 						 SslOpts, Cert,
+ 						 Cache, CacheCb),
+     case Resumed of
+         undefined ->
+-	    Suites = available_suites(Cert, UserSuites, Version, ECCCurve),
+-	    CipherSuite = select_cipher_suite(CipherSuites, Suites, HCO),
++	    Suites = available_suites(Cert, UserSuites, Version, HashSigns, ECCCurve),
++	    CipherSuite = select_cipher_suite(CipherSuites, Suites, HonorCipherOrder),
+ 	    Compression = select_compression(Compressions),
+ 	    {new, Session#session{session_id = SessionId,
+ 				  cipher_suite = CipherSuite,
+@@ -1155,7 +1192,7 @@ handle_client_hello_extensions(RecordCB, Random, ClientCipherSuites,
+ 			       #hello_extensions{renegotiation_info = Info,
+ 						 srp = SRP,
+ 						 ec_point_formats = ECCFormat,
+-                         alpn = ALPN,
++						 alpn = ALPN,
+ 						 next_protocol_negotiation = NextProtocolNegotiation}, Version,
+ 			       #ssl_options{secure_renegotiate = SecureRenegotation,
+                                             alpn_preferred_protocols = ALPNPreferredProtocols} = Opts,
+@@ -1324,7 +1361,7 @@ handle_renegotiation_info(_RecordCB, ConnectionStates, SecureRenegotation) ->
+ 
+ hello_extensions_list(#hello_extensions{renegotiation_info = RenegotiationInfo,
+ 					srp = SRP,
+-					hash_signs = HashSigns,
++					signature_algs = HashSigns,
+ 					ec_point_formats = EcPointFormats,
+ 					elliptic_curves = EllipticCurves,
+                                         alpn = ALPN,
+@@ -1799,7 +1836,7 @@ dec_hello_extensions(<<?UINT16(?SIGNATURE_ALGORITHMS_EXT), ?UINT16(Len),
+     <<?UINT16(SignAlgoListLen), SignAlgoList/binary>> = ExtData,
+     HashSignAlgos = [{ssl_cipher:hash_algorithm(Hash), ssl_cipher:sign_algorithm(Sign)} ||
+ 			<<?BYTE(Hash), ?BYTE(Sign)>> <= SignAlgoList],
+-    dec_hello_extensions(Rest, Acc#hello_extensions{hash_signs =
++    dec_hello_extensions(Rest, Acc#hello_extensions{signature_algs =
+ 						    #hash_sign_algos{hash_sign_algos = HashSignAlgos}});
+ 
+ dec_hello_extensions(<<?UINT16(?ELLIPTIC_CURVES_EXT), ?UINT16(Len),
+@@ -1899,7 +1936,7 @@ from_2bytes(<<?UINT16(N), Rest/binary>>, Acc) ->
+ key_exchange_alg(rsa) ->
+     ?KEY_EXCHANGE_RSA;
+ key_exchange_alg(Alg) when Alg == dhe_rsa; Alg == dhe_dss;
+-			    Alg == dh_dss; Alg == dh_rsa; Alg == dh_anon ->
++			   Alg == dh_dss; Alg == dh_rsa; Alg == dh_anon ->
+     ?KEY_EXCHANGE_DIFFIE_HELLMAN;
+ key_exchange_alg(Alg) when Alg == ecdhe_rsa; Alg == ecdh_rsa;
+ 			   Alg == ecdhe_ecdsa; Alg == ecdh_ecdsa;
+@@ -2008,27 +2045,16 @@ is_member(Suite, SupportedSuites) ->
+ select_compression(_CompressionMetodes) ->
+     ?NULL.
+ 
+--define(TLSEXT_SIGALG_RSA(MD), {MD, rsa}).
+--define(TLSEXT_SIGALG_DSA(MD), {MD, dsa}).
+--define(TLSEXT_SIGALG_ECDSA(MD), {MD, ecdsa}).
+-
+--define(TLSEXT_SIGALG(MD), ?TLSEXT_SIGALG_ECDSA(MD), ?TLSEXT_SIGALG_RSA(MD)).
+-
+-advertised_hash_signs({Major, Minor}) when Major >= 3 andalso Minor >= 3 ->
+-    HashSigns = [?TLSEXT_SIGALG(sha512),
+-		 ?TLSEXT_SIGALG(sha384),
+-		 ?TLSEXT_SIGALG(sha256),
+-		 ?TLSEXT_SIGALG(sha224),
+-		 ?TLSEXT_SIGALG(sha),
+-		 ?TLSEXT_SIGALG_DSA(sha),
+-		 ?TLSEXT_SIGALG_RSA(md5)],
+-    CryptoSupport = crypto:supports(),
+-    HasECC = proplists:get_bool(ecdsa,  proplists:get_value(public_keys, CryptoSupport)),
+-    Hashs = proplists:get_value(hashs, CryptoSupport),
+-    #hash_sign_algos{hash_sign_algos =
+-			 lists:filter(fun({Hash, ecdsa}) -> HasECC andalso proplists:get_bool(Hash, Hashs);
+-					 ({Hash, _}) -> proplists:get_bool(Hash, Hashs) end, HashSigns)};
+-advertised_hash_signs(_) ->
++available_signature_algs(undefined, _, _)  ->
++    undefined;
++available_signature_algs(SupportedHashSigns, {Major, Minor}, AllVersions) when Major >= 3 andalso Minor >= 3 ->
++    case tls_record:lowest_protocol_version(AllVersions) of
++	{3, 3} ->
++	    #hash_sign_algos{hash_sign_algos = SupportedHashSigns};
++	_ ->
++	    undefined
++    end;	
++available_signature_algs(_, _, _) ->
+     undefined.
+ 
+ psk_secret(PSKIdentity, PSKLookup) ->
+@@ -2123,3 +2149,25 @@ distpoints_lookup([DistPoint | Rest], Callback, CRLDbHandle) ->
+ 	CRLs ->
+ 	    [{DistPoint, {CRL, public_key:der_decode('CertificateList', CRL)}} ||  CRL <- CRLs]
+     end.	
++
++cert_sign(?rsaEncryption) ->
++    rsa;
++cert_sign(?'id-ecPublicKey') ->
++    ecdsa;
++cert_sign(?'id-dsa') ->
++    dsa;
++cert_sign(Alg) ->
++    {_, Sign} =public_key:pkix_sign_types(Alg),
++    Sign.
++
++is_acceptable_hash_sign({_, Sign} = Algos, Sign, _, SupportedHashSigns) ->
++    is_acceptable_hash_sign(Algos, SupportedHashSigns);
++is_acceptable_hash_sign(Algos,_, KeyExAlgo, SupportedHashSigns) when KeyExAlgo == dh_ecdsa;
++								     KeyExAlgo == ecdh_rsa;    
++								     KeyExAlgo == ecdh_ecdsa ->
++    is_acceptable_hash_sign(Algos, SupportedHashSigns); 
++is_acceptable_hash_sign(_,_,_,_) ->
++    false.
++is_acceptable_hash_sign(Algos, SupportedHashSigns) ->
++    lists:member(Algos, SupportedHashSigns).
++
+--- a/lib/ssl/src/ssl_handshake.hrl
++++ b/lib/ssl/src/ssl_handshake.hrl
+@@ -95,7 +95,7 @@
+ 
+ -record(hello_extensions, {
+ 	  renegotiation_info,
+-	  hash_signs,          % supported combinations of hashes/signature algos
++	  signature_algs,          % supported combinations of hashes/signature algos
+           alpn,
+ 	  next_protocol_negotiation = undefined, % [binary()]
+ 	  srp,
+--- a/lib/ssl/src/ssl_internal.hrl
++++ b/lib/ssl/src/ssl_internal.hrl
+@@ -135,7 +135,8 @@
+ 	  padding_check = true       :: boolean(),
+ 	  fallback = false           :: boolean(),
+ 	  crl_check                  :: boolean() | peer | best_effort, 
+-	  crl_cache
++	  crl_cache,
++	  signature_algs
+ 	  }).
+ 
+ -record(socket_options,
+--- a/lib/ssl/src/tls_connection.erl
++++ b/lib/ssl/src/tls_connection.erl
+@@ -182,8 +182,7 @@ hello(start, #state{host = Host, port = Port, role = client,
+     next_state(hello, hello, Record, State);
+ 
+ hello(Hello = #client_hello{client_version = ClientVersion,
+-			    extensions = #hello_extensions{hash_signs = HashSigns,
+-							   ec_point_formats = EcPointFormats,
++			    extensions = #hello_extensions{ec_point_formats = EcPointFormats,
+ 							   elliptic_curves = EllipticCurves}},
+       State = #state{connection_states = ConnectionStates0,
+ 		     port = Port, session = #session{own_certificate = Cert} = Session0,
+@@ -191,27 +190,28 @@ hello(Hello = #client_hello{client_version = ClientVersion,
+ 		     session_cache = Cache,
+ 		     session_cache_cb = CacheCb,
+ 		     negotiated_protocol = CurrentProtocol,
++		     key_algorithm = KeyExAlg,
+ 		     ssl_options = SslOpts}) ->
++
+     case tls_handshake:hello(Hello, SslOpts, {Port, Session0, Cache, CacheCb,
+-					      ConnectionStates0, Cert}, Renegotiation) of
++					      ConnectionStates0, Cert, KeyExAlg}, Renegotiation) of
+         #alert{} = Alert ->
+             handle_own_alert(Alert, ClientVersion, hello, State);
+         {Version, {Type, Session},
+-	 ConnectionStates, Protocol0, ServerHelloExt} ->
+-
++	 ConnectionStates, Protocol0, ServerHelloExt, HashSign} ->
+ 	    Protocol = case Protocol0 of
+-		undefined -> CurrentProtocol;
+-		_ -> Protocol0
+-	    end,
+-
+-            HashSign = ssl_handshake:select_hashsign(HashSigns, Cert, Version),
+-            ssl_connection:hello({common_client_hello, Type, ServerHelloExt, HashSign},
++			   undefined -> CurrentProtocol;
++			   _ -> Protocol0
++		       end,
++	    ssl_connection:hello({common_client_hello, Type, ServerHelloExt},
+ 				 State#state{connection_states  = ConnectionStates,
+ 					     negotiated_version = Version,
++					     hashsign_algorithm = HashSign,
+ 					     session = Session,
+ 					     client_ecc = {EllipticCurves, EcPointFormats},
+ 					     negotiated_protocol = Protocol}, ?MODULE)
+     end;
++
+ hello(Hello = #server_hello{},
+       #state{connection_states = ConnectionStates0,
+ 	     negotiated_version = ReqVersion,
+@@ -1069,3 +1069,4 @@ handle_sni_extension(#client_hello{extensions = HelloExtensions}, State0) ->
+     end;
+ handle_sni_extension(_, State0) ->
+     State0.
++
+--- a/lib/ssl/src/tls_handshake.erl
++++ b/lib/ssl/src/tls_handshake.erl
+@@ -56,7 +56,7 @@ client_hello(Host, Port, ConnectionStates,
+     Version = tls_record:highest_protocol_version(Versions),
+     Pending = ssl_record:pending_connection_state(ConnectionStates, read),
+     SecParams = Pending#connection_state.security_parameters,
+-    AvailableCipherSuites = ssl_handshake:available_suites(UserSuites, Version), 
++    AvailableCipherSuites = ssl_handshake:available_suites(UserSuites, Version),     
+     Extensions = ssl_handshake:client_hello_extensions(Host, Version, 
+ 						       AvailableCipherSuites,
+ 						       SslOpts, ConnectionStates, Renegotiation),
+@@ -80,13 +80,13 @@ client_hello(Host, Port, ConnectionStates,
+ -spec hello(#server_hello{} | #client_hello{}, #ssl_options{},
+ 	    #connection_states{} | {inet:port_number(), #session{}, db_handle(),
+ 				    atom(), #connection_states{}, 
+-				    binary() | undefined},
++				    binary() | undefined, ssl_cipher:key_algo()},
+ 	    boolean()) ->
+ 		   {tls_record:tls_version(), session_id(), 
+ 		    #connection_states{}, alpn | npn, binary() | undefined}|
+ 		   {tls_record:tls_version(), {resumed | new, #session{}}, 
+ 		    #connection_states{}, binary() | undefined, 
+-		    #hello_extensions{}} |
++		    #hello_extensions{}, {ssl_cipher:hash(), ssl_cipher:sign_algo()} | undefined} |
+ 		   #alert{}.
+ %%
+ %% Description: Handles a recieved hello message
+@@ -149,26 +149,35 @@ get_tls_handshake(Version, Data, Buffer) ->
+ %%% Internal functions
+ %%--------------------------------------------------------------------
+ handle_client_hello(Version, #client_hello{session_id = SugesstedId,
+-				       cipher_suites = CipherSuites,
+-				       compression_methods = Compressions,
+-				       random = Random,
+-				       extensions = #hello_extensions{elliptic_curves = Curves} = HelloExt},
+-		#ssl_options{versions = Versions} = SslOpts,
+-	 {Port, Session0, Cache, CacheCb, ConnectionStates0, Cert}, Renegotiation) ->
++					   cipher_suites = CipherSuites,
++					   compression_methods = Compressions,
++					   random = Random,
++					   extensions = #hello_extensions{elliptic_curves = Curves,
++									  signature_algs = ClientHashSigns} = HelloExt},
++		    #ssl_options{versions = Versions,
++				 signature_algs = SupportedHashSigns} = SslOpts,
++		    {Port, Session0, Cache, CacheCb, ConnectionStates0, Cert, _}, Renegotiation) ->
+     case tls_record:is_acceptable_version(Version, Versions) of
+ 	true ->
++	    AvailableHashSigns = available_signature_algs(ClientHashSigns, SupportedHashSigns, Cert, Version),
+ 	    ECCCurve = ssl_handshake:select_curve(Curves, ssl_handshake:supported_ecc(Version)),
+ 	    {Type, #session{cipher_suite = CipherSuite} = Session1}
+-		= ssl_handshake:select_session(SugesstedId, CipherSuites, Compressions,
++		= ssl_handshake:select_session(SugesstedId, CipherSuites, AvailableHashSigns, Compressions,
+ 					       Port, Session0#session{ecc = ECCCurve}, Version,
+ 					       SslOpts, Cache, CacheCb, Cert),
+ 	    case CipherSuite of 
+ 		no_suite ->
+ 		    ?ALERT_REC(?FATAL, ?INSUFFICIENT_SECURITY);
+ 		_ ->
+-		    handle_client_hello_extensions(Version, Type, Random, CipherSuites, HelloExt,
+-						   SslOpts, Session1, ConnectionStates0,
+-						   Renegotiation)
++		    {KeyExAlg,_,_,_} = ssl_cipher:suite_definition(CipherSuite),
++		    case ssl_handshake:select_hashsign(ClientHashSigns, Cert, KeyExAlg, SupportedHashSigns, Version) of
++			#alert{} = Alert ->
++			    Alert;
++			HashSign ->
++			    handle_client_hello_extensions(Version, Type, Random, CipherSuites, HelloExt,
++							   SslOpts, Session1, ConnectionStates0,
++							   Renegotiation, HashSign)
++		    end
+ 	    end;
+ 	false ->
+ 	    ?ALERT_REC(?FATAL, ?PROTOCOL_VERSION)
+@@ -245,14 +254,14 @@ enc_handshake(HandshakeMsg, Version) ->
+ 
+ 
+ handle_client_hello_extensions(Version, Type, Random, CipherSuites,
+-			HelloExt, SslOpts, Session0, ConnectionStates0, Renegotiation) ->
++			HelloExt, SslOpts, Session0, ConnectionStates0, Renegotiation, HashSign) ->
+     try ssl_handshake:handle_client_hello_extensions(tls_record, Random, CipherSuites,
+ 						     HelloExt, Version, SslOpts,
+ 						     Session0, ConnectionStates0, Renegotiation) of
+ 	#alert{} = Alert ->
+ 	    Alert;
+ 	{Session, ConnectionStates, Protocol, ServerHelloExt} ->
+-	    {Version, {Type, Session}, ConnectionStates, Protocol, ServerHelloExt}
++	    {Version, {Type, Session}, ConnectionStates, Protocol, ServerHelloExt, HashSign}
+     catch throw:Alert ->
+ 	    Alert
+     end.
+@@ -269,3 +278,12 @@ handle_server_hello_extensions(Version, SessionId, Random, CipherSuite,
+ 	    {Version, SessionId, ConnectionStates, ProtoExt, Protocol}
+     end.
+ 
++available_signature_algs(undefined, SupportedHashSigns, _, {Major, Minor}) when (Major < 3) andalso (Minor < 3) ->
++    SupportedHashSigns;
++available_signature_algs(#hash_sign_algos{hash_sign_algos = ClientHashSigns}, SupportedHashSigns, 
++		     _, {Major, Minor}) when (Major < 3) andalso (Minor < 3) ->
++    ordsets:intersection(ClientHashSigns, SupportedHashSigns);
++available_signature_algs(_, _, _, _) -> 
++    undefined.
++
++
+--- a/lib/ssl/src/tls_v1.erl
++++ b/lib/ssl/src/tls_v1.erl
+@@ -31,7 +31,8 @@
+ 
+ -export([master_secret/4, finished/5, certificate_verify/3, mac_hash/7,
+ 	 setup_keys/8, suites/1, prf/5,
+-	 ecc_curves/1, oid_to_enum/1, enum_to_oid/1]).
++	 ecc_curves/1, oid_to_enum/1, enum_to_oid/1, 
++	 default_signature_algs/1, signature_algs/2]).
+ 
+ %%====================================================================
+ %% Internal application API
+@@ -258,6 +259,54 @@ suites(3) ->
+     ] ++ suites(2).
+ 
+ 
++
++signature_algs({3, 3}, HashSigns) ->
++    CryptoSupports =  crypto:supports(),
++    Hashes = proplists:get_value(hashs, CryptoSupports),
++    PubKeys = proplists:get_value(public_keys, CryptoSupports),
++    Supported = lists:foldl(fun({Hash, dsa = Sign} = Alg, Acc) ->
++				    case proplists:get_bool(dss, PubKeys) 
++					andalso proplists:get_bool(Hash, Hashes)
++					andalso is_pair(Hash, Sign, Hashes)
++				    of
++					true ->
++					    [Alg | Acc];
++					false ->
++					    Acc
++				    end;
++			       ({Hash, Sign} = Alg, Acc) -> 
++				    case proplists:get_bool(Sign, PubKeys) 
++					andalso proplists:get_bool(Hash, Hashes) 
++					andalso is_pair(Hash, Sign, Hashes)
++				    of
++					true ->
++					    [Alg | Acc];
++					false ->
++					    Acc
++				    end
++			    end, [], HashSigns),
++    lists:reverse(Supported).
++
++default_signature_algs({3, 3} = Version) ->
++    Default = [%% SHA2
++	       {sha512, ecdsa},
++	       {sha512, rsa},
++	       {sha384, ecdsa},
++	       {sha384, rsa},
++	       {sha256, ecdsa},
++	       {sha256, rsa},
++	       {sha224, ecdsa},
++	       {sha224, rsa},
++	       %% SHA
++	       {sha, ecdsa},
++	       {sha, rsa},
++	       {sha, dsa},
++	       %% MD5
++	       {md5, rsa}],
++    signature_algs(Version, Default);
++default_signature_algs(_) ->
++    undefined.
++
+ %%--------------------------------------------------------------------
+ %%% Internal functions
+ %%--------------------------------------------------------------------
+@@ -342,6 +391,17 @@ finished_label(client) ->
+ finished_label(server) ->
+     <<"server finished">>.
+ 
++is_pair(sha, dsa, _) ->
++    true;
++is_pair(_, dsa, _) ->
++    false;
++is_pair(Hash, ecdsa, Hashs) ->
++    AtLeastSha = Hashs -- [md2,md4,md5],
++    lists:member(Hash, AtLeastSha);
++is_pair(Hash, rsa, Hashs) ->
++    AtLeastMd5 = Hashs -- [md2,md4],
++    lists:member(Hash, AtLeastMd5).
++
+ %% list ECC curves in prefered order
+ ecc_curves(_Minor) ->
+     TLSCurves = [sect571r1,sect571k1,secp521r1,brainpoolP512r1,
+--- a/lib/ssl/test/ssl_basic_SUITE.erl
++++ b/lib/ssl/test/ssl_basic_SUITE.erl
+@@ -58,7 +58,7 @@ all() ->
+ groups() ->
+     [{basic, [], basic_tests()},
+      {options, [], options_tests()},
+-     {'tlsv1.2', [], all_versions_groups()},
++     {'tlsv1.2', [], all_versions_groups() ++ [conf_signature_algs, no_common_signature_algs]},
+      {'tlsv1.1', [], all_versions_groups()},
+      {'tlsv1', [], all_versions_groups() ++ rizzo_tests()},
+      {'sslv3', [], all_versions_groups() ++ rizzo_tests() ++ [ciphersuite_vs_version]},
+@@ -168,6 +168,7 @@ renegotiate_tests() ->
+ 
+ cipher_tests() ->
+     [cipher_suites,
++     cipher_suites_mix,
+      ciphers_rsa_signed_certs,
+      ciphers_rsa_signed_certs_openssl_names,
+      ciphers_dsa_signed_certs,
+@@ -445,7 +446,7 @@ connection_info(Config) when is_list(Config) ->
+ 			   {from, self()}, 
+ 			   {mfa, {?MODULE, connection_info_result, []}},
+ 			   {options, 
+-			    [{ciphers,[{rsa,des_cbc,sha,no_export}]} | 
++			    [{ciphers,[{rsa,des_cbc,sha}]} | 
+ 			     ClientOpts]}]),
+     
+     ct:log("Testcase ~p, Client ~p  Server ~p ~n",
+@@ -911,6 +912,31 @@ cipher_suites(Config) when is_list(Config) ->
+     [_|_] =ssl:cipher_suites(openssl).
+ 
+ %%--------------------------------------------------------------------
++cipher_suites_mix() ->
++    [{doc,"Test to have old and new cipher suites at the same time"}].
++
++cipher_suites_mix(Config) when is_list(Config) -> 
++    CipherSuites = [{ecdh_rsa,aes_128_cbc,sha256,sha256}, {rsa,aes_128_cbc,sha}],
++    ClientOpts = ?config(client_opts, Config),
++    ServerOpts = ?config(server_opts, Config),
++
++    {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
++
++    Server = ssl_test_lib:start_server([{node, ServerNode}, {port, 0},
++					{from, self()},
++					{mfa, {ssl_test_lib, send_recv_result_active, []}},
++					{options, ServerOpts}]),
++    Port = ssl_test_lib:inet_port(Server),
++    Client = ssl_test_lib:start_client([{node, ClientNode}, {port, Port},
++					{host, Hostname},
++					{from, self()},
++					{mfa, {ssl_test_lib, send_recv_result_active, []}},
++					{options, [{ciphers, CipherSuites} | ClientOpts]}]),
++
++    ssl_test_lib:check_result(Server, ok, Client, ok),
++    ssl_test_lib:close(Server),
++    ssl_test_lib:close(Client).
++%%--------------------------------------------------------------------
+ socket_options() ->
+     [{doc,"Test API function getopts/2 and setopts/2"}].
+ 
+@@ -2876,7 +2902,61 @@ ciphersuite_vs_version(Config) when is_list(Config) ->
+ 	_ ->
+ 	    ct:fail({unexpected_server_hello, ServerHello})
+     end.
+-										
++			
++%%--------------------------------------------------------------------
++conf_signature_algs() ->
++    [{doc,"Test to set the signature_algs option on both client and server"}].
++conf_signature_algs(Config) when is_list(Config) -> 
++    ClientOpts = ?config(client_opts, Config),
++    ServerOpts = ?config(server_opts, Config),
++    {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
++    Server = 
++	ssl_test_lib:start_server([{node, ServerNode}, {port, 0}, 
++				   {from, self()}, 
++				   {mfa, {ssl_test_lib, send_recv_result, []}},
++				   {options,  [{active, false}, {signature_algs, [{sha256, rsa}]} | ServerOpts]}]),
++    Port = ssl_test_lib:inet_port(Server),
++    Client = 
++	ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
++				   {host, Hostname},
++				   {from, self()}, 
++				   {mfa, {ssl_test_lib, send_recv_result, []}},
++				   {options, [{active, false}, {signature_algs, [{sha256, rsa}]} | ClientOpts]}]),
++    
++    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
++			 [self(), Client, Server]),
++    
++    ssl_test_lib:check_result(Server, ok, Client, ok),
++    
++    ssl_test_lib:close(Server),
++    ssl_test_lib:close(Client).
++
++
++%%--------------------------------------------------------------------
++no_common_signature_algs()  ->
++    [{doc,"Set the signature_algs option so that there client and server does not share any hash sign algorithms"}].
++no_common_signature_algs(Config) when is_list(Config) ->
++    
++    ClientOpts = ?config(client_opts, Config),
++    ServerOpts = ?config(server_opts, Config),
++
++    {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
++
++
++    Server = ssl_test_lib:start_server_error([{node, ServerNode}, {port, 0},
++					      {from, self()},
++					      {options, [{signature_algs, [{sha256, rsa}]}
++							 | ServerOpts]}]),
++    Port = ssl_test_lib:inet_port(Server),
++    Client = ssl_test_lib:start_client_error([{node, ClientNode}, {port, Port},
++					      {host, Hostname},
++					      {from, self()}, 
++					      {options, [{signature_algs, [{sha384, rsa}]}
++							 | ClientOpts]}]),
++    
++    ssl_test_lib:check_result(Server, {error, {tls_alert, "insufficient security"}},
++			      Client, {error, {tls_alert, "insufficient security"}}).
++    						
+ %%--------------------------------------------------------------------
+ 
+ dont_crash_on_handshake_garbage() ->
+--- a/lib/ssl/test/ssl_handshake_SUITE.erl
++++ b/lib/ssl/test/ssl_handshake_SUITE.erl
+@@ -166,10 +166,10 @@ ignore_hassign_extension_pre_tls_1_2(Config) ->
+     CertFile = proplists:get_value(certfile, Opts),
+     [{_, Cert, _}] = ssl_test_lib:pem_to_der(CertFile),
+     HashSigns = #hash_sign_algos{hash_sign_algos = [{sha512, rsa}, {sha, dsa}]},
+-    {sha512, rsa} = ssl_handshake:select_hashsign(HashSigns, Cert, {3,3}),
++    {sha512, rsa} = ssl_handshake:select_hashsign(HashSigns, Cert, ecdhe_rsa, tls_v1:default_signature_algs({3,3}), {3,3}),
+     %%% Ignore
+-    {md5sha, rsa} = ssl_handshake:select_hashsign(HashSigns, Cert, {3,2}),
+-    {md5sha, rsa} = ssl_handshake:select_hashsign(HashSigns, Cert, {3,0}).
++    {md5sha, rsa} = ssl_handshake:select_hashsign(HashSigns, Cert, ecdhe_rsa, tls_v1:default_signature_algs({3,2}), {3,2}),
++    {md5sha, rsa} = ssl_handshake:select_hashsign(HashSigns, Cert, ecdhe_rsa, tls_v1:default_signature_algs({3,0}), {3,0}).
+ 
+ is_supported(Hash) ->
+     Algos = crypto:supports(),
+--- a/lib/ssl/test/ssl_test_lib.erl
++++ b/lib/ssl/test/ssl_test_lib.erl
+@@ -905,8 +905,8 @@ anonymous_suites() ->
+ 	 {dh_anon, '3des_ede_cbc', sha},
+ 	 {dh_anon, aes_128_cbc, sha},
+ 	 {dh_anon, aes_256_cbc, sha},
+-	 {dh_anon, aes_128_gcm, null},
+-	 {dh_anon, aes_256_gcm, null},
++	 {dh_anon, aes_128_gcm, null, sha256},
++	 {dh_anon, aes_256_gcm, null, sha384},
+ 	 {ecdh_anon,rc4_128,sha},
+ 	 {ecdh_anon,'3des_ede_cbc',sha},
+ 	 {ecdh_anon,aes_128_cbc,sha},
+@@ -933,12 +933,12 @@ psk_suites() ->
+ 	 {rsa_psk, aes_256_cbc, sha},
+ 	 {rsa_psk, aes_128_cbc, sha256},
+ 	 {rsa_psk, aes_256_cbc, sha384},
+-	 {psk, aes_128_gcm, null},
+-	 {psk, aes_256_gcm, null},
+-	 {dhe_psk, aes_128_gcm, null},
+-	 {dhe_psk, aes_256_gcm, null},
+-	 {rsa_psk, aes_128_gcm, null},
+-	 {rsa_psk, aes_256_gcm, null}],
++	 {psk, aes_128_gcm, null, sha256},
++	 {psk, aes_256_gcm, null, sha384},
++	 {dhe_psk, aes_128_gcm, null, sha256},
++	 {dhe_psk, aes_256_gcm, null, sha384},
++	 {rsa_psk, aes_128_gcm, null, sha256},
++	 {rsa_psk, aes_256_gcm, null, sha384}],
+     ssl_cipher:filter_suites(Suites).
+ 
+ psk_anon_suites() ->
+--- a/lib/ssl/vsn.mk
++++ b/lib/ssl/vsn.mk
+@@ -1 +1 @@
+-SSL_VSN = 7.3
++SSL_VSN = 7.3.1
+--- a/otp_versions.table
++++ b/otp_versions.table
+@@ -1,3 +1,5 @@
++OTP-18.3.2 : inets-6.2.2 ssl-7.3.1 # asn1-4.0.2 common_test-1.12 compiler-6.0.3 cosEvent-2.2 cosEventDomain-1.2 cosFileTransfer-1.2 cosNotification-1.2.1 cosProperty-1.2 cosTime-1.2.1 cosTransactions-1.3.1 crypto-3.6.3 debugger-4.1.2 dialyzer-2.9 diameter-1.11.2 edoc-0.7.18 eldap-1.2.1 erl_docgen-0.4.2 erl_interface-3.8.2 erts-7.3.1 et-1.5.1 eunit-2.2.13 gs-1.6 hipe-3.15 ic-4.4 jinterface-1.6.1 kernel-4.2 megaco-3.18 mnesia-4.13.4 observer-2.1.2 odbc-2.11.1 orber-3.8.1 os_mon-2.4 ose-1.1 otp_mibs-1.1 parsetools-2.1.1 percept-0.8.11 public_key-1.1.1 reltool-0.7 runtime_tools-1.9.3 sasl-2.7 snmp-5.2.2 ssh-4.2.2 stdlib-2.8 syntax_tools-1.7 test_server-3.10 tools-2.8.3 typer-0.9.10 webtool-0.9.1 wx-1.6.1 xmerl-1.3.10 :
++OTP-18.3.1 : erts-7.3.1 inets-6.2.1 mnesia-4.13.4 # asn1-4.0.2 common_test-1.12 compiler-6.0.3 cosEvent-2.2 cosEventDomain-1.2 cosFileTransfer-1.2 cosNotification-1.2.1 cosProperty-1.2 cosTime-1.2.1 cosTransactions-1.3.1 crypto-3.6.3 debugger-4.1.2 dialyzer-2.9 diameter-1.11.2 edoc-0.7.18 eldap-1.2.1 erl_docgen-0.4.2 erl_interface-3.8.2 et-1.5.1 eunit-2.2.13 gs-1.6 hipe-3.15 ic-4.4 jinterface-1.6.1 kernel-4.2 megaco-3.18 observer-2.1.2 odbc-2.11.1 orber-3.8.1 os_mon-2.4 ose-1.1 otp_mibs-1.1 parsetools-2.1.1 percept-0.8.11 public_key-1.1.1 reltool-0.7 runtime_tools-1.9.3 sasl-2.7 snmp-5.2.2 ssh-4.2.2 ssl-7.3 stdlib-2.8 syntax_tools-1.7 test_server-3.10 tools-2.8.3 typer-0.9.10 webtool-0.9.1 wx-1.6.1 xmerl-1.3.10 :
+ OTP-18.3 : asn1-4.0.2 common_test-1.12 compiler-6.0.3 cosNotification-1.2.1 cosTime-1.2.1 cosTransactions-1.3.1 crypto-3.6.3 debugger-4.1.2 dialyzer-2.9 diameter-1.11.2 edoc-0.7.18 eldap-1.2.1 erl_docgen-0.4.2 erl_interface-3.8.2 erts-7.3 eunit-2.2.13 hipe-3.15 inets-6.2 kernel-4.2 mnesia-4.13.3 observer-2.1.2 orber-3.8.1 public_key-1.1.1 runtime_tools-1.9.3 sasl-2.7 snmp-5.2.2 ssh-4.2.2 ssl-7.3 stdlib-2.8 test_server-3.10 tools-2.8.3 webtool-0.9.1 wx-1.6.1 xmerl-1.3.10 # cosEvent-2.2 cosEventDomain-1.2 cosFileTransfer-1.2 cosProperty-1.2 et-1.5.1 gs-1.6 ic-4.4 jinterface-1.6.1 megaco-3.18 odbc-2.11.1 os_mon-2.4 ose-1.1 otp_mibs-1.1 parsetools-2.1.1 percept-0.8.11 reltool-0.7 syntax_tools-1.7 typer-0.9.10 :
+ OTP-18.2.4 : common_test-1.11.2 # asn1-4.0.1 compiler-6.0.2 cosEvent-2.2 cosEventDomain-1.2 cosFileTransfer-1.2 cosNotification-1.2 cosProperty-1.2 cosTime-1.2 cosTransactions-1.3 crypto-3.6.2 debugger-4.1.1 dialyzer-2.8.2 diameter-1.11.1 edoc-0.7.17 eldap-1.2 erl_docgen-0.4.1 erl_interface-3.8.1 erts-7.2.1 et-1.5.1 eunit-2.2.12 gs-1.6 hipe-3.14 ic-4.4 inets-6.1.1 jinterface-1.6.1 kernel-4.1.1 megaco-3.18 mnesia-4.13.2 observer-2.1.1 odbc-2.11.1 orber-3.8 os_mon-2.4 ose-1.1 otp_mibs-1.1 parsetools-2.1.1 percept-0.8.11 public_key-1.1 reltool-0.7 runtime_tools-1.9.2 sasl-2.6.1 snmp-5.2.1 ssh-4.2.1 ssl-7.2 stdlib-2.7 syntax_tools-1.7 test_server-3.9.1 tools-2.8.2 typer-0.9.10 webtool-0.9 wx-1.6 xmerl-1.3.9 :
+ OTP-18.2.3 : inets-6.1.1 # asn1-4.0.1 common_test-1.11.1 compiler-6.0.2 cosEvent-2.2 cosEventDomain-1.2 cosFileTransfer-1.2 cosNotification-1.2 cosProperty-1.2 cosTime-1.2 cosTransactions-1.3 crypto-3.6.2 debugger-4.1.1 dialyzer-2.8.2 diameter-1.11.1 edoc-0.7.17 eldap-1.2 erl_docgen-0.4.1 erl_interface-3.8.1 erts-7.2.1 et-1.5.1 eunit-2.2.12 gs-1.6 hipe-3.14 ic-4.4 jinterface-1.6.1 kernel-4.1.1 megaco-3.18 mnesia-4.13.2 observer-2.1.1 odbc-2.11.1 orber-3.8 os_mon-2.4 ose-1.1 otp_mibs-1.1 parsetools-2.1.1 percept-0.8.11 public_key-1.1 reltool-0.7 runtime_tools-1.9.2 sasl-2.6.1 snmp-5.2.1 ssh-4.2.1 ssl-7.2 stdlib-2.7 syntax_tools-1.7 test_server-3.9.1 tools-2.8.2 typer-0.9.10 webtool-0.9 wx-1.6 xmerl-1.3.9 :
+@@ -14,6 +16,7 @@ OTP-18.0.3 : erts-7.0.3 # asn1-4.0 common_test-1.11 compiler-6.0 cosEvent-2.2 co
+ OTP-18.0.2 : erts-7.0.2 runtime_tools-1.9.1 # asn1-4.0 common_test-1.11 compiler-6.0 cosEvent-2.2 cosEventDomain-1.2 cosFileTransfer-1.2 cosNotification-1.2 cosProperty-1.2 cosTime-1.2 cosTransactions-1.3 crypto-3.6 debugger-4.1 dialyzer-2.8 diameter-1.10 edoc-0.7.17 eldap-1.2 erl_docgen-0.4 erl_interface-3.8 et-1.5.1 eunit-2.2.10 gs-1.6 hipe-3.12 ic-4.4 inets-6.0 jinterface-1.6 kernel-4.0 megaco-3.18 mnesia-4.13 observer-2.1 odbc-2.11 orber-3.8 os_mon-2.4 ose-1.1 otp_mibs-1.1 parsetools-2.1 percept-0.8.11 public_key-1.0 reltool-0.7 sasl-2.5 snmp-5.2 ssh-4.0 ssl-7.0 stdlib-2.5 syntax_tools-1.7 test_server-3.9 tools-2.8 typer-0.9.9 webtool-0.9 wx-1.4 xmerl-1.3.8 :
+ OTP-18.0.1 : erts-7.0.1 # asn1-4.0 common_test-1.11 compiler-6.0 cosEvent-2.2 cosEventDomain-1.2 cosFileTransfer-1.2 cosNotification-1.2 cosProperty-1.2 cosTime-1.2 cosTransactions-1.3 crypto-3.6 debugger-4.1 dialyzer-2.8 diameter-1.10 edoc-0.7.17 eldap-1.2 erl_docgen-0.4 erl_interface-3.8 et-1.5.1 eunit-2.2.10 gs-1.6 hipe-3.12 ic-4.4 inets-6.0 jinterface-1.6 kernel-4.0 megaco-3.18 mnesia-4.13 observer-2.1 odbc-2.11 orber-3.8 os_mon-2.4 ose-1.1 otp_mibs-1.1 parsetools-2.1 percept-0.8.11 public_key-1.0 reltool-0.7 runtime_tools-1.9 sasl-2.5 snmp-5.2 ssh-4.0 ssl-7.0 stdlib-2.5 syntax_tools-1.7 test_server-3.9 tools-2.8 typer-0.9.9 webtool-0.9 wx-1.4 xmerl-1.3.8 :
+ OTP-18.0 : asn1-4.0 common_test-1.11 compiler-6.0 cosEvent-2.2 cosEventDomain-1.2 cosFileTransfer-1.2 cosNotification-1.2 cosProperty-1.2 cosTime-1.2 cosTransactions-1.3 crypto-3.6 debugger-4.1 dialyzer-2.8 diameter-1.10 edoc-0.7.17 eldap-1.2 erl_docgen-0.4 erl_interface-3.8 erts-7.0 et-1.5.1 eunit-2.2.10 gs-1.6 hipe-3.12 ic-4.4 inets-6.0 jinterface-1.6 kernel-4.0 megaco-3.18 mnesia-4.13 observer-2.1 odbc-2.11 orber-3.8 os_mon-2.4 ose-1.1 otp_mibs-1.1 parsetools-2.1 percept-0.8.11 public_key-1.0 reltool-0.7 runtime_tools-1.9 sasl-2.5 snmp-5.2 ssh-4.0 ssl-7.0 stdlib-2.5 syntax_tools-1.7 test_server-3.9 tools-2.8 typer-0.9.9 webtool-0.9 wx-1.4 xmerl-1.3.8 # :
++OTP-17.5.6.9 : diameter-1.9.2.4 erts-6.4.1.6 ssl-6.0.1.2 # asn1-3.0.4 common_test-1.10.1 compiler-5.0.4 cosEvent-2.1.15 cosEventDomain-1.1.14 cosFileTransfer-1.1.16 cosNotification-1.1.21 cosProperty-1.1.17 cosTime-1.1.14 cosTransactions-1.2.14 crypto-3.5 debugger-4.0.3.1 dialyzer-2.7.4 edoc-0.7.16 eldap-1.1.1 erl_docgen-0.3.7 erl_interface-3.7.20 et-1.5 eunit-2.2.9 gs-1.5.16 hipe-3.11.3 ic-4.3.6 inets-5.10.9 jinterface-1.5.12 kernel-3.2.0.1 megaco-3.17.3 mnesia-4.12.5 observer-2.0.4 odbc-2.10.22 orber-3.7.1 os_mon-2.3.1 ose-1.0.2 otp_mibs-1.0.10 parsetools-2.0.12 percept-0.8.10 public_key-0.23 reltool-0.6.6 runtime_tools-1.8.16.1 sasl-2.4.1 snmp-5.1.2 ssh-3.2.4 stdlib-2.4 syntax_tools-1.6.18 test_server-3.8.1 tools-2.7.2 typer-0.9.8 webtool-0.8.10 wx-1.3.3 xmerl-1.3.7 :
+ OTP-17.5.6.8 : diameter-1.9.2.3 # asn1-3.0.4 common_test-1.10.1 compiler-5.0.4 cosEvent-2.1.15 cosEventDomain-1.1.14 cosFileTransfer-1.1.16 cosNotification-1.1.21 cosProperty-1.1.17 cosTime-1.1.14 cosTransactions-1.2.14 crypto-3.5 debugger-4.0.3.1 dialyzer-2.7.4 edoc-0.7.16 eldap-1.1.1 erl_docgen-0.3.7 erl_interface-3.7.20 erts-6.4.1.5 et-1.5 eunit-2.2.9 gs-1.5.16 hipe-3.11.3 ic-4.3.6 inets-5.10.9 jinterface-1.5.12 kernel-3.2.0.1 megaco-3.17.3 mnesia-4.12.5 observer-2.0.4 odbc-2.10.22 orber-3.7.1 os_mon-2.3.1 ose-1.0.2 otp_mibs-1.0.10 parsetools-2.0.12 percept-0.8.10 public_key-0.23 reltool-0.6.6 runtime_tools-1.8.16.1 sasl-2.4.1 snmp-5.1.2 ssh-3.2.4 ssl-6.0.1.1 stdlib-2.4 syntax_tools-1.6.18 test_server-3.8.1 tools-2.7.2 typer-0.9.8 webtool-0.8.10 wx-1.3.3 xmerl-1.3.7 :
+ OTP-17.5.6.7 : diameter-1.9.2.2 # asn1-3.0.4 common_test-1.10.1 compiler-5.0.4 cosEvent-2.1.15 cosEventDomain-1.1.14 cosFileTransfer-1.1.16 cosNotification-1.1.21 cosProperty-1.1.17 cosTime-1.1.14 cosTransactions-1.2.14 crypto-3.5 debugger-4.0.3.1 dialyzer-2.7.4 edoc-0.7.16 eldap-1.1.1 erl_docgen-0.3.7 erl_interface-3.7.20 erts-6.4.1.5 et-1.5 eunit-2.2.9 gs-1.5.16 hipe-3.11.3 ic-4.3.6 inets-5.10.9 jinterface-1.5.12 kernel-3.2.0.1 megaco-3.17.3 mnesia-4.12.5 observer-2.0.4 odbc-2.10.22 orber-3.7.1 os_mon-2.3.1 ose-1.0.2 otp_mibs-1.0.10 parsetools-2.0.12 percept-0.8.10 public_key-0.23 reltool-0.6.6 runtime_tools-1.8.16.1 sasl-2.4.1 snmp-5.1.2 ssh-3.2.4 ssl-6.0.1.1 stdlib-2.4 syntax_tools-1.6.18 test_server-3.8.1 tools-2.7.2 typer-0.9.8 webtool-0.8.10 wx-1.3.3 xmerl-1.3.7 :
+ OTP-17.5.6.6 : erts-6.4.1.5 # asn1-3.0.4 common_test-1.10.1 compiler-5.0.4 cosEvent-2.1.15 cosEventDomain-1.1.14 cosFileTransfer-1.1.16 cosNotification-1.1.21 cosProperty-1.1.17 cosTime-1.1.14 cosTransactions-1.2.14 crypto-3.5 debugger-4.0.3.1 dialyzer-2.7.4 diameter-1.9.2.1 edoc-0.7.16 eldap-1.1.1 erl_docgen-0.3.7 erl_interface-3.7.20 et-1.5 eunit-2.2.9 gs-1.5.16 hipe-3.11.3 ic-4.3.6 inets-5.10.9 jinterface-1.5.12 kernel-3.2.0.1 megaco-3.17.3 mnesia-4.12.5 observer-2.0.4 odbc-2.10.22 orber-3.7.1 os_mon-2.3.1 ose-1.0.2 otp_mibs-1.0.10 parsetools-2.0.12 percept-0.8.10 public_key-0.23 reltool-0.6.6 runtime_tools-1.8.16.1 sasl-2.4.1 snmp-5.1.2 ssh-3.2.4 ssl-6.0.1.1 stdlib-2.4 syntax_tools-1.6.18 test_server-3.8.1 tools-2.7.2 typer-0.9.8 webtool-0.8.10 wx-1.3.3 xmerl-1.3.7 :
