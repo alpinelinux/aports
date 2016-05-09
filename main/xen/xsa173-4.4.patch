@@ -1,0 +1,251 @@
+commit 5893f9ea852f428e7120a4f3184a20deeb145d91
+Author: Tim Deegan <tim@xen.org>
+Date:   Wed Mar 16 17:05:25 2016 +0000
+
+    x86: limit GFNs to 32 bits for shadowed superpages.
+    
+    Superpage shadows store the shadowed GFN in the backpointer field,
+    which for non-BIGMEM builds is 32 bits wide.  Shadowing a superpage
+    mapping of a guest-physical address above 2^44 would lead to the GFN
+    being truncated there, and a crash when we come to remove the shadow
+    from the hash table.
+    
+    Track the valid width of a GFN for each guest, including reporting it
+    through CPUID, and enforce it in the shadow pagetables.  Set the
+    maximum witth to 32 for guests where this truncation could occur.
+    
+    This is XSA-173.
+    
+    Signed-off-by: Tim Deegan <tim@xen.org>
+    Signed-off-by: Jan Beulich <jbeulich@suse.com>
+
+Reported-by: Ling Liu <liuling-it@360.cn>
+diff --git a/xen/arch/x86/cpu/common.c b/xen/arch/x86/cpu/common.c
+index 4221826..f436f91 100644
+--- a/xen/arch/x86/cpu/common.c
++++ b/xen/arch/x86/cpu/common.c
+@@ -37,6 +37,7 @@ integer_param("cpuid_mask_ext_edx", opt_cpuid_mask_ext_edx);
+ struct cpu_dev * cpu_devs[X86_VENDOR_NUM] = {};
+ 
+ unsigned int paddr_bits __read_mostly = 36;
++unsigned int hap_paddr_bits __read_mostly = 36;
+ 
+ /*
+  * Default host IA32_CR_PAT value to cover all memory types.
+@@ -195,7 +196,7 @@ static void __init early_cpu_detect(void)
+ 
+ static void __cpuinit generic_identify(struct cpuinfo_x86 *c)
+ {
+-	u32 tfms, xlvl, capability, excap, ebx;
++	u32 tfms, xlvl, capability, excap, eax, ebx;
+ 
+ 	/* Get vendor name */
+ 	cpuid(0x00000000, &c->cpuid_level,
+@@ -230,8 +231,11 @@ static void __cpuinit generic_identify(struct cpuinfo_x86 *c)
+ 		}
+ 		if ( xlvl >= 0x80000004 )
+ 			get_model_name(c); /* Default name */
+-		if ( xlvl >= 0x80000008 )
+-			paddr_bits = cpuid_eax(0x80000008) & 0xff;
++		if ( xlvl >= 0x80000008 ) {
++			eax = cpuid_eax(0x80000008);
++			paddr_bits = eax & 0xff;
++			hap_paddr_bits = ((eax >> 16) & 0xff) ?: paddr_bits;
++		}
+ 	}
+ 
+ 	/* Might lift BIOS max_leaf=3 limit. */
+diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
+index f3f6c61..a4bfb90 100644
+--- a/xen/arch/x86/hvm/hvm.c
++++ b/xen/arch/x86/hvm/hvm.c
+@@ -2966,8 +2966,7 @@ void hvm_cpuid(unsigned int input, unsigned int *eax, unsigned int *ebx,
+         break;
+ 
+     case 0x80000008:
+-        count = cpuid_eax(0x80000008);
+-        count = (count >> 16) & 0xff ?: count & 0xff;
++        count = d->arch.paging.gfn_bits + PAGE_SHIFT;
+         if ( (*eax & 0xff) > count )
+             *eax = (*eax & ~0xff) | count;
+ 
+diff --git a/xen/arch/x86/mm/guest_walk.c b/xen/arch/x86/mm/guest_walk.c
+index 70460b6..09511f0 100644
+--- a/xen/arch/x86/mm/guest_walk.c
++++ b/xen/arch/x86/mm/guest_walk.c
+@@ -94,6 +94,12 @@ void *map_domain_gfn(struct p2m_domain *p2m, gfn_t gfn, mfn_t *mfn,
+     struct page_info *page;
+     void *map;
+ 
++    if ( gfn_x(gfn) >> p2m->domain->arch.paging.gfn_bits )
++    {
++        *rc = _PAGE_INVALID_BIT;
++        return NULL;
++    }
++
+     /* Translate the gfn, unsharing if shared */
+     page = get_page_from_gfn_p2m(p2m->domain, p2m, gfn_x(gfn), p2mt, NULL,
+                                  q);
+@@ -294,20 +300,8 @@ guest_walk_tables(struct vcpu *v, struct p2m_domain *p2m,
+             flags &= ~_PAGE_PAT;
+ 
+         if ( gfn_x(start) & GUEST_L2_GFN_MASK & ~0x1 )
+-        {
+-#if GUEST_PAGING_LEVELS == 2
+-            /*
+-             * Note that _PAGE_INVALID_BITS is zero in this case, yielding a
+-             * no-op here.
+-             *
+-             * Architecturally, the walk should fail if bit 21 is set (others
+-             * aren't being checked at least in PSE36 mode), but we'll ignore
+-             * this here in order to avoid specifying a non-natural, non-zero
+-             * _PAGE_INVALID_BITS value just for that case.
+-             */
+-#endif
+             rc |= _PAGE_INVALID_BITS;
+-        }
++
+         /* Increment the pfn by the right number of 4k pages.  
+          * Mask out PAT and invalid bits. */
+         start = _gfn((gfn_x(start) & ~GUEST_L2_GFN_MASK) +
+@@ -390,5 +384,11 @@ set_ad:
+         put_page(mfn_to_page(mfn_x(gw->l1mfn)));
+     }
+ 
++    /* If this guest has a restricted physical address space then the
++     * target GFN must fit within it. */
++    if ( !(rc & _PAGE_PRESENT)
++         && gfn_x(guest_l1e_get_gfn(gw->l1e)) >> d->arch.paging.gfn_bits )
++        rc |= _PAGE_INVALID_BITS;
++
+     return rc;
+ }
+diff --git a/xen/arch/x86/mm/hap/hap.c b/xen/arch/x86/mm/hap/hap.c
+index c06369b..ccc4174 100644
+--- a/xen/arch/x86/mm/hap/hap.c
++++ b/xen/arch/x86/mm/hap/hap.c
+@@ -428,6 +428,7 @@ static void hap_destroy_monitor_table(struct vcpu* v, mfn_t mmfn)
+ void hap_domain_init(struct domain *d)
+ {
+     INIT_PAGE_LIST_HEAD(&d->arch.paging.hap.freelist);
++    d->arch.paging.gfn_bits = hap_paddr_bits - PAGE_SHIFT;
+ }
+ 
+ /* return 0 for success, -errno for failure */
+diff --git a/xen/arch/x86/mm/shadow/common.c b/xen/arch/x86/mm/shadow/common.c
+index 90ba4d6..06a04ad 100644
+--- a/xen/arch/x86/mm/shadow/common.c
++++ b/xen/arch/x86/mm/shadow/common.c
+@@ -48,6 +48,16 @@ void shadow_domain_init(struct domain *d, unsigned int domcr_flags)
+     INIT_PAGE_LIST_HEAD(&d->arch.paging.shadow.freelist);
+     INIT_PAGE_LIST_HEAD(&d->arch.paging.shadow.pinned_shadows);
+ 
++    d->arch.paging.gfn_bits = paddr_bits - PAGE_SHIFT;
++#ifndef CONFIG_BIGMEM
++    /*
++     * Shadowed superpages store GFNs in 32-bit page_info fields.
++     * Note that we cannot use guest_supports_superpages() here.
++     */
++    if ( !is_pv_domain(d) || opt_allow_superpage )
++        d->arch.paging.gfn_bits = 32;
++#endif
++
+     /* Use shadow pagetables for log-dirty support */
+     paging_log_dirty_init(d, shadow_enable_log_dirty, 
+                           shadow_disable_log_dirty, shadow_clean_dirty_bitmap);
+diff --git a/xen/arch/x86/mm/shadow/multi.c b/xen/arch/x86/mm/shadow/multi.c
+index 0f499bf..6c88d4e 100644
+--- a/xen/arch/x86/mm/shadow/multi.c
++++ b/xen/arch/x86/mm/shadow/multi.c
+@@ -527,7 +527,8 @@ _sh_propagate(struct vcpu *v,
+     ASSERT(GUEST_PAGING_LEVELS > 3 || level != 3);
+ 
+     /* Check there's something for the shadows to map to */
+-    if ( !p2m_is_valid(p2mt) && !p2m_is_grant(p2mt) )
++    if ( (!p2m_is_valid(p2mt) && !p2m_is_grant(p2mt))
++         || gfn_x(target_gfn) >> d->arch.paging.gfn_bits )
+     {
+         *sp = shadow_l1e_empty();
+         goto done;
+diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
+index 7dfbbcb..a03fc2e 100644
+--- a/xen/include/asm-x86/domain.h
++++ b/xen/include/asm-x86/domain.h
+@@ -187,6 +187,9 @@ struct paging_domain {
+     /* log dirty support */
+     struct log_dirty_domain log_dirty;
+ 
++    /* Number of valid bits in a gfn. */
++    unsigned int gfn_bits;
++
+     /* preemption handling */
+     struct {
+         const struct domain *dom;
+diff --git a/xen/include/asm-x86/guest_pt.h b/xen/include/asm-x86/guest_pt.h
+index d2a8250..d95f835 100644
+--- a/xen/include/asm-x86/guest_pt.h
++++ b/xen/include/asm-x86/guest_pt.h
+@@ -220,15 +220,17 @@ guest_supports_nx(struct vcpu *v)
+ }
+ 
+ 
+-/* Some bits are invalid in any pagetable entry. */
+-#if GUEST_PAGING_LEVELS == 2
+-#define _PAGE_INVALID_BITS (0)
+-#elif GUEST_PAGING_LEVELS == 3
+-#define _PAGE_INVALID_BITS \
+-    get_pte_flags(((1ull<<63) - 1) & ~((1ull<<paddr_bits) - 1))
+-#else /* GUEST_PAGING_LEVELS == 4 */
++/*
++ * Some bits are invalid in any pagetable entry.
++ * Normal flags values get represented in 24-bit values (see
++ * get_pte_flags() and put_pte_flags()), so set bit 24 in
++ * addition to be able to flag out of range frame numbers.
++ */
++#if GUEST_PAGING_LEVELS == 3
+ #define _PAGE_INVALID_BITS \
+-    get_pte_flags(((1ull<<52) - 1) & ~((1ull<<paddr_bits) - 1))
++    (_PAGE_INVALID_BIT | get_pte_flags(((1ull << 63) - 1) & ~(PAGE_SIZE - 1)))
++#else /* 2-level and 4-level */
++#define _PAGE_INVALID_BITS _PAGE_INVALID_BIT
+ #endif
+ 
+ 
+diff --git a/xen/include/asm-x86/processor.h b/xen/include/asm-x86/processor.h
+index ec3da9b..8182afd 100644
+--- a/xen/include/asm-x86/processor.h
++++ b/xen/include/asm-x86/processor.h
+@@ -194,6 +194,8 @@ extern bool_t opt_cpu_info;
+ 
+ /* Maximum width of physical addresses supported by the hardware */
+ extern unsigned int paddr_bits;
++/* Max physical address width supported within HAP guests */
++extern unsigned int hap_paddr_bits;
+ 
+ extern void identify_cpu(struct cpuinfo_x86 *);
+ extern void setup_clear_cpu_cap(unsigned int);
+diff --git a/xen/include/asm-x86/x86_64/page.h b/xen/include/asm-x86/x86_64/page.h
+index c193c88..a48c650 100644
+--- a/xen/include/asm-x86/x86_64/page.h
++++ b/xen/include/asm-x86/x86_64/page.h
+@@ -166,6 +166,7 @@ typedef l4_pgentry_t root_pgentry_t;
+ 
+ #define USER_MAPPINGS_ARE_GLOBAL
+ #ifdef USER_MAPPINGS_ARE_GLOBAL
++
+ /*
+  * Bit 12 of a 24-bit flag mask. This corresponds to bit 52 of a pte.
+  * This is needed to distinguish between user and kernel PTEs since _PAGE_USER
+@@ -176,6 +177,12 @@ typedef l4_pgentry_t root_pgentry_t;
+ #define _PAGE_GUEST_KERNEL 0
+ #endif
+ 
++/*
++ * Bit 24 of a 24-bit flag mask!  This is not any bit of a real pte,
++ * and is only used for signalling in variables that contain flags.
++ */
++#define _PAGE_INVALID_BIT (1U<<24)
++
+ #endif /* __X86_64_PAGE_H__ */
+ 
+ /*
