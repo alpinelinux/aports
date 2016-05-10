@@ -15,7 +15,7 @@ $CONFIG = array(
     ),
     */
   ),
-  'version' => '7.0.0',
+  'version' => '7.0.14',
   'dbname' => 'owncloud',
   'dbhost' => 'localhost',
   'dbuser' => 'owncloud',
