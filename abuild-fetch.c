@@ -26,6 +26,7 @@ THE SOFTWARE.
 #include <sys/wait.h>
 
 #include <err.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -99,9 +100,16 @@ int fetch(char *url, const char *destdir)
 		err(1, lockfile);
 
 	if (fcntl(lockfd, F_SETLK, &fl) < 0) {
+		int i;
 		printf("Waiting for %s ...\n", lockfile);
-		if (fcntl(lockfd, F_SETLKW, &fl) < 0)
-			err(1, "fcntl(F_SETLKW)");
+		for (i=0; i<10; i++) {
+			int r = fcntl(lockfd, F_SETLKW, &fl);
+			if (r == 0)
+				break;
+			if (r == -1 && errno != ESTALE)
+				err(1, "fcntl(F_SETLKW)");
+			sleep(1);
+		}
 	}
 
 	if (access(outfile, F_OK) == 0)
