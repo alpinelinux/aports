@@ -78,7 +78,7 @@ int fetch(char *url, const char *destdir)
 
 	name = strrchr(url, '/');
 	if (name == NULL)
-		errx(1, "%s: no '/' in url");
+		errx(1, "%s: no '/' in url", url);
 	p = strstr(url, "::");
 	if (p != NULL) {
 		name = url;
@@ -97,7 +97,7 @@ int fetch(char *url, const char *destdir)
 
 	lockfd = open(lockfile, O_WRONLY|O_CREAT, 0660);
 	if (lockfd < 0)
-		err(1, lockfile);
+		err(1, "%s", lockfile);
 
 	if (fcntl(lockfd, F_SETLK, &fl) < 0) {
 		int i;
@@ -133,7 +133,7 @@ int fetch(char *url, const char *destdir)
 		execvp(curlcmd.argv[0], curlcmd.argv);
 		printf("Using wget\n");
 		execvp(wgetcmd.argv[0], wgetcmd.argv);
-		warn(wgetcmd.argv[0]);
+		warn("%s", wgetcmd.argv[0]);
 		unlink(lockfile);
 		_exit(1);
 	}
