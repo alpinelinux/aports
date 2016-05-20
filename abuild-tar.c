@@ -162,6 +162,7 @@ static ssize_t full_write(int fd, const void *buf, size_t count)
 	return total;
 }
 
+#if defined(__linux__)
 static ssize_t full_splice(int from_fd, int to_fd, size_t count)
 {
 	ssize_t total, n;
@@ -182,6 +183,9 @@ static ssize_t full_splice(int from_fd, int to_fd, size_t count)
 
 	return total;
 }
+#else
+#define full_splice(from_fd, to_fd, count) -1
+#endif
 
 #define BUF_INITIALIZER {0}
 struct buf {
