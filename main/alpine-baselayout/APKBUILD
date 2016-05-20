@@ -1,8 +1,8 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=2.3.2
-pkgrel=11
+pkgver=3.0.0
+pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="http://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -62,16 +62,17 @@ package() {
 		etc/init.d \
 		etc/modprobe.d \
 		etc/modules-load.d \
-		etc/profile.d \
 		etc/network/if-down.d \
 		etc/network/if-post-down.d \
 		etc/network/if-pre-up.d \
 		etc/network/if-up.d \
+		etc/opt \
 		etc/periodic/15min \
 		etc/periodic/daily \
 		etc/periodic/hourly \
 		etc/periodic/monthly \
 		etc/periodic/weekly \
+		etc/profile.d \
 		etc/sysctl.d \
 		home \
 		lib/firmware \
@@ -81,22 +82,30 @@ package() {
 		media/usb \
 		mnt \
 		proc \
+		run \
 		sbin \
+		srv \
 		sys \
 		usr/bin \
-		usr/sbin \
 		usr/local/bin \
 		usr/local/lib \
 		usr/local/share \
+		usr/sbin \
 		usr/share \
+		usr/share/man \
+		usr/share/misc \
+		var/cache \
 		var/cache/misc \
 		var/empty \
+		var/lib \
 		var/lib/misc \
+		var/local \
 		var/lock/subsys \
 		var/log \
+		var/opt \
 		var/run \
+		var/spool \
 		var/spool/cron \
-		run \
 		|| return 1
 
 	install -d -m 0700 "$pkgdir"/root || return 1
