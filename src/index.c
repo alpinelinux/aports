@@ -82,9 +82,9 @@ static int index_read_file(struct apk_database *db, struct index_ctx *ictx)
 	if (ictx->index == NULL)
 		return 0;
 	if (apk_fileinfo_get(AT_FDCWD, ictx->index, APK_CHECKSUM_NONE, &fi) < 0)
-		return -EIO;
-	ictx->index_mtime = fi.mtime;
+		return 0;
 
+	ictx->index_mtime = fi.mtime;
 	return apk_db_index_read_file(db, ictx->index, 0);
 }
 
