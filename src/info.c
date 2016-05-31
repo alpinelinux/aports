@@ -95,13 +95,19 @@ static void info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 	struct apk_dependency dep;
 	struct apk_ostream *os;
 	const char *via;
-	char **parg, buf[PATH_MAX];
+	char **parg, fnbuf[PATH_MAX], buf[PATH_MAX];
+	apk_blob_t fn;
 	ssize_t r;
 
 	apk_dependency_array_init(&deps);
 	foreach_array_item(parg, args) {
+		if (*parg[0] != '/' && realpath(*parg, fnbuf))
+			fn = APK_BLOB_STR(fnbuf);
+		else
+			fn = APK_BLOB_STR(*parg);
+
 		via = "";
-		pkg = apk_db_get_file_owner(db, APK_BLOB_STR(*parg));
+		pkg = apk_db_get_file_owner(db, fn);
 		if (pkg == NULL) {
 			r = readlinkat(db->root_fd, *parg, buf, sizeof(buf));
 			if (r > 0 && r < PATH_MAX && buf[0] == '/') {
@@ -111,7 +117,8 @@ static void info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 		}
 
 		if (pkg == NULL) {
-			apk_error("%s: Could not find owner package", *parg);
+			apk_error(BLOB_FMT ": Could not find owner package",
+				  BLOB_PRINTF(fn));
 			ctx->errors++;
 			continue;
 		}
@@ -124,8 +131,8 @@ static void info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 			};
 			apk_deps_add(&deps, &dep);
 		} else {
-			printf("%s %sis owned by " PKG_VER_FMT "\n",
-			       *parg, via, PKG_VER_PRINTF(pkg));
+			printf(BLOB_FMT " %sis owned by " PKG_VER_FMT "\n",
+			       BLOB_PRINTF(fn), via, PKG_VER_PRINTF(pkg));
 		}
 	}
 	if (apk_verbosity < 1 && deps->num != 0) {
