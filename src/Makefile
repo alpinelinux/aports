@@ -1,6 +1,13 @@
-PKGDEPS := openssl zlib
 PKG_CONFIG ?= pkg-config
 LUAAPK ?= yes
+
+OPENSSL_CFLAGS		:= $(shell $(PKG_CONFIG) --cflags openssl)
+OPENSSL_LIBS		:= $(shell $(PKG_CONFIG) --libs openssl)
+
+ZLIB_CFLAGS		:= $(shell $(PKG_CONFIG) --cflags zlib)
+ZLIB_LIBS		:= $(shell $(PKG_CONFIG) --libs zlib)
+
+FETCH_LIBS		:= /usr/lib/libfetch.a
 
 # lua module
 ifneq ($(LUAAPK),)
@@ -15,10 +22,6 @@ CFLAGS_lua-apk.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\" \
 LUA_LIB-y		:= $(obj)/apk.so
 install-LUA_LIB-y	:= $(INSTALLDIR) $(DESTDIR)$(LUA_LIBDIR) && \
 			   $(INSTALL) $(LUA_LIB-y) $(DESTDIR)$(LUA_LIBDIR)
-endif
-
-ifeq ($(shell $(PKG_CONFIG) --print-errors --exists $(PKGDEPS) || echo fail),fail)
-$(error Build dependencies are not met)
 endif
 
 progs-y			+= apk
@@ -65,10 +68,9 @@ LIBS_apk.static		:= -Wl,--as-needed -ldl -Wl,--no-as-needed
 LDFLAGS_apk		+= -L$(obj)
 LDFLAGS_apk-test	+= -L$(obj)
 
-CFLAGS_ALL		+= $(shell $(PKG_CONFIG) --cflags $(PKGDEPS))
-LIBS			:=  /usr/lib/libfetch.a \
-			   -Wl,--as-needed \
-				$(shell $(PKG_CONFIG) --libs $(PKGDEPS)) \
+CFLAGS_ALL		+= $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS)
+LIBS			:= -Wl,--as-needed \
+				$(FETCH_LIBS) $(OPENSSL_LIBS) $(ZLIB_LIBS) \
 			   -Wl,--no-as-needed
 
 $(obj)/apk: $(LIBAPK-y)
