@@ -38,6 +38,7 @@ struct info_ctx {
 #define APK_INFO_INSTALL_IF	0x100
 #define APK_INFO_RINSTALL_IF	0x200
 #define APK_INFO_REPLACES	0x400
+#define APK_INFO_LICENSE	0x800
 
 static void verbose_print_pkg(struct apk_package *pkg, int minimal_verbosity)
 {
@@ -164,6 +165,16 @@ static void info_print_url(struct apk_database *db, struct apk_package *pkg)
 		printf(PKG_VER_FMT " webpage:\n%s\n",
 		       PKG_VER_PRINTF(pkg),
 		       pkg->url);
+}
+
+static void info_print_license(struct apk_database *db, struct apk_package *pkg)
+{
+	if (apk_verbosity > 1)
+		printf("%s: " BLOB_FMT , pkg->name->name, BLOB_PRINTF(*pkg->license));
+	else
+		printf(PKG_VER_FMT " license:\n" BLOB_FMT "\n",
+		       PKG_VER_PRINTF(pkg),
+		       BLOB_PRINTF(*pkg->license));
 }
 
 static void info_print_size(struct apk_database *db, struct apk_package *pkg)
@@ -318,6 +329,7 @@ static void info_subaction(struct info_ctx *ctx, struct apk_package *pkg)
 		info_print_install_if,
 		info_print_rinstall_if,
 		info_print_replaces,
+		info_print_license,
 	};
 	const int requireipkg =
 		APK_INFO_CONTENTS | APK_INFO_TRIGGERS | APK_INFO_RDEPENDS |
@@ -397,6 +409,9 @@ static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int op
 	case 0x10000:
 		ctx->subaction_mask |= APK_INFO_REPLACES;
 		break;
+	case 0x10001:
+		ctx->subaction_mask |= APK_INFO_LICENSE;
+		break;
 	case 'a':
 		ctx->subaction_mask = 0xffffffff;
 		break;
@@ -443,6 +458,7 @@ static const struct apk_option options_applet[] = {
 	{ 'w', "webpage",	"Show URL for more information about PACKAGE" },
 	{ 's', "size",		"Show installed size of PACKAGE" },
 	{ 'd', "description",	"Print description for PACKAGE" },
+	{ 0x10001, "license",	"Print license for PACKAGE" },
 	{ 't', "triggers",	"Print active triggers of PACKAGE" },
 	{ 'a', "all",		"Print all information about PACKAGE" },
 };
