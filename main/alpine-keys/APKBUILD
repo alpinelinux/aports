@@ -1,11 +1,11 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-keys
 pkgver=1.1
-pkgrel=0
+pkgrel=1
 pkgdesc="Public keys for Alpine Linux packages"
 url="http://alpinelinux.org"
 arch="noarch"
-license="GPL"
+license="MIT"
 depends=""
 makedepends=""
 install=""
