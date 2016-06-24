@@ -1,0 +1,195 @@
+From 9a5ccbd7b599c75b3a95c52bf128e362c0ae9e45 Mon Sep 17 00:00:00 2001
+From: Ian Jackson <ian.jackson@eu.citrix.com>
+Date: Mon, 16 May 2016 16:44:31 +0100
+Subject: [PATCH 01/10] libxl: Record backend/frontend paths in /libxl/$DOMID
+
+This gives us a record of all the backends we have set up for a
+domain, which is separate from the frontends in
+  /local/domain/$DOMID/device.
+
+In particular:
+
+1. A guest has write permission for the frontend path:
+  /local/domain/$DOMID/device/$KIND/$DEVID
+which means that the guest can completely delete the frontend.
+(They can't recreate it because they don't have write permission
+on the containing directory.)
+
+2. A guest has write permission for the backend path recorded in the
+frontend, ie, it can write to
+  /local/domain/$DOMID/device/$KIND/$DEVID/backend
+which means that the guest can break the association between
+frontend and backend.
+
+So we can't rely on iterating over the frontends to find all the
+backends, or examining a frontend to discover how a device is
+configured.
+
+So, have libxl__device_generic_add record the frontend and backend
+paths in /libxl/$DOMID/device, and have libxl__device_destroy remove
+them again.
+
+Create the containing directory /libxl/GUEST/device in
+libxl__domain_make.  The already existing xs_rm in devices_destroy_cb
+will take care of removing it.
+
+This is part of XSA-175.
+
+Backport note: Backported over 7472ced, which fixes a bug in driver
+domain teardown.
+
+Signed-off-by: Ian Jackson <Ian.Jackson@eu.citrix.com>
+Reviewed-by: Wei Liu <wei.liu2@citrix.com>
+---
+v2: Correct actual path computation (!)
+v3: Correct actual path computation - really this time (!)
+---
+ docs/misc/xenstore-paths.markdown | 15 +++++++++++++++
+ tools/libxl/libxl_create.c        |  2 ++
+ tools/libxl/libxl_device.c        | 34 +++++++++++++++++++++++++++++++++-
+ tools/libxl/libxl_internal.h      |  1 +
+ 4 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/docs/misc/xenstore-paths.markdown b/docs/misc/xenstore-paths.markdown
+index 70ab7f4..e018b55 100644
+--- a/docs/misc/xenstore-paths.markdown
++++ b/docs/misc/xenstore-paths.markdown
+@@ -381,6 +381,21 @@ The guest's virtual time offset from UTC in seconds.
+ 
+ ### libxl Specific Paths
+ 
++#### /libxl/$DOMID/device/$KIND/$DEVID
++
++Created by libxl for every frontend/backend pair created for $DOMID.
++Used by libxl for enumeration and management of the device.
++
++#### /libxl/$DOMID/device/$KIND/$DEVID/frontend
++
++Path in xenstore to the frontend, normally
++/local/domain/$DOMID/device/$KIND/$DEVID
++
++#### /libxl/$DOMID/device/$KIND/$DEVID/backend
++
++Path in xenstore to the backend, normally
++/local/domain/$BACKEND_DOMID/backend/$KIND/$DOMID/$DEVID
++
+ #### /libxl/$DOMID/dm-version ("qemu\_xen"|"qemu\_xen\_traditional") = [n,INTERNAL]
+ 
+ The device model version for a domain.
+diff --git a/tools/libxl/libxl_create.c b/tools/libxl/libxl_create.c
+index 5292c15..0e26666 100644
+--- a/tools/libxl/libxl_create.c
++++ b/tools/libxl/libxl_create.c
+@@ -528,6 +528,8 @@ retry_transaction:
+ 
+     xs_rm(ctx->xsh, t, libxl_path);
+     libxl__xs_mkdir(gc, t, libxl_path, noperm, ARRAY_SIZE(noperm));
++    libxl__xs_mkdir(gc, t, GCSPRINTF("%s/device", libxl_path),
++                    noperm, ARRAY_SIZE(noperm));
+ 
+     xs_write(ctx->xsh, t, libxl__sprintf(gc, "%s/vm", dom_path), vm_path, strlen(vm_path));
+     rc = libxl__domain_rename(gc, *domid, 0, info->name, t);
+diff --git a/tools/libxl/libxl_device.c b/tools/libxl/libxl_device.c
+index 29ed547..e9d2424 100644
+--- a/tools/libxl/libxl_device.c
++++ b/tools/libxl/libxl_device.c
+@@ -40,6 +40,15 @@ char *libxl__device_backend_path(libxl__gc *gc, libxl__device *device)
+                      device->domid, device->devid);
+ }
+ 
++char *libxl__device_libxl_path(libxl__gc *gc, libxl__device *device)
++{
++    char *libxl_dom_path = libxl__xs_libxl_path(gc, device->domid);
++
++    return GCSPRINTF("%s/device/%s/%d", libxl_dom_path,
++                     libxl__device_kind_to_string(device->kind),
++                     device->devid);
++}
++
+ int libxl__parse_backend_path(libxl__gc *gc,
+                               const char *path,
+                               libxl__device *dev)
+@@ -87,14 +96,16 @@ int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
+         libxl__device *device, char **bents, char **fents, char **ro_fents)
+ {
+     libxl_ctx *ctx = libxl__gc_owner(gc);
+-    char *frontend_path, *backend_path;
++    char *frontend_path, *backend_path, *libxl_path;
+     struct xs_permissions frontend_perms[2];
+     struct xs_permissions ro_frontend_perms[2];
+     struct xs_permissions backend_perms[2];
+     int create_transaction = t == XBT_NULL;
++    int rc;
+ 
+     frontend_path = libxl__device_frontend_path(gc, device);
+     backend_path = libxl__device_backend_path(gc, device);
++    libxl_path = libxl__device_libxl_path(gc, device);
+ 
+     frontend_perms[0].id = device->domid;
+     frontend_perms[0].perms = XS_PERM_NONE;
+@@ -109,8 +120,22 @@ int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
+ retry_transaction:
+     if (create_transaction)
+         t = xs_transaction_start(ctx->xsh);
++
+     /* FIXME: read frontend_path and check state before removing stuff */
+ 
++    rc = libxl__xs_rm_checked(gc, t, libxl_path);
++    if (rc) goto out;
++
++    rc = libxl__xs_write_checked(gc, t, GCSPRINTF("%s/frontend",libxl_path),
++                                 frontend_path);
++    if (rc) goto out;
++
++    rc = libxl__xs_write_checked(gc, t, GCSPRINTF("%s/backend",libxl_path),
++                                 backend_path);
++    if (rc) goto out;
++
++    /* xxx much of this function lacks error checks! */
++
+     if (fents || ro_fents) {
+         xs_rm(ctx->xsh, t, frontend_path);
+         xs_mkdir(ctx->xsh, t, frontend_path);
+@@ -156,6 +181,11 @@ retry_transaction:
+         }
+     }
+     return 0;
++
++ out:
++    if (create_transaction && t)
++        libxl__xs_transaction_abort(gc, &t);
++    return rc;
+ }
+ 
+ typedef struct {
+@@ -552,6 +582,7 @@ int libxl__device_destroy(libxl__gc *gc, libxl__device *dev)
+ {
+     const char *be_path = libxl__device_backend_path(gc, dev);
+     const char *fe_path = libxl__device_frontend_path(gc, dev);
++    const char *libxl_path = libxl__device_libxl_path(gc, dev);
+     const char *tapdisk_path = GCSPRINTF("%s/%s", be_path, "tapdisk-params");
+     const char *tapdisk_params;
+     xs_transaction_t t = 0;
+@@ -576,6 +607,7 @@ int libxl__device_destroy(libxl__gc *gc, libxl__device *dev)
+              */
+             libxl__xs_path_cleanup(gc, t, fe_path);
+             libxl__xs_path_cleanup(gc, t, be_path);
++            libxl__xs_path_cleanup(gc, t, libxl_path);
+         } else if (dev->backend_domid == domid) {
+             /*
+              * The driver domain is in charge for removing what it can
+diff --git a/tools/libxl/libxl_internal.h b/tools/libxl/libxl_internal.h
+index f6d469b..801e95d 100644
+--- a/tools/libxl/libxl_internal.h
++++ b/tools/libxl/libxl_internal.h
+@@ -968,6 +968,7 @@ _hidden int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
+         libxl__device *device, char **bents, char **fents, char **ro_fents);
+ _hidden char *libxl__device_backend_path(libxl__gc *gc, libxl__device *device);
+ _hidden char *libxl__device_frontend_path(libxl__gc *gc, libxl__device *device);
++_hidden char *libxl__device_libxl_path(libxl__gc *gc, libxl__device *device);
+ _hidden int libxl__parse_backend_path(libxl__gc *gc, const char *path,
+                                       libxl__device *dev);
+ _hidden int libxl__device_destroy(libxl__gc *gc, libxl__device *dev);
+-- 
+2.1.4
+

@@ -1,0 +1,104 @@
+From d84e538d96525f75fc0aa7d0ebe3cd194186d0d4 Mon Sep 17 00:00:00 2001
+From: Ian Jackson <ian.jackson@eu.citrix.com>
+Date: Wed, 27 Apr 2016 16:08:49 +0100
+Subject: [PATCH 05/10] libxl: Do not trust frontend for disk eject event
+
+Use the /libxl path for interpreting disk eject watch events: do not
+read the backend path out of the frontend.  Instead, use the version
+in /libxl.  That avoids us relying on the guest-modifiable
+$frontend/backend pointer.
+
+To implement this we store the path
+  /libxl/$guest/device/vbd/$devid/backend
+in the evgen structure.
+
+This is part of XSA-175.
+
+Signed-off-by: Ian Jackson <Ian.Jackson@eu.citrix.com>
+Reviewed-by: Wei Liu <wei.liu2@citrix.com>
+---
+ tools/libxl/libxl.c          | 28 ++++++++++++++++++++++------
+ tools/libxl/libxl_internal.h |  2 +-
+ 2 files changed, 23 insertions(+), 7 deletions(-)
+
+diff --git a/tools/libxl/libxl.c b/tools/libxl/libxl.c
+index b52e63e..f101334 100644
+--- a/tools/libxl/libxl.c
++++ b/tools/libxl/libxl.c
+@@ -1141,9 +1141,10 @@ static void disk_eject_xswatch_callback(libxl__egc *egc, libxl__ev_xswatch *w,
+                                         const char *wpath, const char *epath) {
+     EGC_GC;
+     libxl_evgen_disk_eject *evg = (void*)w;
+-    char *backend;
++    const char *backend;
+     char *value;
+     char backend_type[BACKEND_STRING_SIZE+1];
++    int rc;
+ 
+     value = libxl__xs_read(gc, XBT_NULL, wpath);
+ 
+@@ -1159,9 +1160,16 @@ static void disk_eject_xswatch_callback(libxl__egc *egc, libxl__ev_xswatch *w,
+     libxl_event *ev = NEW_EVENT(egc, DISK_EJECT, evg->domid, evg->user);
+     libxl_device_disk *disk = &ev->u.disk_eject.disk;
+     
+-    backend = libxl__xs_read(gc, XBT_NULL,
+-                             libxl__sprintf(gc, "%.*s/backend",
+-                                            (int)strlen(wpath)-6, wpath));
++    rc = libxl__xs_read_checked(gc, XBT_NULL, evg->be_ptr_path, &backend);
++    if (rc) {
++        LIBXL__EVENT_DISASTER(egc, "xs_read failed reading be_ptr_path",
++                              errno, LIBXL_EVENT_TYPE_DISK_EJECT);
++        return;
++    }
++    if (!backend) {
++        /* device has been removed, not simply ejected */
++        return;
++    }
+ 
+     sscanf(backend,
+             "/local/domain/%d/backend/%" TOSTRING(BACKEND_STRING_SIZE)
+@@ -1210,11 +1218,18 @@ int libxl_evenable_disk_eject(libxl_ctx *ctx, uint32_t guest_domid,
+     if (!domid)
+         domid = guest_domid;
+ 
+-    path = libxl__sprintf(gc, "%s/device/vbd/%d/eject",
++    int devid = libxl__device_disk_dev_number(vdev, NULL, NULL);
++
++    path = GCSPRINTF("%s/device/vbd/%d/eject",
+                  libxl__xs_get_dompath(gc, domid),
+-                 libxl__device_disk_dev_number(vdev, NULL, NULL));
++                 devid);
+     if (!path) { rc = ERROR_NOMEM; goto out; }
+ 
++    const char *libxl_path = GCSPRINTF("%s/device/vbd/%d",
++                                 libxl__xs_libxl_path(gc, domid),
++                                 devid);
++    evg->be_ptr_path = libxl__sprintf(NOGC, "%s/backend", libxl_path);
++
+     rc = libxl__ev_xswatch_register(gc, &evg->watch,
+                                     disk_eject_xswatch_callback, path);
+     if (rc) goto out;
+@@ -1241,6 +1256,7 @@ void libxl__evdisable_disk_eject(libxl__gc *gc, libxl_evgen_disk_eject *evg) {
+         libxl__ev_xswatch_deregister(gc, &evg->watch);
+ 
+     free(evg->vdev);
++    free(evg->be_ptr_path);
+     free(evg);
+ 
+     CTX_UNLOCK;
+diff --git a/tools/libxl/libxl_internal.h b/tools/libxl/libxl_internal.h
+index 3fc9997..8128e76 100644
+--- a/tools/libxl/libxl_internal.h
++++ b/tools/libxl/libxl_internal.h
+@@ -257,7 +257,7 @@ struct libxl__evgen_disk_eject {
+     uint32_t domid;
+     LIBXL_LIST_ENTRY(libxl_evgen_disk_eject) entry;
+     libxl_ev_user user;
+-    char *vdev;
++    char *vdev, *be_ptr_path;
+ };
+ _hidden void
+ libxl__evdisable_disk_eject(libxl__gc*, libxl_evgen_disk_eject*);
+-- 
+2.1.4
+
