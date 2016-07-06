@@ -7,7 +7,7 @@ OPENSSL_LIBS		:= $(shell $(PKG_CONFIG) --libs openssl)
 ZLIB_CFLAGS		:= $(shell $(PKG_CONFIG) --cflags zlib)
 ZLIB_LIBS		:= $(shell $(PKG_CONFIG) --libs zlib)
 
-FETCH_LIBS		:= /usr/lib/libfetch.a
+FETCH_LIBS		:= $(shell $(CC) -print-file-name=libfetch.a)
 
 # lua module
 ifneq ($(LUAAPK),)
