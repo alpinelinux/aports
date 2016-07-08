@@ -93,9 +93,10 @@ extern char **apk_argv;
 #define APK_DEFAULT_ARCH	"armhf"
 #elif defined(__arm__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define APK_DEFAULT_ARCH	"armel"
+#elif defined(__aarch64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define APK_DEFAULT_ARCH	"aarch64"
 #else
-#warning APK_DEFAULT_ARCH is not set for this architecture
-#define APK_DEFAULT_ARCH        "noarch"
+#error APK_DEFAULT_ARCH not detected for this architecture
 #endif
 
 #define APK_MAX_REPOS		32	/* see struct apk_package */
