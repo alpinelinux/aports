@@ -23,3 +23,10 @@ BeagleBoard
 - Install u-boot with:
   cp am335x_boneblack/{MLO,u-boot.img} /media/mmcblk0p1/
 
+Sunxi (Cubie* etc)
+------------------
+
+- ROM loads boot loader from SD-CARD sectors at fixed address
+- Install u-boot with:
+    sudo dd if=<board>/u-boot-sunxi-with-spl.bin of=/dev/sda bs=1024 seek=8
+
