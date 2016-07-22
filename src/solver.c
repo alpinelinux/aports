@@ -482,6 +482,7 @@ static int compare_providers(struct apk_solver_state *ss,
 	unsigned int solver_flags;
 	int r;
 
+
 	/* Prefer existing package */
 	if (pkgA == NULL || pkgB == NULL)
 		return (pkgA != NULL) - (pkgB != NULL);
@@ -521,7 +522,7 @@ static int compare_providers(struct apk_solver_state *ss,
 			return r;
 
 		/* Prefer installed on self-upgrade */
-		if (db->performing_self_update && !(solver_flags & APK_SOLVERF_UPGRADE)) {
+		if (db->performing_self_upgrade && !(solver_flags & APK_SOLVERF_UPGRADE)) {
 			r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
 			if (r)
 				return r;
@@ -631,8 +632,8 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 
 	if (name->ss.requirers || name->ss.has_iif) {
 		foreach_array_item(p, name->providers) {
-			dbg_printf("  consider "PKG_VER_FMT" iif_triggered=%d, tag_ok=%d\n",
-				PKG_VER_PRINTF(p->pkg), p->pkg->ss.iif_triggered, p->pkg->ss.tag_ok);
+			dbg_printf("  consider "PKG_VER_FMT" iif_triggered=%d, tag_ok=%d, selectable=%d\n",
+				PKG_VER_PRINTF(p->pkg), p->pkg->ss.iif_triggered, p->pkg->ss.tag_ok, p->pkg->ss.pkg_selectable);
 			/* Ensure valid pinning and install-if trigger */
 			if (name->ss.requirers == 0 &&
 			    (!p->pkg->ss.iif_triggered ||
@@ -979,7 +980,7 @@ restart:
 			pkg = name->ss.chosen.pkg;
 			if (pkg == NULL || pkg->ss.error) {
 				d->broken = 1;
-				dbg_printf("disabling broken world dep: %s", name->name);
+				dbg_printf("disabling broken world dep: %s\n", name->name);
 			}
 		}
 		apk_hash_foreach(&db->available.names, free_name, NULL);

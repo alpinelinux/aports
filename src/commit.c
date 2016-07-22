@@ -309,7 +309,7 @@ all_done:
 	apk_dependency_array_copy(&db->world, world);
 	apk_db_write_config(db);
 
-	if (!db->performing_self_update) {
+	if (!db->performing_self_upgrade) {
 		if (errors)
 			snprintf(buf, sizeof(buf), "%d errors;", errors);
 		else

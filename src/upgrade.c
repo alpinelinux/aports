@@ -21,6 +21,7 @@
 struct upgrade_ctx {
 	unsigned short solver_flags;
 	int no_self_upgrade : 1;
+	int self_upgrade_only : 1;
 };
 
 static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
@@ -30,6 +31,9 @@ static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int opt
 	switch (optch) {
 	case 0x10000:
 		uctx->no_self_upgrade = 1;
+		break;
+	case 0x10001:
+		uctx->self_upgrade_only = 1;
 		break;
 	case 'a':
 		uctx->solver_flags |= APK_SOLVERF_AVAILABLE;
@@ -54,6 +58,7 @@ static const struct apk_option options_applet[] = {
 	  "print error if it cannot be installed due to other dependencies" },
 	{ 0x10000, "no-self-upgrade",
 	  "Do not do early upgrade of 'apk-tools' package" },
+	{ 0x10001, "self-upgrade-only", "Only do self-upgrade" },
 };
 
 static const struct apk_option_group optgroup_applet = {
@@ -63,32 +68,56 @@ static const struct apk_option_group optgroup_applet = {
 	.parse = option_parse_applet,
 };
 
-int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
+int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags, unsigned int self_upgrade_only)
 {
 	struct apk_name *name;
+	struct apk_package *pkg;
+	struct apk_provider *p0;
 	struct apk_changeset changeset = {};
 	int r;
 
 	name = apk_db_get_name(db, APK_BLOB_STR("apk-tools"));
+
+	/* First check if new version is even available */
+	r = 0;
+	pkg = apk_pkg_get_installed(name);
+	if (!pkg) goto ret;
+
+	foreach_array_item(p0, name->providers) {
+		struct apk_package *pkg0 = p0->pkg;
+		if (pkg0->name != name || pkg0->repos == 0)
+			continue;
+		if (apk_version_compare_blob(*pkg0->version, *pkg->version) == APK_VERSION_GREATER) {
+			r = 1;
+			break;
+		}
+	}
+
+	if (r == 0) goto ret;
+
+	/* Create new commit upgrading apk-tools only with minimal other changes */
+	db->performing_self_upgrade = 1;
 	apk_solver_set_name_flags(name, solver_flags, 0);
-	db->performing_self_update = 1;
 
 	r = apk_solver_solve(db, 0, db->world, &changeset);
 	if (r != 0) {
-		apk_solver_print_errors(db, &changeset, db->world);
+		apk_warning("Failed to perform initial self-upgrade, continuing with full upgrade.");
+		r = 0;
 		goto ret;
 	}
 
 	if (changeset.num_total_changes == 0)
 		goto ret;
 
-	if (apk_flags & APK_SIMULATE) {
+	if (!self_upgrade_only && apk_flags & APK_SIMULATE) {
 		apk_warning("This simulation is not reliable as apk-tools upgrade is available.");
 		goto ret;
 	}
 
 	apk_message("Upgrading critical system libraries and apk-tools:");
 	apk_solver_commit_changeset(db, &changeset, db->world);
+	if (self_upgrade_only) goto ret;
+
 	apk_db_close(db);
 
 	apk_message("Continuing the upgrade transaction with new apk-tools:");
@@ -102,8 +131,7 @@ int apk_do_self_upgrade(struct apk_database *db, unsigned short solver_flags)
 
 ret:
 	apk_change_array_free(&changeset.changes);
-	db->performing_self_update = 0;
-
+	db->performing_self_upgrade = 0;
 	return r;
 }
 
@@ -113,7 +141,7 @@ static int upgrade_main(void *ctx, struct apk_database *db, struct apk_string_ar
 	unsigned short solver_flags;
 	struct apk_dependency *dep;
 	struct apk_dependency_array *world = NULL;
-	int r;
+	int r = 0;
 
 	if (apk_db_check_world(db, db->world) != 0) {
 		apk_error("Not continuing with upgrade due to missing repository tags. Use --force to override.");
@@ -122,10 +150,12 @@ static int upgrade_main(void *ctx, struct apk_database *db, struct apk_string_ar
 
 	solver_flags = APK_SOLVERF_UPGRADE | uctx->solver_flags;
 	if (!uctx->no_self_upgrade) {
-		r = apk_do_self_upgrade(db, solver_flags);
+		r = apk_do_self_upgrade(db, solver_flags, uctx->self_upgrade_only);
 		if (r != 0)
 			return r;
 	}
+	if (uctx->self_upgrade_only)
+		return 0;
 
 	if (solver_flags & APK_SOLVERF_AVAILABLE) {
 		apk_dependency_array_copy(&world, db->world);
