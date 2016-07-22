@@ -282,11 +282,6 @@ static const luaL_Reg reg_apk_methods[] = {
 	{NULL,		NULL}
 };
 
-static const luaL_Reg reg_apk_db_meta_methods[] = {
-	{"__gc",	Papk_db_close},
-	{NULL, NULL}
-};
-
 static int db_create_meta(lua_State *L)
 {
 	luaL_newmetatable(L, APK_DB_META);
