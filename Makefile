@@ -6,7 +6,6 @@ prefix		?= /usr
 bindir		?= $(prefix)/bin
 sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
-abuildrepo	?= ~/.cache/abuild
 
 SCRIPTS		:= abuild abuild-keygen abuild-sign newapkbuild \
 		   abump apkgrel buildlab apkbuild-cpan checkapk \
@@ -35,7 +34,6 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@prefix@:$(prefix):g' \
 			-e 's:@sysconfdir@:$(sysconfdir):g' \
 			-e 's:@datadir@:$(datadir):g' \
-			-e 's:@abuildrepo@:$(abuildrepo):g'
 
 SSL_CFLAGS	?= $(shell pkg-config --cflags openssl)
 SSL_LDFLAGS	?= $(shell pkg-config --cflags openssl)
