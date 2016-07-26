@@ -456,25 +456,17 @@ subpkg_set() {
 	fi
 }
 
-listpkgnames() {
-	local i
-	for i in $pkgname $subpackages; do
-		echo ${i%%:*}
-	done
-	for i in $linguas; do
-		echo $pkgname-lang-$i
-	done
-}
-
 cleanpkg() {
 	local i
 	getpkgver || return 1
 	msg "Cleaning built packages..."
-	for i in $(listpkgnames); do
-		local p="${i%%:*}-$pkgver-r$pkgrel"
-		rm -f	"$REPODEST/$repo/$CARCH/$p.apk" \
-			"$REPODEST/$repo/src/$p.src.tar.gz"
+	rm -f "$REPODEST/$repo/src/$pkgname-$pkgver-r$pkgrel.src.tar.gz"
+	for i in $allpackages; do
+		subpkg_set "$i"
+		rm -f "$REPODEST/$repo/$subpkgarch/$subpkgname-$pkgver-r$pkgrel.apk"
 	done
+	subpkg_unset
+
 	# remove given packages from index
 	update_abuildrepo_index
 }
@@ -484,14 +476,15 @@ cleanoldpkg() {
 	local i j
 	getpkgver || return 1
 	msg "Cleaning all packages except $pkgver-r$pkgrel..."
-	for i in $(listpkgnames); do
-		local pn=${i%%:*}
-		for j in "$REPODEST"/$repo/*/$pn-[0-9]*.apk ; do
-			[ "${j##*/}" = "$pn-$pkgver-r$pkgrel.apk" ] \
+	for i in $allpackages; do
+		subpkg_set "$i"
+		for j in "$REPODEST"/$repo/*/$subpkgname-[0-9]*.apk ; do
+			[ "${j##*/}" = "$subpkgname-$pkgver-r$pkgrel.apk" ] \
 				&& continue
 			rm -f "$j"
 		done
 	done
+	subpkg_unset
 	update_abuildrepo_index
 	return 0
 }
@@ -738,6 +731,7 @@ lang_subpkg() {
 }
 
 prepare_language_packs() {
+	local lang
 	for lang in $linguas; do
 		lang="$lang" \
 		subpkgname="$pkgname-lang-$lang" \
@@ -1319,6 +1313,7 @@ create_apks() {
 		local apk=$name-$ver.apk
 		local datadir="$pkgbasedir"/$name
 		local subpkgname=$name
+		local subpkgarch=$(pkginfo_val arch $file)
 
 		trace_apk_deps "$name" "$dir" || return 1
 		msg "Package size: ${size}"
@@ -1345,9 +1340,8 @@ create_apks() {
 		abuild-sign -q control.tar.gz || exit 1
 
 		msg "Create $apk"
-		# create the final apk
-		mkdir -p "$REPODEST"/$repo/$CARCH
-		cat control.tar.gz data.tar.gz > "$REPODEST"/$repo/$CARCH/$apk
+		mkdir -p "$REPODEST"/$repo/${subpkgarch/noarch/$CARCH}
+		cat control.tar.gz data.tar.gz > "$REPODEST"/$repo/${subpkgarch/noarch/$CARCH}/$apk
 		)
 	done
 }
@@ -1371,23 +1365,38 @@ build_abuildrepo() {
 }
 
 update_abuildrepo_index() {
-	cd "$REPODEST/$repo"
-	local index=$CARCH/APKINDEX.tar.gz
+	local i allarch=""
+	for i in $allpackages; do
+		subpkg_set "$i"
+		##NOARCH: These packages are really in $CARCH and do not need their
+		# own repository. --rewrite-arch is used below to make sure the index
+		# thinks they are for $CARCH and apk-tools will fetch them from
+		# correct URL path. Remainder of the script uses ${subpkgarch/noarch/$CARCH}
+		# when expanding to the target repository path.
+		[ "$subpkgarch" = "noarch" ] && subpkgarch="$CARCH"
+		list_has "$subpkgarch" "$allarch" || allarch="$allarch $subpkgarch"
+	done
+	subpkg_unset
 
-	msg "Updating the cached abuild repository index..."
-	local sign=".SIGN.RSA.${SIGN_PUBLIC_KEY##*/}"
-	local oldindex=
-	if [ -f "$index" ]; then
-		oldindex="--index $index"
-	fi
-	$APK index --quiet $oldindex --output "$index".unsigned \
-		--description "$repo $(cd $startdir && git describe)" \
-		--rewrite-arch $CARCH \
-		$CARCH/*.apk || exit 1
-	msg "Signing the index..."
-	abuild-sign -q "$index".unsigned || exit 1
-	mv "$index".unsigned "$index"
-	chmod 644 "$index"
+	for i in $allarch; do
+		cd "$REPODEST/$repo/$i"
+		local index=$i/APKINDEX.tar.gz
+
+		msg "Updating the $repo/$i repository index..."
+		local sign=".SIGN.RSA.${SIGN_PUBLIC_KEY##*/}"
+		local oldindex=
+		if [ -f APKINDEX.tar.gz ]; then
+			oldindex="--index APKINDEX.tar.gz"
+		fi
+		( $APK index --quiet $oldindex --output APKINDEX.tar.gz.$$ \
+			--description "$repo $(cd $startdir && git describe)" \
+			--rewrite-arch $i *.apk && \
+		  msg "Signing the index..." && \
+		  abuild-sign -q APKINDEX.tar.gz.$$ && \
+		  chmod 644 APKINDEX.tar.gz.$$ && \
+		  mv APKINDEX.tar.gz.$$ APKINDEX.tar.gz \
+		) || (rm -f APKINDEX.tar.gz.$$ ; die "Failed to create index")
+	done
 }
 
 # predefined splitfunc doc
@@ -1614,22 +1623,26 @@ check_libc() {
 # check if package is up to date
 apk_up2date() {
 	getpkgver || return 1
-	local pkg="$REPODEST/$repo/$CARCH/$pkgname-$pkgver-r$pkgrel.apk"
+
 	local i s
-	cd "$startdir"
-	for i in $pkgname $subpackages; do
-		[ -f "$REPODEST/$repo/$CARCH/${i%:*}-$pkgver-r$pkgrel.apk" ] || return 1
+	for i in $allpackages; do
+		subpkg_set "$i"
+		if [ ! -f "$REPODEST/$repo/${subpkgarch/noarch/$CARCH}/$subpkgname-$pkgver-r$pkgrel.apk" ]; then
+			subpkg_unset
+			return 1
+		fi
 	done
+	subpkg_unset
 	[ -n "$keep" ] && return 0
 
+	cd "$startdir"
 	for i in $source APKBUILD; do
-		local s
 		if is_remote "$i"; then
 			s="$SRCDEST/$(filename_from_uri $i)"
 		else
 			s="$startdir/${i##*/}"
 		fi
-		if [ "$s" -nt "$pkg" ]; then
+		if [ "$s" -nt "$REPODEST/$repo/$pkgarch/$pkgname-$pkgver-r$pkgrel.apk" ]; then
 			return 1
 		fi
 	done
@@ -1639,19 +1652,21 @@ apk_up2date() {
 abuildindex_up2date() {
 	local i
 	getpkgver || return 1
-	local dir="$REPODEST"/$repo/$CARCH
-	local apk="${pkgname%%:*}-$pkgver-r$pkgrel.apk"
-	local idx="$dir"/APKINDEX.tar.gz
-	local file="$dir"/$apk
 
-	# check if index is missing
-	[ -f "$idx" ] || return 1
+	for i in $allpackages; do
+		subpkg_set "$i"
+		local dir="$REPODEST"/$repo/${subpkgarch/noarch/$CARCH}
+		local idx="$dir"/APKINDEX.tar.gz
+		local file="$dir"/$subpkgname-$pkgver-r$pkgrel.apk
 
-	# if link or file is missing, then we need update abuildrepo index
-	[ -f "$file" ] || return 1
-
-	# if file exists and is newer than index, then we need update index
-	[ "$file" -nt "$idx" ] && return 1
+		# if any file is missing or .apk is newer then index
+		# the index needs to be updated
+		if [ ! -f "$idx" -o ! -f "$file" -o "$file" -nt "$idx" ]; then
+			subpkg_unset
+			return 1
+		fi
+	done
+	subpkg_unset
 
 	return 0
 }
@@ -1916,9 +1931,11 @@ stripbin() {
 listpkg() {
 	local name
 	getpkgver || return 1
-	for name in $(listpkgnames) ; do
-		echo "$name-$pkgver-r$pkgrel.apk"
+	for name in $allpackages ; do
+		subpkg_set $name
+		echo "$subpkgname-$pkgver-r$pkgrel.apk"
 	done
+	subpkg_unset
 }
 
 source_has() {
@@ -2213,10 +2230,16 @@ if [ -n "$DEBUG" ] || subpackage_types_has "dbg"; then
 	options="$options !strip"
 fi
 
-# If we are handling a sub package then reset subpackages and install
 if [ -n "$subpkgname" ]; then
+	# If we are handling a sub package then reset subpackages and install
 	origsubpackages="$subpackages"
 	subpackages=
+else
+	local i
+	allpackages="$pkgname $subpackages"
+	for i in $linguas; do
+		allpackages="$allpackages $pkgname-lang-$i::noarch"
+	done
 fi
 apkbuild_arch="$arch"
 pkgdir="$pkgbasedir/$pkgname"
