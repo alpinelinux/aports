@@ -79,12 +79,7 @@ cleanup() {
 		deps)
 			if [ -z "$install_after" ] && [ -n "$uninstall_after" ]; then
 				msg "Uninstalling dependencies..."
-				$SUDO_APK del --quiet $apk_opt_wait $uninstall_after
-				if cross_compiling; then
-					$SUDO_APK del --root "$CBUILDROOT" \
-						--no-scripts --quiet $apk_opt_wait \
-						$uninstall_after
-				fi
+				undeps
 			fi
 			;;
 		esac
@@ -1758,33 +1753,41 @@ trace_makedepends() {
 	'
 }
 
-# build and install dependencies
-builddeps() {
-	local pkg= i= missing=
-	local hostdeps= builddeps= installed_hostdeps= installed_builddeps=
-	[ -n "$nodeps" ] && return 0
-	msg "Analyzing dependencies..."
+calcdeps() {
+	builddeps=
+	hostdeps=
 
-	# add depends unless it is a subpackage or package itself
 	if cross_compiling && [ -n "$makedepends_build" -o -n "$makedepends_host" ]; then
-		builddeps="$makedepends_build"
-		for i in $BUILD_BASE; do
-			[ "$pkgname" = "${i%%[<>=]*}" ] && continue
-			subpackages_has ${i%%[<>=]*} || builddeps="$builddeps $i"
+		for i in $1 $makedepends_build; do
+			list_has $i $hostdeps && continue
+			builddeps="$builddeps $i"
 		done
 		for i in $depends $makedepends_host; do
 			[ "$pkgname" = "${i%%[<>=]*}" ] && continue
+			list_has $i $hostdeps && continue
 			subpackages_has ${i%%[<>=]*} || hostdeps="$hostdeps $i"
 		done
 	else
-		for i in $BUILD_BASE $depends $makedepends; do
+		[ -z "$makedepends" ] && makedepends="$makedepends_build $makedepends_host"
+		for i in $1 $depends $makedepends; do
 			[ "$pkgname" = "${i%%[<>=]*}" ] && continue
+			list_has $i $builddeps && continue
 			subpackages_has ${i%%[<>=]*} || builddeps="$builddeps $i"
 		done
 	fi
+}
+
+# build and install dependencies
+builddeps() {
+	local pkg= i= missing=
+	local installed_hostdeps= installed_builddeps=
+	[ -n "$nodeps" ] && return 0
+
+	msg "Analyzing dependencies..."
+	calcdeps "$BUILD_BASE"
 
 	installed_builddeps=$($APK info --installed $builddeps)
-	[ -n "$hostdeps" ] && installed_hostdeps=$($APK info --root "$CBUILDROOT" --installed $hostdeps)
+	[ -n "$CBUILDROOT" -a -n "$hostdeps" ] && installed_hostdeps=$($APK info --root "$CBUILDROOT" --installed $hostdeps)
 
 	# find which deps are missing
 	for i in $builddeps; do
@@ -1819,27 +1822,17 @@ builddeps() {
 	if [ -n "$install_deps" ] && [ -z "$recursive" ]; then
 		# make a --simulate run first to detect missing deps
 		# apk-tools --virtual is no goot at reporting those.
-		$SUDO_APK add --repository "$REPODEST/$repo" $apk_opt_wait \
-			--simulate --quiet $builddeps || return 1
-		if cross_compiling; then
-			$SUDO_APK add --root "$CBUILDROOT" --repository "$REPODEST/$repo" $apk_opt_wait \
-				--simulate --quiet $hostdeps || return 1
-		fi
-
-		$SUDO_APK add --repository "$REPODEST/$repo" $apk_opt_wait \
-			--virtual .makedepends-$pkgname $builddeps || return 1
-		if cross_compiling; then
-			$SUDO_APK add --root "$CBUILDROOT" --repository "$REPODEST/$repo" $apk_opt_wait \
-				--no-scripts --virtual .makedepends-$pkgname $hostdeps || return 1
-		fi
+		deps "--quiet --simulate" || return 1
+		deps || return 1
 		return 0
 	fi
 
+	[ -z "$recursive" ] && return 1
+
 	if [ -n "$CBUILDROOT" ]; then
-		error "Recursive rebuilding is not supported when cross compiling."
+		error "Recursive rebuilding (-R) is not supported when cross compiling."
 		return 1
 	fi
-	[ -z "$recursive" ] && return 1
 
 	# find dependencies that are installed but missing in repo.
 	for i in $builddeps; do
@@ -2012,22 +2005,28 @@ install_has() {
 }
 
 deps() {
-	local builddeps= i
-	for i in $depends $makedepends; do
-		[ "$pkgname" = "${i%%[<>=]*}" ] && continue
-		subpackages_has ${i%%[<>=]*} || builddeps="$builddeps $i"
-	done
-	$SUDO_APK add $apk_opt_wait --repository "$REPODEST/$repo" \
+	[ -z "$hostdeps" -a -z "$builddeps" ] && calcdeps
+
+	local _quiet="$1"
+	[ -z "$_quiet" ] && msg "Installing for build:$builddeps"
+	$SUDO_APK add $_quiet $apk_opt_wait --repository "$REPODEST/$repo" \
 		--virtual .makedepends-$pkgname \
 		$builddeps
+	if [ -n "$CBUILDROOT" ]; then
+		[ -z "$_quiet" ] && msg "Installing for host:$hostdeps"
+		$SUDO_APK add $_quiet --root "$CBUILDROOT" --repository "$REPODEST/$repo" $apk_opt_wait \
+			--no-scripts --virtual .makedepends-$pkgname $hostdeps || return 1
+	fi
 }
 
-undeps (){
-	$SUDO_APK del $apk_opt_wait .makedepends-$pkgname
-	if cross_compiling; then
-		$SUDO_APK del --root "$CBUILDROOT" $apk_opt_wait \
+undeps() {
+	local _quiet="$@"
+	$SUDO_APK del $_quiet $apk_opt_wait .makedepends-$pkgname
+	if [ -n "$CBUILDROOT" ]; then
+		$SUDO_APK del $_quiet --root "$CBUILDROOT" $apk_opt_wait \
 			--no-scripts .makedepends-$pkgname
 	fi
+	return 0
 }
 
 # compat
