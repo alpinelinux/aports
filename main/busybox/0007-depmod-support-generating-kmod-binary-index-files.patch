@@ -1,7 +1,7 @@
-From d8c1e5b77fd9fac9e03172a00bcd3f18aa20e2d9 Mon Sep 17 00:00:00 2001
+From 249ef5277e15bd9f6728275a4d21ffdcd7877dc4 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
 Date: Sun, 25 Oct 2015 22:21:41 +0200
-Subject: [PATCH 2002/2003] depmod: support generating kmod binary index files
+Subject: [PATCH 07/15] depmod: support generating kmod binary index files
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -16,11 +16,11 @@ the code size a little bit.
 Signed-off-by: Timo Teräs <timo.teras@iki.fi>
 ---
  modutils/Config.src |  10 ++
- modutils/depmod.c   | 270 ++++++++++++++++++++++++++++++++++++++++++----------
+ modutils/depmod.c   | 277 ++++++++++++++++++++++++++++++++++++++++++----------
  modutils/modprobe.c |  15 ---
- modutils/modutils.c |  27 +++++-
+ modutils/modutils.c |  27 ++++-
  modutils/modutils.h |  15 +++
- 5 files changed, 270 insertions(+), 67 deletions(-)
+ 5 files changed, 278 insertions(+), 66 deletions(-)
 
 diff --git a/modutils/Config.src b/modutils/Config.src
 index 0b11832..09db515 100644
@@ -44,7 +44,7 @@ index 0b11832..09db515 100644
  	bool "Support for module.symbols file"
  	default y
 diff --git a/modutils/depmod.c b/modutils/depmod.c
-index b8699ba..40f3c08 100644
+index e5f0e3d..c35a584 100644
 --- a/modutils/depmod.c
 +++ b/modutils/depmod.c
 @@ -2,7 +2,7 @@
@@ -56,7 +56,7 @@ index b8699ba..40f3c08 100644
   * Copyright (c) 2008 Vladimir Dronnikov
   *
   * Licensed under GPLv2 or later, see file LICENSE in this source tree.
-@@ -14,8 +14,18 @@
+@@ -14,6 +14,24 @@
  #include "modutils.h"
  #include <sys/utsname.h> /* uname() */
  
@@ -69,13 +69,19 @@ index b8699ba..40f3c08 100644
 +	struct index_node *children[INDEX_MAXCHAR-INDEX_MINCHAR];
 +} index_node;
 +
- struct globals {
- 	module_db db;
++struct globals {
++	module_db db;
 +	index_node *root_node;
- } FIX_ALIASING;
- #define G (*ptr_to_globals)
- #define INIT_G() do { \
-@@ -48,18 +58,12 @@ static int FAST_FUNC parse_module(const char *fname, struct stat *sb UNUSED_PARA
++} FIX_ALIASING;
++#define G (*ptr_to_globals)
++#define INIT_G() do { \
++	SET_PTR_TO_GLOBALS(xzalloc(sizeof(G))); \
++} while (0)
++
+ /*
+  * Theory of operation:
+  * - iterate over all modules and record their full path
+@@ -41,18 +59,12 @@ static int FAST_FUNC parse_module(const char *fname, struct stat *sb UNUSED_PARA
  
  	for (ptr = image; ptr < image + len - 10; ptr++) {
  		if (is_prefixed_with(ptr, "depends=")) {
@@ -96,7 +102,7 @@ index b8699ba..40f3c08 100644
  		} else if (ENABLE_FEATURE_MODUTILS_SYMBOLS
  		 && is_prefixed_with(ptr, "__ksymtab_")
  		) {
-@@ -69,9 +73,10 @@ static int FAST_FUNC parse_module(const char *fname, struct stat *sb UNUSED_PARA
+@@ -62,9 +74,10 @@ static int FAST_FUNC parse_module(const char *fname, struct stat *sb UNUSED_PARA
  			) {
  				continue;
  			}
@@ -110,7 +116,7 @@ index b8699ba..40f3c08 100644
  	}
  	free(image);
  
-@@ -103,12 +108,6 @@ static void order_dep_list(module_entry *start, llist_t *add)
+@@ -96,12 +109,6 @@ static void order_dep_list(module_db *modules, module_entry *start, llist_t *add
  	}
  }
  
@@ -123,7 +129,7 @@ index b8699ba..40f3c08 100644
  //usage:#if !ENABLE_MODPROBE_SMALL
  //usage:#define depmod_trivial_usage "[-n] [-b BASE] [VERSION] [MODFILES]..."
  //usage:#define depmod_full_usage "\n\n"
-@@ -162,6 +161,169 @@ enum {
+@@ -155,6 +162,169 @@ enum {
  	OPT_C = (1 << 9), /* -C,--config etc_modules_conf: ignored */
  };
  
@@ -293,7 +299,7 @@ index b8699ba..40f3c08 100644
  int depmod_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
  int depmod_main(int argc UNUSED_PARAM, char **argv)
  {
-@@ -205,53 +367,59 @@ int depmod_main(int argc UNUSED_PARAM, char **argv)
+@@ -198,53 +368,60 @@ int depmod_main(int argc UNUSED_PARAM, char **argv)
  	}
  
  	/* Generate dependency and alias files */
@@ -301,11 +307,12 @@ index b8699ba..40f3c08 100644
 -		xfreopen_write(CONFIG_DEFAULT_DEPMOD_FILE, stdout);
 -
 +	index_init(CONFIG_DEFAULT_DEPMOD_FILE);
- 	moddb_foreach_module(&G.db, m, i) {
+ 	moddb_foreach_module(&modules, m, i) {
 -		printf("%s:", m->name);
 -
 +		char *buf = xasprintf("%s:", m->name);
- 		order_dep_list(m, m->deps);
+ 		order_dep_list(&modules, m, m->deps);
++
  		while (m->dnext != m) {
  			dep = m->dnext;
 -			printf(" %s", dep->name);
@@ -319,11 +326,12 @@ index b8699ba..40f3c08 100644
 -		bb_putchar('\n');
 +		index_add(m->modname, buf, "");
  	}
--
++	index_dump(CONFIG_DEFAULT_DEPMOD_FILE, 1);
+ 
 -#if ENABLE_FEATURE_MODUTILS_ALIAS
 -	if (!(option_mask32 & OPT_n))
 -		xfreopen_write("modules.alias", stdout);
--	moddb_foreach_module(&G.db, m, i) {
+-	moddb_foreach_module(&modules, m, i) {
 -		while (m->aliases) {
 -			/*
 -			 * Last word used to be a basename
@@ -334,11 +342,9 @@ index b8699ba..40f3c08 100644
 -			printf("alias %s %s\n",
 -				(char*)llist_pop(&m->aliases),
 -				m->modname);
-+	index_dump(CONFIG_DEFAULT_DEPMOD_FILE, 1);
-+
 +	if (ENABLE_FEATURE_MODUTILS_ALIAS) {
 +		index_init("modules.alias");
-+		moddb_foreach_module(&G.db, m, i) {
++		moddb_foreach_module(&modules, m, i) {
 +			while (m->aliases) {
 +				/*
 +				 * Last word used to be a basename
@@ -355,14 +361,14 @@ index b8699ba..40f3c08 100644
 -#if ENABLE_FEATURE_MODUTILS_SYMBOLS
 -	if (!(option_mask32 & OPT_n))
 -		xfreopen_write("modules.symbols", stdout);
--	moddb_foreach_module(&G.db, m, i) {
+-	moddb_foreach_module(&modules, m, i) {
 -		while (m->symbols) {
 -			printf("alias symbol:%s %s\n",
 -				(char*)llist_pop(&m->symbols),
 -				m->modname);
 +	if (ENABLE_FEATURE_MODUTILS_SYMBOLS) {
 +		index_init("modules.symbols");
-+		moddb_foreach_module(&G.db, m, i) {
++		moddb_foreach_module(&modules, m, i) {
 +			while (m->symbols) {
 +				index_add((char*)llist_pop(&m->symbols), m->modname, "alias ");
 +			}
@@ -385,9 +391,9 @@ index b8699ba..40f3c08 100644
 -#endif
  
  	if (ENABLE_FEATURE_CLEAN_UP)
- 		moddb_free(&G.db);
+ 		moddb_free(&modules);
 diff --git a/modutils/modprobe.c b/modutils/modprobe.c
-index 2f55ad2..121bd56 100644
+index 8130c40..ec64477 100644
 --- a/modutils/modprobe.c
 +++ b/modutils/modprobe.c
 @@ -167,21 +167,6 @@ struct globals {
@@ -411,12 +417,12 @@ index 2f55ad2..121bd56 100644
 -
  static struct module_entry *get_or_add_modentry(const char *module)
  {
- 	return moddb_get(&G.db, module, 1);
+ 	return moddb_get_or_create(&G.db, module);
 diff --git a/modutils/modutils.c b/modutils/modutils.c
-index 05e0777..9d5c8c4 100644
+index 0a05673..8b6298b 100644
 --- a/modutils/modutils.c
 +++ b/modutils/modutils.c
-@@ -59,6 +59,21 @@ void FAST_FUNC moddb_free(module_db *db)
+@@ -67,6 +67,21 @@ void FAST_FUNC moddb_free(module_db *db)
  	}
  }
  
@@ -438,7 +444,7 @@ index 05e0777..9d5c8c4 100644
  void FAST_FUNC replace(char *s, char what, char with)
  {
  	while (*s) {
-@@ -70,7 +85,17 @@ void FAST_FUNC replace(char *s, char what, char with)
+@@ -78,7 +93,17 @@ void FAST_FUNC replace(char *s, char what, char with)
  
  char* FAST_FUNC replace_underscores(char *s)
  {
@@ -458,7 +464,7 @@ index 05e0777..9d5c8c4 100644
  }
  
 diff --git a/modutils/modutils.h b/modutils/modutils.h
-index 0c0cb46..30a13e6 100644
+index 2cbd144..dd6f173 100644
 --- a/modutils/modutils.h
 +++ b/modutils/modutils.h
 @@ -18,6 +18,20 @@ PUSH_AND_SET_FUNCTION_VISIBILITY_TO_HIDDEN
@@ -482,8 +488,8 @@ index 0c0cb46..30a13e6 100644
  typedef struct module_entry {
  	struct module_entry *next;
  	char *name, *modname;
-@@ -46,6 +60,7 @@ typedef struct module_db {
- module_entry *moddb_get(module_db *db, const char *s, int create) FAST_FUNC;
+@@ -47,6 +61,7 @@ module_entry *moddb_get(module_db *db, const char *s) FAST_FUNC;
+ module_entry *moddb_get_or_create(module_db *db, const char *s) FAST_FUNC;
  void moddb_free(module_db *db) FAST_FUNC;
  
 +char *gather_options_str(char *opts, const char *append) FAST_FUNC;
@@ -491,5 +497,5 @@ index 0c0cb46..30a13e6 100644
  char *replace_underscores(char *s) FAST_FUNC;
  int string_to_llist(char *string, llist_t **llist, const char *delim) FAST_FUNC;
 -- 
-2.6.1
+2.9.1
 

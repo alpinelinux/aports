@@ -1,22 +1,53 @@
-From 52278b8df9433b2e32d2d842637024b42fcf1a94 Mon Sep 17 00:00:00 2001
+From 678563e106ce8416266de16c309494a051f331f6 Mon Sep 17 00:00:00 2001
 From: Kaarle Ritvanen <kaarle.ritvanen@datakunkku.fi>
-Date: Fri, 13 May 2016 00:00:11 +0300
-Subject: [PATCH 4007/4007] ntpd: postpone hostname resolution if fails on
- startup
+Date: Thu, 4 Aug 2016 12:26:56 +0200
+Subject: [PATCH 13/15] ntpd: postpone hostname resolution if fails on startup
 
 Signed-off-by: Kaarle Ritvanen <kaarle.ritvanen@datakunkku.fi>
 ---
- networking/ntpd.c | 116 +++++++++++++++++++++++++++++-------------------------
- 1 file changed, 63 insertions(+), 53 deletions(-)
+ networking/ntpd.c | 129 ++++++++++++++++++++++++++----------------------------
+ 1 file changed, 63 insertions(+), 66 deletions(-)
 
 diff --git a/networking/ntpd.c b/networking/ntpd.c
-index 4103189..7f7d69e 100644
+index 98158a3..7f7d69e 100644
 --- a/networking/ntpd.c
 +++ b/networking/ntpd.c
-@@ -765,34 +765,48 @@ reset_peer_stats(peer_t *p, double offset)
+@@ -267,6 +267,7 @@ typedef struct {
+ 
+ typedef struct {
+ 	len_and_sockaddr *p_lsa;
++	char             *p_hostname;
+ 	char             *p_dotted;
+ 	int              p_fd;
+ 	int              datapoint_idx;
+@@ -292,7 +293,6 @@ typedef struct {
+ 	datapoint_t      filter_datapoint[NUM_DATAPOINTS];
+ 	/* last sent packet: */
+ 	msg_t            p_xmt_msg;
+-	char             p_hostname[1];
+ } peer_t;
+ 
+ 
+@@ -765,27 +765,17 @@ reset_peer_stats(peer_t *p, double offset)
  }
  
  static void
+-resolve_peer_hostname(peer_t *p, int loop_on_fail)
+-{
+-	len_and_sockaddr *lsa;
+-
+- again:
+-	lsa = host2sockaddr(p->p_hostname, 123);
+-	if (!lsa) {
+-		/* error message already emitted by host2sockaddr() */
+-		if (!loop_on_fail)
+-			return;
+-//FIXME: do this to avoid infinite looping on typo in a hostname?
+-//well... in which case, what is a good value for loop_on_fail?
+-		//if (--loop_on_fail == 0)
+-		//	xfunc_die();
+-		sleep(5);
+-		goto again;
 +resolve_peer_hostname(peer_t *p) {
 +	len_and_sockaddr *lsa = host2sockaddr(p->p_hostname, 123);
 +	if (lsa) {
@@ -26,19 +57,23 @@ index 4103189..7f7d69e 100644
 +		}
 +		p->p_lsa = lsa;
 +		p->p_dotted = xmalloc_sockaddr2dotted_noport(&lsa->u.sa);
-+	}
+ 	}
+-	free(p->p_lsa);
+-	free(p->p_dotted);
+-	p->p_lsa = lsa;
+-	p->p_dotted = xmalloc_sockaddr2dotted_noport(&lsa->u.sa);
 +	set_next(p, lsa ? 0 : RETRY_INTERVAL);
-+}
-+
-+static void
- add_peers(const char *s)
- {
+ }
+ 
+ static void
+@@ -794,28 +784,29 @@ add_peers(const char *s)
  	llist_t *item;
  	peer_t *p;
  
- 	p = xzalloc(sizeof(*p));
--	p->p_lsa = xhost2sockaddr(s, 123);
--	p->p_dotted = xmalloc_sockaddr2dotted_noport(&p->p_lsa->u.sa);
+-	p = xzalloc(sizeof(*p) + strlen(s));
+-	strcpy(p->p_hostname, s);
+-	resolve_peer_hostname(p, /*loop_on_fail=*/ 1);
++	p = xzalloc(sizeof(*p));
 +	p->p_hostname = xstrdup(s);
 +	resolve_peer_hostname(p);
  
@@ -68,14 +103,13 @@ index 4103189..7f7d69e 100644
  		}
 -	}
  
--	p->p_hostname = xstrdup(s);
  	p->p_fd = -1;
  	p->p_xmt_msg.m_status = MODE_CLIENT | (NTP_VERSION << 3);
 -	p->next_action_time = G.cur_time; /* = set_next(p, 0); */
  	reset_peer_stats(p, STEP_THRESHOLD);
  
  	llist_add_to(&G.ntp_peers, p);
-@@ -2317,54 +2331,50 @@ int ntpd_main(int argc UNUSED_PARAM, char **argv)
+@@ -2340,44 +2331,50 @@ int ntpd_main(int argc UNUSED_PARAM, char **argv)
  		for (item = G.ntp_peers; item != NULL; item = item->link) {
  			peer_t *p = (peer_t *) item->data;
  
@@ -86,30 +120,6 @@ index 4103189..7f7d69e 100644
 -						VERB4 bb_error_msg("disabling burst mode");
 -						G.polladj_count = 0;
 -						G.poll_exp = MINPOLL;
--					}
--					send_query_to_peer(p);
--				} else {
--					/* Timed out waiting for reply */
--					close(p->p_fd);
--					p->p_fd = -1;
--					/* If poll interval is small, increase it */
--					if (G.poll_exp < BIGPOLL)
--						adjust_poll(MINPOLL);
--					timeout = poll_interval(NOREPLY_INTERVAL);
--					bb_error_msg("timed out waiting for %s, reach 0x%02x, next query in %us",
--							p->p_dotted, p->reachable_bits, timeout);
--
--					/* What if don't see it because it changed its IP? */
--					if (p->reachable_bits == 0) {
--						len_and_sockaddr *lsa = host2sockaddr(p->p_hostname, 123);
--						if (lsa) {
--							char *dotted = xmalloc_sockaddr2dotted_noport(&lsa->u.sa);
--							//if (strcmp(dotted, p->p_dotted) != 0)
--							//	bb_error_msg("peer IP changed");
--							free(p->p_lsa);
--							free(p->p_dotted);
--							p->p_lsa = lsa;
--							p->p_dotted = dotted;
 +			if (p->p_lsa) {
 +
 +				if (p->next_action_time <= G.cur_time) {
@@ -119,7 +129,7 @@ index 4103189..7f7d69e 100644
 +							VERB4 bb_error_msg("disabling burst mode");
 +							G.polladj_count = 0;
 +							G.poll_exp = MINPOLL;
- 						}
++						}
 +						send_query_to_peer(p);
 +					} else {
 +						/* Timed out waiting for reply */
@@ -138,17 +148,33 @@ index 4103189..7f7d69e 100644
 +
 +						set_next(p, timeout);
  					}
-+				}
- 
+-					send_query_to_peer(p);
+-				} else {
+-					/* Timed out waiting for reply */
+-					close(p->p_fd);
+-					p->p_fd = -1;
+-					/* If poll interval is small, increase it */
+-					if (G.poll_exp < BIGPOLL)
+-						adjust_poll(MINPOLL);
+-					timeout = poll_interval(NOREPLY_INTERVAL);
+-					bb_error_msg("timed out waiting for %s, reach 0x%02x, next query in %us",
+-							p->p_dotted, p->reachable_bits, timeout);
+-
+-					/* What if don't see it because it changed its IP? */
+-					if (p->reachable_bits == 0)
+-						resolve_peer_hostname(p, /*loop_on_fail=*/ 0);
+-
 -					set_next(p, timeout);
+ 				}
+-			}
++
 +				if (p->p_fd >= 0) {
 +					/* Wait for reply from this peer */
 +					pfd[i].fd = p->p_fd;
 +					pfd[i].events = POLLIN;
 +					idx2peer[i] = p;
 +					i++;
- 				}
--			}
++				}
 +
 +			} else
 +				resolve_peer_hostname(p);
@@ -167,5 +193,5 @@ index 4103189..7f7d69e 100644
  
  		timeout = nextaction - G.cur_time;
 -- 
-2.8.3
+2.9.1
 
