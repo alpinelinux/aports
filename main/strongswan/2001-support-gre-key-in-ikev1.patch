@@ -1,4 +1,4 @@
-From 8addb45c033b13f3063ece56823a925c2b8bf9a8 Mon Sep 17 00:00:00 2001
+From 9ebc52171e912a58288c24b74668ffa7af61bee8 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
 Date: Mon, 21 Sep 2015 13:42:18 +0300
 Subject: [PATCH] support gre key in ikev1
@@ -17,17 +17,17 @@ racoon for the time being.
 ---
  src/libcharon/encoding/payloads/id_payload.c       | 68 +++++++++++++++++-----
  src/libcharon/encoding/payloads/id_payload.h       |  6 +-
+ .../plugins/kernel_netlink/kernel_netlink_ipsec.c  | 40 ++++++++++---
  src/libcharon/plugins/stroke/stroke_config.c       |  5 ++
  src/libcharon/plugins/unity/unity_narrow.c         |  2 +-
  src/libcharon/plugins/vici/vici_config.c           |  9 ++-
  src/libcharon/sa/ikev1/tasks/quick_mode.c          | 16 ++---
- .../plugins/kernel_netlink/kernel_netlink_ipsec.c  | 40 ++++++++++---
  src/libstrongswan/selectors/traffic_selector.c     | 33 ++++++++++-
  src/libstrongswan/selectors/traffic_selector.h     | 31 ++++++++++
  9 files changed, 171 insertions(+), 39 deletions(-)
 
 diff --git a/src/libcharon/encoding/payloads/id_payload.c b/src/libcharon/encoding/payloads/id_payload.c
-index bb8aab7..2cf08e9 100644
+index ae0b19a..b8a6500 100644
 --- a/src/libcharon/encoding/payloads/id_payload.c
 +++ b/src/libcharon/encoding/payloads/id_payload.c
 @@ -245,18 +245,20 @@ METHOD(id_payload_t, get_identification, identification_t*,
@@ -36,7 +36,7 @@ index bb8aab7..2cf08e9 100644
  static traffic_selector_t *get_ts_from_range(private_id_payload_t *this,
 -											 ts_type_t type)
 +											 ts_type_t type,
-+											 u_int16_t from_port, u_int16_t to_port)
++											 uint16_t from_port, uint16_t to_port)
  {
  	return traffic_selector_create_from_bytes(this->protocol_id, type,
 -		chunk_create(this->id_data.ptr, this->id_data.len / 2), this->port,
@@ -51,7 +51,7 @@ index bb8aab7..2cf08e9 100644
  static traffic_selector_t *get_ts_from_subnet(private_id_payload_t *this,
 -											  ts_type_t type)
 +											  ts_type_t type,
-+											  u_int16_t from_port, u_int16_t to_port)
++											  uint16_t from_port, uint16_t to_port)
  {
  	traffic_selector_t *ts;
  	chunk_t net, netmask;
@@ -70,7 +70,7 @@ index bb8aab7..2cf08e9 100644
  static traffic_selector_t *get_ts_from_ip(private_id_payload_t *this,
 -										  ts_type_t type)
 +										  ts_type_t type,
-+										  u_int16_t from_port, u_int16_t to_port)
++										  uint16_t from_port, uint16_t to_port)
  {
  	return traffic_selector_create_from_bytes(this->protocol_id, type,
 -				this->id_data, this->port, this->id_data, this->port ?: 65535);
@@ -82,7 +82,7 @@ index bb8aab7..2cf08e9 100644
 +	private_id_payload_t *this, id_payload_t *other_, bool initiator)
  {
 +	private_id_payload_t *other = (private_id_payload_t *) other_;
-+	u_int16_t from_port, to_port;
++	uint16_t from_port, to_port;
 +
 +	if (other && this->protocol_id == IPPROTO_GRE && other->protocol_id == IPPROTO_GRE)
 +	{
@@ -158,7 +158,7 @@ index bb8aab7..2cf08e9 100644
 +id_payload_t *id_payload_create_from_ts(traffic_selector_t *ts, bool initiator)
  {
  	private_id_payload_t *this;
- 	u_int8_t mask;
+ 	uint8_t mask;
 @@ -460,8 +487,17 @@ id_payload_t *id_payload_create_from_ts(traffic_selector_t *ts)
  							ts->get_from_address(ts), ts->get_to_address(ts));
  		net->destroy(net);
@@ -204,112 +204,11 @@ index df1d075..7558e91 100644
 +id_payload_t *id_payload_create_from_ts(traffic_selector_t *ts, bool initiator);
  
  #endif /** ID_PAYLOAD_H_ @}*/
-diff --git a/src/libcharon/plugins/stroke/stroke_config.c b/src/libcharon/plugins/stroke/stroke_config.c
-index f717194..cde175f 100644
---- a/src/libcharon/plugins/stroke/stroke_config.c
-+++ b/src/libcharon/plugins/stroke/stroke_config.c
-@@ -1049,6 +1049,11 @@ static bool parse_protoport(char *token, u_int16_t *from_port,
- 		*from_port = 0xffff;
- 		*to_port = 0;
- 	}
-+	else if (*port && *protocol == IPPROTO_GRE)
-+	{
-+		p = strtol(port, &endptr, 0);
-+		traffic_selector_split_grekey(p, from_port, to_port);
-+	}
- 	else if (*port)
- 	{
- 		svc = getservbyname(port, NULL);
-diff --git a/src/libcharon/plugins/unity/unity_narrow.c b/src/libcharon/plugins/unity/unity_narrow.c
-index 227d24b..7749d8c 100644
---- a/src/libcharon/plugins/unity/unity_narrow.c
-+++ b/src/libcharon/plugins/unity/unity_narrow.c
-@@ -247,7 +247,7 @@ METHOD(listener_t, message, bool,
- 			if (!first)
- 			{
- 				id_payload = (id_payload_t*)payload;
--				tsr = id_payload->get_ts(id_payload);
-+				tsr = id_payload->get_ts(id_payload, NULL, FALSE);
- 				break;
- 			}
- 			first = FALSE;
-diff --git a/src/libcharon/plugins/vici/vici_config.c b/src/libcharon/plugins/vici/vici_config.c
-index 5537ed9..70c83d4 100644
---- a/src/libcharon/plugins/vici/vici_config.c
-+++ b/src/libcharon/plugins/vici/vici_config.c
-@@ -596,8 +596,13 @@ CALLBACK(parse_ts, bool,
- 		}
- 		else if (*port && !streq(port, "any"))
- 		{
--			svc = getservbyname(port, NULL);
--			if (svc)
-+			if (proto == IPPROTO_GRE)
-+			{
-+				p = strtol(port, &end, 0);
-+				if (*end) return FALSE;
-+				traffic_selector_split_grekey(p, &from, &to);
-+			}
-+			else if ((svc = getservbyname(port, NULL)) != NULL)
- 			{
- 				from = to = ntohs(svc->s_port);
- 			}
-diff --git a/src/libcharon/sa/ikev1/tasks/quick_mode.c b/src/libcharon/sa/ikev1/tasks/quick_mode.c
-index d6a3f2c..8533112 100644
---- a/src/libcharon/sa/ikev1/tasks/quick_mode.c
-+++ b/src/libcharon/sa/ikev1/tasks/quick_mode.c
-@@ -541,9 +541,9 @@ static void add_ts(private_quick_mode_t *this, message_t *message)
- {
- 	id_payload_t *id_payload;
- 
--	id_payload = id_payload_create_from_ts(this->tsi);
-+	id_payload = id_payload_create_from_ts(this->tsi, TRUE);
- 	message->add_payload(message, &id_payload->payload_interface);
--	id_payload = id_payload_create_from_ts(this->tsr);
-+	id_payload = id_payload_create_from_ts(this->tsr, FALSE);
- 	message->add_payload(message, &id_payload->payload_interface);
- }
- 
-@@ -554,7 +554,7 @@ static bool get_ts(private_quick_mode_t *this, message_t *message)
- {
- 	traffic_selector_t *tsi = NULL, *tsr = NULL;
- 	enumerator_t *enumerator;
--	id_payload_t *id_payload;
-+	id_payload_t *idi = NULL, *idr = NULL;
- 	payload_t *payload;
- 	host_t *hsi, *hsr;
- 	bool first = TRUE;
-@@ -564,20 +564,22 @@ static bool get_ts(private_quick_mode_t *this, message_t *message)
- 	{
- 		if (payload->get_type(payload) == PLV1_ID)
- 		{
--			id_payload = (id_payload_t*)payload;
--
- 			if (first)
- 			{
--				tsi = id_payload->get_ts(id_payload);
-+				idi = (id_payload_t*)payload;
- 				first = FALSE;
- 			}
- 			else
- 			{
--				tsr = id_payload->get_ts(id_payload);
-+				idr = (id_payload_t*)payload;
- 				break;
- 			}
- 		}
- 	}
-+	if (idi && idr) {
-+		tsi = idi->get_ts(idi, idr, TRUE);
-+		tsr = idr->get_ts(idr, idi, FALSE);
-+	}
- 	enumerator->destroy(enumerator);
- 
- 	/* create host2host selectors if ID payloads missing */
 diff --git a/src/libcharon/plugins/kernel_netlink/kernel_netlink_ipsec.c b/src/libcharon/plugins/kernel_netlink/kernel_netlink_ipsec.c
-index 605476e..ef94c26 100644
+index 9c2a7c3..c39db9d 100644
 --- a/src/libcharon/plugins/kernel_netlink/kernel_netlink_ipsec.c
 +++ b/src/libcharon/plugins/kernel_netlink/kernel_netlink_ipsec.c
-@@ -745,7 +745,18 @@ static struct xfrm_selector ts2selector(traffic_selector_t *src,
+@@ -812,7 +812,18 @@ static struct xfrm_selector ts2selector(traffic_selector_t *src,
  	ts2subnet(src, &sel.saddr, &sel.prefixlen_s);
  	ts2ports(dst, &sel.dport, &sel.dport_mask);
  	ts2ports(src, &sel.sport, &sel.sport_mask);
@@ -329,16 +228,16 @@ index 605476e..ef94c26 100644
  		(sel.dport || sel.sport))
  	{
  		/* the kernel expects the ICMP type and code in the source and
-@@ -769,7 +780,7 @@ static traffic_selector_t* selector2ts(struct xfrm_selector *sel, bool src)
+@@ -836,7 +847,7 @@ static traffic_selector_t* selector2ts(struct xfrm_selector *sel, bool src)
  {
  	u_char *addr;
- 	u_int8_t prefixlen;
--	u_int16_t port = 0;
-+	u_int16_t from_port = 0, to_port = 65535;
+ 	uint8_t prefixlen;
+-	uint16_t port = 0;
++	uint16_t from_port = 0, to_port = 65535;
  	host_t *host = NULL;
  
  	if (src)
-@@ -778,7 +789,7 @@ static traffic_selector_t* selector2ts(struct xfrm_selector *sel, bool src)
+@@ -845,7 +856,7 @@ static traffic_selector_t* selector2ts(struct xfrm_selector *sel, bool src)
  		prefixlen = sel->prefixlen_s;
  		if (sel->sport_mask)
  		{
@@ -347,7 +246,7 @@ index 605476e..ef94c26 100644
  		}
  	}
  	else
-@@ -787,14 +798,27 @@ static traffic_selector_t* selector2ts(struct xfrm_selector *sel, bool src)
+@@ -854,14 +865,27 @@ static traffic_selector_t* selector2ts(struct xfrm_selector *sel, bool src)
  		prefixlen = sel->prefixlen_d;
  		if (sel->dport_mask)
  		{
@@ -379,7 +278,7 @@ index 605476e..ef94c26 100644
  	}
  	/* The Linux 2.6 kernel does not set the selector's family field,
  	 * so as a kludge we additionally test the prefix length.
-@@ -811,7 +835,7 @@ static traffic_selector_t* selector2ts(struct xfrm_selector *sel, bool src)
+@@ -878,7 +902,7 @@ static traffic_selector_t* selector2ts(struct xfrm_selector *sel, bool src)
  	if (host)
  	{
  		return traffic_selector_create_from_subnet(host, prefixlen,
@@ -388,17 +287,118 @@ index 605476e..ef94c26 100644
  	}
  	return NULL;
  }
+diff --git a/src/libcharon/plugins/stroke/stroke_config.c b/src/libcharon/plugins/stroke/stroke_config.c
+index f2d1104..9caf12e 100644
+--- a/src/libcharon/plugins/stroke/stroke_config.c
++++ b/src/libcharon/plugins/stroke/stroke_config.c
+@@ -941,6 +941,11 @@ static bool parse_protoport(char *token, uint16_t *from_port,
+ 		*from_port = 0xffff;
+ 		*to_port = 0;
+ 	}
++	else if (*port && *protocol == IPPROTO_GRE)
++	{
++		p = strtol(port, &endptr, 0);
++		traffic_selector_split_grekey(p, from_port, to_port);
++	}
+ 	else if (*port)
+ 	{
+ 		svc = getservbyname(port, NULL);
+diff --git a/src/libcharon/plugins/unity/unity_narrow.c b/src/libcharon/plugins/unity/unity_narrow.c
+index 227d24b..7749d8c 100644
+--- a/src/libcharon/plugins/unity/unity_narrow.c
++++ b/src/libcharon/plugins/unity/unity_narrow.c
+@@ -247,7 +247,7 @@ METHOD(listener_t, message, bool,
+ 			if (!first)
+ 			{
+ 				id_payload = (id_payload_t*)payload;
+-				tsr = id_payload->get_ts(id_payload);
++				tsr = id_payload->get_ts(id_payload, NULL, FALSE);
+ 				break;
+ 			}
+ 			first = FALSE;
+diff --git a/src/libcharon/plugins/vici/vici_config.c b/src/libcharon/plugins/vici/vici_config.c
+index 30e3484..553f04c 100644
+--- a/src/libcharon/plugins/vici/vici_config.c
++++ b/src/libcharon/plugins/vici/vici_config.c
+@@ -626,8 +626,13 @@ CALLBACK(parse_ts, bool,
+ 		}
+ 		else if (*port && !streq(port, "any"))
+ 		{
+-			svc = getservbyname(port, NULL);
+-			if (svc)
++			if (proto == IPPROTO_GRE)
++			{
++				p = strtol(port, &end, 0);
++				if (*end) return FALSE;
++				traffic_selector_split_grekey(p, &from, &to);
++			}
++			else if ((svc = getservbyname(port, NULL)) != NULL)
+ 			{
+ 				from = to = ntohs(svc->s_port);
+ 			}
+diff --git a/src/libcharon/sa/ikev1/tasks/quick_mode.c b/src/libcharon/sa/ikev1/tasks/quick_mode.c
+index bbd1cb0..fe5d33d 100644
+--- a/src/libcharon/sa/ikev1/tasks/quick_mode.c
++++ b/src/libcharon/sa/ikev1/tasks/quick_mode.c
+@@ -555,9 +555,9 @@ static void add_ts(private_quick_mode_t *this, message_t *message)
+ {
+ 	id_payload_t *id_payload;
+ 
+-	id_payload = id_payload_create_from_ts(this->tsi);
++	id_payload = id_payload_create_from_ts(this->tsi, TRUE);
+ 	message->add_payload(message, &id_payload->payload_interface);
+-	id_payload = id_payload_create_from_ts(this->tsr);
++	id_payload = id_payload_create_from_ts(this->tsr, FALSE);
+ 	message->add_payload(message, &id_payload->payload_interface);
+ }
+ 
+@@ -568,7 +568,7 @@ static bool get_ts(private_quick_mode_t *this, message_t *message)
+ {
+ 	traffic_selector_t *tsi = NULL, *tsr = NULL;
+ 	enumerator_t *enumerator;
+-	id_payload_t *id_payload;
++	id_payload_t *idi = NULL, *idr = NULL;
+ 	payload_t *payload;
+ 	host_t *hsi, *hsr;
+ 	bool first = TRUE;
+@@ -578,20 +578,22 @@ static bool get_ts(private_quick_mode_t *this, message_t *message)
+ 	{
+ 		if (payload->get_type(payload) == PLV1_ID)
+ 		{
+-			id_payload = (id_payload_t*)payload;
+-
+ 			if (first)
+ 			{
+-				tsi = id_payload->get_ts(id_payload);
++				idi = (id_payload_t*)payload;
+ 				first = FALSE;
+ 			}
+ 			else
+ 			{
+-				tsr = id_payload->get_ts(id_payload);
++				idr = (id_payload_t*)payload;
+ 				break;
+ 			}
+ 		}
+ 	}
++	if (idi && idr) {
++		tsi = idi->get_ts(idi, idr, TRUE);
++		tsr = idr->get_ts(idr, idi, FALSE);
++	}
+ 	enumerator->destroy(enumerator);
+ 
+ 	/* create host2host selectors if ID payloads missing */
 diff --git a/src/libstrongswan/selectors/traffic_selector.c b/src/libstrongswan/selectors/traffic_selector.c
-index 6686324..776c765 100644
+index da3ba97..ee2af19 100644
 --- a/src/libstrongswan/selectors/traffic_selector.c
 +++ b/src/libstrongswan/selectors/traffic_selector.c
-@@ -209,6 +209,14 @@ static int print_icmp(printf_hook_data_t *data, u_int16_t port)
+@@ -209,6 +209,14 @@ static int print_icmp(printf_hook_data_t *data, uint16_t port)
  }
  
  /**
 + * Print GRE key
 + */
-+static int print_grekey(printf_hook_data_t *data, u_int16_t from_port, u_int16_t to_port)
++static int print_grekey(printf_hook_data_t *data, uint16_t from_port, uint16_t to_port)
 +{
 +	return print_in_hook(data, "%d", traffic_selector_grekey(from_port, to_port));
 +}
@@ -407,7 +407,7 @@ index 6686324..776c765 100644
   * Described in header.
   */
  int traffic_selector_printf_hook(printf_hook_data_t *data,
-@@ -313,7 +321,11 @@ int traffic_selector_printf_hook(printf_hook_data_t *data,
+@@ -312,7 +320,11 @@ int traffic_selector_printf_hook(printf_hook_data_t *data,
  	/* build port string */
  	if (has_ports)
  	{
@@ -420,7 +420,7 @@ index 6686324..776c765 100644
  		{
  			struct servent *serv;
  
-@@ -398,7 +410,24 @@ METHOD(traffic_selector_t, get_subset, traffic_selector_t*,
+@@ -397,7 +409,24 @@ METHOD(traffic_selector_t, get_subset, traffic_selector_t*,
  	/* select protocol, which is not zero */
  	protocol = max(this->protocol, other->protocol);
  
@@ -447,7 +447,7 @@ index 6686324..776c765 100644
  		(is_opaque(other) && is_any(this)))
  	{
 diff --git a/src/libstrongswan/selectors/traffic_selector.h b/src/libstrongswan/selectors/traffic_selector.h
-index cf9a286..d458c68 100644
+index cc66c34..a2a95b9 100644
 --- a/src/libstrongswan/selectors/traffic_selector.h
 +++ b/src/libstrongswan/selectors/traffic_selector.h
 @@ -120,6 +120,9 @@ struct traffic_selector_t {
@@ -459,7 +459,7 @@ index cf9a286..d458c68 100644
 +	 *
  	 * @return			port
  	 */
- 	u_int16_t (*get_from_port) (traffic_selector_t *this);
+ 	uint16_t (*get_from_port) (traffic_selector_t *this);
 @@ -134,6 +137,9 @@ struct traffic_selector_t {
  	 * 8 bits and the code in the least significant 8 bits.  Use the utility
  	 * functions to extract them.
@@ -469,7 +469,7 @@ index cf9a286..d458c68 100644
 +	 *
  	 * @return			port
  	 */
- 	u_int16_t (*get_to_port) (traffic_selector_t *this);
+ 	uint16_t (*get_to_port) (traffic_selector_t *this);
 @@ -268,6 +274,31 @@ int traffic_selector_cmp(traffic_selector_t *a, traffic_selector_t *b,
  						 void *opts);
  
@@ -480,7 +480,7 @@ index cf9a286..d458c68 100644
 + * @param to_port			port number in host order
 + * @return				GRE KEY in host order
 + */
-+static inline u_int32_t traffic_selector_grekey(u_int16_t from_port, u_int16_t to_port)
++static inline uint32_t traffic_selector_grekey(uint16_t from_port, uint16_t to_port)
 +{
 +	return (from_port << 16) | to_port;
 +}
@@ -492,7 +492,7 @@ index cf9a286..d458c68 100644
 + * @param from_port			from port in host order
 + * @param to_port			to port in host order
 + */
-+static inline void traffic_selector_split_grekey(u_int32_t grekey, u_int16_t *from_port, u_int16_t *to_port)
++static inline void traffic_selector_split_grekey(uint32_t grekey, uint16_t *from_port, uint16_t *to_port)
 +{
 +	*from_port = grekey >> 16;
 +	*to_port = grekey & 0xffff;
@@ -503,5 +503,5 @@ index cf9a286..d458c68 100644
   *
   * If protocol is ICMP or ICMPv6 the ports are interpreted as follows:  If they
 -- 
-2.5.3
+2.9.1
 
