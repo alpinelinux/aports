@@ -1,0 +1,181 @@
+From 1ca1fcaa5b4c75a65a202badfd5df8240a36ca0f Mon Sep 17 00:00:00 2001
+From: "Arch D. Robison" <arch.robison@intel.com>
+Date: Mon, 25 Apr 2016 22:22:39 +0000
+Subject: [PATCH] Optimize store of "bitcast" from vector to aggregate.
+
+This patch is what was the "instcombine" portion of D14185, with an additional
+test added (see julia_pseudovec in test/Transforms/InstCombine/insert-val-extract-elem.ll).
+The patch causes instcombine to replace sequences of extractelement-insertvalue-store
+that act essentially like a bitcast followed by a store.
+
+Differential review: http://reviews.llvm.org/D14260
+
+git-svn-id: https://llvm.org/svn/llvm-project/llvm/trunk@267482 91177308-0d34-0410-b5e6-96231b3b80d8
+
+Alpine maintainer notes:
+  - Updated for llvm 3.8.1.
+  - This patch replaces llvm-D14260.patch from Julia.
+---
+ .../InstCombine/InstCombineLoadStoreAlloca.cpp     | 60 ++++++++++++++++++
+ .../InstCombine/insert-val-extract-elem.ll         | 74 ++++++++++++++++++++++
+ 2 files changed, 134 insertions(+)
+ create mode 100644 test/Transforms/InstCombine/insert-val-extract-elem.ll
+
+diff --git a/lib/Transforms/InstCombine/InstCombineLoadStoreAlloca.cpp b/lib/Transforms/InstCombine/InstCombineLoadStoreAlloca.cpp
+index 96f0908..0ee6045 100644
+--- a/lib/Transforms/InstCombine/InstCombineLoadStoreAlloca.cpp
++++ b/lib/Transforms/InstCombine/InstCombineLoadStoreAlloca.cpp
+@@ -913,6 +913,61 @@ Instruction *InstCombiner::visitLoadInst(LoadInst &LI) {
+   return nullptr;
+ }
+ 
++/// \brief Look for extractelement/insertvalue sequence that acts like a bitcast.
++///
++/// \returns underlying value that was "cast", or nullptr otherwise.
++///
++/// For example, if we have:
++///
++///     %E0 = extractelement <2 x double> %U, i32 0
++///     %V0 = insertvalue [2 x double] undef, double %E0, 0
++///     %E1 = extractelement <2 x double> %U, i32 1
++///     %V1 = insertvalue [2 x double] %V0, double %E1, 1
++///
++/// and the layout of a <2 x double> is isomorphic to a [2 x double],
++/// then %V1 can be safely approximated by a conceptual "bitcast" of %U.
++/// Note that %U may contain non-undef values where %V1 has undef.
++static Value *likeBitCastFromVector(InstCombiner &IC, Value *V) {
++  Value *U = nullptr;
++  while (auto *IV = dyn_cast<InsertValueInst>(V)) {
++    auto *E = dyn_cast<ExtractElementInst>(IV->getInsertedValueOperand());
++    if (!E)
++      return nullptr;
++    auto *W = E->getVectorOperand();
++    if (!U)
++      U = W;
++    else if (U != W)
++      return nullptr;
++    auto *CI = dyn_cast<ConstantInt>(E->getIndexOperand());
++    if (!CI || IV->getNumIndices() != 1 || CI->getZExtValue() != *IV->idx_begin())
++      return nullptr;
++    V = IV->getAggregateOperand();
++  }
++  if (!isa<UndefValue>(V) ||!U)
++    return nullptr;
++
++  auto *UT = cast<VectorType>(U->getType());
++  auto *VT = V->getType();
++  // Check that types UT and VT are bitwise isomorphic.
++  const auto &DL = IC.getDataLayout();
++  if (DL.getTypeStoreSizeInBits(UT) != DL.getTypeStoreSizeInBits(VT)) {
++    return nullptr;
++  }
++  if (auto *AT = dyn_cast<ArrayType>(VT)) {
++    if (AT->getNumElements() != UT->getNumElements())
++      return nullptr;
++  } else {
++    auto *ST = cast<StructType>(VT);
++    if (ST->getNumElements() != UT->getNumElements())
++      return nullptr;
++    for (const auto *EltT : ST->elements()) {
++      if (EltT != UT->getElementType())
++        return nullptr;
++    }
++  }
++  return U;
++}
++
+ /// \brief Combine stores to match the type of value being stored.
+ ///
+ /// The core idea here is that the memory does not have any intrinsic type and
+@@ -924,6 +979,11 @@
+     return true;
+   }
+
++  if (Value *U = likeBitCastFromVector(IC, V)) {
++    combineStoreToNewValue(IC, SI, U);
++    return true;
++  }
++
+   // FIXME: We should also canonicalize loads of vectors when their elements are
+   // cast to other types.
+   return false;
+diff --git a/test/Transforms/InstCombine/insert-val-extract-elem.ll b/test/Transforms/InstCombine/insert-val-extract-elem.ll
+new file mode 100644
+index 0000000..db7b403
+--- /dev/null
++++ b/test/Transforms/InstCombine/insert-val-extract-elem.ll
+@@ -0,0 +1,74 @@
++; RUN: opt -S -instcombine %s | FileCheck %s
++
++; CHECK-LABEL: julia_2xdouble
++; CHECK-NOT: insertvalue
++; CHECK-NOT: extractelement
++; CHECK: store <2 x double>
++define void @julia_2xdouble([2 x double]* sret, <2 x double>*) {
++top:
++  %x = load <2 x double>, <2 x double>* %1
++  %x0 = extractelement <2 x double> %x, i32 0
++  %i0 = insertvalue [2 x double] undef, double %x0, 0
++  %x1 = extractelement <2 x double> %x, i32 1
++  %i1 = insertvalue [2 x double] %i0, double %x1, 1
++  store [2 x double] %i1, [2 x double]* %0, align 4
++  ret void
++}
++
++; Test with two inserts to the same index
++; CHECK-LABEL: julia_2xi64
++; CHECK-NOT: insertvalue
++; CHECK-NOT: extractelement
++; CHECK: store <2 x i64>
++define void @julia_2xi64([2 x i64]* sret, <2 x i64>*) {
++top:
++  %x = load <2 x i64>, <2 x i64>* %1
++  %x0 = extractelement <2 x i64> %x, i32 1
++  %i0 = insertvalue [2 x i64] undef, i64 %x0, 0
++  %x1 = extractelement <2 x i64> %x, i32 1
++  %i1 = insertvalue [2 x i64] %i0, i64 %x1, 1
++  %x2 = extractelement <2 x i64> %x, i32 0
++  %i2 = insertvalue [2 x i64] %i1, i64 %x2, 0
++  store [2 x i64] %i2, [2 x i64]* %0, align 4
++  ret void
++}
++
++; CHECK-LABEL: julia_4xfloat
++; CHECK-NOT: insertvalue
++; CHECK-NOT: extractelement
++; CHECK: store <4 x float>
++define void @julia_4xfloat([4 x float]* sret, <4 x float>*) {
++top:
++  %x = load <4 x float>, <4 x float>* %1
++  %x0 = extractelement <4 x float> %x, i32 0
++  %i0 = insertvalue [4 x float] undef, float %x0, 0
++  %x1 = extractelement <4 x float> %x, i32 1
++  %i1 = insertvalue [4 x float] %i0, float %x1, 1
++  %x2 = extractelement <4 x float> %x, i32 2
++  %i2 = insertvalue [4 x float] %i1, float %x2, 2
++  %x3 = extractelement <4 x float> %x, i32 3
++  %i3 = insertvalue [4 x float] %i2, float %x3, 3
++  store [4 x float] %i3, [4 x float]* %0, align 4
++  ret void
++}
++
++%pseudovec = type { float, float, float, float }
++
++; CHECK-LABEL: julia_pseudovec
++; CHECK-NOT: insertvalue
++; CHECK-NOT: extractelement
++; CHECK: store <4 x float>
++define void @julia_pseudovec(%pseudovec* sret, <4 x float>*) {
++top:
++  %x = load <4 x float>, <4 x float>* %1
++  %x0 = extractelement <4 x float> %x, i32 0
++  %i0 = insertvalue %pseudovec undef, float %x0, 0
++  %x1 = extractelement <4 x float> %x, i32 1
++  %i1 = insertvalue %pseudovec %i0, float %x1, 1
++  %x2 = extractelement <4 x float> %x, i32 2
++  %i2 = insertvalue %pseudovec %i1, float %x2, 2
++  %x3 = extractelement <4 x float> %x, i32 3
++  %i3 = insertvalue %pseudovec %i2, float %x3, 3
++  store %pseudovec %i3, %pseudovec* %0, align 4
++  ret void
++}
