@@ -1019,6 +1019,7 @@ void apk_ipkg_run_script(struct apk_installed_package *ipkg,
 	if (pid == -1)
 		goto error;
 	if (pid == 0) {
+		umask(0022);
 		if (fchdir(root_fd) == 0 && chroot(".") == 0)
 			execve(fn, argv, environment);
 		exit(1);
