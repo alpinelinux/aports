@@ -1,27 +1,23 @@
 #!/sbin/openrc-run
 
-conffile="/etc/tor/torrc"
-pidfile="/run/tor/tor.pid"
-user="${user:-tor}"
-graceful_timeout="${GRACEFUL_TIMEOUT:-60}"
+: ${conffile:="/etc/tor/torrc"}
+: ${user:="tor"}
+: ${graceful_timeout:="${GRACEFUL_TIMEOUT:-60}"}
 
 command="/usr/bin/tor"
-command_args="-f $conffile"
+command_args="-f $conffile --runasdaemon 0"
 command_background="yes"
-start_stop_daemon_args="
-	--user $user
-	--chdir /var/lib/tor
-	--env HOME=/var/lib/tor"
+start_stop_daemon_args="--chdir /var/lib/tor"
+pidfile="/run/tor/tor.pid"
 
-# See bug #523552, and https://trac.torproject.org/projects/tor/ticket/5525
-# Graceful = wait 30 secs or so until all connections are properly closed.
 extra_commands="checkconfig"
-extra_started_commands="graceful gracefulstop reload"
+extra_started_commands="gracefulstop reload"
 
 description="Anonymizing overlay network for TCP"
 description_checkconfig="Check if config file is valid."
 description_reload="Reload the configuration."
-description_gracefulstop="Gracefully stop."
+# See bug #523552, and https://trac.torproject.org/projects/tor/ticket/5525
+description_gracefulstop="Gracefully stop (wait $gracefulstop until all connections are properly closed)."
 
 
 depend() {
@@ -36,15 +32,35 @@ checkconfig() {
 	fi
 
 	# Now verify whether the configuration is valid.
-	if ! $command --verify-config -f "$conffile" 2>&1 1>/dev/null; then
-		eerror "Tor configuration (${conffile}) not valid"
-		$command --verify-config -f "$conffile"
-		return 1
+	# If User directive is set in $conffile, then we must run tor as root,
+	# even --verify-config, otherwise it fails when verifying permissions
+	# of DataDirectory.
+	if conf_has User; then
+		local user="root"
 	fi
+	local out
+	out="$(su -s /bin/sh -c "$command $command_args --verify-config" $user 2>&1)" || {
+		eerror "Tor configuration $conffile is not valid"
+		printf '%s\n' "$out"
+		return 1
+	}
 }
 
 start_pre() {
 	checkconfig || return 1
+
+	# If User directive is set in $conffile, start tor as root and let it
+	# drop privileges itself (may be needed e.g. to bind to a privileged
+	# port). Otherwise run tor as $user (recommended).
+	if conf_has User; then
+		local user="$(conf_get User)"
+	else
+		start_stop_daemon_args="$start_stop_daemon_args --user $user"
+	fi
+
+	if conf_has DataDirectory; then
+		checkpath -d -m 0700 -o "$user" "$(conf_get DataDirectory)"
+	fi
 	checkpath -d -m 0755 -o "$user" "$(dirname "$pidfile")"
 }
 
@@ -65,4 +81,12 @@ reload() {
 	ebegin "Reloading Tor configuration"
 	start-stop-daemon --signal HUP --pidfile "$pidfile"
 	eend $?
+}
+
+conf_get() {
+	sed -n "s/^\s*$1 \([^#]*\)/\1/p" "$conffile"
+}
+
+conf_has() {
+	grep -q "^\s*$1 " "$conffile"
 }
