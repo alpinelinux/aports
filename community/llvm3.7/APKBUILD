@@ -1,0 +1,221 @@
+# Contributor: Travis Tilley <ttilley@gmail.com>
+# Contributor: Mitch Tishmack <mitch.tishmack@gmail.com>
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Maintainer: Travis Tilley <ttilley@gmail.com>
+pkgname=llvm3.7
+_pkgname=llvm
+_majorver=3.7
+pkgver=$_majorver.1
+pkgrel=4
+pkgdesc="Low Level Virtual Machine compiler system (version $_majorver)"
+arch="all"
+url="http://llvm.org/"
+license="UOI-NCSA"
+depends=""
+depends_dev="$pkgname-libs"
+makedepends="
+	binutils-dev
+	bison
+	chrpath
+	cmake
+	file
+	flex
+	groff
+	isl-dev
+	libffi-dev
+	make
+	paxmark
+	py-sphinx
+	python
+	python-dev
+	zlib-dev
+	"
+subpackages="$pkgname-static $pkgname-libs $pkgname-dev"
+source="http://llvm.org/releases/$pkgver/llvm-$pkgver.src.tar.xz
+	llvm-0001-Add-Musl-MuslEABI-and-Musl-EABIHF-triples.patch
+	llvm-0002-Fix-build-with-musl-libc.patch
+	llvm-0003-Fix-DynamicLibrary-to-build-with-musl-libc.patch
+	llvm-nm-workaround.patch
+	config.guess.patch
+	cmake-fix-libLLVM-name.patch
+	"
+builddir="$srcdir/$_pkgname-$pkgver.src"
+
+# NOTE: It seems that there's no (sane) way how to change includedir, sharedir
+# etc. separately, just the CMAKE_INSTALL_PREFIX. Standard CMake variables and
+# even  LLVM-specific variables, that are related to these paths, actually
+# don't work (in llvm 3.7).
+#
+# When building a software that depends on LLVM, utility llvm-config should be
+# used to discover where is LLVM installed. It provides options to print
+# path of bindir, includedir, and libdir separately, but in its source, all
+# these paths are actually hard-coded against INSTALL_PREFIX. We can patch it
+# and move paths manually, but I'm really not sure what it may break...
+#
+# Also note that we should *not* add version suffix to files in llvm bindir!
+# It breaks build system of some software that depends on LLVM, because they
+# don't expect these files to have a sufix.
+#
+# So, we install all the LLVM files into /usr/lib/llvm-$_majorver.
+# BTW, Debian do the same thing.
+#
+_prefix="usr/lib/llvm-$_majorver"
+ldpath="/$_prefix/lib"
+
+prepare() {
+	cd "$builddir"
+	mkdir -p "$builddir"/build
+
+	update_config_sub || return 1
+
+	# Apply patches while ignoring whitespace changes.
+	local i; for i in $source; do
+		case $i in
+		*.patch)
+			msg "Applying $i..."
+			patch --ignore-whitespace -s -p1 -N -i "$srcdir"/$i || return 1
+			;;
+		esac
+	done
+
+	# Remove some tests that fails.
+	rm test/tools/llvm-objdump/macho-compact-unwind-x86_64.test \
+		test/tools/llvm-objdump/macho-compact-unwind-i386.test \
+		test/Transforms/GlobalOpt/alias-used.ll || return 1
+}
+
+build() {
+	cd "$builddir"/build
+
+	# Auto-detect it by guessing either.
+	local ffi_include_dir="$(pkg-config --cflags-only-I libffi | sed 's|^-I||g')"
+
+	cmake -G "Unix Makefiles" -Wno-dev \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/$_prefix \
+		-DCMAKE_VERBOSE_MAKEFILE=NO \
+		\
+		-DFFI_INCLUDE_DIR="$ffi_include_dir" \
+		-DLLVM_BINUTILS_INCDIR=/usr/include \
+		-DLLVM_BUILD_DOCS=ON \
+		-DLLVM_BUILD_EXAMPLES=OFF \
+		-DLLVM_BUILD_EXTERNAL_COMPILER_RT=ON \
+		-DLLVM_BUILD_LLVM_DYLIB=ON \
+		-DLLVM_BUILD_TESTS=ON \
+		-DLLVM_DEFAULT_TARGET_TRIPLE="$CBUILD" \
+		-DLLVM_DYLIB_EXPORT_ALL=ON \
+		-DLLVM_ENABLE_ASSERTIONS=OFF \
+		-DLLVM_ENABLE_CXX1Y=ON \
+		-DLLVM_ENABLE_FFI=ON \
+		-DLLVM_ENABLE_LIBCXX=OFF \
+		-DLLVM_ENABLE_PIC=ON \
+		-DLLVM_ENABLE_RTTI=ON \
+		-DLLVM_ENABLE_SPHINX=OFF \
+		-DLLVM_ENABLE_TERMINFO=ON \
+		-DLLVM_ENABLE_ZLIB=ON \
+		-DLLVM_HOST_TRIPLE="$CHOST" \
+		-DLLVM_INCLUDE_EXAMPLES=OFF \
+		-DLLVM_TARGETS_TO_BUILD=all \
+		\
+		"$builddir" || return 1
+
+	make llvm-tblgen || return 1
+	make || return 1
+
+	paxmark m bin/llvm-rtdyld \
+		bin/lli \
+		bin/lli-child-target \
+		unittests/ExecutionEngine/MCJIT/MCJITTests \
+		unittests/Support/SupportTests || return 1
+
+	case "$CARCH" in
+	arm*)
+		# ARM has few failures in test suite
+		# that we don't care about currently.
+		;;
+	*)
+		make check-llvm || return 1
+		;;
+	esac
+}
+
+package() {
+	cd "$builddir"/build
+	make DESTDIR="$pkgdir" install || return 1
+
+	cd "$pkgdir"/$_prefix
+
+	# Remove RPATHs.
+	file lib/*.so bin/* \
+		| awk -F: '$2~/ELF/{print $1}' \
+		| xargs -r chrpath -d || return 1
+
+	# Symlink files in bindir to /usr/bin with version suffix.
+	mkdir -p "$pkgdir"/usr/bin
+	local path; for path in bin/*; do
+		ln -s ../lib/llvm-$_majorver/$path \
+			"$pkgdir"/usr/$path-$_majorver || return 1
+	done
+}
+
+static() {
+	pkgdesc="LLVM $_majorver static libraries"
+
+	_mv "$pkgdir"/$_prefix/lib/*.a "$subpkgdir"/$_prefix/lib/
+}
+
+libs() {
+	pkgdesc="LLVM $_majorver runtime libraries"
+	local soname="libLLVM-$_majorver.so"
+
+	mkdir -p "$subpkgdir"
+	cd "$subpkgdir"
+
+	# libLLVM should be in /usr/lib. This is needed for binaries that are
+	# dynamically linked with libLLVM, so they can find it on default path.
+	_mv "$pkgdir"/$_prefix/lib/$soname usr/lib/ || return 1
+	ln -s $soname usr/lib/${soname/$_majorver/$pkgver} || return 1
+
+	# And also symlink it back to the LLVM prefix.
+	mkdir -p $_prefix/lib
+	ln -s ../../$soname $_prefix/lib/$soname || return 1
+	ln -s ../../$soname $_prefix/lib/${soname/$_majorver/$pkgver}
+}
+
+dev() {
+	default_dev || return 1
+
+	cd "$subpkgdir"
+
+	_mv "$pkgdir"/$_prefix/share "$pkgdir"/$_prefix/lib $_prefix/ || return 1
+	_mv "$pkgdir"/$_prefix/bin/llvm-config $_prefix/bin/ || return 1
+	_mv "$pkgdir"/usr/bin/llvm-config-* usr/bin/
+}
+
+_mv() {
+	local dest; for dest; do true; done  # get last argument
+	mkdir -p "$dest"
+	mv $@
+}
+
+md5sums="bf8b3a2c79e61212c5409041dfdbd319  llvm-3.7.1.src.tar.xz
+b370ea6589931c560a92699b890dd888  llvm-0001-Add-Musl-MuslEABI-and-Musl-EABIHF-triples.patch
+b0cd098117223159b76e96c3f884536b  llvm-0002-Fix-build-with-musl-libc.patch
+9cc5050619f764ca9dc842a5ab122290  llvm-0003-Fix-DynamicLibrary-to-build-with-musl-libc.patch
+785147afd8ab80fa95955a5637b6582f  llvm-nm-workaround.patch
+57d95aabd731eca1c1411ceb1894120c  config.guess.patch
+a263b29c441c1c83b12535a3f9fd3410  cmake-fix-libLLVM-name.patch"
+sha256sums="be7794ed0cec42d6c682ca8e3517535b54555a3defabec83554dbc74db545ad5  llvm-3.7.1.src.tar.xz
+6018671b549f3043ab4d7100956f0e05092d83de72b88edea199c91d5755d819  llvm-0001-Add-Musl-MuslEABI-and-Musl-EABIHF-triples.patch
+e1b0fd5f6918d8c8404f3ec4b8d3ab8fbe8dadc2d6011792349b56e5e8ee51e2  llvm-0002-Fix-build-with-musl-libc.patch
+fc28356bf0d5fcfe9b99e28f4abbc2f49f50d263b44e428e30f33bf5472747b4  llvm-0003-Fix-DynamicLibrary-to-build-with-musl-libc.patch
+1870f910a6f5f2ba6144bd079ec55ed879fe8fd8b1b1b384935f36da43e5f114  llvm-nm-workaround.patch
+10a719450c48433756c9f7a51593f415758ac587911349b22f7d440415a0c6d5  config.guess.patch
+e3a9d29441e5a701deb5d89b00ba0b93103ca1aef3f9dffe97f2378aca0e9ef6  cmake-fix-libLLVM-name.patch"
+sha512sums="ac521debc02f6deba96ef975d6a546b0c5c77299c1dbf5e1b87a7974ff5e7fd715bd7e384b92d9adf572ce47130bdbf6d3c648eb0d7f72f16f976292e4909e90  llvm-3.7.1.src.tar.xz
+64388ca3100fd36dfcfa7ba8ec8eb8dd40a7388d4363952ec9b4012e5b82494bd445a1b46506b479283121ec2f74fe3dc07b154f5c76db27b6f5b1af50c265aa  llvm-0001-Add-Musl-MuslEABI-and-Musl-EABIHF-triples.patch
+4cb3fabbb627b596ce398ed717c66ad20bbea7092ba30751520cc5a63d38e1ac53d23e98a6ad82121ddcf2434383ba5cadbc2990f99a4528e99c6e2160c2f725  llvm-0002-Fix-build-with-musl-libc.patch
+19bfb9282455d39d07dbb2b1293b03a45c57d522fbb9c5e58dac034200669628b97e7a90cd4ff5d52d9bb79acfccbef653d8a1140a7f0589ecd6f9b7c4ba0eb6  llvm-0003-Fix-DynamicLibrary-to-build-with-musl-libc.patch
+11db6f3c5d697bc536c7d053530f7a5572756185e16399c32c31306861b58046ca9bc14b8d8097758c00a8c1a7026cbfb75636c0e697e59c53dda5848f93b006  llvm-nm-workaround.patch
+caf1c9466e8163f8844bd40095d1c3ce26c9e96dcb639f64833baca65a81708d39496e8c8ea65c7f11476d752265080998f1873b79cbc92b23349258e4dfa3ab  config.guess.patch
+52287dd37f62e0b51c487abe62a22440d3e9df2cb6144af45ba9ddc42848495fad533bf6b13f08e1b454ee653be9b8a14e02cf81f430a7d2c9be030889ef7f72  cmake-fix-libLLVM-name.patch"

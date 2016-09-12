@@ -1,0 +1,192 @@
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Maintainer: Jakub Jirutka <jakub@jirutka.cz>
+pkgname=rust
+pkgver=1.10.0
+pkgrel=1
+pkgdesc="The Rust Programming Language (compiler)"
+url="http://www.rust-lang.org"
+arch="x86_64"
+license="ASL-2.0 BSD MIT"
+depends="$pkgname-stdlib"
+# libffi-dev is needed just because we compile llvm3.7 with LLVM_ENABLE_FFI.
+makedepends="cmake file libffi-dev llvm3.7 llvm3.7-dev llvm3.7-static
+	musl-dev python2 tar zlib-dev"
+subpackages="$pkgname-stdlib $pkgname-gdb $pkgname-lldb $pkgname-doc"
+
+# XXX: Rust is self-hosted, so you need rustc to build rustc... The problem is
+# that Rust doesn't provide prebuilt rustc for musl yet. Thus I cross-compiled
+# rustc on glibc-based system and uploaded the built tarballs to my server.
+# We're gonna replace them once Rust start providing prebuilt binaries for musl.
+# Follow https://github.com/rust-lang/rust/issues/31322.
+# TODO: Implement some support for verifying crates fetched by cargo!
+source="https://static.rust-lang.org/dist/rustc-$pkgver-src.tar.gz
+	https://alpine.geeknet.cz/distfiles/rustc-$pkgver-x86_64-unknown-linux-musl.tar.gz
+	https://alpine.geeknet.cz/distfiles/rust-std-$pkgver-x86_64-unknown-linux-musl.tar.gz
+	https://alpine.geeknet.cz/distfiles/cargo-0.11.0-nightly-x86_64-alpine-linux-musl.tar.gz
+
+	dont-require-filecheck.patch
+	link-musl-dynamically.patch
+	llvm-with-ffi.patch
+	move-py-scripts-to-share.patch
+	"
+options="!strip"
+builddir="$srcdir/rustc-$pkgver"
+
+_sharedir="usr/share/rust"
+_stage0dir="$srcdir/stage0"
+_CTARGET="$CARCH-unknown-linux-musl"
+
+prepare() {
+	default_prepare || return 1
+
+	cd "$builddir"
+
+	# Remove some bundled dependencies.
+	rm -Rf src/llvm/ src/jemalloc/ || return 1
+
+	# These tests assume that alloc_jemalloc is present, disable them.
+	sed -i "1i // ignore-test jemalloc is disabled" \
+		src/test/compile-fail/allocator-dylib-is-system.rs \
+		src/test/compile-fail/allocator-rust-dylib-is-jemalloc.rs \
+		src/test/run-pass/allocator-default.rs
+
+	# Prepare our stage0 for bootstrapping.
+	mkdir -p "$_stage0dir"
+	cp -flr "$srcdir"/rustc-*$_CTARGET/rustc/* \
+		"$srcdir"/rust-std-*$_CTARGET/rust-std-*/* \
+		"$srcdir"/cargo-*$_CTARGET/cargo/* \
+		"$_stage0dir"/
+}
+
+build() {
+	cd "$builddir"
+
+	export CARGO_HOME="$builddir/.cargo"
+
+	# XXX: Cheat Rust build system so we can build rustc using different
+	# version of (prebuilt) stable rustc than preconfigured. It's hack-ish,
+	# but since we're basically rebuilding rustc with the same version,
+	# it's actually safe.
+	# Note: --enable-local-rebuild from #33787 didn't work, don't know why.
+	local rustc_ver="$("$_stage0dir"/bin/rustc --version | cut -f2 -d ' ')"
+	local rustc_key="$(printf "$rustc_ver" | md5sum | cut -c1-8)"
+	sed -Ei \
+		-e "s/^(rustc):.*/\1: $rustc_ver-1970-01-01/" \
+		-e "s/^(rustc_key):.*/\1: $rustc_key/" \
+		src/stage0.txt
+
+	# Generate config for bootstrap.py to use our prebuilt rustc and cargo
+	# for bootstrapping instead of downloading snapshot from internet.
+	cat > config.toml <<-EOF
+		[build]
+		cargo = "$_stage0dir/bin/cargo"
+		rustc = "$_stage0dir/bin/rustc"
+	EOF
+
+	# Note: rustc doesn't work well with jemalloc on musl (yet)
+	./configure \
+		--build="$_CTARGET" \
+		--host="$_CTARGET" \
+		--prefix="/usr" \
+		--enable-rustbuild \
+		--release-channel="stable" \
+		--musl-root="/usr" \
+		--llvm-root="/usr/lib/llvm-3.7" \
+		--disable-docs \
+		--disable-jemalloc \
+		--disable-rpath || return 1
+
+	# This is really stupid, but rustbuild doesn't provide "install"
+	# command yet, so we must create a dist tarball...
+	# https://github.com/rust-lang/rust/issues/34675
+	make dist VERBOSE=1 || return 1
+
+	#msg "Running tests..."
+	#make check VERBOSE=1
+}
+
+# XXX: so libs doesn't have stable ABI, so they should not be registered as
+# provided dependencies. The problem is that abuild doesn't provide an option
+# to disable it without completely disabling dependencies tracking.
+package() {
+	cd "$builddir"
+
+	_install build/dist/rustc-$pkgver-$_CTARGET.tar.gz \
+		"$pkgdir"/usr || return 1
+
+	# Python scripts are noarch, so move them to /usr/share.
+	# Requires move-py-scripts-to-share.patch to be applied.
+	_mv "$pkgdir"/usr/lib/rustlib/etc/*.py "$pkgdir"/$_sharedir/etc/
+}
+
+stdlib() {
+	pkgdesc="The Rust Programming Language (stdlib)"
+	depends="$pkgname"
+
+	cd "$builddir"
+	_install build/dist/rust-std-$pkgver-$_CTARGET.tar.gz \
+		"$subpkgdir"/usr || return 1
+}
+
+gdb() {
+	pkgdesc="GDB pretty printers for Rust"
+	arch="noarch"
+	depends="$pkgname gdb"
+
+	mkdir -p "$subpkgdir"
+	cd "$subpkgdir"
+
+	_mv "$pkgdir"/usr/bin/rust-gdb usr/bin/ || return 1
+	_mv "$pkgdir"/$_sharedir/etc/gdb_*.py $_sharedir/etc/
+}
+
+lldb() {
+	pkgdesc="LLDB pretty printers for Rust"
+	arch="noarch"
+	depends="$pkgname lldb py-lldb"
+
+	mkdir -p "$subpkgdir"
+	cd "$subpkgdir"
+
+	_mv "$pkgdir"/usr/bin/rust-lldb usr/bin/ || return 1
+	_mv "$pkgdir"/$_sharedir/etc/lldb_*.py $_sharedir/etc/
+}
+
+_install() {
+	local tarfile="$1"
+	local dest="$2"
+
+	mkdir -p "$dest"
+	tar -xz -f "$tarfile" -C "$dest" --strip-components=2 --exclude=manifest.in
+}
+
+_mv() {
+	local dest; for dest; do true; done  # get last argument
+	mkdir -p "$dest"
+	mv $@
+}
+
+md5sums="a48fef30353fc9daa70b484b690ce5db  rustc-1.10.0-src.tar.gz
+7d6278b0898b3c9e05cd3c622d8c7491  rustc-1.10.0-x86_64-unknown-linux-musl.tar.gz
+f5ebd54888bfd8698f629b168691a47b  rust-std-1.10.0-x86_64-unknown-linux-musl.tar.gz
+79f81ecfa861f4d97a3b9235e66ba594  cargo-0.11.0-nightly-x86_64-alpine-linux-musl.tar.gz
+c6fc2288df0b746f5317c866800a628b  dont-require-filecheck.patch
+4351eff471b20fbcf135fe311e5b0870  link-musl-dynamically.patch
+27f12fb4ce42e18dcf19fd78be4c183e  llvm-with-ffi.patch
+9b951149e87a99a1934af4eb7e698902  move-py-scripts-to-share.patch"
+sha256sums="a4015aacf4f6d8a8239253c4da46e7abaa8584f8214d1828d2ff0a8f56176869  rustc-1.10.0-src.tar.gz
+a7d8baacfa2225c923de28ecef2c9550c1d82cef3b90f6a1b8431359da7e7e69  rustc-1.10.0-x86_64-unknown-linux-musl.tar.gz
+335527615fc1a5f53d41c1d8556645bfe0b4f3a39f72ad859b392392066d9239  rust-std-1.10.0-x86_64-unknown-linux-musl.tar.gz
+587172026c0565e839d96b0c1d4c68c000927817398241f96682dca47fa8c3b9  cargo-0.11.0-nightly-x86_64-alpine-linux-musl.tar.gz
+45ffc2e5626ce5e8e7dadecbd7cfdbf4db6bc1bba99dc54376a794011bb3919b  dont-require-filecheck.patch
+8aec85b958ab975164d1673b666be0aa88d4b51b5944fa7227024b4942f52ed8  link-musl-dynamically.patch
+a7d533ac9542151234911d4a48815cc53f490b8011f5eab555cbc3a95fbde2b6  llvm-with-ffi.patch
+176dfddeff62f0bac918f742df6041df6ab777d0ddbfd01a73d580180781cbee  move-py-scripts-to-share.patch"
+sha512sums="fdef0a4c458ce687ab2921fb879cf6f68ae7ec4d780e407fea80cb751d70d80e621fc37756358d8336383c24646d9e2869215b3591b2240904206df2e58a7e45  rustc-1.10.0-src.tar.gz
+35e94c86a6abc579dcfe875ecc830522ecb8b1a0b96a03054b4020f21b1a2ee1ab2e61782dafbfaa3ce7b5b721f4b15f10e5dfac9c41b6f008152ed8b842ac67  rustc-1.10.0-x86_64-unknown-linux-musl.tar.gz
+f6a89b4a1dc3d620cc1d783f62eb4f2e7a519f6b86b4d87877b854ea86ac740a0c8ea96c4ff11185bfb496861ade286ad08c3ab5e0bcc9592251406d7fb35f8a  rust-std-1.10.0-x86_64-unknown-linux-musl.tar.gz
+17838355ff6d87165aa0f61bd01f48c58a426c069bba7c3852d016e1836666bfafe2609c323a0409fc8530ad27fb3ad5989d8cee033633e38b07fefa670597d5  cargo-0.11.0-nightly-x86_64-alpine-linux-musl.tar.gz
+19f390e0d9cd2c23cbad26aa97f51a0978a3ed5170050d5635ee06e5115d8608f55884a61d98003fca91434c9be081bde735ace97f1e251450b70d63c3bffd42  dont-require-filecheck.patch
+9ae2d8d9eff9fb6cf8fe8e902f0b87bc464cd84364734f105230785c4d8dc57ecf6872fc0532e15ac612ef11727e70ef25d08f7b084c4473017989b6c9a4593b  link-musl-dynamically.patch
+ab126eea4b960924b4a4d52f73709085a3b742329364db1a3543bcae94e4e6d8f94d30983e5e06069a489678b2d195e7535ff8e66be2c518dc8b2c54cb0c8804  llvm-with-ffi.patch
+19cc2725d68db3e359e0e3016028374e5818a97fdba24d0103f7d1706601c8b17c4dd95a3152e64f982f98e95ad3e949acddbea8a39ed0ba8dd4f702acc2704d  move-py-scripts-to-share.patch"

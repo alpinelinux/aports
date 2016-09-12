@@ -31,9 +31,9 @@ else
 CFLAGS += -UDEBUG
 endif
 
-CC = gcc
-LD = gcc
-AR = ar
+CC = $(CROSS_COMPILE)gcc
+LD = $(CROSS_COMPILE)gcc
+AR = $(CROSS_COMPILE)ar
 RANLIB = ranlib
 INSTALL = install -c -D
 

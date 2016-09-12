@@ -1,28 +1,54 @@
 # Contributor: Łukasz Jendrysik <scadu@yandex.com>
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
 # Maintainer: Jeff Bilyk <jbilyk@gmail.com>
 pkgname=nagios-plugins
-pkgver=2.0.3
-pkgrel=1
+pkgver=2.1.1
+pkgrel=0
 pkgdesc="Plugins for Nagios to check services on hosts"
 url="http://nagiosplugins.org"
 arch="all"
 license="GPL2"
-depends="fping net-snmp-tools bind-tools nrpe-plugin perl-net-snmp"
-makedepends="net-snmp-tools openssl-dev openldap-dev mariadb-dev postgresql-dev libpq
-	linux-headers"
-source="https://www.nagios-plugins.org/download/nagios-plugins-$pkgver.tar.gz"
+depends=""
+depends_by_ssh="openssh-client"
+depends_dig="bind-tools"
+depends_disk_smb="samba-client"
+depends_dns="bind-tools"
+depends_fping="fping"
+depends_log="grep"
+depends_rcp="rpcbind"
+depends_sensors="grep lm_sensors"
+depends_snmp="net-snmp-tools"
+makedepends="openssh-client bind-tools samba-client fping grep rpcbind
+	lm_sensors net-snmp-tools
+	file freeradius-client-dev libdbi-dev libpq linux-headers mariadb-dev
+	net-snmp-dev openldap-dev opensmtpd openssl-dev postgresql-dev"
+install="$pkgname.post-upgrade"
 pkgusers="nagios"
 pkggroups="nagios"
-subpackages=""
 options="suid"
+source="https://www.nagios-plugins.org/download/$pkgname-$pkgver.tar.gz"
+builddir="$srcdir/$pkgname-$pkgver"
+
+_plugins_dir="/usr/lib/nagios/plugins"
+
+# Note: Split function takes $name*, so ntp must be before nt etc.
+_plugins="breeze by_ssh cluster dbi dhcp dig disk_smb disk dns dummy file_age
+	fping hpjd http icmp ide_smart ifoperstatus ifstatus ircd ldap load log
+	mailq mrtgtraf mrtg mysql nagios ntp nt nwstat overcr pgsql ping procs
+	radius real rpc sensors smtp snmp ssh swap time ups uptime users wave"
+for _sub in $_plugins; do
+	subpackages="$subpackages $pkgname-$_sub:_plugin"
+done
+subpackages="$subpackages $pkgname-tcp $pkgname-all:_all"  # all must be the last
+
 
 prepare() {
-	cd "$srcdir/$pkgname-$pkgver"
-	update_config_sub || return 1
+	cd "$builddir"
+	update_config_sub
 }
 
 build() {
-	cd "$srcdir/$pkgname-$pkgver"
+	cd "$builddir"
 
 	./configure \
 		--build=$CBUILD \
@@ -31,26 +57,82 @@ build() {
 		--mandir=/usr/share/man \
 		--infodir=/usr/share/info \
 		--bindir=/usr/sbin \
-		--libexecdir=/usr/lib/nagios/plugins \
+		--libexecdir="/$_plugins_dir" \
 		--localstatedir=/var/nagios \
+		--with-ipv6 \
 		--with-ps-command="/bin/ps" \
 		--with-ps-format="%d %s %s %s" \
 		--with-ps-varlist="&procpid,&procuid,&procpcpu,procprog" \
 		--with-ps-cols=4 \
 		--with-ping-command="/bin/ping -c %d %s" \
+		--disable-nls \
 		|| return 1
-	make all || return 1
+	make all
 }
 
 package() {
-	cd "$srcdir/$pkgname-$pkgver"
+	cd "$builddir"
+
 	make DESTDIR="$pkgdir" install || return 1
+
+	# Remove plugins that are useless or doesn't work on Alpine.
+	local name; for name in apt flexlm game oracle; do
+		rm "$pkgdir/$_plugins_dir"/check_$name
+	done
+
 	rm -rf "$pkgdir"/usr/lib/charset.alias
-	rmdir -p "$pkgdir"/usr/lib 2>/dev/null
+	rmdir -p "$pkgdir"/usr/lib "$pkgdir"/usr/include 2>/dev/null
+
 	return 0
 }
 
+tcp() {
+	local plugins=" clamd ftp imap jabber nntp nntps pop simap spop ssmtp udp"
+	local destdir="$subpkgdir/$_plugins_dir"
+	pkgdesc="Nagios plugins check_tcp${plugins// /, check_}"
+	provides="${plugins// /$pkgname-}"
 
-md5sums="6755765bab88b506181268ef7982595e  nagios-plugins-2.0.3.tar.gz"
-sha256sums="8f0021442dce0138f0285ca22960b870662e28ae8973d49d439463588aada04a  nagios-plugins-2.0.3.tar.gz"
-sha512sums="2753e6f3fc7433a5583fee01e63a65b9ea74155964f2b6e6bf3458e56cb29ea5dbd020f83816044a717b66d6548d203b3a082fba0faedcd629c7a8457bc19b36  nagios-plugins-2.0.3.tar.gz"
+	mkdir -p "$destdir"
+	local name; for name in tcp $plugins; do
+		mv "$pkgdir/$_plugins_dir"/check_$name "$destdir"/ || return 1
+	done
+}
+
+_plugin() {
+	local name="${subpkgname#$pkgname-}"
+	local destdir="$subpkgdir/$_plugins_dir"
+	pkgdesc="Nagios plugin check_$name"
+	depends="$pkgname $(eval "echo \$depends_$name")"
+
+	mkdir -p "$destdir"
+	mv "$pkgdir/$_plugins_dir"/check_$name* "$destdir"/ || return 1
+
+	if file -bi "$destdir"/* | grep -qw text/x-perl; then
+		depends="$depends perl"
+	fi
+	if ! file -bi "$destdir"/* | grep -qw application/x-sharedlib; then
+		arch="noarch"
+	fi
+}
+
+_all() {
+	pkgdesc="Metapackage that installs *all* Nagios plugins from the nagios-plugins package"
+	depends="${subpackages% all}"
+	arch="noarch"
+
+	mkdir -p "$subpkgdir"
+
+	# We exploit the fact that the -all subpackage is created last
+	# and check if all the plugins have been moved to subpackages.
+	local path= retval=0
+	for path in "$pkgdir/$_plugins_dir"/check_*; do
+		[ -r "$path" ] || continue
+		error "Please create a subpackage for ${path##*/} or remove it"
+		retval=1
+	done
+	return $retval
+}
+
+md5sums="e199ca874df5723bfaca8c43887b1a79  nagios-plugins-2.1.1.tar.gz"
+sha256sums="c7daf95ecbf6909724258e55a319057b78dcca23b2a6cc0a640b90c90d4feae3  nagios-plugins-2.1.1.tar.gz"
+sha512sums="6ef872a6aca50f4b575cae8b484766103bbeace7118090c81df3e62f9a30f9a156bb2bed4dbfa3e483e22a6b7505816e668b56bf3c91fcef8eafa9038c93dd26  nagios-plugins-2.1.1.tar.gz"

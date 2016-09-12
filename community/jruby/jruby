@@ -1,0 +1,239 @@
+#!/bin/sh
+# vim: set ts=4:
+#
+# This jruby start script is rewrite of (poor) upstream's jruby.bash.
+# It's POSIX compatible, more clean, with sensible defaults for Alpine Linux
+# and without Windows, OS X and Truffle stuff. Beside that it should support
+# all the options of jruby.bash (hopefully) with the same behaviour.
+#
+# -----BEGIN HELP-----
+#
+# Environment variables:
+#     CLASSPATH      Additional paths to be added to the end of the Java classpath.
+#                    This may be overwritten by CLI argument -J-classpath or -J-cp.
+#     JAVA_HOME      Path to directory where is JRE/JVM installed to use specific java/jdb binary,
+#                    not the one on the PATH.
+#     JAVA_OPTS      Default options to be passed to JVM.
+#     JRUBY_HOME     Path to directory where JRuby is installed (default is /usr/share/java/jruby).
+#     JRUBY_OPTS     Default JRuby command line arguments.
+#     JRUBY_SHELL    Path to the system shell executable (default is /bin/sh).
+#     PROFILE_ARGS   Arguments for the instrumented profiler.
+#
+# Deprecated environment variables (for compatibility):
+#     JAVA_MEM       The -Xmx (maximum memory allocation) parameter for JVM (e.g. -Xmx128M).
+#                    This may be overwritten by CLI argument -J-Xmx.
+#     JAVA_STACK     The -Xss (stack size) parameter for JVM (default is -Xss2048k).
+#                    This may be overwritten by CLI argument -J-Xss.
+#     JAVA_VM        What JIT mode to use; -client, or -server (default is -server).
+#                    This may be overwritten by CLI arguments --server, --client, and --dev.
+#     JRUBY_PARENT_CLASSPATH  Classpath propagated from the parent JRuby process.
+#
+# All the environment variables are optional.
+# -----END HELP-----
+#
+set -eu
+
+readonly MAIN_CLASS_JRUBY='org.jruby.Main'
+readonly MAIN_CLASS_NGCLIENT='org.jruby.util.NailMain'
+readonly MAIN_CLASS_NGSERVER='org.jruby.main.NailServerMain'
+
+readonly JRUBY_HOME="${JRUBY_HOME:-"/usr/share/jruby"}"
+readonly JRUBY_CP="$JRUBY_HOME/lib/jruby.jar"
+readonly JRUBY_SHELL="${JRUBY_SHELL:-"/bin/sh"}"
+readonly NAILGUN_CMD="$JRUBY_HOME/tool/nailgun/ng"
+readonly PROFILE_ARGS="${PROFILE_ARGS:-}"
+
+quote() {
+	local val; for val in "$@"; do
+		printf %s "$val" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/' /"
+	done
+}
+
+
+java_stack="${JAVA_STACK:-"-Xss2048k"}"
+java_cmd="${JAVA_HOME:+"$JAVA_HOME/bin/"}java"
+
+java_opts="${JAVA_OPTS:-} ${JAVA_MEM:-} $java_stack
+	-Dorg.xerial.snappy.use.systemlib=true"
+
+# Use the same classpath propagated from parent jruby, if provided.
+classpath="${JRUBY_PARENT_CLASSPATH:-}"
+if [ -z "$classpath" ]; then
+	_excluded='jruby.jar jruby-truffle.jar jruby-complete.jar'
+
+	# Add all JARs from $JRUBY_HOME/lib to the classpath, except $_excluded.
+	classpath=$(find "$JRUBY_HOME/lib" -maxdepth 1 \
+		-name '*.jar' $(printf '! -name %s ' $_excluded) -print0 \
+		| xargs -0 printf '%s:')
+	classpath="${classpath%?}"  # %? removes leading ":"
+fi
+
+extra_cp="${CLASSPATH:-}"
+java_vm="${JAVA_VM:-"-server"}"
+main_class="$MAIN_CLASS_JRUBY"
+nailgun_client='no'
+ruby_args=''
+verify_jruby='no'
+
+
+# Split out any -J argument for passing to the JVM.
+# Scanning for args is aborted by '--'.
+set -- ${JRUBY_OPTS:-} "$@"
+while [ $# -gt 0 ]; do
+	case "$1" in
+	# Stuff after "-J" goes to JVM.
+	-J | -J-X)
+		"$java_cmd" -help
+		printf '\n%s\n' '(Prepend -J in front of these options when using "jruby" command)'
+		exit 1
+	;;
+	-J-classpath | -J-cp)
+		extra_cp="$2"
+		shift
+	;;
+	-J-ea)
+		verify_jruby='yes'
+		java_opts="$java_opts ${1:2}"
+	;;
+	-J*)
+		java_opts="$java_opts ${1:2}"
+	;;
+	 # Pass -X... and -X? search options through.
+	 -X*\.\.\.|-X*\?)
+		ruby_args="$ruby_args $1"
+	;;
+	 # Match -Xa.b.c=d to translate to -Da.b.c=d as a Java option.
+	 -X*)
+		val="${1:2}"
+		if expr "$val" : '.*[.]' > /dev/null; then
+			java_opts="$java_opts -Djruby.$val"
+		else
+			ruby_args="$ruby_args -X$val"
+		fi
+	;;
+	 # Match switches that take an argument.
+	 -C | -e | -I | -S)
+		ruby_args="$ruby_args $1 $(quote "$2")"
+		shift
+	;;
+	 # Match same switches with argument stuck together.
+	 -e* | -I* | -S*)
+		ruby_args="$ruby_args $(quote "$1")"
+	;;
+	 # Run with JMX management enabled.
+	 --manage)
+		java_opts="$java_opts -Dcom.sun.management.jmxremote \
+			-Djruby.management.enabled=true"
+	;;
+	 # Don't launch a GUI window, no matter what.
+	 --headless)
+		java_opts="$java_opts -Djava.awt.headless=true"
+	;;
+	 # Run under JDB (debug mode).
+	 --jdb)
+		java_cmd="${JAVA_HOME:+"$JAVA_HOME/bin/"}jdb"
+		java_opts="$java_opts -sourcepath $JRUBY_HOME/lib/ruby/1.9:."
+		ruby_args="$ruby_args -X+C"
+	;;
+	 --client | --server)
+		java_vm="${1#?}"  # #? removes leading "-"
+	;;
+	 --dev)
+		java_vm='-client'
+		java_opts="$java_opts -XX:+TieredCompilation -XX:TieredStopAtLevel=1 \
+			-Djruby.compile.mode=OFF -Djruby.compile.invokedynamic=false"
+	;;
+	 --sample)
+		java_opts="$java_opts -Xprof"
+	;;
+	# Start up as Nailgun server.
+	 --ng-server)
+		main_class="$MAIN_CLASS_NGSERVER"
+		verify_jruby='yes'
+	;;
+	# Use native Nailgun client to toss commands to server.
+	 --ng-client | --ng)
+		nailgun_client='yes'
+	;;
+	 # Warn but ignore.
+	 --1.8 | --1.9 | --2.0)
+		echo "WARNING: $1 is ignored"
+	;;
+	-h | -help | --help)
+		"$java_cmd" -help
+		# Print help from the top of this script.
+		sed -En '/-{5}BEGIN HELP-{5}/,/-{5}END HELP-{5}/p' "$0" \
+			| sed -E "s/^# ?//; 1d;\$d;"
+		exit 0
+	;;
+	 # Abort processing on the double dash.
+	 --)
+		break
+	;;
+	 # Other opts go to ruby.
+	 -*)
+		ruby_args="$ruby_args $(quote "$1")"
+	;;
+	 # Abort processing on first non-opt arg.
+	 *)
+		break
+	;;
+	esac
+	shift
+done
+
+# Remove possible duplications of some common JVM options.
+for opt in -Xmx -Xms -Xss; do
+	val=$(expr "$java_opts" : ".*$opt\([^ \t]*\).*" ||:)  # gets the later one
+	if [ -n "$val" ]; then
+		# Remove all occurrences of $opt and append the last one to the end.
+		java_opts=$(printf "%s\n" "$java_opts" | sed "s/$opt[^ \t]*//g")
+		java_opts="$java_opts ${opt}${val}"
+	fi
+done
+
+classpath="$classpath${extra_cp:+":$extra_cp"}"
+java_opts="$java_opts $java_vm
+	-Djruby.home=$JRUBY_HOME
+	-Djruby.lib=$JRUBY_HOME/lib
+	-Djruby.script=jruby
+	-Djruby.shell=$JRUBY_SHELL"
+
+# Append the rest of the arguments.
+ruby_args="$ruby_args $(quote "$@")"
+
+# Put $ruby_args back into the position arguments $1, $2, ...
+# We must use eval to unquote arguments that we have quoted in order to
+# preserve whitespaces.
+eval "set -- $ruby_args"
+
+
+if [ "$nailgun_client" = 'yes' ]; then
+	if [ ! -f "$NAILGUN_CMD" ]; then
+		echo 'ERROR: ng executable not found' 1>&2
+		exit 1
+	fi
+	exec "$NAILGUN_CMD" $MAIN_CLASS_NGCLIENT "$@"
+
+elif [ "$verify_jruby" = 'yes' ]; then
+	[ -n "$PROFILE_ARGS" ] && echo 'Running with instrumented profiler'
+
+	set +e
+	"$java_cmd" $PROFILE_ARGS $java_opts \
+		-classpath "$JRUBY_CP:$classpath" $main_class "$@"
+	exit_code=$?
+	set -e
+
+	if [ -n "$PROFILE_ARGS" ]; then
+		echo 'Profiling results:'
+		cat profile.txt
+		rm profile.txt
+	fi
+
+	exit $exit_code
+
+else
+	exec "$java_cmd" $java_opts -Xbootclasspath/a:"$JRUBY_CP" \
+		${classpath:+"-classpath $classpath"} \
+		$main_class "$@"
+fi

@@ -144,7 +144,7 @@ copyfile(const char* source, int output)
 	}
 
 	result = sendfile(output, in_fd, &bytes, fileinfo.st_size);
-	if (result == EINVAL || result == ENOSYS)
+	if ((result == -1) && (errno == EINVAL || errno == ENOSYS))
 		result = buffered_copyfd(in_fd, output, fileinfo.st_size);
 
 	close(in_fd);
