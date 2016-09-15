@@ -1,0 +1,153 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/segment: Bounds check accesses to emulation ctxt->seg_reg[]
+
+HVM HAP codepaths have space for all segment registers in the seg_reg[]
+cache (with x86_seg_none still risking an array overrun), while the shadow
+codepaths only have space for the user segments.
+
+Range check the input segment of *_get_seg_reg() against the size of the array
+used to cache the results, to avoid overruns in the case that the callers
+don't filter their input suitably.
+
+Subsume the is_x86_user_segment(seg) checks from the shadow code, which were
+an incomplete attempt at range checking, and are now superceeded.  Make
+hvm_get_seg_reg() static, as it is not used outside of shadow/common.c
+
+No functional change, but far easier to reason that no overflow is possible.
+
+Reported-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Acked-by: Tim Deegan <tim@xen.org>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+
+--- a/xen/arch/x86/hvm/emulate.c
++++ b/xen/arch/x86/hvm/emulate.c
+@@ -534,6 +534,8 @@ static int hvmemul_virtual_to_linear(
+     *reps = min_t(unsigned long, *reps, max_reps);
+ 
+     reg = hvmemul_get_seg_reg(seg, hvmemul_ctxt);
++    if ( IS_ERR(reg) )
++        return -PTR_ERR(reg);
+ 
+     if ( (hvmemul_ctxt->ctxt.regs->eflags & X86_EFLAGS_DF) && (*reps > 1) )
+     {
+@@ -1369,6 +1371,10 @@ static int hvmemul_read_segment(
+     struct hvm_emulate_ctxt *hvmemul_ctxt =
+         container_of(ctxt, struct hvm_emulate_ctxt, ctxt);
+     struct segment_register *sreg = hvmemul_get_seg_reg(seg, hvmemul_ctxt);
++
++    if ( IS_ERR(sreg) )
++         return -PTR_ERR(sreg);
++
+     memcpy(reg, sreg, sizeof(struct segment_register));
+     return X86EMUL_OKAY;
+ }
+@@ -1382,6 +1388,9 @@ static int hvmemul_write_segment(
+         container_of(ctxt, struct hvm_emulate_ctxt, ctxt);
+     struct segment_register *sreg = hvmemul_get_seg_reg(seg, hvmemul_ctxt);
+ 
++    if ( IS_ERR(sreg) )
++         return -PTR_ERR(sreg);
++
+     memcpy(sreg, reg, sizeof(struct segment_register));
+     __set_bit(seg, &hvmemul_ctxt->seg_reg_dirty);
+ 
+@@ -1934,10 +1943,17 @@ void hvm_emulate_writeback(
+     }
+ }
+ 
++/*
++ * Callers which pass a known in-range x86_segment can rely on the return
++ * pointer being valid.  Other callers must explicitly check for errors.
++ */
+ struct segment_register *hvmemul_get_seg_reg(
+     enum x86_segment seg,
+     struct hvm_emulate_ctxt *hvmemul_ctxt)
+ {
++    if ( seg < 0 || seg >= ARRAY_SIZE(hvmemul_ctxt->seg_reg) )
++        return ERR_PTR(-X86EMUL_UNHANDLEABLE);
++
+     if ( !__test_and_set_bit(seg, &hvmemul_ctxt->seg_reg_accessed) )
+         hvm_get_segment_register(current, seg, &hvmemul_ctxt->seg_reg[seg]);
+     return &hvmemul_ctxt->seg_reg[seg];
+--- a/xen/arch/x86/mm/shadow/common.c
++++ b/xen/arch/x86/mm/shadow/common.c
+@@ -123,10 +123,19 @@ __initcall(shadow_audit_key_init);
+ /* x86 emulator support for the shadow code
+  */
+ 
+-struct segment_register *hvm_get_seg_reg(
++/*
++ * Callers which pass a known in-range x86_segment can rely on the return
++ * pointer being valid.  Other callers must explicitly check for errors.
++ */
++static struct segment_register *hvm_get_seg_reg(
+     enum x86_segment seg, struct sh_emulate_ctxt *sh_ctxt)
+ {
+-    struct segment_register *seg_reg = &sh_ctxt->seg_reg[seg];
++    struct segment_register *seg_reg;
++
++    if ( seg < 0 || seg >= ARRAY_SIZE(sh_ctxt->seg_reg) )
++        return ERR_PTR(-X86EMUL_UNHANDLEABLE);
++
++    seg_reg = &sh_ctxt->seg_reg[seg];
+     if ( !__test_and_set_bit(seg, &sh_ctxt->valid_seg_regs) )
+         hvm_get_segment_register(current, seg, seg_reg);
+     return seg_reg;
+@@ -143,14 +152,9 @@ static int hvm_translate_linear_addr(
+     struct segment_register *reg;
+     int okay;
+ 
+-    /*
+-     * Can arrive here with non-user segments.  However, no such cirucmstance
+-     * is part of a legitimate pagetable update, so fail the emulation.
+-     */
+-    if ( !is_x86_user_segment(seg) )
+-        return X86EMUL_UNHANDLEABLE;
+-
+     reg = hvm_get_seg_reg(seg, sh_ctxt);
++    if ( IS_ERR(reg) )
++        return -PTR_ERR(reg);
+ 
+     okay = hvm_virtual_to_linear_addr(
+         seg, reg, offset, bytes, access_type, sh_ctxt->ctxt.addr_size, paddr);
+@@ -253,9 +257,6 @@ hvm_emulate_write(enum x86_segment seg,
+     unsigned long addr;
+     int rc;
+ 
+-    if ( !is_x86_user_segment(seg) )
+-        return X86EMUL_UNHANDLEABLE;
+-
+     /* How many emulations could we save if we unshadowed on stack writes? */
+     if ( seg == x86_seg_ss )
+         perfc_incr(shadow_fault_emulate_stack);
+@@ -283,7 +284,7 @@ hvm_emulate_cmpxchg(enum x86_segment seg
+     unsigned long addr, old, new;
+     int rc;
+ 
+-    if ( !is_x86_user_segment(seg) || bytes > sizeof(long) )
++    if ( bytes > sizeof(long) )
+         return X86EMUL_UNHANDLEABLE;
+ 
+     rc = hvm_translate_linear_addr(
+--- a/xen/arch/x86/mm/shadow/private.h
++++ b/xen/arch/x86/mm/shadow/private.h
+@@ -740,8 +740,6 @@ const struct x86_emulate_ops *shadow_ini
+     struct sh_emulate_ctxt *sh_ctxt, struct cpu_user_regs *regs);
+ void shadow_continue_emulation(
+     struct sh_emulate_ctxt *sh_ctxt, struct cpu_user_regs *regs);
+-struct segment_register *hvm_get_seg_reg(
+-    enum x86_segment seg, struct sh_emulate_ctxt *sh_ctxt);
+ 
+ #if (SHADOW_OPTIMIZATIONS & SHOPT_VIRTUAL_TLB)
+ /**************************************************************************/
+--- a/xen/include/asm-x86/hvm/emulate.h
++++ b/xen/include/asm-x86/hvm/emulate.h
+@@ -13,6 +13,7 @@
+ #define __ASM_X86_HVM_EMULATE_H__
+ 
+ #include <xen/config.h>
++#include <xen/err.h>
+ #include <asm/hvm/hvm.h>
+ #include <asm/x86_emulate.h>
+ 
