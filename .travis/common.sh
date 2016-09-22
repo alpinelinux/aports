@@ -3,6 +3,7 @@
 readonly ALPINE_ROOT='/mnt/alpine'
 readonly ALPINE_USER='alpine'
 readonly CLONE_DIR="${CLONE_DIR:-$(pwd)}"
+readonly MIRROR_URI='http://dl-cdn.alpinelinux.org/alpine/edge'
 
 # Runs commands inside the Alpine chroot.
 alpine_run() {
