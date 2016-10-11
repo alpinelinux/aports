@@ -1,16 +1,90 @@
 #!/sbin/openrc-run
 
-name="uwsgi"
-command="/usr/sbin/uwsgi"
-command_args="--ini /etc/uwsgi/uwsgi.ini --daemonize=/var/log/uwsgi/uwsgi.log"
-retry="INT/30/KILL/5"
-start_stop_daemon_args="--quiet"
+# If you want to run multiple separate processes, then create symlinks to
+# this runscript (e.g. uwsgi.myapp or myapp) and configure options in
+# the corresponding conf.d files. uWSGI options can be specified as variables
+# prefixed with "uwsgi_" (e.g. uwsgi_chmod_socket=640 -> --chmod-socket=640).
+
+: ${pidfile:="/run/$RC_SVCNAME/uwsgi.pid"}
+
+extra_started_commands='reload stats'
+description_reload='Gracefully reload all the workers and the master process'
+description_stats='Dump uWSGI statistics to log file'
+
+command='/usr/sbin/uwsgi'
+command_args="--die-on-term"
+command_background='yes'
+start_stop_daemon_args='--quiet'
+retry='INT/30/KILL/5'
+
+if [ "$RC_SVCNAME" = 'uwsgi' ]; then
+	: ${name:="uWSGI emperor"}
+	emperor='yes'
+else
+	: ${name:="uWSGI application ${RC_SVCNAME#uwsgi.}"}
+	emperor='no'
+fi
 
 depend() {
-        need net
+	need net
+	use apache2 lighttpd nginx
+	after postgresql
 }
 
 start_pre() {
-        checkpath --directory --owner uwsgi:uwsgi \
-                --mode 0775 /run/uwsgi /var/log/uwsgi
+	if [ "$emperor" = 'yes' ]; then
+		: ${logfile:="/var/log/uwsgi/uwsgi.log"}
+		: ${user:="root"}
+	else
+		: ${user:="nobody"}
+		command_args="$command_args --master"
+	fi
+	start_stop_daemon_args="$start_stop_daemon_args
+		--user $user
+		$(optif --group "$group")
+		$(optif --stdout "$logfile")
+		$(optif --stderr "$logfile")"
+
+	if [ -z "$uwsgi_conf" ]; then
+		case "$RC_SVCNAME" in
+			uwsgi) uwsgi_conf='/etc/uwsgi/uwsgi.ini';;
+			uwsgi.*) uwsgi_conf="/etc/uwsgi/conf.d/${RC_SVCNAME#uwsgi.}";;
+			*) uwsgi_conf="/etc/$RC_SVCNAME/uwsgi";;
+		esac
+	fi
+
+	if [ -f "${uwsgi_conf%.ini}.ini" ]; then
+		command_args="$command_args --ini ${uwsgi_conf%.ini}.ini"
+	elif [ -f "${uwsgi_conf%.yml}.yml" ]; then
+		command_args="$command_args --yaml ${uwsgi_conf%.yml}.yml"
+	fi
+
+	# Convert variables "uwsgi_<opt_name>=<value>" into "--<opt-name>=<value>".
+	local uwsgi_opts="$(set | grep -v '^uwsgi_conf=' \
+		| sed -En 's/^uwsgi_([^=]+)=(.*)/--\1=\2 /p' \
+		| sed -E ':s; s/^([^=]*)_([^=]*)=(.*)$/\1-\2=\3/; t s;')"
+	command_args="$command_args $uwsgi_opts"
+
+	checkpath -d -m 755 -o $user:$group \
+		"$(dirname "$pidfile")" "$(dirname "$logfile")"
+
+	if yesno "$EINFO_VERBOSE"; then
+		einfo "Command: $command $(printf '%s ' $command_args)"
+	fi
+}
+
+reload() {
+	ebegin "Reloading $name"
+	start-stop-daemon --signal HUP --pidfile "$pidfile"
+	eend $?
+}
+
+stats() {
+	ebegin "Dumping statistics for $name to the log file"
+	start-stop-daemon --signal USR1 --pidfile "$pidfile"
+	eend $?
+}
+
+optif() {
+	test -n "$2" && printf "%s %s\n" "$1" "$2"
 }
