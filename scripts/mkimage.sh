@@ -142,6 +142,7 @@ build_profile() {
 	# Defaults
 	[ -n "$image_name" ] || image_name="alpine-${PROFILE}"
 	[ -n "$output_filename" ] || output_filename="${image_name}-${RELEASE}-${ARCH}.${image_ext}"
+	local output_file="${OUTDIR:-.}/$output_filename"
 
 	# Construct final image
 	local _imgid=$(echo -n $_my_sections | sort | checksum)
@@ -161,14 +162,14 @@ build_profile() {
 		fi
 	fi
 
-	if [ "$_dirty" = "yes" -o ! -e "$output_filename" ]; then
+	if [ "$_dirty" = "yes" -o ! -e "$output_file" ]; then
 		# Create image
 		output_format="${image_ext//[:\.]/}"
 		create_image_${output_format} || { _fail="yes"; false; }
 
 		if [ "$_checksum" = "yes" ]; then
 			for _c in $all_checksums; do
-				${_c}sum "$output_filename" > "${output_filename}.${_c}"
+				${_c}sum "$output_file" > "${output_file}.${_c}"
 			done
 		fi
 	fi
