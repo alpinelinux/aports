@@ -145,7 +145,7 @@ build_profile() {
 	# Construct final image
 	local _imgid=$(echo -n $_my_sections | sort | checksum)
 	DESTDIR=$WORKDIR/image-$_imgid-$ARCH-$PROFILE
-	if [ "_$dirty" = "yes" -o ! -e "$DESTDIR" ]; then
+	if [ "$_dirty" = "yes" -o ! -e "$DESTDIR" ]; then
 		msg "Creating $output_filename"
 		if [ -z "$_simulate" ]; then
 			# Merge sections
@@ -160,7 +160,7 @@ build_profile() {
 		fi
 	fi
 
-	if [ "_$dirty" = "yes" -o ! -e "$output_filename" ]; then
+	if [ "$_dirty" = "yes" -o ! -e "$output_filename" ]; then
 		# Create image
 		output_format="${image_ext//[:\.]/}"
 		create_image_${output_format} || _fail="yes"
