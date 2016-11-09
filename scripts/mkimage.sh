@@ -217,6 +217,9 @@ for ARCH in $req_arch; do
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
 		abuild-apk --arch "$ARCH" --root "$APKROOT" add --initdb
 
+		if [ -z "$REPODIR" ]; then
+			warning "no repository set"
+		fi
 		echo "$REPODIR" > "$APKROOT/etc/apk/repositories"
 	fi
 	abuild-apk update --root "$APKROOT"
