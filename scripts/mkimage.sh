@@ -209,6 +209,14 @@ req_arch=${req_arch:-${default_arch}}
 [ "$req_arch" != "all" ] || req_arch="${all_arch}"
 [ "$req_profiles" != "all" ] || req_profiles="${all_profiles}"
 
+# get abuild pubkey used to sign the apkindex
+# we need inject this to the initramfs or we will not be able to use the
+# boot repository
+if [ -z "$_hostkeys" ]; then
+	_pub=${PACKAGER_PRIVKEY:+${PACKAGER_PRIVKEY}.pub}
+	_abuild_pubkey="${PACKAGER_PUBKEY:-$_pub}"
+fi
+
 # create images
 for ARCH in $req_arch; do
 	APKROOT="$WORKDIR/apkroot-$ARCH"

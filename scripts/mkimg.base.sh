@@ -4,6 +4,7 @@ build_kernel() {
 	local _pkgs="$@"
 	update-kernel \
 		$_hostkeys \
+		${_abuild_pubkey:+--apk-pubkey $_abuild_pubkey} \
 		--media \
 		--flavor "$_flavor" \
 		--arch "$ARCH" \
