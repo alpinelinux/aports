@@ -113,6 +113,7 @@ build_section() {
 			else
 				rm -rf "$DESTDIR"
 				_fail="yes"
+				return 1
 			fi
 		fi
 	fi
@@ -134,7 +135,7 @@ build_profile() {
 
 	# Collect list of needed sections, and make sure they are built
 	for SECTION in $all_sections; do
-		section_$SECTION
+		section_$SECTION || return 1
 	done
 	[ "$_fail" = "no" ] || return 1
 
@@ -163,7 +164,7 @@ build_profile() {
 	if [ "$_dirty" = "yes" -o ! -e "$output_filename" ]; then
 		# Create image
 		output_format="${image_ext//[:\.]/}"
-		create_image_${output_format} || _fail="yes"
+		create_image_${output_format} || { _fail="yes"; false; }
 
 		if [ "$_checksum" = "yes" ]; then
 			for _c in $all_checksums; do
@@ -221,6 +222,6 @@ for ARCH in $req_arch; do
 	abuild-apk update --root "$APKROOT"
 
 	for PROFILE in $req_profiles; do
-		(build_profile)
+		(build_profile) || exit 1
 	done
 done
