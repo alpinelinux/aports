@@ -47,6 +47,7 @@ for image; do
 	size="$(stat -c "%s" $image)"
 	date=${datetime%% *}
 	time=${datetime#* }
+	time=${time%.*}
 	file=${filepath##*/}
 	flavor=${file%-${release}-${arch}.*}
 
