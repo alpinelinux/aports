@@ -29,7 +29,6 @@ _simulate=""
 _checksum=""
 
 OUTDIR="$PWD"
-RELEASE="${build_date}"
 
 msg() {
 	if [ -n "$quiet" ]; then return 0; fi
@@ -208,6 +207,15 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+if [ -z "$RELEASE" ]; then
+	if git describe --exact-match >/dev/null 2>&1; then
+		RELEASE=$(git describe --always)
+		RELEASE=${RELEASE#v}
+	else
+		RELEASE="${build_date}"
+	fi
+fi
+
 # setup defaults
 if [ -z "$WORKDIR" ]; then
 	WORKDIR="$(mktemp -d -t mkimage.XXXXXX)"
@@ -253,3 +261,4 @@ for ARCH in $req_arch; do
 		(build_profile) || exit 1
 	done
 done
+echo "Images generated in $OUTDIR"

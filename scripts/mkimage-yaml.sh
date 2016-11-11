@@ -34,12 +34,6 @@ fi
 
 [ -n "$arch" ] || arch=$(apk --print-arch)
 
-if [ -z "$release" ]; then
-	release=$(git describe --always)
-	if git describe --exact-match >/dev/null 2>&1; then
-		release=${release#v}
-	fi
-fi
 
 for image; do
 	filepath="$releasedir/${image##*/}"
