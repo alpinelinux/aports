@@ -28,7 +28,10 @@ _hostkeys=""
 _simulate=""
 _checksum=""
 
+scriptdir="$(dirname $0)"
 OUTDIR="$PWD"
+RELEASE="${build_date}"
+
 
 msg() {
 	if [ -n "$quiet" ]; then return 0; fi
@@ -182,7 +185,7 @@ build_profile() {
 }
 
 # load plugins
-load_plugins "$(dirname $0)"
+load_plugins "$scriptdir"
 [ -z "$HOME" ] || load_plugins "$HOME/.mkimage"
 
 mkimage_yaml="$(dirname $0)"/mkimage-yaml.sh
