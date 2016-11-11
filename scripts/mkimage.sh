@@ -219,6 +219,8 @@ req_arch=${req_arch:-${default_arch}}
 [ "$req_arch" != "all" ] || req_arch="${all_arch}"
 [ "$req_profiles" != "all" ] || req_profiles="${all_profiles}"
 
+mkdir -p "$OUTDIR"
+
 # get abuild pubkey used to sign the apkindex
 # we need inject this to the initramfs or we will not be able to use the
 # boot repository
