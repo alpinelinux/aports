@@ -34,6 +34,7 @@ arch=$(abuild -A)
 aports=${APORTS:-$HOME/aports}
 isodir=$HOME/alpine-iso
 packages=${REPOSDIR:-$HOME/packages}
+releasedir="$packages/releases/$arch"
 repos=${REPOS:-"main community testing"}
 
 : ${buildrepo:="buildrepo -p"}
@@ -62,34 +63,22 @@ send_irc() {
 }
 
 # create new_release
-new_release() {
-	local new=$1
-	local target="all-release"
-	local yaml=latest-releases.yaml
-	local txt=.latest.txt
-	local release_pkgs="lua"
-	if [ "$rel" = "edge" ]; then
-		target="edge"
-	fi
+create_release() {
+	local release="$1"
+	local release_deps="abuild apk-tools alpine-conf busybox fakeroot xorriso rsync"
 	case "$arch" in
-	x86*) release_pkgs="$release_pkgs syslinux";;
+	x86*) release_deps="$release_deps syslinux";;
 	esac
-	cd "$isodir"
-	echo "$new" > current
-	rm -rf isotmp.*
-	sudo apk add --virtual .alpine-release $release_pkgs
-	if ! make $target; then
-		rm current
-		return 1
+
+	cd "$aports"
+	abuild-apk add --virtual .alpine-release-deps $release_deps
+	sh scripts/mkimage.sh --repository $packages/main --yaml \
+		--tag "$release" --outdir $releasedir || return 1
+
+	if $use_network; then
+		ssh $upload_host mkdir -p "${upload_iso#${upload_host}:}"
+		rsync -ruv "$releasedir"/* "$upload_iso" || return 1
 	fi
-	sh mklatest.sh || return 1
-	ssh $upload_host mkdir -p "${upload_iso#${upload_host}:}"
-	[ -e "$yaml" ] || yaml=""
-	[ -e "$txt" ] || txt=""
-	rsync -ruv $yaml $txt *"$new"* "$upload_iso" || return 1
-	sudo apk del .alpine-release
-	mv current previous
-	return 0
 }
 
 build() {
@@ -105,11 +94,22 @@ build() {
 cd $aports || return 1
 [ -z "$repos" ] && return 1
 
+use_network=true
+force_release=false
+skip_build=false
+
 # parse opts
-while getopts "fu:" opt; do
+while getopts "fFu:ns" opt; do
 	case $opt in
 	'f') force=true;;
+	'F') force_release=true;;
 	'u') logurl=" $OPTARG";;
+	'n') use_network=false
+	     status_msg="echo status_msg:"
+	     upload_msg="echo upload_msg:"
+	     irc_msg="echo irc_msg:"
+	     ;;
+	's') skip_build=true;;
 	esac
 done
 shift $(( $OPTIND - 1 ))
@@ -118,11 +118,13 @@ while true; do
 	do_release=false
 	cd $aports || return 1
 	# check if we need to rebuild
-	log "pulling git"
 	_old=$(git describe)
 	_old_tag=$(git describe --abbrev=0)
-	git checkout $git_branch
-	git pull || return 1
+	if $use_network; then
+		log "pulling git"
+		git checkout $git_branch
+		git pull || return 1
+	fi
 	_current=$(git describe)
 	_current_tag=$(git describe --abbrev=0)
 	if [ "$_old_tag" != "$_current_tag" ]; then
@@ -135,6 +137,9 @@ while true; do
 		break
 	fi
 
+	if $force_release; then
+		do_release=true
+	fi
 	force=
 
 	# check if we need make new release
@@ -151,7 +156,7 @@ while true; do
 	log "building $_current"
 	rm -f "$logdir"/$hostname.log
 	rc=0
-	for repo in $repos; do
+	! $skip_build && for repo in $repos; do
 		if ! build $repo >>"$logdir"/$hostname.log 2>&1 ; then
 			errlog=$hostname.$_current.log
 			cp "$logdir"/$hostname.log "$logdir"/$errlog
@@ -171,7 +176,7 @@ while true; do
 		fi
 
 		log "uploading packages to $repo"
-		for i in $upload_pkg; do
+		$use_network && for i in $upload_pkg; do
 			rsync -rui --delete-delay --delay-updates \
 				$repo/$arch $i/$repo/ > /tmp/upload-$repo
 			if [ $? -ne 0 ]; then
@@ -185,11 +190,8 @@ while true; do
 	done
 	[ $rc -eq 0 ] && touch /tmp/uploaded && sudo apk update
 
-	if [ -n "$upload_pkg" ] && $do_release; then
-		if new_release ${_current_tag#v}; then
-			$upload_msg "$rel/releases/$arch"
-			send_irc "release $_current_tag uploaded"
-		fi
+	if $do_release && create_release ${_current_tag#v}; then
+		$upload_msg "$rel/releases/$arch"
 	fi
 
 done
