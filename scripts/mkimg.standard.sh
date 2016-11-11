@@ -10,6 +10,7 @@ profile_standard() {
 profile_vanilla() {
 	profile_standard
 	kernel_flavors="vanilla"
+	kernel_addons=
 }
 
 profile_extended() {
@@ -49,6 +50,7 @@ profile_extended() {
 
 profile_virt() {
 	profile_standard
+	kernel_addons=
 	kernel_flavors="virtgrsec"
 	kernel_cmdline="console=tty0 console=ttyS0,115200"
 	syslinux_serial="0 115200"
