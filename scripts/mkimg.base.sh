@@ -155,6 +155,6 @@ profile_base() {
 	initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage quiet"
 	initfs_features="ata base bootchart cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
 	apks="alpine-base alpine-mirrors bkeymaps chrony e2fsprogs network-extras openssl openssh tzdata"
-	apkovl="genapkovl-dhcp.sh"
+	apkovl=
 	hostname="alpine"
 }
