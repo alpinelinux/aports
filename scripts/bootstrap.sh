@@ -93,9 +93,9 @@ cross_compile_base() {
 		|| return 1
 
 	# ordered cross-build
-	for PKG in fortify-headers linux-headers musl libc-dev \
-		   busybox busybox-initscripts binutils make pkgconf \
-		   zlib openssl libfetch apk-tools \
+	for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
+		   busybox busybox-initscripts binutils make \
+		   libressl libfetch apk-tools \
 		   gmp mpfr3 mpc1 isl cloog gcc \
 		   openrc alpine-conf alpine-baselayout alpine-keys alpine-base build-base \
 		   attr libcap patch sudo acl fakeroot tar \
