@@ -74,13 +74,14 @@ build_syslinux() {
 	local _fn
 	mkdir -p "$DESTDIR"/boot/syslinux
 	apk fetch --root "$APKROOT" --stdout syslinux | tar -C "$DESTDIR" -xz usr/share/syslinux
-	for _fn in isolinux.bin ldlinux.c32 libutil.c32 libcom32.c32 mboot.c32; do
+	for _fn in isohdpfx.bin isolinux.bin ldlinux.c32 libutil.c32 libcom32.c32 mboot.c32; do
 		mv "$DESTDIR"/usr/share/syslinux/$_fn "$DESTDIR"/boot/syslinux/$_fn || return 1
 	done
 	rm -rf "$DESTDIR"/usr
 }
 
 section_syslinux() {
+	[ "$ARCH" = x86 -o "$ARCH" = x86_64 ] || return 0
 	[ "$output_format" = "iso" ] || return 0
 	build_section syslinux $(apk fetch --root "$APKROOT" --simulate syslinux | sort | checksum)
 }
@@ -94,24 +95,38 @@ syslinux_gen_config() {
 	local _f
 	for _f in $kernel_flavors; do
 		if [ -z "${xen_params+set}" ]; then
-			cat <<EOF
+			cat <<- EOF
 
-LABEL $_f
-	MENU LABEL Linux $_f
-	KERNEL /boot/vmlinuz-$_f
-	INITRD /boot/initramfs-$_f
-	DEVICETREEDIR /boot/dtbs
-	APPEND $initfs_cmdline $kernel_cmdline
-EOF
+			LABEL $_f
+				MENU LABEL Linux $_f
+				KERNEL /boot/vmlinuz-$_f
+				INITRD /boot/initramfs-$_f
+				DEVICETREEDIR /boot/dtbs
+				APPEND $initfs_cmdline $kernel_cmdline
+			EOF
 		else
-			cat <<EOF
+			cat <<- EOF
 
-LABEL $_f
-	MENU LABEL Xen/Linux $_f
-	KERNEL /boot/syslinux/mboot.c32
-	APPEND /boot/xen.gz ${xen_params} --- /boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline --- /boot/initramfs-$_f
-EOF
+			LABEL $_f
+				MENU LABEL Xen/Linux $_f
+				KERNEL /boot/syslinux/mboot.c32
+				APPEND /boot/xen.gz ${xen_params} --- /boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline --- /boot/initramfs-$_f
+			EOF
 		fi
+	done
+}
+
+grub_gen_config() {
+	local _f
+	echo "set timeout=2"
+	for _f in $kernel_flavors; do
+		cat <<- EOF
+		
+		menuentry "Linux $_f" {
+			linux	/boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline
+			initrd	/boot/initramfs-$_f
+		}
+		EOF
 	done
 }
 
@@ -123,27 +138,123 @@ build_syslinux_cfg() {
 
 section_syslinux_cfg() {
 	syslinux_cfg=""
-	[ ! "$output_format" = "iso" ] || syslinux_cfg="boot/syslinux/syslinux.cfg"
+	if [ "$ARCH" = x86 -o "$ARCH" = x86_64 ]; then
+		[ ! "$output_format" = "iso" ] || syslinux_cfg="boot/syslinux/syslinux.cfg"
+	fi
 	[ ! -n "$uboot_install" ] || syslinux_cfg="extlinux/extlinux.conf"
 	[ -n "$syslinux_cfg" ] || return 0
 	build_section syslinux_cfg $syslinux_cfg $(syslinux_gen_config | checksum)
 }
 
+build_grub_cfg() {
+	local grub_cfg="$1"
+	mkdir -p "${DESTDIR}/$(dirname $grub_cfg)"
+	grub_gen_config > "${DESTDIR}"/$grub_cfg
+}
+
+grub_gen_earlyconf() {
+	cat <<- EOF
+	search --no-floppy --set=root --label "alpine-$PROFILE $RELEASE $ARCH"
+	set prefix=(\$root)/boot/grub
+	EOF
+}
+
+build_grubefi_img() {
+	local _format="$1"
+	local _efi="$2"
+	local _tmpdir="$WORKDIR/efiboot.$3"
+
+	# Prepare grub-efi bootloader
+	mkdir -p "$_tmpdir/efi/boot"
+	grub_gen_earlyconf > "$_tmpdir"/grub_early.cfg
+	grub-mkimage \
+		--config="$_tmpdir"/grub_early.cfg \
+		--prefix="/boot/grub" \
+		--output="$_tmpdir/efi/boot/$_efi" \
+		--format="$_format" \
+		--compression="xz" \
+		$grub_mod
+
+	# Create the EFI image
+	# mkdosfs and mkfs.vfat are busybox applets which failed to create a proper image
+	# use dosfstools mkfs.fat instead
+	mkdir -p ${DESTDIR}/boot/grub/
+	dd if=/dev/zero of=${DESTDIR}/boot/grub/efiboot.img bs=1K count=1440
+	mkfs.fat -F 12 ${DESTDIR}/boot/grub/efiboot.img
+	mcopy -s -i ${DESTDIR}/boot/grub/efiboot.img $_tmpdir/efi ::
+}
+
+section_grubefi() {
+	[ -n "$grub_mod" ] || return 0
+	[ "$output_format" = "iso" ] || return 0
+
+	local _format _efi
+	case "$ARCH" in
+	x86_64)
+		_format="x86_64-efi"
+		_efi="bootx64.efi"
+		;;
+	aarch64)
+		_format="arm64-efi"
+		_efi="bootaa64.efi"
+		;;
+	*)
+		return 0
+		;;
+	esac
+
+	build_section grub_cfg boot/grub/grub.cfg $(grub_gen_config | checksum)
+	build_section grubefi_img $_format $_efi $(grub_gen_earlyconf | checksum)
+}
+
 create_image_iso() {
 	local ISO="${OUTDIR}/${output_filename}"
+	local _isolinux
+	local _efiboot
+
+	if [ -e "${DESTDIR}/boot/syslinux/isolinux.bin" ]; then
+		# isolinux enabled
+		_isolinux="
+			-isohybrid-mbr ${DESTDIR}/boot/syslinux/isohdpfx.bin
+			-eltorito-boot boot/syslinux/isolinux.bin
+			-eltorito-catalog boot/syslinux/boot.cat
+			-no-emul-boot
+			-boot-load-size 4
+			-boot-info-table
+			"
+	fi
+	if [ -e "${DESTDIR}/boot/grub/efiboot.img" ]; then
+		# efi boot enabled
+		if [ -z "$_isolinux" ]; then
+			# efi boot only
+			_efiboot="
+				-efi-boot-part
+				--efi-boot-image
+				-e boot/grub/efiboot.img
+				-no-emul-boot
+				"
+		else
+			# hybrid isolinux+efi boot
+			_efiboot="
+				-eltorito-alt-boot
+				-e boot/grub/efiboot.img
+				-no-emul-boot
+				-isohybrid-gpt-basdat
+				"
+		fi
+	fi
 	xorrisofs \
-		-o ${ISO} -l -J -R \
-		-b boot/syslinux/isolinux.bin		\
-		-c boot/syslinux/boot.cat		\
-		-V "alpine-$PROFILE $RELEASE $ARCH"	\
-		-no-emul-boot		\
-		-boot-load-size 4	\
-		-boot-info-table	\
-		-quiet			\
-		-follow-links		\
-		${iso_opts}		\
+		-quiet \
+		-output ${ISO} \
+		-full-iso9660-filenames \
+		-joliet \
+		-rock \
+		-volid "alpine-$PROFILE $RELEASE $ARCH" \
+		$_isolinux \
+		$_efiboot \
+		-follow-links \
+		${iso_opts} \
 		${DESTDIR}
-	isohybrid ${ISO}
 }
 
 create_image_targz() {
@@ -154,6 +265,7 @@ profile_base() {
 	kernel_flavors="grsec"
 	initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage quiet"
 	initfs_features="ata base bootchart cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
+	#grub_mod="disk part_msdos linux normal configfile search search_label efi_uga efi_gop fat iso9660 cat echo ls test true help"
 	apks="alpine-base alpine-mirrors bkeymaps chrony e2fsprogs network-extras openssl openssh tzdata"
 	apkovl=
 	hostname="alpine"

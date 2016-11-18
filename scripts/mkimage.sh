@@ -1,6 +1,8 @@
 #!/bin/sh
 
-# apk add abuild apk-tools alpine-conf busybox fakeroot xorriso
+# apk add \
+#	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso
+#	(for efi:) mtools dosfstools grub-efi
 
 # FIXME: clean workdir out of unneeded sections
 # FIXME: --release: cp/mv images to REPODIR/$ARCH/releases/
@@ -55,7 +57,7 @@ usage() {
 
 $0	[--tag RELEASE] [--outdir OUTDIR] [--workdir WORKDIR]
 		[--arch ARCH] [--profile PROFILE] [--hostkeys] [--simulate]
-		[--yaml FILE]
+		[--repository REPO] [--yaml FILE]
 $0	--help
 
 options:
@@ -64,6 +66,7 @@ options:
 --hostkeys	Copy system apk signing keys to created images
 --outdir	Specify directory for the created images
 --profile	Specify which profiles to build
+--repository	Add package repository to use for the image
 --simulate	Don't execute commands
 --tag		Build images for tag RELEASE
 --workdir	Specify temporary working directory (cache)
