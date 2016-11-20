@@ -95,6 +95,8 @@ extern char **apk_argv;
 #define APK_DEFAULT_ARCH	"armel"
 #elif defined(__aarch64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define APK_DEFAULT_ARCH	"aarch64"
+#elif defined(__s390x__)
+#define APK_DEFAULT_ARCH	"s390x"
 #else
 #error APK_DEFAULT_ARCH not detected for this architecture
 #endif
