@@ -88,14 +88,14 @@ cross_compile_base() {
 	apk info --quiet --installed gcc-gnat gcc-$TARGET_ARCH g++-$TARGET_ARCH gcc-gnat-$TARGET_ARCH || \
 		${SUDO_APK} add --repository "$REPODEST/main" gcc-gnat gcc-$TARGET_ARCH g++-$TARGET_ARCH gcc-gnat-$TARGET_ARCH \
 		|| return 1
-	apk info --quiet --installed --root "$CBUILDROOT" libgcc musl-dev || \
-		${SUDO_APK} --root "$CBUILDROOT" add --repository "$REPODEST/main" libgcc musl-dev \
+	apk info --quiet --installed --root "$CBUILDROOT" libgcc libstdc++ musl-dev || \
+		${SUDO_APK} --root "$CBUILDROOT" add --repository "$REPODEST/main" libgcc libstdc++ musl-dev \
 		|| return 1
 
 	# ordered cross-build
-	for PKG in fortify-headers linux-headers musl libc-dev \
-		   busybox busybox-initscripts binutils make pkgconf \
-		   zlib openssl libfetch apk-tools \
+	for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
+		   busybox busybox-initscripts binutils make \
+		   libressl libfetch apk-tools \
 		   gmp mpfr3 mpc1 isl cloog gcc \
 		   openrc alpine-conf alpine-baselayout alpine-keys alpine-base build-base \
 		   attr libcap patch sudo acl fakeroot tar \

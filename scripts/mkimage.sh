@@ -1,6 +1,8 @@
 #!/bin/sh
 
-# apk add abuild apk-tools alpine-conf busybox fakeroot xorriso
+# apk add \
+#	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso
+#	(for efi:) mtools dosfstools grub-efi
 
 # FIXME: clean workdir out of unneeded sections
 # FIXME: --release: cp/mv images to REPODIR/$ARCH/releases/
@@ -55,18 +57,20 @@ usage() {
 
 $0	[--tag RELEASE] [--outdir OUTDIR] [--workdir WORKDIR]
 		[--arch ARCH] [--profile PROFILE] [--hostkeys] [--simulate]
-		[--yaml FILE]
+		[--repository REPO] [--extra-repository REPO] [--yaml FILE]
 $0	--help
 
 options:
---arch		Specify which architecture images to build
-		(default: $default_arch)
---hostkeys	Copy system apk signing keys to created images
---outdir	Specify directory for the created images
---profile	Specify which profiles to build
---simulate	Don't execute commands
---tag		Build images for tag RELEASE
---workdir	Specify temporary working directory (cache)
+--arch			Specify which architecture images to build
+			(default: $default_arch)
+--hostkeys		Copy system apk signing keys to created images
+--outdir		Specify directory for the created images
+--profile		Specify which profiles to build
+--repository		Package repository to use for the image create
+--extra-repository	Add repository to search packages from
+--simulate		Don't execute commands
+--tag			Build images for tag RELEASE
+--workdir		Specify temporary working directory (cache)
 --yaml
 
 known profiles: $(echo $all_profiles | sort -u)
@@ -196,6 +200,7 @@ while [ $# -gt 0 ]; do
 	shift
 	case "$opt" in
 	--repository) REPODIR="$1"; shift ;;
+	--extra-repository) EXTRAREPOS="$EXTRAREPOS $1"; shift ;;
 	--workdir) WORKDIR="$1"; shift ;;
 	--outdir) OUTDIR="$1"; shift ;;
 	--tag) RELEASE="$1"; shift ;;
@@ -253,6 +258,9 @@ for ARCH in $req_arch; do
 			warning "no repository set"
 		fi
 		echo "$REPODIR" > "$APKROOT/etc/apk/repositories"
+		for repo in $EXTRAREPOS; do
+			echo "$repo" >> "$APKROOT/etc/apk/repositories"
+		done
 	fi
 	abuild-apk update --root "$APKROOT"
 
