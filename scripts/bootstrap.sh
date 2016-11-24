@@ -88,8 +88,8 @@ cross_compile_base() {
 	apk info --quiet --installed gcc-gnat gcc-$TARGET_ARCH g++-$TARGET_ARCH gcc-gnat-$TARGET_ARCH || \
 		${SUDO_APK} add --repository "$REPODEST/main" gcc-gnat gcc-$TARGET_ARCH g++-$TARGET_ARCH gcc-gnat-$TARGET_ARCH \
 		|| return 1
-	apk info --quiet --installed --root "$CBUILDROOT" libgcc musl-dev || \
-		${SUDO_APK} --root "$CBUILDROOT" add --repository "$REPODEST/main" libgcc musl-dev \
+	apk info --quiet --installed --root "$CBUILDROOT" libgcc libstdc++ musl-dev || \
+		${SUDO_APK} --root "$CBUILDROOT" add --repository "$REPODEST/main" libgcc libstdc++ musl-dev \
 		|| return 1
 
 	# ordered cross-build
