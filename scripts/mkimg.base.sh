@@ -92,14 +92,17 @@ syslinux_gen_config() {
 	echo "PROMPT ${syslinux_prompt:-1}"
 	echo "DEFAULT ${kernel_flavors%% *}"
 
-	local _f
+	local _f _kf
 	for _f in $kernel_flavors; do
+		_kf=""
+		[ "$_f" = vanilla ] || _kf=-$_f
+
 		if [ -z "${xen_params+set}" ]; then
 			cat <<- EOF
 
 			LABEL $_f
 				MENU LABEL Linux $_f
-				KERNEL /boot/vmlinuz-$_f
+				KERNEL /boot/vmlinuz$_kf
 				INITRD /boot/initramfs-$_f
 				DEVICETREEDIR /boot/dtbs
 				APPEND $initfs_cmdline $kernel_cmdline
@@ -110,20 +113,23 @@ syslinux_gen_config() {
 			LABEL $_f
 				MENU LABEL Xen/Linux $_f
 				KERNEL /boot/syslinux/mboot.c32
-				APPEND /boot/xen.gz ${xen_params} --- /boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline --- /boot/initramfs-$_f
+				APPEND /boot/xen.gz ${xen_params} --- /boot/vmlinuz$_kf $initfs_cmdline $kernel_cmdline --- /boot/initramfs-$_f
 			EOF
 		fi
 	done
 }
 
 grub_gen_config() {
-	local _f
+	local _f _kf
 	echo "set timeout=2"
 	for _f in $kernel_flavors; do
+		_kf=""
+		[ "$_f" = vanilla ] || _kf=-$_f
+
 		cat <<- EOF
 		
 		menuentry "Linux $_f" {
-			linux	/boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline
+			linux	/boot/vmlinuz$_kf $initfs_cmdline $kernel_cmdline
 			initrd	/boot/initramfs-$_f
 		}
 		EOF
