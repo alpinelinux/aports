@@ -20,7 +20,7 @@ This means you care about the quality of your contributions.
 1. [Fork](https://help.github.com/articles/fork-a-repo/) our Alpine Linux aports repository.
 2. Clone your copy of aports `git clone https://github.com/username/aports`.
 3. Create a feature branch `git checkout -b my_new_feature`.
-4. Make your desired changes and commit them with a [correct commit message](https://git-scm.com/book/ch5-2.html).
+4. Make your desired changes and commit them with a [correct commit message](https://git-scm.com/book/ch5-2.html#Commit-Guidelines).
   * Begin the commit message with a single short line summarizing the changes, followed by a blank line and then a more thorough description. Examples of correctly formated summary lines are:
     * When adding a new aport: testing/apkname: new aport
     * When modifying an aport: testing/apkname: short description about changes
