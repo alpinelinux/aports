@@ -30,7 +30,7 @@ This means you care about the quality of your contributions.
 7. If all is ok your PR will be merged but if a developer asks for changes please do as followed.
   * Make the requested changes.
   * Add your file(s) to git and commit (we will squash your commits if needed).
-  * Push your changes `git push --force origin my_new_feature`.
+  * Push your changes `git push origin my_new_feature`.
 8. Goto #6.
 
 ### Submitting a package with new dependencies
