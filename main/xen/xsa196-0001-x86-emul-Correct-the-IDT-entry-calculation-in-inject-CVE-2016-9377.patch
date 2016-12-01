@@ -1,0 +1,61 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/emul: Correct the IDT entry calculation in inject_swint()
+
+The logic, as introduced in c/s 36ebf14ebe "x86/emulate: support for emulating
+software event injection" is buggy.  The size of an IDT entry depends on long
+mode being active, not the width of the code segment currently in use.
+
+In particular, this means that a compatibility code segment which hits
+emulation for software event injection will end up using an incorrect offset
+in the IDT for DPL/Presence checking.  In practice, this only occurs on old
+AMD hardware lacking NRip support; all newer AMD hardware, and all Intel
+hardware bypass this path in the emulator.
+
+While here, fix a minor issue with reading the IDT entry.  The return value
+from ops->read() wasn't checked, but in reality the only failure case is if a
+pagefault occurs.  This is not a realistic problem as the kernel will almost
+certainly crash with a double fault if this setup actually occured.
+
+This is part of XSA-196.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/arch/x86/x86_emulate/x86_emulate.c | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/xen/arch/x86/x86_emulate/x86_emulate.c b/xen/arch/x86/x86_emulate/x86_emulate.c
+index 7a707dc..f74aa8f 100644
+--- a/xen/arch/x86/x86_emulate/x86_emulate.c
++++ b/xen/arch/x86/x86_emulate/x86_emulate.c
+@@ -1630,10 +1630,16 @@ static int inject_swint(enum x86_swint_type type,
+     {
+         if ( !in_realmode(ctxt, ops) )
+         {
+-            unsigned int idte_size = (ctxt->addr_size == 64) ? 16 : 8;
+-            unsigned int idte_offset = vector * idte_size;
++            unsigned int idte_size, idte_offset;
+             struct segment_register idtr;
+             uint32_t idte_ctl;
++            int lm = in_longmode(ctxt, ops);
++
++            if ( lm < 0 )
++                return X86EMUL_UNHANDLEABLE;
++
++            idte_size = lm ? 16 : 8;
++            idte_offset = vector * idte_size;
+ 
+             /* icebp sets the External Event bit despite being an instruction. */
+             error_code = (vector << 3) | ECODE_IDT |
+@@ -1661,8 +1667,9 @@ static int inject_swint(enum x86_swint_type type,
+              * Should strictly speaking read all 8/16 bytes of an entry,
+              * but we currently only care about the dpl and present bits.
+              */
+-            ops->read(x86_seg_none, idtr.base + idte_offset + 4,
+-                      &idte_ctl, sizeof(idte_ctl), ctxt);
++            if ( (rc = ops->read(x86_seg_none, idtr.base + idte_offset + 4,
++                                 &idte_ctl, sizeof(idte_ctl), ctxt)) )
++                goto done;
+ 
+             /* Is this entry present? */
+             if ( !(idte_ctl & (1u << 15)) )
