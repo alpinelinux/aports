@@ -172,7 +172,7 @@ build_profile() {
 
 	if [ "$_dirty" = "yes" -o ! -e "$output_file" ]; then
 		# Create image
-		output_format="${image_ext//[:\.]/}"
+		[ -n "$output_format" ] || output_format="${image_ext//[:\.]/}"
 		create_image_${output_format} || { _fail="yes"; false; }
 
 		if [ "$_checksum" = "yes" ]; then
