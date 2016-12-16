@@ -27,17 +27,17 @@ if [ -z "$outfile" ]; then
 	outfile=$name-$arch.tar.gz
 fi
 
-${APK:-apk} add --keys-dir "$keys_dir" \
+${APK:-apk} add --keys-dir "$keys_dir" --no-cache \
 	--repositories-file "$repositories_file" \
-	--no-script --no-cache --root "$tmp" --initdb \
+	--no-script --root "$tmp" --initdb \
 	"$@"
 for link in $("$tmp"/bin/busybox --list-full); do
 	[ -e "$tmp"/$link ] || ln -s /bin/busybox "$tmp"/$link
 done
 
-${APK:-apk} fetch --keys-dir "$keys_dir" \
+${APK:-apk} fetch --keys-dir "$keys_dir" --no-cache \
 	--repositories-file "$repositories_file" \
-	--stdout alpine-base | tar -zx -C "$tmp" etc/
+	--stdout --quiet alpine-base | tar -zx -C "$tmp" etc/
 
 branch=edge
 VERSION_ID=$(awk -F= '$1=="VERSION_ID" {print $2}'  "$tmp"/etc/os-release)
