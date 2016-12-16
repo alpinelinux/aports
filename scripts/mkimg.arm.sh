@@ -76,9 +76,17 @@ section_uboot() {
 profile_uboot() {
 	profile_base
 	image_ext="tar.gz"
-	arch="armhf armv7"
-	kernel_flavors="grsec"
-	kernel_addons="xtables-addons"
+	arch="aarch64 armhf armv7"
+	case "$ARCH" in
+	aarch64)
+		kernel_flavors="vanilla"
+		kernel_addons=
+		;;
+	*)
+		kernel_flavors="grsec"
+		kernel_addons="xtables-addons"
+		;;
+	esac
 	initfs_features="base bootchart squashfs ext2 ext3 ext4 kms mmc raid scsi usb"
 	apkovl="genapkovl-dhcp.sh"
 	hostname="alpine"
