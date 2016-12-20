@@ -1,0 +1,130 @@
+From: Wei Chen <Wei.Chen@arm.com>
+Subject: arm32: handle async aborts delivered while at HYP
+
+If guest generates an asynchronous abort and then traps into HYP
+(by HVC or IRQ) before the abort has been delivered, the hypervisor
+could not catch it, because the PSTATE.A bit is masked all the time
+in hypervisor. So this asynchronous abort may be slipped to next
+running guest with PSTATE.A bit unmasked.
+
+In order to avoid this, it is necessary to take the abort at HYP, by
+clearing the PSTATE.A bit. In this patch, we unmask the PSTATE.A bit
+to open a window to catch guest-generated asynchronous abort in all
+Guest -> HYP switch paths. If we caught such asynchronous abort in
+checking window, the HYP data abort exception will be triggered and
+the abort source guest will be crashed.
+
+This is CVE-2016-9818, part of XSA-201.
+
+Signed-off-by: Wei Chen <Wei.Chen@arm.com>
+Reviewed-by: Julien Grall <julien.grall@arm.com>
+
+--- a/xen/arch/arm/arm32/entry.S
++++ b/xen/arch/arm/arm32/entry.S
+@@ -42,6 +42,61 @@ save_guest_regs:
+         SAVE_BANKED(fiq)
+         SAVE_ONE_BANKED(R8_fiq); SAVE_ONE_BANKED(R9_fiq); SAVE_ONE_BANKED(R10_fiq)
+         SAVE_ONE_BANKED(R11_fiq); SAVE_ONE_BANKED(R12_fiq);
++        /*
++         * Start to check pending virtual abort in the gap of Guest -> HYP
++         * world switch.
++         *
++         * Save ELR_hyp to check whether the pending virtual abort exception
++         * takes place while we are doing this trap exception.
++         */
++        mrs r1, ELR_hyp
++
++        /*
++         * Force loads and stores to complete before unmasking asynchronous
++         * aborts and forcing the delivery of the exception.
++         */
++        dsb sy
++
++        /*
++         * Unmask asynchronous abort bit. If there is a pending asynchronous
++         * abort, the data_abort exception will happen after A bit is cleared.
++         */
++        cpsie a
++
++        /*
++         * This is our single instruction exception window. A pending
++         * asynchronous abort is guaranteed to occur at the earliest when we
++         * unmask it, and at the latest just after the ISB.
++         *
++         * If a pending abort occurs, the program will jump to data_abort
++         * exception handler, and the ELR_hyp will be set to
++         * abort_guest_exit_start or abort_guest_exit_end.
++         */
++        .global abort_guest_exit_start
++abort_guest_exit_start:
++
++        isb
++
++        .global abort_guest_exit_end
++abort_guest_exit_end:
++        /* Mask CPSR asynchronous abort bit, close the checking window. */
++        cpsid a
++
++        /*
++         * Compare ELR_hyp and the saved value to check whether we are
++         * returning from a valid exception caused by pending virtual
++         * abort.
++         */
++        mrs r2, ELR_hyp
++        cmp r1, r2
++
++        /*
++         * Not equal, the pending virtual abort exception took place, the
++         * initial exception does not have any significance to be handled.
++         * Exit ASAP.
++         */
++        bne return_from_trap
++
+         mov pc, lr
+
+ #define DEFINE_TRAP_ENTRY(trap)                                         \
+--- a/xen/arch/arm/arm32/traps.c
++++ b/xen/arch/arm/arm32/traps.c
+@@ -63,7 +63,10 @@ asmlinkage void do_trap_prefetch_abort(struct cpu_user_regs *regs)
+
+ asmlinkage void do_trap_data_abort(struct cpu_user_regs *regs)
+ {
+-    do_unexpected_trap("Data Abort", regs);
++    if ( VABORT_GEN_BY_GUEST(regs) )
++        do_trap_guest_error(regs);
++    else
++        do_unexpected_trap("Data Abort", regs);
+ }
+
+ /*
+--- a/xen/include/asm-arm/arm32/processor.h
++++ b/xen/include/asm-arm/arm32/processor.h
+@@ -55,6 +55,17 @@ struct cpu_user_regs
+
+     uint32_t pad1; /* Doubleword-align the user half of the frame */
+ };
++
++/* Functions for pending virtual abort checking window. */
++void abort_guest_exit_start(void);
++void abort_guest_exit_end(void);
++
++#define VABORT_GEN_BY_GUEST(r)  \
++( \
++    ( (unsigned long)abort_guest_exit_start == (r)->pc ) || \
++    ( (unsigned long)abort_guest_exit_end == (r)->pc ) \
++)
++
+ #endif
+
+ /* Layout as used in assembly, with src/dest registers mixed in */
+--- a/xen/include/asm-arm/processor.h
++++ b/xen/include/asm-arm/processor.h
+@@ -690,6 +690,8 @@ void vcpu_regs_user_to_hyp(struct vcpu *vcpu,
+ int call_smc(register_t function_id, register_t arg0, register_t arg1,
+              register_t arg2);
+
++void do_trap_guest_error(struct cpu_user_regs *regs);
++
+ #endif /* __ASSEMBLY__ */
+ #endif /* __ASM_ARM_PROCESSOR_H */
+ /*
