@@ -20,4 +20,9 @@ typedef unsigned long int       uint64_t;
 typedef unsigned long long int  uint64_t;
 #endif
 
+typedef __UINTPTR_TYPE__ uintptr_t;
+#ifdef __UINTPTR_MAX__
+# undef UINTPTR_MAX
+# define UINTPTR_MAX __UINTPTR_MAX__
+#endif
 #endif
