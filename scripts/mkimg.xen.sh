@@ -13,5 +13,5 @@ profile_xen() {
 	kernel_cmdline="nomodeset"
 	xen_params=""
 	apks="$apks ethtool lvm2 mdadm multipath-tools openvswitch sfdisk xen"
-	apkovl="genapkovl-xen.sh"
+#	apkovl="genapkovl-xen.sh"
 }
