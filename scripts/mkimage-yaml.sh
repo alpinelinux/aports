@@ -66,7 +66,7 @@ EOF
 	# generate checksums if missing
 	for hash in ${checksums}; do
 		if ! [ -f "$image.$hash" ]; then
-			${hash}sum $image > $image.$hash
+			${hash}sum $image | sed 's: .*/:  :' > $image.$hash
 		fi
 		echo "  $hash: $(cut -d' ' -f1 $image.$hash)"
 	done
