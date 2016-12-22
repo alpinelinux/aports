@@ -265,7 +265,7 @@ for ARCH in $req_arch; do
 	abuild-apk update --root "$APKROOT"
 
 	if [ "$_yaml" = "yes" ]; then
-		_yaml_out=${OUTDIR:-.}/latest-release.yaml
+		_yaml_out=${OUTDIR:-.}/latest-releases.yaml
 		echo "---" > "$_yaml_out"
 	fi
 	for PROFILE in $req_profiles; do
