@@ -177,7 +177,7 @@ build_profile() {
 
 		if [ "$_checksum" = "yes" ]; then
 			for _c in $all_checksums; do
-				${_c}sum "$output_file" > "${output_file}.${_c}"
+				echo "$(${_c}sum "$output_file" | cut -d' '  -f1)  ${output_filename}" > "${output_file}.${_c}"
 			done
 		fi
 
