@@ -177,7 +177,7 @@ build_profile() {
 
 		if [ "$_checksum" = "yes" ]; then
 			for _c in $all_checksums; do
-				${_c}sum "$output_file" > "${output_file}.${_c}"
+				echo "$(${_c}sum "$output_file" | cut -d' '  -f1)  ${output_filename}" > "${output_file}.${_c}"
 			done
 		fi
 
@@ -265,7 +265,7 @@ for ARCH in $req_arch; do
 	abuild-apk update --root "$APKROOT"
 
 	if [ "$_yaml" = "yes" ]; then
-		_yaml_out=${OUTDIR:-.}/latest-release.yaml
+		_yaml_out=${OUTDIR:-.}/latest-releases.yaml
 		echo "---" > "$_yaml_out"
 	fi
 	for PROFILE in $req_profiles; do
