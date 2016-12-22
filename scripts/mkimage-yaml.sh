@@ -23,14 +23,20 @@ done
 
 set -- $opt "$@"
 
-releasedir="$branch/releases/$arch"
 if [ -z "$branch" ]; then
-	git_branch="$(git rev-parse --abbrev-ref HEAD)"
-	case "$git_branch" in
-	*-stable) branch=${git_branch%-stable};;
-	*) branch=edge;;
+	case "$release" in
+	*.*.*_alpha*|*.*.*_beta*) branch=edge;;
+	*.*.*) branch=${release%.*}; branch="v${branch#v}";;
+	*)
+		git_branch="$(git rev-parse --abbrev-ref HEAD)"
+		case "$git_branch" in
+		*-stable) branch=${git_branch%-stable};;
+		*) branch=edge;;
+		esac
+		;;
 	esac
 fi
+releasedir="$branch/releases/$arch"
 
 [ -n "$arch" ] || arch=$(apk --print-arch)
 
