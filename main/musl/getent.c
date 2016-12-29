@@ -196,8 +196,8 @@ static int hosts(int argc, char *argv[])
 				he = gethostbyaddr(addr, IN6ADDRSZ, AF_INET6);
 			else if (inet_pton(AF_INET, argv[i], (void *)addr) > 0)
 				he = gethostbyaddr(addr, INADDRSZ, AF_INET);
-			else
-				he = gethostbyname(argv[i]);
+			else if ((he = gethostbyname2(argv[i], AF_INET6)) == NULL)
+				he = gethostbyname2(argv[i], AF_INET);
 			if (he == NULL) {
 				rv = RV_NOTFOUND;
 				break;
@@ -207,6 +207,77 @@ static int hosts(int argc, char *argv[])
 	}
 	endhostent();
 	return rv;
+}
+
+static int ahosts_ex(int family, int flags, int argc, char *argv[])
+{
+	static const char *socktypes[] = {
+		[SOCK_STREAM]		= "STREAM",
+		[SOCK_DGRAM]		= "DGRAM",
+		[SOCK_RAW]		= "RAW",
+		[SOCK_RDM]		= "RDM",
+		[SOCK_SEQPACKET]	= "SEQPACKET",
+		[SOCK_DCCP]		= "DCCP",
+		[SOCK_PACKET]		= "PACKET",
+	};
+	const char *sockstr;
+	char sockbuf[16], buf[INET6_ADDRSTRLEN];
+	struct addrinfo *res, *r, hint;
+	void *addr;
+	int i;
+
+	if (argc == 2)
+		return hosts(argc, argv);
+
+	hint = (struct addrinfo) {
+		.ai_family = family,
+		.ai_flags = AI_ADDRCONFIG | AI_CANONNAME | flags,
+	};
+
+	for (i = 2; i < argc; i++) {
+		if (getaddrinfo(argv[i], 0, &hint, &res) != 0)
+			return RV_NOTFOUND;
+
+		for (r = res; r; r = r->ai_next) {
+			sockstr = NULL;
+			if (r->ai_socktype >= 0 && r->ai_socktype < sizeof(socktypes)/sizeof(socktypes[0]))
+				sockstr = socktypes[r->ai_socktype];
+			if (!sockstr) {
+				sprintf(buf, "%d", r->ai_socktype);
+				sockstr = sockbuf;
+			}
+			switch (r->ai_family) {
+			case AF_INET:
+				addr = &((struct sockaddr_in*) r->ai_addr)->sin_addr;
+				break;
+			case AF_INET6:
+				addr = &((struct sockaddr_in6*) r->ai_addr)->sin6_addr;
+				break;
+			default:
+				continue;
+			}
+			if (inet_ntop(r->ai_family, addr, buf, sizeof(buf)) == NULL)
+				(void)strlcpy(buf, "# unknown", sizeof(buf));
+			printf("%-15s %-6s %s\n", buf, sockstr, r->ai_canonname ?: "");
+		}
+	}
+
+	return RV_OK;
+}
+
+static int ahosts(int argc, char *argv[])
+{
+	return ahosts_ex(AF_UNSPEC, 0, argc, argv);
+}
+
+static int ahostsv4(int argc, char *argv[])
+{
+	return ahosts_ex(AF_INET, 0, argc, argv);
+}
+
+static int ahostsv6(int argc, char *argv[])
+{
+	return ahosts_ex(AF_INET6, AI_V4MAPPED, argc, argv);
 }
 
 static void networksprint(const struct netent *ne)
@@ -393,6 +464,9 @@ static struct getentdb {
 	{	"ethers",	ethers,		},
 	{	"group",	group,		},
 	{	"hosts",	hosts,		},
+	{	"ahosts",	ahosts,		},
+	{	"ahostsv4",	ahostsv4,	},
+	{	"ahostsv6",	ahostsv6,	},
 	{	"networks",	networks,	},
 	{	"passwd",	passwd,		},
 	{	"protocols",	protocols,	},
