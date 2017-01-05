@@ -105,12 +105,17 @@ static ssize_t tar_entry_read(void *stream, void *ptr, size_t size)
 
 	if (size > teis->bytes_left)
 		size = teis->bytes_left;
-        if (size == 0)
-                return 0;
+	if (size == 0)
+		return 0;
 
 	r = teis->tar_is->read(teis->tar_is, ptr, size);
-	if (r < 0)
+	if (r <= 0) {
+		/* If inner stream returned zero (end-of-stream), we
+		 * are getting short read, because tar header indicated
+		 * more was to be expected. */
+		if (r == 0) return -ECONNABORTED;
 		return r;
+	}
 
 	teis->bytes_left -= r;
 	if (teis->csum == NULL)
