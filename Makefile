@@ -10,7 +10,7 @@ datadir		?= $(prefix)/share/$(PACKAGE)
 SCRIPTS		:= abuild abuild-keygen abuild-sign newapkbuild \
 		   abump apkgrel buildlab apkbuild-cpan checkapk \
 		   apkbuild-gem-resolver
-USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-sudo abuild-fetch
+USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-gzsplit abuild-sudo abuild-fetch
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
 AUTOTOOLS_TOOLCHAIN_FILES := config.sub config.guess
@@ -38,12 +38,15 @@ SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 SSL_CFLAGS	?= $(shell pkg-config --cflags openssl)
 SSL_LDFLAGS	?= $(shell pkg-config --cflags openssl)
 SSL_LIBS	?= $(shell pkg-config --libs openssl)
-
+ZLIB_LIBS	?= $(shell pkg-config --libs zlib)
 
 OBJS-abuild-tar  = abuild-tar.o
 CFLAGS-abuild-tar.o = $(SSL_CFLAGS)
 LDFLAGS-abuild-tar = $(SSL_LDFLAGS)
 LIBS-abuild-tar = $(SSL_LIBS)
+
+OBJS-abuild-gzsplit = abuild-gzsplit.o
+LDFLAGS-abuild-gzsplit = $(ZLIB_LIBS)
 
 OBJS-abuild-sudo = abuild-sudo.o
 OBJS-abuild-fetch = abuild-fetch.o
@@ -74,6 +77,9 @@ abuild-tar: abuild-tar.o
 	$(LINK)
 
 abuild-fetch: abuild-fetch.o
+	$(LINK)
+
+abuild-gzsplit: abuild-gzsplit.o
 	$(LINK)
 
 abuild-tar.static: abuild-tar.o
