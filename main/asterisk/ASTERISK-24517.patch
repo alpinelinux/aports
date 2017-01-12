@@ -3098,3 +3098,229 @@ index 2e4f873..1b77b9f 100644
 -- 
 2.10.2
 
+From e3dae763ee77485bcbcf8818d2b8c9570afe3013 Mon Sep 17 00:00:00 2001
+From: Joshua Colp <jcolp@digium.com>
+Date: Mon, 28 Nov 2016 13:36:18 +0000
+Subject: [PATCH] iostream: Move include of asterisk.h
+
+The asterisk.h header file needs to be included first or else
+some things go awry, such as:
+
+implicit declaration of function 'vasprintf'
+
+Change-Id: I981dc2a77a1ba791888e4f1726644d4656c0407c
+---
+ main/iostream.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/main/iostream.c b/main/iostream.c
+index 46abc18a5c..008888142b 100644
+--- a/main/iostream.c
++++ b/main/iostream.c
+@@ -16,10 +16,11 @@
+  * at the top of the source tree.
+  */
+ 
++#include "asterisk.h"
++
+ #include <fcntl.h>
+ #include <stdarg.h>
+ 
+-#include "asterisk.h"
+ #include "asterisk/utils.h"
+ #include "asterisk/astobj2.h"
+ #include "asterisk/iostream.h"
+-- 
+2.11.0
+
+From bf6423a33678d95896cfb6325572dab3a23e6d6a Mon Sep 17 00:00:00 2001
+From: Mark Michelson <mmichelson@digium.com>
+Date: Tue, 6 Dec 2016 10:56:06 -0600
+Subject: [PATCH] Iostreams: Correct off-by-one error.
+
+ast_iostream_printf() attempts first to use a fixed-size buffer to
+perform its printf-like operation. If the fixed-size buffer is too
+small, then a heap allocation is used instead. The heap allocation in
+this case was exactly the length of the string to print. The issue here
+is that the ensuing call to vsnprintf() will print a NULL byte in the
+final space of the string. This meant that the final character was being
+chopped off the string and replaced with a NULL byte. For HTTP in
+particular, this caused problems because HTTP publishes the expected
+Contact-Length. This meant HTTP was publishing a length one character
+larger than what was actually present in the message.
+
+This patch corrects the issue by adding one to the allocation length.
+
+ASTERISK-26629
+Reported by Joshua Colp
+
+Change-Id: Ib3c5f41e96833d0415cf000656ac368168add639
+---
+ main/iostream.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/main/iostream.c b/main/iostream.c
+index a20a048964..22cd5985c4 100644
+--- a/main/iostream.c
++++ b/main/iostream.c
+@@ -404,7 +404,7 @@ ssize_t ast_iostream_write(struct ast_iostream *stream, const void *buf, size_t
+ 
+ ssize_t ast_iostream_printf(struct ast_iostream *stream, const void *fmt, ...)
+ {
+-	char sbuf[256], *buf = sbuf;
++	char sbuf[512], *buf = sbuf;
+ 	int len, len2, ret = -1;
+ 	va_list va;
+ 
+@@ -412,15 +412,18 @@ ssize_t ast_iostream_printf(struct ast_iostream *stream, const void *fmt, ...)
+ 	len = vsnprintf(buf, sizeof(sbuf), fmt, va);
+ 	va_end(va);
+ 
+-	if (len > sizeof(sbuf)) {
+-		buf = ast_malloc(len);
++	if (len > sizeof(sbuf) - 1) {
++		/* Add one to the string length to accommodate the NULL byte */
++		size_t buf_len = len + 1;
++
++		buf = ast_malloc(buf_len);
+ 		if (!buf) {
+ 			return -1;
+ 		}
+ 		va_start(va, fmt);
+-		len2 = vsnprintf(buf, len, fmt, va);
++		len2 = vsnprintf(buf, buf_len, fmt, va);
+ 		va_end(va);
+-		if (len2 > len) {
++		if (len2 != len) {
+ 			goto error;
+ 		}
+ 	}
+-- 
+2.11.0
+
+From 503006123a9eecdaedf74295367af99578f021b7 Mon Sep 17 00:00:00 2001
+From: Mark Michelson <mmichelson@digium.com>
+Date: Thu, 1 Dec 2016 16:49:03 -0600
+Subject: [PATCH] http: Send headers and body in one write.
+
+This is a semi-regression caused by the iostreams change. Prior to
+iostreams, HTTP headers were written to a FILE handle using fprintf.
+Then the body was written using a call to fwrite(). Because of internal
+buffering, the result was that the HTTP headers and body would be sent
+out in a single write to the socket.
+
+With the change to iostreams, the HTTP headers are written using
+ast_iostream_printf(), which under the hood calls write(). The HTTP body
+calls ast_iostream_write(), which also calls write() under the hood.
+This results in two separate writes to the socket.
+
+Most HTTP client libraries out there will handle this change just fine.
+However, a few of our testsuite tests started failing because of the
+change. As a result, in order to reduce frustration for users, this
+change alters the HTTP code to write the headers and body in a single
+write operation.
+
+ASTERISK-26629 #close
+Reported by Joshua Colp
+
+Change-Id: Idc2d2fb3d9b3db14b8631a1e302244fa18b0e518
+---
+ main/http.c | 29 ++++++++++++-----------------
+ 1 file changed, 12 insertions(+), 17 deletions(-)
+
+diff --git a/main/http.c b/main/http.c
+index 9aff4d1676..5f57b1eb01 100644
+--- a/main/http.c
++++ b/main/http.c
+@@ -454,6 +454,7 @@ void ast_http_send(struct ast_tcptls_session_instance *ser,
+ 	int content_length = 0;
+ 	int close_connection;
+ 	struct ast_str *server_header_field = ast_str_create(MAX_SERVER_NAME_LENGTH);
++	int send_content;
+ 
+ 	if (!ser || !server_header_field) {
+ 		/* The connection is not open. */
+@@ -504,6 +505,8 @@ void ast_http_send(struct ast_tcptls_session_instance *ser,
+ 		lseek(fd, 0, SEEK_SET);
+ 	}
+ 
++	send_content = method != AST_HTTP_HEAD || status_code >= 400;
++
+ 	/* send http header */
+ 	ast_iostream_printf(ser->stream,
+ 		"HTTP/1.1 %d %s\r\n"
+@@ -513,33 +516,25 @@ void ast_http_send(struct ast_tcptls_session_instance *ser,
+ 		"%s"
+ 		"%s"
+ 		"Content-Length: %d\r\n"
+-		"\r\n",
++		"\r\n"
++		"%s",
+ 		status_code, status_title ? status_title : "OK",
+ 		ast_str_buffer(server_header_field),
+ 		timebuf,
+ 		close_connection ? "Connection: close\r\n" : "",
+ 		static_content ? "" : "Cache-Control: no-cache, no-store\r\n",
+ 		http_header ? ast_str_buffer(http_header) : "",
+-		content_length
++		content_length,
++		send_content && out && ast_str_strlen(out) ? ast_str_buffer(out) : ""
+ 		);
+ 
+ 	/* send content */
+-	if (method != AST_HTTP_HEAD || status_code >= 400) {
+-		if (out && ast_str_strlen(out)) {
+-			len = ast_str_strlen(out);
+-			if (ast_iostream_write(ser->stream, ast_str_buffer(out), len) != len) {
+-				ast_log(LOG_ERROR, "fwrite() failed: %s\n", strerror(errno));
++	if (send_content && fd) {
++		while ((len = read(fd, buf, sizeof(buf))) > 0) {
++			if (ast_iostream_write(ser->stream, buf, len) != len) {
++				ast_log(LOG_WARNING, "fwrite() failed: %s\n", strerror(errno));
+ 				close_connection = 1;
+-			}
+-		}
+-
+-		if (fd) {
+-			while ((len = read(fd, buf, sizeof(buf))) > 0) {
+-				if (ast_iostream_write(ser->stream, buf, len) != len) {
+-					ast_log(LOG_WARNING, "fwrite() failed: %s\n", strerror(errno));
+-					close_connection = 1;
+-					break;
+-				}
++				break;
+ 			}
+ 		}
+ 	}
+-- 
+2.11.0
+
+From 149d8db96ce4390f52be84d5846b053e02e6b907 Mon Sep 17 00:00:00 2001
+From: Badalyan Vyacheslav <v.badalyan@open-bs.ru>
+Date: Thu, 8 Dec 2016 18:34:28 +0000
+Subject: [PATCH] Fix IO conversion bug
+
+Expression 'rlen < 0' is always false.
+Unsigned type value is never < 0.
+
+Change-Id: Id9f393ff25b009a6c4a6e40b95f561a9369e4585
+---
+ res/res_http_websocket.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/res/res_http_websocket.c b/res/res_http_websocket.c
+index 106ba488be..84138234eb 100644
+--- a/res/res_http_websocket.c
++++ b/res/res_http_websocket.c
+@@ -490,7 +490,7 @@ const char * AST_OPTIONAL_API_NAME(ast_websocket_session_id)(struct ast_websocke
+  */
+ static inline int ws_safe_read(struct ast_websocket *session, char *buf, int len, enum ast_websocket_opcode *opcode)
+ {
+-	size_t rlen;
++	ssize_t rlen;
+ 	int xlen = len;
+ 	char *rbuf = buf;
+ 	int sanity = 10;
+-- 
+2.11.0
+
