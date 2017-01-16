@@ -85,8 +85,10 @@ extern char **apk_argv;
 #define APK_DEFAULT_ARCH        "x86"
 #elif defined(__powerpc__) && !defined(__powerpc64__)
 #define APK_DEFAULT_ARCH	"ppc"
-#elif defined(__powerpc64__)
+#elif defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define APK_DEFAULT_ARCH	"ppc64"
+#elif defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define APK_DEFAULT_ARCH	"ppc64le"
 #elif defined(__arm__) && defined(__ARM_PCS_VFP) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ && __ARM_ARCH>=7
 #define APK_DEFAULT_ARCH	"armv7"
 #elif defined(__arm__) && defined(__ARM_PCS_VFP) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
