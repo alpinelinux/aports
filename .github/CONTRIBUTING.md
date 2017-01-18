@@ -15,6 +15,18 @@ This means you care about the quality of your contributions.
 2. Have access to an Alpine Linux [development envirorment](https://wiki.alpinelinux.org/wiki/Developer_Documentation#Development).
 3. Please __do not__ submit PR's via Github's web interface. You should have a working [development envirorment](https://wiki.alpinelinux.org/wiki/Developer_Documentation#Development) available and submit your commits from your git client.
 
+### Before you start making changes
+
+1. Check whether the change you want to introduce is not already present in the aports repository.  
+   Main aports repository can be cloned from: git://git.alpinelinux.org/aports  
+   There is also web frontend available at:  http://git.alpinelinux.org/cgit/aports  
+   GitHub mirror of aports repository:      https://github.com/alpinelinux/aports
+2. Check whether the change you want to introduce has not been already submitted by someone else.
+   - https://patchwork.alpinelinux.org/project/aports/list/
+   - https://github.com/alpinelinux/aports/pulls
+3. If you've found that someone already did what you wanted to do, then be patient. The change should be applied soon in the main repository, unless maintainers are busy or the patch needs to be improved.  
+   If it seems that your change won't be duplicating already done work, then please continue.
+
 ### Creating a Pull Request (PR)
 
 1. [Fork](https://help.github.com/articles/fork-a-repo/) our Alpine Linux aports repository.
