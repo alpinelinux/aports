@@ -1,0 +1,536 @@
+From d29a5a61509eeb3dbde375c74c5ec2a9ec0e82ec Mon Sep 17 00:00:00 2001
+From: Natanael Copa <natanael.copa@docker.com>
+Date: Thu, 29 Sep 2016 14:49:26 +0200
+Subject: [PATCH 1/3] implement glibc compatible nftw if libc does not provide
+ it
+
+This is so we can use the exact same code without resorting to call an
+external script on musl libc.
+
+Signed-off-by: Natanael Copa <natanael.copa@docker.com>
+---
+ Makefile                   |   9 --
+ au_nftw.h                  |  20 +++++
+ auplink_ftw                |  58 ------------
+ extlib/glibc/au_nftw.c     |  80 -----------------
+ extlib/non-glibc/au_nftw.c | 215 +++++++++++++++++++++++++++++----------------
+ plink.c                    |  56 ++++++++++++
+ 6 files changed, 215 insertions(+), 223 deletions(-)
+ create mode 100644 au_nftw.h
+ delete mode 100755 auplink_ftw
+ delete mode 100644 extlib/glibc/au_nftw.c
+
+diff --git a/Makefile b/Makefile
+index 3838f0e..ffa4b11 100644
+--- a/Makefile
++++ b/Makefile
+@@ -90,12 +90,6 @@ Etc = etc_default_aufs
+ Bin = auibusy aumvdown auplink mount.aufs umount.aufs #auctl
+ BinObj = $(addsuffix .o, ${Bin})
+ 
+-ifeq (${Glibc},no)
+-AuplinkFtwCmd=/sbin/auplink_ftw
+-override CPPFLAGS += -DAUPLINK_FTW_CMD=\"${AuplinkFtwCmd}\"
+-Cmd += auplink_ftw
+-endif
+-
+ # suppress 'eval' for ${v}
+ $(foreach v, CC CPPFLAGS CFLAGS INSTALL Install ManDir TopDir LibUtilHdr \
+ 	Glibc LibAuDir ExtlibPath, \
+@@ -155,9 +149,6 @@ c2sh c2tmac ver: CC = ${HOSTCC}
+ .INTERMEDIATE: c2sh c2tmac ver
+ 
+ install_sbin: File = auibusy aumvdown auplink mount.aufs umount.aufs
+-ifeq (${Glibc},no)
+-install_sbin: File += auplink_ftw
+-endif
+ install_sbin: Tgt = ${DESTDIR}/sbin
+ install_ubin: File = aubusy auchk aubrsync #auctl
+ install_ubin: Tgt = ${DESTDIR}/usr/bin
+diff --git a/au_nftw.h b/au_nftw.h
+new file mode 100644
+index 0000000..4b1c724
+--- /dev/null
++++ b/au_nftw.h
+@@ -0,0 +1,20 @@
++#include <ftw.h>
++
++#if defined(FTW_ACTIONRETVAL) && defined(FTW_CONTINUE) && defined(FTW_SKIP_SUBTREE)
++#define au_nftw nftw
++#else
++
++#ifndef FTW_CONTINUE
++#define FTW_CONTINUE 0
++#endif
++
++#ifndef FTW_SKIP_SUBTREE
++#define FTW_SKIP_SUBTREE 2
++#endif
++
++#ifndef FTW_ACTIONRETVAL
++#define FTW_ACTIONRETVAL 16
++#endif
++
++int au_nftw(const char *path, int (*fn)(const char *, const struct stat *, int, struct FTW *), int fd_limit, int flags);
++#endif
+diff --git a/auplink_ftw b/auplink_ftw
+deleted file mode 100755
+index 9d1564d..0000000
+--- a/auplink_ftw
++++ /dev/null
+@@ -1,58 +0,0 @@
+-#!/bin/sh
+-
+-# Copyright (C) 2016 Junjiro R. Okajima
+-#
+-# This program, aufs is free software; you can redistribute it and/or modify
+-# it under the terms of the GNU General Public License as published by
+-# the Free Software Foundation; either version 2 of the License, or
+-# (at your option) any later version.
+-#
+-# This program is distributed in the hope that it will be useful,
+-# but WITHOUT ANY WARRANTY; without even the implied warranty of
+-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-# GNU General Public License for more details.
+-#
+-# You should have received a copy of the GNU General Public License
+-# along with this program; if not, write to the Free Software
+-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+-
+-# usage: $0 inum_list dir list|cpup
+-
+-tmp=/tmp/$$
+-set -eu
+-rc=${DebugRc:-/etc/default/aufs}
+-. $rc
+-
+-inum=$1
+-dir=$2
+-action=$3
+-
+-# build the grep pattern
+-sed -e 's/^/^/' $inum > $tmp.inum
+-
+-Find()
+-{
+-	find $dir -xdev -name $AUFS_WH_PLINKDIR -prune \
+-		-o -printf "%i %p\0" | #2> /dev/null |
+-	grep -z -w -f $tmp.inum |
+-	sed -e 's/^[0-9][0-9]* //g' -e 's/\x00[0-9][0-9]* /\x00/g'
+-}
+-
+-err=0
+-case $3 in
+-list)
+-	Find |
+-	tr '\0' '\n'
+-	;;
+-cpup)
+-	Find |
+-	xargs -r0 touch -ac
+-	;;
+-*)
+-	echo Usage
+-	err=1
+-	;;
+-esac
+-
+-rm -fr $tmp $tmp.*
+-exit $err
+diff --git a/extlib/glibc/au_nftw.c b/extlib/glibc/au_nftw.c
+deleted file mode 100644
+index 3ff7ad2..0000000
+--- a/extlib/glibc/au_nftw.c
++++ /dev/null
+@@ -1,80 +0,0 @@
+-/*
+- * Copyright (C) 2005-2016 Junjiro R. Okajima
+- *
+- * This program, aufs is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+- */
+-
+-#include <ftw.h>
+-#include <stdio.h>
+-#include <string.h>
+-#include <unistd.h>
+-
+-#include <linux/aufs_type.h>
+-#include "au_util.h"
+-
+-static int ia_test(ino_t ino)
+-{
+-	int i;
+-	ino_t *p;
+-
+-	/* todo: hash table */
+-	ia.p = ia.o;
+-	p = ia.cur;
+-	for (i = 0; i < ia.nino; i++)
+-		if (*p++ == ino)
+-			return 1;
+-	return 0;
+-}
+-
+-
+-int ftw_list(const char *fname, const struct stat *st, int flags,
+-	     struct FTW *ftw)
+-{
+-	if (!strcmp(fname + ftw->base, AUFS_WH_PLINKDIR))
+-		return FTW_SKIP_SUBTREE;
+-	if (flags == FTW_D || flags == FTW_DNR)
+-		return FTW_CONTINUE;
+-
+-	if (ia_test(st->st_ino))
+-		puts(fname);
+-
+-	return FTW_CONTINUE;
+-}
+-
+-int ftw_cpup(const char *fname, const struct stat *st, int flags,
+-	     struct FTW *ftw)
+-{
+-	int err;
+-
+-	if (!strcmp(fname + ftw->base, AUFS_WH_PLINKDIR))
+-		return FTW_SKIP_SUBTREE;
+-	if (flags == FTW_D || flags == FTW_DNR)
+-		return FTW_CONTINUE;
+-
+-	/*
+-	 * do nothing but update something harmless in order to make it copyup
+-	 */
+-	if (ia_test(st->st_ino)) {
+-		Dpri("%s\n", fname);
+-		if (!S_ISLNK(st->st_mode))
+-			err = chown(fname, -1, -1);
+-		else
+-			err = lchown(fname, -1, -1);
+-		if (err)
+-			AuFin("%s", fname);
+-	}
+-
+-	return FTW_CONTINUE;
+-}
+diff --git a/extlib/non-glibc/au_nftw.c b/extlib/non-glibc/au_nftw.c
+index 8e053a4..15ab929 100644
+--- a/extlib/non-glibc/au_nftw.c
++++ b/extlib/non-glibc/au_nftw.c
+@@ -1,90 +1,153 @@
+ /*
+- * Copyright (C) 2016 Junjiro R. Okajima
+- *
+- * This program, aufs is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+- */
++copied from musl libc and added support for FWT_SKIP_SUBTREE
+ 
+-#include <sys/stat.h>
+-#include <sys/types.h>
++musl as a whole is licensed under the following standard MIT license:
++
++----------------------------------------------------------------------
++Copyright © 2005-2014 Rich Felker, et al.
++
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of this software and associated documentation files (the
++"Software"), to deal in the Software without restriction, including
++without limitation the rights to use, copy, modify, merge, publish,
++distribute, sublicense, and/or sell copies of the Software, and to
++permit persons to whom the Software is furnished to do so, subject to
++the following conditions:
++
++The above copyright notice and this permission notice shall be
++included in all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++----------------------------------------------------------------------
++*/
+ #include <ftw.h>
+-#include <stdio.h>
+-#include <stdlib.h>
++#include <dirent.h>
++#include <sys/stat.h>
++#include <errno.h>
++#include <unistd.h>
++#include <string.h>
++#include <limits.h>
++#include <pthread.h>
+ 
+-#include "au_util.h"
++#include "au_nftw.h"
+ 
+-/* dummy */
+-int ftw_list(const char *fname, const struct stat *st, int flags,
+-	     struct FTW *ftw)
++struct history
+ {
+-	return 0;
+-}
++	struct history *chain;
++	dev_t dev;
++	ino_t ino;
++	int level;
++	int base;
++};
++
++#undef dirfd
++#define dirfd(d) (*(int *)d)
+ 
+-/* dummy */
+-int ftw_cpup(const char *fname, const struct stat *st, int flags,
+-	     struct FTW *ftw)
++static int do_nftw(char *path, int (*fn)(const char *, const struct stat *, int, struct FTW *), int fd_limit, int flags, struct history *h)
+ {
++	size_t l = strlen(path), j = l && path[l-1]=='/' ? l-1 : l;
++	struct stat st;
++	struct history new;
++	int type;
++	int r;
++	struct FTW lev;
++	char *name;
++
++	if ((flags & FTW_PHYS) ? lstat(path, &st) : stat(path, &st) < 0) {
++		if (!(flags & FTW_PHYS) && errno==ENOENT && !lstat(path, &st))
++			type = FTW_SLN;
++		else if (errno != EACCES) return -1;
++		else type = FTW_NS;
++	} else if (S_ISDIR(st.st_mode)) {
++		if (access(path, R_OK) < 0) type = FTW_DNR;
++		else if (flags & FTW_DEPTH) type = FTW_DP;
++		else type = FTW_D;
++	} else if (S_ISLNK(st.st_mode)) {
++		if (flags & FTW_PHYS) type = FTW_SL;
++		else type = FTW_SLN;
++	} else {
++		type = FTW_F;
++	}
++
++	if ((flags & FTW_MOUNT) && h && st.st_dev != h->dev)
++		return 0;
++
++	new.chain = h;
++	new.dev = st.st_dev;
++	new.ino = st.st_ino;
++	new.level = h ? h->level+1 : 0;
++	new.base = l+1;
++
++	lev.level = new.level;
++	lev.base = h ? h->base : (name=strrchr(path, '/')) ? name-path : 0;
++
++	if (!(flags & FTW_DEPTH) && (r=fn(path, &st, type, &lev)))
++		return ((flags & FTW_ACTIONRETVAL)
++			&& (r == FTW_SKIP_SUBTREE)
++			&& (type == FTW_D)) ? FTW_CONTINUE : r;
++
++	for (; h; h = h->chain)
++		if (h->dev == st.st_dev && h->ino == st.st_ino)
++			return 0;
++
++	if ((type == FTW_D || type == FTW_DP) && fd_limit) {
++		DIR *d = opendir(path);
++		if (d) {
++			struct dirent *de;
++			while ((de = readdir(d))) {
++				if (de->d_name[0] == '.'
++				 && (!de->d_name[1]
++				  || (de->d_name[1]=='.'
++				   && !de->d_name[2]))) continue;
++				if (strlen(de->d_name) >= PATH_MAX-l) {
++					errno = ENAMETOOLONG;
++					closedir(d);
++					return -1;
++				}
++				path[j]='/';
++				strcpy(path+j+1, de->d_name);
++				if ((r=do_nftw(path, fn, fd_limit-1, flags, &new))) {
++					closedir(d);
++					return r;
++				}
++			}
++			closedir(d);
++		} else if (errno != EACCES) {
++			return -1;
++		}
++	}
++
++	path[l] = 0;
++	if ((flags & FTW_DEPTH) && (r=fn(path, &st, type, &lev)))
++		return r;
++
+ 	return 0;
+ }
+ 
+-int au_nftw(const char *dirpath,
+-	    int (*fn) (const char *fpath, const struct stat *sb,
+-		       int typeflag, struct FTW *ftwbuf),
+-	    int nopenfd, int flags)
++int au_nftw(const char *path, int (*fn)(const char *, const struct stat *, int, struct FTW *), int fd_limit, int flags)
+ {
+-	int err, fd, i;
+-	mode_t mask;
+-	FILE *fp;
+-	ino_t *p;
+-	char *action, ftw[1024], tmp[] = "/tmp/auplink_ftw.XXXXXX";
+-
+-	mask = umask(S_IRWXG | S_IRWXO);
+-	fd = mkstemp(tmp);
+-	if (fd < 0)
+-		AuFin("mkstemp");
+-	umask(mask);
+-	fp = fdopen(fd, "r+");
+-	if (!fp)
+-		AuFin("fdopen");
+-
+-	ia.p = ia.o;
+-	p = ia.cur;
+-	for (i = 0; i < ia.nino; i++) {
+-		err = fprintf(fp, "%llu\n", (unsigned long long)*p++);
+-		if (err < 0)
+-			break;
++	int r, cs;
++	size_t l;
++	char pathbuf[PATH_MAX+1];
++
++	if (fd_limit <= 0) return 0;
++
++	l = strlen(path);
++	if (l > PATH_MAX) {
++		errno = ENAMETOOLONG;
++		return -1;
+ 	}
+-	err = fflush(fp) || ferror(fp);
+-	if (err)
+-		AuFin("%s", tmp);
+-	err = fclose(fp);
+-	if (err)
+-		AuFin("%s", tmp);
+-
+-	action = "list";
+-	if (fn == ftw_cpup)
+-		action = "cpup";
+-	else
+-		fflush(stdout); /* inode numbers */
+-	i = snprintf(ftw, sizeof(ftw), AUPLINK_FTW_CMD " %s %s %s",
+-		     tmp, dirpath, action);
+-	if (i > sizeof(ftw))
+-		AuFin("snprintf");
+-	err = system(ftw);
+-	err = WEXITSTATUS(err);
+-	if (err)
+-		AuFin("%s", ftw);
+-
+-	return err;
++	memcpy(pathbuf, path, l+1);
++	
++	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
++	r = do_nftw(pathbuf, fn, fd_limit, flags, NULL);
++	pthread_setcancelstate(cs, 0);
++	return r;
+ }
++
+diff --git a/plink.c b/plink.c
+index a048ed1..00c73c9 100644
+--- a/plink.c
++++ b/plink.c
+@@ -33,6 +33,7 @@
+ 
+ #include <linux/aufs_type.h>
+ #include "au_util.h"
++#include "au_nftw.h"
+ 
+ /* todo: try argz? */
+ static struct name_array {
+@@ -181,6 +182,61 @@ void au_clean_plink(void)
+ #endif
+ }
+ 
++static int ia_test(ino_t ino)
++{
++	int i;
++	ino_t *p;
++
++	/* todo: hash table */
++	ia.p = ia.o;
++	p = ia.cur;
++	for (i = 0; i < ia.nino; i++)
++		if (*p++ == ino)
++			return 1;
++	return 0;
++}
++
++/* ---------------------------------------------------------------------- */
++
++int ftw_list(const char *fname, const struct stat *st, int flags,
++	     struct FTW *ftw)
++{
++	if (!strcmp(fname + ftw->base, AUFS_WH_PLINKDIR))
++		return FTW_SKIP_SUBTREE;
++	if (flags == FTW_D || flags == FTW_DNR)
++		return FTW_CONTINUE;
++
++	if (ia_test(st->st_ino))
++		puts(fname);
++
++	return FTW_CONTINUE;
++}
++
++int ftw_cpup(const char *fname, const struct stat *st, int flags,
++	     struct FTW *ftw)
++{
++	int err;
++
++	if (!strcmp(fname + ftw->base, AUFS_WH_PLINKDIR))
++		return FTW_SKIP_SUBTREE;
++	if (flags == FTW_D || flags == FTW_DNR)
++		return FTW_CONTINUE;
++
++	/*
++	 * do nothing but update something harmless in order to make it copyup
++	 */
++	if (ia_test(st->st_ino)) {
++		Dpri("%s\n", fname);
++		if (!S_ISLNK(st->st_mode))
++			err = chown(fname, -1, -1);
++		else
++			err = lchown(fname, -1, -1);
++		if (err)
++			AuFin("%s", fname);
++	}
++
++	return FTW_CONTINUE;
++}
+ static int do_plink(char *cwd, int cmd, int nbr, union aufs_brinfo *brinfo)
+ {
+ 	int err, i, l, nopenfd;
+-- 
+2.11.0
+
