@@ -43,4 +43,11 @@ package() {
 	# install -m644 -D "$srcdir"/$pkgname.confd "$pkgdir"/etc/conf.d/$pkgname
 }
 
+check() {
+	# uncomment the 2 lines below if there is a testsuite.  we assume the testsuite
+	# is run using "make check", which is the default for autotools-based build systems.
+	# cd "$builddir"
+	# make check || return 1
+}
+
 md5sums="" #generate with 'abuild checksum'
