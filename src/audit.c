@@ -179,11 +179,8 @@ static int audit_directory_tree_item(void *ctx, int dirfd, const char *name)
 	struct apk_file_info fi;
 	int reason = 0;
 
-	if (bdir.len + bent.len + 1 >= sizeof(atctx->path))
-		return -ENOMEM;
-
-	if (apk_fileinfo_get(dirfd, name, APK_FI_NOFOLLOW, &fi) < 0)
-		return -EPERM;
+	if (bdir.len + bent.len + 1 >= sizeof(atctx->path)) return 0;
+	if (apk_fileinfo_get(dirfd, name, APK_FI_NOFOLLOW, &fi) < 0) return 0;
 
 	memcpy(&atctx->path[atctx->pathlen], bent.ptr, bent.len);
 	atctx->pathlen += bent.len;
@@ -273,7 +270,7 @@ done:
 		apk_db_dir_unref(db, child, FALSE);
 
 	atctx->pathlen -= bent.len;
-	return reason < 0 ? reason : 0;
+	return 0;
 }
 
 static int audit_directory_tree(struct audit_tree_ctx *atctx, int dirfd)

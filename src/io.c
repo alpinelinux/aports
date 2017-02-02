@@ -741,6 +741,7 @@ int apk_dir_foreach_file(int dirfd, apk_dir_file_cb cb, void *ctx)
 {
 	struct dirent *de;
 	DIR *dir;
+	int ret = 0;
 
 	if (dirfd < 0)
 		return -1;
@@ -759,11 +760,11 @@ int apk_dir_foreach_file(int dirfd, apk_dir_file_cb cb, void *ctx)
 			    (de->d_name[1] == '.' && de->d_name[2] == 0))
 				continue;
 		}
-		cb(ctx, dirfd, de->d_name);
+		ret = cb(ctx, dirfd, de->d_name);
+		if (ret) break;
 	}
 	closedir(dir);
-
-	return 0;
+	return ret;
 }
 
 struct apk_istream *apk_istream_from_file_gz(int atfd, const char *file)

@@ -979,14 +979,9 @@ void apk_ipkg_run_script(struct apk_installed_package *ipkg,
 			 struct apk_database *db,
 			 unsigned int type, char **argv)
 {
-	static char * const environment[] = {
-		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-		NULL
-	};
 	struct apk_package *pkg = ipkg->pkg;
 	char fn[PATH_MAX];
-	int fd, status, root_fd = db->root_fd;
-	pid_t pid;
+	int fd, root_fd = db->root_fd;
 
 	if (type >= APK_SCRIPT_MAX || ipkg->script[type].ptr == NULL)
 		return;
@@ -1015,23 +1010,8 @@ void apk_ipkg_run_script(struct apk_installed_package *ipkg,
 	}
 	close(fd);
 
-	pid = fork();
-	if (pid == -1)
-		goto error;
-	if (pid == 0) {
-		umask(0022);
-		if (fchdir(root_fd) == 0 && chroot(".") == 0)
-			execve(fn, argv, environment);
-		exit(1);
-	}
-	waitpid(pid, &status, 0);
-	unlinkat(root_fd, fn, 0);
-	apk_id_cache_reset(&db->id_cache);
-
-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		apk_error("%s: script exited with error %d", &fn[15], WEXITSTATUS(status));
+	if (apk_db_run_script(db, fn, argv) < 0)
 		ipkg->broken_script = 1;
-	}
 	return;
 error:
 	apk_error("%s: failed to execute: %s", &fn[15], apk_error_str(errno));

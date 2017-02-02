@@ -216,6 +216,40 @@ static void run_triggers(struct apk_database *db, struct apk_changeset *changese
 	}
 }
 
+#define PRE_COMMIT_HOOK		0
+#define POST_COMMIT_HOOK	1
+
+struct apk_commit_hook {
+	struct apk_database *db;
+	int type;
+};
+
+static int run_commit_hook(void *ctx, int dirfd, const char *file)
+{
+	static char *const commit_hook_str[] = { "pre-commit", "post-commit" };
+	struct apk_commit_hook *hook = (struct apk_commit_hook *) ctx;
+	struct apk_database *db = hook->db;
+	char fn[PATH_MAX], *argv[] = { fn, (char *) commit_hook_str[hook->type], NULL };
+
+	if ((apk_flags & (APK_NO_SCRIPTS | APK_SIMULATE)) != 0)
+		return 0;
+
+	snprintf(fn, sizeof(fn), "etc/apk/commit_hooks.d" "/%s", file);
+	if (apk_verbosity >= 2) apk_message("Executing: %s", fn);
+
+	if (apk_db_run_script(db, fn, argv) < 0 && hook->type == PRE_COMMIT_HOOK)
+		return -1;
+
+	return 0;
+}
+
+static int run_commit_hooks(struct apk_database *db, int type)
+{
+	struct apk_commit_hook hook = { .db = db, .type = type };
+	return apk_dir_foreach_file(openat(db->root_fd, "etc/apk/commit_hooks.d", O_RDONLY | O_CLOEXEC),
+				    run_commit_hook, &hook);
+}
+
 int apk_solver_commit_changeset(struct apk_database *db,
 				struct apk_changeset *changeset,
 				struct apk_dependency_array *world)
@@ -278,6 +312,9 @@ int apk_solver_commit_changeset(struct apk_database *db,
 		}
 	}
 
+	if (run_commit_hooks(db, PRE_COMMIT_HOOK) < 0)
+		return -1;
+
 	/* Go through changes */
 	foreach_array_item(change, changeset->changes) {
 		r = change->old_pkg &&
@@ -308,6 +345,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 all_done:
 	apk_dependency_array_copy(&db->world, world);
 	apk_db_write_config(db);
+	run_commit_hooks(db, POST_COMMIT_HOOK);
 
 	if (!db->performing_self_upgrade) {
 		if (errors)
@@ -328,7 +366,6 @@ all_done:
 				    db->installed.stats.packages);
 		}
 	}
-
 	return errors;
 }
 

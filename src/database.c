@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <mntent.h>
+#include <libgen.h>
 #include <limits.h>
 #include <unistd.h>
 #include <malloc.h>
@@ -1875,6 +1876,34 @@ int apk_db_fire_triggers(struct apk_database *db)
 {
 	apk_hash_foreach(&db->installed.dirs, fire_triggers, db);
 	return db->pending_triggers;
+}
+
+int apk_db_run_script(struct apk_database *db, char *fn, char **argv)
+{
+	int status;
+	pid_t pid;
+	static char * const environment[] = {
+		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+		NULL
+	};
+
+	pid = fork();
+	if (pid == -1) {
+		apk_error("%s: fork: %s", basename(fn), strerror(errno));
+		return -2;
+	}
+	if (pid == 0) {
+		umask(0022);
+		if (fchdir(db->root_fd) == 0 && chroot(".") == 0)
+			execve(fn, argv, environment);
+		exit(127); /* should not get here */
+	}
+	waitpid(pid, &status, 0);
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		apk_error("%s: script exited with error %d", basename(fn), WEXITSTATUS(status));
+		return -1;
+	}
+	return 0;
 }
 
 static int update_permissions(apk_hash_item item, void *ctx)
