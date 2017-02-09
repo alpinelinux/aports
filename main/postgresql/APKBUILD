@@ -1,7 +1,9 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+# Contributor: G.J.R. Timmer <gjr.timmer@gmail.com>
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
 pkgname=postgresql
 pkgver=9.6.1
-pkgrel=0
+pkgrel=1
 pkgdesc="A sophisticated object-relational DBMS"
 url="http://www.postgresql.org/"
 arch="all"
@@ -12,22 +14,25 @@ pkgusers="postgres"
 pkggroups="postgres"
 depends_dev="libressl-dev"
 makedepends="$depends_dev libedit-dev zlib-dev libxml2-dev util-linux-dev
-	openldap-dev"
+	openldap-dev tcl-dev perl-dev python2-dev python3-dev"
 subpackages="$pkgname-contrib $pkgname-dev $pkgname-doc libpq $pkgname-libs
-	$pkgname-client"
-patches="initdb.patch"
+	$pkgname-client $pkgname-pltcl
+	$pkgname-plperl $pkgname-plperl-contrib:plperl_contrib
+	$pkgname-plpython2 $pkgname-plpython2-contrib:plpython2_contrib
+	$pkgname-plpython3 $pkgname-plpython3-contrib:plpython3_contrib"
 source="ftp://ftp.$pkgname.org/pub/source/v$pkgver/$pkgname-$pkgver.tar.bz2
-	$patches
+	initdb.patch
+	perl-rpath.patch
 	$pkgname.initd
 	$pkgname.confd
 	pg-restore.initd
 	pg-restore.confd
+	pltcl_create_tables.sql
 	"
 builddir="$srcdir/$pkgname-$pkgver"
 
 prepare() {
 	default_prepare || return 1
-	cd "$builddir"
 
 	# sanity check of conf.d
 	(
@@ -37,10 +42,36 @@ prepare() {
 			die "PGDATA is $PGDATA while $_datadir is expected"
 		fi
 	) || return 1
+
+	cp -al "$builddir" "$builddir"~py3
 }
 
+# NOTE: plpython requires separate configure/build runs to build against
+# python 2 versus python 3. Note that the installed Makefile.global will
+# reflect the python 2 build, which seems appropriate since that's still
+# considered the default plpython version.
 build() {
+	msg "Building plpython3"
+
+	cd "$builddir"~py3
+	export PYTHON=/usr/bin/python3
+
+	_configure || return 1
+	make -C src/backend submake-errcodes || return 1
+	make -C src/pl/plpython all || return 1
+
+
+	msg "Building all"
+
 	cd "$builddir"
+	export PYTHON=/usr/bin/python2
+
+	_configure && make world || return 1
+
+	unset PYTHON
+}
+
+_configure() {
 	./configure \
 		--build=$CBUILD \
 		--host=$CHOST \
@@ -52,9 +83,9 @@ build() {
 		--with-openssl \
 		--with-uuid=e2fs \
 		--disable-rpath \
-		|| return 1
-
-	make world || return 1
+		--with-perl \
+		--with-python \
+		--with-tcl
 }
 
 package() {
@@ -108,32 +139,128 @@ client() {
 }
 
 contrib() {
-	depends=""
 	pkgdesc="Extension modules distributed with PostgreSQL"
+	depends=""
 
 	cd "$builddir"
-	make DESTDIR="$subpkgdir" -C contrib install || return 1
+
+	# Avoid installing plperl and plpython extensions, these will be
+	# installed into separate subpackages.
+	sed -Ei -e 's/(.*_plperl)/#\1/' \
+		-e 's/(.*_plpython)/#\1/' \
+		contrib/Makefile || return 1
+
+	make -C contrib DESTDIR="$subpkgdir" install || return 1
 
 	mv "$subpkgdir"/usr/share/doc/postgresql/extension \
 		"$pkgdir"/usr/share/doc/postgresql/ || return 1
 	rmdir -p "$subpkgdir"/usr/share/doc/postgresql || true
 }
 
+pltcl() {
+	pkgdesc="PL/Tcl procedural language for PostgreSQL"
+	depends="pgtcl"
+
+	cd "$pkgdir"
+	_submv usr/bin/pltcl* \
+		usr/lib/postgresql/pltcl.so \
+		usr/share/postgresql/unknown.pltcl \
+		usr/share/postgresql/extension/pltcl* || return 1
+
+	install -m 644 "$srcdir"/pltcl_create_tables.sql \
+		"$subpkgdir"/usr/share/postgresql/
+}
+
+plperl() {
+	pkgdesc="PL/Perl procedural language for PostgreSQL"
+	depends=""
+
+	cd "$pkgdir"
+	_submv usr/lib/postgresql/plperl.so \
+		usr/share/postgresql/extension/plperl*
+}
+
+plperl_contrib() {
+	_plcontrib plperl "PL/Perl"
+
+	cd "$builddir"
+	make -C contrib/hstore_plperl DESTDIR="$subpkgdir" install
+}
+
+plpython2() {
+	pkgdesc="PL/Python2 procedural language for PostgreSQL"
+	depends=""
+
+	cd "$pkgdir"
+	_submv usr/lib/postgresql/plpython2.so \
+		usr/share/postgresql/extension/plpython*
+}
+
+plpython2_contrib() {
+	_plcontrib plpython2 "PL/Python 2"
+
+	cd "$builddir"
+	make -C contrib/hstore_plpython DESTDIR="$subpkgdir" install || return 1
+	make -C contrib/ltree_plpython DESTDIR="$subpkgdir" install || return 1
+
+	rm "$subpkgdir"/usr/share/postgresql/extension/*plpython3*
+}
+
+plpython3() {
+	pkgdesc="PL/Python3 procedural language for PostgreSQL"
+	depends=""
+
+	cd "$builddir"~py3
+	make -C src/pl/plpython DESTDIR="$subpkgdir" install || return 1
+	rm -R "$subpkgdir"/usr/include
+}
+
+plpython3_contrib() {
+	_plcontrib plpython3 "PL/Python 3"
+
+	cd "$builddir"~py3
+	make -C contrib/hstore_plpython DESTDIR="$subpkgdir" install || return 1
+	make -C contrib/ltree_plpython DESTDIR="$subpkgdir" install || return 1
+
+	cd "$subpkgdir"/usr/share/postgresql/extension/
+	rm *plpython2* *plpythonu*
+}
+
+_plcontrib() {
+	local subname="$1"
+	pkgdesc="$2 extension modules distributed with PostgreSQL"
+	depends="$pkgname-$subname"
+	install_if="$pkgname-$subname=$pkgver-r$pkgrel $pkgname-contrib=$pkgver-r$pkgrel"
+}
+
+_submv() {
+	local path; for path in "$@"; do
+		mkdir -p "$subpkgdir/${path%/*}"
+		mv "$path" "$subpkgdir/$path" || return 1
+	done
+}
+
 md5sums="92ae6d7cdf18e648b3c22d0aa015565d  postgresql-9.6.1.tar.bz2
 538fa611966ee43c001dafdc1587c170  initdb.patch
+643a56ee96d8de682ada8aba52a9fb53  perl-rpath.patch
 a7a193cce4443998e3a47fde4f10723e  postgresql.initd
 e63ec8cd30cb33e812f79f06892b6dc4  postgresql.confd
 140ed427fe54b435064f0e3c6f683aea  pg-restore.initd
-bf45384752b320b369f1425939763178  pg-restore.confd"
+bf45384752b320b369f1425939763178  pg-restore.confd
+fc1d0f757dde9386edfe5be9c44c420e  pltcl_create_tables.sql"
 sha256sums="e5101e0a49141fc12a7018c6dad594694d3a3325f5ab71e93e0e51bd94e51fcd  postgresql-9.6.1.tar.bz2
 abd3761ecb47e41625d21bfda6a36badb047b0bedfd7cf0b1fbe61914fb3c9bc  initdb.patch
+83e79ccc98b12d68a9620ae528d6ac37012841a7c120477e05e327fb52eadb38  perl-rpath.patch
 af57a4190b1f5019290d26429b973d31465a8224a2e552fc3ecaf4fb4e471d7f  postgresql.initd
 5ad3d9d0cd9d361ce453e5ec28ee04c9a17969842abd0150b5b65bc1967d4ee6  postgresql.confd
 e509cdb77a4be8a74381b039bb8e5dc3a7b7ef3375785acf967092e4e6a34215  pg-restore.initd
-31414d8b57c4cd2116b6014de3f1329875151910753fbd616daec4554866d02f  pg-restore.confd"
+31414d8b57c4cd2116b6014de3f1329875151910753fbd616daec4554866d02f  pg-restore.confd
+6ea28d7e0ff2078bc5f307c6cc6d474c759d5f5c543e09bf9ca8e67d992783b0  pltcl_create_tables.sql"
 sha512sums="f27af67f9a96f6327150330bf091a803e10eabbac4e488cf5e4d72907e2eb1dbde7282fe0b89fd75711fd8bdcdb3688b5a9eac1e4d6871f4e8681c9c8b0e7c45  postgresql-9.6.1.tar.bz2
 0b88eee78380ed6cf543c851ac1cea5fc50bb6ef1bb51e03694003f43d2bf4e117ff06657f958d0e9c00ace3b8a6bab6ed0bd017d23f80cfd203dab33da81d46  initdb.patch
+5f9d8bb4957194069d01af8ab3abc6d4d83a7e7f8bd7ebe1caae5361d621a3e58f91b14b952958138a794e0a80bc154fbb7e3e78d211e2a95b9b7901335de854  perl-rpath.patch
 af37b100cc67769817e4c9e997abecf50475d7f0bf9b0f1d51bf8454d45abd6c87d5d315ed6cafd14e0dd059e96723a6203b756236070d12968816666e63e522  postgresql.initd
 5b2fe18e38b5bef6fc289ff7701148dd5608d98002db046b183d715b718f96e22c01ba0adc5b590c386694c3eefae1a0a30425b985965ed2238e3858923b91ec  postgresql.confd
 f5a1cba051e7d846c2d16703514601cb25729ed96b677c9bd0c199d64552120a8b14b238af01917fdb87106681e12dee6fff7447558155ba273e4f96be5e2892  pg-restore.initd
-c14a5684e914abb3b0ee71bbf15eed71a9264deacaa404a6e3af6bfc330d93e7598624d0ed11a94263106cc660f7f54c8ff57e759033cf606a795f69ff6c1c7c  pg-restore.confd"
+c14a5684e914abb3b0ee71bbf15eed71a9264deacaa404a6e3af6bfc330d93e7598624d0ed11a94263106cc660f7f54c8ff57e759033cf606a795f69ff6c1c7c  pg-restore.confd
+5c9bfd9e295dcf678298bf0aa974347a7c311d6e7c2aa76a6920fcb751d01fd1ab77abbec11f3c672f927ad9deaa88e04e370c0b5cd1b60087554c474b748731  pltcl_create_tables.sql"
