@@ -69,6 +69,19 @@ index 78e33e1..255b1a4 100644
  	    len, NULL, state, pri, PTHREAD_CREATE_DETACHED)
  #define	thread_join(t)			zk_thread_join(t)
  #define	newproc(f, a, cid, pri, ctp, pid)	(ENOSYS)
+diff --git a/include/sys/zio.h b/include/sys/zio.h
+index 4916d87..973dc73 100644
+--- a/include/sys/zio.h
++++ b/include/sys/zio.h
+@@ -513,7 +513,7 @@ extern void zio_shrink(zio_t *zio, uint64_t size);
+ 
+ extern int zio_wait(zio_t *zio);
+ extern void zio_nowait(zio_t *zio);
+-extern void zio_execute(zio_t *zio);
++extern void zio_execute(void *zio);
+ extern void zio_interrupt(zio_t *zio);
+ 
+ extern zio_t *zio_walk_parents(zio_t *cio);
 diff --git a/module/zfs/arc.c b/module/zfs/arc.c
 index 04fde6c..a9652dd 100644
 --- a/module/zfs/arc.c
@@ -100,6 +113,73 @@ index 04fde6c..a9652dd 100644
  {
  	callb_cpr_t cpr;
  	l2arc_dev_t *dev;
+diff --git a/module/zfs/dbuf.c b/module/zfs/dbuf.c
+index 483067c..68d2933 100644
+--- a/module/zfs/dbuf.c
++++ b/module/zfs/dbuf.c
+@@ -1583,7 +1583,6 @@ dmu_buf_will_fill(dmu_buf_t *db_fake, dmu_tx_t *tx)
+ 	(void) dbuf_dirty(db, tx);
+ }
+ 
+-#pragma weak dmu_buf_fill_done = dbuf_fill_done
+ /* ARGSUSED */
+ void
+ dbuf_fill_done(dmu_buf_impl_t *db, dmu_tx_t *tx)
+@@ -1605,6 +1604,12 @@ dbuf_fill_done(dmu_buf_impl_t *db, dmu_tx_t *tx)
+ 	mutex_exit(&db->db_mtx);
+ }
+ 
++void __weak
++dmu_buf_fill_done(dmu_buf_t *db, dmu_tx_t *tx)
++{
++	dbuf_fill_done((dmu_buf_impl_t *)db, tx);
++}
++
+ void
+ dmu_buf_write_embedded(dmu_buf_t *dbuf, void *data,
+     bp_embedded_type_t etype, enum zio_compress comp,
+@@ -2240,13 +2245,20 @@ dbuf_rm_spill(dnode_t *dn, dmu_tx_t *tx)
+ 	dbuf_free_range(dn, DMU_SPILL_BLKID, DMU_SPILL_BLKID, tx);
+ }
+ 
+-#pragma weak dmu_buf_add_ref = dbuf_add_ref
+ void
+ dbuf_add_ref(dmu_buf_impl_t *db, void *tag)
+ {
+ 	VERIFY(refcount_add(&db->db_holds, tag) > 1);
+ }
+ 
++void __weak
++dmu_buf_add_ref(dmu_buf_t *_db, void* tag)
++{
++	dmu_buf_impl_t *db = (dmu_buf_impl_t *)_db;
++	dbuf_add_ref(db, tag);
++}
++
++
+ #pragma weak dmu_buf_try_add_ref = dbuf_try_add_ref
+ boolean_t
+ dbuf_try_add_ref(dmu_buf_t *db_fake, objset_t *os, uint64_t obj, uint64_t blkid,
+@@ -2412,13 +2424,18 @@ dbuf_rele_and_unlock(dmu_buf_impl_t *db, void *tag)
+ 	}
+ }
+ 
+-#pragma weak dmu_buf_refcount = dbuf_refcount
+ uint64_t
+ dbuf_refcount(dmu_buf_impl_t *db)
+ {
+ 	return (refcount_count(&db->db_holds));
+ }
+ 
++uint64_t __weak
++dmu_buf_refcount(dmu_buf_t *db)
++{
++	return dbuf_refcount((dmu_buf_impl_t *)db);
++}
++
+ void *
+ dmu_buf_replace_user(dmu_buf_t *db_fake, dmu_buf_user_t *old_user,
+     dmu_buf_user_t *new_user)
 diff --git a/module/zfs/spa.c b/module/zfs/spa.c
 index dde909e..34ff0dc 100644
 --- a/module/zfs/spa.c
@@ -116,7 +196,7 @@ index dde909e..34ff0dc 100644
  
  	ASSERT(spa->spa_sync_on);
 diff --git a/module/zfs/txg.c b/module/zfs/txg.c
-index 1d5ee97..2d63a57 100644
+index 1d5ee97..6469c8b 100644
 --- a/module/zfs/txg.c
 +++ b/module/zfs/txg.c
 @@ -107,8 +107,8 @@
@@ -130,7 +210,27 @@ index 1d5ee97..2d63a57 100644
  
  int zfs_txg_timeout = 5;	/* max seconds worth of delta per txg */
  
-@@ -475,8 +475,9 @@ txg_wait_callbacks(dsl_pool_t *dp)
+@@ -406,8 +406,9 @@ txg_quiesce(dsl_pool_t *dp, uint64_t txg)
+ }
+ 
+ static void
+-txg_do_callbacks(list_t *cb_list)
++txg_do_callbacks(void *_cb_list)
+ {
++	list_t *cb_list = _cb_list;
+ 	dmu_tx_do_callbacks(cb_list, 0);
+ 
+ 	list_destroy(cb_list);
+@@ -455,7 +456,7 @@ txg_dispatch_callbacks(dsl_pool_t *dp, uint64_t txg)
+ 
+ 		list_move_tail(cb_list, &tc->tc_callbacks[g]);
+ 
+-		(void) taskq_dispatch(tx->tx_commit_cb_taskq, (task_func_t *)
++		(void) taskq_dispatch(tx->tx_commit_cb_taskq,
+ 		    txg_do_callbacks, cb_list, TQ_SLEEP);
+ 	}
+ }
+@@ -475,8 +476,9 @@ txg_wait_callbacks(dsl_pool_t *dp)
  }
  
  static void
@@ -141,7 +241,7 @@ index 1d5ee97..2d63a57 100644
  	spa_t *spa = dp->dp_spa;
  	tx_state_t *tx = &dp->dp_tx;
  	callb_cpr_t cpr;
-@@ -584,8 +585,9 @@ txg_sync_thread(dsl_pool_t *dp)
+@@ -584,8 +586,9 @@ txg_sync_thread(dsl_pool_t *dp)
  }
  
  static void
@@ -152,3 +252,74 @@ index 1d5ee97..2d63a57 100644
  	tx_state_t *tx = &dp->dp_tx;
  	callb_cpr_t cpr;
  
+diff --git a/module/zfs/zfs_vnops.c b/module/zfs/zfs_vnops.c
+index 384a37f..76d02a4 100644
+--- a/module/zfs/zfs_vnops.c
++++ b/module/zfs/zfs_vnops.c
+@@ -919,6 +919,13 @@ zfs_write(struct inode *ip, uio_t *uio, int ioflag, cred_t *cr)
+ }
+ EXPORT_SYMBOL(zfs_write);
+ 
++static void
++iput_wrapper(void *_i)
++{
++	struct inode *i = _i;
++	iput(i);
++}
++
+ void
+ zfs_iput_async(struct inode *ip)
+ {
+@@ -929,7 +936,7 @@ zfs_iput_async(struct inode *ip)
+ 
+ 	if (atomic_read(&ip->i_count) == 1)
+ 		taskq_dispatch(dsl_pool_iput_taskq(dmu_objset_pool(os)),
+-		    (task_func_t *)iput, ip, TQ_SLEEP);
++		    iput_wrapper, ip, TQ_SLEEP);
+ 	else
+ 		iput(ip);
+ }
+diff --git a/module/zfs/zio.c b/module/zfs/zio.c
+index 2bc88c5..df44e39 100644
+--- a/module/zfs/zio.c
++++ b/module/zfs/zio.c
+@@ -1345,7 +1345,7 @@ zio_taskq_dispatch(zio_t *zio, zio_taskq_type_t q, boolean_t cutinline)
+ 	 * to dispatch the zio to another taskq at the same time.
+ 	 */
+ 	ASSERT(taskq_empty_ent(&zio->io_tqent));
+-	spa_taskq_dispatch_ent(spa, t, q, (task_func_t *)zio_execute, zio,
++	spa_taskq_dispatch_ent(spa, t, q, zio_execute, zio,
+ 	    flags, &zio->io_tqent);
+ }
+ 
+@@ -1406,8 +1406,9 @@ static zio_pipe_stage_t *zio_pipeline[];
+  * it is externally visible.
+  */
+ void
+-zio_execute(zio_t *zio)
++zio_execute(void *_zio)
+ {
++	zio_t *zio = _zio;
+ 	fstrans_cookie_t cookie;
+ 
+ 	cookie = spl_fstrans_mark();
+@@ -1560,8 +1561,9 @@ zio_nowait(zio_t *zio)
+  */
+ 
+ static void
+-zio_reexecute(zio_t *pio)
++zio_reexecute(void *_pio)
+ {
++	zio_t *pio = _pio;
+ 	zio_t *cio, *cio_next;
+ 	int c, w;
+ 
+@@ -3362,7 +3364,7 @@ zio_done(zio_t *zio)
+ 			ASSERT(taskq_empty_ent(&zio->io_tqent));
+ 			spa_taskq_dispatch_ent(zio->io_spa,
+ 			    ZIO_TYPE_CLAIM, ZIO_TASKQ_ISSUE,
+-			    (task_func_t *)zio_reexecute, zio, 0,
++			    zio_reexecute, zio, 0,
+ 			    &zio->io_tqent);
+ 		}
+ 		return (ZIO_PIPELINE_STOP);
