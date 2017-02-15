@@ -235,7 +235,7 @@ static int run_commit_hook(void *ctx, int dirfd, const char *file)
 		return 0;
 
 	snprintf(fn, sizeof(fn), "etc/apk/commit_hooks.d" "/%s", file);
-	if (apk_verbosity >= 2) apk_message("Executing: %s", fn);
+	if (apk_verbosity >= 2) apk_message("Executing: %s %s", fn, commit_hook_str[hook->type]);
 
 	if (apk_db_run_script(db, fn, argv) < 0 && hook->type == PRE_COMMIT_HOOK)
 		return -1;
