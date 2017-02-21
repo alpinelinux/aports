@@ -1,0 +1,158 @@
+diff --git a/hosts_access.c b/hosts_access.c
+index dfff943..13ad9f9 100644
+--- a/hosts_access.c
++++ b/hosts_access.c
+@@ -78,6 +78,9 @@ int     hosts_access_verbose = 0;
+   */
+ 
+ int     resident = (-1);		/* -1, 0: unknown; +1: yes */
++#ifdef ACLEXEC
++int	aclexec_matched = 0;
++#endif
+ 
+ /* Forward declarations. */
+ 
+@@ -179,6 +182,12 @@ struct request_info *request;
+ 	if (sh_cmd) {
+ #ifdef PROCESS_OPTIONS
+ 	    process_options(sh_cmd, request);
++# ifdef ACLEXEC
++	    if (aclexec_matched) {
++		syslog(LOG_INFO, "aclexec returned %d", aclexec_matched);
++		match = NO;
++	    }
++# endif
+ #else
+ 	    char    cmd[BUFSIZ];
+ 	    shell_cmd(percent_x(cmd, sizeof(cmd), sh_cmd, request));
+diff --git a/hosts_options.5 b/hosts_options.5
+index 3bd189e..39c7fdd 100644
+--- a/hosts_options.5
++++ b/hosts_options.5
+@@ -54,6 +54,23 @@ ALL: ALL: ALLOW
+ .sp
+ Notice the leading dot on the domain name patterns.
+ .SH RUNNING OTHER COMMANDS
++.IP "aclexec shell_command"
++Execute, in a child process, the specified shell command, after
++performing the %<letter> expansions described in the hosts_access(5)
++manual page.  The command is executed with stdin, stdout and stderr
++connected to the null device, so that it won't mess up the
++conversation with the client host. Example:
++.sp
++.nf
++.ti +3
++smtp : ALL : aclexec checkdnsbl %a
++.fi
++.sp
++executes, in a background child process, the shell command "checkdnsbl %a"
++after replacing %a by the address of the remote host.
++.sp
++The connection will be allowed or refused depending on whether the
++command returns a true or false exit status.
+ .IP "spawn shell_command"
+ Execute, in a child process, the specified shell command, after
+ performing the %<letter> expansions described in the hosts_access(5)
+diff --git a/options.c b/options.c
+index 675c9b4..b01db51 100644
+--- a/options.c
++++ b/options.c
+@@ -49,6 +49,7 @@ static char sccsid[] = "@(#) options.c 1.17 96/02/11 17:01:31";
+ #include <setjmp.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <sys/wait.h>
+ 
+ #ifndef MAXPATHNAMELEN
+ #define MAXPATHNAMELEN  BUFSIZ
+@@ -78,6 +79,7 @@ static void group_option();		/* execute "group name" option */
+ static void umask_option();		/* execute "umask mask" option */
+ static void linger_option();		/* execute "linger time" option */
+ static void keepalive_option();		/* execute "keepalive" option */
++static void aclexec_option();		/* execute "aclexec command" option */
+ static void spawn_option();		/* execute "spawn command" option */
+ static void twist_option();		/* execute "twist command" option */
+ static void rfc931_option();		/* execute "rfc931" option */
+@@ -115,6 +117,9 @@ static struct option option_table[] = {
+     { "umask", umask_option, NEED_ARG },
+     { "linger", linger_option, NEED_ARG },
+     { "keepalive", keepalive_option, 0 },
++#ifdef ACLEXEC
++    { "aclexec", aclexec_option, NEED_ARG | EXPAND_ARG },
++#endif
+     { "spawn", spawn_option, NEED_ARG | EXPAND_ARG },
+     { "twist", twist_option, NEED_ARG | EXPAND_ARG | USE_LAST },
+     { "rfc931", rfc931_option, OPT_ARG },
+@@ -327,6 +332,54 @@ struct request_info *request;
+ 	shell_cmd(value);
+ }
+ 
++#ifdef ACLEXEC
++/* aclexec_option - spawn a shell command and check status */
++
++/* ARGSUSED */
++
++static void aclexec_option(value, request)
++char   *value;
++struct request_info *request;
++{
++    int status, child_pid, wait_pid;
++    extern int aclexec_matched;
++
++    if (dry_run != 0)
++	    return;
++
++    child_pid = fork();
++
++    /* Something went wrong: we MUST terminate the process. */
++    if (child_pid < 0) {
++	tcpd_warn("aclexec_option: /bin/sh: %m");
++	clean_exit(request);
++    }
++
++    if (child_pid == 0) {
++	execl("/bin/sh", "sh", "-c", value, (char *) 0);
++
++        /* Something went wrong. We MUST terminate the child process. */
++        tcpd_warn("execl /bin/sh: %m");
++	_exit(0);
++    }
++
++    while ((wait_pid = wait(&status)) != -1 && wait_pid != child_pid)
++	/* void */ ;
++
++    aclexec_matched = 1;
++
++    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
++	aclexec_matched = 0;
++    }
++
++    if (WIFSIGNALED(status))
++	tcpd_warn("process %d exited with signal %d", child_pid,
++	    WTERMSIG(status));
++
++    return;
++}
++#endif
++
+ /* linger_option - set the socket linger time (Marc Boucher <marc@cam.org>) */
+ 
+ /* ARGSUSED */
+diff --git a/tcpdchk.c b/tcpdchk.c
+index e67ffb0..8c74df8 100644
+--- a/tcpdchk.c
++++ b/tcpdchk.c
+@@ -59,10 +59,6 @@ static char sep[] = ", \t\n";
+ 
+ #define	BUFLEN 2048
+ 
+-int     resident = 0;
+-int     hosts_access_verbose = 0;
+-char   *hosts_allow_table = HOSTS_ALLOW;
+-char   *hosts_deny_table = HOSTS_DENY;
+ extern jmp_buf tcpd_buf;
+ 
+  /*
+-- 
+2.1.0
+
