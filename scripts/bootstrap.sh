@@ -20,7 +20,10 @@ CBUILDROOT="$(CTARGET=$TARGET_ARCH . /usr/share/abuild/functions.sh ; echo $CBUI
 [ -e "$APORTS/main/build-base" ] || die "Unable to deduce aports base checkout"
 
 apkbuildname() {
-	echo $APORTS/main/$1/APKBUILD
+	local repo="${1%%/*}"
+	local pkg="${1##*/}"
+	[ "$repo" = "$1" ] && repo="main"
+	echo $APORTS/$repo/$pkg/APKBUILD
 }
 
 msg() {
@@ -100,6 +103,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   attr libcap patch sudo acl fakeroot tar \
 	   pax-utils abuild openssh \
 	   ncurses util-linux lvm2 popt xz cryptsetup kmod lddtree mkinitfs \
+	   community/go \
 	   $KERNEL_PKG ; do
 
 	CHOST=$TARGET_ARCH BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild -r
