@@ -66,7 +66,7 @@ fi
 msg "Building cross-compiler"
 
 # Build and install cross binutils (--with-sysroot)
-CTARGET=$TARGET_ARCH APKBUILD=$(apkbuildname binutils) abuild -r
+CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname binutils) abuild -r
 
 if ! CHOST=$TARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild up2date 2>/dev/null; then
 	# C-library headers for target
@@ -83,10 +83,10 @@ fi
 
 # Full cross GCC
 EXTRADEPENDS_TARGET="musl musl-dev" \
-CTARGET=$TARGET_ARCH APKBUILD=$(apkbuildname gcc) abuild -r -k
+CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname gcc) abuild -r
 
 # Cross build-base
-CTARGET=$TARGET_ARCH APKBUILD=$(apkbuildname build-base) abuild -r
+CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname build-base) abuild -r
 
 msg "Cross building base system"
 
