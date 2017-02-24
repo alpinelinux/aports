@@ -1,19 +1,3 @@
-profile_standard() {
-	profile_base
-	image_ext="iso"
-	arch="x86 x86_64"
-	output_format="iso"
-	kernel_cmdline="nomodeset"
-	kernel_addons="xtables-addons"
-}
-
-profile_vanilla() {
-	profile_standard
-	#arch="$arch aarch64"
-	kernel_flavors="vanilla"
-	kernel_addons=
-}
-
 profile_extended() {
 	profile_standard
 	kernel_addons="dahdi-linux xtables-addons"
@@ -47,12 +31,4 @@ profile_extended() {
 		done
 	done
 	apks="$apks linux-firmware"
-}
-
-profile_virt() {
-	profile_standard
-	kernel_addons=
-	kernel_flavors="virtgrsec"
-	kernel_cmdline="console=tty0 console=ttyS0,115200"
-	syslinux_serial="0 115200"
 }
