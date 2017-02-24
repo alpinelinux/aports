@@ -103,7 +103,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   attr libcap patch sudo acl fakeroot tar \
 	   pax-utils abuild openssh \
 	   ncurses util-linux lvm2 popt xz cryptsetup kmod lddtree mkinitfs \
-	   community/go \
+	   community/go libffi testing/ghc \
 	   $KERNEL_PKG ; do
 
 	CHOST=$TARGET_ARCH BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild -r
