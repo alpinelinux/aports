@@ -4,6 +4,10 @@ imagetype_iso() {
 
 create_image_iso() {
 	local ISO="${OUTDIR}/${output_filename}"
+
+	local _iso_label_default="alpine-$PROFILE $RELEASE $ARCH"
+	local _volid="${iso_label:=$_iso_label_default}"
+
 	local _isolinux
 	local _efiboot
 
@@ -44,7 +48,7 @@ create_image_iso() {
 		-full-iso9660-filenames \
 		-joliet \
 		-rock \
-		-volid "alpine-$PROFILE $RELEASE $ARCH" \
+		-volid "$_volid" \
 		$_isolinux \
 		$_efiboot \
 		-follow-links \
