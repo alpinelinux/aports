@@ -35,7 +35,7 @@ section_kernels() {
 		done
 
 		for _a in $initfs_apks_flavored $initfs_only_apks_flavored; do
-			_pkgs="$_pkgs $(add_flavor "$_a")"
+			_pkgs="$_pkgs $(add_flavor $_a)"
 		done
 
 		local id=$( (echo "$initfs_features::$_hostkeys" ; apk fetch --root "$APKROOT" --simulate alpine-base $_pkgs | sort) | checksum)
@@ -65,9 +65,9 @@ build_apks() {
 
 section_apks() {
 	# Build list of all required apks
-	[ -n "$apks_flavored" ] && apkx="$apks $(add_flavor $apks_flavored)"
+	[ -n "$apks_flavored" ] && apks="$apks $(add_flavor $apks_flavored)"
 	[ -n "$initfs_apks" ] && apks="$apks $initfs_apks"
-	[ -n "$initfs_apks_flavored" ] && apkx="$apks $(add_flavor $initfs_apks_flavored)"
+	[ -n "$initfs_apks_flavored" ] && apks="$apks $(add_flavor $initfs_apks_flavored)"
 	[ -n "$apks" ] || return 0
 
 	build_section apks $ARCH $(apk fetch --root "$APKROOT" --simulate --recursive $apks | sort | checksum)
