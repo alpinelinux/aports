@@ -87,6 +87,7 @@ EOF
 # helpers
 load_plugins() {
 	local f l i n
+	( [ -e "$1" ] && [ -r "$1" ] ) || return 0
 
 	# Load all sections, profiles, imagetypes, and features script files in file/directory structure
 	while IFS= read -r f ; do
@@ -125,12 +126,7 @@ load_plugins() {
 		. "$f"
 
 	done <<-EOF
-		$( # Load plugins from specified file or directory.
-		if [ -e "$1" ] && [ -r "$1" ]; then
-			[ -f "$1" ] && echo "$1"
-			[ -d "$1" ] && IFS='\n' find "$1"  -type f -regex "$1/.*/\(profile\|imagetype\|feature\)-.*\.sh"  -exec echo "{}" \;
-		fi
-		)
+		$( [ -f "$1" ] && echo "$1"; [ -d "$1" ] && IFS='\n' find "$1"  -type f -regex "$1/.*/\(profile\|imagetype\|feature\)-.*\.sh"  -exec echo "{}" \; )
 	EOF
 }
 
