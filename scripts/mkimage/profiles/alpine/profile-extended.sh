@@ -1,6 +1,6 @@
 profile_extended() {
 	profile_standard
-	kernel_addons="dahdi-linux xtables-addons"
+	initfs_apks_flavored="$initfs_apks_flavored dahdi-linux xtables-addons"	
 	apks="$apks
 		dahdi-linux dahdi-tools ethtool hwdata lftp links
 		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
@@ -23,12 +23,6 @@ profile_extended() {
 		parted rsync sfdisk syslinux unrar util-linux xfsprogs
 		"
 
-	local _k _a
-	for _k in $kernel_flavors; do
-		apks="$apks linux-$_k"
-		for _a in $kernel_addons; do
-			apks="$apks $_a-$_k"
-		done
-	done
 	apks="$apks linux-firmware"
+	apks_flavored=" $apks_flavored linux"
 }

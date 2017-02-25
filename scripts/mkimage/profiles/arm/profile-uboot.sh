@@ -21,11 +21,10 @@ profile_uboot() {
 	case "$ARCH" in
 	aarch64)
 		kernel_flavors="vanilla"
-		kernel_addons=
 		;;
 	*)
 		kernel_flavors="grsec"
-		kernel_addons="xtables-addons"
+		initfs_apks_flavored="xtables-addons"
 		;;
 	esac
 	initfs_features="base bootchart squashfs ext2 ext3 ext4 kms mmc raid scsi usb"

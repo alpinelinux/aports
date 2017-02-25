@@ -1,3 +1,7 @@
+imagetype_iso() {
+	return 0
+}
+
 create_image_iso() {
 	local ISO="${OUTDIR}/${output_filename}"
 	local _isolinux

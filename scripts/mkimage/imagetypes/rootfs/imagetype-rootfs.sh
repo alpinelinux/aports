@@ -1,3 +1,7 @@
+imagetype_rootfs() {
+	return 0
+}
+
 create_image_rootfs() {
 	local _script=$(readlink -f "$scriptdir/genrootfs.sh")
 	local output_file="$(readlink -f ${OUTDIR:-.})/$output_filename"

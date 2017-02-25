@@ -14,13 +14,30 @@ build_kernel() {
 		"$DESTDIR"
 }
 
+add_flavor() {
+	local _f _a _s=""
+	for _f in $kernel_flavors; do
+		for _a in $@; do
+			_s="$s $_a-$_f"
+		done
+	done
+	echo $_s
+}
+
 section_kernels() {
 	local _f _a _pkgs
 	for _f in $kernel_flavors; do
+		#FIXME Should these really be hard-coded?
 		_pkgs="linux-$_f linux-firmware"
-		for _a in $kernel_addons; do
-			_pkgs="$_pkgs $_a-$_f"
+
+		for _a in $initfs_apks $initfs_only_apks; do
+			_pkgs="$_pkgs $_a"
 		done
+
+		for _a in $initfs_apks_flavored $initfs_only_apks_flavored; do
+			_pkgs="$_pkgs $(add_flavor "$_a")"
+		done
+
 		local id=$( (echo "$initfs_features::$_hostkeys" ; apk fetch --root "$APKROOT" --simulate alpine-base $_pkgs | sort) | checksum)
 		build_section kernel $ARCH $_f $id $_pkgs
 	done
@@ -47,7 +64,12 @@ build_apks() {
 }
 
 section_apks() {
+	# Build list of all required apks
+	[ -n "$apks_flavored" ] && apkx="$apks $(add_flavor $apks_flavored)"
+	[ -n "$initfs_apks" ] && apks="$apks $initfs_apks"
+	[ -n "$initfs_apks_flavored" ] && apkx="$apks $(add_flavor $initfs_apks_flavored)"
 	[ -n "$apks" ] || return 0
+
 	build_section apks $ARCH $(apk fetch --root "$APKROOT" --simulate --recursive $apks | sort | checksum)
 }
 
@@ -97,7 +119,7 @@ syslinux_gen_config() {
 		_kf=""
 		[ "$_f" = vanilla ] || _kf=-$_f
 
-		if [ -z "${xen_params+set}" ]; then
+		if [ ! "${xen_enabled}" = "true" ]; then
 			cat <<- EOF
 
 			LABEL $_f
