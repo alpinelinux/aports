@@ -15,16 +15,19 @@ set -e
 . /usr/share/abuild/functions.sh
 
 # deduce aports directory
-[ -n "$APORTS" ] || APORTS=$(realpath $(dirname $0)/../)
-[ -e "$APORTS/main/build-base" ] || die "Unable to deduce aports base checkout"
+[ -n "$APORTS" ] || APORTS="$(realpath "$(dirname $0)"/../)"
+[ -e "$APORTS/main/build-base" ] || die "Unable to deduce aports base checkout, please set \$APORTS"
 
 # 
 all_sections=""
 all_profiles=""
+all_imagetypes=""
+all_features=""
+
 all_checksums="sha256 sha512"
 all_arches="aarch64 armhf x86 x86_64"
 all_dirs=""
-build_date="$(date +%y%m%d)"
+build_date="$(date +%Y%m%d)"
 default_arch="$(apk --print-arch)"
 _hostkeys=""
 _simulate=""
@@ -66,6 +69,7 @@ options:
 --hostkeys		Copy system apk signing keys to created images
 --outdir		Specify directory for the created images
 --profile		Specify which profiles to build
+--repository-file	File to use for list of repositories
 --repository		Package repository to use for the image create
 --extra-repository	Add repository to search packages from
 --simulate		Don't execute commands
@@ -73,24 +77,61 @@ options:
 --workdir		Specify temporary working directory (cache)
 --yaml
 
-known profiles: $(echo $all_profiles | sort -u)
+known profiles    : $(echo $all_profiles )
+known image types : $(echo $all_imagetypes)
+known features    : $(echo $all_features )
 
 EOF
 }
 
 # helpers
 load_plugins() {
-	local f
-	[ -e "$1" ] || return 0
-	for f in "$1"/mkimg.*.sh; do
-		[ -e "$f" ] || return 0
-		break
-	done
-	all_profiles="$all_profiles $(sed -n -e 's/^profile_\(.*\)() {$/\1/p' $1/mkimg.*.sh)"
-	all_sections="$all_sections $(sed -n -e 's/^section_\(.*\)() {$/\1/p' $1/mkimg.*.sh)"
-	for f in "$1"/mkimg.*.sh; do
-		. $f
-	done
+	local f l i n
+
+	# Load all sections, profiles, imagetypes, and features script files in file/directory structure
+	while IFS= read -r f ; do
+
+		while read -r l ; do
+			i="${l%()*}"
+			t="${i%%_*}"
+			n="${i#${t}_}"
+		
+			case "$t" in
+				"section" )
+					all_sections="$all_sections $n"
+					;;
+				"profile" )
+					all_profiles="$all_profiles $n"
+					;;
+				"imagetype" )
+					all_imagetypes="$all_imagetypes $n"
+					;;
+				"feature" )
+					all_features="$all_features $n"
+					;;
+			esac
+
+		done <<-EOF
+			$(cat "$f" | grep -E -e '^section_*()' -e '^profile_*()' -e '^feature_*()' -e '^imagetype_*()')
+		EOF
+
+		# Sort and eliminate duplicates from lists
+		all_sections="$(echo $all_sections | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+		all_profiles="$(echo $all_profiles | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+		all_imagetypes="$(echo $all_imagetypes | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+		all_features="$(echo $all_features | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+
+		# Source all profile/imagetype/feature files found.
+		. "$f"
+
+	done <<-EOF
+		$( # Load plugins from specified file or directory.
+		if [ -e "$1" ] && [ -r "$1" ]; then
+			[ -f "$1" ] && echo "$1"
+			[ -d "$1" ] && IFS='\n' find "$1"  -type f -regex "$1/.*/\(profile\|imagetype\|feature\)-.*\.sh"  -exec echo "{}" \;
+		fi
+		)
+	EOF
 }
 
 checksum() {
@@ -199,6 +240,7 @@ while [ $# -gt 0 ]; do
 	opt="$1"
 	shift
 	case "$opt" in
+	--repository-file) REPOFILE="$1"; shift ;;
 	--repository) REPODIR="$1"; shift ;;
 	--extra-repository) EXTRAREPOS="$EXTRAREPOS $1"; shift ;;
 	--workdir) WORKDIR="$1"; shift ;;
@@ -248,18 +290,27 @@ fi
 # create images
 for ARCH in $req_arch; do
 	APKROOT="$WORKDIR/apkroot-$ARCH"
+	APKREPOS="$APKROOT/etc/apk/repositories"
 	if [ ! -e "$APKROOT" ]; then
 		# create root for caching packages
 		mkdir -p "$APKROOT/etc/apk/cache"
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
 		abuild-apk --arch "$ARCH" --root "$APKROOT" add --initdb
 
-		if [ -z "$REPODIR" ]; then
+		if [ -z "$REPODIR" ] && [ -z "$REPOFILE" ]; then
 			warning "no repository set"
 		fi
-		echo "$REPODIR" > "$APKROOT/etc/apk/repositories"
+		
+		touch "$APKREPOS"
+
+		if [ -f "$REPOFILE" ]; then
+			cat "$REPOFILE" | grep -E -v "^#" >> "$APKREPOS"
+		fi
+
+		[ -z "$REPODIR"] || echo "$REPODIR" >> "$APKREPOS"
+
 		for repo in $EXTRAREPOS; do
-			echo "$repo" >> "$APKROOT/etc/apk/repositories"
+			echo "$repo" >> "$APKREPOS"
 		done
 	fi
 	abuild-apk update --root "$APKROOT"
