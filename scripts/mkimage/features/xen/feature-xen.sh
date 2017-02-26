@@ -6,7 +6,7 @@ feature_xen() {
 	kernel_cmdline="nomodeset"
 	xen_params=""
 	apks="$apks xen"
-#	apkovl="genapkovl-xen.sh"
+	overlays="$overlays xen-dom0"
 }
 
 

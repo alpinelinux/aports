@@ -14,4 +14,6 @@ feature_zfs() {
 	fi
 
 	apks="$apks udev zfs-udev"
+
+	overlays="$overlays zfs"
 }
