@@ -216,6 +216,11 @@ static void mark_error(struct fetch_ctx *ctx, const char *match, struct apk_name
 	ctx->errors++;
 }
 
+static void mark_name_flags(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
+{
+	name->auto_select_virtual = 1;
+}
+
 static void mark_name_recursive(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
 {
 	struct apk_changeset changeset = {};
@@ -299,7 +304,7 @@ static int purge_package(void *pctx, int dirfd, const char *filename)
 static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
-	void *mark = (ctx->flags & FETCH_RECURSIVE) ? mark_name_recursive : mark_name;
+	void *mark;
 
 	if (ctx->flags & FETCH_STDOUT) {
 		apk_flags &= ~APK_PROGRESS;
@@ -318,6 +323,12 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 
 	ctx->db = db;
 
+	if (ctx->flags & FETCH_RECURSIVE) {
+		apk_name_foreach_matching(db, args, apk_foreach_genid(), mark_name_flags, ctx);
+		mark = mark_name_recursive;
+	} else {
+		mark = mark_name;
+	}
 	apk_name_foreach_matching(db, args, apk_foreach_genid(), mark, ctx);
 	if (!ctx->errors)
 		apk_hash_foreach(&db->available.packages, fetch_package, ctx);

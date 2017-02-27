@@ -640,7 +640,9 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 			     !p->pkg->ss.tag_ok))
 				continue;
 			/* Virtual packages cannot be autoselected */
-			if (p->version == &apk_null_blob && p->pkg->name->ss.requirers == 0)
+			if (p->version == &apk_null_blob &&
+			    p->pkg->name->auto_select_virtual == 0 &&
+			    p->pkg->name->ss.requirers == 0)
 				continue;
 			if (compare_providers(ss, p, &chosen) > 0)
 				chosen = *p;
