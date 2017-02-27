@@ -25,7 +25,8 @@
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
+#include <sys/mount.h>
+#include <linux/magic.h>
 
 #include "apk_defines.h"
 #include "apk_package.h"
@@ -1373,28 +1374,6 @@ static char *find_mountpoint(int atfd, const char *rel_path)
 	return ret;
 }
 
-static int do_remount(const char *path, const char *option)
-{
-	pid_t pid;
-	int status;
-
-	pid = fork();
-	if (pid < 0)
-		return -errno;
-
-	if (pid == 0) {
-		execl("/bin/mount", "mount", "-o", "remount", "-o",
-		      option, path, (void*) 0);
-		return 1;
-	}
-
-	waitpid(pid, &status, 0);
-	if (!WIFEXITED(status))
-		return -1;
-
-	return WEXITSTATUS(status);
-}
-
 static void mark_in_cache(struct apk_database *db, int dirfd, const char *name, struct apk_package *pkg)
 {
 	if (pkg == NULL)
@@ -1475,13 +1454,30 @@ static int apk_db_name_rdepends(apk_hash_item item, void *pctx)
 	return 0;
 }
 
+
+static unsigned long map_statfs_flags(unsigned long f_flag)
+{
+	unsigned long mnt_flags = 0;
+	if (f_flag & ST_RDONLY) mnt_flags |= MS_RDONLY;
+	if (f_flag & ST_NOSUID) mnt_flags |= MS_NOSUID;
+	if (f_flag & ST_NODEV)  mnt_flags |= MS_NODEV;
+	if (f_flag & ST_NOEXEC) mnt_flags |= MS_NOEXEC;
+	if (f_flag & ST_NOATIME) mnt_flags |= MS_NOATIME;
+	if (f_flag & ST_NODIRATIME)mnt_flags |= MS_NODIRATIME;
+#ifdef ST_RELATIME
+	if (f_flag & ST_RELATIME) mnt_flags |= MS_RELATIME;
+#endif
+	if (f_flag & ST_SYNCHRONOUS) mnt_flags |= MS_SYNCHRONOUS;
+	if (f_flag & ST_MANDLOCK) mnt_flags |= ST_MANDLOCK;
+	return mnt_flags;
+}
+
 int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 {
 	const char *msg = NULL;
 	struct apk_repository_list *repo = NULL;
 	struct apk_bstream *bs;
 	struct statfs stfs;
-	struct statvfs stvfs;
 	apk_blob_t blob;
 	int r, fd, write_arch = FALSE;
 
@@ -1522,7 +1518,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		goto ret_errno;
 	}
 	if (fstatfs(db->root_fd, &stfs) == 0 &&
-	    stfs.f_type == 0x01021994 /* TMPFS_MAGIC */)
+	    stfs.f_type == TMPFS_MAGIC)
 		db->permanent = 0;
 
 	if (dbopts->root && dbopts->arch) {
@@ -1578,6 +1574,15 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		}
 		if (write_arch)
 			apk_blob_to_file(db->root_fd, apk_arch_file, *db->arch, APK_BTF_ADD_EOL);
+
+		/* mount /proc */
+		asprintf(&db->root_proc_dir, "%s/proc", dbopts->root);
+		if (statfs(db->root_proc_dir, &stfs) != 0) {
+			if (errno == ENOENT) mkdir(db->root_proc_dir, 0555);
+			stfs.f_type = 0;
+		}
+		if (stfs.f_type != PROC_SUPER_MAGIC)
+			mount("proc", db->root_proc_dir, "proc", 0, 0);
 	}
 
 	blob = APK_BLOB_STR("+etc\n" "@etc/init.d\n" "!etc/apk\n");
@@ -1588,16 +1593,17 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 
 	/* figure out where to have the cache */
 	fd = openat(db->root_fd, apk_linked_cache_dir, O_RDONLY | O_CLOEXEC);
-	if (fd >= 0 && fstatfs(fd, &stfs) == 0 && stfs.f_type != 0x01021994 /* TMPFS_MAGIC */) {
+	if (fd >= 0 && fstatfs(fd, &stfs) == 0 && stfs.f_type != TMPFS_MAGIC) {
 		db->cache_dir = apk_linked_cache_dir;
 		db->cache_fd = fd;
+		db->cache_remount_flags = map_statfs_flags(stfs.f_flags);
 		if ((dbopts->open_flags & (APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE)) &&
-		    fstatvfs(fd, &stvfs) == 0 && (stvfs.f_flag & ST_RDONLY) != 0) {
+		    (db->cache_remount_flags & MS_RDONLY) != 0) {
 			/* remount cache read/write */
 			db->cache_remount_dir = find_mountpoint(db->root_fd, db->cache_dir);
 			if (db->cache_remount_dir == NULL) {
 				apk_warning("Unable to find cache directory mount point");
-			} else if (do_remount(db->cache_remount_dir, "rw") != 0) {
+			} else if (mount(0, db->cache_remount_dir, 0, MS_REMOUNT | (db->cache_remount_flags & ~MS_RDONLY), 0) != 0) {
 				free(db->cache_remount_dir);
 				db->cache_remount_dir = NULL;
 				apk_error("Unable to remount cache read/write");
@@ -1784,6 +1790,18 @@ void apk_db_close(struct apk_database *db)
 	apk_hash_free(&db->installed.files);
 	apk_hash_free(&db->installed.dirs);
 
+	if (db->root_proc_dir) {
+		umount2(db->root_proc_dir, MNT_DETACH|UMOUNT_NOFOLLOW);
+		free(db->root_proc_dir);
+		db->root_proc_dir = NULL;
+	}
+
+	if (db->cache_remount_dir) {
+		mount(0, db->cache_remount_dir, 0, MS_REMOUNT | db->cache_remount_flags, 0);
+		free(db->cache_remount_dir);
+		db->cache_remount_dir = NULL;
+	}
+
 	if (db->keys_fd)
 		close(db->keys_fd);
 	if (db->cache_fd)
@@ -1794,12 +1812,6 @@ void apk_db_close(struct apk_database *db)
 		close(db->lock_fd);
 	if (db->root != NULL)
 		free(db->root);
-
-	if (db->cache_remount_dir) {
-		do_remount(db->cache_remount_dir, "ro");
-		free(db->cache_remount_dir);
-		db->cache_remount_dir = NULL;
-	}
 }
 
 int apk_db_get_tag_id(struct apk_database *db, apk_blob_t tag)

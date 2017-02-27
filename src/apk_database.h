@@ -145,7 +145,8 @@ struct apk_database {
 	int root_fd, lock_fd, cache_fd, keys_fd;
 	unsigned num_repos, num_repo_tags;
 	const char *cache_dir;
-	char *cache_remount_dir;
+	char *cache_remount_dir, *root_proc_dir;
+	unsigned long cache_remount_flags;
 	apk_blob_t *arch;
 	unsigned int local_repos, available_repos;
 	int repo_update_errors;
