@@ -238,7 +238,7 @@ static int run_commit_hook(void *ctx, int dirfd, const char *file)
 	if (apk_verbosity >= 2) apk_message("Executing: %s %s", fn, commit_hook_str[hook->type]);
 
 	if (apk_db_run_script(db, fn, argv) < 0 && hook->type == PRE_COMMIT_HOOK)
-		return -1;
+		return -2;
 
 	return 0;
 }
@@ -312,7 +312,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 		}
 	}
 
-	if (run_commit_hooks(db, PRE_COMMIT_HOOK) < 0)
+	if (run_commit_hooks(db, PRE_COMMIT_HOOK) == -2)
 		return -1;
 
 	/* Go through changes */
