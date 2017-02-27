@@ -37,22 +37,15 @@ scriptdir="$(dirname $0)"
 OUTDIR="$PWD"
 RELEASE="${build_date}"
 
+# Include utilities: basic list
+. "$scriptdir/utils/utils-basic.sh"
+. "$scriptdir/utils/utils-list.sh"
 
 msg() {
 	if [ -n "$quiet" ]; then return 0; fi
 	local prompt="$GREEN>>>${NORMAL}"
 	local name="${BLUE}mkimage${ARCH+-$ARCH}${NORMAL}"
 	printf "${prompt} ${name}: %s\n" "$1" >&2
-}
-
-list_has() {
-	local needle="$1"
-	local i
-	shift
-	for i in $@; do
-		[ "$needle" != "$i" ] || return 0
-	done
-	return 1
 }
 
 usage() {
