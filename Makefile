@@ -35,7 +35,7 @@ install:
 	$(INSTALLDIR) $(DESTDIR)$(DOCDIR)
 	$(INSTALL) README $(DESTDIR)$(DOCDIR)
 
-test: FORCE
+check test: FORCE
 	$(Q)$(MAKE) TEST=y
 	$(Q)$(MAKE) -C test
 
