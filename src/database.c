@@ -1593,7 +1593,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 
 	/* figure out where to have the cache */
 	fd = openat(db->root_fd, apk_linked_cache_dir, O_RDONLY | O_CLOEXEC);
-	if (fd >= 0 && fstatfs(fd, &stfs) == 0 && stfs.f_type != TMPFS_MAGIC) {
+	if (fd >= 0) {
 		db->cache_dir = apk_linked_cache_dir;
 		db->cache_fd = fd;
 		db->cache_remount_flags = map_statfs_flags(stfs.f_flags);
@@ -1612,8 +1612,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			}
 		}
 	} else {
-		if (fd >= 0)
-			close(fd);
 		db->cache_dir = apk_static_cache_dir;
 		db->cache_fd = openat(db->root_fd, db->cache_dir, O_RDONLY | O_CLOEXEC);
 	}
