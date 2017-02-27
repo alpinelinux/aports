@@ -53,7 +53,6 @@ static apk_blob_t tmpprefix = { .len=8, .ptr = ".apknew." };
 static const char * const apkindex_tar_gz = "APKINDEX.tar.gz";
 
 static const char * const apk_static_cache_dir = "var/cache/apk";
-static const char * const apk_linked_cache_dir = "etc/apk/cache";
 
 static const char * const apk_world_file = "etc/apk/world";
 static const char * const apk_world_file_tmp = "etc/apk/world.new";
@@ -598,7 +597,7 @@ int apk_repo_format_real_url(struct apk_database *db, struct apk_repository *rep
 int apk_repo_format_item(struct apk_database *db, struct apk_repository *repo, struct apk_package *pkg,
 			 int *fd, char *buf, size_t len)
 {
-	if (repo->url == apk_linked_cache_dir) {
+	if (repo->url == db->repos[APK_REPOSITORY_CACHED].url) {
 		*fd = db->cache_fd;
 		return apk_pkg_format_cache_pkg(APK_BLOB_PTR_LEN(buf, len), pkg);
 	} else {
@@ -1403,10 +1402,10 @@ static int add_repos_from_file(void *ctx, int dirfd, const char *file)
 	return 0;
 }
 
-static void apk_db_setup_repositories(struct apk_database *db)
+static void apk_db_setup_repositories(struct apk_database *db, const char *cache_dir)
 {
 	db->repos[APK_REPOSITORY_CACHED] = (struct apk_repository) {
-		.url = apk_linked_cache_dir,
+		.url = cache_dir,
 		.csum.data = {
 			0xb0,0x35,0x92,0x80,0x6e,0xfa,0xbf,0xee,0xb7,0x09,
 			0xf5,0xa7,0x0a,0x7c,0x17,0x26,0x69,0xb0,0x05,0x38 },
@@ -1494,6 +1493,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		r = -1;
 		goto ret_r;
 	}
+	if (!dbopts->cache_dir) dbopts->cache_dir = "etc/apk/cache";
 
 	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 20000);
 	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 10000);
@@ -1505,7 +1505,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_protected_path_array_init(&db->protected_paths);
 	db->permanent = 1;
 
-	apk_db_setup_repositories(db);
+	apk_db_setup_repositories(db, dbopts->cache_dir);
 
 	db->root = strdup(dbopts->root ?: "/");
 	db->root_fd = openat(AT_FDCWD, db->root, O_RDONLY | O_CLOEXEC);
@@ -1592,9 +1592,9 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			     add_protected_paths_from_file, db);
 
 	/* figure out where to have the cache */
-	fd = openat(db->root_fd, apk_linked_cache_dir, O_RDONLY | O_CLOEXEC);
+	fd = openat(db->root_fd, dbopts->cache_dir, O_RDONLY | O_CLOEXEC);
 	if (fd >= 0) {
-		db->cache_dir = apk_linked_cache_dir;
+		db->cache_dir = dbopts->cache_dir;
 		db->cache_fd = fd;
 		db->cache_remount_flags = map_statfs_flags(stfs.f_flags);
 		if ((dbopts->open_flags & (APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE)) &&

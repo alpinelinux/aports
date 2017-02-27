@@ -125,6 +125,7 @@ struct apk_db_options {
 	const char *root;
 	const char *arch;
 	const char *keys_dir;
+	const char *cache_dir;
 	const char *repositories_file;
 	struct list_head repository_list;
 };
