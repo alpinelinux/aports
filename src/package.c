@@ -522,7 +522,19 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 			      const struct apk_file_info *fi,
 			      struct apk_istream *is)
 {
-	int r;
+	static struct {
+		char type[8];
+		unsigned int nid;
+	} signature_type[] = {
+		{ "RSA512", NID_sha512 },
+		{ "RSA256", NID_sha256 },
+		{ "RSA", NID_sha1 },
+		{ "DSA", NID_dsa },
+	};
+	const EVP_MD *md = NULL;
+	const char *name = NULL;
+	BIO *bio;
+	int r, i, fd;
 
 	if (ctx->data_started)
 		return 1;
@@ -562,28 +574,27 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 	if (ctx->keys_fd < 0)
 		return 0;
 
-	if (strncmp(&fi->name[6], "RSA.", 4) == 0 ||
-	    strncmp(&fi->name[6], "DSA.", 4) == 0) {
-		int fd = openat(ctx->keys_fd, &fi->name[10], O_RDONLY|O_CLOEXEC);
-		BIO *bio;
-
-		if (fd < 0)
-			return 0;
-
-		bio = BIO_new_fp(fdopen(fd, "r"), BIO_CLOSE);
-		ctx->signature.pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
-		if (ctx->signature.pkey != NULL) {
-			if (fi->name[6] == 'R')
-				ctx->md = EVP_sha1();
-			else
-				ctx->md = EVP_dss1();
+	for (i = 0; i < ARRAY_SIZE(signature_type); i++) {
+		size_t slen = strlen(signature_type[i].type);
+		if (strncmp(&fi->name[6], signature_type[i].type, slen) == 0 &&
+		    fi->name[6+slen] == '.') {
+			md = EVP_get_digestbynid(signature_type[i].nid);
+			name = &fi->name[6+slen+1];
+			break;
 		}
-		BIO_free(bio);
-	} else
-		return 0;
+	}
+	if (!md) return 0;
 
-	if (ctx->signature.pkey != NULL)
+	fd = openat(ctx->keys_fd, name, O_RDONLY|O_CLOEXEC);
+	if (fd < 0) return 0;
+
+	bio = BIO_new_fp(fdopen(fd, "r"), BIO_CLOSE);
+	ctx->signature.pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
+	if (ctx->signature.pkey != NULL) {
+		ctx->md = md;
 		ctx->signature.data = apk_blob_from_istream(is, fi->size);
+	}
+	BIO_free(bio);
 
 	return 0;
 }
