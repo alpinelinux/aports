@@ -37,7 +37,7 @@ scriptdir="$(dirname $0)"
 OUTDIR="$PWD"
 RELEASE="${build_date}"
 
-# Include utilities: basic list
+# Include utilities: 'basic', 'list'
 . "$scriptdir/utils/utils-basic.sh"
 . "$scriptdir/utils/utils-list.sh"
 
@@ -70,57 +70,111 @@ options:
 --workdir		Specify temporary working directory (cache)
 --yaml
 
-known profiles    : $(echo $all_profiles )
-known image types : $(echo $all_imagetypes)
-known features    : $(echo $all_features )
+known profiles    : $all_profiles
+known image types : $all_imagetypes
+known features    : $all_features
 
 EOF
 }
 
-# helpers
+
+##
+## General purpose plugins loader.
+##
+## Usage: 'load_plugins "<filename>"' to load all plugin types and plugins from a file
+##        'load_plugins "<directory>"' to load all plugins found in directory hierarchy.
+
+# List containing all known plugin types.
+var_list_alias all_plugins
+
+# Include 'sections' plugin here directly, the rest will be discovered.
+plugin_sections() {
+	return 0
+}
+set_all_plugins "sections"
+
+# Main load_plugins function which does all the work of discovering, sourcing, and loading plugin types and plugins.
 load_plugins() {
-	local f l i n
-	( [ -e "$1" ] && [ -r "$1" ] ) || return 0
 
-	# Load all sections, profiles, imagetypes, and features script files in file/directory structure
-	while IFS= read -r f ; do
+	local target="$1"
+	local f l p q func
+	local _regex="section"
+	local _found=""
+	local mypath mydir myfile
 
-		while read -r l ; do
-			i="${l%()*}"
-			t="${i%%_*}"
-			n="${i#${t}_}"
+	( [ -e "$target" ] && [ -r "$target" ] ) || return 0
+
+	# Find all plugin-*.sh scripts, source them, and add plugin types they define to all_plugins list.
+	while IFS=$'\n' read -r f ; do
+		_found=
+		# Variables to be available when sourcing files
+		mypath="$(realpath "$f")"
+		mydir="${mypath%/*}"
+		myfile="${mypath##*/}"
+
+		# Find all lines containing plugin_* function definitions.
+		IFS=$'\n'
+		for l in $(grep -E -e '^plugin_[_[:alnum:]+[[:space:]]*\(\)[[:space:]]*\{' "$f" ) ; do
+			unset IFS
+			l="${l#plugin_}"
+			l="${l%\(\)*}"
+
+			# Add this plugin type to all_plugins list, regex for finding plugins, and mark for sourcing.
+			add_all_plugins "$l"
+			var_list_alias "all_$l"
+			_regex="$_regex\|${l%s}"
+			_found="true"
+		done
 		
-			case "$t" in
-				"section" )
-					all_sections="$all_sections $n"
-					;;
-				"profile" )
-					all_profiles="$all_profiles $n"
-					;;
-				"imagetype" )
-					all_imagetypes="$all_imagetypes $n"
-					;;
-				"feature" )
-					all_features="$all_features $n"
-					;;
-			esac
+		# Source all files in which valid plugin definitions were found.
+		[ "$_found" ] && . "$f"
 
-		done <<-EOF
-			$(cat "$f" | grep -E -e '^section_*()' -e '^profile_*()' -e '^feature_*()' -e '^imagetype_*()')
-		EOF
-
-		# Sort and eliminate duplicates from lists
-		all_sections="$(echo $all_sections | tr ' ' '\n' | sort -u | tr '\n' ' ')"
-		all_profiles="$(echo $all_profiles | tr ' ' '\n' | sort -u | tr '\n' ' ')"
-		all_imagetypes="$(echo $all_imagetypes | tr ' ' '\n' | sort -u | tr '\n' ' ')"
-		all_features="$(echo $all_features | tr ' ' '\n' | sort -u | tr '\n' ' ')"
-
-		# Source all profile/imagetype/feature files found.
-		. "$f"
-
-	done <<-EOF
-		$( [ -f "$1" ] && echo "$1"; [ -d "$1" ] && IFS='\n' find "$1"  -type f -regex "$1/.*/\(profile\|imagetype\|feature\)-.*\.sh"  -exec echo "{}" \; )
+	done<<-EOF
+		$( [ -f "$target" ] && echo "$target"; [ -d "$target" ] && find "$target" -type f -iname 'plugin-*\.sh' -exec printf '%s\n' {} \; )
 	EOF
+	unset IFS
+
+	# Run all plugin_* scripts found before loading plugins themselves.
+	for p in $(get_all_plugins) ; do
+		plugin_${p}
+	done
+
+	# Load all plugins of type defined in all_plugins list using regex built above.
+	while IFS=$'\n' read -r f ; do
+		_found=
+		# Variables to be available when sourcing files
+		mypath="$(realpath "$f")"
+		mydir="${mypath%/*}"
+		myfile="${mypath##*/}"
+
+		# Find all lines containing any function definitions.
+		IFS=$'\n'
+		for func in $(grep -E -e '^[[:alnum:]]+[_[:alnum:]]+[[:space:]]*\(\)' "$f") ; do
+			unset IFS
+			func="${func%()*}"
+			func="${func%% }"
+
+			# Determine if the function definition has the stem of any known plugins.
+			for p in $(get_all_plugins) ; do
+				p="${p}"
+				q="${func#${p%s}_}"
+
+				# Won't match iff this plugin type is stem of funciton
+				if [ "$q" != "$func" ] ; then
+					# Add this plugin to all_<plugin>s list and mark file for sourcing.
+					var_list_add "all_$p" "$q"
+					_found="true"
+				fi
+			done
+		done
+
+		# Source all files which contain function definitions for known plugin types.
+		[ "$_found" ] && . "$f"
+
+	done<<-EOF
+		$([ -f "$target" ] && echo "$target" ; [ -d "$target" ] && find "$target" -type f -regex "$target.*/\($_regex\)-.*\.sh" -exec printf '%s\n' {} \; )
+	EOF
+	unset IFS
 }
 
 checksum() {

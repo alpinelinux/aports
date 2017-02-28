@@ -160,7 +160,7 @@ var_list_filter() {
 
 var_list_get() {
 	local _list=$1
-	getvar $_list
+	getvar "$_list"
 }
 
 var_list_set() {
