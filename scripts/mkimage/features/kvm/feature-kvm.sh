@@ -8,10 +8,10 @@ feature_kvm() {
 
 
 feature_kvm_host() {
-	apks="$apks qemu qemu-img qemu-openrc qemu-system-$ARCH"
+	add_apks "qemu qemu-img qemu-openrc qemu-system-$ARCH"
 }
 
 
 feature_kvm_guest() {
-	initfs_features="$initfs_features virtio"
+	add_initfs_features "virtio"
 }

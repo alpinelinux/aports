@@ -5,8 +5,8 @@ feature_xen() {
 	xen_enabled=${xen_enabled:=true}
 	kernel_cmdline="nomodeset"
 	xen_params=""
-	apks="$apks xen"
-	overlays="$overlays xen-dom0"
+	add_apks "xen"
+	add_overlays "xen-dom0"
 }
 
 

@@ -3,5 +3,5 @@ plugin_features() {
 }
 
 plugin_overlays() {
-	return 0
+	var_list_alias overlays
 }

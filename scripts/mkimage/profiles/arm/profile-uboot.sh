@@ -17,17 +17,17 @@ section_uboot() {
 profile_uboot() {
 	profile_base
 	image_ext="tar.gz"
-	arch="aarch64 armhf armv7"
+	set_arch "aarch64 armhf armv7"
 	case "$ARCH" in
 	aarch64)
-		kernel_flavors="vanilla"
+		set_kernel_flavors "vanilla"
 		;;
 	*)
-		kernel_flavors="grsec"
-		initfs_apks_flavored="xtables-addons"
+		set_kernel_flavors "grsec"
+		add_initfs_apks_flavored "xtables-addons"
 		;;
 	esac
-	initfs_features="base bootchart squashfs ext2 ext3 ext4 kms mmc raid scsi usb"
+	set_initfs_features "base bootchart squashfs ext2 ext3 ext4 kms mmc raid scsi usb"
 	apkovl="genapkovl-dhcp.sh"
 	hostname="alpine"
 	uboot_install="yes"

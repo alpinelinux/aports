@@ -1,5 +1,5 @@
 profile_vanilla() {
 	profile_standard
-	#arch="$arch aarch64"
-	kernel_flavors="vanilla"
+	#add_arch "aarch64"
+	set_kernel_flavors "vanilla"
 }

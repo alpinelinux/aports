@@ -5,15 +5,15 @@ feature_zfs() {
 	enable_rootfs_zfs="${enable_rootfs_zfs:=true}"
 	
 	if [ "$enable_rootfs_zfs" = "true" ] ; then
-		initfs_apks="$initfs_apks zfs"
-		initfs_apks_flavored="$initfs_apks_flavored spl zfs"
-		initfs_features="$initfs_features zfs"
+		add_initfs_apks "zfs"
+		add_initfs_apks_flavored "spl zfs"
+		add_initfs_features "zfs"
 	else
-		apks_flavored="$apks_flavord spl zfs"
-		apks="$apks zfs"
+		apks_flavored "spl zfs"
+		apks "zfs"
 	fi
 
-	apks="$apks udev zfs-udev"
+	add_apks "udev zfs-udev"
 
-	overlays="$overlays zfs"
+	add_overlays "zfs"
 }

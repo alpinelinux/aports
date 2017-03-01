@@ -14,11 +14,10 @@ feature_nfs_client() {
 
 	enable_rootfs_nfs="${enable_rootfs_nfs:=true}"
 	if [ "$enable_rootfs_nfs" = "true" ] ; then
-##FIXME		initfs_features="$initfs_features nfs"
-		initfs_features="$initfs_features"
+		: ##FIXME add_initfs_features "nfs"
 	fi
 
-	apks="$apks nfs-utils"
+	add_apks "nfs-utils"
 
 }
 
@@ -26,6 +25,6 @@ feature_nfs_client() {
 # NFS server support
 
 feature_nfs_server() {
-	apks="$apks nfs-utils"
+	add_apks "nfs-utils"
 
 }

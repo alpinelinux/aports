@@ -16,10 +16,10 @@ feature_iscsi_initiator() {
 	enable_rootfs_iscsi="${enable_rootfs_iscsi:=true}"
 
 	if [ "$enable_rootfs_iscsi" = "true" ] ; then
-		initfs_features="$initfs_features scsi"
-		initfs_apks="$initfs_apks open-iscsi"
+		add_initfs_features "scsi"
+		add_initfs_apks "open-iscsi"
 	else
-		apks="$apks open-iscsi"
+		add_apks "open-iscsi"
 	fi
 }
 
@@ -27,6 +27,6 @@ feature_iscsi_initiator() {
 #iSCSI target (host) feature
 
 feature_iscsi_target() {
-	apks="$apks targetcli"
+	add_apks "targetcli"
 }
 

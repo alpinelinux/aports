@@ -28,15 +28,10 @@ section_kernels() {
 	local _f _a _pkgs
 	for _f in $kernel_flavors; do
 		#FIXME Should these really be hard-coded?
-		_pkgs="linux-$_f linux-firmware"
+		var_list_set _pkgs "linux-$_f linux-firmware"
 
-		for _a in $initfs_apks $initfs_only_apks; do
-			_pkgs="$_pkgs $_a"
-		done
-
-		for _a in $initfs_apks_flavored $initfs_only_apks_flavored; do
-			_pkgs="$_pkgs $(add_flavor $_a)"
-		done
+		var_list_add _pkgs "$initfs_apks $initfs_only_apks"
+		var_list_add _pkgs "$(add_flavor $initfs_apks_flavored $initfs_only_apks_flavored)"
 
 		local id=$( (echo "$initfs_features::$_hostkeys" ; apk fetch --root "$APKROOT" --simulate alpine-base $_pkgs | sort) | checksum)
 		build_section kernel $ARCH $_f $id $_pkgs
@@ -65,9 +60,7 @@ build_apks() {
 
 section_apks() {
 	# Build list of all required apks
-	[ -n "$apks_flavored" ] && apks="$apks $(add_flavor $apks_flavored)"
-	[ -n "$initfs_apks" ] && apks="$apks $initfs_apks"
-	[ -n "$initfs_apks_flavored" ] && apks="$apks $(add_flavor $initfs_apks_flavored)"
+	add_apks "$(add_flavor $apks_flavored) $initfs_apks $(add_flavor $initfs_apks_flavored)"
 	[ -n "$apks" ] || return 0
 
 	build_section apks $ARCH $(apk fetch --root "$APKROOT" --simulate --recursive $apks | sort | checksum)
@@ -236,11 +229,11 @@ section_grubefi() {
 }
 
 profile_base() {
-	kernel_flavors="grsec"
+	set_kernel_flavors "grsec"
 	initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage quiet"
-	initfs_features="ata base bootchart cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
+	set_initfs_features "ata base bootchart cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
 	#grub_mod="disk part_msdos linux normal configfile search search_label efi_uga efi_gop fat iso9660 cat echo ls test true help"
-	apks="alpine-base alpine-mirrors bkeymaps chrony e2fsprogs network-extras libressl openssh tzdata"
+	set_apks "alpine-base alpine-mirrors bkeymaps chrony e2fsprogs network-extras libressl openssh tzdata"
 	apkovl=
 	hostname="alpine"
 }

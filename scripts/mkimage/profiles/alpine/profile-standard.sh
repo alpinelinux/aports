@@ -1,8 +1,17 @@
 profile_standard() {
+	# Load parent profile(s)
 	profile_base
-	image_ext="iso"
-	arch="x86 x86_64"
-	output_format="iso"
+
+	# Set architecture and kernel flavor
+	set_arch "x86 x86_64"
+
+	# Load features
+	feature_xtables_addons
+
+	# Configure kernel
 	kernel_cmdline="nomodeset"
-	initfs_apks_flavored="$initfs_apks_flavored xtables-addons"
+
+	# Configure output
+	image_ext="iso"
+	output_format="iso"
 }

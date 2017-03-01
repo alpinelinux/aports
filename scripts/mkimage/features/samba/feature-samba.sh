@@ -3,29 +3,29 @@
 # Enable windbind support and samba domain controller using feature_samba_winbind or feature_samba_dc respectively.
 
 feature_samba() {
-	apks="$apks samba"
+	add_apks "samba"
 	feature_samba_client
 	feature_samba_server
 }
 
 
 feature_samba_client() {
-	apks="$apks samba-client"
+	add_apks "samba-client"
 }
 
 
 feature_samba_server() {
-	apks="$apks samba-server"
+	add_apks "samba-server"
 }
 
 
 feature_samba_winbind() {
-	apks="$apks samba-winbind"
+	add_apks "samba-winbind"
 }
 
 
 feature_samba_dc() {
-	apks="$apks samba-dc"
+	add_apks "samba-dc"
 	feature_samba_server
 	feature_samba_winbind
 }

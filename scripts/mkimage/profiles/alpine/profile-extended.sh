@@ -1,7 +1,7 @@
 profile_extended() {
 	profile_standard
-	initfs_apks_flavored="$initfs_apks_flavored dahdi-linux xtables-addons"	
-	apks="$apks
+	add_initfs_apks_flavored "dahdi-linux xtables-addons"	
+	add_apks "
 		dahdi-linux dahdi-tools ethtool hwdata lftp links
 		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
 		pax-utils paxctl pciutils screen strace sudo tmux
@@ -23,6 +23,6 @@ profile_extended() {
 		parted rsync sfdisk syslinux unrar util-linux xfsprogs
 		"
 
-	apks="$apks linux-firmware"
-	apks_flavored=" $apks_flavored linux"
+	add_apks "linux-firmware"
+	add_apks_flavored "linux"
 }
