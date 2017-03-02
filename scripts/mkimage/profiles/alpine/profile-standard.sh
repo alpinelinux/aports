@@ -12,6 +12,5 @@ profile_standard() {
 	kernel_cmdline="nomodeset"
 
 	# Configure output
-	image_ext="iso"
-	output_format="iso"
+	imagetype_iso
 }

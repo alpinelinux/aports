@@ -14,6 +14,7 @@ feature_ntp() {
 						;;
 					* )
 						warning "unrecognized ntp provider '$_val'"
+						;;
 				esac
 			;;
 		esac

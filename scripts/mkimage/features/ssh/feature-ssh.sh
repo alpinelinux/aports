@@ -14,6 +14,7 @@ feature_ssh() {
 						;;
 					* )
 						warning "unrecognized ssh provider '$_val'"
+						;;
 				esac
 			;;
 		esac
