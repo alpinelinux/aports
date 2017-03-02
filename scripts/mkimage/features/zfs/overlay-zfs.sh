@@ -1,3 +1,5 @@
+overlay_zfs_script="$mypath"
+
 # Overlay to enable ZFS filesystem support.
 overlay_zfs() {
 

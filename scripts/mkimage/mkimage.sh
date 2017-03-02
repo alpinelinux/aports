@@ -18,11 +18,6 @@ set -e
 [ -n "$APORTS" ] || APORTS="$(realpath "$(dirname $0)"/../)"
 [ -e "$APORTS/main/build-base" ] || die "Unable to deduce aports base checkout, please set \$APORTS"
 
-# 
-all_sections=""
-all_profiles=""
-all_imagetypes=""
-all_features=""
 
 all_checksums="sha256 sha512"
 all_arches="aarch64 armhf x86 x86_64"
@@ -34,12 +29,18 @@ _simulate=""
 _checksum=""
 
 scriptdir="$(dirname $0)"
+
+# If we're NOT running in the script directory, default to outputting in the curent directory.
 OUTDIR="$PWD"
+# If we ARE running in our script directory, put output files somewhere sane, like /tmp
+[ "$OUTDIR" = "scriptdir" ] && OUTDIR="/tmp"
+
 RELEASE="${build_date}"
 
-# Include utilities: 'basic', 'list'
+# Include utilities: 'basic', 'list', 'fkrt'
 . "$scriptdir/utils/utils-basic.sh"
 . "$scriptdir/utils/utils-list.sh"
+. "$scriptdir/utils/utils-fkrt.sh"
 
 msg() {
 	if [ -n "$quiet" ]; then return 0; fi
@@ -62,6 +63,8 @@ options:
 --hostkeys		Copy system apk signing keys to created images
 --outdir		Specify directory for the created images
 --profile		Specify which profiles to build
+--plugins		Specify a file or directory structure root from
+                        which to load additional discovered plugins.
 --repository-file	File to use for list of repositories
 --repository		Package repository to use for the image create
 --extra-repository	Add repository to search packages from
@@ -70,6 +73,7 @@ options:
 --workdir		Specify temporary working directory (cache)
 --yaml
 
+known plugins     : $all_plugins
 known profiles    : $all_profiles
 known image types : $all_imagetypes
 known features    : $all_features
@@ -88,10 +92,12 @@ EOF
 var_list_alias all_plugins
 
 # Include 'sections' plugin here directly, the rest will be discovered.
+set_all_plugins "sections"
+
 plugin_sections() {
 	return 0
 }
-set_all_plugins "sections"
+var_list_alias all_sections
 
 # Main load_plugins function which does all the work of discovering, sourcing, and loading plugin types and plugins.
 load_plugins() {
@@ -291,6 +297,7 @@ while [ $# -gt 0 ]; do
 	--tag) RELEASE="$1"; shift ;;
 	--arch) req_arch="$1"; shift ;;
 	--profile) req_profiles="$1"; shift ;;
+	--plugin) load_plugins "$1"; shift ;;
 	--hostkeys) _hostkeys="--hostkeys";;
 	--simulate) _simulate="yes";;
 	--checksum) _checksum="yes";;
@@ -346,9 +353,9 @@ for ARCH in $req_arch; do
 		
 		touch "$APKREPOS"
 
-		if [ -f "$REPOFILE" ]; then
+		for repo in $REPOFILE ; do
 			cat "$REPOFILE" | grep -E -v "^#" >> "$APKREPOS"
-		fi
+		done
 
 		[ -z "$REPODIR"] || echo "$REPODIR" >> "$APKREPOS"
 

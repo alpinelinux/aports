@@ -1,12 +1,18 @@
 # syslinux bootloader plugin for x86/x86_64
 bootloader_syslinux() {
-	[ "$ARCH" = x86 -o "$ARCH" = x86_64 ] || return 0
-	bootloader_syslinux_enabled="${bootloader_syslinux_enabled:-true}"
+	list_has $ARCH "x86 x86_64" || return 0
+
+	if [ "$1" = "disabled" ] ; then
+		bootloader_syslinux_enabled="false"
+	elif [ "$1" = "enabled" ] || [ "$bootloader_syslinux_enabled" != "false" ] ; then
+		bootloader_syslinux_enabled="true"
+		bootloader_syslinux_cfg "extlinux/extlinux.conf"
+	fi
 }
 
 # syslinux.cfg bootloader plugin.
 bootloader_syslinux_cfg() {
-	[ "$ARCH" = x86 -o "$ARCH" = x86_64 ] || return 0
+	list_has $ARCH "x86 x86_64" || return 0
 	syslinux_cfg="${1:-boot/syslinux/syslinux.cfg}"
 }
 

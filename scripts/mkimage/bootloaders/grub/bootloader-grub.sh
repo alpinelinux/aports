@@ -1,15 +1,20 @@
 #FIXME No non-efi grub bootloader defined. Should this be implemented for supporting grub on non-efi systems?
 bootloader_grub() {
 	warning "bootloader_grub not currently implemented, please using bootloader_grubefi instead!"
-	bootloader_grubefi
+	bootloader_grubefi "$@"
 }
 
 
 # GgrubEFI bootloader plugin - works on x86_64/aarch64 efi systems only.
 bootloader_grubefi() {
-	[ "$ARCH" = "x86_64" ] || [ "$ARCH" = "aarch64" ] || return 0
-	bootloader_grubefi_enabled="${bootloader_grubefi_enabled:-true}"
-	bootloader_grub_cfg
+	list_has $ARCH "x86_64 aarch64" || return 0
+
+	if [ "$1" = "disabled" ] ; then
+		bootloader_grubefi_enabled="false"
+	elif [ "$1" = "enabled" ] || [ "$bootloader_grubefi_enabled" != "false" ] ; then
+		bootloader_grubefi_enabled="true"
+		bootloader_grub_cfg
+	fi
 }
 
 # grub.cfg ootloader plugin - sets grub_cfg_file variable to default of boot/grub/grub.cfg

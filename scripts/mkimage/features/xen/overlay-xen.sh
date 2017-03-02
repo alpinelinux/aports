@@ -1,3 +1,4 @@
+overlay_xen_script="$mypath"
 # Overlay for Xen dom0
 overlay_xen_dom0() {
 
