@@ -3,10 +3,11 @@ plugin_overlays() {
 	var_list_alias overlays
 }
 
+
 section_overlays() {
-	[ "$overlays" ] || return 0
-	local _id="$(echo "$hostname::$overlays" | checksum)"
-	[ "$overlays" ] && build_section overlays $hostname $local_id
+	[ "${overlays## }" ] || return 0
+	local _id="$(echo "$hostname::$overlay_name::$overlays::$PROFILE::$ARCH" | checksum)"
+	build_section overlays $hostname $overlay_name $_id
 }
 
 build_overlays() {
@@ -66,7 +67,7 @@ build_overlays() {
 		fi
 	done
 	
-	[ "$run_overlays" ] && ovl_targz_create $ovl_hostname $ovl_root_dir
+	[ "$run_overlays" ] && ovl_targz_create "${overlay_name:-$ovl_hostname}" "$ovl_root_dir" "./"
 
 	fkrt_faked_stop $ovl_fkrt_inst
 
@@ -296,7 +297,8 @@ ovl_runlevel_add() {
 	local _lvl="$1"
 	local _srv
 	shift
+	mkdir -p "$(ovl_get_root)/etc/runlevels/$_lvl/"
 	for _srv in "$@" ; do
-		ln -sfT "/etc/init.d/$1" "$(ovl_get_root)/etc/runlevels/$2/$1"
+		ln -sfT "/etc/init.d/$_srv" "$(ovl_get_root)/etc/runlevels/$_lvl/$_srv"
 	done
 }

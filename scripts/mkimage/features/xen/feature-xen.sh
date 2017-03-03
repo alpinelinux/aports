@@ -7,7 +7,7 @@ feature_xen() {
 	kernel_cmdline="nomodeset"
 	xen_params=
 	add_apks "xen"
-	add_overlays "xen-dom0"
+	add_overlays "xen_dom0"
 }
 
 
