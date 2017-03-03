@@ -4,8 +4,9 @@ plugin_overlays() {
 }
 
 section_overlays() {
-	local _id = "$(echo "$hostname::$overlays" | checksum)"
-	build_section overlays $hostname $local_id
+	[ "$overlays" ] || return 0
+	local _id="$(echo "$hostname::$overlays" | checksum)"
+	[ "$overlays" ] && build_section overlays $hostname $local_id
 }
 
 build_overlays() {
@@ -65,11 +66,11 @@ build_overlays() {
 		fi
 	done
 	
-	ovl_targz_create $ovl_hostname $ovl_root_dir
+	[ "$run_overlays" ] && ovl_targz_create $ovl_hostname $ovl_root_dir
 
 	fkrt_faked_stop $ovl_fkrt_inst
 
-
+	return 0
 }
 
 ovl_fkrt_enable() {
@@ -92,8 +93,8 @@ ovl_path() {
 
 # Usage: targz_dir <output.tar.gz> <source directory> [<source objects>]
 targz_dir() {
-	local output_file = "$1"
-	local source_dir = "$2"
+	local output_file="$1"
+	local source_dir="$2"
 	shift 2
 
 	tar -c --numeric-owner --acls --xattrs -C "$source_dir" "$@" | gzip -9n > "$output_file"
@@ -105,7 +106,7 @@ ovl_targz_create() {
 	shift 2
 
 	ovl_fkrt_enable
-	(	targz_dir "$_name".apkovl.tar.gz "$_dir" "$@" )
+	(	targz_dir "${DESTDIR%/}/${_name##*/}.apkovl.tar.gz" "$_dir" "$@" )
 	ovl_fkrt_disable
 }
 
