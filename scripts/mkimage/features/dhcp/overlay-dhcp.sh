@@ -1,21 +1,12 @@
-overlay_dhcp() {
+overlay_dhcp_client() {
+	_call="ovl_script_dhcp_client"
+}
 
-	ovl_rc_add devfs sysinit
-	ovl_rc_add dmesg sysinit
-	ovl_rc_add mdev sysinit
-	ovl_rc_add hwdrivers sysinit
-	ovl_rc_add modloop sysinit
-
-	ovl_rc_add hwclock boot
-	ovl_rc_add modules boot
-	ovl_rc_add sysctl boot
-	ovl_rc_add hostname boot
-	ovl_rc_add bootmisc boot
-	ovl_rc_add syslog boot
-
-	ovl_rc_add mount-ro shutdown
-	ovl_rc_add killprocs shutdown
-	ovl_rc_add savecache shutdown
+ovl_script_dhcp_client() {
+	# TODO: Split into appropriate common overlays.
+	ovl_runlevel_add sysinit devfs dmesg mdev hwdrivers modloop
+	ovl_runlevel_add boot hwclock modules sysctl hostname bootmisc syslog
+	ovl_runlevel_add mount-ro killprocs savecache
 
 	ovl_create_file root:root 0644 /etc/hostname <<-EOF
 	$HOSTNAME

@@ -88,26 +88,3 @@ build_apks() {
 	touch "$_apksdir/.boot_repository"
 }
 
-
-# apkovl support.
-# FIXME: merge with overlays plugin (Probably broken until then)
-section_apkovl() {
-	[ -n "$apkovl" -a -n "$hostname" ] || return 0
-	build_section apkovl $hostname $(checksum < "$apkovl")
-}
-
-build_apkovl() {
-	local _host="$1" _script=
-	msg "Generating $_host.apkovl.tar.gz"
-	for _script in "$PWD"/"$apkovl" $HOME/.mkimage/$apkovl \
-		$(readlink -f "$scriptdir/$apkovl"); do
-
-		if [ -f "$_script" ]; then
-			break
-		fi
-	done
-	[ -n "$_script" ] || die "could not find $apkovl"
-	(cd "$DESTDIR"; fakeroot "$_script" "$_host")
-}
-
-

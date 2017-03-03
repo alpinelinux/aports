@@ -1,25 +1,18 @@
-overlay_xen_script="$mypath"
-# Overlay for Xen dom0
 overlay_xen_dom0() {
+	_call="ovl_script_xen_dom0"
+}
 
-	ovl_rc_add devfs sysinit
-	ovl_rc_add dmesg sysinit
-	ovl_rc_add udev sysinit
+# Overlay for Xen dom0
+ovl_script_xen_dom0() {
 
-	ovl_rc_add hwclock boot
-	ovl_rc_add modules boot
-	ovl_rc_add sysctl boot
-	ovl_rc_add hostname boot
-	ovl_rc_add bootmisc boot
-	ovl_rc_add syslog boot
+	ovl_runlevel_add sysinit devfs dmesg udev
 
-	ovl_rc_add udev-postmount default
-	ovl_rc_add xenstored default
-	ovl_rc_add xenconsoled default
+	ovl_runlevel_add boothwclock modules sysctl hostname bootmisc syslog
 
-	ovl_rc_add mount-ro shutdown
-	ovl_rc_add killprocs shutdown
-	ovl_rc_add savecache shutdown
+	ovl_runlevel_add default udev-postmount
+	ovl_runlevel_add default xenstored xenconsoled
+
+	ovl_runlevel_add shutdown mount-ro killprocs savecache
 
 	ovl_create_file root:root 0644 /etc/modules-load.d/xen-dom0.conf <<-EOF
 		# Modules needed by Xen dom0

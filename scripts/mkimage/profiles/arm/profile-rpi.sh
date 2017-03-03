@@ -6,7 +6,7 @@ profile_rpi() {
 	rpi_firmware_commit="debe2d29bbc3df84f74672fae47f3a52fd0d40f1"
 	kernel_cmdline="dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1"
 	bootloader_rpi
-	apkovl="genapkovl-dhcp.sh"
+	add_overlays "dhcp_client"
 	hostname="rpi"
 	image_ext="tar.gz"
 }

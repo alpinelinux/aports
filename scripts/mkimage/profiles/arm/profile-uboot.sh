@@ -12,7 +12,8 @@ profile_uboot() {
 	esac
 	set_initfs_features "base bootchart squashfs ext2 ext3 ext4 kms mmc raid scsi usb"
 	feature_xtables_addons
-	add_overlays "dhcp"
+	feature_dhcp client
+	add_overlays "dhcp_client"
 	hostname="alpine"
 	bootloader_uboot
 }
