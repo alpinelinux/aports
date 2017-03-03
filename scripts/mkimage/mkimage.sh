@@ -104,7 +104,7 @@ load_plugins() {
 
 	local target="$1"
 	local f l p q func
-	local _regex="section"
+	local _regex="plugin\|section"
 	local _found=""
 	local mypath mydir myfile
 

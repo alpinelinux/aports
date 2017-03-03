@@ -5,7 +5,7 @@ feature_xen() {
 	xen_enabled=${xen_enabled:=true}
 	syslinux_cfg_entry_type="xen"
 	kernel_cmdline="nomodeset"
-	xen_params
+	xen_params=
 	add_apks "xen"
 	add_overlays "xen-dom0"
 }
