@@ -38,7 +38,7 @@ section_kernels() {
 		var_list_add _pkgs "$initfs_apks $initfs_only_apks"
 		var_list_add _pkgs "$(suffix_kernel_flavor $_f $initfs_apks_flavored $initfs_only_apks_flavored)"
 
-		local id=$( (echo "$initfs_features::$_hostkeys" ; apk fetch --root "$APKROOT" --simulate alpine-base $_pkgs | sort) | checksum)
+		local id=$( (echo "$initfs_features::$_hostkeys" ; $APK fetch --root "$APKROOT" --simulate alpine-base $_pkgs | sort) | checksum)
 		build_section kernel $ARCH $_f $id $_pkgs
 	done
 }
@@ -65,7 +65,7 @@ section_apks() {
 	add_apks "$(suffix_all_kernel_flavors $apks_flavored) $initfs_apks $(suffix_all_kernel_flavors $initfs_apks_flavored)"
 	[ -n "$apks" ] || return 0
 
-	build_section apks $ARCH $(apk fetch --root "$APKROOT" --simulate --recursive $apks | sort | checksum)
+	build_section apks $ARCH $($APK fetch --root "$APKROOT" --simulate --recursive $apks | sort | checksum)
 }
 
 build_apks() {
@@ -73,12 +73,12 @@ build_apks() {
 	local _archdir="$_apksdir/$ARCH"
 	mkdir -p "$_archdir"
 
-	apk fetch --root "$APKROOT" --link --recursive --output "$_archdir" $apks
+	$APK fetch --root "$APKROOT" --link --recursive --output "$_archdir" $apks
 	if ! ls "$_archdir"/*.apk >& /dev/null; then
 		return 1
 	fi
 
-	apk index \
+	$APK index \
 		--description "$RELEASE" \
 		--rewrite-arch "$ARCH" \
 		--index "$_archdir"/APKINDEX.tar.gz \

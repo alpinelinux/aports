@@ -10,76 +10,18 @@
 
 set -e
 
-# get abuild configurables
-[ -e /usr/share/abuild/functions.sh ] || (echo "abuild not found" ; exit 1)
-. /usr/share/abuild/functions.sh
-
-# deduce aports directory
-[ -n "$APORTS" ] || APORTS="$(realpath "$(dirname $0)"/../)"
-[ -e "$APORTS/main/build-base" ] || die "Unable to deduce aports base checkout, please set \$APORTS"
-
-
-all_checksums="sha256 sha512"
-all_arches="aarch64 armhf x86 x86_64"
-all_dirs=""
-build_date="$(date +%Y%m%d)"
-default_arch="$(apk --print-arch)"
-_hostkeys=""
-_simulate=""
-_checksum=""
-
+scriptname="${0##*/}"
 scriptdir="$(dirname $0)"
 
-# If we're NOT running in the script directory, default to outputting in the curent directory.
-OUTDIR="$PWD"
-# If we ARE running in our script directory, put output files somewhere sane, like /tmp
-[ "$OUTDIR" = "scriptdir" ] && OUTDIR="/tmp"
-
-RELEASE="${build_date}"
 
 # Include utilities: 'basic', 'list', 'fkrt'
 . "$scriptdir/utils/utils-basic.sh"
+. "$scriptdir/utils/utils-info.sh"
 . "$scriptdir/utils/utils-list.sh"
 . "$scriptdir/utils/utils-fkrt.sh"
 
-msg() {
-	if [ -n "$quiet" ]; then return 0; fi
-	local prompt="$GREEN>>>${NORMAL}"
-	local name="${BLUE}mkimage${ARCH+-$ARCH}${NORMAL}"
-	printf "${prompt} ${name}: %s\n" "$1" >&2
-}
+info_prog_set "$scriptname"
 
-usage() {
-	cat <<EOF
-
-$0	[--tag RELEASE] [--outdir OUTDIR] [--workdir WORKDIR]
-		[--arch ARCH] [--profile PROFILE] [--hostkeys] [--simulate]
-		[--repository REPO] [--extra-repository REPO] [--yaml FILE]
-$0	--help
-
-options:
---arch			Specify which architecture images to build
-			(default: $default_arch)
---hostkeys		Copy system apk signing keys to created images
---outdir		Specify directory for the created images
---profile		Specify which profiles to build
---plugins		Specify a file or directory structure root from
-                        which to load additional discovered plugins.
---repository-file	File to use for list of repositories
---repository		Package repository to use for the image create
---extra-repository	Add repository to search packages from
---simulate		Don't execute commands
---tag			Build images for tag RELEASE
---workdir		Specify temporary working directory (cache)
---yaml
-
-known plugins     : $all_plugins
-known profiles    : $all_profiles
-known image types : $all_imagetypes
-known features    : $all_features
-
-EOF
-}
 
 
 ##
@@ -88,16 +30,6 @@ EOF
 ## Usage: 'load_plugins "<filename>"' to load all plugin types and plugins from a file
 ##        'load_plugins "<directory>"' to load all plugins found in directory hierarchy.
 
-# List containing all known plugin types.
-var_list_alias all_plugins
-
-# Include 'sections' plugin here directly, the rest will be discovered.
-set_all_plugins "sections"
-
-plugin_sections() {
-	return 0
-}
-var_list_alias all_sections
 
 # Main load_plugins function which does all the work of discovering, sourcing, and loading plugin types and plugins.
 load_plugins() {
@@ -106,10 +38,21 @@ load_plugins() {
 	local f l p q func
 	local _regex="plugin\|section"
 	local _found=""
+	local new_plugins=""
 	local mypath mydir myfile
 
 	( [ -e "$target" ] && [ -r "$target" ] ) || return 0
 
+	# Run var_list_alias for all_plugins if it's not already setup
+	[ "$(type -t get_all_plugins)" ] || var_list_alias all_plugins
+
+	info_func_set "load_plugins"
+	if [ -f "$target" ] ; then
+		msg "Discovering plugins from file '$target':"
+	else
+		msg "Discovering plugins under directory '$target':"
+	fi
+	
 	# Find all plugin-*.sh scripts, source them, and add plugin types they define to all_plugins list.
 	while IFS=$'\n' read -r f ; do
 		_found=
@@ -124,12 +67,14 @@ load_plugins() {
 			unset IFS
 			l="${l#plugin_}"
 			l="${l%\(\)*}"
-
-			# Add this plugin type to all_plugins list, regex for finding plugins, and mark for sourcing.
-			add_all_plugins "$l"
-			var_list_alias "all_$l"
-			_regex="$_regex\|${l%s}"
-			_found="true"
+			if ! ( all_plugins_has "$l" ) ; then
+				# Add this plugin type to all_plugins list, regex for finding plugins, and mark for sourcing.
+				add_all_plugins "$l"
+				var_list_alias "all_$l"
+				_regex="$_regex\|${l%s}"
+				_found="true"
+				var_list_add new_plugins "$l"
+			fi
 		done
 		
 		# Source all files in which valid plugin definitions were found.
@@ -140,8 +85,10 @@ load_plugins() {
 	EOF
 	unset IFS
 
-	# Run all plugin_* scripts found before loading plugins themselves.
-	for p in $(get_all_plugins) ; do
+	msg2 "$(printf "%s " $(get_all_plugins))"
+
+	# Run all new plugin_* scripts found before loading plugins themselves.
+	for p in $new_plugins ; do
 		plugin_${p}
 	done
 
@@ -185,6 +132,11 @@ load_plugins() {
 
 checksum() {
 	sha1sum | cut -f 1 -d ' '
+}
+
+# Empty plugin to keep load_plugins happy.
+plugin_sections() {
+	return 0
 }
 
 build_section() {
@@ -278,6 +230,72 @@ build_profile() {
 	fi
 }
 
+
+###
+### Begin code for mkimage proper
+###
+
+usage() {
+	cat <<EOF
+
+$0	[--tag RELEASE] [--outdir OUTDIR] [--workdir WORKDIR]
+		[--arch ARCH] [--profile PROFILE] [--hostkeys] [--simulate]
+		[--repository REPO] [--extra-repository REPO] [--yaml FILE]
+$0	--help
+
+options:
+--arch			Specify which architecture images to build
+			(default: $default_arch)
+--hostkeys		Copy system apk signing keys to created images
+--outdir		Specify directory for the created images
+--profile		Specify which profiles to build
+--plugins		Specify a file or directory structure root from
+                        which to load additional discovered plugins.
+--repository-file	File to use for list of repositories
+--repository		Package repository to use for the image create
+--extra-repository	Add repository to search packages from
+--simulate		Don't execute commands
+--tag			Build images for tag RELEASE
+--workdir		Specify temporary working directory (cache)
+--yaml
+
+known plugins     : $all_plugins
+known profiles    : $all_profiles
+known image types : $all_imagetypes
+known features    : $all_features
+
+EOF
+}
+
+
+# List containing all known plugin types initially.
+# Include 'sections' plugin here directly, the rest will be discovered.
+var_list_alias all_plugins
+set_all_plugins "sections"
+var_list_alias all_sections
+
+
+# Configuration of apk
+APK="abuild-apk ${APK_CACHE_DIR:+--cache-dir $APK_CACHE_DIR}" 
+
+# Global variable declarations
+all_checksums="sha256 sha512"
+all_arches="aarch64 armhf x86 x86_64"
+all_dirs=""
+build_date="$(date +%Y%m%d)"
+default_arch="$($APK --print-arch)"
+_hostkeys=""
+_simulate=""
+_checksum=""
+
+
+# If we're NOT running in the script directory, default to outputting in the curent directory.
+OUTDIR="$PWD"
+# If we ARE running in our script directory, put output files somewhere sane, like /tmp
+[ "$OUTDIR" = "scriptdir" ] && OUTDIR="/tmp"
+
+RELEASE="${build_date}"
+
 # load plugins
 load_plugins "$scriptdir"
 [ -z "$HOME" ] || load_plugins "$HOME/.mkimage"
@@ -292,6 +310,7 @@ while [ $# -gt 0 ]; do
 	--repository-file) REPOFILE="$1"; shift ;;
 	--repository) REPODIR="$1"; shift ;;
 	--extra-repository) EXTRAREPOS="$EXTRAREPOS $1"; shift ;;
+	--apk-cache-dir) APK_CACHE_DIR="$1" shift ;;
 	--workdir) WORKDIR="$1"; shift ;;
 	--outdir) OUTDIR="$1"; shift ;;
 	--tag) RELEASE="$1"; shift ;;
@@ -306,6 +325,7 @@ while [ $# -gt 0 ]; do
 	-*) usage; exit 1;;
 	esac
 done
+
 
 if [ -z "$RELEASE" ]; then
 	if git describe --exact-match >/dev/null 2>&1; then
@@ -339,13 +359,15 @@ fi
 
 # create images
 for ARCH in $req_arch; do
+	info_prog_set "$scriptname:$ARCH"
+
 	APKROOT="$WORKDIR/apkroot-$ARCH"
 	APKREPOS="$APKROOT/etc/apk/repositories"
 	if [ ! -e "$APKROOT" ]; then
 		# create root for caching packages
 		mkdir -p "$APKROOT/etc/apk/cache"
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
-		abuild-apk --arch "$ARCH" --root "$APKROOT" add --initdb
+		$APK --arch "$ARCH" --root "$APKROOT" add --initdb
 
 		if [ -z "$REPODIR" ] && [ -z "$REPOFILE" ]; then
 			warning "no repository set"
@@ -363,13 +385,15 @@ for ARCH in $req_arch; do
 			echo "$repo" >> "$APKREPOS"
 		done
 	fi
-	abuild-apk update --root "$APKROOT"
+	$APK update --root "$APKROOT"
 
 	if [ "$_yaml" = "yes" ]; then
 		_yaml_out=${OUTDIR:-.}/latest-releases.yaml
 		echo "---" > "$_yaml_out"
 	fi
 	for PROFILE in $req_profiles; do
+		info_prog_set "$scriptname:$ARCH:$PROFILE"
+		msg "Beginning build for profile $PROFILE."
 		(build_profile) || exit 1
 	done
 done

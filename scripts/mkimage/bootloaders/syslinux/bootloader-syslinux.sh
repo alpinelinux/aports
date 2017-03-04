@@ -66,13 +66,13 @@ build_syslinux_cfg() {
 # Build and install syslinux bootloader if enabled.
 section_bootloader_syslinux() {
 	[ "$bootloader_syslinux_enabled" = "true" ] || return 0
-	build_section bootloader_syslinux $(apk fetch --root "$APKROOT" --simulate syslinux | sort | checksum)
+	build_section bootloader_syslinux $($APK fetch --root "$APKROOT" --simulate syslinux | sort | checksum)
 }
 
 build_bootloader_syslinux() {
 	local _fn
 	mkdir -p "$DESTDIR"/boot/syslinux
-	apk fetch --root "$APKROOT" --stdout syslinux | tar -C "$DESTDIR" -xz usr/share/syslinux
+	$APK fetch --root "$APKROOT" --stdout syslinux | tar -C "$DESTDIR" -xz usr/share/syslinux
 	for _fn in isohdpfx.bin isolinux.bin ldlinux.c32 libutil.c32 libcom32.c32 mboot.c32; do
 		mv "$DESTDIR"/usr/share/syslinux/$_fn "$DESTDIR"/boot/syslinux/$_fn || return 1
 	done
