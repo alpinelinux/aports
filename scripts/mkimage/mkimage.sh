@@ -34,6 +34,7 @@ var_list_alias all_plugins
 
 set_all_plugins "sections"
 var_list_alias all_sections
+plugins_regex="${plugins_regex:-plugin\|section}"
 
 ##
 ## General purpose plugins loader.
@@ -47,7 +48,7 @@ var_list_alias all_sections
 # Main load_plugins function which does all the work of discovering, sourcing, and loading plugin types and plugins.
 load_plugins() {
 
-	plugins_regex="${plugins_regex:-plugin\|section}"
+	plugins_regex="${plugins_regex:-plugin}"
 
 	local target="$1"
 	local f l p q func
@@ -195,67 +196,6 @@ build_section() {
 	info_func_set ""
 }
 
-build_profile() {
-	local _id _dir _spec
-	_my_sections=""
-	_dirty="no"
-	_fail="no"
-
-	profile_$PROFILE
-	list_has $ARCH $arch || return 0
-
-	info_func_set "build"
-
-	msg "Building $PROFILE"
-
-	# Collect list of needed sections, and make sure they are built
-	for SECTION in $all_sections; do
-		section_$SECTION || return 1
-	done
-	[ "$_fail" = "no" ] || return 1
-
-	# Defaults
-	[ -n "$image_name" ] || image_name="alpine-${PROFILE}"
-	[ -n "$output_filename" ] || output_filename="${image_name}-${RELEASE}-${ARCH}.${image_ext}"
-	local output_file="${OUTDIR:-.}/$output_filename"
-
-	# Construct final image
-	local _imgid=$(echo -n $_my_sections | sort | checksum)
-	DESTDIR=$WORKDIR/image-$_imgid-$ARCH-$PROFILE
-	if [ "$_dirty" = "yes" -o ! -e "$DESTDIR" ]; then
-		msg "Creating $output_filename"
-		if [ -z "$_simulate" ]; then
-			# Merge sections
-			rm -rf "$DESTDIR"
-			mkdir -p "$DESTDIR"
-			for _dir in $_my_sections; do
-				for _fn in $WORKDIR/$_dir/*; do
-					[ ! -e "$_fn" ] || cp -Lrs $_fn $DESTDIR/
-				done
-			done
-			echo "${image_name}-${RELEASE} ${build_date}" > "$DESTDIR"/.alpine-release
-		fi
-	fi
-
-	if [ "$_dirty" = "yes" -o ! -e "$output_file" ]; then
-		# Create image
-		[ -n "$output_format" ] || output_format="${image_ext//[:\.]/}"
-		create_image_${output_format} || { _fail="yes"; false; }
-
-		if [ "$_checksum" = "yes" ]; then
-			for _c in $all_checksums; do
-				echo "$(${_c}sum "$output_file" | cut -d' '  -f1)  ${output_filename}" > "${output_file}.${_c}"
-			done
-		fi
-
-		if [ -n "$_yaml_out" ]; then
-			$mkimage_yaml --release $RELEASE \
-				"$output_file" >> "$_yaml_out"
-		fi
-	fi
-
-	info_func_set ""
-}
 
 
 ###
