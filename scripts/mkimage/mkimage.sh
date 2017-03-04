@@ -10,8 +10,11 @@
 
 set -e
 
-scriptname="${0##*/}"
-scriptdir="$(dirname $0)"
+
+scriptrealpath="$(realpath "$0")"
+scriptname="${scriptrealpath##*/}"
+scriptdir="${0%$scriptname}"
+scriptrealdir="$(realpath "$scriptdir")"
 
 
 # Include utilities: 'basic', 'list', 'fkrt'
@@ -20,12 +23,22 @@ scriptdir="$(dirname $0)"
 . "$scriptdir/utils/utils-list.sh"
 . "$scriptdir/utils/utils-fkrt.sh"
 
+default_colors
 info_prog_set "$scriptname"
 
 
 
+# List containing all known plugin types initially.
+# Include 'sections' plugin here directly, the rest will be discovered.
+var_list_alias all_plugins
+set_all_plugins "sections"
+var_list_alias all_sections
+
+
 ##
 ## General purpose plugins loader.
+##
+## Requires: 'source utils/utils-list.sh' 'var_list_alias all_plugins' 'set_all_plugins'
 ##
 ## Usage: 'load_plugins "<filename>"' to load all plugin types and plugins from a file
 ##        'load_plugins "<directory>"' to load all plugins found in directory hierarchy.
@@ -43,8 +56,6 @@ load_plugins() {
 
 	( [ -e "$target" ] && [ -r "$target" ] ) || return 0
 
-	# Run var_list_alias for all_plugins if it's not already setup
-	[ "$(type -t get_all_plugins)" ] || var_list_alias all_plugins
 
 	info_func_set "load_plugins"
 	if [ -f "$target" ] ; then
@@ -67,7 +78,7 @@ load_plugins() {
 			unset IFS
 			l="${l#plugin_}"
 			l="${l%\(\)*}"
-			if ! ( all_plugins_has "$l" ) ; then
+			if all_plugins_has_not "$l" ; then 
 				# Add this plugin type to all_plugins list, regex for finding plugins, and mark for sourcing.
 				add_all_plugins "$l"
 				var_list_alias "all_$l"
@@ -268,39 +279,10 @@ EOF
 }
 
 
-# List containing all known plugin types initially.
-# Include 'sections' plugin here directly, the rest will be discovered.
-var_list_alias all_plugins
-set_all_plugins "sections"
-var_list_alias all_sections
-
-
-# Configuration of apk
-APK="abuild-apk ${APK_CACHE_DIR:+--cache-dir $APK_CACHE_DIR}" 
-
-# Global variable declarations
-all_checksums="sha256 sha512"
-all_arches="aarch64 armhf x86 x86_64"
-all_dirs=""
-build_date="$(date +%Y%m%d)"
-default_arch="$($APK --print-arch)"
-_hostkeys=""
-_simulate=""
-_checksum=""
-
-
-# If we're NOT running in the script directory, default to outputting in the curent directory.
-OUTDIR="$PWD"
-# If we ARE running in our script directory, put output files somewhere sane, like /tmp
-[ "$OUTDIR" = "scriptdir" ] && OUTDIR="/tmp"
-
-RELEASE="${build_date}"
-
 # load plugins
 load_plugins "$scriptdir"
 [ -z "$HOME" ] || load_plugins "$HOME/.mkimage"
 
-mkimage_yaml="$(dirname $0)"/mkimage-yaml.sh
 
 # parse parameters
 while [ $# -gt 0 ]; do
@@ -326,6 +308,41 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+# Configuration of apk, use cache directory if specified
+APK="abuild-apk ${APK_CACHE_DIR:+--cache-dir $APK_CACHE_DIR}"
+
+# Global variable declarations
+all_checksums="sha256 sha512"
+all_arches="aarch64 armhf x86 x86_64"
+all_dirs=""
+build_date="$(date +%Y%m%d)"
+default_arch="$($APK --print-arch)"
+_hostkeys=""
+_simulate=""
+_checksum=""
+
+# Location of yaml generator -- TODO: This should move!
+mkimage_yaml="$(dirname $0)"/mkimage-yaml.sh
+
+# If we're NOT running in the script directory, default to outputting in the curent directory.
+# If we ARE running in our script directory, at least put output files somewhere sane, like ./out
+OUTDIR="${OUTDIR:-$PWD})"
+
+# Save ourselves from making a mess in our script's root directory.
+mkdir -p "$OUTDIR"
+[ "$(realpath "$OUTDIR")" = "$scriptrealdir" ] && OUTDIR="${OUTDIR}/out"
+mkdir -p "$OUTDIR"
+
+# Setup default workdir in /tmp using mktemp
+if [ -z "$WORKDIR" ]; then
+	WORKDIR="/tmp/$(mktemp -d -t mkimage.XXXXXX)"
+	trap 'rm -rf $WORKDIR' INT
+	mkdir -p "$WORKDIR"
+fi
+
+
+# Release configuration
+RELEASE="${RELEASE:-${build_date}}"
 
 if [ -z "$RELEASE" ]; then
 	if git describe --exact-match >/dev/null 2>&1; then
@@ -336,18 +353,11 @@ if [ -z "$RELEASE" ]; then
 	fi
 fi
 
-# setup defaults
-if [ -z "$WORKDIR" ]; then
-	WORKDIR="$(mktemp -d -t mkimage.XXXXXX)"
-	trap 'rm -rf $WORKDIR' INT
-	mkdir -p "$WORKDIR"
-fi
 req_profiles=${req_profiles:-${all_profiles}}
 req_arch=${req_arch:-${default_arch}}
 [ "$req_arch" != "all" ] || req_arch="${all_arch}"
 [ "$req_profiles" != "all" ] || req_profiles="${all_profiles}"
 
-mkdir -p "$OUTDIR"
 
 # get abuild pubkey used to sign the apkindex
 # we need inject this to the initramfs or we will not be able to use the

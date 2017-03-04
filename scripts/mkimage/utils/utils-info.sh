@@ -7,7 +7,7 @@ info_func_set() {
 }
 
 info_title_get() {
-	printf "%s" "${_INFO_TITLE_:-${_INFO_PROG_:+:$_INFO_PROG}}"
+	printf "%s" "${_INFO_TITLE_:-$_INFO_PROG_${_INFO_FUNC_:+:${_INFO_FUNC_}}}"
 }
 
 # output functions
@@ -73,20 +73,11 @@ enable_colors() {
 	BLUE="\033[1;34m"
 }
 
-if [ -n "$USE_COLORS" ] && [ -t 1 ]; then
-	enable_colors
-else
-	disable_colors
-fi
-
-# caller may override
-cleanup() {
-	return 0
-}
-
-die() {
-	error "$@"
-	cleanup
-	exit 1
+default_colors() {
+	if [ -n "$USE_COLORS" ] && [ -t 1 ]; then
+		enable_colors
+	else
+		disable_colors
+	fi
 }
 

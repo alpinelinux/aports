@@ -16,6 +16,19 @@ list_has() {
 	return 1
 }
 
+# Is not set element: "a <Not Element> A" Needle is not an element of haystack.
+list_has_not() {
+	local needle="$1"
+	shift
+	local haystack="$*"
+	local i
+
+	for i in $haystack; do
+		[ "$needle" != "$i" ] || return 1
+	done
+	return 0
+}
+
 # Sets intersect: "A <Intersect> B != 0" Some element in needles is also an element of haystack"
 list_has_any() {
 	local needles="$1"
@@ -50,6 +63,17 @@ list_has_exactly() {
 
 	list_has_all "$needles" "$*" || return 1
 	list_has_all "$*" "$needles" || return 1
+
+	return 0
+}
+
+# Sets don't intersect: "A XOR B" No element of needles matches any element of haystack.
+list_has_none() {
+	local needles="$1"
+	shift
+	local haystack="$*"
+
+	list_has_any "$needles" "$*" || return 1
 
 	return 0
 }
@@ -96,12 +120,42 @@ list_filter() {
 ##
 ## Usage: var_list_<function> <varname> [item(s)]
 
+
+var_list_is_empty() {
+	local _list=$1
+	shift
+	local _val="$(getvar "$_list")"
+
+	[ "${_val## }" ] && return 1
+
+	return 0
+}
+
+var_list_not_empty() {
+	local _list=$1
+	shift
+	local _val="$(getvar "$_list")"
+
+	[ "${_val## }" ] && return 0
+
+	return 1
+}
+
+
 var_list_has() {
 	local _list=$1
 	shift
 	local _items="$*"
 
 	list_has "$_items" "$(getvar "$_list")"
+}
+
+var_list_has_not() {
+	local _list=$1
+	shift
+	local _items="$*"
+
+	list_has_not "$_items" "$(getvar "$_list")"
 }
 
 var_list_has_any() {
@@ -126,6 +180,14 @@ var_list_has_exactly() {
 	local _items="$*"
 
 	list_has_exactly "$_items" "$(getvar $_list)"
+}
+
+var_list_has_none() {
+	local _list=$1
+	shift
+	local _items="$*"
+
+	list_has_none "$_items" "$(getvar $_list)"
 }
 
 var_list_add() {
@@ -192,17 +254,21 @@ var_list_unset() {
 ## Usage: var_list_alias <varname>
 
 var_list_alias() {
-	alias $1_has="var_list_has $1"
-	alias $1_has_any="var_list_has_any $1"
-	alias $1_has_all="var_list_has_all $1"
-	alias $1_has_exactly="var_list_has_exactly $1"
+	alias "${1}_is_empty"="var_list_is_empty $1"
+	alias "${1}_not_empty"="var_list_not_empty $1"
+	alias "${1}_has"="var_list_has $1"
+	alias "${1}_has_not"="var_list_has_not $1"
+	alias "${1}_has_any"="var_list_has_any $1"
+	alias "${1}_has_all"="var_list_has_all $1"
+	alias "${1}_has_exactly"="var_list_has_exactly $1"
+	alias "${1}_has_none"="var_list_has_none $1"
 
-	alias add_$1="var_list_add $1"
-	alias del_$1="var_list_del $1"
-	alias filter_$1="var_list_filter $1"
-	alias get_$1="var_list_get $1"
-	alias set_$1="var_list_set $1"
-	alias clear_$1="var_list_clear $1"
-	alias unset_$1="var_list_unset $1"
+	alias "add_${1}"="var_list_add $1"
+	alias "del_${1}"="var_list_del $1"
+	alias "filter_${1}"="var_list_filter $1"
+	alias "get_${1}"="var_list_get $1"
+	alias "set_${1}"="var_list_set $1"
+	alias "clear_${1}"="var_list_clear $1"
+	alias "unset_${1}"="var_list_unset $1"
 }
 
