@@ -13,9 +13,9 @@ set -e
 
 scriptrealpath="$(realpath "$0")"
 scriptname="${scriptrealpath##*/}"
-scriptdir="${0%$scriptname}"
-scriptrealdir="$(realpath "$scriptdir")"
+scriptrealdir="$(dirname "$scriptrealpath")"
 
+scriptdir="${scriptrealdir}"
 
 # Include utilities: 'basic', 'list', 'fkrt'
 . "$scriptdir/utils/utils-basic.sh"
@@ -31,9 +31,9 @@ info_prog_set "$scriptname"
 # List containing all known plugin types initially.
 # Include 'sections' plugin here directly, the rest will be discovered.
 var_list_alias all_plugins
+
 set_all_plugins "sections"
 var_list_alias all_sections
-
 
 ##
 ## General purpose plugins loader.
@@ -47,15 +47,16 @@ var_list_alias all_sections
 # Main load_plugins function which does all the work of discovering, sourcing, and loading plugin types and plugins.
 load_plugins() {
 
+	plugins_regex="${plugins_regex:-plugin\|section}"
+
 	local target="$1"
 	local f l p q func
-	local _regex="plugin\|section"
 	local _found=""
 	local new_plugins=""
 	local mypath mydir myfile
 
 	( [ -e "$target" ] && [ -r "$target" ] ) || return 0
-
+	target="$(realpath "$target")"
 
 	info_func_set "load_plugins"
 	if [ -f "$target" ] ; then
@@ -66,9 +67,11 @@ load_plugins() {
 	
 	# Find all plugin-*.sh scripts, source them, and add plugin types they define to all_plugins list.
 	while IFS=$'\n' read -r f ; do
+		[ -f "$f" ] && [ -r "$f" ] || continue
+		f="$(realpath "$f")"
 		_found=
 		# Variables to be available when sourcing files
-		mypath="$(realpath "$f")"
+		mypath="${f}"
 		mydir="${mypath%/*}"
 		myfile="${mypath##*/}"
 
@@ -82,7 +85,7 @@ load_plugins() {
 				# Add this plugin type to all_plugins list, regex for finding plugins, and mark for sourcing.
 				add_all_plugins "$l"
 				var_list_alias "all_$l"
-				_regex="$_regex\|${l%s}"
+				plugins_regex="$plugins_regex\|${l%s}"
 				_found="true"
 				var_list_add new_plugins "$l"
 			fi
@@ -105,9 +108,11 @@ load_plugins() {
 
 	# Load all plugins of type defined in all_plugins list using regex built above.
 	while IFS=$'\n' read -r f ; do
+		[ -f "$f" ] && [ -r "$f" ] || continue
+		f="$(realpath "$f")"
 		_found=
 		# Variables to be available when sourcing files
-		mypath="$(realpath "$f")"
+		mypath="${f}"
 		mydir="${mypath%/*}"
 		myfile="${mypath##*/}"
 
@@ -136,9 +141,11 @@ load_plugins() {
 		[ "$_found" ] && . "$f"
 
 	done<<-EOF
-		$([ -f "$target" ] && echo "$target" ; [ -d "$target" ] && find "$target" -type f -regex "$target.*/\($_regex\)-.*\.sh" -exec printf '%s\n' {} \; )
+		$([ -f "$target" ] && echo "$target" ; [ -d "$target" ] && find "$target" -type f -regex "$target.*/\($plugins_regex\)-.*\.sh" -exec printf '%s\n' {} \; )
 	EOF
 	unset IFS
+
+	info_func_set ""
 }
 
 checksum() {
@@ -165,6 +172,9 @@ build_section() {
 	if [ ! -e "$WORKDIR/${_dir}" ]; then
 		DESTDIR="$WORKDIR/${_dir}.work"
 		msg "--> $section $args"
+
+		info_func_set "build_$section"
+		msg "Building section '$section' with args '$args':"
 		if [ -z "$_simulate" ]; then
 			rm -rf "$DESTDIR"
 			mkdir -p "$DESTDIR"
@@ -174,6 +184,7 @@ build_section() {
 			else
 				rm -rf "$DESTDIR"
 				_fail="yes"
+				info_func_set ""
 				return 1
 			fi
 		fi
@@ -181,6 +192,7 @@ build_section() {
 	unset DESTDIR
 	all_dirs="$all_dirs $_dir"
 	_my_sections="$_my_sections $_dir"
+	info_func_set ""
 }
 
 build_profile() {
@@ -191,6 +203,8 @@ build_profile() {
 
 	profile_$PROFILE
 	list_has $ARCH $arch || return 0
+
+	info_func_set "build"
 
 	msg "Building $PROFILE"
 
@@ -239,6 +253,8 @@ build_profile() {
 				"$output_file" >> "$_yaml_out"
 		fi
 	fi
+
+	info_func_set ""
 }
 
 
@@ -326,7 +342,7 @@ mkimage_yaml="$(dirname $0)"/mkimage-yaml.sh
 
 # If we're NOT running in the script directory, default to outputting in the curent directory.
 # If we ARE running in our script directory, at least put output files somewhere sane, like ./out
-OUTDIR="${OUTDIR:-$PWD})"
+OUTDIR="${OUTDIR:-$PWD}"
 
 # Save ourselves from making a mess in our script's root directory.
 mkdir -p "$OUTDIR"
