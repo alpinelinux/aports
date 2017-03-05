@@ -21,6 +21,7 @@ scriptdir="${scriptrealdir}"
 . "$scriptdir/utils/utils-basic.sh"
 . "$scriptdir/utils/utils-info.sh"
 . "$scriptdir/utils/utils-list.sh"
+. "$scriptdir/utils/utils-search.sh"
 . "$scriptdir/utils/utils-fkrt.sh"
 
 default_colors
