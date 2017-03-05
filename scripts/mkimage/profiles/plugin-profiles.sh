@@ -1,4 +1,5 @@
 plugin_profiles() {
+	var_list_alias host_apks
 	var_list_alias apks
 	var_list_alias apks_flavored
 	var_list_alias arch

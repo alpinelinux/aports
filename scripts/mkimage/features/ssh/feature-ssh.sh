@@ -13,9 +13,9 @@ feature_ssh() {
 					* ) warning "unrecognized ssh provider '$_val'" ;;
 				esac ;;
 			autostart )
-				add_overlays "ssh_autostart" ;;
+				feature_ssh_autostart ;;
 			generate_keys )
-				add_overlays "ssh_generate_keys" ;;
+				feature_ssh_generate_keys ;;
 		esac
 	done
 
@@ -23,8 +23,26 @@ feature_ssh() {
 	[ "$ssh_provider" ] && feature_ssh_$ssh_provider
 }
 
+feature_ssh_autostart() {
+
+	if [ "$ssh_provider" ] ; then
+		feature_ssh_$ssh_provider
+		feature_ssh_autostart_${ssh_provider}
+		add_overlays "ssh_autostart"
+	fi
+}
+
+feature_ssh_generate_keys() {
+
+	if [ "$ssh_provider" ] ; then
+		feature_ssh_$ssh_provider
+		feature_ssh_generate_keys_${ssh_provider}
+		add_overlays "ssh_generate_keys"
+	fi
+}
+
 overlay_ssh_autostart() {
-	_call="${ssh_provider:+ovl_script_ssh_autostart_keys_${ssh_provider}}"
+	_call="${ssh_provider:+ovl_script_ssh_autostart_${ssh_provider}}"
 }
 
 overlay_ssh_generate_keys() {
@@ -34,14 +52,25 @@ overlay_ssh_generate_keys() {
 
 # ssh_provider: openssh 
 feature_ssh_openssh() {
-	add_apks_host "openssh"
 	add_apks "openssh"
+}
+
+
+feature_ssh_autostart_openssh() {
+	feature_ssh_openssh
+	add_overlays "ssh_autostart"
 }
 
 ovl_script_ssh_autostart_openssh() {
 	ovl_runlevel_add boot sshd
 }
 
+
+feature_ssh_generate_keys_openssh() {
+	add_host_apks "openssh"
+	feature_ssh_openssh
+	add_overlays "ssh_generate_keys"
+}
 
 ovl_script_ssh_generate_keys_openssh() {
 	# Host keys destination
@@ -97,8 +126,12 @@ ovl_script_ssh_generate_keys_openssh() {
 
 # ssh_provider: dropbear
 feature_ssh_dropbear() {
-	add_apks_host "dropbear dropbear-convert"
 	add_apks "dropbear"
+}
+
+feature_ssh_autostart_dropbear() {
+	feature_ssh_dropbear
+	add_overlays "ssh_autostart"
 }
 
 ovl_script_ssh_autostart_dropbear() {
@@ -113,6 +146,12 @@ ovl_script_ssh_autostart_dropbear() {
 		# -g Disable password login for root.
 		DROPBEAR_OPTS="-R -g"
 	EOF
+}
+
+feature_ssh_generate_keys_dropbear() {
+	add_apks_host "dropbear dropbear-convert"
+	feature_ssh_dropbear
+	add_overlays "ssh_generate_keys"
 }
 
 ovl_script_ssh_generate_keys_dropbear() {
