@@ -221,6 +221,7 @@ options:
 --repository-file	File to use for list of repositories
 --repository		Package repository to use for the image create
 --extra-repository	Add repository to search packages from
+--apk-cache-dir		Sets cache directory for apks.
 --simulate		Don't execute commands
 --tag			Build images for tag RELEASE
 --workdir		Specify temporary working directory (cache)
@@ -362,5 +363,7 @@ for ARCH in $req_arch; do
 		msg "Beginning build for profile $PROFILE."
 		(build_profile) || exit 1
 	done
+
+	info_prog_set ""
 done
 echo "Images generated in $OUTDIR"
