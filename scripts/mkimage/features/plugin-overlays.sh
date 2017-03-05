@@ -14,24 +14,24 @@ build_overlays() {
 	local my_overlays="$overlays"
 	local run_overlays=""
 	ovl_hostname="$1"
-	ovl_root_dir="$DESTDIR/ovlroot"
-	mkdir -p $ovl_root_dir
+	ovl_root_dir="$DESTDIR/.ovlroot"
+	mkdir -p "$ovl_root_dir"
 
-	fkrt_faked_start $ovl_fkrt_inst
+	fkrt_faked_start "$ovl_fkrt_inst"
 	
 	local watchdog=20
 	while [ "${my_overlays## }" ] && [ $watchdog -gt 0 ]; do
 		for _overlay in $my_overlays ; do
 			overlay_${_overlay}
-			if ( list_has_any "$_conflicts" "$overlays" ) ; then
+			if [ "${_conflicts## }" ] && ( list_has_any "$_conflicts" "$overlays" ) ; then
 				warning "overlay: Overlay conflict detected!"
 				warning "    '$_overlay' conflicts with '$(list_filter "$_conflicts" "$overlays" )'"
 				fkrt_faked_stop $ovl_fkrt_inst
 				return 1
 			fi
-			if ( list_has_all "$_needs" "$overlays" ) ; then
-				list_has_any "$_after" "$my_overlays" && continue
-				list_has_all "$(list_filter "$_before" "$overlays")" "$run_overlays" || continue
+			if [ ! "${_needs## }" ] || list_has_all "$_needs" "$overlays" ; then
+				[ "${_after## }" ] && list_has_any "$_after" "$my_overlays" && continue
+				[ ! "${_before## }" ] || list_has_all "$(list_filter "$_before" "$overlays")" "$run_overlays" || continue
 				local _func
 				for _func in $_call ; do
 					[ "$(type -t $_func)" ] && $_func
@@ -69,7 +69,7 @@ build_overlays() {
 	
 	[ "$run_overlays" ] && ovl_targz_create "${overlay_name:-$ovl_hostname}" "$ovl_root_dir" "./"
 
-	fkrt_faked_stop $ovl_fkrt_inst
+	fkrt_faked_stop "$ovl_fkrt_inst"
 
 	return 0
 }
@@ -98,7 +98,7 @@ targz_dir() {
 	local source_dir="$2"
 	shift 2
 
-	tar -c --numeric-owner --acls --xattrs -C "$source_dir" "$@" | gzip -9n > "$output_file"
+	tar -c --numeric-owner --acls --xattrs --xform='s|^\.*/*||' -C "$source_dir" "$@" | gzip -9n > "$output_file"
 }
 
 ovl_targz_create() {
@@ -275,7 +275,7 @@ ovl_chown() {
 	shift
 
 	ovl_fkrt_enable
-	(	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs mkdir $opts "$owner" )
+	(	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs chown $opts "$owner" )
 	ovl_fkrt_disable
 }
 
@@ -289,7 +289,7 @@ ovl_chmod() {
 	shift
 
 	ovl_fkrt_enable
-	( 	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs mkdir $opts $perms )
+	( 	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs chmod $opts $perms )
 	ovl_fkrt_disable
 }
 
