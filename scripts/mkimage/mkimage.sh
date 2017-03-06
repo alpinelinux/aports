@@ -23,181 +23,15 @@ scriptdir="${scriptrealdir}"
 . "$scriptdir/utils/utils-list.sh"
 . "$scriptdir/utils/utils-search.sh"
 . "$scriptdir/utils/utils-fkrt.sh"
+. "$scriptdir/utils/utils-plugin-loader.sh"
 
 default_colors
 info_prog_set "$scriptname"
 
 
-
-# List containing all known plugin types initially.
-# Include 'sections' plugin here directly, the rest will be discovered.
-var_list_alias all_plugins
-
-set_all_plugins "sections"
-var_list_alias all_sections
-plugins_regex="${plugins_regex:-plugin\|section}"
-
-##
-## General purpose plugins loader.
-##
-## Requires: 'source utils/utils-list.sh' 'var_list_alias all_plugins' 'set_all_plugins'
-##
-## Usage: 'load_plugins "<filename>"' to load all plugin types and plugins from a file
-##        'load_plugins "<directory>"' to load all plugins found in directory hierarchy.
-
-
-# Main load_plugins function which does all the work of discovering, sourcing, and loading plugin types and plugins.
-load_plugins() {
-
-	plugins_regex="${plugins_regex:-plugin}"
-
-	local target="$1"
-	local f l p q func
-	local _found=""
-	local new_plugins=""
-	local mypath mydir myfile
-
-	( [ -e "$target" ] && [ -r "$target" ] ) || return 0
-	target="$(realpath "$target")"
-
-	info_func_set "load_plugins"
-	if [ -f "$target" ] ; then
-		msg "Discovering plugins from file '$target':"
-	else
-		msg "Discovering plugins under directory '$target':"
-	fi
-	
-	# Find all plugin-*.sh scripts, source them, and add plugin types they define to all_plugins list.
-	while IFS=$'\n' read -r f ; do
-		[ -f "$f" ] && [ -r "$f" ] || continue
-		f="$(realpath "$f")"
-		_found=
-		# Variables to be available when sourcing files
-		mypath="${f}"
-		mydir="${mypath%/*}"
-		myfile="${mypath##*/}"
-
-		# Find all lines containing plugin_* function definitions.
-		IFS=$'\n'
-		for l in $(grep -E -e '^plugin_[_[:alnum:]+[[:space:]]*\(\)[[:space:]]*\{' "$f" ) ; do
-			unset IFS
-			l="${l#plugin_}"
-			l="${l%\(\)*}"
-			if all_plugins_has_not "$l" ; then 
-				# Add this plugin type to all_plugins list, regex for finding plugins, and mark for sourcing.
-				add_all_plugins "$l"
-				var_list_alias "all_$l"
-				plugins_regex="$plugins_regex\|${l%s}"
-				_found="true"
-				var_list_add new_plugins "$l"
-			fi
-		done
-		
-		# Source all files in which valid plugin definitions were found.
-		[ "$_found" ] && . "$f"
-
-	done<<-EOF
-		$( [ -f "$target" ] && echo "$target"; [ -d "$target" ] && find "$target" -type f -iname 'plugin-*\.sh' -exec printf '%s\n' {} \; )
-	EOF
-	unset IFS
-
-	msg2 "$(printf "%s " $(get_all_plugins))"
-
-	# Run all new plugin_* scripts found before loading plugins themselves.
-	for p in $new_plugins ; do
-		plugin_${p}
-	done
-
-	# Load all plugins of type defined in all_plugins list using regex built above.
-	while IFS=$'\n' read -r f ; do
-		[ -f "$f" ] && [ -r "$f" ] || continue
-		f="$(realpath "$f")"
-		_found=
-		# Variables to be available when sourcing files
-		mypath="${f}"
-		mydir="${mypath%/*}"
-		myfile="${mypath##*/}"
-
-		# Find all lines containing any function definitions.
-		IFS=$'\n'
-		for func in $(grep -E -e '^[[:alnum:]]+[_[:alnum:]]+[[:space:]]*\(\)' "$f") ; do
-			unset IFS
-			func="${func%()*}"
-			func="${func%% }"
-
-			# Determine if the function definition has the stem of any known plugins.
-			for p in $(get_all_plugins) ; do
-				p="${p}"
-				q="${func#${p%s}_}"
-
-				# Won't match iff this plugin type is stem of funciton
-				if [ "$q" != "$func" ] ; then
-					# Add this plugin to all_<plugin>s list and mark file for sourcing.
-					var_list_add "all_$p" "$q"
-					_found="true"
-				fi
-			done
-		done
-
-		# Source all files which contain function definitions for known plugin types.
-		[ "$_found" ] && . "$f"
-
-	done<<-EOF
-		$([ -f "$target" ] && echo "$target" ; [ -d "$target" ] && find "$target" -type f -regex "$target.*/\($plugins_regex\)-.*\.sh" -exec printf '%s\n' {} \; )
-	EOF
-	unset IFS
-
-	info_func_set ""
-}
-
 checksum() {
 	sha1sum | cut -f 1 -d ' '
 }
-
-# Empty plugin to keep load_plugins happy.
-plugin_sections() {
-	return 0
-}
-
-build_section() {
-	local section="$1"
-	local args="$@"
-	local _dir="${args//[^a-zA-Z0-9]/_}"
-	shift
-	local args="$@"
-
-	if [ -z "$_dir" ]; then
-		_fail="yes"
-		return 1
-	fi
-
-	if [ ! -e "$WORKDIR/${_dir}" ]; then
-		DESTDIR="$WORKDIR/${_dir}.work"
-		msg "--> $section $args"
-
-		info_func_set "build_$section"
-		msg "Building section '$section' with args '$args':"
-		if [ -z "$_simulate" ]; then
-			rm -rf "$DESTDIR"
-			mkdir -p "$DESTDIR"
-			if build_${section} "$@"; then
-				mv "$DESTDIR" "$WORKDIR/${_dir}"
-				_dirty="yes"
-			else
-				rm -rf "$DESTDIR"
-				_fail="yes"
-				info_func_set ""
-				return 1
-			fi
-		fi
-	fi
-	unset DESTDIR
-	all_dirs="$all_dirs $_dir"
-	_my_sections="$_my_sections $_dir"
-	info_func_set ""
-}
-
-
 
 ###
 ### Begin code for mkimage proper
@@ -262,7 +96,7 @@ while [ $# -gt 0 ]; do
 	--checksum) _checksum="yes";;
 	--yaml) _yaml="yes";;
 	--) break ;;
-	-*) usage; exit 1;;
+	-*) _show_usage="yes";;
 	esac
 done
 
@@ -285,6 +119,8 @@ mkimage_yaml="$(dirname $0)"/mkimage-yaml.sh
 # If we're NOT running in the script directory, default to outputting in the curent directory.
 # If we ARE running in our script directory, at least put output files somewhere sane, like ./out
 OUTDIR="${OUTDIR:-$PWD}"
+
+[ "$_show_usage" = "yes" ] && usage ; exit 1
 
 # Save ourselves from making a mess in our script's root directory.
 mkdir -p "$OUTDIR"

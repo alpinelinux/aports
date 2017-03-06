@@ -114,6 +114,45 @@ list_filter() {
 	done | sort -u | tr '\n' ' '
 }
 
+# Strip leading prefix in needle from each item in list haystack
+list_strip_prefix() {
+	local needle i
+
+	needle="$1"
+	shift
+
+	for i in $@ ; do
+		printf_n "${i#$needle}"
+	done | sort -u | tr '\n' ' '
+
+}
+
+# Strip trailing suffix in needle from each item in list haystack
+list_strip_suffix() {
+	local needle i
+
+	needle="$1"
+	shift
+
+	for i in $@ ; do
+		printf_n "${i%$needle}"
+	done | sort -u | tr '\n' ' '
+
+}
+
+# Transform each item in list haystack with 'sed -E' using commands in needles.
+list_transform() {
+	local needles i
+
+	needles="$1"
+	shift
+
+	for i in $@ ; do
+		printf_n "$(echo ${i} | sed -E $(IFS=$'\n\t ' printf " -e '%s'" $needles))"
+	done | sort -u | tr '\n' ' '
+
+}
+
 
 ##
 ## Functions for handling lists contained in variables.
@@ -130,6 +169,7 @@ var_list_is_empty() {
 
 	return 0
 }
+
 
 var_list_not_empty() {
 	local _list=$1
@@ -150,6 +190,7 @@ var_list_has() {
 	list_has "$_items" "$(getvar "$_list")"
 }
 
+
 var_list_has_not() {
 	local _list=$1
 	shift
@@ -157,6 +198,7 @@ var_list_has_not() {
 
 	list_has_not "$_items" "$(getvar "$_list")"
 }
+
 
 var_list_has_any() {
 	local _list=$1
@@ -166,6 +208,7 @@ var_list_has_any() {
 	list_has_any "$_items" "$(getvar "$_list")"
 }
 
+
 var_list_has_all() {
 	local _list=$1
 	shift
@@ -173,6 +216,7 @@ var_list_has_all() {
 
 	list_has_all "$_items" "$(getvar $_list)"
 }
+
 
 var_list_has_exactly() {
 	local _list=$1
@@ -182,6 +226,7 @@ var_list_has_exactly() {
 	list_has_exactly "$_items" "$(getvar $_list)"
 }
 
+
 var_list_has_none() {
 	local _list=$1
 	shift
@@ -189,6 +234,7 @@ var_list_has_none() {
 
 	list_has_none "$_items" "$(getvar $_list)"
 }
+
 
 var_list_add() {
 	local _list=$1
@@ -200,6 +246,7 @@ var_list_add() {
 	setvar $_list "${_new%% }"
 }
 
+
 var_list_del() {
 	local _list=$1
 	shift
@@ -209,6 +256,7 @@ var_list_del() {
 
 	setvar $_list "${_new%% }"
 }
+
 
 var_list_filter() {
 	local _list=$1
@@ -220,10 +268,30 @@ var_list_filter() {
 	setvar $_list "${_new%% }"
 }
 
+
 var_list_get() {
 	local _list=$1
 	getvar "$_list"
 }
+
+
+var_list_get_strip_prefix() {
+	local _list=$1
+	list_strip_prefix "$2" $(getvar "$_list")
+}
+
+
+var_list_get_strip_suffix() {
+	local _list=$1
+	list_strip_suffix "$2" $(getvar "$_list")
+}
+
+
+var_list_get_transform() {
+	local _list=$1
+	list_transform "$2" $(getvar "$_list")
+}
+
 
 var_list_set() {
 	local _list=$1
@@ -267,6 +335,9 @@ var_list_alias() {
 	alias "del_${1}"="var_list_del $1"
 	alias "filter_${1}"="var_list_filter $1"
 	alias "get_${1}"="var_list_get $1"
+	alias "get_${1}_strip_prefix"="var_list_get_strip_prefix $1"
+	alias "get_${1}_strip_suffix"="var_list_get_strip_suffix $1"
+	alias "get_${1}_transform"="var_list_get_transform $1"
 	alias "set_${1}"="var_list_set $1"
 	alias "clear_${1}"="var_list_clear $1"
 	alias "unset_${1}"="var_list_unset $1"

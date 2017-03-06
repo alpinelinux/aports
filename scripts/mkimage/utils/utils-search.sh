@@ -1,3 +1,11 @@
+# grep_ -v -E -e '$1' -e '$2'
+# evaluates to
+# grep -v -E -e '$1' -e '$2'
+grep_() {
+
+	(unset IFS ; eval "grep $@")
+}
+
 # $cmd | grep_exps -v -E $1 $2 
 # evaluates to
 # $cmd | grep -v -E -e '$1' -e '$2'
@@ -9,8 +17,9 @@ pipe_grep_e() {
 		shift
 	done
 
-	(eval "grep $(printf "-e '%s' " "$@")")
+	(unset IFS ; eval "grep $opts $(printf "-e '%s' " "$@")")
 }
+
 
 # grep_exps $filespec -v -E $1 $2 
 # evaluates to:
@@ -24,7 +33,7 @@ grep_file_e() {
 		opts="${opts}${opts:+ }$1" ; shift
 	done
 
-	(eval "grep $(printf "-e '%s' " "$@") $filespec")
+	(unset IFS ; eval "grep $opts $(printf "-e '%s' " "$@") $filespec")
 }
 
 
@@ -38,7 +47,7 @@ xargs_grep_e() {
 		opts="${opts}${opts:+ }$1" ; shift
 	done
 
-	(eval "xargs -r grep $(printf "-e '%s' " "$@")")
+	(unset IFS ; eval "xargs -r grep $opts $(printf "-e '%s' " "$@")")
 }
 
 
@@ -52,6 +61,6 @@ xargs0_grep_e() {
 		opts="${opts}${opts:+ }$1" ; shift
 	done
 
-	(eval "xargs -0 -r grep $(printf "-e '%s' " "$@")")
+	(unset IFS ; eval "xargs -0 -r grep $opts $(printf "-e '%s' " "$@")")
 }
 

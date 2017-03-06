@@ -76,6 +76,51 @@ build_profile() {
 }
 
 
+# Empty plugin to keep load_plugins happy.
+plugin_sections() {
+	return 0
+}
+
+build_section() {
+	local section="$1"
+	local args="$@"
+	local _dir="${args//[^a-zA-Z0-9]/_}"
+	shift
+	local args="$@"
+
+	if [ -z "$_dir" ]; then
+		_fail="yes"
+		return 1
+	fi
+
+	if [ ! -e "$WORKDIR/${_dir}" ]; then
+		DESTDIR="$WORKDIR/${_dir}.work"
+		msg "--> $section $args"
+
+		info_func_set "build_$section"
+		msg "Building section '$section' with args '$args':"
+		if [ -z "$_simulate" ]; then
+			rm -rf "$DESTDIR"
+			mkdir -p "$DESTDIR"
+			if build_${section} "$@"; then
+				mv "$DESTDIR" "$WORKDIR/${_dir}"
+				_dirty="yes"
+			else
+				rm -rf "$DESTDIR"
+				_fail="yes"
+				info_func_set ""
+				return 1
+			fi
+		fi
+	fi
+	unset DESTDIR
+	all_dirs="$all_dirs $_dir"
+	_my_sections="$_my_sections $_dir"
+	info_func_set ""
+}
+
+
+
 # Helpers to defined kernel-flavor suffixes to all specified roots.
 suffix_kernel_flavor() {
 	local _f="$1"
