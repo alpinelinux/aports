@@ -9,6 +9,7 @@
  * by the Free Software Foundation. See http://www.gnu.org/ for details.
  */
 
+#include <limits.h>
 #include <stdint.h>
 #include <unistd.h>
 #include "apk_defines.h"
