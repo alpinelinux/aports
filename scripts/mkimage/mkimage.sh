@@ -120,7 +120,7 @@ mkimage_yaml="$(dirname $0)"/mkimage-yaml.sh
 # If we ARE running in our script directory, at least put output files somewhere sane, like ./out
 OUTDIR="${OUTDIR:-$PWD}"
 
-[ "$_show_usage" = "yes" ] && usage ; exit 1
+[ "$_show_usage" = "yes" ] && usage && exit 1
 
 # Save ourselves from making a mess in our script's root directory.
 mkdir -p "$OUTDIR"
