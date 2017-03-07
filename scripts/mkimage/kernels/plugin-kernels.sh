@@ -8,6 +8,7 @@ plugin_kernels() {
 }
 
 plugin_kernel_flavors() {
+	var_list_alias kernel_flavors
 	return 0
 }
 
