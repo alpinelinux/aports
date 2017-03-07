@@ -112,12 +112,10 @@ APK="abuild-apk ${APK_CACHE_DIR:+--cache-dir $APK_CACHE_DIR}"
 
 # Global variable declarations
 all_checksums="sha256 sha512"
-all_arches="aarch64 armhf x86 x86_64"
-all_dirs=""
 build_date="$(date +%Y%m%d)"
 default_arch="$($APK --print-arch)"
 
-# Location of yaml generator -- TODO: This should move!
+# Location of yaml generator
 mkimage_yaml="$(dirname $0)"/release/mkimage-yaml.sh
 
 # If we're NOT running in the script directory, default to outputting in the curent directory.
@@ -151,10 +149,6 @@ if [ -z "$RELEASE" ]; then
 	fi
 fi
 
-req_profiles=${req_profiles:-${all_profiles}}
-req_arch=${req_arch:-${default_arch}}
-[ "$req_arch" != "all" ] || req_arch="${all_arch}"
-[ "$req_profiles" != "all" ] || req_profiles="${all_profiles}"
 
 
 # get abuild pubkey used to sign the apkindex
@@ -165,7 +159,14 @@ if [ -z "$_hostkeys" ]; then
 	_abuild_pubkey="${PACKAGER_PUBKEY:-$_pub}"
 fi
 
-# create images
+# Create lists of candidate archs and profiles for building images.
+req_arch=${req_arch:-${default_arch}}
+[ "$req_arch" != "all" ] || req_arch="${all_archs}"
+# FIXME: We probably DON'T want to build all profiles by default!
+req_profiles=${req_profiles:-all}
+[ "$req_profiles" != "all" ] || req_profiles="${all_profiles}"
+
+# Build image for each requested arch/profile (profiles skip if invalid combo).
 for ARCH in $req_arch; do
 	info_prog_set "$scriptname:$ARCH"
 

@@ -1,4 +1,13 @@
 plugin_kernels() {
+	var_list_alias initfs_apks
+	var_list_alias initfs_apks_flavored
+	var_list_alias initfs_only_apks
+	var_list_alias initfs_only_apks_flavored
+	var_list_alias initfs_features
+	return 0
+}
+
+plugin_kernel_flavors() {
 	return 0
 }
 
