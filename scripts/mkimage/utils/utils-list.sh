@@ -140,6 +140,32 @@ list_strip_suffix() {
 
 }
 
+# Add leading prefix in needle from each item in list haystack
+list_add_prefix() {
+	local needle i
+
+	needle="$1"
+	shift
+
+	for i in $@ ; do
+		printf_n "${needle}${i}"
+	done | sort -u | tr '\n' ' '
+
+}
+
+# Add trailing suffix in needle from each item in list haystack
+list_add_suffix() {
+	local needle i
+
+	needle="$1"
+	shift
+
+	for i in $@ ; do
+		printf_n "${i}{$needle}"
+	done | sort -u | tr '\n' ' '
+
+}
+
 # Transform each item in list haystack with 'sed -E' using commands in needles.
 list_transform() {
 	local needles i
@@ -287,6 +313,18 @@ var_list_get_strip_suffix() {
 }
 
 
+var_list_get_add_prefix() {
+	local _list=$1
+	list_add_prefix "$2" $(getvar "$_list")
+}
+
+
+var_list_get_add_suffix() {
+	local _list=$1
+	list_add_suffix "$2" $(getvar "$_list")
+}
+
+
 var_list_get_transform() {
 	local _list=$1
 	list_transform "$2" $(getvar "$_list")
@@ -337,6 +375,8 @@ var_list_alias() {
 	alias "get_${1}"="var_list_get $1"
 	alias "get_${1}_strip_prefix"="var_list_get_strip_prefix $1"
 	alias "get_${1}_strip_suffix"="var_list_get_strip_suffix $1"
+	alias "get_${1}_add_prefix"="var_list_get_add_prefix $1"
+	alias "get_${1}_add_suffix"="var_list_get_add_suffix $1"
 	alias "get_${1}_transform"="var_list_get_transform $1"
 	alias "set_${1}"="var_list_set $1"
 	alias "clear_${1}"="var_list_clear $1"
