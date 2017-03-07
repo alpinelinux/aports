@@ -118,7 +118,7 @@ build_date="$(date +%Y%m%d)"
 default_arch="$($APK --print-arch)"
 
 # Location of yaml generator -- TODO: This should move!
-mkimage_yaml="$(dirname $0)"/mkimage-yaml.sh
+mkimage_yaml="$(dirname $0)"/release/mkimage-yaml.sh
 
 # If we're NOT running in the script directory, default to outputting in the curent directory.
 # If we ARE running in our script directory, at least put output files somewhere sane, like ./out
