@@ -1,9 +1,12 @@
 imagetype_iso() {
 	image_ext="iso"
 	output_format="iso"
-	bootloader_syslinux_cfg
-	bootloader_syslinux
+
 	bootloader_grubefi
+	bootloader_isolinux_cfg
+	bootloader_syslinux_cfg
+	bootloader_extlinux_cfg
+	bootloader_isolinux
 }
 
 create_image_iso() {

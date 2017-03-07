@@ -6,7 +6,31 @@ bootloader_syslinux() {
 		bootloader_syslinux_enabled="false"
 	elif [ "$1" = "enabled" ] || [ "$bootloader_syslinux_enabled" != "false" ] ; then
 		bootloader_syslinux_enabled="true"
-		bootloader_syslinux_cfg "extlinux/extlinux.conf"
+		bootloader_syslinux_cfg
+	fi
+}
+
+# extlinux bootloader plugin
+bootloader_extlinux() {
+	list_has $ARCH "x86 x86_64" || return 0
+
+	if [ "$1" = "disabled" ] ; then
+		bootloader_extlinux_enabled="false"
+	elif [ "$1" = "enabled" ] || [ "$bootloader_extlinux_enabled" != "false" ] ; then
+		bootloader_extlinux_enabled="true"
+		bootloader_extlinux_cfg
+	fi
+}
+
+# extlinux bootloader plugin
+bootloader_isolinux() {
+	list_has $ARCH "x86 x86_64" || return 0
+
+	if [ "$1" = "disabled" ] ; then
+		bootloader_isolinux_enabled="false"
+	elif [ "$1" = "enabled" ] || [ "$bootloader_isolinuxlinux_enabled" != "false" ] ; then
+		bootloader_isolinux_enabled="true"
+		bootloader_isolinux_cfg
 	fi
 }
 
@@ -16,13 +40,26 @@ bootloader_syslinux_cfg() {
 	syslinux_cfg="${1:-boot/syslinux/syslinux.cfg}"
 }
 
-# syslinux.cfg builder -- enabled as long as output file $syslinux_cfg is specified.
+# extlinux.cfg bootloader plugin.
+bootloader_extlinux_cfg() {
+	extlinux_cfg="${1:-boot/syslinux/extlinux.cfg}"
+}
+
+# isolinux.cfg bootloader plugin.
+bootloader_isolinux_cfg() {
+	list_has $ARCH "x86 x86_64" || return 0
+	isolinux_cfg="${1:-boot/syslinux/isolinux.cfg}"
+}
+
+# syslinux.cfg builder -- enabled if any of syslinux_cfg, extlinux_cfg, or isolinux_cfg is specified.
 section_syslinux_cfg() {
-	[ "$syslinux_cfg" ] || return 0
-	build_section syslinux_cfg $syslinux_cfg $(syslinux_cfg_generate | checksum)
+	[ "$syslinux_cfg" ] && build_section syslinux_cfg $syslinux_cfg $(syslinux_cfg_generate | checksum)
+	[ "$extlinux_cfg" ] && build_section syslinux_cfg $extlinux_cfg $(syslinux_cfg_generate | checksum)
+	[ "$isolinux_cfg" ] && build_section syslinux_cfg $isolinux_cfg $(syslinux_cfg_generate | checksum)
 }
 
 # Generate syslinux.cfg including menu entries for each kernel flavor.
+# TODO: Allow configuration of default menu option.
 syslinux_cfg_generate() {
 	[ -z "$syslinux_serial" ] || echo "SERIAL $syslinux_serial"
 	echo "TIMEOUT ${syslinux_timeout:-20}"
@@ -50,12 +87,12 @@ LABEL $_flavor
 	MENU LABEL Linux $_flavor
 	KERNEL /boot/vmlinuz$_suffix
 	INITRD /boot/initramfs-$_flavor
-	DEVICETREEDIR /boot/dtbs
 	APPEND $initfs_cmdline $kernel_cmdline
 EOF
 
 }
 
+# Build a syslinux style configuration file with given name.
 build_syslinux_cfg() {
 	local _syslinux_cfg="$1"
 	mkdir -p "${DESTDIR}/$(dirname $_syslinux_cfg)"
@@ -63,12 +100,15 @@ build_syslinux_cfg() {
 }
 
 
-# Build and install syslinux bootloader if enabled.
+
+# Build and install syslinux bootloader if any of syslinux, extlinux, or isolinux if enabled.
 section_bootloader_syslinux() {
-	[ "$bootloader_syslinux_enabled" = "true" ] || return 0
+	[ "$bootloader_syslinux_enabled" = "true" ] || [ "$bootloader_extlinux_enabled" = "true" ] || [ "$bootloader_isolinux_enabled" = "true" ] || return 0
 	build_section bootloader_syslinux $($APK fetch --root "$APKROOT" --simulate syslinux | sort | checksum)
 }
 
+# Add syslinux suite to dest boot directory.
+# TODO: Add ability to configure modules.
 build_bootloader_syslinux() {
 	local _fn
 	mkdir -p "$DESTDIR"/boot/syslinux

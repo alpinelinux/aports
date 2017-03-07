@@ -76,6 +76,10 @@ load_plugins "$scriptdir"
 [ -z "$HOME" ] || load_plugins "$HOME/.mkimage"
 
 
+_hostkeys="${_hostkeys:-}"
+_simulate="${_simulate:-}"
+_checksum="${_checksum:-}"
+
 # parse parameters
 while [ $# -gt 0 ]; do
 	opt="$1"
@@ -109,9 +113,6 @@ all_arches="aarch64 armhf x86 x86_64"
 all_dirs=""
 build_date="$(date +%Y%m%d)"
 default_arch="$($APK --print-arch)"
-_hostkeys=""
-_simulate=""
-_checksum=""
 
 # Location of yaml generator -- TODO: This should move!
 mkimage_yaml="$(dirname $0)"/mkimage-yaml.sh
