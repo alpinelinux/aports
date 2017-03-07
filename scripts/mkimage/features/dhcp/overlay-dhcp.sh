@@ -26,18 +26,3 @@ ovl_script_dhcp_client() {
 	EOF
 }
 
-ovl_script_dhcp_client_dhcpcd() {
-	ovl_runlevel_add boot dhcpcd
-}
-ovl_script_dhcp_client_isc() {
-	return 0
-}
-ovl_script_dhcp_server_isc() {
-	ovl_runlevel_add boot dhcpd
-}
-ovl_script_dhcp_client_udhcp() {
-	return 0
-}
-ovl_script_dhcp_server_udhcp() {
-	ovl_runlevel_add boot udhcpd
-}
