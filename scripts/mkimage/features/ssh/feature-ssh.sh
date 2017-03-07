@@ -114,12 +114,10 @@ ovl_script_ssh_generate_keys_openssh() {
 		local k_id="id_${kt}"
 		local k_root_login="${k_id}.${ovl_hostname}.root_login"
 		local k_user_root="${k_id}.${ovl_hostname}.user_root"
-		local kt_str="ssh-${kt}"
-		[ "$kt" = "dsa" ] && kt_str="ssh-dss"
-		[ "$kt" = "ecdsa" ] && kt_str="ecdsa"
+
 		# Host keys:
 		ssh-keygen -q -o -N '' -C "$ovl_hostname host key" -t $kt -f "${keys_dir}/${k_host}"
-		ssh-keygen -y -f "${keys_dir}/${k_host}" | grep "^ssh-${kt_str}" > "${keys_dir}/${k_host}.pub"
+		ssh-keygen -y -f "${keys_dir}/${k_host}" > "${keys_dir}/${k_host}.pub"
 
 		ovl_fkrt_enable
 		(	cp "${keys_dir}/${k_host}" "$(ovl_get_root)/${h_keys#/}"
@@ -132,7 +130,7 @@ ovl_script_ssh_generate_keys_openssh() {
 
 		# Root user keys:
 		ssh-keygen -q -o -N '' -C "root@$ovl_hostname" -t $kt -f "${keys_dir}/${k_user_root}"
-		ssh-keygen -y -f "${keys_dir}/${k_user_root}" | grep "^ssh-${kt_str}" > "${keys_dir}/${k_user_root}.pub"
+		ssh-keygen -y -f "${keys_dir}/${k_user_root}" > "${keys_dir}/${k_user_root}.pub"
 
 		ovl_fkrt_enable
 		(	cp "${keys_dir}/${k_user_root}" "$(ovl_get_root)/${r_ssh#/}/${k_id}"
@@ -149,7 +147,7 @@ ovl_script_ssh_generate_keys_openssh() {
 
 		# Root login keys:
 		ssh-keygen -q -o -N '' -C "SSH login key for root@$ovl_hostname" -t $kt -f "${keys_dir}/${k_root_login}"
-		ssh-keygen -y -f "${keys_dir}/${k_root_login}" | grep "^ssh-${kt_str}" > "${keys_dir}/${k_root_login}.pub"
+		ssh-keygen -y -f "${keys_dir}/${k_root_login}" > "${keys_dir}/${k_root_login}.pub"
 
 		ovl_fkrt_enable
 		(	cp "${keys_dir}/${k_root_login}.pub" "$(ovl_get_root)/${r_keys#/}"
