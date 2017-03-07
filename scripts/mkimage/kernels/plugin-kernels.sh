@@ -1,13 +1,14 @@
 plugin_kernels() {
 	var_list_alias initfs_apks
-	var_list_alias initfs_apks_flavored
 	var_list_alias initfs_only_apks
-	var_list_alias initfs_only_apks_flavored
 	var_list_alias initfs_features
 	return 0
 }
 
 plugin_kernel_flavors() {
+	var_list_alias kernel_flavors
+	var_list_alias initfs_apks_flavored
+	var_list_alias initfs_only_apks_flavored
 	return 0
 }
 
@@ -19,16 +20,16 @@ suffix_kernel_flavor() {
 	list_add_suffix "-$_flavor" $@
 }
 
-suffix_all_kernel_flavors() {
+suffix_kernel_flavors() {
 	local _flavor
-	for _flavor in $all_kernel_flavors; do
+	for _flavor in $kernel_flavors; do
 		suffix_kernel_flavor $_flavor $@
 	done
 }
 
 section_kernels() {
 	local _flavor _pkgs
-	for _flavor in $all_kerinel_flavors; do
+	for _flavor in $kernel_flavors; do
 		#FIXME Should these really be hard-coded?
 		var_list_set _pkgs "$(suffix_kernel_flavor "linux") linux-firmware"
 

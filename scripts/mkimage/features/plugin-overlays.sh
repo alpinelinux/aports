@@ -68,8 +68,8 @@ build_overlays() {
 		fi
 	done
 	
-	[ "$all_apks_in_world" = "true" ] && ovl_add_apks_world "$all_apks" "$(suffix_all_kernel_flavors $apks_flavored)" 
-	[ "$rootfs_apks" ] && ovl_add_apks_world "$rootfs_apks" "$(suffix_all_kernel_flavors $rootfs_apks_flavored)" 
+	[ "$all_apks_in_world" = "true" ] && ovl_add_apks_world "$apks" "$(suffix_kernel_flavors $apks_flavored)" 
+	[ "$rootfs_apks" ] && ovl_add_apks_world "$rootfs_apks" "$(suffix_kernel_flavors $rootfs_apks_flavored)" 
 	[ "$run_overlays" ] && ovl_targz_create "${overlay_name:-$ovl_hostname}" "$ovl_root_dir" "etc/.."
 
 	fkrt_faked_stop "$ovl_fkrt_inst"

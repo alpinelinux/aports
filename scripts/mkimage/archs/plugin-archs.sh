@@ -1,6 +1,11 @@
 # Arch stubs
 # TODO: Flesh out.
 plugin_archs() {
+	var_list_alias archs
+	return 0
+}
+
+arch_aarch64() {
 	return 0
 }
 

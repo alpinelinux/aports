@@ -63,7 +63,9 @@ options:
 --yaml
 
 known plugins     : $all_plugins
+known archs       : $all_archs
 known profiles    : $all_profiles
+known kern-flavors: $all_kernel_flavors
 known image types : $all_imagetypes
 known features    : $all_features
 

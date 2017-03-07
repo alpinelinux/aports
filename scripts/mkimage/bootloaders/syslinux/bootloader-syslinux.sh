@@ -28,7 +28,7 @@ bootloader_isolinux() {
 
 	if [ "$1" = "disabled" ] ; then
 		bootloader_isolinux_enabled="false"
-	elif [ "$1" = "enabled" ] || [ "$bootloader_isolinuxlinux_enabled" != "false" ] ; then
+	elif [ "$1" = "enabled" ] || [ "$bootloader_isolinux_enabled" != "false" ] ; then
 		bootloader_isolinux_enabled="true"
 		bootloader_isolinux_cfg
 	fi
@@ -64,10 +64,10 @@ syslinux_cfg_generate() {
 	[ -z "$syslinux_serial" ] || echo "SERIAL $syslinux_serial"
 	echo "TIMEOUT ${syslinux_timeout:-20}"
 	echo "PROMPT ${syslinux_prompt:-1}"
-	echo "DEFAULT ${all_kernel_flavors%% *}"
+	echo "DEFAULT ${kernel_flavors%% *}"
 
 	local _f _kf
-	for _f in $all_kernel_flavors; do
+	for _f in $kernel_flavors; do
 		_kf=""
 		[ "$_f" = vanilla ] || _kf=-$_f
 		# Use standard entry type by default

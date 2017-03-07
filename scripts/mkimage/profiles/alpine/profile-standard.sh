@@ -3,7 +3,7 @@ profile_standard() {
 	profile_base
 
 	# Set architecture and kernel flavor
-	set_arch "x86 x86_64"
+	set_archs "x86 x86_64"
 
 	# Load features
 	feature_xtables_addons
