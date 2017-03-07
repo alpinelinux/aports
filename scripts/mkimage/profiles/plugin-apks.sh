@@ -31,6 +31,7 @@ build_apks() {
 	var_list_add _repoapks "$rootfs_apks" "$(suffix_kernel_flavors $rootfs_apks_flavored)"
 
 	msg "Fetching required apks recursively..."
+	msg2 "$_repoapks"
 	$APK fetch --root "$APKROOT" --link --recursive --output "$_archdir" $_repoapks
 	if ! ls "$_archdir"/*.apk >& /dev/null; then
 		return 1

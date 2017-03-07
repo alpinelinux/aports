@@ -110,7 +110,7 @@ build_section() {
 				msg "Built '$section' -> '$_dir'"
 			else
 				_fail="yes"
-				warn "Building '$section' failed!"
+				warning "Building '$section' failed!"
 				rm -rf "$DESTDIR"
 				return 1
 			fi

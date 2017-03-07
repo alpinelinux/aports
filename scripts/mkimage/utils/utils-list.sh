@@ -161,7 +161,7 @@ list_add_suffix() {
 	shift
 
 	for i in $@ ; do
-		printf_n "${i}{$needle}"
+		printf_n "${i}${needle}"
 	done | sort -u | tr '\n' ' '
 
 }

@@ -17,7 +17,7 @@ suffix_kernel_flavor() {
 	local _flavor="$1"
 	shift
 
-	list_add_suffix "-$_flavor" $@
+	list_add_suffix "-${_flavor}" $@
 }
 
 suffix_kernel_flavors() {
