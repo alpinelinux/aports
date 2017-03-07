@@ -7,6 +7,6 @@ profile_base() {
 
 	feature_ssh
 	feature_ntp
-
+	overlays="base"
 	hostname="alpine"
 }

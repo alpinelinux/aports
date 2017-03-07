@@ -10,6 +10,7 @@ section_overlays() {
 	build_section overlays $hostname $overlay_name $_id
 }
 
+
 build_overlays() {
 	local my_overlays="$overlays"
 	local run_overlays=""
@@ -54,7 +55,7 @@ build_overlays() {
 			unset _conflicts
 			unset _before
 			unset _after
-			unset run_ovl
+			unset _call
 		done
 
 		watchdog=$(( $watchdog - 1 ))
@@ -67,29 +68,57 @@ build_overlays() {
 		fi
 	done
 	
-	[ "$run_overlays" ] && ovl_targz_create "${overlay_name:-$ovl_hostname}" "$ovl_root_dir" "./"
+	[ "$all_apks_in_world" = "true" ] && ovl_add_apks_world "$all_apks" "$(suffix_all_kernel_flavors $apks_flavored)" 
+	[ "$rootfs_apks" ] && ovl_add_apks_world "$rootfs_apks" "$(suffix_all_kernel_flavors $rootfs_apks_flavored)" 
+	[ "$run_overlays" ] && ovl_targz_create "${overlay_name:-$ovl_hostname}" "$ovl_root_dir" "etc/.."
 
 	fkrt_faked_stop "$ovl_fkrt_inst"
 
 	return 0
 }
 
+
+ovl_add_apks_world() {
+	local _ovlwld
+	_ovlwld="$(ovl_path /etc/apk/world)"
+
+	ovl_fkrt_enable
+	if [ -e "$_ovlwld" ] && [ -f "$_ovlwld" ] ; then
+		(IFS=$'\n\r ' ; cat "$_ovlwld" | xargs printf_n $@ > "$_ovlwld")
+	elif [ -d "$(ovl_get_root)" ] ; then
+		mkdir -p "${_ovlwld%/*}"
+		(IFS=$'\n\r ' ; printf_n $@ > "$_ovlwld")
+	fi
+	ovl_fkrt_disable
+}
+
+
 ovl_fkrt_enable() {
 	fkrt_enable $ovl_fkrt_inst
 }
+
 
 ovl_fkrt_disable() {
 	fkrt_disable
 }
 
+
 ovl_get_root() {
 	printf %s $ovl_root_dir
 }
 
+
 ovl_path() {
-	printf "%s" "${ovl_root_dir%%//}${1##/}"
+	printf "%s" "${ovl_root_dir%%/}/${1##/}"
 }
 
+ovl_file_exists() {
+	[ -e "$1" ] && [ -f "$1" ]
+}
+
+ovl_file_not_exists() {
+	[ -e "$1" ] && [ -f "$1" ]
+}
 
 
 # Usage: targz_dir <output.tar.gz> <source directory> [<source objects>]
@@ -98,7 +127,7 @@ targz_dir() {
 	local source_dir="$2"
 	shift 2
 
-	tar -c --numeric-owner --acls --xattrs --xform='s|^\.*/*||' -C "$source_dir" "$@" | gzip -9n > "$output_file"
+	tar -c --numeric-owner --xattrs -C "$source_dir" "$@" | gzip -9n > "$output_file"
 }
 
 ovl_targz_create() {
@@ -111,6 +140,12 @@ ovl_targz_create() {
 	ovl_fkrt_disable
 }
 
+
+# Create file with specified owner and mode taking content from stdin.
+# Usage: '<cmd> | ovl_create_file <file> <owner> <mode>'
+#      : ovl_create_file <file> <owner> <mode>' <<-EOF
+#      :     [HERE DOCUMENT]
+#      : EOF
 
 ovl_create_file() {
 	local owner perms file filename filedir
@@ -126,6 +161,26 @@ ovl_create_file() {
 		cat > "${filedir%/}/$filename"
 		chown "$owner" "$file"
 		chmod "$perms" "$file"
+	)
+	ovl_fkrt_disable
+}
+
+# Append content from stdin to file.
+# Usage: '<cmd> | ovl_append_file <file>'
+#      : ovl_append_file <file>' <<-EOF
+#      :     [HERE DOCUMENT]
+#      : EOF
+
+ovl_append_file() {
+	local file filename filedir
+	file="${1}"
+	file="$(ovl_get_root)/${file#/}"
+	filename="${file##*/}"
+	filedir="${file%$filename}"
+
+	ovl_fkrt_enable
+	(	mkdir -p "$filedir"
+		cat >> "${filedir%/}/$filename"
 	)
 	ovl_fkrt_disable
 }

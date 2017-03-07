@@ -9,6 +9,8 @@ plugin_profiles() {
 	var_list_alias initfs_only_apks_flavored
 	var_list_alias initfs_features
 	var_list_alias kernel_flavors
+	var_list_alias rootfs_apks
+	var_list_alias rootfs_apks_flavored
 }
 
 
@@ -171,9 +173,11 @@ build_kernel() {
 
 # Local apk repository support.
 section_apks() {
+	[ "disable_apk_repository" = "true" ] && return 0
 	# Build list of all required apks
-	add_apks "$(suffix_all_kernel_flavors $apks_flavored) $initfs_apks $(suffix_all_kernel_flavors $initfs_apks_flavored)"
-	[ -n "$apks" ] || return 0
+
+	# Check for any apks that need to go in the local repository.
+	[ "${apks}${apks_flavored}${initfs_apks}${initfs_apks_flavored}${rootfs_apks}${rootfs7_apks_flavored}" ] || return 0
 
 	build_section apks $ARCH $($APK fetch --root "$APKROOT" --simulate --recursive $apks | sort | checksum)
 }
@@ -183,7 +187,12 @@ build_apks() {
 	local _archdir="$_apksdir/$ARCH"
 	mkdir -p "$_archdir"
 
-	$APK fetch --root "$APKROOT" --link --recursive --output "$_archdir" $apks
+	local _repoapks
+	var_list_add _repoapks "$apks" "$(suffix_all_kernel_flavors $apks_flavored)"
+	var_list_add _repoapks "$initfs_apks" "$(suffix_all_kernel_flavors $initfs_apks_flavored)"
+	var_list_add _repoapks "$rootfs_apks" "$(suffix_all_kernel_flavors $rootfs_apks_flavored)"
+
+	$APK fetch --root "$APKROOT" --link --recursive --output "$_archdir" $_repoapks
 	if ! ls "$_archdir"/*.apk >& /dev/null; then
 		return 1
 	fi

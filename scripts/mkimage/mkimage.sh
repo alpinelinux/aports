@@ -71,10 +71,13 @@ EOF
 }
 
 
-# load plugins
+# load plugins from script dir and ~/.mkimage
+info_prog_set "$scriptname:plugin-loader"
+
 load_plugins "$scriptdir"
 [ -z "$HOME" ] || load_plugins "$HOME/.mkimage"
 
+info_prog_set "$scriptname"
 
 _hostkeys="${_hostkeys:-}"
 _simulate="${_simulate:-}"
@@ -200,8 +203,10 @@ for ARCH in $req_arch; do
 		info_prog_set "$scriptname:$ARCH:$PROFILE"
 		msg "Beginning build for profile $PROFILE."
 		(build_profile) || exit 1
+		msg "Completed build for profile $PROFILE."
 	done
-
-	info_prog_set ""
 done
+
+info_prog_set "$scriptdir"
+
 echo "Images generated in $OUTDIR"
