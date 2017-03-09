@@ -57,7 +57,7 @@ suffix_kernel_flavor() {
 # All specified flavors:
 suffix_kernel_flavors() {
 	local _flavor
-	for _flavor in $kernel_flavors; do
+	for _flavor in $(get_kernel_flavors); do
 		suffix_kernel_flavor $_flavor $@
 	done
 }
