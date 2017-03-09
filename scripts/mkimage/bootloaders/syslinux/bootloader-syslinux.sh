@@ -67,7 +67,7 @@ syslinux_cfg_generate() {
 	echo "DEFAULT ${kernel_flavors%% *}"
 
 	local _f _kf
-	for _f in $kernel_flavors; do
+	for _f in $(get_kernel_flavors); do
 		_kf=""
 		[ "$_f" = vanilla ] || _kf=-$_f
 		# Use standard entry type by default

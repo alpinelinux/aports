@@ -33,7 +33,7 @@ grub_cfg_generate() {
 	local _f _kf _tab
 	tab=$'\t' # Used in heredoc because leading tabs are trimmed with <<- operator.
 	echo "set timeout=2"
-	for _f in $kernel_flavors; do
+	for _f in $(get_kernel_flavors); do
 		_kf=""
 		[ "$_f" = vanilla ] || _kf=-$_f
 

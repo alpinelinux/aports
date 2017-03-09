@@ -64,7 +64,7 @@ suffix_kernel_flavors() {
 
 section_kernels() {
 	local _flavor _pkgs
-	for _flavor in $kernel_flavors; do
+	for _flavor in $(get_kernel_flavors); do
 		#FIXME Should these really be hard-coded?
 		var_list_set _pkgs "$(suffix_kernel_flavor "linux") linux-firmware"
 
