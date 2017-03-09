@@ -11,7 +11,7 @@ build_bootloader_rpi_blobs() {
 }
 
 bootloader_rpi_gen_cmdline() {
-	echo "modules=loop,squashfs,sd-mod,usb-storage quiet ${kernel_cmdline}"
+	printf '%s  %s' "$(get_initfs_cmdline)" "$(get_kernel_cmdline)"
 }
 
 bootloader_rpi_gen_config() {

@@ -3,10 +3,10 @@
 
 feature_xen() {
 	xen_enabled=${xen_enabled:=true}
-	syslinux_cfg_entry_type="xen"
-	kernel_cmdline="nomodeset"
 	xen_params=
-	add_apks "xen"
+	syslinux_cfg_entry_type="xen"
+	append_kernel_cmdline "nomodeset"
+	add_rootfs_apks "xen"
 	add_overlays "xen_dom0"
 }
 
@@ -24,16 +24,16 @@ section_xen() {
 syslinux_cfg_entry_xen() {
 	local _flavor="$1"
 	local _suffix="$2"
-
+	local _tab=$'\t'
 	[ "$xen_enabled" ] || return 0
 
-	cat <<EOF
+	cat <<-EOF
 
-LABEL $_flavor
-	MENU LABEL Xen/Linux $_flavor
-	KERNEL /boot/syslinux/mboot.c32
-	APPEND /boot/xen.gz ${xen_params} --- /boot/vmlinuz$_suffix $initfs_cmdline $kernel_cmdline --- /boot/initramfs-$_flavor
-EOF
+		LABEL $_flavor
+		${_tab}MENU LABEL Xen/Linux $_flavor
+		${_tab}KERNEL /boot/syslinux/mboot.c32
+		${_tab}APPEND /boot/xen.gz ${xen_params} --- /boot/vmlinuz$_suffix $(get_initfs_cmdline) $(get_kernel_cmdline) --- /boot/initramfs-$_flavor
+	EOF
 
 }
 			

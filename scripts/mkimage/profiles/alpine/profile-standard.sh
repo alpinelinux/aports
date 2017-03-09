@@ -9,7 +9,7 @@ profile_standard() {
 	feature_xtables_addons
 
 	# Configure kernel
-	kernel_cmdline="nomodeset"
+	append_kernel_cmdline "nomodeset"
 
 	# Configure output
 	imagetype_iso

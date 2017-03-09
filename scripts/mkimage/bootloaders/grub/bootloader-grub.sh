@@ -30,18 +30,19 @@ section_grub_cfg() {
 }
 
 grub_cfg_generate() {
-	local _f _kf
+	local _f _kf _tab
+	tab=$'\t' # Used in heredoc because leading tabs are trimmed with <<- operator.
 	echo "set timeout=2"
 	for _f in $kernel_flavors; do
 		_kf=""
 		[ "$_f" = vanilla ] || _kf=-$_f
 
 		cat <<- EOF
-		
-		menuentry "Linux $_f" {
-			linux	/boot/vmlinuz$_kf $initfs_cmdline $kernel_cmdline
-			initrd	/boot/initramfs-$_f
-		}
+
+			menuentry "Linux $_f" {
+			${_tab}linux	/boot/vmlinuz$_kf $(get_initfs_cmdline) $(get_kernel_cmdline)
+			${_tab}initrd	/boot/initramfs-$_f
+			}
 		EOF
 	done
 }

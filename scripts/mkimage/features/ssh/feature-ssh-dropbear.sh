@@ -1,17 +1,16 @@
 # ssh_provider: dropbear
 feature_ssh_dropbear() {
 	ssh_provider="dropbear"
-	add_rootfs_apks "dropbear dbclient"
+	add_apks "dropbear dbclient"
 }
 
 feature_ssh_autostart_dropbear() {
-	ssh_provider="dropbear"
 	feature_ssh_dropbear
+	add_rootfs_apks "dropbear dbclient"
 	add_overlays "ssh_autostart"
 }
 
 ovl_script_ssh_autostart_dropbear() {
-
 	ovl_runlevel_add boot dropbear
 	ovl_mkdir /etc/dropbear
 	ovl_chmod 0700 /etc/dropbear
@@ -25,9 +24,8 @@ ovl_script_ssh_autostart_dropbear() {
 }
 
 feature_ssh_generate_keys_dropbear() {
-	ssh_provider="dropbear"
-	add_host_apks "dropbear dropbear-convert"
 	feature_ssh_dropbear
+	add_host_apks "dropbear dropbear-convert"
 	add_overlays "ssh_generate_keys"
 }
 

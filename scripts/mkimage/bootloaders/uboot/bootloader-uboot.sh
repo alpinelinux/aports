@@ -3,7 +3,7 @@ bootloader_uboot() {
 		bootloader_uboot_enabled="false"
 	elif [ "$1" = "enabled" ] || [ "$bootloader_uboot_enabled" != "false" ] ; then
 		bootloader_uboot_enabled="true"
-		bootloader_syslinux_cfg "extlinux/extlinux.conf"
+		bootloader_extlinux_cfg "extlinux/extlinux.conf"
 	fi
 }
 

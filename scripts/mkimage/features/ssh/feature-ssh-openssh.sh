@@ -2,13 +2,13 @@
 # ssh_provider: openssh 
 feature_ssh_openssh() {
 	ssh_provider="openssh"
-	add_rootfs_apks "openssh"
+	add_apks "openssh"
 }
 
 
 feature_ssh_autostart_openssh() {
-	ssh_provider="openssh"
 	feature_ssh_openssh
+	add_rootfs_apks "openssh"
 	add_overlays "ssh_autostart"
 }
 
@@ -18,9 +18,8 @@ ovl_script_ssh_autostart_openssh() {
 
 
 feature_ssh_generate_keys_openssh() {
-	ssh_provider="openssh"
-	add_host_apks "openssh"
 	feature_ssh_openssh
+	add_host_apks "openssh-keygen"
 	add_overlays "ssh_generate_keys"
 }
 

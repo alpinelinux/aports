@@ -80,15 +80,15 @@ syslinux_cfg_generate() {
 syslinux_cfg_entry_standard() {
 	local _flavor="$1"
 	local _suffix="$2"
+	local _tab=$'\t'
+	cat <<-EOF
 
-	cat <<EOF
-
-LABEL $_flavor
-	MENU LABEL Linux $_flavor
-	KERNEL /boot/vmlinuz$_suffix
-	INITRD /boot/initramfs-$_flavor
-	APPEND $initfs_cmdline $kernel_cmdline
-EOF
+		LABEL $_flavor
+		${_tab}MENU LABEL Linux $_flavor
+		${_tab}KERNEL /boot/vmlinuz$_suffix
+		${_tab}INITRD /boot/initramfs-$_flavor
+		${_tab}APPEND $(get_initfs_cmdline) $(get_kernel_cmdline)
+	EOF
 
 }
 
