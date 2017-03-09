@@ -13,6 +13,7 @@ feature_zfs() {
 	if [ "$enable_rootfs_zfs" = "true" ] ; then
 		add_initfs_apks "zfs"
 		add_initfs_apks_flavored "spl zfs"
+		add_initfs_load_modules "spl zfs"
 		add_initfs_features "zfs"
 		add_rootfs_apks "udev zfs zfs-udev"
 		add_overlays "zfs"
