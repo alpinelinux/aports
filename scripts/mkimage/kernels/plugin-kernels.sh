@@ -1,5 +1,5 @@
 plugin_initfs() {
-i	# initfs_cmdline
+	# initfs_cmdline
 	# 
 	var_list_alias initfs_features
 	var_list_alias initfs_load_modules
