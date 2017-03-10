@@ -170,45 +170,28 @@ req_profiles=${req_profiles:-all}
 # Build image for each requested arch/profile (profiles skip if invalid combo).
 for ARCH in $req_arch; do
 	info_prog_set "$scriptname:$ARCH"
+	info_func_set "build arch"
 
-	APKROOT="$WORKDIR/apkroot-$ARCH"
-	APKREPOS="$APKROOT/etc/apk/repositories"
-	if [ ! -e "$APKROOT" ]; then
-		# create root for caching packages
-		mkdir -p "$APKROOT/etc/apk/cache"
-		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
-		_apk add --initdb
-
-		if [ -z "$REPODIR" ] && [ -z "$REPOFILE" ]; then
-			warning "no repository set"
-		fi
-		
-		touch "$APKREPOS"
-
-		for repo in $REPOFILE ; do
-			cat "$REPOFILE" | grep -E -v "^#" >> "$APKREPOS"
-		done
-
-		[ -z "$REPODIR"] || echo "$REPODIR" >> "$APKREPOS"
-
-		for repo in $EXTRAREPOS; do
-			echo "$repo" >> "$APKREPOS"
-		done
-	fi
-	_apk update
+	apk_repo_init "${WORKDIR}" "$ARCH"
 
 	if [ "$_yaml" = "yes" ]; then
-		_yaml_out=${OUTDIR:-.}/latest-releases.yaml
+		info_func_set "build yaml"
+		msg "Generating yaml release manifest..."
+		_yaml_out="${OUTDIR:-.}"/latest-releases.yaml
 		echo "---" > "$_yaml_out"
+		msg2 "... '$_yaml_out' generated."
 	fi
 	for PROFILE in $req_profiles; do
 		info_prog_set "$scriptname:$ARCH:$PROFILE"
-		msg "Beginning build for profile $PROFILE."
-		(build_profile) || exit 1
-		msg "Completed build for profile $PROFILE."
+		info_func_set "build profile"
+		msg "Beginning build for profile '$PROFILE'..."
+		(build_profile) || ( error "BUILD FAILED IN PROFILE '$PROFOLE' -- ABORTING!" ; exit 1 )
+		msg "...build for profile '$PROFILE' completed."
 	done
 done
 
-info_prog_set "$scriptdir"
+info_prog_set "$scriptname"
+info_func_set "DONE"
 
-echo "Images generated in $OUTDIR"
+msg "Images generated in '$OUTDIR'."
+

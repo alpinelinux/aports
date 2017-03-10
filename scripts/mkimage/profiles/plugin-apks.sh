@@ -13,6 +13,42 @@ _apk() {
 	$APK $_apkcmd${APK_CACHE_DIR:+ --cache-dir "$APK_CACHE_DIR"}${APKROOT:+ --root "$APKROOT"}${ARCH:+ --arch "$ARCH"} "$@"
 }
 
+apk_repo_init() {
+	local _work="$(realpath "$1")"
+	local _arch="$2"
+	info_func_set "apk-repo init"
+	APKROOT="$_work/apkroot-$_arch"
+	APKREPOS="$APKROOT/etc/apk/repositories"
+	msg "Initilizing apk repository for '$_arch' at"
+	msg2 "'$APKROOT'"
+	if [ ! -e "$APKROOT" ]; then
+		# create root for caching packages
+		# TODO: Add configuration for source location of host keys
+		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
+		_apk add --initdb
+
+		if [ -z "$REPODIR" ] && [ -z "$REPOFILE" ]; then
+			warning "no repository set"
+		fi
+
+		touch "$APKREPOS"
+
+		for repo in $REPOFILE ; do
+			cat "$REPOFILE" | grep -E -v "^#" >> "$APKREPOS"
+		done
+
+		[ -z "$REPODIR"] || echo "$REPODIR" >> "$APKREPOS"
+
+		for repo in $EXTRAREPOS; do
+			echo "$repo" >> "$APKREPOS"
+		done
+		msg "apk repository root for '$_arch' initilized."
+	else
+		msg "apk repository root for '$_arch' already initilized."
+	fi
+	_apk update
+}
+
 # Local apk repository support.
 section_apks() {
 	[ "disable_apk_repository" = "true" ] && return 0
