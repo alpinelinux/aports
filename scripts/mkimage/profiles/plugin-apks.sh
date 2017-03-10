@@ -1,9 +1,16 @@
 plugin_apks() {
+	APK="${APK:-/usr/bin/abuild-apk}"
 	var_list_alias apks
 	var_list_alias apks_flavored
 	var_list_alias host_apks
 	var_list_alias rootfs_apks
 	var_list_alias rootfs_apks_flavored
+}
+
+_apk() {
+	local _apkcmd="$1"
+	shift
+	$APK $_apkcmd${APK_CACHE_DIR:+ --cache-dir "$APK_CACHE_DIR"}${APKROOT:+ --root "$APKROOT"}${ARCH:+ --arch "$ARCH"} "$@"
 }
 
 # Local apk repository support.
@@ -14,7 +21,7 @@ section_apks() {
 	# Check for any apks that need to go in the local repository.
 	[ "${apks}${apks_flavored}${initfs_apks}${initfs_apks_flavored}${rootfs_apks}${rootfs_apks_flavored}" ] || return 0
 
-	build_section apks $ARCH $($APK fetch --root "$APKROOT" --simulate --recursive $apks | sort | checksum)
+	build_section apks $ARCH $(_apk fetch --simulate --recursive $apks | sort | checksum)
 }
 
 build_apks() {
@@ -32,12 +39,12 @@ build_apks() {
 
 	msg "Fetching required apks recursively..."
 	msg2 "$_repoapks"
-	$APK fetch --root "$APKROOT" --link --recursive --output "$_archdir" $_repoapks
+	_apk fetch --link --recursive --output "$_archdir" $_repoapks
 	if ! ls "$_archdir"/*.apk >& /dev/null; then
 		return 1
 	fi
 	msg "Creating APKINDEX..."
-	$APK index \
+	_apk index \
 		--description "$RELEASE" \
 		--rewrite-arch "$ARCH" \
 		--index "$_archdir"/APKINDEX.tar.gz \

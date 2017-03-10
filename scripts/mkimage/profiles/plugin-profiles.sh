@@ -23,7 +23,7 @@ build_profile() {
 	# Collect list of needed sections, and make sure they are built
 
 	for SECTION in $all_sections; do
-		section_$SECTION || return 1
+		section_$SECTION || ( warning "Section '$SECTION' returned failure!" && return 1 )
 	done
 	[ "$_fail" = "no" ] || return 1
 	info_func_set "build profile_$PROFILE"
@@ -36,7 +36,7 @@ build_profile() {
 	# Construct final image
 	info_func_set "build profile_${PROFILE}:image"
 	local _imgid=$(echo -n $_my_sections | sort -u | checksum)
-	DESTDIR=$WORKDIR/image-$_imgid-$ARCH-$PROFILE
+	DESTDIR="$WORKDIR/image-$_imgid-$ARCH-$PROFILE"
 	if [ "$_dirty" = "yes" -o ! -e "$DESTDIR" ]; then
 		msg "Merging sections '$_my_sections' into '$DESTDIR':"
 		if [ -z "$_simulate" ]; then
@@ -44,7 +44,7 @@ build_profile() {
 			rm -rf "$DESTDIR"
 			mkdir -p "$DESTDIR"
 			for _dir in $_my_dirs; do
-				for _fn in $WORKDIR/$_dir/*; do
+				for _fn in $WORKDIR/${_dir##/}/*; do
 					[ ! -e "$_fn" ] || msg2 " * $_fn" && cp -Lrs $_fn $DESTDIR/
 				done
 			done
@@ -85,7 +85,7 @@ plugin_sections() {
 build_section() {
 	local section="$1"
 	local args="$@"
-	local _dir="${args//[^a-zA-Z0-9]/_}"
+	local _dir="${args//[^a-zA-Z0-9]/_}" && _dir="${_dir#/}"
 	shift
 	local args="$@"
 
@@ -93,6 +93,7 @@ build_section() {
 
 	if [ -z "$_dir" ]; then
 		_fail="yes"
+		warning "Building '$section' failed: '$_dir' empty!"
 		return 1
 	fi
 
@@ -107,7 +108,7 @@ build_section() {
 			if build_${section} "$@"; then
 				mv "$DESTDIR" "$WORKDIR/${_dir}"
 				_dirty="yes"
-				msg "Built '$section' -> '$_dir'"
+				msg "Built '$section' -> '${_dir}'"
 			else
 				_fail="yes"
 				warning "Building '$section' failed!"
@@ -118,7 +119,7 @@ build_section() {
 	fi
 
 	# Add this directory and section to built list.
-	var_list_add _my_dirs "$_dir"
+	var_list_add _my_dirs "${_dir}"
 	var_list_add _my_sections "$section"
 
 	unset DESTDIR

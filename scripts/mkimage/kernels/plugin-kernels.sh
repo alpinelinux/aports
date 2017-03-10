@@ -12,10 +12,11 @@ plugin_initfs() {
 	return 0
 }
 
+
 get_initfs_cmdline() {
 	# Intentionally not quoted to clean up list!
-	_mod=${initfs_load_modules}
-	printf '%s' "${_mod:+modules=${_mod// /,}}${initfs_cmdline:+ $initfs_cmdline}"
+	_mod="$(get_initfs_load_modules_with_sep ',')"
+	printf '%s' "${_mod:+modules=$_mod}${initfs_cmdline:+ $initfs_cmdline}"
 }
 
 append_initfs_cmdline() {
@@ -71,7 +72,7 @@ section_kernels() {
 		var_list_add _pkgs "$initfs_apks $initfs_only_apks"
 		var_list_add _pkgs "$(suffix_kernel_flavor $_flavor $initfs_apks_flavored $initfs_only_apks_flavored)"
 
-		local id=$( (echo "$initfs_features::$_hostkeys" ; $APK fetch --root "$APKROOT" --simulate alpine-base $_pkgs | sort -u ) | checksum)
+		local id=$( (echo "$initfs_features::$_hostkeys" ; _apk fetch --simulate alpine-base $_pkgs | sort -u ) | checksum)
 		build_section kernel $ARCH $_flavor $id $_pkgs
 	done
 }
@@ -80,14 +81,16 @@ build_kernel() {
 	local _flavor="$2"
 	shift 3
 	local _pkgs="$@"
-	update-kernel \
+	( update-kernel \
 		$_hostkeys \
 		${_abuild_pubkey:+--apk-pubkey $_abuild_pubkey} \
 		--media \
 		--flavor "$_flavor" \
 		--arch "$ARCH" \
 		--package "$_pkgs" \
-		--feature "$initfs_features" \
+		--feature "$(get_initfs_features_with_sep ',')" \
 		--repositories-file "$APKROOT/etc/apk/repositories" \
 		"$DESTDIR"
+	) || warning "update-kernel failed!"
+
 }

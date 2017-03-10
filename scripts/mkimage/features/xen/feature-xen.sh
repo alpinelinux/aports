@@ -12,13 +12,13 @@ feature_xen() {
 
 
 build_xen() {
-	$APK fetch --root "$APKROOT" --stdout xen-hypervisor | tar -C "$DESTDIR" -xz boot
+	_apk fetch --stdout xen-hypervisor | tar -C "$DESTDIR" -xz boot
 }
 
 
 section_xen() {
 	[ "${xen_enabled}" = "true" ] || return 0
-	build_section xen $ARCH $($APK fetch --root "$APKROOT" --simulate xen-hypervisor | checksum)
+	build_section xen $ARCH $(_apk fetch --simulate xen-hypervisor | checksum)
 }
 
 syslinux_cfg_entry_xen() {

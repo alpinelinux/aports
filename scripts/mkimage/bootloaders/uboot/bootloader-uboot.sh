@@ -9,9 +9,12 @@ bootloader_uboot() {
 
 build_bootloader_uboot() {
 	# FIXME: Fix apk-tools to extract packages directly
-	local pkg pkgs="$($APK fetch  --simulate --root /tmp/timo/apkroot-armhf/ --recursive u-boot-all | sed -ne "s/^Downloading \([^0-9.]*\)\-.*$/\1/p")"
-	for pkg in $pkgs; do
-		[ "$pkg" == "u-boot-all" ] || $APK fetch --root "$APKROOT" --stdout $pkg | tar -C "$DESTDIR" -xz usr
+	local ub_apk
+	local _tmpdir="$WORKDIR"/u-boot-apks
+	mkdir -p "$_tmpdir"
+	_apk fetch  --recursive u-boot-all --output "$_tmpdir"
+	for ub_apk in "$_tmpdir"/*.apk; do
+		(tar -tzf "$ub_apk" | grep -q "^usr/" ) && tar -C "$DESTDIR" -xf "$ub_apk" usr
 	done
 	mkdir -p "$DESTDIR"/u-boot
 	mv "$DESTDIR"/usr/sbin/update-u-boot "$DESTDIR"/usr/share/u-boot/* "$DESTDIR"/u-boot
@@ -20,5 +23,5 @@ build_bootloader_uboot() {
 
 section_bootloader_uboot() {
 	[ "$bootloader_uboot_enabled" = "true" ] || return 0
-	build_section bootloader_uboot $ARCH $($APK fetch --root "$APKROOT" --simulate --recursive u-boot-all | sort | checksum)
+	build_section bootloader_uboot $ARCH $(_apk fetch --simulate --recursive u-boot-all | sort | checksum)
 }

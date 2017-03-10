@@ -179,6 +179,18 @@ list_transform() {
 
 }
 
+# Transform each item in list haystack with 'sed -E' using commands in needles.
+list_with_sep() {
+	local needles i
+	needles="$1"
+	shift
+
+	for i in $@ ; do
+		[ $# -gt 1 ] && shift && printf '%s%s' $i "$needles" || printf '%s' $i
+	done | sort -u | tr '\n' ' '
+
+}
+
 
 ##
 ## Functions for handling lists contained in variables.
@@ -330,6 +342,11 @@ var_list_get_transform() {
 	list_transform "$2" $(getvar "$_list")
 }
 
+var_list_get_with_sep() {
+	local _list=$1
+	list_with_sep "$2" $(getvar "$_list")
+}
+
 
 var_list_set() {
 	local _list=$1
@@ -339,6 +356,7 @@ var_list_set() {
 	local _new="$(list_add "$_items")"
 
 	setvar $_list "${_new%% }"
+	return 0
 }
 
 var_list_set_if_empty() {
@@ -349,6 +367,7 @@ var_list_set_if_empty() {
 	local _new="$(list_add "$_items")"
 
 	var_list_is_empty $_list && setvar $_list "${_new%% }"
+	return 0
 }
 
 var_list_clear() {
@@ -388,6 +407,7 @@ var_list_alias() {
 	alias "get_${1}_add_prefix"="var_list_get_add_prefix $1"
 	alias "get_${1}_add_suffix"="var_list_get_add_suffix $1"
 	alias "get_${1}_transform"="var_list_get_transform $1"
+	alias "get_${1}_with_sep"="var_list_get_with_sep $1"
 	alias "set_${1}"="var_list_set $1"
 	alias "set_${1}_if_empty"="var_list_set_if_empty $1"
 	alias "clear_${1}"="var_list_clear $1"

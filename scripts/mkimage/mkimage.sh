@@ -85,6 +85,8 @@ _hostkeys="${_hostkeys:-}"
 _simulate="${_simulate:-}"
 _checksum="${_checksum:-}"
 
+default_arch="$(_apk --print-arch)"
+
 # parse parameters
 while [ $# -gt 0 ]; do
 	opt="$1"
@@ -109,13 +111,10 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-# Configuration of apk, use cache directory if specified
-APK="abuild-apk ${APK_CACHE_DIR:+--cache-dir $APK_CACHE_DIR}"
 
 # Global variable declarations
 all_checksums="sha256 sha512"
 build_date="$(date +%Y%m%d)"
-default_arch="$($APK --print-arch)"
 
 # Location of yaml generator
 mkimage_yaml="$(dirname $0)"/release/mkimage-yaml.sh
@@ -135,9 +134,9 @@ mkdir -p "$OUTDIR"
 if [ -z "$WORKDIR" ]; then
 	WORKDIR="/tmp/$(mktemp -d -t mkimage.XXXXXX)"
 	trap 'rm -rf $WORKDIR' INT
-	mkdir -p "$WORKDIR"
 fi
-
+WORKDIR="${WORKDIR%%/}"
+mkdir -p "$WORKDIR"
 
 # Release configuration
 RELEASE="${RELEASE:-${build_date}}"
@@ -178,7 +177,7 @@ for ARCH in $req_arch; do
 		# create root for caching packages
 		mkdir -p "$APKROOT/etc/apk/cache"
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
-		$APK --arch "$ARCH" --root "$APKROOT" add --initdb
+		_apk add --initdb
 
 		if [ -z "$REPODIR" ] && [ -z "$REPOFILE" ]; then
 			warning "no repository set"
@@ -196,7 +195,7 @@ for ARCH in $req_arch; do
 			echo "$repo" >> "$APKREPOS"
 		done
 	fi
-	$APK update --root "$APKROOT"
+	_apk update
 
 	if [ "$_yaml" = "yes" ]; then
 		_yaml_out=${OUTDIR:-.}/latest-releases.yaml
