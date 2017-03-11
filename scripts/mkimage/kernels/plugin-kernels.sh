@@ -57,16 +57,16 @@ build_kernel() {
 	local _flavor="$2"
 	shift 3
 	local _pkgs="$@"
-	( update-kernel \
+	update-kernel \
 		$_hostkeys \
 		${_abuild_pubkey:+--apk-pubkey $_abuild_pubkey} \
 		--media \
 		--flavor "$_flavor" \
 		--arch "$ARCH" \
 		--package "$_pkgs" \
-		--feature "$(get_initfs_features_with_sep ',')" \
+		--feature "$(get_initfs_features)" \
 		--repositories-file "$APKROOT/etc/apk/repositories" \
-		"$DESTDIR"
-	) || warning "update-kernel failed!"
+		"$DESTDIR" \
+		|| warning "update-kernel failed!"
 
 }
