@@ -53,9 +53,10 @@ bootloader_isolinux_cfg() {
 
 # syslinux.cfg builder -- enabled if any of syslinux_cfg, extlinux_cfg, or isolinux_cfg is specified.
 section_syslinux_cfg() {
-	[ "$syslinux_cfg" ] && build_section syslinux_cfg $syslinux_cfg $(syslinux_cfg_generate | checksum)
-	[ "$extlinux_cfg" ] && build_section syslinux_cfg $extlinux_cfg $(syslinux_cfg_generate | checksum)
-	[ "$isolinux_cfg" ] && build_section syslinux_cfg $isolinux_cfg $(syslinux_cfg_generate | checksum)
+	[ -z "$syslinux_cfg" ] || build_section syslinux_cfg $syslinux_cfg $(syslinux_cfg_generate | checksum) || return 1
+	[ -z "$extlinux_cfg" ] || build_section syslinux_cfg $extlinux_cfg $(syslinux_cfg_generate | checksum) || return 1
+	[ -z "$isolinux_cfg" ] || build_section syslinux_cfg $isolinux_cfg $(syslinux_cfg_generate | checksum) || return 1
+	return 0
 }
 
 # Generate syslinux.cfg including menu entries for each kernel flavor.
