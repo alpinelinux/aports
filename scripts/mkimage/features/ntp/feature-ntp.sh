@@ -9,7 +9,7 @@ feature_ntp() {
 		case "$_opt" in
 			provider )
 				case "$_val" in
-					chrony | openntpd | sntpc )
+					busybox |chrony | openntpd | sntpc )
 						ntp_provider="$_val"
 						;;
 					* )
@@ -20,8 +20,12 @@ feature_ntp() {
 		esac
 	done
 
-	ntp_provider="${ntp_provider:-chrony}"
+	ntp_provider="${ntp_provider:-busybox}"
 	feature_ntp_$ntp_provider
+}
+
+feature_ntp_busybox() {
+	return 0 # BusyBox built-in ntpd
 }
 
 feature_ntp_chrony() {
