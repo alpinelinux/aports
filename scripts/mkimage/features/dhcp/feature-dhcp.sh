@@ -9,7 +9,7 @@ feature_dhcp() {
 		case "$_opt" in
 			provider | client_provider | server_provider )
 				case "$_val" in
-					dhcpcd | isc | udhcp ) setval dhcp_${_opt## } $_val ;;
+					dhcpcd | isc | busybox ) setval dhcp_${_opt## } $_val ;;
 					* ) warning "unrecognized dhcp provider '$_val'" ;;
 				esac ;;
 			client )
