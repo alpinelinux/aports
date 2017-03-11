@@ -23,7 +23,8 @@ build_profile() {
 	# Collect list of needed sections, and make sure they are built
 
 	for SECTION in $all_sections; do
-		section_$SECTION || ( warning "Section '$SECTION' returned failure!" && return 1 )
+		info_func_set "build $SECTION"
+			section_$SECTION || ( warning "Section '$SECTION' returned failure!" && return 1 ) || return 1
 	done
 	[ "$_fail" = "no" ] || return 1
 	info_func_set "build profile_$PROFILE"
