@@ -34,7 +34,7 @@ msg() {
 }
 
 if [ -z "$TARGET_ARCH" ]; then
-	local program=$(basename $0)
+	program=$(basename $0)
 	cat <<EOF
 usage: $program TARGET_ARCH
 
