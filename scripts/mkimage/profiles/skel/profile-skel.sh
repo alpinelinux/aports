@@ -1,0 +1,28 @@
+# Skeleton profile - Absolute minimum required root filesystem for apk to function.
+#   This will only include bootable content (kernel, initramfs, bootloader, etc.)
+#   if $profile_is_bootable is non-empty and not equal to 'false'.
+
+profile_skel() {
+	add_rootfs_apks "alpine-baselayout alpine-keys apk-tools busybox libc-utils"
+	hostname="${hostname:-alpine}"
+	[ "$profile_is_bootable" ] && [ "$profile_is_bootable" != "false" ] && _profile_skel_make_bootable
+}
+
+# Bootable skeleton profile - Load skeleton profile with boot content enabled.
+#   This profile will include the absolute minimum boot-time content required
+#   to bring up a minimal bootable environment, but no drivers or other support.
+
+profile_skel_bootable() {
+	profile_is_bootable="true"
+	profile_skel
+}
+
+# Make bootable profile - Minimum bootable content included by bootable skel profile when enabled.
+_profile_skel_make_bootable() {
+	set_kernel_flavors_if_empty "vanilla"
+	add_initfs_load_modules "loop squashfs"
+	add_initfs_features "base squashfs"
+	add_initfs_apks "alpine-baselayout alpine-keys apk-tools busybox busybox-initscripts libc-utils mkinitfs"
+	add_rootfs_apks "busybox-initscripts busybox-suid"
+}
+
