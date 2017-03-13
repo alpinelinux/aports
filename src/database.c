@@ -1581,8 +1581,13 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			if (errno == ENOENT) mkdir(db->root_proc_dir, 0555);
 			stfs.f_type = 0;
 		}
-		if (stfs.f_type != PROC_SUPER_MAGIC)
+		if (stfs.f_type != PROC_SUPER_MAGIC) {
 			mount("proc", db->root_proc_dir, "proc", 0, 0);
+		} else {
+			/* was already mounted. prevent umount on close */
+			free(db->root_proc_dir);
+			db->root_proc_dir = NULL;
+		}
 	}
 
 	blob = APK_BLOB_STR("+etc\n" "@etc/init.d\n" "!etc/apk\n");
