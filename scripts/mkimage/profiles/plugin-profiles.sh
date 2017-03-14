@@ -45,7 +45,10 @@ build_profile() {
 			rm -rf "$DESTDIR"
 			mkdir -p "$DESTDIR"
 			for _dir in $_my_dirs; do
-				for _fn in $WORKDIR/${_dir##/}/*; do
+				local d="$WORKDIR/${_dir##/}"
+				[ -d "$d" ] && [ "$(echo "$d"/*)" != "$d/*" ] || continue
+				for _fn in "$d"/*; do
+					_fn="$(realpath $_fn)"
 					[ ! -e "$_fn" ] || msg2 " * $_fn" && cp -Lrs $_fn $DESTDIR/
 				done
 			done
@@ -85,9 +88,9 @@ plugin_sections() {
 
 build_section() {
 	local section="$1"
-	local args="$@"
-	local _dir="${args//[^a-zA-Z0-9]/_}" && _dir="${_dir#/}"
 	shift
+	local args="$@"
+	local _dir="$(printf '%s-%s' "$section-$(echo ${args//[^a-zA-Z0-9]/_} | cut -c1-10)" "$(echo $args | checksum)" )" && _dir="${_dir#/}"
 	local args="$@"
 
 	info_func_set "build section_$section"

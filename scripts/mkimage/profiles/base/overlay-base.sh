@@ -7,7 +7,7 @@ ovl_script_base() {
 	# TODO: Split into appropriate common overlays.
 	ovl_runlevel_add sysinit devfs dmesg mdev hwdrivers modloop
 	ovl_runlevel_add boot hwclock modules sysctl hostname bootmisc syslog
-	ovl_runlevel_add mount-ro killprocs savecache
+	ovl_runlevel_add shutdown mount-ro killprocs savecache
 
 	ovl_create_file root:root 0644 /etc/hostname <<-EOF
 	$HOSTNAME

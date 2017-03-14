@@ -11,7 +11,7 @@ profile_base() {
 			profile_base_type="default"
 		fi
 	else profile_base_type="default" ; fi
-	
+
 	_profile_base_make_$profile_base_type
 
 	# Default to include grsec flavored kernel if none previously set.
@@ -38,7 +38,7 @@ profile_base() {
 # Base types --
 # TODO: These probably need to be moved to a hardware config and out of the main profiles.
 
-_profile_base_make_default(){ 
+_profile_base_make_default(){
 	add_initfs_load_modules "sd_mod usb-storage"
 	add_initfs_features "ata base cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
 	add_apks "e2fsprogs network-extras"
@@ -82,9 +82,9 @@ _profile_base_make_virtio() {
 	set_kernel_flavors_if_empty "virtgrsec"
 
 	add_initfs_load_modules "scsi_mod sr_mod sd_mod cdrom virtio_scsi virtio_net"
-	add_initfs_features "scsi-base cdrom virtio-guest-base ext2 ext3 ext4"
+	add_initfs_features "scsi cdrom virtio ext2 ext3 ext4"
+	#add_initfs_features "scsi-base cdrom virtio-guest-base ext2 ext3 ext4"
 	#add_initfs_apks_flavored "linux"
 	add_rootfs_apks "bridge vlan"
 }
-
 

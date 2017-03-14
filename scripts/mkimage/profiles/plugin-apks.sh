@@ -10,22 +10,52 @@ plugin_apks() {
 _apk() {
 	local _apkcmd="$1"
 	shift
+	if [ "_apkcmd" = "fetch" ] ; then
+		_apkcmd="fetch -L"
+		# Pre-fetch packages so they get cached when doing one-off fetchs.
+		#if ( printf_n "$@" | grep -q -e '^-o$' -e '^--output$' -e '^-s$' -e '^--stdout$' ) ; then
+		#	_apk $(printf_n "$@" | sed -e '/^-o$/,+1d' -e '/^--output$/,+1d' -e '/^-s$/d' -e '/^--stdout$/d' | tr '\n' ' ')
+		#fi
+	fi
+
 	$APK $_apkcmd${APK_CACHE_DIR:+ --cache-dir "$APK_CACHE_DIR"}${APKROOT:+ --root "$APKROOT"}${ARCH:+ --arch "$ARCH"} "$@"
+}
+
+apk_pkg_full() {
+	local res=$(_apk search -x "$1")
+	printf '%s' $res
+}
+
+apk_check_pkgs() {
+	local res=$(_apk search -x $1)
+	if [ "$res" ]; then
+		echo $*
+	fi
+}
+
+apk_extract_files() {
+	local myapk="$1"
+	local mydest="$2"
+	shift 2
+
+	_apk fetch "$myapk" --stdout | tar -xz -C "$mydest" "$@"
 }
 
 apk_repo_init() {
 	local _work="$(realpath "$1")"
 	local _arch="$2"
 	info_func_set "apk-repo init"
-	APKROOT="$_work/apkroot-$_arch"
+	APKROOT="$_work/.apkroot-$_arch"
 	APKREPOS="$APKROOT/etc/apk/repositories"
 	msg "Initilizing apk repository for '$_arch' at"
 	msg2 "'$APKROOT'"
 	if [ ! -e "$APKROOT" ]; then
+		mkdir -p "$APKROOT/etc/apk"
 		# create root for caching packages
 		# TODO: Add configuration for source location of host keys
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
 		_apk add --initdb
+		[ "$APK_CACHE_DIR" ] && ln -sfT "$APK_CACHE_DIR" "$APKROOT/etc/apk/cache"
 
 		if [ -z "$REPODIR" ] && [ -z "$REPOFILE" ]; then
 			warning "no repository set"
@@ -88,7 +118,7 @@ build_apks() {
 		"$_archdir"/*.apk
 
 	msg "Signing APKINDEX..."
-	abuild-sign "$_archdir"/APKINDEX.tar.gz
+	abuild-sign -q "$_archdir"/APKINDEX.tar.gz
 	touch "$_apksdir/.boot_repository"
 	msg "APK boot repository built at '$_archdir'."
 }

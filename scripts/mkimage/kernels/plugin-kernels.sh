@@ -25,7 +25,6 @@ append_initfs_cmdline() {
 
 
 
-
 plugin_kernels() {
 	# kernel_cmdline
 	return 0
@@ -40,33 +39,7 @@ append_kernel_cmdline() {
 }
 
 section_kernels() {
-	local _flavor _pkgs
-	for _flavor in $(get_kernel_flavors); do
-		#FIXME Should these really be hard-coded?
-		var_list_set _pkgs "$(suffix_kernel_flavor "linux") linux-firmware"
-
-		var_list_add _pkgs "$initfs_apks $initfs_only_apks"
-		var_list_add _pkgs "$(suffix_kernel_flavor $_flavor $initfs_apks_flavored $initfs_only_apks_flavored)"
-
-		local id=$( (echo "$initfs_features::$_hostkeys" ; _apk fetch --simulate alpine-base $_pkgs | sort -u ) | checksum)
-		build_section kernel $ARCH $_flavor $id $_pkgs
-	done
+	$(kernel_flavors_is_empty) && return 0
+	build_all_kernels
 }
 
-build_kernel() {
-	local _flavor="$2"
-	shift 3
-	local _pkgs="$@"
-	update-kernel \
-		$_hostkeys \
-		${_abuild_pubkey:+--apk-pubkey $_abuild_pubkey} \
-		--media \
-		--flavor "$_flavor" \
-		--arch "$ARCH" \
-		--package "$_pkgs" \
-		--feature "$(get_initfs_features)" \
-		--repositories-file "$APKROOT/etc/apk/repositories" \
-		"$DESTDIR" \
-		|| warning "update-kernel failed!"
-
-}
