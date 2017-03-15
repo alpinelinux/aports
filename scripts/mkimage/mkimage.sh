@@ -126,9 +126,8 @@ OUTDIR="${OUTDIR:-$PWD}"
 [ "$_show_usage" = "yes" ] && usage && exit 1
 
 # Save ourselves from making a mess in our script's root directory.
-mkdir -p "$OUTDIR"
-[ "$(realpath "$OUTDIR")" = "$scriptrealdir" ] && OUTDIR="${OUTDIR}/out"
-mkdir -p "$OUTDIR"
+mkdir -p "$OUTDIR" && OUTDIR="$(realpath "$OUTDIR")"
+[ "$OUTDIR" = "$scriptrealdir" ] && OUTDIR="${OUTDIR}/out" && mkdir -p "$OUTDIR"
 
 # Setup default workdir in /tmp using mktemp
 if [ -z "$WORKDIR" ]; then
@@ -136,7 +135,7 @@ if [ -z "$WORKDIR" ]; then
 	trap 'rm -rf $WORKDIR' INT
 fi
 WORKDIR="${WORKDIR%%/}"
-mkdir -p "$WORKDIR"
+mkdir -p "$WORKDIR" && WORKDIR="$(realpath "$WORKDIR")"
 
 # Release configuration
 RELEASE="${RELEASE:-${build_date}}"

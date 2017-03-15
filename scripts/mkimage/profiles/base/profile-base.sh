@@ -39,7 +39,7 @@ profile_base() {
 # TODO: These probably need to be moved to a hardware config and out of the main profiles.
 
 _profile_base_make_default(){
-	add_initfs_load_modules "sd_mod usb-storage"
+	add_initfs_load_modules "cdrom sr_mod sd_mod virtio_scsi usb-storage"
 	add_initfs_features "ata base cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
 	add_apks "e2fsprogs network-extras"
 }

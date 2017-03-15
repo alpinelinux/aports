@@ -50,7 +50,7 @@ build_profile() {
 				local d="$WORKDIR/${_dir##/}"
 				[ -e "$d" ] && [ "$(cd $d && echo *)" != "*" ] || continue
 				d="$(realpath $d)"
-				( cd "$d" && find -L -maxdepth 1 -exec printf '* %s\n' "$_dir" \; -exec cp -Lrs \{\} "$DESTDIR" \; )
+				( cd "$d" && find -maxdepth 1 -exec printf '* %s\n' "$_dir" \; -exec cp -Lr \{\} "$DESTDIR" \; )
 			done
 			echo "${image_name}-${RELEASE} ${build_date}" > "$DESTDIR"/.alpine-release
 		fi
@@ -60,6 +60,7 @@ build_profile() {
 		msg "Creating '$output_filename':"
 		# Create image
 		[ -n "$output_format" ] || output_format="${image_ext//[:\.]/}"
+		rm -f "$output_file"
 		create_image_${output_format} || { _fail="yes"; false; }
 
 		if [ "$_checksum" = "yes" ]; then
