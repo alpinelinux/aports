@@ -27,7 +27,7 @@ feature_postgresql() {
 
 	[ "$_autostart" = "true" ] && feature_postgresql_autostart
 	[ "$_autoload" = "true" ] && feature_postgresql_autoload
-
+	add_apks "postgresql"
 	add_overlays "postgresql"
 
 	return 0
@@ -35,6 +35,7 @@ feature_postgresql() {
 
 feature_postgresql_autostart() {
 	postgresql_autostart="true"
+	add_rootfs_apks "postgresql"
 	return 0
 }
 
@@ -76,7 +77,7 @@ ovl_script_postgresql_dump_copy() {
 	elif [ "${postgresql_dump_dest#HOSTROOT/}" != "$postgresql_dump_dest" ] ; then
 		postgresql_autoload_dest="${postgresql_dump_dest#HOSTROOT}"
 	else
-		postgresql_autoload_dest="$(ovl_get_root)/${postgresql_dump_dest#IMAGEROOT/}"
+		postgresql_autoload_dest="$(ovl_get_root)/${postgresql_dump_dest}"
 	fi
 
 	ovl_fkrt_enable
