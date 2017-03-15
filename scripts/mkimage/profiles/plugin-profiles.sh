@@ -36,9 +36,11 @@ build_profile() {
 
 	# Construct final image
 	info_func_set "build profile_${PROFILE}:image"
-	local _imgid=$(echo -n $_my_sections | sort -u | checksum)
+	local _imgid=$(printf_n $image_name $RELEASE $build_date $_my_sections $_my_dirs | sort -u | checksum)
 	DESTDIR="$WORKDIR/image-$_imgid-$ARCH-$PROFILE"
-	if [ "$_dirty" = "yes" -o ! -e "$DESTDIR" ]; then
+	[ ! -e "$DESTDIR" ] && _dirty="yes"
+
+	if [ "$_dirty" = "yes" ]; then
 		msg "Merging sections '$_my_sections' into '$DESTDIR':"
 		if [ -z "$_simulate" ]; then
 			# Merge sections
