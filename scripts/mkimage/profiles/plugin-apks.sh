@@ -38,7 +38,7 @@ apk_extract_files() {
 	local mydest="$2"
 	shift 2
 
-	_apk fetch "$myapk" --stdout | tar -xz -C "$mydest" "$@"
+	_apk fetch --quiet "$myapk" --stdout | tar -xz -C "$mydest" "$@"
 }
 
 apk_repo_init() {

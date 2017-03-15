@@ -14,7 +14,8 @@ build_kernel() {
 	local _flavor="$1"
 
 	fkrt_enable kernel
-	(	local _pkgs
+
+		local _pkgs
 
 		#FIXME Should these really be hard-coded?
 		local _kpkg=$(suffix_kernel_flavor $_flavor "linux") && _kpkg=${_kpkg// /}
@@ -68,7 +69,7 @@ build_kernel() {
 
 		# Install the final output in $DESTDIR here.
 		build_section kernel_install "$KERNEL_STAGING" $ARCH $id_install "kernel modloop mkinitfs devicetree"
-	)
+
 	fkrt_disable
 }
 

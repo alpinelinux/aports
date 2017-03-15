@@ -48,11 +48,9 @@ build_profile() {
 			mkdir -p "$DESTDIR"
 			for _dir in $_my_dirs; do
 				local d="$WORKDIR/${_dir##/}"
-				[ -d "$d" ] && [ "$(echo "$d"/*)" != "$d/*" ] || continue
-				for _fn in "$d"/*; do
-					_fn="$(realpath $_fn)"
-					[ ! -e "$_fn" ] || msg2 " * $_fn" && cp -Lrs $_fn $DESTDIR/
-				done
+				[ -e "$d" ] && [ "$(cd $d && echo *)" != "*" ] || continue
+				d="$(realpath $d)"
+				( cd "$d" && find -L -maxdepth 1 -exec printf '* %s\n' "$_dir" \; -exec cp -Lrs \{\} "$DESTDIR" \; )
 			done
 			echo "${image_name}-${RELEASE} ${build_date}" > "$DESTDIR"/.alpine-release
 		fi
@@ -92,7 +90,7 @@ build_section() {
 	local section="$1"
 	shift
 	local args="$@"
-	local _dir="$(printf '%s-%s' "$section-$(echo ${args//[^a-zA-Z0-9]/_} | cut -c1-10)" "$(echo $args | checksum)" )" && _dir="${_dir#/}"
+	local _dir="$(printf '%s-%s' "$section-$( echo ${args//[^a-zA-Z0-9]/} | cut -c1-10)" "$(echo $args | checksum)" )" && _dir="${_dir#/}"
 	local args="$@"
 
 	info_func_set "build section_$section"

@@ -1,9 +1,9 @@
 profile_standard() {
+	# Set our target archs
+	set_archs "x86 x86_64"
+
 	# Load parent profile(s)
 	profile_base
-
-	# Set architecture and kernel flavor
-	set_archs "x86 x86_64"
 
 	# Load features
 	feature_xtables_addons
