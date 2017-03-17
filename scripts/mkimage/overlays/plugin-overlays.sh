@@ -15,7 +15,7 @@ build_overlays() {
 	local my_overlays="$overlays"
 	local run_overlays=""
 	ovl_hostname="$1"
-	ovl_root_dir="$DESTDIR/.ovlroot"
+	ovl_root_dir="${DESTDIR%.work}-ovlroot"
 	mkdir -p "$ovl_root_dir"
 
 	fkrt_faked_start "$ovl_fkrt_inst"
