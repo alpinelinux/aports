@@ -311,7 +311,7 @@ build_kernel_stage_devicetree () {
 	fi
 
 	rm -rf "$DESTDIR"
-	mkdir -p "$base /devicetree/.built"
+	mkdir -p "$base/devicetree/.built"
 	ln -sfT "$base/devicetree/.built" "$DESTDIR"
 	#mkdir -p "$DESTDIR"
 }
