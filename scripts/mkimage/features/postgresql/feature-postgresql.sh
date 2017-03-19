@@ -32,14 +32,11 @@ feature_postgresql() {
 	[ "$_autoload" = "true" ] && feature_postgresql_autoload
 	add_apks "postgresql"
 	add_overlays "postgresql"
-
-	return 0
 }
 
 feature_postgresql_autostart() {
 	postgresql_autostart="true"
 	add_rootfs_apks "postgresql"
-	return 0
 }
 
 feature_postgresql_autoload() {
@@ -51,7 +48,6 @@ feature_postgresql_autoload() {
 	postgresql_autoload="true"
 	postgresql_conf_pgdump="${postgresql_conf_pgdump:-${postgresql_dump_dest:=/var/lib/postgresql/backup/databases.pgdump}}"
 	feature_postgresql_autostart
-	return 0
 }
 
 overlay_postgresql() {
@@ -63,7 +59,6 @@ overlay_postgresql() {
 	[ "$postgresql_conf_pgport" ] && var_list_add _call "ovl_script_postgresql_conf"
 	[ "$postgresql_conf_pgdata" ] && var_list_add _call "ovl_script_postgresql_conf"
 	[ "$postgresql_conf_pgdump" ] && var_list_add _call "ovl_script_postgresql_conf"
-	return 0
 }
 
 # Copy the specified dump to the destination.
