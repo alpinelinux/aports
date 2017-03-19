@@ -25,9 +25,10 @@ dirname_parent() { [ "$1" = "/" ] && return 0 || printf '%s' "${1%/*?}" || retur
 
 ## File Exists/Read/Write/Execute full tests:
 
-# Check that the argument exists, and is a file.
-# Usage: file_exists <file>
+# Check that the argument [not] exists, and is [not] a file.
+# Usage: file_(exists|not_exists) <file>
 file_exists() { [ -e "$1" ] && [ -f "$1" ] && return 0 || return 1 ; }
+file_not_exists() { [ -e "$1" ] && [ -f "$1" ] && return 1 || return 0 ; }
 
 
 # Check that the argument exists, is a file, and is readable [and writeable | and executable].
@@ -59,6 +60,11 @@ file_size_human_readable() { file_is_readable "$1" && du -sLh "$1" | cut -f1 || 
 
 
 ## Directory Read(+Execute)/Write full tests:
+
+# Check that the argument [not] exists, and is [not] a directory.
+# Usage: dir_(exists|not_exists) <directory>
+dir_exists() { [ -e "$1" ] && [ -d "$1" ] && return 0 || return 1 ; }
+dir_not_exists() { [ -e "$1" ] && [ -d "$1" ] && return 1 || return 0 ; }
 
 # Check that the argument exists, is a directory, is readable and is searchable (executable) [ and writeable ].
 # Usage: 'dir_is_(readable|writeable) <directory>

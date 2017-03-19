@@ -16,8 +16,10 @@ build_overlays() {
 	local run_overlays=""
 	ovl_hostname="$1"
 	ovl_root_dir="${DESTDIR%.work}-ovlroot"
-	mkdir -p "$ovl_root_dir"
+	mkdir_is_writable "$ovl_root_dir" \
+		|| ! warning "build_overlays: Could not create writeable directory to build overlay root: '$ovl_root_dir'" || return 1
 
+	local _err=0
 	fkrt_faked_start "$ovl_fkrt_inst"
 	
 	local watchdog=20
@@ -70,7 +72,7 @@ build_overlays() {
 	
 	[ "$all_apks_in_world" = "true" ] && ovl_add_apks_world "$apks" "$(suffix_kernel_flavors $apks_flavored)" 
 	[ "$rootfs_apks" ] && ovl_add_apks_world "$rootfs_apks" "$(suffix_kernel_flavors $rootfs_apks_flavored)" 
-	[ "$run_overlays" ] && ovl_targz_create "${overlay_name:-$ovl_hostname}" "$ovl_root_dir" "etc/.."
+	[ "$run_overlays" ] && ovl_targz_create "${overlay_name:-$ovl_hostname}" "$ovl_root_dir" "etc/.." || _err=1
 
 	fkrt_faked_stop "$ovl_fkrt_inst"
 
@@ -79,17 +81,23 @@ build_overlays() {
 
 
 ovl_add_apks_world() {
-	local _ovlwld
+	local _ovlwld _err
 	_ovlwld="$(ovl_path /etc/apk/world)"
+	_err=0
 
 	ovl_fkrt_enable
-	if [ -e "$_ovlwld" ] && [ -f "$_ovlwld" ] ; then
-		(IFS=$'\n\r ' ; cat "$_ovlwld" | xargs printf_n $@ > "$_ovlwld")
-	elif [ -d "$(ovl_get_root)" ] ; then
-		mkdir -p "${_ovlwld%/*}"
-		(IFS=$'\n\r ' ; printf_n $@ > "$_ovlwld")
+	if file_is_writable "$_ovlwld" ; then
+		(IFS=$'\n\r ' ; cat "$_ovlwld" | xargs printf_n $@ > "$_ovlwld") || _err=1
+	elif dir_is_writable "$(ovl_get_root)" ; then
+		( mkdir_is_writable "${_ovlwld%/*}" || ! warning "ovl_add_apks_world - Could not create directory '${_ovlwld%/*}'." ) \
+			&& (IFS=$'\n\r ' ; printf_n $@ > "$_ovlwld") \
+			|| _err=1
+	else
+		_err=1 && warning "ovl_add_apks_world - Could not write world file '$_ovlwld'"
 	fi
 	ovl_fkrt_disable
+
+	return $_err
 }
 
 
@@ -104,20 +112,28 @@ ovl_fkrt_disable() {
 
 
 ovl_get_root() {
-	printf %s $ovl_root_dir
+	printf '%s' $ovl_root_dir
 }
 
 
 ovl_path() {
-	printf "%s" "${ovl_root_dir%%/}/${1##/}"
+	printf '%s' "${ovl_root_dir%%/}/${1##/}"
 }
 
 ovl_file_exists() {
-	[ -e "$(ovl_get_root)/${1#/}" ] && [ -f "$(ovl_get_root)/${1#/}" ]
+	file_exists "$(ovl_get_root)/${1#/}"
 }
 
 ovl_file_not_exists() {
-	[ ! -e "$(ovl_get_root)/${1#/}" ]
+	file_not_exists "$(ovl_get_root)/${1#/}"
+}
+
+ovl_dir_exists() {
+	dir_exists "$(ovl_get_root)/${1#/}"
+}
+
+ovl_dir_not_exists() {
+	dir_not_exists "$(ovl_get_root)/${1#/}"
 }
 
 
@@ -127,6 +143,8 @@ targz_dir() {
 	local source_dir="$2"
 	shift 2
 
+	dir_is_writable "${output_file%/*}" || ! warning "targz_dir: Can not create writeable directory: '${outputfile%/*}'" || return 1
+
 	tar -c --numeric-owner --xattrs -C "$source_dir" "$@" | gzip -9n > "$output_file"
 }
 
@@ -135,9 +153,12 @@ ovl_targz_create() {
 	local _dir="$2"
 	shift 2
 
+	local _err=0
 	ovl_fkrt_enable
-	(	targz_dir "${DESTDIR%/}/${_name##*/}.apkovl.tar.gz" "$_dir" "$@" )
+	(	targz_dir "${DESTDIR%/}/${_name##*/}.apkovl.tar.gz" "$_dir" "$@" ) || _err=1
 	ovl_fkrt_disable
+
+	return $_err
 }
 
 
@@ -148,21 +169,25 @@ ovl_targz_create() {
 #      : EOF
 
 ovl_create_file() {
-	local owner perms file filename filedir
+	local owner perms file filename filedir _err
 	owner="$1"
 	perms="$2"
 	file="${3}"
 	file="$(ovl_get_root)/${file#/}"
 	filename="${file##*/}"
 	filedir="${file%$filename}"
+	_err=0
 
 	ovl_fkrt_enable
-	(	mkdir -p "$filedir"
-		cat > "${filedir%/}/$filename"
-		chown "$owner" "$file"
-		chmod "$perms" "$file"
-	)
+	(	( mkdir_is_writable "$filedir" || ! warning "ovl_create_file: Could not create writable directory: '$filedir'" ) \
+			&& cat > "${filedir%/}/$filename" \
+			&& chown "$owner" "$file" \
+			&& chmod "$perms" "$file"
+	) || _err=1
 	ovl_fkrt_disable
+
+	[ "$_err" -eq 0 ] || warning "ovl_create_file: Failed to create '$file'"
+	return $_err
 }
 
 # Append content from stdin to file.
@@ -172,17 +197,21 @@ ovl_create_file() {
 #      : EOF
 
 ovl_append_file() {
-	local file filename filedir
+	local file filename filedir _err
 	file="${1}"
 	file="$(ovl_get_root)/${file#/}"
 	filename="${file##*/}"
 	filedir="${file%$filename}"
+	_err=0
 
 	ovl_fkrt_enable
-	(	mkdir -p "$filedir"
-		cat >> "${filedir%/}/$filename"
-	)
+	(	( mkdir_is_writable "$filedir" || ! warning "ovl_append_file: Could not create writable directory: '$filedir'" ) \
+		&& cat >> "${filedir%/}/$filename"
+	) || _err=1
 	ovl_fkrt_disable
+
+	[ "$_err" -eq 0 ] || warning "ovl_append_file: Failed to append to '$file'"
+	return $_err
 }
 
 
@@ -190,7 +219,7 @@ ovl_append_file() {
 # Files and links to be created or overwritten without trailing slash
 # i.e. ovl_ln /usr/include/ /opt/include
 ovl_create_link() {
-	local target targetname targetdir link linkname linkdir
+	local target targetname targetdir link linkname linkdir _err
 
 	target="$1"
 	targetname="${target##*/}"
@@ -201,6 +230,7 @@ ovl_create_link() {
 	linkname="${link##*/}"
 	linkdir="${link%$linkname}"
 	linkdir="${linkdir%/}"
+
 
 	# If only link name given, create link with that name in target directory.
 	[ "$linkdir" ] || linkdir="$targetdir"
@@ -230,55 +260,75 @@ ovl_create_link() {
 	link="${linkdir%/}/$linkname"
 	
 
+	_err=0
 	ovl_fkrt_enable 
-	(	mkdir -p "$linkdir"
-		ln -sfT "${target%/}" "$link"	
-	)
+	(	( mkdir_is_writable "$linkdir" || ! warning: "ovl_create_link: Could not create writable directory: '$linkdir'" ) \
+			&& ln -sfT "${target%/}" "$link"
+	) || _err=1
 	ovl_fkrt_disable
+
+	[ "$_err" -eq 0 ] || warning "ovl_create_link: Failed to create link: '$link' --> '$target'"
+	return $_err
 }
 
 
 ovl_cat() {
+	local _err=0
 	ovl_fkrt_enable
-	( printf "%s\n" "$@" | sed -e "/^-$/b; s/^/$(ovl_get_root)" | xargs cat )
+	(	printf "%s\n" "$@" | sed -e "/^-$/b; s/^/$(ovl_get_root)" | xargs cat ) || _err=1
 	ovl_fkrt_disable
+
+	return $_err
 }
 
 # Call sed -i with specified arguments on file specified.
 # Usage: ovl_edit_file_sed <file> <sed options and commands>
 ovl_edit_file_sed() {
+	local _file _err
 	_file="$1"
 	shift
+
+	file_is_writable "$_file" || ! warning "ovl_edit_file_sed: Can not write to file: '$_file'" || return 1
+
+	_err=0
 	ovl_fkrt_enable
-	( printf "%s\n" "$_file" | sed -e "/^-/b; s/^/$(ovl_get_root)" | xargs sed -i "$@" )
+	(	printf "%s\n" "$_file" | sed -e "/^-/b; s/^/$(ovl_get_root)" | xargs sed -i "$@" ) || _err=1
 	ovl_fkrt_disable
+
+	return $_err
 }
 
 
 ovl_mkdir() {
-	local opts
+	local opts _err
 	opts=""
 	while [ "$1" != "${1#-}" ] ; do opts="$opts $1" ; shift ; done
 
+	_err=0
 	ovl_fkrt_enable
-	(	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs mkdir $opts )
+	(	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs mkdir $opts ) || _err=1
 	ovl_fkrt_disable
+
+	return $_err
 }
 
 
 ovl_rm() {
-	local opts
+	local opts _err
 	opts=""
 	while [ "$1" != "${1#-}" ] ; do opts="$opts $1" ; shift ; done
 
+	_err=0
 	ovl_fkrt_enable
-	(	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs rm $opts )
+	(	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs rm $opts ) || _err=1
 	ovl_fkrt_disable
+
+	return $_err
 }
 
 
 ovl_ln() {
-	local output outdir opts
+	local output outdir opts _err
 
 	output="$(ovl_get_root)/$(eval "echo \${$##/}")"
 	outdir="${outdir%${outdir##*/}}"
@@ -286,17 +336,19 @@ ovl_ln() {
 	opts=""
 	while [ "$1" != "${1#-}" ] ; do opts="$opts $1" ; shift ; done
 
+	_err=0
 	ovl_fkrt_enable
-	(	mkdir -p "$outdir"
-		printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs ln $opts
-	)
+	(	( mkdir_is_writable "$outdir" || ! warning "ovl_ln: Can not create writable directory: '$outdir'" ) \
+			&& printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs ln $opts
+	) || _err=1
 	ovl_fkrt_disable
 
+	return $_err
 }
 
 
 ovl_cp() {
-	local output outdir opts
+	local output outdir opts _err
 
 	output="$(ovl_get_root)/$(eval "echo \${$##/}")"
 	outdir="${outdir%${outdir##*/}}"
@@ -304,17 +356,19 @@ ovl_cp() {
 	opts=""
 	while [ "$1" != "${1#-}" ] ; do opts="$opts $1" ; shift ; done
 
+	_err=0
 	ovl_fkrt_enable
-	(	mkdir -p "$outdir"
-		printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs cp $opts
-	)
+	(	( mkdir_is_writable "$outdir" || ! warning "ovl_cp: Can not create writable directory: '$outdir'" ) \
+			&& printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs cp $opts
+	) || _err=1
 	ovl_fkrt_disable
 
+	return $_err
 }
 
 
 ovl_mv() {
-	local output outdir opts
+	local output outdir opts _err
 
 	output="$(ovl_get_root)/$(eval "echo \${$##/}")"
 	outdir="${outdir%${outdir##*/}}"
@@ -322,49 +376,59 @@ ovl_mv() {
 	opts=""
 	while [ "$1" != "${1#-}" ] ; do opts="$opts $1" ; shift ; done
 
-
+	_err=0
 	ovl_fkrt_enable
-	(	mkdir -p "$outdir"
-		printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs mv $opts
-	)
+	(	( mkdir_is_writable "$outdir" || ! warning "ovl_mv: Can not create writable directory: '$outdir'" ) \
+			&& printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs mv $opts
+	) || _err=1
 	ovl_fkrt_disable
+
+	return $_err
 }
 
 
 ovl_chown() {
-	local opts owner
+	local opts owner _err
 	opts=""
 	while [ "$1" != "${1#-}" ] ; do opts="$opts $1" ; shift ; done
 
 	owner="$1"
 	shift
 
+	_err=0
 	ovl_fkrt_enable
-	(	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs chown $opts "$owner" )
+	(	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs chown $opts "$owner" ) || _err=1
 	ovl_fkrt_disable
+
+	return $_err
 }
 
 
 ovl_chmod() {
-	local opts perms
+	local opts perms _err
 	opts=""
 	while [ "$1" != "${1#-}" ] ; do opts="$opts $1" ; shift ; done
 	
 	perms="$1"
 	shift
 
+	_err=0
 	ovl_fkrt_enable
-	( 	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs chmod $opts $perms )
+	( 	printf "$(ovl_get_root)/%s\\n" "${@#/}" | xargs chmod $opts $perms ) || _err=1
 	ovl_fkrt_disable
+
+	return $_err
 }
 
 ovl_runlevel_add() {
 	local _lvl="$1"
 	local _srv
 	shift
-	mkdir -p "$(ovl_get_root)/etc/runlevels/$_lvl/"
+	local outdir="$(ovl_get_root)/etc/runlevels/$_lvl/" 
+	mkdir_is_writable "$outdir" || ! warning "ovl_runlevl_add: Can not create writable directory: '$outdir'" || return 1
 	for _srv in "$@" ; do
-		ln -sfT "/etc/init.d/$_srv" "$(ovl_get_root)/etc/runlevels/$_lvl/$_srv"
+		ln -sfT "/etc/init.d/$_srv" "$outdir/$_srv" \
+			|| ! warning "ovl_runlevel_add: Could not create link '$outdir/$srv' --> '/etc/init.d/$_srv'" || return 1
 	done
 }
 
@@ -381,18 +445,26 @@ ovl_conf_file_setting_add_or_replace() {
 	local _new="${_key}=\"${_v}\""
 
 	[ "$_file" ] || ! warning "ovl_conf_file_setting_add_or_replace called with no file!" || return 1
-	ovl_file_not_exists "$_file" && ( printf '# %s\n# Generated by mkimage.\n\n# %s\n%s' "$_file" "$_key" "$_new" | ovl_create_file "$_file" "root:root" "0644" ) && return 0
 
-	if grep -q "^${_key}=" "${_file}" ; then
-		ovl_edit_file_sed "${_file}" -e "s/^\(${_key}=.*\)/#\\1\n${_new}/"
-	elif grep -q "^#[[:space:]]*${_new}" "${_file}" ; then
-		ovl_edit_file_sed "${_file}" -e "s/^#[[:space:]]*${_key}=.*/${_new}/"
-	elif grep -q "^#[[:space:]]*${_key}=" "${_file}" ; then
-		ovl_edit_file_sed "${_file}" -e "/^#[[:space:]]*${_key}=.*/a${_new}"
-	elif grep -q "^#.*${_key}.*" "${_file}" ; then
-		ovl_edit_file_sed "${_file}" -e "/^#[[:space:]]*${_key}=.*/a${_new}"
-		ovl_edit_file_sed "${_file}" -e "/^#.*${_key}.*/a${_new}"
-	else
-		ovl_edit_file_sed "${_file}" -e "\$a# ${_key}" -e "/\$a${_new}"
+	if ovl_file_not_exists "$_file" ; then
+		( printf '# %s\n# Generated by mkimage.\n\n# %s\n%s' "$_file" "$_key" "$_new" | ovl_create_file "$_file" "root:root" "0644" ) && return 0
+		warning "ovl_conf_file_setting_add_or_replac: Could not create conf file: '$_file'"
+		return 1
 	fi
+
+	local _err=0
+	if grep -q "^${_key}=" "${_file}" ; then
+		ovl_edit_file_sed "${_file}" -e "s/^\(${_key}=.*\)/#\\1\n${_new}/" || _err=1
+	elif grep -q "^#[[:space:]]*${_new}" "${_file}" ; then
+		ovl_edit_file_sed "${_file}" -e "s/^#[[:space:]]*${_key}=.*/${_new}/" || _err=1
+	elif grep -q "^#[[:space:]]*${_key}=" "${_file}" ; then
+		ovl_edit_file_sed "${_file}" -e "/^#[[:space:]]*${_key}=.*/a${_new}" || _err=1
+	elif grep -q "^#.*${_key}.*" "${_file}" ; then
+		ovl_edit_file_sed "${_file}" -e "/^#[[:space:]]*${_key}=.*/a${_new}" \
+			&& ovl_edit_file_sed "${_file}" -e "/^#.*${_key}.*/a${_new}" || _err=1
+	else
+		ovl_edit_file_sed "${_file}" -e "\$a# ${_key}" -e "/\$a${_new}" || _err=1
+	fi
+
+	return $_err
 }
