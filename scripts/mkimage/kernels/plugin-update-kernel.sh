@@ -200,8 +200,7 @@ build_kernel_stage_added_pkgs() {
 	done
 
 	if dir_is_readable "$_outapks" ; then
-		find "$d" -name '*.apk' -exec tar -xz -C "$_out" -f \{\} \;
-		ls -dA "$_out"/.[!.]* 2>&1 > /dev/null  && rm -rf "$_out"/.[!.]*
+		find "$_outapks" -name '*.apk' -exec tar -xz -C "$_out" -f \{\} \; -exec rm -rf "$_out"/.[!.]* \;
 	fi
 
 	rm -rf "$DESTDIR"
