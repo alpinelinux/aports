@@ -38,6 +38,8 @@ apk_extract_files() {
 	local mydest="$2"
 	shift 2
 
+	file_is_readable "$myapk" || ! warning "apk_extract_files - Can not read apk: '$myapk'" || return 1
+	dir_is_writable "$mydest" || ! warning "apk_extract_files - Can not write to destination: '$mydest'" || return 1
 	_apk fetch --quiet "$myapk" --stdout | tar -xz -C "$mydest" "$@"
 }
 
@@ -50,7 +52,7 @@ apk_repo_init() {
 	msg "Initilizing apk repository for '$_arch' at"
 	msg2 "'$APKROOT'"
 	if [ ! -e "$APKROOT" ]; then
-		mkdir -p "$APKROOT/etc/apk"
+		mkdir_is_writable "$APKROOT/etc/apk" || ! warning "Can not create apk repository root for '$_arch'!" || return 1
 		# create root for caching packages
 		# TODO: Add configuration for source location of host keys
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
@@ -72,9 +74,12 @@ apk_repo_init() {
 		for repo in $EXTRAREPOS; do
 			echo "$repo" >> "$APKREPOS"
 		done
-		msg "apk repository root for '$_arch' initilized."
+		msg "apk repository root for '$_arch' initilized, updating..."
+	elif ! dir_is_writable "$APKROOT" ; then
+		warning "apk repository root for '$_arch' '$APKROOT' exists, but is not writable!"
+		return 1
 	else
-		msg "apk repository root for '$_arch' already initilized."
+		msg "apk repository root for '$_arch' already initilized, updating..."
 	fi
 	_apk update
 }
