@@ -126,7 +126,7 @@ _load_plugins_from_target_recursive() {
 	while IFS=$'\n' read -r _file ; do
 		_load_plugins_from_file "$_file" "$_list" $@  && _found="true"
 	done<<-EOF
-		$( file_is_readable "$_target" && printf '%s\n' "$_target" ; directory_is_readable "$_target" && ( _load_plugins_find_plugin_files "$_target" $(getvar "$_list") $@ ) )
+		$( file_is_readable "$_target" && printf '%s\n' "$_target" ; dir_is_readable "$_target" && ( _load_plugins_find_plugin_files "$_target" $(getvar "$_list") $@ ) )
 	EOF
 
 	IFS=$OIFS
