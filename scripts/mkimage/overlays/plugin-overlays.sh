@@ -462,16 +462,15 @@ ovl_conf_file_setting_add_or_replace() {
 
 	local _err=0
 	if grep -q "^${_key}=" "${_file}" ; then
-		ovl_edit_file_sed "${_file}" -e "s/^\(${_key}=.*\)/#\\1\n${_new}/" || _err=1
+		ovl_edit_file_sed "${_file}" -E -e 's|^('"${_key}"'=.*)|#\1\n'"${_new}"'|' || _err=1
 	elif grep -q "^#[[:space:]]*${_new}" "${_file}" ; then
-		ovl_edit_file_sed "${_file}" -e "s/^#[[:space:]]*${_key}=.*/${_new}/" || _err=1
+		ovl_edit_file_sed "${_file}" -e "s|^#[[:space:]]*${_key}=.*|${_new}|" || _err=1
 	elif grep -q "^#[[:space:]]*${_key}=" "${_file}" ; then
-		ovl_edit_file_sed "${_file}" -e "/^#[[:space:]]*${_key}=.*/a${_new}" || _err=1
+		ovl_edit_file_sed "${_file}" -e '\|^#[[:space:]]*'"${_key}"'=.*|a'"${_new}" || _err=1
 	elif grep -q "^#.*${_key}.*" "${_file}" ; then
-		ovl_edit_file_sed "${_file}" -e "/^#[[:space:]]*${_key}=.*/a${_new}" \
-			&& ovl_edit_file_sed "${_file}" -e "/^#.*${_key}.*/a${_new}" || _err=1
+		ovl_edit_file_sed "${_file}" -e '\|^#.*'"${_key}"'.*|a'"${_new}" || _err=1
 	else
-		ovl_edit_file_sed "${_file}" -e "\$a# ${_key}" -e "/\$a${_new}" || _err=1
+		ovl_edit_file_sed "${_file}" -e '$a# '"${_key}" -e '$a'"${_new}" || _err=1
 	fi
 
 	return $_err
