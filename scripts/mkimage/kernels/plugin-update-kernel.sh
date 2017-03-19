@@ -76,107 +76,110 @@ build_kernel() {
 # Begin build by making staging directory
 build_kernel_stage_begin() {
 	rm -rf "$1"
-	mkdir -p "$1/base"
-	mkdir -p "$1-apks/alpine-baselayout"
+	mkdir_is_writable "$1/base" || ! warning "Can not create writable directory: '$1/base'" || return 1
+	mkdir_is_writable "$1-apks/alpine-baselayout"
 
 	_apk fetch -R -o "$1-apks/alpine-baselayout" "alpine-baselayout"
 
 	find "$1-apks/alpine-baselayout" -name '*.apk' -exec tar -xzp -C "$1/base" -f \{\} \;
-	rm -r "$1/base"/.[_[:alnum:]]*
+	rm -r "$1/base"/.[!.]*
 
-	mkdir -p "$1/base/etc/apk/keys"
+	mkdir_is_writable "$1/base/etc/apk/keys"
 
 	cp "$APKREPOS" "$1/base/etc/apk/"
 	[ "$_abuild_pubkey" ] && cp -Pr "$1" "$1/base/etc/apk/keys/"
 	[ "$_hostkeys" ] && cp -Pr /etc/apk/keys/* "$1/base/etc/apk/keys/"
 
 	rm -rf "$DESTDIR"
-	mkdir -p "$1/base/.built"
+	mkdir_is_writable "$1/base/.built"
 	ln -sfT "$1/base/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 # Custom kernel build directories.
 # TODO: Not yet implemented -- need to chase config options to enable
 build_kernel_stage_custom_kernel() {
-	mkdir -p "$1/kernel"
+	mkdir_is_writable "$1/kernel"
 	make -C "$BUILDDIR" INSTALL_PATH="$1/kernel/boot" ${kernel_make_install_target:-install}
 	rm -rf "$DESTDIR"
 	mkdir -p "$1/kernel/.built"
 	ln -sfT "$1/kernel/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 build_kernel_stage_custom_modules() {
-	mkdir -p "$1/modules"
+	mkdir_is_writable "$1/modules"
 	make -C "$BUILDDIR" INSTALL_MOD_PATH="$1/modules" modules_install
 	rm -rf "$DESTDIR"
-	mkdir -p "$1/modules/.built"
+	mkdir_is_writable "$1/modules/.built"
 	ln -sfT "$1/modules/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 build_kernel_stage_custom_firmware() {
-	mkdir -p "$1/firmware"
+	mkdir_is_writable "$1/firmware"
 	make -C "$BUILDDIR" INSTALL_MOD_PATH="$1/firmware" firmware_install
 	rm -rf "$DESTDIR"
-	mkdir -p "$1/firmware/.built"
+	mkdir_is_writable "$1/firmware/.built"
 	ln -sfT "$1/firmware/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 build_kernel_stage_custom_dtbs() {
-	mkdir -p "$1/dtbs"
+	mkdir_is_writable "$1/dtbs"
 	make -C "$BUILDDIR" INSTALL_DTBS_PATH="$1/dtbs/usr/lib/linux/linux-$7" dtbs_install
 	rm -rf "$DESTDIR"
-	mkdir -p "$1/dtbs/.built"
+	mkdir_is_writable "$1/dtbs/.built"
 	ln -sfT "$1/dtbs/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 
 # Using standard kernel packages
 build_kernel_stage_packaged_kernel() {
-	mkdir -p "$1/kernel"
-	mkdir -p "$1-apks/kernel"
+	mkdir_is_writable "$1/kernel"
+	mkdir_is_writable "$1-apks/kernel"
 	_apk fetch -o "$1-apks/kernel" "$5"
-	tar -xz -C "$1/kernel" -f "$1-apks/kernel/$(apk_pkg_full "$5").apk" boot || return 1
+	tar -xz -C "$1/kernel" -f "$1-apks/kernel/$(apk_pkg_full "$5").apk" boot \
+			|| ! warning "Failed to extract kernel files from kernel apk: '$1-apks/kernel/$(apk_pkg_full "$5").apk'" \
+			|| return 1
 	rm -rf "$DESTDIR"
-	mkdir -p "$1/kernel/.built"
+	mkdir_is_writable "$1/kernel/.built"
 	ln -sfT "$1/kernel/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 build_kernel_stage_packaged_modules() {
-	mkdir -p "$1/modules"
-	mkdir -p "$1-apks/kernel"
+	mkdir_is_writable "$1/modules"
+	mkdir_is_writable "$1-apks/kernel"
 	_apk fetch -o "$1-apks/kernel" "$5"
-	tar -xz -C "$1/modules" -f "$1-apks/kernel/$(apk_pkg_full "$5").apk" lib/modules || return 1
+	tar -xz -C "$1/modules" -f "$1-apks/kernel/$(apk_pkg_full "$5").apk" lib/modules \
+			|| ! warning "Failed to extract modules from kernel apk: '$1-apks/kernel/$(apk_pkg_full "$5").apk'" \
+			|| return 1
 	rm -rf "$DESTDIR"
-	mkdir -p "$1/modules/.built"
+	mkdir_is_writable "$1/modules/.built"
 	ln -sfT "$1/modules/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 build_kernel_stage_packaged_firmware() {
-	mkdir -p "$1/firmware"
-	mkdir -p "$1-apks/firmware"
+	mkdir_is_writable "$1/firmware"
+	mkdir_is_writable "$1-apks/firmware"
 	_apk fetch -o "$1-apks/firmware" "$4"
-	tar -xz -C "$1/firmware" -f "$1-apks/firmware/$(apk_pkg_full "$4").apk" lib/firmware || return 1
+
+	tar -xz -C "$1/firmware" -f "$1-apks/firmware/$(apk_pkg_full "$4").apk" lib/firmware \
+			|| ! warning "Failed to extract firmware from firmware apk: '$1-apks/firmware/$(apk_pkg_full "$4").apk'" \
+			|| return 1
+
 	rm -rf "$DESTDIR"
-	mkdir -p "$1/firmware/.built"
+	mkdir_is_writable "$1/firmware/.built"
 	ln -sfT "$1/firmware/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 build_kernel_stage_packaged_dtbs() {
-	mkdir -p "$1/dtbs"
-	mkdir -p "$1-apks/kernel"
+	mkdir_is_writable "$1/dtbs"
+	mkdir_is_writable "$1-apks/kernel"
 	_apk fetch -o "$1-apks/kernel" "$5"
+
 	if ( tar -tz -f "$1-apks/kernel/$(apk_pkg_full "$5").apk" | grep -q "^usr/lib" ) ; then
-		tar -xz -C "$1/dtbs" -f "$1-apks/kernel/$(apk_pkg_full "$5").apk" usr/lib || return 1
+		tar -xz -C "$1/dtbs" -f "$1-apks/kernel/$(apk_pkg_full "$5").apk" usr/lib \
+			|| ! warning "Failed to extract dtbs from kernel apk: '$1-apks/kernel/$(apk_pkg_full "$5").apk'" \
+			|| return 1
 	fi
+
 	rm -rf "$DESTDIR"
-	mkdir -p "$1/dtbs/.built"
+	mkdir_is_writable "$1/dtbs/.built"
 	ln -sfT "$1/dtbs/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 # Additional packages needed by mkinitfs for various feature files
@@ -184,8 +187,8 @@ build_kernel_stage_added_pkgs() {
 	local base="$1"
 
 	rm -rf "$base/addpkgs$__extra"
-	mkdir -p "$base-apks/addpkgs$__extra"
-	mkdir -p "$base/addpkgs$__extra"
+	mkdir_is_writable "$base-apks/addpkgs$__extra"
+	mkdir_is_writable "$base/addpkgs$__extra"
 	shift 3
 
 	local p
@@ -193,15 +196,15 @@ build_kernel_stage_added_pkgs() {
 		_apk fetch -R -o "$base-apks/addpkgs$__extra" "$p"
 	done
 
-	local f
 	local d="$base-apks/addpkgs$__extra"
-	find "$d" -name '*.apk' -exec tar -xz -C "$base/addpkgs$__extra" -f \{\} \;
-	rm -r "$base/addpkgs$__extra"/.[_[:alnum:]]*
+	if dir_is_readable "$d" ; then
+		find "$d" -name '*.apk' -exec tar -xz -C "$base/addpkgs$__extra" -f \{\} \;
+		ls -dA "$base/add_pkgs$__extra"/.[!.]* 2>&1 > /dev/null  && rm -rf "$base/addpkgs$__extra"/.[!.]*
+	fi
 
 	rm -rf "$DESTDIR"
-	mkdir -p "$base/addpkgs$__extra/.built"
+	mkdir_is_writable "$base/addpkgs$__extra/.built"
 	ln -sfT "$base/addpkgs$__extra/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 # Wrapper to swallow flavored packages
 build_kernel_stage_added_pkgs_flavored() {
@@ -209,6 +212,8 @@ build_kernel_stage_added_pkgs_flavored() {
 	local _arch="$2"
 	local _id="$3"
 	shift 4
+
+
 	__extra="_flavored"
 	build_kernel_stage_added_pkgs "$base" "$_arch" "$_id" "$@"
 	unset __extra
@@ -222,20 +227,19 @@ build_kernel_stage_merge() {
 	shift 4
 
 	rm -rf
-	mkdir -p "$base/merged"
+	mkdir_is_writable "$base/merged"
 
 	local d f
 	for d in $@ ; do
 		f="${base}/${d}"
-		[ -d "$f" ] && ( cd "$f" && find | cpio -pumd "$base/merged" )
+		dir_is_readable "$f" && ( cd "$f" && find | cpio -pumd "$base/merged" )
 	done
 
 	depmod -b "$base/merged" "$_kver"
 
 	rm -rf "$DESTDIR"
-	mkdir -p "$base/merged/.built"
+	mkdir_is_writable "$base/merged/.built"
 	ln -sfT "$base/merged/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 
@@ -248,23 +252,24 @@ build_kernel_stage_modloop() {
 	local _tmp="$_out-tmp"
 	local _outname="modloop-$_flavor"
 
+	dir_is_readable "$base/merged/lib/modules" || ! warning "Could not read merged modules directory '$base/merged/lib/modules'" || return 1
+	dir_is_readable "$base/merged/lib/firmware" || ! warning "Could not read merged firmware directory '$base/merged/lib/firmware'" || return 1
+
 	rm -rf "$_tmp" "$_out"
-	mkdir -p "$_out/boot" "$_tmp/lib"
+	mkdir_is_writable "$_out/boot"
+	mkdir_is_writable "$_tmp/lib"
 
 	# TODO: Allow filtering of modloop modules here!
 	cp -a "$base/merged/lib/modules" "$_tmp/modules"
 	mkdir -p "$_tmp/modules/firmware"
 	find "$_tmp/modules" -type f -name "*.ko" | xargs modinfo -F firmware | sort -u | while read FW; do
-		if [ -e "$base/merged/lib/firmware/$FW" ]; then
-			install -pD "$base/merged/lib/firmware/$FW" "$_tmp/modules/firmware/$FW"
-		fi
+		file_is_readable "$base/merged/lib/firmware/$FW" && install -pD "$base/merged/lib/firmware/$FW" "$_tmp/modules/firmware/$FW"
 	done
 	mksquashfs "$_tmp" "$_out/boot/$_outname" -comp xz -exit-on-error
 
 	rm -rf "$DESTDIR"
-	mkdir -p "$_out/.built"
+	mkdir_is_writable "$_out/.built"
 	ln -sfT "$_out/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 # Build our initfs
@@ -277,20 +282,23 @@ build_kernel_stage_mkinitfs() {
 	local _out="$base/mkinitfs"
 	local _tmp="$_out-tmp"
 
+	dir_is_readable "$base/merged" || ! warning "Could not read merged directory root '$base/merged'" || return 1
+
 	rm -rf "$_out" "$_tmp"
 
-	mkdir -p "$_out/boot" "$_tmp"
-	mkdir -p "$base/merged/etc/mkinitfs"
+	mkdir_is_writable "$_out/boot"
+	mkdir_is_writable "$_tmp"
+	mkdir_is_writable "$base/merged/etc/mkinitfs"
+
 	echo "features=\"$@\"" > "$base/merged/etc/mkinitfs/mkinitfs.conf"
-	# mkinitfs keep-tmp install-keys base-dir features output tmp-dir kernel-version
+	# mkinitfs keep-tmp install-keys feature-dir base-dir features-file tmp-dir output-file kernel-version
 	# TODO: mkinitfs to use should be configurable.
-	msg "calling: mkinitfs -K -P /etc/mkinitfs/features.d -b $base/merged -c $base/merged/etc/mkinitfs/mkinitfs.conf -o $_out/boot/initramfs-$_flavor $_kver"
+	msg "calling: mkinitfs -K -P /etc/mkinitfs/features.d -b $base/merged -c $base/merged/etc/mkinitfs/mkinitfs.conf -t "$_tmp" -o $_out/boot/initramfs-$_flavor $_kver"
 	mkinitfs -k -K -P /etc/mkinitfs/features.d -b "$base/merged" -c "$base/merged/etc/mkinitfs/mkinitfs.conf" -t "$_tmp" -o "$_out/boot/initramfs-$_flavor" "$_kver"
 
 	rm -rf "$DESTDIR"
-	mkdir -p "$_out/.built"
+	mkdir_is_writable "$_out/.built"
 	ln -sfT "$_out/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 
@@ -302,18 +310,17 @@ build_kernel_stage_devicetree () {
 	local _out="$base/devicetree/boot/dtbs"
 
 	rm -rf "$base/devicetree"
-	mkdir -p "$base/devicetree"
+	mkdir_is_writable "$base/devicetree"
 
-	if [ -d "$_in" ]; then
-		mkdir -p "$_out"
+	if dir_is_readable "$_in" ; then
+		mkdir_is_writable "$_out"
 		_out=$(realpath "$_out")
-		(cd $_in && find -type f \( -name "*.dtb" -o -name "*.dtbo" \) | cpio -pudm "$_out" 2> /dev/null)
+		(cd $_in && find -type f \( -name "*.dtb" -o -name "*.dtbo" \) | cpio -pudm "$_out" 2> /dev/null) || return 1
 	fi
 
 	rm -rf "$DESTDIR"
-	mkdir -p "$base/devicetree/.built"
+	mkdir_is_writable "$base/devicetree/.built"
 	ln -sfT "$base/devicetree/.built" "$DESTDIR"
-	#mkdir -p "$DESTDIR"
 }
 
 # Install everything in our DESTDIR ready for merging into the final image
@@ -323,13 +330,13 @@ build_kernel_install() {
 
 	local _out="$DESTDIR"
 	rm -rf "$_out"
-	mkdir -p "$_out"
+	mkdir_is_writable "$_out"
 
 	# TODO: Handle differnt output directories (rpi?) for various bits when needed.
 	local d f
 	for d in $@ ; do
 		f="$base/$d"
-		[ -d "$f" ] && ( cd "$f" && find | grep -v '^\./\.built' | cpio -pumd "$_out" )
+		dir_is_readable "$f" && ( cd "$f" && find | grep -v '^\./\.built' | cpio -pumd "$_out" ) || return 1
 	done
 
 	# TODO: Review "media" logic and implement if needed.
@@ -338,3 +345,4 @@ build_kernel_install() {
 		rmdir "$_out/boot"
 	fi
 }
+
