@@ -89,7 +89,7 @@ dir_size_human_readable() { dir_is_readable "$1" && du -sh "$1" | cut -f1 || ret
 # Usage: dir_home_user <user>
 dir_user_home() {
 	# Make sure we have something resembling a user name before we eval it.
-	[ "$1" ] && [ "$(printf '%s' "$1" | sed -E -e 's/^[_[:alnum:]][-_[:alnum:]]*\$?$//')" = "" ] && [ $(echo "$1" | wc -c) -le 32 ] || warning "dir_user_home: Bad username passed: '$1'" && return 1
+	[ "$1" ] && [ "$(printf '%s' "$1" | sed -E -e 's/^[_[:alnum:]][-_[:alnum:]]*\$?$//')" = "" ] && [ $(echo "$1" | wc -c) -le 32 ] || ! warning "dir_user_home: Bad username passed: '$1'" || return 1
 	eval "realpath ~$(echo "$1" | sed -e 's/./\\&/g')/"
 }
 
@@ -105,14 +105,14 @@ mkdir_is_writable() { mkdir -p "$1" && dir_is_writable "$1" && return 0 || retur
 # Use cpio to make a full reproduction of the contents of one directory into another.
 # Usage: dir_copy_contents <source dir> <dest dir>
 dir_copy_contents_cpio() {
-	dir_is_readable $1 || warning "dir_copy_contents: Can not change to source directory: '$1'" && return 1
+	dir_is_readable $1 || ! warning "dir_copy_contents: Can not change to source directory: '$1'" || return 1
 	mkdir_is_writable "$2" && ( cd "$1" && find -depth -print0 | cpio --null -pmd "$2" )
 }
 
 # Make a copy of contents of one directory into another.
 # Usage: dir_copy_symlink_contents() <source dir> <dest dir>
 dir_copy_contents() {
-	dir_is_readable $1 || warning "dir_copy_contents: Can not change to source directory: '$1'" && return 1
+	dir_is_readable $1 || ! warning "dir_copy_contents: Can not change to source directory: '$1'" || return 1
 	mkdir_is_writeable "$2" && \
 		( cd "$1" && find -maxdepth 1 ! -name . -depth -xdev -exec cp -a "{}" "$2/"  \; )
 }
@@ -121,7 +121,7 @@ dir_copy_contents() {
 # Since cp -al doesn't work across filesystems, try it first, then fall back on cp -a if it fails.
 # Usage: dir_copy_link_contents() <source dir> <dest dir>
 dir_copy_link_contents() {
-	dir_is_readable $1 || warning "dir_copy_contents: Can not change to source directory: '$1'" && return 1
+	dir_is_readable $1 || ! warning "dir_copy_contents: Can not change to source directory: '$1'" || return 1
 	mkdir_is_writeable "$2" && \
 		( cd "$1" && find -maxdepth 1 ! -name . -depth -xdev \
 			! -exec cp -al "{}" "$2/" 2> /dev/null \; -exec cp -a "{}" "$2/"  \; )
@@ -131,7 +131,7 @@ dir_copy_link_contents() {
 # Make sym-linked copy of contents of one directory into another.
 # Usage: dir_copy_symlink_contents() <source dir> <dest dir>
 dir_copy_symlink_contents() {
-	dir_is_readable $1 || warning "dir_copy_contents: Can not change to source directory: '$1'" && return 1
+	dir_is_readable $1 || ! warning "dir_copy_contents: Can not change to source directory: '$1'" || return 1
 	mkdir_is_writeable "$2" && \
 		( cd "$1" && find -maxdepth 1 ! -name . -depth -xdev -exec cp -as "{}" "$2/"  \; )
 }

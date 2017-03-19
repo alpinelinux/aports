@@ -129,7 +129,7 @@ OUTDIR="${OUTDIR:-$PWD}"
 # Save ourselves from making a mess in our script's root directory.
 mkdir_is_writable "$OUTDIR" && OUTDIR="$(realpath "$OUTDIR")" \
 	&& ( [ "$OUTDIR" != "$scriptrealdir" ] || OUTDIR="${OUTDIR}/out" && mkdir_is_writable "$OUTDIR" ) \
-	|| warning "Can not write to output directory '$OUTDIR'." && return 1
+	|| ! error "Can not write to output directory '$OUTDIR'." || exit 1
 
 # Setup default workdir in /tmp using mktemp
 if [ -z "$WORKDIR" ]; then
@@ -137,7 +137,8 @@ if [ -z "$WORKDIR" ]; then
 	trap 'rm -rf $WORKDIR' INT
 fi
 WORKDIR="${WORKDIR%%/}"
-mkdir_is_writable "$WORKDIR" && WORKDIR="$(realpath "$WORKDIR")" || warning "Can not write to work directory '$WORKDIR'." && return 1
+mkdir_is_writable "$WORKDIR" && WORKDIR="$(realpath "$WORKDIR")" \
+	|| ! error "Can not write to work directory '$WORKDIR'." || exit 1
 
 # Release configuration
 RELEASE="${RELEASE:-${build_date}}"
@@ -186,7 +187,7 @@ for ARCH in $req_arch; do
 		info_prog_set "$scriptname:$ARCH:$PROFILE"
 		info_func_set "build profile"
 		msg "Beginning build for profile '$PROFILE'..."
-		(build_profile) || ( error "BUILD FAILED IN PROFILE '$PROFOLE' -- ABORTING!" ; exit 1 )
+		(build_profile) || ! error "BUILD FAILED IN PROFILE '$PROFOLE' -- ABORTING!" || exit 1
 		msg "...build for profile '$PROFILE' completed."
 	done
 done

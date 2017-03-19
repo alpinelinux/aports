@@ -24,7 +24,7 @@ build_profile() {
 
 	for SECTION in $all_sections; do
 		info_func_set "build $SECTION"
-			section_$SECTION || ( warning "Section '$SECTION' returned failure!" && return 1 ) || return 1
+			section_$SECTION || ! warning "Section '$SECTION' returned failure!" || return 1
 	done
 	[ "$_fail" = "no" ] || return 1
 	info_func_set "build profile_$PROFILE"
@@ -45,11 +45,11 @@ build_profile() {
 		if [ -z "$_simulate" ]; then
 			# Merge sections
 			rm -rf "$DESTDIR"
-			mkdir -p "$DESTDIR"
+			mkdir_is_writable "$DESTDIR"|| ! warning "Can not write to destination directory '$DESTDIR'." || return 1
 			for _dir in $_my_dirs; do
 				local d="$WORKDIR/${_dir##/}"
-				[ -e "$d" ] && [ "$(cd $d && echo *)" != "*" ] || continue
-				d="$(realpath $d)"
+				dir_is_readable "$d" && [ "$(cd $d && echo *)" != "*" ] || continue
+				d="$(realpath "$d")"
 				( cd "$d" && find -maxdepth 1 -exec printf '* %s\n' "$_dir" \; -exec cp -Lr \{\} "$DESTDIR" \; )
 			done
 			echo "${image_name}-${RELEASE} ${build_date}" > "$DESTDIR"/.alpine-release
@@ -91,27 +91,26 @@ build_section() {
 	local section="$1"
 	shift
 	local args="$@"
-	local _dir="$(printf '%s-%s' "$section-$( echo ${args//[^a-zA-Z0-9]/} | cut -c1-10)" "$(echo $args | checksum)" )" && _dir="${_dir#/}"
+	local _dir="$(printf '%s-%s' "$section-$( echo ${args//[^_a-zA-Z0-9]/} | cut -c1-10)" "$(echo $args | checksum)" )" && _dir="${_dir#/}"
 	local args="$@"
 
 	info_func_set "build section_$section"
 
 	if [ -z "$_dir" ]; then
 		_fail="yes"
-		warning "Building '$section' failed: '$_dir' empty!"
+		warning "Building '$section' failed: Variable '\$_dir' empty!"
 		return 1
 	fi
 
 	if [ ! -e "$WORKDIR/${_dir}" ]; then
 		DESTDIR="$WORKDIR/${_dir}.work"
-		msg "--> $section $args"
 
 		msg "Building section '$section' with args '$args':"
 		if [ -z "$_simulate" ]; then
 			rm -rf "$DESTDIR"
-			mkdir -p "$DESTDIR"
+			mkdir_is_writable "$DESTDIR" || ! warning "Can not write to destination directory '$DESTDIR'." || return 1
 			if build_${section} "$@"; then
-				mv "$DESTDIR" "$WORKDIR/${_dir}"
+				mv "$DESTDIR" "$WORKDIR/${_dir}" || ! warning "Could not move '$DESTDIR' -> '$WORKDIR/$_dir'." || return 1
 				_dirty="yes"
 				msg "Built '$section' -> '${_dir}'"
 			else
