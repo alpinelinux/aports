@@ -93,9 +93,9 @@ while [ $# -gt 0 ]; do
 	opt="$1"
 	shift
 	case "$opt" in
-	--repository-file) REPOFILE="$1"; shift ;;
+	--repository-file) REPOFILES="${REPOFILES:+$REPOFILES }$1"; shift ;;
 	--repository) REPODIR="$1"; shift ;;
-	--extra-repository) EXTRAREPOS="$EXTRAREPOS $1"; shift ;;
+	--extra-repository) EXTRAREPOS="${EXTRAREPOS:+$EXTRAREPOS }$1"; shift ;;
 	--apk-cache-dir) APK_CACHE_DIR="$1" shift ;;
 	--workdir) WORKDIR="$1"; shift ;;
 	--outdir) OUTDIR="$1"; shift ;;

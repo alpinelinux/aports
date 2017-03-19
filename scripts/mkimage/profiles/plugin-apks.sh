@@ -53,28 +53,35 @@ apk_repo_init() {
 	msg2 "'$APKROOT'"
 	if [ ! -e "$APKROOT" ]; then
 		mkdir_is_writable "$APKROOT/etc/apk" || ! warning "Can not create apk repository root for '$_arch'!" || return 1
-		# create root for caching packages
+
+		# Copy keys
 		# TODO: Add configuration for source location of host keys
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
+
+		# create root for caching packages
 		_apk add --initdb
+
 		[ "$APK_CACHE_DIR" ] && ln -sfT "$APK_CACHE_DIR" "$APKROOT/etc/apk/cache"
 
-		if [ -z "$REPODIR" ] && [ -z "$REPOFILE" ]; then
+		if [ -z "$REPODIR" ] && [ -z "$REPOFILES" ]; then
 			warning "no repository set"
 		fi
 
-		touch "$APKREPOS"
+		touch "$APKREPOS" && file_is_writable "$APKREPOS" || ! warning "Can not write to apk repository file: '$APKREPOS'" || return 1
 
-		for repo in $REPOFILE ; do
-			cat "$REPOFILE" | grep -E -v "^#" >> "$APKREPOS"
-		done
 
 		[ -z "$REPODIR"] || echo "$REPODIR" >> "$APKREPOS"
+
+		for repo in $REPOFILES ; do
+			cat "$repo" | grep -E -v "^#" >> "$APKREPOS"
+		done
 
 		for repo in $EXTRAREPOS; do
 			echo "$repo" >> "$APKREPOS"
 		done
+
 		msg "apk repository root for '$_arch' initilized, updating..."
+
 	elif ! dir_is_writable "$APKROOT" ; then
 		warning "apk repository root for '$_arch' '$APKROOT' exists, but is not writable!"
 		return 1
