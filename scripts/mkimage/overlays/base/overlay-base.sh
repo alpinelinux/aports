@@ -13,9 +13,10 @@ ovl_script_base() {
 	$HOSTNAME
 	EOF
 
-	ovl_file_not_exists /etc/network/interfaces && \
-		ovl_create_file root:root 0644 /etc/network/interfaces <<-EOF
+	if ovl_file_not_exists "/etc/network/interfaces" ; then
+		ovl_create_file root:root 0644 "/etc/network/interfaces" <<-EOF
 		auto lo
 		iface lo inet loopback
 		EOF
+	fi
 }

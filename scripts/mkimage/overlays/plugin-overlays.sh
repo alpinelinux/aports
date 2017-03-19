@@ -36,10 +36,16 @@ build_overlays() {
 			if [ ! "${_needs## }" ] || list_has_all "$_needs" "$overlays" ; then
 				[ "${_after## }" ] && list_has_any "$_after" "$my_overlays" && continue
 				[ ! "${_before## }" ] || list_has_all "$(list_filter "$_before" "$overlays")" "$run_overlays" || continue
+
 				local _func
 				for _func in $_call ; do
-					if [ "$(type -t $_func)" ] ; then ! $_func && _err=1 && break ; fi
+					if [ "$_func" ] && [ "$(type -t $_func)" ] && ! $_func ; then
+						_err=1 ; warning "Call to '$_func' failed in overlay '$_overlay'."
+						break
+					fi
 				done
+				[ $_err -eq 0 ] || break
+
 				run_overlays="$run_overlays $_overlay"
 				var_list_del my_overlays "$_overlay"
 
@@ -60,6 +66,7 @@ build_overlays() {
 			unset _after
 			unset _call
 		done
+
 		[ $_err -eq 0 ] || break
 
 		watchdog=$(( $watchdog - 1 ))
@@ -73,9 +80,9 @@ build_overlays() {
 	done
 
 	if [ $_err -eq 0 ] ; then
-		[ "$all_apks_in_world" = "true" ] && ovl_add_apks_world "$apks" "$(suffix_kernel_flavors $apks_flavored)" 
-		[ "$rootfs_apks" ] && ovl_add_apks_world "$rootfs_apks" "$(suffix_kernel_flavors $rootfs_apks_flavored)" 
-		[ "$run_overlays" ] && ovl_targz_create "${overlay_name:-$ovl_hostname}" "$ovl_root_dir" "etc/.." || _err=1
+		if [ "$all_apks_in_world" = "true" ] ; then ovl_add_apks_world "$apks" "$(suffix_kernel_flavors $apks_flavored)" || _err=1 ; fi
+		if [ "$rootfs_apks" ] ; then ovl_add_apks_world "$rootfs_apks" "$(suffix_kernel_flavors $rootfs_apks_flavored)" || _err=1 ; fi
+		if [ "$run_overlays" ] ; then ovl_targz_create "${overlay_name:-$ovl_hostname}" "$ovl_root_dir" "etc/.." || _err=1 ; fi
 	fi
 
 	fkrt_faked_stop "$ovl_fkrt_inst"
@@ -91,7 +98,7 @@ ovl_add_apks_world() {
 
 	ovl_fkrt_enable
 	if file_is_writable "$_ovlwld" ; then
-		(IFS=$'\n\r ' ; cat "$_ovlwld" | xargs printf_n $@ > "$_ovlwld") || _err=1
+		(IFS=$'\n\r ' ; cat "$_ovlwld" | xargs printf '%s\n' $@ > "$_ovlwld") || _err=1
 	elif dir_is_writable "$(ovl_get_root)" ; then
 		( mkdir_is_writable "${_ovlwld%/*}" || ! warning "ovl_add_apks_world - Could not create directory '${_ovlwld%/*}'." ) \
 			&& (IFS=$'\n\r ' ; printf_n $@ > "$_ovlwld") \
