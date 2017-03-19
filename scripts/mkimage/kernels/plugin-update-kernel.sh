@@ -191,7 +191,7 @@ build_kernel_stage_added_pkgs() {
 	local _out="$base/addpkgs$__extra"
 	rm -rf "$_out" && mkdir_is_writable "$_out" && _out=$(realpath "$_out") || return 1
 
-	local _outapks= "$base-apks/addpkgs$__extra"
+	local _outapks="$base-apks/addpkgs$__extra"
 	mkdir_is_writable "$_outapks" && _out=$(realpath "$_outapks") || return 1
 
 	local p
