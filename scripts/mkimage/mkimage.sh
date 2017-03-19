@@ -126,8 +126,9 @@ OUTDIR="${OUTDIR:-$PWD}"
 [ "$_show_usage" = "yes" ] && usage && exit 1
 
 # Save ourselves from making a mess in our script's root directory.
-mkdir -p "$OUTDIR" && OUTDIR="$(realpath "$OUTDIR")"
-[ "$OUTDIR" = "$scriptrealdir" ] && OUTDIR="${OUTDIR}/out" && mkdir -p "$OUTDIR"
+mkdir_is_writable "$OUTDIR" && OUTDIR="$(realpath "$OUTDIR")" \
+	&& ( [ "$OUTDIR" != "$scriptrealdir" ] || OUTDIR="${OUTDIR}/out" && mkdir_is_writable "$OUTDIR" ) \
+	|| warning "Can not write to output directory '$OUTDIR'." && return 1
 
 # Setup default workdir in /tmp using mktemp
 if [ -z "$WORKDIR" ]; then
@@ -135,7 +136,7 @@ if [ -z "$WORKDIR" ]; then
 	trap 'rm -rf $WORKDIR' INT
 fi
 WORKDIR="${WORKDIR%%/}"
-mkdir -p "$WORKDIR" && WORKDIR="$(realpath "$WORKDIR")"
+mkdir_is_writable "$WORKDIR" && WORKDIR="$(realpath "$WORKDIR")" || warning "Can not write to work directory '$WORKDIR'." && return 1
 
 # Release configuration
 RELEASE="${RELEASE:-${build_date}}"

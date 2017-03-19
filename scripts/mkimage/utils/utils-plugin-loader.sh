@@ -65,7 +65,7 @@ _load_plugins_from_file() {
 	_found="false"
 
 	# Check that $_file is actually a readable file, then update _file with canonical path.
-	[ -f "$_file" ] && [ -r "$_file" ] || return 1
+	file_is_readable "$_file" || return 1
 	_file="$(realpath "$_file")"
 
 	# Find all lines containing function definitions beginning with specified prefixes.
@@ -126,7 +126,7 @@ _load_plugins_from_target_recursive() {
 	while IFS=$'\n' read -r _file ; do
 		_load_plugins_from_file "$_file" "$_list" $@  && _found="true"
 	done<<-EOF
-		$([ -f "$_target" ] && printf '%s\n' "$_target" ; [ -d "$_target" ] && ( _load_plugins_find_plugin_files "$_target" $(getvar "$_list") $@ ))
+		$( file_is_readable "$_target" && printf '%s\n' "$_target" ; directory_is_readable "$_target" && ( _load_plugins_find_plugin_files "$_target" $(getvar "$_list") $@ ) )
 	EOF
 
 	IFS=$OIFS
