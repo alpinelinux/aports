@@ -5,7 +5,7 @@ build_all_kernels() {
 	fkrt_faked_start kernel
 	for _flavor in $(get_kernel_flavors); do
 		_err=1
-		fkrt_enable_kernel
+		fkrt_enable kernel
 		build_kernel "$_flavor" && _err=0 || break
 		fkrt_disable
 	done
