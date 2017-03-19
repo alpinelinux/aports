@@ -52,7 +52,7 @@ _profile_base_make_host() {
 
 _profile_base_make_box() {
 	_profile_base_make_host
-	iadd_initfs_load_modules "ahci nvme cdrom vfat ext3 ext4"
+	add_initfs_load_modules "ahci nvme cdrom vfat ext3 ext4"
 	add_initfs_features "ata-ahci nvme cdrom fat ext3 ext4 network"
 }
 
