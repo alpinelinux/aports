@@ -1,76 +1,77 @@
 # Build all specified kernels.
 build_all_kernels() {
-	local _flavor
+	local _flavor _err
 
 	fkrt_faked_start kernel
 	for _flavor in $(get_kernel_flavors); do
-		build_kernel "$_flavor"
+		_err=1
+		fkrt_enable_kernel
+		build_kernel "$_flavor" && _err=0 || break
+		fkrt_disable
 	done
 	fkrt_faked_stop kernel
+
+	return $_err
 }
 
 # Build a specific kerenel config.
 build_kernel() {
 	local _flavor="$1"
 
-	fkrt_enable kernel
+	local _pkgs
 
-		local _pkgs
+	#FIXME Should these really be hard-coded?
+	local _kpkg=$(suffix_kernel_flavor $_flavor "linux") && _kpkg=${_kpkg// /}
+	local _fpkg=linux-firmware
 
-		#FIXME Should these really be hard-coded?
-		local _kpkg=$(suffix_kernel_flavor $_flavor "linux") && _kpkg=${_kpkg// /}
-		local _fpkg=linux-firmware
+	local _kpkg_full=$( printf %s $(apk_pkg_full $_kpkg)) && _kpkg_full=${_kpkg_full// /}
+	local _fpkg_full=$(apk_pkg_full $_fpkg)
 
-		local _kpkg_full=$( printf %s $(apk_pkg_full $_kpkg)) && _kpkg_full=${_kpkg_full// /}
-		local _fpkg_full=$(apk_pkg_full $_fpkg)
+	local _kver_full=${_kpkg_full#$_kpkg-}
+	local _kver_short=${_kver_full%-r*}
+	local _kver_rev=${_kver_full#$_kver_short-r}
+	local _kver_rel=$_kver_short-$_kver_rev-$_flavor
 
-		local _kver_full=${_kpkg_full#$_kpkg-}
-		local _kver_short=${_kver_full%-r*}
-		local _kver_rev=${_kver_full#$_kver_short-r}
-		local _kver_rel=$_kver_short-$_kver_rev-$_flavor
+	var_list_set _pkgs_flavored "$(suffix_kernel_flavor $_flavor $initfs_apks_flavored $initfs_only_apks_flavored)"
+	var_list_set _pkgs "$initfs_apks $initfs_only_apks"
 
-		var_list_set _pkgs_flavored "$(suffix_kernel_flavor $_flavor $initfs_apks_flavored $initfs_only_apks_flavored)"
-		var_list_set _pkgs "$initfs_apks $initfs_only_apks"
+	local id_base=$(_apk fetch -R --simulate alpine-baselayout | sort -u | checksum)
+	local id_kern=$(_apk fetch -R --simulate $_kpkg | sort -u  | checksum)
+	local id_firm=$(_apk fetch -R --simulate $_fpkg | sort -u  | checksum)
+	local id_pkgs=$(_apk fetch -R --simulate alpine-baselayout $_pkgs | sort -u  | checksum)
+	local id_pkgs_flavored=$(_apk fetch -R --simulate $_pkgs_flavored | sort -u  | checksum)
+	local id_stage=$(printf '%s' $id_base $id_kern $id_firm $id_pkgs $id_pkgs_flavored| checksum)
+	local id_modloop=$(printf '%s' $id_kern $id_firm $id_pkgs_flavored | checksum)
+	local id_mkinitfs=$(printf '%s' $id_kern $id_firm $id_pkgs $id_pkgs_flavored $id_stage $initfs_features | checksum)
+	local id_install=$(printf '%s' $id_kern $id_firm $id_pkgs $id_pkgs_flavored $id_stage $id_modloop $id_mkinitfs | checksum)
 
-		local id_base=$(_apk fetch -R --simulate alpine-baselayout | sort -u | checksum)
-		local id_kern=$(_apk fetch -R --simulate $_kpkg | sort -u  | checksum)
-		local id_firm=$(_apk fetch -R --simulate $_fpkg | sort -u  | checksum)
-		local id_pkgs=$(_apk fetch -R --simulate alpine-baselayout $_pkgs | sort -u  | checksum)
-		local id_pkgs_flavored=$(_apk fetch -R --simulate $_pkgs_flavored | sort -u  | checksum)
-		local id_stage=$(printf '%s' $id_base $id_kern $id_firm $id_pkgs $id_pkgs_flavored| checksum)
-		local id_modloop=$(printf '%s' $id_kern $id_firm $id_pkgs_flavored | checksum)
-		local id_mkinitfs=$(printf '%s' $id_kern $id_firm $id_pkgs $id_pkgs_flavored $id_stage $initfs_features | checksum)
-		local id_install=$(printf '%s' $id_kern $id_firm $id_pkgs $id_pkgs_flavored $id_stage $id_modloop $id_mkinitfs | checksum)
-
-		# Stage everything so we don't have to repeat ourselves!
-		KERNEL_STAGING="kernel_staging-$ARCH-$_kpkg_full-$id_kern"
-		KERNEL_STAGING="${KERNEL_STAGING//[^A-Za-z0-9]/_}"
-		KERNEL_STAGING="${WORKDIR}/${KERNEL_STAGING}"
-		mkdir -p "$KERNEL_STAGING"
-		KERNEL_STAGING="$(realpath $KERNEL_STAGING)"
+	# Stage everything so we don't have to repeat ourselves!
+	KERNEL_STAGING="kernel_staging-$ARCH-$_kpkg_full-$id_kern"
+	KERNEL_STAGING="${KERNEL_STAGING//[^A-Za-z0-9]/_}"
+	KERNEL_STAGING="${WORKDIR}/${KERNEL_STAGING}"
+	mkdir_is_writable "$KERNEL_STAGING"
+	KERNEL_STAGING="$(realpath $KERNEL_STAGING)"
 
 
-		build_section kernel_stage_begin "$KERNEL_STAGING" $ARCH $id_base
-		build_section kernel_stage_packaged_kernel "$KERNEL_STAGING"  $ARCH $id_kern $_flavor $_kpkg $_kpkg_full $_kver_rel
-		build_section kernel_stage_packaged_modules "$KERNEL_STAGING"  $ARCH $id_kern $_flavor $_kpkg $_kpkg_full $_kver_rel
-		build_section kernel_stage_packaged_firmware "$KERNEL_STAGING"  $ARCH $id_firm $_fpkg $_fpkg_full
-		build_section kernel_stage_packaged_dtbs "$KERNEL_STAGING"  $ARCH $id_kern $_flavor $_kpkg $_kpkg_full $_kver_rel
-		build_section kernel_stage_added_pkgs "$KERNEL_STAGING" $ARCH $id_pkgs $_pkgs
-		build_section kernel_stage_added_pkgs_flavored "$KERNEL_STAGING" $ARCH $id_pkgs_flavored $_flavor $_pkgs_flavored
+	build_section kernel_stage_begin "$KERNEL_STAGING" $ARCH $id_base || return 1
+	build_section kernel_stage_packaged_kernel "$KERNEL_STAGING"  $ARCH $id_kern $_flavor $_kpkg $_kpkg_full $_kver_rel || return 1
+	build_section kernel_stage_packaged_modules "$KERNEL_STAGING"  $ARCH $id_kern $_flavor $_kpkg $_kpkg_full $_kver_rel || return 1
+	build_section kernel_stage_packaged_firmware "$KERNEL_STAGING"  $ARCH $id_firm $_fpkg $_fpkg_full || return 1
+	build_section kernel_stage_packaged_dtbs "$KERNEL_STAGING"  $ARCH $id_kern $_flavor $_kpkg $_kpkg_full $_kver_rel || return 1
+	build_section kernel_stage_added_pkgs "$KERNEL_STAGING" $ARCH $id_pkgs $_pkgs || return 1
+	build_section kernel_stage_added_pkgs_flavored "$KERNEL_STAGING" $ARCH $id_pkgs_flavored $_flavor $_pkgs_flavored || return 1
 
-		# Merge the individual staged directories:
-		build_section kernel_stage_merge "$KERNEL_STAGING" $ARCH $id_stage $_kver_rel "base kernel modules firmware dtbs addpkgs addpkgs_flavored"
+	# Merge the individual staged directories:
+	build_section kernel_stage_merge "$KERNEL_STAGING" $ARCH $id_stage $_kver_rel "base kernel modules firmware dtbs addpkgs addpkgs_flavored" || return 1
 
-		# Build modloop, initramfs, devicetree
-		# TODO: Modify this to allow selecting which modules are installed in modloop!
-		build_section kernel_stage_modloop "$KERNEL_STAGING" $ARCH $id_modloop $_flavor $_kpkg $_kpkg_full $_kver_rel
-		build_section kernel_stage_mkinitfs "$KERNEL_STAGING" $ARCH $id_mkinitfs $_flavor $_kver_rel $initfs_features
-		build_section kernel_stage_devicetree "$KERNEL_STAGING" $ARCH $id_kern $_flavor $_kpkg $_kpkg_full $_kver_rel
+	# Build modloop, initramfs, devicetree
+	# TODO: Modify this to allow selecting which modules are installed in modloop!
+	build_section kernel_stage_modloop "$KERNEL_STAGING" $ARCH $id_modloop $_flavor $_kpkg $_kpkg_full $_kver_rel || return 1
+	build_section kernel_stage_mkinitfs "$KERNEL_STAGING" $ARCH $id_mkinitfs $_flavor $_kver_rel $initfs_features || return 1
+	build_section kernel_stage_devicetree "$KERNEL_STAGING" $ARCH $id_kern $_flavor $_kpkg $_kpkg_full $_kver_rel || return 1
 
-		# Install the final output in $DESTDIR here.
-		build_section kernel_install "$KERNEL_STAGING" $ARCH $id_install "kernel modloop mkinitfs devicetree"
-
-	fkrt_disable
+	# Install the final output in $DESTDIR here.
+	build_section kernel_install "$KERNEL_STAGING" $ARCH $id_install "kernel modloop mkinitfs devicetree" || return 1
 }
 
 # Begin build by making staging directory
@@ -101,7 +102,7 @@ build_kernel_stage_custom_kernel() {
 	mkdir_is_writable "$1/kernel"
 	make -C "$BUILDDIR" INSTALL_PATH="$1/kernel/boot" ${kernel_make_install_target:-install}
 	rm -rf "$DESTDIR"
-	mkdir -p "$1/kernel/.built"
+	mkdir_is_writable "$1/kernel/.built"
 	ln -sfT "$1/kernel/.built" "$DESTDIR"
 }
 build_kernel_stage_custom_modules() {
@@ -185,26 +186,27 @@ build_kernel_stage_packaged_dtbs() {
 # Additional packages needed by mkinitfs for various feature files
 build_kernel_stage_added_pkgs() {
 	local base="$1"
-
-	rm -rf "$base/addpkgs$__extra"
-	mkdir_is_writable "$base-apks/addpkgs$__extra"
-	mkdir_is_writable "$base/addpkgs$__extra"
 	shift 3
+
+	local _out="$base/addpkgs$__extra"
+	rm -rf "$_out" && mkdir_is_writable "$_out" && _out=$(realpath "$_out") || return 1
+
+	local _outapks= "$base-apks/addpkgs$__extra"
+	mkdir_is_writable "$_outapks" && _out=$(realpath "$_outapks") || return 1
 
 	local p
 	for p in $@ ; do
-		_apk fetch -R -o "$base-apks/addpkgs$__extra" "$p"
+		_apk fetch -R -o "$_outapks" "$p"
 	done
 
-	local d="$base-apks/addpkgs$__extra"
-	if dir_is_readable "$d" ; then
-		find "$d" -name '*.apk' -exec tar -xz -C "$base/addpkgs$__extra" -f \{\} \;
-		ls -dA "$base/add_pkgs$__extra"/.[!.]* 2>&1 > /dev/null  && rm -rf "$base/addpkgs$__extra"/.[!.]*
+	if dir_is_readable "$_outapks" ; then
+		find "$d" -name '*.apk' -exec tar -xz -C "$_out" -f \{\} \;
+		ls -dA "$_out"/.[!.]* 2>&1 > /dev/null  && rm -rf "$_out"/.[!.]*
 	fi
 
 	rm -rf "$DESTDIR"
-	mkdir_is_writable "$base/addpkgs$__extra/.built"
-	ln -sfT "$base/addpkgs$__extra/.built" "$DESTDIR"
+	mkdir_is_writable "$_out/.built"
+	ln -sfT "$_out/.built" "$DESTDIR"
 }
 # Wrapper to swallow flavored packages
 build_kernel_stage_added_pkgs_flavored() {
@@ -226,20 +228,20 @@ build_kernel_stage_merge() {
 	local _kver="$4"
 	shift 4
 
-	rm -rf
-	mkdir_is_writable "$base/merged"
+	local _out="$base/merged"
+	rm -rf "$_out" && mkdir_is_writable "$_out" && _out=$(realpath "$_out") || return 1
 
 	local d f
 	for d in $@ ; do
 		f="${base}/${d}"
-		dir_is_readable "$f" && ( cd "$f" && find | cpio -pumd "$base/merged" )
+		dir_is_readable "$f" && ( cd "$f" && find | cpio -pumd "$_out" )
 	done
 
-	depmod -b "$base/merged" "$_kver"
+	depmod -b "$_out" "$_kver"
 
 	rm -rf "$DESTDIR"
-	mkdir_is_writable "$base/merged/.built"
-	ln -sfT "$base/merged/.built" "$DESTDIR"
+	mkdir_is_writable "$_out/.built"
+	ln -sfT "$_out/.built" "$DESTDIR"
 }
 
 
@@ -248,14 +250,17 @@ build_kernel_stage_modloop() {
 	local base="$1"
 	local _flavor="$4"
 
-	local _out="$base/modloop"
-	local _tmp="$_out-tmp"
-	local _outname="modloop-$_flavor"
-
 	dir_is_readable "$base/merged/lib/modules" || ! warning "Could not read merged modules directory '$base/merged/lib/modules'" || return 1
 	dir_is_readable "$base/merged/lib/firmware" || ! warning "Could not read merged firmware directory '$base/merged/lib/firmware'" || return 1
 
-	rm -rf "$_tmp" "$_out"
+	local _out="$base/modloop"
+	rm -rf "$_out" && mkdir_is_writable "$_out" && _out=$(realpath "$_out") || return 1
+
+	local _tmp="$_out-tmp"
+	rm -rf "$_tmp"
+
+	local _outname="modloop-$_flavor"
+
 	mkdir_is_writable "$_out/boot"
 	mkdir_is_writable "$_tmp/lib"
 
@@ -279,12 +284,13 @@ build_kernel_stage_mkinitfs() {
 	local _kver="$5"
 	shift 5
 
-	local _out="$base/mkinitfs"
-	local _tmp="$_out-tmp"
-
 	dir_is_readable "$base/merged" || ! warning "Could not read merged directory root '$base/merged'" || return 1
 
-	rm -rf "$_out" "$_tmp"
+	local _out="$base/mkinitfs"
+	rm -rf "$_out" && mkdir_is_writable "$_out" && _out=$(realpath "$_out") || return 1
+
+	local _tmp="$_out-tmp"
+	rm -rf "$_tmp"
 
 	mkdir_is_writable "$_out/boot"
 	mkdir_is_writable "$_tmp"
@@ -313,8 +319,7 @@ build_kernel_stage_devicetree () {
 	mkdir_is_writable "$base/devicetree"
 
 	if dir_is_readable "$_in" ; then
-		mkdir_is_writable "$_out"
-		_out=$(realpath "$_out")
+		rm -rf "$out" && mkdir_is_writable "$_out" && _out=$(realpath "$_out") || return 1
 		(cd $_in && find -type f \( -name "*.dtb" -o -name "*.dtbo" \) | cpio -pudm "$_out" 2> /dev/null) || return 1
 	fi
 
@@ -329,8 +334,7 @@ build_kernel_install() {
 	shift 3
 
 	local _out="$DESTDIR"
-	rm -rf "$_out"
-	mkdir_is_writable "$_out"
+	rm -rf "$_out" && mkdir_is_writable "$_out" && _out=$(realpath "$_out") || return 1
 
 	# TODO: Handle differnt output directories (rpi?) for various bits when needed.
 	local d f
