@@ -38,7 +38,7 @@ apk_extract_files() {
 	local mydest="$2"
 	shift 2
 
-	file_is_readable "$myapk" || ! warning "apk_extract_files - Can not read apk: '$myapk'" || return 1
+	apk_check_pkgs "$myapk" || ! warning "apk_extract_files - Package '$myapk' can not be foud!" || return 1
 	dir_is_writable "$mydest" || ! warning "apk_extract_files - Can not write to destination: '$mydest'" || return 1
 	_apk fetch --quiet "$myapk" --stdout | tar -xz -C "$mydest" "$@"
 }
