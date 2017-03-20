@@ -49,7 +49,7 @@ $0	--help
 options:
 --arch			Specify which architecture images to build
 			(default: $default_arch)
---hostkeys		Copy system apk signing keys to created images
+--no-hostkeys		Don't copy system apk signing keys to created images
 --outdir		Specify directory for the created images
 --profile		Specify which profiles to build
 --plugins		Specify a file or directory structure root from
@@ -82,7 +82,7 @@ load_plugins "$scriptdir"
 
 info_prog_set "$scriptname"
 
-_hostkeys="${_hostkeys:-}"
+_hostkeys="${_hostkeys:-yes}"
 _simulate="${_simulate:-}"
 _checksum="${_checksum:-}"
 
@@ -103,7 +103,7 @@ while [ $# -gt 0 ]; do
 	--arch) req_arch="$1"; shift ;;
 	--profile) req_profiles="$1"; shift ;;
 	--plugin) load_plugins "$1"; shift ;;
-	--hostkeys) _hostkeys="--hostkeys";;
+	--no-hostkeys) _hostkeys="";;
 	--simulate) _simulate="yes";;
 	--checksum) _checksum="yes";;
 	--yaml) _yaml="yes";;
