@@ -1,52 +1,60 @@
-feature_files() {
-	local dir="$1"
+
+mkinitfs_feature_files() {
+	local _src="${1%/}"
 	local suffix="$2"
-	local glob file fdir
-	for f in $features; do
-		for fdir in $features_dirs; do
-			[ -f "$fdir/$f.$suffix" ] || continue
-			for glob in $(sed -e '/^$/d' -e '/^#/d' -e "s|^/*|$dir|" "$fdir/$f.$suffix"); do
-				for file in $glob; do
-					if [ -d $file ]; then
-						find $file -type f
-					elif [ -e "$file" ]; then
-						echo $file
-					fi
-				done
+	shift 2
+
+	local glob file
+	for f in $@; do
+		[ "$(type -t _initfs_${f}_${suffix})" ] \
+			|| ! warning "Could not get $suffix list for feature '$f'!" \
+			|| continue
+
+		for glob in $( _initfs_${f}_${suffix} | sed -e '/^$/d' -e '/^#/d' -e "s|^/*|$_src/|") ; do
+			for file in $glob; do
+				if [ -d $file ]; then
+					find $file -type f
+				elif [ -e "$file" ]; then
+					echo $file
+				fi
 			done
-			break
 		done
 	done
 }
 
-initfs_base() {
-	local i= dirs= glob= file=
+mkinitfs_initfs_base() {
+	local _src _tgt
+	_src="${1%/}"
+	_tgt="${2%/}"
+	shift 2
+
+	local i=
 	for i in dev proc sys sbin bin run .modloop lib/modules media/cdrom \
 	    etc/apk media/floppy media/usb newroot; do
-		dirs="$dirs $tmpdir/$i"
+		mkdir_is_writable "$_tgt/$i"
 	done
-	mkdir -p $dirs
 
-	local oldpwd="$PWD"
-	cd "${basedir}"
 
-	lddtree -R "$basedir" -l --no-auto-root \
-		$(feature_files "$basedir" files) \
-		\
-		| sed -e "s|^$basedir||" | sort -u \
-		| cpio --quiet -pdm "$tmpdir" || return 1
+	( cd $_src && lddtree -R "$_src" -l --no-auto-root \
+		$(feature_files "$_src" files "$@") \
+		| sed -e "s|^$_src||" | sort -u \
+		| cpio --quiet -pdm "$_tgt"
+	) || return 1
 	
 	# copy init
-	cd "$startdir"
-	install -m755 "$init" "$tmpdir"/init || return 1
-	for i in "$fstab" "$passwd" "$group"; do
-		install -Dm644 "$i" "$tmpdir"/etc/${i##*/} || return 1
+	install -m755 "$initfs_src_init" "$_tgt"/init || return 1
+	for i in "$initfs_src_fstab" "$initfs_src_passwd" "$initfs_src_group"; do
+		install -Dm644 "$i" "$_tgt"/etc/${i##*/} || return 1
 	done
-	cd "$oldpwd"
 }
 
-find_kmod_deps() {
-	awk -v prepend="/lib/modules/$kernel/" -v modulesdep="${basedir}lib/modules/$kernel/modules.dep" '
+mkinitfs_find_kmod_deps() {
+	local _src
+	_src="${1%/}"
+	_kver="${2%}"
+	shift 2
+
+	awk -v prepend="/lib/modules/$_kver/" -v modulesdep="${_src}/lib/modules/$_kver/modules.dep" '
 function recursedeps(k,		j, dep) {
 	if (k in visited)
 		return;
@@ -80,64 +88,93 @@ END {
 }'
 }
 
-find_kmods() {
+mkinitfs_find_kmods() {
+	local _src _tgt
+	_src="${1%/}"
+	_kver="${2%/}"
+	shift 2
+
 	local oldpwd="$PWD"
-	cd "$kerneldir" || return 1
-	for file in $(feature_files "${kerneldir}/" modules); do
-		echo ${file#${kerneldir%/}/}
-	done | find_kmod_deps
+	cd "$_src" || return 1
+	for file in $(mkinitfs_feature_files "${_src}" modules "$@"); do
+		echo ${file#${_src%/}/}
+	done | mkinitfs_find_kmod_deps "$_src" "$_kver"
 	cd "$oldpwd"
 }
 
-initfs_kmods() {
-	[ -z "$nokernel" ] || return
-	local glob= file= files= dirs=
-	rm -rf "$tmpdir"/lib/modules
+mkinitfs_kmods() {
+	local _src _tgt
+	_src="${1%/}"
+	_tgt="${2%/}"
+	_kver="${3}"
+	shift 3
+
+	local file=
+	local kerneldir="$_src/lib/modules/$_kver"
+
+	rm -rf "$_tgt"/lib/modules
 	# make sure we have modules.dep
 	if ! [ -f "$kerneldir"/modules.dep ]; then
-		depmod -b "${basedir}" $kernel
+		depmod -b "$_src" $kernel
 	fi
+
 	local oldpwd="$PWD"
-	cd "${basedir}"
-	for file in $(find_kmods); do
+	cd "${_src}"
+	for file in $(mkinitfs_find_kmods "$_src" "$_kver" "$@" ); do
 		echo "${file#/}"
-	done | sort -u | cpio --quiet -pdm "$tmpdir" || return 1
+	done | sort -u | cpio --quiet -pdm "$_tgt" || return 1
 	for file in modules.order modules.builtin; do
 		if [ -f "$kerneldir"/$file ]; then
-			cp "$kerneldir"/$file "$tmpdir"/lib/modules/$kernel/
+			cp "$kerneldir"/$file "$_tgt"/lib/modules/$_kver/
 		fi
 	done
-	depmod $kernel -b "$tmpdir"
+	depmod $_kver -b "$_tgt"
 	cd "$oldpwd"
 }
 
-initfs_firmware() {
-	[ -z "$nokernel" ] || return
-	rm -rf "$tmpdir"/lib/firmware
-	mkdir -p "$tmpdir"/lib/firmware
-	find "$tmpdir"/lib/modules -type f -name "*.ko" | xargs modinfo -F firmware | sort -u | while read FW; do
-		[ -e "${basedir}/lib/firmware/${FW}" ] && install -pD "${basedir}/lib/firmware/${FW}" "$tmpdir"/lib/firmware/$FW
+# Usage: initfs_copy_firmware_deps <source> <target>
+mkinitfs_firmware() {
+	local _src _tgt
+	_src="${1%/}"
+	_tgt="${2%/}"
+
+	rm -rf "$_tgt"/lib/firmware
+	mkdir_is_writable "$_tgt"/lib/firmware
+
+	find "$_tgt"/lib/modules -type f -name "*.ko" | xargs modinfo -F firmware | sort -u | while read FW; do
+		[ -e "${_src}/lib/firmware/${FW}" ] && install -pD "${_src}/lib/firmware/${FW}" "$_tgt"/lib/firmware/$FW
 	done
 	return 0
 }
 
-initfs_apk_keys() {
-	mkdir -p "$tmpdir"/etc/apk/keys
-	[ "$hostkeys" ] && cp "/etc/apk/keys/"* "$tmpdir"/etc/apk/keys/
-	cp "${basedir}etc/apk/keys/"* "$tmpdir"/etc/apk/keys/
+mkinitfs_apk_keys() {
+	local _src _tgt
+	_src="${1%/}"
+	_tgt="${2%/}"
+
+	mkdir_is_writable "$_tgt"/etc/apk/keys
+	[ "$_hostkeys" ] && cp "/etc/apk/keys/"* "$_tgt"/etc/apk/keys/
+	cp "${_src}/etc/apk/keys/"* "$_tgt"/etc/apk/keys/
 }
 
-initfs_cpio() {
-	if [ -n "$list_sources" ]; then
-		(cd "$tmpdir" && find . | sort)
-		return
-	fi
-	rm -f $outfile
+mkinitfs_cpio_sources() {
+	local _src _tgt
+	_src="${1%/}"
+	(cd "$_src" && find . | sort)
+}
+
+mkinitfs_cpio() {
+	local _src _tgt
+	_src="${1%/}"
+	_out="${2%/}"
+	shift 2
+
+	rm -f "$_out"
 	umask 0022
-	(cd "$tmpdir" && find . | sort | cpio --quiet -o -H newc | gzip -9) > $outfile
+	(cd "$_src" && find . | sort | cpio --quiet -o -H newc | gzip -9) > $_out
 }
 
-usage() {
+mkinitfs_old_usage() {
 	cat <<EOF
 usage: mkinitfs [-hkKLln] [-b basedir] [-c configfile] [-F features] [-f fstab]
 		[-i initfile ] [-o outfile] [-P featuresdir] [-t tempdir] [kernelversion]"
@@ -162,10 +199,25 @@ EOF
 	exit 1
 }
 
+# Usage: mkinitfs <source dir> <temp dir> <outfile> <kernel version> <initfs-features...>
 mkinitfs() {
-initfs_base \
-	&& initfs_kmods \
-	&& initfs_firmware \
-	&& initfs_apk_keys \
-	&& initfs_cpio
+	local _src _tgt
+	_src="${1%/}"
+	_tgt="${2%/}"
+	_out="${3%/}"
+	_kver="${4}"
+	shift 4
+
+
+	initfs_src_fstab="${initfs_src_fstab}"
+	initfs_src_init="${initfs_src_init}"
+	initfs_src_passwd="${initfs_src_passwd}"
+	initfs_src_group="${initfs_src_group}"
+
+	mkinitfs_base "$_src" "$_tgt" "$@" \
+		&& mkinitfs_kmods "$_src" "$_tgt" "$_kver" "$@" \
+		&& mkinitfs_firmware "$_src" "$_tgt" \
+		&& mkinitfs_apk_keys "$_src" "$_tgt" \
+		&& mkinitfs_cpio "$_tgt" "$_out" \
+		|| ! warning "mkintfs failed!" || return 1
 }
