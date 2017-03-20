@@ -4,6 +4,6 @@ initfs_fs_squashfs() {
 
 _initfs_fs_squashfs_modules() {
 	cat <<-'EOF'
-		kernel/fs/squashfs
+		kernel/fs/squashfs/
 	EOF
 }

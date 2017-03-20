@@ -3,10 +3,8 @@ initfs_fs_xfs() {
 }
 
 _initfs_fs_xfs_modules() {
-	# FIXME: Crypto should be on its own.
 	cat <<-'EOF'
-		kernel/arch/*/crypto/crc32*
-		kernel/crypto/crc32*
-		kernel/fs/xfs
+		kernel/fs/xfs/
 	EOF
+	_initfs_crypto_crc32_modules
 }

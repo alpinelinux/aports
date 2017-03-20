@@ -4,13 +4,13 @@ initfs_fs_zfs() {
 
 _initfs_fs_zfs_modules() {
 	cat <<-'EOF'
-	extra/avl
-	extra/nvpair
-	extra/spl
-	extra/unicode
-	extra/zcommon
-	extra/zfs
-	extra/zpios
+	extra/avl/
+	extra/nvpair/
+	extra/spl/
+	extra/unicode/
+	extra/zcommon/
+	extra/zfs/
+	extra/zpios/
 	EOF
 }
 

@@ -4,7 +4,7 @@ initfs_fs_ubifs() {
 
 _initfs_fs_ubifs_modules() {
 	cat <<-'EOF'
-		kernel/fs/ubifs
+		kernel/fs/ubifs/
 	EOF
 }
 

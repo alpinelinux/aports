@@ -4,7 +4,7 @@ initfs_fs_jfs() {
 
 _initfs_fs_jfs_modules() {
 	cat <<-'EOF'
-		kernel/fs/jfs
+		kernel/fs/jfs/
 	EOF
 }
 

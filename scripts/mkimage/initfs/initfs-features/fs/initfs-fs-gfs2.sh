@@ -4,7 +4,7 @@ initfs_fs_gfs2() {
 
 _initfs_fs_gfs2_modules() {
 	cat <<-'EOF'
-		kernel/fs/gfs2
+		kernel/fs/gfs2/
 	EOF
 }
 

@@ -4,7 +4,7 @@ initfs_fs_ocfs2() {
 
 _initfs_fs_ocfs2_modules() {
 	cat <<-'EOF'
-		kernel/fs/ocfs2
+		kernel/fs/ocfs2/
 	EOF
 }
 

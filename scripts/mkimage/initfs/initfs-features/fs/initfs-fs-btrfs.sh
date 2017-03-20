@@ -3,10 +3,8 @@ initfs_fs_btrfs() {
 }
 
 _initfs_fs_btrfs_modules() {
-	# FIXME: Crypto should be on its own.
 	cat <<-'EOF'
-		kernel/arch/*/crypto/crc32*
-		kernel/crypto/crc32*
-		kernel/fs/btrfs
+		kernel/fs/btrfs/
 	EOF
+	_initfs_crypto_crc32_modules
 }

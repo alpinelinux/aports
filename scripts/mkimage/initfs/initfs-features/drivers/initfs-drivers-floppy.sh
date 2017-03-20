@@ -1,4 +1,3 @@
-
 initfs_drivers_floppy() {
 	return 0
 }
@@ -8,3 +7,4 @@ _initfs_drivers_floppy_modules() {
 		kernel/drivers/block/floppy.ko
 	EOF
 }
+

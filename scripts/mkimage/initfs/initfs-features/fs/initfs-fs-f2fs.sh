@@ -4,6 +4,6 @@ initfs_fs_f2fs() {
 
 _initfs_fs_f2fs_modules() {
 	cat <<-'EOF'
-		kernel/fs/f2fs
+		kernel/fs/f2fs/
 	EOF
 }

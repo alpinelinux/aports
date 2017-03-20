@@ -4,6 +4,6 @@ initfs_fs_cramfs() {
 
 _initfs_fs_cramfs_modules() {
 	cat <<-'EOF'
-		kernel/fs/cramfs
+		kernel/fs/cramfs/
 	EOF
 }

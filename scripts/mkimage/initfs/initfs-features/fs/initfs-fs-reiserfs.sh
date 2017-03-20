@@ -5,7 +5,7 @@ initfs_fs_reiserfs() {
 
 _initfs_fs_reiserfs_modules() {
 	cat <<-'EOF'
-		kernel/fs/reiserfs
+		kernel/fs/reiserfs/
 	EOF
 }
 
