@@ -53,22 +53,26 @@ _profile_base_make_host() {
 _profile_base_make_box() {
 	_profile_base_make_host
 	add_initfs_load_modules "ahci nvme cdrom vfat ext3 ext4"
-	add_initfs_features "ata-ahci drivers-nvme drivers-cdrom fs-fat fs-ext3 fs-ext4 network"
+	add_initfs_features "ata-ahci drivers-nvme drivers-cdrom fs-fat fs-ext3 fs-ext4 net-drivers-ethernet"
 }
 
 _profile_base_make_workstation() {
 	_profile_base_make_box
-	add_initfs_features "ata-sata scsi-drivers-sas"
+	add_initfs_features "ata-drivers-sata scsi-drivers-sas"
 }
 
 _profile_base_make_pc() {
 	_profile_base_make_box
-	add_initfs_features "ata-sata"
+	add_initfs_features "ata-drivers-sata"
 }
 
 _profile_base_make_all_kitchen_sink() {
 	_profile_base_make_box
-	add_initfs_features "9p ata bootchart btrfs cdrom cramfs cryptsetup f2fs floppy gfs2 iscsi iscsi-target jfs keymap kms kvm-amd kvm-intel lvm mmc nbd nvme ocfs2 raid reiserfs scsi ubifs virt-host virtio xfs zfs"
+	add_initfs_features "ata-all drivers-cdrom drivers-floppy scsi-iscsi drivers-mmc block-nbd drivers-nvme scsi-all virtio-all"
+	add_initfs_features "md-cryptsetup md-lvm md-raid"
+	add_initfs_features "9p"
+	add_initfs_features "fs-btrfs fs-cramfs fs-f2fs fs-gfs2 fs-jfs fs-ocfs2 fs-reiserfs fs-ubifs fs-xfs fs-zfs"
+	add_initfs_features "bootchart iscsi-target keymaps-all kms kvm-amd kvm-intel virt-host"
 }
 
 _profile_base_make_embedded() {
