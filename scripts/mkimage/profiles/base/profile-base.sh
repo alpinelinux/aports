@@ -20,7 +20,7 @@ profile_base() {
 	# Load the bootable skeleton profile
 	profile_skel_bootable
 
-	add_initfs_features "keymaps"
+	add_initfs_features "keymaps-all"
 	# Add our base filesystem, keymaps, ssl/crypto tools, and timezone data
 	add_rootfs_apks "alpine-base bkeymaps libressl tzdata"
 	add_apks "alpine-mirrors"
@@ -40,20 +40,20 @@ profile_base() {
 
 _profile_base_make_default(){
 	add_initfs_load_modules "cdrom sr_mod sd_mod virtio_scsi usb-storage"
-	add_initfs_features "ata base cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
+	add_initfs_features "ata-all base drivers-cdrom fs-squashfs fs-ext2 fs-ext3 fs-ext4 drivers-mmc md-raid scsi-all drivers-usb virt-virtio"
 	add_apks "e2fsprogs network-extras"
 }
 
 _profile_base_make_host() {
 	add_initfs_load_modules "sd_mod usb-storage"
-	add_initfs_features "scsi-basic ext2 usb"
+	add_initfs_features "scsi-base fs-ext2 drivers-usb"
 	add_apks "e2fsprogs network-extras"
 }
 
 _profile_base_make_box() {
 	_profile_base_make_host
 	add_initfs_load_modules "ahci nvme cdrom vfat ext3 ext4"
-	add_initfs_features "ata-ahci nvme cdrom fat ext3 ext4 network"
+	add_initfs_features "ata-ahci drivers-nvme drivers-cdrom fs-fat fs-ext3 fs-ext4 network"
 }
 
 _profile_base_make_workstation() {
@@ -82,7 +82,7 @@ _profile_base_make_virtio() {
 	set_kernel_flavors_if_empty "virtgrsec"
 
 	add_initfs_load_modules "scsi_mod sr_mod sd_mod cdrom virtio_scsi virtio_net"
-	add_initfs_features "scsi cdrom virtio ext2 ext3 ext4"
+	add_initfs_features "scsi-base drivers-cdrom virt-virtio fs-ext2 fs-ext3 fs-ext4"
 	#add_initfs_features "scsi-base cdrom virtio-guest-base ext2 ext3 ext4"
 	#add_initfs_apks_flavored "linux"
 	add_rootfs_apks "bridge vlan"

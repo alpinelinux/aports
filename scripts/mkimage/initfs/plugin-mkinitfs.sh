@@ -36,12 +36,12 @@ mkinitfs_feature_files() {
 
 	local f glob file fname
 	for f in $@; do
-		fname="$(type "_initfs_${f}_${suffix}")"
+		fname="$(type "_initfs_${f//-/_}_${suffix}")"
 		[ "$fname" != "${fname//shell function/}" ] \
 			|| ! warning "mkinitfs: Could not get $suffix list for feature '$f'!" \
 			|| continue
 
-		for glob in $( _initfs_${f}_${suffix} | sed -e '/^$/d' -e '/^#/d' -e "s|^/*|$_src/|") ; do
+		for glob in $( _initfs_${f//-/_}_${suffix} | sed -e '/^$/d' -e '/^#/d' -e "s|^/*|$_src/|") ; do
 			for file in $glob; do
 				if [ -d $file ]; then
 					find $file -type f
@@ -144,6 +144,7 @@ mkinitfs_initfs_kmods() {
 	local kerneldir="$_src/lib/modules/$_kver"
 
 	rm -rf "$_tgt"/lib/modules
+	mkdir_is_writable "$_tgt/lib/modules/$_kver"
 	# make sure we have modules.dep
 	if ! [ -f "$kerneldir"/modules.dep ]; then
 		depmod -b "$_src" $kernel
@@ -151,13 +152,13 @@ mkinitfs_initfs_kmods() {
 
 	local oldpwd="$PWD"
 	cd "${_src}"
-	for file in $(mkinitfs_find_kmods "$_src" "$_kver" "$@" ); do
+	for file in $(mkinitfs_find_kmods "$kerneldir" "$_kver" "$@" ); do
 		echo "${file#/}"
 	done | sort -u | cpio --quiet -pdm "$_tgt" || return 1
 
 	for file in modules.order modules.builtin; do
 		if [ -f "$kerneldir"/$file ]; then
-			cp "$kerneldir"/$file "$_tgt/lib/modules/$_kver/"
+			cp "$kerneldir"/$file "$_tgt/lib/modules/$_kver/$file"
 		fi
 	done
 	depmod $_kver -b "$_tgt"
@@ -170,10 +171,10 @@ mkinitfs_initfs_firmware() {
 	_src="${1%/}"
 	_tgt="${2%/}"
 
-	rm -rf "$_tgt"/lib/firmware
-	mkdir_is_writable "$_tgt"/lib/firmware
+	rm -rf "$_tgt/lib/firmware"
+	mkdir_is_writable "$_tgt/lib/firmware"
 
-	find "$_tgt"/lib/modules -type f -name "*.ko" | xargs modinfo -F firmware | sort -u | while read FW; do
+	find "$_tgt/lib/modules" -type f -name "*.ko" | xargs modinfo -F firmware | sort -u | while read FW; do
 		[ -e "${_src}/lib/firmware/${FW}" ] && install -pD "${_src}/lib/firmware/${FW}" "$_tgt"/lib/firmware/$FW
 	done
 	return 0

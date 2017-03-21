@@ -108,7 +108,7 @@ while [ $# -gt 0 ]; do
 	--checksum) _checksum="yes";;
 	--yaml) _yaml="yes";;
 	--) break ;;
-	-*) _show_usage="yes";;
+	-*) _show_usage="yes" ; warning "Unrecognized option '$opt'" ; break ;;
 	esac
 done
 

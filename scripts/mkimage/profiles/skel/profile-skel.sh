@@ -21,7 +21,7 @@ profile_skel_bootable() {
 _profile_skel_make_bootable() {
 	set_kernel_flavors_if_empty "vanilla"
 	add_initfs_load_modules "loop squashfs"
-	add_initfs_features "base squashfs"
+	add_initfs_features "base fs-squashfs"
 	add_initfs_apks "alpine-baselayout alpine-keys apk-tools busybox busybox-initscripts libressl zlib libc-utils mkinitfs"
 	add_rootfs_apks "busybox-initscripts busybox-suid"
 }

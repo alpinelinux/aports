@@ -16,7 +16,7 @@ feature_iscsi_initiator() {
 	enable_rootfs_iscsi="${enable_rootfs_iscsi:=true}"
 
 	if [ "$enable_rootfs_iscsi" = "true" ] ; then
-		add_initfs_features "scsi"
+		add_initfs_features "scsi-iscsi"
 		add_initfs_apks "open-iscsi"
 	else
 		add_apks "open-iscsi"

@@ -192,7 +192,7 @@ build_kernel_stage_added_pkgs() {
 	rm -rf "$_out" && mkdir_is_writable "$_out" && _out=$(realpath "$_out") || return 1
 
 	local _outapks="$base-apks/addpkgs$__extra"
-	mkdir_is_writable "$_outapks" && _out=$(realpath "$_outapks") || return 1
+	mkdir_is_writable "$_outapks" && _outapks=$(realpath "$_outapks") || return 1
 
 	local p
 	for p in $@ ; do
@@ -299,7 +299,7 @@ build_kernel_stage_mkinitfs() {
 	# mkinitfs keep-tmp install-keys feature-dir base-dir features-file tmp-dir output-file kernel-version
 	# TODO: mkinitfs to use should be configurable.
 	msg "calling: mkinitfs -K -P /etc/mkinitfs/features.d -b $base/merged -c $base/merged/etc/mkinitfs/mkinitfs.conf -t "$_tmp" -o $_out/boot/initramfs-$_flavor $_kver"
-	mkinitfs -k -K -P /etc/mkinitfs/features.d -b "$base/merged" -c "$base/merged/etc/mkinitfs/mkinitfs.conf" -t "$_tmp" -o "$_out/boot/initramfs-$_flavor" "$_kver"
+	mkinitfs -k -K -P /etc/mkinitfs/features.d -b "$base/merged" -c "$base/merged/etc/mkinitfs/mkinitfs.conf" -t "$_tmp" -o "$_out/boot/initramfs-$_flavor" "$_kver" || return 1
 
 	rm -rf "$DESTDIR"
 	mkdir_is_writable "$_out/.built"

@@ -13,5 +13,5 @@ feature_kvm_host() {
 
 
 feature_kvm_guest() {
-	add_initfs_features "virtio"
+	add_initfs_features "virt-virtio"
 }
