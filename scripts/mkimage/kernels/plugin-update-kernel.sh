@@ -200,8 +200,9 @@ build_kernel_stage_added_pkgs() {
 	done
 
 	if dir_is_readable "$_outapks" ; then
-		find "$_outapks" -name '*.apk' -exec tar -xz -C "$_out" -f \{\} \; -exec rm -rf "$_out"/.[!.]* \;
+		find "$_outapks" -name '*.apk' -exec tar -xz -C "$_out" -f \{\} \;
 	fi
+	rm -rf "$_out"/.[!.]*
 
 	rm -rf "$DESTDIR"
 	mkdir_is_writable "$_out/.built"
