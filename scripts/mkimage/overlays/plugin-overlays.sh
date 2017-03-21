@@ -451,7 +451,7 @@ ovl_conf_d_file_setting() {
 	ovl_conf_file_setting_add_or_replace "/etc/conf.d/$1" "$2" "$3"
 }
 
-# TODO: Move this functionality to utils.
+# TODO: overlays - Move conf_file_add_or_replace functionality to more general util.
 ovl_conf_file_setting_add_or_replace() {
 	local _file="$1"
 	local _key="$2"

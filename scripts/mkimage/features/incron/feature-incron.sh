@@ -1,4 +1,4 @@
-#TODO Handle multiple system incrontabs, user incrontabs
+# TODO: feature_incron - Handle multiple system incrontabs and user incrontabs.
 feature_incron() {
 	local _arg _opt _val
 	local _autostart _autoload

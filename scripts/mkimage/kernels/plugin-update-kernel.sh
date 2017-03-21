@@ -20,7 +20,7 @@ build_kernel() {
 
 	local _pkgs
 
-	#FIXME Should these really be hard-coded?
+	#FIXME: update_kernel (build_kernel) - Should 'linux-$flavor' and 'linux-firmware' really be hard-coded?
 	local _kpkg=$(suffix_kernel_flavor $_flavor "linux") && _kpkg=${_kpkg// /}
 	local _fpkg=linux-firmware
 
@@ -65,7 +65,6 @@ build_kernel() {
 	build_section kernel_stage_merge "$KERNEL_STAGING" $ARCH $id_stage $_kver_rel "base kernel modules firmware dtbs addpkgs addpkgs_flavored" || return 1
 
 	# Build modloop, initramfs, devicetree
-	# TODO: Modify this to allow selecting which modules are installed in modloop!
 	build_section kernel_stage_modloop "$KERNEL_STAGING" $ARCH $id_modloop $_flavor $_kpkg $_kpkg_full $_kver_rel || return 1
 	build_section kernel_stage_mkinitfs "$KERNEL_STAGING" $ARCH $id_mkinitfs $_flavor $_kver_rel $initfs_features || return 1
 	build_section kernel_stage_devicetree "$KERNEL_STAGING" $ARCH $id_kern $_flavor $_kpkg $_kpkg_full $_kver_rel || return 1
@@ -97,7 +96,7 @@ build_kernel_stage_begin() {
 }
 
 # Custom kernel build directories.
-# TODO: Not yet implemented -- need to chase config options to enable
+# TODO: update_kernel - Custom kernel builds not yet implemented -- need to chase config options to enable properly.
 build_kernel_stage_custom_kernel() {
 	mkdir_is_writable "$1/kernel"
 	make -C "$BUILDDIR" INSTALL_PATH="$1/kernel/boot" ${kernel_make_install_target:-install}
@@ -183,6 +182,7 @@ build_kernel_stage_packaged_dtbs() {
 	ln -sfT "$1/dtbs/.built" "$DESTDIR"
 }
 
+# TODO: build_kernel - Add logic to discover packages needed from mkinitfs.
 # Additional packages needed by mkinitfs for various feature files
 build_kernel_stage_added_pkgs() {
 	local base="$1"
@@ -245,6 +245,7 @@ build_kernel_stage_merge() {
 
 
 # Build our modloop
+# TODO: update_kernel -  Modify build_kernel_stage_modloop to allow selecting which modules are installed in generated modloop!
 build_kernel_stage_modloop() {
 	local base="$1"
 	local _flavor="$4"
@@ -263,7 +264,7 @@ build_kernel_stage_modloop() {
 	mkdir_is_writable "$_out/boot"
 	mkdir_is_writable "$_tmp/lib"
 
-	# TODO: Allow filtering of modloop modules here!
+	# NOTE: Allow filtering of modloop modules here!
 	cp -a "$base/merged/lib/modules" "$_tmp/modules"
 	mkdir -p "$_tmp/modules/firmware"
 	find "$_tmp/modules" -type f -name "*.ko" | xargs modinfo -F firmware | sort -u | while read FW; do
@@ -297,7 +298,7 @@ build_kernel_stage_mkinitfs() {
 
 	echo "features=\"$@\"" > "$base/merged/etc/mkinitfs/mkinitfs.conf"
 	# mkinitfs keep-tmp install-keys feature-dir base-dir features-file tmp-dir output-file kernel-version
-	# TODO: mkinitfs to use should be configurable.
+	# TODO: update_kernel - Replace call to 'mkinitfs' wrapper with direct call to main function of integrated mkinitfs.
 	msg "calling: mkinitfs -K -P /etc/mkinitfs/features.d -b $base/merged -c $base/merged/etc/mkinitfs/mkinitfs.conf -t "$_tmp" -o $_out/boot/initramfs-$_flavor $_kver"
 	mkinitfs -k -K -P /etc/mkinitfs/features.d -b "$base/merged" -c "$base/merged/etc/mkinitfs/mkinitfs.conf" -t "$_tmp" -o "$_out/boot/initramfs-$_flavor" "$_kver" || return 1
 
@@ -335,14 +336,14 @@ build_kernel_install() {
 	local _out="$DESTDIR"
 	rm -rf "$_out" && mkdir_is_writable "$_out" && _out=$(realpath "$_out") || return 1
 
-	# TODO: Handle differnt output directories (rpi?) for various bits when needed.
+	# TODO: update_kernel - Handle differnt output directories (rpi?) for various bits when needed during install phase.
 	local d f
 	for d in $@ ; do
 		f="$base/$d"
 		dir_is_readable "$f" && ( cd "$f" && find | grep -v '^\./\.built' | cpio -pumd "$_out" ) || return 1
 	done
 
-	# TODO: Review "media" logic and implement if needed.
+	# TODO: update_kernel - Review "media" logic and implement needed functionality for install phase.
 	if [ "$media" = "false" ] ; then
 		mv "$_out/boot/"* "$_out"
 		rmdir "$_out/boot"

@@ -4,7 +4,7 @@ overlay_base() {
 
 
 ovl_script_base() {
-	# TODO: Split into appropriate common overlays.
+	# TODO: overlay_base - Split into appropriate common overlays.
 	ovl_runlevel_add sysinit devfs dmesg mdev hwdrivers modloop
 	ovl_runlevel_add boot hwclock modules sysctl hostname bootmisc syslog
 	ovl_runlevel_add shutdown mount-ro killprocs savecache

@@ -36,7 +36,7 @@ profile_base() {
 
 
 # Base types --
-# TODO: These probably need to be moved to a hardware config and out of the main profiles.
+# TODO: profile_base - Most base type definitions probably need to be moved to a hardware config and out of the main profiles.
 
 _profile_base_make_default(){
 	add_initfs_load_modules "cdrom sr_mod sd_mod virtio_scsi usb-storage"

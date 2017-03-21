@@ -1,5 +1,5 @@
 # rpi base profile
-# TODO: Make this configurable!
+# TODO: profile_rpi - Make profile options configurable!
 profile_rpi() {
 	set_kernel_flavors "rpi rpi2"
 	profile_base

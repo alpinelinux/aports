@@ -55,7 +55,7 @@ apk_repo_init() {
 		mkdir_is_writable "$APKROOT/etc/apk" || ! warning "Can not create apk repository root for '$_arch'!" || return 1
 
 		# Copy keys
-		# TODO: Add configuration for source location of host keys
+		# TODO: plugin_apks - Add configuration for source location of host keys.
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
 
 		# create root for caching packages
