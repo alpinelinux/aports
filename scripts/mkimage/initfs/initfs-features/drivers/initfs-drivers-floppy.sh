@@ -8,3 +8,4 @@ _initfs_drivers_floppy_modules() {
 	EOF
 }
 
+_initfs_drivers_floppy_files() { return 0 ; }

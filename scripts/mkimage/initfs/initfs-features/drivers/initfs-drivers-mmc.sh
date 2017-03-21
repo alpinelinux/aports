@@ -7,3 +7,5 @@ _initfs_drivers_mmc_modules() {
 		kernel/drivers/mmc/
 	EOF
 }
+
+_initfs_drivers_mmc_files() { return 0 ; }

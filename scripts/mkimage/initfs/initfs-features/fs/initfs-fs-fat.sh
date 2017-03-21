@@ -8,6 +8,10 @@ _initfs_fs_fat_modules() {
 	EOF
 }
 
+_initfs_fs_fat_files() { return 0 ; }
+
+
+
 initfs_fs_vfat() {
 	return 0
 }
@@ -18,3 +22,4 @@ _initfs_fs_vfat_modules() {
 	EOF
 }
 
+_initfs_fs_vfat_files() { return 0 ; }

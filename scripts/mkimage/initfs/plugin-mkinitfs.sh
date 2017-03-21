@@ -1,13 +1,44 @@
 
+
+# Usage: mkinitfs <source dir> <temp dir> <outfile> <kernel version> <initfs-features...>
+mkinitfs_main() {
+	local _src _tgt _out _kver _err
+	_src="${1%/}"
+	_tgt="${2%/}"
+	_out="${3%/}"
+	_kver="${4}"
+	shift 4
+
+	initfs_file_root="${initfs_file_root:-/usr/share/mkinitfs}"
+	initfs_src_fstab="${initfs_src_fstab:-$initfs_file_root/fstab}"
+	initfs_src_init="${initfs_src_init:-$initfs_file_root/initramfs-init}"
+	initfs_src_passwd="${initfs_src_passwd:-$initfs_file_root/passwd}"
+	initfs_src_group="${initfs_src_group:-$initfs_file_root/group}"
+
+	_err=1
+	mkinitfs_initfs_base "$_src" "$_tgt" "$@" \
+		&& if [ "$_mkinitfs_nomods" != "yes" ] ; then \
+			mkinitfs_initfs_kmods "$_src" "$_tgt" "$_kver" "$@" \
+			&& mkinitfs_initfs_firmware "$_src" "$_tgt" ; \
+		fi \
+		&& mkinitfs_initfs_apk_keys "$_src" "$_tgt" \
+		&& mkinitfs_initfs_cpio "$_tgt" "$_out" \
+		&& _err=0
+
+	[ $_err -ne 0 ] && warning "mkintfs: Building initfs failed!"
+	return $_err
+}
+
 mkinitfs_feature_files() {
 	local _src="${1%/}"
 	local suffix="$2"
 	shift 2
 
-	local glob file
+	local f glob file fname
 	for f in $@; do
-		[ "$(type -t _initfs_${f}_${suffix})" ] \
-			|| ! warning "Could not get $suffix list for feature '$f'!" \
+		fname="$(type "_initfs_${f}_${suffix}")"
+		[ "$fname" != "${fname//shell function/}" ] \
+			|| ! warning "mkinitfs: Could not get $suffix list for feature '$f'!" \
 			|| continue
 
 		for glob in $( _initfs_${f}_${suffix} | sed -e '/^$/d' -e '/^#/d' -e "s|^/*|$_src/|") ; do
@@ -36,7 +67,7 @@ mkinitfs_initfs_base() {
 
 
 	( cd $_src && lddtree -R "$_src" -l --no-auto-root \
-		$(feature_files "$_src" files "$@") \
+		$(mkinitfs_feature_files "$_src" files "$@") \
 		| sed -e "s|^$_src||" | sort -u \
 		| cpio --quiet -pdm "$_tgt"
 	) || return 1
@@ -96,13 +127,13 @@ mkinitfs_find_kmods() {
 
 	local oldpwd="$PWD"
 	cd "$_src" || return 1
-	for file in $(mkinitfs_feature_files "${_src}" modules "$@"); do
+	for file in $(mkinitfs_feature_files "${_src}" modules "$@") ; do
 		echo ${file#${_src%/}/}
 	done | mkinitfs_find_kmod_deps "$_src" "$_kver"
 	cd "$oldpwd"
 }
 
-mkinitfs_kmods() {
+mkinitfs_initfs_kmods() {
 	local _src _tgt
 	_src="${1%/}"
 	_tgt="${2%/}"
@@ -123,9 +154,10 @@ mkinitfs_kmods() {
 	for file in $(mkinitfs_find_kmods "$_src" "$_kver" "$@" ); do
 		echo "${file#/}"
 	done | sort -u | cpio --quiet -pdm "$_tgt" || return 1
+
 	for file in modules.order modules.builtin; do
 		if [ -f "$kerneldir"/$file ]; then
-			cp "$kerneldir"/$file "$_tgt"/lib/modules/$_kver/
+			cp "$kerneldir"/$file "$_tgt/lib/modules/$_kver/"
 		fi
 	done
 	depmod $_kver -b "$_tgt"
@@ -133,7 +165,7 @@ mkinitfs_kmods() {
 }
 
 # Usage: initfs_copy_firmware_deps <source> <target>
-mkinitfs_firmware() {
+mkinitfs_initfs_firmware() {
 	local _src _tgt
 	_src="${1%/}"
 	_tgt="${2%/}"
@@ -147,7 +179,7 @@ mkinitfs_firmware() {
 	return 0
 }
 
-mkinitfs_apk_keys() {
+mkinitfs_initfs_apk_keys() {
 	local _src _tgt
 	_src="${1%/}"
 	_tgt="${2%/}"
@@ -163,7 +195,7 @@ mkinitfs_cpio_sources() {
 	(cd "$_src" && find . | sort)
 }
 
-mkinitfs_cpio() {
+mkinitfs_initfs_cpio() {
 	local _src _tgt
 	_src="${1%/}"
 	_out="${2%/}"
@@ -199,25 +231,63 @@ EOF
 	exit 1
 }
 
-# Usage: mkinitfs <source dir> <temp dir> <outfile> <kernel version> <initfs-features...>
 mkinitfs() {
-	local _src _tgt
-	_src="${1%/}"
-	_tgt="${2%/}"
-	_out="${3%/}"
-	_kver="${4}"
-	shift 4
+	local _opt _val _src _tgt _out _kver _features _conf _keeptmp
+	_mkinitfs_nomods=""
+	while [ "${1}" != "${1#-}" ] ; do
+		case "$1" in
+			'-b' ) _src="${2%/}" ; shift 2 ; continue ;;
+			'-t' ) _tgt="${2%/}" ; shift 2 ; continue ;;
+			'-o' ) _out="$2" ; shift 2 ; continue ;;
+			'-F' ) _features="$2" ; shift 2 ; continue ;;
+			'-c' ) _conf="$2" ; shift 2 ; continue ;;
+			'-f' ) initfs_src_fstab="$2" ; shift 2 ; continue ;;
+			'-i' ) initfs_src_init="$2" ; shift 2 ; continue ;;
+			'-k' ) _keeptmp="yes" ; shift ;; # Enabled by default
+			'-n' ) _mkinitfs_nomods="yes" ; shift ;; # Enabled by default
+			'-K' ) shift ;; # Enabled by default
+			'-P' ) shift 2 ;; # features.d no longer used
+			'-l' ) shift ; ! warning "mkinitfs: '-l' Not currently reimplemented!" ;;
+			'-L' ) shift ; ! warning "mkinitfs: '-L' Not yet reimplemented!" ;;
+			'-q' ) shift ;; # Not yet implemented
+
+		esac
+	done
+	
+	_kver="${1:-$(uname -r)}"
+	shift
+	
+
+	_src="${_src:-/}"
+	_tgt="${_tgt:-$(mktemp -dt mkinitfs.XXXXXX)}"
+	_out="${_out:-${_kver#*-*-}}"
 
 
-	initfs_src_fstab="${initfs_src_fstab}"
-	initfs_src_init="${initfs_src_init}"
-	initfs_src_passwd="${initfs_src_passwd}"
-	initfs_src_group="${initfs_src_group}"
+	if [ "$_conf" ] ; then
+		file_is_readable "$_conf"
+		local features
+		. "$_conf"
+		_features="${_features:+$_features }${features}"
+		unset features
+	fi
 
-	mkinitfs_base "$_src" "$_tgt" "$@" \
-		&& mkinitfs_kmods "$_src" "$_tgt" "$_kver" "$@" \
-		&& mkinitfs_firmware "$_src" "$_tgt" \
-		&& mkinitfs_apk_keys "$_src" "$_tgt" \
-		&& mkinitfs_cpio "$_tgt" "$_out" \
-		|| ! warning "mkintfs failed!" || return 1
+	[ "$_features" ] || [ "$@" ] || ! warning "mkinitfs: Called with no features!"
+
+	dir_is_readable "$_src" || ! warning "mkinitfs: Could not read from source directory '$_src'"
+	mkdir_is_writable "$_tgt" || ! warning "mkinitfs: Could create writable work directory '$_tgt'"
+
+	mkdir_is_writable "${_out%/*?}" || ! warning "mkinitfs: Can not write to output directory '${_out%/*?}'"
+	if [ -e "$_out" ] ; then
+		rm -f "$_out"
+		[ -e "$_out" ] && file_is_writable "${_out}" \
+			|| ! warning "mkinitfs: Output file exists and can not be overwritten: '${_out}'"
+	fi
+
+
+	mkinitfs_main "$_src" "$_tgt" "$_out" "$_kver" $_features $@ || return 1
+	
+	#[ "$_keeptmp" ] || rm -rf "$_tgt"
+
 }
+
+

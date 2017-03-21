@@ -11,3 +11,5 @@ _initfs_drivers_usb_modules() {
 		kernel/drivers/hid/hid-cherry.ko
 	EOF
 }
+
+_initfs_drivers_usb_files() { return 0 ; }

@@ -7,3 +7,5 @@ _initfs_fs_cramfs_modules() {
 		kernel/fs/cramfs/
 	EOF
 }
+
+_initfs_fs_cramfs_files() { return 0 ; }

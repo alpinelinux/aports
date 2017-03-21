@@ -7,3 +7,5 @@ _initfs_fs_squashfs_modules() {
 		kernel/fs/squashfs/
 	EOF
 }
+
+_initfs_fs_squashfs_files() { return 0 ; }

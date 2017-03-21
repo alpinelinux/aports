@@ -8,3 +8,5 @@ _initfs_crypto_crc32_modules() {
 		kernel/crypto/crc32*
 	EOF
 }
+
+_initfs_crypto_crc32_files() { return 0 ; }

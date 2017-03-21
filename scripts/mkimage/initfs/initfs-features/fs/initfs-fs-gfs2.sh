@@ -8,3 +8,4 @@ _initfs_fs_gfs2_modules() {
 	EOF
 }
 
+_initfs_fs_gfs2_files() { return 0 ; }

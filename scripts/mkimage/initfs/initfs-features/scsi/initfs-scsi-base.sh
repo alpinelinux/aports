@@ -12,3 +12,4 @@ _initfs_scsi_base_modules() {
 	EOF
 }
 
+_initfs_scsi_base_files() { return 0 ; }

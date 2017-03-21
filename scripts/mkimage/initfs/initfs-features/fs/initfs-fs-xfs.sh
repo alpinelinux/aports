@@ -8,3 +8,5 @@ _initfs_fs_xfs_modules() {
 	EOF
 	_initfs_crypto_crc32_modules
 }
+
+_initfs_fs_xfs_files() { return 0 ; }

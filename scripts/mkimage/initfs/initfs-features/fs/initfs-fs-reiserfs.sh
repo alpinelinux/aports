@@ -9,3 +9,4 @@ _initfs_fs_reiserfs_modules() {
 	EOF
 }
 
+_initfs_fs_reiserfs_files() { return 0 ; }

@@ -3,6 +3,8 @@ initfs_fs_nfs_all() {
 	initfs_fs_nfsd
 }
 
+
+
 initfs_fs_nfs() {
 	return 0
 }
@@ -12,6 +14,9 @@ _initfs_fs_nfs_modules() {
 		kernel/fs/nfs/
 	EOF
 }
+
+_initfs_fs_nfs_files() { return 0 ; }
+
 
 
 initfs_fs_nfsd() {
@@ -24,4 +29,4 @@ _initfs_fs_nfsd_modules() {
 	EOF
 }
 
-
+_initfs_fs_nfsd_files() { return 0 ; }

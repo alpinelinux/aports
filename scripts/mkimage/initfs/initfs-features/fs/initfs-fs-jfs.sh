@@ -8,3 +8,4 @@ _initfs_fs_jfs_modules() {
 	EOF
 }
 
+_initfs_fs_jfs_files() { return 0 ; }

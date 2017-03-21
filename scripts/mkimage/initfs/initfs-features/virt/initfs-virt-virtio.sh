@@ -10,3 +10,4 @@ _initfs_virt_virtio_modules() {
 	EOF
 }
 
+_initfs_virt_virtio_files() { return 0 ; }

@@ -8,3 +8,4 @@ _initfs_fs_ubifs_modules() {
 	EOF
 }
 
+_initfs_fs_ubifs_files() { return 0 ; }

@@ -7,3 +7,5 @@ _initfs_fs_cifs_modules() {
 		kernel/fs/cifs/
 	EOF
 }
+
+_initfs_fs_cifs_files() { return 0 ; }

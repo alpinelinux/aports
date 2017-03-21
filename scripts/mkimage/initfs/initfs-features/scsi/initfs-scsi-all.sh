@@ -9,3 +9,4 @@ _initfs_scsi_all_modules() {
 	EOF
 }
 
+_initfs_scsi_all_files() { return 0 ; }

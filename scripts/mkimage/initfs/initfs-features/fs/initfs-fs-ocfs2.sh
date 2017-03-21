@@ -8,3 +8,4 @@ _initfs_fs_ocfs2_modules() {
 	EOF
 }
 
+_initfs_fs_ocfs2_files() { return 0 ; }

@@ -1,4 +1,5 @@
 initfs_md_raid() {
+	return 0
 }
 
 _initfs_md_raid_modules() {

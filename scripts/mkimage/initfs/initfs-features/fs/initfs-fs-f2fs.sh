@@ -7,3 +7,5 @@ _initfs_fs_f2fs_modules() {
 		kernel/fs/f2fs/
 	EOF
 }
+
+_initfs_fs_f2fs_files() { return 0 ; }
