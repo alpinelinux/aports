@@ -8,7 +8,6 @@ feature_nfs() {
 
 # NFS client support
 # Use enable_rootfs_nfs="true" (default) to allow mounting the root filesystem over NFS
-# FIXME: Add NFS feature to mkinitfs
 
 feature_nfs_client() {
 
