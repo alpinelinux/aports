@@ -24,8 +24,8 @@ var_not_set() { [ "$(eval "echo \${$1+$1_is_set}")" ] && return 1 || return 0 ; 
 
 # Check to see if a variable is empty or not
 # Usage: var_(is_empty|not_empty) <varname>
-var_is_empty() { [ "$(eval "echo \$$1")" ] && return 0 || return 1 ; }
-var_not_empty() { [ "$(eval "echo \$$1")" ] && return 1 || return 0 ; }
+var_is_empty() { [ "$(eval "echo \$$1")" ] && return 1 || return 0 ; }
+var_not_empty() { [ "$(eval "echo \$$1")" ] && return 0 || return 1 ; }
 
 # Check to see if a variable equals a given value or not.
 # Usage: var_(is_equal_to|not_equal_to) <varname> <value>
