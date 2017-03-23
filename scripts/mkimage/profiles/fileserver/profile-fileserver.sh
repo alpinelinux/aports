@@ -4,5 +4,5 @@ profile_fileserver() {
 	feature_nfs
 	feature_cifs
 	feature_samba
-	iso_label="alp-fserv $RELEASE $ARCH"
+	set_iso_label_if_is_empty "alp-fserv $RELEASE $ARCH"
 }

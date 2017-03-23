@@ -4,15 +4,15 @@
 profile_base() {
 
 	# Load any additional options and packages required for specified base type.
-	if [ "$profile_base_type" ] ; then
-		local pfunc="$(type _profile_base_make_$profile_base_type)"
+	if profile_base_type_not_empty ; then
+		local pfunc="$(type _profile_base_make_$(get_profile_base_type))"
 		if [ "${pfunc}" = "${pfunc%%*shell function}" ] ; then
-			warning "Specified non-existent base type '$profile_base_type' - using 'default'!"
-			profile_base_type="default"
+			warning "Specified non-existent base type '$(get_profile_base_type)' - using 'default'!"
+			set_profile_base_type "default"
 		fi
-	else profile_base_type="default" ; fi
+	else set_profile_base_type "default" ; fi
 
-	_profile_base_make_$profile_base_type
+	_profile_base_make_$(get_profile_base_type)
 
 	# Default to include grsec flavored kernel if none previously set.
 	set_kernel_flavors_if_empty "grsec"

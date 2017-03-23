@@ -4,8 +4,8 @@
 
 profile_skel() {
 	add_rootfs_apks "alpine-baselayout alpine-keys apk-tools busybox libressl zlib libc-utils"
-	hostname="${hostname:-alpine}"
-	[ "$profile_is_bootable" ] && [ "$profile_is_bootable" != "false" ] && _profile_skel_make_bootable
+	set_hostname_if_is_empty "alpine"
+	profile_is_bootable_not_empty && profile_is_bootable_not_equal_to "false" && _profile_skel_make_bootable
 }
 
 # Bootable skeleton profile - Load skeleton profile with boot content enabled.
@@ -13,7 +13,7 @@ profile_skel() {
 #   to bring up a minimal bootable environment, but no drivers or other support.
 
 profile_skel_bootable() {
-	profile_is_bootable="true"
+	set_profile_is_bootable "true"
 	profile_skel
 }
 

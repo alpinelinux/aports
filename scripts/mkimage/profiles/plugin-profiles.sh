@@ -1,5 +1,7 @@
 plugin_profiles() {
-	return 0
+	var_alias hostname
+	var_alias profile_base_type
+	var_alias profile_is_bootable
 }
 
 

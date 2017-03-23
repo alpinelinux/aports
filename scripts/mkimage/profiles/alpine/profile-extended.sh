@@ -1,5 +1,6 @@
+# TODO: Clean up packages list using features where appropriate.
 profile_extended() {
-	ntp_provider="sntpc"
+	feature_ntp "provider=sntpc"
 	profile_standard
 	feature_dahdi
 	feature_xtables_addons

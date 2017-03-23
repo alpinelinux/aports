@@ -9,6 +9,6 @@ profile_rpi() {
 	append_kernel_cmdline "dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1"
 	bootloader_rpi
 	feature_dhcp "client=autostart"
-	hostname="rpi"
-	image_ext="tar.gz"
+	set_hostname "rpi"
+	set_image_ext "tar.gz"
 }

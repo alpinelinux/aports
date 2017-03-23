@@ -13,8 +13,8 @@ profile_uboot() {
 	set_initfs_features "base bootchart squashfs ext2 ext3 ext4 kms mmc raid scsi usb"
 
 	feature_dhcp "client=autostart"
-	hostname="alpine"
+	set_hostname "alpine"
 
 	bootloader_uboot
-	image_ext="tar.gz"
+	set_image_ext "tar.gz"
 }
