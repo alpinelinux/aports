@@ -20,7 +20,7 @@ profile_skel_bootable() {
 # Make bootable profile - Minimum bootable content included by bootable skel profile when enabled.
 _profile_skel_make_bootable() {
 	set_kernel_flavors_if_empty "vanilla"
-	add_initfs_load_modules "loop squashfs"
+	add_initfs_load_modules "loop squashfs lz4"
 	add_initfs_features "base fs-squashfs"
 	add_initfs_apks "alpine-baselayout alpine-keys apk-tools busybox busybox-initscripts libressl zlib libc-utils mkinitfs"
 	add_rootfs_apks "busybox-initscripts busybox-suid"
