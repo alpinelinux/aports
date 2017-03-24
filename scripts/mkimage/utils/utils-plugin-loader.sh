@@ -12,15 +12,13 @@
 # Main load_plugins function which wraps all the work of discovering, sourcing, and loading plugin types and plugins.
 load_plugins() {
 	local OIFS=$IFS ; IFS=$'\n\t '
-	local target plugins_basename plugins_listname plugins_old plugins_new _plug _found
+	local target plugins_basename plugins_listname plugins_old plugins_new _plug _hook _found _file
 
 	target="$1"
 	plugins_basename="${2:-plugins}"
 	shift 2
 
 	plugins_listname="all_${plugins_basename}"
-	local _found=""
-	local new_plugins=""
 
 	( [ -e "$target" ] && [ -r "$target" ] ) || return 0
 	target="$(realpath "$target")"
@@ -47,6 +45,21 @@ load_plugins() {
 	# Run again to load all plugins of all discoverd types:
 	_load_plugins_from_target_recursive "$target" "$plugins_listname"
 
+	# Run all onload hooks for all plugtypes found
+	for _plug in $(getvar "$plugins_listname") ; do
+		_plug="${_plug%% }"
+		_plug="${_plug## }"
+		if ( type get_all_${_plug%s}_hooks > /dev/null ) ; then
+			for _hook in $(eval "get_all_${_plug%s}_hooks") ; do
+				[ "$_hook" != "${_hook%_onload}" ] && var_list_has_not all_run hooks ${hook} && __${_hook} && var_list_add all_run_hooks ${_hook}
+			done
+		fi
+	done
+
+	for _file in $all_sourced_files ; do
+		. "$_file"
+	done
+
 	msg2 "$(printf "%s " $(getvar $plugins_listname) )"
 
 	info_func_set ""
@@ -70,7 +83,11 @@ _load_plugins_from_file() {
 
 	# Find all lines containing function definitions beginning with specified prefixes.
 	local _function
-	for _function in $( _load_plugins_grep_file_funcs "${_file}" $(var_list_get "$_list") $@ ) ; do
+	for _function in $( \
+		_load_plugins_grep_file_funcs "${_file}" \
+			$(var_list_get "$_list") $@ \
+			$(list_add_prefix "__" $(var_list_get "$_list") $@ )
+		) ; do
 		_function="${_function%% }"
 		_function="${_function## }"
 		local _plugtype _pluglist _plug
@@ -85,27 +102,43 @@ _load_plugins_from_file() {
 			# If this is our first run, only load the plugin list.
 			[ "$_firstrun" = "true" ] && [ "$_list" != "all_${_plugtype}" ] && continue
 
-			# Snip '<plugin type>_' stem from function to get name current plugin.
+			# Snip '<plugin type>_' stem from function to get it's name.
 			_plug="${_function#${_plugtype%s}_}"
+			
+			# Snip '__<plugin type>_' stem from function to find hooks points.
+			_hook="${_function#__${_plugtype%s}_}"
 
-			# If we didn't snip anything, function isn't for this plugin type.
-			[ "$_plug" = "$_function" ] && continue
+			# If we didn't snip anything, function isn't for this plugin/hook type.
+			if [ "$_plug" != "$_function" ] ; then 
+				# If we've already loaded this plugin, skip.
+				var_list_has "all_${_plugtype}" "$_plug" && continue
 
-			# If we've already loaded this plugin, skip.
-			var_list_has "all_${_plugtype}" "$_plug" && continue
+				# Setup accessor aliases if they aren't already.
+				( type get_all_${_plugtype} > /dev/null ) || var_list_alias "all_${_plugtype}"
 
+				# Add current plugin to list for its plugin type and mark file for sourcing.
+				var_list_add "all_${_plugtype}" "$_plug"
+				_found="true"
 
-			# Setup accessor aliases if they aren't already.
-			( type get_all_${_plugtype} > /dev/null ) || var_list_alias "all_${_plugtype}"
+			elif [ "$_hook" != "$_function" ] ; then
+				_hook="${_plugtype%s}_${_hook}"
+				# If we've already loaded these plugin hooks, skip.
+				var_list_has "all_${_plugtype%s}_hooks" "$_hook" && continue
 
-			# Add current plugin to list for its plugin type and mark file for sourcing.
-			var_list_add "all_${_plugtype}" "$_plug"
-			_found="true"
+				# Setup accessor aliases if they aren't already.
+				( type get_all_${_plugtype%s}_hooks > /dev/null ) || var_list_alias "all_${_plugtype%s}_hooks"
+
+				# Add current hook to list for its plugin type hooks and mark file for sourcing.
+				var_list_add "all_${_plugtype%s}_hooks" "$_hook"
+				_found="true"
+			else
+				continue
+			fi
 		done
 	done
 
 	IFS=$OIFS
-	[ "$_found" ] && . "$_file" && return 0
+	[ "$_found" ] && . "$_file" && var_list_add all_sourced_files "$_file" && return 0
 	return 1
 }
 

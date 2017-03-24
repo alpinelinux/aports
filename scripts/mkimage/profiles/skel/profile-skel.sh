@@ -2,6 +2,11 @@
 #   This will only include bootable content (kernel, initramfs, bootloader, etc.)
 #   if $profile_is_bootable is non-empty and not equal to 'false'.
 
+__profile_skel_onload() {
+	var_alias profile_is_bootable
+	var_alias hostname
+}
+
 profile_skel() {
 	add_rootfs_apks "alpine-baselayout alpine-keys apk-tools busybox libressl zlib libc-utils"
 	set_hostname_if_is_empty "alpine"

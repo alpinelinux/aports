@@ -1,3 +1,5 @@
+__imagetype_iso_onload() { var_alias iso_label && return 0 ; } 
+
 imagetype_iso() {
 	image_ext="iso"
 	output_format="iso"

@@ -1,6 +1,8 @@
 # Base profile - Normal alpine-base root filesystem.
 #   Rootfs includes full alpine-base package and mirrors, binary keymaps, and timezone data.
 
+__profile_base_onload() { var_alias profile_base_type ; }
+
 profile_base() {
 
 	# Load any additional options and packages required for specified base type.

@@ -1,3 +1,9 @@
+
+__bootloader_syslinux_onload() {
+	var_alias syslinux_serial
+	return 0
+}
+
 # syslinux bootloader plugin for x86/x86_64
 bootloader_syslinux() {
 	list_has $ARCH "x86 x86_64" || return 0
@@ -123,3 +129,4 @@ build_bootloader_syslinux() {
 }
 
 # TODO: syslinux - Add pxelinux support.
+
