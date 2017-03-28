@@ -64,7 +64,7 @@ void apk_print_progress(size_t done, size_t total)
 	if (!(apk_flags & APK_PROGRESS))
 		return;
 
-	bar_width = apk_get_screen_width() - 7;
+	bar_width = apk_get_screen_width() - 8;
 	if (total > 0) {
 		bar = muldiv(bar_width, done, total);
 		percent = muldiv(100, done, total);
