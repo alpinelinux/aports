@@ -1,0 +1,112 @@
+#!/bin/busybox sh
+# initramfs /init stub loader
+
+# Start with an explicit value of 'false' in DIRTY and a CANARY from the kernel command line (Pass "A_BIRD_IN_HAND=<value>").
+DIRTY="false"
+CANARY="${A_BIRD_IN_HAND:="IS_DEAD"}" && CANARY="$($BB mkpasswd -m sha512 "$CANARY" "YellowBird")"
+
+# Set the location we expect to find BusyBox only and clear PATH.
+BB=/bin/busybox.static
+PATH=
+
+die() { printf '<1>initfs-init(stub): %s\n\a\a\aREBOOTING!\a\a\a\n' "$*" >> /dev/kmsg ; $BB sleep 5 ; $BB reboot ; fi ; }
+
+# Close all open file descriptors.
+exec 0>&- ; exec 1>&- ; exec 2>&-
+
+# Create pristine special file system directories.
+$BB umount -f /sys /dev /proc 2>&1 | true
+$BB rm -rf /proc /dev && $BB mkdir /proc /dev || $BB reboot
+
+# Set up our console first.
+$BB mknod -m 600 /dev/console c 5 1 && [ "$($BB stat -c %t-%T /dev/console)" = '5-1' ] || $BB reboot
+: ${console:=/dev/console}
+exec 0<$console 1>$console 2>$console
+
+# Create minimal device files.
+$BB mknod -m 666 /dev/null c 1 3 && [ "$($BB stat -c %t-%T /dev/null)" = '1-3' ] || ( printf 'initfs-init(stub): Could not create /dev/null! REBOOTING!' ; $BB sleep 5 ; $BB reboot ) 
+$BB mknod -m 620 /dev/kmsg c 1 11 && [ "$($BB stat -c %t-%T /dev/kmsg)" = '1-11' ] || ( printf 'initfs-init(stub): Could not create /dev/kmsg! REBOOTING!' ; $BB sleep 5 ; $BB reboot )
+
+# Mount proc so we can set log level, and get mount status and kernel command line
+$BB mount -t proc ${init_mnt_opts_proc} proc /proc || die 'Could not mount /proc!'
+
+# Sanity check our busybox and apk match the stored good sums
+( cd / && $BB sha512sum -s -c - <<'EOF'
+###SUMS###
+EOF
+) || die 'BusyBox/APK checksums did not match! Refusing to boot!'
+
+
+# Set kmsg for output logging
+: ${logs:=/dev/kmsg}
+exec 0<$console 1>$logs 2>$logs
+( set -- $($BB cat /proc/sys/kernel/printk) && printf '%s\t%s\t%s\%s' "$1" 6 "$3" "$4" > /proc/sys/kernel/printk )
+
+
+umask 0077
+# Create a work dir that we can obliterate when we're done.
+$BB mount -t tmpfs ${init_mnt_opts__init_d} tmpfs /.init.d || die 'Could not mount tmpfs at /.init.d!'
+$BB mkdir -p /.init.d/env /.init.d/tarballs/ /.init.d/bin /.init.d/sbin || die 'Could not create dirs in /.init.d!'
+
+# Copy busybox to the work dir, update the BB var, then delete from /bin.
+$BB cp $BB /.init.d/bin/ || die 'Could not copy '"$BB"' to /.init.d/bin!'
+BB=/.init.d/bin/busybox.static
+$BB rm -f /bin/busybox.static || die 'Could not remove old /bin/busybox.static!'
+
+
+# Don't allow anything on root to be executed until we explicitly reenable it!
+# This puts us in a sandbox where were can verify everything we extract and ensure nothing can sneak in as we build the rootfs.
+$BB mount -o remount,noexec${init_mnt_opts_root_early} / || die 'Could not remount '/' with noexec option!'
+
+# Capture and clear kernel environment, arguments, and command line to files in /.init.d/env.
+$BB env > /.init.d/env/kopt-env && unset $($BB env | $BB grep -v -e '^BB=' -e '^DIRTY='| $BB cut -d= -f1 ) || die 'Could not capture and clear environment set by kernel!'
+while $# ; do printf '%s\n' "$1" ; shift ; done >> /.init.d/env/kopt-args || die 'Could not capture kernel args!'
+$BB cat /proc/cmdline > /.init.d/env/kopt-cmdline || die 'Could not capture kernel commandline!'
+
+# Move our static apk to work dir and update APK var.
+$BB mv -f /sbin/apk.static /.init.d/sbin || die 'Could not move /sbin/apk.static to /.init.d/sbin!'
+APK=/.init.d/sbin/apk.static
+
+# Install our base keychain in /.init.d/etc/apk/keys.
+$BB mkdir -p /.init.d/etc/apk/keys || die 'Could not create /etc/apk/keys dir!'
+
+###KEYS###
+
+
+# Check the signature of our base payload matches what we expect, the extract to /.init.d
+$APK --keys-dir /.init.d/etc/apk/keys verify /.init.d/tarballs/init-base.tar.gz \
+	&& $BB tar -C /.init.d -xpzf /.init.d/tarballs/init-base.tar.gz \
+	|| die 'Failed to verify and extract init-base.tar.gz in initramfs!'
+
+# Verify our stub and apk sha512s again, this time against the one supplied inthe signed payload.
+[ "/.init.d/sums/init-stub.sha512" ] && ( cd /.init.d && $BB sha512sum -s -c sums/init-stub.sha512 ) \ 
+	|| die 'Failed to verify init-stub integrity in initramfs!'
+
+# TODO: Look for user-requested (kernel opt) keys file include and a hash/key to verify it before checking rest of tar.gz files.
+
+# Verify all .tar.gz files before copying to working dir.
+for tgz in /init.d/tarballs/*.tar.gz ; do
+	[  -e "$tgz" ] && [ -f "$tgz" ] || continue
+	if $APK --keys-dir /.init.d/etc/apk/keys verify "$tgz" ; then
+		$BB mv -f "$tgz" /.init.d/tarballs/ || printf '<3>initfs-init(stub): Could not move %s to /.init.d/tarballs!' "$tgz"
+	else printf '<4>initfs-init(stub): Could not verify signature on %s!\n' "$tgz" >> /dev/kmsg ; fi
+done
+
+# Wipe out everything but active mounts (proc, .init.d) and the dev dir we just populated.
+mounted="$($BB cat /proc/mounts | $BB cut -d' ' -f2 | $BB cut -d'/' -f1,2 | $BB sort -u | $BB tr -s '\n ' '|' )"
+
+for d in /* /.[!.]* /..?* ; do
+	[ -e "$d" ] && [ -d "$d" ] || continue
+	case "$d" in
+		$mounted) printf '<4>initfs-init(stub): Unexpected mounted filesystem found at %s, not wiping!\n' "$d" >> /dev/kmsg ;;
+		/dev|/proc|/.init.d) : ;;
+		*) $BB rm -rf "$d" || printf '<3>initfs-init(stub): Failed to remove directory %s !' "$d" >> /dev/kmsg ;;
+	esac
+done
+
+# Transfer control to init-base with only APK, BB, and DIRTY defined, all else in files.
+exec $BB env -i APK="$APK" BB="$BB" DIRTY="$DIRTY" CANARY="$CANARY" $BB /.init.d/init-base || die 'Failed to exec /.init.d/init-base!'
+
+# If we got here, something went wrong and we will reboot.
+die 'Fell through end of initfs-init /init stub without execing init-base!'
+
