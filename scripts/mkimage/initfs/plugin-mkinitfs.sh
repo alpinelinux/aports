@@ -213,20 +213,20 @@ usage: mkinitfs [-hkKLln] [-b basedir] [-c configfile] [-F features] [-f fstab]
 		[-i initfile ] [-o outfile] [-P featuresdir] [-t tempdir] [kernelversion]"
 options:
 	-b  prefix files and kernel modules with basedir
-	-c  use configfile instead of $config
-	-f  use fstab instead of $fstab
-	-F  use specified features
-	-h  print this help
-	-i  use initfile as init instead of $init
-	-k  keep tempdir
-	-K  copy also host keys to initramfs
-	-l  only list files that would have been used
-	-L  list available features
-	-n  don't include kernel modules or firmware
-	-o  set another outfile
-	-P  prepend features.d search path
-	-q  Quiet mode
 	-t  use tempdir when creating initramfs image
+	-o  set another outfile
+	-c  use configfile instead of default
+	-F  use specified features
+	-f  use fstab instead of default
+	-i  use initfile as init instead of default
+	-k  keep tempdir
+	-h  print this help
+	X-K  copy also host keys to initramfs
+	X-l  only list files that would have been used
+	X-L  list available features
+	X-n  don't include kernel modules or firmware
+	X-P  prepend features.d search path
+	X-q  Quiet mode
 
 EOF
 	exit 1
@@ -240,8 +240,8 @@ mkinitfs() {
 			'-b' ) _src="${2%/}" ; shift 2 ; continue ;;
 			'-t' ) _tgt="${2%/}" ; shift 2 ; continue ;;
 			'-o' ) _out="$2" ; shift 2 ; continue ;;
-			'-F' ) _features="$2" ; shift 2 ; continue ;;
 			'-c' ) _conf="$2" ; shift 2 ; continue ;;
+			'-F' ) _features="$2" ; shift 2 ; continue ;;
 			'-f' ) initfs_src_fstab="$2" ; shift 2 ; continue ;;
 			'-i' ) initfs_src_init="$2" ; shift 2 ; continue ;;
 			'-k' ) _keeptmp="yes" ; shift ;; # Enabled by default
@@ -250,7 +250,8 @@ mkinitfs() {
 			'-P' ) shift 2 ;; # features.d no longer used
 			'-l' ) shift ; ! warning "mkinitfs: '-l' Not currently reimplemented!" ;;
 			'-L' ) shift ; ! warning "mkinitfs: '-L' Not yet reimplemented!" ;;
-			'-q' ) shift ;; # Not yet implemented
+			'-h' ) shift ; usage ; exit 0 ;;
+			* ) shift ; usage ; exit 1 ;;
 
 		esac
 	done
