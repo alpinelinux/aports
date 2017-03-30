@@ -248,7 +248,7 @@ options:
 	-n  don't include kernel modules or firmware
 	-K  copy also host keys to initramfs
 	-k  keep tempdir
-	X-q  Quiet mode
+	-q  Quiet mode
 	-l  only list files that would have been used
 	-L  list available features
 	-h  print this help
