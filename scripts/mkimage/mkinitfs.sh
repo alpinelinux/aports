@@ -38,14 +38,8 @@ checksum() {
 ### Begin code for mkimage proper
 ###
 
-usage() {
-	cat <<EOF
-$(mkinitfs_old_usage)
-known initfs features: $all_initfss
 
-EOF
-}
-
+_co="$@" && for _i in $_co ; do case "$_i" in -q|--quiet) QUIET="yes" ; break ;; --) break ;; esac ; done
 
 # load plugins from script dir and ~/.mkimage
 info_prog_set "$scriptname:plugin-loader"

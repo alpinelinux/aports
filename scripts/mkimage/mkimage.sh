@@ -41,10 +41,10 @@ checksum() {
 usage() {
 	cat <<EOF
 
-$0	[--tag RELEASE] [--outdir OUTDIR] [--workdir WORKDIR]
+$scriptname	[--tag RELEASE] [--outdir OUTDIR] [--workdir WORKDIR]
 		[--arch ARCH] [--profile PROFILE] [--hostkeys] [--simulate]
 		[--repository REPO] [--extra-repository REPO] [--yaml FILE]
-$0	--help
+$scriptname	--help
 
 options:
 --arch			Specify which architecture images to build
@@ -73,12 +73,12 @@ known features    : $all_features
 EOF
 }
 
+_co="$@" && for _i in $_co ; do case "$_i" in --quiet) QUIET="yes" ; break ;; --) break ;; esac ; done
 
 # load plugins from script dir and ~/.mkimage
 info_prog_set "$scriptname:plugin-loader"
-
 load_plugins "$scriptdir"
-[ -z "$HOME" ] || load_plugins "$HOME/.mkimage"
+[ "$HOME" ] && [ -e "$HOME/.mkimage" ] && load_plugins "$HOME/.mkimage"
 
 info_prog_set "$scriptname"
 
@@ -107,6 +107,7 @@ while [ $# -gt 0 ]; do
 	--simulate) _simulate="yes";;
 	--checksum) _checksum="yes";;
 	--yaml) _yaml="yes";;
+	--quiet) : ;;
 	--) break ;;
 	-*) _show_usage="yes" ; warning "Unrecognized option '$opt'" ; break ;;
 	esac

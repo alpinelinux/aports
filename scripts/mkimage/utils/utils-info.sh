@@ -12,7 +12,7 @@ info_title_get() {
 
 # output functions
 msg() {
-	if [ -n "$quiet" ]; then return 0; fi
+	if [ "$QUIET" ]; then return 0; fi
 	local prompt="$GREEN>>>${NORMAL}"
 	local title="$(info_title_get)"
 	title="${title:+${BLUE}${title}${NORMAL}: }"
@@ -20,7 +20,7 @@ msg() {
 }
 
 msg2() {
-	[ -n "$quiet" ] && return 0
+	[ "$QUIET" ] && return 0
 	#      ">>> %s"
 	printf "    %s\n" "$1" >&2
 }
