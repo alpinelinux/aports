@@ -10,14 +10,14 @@ d="${p%/*}"
 cat <<EOF
 # Initifs feature $f.
 
-initfs_$f() {
+initfs_${f}() {
 	return 0
 }
 EOF
 
 cat << EOF
 
-_initfs_$f_modules() {
+_initfs_${f}_modules() {
 $( if [ -e "${d}/$f.modules" ] ; then
 	printf "\tcat <<-'EOF'\n"
 	cat "${d}/$f.modules" | sed -e 's|^|\t\t|g'
@@ -29,7 +29,7 @@ EOF
 
 cat << EOF
 
-_initfs_$f_files() {
+_initfs_${f}_files() {
 $( if [ -e "${d}/$f.files" ] ; then
 	printf "\tcat <<-'EOF'\n"
 	cat "${d}/$f.files" | sed -e 's|^|\t\t|g'
