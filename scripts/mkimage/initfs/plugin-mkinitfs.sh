@@ -274,7 +274,7 @@ mkinitfs() {
 			'-K' ) shift ; _hostkeys="yes";;
 			'-k' ) _keeptmp="yes" ; shift ;; # Cleaning up tmp enabled by default
 			'-l' ) shift ; _listfiles="yes" ;;
-			'-L' ) shift ; _listfeatures="yes" ; exit 0 ;;
+			'-L' ) shift ; _listfeatures="yes" ;;
 			'-h' ) shift ; mkinitfs_wrapper_usage ; exit 0 ;;
 			'-q' ) shift ;;
 			* ) shift ; mkinitfs_wrapper_usage ; exit 1 ;;
@@ -302,7 +302,7 @@ mkinitfs() {
 
 
 
-	if [ "$_listfeatures" = "yes" ] ; then printf_n $all_initfss ; exit 0 ; fi
+	if [ "$_listfeatures" = "yes" ] ; then printf '%s\n' $all_initfss ; exit 0 ; fi
 
 	[ "$_features" ] || [ "$@" ] || ! warning "mkinitfs: Called with no features!" || return 1
 
