@@ -87,7 +87,7 @@ mkinitfs_initfs_base() {
 	done
 }
 
-# Usage: ... | mkinitfs_find_kmod_deps <source> <kernel version>
+# Usage: <list of modules...> | mkinitfs_find_kmod_deps <source> <kernel version>
 mkinitfs_find_kmod_deps() {
 	local _src
 	_src="${1%/}"
@@ -170,7 +170,7 @@ mkinitfs_initfs_kmods() {
 	depmod $_kver -b "$_tgt"
 }
 
-# Usage: initfs_find_firmware <source> <kernel version> <features...>
+# Usage: mkinitfs_find_firmware <source> <kernel version> <features...>
 mkinitfs_find_firmware() {
 	local _src _tgt FW
 	_src="${1%/}"
@@ -182,6 +182,7 @@ mkinitfs_find_firmware() {
 	done
 	return 0
 }
+
 # Usage: mkinitfs_initfs_firmware <source> <target> <kernel version> <features...>
 mkinitfs_initfs_firmware() {
 	local _src _tgt FW
