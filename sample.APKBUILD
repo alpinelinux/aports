@@ -31,12 +31,12 @@ build() {
 		--sysconfdir=/etc \
 		--mandir=/usr/share/man \
 		--infodir=/usr/share/info
-	make || return 1
+	make
 }
 
 package() {
 	cd "$builddir"
-	make DESTDIR="$pkgdir" install || return 1
+	make DESTDIR="$pkgdir" install
 
 	# remove the 2 lines below (and this) if there is no init.d script
 	# install -m755 -D "$srcdir"/$pkgname.initd "$pkgdir"/etc/init.d/$pkgname
@@ -47,7 +47,7 @@ check() {
 	# uncomment the 2 lines below if there is a testsuite.  we assume the testsuite
 	# is run using "make check", which is the default for autotools-based build systems.
 	# cd "$builddir"
-	# make check || return 1
+	# make check
 }
 
 md5sums="" #generate with 'abuild checksum'
