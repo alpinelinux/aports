@@ -4,3 +4,4 @@ plugin_archs() {
 	var_list_alias archs
 	return 0
 }
+
