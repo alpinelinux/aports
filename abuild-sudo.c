@@ -27,6 +27,7 @@ static const char* valid_cmds[] = {
 	"/bin/addgroup",
 	"/usr/sbin/addgroup",
 	"/sbin/apk",
+	"/usr/bin/abuild-rmtemp",
 	NULL
 };
 

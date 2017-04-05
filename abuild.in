@@ -83,6 +83,11 @@ cleanup() {
 	fi
 	for i; do
 		case $i in
+		bldroot)
+			if [ "$BUILD_ROOT" ]; then
+				msg "Cleaning up build chroot"
+				abuild-rmtemp "$BUILD_ROOT"
+			fi;;
 		pkgdir) msg "Cleaning up pkgdir"; rm -rf "$pkgbasedir";;
 		srcdir) msg "Cleaning up srcdir"; rm -rf "$srcdir";;
 		deps)
@@ -1992,6 +1997,106 @@ checksum() {
 	echo "sha512sums=\"$sha512sums\"" >>"$APKBUILD"
 }
 
+subst() {
+	(
+		for key in $(git config --list --name-only); do
+			k=${key#abuild.}
+			[ $k != $key ] && \
+				eval "export $k=\"$(git config --get $key)\""
+		done
+
+		export mirror version
+		[ "$mirror" ] || mirror=http://dl-cdn.alpinelinux.org/alpine
+
+		if [ -z "$version" ]; then
+			version=$(git symbolic-ref --short HEAD)
+			[ "$version" ] && \
+				version=$(expr "$version" : '\([0-9]\+\(\.[0-9]\+\)*\)-') && \
+				version=v${version}
+			[ "$version" ] || version=edge
+		fi
+
+		envsubst
+	)
+}
+
+rootbld() {
+	if apk_up2date && [ -z "$force" ]; then
+		msg "Package is up to date"
+		return
+	fi
+
+	[ "$CBUILD" = "$CHOST" ] || die "rootbld: cross-building not supported currently"
+
+	local cmd
+	for cmd in bwrap git; do
+		[ -x "$(which $cmd)" ] || die "rootbld: $cmd not installed"
+	done
+
+	logcmd "chroot building building $repo/$pkgname-$pkgver-r$pkgrel"
+
+	# check early if we have abuild key
+	abuild-sign --installed
+
+	# networking business
+	sanitycheck
+	clean
+	fetch
+	verify
+
+	msg "Preparing build chroot..."
+
+	BUILD_ROOT=$(mktemp -d /var/tmp/abuild.XXXXXXXXXX)
+	local aportsgit=${APORTSDIR:-${startdir}}
+
+	mkdir -p "$BUILD_ROOT/proc" "$BUILD_ROOT/etc/apk/keys" \
+		"$BUILD_ROOT/$HOME/.abuild" "$BUILD_ROOT/$aportsgit" \
+		"$BUILD_ROOT/$SRCDEST" "$BUILD_ROOT/$REPODEST" \
+		"$BUILD_ROOT/tmp/pkg" "$BUILD_ROOT/tmp/src" \
+		"$BUILD_ROOT/usr/bin" "$pkgbasedir" "$REPODEST" \
+		"$srcdir"
+
+	cp /etc/abuild.conf "$BUILD_ROOT/etc"
+	cp /etc/apk/keys/* "$BUILD_ROOT/etc/apk/keys"
+
+	local repo_template=$aportsgit/$repo/.rootbld-repositories
+	local repofile=$BUILD_ROOT/etc/apk/repositories
+	if [ -s "$repo_template" ]; then
+		subst < "$repo_template"
+	else
+		local prefix='$mirror/$version'
+		subst <<-EOF
+			$prefix/main
+			$prefix/community
+		EOF
+	fi > "$repofile"
+	echo "$REPODEST/$repo" >> "$repofile"
+
+	calcdeps
+	$SUDO_APK add --initdb --root "$BUILD_ROOT" --update \
+		abuild alpine-base build-base git $hostdeps $builddeps
+
+	local bwrap_opts=""
+	options_has "net" || bwrap_opts="$bwrap_opts --unshare-net"
+	bwrap --unshare-ipc --unshare-uts $bwrap_opts \
+		--ro-bind "$BUILD_ROOT" / \
+		--proc /proc \
+		--dev-bind /dev /dev \
+		--ro-bind "$HOME/.abuild" "$HOME/.abuild" \
+		--ro-bind "$aportsgit" "$aportsgit" \
+		--bind "$SRCDEST" "$SRCDEST" \
+		--bind "$BUILD_ROOT/tmp/src" "$srcdir" \
+		--bind "$BUILD_ROOT/tmp/pkg" "$pkgbasedir" \
+		--bind "$BUILD_ROOT/tmp" /tmp \
+		--bind "$REPODEST" "$REPODEST" \
+		--hostname "build-edge-$CARCH" \
+		--chdir "$startdir" \
+		--setenv PATH /bin:/usr/bin:/sbin:/usr/sbin \
+		/usr/bin/abuild $force symlinksrc unpack prepare mkusers build rootpkg
+	update_abuildrepo_index
+	cleanup $CLEANUP
+}
+
 stripbin() {
 	local bin
 	if options_has "!strip" || [ "${subpkgarch:-$pkgarch}" = "noarch" ]; then
@@ -2241,6 +2346,7 @@ usage() {
 		  listpkg     List target packages
 		  package     Create package in \$REPODEST
 		  prepare     Apply patches
+		  rootbld     Build package in clean chroot
 		  rootpkg     Run 'package', the split functions and create apks as fakeroot
 		  sanitycheck Basic sanity check of APKBUILD
 		  snapshot    Create a \$giturl or \$svnurl snapshot and upload to \$disturl
@@ -2307,6 +2413,8 @@ repo=${startdir%/*}
 repo=${repo##*/}
 
 SRCDEST=${SRCDEST:-$startdir}
+
+BUILD_ROOT=
 
 # set a default CC
 : ${CC:=gcc}

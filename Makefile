@@ -10,7 +10,7 @@ datadir		?= $(prefix)/share/$(PACKAGE)
 SCRIPTS		:= abuild abuild-keygen abuild-sign newapkbuild \
 		   abump apkgrel buildlab apkbuild-cpan checkapk \
 		   apkbuild-gem-resolver
-USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-gzsplit abuild-sudo abuild-fetch
+USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-gzsplit abuild-sudo abuild-fetch abuild-rmtemp
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
 AUTOTOOLS_TOOLCHAIN_FILES := config.sub config.guess
