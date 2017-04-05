@@ -1,0 +1,258 @@
+#!/sbin/openrc-run
+# Blacklist init script for ipset
+# Copyright (C) 2016  Stuart Cardall
+# Licensed under the terms of the GPL2
+
+description="Manage Blacklist IP sets in the Linux kernel"
+description_info="List active IP sets / raw iptables rules"
+description_save="Save firewall Blacklist IP sets"
+description_load="Load inactive /etc/ipset.blacklist files"
+description_unload="Unload / remove specific Blacklist IP set"
+description_reload="Reload all firewall Blacklist IP sets"
+
+extra_commands="info"
+extra_started_commands="save load unload reload"
+
+IPSET=/usr/sbin/ipset
+DIR=/etc/ipset.blacklist
+STATUS=0
+
+ipset() {
+	$IPSET $* || STATUS=1
+}
+
+set_files() {
+	find $DIR -maxdepth 1 -type f -exec basename {} \;
+}
+
+set_file() {
+	egrep -v '(^//|^/\*|^#|^$|^[[:space:]]+$)' $1
+}
+
+set_comments() {
+	egrep '(^//|^/\*|^#|^$|^[[:space:]]+$)' $1
+}
+
+set_exists() {
+	$IPSET save $1 &> /dev/null
+}
+
+sets_lists() {
+	$IPSET save | sed "s/^create \\([^ ]\\+\\) ${1:+$1 }.*/\\1/;ta;d;:a"
+}
+
+sets() {
+	$IPSET list | grep ^Name: | awk '{print $2}'
+}
+
+depend() {
+	before iptables ip6tables
+}
+
+info() {
+	local len=$(iptables -t raw -vnL | head -n 1 | wc -m)
+
+        printf "%$(($len -2))s" | sed 's/ /_/g'
+        printf '\n|___ IP4 '
+        printf "%$(($len -11))s" | sed 's/ /_/g' && printf '|\n\n'
+        iptables -t raw -vnL
+        printf "%$(($len -2))s" | sed 's/ /_/g'
+        printf '\n|___ IP6 '
+        printf "%$(($len -11))s" | sed 's/ /_/g' && printf '|\n\n'
+        ip6tables -t raw -vnL
+        printf "%$(($len -2))s" | sed 's/ /_/g'
+        printf '\n|___ IPSETS '
+        printf "%$(($len -14))s" | sed 's/ /_/g' && printf '|\n\n'
+
+        for name in $(sets); do
+                einfo "active: $name"
+        done
+}
+
+start() {
+	ebegin "Restoring firewall IP sets from: ${IPSET_SAVE}"
+	$IPSET restore -f ${IPSET_SAVE}
+
+	#add iptables rules
+	add_ip $(sets)
+}
+
+stop() {
+	case "${SAVE_ON_STOP}" in
+		y*|Y*) save || return 1
+	esac
+
+	ebegin "Flushing firewall IP sets"
+
+	for name in $(sets_lists list:set); do
+		del_ip $name
+		ipset destroy $name
+	done
+
+	for name in $(sets); do
+		einfo "destroying ipset: $name"
+		del_ip $name
+		ipset destroy $name
+	done
+
+	eend $STATUS
+}
+
+save() {
+	local x=
+	ebegin "Saving firewall IP sets"
+	einfo "--> ${IPSET_SAVE}"
+
+	mv ${IPSET_SAVE} ${IPSET_SAVE}.old
+
+	for x in $(set_files); do
+		einfo "saving ipset: $x"
+		$IPSET save $x >> ${IPSET_SAVE}
+	done
+
+	if [ $? = 0 ]; then
+		rm -f ${IPSET_SAVE}.old
+	fi
+
+	eend $STATUS
+}
+
+reload() {
+	local swap=
+	ebegin "Reloading all firewall IP sets"
+
+	for name in $(set_files); do
+		local new=$name
+		if set_exists $name; then
+			new=_init_$name
+			swap="$swap $name"
+			create_setfile $new $DIR/$name
+		fi
+	done
+
+	for name in $swap; do
+		einfo "swapping _init_$name --> $name"
+		$IPSET swap _init_$name $name
+		ewarn "destroying ipset: _init_$name"
+		$IPSET destroy _init_$name
+	done
+
+	eend $STATUS
+	status
+}
+
+load() {
+	local name= ldsets=$(sets) tmpfile=$(mktemp)
+	ebegin "Loading inactive IP sets in: $DIR"
+
+	for name in $(set_files); do
+		if ! echo $ldsets |grep -q $name; then
+			create_setfile $name $DIR/$name
+			if set_exists $name; then
+				add_ip $name
+			fi
+		fi
+	done
+}
+
+create_setfile() {
+	local tmpfile=$(mktemp) name=$1 file=$2
+	local  set_format=$(head -n 1 $file)
+	einfo "creating ipset: '$name' => type: $set_format"
+
+	# remove any comments
+	set_file $file > $tmpfile
+
+	# loading from a file is much faster
+	# than adding elements individually
+	sed -i "s/^/add $name /" $tmpfile
+	sed -i "1s/.*/create $name $set_format/" $tmpfile
+
+	$IPSET restore -exist -f $tmpfile
+	rm -f $tmpfile
+}
+
+unload() {
+	local name= ldsets=$(sets) i=0 choice=
+
+	if [ -n "$ldsets" ]; then
+		for name in $ldsets; do
+			i=$(( $i + 1 ))
+			einfo "($i): $name"
+		done
+
+		printf "\nSelect ipset to destroy? [1 - $i]: "; read -t 100 choice
+
+		case $choice in
+			''|*[!0-9]*) eerror "bad number" ;;
+			*) name=$(echo $ldsets | awk -v VAR=$choice '{print $VAR}')
+				if [ -n "$name" ]; then
+					printf "\n"; del_ip $name
+					ewarn "destroying ipset: $name"
+					ipset destroy $name
+				else
+					eerror "bad number"
+				fi
+				;;
+		esac
+	else
+		eerror "No IP sets loaded"
+	fi
+}
+
+ipt_version() {
+	if head -n 1 $1 |grep -q "family inet6"; then
+		echo ip6tables
+	else
+		echo iptables
+	fi
+}
+
+add_ip() {
+	local name= ipt_cmd=
+
+	if echo "${IPT_MANAGE}" | egrep -vq '(^y|^Y)'; then
+		return 0
+	fi
+
+	# block ips in the raw iptable:
+	# http://ipset.netfilter.org/tips.html
+	for name in $@; do
+		ipt_cmd=$(ipt_version $DIR/$name)
+
+		if ! $ipt_cmd -t raw -L | grep -q "match-set $name"; then
+			einfo "adding ipset iptables rule: $name"
+			$ipt_cmd -t raw -I PREROUTING -m set --match-set $name src -j DROP
+			$ipt_cmd -t raw -I OUTPUT -m set --match-set $name dst -j DROP
+
+			case ${IPT_LOGS} in
+			y*|Y*) $ipt_cmd -t raw -I PREROUTING -m set --match-set $name src -j LOG --log-prefix "${IPTABLES_LOG_PREFIX}: $name IN: " \
+				--log-ip-options --log-tcp-options;
+				$ipt_cmd -t raw -I OUTPUT -m set --match-set $name dst -j LOG --log-prefix "${IPTABLES_LOG_PREFIX}: $name OUT: " \
+				--log-ip-options --log-tcp-options;
+				;;
+			esac
+		fi
+	done
+}
+
+del_ip() {
+	local name= ipt_cmd=
+
+	if echo "${IPT_MANAGE}" | egrep -vq '(^y|^Y)'; then
+		return 0
+	fi
+
+	for name in $@; do
+		ipt_cmd=$(ipt_version $DIR/$name)
+
+		ewarn "removing ipset iptables rule: $name"
+		$ipt_cmd -t raw -D PREROUTING -m set --match-set $name src -j DROP 2>/dev/null
+		$ipt_cmd -t raw -D PREROUTING -m set --match-set $name src -j LOG --log-prefix "${IPTABLES_LOG_PREFIX}: $name IN: " \
+			--log-ip-options --log-tcp-options 2>/dev/null
+		$ipt_cmd -t raw -D OUTPUT -m set --match-set $name dst -j DROP 2>/dev/null
+		$ipt_cmd -t raw -D OUTPUT -m set --match-set $name dst -j LOG --log-prefix "${IPTABLES_LOG_PREFIX}: $name OUT: " \
+			--log-ip-options --log-tcp-options 2>/dev/null
+	done
+}
+
