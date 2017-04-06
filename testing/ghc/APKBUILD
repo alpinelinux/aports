@@ -2,19 +2,24 @@
 # Maintainer: Mitch Tishmack <mitch.tishmack@gmail.com>
 pkgname=ghc
 pkgver=8.0.2
-pkgrel=1
+pkgrel=4
 pkgdesc="The Glasgow Haskell Compiler"
 url="http://haskell.org"
 subpackages="$pkgname-doc $pkgname-dev"
-arch="x86_64"
+arch="x86_64 armhf"
 builddir="$srcdir/$pkgname-$pkgver"
 source="http://downloads.haskell.org/~ghc/${pkgver}/ghc-${pkgver}-src.tar.xz
+	http://downloads.haskell.org/~ghc/${pkgver}/ghc-${pkgver}-testsuite.tar.xz
+	0000-alpine.patch
+	0000-bootstrap.patch
 	0001-rm-ghc-pwd.patch
 	0002-Correct-issue-with-libffi-and-glibc.patch
 	0003-do-not-use-SHELL.patch
 	0004-reproducible-tmp-names.patch
 	0005-buildpath-abi-stability.patch
 	0006-fix-madvise.patch
+	0007-build-hp2ps-twice.patch
+	0008-build-unlit-twice.patch
 	"
 
 # Note ghc's license is basically bsd3. If you'd like to know more visit:
@@ -31,7 +36,7 @@ license="custom:bsd3"
 # Note, gcc supports --no-pie on alpine linux 3.5+ only. We test for
 # that version as it greatly simplifies the apkbuild process. The
 # apks built on 3.5 will not work on any prior version of alpine linux.
-depends="gmp-dev perl gcc>=6.2.1 llvm3.7"
+depends="gmp-dev perl gcc>=6.2.1 llvm3.7 libffi-dev"
 provides="ghc-bootstrap=$pkgver-r$pkgrel
 	haskell-cabal=1.24.2.0
 	haskell-bytestring=0.10.8.1
@@ -61,40 +66,66 @@ provides="ghc-bootstrap=$pkgver-r$pkgrel
 install="$pkgname.post-install"
 
 # ghc build dependencies
-makedepends="
-	$depends
-	autoconf
-	cpio
-	linux-headers
-	musl-dev
-	ncurses-dev
-	libffi-dev
-	zlib-dev
-	binutils-dev
-	binutils-gold
-	paxmark
-	ghc-bootstrap
-	"
+makedepends_build="autoconf cpio binutils-gold paxmark ghc-bootstrap libffi-dev ncurses-dev"
+makedepends_host="linux-headers musl-dev zlib-dev gmp-dev binutils-dev libffi-dev ncurses-dev"
+makedepends="$makedepends_build $makedepends_host"
+checkdepends="python2"
 
-build() {
-	cd "$builddir"
+prepare() {
+	default_prepare || return 1
 	cp mk/build.mk.sample mk/build.mk || return 1
 	cat >> mk/build.mk <<-EOF
-	BuildFlavour         = perf-llvm
-	INTEGER_LIBRARY      = integer-gmp
-	BeConservative       = YES
-	V                    = 0
-	GhcStage3HcOpts     += -O3
-	SplitSections        = YES
+		BuildFlavour         = perf-llvm
+		INTEGER_LIBRARY      = integer-gmp
+		BeConservative       = YES
+		V                    = 0
+		GhcStage3HcOpts     += -O3
+		SplitSections        = YES
 	EOF
+
+	if [ "$CBUILD" != "$CTARGET" ]; then
+		# cross-build
+		cat >> mk/build.mk <<-EOF
+			HADDOCK_DOCS         = NO
+			BUILD_SPHINX_HTML    = NO
+			BUILD_SPHINX_PS      = NO
+			BUILD_SPHINX_PDF     = NO
+		EOF
+	fi
 
 	# Due to patches to the configure script
 	autoreconf || return 1
+}
 
+build() {
+	cd "$builddir"
+	local _ffi_inc=$(pkg-config libffi --cflags-only-I); _ffi_inc="${_ffi_inc%% }"
+	local _ffi_lib=$(pkg-config libffi --libs-only-L); _ffi_lib="${_ffi_lib%% }"
+
+	# NOTE: ghc build system requires host == build, and it ends up
+	# compiling the cross-compiler (stage1) and cross-compiling with
+	# that the native compiler (stage2)
 	./configure \
+		--build=$CBUILD \
+		--host=$CBUILD \
+		--target=$CTARGET \
 		--prefix=/usr \
-		--with-ld=ld.gold || return 1
+		--with-system-libffi \
+		${_ffi_inc:+--with-ffi-includes="${_ffi_inc#-I}"} \
+		${_ffi_lib:+--with-ffi-libraries="${_ffi_lib#-L}"} \
+		--with-ar=${CROSS_COMPILE}ar \
+		--with-nm=${CROSS_COMPILE}nm \
+		--with-ranlib=${CROSS_COMPILE}ranlib \
+		--with-objdump=${CROSS_COMPILE}objdump \
+		--with-ld=${CROSS_COMPILE}ld.gold \
+		--with-ld.gold=${CROSS_COMPILE}ld.gold \
+		|| return 1
 	make || return 1
+}
+
+check() {
+	cd "$builddir/testsuite"
+	make fast THREADS=$JOBS || return 1
 }
 
 doc() {
@@ -105,13 +136,36 @@ doc() {
 package() {
 	cd "$builddir"
 	make -j1 DESTDIR="$pkgdir" install || return 1
+
+	local _ghclib="usr/lib/ghc-$pkgver"
+
+	# Fixup install tree if needed
+	if [ -d "$pkgdir/usr/lib/$CTARGET-ghc-$pkgver" ]; then
+		# different location
+		_ghclib="usr/lib/$CTARGET-ghc-$pkgver"
+		# rename binaries, and fix links
+		local fn; for fn in "$pkgdir"/usr/bin/"$CTARGET"-*; do
+			local _new="${fn//${CTARGET}-/}"
+			if [ -h "$fn" ]; then
+				local _target="$(readlink $fn)"
+				ln -sf "${_target//${CTARGET}-/}" "$_new" || return 1
+				rm "$fn" || return 1
+			else
+				mv "$fn" "$_new" || return 1
+			fi
+		done
+		# remove triplet prefix from settings -- the intention is
+		# that the native compiler will use native gcc/ld on the target
+		sed -ie "s|$CTARGET-||g" "$pkgdir"/usr/lib/${CTARGET}-ghc-$pkgver/settings || return 1
+	fi
+
 	# Can't do a full strip on archives.
-	find "$pkgdir" -type f \( -name "*.so" -o -name "*.a" \) -exec strip --strip-unneeded {} \;
-	find "$pkgdir/usr/lib/ghc-$pkgver/bin" -type f -exec strip {} \;
-	paxmark -m "$pkgdir/usr/lib/ghc-$pkgver/bin/ghc"
-	paxmark -m "$pkgdir/usr/lib/ghc-$pkgver/bin/ghc-iserv"
-	paxmark -m "$pkgdir/usr/lib/ghc-$pkgver/bin/ghc-iserv-dyn"
-	paxmark -m "$pkgdir/usr/lib/ghc-$pkgver/bin/ghc-iserv-prof"
+	find "$pkgdir" -type f \( -name "*.so" -o -name "*.a" \) -exec ${CROSS_COMPILE}strip --strip-unneeded {} \;
+	find "$pkgdir/$_ghclib/bin" -type f -exec ${CROSS_COMPILE}strip {} \;
+	paxmark -m "$pkgdir/$_ghclib/bin/ghc" \
+		"$pkgdir/$_ghclib/bin/ghc-iserv" \
+		"$pkgdir/$_ghclib/bin/ghc-iserv-dyn" \
+		"$pkgdir/$_ghclib/bin/ghc-iserv-prof"
 }
 
 dev() {
@@ -125,9 +179,14 @@ dev() {
 }
 
 sha512sums="58ea3853cd93b556ecdc4abd0be079b2621171b8491f59004ea4e036a4cba4470aaafe6591b942e0a50a64bdc47540e01fe6900212a1ef7087850112d9bfc5ef  ghc-8.0.2-src.tar.xz
+1b35fc6a5f482dc1e33f21ddf4c4fe17591990f16a4105c787225980a5f4dbaa42205204faf547f8e1b53f6356aefde9d3ff50cc416c9bf1a9ac08feadd74a99  ghc-8.0.2-testsuite.tar.xz
+23a52467fe83322e7b1d5f3e17a9defd08969666acb5a40e40ad93aa4f3feec028389448d4620edbe3ee8b246b3b6e338b267dce09cb14bdd0949b98e75d7562  0000-alpine.patch
+82cecce9e42c12cc3c8d484331b76ac5c6d2529887cd73181d4798f95057883be47489919379e6ebf7daba95b7c25b5d9d689b30ed8d01b13dda20a3b921ce3d  0000-bootstrap.patch
 128eece1b103f286b915a1563a628b638f03509d18cdb2e6510957d26eb56a4ae66e33c946c0e6c2aac2f947b9646dc88c1f390c69ea21f9dc64e0bef4de4e97  0001-rm-ghc-pwd.patch
 6f90b0de1e34c286e54ef14514ffabe17f9012fbc5448b4aacb3687aac065942e0a3a2c1c57b6338121140369a8870b4ce2a6b355c83c43344d4de8909a253a4  0002-Correct-issue-with-libffi-and-glibc.patch
 59194e6994c8344c579ec16c3adf3e0cdc7c356b524b12f8b10ec940191463d686782e525537c94ffa8e1bf9efcc36a2b3da3004183586ab0e354ab0a7036e0a  0003-do-not-use-SHELL.patch
 b5a5e73a2f01c0cabc96a49776d0d0f3d1d7a10759bb0b2982e7c7f6dc525d0559c0183ee779feb77ec6f2cec3bac17c1a5ba4c3bc0c6f780dfc1ed3dcf6c80e  0004-reproducible-tmp-names.patch
 e1c2cef06d307eda4b35521204e95eb54ace5dbcd22de659e95356f884b4424d6304365e4ab45c5116192cba4c095e2e91114bc7cb73d7c7173a7035287d0854  0005-buildpath-abi-stability.patch
-478f9c9990ee01b70e88daf97138f853816d862731a02e9286ad787845dcb40c1443a30520598d805d0ff7cea8c3d604ed5d9033dbe8e572e8a85911ee739ff7  0006-fix-madvise.patch"
+478f9c9990ee01b70e88daf97138f853816d862731a02e9286ad787845dcb40c1443a30520598d805d0ff7cea8c3d604ed5d9033dbe8e572e8a85911ee739ff7  0006-fix-madvise.patch
+a1032b800515908eae1602454c03bd80c92e39faa4004b52dba698d84166abea1bb4ce4afc2b69aad4a25a4e9acb2d12704453e512ab2b2ceae02c6df180bd76  0007-build-hp2ps-twice.patch
+0a53264a2066869379cbcb3a6175b93d4461d9a9fe6d2594bf0c9438daa176fbccf033832fa61bd482a23335c4528d8087301e3bdc08d08160acb789befbe005  0008-build-unlit-twice.patch"

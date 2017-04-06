@@ -1,52 +1,59 @@
 # Maintainer: Eivind Uggedal <eivind@uggedal.com>
 pkgname=docker
-pkgver=1.13.1
-_ver=${pkgver/_/-}
-pkgrel=0
+pkgver=17.03.1
+_ver=${pkgver/_/-}-ce
+pkgrel=1
 _gitcommit=v$_ver
 pkgdesc="Pack, ship and run any application as a lightweight container"
 url="http://www.docker.io/"
 arch="all"
 license="ASL 2.0"
-depends="iptables git xz"
+depends="ca-certificates iptables"
 depends_dev=""
-makedepends="go btrfs-progs-dev bash linux-headers coreutils libseccomp-dev"
-options="!strip"
+makedepends="go btrfs-progs-dev bash linux-headers coreutils libseccomp-dev cmake lvm2-dev glide"
+options="!check"
 install="$pkgname.pre-install"
 
 # $ grep COMMIT hack/dockerfile/binaries-commits
 # TOMLV_COMMIT=9baf8a8a9f2ed20a8e54160840c492f937eeaf9a
-# RUNC_COMMIT=2f7393a47307a16f8cee44a37b262e8b81021e3e
-# CONTAINERD_COMMIT=03e5862ec0d8d3b3f750e19fca3ee367e13c090e
+# RUNC_COMMIT=54296cf40ad8143b62dbcaa1d90e520a2136ddfe
+# CONTAINERD_COMMIT=4ab9917febca54791c5f071a9d1f404867857fcc
 # TINI_COMMIT=949e6facb77383876aeff8a6944dde66b3089574
 # LIBNETWORK_COMMIT=0f534354b813003a754606689722fe253101bc4e
 # VNDR_COMMIT=f56bd4504b4fad07a357913687fb652ee54bb3b0
+# BINDATA_COMMIT=a0ff2567cfb70903282db057e799fd826784d41d
 
-_runc_ver=2f7393a47307a16f8cee44a37b262e8b81021e3e
-_containerd_ver=03e5862ec0d8d3b3f750e19fca3ee367e13c090e
+_runc_ver=54296cf40ad8143b62dbcaa1d90e520a2136ddfe
+_containerd_ver=4ab9917febca54791c5f071a9d1f404867857fcc
 _libnetwork_ver=0f534354b813003a754606689722fe253101bc4e
+_tini_ver=949e6facb77383876aeff8a6944dde66b3089574
 
 subpackages="
 	$pkgname-bash-completion:bashcomp:noarch
+	$pkgname-fish-completion:fishcomp:noarch
 	$pkgname-zsh-completion:zshcomp:noarch
 	$pkgname-vim:vim:noarch
+	$pkgname-doc
 	"
 source="
 	$pkgname-$pkgver.tar.gz::https://github.com/docker/docker/archive/v$_ver.tar.gz
 	runc-$_runc_ver.tar.gz::https://github.com/opencontainers/runc/archive/$_runc_ver.tar.gz
 	containerd-$_containerd_ver.tar.gz::https://github.com/docker/containerd/archive/$_containerd_ver.tar.gz
 	libnetwork-$_libnetwork_ver.tar.gz::https://github.com/docker/libnetwork/archive/$_libnetwork_ver.tar.gz
-
+	tini-$_tini_ver.tar.gz::https://github.com/krallin/tini/archive/$_tini_ver.tar.gz
 	docker-openrc-fixes.patch
+	tini-cmake-fixes.patch
 	"
 
 builddir="$srcdir"/$pkgname-$_ver
-_buildtags="exclude_graphdriver_aufs exclude_graphdriver_devicemapper"
+#_buildtags="exclude_graphdriver_aufs exclude_graphdriver_devicemapper"
+_buildtags=""
 _runc_buildtags="seccomp"
 _runc_builddir="$srcdir"/runc-$_runc_ver
 
 _containerd_builddir="$srcdir"/containerd-$_containerd_ver
 _libnetwork_builddir="$srcdir"/libnetwork-$_libnetwork_ver
+_tini_builddir="$srcdir"/tini-$_tini_ver
 
 _apply_patches() {
 	local _dir="$1"
@@ -64,6 +71,7 @@ _apply_patches() {
 prepare() {
 	_apply_patches "$builddir" docker || return 1
 	_apply_patches "$_runc_builddir" runc || return 1
+	_apply_patches "$_tini_builddir" tini || return 1
 }
 
 build() {
@@ -96,10 +104,36 @@ build() {
 	cd "$_runc_builddir" || return 1
 	GOPATH="$PWD" make COMMIT="$_runc_ver" || return 1
 
+	# tini
+	msg "building tini"
+	cd "$_tini_builddir" || return 1
+	cmake -DVERSION_GIT=$_tini_ver || return 1
+	make tini-static|| return 1
+
 	# docker
 	msg "building docker"
 	cd "$builddir"
 	./hack/make.sh dynbinary
+
+	# docker man
+	msg "building docker man pages"
+	cd "$builddir/man"
+	mkdir -p genman
+	cp glide.lock glide.yaml genman/
+	cd genman
+	# need empty src folder for glide
+	mkdir src 
+	GOPATH=`pwd` glide install
+	rmdir src && mv vendor src
+	mkdir -p src/github.com/docker
+	ln -s `pwd`/../../ src/github.com/docker/docker
+	cd src/github.com/docker/docker
+	GOPATH="$builddir/man/genman" go build -o man/gen-manpages ./man
+
+	msg "Generating man pages"
+	cd "$builddir/man"
+	mkdir -p man1
+	./gen-manpages ./man1
 }
 
 package() {
@@ -127,12 +161,17 @@ package() {
 	install -Dm755 "$_containerd_builddir"/bin/ctr \
 		"$pkgdir"/usr/bin/docker-containerd-ctr || return 1
 
-	install -Dm755 bundles/$ver/dynbinary/dockerinit-$ver \
-		"$pkgdir"/usr/lib/docker/dockerinit
+	install -Dm755 "$_tini_builddir"/tini-static \
+		"$pkgdir"/usr/bin/docker-init || return 1
+
 	install -Dm755 contrib/init/openrc/docker.initd \
-		"$pkgdir"/etc/init.d/docker
+		"$pkgdir"/etc/init.d/docker || return 1
 	install -Dm644 contrib/init/openrc/docker.confd \
-		"$pkgdir"/etc/conf.d/docker
+		"$pkgdir"/etc/conf.d/docker || return 1
+
+	mkdir -p "$pkgdir"/usr/share/man/man1
+	install -Dm644 man/man1/* \
+		"$pkgdir"/usr/share/man/man1 || return 1
 }
 
 bashcomp() {
@@ -142,6 +181,15 @@ bashcomp() {
 
 	install -Dm644 "$builddir"/contrib/completion/bash/$pkgname \
 		"$subpkgdir"/usr/share/bash-completion/completions/$pkgname
+}
+
+fishcomp() {
+	pkgdesc="Fish shell completion for Docker"
+	depends=""
+	install_if="$pkgname=$pkgver-r$pkgrel fish"
+
+	install -Dm644 "$builddir"/contrib/completion/fish/$pkgname.fish \
+		"$subpkgdir"/usr/share/fish/completions/$pkgname.fish || return 1
 }
 
 zshcomp() {
@@ -164,8 +212,10 @@ vim() {
 	done
 }
 
-sha512sums="e480a884d7bb4f41f5c036afd5fae878e03aa740297dd3dd4df0eb8766efa6426ba636453513b423666eea21ba99f162ec27885828f8348d8746424944a3cfb4  docker-1.13.1.tar.gz
-2c2c925a1274eaef16d54881bfaa3e535956b67dd10eed87096ae9e7576234ff3598d37e635d3ce88c10fa9d102e79300bd48b69b972b6082f7acbfe2d4e90ea  runc-2f7393a47307a16f8cee44a37b262e8b81021e3e.tar.gz
-7c320a8f8fc12ae74ccda00d0f2f45f66d7592b5d209a62553cff3463a6006d8ad0275e0ae4ef07879455a32767f1d33f8f0f34392d28be4e6c217eee0f36ca3  containerd-03e5862ec0d8d3b3f750e19fca3ee367e13c090e.tar.gz
+sha512sums="51e2a9d6ca529ac67d63794b9fd257f962278019ae1a36a39ff635c742d6ca16286cc164470333ff6cd88d709ecf2cb90343b2dd94bb3939747550f74fb442d5  docker-17.03.1.tar.gz
+f17c7ff09578573a161f14616446e74d92d66039c1462bce23ea507b151eb66ede12d2ca583d3dace21d186a80bdadf222fc180bf1123e29c68e43f2f2d949c8  runc-54296cf40ad8143b62dbcaa1d90e520a2136ddfe.tar.gz
+0716ab670b87ff4c64047d49b02f8eb7f3f2cb2609480a64799089498c1b40a3a823aedb5c4a57112e281a9e6dc727d0bfc038b3ae6ca1f4ca62a7d4e28da65a  containerd-4ab9917febca54791c5f071a9d1f404867857fcc.tar.gz
 754cf6489968f3a83392c52b9445f71e8d5faca96e23ffc3ee2c6e8644bf065b64c7497395cf8fac9cc083ce9c7668260e319d01a8f10613e67db2d8254f6b06  libnetwork-0f534354b813003a754606689722fe253101bc4e.tar.gz
-8296b1bc88ef3dec4f9038c4e0bf83120ac5870860f6662eac9f9f8850ea8b7596bcd2b47932551e804ae8b6f6f26ad3bc4ce6d49600cc8eaf0a3016c15a9ccf  docker-openrc-fixes.patch"
+b6c1454f734662adf2fdedcb75cb7cdc82f4cf5b4c41fadf6891a670fa26d49b789034f4af8bf920b9e1ff1c3536123637ade9471f4ae2c1ef6c534e839b9f27  tini-949e6facb77383876aeff8a6944dde66b3089574.tar.gz
+8296b1bc88ef3dec4f9038c4e0bf83120ac5870860f6662eac9f9f8850ea8b7596bcd2b47932551e804ae8b6f6f26ad3bc4ce6d49600cc8eaf0a3016c15a9ccf  docker-openrc-fixes.patch
+29a343848d0aa14864c6bfc87c2a6fd408f546f0114e12f7035fb4678ee769fe728872a5d283803177990a61d7e02c4916017d5e45380ad3b0a2dffa3e746857  tini-cmake-fixes.patch"
