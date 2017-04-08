@@ -11,6 +11,7 @@ get_kernel_cmdline() {
 
 append_kernel_cmdline() {
 	kernel_cmdline="${kernel_cmdline}${1:+ $1}"
+	return 0
 }
 
 section_kernels() {

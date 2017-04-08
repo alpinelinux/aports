@@ -25,6 +25,9 @@ scriptdir="${scriptrealdir}"
 . "$scriptdir/utils/utils-search.sh"
 . "$scriptdir/utils/utils-fkrt.sh"
 . "$scriptdir/utils/utils-plugin-loader.sh"
+. "$scriptdir/utils/utils-apk.sh"
+
+_apk_init "/usr/bin/abuild-apk"
 
 default_colors
 info_prog_set "$scriptname"
@@ -38,7 +41,7 @@ checksum() {
 ### Begin code for mkimage proper
 ###
 
-usage() {
+mkimage_usage() {
 	cat <<EOF
 
 $scriptname	[--tag RELEASE] [--outdir OUTDIR] [--workdir WORKDIR]
@@ -93,10 +96,10 @@ while [ $# -gt 0 ]; do
 	opt="$1"
 	shift
 	case "$opt" in
-	--repository-file) REPOFILES="${REPOFILES:+$REPOFILES }$1"; shift ;;
-	--repository) REPODIR="$1"; shift ;;
-	--extra-repository) EXTRAREPOS="${EXTRAREPOS:+$EXTRAREPOS }$1"; shift ;;
-	--apk-cache-dir) APK_CACHE_DIR="$1" shift ;;
+	--repository-file) _repo="${_repos+$_repos }--repo-file '$1'" ; shift ;;
+	--repository) _repo="${_repos+$_repos }--repo '$1'" ; shift ;;
+	--extra-repository) _repo="${_repos+$_repo }--repo '$1'" ; shift ;;
+	--apk-cache-dir) _apk_cache_dir="$1" shift ;;
 	--workdir) WORKDIR="$1"; shift ;;
 	--outdir) OUTDIR="$1"; shift ;;
 	--tag) RELEASE="$1"; shift ;;
@@ -109,7 +112,8 @@ while [ $# -gt 0 ]; do
 	--yaml) _yaml="yes";;
 	--quiet) : ;;
 	--) break ;;
-	-*) _show_usage="yes" ; warning "Unrecognized option '$opt'" ; break ;;
+	--help) _show_usage="yes" ; break ;;
+	-*) _show_usage="error" ; warning "Unrecognized option '$opt'" ; break ;;
 	esac
 done
 
@@ -125,7 +129,12 @@ mkimage_yaml="$(dirname $0)"/release/mkimage-yaml.sh
 # If we ARE running in our script directory, at least put output files somewhere sane, like ./out
 OUTDIR="${OUTDIR:-$PWD}"
 
-[ "$_show_usage" = "yes" ] && usage && exit 1
+# Handle usage either from --help or unrecognized option.
+if [ "$_show_usage" ] ; then 
+	mkimage_usage
+	[ "$_show_usage" = "error" ] && exit 1
+	exit 0
+fi
 
 # Save ourselves from making a mess in our script's root directory.
 mkdir_is_writable "$OUTDIR" && OUTDIR="$(realpath "$OUTDIR")" \
@@ -175,7 +184,8 @@ for ARCH in $req_arch; do
 	info_prog_set "$scriptname:$ARCH"
 	info_func_set "build arch"
 
-	apk_repo_init "${WORKDIR}" "$ARCH"
+	apkroot_init "$ARCH" "$WORKDIR/.apkroot-$ARCH" "${_hotkeys:+--host-keys}" "${_apk_cache_dir:+--cache--dir $_apk_cache_dir}" $_repos
+	_apk update
 
 	if [ "$_yaml" = "yes" ]; then
 		info_func_set "build yaml"

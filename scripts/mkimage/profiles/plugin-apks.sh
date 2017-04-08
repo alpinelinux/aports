@@ -1,94 +1,9 @@
 plugin_apks() {
-	APK="${APK:-/usr/bin/abuild-apk}"
 	var_list_alias apks
 	var_list_alias apks_flavored
 	var_list_alias host_apks
 	var_list_alias rootfs_apks
 	var_list_alias rootfs_apks_flavored
-}
-
-_apk() {
-	local _apkcmd="$1"
-	shift
-	if [ "_apkcmd" = "fetch" ] ; then
-		_apkcmd="fetch -L"
-		# Pre-fetch packages so they get cached when doing one-off fetchs.
-		#if ( printf_n "$@" | grep -q -e '^-o$' -e '^--output$' -e '^-s$' -e '^--stdout$' ) ; then
-		#	_apk $(printf_n "$@" | sed -e '/^-o$/,+1d' -e '/^--output$/,+1d' -e '/^-s$/d' -e '/^--stdout$/d' | tr '\n' ' ')
-		#fi
-	fi
-
-	$APK $_apkcmd${APK_CACHE_DIR:+ --cache-dir "$APK_CACHE_DIR"}${APKROOT:+ --root "$APKROOT"}${ARCH:+ --arch "$ARCH"} "$@"
-}
-
-apk_pkg_full() {
-	local res=$(_apk search -x "$1")
-	printf '%s' $res
-}
-
-apk_check_pkgs() {
-	local res=$(_apk search -x $1)
-	if [ "$res" ]; then
-		echo $*
-	fi
-}
-
-apk_extract_files() {
-	local myapk="$1"
-	local mydest="$2"
-	shift 2
-
-	apk_check_pkgs "$myapk" || ! warning "apk_extract_files - Package '$myapk' can not be foud!" || return 1
-	dir_is_writable "$mydest" || ! warning "apk_extract_files - Can not write to destination: '$mydest'" || return 1
-	_apk fetch --quiet "$myapk" --stdout | tar -xz -C "$mydest" "$@"
-}
-
-apk_repo_init() {
-	local _work="$(realpath "$1")"
-	local _arch="$2"
-	info_func_set "apk-repo init"
-	APKROOT="$_work/.apkroot-$_arch"
-	APKREPOS="$APKROOT/etc/apk/repositories"
-	msg "Initilizing apk repository for '$_arch' at"
-	msg2 "'$APKROOT'"
-	if [ ! -e "$APKROOT" ]; then
-		mkdir_is_writable "$APKROOT/etc/apk" || ! warning "Can not create apk repository root for '$_arch'!" || return 1
-
-		# Copy keys
-		# TODO: plugin_apks - Add configuration for source location of host keys.
-		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
-
-		# create root for caching packages
-		_apk add --initdb
-
-		[ "$APK_CACHE_DIR" ] && ln -sfT "$APK_CACHE_DIR" "$APKROOT/etc/apk/cache"
-
-		if [ -z "$REPODIR" ] && [ -z "$REPOFILES" ]; then
-			warning "no repository set"
-		fi
-
-		touch "$APKREPOS" && file_is_writable "$APKREPOS" || ! warning "Can not write to apk repository file: '$APKREPOS'" || return 1
-
-
-		[ -z "$REPODIR"] || echo "$REPODIR" >> "$APKREPOS"
-
-		for repo in $REPOFILES ; do
-			cat "$repo" | grep -E -v "^#" >> "$APKREPOS"
-		done
-
-		for repo in $EXTRAREPOS; do
-			echo "$repo" >> "$APKREPOS"
-		done
-
-		msg "apk repository root for '$_arch' initilized, updating..."
-
-	elif ! dir_is_writable "$APKROOT" ; then
-		warning "apk repository root for '$_arch' '$APKROOT' exists, but is not writable!"
-		return 1
-	else
-		msg "apk repository root for '$_arch' already initilized, updating..."
-	fi
-	_apk update
 }
 
 # Local apk repository support.
