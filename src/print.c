@@ -157,17 +157,28 @@ const char *apk_error_str(int error)
 	}
 }
 
-void apk_log(const char *prefix, const char *format, ...)
+static void log(FILE *dest, const char *prefix, const char *format, va_list va)
 {
-	va_list va;
-
 	if (prefix != NULL)
-		fprintf(stdout, "%s", prefix);
-	va_start(va, format);
-	vfprintf(stdout, format, va);
-	va_end(va);
-	fprintf(stdout, "\n");
-	fflush(stdout);
+		fprintf(dest, "%s", prefix);
+	vfprintf(dest, format, va);
+	fprintf(dest, "\n");
+	fflush(dest);
 	apk_progress_force = 1;
 }
 
+void apk_log(const char *prefix, const char *format, ...)
+{
+	va_list va;
+	va_start(va, format);
+	log(stdout, prefix, format, va);
+	va_end(va);
+}
+
+void apk_log_err(const char *prefix, const char *format, ...)
+{
+	va_list va;
+	va_start(va, format);
+	log(stderr, prefix, format, va);
+	va_end(va);
+}
