@@ -1,6 +1,6 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-keys
-pkgver=2.0
+pkgver=2.1
 pkgrel=0
 pkgdesc="Public keys for Alpine Linux packages"
 url="http://alpinelinux.org"
@@ -23,6 +23,8 @@ _arch_keys="
 	x86_64:alpine-devel@lists.alpinelinux.org-5261cecb.rsa.pub
 
 	ppc64le:alpine-devel@lists.alpinelinux.org-58cbb476.rsa.pub
+
+	s390x:alpine-devel@lists.alpinelinux.org-58e4f17d.rsa.pub
 	"
 
 for _i in $_arch_keys; do
@@ -85,4 +87,5 @@ sha512sums="e4f9e314f8e506fba2cb3e599c6412a036ec37ce3a54990fc7d80a821d8728f40ee3
 e18e65ee911eb1f8ea869f758e8f2c94cf2ac254ee7ab90a3de1d47b94a547c2066214abf710da21910ebedc0153d05fd4fe579cc5ce24f46e0cfd29a02b1a68  alpine-devel@lists.alpinelinux.org-5243ef4b.rsa.pub
 2d4064cbe09ff958493ec86bcb925af9b7517825d1d9d8d00f2986201ad5952f986fea83d1e2c177e92130700bafa8c0bff61411b3cdb59a41e460ed719580a6  alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub
 721134f289ab1e7dde9158359906017daee40983199fe55f28206c8cdc46b8fcf177a36f270ce374b0eba5dbe01f68cbb3e385ae78a54bb0a2ed1e83a4d820a5  alpine-devel@lists.alpinelinux.org-5261cecb.rsa.pub
-bb5a3df8fac14a62d5936fb3722873fa6a121219b703cba955eb77de38c4384aeaf378fb9321a655e255f0be761e894e309b3789867279c1524dab6300cd8ef1  alpine-devel@lists.alpinelinux.org-58cbb476.rsa.pub"
+bb5a3df8fac14a62d5936fb3722873fa6a121219b703cba955eb77de38c4384aeaf378fb9321a655e255f0be761e894e309b3789867279c1524dab6300cd8ef1  alpine-devel@lists.alpinelinux.org-58cbb476.rsa.pub
+0666389ca53121453578cd4bef5fd06e159e291164b3e3233e7d6521604f8bebd30caeef1663adcd5309e07278833402c8a92c33294ec0c5cada24dc47c8cc98  alpine-devel@lists.alpinelinux.org-58e4f17d.rsa.pub"
