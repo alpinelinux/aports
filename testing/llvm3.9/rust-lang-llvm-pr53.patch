@@ -1,0 +1,883 @@
+From 0d4331af6e01235479e44f9775b3fde9e19200a3 Mon Sep 17 00:00:00 2001
+From: Keith Walker <kwalker@arm.com>
+Date: Tue, 27 Sep 2016 16:46:07 +0000
+Subject: [rust-lang/llvm#53 1/2] Propagate DBG_VALUE entries when there are
+ unvisited predecessors
+
+Variables are sometimes missing their debug location information in
+blocks in which the variables should be available. This would occur
+when one or more predecessor blocks had not yet been visited by the
+routine which propagated the information from predecessor blocks.
+
+This is addressed by only considering predecessor blocks which have
+already been visited.
+
+The solution to this problem was suggested by Daniel Berlin on the
+LLVM developer mailing list.
+
+Differential Revision: https://reviews.llvm.org/D24927
+
+
+git-svn-id: https://llvm.org/svn/llvm-project/llvm/trunk@282506 91177308-0d34-0410-b5e6-96231b3b80d8
+---
+ lib/CodeGen/LiveDebugValues.cpp          |  34 ++--
+ test/CodeGen/ARM/dbg-range-extension.mir | 282 +++++++++++++++++++++++++++++++
+ 2 files changed, 306 insertions(+), 10 deletions(-)
+ create mode 100644 test/CodeGen/ARM/dbg-range-extension.mir
+
+diff --git a/lib/CodeGen/LiveDebugValues.cpp b/lib/CodeGen/LiveDebugValues.cpp
+index 4ff88d528108..4cadd5855ed5 100644
+--- a/lib/CodeGen/LiveDebugValues.cpp
++++ b/lib/CodeGen/LiveDebugValues.cpp
+@@ -201,7 +201,8 @@ private:
+                 VarLocInMBB &OutLocs, VarLocMap &VarLocIDs);
+ 
+   bool join(MachineBasicBlock &MBB, VarLocInMBB &OutLocs, VarLocInMBB &InLocs,
+-            const VarLocMap &VarLocIDs);
++            const VarLocMap &VarLocIDs,
++            SmallPtrSet<const MachineBasicBlock *, 16> &Visited);
+ 
+   bool ExtendRanges(MachineFunction &MF);
+ 
+@@ -368,7 +369,8 @@ bool LiveDebugValues::transfer(MachineInstr &MI, OpenRangesSet &OpenRanges,
+ /// inserting a new DBG_VALUE instruction at the start of the @MBB - if the same
+ /// source variable in all the predecessors of @MBB reside in the same location.
+ bool LiveDebugValues::join(MachineBasicBlock &MBB, VarLocInMBB &OutLocs,
+-                           VarLocInMBB &InLocs, const VarLocMap &VarLocIDs) {
++                           VarLocInMBB &InLocs, const VarLocMap &VarLocIDs,
++                           SmallPtrSet<const MachineBasicBlock *, 16> &Visited) {
+   DEBUG(dbgs() << "join MBB: " << MBB.getName() << "\n");
+   bool Changed = false;
+ 
+@@ -376,21 +378,32 @@ bool LiveDebugValues::join(MachineBasicBlock &MBB, VarLocInMBB &OutLocs,
+ 
+   // For all predecessors of this MBB, find the set of VarLocs that
+   // can be joined.
++  int NumVisited = 0;
+   for (auto p : MBB.predecessors()) {
++    // Ignore unvisited predecessor blocks.  As we are processing
++    // the blocks in reverse post-order any unvisited block can
++    // be considered to not remove any incoming values.
++    if (!Visited.count(p))
++      continue;
+     auto OL = OutLocs.find(p);
+     // Join is null in case of empty OutLocs from any of the pred.
+     if (OL == OutLocs.end())
+       return false;
+ 
+-    // Just copy over the Out locs to incoming locs for the first predecessor.
+-    if (p == *MBB.pred_begin()) {
++    // Just copy over the Out locs to incoming locs for the first visited
++    // predecessor, and for all other predecessors join the Out locs.
++    if (!NumVisited)
+       InLocsT = OL->second;
+-      continue;
+-    }
+-    // Join with this predecessor.
+-    InLocsT &= OL->second;
++    else
++      InLocsT &= OL->second;
++    NumVisited++;
+   }
+ 
++  // As we are processing blocks in reverse post-order we
++  // should have processed at least one predecessor, unless it
++  // is the entry block which has no predecessor.
++  assert((NumVisited || MBB.pred_empty()) &&
++         "Should have processed at least one predecessor");
+   if (InLocsT.empty())
+     return false;
+ 
+@@ -463,6 +476,7 @@ bool LiveDebugValues::ExtendRanges(MachineFunction &MF) {
+   // To solve it, we perform join() and transfer() using the two worklist method
+   // until the ranges converge.
+   // Ranges have converged when both worklists are empty.
++  SmallPtrSet<const MachineBasicBlock *, 16> Visited;
+   while (!Worklist.empty() || !Pending.empty()) {
+     // We track what is on the pending worklist to avoid inserting the same
+     // thing twice.  We could avoid this with a custom priority queue, but this
+@@ -471,8 +485,8 @@ bool LiveDebugValues::ExtendRanges(MachineFunction &MF) {
+     while (!Worklist.empty()) {
+       MachineBasicBlock *MBB = OrderToBB[Worklist.top()];
+       Worklist.pop();
+-      MBBJoined = join(*MBB, OutLocs, InLocs, VarLocIDs);
+-
++      MBBJoined = join(*MBB, OutLocs, InLocs, VarLocIDs, Visited);
++      Visited.insert(MBB);
+       if (MBBJoined) {
+         MBBJoined = false;
+         Changed = true;
+diff --git a/test/CodeGen/ARM/dbg-range-extension.mir b/test/CodeGen/ARM/dbg-range-extension.mir
+new file mode 100644
+index 000000000000..b18f56197948
+--- /dev/null
++++ b/test/CodeGen/ARM/dbg-range-extension.mir
+@@ -0,0 +1,282 @@
++# RUN: llc -mtriple=arm-eabi -run-pass=livedebugvalues %s -o - | FileCheck %s
++#
++# Check that the debug information for variables are propagated into the correct blocks.
++#
++# Generated from the C source:
++#
++# int func2(int,  int);
++# void func(int a) {
++#   int b = func2(10, 11);
++#   if (a) {
++#     int c = func2(12, 13);
++#     for(int i = 1; i < a; i++) {
++#       func2(i, i+b);
++#     }
++#     func2(b,c);
++#   }
++#   func2(b,a);
++# }
++
++# CHECK: [[VAR_A:![0-9]+]] = !DILocalVariable(name: "a",
++# CHECK: [[VAR_B:![0-9]+]] = !DILocalVariable(name: "b",
++# CHECK: [[VAR_C:![0-9]+]] = !DILocalVariable(name: "c",
++# CHECK: [[VAR_I:![0-9]+]] = !DILocalVariable(name: "i",
++
++# CHECK: bb.0.entry
++# CHECK: DBG_VALUE debug-use %r0, debug-use _, [[VAR_A]]
++# CHECK: DBG_VALUE debug-use [[REG_A:%r[0-9]+]], debug-use _, [[VAR_A]]
++# CHECK: DBG_VALUE debug-use [[REG_B:%r[0-9]+]], debug-use _, [[VAR_B]]
++
++# CHECK: bb.1.if.then
++# CHECK: DBG_VALUE debug-use [[REG_B]], debug-use _, [[VAR_B]]
++# CHECK: DBG_VALUE debug-use [[REG_A]], debug-use _, [[VAR_A]]
++# CHECK: DBG_VALUE debug-use [[REG_C:%r[0-9]+]], debug-use _, [[VAR_C]]
++# CHECK: DBG_VALUE 1, 0, [[VAR_I]]
++
++# CHECK: bb.2.for.body
++# CHECK: DBG_VALUE debug-use [[REG_I:%r[0-9]+]], debug-use _, [[VAR_I]]
++# CHECK: DBG_VALUE debug-use [[REG_C]], debug-use _, [[VAR_C]]
++# CHECK: DBG_VALUE debug-use [[REG_B]], debug-use _, [[VAR_B]]
++# CHECK: DBG_VALUE debug-use [[REG_A]], debug-use _, [[VAR_A]]
++# CHECK: DBG_VALUE debug-use [[REG_I]], debug-use _, [[VAR_I]]
++
++# CHECK: bb.3.for.cond
++# CHECK: DBG_VALUE debug-use [[REG_C]], debug-use _, [[VAR_C]]
++# CHECK: DBG_VALUE debug-use [[REG_B]], debug-use _, [[VAR_B]]
++# CHECK: DBG_VALUE debug-use [[REG_A]], debug-use _, [[VAR_A]]
++# CHECK: DBG_VALUE debug-use [[REG_I]], debug-use _, [[VAR_I]]
++
++# CHECK: bb.4.for.cond.cleanup
++# CHECK: DBG_VALUE debug-use [[REG_I]], debug-use _, [[VAR_I]]
++# CHECK: DBG_VALUE debug-use [[REG_C]], debug-use _, [[VAR_C]]
++# CHECK: DBG_VALUE debug-use [[REG_B]], debug-use _, [[VAR_B]]
++# CHECK: DBG_VALUE debug-use [[REG_A]], debug-use _, [[VAR_A]]
++
++# CHECK: bb.5.if.end
++# CHECK: DBG_VALUE debug-use [[REG_B]], debug-use _, [[VAR_B]]
++# CHECK: DBG_VALUE debug-use [[REG_A]], debug-use _, [[VAR_A]]
++--- |
++  ; ModuleID = '/data/kwalker/work/OpenSource-llvm/llvm/test/CodeGen/ARM/dbg-range-extension.ll'
++  source_filename = "/data/kwalker/work/OpenSource-llvm/llvm/test/CodeGen/ARM/dbg-range-extension.ll"
++  target datalayout = "e-m:e-p:32:32-i64:64-v128:64:128-a:0:32-n32-S64"
++  target triple = "arm---eabi"
++  
++  ; Function Attrs: minsize nounwind optsize
++  define void @func(i32 %a) local_unnamed_addr #0 !dbg !8 {
++  entry:
++    tail call void @llvm.dbg.value(metadata i32 %a, i64 0, metadata !13, metadata !20), !dbg !21
++    %call = tail call i32 @func2(i32 10, i32 11) #0, !dbg !22
++    tail call void @llvm.dbg.value(metadata i32 %call, i64 0, metadata !14, metadata !20), !dbg !23
++    %tobool = icmp eq i32 %a, 0, !dbg !24
++    br i1 %tobool, label %if.end, label %if.then, !dbg !25
++  
++  if.then:                                          ; preds = %entry
++    %call1 = tail call i32 @func2(i32 12, i32 13) #0, !dbg !26
++    tail call void @llvm.dbg.value(metadata i32 %call1, i64 0, metadata !15, metadata !20), !dbg !27
++    tail call void @llvm.dbg.value(metadata i32 1, i64 0, metadata !18, metadata !20), !dbg !28
++    br label %for.cond, !dbg !29
++  
++  for.cond:                                         ; preds = %for.body, %if.then
++    %i.0 = phi i32 [ 1, %if.then ], [ %inc, %for.body ]
++    tail call void @llvm.dbg.value(metadata i32 %i.0, i64 0, metadata !18, metadata !20), !dbg !28
++    %cmp = icmp slt i32 %i.0, %a, !dbg !30
++    br i1 %cmp, label %for.body, label %for.cond.cleanup, !dbg !33
++  
++  for.cond.cleanup:                                 ; preds = %for.cond
++    %call3 = tail call i32 @func2(i32 %call, i32 %call1) #0, !dbg !34
++    br label %if.end, !dbg !35
++  
++  for.body:                                         ; preds = %for.cond
++    %0 = add i32 %call, %i.0, !dbg !36
++    %call2 = tail call i32 @func2(i32 %i.0, i32 %0) #0, !dbg !36
++    %inc = add nuw nsw i32 %i.0, 1, !dbg !38
++    tail call void @llvm.dbg.value(metadata i32 %inc, i64 0, metadata !18, metadata !20), !dbg !28
++    br label %for.cond, !dbg !40, !llvm.loop !41
++  
++  if.end:                                           ; preds = %for.cond.cleanup, %entry
++    %call4 = tail call i32 @func2(i32 %call, i32 %a) #0, !dbg !43
++    ret void, !dbg !44
++  }
++  
++  ; Function Attrs: minsize optsize
++  declare i32 @func2(i32, i32) local_unnamed_addr #1
++  
++  ; Function Attrs: nounwind readnone
++  declare void @llvm.dbg.value(metadata, i64, metadata, metadata) #2
++  
++  ; Function Attrs: nounwind
++  declare void @llvm.stackprotector(i8*, i8**) #3
++  
++  attributes #0 = { minsize nounwind optsize }
++  attributes #1 = { minsize optsize }
++  attributes #2 = { nounwind readnone }
++  attributes #3 = { nounwind }
++  
++  !llvm.dbg.cu = !{!0}
++  !llvm.module.flags = !{!3, !4, !5, !6}
++  !llvm.ident = !{!7}
++  
++  !0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, producer: "clang", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, enums: !2)
++  !1 = !DIFile(filename: "loop.c", directory: "/tmp")
++  !2 = !{}
++  !3 = !{i32 2, !"Dwarf Version", i32 4}
++  !4 = !{i32 2, !"Debug Info Version", i32 3}
++  !5 = !{i32 1, !"wchar_size", i32 4}
++  !6 = !{i32 1, !"min_enum_size", i32 4}
++  !7 = !{!"clang version 4.0.0 (http://llvm.org/git/clang.git b8f10df3679b36f51e1de7c4351b82d297825089) (http://llvm.org/git/llvm.git c2a5d16d1e3b8c49f5bbb1ff87a76ac4f88edb89)"}
++  !8 = distinct !DISubprogram(name: "func", scope: !1, file: !1, line: 2, type: !9, isLocal: false, isDefinition: true, scopeLine: 2, flags: DIFlagPrototyped, isOptimized: true, unit: !0, variables: !12)
++  !9 = !DISubroutineType(types: !10)
++  !10 = !{null, !11}
++  !11 = !DIBasicType(name: "int", size: 32, align: 32, encoding: DW_ATE_signed)
++  !12 = !{!13, !14, !15, !18}
++  !13 = !DILocalVariable(name: "a", arg: 1, scope: !8, file: !1, line: 2, type: !11)
++  !14 = !DILocalVariable(name: "b", scope: !8, file: !1, line: 3, type: !11)
++  !15 = !DILocalVariable(name: "c", scope: !16, file: !1, line: 5, type: !11)
++  !16 = distinct !DILexicalBlock(scope: !17, file: !1, line: 4, column: 9)
++  !17 = distinct !DILexicalBlock(scope: !8, file: !1, line: 4, column: 6)
++  !18 = !DILocalVariable(name: "i", scope: !19, file: !1, line: 6, type: !11)
++  !19 = distinct !DILexicalBlock(scope: !16, file: !1, line: 6, column: 3)
++  !20 = !DIExpression()
++  !21 = !DILocation(line: 2, column: 15, scope: !8)
++  !22 = !DILocation(line: 3, column: 17, scope: !8)
++  !23 = !DILocation(line: 3, column: 13, scope: !8)
++  !24 = !DILocation(line: 4, column: 6, scope: !17)
++  !25 = !DILocation(line: 4, column: 6, scope: !8)
++  !26 = !DILocation(line: 5, column: 11, scope: !16)
++  !27 = !DILocation(line: 5, column: 7, scope: !16)
++  !28 = !DILocation(line: 6, column: 11, scope: !19)
++  !29 = !DILocation(line: 6, column: 7, scope: !19)
++  !30 = !DILocation(line: 6, column: 20, scope: !31)
++  !31 = !DILexicalBlockFile(scope: !32, file: !1, discriminator: 1)
++  !32 = distinct !DILexicalBlock(scope: !19, file: !1, line: 6, column: 3)
++  !33 = !DILocation(line: 6, column: 3, scope: !31)
++  !34 = !DILocation(line: 9, column: 3, scope: !16)
++  !35 = !DILocation(line: 10, column: 2, scope: !16)
++  !36 = !DILocation(line: 7, column: 4, scope: !37)
++  !37 = distinct !DILexicalBlock(scope: !32, file: !1, line: 6, column: 30)
++  !38 = !DILocation(line: 6, column: 26, scope: !39)
++  !39 = !DILexicalBlockFile(scope: !32, file: !1, discriminator: 3)
++  !40 = !DILocation(line: 6, column: 3, scope: !39)
++  !41 = distinct !{!41, !42}
++  !42 = !DILocation(line: 6, column: 3, scope: !16)
++  !43 = !DILocation(line: 11, column: 2, scope: !8)
++  !44 = !DILocation(line: 12, column: 1, scope: !8)
++
++...
++---
++name:            func
++alignment:       2
++exposesReturnsTwice: false
++legalized:       false
++regBankSelected: false
++selected:        false
++tracksRegLiveness: false
++liveins:         
++  - { reg: '%r0' }
++calleeSavedRegisters: [ '%lr', '%d8', '%d9', '%d10', '%d11', '%d12', '%d13', 
++                        '%d14', '%d15', '%q4', '%q5', '%q6', '%q7', '%r4', 
++                        '%r5', '%r6', '%r7', '%r8', '%r9', '%r10', '%r11', 
++                        '%s16', '%s17', '%s18', '%s19', '%s20', '%s21', 
++                        '%s22', '%s23', '%s24', '%s25', '%s26', '%s27', 
++                        '%s28', '%s29', '%s30', '%s31', '%d8_d10', '%d9_d11', 
++                        '%d10_d12', '%d11_d13', '%d12_d14', '%d13_d15', 
++                        '%q4_q5', '%q5_q6', '%q6_q7', '%q4_q5_q6_q7', '%r4_r5', 
++                        '%r6_r7', '%r8_r9', '%r10_r11', '%d8_d9_d10', '%d9_d10_d11', 
++                        '%d10_d11_d12', '%d11_d12_d13', '%d12_d13_d14', 
++                        '%d13_d14_d15', '%d8_d10_d12', '%d9_d11_d13', '%d10_d12_d14', 
++                        '%d11_d13_d15', '%d8_d10_d12_d14', '%d9_d11_d13_d15', 
++                        '%d9_d10', '%d11_d12', '%d13_d14', '%d9_d10_d11_d12', 
++                        '%d11_d12_d13_d14' ]
++frameInfo:       
++  isFrameAddressTaken: false
++  isReturnAddressTaken: false
++  hasStackMap:     false
++  hasPatchPoint:   false
++  stackSize:       24
++  offsetAdjustment: 0
++  maxAlignment:    4
++  adjustsStack:    true
++  hasCalls:        true
++  maxCallFrameSize: 0
++  hasOpaqueSPAdjustment: false
++  hasVAStart:      false
++  hasMustTailInVarArgFunc: false
++stack:           
++  - { id: 0, type: spill-slot, offset: -4, size: 4, alignment: 4, callee-saved-register: '%lr' }
++  - { id: 1, type: spill-slot, offset: -8, size: 4, alignment: 4, callee-saved-register: '%r11' }
++  - { id: 2, type: spill-slot, offset: -12, size: 4, alignment: 4, callee-saved-register: '%r7' }
++  - { id: 3, type: spill-slot, offset: -16, size: 4, alignment: 4, callee-saved-register: '%r6' }
++  - { id: 4, type: spill-slot, offset: -20, size: 4, alignment: 4, callee-saved-register: '%r5' }
++  - { id: 5, type: spill-slot, offset: -24, size: 4, alignment: 4, callee-saved-register: '%r4' }
++body:             |
++  bb.0.entry:
++    successors: %bb.5.if.end, %bb.1.if.then
++    liveins: %r0, %r4, %r5, %r6, %r7, %r11, %lr
++  
++    %sp = frame-setup STMDB_UPD %sp, 14, _, killed %r4, killed %r5, killed %r6, killed %r7, killed %r11, killed %lr
++    frame-setup CFI_INSTRUCTION def_cfa_offset 24
++    frame-setup CFI_INSTRUCTION offset %lr, -4
++    frame-setup CFI_INSTRUCTION offset %r11, -8
++    frame-setup CFI_INSTRUCTION offset %r7, -12
++    frame-setup CFI_INSTRUCTION offset %r6, -16
++    frame-setup CFI_INSTRUCTION offset %r5, -20
++    frame-setup CFI_INSTRUCTION offset %r4, -24
++    DBG_VALUE debug-use %r0, debug-use _, !13, !20, debug-location !21
++    %r4 = MOVr killed %r0, 14, _, _
++    DBG_VALUE debug-use %r4, debug-use _, !13, !20, debug-location !21
++    %r0 = MOVi 10, 14, _, _, debug-location !22
++    %r1 = MOVi 11, 14, _, _, debug-location !22
++    BL @func2, csr_aapcs, implicit-def dead %lr, implicit %sp, implicit killed %r0, implicit killed %r1, implicit-def %sp, implicit-def %r0, debug-location !22
++    %r5 = MOVr killed %r0, 14, _, _, debug-location !22
++    DBG_VALUE debug-use %r5, debug-use _, !14, !20, debug-location !23
++    CMPri %r4, 0, 14, _, implicit-def %cpsr, debug-location !25
++    Bcc %bb.5.if.end, 0, killed %cpsr
++  
++  bb.1.if.then:
++    successors: %bb.3.for.cond
++    liveins: %r4, %r5
++  
++    %r0 = MOVi 12, 14, _, _, debug-location !26
++    %r1 = MOVi 13, 14, _, _, debug-location !26
++    BL @func2, csr_aapcs, implicit-def dead %lr, implicit %sp, implicit killed %r0, implicit killed %r1, implicit-def %sp, implicit-def %r0, debug-location !26
++    %r6 = MOVr killed %r0, 14, _, _, debug-location !26
++    DBG_VALUE debug-use %r6, debug-use _, !15, !20, debug-location !27
++    %r7 = MOVi 1, 14, _, _
++    DBG_VALUE 1, 0, !18, !20, debug-location !28
++    B %bb.3.for.cond
++  
++  bb.2.for.body:
++    successors: %bb.3.for.cond
++    liveins: %r4, %r5, %r6, %r7
++  
++    %r1 = ADDrr %r5, %r7, 14, _, _, debug-location !36
++    %r0 = MOVr %r7, 14, _, _, debug-location !36
++    BL @func2, csr_aapcs, implicit-def dead %lr, implicit %sp, implicit killed %r0, implicit killed %r1, implicit-def %sp, implicit-def dead %r0, debug-location !36
++    %r7 = ADDri killed %r7, 1, 14, _, _, debug-location !38
++    DBG_VALUE debug-use %r7, debug-use _, !18, !20, debug-location !28
++  
++  bb.3.for.cond:
++    successors: %bb.2.for.body, %bb.4.for.cond.cleanup
++    liveins: %r4, %r5, %r6, %r7
++  
++    DBG_VALUE debug-use %r7, debug-use _, !18, !20, debug-location !28
++    CMPrr %r7, %r4, 14, _, implicit-def %cpsr, debug-location !33
++    Bcc %bb.2.for.body, 11, killed %cpsr, debug-location !33
++  
++  bb.4.for.cond.cleanup:
++    successors: %bb.5.if.end
++    liveins: %r4, %r5, %r6
++  
++    %r0 = MOVr %r5, 14, _, _, debug-location !34
++    %r1 = MOVr killed %r6, 14, _, _, debug-location !34
++    BL @func2, csr_aapcs, implicit-def dead %lr, implicit %sp, implicit killed %r0, implicit killed %r1, implicit-def %sp, implicit-def dead %r0, debug-location !34
++  
++  bb.5.if.end:
++    liveins: %r4, %r5
++  
++    %r0 = MOVr killed %r5, 14, _, _, debug-location !43
++    %r1 = MOVr killed %r4, 14, _, _, debug-location !43
++    %sp = LDMIA_UPD %sp, 14, _, def %r4, def %r5, def %r6, def %r7, def %r11, def %lr, debug-location !43
++    TAILJMPd @func2, implicit %sp, implicit %sp, implicit killed %r0, implicit killed %r1, debug-location !43
++
++...
+-- 
+2.7.4
+
+From 8a0fc26559123bb6eab3ceae93d5a2c94943614b Mon Sep 17 00:00:00 2001
+From: Adrian Prantl <aprantl@apple.com>
+Date: Wed, 28 Sep 2016 17:51:14 +0000
+Subject: [rust-lang/llvm#53 2/2] Teach LiveDebugValues about lexical scopes.
+
+This addresses PR26055 LiveDebugValues is very slow.
+
+Contrary to the old LiveDebugVariables pass LiveDebugValues currently
+doesn't look at the lexical scopes before inserting a DBG_VALUE
+intrinsic. This means that we often propagate DBG_VALUEs much further
+down than necessary. This is especially noticeable in large C++
+functions with many inlined method calls that all use the same
+"this"-pointer.
+
+For example, in the following code it makes no sense to propagate the
+inlined variable a from the first inlined call to f() into any of the
+subsequent basic blocks, because the variable will always be out of
+scope:
+
+void sink(int a);
+void __attribute((always_inline)) f(int a) { sink(a); }
+void foo(int i) {
+   f(i);
+   if (i)
+     f(i);
+   f(i);
+}
+
+This patch reuses the LexicalScopes infrastructure we have for
+LiveDebugVariables to take this into account.
+
+The effect on compile time and memory consumption is quite noticeable:
+I tested a benchmark that is a large C++ source with an enormous
+amount of inlined "this"-pointers that would previously eat >24GiB
+(most of them for DBG_VALUE intrinsics) and whose compile time was
+dominated by LiveDebugValues. With this patch applied the memory
+consumption is 1GiB and 1.7% of the time is spent in LiveDebugValues.
+
+https://reviews.llvm.org/D24994
+Thanks to Daniel Berlin and Keith Walker for reviewing!
+
+git-svn-id: https://llvm.org/svn/llvm-project/llvm/trunk@282611 91177308-0d34-0410-b5e6-96231b3b80d8
+---
+ lib/CodeGen/LiveDebugValues.cpp                  |  51 ++++-
+ test/CodeGen/ARM/dbg-range-extension.mir         |   1 -
+ test/DebugInfo/COFF/register-variables.ll        |   8 +-
+ test/DebugInfo/MIR/X86/livedebugvalues-limit.mir | 228 +++++++++++++++++++++++
+ test/DebugInfo/X86/fission-ranges.ll             |   6 +-
+ 5 files changed, 278 insertions(+), 16 deletions(-)
+ create mode 100644 test/DebugInfo/MIR/X86/livedebugvalues-limit.mir
+
+diff --git a/lib/CodeGen/LiveDebugValues.cpp b/lib/CodeGen/LiveDebugValues.cpp
+index 4cadd5855ed5..969944eb24a2 100644
+--- a/lib/CodeGen/LiveDebugValues.cpp
++++ b/lib/CodeGen/LiveDebugValues.cpp
+@@ -23,6 +23,7 @@
+ #include "llvm/ADT/SparseBitVector.h"
+ #include "llvm/ADT/Statistic.h"
+ #include "llvm/ADT/UniqueVector.h"
++#include "llvm/CodeGen/LexicalScopes.h"
+ #include "llvm/CodeGen/MachineFunction.h"
+ #include "llvm/CodeGen/MachineFunctionPass.h"
+ #include "llvm/CodeGen/MachineInstrBuilder.h"
+@@ -60,6 +61,26 @@ class LiveDebugValues : public MachineFunctionPass {
+ private:
+   const TargetRegisterInfo *TRI;
+   const TargetInstrInfo *TII;
++  LexicalScopes LS;
++
++  /// Keeps track of lexical scopes associated with a user value's source
++  /// location.
++  class UserValueScopes {
++    DebugLoc DL;
++    LexicalScopes &LS;
++    SmallPtrSet<const MachineBasicBlock *, 4> LBlocks;
++
++  public:
++    UserValueScopes(DebugLoc D, LexicalScopes &L) : DL(std::move(D)), LS(L) {}
++
++    /// Return true if current scope dominates at least one machine
++    /// instruction in a given machine basic block.
++    bool dominates(MachineBasicBlock *MBB) {
++      if (LBlocks.empty())
++        LS.getMachineBasicBlocks(DL, LBlocks);
++      return LBlocks.count(MBB) != 0 || LS.dominates(DL, MBB);
++    }
++  };
+ 
+   /// Based on std::pair so it can be used as an index into a DenseMap.
+   typedef std::pair<const DILocalVariable *, const DILocation *>
+@@ -83,7 +104,7 @@ private:
+   struct VarLoc {
+     const DebugVariable Var;
+     const MachineInstr &MI; ///< Only used for cloning a new DBG_VALUE.
+-
++    mutable UserValueScopes UVS;
+     enum { InvalidKind = 0, RegisterKind } Kind;
+ 
+     /// The value location. Stored separately to avoid repeatedly
+@@ -96,9 +117,9 @@ private:
+       uint64_t Hash;
+     } Loc;
+ 
+-    VarLoc(const MachineInstr &MI)
++    VarLoc(const MachineInstr &MI, LexicalScopes &LS)
+         : Var(MI.getDebugVariable(), MI.getDebugLoc()->getInlinedAt()), MI(MI),
+-          Kind(InvalidKind) {
++          UVS(MI.getDebugLoc(), LS), Kind(InvalidKind) {
+       static_assert((sizeof(Loc) == sizeof(uint64_t)),
+                     "hash does not cover all members of Loc");
+       assert(MI.isDebugValue() && "not a DBG_VALUE");
+@@ -125,6 +146,10 @@ private:
+       return 0;
+     }
+ 
++    /// Determine whether the lexical scope of this value's debug location
++    /// dominates MBB.
++    bool dominates(MachineBasicBlock &MBB) const { return UVS.dominates(&MBB); }
++
+     void dump() const { MI.dump(); }
+ 
+     bool operator==(const VarLoc &Other) const {
+@@ -229,6 +254,7 @@ public:
+   /// Calculate the liveness information for the given machine function.
+   bool runOnMachineFunction(MachineFunction &MF) override;
+ };
++
+ } // namespace
+ 
+ //===----------------------------------------------------------------------===//
+@@ -295,7 +321,7 @@ void LiveDebugValues::transferDebugValue(const MachineInstr &MI,
+   // Add the VarLoc to OpenRanges from this DBG_VALUE.
+   // TODO: Currently handles DBG_VALUE which has only reg as location.
+   if (isDbgValueDescribedByReg(MI)) {
+-    VarLoc VL(MI);
++    VarLoc VL(MI, LS);
+     unsigned ID = VarLocIDs.insert(VL);
+     OpenRanges.insert(ID, VL.Var);
+   }
+@@ -399,6 +425,13 @@ bool LiveDebugValues::join(MachineBasicBlock &MBB, VarLocInMBB &OutLocs,
+     NumVisited++;
+   }
+ 
++  // Filter out DBG_VALUES that are out of scope.
++  VarLocSet KillSet;
++  for (auto ID : InLocsT)
++    if (!VarLocIDs[ID].dominates(MBB))
++      KillSet.set(ID);
++  InLocsT.intersectWithComplement(KillSet);
++
+   // As we are processing blocks in reverse post-order we
+   // should have processed at least one predecessor, unless it
+   // is the entry block which has no predecessor.
+@@ -519,12 +552,14 @@ bool LiveDebugValues::ExtendRanges(MachineFunction &MF) {
+ }
+ 
+ bool LiveDebugValues::runOnMachineFunction(MachineFunction &MF) {
++  if (!MF.getFunction()->getSubprogram())
++    // LiveDebugValues will already have removed all DBG_VALUEs.
++    return false;
++
+   TRI = MF.getSubtarget().getRegisterInfo();
+   TII = MF.getSubtarget().getInstrInfo();
++  LS.initialize(MF);
+ 
+-  bool Changed = false;
+-
+-  Changed |= ExtendRanges(MF);
+-
++  bool Changed = ExtendRanges(MF);
+   return Changed;
+ }
+diff --git a/test/CodeGen/ARM/dbg-range-extension.mir b/test/CodeGen/ARM/dbg-range-extension.mir
+index b18f56197948..466f69396948 100644
+--- a/test/CodeGen/ARM/dbg-range-extension.mir
++++ b/test/CodeGen/ARM/dbg-range-extension.mir
+@@ -47,7 +47,6 @@
+ # CHECK: DBG_VALUE debug-use [[REG_I]], debug-use _, [[VAR_I]]
+ 
+ # CHECK: bb.4.for.cond.cleanup
+-# CHECK: DBG_VALUE debug-use [[REG_I]], debug-use _, [[VAR_I]]
+ # CHECK: DBG_VALUE debug-use [[REG_C]], debug-use _, [[VAR_C]]
+ # CHECK: DBG_VALUE debug-use [[REG_B]], debug-use _, [[VAR_B]]
+ # CHECK: DBG_VALUE debug-use [[REG_A]], debug-use _, [[VAR_A]]
+diff --git a/test/DebugInfo/COFF/register-variables.ll b/test/DebugInfo/COFF/register-variables.ll
+index 9bb782853a3d..08246fef9603 100644
+--- a/test/DebugInfo/COFF/register-variables.ll
++++ b/test/DebugInfo/COFF/register-variables.ll
+@@ -37,8 +37,8 @@
+ ; ASM:         #DEBUG_VALUE: c <- %EAX
+ ; ASM:         testl   %esi, %esi
+ ; ASM:         je      .LBB0_2
++; ASM: [[after_je:\.Ltmp.*]]:
+ ; ASM: # BB#1:                                 # %if.then
+-; ASM-DAG:     #DEBUG_VALUE: c <- %EAX
+ ; ASM-DAG:     #DEBUG_VALUE: inlineinc:a <- %EAX
+ ; ASM-DAG:     #DEBUG_VALUE: a <- %EAX
+ ; ASM-DAG:     #DEBUG_VALUE: f:p <- %ESI
+@@ -65,7 +65,7 @@
+ ; ASM:         .cv_def_range    [[after_getint]] [[after_inc_eax]], "A\021\021\000\000\000"
+ ; ASM:         .short  4414                    # Record kind: S_LOCAL
+ ; ASM:         .asciz  "c"
+-; ASM:         .cv_def_range    [[after_getint]] [[after_inc_eax]], "A\021\021\000\000\000"
++; ASM:         .cv_def_range    [[after_getint]] [[after_je]], "A\021\021\000\000\000"
+ ; ASM:         .short  4414                    # Record kind: S_LOCAL
+ ; ASM:         .asciz  "b"
+ ; ASM:         .cv_def_range    [[after_inc_eax]] [[after_if]], "A\021\021\000\000\000"
+@@ -132,7 +132,7 @@
+ ; OBJ:     LocalVariableAddrRange {
+ ; OBJ:       OffsetStart: .text+0xC
+ ; OBJ:       ISectStart: 0x0
+-; OBJ:       Range: 0x6
++; OBJ:       Range: 0x4
+ ; OBJ:     }
+ ; OBJ:   }
+ ; OBJ:   Local {
+@@ -143,7 +143,7 @@
+ ; OBJ:   }
+ ; OBJ:   DefRangeRegister {
+ ; OBJ:     Register: 17
+-; OBJ:     LocalVariableAddrRange {
++; OBJ:     MayHaveNoName: 0
+ ; OBJ:       OffsetStart: .text+0x12
+ ; OBJ:       ISectStart: 0x0
+ ; OBJ:       Range: 0x6
+diff --git a/test/DebugInfo/MIR/X86/livedebugvalues-limit.mir b/test/DebugInfo/MIR/X86/livedebugvalues-limit.mir
+new file mode 100644
+index 000000000000..4c87543636d5
+--- /dev/null
++++ b/test/DebugInfo/MIR/X86/livedebugvalues-limit.mir
+@@ -0,0 +1,228 @@
++--- |
++  ; RUN: llc -run-pass=livedebugvalues -march=x86-64 -o - %s | FileCheck %s
++  ; Created from:
++  ; void sink(int a);
++  ; void __attribute((always_inline)) f(int a) { sink(a); }
++  ; void foo(int i) {
++  ;   f(i);
++  ;   if (i)
++  ;     f(i);
++  ;   f(i);
++  ; }
++  ;
++  ; This test verifies that LiveDebugValues doesn't propagate DBG_VALUEs into
++  ; basic blocks that are beyond the scope of the source variable.
++  ;
++  ; CHECK:  bb.1.if.then:
++  ; CHECK:      DBG_VALUE debug-use %ebx, debug-use _, !19, !13, debug-location !20
++  ; CHECK-NOT:  DBG_VALUE debug-use %ebx, debug-use _, !12, !13, debug-location !21
++  ; CHECK:      DBG_VALUE debug-use %ebx, debug-use _, !12, !13, debug-location !27
++  ; CHECK: bb.2.if.end:
++  ; CHECK:     DBG_VALUE debug-use %ebx, debug-use _, !19, !13, debug-location !20
++  ; CHECK-NOT: DBG_VALUE debug-use %ebx, debug-use _, !12, !13, debug-location !21
++  ; CHECK:     DBG_VALUE debug-use %ebx, debug-use _, !12, !13, debug-location !31
++  ;
++  ; ModuleID = 'livedebugvalues-limit.ll'
++  source_filename = "livedebugvalues-limit.c"
++  target datalayout = "e-m:o-i64:64-f80:128-n8:16:32:64-S128"
++  target triple = "x86_64-apple-macosx"
++  
++  ; Function Attrs: alwaysinline nounwind ssp uwtable
++  define void @f(i32 %a) local_unnamed_addr #0 !dbg !7 {
++  entry:
++    tail call void @llvm.dbg.value(metadata i32 %a, i64 0, metadata !12, metadata !13), !dbg !14
++    tail call void @sink(i32 %a) #4, !dbg !15
++    ret void, !dbg !16
++  }
++  
++  declare void @sink(i32) local_unnamed_addr
++  
++  ; Function Attrs: nounwind ssp uwtable
++  define void @foo(i32 %i) local_unnamed_addr #2 !dbg !17 {
++  entry:
++    tail call void @llvm.dbg.value(metadata i32 %i, i64 0, metadata !19, metadata !13), !dbg !20
++    tail call void @llvm.dbg.value(metadata i32 %i, i64 0, metadata !12, metadata !13) #4, !dbg !21
++    tail call void @sink(i32 %i) #4, !dbg !23
++    %tobool = icmp eq i32 %i, 0, !dbg !24
++    br i1 %tobool, label %if.end, label %if.then, !dbg !26
++  
++  if.then:                                          ; preds = %entry
++    tail call void @llvm.dbg.value(metadata i32 %i, i64 0, metadata !12, metadata !13) #4, !dbg !27
++    tail call void @sink(i32 %i) #4, !dbg !29
++    br label %if.end, !dbg !30
++  
++  if.end:                                           ; preds = %if.then, %entry
++    tail call void @llvm.dbg.value(metadata i32 %i, i64 0, metadata !12, metadata !13) #4, !dbg !31
++    tail call void @sink(i32 %i) #4, !dbg !33
++    ret void, !dbg !34
++  }
++  
++  ; Function Attrs: nounwind readnone
++  declare void @llvm.dbg.value(metadata, i64, metadata, metadata) #3
++  
++  ; Function Attrs: nounwind
++  declare void @llvm.stackprotector(i8*, i8**) #4
++  
++  attributes #0 = { alwaysinline nounwind ssp uwtable }
++  attributes #2 = { nounwind ssp uwtable }
++  attributes #3 = { nounwind readnone }
++  attributes #4 = { nounwind }
++  
++  !llvm.dbg.cu = !{!0}
++  !llvm.module.flags = !{!3, !4, !5}
++  !llvm.ident = !{!6}
++  
++  !0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, producer: "clang version 4.0.0 (trunk 281923) (llvm/trunk 281916)", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, enums: !2)
++  !1 = !DIFile(filename: "livedebugvalues-limit.c", directory: "/Volumes/Fusion/Data/llvm")
++  !2 = !{}
++  !3 = !{i32 2, !"Dwarf Version", i32 4}
++  !4 = !{i32 2, !"Debug Info Version", i32 3}
++  !5 = !{i32 1, !"PIC Level", i32 2}
++  !6 = !{!"clang version 4.0.0 (trunk 281923) (llvm/trunk 281916)"}
++  !7 = distinct !DISubprogram(name: "f", scope: !1, file: !1, line: 3, type: !8, isLocal: false, isDefinition: true, scopeLine: 3, flags: DIFlagPrototyped, isOptimized: true, unit: !0, variables: !11)
++  !8 = !DISubroutineType(types: !9)
++  !9 = !{null, !10}
++  !10 = !DIBasicType(name: "int", size: 32, align: 32, encoding: DW_ATE_signed)
++  !11 = !{!12}
++  !12 = !DILocalVariable(name: "a", arg: 1, scope: !7, file: !1, line: 3, type: !10)
++  !13 = !DIExpression()
++  !14 = !DILocation(line: 3, column: 41, scope: !7)
++  !15 = !DILocation(line: 3, column: 46, scope: !7)
++  !16 = !DILocation(line: 3, column: 55, scope: !7)
++  !17 = distinct !DISubprogram(name: "foo", scope: !1, file: !1, line: 4, type: !8, isLocal: false, isDefinition: true, scopeLine: 4, flags: DIFlagPrototyped, isOptimized: true, unit: !0, variables: !18)
++  !18 = !{!19}
++  !19 = !DILocalVariable(name: "i", arg: 1, scope: !17, file: !1, line: 4, type: !10)
++  !20 = !DILocation(line: 4, column: 14, scope: !17)
++  !21 = !DILocation(line: 3, column: 41, scope: !7, inlinedAt: !22)
++  !22 = distinct !DILocation(line: 5, column: 3, scope: !17)
++  !23 = !DILocation(line: 3, column: 46, scope: !7, inlinedAt: !22)
++  !24 = !DILocation(line: 6, column: 7, scope: !25)
++  !25 = distinct !DILexicalBlock(scope: !17, file: !1, line: 6, column: 7)
++  !26 = !DILocation(line: 6, column: 7, scope: !17)
++  !27 = !DILocation(line: 3, column: 41, scope: !7, inlinedAt: !28)
++  !28 = distinct !DILocation(line: 7, column: 5, scope: !25)
++  !29 = !DILocation(line: 3, column: 46, scope: !7, inlinedAt: !28)
++  !30 = !DILocation(line: 7, column: 5, scope: !25)
++  !31 = !DILocation(line: 3, column: 41, scope: !7, inlinedAt: !32)
++  !32 = distinct !DILocation(line: 8, column: 3, scope: !17)
++  !33 = !DILocation(line: 3, column: 46, scope: !7, inlinedAt: !32)
++  !34 = !DILocation(line: 9, column: 1, scope: !17)
++
++...
++---
++name:            f
++alignment:       4
++exposesReturnsTwice: false
++legalized:       false
++regBankSelected: false
++selected:        false
++tracksRegLiveness: true
++liveins:         
++  - { reg: '%edi' }
++calleeSavedRegisters: [ '%bh', '%bl', '%bp', '%bpl', '%bx', '%ebp', '%ebx', 
++                        '%rbp', '%rbx', '%r12', '%r13', '%r14', '%r15', 
++                        '%r12b', '%r13b', '%r14b', '%r15b', '%r12d', '%r13d', 
++                        '%r14d', '%r15d', '%r12w', '%r13w', '%r14w', '%r15w' ]
++frameInfo:       
++  isFrameAddressTaken: false
++  isReturnAddressTaken: false
++  hasStackMap:     false
++  hasPatchPoint:   false
++  stackSize:       8
++  offsetAdjustment: 0
++  maxAlignment:    0
++  adjustsStack:    false
++  hasCalls:        false
++  maxCallFrameSize: 0
++  hasOpaqueSPAdjustment: false
++  hasVAStart:      false
++  hasMustTailInVarArgFunc: false
++fixedStack:      
++  - { id: 0, type: spill-slot, offset: -16, size: 8, alignment: 16 }
++body:             |
++  bb.0.entry:
++    liveins: %edi, %rbp
++  
++    frame-setup PUSH64r killed %rbp, implicit-def %rsp, implicit %rsp
++    CFI_INSTRUCTION def_cfa_offset 16
++    CFI_INSTRUCTION offset %rbp, -16
++    %rbp = frame-setup MOV64rr %rsp
++    CFI_INSTRUCTION def_cfa_register %rbp
++    DBG_VALUE debug-use %edi, debug-use _, !12, !13, debug-location !14
++    %rbp = POP64r implicit-def %rsp, implicit %rsp, debug-location !15
++    TAILJMPd64 @sink, csr_64, implicit %rsp, implicit %rsp, implicit %edi, debug-location !15
++
++...
++---
++name:            foo
++alignment:       4
++exposesReturnsTwice: false
++legalized:       false
++regBankSelected: false
++selected:        false
++tracksRegLiveness: true
++liveins:         
++  - { reg: '%edi' }
++calleeSavedRegisters: [ '%bh', '%bl', '%bp', '%bpl', '%bx', '%ebp', '%ebx', 
++                        '%rbp', '%rbx', '%r12', '%r13', '%r14', '%r15', 
++                        '%r12b', '%r13b', '%r14b', '%r15b', '%r12d', '%r13d', 
++                        '%r14d', '%r15d', '%r12w', '%r13w', '%r14w', '%r15w' ]
++frameInfo:       
++  isFrameAddressTaken: false
++  isReturnAddressTaken: false
++  hasStackMap:     false
++  hasPatchPoint:   false
++  stackSize:       24
++  offsetAdjustment: -8
++  maxAlignment:    0
++  adjustsStack:    true
++  hasCalls:        true
++  maxCallFrameSize: 0
++  hasOpaqueSPAdjustment: false
++  hasVAStart:      false
++  hasMustTailInVarArgFunc: false
++fixedStack:      
++  - { id: 0, type: spill-slot, offset: -24, size: 8, alignment: 8, callee-saved-register: '%rbx' }
++  - { id: 1, type: spill-slot, offset: -16, size: 8, alignment: 16 }
++body:             |
++  bb.0.entry:
++    successors: %bb.2.if.end, %bb.1.if.then
++    liveins: %edi, %rbx, %rbp
++  
++    frame-setup PUSH64r killed %rbp, implicit-def %rsp, implicit %rsp
++    CFI_INSTRUCTION def_cfa_offset 16
++    CFI_INSTRUCTION offset %rbp, -16
++    %rbp = frame-setup MOV64rr %rsp
++    CFI_INSTRUCTION def_cfa_register %rbp
++    frame-setup PUSH64r killed %rbx, implicit-def %rsp, implicit %rsp
++    frame-setup PUSH64r undef %rax, implicit-def %rsp, implicit %rsp
++    CFI_INSTRUCTION offset %rbx, -24
++    DBG_VALUE debug-use %edi, debug-use _, !19, !13, debug-location !20
++    %ebx = MOV32rr %edi
++    DBG_VALUE debug-use %ebx, debug-use _, !12, !13, debug-location !21
++    DBG_VALUE debug-use %ebx, debug-use _, !19, !13, debug-location !20
++    CALL64pcrel32 @sink, csr_64, implicit %rsp, implicit %edi, implicit-def %rsp, debug-location !23
++    TEST32rr %ebx, %ebx, implicit-def %eflags, debug-location !24
++    JE_1 %bb.2.if.end, implicit %eflags
++  
++  bb.1.if.then:
++    successors: %bb.2.if.end
++    liveins: %ebx, %rbp
++  
++    DBG_VALUE debug-use %ebx, debug-use _, !19, !13, debug-location !20
++    DBG_VALUE debug-use %ebx, debug-use _, !12, !13, debug-location !27
++    %edi = MOV32rr %ebx, debug-location !29
++    CALL64pcrel32 @sink, csr_64, implicit %rsp, implicit %edi, implicit-def %rsp, debug-location !29
++  
++  bb.2.if.end:
++    liveins: %ebx, %rbp
++  
++    DBG_VALUE debug-use %ebx, debug-use _, !19, !13, debug-location !20
++    %edi = MOV32rr killed %ebx, debug-location !33
++    %rsp = ADD64ri8 %rsp, 8, implicit-def dead %eflags, debug-location !33
++    DBG_VALUE debug-use %ebx, debug-use _, !12, !13, debug-location !31
++    %rbx = POP64r implicit-def %rsp, implicit %rsp, debug-location !33
++    %rbp = POP64r implicit-def %rsp, implicit %rsp, debug-location !33
++    TAILJMPd64 @sink, csr_64, implicit %rsp, implicit %rsp, implicit %edi, debug-location !33
++
++...
+diff --git a/test/DebugInfo/X86/fission-ranges.ll b/test/DebugInfo/X86/fission-ranges.ll
+index 3c05f223ee79..0dfb13ab66b7 100644
+--- a/test/DebugInfo/X86/fission-ranges.ll
++++ b/test/DebugInfo/X86/fission-ranges.ll
+@@ -32,13 +32,13 @@
+ ; CHECK-NEXT:                    Length: 25
+ ; CHECK-NEXT:      Location description: 50 93 04
+ ; CHECK: [[E]]: Beginning address index: 4
+-; CHECK-NEXT:                    Length: 23
++; CHECK-NEXT:                    Length: 19
+ ; CHECK-NEXT:      Location description: 50 93 04
+ ; CHECK: [[B]]: Beginning address index: 5
+-; CHECK-NEXT:                    Length: 21
++; CHECK-NEXT:                    Length: 17
+ ; CHECK-NEXT:      Location description: 50 93 04
+ ; CHECK: [[D]]: Beginning address index: 6
+-; CHECK-NEXT:                    Length: 21
++; CHECK-NEXT:                    Length: 17
+ ; CHECK-NEXT:      Location description: 50 93 04
+ 
+ ; Make sure we don't produce any relocations in any .dwo section (though in particular, debug_info.dwo)
+-- 
+2.7.4
+
