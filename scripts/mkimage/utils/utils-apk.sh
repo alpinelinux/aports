@@ -10,16 +10,18 @@ _apk() {
 
 	[ "_apkcmd" = "fetch" ] && _apkcmd="fetch -L"
 
-	$APK $_apkcmd${APKOPTS:+ $APKOPTS}${APKROOT:+ --root "$APKROOT"}${ARCH:+ --arch "$ARCH"} "$@"
+	$APK $_apkcmd${APKOPTS:+ $APKOPTS}${APKROOT:+ --root "$APKROOT"}${APKARCH:+ --arch "$APKARCH"} "$@"
 }
 
 apk_pkg_full() {
-	local res=$(_apk search -x "$1")
+	local res="$(_apk search -x "$1")"
+	[ $? -eq 0 ] || return 1
 	printf '%s' $res
 }
 
 apk_check_pkgs() {
 	local res=$(_apk search -x $1)
+	[ $? -eq 0 ] || return 1
 	if [ "$res" ]; then
 		echo $*
 	fi
@@ -75,32 +77,31 @@ apkroot_init() {
 		mkdir_is_writable "$_apkroot" && APKROOT="$(realpath "$_apkroot")" && [ "$APKROOT" ] || ! warning "Can not setup writable APKROOT for arch '$_arch' at '$_apkroot'!" || return 1
 		APKARCH="$_arch"
 		_apk add --initdb || ! warning "Could not initilize APKROOT for arch '$APKARCH' at '$APKROOT!'" || return 1
-		apkroot_tool $@
-		_apk update
 	fi
 
 	export APKARCH APKROOT
 }
 
 apkroot_tool() {
-	info_func_set "apkroot_too"
+	info_func_set "apkroot_tool"
 	_arch="$APKARCH" && [ "$_arch" ] || ! warning "Called without value set in \$APKARCH!" || return 1
 	_apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
 	_apkkeysdir="$_apkroot/etc/apk/keys" && mkdir_is_writable "$_apkkeysdir" || ! warning "Can not write to keys directory at '$_apkkeysdir'!" || return 1
 	_apkrepofile="$_apkroot/etc/apk/repositories" && mkdir_is_writable "$_apkroot/etc/apk" || !warning "Can not write to directory '$_apkroot/etc/apk'!" || return 1
 	touch "$_apkrepofile" && file_is_writable "$_apkrepofile" || ! warning "Can not write to apk repositories file '$_apkrepofile'" || return 1
 	
-	while [ "$1" ] ; do
+	while [ $# -gt 0 ] ; do
 		case "$1" in
 			--cache-dir) dir_is_writable "$2" && rm -f "$APKROOT/etc/apk/cache" && ln -sf "$2" "$APKROOT/etc/apk/cache" || warning "Can not write to cache dir '$2'!" ; shift 2 ;;
-			--repo-file) file_is_readable "$2" && cat "$2" | grep -E -v "^#" >> "$_apkrepofile" || warning "Could not add repos from file '$2' to repositories file '$_apkrepofile'!" ; shift 2 ;;
-			--repo) printf '%s\n' "$2" >> "$_apkrepofile" || warning "Could not add repo '$2' to repositories file '$_apkrepofile'" ; shift 2 ;;
-			--key-file) file_is_readable "$2" && cp -pLf "$2" "$_apkkeysdir" || warning "Can not copy key file '$2' to '$_apkkeysdir'!" ; shift 2 ;;
-			--key-dir) dir_is_readable "$2" && cp -pLf "$2"/* "$_apkkeysdir" || warning "Can not copy keys from '$2/*' to '$_apkkeysdir'!" ; shift 2 ;;
-			--host-keys) dir_is_readable "/etc/apk/keys" && cp -pLf /etc/apk/keys/* "$_apkkeysdir" || warning "Can not copy host keys from '/etc/apk/keys/*' to '$_apkkeysdir'!" ; shift 1 ;;
+			--repository|--repo) printf '%s\n' "$2" >> "$_apkrepofile" || warning "Could not add repo '$2' to repositories file '$_apkrepofile'" ; shift 2 ;;
+			--repositories-file|--repo-file) file_is_readable "$2" && cat "$2" | grep -E -v "^#" >> "$_apkrepofile" || warning "Could not add repos from file '$2' to repositories file '$_apkrepofile'!" ; shift 2 ;;
+			--key-file) file_is_readable "$2" && cp -Lf "$2" "$_apkkeysdir" || warning "Can not copy key file '$2' to '$_apkkeysdir'!" ; shift 2 ;;
+			--keys-dir) dir_is_readable "$2" && cp -Lf "$2"/* "$_apkkeysdir" || warning "Can not copy keys from '$2/*' to '$_apkkeysdir'!" ; shift 2 ;;
+			--host-keys) dir_is_readable "/etc/apk/keys" && cp -Lf /etc/apk/keys/* "$_apkkeysdir" || warning "Can not copy host keys from '/etc/apk/keys/*' to '$_apkkeysdir'!" ; shift 1 ;;
 			*) shift ;;
 		esac
 	done
+	sort -u -o "$_apkrepofile" "$_apkrepofile"
 }
 
 apk_build_apk_manifest() {
@@ -110,15 +111,17 @@ apk_build_apk_manifest() {
 
 	local _apkfile
 	for _apkfile in $@ ; do
-		_apk_manifest="$_ddir/${_apkfile##*/}-Manifest"
+		_apk_manifest="$_ddir/${_apkfile##*/}.Manifest"
 		file_is_readable "$_apk_manifest" || apk_extract_apk_manifest "$_apkfile" > "$_apk_manifest"
 	done
 }
 
 apk_extract_apk_manifest() {
 	local _apkfile="$1"
-	_apk verify "$_apkfile" || ! warning "Could not verify '$_apkfile'!" || return 1
+	_apk verify -q "$_apkfile" > /dev/null 2>&1 || ! warning "Could not verify '$_apkfile'!" || return 1
 	local _arch_pkg_ver="$(apk_get_apk_arch_package_version "$_apkfile")"
+	printf '# APK Manifest file for %s\n' "$_arch_pkg_ver"
+	printf '# sha512:%s\t%s\n' "$(cat "$_apkfile" | sha512sum | cut -d' ' -f 1)" "${_apkfile##*/}" 
 	printf '\n###### APK .PKGINFO ######\n'
 	tar -x -O -f "$_apkfile" .PKGINFO
 	printf '\n###### APK Manifest ######\n'
