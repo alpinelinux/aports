@@ -39,7 +39,7 @@ load_plugins() {
 	for _plug in $plugins_new ; do
 		_plug="${_plug%% }"
 		_plug="${_plug## }"
-		[ "${_plug}" != "${plugins_basename%% }" ] && plugin_${_plug}
+		[ "${_plug}" != "${plugins_basename%% }" ] && ${plugins_basename%s}_${_plug}
 	done
 
 	# Run again to load all plugins of all discoverd types:
