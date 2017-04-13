@@ -1,13 +1,4 @@
 #!/bin/sh
-
-# apk add \
-#	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso
-#	(for efi:) mtools dosfstools grub-efi
-
-# FIXME: clean workdir out of unneeded sections
-# FIXME: --release: cp/mv images to REPODIR/$ARCH/releases/
-# FIXME: --update-latest: rewrite latest-releases.yaml with this build
-
 set -e
 
 toolname="${0##*/}" && toolname="${toolname%.sh}"
@@ -17,26 +8,25 @@ scriptrealdir="$(dirname "$scriptrealpath")"
 
 scriptdir="${scriptrealdir}"
 
-# Include utilities: 'basic', 'list', 'fkrt'
+# Include utilities:
 . "$scriptdir/utils/utils-basic.sh"
 . "$scriptdir/utils/utils-info.sh"
 . "$scriptdir/utils/utils-list.sh"
 . "$scriptdir/utils/utils-file.sh"
 . "$scriptdir/utils/utils-search.sh"
-. "$scriptdir/utils/utils-fkrt.sh"
 . "$scriptdir/utils/utils-plugin-loader.sh"
+. "$scriptdir/utils/utils-checksum.sh"
 . "$scriptdir/utils/utils-apk.sh"
+. "$scriptdir/utils/utils-fkrt.sh"
 
 # Check for quiet flag and set global 'QUIET=yes' before running anything that generates output. Skipped in main option parser.
-_co="$@" && for _i in $_co ; do case "$_i" in -q|--quiet) QUIET="yes" ; break ;; --) break ;; esac ; done
+# Let verbose override quiet before setting verbose, but quiet acts directly.
+_co="$@" && for _i in $_co ; do case "$_i" in -q|--quiet) QUIET="yes" ; VERBOSE="no" ;; -v|--verbose) [ "$QUIET" = "yes" ] || VERBOSE="yes" ; QUIET="no" ;; --) break ;; esac ; done
 
 default_colors
 info_prog_set "$scriptname"
 
 
-checksum() {
-	sha1sum | cut -f 1 -d ' '
-}
 
 
 # load plugins from script dir and ~/.mkimage
@@ -48,7 +38,7 @@ info_prog_set "$scriptname"
 [ "$toolname" = "multitool" ] && toolname="$1" && shift
 
 
-case "$(type tool_$toolname)" in
+case "$(type $toolname)" in
 	*"shell function") TOOL="$toolname" ;;
 	*) error "Unknown tool '$toolname'!" ; return 1 ;;
 esac
@@ -63,7 +53,10 @@ case "$TOOL" in
 		. "$scriptdir/kernels/tool-kerneltool.sh"
 		. "$scriptdir/kernels/tool-kerneltool-apk.sh"
 		. "$scriptdir/kernels/tool-kerneltool-kbuild.sh"
-		
+		;;
+	mkinitfs)	
+		load_plugins "$scriptdir/initfs"
+		. "$scriptdir/initfs/plugin-mkinitfs.sh"
 		;;
 
 esac
@@ -106,7 +99,8 @@ esac
 	: "${mkalpine_staging_root:=/var/cache/mkalpine/staging}"
 	STAGING_ROOT="${OPT_staging_root:-$mkalpine_staging_root}"
 
+set -- $_args
 
-"$TOOL" $_args
+"$TOOL" "$@"
 
 
