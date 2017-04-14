@@ -27,6 +27,7 @@ kerneltool() {
 		restage) shift ; unset UNSTAGE ; RESTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
 		unstage) shift ; unset RESTAGE ; UNSTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
 		depmod) shift ; kerneltool_depmod "${STAGING_ROOT}/${OPT_arch:-"$(_apk --print-arch)"}/merged-$1" "$1" ; return $? ;;
+		mkmodloop) shift ; kerneltool_mkmodloop "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
 		--*) warning "Unhandled global option '$1'!" ; return 1 ;;
 		*) warning "Unknown command '$1'!" ; return 1 ;;
 	esac
@@ -262,7 +263,8 @@ kerneltool_stage() {
 						info_func_set "stage ($p-post build-index)"
 						local _mymod _mymodname
 						local _mymodindex="$manifests/${_myddir##*/}.kmod-INDEX"
-						: > "$_mymodindex" && file_is_writable "$_mymodindex" || ! warning "Could not write to module index at '$_mymodindex'!" || return 1
+						: > "$_mymodindex"
+						file_is_writable "$_mymodindex" || ! warning "Could not write to module index at '$_mymodindex'!" || return 1
 
 						(	cd "$_myddir"
 							printf '# Module index for: %s/%s-%s\n' "$_arch" "$_subdir" "$p"
@@ -285,12 +287,13 @@ kerneltool_stage() {
 						info_func_set "stage ($p-post build-index)"
 						local _myfw
 						local _myfwindex="$manifests/${_myddir##*/}.firmware-INDEX"
-						: > "$_myfwindex" && file_is_writable "$_myfwindex" || ! warning "Could not write to module index at '$_myfwindex'!" || return 1
+						: > "$_myfwindex"
+						file_is_writable "$_myfwindex" || ! warning "Could not write to module index at '$_myfwindex'!" || return 1
 						( 	cd "$_myddir"
 							printf '# Firmware index for: %s/%s-%s\n' "$_arch" "$_subdir" "$p"
 							find "lib/firmware" -type f -print | while read _myfw; do
 								_myfw="${_myfw#./}"
-								printf 'firmware:%s:%s:%s\t' "${_myfw#lib/firmware}" "$_arch" "$(kerneltool_checksum_module "$_myfw")"
+								printf 'firmware:%s:%s:%s\t' "${_myfw#lib/firmware/}" "$_arch" "$(kerneltool_checksum_module "$_myfw")"
 								printf 'kpkg:%s/%s-%s\t' "$_arch" "$_subdir" "$p"
 								calc_file_checksums "$_myfw" sha512 ; printf '\n'
 							done
@@ -317,11 +320,21 @@ kerneltool_stage() {
 	info_func_set "stage (merge)"
 	msg "Merging contents of all staging subdirectiories under '$_arch/$_krel' into '$_arch/merged-$_krel'."
 	local merged="$stage_base/$_arch/merged-$_krel"
-	[ -e "$merged" ] && rm -rf "$merged" # We want to recreate this every time even if we're only adding staged files.
+	[ -e "$merged" ] && rm -rf "$merged" || ! warning "Failed to wipe target directory before merging!" || return 1 # We want to recreate this every time even if we're only adding staged files.
 	mkdir_is_writable "$merged" || ! warning "Failed to create directory for staging merged root '$merged'" || return 1
 
 	# Create hardlinked copy of all contents of all subdirectories in stage_base into merged.
-	(cd "$stage_kern" && cp -rl */* "$merged")
+	(cd "$stage_kern" && cp -rl */* "$merged") || ! warning "Could not merge '$stage_kern/*' into '$merged'!" || return 1
+
+	merged_manifest="$manifests/$_krel.Manifest" merged_kmod_index="$manifests/$_krel.kmod-INDEX" merged_firmware_index="$manifests/$_krel.firmware-INDEX"
+	# Creat merged Manifest, kmod-INDEX, and firmware-INDEX
+	printf '# Manifest for %s/%s\n' "$_arch"  "$_krel" > "$merged_manifest" && file_is_writable "$merged_manifest" || ! warning "Could not write to merged Manifest at '$merged_manifest'!" || return 1
+	(cd "$stage_kern" && for _d in * ; do file_exists "$manifests/$_d.Manifest" && cat "$manifests/$_d.Manifest" ; done ) | grep -v '^#' | sort -u -k3 -k2 -k1 >> "$merged_manifest"
+	printf '# kmod INDEX for %s/%s\n' "$_arch" "$_krel" > "$merged_kmod_index" && file_is_writable "$merged_kmod_index" || ! warning "Could not write to merged Manifest at '$merged_kmod_index'!" || return 1
+	(cd "$stage_kern" && for _d in * ; do file_exists "$manifests/$_d.kmod-INDEX" && cat "$manifests/$_d.kmod-INDEX"; done ) | grep -v '^#' | sort -u -k3 -k2 -k1  >> "$merged_kmod_index"
+	printf '# firmware INDEX for %s/%s\n' "$_arch" "$_krel" > "$merged_firmware_index" && file_is_writable "$merged_firmware_index" || ! warning "Could not write to merged Manifest at '$merged_firmware_index'!" || return 1
+	(cd "$stage_kern" && for _d in * ; do file_exists "$manifests/$_d.firmware-INDEX" && cat "$manifests/$_d.firmware-INDEX" ; done ) | grep -v '^#' | sort -u -k3 -k2 -k1  >> "$merged_firmware_index"
+
 
 	# Update module dependencies.
 	info_func_set "stage (depmod)"
@@ -338,6 +351,7 @@ kerneltool_stage() {
 			kerneltool_calc_module_fw_deps "$_arch" "$_krel" "$merged" "$_mymod"
 		done
 	) >> "$_moduledepfile" || ! warning "Failed to create checkesummed kernel module and firmware dependency dump!" || return 1
+
 
 	info_prog_set "kerneltool-stage"
 	msg "Staging complete for '$_arch/$_krel'."
@@ -364,12 +378,103 @@ kerneltool_depmod() {
 # TODO: kerneltool -  Modify build_kernel_stage_modloop to allow selecting which modules are installed in generated modloop!
 kerneltool_mkmodloop() {
 	info_prog_set "kerneltool-mkmodloop"
+	info_func_set "mkmodloop"
+	local stage_base="$1" _arch="$2" _krel="$3"
+	shift 3
+	local _merged="$stage_base/$_arch/merged-$_krel"
+	local _modbase="$_merged/lib/modules"
+	dir_is_readable "$_modbase" || ! warning "Could not read merged modules directory '$_modbase'" || return 1
 
-	local _outname="modloop-$_flavor"
-	#kerneltool_build_modules_subset "$_bdir" "$_tmp"
+	local _outname="modloop-$_krel"
+	
+	local _tmp="$stage_base/$_arch/tmp/modloop-$_krel"
+	rm -rf "$_tmp" || ! Warning "Could not clean temp directory '$_tmp' before building modloop!" || return 1
+	mkdir_is_writable "$_tmp" || ! warning "Could not create temp directory '$_tmp' to build modloop!" || return 1
 
-	mkdir "$_tmp"
-	mksquashfs "$_tmp" "$_out/boot/$_outname" -comp xz -exit-on-error
+	local _modout="$_tmp/lib/modules"
+	mkdir_is_writable "$_modout" || ! warning "Could not create temp output directory for modules at '$_modout'!" || return 1
+	
+	local _fwbase="$_merged/lib/firmware"
+	local _fwout="$_tmp/lib/firmware"
+	
+	info_func_set "copy modules"
+	local _kmod_index="$stage_base/$_arch/manifests/$_krel.kmod-INDEX"
+	local _firmware_index="$stage_base/$_arch/manifests/$_krel.firmware-INDEX"
+	local _kmod_fw_deps="$stage_base/$_arch/manifests/$_krel.kmod_fw-DEPS"
+	local mod_subset_manifest="$stage_base/$_arch/manifests/$_krel-subset-$(date -I).kmod-Manifest"
+		
+	if [ $# -gt 0 ] ; then
+		msg "Copying selected modules and their deps from '$_modbase' to '$_modout'."
+		local _kmod _kpkg _kfsum _kfile
+		cat "$_kmod_index" | while read _kmod _kpkg _kfsum _kfile ; do
+			for _mod in $@ ; do
+				#msg "_kmod: $_kmod"
+				#msg "_file: $_kfile"
+				#msg "_mod:$_mod"
+				case "$_mod" in 
+					*/*/) case "$_kfile" in lib/modules/*/$_mod* ) : ;; *) continue;; esac ;;
+					*/*) case "$_kfile" in lib/modules/*/$_mod ) : ;; *) continue ;; esac ;;
+					*) case "$_kmod" in "kmod:$_mod:"* | "kmod:${_mod%.ko*}:"* ) : ;; *) continue ;; esac ;;
+				esac
+				grep -e "^$_kmod" "$_kmod_fw_deps"
+			done
+		done | grep -v '^#' | tr -s '\t ' '\n' | sort -u > "$mod_subset_manifest"
+	else
+		msg "Copying all staged modules found in '$_modbase' and their firmware deps to '$_modout'."
+		cat "$_kmod_fw_deps" | grep -v '^#' | tr -s '\t ' '\n' | sort -u > "$mod_subset_manifest"
+	fi
+
+
+	file_exists "$mod_subset_manifest" || ! warning "No module-subset Manifest found at '$mod_subset_manifest'!" || return 1
+	info_func_set "copy modules"
+	if file_is_readable "$_kmod_index" ; then 
+		msg2 "Copied $(
+			local _modcount=0
+			grep -F -f "$mod_subset_manifest" "$_kmod_index" | grep -v '^#' | tr '\t' ' ' | while read _kmod _kpkg _kfsum _kfile ; do
+				if [ "$_kmod" ] ; then 
+					_filein="$stage_base/$_arch/$_krel/${_kpkg#kpkg:$_arch/}/$_kfile"
+					_fileout="$_modout/$_kfile"
+					file_exists "$_filein" || ! warning "Could not read kernel module file '$_filein'!" || continue
+					mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make module output subdirectory '${_fileout%/*}'!" || return 1
+					cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink module '$_filein' to '$_fileout'!" || return 1
+					echo $(( _modcount++ ))
+				fi
+			done | tail -n 1 | sed -e 's/[[:space:]]//g'
+			) modules to '$_modout'." 
+	else warning "Could not read kernel module index '$_kmod_index'!" ; return 1 ; fi
+
+	info_func_set "copy firmware"
+	if file_not_exists "$_firmware_index" ; then msg "No firmware index found at '$_firmware_index', not copying firmware."
+	elif grep -q "^firmware:" "$mod_subset_manifest" ; then msg "Copying firmware needed by selected modules:"
+		msg2 "Copied $(
+			local _fwcount=0
+			grep -F -f "$mod_subset_manifest" "$_firmware_index" | grep -v '^#' | tr '\t' ' ' | while read _fw _kpkg _fwsum _fwfile ; do
+				if [ "$_fw" ] ; then
+					: $(( _fwcount + 1 ))
+					_filein="$stage_base/$_arch/$_krel/${_kpkg#kpkg:$_arch}/$_fwfile"
+					_fileout="$_fwout/$_fwfile"
+					file_exists "$_filein" || ! warning "Could not read firmware file '$_filein'!" || continue
+					mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make firmware output subdirectory '${_fileout%/*}'!" || return 1
+					cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink firmware '$_filein' to '$_fileout'!" || return 1
+					echo $(( _fwcount++ ))
+				fi
+			done | tail -n 1 | sed -e 's/[[:space:]]//g'
+			) firmware files to '$_fwout'."
+	else msg "No firmware to copy." ; fi
+#}
+#kerneltool_mkmodloopx() {
+#	local stage_base="$1" _arch="$2" _krel="$3"
+#	shift 3
+
+
+	info_func_set "create squashfs"
+	local _outdir="$stage_base/$_arch/out-$_krel/boot"
+	mkdir_is_writable "$_outdir" || ! warning "Could not create writable output directory '$_outdir'!" || return 1
+	mksquashfs "$_tmp/lib" "$_outdir/$_outname" -root-owned -noappend -comp xz -exit-on-error || ! warning "Failed to mkswashfs '$_tmp/lib' to '$_outdir/$_outname' with compression 'xz'!" || return 1
+	rm -rf  "$_tmp" || ! warning "Could not clean up tmp directory for mkmodloopt at '$_tmp'!" || return 1
+	msg "mkmodloop complete!"
+	msg "modloop file for '$_arch/$_krel' is at '$_outdir/$_outname'."
+	return 0
 }
 
 
