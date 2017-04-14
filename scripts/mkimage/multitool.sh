@@ -21,12 +21,39 @@ scriptdir="${scriptrealdir}"
 
 # Check for quiet flag and set global 'QUIET=yes' before running anything that generates output. Skipped in main option parser.
 # Let verbose override quiet before setting verbose, but quiet acts directly.
-_co="$@" && for _i in $_co ; do case "$_i" in -q|--quiet) QUIET="yes" ; VERBOSE="no" ;; -v|--verbose) [ "$QUIET" = "yes" ] || VERBOSE="yes" ; QUIET="no" ;; --) break ;; esac ; done
+_co="$@" && for _i in $_co ; do case "$_i" in -q|--quiet) QUIET="yes" ; VERBOSE="" ;; -v|--verbose) [ "$QUIET" = "yes" ] || VERBOSE="yes" ; QUIET="" ;; --) break ;; esac ; done
 
 default_colors
 info_prog_set "$scriptname"
 
 
+
+multitool_usage() {
+cat <<EOF
+Global options:
+	--quiet|-q			Enable quiet mode.
+	--verbose|-v			Increase verbosity.
+	--apk-cmd			Override APK command.
+	--arch				Override arch.
+	--staging-root			Override staging root.
+	--install-root			Override install root.
+
+EOF
+}
+
+apkroottool_usage() {
+cat <<EOF
+apkroottool options:
+	--cache-dir			Set apk cache directory for apkroot.
+	--repository|--repo		Add apk repository to apkroot repos.
+	--repositories-file|--repo-file	Add apk repos from file to apkroot repos.
+	--key-file|--key		Add key in file to apkroot keys dir.
+	--keys-dir			Add keys in dir to apkroot keys dir.
+	--host-keys			Copy host keys to apkroot keys dir.
+	--no-host-keys			Don't copy host keys.
+
+EOF
+}
 
 
 # load plugins from script dir and ~/.mkimage
@@ -69,6 +96,7 @@ esac
 		# Options that apply to all tools.
 		case "$1" in
 			--quiet|-q) shift ; continue ;;
+			--verbose|-v) shift ; continue ;;
 			--apk-cmd) OPT_apk_cmd="$2" ; shift 2 ; continue ;;
 			--arch) OPT_arch="$2"; shift 2 ; continue ;;
 			--staging-root) OPT_staging_root="$2" ; shift 2 ; continue ;;
@@ -102,5 +130,3 @@ esac
 set -- $_args
 
 "$TOOL" "$@"
-
-

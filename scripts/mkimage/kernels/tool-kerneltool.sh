@@ -27,11 +27,64 @@ kerneltool() {
 		restage) shift ; unset UNSTAGE ; RESTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
 		unstage) shift ; unset RESTAGE ; UNSTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
 		depmod) shift ; kerneltool_depmod "${STAGING_ROOT}/${OPT_arch:-"$(_apk --print-arch)"}/merged-$1" "$1" ; return $? ;;
+		mkmodsubset) shift ; kerneltool_mkmodsubset "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
+		mkmodcpio) shift ; kerneltool_mkmodcpio "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
 		mkmodloop) shift ; kerneltool_mkmodloop "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
+		help) kerneltool_usage && return 0 ;;
 		--*) warning "Unhandled global option '$1'!" ; return 1 ;;
 		*) warning "Unknown command '$1'!" ; return 1 ;;
 	esac
+	return 1
 }
+
+
+kerneltool_usage() {
+
+cat <<EOF
+Usage: kerneltool <global opts> <command> <command opts>
+
+Commands:
+	stage <kernel spec> [<additional apk-file/kbuild-dir/apk-atom>...]
+		Stage kernel components and build manifests for use by other kernel tools.
+		The <kernel spec> may be: an apk file, kernel build directory, apk package atom;
+		or, an already staged kernel release or <arch>/<kernel release> pair; or, the
+		symbolic names 'current', 'latest' or 'latest-<flavor>'.
+
+	restage <kernel spec> [<additional apk-files/kbuild-dirs/apk-atoms>...]
+		Wipe staging directory and restage from scratch.
+
+	unstage <kernel spec>
+		Wipe staging directory for specified kernel spec.
+
+
+	depmod <kernel release>
+		Run depmod against the staging directory for specified kernel release.
+
+
+	mkmodsubset <kernel release> <modsubset name> [<module names/globs>...]
+		Build a subset of modules for the given release containing the specified
+		modules and all their deps, including firmware.
+
+	mkmodcpio <kernel release> [modsubset=<modsubset name>] [<module names/globs>...]
+		Build a compressed cpio archive containg the specified subset of modules.
+		An existing named subset may be used or a new one created using modsubset=<name>,
+		otherwise a temporary subset will be created, used, and purged.
+
+	mkmodloop <kernel release> [modsubset=<modsubset name>] [<module names/globs>...]
+		Build a compressed squashfs filesystem for use as a modloop containing either
+		the specified modules and their deps or all staged modules with needed firmware.
+		Usage is the same as mkmodcpio.
+
+
+EOF
+	multitool_usage
+	apkroottool_usage
+}
+
+###
+## Kerneltool Commands
+###
+
 
 # Command: stage
 # Usage: kerneltool_stage <staging basedir> [<arch>] <kernel (apk | build dir | package name | version) > [ other (build dirs | package names) ...]
@@ -41,6 +94,7 @@ kerneltool_stage() {
 	local stage_base="$1" ; shift
 	local _arch _karch _krel k_pkg k_pkgname k_pkgver
 	local _arch_krel _arch_pkg_ver
+	local _flavor
 
 	# Set our arch if it was explicitly specified, then shift if found.
 	local _allarchsglob="$(get_all_archs_with_sep ' | ')"
@@ -51,8 +105,8 @@ kerneltool_stage() {
 	# Detect our arch and kernel release from the first argument.
 	info_func_set "stage (detect arch/krel)"
 	[ "$1" ] || set -- linux-vanilla linux-firmware
-	[ "$1" = "current" ] && shift  && set -- "$(uname -r)" "$@"
-	[ "$1" = "latest" ] && shift && set -- linux-vanilla "$@"
+	case "$1" in current) shift ; set -- "$(uname -r)" "$@" ;; latest) shift ; set -- "linux-vanilla" "$@" ;; latest-*) _flavor="${1#latest-}" ; shift ; set -- "linux-${_flavor}" "$@" ;; esac
+
 	case "$1" in
 		*.apk)	# Handle explicit kernel .apk
 			_arch_pkg_ver="$(apk_get_arch_package_version $1)"
@@ -320,7 +374,7 @@ kerneltool_stage() {
 	info_func_set "stage (merge)"
 	msg "Merging contents of all staging subdirectiories under '$_arch/$_krel' into '$_arch/merged-$_krel'."
 	local merged="$stage_base/$_arch/merged-$_krel"
-	[ -e "$merged" ] && rm -rf "$merged" || ! warning "Failed to wipe target directory before merging!" || return 1 # We want to recreate this every time even if we're only adding staged files.
+	dir_not_exists "$merged" || rm -rf "$merged" || ! warning "Failed to wipe target directory before merging!" || return 1 # We want to recreate this every time even if we're only adding staged files.
 	mkdir_is_writable "$merged" || ! warning "Failed to create directory for staging merged root '$merged'" || return 1
 
 	# Create hardlinked copy of all contents of all subdirectories in stage_base into merged.
@@ -362,6 +416,7 @@ kerneltool_stage() {
 }
 
 
+
 # Command: depmod
 # Usage: kerneltool_depmod <base dir> [<kernel release>]
 kerneltool_depmod() {
@@ -373,39 +428,38 @@ kerneltool_depmod() {
 }
 
 
-# Command: mkmodloop
-# Build our modloop
-# TODO: kerneltool -  Modify build_kernel_stage_modloop to allow selecting which modules are installed in generated modloop!
-#kerneltool_mkmodloop() {
+# Command: mkmodsubset
+# Build module subset given a name and list of module names and/or globs.
+# Usage: kerneltool_mkmodsubset <staging base> <arch> <kernel release> <subset name> [<list of modules/globs>...]
 kerneltool_mkmodsubset() {
-	info_prog_set "kerneltool-mkmodloop"
-	info_func_set "mkmodloop"
-	local stage_base="$1" _arch="$2" _krel="$3" 
-	shift 3
+	info_prog_set "kerneltool-mkmodsubset"
+	info_func_set "mkmodsubset"
+	local stage_base="$1" _arch="$2" _krel="$3" _subname="$4"
+	shift 4
 	allmods="$@"
 	local _merged="$stage_base/$_arch/merged-$_krel"
 	local _modbase="$_merged/lib/modules"
 	dir_is_readable "$_modbase" || ! warning "Could not read merged modules directory '$_modbase'" || return 1
 
 	
-	local _tmp="$stage_base/$_arch/tmp/modloop-$_krel"
-	rm -rf "$_tmp" || ! Warning "Could not clean temp directory '$_tmp' before building modloop!" || return 1
-	mkdir_is_writable "$_tmp" || ! warning "Could not create temp directory '$_tmp' to build modloop!" || return 1
+	local _ddir="$stage_base/$_arch/$_krel-subsets/$_subname"
+	dir_not_exists "$_ddir" || rm -rf "$_ddir" || ! Warning "Could not clean destination directory '$_ddir' to build module subeset '$_subname'!" || return 1
+	mkdir_is_writable "$_ddir" || ! warning "Could not create destination directory '$_ddir' to build module subset '$_subname'!" || return 1
 
-	local _modout="$_tmp/lib/modules"
+	local _modout="$_ddir/lib/modules"
 	mkdir_is_writable "$_modout" || ! warning "Could not create temp output directory for modules at '$_modout'!" || return 1
 	
 	local _fwbase="$_merged/lib/firmware"
-	local _fwout="$_tmp/lib/firmware"
+	local _fwout="$_ddir/lib/firmware"
 	
 	info_func_set "copy modules"
 	local _kmod_index="$stage_base/$_arch/manifests/$_krel.kmod-INDEX"
 	local _firmware_index="$stage_base/$_arch/manifests/$_krel.firmware-INDEX"
 	local _kmod_fw_deps="$stage_base/$_arch/manifests/$_krel.kmod_fw-DEPS"
 	local mod_subset_manifest
+	mod_subset_manifest="$_ddir.kmod-Manifest"
 		
 	if [ $# -gt 0 ] ; then
-		mod_subset_manifest="$stage_base/$_arch/tmp/$_krel-subset-$(printf '%s' "$@" | sort -u | md5sum | cut -d' ' -f 1 ).kmod-Manifest"
 		msg "Selecting requested modules and their deps from '$_modbase' into '$mod_subset_manifest'."
 		local _kmod _kpkg _kfsum _kfile
 		cat "$_kmod_index" | while read _kmod _kpkg _kfsum _kfile ; do
@@ -422,7 +476,6 @@ kerneltool_mkmodsubset() {
 			done
 		done | grep -v '^#' | tr -s '\t ' '\n' | sort -u > "$mod_subset_manifest"
 	else
-		mod_subset_manifest="$stage_base/$_arch/tmp/$_krel-subset-all.kmod-Manifest"
 		msg "Selecting all staged modules found in '$_modbase' and their firmware deps into '$mod_subset_manifest'."
 		cat "$_kmod_fw_deps" | grep -v '^#' | tr -s '\t ' '\n' | sort -u > "$mod_subset_manifest"
 	fi
@@ -460,28 +513,88 @@ kerneltool_mkmodsubset() {
 			fi
 		done | tail -n 1 | sed -E -e 's/[[:space:]]//g' | ( read _fwcount && msg "Copied $_fwcount firmware files to '$_fwout'." ) 
 	else msg "No firmware to copy." ; fi
-
-	printf "$_tmp"
 }
 
-kerneltool_mkmodloop() {
-	local stage_base="$1" _arch="$2" _krel="$3"
-	#shift 3
 
-	local _tmp="$(kerneltool_mkmodsubset $@)"
+# Command: mkmodcpio
+# Build module cpio from subset
+# Usage: kerneltool_mkmodcpio <staging base> <arch> <kernel release> [modsubset=<subset name>] [<list of modules/globs>...]
+kerneltool_mkmodcpio() {
+	info_prog_set "kerneltool-mkmodcpio"
+	info_func_set "mkmodcpio"
+	local stage_base="$1" _arch="$2" _krel="$3" _subname="$4"
+	shift 3
 
-	info_func_set "create squashfs"
+	local _tmp _keeptmp _subname _subexists
+	case "$_subname" in
+		modsubset=*)
+			_keeptmp="yes"
+			_subname="${_subname#*=}"
+			shift
+			;;
+		*)
+			_subname="modules-$_krel-$(echo "$*" | md5sum | cut -d' ' -f 1)"
+			;;
+	esac
+
+	local _tmp="$stage_base/$_arch/$_krel-subsets/$_subname"
 	local _outdir="$stage_base/$_arch/out-$_krel/boot"
-	local _outname="modloop-$_krel"
+	local _outname="modules-$_krel.cpio.gz"
 	mkdir_is_writable "$_outdir" || ! warning "Could not create writable output directory '$_outdir'!" || return 1
-	mksquashfs "$_tmp/lib" "$_outdir/$_outname" -root-owned -no-recovery -noappend -progress -comp xz -exit-on-error ${VERBOSE:+-info} | cat ${QUIET:+/dev/null} \
-		|| ! warning "Failed to mksqwashfs '$_tmp/lib' to '$_outdir/$_outname' with compression 'xz'!" || return 1
-	rm -rf  "$_tmp" || ! warning "Could not clean up tmp directory for mkmodloopt at '$_tmp'!" || return 1
-	msg "mkmodloop complete!"
-	msg "modloop file for '$_arch/$_krel' is at '$_outdir/$_outname'."
+
+	[ "$_keeptmp" = "yes" ] && dir_exists "$_tmp" || kerneltool_mkmodsubset "$stage_base" "$_arch" "$_krel" "$_subname" $@ || ! warning "Failed to make module subset '$_subname' needed to make '$_outname'!" || return 1
+
+	info_func_set "create cpio"
+	(cd "$_tmp" && find | sort -u | sed -e 's|\./||g' | cpio -H newc -o | gzip -9 ) > "$_outdir/$_outname" || ! warning "Failed to create '$_outname' in '$_outdir'!" || return 1
+	[ "$_keeptmp" = "yes" ] || rm -rf  "$_tmp" || ! warning "Could not clean up tmp directory for mkmodcpio at '$_tmp'!" || return 1
+	msg "mkmodcpio complete!"
+	msg "Compressed module cpio file for '$_arch/$_krel' is at '$_outdir/$_outname'."
 	return 0
 }
 
+
+# Command: mkmodloop
+# Build modloop from subset
+# Usage: kerneltool_mkmodloop <staging base> <arch> <kernel release> [modsubset=<subset name>] [<list of modules/globs>...]
+kerneltool_mkmodloop() {
+	info_prog_set "kerneltool-mkmodloop"
+	info_func_set "mkmodloop"
+	local stage_base="$1" _arch="$2" _krel="$3" _subname="$4"
+	shift 3
+
+	local _tmp _keeptmp _subname _subexists
+	case "$_subname" in
+		modsubset=*)
+			_keeptmp="yes"
+			_subname="${_subname#*=}"
+			shift
+			;;
+		*)
+			_subname="modloop-$_krel-$(echo "$*" | md5sum | cut -d' ' -f 1)"
+			;;
+	esac
+
+	local _tmp="$stage_base/$_arch/$_krel-subsets/$_subname"
+	local _outdir="$stage_base/$_arch/out-$_krel/boot"
+	local _outname="modloop-$_krel"
+	mkdir_is_writable "$_outdir" || ! warning "Could not create writable output directory '$_outdir'!" || return 1
+
+	[ "$_keeptmp" = "yes" ] && dir_exists "$_tmp" || kerneltool_mkmodsubset "$stage_base" "$_arch" "$_krel" "$_subname" $@ || ! warning "Failed to make module subset '$_subname' needed to make '$_outname'!" || return 1
+
+	info_func_set "create squashfs"
+	mksquashfs "$_tmp/lib" "$_outdir/$_outname" -root-owned -no-recovery -noappend -progress -comp xz -exit-on-error ${VERBOSE:+-info} | cat ${QUIET:+/dev/null} \
+		|| ! warning "Failed to mksqwashfs '$_tmp/lib' to '$_outdir/$_outname' with compression 'xz'!" || return 1
+	[ "$_keeptmp" = "yes" ] || rm -rf  "$_tmp" || ! warning "Could not clean up tmp directory for mkmodloop at '$_tmp'!" || return 1
+	msg "mkmodloop complete!"
+	msg "Compressed squashfs modloop file for '$_arch/$_krel' is at '$_outdir/$_outname'."
+	return 0
+}
+
+
+
+###
+## Kerneltool Helper Functions
+###
 
 # Print kernel arch given system arch.
 # Usage: get_karch_from_arch <arch>
@@ -503,36 +616,17 @@ kerneltool_get_arch_from_karch() {
 }
 
 
-# TODO: kerneltool - Finish build_modules_subset to allow filtering of modules for building modloop/mkinitfs/etc.
-kerneltool_build_modules_subset() {
-	local _bdir="$1"
-	local _ddir="$2"
-	shift 2
-	_modbase="$_bdir/lib/modules"
-	_modout="$_ddir/lib/modules"
-	_fwbase="$_bdir/lib/firmware"
-	_fwout="$_ddir/lib/firmware"
-
-	dir_is_readable "$_modbase" || ! warning "Could not read merged modules directory '$_modbase'" || return 1
-	mkdir_is_writable "$_modout" || ! warning "Could not create output directory for modules subset at '$_modout'!" || return 1
-	
-
-	# NOTE: Allow filtering of modloop modules here!
-
-	for _mod do
-		case "$_mod" in 
-		*/*) ;;
-		*) ;;
-		esac
-	done
-
-	dir_is_readable "$_fwbase" && ! mkdir_is_writable "$_fwout" && warning "Could not create output directory for firmware at '$_fwout'!" && return 1
-
-	find "$_modout" -type f \( -iname '*.ko' -o -iname '*.ko.*' \) -exec printf '%s\t' \{\} \; -exec modinfo -F firmware \{\} \; | while read _mod _fw; do
-		file_is_readable "$_fwout/$_fw" \
-			|| file_is_readable "$_fwbase/$_fw" && install -pD "$_fwbase/$_fw" "$_fwout/$_fw" \
-			|| ! warning "Could not find firmware '$_fw' in '$_fwbase' needed by module '$_mod'!" || return 1
-	done
+# Get sha512 checksum of uncompressed module given a compressed or uncompressed module, or checksum of raw file (firmware) with no decompression applied.
+# Usage: kerneltool_checksum_module <kernel module file>
+kerneltool_checksum_module() {
+	local _file="$1" _mc
+	file_is_readable "$1" || ! warning "Could not read module '$1'!" || return 1
+	case "$_file" in
+		*.ko) : uncompressed module; _mc='cat';;
+		*.ko.bz*) : compressed module; _mc='bzcat';; *.ko.gz)_mc='zcat';; *.ko.lz4)_mc='lz4cat';; *.ko.lzo*)_mc='lzopcat';; *.ko.xz|*.ko.lz*)_mc='xzcat';;
+		*) : unrecognized module extension, checksum raw file ; _mc='cat'
+	esac
+	$_mc "$_file" | sha512sum | cut -d' ' -f 1 | sed 's/^/sha512:/g'
 }
 
 
@@ -586,19 +680,5 @@ kerneltool_calc_module_fw_deps() {
 		done
 		printf '%s\n' "$_sums"
 	done
-}
-
-
-# Get sha512 checksum of uncompressed module given a compressed or uncompressed module, or checksum of raw file (firmware) with no decompression applied.
-# Usage: kerneltool_checksum_module <kernel module file>
-kerneltool_checksum_module() {
-	local _file="$1" _mc
-	file_is_readable "$1" || ! warning "Could not read module '$1'!" || return 1
-	case "$_file" in
-		*.ko) : uncompressed module; _mc='cat';;
-		*.ko.bz*) : compressed module; _mc='bzcat';; *.ko.gz)_mc='zcat';; *.ko.lz4)_mc='lz4cat';; *.ko.lzo*)_mc='lzopcat';; *.ko.xz|*.ko.lz*)_mc='xzcat';;
-		*) : unrecognized module extension, checksum raw file ; _mc='cat'
-	esac
-	$_mc "$_file" | sha512sum | cut -d' ' -f 1 | sed 's/^/sha512:/g'
 }
 
