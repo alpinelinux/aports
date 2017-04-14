@@ -1,0 +1,217 @@
+From: Shiz <hi@shiz.me>
+Date: Tue, 11 Apr 2017 04:37:00 +0200
+Subject: [PATCH] Add support for static PIE executables
+
+Note that static PIE binaries are reported as dynamically linked by file(1):
+
+    $ rustc -C target-feature=+crt-static hello_world.rb
+    $ file hello_world
+    ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically \
+      linked, not stripped, with debug_info
+
+In addition, ldd(1) reports that it's linked with ldd, as it can't find any
+dependencies except itself loaded into the process:
+
+    $ ldd hello_world
+    ldd (0x237fcc81000)
+
+Static PIE binaries are dynamic binaries without a loader or any DT_NEEDED
+entries. The important is that they do not depend on libc or any other system
+library, just like static binaries, but more secure.
+
+    $ readelf -d hello_world
+    Dynamic section at offset 0x2de40 contains 17 entries:
+      Tag        Type                         Name/Value
+     0x0000000000000010 (SYMBOLIC)           0x0
+     0x000000000000000c (INIT)               0x17a0
+     0x000000000000000d (FINI)               0x2003c
+     0x000000006ffffef5 (GNU_HASH)           0x1c8
+     0x0000000000000005 (STRTAB)             0x278
+     0x0000000000000006 (SYMTAB)             0x200
+     0x000000000000000a (STRSZ)              60 (bytes)
+     0x000000000000000b (SYMENT)             24 (bytes)
+     0x0000000000000015 (DEBUG)              0x0
+     0x0000000000000003 (PLTGOT)             0x22df90
+     0x0000000000000007 (RELA)               0x2b8
+     0x0000000000000008 (RELASZ)             5352 (bytes)
+     0x0000000000000009 (RELAENT)            24 (bytes)
+     0x0000000000000018 (BIND_NOW)
+     0x000000006ffffffb (FLAGS_1)            Flags: NOW PIE
+     0x000000006ffffff9 (RELACOUNT)          223
+     0x0000000000000000 (NULL)               0x0
+
+--- a/src/librustc_back/target/linux_musl_base.rs
++++ b/src/librustc_back/target/linux_musl_base.rs
+@@ -22,5 +22,8 @@
+     // Except for on MIPS, these targets statically link libc by default.
+     base.crt_static_default = true;
+ 
++    // Static position-independent executables are supported.
++    base.static_position_independent_executables = true;
++
+     base
+ }
+--- a/src/librustc_back/target/mod.rs
++++ b/src/librustc_back/target/mod.rs
+@@ -350,6 +350,8 @@
+     /// the functions in the executable are not randomized and can be used
+     /// during an exploit of a vulnerability in any code.
+     pub position_independent_executables: bool,
++    /// As above, but also support for static position independent executables.
++    pub static_position_independent_executables: bool,
+     /// Format that archives should be emitted in. This affects whether we use
+     /// LLVM to assemble an archive or fall back to the system linker, and
+     /// currently only "gnu" is used to fall into LLVM. Unknown strings cause
+@@ -434,6 +436,7 @@
+             has_rpath: false,
+             no_default_libraries: true,
+             position_independent_executables: false,
++            static_position_independent_executables: false,
+             pre_link_objects_exe: Vec::new(),
+             pre_link_objects_dll: Vec::new(),
+             post_link_objects: Vec::new(),
+--- a/src/librustc_trans/back/link.rs
++++ b/src/librustc_trans/back/link.rs
+@@ -840,6 +840,10 @@
+ 
+     let used_link_args = sess.cstore.used_link_args();
+ 
++    if crate_type == config::CrateTypeExecutable && sess.crt_static() {
++        cmd.static_executable();
++    }
++
+     if crate_type == config::CrateTypeExecutable &&
+        t.options.position_independent_executables {
+         let empty_vec = Vec::new();
+@@ -850,7 +854,7 @@
+         let relocation_model = sess.opts.cg.relocation_model.as_ref()
+                                    .unwrap_or(&empty_str);
+         if (t.options.relocation_model == "pic" || *relocation_model == "pic")
+-            && !args.any(|x| *x == "-static") {
++            && (t.options.static_position_independent_executables || !args.any(|x| *x == "-static")) {
+             cmd.position_independent_executable();
+         }
+     }
+--- a/src/librustc_trans/back/linker.rs
++++ b/src/librustc_trans/back/linker.rs
+@@ -82,6 +82,7 @@
+     fn add_object(&mut self, path: &Path);
+     fn gc_sections(&mut self, keep_metadata: bool);
+     fn position_independent_executable(&mut self);
++    fn static_executable(&mut self);
+     fn optimize(&mut self);
+     fn debuginfo(&mut self);
+     fn no_default_libraries(&mut self);
+@@ -116,6 +117,7 @@
+     fn output_filename(&mut self, path: &Path) { self.cmd.arg("-o").arg(path); }
+     fn add_object(&mut self, path: &Path) { self.cmd.arg(path); }
+     fn position_independent_executable(&mut self) { self.cmd.arg("-pie"); }
++    fn static_executable(&mut self) { self.cmd.arg("-static"); }
+     fn args(&mut self, args: &[String]) { self.cmd.args(args); }
+ 
+     fn link_rust_dylib(&mut self, lib: &str, _path: &Path) {
+@@ -359,6 +361,10 @@
+ 
+     fn position_independent_executable(&mut self) {
+         // noop
++    }
++
++    fn static_executable(&mut self) {
++        self.cmd.arg("-MT");
+     }
+ 
+     fn no_default_libraries(&mut self) {
+--- a/src/librustc_trans/back/link.rs
++++ b/src/librustc_trans/back/link.rs
+@@ -987,11 +987,14 @@
+         cmd.link_whole_staticlib(&l.name.as_str(), &search_path);
+     }
+ 
+-    cmd.hint_dynamic();
++    let crt_static = sess.crt_static();
++    if !crt_static {
++        cmd.hint_dynamic();
++    }
+ 
+     for lib in others {
+         match lib.kind {
+-            NativeLibraryKind::NativeUnknown => cmd.link_dylib(&lib.name.as_str()),
++            NativeLibraryKind::NativeUnknown => if crt_static { cmd.link_staticlib(&lib.name.as_str()) } else { cmd.link_dylib(&lib.name.as_str()) },
+             NativeLibraryKind::NativeFramework => cmd.link_framework(&lib.name.as_str()),
+             NativeLibraryKind::NativeStatic => bug!(),
+         }
+--- a/src/librustc_trans/back/link.rs
++++ b/src/librustc_trans/back/link.rs
+@@ -874,15 +874,8 @@
+         cmd.no_default_libraries();
+     }
+ 
+-    // Take careful note of the ordering of the arguments we pass to the linker
+-    // here. Linkers will assume that things on the left depend on things to the
+-    // right. Things on the right cannot depend on things on the left. This is
+-    // all formally implemented in terms of resolving symbols (libs on the right
+-    // resolve unknown symbols of libs on the left, but not vice versa).
++    // We have organized the arguments we pass to the linker as such:
+     //
+-    // For this reason, we have organized the arguments we pass to the linker as
+-    // such:
+-    //
+     //  1. The local object that LLVM just generated
+     //  2. Local native libraries
+     //  3. Upstream rust libraries
+@@ -892,17 +885,12 @@
+     // list can't depend on items higher up in the list. For example nothing can
+     // depend on what we just generated (e.g. that'd be a circular dependency).
+     // Upstream rust libraries are not allowed to depend on our local native
+-    // libraries as that would violate the structure of the DAG, in that
+-    // scenario they are required to link to them as well in a shared fashion.
+-    //
+-    // Note that upstream rust libraries may contain native dependencies as
+-    // well, but they also can't depend on what we just started to add to the
+-    // link line. And finally upstream native libraries can't depend on anything
+-    // in this DAG so far because they're only dylibs and dylibs can only depend
+-    // on other dylibs (e.g. other native deps).
++    // libraries as that would violate the structure of the DAG.
++    cmd.start_group();
+     add_local_native_libraries(cmd, sess);
+     add_upstream_rust_crates(cmd, sess, crate_type, tmpdir);
+     add_upstream_native_libraries(cmd, sess);
++    cmd.end_group();
+ 
+     // # Telling the linker what we're doing
+ 
+--- a/src/librustc_trans/back/linker.rs
++++ b/src/librustc_trans/back/linker.rs
+@@ -94,6 +94,8 @@
+     fn no_whole_archives(&mut self);
+     fn export_symbols(&mut self, tmpdir: &Path, crate_type: CrateType);
+     fn subsystem(&mut self, subsystem: &str);
++    fn start_group(&mut self);
++    fn end_group(&mut self);
+ }
+ 
+ pub struct GnuLinker<'a> {
+@@ -118,6 +120,8 @@
+     fn add_object(&mut self, path: &Path) { self.cmd.arg(path); }
+     fn position_independent_executable(&mut self) { self.cmd.arg("-pie"); }
+     fn static_executable(&mut self) { self.cmd.arg("-static"); }
++    fn start_group(&mut self) { self.cmd.arg("-Wl,-("); }
++    fn end_group(&mut self) { self.cmd.arg("-Wl,-)"); }
+     fn args(&mut self, args: &[String]) { self.cmd.args(args); }
+ 
+     fn link_rust_dylib(&mut self, lib: &str, _path: &Path) {
+@@ -490,6 +494,14 @@
+         if subsystem == "windows" {
+             self.cmd.arg("/ENTRY:mainCRTStartup");
+         }
++    }
++
++    fn start_group(&mut self) {
++        // Not needed
++    }
++
++    fn end_group(&mut self) {
++        // Not needed
+     }
+ }
+ 
