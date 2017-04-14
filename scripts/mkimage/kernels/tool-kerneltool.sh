@@ -376,16 +376,17 @@ kerneltool_depmod() {
 # Command: mkmodloop
 # Build our modloop
 # TODO: kerneltool -  Modify build_kernel_stage_modloop to allow selecting which modules are installed in generated modloop!
-kerneltool_mkmodloop() {
+#kerneltool_mkmodloop() {
+kerneltool_mkmodsubset() {
 	info_prog_set "kerneltool-mkmodloop"
 	info_func_set "mkmodloop"
-	local stage_base="$1" _arch="$2" _krel="$3"
+	local stage_base="$1" _arch="$2" _krel="$3" 
 	shift 3
+	allmods="$@"
 	local _merged="$stage_base/$_arch/merged-$_krel"
 	local _modbase="$_merged/lib/modules"
 	dir_is_readable "$_modbase" || ! warning "Could not read merged modules directory '$_modbase'" || return 1
 
-	local _outname="modloop-$_krel"
 	
 	local _tmp="$stage_base/$_arch/tmp/modloop-$_krel"
 	rm -rf "$_tmp" || ! Warning "Could not clean temp directory '$_tmp' before building modloop!" || return 1
@@ -401,13 +402,14 @@ kerneltool_mkmodloop() {
 	local _kmod_index="$stage_base/$_arch/manifests/$_krel.kmod-INDEX"
 	local _firmware_index="$stage_base/$_arch/manifests/$_krel.firmware-INDEX"
 	local _kmod_fw_deps="$stage_base/$_arch/manifests/$_krel.kmod_fw-DEPS"
-	local mod_subset_manifest="$stage_base/$_arch/manifests/$_krel-subset-$(date -I).kmod-Manifest"
+	local mod_subset_manifest
 		
 	if [ $# -gt 0 ] ; then
-		msg "Copying selected modules and their deps from '$_modbase' to '$_modout'."
+		mod_subset_manifest="$stage_base/$_arch/tmp/$_krel-subset-$(printf '%s' "$@" | sort -u | md5sum | cut -d' ' -f 1 ).kmod-Manifest"
+		msg "Selecting requested modules and their deps from '$_modbase' into '$mod_subset_manifest'."
 		local _kmod _kpkg _kfsum _kfile
 		cat "$_kmod_index" | while read _kmod _kpkg _kfsum _kfile ; do
-			for _mod in $@ ; do
+			for _mod in $allmods ; do
 				#msg "_kmod: $_kmod"
 				#msg "_file: $_kfile"
 				#msg "_mod:$_mod"
@@ -420,57 +422,60 @@ kerneltool_mkmodloop() {
 			done
 		done | grep -v '^#' | tr -s '\t ' '\n' | sort -u > "$mod_subset_manifest"
 	else
-		msg "Copying all staged modules found in '$_modbase' and their firmware deps to '$_modout'."
+		mod_subset_manifest="$stage_base/$_arch/tmp/$_krel-subset-all.kmod-Manifest"
+		msg "Selecting all staged modules found in '$_modbase' and their firmware deps into '$mod_subset_manifest'."
 		cat "$_kmod_fw_deps" | grep -v '^#' | tr -s '\t ' '\n' | sort -u > "$mod_subset_manifest"
 	fi
-
 
 	file_exists "$mod_subset_manifest" || ! warning "No module-subset Manifest found at '$mod_subset_manifest'!" || return 1
 	info_func_set "copy modules"
 	if file_is_readable "$_kmod_index" ; then 
-		msg2 "Copied $(
-			local _modcount=0
-			grep -F -f "$mod_subset_manifest" "$_kmod_index" | grep -v '^#' | tr '\t' ' ' | while read _kmod _kpkg _kfsum _kfile ; do
-				if [ "$_kmod" ] ; then 
-					_filein="$stage_base/$_arch/$_krel/${_kpkg#kpkg:$_arch/}/$_kfile"
-					_fileout="$_modout/$_kfile"
-					file_exists "$_filein" || ! warning "Could not read kernel module file '$_filein'!" || continue
-					mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make module output subdirectory '${_fileout%/*}'!" || return 1
-					cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink module '$_filein' to '$_fileout'!" || return 1
-					echo $(( ++_modcount ))
-				fi
-			done | tail -n 1 | sed -e 's/[[:space:]]//g'
-			) modules to '$_modout'." 
+		grep -F -f "$mod_subset_manifest" "$_kmod_index" | grep -v '^#' | tr '\t' ' ' | while read _kmod _kpkg _kfsum _kfile ; do
+			if [ "$_kmod" ] ; then 
+				_filein="$stage_base/$_arch/$_krel/${_kpkg#kpkg:$_arch/}/$_kfile"
+				_fileout="$_modout/$_kfile"
+				[ "$VERBOSE" ] && msg "'$_filein' -> '$_fileout'"
+				file_exists "$_filein" || ! warning "Could not read kernel module file '$_filein'!" || continue
+				mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make module output subdirectory '${_fileout%/*}'!" || return 1
+				cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink module '$_filein' to '$_fileout'!" || return 1
+				echo $(( ++_modcount ))
+			fi
+		done | tail -n 1 | sed -E -e 's/[[:space:]]//g' | ( read _modcount && msg "Copied $_modcount kernel modules to '$_modout'." )
 	else warning "Could not read kernel module index '$_kmod_index'!" ; return 1 ; fi
 
 	info_func_set "copy firmware"
 	if file_not_exists "$_firmware_index" ; then msg "No firmware index found at '$_firmware_index', not copying firmware."
 	elif grep -q "^firmware:" "$mod_subset_manifest" ; then msg "Copying firmware needed by selected modules:"
-		msg2 "Copied $(
-			local _fwcount=0
-			grep -F -f "$mod_subset_manifest" "$_firmware_index" | grep -v '^#' | tr '\t' ' ' | while read _fw _kpkg _fwsum _fwfile ; do
-				if [ "$_fw" ] ; then
-					: $(( _fwcount + 1 ))
-					_filein="$stage_base/$_arch/$_krel/${_kpkg#kpkg:$_arch}/$_fwfile"
-					_fileout="$_fwout/$_fwfile"
-					file_exists "$_filein" || ! warning "Could not read firmware file '$_filein'!" || continue
-					mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make firmware output subdirectory '${_fileout%/*}'!" || return 1
-					cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink firmware '$_filein' to '$_fileout'!" || return 1
-					echo $(( ++_fwcount ))
-				fi
-			done | tail -n 1 | sed -e 's/[[:space:]]//g'
-			) firmware files to '$_fwout'."
+		local _fwcount=0
+		grep -F -f "$mod_subset_manifest" "$_firmware_index" | grep -v '^#' | tr '\t' ' ' | while read _fw _kpkg _fwsum _fwfile ; do
+			if [ "$_fw" ] ; then
+				: $(( _fwcount + 1 ))
+				_filein="$stage_base/$_arch/$_krel/${_kpkg#kpkg:$_arch}/$_fwfile"
+				_fileout="$_fwout/$_fwfile"
+				[ "$VERBOSE" ] && msg "'$_filein' -> '$_fileout'"
+				file_exists "$_filein" || ! warning "Could not read firmware file '$_filein'!" || continue
+				mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make firmware output subdirectory '${_fileout%/*}'!" || return 1
+				cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink firmware '$_filein' to '$_fileout'!" || return 1
+				echo $(( ++_fwcount ))
+			fi
+		done | tail -n 1 | sed -E -e 's/[[:space:]]//g' | ( read _fwcount && msg "Copied $_fwcount firmware files to '$_fwout'." ) 
 	else msg "No firmware to copy." ; fi
-#}
-#kerneltool_mkmodloopx() {
-#	local stage_base="$1" _arch="$2" _krel="$3"
-#	shift 3
 
+	printf "$_tmp"
+}
+
+kerneltool_mkmodloop() {
+	local stage_base="$1" _arch="$2" _krel="$3"
+	#shift 3
+
+	local _tmp="$(kerneltool_mkmodsubset $@)"
 
 	info_func_set "create squashfs"
 	local _outdir="$stage_base/$_arch/out-$_krel/boot"
+	local _outname="modloop-$_krel"
 	mkdir_is_writable "$_outdir" || ! warning "Could not create writable output directory '$_outdir'!" || return 1
-	mksquashfs "$_tmp/lib" "$_outdir/$_outname" -root-owned -noappend -comp xz -exit-on-error || ! warning "Failed to mkswashfs '$_tmp/lib' to '$_outdir/$_outname' with compression 'xz'!" || return 1
+	mksquashfs "$_tmp/lib" "$_outdir/$_outname" -root-owned -no-recovery -noappend -progress -comp xz -exit-on-error ${VERBOSE:+-info} | cat ${QUIET:+/dev/null} \
+		|| ! warning "Failed to mksqwashfs '$_tmp/lib' to '$_outdir/$_outname' with compression 'xz'!" || return 1
 	rm -rf  "$_tmp" || ! warning "Could not clean up tmp directory for mkmodloopt at '$_tmp'!" || return 1
 	msg "mkmodloop complete!"
 	msg "modloop file for '$_arch/$_krel' is at '$_outdir/$_outname'."
