@@ -12,7 +12,7 @@ This means you care about the quality of your contributions.
   * Know how to create a commit (for details see below).
   * Know how to work with git history (rebasing your commits).
   * Know how to create Pull Requests.
-2. Have access to an Alpine Linux [development envirorment](https://wiki.alpinelinux.org/wiki/Developer_Documentation#Development).
+2. Have access to an Alpine Linux [development environment](https://wiki.alpinelinux.org/wiki/Developer_Documentation#Development).
 3. Please __do not__ submit PR's via Github's web interface. You should have a working [development envirorment](https://wiki.alpinelinux.org/wiki/Developer_Documentation#Development) available and submit your commits from your git client.
 
 ### Before you start making changes
@@ -36,10 +36,10 @@ This means you care about the quality of your contributions.
   * Begin the commit message with a single short line summarizing the changes, followed by a blank line and then a more thorough description. Examples of correctly formated summary lines are:
     * When adding a new aport: testing/apkname: new aport
     * When modifying an aport: testing/apkname: short description about changes
-  * If needed provide a proper formatted (line wrapped) description of what your patch will do. You can provide a description in the PR, but you must include a message for this specific commit in the commit description. If in the future we would like to distance ourselfs from Github the PR information could be lost.
+  * If needed provide a proper formatted (line wrapped) description of what your patch will do. You can provide a description in the PR, but you must include a message for this specific commit in the commit description. If in the future we would like to distance ourselves from Github the PR information could be lost.
 5. Open your copy of the aports repository at github.com and switch to your feature branch. You should now see an option to create your PR. [More info](https://help.github.com/articles/creating-a-pull-request/)
 6. Wait for an Alpine Linux developer to review your changes.
-7. If all is ok your PR will be merged but if a developer asks for changes please do as followed.
+7. If all is ok your PR will be merged but if a developer asks for changes please do as follows:
   * Make the requested changes.
   * Add your file(s) to git and commit (we will squash your commits if needed).
   * Push your changes `git push origin my_new_feature`.
@@ -53,5 +53,5 @@ Failing to include __new__ dependencies will fail the CI tests.
 
 ### Clean-up a Pull Request (PR)
 
-If by some mistake you end up with multiple commits in your PR and one of our developers asks you to squash you commits please do __NOT__ create a new pull request.
+If by some mistake you end up with multiple commits in your PR and one of our developers asks you to squash your commits please do __NOT__ create a new pull request.
 Instead please follow [this rebase tutorial](https://git-scm.com/book/en/v2/Git-Tools-Rewriting-History#Changing-Multiple-Commit-Messages).

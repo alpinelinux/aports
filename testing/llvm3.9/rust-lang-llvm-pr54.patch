@@ -1,0 +1,103 @@
+From 9b74379db3f9e30516f053138fd3697d42b23164 Mon Sep 17 00:00:00 2001
+From: David Majnemer <david.majnemer@gmail.com>
+Date: Fri, 7 Oct 2016 01:38:35 +0000
+Subject: [rust-lang/llvm#54] [SimplifyCFG] Correctly test for unconditional
+ branches in GetCaseResults
+
+GetCaseResults assumed that a terminator with one successor was an
+unconditional branch.  This is not necessarily the case, it could be a
+cleanupret.
+
+Strengthen the check by querying whether or not the terminator is
+exceptional.
+
+git-svn-id: https://llvm.org/svn/llvm-project/llvm/trunk@283517 91177308-0d34-0410-b5e6-96231b3b80d8
+---
+ lib/Transforms/Utils/SimplifyCFG.cpp               |  2 +-
+ .../SimplifyCFG/X86/switch_to_lookup_table.ll      | 60 ++++++++++++++++++++++
+ 2 files changed, 61 insertions(+), 1 deletion(-)
+
+diff --git a/lib/Transforms/Utils/SimplifyCFG.cpp b/lib/Transforms/Utils/SimplifyCFG.cpp
+index c197317ac771..d274f97296dc 100644
+--- a/lib/Transforms/Utils/SimplifyCFG.cpp
++++ b/lib/Transforms/Utils/SimplifyCFG.cpp
+@@ -4228,7 +4228,7 @@ GetCaseResults(SwitchInst *SI, ConstantInt *CaseVal, BasicBlock *CaseDest,
+        ++I) {
+     if (TerminatorInst *T = dyn_cast<TerminatorInst>(I)) {
+       // If the terminator is a simple branch, continue to the next block.
+-      if (T->getNumSuccessors() != 1)
++      if (T->getNumSuccessors() != 1 || T->isExceptional())
+         return false;
+       Pred = CaseDest;
+       CaseDest = T->getSuccessor(0);
+diff --git a/test/Transforms/SimplifyCFG/X86/switch_to_lookup_table.ll b/test/Transforms/SimplifyCFG/X86/switch_to_lookup_table.ll
+index bae8c1dc5a4b..77e355a00528 100644
+--- a/test/Transforms/SimplifyCFG/X86/switch_to_lookup_table.ll
++++ b/test/Transforms/SimplifyCFG/X86/switch_to_lookup_table.ll
+@@ -1334,3 +1334,63 @@ cleanup4:
+   br label %while.body
+ }
+ 
++declare void @throw(i1)
++
++define void @wineh_test(i64 %val) personality i32 (...)* @__CxxFrameHandler3 {
++entry:
++  invoke void @throw(i1 false)
++          to label %unreachable unwind label %cleanup1
++
++unreachable:
++  unreachable
++
++cleanup1:
++  %cleanuppad1 = cleanuppad within none []
++  switch i64 %val, label %cleanupdone2 [
++    i64 0, label %cleanupdone1
++    i64 1, label %cleanupdone1
++    i64 6, label %cleanupdone1
++  ]
++
++cleanupdone1:
++  cleanupret from %cleanuppad1 unwind label %cleanup2
++
++cleanupdone2:
++  cleanupret from %cleanuppad1 unwind label %cleanup2
++
++cleanup2:
++  %phi = phi i1 [ true, %cleanupdone1 ], [ false, %cleanupdone2 ]
++  %cleanuppad2 = cleanuppad within none []
++  call void @throw(i1 %phi) [ "funclet"(token %cleanuppad2) ]
++  unreachable
++}
++
++; CHECK-LABEL: @wineh_test(
++; CHECK: entry:
++; CHECK:   invoke void @throw(i1 false)
++; CHECK:           to label %[[unreachable:.*]] unwind label %[[cleanup1:.*]]
++
++; CHECK: [[unreachable]]:
++; CHECK:   unreachable
++
++; CHECK: [[cleanup1]]:
++; CHECK:   %[[cleanuppad1:.*]] = cleanuppad within none []
++; CHECK:   switch i64 %val, label %[[cleanupdone2:.*]] [
++; CHECK:     i64 0, label %[[cleanupdone1:.*]]
++; CHECK:     i64 1, label %[[cleanupdone1]]
++; CHECK:     i64 6, label %[[cleanupdone1]]
++; CHECK:   ]
++
++; CHECK: [[cleanupdone1]]:
++; CHECK:   cleanupret from %[[cleanuppad1]] unwind label %[[cleanup2:.*]]
++
++; CHECK: [[cleanupdone2]]:
++; CHECK:   cleanupret from %[[cleanuppad1]] unwind label %[[cleanup2]]
++
++; CHECK: [[cleanup2]]:
++; CHECK:   %[[phi:.*]] = phi i1 [ true, %[[cleanupdone1]] ], [ false, %[[cleanupdone2]] ]
++; CHECK:   %[[cleanuppad2:.*]] = cleanuppad within none []
++; CHECK:   call void @throw(i1 %[[phi]]) [ "funclet"(token %[[cleanuppad2]]) ]
++; CHECK:   unreachable
++
++declare i32 @__CxxFrameHandler3(...)
+-- 
+2.7.4
+
