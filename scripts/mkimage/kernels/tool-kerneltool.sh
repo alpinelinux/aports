@@ -437,7 +437,7 @@ kerneltool_mkmodloop() {
 					file_exists "$_filein" || ! warning "Could not read kernel module file '$_filein'!" || continue
 					mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make module output subdirectory '${_fileout%/*}'!" || return 1
 					cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink module '$_filein' to '$_fileout'!" || return 1
-					echo $(( _modcount++ ))
+					echo $(( ++_modcount ))
 				fi
 			done | tail -n 1 | sed -e 's/[[:space:]]//g'
 			) modules to '$_modout'." 
@@ -456,7 +456,7 @@ kerneltool_mkmodloop() {
 					file_exists "$_filein" || ! warning "Could not read firmware file '$_filein'!" || continue
 					mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make firmware output subdirectory '${_fileout%/*}'!" || return 1
 					cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink firmware '$_filein' to '$_fileout'!" || return 1
-					echo $(( _fwcount++ ))
+					echo $(( ++_fwcount ))
 				fi
 			done | tail -n 1 | sed -e 's/[[:space:]]//g'
 			) firmware files to '$_fwout'."
