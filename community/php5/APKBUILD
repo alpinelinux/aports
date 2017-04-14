@@ -4,7 +4,7 @@
 # Maintainer: Matt Smith <mcs@darkregion.net>
 pkgname=php5
 pkgver=5.6.30
-pkgrel=0
+pkgrel=1
 pkgdesc="The PHP language runtime engine"
 url="http://www.php.net/"
 arch="all"
@@ -172,6 +172,7 @@ build() {
 		--enable-shared \
 		--mandir=/usr/share/man \
 		--with-pic \
+		--program-suffix=5 \
 		"
 
 	_phpextensions=" \
@@ -301,18 +302,12 @@ package() {
 		"$pkgdir"/usr/lib/libphp5.so || return 1
 	install -D -m644 "$_srcdir"/sapi/embed/php_embed.h \
 		"$pkgdir"/usr/include/php/sapi/embed/php_embed.h || return 1
-
-	# Create symlink with version suffix, parallel to php7 package,
-	# to simplify multiversion aports and prepare us for future.
-	local f; for f in php php-cgi php-config phpdbg phpize; do
-		ln -s $f "$pkgdir"/usr/bin/${f}5 || return 1
-	done
 }
 
 dev() {
 	default_dev || return 1
 
-	mkdir -p "$subpkgdir"/usr/lib/php
+	mkdir -p "$subpkgdir"/usr/lib/php "$subpkgdir"/usr/bin
 	mv "$pkgdir"/usr/lib/php/build \
 		"$subpkgdir"/usr/lib/php/ || return 1
 	mv "$pkgdir"/usr/bin/php-config5 "$subpkgdir"/usr/bin/
@@ -356,7 +351,6 @@ cli() {
 	pkgdesc="PHP Command Line Interface (CLI)"
 	depends="$pkgname-common"
 	mkdir -p "$subpkgdir"/usr/bin
-	mv "$pkgdir"/usr/bin/php "$subpkgdir"/usr/bin/ || return 1
 	mv "$pkgdir"/usr/bin/php5 "$subpkgdir"/usr/bin/ || return 1
 	# provide phpize here instead of -dev due to pecl command
 	mv "$pkgdir"/usr/bin/phpize* "$subpkgdir"/usr/bin/ || return 1
@@ -367,7 +361,7 @@ fpm() {
 	depends="$pkgname-common"
 	mkdir -p "$subpkgdir"$_confdir/fpm.d
 	install -D -m755 "$srcdir"/build-fpm/sapi/fpm/php-fpm \
-		"$subpkgdir"/usr/bin/php-fpm || return 1
+		"$subpkgdir"/usr/bin/php-fpm5 || return 1
 	install -D -m644 "$srcdir"/build-fpm/sapi/fpm/php-fpm.conf \
 		"$subpkgdir"$_confdir/php-fpm.conf || return 1
 	install -D -m755 "$srcdir"/php-fpm.initd "$subpkgdir"/etc/init.d/php-fpm
@@ -378,7 +372,6 @@ fpm() {
 		-e "s/^;(pm.min_spare_servers)/\1/" \
 		-e "s/^;(pm.max_spare_servers)/\1/" \
 		"$subpkgdir"$_confdir/php-fpm.conf || return 1
-	ln -s php-fpm "$subpkgdir"/usr/bin/php-fpm5
 }
 
 apache2() {
