@@ -1,0 +1,134 @@
+--- a/src/librustc_trans/back/link.rs 
++++ b/src/librustc_trans/back/link.rs
+@@ -239,8 +239,8 @@
+ /// Checks if target supports crate_type as output
+ pub fn invalid_output_for_target(sess: &Session,
+                                  crate_type: config::CrateType) -> bool {
+-    match (sess.target.target.options.dynamic_linking,
+-           sess.target.target.options.executables, crate_type) {
++    let dynamic_linking = sess.target.target.options.dynamic_linking && !sess.crt_static();
++    match (dynamic_linking, sess.target.target.options.executables, crate_type) {
+         (false, _, config::CrateTypeCdylib) |
+         (false, _, config::CrateTypeProcMacro) |
+         (false, _, config::CrateTypeDylib) => true,
+@@ -840,6 +840,10 @@
+ 
+     let used_link_args = sess.cstore.used_link_args();
+ 
++    if crate_type == config::CrateTypeExecutable && sess.crt_static() {
++        cmd.static_executable();
++    }
++
+     if crate_type == config::CrateTypeExecutable &&
+        t.options.position_independent_executables {
+         let empty_vec = Vec::new();
+@@ -870,15 +870,8 @@ 
+         cmd.no_default_libraries();
+     }
+ 
+-    // Take careful note of the ordering of the arguments we pass to the linker
+-    // here. Linkers will assume that things on the left depend on things to the
+-    // right. Things on the right cannot depend on things on the left. This is
+-    // all formally implemented in terms of resolving symbols (libs on the right
+-    // resolve unknown symbols of libs on the left, but not vice versa).
++    // We have organized the arguments we pass to the linker as such:
+     //
+-    // For this reason, we have organized the arguments we pass to the linker as
+-    // such:
+-    //
+     //  1. The local object that LLVM just generated
+     //  2. Local native libraries
+     //  3. Upstream rust libraries
+@@ -888,17 +881,12 @@
+     // list can't depend on items higher up in the list. For example nothing can
+     // depend on what we just generated (e.g. that'd be a circular dependency).
+     // Upstream rust libraries are not allowed to depend on our local native
+-    // libraries as that would violate the structure of the DAG, in that
+-    // scenario they are required to link to them as well in a shared fashion.
+-    //
+-    // Note that upstream rust libraries may contain native dependencies as
+-    // well, but they also can't depend on what we just started to add to the
+-    // link line. And finally upstream native libraries can't depend on anything
+-    // in this DAG so far because they're only dylibs and dylibs can only depend
+-    // on other dylibs (e.g. other native deps).
++    // libraries as that would violate the structure of the DAG.
++    cmd.start_group();
+     add_local_native_libraries(cmd, sess);
+     add_upstream_rust_crates(cmd, sess, crate_type, tmpdir);
+     add_upstream_native_libraries(cmd, sess);
++    cmd.end_group();
+ 
+     // # Telling the linker what we're doing
+ 
+@@ -983,11 +983,14 @@ 
+         cmd.link_whole_staticlib(&l.name.as_str(), &search_path);
+     }
+ 
+-    cmd.hint_dynamic();
++    let crt_static = sess.crt_static();
++    if !crt_static {
++        cmd.hint_dynamic();
++    }
+ 
+     for lib in others {
+         match lib.kind {
+-            NativeLibraryKind::NativeUnknown => cmd.link_dylib(&lib.name.as_str()),
++            NativeLibraryKind::NativeUnknown => if crt_static { cmd.link_staticlib(&lib.name.as_str()) } else { cmd.link_dylib(&lib.name.as_str()) },
+             NativeLibraryKind::NativeFramework => cmd.link_framework(&lib.name.as_str()),
+             NativeLibraryKind::NativeStatic => bug!(),
+         }
+--- a/src/librustc_trans/back/linker.rs 
++++ b/src/librustc_trans/back/linker.rs 
+@@ -82,6 +82,7 @@
+     fn add_object(&mut self, path: &Path);
+     fn gc_sections(&mut self, keep_metadata: bool);
+     fn position_independent_executable(&mut self);
++    fn static_executable(&mut self);
+     fn optimize(&mut self);
+     fn debuginfo(&mut self);
+     fn no_default_libraries(&mut self);
+@@ -93,6 +93,8 @@
+     fn no_whole_archives(&mut self);
+     fn export_symbols(&mut self, tmpdir: &Path, crate_type: CrateType);
+     fn subsystem(&mut self, subsystem: &str);
++    fn start_group(&mut self);
++    fn end_group(&mut self);
+ }
+ 
+ pub struct GnuLinker<'a> {
+@@ -116,6 +117,9 @@ 
+     fn output_filename(&mut self, path: &Path) { self.cmd.arg("-o").arg(path); }
+     fn add_object(&mut self, path: &Path) { self.cmd.arg(path); }
+     fn position_independent_executable(&mut self) { self.cmd.arg("-pie"); }
++    fn static_executable(&mut self) { self.cmd.arg("-static"); }
++    fn start_group(&mut self) { self.cmd.arg("-Wl,-("); } 
++    fn end_group(&mut self) { self.cmd.arg("-Wl,-)"); }
+     fn args(&mut self, args: &[String]) { self.cmd.args(args); }
+ 
+     fn link_rust_dylib(&mut self, lib: &str, _path: &Path) {
+@@ -359,6 +361,10 @@ 
+ 
+     fn position_independent_executable(&mut self) {
+         // noop
++    }
++
++    fn static_executable(&mut self) {
++        self.cmd.arg("-MT");
+     }
+ 
+     fn no_default_libraries(&mut self) {
+@@ -484,6 +488,14 @@
+         if subsystem == "windows" {
+             self.cmd.arg("/ENTRY:mainCRTStartup");
+         }
++    }
++
++    fn start_group(&mut self) {
++        // Not needed
++    }
++    
++    fn end_group(&mut self) { 
++        // Not needed
+     }
+ }
+ 
