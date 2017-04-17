@@ -441,6 +441,14 @@ static void apk_applet_register_builtin(void)
 		(*p)();
 }
 
+static struct apk_database db;
+
+static void on_sigint(int s)
+{
+	apk_db_close(&db);
+	exit(128 + s);
+}
+
 int main(int argc, char **argv)
 {
 	struct apk_applet *applet;
@@ -448,7 +456,6 @@ int main(int argc, char **argv)
 	struct option *opt, *all_options;
 	int i, p, r, num_options;
 	void *ctx = NULL;
-	struct apk_database db;
 	struct apk_db_options dbopts;
 	const struct apk_option_group **optgroups = default_optgroups;
 	struct apk_string_array *args;
@@ -517,6 +524,7 @@ int main(int argc, char **argv)
 	}
 
 	apk_db_init(&db);
+	signal(SIGINT, on_sigint);
 
 #ifdef TEST_MODE
 	dbopts.open_flags &= ~(APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE | APK_OPENF_CREATE);
