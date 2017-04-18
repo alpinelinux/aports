@@ -22,6 +22,7 @@ kerneltool() {
 	local command
 	command="$1"
 
+	: "${OPT_apkroot_tool_cmdline:="--repositories-file /etc/apk/repositories --host-keys"}"
 	case "$1" in
 		stage) shift ; unset UNSTAGE RESTAGE ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
 		restage) shift ; unset UNSTAGE ; RESTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
@@ -29,7 +30,7 @@ kerneltool() {
 		depmod) shift ; kerneltool_depmod "${STAGING_ROOT}/${OPT_arch:-"$(_apk --print-arch)"}/merged-$1" "$1" $2 ; return $? ;;
 		mkmodsubset) shift ; kerneltool_mkmodsubset "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
 		mkmodcpio) shift ; kerneltool_mkmodcpio "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
-		mkmodcpiogz) shift ; kerneltool_mkmodcpio "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
+		mkmodcpiogz) shift ; kerneltool_mkmodcpiogz "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
 		mkmodloop) shift ; kerneltool_mkmodloop "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
 		help) kerneltool_usage && return 0 ;;
 		--*) warning "Unhandled global option '$1'!" ; return 1 ;;
