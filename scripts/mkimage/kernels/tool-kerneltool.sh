@@ -22,7 +22,7 @@ kerneltool() {
 	local command
 	command="$1"
 
-	: "${OPT_apkroot_tool_cmdline:="--repositories-file /etc/apk/repositories --host-keys"}"
+	: "${OPT_apkroot_setup_cmdline:="--repositories-file /etc/apk/repositories --host-keys"}"
 	case "$1" in
 		stage) shift ; unset UNSTAGE RESTAGE ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
 		restage) shift ; unset UNSTAGE ; RESTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
@@ -163,8 +163,8 @@ kerneltool_stage() {
 	fi
 
 	# Initilize our apk root
-	apkroot_init "$_arch" "$stage_apkroot"
-	apkroot_tool $OPT_apkroot_tool_cmdline
+	apkroot_init "$stage_apkroot" "$_arch"
+	apkroot_setup $OPT_apkroot_setup_cmdline
 	info_func_set "stage (setup)"
 	_apk update ${VERBOSE--q} || warning "Could not update apk database. Continuing..."
 

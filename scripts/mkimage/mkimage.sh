@@ -184,7 +184,7 @@ for ARCH in $req_arch; do
 	info_prog_set "$scriptname:$ARCH"
 	info_func_set "build arch"
 
-	apkroot_init "$ARCH" "$WORKDIR/.apkroot-$ARCH" "${_hotkeys:+--host-keys}" "${_apk_cache_dir:+--cache--dir $_apk_cache_dir}" $_repos
+	apkroot_init "$WORKDIR/.apkroot-$ARCH" "$ARCH" "${_hotkeys:+--host-keys}" "${_apk_cache_dir:+--cache--dir $_apk_cache_dir}" $_repos
 	_apk update
 
 	if [ "$_yaml" = "yes" ]; then

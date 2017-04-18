@@ -72,6 +72,7 @@ esac
 
 
 case "$TOOL" in
+	apkroottool) : ;;
 	kerneltool)
 		load_plugins "$scriptdir/initfs" 
 		load_plugins "$scriptdir/kernels"
@@ -90,7 +91,7 @@ esac
 
 
 
-	OPT_apkroot_tool_cmdline=""
+	OPT_apkroot_setup_cmdline=""
 	while [ $# -gt 0 ] ; do
 
 		# Options that apply to all tools.
@@ -103,16 +104,16 @@ esac
 			--install-root) OPT_install_root="$2" ; shift 2 ; continue ;;
 		esac
 
-		# Options for tools that call apkroot_tool
+		# Options for tools that call apkroot_setup
 		case "$1" in
-			# Options to pass to apkroot_tool
-			--cache-dir) OPT_apkroot_tool_cmdline="${OPT_apkroot_tool_cmdline:+"$OPT_apkroot_tool_cmdline "}--cache-dir $2" ; shift 2 ; continue ;;
-			--repository|--repo) OPT_apkroot_tool_cmdline="${OPT_apkroot_tool_cmdline:+"$OPT_apkroot_tool_cmdline "}--repository $2" ; shift 2 ; continue ;;
-			--repositories-file|--repo-file) OPT_apkroot_tool_cmdline="${OPT_apkroot_tool_cmdline:+"$OPT_apkroot_tool_cmdline "}--repositories-file $2" ; shift 2 ; continue ;;
-			--key-file|--key) OPT_apkroot_tool_cmdline="${OPT_apkroot_tool_cmdline:+"$OPT_apkroot_tool_cmdline "}--key-file $2" ; shift 2 ; continue ;;
-			--keys-dir) OPT_apkroot_tool_cmdline="${OPT_apkroot_tool_cmdline:+"$OPT_apkroot_tool_cmdline "}--keys-dir $2" ; shift 2 ; continue ;;
-			--host-keys) OPT_apkroot_tool_cmdline="${OPT_apkroot_tool_cmdline:+"$OPT_apkroot_tool_cmdline "}--host-keys" ; shift ; continue ;;
-			--no-host-keys) OPT_apkroot_tool_cmdline="${OPT_apkroot_tool_cmdline:+"$OPT_apkroot_tool_cmdline "}--no-host-keys" ; shift ; continue ;;
+			# Options to pass to apkroot_setup
+			--cache-dir) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--cache-dir $2" ; shift 2 ; continue ;;
+			--repository|--repo) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--repository $2" ; shift 2 ; continue ;;
+			--repositories-file|--repo-file) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--repositories-file $2" ; shift 2 ; continue ;;
+			--key-file|--key) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--key-file $2" ; shift 2 ; continue ;;
+			--keys-dir) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--keys-dir $2" ; shift 2 ; continue ;;
+			--host-keys) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--host-keys" ; shift ; continue ;;
+			--no-host-keys) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--no-host-keys" ; shift ; continue ;;
 		esac
 
 		case "$1" in

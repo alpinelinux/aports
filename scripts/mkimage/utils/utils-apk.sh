@@ -58,8 +58,8 @@ apk_get_apk_arch_package_version() {
 
 apkroot_init() {
 	info_func_set "apkroot_setup"
-	local _arch="$1"
-	local _apkroot="$2"
+	local _apkroot="$1"
+	local _arch="$2"
 	shift 2
 
 	if dir_exists "$_apkroot" && ! dir_is_writable "$_apkroot" ; then
@@ -67,11 +67,13 @@ apkroot_init() {
 		return 1
 	elif file_exists "$_apkroot/etc/apk/arch" ; then
 		_realarch="$(cat "$_apkroot/etc/apk/arch")"
+		[ "$_arch" ] || _arch="$_realarch"
 		[ "$_realarch" != "$_arch" ] && warning "Arch mismatch: '$_arch' requested, but APKROOT at '$_apkroot' setup for '$_realarch'!" && return 1
 		msg "Using APKROOT '$_apkroot' for arch '$_arch'."
 		APKARCH="$_arch"
 		APKROOT="$_apkroot"
 	else
+		[ "$_arch" ] || _arch="$(_apk --print-arch)"
 		msg "Initilizing apk repository for '$_arch' at"
 		msg2 "'$_apkroot'"
 		mkdir_is_writable "$_apkroot" && APKROOT="$(realpath "$_apkroot")" && [ "$APKROOT" ] || ! warning "Can not setup writable APKROOT for arch '$_arch' at '$_apkroot'!" || return 1
@@ -82,8 +84,8 @@ apkroot_init() {
 	export APKARCH APKROOT
 }
 
-apkroot_tool() {
-	info_func_set "apkroot_tool"
+apkroot_setup() {
+	info_func_set "apkroot_setup"
 	_arch="$APKARCH" && [ "$_arch" ] || ! warning "Called without value set in \$APKARCH!" || return 1
 	_apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
 	_apkkeysdir="$_apkroot/etc/apk/keys" && mkdir_is_writable "$_apkkeysdir" || ! warning "Can not write to keys directory at '$_apkkeysdir'!" || return 1
@@ -98,6 +100,10 @@ apkroot_tool() {
 			--key-file) file_is_readable "$2" && cp -Lf "$2" "$_apkkeysdir" || warning "Can not copy key file '$2' to '$_apkkeysdir'!" ; shift 2 ;;
 			--keys-dir) dir_is_readable "$2" && cp -Lf "$2"/* "$_apkkeysdir" || warning "Can not copy keys from '$2/*' to '$_apkkeysdir'!" ; shift 2 ;;
 			--host-keys) dir_is_readable "/etc/apk/keys" && cp -Lf /etc/apk/keys/* "$_apkkeysdir" || warning "Can not copy host keys from '/etc/apk/keys/*' to '$_apkkeysdir'!" ; shift 1 ;;
+			--arch-keys) dir_is_readable "/usr/share/apk/keys/$_arch" && cp -Lf "/usr/share/apk/keys/$_arch"/* "$_apkkeysdir" \
+					|| warning "Can not copy arch keys from '/usr/share/apk/keys/$_arch/*' to '$_apkkeysdir'!"
+				shift 1
+				;;
 			*) shift ;;
 		esac
 	done
