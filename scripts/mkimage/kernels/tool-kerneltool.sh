@@ -4,7 +4,7 @@
 ### Kernel components build and staging tool.
 
 # Tool: kerneltool
-# Commands: stage depmod
+# Commands: stage restage unstage depmod mkmodsubset mkmodcpio mkmodcpiogz mkmodloop
 
 tool_kerneltool() { return 0 ; }
 kerneltool() {
@@ -26,9 +26,10 @@ kerneltool() {
 		stage) shift ; unset UNSTAGE RESTAGE ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
 		restage) shift ; unset UNSTAGE ; RESTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
 		unstage) shift ; unset RESTAGE ; UNSTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
-		depmod) shift ; kerneltool_depmod "${STAGING_ROOT}/${OPT_arch:-"$(_apk --print-arch)"}/merged-$1" "$1" ; return $? ;;
+		depmod) shift ; kerneltool_depmod "${STAGING_ROOT}/${OPT_arch:-"$(_apk --print-arch)"}/merged-$1" "$1" $2 ; return $? ;;
 		mkmodsubset) shift ; kerneltool_mkmodsubset "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
 		mkmodcpio) shift ; kerneltool_mkmodcpio "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
+		mkmodcpiogz) shift ; kerneltool_mkmodcpio "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
 		mkmodloop) shift ; kerneltool_mkmodloop "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
 		help) kerneltool_usage && return 0 ;;
 		--*) warning "Unhandled global option '$1'!" ; return 1 ;;
@@ -37,7 +38,7 @@ kerneltool() {
 	return 1
 }
 
-
+# Print usage
 kerneltool_usage() {
 
 cat <<EOF
@@ -48,7 +49,9 @@ Commands:
 		Stage kernel components and build manifests for use by other kernel tools.
 		The <kernel spec> may be: an apk file, kernel build directory, apk package atom;
 		or, an already staged kernel release or <arch>/<kernel release> pair; or, the
-		symbolic names 'current', 'latest' or 'latest-<flavor>'.
+		symbolic names 'current', 'latest' or 'latest-<flavor>'. Package atoms are tested
+		with added kernel flavor first, but an exact version match on the unflavored atom
+		will take precedence over an unversioned or mismatched version on a flavored atom.
 
 	restage <kernel spec> [<additional apk-files/kbuild-dirs/apk-atoms>...]
 		Wipe staging directory and restage from scratch.
@@ -57,7 +60,7 @@ Commands:
 		Wipe staging directory for specified kernel spec.
 
 
-	depmod <kernel release>
+	depmod <kernel release> [<subset base>]
 		Run depmod against the staging directory for specified kernel release.
 
 
@@ -65,8 +68,8 @@ Commands:
 		Build a subset of modules for the given release containing the specified
 		modules and all their deps, including firmware.
 
-	mkmodcpio <kernel release> [modsubset=<modsubset name>] [<module names/globs>...]
-		Build a compressed cpio archive containg the specified subset of modules.
+	mkmodcpio[.gz] <kernel release> [modsubset=<modsubset name>] [<module names/globs>...]
+		Build a [compressed] cpio archive containg the specified subset of modules.
 		An existing named subset may be used or a new one created using modsubset=<name>,
 		otherwise a temporary subset will be created, used, and purged.
 
@@ -177,6 +180,7 @@ kerneltool_stage() {
 	# Split package atom to into package name and version.
 	k_pkgname="${k_pkg%-*-*}"
 	k_pkgver="${k_pkg#$k_pkgname-}"
+	k_flavor="${k_pkgname#linux-}"
 
 	# Derrive the kernel release from the package (fetching if needed).
 	if ! [ "$_krel" ] && [ "$k_pkgname" ] ; then
@@ -186,8 +190,8 @@ kerneltool_stage() {
 		_krel="${_arch_krel#*/}"
 	fi
 	if ! [ "$_krel" ] ; then
-		_krel="${k_pkgver/-r/-}-${k_pkgname#linux-}"
 		warning "Could not determine kernel release for '$k_pkgname' in a reliable manner, falling back to using package version number."
+		_krel="${k_pkgver/-r/-}-${k_flavor}"
 	fi
 
 	# Setup kernel staging for this arch and kernel release (restage/unstage here if requested); Set _kernpkg_ to the package name for the kernel if needed.
@@ -222,12 +226,22 @@ kerneltool_stage() {
 				;;
 			*)
 				_type="apk"
-				local _i="$i"
-				i="$(apk_pkg_full "${i%-*-*}")"
-				if ! [ "$i" ] ; then warning "Could not find package matching '$_i'!" ; return 1
-				elif [ "$_i" = "${i%-*-*}" ] ; then msg "Using '$i' for package '$_i'."
-				elif [ "$i" != "$_i" ] ; then warning "Specified package '$_i' but found '$i'! Continuing with '$i'..." ; fi
+
+				local _i="$i" _in="${i%-*-*}"
+				local _iv="${i#$_in}"
+				local _if="${_in%-$k_flavor}-$k_flavor$_iv"
+				
+				i="$(apk_pkg_full "${_i%-*-*}")"
+				f="$(apk_pkg_full "${_if%-*-*}")"
+				[ "$i" ] || [ "$f" ] || ! warning "Could not find package matching '$_i'!" || return 1
+				if [ "$_if" = "$f" ] ; then i="$f" ; msg "Using package '$f'."
+				elif [ "$_i" = "$i" ] ; then msg "Using package '$i'."
+				elif [ "$_if" = "${f%-*-*}" ] ; then i="$f" ; msg "Using package '$f' for '$_i'."
+				elif [ "$_i" = "${i%-*-*}" ] ; then msg "Using package '$i' for '$_i'."
+				elif [ "${_if%-*-*}" = "${_i%-*-*}" ] ; then i="$f" ; warning "Specified package '$_i' but found '$i'! Continuing with '$i'..."
+				elif [ "${_if%-*-*}" = "${_i%-*-*}" ] ; then warning "Specified package '$_i' but found '$i'! Continuing with '$i'..." ; fi
 				_subdir="apk-$i"
+				
 				
 				;;
 		esac
@@ -418,12 +432,12 @@ kerneltool_stage() {
 
 
 # Command: depmod
-# Usage: kerneltool_depmod <base dir> [<kernel release>]
+# Usage: kerneltool_depmod <base dir> [<kernel release>] [<subset base>]
 kerneltool_depmod() {
 	info_prog_set "kerneltool-depmod"
 	local _bdir="$1" _krel="$2"
 	shift 2
-	depmod -a -e ${VERBOSE+-w }-b "$_bdir" -F "$_bdir/boot/System.map-$_krel" $_krel 
+	depmod -a -e ${VERBOSE+-w }-b "${1:-$_bdir}" -F "$_bdir/boot/System.map-$_krel" "$_krel"
 	#2>&1 > /dev/null | grep -e '^.+$' >&2 && warning "Errors encounterd by depmod in '$_bdir'!" && return 1
 }
 
@@ -442,7 +456,7 @@ kerneltool_mkmodsubset() {
 	dir_is_readable "$_modbase" || ! warning "Could not read merged modules directory '$_modbase'" || return 1
 
 	
-	local _ddir="$stage_base/$_arch/$_krel-subsets/$_subname"
+	local _ddir="$stage_base/$_arch/subsets-$_krel/$_subname"
 	dir_not_exists "$_ddir" || rm -rf "$_ddir" || ! Warning "Could not clean destination directory '$_ddir' to build module subeset '$_subname'!" || return 1
 	mkdir_is_writable "$_ddir" || ! warning "Could not create destination directory '$_ddir' to build module subset '$_subname'!" || return 1
 
@@ -456,9 +470,16 @@ kerneltool_mkmodsubset() {
 	local _kmod_index="$stage_base/$_arch/manifests/$_krel.kmod-INDEX"
 	local _firmware_index="$stage_base/$_arch/manifests/$_krel.firmware-INDEX"
 	local _kmod_fw_deps="$stage_base/$_arch/manifests/$_krel.kmod_fw-DEPS"
-	local mod_subset_manifest
+	local mod_subset_selected mod_subset_alldeps mod_subset_manifest
+	mod_subset_selected="$_ddir.kmod-Selected"
+	mod_subset_alldeps="$_ddir.kmod_fw-DEPS"
+	mod_subset_modfwlist="$_ddir.kmod_fw-LIST"
 	mod_subset_manifest="$_ddir.kmod-Manifest"
+	mod_subset_modindex="$_ddir.kmod-INDEX"
+	mod_subset_fwindex="$_ddir.firmware-INDEX"
 		
+
+	# Select modules against kmod index:
 	if [ $# -gt 0 ] ; then
 		msg "Selecting requested modules and their deps from '$_modbase' into '$mod_subset_manifest'."
 		local _kmod _kpkg _kfsum _kfile
@@ -468,62 +489,106 @@ kerneltool_mkmodsubset() {
 				#msg "_file: $_kfile"
 				#msg "_mod:$_mod"
 				case "$_mod" in 
-					*/*/) case "$_kfile" in lib/modules/*/$_mod* ) : ;; *) continue;; esac ;;
+					*/|*/*/) case "$_kfile" in lib/modules/*/$_mod* ) : ;; *) continue;; esac ;;
 					*/*) case "$_kfile" in lib/modules/*/$_mod ) : ;; *) continue ;; esac ;;
 					*) case "$_kmod" in "kmod:$_mod:"* | "kmod:${_mod%.ko*}:"* ) : ;; *) continue ;; esac ;;
 				esac
-				grep -e "^$_kmod" "$_kmod_fw_deps"
+				printf "$_kmod\n"
 			done
-		done | grep -v '^#' | tr -s '\t ' '\n' | sort -u > "$mod_subset_manifest"
+		done > "$mod_subset_selected"
+		# Select all deps:
+		kerneltool_moddep_helper "$_kmod_fw_deps" "$mod_subset_selected" > "$mod_subset_alldeps"
 	else
-		msg "Selecting all staged modules found in '$_modbase' and their firmware deps into '$mod_subset_manifest'."
-		cat "$_kmod_fw_deps" | grep -v '^#' | tr -s '\t ' '\n' | sort -u > "$mod_subset_manifest"
+		msg "Selecting all staged modules found in '$_modbase' and their firmware deps into '$mod_subset_alldeps'."
+		cat "$_kmod_fw_deps" | grep -v -e '^#' -e '^$' | sort -u > "$mod_subset_alldeps"
 	fi
 
-	file_exists "$mod_subset_manifest" || ! warning "No module-subset Manifest found at '$mod_subset_manifest'!" || return 1
-	info_func_set "copy modules"
-	if file_is_readable "$_kmod_index" ; then 
-		grep -F -f "$mod_subset_manifest" "$_kmod_index" | grep -v '^#' | tr '\t' ' ' | while read _kmod _kpkg _kfsum _kfile ; do
-			if [ "$_kmod" ] ; then 
-				_filein="$stage_base/$_arch/$_krel/${_kpkg#kpkg:$_arch/}/$_kfile"
-				_fileout="$_modout/$_kfile"
-				[ "$VERBOSE" ] && msg "'$_filein' -> '$_fileout'"
-				file_exists "$_filein" || ! warning "Could not read kernel module file '$_filein'!" || continue
-				mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make module output subdirectory '${_fileout%/*}'!" || return 1
-				cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink module '$_filein' to '$_fileout'!" || return 1
-				echo $(( ++_modcount ))
-			fi
-		done | tail -n 1 | sed -E -e 's/[[:space:]]//g' | ( read _modcount && msg "Copied $_modcount kernel modules to '$_modout'." )
-	else warning "Could not read kernel module index '$_kmod_index'!" ; return 1 ; fi
+	# Created flattened list of all modules and firmware to be included.
+	cat "$mod_subset_alldeps" | tr -s '\t ' '\n' | grep -v -e '^$' -e '^#' | sort -u > "$mod_subset_modfwlist"
 
-	info_func_set "copy firmware"
-	if file_not_exists "$_firmware_index" ; then msg "No firmware index found at '$_firmware_index', not copying firmware."
-	elif grep -q "^firmware:" "$mod_subset_manifest" ; then msg "Copying firmware needed by selected modules:"
-		local _fwcount=0
-		grep -F -f "$mod_subset_manifest" "$_firmware_index" | grep -v '^#' | tr '\t' ' ' | while read _fw _kpkg _fwsum _fwfile ; do
-			if [ "$_fw" ] ; then
-				: $(( _fwcount + 1 ))
-				_filein="$stage_base/$_arch/$_krel/${_kpkg#kpkg:$_arch}/$_fwfile"
-				_fileout="$_fwout/$_fwfile"
-				[ "$VERBOSE" ] && msg "'$_filein' -> '$_fileout'"
-				file_exists "$_filein" || ! warning "Could not read firmware file '$_filein'!" || continue
-				mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make firmware output subdirectory '${_fileout%/*}'!" || return 1
-				cp -L "$_filein" "$_fileout" || ! warning "Could not hardlink firmware '$_filein' to '$_fileout'!" || return 1
-				echo $(( ++_fwcount ))
-			fi
-		done | tail -n 1 | sed -E -e 's/[[:space:]]//g' | ( read _fwcount && msg "Copied $_fwcount firmware files to '$_fwout'." ) 
-	else msg "No firmware to copy." ; fi
+	# Generate complete index from flattened dep list for both modules and firmware.
+	file_is_readable "$_kmod_index" || ! warning "Could not read kernel module index '$_kmod_index'!" || return 1
+	grep -h -F -f "$mod_subset_modfwlist" "$_kmod_index" > "$mod_subset_modindex"
+	if grep -e 'firmware:' -q "$mod_subset_alldeps" ; then
+		file_is_readable "$_firmware_index" || ! warning "Firmware indicated in deps, but could not read firmware index '$_firmware_index'!" || return 1
+		grep -h -F -f "$mod_subset_modfwlist" "$_firmware_index" > "$mod_subset_fwindex"
+	else unset mod_subset_fwindex ; fi
+
+	# Extract manifest from subset mod index and fw index. 
+	cut -f 2,3,4 "$mod_subset_modindex" ${mod_subset_fwindex:+"$mod_subset_fwindex"} > "$mod_subset_manifest"
+	
+	# Copy modules from list using subset manifest
+	info_func_set "copy"
+	msg "Copying modules and fimrware included in manifest '$mod_subset_manifest' from '$_bdir' to '$_ddir'."
+	file_exists "$mod_subset_manifest" || ! warning "No module-subset Manifest found at '$mod_subset_manifest'!" || return 1
+	_bdir="$stage_base/$_arch/$_krel"
+	kerneltool_manifest_copy "$mod_subset_manifest" "$_bdir" "$_ddir" || ! warning "Failed to copy files in manifest '$mod_subset_manifest' from '$_merged' to '$_ddir'!" || return 1
+
+	# Copy module.* metadata files from source to dest.
+	cp -L "$_modbase/$_krel"/modules.* "$_modout/$_krel/" || ! warning "Could not copy module metadata from '$_modbase/$_krel' to '$_modout/$_krel'!" || return 1
+
+	# Run depmod against dest.
+	kerneltool_depmod "$_merged" "$_krel" "$_ddir"
+
+}
+
+kerneltool_moddep_helper() {
+	local _alldeps="$1" _selected="$2"
+	# Select subset deps:
+	awk -e '
+		BEGIN { fcount = 0 ; fname = "" }
+		fname == "" { fname = FILENAME }
+		FILENAME != fname { fname = FILENAME ; fcount++ }
+		fcount == 0 { deps[$1] = $0 }
+		fcount > 0 { req[$1] = $0 }
+		function allsubdeps(ad, d, sd, td, t) {
+			split(ad[d], td)
+			for ( t in td ) {
+				sd[td[t]] = td[t]
+				if (t != d) { allsubdeps(ad, t, sd) }
+			}		
+		}
+		END {
+			for (dep in req) { allsubdeps(deps, dep, subdeps) }
+			for (dep in subdeps) { print deps[dep] } 
+		}
+		' "$_alldeps" "$_selected" | sort -u
+}
+
+kerneltool_manifest_copy() {
+	local _manifest="$1" _bdir="$2" _ddir="$3"
+	file_is_readable "$_manifest" || ! warning "Manifest file '$_manifest' is not readable!" || return 1
+	dir_is_readable "$_bdir" || ! warning "Source directory '$_bdir' is not readable!" || return 1
+	mkdir_is_writable "$_ddir" || ! warning "Could not create writable destination directory at '$_ddir'!" || return 1
+	while IFS=$'\t ' read _pkg _fsum _file ; do
+		if [ "$_file" ] ; then 
+			_filein="$_bdir/${_pkg#*:$_arch/}/$_file"
+			_fileout="$_ddir/$_file"
+			[ "$VERBOSE" ] && msg "'$_filein' -> '$_fileout'"
+			file_exists "$_filein" || ! warning "Could not read file '$_filein'!" || continue
+			mkdir_is_writable "${_fileout%/*}" || ! warning "Could not make output subdirectory '${_fileout%/*}'!" || return 1
+			cp -l -f "$_filein" "$_fileout" || cp -f "$_filein" "$_fileout" || ! warning "Could not hardlink or copy '$_filein' to '$_fileout'!" || return 1
+			echo "$_file"
+		fi
+	done < "$_manifest" | wc -l | ( read _count && msg "Copied $_count files from '$_bdir' to '$_ddir'." )
+	return 0
 }
 
 
-# Command: mkmodcpio
-# Build module cpio from subset
-# Usage: kerneltool_mkmodcpio <staging base> <arch> <kernel release> [modsubset=<subset name>] [<list of modules/globs>...]
-kerneltool_mkmodcpio() {
-	info_prog_set "kerneltool-mkmodcpio"
-	info_func_set "mkmodcpio"
-	local stage_base="$1" _arch="$2" _krel="$3" _subname="$4"
-	shift 3
+# Command: mkmodarchive
+# Build modarchive from subset or list of modules.
+# Usage: kerneltool_mkmodarchive <staging base> <arch> <kernel release> <output file> [modsubset=<subset name>] [<list of modules/globs>...]
+kerneltool_mkmodarchive() {
+	info_prog_set "kerneltool-mkmodarchive"
+	info_func_set "mkmodarchive"
+	local stage_base="$1" _arch="$2" _krel="$3" _out="$4" _subname="$5"
+	shift 4
+	local _outdir="${_out%/*}" _outname="${_out##*/}"
+
+	# Clean up any stale output files and make sure we can write to our output directory
+	mkdir_is_writable "$_outdir" || ! warning "Could not create writable output directory '$_outdir'!" || return 1
+	! file_exists "$_out" || rm -f "$_out" || ! warning "Could not remove existing output file '$_outname' in '$_outdir'!" || return 1
+	: > "$_out" && file_is_writable "$_out" && rm -f "$_out" || ! warning "Could not create output file '$_outname' in '$_outdir'!" || return 1
 
 	local _tmp _keeptmp _subname _subexists
 	case "$_subname" in
@@ -533,61 +598,85 @@ kerneltool_mkmodcpio() {
 			shift
 			;;
 		*)
-			_subname="modules-$_krel-$(echo "$*" | md5sum | cut -d' ' -f 1)"
+			_keeptmp="no"
+			_subname="modloop-$_krel-$(echo "$*" | md5sum | cut -d' ' -f 1)"
 			;;
 	esac
 
-	local _tmp="$stage_base/$_arch/$_krel-subsets/$_subname"
-	local _outdir="$stage_base/$_arch/out-$_krel/boot"
-	local _outname="modules-$_krel.cpio.gz"
-	mkdir_is_writable "$_outdir" || ! warning "Could not create writable output directory '$_outdir'!" || return 1
+	local _tmp="$stage_base/$_arch/subsets-$_krel/$_subname"
 
 	[ "$_keeptmp" = "yes" ] && dir_exists "$_tmp" || kerneltool_mkmodsubset "$stage_base" "$_arch" "$_krel" "$_subname" $@ || ! warning "Failed to make module subset '$_subname' needed to make '$_outname'!" || return 1
 
-	info_func_set "create cpio"
-	(cd "$_tmp" && find | sort -u | sed -e 's|\./||g' | cpio -H newc -o | gzip -9 ) > "$_outdir/$_outname" || ! warning "Failed to create '$_outname' in '$_outdir'!" || return 1
-	[ "$_keeptmp" = "yes" ] || rm -rf  "$_tmp" || ! warning "Could not clean up tmp directory for mkmodcpio at '$_tmp'!" || return 1
-	msg "mkmodcpio complete!"
-	msg "Compressed module cpio file for '$_arch/$_krel' is at '$_outdir/$_outname'."
+
+	# Determine how to build the output based on the filename extension. Unknown extensions are assumed to be squashfs.
+	case "$_outname" in
+		*.cpio)
+			info_func_set "create cpio"
+			(cd "$_tmp" && find | sort -u | sed -e 's|\./||g' | cpio -R 0:0 -H newc -o ) > "$_outdir/$_outname" || ! warning "Failed to create cpio archive '$_outname' in '$_outdir'!" || return 1
+			msg "Module cpio archive for '$_arch/$_krel' is at '$_outdir/$_outname'."
+			;;
+		*.cpio.gz)
+			info_func_set "create cpio.gz"
+			(cd "$_tmp" && find | sort -u | sed -e 's|\./||g' | cpio -R 0:0 -H newc -o | gzip -9 ) > "$_outdir/$_outname" || ! warning "Failed to create compressed cpio archive '$_outname' in '$_outdir'!" || return 1
+			msg "Created gz compressed module cpio archive '$_outname' for '$_arch/$_krel' in '$_outdir'."
+			;;
+		*.tar)
+			info_func_set "create tarball"
+			(cd "$_tmp" && tar --owner=0:0 --numeric-owner -cf "$_out" * ) || ! warning "Failed to create '$_outname' in '$_outdir'!" || return 1
+			msg "Created module tarball '$_outname' for '$_arch/$_krel' in '$_outdir'."
+			;;
+		*.tar.*)
+			info_func_set "create tarball.${_outname##*.}"
+			(cd "$_tmp" && tar --owner=0:0 --numeric-owner -caf "$_out" * ) || ! warning "Failed to create '$_outname' in '$_outdir'!" || return 1
+			msg "Created ${_outname##*.} compressed module tarball '$_outname' for '$_arch/$_krel' in '$_outdir'."
+			;;
+		*)
+			info_func_set "create squashfs"
+			mksquashfs "$_tmp/lib" "$_out" -root-owned -no-recovery -noappend -progress -comp xz -exit-on-error ${VERBOSE:+-info} | cat ${QUIET:+/dev/null} \
+				|| ! warning "Failed to mksqwashfs '$_tmp/lib' to '$_out' with compression 'xz'!" || return 1
+			msg "Created xz compressed squashfs modloop file '$_outname' for '$_arch/$_krel' in '$_outdir'."
+			;;
+	esac
+
+	# Clean up our subset tmpdir if needed.
+	[ "$_keeptmp" = "yes" ] || rm -rf  "$_tmp" || ! warning "Could not clean up tmp directory for mkmodarchiveat '$_tmp'!" || return 1
+
+	msg "mkmodarchive complete."
 	return 0
 }
 
 
 # Command: mkmodloop
-# Build modloop from subset
+# Build modloop (rooted at lib/) from subset or list of modules.
 # Usage: kerneltool_mkmodloop <staging base> <arch> <kernel release> [modsubset=<subset name>] [<list of modules/globs>...]
 kerneltool_mkmodloop() {
-	info_prog_set "kerneltool-mkmodloop"
-	info_func_set "mkmodloop"
-	local stage_base="$1" _arch="$2" _krel="$3" _subname="$4"
+	local stage_base="$1" _arch="$2" _krel="$3"
 	shift 3
-
-	local _tmp _keeptmp _subname _subexists
-	case "$_subname" in
-		modsubset=*)
-			_keeptmp="yes"
-			_subname="${_subname#*=}"
-			shift
-			;;
-		*)
-			_subname="modloop-$_krel-$(echo "$*" | md5sum | cut -d' ' -f 1)"
-			;;
-	esac
-
-	local _tmp="$stage_base/$_arch/$_krel-subsets/$_subname"
 	local _outdir="$stage_base/$_arch/out-$_krel/boot"
 	local _outname="modloop-$_krel"
-	mkdir_is_writable "$_outdir" || ! warning "Could not create writable output directory '$_outdir'!" || return 1
+	kerneltool_mkmodarchive "$stage_base" "$_arch" "$_krel" "$_outdir/$_outname" $@
+}
 
-	[ "$_keeptmp" = "yes" ] && dir_exists "$_tmp" || kerneltool_mkmodsubset "$stage_base" "$_arch" "$_krel" "$_subname" $@ || ! warning "Failed to make module subset '$_subname' needed to make '$_outname'!" || return 1
+# Command: mkmodcpio
+# Build module cpio archive from subset or list of modules.
+# Usage: kerneltool_mkmodarchive <staging base> <arch> <kernel release> [modsubset=<subset name>] [<list of modules/globs>...]
+kerneltool_mkmodcpio() {
+	local stage_base="$1" _arch="$2" _krel="$3"
+	shift 3
+	local _outdir="$stage_base/$_arch/out-$_krel/boot"
+	local _outname="modules-$_krel.cpio"
+	kerneltool_mkmodarchive "$stage_base" "$_arch" "$_krel" "$_outdir/$_outname" $@
+}
 
-	info_func_set "create squashfs"
-	mksquashfs "$_tmp/lib" "$_outdir/$_outname" -root-owned -no-recovery -noappend -progress -comp xz -exit-on-error ${VERBOSE:+-info} | cat ${QUIET:+/dev/null} \
-		|| ! warning "Failed to mksqwashfs '$_tmp/lib' to '$_outdir/$_outname' with compression 'xz'!" || return 1
-	[ "$_keeptmp" = "yes" ] || rm -rf  "$_tmp" || ! warning "Could not clean up tmp directory for mkmodloop at '$_tmp'!" || return 1
-	msg "mkmodloop complete!"
-	msg "Compressed squashfs modloop file for '$_arch/$_krel' is at '$_outdir/$_outname'."
-	return 0
+# Command: mkmodcpiogz
+# Build compressed cpio archive from subset or list of modules.
+# Usage: kerneltool_mkmodarchive <staging base> <arch> <kernel release> [modsubset=<subset name>] [<list of modules/globs>...]
+kerneltool_mkmodcpiogz() {
+	local stage_base="$1" _arch="$2" _krel="$3"
+	shift 3
+	local _outdir="$stage_base/$_arch/out-$_krel/boot"
+	local _outname="modules-$_krel.cpio.gz"
+	kerneltool_mkmodarchive "$stage_base" "$_arch" "$_krel" "$_outdir/$_outname" $@
 }
 
 
@@ -665,18 +754,19 @@ kerneltool_calc_module_fw_deps() {
 			# Checksum this module and add it to the end of the list
 			_sums="${_sums}$(printf 'kmod:%s:%s/%s:%s\t' "$_mod" "$_arch" "$_krel" "$(kerneltool_checksum_module "$_file")" )"
 
-			# Find list of required firmware for each module, if any.
-			_fw="$(modinfo -b "$_bdir" -k "$_krel" -F firmware "$_file" )"
-			for _myfw in $_fw ; do
-				_file="$_fwbase/$_myfw"
-				if file_is_readable "$_file" ; then 
-					_sums="${_sums}$(printf 'firmware:%s:%s:%s\t' "$_myfw" "$_arch" "$(kerneltool_checksum_module "$_file")" )"
-					[ "$VERBOSE" ] && msg "Module '$_mod' depends on '$_myfw'."
-				else 
-					_sums="${_sums}$(printf 'firmware:%s:%s:%s\t' "$_myfw" "$_arch" "UNRESOLVED" )"
-					[ "$VERBOSE" ] && msg "Could not find firmware '$_myfw' in '$_fwbase' needed by module '$_mod'!"
-				fi
-			done
+		done
+
+		# Find list of required firmware for each module, if any.
+		_fw="$(modinfo -b "$_bdir" -k "$_krel" -F firmware "$_myfile" )"
+		for _myfw in $_fw ; do
+			_file="$_fwbase/$_myfw"
+			if file_is_readable "$_file" ; then 
+				_sums="${_sums}$(printf 'firmware:%s:%s:%s\t' "$_myfw" "$_arch" "$(kerneltool_checksum_module "$_file")" )"
+				[ "$VERBOSE" ] && msg "Module '$_mymod' depends on '$_myfw'."
+			else 
+				_sums="${_sums}$(printf 'firmware:%s:%s:%s\t' "$_myfw" "$_arch" "UNRESOLVED" )"
+				[ "$VERBOSE" ] && msg "Could not find firmware '$_myfw' in '$_fwbase' needed by module '$_mymod'!"
+			fi
 		done
 		printf '%s\n' "$_sums"
 	done
