@@ -663,8 +663,9 @@ kerneltool_mkmodloop() {
 kerneltool_mkmodcpio() {
 	local stage_base="$1" _arch="$2" _krel="$3"
 	shift 3
+	case "$1" in modsubset=*) local _subset="${1#modsubset=}" ;; esac
 	local _outdir="$stage_base/$_arch/out-$_krel/boot"
-	local _outname="modules-$_krel.cpio"
+	local _outname="modules-${_subset:+$_subset-}$_krel.cpio"
 	kerneltool_mkmodarchive "$stage_base" "$_arch" "$_krel" "$_outdir/$_outname" $@
 }
 
@@ -674,8 +675,9 @@ kerneltool_mkmodcpio() {
 kerneltool_mkmodcpiogz() {
 	local stage_base="$1" _arch="$2" _krel="$3"
 	shift 3
+	case "$1" in modsubset=*) local _subset="${1#modsubset=}" ;; esac
 	local _outdir="$stage_base/$_arch/out-$_krel/boot"
-	local _outname="modules-$_krel.cpio.gz"
+	local _outname="modules-${_subset:+$_subset-}$_krel.cpio.gz"
 	kerneltool_mkmodarchive "$stage_base" "$_arch" "$_krel" "$_outdir/$_outname" $@
 }
 
