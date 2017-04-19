@@ -60,3 +60,16 @@ title() {
 	printf '\n'
 	print -s1 -c6 "==> $@\n"
 }
+
+# Checks an APKBUILD for patterns
+APKBUILD_is_sane () {
+	while read pattern; do
+		[ "$pattern" = "" ] && continue
+		grep -q "$pattern" "$1/APKBUILD" && {
+			print -s1 -c1 "Forbidden pattern '$pattern' found in $qname/APKBUILD. Aborting...";
+			print "Consult the commit message associated with the additon of '$pattern' in .travis/forbidden_patterns to know why.";
+			return 1
+		}
+	done < .travis/forbidden_patterns;
+	return 0
+}
