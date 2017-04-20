@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-keys
 pkgver=2.1
-pkgrel=0
+pkgrel=1
 pkgdesc="Public keys for Alpine Linux packages"
 url="http://alpinelinux.org"
 # we install arch specific keys to /etc so we cannot do arch=noarch
@@ -43,19 +43,25 @@ _ins_key() {
 
 _install_x86() {
 	case "$1" in
-	x86*) _ins_key $1 $2 || return 1
+	x86*) _ins_key $1 $2 ;;
 	esac
 }
 
 _install_arm() {
 	case "$1" in
-	aarch64|arm*) _ins_key $1 $2 || return 1;;
+	aarch64|arm*) _ins_key $1 $2 ;;
 	esac
 }
 
 _install_ppc() {
 	case "$1" in
-	ppc*) _ins_key $1 $2 || return 1;;
+	ppc*) _ins_key $1 $2 ;;
+	esac
+}
+
+_install_s390x() {
+	case "$1" in
+	s390x) _ins_key $1 $2 ;;
 	esac
 }
 
@@ -66,17 +72,17 @@ package() {
 		_archs="${i%:*}"
 		_key="${i#*:}"
 		install -Dm644 "$srcdir"/$_key \
-			"$pkgdir"/usr/share/apk/keys/$_key \
-			|| return 1
+			"$pkgdir"/usr/share/apk/keys/$_key
 
 		for _arch in ${_archs//,/ }; do
-			mkdir -p "$pkgdir"/usr/share/apk/keys/$_arch || return 1
+			mkdir -p "$pkgdir"/usr/share/apk/keys/$_arch
 			ln -s ../$_key "$pkgdir"/usr/share/apk/keys/$_arch/
 
 			case "$CARCH" in
-			x86*) _install_x86 $_arch $_key || return 1;;
-			arm*|aarch64) _install_arm $_arch $_key || return 1;;
-			ppc*) _install_ppc $_arch $_key || return 1;;
+			x86*) _install_x86 $_arch $_key ;;
+			arm*|aarch64) _install_arm $_arch $_key ;;
+			ppc*) _install_ppc $_arch $_key ;;
+			s390x) _install_s390x $_arch $_key ;;
 			esac
 		done
 	done
