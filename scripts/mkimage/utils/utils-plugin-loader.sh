@@ -24,11 +24,9 @@ load_plugins() {
 	target="$(realpath "$target")"
 
 	info_func_set "load_plugins"
-	if [ -f "$target" ] ; then
-		msg "Discovering plugins from file '$target':"
-	else
-		msg "Discovering plugins under directory '$target':"
-	fi
+	if ! [ "$VERBOSE" ] ; then :
+	elif [ -f "$target" ] ; then msg "Discovering plugins from file '$target':"
+	else msg "Discovering plugins under directory '$target':" ; fi
 
 	# First run is to find all plugin types:
 	plugins_old="$(getvar "$plugins_listname")"
@@ -60,7 +58,7 @@ load_plugins() {
 		. "$_file"
 	done
 
-	msg2 "$(printf "%s " $(getvar $plugins_listname) )"
+	[ "$VERBOSE" ] && msg2 "$(printf "%s " $(getvar $plugins_listname) )"
 
 	info_func_set ""
 	IFS=$OIFS
