@@ -10,7 +10,13 @@ checksum() {
 calc_path_checksums() { 
 	local _path="$1" ; shift
 	sumf=""
-	for sumf in $@ ; do (cd "$_path" && find -type f -print0 | sed -e 's|\./||g' | xargs -0 -r -n 1 ${sumf}sum ) | sed -e 's|^|'"$sumf"':|g' -e 's|[[:space:]]+./|\t|g' -e 's|[[:space:]]+|\t|g' ; done | sort -b -u -k2 -k1 
+	for sumf in $@ ; do
+		(cd "$_path"
+			find -type f -print0 | sed -e 's|\./||g' | xargs -0 -r -n 1 ${sumf}sum | sed -e 's|^|'"$sumf"':|g'
+			find -type l -print0 | sed -e 's|\./||g' | xargs -0 -r -n 1 sh -c "printf '"'linkto:%s\t%s\n'"' \"\$(readlink -n \"\$0\")\" \"\$0\""
+		) | sed -e 's|[[:space:]]+./|\t|g' -e 's|[[:space:]]+|\t|g'
+	done | sort -b -u -k2 -k1
+
 	unset sumf
 }
 
@@ -37,13 +43,20 @@ kerneltool_verify_path_manifest() {
 calc_file_checksums() { 
 	local _file="$1" ; shift
 	local sumf
-	( [ "${_file#/}" != "$_file" ] && cd "${_file%/*}" ; for sumf in $@ ; do ${sumf}sum "$_file" | sed -e 's|^|'"$sumf"':|g' -e 's/[[:space:]]+/\t/g' ; done ) | sort -b -u -k1
+	[ -e "$_file" ] || ! warning "File '$_file' does not exist to checksum!" || return 1
+	[ -f "$_file" ] && ( [ "${_file#/}" != "$_file" ] && cd "${_file%/*}" ; for sumf in $@ ; do ${sumf}sum "$_file" | sed -e 's|^|'"$sumf"':|g' -e 's/[[:space:]]+/\t/g' ; done ) | sort -b -u -k1
+	[ -L "$_file" ] && printf 'linkto:%s\t%s\n' "$(readlink -n "$_file")" "$_file"
 }
 
 verify_file_checksums() { 
 	local _file="$1" _sum="$2" sumf
 	sumf="$(printf '%s' "$_sum" | sed -E -n -e 's|^#*[[:space:]]*([[:alnum:]]+):.*|\1|p')"
-	_sum="$(printf '%s' "$_sum" | sed -E -n -e 's|^#*[[:space:]]*[[:alnum:]]+:([[:alnum:]]+)[[:space:]].*|\1|p')"
+	_sum="$(printf '%s' "$_sum" | sed -E -n -e 's|^#*[[:space:]]*[[:alnum:]]+:([[:alnum:]]+)[[:space:]]+.*|\1|p')"
+	if [ "$sumf" = "linkto" ] ; then
+		[ -e "$_file" ] && [ -L "$_file" ] && local _link="$(readlink -n "$_file")" && [ "$_link" = "$_sum" ] \
+			|| ! warning "Symlink mismatch detected for '$_file': Expected '$_sum', got '$_link'!" || return 1
+		return 0
+	fi
 	( cd "${_file%/*}" && printf '%s\n' "$_sum" ; ${sumf}sum "$_file" | cut -d' ' -f 1 ) | uniq -u | grep -q '.*' || return 0
 	msg "Checksum mismatch detected for '$_file':"
 	msg2 "Expected: $_sum"
