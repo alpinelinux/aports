@@ -115,11 +115,9 @@ esac
 			--host-keys) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--host-keys" ; shift ; continue ;;
 			--no-host-keys) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--no-host-keys" ; shift ; continue ;;
 		esac
-
-		case "$1" in
-			--) _args="${args:+$args }$@" ; shift $# ; break ;;
-			*) _args="${_args:+$_args }$1" ; shift ; continue;;
-		esac
+		break
+		#case "$1" in
+		case "$1" in -*|--*) warning "Unknown global option '$1'!" ; shift ; continue ;; *) break ;; esac
 	done
 
 	# Setup our apk tool:
@@ -128,6 +126,6 @@ esac
 	: "${mkalpine_staging_root:=/var/cache/mkalpine/staging}"
 	STAGING_ROOT="${OPT_staging_root:-$mkalpine_staging_root}"
 
-set -- $_args
+#set -- $_args
 
 "$TOOL" "$@"
