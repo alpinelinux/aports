@@ -82,7 +82,7 @@ Commands:
 
 EOF
 	multitool_usage
-	apkroottool_usage
+	apkroot_usage
 }
 
 ###

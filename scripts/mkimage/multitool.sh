@@ -26,9 +26,9 @@ _co="$@" && for _i in $_co ; do case "$_i" in -q|--quiet) QUIET="yes" ; VERBOSE=
 default_colors
 info_prog_set "$scriptname"
 
+multitool_usage() { multitool_opts_usage ; } 
 
-
-multitool_usage() {
+multitool_opts_usage() {
 cat <<EOF
 Global options:
 	--quiet|-q			Enable quiet mode.
@@ -41,9 +41,9 @@ Global options:
 EOF
 }
 
-apkroottool_usage() {
+apkroot_opts_usage() {
 cat <<EOF
-apkroottool options:
+apkroot options:
 	--cache-dir			Set apk cache directory for apkroot.
 	--repository|--repo		Add apk repository to apkroot repos.
 	--repositories-file|--repo-file	Add apk repos from file to apkroot repos.
@@ -94,7 +94,7 @@ esac
 	OPT_apkroot_setup_cmdline=""
 	while [ $# -gt 0 ] ; do
 
-		# Options that apply to all tools.
+		# Global options that may apply to any tool.
 		case "$1" in
 			--quiet|-q) shift ; continue ;;
 			--verbose|-v) shift ; continue ;;
