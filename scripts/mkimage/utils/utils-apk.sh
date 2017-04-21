@@ -336,6 +336,10 @@ apkroot_manifest_dep_bins() {
 apkroot_manifest_deps() {
 	local _arch="$APKARCH" && [ "$_arch" ] || ! warning "Called without value set in \$APKARCH!" || return 1
 	local _apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
+	local _f
+	for _f in ".Manifest-apk-installed" ".libs.INDEX" ".bins.INDEX" ".libs.DEPS" ".bins.DEPS" ; do
+		file_exists "$_apkroot/$_f" && rm -f "$_apkroot/$_f"
+	done
 	apkroot_manifest_index_libs
 	apkroot_manifest_index_bins
 	apkroot_manifest_dep_libs
@@ -344,12 +348,12 @@ apkroot_manifest_deps() {
 
 
 # Usage: apkroot_manifest_subset <globs>...
-apkroot_manifest_subset() {
+apkroot_manifest_subset_deps() {
 	local _arch="$APKARCH" && [ "$_arch" ] || ! warning "Called without value set in \$APKARCH!" || return 1
 	local _apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
 	local _line _tgt _glob
-	file_exists "$_apkroot/.bins.DEPS" || apkroot_manifest_deps
-	cat "$_apkroot/.bins.DEPS" | while read -r _line ; do
+	file_exists "$_apkroot/.libs.DEPS" && file_exists "$_apkroot/.bins.DEPS" || apkroot_manifest_deps
+	cat "$_apkroot/.libs.DEPS" "$_apkroot/.bins.DEPS" | while read -r _line ; do
 		for _glob in "$@"; do
 			_tgt="${_line#*:}" && _tgt="${_tgt%%:*}"
 			case "$_glob" in
@@ -359,8 +363,60 @@ apkroot_manifest_subset() {
 				*/*) case "$_tgt" in $_glob) : ;; *) continue ; esac ;;
 				*) case "$_tgt" in */$_glob) : ;; *) continue ; esac ;;
 			esac
-			printf "$_line"
+			printf '%s\n' "$_line"
 		done
 	done | sort -t':' -k2 -u
+}
+
+# Usage: apkroot_manifest_subset <globs>...
+apkroot_manifest_subset() {
+	local _arch="$APKARCH" && [ "$_arch" ] || ! warning "Called without value set in \$APKARCH!" || return 1
+	local _apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
+	file_exists "$_apkroot/.libs.DEPS" && file_exists "$_apkroot/.bins.DEPS" || apkroot_manifest_deps
+
+	local _line _tgt _glob _idx
+	cat "$_apkroot/.Manifest-apk-installed" | while read -r _line ; do
+		for _glob in "$@"; do
+			_tgt="${_line##*[[:space:]]}"
+			case "$_glob" in
+				/*/) case "$_tgt" in ${_glob#/}*) : ;; *) continue ; esac ;;
+				/*) case "$_tgt" in ${_glob#/}) : ;; *) continue ; esac ;;
+				*/) case "$_tgt" in $_glob*) : ;; *) continue ; esac ;;
+				*/*) case "$_tgt" in $_glob) : ;; *) continue ; esac ;;
+				*) case "$_tgt" in */$_glob) : ;; *) continue ; esac ;;
+			esac
+			printf '%s\n' "$_line"
+			_idx="$(grep -h -F -e "$_line" "$_apkroot/.libs.INDEX" "$_apkroot/.bins.INDEX" | cut -f 1)"
+			[ "$_idx" ] && grep -h -F -e "$_idx" "$_apkroot/.libs.DEPS" "$_apkroot/.bins.DEPS" | tr -s ' \t' '\n'| grep -h -F -f - "$_apkroot/.libs.INDEX" "$_apkroot/.bins.INDEX" | cut -f 2,3,4
+
+		done
+	done | sort -k1 -k3 -k2 -u
+}
+
+
+# Usage: apkroot_manifest_subset_cpio <outfile|-> <globs>...
+apkroot_manifest_subset_cpio() {
+	local _arch="$APKARCH" && [ "$_arch" ] || ! warning "Called without value set in \$APKARCH!" || return 1
+	local _apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
+	local _out="$1" ; shift
+	local _ret
+	if [ "$_out" = "-" ] ; then
+		(cd "$_apkroot" ; apkroot_manifest_subset "$@" | cut -f 3 | sort -u | cpio -H newc -o ) || ! _ret=$? || ! warning "Could not create cpio archive to stdout from subset of '$_apkroot'!" || return $_ret
+	else
+		touch "$_out" && file_is_writable "$_out" || ! warning "Could not create output file '$_out'!" || return 1
+		(cd "$_apkroot" ; apkroot_manifest_subset "$@" | cut -f 3 | sort -u | cpio -H newc -o > "$_out" ) || ! _ret=$? || ! warning "Could not create cpio archive '$_out' from subset of '$_apkroot'!" || return $_ret
+	fi
+}
+
+
+# Usage: apkroot_manifest_subset_cpiogz <outfile|-> <globs>...
+apkroot_manifest_subset_cpiogz() {
+	local _arch="$APKARCH" && [ "$_arch" ] || ! warning "Called without value set in \$APKARCH!" || return 1
+	local _apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
+	local _ret
+	local _out="$1" ; shift
+	if [ "$_out" = "-" ] ; then apkroot_manifest_subset_cpio "-" "$@" | gzip -f -q -9 || _ret=$? || ! warning "Could not compress cpio archive stream using 'gzip -9'! "
+	else apkroot_manifest_subset_cpio "-" "$@" | gzip -f -q -9 > "$_out" || ! _ret=$? || ! warning "Could not compress cpio archive stream using 'gzip -9 > \"$_out\"'! " ; fi
+	return $_ret
 }
 
