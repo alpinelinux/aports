@@ -80,7 +80,12 @@ int main(int argc, const char *argv[])
 			name ? name : "(unknown)", ABUILD_GROUP);
 	}
 
-	cmd = strrchr(argv[0], '-');
+	cmd = strrchr(argv[0], '/');
+	if (cmd)
+		cmd++;
+	else
+		cmd = argv[0];
+	cmd = strchr(cmd, '-');
 	if (cmd == NULL)
 		errx(1, "Calling command has no '-'");
 	cmd++;
