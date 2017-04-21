@@ -74,11 +74,12 @@ int main(int argc, const char *argv[])
 	if (grent == NULL)
 		errx(1, "%s: Group not found", ABUILD_GROUP);
 
+	char *name = getlogin();
 	if (!is_in_group(grent->gr_gid)) {
-		char *name = getlogin();
 		errx(1, "User %s is not a member of group %s\n",
 			name ? name : "(unknown)", ABUILD_GROUP);
 	}
+	setenv("USER", name, 1);
 
 	cmd = strrchr(argv[0], '/');
 	if (cmd)
