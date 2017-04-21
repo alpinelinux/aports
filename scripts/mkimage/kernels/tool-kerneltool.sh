@@ -41,7 +41,12 @@ kerneltool() {
 
 # Print usage
 kerneltool_usage() {
+	kerneltool_commands_usage
+	multitool_opts_usage
+	apkroot_opts_usage
+}
 
+kerneltool_commands_usage() {
 cat <<EOF
 Usage: kerneltool <global opts> <command> <command opts>
 
@@ -81,8 +86,6 @@ Commands:
 
 
 EOF
-	multitool_usage
-	apkroot_usage
 }
 
 ###

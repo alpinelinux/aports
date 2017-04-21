@@ -11,9 +11,10 @@ apkroottool() {
 	fkrt_init
 	: "${OPT_apkroot_setup_cmdline:=--repositories-file /etc/apk/repositories --host-keys --arch-keys}"
 	case "$1" in
-		help) apkroottool_commands_usage; multitool_usage ; apkroot_opts_usage ; return 0 ;;
+		help) apkroottool_usage ; return 0 ;;
 		init)	shift
 			mkdir_is_writable "$1" || ! warning "Could not create writable directory for apkroot at '$1'!" || return 1
+			file_exists "$1/.fkrt-db" && fkrt_faked_db_load_file "rt" "$1/.fkrt-db"
 			fkrt_faked_db_save_file "rt" "$1/.fkrt-db" && fkrt_enable "rt" || ! _ret=$? || ! fkrt_cleanup || ! warning "Could not start fkrt or create state file '$1/.fkrt-db'!" || return $_ret
 			apkroot_init "$@" ; _ret=$?
 			fkrt_cleanup
@@ -75,29 +76,57 @@ apkroottool() {
 	esac
 }
 
+apkroottool_usage() {
+	apkroottool_commands_usage
+	multitool_usage
+	apkroot_opts_usage
+}
+
 apkroottool_commands_usage() {
 cat <<EOF
-apkroottool:
-	command mode:
+Usage: 	apkroottool <global options>
+		( (<apkroot cmd> <apkroot> [<args>])	# Command Mode
+		| (<apkroot> apk <apk cmd> [<args>])	# APK Mode
+		| (<apkroot> <commd> [<args>]) )	# Wrapper Mode
+
+Command Mode:
 	init <apkroot> [<arch>]
+		  Use existing apkroot or initilize a new apkroot directory
+		  at <apkroot> (using arch <arch> if specified).
+
 	setup <apkroot> [<arch>]
-	manifest <apkroot>
-	index-libs <apkroot>
-	index-bins <apkroot>
-	dep-libs <apkroot>
-	dep-bins <apkroot>
+		Modify exising or setup new <apkroot> using the apkroot
+		command-line options specified (see below).
+
 	deps <apkroot>
+		Builds all of the following stages for <apkroot>:
+
+		manifest <apkroot> - Build manifest of installd files.
+		index-libs <apkroot> - Build index of installed libs.
+		index-bins <apkroot> - Build index of installed bins.
+		dep-libs <apkroot> - Build dep list for installed libs.
+		dep-bins <apkroot> - Build dep list for installed bins.
+		(See output in <apkroot>/.*)
+
 	subset-deps <apkroot> <globs>...
-	subset <apkroot> <globs>...
-	subset-cpio <apkroot> <outfile> <globs>...
-	subset-cpiogz <apkroot> <outfile> <globs>...
+		Print list of bin and lib deps for given <globs> in <apkroot>.
+
+	subset <apkroot> <globs>... (To be renamed subset-manifest)
+		Print submainfest of all files matching <glibs> and their deps.
+
+	subset-cpio <apkroot> <outfile|-> <globs>...
+		Build cpio archive <outfile> ('-' for stdout) containing all
+		files in <apkroot> Manifest matching <globs> and their deps.
+
+	subset-cpiogz <apkroot> <outfile|-> <globs>...
+		Same as with subset-cpio, piped through 'gzip -9'.
 
 
-	apk mode:
+APK Mode:
 	apkroottool <apkroot> apk <apk cmd> <apk args>
-		Call _apk using specified <apkroot>, detect arch, and uses fkrt.
+		Call _apk using specified <apkroot>, detect arch, and use fkrt.
 
-	wrapper mode:
+Wrapper Mode:
 	apkroottool <apkroot> <cmdline>
 		Run subshell in <apkroot> and execute arbitrary command wrapped
 		using fkrt, with state loaed from <apkroot>/.fkrt-db
