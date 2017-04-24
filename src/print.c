@@ -157,7 +157,7 @@ const char *apk_error_str(int error)
 	}
 }
 
-static void log(FILE *dest, const char *prefix, const char *format, va_list va)
+static void log_internal(FILE *dest, const char *prefix, const char *format, va_list va)
 {
 	if (prefix != NULL)
 		fprintf(dest, "%s", prefix);
@@ -171,7 +171,7 @@ void apk_log(const char *prefix, const char *format, ...)
 {
 	va_list va;
 	va_start(va, format);
-	log(stdout, prefix, format, va);
+	log_internal(stdout, prefix, format, va);
 	va_end(va);
 }
 
@@ -179,6 +179,6 @@ void apk_log_err(const char *prefix, const char *format, ...)
 {
 	va_list va;
 	va_start(va, format);
-	log(stderr, prefix, format, va);
+	log_internal(stderr, prefix, format, va);
 	va_end(va);
 }
