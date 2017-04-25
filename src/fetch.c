@@ -218,7 +218,8 @@ static void mark_error(struct fetch_ctx *ctx, const char *match, struct apk_name
 
 static void mark_name_flags(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
 {
-	name->auto_select_virtual = 1;
+	if (!IS_ERR_OR_NULL(name))
+		name->auto_select_virtual = 1;
 }
 
 static void mark_name_recursive(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
