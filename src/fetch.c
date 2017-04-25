@@ -212,7 +212,7 @@ static void mark_error(struct fetch_ctx *ctx, const char *match, struct apk_name
 	if (strchr(match, '*') != NULL)
 		return;
 
-	apk_message("%s: unable to select package (or it's dependencies)", name ? name->name : match);
+	apk_message("%s: unable to select package (or its dependencies)", name ? name->name : match);
 	ctx->errors++;
 }
 
