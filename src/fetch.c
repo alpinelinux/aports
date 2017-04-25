@@ -346,8 +346,7 @@ static struct apk_applet apk_fetch = {
 	.name = "fetch",
 	.help = "Download PACKAGEs from global repositories to a local directory",
 	.arguments = "PACKAGE...",
-	.open_flags =	APK_OPENF_READ | APK_OPENF_NO_STATE |
-			APK_OPENF_NO_INSTALLED_REPO,
+	.open_flags =	APK_OPENF_READ | APK_OPENF_NO_STATE,
 	.context_size = sizeof(struct fetch_ctx),
 	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = fetch_main,
