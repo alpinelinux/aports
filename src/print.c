@@ -159,6 +159,8 @@ const char *apk_error_str(int error)
 
 static void log_internal(FILE *dest, const char *prefix, const char *format, va_list va)
 {
+	if (dest != stdout)
+		fflush(stdout);
 	if (prefix != NULL)
 		fprintf(dest, "%s", prefix);
 	vfprintf(dest, format, va);
