@@ -1,0 +1,192 @@
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Maintainer: Jakub Jirutka <jakub@jirutka.cz>
+
+# Note: This software is total mess and it seems to be nearly impossible to
+#   create a clean distribution package.
+pkgname=emscripten
+# Keep with sync with pkg emscrypten-fastcomp!
+pkgver=1.37.9
+pkgrel=3
+pkgdesc="An LLVM-to-JavaScript Compiler"
+url="https://kripken.github.io/emscripten-site/"
+arch="all"
+license="MIT UOI-NCSA"
+depends="$pkgname-optimizer>=$pkgver emscripten-fastcomp>=$pkgver
+	nodejs python2 node-closurecompiler-externs"
+makedepends="binaryen clang cmake"
+checkdepends="closure-compiler"
+subpackages="$pkgname-optimizer
+	$pkgname-libs-asmjs:libs_asmjs:noarch
+	$pkgname-libs-wasm:libs_wasm:noarch"
+source="$pkgname-$pkgver.tar.gz::https://github.com/kripken/$pkgname/archive/$pkgver.tar.gz
+	fix-python-shebang.patch
+	settings_template-paths.patch
+	add-system-level-config.patch
+	move-emcc-txt.patch
+	binaryen-wasm-js-path.patch
+	closurecompiler-externs-path.patch
+	closurecompiler-language_in-es6.patch
+	embuilder-fix-task-all-for-wasm.patch
+	embuilder-omit-provided.patch
+	add-global-cache.patch
+	emscripten.cfg"
+builddir="$srcdir/$pkgname-$pkgver"
+
+_ports="Bullet-version_1:bullet
+	FreeType-version_1:freetype
+	libpng-version_1:libpng
+	Ogg-version_1:ogg
+	SDL2-version_13:sdl2
+	SDL2_image-version_3:sdl2-image
+	SDL2_net-version_2:sdl2-net
+	SDL2_ttf-version_1:sdl2-ttf
+	Vorbis-version_1:vorbis
+	zlib-version_1:zlib
+	"
+for _port in $_ports; do
+	_port=${_port%:*}
+	source="$source $pkgname-port-$_port-zip::https://github.com/emscripten-ports/${_port%-*}/archive/${_port##*-}.zip"
+done
+
+export EM_CACHE="$srcdir/cache"
+export EM_CONFIG="$srcdir/.emscripten"
+export EM_PORTS="$srcdir/ports"
+
+prepare() {
+	default_prepare
+
+	cd "$builddir"
+
+	# This file is read from emcc.py for --help.
+	cp site/build/text/docs/tools_reference/emcc.txt .
+
+	sed -e "s|/usr/share/emscripten|$builddir|" \
+		-e "s|/usr/bin/emoptimizer|$builddir/tools/optimizer/optimizer|" \
+		"$srcdir"/emscripten.cfg > "$EM_CONFIG"
+
+	# Symlink fetched ports to the directory where emscripten can find them.
+	mkdir -p "$EM_PORTS"
+	local port; for port in $_ports; do
+		ln -s "$srcdir"/$pkgname-port-${port%:*}-zip "$EM_PORTS"/${port#*:}.zip
+	done
+
+	# Backup and patch system_libs.py to block fetching ports from internet.
+	cp tools/system_libs.py tools/system_libs.py.orig
+	sed -Ei 's/^(\s+).*\.urlopen\(.*/\1logging.error("fetching disabled in abuild"); exit(1)/' \
+		tools/system_libs.py
+}
+
+build() {
+	cd "$builddir"/tools/optimizer
+
+	msg "Building optimizer..."
+	cmake \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+		-DCMAKE_C_FLAGS="$CFLAGS" \
+		-DCMAKE_C_COMPILER=clang \
+		-DCMAKE_VERBOSE_MAKEFILE=ON
+	make
+
+	cd "$builddir"
+
+	msg "Building libraries and ports for asm.js..."
+	./embuilder.py build ALL
+
+	msg "Building libraries and ports for WebAssembly..."
+	EMCC_WASM_BACKEND=1 ./embuilder.py build ALL
+}
+
+check() {
+	cd "$builddir"/tests
+
+	rm -f hello_world.js*
+	../emcc -Os --closure 1 -o hello_world.js hello_world.c
+	node hello_world.js
+}
+
+package() {
+	local destdir="$pkgdir/usr/share/$pkgname"
+	local name
+
+	mkdir -p "$destdir"
+	cp -r "$builddir"/* "$destdir"/
+
+	cd "$destdir"
+
+	# Revert original file without connection blocking.
+	mv tools/system_libs.py.orig tools/system_libs.py
+
+	find . -name "*.bat" -delete
+	find . -name "*.pyc" -delete  # these contain wrong absolute path
+	rm -r docs   # there are only few PDFs and TeX sources
+	rm -r media  # media for website
+	rm -r site   # a website (?)
+	rm -r tests  # looks more like a dump of random sources than decent tests
+	rm -r third_party  # bundled stuff
+	rm -r tools/optimizer  # we've already built it
+	rm AUTHORS LICENSE *.md *.markdown package.json
+	rm system/lib/build_cxx_natively.sh tools/update_libc_symbols.sh  # garbage
+
+	mkdir -p "$pkgdir"/usr/bin
+	for name in  em++ em-config emar embuilder.py emcc emcmake \
+		emconfigure emlink.py emmake emrun emscons
+	do
+		ln -s ../share/$pkgname/$name "$pkgdir"/usr/bin/$name
+	done
+
+	install -D -m 644 "$srcdir"/emscripten.cfg "$pkgdir"/etc/emscripten.cfg
+
+	mkdir cache  # this directory should not exist yet!
+	install -m 644 "$EM_CACHE"/is_vanilla.txt cache/
+}
+
+optimizer() {
+	pkgdesc="Emscripten's optimizer for asm.js code"
+	depends=""
+
+	install -D -m 755 "$builddir"/tools/optimizer/optimizer \
+		"$subpkgdir"/usr/bin/emoptimizer
+}
+
+libs_asmjs() {
+	pkgdesc="Prebuilt libraries and ports for Emscripten - asm.js"
+	depends="$pkgname=$pkgver-r$pkgrel"
+	local destdir="$subpkgdir/usr/share/$pkgname/cache/asmjs"
+
+	mkdir -p "$destdir"
+	cp -r "$EM_CACHE"/asmjs/*.bc "$destdir"/
+}
+
+libs_wasm() {
+	pkgdesc="Prebuilt libraries and ports for Emscripten - WebAssembly"
+	depends="$pkgname=$pkgver-r$pkgrel"
+	local destdir="$subpkgdir/usr/share/$pkgname/cache/wasm"
+
+	mkdir -p "$destdir"
+	cp -r "$EM_CACHE"/wasm/*.bc "$destdir"/
+}
+
+sha512sums="0efd9035d3dce0726025b5b8e30129885eef30f915c502b8957150e4ffc11fd0e9a2b605854cdf69ca3eb05e5102bf34341b7edd2116f5fa29fd170a28e7f07f  emscripten-1.37.9.tar.gz
+a61e172ced6b72adb53a840255a9753905a0c7a1c9f8965345781b9cdcc8a596c4dc88f036e91bd5c05d8b3eb2908bbb7d991c4e1abcf35a46be67b9765e546a  fix-python-shebang.patch
+f190ea32dcd4af2661f455ffd8773cb0f7b30ba4a96d22609e11af7186ed1a5c230f3c379d717f23213e87143bb5601acc4d75799631854d0312ff308cbcc14b  settings_template-paths.patch
+10a7a545f468a5f71fdf1cca0e0be983db5d21387202b851bd11f811c2a0a74f4e4c8733ae9ff933df4ea49c3f5e8e4e16fc3651bc98bb8c37a0828bb29eca7e  add-system-level-config.patch
+6613ef4cf41bcf0ecc13a0415cdc847f4ec112f07dd19573000ea6a9a6f2360aee6b2db01f822d117d5022dc58b2421be89fe3421c46fd6857737d07ce489c1e  move-emcc-txt.patch
+a2a2c9b56e8d655b06fdbac2e297e07a0bbcdc3e3df7c913b5caac8ddf20f66b91ed77ac46275adcf8e92baedb5a50cb554c8f3fa59823e17006e17d8d11e820  binaryen-wasm-js-path.patch
+1d699aa0ab4b257d58c30ebefd6fbce9a74df964c37f360dcbcaaa6e6c6f4bc8e3f706f32e5855fb6e307d099c7eaca47d07d12a52c83caab43b268fccb606ef  closurecompiler-externs-path.patch
+5b63f42e4934c7c6d5eedb9e46636a488bc0723618dd0b5d5b720d58cf9d1f6a6e6a768fe1ce1188f86bbb931b6881dfdfc36f8c0584775cb66a9d9e8a2cbb9a  closurecompiler-language_in-es6.patch
+53bb9b64222dd445e8aefbb5a4b87bc6d562ea578a6f7a04c2605703f0235633583144fe478031e650a7346ba89f6e0aaf6c435aedb8398131fa02940356bc17  embuilder-fix-task-all-for-wasm.patch
+3d2fb817ea3e1dd661900df1e27bd135f39076723494b7ffbbe9e1561ae0a0e62a4ed0058301cf3e6b9a13f75adafe58dc902d4a32ade2cb16754a7fd5e542af  embuilder-omit-provided.patch
+8d02f598df12ecbebab151a9d9e6972164bddf4da586e5a3070f2a5b35248b622a663a513295c1bf79fcf13523940ea5e47f8ab1def86e28b260dba8bfef7bac  add-global-cache.patch
+42142064f828c39fbeb04e65c13c0eae8d843ee8541e67db361086b2d44ad896604d561220363f71aa8aa9f07ae6c285a39f49d9078f5a56e022879ed987c020  emscripten.cfg
+3922486816cf7d99ee02c3c1ef63d94290e8ed304016dd9927137d04206e7674d9df8773a4abb7bb57783d0a5107ad0f893aa87acfb34f7b316eec22ca55a536  emscripten-port-Bullet-version_1-zip
+0d0b1280ba0501ad0a23cf1daa1f86821c722218b59432734d3087a89acd22aabd5c3e5e1269700dcd41e87073046e906060f167c032eb91a3ac8c5808a02783  emscripten-port-FreeType-version_1-zip
+a19ede8a4339f2745a490c22f3893899e1a5eae9d2b270e49d88d3a85239fbbaa26c9a352d0e6fb8bb69b4f45bd00c1ae9eff29b60cf03e79c5df45a4409992f  emscripten-port-libpng-version_1-zip
+929e8d6003c06ae09593021b83323c8f1f54532b67b8ba189f4aedce52c25dc182bac474de5392c46ad5b0dea5a24928e4ede1492d52f4dd5cd58eea9be4dba7  emscripten-port-Ogg-version_1-zip
+e7cbcafc1398c337814caa4b91692989d65ed5ffdd8ff1bebb9673a566bba6c16f1e3b72abefaff4b3e390b6571eba678e9ea197cdfd14641648b5282688ef50  emscripten-port-SDL2-version_13-zip
+785d6f636b5124dbfc65841fcd5c75df42c8186cb85e5c977e6e321317f0381a7690125a78e6687da1081b1ce6c876040d04083e770e2c8b28e7c2e776287555  emscripten-port-SDL2_image-version_3-zip
+317b22ad9b6b2f7b40fac7b7c426da2fa2da1803bbe58d480631f1e5b190d730763f2768c77c72affa806c69a1e703f401b15a1be3ec611cd259950d5ebc3711  emscripten-port-SDL2_net-version_2-zip
+6ce426de0411ba51dd307027c4ef00ff3de4ee396018e524265970039132ab20adb29c2d2e61576c393056374f03fd148dd96f0c4abf8dcee51853dd32f0778f  emscripten-port-SDL2_ttf-version_1-zip
+99bee75beb662f8520bbb18ad6dbf8590d30eb3a7360899f0ac4764ca72fe8013da37c9df21e525f9d2dc5632827d4b4cea558cbc938e7fbed0c41a29a7a2dc5  emscripten-port-Vorbis-version_1-zip
+77f7d8f18fe11bb66a57e358325b7422d721f7b506bd63293cfde74079f958864db66ead5a36c311a76dd8c2b089b7659641a5522de650de0f9e6865782a60dd  emscripten-port-zlib-version_1-zip"
