@@ -83,7 +83,7 @@ profile_uboot() {
 		kernel_addons=
 		;;
 	*)
-		kernel_flavors="grsec"
+		kernel_flavors="hardened"
 		kernel_addons="xtables-addons"
 		;;
 	esac
