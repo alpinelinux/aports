@@ -516,6 +516,8 @@ int main(int argc, char **argv)
 		argv++;
 	}
 
+	apk_db_init(&db);
+
 #ifdef TEST_MODE
 	dbopts.open_flags &= ~(APK_OPENF_WRITE | APK_OPENF_CACHE_WRITE | APK_OPENF_CREATE);
 	dbopts.open_flags |= APK_OPENF_READ | APK_OPENF_NO_STATE | APK_OPENF_NO_REPOS;

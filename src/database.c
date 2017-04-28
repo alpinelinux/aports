@@ -1471,6 +1471,21 @@ static unsigned long map_statfs_flags(unsigned long f_flag)
 	return mnt_flags;
 }
 
+void apk_db_init(struct apk_database *db)
+{
+	memset(db, 0, sizeof(*db));
+	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 20000);
+	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 10000);
+	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 20000);
+	apk_hash_init(&db->installed.files, &file_hash_ops, 200000);
+	list_init(&db->installed.packages);
+	list_init(&db->installed.triggers);
+	apk_dependency_array_init(&db->world);
+	apk_protected_path_array_init(&db->protected_paths);
+	db->permanent = 1;
+	db->root_fd = -1;
+}
+
 int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 {
 	const char *msg = NULL;
@@ -1483,7 +1498,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 	apk_default_acl_dir = apk_db_acl_atomize(0755, 0, 0, NULL);
 	apk_default_acl_file = apk_db_acl_atomize(0644, 0, 0, NULL);
 
-	memset(db, 0, sizeof(*db));
 	if (apk_flags & APK_SIMULATE) {
 		dbopts->open_flags &= ~(APK_OPENF_CREATE | APK_OPENF_WRITE);
 		dbopts->open_flags |= APK_OPENF_READ;
@@ -1494,16 +1508,6 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		goto ret_r;
 	}
 	if (!dbopts->cache_dir) dbopts->cache_dir = "etc/apk/cache";
-
-	apk_hash_init(&db->available.names, &pkg_name_hash_ops, 20000);
-	apk_hash_init(&db->available.packages, &pkg_info_hash_ops, 10000);
-	apk_hash_init(&db->installed.dirs, &dir_hash_ops, 20000);
-	apk_hash_init(&db->installed.files, &file_hash_ops, 200000);
-	list_init(&db->installed.packages);
-	list_init(&db->installed.triggers);
-	apk_dependency_array_init(&db->world);
-	apk_protected_path_array_init(&db->protected_paths);
-	db->permanent = 1;
 
 	apk_db_setup_repositories(db, dbopts->cache_dir);
 
