@@ -10,6 +10,7 @@ profile_standard() {
 profile_vanilla() {
 	profile_standard
 	#arch="$arch aarch64"
+	arch="$arch ppc64le"
 	kernel_flavors="vanilla"
 	kernel_addons=
 }
