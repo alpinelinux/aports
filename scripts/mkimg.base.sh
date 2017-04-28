@@ -190,6 +190,13 @@ build_grubefi_img() {
 	mcopy -s -i ${DESTDIR}/boot/grub/efiboot.img $_tmpdir/efi ::
 }
 
+section_grubieee1275() {
+	[ "$ARCH" = ppc64le ] || return 0
+	[ "$output_format" = "iso" ] || return 0
+
+	build_section grub_cfg boot/grub/grub.cfg $(grub_gen_config | checksum)
+}
+
 section_grubefi() {
 	[ -n "$grub_mod" ] || return 0
 	[ "$output_format" = "iso" ] || return 0
@@ -249,18 +256,23 @@ create_image_iso() {
 				"
 		fi
 	fi
-	xorrisofs \
-		-quiet \
-		-output ${ISO} \
-		-full-iso9660-filenames \
-		-joliet \
-		-rock \
-		-volid "alpine-$PROFILE $RELEASE $ARCH" \
-		$_isolinux \
-		$_efiboot \
-		-follow-links \
-		${iso_opts} \
-		${DESTDIR}
+
+	if [ "$ARCH" = ppc64le ]; then
+		grub-mkrescue --output ${ISO} ${DESTDIR} -follow-links
+	else
+		xorrisofs \
+			-quiet \
+			-output ${ISO} \
+			-full-iso9660-filenames \
+			-joliet \
+			-rock \
+			-volid "alpine-$PROFILE $RELEASE $ARCH" \
+			$_isolinux \
+			$_efiboot \
+			-follow-links \
+			${iso_opts} \
+			${DESTDIR}
+	fi
 }
 
 create_image_targz() {
