@@ -24,7 +24,7 @@ _apk() {
 # Usage: apk_pkg_full <apk pkgname>
 apk_pkg_full() {
 	local res="$(_apk search -x "$1")"
-	[ $? -eq 0 ] || res="$(_apk search -x "${1%-*-*}")"
+	[ $? -eq 0 ] && [ "$res" ] || res="$(_apk search -x "${1%-*-r*}")"
 	[ $? -eq 0 ] || return 1
 	printf '%s' $res
 }
@@ -37,6 +37,71 @@ apk_check_pkgs() {
 	if [ "$res" ]; then
 		echo $*
 	fi
+}
+
+# Fetch apk for specified package(s) to specified destination dir.
+# Usage: kerneltool_apk_fetch <destination dir> <package>
+apk_fetch() {
+	local _ddir="$1"
+	shift
+
+	local _p _pkg _pkgname _pkgfile
+	for _p in "$@" ; do
+		case "$_p" in 
+			/*/*.apk | ./*/*.apk | ../*/*.apk )
+				file_exists "$_p" && _apk verify "$_p" || ! warning "Could not verify requested apk '$_p'!" || return 1
+				_pkgfile="$_ddir/$_p"
+				cp -f "$_p" "$_pkgfile"
+
+				;;
+			*.apk )
+				_pkgfile="$_ddir/$_p"
+				file_exists "$_pkgfile" && _apk verify "$_pkgfile" || ! warning "Could not verify apk '$_pkgfile'!" || return 1
+				;;
+			*)
+				_pkg="$(apk_pkg_full "$_p")"
+				_pkgname="${_pkg%-*-r*}"
+				_pkgfile="$_ddir/$_pkg.apk"
+				[ "$_p" = "$_pkgname" ] || [ "$_p" = "$_pkg" ] || "$_p" = "$_pkgfile" || ! warning "Requested package '$_p' but search found '$_pkg' instead!" || return 1
+				local _a_
+				for _a_ in 1 2 ; do
+					if ! file_exists "$_pkgfile" ; then
+						_fetched="$(_apk fetch -o "$_ddir" "$_pkgname" | cut -d' ' -f2)"
+						if [ "$_fetched" != "$_pkg" ] ; then rm -f "$_ddir/$_fetched.apk" ; warning "Requested '$_pkg' but fetch found '$_fetched' instead!" ; return 1 ; fi
+					fi
+					_apk verify "$_pkgfile" && break
+					rm -f "$_pkgfile"
+					[ $_a_ -gt 1 ] && return 1
+				done
+				;;
+		esac
+
+
+	done
+
+}
+
+# Extract all or specified from .apk file to destination directory.
+# Usage: apk_extract <apk file> <destination dir> [<paths to extract>...]
+apk_extract() {
+	local _apkfile="$1" _ddir="$2"
+	shift 2
+	_arch="${OPT_arch:-${APKARCH:-"$(_apk --print-arch)"}}"
+
+	_archpkgver="$(apk_get_apk_arch_package_version "$_apkfile")"
+	local _apkarch="${_archpkgver%%/*}"
+	[ "$_arch" != "$_apkarch" ] && warning "Arch mismatch detected: '$_arch' requested but '$_apkarch' found in '$_apkfile'!" && return 1
+	file_is_readable "$_apkfile" || ! warning "Could not read '$_apkfile' to extract!" || return 1
+	_apk verify ${VERBOSE:--q} "$_apkfile" || ! warning "Could not verify '$_apkfile'!" || return 1
+
+	_found="$( tar -tz -f "$_apkfile" | sed -n -E $([ "$1" ] && printf '-e s|^(%s).*|\\1|gp ' $@ || printf '1,$ p') | sort -u )"
+	! [ "$_found" ] && msg "No $([ "$1" ] && printf ''\''%s'\'' ' $@ || printf 'files ')found in '$_apkfile', nothing extracted." && return 0
+ 
+	mkdir_is_writable "$_ddir" || ! warning "Could not create output directory '$_ddir' to extract '$_apkfile'!" || return 1
+	tar -C "$_ddir" -x -f "$_apkfile" $_found || ! warning "Could not extract files${_found+" in '$_found'"} from '$_apkfile'!" || return 1
+	msg "Extracted $(printf ''\''%s'\'' ' $_foundi | tr -s ' \n\t' ' ')from '$_apkfile.'"
+
+	return 0
 }
 
 
@@ -189,9 +254,9 @@ apkroot_manifest_installed_packages() {
 	local _apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
 
 	local _line _pkgname _file _contains _pkg
-	_apk info -v 2> /dev/null | grep -v "WARNING" | while read -r _line ; do
+	_apk info -v 2> /dev/null | while read -r _line ; do
 		_pkgname="${_line%-*-*}"
-		_apk info -L "$_pkgname" 2> /dev/null | grep -v "WARNING"
+		_apk info -L "$_pkgname" 2> /dev/null
 	done | while read -r _file _contains ; do
 		if [ "$_contains" ] ; then _pkg="$_file" ; continue ; fi
 		_file="$_apkroot/$_file"
@@ -212,6 +277,7 @@ apkroot_manifest_index_libs() {
 		case "$_filefield" in
 			*.so|*.so.*) printf 'libso:%s:%s:%s\t%s\t%s\t%s\n' "${_filefield##*/}" "$_arch" "$_sumfield" "$_pkgfield" "$_sumfield" "$_filefield" ;;
 			*.a) printf 'liba:%s:%s:%s\t%s\t%s\t%s' "${_filefield##*/}" "$_arch" "$_sumfield" "$_pkgfield" "$_sumfield" "$_filefield" ;;
+			*.rlib) printf 'librust:%s:%s:%s\t%s\t%s\t%s' "${_filefield##*/}" "$_arch" "$_sumfield" "$_pkgfield" "$_sumfield" "$_filefield" ;;
 			*) continue ;;
 		esac
 	done > "$_apkroot/.libs.INDEX"
@@ -351,22 +417,16 @@ apkroot_manifest_deps() {
 apkroot_manifest_subset_deps() {
 	local _arch="$APKARCH" && [ "$_arch" ] || ! warning "Called without value set in \$APKARCH!" || return 1
 	local _apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
-	local _line _tgt _glob
+	local _line _tgt
 	file_exists "$_apkroot/.libs.DEPS" && file_exists "$_apkroot/.bins.DEPS" || apkroot_manifest_deps
 	cat "$_apkroot/.libs.DEPS" "$_apkroot/.bins.DEPS" | while read -r _line ; do
 		for _glob in "$@"; do
 			_tgt="${_line#*:}" && _tgt="${_tgt%%:*}"
-			case "$_glob" in
-				/*/) case "$_tgt" in ${_glob#/}*) : ;; *) continue ; esac ;;
-				/*) case "$_tgt" in ${_glob#/}) : ;; *) continue ; esac ;;
-				*/) case "$_tgt" in $_glob*) : ;; *) continue ; esac ;;
-				*/*) case "$_tgt" in $_glob) : ;; *) continue ; esac ;;
-				*) case "$_tgt" in */$_glob) : ;; *) continue ; esac ;;
-			esac
-			printf '%s\n' "$_line"
+			fnmatch_relative_globs "$_tgt" "$@" && printf '%s\n' "$_line"
 		done
 	done | sort -t':' -k2 -u
 }
+
 
 # Usage: apkroot_manifest_subset <globs>...
 apkroot_manifest_subset() {
@@ -376,20 +436,16 @@ apkroot_manifest_subset() {
 
 	local _line _tgt _glob _idx
 	cat "$_apkroot/.Manifest-apk-installed" | while read -r _line ; do
-		for _glob in "$@"; do
-			_tgt="${_line##*[[:space:]]}"
-			case "$_glob" in
-				/*/) case "$_tgt" in ${_glob#/}*) : ;; *) continue ; esac ;;
-				/*) case "$_tgt" in ${_glob#/}) : ;; *) continue ; esac ;;
-				*/) case "$_tgt" in $_glob*) : ;; *) continue ; esac ;;
-				*/*) case "$_tgt" in $_glob) : ;; *) continue ; esac ;;
-				*) case "$_tgt" in */$_glob) : ;; *) continue ; esac ;;
-			esac
-			printf '%s\n' "$_line"
-			_idx="$(grep -h -F -e "$_line" "$_apkroot/.libs.INDEX" "$_apkroot/.bins.INDEX" | cut -f 1)"
-			[ "$_idx" ] && grep -h -F -e "$_idx" "$_apkroot/.libs.DEPS" "$_apkroot/.bins.DEPS" | tr -s ' \t' '\n'| grep -h -F -f - "$_apkroot/.libs.INDEX" "$_apkroot/.bins.INDEX" | cut -f 2,3,4
+		_tgt="${_line##*[[:space:]]}"
 
-		done
+		if fnmatch_relative_globs "$_tgt" "$@" ; then
+			printf '%s\n' "$_line"
+
+			_idx="$(grep -h -F -e "$_line" "$_apkroot/.libs.INDEX" "$_apkroot/.bins.INDEX" | cut -f 1)"
+			[ "$_idx" ] && grep -h -F -e "$_idx" "$_apkroot/.libs.DEPS" "$_apkroot/.bins.DEPS" | tr -s ' \t' '\n' \
+				| grep -h -F -f - "$_apkroot/.libs.INDEX" "$_apkroot/.bins.INDEX" | cut -f 2,3,4
+		fi
+
 	done | sort -k1 -k3 -k2 -u
 }
 

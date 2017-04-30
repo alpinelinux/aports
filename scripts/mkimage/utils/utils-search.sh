@@ -64,3 +64,25 @@ xargs0_grep_e() {
 	(unset IFS ; eval "xargs -0 -r grep $opts $(printf "-e '%s' " "$@")")
 }
 
+
+# Match a relative path string against a list of globs relative to the root of the path.
+# Strips leading '/' from globs.
+# Treats trailing '/' as '/*', matching all paths under that directory.
+# Usage: fnmatch_relative_globs <relative path> <globs>...
+fnmatch_relative_globs() {
+	local _tgt="$1"
+	shift
+
+	local _glob
+	for _glob in "$@"; do
+		case "$_glob" in
+			/*/) case "$_tgt" in ${_glob#/}*) : ;; *) continue ; esac ;;
+			/*) case "$_tgt" in ${_glob#/}) : ;; *) continue ; esac ;;
+			*/) case "$_tgt" in $_glob*) : ;; *) continue ; esac ;;
+			*/*) case "$_tgt" in $_glob) : ;; *) continue ; esac ;;
+			*) case "$_tgt" in */$_glob) : ;; *) continue ; esac ;;
+		esac
+		return 0
+	done
+	return 1
+}

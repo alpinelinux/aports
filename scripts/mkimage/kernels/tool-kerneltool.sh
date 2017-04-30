@@ -1,32 +1,29 @@
+####
+###  KERNELTOOL
 ###
-### KERNELTOOL
-###
-### Kernel components build and staging tool.
+###  Kernel components build and staging tool.
+####
 
 # Tool: kerneltool
-# Commands: stage restage unstage depmod mkmodsubset mkmodcpio mkmodcpiogz mkmodloop
+# Commands: help stage restage unstage depmod mkmodsubset mkmodcpio mkmodcpiogz mkmodloop
 
+# Usage: tool_kerneltool
 tool_kerneltool() { return 0 ; }
+
+# Usage: kerneltool
 kerneltool() {
 	info_prog_set "kerneltool"
-	#: --staging-dir
-	#: --arch
-	#: --kernel-release <krel|apk|build-dir|install-dir|latest>
-	#: stage [arch|arch/krel] <apk|build-dir|package-name)>  (i.e. /usr/src/linux or linux-firmware)
-	#: depmod <basdir> <kernel release>
-	#: subset_modules
-	#: install
-	#: package
-
 
 	local command
 	command="$1"
 
 	: "${OPT_apkroot_setup_cmdline:="--repositories-file /etc/apk/repositories --host-keys"}"
 	case "$1" in
-		stage) shift ; unset UNSTAGE RESTAGE ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
-		restage) shift ; unset UNSTAGE ; RESTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
-		unstage) shift ; unset RESTAGE ; UNSTAGE="yes" ; kerneltool_stage "${STAGING_ROOT}" ${OPT_arch:+"$OPT_arch"} "$@" ; return $? ;;
+		list) shift ; kerneltool_list_staged ; return $? ;;
+		init) shift ; kerneltool_init "$@" ; return $? ;;
+		stage) shift ; unset UNSTAGE RESTAGE ; kerneltool_stage "$@" ; return $? ;;
+		restage) shift ; unset UNSTAGE ; RESTAGE="yes" ; kerneltool_stage "$@" ; return $? ;;
+		unstage) shift ; unset RESTAGE ; UNSTAGE="yes" ; kerneltool_stage "$@" ; return $? ;;
 		depmod) shift ; kerneltool_depmod "${STAGING_ROOT}/${OPT_arch:-"$(_apk --print-arch)"}/merged-$1" "$1" $2 ; return $? ;;
 		mkmodsubset) shift ; kerneltool_mkmodsubset "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
 		mkmodcpio) shift ; kerneltool_mkmodcpio "${STAGING_ROOT}" "${OPT_arch:-"$(_apk --print-arch)"}" "$@" ; return $? ;;
@@ -39,13 +36,18 @@ kerneltool() {
 	return 1
 }
 
+
+
 # Print usage
+# Usage: kerneltool_usage
 kerneltool_usage() {
 	kerneltool_commands_usage
 	multitool_opts_usage
 	apkroot_opts_usage
 }
 
+
+# Usage: kerneltool_commands_usage
 kerneltool_commands_usage() {
 cat <<EOF
 Usage: kerneltool <global opts> <command> <command opts>
@@ -88,155 +90,202 @@ Commands:
 EOF
 }
 
+
+
 ###
-## Kerneltool Commands
+##  Kerneltool Commands
 ###
 
+kerneltool_init_vars() { KTYPE="$1" ; KARCH="$2" ; KREL="$3" ; KSRC="$4" ; KPATH="$5" ; [ "$KTYPE" = "kapk" ] && KFLAVOR="${KSRC#linux-}" && KFLAVOR="${KFLAVOR%-*-r*}" ; }
+kerneltool_info_kstage_string() { printf '%s:%s/%s/%s:%s\n' "$KTYPE" "$KARCH" "$KREL" "$KSRC" "$KPATH" ; }
+kerneltool_info_kstage_parse() {
+	KTYPE="${1%%:*}"
+	KARCH="${1#$KTYPE:}" && KARCH="${KARCH%%/*}"
+	KREL="${1#$KTYPE:$KARCH/}" && KREL="${KREL%%/*}"
+	KSRC="${1#$KTYPE:$KARCH/$KREL/}" && KSRC="${KSRC%%:*}"
+	KPATH="${1%%*:}"
+
+	[ "$KTYPE" = "kapk" ] && KFLAVOR="${KSRC#linux-}" && KFLAVOR="${KFLAVOR%-*-r*}"
+}
+
+
+kerneltool_apkroot_init() {
+	[ "$STAGING_ROOT" ] && [ "$KARCH" ] || ! warning "kerneltool_apkroot_init needs \$STAGING_ROOT and \$KARCH defined!" || return 1
+	STAGE_ARCH="$STAGING_ROOT/$KARCH"
+	KAPKROOT="$STAGE_ARCH/apkroot"
+	KAPKSTORE="$STAGE_ARCH/apks"
+	apkroottool init "$KAPKROOT" "$KARCH"
+	apkroottool setup "$KAPKROOT" "$KARCH"
+	apkroottool "$KAPKROOT" apk update -q
+	mkdir_is_writable "$KAPKSTORE"
+}
+
+
+kerneltool_init_by_apkpackage() {
+	KARCH="$1"
+	shift
+	kerneltool_apkroot_init
+	local _pkg="$(apk_pkg_full "$1")"
+	apk_fetch "$KAPKSTORE" "$1"
+	kerneltool_init_by_apkfile "$KARCH" "$KAPKSTORE/$_pkg.apk"
+}
+
+
+kerneltool_init_by_apkfile() {
+	local _arch="$1" _source="$2"
+	local _arch_pkg_ver="$(apk_get_apk_arch_package_version "$_source")"
+	local _arch_krel="$(kerneltool_apk_get_arch_kernel_release "$_source")"
+	local _pkg="${_arch_pkg_ver#*/}"
+	kerneltool_init_vars "kapk" "${_arch_krel%%/*}" "${_arch_krel#*/}" "$_pkg" "$_source"
+	kerneltool_apkroot_init
+	file_exists "$KAPKSTORE/${KPATH##*/}" && [ "$(cat "$KPATH" | sha512sum )" = "$(cat "$KAPKSTORE/${KPATH##*/}" | sha512sum)" ] || cp -f "$KPATH" "$KAPKSTORE" || ! warning "Could not copy '$KPATH' to '$KAPKSTORE'!" || return 1
+	KPATH="${KPATH##*/}"
+}
+
+
+kerneltool_init_by_krel() {
+	local _arch="$1" _krel="$2"
+	local _stage_kern="$STAGING_ROOT/$_arch/kernel/$_krel"
+	dir_exists "$_stage_kern" || ! warning "No kernel staged for kernel release '$_krel' on arch '$_arch'!" || return 1
+	dir_is_writable "$_stage_kern" || ! warning "Can not write to staging subdirectory '$_stage_kern'!" || return 1
+	file_is_readable "$_stage_kern/.info_kstage" && kerneltool_info_kstage_parse "$(cat "$_stage_kern/.info_kstage")" || ! warning "Staging info '$_stage_kern/.info_kstage' can not be read!" || return 1
+	kerneltool_apkroot_init
+	return 0
+}
+
+
+kerneltool_init_by_path() {
+	if ! [ -e "$1" ] ; then
+		warning "'$1' does not exist!" ; return 1
+	elif [ -d "$1" ] ; then dir_is_readable "$1" || ! warning "Can not read specified directory '$1'!" || return 1
+
+		# Handle the case where we're passed a subdirectory under our staging directory.
+		case "$1" in "$stage_base"/*/*/*)
+			local _arch="${1#$stage_base/}" ; local _krel="${_arch#*/*/}" ; _krel="${_krel%%/*}" ; _arch="${_arch%%/*}"
+			kerneltool_init_by_krel "$_arch" "$_krel" ; return $?
+			;;
+		esac
+
+		# Handle the case where we're passed a directory containing Kbuild system.
+		file_exists "$1/Kbuild" && kerneltool_init_kernel_by_kbuild "$1" ; return $?
+
+	elif [ -f "$1" ] ; then file_is_readable "$1" || ! warning "Can not read specified file '$1'!" || return 1
+		case "$1" in 
+			*.apk) kerneltool_init_by_apkfile "$1" ; return $? ;;
+			*) warning "Don't know how to handle file '$1'!" ; return 1 ;;
+		esac
+
+	else warning "Path '$1' is not a file or directory!" ; return 1 ; fi
+}
+
+
+kerneltool_init_by_kbuild() {
+	local _arch="$1" _source="${2%/}"
+
+	local _arch_krel="$(kerneltool_custom_get_arch_kernel_release "$_source")"
+	[ "$_arch_krel" ] || ! warning "Could not detect architecture and kernel release for '$_source'!" || return 1
+	! [ "$_arch" ] || [ "$_arch" = "${_arch_krel%%/*}" ] || ! warning "Requested arch '$_arch' but kernel is configured for '${_arch_krel%%/*}' in '$_source'!" || return 1
+
+	kerneltool_init_vars "kbuild" "${_arch_krel%%/*}" "${_arch_krel#*/}" "${_source##*/}" "${_source}"
+	kerneltool_apkroot_init
+}
+
+# Must be called with STAGING_ROOT defined
+kerneltool_init() {
+	[ "$STAGING_ROOT" ] || ! warning "\$STAGING_ROOT must be defined before calling kerneltool_init!" || return 1
+	local _current_krel="$(uname -r)"
+	local _host_arch="$(_apk --print-arch)"
+
+	case "$1" in
+
+	# keywords
+	current ) kerneltool_init_by_krel "$_host_arch" "$_current_krel" ;;
+	latest ) kerneltool_init_by_apkpackage "${OPT_arch:-$_host_arch}" "linux-${_current_krel##*-}" ;;
+	latest-*[!/] ) kerneltool_init_by_apkpackage "${OPT_arch:-$_host_arch}" "linux${1#latest}" ;;
+	custom ) kerneltool_init_by_path "${OPT_arch:-$_host_arch}" "/usr/src/linux" ;;
+
+	# path
+	/* | ./* | ../* | *.apk ) kerneltool_init_by_path "${OPT_arch}" "$1" ;;
+
+	# apk package
+	linux-* ) kerneltool_init_by_apkpackage "${OPT_arch:-$_host_arch}" "$1" ;;
+
+	# Kernel release string
+	[0-9]*.[0-9]* ) kerneltool_init_by_krel "${OPT_arch:-$_host_arch}" "$1" ;;
+
+	# Something else...
+	*) return 1 ;;
+
+	esac
+
+	STAGE_ARCH="$STAGING_ROOT/$KARCH"
+	STAGE_KERN="$STAGE_ARCH/kernel"
+
+	STAGE_KREL="$STAGE_KERN/$KREL"
+	mkdir_is_writable "$STAGE_KREL" || ! warning "Could not create staging subdir '$STAGE_KREL'!" || return 1
+	kerneltool_info_kstage_string > "$STAGE_KREL/.info_kstage"
+
+	STAGE_MANIFESTS="$STAGE_ARCH/Manifests"
+	mkdir_is_writable "$STAGE_MANIFESTS" || ! warning "Could not create staging Manifest directory '$STAGE_MANIFESTS'!" || return 1
+}
+
+
+kerneltool_list_staged() {
+	dir_exists "$STAGING_ROOT" || ! warning "No staging directory at '$STAGING_ROOT'!" || return 1
+	( cd "$STAGING_ROOT" && for a in * ; do dir_exists "$a/kernel" && cd "$STAGING_ROOT/$a/kernel" && for b in * ; do file_exists "$b/.info_kstage" && cat "$STAGING_ROOT/$a/kernel/$b/.info_kstage" ; done ; done )
+
+}
 
 # Command: stage
 # Usage: kerneltool_stage <staging basedir> [<arch>] <kernel (apk | build dir | package name | version) > [ other (build dirs | package names) ...]
 kerneltool_stage() {
 	info_prog_set "kerneltool-stage"
 	info_func_set "stage"
-	local stage_base="$1" ; shift
-	local _arch _karch _krel k_pkg k_pkgname k_pkgver
-	local _arch_krel _arch_pkg_ver
-	local _flavor
 
-	# Set our arch if it was explicitly specified, then shift if found.
-	local _allarchsglob="$(get_all_archs_with_sep ' | ')"
-	eval "case \"\$1\" in $_allarchsglob ) _arch=\"\$1\" ; shift ;; esac"
-	
-	# TODO: kerneltool_stage - Handle kernel images/tarballs.
-
-	# Detect our arch and kernel release from the first argument.
-	info_func_set "stage (detect arch/krel)"
-	[ "$1" ] || set -- linux-vanilla linux-firmware
-	case "$1" in current) shift ; set -- "$(uname -r)" "$@" ;; latest) shift ; set -- "linux-vanilla" "$@" ;; latest-*) _flavor="${1#latest-}" ; shift ; set -- "linux-${_flavor}" "$@" ;; esac
-
-	case "$1" in
-		*.apk)	# Handle explicit kernel .apk
-			_arch_pkg_ver="$(apk_get_arch_package_version $1)"
-			_arch_krel="$(kerneltool_apk_get_arch_kernel_release $1)"
-			if ! [ "$_arch" ] ; then _arch="$_arch_krel%%/*}"
-			elif [ "${_arch_krel%%/*}" = "$_arch" ] ; then warning "Kernel in apk '$1' is for arch '${_arch_krel%%/*}' but '$_arch' requested!" ; return 1 ; fi
-			;;
-		/*/*|./*|../*)	# Handle kernel build directory
-			_arch_krel="$(kerneltool_custom_get_arch_kernel_release $1)"
-			if ! [ "$_arch" ] ; then _arch="${_arch_krel%%/*}"
-			elif [ "${_arch_krel%%/*}" = "$_arch" ] ; then warning "Kernel at '$1' configured for arch '${_arch_krel%%/*}' but '$_arch' requested!" ; return 1 ; fi
-			;;
-		*/*)  # Handle arch/krel pairs
-			_arch_krel="$1"
-			_arch="${_arch_krel%%/*}" && all_archs_has $_arch || ! warning "Specified arch '$_arch' not recognized!" || return 1
-			_krel="${_arch_krel#*/}"
-			;;
-		# Handle packages with version
-		linux-*-[0-9].*-r[0-9]*) k_pkg="$1" ;;
-		linux-*-[0-9].*) k_pkg="$1-r0" ;;
-		# Handle alpine package name with no version
-		linux-*) k_pkgname="$1" ;;
-		# Handle 'linux-<krel>' (with or without -r)
-		linux-[0-9].*-r[0-9]*-*|linux-[0-9].*-r[0-9]*) _krel="${1#linux-}" ; _krel="${_krel/-r/-}" ;;
-		linux-[0-9].*-*-*|linux-[0-9].*-*|linux-[0-9].*) _krel="${1#linux-}" ;;
-		# Handle raw kernel version (uname -r)
-		[0-9].*-r[0-9]*-*|[0-9].*-r[0-9]*) _krel="${1/-r/-}" ;;
-		[0-9].*-*-*|[0-9].*-*|[0-9].*) _krel="$1" ;;
-		*) warning "Unknown kernel spec: '$1'" ; return 1 ;;
-	esac
-
-	# If nothing has specified an arch yet, default to the system's arch.
-	[ "$_arch" ] || _arch="$(_apk --print-arch)"
-	
-	info_func_set "stage (setup)"
-	# Setup staging base directory.
-	mkdir_is_writable "$stage_base" && stage_base="$(realpath $stage_base)" || ! warning "Failed to create staging base directory '$stage_base'" || return 1
-
-	# Setup staging directory for this arch.
-	mkdir_is_writable "$stage_base/$_arch" || ! warning "Failed to create writable directory for staging arch '$_arch'!" || return 1
-
-	# Setup staging apkroot for this arch.
-	local stage_apkroot="$stage_base/$_arch/apkroot"
-
-	# Setup alpine-keys so we can actually fetch things for our desired arch. We do this BEFORE we setup our apkroot.
-	if dir_not_exists "$stage_apkroot/etc/apk/keys" ; then
-		mkdir_is_writable "$stage_apkroot/etc/apk/keys" || ! warning "Failed to setup staging apkroot at '$stage_apkroot'!" || return 1
-		_apk fetch -s alpine-keys | tar -C "$stage_apkroot" -xz usr/share/apk/keys || ! warning "Could not fetch package 'alpine-keys' or extract '/usr/share/apk/keys' to '$stage_apkroot'!" || return 1
-		cp -L "$stage_apkroot/usr/share/apk/keys/$_arch/"* "$stage_apkroot/etc/apk/keys"
-	fi
-
-	# Initilize our apk root
-	apkroot_init "$stage_apkroot" "$_arch"
-	apkroot_setup $OPT_apkroot_setup_cmdline
-	info_func_set "stage (setup)"
-	_apk update ${VERBOSE--q} || warning "Could not update apk database. Continuing..."
-
-	# Setup apk storage dir.
-	local stage_apkstore="$stage_base/$_arch/apks"
-	mkdir_is_writable "$stage_apkstore" || ! warning "Failed to setup staging apkstore at '$stage_apkstore'!" || return 1
-	
-	# Create a manifests directory for this arch.
-	local manifests="$stage_base/$_arch/manifests"
-	mkdir_is_writable "$manifests" || ! warning "Failed to create directory for staging manifests '$manifests'" || return 1
-
-	# Derive the full package atom when given a package name only.
-	[ "$k_pkgname" ] && [ ! "$k_pkg" ] && k_pkg="$(apk_pkg_full "$k_pkgname")"
-	# Split package atom to into package name and version.
-	k_pkgname="${k_pkg%-*-*}"
-	k_pkgver="${k_pkg#$k_pkgname-}"
-	k_flavor="${k_pkgname#linux-}"
-
-	# Derrive the kernel release from the package (fetching if needed).
-	if ! [ "$_krel" ] && [ "$k_pkgname" ] ; then
-		file_is_readable "$stage_apkstore/$k_pkg.apk" || kerneltool_apk_fetch "$_arch" "$_krel" "$k_pkgname"  "$stage_apkstore" || ! warning "Could not fetch '$k_pkg'!" || return 1
-		_arch_krel="$(kerneltool_apk_get_arch_kernel_release "$stage_apkstore/$k_pkg.apk")"
-		[ "${_arch_krel%%/*}" != "$_arch" ] && warning "Kernel in apk '$1' is for arch '${_arch_krel%%/*}' but '$_arch' requested!" && return 1
-		_krel="${_arch_krel#*/}"
-	fi
-	if ! [ "$_krel" ] ; then
-		warning "Could not determine kernel release for '$k_pkgname' in a reliable manner, falling back to using package version number."
-		_krel="${k_pkgver/-r/-}-${k_flavor}"
-	fi
+	kerneltool_init "$1" ; shift
+	if [ "$KTYPE" = "kbuild" ] ; then _k="$KPATH"
+	elif [ "$KTYPE" = "kapk" ] ; then _k="$KAPKSTORE/$KPATH"
+	else warning "Don't know to stage kernel with source type '$KTYPE'!" ; return 1 ; fi
 
 	# Setup kernel staging for this arch and kernel release (restage/unstage here if requested); Set _kernpkg_ to the package name for the kernel if needed.
-	local stage_kern="$stage_base/$_arch/$_krel"
 	if [ "$RESTAGE" = "yes" ] || [ "$UNSTAGE" = "yes" ] ; then
-		! dir_exists "$stage_kern" || rm -rf "$stage_kern" || ! warning "Could not purge staging directory at '$stage_kern'!" || return 1
-		[ "$UNSTAGE" = "yes" ] && msg "Unstaged '$_arch/$_krel'." && return 0
+		! dir_exists "$STAGE_KERN" || rm -rf "$STAGE_KERN" || ! warning "Could not purge staging directory at '$STAGE_KERN'!" || return 1
+		[ "$UNSTAGE" = "yes" ] && msg "Unstaged '$KARCH/$KREL'." && return 0
 	fi
 
-	if dir_exists "$stage_kern" || mkdir_is_writable "$stage_kern" ; then _kernpkg_="${k_pkgname:-yes}"
-	else warning "Failed to create staging kernel directory '$stage_kern'" ; return 1
+	if dir_exists "$STAGE_KERN" || mkdir_is_writable "$STAGE_KERN" ; then :
+	else warning "Failed to create staging kernel directory '$STAGE_KERN'" ; return 1
 	fi
 
 	info_func_set "stage"
+
 	# Loop over items to be staged
 	local i _type _subdir
-	for i do
+
+	for i in "$_k" "$@" ; do
 		i="${i%/}"
-		# Fix the mess if we gave it something other than a simple package name as our original arg
-		[ "${_kernpkg_##yes}" ] && i="$_kernpkg_"
 
 		# Figure out what type we're dealing with and set things up.
 		case "$i" in
 			*.apk)
-				_type="apk"
+				_type="kapk"
 				_subdir="${i##*/}" && _subdir="${_subdir%.apk}"
-				cp -f "$i" "$stage_apkstore" && i="${i##*/}"
+				file_exists "$KAPKSTORE/${i##*/}" && [ "$(cat "$i" | sha512sum )" = "$(cat "$KAPKSTORE/${i##*/}" | sha512sum)" ] || cp -f "$i" "$KAPKSTORE" || ! warning "Could not copy '$i' to '$KAPKSTORE'!" || return 1
+				i="${i##*/}"
 				;;
-			*/*)	
+			/* | ./* | ../* )
 				_type="kbuild"
-				_subdir="kbuild-{i##*/}"
+				_subdir="kbuild-${i##*/}"
 				;;
 			*)
-				_type="apk"
+				_type="kapk"
 
-				local _i="$i" _in="${i%-*-*}"
+				local _i="$i" _in="${i%-*-r*}"
 				local _iv="${i#$_in}"
-				local _if="${_in%-$k_flavor}-$k_flavor$_iv"
+				local _if="${_in%-$KFLAVOR}-$KFLAVOR$_iv"
 				
-				i="$(apk_pkg_full "${_i%-*-*}")"
-				f="$(apk_pkg_full "${_if%-*-*}")"
+				i="$(apk_pkg_full "$i" )"
+				f="$(apk_pkg_full "$_if")"
 				[ "$i" ] || [ "$f" ] || ! warning "Could not find package matching '$_i'!" || return 1
 				if [ "$_if" = "$f" ] ; then i="$f" ; msg "Using package '$f'."
 				elif [ "$_i" = "$i" ] ; then msg "Using package '$i'."
@@ -245,19 +294,17 @@ kerneltool_stage() {
 				elif [ "${_if%-*-*}" = "${_i%-*-*}" ] ; then i="$f" ; warning "Specified package '$_i' but found '$i'! Continuing with '$i'..."
 				elif [ "${_if%-*-*}" = "${_i%-*-*}" ] ; then warning "Specified package '$_i' but found '$i'! Continuing with '$i'..." ; fi
 				_subdir="apk-$i"
-				
-				
 				;;
 		esac
 
 
 		# Handle fetching apks as needed.
 		case "$_type" in
-			apk)
-				file_is_readable "$stage_apkstore/$i.apk" || kerneltool_apk_fetch "$_arch" "$_krel" "$i" "$stage_apkstore" || ! warning "Could not fetch '$i'!" || return 1
-				i="$stage_apkstore/$i.apk"
+			kapk)
+				apk_fetch "$KAPKSTORE" "$i" || ! warning "Could not fetch '$i'!" || return 1
+				i="$KAPKSTORE/${i%.apk}.apk"
 
-				_apkmanifest="$manifests/${i##*/}.Manifest"
+				_apkmanifest="$STAGE_MANIFESTS/${i##*/}.Manifest"
 				if file_is_readable "$_apkmanifest" && verify_file_checksums "$i" "$(sed -n -e '2 p' "$_apkmanifest")" ; then
 					msg "Checksum matches for '${i##*/}' in APK Manifest '$_apkmanifest'."
 				elif file_is_readable "$_apkmanifest" ; then
@@ -270,7 +317,7 @@ kerneltool_stage() {
 
 				if file_not_exists "$_apkmanifest" ; then 
 					msg "Building APK Manifest for '$i'..."
-					apk_build_apk_manifest "$manifests" "$i" || ! warning "Failed to create APK Manifest for '$i!'" || return 1
+					apk_build_apk_manifest "$STAGE_MANIFESTS" "$i" || ! warning "Failed to create APK Manifest for '$i!'" || return 1
 					msg2 "Done."
 				fi
 
@@ -278,38 +325,38 @@ kerneltool_stage() {
 		esac
 
 		# Set the list of sub-parts to be staged for each package, then iterate over it.
-		kerneltool_stage_parts="${kerneltool_stage_parts:-"${_kernpkg_:+"kernel "} modules firmware dtbs headers"}"
+		kerneltool_stage_parts="kernel modules firmware dtbs headers"
 		for p in $kerneltool_stage_parts ; do
 			info_func_set "stage ($p)"
-			_mymanifest="$manifests/$_subdir-$p.Manifest"
-			_myddir="$stage_kern/$_subdir-$p"
+			_mymanifest="$STAGE_MANIFESTS/$_subdir-$p.Manifest"
+			_myddir="$STAGE_KREL/$_subdir-$p"
 
 			
 			if dir_exists "$_myddir" ; then
 				if file_exists "$_mymanifest" ; then
 					info_func_set "stage ($p check-manifest)"
-					msg "Directory '$_subdir-$p' exists in '$stage_kern', checking contents against manifest '$_mymanifest'..."
+					msg "Directory '$_subdir-$p' exists in '$STAGE_KREL', checking contents against manifest '$_mymanifest'..."
 					kerneltool_verify_path_manifest "$_myddir" "$_mymanifest" && msg "Matched." && continue
 					warning "Contents of directory '$_myddir' does not match manifest '$_mymanifest'!" 
 				fi
 				info_func_set "stage ($p)"
-				msg "Rebuilding directory '$_subdir-$p' in '$stage_kern'."
-				rm -rf "$_myddir" || ! warning "Could wipe destination directory for '$_subdir-$p' in '$stage_kern'!" || return 1
+				msg "Rebuilding directory '$_subdir-$p' in '$STAGE_KREL'."
+				rm -rf "$_myddir" || ! warning "Could wipe destination directory for '$_subdir-$p' in '$STAGE_KREL'!" || return 1
 			fi
 			info_func_set "stage ($p)"
-			mkdir_is_writable "$_myddir" || ! warning "Could not create writable destination directory for '$_subdir-$p' in '$stage_kern'!" || return 1
+			mkdir_is_writable "$_myddir" || ! warning "Could not create writable destination directory for '$_subdir-$p' in '$STAGE_KREL'!" || return 1
 
 			# Extract / install this subpart.
 			case "$_type" in
-				apk) 
+				kapk) 
 					info_func_set "stage ($p-extract)"
-					msg "Extracting '$i' to '$_subdir-$p' in '$stage_kern'."
-					kerneltool_apk_extract_$p "$_arch" "$_krel" "$i" "$stage_kern/$_subdir-$p" || ! warning "Failed to extract $p from '$i' into '$_myddir'!" || return 1
+					msg "Extracting '$i' to '$_subdir-$p' in '$STAGE_KREL'."
+					kerneltool_apk_extract_$p "$KARCH" "$KREL" "$i" "$STAGE_KREL/$_subdir-$p" || ! warning "Failed to extract $p from '$i' into '$_myddir'!" || return 1
 					;;
 				kbuild)
 					info_func_set "stage ($p-install)"
 					msg "Installing $p from '$i' into staging dir '$_myddir'."
-					kerneltool_kbuild_make_${p}_install "$_arch" "$_krel" "$i" "$stage_kern/$_subdir-$p" || ! warning "Failed to stage $p from '$i' into '$_myddir'!" || return 1
+					kerneltool_kbuild_make_${p}_install "$KARCH" "$KREL" "$i" "$STAGE_KREL/$_subdir-$p" || ! warning "Failed to stage $p from '$i' into '$_myddir'!" || return 1
 					;;
 			esac
 
@@ -318,7 +365,7 @@ kerneltool_stage() {
 				kernel)
 					if dir_exists "$_myddir/boot" ; then
 						info_func_set "stage ($p-post)"
-						( cd "$_myddir/boot" ; for _f in * ; do if file_exists "$_f" ; then mv "$_f" "${_f}-$_krel" && ln -s "${_f}-$_krel" "$_f" ; fi ; done) ;
+						( cd "$_myddir/boot" ; for _f in * ; do if file_exists "$_f" ; then mv "$_f" "${_f%-$KFLAVOR}-$KREL" && ln -s "${_f%-$KFLAVOR}-$KREL" "$_f" ; fi ; done) ;
 					fi
 				;;
 
@@ -327,25 +374,25 @@ kerneltool_stage() {
 						info_func_set "stage ($p-post check-versions)"
 						# Check that the vermagic version of the module matches the requested kernel release
 						local _vermismatches="$( cd "$_myddir" \
-							&& find -type f \( -iname '*.ko' -o -iname '*.ko.*' \) -exec sh -c "modinfo -F vermagic {} | cut -d' ' -f 1 | grep -q -v '^$_krel'" \; -print \
+							&& find -type f \( -iname '*.ko' -o -iname '*.ko.*' \) -exec sh -c "modinfo -F vermagic {} | cut -d' ' -f 1 | grep -q -v '^$KREL'" \; -print \
 							| sed 's/^[[:space:]]*$//g' )"
-						[ "$_vermismatches" ] && warning "Mismatch between kernel release '$_krel' and vermagic value in modules:" && warning2 "$_vermismatches" && return 1
+						[ "$_vermismatches" ] && warning "Mismatch between kernel release '$KREL' and vermagic value in modules:" && warning2 "$_vermismatches" && return 1
 
 						# Build kmod index.
 						info_func_set "stage ($p-post build-index)"
 						local _mymod _mymodname
-						local _mymodindex="$manifests/${_myddir##*/}.kmod-INDEX"
+						local _mymodindex="$STAGE_MANIFESTS/${_myddir##*/}.kmod-INDEX"
 						: > "$_mymodindex"
 						file_is_writable "$_mymodindex" || ! warning "Could not write to module index at '$_mymodindex'!" || return 1
 
 						(	cd "$_myddir"
-							printf '# Module index for: %s/%s-%s\n' "$_arch" "$_subdir" "$p"
-							printf '# Kernel: %s/%s\n' "$_arch" "$kver"
+							printf '# Module index for: %s/%s-%s\n' "$KARCH" "$_subdir" "$p"
+							printf '# Kernel: %s/%s\n' "$KARCH" "$KREL"
 
 							find "lib/modules" -type f \( -iname '*.ko' -o -iname '*.ko.*' \) -print | while read _mymod; do
 								_mymodname="${_mymod##*/}" && _mymodname="${_mymodname%.ko.*}" && _mymodname="${_mymodname%.ko}"
-								printf 'kmod:%s:%s/%s:%s\t' "$_mymodname" "$_arch" "$_krel" "$(kerneltool_checksum_module "$_myddir/$_mymod")"
-								printf 'kpkg:%s/%s-%s\t' "$_arch" "$_subdir" "$p"
+								printf 'kmod:%s:%s/%s:%s\t' "$_mymodname" "$KARCH" "$KREL" "$(kerneltool_checksum_module "$_myddir/$_mymod")"
+								printf 'kpkg:%s/%s-%s\t' "$KARCH" "$_subdir" "$p"
 								calc_file_checksums "$_mymod" sha512 ; printf '\n'
 							done
 						) >> "$_mymodindex" || ! warning "Failed to create module index '$_mymodindex' for '$_myddir'!" || return 1
@@ -358,15 +405,15 @@ kerneltool_stage() {
 						# Build firmware index.
 						info_func_set "stage ($p-post build-index)"
 						local _myfw
-						local _myfwindex="$manifests/${_myddir##*/}.firmware-INDEX"
+						local _myfwindex="$STAGE_MANIFESTS/${_myddir##*/}.firmware-INDEX"
 						: > "$_myfwindex"
 						file_is_writable "$_myfwindex" || ! warning "Could not write to module index at '$_myfwindex'!" || return 1
 						( 	cd "$_myddir"
-							printf '# Firmware index for: %s/%s-%s\n' "$_arch" "$_subdir" "$p"
+							printf '# Firmware index for: %s/%s-%s\n' "$KARCH" "$_subdir" "$p"
 							find "lib/firmware" -type f -print | while read _myfw; do
 								_myfw="${_myfw#./}"
-								printf 'firmware:%s:%s:%s\t' "${_myfw#lib/firmware/}" "$_arch" "$(kerneltool_checksum_module "$_myfw")"
-								printf 'kpkg:%s/%s-%s\t' "$_arch" "$_subdir" "$p"
+								printf 'firmware:%s:%s:%s\t' "${_myfw#lib/firmware/}" "$KARCH" "$(kerneltool_checksum_module "$_myfw")"
+								printf 'kpkg:%s/%s-%s\t' "$KARCH" "$_subdir" "$p"
 								calc_file_checksums "$_myfw" sha512 ; printf '\n'
 							done
 						) >> "$_myfwindex" || ! warning "Failed to create firmware index '$_mymodindex' for '$_myddir'!" || return 1
@@ -378,7 +425,7 @@ kerneltool_stage() {
 			info_func_set "stage ($p-manifest)"
 			if dir_exists "$_myddir" ; then
 				msg "Building Manifest for '$_myddir' at '$_mymanifest'."
-				kerneltool_calc_path_manifest "$_myddir" "kpkg:$_arch/$_subdir-$p" > "$_mymanifest"
+				kerneltool_calc_path_manifest "$_myddir" "kpkg:$KARCH/$_subdir-$p" > "$_mymanifest"
 			fi
 		done
 
@@ -388,49 +435,57 @@ kerneltool_stage() {
 
 	done
 
-	# Wipe and create merged-root for this arch and kernel release
-	info_func_set "stage (merge)"
-	msg "Merging contents of all staging subdirectiories under '$_arch/$_krel' into '$_arch/merged-$_krel'."
-	local merged="$stage_base/$_arch/merged-$_krel"
-	dir_not_exists "$merged" || rm -rf "$merged" || ! warning "Failed to wipe target directory before merging!" || return 1 # We want to recreate this every time even if we're only adding staged files.
-	mkdir_is_writable "$merged" || ! warning "Failed to create directory for staging merged root '$merged'" || return 1
-
-	# Create hardlinked copy of all contents of all subdirectories in stage_base into merged.
-	(cd "$stage_kern" && cp -rl */* "$merged") || ! warning "Could not merge '$stage_kern/*' into '$merged'!" || return 1
-
-	merged_manifest="$manifests/$_krel.Manifest" merged_kmod_index="$manifests/$_krel.kmod-INDEX" merged_firmware_index="$manifests/$_krel.firmware-INDEX"
-	# Creat merged Manifest, kmod-INDEX, and firmware-INDEX
-	printf '# Manifest for %s/%s\n' "$_arch"  "$_krel" > "$merged_manifest" && file_is_writable "$merged_manifest" || ! warning "Could not write to merged Manifest at '$merged_manifest'!" || return 1
-	(cd "$stage_kern" && for _d in * ; do file_exists "$manifests/$_d.Manifest" && cat "$manifests/$_d.Manifest" ; done ) | grep -v '^#' | sort -u -k3 -k2 -k1 >> "$merged_manifest"
-	printf '# kmod INDEX for %s/%s\n' "$_arch" "$_krel" > "$merged_kmod_index" && file_is_writable "$merged_kmod_index" || ! warning "Could not write to merged Manifest at '$merged_kmod_index'!" || return 1
-	(cd "$stage_kern" && for _d in * ; do file_exists "$manifests/$_d.kmod-INDEX" && cat "$manifests/$_d.kmod-INDEX"; done ) | grep -v '^#' | sort -u -k3 -k2 -k1  >> "$merged_kmod_index"
-	printf '# firmware INDEX for %s/%s\n' "$_arch" "$_krel" > "$merged_firmware_index" && file_is_writable "$merged_firmware_index" || ! warning "Could not write to merged Manifest at '$merged_firmware_index'!" || return 1
-	(cd "$stage_kern" && for _d in * ; do file_exists "$manifests/$_d.firmware-INDEX" && cat "$manifests/$_d.firmware-INDEX" ; done ) | grep -v '^#' | sort -u -k3 -k2 -k1  >> "$merged_firmware_index"
-
-
-	# Update module dependencies.
-	info_func_set "stage (depmod)"
-	msg "Running depmod against staged modules for '$_arch/$_krel'."
-	kerneltool_depmod "$merged" "$_krel" || ! warning "depmod for '$_krel' failed in merged dir '$merged'!" || return 1
-
-	# Create checksummed module and firmware deps for each module.
-	info_func_set "stage (kmod-deps)"
-	msg "Calculating checksummed module and firmware dependencies for all modules for '$_arch/$_krel'."
-	_moduledepfile="$manifests/$_krel.kmod_fw-DEPS"
-	( cd "$merged"
-		: > "$_moduledepfile" && file_is_writable "$_moduledepfile" || ! warning "Could not write to module and firmware dependency dump at '$_moduledepfile'!" || return 1
-		find "lib/modules" -type f \( -iname '*.ko' -o -iname '*.ko.*' \) -print | while read _mymod; do
-			kerneltool_calc_module_fw_deps "$_arch" "$_krel" "$merged" "$_mymod"
-		done
-	) >> "$_moduledepfile" || ! warning "Failed to create checkesummed kernel module and firmware dependency dump!" || return 1
-
-
+	kerneltool_merge
+	kerneltool_depall
+	
 	info_prog_set "kerneltool-stage"
-	msg "Staging complete for '$_arch/$_krel'."
+	msg "Staging complete for '$KARCH/$KREL'."
 
 	info_func_set "stage"
 	msg "Done."
 	return 0
+}
+
+kerneltool_merge() {
+	# Wipe and create merged-root for this arch and kernel release
+	info_func_set "stage (merge)"
+	msg "Merging contents of all staging subdirectiories under '$STAGE_KREL' into '$STAGE_KERN/merged-$KREL'."
+	local merged="$STAGE_KERN/merged-$KREL"
+	dir_not_exists "$merged" || rm -rf "$merged" || ! warning "Failed to wipe target directory before merging!" || return 1 # We want to recreate this every time even if we're only adding staged files.
+	mkdir_is_writable "$merged" || ! warning "Failed to create directory for staging merged root '$merged'" || return 1
+
+	# Create hardlinked copy of all contents of all subdirectories in stage_base into merged.
+	(cd "$STAGE_KREL" && cp -rl */* "$merged") || ! warning "Could not merge '$STAGE_KREL/*' into '$merged'!" || return 1
+
+	merged_manifest="$STAGE_MANIFESTS/$KREL.Manifest" merged_kmod_index="$STAGE_MANIFESTS/$KREL.kmod-INDEX" merged_firmware_index="$STAGE_MANIFESTS/$KREL.firmware-INDEX"
+	# Creat merged Manifest, kmod-INDEX, and firmware-INDEX
+	printf '# Manifest for %s/%s\n' "$KARCH"  "$KREL" > "$merged_manifest" && file_is_writable "$merged_manifest" || ! warning "Could not write to merged Manifest at '$merged_manifest'!" || return 1
+	(cd "$STAGE_KREL" && for _d in * ; do file_exists "$manifests/$_d.Manifest" && cat "$STAGE_MANIFESTS/$_d.Manifest" ; done ) | grep -v '^#' | sort -u -k3 -k2 -k1 >> "$merged_manifest"
+	printf '# kmod INDEX for %s/%s\n' "$KARCH" "$KREL" > "$merged_kmod_index" && file_is_writable "$merged_kmod_index" || ! warning "Could not write to merged Manifest at '$merged_kmod_index'!" || return 1
+	(cd "$STAGE_KREL" && for _d in * ; do file_exists "$manifests/$_d.kmod-INDEX" && cat "$STAGE_MANIFESTS/$_d.kmod-INDEX"; done ) | grep -v '^#' | sort -u -k3 -k2 -k1  >> "$merged_kmod_index"
+	printf '# firmware INDEX for %s/%s\n' "$KARCH" "$KREL" > "$merged_firmware_index" && file_is_writable "$merged_firmware_index" || ! warning "Could not write to merged Manifest at '$merged_firmware_index'!" || return 1
+	(cd "$STAGE_KREL" && for _d in * ; do file_exists "$STAGE_MANIFESTS/$_d.firmware-INDEX" && cat "$STAGE_MANIFESTS/$_d.firmware-INDEX" ; done ) | grep -v '^#' | sort -u -k3 -k2 -k1  >> "$merged_firmware_index"
+}
+
+kerneltool_depall() {
+	local merged="$STAGE_KERN/merged-$KREL"
+
+	# Update module dependencies.
+	info_func_set "stage (depmod)"
+	msg "Running depmod against staged modules for '$KARCH/$KREL'."
+	kerneltool_depmod "$merged" "$KREL" || ! warning "depmod for '$KREL' failed in merged dir '$merged'!" || return 1
+
+	# Create checksummed module and firmware deps for each module.
+	info_func_set "stage (kmod-deps)"
+	msg "Calculating checksummed module and firmware dependencies for all modules for '$KARCH/$KREL'."
+	_moduledepfile="$STAGE_MANIFESTS/$KREL.kmod_fw-DEPS"
+	( cd "$merged"
+		: > "$_moduledepfile" && file_is_writable "$_moduledepfile" || ! warning "Could not write to module and firmware dependency dump at '$_moduledepfile'!" || return 1
+		find "lib/modules" -type f \( -iname '*.ko' -o -iname '*.ko.*' \) -print | while read _mymod; do
+			kerneltool_calc_module_fw_deps "$KARCH" "$KREL" "$merged" "$_mymod"
+		done
+	) >> "$_moduledepfile" || ! warning "Failed to create checkesummed kernel module and firmware dependency dump!" || return 1
+
 }
 
 
@@ -446,6 +501,7 @@ kerneltool_depmod() {
 }
 
 
+
 # Command: mkmodsubset
 # Build module subset given a name and list of module names and/or globs.
 # Usage: kerneltool_mkmodsubset <staging base> <arch> <kernel release> <subset name> [<list of modules/globs>...]
@@ -455,7 +511,7 @@ kerneltool_mkmodsubset() {
 	local stage_base="$1" _arch="$2" _krel="$3" _subname="$4"
 	shift 4
 	allmods="$@"
-	local _merged="$stage_base/$_arch/merged-$_krel"
+	local _merged="$stage_base/$_arch/kernel/merged-$_krel"
 	local _modbase="$_merged/lib/modules"
 	dir_is_readable "$_modbase" || ! warning "Could not read merged modules directory '$_modbase'" || return 1
 
@@ -579,6 +635,7 @@ kerneltool_manifest_copy() {
 }
 
 
+
 # Command: mkmodarchive
 # Build modarchive from subset or list of modules.
 # Usage: kerneltool_mkmodarchive <staging base> <arch> <kernel release> <output file> [modsubset=<subset name>] [<list of modules/globs>...]
@@ -607,7 +664,7 @@ kerneltool_mkmodarchive() {
 			;;
 	esac
 
-	local _tmp="$stage_base/$_arch/subsets-$_krel/$_subname"
+	local _tmp="$stage_base/$_arch/kernel/subsets-$_krel/$_subname"
 
 	[ "$_keeptmp" = "yes" ] && dir_exists "$_tmp" || kerneltool_mkmodsubset "$stage_base" "$_arch" "$_krel" "$_subname" $@ || ! warning "Failed to make module subset '$_subname' needed to make '$_outname'!" || return 1
 
@@ -650,6 +707,7 @@ kerneltool_mkmodarchive() {
 }
 
 
+
 # Command: mkmodloop
 # Build modloop (rooted at lib/) from subset or list of modules.
 # Usage: kerneltool_mkmodloop <staging base> <arch> <kernel release> [modsubset=<subset name>] [<list of modules/globs>...]
@@ -660,6 +718,8 @@ kerneltool_mkmodloop() {
 	local _outname="modloop-$_krel"
 	kerneltool_mkmodarchive "$stage_base" "$_arch" "$_krel" "$_outdir/$_outname" $@
 }
+
+
 
 # Command: mkmodcpio
 # Build module cpio archive from subset or list of modules.
@@ -672,6 +732,8 @@ kerneltool_mkmodcpio() {
 	local _outname="modules-${_subset:+$_subset-}$_krel.cpio"
 	kerneltool_mkmodarchive "$stage_base" "$_arch" "$_krel" "$_outdir/$_outname" $@
 }
+
+
 
 # Command: mkmodcpiogz
 # Build compressed cpio archive from subset or list of modules.
@@ -688,7 +750,7 @@ kerneltool_mkmodcpiogz() {
 
 
 ###
-## Kerneltool Helper Functions
+##  Kerneltool Helper Functions
 ###
 
 # Print kernel arch given system arch.
@@ -719,10 +781,11 @@ kerneltool_checksum_module() {
 	case "$_file" in
 		*.ko) : uncompressed module; _mc='cat';;
 		*.ko.bz*) : compressed module; _mc='bzcat';; *.ko.gz)_mc='zcat';; *.ko.lz4)_mc='lz4cat';; *.ko.lzo*)_mc='lzopcat';; *.ko.xz|*.ko.lz*)_mc='xzcat';;
-		*) : unrecognized module extension, checksum raw file ; _mc='cat'
+		*) : unrecognized module extension, checksum raw file ; _mc='cat' ;;
 	esac
 	$_mc "$_file" | sha512sum | cut -d' ' -f 1 | sed 's/^/sha512:/g'
 }
+
 
 
 # Calculate complete module dependency tree (including firmware) for the given list of modules, with checksums.

@@ -1,10 +1,11 @@
-##
-## kerneltool - kbuild build directory tools.
-##
+####
+###  kerneltool - kbuild build directory tools.
+####
 
-#
-# Tools for querying the build directory.
-#
+###
+##  Tools for querying the build directory.
+###
+
 
 # Get the current configured kernel build arch from .config and translate it to a system arch
 kerneltool_kbuild_query_arch() {
@@ -18,10 +19,16 @@ kerneltool_kbuild_query_arch() {
 }
 
 # Print result of make kernelrelease/kernelversion/image_name from build directory.
-# Usage: kerneltool_kbuild_query_(kernelrelease|kernelversion|image_name) <arch> <build dir>
+
+# Usage: kerneltool_kbuild_query_kernelrelease <arch> <build dir>
 kerneltool_kbuild_query_kernelrelease() { local _arch="$1" _bdir="$2" ; make -C "$_bdir" ARCH="$(kerneltool_get_karch_from_arch "$_arch")" -s kernelrelease || return $? ; }
+
+# Usage: kerneltool_kbuild_query_kernelversion <arch> <build dir>
 kerneltool_kbuild_query_kernelversion() { local _arch="$1" _bdir="$2" ; make -C "$_bdir" ARCH="$(kerneltool_get_karch_from_arch "$_arch")" -s kernelversion || return $? ; }
+
+# Usage: kerneltool_kbuild_query_image_name <arch> <build dir>
 kerneltool_kbuild_query_image_name() { local _arch="$1" _bdir="$2" ; make -C "$_bdir" ARCH="$(kerneltool_get_karch_from_arch "$_arch")" -s image_name || return $? ; }
+
 
 # Print the current configured kernel build arch / kernel release from build dir.
 # Usage: kerneltool_kbuild_query_arch_kernel_release <build dir>
@@ -35,6 +42,7 @@ kerneltool_kbuild_query_arch_kernel_release() {
 
 	printf '%s/%s' "$_arch" "$_krel"
 }
+
 
 
 ###
@@ -53,9 +61,12 @@ kerneltool_kbuild_make_kernel_target() {
 	printf '%s' "${_target}"
 	return 0
 }
+
+# Usage: get_kernel_make_kernel_opts <arch> <kernel release> <build dir>
 kerneltool_kbuild_make_kernel_opts() { printf '%s' "${kernel_make_kernel_opts:-"$(getvar arch_$1_kernel_make_kernel_opts)"}" ; }
 
 # No kerneltool_kbuild_make_kernel_install_*() because we copy kernel image with our own fake target.
+
 # Usage: kerneltool_kbuild_make_kernel_install <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_kernel_install() {
 	local _arch="$1" _krel="$2" _bdir="$3" _ddir="$4"
@@ -81,18 +92,47 @@ kerneltool_kbuild_make_kernel_install() {
 
 
 # Targets and options to build and install modules:
+
+# Usage: kerneltool_kbuild_make_modules_target <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_modules_target() { printf '%s' "${kernel_make_modules_target:-modules}" ; }
+
+# Usage: kerneltool_kbuild_make_modules_opts <arch> <kernel release> <build dir> <dest dir>
+kerneltool_kbuild_make_modules_opts() { printf '%s' "${kernel_make_modules_opts:-}" ; }
+
+# Usage: kerneltool_kbuild_make_modules_install_target <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_modules_install_target() { printf '%s' "${kernel_make_modules_install_target:-modules_install}" ; }
+
+# Usage: kerneltool_kbuild_make_modules_install_opts <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_modules_install_opts() { local _ddir="$4" ; printf '%s' "${kernel_make_modules_install_opts:-INSTALL_MOD_PATH="$_ddir${kernel_modules_install_path:-/}"}" ; }
 
+
 # Targets and options to build and install firmware:
+
+# Usage: kerneltool_kbuild_make_firmware_target <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_firmware_target() { printf '%s' "${kernel_make_firmware_target:-firmware}" ; }
+
+# Usage: kerneltool_kbuild_make_firmware_opts <arch> <kernel release> <build dir> <dest dir>
+kerneltool_kbuild_make_firmware_opts() { printf '%s' "${kernel_make_firmware_opts:-}" ; }
+
+# Usage: kerneltool_kbuild_make_firmware_install_target <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_firmware_install_target() { printf '%s' "${kernel_make_firmware_install_target:-firmware_install}" ; }
+
+# Usage: kerneltool_kbuild_make_firmware_install_opts <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_firmware_install_opts() { local _ddir="$4" ; printf '%s' "${kernel_make_firmware_install_opts:-${kernel_firmware_install_path:-INSTALL_MOD_PATH="$_ddir${kernel_modules_install_path:-/}"}}" ; }
 
+
 # Targets and options to build and install dtbs:
+
+# Usage: kerneltool_kbuild_make_dtbs_target <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_dtbs_target() { printf '%s' "${kernel_make_dtbs_target:-dtbs}" ; }
+
+# Usage: kerneltool_kbuild_make_dtbs_opts <arch> <kernel release> <build dir> <dest dir>
+kerneltool_kbuild_make_dtbs_opts() { printf '%s' "${kernel_make_dtbs_target_opts:-}" ; }
+
+# Usage: kerneltool_kbuild_make_dtbs_install_target <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_dtbs_install_target() { printf '%s' "${kernel_make_dtbs_install_target:-dtbs_install}" ; }
+
+# Usage: kerneltool_kbuild_make_dtbs_install_opts <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_dtbs_install_opts() {
 	local _arch="$1" _krel="$2" _bdir="$3" _ddir="$4"
 
@@ -106,17 +146,27 @@ kerneltool_kbuild_make_dtbs_install_opts() {
 	else printf 'INSTALL_DTBS_PATH="%s"' "$_ddir/usr/lib/linux-$_krel" ; fi
 }
 
+
 # Targets and options to build and install headers:
+
+# Usage: kerneltool_kbuild_make_headers_target <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_headers_target() { printf '%s' "${kernel_make_headers_target:-headers_check}" ; }
+
+# Usage: kerneltool_kbuild_make_headers_opts <arch> <kernel release> <build dir> <dest dir>
+kerneltool_kbuild_make_headers_opts() { printf '%s' "${kernel_make_headers_opts:-}" ; }
+
+# Usage: kerneltool_kbuild_make_headers_install_target <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_headers_install_target() { printf '%s' "${kernel_make_headers_install_target:-headers_install}" ; }
+
+# Usage: kerneltool_kbuild_make_headers_install_opts <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_make_headers_install_opts() { local _ddir="$4" ; printf '%s' "${kernel_make_headers_install_opts:-INSTALL_HDR_PATH="$_ddir${kernel_headers_install_path:-/usr}"}" ; }
 
 
 
+###
+##  Tools for building kbuild targets
+###
 
-#
-# Tools for building kbuild targets
-#
 
 # Usage: kerneltool_kbuild_make <arch> <build dir> <dest dir> <make command line...>
 kerneltool_kbuild_make() {
@@ -124,6 +174,7 @@ kerneltool_kbuild_make() {
 	shift 2
 	make -C "$_bdir" ARCH="$_karch" $@ || return $?
 }
+
 
 # Usage: kerneltool_kbuild_get_make_target <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_get_make_target() {
@@ -139,6 +190,7 @@ kerneltool_kbuild_get_make_target() {
 	printf '%s' "$_target"
 }
 
+
 # Usage: kerneltool_kbuild_get_make_opts <arch> <kernel release> <build dir> <dest dir>
 kerneltool_kbuild_get_make_opts() {
 	local _arch="$1" _krel="$2" _bdir="$3" _ddir="$4" _tgt="$5"
@@ -151,6 +203,7 @@ kerneltool_kbuild_get_make_opts() {
 	
 	[ "$kernel_make_opts$_opts" ] && printf '%s ' $kernel_make_opts $_opts
 }
+
 
 # Usage: kerneltool_kbuild_make_target <arch> <kernel release string> <build dir> <dest dir> <make targets (get_kernel_make_*_target) ...>
 kerneltool_kbuild_make_target() {

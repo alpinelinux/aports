@@ -35,6 +35,7 @@ Global options:
 	--verbose|-v			Increase verbosity.
 	--apk-cmd			Override APK command.
 	--arch				Override arch.
+	--hostname			Override hostname.
 	--staging-root			Override staging root.
 	--install-root			Override install root.
 
@@ -86,6 +87,16 @@ case "$TOOL" in
 		load_plugins "$scriptdir/initfs"
 		. "$scriptdir/initfs/plugin-mkinitfs.sh"
 		;;
+	initfstool)	
+		load_plugins "$scriptdir/archs"
+		load_plugins "$scriptdir/kernels"
+		load_plugins "$scriptdir/initfs"
+		. "$scriptdir/tools/tool-apkroottool.sh"
+		. "$scriptdir/kernels/tool-kerneltool.sh"
+		. "$scriptdir/kernels/tool-kerneltool-apk.sh"
+		. "$scriptdir/kernels/tool-kerneltool-kbuild.sh"
+		. "$scriptdir/initfs/tool-initfstool.sh"
+		;;
 
 esac
 
@@ -100,6 +111,7 @@ esac
 			--verbose|-v) shift ; continue ;;
 			--apk-cmd) OPT_apk_cmd="$2" ; shift 2 ; continue ;;
 			--arch) OPT_arch="$2"; shift 2 ; continue ;;
+			--hostname) OPT_hostname="$2"; shift 2 ; continue ;;
 			--staging-root) OPT_staging_root="$2" ; shift 2 ; continue ;;
 			--install-root) OPT_install_root="$2" ; shift 2 ; continue ;;
 		esac
@@ -113,7 +125,9 @@ esac
 			--key-file|--key) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--key-file $2" ; shift 2 ; continue ;;
 			--keys-dir) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--keys-dir $2" ; shift 2 ; continue ;;
 			--host-keys) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--host-keys" ; shift ; continue ;;
-			--no-host-keys) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--no-host-keys" ; shift ; continue ;;
+			--no-host-keys) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline//--host-keys/ }" ; shift ; continue ;;
+			--arch-keys) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline:+"$OPT_apkroot_setup_cmdline "}--arch-keys" ; shift ; continue ;;
+			--no-arch-keys) OPT_apkroot_setup_cmdline="${OPT_apkroot_setup_cmdline//--arch-keys/ }" ; shift ; continue ;;
 		esac
 		break
 		#case "$1" in
@@ -122,10 +136,16 @@ esac
 
 	# Setup our apk tool:
 	[ "$APK" ] || _apk_init ${OPT_apk_cmd:+"$OPT_apk_cmd"}
+	
+	# Determine our value for hostname
+	: "${mkalpine_hostname:="${HOSTNAME:-alpine}"}"
+	HOSTNAME="${OPT_hostname:-${mkalpine_hostname}}"
+
 	# Determine our staging root
 	: "${mkalpine_staging_root:=/var/cache/mkalpine/staging}"
 	STAGING_ROOT="${OPT_staging_root:-$mkalpine_staging_root}"
 
-#set -- $_args
+	# Default apkroot_setup_cmdline if nothing has been specified
+	: "${OPT_apkroot_setup_cmdline:="--host-keys --arch-keys"}"
 
 "$TOOL" "$@"
