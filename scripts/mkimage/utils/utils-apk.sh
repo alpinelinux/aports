@@ -278,6 +278,7 @@ apkroot_manifest_index_libs() {
 			*.so|*.so.*) printf 'libso:%s:%s:%s\t%s\t%s\t%s\n' "${_filefield##*/}" "$_arch" "$_sumfield" "$_pkgfield" "$_sumfield" "$_filefield" ;;
 			*.a) printf 'liba:%s:%s:%s\t%s\t%s\t%s' "${_filefield##*/}" "$_arch" "$_sumfield" "$_pkgfield" "$_sumfield" "$_filefield" ;;
 			*.rlib) printf 'librust:%s:%s:%s\t%s\t%s\t%s' "${_filefield##*/}" "$_arch" "$_sumfield" "$_pkgfield" "$_sumfield" "$_filefield" ;;
+			lib*.c32) printf 'libc32:%s:%s:%s\t%s\t%s\t%s' "${_filefield##*/}" "$_arch" "$_sumfield" "$_pkgfield" "$_sumfield" "$_filefield" ;;
 			*) continue ;;
 		esac
 	done > "$_apkroot/.libs.INDEX"
@@ -290,7 +291,7 @@ apkroot_manifest_index_bins() {
 	local _apkroot="$APKROOT" && [ "$_apkroot" ] || ! warning "Called without value set in \$APKROOT!" || return 1
 	file_exists "$_apkroot/.Manifest-apk-installed" || apkroot_manifest_installed_packages
 	local _pkgfield _sumfield _filefield _file _link _type
-	cat "$_apkroot/.Manifest-apk-installed" | grep -v -e '\.so$' -e '\.so\..*$' -e '\.a$' | while read -r _pkgfield _sumfield _filefield ; do
+	cat "$_apkroot/.Manifest-apk-installed" | grep -v -e '\.so$' -e '\.so\..*$' -e '\.a$' -e '\.rlib$' -e 'lib.*\.c32' | while read -r _pkgfield _sumfield _filefield ; do
 		_file="$_apkroot/$_filefield"
 
 		# Resolve links and check target so we can include link in index if it hits.
