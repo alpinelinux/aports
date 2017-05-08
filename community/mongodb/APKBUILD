@@ -1,8 +1,8 @@
 # Maintainer: Filipp Andronov <filipp.andronov@gmail.com>
 # Contributor: Marc Vertes <marc.vertes@ugrid.net>
 pkgname=mongodb
-pkgver=3.4.3
-pkgrel=1
+pkgver=3.4.4
+pkgrel=0
 pkgdesc='A high-performance, open source, schema-free document-oriented database'
 url='http://www.mongodb.org'
 arch='x86_64'
@@ -100,7 +100,7 @@ package() {
 	install -Dm644 "$srcdir/mongos.confd" "$pkgdir/etc/conf.d/mongos"
 }
 
-sha512sums="e2fb5fc2f02e9dbca6c30d2e2aaf1569180ca15198226cdad46f47f44905293afe77763fe2e5c9add0b5bcbd62b7ce7905fb183068c0738cdeeae8d39f848cef  mongodb-src-r3.4.3.tar.gz
+sha512sums="dbae89b49c363e7258021cd31385e4449bfdfdfd5adfcb1683e4431372731e58ec33bf8f7576d2d52659a52461bd6a32fbc67d5c6e36d52184ec1aabb345d940  mongodb-src-r3.4.4.tar.gz
 56db8f43afc94713ac65b174189e2dd903b5e1eff0b65f1bdac159e52ad4de6606c449865d73bd47bffad6a8fc339777e2b11395596e9a476867d94a219c7925  40-fix-elf-native-class.patch
 7d097f497cb910c9cb81086cd8c222e43456d1a6de4adfe3e97a4d99add454279350fdeb7305dab84b3deca04afd824036d4065ee0fb8cdd8c03e96d98ee86af  backtrace.patch
 f829b1ad542db3ee776d444243b8b47ab4e48a7386d9b199d7b1adafd31556cf173a5683b78ee735d6a69999ad9af5ad152fde955bbe8865f7910718991ce97c  fix-asio-strerror_r.patch
