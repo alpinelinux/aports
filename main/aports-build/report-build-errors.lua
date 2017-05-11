@@ -39,9 +39,11 @@ function m.postbuild(aport, success, repodest, arch, logfile)
 		run{"scp", logfile, loghost..":"..logdir}
 	end
 
+	local topic = ("build/%s/errors"):format(hostname)
+	local payload = nil
+
 	if not success then
-		local topic = ("build/%s/errors"):format(hostname)
-		local payload =	json.encode{
+		payload = json.encode{
 			pkgname = aport.pkgname,
 			hostname = hostname,
 			reponame = aport:get_repo_name(),
@@ -51,8 +53,8 @@ function m.postbuild(aport, success, repodest, arch, logfile)
 					aport.pkgname, aport.pkgver, aport.pkgrel),
 			status = success
 		}
-		publish.single(topic, payload, nil, nil, "msg.alpinelinux.org")
 	end
+	publish.single(topic, payload, nil, true, "msg.alpinelinux.org")
 end
 
 return m

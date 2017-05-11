@@ -1,0 +1,213 @@
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+
+_mainflavor=hardened
+pkgname=linux-$_mainflavor
+pkgver=4.9.27
+case $pkgver in
+*.*.*)	_kernver=${pkgver%.*};;
+*.*)	_kernver=${pkgver};;
+esac
+pkgrel=0
+pkgdesc="Linux kernel with hardening patches"
+url="http://alpinelinux.org"
+depends="mkinitfs"
+makedepends="perl sed installkernel bash gmp-dev bc linux-headers mpfr-dev
+	mpc1-dev elfutils-dev"
+options="!strip !check"
+install=
+source="https://kernel.org/pub/linux/kernel/v4.x/linux-$_kernver.tar.xz
+	https://kernel.org/pub/linux/kernel/v4.x/patch-$pkgver.xz
+	http://dev.alpinelinux.org/~ncopa/grsec/hardened-3.1-$pkgver-201704252333-alpine.patch
+
+	zfs-fix.patch
+	config-hardened.x86
+	config-hardened.x86_64
+	config-hardened.armhf
+
+	config-virthardened.x86
+	config-virthardened.x86_64
+	"
+subpackages="$pkgname-dev:_dev"
+_flavors=
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-${_f} linux-${_f}-dev:_dev"
+		fi
+		;;
+	esac
+done
+
+arch="x86 x86_64 armhf"
+license="GPL2"
+
+prepare() {
+	local _patch_failed=
+	cd "$srcdir"/linux-$_kernver
+	if [ "${pkgver%.0}" = "$pkgver" ]; then
+		msg "Applying patch-$pkgver.xz"
+		unxz -c < "$srcdir"/patch-$pkgver.xz | patch -p1 -N || return 1
+	fi
+
+	# first apply patches in specified order
+	for i in $source; do
+		local file=${i%::*}
+		case $file in
+		*.patch)
+			msg "Applying $file..."
+			if ! patch -s -p1 -N -i "$srcdir"/${file##*/}; then
+				echo $file >>failed
+				_patch_failed=1
+			fi
+			;;
+		esac
+	done
+
+	if ! [ -z "$_patch_failed" ]; then
+		error "The following patches failed:"
+		cat failed
+		return 1
+	fi
+
+	# remove localversion from patch if any
+	rm -f localversion*
+
+	for i in $_flavors; do
+		local _config=config-$i.${CARCH}
+		local _builddir="$srcdir"/build-$i
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$i" > "$srcdir"/build-$i/localversion-alpine \
+			|| return 1
+
+		cp "$srcdir"/$_config "$_builddir"/.config || return 1
+		make -C "$srcdir"/linux-$_kernver \
+			O="$_builddir" \
+			HOSTCC="${CC:-gcc}" \
+			silentoldconfig || return 1
+	done
+}
+
+build() {
+	for i in $_flavors; do
+		cd "$srcdir"/build-$i
+		make CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
+			|| return 1
+	done
+}
+
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=${pkgver}-${pkgrel}-${_buildflavor}
+
+	cd "$srcdir"/build-$_buildflavor || return 1
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+
+	local _install
+	case "$CARCH" in
+	arm*)
+		local _dtbdir="$_outdir"/usr/lib/linux-${_abi_release}
+		mkdir -p "$_dtbdir"
+		for i in arch/arm/boot/dts/*.dtb ; do
+			install -m644 "$i" "$_dtbdir"
+		done
+
+		_install=zinstall
+		;;
+	*)
+		_install=install
+		;;
+	esac
+
+	make -j1 modules_install firmware_install $_install \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_PATH="$_outdir"/boot \
+		|| return 1
+
+	rm -f "$_outdir"/lib/modules/${_abi_release}/build \
+		"$_outdir"/lib/modules/${_abi_release}/source
+	rm -rf "$_outdir"/lib/firmware
+
+	install -D include/config/kernel.release \
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+}
+
+# main flavor installs in $pkgdir
+package() {
+	depends="$depends linux-firmware"
+	provides="linux-grsec=${pkgver}-r${pkgrel}"
+
+	_package hardened "$pkgdir"
+}
+
+# subflavors install in $subpkgdir
+virthardened() {
+	provides="linux-virtgrsec=${pkgver}-r${pkgrel}"
+
+	_package virthardened "$subpkgdir"
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _abi_release=${pkgver}-${pkgrel}-$_flavor
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# simlar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="gmp-dev bash"
+	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
+	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine \
+		|| return 1
+	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" HOSTCC="${CC:-gcc}" \
+		silentoldconfig prepare modules_prepare scripts
+
+	# remove the stuff that points to real sources. we want 3rd party
+	# modules to believe this is the soruces
+	rm "$dir"/Makefile "$dir"/source
+
+	# copy the needed stuff from real sources
+	#
+	# this is taken from ubuntu kernel build script
+	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
+	cd "$srcdir"/linux-$_kernver
+	find .  -path './include/*' -prune \
+		-o -path './scripts/*' -prune -o -type f \
+		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
+		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' \) \
+		-print | cpio -pdm "$dir" || return 1
+
+	cp -a scripts include "$dir" || return 1
+	find $(find arch -name include -type d -print) -type f \
+		| cpio -pdm "$dir"
+
+	install -Dm644 "$srcdir"/build-$_flavor/Module.symvers \
+		"$dir"/Module.symvers
+
+	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
+	ln -sf /usr/src/linux-headers-${_abi_release} \
+		"$subpkgdir"/lib/modules/${_abi_release}/build
+}
+
+sha512sums="bf67ff812cc3cb7e5059e82cc5db0d9a7c5637f7ed9a42e4730c715bf7047c81ed3a571225f92a33ef0b6d65f35595bc32d773356646df2627da55e9bc7f1f1a  linux-4.9.tar.xz
+e7a9302d284e77c4a961f6cbfe5c702bbb2db5046a35e4c850d0549808ac8278d550239d7af72f2dd7d1b7940416dfacb6cc83be9b948ffe012428bd8d0fe367  patch-4.9.27.xz
+9ed31a793211f3042a7dd51759a1c357c02240b004bd55d22c4657d7898710c14dd6d33de3d404e5e24b2319bec7cd6284ce33534dd902c5dc36fc00f58d8ca1  hardened-3.1-4.9.27-201704252333-alpine.patch
+5a0a78e6de11eb8180d96830b9faa9ac560586f7beb663c8196a16ac6232b5008b9181b3c9b94e2b13a444acba4b6e80a3408d34606432f92eb4d169c3953d5d  zfs-fix.patch
+e0f8793210d3974a748bd7b1cd71cf7adc3672d279a1d51bbf1a7417161fadaf377bff43fa51b943c89051c62cf608af263137e5c5f904cf70391b94d60cb14d  config-hardened.x86
+adab5e5165c139e219a49b5aa386e64a8778548fe41d34d62a4ca1fceae36a3001d570695a425b9e10f96a14fa67288ffde3d012165e23aeccc087fd6a79989f  config-hardened.x86_64
+0b14dc2d522daa10d102a10d79af242ac80631131f2748188d66964e94a95f0437458f280d9bdb302548b25c4bd1c2aecdbb619be9ba599ffd9b56fa16d6a277  config-hardened.armhf
+1de874523eee031c2efadfb6f7ddb86bb303b9f61d1a022e4e922f6365c3a667c2a1fdb61570a95a05c6c45689796e355eae9579e567790b757ae2a09f6be8c4  config-virthardened.x86
+0570f4ad5af0d6e3cbf50d9e3a7d6dab8d7cba85693037e70dbee73aa1e4fc66cb217e1ef8e4a0ceb4073ffb6ada8201775bafe8401dc6dff5c07ac3bbe0f8f0  config-virthardened.x86_64"
