@@ -97,6 +97,8 @@ int main(int argc, const char *argv[])
 	argv[0] = path;
 	/* set our uid to root so bbsuid --install works */
 	setuid(0);
+	/* set our gid to root so apk commit hooks run with the same gid as for "sudo apk add ..." */
+	setgid(0);
 	execv(path, (char * const*)argv);
 	perror(path);
 	return 1;
