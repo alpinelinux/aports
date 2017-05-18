@@ -193,6 +193,7 @@ build_grubefi_img() {
 section_grubieee1275() {
 	[ "$ARCH" = ppc64le ] || return 0
 	[ "$output_format" = "iso" ] || return 0
+	kernel_cmdline="$kernel_cmdline console=hvc0"
 
 	build_section grub_cfg boot/grub/grub.cfg $(grub_gen_config | checksum)
 }
