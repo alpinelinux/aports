@@ -17,11 +17,11 @@ profile_vanilla() {
 
 profile_extended() {
 	profile_standard
-	kernel_addons="dahdi-linux xtables-addons"
+	kernel_addons="dahdi-linux xtables-addons zfs spl"
 	apks="$apks
 		dahdi-linux dahdi-tools ethtool hwdata lftp links
 		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
-		pax-utils paxctl pciutils screen strace sudo tmux
+		pax-utils paxmark pciutils screen strace sudo tmux
 		usbutils v86d vim xtables-addons
 
 		acct arpon arpwatch awall bridge-utils bwm-ng
@@ -38,6 +38,7 @@ profile_extended() {
 		btrfs-progs cksfv dosfstools cryptsetup
 		cciss_vol_status lvm2 mdadm mkinitfs mtools nfs-utils
 		parted rsync sfdisk syslinux unrar util-linux xfsprogs
+		zfs
 		"
 
 	local _k _a
