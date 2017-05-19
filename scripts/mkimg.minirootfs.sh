@@ -16,6 +16,6 @@ create_image_rootfs() {
 profile_minirootfs() {
 	image_ext=tar.gz
 	output_format=rootfs
-	arch="x86 x86_64 armhf aarch64 ppc64le"
+	arch="x86 x86_64 armhf aarch64 ppc64le s390x"
 	rootfs_apks="busybox alpine-baselayout alpine-keys apk-tools libc-utils"
 }
