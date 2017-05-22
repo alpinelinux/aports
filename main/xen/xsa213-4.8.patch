@@ -1,0 +1,177 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: multicall: deal with early exit conditions
+
+In particular changes to guest privilege level require the multicall
+sequence to be aborted, as hypercalls are permitted from kernel mode
+only. While likely not very useful in a multicall, also properly handle
+the return value in the HYPERVISOR_iret case (which should be the guest
+specified value).
+
+This is XSA-213.
+
+Reported-by: Jann Horn <jannh@google.com>
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Acked-by: Julien Grall <julien.grall@arm.com>
+
+--- a/xen/arch/arm/traps.c
++++ b/xen/arch/arm/traps.c
+@@ -1550,7 +1550,7 @@ static bool_t check_multicall_32bit_clea
+     return true;
+ }
+ 
+-void arch_do_multicall_call(struct mc_state *state)
++enum mc_disposition arch_do_multicall_call(struct mc_state *state)
+ {
+     struct multicall_entry *multi = &state->call;
+     arm_hypercall_fn_t call = NULL;
+@@ -1558,23 +1558,26 @@ void arch_do_multicall_call(struct mc_st
+     if ( multi->op >= ARRAY_SIZE(arm_hypercall_table) )
+     {
+         multi->result = -ENOSYS;
+-        return;
++        return mc_continue;
+     }
+ 
+     call = arm_hypercall_table[multi->op].fn;
+     if ( call == NULL )
+     {
+         multi->result = -ENOSYS;
+-        return;
++        return mc_continue;
+     }
+ 
+     if ( is_32bit_domain(current->domain) &&
+          !check_multicall_32bit_clean(multi) )
+-        return;
++        return mc_continue;
+ 
+     multi->result = call(multi->args[0], multi->args[1],
+                          multi->args[2], multi->args[3],
+                          multi->args[4]);
++
++    return likely(!psr_mode_is_user(guest_cpu_user_regs()))
++           ? mc_continue : mc_preempt;
+ }
+ 
+ /*
+--- a/xen/arch/x86/hypercall.c
++++ b/xen/arch/x86/hypercall.c
+@@ -255,15 +255,19 @@ void pv_hypercall(struct cpu_user_regs *
+     perfc_incr(hypercalls);
+ }
+ 
+-void arch_do_multicall_call(struct mc_state *state)
++enum mc_disposition arch_do_multicall_call(struct mc_state *state)
+ {
+-    if ( !is_pv_32bit_vcpu(current) )
++    struct vcpu *curr = current;
++    unsigned long op;
++
++    if ( !is_pv_32bit_vcpu(curr) )
+     {
+         struct multicall_entry *call = &state->call;
+ 
+-        if ( (call->op < ARRAY_SIZE(pv_hypercall_table)) &&
+-             pv_hypercall_table[call->op].native )
+-            call->result = pv_hypercall_table[call->op].native(
++        op = call->op;
++        if ( (op < ARRAY_SIZE(pv_hypercall_table)) &&
++             pv_hypercall_table[op].native )
++            call->result = pv_hypercall_table[op].native(
+                 call->args[0], call->args[1], call->args[2],
+                 call->args[3], call->args[4], call->args[5]);
+         else
+@@ -274,15 +278,21 @@ void arch_do_multicall_call(struct mc_st
+     {
+         struct compat_multicall_entry *call = &state->compat_call;
+ 
+-        if ( (call->op < ARRAY_SIZE(pv_hypercall_table)) &&
+-             pv_hypercall_table[call->op].compat )
+-            call->result = pv_hypercall_table[call->op].compat(
++        op = call->op;
++        if ( (op < ARRAY_SIZE(pv_hypercall_table)) &&
++             pv_hypercall_table[op].compat )
++            call->result = pv_hypercall_table[op].compat(
+                 call->args[0], call->args[1], call->args[2],
+                 call->args[3], call->args[4], call->args[5]);
+         else
+             call->result = -ENOSYS;
+     }
+ #endif
++
++    return unlikely(op == __HYPERVISOR_iret)
++           ? mc_exit
++           : likely(guest_kernel_mode(curr, guest_cpu_user_regs()))
++             ? mc_continue : mc_preempt;
+ }
+ 
+ /*
+--- a/xen/common/multicall.c
++++ b/xen/common/multicall.c
+@@ -40,6 +40,7 @@ do_multicall(
+     struct mc_state *mcs = &current->mc_state;
+     uint32_t         i;
+     int              rc = 0;
++    enum mc_disposition disp = mc_continue;
+ 
+     if ( unlikely(__test_and_set_bit(_MCSF_in_multicall, &mcs->flags)) )
+     {
+@@ -50,7 +51,7 @@ do_multicall(
+     if ( unlikely(!guest_handle_okay(call_list, nr_calls)) )
+         rc = -EFAULT;
+ 
+-    for ( i = 0; !rc && i < nr_calls; i++ )
++    for ( i = 0; !rc && disp == mc_continue && i < nr_calls; i++ )
+     {
+         if ( i && hypercall_preempt_check() )
+             goto preempted;
+@@ -63,7 +64,7 @@ do_multicall(
+ 
+         trace_multicall_call(&mcs->call);
+ 
+-        arch_do_multicall_call(mcs);
++        disp = arch_do_multicall_call(mcs);
+ 
+ #ifndef NDEBUG
+         {
+@@ -77,7 +78,14 @@ do_multicall(
+         }
+ #endif
+ 
+-        if ( unlikely(__copy_field_to_guest(call_list, &mcs->call, result)) )
++        if ( unlikely(disp == mc_exit) )
++        {
++            if ( __copy_field_to_guest(call_list, &mcs->call, result) )
++                /* nothing, best effort only */;
++            rc = mcs->call.result;
++        }
++        else if ( unlikely(__copy_field_to_guest(call_list, &mcs->call,
++                                                 result)) )
+             rc = -EFAULT;
+         else if ( mcs->flags & MCSF_call_preempted )
+         {
+@@ -93,6 +101,9 @@ do_multicall(
+             guest_handle_add_offset(call_list, 1);
+     }
+ 
++    if ( unlikely(disp == mc_preempt) && i < nr_calls )
++        goto preempted;
++
+     perfc_incr(calls_to_multicall);
+     perfc_add(calls_from_multicall, i);
+     mcs->flags = 0;
+--- a/xen/include/xen/multicall.h
++++ b/xen/include/xen/multicall.h
+@@ -24,6 +24,10 @@ struct mc_state {
+     };
+ };
+ 
+-void arch_do_multicall_call(struct mc_state *mc);
++enum mc_disposition {
++    mc_continue,
++    mc_exit,
++    mc_preempt,
++} arch_do_multicall_call(struct mc_state *mc);
+ 
+ #endif /* __XEN_MULTICALL_H__ */
