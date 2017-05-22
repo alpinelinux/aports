@@ -259,7 +259,8 @@ create_image_iso() {
 	fi
 
 	if [ "$ARCH" = ppc64le ]; then
-		grub-mkrescue --output ${ISO} ${DESTDIR} -follow-links
+		grub-mkrescue --output ${ISO} ${DESTDIR} -follow-links \
+			-volid "alpine-$PROFILE $RELEASE $ARCH"
 	else
 		xorrisofs \
 			-quiet \
