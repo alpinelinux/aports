@@ -22,7 +22,7 @@ profile_extended() {
 		dahdi-linux dahdi-tools ethtool hwdata lftp links
 		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
 		pax-utils paxmark pciutils screen strace sudo tmux
-		usbutils v86d vim xtables-addons
+		usbutils v86d vim xtables-addons curl
 
 		acct arpon arpwatch awall bridge-utils bwm-ng
 		ca-certificates conntrack-tools cutter cyrus-sasl dhcp
