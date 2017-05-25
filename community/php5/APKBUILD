@@ -4,7 +4,7 @@
 # Maintainer: Matt Smith <mcs@darkregion.net>
 pkgname=php5
 pkgver=5.6.35
-pkgrel=1
+pkgrel=2
 pkgdesc="The PHP language runtime engine"
 url="http://www.php.net/"
 arch="all"
@@ -12,7 +12,7 @@ license="PHP-3.0"
 depends="$pkgname-cli"
 depends_dev="$pkgname-cli pcre-dev"
 install="$pkgname.post-upgrade"
-provides="php"
+provides="$pkgname-cli php-cli php"
 makedepends="
 	$depends_dev
 	apache2-dev
@@ -339,7 +339,7 @@ doc() {
 
 common() {
 	pkgdesc="PHP Common Files"
-	provides="$pkgname-zlib"  # for backward compatibility
+	provides="php-common $pkgname-zlib php-zlib"  # for backward compatibility
 	depends=""
 
 	cd "$srcdir"/php-$pkgver
@@ -354,6 +354,7 @@ common() {
 cgi() {
 	pkgdesc="PHP Common Gateway Interface (CGI)"
 	depends="$pkgname-common"
+	provides="php-cgi"
 	mkdir -p "$subpkgdir"/usr/bin
 	mv "$pkgdir"/usr/bin/php-cgi* "$subpkgdir"/usr/bin/
 }
@@ -370,6 +371,7 @@ cli() {
 fpm() {
 	pkgdesc="PHP FastCGI Process Manager (FPM)"
 	depends="$pkgname-common"
+	provides="php-fpm"
 	mkdir -p "$subpkgdir"$_confdir/fpm.d
 	install -D -m755 "$srcdir"/build-fpm/sapi/fpm/php-fpm \
 		"$subpkgdir"/usr/bin/php-fpm5 || return 1
@@ -388,6 +390,7 @@ fpm() {
 apache2() {
 	pkgdesc="PHP Module for Apache2"
 	depends="$pkgname-common apache2"
+	provides="php-apache2"
 	install -D -m755 "$srcdir"/build-apache2/libs/libphp5.so \
 		"$subpkgdir"/usr/lib/apache2/libphp5.so || return 1
 	install -D -m644 "$srcdir"/php5-module.conf \
@@ -397,6 +400,7 @@ apache2() {
 embed() {
 	pkgdesc="PHP Embed Library"
 	depends="$pkgname-common"
+	provides="php-embed"
 	mkdir -p "$subpkgdir"/usr/lib
 	mv "$pkgdir"/usr/lib/libphp5.so "$subpkgdir"/usr/lib/
 }
@@ -404,6 +408,7 @@ embed() {
 pear() {
 	pkgdesc="PHP Extension and Application Repository (PEAR)"
 	depends="$pkgname-cli $pkgname-xml"
+	provides="php-pear"
 	mkdir -p "$subpkgdir"/usr/share "$subpkgdir"$_confdir \
 		"$subpkgdir"/usr/bin
 	mv "$pkgdir"/usr/bin/pecl \
@@ -418,6 +423,7 @@ pear() {
 
 phpdbg() {
 	pkgdesc="Interactive PHP debugger"
+	provides="php-phpdbg"
 	mkdir -p "$subpkgdir"/usr/bin
 	mv "$pkgdir"/usr/bin/phpdbg* "$subpkgdir"/usr/bin/
 }
@@ -426,6 +432,7 @@ _mv_ext() {
 	local ext=$1
 	local ini=$ext.ini
 	pkgdesc="${ext} extension for PHP"
+	provides="php-$extname"
 
 	# extension dependencies
 	if [ -n "${2-}" ]; then
