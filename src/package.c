@@ -31,6 +31,7 @@
 
 static const apk_spn_match_def apk_spn_dependency_comparer = {
 	[7] = (1<<4) /*<*/ | (1<<5) /*=*/ | (1<<6) /*<*/,
+	[15] = (1<<6) /*~*/
 };
 
 static const apk_spn_match_def apk_spn_dependency_separator = {
@@ -190,9 +191,9 @@ void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_depend
 {
 	struct apk_name *name;
 	apk_blob_t bdep, bname, bop, bver = APK_BLOB_NULL, btag;
-	int mask = APK_DEPMASK_ANY, conflict = 0, tag = 0;
+	int mask = APK_DEPMASK_ANY, conflict = 0, tag = 0, fuzzy = 0;
 
-	/* [!]name[<,<=,=,>=,>,><]ver */
+	/* [!]name[<,<=,<~,=,~,>~,>=,>,><]ver */
 	if (APK_BLOB_IS_NULL(*b))
 		goto fail;
 
@@ -231,6 +232,10 @@ void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_depend
 			case '>':
 				mask |= APK_VERSION_GREATER;
 				break;
+			case '~':
+				mask |= APK_VERSION_FUZZY|APK_VERSION_EQUAL;
+				fuzzy = TRUE;
+				break;
 			case '=':
 				mask |= APK_VERSION_EQUAL;
 				break;
@@ -259,6 +264,7 @@ void apk_blob_pull_dep(apk_blob_t *b, struct apk_database *db, struct apk_depend
 		.repository_tag = tag,
 		.result_mask = mask,
 		.conflict = conflict,
+		.fuzzy = fuzzy,
 	};
 	return;
 fail:
@@ -320,7 +326,7 @@ int apk_dep_is_provided(struct apk_dependency *dep, struct apk_provider *p)
 	default:
 		if (p->version == &apk_null_blob)
 			return dep->conflict;
-		if (apk_version_compare_blob(*p->version, *dep->version)
+		if (apk_version_compare_blob_fuzzy(*p->version, *dep->version, dep->fuzzy)
 		    & dep->result_mask)
 			return !dep->conflict;
 		return dep->conflict;
@@ -341,7 +347,7 @@ int apk_dep_is_materialized(struct apk_dependency *dep, struct apk_package *pkg)
 	case APK_DEPMASK_ANY:
 		return !dep->conflict;
 	default:
-		if (apk_version_compare_blob(*pkg->version, *dep->version)
+		if (apk_version_compare_blob_fuzzy(*pkg->version, *dep->version, dep->fuzzy)
 		    & dep->result_mask)
 			return !dep->conflict;
 		return dep->conflict;

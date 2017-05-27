@@ -145,6 +145,9 @@ const char *apk_version_op_string(int mask)
 		return "<";
 	case APK_VERSION_LESS|APK_VERSION_EQUAL:
 		return "<=";
+	case APK_VERSION_EQUAL|APK_VERSION_FUZZY:
+	case APK_VERSION_FUZZY:
+		return "~";
 	case APK_VERSION_EQUAL:
 		return "=";
 	case APK_VERSION_GREATER|APK_VERSION_EQUAL:
@@ -186,7 +189,7 @@ int apk_version_validate(apk_blob_t ver)
 	return t == TOKEN_END;
 }
 
-int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
+int apk_version_compare_blob_fuzzy(apk_blob_t a, apk_blob_t b, int fuzzy)
 {
 	int at = TOKEN_DIGIT, bt = TOKEN_DIGIT, tt;
 	int av = 0, bv = 0;
@@ -215,7 +218,7 @@ int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
 		return APK_VERSION_GREATER;
 
 	/* both have TOKEN_END or TOKEN_INVALID next? */
-	if (at == bt)
+	if (at == bt || fuzzy)
 		return APK_VERSION_EQUAL;
 
 	/* if only difference is pkgrev, they are equal. */
@@ -238,6 +241,11 @@ int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
 		return APK_VERSION_GREATER;
 
 	return APK_VERSION_EQUAL;
+}
+
+int apk_version_compare_blob(apk_blob_t a, apk_blob_t b)
+{
+	return apk_version_compare_blob_fuzzy(a, b, FALSE);
 }
 
 int apk_version_compare(const char *str1, const char *str2)

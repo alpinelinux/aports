@@ -137,7 +137,7 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 
 			apk_blob_pull_dep(&b, db, &dep);
 			if (APK_BLOB_IS_NULL(b) || b.len > 0) {
-				apk_error("'%s' is not a valid dependency, format is name(@tag)([<>=]version)",
+				apk_error("'%s' is not a valid dependency, format is name(@tag)([<>~=]version)",
 					  *parg);
 				return -1;
 			}

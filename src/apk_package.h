@@ -73,7 +73,8 @@ struct apk_dependency {
 	unsigned broken : 1;
 	unsigned repository_tag : 6;
 	unsigned conflict : 1;
-	unsigned result_mask : 3;
+	unsigned result_mask : 4;
+	unsigned fuzzy : 1;
 };
 APK_ARRAY(apk_dependency_array, struct apk_dependency);
 
