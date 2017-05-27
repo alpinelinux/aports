@@ -18,6 +18,10 @@
 #include "apk_print.h"
 
 /* TODO: support package files as well as generating manifest from the installed DB. */
+static char *csum_types[APK_CHECKSUM_SHA1 + 1] = {
+	[APK_CHECKSUM_MD5] = "md5",
+	[APK_CHECKSUM_SHA1] = "sha1",
+};
 
 static void process_package(struct apk_database *db, struct apk_package *pkg)
 {
@@ -42,7 +46,7 @@ static void process_package(struct apk_database *db, struct apk_package *pkg)
 			if (apk_verbosity > 1)
 				printf("%s: ", pkg->name->name);
 
-                        printf("%s  " DIR_FILE_FMT "\n", csum_buf, DIR_FILE_PRINTF(diri->dir, file));
+                        printf("%s:%s  " DIR_FILE_FMT "\n", csum_types[file->csum.type], csum_buf, DIR_FILE_PRINTF(diri->dir, file));
                 }
 	}
 }
