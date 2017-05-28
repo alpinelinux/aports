@@ -249,7 +249,7 @@ static int index_main(void *ctx, struct apk_database *db, struct apk_string_arra
 
 	if (counts.unsatisfied != 0)
 		apk_warning("Total of %d unsatisfiable package "
-			    "names. Your repository maybe broken.",
+			    "names. Your repository may be broken.",
 			    counts.unsatisfied);
 	apk_message("Index has %d packages (of which %d are new)",
 		    total, newpkgs);
