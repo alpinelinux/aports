@@ -124,10 +124,11 @@ static int manifest_main(void *ctx, struct apk_database *db, struct apk_string_a
 }
 
 static struct apk_applet apk_manifest = {
-        .name = "manifest",
-        .help = "Show checksums of package contents",
-        .open_flags = APK_OPENF_READ,
-        .main = manifest_main,
+	.name = "manifest",
+	.help = "Show checksums of package contents",
+	.arguments = "PACKAGE...",
+	.open_flags = APK_OPENF_READ,
+	.main = manifest_main,
 };
 
 APK_DEFINE_APPLET(apk_manifest);
