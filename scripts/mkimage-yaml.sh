@@ -16,6 +16,8 @@ while [ $# -gt 0 ]; do
 	--branch) branch="$1"; shift;;
 	--release) release="$1"; shift;;
 	--flavor) flavor="$1"; shift;;
+	--title) title="$1"; shift;;
+	--desc) desc="$1"; shift;;
 	--) break ;;
 	-*) usage; exit 1;;
 	esac
@@ -50,9 +52,13 @@ for image; do
 	time=${time%.*}
 	file=${filepath##*/}
 	flavor=${file%-${release}-${arch}.*}
+	desc=$(echo "$desc" | sed -E 's/^\s*/    /')
 
 	cat <<-EOF
 	-
+	  title: "$title"
+	  desc: |
+	$desc
 	  branch: $branch
 	  arch: $arch
 	  version: $release
