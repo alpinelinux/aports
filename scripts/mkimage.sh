@@ -183,6 +183,8 @@ build_profile() {
 
 		if [ -n "$_yaml_out" ]; then
 			$mkimage_yaml --release $RELEASE \
+				--title "$title" \
+				--desc "$desc" \
 				"$output_file" >> "$_yaml_out"
 		fi
 	fi
