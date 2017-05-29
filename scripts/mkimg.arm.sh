@@ -46,6 +46,10 @@ section_rpi_config() {
 
 profile_rpi() {
 	profile_base
+	title="Raspberry Pi"
+	desc="Includes Raspberry Pi kernel.
+		Does not include grsec patchset.
+		And much more..."
 	image_ext="tar.gz"
 	arch="armhf"
 	rpi_firmware_commit="32c28990b18908ce899c289bcd12c6e9daeb1588"
@@ -76,6 +80,10 @@ section_uboot() {
 
 profile_uboot() {
 	profile_base
+	title="Generic ARM"
+	desc="Has default ARM kernel.
+		Includes the uboot bootloader.
+		Supports armhf and aarch64."
 	image_ext="tar.gz"
 	arch="aarch64 armhf armv7"
 	case "$ARCH" in
