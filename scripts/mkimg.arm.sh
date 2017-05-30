@@ -18,16 +18,16 @@ gpu_mem=256
 gpu_mem_256=64
 [pi0]
 kernel=boot/vmlinuz-rpi
-initramfs boot/initramfs-rpi 0x08000000
+initramfs boot/initramfs-rpi
 [pi1]
 kernel=boot/vmlinuz-rpi
-initramfs boot/initramfs-rpi 0x08000000
+initramfs boot/initramfs-rpi
 [pi2]
 kernel=boot/vmlinuz-rpi2
-initramfs boot/initramfs-rpi2 0x08000000
+initramfs boot/initramfs-rpi2
 [pi3]
 kernel=boot/vmlinuz-rpi2
-initramfs boot/initramfs-rpi2 0x08000000
+initramfs boot/initramfs-rpi2
 [all]
 include usercfg.txt
 EOF
@@ -48,7 +48,7 @@ profile_rpi() {
 	profile_base
 	image_ext="tar.gz"
 	arch="armhf"
-	rpi_firmware_commit="debe2d29bbc3df84f74672fae47f3a52fd0d40f1"
+	rpi_firmware_commit="32c28990b18908ce899c289bcd12c6e9daeb1588"
 	kernel_flavors="rpi rpi2"
 	kernel_cmdline="dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1"
 	initrd_features="base bootchart squashfs ext2 ext3 ext4 f2fs kms mmc raid scsi usb"
