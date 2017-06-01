@@ -22,6 +22,7 @@
 int apk_progress_fd;
 static int apk_screen_width = 0;
 static int apk_progress_force = 1;
+static const char *apk_progress_char = "#";
 
 void apk_reset_screen_width(void)
 {
@@ -32,6 +33,8 @@ void apk_reset_screen_width(void)
 int apk_get_screen_width(void)
 {
 	struct winsize w;
+	const char *lang;
+	const char *progress_char;
 
 	if (apk_screen_width == 0) {
 		apk_screen_width = 50;
@@ -39,6 +42,13 @@ int apk_get_screen_width(void)
 		    w.ws_col > 50)
 			apk_screen_width = w.ws_col;
 	}
+
+	lang = getenv("LANG");
+	if (lang != NULL && strstr(lang, "UTF-8") != NULL)
+		apk_progress_char = "\u2588";
+
+	if ((progress_char = getenv("APK_PROGRESS_CHAR")) != NULL)
+		apk_progress_char = progress_char;
 
 	return apk_screen_width;
 }
@@ -64,7 +74,7 @@ void apk_print_progress(size_t done, size_t total)
 	if (!(apk_flags & APK_PROGRESS))
 		return;
 
-	bar_width = apk_get_screen_width() - 8;
+	bar_width = apk_get_screen_width() - 6;
 	if (total > 0) {
 		bar = muldiv(bar_width, done, total);
 		percent = muldiv(100, done, total);
@@ -77,12 +87,13 @@ void apk_print_progress(size_t done, size_t total)
 	last_percent = percent;
 	apk_progress_force = 0;
 
-	fprintf(stdout, "\e7%3i%% [", percent);
+	fprintf(stdout, "\e7%3i%% ", percent);
+
 	for (i = 0; i < bar; i++)
-		fputc('#', stdout);
+		fputs(apk_progress_char, stdout);
 	for (; i < bar_width; i++)
 		fputc(' ', stdout);
-	fputc(']', stdout);
+
 	fflush(stdout);
 	fputs("\e8\e[0K", stdout);
 }
