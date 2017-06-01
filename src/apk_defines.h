@@ -121,6 +121,14 @@ static inline size_t muldiv(size_t a, size_t b, size_t c)
 	tmp /= c;
 	return (size_t) tmp;
 }
+static inline size_t mulmod(size_t a, size_t b, size_t c)
+{
+	unsigned long long tmp;
+	tmp = a;
+	tmp *= b;
+	tmp %= c;
+	return (size_t) tmp;
+}
 
 typedef void (*apk_progress_cb)(void *cb_ctx, size_t);
 
