@@ -4,7 +4,7 @@
 # Maintainer: Matt Smith <mcs@darkregion.net>
 pkgname=php5
 pkgver=5.6.30
-pkgrel=2
+pkgrel=3
 pkgdesc="The PHP language runtime engine"
 url="http://www.php.net/"
 arch="all"
@@ -497,18 +497,8 @@ pdo_dblib()	{ _mv_ext pdo_dblib "$pkgname-pdo freetds"; }
 wddx()		{ _mv_ext wddx; }
 opcache()	{ _mv_ext opcache; }
 
-md5sums="67566191957b5fcac8567a5a9bbdced7  php-5.6.30.tar.bz2
-63b16caff0d7aa881a31a1e02f3080c3  php-fpm.initd
-67719f428f44ec004da18705cbabe2ee  php5-module.conf
-483bc0a85c50a9a9aedbe14a19ed4526  php-install-pear-xml.patch
-7200972a23adae799921c4ca20ff0074  gd-iconv.patch"
-sha256sums="a105c293fa1dbff118b5b0ca74029e6c461f8c78f49b337a2a98be9e32c27906  php-5.6.30.tar.bz2
-be9bfdab10a994fe553119b181be7015325a7618de454a58bdee06bcfb711454  php-fpm.initd
-ceec4d5b2a128c6a97e49830af604f0bb555bca1a86a9cd0366b828ba392257f  php5-module.conf
-f739ca427a1dd53a388bad0823565299c5d4a5796b1171b892884e4d7d099bab  php-install-pear-xml.patch
-98de37c650a36870a543225f6a6b81813ccd447a484f0881511be4eb6e901844  gd-iconv.patch"
 sha512sums="12734d786cca5767b8b8838affbe1c3d578dd179c8d5339653d905658562c5fdf39a88349213b1340f320320700a5378aed617447b6e15909019788a49ad2da0  php-5.6.30.tar.bz2
-1f5cb18f85a2e279e24344d993f5c51c7bfbcbecc0e9bfcf075bebd1b0b893e2ffb793d95a632c9333033597d4b4f74840bfd00520a6dc700444d1a054225da1  php-fpm.initd
+f7d922cab98617ef910b4c14974e768c85e60424cd1b216f688b34b2d823b642a5b896463008c134ce47c150f9407f5c438823b7e7bc89b3fb440cd3e97b9d7e  php-fpm.initd
 895e94c791bd82060ad820fef049d366a09c932097faa6b7b9a2c2e9e00a18cb7c0f9b128679c7659b404379266fd0f95dba5c0333f626194cf60f7bf6044102  php5-module.conf
 f1177cbf6b1f44402f421c3d317aab1a2a40d0b1209c11519c1158df337c8945f3a313d689c939768584f3e4edbe52e8bd6103fb6777462326a9d94e8ab1f505  php-install-pear-xml.patch
 6ecd0be2da1dc5b1d7512e46a2a5cd107a8b2a8c364efc9c624a7d6b2ab081685a329c94c22c970dc14c5c1115f702c512e97ae858da1bc69c6423323dbeeba2  gd-iconv.patch"
