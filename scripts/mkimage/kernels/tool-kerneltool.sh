@@ -460,9 +460,9 @@ kerneltool_merge() {
 	merged_manifest="$STAGE_MANIFESTS/$KREL.Manifest" merged_kmod_index="$STAGE_MANIFESTS/$KREL.kmod-INDEX" merged_firmware_index="$STAGE_MANIFESTS/$KREL.firmware-INDEX"
 	# Creat merged Manifest, kmod-INDEX, and firmware-INDEX
 	printf '# Manifest for %s/%s\n' "$KARCH"  "$KREL" > "$merged_manifest" && file_is_writable "$merged_manifest" || ! warning "Could not write to merged Manifest at '$merged_manifest'!" || return 1
-	(cd "$STAGE_KREL" && for _d in * ; do file_exists "$manifests/$_d.Manifest" && cat "$STAGE_MANIFESTS/$_d.Manifest" ; done ) | grep -v '^#' | sort -u -k3 -k2 -k1 >> "$merged_manifest"
+	(cd "$STAGE_KREL" && for _d in * ; do file_exists "$STAGE_MANIFESTS/$_d.Manifest" && cat "$STAGE_MANIFESTS/$_d.Manifest" ; done ) | grep -v '^#' | sort -u -k3 -k2 -k1 >> "$merged_manifest"
 	printf '# kmod INDEX for %s/%s\n' "$KARCH" "$KREL" > "$merged_kmod_index" && file_is_writable "$merged_kmod_index" || ! warning "Could not write to merged Manifest at '$merged_kmod_index'!" || return 1
-	(cd "$STAGE_KREL" && for _d in * ; do file_exists "$manifests/$_d.kmod-INDEX" && cat "$STAGE_MANIFESTS/$_d.kmod-INDEX"; done ) | grep -v '^#' | sort -u -k3 -k2 -k1  >> "$merged_kmod_index"
+	(cd "$STAGE_KREL" && for _d in * ; do file_exists "$STAGE_MANIFESTS/$_d.kmod-INDEX" && cat "$STAGE_MANIFESTS/$_d.kmod-INDEX"; done ) | grep -v '^#' | sort -u -k3 -k2 -k1  >> "$merged_kmod_index"
 	printf '# firmware INDEX for %s/%s\n' "$KARCH" "$KREL" > "$merged_firmware_index" && file_is_writable "$merged_firmware_index" || ! warning "Could not write to merged Manifest at '$merged_firmware_index'!" || return 1
 	(cd "$STAGE_KREL" && for _d in * ; do file_exists "$STAGE_MANIFESTS/$_d.firmware-INDEX" && cat "$STAGE_MANIFESTS/$_d.firmware-INDEX" ; done ) | grep -v '^#' | sort -u -k3 -k2 -k1  >> "$merged_firmware_index"
 }
@@ -841,3 +841,26 @@ kerneltool_calc_module_fw_deps() {
 	done
 }
 
+kerneltool_manifest_dir() {
+:
+}
+kerneltool_index() {
+#	boot/vmlinu*	kernel
+#	boot/System.map*	kmap
+#	boot/config*	kconf
+#	usr/share/kernel/	krel
+#	lib/modules/*/	kmod
+#	lib/modules/modules.*	kmodmeta
+#	lib/firmware/	firmware
+#	usr/include/	kheaders
+#	usr/lib/	dtbs
+:
+}
+
+kerneltool_index_modules() {
+:
+}
+
+kerneltool_index_firmware() {
+:
+}

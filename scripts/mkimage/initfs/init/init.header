@@ -1,0 +1,369 @@
+#!/bin/sh
+
+# this is the init script version
+VERSION=3.0.9-4-g3cce109
+SINGLEMODE=no
+sysroot=/sysroot
+splashfile=/.splash.ctrl
+repofile=/tmp/repositories
+QUIET="false"
+
+initlog=/init.log
+
+
+msg "Alpine Init $VERSION"
+
+
+# some helpers
+ebegin() {
+	last_emsg="$*"
+	[ "$KOPT_quiet" = yes ] && return 0
+	echo -n " * $last_emsg: "
+}
+eend() {
+	local msg
+	if [ "$1" = 0 ] || [ $# -lt 1 ] ; then
+		[ "$KOPT_quiet" = yes ] && return 0
+		echo "ok."
+	else
+		shift
+		if [ "$KOPT_quiet" = "yes" ]; then
+			echo -n "$last_emsg "
+		fi
+		echo "failed. $*"
+		echo "initramfs emergency recovery shell launched. Type 'exit' to continue boot"
+		/bin/busybox sh
+	fi
+}
+
+
+
+
+
+initfs_init_handle_keymap() {
+	# pick first keymap if found
+	for map in /etc/keymap/*; do
+		if [ -f "$map" ]; then
+			ebegin "Setting keymap ${map##*/}"
+			zcat "$map" | loadkmap
+			eend
+			break
+		fi
+	done
+}
+
+
+
+
+initfs_init_handle_zfs() {
+	# zpool reports /dev/zfs missing if it can't read /etc/mtab
+	ln -s /proc/mounts /etc/mtab
+}
+
+initfs_init_handle_opt_root() {
+	# check if root=... was set
+	if [ -n "$OPT_root" ]; then
+		initfs_init_handle_single
+
+		ebegin "Mounting root"
+		nlplug-findfs $cryptopts -p /sbin/mdev ${OPT_debug_init:+-d} \
+			$OPT_root
+
+		if [ -n "$OPT_resume" ]; then
+			echo "Resume from disk"
+			if [ -e /sys/power/resume ]; then
+				printf "%d:%d" $(stat -Lc "0x%t 0x%T" "$OPT_resume") >/sys/power/resume
+			else
+				echo "resume: no hibernation support found"
+			fi
+		fi
+
+		if [ "$OPT_overlaytmpfs" = "yes" ]; then
+			mkdir -p /media/root-ro /media/root-rw $sysroot/media/root-ro \
+				$sysroot/media/root-rw
+			mount -o ro $KOPT_root /media/root-ro
+			mount -t tmpfs root-tmpfs /media/root-rw
+			mkdir -p /media/root-rw/work /media/root-rw/root
+			mount -t overlay -o lowerdir=/media/root-ro,upperdir=/media/root-rw/root,workdir=/media/root-rw/work overlayfs $sysroot
+		else
+			mount ${OPT_rootfstype:+-t} ${OPT_rootfstype} \
+				-o ${OPT_rootflags:-ro} \
+				$OPT_root $sysroot
+		fi
+
+		eend $?
+		initfs_init_move_mounts
+		sync
+		exec /bin/busybox switch_root $sysroot /sbin/init $OPT_init_args
+		echo "initramfs emergency recovery shell launched"
+		exec /bin/busybox sh
+	fi
+}
+
+initfs_init_move_mounts() {
+	local DEV DIR TYPE OPTS
+	cat /proc/mounts | while read DEV DIR TYPE OPTS ; do
+		if [ "$DIR" != "/" -a "$DIR" != "$sysroot" -a -d "$DIR" ]; then
+			mkdir -p $sysroot/$DIR
+			mount -o move $DIR $sysroot/$DIR
+		fi
+	done
+	sync
+}
+
+initfs_init_mount_boot_media() {
+	# locate boot media and mount it
+	ebegin "Mounting boot media"
+	nlplug-findfs $cryptopts -p /sbin/mdev ${OPT_debug_init:+-d} \
+		${OPT_usbdelay:+-t $(( $OPT_usbdelay * 1000 ))} \
+		$repoopts -a /tmp/apkovls
+	eend $?
+}
+
+# Handle request for early console.
+initfs_init_handle_single() {
+	[ "$OPT_single" = "yes" ] && echo "Entering single mode. Type 'exit' to continue booting." && sh
+}
+
+
+initfs_init_mount_tmpfs_sysroot () {
+	mount -t tmpfs -o $rootflags tmpfs $sysroot
+}
+
+initfs_init_handle_apkovl() {
+	case "$OPT_apkovl" in
+		'')
+			if [ -e /tmp/apkovls ]; then
+				ovl=$(head -n 1 /tmp/apkovls)
+			fi
+			;;
+		http://*|https://*|ftp://*)
+			configure_ip
+
+			MACHINE_UUID=$(cat /sys/class/dmi/id/product_uuid)
+			url="${OPT_apkovl/{MAC\}/$MAC_ADDRESS}"
+			url="${url/{UUID\}/$MACHINE_UUID}"
+			ovl=/tmp/${url##*/}
+			wget -O "$ovl" "$url" || ovl=
+			;;
+		*)
+			ovl="$OPT_apkovl"
+			;;
+	esac
+}
+
+initfs_init_handle_opt_pkgs() {
+	# parse pkgs=pkg1,pkg2
+	if [ -n "$OPT_pkgs" ]; then
+		pkgs=$(echo "$OPT_pkgs" | tr ',' ' ' )
+	fi
+}
+
+# load apkovl or set up a minimal system
+initfs_init_alpine_load_apkovl() {
+	if [ -f "$ovl" ]; then
+		ebegin "Loading user settings from $ovl"
+		# create apk db and needed /dev/null and /tmp first
+		apk add --root $sysroot --initdb --quiet
+
+		unpack_apkovl "$ovl" $sysroot
+		eend $? $errstr || ovlfiles=
+		# hack, incase /root/.ssh was included in apkovl
+		[ -d "$sysroot/root" ] && chmod 700 "$sysroot/root"
+		pkgs="$pkgs $(cat $sysroot/etc/apk/world 2>/dev/null)"
+	fi
+}
+
+initfs_init_alpine_setup_default_boot_services() {
+	if [ -f "$sysroot/etc/.default_boot_services" -o ! -f "$ovl" ]; then
+		# add some boot services by default
+		rc_add devfs sysinit
+		rc_add dmesg sysinit
+		rc_add mdev sysinit
+		rc_add hwdrivers sysinit
+		rc_add modloop sysinit
+
+		rc_add hwclock boot
+		rc_add modules boot
+		rc_add sysctl boot
+		rc_add hostname boot
+		rc_add bootmisc boot
+		rc_add syslog boot
+
+		rc_add mount-ro shutdown
+		rc_add killprocs shutdown
+		rc_add savecache shutdown
+
+		rm -f "$sysroot/etc/.default_boot_services"
+	fi
+}
+
+initfs_init_handle_splash() {
+	if [ "$OPT_splash" != "no" ]; then
+		echo "IMAGE_ALIGN=CM" > /tmp/fbsplash.cfg
+		for fbdev in /dev/fb[0-9]; do
+			[ -e "$fbdev" ] || break
+			num="${fbdev#/dev/fb}"
+			for img in /media/*/fbsplash$num.ppm; do
+				[ -e "$img" ] || break
+				config="${img%.*}.cfg"
+				[ -e "$config" ] || config=/tmp/fbsplash.cfg
+				fbsplash -s "$img" -d "$fbdev" -i "$config"
+				break
+			done
+		done
+		for fbsplash in /media/*/fbsplash.ppm; do
+			[ -e "$fbsplash" ] && break
+		done
+	fi
+
+	if [ -n "$fbsplash" ] && [ -e "$fbsplash" ]; then
+		ebegin "Starting bootsplash"
+		mkfifo $sysroot/$splashfile
+		config="${fbsplash%.*}.cfg"
+		[ -e "$config" ] || config=/tmp/fbsplash.cfg
+		setsid fbsplash -T 16 -s "$fbsplash" -i $config -f $sysroot/$splashfile &
+		eend 0
+	else
+		OPT_splash="no"
+	fi
+}
+
+initfs_init_relocate_mount() {
+	if [ -f $sysroot/etc/fstab ]; then
+		has_fstab=1
+		fstab=$sysroot/etc/fstab
+
+		# let user override tmpfs size in fstab in apkovl
+		mountopts=$(awk '$2 == "/" && $3 == "tmpfs" { print $4 }' $sysroot/etc/fstab)
+		if [ -n "$mountopts" ]; then
+			mount -o remount,$mountopts $sysroot
+		fi
+		# move the ALPINE_MNT if ALPINE_DEV is specified in users fstab
+		# this is so a generated /etc/apk/repositories will use correct
+		# mount dir
+		relocate_mount "$sysroot"/etc/fstab
+	elif [ -f /etc/fstab ]; then
+		relocate_mount /etc/fstab
+	fi
+}
+
+initfs_init_copy_apk_keys() {
+	# copy keys so apk finds them. apk looks for stuff relative --root
+	mkdir -p $sysroot/etc/apk/keys/
+	cp -a /etc/apk/keys $sysroot/etc/apk
+}
+
+# generate apk repositories file. needs to be done after relocation
+find_boot_repositories > $repofile
+
+
+# silently fix apk arch in case the apkovl does not match
+if [ -r "$sysroot"/etc/apk/arch ]; then
+	apk_arch="$(apk --print-arch)"
+	if [ -n "$apk_arch" ]; then
+		echo "$apk_arch" > "$sysroot"/etc/apk/arch
+	fi
+fi
+
+initfs_init_gen_repo_opts() {
+	# generate repo opts for apk
+	for i in $(cat $repofile); do
+		repo_opt="$repo_opt --repository $i"
+	done
+}
+
+
+# set up network if needed
+[ "$ALPINE_REPO" ] && configure_ip
+
+if [ -z "$ALPINE_REPO" ]; then
+	apkflags="$apkflags --no-network"
+else
+	apkflags="$apkflags --update-cache"
+fi
+
+! [ -f "$sysroot"/etc/resolv.conf ] && [ -f /etc/resolv.conf ] && \
+  cp /etc/resolv.conf "$sysroot"/etc
+
+
+initfs_init_handle_keep_apk_new() {
+	if [ "$OPT_keep_apk_new" != yes ]; then
+		apkflags="$apkflags --clean-protected"
+		[ -n "$ovlfiles" ] && apkflags="$apkflags --overlay-from-stdin"
+	fi
+}
+
+initfs_init_alpine_install_to_sysroot() {
+	local _apkflags="--initdb --progress --force"
+
+	# install new root
+	ebegin "Installing packages to root filesystem"
+	
+	mkdir -p $sysroot/sys $sysroot/proc $sysroot/dev
+	mount -o bind /sys $sysroot/sys
+	mount -o bind /proc $sysroot/proc
+	mount -o bind /dev $sysroot/dev
+	# hack so we get openrc
+	pkgs="$pkgs alpine-base"
+	if [ -n "$ovlfiles" ]; then
+		apk add --root $sysroot $repo_opt $apkflags $pkgs <$ovlfiles
+	else
+		apk add --root $sysroot $repo_opt $apkflags $pkgs
+	fi
+	umount -l -f $sysroot/sys
+	umount -l -f $sysroot/proc
+	umount -l -f $sysroot/dev
+	eend $?
+}
+
+# unmount ovl mount if needed
+if [ -n "$ovl_unmount" ]; then
+	umount $ovl_unmount 2>/dev/null
+fi
+
+# remount according default fstab from package
+if [ -z "$has_fstab" ] && [ -f "$sysroot"/etc/fstab ]; then
+	relocate_mount "$sysroot"/etc/fstab
+fi
+
+# generate repositories if none exists. this needs to be done after relocation
+if ! [ -f "$sysroot"/etc/apk/repositories ]; then
+	find_boot_repositories > "$sysroot"/etc/apk/repositories
+fi
+
+# respect mount options in fstab for ALPINE_MNT (e.g if user wants rw)
+if [ -f "$sysroot"/etc/fstab ]; then
+	opts=$(awk "\$2 == \"$ALPINE_MNT\" {print \$4}" $sysroot/etc/fstab)
+	if [ -n "$opts" ]; then
+		mount -o remount,$opts "$ALPINE_MNT"
+	fi
+fi
+
+# fix inittab if alternative console
+setup_inittab_console $CONSOLE
+
+# copy alpine release info
+#if ! [ -f "$sysroot"/etc/alpine-release ] && [ -f $ALPINE_MNT/.alpine-release ]; then
+#	cp $ALPINE_MNT/.alpine-release $sysroot/
+#	ln -sf /.alpine-release $sysroot/etc/alpine-release
+#fi
+
+
+
+initfs_init_switch_root() {
+	if [ ! -x $sysroot/sbin/init ]; then
+		error "/sbin/init not found in new root."
+		initfs_init_start_emergency_shell
+	fi
+
+	# switch over to new root
+	initfs_init_move_mounts
+
+	initfs_init_exit_splash init
+
+	exec /bin/busybox switch_root $sysroot /sbin/init $OPT_init_args
+	error "/init in initramfs failed to transfer control to /sbin/init!"
+	initfs_init_exec_emergency_shell
+}
+

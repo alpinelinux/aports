@@ -27,7 +27,8 @@ scriptdir="${scriptrealdir}"
 . "$scriptdir/utils/utils-plugin-loader.sh"
 . "$scriptdir/utils/utils-apk.sh"
 
-_apk_init "/usr/bin/abuild-apk"
+#_apk_init "/usr/bin/abuild-apk"
+_apk_init
 
 default_colors
 info_prog_set "$scriptname"
@@ -96,9 +97,9 @@ while [ $# -gt 0 ]; do
 	opt="$1"
 	shift
 	case "$opt" in
-	--repository-file) _repo="${_repos+$_repos }--repo-file '$1'" ; shift ;;
-	--repository) _repo="${_repos+$_repos }--repo '$1'" ; shift ;;
-	--extra-repository) _repo="${_repos+$_repo }--repo '$1'" ; shift ;;
+	--repositories-file) _repos="${_repos+$_repos }--repositories-file $1" ; shift ;;
+	--repository) _repos="${_repos+$_repos }--repository $1" ; shift ;;
+	--extra-repository) _repos="${_repos+$_repos }--repository $1" ; shift ;;
 	--apk-cache-dir) _apk_cache_dir="$1" shift ;;
 	--workdir) WORKDIR="$1"; shift ;;
 	--outdir) OUTDIR="$1"; shift ;;
@@ -184,7 +185,8 @@ for ARCH in $req_arch; do
 	info_prog_set "$scriptname:$ARCH"
 	info_func_set "build arch"
 
-	apkroot_init "$WORKDIR/.apkroot-$ARCH" "$ARCH" "${_hotkeys:+--host-keys}" "${_apk_cache_dir:+--cache--dir $_apk_cache_dir}" $_repos
+	apkroot_init "$WORKDIR/.apkroot-$ARCH" "$ARCH" 
+	apkroot_setup "${_hostkeys:+--host-keys}" "${_apk_cache_dir:+--cache--dir $_apk_cache_dir}" $_repos
 	_apk update
 
 	if [ "$_yaml" = "yes" ]; then

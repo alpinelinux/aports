@@ -1,0 +1,680 @@
+#!/bin/sh
+
+# this is the init script version
+VERSION=3.0.9-4-g3cce109
+SINGLEMODE=no
+sysroot=/sysroot
+splashfile=/.splash.ctrl
+repofile=/tmp/repositories
+
+/bin/busybox mkdir -p /usr/bin /usr/sbin /proc /sys /dev $sysroot \
+	/media/cdrom /media/usb /tmp /run
+/bin/busybox --install -s
+
+# basic environment
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# needed devs
+[ -c /dev/null ] || mknod -m 666 /dev/null c 1 3
+
+# basic mounts
+mount -t proc -o noexec,nosuid,nodev proc /proc
+mount -t sysfs -o noexec,nosuid,nodev sysfs /sys
+
+# some helpers
+ebegin() {
+	last_emsg="$*"
+	[ "$KOPT_quiet" = yes ] && return 0
+	echo -n " * $last_emsg: "
+}
+eend() {
+	local msg
+	if [ "$1" = 0 ] || [ $# -lt 1 ] ; then
+		[ "$KOPT_quiet" = yes ] && return 0
+		echo "ok."
+	else
+		shift
+		if [ "$KOPT_quiet" = "yes" ]; then
+			echo -n "$last_emsg "
+		fi
+		echo "failed. $*"
+		echo "initramfs emergency recovery shell launched. Type 'exit' to continue boot"
+		/bin/busybox sh
+	fi
+}
+
+unpack_apkovl() {
+	local ovl="$1"
+	local dest="$2"
+	local suffix=${ovl##*.}
+	local i
+	ovlfiles=/tmp/ovlfiles
+	if [ "$suffix" = "gz" ]; then
+		tar -C "$dest" -zxvf "$ovl" > $ovlfiles
+		return $?
+	fi
+
+	# we need openssl. let apk handle deps
+	apk add --quiet --initdb --repositories-file $repofile libressl || return 1
+
+	if ! openssl list-cipher-commands | grep "^$suffix$" > /dev/null; then
+		errstr="Cipher $suffix is not supported"
+		return 1
+	fi
+	local count=0
+	# beep
+	echo -e "\007"
+	while [ $count -lt 3 ]; do
+		openssl enc -d -$suffix -in "$ovl" | tar --numeric-owner \
+			-C "$dest" -zxv >$ovlfiles 2>/dev/null && return 0
+		count=$(( $count + 1 ))
+	done
+	ovlfiles=
+	return 1
+}
+
+# find mount dir for given device in an fstab
+# returns global MNTOPTS
+find_mnt() {
+	local search_dev="$1"
+	local fstab="$2"
+	case "$search_dev" in
+	UUID*|LABEL*) search_dev=$(findfs "$search_dev");;
+	esac
+	MNTOPTS=
+	[ -r "$fstab" ] || return 1
+	local search_maj_min=$(stat -L -c '%t,%T' $search_dev)
+	while read dev mnt fs MNTOPTS chk; do
+		case "$dev" in
+		UUID*|LABEL*) dev=$(findfs "$dev");;
+		esac
+		if [ -b "$dev" ]; then
+			local maj_min=$(stat -L -c '%t,%T' $dev)
+			if [ "$maj_min" = "$search_maj_min" ]; then
+				echo "$mnt"
+				return
+			fi
+		fi
+	done < $fstab
+	MNTOPTS=
+}
+
+#  add a boot service to $sysroot
+rc_add() {
+	mkdir -p $sysroot/etc/runlevels/$2
+	ln -sf /etc/init.d/$1 $sysroot/etc/runlevels/$2/$1
+}
+
+setup_inittab_console(){
+	while [ $# -gt 0 ]; do
+		local tty=${1%,*}
+		local speed=${1#*,}
+		local line=
+		local term=
+		case "$tty" in
+			ttyS*|ttyMFD*|ttyUSB*|ttyAMA*)
+				[ "$speed" = "$1" ] && speed=115200
+				term=vt100
+				line=-L
+				;;
+			*)
+				[ "$speed" = "$1" ] && speed=38400
+				;;
+		esac
+		shift
+
+		# skip "current console" from being added to inittab
+		[ "$tty" = "tty0" ] && continue
+
+		# do nothing if inittab already have the tty set up
+		if ! grep -q "^$tty:" $sysroot/etc/inittab; then
+			echo "# enable login on alternative console" \
+				>> $sysroot/etc/inittab
+			echo "$tty::respawn:/sbin/getty $line $speed $tty $term" \
+				>> $sysroot/etc/inittab
+		fi
+		if [ -e "$sysroot"/etc/securetty ] && ! grep -q -w "$tty" "$sysroot"/etc/securetty; then
+			echo "$tty" >> "$sysroot"/etc/securetty
+		fi
+	done
+}
+
+# determine the default interface to use if ip=dhcp is set
+# uses the first "eth" interface.
+ip_choose_if() {
+	for x in /sys/class/net/eth*; do
+		[ -e "$x" ] && echo ${x##*/} && return
+	done
+}
+
+# ip_set <device> <ip> <netmask> <gateway-ip>
+ip_set() {
+	ifconfig "$1" "$2" netmask "$3" || return $?
+	if [ -n "$4" ]; then
+		ip route add 0.0.0.0/0 via "$4" dev "$1" || return $?
+	fi
+}
+
+# if "ip=dhcp" is specified on the command line, we obtain an IP address
+# using udhcpc. we do this now and not by enabling kernel-mode DHCP because
+# kernel-model DHCP appears to require that network drivers be built into
+# the kernel rather than as modules. At this point all applicable modules
+# in the initrd should have been loaded.
+#
+# You need af_packet.ko available as well modules for your Ethernet card.
+#
+# Valid syntaxes:
+#   ip=client-ip:server-ip:gw-ip:netmask:hostname:device:autoconf
+#   ip=dhcp
+#   "server-ip" and "hostname" are not supported here.
+# Default (when configure_ip is called without setting ip=):
+#   ip=dhcp
+#
+configure_ip() {
+	[ -n "$MAC_ADDRESS" ] && return
+	local ops=${KOPT_ip:-dhcp}
+	local IFS=':'
+	set -- $ops
+	unset IFS
+	local client_ip="$1"
+	local gw_ip="$3"
+	local netmask="$4"
+	local device="$6"
+	local autoconf="$7"
+	case "$client_ip" in
+		off|none|'') return;;
+		dhcp) autoconf="dhcp";;
+	esac
+
+	[ -n "$device" ] || device=$(ip_choose_if)
+	if [ -z "$device" ]; then
+		echo "ERROR: IP requested but no network device was found"
+		return 1
+	fi
+	if [ "$autoconf" = "dhcp" ]; then
+		# automatic configuration
+		if [ ! -e /usr/share/udhcpc/default.script ]; then
+			echo "ERROR: DHCP requested but not present in initrd"
+			return 1
+		fi
+		ebegin "Obtaining IP via DHCP ($device)..."
+		ifconfig $device 0.0.0.0
+		udhcpc -i $device -f -q
+		eend $?
+	else
+		# manual configuration
+		[ -n "$client_ip" -a -n "$netmask" ] || return
+		ebegin "Setting IP ($device)..."
+		ip_set "$device" "$client_ip" "$netmask" "$gw_ip"
+		eend $?
+	fi
+	MAC_ADDRESS=$(cat /sys/class/net/$device/address)
+}
+
+# relocate mountpoint according given fstab
+relocate_mount() {
+	local fstab="${1}"
+	local dir=
+	if ! [ -e $repofile ]; then
+		return
+	fi
+	while read dir; do
+		local dev=$(df -P "$dir" | tail -1 | awk '{print $1}')
+		local mnt=$(find_mnt $dev $fstab)
+		if [ -n "$mnt" ]; then
+			local oldmnt=$(awk -v d=$dev '$1==d {print $2}' /proc/mounts)
+			if [ "$oldmnt" != "$mnt" ]; then
+				mkdir -p "$mnt"
+				mount -o move "$oldmnt" "$mnt"
+			fi
+		fi
+	done < $repofile
+}
+
+# find the dirs under ALPINE_MNT that are boot repositories
+find_boot_repositories() {
+	if [ -n "$ALPINE_REPO" ]; then
+		echo "$ALPINE_REPO"
+	else
+		find /media/* -name .boot_repository -type f -maxdepth 3 \
+			| sed 's:/.boot_repository$::'
+	fi
+}
+
+setup_nbd() {
+	modprobe -q nbd max_part=8 || return 1
+	local IFS=, n=0
+	set -- $KOPT_nbd
+	unset IFS
+	for ops; do
+		local server="${ops%:*}"
+		local port="${ops#*:}"
+		local device="/dev/nbd${n}"
+		[ -b "$device" ] || continue
+		nbd-client "$server" "$port" "$device" && n=$((n+1))
+	done
+	[ "$n" != 0 ] || return 1
+}
+
+# read the kernel options. we need surve things like:
+#  acpi_osi="!Windows 2006" xen-pciback.hide=(01:00.0)
+set -- $(cat /proc/cmdline)
+
+myopts="alpine_dev autodetect autoraid chart cryptroot cryptdm debug_init
+	dma init_args keep_apk_new modules ovl_dev pkgs quiet root_size root
+	usbdelay ip alpine_repo apkovl alpine_start splash blacklist
+	overlaytmpfs rootfstype rootflags nbd resume"
+
+for opt; do
+	case "$opt" in
+	s|single|1)
+		SINGLEMODE=yes
+		continue
+		;;
+	console=*)
+		CONSOLE="$CONSOLE ${opt#console=}"
+		continue
+		;;
+	esac
+
+	for i in $myopts; do
+		case "$opt" in
+		$i=*)	eval "KOPT_${i}=${opt#*=}";;
+		$i)	eval "KOPT_${i}=yes";;
+		no$i)	eval "KOPT_${i}=no";;
+		esac
+	done
+done
+
+[ "$KOPT_quiet" = yes ] || echo "Alpine Init $VERSION"
+
+# enable debugging if requested
+[ -n "$KOPT_debug_init" ] && set -x
+
+# pick first keymap if found
+for map in /etc/keymap/*; do
+	if [ -f "$map" ]; then
+		ebegin "Setting keymap ${map##*/}"
+		zcat "$map" | loadkmap
+		eend
+		break
+	fi
+done
+
+# start bootcharting if wanted
+if [ "$KOPT_chart" = yes ]; then
+	ebegin "Starting bootchart logging"
+	/sbin/bootchartd start-initfs "$sysroot"
+	eend 0
+fi
+
+# dma can be problematic
+if [ "$KOPT_dma" = no ]; then
+	modprobe libata dma=0
+fi
+
+# The following values are supported:
+#   alpine_repo=auto         -- default, search for .boot_repository
+#   alpine_repo=http://...   -- network repository
+ALPINE_REPO=${KOPT_alpine_repo}
+[ "$ALPINE_REPO" = "auto" ] && ALPINE_REPO=
+
+# hide kernel messages
+[ "$KOPT_quiet" = yes ] && dmesg -n 1
+
+# optional blacklist
+for i in ${KOPT_blacklist/,/ }; do
+	echo "blacklist $i" >> /etc/modprobe.d/boot-opt-blacklist.conf
+done
+
+# setup /dev
+mount -t devtmpfs -o exec,nosuid,mode=0755,size=2M devtmpfs /dev 2>/dev/null \
+	|| mount -t tmpfs -o exec,nosuid,mode=0755,size=2M tmpfs /dev
+[ -d /dev/pts ] || mkdir -m 755 /dev/pts
+[ -c /dev/ptmx ] || mknod -m 666 /dev/ptmx c 5 2
+# make sure /dev/null is setup correctly
+[ -f /dev/null ] && rm -f /dev/null
+[ -c /dev/null ] || mknod -m 666 /dev/null c 1 3
+mount -t devpts -o gid=5,mode=0620,noexec,nosuid devpts /dev/pts
+[ -d /dev/shm ] || mkdir /dev/shm
+mount -t tmpfs -o nodev,nosuid,noexec shm /dev/shm
+
+# load available drivers to get access to modloop media
+ebegin "Loading boot drivers"
+
+modprobe -a $(echo "$KOPT_modules $KOPT_rootfstype" | tr ',' ' ' ) loop squashfs 2> /dev/null
+if [ -f /etc/modules ] ; then
+	sed 's/\#.*//g' < /etc/modules |
+	while read module args; do
+		modprobe -q $module $args
+	done
+fi
+eend 0
+
+if [ -n "$KOPT_cryptroot" ]; then
+	cryptopts="-c ${KOPT_cryptroot}"
+	if [ -n "$KOPT_cryptdm" ]; then
+		cryptopts="$cryptopts -m ${KOPT_cryptdm}"
+	fi
+fi
+
+if [ -n "$KOPT_nbd" ]; then
+	configure_ip
+	setup_nbd || echo "Failed to setup nbd device."
+fi
+
+# zpool reports /dev/zfs missing if it can't read /etc/mtab
+ln -s /proc/mounts /etc/mtab
+
+# check if root=... was set
+if [ -n "$KOPT_root" ]; then
+	if [ "$SINGLEMODE" = "yes" ]; then
+		echo "Entering single mode. Type 'exit' to continue booting."
+		sh
+	fi
+
+	ebegin "Mounting root"
+	nlplug-findfs $cryptopts -p /sbin/mdev ${KOPT_debug_init:+-d} \
+		$KOPT_root
+
+	if [ -n "$KOPT_resume" ]; then
+		echo "Resume from disk"
+		if [ -e /sys/power/resume ]; then
+			printf "%d:%d" $(stat -Lc "0x%t 0x%T" "$KOPT_resume") >/sys/power/resume
+		else
+			echo "resume: no hibernation support found"
+		fi
+	fi
+
+	if [ "$KOPT_overlaytmpfs" = "yes" ]; then
+		mkdir -p /media/root-ro /media/root-rw $sysroot/media/root-ro \
+			$sysroot/media/root-rw
+		mount -o ro $KOPT_root /media/root-ro
+		mount -t tmpfs root-tmpfs /media/root-rw
+		mkdir -p /media/root-rw/work /media/root-rw/root
+		mount -t overlay -o lowerdir=/media/root-ro,upperdir=/media/root-rw/root,workdir=/media/root-rw/work overlayfs $sysroot
+	else
+		mount ${KOPT_rootfstype:+-t} ${KOPT_rootfstype} \
+			-o ${KOPT_rootflags:-ro} \
+			$KOPT_root $sysroot
+	fi
+
+	eend $?
+	cat /proc/mounts | while read DEV DIR TYPE OPTS ; do
+		if [ "$DIR" != "/" -a "$DIR" != "$sysroot" -a -d "$DIR" ]; then
+			mkdir -p $sysroot/$DIR
+			mount -o move $DIR $sysroot/$DIR
+		fi
+	done
+	sync
+	exec /bin/busybox switch_root $sysroot $chart_init /sbin/init $KOPT_init_args
+	echo "initramfs emergency recovery shell launched"
+	exec /bin/busybox sh
+fi
+
+if [ -n "$ALPINE_REPO" ]; then
+	repoopts="-n"
+else
+	repoopts="-b $repofile"
+fi
+
+# locate boot media and mount it
+ebegin "Mounting boot media"
+nlplug-findfs $cryptopts -p /sbin/mdev ${KOPT_debug_init:+-d} \
+	${KOPT_usbdelay:+-t $(( $KOPT_usbdelay * 1000 ))} \
+	$repoopts -a /tmp/apkovls
+eend $?
+
+# early console?
+if [ "$SINGLEMODE" = "yes" ]; then
+	echo "Entering single mode. Type 'exit' to continue booting."
+	sh
+fi
+
+# mount tmpfs sysroot
+rootflags="mode=0755"
+if [ -n "$KOPT_root_size" ]; then
+	echo "WARNING: the boot option root_size is deprecated. Use rootflags instead"
+	rootflags="$rootflags,size=$KOPT_root_size"
+fi
+if [ -n "$KOPT_rootflags" ]; then
+	rootflags="$rootflags,$KOPT_rootflags"
+fi
+
+mount -t tmpfs -o $rootflags tmpfs $sysroot
+
+case "$KOPT_apkovl" in
+	'')
+		if [ -e /tmp/apkovls ]; then
+			ovl=$(head -n 1 /tmp/apkovls)
+		fi
+		;;
+	http://*|https://*|ftp://*)
+		configure_ip
+
+		MACHINE_UUID=$(cat /sys/class/dmi/id/product_uuid)
+		url="${KOPT_apkovl/{MAC\}/$MAC_ADDRESS}"
+		url="${url/{UUID\}/$MACHINE_UUID}"
+		ovl=/tmp/${url##*/}
+		wget -O "$ovl" "$url" || ovl=
+		;;
+	*)
+		ovl="$KOPT_apkovl"
+		;;
+esac
+
+
+# parse pkgs=pkg1,pkg2
+if [ -n "$KOPT_pkgs" ]; then
+	pkgs=$(echo "$KOPT_pkgs" | tr ',' ' ' )
+fi
+
+# load apkovl or set up a minimal system
+if [ -f "$ovl" ]; then
+	ebegin "Loading user settings from $ovl"
+	# create apk db and needed /dev/null and /tmp first
+	apk add --root $sysroot --initdb --quiet
+
+	unpack_apkovl "$ovl" $sysroot
+	eend $? $errstr || ovlfiles=
+	# hack, incase /root/.ssh was included in apkovl
+	[ -d "$sysroot/root" ] && chmod 700 "$sysroot/root"
+	pkgs="$pkgs $(cat $sysroot/etc/apk/world 2>/dev/null)"
+fi
+
+if [ -f "$sysroot/etc/.default_boot_services" -o ! -f "$ovl" ]; then
+	# add some boot services by default
+	rc_add devfs sysinit
+	rc_add dmesg sysinit
+	rc_add mdev sysinit
+	rc_add hwdrivers sysinit
+	rc_add modloop sysinit
+
+	rc_add hwclock boot
+	rc_add modules boot
+	rc_add sysctl boot
+	rc_add hostname boot
+	rc_add bootmisc boot
+	rc_add syslog boot
+
+	rc_add mount-ro shutdown
+	rc_add killprocs shutdown
+	rc_add savecache shutdown
+
+	rm -f "$sysroot/etc/.default_boot_services"
+fi
+
+if [ "$KOPT_splash" != "no" ]; then
+	echo "IMAGE_ALIGN=CM" > /tmp/fbsplash.cfg
+	for fbdev in /dev/fb[0-9]; do
+		[ -e "$fbdev" ] || break
+		num="${fbdev#/dev/fb}"
+		for img in /media/*/fbsplash$num.ppm; do
+			[ -e "$img" ] || break
+			config="${img%.*}.cfg"
+			[ -e "$config" ] || config=/tmp/fbsplash.cfg
+			fbsplash -s "$img" -d "$fbdev" -i "$config"
+			break
+		done
+	done
+	for fbsplash in /media/*/fbsplash.ppm; do
+		[ -e "$fbsplash" ] && break
+	done
+fi
+
+if [ -n "$fbsplash" ] && [ -e "$fbsplash" ]; then
+	ebegin "Starting bootsplash"
+	mkfifo $sysroot/$splashfile
+	config="${fbsplash%.*}.cfg"
+	[ -e "$config" ] || config=/tmp/fbsplash.cfg
+	setsid fbsplash -T 16 -s "$fbsplash" -i $config -f $sysroot/$splashfile &
+	eend 0
+else
+	KOPT_splash="no"
+fi
+
+if [ -f $sysroot/etc/fstab ]; then
+	has_fstab=1
+	fstab=$sysroot/etc/fstab
+
+	# let user override tmpfs size in fstab in apkovl
+	mountopts=$(awk '$2 == "/" && $3 == "tmpfs" { print $4 }' $sysroot/etc/fstab)
+	if [ -n "$mountopts" ]; then
+		mount -o remount,$mountopts $sysroot
+	fi
+	# move the ALPINE_MNT if ALPINE_DEV is specified in users fstab
+	# this is so a generated /etc/apk/repositories will use correct
+	# mount dir
+	relocate_mount "$sysroot"/etc/fstab
+elif [ -f /etc/fstab ]; then
+	relocate_mount /etc/fstab
+fi
+
+# hack so we get openrc
+pkgs="$pkgs alpine-base"
+
+# copy keys so apk finds them. apk looks for stuff relative --root
+mkdir -p $sysroot/etc/apk/keys/
+cp -a /etc/apk/keys $sysroot/etc/apk
+
+# generate apk repositories file. needs to be done after relocation
+find_boot_repositories > $repofile
+
+# set up network if needed
+[ "$ALPINE_REPO" ] && configure_ip
+
+# silently fix apk arch in case the apkovl does not match
+if [ -r "$sysroot"/etc/apk/arch ]; then
+	apk_arch="$(apk --print-arch)"
+	if [ -n "$apk_arch" ]; then
+		echo "$apk_arch" > "$sysroot"/etc/apk/arch
+	fi
+fi
+
+# generate repo opts for apk
+for i in $(cat $repofile); do
+	repo_opt="$repo_opt --repository $i"
+done
+
+# install new root
+ebegin "Installing packages to root filesystem"
+
+if [ "$KOPT_chart" = yes ]; then
+	pkgs="$pkgs acct"
+fi
+
+apkflags="--initdb --progress --force"
+if [ -z "$ALPINE_REPO" ]; then
+	apkflags="$apkflags --no-network"
+else
+	apkflags="$apkflags --update-cache"
+fi
+
+if [ "$KOPT_quiet" = yes ]; then
+	apkflags="$apkflags --quiet"
+fi
+
+if [ "$KOPT_keep_apk_new" != yes ]; then
+	apkflags="$apkflags --clean-protected"
+	[ -n "$ovlfiles" ] && apkflags="$apkflags --overlay-from-stdin"
+fi
+mkdir -p $sysroot/sys $sysroot/proc $sysroot/dev
+mount -o bind /sys $sysroot/sys
+mount -o bind /proc $sysroot/proc
+mount -o bind /dev $sysroot/dev
+if [ -n "$ovlfiles" ]; then
+	apk add --root $sysroot $repo_opt $apkflags $pkgs <$ovlfiles
+else
+	apk add --root $sysroot $repo_opt $apkflags $pkgs
+fi
+umount -l -f $sysroot/sys
+umount -l -f $sysroot/proc
+umount -l -f $sysroot/dev
+eend $?
+
+# unmount ovl mount if needed
+if [ -n "$ovl_unmount" ]; then
+	umount $ovl_unmount 2>/dev/null
+fi
+
+# remount according default fstab from package
+if [ -z "$has_fstab" ] && [ -f "$sysroot"/etc/fstab ]; then
+	relocate_mount "$sysroot"/etc/fstab
+fi
+
+# generate repositories if none exists. this needs to be done after relocation
+if ! [ -f "$sysroot"/etc/apk/repositories ]; then
+	find_boot_repositories > "$sysroot"/etc/apk/repositories
+fi
+
+# respect mount options in fstab for ALPINE_MNT (e.g if user wants rw)
+if [ -f "$sysroot"/etc/fstab ]; then
+	opts=$(awk "\$2 == \"$ALPINE_MNT\" {print \$4}" $sysroot/etc/fstab)
+	if [ -n "$opts" ]; then
+		mount -o remount,$opts "$ALPINE_MNT"
+	fi
+fi
+
+# fix inittab if alternative console
+setup_inittab_console $CONSOLE
+
+# copy alpine release info
+#if ! [ -f "$sysroot"/etc/alpine-release ] && [ -f $ALPINE_MNT/.alpine-release ]; then
+#	cp $ALPINE_MNT/.alpine-release $sysroot/
+#	ln -sf /.alpine-release $sysroot/etc/alpine-release
+#fi
+
+! [ -f "$sysroot"/etc/resolv.conf ] && [ -f /etc/resolv.conf ] && \
+  cp /etc/resolv.conf "$sysroot"/etc
+
+# setup bootchart for switch_root
+chart_init=""
+if [ "$KOPT_chart" = yes ]; then
+	/sbin/bootchartd stop-initfs "$sysroot"
+	chart_init="/sbin/bootchartd start-rootfs"
+fi
+
+if [ ! -x $sysroot/sbin/init ]; then
+	[ "$KOPT_splash" != "no" ] && echo exit > $sysroot/$splashfile
+	echo "/sbin/init not found in new root. Launching emergency recovery shell"
+	echo "Type exit to continue boot."
+	/bin/busybox sh
+fi
+
+# switch over to new root
+cat /proc/mounts | while read DEV DIR TYPE OPTS ; do
+	if [ "$DIR" != "/" -a "$DIR" != "$sysroot" -a -d "$DIR" ]; then
+		mkdir -p $sysroot/$DIR
+		mount -o move $DIR $sysroot/$DIR
+	fi
+done
+sync
+
+[ "$KOPT_splash" = "init" ] && echo exit > $sysroot/$splashfile
+echo ""
+exec /bin/busybox switch_root $sysroot $chart_init /sbin/init $KOPT_init_args
+
+[ "$KOPT_splash" != "no" ] && echo exit > $sysroot/$splashfile
+echo "initramfs emergency recovery shell launched"
+exec /bin/busybox sh
+reboot

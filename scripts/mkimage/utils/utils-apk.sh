@@ -333,7 +333,7 @@ _manifest_deps_resolve_index() {
 # Usage: (index with indexed deps) | _manifest_deps_resolve_recurse [<additional deps files>...]
 _manifest_deps_resolve_recurse() {
 	awk -e '
-		NF>0	{ split($1,f,":") ; ideps[$1]=$0}
+		NF>0	{ ideps[$1]=$0 }
 		function alldeps(ad,d, sd,   td, t) {
 			split(ad[d], td)
 			for (t in td) { sd[td[t]]=td[t] ; if (td[t] !=d) { alldeps(ad, td[t], sd) } }

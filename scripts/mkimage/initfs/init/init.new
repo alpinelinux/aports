@@ -1,0 +1,264 @@
+#!/bin/sh
+
+
+# Helper functions defined first:
+
+# Variable tools
+setvar() { local var="$1" ; shift ;  eval "$1=\"$@\"" ; }
+getvar() { eval "printf '%s' \"\$$1\"" ; }
+list_prepend() { local var="$1" ; shift ; eval "$var=\"\$@\${$var:+ \$$var}\"" ; }
+list_append() { local var="$1" ; shift ; eval "$var=\"\${$var:+\$$var }\$@\"" ; }
+list_first() { eval "printf '%s' \"\${"$1"%% *}\"" ; }
+list_last() { eval "printf '%s' \"\${"$1"##* }\"" ; }
+
+
+
+##
+# Logging facilities and output control.
+##
+
+# Canonicalize loglevel to number
+_ll() {	local o=4 ; case "$1" in [0-7])o="$1";; emerg*|EMERG*)o=0;; alert|ALERT)o=1;; crit*|CRIT*)o=2;; err*|ERR*)o=3;; warn*|WARN*)o=4;; notice|NOTICE)o=5;; info|INFO)o=6;; debug|DEBUG)o=7;; esac; printf '%s' "$o"; }
+
+# Save stdout/stderr(fd1/2) to fd8/9. Write fd3 to /dev/kmsg. Redirect fd1/2 to fd3
+log_start() { exec 3>>/dev/kmsg && exec 1>&3 && exec 2>&3 ; }
+# Restore stdout/stderr from fd8/9. Close fd3. 
+log_stop() { exec 0<$console 1>$console 2>$console ; exec 3>&- ; }
+
+# Sets default log level for output sent to /dev/kmsg and which are displayed to console.
+log_level() { local pk="/proc/sys/kernel/printk" new="$(_ll "$1")"  && set -- $($BB cat "$pk") && printf '%s\t%s\t%s\t%s' "$1" "$new" "$3" "$4" > "$pk" ; }
+
+# Sets the threshold level for messages to be sent to the console.
+log_console_level() { local pk="/proc/sys/kernel/printk" ; printf '%s' "$(( $(_ll "$1") + 1 ))"  > "$pk" ; }
+
+log_console_debug() { log_console_level debug ; }
+log_console_full() { log_console_level info ; }
+log_console_normal() { log_console_level notice ; }
+log_console_quiet() { log_console_level warning ; }
+log_console_slient() { log_console_level error ; }
+log_console_gag() { log_console_level alert ; }
+
+
+# Log a message at the current or specified log level.
+log() { printf 'initfs-init: %s\n' "$*" ; }
+log_() { local lvl="$(_ll "$1")" ; shift ; printf '<%s>initfs-init: %s\n' "$lvl" "$*" ; }
+
+# Log a message at the indicated log level.
+log_emergency() { printf '<0>initfs-init: %s\n' "$*" ; }
+log_alert() { printf '<1>initfs-init: %s\n' "$*" ; }
+log_critical() { printf '<2>initfs-init: %s\n' "$*" ; }
+log_error() { printf '<3>initfs-init: %s\n' "$*" ; }
+log_warning() { printf '<4>initfs-init: %s\n' "$*" ; }
+log_notice() { printf '<5>initfs-init: %s\n' "$*" ; }
+log_info () { printf '<6>initfs-init: %s\n' "$*" ; }
+log_debug() { printf '<7>initfs-init: %s\n' "$*" ; }
+
+
+##
+# Error handling and recovery.
+##
+
+# Run (or exec) a rescue shell, optionally halting or rebooting upon exit.
+rescue_shell() {
+	local act exe
+	case "$1" in exec) exe="exec" ; shift ;; esac
+	case "$1" in reboot)act="reboot" ;; halt)act="halt" ;; *)act="" ;; esac
+	log_console_full
+	log_notice "Boot process suspended, starting rescue shell..."
+	log_stop
+	$BB dmesg | $BB tail
+	printf "Starting rescue shell. Type 'exit' to ${act:-continue booting}.\\n"
+	eval "${exe:+$exe }$BB sh"
+	[ "$act" ] && $BB $act
+	log_start
+	log_notice "...rescue shell exited, resuming boot process."
+}
+
+# Failure handling:
+set_failmode() { local l="$(_ll "$1")" ; case "$l" in [0-7]) : ;; *) l="3" ;; esac ; failmode="$l" ; }
+
+# Fail at level with message. (Usage: fail <lvl> <msg>)
+fail() {
+	log_ "$@"
+	case "$(_ll "$1")" in
+		0) log_emergency "Executing emergency reboot" ; log_stop  ; ( $BB dmesg | $BB tail ; ) ; printf "\n\a\a\aREBOOTING IN 5 SECONDS\n" ; $BB sleep 5 ; $BB reboot ;;
+		1|2) log_notice "Executing emergency shell." ; rescue_shell exec reboot ;;
+		3) log_notice "Starting emergecny shell." ; rescue_shell ;;
+		4) [ "$initfs_init_shell_on_warning" ] || break ; log_notice "Starting shell on warning by request." ; rescue_shell ;;
+	esac
+	return 1
+}
+
+# Function call wrapper with hooks and error handling.
+call() {
+	local h
+	for h in $(getvar "_before_$1") ; do call "$h" ; done
+	$@ || handle_call_error "$@"
+	for h in $(getvar "_after_$1") ; do call "$h" ; done
+}
+handle_call_error() { log_console_full && fail "${failmode:-3}" "Call failed: '$*'" ; }
+
+# Run program with error handling
+run() { $@ || handle_run_error "$@" ; }
+handle_run_error() { log_console_full && fail "${failmode:-3}" "Failed to run: '$*'" ; }
+
+
+
+
+
+##
+# Basic filesystems and mounts.
+##
+
+initfs_init_root_create_dirs() {
+	# Create initial directories on initramfs.
+	local d
+	: "${initfs_root_dirs:="/dev /sys /proc /run /sbin /bin /usr/sbin /usr/bin"}"
+	for d in $initfs_root_dirs ; do
+		$BB mkdir -p "$1$d" || fail critical "Can not create directory $1$d!"
+	done
+}
+
+initfs_init_root_mount_proc_sys() {
+	set_failmode error
+	# Mount /proc and /sys
+	: "${initfs_mnt_opts_proc="noexec nosuid nodev"}"
+	: "${initfs_mnt_opts_sys="noexec nosuid nodev"}"
+	log_info "Mounting /proc"
+	$BB mount -t proc ${initfs_mnt_opts_proc:+-o "${initfs_mnt_opts_proc// /,}"} proc "$1/proc"
+	log_info "Mounting /sys"
+	$BB mount -t sysfs ${initfs_mnt_opts_sys:+-o "${initfs_mnt_opts_sys// /,}"} sysfs "$1/sys"
+}
+
+initfs_init_root_mount_dev() {	
+	[ "$initfs_mnt_opts_dev" = "no" ] && log_notice "NOT mounting $1/dev! (disabled by 'initfs_mnt_opts_dev=no')" && return 0
+	log_info "Mounting $1/dev"
+
+	local _fm="$failmode"
+	set_failmode error
+
+	: "${initfs_mnt_opts_dev="exec nosuid mode=0755 size=2M"}"
+	$BB mount -t devtmpfs ${initfs_mnt_opts_dev:+-o "${initfs_mnt_opts_dev// /,}"} devtmpfs "$1/dev" > "$1/dev/null" 2>&1 \
+		|| $BB mount -t tmpfs ${initfs_mnt_opts_dev:+-o "${initfs_mnt_opts_dev// /,}"} tmpfs "$1/dev" || return 1
+
+	set_failmode warning
+
+	if [ "$initfs_mnt_opts_dev_pts" != "no" ] ; then : "${initfs_mnt_opts_dev_pts="noexec nosuid gid=5 mode=0755"}"
+		log_info "Mounting $1/dev/pts"
+		[ -e "$1/dev/pts" ] && [ ! -d "$1/dev/pts" ] && $BB rm -f "$1/dev/pts" || return 1
+		[ -e "$1/dev/pts" ] && [ -d "$1/dev/pts" ] || $BB mkdir -m 755 "$1/dev/pts" || return 1
+		$BB mount -t devpts ${initfs_mnt_opts_dev_pts:+-o "${initfs_mnt_opts_dev_pts// /,}"} devpts "$1/dev/pts" || return 1
+		[ -e "$1/dev/ptmx" ] && [ ! -c "$1/dev/ptmx" ] && $BB rm -rf "$1/dev/ptmx" || return 1
+		[ -c "$1/dev/ptmx" ] || $BB mknod -m 666 "$1/dev/ptmx" c 5 2 || return 1
+	else log_info "Not mounting $1/dev/pts. (disabled by 'initfs_mnt_opts_dev_pts=no')" ; fi
+
+	if [ "$initfs_mnt_opts_dev_shm" != "no" ] ; then : "${initfs_mnt_opts_dev_shm="nodev noexec nosuid"}"
+		log_info "Mounting $1/dev/shm"
+		[ -e "$1/dev/shm" ] && [ ! -d "$1/dev/pts" ] && $BB rm -f "$1/dev/shm" || return 1
+		[ -e "$1/dev/shm" ] && [ -d "$1/dev/shm" ] || $BB mkdir -m 755 "$1/dev/shm" || return 1
+		$BB mount -t tmpfs ${initfs_mnt_opts_dev_shm:+-o "${initfs_mnt_opts_dev_shm// /,}"} shm "$1/dev/shm" && log_debug "Mounted $1/dev/shm." || return 1
+	else log_info "Not mounting $1/dev/shm. (disabled by 'initfs_mnt_opts_dev_shm=no')" ; fi
+
+
+	set_failmode "$_fm"
+}
+
+
+
+
+
+
+##
+# Kernel command line option handling.
+##
+
+# Caputre all kernel command line options and assign to variables.
+initfs_init_parse_kernel_cmdline() {
+	log_info "Parsing the kernel commandline..."
+	set -- $($BB cat /.init.d/env/kopt-cmdline)
+	local opt="" val="" OPT_=""
+	for $opt ; do
+		val="${opt#*=}"
+		opt="${opt%%=*}" && opt="${opt//-/_}" && opt="${opt//[!_[:alnum:]]/_}"
+		case "$opt" in initfs_*opt* | noinitfs_*opt* ) OPT_="" ;; *) OPT_="OPT_" ;; esac
+		case "$opt" in
+			1|s|single) opt="single" ; val='yes' ;;
+			*=*) : ;;
+			no*) opt="${opt#no}" ; val='no' ;;
+			*) val='yes';;
+		esac
+		setvar "$OPT_$opt" "$val"
+		list_append parsed_opts "$OPT_$opt"
+		log_debug "...option '$opt': '$OPT_$opt' set to '$val'."
+	done
+}
+
+
+
+
+
+
+
+
+##
+# Expected from stub:
+# env -i console="$console" APK="$APK" BB="$BB" DIRTY="$DIRTY" CANARY="$CANARY"
+# tmpfs mounted at /.init.d
+# kernel passed env in /.init.d/env/kopt-env
+# kernel set options in /.init.d/env/kopt-args
+# kernel command line in /.init.d/kopt-cmdline
+# BB and APK in /.init.d/(bin|sbin)
+# rootfs mounted noexec
+# /proc mounted
+# /dev not mounted, but /dev/(console|kmsg|null) exist
+
+##
+# Begin init process, we must make all calls via $BB until applet links installed:
+##
+
+log_start
+export PATH='/usr/sbin:/sbin:/usr/bin:/bin' # Set initial path
+
+# Parse kernel command line options then mount and set up rest of /dev.
+call initfs_init_parse_kernel_cmdline
+call initfs_init_root_mount_dev
+
+
+
+# Create initial dirs and devs so we can start logging.
+initfs_init_root_create_dirs
+
+# Setup busybox links
+set_failmode error
+run $BB --install -s 2>&1 /dev/null
+log_info "Minimal BusyBox environment initilized, beginning initramfs init..."
+
+
+# Drop to single before we do anything else.
+[ "$OPT_rescue" = "yes" ] && rescue_shell
+
+##
+# Past this point we can use applets without calling via /bin/busybox.
+##
+
+# Mount /proc & /sys, then set our default log level
+call initfs_init_root_mount_proc_sys
+log_level INFO
+
+
+
+# TODO - Implement calls to all features through these:
+call initfs_init_do_drivers
+call initfs_init_do_network
+call initfs_init_do_filesystems
+call initfs_init_do_real_root
+call initfs_init_do_alpine_live
+
+
+
+
+# Reboot if we somehow fall through to the end.
+log_emergency "Reached the end of initramfs init! - REBOOTING!!!"
+$BB sleep 5
+log_stop
+$BB reboot
