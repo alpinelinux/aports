@@ -8,7 +8,7 @@ testroot = $(tmproot)/$(basename $@)
 SUDO	:= sudo
 APK	:= ../src/apk --keys-dir /etc/apk/keys
 
-SYSREPO ?= http://alpinelinux.org/cgi-bin/dl.cgi/edge/main
+SYSREPO ?= http://nl.alpinelinux.org/alpine/edge/main
 
 LD_LIBRARY_PATH = ../src
 export LD_LIBRARY_PATH SYSREPO
