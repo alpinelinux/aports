@@ -13,12 +13,11 @@ makedepends="python2 linux-headers libffi-dev pkgconf zlib-dev bzip2-dev
              gdbm-dev paxmark tk tk-dev py3-cffi py2-cffi xz xz-dev"
 subpackages="$pkgname-dev"
 source="https://bitbucket.org/pypy/pypy/downloads/$pkgname-v$pkgver-src.tar.bz2
-        conststdio.patch
-        dbremove.patch
+	tk.patch
+	conststdio.patch
         libpthread.patch
         nomandelbrot.patch
-        nopax.patch
-        tk.patch"
+        nopax.patch"
 builddir="$srcdir/$pkgname-v$pkgver-src"
 
 build() {
@@ -38,9 +37,8 @@ package() {
 }
 
 sha512sums="d78b4c899a5643028664365ed973a7b292a8e5b3989cc75203cd381ea3cda7dd73121c574726e23dca86e8364fcfcf42c372c9deee438c805f30d6e1c4ac115a  pypy3-v5.8.0-src.tar.bz2
-a161dee3ff4090697cf45f7066cb237e4605904b758e14c587a288c4cba96b4311da4fe4c99f054cd97236e0ed46ba11a3071123edf29d2e86a3515d79b7d56c  conststdio.patch
-ebd21c43ac61ebc6b597af42adc1af6a85e5ea84018d5f8add69e8abf800aa71798df2ffbda008befbca200d1c5f92b4602c5d128fac07ac31cd2d5877e33cc2  dbremove.patch
-3a25c8613033636f18aeb7218eb77a18e7f5c25787dbbff1853d9ffffd6631053b3cd6d6503bcce2df388e625b166f7d982160c61de0a9ba5ffe1d81a5f9dfd2  libpthread.patch
-9cac3684e29ac9e56f8b4085fe02ed027fa208963e4f54453898af3eeef1a0f07b6f3d6f940b2dca05e9f1fbff8baede696a57e53ac01fdadc081943a48580da  nomandelbrot.patch
-c868f15c0e87ee225364b6e08aad80cb8a2d0ec1a87279f38f40f653e33bfce4b1f8860a2920cb74d3e48db9553ccf2767538a876f15cd6694e6a8cef9cd5a20  nopax.patch
-7fa1c5893ae191a93282a085d63fb3f7a7b62c6d365c7b52e0a097517341a8b9097d3a613dba42862879d8a13ea028202a1af74ceafbd334a381b241570e32d4  tk.patch"
+4758cd1ab96dbf1f3ced4553c04adb62b2aaf1528e0d98c8650fc489b7b09281187961662c94039a5303f3bfa8603ac10bce5a96f5d83a74cd6fc137f6afcb23  conststdio.patch
+4b48adbf0b8723ab1a7171494c4b40be696242abec047c1c2a9d071f639bf3b6b1b1b5b4aa602d2ece43dc4f06edf9b7087ad647c4ab9774a850335fdead313c  libpthread.patch
+2beb51cada368b041bc585c8196dea00bd8884a25ded376ac8fa097e79044405dfbd95ce1b6626f8e81cd4f950112d04ae98d5adf3b0e9e7327934419243e90d  nomandelbrot.patch
+8051547cea7182ff6c191f9b3c05f11768977d65877c10ffa202baad91e27731a43844cc269ccd99c78e61ff60d95294adc997937a532a9f6d54eb8e3009eeef  nopax.patch
+264de3a068f5680488574464eebb1a88d5590b257749b6ce1a75ec5bc498fa9609500a4ca92d82d370613286a0a4217f4a1667311f73479fa58b138715878711  tk.patch"
