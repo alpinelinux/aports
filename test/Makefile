@@ -21,7 +21,7 @@ $(repos):
 	@cd $@ &&\
 		for i in */APKBUILD; do\
 			( cd $${i%/*} && \
-			PKGDEST="$$PWD/.." abuild -R ) >> ../repos.out 2>&1 || exit 1;\
+			REPODEST="$$PWD/../.." abuild -R ) >> ../repos.out 2>&1 || exit 1;\
 		done
 	@cd $@ &&\
 		( apk index -o APKINDEX.tar.gz *.apk &&\
