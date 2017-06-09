@@ -14,8 +14,12 @@ create_image_rootfs() {
 }
 
 profile_minirootfs() {
+	title="Mini root filesystem"
+	desc="Minimal root filesystem.
+		For use in containers
+		and minimal chroots."
 	image_ext=tar.gz
 	output_format=rootfs
-	arch="x86 x86_64 armhf aarch64 ppc64le"
+	arch="x86 x86_64 armhf aarch64 ppc64le s390x"
 	rootfs_apks="busybox alpine-baselayout alpine-keys apk-tools libc-utils"
 }
