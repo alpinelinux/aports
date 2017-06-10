@@ -10,6 +10,12 @@ APK	:= ../src/apk --keys-dir /etc/apk/keys
 
 SYSREPO ?= http://nl.alpinelinux.org/alpine/edge/main
 
+# Absolute path to QEMU user-mode emulation binary to be copied into every
+# $testroot before running test. This is used when running root-tests in
+# emulation using QEMU and binfmt (apk --root uses chroot to run pre/post
+# install scripts).
+QEMU_EMULATOR ?=
+
 LD_LIBRARY_PATH = ../src
 export LD_LIBRARY_PATH SYSREPO
 
@@ -39,6 +45,9 @@ repos.stamp: $(repos)
 	@echo -n "$<"; \
 		rm -rf "$(testroot)" ;\
 		mkdir -p "$(testroot)"; \
+		if [ -n "$(QEMU_EMULATOR)" ]; then \
+			$(SUDO) install -Dm755 "$(QEMU_EMULATOR)" "$(testroot)$(QEMU_EMULATOR)"; \
+		fi; \
 		if ! APK="$(APK)" ROOT="$(testroot)" SYSREPO="$(SYSREPO)" sh -ex ./$< > $(basename $@).out 2>&1; then\
 			echo " FAIL";\
 			printf "------------- output -------------\n" >&2;\
@@ -54,7 +63,9 @@ root-tests: repos.stamp
 	@echo "== Testing `$(APK) --version` (tests that require root permission) =="
 	@failed=0; for i in test*.sh; do \
 		rm -f $${i%.sh}.ok ;\
-		$(SUDO) $(MAKE) --no-print-directory $${i%.sh}.ok SYSREPO=$(SYSREPO) || failed=1; \
+		$(SUDO) $(MAKE) --no-print-directory $${i%.sh}.ok \
+			SYSREPO=$(SYSREPO) \
+			QEMU_EMULATOR=$(QEMU_EMULATOR) || failed=1; \
 	done; \
 	return $$failed
 
