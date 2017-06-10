@@ -5,7 +5,7 @@
 $APK add --root $ROOT --initdb -U --repository $PWD/repo1 \
 	--repository $SYSREPO alpine-keys linux-vanilla
 
-test -L "$ROOT"/boot/vmlinuz
+test -e "$ROOT"/boot/vmlinuz
 
-test -L "$ROOT"/boot/initramfs-vanilla
+test -e "$ROOT"/boot/initramfs-vanilla
 
