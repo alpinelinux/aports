@@ -52,10 +52,11 @@ repos.stamp: $(repos)
 
 root-tests: repos.stamp
 	@echo "== Testing `$(APK) --version` (tests that require root permission) =="
-	@for i in test*.sh; do \
+	@failed=0; for i in test*.sh; do \
 		rm -f $${i%.sh}.ok ;\
-		$(SUDO) $(MAKE) --no-print-directory $${i%.sh}.ok SYSREPO=$(SYSREPO); \
-	done
+		$(SUDO) $(MAKE) --no-print-directory $${i%.sh}.ok SYSREPO=$(SYSREPO) || failed=1; \
+	done; \
+	return $$failed
 
 tests:
 	@echo "== Testing `$(APK) --version` =="
