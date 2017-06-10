@@ -39,7 +39,7 @@ repos.stamp: $(repos)
 	@echo -n "$<"; \
 		rm -rf "$(testroot)" ;\
 		mkdir -p "$(testroot)"; \
-		if ! APK="$(APK)" ROOT="$(testroot)" SYSREPO="$(SYSREPO)" ./$< > $(basename $@).out 2>&1; then\
+		if ! APK="$(APK)" ROOT="$(testroot)" SYSREPO="$(SYSREPO)" sh -ex ./$< > $(basename $@).out 2>&1; then\
 			echo " FAIL";\
 			printf "------------- output -------------\n" >&2;\
 			cat $(basename $@).out >&2;\
