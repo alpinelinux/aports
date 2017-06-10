@@ -19,9 +19,9 @@ $(repos):
 	@echo "Building $@"
 	@rm -f repos.out
 	@cd $@ &&\
-		for i in */APKBUILD; do\
-			( cd $${i%/*} && \
-			REPODEST="$$PWD/../.." abuild -R ) >> ../repos.out 2>&1 || exit 1;\
+		for i in */APKBUILD; do \
+			( cd $${i%/*} && REPODEST="$$PWD/../.." abuild -R ) \
+				>> ../repos.out 2>&1 || { cat ../repos.out >&2; exit 1; } \
 		done
 
 
@@ -41,6 +41,9 @@ repos.stamp: $(repos)
 		mkdir -p "$(testroot)"; \
 		if ! APK="$(APK)" ROOT="$(testroot)" SYSREPO="$(SYSREPO)" ./$< > $(basename $@).out 2>&1; then\
 			echo " FAIL";\
+			printf "------------- output -------------\n" >&2;\
+			cat $(basename $@).out >&2;\
+			printf "----------------------------------\n" >&2;\
 			exit 1;\
 		fi ;\
 		echo " OK" ;\
