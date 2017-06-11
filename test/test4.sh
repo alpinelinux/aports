@@ -12,6 +12,6 @@ touch "$ROOT"/should-fail
 # check that pre-install was executed
 test -f $ROOT/pre-install
 
-# check that package was not installed
-! $APK info --root $ROOT -e test-c
+# check that package was installed
+$APK info --root $ROOT -e test-c
 
