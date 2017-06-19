@@ -1,0 +1,264 @@
+# Contributor: Carlo Landmeter <clandmeter@gmail.com>
+# Maintainer:
+pkgname=grub
+pkgver=2.02
+pkgrel=1
+pkgdesc="Bootloader with support for Linux, Multiboot and more"
+url="https://www.gnu.org/software/grub/"
+arch="all !armhf !s390x"
+license="GPLv3+"
+depends=""
+depends_dev=""
+makedepends="$depends_dev bison flex linux-headers xz-dev lvm2-dev
+	automake autoconf libtool python2 freetype-dev unifont"
+install=""
+# strip handled by grub Makefiles, abuild strip breaks xen pv-grub
+options="!strip"
+subpackages="$pkgname-dev $pkgname-doc"
+
+# currently grub only builds on x86*, aarch64 and ppc64le systems
+case "$CARCH" in
+x86)	 subpackages="$subpackages $pkgname-efi $pkgname-bios" ;;
+x86_64)  subpackages="$subpackages $pkgname-efi $pkgname-bios $pkgname-xenhost" ;;
+aarch64) subpackages="$subpackages $pkgname-efi" ;;
+ppc64le) subpackages="$subpackages $pkgname-ieee1275"
+	 makedepends="$makedepends powerpc-utils" ;;
+s390x) subpackages="$subpackages $pkgname-emu" ;;
+esac
+
+source="https://ftp.gnu.org/gnu/grub/grub-$pkgver.tar.xz
+	fix-gcc-no-pie-specs.patch
+	grub2-accept-empty-module.patch
+	grub-xen-host_grub.cfg
+	2.02_beta3-mkconfig-alpine.patch
+	"
+builddir="$srcdir/grub-$pkgver"
+
+
+_build_bios() {
+	msg "Building grub for platform BIOS"
+	cd $builddir/bios
+	./configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--localstatedir=/var \
+		--disable-nls \
+		--disable-werror \
+		--with-platform=pc \
+		|| return 1
+	make || return 1
+}
+
+_build_efi() {
+	msg "Building grub for platform EFI"
+	cd $builddir/efi
+	./configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--localstatedir=/var \
+		--disable-nls \
+		--disable-werror \
+		--with-platform=efi \
+		--disable-efiemu \
+		|| return 1
+	make || return 1
+}
+
+_build_xen() {
+	msg "Building grub for platform XEN"
+	cd $builddir/xen
+	./configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--localstatedir=/var \
+		--disable-nls \
+		--disable-werror \
+		--with-platform=xen \
+		--target=$CARCH \
+	|| return 1
+	make || return 1
+}
+
+_build_ieee1275() {
+	msg "Building grub for platform IEEE1275"
+	cd $builddir/ieee1275
+	./configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--localstatedir=/var \
+		--disable-nls \
+		--disable-werror \
+		--with-platform=ieee1275 \
+	|| return 1
+	make || return 1
+}
+
+_build_emu() {
+	msg "Building grub for platform EMU"
+	cd $builddir/emu
+	./configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--localstatedir=/var \
+		--disable-nls \
+		--disable-werror \
+		--with-platform=emu \
+	|| return 1
+	make || return 1
+}
+
+build() {
+	cd "$builddir"
+	autoreconf -vif || return 1
+
+	cd "$srcdir"
+	tmpdir="$srcdir"/tmp
+	mv "$builddir" "$tmpdir"
+
+	mkdir "$builddir"
+	cp -r "$tmpdir" "$builddir"/bios
+	cp -r "$tmpdir" "$builddir"/efi
+	cp -r "$tmpdir" "$builddir"/xen
+	cp -r "$tmpdir" "$builddir"/emu
+	mv    "$tmpdir" "$builddir"/ieee1275
+
+	case "$CARCH" in
+	x86)
+		_build_bios || return 1
+		_build_efi  || return 1 ;;
+	x86_64)
+		_build_bios || return 1
+		_build_efi  || return 1
+		_build_xen  || return 1	;;
+	aarch64)
+		_build_efi || return 1 ;;
+	ppc64le)
+		_build_ieee1275 || return 1 ;;
+	s390x)
+		_build_emu || return 1;;
+	esac
+}
+
+_install_bios() {
+	cd "$builddir"/bios
+	make DESTDIR="$pkgdir" install-strip || return 1
+}
+
+_install_efi() {
+	cd "$builddir"/efi
+	make DESTDIR="$pkgdir" install-strip || return 1
+}
+
+_install_xen() {
+	cd "$builddir"/xen
+
+	grub_dir=`mktemp -d`
+	cfg=`mktemp`
+	grub_memdisk=`mktemp`
+
+	mkdir -p $grub_dir/boot/grub
+	echo 'normal (memdisk)/grub.cfg' > $cfg
+	sed -e "s/@@PVBOOT_ARCH@@/$CARCH/g" \
+		$srcdir/grub-xen-host_grub.cfg \
+			> $grub_dir/grub.cfg
+	tar -cf - -C $grub_dir grub.cfg > $grub_memdisk
+
+	./grub-mkimage \
+		-O $CARCH-xen \
+		-c $cfg \
+		-d ./grub-core ./grub-core/*.mod \
+		-m $grub_memdisk \
+		-o $pkgdir/grub-$CARCH-xen.bin
+
+	rm -r "$grub_dir"
+	rm "$cfg"
+	rm "$grub_memdisk"
+}
+
+_install_ieee1275() {
+	cd "$builddir"/ieee1275
+	make DESTDIR="$pkgdir" install-strip || return 1
+}
+
+_install_emu() {
+	cd "$builddir"/emu
+	make DESTDIR="$pkgdir" install-strip || return 1
+}
+
+package() {
+	# install BIOS & EFI version into the same directory
+	# and overwrite similar files.
+
+	case "$CARCH" in
+	x86)
+		_install_bios
+		_install_efi ;;
+	x86_64)
+		_install_bios
+		_install_efi
+		_install_xen ;;
+	aarch64)
+		_install_efi ;;
+	ppc64le)
+		_install_ieee1275 ;;
+	s390x)
+		_install_emu ;;
+	esac
+
+	rm -f "$pkgdir"/usr/lib/charset.alias
+}
+
+bios() {
+	pkgdesc="$pkgdesc (BIOS version)"
+	depends="$pkgname"
+	mkdir -p $subpkgdir/usr/lib/grub
+	mv $pkgdir/usr/lib/grub/*-pc $subpkgdir/usr/lib/grub/
+}
+
+efi() {
+	pkgdesc="$pkgdesc (EFI version)"
+	depends="$pkgname"
+	mkdir -p $subpkgdir/usr/lib/grub
+	mv $pkgdir/usr/lib/grub/*-efi $subpkgdir/usr/lib/grub/
+}
+
+xenhost() {
+	pkgdesc="$pkgdesc (XEN host version)"
+	mkdir -p $subpkgdir/usr/lib/grub-xen
+	mv $pkgdir/*-xen.bin $subpkgdir/usr/lib/grub-xen/
+}
+
+ieee1275() {
+	pkgdesc="$pkgdesc (IEEE1275 version)"
+	depends="$pkgname powerpc-utils"
+	mkdir -p $subpkgdir/usr/lib/grub
+	mv $pkgdir/usr/lib/grub/*-ieee1275 $subpkgdir/usr/lib/grub/
+}
+
+emu() {
+	pkgdesc="$pkgdesc (EMU version)"
+	depends="$pkgname"
+	mkdir -p $subpkgdir/usr/lib/grub
+	mv $pkgdir/usr/lib/grub/*-emu $subpkgdir/usr/lib/grub/
+}
+
+sha512sums="cc6eb0a42b5c8df2f671cc128ff725afb3ff1f8832a196022e433cf0d3b75decfca2316d0aa5fabea75747d55e88f3d021dd93508563f8ca80fd7b9e7fe1f088  grub-2.02.tar.xz
+f2a7d9ab6c445f4e402e790db56378cecd6631b5c367451aa6ce5c01cd95b95c83c3dd24d6d4b857f8f42601eba82c855607513eb6ce5b2af6bd6c71f046e288  fix-gcc-no-pie-specs.patch
+098a1742aef131c85d63b934a9815879b991f2e73030cb90ac4b5dcd07d249fa0dd0a281e52ada0e10f05d59223493bd416eb47543242bf0ba336a0ebc9b2a1a  grub2-accept-empty-module.patch
+4e7394e0fff6772c89683039ccf81099ebbfe4f498e6df408977a1488fd59389b6e19afdbf0860ec271e2b2aea0df7216243dcc8235d1ca3af0e7f4d0a9d60a4  grub-xen-host_grub.cfg
+5de7c1cc11640a3892447f0daa1e3fd1f67b0c474c8aec555e4e6315b5e6c00491ba02c88b420cec221da0640c6961d639f148746df14a0b2c15bda7989cd25c  2.02_beta3-mkconfig-alpine.patch"

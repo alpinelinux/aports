@@ -15,5 +15,6 @@ done
 
 if [ -n "$do_bb_install" ]; then
 	[ -e /bin/bbsuid ] && /bin/bbsuid --install
+	[ -e /bin/busybox-extras ] && /bin/busybox-extras --install -s
 	/bin/busybox --install -s
 fi

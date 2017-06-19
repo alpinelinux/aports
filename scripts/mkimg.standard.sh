@@ -1,4 +1,8 @@
 profile_standard() {
+	title="Standard"
+	desc="Alpine as it was intended.
+		Just enough to get you started.
+		Network connection is required."
 	profile_base
 	image_ext="iso"
 	arch="x86 x86_64"
@@ -9,6 +13,10 @@ profile_standard() {
 
 profile_vanilla() {
 	profile_standard
+	title="Vanilla"
+	desc="Includes a vanilla kernel.
+		Does not include grsec patch set.
+		Suitable for debugging."
 	#arch="$arch aarch64"
 	arch="$arch ppc64le"
 	kernel_flavors="vanilla"
@@ -17,12 +25,16 @@ profile_vanilla() {
 
 profile_extended() {
 	profile_standard
-	kernel_addons="dahdi-linux xtables-addons"
+	title="Extended"
+	desc="Most common used packages included.
+		Suitable for routers and servers.
+		Runs from RAM."
+	kernel_addons="dahdi-linux xtables-addons zfs spl"
 	apks="$apks
 		dahdi-linux dahdi-tools ethtool hwdata lftp links
 		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
-		pax-utils paxctl pciutils screen strace sudo tmux
-		usbutils v86d vim xtables-addons
+		pax-utils paxmark pciutils screen strace sudo tmux
+		usbutils v86d vim xtables-addons curl
 
 		acct arpon arpwatch awall bridge-utils bwm-ng
 		ca-certificates conntrack-tools cutter cyrus-sasl dhcp
@@ -38,6 +50,7 @@ profile_extended() {
 		btrfs-progs cksfv dosfstools cryptsetup
 		cciss_vol_status lvm2 mdadm mkinitfs mtools nfs-utils
 		parted rsync sfdisk syslinux unrar util-linux xfsprogs
+		zfs
 		"
 
 	local _k _a
@@ -52,6 +65,10 @@ profile_extended() {
 
 profile_virt() {
 	profile_standard
+	title="Virtual"
+	desc="Similar to standard.
+		Slimmed down kernel.
+		Optimized for virtual systems."
 	kernel_addons=
 	kernel_flavors="virthardened"
 	kernel_cmdline="console=tty0 console=ttyS0,115200"
