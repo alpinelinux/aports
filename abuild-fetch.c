@@ -84,9 +84,6 @@ int fetch(char *url, const char *destdir)
 		name = url;
 		*p = '\0';
 		url = p + 2;
-	} else if (strstr(url, "saveas-") == url) {
-		*name++ = '\0';
-		url += 7;  /* strlen("saveas-") */
 	} else {
 		name++;
 	}
