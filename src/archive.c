@@ -59,7 +59,7 @@ struct apk_tar_digest_info {
 #define GET_OCTAL(s)	get_octal(s, sizeof(s))
 #define PUT_OCTAL(s,v)	put_octal(s, sizeof(s), v)
 
-static int get_octal(char *s, size_t l)
+static unsigned int get_octal(char *s, size_t l)
 {
 	apk_blob_t b = APK_BLOB_PTR_LEN(s, l);
 	return apk_blob_pull_uint(&b, 8);
@@ -133,7 +133,7 @@ static void tar_entry_close(void *stream)
 {
 }
 
-static int blob_realloc(apk_blob_t *b, int newsize)
+static int blob_realloc(apk_blob_t *b, size_t newsize)
 {
 	char *tmp;
 	if (b->len >= newsize) return 0;
@@ -232,6 +232,8 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		teis.csum = NULL;
 		teis.mtime = entry.mtime;
 		apk_xattr_array_resize(&entry.xattrs, 0);
+
+		if (entry.size >= SSIZE_MAX-512) goto err;
 
 		if (paxlen) {
 			handle_extended_header(&entry, APK_BLOB_PTR_LEN(pax.ptr, paxlen));
