@@ -242,9 +242,10 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 
 		switch (buf.typeflag) {
 		case 'L': /* GNU long name extension */
-			if (blob_realloc(&longname, entry.size+1)) goto err_nomem;
+			if ((r = blob_realloc(&longname, entry.size+1)) != 0 ||
+			    (r = is->read(is, longname.ptr, entry.size)) != entry.size)
+				goto err;
 			entry.name = longname.ptr;
-			is->read(is, entry.name, entry.size);
 			entry.name[entry.size] = 0;
 			offset += entry.size;
 			entry.size = 0;
@@ -291,8 +292,9 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		case 'x': /* file specific pax header */
 			paxlen = entry.size;
 			entry.size = 0;
-			if (blob_realloc(&pax, (paxlen + 511) & -512)) goto err_nomem;
-			is->read(is, pax.ptr, paxlen);
+			if ((r = blob_realloc(&pax, (paxlen + 511) & -512)) != 0 ||
+			    (r = is->read(is, pax.ptr, paxlen)) != paxlen)
+				goto err;
 			offset += paxlen;
 			break;
 		default:
@@ -318,8 +320,10 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		if ((offset + toskip) & 511)
 			toskip += 512 - ((offset + toskip) & 511);
 		offset += toskip;
-		if (toskip != 0)
-			is->read(is, NULL, toskip);
+		if (toskip != 0) {
+			if ((r = is->read(is, NULL, toskip)) != toskip)
+				goto err;
+		}
 	}
 
 	/* Read remaining end-of-archive records, to ensure we read all of
@@ -329,20 +333,16 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			if (buf.name[0] != 0) break;
 		}
 	}
-
-	/* Check that there was no partial (or non-zero) record */
-	if (r > 0) r = -EBADMSG;
-
+	if (r == 0) goto ok;
 err:
+	/* Check that there was no partial (or non-zero) record */
+	if (r >= 0) r = -EBADMSG;
+ok:
 	EVP_MD_CTX_cleanup(&teis.mdctx);
 	free(pax.ptr);
 	free(longname.ptr);
 	apk_fileinfo_free(&entry);
 	return r;
-
-err_nomem:
-	r = -ENOMEM;
-	goto err;
 }
 
 int apk_tar_write_entry(struct apk_ostream *os, const struct apk_file_info *ae,
