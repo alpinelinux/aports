@@ -100,7 +100,7 @@ static void process_file(struct apk_database *db, const char *match)
 	}
 
 	(void) apk_tar_parse(is, read_file_entry, &ctx, FALSE, &db->id_cache);
-	is->close(is);
+	apk_istream_close(is);
 }
 
 static void process_match(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)

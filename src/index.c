@@ -215,7 +215,7 @@ static int index_main(void *ctx, struct apk_database *db, struct apk_string_arra
 		fi.name = "APKINDEX";
 		counter = apk_ostream_counter(&fi.size);
 		r = apk_db_index_write(db, counter);
-		counter->close(counter);
+		apk_ostream_close(counter);
 
 		if (r >= 0) {
 			os = apk_ostream_gzip(os);
@@ -237,7 +237,7 @@ static int index_main(void *ctx, struct apk_database *db, struct apk_string_arra
 	} else {
 		r = apk_db_index_write(db, os);
 	}
-	os->close(os);
+	apk_ostream_close(os);
 
 	if (r < 0) {
 		apk_error("Index generation failed: %s", apk_error_str(r));

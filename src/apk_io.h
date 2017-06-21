@@ -54,25 +54,37 @@ struct apk_file_info {
 	struct apk_xattr_array *xattrs;
 };
 
-struct apk_istream {
+struct apk_istream_ops {
 	void (*get_meta)(void *stream, struct apk_file_meta *meta);
 	ssize_t (*read)(void *stream, void *ptr, size_t size);
 	void (*close)(void *stream);
 };
 
+struct apk_istream {
+	const struct apk_istream_ops *ops;
+};
+
 #define APK_BSTREAM_SINGLE_READ			0x0001
 #define APK_BSTREAM_EOF				0x0002
 
-struct apk_bstream {
-	unsigned int flags;
+struct apk_bstream_ops {
 	void (*get_meta)(void *stream, struct apk_file_meta *meta);
 	apk_blob_t (*read)(void *stream, apk_blob_t token);
 	void (*close)(void *stream, size_t *size);
 };
 
-struct apk_ostream {
+struct apk_bstream {
+	unsigned int flags;
+	const struct apk_bstream_ops *ops;
+};
+
+struct apk_ostream_ops {
 	ssize_t (*write)(void *stream, const void *buf, size_t size);
 	int (*close)(void *stream);
+};
+
+struct apk_ostream {
+	const struct apk_ostream_ops *ops;
 };
 
 #define APK_MPART_DATA		1 /* data processed so far */
@@ -118,6 +130,18 @@ static inline struct apk_istream *apk_istream_from_url_if_modified(const char *u
 {
 	return apk_istream_from_fd_url_if_modified(AT_FDCWD, url, since);
 }
+static inline void apk_istream_get_meta(struct apk_istream *is, struct apk_file_meta *meta)
+{
+	is->ops->get_meta(is, meta);
+}
+static inline ssize_t apk_istream_read(struct apk_istream *is, void *ptr, size_t size)
+{
+	return is->ops->read(is, ptr, size);
+}
+static inline void apk_istream_close(struct apk_istream *is)
+{
+	is->ops->close(is);
+}
 
 struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream);
 struct apk_bstream *apk_bstream_from_fd_pid(int fd, pid_t pid, int (*translate_status)(int));
@@ -143,11 +167,31 @@ static inline struct apk_bstream *apk_bstream_from_url_if_modified(const char *u
 {
 	return apk_bstream_from_fd_url_if_modified(AT_FDCWD, url, since);
 }
+static inline void apk_bstream_get_meta(struct apk_bstream *bs, struct apk_file_meta *meta)
+{
+	bs->ops->get_meta(bs, meta);
+}
+static inline apk_blob_t apk_bstream_read(struct apk_bstream *bs, apk_blob_t token)
+{
+	return bs->ops->read(bs, token);
+}
+static inline void apk_bstream_close(struct apk_bstream *bs, size_t *size)
+{
+	bs->ops->close(bs, size);
+}
 
 struct apk_ostream *apk_ostream_to_fd(int fd);
 struct apk_ostream *apk_ostream_to_file(int atfd, const char *file, const char *tmpfile, mode_t mode);
 struct apk_ostream *apk_ostream_to_file_gz(int atfd, const char *file, const char *tmpfile, mode_t mode);
 size_t apk_ostream_write_string(struct apk_ostream *ostream, const char *string);
+static inline ssize_t apk_ostream_write(struct apk_ostream *os, const void *buf, size_t size)
+{
+	return os->ops->write(os, buf, size);
+}
+static inline int apk_ostream_close(struct apk_ostream *os)
+{
+	return os->ops->close(os);
+}
 
 apk_blob_t apk_blob_from_istream(struct apk_istream *istream, size_t size);
 apk_blob_t apk_blob_from_file(int atfd, const char *file);

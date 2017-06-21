@@ -108,7 +108,7 @@ static ssize_t tar_entry_read(void *stream, void *ptr, size_t size)
 	if (size == 0)
 		return 0;
 
-	r = teis->tar_is->read(teis->tar_is, ptr, size);
+	r = apk_istream_read(teis->tar_is, ptr, size);
 	if (r <= 0) {
 		/* If inner stream returned zero (end-of-stream), we
 		 * are getting short read, because tar header indicated
@@ -132,6 +132,12 @@ static ssize_t tar_entry_read(void *stream, void *ptr, size_t size)
 static void tar_entry_close(void *stream)
 {
 }
+
+static const struct apk_istream_ops tar_istream_ops = {
+	.get_meta = tar_entry_get_meta,
+	.read = tar_entry_read,
+	.close = tar_entry_close,
+};
 
 static int blob_realloc(apk_blob_t *b, size_t newsize)
 {
@@ -191,9 +197,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 {
 	struct apk_file_info entry;
 	struct apk_tar_entry_istream teis = {
-		.is.get_meta = tar_entry_get_meta,
-		.is.read = tar_entry_read,
-		.is.close = tar_entry_close,
+		.is.ops = &tar_istream_ops,
 		.tar_is = is,
 	};
 	struct tar_header buf;
@@ -206,7 +210,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	odi = (struct apk_tar_digest_info *) &buf.linkname[3];
 	EVP_MD_CTX_init(&teis.mdctx);
 	memset(&entry, 0, sizeof(entry));
-	while ((r = is->read(is, &buf, 512)) == 512) {
+	while ((r = apk_istream_read(is, &buf, 512)) == 512) {
 		offset += 512;
 		if (buf.name[0] == '\0') {
 			if (end) break;
@@ -243,7 +247,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		switch (buf.typeflag) {
 		case 'L': /* GNU long name extension */
 			if ((r = blob_realloc(&longname, entry.size+1)) != 0 ||
-			    (r = is->read(is, longname.ptr, entry.size)) != entry.size)
+			    (r = apk_istream_read(is, longname.ptr, entry.size)) != entry.size)
 				goto err;
 			entry.name = longname.ptr;
 			entry.name[entry.size] = 0;
@@ -293,7 +297,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			paxlen = entry.size;
 			entry.size = 0;
 			if ((r = blob_realloc(&pax, (paxlen + 511) & -512)) != 0 ||
-			    (r = is->read(is, pax.ptr, paxlen)) != paxlen)
+			    (r = apk_istream_read(is, pax.ptr, paxlen)) != paxlen)
 				goto err;
 			offset += paxlen;
 			break;
@@ -321,7 +325,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			toskip += 512 - ((offset + toskip) & 511);
 		offset += toskip;
 		if (toskip != 0) {
-			if ((r = is->read(is, NULL, toskip)) != toskip)
+			if ((r = apk_istream_read(is, NULL, toskip)) != toskip)
 				goto err;
 		}
 	}
@@ -329,7 +333,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	/* Read remaining end-of-archive records, to ensure we read all of
 	 * the file. The underlying istream is likely doing checksumming. */
 	if (r == 512) {
-		while ((r = is->read(is, &buf, 512)) == 512) {
+		while ((r = apk_istream_read(is, &buf, 512)) == 512) {
 			if (buf.name[0] != 0) break;
 		}
 	}
@@ -381,15 +385,15 @@ int apk_tar_write_entry(struct apk_ostream *os, const struct apk_file_info *ae,
 	        put_octal(buf.chksum, sizeof(buf.chksum)-1, chksum);
 	}
 
-	if (os->write(os, &buf, sizeof(buf)) != sizeof(buf))
+	if (apk_ostream_write(os, &buf, sizeof(buf)) != sizeof(buf))
 		return -1;
 
 	if (ae == NULL) {
 		/* End-of-archive is two empty headers */
-		if (os->write(os, &buf, sizeof(buf)) != sizeof(buf))
+		if (apk_ostream_write(os, &buf, sizeof(buf)) != sizeof(buf))
 			return -1;
 	} else if (data != NULL) {
-		if (os->write(os, data, ae->size) != ae->size)
+		if (apk_ostream_write(os, data, ae->size) != ae->size)
 			return -1;
 		if (apk_tar_write_padding(os, ae) != 0)
 			return -1;
@@ -405,7 +409,7 @@ int apk_tar_write_padding(struct apk_ostream *os, const struct apk_file_info *ae
 
 	pad = 512 - (ae->size & 511);
 	if (pad != 512 &&
-	    os->write(os, padding, pad) != pad)
+	    apk_ostream_write(os, padding, pad) != pad)
 		return -1;
 
 	return 0;

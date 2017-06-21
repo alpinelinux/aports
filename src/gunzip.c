@@ -34,7 +34,7 @@ static void gzi_get_meta(void *stream, struct apk_file_meta *meta)
 {
 	struct apk_gzip_istream *gis =
 		container_of(stream, struct apk_gzip_istream, is);
-	gis->bs->get_meta(gis->bs, meta);
+	apk_bstream_get_meta(gis->bs, meta);
 }
 
 static ssize_t gzi_read(void *stream, void *ptr, size_t size)
@@ -77,7 +77,7 @@ static ssize_t gzi_read(void *stream, void *ptr, size_t size)
 					APK_BLOB_PTR_LEN(gis->cbprev,
 					(void *)gis->zs.next_in - gis->cbprev));
 			}
-			blob = gis->bs->read(gis->bs, APK_BLOB_NULL);
+			blob = apk_bstream_read(gis->bs, APK_BLOB_NULL);
 			gis->cbprev = blob.ptr;
 			gis->zs.avail_in = blob.len;
 			gis->zs.next_in = (void *) gis->cbprev;
@@ -147,9 +147,15 @@ static void gzi_close(void *stream)
 		container_of(stream, struct apk_gzip_istream, is);
 
 	inflateEnd(&gis->zs);
-	gis->bs->close(gis->bs, NULL);
+	apk_bstream_close(gis->bs, NULL);
 	free(gis);
 }
+
+static const struct apk_istream_ops gunzip_istream_ops = {
+	.get_meta = gzi_get_meta,
+	.read = gzi_read,
+	.close = gzi_close,
+};
 
 struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 					     apk_multipart_cb cb, void *ctx)
@@ -162,9 +168,7 @@ struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 	if (!gis) goto err;
 
 	*gis = (struct apk_gzip_istream) {
-		.is.get_meta = gzi_get_meta,
-		.is.read = gzi_read,
-		.is.close = gzi_close,
+		.is.ops = &gunzip_istream_ops,
 		.bs = bs,
 		.cb = cb,
 		.cbctx = ctx,
@@ -177,7 +181,7 @@ struct apk_istream *apk_bstream_gunzip_mpart(struct apk_bstream *bs,
 
 	return &gis->is;
 err:
-	bs->close(bs, NULL);
+	apk_bstream_close(bs, NULL);
 	return ERR_PTR(-ENOMEM);
 }
 
@@ -203,7 +207,7 @@ static ssize_t gzo_write(void *stream, const void *ptr, size_t size)
 			return -EIO;
 		have = sizeof(buffer) - gos->zs.avail_out;
 		if (have != 0) {
-			r = gos->output->write(gos->output, buffer, have);
+			r = apk_ostream_write(gos->output, buffer, have);
 			if (r != have)
 				return -EIO;
 		}
@@ -224,10 +228,10 @@ static int gzo_close(void *stream)
 		gos->zs.next_out = buffer;
 		r = deflate(&gos->zs, Z_FINISH);
 		have = sizeof(buffer) - gos->zs.avail_out;
-		if (gos->output->write(gos->output, buffer, have) != have)
+		if (apk_ostream_write(gos->output, buffer, have) != have)
 			rc = -EIO;
 	} while (r == Z_OK);
-	r = gos->output->close(gos->output);
+	r = apk_ostream_close(gos->output);
 	if (r != 0)
 		rc = r;
 
@@ -236,6 +240,11 @@ static int gzo_close(void *stream)
 
 	return rc;
 }
+
+static const struct apk_ostream_ops gzip_ostream_ops = {
+	.write = gzo_write,
+	.close = gzo_close,
+};
 
 struct apk_ostream *apk_ostream_gzip(struct apk_ostream *output)
 {
@@ -247,8 +256,7 @@ struct apk_ostream *apk_ostream_gzip(struct apk_ostream *output)
 	if (gos == NULL) goto err;
 
 	*gos = (struct apk_gzip_ostream) {
-		.os.write = gzo_write,
-		.os.close = gzo_close,
+		.os.ops = &gzip_ostream_ops,
 		.output = output,
 	};
 
@@ -260,7 +268,7 @@ struct apk_ostream *apk_ostream_gzip(struct apk_ostream *output)
 
 	return &gos->os;
 err:
-	output->close(output);
+	apk_ostream_close(output);
 	return ERR_PTR(-ENOMEM);
 }
 

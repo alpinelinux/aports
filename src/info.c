@@ -140,8 +140,8 @@ static void info_who_owns(struct info_ctx *ctx, struct apk_database *db,
 		os = apk_ostream_to_fd(STDOUT_FILENO);
 		if (!IS_ERR_OR_NULL(os)) {
 			apk_deps_write(db, deps, os, APK_BLOB_PTR_LEN(" ", 1));
-			os->write(os, "\n", 1);
-			os->close(os);
+			apk_ostream_write(os, "\n", 1);
+			apk_ostream_close(os);
 		}
 	}
 	apk_dependency_array_free(&deps);

@@ -548,7 +548,7 @@ int main(int argc, char **argv)
 		struct apk_bstream *bs = apk_bstream_from_file(AT_FDCWD, test_installed_db);
 		if (!IS_ERR_OR_NULL(bs)) {
 			apk_db_index_read(&db, bs, -1);
-			bs->close(bs, NULL);
+			apk_bstream_close(bs, NULL);
 		}
 	}
 	for (i = 0; i < test_repos->num; i++) {
@@ -576,7 +576,7 @@ int main(int argc, char **argv)
 		}
 
 		apk_db_index_read(&db, bs, repo);
-		bs->close(bs, NULL);
+		apk_bstream_close(bs, NULL);
 		if (repo != -2) {
 			if (!(apk_flags & APK_NO_NETWORK))
 				db.available_repos |= BIT(repo);

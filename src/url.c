@@ -102,6 +102,12 @@ static void fetch_close(void *stream)
 	free(fis);
 }
 
+static const struct apk_istream_ops fetch_istream_ops = {
+	.get_meta = fetch_get_meta,
+	.read = fetch_read,
+	.close = fetch_close,
+};
+
 static struct apk_istream *apk_istream_fetch(const char *url, time_t since)
 {
 	struct apk_fetch_istream *fis;
@@ -121,9 +127,7 @@ static struct apk_istream *apk_istream_fetch(const char *url, time_t since)
 	}
 
 	*fis = (struct apk_fetch_istream) {
-		.is.get_meta = fetch_get_meta,
-		.is.read = fetch_read,
-		.is.close = fetch_close,
+		.is.ops = &fetch_istream_ops,
 		.fetchIO = io,
 		.urlstat = fis->urlstat,
 	};
