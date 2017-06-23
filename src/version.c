@@ -221,11 +221,6 @@ int apk_version_compare_blob_fuzzy(apk_blob_t a, apk_blob_t b, int fuzzy)
 	if (at == bt || fuzzy)
 		return APK_VERSION_EQUAL;
 
-	/* if only difference is pkgrev, they are equal. */
-	if ((at == TOKEN_REVISION_NO && bt == TOKEN_END) ||
-	    (at == TOKEN_END && bt == TOKEN_REVISION_NO))
-		return APK_VERSION_EQUAL;
-
 	/* leading version components and their values are equal,
 	 * now the non-terminating version is greater unless it's a suffix
 	 * indicating pre-release */
