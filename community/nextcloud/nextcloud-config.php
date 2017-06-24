@@ -16,5 +16,7 @@ $CONFIG = array (
       'writable' => true,
     ),
   ),
+  'updatechecker' => false,
+  'check_for_working_htaccess' => false,
   'installed' => false,
 );
