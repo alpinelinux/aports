@@ -18,5 +18,9 @@ $CONFIG = array (
   ),
   'updatechecker' => false,
   'check_for_working_htaccess' => false,
+
+  // Uncomment to enable Zend OPcache.
+  //'memcache.local' => '\OC\Memcache\APCu',
+
   'installed' => false,
 );
