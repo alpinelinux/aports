@@ -206,10 +206,12 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	int end = 0, r;
 	size_t toskip, paxlen = 0;
 	apk_blob_t pax = APK_BLOB_NULL, longname = APK_BLOB_NULL;
+	char filename[sizeof buf.name + sizeof buf.prefix + 2];
 
 	odi = (struct apk_tar_digest_info *) &buf.linkname[3];
 	EVP_MD_CTX_init(&teis.mdctx);
 	memset(&entry, 0, sizeof(entry));
+	entry.name = buf.name;
 	while ((r = apk_istream_read(is, &buf, 512)) == 512) {
 		offset += 512;
 		if (buf.name[0] == '\0') {
@@ -224,13 +226,19 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			.gid   = apk_resolve_gid(idc, buf.gname, GET_OCTAL(buf.gid)),
 			.mode  = GET_OCTAL(buf.mode) & 07777,
 			.mtime = GET_OCTAL(buf.mtime),
-			.name  = entry.name ?: buf.name,
+			.name  = entry.name,
 			.uname = buf.uname,
 			.gname = buf.gname,
 			.device = makedev(GET_OCTAL(buf.devmajor),
 					  GET_OCTAL(buf.devminor)),
 			.xattrs = entry.xattrs,
 		};
+		if (buf.prefix[0] && buf.typeflag != 'x' && buf.typeflag != 'g') {
+			snprintf(filename, sizeof filename, "%.*s/%.*s",
+				 (int) sizeof buf.prefix, buf.prefix,
+				 (int) sizeof buf.name, buf.name);
+			entry.name = filename;
+		}
 		buf.mode[0] = 0; /* to nul terminate 100-byte buf.name */
 		buf.magic[0] = 0; /* to nul terminate 100-byte buf.linkname */
 		teis.csum = NULL;
