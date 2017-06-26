@@ -2409,7 +2409,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 			return 0;
 
 		/* Make sure the file is part of the cached directory tree */
-		diri = find_diri(ipkg, bdir, diri, &ctx->file_diri_node);
+		diri = ctx->diri = find_diri(ipkg, bdir, diri, &ctx->file_diri_node);
 		if (diri == NULL) {
 			if (!APK_BLOB_IS_NULL(bdir)) {
 				apk_error(PKG_VER_FMT": "BLOB_FMT": no dirent in archive",
