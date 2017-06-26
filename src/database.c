@@ -2652,8 +2652,12 @@ static void apk_db_migrate_files(struct apk_database *db,
 					unlinkat(db->root_fd, tmpname, 0);
 			} else {
 				/* Overwrite the old file */
-				renameat(db->root_fd, tmpname,
-					 db->root_fd, name);
+				if (renameat(db->root_fd, tmpname,
+					     db->root_fd, name) != 0) {
+					apk_error(PKG_VER_FMT": failed to rename %s to %s.",
+						  PKG_VER_PRINTF(ipkg->pkg), tmpname, name);
+					ipkg->broken_files = 1;
+				}
 			}
 
 			/* Claim ownership of the file in db */
