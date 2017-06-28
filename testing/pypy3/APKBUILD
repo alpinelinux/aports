@@ -16,14 +16,14 @@ source="https://bitbucket.org/pypy/pypy/downloads/$pkgname-v$pkgver-src.tar.bz2
 	dbremove.patch
 	tk.patch
 	conststdio.patch
-        libpthread.patch
-        nomandelbrot.patch
-        nopax.patch"
+	libpthread.patch
+	nomandelbrot.patch
+	nopax.patch"
 builddir="$srcdir/$pkgname-v$pkgver-src"
 
 build() {
 	cd "$builddir/pypy/goal"
-        python2 ../../rpython/bin/rpython --opt=jit --nopax targetpypystandalone.py 
+	python2 ../../rpython/bin/rpython --opt=jit --nopax targetpypystandalone.py
 }
 
 check() {
@@ -34,7 +34,7 @@ check() {
 
 package() {
 	cd "$builddir/pypy/tool/release"
-	./package.py --archive-name $pkgname-$pkgver --builddir "$pkgdir" 
+	./package.py --archive-name $pkgname-$pkgver --builddir "$pkgdir"
 }
 
 sha512sums="d78b4c899a5643028664365ed973a7b292a8e5b3989cc75203cd381ea3cda7dd73121c574726e23dca86e8364fcfcf42c372c9deee438c805f30d6e1c4ac115a  pypy3-v5.8.0-src.tar.bz2
