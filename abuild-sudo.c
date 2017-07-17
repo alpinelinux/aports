@@ -12,6 +12,7 @@
 
 #include <err.h>
 #include <grp.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,17 +71,28 @@ int main(int argc, const char *argv[])
 	const char *cmd;
 	const char *path;
 	int i;
+	struct passwd *pw;
 
 	grent = getgrnam(ABUILD_GROUP);
 	if (grent == NULL)
 		errx(1, "%s: Group not found", ABUILD_GROUP);
 
 	char *name = getlogin();
+	if (name == NULL) {
+		pw = getpwuid(getuid());
+		if (pw)
+			name = pw->pw_name;
+	}
+
 	if (!is_in_group(grent->gr_gid)) {
 		errx(1, "User %s is not a member of group %s\n",
 			name ? name : "(unknown)", ABUILD_GROUP);
 	}
-	setenv("USER", name, 1);
+	if (name) {
+		setenv("USER", name, 1);
+	} else {
+		warnx("Could not find username for uid %d\n", getuid());
+	}
 
 	cmd = strrchr(argv[0], '/');
 	if (cmd)
