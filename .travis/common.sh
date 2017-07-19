@@ -1,7 +1,6 @@
 # vim: set ts=4:
 
 readonly ALPINE_ROOT='/mnt/alpine'
-readonly ALPINE_USER='alpine'
 readonly CLONE_DIR="${CLONE_DIR:-$(pwd)}"
 readonly MIRROR_URI='http://nl.alpinelinux.org/alpine/edge'
 
