@@ -190,6 +190,14 @@ build_grubefi_img() {
 	mcopy -s -i ${DESTDIR}/boot/grub/efiboot.img $_tmpdir/efi ::
 }
 
+section_grubieee1275() {
+	[ "$ARCH" = ppc64le ] || return 0
+	[ "$output_format" = "iso" ] || return 0
+	kernel_cmdline="$kernel_cmdline console=hvc0"
+
+	build_section grub_cfg boot/grub/grub.cfg $(grub_gen_config | checksum)
+}
+
 section_grubefi() {
 	[ -n "$grub_mod" ] || return 0
 	[ "$output_format" = "iso" ] || return 0
@@ -249,18 +257,26 @@ create_image_iso() {
 				"
 		fi
 	fi
-	xorrisofs \
-		-quiet \
-		-output ${ISO} \
-		-full-iso9660-filenames \
-		-joliet \
-		-rock \
-		-volid "alpine-$PROFILE $RELEASE $ARCH" \
-		$_isolinux \
-		$_efiboot \
-		-follow-links \
-		${iso_opts} \
-		${DESTDIR}
+
+	if [ "$ARCH" = ppc64le ]; then
+		grub-mkrescue --output ${ISO} ${DESTDIR} -follow-links \
+			-sysid LINUX \
+			-volid "alpine-$PROFILE $RELEASE $ARCH"
+	else
+		xorrisofs \
+			-quiet \
+			-output ${ISO} \
+			-full-iso9660-filenames \
+			-joliet \
+			-rock \
+			-sysid LINUX \
+			-volid "alpine-$PROFILE $RELEASE $ARCH" \
+			$_isolinux \
+			$_efiboot \
+			-follow-links \
+			${iso_opts} \
+			${DESTDIR}
+	fi
 }
 
 create_image_targz() {
@@ -268,11 +284,11 @@ create_image_targz() {
 }
 
 profile_base() {
-	kernel_flavors="grsec"
+	kernel_flavors="hardened"
 	initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage quiet"
 	initfs_features="ata base bootchart cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
 	#grub_mod="disk part_msdos linux normal configfile search search_label efi_uga efi_gop fat iso9660 cat echo ls test true help"
-	apks="alpine-base alpine-mirrors bkeymaps chrony e2fsprogs network-extras libressl openssh tzdata"
+	apks="alpine-base alpine-mirrors kbd-bkeymaps chrony e2fsprogs network-extras libressl openssh tzdata"
 	apkovl=
 	hostname="alpine"
 }
