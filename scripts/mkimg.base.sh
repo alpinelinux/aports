@@ -268,7 +268,7 @@ create_image_targz() {
 }
 
 profile_base() {
-	kernel_flavors="grsec"
+	kernel_flavors="hardened"
 	initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage quiet"
 	initfs_features="ata base bootchart cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
 	#grub_mod="disk part_msdos linux normal configfile search search_label efi_uga efi_gop fat iso9660 cat echo ls test true help"
