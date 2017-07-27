@@ -1,0 +1,185 @@
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Contributor: Shiz <hi@shiz.me>
+# Maintainer: Jakub Jirutka <jakub@jirutka.cz>
+pkgname=rust
+pkgver=1.17.0
+_llvmver=3.9
+_bootver=1.16.0
+pkgrel=3
+pkgdesc="The Rust Programming Language (compiler)"
+url="http://www.rust-lang.org"
+arch="x86_64"
+license="ASL-2.0 BSD ISC MIT"
+
+# gcc is needed at runtime just for linking. Someday rustc might invoke
+# the linker directly, and then we'll only need binutils.
+# See: https://github.com/rust-lang/rust/issues/11937
+depends="$pkgname-stdlib=$pkgver-r$pkgrel gcc llvm-libunwind-dev musl-dev"
+
+# * Rust is self-hosted, so you need rustc (and cargo) to build rustc...
+#   The last revision of this abuild that does not depend on itself (uses
+#   prebuilt rustc and cargo) is 8cb3112594f10a8cee5b5412c28a846acb63167f.
+# * libffi-dev is needed just because we compile llvm with LLVM_ENABLE_FFI.
+makedepends="rust>=$_bootver cargo
+	cmake file libffi-dev llvm$_llvmver-dev python2 tar zlib-dev"
+
+subpackages="$pkgname-dbg $pkgname-stdlib
+	$pkgname-gdb::noarch $pkgname-lldb::noarch $pkgname-doc"
+source="https://static.rust-lang.org/dist/rustc-$pkgver-src.tar.gz
+	musl-support-dynamic-linking.patch
+	musl-fix-static-linking.patch
+	musl-fix-linux_musl_base.patch
+	musl-fix-jemalloc.patch
+	llvm-with-ffi.patch
+	static-pie.patch
+	need-rpath.patch
+	minimize-rpath.patch
+	alpine-allow-crt-static.patch
+	alpine-move-py-scripts-to-share.patch
+	alpine-change-rpath-to-rustlib.patch
+	alpine-target.patch
+	check-rustc
+	"
+builddir="$srcdir/rustc-$pkgver-src"
+
+_rlibdir="usr/lib/rustlib/$CTARGET/lib"
+_sharedir="usr/share/rust"
+
+ldpath="/$_rlibdir"
+
+prepare() {
+	default_prepare
+
+	cd "$builddir"
+
+	# Remove bundled dependencies.
+	rm -Rf src/llvm/ src/jemalloc/
+
+	# Make sure to use the system LLVM.
+	printf '[target.%s]\nllvm_config = "/usr/lib/llvm%s/bin/llvm-config"\n' \
+		"$CTARGET" "$_llvmver" > config.toml
+}
+
+build() {
+	cd "$builddir"
+
+	# jemalloc is disabled, because it increases size of statically linked
+	# binaries produced by rustc (stripped hello_world 186 kiB vs. 358 kiB)
+	# for only tiny performance boost (even negative in some tests).
+	./configure \
+		--build="$CBUILD" \
+		--host="$CTARGET" \
+		--target="$CTARGET" \
+		--prefix="/usr" \
+		--release-channel="stable" \
+		--enable-local-rust \
+		--local-rust-root="/usr" \
+		--llvm-root="/usr/lib/llvm$_llvmver" \
+		--musl-root="/usr" \
+		--enable-vendor \
+		--enable-llvm-link-shared \
+		--disable-jemalloc \
+		--disable-docs
+
+	make \
+		RUST_BACKTRACE=1 \
+		RUST_CRT_STATIC="false" \
+		VERBOSE=1
+}
+
+check() {
+	"$srcdir"/check-rustc "$builddir/build/$CTARGET/stage2/bin/rustc"
+
+# XXX: There's some problem with these tests, we will figure it out later.
+#	cd "$builddir"
+#	make check \
+#		LD_LIBRARY_PATH="$_stage0dir/lib" \
+#		RUST_BACKTRACE=1 \
+#		RUST_CRT_STATIC="false" \
+#		VERBOSE=1
+}
+
+package() {
+	cd "$builddir"
+
+	make dist \
+		RUST_BACKTRACE=1 \
+		RUST_CRT_STATIC="false" \
+		VERBOSE=1
+
+	local component; for component in rustc rust-std; do
+		tar -xf "build/dist/$component-$pkgver-$CTARGET.tar.gz"
+		./"$component-$pkgver-$CTARGET"/install.sh --destdir="$pkgdir" --prefix=/usr --disable-ldconfig
+	done
+
+	cd "$pkgdir"
+
+	# These libraries are identical to those under rustlib/. Since we have
+	# linked rustc/rustdoc against those under rustlib/, we can remove
+	# them. Read change-rpath-to-rustlib.patch for more info.
+	rm -r usr/lib/*.so
+
+	# These objects are for static linking with musl on non-musl systems.
+	rm $_rlibdir/crt*.o
+
+	# Shared objects should have executable flag.
+	chmod +x $_rlibdir/*.so
+
+	# Python scripts are noarch, so move them to /usr/share.
+	# Requires move-py-scripts-to-share.patch to be applied.
+	_mv usr/lib/rustlib/etc/*.py $_sharedir/etc/
+	rmdir -p usr/lib/rustlib/etc 2>/dev/null || true
+
+	# Remove some clutter.
+	cd usr/lib/rustlib
+	rm components install.log manifest-* rust-installer-version uninstall.sh
+}
+
+stdlib() {
+	pkgdesc="Standard library for Rust (static rlibs)"
+
+	_mv "$pkgdir"/$_rlibdir/*.rlib "$subpkgdir"/$_rlibdir/
+}
+
+gdb() {
+	pkgdesc="GDB pretty printers for Rust"
+	depends="$pkgname gdb"
+
+	mkdir -p "$subpkgdir"
+	cd "$subpkgdir"
+
+	_mv "$pkgdir"/usr/bin/rust-gdb usr/bin/
+	_mv "$pkgdir"/$_sharedir/etc/gdb_*.py $_sharedir/etc/
+}
+
+lldb() {
+	pkgdesc="LLDB pretty printers for Rust"
+	depends="$pkgname lldb py-lldb"
+
+	mkdir -p "$subpkgdir"
+	cd "$subpkgdir"
+
+	_mv "$pkgdir"/usr/bin/rust-lldb usr/bin/
+	_mv "$pkgdir"/$_sharedir/etc/lldb_*.py $_sharedir/etc/
+}
+
+_mv() {
+	local dest; for dest; do true; done  # get last argument
+	mkdir -p "$dest"
+	mv $@
+}
+
+sha512sums="781799b29d83b4f0f433814bd818df034526db8e7f88c2df51d3b814eacafe8098d4bbe47ace951e1943325b3267b244007cf04f1f11083645b25aeacd40ebb6  rustc-1.17.0-src.tar.gz
+b0a8883e4469b60edd150c84486ab950396d757220f97bd271529576614c6c3b49456098507503832c20619d4bd74246dbc99c78116634a68a6df994793e9a94  musl-support-dynamic-linking.patch
+292c1cb4f751d830f5f1300d7ef94f573f698ac51e18243d7ff0d5a47bb1729bb2cbe8fb456e7a479213df5e5fbf49e360c9439d0f5ad7126cb72d161c91566a  musl-fix-static-linking.patch
+f436fddf7ab70ca5f1424081f5b75450270b200b3d997231323863e11addf76e1d65831a7ca09e3a5b7904ce828766c1f70b08326a175890298f28e5bc8646ef  musl-fix-linux_musl_base.patch
+c913d04ef419b2b6d8e453f72894070f263c9292abf97114a51884d475d03ce5b032053f1676ba9364800b4b35e394f707995058530ad5e4122c60f65ddd3db7  musl-fix-jemalloc.patch
+dc6432293bd060d5e3a73f25870867654fae61995dcd919e244a2dc686b6107556deed8c59ca6002182bfeff5ebc1ca2b89c4028ab0fbfb79e65defe47c9b4b0  llvm-with-ffi.patch
+5aaf6715b27b8b786740a55b91216d47985fbef3ccb0ef7e6a81696a2823671f8306143f7ecf77e66af91ef1500072524b9b4c7569508922ad5268df6080fda1  static-pie.patch
+ff633f2a46c683ad698d1c09c98c06ce9ee9b8d55fa5593cdd485b439ebca3273794d29b5ff32b887be8666f52913a23af6e133c782bd0c4e2c88e306dd3a494  need-rpath.patch
+d352614e7c774e181decae210140e789de7fc090327ff371981ad28a11ce51c8c01b27c1101a24bb84d75ed2f706f67868f7dbc52196d4ccdf4ebd2d6d6b6b5e  minimize-rpath.patch
+b00997c65d1a451fafae8b547893c5cbf03f028d2d70f6971aa670f34c2d6fc82728c740ac4a9909fc1999925ff300e4525cfec745cb9c9521e564eb166872a2  alpine-allow-crt-static.patch
+498f4649163974afc4f042c43cd0c15d36784031514201a2962061f288a9336c2bc9749f8d2308b8ce3656f8097b5fc5bef505f61e2a6ed422ef4153f5339d77  alpine-move-py-scripts-to-share.patch
+8d6206f8c50856724cf7b4c1854ec82547f040358a1c7d44abeacc27a5c205a963b1fec51e58ec06c68d85bd2f68a9e6e27ebe457f39e8dd043de17758f5063f  alpine-change-rpath-to-rustlib.patch
+aaf359dbfb8f379bef42647890e99ada4b5326c29f726edb16c51b23a5033b5e00363d2fb6d74a4f11dfbb241b21b22c578e2ec269ecd77a87cf20d3620b29a5  alpine-target.patch
+79549055dea81379c890b495c82456ab497a9179ec6702c59e11d0748bc668f47fc3d6a69c27a0545bb87c01318631dffc69260bf2d4badc75f53cbf7fad7528  check-rustc"

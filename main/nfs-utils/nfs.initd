@@ -1,9 +1,8 @@
 #!/sbin/openrc-run
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2014 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
-# $Header: /var/cvsroot/gentoo-x86/net-fs/nfs-utils/files/nfs.initd,v 1.19 2009/05/30 22:01:43 vapier Exp $
 
-extra_started_commans="reload"
+extra_started_commands="reload"
 
 # This variable is used for controlling whether or not to run exportfs -ua;
 # see stop() for more information
@@ -17,12 +16,18 @@ smnotify=/usr/sbin/sm-notify
 
 depend() {
 	local myneed=""
-	if [ -e /etc/exports ] ; then
-		if awk '!/^[[:space:]]*#/ && $2 ~ /sec=/ { exit 0 } END { exit 1 }' /etc/exports ; then
-			myneed="${myneed} rpc.svcgssd"
-		fi
-	fi
-	config /etc/exports
+	# XXX: no way to detect NFSv4 is desired and so need rpc.idmapd
+	myneed="${myneed} $(
+		awk '!/^[[:space:]]*#/ {
+			# clear the path to avoid spurious matches
+			$1 = "";
+			if ($0 ~ /[(][^)]*sec=(krb|spkm)[^)]*[)]/) {
+				print "rpc.svcgssd"
+				exit 0
+			}
+		}' /etc/exports /etc/exports.d/*.exports 2>/dev/null
+	)"
+	config /etc/exports /etc/exports.d/*.exports
 	need portmap rpc.statd ${myneed} ${NFS_NEEDED_SERVICES}
 	use ypbind net dns rpc.rquotad rpc.idmapd rpc.svcgssd
 	after quota
@@ -30,7 +35,7 @@ depend() {
 
 mkdir_nfsdirs() {
 	local d
-	for d in rpc_pipefs v4recovery v4root ; do
+	for d in v4recovery v4root ; do
 		d="/var/lib/nfs/${d}"
 		[ ! -d "${d}" ] && mkdir -p "${d}"
 	done
@@ -38,7 +43,7 @@ mkdir_nfsdirs() {
 
 waitfor_exportfs() {
 	local pid=$1
-	( sleep ${EXPORTFS_TIMEOUT:-30}; kill -9 $pid 2>/dev/null ) &
+	( sleep ${EXPORTFS_TIMEOUT:-30}; kill -9 ${pid} 2>/dev/null ) &
 	wait $1
 }
 
@@ -56,11 +61,16 @@ mount_nfsd() {
 
 	# This is the new "kernel 2.6 way" to handle the exports file
 	if grep -qs nfsd /proc/filesystems ; then
-		if ! grep -qs "nfsd /proc/fs/nfsd" /proc/mounts ; then
+		if ! mountinfo -q /proc/fs/nfsd ; then
 			ebegin "Mounting nfsd filesystem in /proc"
 			mount -t nfsd -o nodev,noexec,nosuid nfsd /proc/fs/nfsd
 			eend $?
 		fi
+
+		local o
+		for o in ${OPTS_NFSD} ; do
+			echo "${o#*=}" > "/proc/fs/nfsd/${o%%=*}"
+		done
 	fi
 }
 
@@ -78,7 +88,7 @@ start() {
 	# Exportfs likes to hang if networking isn't working.
 	# If that's the case, then try to kill it so the
 	# bootup process can continue.
-	if grep -qs '^[[:space:]]*/' /etc/exports ; then
+	if grep -qs '^[[:space:]]*/' /etc/exports /etc/exports.d/*.exports ; then
 		ebegin "Exporting NFS directories"
 		${exportfs} -r &
 		waitfor_exportfs $!
@@ -95,16 +105,14 @@ start() {
 stop() {
 	local ret=0
 
-	# Don't check NFSSERVER variable since it might have changed,
-	# instead use --oknodo to smooth things over
 	ebegin "Stopping NFS mountd"
-	start-stop-daemon --stop --oknodo --exec ${mountd}
+	start-stop-daemon --stop --exec ${mountd}
 	eend $?
 	ret=$((ret + $?))
 
 	# nfsd sets its process name to [nfsd] so don't look for $nfsd
 	ebegin "Stopping NFS daemon"
-	start-stop-daemon --stop --oknodo --name nfsd --user root --signal 2
+	start-stop-daemon --stop --name nfsd --user root --signal 2
 	eend $?
 	ret=$((ret + $?))
 	# in case things don't work out ... #228127

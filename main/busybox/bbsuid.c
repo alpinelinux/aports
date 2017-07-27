@@ -22,9 +22,9 @@
 const static char * applets[] = {
 	"/bin/mount",
 	"/bin/umount",
+	"/bin/su",
 	"/usr/bin/crontab",
 	"/usr/bin/passwd",
-	"/usr/bin/su",
 	"/usr/bin/traceroute",
 	"/usr/bin/traceroute6",
 	"/usr/bin/vlock",

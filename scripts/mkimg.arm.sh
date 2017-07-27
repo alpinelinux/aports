@@ -18,16 +18,16 @@ gpu_mem=256
 gpu_mem_256=64
 [pi0]
 kernel=boot/vmlinuz-rpi
-initramfs boot/initramfs-rpi 0x08000000
+initramfs boot/initramfs-rpi
 [pi1]
 kernel=boot/vmlinuz-rpi
-initramfs boot/initramfs-rpi 0x08000000
+initramfs boot/initramfs-rpi
 [pi2]
 kernel=boot/vmlinuz-rpi2
-initramfs boot/initramfs-rpi2 0x08000000
+initramfs boot/initramfs-rpi2
 [pi3]
 kernel=boot/vmlinuz-rpi2
-initramfs boot/initramfs-rpi2 0x08000000
+initramfs boot/initramfs-rpi2
 [all]
 include usercfg.txt
 EOF
@@ -46,9 +46,13 @@ section_rpi_config() {
 
 profile_rpi() {
 	profile_base
+	title="Raspberry Pi"
+	desc="Includes Raspberry Pi kernel.
+		Does not include grsec patchset.
+		And much more..."
 	image_ext="tar.gz"
 	arch="armhf"
-	rpi_firmware_commit="debe2d29bbc3df84f74672fae47f3a52fd0d40f1"
+	rpi_firmware_commit="32c28990b18908ce899c289bcd12c6e9daeb1588"
 	kernel_flavors="rpi rpi2"
 	kernel_cmdline="dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1"
 	initrd_features="base bootchart squashfs ext2 ext3 ext4 f2fs kms mmc raid scsi usb"
@@ -58,10 +62,11 @@ profile_rpi() {
 }
 
 build_uboot() {
+	set -x
 	# FIXME: Fix apk-tools to extract packages directly
-	local pkg pkgs="$(apk fetch  --simulate --root /tmp/timo/apkroot-armhf/ --recursive u-boot-all | sed -ne "s/^Downloading \([^0-9.]*\)\-.*$/\1/p")"
+	local pkg pkgs="$(apk fetch  --simulate --root "$APKROOT" --recursive u-boot-all | sed -ne "s/^Downloading \([^0-9.]*\)\-.*$/\1/p")"
 	for pkg in $pkgs; do
-		[ "$pkg" == "u-boot-all" ] || apk fetch --root "$APKROOT" --stdout $pkg | tar -C "$DESTDIR" -xz usr
+		[ "$pkg" = "u-boot-all" ] || apk fetch --root "$APKROOT" --stdout $pkg | tar -C "$DESTDIR" -xz usr
 	done
 	mkdir -p "$DESTDIR"/u-boot
 	mv "$DESTDIR"/usr/sbin/update-u-boot "$DESTDIR"/usr/share/u-boot/* "$DESTDIR"/u-boot
@@ -75,6 +80,10 @@ section_uboot() {
 
 profile_uboot() {
 	profile_base
+	title="Generic ARM"
+	desc="Has default ARM kernel.
+		Includes the uboot bootloader.
+		Supports armhf and aarch64."
 	image_ext="tar.gz"
 	arch="aarch64 armhf armv7"
 	case "$ARCH" in
