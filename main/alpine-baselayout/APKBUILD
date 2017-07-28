@@ -1,7 +1,7 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=3.0.4
+pkgver=3.0.5
 pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="http://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
@@ -102,11 +102,11 @@ package() {
 		var/lock/subsys \
 		var/log \
 		var/opt \
-		var/run \
 		var/spool \
 		var/spool/cron \
 		|| return 1
 
+	ln -s /run var/run
 	install -d -m 0555 var/empty || return 1
 	install -d -m 0700 "$pkgdir"/root || return 1
 	install -d -m 1777 "$pkgdir"/tmp "$pkgdir"/var/tmp || return 1
