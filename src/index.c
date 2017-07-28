@@ -192,9 +192,9 @@ static int index_main(void *ctx, struct apk_database *db, struct apk_string_arra
 				errors++;
 			} else {
 				newpkgs++;
+				if (ictx->rewrite_arch != NULL)
+					pkg->arch = ictx->rewrite_arch;
 			}
-			if (ictx->rewrite_arch != NULL)
-				pkg->arch = ictx->rewrite_arch;
 			apk_sign_ctx_free(&sctx);
 		}
 	}
