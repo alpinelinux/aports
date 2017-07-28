@@ -123,38 +123,38 @@ package() {
 	echo "127.0.0.1	localhost localhost.localdomain" > "$pkgdir"/etc/hosts
 	echo "af_packet" >"$pkgdir"/etc/modules
 
-	cat > "$pkgdir"/etc/shells <<EOF
-# valid login shells
-/bin/sh
-/bin/ash
-EOF
+	cat > "$pkgdir"/etc/shells <<-EOF
+		# valid login shells
+		/bin/sh
+		/bin/ash
+	EOF
 
-	cat > "$pkgdir"/etc/motd <<EOF
-Welcome to Alpine!
+	cat > "$pkgdir"/etc/motd <<-EOF
+		Welcome to Alpine!
 
-The Alpine Wiki contains a large amount of how-to guides and general
-information about administrating Alpine systems.
-See <http://wiki.alpinelinux.org>.
+		The Alpine Wiki contains a large amount of how-to guides and general
+		information about administrating Alpine systems.
+		See <http://wiki.alpinelinux.org>.
 
-You can setup the system with the command: setup-alpine
+		You can setup the system with the command: setup-alpine
 
-You may change this message by editing /etc/motd.
+		You may change this message by editing /etc/motd.
 
-EOF
-	cat > "$pkgdir"/etc/sysctl.conf <<EOF
-# content of this file will override /etc/sysctl.d/*
-EOF
-	cat > "$pkgdir"/etc/sysctl.d/00-alpine.conf <<EOF
-net.ipv4.tcp_syncookies = 1
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.ping_group_range=999 59999
-kernel.panic = 120
-EOF
-	cat > "$pkgdir"/etc/fstab <<EOF
-/dev/cdrom	/media/cdrom	iso9660	noauto,ro 0 0
-/dev/usbdisk	/media/usb	vfat	noauto,ro 0 0
-EOF
+	EOF
+	cat > "$pkgdir"/etc/sysctl.conf <<-EOF
+		# content of this file will override /etc/sysctl.d/*
+	EOF
+	cat > "$pkgdir"/etc/sysctl.d/00-alpine.conf <<-EOF
+		net.ipv4.tcp_syncookies = 1
+		net.ipv4.conf.default.rp_filter = 1
+		net.ipv4.conf.all.rp_filter = 1
+		net.ipv4.ping_group_range=999 59999
+		kernel.panic = 120
+	EOF
+	cat > "$pkgdir"/etc/fstab <<-EOF
+		/dev/cdrom	/media/cdrom	iso9660	noauto,ro 0 0
+		/dev/usbdisk	/media/usb	vfat	noauto,ro 0 0
+	EOF
 
 	install -m644 \
 		"$srcdir"/group \
