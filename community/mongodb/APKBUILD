@@ -1,7 +1,7 @@
 # Maintainer: Filipp Andronov <filipp.andronov@gmail.com>
 # Contributor: Marc Vertes <marc.vertes@ugrid.net>
 pkgname=mongodb
-pkgver=3.4.4
+pkgver=3.4.7
 pkgrel=0
 pkgdesc='A high-performance, open source, schema-free document-oriented database'
 url='http://www.mongodb.org'
@@ -17,8 +17,10 @@ source="http://downloads.mongodb.org/src/mongodb-src-r${pkgver}.tar.gz
 	40-fix-elf-native-class.patch
 	backtrace.patch
 	fix-asio-strerror_r.patch
+	fix-libressl.patch
 	fix-log.patch
 	fix-processinfo_linux.patch
+	fix-std-string.patch
 	set-default-stacksize.patch
 	wiredtiger-strtouq.patch
 	boost160.patch
@@ -100,12 +102,14 @@ package() {
 	install -Dm644 "$srcdir/mongos.confd" "$pkgdir/etc/conf.d/mongos"
 }
 
-sha512sums="dbae89b49c363e7258021cd31385e4449bfdfdfd5adfcb1683e4431372731e58ec33bf8f7576d2d52659a52461bd6a32fbc67d5c6e36d52184ec1aabb345d940  mongodb-src-r3.4.4.tar.gz
+sha512sums="30f4d0dbd487d148531d7073881cd55db3fef3dcfd199e260e1a51858c5a2c28dfe904d1273b89b27b2fbcde23c3a301a3fa24766489ad6eb2daa25da31d3182  mongodb-src-r3.4.7.tar.gz
 56db8f43afc94713ac65b174189e2dd903b5e1eff0b65f1bdac159e52ad4de6606c449865d73bd47bffad6a8fc339777e2b11395596e9a476867d94a219c7925  40-fix-elf-native-class.patch
 7d097f497cb910c9cb81086cd8c222e43456d1a6de4adfe3e97a4d99add454279350fdeb7305dab84b3deca04afd824036d4065ee0fb8cdd8c03e96d98ee86af  backtrace.patch
 f829b1ad542db3ee776d444243b8b47ab4e48a7386d9b199d7b1adafd31556cf173a5683b78ee735d6a69999ad9af5ad152fde955bbe8865f7910718991ce97c  fix-asio-strerror_r.patch
+8f2832f10e47b1a9f413ab44eb2b75dbb7bc47282d3ba721f35d4a93bc4fcf18b88c5f1c2f0ccf28539bbf81ee4c5715c5b71506fa680d22cde0630f9b3e2d22  fix-libressl.patch
 9e109a9131e8466496e94f7046e13fd40ec750c8de703e31d65cf3f6e80830e67e1438debaefc0e1150fe2bb08dbb42cf95890c51e9d98f354cfbb396500b5d4  fix-log.patch
 026d20fa1a0f1e27150b833664300250386d7e0d73c0778f81f70242e93e8a16e5607716693bbcdd1efb328fa84c7284e2c6c7e1ac92259b97a9d402975cf709  fix-processinfo_linux.patch
+de2523a2c0e3b2d56158ff697e69e3e5e1d65cb29e8a0f07a3a2794f6c4ba8abfe62d1871eb72c823f17399327f4741975a6424f011c95031e60e309d267ccd0  fix-std-string.patch
 1492137b0e3456d90a79617c1cd5ead5c71b1cfaae9ee41c75d56cd25f404ec73a690f95ce0d8c064c0a14206daca8070aa769b7cdfa904a338a425b52c293fa  set-default-stacksize.patch
 bbb323d428d59584703e8692bf4df7fe0d37c0324c23822bade2edd1ca78759191f778230b7107502a9d2f7f22afc84d4ea350139fc1d751ceb2fff219b9ddf8  wiredtiger-strtouq.patch
 385c82875174caae433a3b381eb10f98a6fed0c8943788ddefff1de80a898e480bdbbf094a7783285cf2ae11ce3fc6878e57d58183d05be2f0837b206aaa4da6  boost160.patch
