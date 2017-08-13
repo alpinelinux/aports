@@ -4,6 +4,7 @@
  * Distributed under GPL-2
  */
 
+#define _XOPEN_SOURCE 700
 #include <err.h>
 #include <errno.h>
 #include <ftw.h>
