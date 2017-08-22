@@ -159,8 +159,9 @@ static void handle_extended_header(struct apk_file_info *fi, apk_blob_t hdr)
 		unsigned int len = apk_blob_pull_uint(&hdr, 10);
 		apk_blob_pull_char(&hdr, ' ');
 		if (!apk_blob_split(hdr, APK_BLOB_STR("="), &name, &hdr)) break;
+		if (len < hdr.ptr - start + 1) break;
 		len -= hdr.ptr - start + 1;
-		if (len < 0 || hdr.len < len) break;
+		if (hdr.len < len) break;
 		value = APK_BLOB_PTR_LEN(hdr.ptr, len);
 		hdr = APK_BLOB_PTR_LEN(hdr.ptr+len, hdr.len-len);
 		apk_blob_pull_char(&hdr, '\n');

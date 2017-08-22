@@ -151,7 +151,8 @@ struct apk_istream *apk_istream_from_file(int atfd, const char *file)
 size_t apk_istream_skip(struct apk_istream *is, size_t size)
 {
 	unsigned char buf[2048];
-	size_t done = 0, r, togo;
+	size_t done = 0, togo;
+	ssize_t r;
 
 	while (done < size) {
 		togo = size - done;
@@ -173,7 +174,8 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 	static void *splice_buffer = NULL;
 	struct apk_istream *is = (struct apk_istream *) stream;
 	unsigned char *buf, *mmapbase = MAP_FAILED;
-	size_t bufsz, done = 0, r, togo;
+	size_t bufsz, done = 0, togo;
+	ssize_t r;
 
 	bufsz = size;
 	if (size > 128 * 1024) {
@@ -536,7 +538,7 @@ struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const ch
 apk_blob_t apk_blob_from_istream(struct apk_istream *is, size_t size)
 {
 	void *ptr;
-	size_t rsize;
+	ssize_t rsize;
 
 	ptr = malloc(size);
 	if (ptr == NULL)
