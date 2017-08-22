@@ -279,7 +279,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 			size_diff -= change->old_pkg->installed_size / 1024;
 	}
 	size_unit = 'K';
-	if (abs(size_diff) > 10000) {
+	if (labs(size_diff) > 10000) {
 		size_diff /= 1024;
 		size_unit = 'M';
 	}
