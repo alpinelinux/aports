@@ -350,7 +350,8 @@ all_done:
 
 	if (!db->performing_self_upgrade) {
 		if (errors)
-			snprintf(buf, sizeof(buf), "%d errors;", errors);
+			snprintf(buf, sizeof(buf), "%d error%s;", errors,
+				 errors > 1 ? "s" : "");
 		else
 			strcpy(buf, "OK:");
 		if (apk_verbosity > 1) {
