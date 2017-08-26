@@ -9,9 +9,13 @@ section_xen() {
 
 profile_xen() {
 	profile_standard
+	title="Xen"
+	desc="Build-in support for Xen Hypervisor.
+		Includes packages targed at Xen usage.
+		Includes grsec kernel."
 	arch="x86_64"
 	kernel_cmdline="nomodeset"
 	xen_params=""
-	apks="$apks ethtool lvm2 mdadm multipath-tools openvswitch sfdisk xen"
+	apks="$apks ethtool lvm2 mdadm multipath-tools openvswitch sfdisk xen xen-bridge"
 #	apkovl="genapkovl-xen.sh"
 }
