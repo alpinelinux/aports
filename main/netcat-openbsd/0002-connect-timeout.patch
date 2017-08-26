@@ -1,0 +1,121 @@
+From: Aron Xu <aron@debian.org>
+Date: Mon, 13 Feb 2012 14:43:56 +0800
+Subject: connect timeout
+
+---
+ netcat.c | 77 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 75 insertions(+), 2 deletions(-)
+
+diff --git a/netcat.c b/netcat.c
+index 30591de..d40e3a5 100644
+--- a/netcat.c
++++ b/netcat.c
+@@ -113,6 +113,10 @@
+ #define POLL_STDOUT 3
+ #define BUFSIZE 16384
+ 
++#define CONNECTION_SUCCESS 0
++#define CONNECTION_FAILED 1
++#define CONNECTION_TIMEOUT 2
++
+ /* Command Line Options */
+ int	dflag;					/* detached, no stdin */
+ int	Fflag;					/* fdpass sock to stdout */
+@@ -163,6 +167,9 @@ void	usage(int);
+ ssize_t drainbuf(int, unsigned char *, size_t *);
+ ssize_t fillbuf(int, unsigned char *, size_t *);
+ 
++static int connect_with_timeout(int fd, const struct sockaddr *sa,
++        socklen_t salen, int ctimeout);
++
+ int
+ main(int argc, char *argv[])
+ {
+@@ -680,11 +687,14 @@ remote_connect(const char *host, const char *port, struct addrinfo hints)
+ 
+ 		set_common_sockopts(s, res0->ai_family);
+ 
+-		if (timeout_connect(s, res0->ai_addr, res0->ai_addrlen) == 0)
++                if ((error = connect_with_timeout(s, res0->ai_addr, res0->ai_addrlen, timeout))== CONNECTION_SUCCESS)
+ 			break;
+-		else if (vflag)
++		else if (vflag && error == CONNECTION_FAILED)
+ 			warn("connect to %s port %s (%s) failed", host, port,
+ 			    uflag ? "udp" : "tcp");
++                else if (vflag && error == CONNECTION_TIMEOUT)
++                    warn("connect to %s port %s (%s) timed out", host, port,
++                            uflag ? "udp" : "tcp");
+ 
+ 		close(s);
+ 		s = -1;
+@@ -732,6 +742,69 @@ timeout_connect(int s, const struct sockaddr *name, socklen_t namelen)
+ 	return (ret);
+ }
+ 
++static int connect_with_timeout(int fd, const struct sockaddr *sa,
++		                socklen_t salen, int ctimeout)
++{
++	int err;
++	struct timeval tv, *tvp = NULL;
++	fd_set connect_fdset;
++	socklen_t len;
++	int orig_flags;
++
++	orig_flags = fcntl(fd, F_GETFL, 0);
++	if (fcntl(fd, F_SETFL, orig_flags | O_NONBLOCK) < 0 ) {
++		warn("can't set O_NONBLOCK - timeout not available");
++		if (connect(fd, sa, salen) == 0)
++			return CONNECTION_SUCCESS;
++		else
++			return CONNECTION_FAILED;
++	}
++
++	/* set connect timeout */
++	if (ctimeout > 0) {
++		tv.tv_sec = (time_t)ctimeout/1000;
++		tv.tv_usec = 0;
++		tvp = &tv;
++	}
++
++	/* attempt the connection */
++	err = connect(fd, sa, salen);
++	if (err != 0 && errno == EINPROGRESS) {
++		/* connection is proceeding
++		 * it is complete (or failed) when select returns */
++
++		/* initialize connect_fdset */
++		FD_ZERO(&connect_fdset);
++		FD_SET(fd, &connect_fdset);
++
++		/* call select */
++		do {
++			err = select(fd + 1, NULL, &connect_fdset,
++				     NULL, tvp);
++		} while (err < 0 && errno == EINTR);
++
++		/* select error */
++		if (err < 0)
++			errx(1,"select error: %s", strerror(errno));
++		/* we have reached a timeout */
++		if (err == 0)
++			return CONNECTION_TIMEOUT;
++		/* select returned successfully, but we must test socket
++		 * error for result */
++		len = sizeof(err);
++		if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
++			errx(1, "getsockopt error: %s", strerror(errno));
++		/* setup errno according to the result returned by
++		 * getsockopt */
++		if (err != 0)
++			errno = err;
++	}
++
++	/* return aborted if an error occured, and valid otherwise */
++	fcntl(fd, F_SETFL, orig_flags);
++	return (err != 0)? CONNECTION_FAILED : CONNECTION_SUCCESS;
++}
++
+ /*
+  * local_listen()
+  * Returns a socket listening on a local port, binds to specified source
+-- 
