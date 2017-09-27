@@ -472,7 +472,7 @@ static const struct apk_option_group optgroup_applet = {
 
 static struct apk_applet apk_info = {
 	.name = "info",
-	.help = "Give detailed information about PACKAGEs or repositores",
+	.help = "Give detailed information about PACKAGEs or repositories",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_READ,
 	.context_size = sizeof(struct info_ctx),
