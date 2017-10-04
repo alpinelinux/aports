@@ -1018,21 +1018,24 @@ void apk_ipkg_run_script(struct apk_installed_package *ipkg,
 	if (fd < 0) {
 		mkdirat(root_fd, "var/cache/misc", 0755);
 		fd = openat(root_fd, fn, O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC, 0755);
-		if (fd < 0)
-			goto error;
+		if (fd < 0) goto err_log;
 	}
 	if (write(fd, ipkg->script[type].ptr, ipkg->script[type].len) < 0) {
 		close(fd);
-		goto error;
+		goto err_log;
 	}
 	close(fd);
 
 	if (apk_db_run_script(db, fn, argv) < 0)
-		ipkg->broken_script = 1;
-	return;
-error:
+		goto err;
+	goto cleanup;
+
+err_log:
 	apk_error("%s: failed to execute: %s", &fn[15], apk_error_str(errno));
+err:
 	ipkg->broken_script = 1;
+cleanup:
+	unlinkat(root_fd, fn, 0);
 }
 
 static int parse_index_line(void *ctx, apk_blob_t line)
