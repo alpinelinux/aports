@@ -33,9 +33,6 @@
 #if HAVE_CONFIG_H
 #include "config.h"
 #endif
-#ifndef NETBSD
-#include <nbcompat.h>
-#endif
 
 #include <sys/stat.h>
 

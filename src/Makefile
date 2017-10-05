@@ -7,8 +7,6 @@ OPENSSL_LIBS		:= $(shell $(PKG_CONFIG) --libs openssl)
 ZLIB_CFLAGS		:= $(shell $(PKG_CONFIG) --cflags zlib)
 ZLIB_LIBS		:= $(shell $(PKG_CONFIG) --libs zlib)
 
-FETCH_LIBS		:= $(shell $(CC) -print-file-name=libfetch.a)
-
 # lua module
 ifneq ($(LUAAPK),)
 LUA_VERSION		?= 5.2
@@ -32,6 +30,7 @@ apk-objs		:= apk.o add.o del.o fix.o update.o info.o \
 libapk.so-objs		:= common.o database.o package.o archive.o \
 			   version.o io.o url.o gunzip.o blob.o hash.o print.o \
 			   commit.o solver.o
+libapk.so-libs		:= libfetch/libfetch.a
 
 ifeq ($(TEST),y)
 progs-y			+= apk-test
@@ -42,6 +41,9 @@ ifeq ($(SHARED_LIBAPK),)
 apk-objs		+= $(libapk.so-objs)
 apk-test-objs		+= $(libapk.so-objs)
 apk.so-objs		+= $(libapk.so-objs)
+apk-libs		+= $(libapk.so-libs)
+apk-test-libs		+= $(libapk.so-libs)
+apk.so-libs		+= $(libapk.so-libs)
 else
 LIBAPK			:= YesPlease
 LIBS_apk		:= -lapk
@@ -56,13 +58,14 @@ install-LIBAPK-y	:= $(INSTALLDIR) $(DESTDIR)$(LIBDIR) && \
 			   $(INSTALL) $(LIBAPK-y) $(DESTDIR)$(LIBDIR)
 endif
 
-CFLAGS_ALL		+= -D_ATFILE_SOURCE
+CFLAGS_ALL		+= -D_ATFILE_SOURCE -Ilibfetch
 CFLAGS_apk.o		:= -DAPK_VERSION=\"$(FULL_VERSION)\"
 CFLAGS_apk-static.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\" -DOPENSSL_NO_ENGINE
 CFLAGS_apk-test.o	:= -DAPK_VERSION=\"$(FULL_VERSION)\" -DOPENSSL_NO_ENGINE -DTEST_MODE
 
 progs-$(STATIC)		+= apk.static
 apk.static-objs		:= $(filter-out apk.o,$(apk-objs)) apk-static.o
+apk.static-libs		:= $(apk-libs)
 LDFLAGS_apk.static	:= -static
 LIBS_apk.static		:= -Wl,--as-needed -ldl -Wl,--no-as-needed
 LDFLAGS_apk		+= -L$(obj)
@@ -70,7 +73,7 @@ LDFLAGS_apk-test	+= -L$(obj)
 
 CFLAGS_ALL		+= $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS)
 LIBS			:= -Wl,--as-needed \
-				$(FETCH_LIBS) $(OPENSSL_LIBS) $(ZLIB_LIBS) \
+				$(OPENSSL_LIBS) $(ZLIB_LIBS) \
 			   -Wl,--no-as-needed
 
 $(obj)/apk: $(LIBAPK-y)

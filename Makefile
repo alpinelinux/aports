@@ -21,7 +21,7 @@ export DESTDIR SBINDIR LIBDIR CONFDIR MANDIR DOCDIR
 ##
 # Top-level rules and targets
 
-targets		:= src/
+targets		:= libfetch/ src/
 
 ##
 # Include all rules and stuff
@@ -41,3 +41,5 @@ check test: FORCE
 
 static:
 	$(Q)$(MAKE) STATIC=y
+
+src/: libfetch/

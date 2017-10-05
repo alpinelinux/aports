@@ -33,32 +33,19 @@
 #if HAVE_CONFIG_H
 #include "config.h"
 #endif
-#ifndef NETBSD
-#include <nbcompat.h>
-#endif
 
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/uio.h>
-#if HAVE_POLL_H
-#include <poll.h>
-#elif HAVE_SYS_POLL_H
-#include <sys/poll.h>
-#endif
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
 #include <ctype.h>
 #include <errno.h>
-#if defined(HAVE_INTTYPES_H) || defined(NETBSD)
 #include <inttypes.h>
-#endif
-#ifndef NETBSD
-#include <nbcompat/netdb.h>
-#else
 #include <netdb.h>
-#endif
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdlib.h>
