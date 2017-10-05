@@ -410,6 +410,87 @@ fetch_cache_put(conn_t *conn, int (*closecb)(conn_t *))
 }
 
 /*
+ * Configure peer verification based on environment:
+ *   1. If compile time #define CA_CERT_FILE is set, and it exists, use it.
+ *   2. Use system default CA store settings.
+ */
+static int fetch_ssl_setup_peer_verification(SSL_CTX *ctx, int verbose)
+{
+	const char *ca_file = NULL;
+
+#ifdef CA_CERT_FILE
+	if (access(CA_CERT_FILE, R_OK) == 0) {
+		ca_file = CA_CERT_FILE;
+#ifdef CA_CRL_FILE
+		if (access(CA_CRL_FILE, R_OK) == 0) {
+			X509_STORE *crl_store = SSL_CTX_get_cert_store(ctx);
+			X509_LOOKUP *crl_lookup = X509_STORE_add_lookup(crl_store, X509_LOOKUP_file());
+			if (!crl_lookup || !X509_load_crl_file(crl_lookup, CA_CRL_FILE, X509_FILETYPE_PEM)) {
+				fprintf(stderr, "Could not load CRL file %s\n", CA_CRL_FILE);
+				return 0;
+			}
+			X509_STORE_set_flags(crl_store, X509_V_FLAG_CRL_CHECK | X509_V_FLAG_CRL_CHECK_ALL);
+		}
+#endif
+	}
+#endif
+	if (ca_file)
+		SSL_CTX_load_verify_locations(ctx, ca_file, NULL);
+	else
+		SSL_CTX_set_default_verify_paths(ctx);
+
+	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, 0);
+	return 1;
+}
+
+/*
+ * Configure client certificate based on environment:
+ *  1. Use SSL_CLIENT_{CERT,KEY}_FILE environment variables if set
+ *  2. Use compile time set CLIENT_{CERT,KEY}_FILE #define's if set
+ *  3. No client certificate used
+ *
+ * If the key file is not specified, it is assumed that the certificate
+ * file is a .pem file containing both the cert and the key.
+ */
+static int fetch_ssl_setup_client_certificate(SSL_CTX *ctx, int verbose)
+{
+	const char *cert_file = NULL, *key_file = NULL;
+
+	cert_file = getenv("SSL_CLIENT_CERT_FILE");
+	if (cert_file) key_file = getenv("SSL_CLIENT_KEY_FILE");
+
+#ifdef CLIENT_CERT_FILE
+	if (!cert_file && access(CLIENT_CERT_FILE, R_OK) == 0) {
+		cert_file = CLIENT_CERT_FILE;
+#ifdef CLIENT_KEY_FILE
+		if (access(CLIENT_KEY_FILE, R_OK) == 0)
+			key_file = CLIENT_KEY_FILE;
+#endif
+	}
+#endif
+	if (!cert_file) return 1;
+	if (!key_file) key_file = cert_file;
+
+	if (verbose) {
+		fetch_info("Using client cert file: %s", cert_file);
+		fetch_info("Using client key file: %s", key_file);
+	}
+
+	if (SSL_CTX_use_certificate_chain_file(ctx, cert_file) != 1) {
+		fprintf(stderr, "Could not load client certificate %s\n",
+			cert_file);
+		return 0;
+	}
+
+	if (SSL_CTX_use_PrivateKey_file(ctx, key_file, SSL_FILETYPE_PEM) != 1) {
+		fprintf(stderr, "Could not load client key %s\n", key_file);
+		return 0;
+	}
+
+	return 1;
+}
+
+/*
  * Enable SSL on a connection.
  */
 int
@@ -423,9 +504,14 @@ fetch_ssl(conn_t *conn, const struct url *URL, int verbose)
 
 	SSL_load_error_strings();
 
-	conn->ssl_meth = SSLv23_client_method();
+	conn->ssl_meth = TLS_client_method();
 	conn->ssl_ctx = SSL_CTX_new(conn->ssl_meth);
 	SSL_CTX_set_mode(conn->ssl_ctx, SSL_MODE_AUTO_RETRY);
+
+	if (!fetch_ssl_setup_peer_verification(conn->ssl_ctx, verbose))
+		return (-1);
+	if (!fetch_ssl_setup_client_certificate(conn->ssl_ctx, verbose))
+		return (-1);
 
 	conn->ssl = SSL_new(conn->ssl_ctx);
 	if (conn->ssl == NULL){
@@ -446,20 +532,36 @@ fetch_ssl(conn_t *conn, const struct url *URL, int verbose)
 		return (-1);
 	}
 
+	conn->ssl_cert = SSL_get_peer_certificate(conn->ssl);
+	if (!conn->ssl_cert) {
+		fprintf(stderr, "No server SSL certificate\n");
+		return -1;
+	}
+
+	if (getenv("SSL_NO_VERIFY_HOSTNAME") == NULL) {
+		if (verbose)
+			fetch_info("Verify hostname");
+		if (X509_check_host(conn->ssl_cert, URL->host, 0,
+				X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS,
+				NULL) != 1) {
+			fprintf(stderr, "SSL certificate subject doesn't match host %s\n",
+				URL->host);
+			return -1;
+		}
+	}
+
 	if (verbose) {
 		X509_NAME *name;
 		char *str;
 
-		fprintf(stderr, "SSL connection established using %s\n",
-		    SSL_get_cipher(conn->ssl));
-		conn->ssl_cert = SSL_get_peer_certificate(conn->ssl);
+		fetch_info("SSL connection established using %s\n", SSL_get_cipher(conn->ssl));
 		name = X509_get_subject_name(conn->ssl_cert);
 		str = X509_NAME_oneline(name, 0, 0);
-		printf("Certificate subject: %s\n", str);
+		fetch_info("Certificate subject: %s", str);
 		free(str);
 		name = X509_get_issuer_name(conn->ssl_cert);
 		str = X509_NAME_oneline(name, 0, 0);
-		printf("Certificate issuer: %s\n", str);
+		fetch_info("Certificate issuer: %s", str);
 		free(str);
 	}
 
