@@ -30,10 +30,6 @@
  * $FreeBSD: common.c,v 1.53 2007/12/19 00:26:36 des Exp $
  */
 
-#if HAVE_CONFIG_H
-#include "config.h"
-#endif
-
 #include <poll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -53,10 +49,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifndef MSG_NOSIGNAL
-#include <signal.h>
-#endif
-
 #include "fetch.h"
 #include "common.h"
 
@@ -66,9 +58,7 @@
  * Error messages for resolver errors
  */
 static struct fetcherr netdb_errlist[] = {
-#ifdef EAI_NODATA
 	{ EAI_NODATA,	FETCH_RESOLV,	"Host not found" },
-#endif
 	{ EAI_AGAIN,	FETCH_TEMP,	"Transient resolver failure" },
 	{ EAI_FAIL,	FETCH_RESOLV,	"Non-recoverable resolver failure" },
 	{ EAI_NONAME,	FETCH_RESOLV,	"No address record" },
@@ -156,7 +146,7 @@ fetch_syserr(void)
 	case EHOSTDOWN:
 		fetchLastErrCode = FETCH_DOWN;
 		break;
-default:
+	default:
 		fetchLastErrCode = FETCH_UNKNOWN;
 	}
 	snprintf(fetchLastErrString, MAXERRSTRING, "%s", strerror(errno));
@@ -425,8 +415,6 @@ fetch_cache_put(conn_t *conn, int (*closecb)(conn_t *))
 int
 fetch_ssl(conn_t *conn, const struct url *URL, int verbose)
 {
-
-#ifdef WITH_SSL
 	/* Init the SSL library and context */
 	if (!SSL_library_init()){
 		fprintf(stderr, "SSL library init failed\n");
@@ -446,14 +434,13 @@ fetch_ssl(conn_t *conn, const struct url *URL, int verbose)
 	}
 	conn->buf_events = 0;
 	SSL_set_fd(conn->ssl, conn->sd);
-#if OPENSSL_VERSION_NUMBER >= 0x0090806fL && !defined(OPENSSL_NO_TLSEXT)
 	if (!SSL_set_tlsext_host_name(conn->ssl, (char *)(uintptr_t)URL->host)) {
 		fprintf(stderr,
 		    "TLS server name indication extension failed for host %s\n",
 		    URL->host);
 		return (-1);
 	}
-#endif
+
 	if (SSL_connect(conn->ssl) == -1){
 		ERR_print_errors_fp(stderr);
 		return (-1);
@@ -477,12 +464,6 @@ fetch_ssl(conn_t *conn, const struct url *URL, int verbose)
 	}
 
 	return (0);
-#else
-	(void)conn;
-	(void)verbose;
-	fprintf(stderr, "SSL support disabled\n");
-	return (-1);
-#endif
 }
 
 static int
@@ -546,7 +527,7 @@ fetch_read(conn_t *conn, char *buf, size_t len)
 				}
 			} while (pfd.revents == 0);
 		}
-#ifdef WITH_SSL
+
 		if (conn->ssl != NULL) {
 			rlen = SSL_read(conn->ssl, buf, len);
 			if (rlen == -1) {
@@ -566,9 +547,9 @@ fetch_read(conn_t *conn, char *buf, size_t len)
 				/* Assume buffering on the SSL layer. */
 				conn->buf_events = 0;
 			}
-		} else
-#endif
+		} else {
 			rlen = read(conn->sd, buf, len);
+		}
 		if (rlen >= 0)
 			break;
 	
@@ -655,17 +636,6 @@ fetch_write(conn_t *conn, const void *buf, size_t len)
 	fd_set writefds;
 	ssize_t wlen, total;
 	int r;
-#ifndef MSG_NOSIGNAL
-	static int killed_sigpipe;
-#endif
-
-#ifndef MSG_NOSIGNAL
-	if (!killed_sigpipe) {
-		signal(SIGPIPE, SIG_IGN);
-		killed_sigpipe = 1;
-	}
-#endif
-
 
 	if (fetchTimeout) {
 		FD_ZERO(&writefds);
@@ -698,16 +668,10 @@ fetch_write(conn_t *conn, const void *buf, size_t len)
 			}
 		}
 		errno = 0;
-#ifdef WITH_SSL
 		if (conn->ssl != NULL)
 			wlen = SSL_write(conn->ssl, buf, len);
 		else
-#endif
-#ifndef MSG_NOSIGNAL
-			wlen = send(conn->sd, buf, len, 0);
-#else
 			wlen = send(conn->sd, buf, len, MSG_NOSIGNAL);
-#endif
 		if (wlen == 0) {
 			/* we consider a short write a failure */
 			errno = EPIPE;
@@ -735,7 +699,6 @@ fetch_close(conn_t *conn)
 {
 	int ret;
 
-#ifdef WITH_SSL
 	if (conn->ssl) {
 		SSL_shutdown(conn->ssl);
 		SSL_set_connect_state(conn->ssl);
@@ -747,7 +710,6 @@ fetch_close(conn_t *conn)
 	if (conn->ssl_cert) {
 		X509_free(conn->ssl_cert);
 	}
-#endif
 
 	ret = close(conn->sd);
 	if (conn->cache_url)

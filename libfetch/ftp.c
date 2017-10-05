@@ -57,16 +57,10 @@
  *
  */
 
-#if HAVE_CONFIG_H
-#include "config.h"
-#endif
-
 #include <sys/types.h>
 #include <sys/socket.h>
-
 #include <netinet/in.h>
 #include <arpa/inet.h>
-
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -353,7 +347,6 @@ ftp_cwd(conn_t *conn, const char *path, int subdir)
 	}
 	free(pwd);
 
-#ifdef FTP_COMBINE_CWDS
 	/* Skip leading slashes, even "////". */
 	for (beg = dst + i; beg < end && *beg == '/'; ++beg, ++i)
 		/* nothing */ ;
@@ -370,7 +363,6 @@ ftp_cwd(conn_t *conn, const char *path, int subdir)
 		free(dst);
 		return (0);
 	}
-#endif /* FTP_COMBINE_CWDS */
 
 	/* That didn't work so go back to legacy behavior (multiple CWDs). */
 	for (beg = dst + i; beg < end; beg = dst + i + 1) {
@@ -1019,11 +1011,7 @@ ftp_connect(struct url *url, struct url *purl, const char *flags)
 {
 	conn_t *conn;
 	int e, direct, verbose;
-#ifdef INET6
 	int af = AF_UNSPEC;
-#else
-	int af = AF_INET;
-#endif
 
 	direct = CHECK_FLAG('d');
 	verbose = CHECK_FLAG('v');

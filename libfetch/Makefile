@@ -1,4 +1,3 @@
-CFLAGS_ALL		+= -DINET6 -DWITH_SSL -DFTP_COMBINE_CWDS
 libs-y			+= libfetch.a
 libfetch.a-objs		:= common.o fetch.o file.o ftp.o http.o
 generate-y		+= ftperr.h httperr.h

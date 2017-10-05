@@ -63,16 +63,8 @@
  * SUCH DAMAGE.
  */
 
-/* Needed for gmtime_r on Interix */
-#define _REENTRANT
-
-#if HAVE_CONFIG_H
-#include "config.h"
-#endif
-
 #include <sys/types.h>
 #include <sys/socket.h>
-
 #include <ctype.h>
 #include <errno.h>
 #include <locale.h>
@@ -702,19 +694,13 @@ http_connect(struct url *URL, struct url *purl, const char *flags, int *cached)
 
 	*cached = 0;
 
-#ifdef INET6
 	af = AF_UNSPEC;
-#else
-	af = AF_INET;
-#endif
 
 	verbose = CHECK_FLAG('v');
 	if (CHECK_FLAG('4'))
 		af = AF_INET;
-#ifdef INET6
 	else if (CHECK_FLAG('6'))
 		af = AF_INET6;
-#endif
 
 	curl = (purl != NULL) ? purl : URL;
 
@@ -887,12 +873,10 @@ http_request(struct url *URL, const char *op, struct url_stat *us,
 			goto ouch;
 
 		host = url->host;
-#ifdef INET6
 		if (strchr(url->host, ':')) {
 			snprintf(hbuf, sizeof(hbuf), "[%s]", url->host);
 			host = hbuf;
 		}
-#endif
 		if (url->port != fetch_default_port(url->scheme)) {
 			if (host != hbuf) {
 				strcpy(hbuf, host);

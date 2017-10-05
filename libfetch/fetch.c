@@ -30,10 +30,6 @@
  * $FreeBSD: fetch.c,v 1.41 2007/12/19 00:26:36 des Exp $
  */
 
-#if HAVE_CONFIG_H
-#include "config.h"
-#endif
-
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -446,18 +442,17 @@ find_user:
 	}
 
 	/* hostname */
-#ifdef INET6
 	if (*p == '[' && (q = strchr(p + 1, ']')) != NULL &&
 	    (*++q == '\0' || *q == '/' || *q == ':')) {
 		if ((i = q - p - 2) > URL_HOSTLEN)
 			i = URL_HOSTLEN;
 		strncpy(u->host, ++p, i);
 		p = q;
-	} else
-#endif
+	} else {
 		for (i = 0; *p && (*p != '/') && (*p != ':'); p++)
 			if (i < URL_HOSTLEN)
 				u->host[i++] = *p;
+	}
 
 	/* port */
 	if (*p == ':') {
