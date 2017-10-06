@@ -541,7 +541,7 @@ fetch_ssl(conn_t *conn, const struct url *URL, int verbose)
 	if (getenv("SSL_NO_VERIFY_HOSTNAME") == NULL) {
 		if (verbose)
 			fetch_info("Verify hostname");
-		if (X509_check_host(conn->ssl_cert, URL->host, 0,
+		if (X509_check_host(conn->ssl_cert, URL->host, strlen(URL->host),
 				X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS,
 				NULL) != 1) {
 			fprintf(stderr, "SSL certificate subject doesn't match host %s\n",
