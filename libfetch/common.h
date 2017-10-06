@@ -37,12 +37,7 @@
 #define FTP_DEFAULT_PROXY_PORT	21
 #define HTTP_DEFAULT_PROXY_PORT	3128
 
-#include <openssl/crypto.h>
-#include <openssl/x509.h>
-#include <openssl/x509v3.h>
-#include <openssl/pem.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
+#include "openssl-compat.h"
 
 #if defined(__GNUC__) && __GNUC__ >= 3
 #define LIBFETCH_PRINTFLIKE(fmtarg, firstvararg)	\
