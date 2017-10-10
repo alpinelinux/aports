@@ -1581,7 +1581,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 			apk_blob_to_file(db->root_fd, apk_arch_file, *db->arch, APK_BTF_ADD_EOL);
 
 		/* mount /proc */
-		if (asprintf(&db->root_proc_dir, "%s/proc", dbopts->root) == -1)
+		if (asprintf(&db->root_proc_dir, "%s/proc", db->root) == -1)
 			goto ret_errno;
 		if (statfs(db->root_proc_dir, &stfs) != 0) {
 			if (errno == ENOENT) mkdir(db->root_proc_dir, 0555);
