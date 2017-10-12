@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
+#include <sys/param.h>
 #include <pwd.h>
 #include <grp.h>
 
@@ -148,28 +149,23 @@ struct apk_istream *apk_istream_from_file(int atfd, const char *file)
 	return apk_istream_from_fd(fd);
 }
 
-size_t apk_istream_skip(struct apk_istream *is, size_t size)
+ssize_t apk_istream_skip(struct apk_istream *is, size_t size)
 {
 	unsigned char buf[2048];
 	size_t done = 0, togo;
 	ssize_t r;
 
 	while (done < size) {
-		togo = size - done;
-		if (togo > sizeof(buf))
-			togo = sizeof(buf);
+		togo = MIN(size - done, sizeof buf);
 		r = apk_istream_read(is, buf, togo);
-		if (r < 0)
-			return r;
+		if (r <= 0) return r ?: -EIO;
 		done += r;
-		if (r != togo)
-			break;
 	}
 	return done;
 }
 
-size_t apk_istream_splice(void *stream, int fd, size_t size,
-			  apk_progress_cb cb, void *cb_ctx)
+ssize_t apk_istream_splice(void *stream, int fd, size_t size,
+			   apk_progress_cb cb, void *cb_ctx)
 {
 	static void *splice_buffer = NULL;
 	struct apk_istream *is = (struct apk_istream *) stream;
@@ -187,32 +183,29 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 			else if (r == EBADF || r == EFBIG || r == ENOSPC || r == EIO)
 				return -r;
 		}
-		if (bufsz > 2*1024*1024)
-			bufsz = 2*1024*1024;
+		bufsz = MIN(bufsz, 2*1024*1024);
 		buf = mmapbase;
 	}
 	if (mmapbase == MAP_FAILED) {
-		if (splice_buffer == NULL)
-			splice_buffer = malloc(256*1024);
+		if (!splice_buffer) splice_buffer = malloc(256*1024);
 		buf = splice_buffer;
-		if (buf == NULL)
-			return -ENOMEM;
-		if (bufsz > 256*1024)
-			bufsz = 256*1024;
+		if (!buf) return -ENOMEM;
+		bufsz = MIN(bufsz, 256*1024);
 	}
 
 	while (done < size) {
-		if (cb != NULL)
-			cb(cb_ctx, done);
+		if (cb != NULL) cb(cb_ctx, done);
 
-		togo = size - done;
-		if (togo > bufsz)
-			togo = bufsz;
+		togo = MIN(size - done, bufsz);
 		r = apk_istream_read(is, buf, togo);
-		if (r < 0)
-			goto err;
-		if (r == 0)
+		if (r <= 0) {
+			if (r) goto err;
+			if (size != APK_SPLICE_ALL && done != size) {
+				r = -EBADMSG;
+				goto err;
+			}
 			break;
+		}
 
 		if (mmapbase == MAP_FAILED) {
 			if (write(fd, buf, r) != r) {
@@ -224,8 +217,6 @@ size_t apk_istream_splice(void *stream, int fd, size_t size,
 			buf += r;
 
 		done += r;
-		if (r != togo)
-			break;
 	}
 	r = done;
 err:

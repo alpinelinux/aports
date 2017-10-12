@@ -108,11 +108,11 @@ struct apk_istream *apk_istream_from_file(int atfd, const char *file);
 struct apk_istream *apk_istream_from_file_gz(int atfd, const char *file);
 struct apk_istream *apk_istream_from_fd_url_if_modified(int atfd, const char *url, time_t since);
 struct apk_istream *apk_istream_from_url_gz(const char *url);
-size_t apk_istream_skip(struct apk_istream *istream, size_t size);
+ssize_t apk_istream_skip(struct apk_istream *istream, size_t size);
 
 #define APK_SPLICE_ALL 0xffffffff
-size_t apk_istream_splice(void *stream, int fd, size_t size,
-			  apk_progress_cb cb, void *cb_ctx);
+ssize_t apk_istream_splice(void *stream, int fd, size_t size,
+			   apk_progress_cb cb, void *cb_ctx);
 
 static inline struct apk_istream *apk_istream_from_fd(int fd)
 {
