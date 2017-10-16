@@ -1,0 +1,211 @@
+From b0949ba08f7b896593eaf27023a16a0f26c9ed14 Mon Sep 17 00:00:00 2001
+From: William Pitcock <nenolod@dereferenced.org>
+Date: Sun, 24 Sep 2017 16:37:48 -0500
+Subject: [PATCH 30/30] stdio: implement fopencookie(3)
+
+The fopencookie(3) function allows the programmer to create a custom
+stdio implementation, using four hook functions which operate on a
+"cookie" data type.
+
+Changelog:
+
+v6:
+- remove pointer arithmetic instead using a structure to contain the parent FILE
+  object
+- set F_ERR flag where appropriate
+- style fixes
+- fix stdio readahead to handle single-byte read case (as pointed out by dalias,
+  tested by custom fuzzer)
+- handle seek return values correctly (found by fuzzing)
+
+v5:
+- implement stdio readahead buffering support
+
+v4:
+- remove parameter names from header function declarations
+
+v3:
+- remove spurious `struct winsize`
+- make f->lock unconditionally 0
+
+v2:
+- properly implement stdio buffering
+
+v1:
+- initial proof of concept
+---
+ include/stdio.h         |   9 ++++
+ src/stdio/fopencookie.c | 141 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 150 insertions(+)
+ create mode 100644 src/stdio/fopencookie.c
+
+diff --git a/include/stdio.h b/include/stdio.h
+index 884d2e6a..da0563f6 100644
+--- a/include/stdio.h
++++ b/include/stdio.h
+@@ -182,6 +182,15 @@ int vasprintf(char **, const char *, __isoc_va_list);
+ #ifdef _GNU_SOURCE
+ char *fgets_unlocked(char *, int, FILE *);
+ int fputs_unlocked(const char *, FILE *);
++
++typedef struct {
++	ssize_t (*read)(void *, char *, size_t);
++	ssize_t (*write)(void *, const char *, size_t);
++	int (*seek)(void *, off_t *, int);
++	int (*close)(void *);
++} cookie_io_functions_t;
++
++FILE *fopencookie(void *, const char *, cookie_io_functions_t);
+ #endif
+ 
+ #if defined(_LARGEFILE64_SOURCE) || defined(_GNU_SOURCE)
+diff --git a/src/stdio/fopencookie.c b/src/stdio/fopencookie.c
+new file mode 100644
+index 00000000..bcf42c10
+--- /dev/null
++++ b/src/stdio/fopencookie.c
+@@ -0,0 +1,141 @@
++#define _GNU_SOURCE
++#include "stdio_impl.h"
++#include <stdlib.h>
++#include <sys/ioctl.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <string.h>
++
++struct fcookie {
++	void *cookie;
++	cookie_io_functions_t iofuncs;
++};
++
++struct cookie_FILE {
++	FILE f;
++	struct fcookie fc;
++	unsigned char buf[UNGET+BUFSIZ];
++};
++
++static size_t cookieread(FILE *f, unsigned char *buf, size_t len)
++{
++	struct fcookie *fc = f->cookie;
++	ssize_t ret = -1;
++	size_t remain = len, readlen = 0;
++
++	if (!fc->iofuncs.read) goto bail;
++
++	ret = fc->iofuncs.read(fc->cookie, (char *) buf, len > 1 ? (len - 1) : 1);
++	if (ret <= 0) goto bail;
++
++	readlen += ret;
++	remain -= ret;
++
++	f->rpos = f->buf;
++	ret = fc->iofuncs.read(fc->cookie, (char *) f->rpos, f->buf_size);
++	if (ret <= 0) goto bail;
++	f->rend = f->rpos + ret;
++
++	if (remain > 0) {
++		if (remain > f->buf_size) remain = f->buf_size;
++		memcpy(buf + readlen, f->rpos, remain);
++		readlen += remain;
++		f->rpos += remain;
++	}
++
++	return readlen;
++
++bail:
++	f->flags |= F_EOF ^ ((F_ERR^F_EOF) & ret);
++	f->rpos = f->rend = f->buf;
++	return readlen;
++}
++
++static size_t cookiewrite(FILE *f, const unsigned char *buf, size_t len)
++{
++	struct fcookie *fc = f->cookie;
++	ssize_t ret;
++	size_t len2 = f->wpos - f->wbase;
++	if (!fc->iofuncs.write) return len;
++	if (len2) {
++		f->wpos = f->wbase;
++		if (cookiewrite(f, f->wpos, len2) < len2) return 0;
++	}
++	ret = fc->iofuncs.write(fc->cookie, (const char *) buf, len);
++	if (ret < 0) {
++		f->wpos = f->wbase = f->wend = 0;
++		f->flags |= F_ERR;
++		return 0;
++	}
++	return ret;
++}
++
++static off_t cookieseek(FILE *f, off_t off, int whence)
++{
++	struct fcookie *fc = f->cookie;
++	int res;
++	if (whence > 2) {
++		errno = EINVAL;
++		return -1;
++	}
++	if (!fc->iofuncs.seek) {
++		errno = ENOTSUP;
++		return -1;
++	}
++	res = fc->iofuncs.seek(fc->cookie, &off, whence);
++	if (res < 0)
++		return res;
++	return off;
++}
++
++static int cookieclose(FILE *f)
++{
++	struct fcookie *fc = f->cookie;
++	if (fc->iofuncs.close) return fc->iofuncs.close(fc->cookie);
++	return 0;
++}
++
++FILE *fopencookie(void *cookie, const char *mode, cookie_io_functions_t iofuncs)
++{
++	struct cookie_FILE *f;
++
++	/* Check for valid initial mode character */
++	if (!strchr("rwa", *mode)) {
++		errno = EINVAL;
++		return 0;
++	}
++
++	/* Allocate FILE+fcookie+buffer or fail */
++	if (!(f=malloc(sizeof *f))) return 0;
++
++	/* Zero-fill only the struct, not the buffer */
++	memset(f, 0, sizeof(FILE));
++
++	/* Impose mode restrictions */
++	if (!strchr(mode, '+')) f->f.flags = (*mode == 'r') ? F_NOWR : F_NORD;
++
++	/* Set up our fcookie */
++	f->fc.cookie = cookie;
++	f->fc.iofuncs.read = iofuncs.read;
++	f->fc.iofuncs.write = iofuncs.write;
++	f->fc.iofuncs.seek = iofuncs.seek;
++	f->fc.iofuncs.close = iofuncs.close;
++
++	f->f.fd = -1;
++	f->f.cookie = &f->fc;
++	f->f.buf = f->buf;
++	f->f.buf_size = BUFSIZ;
++	f->f.lbf = EOF;
++
++	/* enable opportunistic stdio locking */
++	f->f.lock = 0;
++
++	/* Initialize op ptrs. No problem if some are unneeded. */
++	f->f.read = cookieread;
++	f->f.write = cookiewrite;
++	f->f.seek = cookieseek;
++	f->f.close = cookieclose;
++
++	/* Add new FILE to open file list */
++	return __ofl_add(&f->f);
++}
+-- 
+2.13.3
+
