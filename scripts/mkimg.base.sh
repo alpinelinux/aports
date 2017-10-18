@@ -165,28 +165,20 @@ grub_gen_earlyconf() {
 	EOF
 }
 
-build_grubefi_img() {
+build_grub_efi() {
 	local _format="$1"
 	local _efi="$2"
-	local _tmpdir="$WORKDIR/efiboot.$3"
-
-	# extra packages needed: grub-efi mtools
 
 	# Prepare grub-efi bootloader
-	mkdir -p "$_tmpdir/efi/boot"
-	grub_gen_earlyconf > "$_tmpdir"/grub_early.cfg
+	mkdir -p "$DESTDIR/efi/boot"
+	grub_gen_earlyconf > "$WORKDIR/grub_early.$3.cfg"
 	grub-mkimage \
-		--config="$_tmpdir"/grub_early.cfg \
+		--config="$WORKDIR/grub_early.$3.cfg" \
 		--prefix="/boot/grub" \
-		--output="$_tmpdir/efi/boot/$_efi" \
+		--output="$DESTDIR/efi/boot/$_efi" \
 		--format="$_format" \
 		--compression="xz" \
 		$grub_mod
-
-	# Create the EFI image
-	mkdir -p ${DESTDIR}/boot/grub/
-	mformat -i ${DESTDIR}/boot/grub/efi.img -C -f 1440 ::
-	mcopy -i ${DESTDIR}/boot/grub/efi.img -s $_tmpdir/efi ::
 }
 
 section_grubieee1275() {
@@ -197,7 +189,7 @@ section_grubieee1275() {
 	build_section grub_cfg boot/grub/grub.cfg $(grub_gen_config | checksum)
 }
 
-section_grubefi() {
+section_grub_efi() {
 	[ -n "$grub_mod" ] || return 0
 	[ "$output_format" = "iso" ] || return 0
 
@@ -217,7 +209,7 @@ section_grubefi() {
 	esac
 
 	build_section grub_cfg boot/grub/grub.cfg $(grub_gen_config | checksum)
-	build_section grubefi_img $_format $_efi $(grub_gen_earlyconf | checksum)
+	build_section grub_efi $_format $_efi $(grub_gen_earlyconf | checksum)
 }
 
 create_image_iso() {
@@ -236,8 +228,12 @@ create_image_iso() {
 			-boot-info-table
 			"
 	fi
-	if [ -e "${DESTDIR}/boot/grub/efi.img" ]; then
-		# efi boot enabled
+	if [ -e "${DESTDIR}/efi" -a -e "${DESTDIR}/boot/grub" ]; then
+		# Create the EFI boot partition image
+		mformat -i ${DESTDIR}/boot/grub/efi.img -C -f 1440 ::
+		mcopy -i ${DESTDIR}/boot/grub/efi.img -s ${DESTDIR}/efi ::
+
+		# Enable EFI boot
 		if [ -z "$_isolinux" ]; then
 			# efi boot only
 			_efiboot="
