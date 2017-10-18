@@ -170,6 +170,8 @@ build_grubefi_img() {
 	local _efi="$2"
 	local _tmpdir="$WORKDIR/efiboot.$3"
 
+	# extra packages needed: grub-efi mtools
+
 	# Prepare grub-efi bootloader
 	mkdir -p "$_tmpdir/efi/boot"
 	grub_gen_earlyconf > "$_tmpdir"/grub_early.cfg
@@ -182,12 +184,9 @@ build_grubefi_img() {
 		$grub_mod
 
 	# Create the EFI image
-	# mkdosfs and mkfs.vfat are busybox applets which failed to create a proper image
-	# use dosfstools mkfs.fat instead
 	mkdir -p ${DESTDIR}/boot/grub/
-	dd if=/dev/zero of=${DESTDIR}/boot/grub/efiboot.img bs=1K count=1440
-	mkfs.fat -F 12 ${DESTDIR}/boot/grub/efiboot.img
-	mcopy -s -i ${DESTDIR}/boot/grub/efiboot.img $_tmpdir/efi ::
+	mformat -i ${DESTDIR}/boot/grub/efi.img -C -f 1440 ::
+	mcopy -i ${DESTDIR}/boot/grub/efi.img -s $_tmpdir/efi ::
 }
 
 section_grubieee1275() {
@@ -237,21 +236,21 @@ create_image_iso() {
 			-boot-info-table
 			"
 	fi
-	if [ -e "${DESTDIR}/boot/grub/efiboot.img" ]; then
+	if [ -e "${DESTDIR}/boot/grub/efi.img" ]; then
 		# efi boot enabled
 		if [ -z "$_isolinux" ]; then
 			# efi boot only
 			_efiboot="
 				-efi-boot-part
 				--efi-boot-image
-				-e boot/grub/efiboot.img
+				-e boot/grub/efi.img
 				-no-emul-boot
 				"
 		else
 			# hybrid isolinux+efi boot
 			_efiboot="
 				-eltorito-alt-boot
-				-e boot/grub/efiboot.img
+				-e boot/grub/efi.img
 				-no-emul-boot
 				-isohybrid-gpt-basdat
 				"
