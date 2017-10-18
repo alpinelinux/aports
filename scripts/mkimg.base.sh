@@ -195,17 +195,11 @@ section_grub_efi() {
 
 	local _format _efi
 	case "$ARCH" in
-	x86_64)
-		_format="x86_64-efi"
-		_efi="bootx64.efi"
-		;;
-	aarch64)
-		_format="arm64-efi"
-		_efi="bootaa64.efi"
-		;;
-	*)
-		return 0
-		;;
+	aarch64)_format="arm64-efi";  _efi="bootaa64.efi" ;;
+	arm*)	_format="arm-efi";    _efi="bootarm.efi"  ;;
+	x86)	_format="i386-efi";   _efi="bootia32.efi" ;;
+	x86_64) _format="x86_64-efi"; _efi="bootx64.efi"  ;;
+	*)	return 0 ;;
 	esac
 
 	build_section grub_cfg boot/grub/grub.cfg $(grub_gen_config | checksum)
