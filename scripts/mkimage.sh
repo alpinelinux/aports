@@ -2,7 +2,7 @@
 
 # apk add \
 #	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso
-#	(for efi:) mtools dosfstools grub-efi
+#	(for efi:) mtools grub-efi
 
 # FIXME: clean workdir out of unneeded sections
 # FIXME: --release: cp/mv images to REPODIR/$ARCH/releases/
