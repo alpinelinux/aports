@@ -4,7 +4,7 @@
 -include config.mk
 
 PACKAGE := apk-tools
-VERSION := 2.8.0
+VERSION := 2.8.1
 
 ##
 # Default directories
