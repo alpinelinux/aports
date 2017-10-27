@@ -302,7 +302,7 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 	}
 }
 
-static void exclude_non_providers(struct apk_solver_state *ss, struct apk_name *name, struct apk_name *must_provide)
+static void exclude_non_providers(struct apk_solver_state *ss, struct apk_name *name, struct apk_name *must_provide, int skip_virtuals)
 {
 	struct apk_provider *p;
 	struct apk_dependency *d;
@@ -310,23 +310,25 @@ static void exclude_non_providers(struct apk_solver_state *ss, struct apk_name *
 	if (name == must_provide)
 		return;
 
-	dbg_printf("%s must provide %s\n", name->name, must_provide->name);
+	dbg_printf("%s must provide %s (skip_virtuals=%d)\n", name->name, must_provide->name, skip_virtuals);
 
 	foreach_array_item(p, name->providers) {
-		if (p->pkg->name == must_provide || !p->pkg->ss.pkg_selectable)
+		if (p->pkg->name == must_provide || !p->pkg->ss.pkg_selectable ||
+		    (skip_virtuals && p->version == &apk_null_blob))
 			goto next;
 		foreach_array_item(d, p->pkg->provides)
-			if (d->name == must_provide)
+			if (d->name == must_provide || (skip_virtuals && d->version == &apk_null_blob))
 				goto next;
 		disqualify_package(ss, p->pkg, "provides transitivity");
 	next: ;
 	}
 }
 
-static inline void merge_index(unsigned short *index, int num_options)
+static inline int merge_index(unsigned short *index, int num_options)
 {
-	if (*index == num_options)
-		*index = num_options + 1;
+	if (*index != num_options) return 0;
+	*index = num_options + 1;
+	return 1;
 }
 
 static inline int merge_index_complete(unsigned short *index, int num_options)
@@ -414,10 +416,11 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 			if (!dep->conflict)
 				merge_index(&dep->name->ss.merge_depends, num_options);
 
-		merge_index(&pkg->name->ss.merge_provides, num_options);
+		if (merge_index(&pkg->name->ss.merge_provides, num_options))
+			pkg->name->ss.has_virtual_provides |= (p->version == &apk_null_blob);
 		foreach_array_item(dep, pkg->provides)
-			if (dep->version != &apk_null_blob)
-				merge_index(&dep->name->ss.merge_provides, num_options);
+			if (merge_index(&dep->name->ss.merge_provides, num_options))
+				dep->name->ss.has_virtual_provides |= (dep->version == &apk_null_blob);
 
 		num_tag_not_ok += !pkg->ss.tag_ok;
 		num_options++;
@@ -455,10 +458,14 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 
 		/* provides transitivity */
 		if (merge_index_complete(&pkg->name->ss.merge_provides, num_options))
-			exclude_non_providers(ss, pkg->name, name);
+			exclude_non_providers(ss, pkg->name, name, pkg->name->ss.has_virtual_provides);
 		foreach_array_item(dep, pkg->provides)
 			if (merge_index_complete(&dep->name->ss.merge_provides, num_options))
-				exclude_non_providers(ss, dep->name, name);
+				exclude_non_providers(ss, dep->name, name, dep->name->ss.has_virtual_provides);
+
+		pkg->name->ss.has_virtual_provides = 0;
+		foreach_array_item(dep, pkg->provides)
+			dep->name->ss.has_virtual_provides = 0;
 	}
 
 	name->ss.reverse_deps_done = 1;
