@@ -42,4 +42,8 @@ check test: FORCE
 static:
 	$(Q)$(MAKE) STATIC=y
 
+tag: check
+	git commit . -m "apk-tools-$(VERSION)"
+	git tag -s v$(VERSION) -m "apk-tools-$(VERSION)"
+
 src/: libfetch/
