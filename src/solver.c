@@ -660,9 +660,9 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 
 	if (name->ss.requirers || name->ss.has_iif) {
 		foreach_array_item(p, name->providers) {
-			dbg_printf("  consider "PKG_VER_FMT" iif_triggered=%d, tag_ok=%d, selectable=%d, selected=%d, provider_priority=%d\n",
+			dbg_printf("  consider "PKG_VER_FMT" iif_triggered=%d, tag_ok=%d, selectable=%d, provider_priority=%d, installed=%d\n",
 				PKG_VER_PRINTF(p->pkg), p->pkg->ss.iif_triggered, p->pkg->ss.tag_ok, p->pkg->ss.pkg_selectable,
-				p->pkg->ss.pkg_selected, p->pkg->provider_priority);
+				p->pkg->provider_priority, p->pkg->ipkg != NULL);
 			/* Ensure valid pinning and install-if trigger */
 			if (name->ss.requirers == 0 &&
 			    (!p->pkg->ss.iif_triggered ||
