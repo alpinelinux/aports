@@ -668,6 +668,12 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 			    (!p->pkg->ss.iif_triggered ||
 			     !p->pkg->ss.tag_ok))
 				continue;
+			/* Virtual packages without provider_priority cannot be autoselected */
+			if (p->version == &apk_null_blob &&
+			    p->pkg->name->auto_select_virtual == 0 &&
+			    p->pkg->name->ss.requirers == 0 &&
+			    p->pkg->provider_priority == 0)
+				continue;
 			if (compare_providers(ss, p, &chosen) > 0)
 				chosen = *p;
 		}
