@@ -812,6 +812,9 @@ int apk_pkg_add_info(struct apk_database *db, struct apk_package *pkg,
 	case 'c':
 		pkg->commit = apk_blob_cstr(value);
 		break;
+	case 'k':
+		pkg->provider_priority = apk_blob_pull_uint(&value, 10);
+		break;
 	case 'F': case 'M': case 'R': case 'Z': case 'r': case 'q':
 	case 'a': case 's': case 'f':
 		/* installed db entries which are handled in database.c */
@@ -850,6 +853,7 @@ static int read_info_line(void *ctx, apk_blob_t line)
 		{ "maintainer",	'm' },
 		{ "builddate",	't' },
 		{ "commit",	'c' },
+		{ "provider_priority", 'k' },
 	};
 	struct read_info_ctx *ri = (struct read_info_ctx *) ctx;
 	apk_blob_t l, r;
@@ -1124,6 +1128,10 @@ int apk_pkg_write_index_entry(struct apk_package *info,
 	if (info->commit) {
 		apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nc:"));
 		apk_blob_push_blob(&bbuf, APK_BLOB_STR(info->commit));
+	}
+	if (info->provider_priority) {
+		apk_blob_push_blob(&bbuf, APK_BLOB_STR("\nk:"));
+		apk_blob_push_uint(&bbuf, info->provider_priority, 10);
 	}
 	apk_blob_push_blob(&bbuf, APK_BLOB_STR("\n"));
 

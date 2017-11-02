@@ -299,6 +299,10 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 
 		if (is_provided)
 			inherit_pinning_and_flags(ss, pkg0, ppkg);
+
+		/* if a world-dependency is non-virtual, then the provider is going to be selected */
+		if (ppkg == NULL && dep->name == pkg0->name && pkg0->ss.pkg_selectable)
+			pkg0->ss.pkg_selected = 1;
 	}
 }
 
@@ -587,6 +591,16 @@ static int compare_providers(struct apk_solver_state *ss,
 	if (r)
 		return r;
 
+	/* Prefer already selected package. */
+	r = pkgA->ss.pkg_selected - pkgB->ss.pkg_selected;
+	if (r)
+		return r;
+
+	/* Prefer highest declared provider priority. */
+	r = pkgA->provider_priority - pkgB->provider_priority;
+	if (r)
+		return r;
+
 	/* Prefer lowest available repository */
 	return ffs(pkgB->repos) - ffs(pkgA->repos);
 }
@@ -639,17 +653,13 @@ static void select_package(struct apk_solver_state *ss, struct apk_name *name)
 
 	if (name->ss.requirers || name->ss.has_iif) {
 		foreach_array_item(p, name->providers) {
-			dbg_printf("  consider "PKG_VER_FMT" iif_triggered=%d, tag_ok=%d, selectable=%d\n",
-				PKG_VER_PRINTF(p->pkg), p->pkg->ss.iif_triggered, p->pkg->ss.tag_ok, p->pkg->ss.pkg_selectable);
+			dbg_printf("  consider "PKG_VER_FMT" iif_triggered=%d, tag_ok=%d, selectable=%d, selected=%d, provider_priority=%d\n",
+				PKG_VER_PRINTF(p->pkg), p->pkg->ss.iif_triggered, p->pkg->ss.tag_ok, p->pkg->ss.pkg_selectable,
+				p->pkg->ss.pkg_selected, p->pkg->provider_priority);
 			/* Ensure valid pinning and install-if trigger */
 			if (name->ss.requirers == 0 &&
 			    (!p->pkg->ss.iif_triggered ||
 			     !p->pkg->ss.tag_ok))
-				continue;
-			/* Virtual packages cannot be autoselected */
-			if (p->version == &apk_null_blob &&
-			    p->pkg->name->auto_select_virtual == 0 &&
-			    p->pkg->name->ss.requirers == 0)
 				continue;
 			if (compare_providers(ss, p, &chosen) > 0)
 				chosen = *p;
