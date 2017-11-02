@@ -567,6 +567,11 @@ static int compare_providers(struct apk_solver_state *ss,
 		if (r)
 			return r;
 
+		/* Prefer highest requirer count. */
+		r = count_requirers(pkgA) - count_requirers(pkgB);
+		if (r)
+			return r;
+
 		/* Prefer installed */
 		if (!(solver_flags & APK_SOLVERF_UPGRADE)) {
 			r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
@@ -595,11 +600,6 @@ static int compare_providers(struct apk_solver_state *ss,
 
 	/* Prefer installed (matches here if upgrading) */
 	r = (pkgA->ipkg != NULL) - (pkgB->ipkg != NULL);
-	if (r)
-		return r;
-
-	/* Prefer highest requirer count. */
-	r = count_requirers(pkgA) - count_requirers(pkgB);
 	if (r)
 		return r;
 
