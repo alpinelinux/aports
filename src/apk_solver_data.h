@@ -54,7 +54,6 @@ struct apk_solver_package_state {
 	unsigned seen : 1;
 	unsigned pkg_available : 1;
 	unsigned pkg_selectable : 1;
-	unsigned pkg_selected : 1;
 	unsigned tag_ok : 1;
 	unsigned tag_preferred : 1;
 	unsigned dependencies_used : 1;

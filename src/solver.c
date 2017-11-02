@@ -299,10 +299,6 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 
 		if (is_provided)
 			inherit_pinning_and_flags(ss, pkg0, ppkg);
-
-		/* if a world-dependency is non-virtual, then the provider is going to be selected */
-		if (ppkg == NULL && dep->name == pkg0->name && pkg0->ss.pkg_selectable)
-			pkg0->ss.pkg_selected = 1;
 	}
 }
 
@@ -485,6 +481,17 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 		name->name, name->ss.has_options, name->ss.reverse_deps_done);
 }
 
+static int count_requirers(const struct apk_package *pkg)
+{
+	int cnt = pkg->name->ss.requirers;
+	struct apk_dependency *p;
+
+	foreach_array_item(p, pkg->provides)
+		cnt += p->name->ss.requirers;
+
+	return cnt;
+}
+
 static int compare_providers(struct apk_solver_state *ss,
 			     struct apk_provider *pA, struct apk_provider *pB)
 {
@@ -591,8 +598,8 @@ static int compare_providers(struct apk_solver_state *ss,
 	if (r)
 		return r;
 
-	/* Prefer already selected package. */
-	r = pkgA->ss.pkg_selected - pkgB->ss.pkg_selected;
+	/* Prefer highest requirer count. */
+	r = count_requirers(pkgA) - count_requirers(pkgB);
 	if (r)
 		return r;
 
