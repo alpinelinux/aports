@@ -6,11 +6,14 @@ prefix		?= /usr
 bindir		?= $(prefix)/bin
 sysconfdir	?= /etc
 datadir		?= $(prefix)/share/$(PACKAGE)
+mandir		?= $(prefix)/share/man
 
 SCRIPTS		:= abuild abuild-keygen abuild-sign newapkbuild \
 		   abump apkgrel buildlab apkbuild-cpan checkapk \
 		   apkbuild-gem-resolver
 USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-gzsplit abuild-sudo abuild-fetch abuild-rmtemp
+MAN_1_PAGES	:= newapkbuild.1
+MAN_5_PAGES	:= APKBUILD.5
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
 AUTOTOOLS_TOOLCHAIN_FILES := config.sub config.guess
@@ -91,13 +94,20 @@ help:
 
 install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	install -d $(DESTDIR)/$(bindir) $(DESTDIR)/$(sysconfdir) \
-		$(DESTDIR)/$(datadir)
+		$(DESTDIR)/$(datadir) $(DESTDIR)/$(mandir)/man1 \
+		$(DESTDIR)/$(mandir)/man5
 	for i in $(USR_BIN_FILES); do\
 		install -m 755 $$i $(DESTDIR)/$(bindir)/$$i;\
 	done
 	chmod 4111 $(DESTDIR)/$(prefix)/bin/abuild-sudo
 	for i in adduser addgroup apk; do \
 		ln -fs abuild-sudo $(DESTDIR)/$(bindir)/abuild-$$i; \
+	done
+	for i in $(MAN_1_PAGES); do\
+		install -m 644 $$i $(DESTDIR)/$(mandir)/man1/$$i;\
+	done
+	for i in $(MAN_5_PAGES); do\
+		install -m 644 $$i $(DESTDIR)/$(mandir)/man5/$$i;\
 	done
 	if [ -n "$(DESTDIR)" ] || [ ! -f "/$(sysconfdir)"/abuild.conf ]; then\
 		cp abuild.conf $(DESTDIR)/$(sysconfdir)/; \
