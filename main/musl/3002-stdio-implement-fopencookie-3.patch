@@ -1,4 +1,4 @@
-From 1f6d9870ebc905990d230a3887d2e91a9edfde93 Mon Sep 17 00:00:00 2001
+From f501fa8271c7464c9c75762d2c9f43e494e416d8 Mon Sep 17 00:00:00 2001
 From: William Pitcock <nenolod@dereferenced.org>
 Date: Sun, 24 Sep 2017 16:37:48 -0500
 Subject: [PATCH] stdio: implement fopencookie(3)
@@ -8,6 +8,13 @@ stdio implementation, using four hook functions which operate on a
 "cookie" data type.
 
 Changelog:
+
+v9:
+- make read function more robust, should have been in v8 but i forgot to commit
+
+v8:
+- fix possible ungetc() underflow
+- style cleanups
 
 v7:
 - include GNU typedefs for cookie i/o functions
@@ -38,8 +45,8 @@ v1:
 - initial proof of concept
 ---
  include/stdio.h         |  14 +++++
- src/stdio/fopencookie.c | 141 ++++++++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 155 insertions(+)
+ src/stdio/fopencookie.c | 138 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 152 insertions(+)
  create mode 100644 src/stdio/fopencookie.c
 
 diff --git a/include/stdio.h b/include/stdio.h
@@ -69,10 +76,10 @@ index 884d2e6a..2932c76f 100644
  #if defined(_LARGEFILE64_SOURCE) || defined(_GNU_SOURCE)
 diff --git a/src/stdio/fopencookie.c b/src/stdio/fopencookie.c
 new file mode 100644
-index 00000000..bcf42c10
+index 00000000..2f46dd53
 --- /dev/null
 +++ b/src/stdio/fopencookie.c
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,138 @@
 +#define _GNU_SOURCE
 +#include "stdio_impl.h"
 +#include <stdlib.h>
@@ -97,31 +104,31 @@ index 00000000..bcf42c10
 +	struct fcookie *fc = f->cookie;
 +	ssize_t ret = -1;
 +	size_t remain = len, readlen = 0;
++	size_t len2 = len - !!f->buf_size;
 +
 +	if (!fc->iofuncs.read) goto bail;
 +
-+	ret = fc->iofuncs.read(fc->cookie, (char *) buf, len > 1 ? (len - 1) : 1);
-+	if (ret <= 0) goto bail;
++	if (len2) {
++		ret = fc->iofuncs.read(fc->cookie, (char *) buf, len2);
++		if (ret <= 0) goto bail;
 +
-+	readlen += ret;
-+	remain -= ret;
++		readlen += ret;
++		remain -= ret;
++	}
++
++	if (!f->buf_size || remain > !!f->buf_size) return readlen;
 +
 +	f->rpos = f->buf;
 +	ret = fc->iofuncs.read(fc->cookie, (char *) f->rpos, f->buf_size);
 +	if (ret <= 0) goto bail;
 +	f->rend = f->rpos + ret;
 +
-+	if (remain > 0) {
-+		if (remain > f->buf_size) remain = f->buf_size;
-+		memcpy(buf + readlen, f->rpos, remain);
-+		readlen += remain;
-+		f->rpos += remain;
-+	}
++	buf[readlen++] = *f->rpos++;
 +
 +	return readlen;
 +
 +bail:
-+	f->flags |= F_EOF ^ ((F_ERR^F_EOF) & ret);
++	f->flags |= ret == 0 ? F_EOF : F_ERR;
 +	f->rpos = f->rend = f->buf;
 +	return readlen;
 +}
@@ -149,7 +156,7 @@ index 00000000..bcf42c10
 +{
 +	struct fcookie *fc = f->cookie;
 +	int res;
-+	if (whence > 2) {
++	if (whence > 2U) {
 +		errno = EINVAL;
 +		return -1;
 +	}
@@ -184,7 +191,7 @@ index 00000000..bcf42c10
 +	if (!(f=malloc(sizeof *f))) return 0;
 +
 +	/* Zero-fill only the struct, not the buffer */
-+	memset(f, 0, sizeof(FILE));
++	memset(&f->f, 0, sizeof f->f);
 +
 +	/* Impose mode restrictions */
 +	if (!strchr(mode, '+')) f->f.flags = (*mode == 'r') ? F_NOWR : F_NORD;
@@ -198,12 +205,9 @@ index 00000000..bcf42c10
 +
 +	f->f.fd = -1;
 +	f->f.cookie = &f->fc;
-+	f->f.buf = f->buf;
++	f->f.buf = f->buf + UNGET;
 +	f->f.buf_size = BUFSIZ;
 +	f->f.lbf = EOF;
-+
-+	/* enable opportunistic stdio locking */
-+	f->f.lock = 0;
 +
 +	/* Initialize op ptrs. No problem if some are unneeded. */
 +	f->f.read = cookieread;
