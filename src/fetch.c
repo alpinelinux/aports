@@ -242,12 +242,15 @@ static void mark_name_recursive(struct apk_database *db, const char *match, stru
 	apk_dependency_array_init(&world);
 	*apk_dependency_array_add(&world) = dep;
 	r = apk_solver_solve(db, 0, world, &changeset);
-	apk_dependency_array_free(&world);
 	if (r == 0) {
 		foreach_array_item(change, changeset.changes)
 			mark_package(ctx, change->new_pkg);
-	} else
+	} else {
 		mark_error(ctx, match, name);
+		if (apk_verbosity > 1)
+			apk_solver_print_errors(db, &changeset, world);
+	}
+	apk_dependency_array_free(&world);
 
 	apk_change_array_free(&changeset.changes);
 }
