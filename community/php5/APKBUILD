@@ -4,7 +4,7 @@
 # Maintainer: Matt Smith <mcs@darkregion.net>
 pkgname=php5
 pkgver=5.6.32
-pkgrel=1
+pkgrel=2
 pkgdesc="The PHP language runtime engine"
 url="http://www.php.net/"
 arch="all"
@@ -507,6 +507,6 @@ opcache()	{ _mv_ext opcache; }
 
 sha512sums="d3f53a9c14e05726ec80785ee2db482d73cfd9bfca751041150da63e5e9273a2ea9a0027d3d9c80434ae8c1f93e7a4556b050969c271e696a841ec785efbeedc  php-5.6.32.tar.bz2
 f7d922cab98617ef910b4c14974e768c85e60424cd1b216f688b34b2d823b642a5b896463008c134ce47c150f9407f5c438823b7e7bc89b3fb440cd3e97b9d7e  php-fpm.initd
-895e94c791bd82060ad820fef049d366a09c932097faa6b7b9a2c2e9e00a18cb7c0f9b128679c7659b404379266fd0f95dba5c0333f626194cf60f7bf6044102  php5-module.conf
+d1dd6a5764e18414476aaaa109efcc568696ac17a61a1afdf7d0621d3e38c5be717a81ee4d11d28963f11e76879af7d3806970e651061f8c4abffb03c4bd5af4  php5-module.conf
 f1177cbf6b1f44402f421c3d317aab1a2a40d0b1209c11519c1158df337c8945f3a313d689c939768584f3e4edbe52e8bd6103fb6777462326a9d94e8ab1f505  php-install-pear-xml.patch
 6ecd0be2da1dc5b1d7512e46a2a5cd107a8b2a8c364efc9c624a7d6b2ab081685a329c94c22c970dc14c5c1115f702c512e97ae858da1bc69c6423323dbeeba2  gd-iconv.patch"
