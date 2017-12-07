@@ -1,0 +1,110 @@
+From 007f5b54d76bf69f441cc277b7f41f478e258aab Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jra@samba.org>
+Date: Tue, 19 Sep 2017 16:11:33 -0700
+Subject: [PATCH 1/2] s3: smbd: Fix SMB1 use-after-free crash bug.
+ CVE-2017-14746
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When setting up the chain, always use 'next->' variables
+not the 'req->' one.
+
+Bug discovered by 连一汉 <lianyihan@360.cn>
+
+CVE-2017-14746
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=13041
+
+Signed-off-by: Jeremy Allison <jra@samba.org>
+---
+ source3/smbd/process.c | 7 ++++---
+ source3/smbd/reply.c   | 5 +++++
+ 2 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/source3/smbd/process.c b/source3/smbd/process.c
+index 656f1c0a667..2641894d1d7 100644
+--- a/source3/smbd/process.c
++++ b/source3/smbd/process.c
+@@ -1854,12 +1854,13 @@ void smb_request_done(struct smb_request *req)
+ 
+ 		next->vuid = SVAL(req->outbuf, smb_uid);
+ 		next->tid  = SVAL(req->outbuf, smb_tid);
+-		status = smb1srv_tcon_lookup(req->xconn, req->tid,
++		status = smb1srv_tcon_lookup(req->xconn, next->tid,
+ 					     now, &tcon);
++
+ 		if (NT_STATUS_IS_OK(status)) {
+-			req->conn = tcon->compat;
++			next->conn = tcon->compat;
+ 		} else {
+-			req->conn = NULL;
++			next->conn = NULL;
+ 		}
+ 		next->chain_fsp = req->chain_fsp;
+ 		next->inbuf = req->inbuf;
+diff --git a/source3/smbd/reply.c b/source3/smbd/reply.c
+index a40ff81b240..26918b6d9d5 100644
+--- a/source3/smbd/reply.c
++++ b/source3/smbd/reply.c
+@@ -921,6 +921,11 @@ void reply_tcon_and_X(struct smb_request *req)
+ 		}
+ 
+ 		TALLOC_FREE(tcon);
++		/*
++		 * This tree id is gone. Make sure we can't re-use it
++		 * by accident.
++		 */
++		req->tid = 0;
+ 	}
+ 
+ 	if ((passlen > MAX_PASS_LEN) || (passlen >= req->buflen)) {
+-- 
+2.11.0
+
+
+From c1a22e59f87783d88dfbaeeb132b89be166b2754 Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jra@samba.org>
+Date: Wed, 20 Sep 2017 11:04:50 -0700
+Subject: [PATCH 2/2] s3: smbd: Chain code can return uninitialized memory when
+ talloc buffer is grown.
+
+Ensure we zero out unused grown area.
+
+CVE-2017-15275
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=13077
+
+Signed-off-by: Jeremy Allison <jra@samba.org>
+---
+ source3/smbd/srvstr.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/source3/smbd/srvstr.c b/source3/smbd/srvstr.c
+index 56dceba8c6c..c2d70b32c32 100644
+--- a/source3/smbd/srvstr.c
++++ b/source3/smbd/srvstr.c
+@@ -110,6 +110,20 @@ ssize_t message_push_string(uint8_t **outbuf, const char *str, int flags)
+ 		DEBUG(0, ("srvstr_push failed\n"));
+ 		return -1;
+ 	}
++
++	/*
++	 * Ensure we clear out the extra data we have
++	 * grown the buffer by, but not written to.
++	 */
++	if (buf_size + result < buf_size) {
++		return -1;
++	}
++	if (grow_size < result) {
++		return -1;
++	}
++
++	memset(tmp + buf_size + result, '\0', grow_size - result);
++
+ 	set_message_bcc((char *)tmp, smb_buflen(tmp) + result);
+ 
+ 	*outbuf = tmp;
+-- 
+2.11.0
+
