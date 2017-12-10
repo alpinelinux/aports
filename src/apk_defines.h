@@ -99,6 +99,14 @@ extern char **apk_argv;
 #define APK_DEFAULT_ARCH	"aarch64"
 #elif defined(__s390x__)
 #define APK_DEFAULT_ARCH	"s390x"
+#elif defined(__mips64) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define APK_DEFAULT_ARCH	"mips64"
+#elif defined(__mips64) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define APK_DEFAULT_ARCH	"mips64el"
+#elif defined(__mips__) && __BYTE_ORDER__ == __ORDER_BIG__ENDIAN__
+#define APK_DEFAULT_ARCH	"mips"
+#elif defined(__mips__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define APK_DEFAULT_ARCH	"mipsel"
 #else
 #error APK_DEFAULT_ARCH not detected for this architecture
 #endif
