@@ -184,55 +184,57 @@ static void discover_name(struct apk_solver_state *ss, struct apk_name *name)
 	name->ss.no_iif = 1;
 	foreach_array_item(p, name->providers) {
 		struct apk_package *pkg = p->pkg;
-		if (pkg->ss.seen)
-			continue;
+		if (!pkg->ss.seen) {
+			pkg->ss.seen = 1;
+			pkg->ss.pinning_allowed = APK_DEFAULT_PINNING_MASK;
+			pkg->ss.pinning_preferred = APK_DEFAULT_PINNING_MASK;
+			pkg->ss.pkg_available =
+				(pkg->filename != NULL) ||
+				(pkg->repos & db->available_repos & ~BIT(APK_REPOSITORY_CACHED));
+			/* Package is in 'cached' repository if filename is provided,
+			 * or it's a 'virtual' package with install_size zero */
+			pkg->ss.pkg_selectable =
+				(pkg->repos & db->available_repos) ||
+				pkg->cached_non_repository ||
+				pkg->ipkg;
 
-		pkg->ss.seen = 1;
+			/* Prune install_if packages that are no longer available,
+			 * currently works only if SOLVERF_AVAILABLE is set in the
+			 * global solver flags. */
+			pkg->ss.iif_failed =
+				(pkg->install_if->num == 0) ||
+				((ss->solver_flags_inherit & APK_SOLVERF_AVAILABLE) &&
+				 !pkg->ss.pkg_available);
 
-		pkg->ss.pinning_allowed = APK_DEFAULT_PINNING_MASK;
-		pkg->ss.pinning_preferred = APK_DEFAULT_PINNING_MASK;
-		pkg->ss.pkg_available =
-			(pkg->filename != NULL) ||
-			(pkg->repos & db->available_repos & ~BIT(APK_REPOSITORY_CACHED));
-		/* Package is in 'cached' repository if filename is provided,
-		 * or it's a 'virtual' package with install_size zero */
-		pkg->ss.pkg_selectable =
-			(pkg->repos & db->available_repos) ||
-			pkg->cached_non_repository ||
-			pkg->ipkg;
+			repos = get_pkg_repos(db, pkg);
+			pkg->ss.tag_preferred =
+				(pkg->filename != NULL) ||
+				(pkg->installed_size == 0) ||
+				(repos & ss->default_repos);
+			pkg->ss.tag_ok =
+				pkg->ss.tag_preferred ||
+				pkg->cached_non_repository ||
+				pkg->ipkg;
 
-		/* Prune install_if packages that are no longer available,
-		 * currently works only if SOLVERF_AVAILABLE is set in the
-		 * global solver flags. */
-		pkg->ss.iif_failed =
-			(pkg->install_if->num == 0) ||
-			((ss->solver_flags_inherit & APK_SOLVERF_AVAILABLE) &&
-			 !pkg->ss.pkg_available);
-		name->ss.no_iif &= pkg->ss.iif_failed;
+			foreach_array_item(dep, pkg->depends) {
+				discover_name(ss, dep->name);
+				pkg->ss.max_dep_chain = max(pkg->ss.max_dep_chain,
+							    dep->name->ss.max_dep_chain+1);
+			}
 
-		repos = get_pkg_repos(db, pkg);
-		pkg->ss.tag_preferred =
-			(pkg->filename != NULL) ||
-			(pkg->installed_size == 0) ||
-			(repos & ss->default_repos);
-		pkg->ss.tag_ok =
-			pkg->ss.tag_preferred ||
-			pkg->cached_non_repository ||
-			pkg->ipkg;
-
-		foreach_array_item(dep, pkg->depends) {
-			discover_name(ss, dep->name);
-			pkg->ss.max_dep_chain = max(pkg->ss.max_dep_chain,
-						    dep->name->ss.max_dep_chain+1);
+			dbg_printf("discover " PKG_VER_FMT ": tag_ok=%d, tag_pref=%d max_dep_chain=%d selectable=%d\n",
+				PKG_VER_PRINTF(pkg),
+				pkg->ss.tag_ok,
+				pkg->ss.tag_preferred,
+				pkg->ss.max_dep_chain,
+				pkg->ss.pkg_selectable);
 		}
+
+		name->ss.no_iif &= pkg->ss.iif_failed;
 		name->ss.max_dep_chain = max(name->ss.max_dep_chain, pkg->ss.max_dep_chain);
 
-		dbg_printf("discover " PKG_VER_FMT ": tag_ok=%d, tag_pref=%d max_dep_chain=%d selectable=%d\n",
-			PKG_VER_PRINTF(pkg),
-			pkg->ss.tag_ok,
-			pkg->ss.tag_preferred,
-			pkg->ss.max_dep_chain,
-			pkg->ss.pkg_selectable);
+		dbg_printf("discover %s: max_dep_chain=%d no_iif=%d\n",
+			name->name, name->ss.max_dep_chain, name->ss.no_iif);
 	}
 	foreach_array_item(pname0, name->rinstall_if)
 		discover_name(ss, *pname0);
@@ -398,10 +400,11 @@ static void reconsider_name(struct apk_solver_state *ss, struct apk_name *name)
 			foreach_array_item(dep, pkg->install_if)
 				inherit_pinning_and_flags(ss, pkg, dep->name->ss.chosen.pkg);
 		}
-		dbg_printf("  "PKG_VER_FMT": iif_triggered=%d iif_failed=%d\n",
-			PKG_VER_PRINTF(pkg), pkg->ss.iif_triggered, pkg->ss.iif_failed);
 		has_iif |= pkg->ss.iif_triggered;
 		no_iif  &= pkg->ss.iif_failed;
+		dbg_printf("  "PKG_VER_FMT": iif_triggered=%d iif_failed=%d, no_iif=%d\n",
+			PKG_VER_PRINTF(pkg), pkg->ss.iif_triggered, pkg->ss.iif_failed,
+			no_iif);
 
 		if (name->ss.requirers == 0)
 			continue;
