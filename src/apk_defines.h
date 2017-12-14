@@ -103,7 +103,7 @@ extern char **apk_argv;
 #define APK_DEFAULT_ARCH	"mips64"
 #elif defined(__mips64) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define APK_DEFAULT_ARCH	"mips64el"
-#elif defined(__mips__) && __BYTE_ORDER__ == __ORDER_BIG__ENDIAN__
+#elif defined(__mips__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define APK_DEFAULT_ARCH	"mips"
 #elif defined(__mips__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define APK_DEFAULT_ARCH	"mipsel"
