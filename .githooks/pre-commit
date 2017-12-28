@@ -1,0 +1,84 @@
+#!/bin/sh
+#
+# This hook checks that all local sources specified in the staged APKBUILDs
+# are staged too or already committed and that checksums are correct.
+#
+set -eu
+
+if ! command -v sha512sum >/dev/null; then
+	# macOS / BSDs (?) don't have sha512sum, but shasum.
+	alias sha512sum='shasum -a 512'
+fi
+
+error() {
+	printf '\033[0;31mpre-commit:\033[0m %s\n' "$1" >&2  # red
+}
+
+# Prints paths of created or modified APKBUILDs being committed.
+changed_apkbuilds() {
+	git diff-index \
+		--name-only \
+		--cached \
+		--diff-filter=ACMR HEAD \
+		-- '**/APKBUILD'
+}
+
+# Prints file names and checksums (in format <SHA-512>:<filename>) of local
+# sources specified in the APKBUILD ($1).
+abuild_local_sources() {
+	apkbuild="$1"
+
+	set +eu
+	. "$apkbuild" || {
+		error "$apkbuild is invalid"
+		return 1
+	}
+	set -eu
+
+	status=0
+	for src in $source; do
+		# Skip remote sources.
+		case "$src" in */*) continue;; esac
+
+		echo "$sha512sums" | awk -v src="$src" '
+				{ if ($2 == src) { ok=1; print($2 ":" $1) } }
+				END { if (ok != 1) exit 1 }' || {
+			status=1
+			error "${apkbuild%/*}: file \"$src\" is missing in \$sha512sums (hint: run abuild checksum)"
+		}
+	done
+
+	return $status
+}
+
+# Checks that all local sources specified in the APKBUILD file ($1) are
+# available in git tree and checksums are correct.
+check_local_sources() {
+	local apkbuild="$1"
+	local startdir="${apkbuild%/*}"
+	local status=0
+	local checksum content filename line sources
+
+	sources=$(abuild_local_sources "$apkbuild")
+	for line in $sources; do
+		filename=${line%%:*}
+		checksum=${line#*:}
+
+		content=$(git show ":$startdir/$filename" 2>/dev/null) || {
+			error "$startdir: missing file \"$filename\""
+			status=1
+			continue
+		}
+		[ "$(printf '%s\n' "$content" | sha512sum)" = "$checksum  -" ] || {
+			error "$startdir: bad checksum for file \"$filename\" (hint: run abuild checksum)"
+			status=1
+		}
+	done
+
+	return $status
+}
+
+
+for apkbuild in $(changed_apkbuilds); do
+	check_local_sources "$apkbuild"
+done
