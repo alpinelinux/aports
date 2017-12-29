@@ -77,6 +77,7 @@ extern char **apk_argv;
 #define APK_OVERLAY_FROM_STDIN	0x2000
 #define APK_NO_SCRIPTS		0x4000
 #define APK_NO_CACHE		0x8000
+#define APK_NO_COMMIT_HOOKS	0x00010000
 
 /* default architecture for APK packages. */
 #if defined(__x86_64__)

@@ -217,6 +217,9 @@ static int option_parse_commit(void *ctx, struct apk_db_options *dbopts, int opt
 	case 0x113:
 		apk_flags |= APK_NO_SCRIPTS;
 		break;
+	case 0x117:
+		apk_flags |= APK_NO_COMMIT_HOOKS;
+		break;
 	default:
 		return -ENOTSUP;
 	}
@@ -228,6 +231,7 @@ static const struct apk_option options_commit[] = {
 	{ 0x102, "clean-protected",	"Do not create .apk-new files in configuration dirs" },
 	{ 0x111, "overlay-from-stdin",	"Read list of overlay files from stdin" },
 	{ 0x113, "no-scripts",		"Do not execute any scripts" },
+	{ 0x117, "no-commit-hooks",	"Skip pre/post hook scripts (but not other scripts)" },
 };
 
 const struct apk_option_group optgroup_commit = {
