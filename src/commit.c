@@ -456,7 +456,8 @@ static void print_conflicts(struct print_state *ps, struct apk_package *pkg)
 			if (d->version == &apk_null_blob &&
 			    p->version == &apk_null_blob)
 				continue;
-			if (once && p->pkg == pkg) {
+			if (once && p->pkg == pkg &&
+			    p->version == d->version) {
 				once = 0;
 				continue;
 			}
