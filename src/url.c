@@ -120,7 +120,7 @@ static struct apk_istream *apk_istream_fetch(const char *url, time_t since)
 	if (!fis || !u) goto err;
 
 	u->last_modified = since;
-	io = fetchXGet(u, &fis->urlstat, "i");
+	io = fetchXGet(u, &fis->urlstat, (apk_force & APK_FORCE_REFRESH) ? "Ci" : "i");
 	if (!io) {
 		rc = fetch_maperror(fetchLastErrCode);
 		goto err;
