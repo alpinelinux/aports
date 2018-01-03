@@ -1022,7 +1022,7 @@ restart:
 
 	generate_changeset(ss, world);
 
-	if (ss->errors && (apk_flags & APK_FORCE)) {
+	if (ss->errors && (apk_force & APK_FORCE_BROKEN_WORLD)) {
 		foreach_array_item(d, world) {
 			name = d->name;
 			pkg = name->ss.chosen.pkg;

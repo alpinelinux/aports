@@ -319,8 +319,7 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 		ctx->outdir_fd = AT_FDCWD;
 
 	if ((args->num == 1) && (strcmp(args->item[0], "coffee") == 0)) {
-		if (apk_flags & APK_FORCE)
-			return cup();
+		if (apk_force) return cup();
 		apk_message("Go and fetch your own coffee.");
 		return 0;
 	}

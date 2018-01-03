@@ -118,9 +118,9 @@ static int index_main(void *ctx, struct apk_database *db, struct apk_string_arra
 	char **parg;
 
 	if (isatty(STDOUT_FILENO) && ictx->output == NULL &&
-	    !(apk_flags & APK_FORCE)) {
-		apk_error("Will not write binary index to console "
-			  "without --force");
+	    !(apk_force & APK_FORCE_BINARY_STDOUT)) {
+		apk_error("Will not write binary index to console. "
+			  "Use --force-binary-stdout to override.");
 		return -1;
 	}
 

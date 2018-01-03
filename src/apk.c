@@ -95,7 +95,27 @@ static int option_parse_global(void *ctx, struct apk_db_options *dbopts, int opt
 		version();
 		return -ESHUTDOWN;
 	case 'f':
-		apk_flags |= APK_FORCE;
+		apk_force |= APK_FORCE_OVERWRITE | APK_FORCE_OLD_APK
+			  |  APK_FORCE_BROKEN_WORLD | APK_FORCE_NON_REPOSITORY
+			  |  APK_FORCE_BINARY_STDOUT;
+		break;
+	case 0x120:
+		apk_force |= APK_FORCE_OVERWRITE;
+		break;
+	case 0x121:
+		apk_force |= APK_FORCE_OLD_APK;
+		break;
+	case 0x122:
+		apk_force |= APK_FORCE_BROKEN_WORLD;
+		break;
+	case 0x123:
+		apk_force |= APK_FORCE_REFRESH;
+		break;
+	case 0x124:
+		apk_force |= APK_FORCE_NON_REPOSITORY;
+		break;
+	case 0x125:
+		apk_force |= APK_FORCE_BINARY_STDOUT;
 		break;
 	case 'i':
 		apk_flags |= APK_INTERACTIVE;
@@ -166,7 +186,13 @@ static const struct apk_option options_global[] = {
 	{ 'v', "verbose",	"Print more information (can be doubled)" },
 	{ 'i', "interactive",	"Ask confirmation for certain operations" },
 	{ 'V', "version",	"Print program version and exit" },
-	{ 'f', "force",		"Do what was asked even if it looks dangerous" },
+	{ 'f', "force",		"Enable selected --force-* (deprecated)" },
+	{ 0x125, "force-binary-stdout", "Continue even if binary data is to be output" },
+	{ 0x122, "force-broken-world", "Continue even if 'world' cannot be satisfied" },
+	{ 0x124, "force-non-repository", "Continue even if packages may be lost on reboot" },
+	{ 0x121, "force-old-apk", "Continue even if packages use unsupported features" },
+	{ 0x120, "force-overwrite", "Overwrite files in other packages" },
+	{ 0x123, "force-refresh", "Do not use cached files (local or from proxy)" },
 	{ 'U', "update-cache",	"Update the repository cache" },
 	{ 0x101, "progress",	"Show a progress bar" },
 	{ 0x10f, "progress-fd",	"Write progress to fd", required_argument, "FD" },
@@ -182,7 +208,7 @@ static const struct apk_option options_global[] = {
 	{ 0x108, "repositories-file", "Override repositories file",
 				required_argument, "REPOFILE" },
 	{ 0x109, "no-network",	"Do not use network (cache is still used)" },
-	{ 0x115, "no-cache",	"Read uncached index from network" },
+	{ 0x115, "no-cache",	"Do not use any local cache path" },
 	{ 0x116, "cache-dir",	"Override cache directory",
 				required_argument, "CACHEDIR" },
 	{ 0x112, "arch",	"Use architecture with --root",
@@ -222,7 +248,9 @@ static int option_parse_commit(void *ctx, struct apk_db_options *dbopts, int opt
 		break;
 	case 0x118:
 		dbopts->open_flags |= APK_OPENF_CREATE;
-		apk_flags |= APK_FORCE | APK_NO_COMMIT_HOOKS;
+		apk_flags |= APK_NO_COMMIT_HOOKS;
+		apk_force |= APK_FORCE_OVERWRITE | APK_FORCE_OLD_APK
+			  |  APK_FORCE_BROKEN_WORLD | APK_FORCE_NON_REPOSITORY;
 		break;
 	default:
 		return -ENOTSUP;

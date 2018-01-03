@@ -47,7 +47,7 @@ enum {
 };
 
 int apk_verbosity = 1;
-unsigned int apk_flags = 0;
+unsigned int apk_flags = 0, apk_force = 0;
 
 static apk_blob_t tmpprefix = { .len=8, .ptr = ".apknew." };
 
@@ -633,7 +633,7 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 	r = apk_repo_format_real_url(db, repo, pkg, url, sizeof(url));
 	if (r < 0) return r;
 
-	if ((apk_flags & APK_FORCE) ||
+	if ((apk_force & APK_FORCE_REFRESH) ||
 	    fstatat(db->cache_fd, cacheitem, &st, 0) != 0)
 		st.st_mtime = 0;
 
@@ -867,13 +867,13 @@ int apk_db_index_read(struct apk_database *db, struct apk_bstream *bs, int repo)
 				case 's': ipkg->broken_script = 1; break;
 				case 'x': ipkg->broken_xattr = 1; break;
 				default:
-					if (!(apk_flags & APK_FORCE))
+					if (!(apk_force & APK_FORCE_OLD_APK))
 						goto old_apk_tools;
 				}
 			}
 			break;
 		default:
-			if (r != 0 && !(apk_flags & APK_FORCE))
+			if (r != 0 && !(apk_force & APK_FORCE_OLD_APK))
 				goto old_apk_tools;
 			/* Installed. So mark the package as installable. */
 			pkg->filename = NULL;
@@ -2033,7 +2033,7 @@ int apk_db_check_world(struct apk_database *db, struct apk_dependency_array *wor
 	struct apk_dependency *dep;
 	int bad = 0, tag;
 
-	if (apk_flags & APK_FORCE)
+	if (apk_force & APK_FORCE_BROKEN_WORLD)
 		return 0;
 
 	foreach_array_item(dep, world) {
@@ -2463,7 +2463,7 @@ static int apk_db_install_archive_entry(void *_ctx,
 				if (pkg_prio >= 0)
 					break;
 
-				if (!(apk_flags & APK_FORCE)) {
+				if (!(apk_force & APK_FORCE_OVERWRITE)) {
 					apk_error(PKG_VER_FMT": trying to overwrite %s owned by "PKG_VER_FMT".",
 						  PKG_VER_PRINTF(pkg), ae->name, PKG_VER_PRINTF(opkg));
 					ipkg->broken_files = 1;

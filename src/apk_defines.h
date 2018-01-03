@@ -60,11 +60,10 @@ static inline int IS_ERR_OR_NULL(const void *ptr) { return IS_ERR(ptr) || !ptr; 
 #endif
 
 extern int apk_verbosity;
-extern unsigned int apk_flags;
+extern unsigned int apk_flags, apk_force;
 extern const char *apk_arch;
 extern char **apk_argv;
 
-#define APK_FORCE		0x0001
 #define APK_SIMULATE		0x0002
 #define APK_CLEAN_PROTECTED	0x0004
 #define APK_PROGRESS		0x0008
@@ -78,6 +77,13 @@ extern char **apk_argv;
 #define APK_NO_SCRIPTS		0x4000
 #define APK_NO_CACHE		0x8000
 #define APK_NO_COMMIT_HOOKS	0x00010000
+
+#define APK_FORCE_OVERWRITE		BIT(0)
+#define APK_FORCE_OLD_APK		BIT(1)
+#define APK_FORCE_BROKEN_WORLD		BIT(2)
+#define APK_FORCE_REFRESH		BIT(3)
+#define APK_FORCE_NON_REPOSITORY	BIT(4)
+#define APK_FORCE_BINARY_STDOUT		BIT(5)
 
 /* default architecture for APK packages. */
 #if defined(__x86_64__)

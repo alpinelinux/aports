@@ -144,7 +144,8 @@ static int upgrade_main(void *ctx, struct apk_database *db, struct apk_string_ar
 	int r = 0;
 
 	if (apk_db_check_world(db, db->world) != 0) {
-		apk_error("Not continuing with upgrade due to missing repository tags. Use --force to override.");
+		apk_error("Not continuing with upgrade due to missing repository tags. "
+			  "Use --force-broken-world to override.");
 		return -1;
 	}
 

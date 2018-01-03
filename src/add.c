@@ -60,7 +60,7 @@ static const struct apk_option_group optgroup_applet = {
 
 static int non_repository_check(struct apk_database *db)
 {
-	if (apk_flags & APK_FORCE)
+	if (apk_force & APK_FORCE_NON_REPOSITORY)
 		return 0;
 	if (apk_db_cache_active(db))
 		return 0;
@@ -69,8 +69,8 @@ static int non_repository_check(struct apk_database *db)
 
 	apk_error("You tried to add a non-repository package to system, "
 		  "but it would be lost on next reboot. Enable package caching "
-		  "(apk cache --help) or use --force if you know what you are "
-		  "doing.");
+		  "(apk cache --help) or use --force-non-repository "
+		  "if you know what you are doing.");
 	return 1;
 }
 
