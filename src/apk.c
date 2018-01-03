@@ -460,6 +460,7 @@ int main(int argc, char **argv)
 	const struct apk_option_group **optgroups = default_optgroups;
 	struct apk_string_array *args;
 
+	apk_string_array_init(&args);
 #ifdef TEST_MODE
 	apk_string_array_init(&test_repos);
 #endif
@@ -585,7 +586,6 @@ int main(int argc, char **argv)
 	}
 #endif
 
-	apk_string_array_init(&args);
 	apk_string_array_resize(&args, argc);
 	memcpy(args->item, argv, argc * sizeof(*argv));
 
@@ -602,5 +602,8 @@ err:
 		free(ctx);
 
 	fetchConnectionCacheClose();
+	apk_string_array_free(&args);
+	free(apk_argv);
+
 	return r;
 }

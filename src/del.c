@@ -151,6 +151,7 @@ static int del_main(void *pctx, struct apk_database *db, struct apk_string_array
 	} else {
 		apk_solver_print_errors(db, &changeset, ctx->world);
 	}
+	apk_change_array_free(&changeset.changes);
 	apk_dependency_array_free(&ctx->world);
 
 	return r;
