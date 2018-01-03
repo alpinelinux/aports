@@ -836,7 +836,7 @@ http_request(struct url *URL, const char *op, struct url_stat *us,
 {
 	conn_t *conn;
 	struct url *url, *new;
-	int chunked, direct, if_modified_since, need_auth, noredirect;
+	int chunked, direct, if_modified_since, need_auth, noredirect, nocache;
 	int keep_alive, verbose, cached;
 	int e, i, n, val;
 	off_t offset, clength, length, size;
@@ -848,6 +848,7 @@ http_request(struct url *URL, const char *op, struct url_stat *us,
 
 	direct = CHECK_FLAG('d');
 	noredirect = CHECK_FLAG('A');
+	nocache = CHECK_FLAG('C');
 	verbose = CHECK_FLAG('v');
 	if_modified_since = CHECK_FLAG('i');
 	keep_alive = 0;
@@ -917,6 +918,8 @@ http_request(struct url *URL, const char *op, struct url_stat *us,
 			    op, url->doc);
 		}
 
+		if (nocache)
+			http_cmd(conn, "Cache-Control: no-cache\r\n");
 		if (if_modified_since && url->last_modified > 0)
 			set_if_modified_since(conn, url->last_modified);
 
