@@ -764,25 +764,44 @@ ouch:
 }
 
 static struct url *
-http_get_proxy(struct url * url, const char *flags)
+http_make_proxy_url(const char *env1, const char *env2)
 {
 	struct url *purl;
 	char *p;
 
+	p = getenv(env1);
+	if (!p)
+		p = getenv(env2);
+	if (!p || !*p)
+		return NULL;
+
+	purl = fetchParseURL(p);
+	if (!purl)
+		return NULL;
+
+	if (!*purl->scheme)
+		strcpy(purl->scheme, SCHEME_HTTP);
+	if (!purl->port)
+		purl->port = fetch_default_proxy_port(purl->scheme);
+
+	if (strcasecmp(purl->scheme, SCHEME_HTTP) == 0)
+		return purl;
+
+	fetchFreeURL(purl);
+	return NULL;
+}
+
+static struct url *
+http_get_proxy(struct url * url, const char *flags)
+{
 	if (flags != NULL && strchr(flags, 'd') != NULL)
 		return (NULL);
 	if (fetch_no_proxy_match(url->host))
 		return (NULL);
-	if (((p = getenv("HTTP_PROXY")) || (p = getenv("http_proxy"))) &&
-	    *p && (purl = fetchParseURL(p))) {
-		if (!*purl->scheme)
-			strcpy(purl->scheme, SCHEME_HTTP);
-		if (!purl->port)
-			purl->port = fetch_default_proxy_port(purl->scheme);
-		if (strcasecmp(purl->scheme, SCHEME_HTTP) == 0)
-			return (purl);
-		fetchFreeURL(purl);
-	}
+	if (strcasecmp(url->scheme, SCHEME_HTTPS) == 0)
+		return http_make_proxy_url("HTTPS_PROXY", "https_proxy");
+	if (strcasecmp(url->scheme, SCHEME_HTTP) == 0)
+		return http_make_proxy_url("HTTP_PROXY", "http_proxy");
 	return (NULL);
 }
 
