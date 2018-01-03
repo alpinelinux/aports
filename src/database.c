@@ -262,12 +262,16 @@ void apk_db_dir_unref(struct apk_database *db, struct apk_db_dir *dir, int rmdir
 	db->installed.stats.dirs--;
 	apk_protected_path_array_free(&dir->protected_paths);
 	if (dir->namelen != 0) {
-		if (rmdir_mode == APK_DIR_REMOVE && !(apk_flags & APK_SIMULATE))
-			if (unlinkat(db->root_fd, dir->name, AT_REMOVEDIR))
+		if (rmdir_mode == APK_DIR_REMOVE) {
+			dir->modified = 1;
+			if (!(apk_flags & APK_SIMULATE) &&
+			    unlinkat(db->root_fd, dir->name, AT_REMOVEDIR) != 0)
 				;
+		}
 		apk_db_dir_unref(db, dir->parent, rmdir_mode);
+		dir->parent = NULL;
 	}
-	apk_hash_delete_hashed(&db->installed.dirs, APK_BLOB_PTR_LEN(dir->name, dir->namelen), dir->hash);
+	dir->seen = dir->created = dir->update_permissions = 0;
 }
 
 struct apk_db_dir *apk_db_dir_ref(struct apk_db_dir *dir)
@@ -291,26 +295,25 @@ struct apk_db_dir *apk_db_dir_get(struct apk_database *db, apk_blob_t name)
 	unsigned long hash = apk_hash_from_key(&db->installed.dirs, name);
 	char *relative_name;
 
-	if (name.len && name.ptr[name.len-1] == '/')
-		name.len--;
+	if (name.len && name.ptr[name.len-1] == '/') name.len--;
 
 	dir = (struct apk_db_dir *) apk_hash_get_hashed(&db->installed.dirs, name, hash);
-	if (dir != NULL)
-		return apk_db_dir_ref(dir);
+	if (dir != NULL && dir->refs) return apk_db_dir_ref(dir);
+	if (dir == NULL) {
+		dir = calloc(1, sizeof(*dir) + name.len + 1);
+		dir->rooted_name[0] = '/';
+		memcpy(dir->name, name.ptr, name.len);
+		dir->name[name.len] = 0;
+		dir->namelen = name.len;
+		dir->hash = hash;
+		apk_protected_path_array_init(&dir->protected_paths);
+		apk_hash_insert_hashed(&db->installed.dirs, dir, hash);
+	}
 
 	db->installed.stats.dirs++;
-	dir = malloc(sizeof(*dir) + name.len + 1);
-	memset(dir, 0, sizeof(*dir));
 	dir->refs = 1;
 	dir->uid = (uid_t) -1;
 	dir->gid = (gid_t) -1;
-	dir->rooted_name[0] = '/';
-	memcpy(dir->name, name.ptr, name.len);
-	dir->name[name.len] = 0;
-	dir->namelen = name.len;
-	dir->hash = hash;
-	apk_protected_path_array_init(&dir->protected_paths);
-	apk_hash_insert_hashed(&db->installed.dirs, dir, hash);
 
 	if (name.len == 0) {
 		dir->parent = NULL;

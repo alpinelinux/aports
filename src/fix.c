@@ -67,6 +67,7 @@ static const struct apk_option_group optgroup_applet = {
 static int mark_recalculate(apk_hash_item item, void *ctx)
 {
 	struct apk_db_dir *dir = (struct apk_db_dir *) item;
+	if (dir->refs == 0) return 0;
 	dir->update_permissions = 1;
 	return 0;
 }
