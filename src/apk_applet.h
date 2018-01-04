@@ -42,7 +42,7 @@ struct apk_applet {
 	const char *help;
 	const struct apk_option_group *optgroups[4];
 
-	unsigned int open_flags, forced_flags;
+	unsigned int open_flags, forced_flags, forced_force;
 	int context_size;
 
 	int (*main)(void *ctx, struct apk_database *db, struct apk_string_array *args);

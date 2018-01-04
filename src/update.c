@@ -49,7 +49,7 @@ static struct apk_applet apk_update = {
 	.name = "update",
 	.help = "Update repository indexes from all remote repositories",
 	.open_flags = APK_OPENF_WRITE,
-	.forced_flags = APK_UPDATE_CACHE,
+	.forced_force = APK_FORCE_REFRESH,
 	.main = update_main,
 };
 

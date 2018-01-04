@@ -122,6 +122,7 @@ struct apk_repository_list {
 
 struct apk_db_options {
 	int lock_wait;
+	unsigned int cache_max_age;
 	unsigned long open_flags;
 	const char *root;
 	const char *arch;
@@ -150,8 +151,8 @@ struct apk_database {
 	char *cache_remount_dir, *root_proc_dir;
 	unsigned long cache_remount_flags;
 	apk_blob_t *arch;
-	unsigned int local_repos, available_repos;
-	int repo_update_errors;
+	unsigned int local_repos, available_repos, cache_max_age;
+	unsigned int repo_update_errors, repo_update_counter;
 	unsigned int pending_triggers;
 	int performing_self_upgrade : 1;
 	int permanent : 1;
@@ -246,7 +247,7 @@ unsigned int apk_db_get_pinning_mask_repos(struct apk_database *db, unsigned sho
 
 int apk_db_cache_active(struct apk_database *db);
 int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
-		       struct apk_package *pkg, int verify,
+		       struct apk_package *pkg, int verify, int autoupdate,
 		       apk_progress_cb cb, void *cb_ctx);
 
 typedef void (*apk_cache_item_cb)(struct apk_database *db,

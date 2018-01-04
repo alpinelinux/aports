@@ -441,7 +441,7 @@ struct apk_bstream *apk_bstream_from_file(int atfd, const char *file)
 struct apk_tee_bstream {
 	struct apk_bstream bs;
 	struct apk_bstream *inner_bs;
-	int fd;
+	int fd, copy_meta;
 	size_t size;
 	apk_progress_cb cb;
 	void *cb_ctx;
@@ -475,9 +475,10 @@ static void tee_close(void *stream, size_t *size)
 	struct apk_tee_bstream *tbs =
 		container_of(stream, struct apk_tee_bstream, bs);
 
-	/* copy info */
-	apk_bstream_get_meta(tbs->inner_bs, &meta);
-	apk_file_meta_to_fd(tbs->fd, &meta);
+	if (tbs->copy_meta) {
+		apk_bstream_get_meta(tbs->inner_bs, &meta);
+		apk_file_meta_to_fd(tbs->fd, &meta);
+	}
 
 	apk_bstream_close(tbs->inner_bs, NULL);
 	if (size != NULL) *size = tbs->size;
@@ -491,7 +492,7 @@ static const struct apk_bstream_ops tee_bstream_ops = {
 	.close = tee_close,
 };
 
-struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to, apk_progress_cb cb, void *cb_ctx)
+struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to, int copy_meta, apk_progress_cb cb, void *cb_ctx)
 {
 	struct apk_tee_bstream *tbs;
 	int fd, r;
@@ -519,6 +520,7 @@ struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const ch
 	};
 	tbs->inner_bs = from;
 	tbs->fd = fd;
+	tbs->copy_meta = copy_meta;
 	tbs->size = 0;
 	tbs->cb = cb;
 	tbs->cb_ctx = cb_ctx;

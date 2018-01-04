@@ -68,7 +68,6 @@ extern char **apk_argv;
 #define APK_CLEAN_PROTECTED	0x0004
 #define APK_PROGRESS		0x0008
 #define APK_RECURSIVE		0x0020
-#define APK_UPDATE_CACHE	0x0080
 #define APK_ALLOW_UNTRUSTED	0x0100
 #define APK_PURGE		0x0200
 #define APK_INTERACTIVE		0x0400

@@ -120,9 +120,6 @@ static int option_parse_global(void *ctx, struct apk_db_options *dbopts, int opt
 	case 'i':
 		apk_flags |= APK_INTERACTIVE;
 		break;
-	case 'U':
-		apk_flags |= APK_UPDATE_CACHE;
-		break;
 	case 0x101:
 		apk_flags |= APK_PROGRESS;
 		break;
@@ -152,6 +149,14 @@ static int option_parse_global(void *ctx, struct apk_db_options *dbopts, int opt
 		break;
 	case 0x116:
 		dbopts->cache_dir = optarg;
+		break;
+	case 'U':
+		/* Make it one minute, to avoid updating indexes twice
+		 * when doing self-upgrade's re-exec */
+		dbopts->cache_max_age = 60;
+		break;
+	case 0x119:
+		dbopts->cache_max_age = atoi(optarg) * 60;
 		break;
 	case 0x112:
 		dbopts->arch = optarg;
@@ -193,7 +198,7 @@ static const struct apk_option options_global[] = {
 	{ 0x121, "force-old-apk", "Continue even if packages use unsupported features" },
 	{ 0x120, "force-overwrite", "Overwrite files in other packages" },
 	{ 0x123, "force-refresh", "Do not use cached files (local or from proxy)" },
-	{ 'U', "update-cache",	"Update the repository cache" },
+	{ 'U', "update-cache",	"Alias for --cache-max-age 60" },
 	{ 0x101, "progress",	"Show a progress bar" },
 	{ 0x10f, "progress-fd",	"Write progress to fd", required_argument, "FD" },
 	{ 0x110, "no-progress",	"Disable progress bar even for TTYs" },
@@ -211,6 +216,8 @@ static const struct apk_option options_global[] = {
 	{ 0x115, "no-cache",	"Do not use any local cache path" },
 	{ 0x116, "cache-dir",	"Override cache directory",
 				required_argument, "CACHEDIR" },
+	{ 0x119, "cache-max-age", "Maximum AGE (in minutes) for index in cache before refresh",
+				required_argument, "AGE" },
 	{ 0x112, "arch",	"Use architecture with --root",
 				required_argument, "ARCH" },
 	{ 0x114, "print-arch",	"Print default arch and exit" },
@@ -528,6 +535,7 @@ int main(int argc, char **argv)
 			ctx = calloc(1, applet->context_size);
 		dbopts.open_flags = applet->open_flags;
 		apk_flags |= applet->forced_flags;
+		apk_force |= applet->forced_force;
 	}
 	for (opt = all_options, sopt = short_options; opt->name != NULL; opt++) {
 		if (opt->flag == NULL &&

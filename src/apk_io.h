@@ -147,7 +147,7 @@ struct apk_bstream *apk_bstream_from_istream(struct apk_istream *istream);
 struct apk_bstream *apk_bstream_from_fd_pid(int fd, pid_t pid, int (*translate_status)(int));
 struct apk_bstream *apk_bstream_from_file(int atfd, const char *file);
 struct apk_bstream *apk_bstream_from_fd_url_if_modified(int atfd, const char *url, time_t since);
-struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to,
+struct apk_bstream *apk_bstream_tee(struct apk_bstream *from, int atfd, const char *to, int copy_meta,
 				    apk_progress_cb cb, void *cb_ctx);
 
 static inline struct apk_bstream *apk_bstream_from_fd(int fd)
