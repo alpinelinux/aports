@@ -548,7 +548,7 @@ int main(int argc, char **argv)
 
 	init_openssl();
 	setup_automatic_flags();
-	fetchConnectionCacheInit(16, 1);
+	fetchConnectionCacheInit(32, 4);
 
 	while ((p = getopt_long(argc, argv, short_options, all_options, NULL)) != -1) {
 		for (i = 0; optgroups[i]; i++) {
