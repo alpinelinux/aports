@@ -1,0 +1,54 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/shadow: correct SH_LINEAR mapping detection in sh_guess_wrmap()
+
+The fix for XSA-243 / CVE-2017-15592 (c/s bf2b4eadcf379) introduced a change
+in behaviour for sh_guest_wrmap(), where it had to cope with no shadow linear
+mapping being present.
+
+As the name suggests, guest_vtable is a mapping of the guests pagetable, not
+Xen's pagetable, meaning that it isn't the pagetable we need to check for the
+shadow linear slot in.
+
+The practical upshot is that a shadow HVM vcpu which switches into 4-level
+paging mode, with an L4 pagetable that contains a mapping which aliases Xen's
+SH_LINEAR_PT_VIRT_START will fool the safety check for whether a SHADOW_LINEAR
+mapping is present.  As the check passes (when it should have failed), Xen
+subsequently falls over the missing mapping with a pagefault such as:
+
+    (XEN) Pagetable walk from ffff8140a0503880:
+    (XEN)  L4[0x102] = 000000046c218063 ffffffffffffffff
+    (XEN)  L3[0x102] = 000000046c218063 ffffffffffffffff
+    (XEN)  L2[0x102] = 000000046c218063 ffffffffffffffff
+    (XEN)  L1[0x103] = 0000000000000000 ffffffffffffffff
+
+This is part of XSA-243.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Tim Deegan <tim@xen.org>
+
+--- a/xen/arch/x86/mm/shadow/multi.c
++++ b/xen/arch/x86/mm/shadow/multi.c
+@@ -4350,11 +4350,18 @@ static int sh_guess_wrmap(struct vcpu *v
+ 
+     /* Carefully look in the shadow linear map for the l1e we expect */
+ #if SHADOW_PAGING_LEVELS >= 4
+-    /* Is a shadow linear map is installed in the first place? */
+-    sl4p  = v->arch.paging.shadow.guest_vtable;
+-    sl4p += shadow_l4_table_offset(SH_LINEAR_PT_VIRT_START);
+-    if ( !(shadow_l4e_get_flags(*sl4p) & _PAGE_PRESENT) )
+-        return 0;
++    /*
++     * Non-external guests (i.e. PV) have a SHADOW_LINEAR mapping from the
++     * moment their shadows are created.  External guests (i.e. HVM) may not,
++     * but always have a regular linear mapping, which we can use to observe
++     * whether a SHADOW_LINEAR mapping is present.
++     */
++    if ( paging_mode_external(d) )
++    {
++        sl4p =  __linear_l4_table + l4_linear_offset(SH_LINEAR_PT_VIRT_START);
++        if ( !(shadow_l4e_get_flags(*sl4p) & _PAGE_PRESENT) )
++            return 0;
++    }
+     sl4p = sh_linear_l4_table(v) + shadow_l4_linear_offset(vaddr);
+     if ( !(shadow_l4e_get_flags(*sl4p) & _PAGE_PRESENT) )
+         return 0;
