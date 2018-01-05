@@ -1,0 +1,111 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: xen/disk: don't leak stack data via response ring
+
+Rather than constructing a local structure instance on the stack, fill
+the fields directly on the shared ring, just like other (Linux)
+backends do. Build on the fact that all response structure flavors are
+actually identical (the old code did make this assumption too).
+
+This is XSA-216.
+
+Reported-by: Anthony Perard <anthony.perard@citrix.com>
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Acked-by: Anthony PERARD <anthony.perard@citrix.com>
+
+--- a/hw/block/xen_blkif.h
++++ b/hw/block/xen_blkif.h
+@@ -12,9 +12,6 @@
+ struct blkif_common_request {
+ 	char dummy;
+ };
+-struct blkif_common_response {
+-	char dummy;
+-};
+ 
+ /* i386 protocol version */
+ #pragma pack(push, 4)
+@@ -26,13 +23,7 @@ struct blkif_x86_32_request {
+ 	blkif_sector_t sector_number;/* start sector idx on disk (r/w only)  */
+ 	struct blkif_request_segment seg[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+ };
+-struct blkif_x86_32_response {
+-	uint64_t        id;              /* copied from request */
+-	uint8_t         operation;       /* copied from request */
+-	int16_t         status;          /* BLKIF_RSP_???       */
+-};
+ typedef struct blkif_x86_32_request blkif_x86_32_request_t;
+-typedef struct blkif_x86_32_response blkif_x86_32_response_t;
+ #pragma pack(pop)
+ 
+ /* x86_64 protocol version */
+@@ -44,17 +35,14 @@ struct blkif_x86_64_request {
+ 	blkif_sector_t sector_number;/* start sector idx on disk (r/w only)  */
+ 	struct blkif_request_segment seg[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+ };
+-struct blkif_x86_64_response {
+-	uint64_t       __attribute__((__aligned__(8))) id;
+-	uint8_t         operation;       /* copied from request */
+-	int16_t         status;          /* BLKIF_RSP_???       */
+-};
+ typedef struct blkif_x86_64_request blkif_x86_64_request_t;
+-typedef struct blkif_x86_64_response blkif_x86_64_response_t;
+ 
+-DEFINE_RING_TYPES(blkif_common, struct blkif_common_request, struct blkif_common_response);
+-DEFINE_RING_TYPES(blkif_x86_32, struct blkif_x86_32_request, struct blkif_x86_32_response);
+-DEFINE_RING_TYPES(blkif_x86_64, struct blkif_x86_64_request, struct blkif_x86_64_response);
++DEFINE_RING_TYPES(blkif_common, struct blkif_common_request,
++                  struct blkif_response);
++DEFINE_RING_TYPES(blkif_x86_32, struct blkif_x86_32_request,
++                  struct blkif_response QEMU_PACKED);
++DEFINE_RING_TYPES(blkif_x86_64, struct blkif_x86_64_request,
++                  struct blkif_response);
+ 
+ union blkif_back_rings {
+ 	blkif_back_ring_t        native;
+--- a/hw/block/xen_disk.c
++++ b/hw/block/xen_disk.c
+@@ -614,31 +614,30 @@ static int blk_send_response_one(struct
+     struct XenBlkDev  *blkdev = ioreq->blkdev;
+     int               send_notify   = 0;
+     int               have_requests = 0;
+-    blkif_response_t  resp;
+-    void              *dst;
+-
+-    resp.id        = ioreq->req.id;
+-    resp.operation = ioreq->req.operation;
+-    resp.status    = ioreq->status;
++    blkif_response_t  *resp;
+ 
+     /* Place on the response ring for the relevant domain. */
+     switch (blkdev->protocol) {
+     case BLKIF_PROTOCOL_NATIVE:
+-        dst = RING_GET_RESPONSE(&blkdev->rings.native, blkdev->rings.native.rsp_prod_pvt);
++        resp = RING_GET_RESPONSE(&blkdev->rings.native,
++                                 blkdev->rings.native.rsp_prod_pvt);
+         break;
+     case BLKIF_PROTOCOL_X86_32:
+-        dst = RING_GET_RESPONSE(&blkdev->rings.x86_32_part,
+-                                blkdev->rings.x86_32_part.rsp_prod_pvt);
++        resp = RING_GET_RESPONSE(&blkdev->rings.x86_32_part,
++                                 blkdev->rings.x86_32_part.rsp_prod_pvt);
+         break;
+     case BLKIF_PROTOCOL_X86_64:
+-        dst = RING_GET_RESPONSE(&blkdev->rings.x86_64_part,
+-                                blkdev->rings.x86_64_part.rsp_prod_pvt);
++        resp = RING_GET_RESPONSE(&blkdev->rings.x86_64_part,
++                                 blkdev->rings.x86_64_part.rsp_prod_pvt);
+         break;
+     default:
+-        dst = NULL;
+         return 0;
+     }
+-    memcpy(dst, &resp, sizeof(resp));
++
++    resp->id        = ioreq->req.id;
++    resp->operation = ioreq->req.operation;
++    resp->status    = ioreq->status;
++
+     blkdev->rings.common.rsp_prod_pvt++;
+ 
+     RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&blkdev->rings.common, send_notify);
