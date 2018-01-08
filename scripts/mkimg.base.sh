@@ -165,29 +165,20 @@ grub_gen_earlyconf() {
 	EOF
 }
 
-build_grubefi_img() {
+build_grub_efi() {
 	local _format="$1"
 	local _efi="$2"
-	local _tmpdir="$WORKDIR/efiboot.$3"
 
 	# Prepare grub-efi bootloader
-	mkdir -p "$_tmpdir/efi/boot"
-	grub_gen_earlyconf > "$_tmpdir"/grub_early.cfg
+	mkdir -p "$DESTDIR/efi/boot"
+	grub_gen_earlyconf > "$WORKDIR/grub_early.$3.cfg"
 	grub-mkimage \
-		--config="$_tmpdir"/grub_early.cfg \
+		--config="$WORKDIR/grub_early.$3.cfg" \
 		--prefix="/boot/grub" \
-		--output="$_tmpdir/efi/boot/$_efi" \
+		--output="$DESTDIR/efi/boot/$_efi" \
 		--format="$_format" \
 		--compression="xz" \
 		$grub_mod
-
-	# Create the EFI image
-	# mkdosfs and mkfs.vfat are busybox applets which failed to create a proper image
-	# use dosfstools mkfs.fat instead
-	mkdir -p ${DESTDIR}/boot/grub/
-	dd if=/dev/zero of=${DESTDIR}/boot/grub/efiboot.img bs=1K count=1440
-	mkfs.fat -F 12 ${DESTDIR}/boot/grub/efiboot.img
-	mcopy -s -i ${DESTDIR}/boot/grub/efiboot.img $_tmpdir/efi ::
 }
 
 section_grubieee1275() {
@@ -198,27 +189,21 @@ section_grubieee1275() {
 	build_section grub_cfg boot/grub/grub.cfg $(grub_gen_config | checksum)
 }
 
-section_grubefi() {
+section_grub_efi() {
 	[ -n "$grub_mod" ] || return 0
 	[ "$output_format" = "iso" ] || return 0
 
 	local _format _efi
 	case "$ARCH" in
-	x86_64)
-		_format="x86_64-efi"
-		_efi="bootx64.efi"
-		;;
-	aarch64)
-		_format="arm64-efi"
-		_efi="bootaa64.efi"
-		;;
-	*)
-		return 0
-		;;
+	aarch64)_format="arm64-efi";  _efi="bootaa64.efi" ;;
+	arm*)	_format="arm-efi";    _efi="bootarm.efi"  ;;
+	x86)	_format="i386-efi";   _efi="bootia32.efi" ;;
+	x86_64) _format="x86_64-efi"; _efi="bootx64.efi"  ;;
+	*)	return 0 ;;
 	esac
 
 	build_section grub_cfg boot/grub/grub.cfg $(grub_gen_config | checksum)
-	build_section grubefi_img $_format $_efi $(grub_gen_earlyconf | checksum)
+	build_section grub_efi $_format $_efi $(grub_gen_earlyconf | checksum)
 }
 
 create_image_iso() {
@@ -237,21 +222,25 @@ create_image_iso() {
 			-boot-info-table
 			"
 	fi
-	if [ -e "${DESTDIR}/boot/grub/efiboot.img" ]; then
-		# efi boot enabled
+	if [ -e "${DESTDIR}/efi" -a -e "${DESTDIR}/boot/grub" ]; then
+		# Create the EFI boot partition image
+		mformat -i ${DESTDIR}/boot/grub/efi.img -C -f 1440 ::
+		mcopy -i ${DESTDIR}/boot/grub/efi.img -s ${DESTDIR}/efi ::
+
+		# Enable EFI boot
 		if [ -z "$_isolinux" ]; then
 			# efi boot only
 			_efiboot="
 				-efi-boot-part
 				--efi-boot-image
-				-e boot/grub/efiboot.img
+				-e boot/grub/efi.img
 				-no-emul-boot
 				"
 		else
 			# hybrid isolinux+efi boot
 			_efiboot="
 				-eltorito-alt-boot
-				-e boot/grub/efiboot.img
+				-e boot/grub/efi.img
 				-no-emul-boot
 				-isohybrid-gpt-basdat
 				"
@@ -287,8 +276,8 @@ profile_base() {
 	kernel_flavors="hardened"
 	initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage quiet"
 	initfs_features="ata base bootchart cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
-	#grub_mod="disk part_msdos linux normal configfile search search_label efi_uga efi_gop fat iso9660 cat echo ls test true help"
-	apks="alpine-base alpine-mirrors kbd-bkeymaps chrony e2fsprogs network-extras libressl openssh tzdata"
+	grub_mod="disk part_msdos linux normal configfile search search_label efi_uga efi_gop fat iso9660 cat echo ls test true help"
+	apks="alpine-base alpine-mirrors busybox kbd-bkeymaps chrony e2fsprogs network-extras libressl openssh tzdata"
 	apkovl=
 	hostname="alpine"
 }

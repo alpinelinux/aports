@@ -1,16 +1,12 @@
 # Contributor: Jakub Jirutka <jakub@jirutka.cz>
 # Maintainer: Jakub Jirutka <jakub@jirutka.cz>
 pkgname=cargo
-pkgver=0.18.0
-# Git revision of prebuilt Cargo to use for bootstrapping.
-_bootstrap_gitrev=6e0c18cccc8b0c06fba8a8d76486f81a792fb420  # 0.16.0
-# Git revision of rust-installer (submodule in cargo repo).
-_installer_gitrev=4f994850808a572e2cc8d43f968893c8e942e9bf
-pkgrel=0
+pkgver=0.22.0
+pkgrel=3
 pkgdesc="The Rust package manager"
 url="https://crates.io"
 arch="x86_64"  # limited by rust pkg
-license="MIT ASL-2.0"
+license="MIT Apache-2.0"
 depends="rust"
 makedepends="cmake curl-dev libgit2-dev libssh2-dev libressl-dev python2 zlib-dev"
 subpackages="$pkgname-doc
@@ -26,60 +22,78 @@ subpackages="$pkgname-doc
 #   adhere to this file and verify checksums. So it provides the same
 #   guarantees as abuild. That said, for now it's exception only for cargo
 #   package and should not be applied to other rust packages!
-_cbuild="$CARCH-unknown-linux-musl"
+_bootstrap_cargo_ver=0.17.0
+# We must use newer version of openssl crate and patch it for compatibility
+# with LibreSSL 2.6.3.
+_crate_openssl_ver="0.9.20"
 source="$pkgname-$pkgver.tar.gz::https://github.com/rust-lang/$pkgname/archive/$pkgver.tar.gz
-	https://github.com/rust-lang/rust-installer/archive/$_installer_gitrev/rust-installer-$_installer_gitrev.tar.gz
-	cargo-$_bootstrap_gitrev-$_cbuild.tar.gz::https://s3.amazonaws.com/rust-lang-ci/cargo-builds/$_bootstrap_gitrev/cargo-nightly-$_cbuild.tar.gz
-	fix-test-build-auth.patch"
+	https://dev.alpinelinux.org/archive/$pkgname/$pkgname-$_bootstrap_cargo_ver-x86_64-alpine-linux-musl.tar.gz
+	tests-fix-build-auth-http_auth_offered.patch
+	tests-ignore-ssh_something_happens.patch
+	replace-openssl-crate.patch
+	rust-openssl-$_crate_openssl_ver.tar.gz::https://github.com/sfackler/rust-openssl/archive/v$_crate_openssl_ver.tar.gz
+	openssl-fix-libressl-cmsh-detection.patch
+	openssl-libressl263-compat.patch"
 builddir="$srcdir/$pkgname-$pkgver"
 
-_bootstrap_cargo="$srcdir/cargo-nightly-$_cbuild/cargo/bin/cargo"
-
-export CARGOFLAGS="--locked"
 export CARGO_HOME="$srcdir/.cargo"
 
-prepare() {
-	default_prepare
-	cd "$builddir"
+_bootstrap_cargo="$srcdir/$pkgname-$_bootstrap_cargo_ver-$CHOST/bin/cargo"
+_cargo_opts="--release --locked --verbose ${JOBS:+--jobs $JOBS}"
 
-	rmdir src/rust-installer
-	ln -s "$srcdir"/rust-installer-$_installer_gitrev src/rust-installer
+# Uploaded cargo binary from the built package to dev.a.o, so it can be used
+# for building cargo next time (needed for bootstrapping).
+# TODO: Build statically linked binary for bootstrapping!
+snapshot() {
+	local apkfile="$REPODEST/$repo/$CARCH/$pkgname-$pkgver-r$pkgrel.apk"
+	local tarname="$pkgname-$pkgver-$CHOST"
+
+	[ -f "$apkfile" ] || die "$apkfile does not exist, run abuild -r"
+
+	mkdir -p "$srcdir/$tarname"
+	cd "$srcdir"
+
+	tar -C "$tarname" -x --strip-components 1 -f "$apkfile" usr/bin/cargo
+	tar -czf "$tarname.tar.gz" "$tarname"
+
+	msg "Uploading $tarname.tar.gz to dev.alpinelinux.org"
+	scp "$tarname.tar.gz" dev.alpinelinux.org:/archive/$pkgname/
+}
+
+prepare() {
+	mv "$srcdir"/rust-openssl-$_crate_openssl_ver "$builddir"/openssl
+	default_prepare
 }
 
 build() {
 	cd "$builddir"
 
-	./configure \
-		--prefix=/usr \
-		--release-channel=stable \
-		--cargo="$_bootstrap_cargo"
+	# Convince libgit2-sys to use the distro libgit2.
+	export LIBGIT2_SYS_USE_PKG_CONFIG=1
 
-	# LIBGIT2... Convince libgit2-sys to use the distro libgit2.
-	make LIBGIT2_SYS_USE_PKG_CONFIG=1 \
-		VERBOSE=1
+	"$_bootstrap_cargo" build $_cargo_opts
+	"$_bootstrap_cargo" test $_cargo_opts --no-run
 }
 
 check() {
 	cd "$builddir"
 
-	./target/$CTARGET/release/cargo --version
+	./target/release/cargo --version
 
-	# XXX: ignore test failures for now
-	CFG_DISABLE_CROSS_TESTS=1 \
-		"$_bootstrap_cargo" test \
-			--release \
-			--target "$CTARGET" \
-			--no-fail-fast \
-			--verbose || true
+	CFG_DISABLE_CROSS_TESTS=1 RUST_BACKTRACE=1 \
+		"$_bootstrap_cargo" test $_cargo_opts --no-fail-fast
 }
 
 package() {
 	cd "$builddir"
 
-	make install DESTDIR="$pkgdir"
+	install -D -m 755 target/release/cargo "$pkgdir"/usr/bin/cargo
 
-	# Remove installer artifacts (manifests, uninstall scripts, etc.)
-	rm -rv "$pkgdir"/usr/lib
+	mkdir -p "$pkgdir"/usr/share/man/man1
+	install -m 644 -t "$pkgdir"/usr/share/man/man1/ src/etc/man/*.1
+
+	mkdir -p "$pkgdir"/usr/share/licenses/$pkgname
+	install -m 644 -t "$pkgdir"/usr/share/licenses/$pkgname/ LICENSE*
 }
 
 bashcomp() {
@@ -87,11 +101,9 @@ bashcomp() {
 	depends=""
 	install_if="$pkgname=$pkgver-r$pkgrel bash"
 
-	_mv "$pkgdir"/usr/etc/bash_completion.d/* \
-		"$subpkgdir"/usr/share/bash-completion/completions/
-
-	# Clean directories which are supposed to be empty.
-	rmdir -p "$pkgdir"/usr/etc/bash_completion.d 2>/dev/null || true
+	cd "$builddir"
+	install -D -m 644 -D src/etc/cargo.bashcomp.sh \
+		"$subpkgdir"/usr/share/bash-completion/completions/cargo
 }
 
 zshcomp() {
@@ -99,17 +111,16 @@ zshcomp() {
 	depends=""
 	install_if="$pkgname=$pkgver-r$pkgrel zsh"
 
-	_mv "$pkgdir"/usr/share/zsh "$subpkgdir"/usr/share/
-	rmdir "$pkgdir"/usr/share
+	cd "$builddir"
+	install -D -m 644 src/etc/_cargo \
+		"$subpkgdir"/usr/share/zsh/site-functions/_cargo
 }
 
-_mv() {
-	local dest; for dest; do true; done  # get last argument
-	mkdir -p "$dest"
-	mv $@
-}
-
-sha512sums="561d6817555da802e99964daa74550cc47a285903301da12a245bb62e5857c18069d87a520c5cefb62aecfe5561666352d57dca8f75758f81ea82709565577d2  cargo-0.18.0.tar.gz
-9ceb4755890ad3ae68ce141231c5114077261e0279d3a9a6208053f8d3386c9198e6b94d6321b456648dd5baa86dfc3ae81df44b67d41b428d11afd6763f0cff  rust-installer-4f994850808a572e2cc8d43f968893c8e942e9bf.tar.gz
-4df33353b6be1af822220ca03f9ec5a3b6421c9b10ec17b864be586ba495c6210bac70d904b0e0b35eff62ef2c9a681ded526e5cbd37e326dc3146742aa659de  cargo-6e0c18cccc8b0c06fba8a8d76486f81a792fb420-x86_64-unknown-linux-musl.tar.gz
-6a789fc1bf0eb19dde9267a10f7506787d6a4bb8316b09f4dee5da083c0fb0bad87630b238d92ef3aaf114d9a337a87797c8ac427f71c53ac06106925d459ee0  fix-test-build-auth.patch"
+sha512sums="31764df0462fcd0e7ddd29aee63ed0916b0d05e44d72aa815b3b823256e90f85e582c468a517d048e4451dfc1a3b22434abf25d825d3d926ab7a95f7bb44ad40  cargo-0.22.0.tar.gz
+b78a03942344852fd1a8c0ac893580c589757d4946150e5959e1df08b163b94ce5319236a48506c18f987cf3500a2c7cfe808eef13092c45d271e169946a18d1  cargo-0.17.0-x86_64-alpine-linux-musl.tar.gz
+4e9a0d409951a72b5c1d3578cb310c0efc5d98a5b963432ec4f485f1d58d2354f0050c31574d6bd9090b7247468ef1a13b04b133deabe6daed91032764468f97  tests-fix-build-auth-http_auth_offered.patch
+17c669a71443e21cc5e5cc6eb99933c20562b7df9d859c493ff25252167eb1aea6dd7322a06207776eab1c769464f95a432d1520a949512a52592b1eb115a4be  tests-ignore-ssh_something_happens.patch
+f066262423d7f092080629bc0b91f8445757c230d5fa441b1c367f3ac44c7def59c05ff8d95f8df8b8c8dbb51e4de8df41b41c95ef18415d20deede3b0f5661f  replace-openssl-crate.patch
+a1a83416d7ef75fedcd98ac2368c6c6041916ce73438a2f1de7aeafb39c32e7156ade5efd3340e58f0eb666c8b60305d030fffd134bc403fddccbe65914b0815  rust-openssl-0.9.20.tar.gz
+e50464c72d94515768763c72778b1e6bd25f83a07eb8ef666fe6efaa592c9fec96307cf5d56643e05665273d4d1c480f28a1e29956a2e24cf4fda9424ead1879  openssl-fix-libressl-cmsh-detection.patch
+8dce5569eee5bbf99a52b0589a7907b6a558eaff04e3701e40e575000fdd2a164736aaa9b104bd38973ad914e6cf5eaed903db13761f8217049ed4100121283d  openssl-libressl263-compat.patch"

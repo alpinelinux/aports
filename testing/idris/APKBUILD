@@ -1,16 +1,15 @@
 # Contributor: Mitch Tishmack <mitch.tishmack@gmail.com>
 # Contributor: Jakub Jirutka <jakub@jirutka.cz>
 # Maintainer: Mitch Tishmack <mitch.tishmack@gmail.com>
-#
-# Note: This abuilds downloads Haskell dependencies in the prepare phase
-#       without any verification!
 pkgname=idris
 pkgver=1.0
-pkgrel=0
+pkgrel=1
 pkgdesc="A Language with Dependent Types"
 url="http://www.idris-lang.org"
+# Note: same as ghc, if it gets ported elsewhere this should run too.
+# armhf: disabled due to build failure
 arch="x86_64"
-license="BSD3"
+license="BSD-3-Clause"
 depends="gmp-dev gcc"
 makedepends="ghc cabal libffi-dev ncurses-dev zlib-dev"
 subpackages="$pkgname-doc"
@@ -18,7 +17,10 @@ source="$pkgname-$pkgver.tar.gz::https://github.com/idris-lang/Idris-dev/archive
 	cabal.config"
 builddir="$srcdir/Idris-dev-$pkgver"
 
-export CABAL_CONFIG="$srcdir/cabal/cabal.config"
+_cabal_home="$srcdir/cabal"
+
+# Prevent cabal setup from using unbounded memory
+_cabal_install_opts=" --max-backjumps=10000"
 
 cabal_update() {
 	msg "Updating constraints"
@@ -26,11 +28,11 @@ cabal_update() {
 	cd "$builddir"
 
 	# Create cabal config and fetch index.
-	HOME="${CABAL_CONFIG%/*}" cabal update
+	HOME="$_cabal_home" cabal update
 
 	# Resolve deps and generate fresh cabal.config with version constraints.
 	rm -f cabal.config
-	cabal freeze
+	HOME="$_cabal_home" cabal freeze --shadow-installed-packages
 
 	# Add version tag at the first line.
 	sed -i "1i--$pkgver" cabal.config
@@ -39,6 +41,41 @@ cabal_update() {
 
 	cd "$startdir"
 	abuild checksum
+}
+
+
+# Used by the subsequent two functions.
+# This barf of a pipeline converts the cabal freeze config file lines from:
+# constraints: foo ==VERSION,
+#              bar ==VERSION
+# etc...
+# To something we can more easily munge into what we need for other purposes
+# aka we end up with:
+# foo==VERSION bar==VERSION ...
+_cabal_constraints_prime() {
+	printf "$(grep '==' cabal.config | \
+		sed -e 's/constraints[:]//g' | \
+		tr -d '[:space:]' | \
+		sed -e 's/[,]/ /g')"
+}
+
+# Take the output from above and replace =='s to -'s so we can cabal fetch
+# the specific package-version's via cabal
+_cabal_pkgs() {
+	printf "$(_cabal_constraints_prime)" | sed -e 's/==/-/g'
+}
+
+# Similar to the above, but convert to --constraint args used for cabal install
+# so that our cabal install line can use the same constraints for idris in cabal.config.
+#
+# This works around us running against a newer hackage index where one of the packages
+# in the freeze file has a newer version that cabal install libffi could end up
+# selecting due to libffi having more relaxed constraints than idris.
+#
+# That is:
+# --constraint=foo==VERSION --constraint=bar==VERSION
+_cabal_constraints() {
+	printf " $(_cabal_constraints_prime)" | sed -e 's/ / --constraint=/g'
 }
 
 prepare() {
@@ -51,30 +88,34 @@ prepare() {
 	cd "$builddir"
 
 	# Create cabal config and fetch index.
-	HOME="${CABAL_CONFIG%/*}" cabal update
+	HOME="$_cabal_home" cabal update
 
 	# Cabal implicitly loads cabal.config from the project's directory.
 	ln -sf "$srcdir"/cabal.config .
 
 	# Create Cabal sandbox that will be used for all subsequent cabal
 	# invocations. This is something like Python virtual env.
-	cabal sandbox init
+	HOME="$_cabal_home" cabal sandbox init
 
 	# Fetch all dependencies.
-	# XXX: This should always fetch the same versions as defined in
-	# our cabal.config, but Cabal does not verify packages integrity!
-	cabal fetch libffi .
+	# Note: cabal-doctest is a transitive dependency for libffi-0.1 not idris
+	HOME="$_cabal_home" cabal fetch --no-dependencies $(_cabal_pkgs) \
+		 cabal-doctest-1.0.2 libffi-0.1
 }
 
 build() {
 	cd "$builddir"
 
-	# Build dependencies.
-	cabal install --offline -v libffi
-	cabal install --only-dependencies --offline -v
+	# Build dependencies
+	# Note: for libffi force constraints manually via the freeze file to prevent
+	# cabal from possibly using newer constraints for libffi that might intersect
+	# with those idris uses.
+	HOME="$_cabal_home" cabal install $_cabal_install_opts --offline --constraint=cabal-doctest==1.0.2 \
+		$(_cabal_constraints) -v libffi-0.1
+	HOME="$_cabal_home" cabal install $_cabal_install_opts --offline --only-dependencies -v
 
 	# Note: ordering of prefixes is important!
-	cabal configure \
+	HOME="$_cabal_home" cabal configure \
 		--prefix='/usr' \
 		--docdir='$prefix/share/doc' \
 		--datadir='$prefix/share' \
@@ -84,8 +125,10 @@ build() {
 		--datasubdir="$pkgname" \
 		--dynlibdir="$pkgname" \
 		--disable-shared \
+		--disable-profiling \
+		--disable-library-profiling \
 		--flags='GMP FFI standalone'
-	cabal build
+	HOME="$_cabal_home" cabal build
 }
 
 # TODO: Run upstream tests and/or figure out how to set paths to be able
@@ -99,7 +142,7 @@ check() {
 package() {
 	cd "$builddir"
 
-	cabal copy --destdir="$pkgdir"
+	HOME="$_cabal_home" cabal copy --destdir="$pkgdir"
 
 	cd "$pkgdir"
 
@@ -113,4 +156,4 @@ package() {
 }
 
 sha512sums="a350004a8510f01d1cc8f965a9a4e2dab219f003980b98354ebb5ae42f73b32c90c98dce193943e9709d994cb92ad35814a46b79412a1afc85d42e1018c6ba10  idris-1.0.tar.gz
-e078892987816012034295be81118fbc710e3dbf08af18257e5390fc159bb5d64e1aae8a802835ca92b1e0d065524833d657bc9edffc9ebefc8cb5c02935694a  cabal.config"
+adce625aed6ab6f36adf6d91e5671c85c91a1009e17419a88071e3cd500962c1c545406b2eb431cd3efa45d3dacadac913a9a27a5956e8233bd13b4630ff2ab4  cabal.config"

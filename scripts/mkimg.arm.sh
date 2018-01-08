@@ -52,7 +52,7 @@ profile_rpi() {
 		And much more..."
 	image_ext="tar.gz"
 	arch="armhf"
-	rpi_firmware_commit="32c28990b18908ce899c289bcd12c6e9daeb1588"
+	rpi_firmware_commit="27993e5acf86d1629428ed1a601e86ecd5e5a1df"
 	kernel_flavors="rpi rpi2"
 	kernel_cmdline="dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1"
 	initrd_features="base bootchart squashfs ext2 ext3 ext4 f2fs kms mmc raid scsi usb"
