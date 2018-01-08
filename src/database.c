@@ -1517,6 +1517,7 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		r = -1;
 		goto ret_r;
 	}
+	if (dbopts->open_flags & APK_OPENF_WRITE) db->open_write = 1;
 	if (!dbopts->cache_dir) dbopts->cache_dir = "etc/apk/cache";
 
 	apk_db_setup_repositories(db, dbopts->cache_dir);
@@ -2263,7 +2264,7 @@ int apk_db_add_repository(apk_database_t _db, apk_blob_t _repository)
 			r = apk_repo_format_real_url(db, repo, NULL, buf, sizeof(buf));
 			if (r == 0) apk_message("fetch %s", buf);
 		} else {
-			apk_repository_update(db, repo);
+			if (db->open_write) apk_repository_update(db, repo);
 			r = apk_repo_format_cache_index(APK_BLOB_BUF(buf), repo);
 		}
 	} else {
