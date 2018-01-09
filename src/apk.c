@@ -579,7 +579,11 @@ int main(int argc, char **argv)
 	}
 
 	if (applet == NULL) {
-		r = usage(NULL);
+		if (argc > 1) {
+			r = 1;
+			apk_error("'%s' is not an apk command. See 'apk --help'.", argv[1]);
+		} else
+			r = usage(NULL);
 		goto err;
 	}
 
