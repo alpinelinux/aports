@@ -519,7 +519,7 @@ int main(int argc, char **argv)
 	struct apk_applet *applet;
 	char short_options[256], *sopt;
 	struct option *opt, *all_options;
-	int i, p, r, num_options;
+	int i, p, r, num_options, help_requested = 0;
 	void *ctx = NULL;
 	struct apk_db_options dbopts;
 	const struct apk_option_group **optgroups = default_optgroups;
@@ -574,8 +574,17 @@ int main(int argc, char **argv)
 		for (i = 0; optgroups[i]; i++) {
 			r = optgroups[i]->parse(ctx, &dbopts, p, optarg);
 			if (r == 0) break;
+			if (r == -EINVAL) {
+				help_requested = 1;
+				break;
+			}
 			if (r != -ENOTSUP) goto err_and_usage;
 		}
+	}
+
+	if (help_requested) {
+		r = usage(applet);
+		goto err;
 	}
 
 	if (applet == NULL) {
