@@ -272,7 +272,7 @@ static const struct apk_option options_commit[] = {
 	{ 0x113, "no-scripts",		"Do not execute any scripts" },
 	{ 0x117, "no-commit-hooks",	"Skip pre/post hook scripts (but not other scripts)" },
 	{ 0x118, "initramfs-diskless-boot",
-	  "Enables options for diskeless initramfs boot (e.g. skip hooks)" },
+	  "Enables options for diskless initramfs boot (e.g. skip hooks)" },
 };
 
 const struct apk_option_group optgroup_commit = {
