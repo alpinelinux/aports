@@ -50,6 +50,7 @@ static struct apk_applet apk_update = {
 	.help = "Update repository indexes from all remote repositories",
 	.open_flags = APK_OPENF_WRITE,
 	.forced_force = APK_FORCE_REFRESH,
+	.command_groups = APK_COMMAND_GROUP_SYSTEM,
 	.main = update_main,
 };
 

@@ -182,6 +182,7 @@ static struct apk_applet apk_upgrade = {
 	.name = "upgrade",
 	.help = "Upgrade currently installed packages to match repositories",
 	.open_flags = APK_OPENF_WRITE,
+	.command_groups = APK_COMMAND_GROUP_SYSTEM,
 	.context_size = sizeof(struct upgrade_ctx),
 	.optgroups = { &optgroup_global, &optgroup_commit, &optgroup_applet },
 	.main = upgrade_main,

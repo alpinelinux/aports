@@ -152,6 +152,7 @@ static struct apk_applet apk_cache = {
 		"unneeded files from cache",
 	.arguments = "sync | clean | download",
 	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_CACHE_WRITE,
+	.command_groups = APK_COMMAND_GROUP_SYSTEM,
 	.main = cache_main,
 };
 

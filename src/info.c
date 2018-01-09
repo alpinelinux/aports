@@ -475,6 +475,7 @@ static struct apk_applet apk_info = {
 	.help = "Give detailed information about PACKAGEs or repositories",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_READ,
+	.command_groups = APK_COMMAND_GROUP_QUERY,
 	.context_size = sizeof(struct info_ctx),
 	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = info_main,

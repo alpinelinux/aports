@@ -59,6 +59,7 @@ static struct apk_applet apk_verify = {
 	.help = "Verify package integrity and signature",
 	.arguments = "FILE...",
 	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE,
+	.command_groups = APK_COMMAND_GROUP_REPO,
 	.forced_flags = APK_ALLOW_UNTRUSTED,
 	.main = verify_main,
 };

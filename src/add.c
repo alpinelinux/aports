@@ -171,6 +171,7 @@ static struct apk_applet apk_add = {
 		"them, while ensuring that all dependencies are met",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
+	.command_groups = APK_COMMAND_GROUP_INSTALL,
 	.context_size = sizeof(struct add_ctx),
 	.optgroups = { &optgroup_global, &optgroup_commit, &optgroup_applet },
 	.main = add_main,

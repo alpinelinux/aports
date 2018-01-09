@@ -128,6 +128,7 @@ static struct apk_applet apk_manifest = {
 	.help = "Show checksums of package contents",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_READ,
+	.command_groups = APK_COMMAND_GROUP_REPO,
 	.main = manifest_main,
 };
 

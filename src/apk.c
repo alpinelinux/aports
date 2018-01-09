@@ -338,6 +338,23 @@ static void print_options(int num_opts, const struct apk_option *opts)
 	}
 }
 
+static void print_applets(const char *desc, unsigned int group)
+{
+	struct apk_applet *a;
+
+	printf("\n%s\n", desc);
+
+	foreach_applet(a) {
+		if (group && (a->command_groups & group) != group)
+			continue;
+
+		struct apk_indent indent = { .indent = 12 };
+		indent.x = printf("  %-*s", indent.indent - 3, a->name);
+		apk_print_indented_words(&indent, a->help);
+		printf("\n");
+	}
+}
+
 static int usage(struct apk_applet *applet)
 {
 	const struct apk_option_group **optgroups = default_optgroups;
@@ -345,16 +362,17 @@ static int usage(struct apk_applet *applet)
 
 	version();
 	if (applet == NULL) {
-		struct apk_applet *a;
+		if (apk_verbosity > 1) {
+			print_usage("COMMAND", "[ARGS]...", default_optgroups);
+			print_applets("The following commands are available:", 0);
+		} else {
+			print_applets("Installing and removing packages:", APK_COMMAND_GROUP_INSTALL);
+			print_applets("System maintenance:", APK_COMMAND_GROUP_SYSTEM);
+			print_applets("Querying information about packages:", APK_COMMAND_GROUP_QUERY);
+			print_applets("Repository maintenance:", APK_COMMAND_GROUP_REPO);
 
-		print_usage("COMMAND", "[ARGS]...", default_optgroups);
-
-		printf("\nThe following commands are available:\n");
-		foreach_applet(a) {
-			struct apk_indent indent = { .indent = 12 };
-			indent.x = printf("  %-*s", indent.indent - 3, a->name);
-			apk_print_indented_words(&indent, a->help);
-			printf("\n");
+			printf("\nUse apk <command> --help for command-specific help.\n");
+			printf("Use apk --help --verbose for a full command listing.\n");
 		}
 	} else {
 		struct apk_indent indent = { .indent = 2 };
@@ -366,9 +384,11 @@ static int usage(struct apk_applet *applet)
 		printf("\n");
 	}
 
-	for (i = 0; optgroups[i]; i++) {
-		printf("\n%s options:\n", optgroups[i]->name);
-		print_options(optgroups[i]->num_options, optgroups[i]->options);
+	if (applet != NULL || apk_verbosity > 1) {
+		for (i = 0; optgroups[i]; i++) {
+			printf("\n%s options:\n", optgroups[i]->name);
+			print_options(optgroups[i]->num_options, optgroups[i]->options);
+		}
 	}
 
 	printf("\nThis apk has coffee making abilities.\n");

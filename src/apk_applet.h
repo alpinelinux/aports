@@ -17,6 +17,11 @@
 #include "apk_defines.h"
 #include "apk_database.h"
 
+#define APK_COMMAND_GROUP_INSTALL		0x0001
+#define APK_COMMAND_GROUP_SYSTEM		0x0002
+#define APK_COMMAND_GROUP_QUERY			0x0004
+#define APK_COMMAND_GROUP_REPO			0x0008
+
 struct apk_option {
 	int val;
 	const char *name;
@@ -42,7 +47,7 @@ struct apk_applet {
 	const char *help;
 	const struct apk_option_group *optgroups[4];
 
-	unsigned int open_flags, forced_flags, forced_force;
+	unsigned int open_flags, forced_flags, forced_force, command_groups;
 	int context_size;
 
 	int (*main)(void *ctx, struct apk_database *db, struct apk_string_array *args);

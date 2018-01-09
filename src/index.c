@@ -262,6 +262,7 @@ static struct apk_applet apk_index = {
 	.help = "Create repository index file from FILEs",
 	.arguments = "FILE...",
 	.open_flags = APK_OPENF_READ | APK_OPENF_NO_STATE | APK_OPENF_NO_REPOS,
+	.command_groups = APK_COMMAND_GROUP_REPO,
 	.context_size = sizeof(struct index_ctx),
 	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = index_main,

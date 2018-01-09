@@ -119,6 +119,7 @@ static struct apk_applet apk_fix = {
 		"dependencies",
 	.arguments = "PACKAGE...",
 	.open_flags = APK_OPENF_WRITE,
+	.command_groups = APK_COMMAND_GROUP_SYSTEM,
 	.context_size = sizeof(struct fix_ctx),
 	.optgroups = { &optgroup_global, &optgroup_commit, &optgroup_applet },
 	.main = fix_main,
