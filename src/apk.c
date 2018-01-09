@@ -198,7 +198,7 @@ static const struct apk_option options_global[] = {
 	{ 0x121, "force-old-apk", "Continue even if packages use unsupported features" },
 	{ 0x120, "force-overwrite", "Overwrite files in other packages" },
 	{ 0x123, "force-refresh", "Do not use cached files (local or from proxy)" },
-	{ 'U', "update-cache",	"Alias for --cache-max-age 60" },
+	{ 'U', "update-cache",	"Alias for --cache-max-age 1" },
 	{ 0x101, "progress",	"Show a progress bar" },
 	{ 0x10f, "progress-fd",	"Write progress to fd", required_argument, "FD" },
 	{ 0x110, "no-progress",	"Disable progress bar even for TTYs" },
