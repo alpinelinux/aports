@@ -7,7 +7,7 @@ case $pkgver in
 	*.*.*)	_kernver=${pkgver%.*};;
 	*.*) _kernver=$pkgver;;
 esac
-pkgrel=0
+pkgrel=1
 pkgdesc="Linux vanilla kernel"
 url="http://kernel.org"
 depends="mkinitfs linux-firmware"
@@ -27,12 +27,29 @@ source="https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/linux-$_kernver
 	config-vanilla.ppc
 	config-vanilla.ppc64le
 	config-vanilla.s390x
+
+	config-virt.x86
+	config-virt.x86_64
 	"
+subpackages="$pkgname-dev:_dev:$CBUILD_ARCH"
+_flavors=
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-${_f}::$CBUILD_ARCH linux-${_f}-dev:_dev:$CBUILD_ARCH"
+		fi
+		;;
+	esac
+done
+
 if [ "${pkgver%.0}" = "$pkgver" ]; then
 	source="$source
 	https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/patch-$pkgver.xz"
 fi
-subpackages="$pkgname-dev::$CBUILD_ARCH"
 arch="all"
 license="GPL-2.0"
 
@@ -75,54 +92,86 @@ prepare() {
 		return 1
 	fi
 
-	mkdir -p "$srcdir"/build
-	cp "$srcdir"/$_config "$srcdir"/build/.config || return 1
-	make -C "$srcdir"/linux-$_kernver O="$srcdir"/build ARCH="$_carch" HOSTCC="$HOSTCC" \
-		silentoldconfig
-}
+	# remove localversion from patch if any
+	rm -f localversion*
 
-# this is so we can do: 'abuild menuconfig' to reconfigure kernel
-menuconfig() {
-	cd "$srcdir"/build || return 1
-	make ARCH="$_carch" menuconfig
-	cp .config "$startdir"/$_config
+	for i in $_flavors; do
+		local _config=config-$i.${CARCH}
+		local _builddir="$srcdir"/build-$i
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$i" > "$srcdir"/build-$i/localversion-alpine \
+			|| return 1
+
+		cp "$srcdir"/$_config "$_builddir"/.config || return 1
+		make -C "$srcdir"/linux-$_kernver \
+			O="$_builddir" \
+			HOSTCC="${CC:-gcc}" \
+			silentoldconfig || return 1
+	done
 }
 
 build() {
-	cd "$srcdir"/build
 	unset LDFLAGS
-	make ARCH="$_carch" CC="${CC:-gcc}" \
-		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
-		|| return 1
+	for i in $_flavors; do
+		cd "$srcdir"/build-$i
+		make CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
+			|| return 1
+	done
 }
 
-package() {
-	cd "$srcdir"/build
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=${pkgver}-${pkgrel}-${_buildflavor}
 
-	mkdir -p "$pkgdir"/boot "$pkgdir"/lib/modules
+	cd "$srcdir"/build-$_buildflavor || return 1
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
 
 	local _install
 	case "$CARCH" in
-	aarch64*|arm*)	_install="zinstall dtbs_install" ;;
-	*)		_install="install" ;;
+	arm*)
+		local _dtbdir="$_outdir"/usr/lib/linux-${_abi_release}
+		mkdir -p "$_dtbdir"
+		for i in arch/arm/boot/dts/*.dtb ; do
+			install -m644 "$i" "$_dtbdir"
+		done
+
+		_install=zinstall
+		;;
+	*)
+		_install=install
+		;;
 	esac
 
 	make -j1 modules_install $_install \
-		ARCH="$_carch" \
-		INSTALL_MOD_PATH="$pkgdir" \
-		INSTALL_PATH="$pkgdir"/boot \
-		INSTALL_DTBS_PATH="$pkgdir"/usr/lib/linux-${_abi_release} \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_PATH="$_outdir"/boot \
 		|| return 1
 
-	rm -f "$pkgdir"/lib/modules/${_abi_release}/build \
-		"$pkgdir"/lib/modules/${_abi_release}/source
-	rm -rf "$pkgdir"/lib/firmware
+	rm -f "$_outdir"/lib/modules/${_abi_release}/build \
+		"$_outdir"/lib/modules/${_abi_release}/source
+	rm -rf "$_outdir"/lib/firmware
 
 	install -D include/config/kernel.release \
-		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
 }
 
-dev() {
+# main flavor installs in $pkgdir
+package() {
+	depends="$depends linux-firmware"
+
+	_package vanilla "$pkgdir"
+}
+
+# subflavors install in $subpkgdir
+virt() {
+	_package virt "$subpkgdir"
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _abi_release=${pkgver}-${pkgrel}-$_flavor
 	# copy the only the parts that we really need for build 3rd party
 	# kernel modules and install those as /usr/src/linux-headers,
 	# simlar to what ubuntu does
@@ -130,22 +179,18 @@ dev() {
 	# this way you dont need to install the 300-400 kernel sources to
 	# build a tiny kernel module
 	#
-	pkgdesc="Headers and script for third party modules for grsec kernel"
-	depends="gmp-dev bash perl elfutils-dev"
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="gmp-dev bash"
 	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
 
 	# first we import config, run prepare to set up for building
 	# external modules, and create the scripts
 	mkdir -p "$dir"
-	cp "$srcdir"/$_config "$dir"/.config
-	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" ARCH="$_carch" HOSTCC="$HOSTCC" \
+	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
+	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine \
+		|| return 1
+	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" HOSTCC="${CC:-gcc}" \
 		silentoldconfig prepare modules_prepare scripts
-
-	# needed for 3rd party modules
-	# https://bugzilla.kernel.org/show_bug.cgi?id=11143
-	case "$CARCH" in
-	ppc*) (cd "$dir" && make arch/powerpc/lib/crtsavres.o);;
-	esac
 
 	# remove the stuff that points to real sources. we want 3rd party
 	# modules to believe this is the soruces
@@ -155,18 +200,18 @@ dev() {
 	#
 	# this is taken from ubuntu kernel build script
 	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
-
 	cd "$srcdir"/linux-$_kernver
-	find . -path './include/*' -prune \
+	find .  -path './include/*' -prune \
 		-o -path './scripts/*' -prune -o -type f \
 		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
 		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' \) \
 		-print | cpio -pdm "$dir" || return 1
-	cp -a scripts include "$dir"
+
+	cp -a scripts include "$dir" || return 1
 	find $(find arch -name include -type d -print) -type f \
 		| cpio -pdm "$dir"
 
-	install -Dm644 "$srcdir"/build/Module.symvers \
+	install -Dm644 "$srcdir"/build-$_flavor/Module.symvers \
 		"$dir"/Module.symvers
 
 	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
@@ -184,4 +229,6 @@ b8b72b8375d1e8c8c2ef29f23a17c658b4d2fa5affe4422d54eed50e3642020afec60e938c8e124b
 6e83541be1fee860f40671046e9d863ade5bc2dd93f8d4f5b36611007a9edf9d3e73569afbde74ce9bc723f3839a85cdce3146960275af5063d3fc0836fe00fe  config-vanilla.ppc
 22393cebb707d8fdd5d7ee9d8c1091bafe7e0c0b7337c831f94e6055cc163bc775c10487143db388d4bbd690570caf0526525a9c20b3a5d830fc076553682d97  config-vanilla.ppc64le
 0520c1b756640b54f2d4ec67e8ee88b5c2af6eb96678401f6117a2a2132660ce1a33e4623b309b2bbb1092e28f4b54d679a37403a173d5f88e3db383beee66c0  config-vanilla.s390x
+27a42421326e7a6cccb63172274ebb26d36bedfbfaaeea07c0d929c74df9ce9cd228b084345a7ee32fd60e437fc3d434fbdbc99cff9b24c026ccba7d6f94531a  config-virt.x86
+0ec02f0114ac750f8565afa2543becc3841b83d05cc407acc34f9ff3882a5cf5bd5e9ca31cb8be30d1d19af98a0fb0093594c64850b3983e6f4b01ade90e155f  config-virt.x86_64
 6ae473fbed193a2997e9d3f02ef9c1b5a1bc6f2464ef32a4bc22306659f5d978ab64e531b3488bf8266732043868f1b14183e463c17020d1dc95c8cf70343415  patch-4.14.13.xz"
