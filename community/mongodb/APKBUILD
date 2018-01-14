@@ -1,7 +1,7 @@
 # Maintainer: Filipp Andronov <filipp.andronov@gmail.com>
 # Contributor: Marc Vertes <mvertes@free.fr>
 pkgname=mongodb
-pkgver=3.6.1
+pkgver=3.6.2
 pkgrel=0
 pkgdesc='A high-performance, open source, schema-free document-oriented database'
 url='http://www.mongodb.org'
@@ -12,9 +12,10 @@ pkggroups="mongodb"
 depends=
 makedepends="scons py-setuptools py-cheetah py2-typing py-yaml paxmark
 	libressl-dev pcre-dev snappy-dev boost-dev asio-dev libpcap-dev
-	wiredtiger-dev zlib-dev cyrus-sasl-dev yaml-cpp-dev"
+	snowball-dev wiredtiger-dev zlib-dev cyrus-sasl-dev yaml-cpp-dev"
 install="$pkgname.pre-install"
 source="http://downloads.mongodb.org/src/mongodb-src-r${pkgver}.tar.gz
+	fix-backtrace.patch
 	fix-default-stacksize.patch
 	fix-elf-native-class.patch
 	fix-processinfo_linux.patch
@@ -34,6 +35,7 @@ _buildopts="
 		--disable-warnings-as-errors \
 		--use-system-boost \
 		--use-system-pcre \
+		--use-system-stemmer \
 		--use-system-wiredtiger \
 		--use-system-snappy \
 		--use-system-zlib \
@@ -83,7 +85,8 @@ package() {
 	install -Dm644 "$srcdir/mongos.confd" "$pkgdir/etc/conf.d/mongos"
 }
 
-sha512sums="ad02fac423186da725493bf82a417cf5f68b08afe91c67f007b46324dfde3d6b4c51ed8eb1a314da73563be498b844f79be66a4f5d1fb83095df6c5458bd6d1f  mongodb-src-r3.6.1.tar.gz
+sha512sums="7acfbcc68c1bd4e6e63eee09be1dfbb064be6f8b0144418105100a065f8162cafc9b776fe0429fd64c79b958561aa42d0bdef56588dda65acee27ccc98631f39  mongodb-src-r3.6.2.tar.gz
+05c4331d028eb396e6cf52d96cdaa2af7199a03522e1a8211df2d36cb053ec093a51e9abf83c4dc00c09a0b1fa119a79bcc719fbc81a48f50ca1527c26613cf0  fix-backtrace.patch
 1492137b0e3456d90a79617c1cd5ead5c71b1cfaae9ee41c75d56cd25f404ec73a690f95ce0d8c064c0a14206daca8070aa769b7cdfa904a338a425b52c293fa  fix-default-stacksize.patch
 56db8f43afc94713ac65b174189e2dd903b5e1eff0b65f1bdac159e52ad4de6606c449865d73bd47bffad6a8fc339777e2b11395596e9a476867d94a219c7925  fix-elf-native-class.patch
 026d20fa1a0f1e27150b833664300250386d7e0d73c0778f81f70242e93e8a16e5607716693bbcdd1efb328fa84c7284e2c6c7e1ac92259b97a9d402975cf709  fix-processinfo_linux.patch
