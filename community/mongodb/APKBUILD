@@ -29,7 +29,7 @@ source="http://downloads.mongodb.org/src/mongodb-src-r${pkgver}.tar.gz
         mongos.initd
 	"
 
-_builddir="$srcdir"/$pkgname-src-r$pkgver
+builddir="$srcdir"/$pkgname-src-r$pkgver
 _buildopts="
 		--allocator=system \
 		--disable-warnings-as-errors \
@@ -44,26 +44,22 @@ _buildopts="
 		--ssl \
 	"
 
-prepare() {
-        cd "$_builddir"
-
-        local i
-        for i in $source; do
-                case $i in
-                *.patch) msg $i; patch -p1 -i "$srcdir"/$i || return 1;;
-                esac
-        done
-}
-
 build() {
-        cd "$_builddir"
+	cd "$builddir"
 
 	export SCONSFLAGS="$MAKEFLAGS"
 	scons $_buildopts --prefix=$pkgdir/usr core
 }
 
+check() {
+	cd "$builddir"
+
+	scons unittests
+	python buildscripts/resmoke.py --suites=unittests --jobs=2
+}
+
 package() {
-        cd "$_builddir"
+        cd "$builddir"
 
 	# install mongo targets
 	export SCONSFLAGS="$MAKEFLAGS"
