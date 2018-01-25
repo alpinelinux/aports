@@ -1,7 +1,459 @@
-From 92884bbf6c424c402ae76e6da06e62cd33714cb3 Mon Sep 17 00:00:00 2001
+From 910dd005da20f27f3415b7eccdf436874989506b Mon Sep 17 00:00:00 2001
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Wed, 17 Jan 2018 16:54:44 +0100
+Subject: [PATCH] x86/entry: Remove support for partial cpu_user_regs frames
+
+Save all GPRs on entry to Xen.
+
+The entry_int82() path is via a DPL1 gate, only usable by 32bit PV guests, so
+can get away with only saving the 32bit registers.  All other entrypoints can
+be reached from 32 or 64bit contexts.
+
+This is part of XSA-254.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Wei Liu <wei.liu2@citrix.com>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+master commit: f9eb74789af77e985ae653193f3622263499f674
+master date: 2018-01-05 19:57:07 +0000
+---
+ tools/tests/x86_emulator/x86-emulate.c |   1 -
+ xen/arch/x86/pv/domain.c               |   1 -
+ xen/arch/x86/pv/emul-priv-op.c         |   2 -
+ xen/arch/x86/x86_64/compat/entry.S     |   7 ++-
+ xen/arch/x86/x86_64/entry.S            |  12 ++--
+ xen/arch/x86/x86_64/traps.c            |  13 ++--
+ xen/arch/x86/x86_emulate.c             |   1 -
+ xen/arch/x86/x86_emulate/x86_emulate.c |   8 +--
+ xen/common/wait.c                      |   1 -
+ xen/include/asm-x86/asm_defns.h        | 105 +++------------------------------
+ 10 files changed, 26 insertions(+), 125 deletions(-)
+
+diff --git a/tools/tests/x86_emulator/x86-emulate.c b/tools/tests/x86_emulator/x86-emulate.c
+index 975ddc7..9056610 100644
+--- a/tools/tests/x86_emulator/x86-emulate.c
++++ b/tools/tests/x86_emulator/x86-emulate.c
+@@ -3,7 +3,6 @@
+ #include <sys/mman.h>
+ 
+ #define cpu_has_amd_erratum(nr) 0
+-#define mark_regs_dirty(r) ((void)(r))
+ #define cpu_has_mpx false
+ #define read_bndcfgu() 0
+ #define xstate_set_init(what)
+diff --git a/xen/arch/x86/pv/domain.c b/xen/arch/x86/pv/domain.c
+index 2234128..74e9e66 100644
+--- a/xen/arch/x86/pv/domain.c
++++ b/xen/arch/x86/pv/domain.c
+@@ -20,7 +20,6 @@
+ static void noreturn continue_nonidle_domain(struct vcpu *v)
+ {
+     check_wakeup_from_wait();
+-    mark_regs_dirty(guest_cpu_user_regs());
+     reset_stack_and_jump(ret_from_intr);
+ }
+ 
+diff --git a/xen/arch/x86/pv/emul-priv-op.c b/xen/arch/x86/pv/emul-priv-op.c
+index 2f92645..5f23c2c 100644
+--- a/xen/arch/x86/pv/emul-priv-op.c
++++ b/xen/arch/x86/pv/emul-priv-op.c
+@@ -337,7 +337,6 @@ static int read_io(unsigned int port, unsigned int bytes,
+         io_emul_stub_t *io_emul =
+             io_emul_stub_setup(poc, ctxt->opcode, port, bytes);
+ 
+-        mark_regs_dirty(ctxt->regs);
+         io_emul(ctxt->regs);
+         return X86EMUL_DONE;
+     }
+@@ -436,7 +435,6 @@ static int write_io(unsigned int port, unsigned int bytes,
+         io_emul_stub_t *io_emul =
+             io_emul_stub_setup(poc, ctxt->opcode, port, bytes);
+ 
+-        mark_regs_dirty(ctxt->regs);
+         io_emul(ctxt->regs);
+         if ( (bytes == 1) && pv_post_outb_hook )
+             pv_post_outb_hook(port, val);
+diff --git a/xen/arch/x86/x86_64/compat/entry.S b/xen/arch/x86/x86_64/compat/entry.S
+index ba6e941..3fea54e 100644
+--- a/xen/arch/x86/x86_64/compat/entry.S
++++ b/xen/arch/x86/x86_64/compat/entry.S
+@@ -16,7 +16,8 @@
+ ENTRY(entry_int82)
+         ASM_CLAC
+         pushq $0
+-        SAVE_VOLATILE type=HYPERCALL_VECTOR compat=1
++        movl  $HYPERCALL_VECTOR, 4(%rsp)
++        SAVE_ALL compat=1 /* DPL1 gate, restricted to 32bit PV guests only. */
+         CR4_PV32_RESTORE
+ 
+         GET_CURRENT(bx)
+@@ -60,7 +61,6 @@ compat_test_guest_events:
+ /* %rbx: struct vcpu */
+ compat_process_softirqs:
+         sti
+-        andl  $~TRAP_regs_partial,UREGS_entry_vector(%rsp)
+         call  do_softirq
+         jmp   compat_test_all_events
+ 
+@@ -197,7 +197,8 @@ ENTRY(cstar_enter)
+         pushq $FLAT_USER_CS32
+         pushq %rcx
+         pushq $0
+-        SAVE_VOLATILE TRAP_syscall
++        movl  $TRAP_syscall, 4(%rsp)
++        SAVE_ALL
+         GET_CURRENT(bx)
+         movq  VCPU_domain(%rbx),%rcx
+         cmpb  $0,DOMAIN_is_32bit_pv(%rcx)
+diff --git a/xen/arch/x86/x86_64/entry.S b/xen/arch/x86/x86_64/entry.S
+index 6066ed8..1dd9ccf 100644
+--- a/xen/arch/x86/x86_64/entry.S
++++ b/xen/arch/x86/x86_64/entry.S
+@@ -98,7 +98,8 @@ ENTRY(lstar_enter)
+         pushq $FLAT_KERNEL_CS64
+         pushq %rcx
+         pushq $0
+-        SAVE_VOLATILE TRAP_syscall
++        movl  $TRAP_syscall, 4(%rsp)
++        SAVE_ALL
+         GET_CURRENT(bx)
+         testb $TF_kernel_mode,VCPU_thread_flags(%rbx)
+         jz    switch_to_kernel
+@@ -140,7 +141,6 @@ test_guest_events:
+ /* %rbx: struct vcpu */
+ process_softirqs:
+         sti       
+-        SAVE_PRESERVED
+         call do_softirq
+         jmp  test_all_events
+ 
+@@ -190,7 +190,8 @@ GLOBAL(sysenter_eflags_saved)
+         pushq $3 /* ring 3 null cs */
+         pushq $0 /* null rip */
+         pushq $0
+-        SAVE_VOLATILE TRAP_syscall
++        movl  $TRAP_syscall, 4(%rsp)
++        SAVE_ALL
+         GET_CURRENT(bx)
+         cmpb  $0,VCPU_sysenter_disables_events(%rbx)
+         movq  VCPU_sysenter_addr(%rbx),%rax
+@@ -207,7 +208,6 @@ UNLIKELY_END(sysenter_nt_set)
+         leal  (,%rcx,TBF_INTERRUPT),%ecx
+ UNLIKELY_START(z, sysenter_gpf)
+         movq  VCPU_trap_ctxt(%rbx),%rsi
+-        SAVE_PRESERVED
+         movl  $TRAP_gp_fault,UREGS_entry_vector(%rsp)
+         movl  %eax,TRAPBOUNCE_error_code(%rdx)
+         movq  TRAP_gp_fault * TRAPINFO_sizeof + TRAPINFO_eip(%rsi),%rax
+@@ -225,7 +225,8 @@ UNLIKELY_END(sysenter_gpf)
+ ENTRY(int80_direct_trap)
+         ASM_CLAC
+         pushq $0
+-        SAVE_VOLATILE 0x80
++        movl  $0x80, 4(%rsp)
++        SAVE_ALL
+ 
+         cmpb  $0,untrusted_msi(%rip)
+ UNLIKELY_START(ne, msi_check)
+@@ -253,7 +254,6 @@ int80_slow_path:
+          * IDT entry with DPL==0.
+          */
+         movl  $((0x80 << 3) | X86_XEC_IDT),UREGS_error_code(%rsp)
+-        SAVE_PRESERVED
+         movl  $TRAP_gp_fault,UREGS_entry_vector(%rsp)
+         /* A GPF wouldn't have incremented the instruction pointer. */
+         subq  $2,UREGS_rip(%rsp)
+diff --git a/xen/arch/x86/x86_64/traps.c b/xen/arch/x86/x86_64/traps.c
+index 2a326be..3652f5f 100644
+--- a/xen/arch/x86/x86_64/traps.c
++++ b/xen/arch/x86/x86_64/traps.c
+@@ -80,15 +80,10 @@ static void _show_registers(
+            regs->rbp, regs->rsp, regs->r8);
+     printk("r9:  %016lx   r10: %016lx   r11: %016lx\n",
+            regs->r9,  regs->r10, regs->r11);
+-    if ( !(regs->entry_vector & TRAP_regs_partial) )
+-    {
+-        printk("r12: %016lx   r13: %016lx   r14: %016lx\n",
+-               regs->r12, regs->r13, regs->r14);
+-        printk("r15: %016lx   cr0: %016lx   cr4: %016lx\n",
+-               regs->r15, crs[0], crs[4]);
+-    }
+-    else
+-        printk("cr0: %016lx   cr4: %016lx\n", crs[0], crs[4]);
++    printk("r12: %016lx   r13: %016lx   r14: %016lx\n",
++           regs->r12, regs->r13, regs->r14);
++    printk("r15: %016lx   cr0: %016lx   cr4: %016lx\n",
++           regs->r15, crs[0], crs[4]);
+     printk("cr3: %016lx   cr2: %016lx\n", crs[3], crs[2]);
+     printk("fsb: %016lx   gsb: %016lx   gss: %016lx\n",
+            crs[5], crs[6], crs[7]);
+diff --git a/xen/arch/x86/x86_emulate.c b/xen/arch/x86/x86_emulate.c
+index cc334ca..c7ba221 100644
+--- a/xen/arch/x86/x86_emulate.c
++++ b/xen/arch/x86/x86_emulate.c
+@@ -11,7 +11,6 @@
+ 
+ #include <xen/domain_page.h>
+ #include <asm/x86_emulate.h>
+-#include <asm/asm_defns.h> /* mark_regs_dirty() */
+ #include <asm/processor.h> /* current_cpu_info */
+ #include <asm/xstate.h>
+ #include <asm/amd.h> /* cpu_has_amd_erratum() */
+diff --git a/xen/arch/x86/x86_emulate/x86_emulate.c b/xen/arch/x86/x86_emulate/x86_emulate.c
+index 54a2756..820495f 100644
+--- a/xen/arch/x86/x86_emulate/x86_emulate.c
++++ b/xen/arch/x86/x86_emulate/x86_emulate.c
+@@ -1956,10 +1956,10 @@ decode_register(
+     case  9: p = &regs->r9;  break;
+     case 10: p = &regs->r10; break;
+     case 11: p = &regs->r11; break;
+-    case 12: mark_regs_dirty(regs); p = &regs->r12; break;
+-    case 13: mark_regs_dirty(regs); p = &regs->r13; break;
+-    case 14: mark_regs_dirty(regs); p = &regs->r14; break;
+-    case 15: mark_regs_dirty(regs); p = &regs->r15; break;
++    case 12: p = &regs->r12; break;
++    case 13: p = &regs->r13; break;
++    case 14: p = &regs->r14; break;
++    case 15: p = &regs->r15; break;
+ #endif
+     default: BUG(); p = NULL; break;
+     }
+diff --git a/xen/common/wait.c b/xen/common/wait.c
+index 9490a17..c5fc094 100644
+--- a/xen/common/wait.c
++++ b/xen/common/wait.c
+@@ -127,7 +127,6 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
+     unsigned long dummy;
+     u32 entry_vector = cpu_info->guest_cpu_user_regs.entry_vector;
+ 
+-    cpu_info->guest_cpu_user_regs.entry_vector &= ~TRAP_regs_partial;
+     ASSERT(wqv->esp == 0);
+ 
+     /* Save current VCPU affinity; force wakeup on *this* CPU only. */
+diff --git a/xen/include/asm-x86/asm_defns.h b/xen/include/asm-x86/asm_defns.h
+index 388fc93..98192eb 100644
+--- a/xen/include/asm-x86/asm_defns.h
++++ b/xen/include/asm-x86/asm_defns.h
+@@ -17,15 +17,6 @@
+ void ret_from_intr(void);
+ #endif
+ 
+-#ifdef CONFIG_FRAME_POINTER
+-/* Indicate special exception stack frame by inverting the frame pointer. */
+-#define SETUP_EXCEPTION_FRAME_POINTER(offs)     \
+-        leaq  offs(%rsp),%rbp;                  \
+-        notq  %rbp
+-#else
+-#define SETUP_EXCEPTION_FRAME_POINTER(offs)
+-#endif
+-
+ #ifndef NDEBUG
+ #define ASSERT_INTERRUPT_STATUS(x, msg)         \
+         pushf;                                  \
+@@ -42,31 +33,6 @@ void ret_from_intr(void);
+ #define ASSERT_INTERRUPTS_DISABLED \
+     ASSERT_INTERRUPT_STATUS(z, "INTERRUPTS DISABLED")
+ 
+-/*
+- * This flag is set in an exception frame when registers R12-R15 did not get
+- * saved.
+- */
+-#define _TRAP_regs_partial 16
+-#define TRAP_regs_partial  (1 << _TRAP_regs_partial)
+-/*
+- * This flag gets set in an exception frame when registers R12-R15 possibly
+- * get modified from their originally saved values and hence need to be
+- * restored even if the normal call flow would restore register values.
+- *
+- * The flag being set implies _TRAP_regs_partial to be unset. Restoring
+- * R12-R15 thus is
+- * - required when this flag is set,
+- * - safe when _TRAP_regs_partial is unset.
+- */
+-#define _TRAP_regs_dirty   17
+-#define TRAP_regs_dirty    (1 << _TRAP_regs_dirty)
+-
+-#define mark_regs_dirty(r) ({ \
+-        struct cpu_user_regs *r__ = (r); \
+-        ASSERT(!((r__)->entry_vector & TRAP_regs_partial)); \
+-        r__->entry_vector |= TRAP_regs_dirty; \
+-})
+-
+ #ifdef __ASSEMBLY__
+ # define _ASM_EX(p) p-.
+ #else
+@@ -236,7 +202,7 @@ static always_inline void stac(void)
+ #endif
+ 
+ #ifdef __ASSEMBLY__
+-.macro SAVE_ALL op
++.macro SAVE_ALL op, compat=0
+ .ifeqs "\op", "CLAC"
+         ASM_CLAC
+ .else
+@@ -255,40 +221,6 @@ static always_inline void stac(void)
+         movq  %rdx,UREGS_rdx(%rsp)
+         movq  %rcx,UREGS_rcx(%rsp)
+         movq  %rax,UREGS_rax(%rsp)
+-        movq  %r8,UREGS_r8(%rsp)
+-        movq  %r9,UREGS_r9(%rsp)
+-        movq  %r10,UREGS_r10(%rsp)
+-        movq  %r11,UREGS_r11(%rsp)
+-        movq  %rbx,UREGS_rbx(%rsp)
+-        movq  %rbp,UREGS_rbp(%rsp)
+-        SETUP_EXCEPTION_FRAME_POINTER(UREGS_rbp)
+-        movq  %r12,UREGS_r12(%rsp)
+-        movq  %r13,UREGS_r13(%rsp)
+-        movq  %r14,UREGS_r14(%rsp)
+-        movq  %r15,UREGS_r15(%rsp)
+-.endm
+-
+-/*
+- * Save all registers not preserved by C code or used in entry/exit code. Mark
+- * the frame as partial.
+- *
+- * @type: exception type
+- * @compat: R8-R15 don't need saving, and the frame nevertheless is complete
+- */
+-.macro SAVE_VOLATILE type compat=0
+-.if \compat
+-        movl  $\type,UREGS_entry_vector-UREGS_error_code(%rsp)
+-.else
+-        movl  $\type|TRAP_regs_partial,\
+-              UREGS_entry_vector-UREGS_error_code(%rsp)
+-.endif
+-        addq  $-(UREGS_error_code-UREGS_r15),%rsp
+-        cld
+-        movq  %rdi,UREGS_rdi(%rsp)
+-        movq  %rsi,UREGS_rsi(%rsp)
+-        movq  %rdx,UREGS_rdx(%rsp)
+-        movq  %rcx,UREGS_rcx(%rsp)
+-        movq  %rax,UREGS_rax(%rsp)
+ .if !\compat
+         movq  %r8,UREGS_r8(%rsp)
+         movq  %r9,UREGS_r9(%rsp)
+@@ -297,20 +229,17 @@ static always_inline void stac(void)
+ .endif
+         movq  %rbx,UREGS_rbx(%rsp)
+         movq  %rbp,UREGS_rbp(%rsp)
+-        SETUP_EXCEPTION_FRAME_POINTER(UREGS_rbp)
+-.endm
+-
+-/*
+- * Complete a frame potentially only partially saved.
+- */
+-.macro SAVE_PRESERVED
+-        btrl  $_TRAP_regs_partial,UREGS_entry_vector(%rsp)
+-        jnc   987f
++#ifdef CONFIG_FRAME_POINTER
++/* Indicate special exception stack frame by inverting the frame pointer. */
++        leaq  UREGS_rbp(%rsp), %rbp
++        notq  %rbp
++#endif
++.if !\compat
+         movq  %r12,UREGS_r12(%rsp)
+         movq  %r13,UREGS_r13(%rsp)
+         movq  %r14,UREGS_r14(%rsp)
+         movq  %r15,UREGS_r15(%rsp)
+-987:
++.endif
+ .endm
+ 
+ #define LOAD_ONE_REG(reg, compat) \
+@@ -330,7 +259,6 @@ static always_inline void stac(void)
+  */
+ .macro RESTORE_ALL adj=0 compat=0
+ .if !\compat
+-        testl $TRAP_regs_dirty,UREGS_entry_vector(%rsp)
+         movq  UREGS_r11(%rsp),%r11
+         movq  UREGS_r10(%rsp),%r10
+         movq  UREGS_r9(%rsp),%r9
+@@ -347,33 +275,16 @@ static always_inline void stac(void)
+         LOAD_ONE_REG(si, \compat)
+         LOAD_ONE_REG(di, \compat)
+ .if !\compat
+-        jz    987f
+         movq  UREGS_r15(%rsp),%r15
+         movq  UREGS_r14(%rsp),%r14
+         movq  UREGS_r13(%rsp),%r13
+         movq  UREGS_r12(%rsp),%r12
+-#ifndef NDEBUG
+-        .subsection 1
+-987:    testl $TRAP_regs_partial,UREGS_entry_vector(%rsp)
+-        jnz   987f
+-        cmpq  UREGS_r15(%rsp),%r15
+-        jne   789f
+-        cmpq  UREGS_r14(%rsp),%r14
+-        jne   789f
+-        cmpq  UREGS_r13(%rsp),%r13
+-        jne   789f
+-        cmpq  UREGS_r12(%rsp),%r12
+-        je    987f
+-789:    BUG   /* Corruption of partial register state. */
+-        .subsection 0
+-#endif
+ .else
+         xor %r15, %r15
+         xor %r14, %r14
+         xor %r13, %r13
+         xor %r12, %r12
+ .endif
+-987:
+         LOAD_ONE_REG(bp, \compat)
+         LOAD_ONE_REG(bx, \compat)
+         subq  $-(UREGS_error_code-UREGS_r15+\adj), %rsp
+-- 
+2.1.4
+
+From 57dc197cf0d36c56ba1d9d32c6a1454bb52605bb Mon Sep 17 00:00:00 2001
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Wed, 17 Jan 2018 16:56:03 +0100
+Subject: [PATCH] x86/mm: Always set _PAGE_ACCESSED on L4e updates
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+master commit: bd61fe94bee0556bc2f64999a4a8315b93f90f21
+master date: 2018-01-15 13:53:16 +0000
+---
+ xen/arch/x86/pv/mm.h | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/xen/arch/x86/pv/mm.h b/xen/arch/x86/pv/mm.h
+index 7502d53..976209b 100644
+--- a/xen/arch/x86/pv/mm.h
++++ b/xen/arch/x86/pv/mm.h
+@@ -144,9 +144,21 @@ static inline l3_pgentry_t unadjust_guest_l3e(l3_pgentry_t l3e,
+ static inline l4_pgentry_t adjust_guest_l4e(l4_pgentry_t l4e,
+                                             const struct domain *d)
+ {
+-    if ( likely(l4e_get_flags(l4e) & _PAGE_PRESENT) &&
+-         likely(!is_pv_32bit_domain(d)) )
+-        l4e_add_flags(l4e, _PAGE_USER);
++    /*
++     * When shadowing an L4 behind the guests back (e.g. for per-pcpu
++     * purposes), we cannot efficiently sync access bit updates from hardware
++     * (on the shadow tables) back into the guest view.
++     *
++     * We therefore unconditionally set _PAGE_ACCESSED even in the guests
++     * view.  This will appear to the guest as a CPU which proactively pulls
++     * all valid L4e's into its TLB, which is compatible with the x86 ABI.
++     *
++     * At the time of writing, all PV guests set the access bit anyway, so
++     * this is no actual change in their behaviour.
++     */
++    if ( likely(l4e_get_flags(l4e) & _PAGE_PRESENT) )
++        l4e_add_flags(l4e, (_PAGE_ACCESSED |
++                            (is_pv_32bit_domain(d) ? 0 : _PAGE_USER)));
+ 
+     return l4e;
+ }
+-- 
+2.1.4
+
+From 234f481337ea1a93db968d614649a6bdfdc8418a Mon Sep 17 00:00:00 2001
 From: Jan Beulich <jbeulich@suse.com>
-Date: Wed, 17 Jan 2018 17:07:33 +0100
-Subject: [PATCH 3/4] x86: Meltdown band-aid against malicious 64-bit PV guests
+Date: Wed, 17 Jan 2018 16:56:57 +0100
+Subject: [PATCH] x86: Meltdown band-aid against malicious 64-bit PV guests
 
 This is a very simplistic change limiting the amount of memory a running
 64-bit PV guest has mapped (and hence available for attacking): Only the
@@ -29,7 +481,6 @@ Signed-off-by: Jan Beulich <jbeulich@suse.com>
 Reviewed-by: Andrew Cooper <andrew.cooper3@citrix.com>
 master commit: 5784de3e2067ed73efc2fe42e62831e8ae7f46c4
 master date: 2018-01-16 17:49:03 +0100
-(cherry picked from commit 1e0974638d65d9b8acf9ac7511d747188f38bcc3)
 ---
  xen/arch/x86/domain.c              |   5 +
  xen/arch/x86/mm.c                  |  21 ++++
@@ -44,12 +495,12 @@ master date: 2018-01-16 17:49:03 +0100
  10 files changed, 428 insertions(+), 6 deletions(-)
 
 diff --git a/xen/arch/x86/domain.c b/xen/arch/x86/domain.c
-index 07b50315b9..c0f0fc7a32 100644
+index b44c95b..f4a3d74 100644
 --- a/xen/arch/x86/domain.c
 +++ b/xen/arch/x86/domain.c
-@@ -1933,6 +1933,9 @@ static void paravirt_ctxt_switch_to(struct vcpu *v)
- 
-     switch_kernel_stack(v);
+@@ -1507,6 +1507,9 @@ void paravirt_ctxt_switch_to(struct vcpu *v)
+ {
+     unsigned long cr4;
  
 +    this_cpu(root_pgt)[root_table_offset(PERDOMAIN_VIRT_START)] =
 +        l4e_from_page(v->domain->arch.perdomain_l3_pg, __PAGE_HYPERVISOR_RW);
@@ -57,7 +508,7 @@ index 07b50315b9..c0f0fc7a32 100644
      cr4 = pv_guest_cr4_to_real_cr4(v);
      if ( unlikely(cr4 != read_cr4()) )
          write_cr4(cr4);
-@@ -2102,6 +2105,8 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
+@@ -1676,6 +1679,8 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
  
      ASSERT(local_irq_is_enabled());
  
@@ -67,18 +518,18 @@ index 07b50315b9..c0f0fc7a32 100644
      /* Allow at most one CPU at a time to be dirty. */
      ASSERT(cpumask_weight(&dirty_mask) <= 1);
 diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
-index 981458907f..78f4cb37f5 100644
+index a7a76a7..6c7d120 100644
 --- a/xen/arch/x86/mm.c
 +++ b/xen/arch/x86/mm.c
-@@ -3906,6 +3906,7 @@ long do_mmu_update(
+@@ -3509,6 +3509,7 @@ long do_mmu_update(
      struct vcpu *curr = current, *v = curr;
      struct domain *d = v->domain, *pt_owner = d, *pg_owner;
-     struct domain_mmap_cache mapcache;
+     mfn_t map_mfn = INVALID_MFN;
 +    bool sync_guest = false;
      uint32_t xsm_needed = 0;
      uint32_t xsm_checked = 0;
      int rc = put_old_guest_table(curr);
-@@ -4054,6 +4055,8 @@ long do_mmu_update(
+@@ -3663,6 +3664,8 @@ long do_mmu_update(
                  case PGT_l4_page_table:
                      rc = mod_l4_entry(va, l4e_from_intpte(req.val), mfn,
                                        cmd == MMU_PT_UPDATE_PRESERVE_AD, v);
@@ -87,9 +538,9 @@ index 981458907f..78f4cb37f5 100644
                      break;
                  case PGT_writable_page:
                      perfc_incr(writable_mmu_updates);
-@@ -4156,6 +4159,24 @@ long do_mmu_update(
- 
-     domain_mmap_cache_destroy(&mapcache);
+@@ -3765,6 +3768,24 @@ long do_mmu_update(
+     if ( va )
+         unmap_domain_page(va);
  
 +    if ( sync_guest )
 +    {
@@ -113,10 +564,10 @@ index 981458907f..78f4cb37f5 100644
  
   out:
 diff --git a/xen/arch/x86/smpboot.c b/xen/arch/x86/smpboot.c
-index 26b5301dcc..965a49f923 100644
+index 1609b62..b1fbb57 100644
 --- a/xen/arch/x86/smpboot.c
 +++ b/xen/arch/x86/smpboot.c
-@@ -321,6 +321,9 @@ void start_secondary(void *unused)
+@@ -327,6 +327,9 @@ void start_secondary(void *unused)
       */
      spin_debug_disable();
  
@@ -354,7 +805,7 @@ index 26b5301dcc..965a49f923 100644
      set_nr_sockets();
  
      socket_cpumask = xzalloc_array(cpumask_t *, nr_sockets);
-@@ -865,6 +1061,8 @@ void __init smp_prepare_boot_cpu(void)
+@@ -864,6 +1060,8 @@ void __init smp_prepare_boot_cpu(void)
  #if NR_CPUS > 2 * BITS_PER_LONG
      per_cpu(scratch_cpumask, cpu) = &scratch_cpu0mask;
  #endif
@@ -364,7 +815,7 @@ index 26b5301dcc..965a49f923 100644
  
  static void
 diff --git a/xen/arch/x86/x86_64/asm-offsets.c b/xen/arch/x86/x86_64/asm-offsets.c
-index e136af6b99..b1a4310974 100644
+index e136af6..b1a4310 100644
 --- a/xen/arch/x86/x86_64/asm-offsets.c
 +++ b/xen/arch/x86/x86_64/asm-offsets.c
 @@ -137,6 +137,8 @@ void __dummy__(void)
@@ -377,10 +828,10 @@ index e136af6b99..b1a4310974 100644
      BLANK();
  
 diff --git a/xen/arch/x86/x86_64/compat/entry.S b/xen/arch/x86/x86_64/compat/entry.S
-index 37864a67f3..86ab78063a 100644
+index 3fea54e..e668f00 100644
 --- a/xen/arch/x86/x86_64/compat/entry.S
 +++ b/xen/arch/x86/x86_64/compat/entry.S
-@@ -197,6 +197,17 @@ ENTRY(cstar_enter)
+@@ -199,6 +199,17 @@ ENTRY(cstar_enter)
          pushq $0
          movl  $TRAP_syscall, 4(%rsp)
          SAVE_ALL
@@ -399,10 +850,10 @@ index 37864a67f3..86ab78063a 100644
          movq  VCPU_domain(%rbx),%rcx
          cmpb  $0,DOMAIN_is_32bit_pv(%rcx)
 diff --git a/xen/arch/x86/x86_64/entry.S b/xen/arch/x86/x86_64/entry.S
-index 668bf8ac28..16cf095ee1 100644
+index 1dd9ccf..fc38874 100644
 --- a/xen/arch/x86/x86_64/entry.S
 +++ b/xen/arch/x86/x86_64/entry.S
-@@ -35,6 +35,32 @@ ENTRY(switch_to_kernel)
+@@ -37,6 +37,32 @@ ENTRY(switch_to_kernel)
  /* %rbx: struct vcpu, interrupts disabled */
  restore_all_guest:
          ASSERT_INTERRUPTS_DISABLED
@@ -435,7 +886,7 @@ index 668bf8ac28..16cf095ee1 100644
          RESTORE_ALL
          testw $TRAP_syscall,4(%rsp)
          jz    iret_exit_to_guest
-@@ -69,6 +95,22 @@ iret_exit_to_guest:
+@@ -71,6 +97,22 @@ iret_exit_to_guest:
          ALIGN
  /* No special register assumptions. */
  restore_all_xen:
@@ -458,7 +909,7 @@ index 668bf8ac28..16cf095ee1 100644
          RESTORE_ALL adj=8
          iretq
  
-@@ -98,7 +140,18 @@ ENTRY(lstar_enter)
+@@ -100,7 +142,18 @@ ENTRY(lstar_enter)
          pushq $0
          movl  $TRAP_syscall, 4(%rsp)
          SAVE_ALL
@@ -478,7 +929,7 @@ index 668bf8ac28..16cf095ee1 100644
          testb $TF_kernel_mode,VCPU_thread_flags(%rbx)
          jz    switch_to_kernel
  
-@@ -190,7 +243,18 @@ GLOBAL(sysenter_eflags_saved)
+@@ -192,7 +245,18 @@ GLOBAL(sysenter_eflags_saved)
          pushq $0
          movl  $TRAP_syscall, 4(%rsp)
          SAVE_ALL
@@ -498,7 +949,7 @@ index 668bf8ac28..16cf095ee1 100644
          cmpb  $0,VCPU_sysenter_disables_events(%rbx)
          movq  VCPU_sysenter_addr(%rbx),%rax
          setne %cl
-@@ -226,13 +290,23 @@ ENTRY(int80_direct_trap)
+@@ -228,13 +292,23 @@ ENTRY(int80_direct_trap)
          movl  $0x80, 4(%rsp)
          SAVE_ALL
  
@@ -523,7 +974,7 @@ index 668bf8ac28..16cf095ee1 100644
  
          /* Check that the callback is non-null. */
          leaq  VCPU_int80_bounce(%rbx),%rdx
-@@ -389,9 +463,27 @@ ENTRY(dom_crash_sync_extable)
+@@ -391,9 +465,27 @@ ENTRY(dom_crash_sync_extable)
  
  ENTRY(common_interrupt)
          SAVE_ALL CLAC
@@ -551,7 +1002,7 @@ index 668bf8ac28..16cf095ee1 100644
          jmp ret_from_intr
  
  /* No special register assumptions. */
-@@ -409,6 +501,23 @@ ENTRY(page_fault)
+@@ -411,6 +503,23 @@ ENTRY(page_fault)
  /* No special register assumptions. */
  GLOBAL(handle_exception)
          SAVE_ALL CLAC
@@ -575,7 +1026,7 @@ index 668bf8ac28..16cf095ee1 100644
  handle_exception_saved:
          GET_CURRENT(bx)
          testb $X86_EFLAGS_IF>>8,UREGS_eflags+1(%rsp)
-@@ -473,6 +582,7 @@ handle_exception_saved:
+@@ -475,6 +584,7 @@ handle_exception_saved:
          leaq  exception_table(%rip),%rdx
          PERFC_INCR(exceptions, %rax, %rbx)
          callq *(%rdx,%rax,8)
@@ -583,7 +1034,7 @@ index 668bf8ac28..16cf095ee1 100644
          testb $3,UREGS_cs(%rsp)
          jz    restore_all_xen
          leaq  VCPU_trap_bounce(%rbx),%rdx
-@@ -505,6 +615,7 @@ exception_with_ints_disabled:
+@@ -507,6 +617,7 @@ exception_with_ints_disabled:
          rep;  movsq                     # make room for ec/ev
  1:      movq  UREGS_error_code(%rsp),%rax # ec/ev
          movq  %rax,UREGS_kernel_sizeof(%rsp)
@@ -591,7 +1042,7 @@ index 668bf8ac28..16cf095ee1 100644
          jmp   restore_all_xen           # return to fixup code
  
  /* No special register assumptions. */
-@@ -583,6 +694,17 @@ ENTRY(double_fault)
+@@ -585,6 +696,17 @@ ENTRY(double_fault)
          movl  $TRAP_double_fault,4(%rsp)
          /* Set AC to reduce chance of further SMAP faults */
          SAVE_ALL STAC
@@ -609,7 +1060,7 @@ index 668bf8ac28..16cf095ee1 100644
          movq  %rsp,%rdi
          call  do_double_fault
          BUG   /* do_double_fault() shouldn't return. */
-@@ -601,10 +723,28 @@ ENTRY(nmi)
+@@ -603,10 +725,28 @@ ENTRY(nmi)
          movl  $TRAP_nmi,4(%rsp)
  handle_ist_exception:
          SAVE_ALL CLAC
@@ -639,7 +1090,7 @@ index 668bf8ac28..16cf095ee1 100644
          GET_CPUINFO_FIELD(guest_cpu_user_regs,di)
          movq  %rsp,%rsi
          movl  $UREGS_kernel_sizeof/8,%ecx
-@@ -614,6 +754,7 @@ handle_ist_exception:
+@@ -616,6 +756,7 @@ handle_ist_exception:
          movzbl UREGS_entry_vector(%rsp),%eax
          leaq  exception_table(%rip),%rdx
          callq *(%rdx,%rax,8)
@@ -648,7 +1099,7 @@ index 668bf8ac28..16cf095ee1 100644
          jne   ret_from_intr
  
 diff --git a/xen/include/asm-x86/asm_defns.h b/xen/include/asm-x86/asm_defns.h
-index 98192eb4e6..fb0fee9286 100644
+index 98192eb..fb0fee9 100644
 --- a/xen/include/asm-x86/asm_defns.h
 +++ b/xen/include/asm-x86/asm_defns.h
 @@ -93,9 +93,30 @@ void ret_from_intr(void);
@@ -699,7 +1150,7 @@ index 98192eb4e6..fb0fee9286 100644
          667: ASM_NOP5;                                             \
          .pushsection .altinstr_replacement, "ax";                  \
 diff --git a/xen/include/asm-x86/current.h b/xen/include/asm-x86/current.h
-index 89849929eb..b929c48c85 100644
+index 8984992..b929c48 100644
 --- a/xen/include/asm-x86/current.h
 +++ b/xen/include/asm-x86/current.h
 @@ -41,6 +41,18 @@ struct cpu_info {
@@ -722,10 +1173,10 @@ index 89849929eb..b929c48c85 100644
  };
  
 diff --git a/xen/include/asm-x86/processor.h b/xen/include/asm-x86/processor.h
-index 00cc23ce40..0291e82de3 100644
+index 41a8d8c..2962e83 100644
 --- a/xen/include/asm-x86/processor.h
 +++ b/xen/include/asm-x86/processor.h
-@@ -466,6 +466,7 @@ extern idt_entry_t idt_table[];
+@@ -462,6 +462,7 @@ extern idt_entry_t idt_table[];
  extern idt_entry_t *idt_tables[];
  
  DECLARE_PER_CPU(struct tss_struct, init_tss);
@@ -734,10 +1185,10 @@ index 00cc23ce40..0291e82de3 100644
  extern void init_int80_direct_trap(struct vcpu *v);
  
 diff --git a/xen/include/asm-x86/x86_64/page.h b/xen/include/asm-x86/x86_64/page.h
-index 1a6cae6283..749554fbbb 100644
+index 6fb7cd5..05a0334 100644
 --- a/xen/include/asm-x86/x86_64/page.h
 +++ b/xen/include/asm-x86/x86_64/page.h
-@@ -25,8 +25,8 @@
+@@ -24,8 +24,8 @@
  /* These are architectural limits. Current CPUs support only 40-bit phys. */
  #define PADDR_BITS              52
  #define VADDR_BITS              48
@@ -746,9 +1197,9 @@ index 1a6cae6283..749554fbbb 100644
 +#define PADDR_MASK              ((_AC(1,UL) << PADDR_BITS) - 1)
 +#define VADDR_MASK              ((_AC(1,UL) << VADDR_BITS) - 1)
  
- #define is_canonical_address(x) (((long)(x) >> 47) == ((long)(x) >> 63))
- 
-@@ -116,6 +116,7 @@ typedef l4_pgentry_t root_pgentry_t;
+ #define VADDR_TOP_BIT           (1UL << (VADDR_BITS - 1))
+ #define CANONICAL_MASK          (~0UL & ~VADDR_MASK)
+@@ -107,6 +107,7 @@ typedef l4_pgentry_t root_pgentry_t;
        : (((_s) < ROOT_PAGETABLE_FIRST_XEN_SLOT) ||  \
           ((_s) > ROOT_PAGETABLE_LAST_XEN_SLOT)))
  
@@ -757,5 +1208,166 @@ index 1a6cae6283..749554fbbb 100644
  #define root_get_flags            l4e_get_flags
  #define root_get_intpte           l4e_get_intpte
 -- 
-2.15.0
+2.1.4
+
+From 7cccd6f748ec724cf9408cec6b3ec8e54a8a2c1f Mon Sep 17 00:00:00 2001
+From: Jan Beulich <jbeulich@suse.com>
+Date: Wed, 17 Jan 2018 16:57:33 +0100
+Subject: [PATCH] x86: allow Meltdown band-aid to be disabled
+
+First of all we don't need it on AMD systems. Additionally allow its use
+to be controlled by command line option. For best backportability, this
+intentionally doesn't use alternative instruction patching to achieve
+the intended effect - while we likely want it, this will be later
+follow-up.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Andrew Cooper <andrew.cooper3@citrix.com>
+master commit: e871e80c38547d9faefc6604532ba3e985e65873
+master date: 2018-01-16 17:50:59 +0100
+---
+ docs/misc/xen-command-line.markdown | 12 ++++++++++++
+ xen/arch/x86/domain.c               |  7 +++++--
+ xen/arch/x86/mm.c                   |  2 +-
+ xen/arch/x86/smpboot.c              | 17 ++++++++++++++---
+ xen/arch/x86/x86_64/entry.S         |  2 ++
+ 5 files changed, 34 insertions(+), 6 deletions(-)
+
+diff --git a/docs/misc/xen-command-line.markdown b/docs/misc/xen-command-line.markdown
+index 781110d..49539b4 100644
+--- a/docs/misc/xen-command-line.markdown
++++ b/docs/misc/xen-command-line.markdown
+@@ -1849,6 +1849,18 @@ In the case that x2apic is in use, this option switches between physical and
+ clustered mode.  The default, given no hint from the **FADT**, is cluster
+ mode.
+ 
++### xpti
++> `= <boolean>`
++
++> Default: `false` on AMD hardware
++> Default: `true` everywhere else
++
++Override default selection of whether to isolate 64-bit PV guest page
++tables.
++
++** WARNING: Not yet a complete isolation implementation, but better than
++nothing. **
++
+ ### xsave
+ > `= <boolean>`
+ 
+diff --git a/xen/arch/x86/domain.c b/xen/arch/x86/domain.c
+index f4a3d74..b357b60 100644
+--- a/xen/arch/x86/domain.c
++++ b/xen/arch/x86/domain.c
+@@ -1505,10 +1505,13 @@ void paravirt_ctxt_switch_from(struct vcpu *v)
+ 
+ void paravirt_ctxt_switch_to(struct vcpu *v)
+ {
++    root_pgentry_t *root_pgt = this_cpu(root_pgt);
+     unsigned long cr4;
+ 
+-    this_cpu(root_pgt)[root_table_offset(PERDOMAIN_VIRT_START)] =
+-        l4e_from_page(v->domain->arch.perdomain_l3_pg, __PAGE_HYPERVISOR_RW);
++    if ( root_pgt )
++        root_pgt[root_table_offset(PERDOMAIN_VIRT_START)] =
++            l4e_from_page(v->domain->arch.perdomain_l3_pg,
++                          __PAGE_HYPERVISOR_RW);
+ 
+     cr4 = pv_guest_cr4_to_real_cr4(v);
+     if ( unlikely(cr4 != read_cr4()) )
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 6c7d120..53295f8 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -3665,7 +3665,7 @@ long do_mmu_update(
+                     rc = mod_l4_entry(va, l4e_from_intpte(req.val), mfn,
+                                       cmd == MMU_PT_UPDATE_PRESERVE_AD, v);
+                     if ( !rc )
+-                        sync_guest = true;
++                        sync_guest = this_cpu(root_pgt);
+                     break;
+                 case PGT_writable_page:
+                     perfc_incr(writable_mmu_updates);
+diff --git a/xen/arch/x86/smpboot.c b/xen/arch/x86/smpboot.c
+index b1fbb57..edf607f 100644
+--- a/xen/arch/x86/smpboot.c
++++ b/xen/arch/x86/smpboot.c
+@@ -328,7 +328,7 @@ void start_secondary(void *unused)
+     spin_debug_disable();
+ 
+     get_cpu_info()->xen_cr3 = 0;
+-    get_cpu_info()->pv_cr3 = __pa(this_cpu(root_pgt));
++    get_cpu_info()->pv_cr3 = this_cpu(root_pgt) ? __pa(this_cpu(root_pgt)) : 0;
+ 
+     load_system_tables();
+ 
+@@ -736,14 +736,20 @@ static int clone_mapping(const void *ptr, root_pgentry_t *rpt)
+     return 0;
+ }
+ 
++static __read_mostly int8_t opt_xpti = -1;
++boolean_param("xpti", opt_xpti);
+ DEFINE_PER_CPU(root_pgentry_t *, root_pgt);
+ 
+ static int setup_cpu_root_pgt(unsigned int cpu)
+ {
+-    root_pgentry_t *rpt = alloc_xen_pagetable();
++    root_pgentry_t *rpt;
+     unsigned int off;
+     int rc;
+ 
++    if ( !opt_xpti )
++        return 0;
++
++    rpt = alloc_xen_pagetable();
+     if ( !rpt )
+         return -ENOMEM;
+ 
+@@ -987,10 +993,14 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
+ 
+     stack_base[0] = stack_start;
+ 
++    if ( opt_xpti < 0 )
++        opt_xpti = boot_cpu_data.x86_vendor != X86_VENDOR_AMD;
++
+     rc = setup_cpu_root_pgt(0);
+     if ( rc )
+         panic("Error %d setting up PV root page table\n", rc);
+-    get_cpu_info()->pv_cr3 = __pa(per_cpu(root_pgt, 0));
++    if ( per_cpu(root_pgt, 0) )
++        get_cpu_info()->pv_cr3 = __pa(per_cpu(root_pgt, 0));
+ 
+     set_nr_sockets();
+ 
+@@ -1062,6 +1072,7 @@ void __init smp_prepare_boot_cpu(void)
+ #endif
+ 
+     get_cpu_info()->xen_cr3 = 0;
++    get_cpu_info()->pv_cr3 = 0;
+ }
+ 
+ static void
+diff --git a/xen/arch/x86/x86_64/entry.S b/xen/arch/x86/x86_64/entry.S
+index fc38874..a8825c8 100644
+--- a/xen/arch/x86/x86_64/entry.S
++++ b/xen/arch/x86/x86_64/entry.S
+@@ -46,6 +46,7 @@ restore_all_guest:
+         movabs $DIRECTMAP_VIRT_START, %rcx
+         mov   %rdi, %rax
+         and   %rsi, %rdi
++        jz    .Lrag_keep_cr3
+         and   %r9, %rsi
+         add   %rcx, %rdi
+         add   %rcx, %rsi
+@@ -62,6 +63,7 @@ restore_all_guest:
+         rep movsq
+         mov   %r9, STACK_CPUINFO_FIELD(xen_cr3)(%rdx)
+         write_cr3 rax, rdi, rsi
++.Lrag_keep_cr3:
+ 
+         RESTORE_ALL
+         testw $TRAP_syscall,4(%rsp)
+-- 
+2.1.4
 
