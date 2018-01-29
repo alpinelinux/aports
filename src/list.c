@@ -25,6 +25,7 @@ struct list_ctx {
 	unsigned int available : 1;
 	unsigned int upgradable : 1;
 	unsigned int match_origin : 1;
+	unsigned int match_depends : 1;
 
 	struct apk_string_array *filters;
 };
@@ -145,16 +146,35 @@ static void filter_package(const struct apk_package *pkg, const struct list_ctx 
 	print_package(pkg, ctx);
 }
 
+static void iterate_providers(const struct apk_name *name, const struct list_ctx *ctx)
+{
+	struct apk_provider *p;
+
+	foreach_array_item(p, name->providers)
+	{
+		if (p->pkg->name != name)
+			continue;
+
+		filter_package(p->pkg, ctx);
+	}
+}
+
 static void print_result(struct apk_database *db, const char *match, struct apk_name *name, void *pctx)
 {
 	struct list_ctx *ctx = pctx;
-	struct apk_provider *p;
 
 	if (name == NULL)
 		return;
 
-	foreach_array_item(p, name->providers)
-		filter_package(p->pkg, ctx);
+	if (ctx->match_depends)
+	{
+		struct apk_name **pname;
+
+		foreach_array_item(pname, name->rdepends)
+			iterate_providers(*pname, ctx);
+	}
+	else
+		iterate_providers(name, ctx);
 }
 
 static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int optch, const char *optarg)
@@ -183,6 +203,9 @@ static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int op
 	case 'o':
 		ctx->match_origin = 1;
 		break;
+	case 'd':
+		ctx->match_depends = 1;
+		break;
 	default:
 		return -1;
 	}
@@ -196,6 +219,7 @@ static const struct apk_option options_applet[] = {
 	{ 'a', "available", "List available packages only" },
 	{ 'u', "upgradable", "List upgradable packages only" },
 	{ 'o', "origin", "List packages by origin" },
+	{ 'd', "depends", "List packages by dependency" },
 };
 
 static const struct apk_option_group optgroup_applet = {
