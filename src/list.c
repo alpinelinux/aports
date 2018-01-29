@@ -125,36 +125,36 @@ static void print_package(const struct apk_package *pkg, const struct list_ctx *
 	printf("\n");
 }
 
+static void filter_package(const struct apk_package *pkg, const struct list_ctx *ctx)
+{
+	if (ctx->match_origin && !origin_matches(ctx, pkg))
+		return;
+
+	if (ctx->installed && pkg->ipkg == NULL)
+		return;
+
+	if (ctx->orphaned && !is_orphaned(pkg->name))
+		return;
+
+	if (ctx->available && pkg->repos == BIT(1))
+		return;
+
+	if (ctx->upgradable && !is_upgradable(pkg->name, pkg))
+		return;
+
+	print_package(pkg, ctx);
+}
+
 static void print_result(struct apk_database *db, const char *match, struct apk_name *name, void *pctx)
 {
 	struct list_ctx *ctx = pctx;
 	struct apk_provider *p;
-	struct apk_package *pkg;
 
 	if (name == NULL)
 		return;
 
 	foreach_array_item(p, name->providers)
-	{
-		pkg = p->pkg;
-
-		if (ctx->match_origin && !origin_matches(ctx, pkg))
-			continue;
-
-		if (ctx->installed && pkg->ipkg == NULL)
-			continue;
-
-		if (ctx->orphaned && !is_orphaned(name))
-			continue;
-
-		if (ctx->available && pkg->repos == BIT(1))
-			continue;
-
-		if (ctx->upgradable && !is_upgradable(name, pkg))
-			continue;
-
-		print_package(pkg, ctx);
-	}
+		filter_package(p->pkg, ctx);
 }
 
 static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int optch, const char *optarg)
