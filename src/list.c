@@ -26,6 +26,7 @@ struct list_ctx {
 	unsigned int upgradable : 1;
 	unsigned int match_origin : 1;
 	unsigned int match_depends : 1;
+	unsigned int match_real_names : 1;
 
 	struct apk_string_array *filters;
 };
@@ -152,7 +153,7 @@ static void iterate_providers(const struct apk_name *name, const struct list_ctx
 
 	foreach_array_item(p, name->providers)
 	{
-		if (p->pkg->name != name)
+		if (ctx->match_real_names && p->pkg->name != name)
 			continue;
 
 		filter_package(p->pkg, ctx);
@@ -205,6 +206,10 @@ static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int op
 		break;
 	case 'd':
 		ctx->match_depends = 1;
+		ctx->match_real_names = 1;
+		break;
+	case 'r':
+		ctx->match_real_names = 1;
 		break;
 	default:
 		return -1;
@@ -220,6 +225,7 @@ static const struct apk_option options_applet[] = {
 	{ 'u', "upgradable", "List upgradable packages only" },
 	{ 'o', "origin", "List packages by origin" },
 	{ 'd', "depends", "List packages by dependency" },
+	{ 'r', "real-names", "List packages by real names only" },
 };
 
 static const struct apk_option_group optgroup_applet = {
