@@ -102,7 +102,8 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base build-base \
 	   attr libcap patch sudo acl fakeroot tar \
 	   pax-utils abuild openssh \
-	   ncurses libcap-ng util-linux lvm2 popt xz cryptsetup kmod lddtree mkinitfs \
+	   ncurses libcap-ng util-linux lvm2 popt xz \
+	   json-c argon2 cryptsetup kmod lddtree mkinitfs \
 	   community/go libffi community/ghc \
 	   $KERNEL_PKG ; do
 
