@@ -13,7 +13,7 @@ This means you care about the quality of your contributions.
   * Know how to work with git history (rebasing your commits).
   * Know how to create Pull Requests.
 2. Have access to an Alpine Linux [development environment](https://wiki.alpinelinux.org/wiki/Developer_Documentation#Development).
-3. Please __do not__ submit PR's via Github's web interface. You should have a working [development envirorment](https://wiki.alpinelinux.org/wiki/Developer_Documentation#Development) available and submit your commits from your git client.
+3. Please __do not__ submit PR's via Github's web interface. You should have a working [development environment](https://wiki.alpinelinux.org/wiki/Developer_Documentation#Development) available and submit your commits from your git client.
 
 ### Before you start making changes
 

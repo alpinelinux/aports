@@ -94,15 +94,12 @@ syslinux_gen_config() {
 
 	local _f _kf
 	for _f in $kernel_flavors; do
-		_kf=""
-		[ "$_f" = vanilla ] || _kf=-$_f
-
 		if [ -z "${xen_params+set}" ]; then
 			cat <<- EOF
 
 			LABEL $_f
 				MENU LABEL Linux $_f
-				KERNEL /boot/vmlinuz$_kf
+				KERNEL /boot/vmlinuz-$_f
 				INITRD /boot/initramfs-$_f
 				DEVICETREEDIR /boot/dtbs
 				APPEND $initfs_cmdline $kernel_cmdline
@@ -123,13 +120,10 @@ grub_gen_config() {
 	local _f _kf
 	echo "set timeout=2"
 	for _f in $kernel_flavors; do
-		_kf=""
-		[ "$_f" = vanilla ] || _kf=-$_f
-
 		cat <<- EOF
-		
+
 		menuentry "Linux $_f" {
-			linux	/boot/vmlinuz$_kf $initfs_cmdline $kernel_cmdline
+			linux	/boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline
 			initrd	/boot/initramfs-$_f
 		}
 		EOF
