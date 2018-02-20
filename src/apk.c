@@ -671,6 +671,11 @@ int main(int argc, char **argv)
 	r = applet->main(ctx, &db, args);
 	apk_db_close(&db);
 
+#ifdef TEST_MODE
+	/* in test mode, we need to always exit 0 since xargs dies otherwise */
+	r = 0;
+#endif
+
 err_and_usage:
 	if (r == -EINVAL)
 		r = usage(applet);
