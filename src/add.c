@@ -136,9 +136,10 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 			apk_blob_t b = APK_BLOB_STR(*parg);
 
 			apk_blob_pull_dep(&b, db, &dep);
-			if (APK_BLOB_IS_NULL(b) || b.len > 0) {
-				apk_error("'%s' is not a valid dependency, format is name(@tag)([<>~=]version)",
-					  *parg);
+			if (APK_BLOB_IS_NULL(b) || b.len > 0 || (virtpkg != NULL && dep.repository_tag)) {
+				apk_error("'%s' is not a valid %s dependency, format is %s",
+					  *parg, virtpkg == NULL ? "world" : "child",
+					  virtpkg == NULL ? "name(@tag)([<>~=]version)" : "name([<>~=]version)");
 				return -1;
 			}
 		}
