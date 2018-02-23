@@ -156,6 +156,10 @@ package() {
 		/dev/usbdisk	/media/usb	vfat	noauto,ro 0 0
 	EOF
 
+	if [ "$CARCH" = "s390x" ]; then
+		for i in `seq 1 6`; do sed -i -e "s/tty$i::/\#tty$i::/g" "$srcdir"/inittab; done
+		echo console::respawn:/sbin/getty 38400 /dev/console >> "$srcdir"/inittab
+	fi
 	install -m644 \
 		"$srcdir"/group \
 		"$srcdir"/passwd \
