@@ -1,7 +1,7 @@
 # Maintainer: Filipp Andronov <filipp.andronov@gmail.com>
 # Contributor: Marc Vertes <mvertes@free.fr>
 pkgname=mongodb
-pkgver=3.6.2
+pkgver=3.6.3
 pkgrel=0
 pkgdesc='A high-performance, open source, schema-free document-oriented database'
 url='http://www.mongodb.org'
@@ -85,7 +85,7 @@ package() {
 	install -Dm644 "$srcdir/mongos.confd" "$pkgdir/etc/conf.d/mongos"
 }
 
-sha512sums="7acfbcc68c1bd4e6e63eee09be1dfbb064be6f8b0144418105100a065f8162cafc9b776fe0429fd64c79b958561aa42d0bdef56588dda65acee27ccc98631f39  mongodb-src-r3.6.2.tar.gz
+sha512sums="94aa9955f99d5f6bbbe65dc3755583952525398308ca7cb9224b91d1fa403de5bb3abb63a651583815cbecaff58966b5cfe7334a36ef6583f73d8c213410ddbc  mongodb-src-r3.6.3.tar.gz
 05c4331d028eb396e6cf52d96cdaa2af7199a03522e1a8211df2d36cb053ec093a51e9abf83c4dc00c09a0b1fa119a79bcc719fbc81a48f50ca1527c26613cf0  fix-backtrace.patch
 1492137b0e3456d90a79617c1cd5ead5c71b1cfaae9ee41c75d56cd25f404ec73a690f95ce0d8c064c0a14206daca8070aa769b7cdfa904a338a425b52c293fa  fix-default-stacksize.patch
 56db8f43afc94713ac65b174189e2dd903b5e1eff0b65f1bdac159e52ad4de6606c449865d73bd47bffad6a8fc339777e2b11395596e9a476867d94a219c7925  fix-elf-native-class.patch
