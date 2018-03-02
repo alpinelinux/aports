@@ -3,8 +3,8 @@
 # Contributor: Carlo Landmeter <clandmeter@gmail.com>
 # Maintainer: Matt Smith <mcs@darkregion.net>
 pkgname=php5
-pkgver=5.6.33
-pkgrel=1
+pkgver=5.6.34
+pkgrel=0
 pkgdesc="The PHP language runtime engine"
 url="http://www.php.net/"
 arch="all"
@@ -508,7 +508,7 @@ pdo_dblib()	{ _mv_ext pdo_dblib "$pkgname-pdo freetds"; }
 wddx()		{ _mv_ext wddx; }
 opcache()	{ _mv_ext opcache; }
 
-sha512sums="d57d87bf5ceb4b8b72908dc9d4236533697ba7055c25bdd299b35ff42b9d0258020241953a6f2c448929742c73fb2e3c67aa630c556af8fccbbe312ec51f1576  php-5.6.33.tar.bz2
+sha512sums="03197a80248ddd59c118baf8d45b0acc98e63413bf63fa6844620a280f963beca0c898ec59924f624210a714bebf6f2a0b15a9b41429f0979b291818781ce997  php-5.6.34.tar.bz2
 f7d922cab98617ef910b4c14974e768c85e60424cd1b216f688b34b2d823b642a5b896463008c134ce47c150f9407f5c438823b7e7bc89b3fb440cd3e97b9d7e  php-fpm.initd
 d1dd6a5764e18414476aaaa109efcc568696ac17a61a1afdf7d0621d3e38c5be717a81ee4d11d28963f11e76879af7d3806970e651061f8c4abffb03c4bd5af4  php5-module.conf
 f1177cbf6b1f44402f421c3d317aab1a2a40d0b1209c11519c1158df337c8945f3a313d689c939768584f3e4edbe52e8bd6103fb6777462326a9d94e8ab1f505  php-install-pear-xml.patch
