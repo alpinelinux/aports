@@ -102,7 +102,6 @@ subpackages="$pkgname-dbg $pkgname-dev $pkgname-doc $pkgname-common::noarch $pkg
 	$pkgname-xmlrpc
 	$pkgname-xsl
 	$pkgname-zip
-	$pkgname-zlib
 	$pkgname-mssql
 	$pkgname-pdo_dblib
 	$pkgname-wddx
@@ -250,7 +249,7 @@ build() {
 		  --with-xsl=shared \
 		--enable-wddx=shared \
 		--enable-zip=shared \
-		  --with-zlib=shared \
+		  --with-zlib \
 		--without-db1 \
 		--without-db2 \
 		--without-db3 \
@@ -340,6 +339,7 @@ doc() {
 
 common() {
 	pkgdesc="PHP Common Files"
+	provides="$pkgname-zlib"  # for backward compatibility
 	depends=""
 
 	cd "$srcdir"/php-$pkgver
@@ -502,7 +502,6 @@ xmlreader()	{ _mv_ext xmlreader $pkgname-dom; }
 xmlrpc()	{ _mv_ext xmlrpc $pkgname-xml; }
 xsl()		{ _mv_ext xsl $pkgname-dom; }
 zip()		{ _mv_ext zip; }
-zlib()		{ _mv_ext zlib; }
 mssql()		{ _mv_ext mssql; }
 pdo_dblib()	{ _mv_ext pdo_dblib "$pkgname-pdo freetds"; }
 wddx()		{ _mv_ext wddx; }
