@@ -1,0 +1,378 @@
+# Contributor: Orson Teodoro <orsonteodoro@hotmail.com>
+# Contributor: Natanael Copa <ncopa@alpinelinux.org>
+# Maintainer: Orson Teodoro <orsonteodoro@hotmail.com>
+# Based on linux-vanilla
+
+_flavor=pf
+_rev=4
+pkgname=linux-${_flavor}
+pkgver=4.15.0_p${_rev}
+_pkgver=${pkgver%_p*}
+case $_pkgver in
+	*.*.*)	_kernver=${_pkgver%.*};;
+	*.*) _kernver=$_pkgver;;
+esac
+pkgrel=1
+pkgdesc="post-factum's patchset for desktop"
+url="http://pfactum.github.io/pf-kernel/"
+depends="mkinitfs linux-firmware"
+_depends_dev="perl gmp-dev elfutils-dev bash"
+makedepends="$_depends_dev sed installkernel bc linux-headers openssl-dev"
+options="!strip"
+_config=${config:-config-$_flavor.${CARCH}}
+source="https://cdn.kernel.org/pub/linux/kernel/v${_pkgver%%.*}.x/linux-$_kernver.tar.xz
+	https://github.com/pfactum/pf-kernel/compare/v${_pkgver%.*}...v${_pkgver%.*}-${_flavor}${_rev}.diff
+	0001-HID-apple-fix-Fn-key-Magic-Keyboard-on-bluetooth.patch
+	bfq-default-option-1.patch
+	bfq-default-option-2.patch
+	config-$_flavor.aarch64
+	config-$_flavor.armhf
+	config-$_flavor.x86
+	config-$_flavor.x86_64
+	config-$_flavor.ppc
+	config-$_flavor.ppc64le
+	config-$_flavor.s390x
+	60-schedulers.rules
+	README.Alpine"
+# Due to time constraints, I'm not including these x86: WINCHIP3D WINCHIPC6
+# CRUSOE EFFICEON GEODE_LX GEODEGX1 ELAN.  Generated per subpackage because of 
+# GraySky2 GCC patches. NATIVE optimal.
+__cpus_x86_64="SKYLAKE BROADWELL HASWELL IVYBRIDGE SANDYBRIDGE SILVERMONT \
+	WESTMERE NEHALEM CORE2 ATOM PSC ZEN EXCAVATOR STEAMROLLER PILEDRIVER \
+	BULLDOZER JAGUAR BOBCAT BARCELONA K10 K8SSE3 K8"
+__cpus_x86="VIAC7 VIAC3_2 CYRIXIII K7 K6 PENTIUM4 PENTIUMM PENTIUMIII \
+	PENTIUMII 686 586MMX 586TSC 586"
+subpackages="$pkgname-dev:_dev:$CBUILD_ARCH"
+_flavors=
+if [[ "${CBUILD_ARCH}" == "x86_64" ]] ; then
+	for _cpu in $__cpus_x86_64 ; do
+		_cpu=$(echo "${_cpu}" | tr '[:upper:]' '[:lower:]')
+		subpackages="$subpackages \
+linux-${_flavor}-${_cpu}:_build_package_x86:$CBUILD_ARCH"
+	done
+fi
+if [[ "${CBUILD_ARCH}" == "x86" ]] ; then
+	for _cpu in $__cpus_x86 ; do
+		_cpu=$(echo "${_cpu}" | tr '[:upper:]' '[:lower:]')
+		subpackages="$subpackages \
+linux-${_flavor}-${_cpu}:_build_package_x86:$CBUILD_ARCH"
+	done
+fi
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}" ;;
+	esac
+done
+if [ "${_pkgver%.0}" = "$_pkgver" ]; then
+	source="$source
+	https://cdn.kernel.org/pub/linux/kernel/v${_pkgver%%.*}.x/patch-${_pkgver}.xz"
+fi
+arch="all"
+license="GPL-2.0"
+_abi_release=${_pkgver}
+_carch=${CARCH}
+case "$_carch" in
+	aarch64*) _carch="arm64" ;;
+	arm*) _carch="arm" ;;
+	ppc*) _carch="powerpc" ;;
+	s390*) _carch="s390" ;;
+esac
+HOSTCC="${CC:-gcc}"
+HOSTCC="${HOSTCC#${CROSS_COMPILE}}"
+
+prepare() {
+	local _patch_failed=
+	cd "$srcdir"/linux-$_kernver
+	if [ "$_kernver" != "$_pkgver" ]; then
+		unxz -c < "$srcdir"/patch-$_pkgver.xz | patch -p1 -N
+	fi
+	patch -p1 < \
+		"$srcdir"/v${_pkgver%.*}...v${_pkgver%.*}-${_flavor}${_rev}.diff
+	for i in $source; do
+		case $i in
+			*.patch) patch -p1 -N -i "$srcdir"/$i ;;
+		esac
+	done
+	rm -f localversion*
+	for i in $_flavors; do
+		local _config=config-$i.${CARCH}
+		local _builddir="$srcdir"/build-$i
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$i" > "$srcdir"/build-$i/localversion-alpine
+		cp "$srcdir"/$_config "$_builddir"/.config
+		make -C "$srcdir"/linux-$_kernver \
+			O="$_builddir" HOSTCC="${CC:-gcc}" silentoldconfig
+	done
+}
+
+_unset_option() {
+	local option="$1"
+	sed -i -E -e "s|[ ]*$option(=[ym0-9]+)?\$|# $option is not set|g" \
+		.config
+}
+
+_replace_option() {
+	local option="$1"
+	local value="$2"
+	sed -i -E -e \
+	"s|[#]+[ ]*$option(=[ym0-9])? is not set|$option=$value|g" .config
+}
+
+_verify_unset_option() {
+	local option="$1"
+	set +e
+	grep -E -e "$option(=[ym0-9]+)?" .config
+	if [[ "$?" == "0" ]] ; then
+		_unset_option "$option"
+	else
+		echo "# $option is not set" >> .config
+	fi
+	set -e
+}
+
+_y_if_match() {
+	local ucputype="$1"
+	local option="$2"
+	local microarchs="$3"
+	_verify_unset_option "$option"
+	case "$ucputype" in
+		$microarchs) _replace_option "$option" "y" ;;
+	esac
+}
+
+_num_if_match() {
+	local ucputype="$1"
+	local option="$2"
+	local microarchs="$3"
+	local num="$4"
+	_verify_unset_option "$option"
+	case "$ucputype" in
+		$microarchs) _replace_option "$option" "$num" ;;
+	esac
+}
+
+_build_x86() {
+	unset LDFLAGS
+	local cputype="$1"
+        local ucputype=$(echo "$cputype" | tr '[:lower:]' '[:upper:]')
+	local i=$_flavor
+	local _UML=
+	local _X86_VSMP=
+	local _X86_GENERIC=1
+	local _X86_P6_NOP=
+	local _X86_CMPXCHG64=
+	local _c
+	cd "$srcdir"/build-$i
+	make clean
+	set +e
+	grep -E -e "^CONFIG_UML" .config ; 	_UML="$?"
+	grep -E -e "^CONFIG_X86_VSMP" .config ; _X86_VSMP="$?"
+	set -e
+	for _c in $__cpus_x86 $__cpus_x86_64; do
+		_verify_unset_option "CONFIG_M${_c}"
+	done
+	_verify_unset_option "CONFIG_GENERIC_CPU"
+	_verify_unset_option "CONFIG_X86_CMOV"
+	_verify_unset_option "CONFIG_X86_INTERNODE_CACHE_SHIFT"
+	_verify_unset_option "CONFIG_X86_P6_NOP"
+	_verify_unset_option "CONFIG_X86_TSC"
+	_verify_unset_option "CONFIG_X86_USE_3DNOW"
+	_verify_unset_option "CONFIG_X86_CMPXCHG64"
+	_verify_unset_option "CONFIG_X86_MINIMUM_CPU_FAMILY"
+	_verify_unset_option "CONFIG_X86_DEBUGCTLMSR"
+	_replace_option "CONFIG_M${ucputype}" "y"
+	if [[ "$CBUILD_ARCH" == "X86_64" ]] ; then
+		_replace_option "CONFIG_X86_CMOV" "y"
+	else
+		_y_if_match "$ucputype" "CONFIG_X86_CMOV" \
+"K8|K8SSE3|K10|BARCELONA|BOBCAT|BULLDOZER|PILEDRIVER|STEAMROLLER|EXCAVATOR|ZEN|\
+JAGUAR|K7|CORE2|NEHALEM|WESTMERE|SILVERMONT|SANDYBRIDGE|IVYBRIDGE|HASWELL|\
+BROADWELL|SKYLAKE|PENTIUM4|PENTIUMM|PENTIUMIII|PENTIUMII|686|VIAC3_2|VIAC7|\
+CRUSOE|EFFICEON|NATIVE|ATOM|GEODE_LX"
+	fi
+	if [[ -n "${_X86_VSMP}" ]] ; then
+		_replace_option "CONFIG_X86_INTERNODE_CACHE_SHIFT" "12"
+	else
+		_num_if_match "$ucputype" "CONFIG_X86_L1_CACHE_SHIFT" \
+			"PENTIUM4|PSC" "7"
+		_num_if_match "$ucputype" "CONFIG_X86_L1_CACHE_SHIFT" \
+"K7|K8|K8SSE3|K10|BARCELONA|BOBCAT|BULLDOZER|PILEDRIVER|STEAMROLLER|EXCAVATOR|\
+ZEN|JAGUAR|PENTIUMM|CORE2|NEHALEM|WESTMERE|SILVERMONT|SANDYBRIDGE|IVYBRIDGE|\
+HASWELL|BROADWELL|SKYLAKE|NATIVE|ATOM|VIAC7|X86_GENERIC|GENERIC_CPU" "6"
+		_num_if_match "$ucputype" "CONFIG_X86_L1_CACHE_SHIFT" \
+			"ELAN|GEODEGX1" "4"
+		_num_if_match "$ucputype" "CONFIG_X86_L1_CACHE_SHIFT" \
+"WINCHIP3D|WINCHIPC6|CRUSOE|EFFICEON|CYRIXIII|K6|PENTIUMIII|PENTIUMII|686|\
+586MMX|586TSC|586|VIAC3_2|GEODE_LX" "5"
+	fi
+	case "$ucputype" in
+		CORE2|PENTIUM4|PSC|ATOM|NEHALEM|WESTMERE|SILVERMONT|\
+SANDYBRIDGE|IVYBRIDGE|HASWELL|BROADWELL|SKYLAKE|NATIVE)
+			_replace_option "CONFIG_X86_P6_NOP" "y"
+			_X86_P6_NOP=1 ;;
+	esac
+	if [[ "$CBUILD_ARCH" == "X86_64" ]] ; then
+		_replace_option "CONFIG_X86_TSC" "y"
+	else	
+		_y_if_match "$ucputype" "CONFIG_X86_TSC" \
+"WINCHIP3D|CRUSOE|EFFICEON|CYRIXIII|K7|K6|PENTIUM4|PENTIUMM|PENTIUMIII|\
+PENTIUMII|686|586MMX|586TSC|K8|K8SSE3|VIAC3_2|VIAC7|GEODEGX1|GEODE_LX|CORE2|\
+NEHALEM|WESTMERE|SILVERMONT|SANDYBRIDGE|IVYBRIDGE|HASWELL|BROADWELL|SKYLAKE|\
+NATIVE|ATOM"
+	fi
+	_y_if_match "$ucputype" "CONFIG_X86_INTEL_USERCOPY" \
+"PENTIUM4|PENTIUMM|PENTIUMIII|PENTIUMII|586MMX|X86_GENERIC|K8|K8SSE3|K7|\
+EFFICEON|CORE2|K10|BARCELONA|NEHALEM|WESTMERE|SILVERMONT|SANDYBRIDGE|IVYBRIDGE|\
+HASWELL|BROADWELL|SKYLAKE|NATIVE"
+	_y_if_match "$ucputype" "CONFIG_X86_USE_PPRO_CHECKSUM" \
+"WINCHIP3D|WINCHIPC6|CYRIXIII|K7|K6|K10|PENTIUM4|PENTIUMM|PENTIUMIII|PENTIUMII|\
+686|K8|K8SSE3|VIAC3_2|VIAC7|EFFICEON|GEODE_LX|CORE2|NEHALEM|WESTMERE|\
+SILVERMONT|SANDYBRIDGE|IVYBRIDGE|HASWELL|BROADWELL|SKYLAKE|ATOM|NATIVE"
+	_y_if_match "$ucputype" "CONFIG_X86_PPRO_FENCE" \
+		"686|586MMX|586TSC|586|GEODEGX1"
+	_y_if_match "$ucputype" "CONFIG_X86_F00F_BUG" "586MMX|586TSC|586"
+	_y_if_match "$ucputype" "CONFIG_X86_ALIGNMENT_16" \
+"MWINCHIP3D|WINCHIPC6|CYRIXIII|ELAN|K6|586MMX|586TSC|586|VIAC3_2|GEODEGX1"
+	case "$ucputype" in
+		CYRIXIII|K7|GEODE_LX)
+			if [[ -z "${_UML}" ]] ; then
+				_replace_option "CONFIG_X86_USE_3DNOW" "y"
+			fi ;;
+	esac
+	if [[ "$CBUILD_ARCH" == "X86_64" ]] ; then
+		_replace_option "CONFIG_X86_CMOV" "y"
+	else
+		case "$ucputype" in
+			X86_PAE|CORE2|NEHALEM|WESTMERE|SILVERMONT|\
+SANDYBRIDGE|IVYBRIDGE|HASWELL|BROADWELL|SKYLAKE|PENTIUM4|PENTIUMM|PENTIUMIII|\
+PENTIUMII|686|ATOM|NATIVE)
+				_replace_option "CONFIG_X86_CMPXCHG64" "y"
+				_X86_CMPXCHG64=1 ;;
+		esac
+	fi
+	if [[ "$CBUILD_ARCH" == "X86_64" ]] ; then
+		_replace_option "CONFIG_X86_MINIMUM_CPU_FAMILY" "64"
+	elif [[ "$CBUILD_ARCH" == "X86_32" ]] ; then
+		if [[ -n "$_X86_P6_NOP" ]] ; then
+			_replace_option "CONFIG_X86_MINIMUM_CPU_FAMILY" "6"
+		fi
+		if [[ -n "$_X86_CMPXCHG64" ]] ; then
+			_replace_option "CONFIG_X86_MINIMUM_CPU_FAMILY" "5"
+		fi
+	else
+		_replace_option "CONFIG_X86_MINIMUM_CPU_FAMILY" "4"
+	fi
+	case "$ucputype" in
+		MK6|WINCHIPC6|WINCHIP3D|CYRIXIII|586MMX|586TSC|586) ;;
+		*)
+			if [[ -z "${_UML}" ]] ; then
+				_replace_option "CONFIG_X86_DEBUGCTLMSR" "y"
+			fi ;;
+	esac
+	make CC="${CC:-gcc}" KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+}
+
+build() {
+	unset LDFLAGS
+	for i in $_flavors; do
+		cd "$srcdir"/build-$i
+		make ARCH="$_carch" CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+	done
+}
+
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=${_pkgver}-${pkgrel}-${_buildflavor}
+	local _install
+	cd "$srcdir"/build-$_buildflavor
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+	case "$CARCH" in
+	arm*)
+		local _dtbdir="$_outdir"/usr/lib/linux-${_abi_release}
+		mkdir -p "$_dtbdir"
+		for i in arch/arm/boot/dts/*.dtb ; do
+			install -m644 "$i" "$_dtbdir"
+		done
+		_install=zinstall ;;
+	*)
+		_install=install ;;
+	esac
+	make -j1 modules_install $_install INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_PATH="$_outdir"/boot
+	rm -rf "$_outdir"/lib/modules/${_abi_release}/build \
+		"$_outdir"/lib/modules/${_abi_release}/source \
+		"$_outdir"/lib/firmware
+	install -D include/config/kernel.release \
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+	install -d "$pkgdir"/usr/share/doc/$pkgname
+	install -t "$pkgdir"/usr/share/doc/$pkgname \
+		"$srcdir"/60-schedulers.rules "$srcdir"/README.Alpine
+}
+
+package() {
+	depends="$depends linux-firmware"
+	_package $_flavor "$pkgdir"
+}
+
+_package_x86() {
+	local cputype="$1"
+	depends="$depends linux-firmware"
+	_package $_flavor "$subpkgdir"
+}
+
+_build_package_x86() {
+        local cputype=${subpkgname##*-}
+	pkgdesc="${pkgdesc} ($cputype)"
+	_build_x86 $cputype
+	_package_x86 $cputype
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _abi_release=${_pkgver}-${pkgrel}-$_flavor
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="$_depends_dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
+	mkdir -p "$dir"
+	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
+	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine
+	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" HOSTCC="${CC:-gcc}" \
+		silentoldconfig prepare modules_prepare scripts
+	rm "$dir"/Makefile "$dir"/source
+	# copy the needed stuff from real sources
+	# from ubuntu kernel build script: 
+# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
+	cd "$srcdir"/linux-$_kernver
+	find .  -path './include/*' -prune \
+		-o -path './scripts/*' -prune -o -type f \
+		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
+		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' \) \
+		-print | cpio -pdm "$dir"
+	cp -a scripts include "$dir"
+	find $(find arch -name include -type d -print) -type f \
+		| cpio -pdm "$dir"
+	install -Dm644 "$srcdir"/build-$_flavor/Module.symvers \
+		"$dir"/Module.symvers
+	install -d "$subpkgdir"/lib/modules/${_abi_release}
+	ln -sf /usr/src/linux-headers-${_abi_release} \
+		"$subpkgdir"/lib/modules/${_abi_release}/build
+}
+
+sha512sums="c00d92659df815a53dcac7dde145b742b1f20867d380c07cb09ddb3295d6ff10f8931b21ef0b09d7156923a3957b39d74d87c883300173b2e20690d2b4ec35ea  linux-4.15.tar.xz
+0a984bcb773c4edb1431e41c2e7f45e44882d514af411bac131628a2ebba2e934e9b6e023edc0039eec85ffe8b6e652d6f880965c236dcf5f3da5bbb0cf36839  v4.15...v4.15-pf4.diff
+5373728be2b507c3db5e042e1d768740df7965078868afdc46418b1adc4cae3d8f9f1aedb59975a0f2acf8754340499354fcf97c503397a5d9886ccc9689b782  0001-HID-apple-fix-Fn-key-Magic-Keyboard-on-bluetooth.patch
+5cf20623096e01910046733cb101e4c1e5fb0ac8f56bfa3ba30bc3e16ddd930e73986cc9675187fffca8517754a684d1ab4927977d536a8aaa03ef66470cd017  bfq-default-option-1.patch
+733058ca1e569864ffa8e83aca0c84b65dab4b2fc34621bc01fd41a9aa090e582678361e5d8174957eb437ffc901d314b877e980af848ed46f5b1d84c9dfe54c  bfq-default-option-2.patch
+566096e1c6bc2f942fe9119fd47800805470a75aae6ff186d2a6adfc1154e3a3455ebc6d586b6e65cddffb3954bdca47b7e0b0839f681991de6df4489708ce98  config-pf.aarch64
+655d3e9cae2a7b50a237638016288be46ee70fc6adec61b14e31342d2a6d8547a2f48ad3e00b433afa563f3c11fdff1a72aabb573e231c941836bd571ab5b338  config-pf.armhf
+688370451db956d5368c78b7aca8d2df12e63722f39140a30f5fa469ff14a7b93bf6f4e67867afb054f1bcaf24b62e036e149fa9d6dc27e4a827fbc692d51204  config-pf.x86
+eecb44cfd069981ef8094255b2c21667600489119e610947ae8f37794a4d6a4701106f122dbf35c6ed198a5af770bc290f58539e043a975e9bf2a91a41cb1b30  config-pf.x86_64
+ba88425e4ab372ea6ecd18f168f3f2646367714944eda774f5a1dfdec9f9aafff2d3d4bb1c6d45b9a2a28254010b71c18a01f35fb54bb7625e0630b95fdff132  config-pf.ppc
+76edf9f89930969560c3f5525cdffe50748660dc79c3ac60e877ed5086c81a3024792592104ec492978fa73a9a72e396a1cfcb12c7e5fb74620ace97e7970f80  config-pf.ppc64le
+56a93d9a7385fb804864846643a46ec09b38a1012880722e0c21fed6dc85b46974f6db7cc81ffb292116c0228360fe7f5a75eada4df622b71b4ea8d807a1b5d2  config-pf.s390x
+91af914dff6374fc5b8043a3d53e9709390e11d63d5becc3d526f19bd66c742395b9eba023dbf95692f9a99504482914dbf544b8f69b34607ef0af72b6a14393  60-schedulers.rules
+61a0047694273723deb1cb000e8f76877bbd76cb1d28b19cb9cad52fa19b8fd0bfd170f47515af5c0191ddc5af840258f06823848ed5adc856a4d6b34ea1349a  README.Alpine"
