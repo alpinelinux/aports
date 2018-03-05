@@ -48,7 +48,7 @@ profile_rpi() {
 	profile_base
 	title="Raspberry Pi"
 	desc="Includes Raspberry Pi kernel.
-		Does not include grsec patchset.
+		Designed for RPI 1,2 and 3.
 		And much more..."
 	image_ext="tar.gz"
 	arch="armhf"
@@ -86,16 +86,8 @@ profile_uboot() {
 		Supports armhf and aarch64."
 	image_ext="tar.gz"
 	arch="aarch64 armhf armv7"
-	case "$ARCH" in
-	aarch64)
-		kernel_flavors="vanilla"
-		kernel_addons=
-		;;
-	*)
-		kernel_flavors="hardened"
-		kernel_addons="xtables-addons"
-		;;
-	esac
+	kernel_flavors="vanilla"
+	kernel_addons="xtables-addons"
 	initfs_features="base bootchart squashfs ext2 ext3 ext4 kms mmc raid scsi usb"
 	apkovl="genapkovl-dhcp.sh"
 	hostname="alpine"

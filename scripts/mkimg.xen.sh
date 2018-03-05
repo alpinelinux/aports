@@ -12,7 +12,7 @@ profile_xen() {
 	title="Xen"
 	desc="Build-in support for Xen Hypervisor.
 		Includes packages targed at Xen usage.
-		Includes grsec kernel."
+		Use for Xen Dom 0."
 	arch="x86_64"
 	kernel_cmdline="nomodeset"
 	xen_params=""

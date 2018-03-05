@@ -5,22 +5,10 @@ profile_standard() {
 		Network connection is required."
 	profile_base
 	image_ext="iso"
-	arch="x86 x86_64"
+	arch="x86 x86_64 ppc64le"
 	output_format="iso"
 	kernel_cmdline="nomodeset"
 	kernel_addons="xtables-addons"
-}
-
-profile_vanilla() {
-	profile_standard
-	title="Vanilla"
-	desc="Includes a vanilla kernel.
-		Does not include grsec patch set.
-		Suitable for debugging."
-	#arch="$arch aarch64"
-	arch="$arch ppc64le"
-	kernel_flavors="vanilla"
-	kernel_addons=
 }
 
 profile_extended() {
@@ -70,7 +58,7 @@ profile_virt() {
 		Slimmed down kernel.
 		Optimized for virtual systems."
 	kernel_addons=
-	kernel_flavors="virthardened"
+	kernel_flavors="virt"
 	kernel_cmdline="console=tty0 console=ttyS0,115200"
 	syslinux_serial="0 115200"
 }
