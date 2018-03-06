@@ -26,7 +26,7 @@
 #define _NOLOGIN_TXT "/etc/nologin.txt"
 
 int nologin_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
-int nologin_main(int argc UNUSED_PARAM, char **argv)
+int nologin_main(int argc UNUSED_PARAM, char **argv UNUSED_PARAM)
 {
 	int fd;
 	fd = open(_NOLOGIN_TXT, O_RDONLY);

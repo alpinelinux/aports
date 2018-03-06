@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <err.h>
 
 #define BBSUID_PATH "/bin/bbsuid"
 
