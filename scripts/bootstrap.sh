@@ -42,7 +42,7 @@ This script creates a local cross-compiler, and uses it to
 cross-compile an Alpine Linux base system for new architecture.
 
 Steps for introducing new architecture include:
-- adding the compiler tripler and arch type to abuild
+- adding the compiler triplet and arch type to abuild
 - adding the arch type detection to apk-tools
 - adjusting build rules for packages that are arch aware:
   gcc, libressl, linux-headers
