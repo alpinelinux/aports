@@ -1,0 +1,187 @@
+# Contributor: Orson Teodoro <orsonteodoro@hotmail.com>
+# Contributor: Natanael Copa <ncopa@alpinelinux.org>
+# Maintainer: Orson Teodoro <orsonteodoro@hotmail.com>
+# Based on linux-vanilla
+
+_flavor=ck
+_rev=1
+pkgname=linux-${_flavor}
+pkgver=4.15.7_p${_rev}
+_pkgver=${pkgver%_p*}
+case $_pkgver in
+	*.*.*)	_kernver=${_pkgver%.*};;
+	*.*) _kernver=${_pkgver};;
+esac
+pkgrel=0
+pkgdesc="Con Kolivas Kernel patchset"
+url="http://users.on.net/~ckolivas/kernel/"
+depends="mkinitfs linux-firmware"
+_depends_dev="perl gmp-dev elfutils-dev bash"
+makedepends="$_depends_dev sed installkernel bc linux-headers openssl-dev"
+options="!strip"
+_config=${config:-config-$_flavor.${CARCH}}
+source="https://cdn.kernel.org/pub/linux/kernel/v${_pkgver%%.*}.x/linux-$_kernver.tar.xz
+	http://ck.kolivas.org/patches/${_pkgver%%.*}.0/${_pkgver%.*}/${_pkgver%.*}-${_flavor}${_rev}/patch-${_pkgver%.*}-${_flavor}${_rev}.xz
+	0001-HID-apple-fix-Fn-key-Magic-Keyboard-on-bluetooth.patch
+	bfq-default-option-1.patch
+	bfq-default-option-2.patch
+	sharerq-arm.patch
+	sharerq-arm64.patch
+	sharerq-powerpc.patch
+	sharerq-s390.patch
+	config-$_flavor.aarch64
+	config-$_flavor.armhf
+	config-$_flavor.x86
+	config-$_flavor.x86_64
+	config-$_flavor.ppc
+	config-$_flavor.ppc64le
+	config-$_flavor.s390x
+	60-schedulers.rules
+	README.Alpine"
+subpackages="$pkgname-dev:_dev:$CBUILD_ARCH"
+_flavors=
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages "
+			subpackages+="linux-${_f}::$CBUILD_ARCH "
+			subpackages+="linux-${_f}-dev:_dev:$CBUILD_ARCH"
+		fi ;;
+	esac
+done
+if [ "${_pkgver%.0}" = "$_pkgver" ]; then
+	source="$source
+	https://cdn.kernel.org/pub/linux/kernel/v${_pkgver%%.*}.x/patch-${_pkgver}.xz"
+fi
+arch="all"
+license="GPL-2.0"
+_abi_release=${_pkgver}
+_carch=${CARCH}
+case "$_carch" in
+	aarch64*) _carch="arm64" ;;
+	arm*) _carch="arm" ;;
+	ppc*) _carch="powerpc" ;;
+	s390*) _carch="s390" ;;
+esac
+HOSTCC="${CC:-gcc}"
+HOSTCC="${HOSTCC#${CROSS_COMPILE}}"
+
+prepare() {
+	local _patch_failed=
+	cd "$srcdir"/linux-$_kernver
+	if [ "$_kernver" != "$_pkgver" ]; then
+		unxz -c < "$srcdir"/patch-$_pkgver.xz | patch -p1 -N
+	fi
+	unxz -c < "$srcdir"/patch-${_pkgver%.*}-${_flavor}${_rev}.xz | patch -p1 -N
+	for i in $source; do
+		case $i in
+			*.patch) patch -p1 -N -i "$srcdir"/$i ;;
+		esac
+	done
+	rm -f localversion*
+	for i in $_flavors; do
+		local _config=config-$i.${CARCH}
+		local _builddir="$srcdir"/build-$i
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$i" > "$srcdir"/build-$i/localversion-alpine
+		cp "$srcdir"/$_config "$_builddir"/.config
+		make -C "$srcdir"/linux-$_kernver O="$_builddir" \
+			HOSTCC="${CC:-gcc}" silentoldconfig
+	done
+}
+
+build() {
+	unset LDFLAGS
+	for i in $_flavors; do
+		cd "$srcdir"/build-$i
+		make CC="${CC:-gcc}" KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+	done
+}
+
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=${_pkgver}-${pkgrel}-${_buildflavor}
+	local _install
+	cd "$srcdir"/build-$_buildflavor
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+	case "$CARCH" in
+	arm*)
+		local _dtbdir="$_outdir"/usr/lib/linux-${_abi_release}
+		mkdir -p "$_dtbdir"
+		for i in arch/arm/boot/dts/*.dtb ; do
+			install -m644 "$i" "$_dtbdir"
+		done
+		_install=zinstall ;;
+	*)
+		_install=install ;;
+	esac
+	make -j1 modules_install $_install INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_PATH="$_outdir"/boot
+	rm -rf "$_outdir"/lib/modules/${_abi_release}/build \
+		"$_outdir"/lib/modules/${_abi_release}/source \
+		"$_outdir"/lib/firmware
+	install -D include/config/kernel.release \
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+	install -d "$pkgdir"/usr/share/doc/$pkgname
+	install -t "$pkgdir"/usr/share/doc/$pkgname \
+		"$srcdir"/60-schedulers.rules "$srcdir"/README.Alpine
+}
+
+package() {
+	depends="$depends linux-firmware"
+	_package $_flavor "$pkgdir"
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _abi_release=${_pkgver}-${pkgrel}-$_flavor
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="$_depends_dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
+	mkdir -p "$dir"
+	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
+	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine
+	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" HOSTCC="${CC:-gcc}" \
+		silentoldconfig prepare modules_prepare scripts
+	rm "$dir"/Makefile "$dir"/source
+	# copy the needed stuff from real sources
+	# from ubuntu kernel build script: 
+# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
+	cd "$srcdir"/linux-$_kernver
+	find .  -path './include/*' -prune \
+		-o -path './scripts/*' -prune -o -type f \
+		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
+		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' \) \
+		-print | cpio -pdm "$dir"
+	cp -a scripts include "$dir"
+	find $(find arch -name include -type d -print) -type f | cpio -pdm "$dir"
+	install -Dm644 "$srcdir"/build-$_flavor/Module.symvers \
+		"$dir"/Module.symvers
+	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
+	ln -sf /usr/src/linux-headers-${_abi_release} \
+		"$subpkgdir"/lib/modules/${_abi_release}/build
+}
+
+sha512sums="c00d92659df815a53dcac7dde145b742b1f20867d380c07cb09ddb3295d6ff10f8931b21ef0b09d7156923a3957b39d74d87c883300173b2e20690d2b4ec35ea  linux-4.15.tar.xz
+ade9fb1e712acd6a0d0b993a22119707d95ac08a55ad9b7474c7d0ee4b8b2bcf07ad9dda92914abae5469e8c569f49a873eb3fffe7e821affb671e1a61d433fa  patch-4.15-ck1.xz
+5373728be2b507c3db5e042e1d768740df7965078868afdc46418b1adc4cae3d8f9f1aedb59975a0f2acf8754340499354fcf97c503397a5d9886ccc9689b782  0001-HID-apple-fix-Fn-key-Magic-Keyboard-on-bluetooth.patch
+5cf20623096e01910046733cb101e4c1e5fb0ac8f56bfa3ba30bc3e16ddd930e73986cc9675187fffca8517754a684d1ab4927977d536a8aaa03ef66470cd017  bfq-default-option-1.patch
+733058ca1e569864ffa8e83aca0c84b65dab4b2fc34621bc01fd41a9aa090e582678361e5d8174957eb437ffc901d314b877e980af848ed46f5b1d84c9dfe54c  bfq-default-option-2.patch
+94d8d8470252e6f44765cad3ec614c389a5d707462608467bad9f1a7fb1a5db9db56f8f955dc7de394379083c8c339bfed27e76d3ea93a1f0c3a1192d958bd4d  sharerq-arm.patch
+453b03a6e0d646eff54ce57cb1fb4b0b5d05e27e00c2c3a582205f93f768e77909ff1d85ae64f00d843fb710ca608f3677db2531a5050516598180281c2b27c3  sharerq-arm64.patch
+d199a5ae4014a2ea611fcc033d74bee9a2865e88f115e446d6da1283e9dfd964b5164dbe51e90fd4b4c063e5a73a947057fd8f364d7d23c5ae9da0c378d21844  sharerq-powerpc.patch
+163c0ca085be5caffc604ea8dedd8fb37355096d4a8f51632bc7d781e1f9eaa772e1b9a7906a70b79ad11ae61f16b6f3bca936ebbc98881dfa919369e4b73ed4  sharerq-s390.patch
+43a2bd6970ff5f750543e393beba3fc9889bb5b3cf7e65d6e526227d55f60791b1cf0afb72f1413c08b05a4f94738fde6fbc3c27716957c847c3b63a0bc0ae0b  config-ck.aarch64
+e3ff212419a8a0347026316267c6b0b9e7cda9411c0de62a745ff2c55d7c52b5bad3218c5918977d45264789e4d82a1a4bf3552f0b0015ab09e964c7272428e6  config-ck.armhf
+d5f74085ce479e0660a50d53bdbc09e625ffbf2a80ecd6d4401af91c6e025d361930756c296951955c0ede0034b932f27fbe9572dea6a0c75ce5919a93a01308  config-ck.x86
+484670ea2f436feea176460d5e4fef83aa5861e3c16701ee88cebc084ae17274b9516af78eef237fc665973e76005fa5dba9ae4dbdec90a6eb6f209973d271e4  config-ck.x86_64
+c6e443e17081c0dfbeada1e22aad0641535b1d85e725e2ed68a69a59ae2085871b82a8d47cf2ba8dbea94f9d177bf65cdcb2c79afd3167519eef03e99c58ec9e  config-ck.ppc
+7d40b0b1482aefb6f7169b9f57307a3407920c19c60654f315954eb828bfd9b586efb0fc1c9a212a4df245ad57fbfa8bf70d6557d01c6326e5f8f79fdcfe13dc  config-ck.ppc64le
+f6ae5bd38533072fd43567e1a37fe1ba4c18624d08fe1b8bd24c469404e87b0774fd23dc1a0916a9a17fbf5c3eb9c478a426ef5599ba539e286c485bb4564152  config-ck.s390x
+91af914dff6374fc5b8043a3d53e9709390e11d63d5becc3d526f19bd66c742395b9eba023dbf95692f9a99504482914dbf544b8f69b34607ef0af72b6a14393  60-schedulers.rules
+61a0047694273723deb1cb000e8f76877bbd76cb1d28b19cb9cad52fa19b8fd0bfd170f47515af5c0191ddc5af840258f06823848ed5adc856a4d6b34ea1349a  README.Alpine
+4215a356a61c3af20352fd60f3ec4e4a74a3d4d6223c7bd5c1b8283bc4d786a5e1c29a770518cb6a136f42841c637648835a54a46f11e552d1aa7b867999ef1a  patch-4.15.7.xz"
