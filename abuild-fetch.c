@@ -175,7 +175,7 @@ int main(int argc, char *argv[])
 			destdir = optarg;
 			break;
 		default:
-			printf("Unkonwn option '%c'\n", opt);
+			printf("Unknown option '%c'\n", opt);
 			return usage(1);
 			break;
 		}
