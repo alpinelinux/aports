@@ -4,7 +4,7 @@
 # Maintainer: Matt Smith <mcs@darkregion.net>
 pkgname=php5
 pkgver=5.6.34
-pkgrel=0
+pkgrel=1
 pkgdesc="The PHP language runtime engine"
 url="http://www.php.net/"
 arch="all"
@@ -39,7 +39,7 @@ makedepends="
 	libtool
 	libxml2-dev
 	libxslt-dev
-	mariadb-dev
+	mariadb-connector-c-dev
 	net-snmp-dev
 	openldap-dev
 	libressl-dev
