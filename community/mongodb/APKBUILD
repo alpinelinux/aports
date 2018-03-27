@@ -2,7 +2,7 @@
 # Contributor: Marc Vertes <mvertes@free.fr>
 pkgname=mongodb
 pkgver=3.6.3
-pkgrel=0
+pkgrel=1
 pkgdesc='A high-performance, open source, schema-free document-oriented database'
 url='http://www.mongodb.org'
 arch='x86_64'
