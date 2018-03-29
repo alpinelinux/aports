@@ -1,0 +1,161 @@
+# Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+pkgname=go1.10
+pkgver=1.10
+# https://github.com/golang/tools/commits/release-branch.go1.10
+_toolsver="25101aadb97aa42907eee6a238d6d26a6cb3c756"
+pkgrel=0
+pkgdesc="Go programming language compiler"
+url="http://www.golang.org/"
+arch="all"
+license="BSD"
+depends="binutils gcc"
+depends_dev=""
+makedepends="bash go-bootstrap"
+options="!strip"
+provides="go-bootstrap=$pkgver-r$pkgrel"
+install=""
+subpackages="$pkgname-doc"
+source="http://golang.org/dl/go${pkgver/_/}.src.tar.gz
+	go-tools-${pkgver/_/}-$_toolsver.tar.gz::https://github.com/golang/tools/archive/${_toolsver}.tar.gz
+	default-buildmode-pie.patch
+	set-external-linker.patch
+	"
+
+# secfixes:
+#   1.9.4-r0:
+#     - CVE-2018-6574
+
+# NOTE: building go for x86 with grsec kernel requires:
+#           sysctl -w kernel.modify_ldt=1
+
+if [ "$CBUILD" = "$CTARGET" ]; then
+	makedepends="go-bootstrap $makedepends"
+	provides="go-bootstrap=$pkgver-r$pkgrel"
+	subpackages="$subpackages $pkgname-tools"
+	_gotools="cover godoc stringer"
+else
+	pkgname="go-bootstrap"
+	makedepends="go $makedepends"
+	# Go expect host linker instead of the cross-compiler
+	export CC_FOR_TARGET="$CC"
+	export CC="${HOSTLD:-gcc}"
+	export CXX="${HOSTLD:-g++}"
+	export LD="${HOSTLD:-ld}"
+fi
+
+_tooldir="$srcdir"/tools-${_toolsver}
+
+case "$CTARGET_ARCH" in
+aarch64)export GOARCH="arm64" ;;
+armhf)  export GOARCH="arm" GOARM=6 ;;
+armv7)  export GOARCH="arm" GOARM=7 ;;
+s390x)  export GOARCH="s390x" ;;
+x86)    export GOARCH="386" GO386=387 ;;
+x86_64) export GOARCH="amd64" ;;
+ppc64le) export GOARCH="ppc64le" ;;
+mips)   export GOARCH="mips" ;;
+mips64) export GOARCH="mips64" ;;
+mips64el) export GOARCH="mips64le" ;;
+mipsel) export GOARCH="mipsle" ;;
+*)      die "Unsupported arch" ;;
+esac
+
+builddir="$srcdir"/go
+build() {
+	cd "$builddir/src"
+
+	export GOOS="linux"
+	export GOPATH="$srcdir"
+	export GOROOT="$builddir"
+	export GOBIN="$GOROOT"/bin
+	export GOROOT_FINAL=/usr/lib/go
+	local p; for p in /usr/lib/go-bootstrap /usr/lib/go-linux-$GOARCH-bootstrap /usr/lib/go; do
+		if [ -d "$p" ]; then
+			export GOROOT_BOOTSTRAP="$p"
+			break
+		fi
+	done
+
+	./make.bash
+
+	# copied from bootstrap.bash to fixup cross-built bootstrap go
+	if [ "$CBUILD" != "$CTARGET" ]; then
+		local gohostos="$(../bin/go env GOHOSTOS)"
+		local gohostarch="$(../bin/go env GOHOSTARCH)"
+		mv ../bin/*_*/* ../bin
+		rmdir ../bin/*_*
+		rm -rf "../pkg/${gohostos}_${gohostarch}"* "../pkg/tool/${gohostos}_${gohostarch}"*
+		rm -rf ../pkg/bootstrap ../pkg/obj
+	fi
+
+	# FIXME some tests fail:
+	# PATH="$GOROOT/bin:$PATH" ./run.bash -no-rebuild
+
+	mkdir -p "$GOPATH"/src/golang.org/x/tools
+	cp -r "$_tooldir"/* "$GOPATH"/src/golang.org/x/tools
+
+	for tool in $_gotools; do
+		"$GOROOT"/bin/go install golang.org/x/tools/cmd/$tool
+	done
+}
+
+check() {
+	cd "$builddir"
+	./bin/go run doc/play/hello.go
+}
+
+package() {
+	cd "$builddir"
+	mkdir -p "$pkgdir"/usr/bin "$pkgdir"/usr/lib/go/bin "$pkgdir"/usr/share/doc/go
+
+	for binary in go gofmt; do
+		install -Dm755 bin/"$binary" "$pkgdir"/usr/lib/go/bin/"$binary"
+		ln -s /usr/lib/go/bin/"$binary" "$pkgdir"/usr/bin/
+	done
+
+	cp -a pkg lib "$pkgdir"/usr/lib/go
+	cp -r doc misc "$pkgdir"/usr/share/doc/go
+	rm -rf "$pkgdir"/usr/lib/go/pkg/bootstrap
+	rm -f  "$pkgdir"/usr/lib/go/pkg/tool/*/api
+
+	# The source needs to be installed due to an upstream
+	# bug (https://github.com/golang/go/issues/2775).
+	# When this is resolved we can split out the source to a
+	# go-src sub package.
+	mkdir -p "$pkgdir"/usr/lib/go/
+	cp -a "$builddir"/src "$pkgdir"/usr/lib/go
+
+	# Remove tests from /usr/lib/go/src.
+	# Those shouldn't be affacted by the upstream bug (see above).
+	find "$pkgdir"/usr/lib/go/src \( -type f -a -name "*_test.go" \) \
+		-exec rm -rf \{\} \+
+	find "$pkgdir"/usr/lib/go/src \( -type d -a -name "testdata" \) \
+		-exec rm -rf \{\} \+
+	find "$pkgdir"/usr/lib/go/src -type f -a \( -name "*.bash" -o -name "*.rc" -o -name "*.bat" \) \
+		-exec rm -rf \{\} \+
+}
+
+tools() {
+	pkgdesc="Go programming language tools"
+	depends="$pkgname"
+
+	mkdir -p "$subpkgdir"/usr/bin "$subpkgdir"/usr/lib/go/bin \
+		"$subpkgdir"/usr/lib/go/pkg/tool/linux_$GOARCH
+
+	for tool in $_gotools; do
+		if [ -f "$pkgdir"/usr/lib/go/pkg/tool/linux_$GOARCH/$tool ]; then
+			mv "$pkgdir"/usr/lib/go/pkg/tool/linux_$GOARCH/$tool \
+				"$subpkgdir"/usr/lib/go/pkg/tool/linux_$GOARCH/$tool
+		fi
+		if [ -f "$builddir/bin/$tool" ]; then
+			install -Dm755 "$builddir/bin/$tool" "$subpkgdir"/usr/lib/go/bin/"$tool"
+			ln -s /usr/lib/go/bin/"$tool" "$subpkgdir"/usr/bin/
+		fi
+	done
+}
+
+sha512sums="59f089e1ffb2d3aba5ada329d4f0d1181c3c4f01fa64f19d0b753f8a989cb59cf290ad88d215cadc18ef99aba8518e44c9bc258c07eaffc834c55e4a37bd4651  go1.10.src.tar.gz
+bb44f4941cc49f8271c1fd46d94c6c165796d919f156a4fd608158247f3f31c4d170e0d5ae67766ee22cb0eb844a106c7fe101fb7d20a2b6414e43e68ffbd6b1  go-tools-1.10-25101aadb97aa42907eee6a238d6d26a6cb3c756.tar.gz
+a8f3afd97992f03ccf2680cde214eefccac47daeb9eeb689b5e0b206ea3c19cfb23d448a4eb532894d830d4b91cd97b249e88f04c17feba02d9e243b40243bd0  default-buildmode-pie.patch
+6abfdd8521b61ce1e823465f9b950a75dc235d7d58cc4c641c4e7830f7da28b8c57be53aef85641ff79bc95d7bd47bb0796659309d9d8e7907e29df520b150b0  set-external-linker.patch"
