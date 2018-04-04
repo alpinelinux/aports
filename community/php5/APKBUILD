@@ -4,7 +4,7 @@
 # Maintainer: Matt Smith <mcs@darkregion.net>
 pkgname=php5
 pkgver=5.6.35
-pkgrel=0
+pkgrel=1
 pkgdesc="The PHP language runtime engine"
 url="http://www.php.net/"
 arch="all"
