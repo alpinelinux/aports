@@ -634,9 +634,11 @@ int apk_cache_download(struct apk_database *db, struct apk_repository *repo,
 	r = apk_repo_format_real_url(db, repo, pkg, url, sizeof(url));
 	if (r < 0) return r;
 
-	if (!(apk_force & APK_FORCE_REFRESH))
-		(void) fstatat(db->cache_fd, cacheitem, &st, 0);
-	if (autoupdate && now - st.st_mtime <= db->cache_max_age) return -EALREADY;
+	if (autoupdate && !(apk_force & APK_FORCE_REFRESH)) {
+		if (fstatat(db->cache_fd, cacheitem, &st, 0) == 0 &&
+		    now - st.st_mtime <= db->cache_max_age)
+			return -EALREADY;
+	}
 
 	apk_message("fetch %s", url);
 
