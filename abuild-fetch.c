@@ -50,7 +50,7 @@ void add_opt(struct cmdarray *cmd, char *opt)
 
 int usage(int eval)
 {
-	printf("usage: %s [-d DESTDIR] URL\n", program);
+	printf("usage: %s [-h] [-d DESTDIR] URL\n", program);
 	return eval;
 }
 
@@ -124,7 +124,7 @@ int fetch(char *url, const char *destdir)
 
 	childpid = fork();
 	if (childpid < 0 )
-		err(1, "fork");
+		err(200, "fork");
 
 	if (childpid == 0) {
 		execvp(curlcmd.argv[0], curlcmd.argv);
@@ -132,17 +132,25 @@ int fetch(char *url, const char *destdir)
 		execvp(wgetcmd.argv[0], wgetcmd.argv);
 		warn("%s", wgetcmd.argv[0]);
 		unlink(lockfile);
-		_exit(1);
+		_exit(201);
 	}
+
+	/* wait for curl/wget and get the exit code */
 	wait(&status);
-	rename(partfile, outfile);
+	if (WIFEXITED(status))
+		status = WEXITSTATUS(status);
+	else
+		status = 202;
+
+	/* don't rename partial downloads that we can't continue */
+	if (status == 0)
+		rename(partfile, outfile);
 
 fetch_done:
 	unlink(lockfile);
 	close(lockfd);
 	lockfile[0] = '\0';
 	return status;
-
 }
 
 void sighandler(int sig)
@@ -160,9 +168,15 @@ void sighandler(int sig)
 	}
 }
 
+/* exit codes get passed through from curl/wget (so we can check in abuild
+   whether the server does not support resuming). Additional exit codes:
+   200: fork failed
+   201: curl/wget could not be started
+   202: curl/wget did not terminate normally
+   203: usage displayed */
 int main(int argc, char *argv[])
 {
-	int opt, r=0, i;
+	int opt;
 	char *destdir = "/var/cache/distfiles";
 
 	program = argv[0];
@@ -184,17 +198,13 @@ int main(int argc, char *argv[])
 	argv += optind;
 	argc -= optind;
 
-	if (argc < 1)
-		return usage(1);
+	if (argc != 1)
+		return usage(203);
 
 	signal(SIGABRT, sighandler);
 	signal(SIGINT, sighandler);
 	signal(SIGQUIT, sighandler);
 	signal(SIGTERM, sighandler);
 
-	for (i = 0; i < argc; i++) {
-		if (fetch(argv[i], destdir))
-			r++;
-	}
-	return r;
+	return fetch(argv[0], destdir);
 }
