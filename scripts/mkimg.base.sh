@@ -251,7 +251,7 @@ create_image_iso() {
 			-output ${ISO} \
 			-full-iso9660-filenames \
 			-joliet \
-			-rock \
+			-rational-rock \
 			-sysid LINUX \
 			-volid "alpine-$PROFILE $RELEASE $ARCH" \
 			$_isolinux \
