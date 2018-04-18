@@ -1,8 +1,8 @@
-# Maintainer: Filipp Andronov <filipp.andronov@gmail.com>
-# Contributor: Marc Vertes <mvertes@free.fr>
+# Maintainer: Marc Vertes <mvertes@free.fr>
+# Contributor: Filipp Andronov <filipp.andronov@gmail.com>
 pkgname=mongodb
 pkgver=3.6.4
-pkgrel=0
+pkgrel=2
 pkgdesc='A high-performance, open source, schema-free document-oriented database'
 url='http://www.mongodb.org'
 arch='x86_64'
@@ -13,7 +13,7 @@ pkggroups="mongodb"
 depends=
 makedepends="scons py-setuptools py-cheetah py2-typing py-yaml paxmark
 	libressl-dev pcre-dev snappy-dev boost-dev asio-dev libpcap-dev
-	snowball-dev wiredtiger-dev zlib-dev cyrus-sasl-dev yaml-cpp-dev"
+	snowball-dev zlib-dev cyrus-sasl-dev yaml-cpp-dev"
 install="$pkgname.pre-install"
 source="http://downloads.mongodb.org/src/mongodb-src-r${pkgver}.tar.gz
 	fix-backtrace.patch
@@ -23,6 +23,7 @@ source="http://downloads.mongodb.org/src/mongodb-src-r${pkgver}.tar.gz
 	fix-resolv.patch
 	fix-strerror_r.patch
 	libressl.patch
+	wiredtiger.patch
 
 	mongodb.confd
 	mongodb.initd
@@ -38,7 +39,6 @@ _buildopts="
 	--use-system-boost \
 	--use-system-pcre \
 	--use-system-stemmer \
-	--use-system-wiredtiger \
 	--use-system-snappy \
 	--use-system-zlib \
 	--use-system-yaml \
@@ -92,6 +92,7 @@ sha512sums="02c2a697af9fdcbb16d19792be17d987e18c684418a63ed4750471c7ec22eb2eabf8
 aac12cffc452f1dc365c65944a015476c2011b0975144879d28938c690fe6e77b6bd672e040b4c04c02cb002224e24d6f13adb083324f424ef4cdb79a3a71f6b  fix-resolv.patch
 94078abfa74583afef6b5c1f0b334b257cfe87b0db7c13309a9c63d915913d5237c776dbb52f6a23e9409ec390d29e2f7225e9b8c8c5efcbc35b015c613f600c  fix-strerror_r.patch
 45721f490f55f015ebdef497530048a36e78d64692be4a06c7f76963b60877e920350b6845385c33a7f6c6d428f60a1c73b083626d4f9567fa19f57ea32f6a3c  libressl.patch
+ecbe6cb579b33dd4888096712f150772db06fd38219ca2a7679b1dc1ee73b0c3f5ee498af12ecd0265b5231a9fe6b7c12b2c1d606ed04caa6aa00c3ad3fe925a  wiredtiger.patch
 9bcd870742c31bf25f34188ddc3c414de1103e9860dea9f54eee276b89bc2cf1226abab1749c5cda6a6fb0880e541373754e5e83d63cc7189d4b9c274fd555c3  mongodb.confd
 74009794d566dd9d70ec93ffd95c830ee4696165574ecf87398165637fb40799b38d182ef54c50fd0772d589be94ade7f7a49247f3d31c1f012cb4e44cc9f5df  mongodb.initd
 8c089b1a11f494e4148fb4646265964c925bf937633a65e395ee1361d42facf837871dd493a9a2e0f480ae0e0829dbd3ed60794c5334e2716332e131fc5c2c51  mongodb.logrotate
