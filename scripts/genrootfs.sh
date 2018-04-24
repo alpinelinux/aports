@@ -36,7 +36,7 @@ for link in $("$tmp"/bin/busybox --list-full); do
 done
 
 ${APK:-apk} fetch --keys-dir "$keys_dir" --no-cache \
-	--repositories-file "$repositories_file" \
+	--repositories-file "$repositories_file" --root "$tmp" \
 	--stdout --quiet alpine-base | tar -zx -C "$tmp" etc/
 
 # make sure root login is disabled
