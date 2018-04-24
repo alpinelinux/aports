@@ -29,7 +29,7 @@ fi
 
 ${APK:-apk} add --keys-dir "$keys_dir" --no-cache \
 	--repositories-file "$repositories_file" \
-	--no-script --root "$tmp" --initdb \
+	--no-script --root "$tmp" --initdb --arch "$arch" \
 	"$@"
 for link in $("$tmp"/bin/busybox --list-full); do
 	[ -e "$tmp"/$link ] || ln -s /bin/busybox "$tmp"/$link
