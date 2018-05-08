@@ -110,14 +110,21 @@ static const struct apk_istream_ops fetch_istream_ops = {
 
 static struct apk_istream *apk_istream_fetch(const char *url, time_t since)
 {
-	struct apk_fetch_istream *fis;
+	struct apk_fetch_istream *fis = NULL;
 	struct url *u;
 	fetchIO *io = NULL;
-	int rc = -ENOMEM;
+	int rc = -EIO;
 
 	u = fetchParseURL(url);
+	if (!u) {
+		rc = -EAPKBADURL;
+		goto err;
+	}
 	fis = malloc(sizeof(*fis));
-	if (!fis || !u) goto err;
+	if (!fis) {
+		rc = -ENOMEM;
+		goto err;
+	}
 
 	u->last_modified = since;
 	io = fetchXGet(u, &fis->urlstat, (apk_force & APK_FORCE_REFRESH) ? "Ci" : "i");
