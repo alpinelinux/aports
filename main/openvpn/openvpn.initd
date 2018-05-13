@@ -10,6 +10,7 @@ instance_name=${RC_SVCNAME#*.}
 # Upper case variables are for backward compatibility with Alpine < v3.8.
 : ${cfgdir:=${VPNDIR:-"/etc/openvpn"}}
 : ${cfgfile:="$cfgdir/$instance_name.conf"}
+: ${detect_client:="${DETECT_CLIENT:-yes}"}
 : ${up_script:="$cfgdir/up.sh"}
 : ${down_script:="$cfgdir/down.sh"}
 : ${peer_dns:=${PEER_DNS:-"yes"}}
@@ -26,35 +27,6 @@ command_args="
 required_dirs="$cfgdir"
 required_files="$cfgfile"
 
-# If client_mode is not specified (user has old config), infer it from the
-# cfgfile as in old version of this runscript. Eventually we try to fix the
-# config when checkconfig() is run.
-# This is for backward compatibility with Alpine < v3.8.
-if [ -z "$client_mode" ] && [ -f "$cfgfile" ]; then
-	yesno "${DETECT_CLIENT:-yes}" && grep -q '^\s*remote\s' "$cfgfile" \
-		&& client_mode=yes \
-		|| client_mode=no
-	client_mode_not_set=yes
-fi
-
-if yesno "$client_mode"; then
-	command_args="$command_args
-		--up-delay
-		--up-restart
-		--down-pre
-		--script-security 2
-		--up $up_script
-		--down $down_script"
-
-	required_files="$required_files $up_script $down_script"
-
-	# If env. variable IN_BACKGROUND is set, fake start and stop commands
-	# (i.e. don't run them). We do this so we can "start" ourselves from
-	# inactive (from OpenVPN's up.sh script) which then triggers other
-	# services to start which depend on us. See openrc-run(8).
-	in_background_fake="start stop"
-	start_inactive="yes"
-fi
 
 depend() {
 	need localmount net
@@ -63,6 +35,14 @@ depend() {
 }
 
 checkconfig() {
+	# Note: This is not just a check; we need to detect the mode both for
+	# "start" and "checkconfig" commands, that's why it's here.
+	if [ -z "$client_mode" ] && yesno "$detect_client"; then
+		cfgfile_has_option 'remote' \
+			&& client_mode=yes \
+			|| client_mode=no
+	fi
+
 	if [ ! -e /dev/net/tun ]; then
 		if ! modprobe tun; then
 			eerror "TUN/TAP support is not available in this kernel"
@@ -77,6 +57,10 @@ checkconfig() {
 	fi
 
 	if yesno "$client_mode"; then
+		local f; for f in "$up_script" "$down_script"; do
+			[ -r "$f" ] || { eerror "'$f' is not readable"; return 1; }
+		done
+
 		# Warn about setting scripts as we override them
 		if cfgfile_has_option "(up|down)"; then
 			ewarn "WARNING: You have defined your own up/down scripts"
@@ -93,29 +77,52 @@ checkconfig() {
 			ewarn "or DNS configuration."
 		fi
 	fi
-
-	# This is for backward compatibility with Alpine < v3.8.
-	if yesno "$client_mode_not_set"; then
-		ewarn "client_mode is not specified in /etc/conf.d/$RC_SVCNAME, fixing..."
-		echo "client_mode=$client_mode" >> /etc/conf.d/$RC_SVCNAME 2>/dev/null
-		eend $?
-	fi
 }
 
 start_pre() {
 	checkconfig || return 1
+
+	if yesno "$client_mode"; then
+		command_args="$command_args
+			--up-delay
+			--up-restart
+			--down-pre
+			--script-security 2
+			--up $up_script
+			--down $down_script"
+		start_inactive="yes"
+	else
+		# Run as openvpn unless otherwise specified.
+		cfgfile_has_option "user" || command_args="$command_args --user openvpn"
+		cfgfile_has_option "group" || command_args="$command_args --group openvpn"
+	fi
 
 	# If the config file does not specify the cd option, we do.
 	# But if we specify it, we override the config option which we do not want.
 	if cfgfile_has_option "cd"; then
 		command_args="$command_args --cd $cfgdir"
 	fi
+}
 
-	if ! yesno "$client_mode"; then
-		# Run as openvpn unless otherwise specified.
-		cfgfile_has_option "user" || command_args="$command_args --user openvpn"
-		cfgfile_has_option "group" || command_args="$command_args --group openvpn"
+start() {
+	# If we are re-called by the up.sh script, then we don't actually want
+	# to start OpenVPN. We do this so we can "start" ourselves from
+	# inactive (from the up.sh script) which then triggers other
+	# services to start which depend on us.
+	yesno "$IN_BACKGROUND" && return 0
+
+	default_start
+}
+
+stop() {
+	# If we are re-called by the down.sh script, then we don't actually
+	# want to stop OpenVPN.
+	if yesno "$IN_BACKGROUND"; then
+		mark_service_inactive "$RC_SVCNAME"
+		return 0
 	fi
+
+	default_stop
 }
 
 cfgfile_has_option() {
