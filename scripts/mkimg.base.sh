@@ -120,13 +120,24 @@ grub_gen_config() {
 	local _f _kf
 	echo "set timeout=2"
 	for _f in $kernel_flavors; do
-		cat <<- EOF
+		if [ -z "${xen_params+set}" ]; then
+			cat <<- EOF
 
-		menuentry "Linux $_f" {
-			linux	/boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline
-			initrd	/boot/initramfs-$_f
-		}
-		EOF
+			menuentry "Linux $_f" {
+				linux	/boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline
+				initrd	/boot/initramfs-$_f
+			}
+			EOF
+		else
+			cat <<- EOF
+
+			menuentry "Xen/Linux $_f" {
+				multiboot2	/boot/xen.gz ${xen_params}
+				module2		/boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline
+				module2		/boot/initramfs-$_f
+			}
+			EOF
+		fi
 	done
 }
 
@@ -270,7 +281,7 @@ profile_base() {
 	kernel_flavors="vanilla"
 	initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage quiet"
 	initfs_features="ata base bootchart cdrom squashfs ext2 ext3 ext4 mmc raid scsi usb virtio"
-	grub_mod="disk part_msdos linux normal configfile search search_label efi_uga efi_gop fat iso9660 cat echo ls test true help"
+	grub_mod="disk part_gpt part_msdos linux multiboot2 normal configfile search search_label efi_uga efi_gop fat iso9660 cat echo ls test true help gzio"
 	apks="alpine-base alpine-mirrors busybox kbd-bkeymaps chrony e2fsprogs network-extras libressl openssh tzdata"
 	apkovl=
 	hostname="alpine"
