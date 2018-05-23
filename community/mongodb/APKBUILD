@@ -1,8 +1,8 @@
 # Maintainer: Marc Vertes <mvertes@free.fr>
 # Contributor: Filipp Andronov <filipp.andronov@gmail.com>
 pkgname=mongodb
-pkgver=3.6.4
-pkgrel=2
+pkgver=3.6.5
+pkgrel=0
 pkgdesc='A high-performance, open source, schema-free document-oriented database'
 url='http://www.mongodb.org'
 arch='x86_64'
@@ -11,7 +11,7 @@ license='AGPL3'
 pkgusers="mongodb"
 pkggroups="mongodb"
 depends=
-makedepends="scons py-setuptools py-cheetah py2-typing py-yaml paxmark
+makedepends="scons py-setuptools py2-cheetah py2-typing py2-yaml paxmark
 	libressl-dev pcre-dev snappy-dev boost-dev asio-dev libpcap-dev
 	snowball-dev zlib-dev cyrus-sasl-dev yaml-cpp-dev"
 install="$pkgname.pre-install"
@@ -84,7 +84,7 @@ package() {
 	install -Dm644 "$srcdir/mongos.confd" "$pkgdir/etc/conf.d/mongos"
 }
 
-sha512sums="02c2a697af9fdcbb16d19792be17d987e18c684418a63ed4750471c7ec22eb2eabf84e93cb1d298f67898b7e23687f668bb333c50ffc4e1b8adf8859f856ad95  mongodb-src-r3.6.4.tar.gz
+sha512sums="6ecb3140ee4a7929fabe62d698f23e87cb5030cf31abefe7f82374f407fb87dc05f712089998f96bc40e23698836a86e7f3590892bde9d2d6f2c4bcc15cc3ebf  mongodb-src-r3.6.5.tar.gz
 05c4331d028eb396e6cf52d96cdaa2af7199a03522e1a8211df2d36cb053ec093a51e9abf83c4dc00c09a0b1fa119a79bcc719fbc81a48f50ca1527c26613cf0  fix-backtrace.patch
 1492137b0e3456d90a79617c1cd5ead5c71b1cfaae9ee41c75d56cd25f404ec73a690f95ce0d8c064c0a14206daca8070aa769b7cdfa904a338a425b52c293fa  fix-default-stacksize.patch
 56db8f43afc94713ac65b174189e2dd903b5e1eff0b65f1bdac159e52ad4de6606c449865d73bd47bffad6a8fc339777e2b11395596e9a476867d94a219c7925  fix-elf-native-class.patch
