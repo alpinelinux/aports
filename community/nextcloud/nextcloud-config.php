@@ -22,5 +22,16 @@ $CONFIG = array (
   // Uncomment to enable Zend OPcache.
   //'memcache.local' => '\OC\Memcache\APCu',
 
+  // Uncomment this and add user nextcloud to the redis group to enable Redis
+  // cache for file locking. This is highly recommended, see
+  // https://github.com/nextcloud/server/issues/9305.
+  //'memcache.locking' => '\OC\Memcache\Redis',
+  //'redis' => array(
+  //  'host' => '/run/redis/redis.sock',
+  //  'port' => 0,
+  //  'dbindex' => 0,
+  //  'timeout' => 1.5,
+  //),
+
   'installed' => false,
 );
