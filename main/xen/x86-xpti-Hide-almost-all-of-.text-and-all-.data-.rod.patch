@@ -1,0 +1,343 @@
+From f7bf4d230aaa2de40b2440f63045180a0cb07547 Mon Sep 17 00:00:00 2001
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Tue, 20 Mar 2018 14:38:26 +0100
+Subject: [PATCH] x86/xpti: Hide almost all of .text and all .data/.rodata/.bss
+ mappings
+
+The current XPTI implementation isolates the directmap (and therefore a lot of
+guest data), but a large quantity of CPU0's state (including its stack)
+remains visible.
+
+Furthermore, an attacker able to read .text is in a vastly superior position
+to normal when it comes to fingerprinting Xen for known vulnerabilities, or
+scanning for ROP/Spectre gadgets.
+
+Collect together the entrypoints in .text.entry (currently 3x4k frames, but
+can almost certainly be slimmed down), and create a common mapping which is
+inserted into each per-cpu shadow.  The stubs are also inserted into this
+mapping by pointing at the in-use L2.  This allows stubs allocated later (SMP
+boot, or CPU hotplug) to work without further changes to the common mappings.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+x86/xpti: really hide almost all of Xen image
+
+Commit 422588e885 ("x86/xpti: Hide almost all of .text and all
+.data/.rodata/.bss mappings") carefully limited the Xen image cloning to
+just entry code, but then overwrote the just allocated and populated L3
+entry with the normal one again covering both Xen image and stubs.
+
+Drop the respective code in favor of an explicit clone_mapping()
+invocation. This in turn now requires setup_cpu_root_pgt() to run after
+stub setup in all cases. Additionally, with (almost) no unintended
+mappings left, the BSP's IDT now also needs to be page aligned.
+
+The moving ahead of cleanup_cpu_root_pgt() is not strictly necessary
+for functionality, but things are more logical this way, and we retain
+cleanup being done in the inverse order of setup.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: Andrew Cooper <andrew.cooper3@citrix.com>
+
+x86/traps: Put idt_table[] back into .bss
+
+c/s d1d6fc97d "x86/xpti: really hide almost all of Xen image" accidentially
+moved idt_table[] from .bss to .data by virtue of using the page_aligned
+section.  We also have .bss.page_aligned, so use that.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Wei Liu <wei.liu2@citrix.com>
+master commit: 422588e88511d17984544c0f017a927de3315290
+master date: 2018-02-15 11:08:27 +0000
+master commit: d1d6fc97d66cf56847fc0bcc2ddc370707c22378
+master date: 2018-03-06 16:46:27 +0100
+master commit: 044fedfaa29b5d5774196e3fc7d955a48bfceac4
+master date: 2018-03-09 15:42:24 +0000
+---
+ docs/misc/xen-command-line.markdown |  3 --
+ xen/arch/x86/smpboot.c              | 65 ++++++++++++++++++++++++++++++-------
+ xen/arch/x86/traps.c                |  3 +-
+ xen/arch/x86/x86_64/compat/entry.S  |  5 +++
+ xen/arch/x86/x86_64/entry.S         | 15 ++++++---
+ xen/arch/x86/xen.lds.S              |  7 ++++
+ 6 files changed, 79 insertions(+), 19 deletions(-)
+
+diff --git a/docs/misc/xen-command-line.markdown b/docs/misc/xen-command-line.markdown
+index de5b79e41e..7ad971735f 100644
+--- a/docs/misc/xen-command-line.markdown
++++ b/docs/misc/xen-command-line.markdown
+@@ -1735,9 +1735,6 @@ mode.
+ Override default selection of whether to isolate 64-bit PV guest page
+ tables.
+ 
+-** WARNING: Not yet a complete isolation implementation, but better than
+-nothing. **
+-
+ ### xsave
+ > `= <boolean>`
+ 
+diff --git a/xen/arch/x86/smpboot.c b/xen/arch/x86/smpboot.c
+index 535104065a..7ad2eebaa6 100644
+--- a/xen/arch/x86/smpboot.c
++++ b/xen/arch/x86/smpboot.c
+@@ -637,13 +637,24 @@ static int clone_mapping(const void *ptr, root_pgentry_t *rpt)
+ {
+     unsigned long linear = (unsigned long)ptr, pfn;
+     unsigned int flags;
+-    l3_pgentry_t *pl3e = l4e_to_l3e(idle_pg_table[root_table_offset(linear)]) +
+-                         l3_table_offset(linear);
++    l3_pgentry_t *pl3e;
+     l2_pgentry_t *pl2e;
+     l1_pgentry_t *pl1e;
+ 
+-    if ( linear < DIRECTMAP_VIRT_START )
+-        return 0;
++    /*
++     * Sanity check 'linear'.  We only allow cloning from the Xen virtual
++     * range, and in particular, only from the directmap and .text ranges.
++     */
++    if ( root_table_offset(linear) > ROOT_PAGETABLE_LAST_XEN_SLOT ||
++         root_table_offset(linear) < ROOT_PAGETABLE_FIRST_XEN_SLOT )
++        return -EINVAL;
++
++    if ( linear < XEN_VIRT_START ||
++         (linear >= XEN_VIRT_END && linear < DIRECTMAP_VIRT_START) )
++        return -EINVAL;
++
++    pl3e = l4e_to_l3e(idle_pg_table[root_table_offset(linear)]) +
++        l3_table_offset(linear);
+ 
+     flags = l3e_get_flags(*pl3e);
+     ASSERT(flags & _PAGE_PRESENT);
+@@ -735,6 +746,10 @@ static __read_mostly int8_t opt_xpti = -1;
+ boolean_param("xpti", opt_xpti);
+ DEFINE_PER_CPU(root_pgentry_t *, root_pgt);
+ 
++static root_pgentry_t common_pgt;
++
++extern const char _stextentry[], _etextentry[];
++
+ static int setup_cpu_root_pgt(unsigned int cpu)
+ {
+     root_pgentry_t *rpt;
+@@ -755,8 +770,23 @@ static int setup_cpu_root_pgt(unsigned int cpu)
+         idle_pg_table[root_table_offset(RO_MPT_VIRT_START)];
+     /* SH_LINEAR_PT inserted together with guest mappings. */
+     /* PERDOMAIN inserted during context switch. */
+-    rpt[root_table_offset(XEN_VIRT_START)] =
+-        idle_pg_table[root_table_offset(XEN_VIRT_START)];
++
++    /* One-time setup of common_pgt, which maps .text.entry and the stubs. */
++    if ( unlikely(!root_get_intpte(common_pgt)) )
++    {
++        const char *ptr;
++
++        for ( rc = 0, ptr = _stextentry;
++              !rc && ptr < _etextentry; ptr += PAGE_SIZE )
++            rc = clone_mapping(ptr, rpt);
++
++        if ( rc )
++            return rc;
++
++        common_pgt = rpt[root_table_offset(XEN_VIRT_START)];
++    }
++
++    rpt[root_table_offset(XEN_VIRT_START)] = common_pgt;
+ 
+     /* Install direct map page table entries for stack, IDT, and TSS. */
+     for ( off = rc = 0; !rc && off < STACK_SIZE; off += PAGE_SIZE )
+@@ -766,6 +796,8 @@ static int setup_cpu_root_pgt(unsigned int cpu)
+         rc = clone_mapping(idt_tables[cpu], rpt);
+     if ( !rc )
+         rc = clone_mapping(&per_cpu(init_tss, cpu), rpt);
++    if ( !rc )
++        rc = clone_mapping((void *)per_cpu(stubs.addr, cpu), rpt);
+ 
+     return rc;
+ }
+@@ -774,6 +806,7 @@ static void cleanup_cpu_root_pgt(unsigned int cpu)
+ {
+     root_pgentry_t *rpt = per_cpu(root_pgt, cpu);
+     unsigned int r;
++    unsigned long stub_linear = per_cpu(stubs.addr, cpu);
+ 
+     if ( !rpt )
+         return;
+@@ -818,6 +851,16 @@ static void cleanup_cpu_root_pgt(unsigned int cpu)
+     }
+ 
+     free_xen_pagetable(rpt);
++
++    /* Also zap the stub mapping for this CPU. */
++    if ( stub_linear )
++    {
++        l3_pgentry_t *l3t = l4e_to_l3e(common_pgt);
++        l2_pgentry_t *l2t = l3e_to_l2e(l3t[l3_table_offset(stub_linear)]);
++        l1_pgentry_t *l1t = l2e_to_l1e(l2t[l2_table_offset(stub_linear)]);
++
++        l1t[l2_table_offset(stub_linear)] = l1e_empty();
++    }
+ }
+ 
+ static void cpu_smpboot_free(unsigned int cpu)
+@@ -839,6 +882,8 @@ static void cpu_smpboot_free(unsigned int cpu)
+     free_cpumask_var(per_cpu(cpu_sibling_mask, cpu));
+     free_cpumask_var(per_cpu(cpu_core_mask, cpu));
+ 
++    cleanup_cpu_root_pgt(cpu);
++
+     if ( per_cpu(stubs.addr, cpu) )
+     {
+         unsigned long mfn = per_cpu(stubs.mfn, cpu);
+@@ -856,8 +901,6 @@ static void cpu_smpboot_free(unsigned int cpu)
+             free_domheap_page(mfn_to_page(mfn));
+     }
+ 
+-    cleanup_cpu_root_pgt(cpu);
+-
+     order = get_order_from_pages(NR_RESERVED_GDT_PAGES);
+     free_xenheap_pages(per_cpu(gdt_table, cpu), order);
+ 
+@@ -913,9 +956,6 @@ static int cpu_smpboot_alloc(unsigned int cpu)
+     set_ist(&idt_tables[cpu][TRAP_nmi],           IST_NONE);
+     set_ist(&idt_tables[cpu][TRAP_machine_check], IST_NONE);
+ 
+-    if ( setup_cpu_root_pgt(cpu) )
+-        goto oom;
+-
+     for ( stub_page = 0, i = cpu & ~(STUBS_PER_PAGE - 1);
+           i < nr_cpu_ids && i <= (cpu | (STUBS_PER_PAGE - 1)); ++i )
+         if ( cpu_online(i) && cpu_to_node(i) == node )
+@@ -929,6 +969,9 @@ static int cpu_smpboot_alloc(unsigned int cpu)
+         goto oom;
+     per_cpu(stubs.addr, cpu) = stub_page + STUB_BUF_CPU_OFFS(cpu);
+ 
++    if ( setup_cpu_root_pgt(cpu) )
++        goto oom;
++
+     if ( secondary_socket_cpumask == NULL &&
+          (secondary_socket_cpumask = xzalloc(cpumask_t)) == NULL )
+         goto oom;
+diff --git a/xen/arch/x86/traps.c b/xen/arch/x86/traps.c
+index 480094a93a..4053721b64 100644
+--- a/xen/arch/x86/traps.c
++++ b/xen/arch/x86/traps.c
+@@ -100,7 +100,8 @@ DEFINE_PER_CPU_READ_MOSTLY(struct desc_struct *, gdt_table);
+ DEFINE_PER_CPU_READ_MOSTLY(struct desc_struct *, compat_gdt_table);
+ 
+ /* Master table, used by CPU0. */
+-idt_entry_t idt_table[IDT_ENTRIES];
++idt_entry_t __section(".bss.page_aligned") __aligned(PAGE_SIZE)
++    idt_table[IDT_ENTRIES];
+ 
+ /* Pointer to the IDT of every CPU. */
+ idt_entry_t *idt_tables[NR_CPUS] __read_mostly;
+diff --git a/xen/arch/x86/x86_64/compat/entry.S b/xen/arch/x86/x86_64/compat/entry.S
+index 9f65e91d7b..1c5cc9dacf 100644
+--- a/xen/arch/x86/x86_64/compat/entry.S
++++ b/xen/arch/x86/x86_64/compat/entry.S
+@@ -12,6 +12,8 @@
+ #include <public/xen.h>
+ #include <irq_vectors.h>
+ 
++        .section .text.entry, "ax", @progbits
++
+ ENTRY(compat_hypercall)
+         ASM_CLAC
+         pushq $0
+@@ -275,6 +277,9 @@ ENTRY(compat_int80_direct_trap)
+         call  compat_create_bounce_frame
+         jmp   compat_test_all_events
+ 
++        /* compat_create_bounce_frame & helpers don't need to be in .text.entry */
++        .text
++
+ /* CREATE A BASIC EXCEPTION FRAME ON GUEST OS (RING-1) STACK:            */
+ /*   {[ERRCODE,] EIP, CS, EFLAGS, [ESP, SS]}                             */
+ /* %rdx: trap_bounce, %rbx: struct vcpu                                  */
+diff --git a/xen/arch/x86/x86_64/entry.S b/xen/arch/x86/x86_64/entry.S
+index f24bffb574..4080da65db 100644
+--- a/xen/arch/x86/x86_64/entry.S
++++ b/xen/arch/x86/x86_64/entry.S
+@@ -13,6 +13,8 @@
+ #include <public/xen.h>
+ #include <irq_vectors.h>
+ 
++        .section .text.entry, "ax", @progbits
++
+ /* %rbx: struct vcpu */
+ ENTRY(switch_to_kernel)
+         leaq  VCPU_trap_bounce(%rbx),%rdx
+@@ -355,6 +357,9 @@ int80_slow_path:
+         subq  $2,UREGS_rip(%rsp)
+         jmp   handle_exception_saved
+ 
++        /* create_bounce_frame & helpers don't need to be in .text.entry */
++        .text
++
+ /* CREATE A BASIC EXCEPTION FRAME ON GUEST OS STACK:                     */
+ /*   { RCX, R11, [DS-GS,] [CR2,] [ERRCODE,] RIP, CS, RFLAGS, RSP, SS }   */
+ /* %rdx: trap_bounce, %rbx: struct vcpu                                  */
+@@ -479,6 +484,8 @@ ENTRY(dom_crash_sync_extable)
+         xorl  %edi,%edi
+         jmp   asm_domain_crash_synchronous /* Does not return */
+ 
++        .section .text.entry, "ax", @progbits
++
+ ENTRY(common_interrupt)
+         SAVE_ALL CLAC
+ 
+@@ -838,8 +845,7 @@ GLOBAL(trap_nop)
+ 
+ 
+ 
+-.section .rodata, "a", @progbits
+-
++        .pushsection .rodata, "a", @progbits
+ ENTRY(exception_table)
+         .quad do_trap
+         .quad do_debug
+@@ -865,9 +871,10 @@ ENTRY(exception_table)
+         .quad do_reserved_trap /* Architecturally reserved exceptions. */
+         .endr
+         .size exception_table, . - exception_table
++        .popsection
+ 
+ /* Table of automatically generated entry points.  One per vector. */
+-        .section .init.rodata, "a", @progbits
++        .pushsection .init.rodata, "a", @progbits
+ GLOBAL(autogen_entrypoints)
+         /* pop into the .init.rodata section and record an entry point. */
+         .macro entrypoint ent
+@@ -876,7 +883,7 @@ GLOBAL(autogen_entrypoints)
+         .popsection
+         .endm
+ 
+-        .text
++        .popsection
+ autogen_stubs: /* Automatically generated stubs. */
+ 
+         vec = 0
+diff --git a/xen/arch/x86/xen.lds.S b/xen/arch/x86/xen.lds.S
+index 681c795c6d..500fe3a9cc 100644
+--- a/xen/arch/x86/xen.lds.S
++++ b/xen/arch/x86/xen.lds.S
+@@ -61,6 +61,13 @@ SECTIONS
+         _stext = .;            /* Text and read-only data */
+        *(.text)
+        *(.text.__x86_indirect_thunk_*)
++
++       . = ALIGN(PAGE_SIZE);
++       _stextentry = .;
++       *(.text.entry)
++       . = ALIGN(PAGE_SIZE);
++       _etextentry = .;
++
+        *(.text.cold)
+        *(.text.unlikely)
+        *(.fixup)
+-- 
+2.13.5
+
