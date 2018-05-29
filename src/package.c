@@ -1032,6 +1032,10 @@ void apk_ipkg_run_script(struct apk_installed_package *ipkg,
 
 	if (apk_db_run_script(db, fn, argv) < 0)
 		goto err;
+
+	/* Script may have done something that changes id cache contents */
+	apk_id_cache_reset(&db->id_cache);
+
 	goto cleanup;
 
 err_log:
