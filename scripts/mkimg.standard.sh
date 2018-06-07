@@ -5,10 +5,15 @@ profile_standard() {
 		Network connection is required."
 	profile_base
 	image_ext="iso"
-	arch="x86 x86_64 ppc64le"
+	arch="x86 x86_64 ppc64le s390x"
 	output_format="iso"
 	kernel_cmdline="nomodeset"
 	kernel_addons="xtables-addons"
+	if [ "$ARCH" = "s390x" ]; then
+		apks="$apks s390-tools"
+		initfs_features="$initfs_features dasd_mod qeth"
+		initfs_cmdline="modules=loop,squashfs,dasd_mod,qeth quiet"
+	fi
 }
 
 profile_extended() {
