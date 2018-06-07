@@ -256,6 +256,10 @@ create_image_iso() {
 		grub-mkrescue --output ${ISO} ${DESTDIR} -follow-links \
 			-sysid LINUX \
 			-volid "alpine-$PROFILE $RELEASE $ARCH"
+	elif [ "$ARCH" = "s390x" ]; then
+		for _image in vmlinuz initramfs modloop; do
+			cp ${DESTDIR}/boot/$_image-$kernel_flavors ${OUTDIR}
+		done
 	else
 		xorrisofs \
 			-quiet \
