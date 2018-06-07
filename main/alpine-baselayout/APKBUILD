@@ -1,7 +1,7 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=3.0.6
+pkgver=3.1.0
 pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
@@ -120,15 +120,19 @@ package() {
 
 	echo "UTC" > "$pkgdir"/etc/TZ
 	echo "localhost" > "$pkgdir"/etc/hostname
-	echo "127.0.0.1	localhost localhost.localdomain" > "$pkgdir"/etc/hosts
-	echo "af_packet" >"$pkgdir"/etc/modules
-
+	cat > "$pkgdir"/etc/hosts <<-EOF
+		127.0.0.1	localhost localhost.localdomain
+		::1		localhost localhost.localdomain
+	EOF
+	cat > "$pkgdir"/etc/modules <<-EOF
+		af_packet
+		ipv6
+	EOF
 	cat > "$pkgdir"/etc/shells <<-EOF
 		# valid login shells
 		/bin/sh
 		/bin/ash
 	EOF
-
 	cat > "$pkgdir"/etc/motd <<-EOF
 		Welcome to Alpine!
 
@@ -160,11 +164,10 @@ package() {
 		net.ipv4.conf.all.accept_redirects = 0
 		net.ipv4.conf.all.secure_redirects = 1
 		net.ipv6.conf.all.accept_redirects = 0
-		net.ipv6.conf.all.secure_redirects = 1
 
 		# The source routing feature includes some known vulnerabilities.
 		net.ipv4.conf.all.accept_source_route = 0
-		net.ipv6.conf.all.accept_source-route = 0
+		net.ipv6.conf.all.accept_source_route = 0
 
 		# See RFC 1337
 		net.ipv4.tcp_rfc1337 = 1
@@ -175,9 +178,6 @@ package() {
 
 		# Restarts computer after 120 seconds after kernel panic
 		kernel.panic = 120
-
-		## Disable magic-sysrq key
-		kernel.sysrq = 0
 
 		# Users should not be able to create soft or hard links to files
 		# which they do not own. This mitigates several privilege
