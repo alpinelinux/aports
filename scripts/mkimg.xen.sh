@@ -9,6 +9,7 @@ section_xen() {
 
 profile_xen() {
 	profile_standard
+	profile_abbrev="xen"
 	title="Xen"
 	desc="Build-in support for Xen Hypervisor.
 		Includes packages targed at Xen usage.

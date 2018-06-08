@@ -4,6 +4,7 @@ profile_standard() {
 		Just enough to get you started.
 		Network connection is required."
 	profile_base
+	profile_abbrev="std"
 	image_ext="iso"
 	arch="x86 x86_64 ppc64le s390x"
 	output_format="iso"
@@ -18,10 +19,12 @@ profile_standard() {
 
 profile_extended() {
 	profile_standard
+	profile_abbrev="ext"
 	title="Extended"
 	desc="Most common used packages included.
 		Suitable for routers and servers.
 		Runs from RAM."
+	arch="x86 x86_64"
 	kernel_addons="dahdi-linux xtables-addons zfs spl"
 	apks="$apks
 		dahdi-linux dahdi-tools ethtool hwdata lftp links
@@ -58,10 +61,12 @@ profile_extended() {
 
 profile_virt() {
 	profile_standard
+	profile_abbrev="virt"
 	title="Virtual"
 	desc="Similar to standard.
 		Slimmed down kernel.
 		Optimized for virtual systems."
+	arch="x86 x86_64"
 	kernel_addons=
 	kernel_flavors="virt"
 	kernel_cmdline="console=tty0 console=ttyS0,115200"
