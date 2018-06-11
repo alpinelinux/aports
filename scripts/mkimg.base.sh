@@ -92,7 +92,7 @@ syslinux_gen_config() {
 	echo "PROMPT ${syslinux_prompt:-1}"
 	echo "DEFAULT ${kernel_flavors%% *}"
 
-	local _f _kf
+	local _f
 	for _f in $kernel_flavors; do
 		if [ -z "${xen_params+set}" ]; then
 			cat <<- EOF
@@ -110,14 +110,14 @@ syslinux_gen_config() {
 			LABEL $_f
 				MENU LABEL Xen/Linux $_f
 				KERNEL /boot/syslinux/mboot.c32
-				APPEND /boot/xen.gz ${xen_params} --- /boot/vmlinuz$_kf $initfs_cmdline $kernel_cmdline --- /boot/initramfs-$_f
+				APPEND /boot/xen.gz ${xen_params} --- /boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline --- /boot/initramfs-$_f
 			EOF
 		fi
 	done
 }
 
 grub_gen_config() {
-	local _f _kf
+	local _f
 	echo "set timeout=2"
 	for _f in $kernel_flavors; do
 		if [ -z "${xen_params+set}" ]; then
