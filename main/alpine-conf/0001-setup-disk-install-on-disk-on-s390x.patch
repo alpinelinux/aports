@@ -1,0 +1,380 @@
+From 50c34a98b9f9b3979a3d1a7be89fa9ec78534eb5 Mon Sep 17 00:00:00 2001
+From: "Tuan M. Hoang" <tmhoang@flatglobe.org>
+Date: Thu, 31 May 2018 10:49:45 +0000
+Subject: setup-disk: install on disk on s390x
+
+In z/VM environment
+ECKD DASDs need to be low-level formatted with dasdfmt and fdasd before
+use. These devices don't have partition ids.
+FBA DASDs are like normal disks - usable with sfdisk/fdisk - and have
+partition ids.
+Software raid and LVM on multiple devices are not supported at the
+moment. Users could install with LVM on single disk and extend logical
+volume to second disk.
+
+In KVM environment
+Virtual SCSI disks (virtio) are used which are like normal disks.
+
+Bootloader is zipl from s390-tools package.
+
+This commit introduces setup-dasd.in for DASD functions.
+---
+ Makefile             |   2 +-
+ dasd-functions.sh.in | 133 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ setup-disk.in        |  72 ++++++++++++++++++++++------
+ 3 files changed, 192 insertions(+), 15 deletions(-)
+ create mode 100644 dasd-functions.sh.in
+
+diff --git a/Makefile b/Makefile
+index 5ca9154..b7f93aa 100644
+--- a/Makefile
++++ b/Makefile
+@@ -4,7 +4,7 @@ sysconfdir	?= /etc/lbu
+ 
+ PREFIX		?=
+ 
+-LIB_FILES	:= libalpine.sh
++LIB_FILES	:= libalpine.sh dasd-functions.sh
+ SBIN_FILES	:= lbu\
+ 		setup-acf\
+ 		setup-alpine\
+diff --git a/dasd-functions.sh.in b/dasd-functions.sh.in
+new file mode 100644
+index 0000000..ae25a79
+--- /dev/null
++++ b/dasd-functions.sh.in
+@@ -0,0 +1,133 @@
++#!/bin/sh
++
++eckd_dasd=
++fba_dasd=
++
++_dasdfmt() {
++	local block="$(ls /sys/bus/ccw/devices/"$1"/block 2>/dev/null)" answer=
++	if ! [ -b "/dev/$block" ]; then
++		echo "/dev/$block is not a block device" >&2
++	else
++		echo -n "WARNING: Erase ECKD DASD $1? [y/N]: "
++		read answer
++		case "$answer" in
++			y*|Y*) dasdfmt -b 4096 -d cdl -yp "/dev/$block" ;;
++		esac
++	fi
++}
++
++eckdselect_help() {
++	cat <<-__EOF__
++
++		Enter each available DASD's address (e.g. 0.0.02d0) to format that DASD.
++		Enter multiple addresses separated by a space to format multiple DASDs.
++		Enter 'all' to format all available DASDs.
++
++		WARNING: Data will be lost after formatted!
++
++		Enter 'done' or 'none' to finish formatting.
++		Enter 'abort' to quit the installer.
++
++	__EOF__
++}
++
++show_dasd_info() {
++	local busid= vendor= block= devtype= cutype=
++	for busid in $@; do
++		vendor=$(cat /sys/bus/ccw/devices/$busid/vendor 2>/dev/null)
++		devtype=$(cat /sys/bus/ccw/devices/$busid/devtype 2>/dev/null)
++		cutype=$(cat /sys/bus/ccw/devices/$busid/cutype 2>/dev/null)
++		block="$(ls /sys/bus/ccw/devices/$busid/block 2>/dev/null)"
++		echo "  $busid	($devtype $cutype $vendor)"
++	done
++}
++
++ask_eckd(){
++	local prompt="$1"
++	local help_func="$2"
++	shift 2
++	local answer=
++	local default_dasd="all"
++	apk add --quiet s390-tools
++
++	while ! all_in_list "$answer" $@ "$default_dasd" "abort" "done" "none"; do
++		echo "Available ECKD DASD(s) are:"
++		show_dasd_info "$@"
++		echon "$prompt [$default_dasd] "
++		default_read answer $default_dasd
++		case "$answer" in
++			'abort') exit 0;;
++			'done'|'none') return 0;;
++			'?') $help_func;;
++			'all') for busid in $@; do _dasdfmt $busid; done;;
++			*) for busid in $answer; do _dasdfmt $busid; done;;
++		esac
++	done
++}
++
++check_dasd() {
++	eckd_dasd= fba_dasd=
++	local dasd="$(get_bootopt dasd)"
++	for _dasd in $( echo $dasd | tr ',' ' '); do
++		[ -e /sys/bus/ccw/drivers/dasd-eckd/$_dasd ] && eckd_dasd="$eckd_dasd $_dasd"
++		[ -e /sys/bus/ccw/drivers/dasd-fba/$_dasd ] && fba_dasd="$fba_dasd $_dasd"
++	done
++	if [ -n "$eckd_dasd" ]; then
++		ask_eckd \
++			"Which ECKD DASD(s) would you like to be formatted using dasdfmt? (enter '?' for help)" \
++			eckdselect_help "$eckd_dasd"
++	fi
++}
++
++is_dasd() {
++	local disk="${1#*\/dev\/}" dasd_type="$2"
++	for _dasd in $(eval "echo \$${dasd_type}_dasd"); do
++		[ -e /sys/bus/ccw/drivers/dasd-$dasd_type/$_dasd/block/$disk ] && return 0
++	done
++	return 1
++}
++
++setup_zipl() {
++	local mnt="$1" root="$2" modules="$3" kernel_opts="$4"
++	local parameters="root=$root modules=$modules $kernel_opts"
++	local dasd=$(echo $eckd_dasd $fba_dasd | tr ' ' ',')
++	local s390x_net="$(get_bootopt s390x_net)"
++	[ -n "$dasd" ] && parameters="$parameters dasd=$dasd"
++	[ -n "$s390x_net" ] && parameters="$parameters s390x_net=$s390x_net"
++
++	cat > "$mnt"/etc/zipl.conf <<- EOF
++	[defaultboot]
++	defaultauto
++	prompt=1
++	timeout=5
++	default=linux
++	target=/boot
++	[linux]
++	image=/boot/vmlinuz-$KERNEL_FLAVOR
++	ramdisk=/boot/initramfs-$KERNEL_FLAVOR
++	parameters="$parameters"
++	EOF
++}
++
++setup_partitions_eckd() {
++	local blocks_per_track=12 tracks_per_cylinder=15 boot_track= swap_track=
++	local diskdev=$1 boot_size=$2 swap_size=$3 sys_type=$4
++	boot_track=$(($boot_size * 1024 / 4 / blocks_per_track))
++	[ "$swap_size" != 0 ] && swap_track=$(($swap_size * 1024 / 4 / blocks_per_track + boot_track + 1))
++	local conf="$(mktemp)"
++
++	if [ -n "$swap_track" ]; then
++		cat > "$conf" <<- EOF
++		[first,$boot_track,native]
++		[$((boot_track + 1)),$swap_track,swap]
++		[$((swap_track + 1)),last,$sys_type]
++		EOF
++	else
++		cat > "$conf" <<- EOF
++		[first,$boot_track,native]
++		[$((boot_track + 1)),last,$sys_type]
++		EOF
++	fi
++	fdasd -s -c "$conf" $diskdev
++	rm $conf
++}
+diff --git a/setup-disk.in b/setup-disk.in
+index efb7f41..c1a5683 100644
+--- a/setup-disk.in
++++ b/setup-disk.in
+@@ -2,6 +2,7 @@
+ 
+ PREFIX=
+ . "$PREFIX/lib/libalpine.sh"
++. "$PREFIX/lib/dasd-functions.sh"
+ 
+ MBR=${MBR:-"/usr/share/syslinux/mbr.bin"}
+ ROOTFS=${ROOTFS:-ext4}
+@@ -124,6 +125,10 @@ partition_id() {
+ 			esp)	id=EF ;;
+ 			*)	die "Partition id \"$1\" is not supported!" ;;
+ 		esac
++	elif [ "$DISKLABEL" = "eckd" ]; then
++		case "$1" in
++			native|lvm|swap|raid|gpfs)	id="$1" ;;
++		esac
+ 	else
+ 		die "Partition label \"$DISKLABEL\" is not supported!"
+ 	fi
+@@ -134,6 +139,13 @@ partition_id() {
+ # type can be any type from partition_id or the literal string "boot"
+ find_partitions() {
+ 	local dev="$1" type="$2" search=
++	if is_dasd "$dev" eckd; then
++		case "$type" in
++			boot) echo "$dev"1 ;;
++			*) fdasd -p "$dev" | grep "Linux $(partition_id "$type")" | awk '{print $1}' | tail -n 1 ;;
++		esac
++		return 0
++	fi
+ 	case "$type" in
+ 		boot)
+ 			search=bootable
+@@ -206,7 +218,7 @@ supported_boot_fs() {
+ 
+ supported_part_label() {
+ 	case "$1" in
+-		dos|gpt) return 0 ;;
++		dos|gpt|eckd) return 0 ;;
+ 		*) die "Partition label \"$DISKLABEL\" is not supported!" ;;
+ 	esac
+ }
+@@ -246,13 +258,14 @@ cleanup_chroot_mounts() {
+ 	done
+ }
+ 
+-has_bootopt() {
++get_bootopt() {
+ 	local opt="$1"
+ 	set -- $(cat /proc/cmdline)
+ 	for i; do
+-		[ "$i" = "$opt" ] && return 0
++		case "$i" in
++			"$opt"|"$opt"=*) echo "${i#*=}"; break;;
++		esac
+ 	done
+-	return 1
+ }
+ 
+ # setup GRUB bootloader
+@@ -341,6 +354,7 @@ install_mounted_root() {
+ 	local initfs_features="ata base ide scsi usb virtio"
+ 	local pvs= dev= rootdev= bootdev= extlinux_raidopt= root= modules=
+ 	local kernel_opts="quiet"
++	[ "$ARCH" = "s390x" ] && initfs_features="$initfs_features qeth dasd_mod"
+ 
+ 	rootdev=$(find_mount_dev "$mnt")
+ 	if [ -z "$rootdev" ]; then
+@@ -432,7 +446,7 @@ install_mounted_root() {
+ 	if is_vmware; then
+ 		kernel_opts="pax_nouderef $kernel_opts"
+ 	fi
+-	if has_bootopt nomodeset; then
++	if [ -n "$(get_bootopt nomodeset)" ]; then
+ 		kernel_opts="nomodeset $kernel_opts"
+ 	fi
+ 	modules="sd-mod,usb-storage,${root_fs}${raidmod}"
+@@ -459,6 +473,7 @@ install_mounted_root() {
+ 	case "$BOOTLOADER" in
+ 		grub) setup_grub "$mnt" "$root" "$modules" "$kernel_opts" "$bootdev" $disks ;;
+ 		syslinux) setup_syslinux "$mnt" "$root" "$modules" "$kernel_opts" "$bootdev" ;;
++		zipl) setup_zipl "$mnt" "$root" "$modules" "$kernel_opts" ;;
+ 		*) die "Bootloader \"$BOOTLOADER\" not supported!" ;;
+ 	esac
+ 
+@@ -585,6 +600,8 @@ select_bootloader() {
+ 	local bootloader=syslinux
+ 	if [ "$ARCH" = "ppc64le" ]; then
+ 		bootloader=grub-ieee1275
++	elif [ "$ARCH" = "s390x" ]; then
++		bootloader=s390-tools
+ 	elif [ -n "$USE_EFI" ]; then
+ 		bootloader=grub-efi
+ 	elif [ "$BOOTLOADER" = "grub" ]; then
+@@ -616,14 +633,19 @@ init_progs() {
+ }
+ 
+ show_disk_info() {
+-	local disk= vendor= model= d= size=
++	local disk= vendor= model= d= size= busid=
+ 	for disk in $@; do
+ 		local dev=${disk#/dev/}
+ 		d=$(echo $dev | sed 's:/:!:g')
+ 		vendor=$(cat /sys/block/$d/device/vendor 2>/dev/null)
+ 		model=$(cat /sys/block/$d/device/model 2>/dev/null)
++		busid=$(readlink -f /sys/block/$d/device 2>/dev/null)
+ 		size=$(awk '{gb = ($1 * 512)/1000000000; printf "%.1f GB\n", gb}' /sys/block/$d/size 2>/dev/null)
+-		echo "  $dev	($size $vendor $model)"
++		if is_dasd $dev eckd; then
++			echo "  $dev	($size $vendor ${busid##*/})"
++		else
++			echo "  $dev	($size $vendor $model)"
++		fi
+ 	done
+ }
+ 
+@@ -716,8 +738,12 @@ find_nth_non_boot_parts() {
+ 	local disks="$@"
+ 	[ -n "$USE_EFI" ] && type=$(partition_id esp)
+ 	for disk in $disks; do
+-		sfdisk -d $disk | grep -v $type \
+-			| awk "/(Id|type)=$id/ { i++; if (i==$idx) print \$1 }"
++		if is_dasd $disk eckd; then
++			fdasd -p $disk | grep "Linux $id" | awk '{print $1}' | tail -n 1
++		else
++			sfdisk -d $disk | grep -v $type \
++				| awk "/(Id|type)=$id/ { i++; if (i==$idx) print \$1 }"
++		fi
+ 	done
+ }
+ 
+@@ -946,9 +972,15 @@ native_disk_install_lvm() {
+ 	fi
+ 
+ 	for diskdev in "$@"; do
+-		setup_partitions $diskdev \
+-			"${boot_size}M,$boot_part_type,*" \
+-			"${lvm_size}${lvm_size:+M},$lvm_part_type" || return 1
++		if is_dasd $diskdev eckd; then
++			root_part_type="lvm"
++			setup_partitions_eckd $diskdev \
++				$boot_size 0 $root_part_type || return 1
++		else
++			setup_partitions $diskdev \
++				"${boot_size}M,$boot_part_type,*" \
++				"${lvm_size}${lvm_size:+M},$lvm_part_type" || return 1
++		fi
+ 	done
+ 
+ 	# will find BOOT_DEV for us
+@@ -993,7 +1025,11 @@ native_disk_install() {
+ 				"${swap_size}M,$swap_part_type" \
+ 				"${root_size}${root_size:+M},$root_part_type" \
+ 				|| return 1
+-
++		elif is_dasd $diskdev eckd; then
++			swap_part_type="swap"
++			root_part_type="native"
++			setup_partitions_eckd $diskdev \
++				$boot_size $swap_size $root_part_type || return 1
+ 		else
+ 			setup_partitions $diskdev \
+ 				"${boot_size}M,$boot_part_type,*" \
+@@ -1187,6 +1223,8 @@ if [ -n "$USE_RAID" ]; then
+ 	stop_all_raid
+ fi
+ 
++check_dasd
++
+ disks=$(find_disks)
+ diskdevs=
+ 
+@@ -1253,6 +1291,9 @@ if [ -z "$SWAP_SIZE" ]; then
+ fi
+ 
+ set -- $diskdevs
++if is_dasd $1 eckd; then
++	DISKLABEL=eckd
++fi
+ if [ $# -gt 1 ]; then
+ 	USE_RAID=1
+ fi
+@@ -1265,7 +1306,10 @@ if is_efi || [ -n "$USE_EFI" ]; then
+ 	BOOTFS=vfat
+ fi
+ 
+-[ "$ARCH" = "ppc64le" ] && BOOTLOADER=grub
++case "$ARCH" in
++	ppc64le) BOOTLOADER=grub;;
++	s390x) BOOTLOADER=zipl;;
++esac
+ 
+ dmesg -n1
+ 
+-- 
+cgit v1.1
+
