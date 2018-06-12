@@ -18,6 +18,7 @@ profile_netboot() {
 	image_ext="tar.gz"
 	case "$ARCH" in
 	x86_64) kernel_flavors="$kernel_flavors virt";;
+	s390x) initfs_features="$initfs_features dasd_mod qeth";;
 	esac
 }
 
