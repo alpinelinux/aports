@@ -52,7 +52,8 @@ profile_rpi() {
 		And much more..."
 	image_ext="tar.gz"
 	arch="armhf"
-	rpi_firmware_commit="27993e5acf86d1629428ed1a601e86ecd5e5a1df"
+	# for 4.14 kernel:  https://github.com/raspberrypi/firmware/tree/next
+	rpi_firmware_commit="4c9ff4884879c4114796eafb297a5c1ac04cba9a"
 	kernel_flavors="rpi rpi2"
 	kernel_cmdline="dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1"
 	initrd_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
