@@ -240,7 +240,7 @@ static void mark_names_recursive(struct apk_database *db, struct apk_string_arra
 	struct apk_change *change;
 	int r;
 
-	r = apk_solver_solve(db, 0, ctx->world, &changeset);
+	r = apk_solver_solve(db, APK_SOLVERF_IGNORE_CONFLICT, ctx->world, &changeset);
 	if (r == 0) {
 		foreach_array_item(change, changeset.changes)
 			mark_package(ctx, change->new_pkg);

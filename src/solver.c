@@ -39,6 +39,7 @@ struct apk_solver_state {
 	unsigned int solver_flags_inherit;
 	unsigned int pinning_inherit;
 	unsigned int default_repos;
+	unsigned ignore_conflict : 1;
 };
 
 static struct apk_provider provider_none = {
@@ -155,6 +156,9 @@ static int dependency_satisfiable(struct apk_solver_state *ss, struct apk_depend
 {
 	struct apk_name *name = dep->name;
 	struct apk_provider *p;
+
+	if (dep->conflict && ss->ignore_conflict)
+		return TRUE;
 
 	if (name->ss.locked)
 		return apk_dep_is_provided(dep, &name->ss.chosen);
@@ -284,6 +288,9 @@ static void apply_constraint(struct apk_solver_state *ss, struct apk_package *pp
 		apk_version_op_string(dep->result_mask),
 		BLOB_PRINTF(*dep->version));
 
+	if (dep->conflict && ss->ignore_conflict)
+		return;
+
 	name->ss.requirers += !dep->conflict;
 	if (name->ss.requirers == 1 && !dep->conflict)
 		name_requirers_changed(ss, name);
@@ -309,7 +316,7 @@ static void exclude_non_providers(struct apk_solver_state *ss, struct apk_name *
 	struct apk_provider *p;
 	struct apk_dependency *d;
 
-	if (name == must_provide)
+	if (name == must_provide || ss->ignore_conflict)
 		return;
 
 	dbg_printf("%s must provide %s (skip_virtuals=%d)\n", name->name, must_provide->name, skip_virtuals);
@@ -624,6 +631,8 @@ static void assign_name(struct apk_solver_state *ss, struct apk_name *name, stru
 		if (p.version == &apk_null_blob &&
 		    name->ss.chosen.version == &apk_null_blob)
 			return;
+		if (ss->ignore_conflict)
+			return;
 		/* Conflict: providing same name */
 		mark_error(ss, p.pkg, "conflict: same name provided");
 		mark_error(ss, name->ss.chosen.pkg, "conflict: same name provided");
@@ -641,13 +650,15 @@ static void assign_name(struct apk_solver_state *ss, struct apk_name *name, stru
 		list_del(&name->ss.dirty_list);
 
 	/* disqualify all conflicting packages */
-	foreach_array_item(p0, name->providers) {
-		if (p0->pkg == p.pkg)
-			continue;
-		if (p.version == &apk_null_blob &&
-		    p0->version == &apk_null_blob)
-			continue;
-		disqualify_package(ss, p0->pkg, "conflicting provides");
+	if (!ss->ignore_conflict) {
+		foreach_array_item(p0, name->providers) {
+			if (p0->pkg == p.pkg)
+				continue;
+			if (p.version == &apk_null_blob &&
+			    p0->version == &apk_null_blob)
+				continue;
+			disqualify_package(ss, p0->pkg, "conflicting provides");
+		}
 	}
 	reevaluate_reverse_deps(ss, name);
 	reevaluate_reverse_installif(ss, name);
@@ -880,6 +891,9 @@ static void cset_gen_dep(struct apk_solver_state *ss, struct apk_package *ppkg, 
 	struct apk_name *name = dep->name;
 	struct apk_package *pkg = name->ss.chosen.pkg;
 
+	if (dep->conflict && ss->ignore_conflict)
+		return;
+
 	if (!apk_dep_is_provided(dep, &name->ss.chosen))
 		mark_error(ss, ppkg, "unfulfilled dependency");
 
@@ -974,6 +988,7 @@ restart:
 	ss->db = db;
 	ss->changeset = changeset;
 	ss->default_repos = apk_db_get_pinning_mask_repos(db, APK_DEFAULT_PINNING_MASK);
+	ss->ignore_conflict = !!(solver_flags & APK_SOLVERF_IGNORE_CONFLICT);
 	list_init(&ss->dirty_head);
 	list_init(&ss->unresolved_head);
 
