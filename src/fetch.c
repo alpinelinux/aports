@@ -31,6 +31,7 @@ struct fetch_ctx {
 	int outdir_fd, errors;
 	struct apk_database *db;
 	size_t done, total;
+	struct apk_dependency_array *world;
 };
 
 static int cup(void)
@@ -216,42 +217,37 @@ static void mark_error(struct fetch_ctx *ctx, const char *match, struct apk_name
 	ctx->errors++;
 }
 
-static void mark_name_flags(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
+static void mark_name_flags(struct apk_database *db, const char *match, struct apk_name *name, void *pctx)
 {
-	if (!IS_ERR_OR_NULL(name))
-		name->auto_select_virtual = 1;
-}
-
-static void mark_name_recursive(struct apk_database *db, const char *match, struct apk_name *name, void *ctx)
-{
-	struct apk_changeset changeset = {};
+	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
 	struct apk_dependency dep = (struct apk_dependency) {
 		.name = name,
 		.version = &apk_null_blob,
 		.result_mask = APK_DEPMASK_ANY,
 	};
-	struct apk_dependency_array *world;
+
+	if (!IS_ERR_OR_NULL(name)) {
+		name->auto_select_virtual = 1;
+		apk_deps_add(&ctx->world, &dep);
+	} else
+		ctx->errors++;
+}
+
+static void mark_names_recursive(struct apk_database *db, struct apk_string_array *args, void *pctx)
+{
+	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
+	struct apk_changeset changeset = {};
 	struct apk_change *change;
 	int r;
 
-	if (!name) {
-		mark_error(ctx, match, name);
-		return;
-	}
-
-	apk_dependency_array_init(&world);
-	*apk_dependency_array_add(&world) = dep;
-	r = apk_solver_solve(db, 0, world, &changeset);
+	r = apk_solver_solve(db, 0, ctx->world, &changeset);
 	if (r == 0) {
 		foreach_array_item(change, changeset.changes)
 			mark_package(ctx, change->new_pkg);
 	} else {
-		mark_error(ctx, match, name);
-		if (apk_verbosity > 1)
-			apk_solver_print_errors(db, &changeset, world);
+		apk_solver_print_errors(db, &changeset, ctx->world);
+		ctx->errors++;
 	}
-	apk_dependency_array_free(&world);
-
 	apk_change_array_free(&changeset.changes);
 }
 
@@ -308,7 +304,6 @@ static int purge_package(void *pctx, int dirfd, const char *filename)
 static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_array *args)
 {
 	struct fetch_ctx *ctx = (struct fetch_ctx *) pctx;
-	void *mark;
 
 	if (ctx->flags & FETCH_STDOUT) {
 		apk_flags &= ~APK_PROGRESS;
@@ -327,12 +322,14 @@ static int fetch_main(void *pctx, struct apk_database *db, struct apk_string_arr
 	ctx->db = db;
 
 	if (ctx->flags & FETCH_RECURSIVE) {
+		apk_dependency_array_init(&ctx->world);
 		apk_name_foreach_matching(db, args, apk_foreach_genid(), mark_name_flags, ctx);
-		mark = mark_name_recursive;
+		if (ctx->errors == 0)
+			mark_names_recursive(db, args, ctx);
+		apk_dependency_array_free(&ctx->world);
 	} else {
-		mark = mark_name;
+		apk_name_foreach_matching(db, args, apk_foreach_genid(), mark_name, ctx);
 	}
-	apk_name_foreach_matching(db, args, apk_foreach_genid(), mark, ctx);
 	if (!ctx->errors)
 		apk_hash_foreach(&db->available.packages, fetch_package, ctx);
 
