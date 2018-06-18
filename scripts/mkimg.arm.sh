@@ -11,26 +11,45 @@ rpi_gen_cmdline() {
 }
 
 rpi_gen_config() {
-	cat <<EOF
-disable_splash=1
-boot_delay=0
-gpu_mem=256
-gpu_mem_256=64
-[pi0]
-kernel=boot/vmlinuz-rpi
-initramfs boot/initramfs-rpi
-[pi1]
-kernel=boot/vmlinuz-rpi
-initramfs boot/initramfs-rpi
-[pi2]
-kernel=boot/vmlinuz-rpi2
-initramfs boot/initramfs-rpi2
-[pi3]
-kernel=boot/vmlinuz-rpi2
-initramfs boot/initramfs-rpi2
-[all]
-include usercfg.txt
-EOF
+	case "$ARCH" in
+	armhf)
+		cat <<-EOF
+		disable_splash=1
+		boot_delay=0
+		gpu_mem=256
+		gpu_mem_256=64
+		[pi0]
+		kernel=boot/vmlinuz-rpi
+		initramfs boot/initramfs-rpi
+		[pi1]
+		kernel=boot/vmlinuz-rpi
+		initramfs boot/initramfs-rpi
+		[pi2]
+		kernel=boot/vmlinuz-rpi2
+		initramfs boot/initramfs-rpi2
+		[pi3]
+		kernel=boot/vmlinuz-rpi2
+		initramfs boot/initramfs-rpi2
+		[pi3+]
+		kernel=boot/vmlinuz-rpi2
+		initramfs boot/initramfs-rpi2
+		[all]
+		include usercfg.txt
+		EOF
+	;;
+	aarch64)
+		cat <<-EOF
+		disable_splash=1
+		boot_delay=0
+		arm_control=0x200
+		kernel=boot/vmlinuz-rpi
+		initramfs boot/initramfs-rpi
+		# uncomment line to enable serial on ttyS0 on rpi3
+		# NOTE: This fixes the core_freq to 250Mhz
+		# enable_uart=1
+		EOF
+	;;
+	esac
 }
 
 build_rpi_config() {
@@ -52,14 +71,18 @@ profile_rpi() {
 		And much more..."
 	image_ext="tar.gz"
 	arch="armhf"
-	# for 4.14 kernel:  https://github.com/raspberrypi/firmware/tree/next
-	rpi_firmware_commit="4c9ff4884879c4114796eafb297a5c1ac04cba9a"
+	# check commit log for matching commit with current rpi kernel version at:
+	# https://github.com/raspberrypi/firmware/tree/master
+	rpi_firmware_commit="eeaaf5e2b5aee29f31e989c0dddd186fb68b2144"
 	kernel_flavors="rpi rpi2"
-	kernel_cmdline="dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1"
+	kernel_cmdline="dwc_otg.lpm_enable=0 console=tty1"
 	initrd_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
 	apkovl="genapkovl-dhcp.sh"
 	hostname="rpi"
-	image_ext="tar.gz"
+	if [ "$ARCH" = "aarch64" ]; then
+		arch="aarch64"
+		kernel_flavors="rpi"
+	fi
 }
 
 build_uboot() {
