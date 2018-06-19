@@ -15,6 +15,9 @@ profile_standard() {
 		initfs_features="$initfs_features dasd_mod qeth"
 		initfs_cmdline="modules=loop,squashfs,dasd_mod,qeth quiet"
 	fi
+	if [ "$ARCH" = "ppc64le" ]; then
+		initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage,ibmvscsi quiet"
+	fi
 }
 
 profile_extended() {
