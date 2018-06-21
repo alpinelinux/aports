@@ -70,19 +70,17 @@ profile_rpi() {
 		Designed for RPI 1,2 and 3.
 		And much more..."
 	image_ext="tar.gz"
-	arch="armhf"
+	arch="aarch64 armhf"
 	# check commit log for matching commit with current rpi kernel version at:
 	# https://github.com/raspberrypi/firmware/tree/master
 	rpi_firmware_commit="eeaaf5e2b5aee29f31e989c0dddd186fb68b2144"
-	kernel_flavors="rpi rpi2"
+	kernel_flavors="rpi"
+	case "$ARCH" in
+		armhf) kernel_flavors="$kernel_flavors rpi2";;
+	esac
 	kernel_cmdline="dwc_otg.lpm_enable=0 console=tty1"
 	initrd_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
-	apkovl="genapkovl-dhcp.sh"
 	hostname="rpi"
-	if [ "$ARCH" = "aarch64" ]; then
-		arch="aarch64"
-		kernel_flavors="rpi"
-	fi
 }
 
 build_uboot() {
