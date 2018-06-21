@@ -20,7 +20,6 @@ profile_standard() {
 		initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage,ibmvscsi quiet"
 		;;
 	esac
-	fi
 }
 
 profile_extended() {
