@@ -79,7 +79,7 @@ profile_rpi() {
 		armhf) kernel_flavors="$kernel_flavors rpi2";;
 	esac
 	kernel_cmdline="dwc_otg.lpm_enable=0 console=tty1"
-	initrd_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
+	initfs_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
 	hostname="rpi"
 }
 
