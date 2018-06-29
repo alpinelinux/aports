@@ -101,9 +101,15 @@ static const struct apk_package *is_upgradable(struct apk_name *name, const stru
 
 static void print_package(const struct apk_package *pkg, const struct list_ctx *ctx)
 {
-	printf(PKG_VER_FMT " " BLOB_FMT " {" BLOB_FMT "} (" BLOB_FMT ")",
-		PKG_VER_PRINTF(pkg), BLOB_PRINTF(*pkg->arch), BLOB_PRINTF(*pkg->origin),
-		BLOB_PRINTF(*pkg->license));
+	printf(PKG_VER_FMT " " BLOB_FMT " ",
+		PKG_VER_PRINTF(pkg), BLOB_PRINTF(*pkg->arch));
+
+	if (pkg->origin != NULL)
+		printf("{" BLOB_FMT "}", BLOB_PRINTF(*pkg->origin));
+	else
+		printf("{%s}", pkg->name->name);
+
+	printf(" (" BLOB_FMT ")", BLOB_PRINTF(*pkg->license));
 
 	if (pkg->ipkg)
 		printf(" [installed]");
