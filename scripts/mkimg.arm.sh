@@ -64,7 +64,7 @@ profile_rpi() {
 	profile_base
 	title="Raspberry Pi"
 	desc="Includes Raspberry Pi kernel.
-		Designed for RPI 1,2 and 3.
+		Designed for RPI 1, 2 and 3.
 		And much more..."
 	image_ext="tar.gz"
 	arch="aarch64 armhf"
