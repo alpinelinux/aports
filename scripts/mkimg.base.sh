@@ -1,10 +1,12 @@
 build_kernel() {
-	local _flavor="$2"
+	local _flavor="$2" _modloopsign=
 	shift 3
 	local _pkgs="$@"
+	[ "$modloop_sign" = "yes" ] && _modloopsign="--modloopsign"
 	update-kernel \
 		$_hostkeys \
 		${_abuild_pubkey:+--apk-pubkey $_abuild_pubkey} \
+		$_modloopsign \
 		--media \
 		--flavor "$_flavor" \
 		--arch "$ARCH" \
@@ -291,6 +293,7 @@ profile_base() {
 	kernel_flavors="vanilla"
 	initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage quiet"
 	initfs_features="ata base bootchart cdrom squashfs ext4 mmc raid scsi usb virtio"
+	modloop_sign=yes
 	grub_mod="disk part_gpt part_msdos linux multiboot2 normal configfile search search_label efi_uga efi_gop fat iso9660 cat echo ls test true help gzio"
 	apks="alpine-base alpine-mirrors busybox kbd-bkeymaps chrony e2fsprogs network-extras libressl openssh tzdata"
 	apkovl=
