@@ -1,8 +1,8 @@
 # Contributor: Carlo Landmeter <clandmeter@gmail.com>
 # Maintainer: Carlo Landmeter <clandmeter@gmail.com>
 pkgname=chromium
-pkgver=64.0.3282.168
-pkgrel=2
+pkgver=66.0.3359.181
+pkgrel=0
 pkgdesc="chromium web browser"
 url="http://www.chromium.org/"
 arch="x86_64"
@@ -17,6 +17,8 @@ makedepends="$depends_dev
 	bsd-compat-headers
 	bzip2-dev
 	cairo-dev
+	clang
+	clang-dev
 	cups-dev
 	dbus-glib-dev
 	eudev-dev
@@ -26,7 +28,7 @@ makedepends="$depends_dev
 	freetype-dev
 	gnutls-dev
 	gperf
-	gtk+-dev
+	gtk+3.0-dev
 	gzip
 	harfbuzz-dev
 	hunspell-dev
@@ -37,6 +39,7 @@ makedepends="$depends_dev
 	libbsd-dev
 	libcap-dev
 	libelf-dev
+	libevent-dev
 	libexif-dev
 	libgcrypt-dev
 	libgnome-keyring-dev
@@ -59,10 +62,12 @@ makedepends="$depends_dev
 	ninja
 	nodejs
 	nss-dev
+	opus-dev
 	paxmark
 	pciutils-dev
 	perl
 	python2
+	re2-dev
 	snappy-dev
 	speex-dev
 	sqlite-dev
@@ -84,7 +89,6 @@ source="https://commondatastorage.googleapis.com/chromium-browser-official/$pkgn
 
 	chromium-widevine.patch
 	default-pthread-stacksize.patch
-	gcc6.patch
 	gn_bootstrap.patch
 	last-commit-position.patch
 	musl-fixes.patch
@@ -98,11 +102,11 @@ source="https://commondatastorage.googleapis.com/chromium-browser-official/$pkgn
 	unset-madv_free.patch
 	swiftshader.patch
 	secure_getenv.patch
-	chromium-48.0.2564.116-libusb_interrupt_event_handler.patch
-	chromium-60.0.3112.78-gn-system.patch
-	chromium-60.0.3112.78-jpeg-nomangle.patch
-	chromium-60.0.3112.78-no-libpng-prefix.patch
-	chromium-60.0.3112.78-no-zlib-mangle.patch
+	chromium-clang-r2.patch
+	chromium-clang-r3.patch
+
+	chromium-gcc-r1.patch
+	chromium-skia-harmony.patch
 	"
 
 builddir="$srcdir"/$pkgname-$pkgver
@@ -140,22 +144,20 @@ prepare() {
 
 	mkdir -p third_party/node/linux/node-linux-x64/bin
 	ln -s /usr/bin/node third_party/node/linux/node-linux-x64/bin/
-}
 
-_gn_flags() {
-	echo $*
-}
-
-build() {
-	cd "$builddir"
 	# reusable system library settings
 	local use_system="
+		fontconfig
 		flac
 		libdrm
+		libevent
 		libjpeg
 		libpng
 		libwebp
+		libxml
 		libxslt
+		opus
+		re2
 		snappy
 		yasm
 		zlib
@@ -165,27 +167,40 @@ build() {
 		find -type f -path "*third_party/$_lib/*" \
 			\! -path "*third_party/$_lib/chromium/*" \
 			\! -path "*third_party/$_lib/google/*" \
+			\! -path './base/third_party/icu/*' \
+			\! -path './third_party/pdfium/third_party/freetype/include/pstables.h' \
+			\! -path './third_party/yasm/run_yasm.py' \
 			\! -regex '.*\.\(gn\|gni\|isolate\|py\)' \
 			-delete
 	done
+#		freetype
+#		harfbuzz-ng
 
 	# pdfium uses internal headers in freetype
 	# we copy from freetype sources
 	# https://bugs.chromium.org/p/pdfium/issues/detail?id=733
 	# should be fixed in freetype:
 	# https://savannah.nongnu.org/bugs/index.php?51156
-	mkdir -p "third_party/freetype/src/src/psnames/"
-	cp "$srcdir"/pstables-2.8.h third_party/freetype/src/src/psnames/pstables.h
+#	mkdir -p "third_party/freetype/src/src/psnames/"
+#	cp "$srcdir"/pstables-2.8.h third_party/freetype/src/src/psnames/pstables.h
 
 	# Work around bug in v8 in which GCC 6 optimizes away null pointer checks
 	# https://bugs.chromium.org/p/v8/issues/detail?id=3782
 	# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=69234
-	CFLAGS="$CFLAGS -fno-delete-null-pointer-checks"
+#	CFLAGS="$CFLAGS -fno-delete-null-pointer-checks"
 
 	msg "Replacing gyp files"
 	python build/linux/unbundle/replace_gn_files.py --system-libraries \
 		${use_system}
 	third_party/libaddressinput/chromium/tools/update-strings.py
+}
+
+_gn_flags() {
+	echo $*
+}
+
+build() {
+	cd "$builddir"
 
 	##############################################################
 	# Please dont use these keys outside of Alpine Linux project #
@@ -194,50 +209,67 @@ build() {
 	##############################################################
 	eval "$(base64 -d < $srcdir/google-api.keys)"
 
+	export CC=clang
+	export CXX=clang++
+
 	msg "Bootstrapping GN"
-	local _c=$(_gn_flags is_clang=false \
+	local _c=$(_gn_flags is_clang=true \
 		use_sysroot=false \
 		treat_warnings_as_errors=false \
 		fatal_linker_warnings=false \
 		binutils_path=\"/usr/bin\" \
-		use_gconf=false \
-		use_gold=true \
+		use_gold=false \
 		use_allocator=\"none\" \
 		use_allocator_shim=false \
 	)
 
-	python tools/gn/bootstrap/bootstrap.py --gn-gen-args "$_c"
+	AR="ar" CC="$CC" CXX="$CXX" LD="$CXX" \
+		python tools/gn/bootstrap/bootstrap.py -s -v --no-clean --gn-gen-args "$_c"
 
+	msg "Configuring build"
 	_c=$(_gn_flags \
+		clang_use_chrome_plugins=false \
+		custom_toolchain=\"//build/toolchain/linux/unbundle:default\" \
+		enable_hangout_services_extension=true \
 		enable_hotwording=false \
 		enable_nacl=false \
 		enable_nacl_nonsfi=false \
 		enable_precompiled_headers=false \
+		enable_widevine=true \
+		fatal_linker_warnings=false \
 		ffmpeg_branding=\"Chrome\" \
 		fieldtrial_testing_like_official_build=true \
+		gold_path=\"/usr/bin/ld.gold\" \
 		google_api_key=\"$_google_api_key\" \
 		google_default_client_id=\"$_google_default_client_id\" \
 		google_default_client_secret=\"$_google_default_client_secret\" \
-		is_clang=false \
+		host_toolchain=\"//build/toolchain/linux/unbundle:default\" \
+		icu_use_data_file=true \
+		is_clang=true \
 		is_debug=$_is_debug \
 		linux_use_bundled_binutils=false \
 		proprietary_codecs=true \
+		remove_webcore_debug_symbols=true \
 		symbol_level=0 \
 		treat_warnings_as_errors=false \
 		use_allocator=\"none\" \
 		use_allocator_shim=false \
-		use_gconf=false \
+		use_cups=true \
+		use_custom_libcxx=false \
 		use_gnome_keyring=false \
+		use_gold=false \
+		use_lld=false \
 		use_pulseaudio=false \
 		use_sysroot=false \
+		use_system_harfbuzz=true \
 	)
 
-	out/Release/gn gen out/$_buildtype --args="$_c"
+	AR="ar" CC="$CC" CXX="$CXX" LD="$CXX" NM=/usr/bin/nm \
+		out/Release/gn gen out/$_buildtype --args="$_c"
 
 	msg "Ninja turtles GO!"
 	# workaround parallel build
-	ninja -C out/Release gen/ui/accessibility/ax_enums.h \
-		gen/ui/accessibility/ax_enums.cc
+	ninja -C out/Release gen/ui/accessibility/ax_enums.p
 
 	# build mksnapshot and paxmark it
 	ninja -C out/$_buildtype mksnapshot
@@ -314,7 +346,7 @@ chromedriver() {
 	mv "$pkgdir"/usr/bin/chromedriver "$subpkgdir"/usr/bin
 }
 
-sha512sums="8bb31d6df85651315f8b70bd27f5b855b0936dd06b05a22451d24d4b440edc5d4e8d8f20d0fbc5fc52484f14f0539d2b2e5e0623aa22cca40c1f3b9e5d9d06d7  chromium-64.0.3282.168.tar.xz
+sha512sums="3549cae27ce33a19bab857c91da1ed96c1ae36123b71bdf41a8bbacdc9554d15b4902e835dc4a8ef8016e69344b809aab4e1e3b1b26bd54d5ca651048bcb9886  chromium-66.0.3359.181.tar.xz
 a3bb959c65944ae2fb765725cedcffd743a58bc0c2cd1f1999d15fe79801d00f3474b08b4ed7b48859ed921eb57093d0ad09d90f201d729ed9b8a419a591ed29  pstables-2.8.h
 b9a810416dd7a8ffc3a5ced85ad9acebda1665bd08a57eec7b189698cc5f74d2c3fd69044e20fcb83297a43214b2772a1312b2c6122ea0eb716abacf39524d60  chromium-launcher.sh
 f6d962b9e4c22dd42183df3db5d3202dab33eccecafb1bf63ca678147289581262db1e5e64cbe8f9c212beefb0a6717bb8d311e497f56b55fe95b8bab2db493f  chromium.conf
@@ -322,22 +354,20 @@ e182c998a43d22d1c76a86c561619afd1fca8c2be668265ad5e2f81a3806f7a154272cc027a2f8b3
 2d8237a940ea691bd10b08315429677a587f7ef9692a0cca53bfd066eae82998a6c71f402a8669e9de39f94d7f3280745d1628ea6eac5d76ca7116844d4e0dac  google-api.keys
 55921cc33d623e0751e94d4fef2ddd69afb57381da6115995b1f318e2398978b9173e80f6ffbc6e6c0c0c55a04e934e0e34a46c32e03947cc31f0f5a226e7725  chromium-widevine.patch
 05fb6d9434565a7a73f5c18d470ae600bf4afbe15d0e4a7c2770bf2596a0bd2788cdfeb37e0b566fc3d26ff2d0791b70488b2c184e3286cff5a1fa25e17582cd  default-pthread-stacksize.patch
-d86fa87a47f9dc1f7400358c70f2d9efcb85fa5bf0badf65456ed6a7003e59eb0809e0406fb114f256d51acb002c2a8da8a0c1c93dfdc21e198761dc516a0ecb  gcc6.patch
-f420f6b4827da4dbd416b2de094452917313cb79e01d33a07029589066a0b79e06446882f1ade5ac418f180ae581937d620d1d48698df77b5c5ddb4a3d6cf680  gn_bootstrap.patch
+46e141a932860c6db1f655c8b188b8c41bce0dbb1654c066379fa53063ce6cc3bf8be156bd8e73e103c7d9e956e436732e2f7db0653f9847eb26cbfebc441a10  gn_bootstrap.patch
 8fbfd67a0b6bbdf08364e810bd85b4a80dda9af73fefe3aba8010d9b33022d458a785c628515bbda9c743b8a0293d57cfe18fcc5aa2313c845c6fb948c2335f9  last-commit-position.patch
 ca73f4912c4e41a235821fba5f3a7a5266739ce86dc1b27bc07d6bc2f97dc97b15b2fa47dc95c7a82a7e0b8fa1e6a17071f6dc06ddf47f65a56f216c0aaaf054  musl-fixes.patch
 90efbc89151c77f32434364dcbaabaf9d9a207f4a77f147cd51b3fe100832fbfb3a9fb665303a79a3d788e400f4f41890de202ccbb7bd1fc6252e33c6e74e429  musl-fixes-breakpad.patch
 507a8db2317f1f6ec18dec6cb5894b716e9b2542b58887bab9319bc6d4c66fe4a4d09b200ca8e3f11b32e380b282442a27e7a1b358d3c25eef0fa7655e9dc134  musl-hacks.patch
 95ead57f7338649351948d100e32e5ec1eeadb02bffa136ff15c6c515eceb8013c444be092d777c1b62b945bfb83b97778ba4d3a0ccc2d7c2c9a0a8cd8ee0f01  musl-libc++.patch
 9b75d6ac720d1b8ddc597f0f472bc400ff866a733f12b3a4cd3e7e18e724549c5f8e056c7e0d0462ef083bff5e677f8cef6b89b22f4740a40ad6398978269373  musl-sandbox.patch
-fe2cee01d07e5dc638dad0c5453397eb03e30867c1e54591d7f612034366c96ccaa35216d2bcedbe796863eeb5b90dcf71c75e5391c266df4cb27b44e59bb040  no-execinfo.patch
+31f847b5c78ac26a8f89fa7ff55911023929753ba2e6a2c4a723fdcee17e38388b0b56e395a6cb958da2efb9f17d4efa8fdce3d9dd31471271a1435b37cfa68b  no-execinfo.patch
 7a3a4ba4479a22a13126a78ad3d9991188ef030389026c4293d45b4440711751d68e43d28687653d5670d7f00ed5f1b820a8df50a3a08ce06e454f0cad9dbd3c  no-mallinfo.patch
 ac0c9d7780ac897ea8ad5d909616d3aa29eed720353c7a660c850ee1404c80f51f5db274b3c5d3c730561a7c3cd138624e1901ece329926b5dc5ca15195d9abf  resolver.patch
 27dd7916be3324294a0a913c43c856e9c00be767a2aec4f3da2455fb84e74ebb0017d1aa586b40dd9d989ada6b60fc531522f503d57e04324726a2171bf3a85e  unset-madv_free.patch
 6b0812725a0fc562527f3556dc4979fec72d1ba92f26a5e78ff2016c39bb2c155a0ff95fc22101f9c097d14b84182d6615276f4247f60ae7833ab45da8366e6d  swiftshader.patch
-67eea8e13c85aca7db5c85f5b0d33e5798e8063ab7f5b2f0a5c7f6fee8266e58bee4e72f4542472ef6634634ca0f4359a2d1113fa310a991373404320c784730  secure_getenv.patch
-2e9496aa9ccd6fed2d0df4b659d55e87abb67b1be4e3cc7cb0483ccb458b9071bed9939132a2345bf15192b4dcfe5da9474d7f653ae2f4b4d46d2f3c032b3a3f  chromium-48.0.2564.116-libusb_interrupt_event_handler.patch
-197ca3fd315e15c3e0b796615afbd01f65e2040027a2cde6304dea500cfaf18372ce2be88f4030bcd26651b913dd4af741a4df8803cdf9ff062a8eef9ab6c5db  chromium-60.0.3112.78-gn-system.patch
-e9fcc976d2ac1b2e73d310790e76dae15111e78cd8e3efa5febd702fd9492d7d68b1b57d95bca88d5e16c0627594a00ebdeaf570df52be6e9b23a4212906c141  chromium-60.0.3112.78-jpeg-nomangle.patch
-9b08e895826fdd14fd6334662b8d07807beabab7368f3fcff3fcebe76baba4c7714c55042b379da6dab1ea0b1c4e5d657bf972b644089f00b418b7c2f5b6ef1b  chromium-60.0.3112.78-no-libpng-prefix.patch
-87a0c6ff4906f0c4b6f6b471ec9bf0b2e2d28431122e99a68f957474cf27ec6b073ebca14660c8858817219521d74a184b8444cf2885db21d28fa4599fcaa66f  chromium-60.0.3112.78-no-zlib-mangle.patch"
+42c4f9684463f0958c27b0cfa3ad160cb9053c2e5e8940fefecdd69adcb844674e64f03c2003d1abdcbdefa5f415a64f37c85042218b2f1d379690322d6e198c  secure_getenv.patch
+b74f94675aad849791f42261325d36bdc796c982d3871c43b7c4f665b1f00762c7e67a6ee7e9d02fbc51b2e23ee171bf0bca36559bdf999e41ffd4fc9f54ceca  chromium-clang-r2.patch
+a742e09199bfa2c391bb3684788961d87ba3b51255aff0346de0fa42874160ce83bd0a6569d76addf2155a47c161bde1176cf6ae8438818b9b962412ec82f16c  chromium-clang-r3.patch
+6e2bcbed44786c6c0d3beda935269f30fdcdf07c400defa6bf73f8359a60b1d59cc2f80dbc106be651a535635995641321d9e524b18919d3975bd6008a641d59  chromium-gcc-r1.patch
+cbd99d51178fa5c2c3dee1eb4990240ca2ff829cee9151384e36bc3c634698c0ecaf9b51c99e901f38d0a37eef7187fe5ad39b9b7f528f7a9066a855a0c6e49f  chromium-skia-harmony.patch"
