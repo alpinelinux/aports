@@ -156,7 +156,7 @@ struct apk_database {
 	unsigned int pending_triggers;
 	int performing_self_upgrade : 1;
 	int permanent : 1;
-	int open_write : 1;
+	int autoupdate : 1;
 	int open_complete : 1;
 	int compat_newfeatures : 1;
 	int compat_notinstallable : 1;
@@ -211,6 +211,7 @@ struct apk_db_file *apk_db_file_query(struct apk_database *db,
 #define APK_OPENF_NO_SYS_REPOS		0x0100
 #define APK_OPENF_NO_INSTALLED_REPO	0x0200
 #define APK_OPENF_CACHE_WRITE		0x0400
+#define APK_OPENF_NO_AUTOUPDATE		0x0800
 
 #define APK_OPENF_NO_REPOS	(APK_OPENF_NO_SYS_REPOS |	\
 				 APK_OPENF_NO_INSTALLED_REPO)
