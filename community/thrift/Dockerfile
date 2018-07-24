@@ -60,6 +60,7 @@ COPY lib-cpp-mutex-adaptive-errorcheck-recursive-init.patch .
 COPY lib-c_glib-test-testdebugproto-musl-broken-neginf.patch .
 COPY lib-c_glib-test-testtransportsslsocket-musl-different-string-for-unknown-host.patch .
 COPY lib-py-src-ext-endian-h-use-system-endian-h.patch .
+COPY test-py-ignore-poorly-written-python-triggers-eaddrinuse.patch .
 RUN abuild checksum
 RUN abuild -r
 
