@@ -72,7 +72,7 @@ RUN sudo apk add libthriftc-${THRIFT_VER}-r${PKG_REV}.apk
 RUN sudo apk add libthriftc-dev-${THRIFT_VER}-r${PKG_REV}.apk
 RUN sudo apk add lua-thrift-${THRIFT_VER}-r${PKG_REV}.apk
 RUN sudo apk add perl-thrift-${THRIFT_VER}-r${PKG_REV}.apk
-#RUN sudo apk add py-thrift-${THRIFT_VER}-r${PKG_REV}.apk
+RUN sudo apk add py-thrift-${THRIFT_VER}-r${PKG_REV}.apk
 # XXX: @CF: 20180715: users should probably just stick with "npm install thrift"
 # RUN sudo apk add node-thrift-${THRIFT_VER}-r${PKG_REV}.apk
 
