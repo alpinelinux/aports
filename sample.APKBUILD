@@ -17,7 +17,7 @@ depends_dev=
 makedepends="$depends_dev"
 install=
 subpackages="$pkgname-dev $pkgname-doc"
-source="http://downloads.sourceforge.net/$pkgname/$pkgname-$pkgver.tar.gz"
+source="https://downloads.sourceforge.net/$pkgname/$pkgname-$pkgver.tar.gz"
 
 builddir="$srcdir"/$pkgname-$pkgver
 
