@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -80,6 +80,7 @@ package() {
 		media/usb \
 		mnt \
 		proc \
+		opt \
 		run \
 		sbin \
 		srv \
