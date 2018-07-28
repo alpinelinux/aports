@@ -4,5 +4,4 @@ For this PR, I have:
 - [ ] Prefixed repo/name: directory in my commit title line
 - [ ] Started `pkgrel` at `0` for a new version or increased `pkgrel`
 - [ ] Used "upgraded to" or "new aport" phrase in title line
-- [ ] Used global `depends_`_split_ variables (e.g. `depends_dev` or `$pkgname-foo:_foo` => `depends__foo`)
 <!-- Before adding anything else, please consider if it applies to all future PRs. -->
