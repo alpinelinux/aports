@@ -300,6 +300,9 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		case '5': /* directory */
 			entry.mode |= S_IFDIR;
 			break;
+		case '6': /* fifo */
+			entry.mode |= S_IFIFO;
+			break;
 		case 'g': /* global pax header */
 			break;
 		case 'x': /* file specific pax header */
@@ -477,11 +480,10 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 		if (r < 0) ret = -errno;
 		atflags |= AT_SYMLINK_NOFOLLOW;
 		break;
-	case S_IFSOCK:
 	case S_IFBLK:
 	case S_IFCHR:
 	case S_IFIFO:
-		r = mknodat(atfd, fn, ae->mode & 07777, ae->device);
+		r = mknodat(atfd, fn, ae->mode, ae->device);
 		if (r < 0) ret = -errno;
 		break;
 	}
