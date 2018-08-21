@@ -1520,7 +1520,8 @@ int apk_db_open(struct apk_database *db, struct apk_db_options *dbopts)
 		goto ret_r;
 	}
 	if ((dbopts->open_flags & APK_OPENF_WRITE) &&
-	    !(dbopts->open_flags & APK_OPENF_NO_AUTOUPDATE))
+	    !(dbopts->open_flags & APK_OPENF_NO_AUTOUPDATE) &&
+	    !(apk_flags & APK_NO_NETWORK))
 		db->autoupdate = 1;
 	if (!dbopts->cache_dir) dbopts->cache_dir = "etc/apk/cache";
 
