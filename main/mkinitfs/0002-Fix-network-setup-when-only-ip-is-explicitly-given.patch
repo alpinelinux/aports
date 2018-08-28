@@ -1,0 +1,144 @@
+From 83dd78258053cd102e8425beb159a2be7e6b912f Mon Sep 17 00:00:00 2001
+From: Ain <41307858+nero@users.noreply.github.com>
+Date: Thu, 9 Aug 2018 20:57:28 +0200
+Subject: [PATCH 2/5] Fix network setup when only ip= is explicitly given
+
+Previously, configure_ip was only called from code paths of other
+boot options that require network.
+
+This fixes the passing of -n to nlplug-findfs and --no-network to
+the apk memory bootstrap.
+---
+ initramfs-init.in | 67 +++++++++++++++++++++++++++++------------------
+ 1 file changed, 42 insertions(+), 25 deletions(-)
+
+diff --git a/initramfs-init.in b/initramfs-init.in
+index fd78fcf..1d0f079 100755
+--- a/initramfs-init.in
++++ b/initramfs-init.in
+@@ -277,6 +277,16 @@ rtc_exists() {
+ 	[ -e "$rtc" ]
+ }
+ 
++# This is used to predict if network access will be necessary
++is_url() {
++	case "$1" in
++	http://*|https://*|ftp://*)
++		return 0;;
++	*)
++		return 1;;
++	esac
++}
++
+ # read the kernel options. we need surve things like:
+ #  acpi_osi="!Windows 2006" xen-pciback.hide=(01:00.0)
+ set -- $(cat /proc/cmdline)
+@@ -360,6 +370,15 @@ mount -t devpts -o gid=5,mode=0620,noexec,nosuid devpts /dev/pts
+ [ -d /dev/shm ] || mkdir /dev/shm
+ mount -t tmpfs -o nodev,nosuid,noexec shm /dev/shm
+ 
++# determine if we are going to need networking
++if [ -n "$KOPT_ip" ] || [ -n "$KOPT_nbd" ] || \
++	is_url "$KOPT_apkovl" || is_url "$ALPINE_REPO"; then
++
++	do_networking=true
++else
++	do_networking=false
++fi
++
+ if [ -n "$KOPT_dasd" ]; then
+ 	for mod in dasd_mod dasd_eckd_mod dasd_fba_mod; do
+ 		modprobe $mod
+@@ -413,6 +432,7 @@ if [ -n "$KOPT_cryptroot" ]; then
+ fi
+ 
+ if [ -n "$KOPT_nbd" ]; then
++	# TODO: Might fail because nlplug-findfs hasn't plugged eth0 yet
+ 	configure_ip
+ 	setup_nbd || echo "Failed to setup nbd device."
+ fi
+@@ -471,7 +491,7 @@ if [ -n "$KOPT_root" ]; then
+ 	exec /bin/busybox sh
+ fi
+ 
+-if [ -n "$ALPINE_REPO" ]; then
++if $do_networking; then
+ 	repoopts="-n"
+ else
+ 	repoopts="-b $repofile"
+@@ -484,6 +504,11 @@ nlplug-findfs $cryptopts -p /sbin/mdev ${KOPT_debug_init:+-d} \
+ 	$repoopts -a /tmp/apkovls
+ eend $?
+ 
++# Setup network interfaces
++if $do_networking; then
++        configure_ip
++fi
++
+ # early console?
+ if [ "$SINGLEMODE" = "yes" ]; then
+ 	echo "Entering single mode. Type 'exit' to continue booting."
+@@ -502,26 +527,21 @@ fi
+ 
+ mount -t tmpfs -o $rootflags tmpfs $sysroot
+ 
+-case "$KOPT_apkovl" in
+-	'')
+-		if [ -e /tmp/apkovls ]; then
+-			ovl=$(head -n 1 /tmp/apkovls)
+-		fi
+-		;;
+-	http://*|https://*|ftp://*)
+-		configure_ip
+-
+-		MACHINE_UUID=$(cat /sys/class/dmi/id/product_uuid)
+-		url="${KOPT_apkovl/{MAC\}/$MAC_ADDRESS}"
+-		url="${url/{UUID\}/$MACHINE_UUID}"
+-		ovl=/tmp/${url##*/}
+-		wget -O "$ovl" "$url" || ovl=
+-		;;
+-	*)
+-		ovl="$KOPT_apkovl"
+-		;;
+-esac
+-
++if [ -z "$KOPT_apkovl" ]; then
++	# Not manually set, use the apkovl found by nlplug
++	if [ -e /tmp/apkovls ]; then
++		ovl=$(head -n 1 /tmp/apkovls)
++	fi
++elif is_url "$KOPT_apkovl"; then
++	# Fetch apkovl via network
++	MACHINE_UUID=$(cat /sys/class/dmi/id/product_uuid)
++	url="${KOPT_apkovl/{MAC\}/$MAC_ADDRESS}"
++	url="${url/{UUID\}/$MACHINE_UUID}"
++	ovl=/tmp/${url##*/}
++	wget -O "$ovl" "$url" || ovl=
++else
++	ovl="$KOPT_apkovl"
++fi
+ 
+ # parse pkgs=pkg1,pkg2
+ if [ -n "$KOPT_pkgs" ]; then
+@@ -620,9 +640,6 @@ cp -a /etc/apk/keys $sysroot/etc/apk
+ # generate apk repositories file. needs to be done after relocation
+ find_boot_repositories > $repofile
+ 
+-# set up network if needed
+-[ "$ALPINE_REPO" ] && configure_ip
+-
+ # silently fix apk arch in case the apkovl does not match
+ if [ -r "$sysroot"/etc/apk/arch ]; then
+ 	apk_arch="$(apk --print-arch)"
+@@ -664,7 +681,7 @@ if [ -f /var/cache/misc/*modloop*.SIGN.RSA.*.pub ]; then
+ fi
+ 
+ apkflags="--initramfs-diskless-boot --progress"
+-if [ -z "$ALPINE_REPO" ]; then
++if [ -z "$MAC_ADDRESS" ]; then
+ 	apkflags="$apkflags --no-network"
+ else
+ 	apkflags="$apkflags --update-cache"
+-- 
+2.18.0
+
