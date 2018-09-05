@@ -689,5 +689,7 @@ err:
 	apk_string_array_free(&args);
 	free(apk_argv);
 
+	if (r < 0) r = 250;
+	if (r > 99) r = 99;
 	return r;
 }
