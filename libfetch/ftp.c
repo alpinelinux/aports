@@ -79,6 +79,7 @@
 
 static int ftp_cmd(conn_t *, const char *, ...) LIBFETCH_PRINTFLIKE(2, 3);
 #define FTP_ANONYMOUS_USER	"anonymous"
+#define FTP_ANONYMOUS_PASSWORD	"anonymous"
 
 #define FTP_CONNECTION_ALREADY_OPEN	125
 #define FTP_OPEN_DATA_CONNECTION	150
@@ -959,9 +960,8 @@ ouch:
 static int
 ftp_authenticate(conn_t *conn, struct url *url, struct url *purl)
 {
-	const char *user, *pwd, *login_name;
-	char pbuf[URL_USERLEN + 1 + URL_HOSTLEN + 1];
-	int e, len;
+	const char *user, *pwd;
+	int e;
 
 	/* XXX FTP_AUTH, and maybe .netrc */
 
@@ -985,18 +985,8 @@ ftp_authenticate(conn_t *conn, struct url *url, struct url *purl)
 		pwd = url->pwd;
 		if (*pwd == '\0')
 			pwd = getenv("FTP_PASSWORD");
-		if (pwd == NULL || *pwd == '\0') {
-			if ((login_name = getlogin()) == 0)
-				login_name = FTP_ANONYMOUS_USER;
-			if ((len = snprintf(pbuf, URL_USERLEN + 2, "%s@", login_name)) < 0)
-				len = 0;
-			else if (len > URL_USERLEN + 1)
-				len = URL_USERLEN + 1;
-			gethostname(pbuf + len, sizeof(pbuf) - len);
-			/* MAXHOSTNAMELEN can differ from URL_HOSTLEN + 1 */
-			pbuf[sizeof(pbuf) - 1] = '\0';
-			pwd = pbuf;
-		}
+		if (pwd == NULL || *pwd == '\0')
+			pwd = FTP_ANONYMOUS_PASSWORD;
 		e = ftp_cmd(conn, "PASS %s\r\n", pwd);
 	}
 
