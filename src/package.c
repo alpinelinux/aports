@@ -476,13 +476,7 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
 		ctx->md = EVP_md_null();
 		break;
 	case APK_SIGN_VERIFY_IDENTITY:
-		if (identity->type == APK_CHECKSUM_MD5) {
-			ctx->md = EVP_md5();
-			ctx->control_started = 1;
-			ctx->data_started = 1;
-		} else {
-			ctx->md = EVP_sha1();
-		}
+		ctx->md = EVP_sha1();
 		memcpy(&ctx->identity, identity, sizeof(ctx->identity));
 		break;
 	case APK_SIGN_GENERATE:
@@ -552,6 +546,9 @@ int apk_sign_ctx_process_file(struct apk_sign_ctx *ctx,
 		 * style .PKGINFO */
 		if (ctx->has_data_checksum)
 			return -ENOMSG;
+		/* Error out early if identity part is missing */
+		if (ctx->action == APK_SIGN_VERIFY_IDENTITY)
+			return -EKEYREJECTED;
 		ctx->data_started = 1;
 		ctx->control_started = 1;
 		r = check_signing_key_trust(ctx);

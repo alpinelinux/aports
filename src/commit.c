@@ -232,8 +232,8 @@ static int run_commit_hook(void *ctx, int dirfd, const char *file)
 	struct apk_database *db = hook->db;
 	char fn[PATH_MAX], *argv[] = { fn, (char *) commit_hook_str[hook->type], NULL };
 
-	if ((apk_flags & (APK_NO_SCRIPTS | APK_SIMULATE)) != 0)
-		return 0;
+	if (file[0] == '.') return 0;
+	if ((apk_flags & (APK_NO_SCRIPTS | APK_SIMULATE)) != 0) return 0;
 
 	snprintf(fn, sizeof(fn), "etc/apk/commit_hooks.d" "/%s", file);
 	if ((apk_flags & APK_NO_COMMIT_HOOKS) != 0) {

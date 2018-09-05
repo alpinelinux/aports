@@ -317,6 +317,12 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 			break;
 		}
 
+		if (strnlen(entry.name, PATH_MAX) >= PATH_MAX-10 ||
+		    (entry.link_target && strnlen(entry.link_target, PATH_MAX) >= PATH_MAX-10)) {
+			r = -ENAMETOOLONG;
+			goto err;
+		}
+
 		teis.bytes_left = entry.size;
 		if (entry.mode & S_IFMT) {
 			/* callback parser function */
@@ -428,23 +434,15 @@ int apk_tar_write_padding(struct apk_ostream *os, const struct apk_file_info *ae
 }
 
 int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
-			      const char *suffix, struct apk_istream *is,
+			      const char *extract_name, const char *link_target,
+			      struct apk_istream *is,
 			      apk_progress_cb cb, void *cb_ctx)
 {
 	struct apk_xattr *xattr;
-	char *fn = ae->name;
+	const char *fn = extract_name ?: ae->name;
 	int fd, r = -1, atflags = 0, ret = 0;
 
-	if (suffix != NULL) {
-		fn = alloca(PATH_MAX);
-		snprintf(fn, PATH_MAX, "%s%s", ae->name, suffix);
-	}
-
-	if ((!S_ISDIR(ae->mode) && !S_ISREG(ae->mode)) ||
-	    (ae->link_target != NULL)) {
-		/* non-standard entries need to be deleted first */
-		unlinkat(atfd, fn, 0);
-	}
+	if (unlinkat(atfd, fn, 0) != 0 && errno != ENOENT) return -errno;
 
 	switch (ae->mode & S_IFMT) {
 	case S_IFDIR:
@@ -454,7 +452,7 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 		break;
 	case S_IFREG:
 		if (ae->link_target == NULL) {
-			int flags = O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC;
+			int flags = O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC | O_EXCL;
 
 			fd = openat(atfd, fn, flags, ae->mode & 07777);
 			if (fd < 0) {
@@ -465,18 +463,12 @@ int apk_archive_entry_extract(int atfd, const struct apk_file_info *ae,
 			if (r != ae->size) ret = r < 0 ? r : -ENOSPC;
 			close(fd);
 		} else {
-			char *link_target = ae->link_target;
-			if (suffix != NULL) {
-				link_target = alloca(PATH_MAX);
-				snprintf(link_target, PATH_MAX, "%s%s",
-					 ae->link_target, suffix);
-			}
-			r = linkat(atfd, link_target, atfd, fn, 0);
+			r = linkat(atfd, link_target ?: ae->link_target, atfd, fn, 0);
 			if (r < 0) ret = -errno;
 		}
 		break;
 	case S_IFLNK:
-		r = symlinkat(ae->link_target, atfd, fn);
+		r = symlinkat(link_target ?: ae->link_target, atfd, fn);
 		if (r < 0) ret = -errno;
 		atflags |= AT_SYMLINK_NOFOLLOW;
 		break;
