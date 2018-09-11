@@ -32,6 +32,9 @@ static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int opt
 	case 'u':
 		actx->solver_flags |= APK_SOLVERF_UPGRADE;
 		break;
+	case 'l':
+		actx->solver_flags |= APK_SOLVERF_LATEST;
+		break;
 	case 't':
 		actx->virtpkg = optarg;
 		break;
@@ -44,6 +47,9 @@ static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int opt
 static const struct apk_option options_applet[] = {
 	{ 0x10000,	"initdb",	"Initialize database" },
 	{ 'u',		"upgrade",	"Prefer to upgrade package" },
+        { 'l',		"latest",
+	  "Select latest version of package (if it is not pinned), and "
+	  "print error if it cannot be installed due to other dependencies" },
 	{ 't',		"virtual",
 	  "Instead of adding all the packages to 'world', create a new virtual "
 	  "package with the listed dependencies and add that to 'world'; the "
