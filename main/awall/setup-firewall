@@ -1,0 +1,141 @@
+#!/bin/sh -e
+
+# Firewall setup script for Alpine Linux
+# Copyright (C) 2018 Kaarle Ritvanen
+
+. /lib/libalpine.sh
+
+info() {
+	local obj=$1
+	shift
+	if [ "$1" ]; then
+		echo "Detected $obj:" $*
+	fi
+}
+
+is_running() {
+	busybox pgrep -x /usr/sbin/$1 > /dev/null
+}
+
+enable_policy() {
+	local pol=adp-$1
+	echo "Enabling policy $pol"
+	awall enable $pol
+}
+
+enable_if_running() {
+	local policy=$1
+	shift
+
+	for proc in $*; do
+		if is_running $proc; then
+			enable_policy $policy
+			return
+		fi
+		shift
+	done
+}
+
+list_to_json() {
+	local var=$1
+	eval set -- \$$var
+
+	echo -n "\"adp_$(echo $var | tr A-Z a-z)\": ["
+	local sep=" "
+	while [ "$1" ]; do
+		echo -n "$sep\"$1\""
+		sep=", "
+		shift
+	done
+	echo " ]"
+}
+
+WAN_IFACE=$(ip route | sed -E 's/^default .+ dev ([^ ]+)( .*)?$/\1/;ta;d;:a')
+[ "$WAN_IFACE" ] || die "No default gateway"
+info "WAN interface" $WAN_IFACE
+
+DHCP_ZONES=
+[ -f /var/run/udhcpc.$WAN_IFACE.pid ] && DHCP_ZONES=adp-wan
+
+if is_running dhcpd; then
+	LAN_IFACES=$(. /etc/conf.d/dhcpd && echo $DHCPD_IFACE)
+	if [ -z "$LAN_IFACES" ]; then
+		for iface in $(ip -o address | \
+			sed -E 's/ scope host //;ta;s/^[0-9]+: ([^ ]+) .+/\1/;tb;:a;d;:b'); do
+
+			echo "$LAN_IFACES" | grep -q " $iface " || \
+				LAN_IFACES="$LAN_IFACES $iface "
+		done
+	fi
+elif is_running udhcpd; then
+	LAN_IFACES=$(sed -E $'s/^interface( |\t)+(.+)$/\\2/;ta;d;:a' /etc/udhcpd.conf)
+else
+	LAN_IFACES=
+fi
+LAN_IFACES=$(echo $(echo " $LAN_IFACES " | sed "s/ $WAN_IFACE //"))
+
+LAN_ADDRS=
+LAN_PRIVATE_ADDRS=
+if [ "$LAN_IFACES" ]; then
+	for iface in $LAN_IFACES; do
+		for addr in $(ip -o address list dev $iface | \
+			sed -E 's/^[0-9]+: [^ ]+ +[^ ]+ ([^ ]+) .+$/\1/;ta;d;:a'); do
+	
+			LAN_ADDRS="$LAN_ADDRS $addr"
+			LAN_PRIVATE_ADDRS="$LAN_PRIVATE_ADDRS $(echo $addr | \
+				sed -E 's/^((10|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.)/\1/;ta;d;:a')"
+		done
+	done
+	info "LAN interfaces" $LAN_IFACES
+	info "LAN addresses" $LAN_ADDRS
+	info "LAN private addresses" $LAN_PRIVATE_ADDRS
+	DHCP_ZONES="$DHCP_ZONES adp-lan"
+	enable_policy router
+fi
+
+if [ "$DHCP_ZONES" ]; then
+	info "DHCP zones" $DHCP_ZONES
+	enable_policy dhcp
+fi
+
+egrep -q "^https?://" /etc/apk/repositories && enable_policy web-client
+
+enable_if_running ntp-client chronyd ntpd openntpd
+enable_if_running ssh-server dropbear sshd
+
+enable_policy ping
+
+cat > /etc/awall/adp-config.json <<EOF
+{
+	"variable": {
+		$(list_to_json DHCP_ZONES),
+		$(list_to_json LAN_ADDRS),
+		$(list_to_json LAN_IFACES),
+		$(list_to_json LAN_PRIVATE_ADDRS)
+	},
+	"zone": { "adp-wan": { "iface": "$WAN_IFACE" } }
+}
+EOF
+
+awall translate
+
+set_param() {
+	sed -Ei "s/^($2=).*\$/\\1$3/" /etc/conf.d/$1
+}
+
+enable_service() {
+	echo "Enabling service $1"
+
+	set_param $1 SAVE_ON_STOP no
+	if [ "$LAN_IFACES" ]; then
+		set_param IPFORWARD yes
+	fi
+
+	rc-update add $1
+	service $1 start
+}
+
+enable_service iptables
+if ip -o address | egrep -q '^[0-9]+: [^ ]+ +inet6 '; then
+	enable_service ip6tables
+fi

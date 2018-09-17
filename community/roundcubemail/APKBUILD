@@ -1,24 +1,60 @@
 # Contributor: Leonardo Arena <rnalrd@alpinelinux.org>
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
-_php=php7
 pkgname=roundcubemail
 pkgver=1.3.6
-pkgrel=0
+pkgrel=2
 pkgdesc="A PHP web-based mail client"
 url="http://www.roundcube.net"
 arch="noarch"
 license="GPL-3.0-or-later"
-install="$pkgname.post-upgrade"
-depends="${_php} ${_php}-imap ${_php}-xml ${_php}-json ${_php}-dom
-	${_php}-exif ${_php}-pear-net_idna2 ${_php}-pear-mail_mime
-	${_php}-pear-net_smtp ${_php}-pear-auth_sasl ${_php}-openssl
-	${_php}-session ${_php}-mbstring ${_php}-iconv ${_php}-intl
+_php=php7
+depends="$_php
+	$_php-dom
+	$_php-exif
+	$_php-iconv
+	$_php-intl
+	$_php-json
+	$_php-mbstring
+	$_php-openssl
+	$_php-pdo
+	$_php-pear-auth_sasl
+	$_php-pear-mail_mime
+	$_php-pear-net_idna2
+	$_php-pear-net_smtp
+	$_php-pear-net_socket
+	$_php-session
+	$_php-sockets
+	$_php-xml
+	ca-certificates
 	"
-options="!check"
-subpackages="$pkgname-installer $pkgname-doc"
-source="https://github.com/roundcube/$pkgname/releases/download/$pkgver/${pkgname}-$pkgver.tar.gz
-	fix-dirs.patch"
-builddir="$srcdir"/roundcubemail-$pkgver
+_depends_managesieve="$_php-pear-net_sieve"
+_depends_zipdownload="$_php-zip"
+# Install plugins' deps during build just to verify that they exist.
+makedepends="$_depends_managesieve"
+pkgusers="roundcube"
+pkggroups="$pkgusers"
+options="!check"  # no tests provided
+install="$pkgname.pre-install
+	$pkgname.post-install
+	$pkgname.post-upgrade
+	$pkgname-installer.post-install
+	$pkgname-openrc.post-install
+	$pkgname-pgsql.post-install
+	"
+subpackages="$pkgname-installer $pkgname-openrc $pkgname-doc"
+source="https://github.com/roundcube/$pkgname/releases/download/$pkgver/$pkgname-$pkgver-complete.tar.gz
+	fix-dirs.patch
+	config-session_key.patch
+	config-disable-remote-spellcheck.patch
+	config.inc.php
+	fpm-pool.conf
+	nginx.conf
+	$pkgname.confd
+	$pkgname.logrotate
+	$pkgname.daily
+	"
+builddir="$srcdir/$pkgname-$pkgver"
 
 # secfixes:
 #   1.3.6-r0:
@@ -28,58 +64,158 @@ builddir="$srcdir"/roundcubemail-$pkgver
 #   1.2.5-r0:
 #     - CVE-2017-8114
 
+for _db in mssql mysql pgsql sqlite; do
+	subpackages="$subpackages $pkgname-$_db:_db"
+done
+
+# List of plugins to move into subpackages.
+_plugins="
+	managesieve
+	zipdownload
+	"
+for _plugin in $_plugins; do
+	subpackages="$subpackages $pkgname-$_plugin:_plugin"
+done
+
+_destdir="usr/share/webapps/roundcube"
+
 prepare() {
 	cd "$builddir"
 	default_prepare
 
-	# fix permissions
-	find . -type f -print | xargs chmod a-x
 	# remove .htaccess
 	find . -name \.htaccess -print | xargs rm -f
-
-	# fixup paths to use the right paths
-	sed -i -e 's|temp/|/tmp/|' \
-		-e 's|config/|/etc/roundcube/|' \
-		-e 's|logs/|/var/log/roundcube/|' \
-		config/defaults.inc.php
 
 	# cleanup
 	sed -i 's/\r//' SQL/mssql.initial.sql
 	rm -rf logs temp
-}
 
-build() {
-	return 0
+	# Useless 'cause there's no FOSS PDO driver.
+	rm -R SQL/oracle*
+
+	cd bin
+
+	# Remove development scripts.
+	rm -f cssshrink.* dumpschema.* installto.* jsshrink.* makedoc.*
+
+	# These are all PHP files, not shell scripts!
+	local file; for file in *.sh; do
+		mv $file ${file%.sh}.php
+	done
+
+	# Fix shebang.
+	sed -i "s|/usr/bin/env php|/usr/bin/env $_php|" *.php
 }
 
 package() {
-	_instdir="$pkgdir"/usr/share/webapps/roundcube
-	mkdir -p "${_instdir}"
-	cd "${_instdir}"
-	cp -rp "$builddir"/* .
-	# install config in /etc/roundcube so config files are not overwritten
-	# on upgrades
-	mkdir -p "$pkgdir"/etc/
-	mv config "$pkgdir"/etc/roundcube
+	local docdir="$pkgdir/usr/share/doc/roundcube"
+	local config plugname
 
-	install -d "$pkgdir"/var/log/roundcube
-	mkdir -p "$pkgdir"/usr/share/doc/roundcube
-	mkdir -p "$pkgdir"/usr/share/licenses/roundcube
-	for file in CHANGELOG INSTALL README.md UPGRADING
-	do
-		mv "$pkgdir"/usr/share/webapps/roundcube/$file \
-		  "$pkgdir"/usr/share/doc/roundcube
+	mkdir -p "$pkgdir/$_destdir"
+	cd "$pkgdir"
+
+	cp -rp "$builddir"/* ./$_destdir/
+
+	# Install config in /etc/roundcube so config files are not overwritten
+	# on upgrades.
+	mkdir -p ./etc/
+	mv ./$_destdir/config ./etc/roundcube
+	mkdir ./etc/roundcube/plugins
+
+	install -m 640 -g roundcube \
+		"$srcdir"/config.inc.php ./etc/roundcube/
+
+	local file; for file in CHANGELOG INSTALL README.md UPGRADING; do
+		_mv ./$_destdir/$file "$docdir"/
 	done
-	mv "$pkgdir"/usr/share/webapps/roundcube/LICENSE \
-	  "$pkgdir"/usr/share/licenses/roundcube
+	_mv ./etc/roundcube/config.inc.php.sample "$docdir"/
+	_mv ./$_destdir/LICENSE ./usr/share/licenses/roundcube/
+
+	install -m 644 -D "$srcdir"/nginx.conf "$docdir"/
+
+	install -m 755 -D "$srcdir"/$pkgname.daily ./etc/periodic/daily/$pkgname
+	install -m 644 -D "$srcdir"/$pkgname.logrotate ./etc/logrotate.d/$pkgname
+
+	install -d -m 750 -o roundcube -g roundcube ./var/log/roundcube
+
+	# Copy plugin configs into /etc and symlink them back.
+	cd ./$_destdir/plugins
+	for config in */config.inc.php.dist; do
+		plugname=${config%/*}
+
+		install -m 644 -g roundcube $config -D \
+			"$pkgdir"/etc/roundcube/plugins/$plugname.inc.php
+		ln -s /etc/roundcube/plugins/$plugname.inc.php \
+			$plugname/config.inc.php
+	done
 }
 
 installer() {
 	pkgdesc="Roundcubemail installer script"
-	mkdir -p "$subpkgdir"/usr/share/webapps/roundcube
-	mv "$pkgdir"/usr/share/webapps/roundcube/installer \
-		"$subpkgdir"/usr/share/webapps/roundcube
+	depends="$pkgname=$pkgver-r$pkgrel"
+
+	_mv "$pkgdir"/$_destdir/installer "$subpkgdir"/$_destdir/
 }
 
-sha512sums="c5e1e80034392ea4fcf780750ad2b7db43422a746462015865cbdb027e9e47b2bae7b191da19b65a7b9303c195bdfd0aa5b5a0382c09dd97d117671271cdc122  roundcubemail-1.3.6.tar.gz
-a8dc9e9493f9b24441378f6a526eb26e4dd4b0ef0cafaf25dd55c334b92df88dcb06008f46404a80eae0520ac04431c5b2237fd662c85c31fc6ee2b0d8fa9435  fix-dirs.patch"
+openrc() {
+	default_openrc
+	pkgdesc="OpenRC init script that runs Roundcube with php-fpm"
+	depends="$pkgname=$pkgver-r$pkgrel $_php-fpm"
+
+	local confdir="$subpkgdir/etc/$_php/php-fpm.d"
+	local fpm_name="php-fpm${_php#php}"
+
+	install -m 644 -D "$srcdir"/fpm-pool.conf "$confdir"/roundcube.conf
+	install -m 644 -D "$srcdir"/$pkgname.confd "$subpkgdir"/etc/conf.d/roundcube
+
+	mkdir -p "$subpkgdir"/etc/init.d
+	ln -s $fpm_name "$subpkgdir"/etc/init.d/roundcube
+
+	install -m 700 -o roundcube -g roundcube -d "$subpkgdir"/var/tmp/roundcube
+}
+
+_db() {
+	local subname=${subpkgname#$pkgname-}
+	local driver="$subname"
+	local rcname="$subname"
+	local desc
+
+	case "$subname" in
+		mssql) desc="MS SQL" driver=dblib;;
+		mysql) desc="MariaDB";;
+		pgsql) desc="PostgreSQL" rcname="postgres";;
+		sqlite) desc="SQLite";;
+	esac
+
+	pkgdesc="$pkgdesc ($desc DB)"
+	depends="$pkgname=$pkgver-r$pkgrel $_php-pdo_${driver}"
+
+	_mv "$pkgdir"/$_destdir/SQL/$rcname* "$subpkgdir"/$_destdir/SQL/
+}
+
+_plugin() {
+	local name="${subpkgname#$pkgname-}"
+	pkgdesc="$pkgdesc ($name plugin)"
+	depends="$pkgname=$pkgver-r$pkgrel $(eval "echo \$_depends_$name")"
+
+	cd "$pkgdir"
+	_mv ./$_destdir/plugins/$name "$subpkgdir"/$_destdir/plugins/
+	_mv ./etc/roundcube/plugins/$name.inc.php "$subpkgdir"/etc/roundcube/plugins/
+}
+
+_mv() {
+	local dest; for dest; do true; done  # get last argument
+	mkdir -p "$dest"
+	mv $@
+}
+
+sha512sums="fc1627d4b539742524c43b3faaa8cb5d64f934ad03f7cf8a461580a3a38dccb11140d08499b988742a0892534b1eda52f37a50f0911015983b6e27703294c70e  roundcubemail-1.3.6-complete.tar.gz
+d205ba8442870b26f93fb287e7fe2bd1a452ea534823869b7ef299e2dca52d64c8a3fdc9a44bd3bc731c1e400efcf745c1866974e3b908e4e54d05b47b835f3e  fix-dirs.patch
+7c4b88da4d2baa53d247dcb7b130d564954a04611c13f2770f45924fafab2a0e98f8dd078cabc87f3eddd0ab03f3ca48a48f27a462676354af22566cb19d220b  config-session_key.patch
+e46cdded33114ee7dae671d936cc41551168df29778dbf18f848a4f0eb0738a54c0751a5689716ba126ac256f2a50284afdcde542a42827003d6ba89af94f064  config-disable-remote-spellcheck.patch
+1ed41e25b5045849a35eb0cb89b6779378773edcc6395b7390d9d919c956aaa487a4cc0dfa41b250129ae40444b93a3c20738101f784f17a25f7aba1d95de047  config.inc.php
+c88d609e94c212215a24f54d2a2cb800d4a382b1044e0c875416bdda6a4e6c0cb896675918e8d24f3ed9e1b677d526d61f3ee1564cb870f674dac687696e8ba4  fpm-pool.conf
+0825096ee7e401c5c1687fe784bc859ca30afa754bc1f49ea56b9156fbd05dd5018e68491247f5db484e644e6f67da3ebf5ee2d2324da0e9f031fdde76517f5b  nginx.conf
+acaa76bfbba6117172a02ad11e39f9b55838895104e75180b057f647156c04fd2e44ac695a333f2332691d19bac5ef8afaca1f89ad409800b19f78afbb40aecb  roundcubemail.confd
+b4de4810ac01a2c4b6922371cb949ecf9b57df4f56c3f1bbc3d0ef926b1d85182a3d801cb1af77d28195b587137a2bcbb9a171d932e7eb1b72950a281ca27c2a  roundcubemail.logrotate
+1864e3914a2efa846e9fd8f8e6e8338ea4d47da0d07424cc524cbed1a68e65342ef5dccda91688d942c5b25f3b7fad412d6020ed7a681aa9aa31b7657aa780a8  roundcubemail.daily"

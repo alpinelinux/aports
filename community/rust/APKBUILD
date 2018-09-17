@@ -3,9 +3,10 @@
 # Contributor: Jeizsm <jeizsm@gmail.com>
 # Maintainer: Jakub Jirutka <jakub@jirutka.cz>
 pkgname=rust
-pkgver=1.24.1
-_llvmver=4
-_bootver=1.23.0
+pkgver=1.29.0
+# TODO: bump to 6 as soon as we add llvm6
+_llvmver=5
+_bootver=1.28.0
 pkgrel=0
 pkgdesc="The Rust Programming Language"
 url="http://www.rust-lang.org"
@@ -21,14 +22,41 @@ depends="$pkgname-stdlib=$pkgver-r$pkgrel gcc llvm-libunwind-dev musl-dev"
 #   The last revision of this abuild that does not depend on itself (uses
 #   prebuilt rustc and cargo) is 8cb3112594f10a8cee5b5412c28a846acb63167f.
 # * libffi-dev is needed just because we compile llvm with LLVM_ENABLE_FFI.
-makedepends="rust>=$_bootver cargo
-	cmake file libffi-dev llvm$_llvmver-dev llvm$_llvmver-test-utils
-	python2 tar zlib-dev"
-
+makedepends="
+	rust-bootstrap>=$_bootver
+	cargo-bootstrap
+	cmake
+	curl-dev
+	file
+	libffi-dev
+	libgit2-dev
+	libressl-dev
+	libssh2-dev
+	llvm$_llvmver-dev
+	llvm$_llvmver-test-utils
+	python2
+	tar
+	zlib-dev
+	"
+# XXX: This is a hack to allow this abuild to depend on itself. Adding "rust"
+# to makedepends would not work, because abuild implicitly removes $pkgname
+# and $subpackages from the abuild's dependencies.
+provides="rust-bootstrap=$pkgver-r$pkgrel"
 # This is needed for -src that contains some testing binaries.
 options="!archcheck"
-subpackages="$pkgname-dbg $pkgname-stdlib
-	$pkgname-gdb::noarch $pkgname-lldb::noarch $pkgname-doc $pkgname-src::noarch"
+subpackages="
+	$pkgname-dbg
+	$pkgname-stdlib
+	$pkgname-analysis
+	$pkgname-gdb::noarch
+	$pkgname-lldb::noarch
+	$pkgname-doc
+	$pkgname-src::noarch
+	cargo
+	cargo-bash-completions:_cargo_bashcomp:noarch
+	cargo-zsh-completion:_cargo_zshcomp:noarch
+	cargo-doc:_cargo_doc:noarch
+	"
 source="https://static.rust-lang.org/dist/rustc-$pkgver-src.tar.gz
 	musl-fix-static-linking.patch
 	musl-fix-linux_musl_base.patch
@@ -40,6 +68,9 @@ source="https://static.rust-lang.org/dist/rustc-$pkgver-src.tar.gz
 	alpine-change-rpath-to-rustlib.patch
 	alpine-target.patch
 	install-template-shebang.patch
+	bootstrap-tool-respect-tool-config.patch
+	cargo-tests-fix-build-auth-http_auth_offered.patch
+	cargo-tests-ignore-resolving_minimum_version_with_transitive_deps.patch
 	check-rustc
 	"
 builddir="$srcdir/rustc-$pkgver-src"
@@ -49,6 +80,11 @@ _sharedir="usr/share/rust"
 
 ldpath="/$_rlibdir"
 
+export RUST_BACKTRACE=1
+export RUSTC_CRT_STATIC="false"
+# Convince libgit2-sys to use the distro libgit2.
+export LIBGIT2_SYS_USE_PKG_CONFIG=1
+
 prepare() {
 	default_prepare
 
@@ -56,9 +92,6 @@ prepare() {
 
 	# Remove bundled dependencies.
 	rm -Rf src/llvm/
-
-	# Save untouched sources for packaging in -src subpackage.
-	cp -a "$builddir"/src "$srcdir"/rust-src
 }
 
 build() {
@@ -78,40 +111,44 @@ build() {
 		--llvm-root="/usr/lib/llvm$_llvmver" \
 		--musl-root="/usr" \
 		--disable-docs \
+		--enable-extended \
+		--tools="analysis,cargo,src" \
 		--enable-llvm-link-shared \
 		--enable-option-checking \
 		--enable-locked-deps \
 		--enable-vendor \
 		--disable-jemalloc
 
-	RUST_BACKTRACE=1 \
-		RUSTC_CRT_STATIC="false" \
-		./x.py build -v
+	./x.py build -v --jobs ${JOBS:-2}
 }
 
 check() {
-	"$srcdir"/check-rustc "$builddir/build/$CTARGET/stage2/bin/rustc"
+	cd "$builddir"
+
+	# At this moment lib/rustlib/$CTARGET/lib does not contain a complete
+	# copy of the .so libs from lib (they will be copied there during
+	# `x.py install`). Thus we must set LD_LIBRARY_PATH for tests to work.
+	# This is related to change-rpath-to-rustlib.patch.
+	export LD_LIBRARY_PATH="$builddir/build/$CTARGET/stage2/lib"
+
+	"$srcdir"/check-rustc "$builddir"/build/$CTARGET/stage2/bin/rustc
 
 # XXX: There's some problem with these tests, we will figure it out later.
 #	cd "$builddir"
 #	make check \
 #		LD_LIBRARY_PATH="$_stage0dir/lib" \
-#		RUST_BACKTRACE=1 \
-#		RUST_CRT_STATIC="false" \
 #		VERBOSE=1
+
+	msg "Running tests for cargo..."
+	CFG_DISABLE_CROSS_TESTS=1 ./x.py test --no-fail-fast src/tools/cargo
+
+	unset LD_LIBRARY_PATH
 }
 
 package() {
 	cd "$builddir"
 
-	RUST_BACKTRACE=1 \
-		RUSTC_CRT_STATIC="false" \
-		./x.py dist -v
-
-	local component; for component in rustc rust-std; do
-		tar -xf "build/dist/$component-$pkgver-$CTARGET.tar.gz"
-		./"$component-$pkgver-$CTARGET"/install.sh --destdir="$pkgdir" --prefix=/usr --disable-ldconfig
-	done
+	DESTDIR="$pkgdir" ./x.py install -v
 
 	cd "$pkgdir"
 
@@ -142,6 +179,13 @@ stdlib() {
 	_mv "$pkgdir"/$_rlibdir/*.rlib "$subpkgdir"/$_rlibdir/
 }
 
+analysis() {
+	pkgdesc="Compiler analysis data for the Rust standard library"
+	depends="$pkgname-stdlib=$pkgver-r$pkgrel"
+
+	_mv "$pkgdir"/$_rlibdir/../analysis "$subpkgdir"/${_rlibdir%/*}/
+}
+
 gdb() {
 	pkgdesc="GDB pretty printers for Rust"
 	depends="$pkgname gdb"
@@ -169,8 +213,55 @@ src() {
 	depends="$pkgname"
 	license="$license OFL-1.1 GPL-3.0-or-later GPL-3.0-with-GCC-exception CC-BY-SA-3.0 LGPL-3.0"
 
-	mkdir -p "$subpkgdir"/usr/src
-	mv "$srcdir"/rust-src "$subpkgdir"/usr/src/rust
+	_mv "$pkgdir"/usr/lib/rustlib/src/rust "$subpkgdir"/usr/src/
+	rmdir -p "$pkgdir"/usr/lib/rustlib/src 2>/dev/null || true
+
+	mkdir -p "$subpkgdir"/usr/lib/rustlib/src
+	ln -s ../../../src/rust "$subpkgdir"/usr/lib/rustlib/src/rust
+}
+
+cargo() {
+	pkgdesc="The Rust package manager"
+	license="Apache-2.0 MIT UNLICENSE"
+	depends="$pkgname"
+	# XXX: See comment on top-level provides=.
+	provides="cargo-bootstrap=$pkgver-r$pkgrel"
+
+	_mv "$pkgdir"/usr/bin/cargo "$subpkgdir"/usr/bin/
+}
+
+_cargo_bashcomp() {
+	pkgdesc="Bash completions for cargo"
+	license="Apache-2.0 MIT"
+	depends=""
+	install_if="cargo=$pkgver-r$pkgrel bash-completion"
+
+	cd "$pkgdir"
+	_mv etc/bash_completion.d/cargo \
+		"$subpkgdir"/usr/share/bash-completion/completions/
+	rmdir -p etc/bash_completion.d 2>/dev/null || true
+}
+
+_cargo_zshcomp() {
+	pkgdesc="ZSH completions for cargo"
+	license="Apache-2.0 MIT"
+	depends=""
+	install_if="cargo=$pkgver-r$pkgrel zsh"
+
+	cd "$pkgdir"
+	_mv usr/share/zsh/site-functions/_cargo \
+		"$subpkgdir"/usr/share/zsh/site-functions/_cargo
+	rmdir -p usr/share/zsh/site-functions 2>/dev/null || true
+}
+
+_cargo_doc() {
+	pkgdesc="The Rust package manager (documentation)"
+	license="Apache-2.0 MIT"
+	install_if="docs cargo=$pkgver-r$pkgrel"
+
+	# XXX: This is hackish!
+	cd "$pkgdir"/../$pkgname-doc
+	_mv usr/share/man/man1/cargo* "$subpkgdir"/usr/share/man/man1/
 }
 
 _mv() {
@@ -179,15 +270,18 @@ _mv() {
 	mv $@
 }
 
-sha512sums="0d99c81b3ca0992af4af0c6a729ada14c24d2563c12a7b0d40c5dfb07e14678b914d4edb003c43d1e53ca68aec199838001ff1652ca6926cbe389a09bcb9c2ed  rustc-1.24.1-src.tar.gz
-cee98ff6cded8a330e383b8b88423b10b7c2cdcb711b31f4685abae7a60f85869e87f3096eb2d90a83dafeeba98b6f153b5e67d88f5cacc368dc53c701fe495b  musl-fix-static-linking.patch
-360b0c1b6374cb356989b6f254da2dfc2ab2390c8251f0151492206b908ebf85c6ff57405394b3f46f1fc3e26f7c986bb9e924065f4c4dfa1d50fff2a99b5cd0  musl-fix-linux_musl_base.patch
-dc6432293bd060d5e3a73f25870867654fae61995dcd919e244a2dc686b6107556deed8c59ca6002182bfeff5ebc1ca2b89c4028ab0fbfb79e65defe47c9b4b0  llvm-with-ffi.patch
-936ddccb357307b3f7f3c10aadcdc3dfbbe0ccb8cc5675969a87b7cf1a8e72f73ed5118c6cd6a1a36a377457ead998cc8c71f4176361acb4416ec16673b4c597  static-pie.patch
-b5c8a4faf3571b5c79b052103639ea3b14f094ec0999963602111608afa1159219f958decf0b45dd409124b318f5e17af47b4e74207a9f1c9648a9572dc68cca  need-rpath.patch
-d352614e7c774e181decae210140e789de7fc090327ff371981ad28a11ce51c8c01b27c1101a24bb84d75ed2f706f67868f7dbc52196d4ccdf4ebd2d6d6b6b5e  minimize-rpath.patch
-498f4649163974afc4f042c43cd0c15d36784031514201a2962061f288a9336c2bc9749f8d2308b8ce3656f8097b5fc5bef505f61e2a6ed422ef4153f5339d77  alpine-move-py-scripts-to-share.patch
-0542e8ffeb7ff6017aeec84d99c14802c6536433b41dafe7c8fc0c40908548228f34ef142ad6ad94235115b05f02ce157553b470b0f242292f90f3125b249e94  alpine-change-rpath-to-rustlib.patch
-9b451a7c4a761ff7e5f269cd5f84e59afbaedc8ef5d1d053cd3e315ce8d99f1a25fa7291e5dacb3cfbac32b4d15518a616bd703ab28844484285929e71dd2720  alpine-target.patch
+sha512sums="3c6b79cce5a42553bc4360591c6e6b42b36f035243b8cb688a0d4b08c10793e59d257bf9e781c9345c92f765a63a9e161e3e3346f02ddc733e4b401cb5aeb302  rustc-1.29.0-src.tar.gz
+6713d0d0ccac6b17ed47e486c6d74d1f913887bf88d42527576188fa98063a33a1ea903967847d52126b996f965577f1311344d6e57063b1625221847290a0ed  musl-fix-static-linking.patch
+3615b815cfb4eae60f3291dc07a292e1be6048eeddcb21c595bddbe8cca6a622e5b76be72a76f6b65b4d33abdc34a792ce010b024b2818a4d73bce3f85b3eb2b  musl-fix-linux_musl_base.patch
+e40d41a6dc5d400d6672f1836cd5b9e00391f7beb52e872d87db76bc95a606ce6aaae737a0256a1e5fba77c83bb223818d214dbe87028d47be65fb43c101595c  llvm-with-ffi.patch
+9fe4c230165a29ffc5557952d20e62b42e0c384a874e2584fa227239b44d20079878a740e525a51a1262d5a2194b2efe0b4e2e846fe317ea4c496d5fc1834671  static-pie.patch
+487d479a15b43c3e1ee28c111206a4f488be933309f3c6571be7ec33da4e955cc1ee907b7729b4228cb292ca7b3324eb6ba4f32a01abc3d04573a0d96982569a  need-rpath.patch
+5e8557e72b250b8726b821541dc7d0e40d8179220cfdacd6d74ed19c756ffb214d9f882e82856acb4fbfbfe5c70f1c6de6813db3ba92a2c0e2e425bb5eb620ba  minimize-rpath.patch
+0c0aa7eeddeb578c320a94696a4437fbf083ef4d6f8049512de82548285f37ec4460b5d04f087dc303a5f62a09b5d13b7f0c4fbbdb0b321147ae030e7282ac07  alpine-move-py-scripts-to-share.patch
+61aa415d754e9e01236481a1f3c9d5242f2d633e6f11b998e9ffcc07bf5c182d87c0c973dab6f10e4bb3ab4b4a4857bf9ed8dd664c49a65f6175d27db2774db1  alpine-change-rpath-to-rustlib.patch
+a688b4bc2420bf05c6ae724c9a4e6821267716032f69a9a44cb395407276df7fb37fc145f8d274b5fa03e7173c338871c9d2294a90726ef16bd087fbe6a77b66  alpine-target.patch
 7d59258d4462eba0207739a5c0c8baf1f19d9a396e5547bb4d59d700eb94d50ba6add2e523f3e94e29e993821018594625ea4ac86304fb58f7f8c82622a26ab0  install-template-shebang.patch
-79549055dea81379c890b495c82456ab497a9179ec6702c59e11d0748bc668f47fc3d6a69c27a0545bb87c01318631dffc69260bf2d4badc75f53cbf7fad7528  check-rustc"
+c2ccab15d48c11cc3af549a3944ca0d29cb3790345468f4f3779e5ac931554dea603e5523281fc391ba4a555ee468b516961c4cb8ecee007eadacf114f3d8758  bootstrap-tool-respect-tool-config.patch
+332a6af59edc507baa73eda1de60591dd4202f540541769ac1bcbc731267f4523ea309d2c3b1f5a9dc3db32831942a5d3d40b81882dad0bf0b5ee7f74f1d6477  cargo-tests-fix-build-auth-http_auth_offered.patch
+3d6f027088e1ec189ce864bf5ed150ccad8be5d9fc0973f1b4d202eec6eab865834403335a9f0765bbfa54638aed7f5d5f2183ba9dfeab9f5bc4ef48111a8427  cargo-tests-ignore-resolving_minimum_version_with_transitive_deps.patch
+c31fdfe8a9b3411576c75da46645cf0465b9053000a2ab49cf9b2f2733f679d6d33acbf236d67a20e14935d094a685453b7f1840180249f39d610fd0902c3125  check-rustc"

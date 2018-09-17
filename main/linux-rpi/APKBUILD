@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 
 pkgname=linux-rpi
-pkgver=4.9.76
+pkgver=4.14.69
 case $pkgver in
 *.*.*)	_kernver=${pkgver%.*};;
 *.*)	_kernver=${pkgver};;
@@ -9,45 +9,52 @@ esac
 pkgrel=0
 pkgdesc="Linux kernel with Raspberry Pi patches"
 url=https://github.com/raspberrypi/linux
-depends="mkinitfs linux-firmware"
-makedepends="perl installkernel bash gmp-dev bc"
-options="!strip"
-install=
+depends="mkinitfs"
+_depends_dev="perl gmp-dev elfutils-dev bash"
+makedepends="$_depends_dev sed installkernel bc linux-headers linux-firmware"
+options="!strip !check"
 # rpi patches are git diff against latest release tag from:
 # linux-4.9.y       https://github.com/raspberrypi/linux/tree/rpi-4.9.y
 source="https://kernel.org/pub/linux/kernel/v4.x/linux-$_kernver.tar.xz
 	https://kernel.org/pub/linux/kernel/v4.x/patch-$pkgver.xz
-	https://dev.alpinelinux.org/archive/rpi-patches/rpi-4.9.63-alpine.patch
-	gpio-mcp23s08-pullups.patch
+	https://dev.alpinelinux.org/archive/rpi-patches/rpi-4.14.67-alpine.patch
+
 	issue-4973.patch
 
-	config-rpi.armhf
-	config-rpi2.armhf
-	markdt
+	config-changes-rpi.armhf
+	config-changes-rpi.aarch64
+	config-changes-rpi2.armhf
 	"
 subpackages=""
+arch="armhf aarch64"
+license="GPL-2.0"
 _flavors=
 for _i in $source; do
 	case $_i in
 	config-*.$CARCH)
 		_f=${_i%.$CARCH}
-		_f=${_f#config-}
+		_f=${_f#config-changes-}
 		_flavors="$_flavors ${_f}"
-		[ "linux-$_f" != "$pkgname" ] && subpackages="$subpackages linux-${_f}"
-		subpackages="$subpackages linux-${_f}-dev:_dev"
+		[ "linux-$_f" != "$pkgname" ] && subpackages="$subpackages linux-${_f}::$CBUILD_ARCH"
+		subpackages="$subpackages linux-${_f}-dev:_dev:$CBUILD_ARCH"
 		;;
 	esac
 done
 
-arch="armhf"
-license="GPL-2.0"
+case "$CARCH" in
+	aarch64) _carch="arm64" ;;
+	arm*) _carch="arm" ;;
+esac
+
+HOSTCC="${CC:-gcc}"
+HOSTCC="${HOSTCC#${CROSS_COMPILE}}"
 
 prepare() {
 	local _patch_failed=
 	cd "$srcdir"/linux-$_kernver
 	if [ "${pkgver%.0}" = "$pkgver" ]; then
 		msg "Applying patch-$pkgver.xz"
-		unxz -c < "$srcdir"/patch-$pkgver.xz | patch -p1 -N || return 1
+		unxz -c < "$srcdir"/patch-$pkgver.xz | patch -p1 -N
 	fi
 
 	# first apply patches in specified order
@@ -72,27 +79,81 @@ prepare() {
 	# remove localversion from patch if any
 	rm -f localversion*
 
-	for i in $_flavors; do
-		local _config=config-$i.${CARCH}
-		local _builddir="$srcdir"/build-$i
-		mkdir -p "$_builddir"
-		echo "-$pkgrel-$i" > "$srcdir"/build-$i/localversion-alpine \
-			|| return 1
-
-		cp "$srcdir"/$_config "$_builddir"/.config || return 1
+	local flavor=
+	for flavor in $_flavors; do
+		local builddir="$srcdir"/build-$flavor
+		mkdir -p "$builddir"
+		echo "-$pkgrel-$flavor" > "$builddir"/localversion-alpine
+		_genconfig $flavor
 		make -C "$srcdir"/linux-$_kernver \
-			O="$_builddir" \
-			HOSTCC="${CC:-gcc}" \
-			silentoldconfig || return 1
+			O="$builddir" \
+			ARCH="$_carch" \
+			HOSTCC="$HOSTCC" \
+			olddefconfig
+		_verifyconfig $flavor
 	done
 }
 
+# generate config from defconfig and apply local changes.
+# config-changes-$flavor.$CARCH holds a list of = delimited
+# config command and values used by kernel scripts/config script.
+_genconfig() {
+	local flavor=$1 defconfig=
+	local builddir="$srcdir"/build-$flavor
+	local defconfig=
+	case $flavor in
+		rpi) defconfig=bcmrpi_defconfig
+		[ "$CARCH" = "aarch64" ] && defconfig=bcmrpi3_defconfig ;;
+		rpi2) defconfig=bcm2709_defconfig ;;
+		*) die "Unknown flavor: $flavor" ;;
+	esac
+
+	cp "$srcdir"/linux-$_kernver/arch/$_carch/configs/$defconfig \
+		"$builddir"/.config
+
+	while read line; do
+		[ ${line:0:1} = "#" ] && continue
+		local option=${line%%=*} str=
+		local cmd=$(echo $line | cut -d= -f2)
+		case "$cmd" in
+			enable|disable|module) str= ;;
+			set-str|set-val) str=${line##*=} ;;
+			*) die "Command $cmd not accepted" ;;
+		esac
+		msg "[$flavor] $cmd: $option $str"
+		"$srcdir"/linux-$_kernver/scripts/config \
+			--file "$builddir"/.config \
+			--${cmd} "$option" "${str//\"/}"
+	done < "$srcdir"/config-changes-$flavor.${CARCH}
+}
+
+# verify if options are set to correct value
+_verifyconfig() {
+	local flavor=$1
+	local builddir="$srcdir"/build-$flavor
+	while read line; do
+		[ ${line:0:1} = "#" ] && continue
+		local option=${line%%=*} str= invert=
+		local cmd=$(echo $line | cut -d= -f2)
+		case "$cmd" in
+			enable) str="$option=y" ;;
+			disable) str="$option"; invert="-v" ;;
+			module) str="$option=m" ;;
+			set-val) str="$option=${line##*=}" ;;
+			set-str) str=${line##*=}
+				str="$option=\"${str//\"/}\"" ;;
+		esac
+		grep -q $invert "^$str" "$builddir"/.config || \
+			die "Config: $option not properly set!"
+	done < "$srcdir"/config-changes-$flavor.${CARCH}
+}
+
 build() {
+	unset LDFLAGS
 	for i in $_flavors; do
 		cd "$srcdir"/build-$i
-		make CC="${CC:-gcc} -fno-pie" \
-			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" \
-			|| return 1
+		make ARCH="$_carch" CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
 	done
 }
 
@@ -100,7 +161,7 @@ _package() {
 	local _buildflavor="$1" _outdir="$2"
 	local _abi_release=${pkgver}-${pkgrel}-${_buildflavor}
 
-	cd "$srcdir"/build-$_buildflavor || return 1
+	cd "$srcdir"/build-$_buildflavor
 
 	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
 
@@ -109,21 +170,21 @@ _package() {
 	arm*)
 		_install="zinstall dtbs_install"
 		;;
+	aarch64)
+		_install="install dtbs_install"
+		;;
 	*)
 		_install=install
 		;;
 	esac
 
-	cd "$srcdir"/build-$_buildflavor || return 1
-	make -j1 modules_install firmware_install $_install \
+	cd "$srcdir"/build-$_buildflavor
+	local INSTALL_DTBS_PATH="$_outdir"/usr/lib/linux-${_abi_release}
+	make -j1 modules_install $_install \
+		ARCH="$_carch" \
 		INSTALL_MOD_PATH="$_outdir" \
 		INSTALL_PATH="$_outdir"/boot \
-		INSTALL_DTBS_PATH="$_outdir"/usr/lib/linux-${_abi_release} \
-		|| return 1
-
-	# tell rpi bootloader we are device tree capable
-	"$srcdir"/markdt "$_outdir"/boot/vmlinuz-$_buildflavor \
-		|| return 1
+		INSTALL_DTBS_PATH="$INSTALL_DTBS_PATH"
 
 	rm -f "$_outdir"/lib/modules/${_abi_release}/build \
 		"$_outdir"/lib/modules/${_abi_release}/source
@@ -131,15 +192,24 @@ _package() {
 
 	install -D include/config/kernel.release \
 		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+
+	if [ "$CARCH" = "aarch64" ]; then
+		mv -f "$INSTALL_DTBS_PATH"/broadcom/*.dtb \
+			"$INSTALL_DTBS_PATH"
+		rmdir "$INSTALL_DTBS_PATH"/broadcom
+	fi
 }
 
 # main flavor installs in $pkgdir
 package() {
+	depends="$depends linux-firmware-brcm"
 	_package rpi "$pkgdir"
 }
 
 # subflavors install in $subpkgdir
 rpi2() {
+	depends="$depends linux-firmware-brcm"
+
 	_package rpi2 "$subpkgdir"
 }
 
@@ -154,13 +224,13 @@ _dev() {
 	# build a tiny kernel module
 	#
 	pkgdesc="Headers and script for third party modules for $_flavor kernel"
-	depends="gmp-dev bash"
+	depends="$_depends_dev"
 	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
 
 	# first we import config, run prepare to set up for building
 	# external modules, and create the scripts
 	mkdir -p "$dir"
-	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
+	cp "$srcdir"/build-$_flavor/.config "$dir"/.config
 	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" HOSTCC="${CC:-gcc}" \
 		silentoldconfig prepare modules_prepare scripts
 
@@ -177,9 +247,9 @@ _dev() {
 		-o -path './scripts/*' -prune -o -type f \
 		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
 		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' \) \
-		-print | cpio -pdm "$dir" || return 1
+		-print | cpio -pdm "$dir"
 
-	cp -a scripts include "$dir" || return 1
+	cp -a scripts include "$dir"
 	find $(find arch -name include -type d -print) -type f \
 		| cpio -pdm "$dir"
 
@@ -191,12 +261,10 @@ _dev() {
 		"$subpkgdir"/lib/modules/${_abi_release}/build
 }
 
-
-sha512sums="bf67ff812cc3cb7e5059e82cc5db0d9a7c5637f7ed9a42e4730c715bf7047c81ed3a571225f92a33ef0b6d65f35595bc32d773356646df2627da55e9bc7f1f1a  linux-4.9.tar.xz
-57d98aa04f01a7ff550885b42cbd115b81234994005378bace5d984dfec232039934c64bff14fd88a5ba962c6dacf5b408173cccf551eb1195f0be980bb41090  patch-4.9.76.xz
-31c665e1ce6f78f2322891e13db1b3712884082dedf5bdf056b83b7207feaecde5bdf5ffda145275e10c17e1e221be78aed8d50a7cf581378537f7e7346de3cd  rpi-4.9.63-alpine.patch
-36724ba56cb8fdf3a3d347cffb67ae1cc3d7b1052d526b6b5134ebf6baae9f9724b586c97833453dc7697ab24699426f0749af78b6a80be36967a80033a0cf40  gpio-mcp23s08-pullups.patch
+sha512sums="77e43a02d766c3d73b7e25c4aafb2e931d6b16e870510c22cef0cdb05c3acb7952b8908ebad12b10ef982c6efbe286364b1544586e715cf38390e483927904d8  linux-4.14.tar.xz
+0e17f70c898a58384ffd29c599a52cccfea30a820f1e55cdf9f46f319370b1c0dc16e9000b1a2dfa84779463b757b8810cbe881c919b635801ae078b5e3c0513  patch-4.14.69.xz
+9ee4c5425d6402e1e53a908038c11b50112f5f9dfe765cd1485564b4e02f1b83a9a48af140b4085d513d5af53f7d246bac7465d8e778d7f2a26c8602e4962a39  rpi-4.14.67-alpine.patch
 501c91bf2538a18102da59bbccc3097f9c3c90079acc0e946ff075074160c09b8a66934e5ce5470e170f0e4f93d114709a95230367426d0bb7ea02c4bdf4cc9b  issue-4973.patch
-dd84624bedfd624d7051d833241b83b96d4c4b9943e7969130ec35cdd86a35b98fc2ebd48d84ddb97115ebfb9a59b84b3b01ea48aca78ae8f8ad8d534f8b36fa  config-rpi.armhf
-031ce381e602f37bfab73e774475b1f323945b59d83c2177e63ce77b3d7ca2119e67d48f1a79b51bf66412c8ebf75353b71d400c6a1efb9d6c3ca4665f5c017d  config-rpi2.armhf
-a8e7f434c325c9dd7a9109efecad408e42a50ecd1391cb0c7d1d7de79609caee007486c8a6538231c74bdc5d7b84cbca053958e1b239bc0507e6d3598ace383a  markdt"
+2f6d7ba43ba13b10cf5ef8e139fa978bee4689cd22ecf356559657ff604317770ede717dc706ee1e8cb999f73a574f5c6332b4bfbe99177389b2f75d60a742c9  config-changes-rpi.armhf
+2f6d7ba43ba13b10cf5ef8e139fa978bee4689cd22ecf356559657ff604317770ede717dc706ee1e8cb999f73a574f5c6332b4bfbe99177389b2f75d60a742c9  config-changes-rpi.aarch64
+2f6d7ba43ba13b10cf5ef8e139fa978bee4689cd22ecf356559657ff604317770ede717dc706ee1e8cb999f73a574f5c6332b4bfbe99177389b2f75d60a742c9  config-changes-rpi2.armhf"

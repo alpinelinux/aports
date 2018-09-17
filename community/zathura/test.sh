@@ -3,7 +3,7 @@
 Xvfb :4242 &
 PID=$!
 export DISPLAY=:4242
-if make test; then
+if ninja -C build meson-test; then
 	kill $PID
 	return 0
 else

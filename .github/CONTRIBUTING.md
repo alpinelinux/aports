@@ -55,3 +55,7 @@ Failing to include __new__ dependencies will fail the CI tests.
 
 If by some mistake you end up with multiple commits in your PR and one of our developers asks you to squash your commits please do __NOT__ create a new pull request.
 Instead please follow [this rebase tutorial](https://git-scm.com/book/en/v2/Git-Tools-Rewriting-History#Changing-Multiple-Commit-Messages).
+
+### Pull Request (PR) max age
+
+Pull Requests that have not been updated in the last 180 days will automatically be labeled S-stale. After 7 days of additional inactivity the PR will automatically be closed except if one of the Alpine developers will label it with S-WIP (Work In Progress).

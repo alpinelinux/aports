@@ -1,17 +1,32 @@
 #!/sbin/openrc-run
-# Copyright 1999-2007 Gentoo Foundation
-# Distributed under the terms of the GNU General Public License v2
 
-description="VPN service"
+extra_commands="checkconfig"
 
-VPNDIR=${VPNDIR:-/etc/openvpn}
-VPN=${SVCNAME#*.}
-if [ -n "${VPN}" ] && [ ${SVCNAME} != "openvpn" ]; then
-	VPNPID="/var/run/openvpn.${VPN}.pid"
-else
-	VPNPID="/var/run/openvpn.pid"
-fi
-VPNCONF="${VPNDIR}/${VPN}.conf"
+instance_name=${RC_SVCNAME#*.}
+[ "$instance_name" != "openvpn" ] \
+	&& name="OpenVPN ($instance_name)" \
+	|| name="OpenVPN"
+
+# Upper case variables are for backward compatibility with Alpine < v3.8.
+: ${cfgdir:=${VPNDIR:-"/etc/openvpn"}}
+: ${cfgfile:="$cfgdir/$instance_name.conf"}
+: ${detect_client:="${DETECT_CLIENT:-yes}"}
+: ${up_script:="$cfgdir/up.sh"}
+: ${down_script:="$cfgdir/down.sh"}
+: ${peer_dns:=${PEER_DNS:-"yes"}}
+
+pidfile="/run/$RC_SVCNAME.pid"
+command="/usr/sbin/openvpn"
+command_args="
+	--daemon
+	--config $cfgfile
+	--writepid $pidfile
+	--setenv RC_SVCNAME $RC_SVCNAME
+	--setenv PEER_DNS $peer_dns"
+
+required_dirs="$cfgdir"
+required_files="$cfgfile"
+
 
 depend() {
 	need localmount net
@@ -20,116 +35,96 @@ depend() {
 }
 
 checkconfig() {
-	# Linux has good dynamic tun/tap creation
-	if [ $(uname -s) = "Linux" ] ; then
-		if [ ! -e /dev/net/tun ]; then
-			if ! modprobe tun ; then
-				eerror "TUN/TAP support is not available" \
-					"in this kernel"
-				return 1
-			fi
+	# Note: This is not just a check; we need to detect the mode both for
+	# "start" and "checkconfig" commands, that's why it's here.
+	if [ -z "$client_mode" ] && yesno "$detect_client"; then
+		cfgfile_has_option 'remote' \
+			&& client_mode=yes \
+			|| client_mode=no
+	fi
+
+	if [ ! -e /dev/net/tun ]; then
+		if ! modprobe tun; then
+			eerror "TUN/TAP support is not available in this kernel"
+			return 1
 		fi
-		if [ -h /dev/net/tun ] && [ -c /dev/misc/net/tun ]; then
-			ebegin "Detected broken /dev/net/tun symlink, fixing..."
-			rm -f /dev/net/tun
-			ln -s /dev/misc/net/tun /dev/net/tun
-			eend $?
-		fi
-		return 0
+	fi
+	if [ -h /dev/net/tun ] && [ -c /dev/misc/net/tun ]; then
+		ebegin "Detected broken /dev/net/tun symlink, fixing..."
+		rm -f /dev/net/tun
+		ln -s /dev/misc/net/tun /dev/net/tun
+		eend $?
 	fi
 
-	# Other OS's don't, so we rely on a pre-configured interface
-	# per vpn instance
-	local ifname=$(sed -n -e 's/[[:space:]]*dev[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' "${VPNCONF}")
-	if [ -z ${ifname} ] ; then
-		eerror "You need to specify the interface that this openvpn" \
-			"instance should use" \
-			"by using the dev option in ${VPNCONF}"
-		return 1
-	fi
-
-	if ! ifconfig "${ifname}" >/dev/null 2>/dev/null ; then
-		# Try and create it
-		echo > /dev/"${ifname}" >/dev/null
-	fi
-	if ! ifconfig "${ifname}" >/dev/null 2>/dev/null ; then
-		eerror "${VPNCONF} requires interface ${ifname}" \
-			"but that does not exist"
-		return 1
-	fi
-}
-
-start() {
-	# If we are re-called by the openvpn gentoo-up.sh script
-	# then we don't actually want to start openvpn
-	[ "${IN_BACKGROUND}" = "true" ] && return 0
-	
-	ebegin "Starting ${SVCNAME}"
-
-	checkconfig || return 1
-
-	local args="" reenter=${RE_ENTER:-no}
-	# If the config file does not specify the cd option, we do
-	# But if we specify it, we override the config option which we do not want
-	if ! grep -q "^[ 	]*cd[ 	].*" "${VPNCONF}" ; then
-		args="${args} --cd ${VPNDIR}"
-	fi
-	
-	# We mark the service as inactive and then start it.
-	# When we get an authenticated packet from the peer then we run our script
-	# which configures our DNS if any and marks us as up.
-	if [ "${DETECT_CLIENT:-yes}" = "yes" ] && \
-	grep -q "^[ 	]*remote[ 	].*" "${VPNCONF}" ; then
-		reenter="yes"
-		args="${args} --up-delay --up-restart"
-		args="${args} --script-security 2"
-		args="${args} --up /etc/openvpn/up.sh"
-		args="${args} --down-pre --down /etc/openvpn/down.sh"
+	if yesno "$client_mode"; then
+		local f; for f in "$up_script" "$down_script"; do
+			[ -r "$f" ] || { eerror "'$f' is not readable"; return 1; }
+		done
 
 		# Warn about setting scripts as we override them
-		if grep -Eq "^[ 	]*(up|down)[ 	].*" "${VPNCONF}" ; then
+		if cfgfile_has_option "(up|down)"; then
 			ewarn "WARNING: You have defined your own up/down scripts"
 			ewarn "As you're running as a client, we now force Alpine specific"
 			ewarn "scripts to be run for up and down events."
-			ewarn "These scripts will call /etc/openvpn/${SVCNAME}-{up,down}.sh"
+			ewarn "These scripts will call /etc/openvpn/$RC_SVCNAME-{up,down}.sh"
 			ewarn "where you can put your own code."
 		fi
-
 		# Warn about the inability to change ip/route/dns information when
 		# dropping privs
-		if grep -q "^[ 	]*user[ 	].*" "${VPNCONF}" ; then
+		if cfgfile_has_option "user"; then
 			ewarn "WARNING: You are dropping root privileges!"
 			ewarn "As such openvpn may not be able to change ip, routing"
 			ewarn "or DNS configuration."
 		fi
+	fi
+}
+
+start_pre() {
+	checkconfig || return 1
+
+	if yesno "$client_mode"; then
+		command_args="$command_args
+			--up-delay
+			--up-restart
+			--down-pre
+			--script-security 2
+			--up $up_script
+			--down $down_script"
+		start_inactive="yes"
 	else
-		# So we're a server. Run as openvpn unless otherwise specified
-		grep -q "^[ 	]*user[ 	].*" "${VPNCONF}" || args="${args} --user openvpn"
-		grep -q "^[ 	]*group[ 	].*" "${VPNCONF}" || args="${args} --group openvpn"
+		# Run as openvpn unless otherwise specified.
+		cfgfile_has_option "user" || command_args="$command_args --user openvpn"
+		cfgfile_has_option "group" || command_args="$command_args --group openvpn"
 	fi
 
-	# Ensure that our scripts get the PEER_DNS variable
-	[ -n "${PEER_DNS}" ] && args="${args} --setenv PEER_DNS ${PEER_DNS}"
+	# If the config file does not specify the cd option, we do.
+	# But if we specify it, we override the config option which we do not want.
+	if cfgfile_has_option "cd"; then
+		command_args="$command_args --cd $cfgdir"
+	fi
+}
 
-	[ "${reenter}" = "yes" ] && mark_service_inactive "${SVCNAME}"
-	start-stop-daemon --start --exec /usr/sbin/openvpn --pidfile "${VPNPID}" \
-		-- --config "${VPNCONF}" --writepid "${VPNPID}" --daemon \
-		--setenv SVCNAME "${SVCNAME}" ${args}
-	eend $? "Check your logs to see why startup failed"
+start() {
+	# If we are re-called by the up.sh script, then we don't actually want
+	# to start OpenVPN. We do this so we can "start" ourselves from
+	# inactive (from the up.sh script) which then triggers other
+	# services to start which depend on us.
+	yesno "$IN_BACKGROUND" && return 0
+
+	default_start
 }
 
 stop() {
-	# If we are re-called by the openvpn gentoo-down.sh script
-	# then we don't actually want to stop openvpn
-	if [ "${IN_BACKGROUND}" = "true" ] ; then
-		mark_service_inactive "${SVCNAME}"
+	# If we are re-called by the down.sh script, then we don't actually
+	# want to stop OpenVPN.
+	if yesno "$IN_BACKGROUND"; then
+		mark_service_inactive "$RC_SVCNAME"
 		return 0
 	fi
 
-	ebegin "Stopping ${SVCNAME}"
-	start-stop-daemon --stop --quiet \
-		--exec /usr/sbin/openvpn --pidfile "${VPNPID}"
-	eend $?
+	default_stop
 }
 
-# vim: set ts=4 :
+cfgfile_has_option() {
+	grep -Eq "^\s*$1\s" "$cfgfile"
+}

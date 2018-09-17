@@ -4,19 +4,32 @@ profile_standard() {
 		Just enough to get you started.
 		Network connection is required."
 	profile_base
+	profile_abbrev="std"
 	image_ext="iso"
-	arch="x86 x86_64 ppc64le"
+	arch="x86 x86_64 ppc64le s390x"
 	output_format="iso"
 	kernel_cmdline="nomodeset"
 	kernel_addons="xtables-addons"
+	case "$ARCH" in
+	s390x)
+		apks="$apks s390-tools"
+		initfs_features="$initfs_features dasd_mod qeth"
+		initfs_cmdline="modules=loop,squashfs,dasd_mod,qeth quiet"
+		;;
+	ppc64le)
+		initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage,ibmvscsi quiet"
+		;;
+	esac
 }
 
 profile_extended() {
 	profile_standard
+	profile_abbrev="ext"
 	title="Extended"
 	desc="Most common used packages included.
 		Suitable for routers and servers.
 		Runs from RAM."
+	arch="x86 x86_64"
 	kernel_addons="dahdi-linux xtables-addons zfs spl"
 	apks="$apks
 		dahdi-linux dahdi-tools ethtool hwdata lftp links
@@ -36,7 +49,7 @@ profile_extended() {
 		wireless-tools wpa_supplicant zonenotify
 
 		btrfs-progs cksfv dosfstools cryptsetup
-		cciss_vol_status lvm2 mdadm mkinitfs mtools nfs-utils
+		cciss_vol_status grub-efi lvm2 mdadm mkinitfs mtools nfs-utils
 		parted rsync sfdisk syslinux unrar util-linux xfsprogs
 		zfs
 		"
@@ -53,10 +66,12 @@ profile_extended() {
 
 profile_virt() {
 	profile_standard
+	profile_abbrev="virt"
 	title="Virtual"
 	desc="Similar to standard.
 		Slimmed down kernel.
 		Optimized for virtual systems."
+	arch="x86 x86_64"
 	kernel_addons=
 	kernel_flavors="virt"
 	kernel_cmdline="console=tty0 console=ttyS0,115200"

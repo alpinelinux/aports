@@ -18,7 +18,7 @@ done
 # extlinux will use path relative partition, so if /boot is on a
 # separate partition we want /boot/<kernel> resolve to /<kernel>
 if ! [ -e /boot/boot ]; then
-	ln -sf / /boot/boot
+	ln -sf . /boot/boot
 fi
 
 # cleanup unused initramfs

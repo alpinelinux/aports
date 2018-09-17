@@ -1,0 +1,88 @@
+#!/sbin/openrc-run
+
+extra_started_commands="loadconfig saveconfig"
+
+description="NGINX Unit"
+description_loadconfig="Load saved configuration"
+description_saveconfig="Save configuration to file"
+
+: ${control_socket:="unix:/run/control.unit.sock"}
+: ${logfile:="/var/log/unit.log"}
+: ${statedir:="/var/lib/unit"}
+: ${config_file:="/etc/unit/unit.conf"}
+: ${config_load_on_start:="no"}
+: ${config_save_on_stop:="no"}
+
+command="/usr/sbin/unitd"
+command_args="
+	--no-daemon
+	--log $logfile
+	--control $control_socket
+	$command_args"
+command_background="yes"
+pidfile="/run/$RC_SVCNAME.pid"
+
+depend() {
+	need net
+	use dns logger netmount
+}
+
+start_post() {
+	if yesno "$config_load_on_start" && [ -f "$config_file" ]; then
+		check_control_socket || return 1
+		ewaitfile 5 "${control_socket#unix:}" || return 1
+		loadconfig || return 1
+	fi
+}
+
+stop_pre() {
+	if yesno "$config_save_on_stop"; then
+		saveconfig
+	fi
+}
+
+saveconfig() {
+	ebegin "Saving configuration to $config_file"
+
+	check_control_socket || return 1
+	checkpath -d "${config_file%/*}" || return 1
+
+	local tmpfile=$(mktemp)
+	curl -sS --unix-socket "${control_socket#unix:}" localhost > "$tmpfile" || {
+		rm -f "$tmpfile"
+		eend 1 "Could not retrieve configuration"
+		return 1
+	}
+	cat "$tmpfile" > "$config_file" && rm -f "$tmpfile"
+	eend $?
+}
+
+loadconfig() {
+	ebegin "Loading configuration from $config_file"
+
+	check_control_socket || return 1
+
+	if ! [ -f "$config_file" ]; then
+		eend 1 "File $config_file does not exist"
+		return 1
+	fi
+
+	local resp=$(curl -sS -X PUT --data-binary "@$config_file" \
+		--write-out "\nHTTP_CODE:%{http_code}\n" \
+		--unix-socket "${control_socket#unix:}" localhost)
+
+	if [ "$(echo "$resp" | sed -n 's/^HTTP_CODE:\(\d\).*/\1/p')" -ne 2 ]; then
+		eend 1 "Unable to load configuration"
+		echo "$resp" | sed '/^HTTP_CODE:/d' >&2
+		return 1
+	fi
+	eend 0
+}
+
+check_control_socket() {
+	case "$control_socket" in
+		unix:*) return 0;;
+	esac
+	eerror "control_socket must be a unix socket when using saveconfig or loadconfig"
+	return 1
+}
