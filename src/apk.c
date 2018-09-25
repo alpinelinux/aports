@@ -123,7 +123,7 @@ static int option_parse_global(void *ctx, struct apk_db_options *dbopts, int opt
 	case 0x101:
 		apk_flags |= APK_PROGRESS;
 		break;
-	case 0x104:
+	case 's':
 		apk_flags |= APK_SIMULATE;
 		break;
 	case 0x110:
@@ -192,6 +192,7 @@ static const struct apk_option options_global[] = {
 	{ 'i', "interactive",	"Ask confirmation for certain operations" },
 	{ 'V', "version",	"Print program version and exit" },
 	{ 'f', "force",		"Enable selected --force-* (deprecated)" },
+	{ 's', "simulate",	"Show what would be done without actually doing it" },
 	{ 0x125, "force-binary-stdout", "Continue even if binary data is to be output" },
 	{ 0x122, "force-broken-world", "Continue even if 'world' cannot be satisfied" },
 	{ 0x124, "force-non-repository", "Continue even if packages may be lost on reboot" },
@@ -238,9 +239,6 @@ const struct apk_option_group optgroup_global = {
 static int option_parse_commit(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
 {
 	switch (optch) {
-	case 's':
-		apk_flags |= APK_SIMULATE;
-		break;
 	case 0x102:
 		apk_flags |= APK_CLEAN_PROTECTED;
 		break;
@@ -266,7 +264,6 @@ static int option_parse_commit(void *ctx, struct apk_db_options *dbopts, int opt
 }
 
 static const struct apk_option options_commit[] = {
-	{ 's', "simulate",		"Show what would be done without actually doing it" },
 	{ 0x102, "clean-protected",	"Do not create .apk-new files in configuration dirs" },
 	{ 0x111, "overlay-from-stdin",	"Read list of overlay files from stdin" },
 	{ 0x113, "no-scripts",		"Do not execute any scripts" },
