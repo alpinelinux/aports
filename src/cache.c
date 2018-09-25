@@ -26,6 +26,41 @@
 #define CACHE_CLEAN	BIT(0)
 #define CACHE_DOWNLOAD	BIT(1)
 
+struct cache_ctx {
+	unsigned short solver_flags;
+};
+
+static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int optch, const char *optarg)
+{
+	struct cache_ctx *cctx = (struct cache_ctx *) ctx;
+
+	switch (optch) {
+	case 'u':
+		cctx->solver_flags |= APK_SOLVERF_UPGRADE;
+		break;
+	case 'l':
+		cctx->solver_flags |= APK_SOLVERF_LATEST;
+		break;
+	default:
+		return -ENOTSUP;
+	}
+	return 0;
+}
+
+static const struct apk_option options_applet[] = {
+	{ 'u',		"upgrade",	"Prefer to upgrade package" },
+	{ 'l',		"latest",
+	  "Select latest version of package (if it is not pinned), and "
+	  "print error if it cannot be installed due to other dependencies" },
+};
+
+static const struct apk_option_group optgroup_applet = {
+	.name = "Cache",
+	.options = options_applet,
+	.num_options = ARRAY_SIZE(options_applet),
+	.parse = option_parse_applet,
+};
+
 struct progress {
 	size_t done, total;
 };
@@ -36,7 +71,7 @@ static void progress_cb(void *ctx, size_t bytes_done)
 	apk_print_progress(prog->done + bytes_done, prog->total);
 }
 
-static int cache_download(struct apk_database *db)
+static int cache_download(struct cache_ctx *cctx, struct apk_database *db)
 {
 	struct apk_changeset changeset = {};
 	struct apk_change *change;
@@ -45,7 +80,7 @@ static int cache_download(struct apk_database *db)
 	struct progress prog = { 0, 0 };
 	int r, ret = 0;
 
-	r = apk_solver_solve(db, 0, db->world, &changeset);
+	r = apk_solver_solve(db, cctx->solver_flags, db->world, &changeset);
 	if (r < 0) {
 		apk_error("Unable to select packages. Run apk fix.");
 		return r;
@@ -116,6 +151,7 @@ static int cache_clean(struct apk_database *db)
 
 static int cache_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
 {
+	struct cache_ctx *cctx = (struct cache_ctx *) ctx;
 	char *arg;
 	int r = 0, actions = 0;
 
@@ -141,7 +177,7 @@ static int cache_main(void *ctx, struct apk_database *db, struct apk_string_arra
 	if (r == 0 && (actions & CACHE_CLEAN))
 		r = cache_clean(db);
 	if (r == 0 && (actions & CACHE_DOWNLOAD))
-		r = cache_download(db);
+		r = cache_download(cctx, db);
 err:
 	return r;
 }
@@ -153,6 +189,8 @@ static struct apk_applet apk_cache = {
 	.arguments = "sync | clean | download",
 	.open_flags = APK_OPENF_READ|APK_OPENF_NO_SCRIPTS|APK_OPENF_CACHE_WRITE,
 	.command_groups = APK_COMMAND_GROUP_SYSTEM,
+	.context_size = sizeof(struct cache_ctx),
+	.optgroups = { &optgroup_global, &optgroup_applet },
 	.main = cache_main,
 };
 
