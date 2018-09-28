@@ -165,7 +165,7 @@ build_grub_cfg() {
 
 grub_gen_earlyconf() {
 	cat <<- EOF
-	search --no-floppy --set=root --label "alpine-$PROFILE $RELEASE $ARCH"
+	search --no-floppy --set=root --label "alpine-${profile_abbrev:-$PROFILE} $RELEASE $ARCH"
 	set prefix=(\$root)/boot/grub
 	EOF
 }
