@@ -54,11 +54,32 @@ int usage(int eval)
 	return eval;
 }
 
+int fork_exec(char *argv[], int showerr)
+{
+	int r = 202;
+	int status = 0;
+	pid_t childpid = fork();
+	if (childpid < 0 )
+		err(200, "fork");
+
+	if (childpid == 0) {
+		execvp(argv[0], argv);
+		if (showerr)
+			warn("%s", argv[0]);
+		_exit(201);
+	}
+
+	/* wait for curl/wget and get the exit code */
+	wait(&status);
+	if (WIFEXITED(status))
+		r = WEXITSTATUS(status);
+	return r;
+}
+
 /* create or wait for an NFS-safe lockfile and fetch url with curl or wget */
 int fetch(char *url, const char *destdir)
 {
 	int lockfd, status=0;
-	pid_t childpid;
 	char outfile[PATH_MAX], partfile[PATH_MAX];
 	char *name, *p;
 	struct flock fl = {
@@ -122,27 +143,18 @@ int fetch(char *url, const char *destdir)
 	add_opt(&curlcmd, url);
 	add_opt(&wgetcmd, url);
 
-	childpid = fork();
-	if (childpid < 0 )
-		err(200, "fork");
+	status = fork_exec(curlcmd.argv, 0);
 
-	if (childpid == 0) {
-		execvp(curlcmd.argv[0], curlcmd.argv);
-		printf("Using wget\n");
-		execvp(wgetcmd.argv[0], wgetcmd.argv);
-		warn("%s", wgetcmd.argv[0]);
-		unlink(lockfile);
-		_exit(201);
-	}
+	/* CURLE_RANGE_ERROR (33)
+	   The server does not support or accept range requests. */
+	if (status == 33)
+		unlink(partfile);
 
-	/* wait for curl/wget and get the exit code */
-	wait(&status);
-	if (WIFEXITED(status))
-		status = WEXITSTATUS(status);
-	else
-		status = 202;
+	/* is we failed execute curl, then fallback to wget */
+	if (status == 201)
+		status = fork_exec(wgetcmd.argv, 1);
 
-	/* don't rename partial downloads that we can't continue */
+	/* only rename completed downloads */
 	if (status == 0)
 		rename(partfile, outfile);
 
