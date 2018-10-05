@@ -542,7 +542,7 @@ int main(int argc, char **argv)
 	applet = deduce_applet(argc, argv);
 	if (applet && applet->optgroups[0]) optgroups = applet->optgroups;
 
-	for (i = 0, num_options = 0; optgroups[i]; i++)
+	for (i = 0, num_options = 1; optgroups[i]; i++)
 		num_options += optgroups[i]->num_options;
 	all_options = alloca(sizeof(struct option) * num_options);
 	for (i = r = 0; optgroups[i]; r += optgroups[i]->num_options, i++)
