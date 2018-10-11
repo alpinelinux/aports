@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
 	if (!p) errx(1, "Incorrect user");
 	if (s.st_uid != p->pw_uid) errx(1, "Permission denied");
 
-	if (nftw(argv[1], handler, 512, FTW_DEPTH)) fail();
+	if (nftw(argv[1], handler, 512, FTW_DEPTH|FTW_PHYS)) fail();
 
 	return 0;
 }
