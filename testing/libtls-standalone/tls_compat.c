@@ -132,14 +132,14 @@ SSL_CTX_use_certificate_chain_mem(SSL_CTX *ctx, char *buf, off_t len)
 	x = ca = NULL;
 
 	if ((in = BIO_new_mem_buf(buf, len)) == NULL) {
-		SSLerr(SSL_F_SSL_CTX_USE_CERTIFICATE_CHAIN_FILE, ERR_R_BUF_LIB);
+		SSLerr(SSL_F_SSL_CTX_USE_CERTIFICATE_FILE, ERR_R_BUF_LIB);
 		goto end;
 	}
 
 	if ((x = PEM_read_bio_X509(in, NULL,
-		    ctx->default_passwd_callback,
-		    ctx->default_passwd_callback_userdata)) == NULL) {
-		SSLerr(SSL_F_SSL_CTX_USE_CERTIFICATE_CHAIN_FILE, ERR_R_PEM_LIB);
+		    SSL_CTX_get_default_passwd_cb(ctx),
+		    SSL_CTX_get_default_passwd_cb_userdata(ctx))) == NULL) {
+		SSLerr(SSL_F_SSL_CTX_USE_CERTIFICATE_FILE, ERR_R_PEM_LIB);
 		goto end;
 	}
 
@@ -149,15 +149,11 @@ SSL_CTX_use_certificate_chain_mem(SSL_CTX *ctx, char *buf, off_t len)
 	/* If we could set up our certificate, now proceed to
 	 * the CA certificates.
 	 */
-
-	if (ctx->extra_certs != NULL) {
-		sk_X509_pop_free(ctx->extra_certs, X509_free);
-		ctx->extra_certs = NULL;
-	}
+	SSL_CTX_clear_extra_chain_certs(ctx);
 
 	while ((ca = PEM_read_bio_X509(in, NULL,
-		    ctx->default_passwd_callback,
-		    ctx->default_passwd_callback_userdata)) != NULL) {
+		    SSL_CTX_get_default_passwd_cb(ctx),
+		    SSL_CTX_get_default_passwd_cb_userdata(ctx))) != NULL) {
 
 		if (!SSL_CTX_add_extra_chain_cert(ctx, ca))
 			goto end;
@@ -294,12 +290,6 @@ ASN1_time_parse(const char *bytes, size_t len, struct tm *tm, int mode)
 	}
 
 	return (type);
-}
-
-int
-SSL_CTX_set1_groups(SSL_CTX *ctx, int *glist, int glistlen)
-{
-	return 1;
 }
 
 /* $OpenBSD: a_time_tm.c,v 1.14 2017/08/28 17:42:47 jsing Exp $ */

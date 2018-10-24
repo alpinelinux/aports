@@ -1,3 +1,5 @@
+#include <string.h>
+
 #include <openssl/opensslv.h>
 #include <openssl/x509_vfy.h>
 
@@ -17,9 +19,5 @@ int SSL_CTX_load_verify_mem(SSL_CTX *ctx, void *buf, int len);
 int ASN1_time_parse(const char *bytes, size_t len, struct tm *tm, int mode);
 
 int SSL_CTX_use_certificate_chain_mem(SSL_CTX *, char *buf, off_t);
-
-int SSL_CTX_set1_groups(SSL_CTX *ctx, int *glist, int glistlen);
-
-#define SSL_CTX_set_dh_auto(...)
 
 #endif
