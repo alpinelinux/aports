@@ -4,8 +4,8 @@ LIBDIR = ${PREFIX}/lib
 INCLUDEDIR = ${PREFIX}/include
 
 LIBRESSL_VERSION = 1.0
-LIBTLS_SOVERSION = 17
-LIBTLS_FULLVERSION = 17.0.1
+LIBTLS_SOVERSION = 1.1
+LIBTLS_FULLVERSION = 1.1.0
 
 OPENSSL_CFLAGS = $(shell pkgconf openssl --cflags)
 OPENSSL_LIBS = $(shell pkgconf openssl --libs)
@@ -35,7 +35,7 @@ SOURCES = \
 
 OBJECTS = ${SOURCES:.c=.o}
 
-all: dumpconfig libtls.so.${LIBTLS_FULLVERSION} libtls.pc
+all: dumpconfig libtls.so.${LIBTLS_FULLVERSION} libtls.so.${LIBTLS_SOVERSION} libtls.pc
 
 dumpconfig:
 	@echo "Building with:"
@@ -46,18 +46,21 @@ dumpconfig:
 .c.o:
 	${CC} ${CFLAGS} -o $@ -c $<
 
+libtls.so.${LIBTLS_SOVERSION}: libtls.so.${LIBTLS_FULLVERSION}
+	ln -s $< $@
+
 libtls.so.${LIBTLS_FULLVERSION}: ${OBJECTS}
 	${CC} ${CFLAGS} ${LDFLAGS} -o $@ ${OBJECTS} ${OPENSSL_LIBS}
 
 check: test_program
-	LD_PRELOAD=./libtls.so.${LIBTLS_FULLVERSION} ./test_program
+	LD_LIBRARY_PATH=$$PWD ./test_program
 
 test_program: test_program.c
 	${CC} -I${LIBRESSL_SRCDIR}/include -o $@ test_program.c ./libtls.so.${LIBTLS_FULLVERSION}
 
 clean:
 	rm -f ${OBJECTS}
-	rm -f libtls.so.${LIBTLS_FULLVERSION}
+	rm -f libtls.so.${LIBTLS_FULLVERSION} libtls.so.${LIBTLS_SOVERSION}
 	rm -f test_program
 
 install:
