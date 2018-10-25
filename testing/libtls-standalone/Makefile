@@ -63,6 +63,7 @@ clean:
 install:
 	install -D -m755 libtls.so.${LIBTLS_FULLVERSION} ${DESTDIR}${PREFIX}/lib/libtls.so.${LIBTLS_FULLVERSION}
 	ln -sf libtls.so.${LIBTLS_FULLVERSION} ${DESTDIR}${PREFIX}/lib/libtls.so.${LIBTLS_SOVERSION}
+	ln -sf libtls.so.${LIBTLS_FULLVERSION} ${DESTDIR}${PREFIX}/lib/libtls.so
 
 	install -D -m644 ${LIBRESSL_SRCDIR}/include/tls.h ${DESTDIR}${PREFIX}/include/tls.h
 
