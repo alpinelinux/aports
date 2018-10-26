@@ -12,7 +12,6 @@
 #define APK_IO
 
 #include <sys/types.h>
-#include <openssl/evp.h>
 #include <fcntl.h>
 #include <time.h>
 

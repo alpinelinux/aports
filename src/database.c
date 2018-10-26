@@ -35,6 +35,7 @@
 #include "apk_applet.h"
 #include "apk_archive.h"
 #include "apk_print.h"
+#include "apk_openssl.h"
 
 static const apk_spn_match_def apk_spn_repo_separators = {
 	[4] = (1<<0) /* */,
@@ -2363,18 +2364,22 @@ static struct apk_db_dir_instance *apk_db_install_directory_entry(struct install
 
 static const char *format_tmpname(struct apk_package *pkg, struct apk_db_file *f, char tmpname[static TMPNAME_MAX])
 {
-	EVP_MD_CTX mdctx;
+	EVP_MD_CTX *mdctx;
 	unsigned char md[EVP_MAX_MD_SIZE];
 	apk_blob_t b = APK_BLOB_PTR_LEN(tmpname, TMPNAME_MAX);
 
 	if (!f) return NULL;
 
-	EVP_DigestInit(&mdctx, EVP_sha256());
-	EVP_DigestUpdate(&mdctx, pkg->name->name, strlen(pkg->name->name) + 1);
-	EVP_DigestUpdate(&mdctx, f->diri->dir->name, f->diri->dir->namelen);
-	EVP_DigestUpdate(&mdctx, "/", 1);
-	EVP_DigestUpdate(&mdctx, f->name, f->namelen);
-	EVP_DigestFinal(&mdctx, md, NULL);
+	mdctx = EVP_MD_CTX_new();
+	if (!mdctx) return NULL;
+
+	EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
+	EVP_DigestUpdate(mdctx, pkg->name->name, strlen(pkg->name->name) + 1);
+	EVP_DigestUpdate(mdctx, f->diri->dir->name, f->diri->dir->namelen);
+	EVP_DigestUpdate(mdctx, "/", 1);
+	EVP_DigestUpdate(mdctx, f->name, f->namelen);
+	EVP_DigestFinal_ex(mdctx, md, NULL);
+	EVP_MD_CTX_free(mdctx);
 
 	apk_blob_push_blob(&b, APK_BLOB_PTR_LEN(f->diri->dir->name, f->diri->dir->namelen));
 	apk_blob_push_blob(&b, APK_BLOB_STR("/.apk."));

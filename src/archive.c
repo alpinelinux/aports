@@ -28,6 +28,7 @@
 #include "apk_defines.h"
 #include "apk_print.h"
 #include "apk_archive.h"
+#include "apk_openssl.h"
 
 struct tar_header {
 	/* ustar header, Posix 1003.1 */
@@ -82,7 +83,7 @@ struct apk_tar_entry_istream {
 	struct apk_istream is;
 	struct apk_istream *tar_is;
 	size_t bytes_left;
-	EVP_MD_CTX mdctx;
+	EVP_MD_CTX *mdctx;
 	struct apk_checksum *csum;
 	time_t mtime;
 };
@@ -121,10 +122,10 @@ static ssize_t tar_entry_read(void *stream, void *ptr, size_t size)
 	if (teis->csum == NULL)
 		return r;
 
-	EVP_DigestUpdate(&teis->mdctx, ptr, r);
+	EVP_DigestUpdate(teis->mdctx, ptr, r);
 	if (teis->bytes_left == 0) {
-		teis->csum->type = EVP_MD_CTX_size(&teis->mdctx);
-		EVP_DigestFinal_ex(&teis->mdctx, teis->csum->data, NULL);
+		teis->csum->type = EVP_MD_CTX_size(teis->mdctx);
+		EVP_DigestFinal_ex(teis->mdctx, teis->csum->data, NULL);
 	}
 	return r;
 }
@@ -210,7 +211,9 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 	char filename[sizeof buf.name + sizeof buf.prefix + 2];
 
 	odi = (struct apk_tar_digest_info *) &buf.linkname[3];
-	EVP_MD_CTX_init(&teis.mdctx);
+	teis.mdctx = EVP_MD_CTX_new();
+	if (!teis.mdctx) return -ENOMEM;
+
 	memset(&entry, 0, sizeof(entry));
 	entry.name = buf.name;
 	while ((r = apk_istream_read(is, &buf, 512)) == 512) {
@@ -327,7 +330,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
 		if (entry.mode & S_IFMT) {
 			/* callback parser function */
 			if (teis.csum != NULL)
-				EVP_DigestInit_ex(&teis.mdctx,
+				EVP_DigestInit_ex(teis.mdctx,
 						  apk_checksum_default(), NULL);
 
 			r = parser(ctx, &entry, &teis.is);
@@ -360,7 +363,7 @@ err:
 	/* Check that there was no partial (or non-zero) record */
 	if (r >= 0) r = -EBADMSG;
 ok:
-	EVP_MD_CTX_cleanup(&teis.mdctx);
+	EVP_MD_CTX_free(teis.mdctx);
 	free(pax.ptr);
 	free(longname.ptr);
 	apk_fileinfo_free(&entry);

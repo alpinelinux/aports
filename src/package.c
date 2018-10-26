@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 
+#include "apk_openssl.h"
 #include <openssl/pem.h>
 
 #include "apk_defines.h"
@@ -490,9 +491,9 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
 		ctx->data_started = 1;
 		break;
 	}
-	EVP_MD_CTX_init(&ctx->mdctx);
-	EVP_DigestInit_ex(&ctx->mdctx, ctx->md, NULL);
-	EVP_MD_CTX_set_flags(&ctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+	ctx->mdctx = EVP_MD_CTX_new();
+	EVP_DigestInit_ex(ctx->mdctx, ctx->md, NULL);
+	EVP_MD_CTX_set_flags(ctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 }
 
 void apk_sign_ctx_free(struct apk_sign_ctx *ctx)
@@ -501,7 +502,7 @@ void apk_sign_ctx_free(struct apk_sign_ctx *ctx)
 		free(ctx->signature.data.ptr);
 	if (ctx->signature.pkey != NULL)
 		EVP_PKEY_free(ctx->signature.pkey);
-	EVP_MD_CTX_cleanup(&ctx->mdctx);
+	EVP_MD_CTX_free(ctx->mdctx);
 }
 
 static int check_signing_key_trust(struct apk_sign_ctx *sctx)
@@ -674,16 +675,16 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 
 	/* Drool in the remaining of the digest block now, we will finish
 	 * it on all cases */
-	EVP_DigestUpdate(&sctx->mdctx, data.ptr, data.len);
+	EVP_DigestUpdate(sctx->mdctx, data.ptr, data.len);
 
 	/* End of control-block and checking control hash/signature or
 	 * end of data-block and checking its hash/signature */
 	if (sctx->has_data_checksum && !end_of_control) {
 		/* End of control-block and check it's hash */
-		EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
-		if (EVP_MD_CTX_size(&sctx->mdctx) == 0 ||
+		EVP_DigestFinal_ex(sctx->mdctx, calculated, NULL);
+		if (EVP_MD_CTX_size(sctx->mdctx) == 0 ||
 		    memcmp(calculated, sctx->data_checksum,
-		           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
+		           EVP_MD_CTX_size(sctx->mdctx)) != 0)
 			return -EKEYREJECTED;
 		sctx->data_verified = 1;
 		if (!(apk_flags & APK_ALLOW_UNTRUSTED) &&
@@ -700,7 +701,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 	case APK_SIGN_VERIFY:
 	case APK_SIGN_VERIFY_AND_GENERATE:
 		if (sctx->signature.pkey != NULL) {
-			r = EVP_VerifyFinal(&sctx->mdctx,
+			r = EVP_VerifyFinal(sctx->mdctx,
 				(unsigned char *) sctx->signature.data.ptr,
 				sctx->signature.data.len,
 				sctx->signature.pkey);
@@ -717,13 +718,13 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 				sctx->data_verified = 1;
 		}
 		if (sctx->action == APK_SIGN_VERIFY_AND_GENERATE) {
-			sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
-			EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
+			sctx->identity.type = EVP_MD_CTX_size(sctx->mdctx);
+			EVP_DigestFinal_ex(sctx->mdctx, sctx->identity.data, NULL);
 		}
 		break;
 	case APK_SIGN_VERIFY_IDENTITY:
 		/* Reset digest for hashing data */
-		EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
+		EVP_DigestFinal_ex(sctx->mdctx, calculated, NULL);
 		if (memcmp(calculated, sctx->identity.data,
 			   sctx->identity.type) != 0)
 			return -EKEYREJECTED;
@@ -733,21 +734,21 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
 		break;
 	case APK_SIGN_GENERATE:
 		/* Package identity is the checksum */
-		sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
-		EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
+		sctx->identity.type = EVP_MD_CTX_size(sctx->mdctx);
+		EVP_DigestFinal_ex(sctx->mdctx, sctx->identity.data, NULL);
 		if (sctx->action == APK_SIGN_GENERATE &&
 		    sctx->has_data_checksum)
 			return -ECANCELED;
 		break;
 	}
 reset_digest:
-	EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
-	EVP_MD_CTX_set_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+	EVP_DigestInit_ex(sctx->mdctx, sctx->md, NULL);
+	EVP_MD_CTX_set_flags(sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
 	return 0;
 
 update_digest:
-	EVP_MD_CTX_clear_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
-	EVP_DigestUpdate(&sctx->mdctx, data.ptr, data.len);
+	EVP_MD_CTX_clear_flags(sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+	EVP_DigestUpdate(sctx->mdctx, data.ptr, data.len);
 	return 0;
 }
 

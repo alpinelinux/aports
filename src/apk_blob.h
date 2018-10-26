@@ -14,9 +14,9 @@
 
 #include <ctype.h>
 #include <string.h>
-#include <openssl/evp.h>
 
 #include "apk_defines.h"
+#include "apk_openssl.h"
 
 typedef const unsigned char *apk_spn_match;
 typedef unsigned char apk_spn_match_def[256 / 8];

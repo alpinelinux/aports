@@ -28,6 +28,7 @@
 #include "apk_defines.h"
 #include "apk_io.h"
 #include "apk_hash.h"
+#include "apk_openssl.h"
 
 #if defined(__GLIBC__) || defined(__UCLIBC__)
 #define HAVE_FGETPWENT_R
@@ -623,22 +624,25 @@ static void hash_len_data(EVP_MD_CTX *ctx, uint32_t len, const void *ptr)
 void apk_fileinfo_hash_xattr_array(struct apk_xattr_array *xattrs, const EVP_MD *md, struct apk_checksum *csum)
 {
 	struct apk_xattr *xattr;
-	EVP_MD_CTX mdctx;
+	EVP_MD_CTX *mdctx;
 
-	if (!xattrs || xattrs->num == 0) {
-		csum->type = APK_CHECKSUM_NONE;
-		return;
-	}
+	if (!xattrs || xattrs->num == 0) goto err;
+	mdctx = EVP_MD_CTX_new();
+	if (!mdctx) goto err;
 
 	qsort(xattrs->item, xattrs->num, sizeof(xattrs->item[0]), cmp_xattr);
 
-	EVP_DigestInit(&mdctx, md);
+	EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
 	foreach_array_item(xattr, xattrs) {
-		hash_len_data(&mdctx, strlen(xattr->name), xattr->name);
-		hash_len_data(&mdctx, xattr->value.len, xattr->value.ptr);
+		hash_len_data(mdctx, strlen(xattr->name), xattr->name);
+		hash_len_data(mdctx, xattr->value.len, xattr->value.ptr);
 	}
-	csum->type = EVP_MD_CTX_size(&mdctx);
-	EVP_DigestFinal(&mdctx, csum->data, NULL);
+	csum->type = EVP_MD_CTX_size(mdctx);
+	EVP_DigestFinal_ex(mdctx, csum->data, NULL);
+	EVP_MD_CTX_free(mdctx);
+	return;
+err:
+	csum->type = APK_CHECKSUM_NONE;
 }
 
 void apk_fileinfo_hash_xattr(struct apk_file_info *fi)
@@ -723,17 +727,20 @@ int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
 	} else {
 		bs = apk_bstream_from_file(atfd, filename);
 		if (!IS_ERR_OR_NULL(bs)) {
-			EVP_MD_CTX mdctx;
+			EVP_MD_CTX *mdctx;
 			apk_blob_t blob;
 
-			EVP_DigestInit(&mdctx, apk_checksum_evp(checksum));
-			if (bs->flags & APK_BSTREAM_SINGLE_READ)
-				EVP_MD_CTX_set_flags(&mdctx, EVP_MD_CTX_FLAG_ONESHOT);
-			while (!APK_BLOB_IS_NULL(blob = apk_bstream_read(bs, APK_BLOB_NULL)))
-				EVP_DigestUpdate(&mdctx, (void*) blob.ptr, blob.len);
-			fi->csum.type = EVP_MD_CTX_size(&mdctx);
-			EVP_DigestFinal(&mdctx, fi->csum.data, NULL);
-
+			mdctx = EVP_MD_CTX_new();
+			if (mdctx) {
+				EVP_DigestInit_ex(mdctx, apk_checksum_evp(checksum), NULL);
+				if (bs->flags & APK_BSTREAM_SINGLE_READ)
+					EVP_MD_CTX_set_flags(mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+				while (!APK_BLOB_IS_NULL(blob = apk_bstream_read(bs, APK_BLOB_NULL)))
+					EVP_DigestUpdate(mdctx, (void*) blob.ptr, blob.len);
+				fi->csum.type = EVP_MD_CTX_size(mdctx);
+				EVP_DigestFinal_ex(mdctx, fi->csum.data, NULL);
+				EVP_MD_CTX_free(mdctx);
+			}
 			apk_bstream_close(bs, NULL);
 		}
 	}

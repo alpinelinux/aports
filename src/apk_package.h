@@ -58,7 +58,7 @@ struct apk_sign_ctx {
 	int data_verified : 1;
 	char data_checksum[EVP_MAX_MD_SIZE];
 	struct apk_checksum identity;
-	EVP_MD_CTX mdctx;
+	EVP_MD_CTX *mdctx;
 
 	struct {
 		apk_blob_t data;
