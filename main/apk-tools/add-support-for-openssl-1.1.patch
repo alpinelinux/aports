@@ -1,0 +1,380 @@
+From beab8545ebb2898a2beb157a4d9424ebddf3e26f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Fri, 26 Oct 2018 08:21:52 +0300
+Subject: add support for openssl 1.1
+
+---
+ src/apk_blob.h    |  2 +-
+ src/apk_io.h      |  1 -
+ src/apk_openssl.h | 21 +++++++++++++++++++++
+ src/apk_package.h |  2 +-
+ src/archive.c     | 17 ++++++++++-------
+ src/database.c    | 19 ++++++++++++-------
+ src/io.c          | 45 ++++++++++++++++++++++++++-------------------
+ src/package.c     | 37 +++++++++++++++++++------------------
+ 8 files changed, 90 insertions(+), 54 deletions(-)
+ create mode 100644 src/apk_openssl.h
+
+diff --git a/src/apk_blob.h b/src/apk_blob.h
+index 2d2e30e..4fdd3be 100644
+--- a/src/apk_blob.h
++++ b/src/apk_blob.h
+@@ -14,9 +14,9 @@
+ 
+ #include <ctype.h>
+ #include <string.h>
+-#include <openssl/evp.h>
+ 
+ #include "apk_defines.h"
++#include "apk_openssl.h"
+ 
+ typedef const unsigned char *apk_spn_match;
+ typedef unsigned char apk_spn_match_def[256 / 8];
+diff --git a/src/apk_io.h b/src/apk_io.h
+index 94aa989..26c3f28 100644
+--- a/src/apk_io.h
++++ b/src/apk_io.h
+@@ -12,7 +12,6 @@
+ #define APK_IO
+ 
+ #include <sys/types.h>
+-#include <openssl/evp.h>
+ #include <fcntl.h>
+ #include <time.h>
+ 
+diff --git a/src/apk_openssl.h b/src/apk_openssl.h
+new file mode 100644
+index 0000000..c45beb9
+--- /dev/null
++++ b/src/apk_openssl.h
+@@ -0,0 +1,21 @@
++#ifndef APK_SSL_COMPAT_H
++#define APK_SSL_COMPAT_H
++
++#include <openssl/opensslv.h>
++#include <openssl/evp.h>
++
++#if OPENSSL_VERSION_NUMBER < 0x1010000fL || (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x2070000fL)
++
++static inline EVP_MD_CTX *EVP_MD_CTX_new(void)
++{
++	return EVP_MD_CTX_create();
++}
++
++static inline void EVP_MD_CTX_free(EVP_MD_CTX *mdctx)
++{
++	return EVP_MD_CTX_destroy(mdctx);
++}
++
++#endif
++
++#endif
+diff --git a/src/apk_package.h b/src/apk_package.h
+index 87635a9..6c4ff29 100644
+--- a/src/apk_package.h
++++ b/src/apk_package.h
+@@ -58,7 +58,7 @@ struct apk_sign_ctx {
+ 	int data_verified : 1;
+ 	char data_checksum[EVP_MAX_MD_SIZE];
+ 	struct apk_checksum identity;
+-	EVP_MD_CTX mdctx;
++	EVP_MD_CTX *mdctx;
+ 
+ 	struct {
+ 		apk_blob_t data;
+diff --git a/src/archive.c b/src/archive.c
+index 9a184fd..f3a66c2 100644
+--- a/src/archive.c
++++ b/src/archive.c
+@@ -28,6 +28,7 @@
+ #include "apk_defines.h"
+ #include "apk_print.h"
+ #include "apk_archive.h"
++#include "apk_openssl.h"
+ 
+ struct tar_header {
+ 	/* ustar header, Posix 1003.1 */
+@@ -82,7 +83,7 @@ struct apk_tar_entry_istream {
+ 	struct apk_istream is;
+ 	struct apk_istream *tar_is;
+ 	size_t bytes_left;
+-	EVP_MD_CTX mdctx;
++	EVP_MD_CTX *mdctx;
+ 	struct apk_checksum *csum;
+ 	time_t mtime;
+ };
+@@ -121,10 +122,10 @@ static ssize_t tar_entry_read(void *stream, void *ptr, size_t size)
+ 	if (teis->csum == NULL)
+ 		return r;
+ 
+-	EVP_DigestUpdate(&teis->mdctx, ptr, r);
++	EVP_DigestUpdate(teis->mdctx, ptr, r);
+ 	if (teis->bytes_left == 0) {
+-		teis->csum->type = EVP_MD_CTX_size(&teis->mdctx);
+-		EVP_DigestFinal_ex(&teis->mdctx, teis->csum->data, NULL);
++		teis->csum->type = EVP_MD_CTX_size(teis->mdctx);
++		EVP_DigestFinal_ex(teis->mdctx, teis->csum->data, NULL);
+ 	}
+ 	return r;
+ }
+@@ -210,7 +211,9 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
+ 	char filename[sizeof buf.name + sizeof buf.prefix + 2];
+ 
+ 	odi = (struct apk_tar_digest_info *) &buf.linkname[3];
+-	EVP_MD_CTX_init(&teis.mdctx);
++	teis.mdctx = EVP_MD_CTX_new();
++	if (!teis.mdctx) return -ENOMEM;
++
+ 	memset(&entry, 0, sizeof(entry));
+ 	entry.name = buf.name;
+ 	while ((r = apk_istream_read(is, &buf, 512)) == 512) {
+@@ -327,7 +330,7 @@ int apk_tar_parse(struct apk_istream *is, apk_archive_entry_parser parser,
+ 		if (entry.mode & S_IFMT) {
+ 			/* callback parser function */
+ 			if (teis.csum != NULL)
+-				EVP_DigestInit_ex(&teis.mdctx,
++				EVP_DigestInit_ex(teis.mdctx,
+ 						  apk_checksum_default(), NULL);
+ 
+ 			r = parser(ctx, &entry, &teis.is);
+@@ -360,7 +363,7 @@ err:
+ 	/* Check that there was no partial (or non-zero) record */
+ 	if (r >= 0) r = -EBADMSG;
+ ok:
+-	EVP_MD_CTX_cleanup(&teis.mdctx);
++	EVP_MD_CTX_free(teis.mdctx);
+ 	free(pax.ptr);
+ 	free(longname.ptr);
+ 	apk_fileinfo_free(&entry);
+diff --git a/src/database.c b/src/database.c
+index 8cf63b2..91fcedd 100644
+--- a/src/database.c
++++ b/src/database.c
+@@ -35,6 +35,7 @@
+ #include "apk_applet.h"
+ #include "apk_archive.h"
+ #include "apk_print.h"
++#include "apk_openssl.h"
+ 
+ static const apk_spn_match_def apk_spn_repo_separators = {
+ 	[4] = (1<<0) /* */,
+@@ -2363,18 +2364,22 @@ static struct apk_db_dir_instance *apk_db_install_directory_entry(struct install
+ 
+ static const char *format_tmpname(struct apk_package *pkg, struct apk_db_file *f, char tmpname[static TMPNAME_MAX])
+ {
+-	EVP_MD_CTX mdctx;
++	EVP_MD_CTX *mdctx;
+ 	unsigned char md[EVP_MAX_MD_SIZE];
+ 	apk_blob_t b = APK_BLOB_PTR_LEN(tmpname, TMPNAME_MAX);
+ 
+ 	if (!f) return NULL;
+ 
+-	EVP_DigestInit(&mdctx, EVP_sha256());
+-	EVP_DigestUpdate(&mdctx, pkg->name->name, strlen(pkg->name->name) + 1);
+-	EVP_DigestUpdate(&mdctx, f->diri->dir->name, f->diri->dir->namelen);
+-	EVP_DigestUpdate(&mdctx, "/", 1);
+-	EVP_DigestUpdate(&mdctx, f->name, f->namelen);
+-	EVP_DigestFinal(&mdctx, md, NULL);
++	mdctx = EVP_MD_CTX_new();
++	if (!mdctx) return NULL;
++
++	EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
++	EVP_DigestUpdate(mdctx, pkg->name->name, strlen(pkg->name->name) + 1);
++	EVP_DigestUpdate(mdctx, f->diri->dir->name, f->diri->dir->namelen);
++	EVP_DigestUpdate(mdctx, "/", 1);
++	EVP_DigestUpdate(mdctx, f->name, f->namelen);
++	EVP_DigestFinal_ex(mdctx, md, NULL);
++	EVP_MD_CTX_free(mdctx);
+ 
+ 	apk_blob_push_blob(&b, APK_BLOB_PTR_LEN(f->diri->dir->name, f->diri->dir->namelen));
+ 	apk_blob_push_blob(&b, APK_BLOB_STR("/.apk."));
+diff --git a/src/io.c b/src/io.c
+index ff254fd..0295807 100644
+--- a/src/io.c
++++ b/src/io.c
+@@ -28,6 +28,7 @@
+ #include "apk_defines.h"
+ #include "apk_io.h"
+ #include "apk_hash.h"
++#include "apk_openssl.h"
+ 
+ #if defined(__GLIBC__) || defined(__UCLIBC__)
+ #define HAVE_FGETPWENT_R
+@@ -623,22 +624,25 @@ static void hash_len_data(EVP_MD_CTX *ctx, uint32_t len, const void *ptr)
+ void apk_fileinfo_hash_xattr_array(struct apk_xattr_array *xattrs, const EVP_MD *md, struct apk_checksum *csum)
+ {
+ 	struct apk_xattr *xattr;
+-	EVP_MD_CTX mdctx;
++	EVP_MD_CTX *mdctx;
+ 
+-	if (!xattrs || xattrs->num == 0) {
+-		csum->type = APK_CHECKSUM_NONE;
+-		return;
+-	}
++	if (!xattrs || xattrs->num == 0) goto err;
++	mdctx = EVP_MD_CTX_new();
++	if (!mdctx) goto err;
+ 
+ 	qsort(xattrs->item, xattrs->num, sizeof(xattrs->item[0]), cmp_xattr);
+ 
+-	EVP_DigestInit(&mdctx, md);
++	EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
+ 	foreach_array_item(xattr, xattrs) {
+-		hash_len_data(&mdctx, strlen(xattr->name), xattr->name);
+-		hash_len_data(&mdctx, xattr->value.len, xattr->value.ptr);
++		hash_len_data(mdctx, strlen(xattr->name), xattr->name);
++		hash_len_data(mdctx, xattr->value.len, xattr->value.ptr);
+ 	}
+-	csum->type = EVP_MD_CTX_size(&mdctx);
+-	EVP_DigestFinal(&mdctx, csum->data, NULL);
++	csum->type = EVP_MD_CTX_size(mdctx);
++	EVP_DigestFinal_ex(mdctx, csum->data, NULL);
++	EVP_MD_CTX_free(mdctx);
++	return;
++err:
++	csum->type = APK_CHECKSUM_NONE;
+ }
+ 
+ void apk_fileinfo_hash_xattr(struct apk_file_info *fi)
+@@ -723,17 +727,20 @@ int apk_fileinfo_get(int atfd, const char *filename, unsigned int flags,
+ 	} else {
+ 		bs = apk_bstream_from_file(atfd, filename);
+ 		if (!IS_ERR_OR_NULL(bs)) {
+-			EVP_MD_CTX mdctx;
++			EVP_MD_CTX *mdctx;
+ 			apk_blob_t blob;
+ 
+-			EVP_DigestInit(&mdctx, apk_checksum_evp(checksum));
+-			if (bs->flags & APK_BSTREAM_SINGLE_READ)
+-				EVP_MD_CTX_set_flags(&mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+-			while (!APK_BLOB_IS_NULL(blob = apk_bstream_read(bs, APK_BLOB_NULL)))
+-				EVP_DigestUpdate(&mdctx, (void*) blob.ptr, blob.len);
+-			fi->csum.type = EVP_MD_CTX_size(&mdctx);
+-			EVP_DigestFinal(&mdctx, fi->csum.data, NULL);
+-
++			mdctx = EVP_MD_CTX_new();
++			if (mdctx) {
++				EVP_DigestInit_ex(mdctx, apk_checksum_evp(checksum), NULL);
++				if (bs->flags & APK_BSTREAM_SINGLE_READ)
++					EVP_MD_CTX_set_flags(mdctx, EVP_MD_CTX_FLAG_ONESHOT);
++				while (!APK_BLOB_IS_NULL(blob = apk_bstream_read(bs, APK_BLOB_NULL)))
++					EVP_DigestUpdate(mdctx, (void*) blob.ptr, blob.len);
++				fi->csum.type = EVP_MD_CTX_size(mdctx);
++				EVP_DigestFinal_ex(mdctx, fi->csum.data, NULL);
++				EVP_MD_CTX_free(mdctx);
++			}
+ 			apk_bstream_close(bs, NULL);
+ 		}
+ 	}
+diff --git a/src/package.c b/src/package.c
+index e19250a..baa8a90 100644
+--- a/src/package.c
++++ b/src/package.c
+@@ -21,6 +21,7 @@
+ #include <sys/wait.h>
+ #include <sys/stat.h>
+ 
++#include "apk_openssl.h"
+ #include <openssl/pem.h>
+ 
+ #include "apk_defines.h"
+@@ -490,9 +491,9 @@ void apk_sign_ctx_init(struct apk_sign_ctx *ctx, int action,
+ 		ctx->data_started = 1;
+ 		break;
+ 	}
+-	EVP_MD_CTX_init(&ctx->mdctx);
+-	EVP_DigestInit_ex(&ctx->mdctx, ctx->md, NULL);
+-	EVP_MD_CTX_set_flags(&ctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
++	ctx->mdctx = EVP_MD_CTX_new();
++	EVP_DigestInit_ex(ctx->mdctx, ctx->md, NULL);
++	EVP_MD_CTX_set_flags(ctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+ }
+ 
+ void apk_sign_ctx_free(struct apk_sign_ctx *ctx)
+@@ -501,7 +502,7 @@ void apk_sign_ctx_free(struct apk_sign_ctx *ctx)
+ 		free(ctx->signature.data.ptr);
+ 	if (ctx->signature.pkey != NULL)
+ 		EVP_PKEY_free(ctx->signature.pkey);
+-	EVP_MD_CTX_cleanup(&ctx->mdctx);
++	EVP_MD_CTX_free(ctx->mdctx);
+ }
+ 
+ static int check_signing_key_trust(struct apk_sign_ctx *sctx)
+@@ -674,16 +675,16 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
+ 
+ 	/* Drool in the remaining of the digest block now, we will finish
+ 	 * it on all cases */
+-	EVP_DigestUpdate(&sctx->mdctx, data.ptr, data.len);
++	EVP_DigestUpdate(sctx->mdctx, data.ptr, data.len);
+ 
+ 	/* End of control-block and checking control hash/signature or
+ 	 * end of data-block and checking its hash/signature */
+ 	if (sctx->has_data_checksum && !end_of_control) {
+ 		/* End of control-block and check it's hash */
+-		EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
+-		if (EVP_MD_CTX_size(&sctx->mdctx) == 0 ||
++		EVP_DigestFinal_ex(sctx->mdctx, calculated, NULL);
++		if (EVP_MD_CTX_size(sctx->mdctx) == 0 ||
+ 		    memcmp(calculated, sctx->data_checksum,
+-		           EVP_MD_CTX_size(&sctx->mdctx)) != 0)
++		           EVP_MD_CTX_size(sctx->mdctx)) != 0)
+ 			return -EKEYREJECTED;
+ 		sctx->data_verified = 1;
+ 		if (!(apk_flags & APK_ALLOW_UNTRUSTED) &&
+@@ -700,7 +701,7 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
+ 	case APK_SIGN_VERIFY:
+ 	case APK_SIGN_VERIFY_AND_GENERATE:
+ 		if (sctx->signature.pkey != NULL) {
+-			r = EVP_VerifyFinal(&sctx->mdctx,
++			r = EVP_VerifyFinal(sctx->mdctx,
+ 				(unsigned char *) sctx->signature.data.ptr,
+ 				sctx->signature.data.len,
+ 				sctx->signature.pkey);
+@@ -717,13 +718,13 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
+ 				sctx->data_verified = 1;
+ 		}
+ 		if (sctx->action == APK_SIGN_VERIFY_AND_GENERATE) {
+-			sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
+-			EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
++			sctx->identity.type = EVP_MD_CTX_size(sctx->mdctx);
++			EVP_DigestFinal_ex(sctx->mdctx, sctx->identity.data, NULL);
+ 		}
+ 		break;
+ 	case APK_SIGN_VERIFY_IDENTITY:
+ 		/* Reset digest for hashing data */
+-		EVP_DigestFinal_ex(&sctx->mdctx, calculated, NULL);
++		EVP_DigestFinal_ex(sctx->mdctx, calculated, NULL);
+ 		if (memcmp(calculated, sctx->identity.data,
+ 			   sctx->identity.type) != 0)
+ 			return -EKEYREJECTED;
+@@ -733,21 +734,21 @@ int apk_sign_ctx_mpart_cb(void *ctx, int part, apk_blob_t data)
+ 		break;
+ 	case APK_SIGN_GENERATE:
+ 		/* Package identity is the checksum */
+-		sctx->identity.type = EVP_MD_CTX_size(&sctx->mdctx);
+-		EVP_DigestFinal_ex(&sctx->mdctx, sctx->identity.data, NULL);
++		sctx->identity.type = EVP_MD_CTX_size(sctx->mdctx);
++		EVP_DigestFinal_ex(sctx->mdctx, sctx->identity.data, NULL);
+ 		if (sctx->action == APK_SIGN_GENERATE &&
+ 		    sctx->has_data_checksum)
+ 			return -ECANCELED;
+ 		break;
+ 	}
+ reset_digest:
+-	EVP_DigestInit_ex(&sctx->mdctx, sctx->md, NULL);
+-	EVP_MD_CTX_set_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
++	EVP_DigestInit_ex(sctx->mdctx, sctx->md, NULL);
++	EVP_MD_CTX_set_flags(sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+ 	return 0;
+ 
+ update_digest:
+-	EVP_MD_CTX_clear_flags(&sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
+-	EVP_DigestUpdate(&sctx->mdctx, data.ptr, data.len);
++	EVP_MD_CTX_clear_flags(sctx->mdctx, EVP_MD_CTX_FLAG_ONESHOT);
++	EVP_DigestUpdate(sctx->mdctx, data.ptr, data.len);
+ 	return 0;
+ }
+ 
+-- 
+cgit v1.1
+
