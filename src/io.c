@@ -632,7 +632,7 @@ void apk_fileinfo_hash_xattr_array(struct apk_xattr_array *xattrs, const EVP_MD 
 
 	qsort(xattrs->item, xattrs->num, sizeof(xattrs->item[0]), cmp_xattr);
 
-	EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
+	EVP_DigestInit_ex(mdctx, EVP_sha1(), NULL);
 	foreach_array_item(xattr, xattrs) {
 		hash_len_data(mdctx, strlen(xattr->name), xattr->name);
 		hash_len_data(mdctx, xattr->value.len, xattr->value.ptr);
