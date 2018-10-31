@@ -4,15 +4,15 @@ LIBDIR = ${PREFIX}/lib
 INCLUDEDIR = ${PREFIX}/include
 
 LIBRESSL_VERSION = 1.0
-LIBTLS_SOVERSION = 1.1
-LIBTLS_FULLVERSION = 1.1.0
+LIBTLS_SOVERSION = 1
+LIBTLS_FULLVERSION = 1.0.0
 
 OPENSSL_CFLAGS = $(shell pkgconf openssl --cflags)
 OPENSSL_LIBS = $(shell pkgconf openssl --libs)
 
 CFLAGS = -Wall -Wno-pointer-sign -fPIC -DPIC -shared -include tls_compat.h -isystem ${LIBRESSL_SRCDIR}/include/compat ${OPENSSL_CFLAGS} -I ${LIBRESSL_SRCDIR}/include \
 	-D__BEGIN_HIDDEN_DECLS= -D__END_HIDDEN_DECLS=
-LDFLAGS = -fPIC -DPIC -shared -Wl,-soname,libtls.so.${LIBTLS_SOVERSION} ${OPENSSL_LIBS}
+LDFLAGS = -fPIC -DPIC -shared -Wl,-soname,libtls-standalone.so.${LIBTLS_SOVERSION} ${OPENSSL_LIBS}
 
 SOURCES = \
 	tls_compat.c				\
@@ -35,7 +35,7 @@ SOURCES = \
 
 OBJECTS = ${SOURCES:.c=.o}
 
-all: dumpconfig libtls.so.${LIBTLS_FULLVERSION} libtls.so.${LIBTLS_SOVERSION} libtls.pc
+all: dumpconfig libtls-standalone.so.${LIBTLS_FULLVERSION} libtls-standalone.so.${LIBTLS_SOVERSION} libtls-standalone.pc
 
 dumpconfig:
 	@echo "Building with:"
@@ -46,40 +46,41 @@ dumpconfig:
 .c.o:
 	${CC} ${CFLAGS} -o $@ -c $<
 
-libtls.so.${LIBTLS_SOVERSION}: libtls.so.${LIBTLS_FULLVERSION}
+libtls-standalone.so.${LIBTLS_SOVERSION}: libtls-standalone.so.${LIBTLS_FULLVERSION}
 	ln -s $< $@
 
-libtls.so.${LIBTLS_FULLVERSION}: ${OBJECTS}
+libtls-standalone.so.${LIBTLS_FULLVERSION}: ${OBJECTS}
 	${CC} ${CFLAGS} ${LDFLAGS} -o $@ ${OBJECTS} ${OPENSSL_LIBS}
 
 check: test_program
 	LD_LIBRARY_PATH=$$PWD ./test_program
 
 test_program: test_program.c
-	${CC} -I${LIBRESSL_SRCDIR}/include -o $@ test_program.c ./libtls.so.${LIBTLS_FULLVERSION}
+	${CC} -I${LIBRESSL_SRCDIR}/include -o $@ test_program.c ./libtls-standalone.so.${LIBTLS_FULLVERSION}
 
 clean:
 	rm -f ${OBJECTS}
-	rm -f libtls.so.${LIBTLS_FULLVERSION} libtls.so.${LIBTLS_SOVERSION}
+	rm -f libtls-standalone.so.${LIBTLS_FULLVERSION} libtls-standalone.so.${LIBTLS_SOVERSION}
 	rm -f test_program
 
 install:
-	install -D -m755 libtls.so.${LIBTLS_FULLVERSION} ${DESTDIR}${PREFIX}/lib/libtls.so.${LIBTLS_FULLVERSION}
-	ln -sf libtls.so.${LIBTLS_FULLVERSION} ${DESTDIR}${PREFIX}/lib/libtls.so.${LIBTLS_SOVERSION}
-	ln -sf libtls.so.${LIBTLS_FULLVERSION} ${DESTDIR}${PREFIX}/lib/libtls.so
+	install -D -m755 libtls-standalone.so.${LIBTLS_FULLVERSION} ${DESTDIR}${PREFIX}/lib/libtls-standalone.so.${LIBTLS_FULLVERSION}
+	ln -sf libtls-standalone.so.${LIBTLS_FULLVERSION} ${DESTDIR}${PREFIX}/lib/libtls-standalone.so.${LIBTLS_SOVERSION}
+	ln -sf libtls-standalone.so.${LIBTLS_FULLVERSION} ${DESTDIR}${PREFIX}/lib/libtls-standalone.so
 
-	install -D -m644 ${LIBRESSL_SRCDIR}/include/tls.h ${DESTDIR}${PREFIX}/include/tls.h
+	install -D -m644 ${LIBRESSL_SRCDIR}/include/tls.h ${DESTDIR}${PREFIX}/include/libtls-standalone/tls.h
 
-	install -D -m644 libtls.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/libtls.pc
+	install -D -m644 libtls-standalone.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/libtls-standalone.pc
 
-libtls.pc: ${LIBRESSL_SRCDIR}/libtls.pc.in
+libtls-standalone.pc: ${LIBRESSL_SRCDIR}/libtls.pc.in
 	sed -e s:@prefix@:${PREFIX}:g \
 	    -e s:@exec_prefix@:${EXEC_PREFIX}:g \
 	    -e s:@libdir@:${LIBDIR}:g \
-	    -e s:@includedir@:${INCLUDEDIR}:g \
-	    -e s:@LIBS@:-ltls:g \
+	    -e s:@includedir@:${INCLUDEDIR}/libtls-standalone:g \
+	    -e s:@LIBS@:-ltls-standalone:g \
 	    -e s:@PLATFORM_LDADD@::g \
 	    -e s:@VERSION@:${LIBRESSL_VERSION}:g \
-	    ${LIBRESSL_SRCDIR}/libtls.pc.in > libtls.pc
+	    -e /^Libs:/s:-ltls:-ltls-standalone:g \
+	    $< > libtls-standalone.pc
 
 .DUMMY: check dumpconfig clean install
