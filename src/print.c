@@ -100,10 +100,10 @@ void apk_print_progress(size_t done, size_t total)
 
 int apk_print_indented(struct apk_indent *i, apk_blob_t blob)
 {
-	if (i->x + blob.len + 1 >= apk_get_screen_width())
-		i->x = printf("\n%*s" BLOB_FMT, i->indent, "", BLOB_PRINTF(blob)) - 1;
-	else if (i->x <= i->indent)
+	if (i->x <= i->indent)
 		i->x += printf("%*s" BLOB_FMT, i->indent - i->x, "", BLOB_PRINTF(blob));
+	else if (i->x + blob.len + 1 >= apk_get_screen_width())
+		i->x = printf("\n%*s" BLOB_FMT, i->indent, "", BLOB_PRINTF(blob)) - 1;
 	else
 		i->x += printf(" " BLOB_FMT, BLOB_PRINTF(blob));
 	apk_progress_force = 1;
