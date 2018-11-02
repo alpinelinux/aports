@@ -116,7 +116,6 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 		virtpkg->version = apk_blob_atomize(APK_BLOB_STR("0"));
 		virtpkg->description = strdup("virtual meta package");
 		virtpkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
-		virtpkg = apk_db_pkg_add(db, virtpkg);
 	}
 
 	foreach_array_item(parg, args) {
@@ -160,6 +159,7 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 		}
 	}
 	if (virtpkg) {
+		virtpkg = apk_db_pkg_add(db, virtpkg);
 		apk_deps_add(&world, &virtdep);
 		apk_solver_set_name_flags(virtdep.name,
 					  actx->solver_flags,
