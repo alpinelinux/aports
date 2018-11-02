@@ -562,6 +562,7 @@ int main(int argc, char **argv)
 				*(sopt++) = ':';
 		}
 	}
+	*(sopt++) = 0;
 
 	init_openssl();
 	setup_automatic_flags();
