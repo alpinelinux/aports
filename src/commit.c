@@ -520,6 +520,7 @@ static void analyze_name(struct print_state *ps, struct apk_name *name)
 	struct apk_provider *p0;
 	struct apk_dependency *d0;
 	char tmp[256];
+	unsigned int genid;
 	int refs;
 
 	if (name->providers->num) {
@@ -555,11 +556,15 @@ static void analyze_name(struct print_state *ps, struct apk_name *name)
 		apk_print_indented_fmt(&ps->i, "world[%s]",
 			apk_dep_snprintf(tmp, sizeof(tmp), d0));
 	}
+	genid = apk_foreach_genid();
 	foreach_array_item(pname0, name->rdepends) {
 		name0 = *pname0;
 		foreach_array_item(p0, name0->providers) {
 			if (!p0->pkg->marked)
 				continue;
+			if (p0->pkg->foreach_genid == genid)
+				continue;
+			p0->pkg->foreach_genid = genid;
 			foreach_array_item(d0, p0->pkg->depends) {
 				if (d0->name != name || d0->conflict)
 					continue;
