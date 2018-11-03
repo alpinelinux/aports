@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <sys/statvfs.h>
+#include <sys/sysmacros.h>
 #include <linux/magic.h>
 
 #include "apk_defines.h"
