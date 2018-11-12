@@ -972,6 +972,20 @@ static int cmp_pkgname(const void *p1, const void *p2)
 	return strcmp(d1->name->name, d2->name->name);
 }
 
+static int compare_name_dequeue(const struct apk_name *a, const struct apk_name *b)
+{
+	int r;
+
+	r = (!!a->ss.requirers) - (!!b->ss.requirers);
+	if (r) return -r;
+
+	r = (int)a->priority - (int)b->priority;
+	if (r) return r;
+
+	r = a->ss.max_dep_chain - b->ss.max_dep_chain;
+	return -r;
+}
+
 int apk_solver_solve(struct apk_database *db,
 		     unsigned short solver_flags,
 		     struct apk_dependency_array *world,
@@ -1022,14 +1036,8 @@ restart:
 				name = name0;
 				break;
 			}
-			if (name == NULL)
-				goto prefer;
-			if ((!!name0->ss.requirers) - (!!name->ss.requirers) < 0)
-				continue;
-			if (name0->ss.max_dep_chain - name->ss.max_dep_chain < 0)
-				continue;
-		prefer:
-			name = name0;
+			if (!name || compare_name_dequeue(name0, name) < 0)
+				name = name0;
 		}
 		if (name == NULL)
 			break;

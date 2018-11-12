@@ -1439,9 +1439,11 @@ static int apk_db_name_rdepends(apk_hash_item item, void *pctx)
 	struct apk_provider *p;
 	struct apk_dependency *dep;
 	struct apk_name_array *touched;
+	unsigned num_virtual = 0;
 
 	apk_name_array_init(&touched);
 	foreach_array_item(p, name->providers) {
+		num_virtual += (p->pkg->name != name);
 		foreach_array_item(dep, p->pkg->depends) {
 			rname = dep->name;
 			rname->is_dependency |= !dep->conflict;
@@ -1460,6 +1462,12 @@ static int apk_db_name_rdepends(apk_hash_item item, void *pctx)
 			}
 		}
 	}
+	if (num_virtual == 0)
+		name->priority = 0;
+	else if (num_virtual != name->providers->num)
+		name->priority = 1;
+	else
+		name->priority = 2;
 	foreach_array_item(n0, touched)
 		(*n0)->state_int = 0;
 	apk_name_array_free(&touched);
