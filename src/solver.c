@@ -817,6 +817,17 @@ static void cset_check_removal_by_iif(struct apk_solver_state *ss, struct apk_na
 	}
 }
 
+static void cset_gen_name_remove_orphan(struct apk_solver_state *ss, struct apk_name *name)
+{
+	struct apk_package *pkg = name->ss.chosen.pkg;
+
+	if (name->ss.in_changeset) return;
+	name->ss.in_changeset = 1;
+
+	if ((!pkg || pkg->name != name) && name->ss.installed_pkg)
+		cset_gen_name_remove(ss, name->ss.installed_pkg);
+}
+
 static void cset_gen_name_change(struct apk_solver_state *ss, struct apk_name *name)
 {
 	struct apk_name **pname;
@@ -825,24 +836,15 @@ static void cset_gen_name_change(struct apk_solver_state *ss, struct apk_name *n
 
 	if (name->ss.in_changeset) return;
 
+	cset_gen_name_remove_orphan(ss, name);
+
 	pkg = name->ss.chosen.pkg;
-	if (pkg == NULL || pkg->name != name) {
-		/* Original package dependency name was orphaned, emit a removal.
-		 * See cset_gen_name_remove() for more details. */
-		opkg = name->ss.installed_pkg;
-		if (opkg) cset_gen_name_remove(ss, opkg);
-		name->ss.in_changeset = 1;
-
-		/* If a replacement is not provided, then we're done here. */
-		if (pkg == NULL)
-			return;
-	}
-	if (pkg->ss.in_changeset) return;
-
+	if (!pkg || pkg->ss.in_changeset) return;
 	pkg->ss.in_changeset = 1;
-	pkg->name->ss.in_changeset = 1;
+
+	cset_gen_name_remove_orphan(ss, pkg->name);
 	foreach_array_item(d, pkg->provides)
-		d->name->ss.in_changeset = 1;
+		cset_gen_name_remove_orphan(ss, d->name);
 
 	opkg = pkg->name->ss.installed_pkg;
 	if (opkg) {
