@@ -566,10 +566,6 @@ static int compare_providers(struct apk_solver_state *ss,
 			r = (int)pkgA->ss.pkg_available - (int)pkgB->ss.pkg_available;
 			if (r)
 				return r;
-		} else if (solver_flags & APK_SOLVERF_REINSTALL) {
-			r = (int)pkgA->ss.pkg_selectable - (int)pkgB->ss.pkg_selectable;
-			if (r)
-				return r;
 		}
 
 		/* Prefer preferred pinning */
@@ -615,6 +611,11 @@ static int compare_providers(struct apk_solver_state *ss,
 
 	/* Prefer highest declared provider priority. */
 	r = pkgA->provider_priority - pkgB->provider_priority;
+	if (r)
+		return r;
+
+	/* Prefer without errors (mostly if --latest used, and different provider) */
+	r = (int)pkgA->ss.pkg_selectable - (int)pkgB->ss.pkg_selectable;
 	if (r)
 		return r;
 
