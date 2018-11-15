@@ -1,0 +1,260 @@
+From 79c2c741303ed188214b9299a51c837635f7e9a8 Mon Sep 17 00:00:00 2001
+From: Pauli <paul.dale@oracle.com>
+Date: Mon, 24 Sep 2018 11:21:18 +1000
+Subject: [PATCH] Use secure_getenv(3) when available.
+
+Change all calls to getenv() inside libcrypto to use a new wrapper function
+that use secure_getenv() if available and an issetugid then getenv if not.
+
+CPU processor override flags are unchanged.
+
+Extra checks for OPENSSL_issetugid() have been removed in favour of the
+safe getenv.
+
+Reviewed-by: Bernd Edlinger <bernd.edlinger@hotmail.de>
+(Merged from https://github.com/openssl/openssl/pull/7047)
+
+(cherry picked from commit 5c39a55d04ea6e6f734b627a050b9e702788d50d)
+---
+ crypto/build.info           |  2 +-
+ crypto/conf/conf_api.c      |  5 +++--
+ crypto/conf/conf_mod.c      |  7 ++-----
+ crypto/ct/ct_log.c          |  2 +-
+ crypto/engine/eng_list.c    |  3 +--
+ crypto/getenv.c             | 31 +++++++++++++++++++++++++++++++
+ crypto/pkcs12/p12_mutl.c    | 18 +++++++++---------
+ crypto/rand/randfile.c      |  6 ++----
+ crypto/x509/by_dir.c        |  2 +-
+ crypto/x509/by_file.c       |  2 +-
+ include/internal/cryptlib.h |  2 ++
+ 11 files changed, 54 insertions(+), 26 deletions(-)
+ create mode 100644 crypto/getenv.c
+
+diff --git a/crypto/build.info b/crypto/build.info
+index b515b7318e..2c619c62e8 100644
+--- a/crypto/build.info
++++ b/crypto/build.info
+@@ -2,7 +2,7 @@ LIBS=../libcrypto
+ SOURCE[../libcrypto]=\
+         cryptlib.c mem.c mem_dbg.c cversion.c ex_data.c cpt_err.c \
+         ebcdic.c uid.c o_time.c o_str.c o_dir.c o_fopen.c ctype.c \
+-        threads_pthread.c threads_win.c threads_none.c \
++        threads_pthread.c threads_win.c threads_none.c getenv.c \
+         o_init.c o_fips.c mem_sec.c init.c {- $target{cpuid_asm_src} -} \
+         {- $target{uplink_aux_src} -}
+ EXTRA=  ../ms/uplink-x86.pl ../ms/uplink.c ../ms/applink.c \
+diff --git a/crypto/conf/conf_api.c b/crypto/conf/conf_api.c
+index 72fe2da1ad..5e57d749ce 100644
+--- a/crypto/conf/conf_api.c
++++ b/crypto/conf/conf_api.c
+@@ -10,6 +10,7 @@
+ /* Part of the code in here was originally in conf.c, which is now removed */
+ 
+ #include "e_os.h"
++#include "internal/cryptlib.h"
+ #include <stdlib.h>
+ #include <string.h>
+ #include <openssl/conf.h>
+@@ -82,7 +83,7 @@ char *_CONF_get_string(const CONF *conf, const char *section,
+             if (v != NULL)
+                 return v->value;
+             if (strcmp(section, "ENV") == 0) {
+-                p = getenv(name);
++                p = ossl_safe_getenv(name);
+                 if (p != NULL)
+                     return p;
+             }
+@@ -95,7 +96,7 @@ char *_CONF_get_string(const CONF *conf, const char *section,
+         else
+             return NULL;
+     } else
+-        return getenv(name);
++        return ossl_safe_getenv(name);
+ }
+ 
+ static unsigned long conf_value_hash(const CONF_VALUE *v)
+diff --git a/crypto/conf/conf_mod.c b/crypto/conf/conf_mod.c
+index df53609cc4..51f262e774 100644
+--- a/crypto/conf/conf_mod.c
++++ b/crypto/conf/conf_mod.c
+@@ -480,11 +480,8 @@ char *CONF_get1_default_config_file(void)
+     char *file, *sep = "";
+     int len;
+ 
+-    if (!OPENSSL_issetugid()) {
+-        file = getenv("OPENSSL_CONF");
+-        if (file)
+-            return OPENSSL_strdup(file);
+-    }
++    if ((file = ossl_safe_getenv("OPENSSL_CONF")) != NULL)
++        return OPENSSL_strdup(file);
+ 
+     len = strlen(X509_get_default_cert_area());
+ #ifndef OPENSSL_SYS_VMS
+diff --git a/crypto/ct/ct_log.c b/crypto/ct/ct_log.c
+index be6681dca7..c1bca3e141 100644
+--- a/crypto/ct/ct_log.c
++++ b/crypto/ct/ct_log.c
+@@ -137,7 +137,7 @@ static int ctlog_new_from_conf(CTLOG **ct_log, const CONF *conf, const char *sec
+ 
+ int CTLOG_STORE_load_default_file(CTLOG_STORE *store)
+ {
+-    const char *fpath = getenv(CTLOG_FILE_EVP);
++    const char *fpath = ossl_safe_getenv(CTLOG_FILE_EVP);
+ 
+     if (fpath == NULL)
+       fpath = CTLOG_FILE;
+diff --git a/crypto/engine/eng_list.c b/crypto/engine/eng_list.c
+index 4bc7ea173c..45c339c541 100644
+--- a/crypto/engine/eng_list.c
++++ b/crypto/engine/eng_list.c
+@@ -317,8 +317,7 @@ ENGINE *ENGINE_by_id(const char *id)
+      * Prevent infinite recursion if we're looking for the dynamic engine.
+      */
+     if (strcmp(id, "dynamic")) {
+-        if (OPENSSL_issetugid()
+-                || (load_dir = getenv("OPENSSL_ENGINES")) == NULL)
++        if ((load_dir = ossl_safe_getenv("OPENSSL_ENGINES")) == NULL)
+             load_dir = ENGINESDIR;
+         iterator = ENGINE_by_id("dynamic");
+         if (!iterator || !ENGINE_ctrl_cmd_string(iterator, "ID", id, 0) ||
+diff --git a/crypto/getenv.c b/crypto/getenv.c
+new file mode 100644
+index 0000000000..7e98b645b0
+--- /dev/null
++++ b/crypto/getenv.c
+@@ -0,0 +1,31 @@
++/*
++ * Copyright 2018 The OpenSSL Project Authors. All Rights Reserved.
++ *
++ * Licensed under the OpenSSL license (the "License").  You may not use
++ * this file except in compliance with the License.  You can obtain a copy
++ * in the file LICENSE in the source distribution or at
++ * https://www.openssl.org/source/license.html
++ */
++
++#ifndef _GNU_SOURCE
++# define _GNU_SOURCE
++#endif
++
++#include <stdlib.h>
++#include "internal/cryptlib.h"
++
++char *ossl_safe_getenv(const char *name)
++{
++#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
++# if __GLIBC_PREREQ(2, 17)
++#  define SECURE_GETENV
++    return secure_getenv(name);
++# endif
++#endif
++
++#ifndef SECURE_GETENV
++    if (OPENSSL_issetugid())
++        return NULL;
++    return getenv(name);
++#endif
++}
+diff --git a/crypto/pkcs12/p12_mutl.c b/crypto/pkcs12/p12_mutl.c
+index 88d1d66324..0cbbed364a 100644
+--- a/crypto/pkcs12/p12_mutl.c
++++ b/crypto/pkcs12/p12_mutl.c
+@@ -7,13 +7,13 @@
+  * https://www.openssl.org/source/license.html
+  */
+ 
+-# include <stdio.h>
+-# include "internal/cryptlib.h"
+-# include <openssl/crypto.h>
+-# include <openssl/hmac.h>
+-# include <openssl/rand.h>
+-# include <openssl/pkcs12.h>
+-# include "p12_lcl.h"
++#include <stdio.h>
++#include "internal/cryptlib.h"
++#include <openssl/crypto.h>
++#include <openssl/hmac.h>
++#include <openssl/rand.h>
++#include <openssl/pkcs12.h>
++#include "p12_lcl.h"
+ 
+ int PKCS12_mac_present(const PKCS12 *p12)
+ {
+@@ -44,7 +44,7 @@ void PKCS12_get0_mac(const ASN1_OCTET_STRING **pmac,
+     }
+ }
+ 
+-# define TK26_MAC_KEY_LEN 32
++#define TK26_MAC_KEY_LEN 32
+ 
+ static int pkcs12_gen_gost_mac_key(const char *pass, int passlen,
+                                    const unsigned char *salt, int saltlen,
+@@ -112,7 +112,7 @@ static int pkcs12_gen_mac(PKCS12 *p12, const char *pass, int passlen,
+     if ((md_type_nid == NID_id_GostR3411_94
+          || md_type_nid == NID_id_GostR3411_2012_256
+          || md_type_nid == NID_id_GostR3411_2012_512)
+-        && !getenv("LEGACY_GOST_PKCS12")) {
++        && ossl_safe_getenv("LEGACY_GOST_PKCS12") == NULL) {
+         md_size = TK26_MAC_KEY_LEN;
+         if (!pkcs12_gen_gost_mac_key(pass, passlen, salt, saltlen, iter,
+                                      md_size, key, md_type)) {
+diff --git a/crypto/rand/randfile.c b/crypto/rand/randfile.c
+index c652ddcf1e..89720eb5cf 100644
+--- a/crypto/rand/randfile.c
++++ b/crypto/rand/randfile.c
+@@ -262,11 +262,9 @@ const char *RAND_file_name(char *buf, size_t size)
+         }
+     }
+ #else
+-    if (OPENSSL_issetugid() != 0) {
++    if ((s = ossl_safe_getenv("RANDFILE")) == NULL || *s == '\0') {
+         use_randfile = 0;
+-    } else if ((s = getenv("RANDFILE")) == NULL || *s == '\0') {
+-        use_randfile = 0;
+-        s = getenv("HOME");
++        s = ossl_safe_getenv("HOME");
+     }
+ #endif
+ 
+diff --git a/crypto/x509/by_dir.c b/crypto/x509/by_dir.c
+index 11ac52ce3c..b3760dbadf 100644
+--- a/crypto/x509/by_dir.c
++++ b/crypto/x509/by_dir.c
+@@ -73,7 +73,7 @@ static int dir_ctrl(X509_LOOKUP *ctx, int cmd, const char *argp, long argl,
+     switch (cmd) {
+     case X509_L_ADD_DIR:
+         if (argl == X509_FILETYPE_DEFAULT) {
+-            const char *dir = getenv(X509_get_default_cert_dir_env());
++            const char *dir = ossl_safe_getenv(X509_get_default_cert_dir_env());
+ 
+             if (dir)
+                 ret = add_cert_dir(ld, dir, X509_FILETYPE_PEM);
+diff --git a/crypto/x509/by_file.c b/crypto/x509/by_file.c
+index 78d7fbdf44..244512c935 100644
+--- a/crypto/x509/by_file.c
++++ b/crypto/x509/by_file.c
+@@ -46,7 +46,7 @@ static int by_file_ctrl(X509_LOOKUP *ctx, int cmd, const char *argp,
+     switch (cmd) {
+     case X509_L_FILE_LOAD:
+         if (argl == X509_FILETYPE_DEFAULT) {
+-            file = getenv(X509_get_default_cert_file_env());
++            file = ossl_safe_getenv(X509_get_default_cert_file_env());
+             if (file)
+                 ok = (X509_load_cert_crl_file(ctx, file,
+                                               X509_FILETYPE_PEM) != 0);
+diff --git a/include/internal/cryptlib.h b/include/internal/cryptlib.h
+index a608735187..329ef62014 100644
+--- a/include/internal/cryptlib.h
++++ b/include/internal/cryptlib.h
+@@ -81,6 +81,8 @@ void OPENSSL_showfatal(const char *fmta, ...);
+ void crypto_cleanup_all_ex_data_int(void);
+ int openssl_init_fork_handlers(void);
+ 
++char *ossl_safe_getenv(const char *name);
++
+ extern CRYPTO_RWLOCK *memdbg_lock;
+ int openssl_strerror_r(int errnum, char *buf, size_t buflen);
+ # if !defined(OPENSSL_NO_STDIO)
+-- 
+2.19.1
+

@@ -38,7 +38,7 @@ NAME="Alpine Linux"
 ID=alpine
 VERSION_ID=$pkgver
 PRETTY_NAME="Alpine Linux v$_ver"
-HOME_URL="http://alpinelinux.org"
-BUG_REPORT_URL="http://bugs.alpinelinux.org"
+HOME_URL="https://alpinelinux.org/"
+BUG_REPORT_URL="https://bugs.alpinelinux.org/"
 EOF
 }
