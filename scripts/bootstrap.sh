@@ -45,7 +45,7 @@ Steps for introducing new architecture include:
 - adding the compiler triplet and arch type to abuild
 - adding the arch type detection to apk-tools
 - adjusting build rules for packages that are arch aware:
-  gcc, libressl, linux-headers
+  gcc, openssl, linux-headers
 - create new kernel config for linux-vanilla
 
 After these steps the initial cross-build can be completed
@@ -96,7 +96,7 @@ apk info --quiet --installed --root "$CBUILDROOT" libgcc libstdc++ musl-dev || \
 
 # ordered cross-build
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
-	   libressl busybox busybox-initscripts binutils make \
+	   openssl libbsd libtls-standalone busybox busybox-initscripts binutils make \
 	   apk-tools file \
 	   gmp mpfr3 mpc1 isl cloog gcc \
 	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base build-base \
