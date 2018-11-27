@@ -47,6 +47,7 @@ OBJS-abuild-tar  = abuild-tar.o
 CFLAGS-abuild-tar.o = $(SSL_CFLAGS)
 LDFLAGS-abuild-tar = $(SSL_LDFLAGS)
 LIBS-abuild-tar = $(SSL_LIBS)
+LIBS-abuild-tar.static = $(LIBS-abuild-tar)
 
 OBJS-abuild-gzsplit = abuild-gzsplit.o
 LDFLAGS-abuild-gzsplit = $(ZLIB_LIBS)
@@ -86,7 +87,7 @@ abuild-gzsplit: abuild-gzsplit.o
 	$(LINK)
 
 abuild-tar.static: abuild-tar.o
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS-$@) -o $@ -static $(LIBS-$@) $^
+	$(CC) -static $(CPPFLAGS) $(CFLAGS) $(CFLAGS-$@) $^ -o $@ $(LIBS-$@)
 
 help:
 	@echo "$(P) makefile"
