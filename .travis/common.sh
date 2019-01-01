@@ -4,6 +4,29 @@ readonly ALPINE_ROOT='/mnt/alpine'
 readonly CLONE_DIR="${CLONE_DIR:-$(pwd)}"
 readonly MIRROR_URI='http://dl-cdn.alpinelinux.org/alpine/edge'
 
+declare_to_export() {
+	local _flag="${1:-x}"
+
+	awk '"declare" == $1 && "-'"$_flag"'" == $2 {$2="export"; $1=""; print; next;} "declare" != $1 {print;}'
+}
+
+setup_alpine_run_env() {
+	local user="${1:-root}"
+
+	local _sudo=
+	[ "$(id -u)" -eq 0 ] || _sudo='sudo'
+
+	$_sudo install -c -o "$user" -m 0644 /dev/null "${ALPINE_ROOT}/.alpine_run_env"
+
+	declare -p ALPINE_ROOT CLONE_DIR MIRROR_URI | \
+		declare_to_export r > "${ALPINE_ROOT}/.alpine_run_env"
+
+	env | grep '^TRAVIS[=_]' | cut -d = -f 1 | while IFS= read -r VAR; do
+		[ -n "$VAR" ] || continue
+		declare -p "$VAR" | declare_to_export x
+	done >> "${ALPINE_ROOT}/.alpine_run_env"
+}
+
 # Runs commands inside the Alpine chroot.
 alpine_run() {
 	local user="${1:-root}"
