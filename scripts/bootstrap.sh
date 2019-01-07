@@ -96,7 +96,7 @@ apk info --quiet --installed --root "$CBUILDROOT" libgcc libstdc++ musl-dev || \
 
 # ordered cross-build
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
-	   openssl libbsd libtls-standalone busybox busybox-initscripts binutils make \
+	   openssl ca-certificates libbsd libtls-standalone busybox busybox-initscripts binutils make \
 	   apk-tools file \
 	   gmp mpfr3 mpc1 isl cloog gcc \
 	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base build-base \
