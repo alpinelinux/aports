@@ -229,8 +229,10 @@ static void mark_name_flags(struct apk_database *db, const char *match, struct a
 	if (!IS_ERR_OR_NULL(name)) {
 		name->auto_select_virtual = 1;
 		apk_deps_add(&ctx->world, &dep);
-	} else
+	} else {
 		ctx->errors++;
+		mark_error(ctx, match, name);
+	}
 }
 
 static void mark_names_recursive(struct apk_database *db, struct apk_string_array *args, void *pctx)
