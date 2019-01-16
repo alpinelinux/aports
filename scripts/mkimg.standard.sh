@@ -45,7 +45,7 @@ profile_extended() {
 		ncurses-terminfo net-snmp net-snmp-tools nrpe nsd
 		opennhrp openvpn openvswitch pingu ppp quagga
 		quagga-nhrp rpcbind sntpc socat ssmtp strongswan
-		sysklogd tcpdump tcpproxy tinyproxy unbound
+		sysklogd tcpdump tinyproxy unbound
 		wireless-tools wpa_supplicant zonenotify
 
 		btrfs-progs cksfv dosfstools cryptsetup
