@@ -717,3 +717,16 @@ apk_blob_t *apk_blob_atomize_dup(apk_blob_t blob)
 
 	return &atom->blob;
 }
+
+#if defined(__GLIBC__) && !defined(__UCLIBC__)
+size_t strlcpy(char *dst, const char *src, size_t size)
+{
+	size_t ret = strlen(src), len;
+	if (!size) return ret;
+	len = ret;
+	if (len >= size) len = size - 1;
+	memcpy(dest, src, len);
+	dst[len] = 0;
+	return ret;
+}
+#endif

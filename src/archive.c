@@ -387,10 +387,10 @@ int apk_tar_write_entry(struct apk_ostream *os, const struct apk_file_info *ae,
 			return -1;
 
 		if (ae->name != NULL)
-			strncpy(buf.name, ae->name, sizeof(buf.name));
+			strlcpy(buf.name, ae->name, sizeof buf.name);
 
-		strncpy(buf.uname, ae->uname ?: "root", sizeof(buf.uname));
-		strncpy(buf.gname, ae->gname ?: "root", sizeof(buf.gname));
+		strlcpy(buf.uname, ae->uname ?: "root", sizeof buf.uname);
+		strlcpy(buf.gname, ae->gname ?: "root", sizeof buf.gname);
 
 		PUT_OCTAL(buf.size, ae->size);
 		PUT_OCTAL(buf.uid, ae->uid);

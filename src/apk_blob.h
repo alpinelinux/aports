@@ -133,4 +133,8 @@ void apk_atom_init(void);
 apk_blob_t *apk_blob_atomize(apk_blob_t blob);
 apk_blob_t *apk_blob_atomize_dup(apk_blob_t blob);
 
+#if defined(__GLIBC__) && !defined(__UCLIBC__)
+extern size_t strlcpy(char *dest, const char *src, size_t size);
+#endif
+
 #endif

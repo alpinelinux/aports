@@ -496,10 +496,10 @@ http_next_header(conn_t *conn, const char **p)
 static int
 http_parse_mtime(const char *p, time_t *mtime)
 {
-	char locale[64], *r;
+	char *locale, *r;
 	struct tm tm;
 
-	strncpy(locale, setlocale(LC_TIME, NULL), sizeof(locale));
+	locale = strdupa(setlocale(LC_TIME, NULL));
 	setlocale(LC_TIME, "C");
 	r = strptime(p, "%a, %d %b %Y %H:%M:%S GMT", &tm);
 	/* XXX should add support for date-2 and date-3 */

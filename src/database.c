@@ -2787,7 +2787,10 @@ static int apk_db_unpack_pkg(struct apk_database *db,
 		if (!(pkg->repos & db->local_repos))
 			need_copy = TRUE;
 	} else {
-		strncpy(file, pkg->filename, sizeof(file));
+		if (strlcpy(file, pkg->filename, sizeof file) >= sizeof file) {
+			r = -ENAMETOOLONG;
+			goto err_msg;
+		}
 		need_copy = TRUE;
 	}
 	if (!apk_db_cache_active(db))
