@@ -1,0 +1,200 @@
+# Contributor: Valery Kartel <valery.kartel@gmail.com>
+# Contributor: Łukasz Jendrysik <scadu@yandex.com>
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+pkgname=postfix
+pkgver=3.3.2
+pkgrel=1
+pkgdesc="Secure and fast drop-in replacement for Sendmail (MTA)"
+url="http://www.postfix.org/"
+arch="all"
+license="IPL-1.0 EPL-2.0"
+depends=
+makedepends="
+	coreutils
+	cyrus-sasl-dev
+	db-dev
+	linux-headers
+	lmdb-dev
+	m4
+	mariadb-connector-c-dev
+	openldap-dev
+	openssl-dev
+	pcre-dev
+	perl
+	postgresql-dev
+	sqlite-dev
+	"
+
+install="$pkgname.pre-install"
+subpackages="
+	$pkgname-doc
+	$pkgname-openrc
+	$pkgname-ldap:_mv_dict
+	$pkgname-lmdb:_mv_dict
+	$pkgname-mysql:_mv_dict
+	$pkgname-pcre:_mv_dict
+	$pkgname-pgsql:_mv_dict
+	$pkgname-sqlite:_mv_dict
+	$pkgname-stone
+	"
+
+options="!check suid"  # No test suite.
+pkgusers="postfix"
+pkggroups="postfix postdrop"
+source="https://de.postfix.org/ftpmirror/official/$pkgname-$pkgver.tar.gz
+	$pkgname.initd
+	postfix-install.patch
+	"
+
+_shared_libs() {
+	file --mime-type "$@" | \
+		awk -F: '$2 ~ /sharedlib/ {print $1}'
+}
+
+builddir="$srcdir"/$pkgname-$pkgver
+prepare() {
+	cd $builddir
+	default_prepare
+
+	sed -i -e "s|#define HAS_NIS|//#define HAS_NIS|g" \
+		-e "/^#define ALIAS_DB_MAP/s|:/etc/aliases|:/etc/postfix/aliases|" \
+		src/util/sys_defs.h
+	sed -i -e "s:/usr/local/:/usr/:g" conf/master.cf
+}
+
+build() {
+	cd $builddir
+	# needed for dynamic maps.
+	local ccargs="-DHAS_SHL_LOAD"
+	local auxlibs="$LDFLAGS"
+
+	# pcre
+	ccargs="$ccargs -DHAS_PCRE $(pkg-config --cflags libpcre)"
+
+	# ssl
+	ccargs="$ccargs -DUSE_TLS"
+	auxlibs="$auxlibs -lssl -lcrypto"
+
+	# dovecot-sasl
+	ccargs="$ccargs -DUSE_SASL_AUTH -DDEF_SASL_SERVER=\\\"dovecot\\\""
+
+	# cyrus sasl
+	ccargs="$ccargs -DUSE_SASL_AUTH -DUSE_CYRUS_SASL -I/usr/include/sasl"
+	auxlibs="$auxlibs -lsasl2"
+
+	# postgresql
+	ccargs="$ccargs -DHAS_PGSQL $(pkg-config --cflags libpq)"
+
+	# mysql
+	ccargs="$ccargs -DHAS_MYSQL $(mysql_config --include)"
+
+	# ldap
+	ccargs="$ccargs -DHAS_LDAP -DUSE_LDAP_SASL"
+
+	# sqlite
+	ccargs="$ccargs -DHAS_SQLITE $(pkg-config --cflags sqlite3)"
+
+	# lmdb
+	ccargs="$ccargs -DHAS_LMDB $(pkg-config --cflags lmdb)"
+
+	#
+	#	AUXLIBS_CDB="$cdb_libs" \
+
+	# compile
+	make DEBUG="" \
+		OPT="$CFLAGS" \
+		CCARGS="$ccargs" \
+		AUXLIBS="$auxlibs" \
+		AUXLIBS_LDAP="-lldap -llber" \
+		AUXLIBS_MYSQL="$(mysql_config --libs)" \
+		AUXLIBS_PCRE="$(pkg-config --libs libpcre)" \
+		AUXLIBS_PGSQL="$(pkg-config --libs libpq)" \
+		AUXLIBS_SQLITE="$(pkg-config --libs sqlite3)" \
+		AUXLIBS_LMDB="$(pkg-config --libs lmdb)" \
+		config_directory=/etc/postfix \
+		meta_directory=/etc/postfix \
+		daemon_directory=/usr/libexec/postfix \
+		shlib_directory=/usr/lib/postfix \
+		dynamicmaps=yes \
+		shared=yes \
+		makefiles
+
+	make OPT="$CFLAGS"
+}
+
+_mvline() {
+	local regex="$1"
+	local outfile="$3.d/$2"
+	local infile="$3"
+	sed -i -E -e "\|$regex|{
+w $outfile
+d
+}" $infile
+}
+
+package() {
+	cd "$builddir"
+
+	make non-interactive-package \
+		install_root="$pkgdir" \
+		readme_directory=/usr/share/doc/$pkgname/readme \
+		manpage_directory=/usr/share/man
+
+	for i in postdrop postqueue; do
+		chgrp postdrop "$pkgdir"/usr/sbin/$i
+		chmod g+s "$pkgdir"/usr/sbin/$i
+	done
+
+	mkdir -p "$pkgdir"/usr/share/doc/postfix/defaults/ \
+		"$pkgdir"/usr/share/licenses/${pkgname}/
+	mv "$pkgdir"/etc/postfix/*.default \
+		"$pkgdir"/usr/share/doc/postfix/defaults/
+	mv "$pkgdir"/etc/postfix/*LICENSE* \
+		"$pkgdir"/usr/share/licenses/${pkgname}/
+
+	install -Dm755 "$srcdir"/$pkgname.initd "$pkgdir"/etc/init.d/$pkgname
+	chown postfix "$pkgdir"/var/spool/postfix/* "$pkgdir"/var/lib/postfix
+	chown root:postfix "$pkgdir"/var/spool/postfix/pid
+	chgrp postdrop "$pkgdir"/var/spool/postfix/maildrop \
+		"$pkgdir"/var/spool/postfix/public
+
+	cd "$pkgdir"/etc/postfix/
+	for map in ldap mysql pcre pgsql sqlite lmdb; do
+		msg "split $map"
+		_mvline "^\s*$map" "$map" dynamicmaps.cf
+	done
+	rm makedefs.out
+
+	# fix /etc/postfix/postfix-files so that "postfix set-permissions" can run
+	sed -i \
+		-e '/shlib_directory\/postfix-/d' \
+		-e '/meta_directory\/makedefs.out/d' \
+		-e '/manpage_directory/d' \
+		-e '/config_directory\/LICENSE/d' \
+		-e '/config_directory\/TLS_LICENSE/d' \
+		-e '/config_directory\/[^/]\+\.cf\.default/d' \
+		"$pkgdir"/etc/postfix/postfix-files
+}
+
+_mv_dict() {
+	local m=${subpkgname##*-}
+	pkgdesc="$m map support for postfix"
+	depends=
+	mkdir -p "$subpkgdir"/usr/lib/postfix \
+		"$subpkgdir"/etc/postfix/dynamicmaps.cf.d
+	mv "$pkgdir"/usr/lib/postfix/postfix-${m}.so \
+		"$subpkgdir"/usr/lib/postfix/
+	mv "$pkgdir"/etc/postfix/dynamicmaps.cf.d/${m} \
+		"$subpkgdir"/etc/postfix/dynamicmaps.cf.d/
+}
+
+stone() {
+	cd $builddir
+	pkgdesc="Postfix simulation and testing tools"
+	install -Dm755 src/fsstone/fsstone "$subpkgdir"/usr/bin/fsstone
+	find src/smtpstone -mindepth 1 -perm 0755 -exec cp {} "$subpkgdir"/usr/bin \;
+}
+
+sha512sums="df67eb978751900d357597def16f744dae990f5cc4e48af8dca57f84b0140e05416712727c1760b8f557ed3564cd593620756561b0a6f31db4b54d928e15293f  postfix-3.3.2.tar.gz
+2752e69c4e1857bdcf29444ffb458bca818bc60b9c77c20823c5f5b87c36cb5e0f3217a625a7fe5788d5bfcef7570a1f2149e1233fcd23ccf7ee14190aff47a2  postfix.initd
+25cd34f23ca909d4e33aaf3239d1e397260abc7796d9a4456dee4f005682fd3a58aab8106126e5218c95bdddae415a3ef7e2223cd3b0d7b1e2bd76158bb7eaf8  postfix-install.patch"

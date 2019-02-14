@@ -1,0 +1,225 @@
+From e0b42b0120b941b5675e4071445424dc8a1230e1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Wed, 15 Aug 2018 14:46:52 +0200
+Subject: [PATCH] Move SSL_ERROR_WANT_READ/SSL_ERROR_WANT_WRITE retry from
+ read()/write() up
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Original OpenSSL 1.1.1 fix broke IO-Socket-SSL-2.058's t/core.t test
+because it tests non-blocking socket operations and expects to see
+SSL_ERROR_WANT_READ/SSL_ERROR_WANT_WRITE errors and to handle them
+byt itself.
+
+This patch purifies Net::SSLeay::{read,write}() to behave exactly as
+underlying OpenSSL functions. The retry is moved to
+Net::SSLeay::ssl_read_all. All relevant Net::SSLeay::{read,write}() calls in
+tests are changed into Net::SSLea::ssl_{read,write}_all().
+
+All applications should implement the retry themsleves or use
+ssl_*_all() instead.
+
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+---
+ SSLeay.xs            | 28 +++++++---------------------
+ lib/Net/SSLeay.pm    | 22 +++++++++++++++-------
+ t/local/07_sslecho.t | 12 ++++++------
+ t/local/36_verify.t  |  9 +++++----
+ 4 files changed, 33 insertions(+), 38 deletions(-)
+
+diff --git a/SSLeay.xs b/SSLeay.xs
+index 5aed4d7..7cb6eab 100644
+--- a/SSLeay.xs
++++ b/SSLeay.xs
+@@ -1997,19 +1997,13 @@ SSL_read(s,max=32768)
+     PREINIT:
+ 	char *buf;
+ 	int got;
++	int succeeded = 1;
+     PPCODE:
+ 	New(0, buf, max, char);
+ 
+-	do {
+-		int err;
+-
+-		got = SSL_read(s, buf, max);
+-		if (got > 0)
+-			break;
+-		err = SSL_get_error(s, got);
+-		if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
+-			break;
+-	} while (1);
++	got = SSL_read(s, buf, max);
++	if (got <= 0 && SSL_ERROR_ZERO_RETURN != SSL_get_error(s, got))
++	       succeeded = 0;
+ 
+ 	/* If in list context, return 2-item list:
+ 	 *   first return value:  data gotten, or undef on error (got<0)
+@@ -2017,13 +2011,13 @@ SSL_read(s,max=32768)
+ 	 */
+ 	if (GIMME_V==G_ARRAY) {
+ 	    EXTEND(SP, 2);
+-	    PUSHs(sv_2mortal(got>=0 ? newSVpvn(buf, got) : newSV(0)));
++	    PUSHs(sv_2mortal(succeeded ? newSVpvn(buf, got) : newSV(0)));
+ 	    PUSHs(sv_2mortal(newSViv(got)));
+ 
+ 	/* If in scalar or void context, return data gotten, or undef on error. */
+ 	} else {
+ 	    EXTEND(SP, 1);
+-	    PUSHs(sv_2mortal(got>=0 ? newSVpvn(buf, got) : newSV(0)));
++	    PUSHs(sv_2mortal(succeeded ? newSVpvn(buf, got) : newSV(0)));
+ 	}
+ 
+ 	Safefree(buf);
+@@ -2066,15 +2060,7 @@ SSL_write(s,buf)
+      INPUT:
+      char *  buf = SvPV( ST(1), len);
+      CODE:
+-     do {
+-	     ret = SSL_write (s, buf, (int)len);
+-	     if (ret > 0)
+-		     break;
+-	     err = SSL_get_error(s, ret);
+-	     if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
+-		     break;
+-     } while (1);
+-     RETVAL = ret;
++     RETVAL = SSL_write (s, buf, (int)len);
+      OUTPUT:
+      RETVAL
+ 
+diff --git a/lib/Net/SSLeay.pm b/lib/Net/SSLeay.pm
+index 3adf12c..afc6c8f 100644
+--- a/lib/Net/SSLeay.pm
++++ b/lib/Net/SSLeay.pm
+@@ -579,14 +579,22 @@ sub debug_read {
+ sub ssl_read_all {
+     my ($ssl,$how_much) = @_;
+     $how_much = 2000000000 unless $how_much;
+-    my ($got, $errs);
++    my ($got, $rv, $errs);
+     my $reply = '';
+ 
+     while ($how_much > 0) {
+-        $got = Net::SSLeay::read($ssl,
++        ($got, $rv) = Net::SSLeay::read($ssl,
+                 ($how_much > 32768) ? 32768 : $how_much
+         );
+-        last if $errs = print_errs('SSL_read');
++        if (! defined $got) {
++            my $err = Net::SSLeay::get_error($ssl, $rv);
++            if ($err != Net::SSLeay::ERROR_WANT_READ() and
++                    $err != Net::SSLeay::ERROR_WANT_WRITE()) {
++                $errs = print_errs('SSL_read');
++                last;
++            }
++            next;
++        }
+         $how_much -= blength($got);
+         debug_read(\$reply, \$got) if $trace>1;
+         last if $got eq '';  # EOF
+@@ -839,14 +847,14 @@ sub ssl_read_until ($;$$) {
+ 	    $found = index($match, $delim);
+ 
+ 	    if ($found > -1) {
+-		#$got = Net::SSLeay::read($ssl, $found+$len_delim);
++		#$got = Net::SSLeay::ssl_read_all($ssl, $found+$len_delim);
+ 		#read up to the end of the delimiter
+-		$got = Net::SSLeay::read($ssl,
++		$got = Net::SSLeay::ssl_read_all($ssl,
+ 					 $found + $len_delim
+ 					 - ((blength($match)) - (blength($got))));
+ 		$done = 1;
+ 	    } else {
+-		$got = Net::SSLeay::read($ssl, $peek_length);
++		$got = Net::SSLeay::ssl_read_all($ssl, $peek_length);
+ 		$done = 1 if ($peek_length == $max_length - blength($reply));
+ 	    }
+ 
+@@ -857,7 +865,7 @@ sub ssl_read_until ($;$$) {
+ 	}
+     } else {
+ 	while (!defined $max_length || length $reply < $max_length) {
+-	    $got = Net::SSLeay::read($ssl,1);  # one by one
++	    $got = Net::SSLeay::ssl_read_all($ssl,1);  # one by one
+ 	    last if print_errs('SSL_read');
+ 	    debug_read(\$reply, \$got) if $trace>1;
+ 	    last if $got eq '';
+diff --git a/t/local/07_sslecho.t b/t/local/07_sslecho.t
+index 74e317a..7f19027 100644
+--- a/t/local/07_sslecho.t
++++ b/t/local/07_sslecho.t
+@@ -134,10 +134,10 @@ my @results;
+ 
+     push @results, [ Net::SSLeay::get_cipher($ssl), 'get_cipher' ];
+ 
+-    push @results, [ Net::SSLeay::write($ssl, $msg), 'write' ];
++    push @results, [ Net::SSLeay::ssl_write_all($ssl, $msg), 'write' ];
+     shutdown($s, 1);
+ 
+-    my ($got) = Net::SSLeay::read($ssl);
++    my $got = Net::SSLeay::ssl_read_all($ssl);
+     push @results, [ $got eq uc($msg), 'read' ];
+ 
+     Net::SSLeay::free($ssl);
+@@ -177,7 +177,7 @@ my @results;
+             Net::SSLeay::set_fd($ssl, fileno($s));
+             Net::SSLeay::connect($ssl);
+ 
+-            Net::SSLeay::write($ssl, $msg);
++            Net::SSLeay::ssl_write_all($ssl, $msg);
+ 
+             shutdown $s, 2;
+             close $s;
+@@ -231,15 +231,15 @@ my @results;
+             Net::SSLeay::set_fd($ssl3, $s3);
+ 
+             Net::SSLeay::connect($ssl1);
+-            Net::SSLeay::write($ssl1, $msg);
++            Net::SSLeay::ssl_write_all($ssl1, $msg);
+             shutdown $s1, 2;
+ 
+             Net::SSLeay::connect($ssl2);
+-            Net::SSLeay::write($ssl2, $msg);
++            Net::SSLeay::ssl_write_all($ssl2, $msg);
+             shutdown $s2, 2;
+ 
+             Net::SSLeay::connect($ssl3);
+-            Net::SSLeay::write($ssl3, $msg);
++            Net::SSLeay::ssl_write_all($ssl3, $msg);
+             shutdown $s3, 2;
+ 
+             close $s1;
+diff --git a/t/local/36_verify.t b/t/local/36_verify.t
+index 2837288..b04be13 100644
+--- a/t/local/36_verify.t
++++ b/t/local/36_verify.t
+@@ -252,8 +252,9 @@ sub client {
+     Net::SSLeay::set_fd($ssl, $cl);
+     Net::SSLeay::connect($ssl);
+     my $end = "end";
+-    Net::SSLeay::write($ssl, $end);
+-    ok($end eq Net::SSLeay::read($ssl),  'Successful termination');
++    Net::SSLeay::ssl_write_all($ssl, $end);
++    Net::SSLeay::shutdown($ssl);
++    ok($end eq Net::SSLeay::ssl_read_all($ssl),  'Successful termination');
+     return;
+ }
+ 
+@@ -291,10 +292,10 @@ sub run_server
+ 	next unless $ret == 1;
+ 
+ 	# Termination request or other message from client
+-	my $msg = Net::SSLeay::read($ssl);
++	my $msg = Net::SSLeay::ssl_read_all($ssl);
+ 	if (defined $msg and $msg eq 'end')
+ 	{
+-	    Net::SSLeay::write($ssl, 'end');
++	    Net::SSLeay::ssl_write_all($ssl, 'end');
+ 	    exit (0);
+ 	}
+     }
+-- 
+2.14.4
+

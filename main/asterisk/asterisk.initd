@@ -1,0 +1,252 @@
+#!/sbin/openrc-run
+
+extra_started_commands="forcestop reload"
+
+depend() {
+	need net
+	after firewall
+	use nscd dns zaptel mysql postgresql slapd capi
+}
+
+is_running() {
+	if [ -z "$(pidof asterisk)" ]; then
+		return 1
+	else
+		PID="$(cat /var/run/asterisk/asterisk.pid 2>/dev/null)"
+		for x in $(pidof asterisk); do
+			if [ "${x}" = "${PID}" ]; then
+				return 0
+			fi	
+		done
+	fi
+
+	return 1
+}
+
+asterisk_run_loop() {
+	local OPTS ARGS MSG NICE=""
+	local result=0 signal=0
+
+	# default options
+	OPTS="-f"  # don't fork / detach breaks wrapper script...
+
+	# filter (redundant) arguments
+	ARGS="$(echo "${@}" | sed -e "s:-c\|-f::g")"
+
+	# mangle yes/no options
+	ASTERISK_CONSOLE="$(echo ${ASTERISK_CONSOLE} | tr '[:lower:]' '[:upper:]')"
+
+	if [ -n "${ASTERISK_CORE_SIZE}" ] &&
+	   [ "${ASTERISK_CORE_SIZE}" != "0" ]; then
+		ulimit -c ${ASTERISK_CORE_SIZE}
+
+		if [ -n "${ASTERISK_CORE_DIR}" ] && \
+		   [ ! -d "${ASTERISK_CORE_DIR}" ]
+		then
+			mkdir -m750 -p "${ASTERISK_CORE_DIR}"
+
+			if [ -n "${ASTERISK_USER}" ]; then
+				chown -R "${ASTERISK_USER}" "${ASTERISK_CORE_DIR}"
+			fi
+		fi
+		ASTERISK_CORE_DIR="${ASTERISK_CORE_DIR:-/tmp}"
+
+		cd "${ASTERISK_CORE_DIR}"
+		echo "   Core dump size            : ${ASTERISK_CORE_SIZE}"
+		echo "   Core dump location        : ${ASTERISK_CORE_DIR}"
+		OPTS="${OPTS} -g"
+	fi
+
+	if [ -n "${ASTERISK_MAX_FD}" ]; then
+		ulimit -n ${ASTERISK_MAX_FD}
+		echo "   Max open filedescriptors  : ${ASTERISK_MAX_FD}"
+	fi
+
+	if [ -n "${ASTERISK_NICE}" ]; then
+		echo "   Nice level                : ${ASTERISK_NICE}"
+		NICE="nice -n ${ASTERISK_NICE} --"
+	fi
+
+	if [ -n "${ASTERISK_NOTIFY_EMAIL}" ]; then
+		if [ -x /usr/sbin/sendmail ]; then
+			echo "   Email notifications go to : ${ASTERISK_NOTIFY_EMAIL}"
+		else
+			echo "   Notifications disabled, /usr/sbin/sendmail doesn't exist or is not executable!"
+			unset ASTERISK_NOTIFY_EMAIL
+		fi
+	fi
+
+	if [ -n "${ASTERISK_TTY}" ]; then
+		for x in ${ASTERISK_TTY} \
+			 /dev/tty${ASTERISK_TTY} \
+			 /dev/vc/${ASTERISK_TTY}
+		do
+			if [ -c "${x}" ]; then
+				TTY="${x}"
+			fi
+		done
+		[ -n "${TTY}" ] && \
+			echo "   Messages are sent to      : ${TTY}"
+	fi
+
+	if [ "${ASTERISK_CONSOLE}" = "YES" ] && [ -n "${TTY}" ]; then
+		echo "   Starting Asterisk console : ${ASTERISK_CONSOLE}"
+		OPTS="${OPTS} -c"
+	fi
+
+	OPTS="${OPTS} ${ARGS}"
+
+	while :; do
+
+		if [ -n "${TTY}" ]; then
+			/usr/bin/stty -F ${TTY} sane
+			${NICE} /usr/sbin/asterisk ${OPTS} >${TTY} 2>&1 <${TTY}
+			result=$?
+		else
+			${NICE} /usr/sbin/asterisk ${OPTS} &>/dev/null
+			result=$?
+		fi		
+
+		if [ $result -eq 0 ]; then
+			echo "Asterisk terminated normally"
+			break
+		else
+			if [ $result -gt 128 ]; then
+				signal=$((result -  128))
+				MSG="Asterisk terminated with Signal: $signal"
+
+				CORE_TARGET="core-$(date "+%Y%m%d-%h%M%s")"
+
+				local CORE_DUMPED=0
+				if [ -f "${ASTERISK_CORE_DIR}/core" ]; then
+					mv "${ASTERISK_CORE_DIR}/core" \
+					   "${ASTERISK_CORE_DIR}/${CORE_TARGET}"
+					CORE_DUMPED=1
+
+				elif [ -f "${ASTERISK_CORE_DIR}/core.${PID}" ]; then
+					mv "${ASTERISK_CORE_DIR}/core.${PID}" \
+					   "${ASTERISK_CORE_DIR}/${CORE_TARGET}"
+					CORE_DUMPED=1
+
+				fi
+
+				[ $CORE_DUMPED -eq 1 ] && \
+					MSG="${MSG}\n\rCore dumped: ${ASTERISK_CORE_DIR}/${CORE_TARGET}"
+			else
+				MSG="Asterisk terminated with return code: $result"
+			fi
+
+			# kill left-over tasks
+			for X in ${ASTERISK_CLEANUP_ON_CRASH}; do
+				kill -9 $(pidof ${X});
+			done
+		fi
+
+		[ -n "${TTY}" ] \
+			&& echo "${MSG}" >${TTY} \
+			|| echo "${MSG}"
+
+
+		if [ -n "${ASTERISK_NOTIFY_EMAIL}" ] && \
+		   [ -x /usr/sbin/sendmail ]; then
+			echo -e -n "Subject: Asterisk crashed\n\r${MSG}\n\r" |\
+				 /usr/sbin/sendmail "${ASTERISK_NOTIFY_EMAIL}"
+		fi
+		sleep 5
+		echo "Restarting Asterisk..."
+	done
+	return 0
+}
+
+start() {
+	local OPTS USER GROUP PID
+	local tmp x
+
+	if [ -n "${ASTERISK_NICE}" ]; then
+		if [ ${ASTERISK_NICE} -ge -20 ] && \
+		   [ ${ASTERISK_NICE} -le  19 ]; then 
+			OPTS="--nicelevel ${ASTERISK_NICE}"
+		else
+			eerror "Nice value must be between -20 and 19"
+			return 1
+		fi
+	fi
+
+	if [ -n "${ASTERISK_USER}" ]; then
+		USER=$(echo $ASTERISK_USER | sed 's/:.*//')
+		GROUP=$(echo $ASTERISK_USER | awk -F: '/.*:.*/ { print $2 }')
+		if [ -n "${USER}" ]; then
+			ASTERISK_OPTS="${ASTERISK_OPTS} -U ${USER}"
+		fi
+		if [ -n "${GROUP}" ]; then
+			ASTERISK_OPTS="${ASTERISK_OPTS} -G ${GROUP}"
+			GROUP=":${GROUP}"	# make it look nice...
+		fi
+		ebegin "Starting asterisk PBX (as ${USER}${GROUP})"
+	else
+		ebegin "Starting asterisk PBX (as root)"
+	fi
+
+	if [ "$(echo ${ASTERISK_WRAPPER} | tr '[:upper:]' '[:lower:]')" != "yes" ]; then
+		start-stop-daemon --start --exec /usr/sbin/asterisk \
+			${OPTS} -- ${ASTERISK_OPTS}
+		result=$?
+	else
+		asterisk_run_loop ${ASTERISK_OPTS} 2>/dev/null &
+		result=$?
+	fi
+
+	if [ $result -eq 0 ]; then
+		# 2 seconds should be enough for asterisk to start
+		sleep 2 
+		is_running
+		result=$?
+	fi
+
+	eend $result
+}
+
+forcestop() {
+	ebegin "Stopping asterisk PBX"
+	start-stop-daemon --stop --pidfile /var/run/asterisk/asterisk.pid
+	eend $?
+}
+
+stop() {
+	if ! is_running; then
+		eerror "Asterisk is not running!"
+		return 0
+	fi
+
+	ebegin "Stopping asterisk PBX now"
+	/usr/sbin/asterisk -r -x "core stop now" &>/dev/null
+	# Now we have to wait until asterisk has _really_ stopped.
+	sleep 1
+	if is_running; then
+		einfon "Waiting for asterisk to shutdown ."
+		local cnt=0
+		while is_running; do
+			cnt=`expr $cnt + 1`
+			if [ $cnt -gt 60 ] ; then
+				# Waited 120 seconds now. Fail.
+				echo
+				eend 1 "Failed."
+				return
+			fi
+			sleep 2
+			echo -n "."
+		done
+		echo
+	fi
+	eend 0
+}
+
+reload() {
+	if is_running; then
+		ebegin "Reloading asterisk configuration"
+		/usr/sbin/asterisk -r -x "core reload" &>/dev/null
+		eend $?
+	else
+		eerror "Asterisk is not running!"
+	fi
+}

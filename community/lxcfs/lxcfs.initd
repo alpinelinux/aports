@@ -1,0 +1,135 @@
+#!/sbin/openrc-run
+# Init script for lxcfs
+# Copyright (C) 2016  Stuart Cardall
+# Licensed under the terms of the GPL2
+
+DAEMON=/usr/bin/lxcfs
+PIDFILE=/run/lxcfs.pid
+VARDIR=/var/lib/lxcfs
+RUNDIR=/run/lxcfs
+MAPPER=/usr/bin/uidmapshift
+
+description="FUSE filesystem for LXC unprivileged containers"
+description_setup="Setup unprivileged container permissions"
+description_info="Unprivileged container config file settings"
+extra_commands="setup info"
+
+depend() {
+	need cgproxy
+}
+
+start_pre() {
+	checkpath --directory ${VARDIR}
+	modprobe fuse autofs4
+}
+
+find_perms() {
+	local file= path= tmp=
+
+	for file in subuid subgid; do
+		path=/etc/$file
+		if [ -f $path ]; then
+			tmp=$(root_id $path 2)
+			if [ -n "$tmp" ]; then
+				tmp=$(echo $tmp | tr -cd '[:digit:]')
+				PERMS="$PERMS $tmp"
+			else
+				create_id $file
+			fi
+		else
+			create_id $file
+		fi
+	done
+	PERMS=$(echo $PERMS | sed 's| |:|')
+}
+
+create_id() {
+	einfo "Creating $1 for root: /etc/$1"
+	echo "root:100000:65537" >> /etc/$1
+	PERMS="$PERMS 100000"
+}
+
+root_id() {
+	grep ^root $1 | cut -d':' -f $2
+}
+
+find_lxc_path() {
+	local lxc_path=
+	lxc_path=$(grep ^lxc.lxcpath /etc/lxc/lxc.conf 2>/dev/null)
+	lxc_path=${lxc_path#*=}
+	lxc_path=${lxc_path:-/var/lib/lxc}
+	echo $lxc_path
+}
+
+dir_perms() {
+	local subgid=$(root_id /etc/subgid 2)
+	# set permissions to allow unprivileged services to run
+	einfo "Setting Mode 755 & root:root  => $1/rootfs"
+	chmod 755 $1/rootfs
+	chown root:root $1/rootfs
+	einfo "Setting Mode 750 & root:$subgid => $1"
+	chmod 750 $1
+	chown root:$subgid $1
+}
+
+info() {
+        cat > /tmp/lxc.fs <<EOF
+### unprivileged container config #############################
+lxc.include = /usr/share/lxc/config/common.conf.d/00-lxcfs.conf
+lxc.id_map = u 0 100000 65536
+lxc.id_map = g 0 100000 65536
+###############################################################
+EOF
+cat /tmp/lxc.fs
+}
+
+setup() {
+	# only needs to be run once on a container
+	# set unprivileged containers in conf.d
+	local ctr= subuid= range= path= ctr_list=
+	find_perms
+
+	subuid=$(root_id /etc/subuid 2)
+	range=$(root_id /etc/subuid 3)
+	path=$(find_lxc_path)
+
+	if [ "${UNPRIV}" = "all" ]; then
+		ctr_list="$(lxc-ls)"
+	else
+		ctr_list=${UNPRIV}
+	fi
+
+	for ctr in $ctr_list; do
+		einfo "Mapping user permissions in container: $ctr"
+		${MAPPER} -b $path/$ctr/rootfs 0 $subuid $range
+		dir_perms "$path/$ctr"
+	done
+}
+
+start() {
+	ebegin "Starting lxcfs"
+	find_perms
+
+	start-stop-daemon --start \
+		--pidfile ${PIDFILE} \
+		--exec ${DAEMON} \
+		--background \
+		--make-pidfile \
+		-- \
+		-f -o allow_other ${VARDIR}
+
+	# sometimes reboots are too fast
+	until [ -d ${RUNDIR} ]; do
+		usleep 50000
+	done
+
+	chown -R ${PERMS} ${RUNDIR}
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping lxcfs"
+	start-stop-daemon --stop --exec ${DAEMON} --pidfile ${PIDFILE} --signal KILL
+	umount ${VARDIR}
+	eend $?
+}

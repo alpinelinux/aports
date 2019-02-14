@@ -1,0 +1,157 @@
+#!/sbin/openrc-run
+# Copyright 1999-2012 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+# $Header: /var/cvsroot/gentoo-x86/app-emulation/lxc/files/lxc.initd.2,v 1.5 2012/07/21 05:07:15 flameeyes Exp $
+
+extra_started_commands="reboot"
+
+description="Linux Containers (LXC)"
+description_reboot="Reboot containers"
+
+CONTAINER=${SVCNAME#*.}
+: ${lxc_group:=$LXC_GROUP}
+: ${systemd_container:=no}
+: ${logdir:=/var/log/lxc}
+
+command="/usr/bin/lxc-start"
+pidfile="/var/run/lxc/$CONTAINER.pid"
+
+depend() {
+	need localmount sysfs cgroups
+	after firewall net
+}
+
+lxc_get_configfile() {
+	local i
+	for i in /var/lib/lxc/${CONTAINER}/config \
+			/etc/lxc/${CONTAINER}.conf \
+			/etc/lxc/${CONTAINER}/config; do
+		if [ -f "$i" ]; then
+			echo "$i"
+			return 0
+		fi
+	done
+	eerror "Unable to find a suitable configuration file."
+	eerror "If you set up the container in a non-standard"
+	eerror "location, please set the CONFIGFILE variable."
+	return 1
+}
+
+lxc_get_var() {
+	awk 'BEGIN { FS="[ \t]*=[ \t]*" } $1 == "'$1'" { print $2; exit }' ${CONFIGFILE} | cut -d: -f2
+}
+
+checkconfig() {
+	if [ ${CONTAINER} = ${SVCNAME} ]; then
+		CONTAINER=
+		return 0
+	fi
+	CONFIGFILE=${CONFIGFILE:-$(lxc_get_configfile)}
+
+	# no need to output anything, the function takes care of that.
+	[ -z "${CONFIGFILE}" ] && return 1
+
+	utsname=$(lxc_get_var lxc.uts.name)
+	if [ "${CONTAINER}" != "${utsname}" ]; then
+	    eerror "You should use the same name for the service and the"
+	    eerror "lxc.uts.name : Right now the lxc.uts.name is set to : ${utsname}"
+	    return 1
+	fi
+}
+
+systemd_ctr() {
+	local cmd="$1"
+	# Required for lxc-console and services inside systemd containers.
+	local cgroup=/sys/fs/cgroup/systemd
+	local mnt_opts='rw,nosuid,nodev,noexec,relatime,none,name=systemd'
+
+	case "$cmd" in
+		mount)
+			checkpath -d $cgroup
+			if ! mount | grep $cgroup >/dev/null; then
+				mount -t cgroup -o $mnt_opts cgroup $cgroup
+			fi
+			;;
+		unmount)
+			if mount | grep $cgroup >/dev/null; then
+				umount $cgroup
+			fi
+			;;
+	esac
+}
+
+_autostart() {
+	ebegin "$1 LXC containers"
+	shift
+	lxc-autostart --group "$lxc_group" "$@"
+	eend $?
+}
+
+start() {
+	checkconfig || return 1
+	if yesno "$systemd_container"; then
+		systemd_ctr mount
+	fi
+	if [ -z "$CONTAINER" ]; then
+		_autostart "Starting"
+		return
+	fi
+
+	rm -f "$logdir"/${CONTAINER}.log
+
+	rootpath=$(lxc_get_var lxc.rootfs.path)
+	# verify that container is not on tmpfs
+	dev=$(df -P "${rootpath}" | awk '{d=$1}; END {print d}')
+	type=$(awk -v dev="$dev" '$1 == dev {m=$3}; END {print m}' /proc/mounts)
+	if [ "$type" = tmpfs ] && ! yesno "$ALLOW_TMPFS"; then
+		eerror "${rootpath} is on tmpfs and ALLOW_TMPFS is not set"
+		return 1
+	fi
+
+	checkpath -d -m 750 -o root:wheel $logdir
+
+	checkpath -d ${pidfile%/*}
+	ebegin "Starting container ${CONTAINER}"
+	start-stop-daemon --start $command \
+		--pidfile $pidfile \
+		-- \
+		--daemon \
+		--pidfile $pidfile \
+		--name ${CONTAINER} \
+		--rcfile ${CONFIGFILE} \
+		--logpriority WARN \
+		--logfile $logdir/${CONTAINER}.log \
+		|| eend $? || return $?
+	lxc-wait -n ${CONTAINER} -t 5 -s RUNNING
+	eend $?
+}
+
+stop() {
+	checkconfig || return 1
+	systemd_ctr unmount
+
+	if [ -z "$CONTAINER" ]; then
+		_autostart "Stopping" --shutdown --timeout ${LXC_TIMEOUT:-30}
+		return
+	fi
+
+	ebegin "Stopping container ${CONTAINER}"
+	start-stop-daemon --stop --pidfile ${pidfile} \
+		--retry ${POWEROFF_SIGNAL:-SIGUSR2}/${TIMEOUT:-30} \
+		--progress
+	eend $?
+}
+
+reboot() {
+	checkconfig || return 1
+	if [ -z "$CONTAINER" ]; then
+		_autostart "Rebooting" --reboot
+		return
+	fi
+
+	ebegin "Sending reboot signal to container $CONTAINER"
+	start-stop-daemon --signal ${RESTART_SIG:-SIGTERM} \
+		--pidfile ${pidfile}
+	eend $?
+}
+

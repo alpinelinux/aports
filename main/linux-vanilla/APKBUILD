@@ -1,0 +1,233 @@
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+
+_flavor=vanilla
+pkgname=linux-${_flavor}
+pkgver=4.19.21
+case $pkgver in
+	*.*.*)	_kernver=${pkgver%.*};;
+	*.*) _kernver=$pkgver;;
+esac
+pkgrel=0
+pkgdesc="Linux vanilla kernel"
+url="http://kernel.org"
+depends="mkinitfs"
+_depends_dev="perl gmp-dev elfutils-dev bash flex bison"
+makedepends="$_depends_dev sed installkernel bc linux-headers linux-firmware openssl-dev"
+options="!strip"
+_config=${config:-config-vanilla.${CARCH}}
+install=
+source="https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/linux-$_kernver.tar.xz
+	config-vanilla.aarch64
+	config-vanilla.armhf
+	config-vanilla.armv7
+	config-vanilla.x86
+	config-vanilla.x86_64
+	config-vanilla.ppc
+	config-vanilla.ppc64le
+	config-vanilla.s390x
+
+	config-virt.aarch64
+	config-virt.x86
+	config-virt.x86_64
+	"
+subpackages="$pkgname-dev:_dev:$CBUILD_ARCH"
+_flavors=
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-${_f}::$CBUILD_ARCH linux-${_f}-dev:_dev:$CBUILD_ARCH"
+		fi
+		;;
+	esac
+done
+
+if [ "${pkgver%.0}" = "$pkgver" ]; then
+	source="$source
+	https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/patch-$pkgver.xz"
+fi
+arch="all"
+license="GPL-2.0"
+
+_carch=${CARCH}
+case "$_carch" in
+aarch64*) _carch="arm64" ;;
+arm*) _carch="arm" ;;
+mips*) _carch="mips" ;;
+ppc*) _carch="powerpc" ;;
+s390*) _carch="s390" ;;
+esac
+
+HOSTCC="${CC:-gcc}"
+HOSTCC="${HOSTCC#${CROSS_COMPILE}}"
+
+prepare() {
+	local _patch_failed=
+	cd "$srcdir"/linux-$_kernver
+	if [ "$_kernver" != "$pkgver" ]; then
+		msg "Applying patch-$pkgver.xz"
+		unxz -c < "$srcdir"/patch-$pkgver.xz | patch -p1 -N
+	fi
+
+	# first apply patches in specified order
+	for i in $source; do
+		case $i in
+		*.patch)
+			msg "Applying $i..."
+			if ! patch -s -p1 -N -i "$srcdir"/$i; then
+				echo $i >>failed
+				_patch_failed=1
+			fi
+			;;
+		esac
+	done
+
+	if ! [ -z "$_patch_failed" ]; then
+		error "The following patches failed:"
+		cat failed
+		return 1
+	fi
+
+	# remove localversion from patch if any
+	rm -f localversion*
+
+	for i in $_flavors; do
+		local _config=config-$i.${CARCH}
+		local _builddir="$srcdir"/build-$i-$CARCH
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$i" > "$_builddir"/localversion-alpine \
+			|| return 1
+
+		cp "$srcdir"/$_config "$_builddir"/.config
+		make -C "$srcdir"/linux-$_kernver \
+			O="$_builddir" \
+			ARCH="$_carch" HOSTCC="$HOSTCC" \
+			listnewconfig oldconfig
+	done
+}
+
+build() {
+	unset LDFLAGS
+	for i in $_flavors; do
+		cd "$srcdir"/build-$i-$CARCH
+		make ARCH="$_carch" CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+	done
+}
+
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=${pkgver}-${pkgrel}-${_buildflavor}
+
+	cd "$srcdir"/build-$_buildflavor-$CARCH
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+
+	local _install
+	case "$CARCH" in
+	arm*)
+		local _dtbdir="$_outdir"/usr/lib/linux-${_abi_release}
+		mkdir -p "$_dtbdir"
+		for i in arch/arm/boot/dts/*.dtb ; do
+			install -m644 "$i" "$_dtbdir"
+		done
+
+		_install=zinstall
+		;;
+	*)
+		_install=install
+		;;
+	esac
+
+	make -j1 modules_install $_install \
+		ARCH="$_carch" \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_PATH="$_outdir"/boot \
+		|| return 1
+
+	rm -f "$_outdir"/lib/modules/${_abi_release}/build \
+		"$_outdir"/lib/modules/${_abi_release}/source
+	rm -rf "$_outdir"/lib/firmware
+
+	install -D include/config/kernel.release \
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+}
+
+# main flavor installs in $pkgdir
+package() {
+	depends="$depends linux-firmware-any"
+
+	_package vanilla "$pkgdir"
+}
+
+# subflavors install in $subpkgdir
+virt() {
+	_package virt "$subpkgdir"
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _abi_release=${pkgver}-${pkgrel}-$_flavor
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# simlar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="$_depends_dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
+	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine \
+		|| return 1
+	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" ARCH="$_carch" HOSTCC="$HOSTCC" \
+		silentoldconfig prepare modules_prepare scripts
+
+	# remove the stuff that points to real sources. we want 3rd party
+	# modules to believe this is the soruces
+	rm "$dir"/Makefile "$dir"/source
+
+	# copy the needed stuff from real sources
+	#
+	# this is taken from ubuntu kernel build script
+	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
+	cd "$srcdir"/linux-$_kernver
+	find .  -path './include/*' -prune \
+		-o -path './scripts/*' -prune -o -type f \
+		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
+		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' \) \
+		-print | cpio -pdm "$dir" || return 1
+
+	cp -a scripts include "$dir" || return 1
+	find $(find arch -name include -type d -print) -type f \
+		| cpio -pdm "$dir"
+
+	install -Dm644 "$srcdir"/build-$_flavor-$CARCH/Module.symvers \
+		"$dir"/Module.symvers
+
+	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
+	ln -sf /usr/src/linux-headers-${_abi_release} \
+		"$subpkgdir"/lib/modules/${_abi_release}/build
+}
+
+sha512sums="ab67cc746b375a8b135e8b23e35e1d6787930d19b3c26b2679787d62951cbdbc3bb66f8ededeb9b890e5008b2459397f9018f1a6772fdef67780b06a4cb9f6f4  linux-4.19.tar.xz
+af3d633e28e5699b6314c2c57c2c671d2103e1181e5465e32f474dc9a07453090ef44f5028cb3bcca7e528db548a77a8b2fc790a08fdbada0322de62f93de9e6  config-vanilla.aarch64
+3c60cb2eee228de79b67d65682d67d25147cfcc321c0dcc27dbefa1eb4ab6ec692fe08df8f14aa868e09a9ad3581b3770a3dd4b9255c585f35f5725e29d2eeb1  config-vanilla.armhf
+3c60cb2eee228de79b67d65682d67d25147cfcc321c0dcc27dbefa1eb4ab6ec692fe08df8f14aa868e09a9ad3581b3770a3dd4b9255c585f35f5725e29d2eeb1  config-vanilla.armv7
+4f917a0618966654ae80b98491433799b0a9670811ff0eaefcd3698af0e34f782bca7f0b0982a8c2cd468bd92a0f0fb4070ad655e5dec5b1343bf40a40c920df  config-vanilla.x86
+467cf1569b56ca040b48ae1eea2e8ce0ba07b3d009cb0ff5941cb8840c4fe232850bd011945aa6e4568214a402e44caf0a5a47d71985005612b3cce45a0a9c6d  config-vanilla.x86_64
+96651aca476c905c04d616565a2dd08066167c1d4887e2ddc86c4b7cdda44257ef633a9bcf745a91f00f88023dde8f1804c56b258e7e99232bb8bfa25d0ba4db  config-vanilla.ppc
+8df56e276c22213844591dd9417bd66ccbe7512979b771f39ec55a135b0e515601df72d7d80f0ec95b88456c3fb49307b761b23a8bbf59b1f8e81c48670d52de  config-vanilla.ppc64le
+c6dc137c3b0518284da53a8876c18a58bd299be4980b3c183949c7e57bef97570d73f3c568888fa392a769226dacc5558082b44b388f79d9a7daa677bbc5f9f4  config-vanilla.s390x
+2f4b32df9f0168dd3388443ca8aa8e77a2e061ce68d4227d651fe6a6dec06e7b55d94fec135f6f5b64d573b2c7327d454e98199290b6c720fa5eb47b4bfe143b  config-virt.aarch64
+1376439b1aa59f00b38ac0f70b63af902d69891e569e835e9c72fbb7099ff6c62762d5c17cb6518fb9378f2f553a365b3931617b326705b3387d7fbc7971d407  config-virt.x86
+d52d0281801b3515edfa4e6a22ce9faa5a33ef123aaca600988dd42c6498d2ae3581200ef0e2fdf7ebf1312ecc3a07368066b4294dad00df79fc418752675c74  config-virt.x86_64
+e08da5167d3d726a3fc72950955ec5e0107d46f0e1e97e4c492295a5a3ad5d1f782b281c07066c3190ec822056b49355c93d2dde6b324787ab6e3181bb548147  patch-4.19.21.xz"

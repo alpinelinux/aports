@@ -1,0 +1,507 @@
+From 24f932672e826e8f93955d0c6dd6bca140f3fa98 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Sun, 25 Oct 2015 22:21:41 +0200
+Subject: [PATCH] depmod: support generating kmod binary index files
+
+This allows to use busybox depmod, and run daemons using libkmod (or
+even kmod modprobe if needed).
+
+About +1500 bytes when enabled. This patch merges some depmod code
+paths, so when this is disabled it shrinks the code size a little bit.
+---
+ modutils/Config.src |   9 ++
+ modutils/depmod.c   | 281 ++++++++++++++++++++++++++++++++++++--------
+ modutils/modprobe.c |  15 ---
+ modutils/modutils.c |  31 +++++
+ modutils/modutils.h |  16 +++
+ 5 files changed, 286 insertions(+), 66 deletions(-)
+
+diff --git a/modutils/Config.src b/modutils/Config.src
+index 188296814..7a4c037ad 100644
+--- a/modutils/Config.src
++++ b/modutils/Config.src
+@@ -152,6 +152,15 @@ config FEATURE_MODUTILS_ALIAS
+ 
+ 	Say Y if unsure.
+ 
++config FEATURE_MODUTILS_BIN
++	bool "Support for the kmod .bin file format"
++	default n
++	depends on DEPMOD && !MODPROBE_SMALL
++	help
++	  Generate kmod compatible binary index files for .dep, .alias,
++	  .symbols and .builtin files. Allows mixing use of busybox
++	  modutils and kmod (binaries and library).
++
+ config FEATURE_MODUTILS_SYMBOLS
+ 	bool "Support module.symbols file"
+ 	default y
+diff --git a/modutils/depmod.c b/modutils/depmod.c
+index 004c67a11..05c1a9bce 100644
+--- a/modutils/depmod.c
++++ b/modutils/depmod.c
+@@ -2,7 +2,7 @@
+ /*
+  * depmod - generate modules.dep
+  * Copyright (c) 2008 Bernhard Reutner-Fischer
+- * Copyrihgt (c) 2008 Timo Teras <timo.teras@iki.fi>
++ * Copyrihgt (c) 2008-2015 Timo Teras <timo.teras@iki.fi>
+  * Copyright (c) 2008 Vladimir Dronnikov
+  *
+  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
+@@ -26,6 +26,24 @@
+ #include "modutils.h"
+ #include <sys/utsname.h> /* uname() */
+ 
++#define INDEX_MINCHAR	32
++#define INDEX_MAXCHAR	128
++
++typedef struct index_node {
++	char *prefix;
++	llist_t *values;
++	struct index_node *children[INDEX_MAXCHAR-INDEX_MINCHAR];
++} index_node;
++
++struct globals {
++	module_db db;
++	index_node *root_node;
++} FIX_ALIASING;
++#define G (*ptr_to_globals)
++#define INIT_G() do { \
++	SET_PTR_TO_GLOBALS(xzalloc(sizeof(G))); \
++} while (0)
++
+ /*
+  * Theory of operation:
+  * - iterate over all modules and record their full path
+@@ -53,18 +71,12 @@ static int FAST_FUNC parse_module(const char *fname, struct stat *sb UNUSED_PARA
+ 
+ 	for (ptr = image; ptr < image + len - 10; ptr++) {
+ 		if (is_prefixed_with(ptr, "depends=")) {
+-			char *u;
+-
+ 			ptr += 8;
+-			for (u = ptr; *u; u++)
+-				if (*u == '-')
+-					*u = '_';
+-			ptr += string_to_llist(ptr, &e->deps, ",");
++			string_to_llist(replace_underscores(ptr), &e->deps, ",");
+ 		} else if (ENABLE_FEATURE_MODUTILS_ALIAS
+ 		 && is_prefixed_with(ptr, "alias=")
+ 		) {
+-			llist_add_to(&e->aliases, xstrdup(ptr + 6));
+-			ptr += strlen(ptr);
++			llist_add_to(&e->aliases, replace_underscores(xstrdup(ptr + 6)));
+ 		} else if (ENABLE_FEATURE_MODUTILS_SYMBOLS
+ 		 && is_prefixed_with(ptr, "__ksymtab_")
+ 		) {
+@@ -74,9 +86,10 @@ static int FAST_FUNC parse_module(const char *fname, struct stat *sb UNUSED_PARA
+ 			) {
+ 				continue;
+ 			}
+-			llist_add_to(&e->symbols, xstrdup(ptr));
+-			ptr += strlen(ptr);
+-		}
++			llist_add_to(&e->symbols, xasprintf("symbol:%s", ptr));
++		} else
++			continue;
++		ptr += strlen(ptr);
+ 	}
+ 	free(image);
+ 
+@@ -108,12 +121,6 @@ static void order_dep_list(module_db *modules, module_entry *start, llist_t *add
+ 	}
+ }
+ 
+-static void xfreopen_write(const char *file, FILE *f)
+-{
+-	if (freopen(file, "w", f) == NULL)
+-		bb_perror_msg_and_die("can't open '%s'", file);
+-}
+-
+ //usage:#if !ENABLE_MODPROBE_SMALL
+ //usage:#define depmod_trivial_usage "[-n] [-b BASE] [VERSION] [MODFILES]..."
+ //usage:#define depmod_full_usage "\n\n"
+@@ -167,6 +174,169 @@ enum {
+ 	OPT_C = (1 << 9), /* -C,--config etc_modules_conf: ignored */
+ };
+ 
++/* Support for the mod binary index generation */
++
++static void index_init(const char *filename)
++{
++	if (ENABLE_FEATURE_MODUTILS_BIN) {
++		index_node *n;
++
++		n = xzalloc(sizeof(index_node));
++		n->prefix = xstrdup("");
++		G.root_node = n;
++	}
++
++	if (filename && !(option_mask32 & OPT_n)) {
++		if (freopen(filename, "w", stdout) == NULL)
++			bb_perror_msg_and_die("can't open '%s'", filename);
++	}
++}
++
++static void index_add(const char *key, char *value, const char *prefix)
++{
++	if (prefix && *prefix)
++		printf("%s%s %s\n", prefix, key, value);
++	else if (prefix)
++		printf("%s\n", value);
++
++	if (ENABLE_FEATURE_MODUTILS_BIN) {
++		index_node *cur = G.root_node, *n;
++		unsigned i = 0, j, ch;
++
++		while (1) {
++			/* Ensure node->prefix is a prefix of &str[i].
++			 * If it is not already, then we must split node. */
++			for (j = 0; cur->prefix[j]; j++) {
++				ch = cur->prefix[j];
++				if (ch != key[i+j]) {
++					/* New child is copy of node with prefix[j+1..N] */
++					n = xzalloc(sizeof(index_node));
++					n->prefix = xstrdup(&cur->prefix[j+1]);
++					n->values = cur->values;
++					memcpy(n->children, cur->children, sizeof(n->children));
++
++					/* Parent has prefix[0..j], child at prefix[j] */
++					cur->prefix[j] = '\0';
++					cur->values = NULL;
++					memset(cur->children, 0, sizeof(cur->children));
++					cur->children[ch-INDEX_MINCHAR] = n;
++					break;
++				}
++			}
++			i += j;
++
++			ch = key[i];
++			if (ch == 0)
++				break;
++
++			if (ch < INDEX_MINCHAR || ch >= INDEX_MAXCHAR)
++				bb_error_msg_and_die("bad module name");
++
++			ch -= INDEX_MINCHAR;
++			if (!cur->children[ch]) {
++				n = xzalloc(sizeof(index_node));
++				cur->children[ch] = n;
++				n->prefix = xstrdup(&key[i+1]);
++				cur = n;
++				break;
++			}
++
++			/* Descend into child node and continue */
++			cur = cur->children[ch];
++			i++;
++		}
++
++		llist_add_to(&cur->values, value);
++	}
++}
++
++static uint32_t index_write_node(FILE *out, index_node *n, void (*freeit)(void *data))
++{
++	uint32_t child_offs[INDEX_MAXCHAR-INDEX_MINCHAR];
++	uint32_t offset;
++	uint8_t first = 255, last = 0;
++	unsigned i;
++
++	for (i = 0; i < INDEX_MAXCHAR-INDEX_MINCHAR; i++) {
++		child_offs[i] = 0;
++		if (!n->children[i])
++			continue;
++		child_offs[i] = index_write_node(out, n->children[i], freeit);
++		if (first > INDEX_MAXCHAR)
++			first = i;
++		last = i;
++	}
++
++	offset = ftell(out);
++
++	if (n->prefix[0]) {
++		fputs(n->prefix, out);
++		fputc('\0', out);
++		offset |= INDEX_NODE_PREFIX;
++	}
++
++	if (first < INDEX_MAXCHAR) {
++		fputc(first + INDEX_MINCHAR, out);
++		fputc(last + INDEX_MINCHAR, out);
++		fwrite(child_offs + first, sizeof(uint32_t), last - first + 1, out);
++		offset |= INDEX_NODE_CHILDS;
++	}
++
++	if (n->values) {
++		const llist_t *v;
++		unsigned int cnt;
++		uint32_t u;
++
++		n->values = llist_rev(n->values);
++		for (v = n->values, cnt = 0; v != NULL; v = v->link, cnt++);
++		u = htonl(cnt);
++		fwrite(&u, sizeof(u), 1, out);
++		for (v = n->values, cnt = 0; v != NULL; v = v->link, cnt++) {
++			u = htonl(cnt);
++			fwrite(&u, sizeof(u), 1, out);
++			fputs(v->data, out);
++			fputc('\0', out);
++		}
++		offset |= INDEX_NODE_VALUES;
++	}
++
++	llist_free(n->values, freeit);
++	free(n->prefix);
++	free(n);
++
++	return htonl(offset);
++}
++
++static void index_dump(const char *filename, int deps_file)
++{
++	if (ENABLE_FEATURE_MODUTILS_BIN) {
++		FILE *out;
++		uint32_t header[3] = {
++			htonl(INDEX_MAGIC),
++			htonl(INDEX_VERSION),
++		};
++
++		if (option_mask32 & OPT_n)
++			filename = "/dev/null";
++		else
++			filename = xasprintf("tmp.%s.bin", filename);
++
++		out = xfopen_for_write(filename);
++		fwrite(header, sizeof(uint32_t), 3, out);
++		header[2] = index_write_node(out, G.root_node, deps_file ? free : 0);
++		rewind(out);
++		G.root_node = NULL;
++		fwrite(header, sizeof(uint32_t), 3, out);
++		if (fclose(out)) {
++			remove(filename);
++			bb_error_msg_and_die(bb_msg_write_error);
++		}
++		/* .bin files are mmap'ed; not renaming it may crash
++		 * long standing daemon using libkmod */
++		rename_or_warn(filename, filename + 4);
++	}
++}
++
+ int depmod_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
+ int depmod_main(int argc UNUSED_PARAM, char **argv)
+ {
+@@ -178,6 +348,8 @@ int depmod_main(int argc UNUSED_PARAM, char **argv)
+ 	unsigned i;
+ 	int tmp;
+ 
++	INIT_G();
++
+ 	getopt32(argv, "aAb:eF:nruqC:", &moddir_base, NULL, NULL);
+ 	argv += optind;
+ 
+@@ -210,53 +382,60 @@ int depmod_main(int argc UNUSED_PARAM, char **argv)
+ 	}
+ 
+ 	/* Generate dependency and alias files */
+-	if (!(option_mask32 & OPT_n))
+-		xfreopen_write(CONFIG_DEFAULT_DEPMOD_FILE, stdout);
+-
++	index_init(CONFIG_DEFAULT_DEPMOD_FILE);
+ 	moddb_foreach_module(&modules, m, i) {
+-		printf("%s:", m->name);
+-
++		char *buf = xasprintf("%s:", m->name);
+ 		order_dep_list(&modules, m, m->deps);
++
+ 		while (m->dnext != m) {
+ 			dep = m->dnext;
+-			printf(" %s", dep->name);
+-
++			buf = gather_options_str(buf, dep->name);
+ 			/* unlink current entry */
+ 			dep->dnext->dprev = dep->dprev;
+ 			dep->dprev->dnext = dep->dnext;
+ 			dep->dnext = dep->dprev = dep;
+ 		}
+-		bb_putchar('\n');
++		index_add(m->modname, buf, "");
+ 	}
+-
+-#if ENABLE_FEATURE_MODUTILS_ALIAS
+-	if (!(option_mask32 & OPT_n))
+-		xfreopen_write("modules.alias", stdout);
+-	moddb_foreach_module(&modules, m, i) {
+-		while (m->aliases) {
+-			/*
+-			 * Last word used to be a basename
+-			 * (filename with path and .ko.* stripped)
+-			 * at the time of module-init-tools 3.4.
+-			 * kmod v.12 uses module name, i.e., s/-/_/g.
+-			 */
+-			printf("alias %s %s\n",
+-				(char*)llist_pop(&m->aliases),
+-				m->modname);
++	index_dump(CONFIG_DEFAULT_DEPMOD_FILE, 1);
++
++	if (ENABLE_FEATURE_MODUTILS_ALIAS) {
++		index_init("modules.alias");
++		moddb_foreach_module(&modules, m, i) {
++			while (m->aliases) {
++				/*
++				 * Last word used to be a basename
++				 * (filename with path and .ko.* stripped)
++				 * at the time of module-init-tools 3.4.
++				 * kmod v.12 uses module name, i.e., s/-/_/g.
++				 */
++				index_add((char*)llist_pop(&m->aliases), m->modname, "alias ");
++			}
+ 		}
++		index_dump("modules.alias", 0);
+ 	}
+-#endif
+-#if ENABLE_FEATURE_MODUTILS_SYMBOLS
+-	if (!(option_mask32 & OPT_n))
+-		xfreopen_write("modules.symbols", stdout);
+-	moddb_foreach_module(&modules, m, i) {
+-		while (m->symbols) {
+-			printf("alias symbol:%s %s\n",
+-				(char*)llist_pop(&m->symbols),
+-				m->modname);
++	if (ENABLE_FEATURE_MODUTILS_SYMBOLS) {
++		index_init("modules.symbols");
++		moddb_foreach_module(&modules, m, i) {
++			while (m->symbols) {
++				index_add((char*)llist_pop(&m->symbols), m->modname, "alias ");
++			}
++		}
++		index_dump("modules.symbols", 0);
++	}
++	if (ENABLE_FEATURE_MODUTILS_BIN) {
++		char line[PATH_MAX], modname[MODULE_NAME_LEN];
++		FILE *in;
++
++		index_init(NULL);
++		in = xfopen_for_read("modules.builtin");
++		while (fgets(line, sizeof(line), in) != NULL) {
++			filename2modname(line, modname);
++			index_add(modname, (char *) "", 0);
+ 		}
++		fclose(in);
++		index_dump("modules.builtin", 0);
+ 	}
+-#endif
+ 
+ 	if (ENABLE_FEATURE_CLEAN_UP)
+ 		moddb_free(&modules);
+diff --git a/modutils/modprobe.c b/modutils/modprobe.c
+index 59f6d54f3..0a398a60f 100644
+--- a/modutils/modprobe.c
++++ b/modutils/modprobe.c
+@@ -192,21 +192,6 @@ struct globals {
+ 
+ static int read_config(const char *path);
+ 
+-static char *gather_options_str(char *opts, const char *append)
+-{
+-	/* Speed-optimized. We call gather_options_str many times. */
+-	if (append) {
+-		if (opts == NULL) {
+-			opts = xstrdup(append);
+-		} else {
+-			int optlen = strlen(opts);
+-			opts = xrealloc(opts, optlen + strlen(append) + 2);
+-			sprintf(opts + optlen, " %s", append);
+-		}
+-	}
+-	return opts;
+-}
+-
+ static struct module_entry *get_or_add_modentry(const char *module)
+ {
+ 	return moddb_get_or_create(&G.db, module);
+diff --git a/modutils/modutils.c b/modutils/modutils.c
+index 6f7cd9721..257089af4 100644
+--- a/modutils/modutils.c
++++ b/modutils/modutils.c
+@@ -66,6 +66,21 @@ void FAST_FUNC moddb_free(module_db *db)
+ 	}
+ }
+ 
++char * FAST_FUNC gather_options_str(char *opts, const char *append)
++{
++	/* Speed-optimized. We call gather_options_str many times. */
++	if (append) {
++		if (opts == NULL) {
++			opts = xstrdup(append);
++		} else {
++			int optlen = strlen(opts);
++			opts = xrealloc(opts, optlen + strlen(append) + 2);
++			sprintf(opts + optlen, " %s", append);
++		}
++	}
++	return opts;
++}
++
+ void FAST_FUNC replace(char *s, char what, char with)
+ {
+ 	while (*s) {
+@@ -75,6 +90,22 @@ void FAST_FUNC replace(char *s, char what, char with)
+ 	}
+ }
+ 
++char* FAST_FUNC replace_underscores(char *s)
++{
++	int i;
++	for (i = 0; s[i]; i++) {
++		switch (s[i]) {
++		case '-':
++			s[i] = '_';
++			break;
++		case '[':
++			i += strcspn(&s[i], "]");
++			break;
++		}
++	}
++	return s;
++}
++
+ int FAST_FUNC string_to_llist(char *string, llist_t **llist, const char *delim)
+ {
+ 	char *tok;
+diff --git a/modutils/modutils.h b/modutils/modutils.h
+index 4a702e97c..73e816028 100644
+--- a/modutils/modutils.h
++++ b/modutils/modutils.h
+@@ -18,6 +18,20 @@ PUSH_AND_SET_FUNCTION_VISIBILITY_TO_HIDDEN
+ #define MODULE_NAME_LEN 256
+ #define MODULE_HASH_SIZE 256
+ 
++/* .bin index format definitions */
++#define INDEX_MAGIC 0xB007F457
++#define INDEX_VERSION_MAJOR 0x0002
++#define INDEX_VERSION_MINOR 0x0001
++#define INDEX_VERSION ((INDEX_VERSION_MAJOR<<16)|INDEX_VERSION_MINOR)
++
++enum node_offset {
++	INDEX_NODE_FLAGS	= 0xF0000000, /* Flags in high nibble */
++	INDEX_NODE_PREFIX	= 0x80000000,
++	INDEX_NODE_VALUES	= 0x40000000,
++	INDEX_NODE_CHILDS	= 0x20000000,
++	INDEX_NODE_MASK		= 0x0FFFFFFF, /* Offset value */
++};
++
+ typedef struct module_entry {
+ 	struct module_entry *next;
+ 	char *name, *modname;
+@@ -47,7 +61,9 @@ module_entry *moddb_get(module_db *db, const char *s) FAST_FUNC;
+ module_entry *moddb_get_or_create(module_db *db, const char *s) FAST_FUNC;
+ void moddb_free(module_db *db) FAST_FUNC;
+ 
++char *gather_options_str(char *opts, const char *append) FAST_FUNC;
+ void replace(char *s, char what, char with) FAST_FUNC;
++char *replace_underscores(char *s) FAST_FUNC;
+ int string_to_llist(char *string, llist_t **llist, const char *delim) FAST_FUNC;
+ char *filename2modname(const char *filename, char *modname) FAST_FUNC;
+ #if ENABLE_FEATURE_CMDLINE_MODULE_OPTIONS

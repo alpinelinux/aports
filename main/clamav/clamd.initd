@@ -1,0 +1,84 @@
+#!/sbin/openrc-run
+
+NAME=clamd
+CONF=/etc/clamav/clamd.conf
+
+pidfile=/run/clamav/clamd.pid
+command=/usr/sbin/clamd
+extra_started_commands="reload"
+extra_commands="logfix"
+required_files=$CONF
+
+depend() {
+	need net
+	after firewall
+	provide antivirus
+}
+
+start_pre() {
+	# fix clamd run permissions
+	local pid=`awk '$1 == "PidFile" { print $2 }' $CONF`
+	[ "x$pid" != "x" ] && pidfile=$pid
+	local socket=`awk '$1 == "LocalSocket" { print $2 }' $CONF`
+	local socketdir=${socket%/*}
+	local clamav_user=`awk '$1 == "User" { print $2 }' $CONF`
+	checkpath --directory --owner ${clamav_user:-clamav} \
+		--mode 750 ${pidfile%/*}
+	checkpath --directory --owner ${clamav_user:-clamav} \
+		--mode 755 ${socketdir:-/run/clamav}
+}
+
+start() {
+	local clamd_socket=$(awk '$1 == "LocalSocket" { print $2 }' $CONF)
+
+	logfix
+
+	if [ -S "${clamd_socket:=/tmp/clamd}" ]; then
+		rm -f ${clamd_socket}
+	fi
+
+	local dbdir=$(awk '$1 == "DatabaseDirectory" { print $2 }' $CONF)
+	local timeout=${FRESHCLAM_TIMEOUT:-120}
+	local cvd="${dbdir:-/var/lib/clamav}"/main.cvd
+	local cld="${dbdir:-/var/lib/clamav}"/main.cld
+
+	if ! [ -e "$cld" ]; then
+		if ! [ -e "$cvd" ]; then
+			ebegin "Waiting for clamav database download"
+			while ! [ -e "$cvd" ]; do
+				timeout=$(( $timeout - 1 ))
+				if [ $timeout -eq 0 ]; then
+					eend 1 "Timed out"
+					return 1
+				fi
+				sleep 1
+			done
+			eend 0
+		fi
+	fi
+	ebegin "Starting ${NAME}"
+	start-stop-daemon --start --quiet \
+		--nicelevel ${CLAMD_NICELEVEL:-0} \
+		--exec $command
+	eend $? "Failed to start ${NAME}"
+}
+
+reload() {
+	ebegin "Reloading ${SVCNAME}"
+	start-stop-daemon --signal HUP --pidfile $pidfile --name $SVCNAME
+	eend $?
+}
+
+logfix() {
+	# fix clamd log permissions
+	# (might be clobbered by logrotate or something)
+	local logfile=`awk '$1 == "LogFile" { print $2 }' $CONF`
+	local clamav_user=`awk '$1 == "User" { print $2 }' $CONF`
+	if [ -n "${logfile}" ] && [ -n "${clamav_user}" ]; then
+		if [ ! -f "${logfile}" ]; then
+			touch ${logfile}
+		fi
+		chown ${clamav_user} ${logfile}
+		chmod 640 ${logfile}
+	fi
+}

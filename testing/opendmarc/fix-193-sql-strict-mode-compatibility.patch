@@ -1,0 +1,202 @@
+Patch-Source: https://src.fedoraproject.org/rpms/opendmarc/blob/f28/f/opendmarc.ticket193.patch
+See-Also: https://sourceforge.net/p/opendmarc/tickets/_discuss/thread/f6c4e3e3/dd30/attachment/mysql_strict_mode.patch
+
+diff --git a/db/Makefile.in b/db/Makefile.in
+index 43b8614..83bc1d1 100644
+--- a/db/Makefile.in
++++ b/db/Makefile.in
+@@ -276,7 +276,7 @@
+ top_build_prefix = @top_build_prefix@
+ top_builddir = @top_builddir@
+ top_srcdir = @top_srcdir@
+-dist_doc_DATA = README.schema schema.mysql
++dist_doc_DATA = README.schema schema.mysql README.update-db-schema.mysql update-db-schema.mysql
+ all: all-am
+ 
+ .SUFFIXES:
+diff --git a/db/README.update-db-schema.mysql b/db/README.update-db-schema.mysql
+new file mode 100644
+index 0000000..8a6a909
+--- /dev/null
++++ b/db/README.update-db-schema.mysql
+@@ -0,0 +1,8 @@
++
++To update your database to the current state use this script like this:
++
++  mysql -u <user> -p <passwd> --force < update-db-schema.mysql
++
++You might receive up to four errors about duplicate keys - this is expected if your database
++already has these keys (because you used the MySQL schema in the db sub-direcory instead of
++the obsolete schema in the reports sub-dirctory).
+diff --git a/db/schema.mysql b/db/schema.mysql
+index 99152bd..28416f8 100644
+--- a/db/schema.mysql
++++ b/db/schema.mysql
+@@ -5,6 +5,7 @@
+ 
+ CREATE DATABASE IF NOT EXISTS opendmarc;
+ USE opendmarc;
++SET TIME_ZONE='+00:00';
+ 
+ -- A table for mapping domain names and their DMARC policies to IDs
+ CREATE TABLE IF NOT EXISTS domains (
+@@ -28,7 +29,7 @@ CREATE TABLE IF NOT EXISTS requests (
+         pct TINYINT NOT NULL,
+         locked TINYINT NOT NULL DEFAULT '0',
+ 	firstseen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+-	lastsent TIMESTAMP NOT NULL DEFAULT '0000-00-00 00:00:00',
++	lastsent TIMESTAMP NOT NULL DEFAULT '1970-01-01 00:00:01',
+ 
+ 	PRIMARY KEY(id),
+ 	KEY(lastsent),
+diff --git a/db/update-db-schema.mysql b/db/update-db-schema.mysql
+new file mode 100644
+index 0000000..5c0a190
+--- /dev/null
++++ b/db/update-db-schema.mysql
+@@ -0,0 +1,12 @@
++use opendmarc;
++SET TIME_ZONE="+00:00";
++ALTER TABLE ipaddr MODIFY COLUMN addr VARCHAR(64) NOT NULL;
++DELETE FROM ipaddr WHERE addr = NULL;
++ALTER TABLE messages MODIFY COLUMN spf TINYINT NOT NULL;
++ALTER TABLE requests ALTER COLUMN locked SET DEFAULT '0';
++ALTER TABLE requests ALTER COLUMN lastsent SET DEFAULT '1970-01-01 00:00:01';
++ALTER TABLE requests ADD UNIQUE KEY domain (domain);
++ALTER TABLE requests ADD KEY lastsent (lastsent);
++ALTER TABLE messages ADD KEY date (date);
++ALTER TABLE signatures ADD KEY message (message);
++
+diff --git a/reports/opendmarc-expire.in b/reports/opendmarc-expire.in
+index 9912bb1..0adbd92 100755
+--- a/reports/opendmarc-expire.in
++++ b/reports/opendmarc-expire.in
+@@ -210,6 +210,17 @@ if ($verbose)
+ 	print STDERR "$progname: connected to database\n";
+ }
+ 
++# switch to UTC to have a defined date behaviour
++$dbi_s = $dbi_h->prepare("SET TIME_ZONE='+00:00'");
++
++if (!$dbi_s->execute())
++{
++	print STDERR "$progname: failed to change to UTC: " . $dbi_h->errstr . "\n";
++	$dbi_s->finish;
++	$dbi_h->disconnect;
++	exit(1);
++}
++
+ #
+ # Expire messages
+ #
+@@ -340,7 +351,7 @@ if ($verbose)
+ 	print STDERR "$progname: expiring request data older than $maxage days\n";
+ }
+ 
+-$dbi_s = $dbi_h->prepare("DELETE FROM requests WHERE lastsent <= DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL ? DAY) AND NOT lastsent = '0000-00-00 00:00:00'");
++$dbi_s = $dbi_h->prepare("DELETE FROM requests WHERE lastsent <= DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL ? DAY) AND NOT lastsent <= '1970-01-01 00:00:01'");
+ $rows = $dbi_s->execute($maxage);
+ if (!$rows)
+ {
+diff --git a/reports/opendmarc-import.in b/reports/opendmarc-import.in
+index 5a28f2f..3efc926 100755
+--- a/reports/opendmarc-import.in
++++ b/reports/opendmarc-import.in
+@@ -204,20 +204,18 @@ sub update_db
+ 	$envfrom_id = get_table_id($envdomain, "domains");
+ 	$pdomain_id = get_table_id($pdomain, "domains");
+ 	$ipaddr_id = get_table_id($ipaddr, "ipaddr", "addr");
+-	$request_id = get_table_id($from_id, "requests", "domain");
+ 
+ 	if (!defined($rep_id) ||
+ 	    !defined($from_id) ||
+ 	    !defined($envfrom_id) ||
+ 	    !defined($pdomain_id) ||
+-	    !defined($ipaddr_id) ||
+-	    !defined($request_id))
++	    !defined($ipaddr_id))
+ 	{
+ 		return;
+ 	}
+ 
+-	$dbi_s = $dbi_h->prepare("INSERT INTO messages (date, jobid, reporter, policy, disp, ip, env_domain, from_domain, spf, align_spf, align_dkim, sigcount) VALUES(FROM_UNIXTIME(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+-	if (!$dbi_s->execute($received, $jobid, $rep_id, $policy, $action, $ipaddr_id, $envfrom_id, $from_id, $spf, $align_spf, $align_dkim, $sigcount))
++	$dbi_s = $dbi_h->prepare("INSERT INTO messages (date, jobid, reporter, policy, disp, ip, env_domain, from_domain, policy_domain, spf, align_spf, align_dkim, sigcount) VALUES(FROM_UNIXTIME(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
++	if (!$dbi_s->execute($received, $jobid, $rep_id, $policy, $action, $ipaddr_id, $envfrom_id, $from_id, $pdomain_id, $spf, $align_spf, $align_dkim, $sigcount))
+ 	{
+ 		print STDERR "$progname: failed to insert message: " . $dbi_h->errstr . "\n";
+ 		return;
+@@ -275,41 +273,51 @@ sub update_db
+ 	}
+ 	$dbi_s->finish;
+ 
+-	if (get_value("requests", "locked", $request_id) != 1)
++	$dbi_t = $dbi_h->prepare("SELECT id FROM requests WHERE domain = ?");
++	if (!$dbi_t->execute($from_id))
+ 	{
+-		if (scalar @rua > 0)
++		print STDERR "$progname: failed to retrieve table ID: " . $dbi_h->errstr . "\n";
++		return undef;
++	}
++
++	undef $request_id;
++	while ($dbi_a = $dbi_t->fetchrow_arrayref())
++	{
++		if (defined($dbi_a->[0]))
+ 		{
+-			$repuri = join(",", @rua);
+-			$dbi_s = $dbi_h->prepare("UPDATE requests SET repuri = ? WHERE id = ?");
++			$request_id = $dbi_a->[0];
++		}
++	}
+ 
+-			if (!$dbi_s->execute($repuri, $request_id))
+-			{
+-				print STDERR "$progname: failed to update reporting URI for $fdomain: " . $dbi_h->errstr . "\n";
+-				$dbi_s->finish;
+-				return;
+-			}
++	$dbi_t->finish;
+ 
+-			$dbi_s->finish;
+-		}
+-		else
++	$repuri = join(",", @rua);
++
++	if (defined($request_id))
++	{
++		if (get_value("requests", "locked", $request_id) != 1)
+ 		{
+-			$dbi_s = $dbi_h->prepare("UPDATE requests SET repuri = NULL WHERE id = ?");
++			$dbi_s = $dbi_h->prepare("UPDATE requests SET domain = ?, repuri = ?, adkim = ?, aspf = ?, policy = ?, spolicy = ?, pct = ? WHERE id = ?");
+ 
+-			if (!$dbi_s->execute($request_id))
++			if (!$dbi_s->execute($from_id, $repuri, $adkim, $aspf, $p, $sp, $pct, $request_id))
+ 			{
+-				print STDERR "$progname: failed to update reporting URI for $fdomain: " . $dbi_h->errstr . "\n";
++				print STDERR "$progname: failed to update policy data for $fdomain: " . $dbi_h->errstr . "\n";
+ 				$dbi_s->finish;
+ 				return;
+ 			}
+-
+-			$dbi_s->finish;
+ 		}
++		else
++		{
++			print STDERR "$progname: policy data for $fdomain not updated, because they are locked\n";
++		}
++	}
++	else
++	{
++		$dbi_s = $dbi_h->prepare("insert requests SET domain = ?, repuri = ?, adkim = ?, aspf = ?, policy = ?, spolicy = ?, pct = ?");
+ 
+-		$dbi_s = $dbi_h->prepare("UPDATE requests SET adkim = ?, aspf = ?, policy = ?, spolicy = ?, pct = ? WHERE id = ?");
+-
+-		if (!$dbi_s->execute($adkim, $aspf, $p, $sp, $pct, $request_id))
++		if (!$dbi_s->execute($from_id, $repuri, $adkim, $aspf, $p, $sp, $pct))
+ 		{
+-			print STDERR "$progname: failed to update policy data for $fdomain: " . $dbi_h->errstr . "\n";
++			print STDERR "$progname: failed to insert policy data for $fdomain: " . $dbi_h->errstr . "\n";
+ 			$dbi_s->finish;
+ 			return;
+ 		}

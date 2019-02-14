@@ -1,0 +1,179 @@
+From 8fb815ec846d9ac64c89ac21cededc17f0b804c3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Mon, 24 Sep 2012 07:58:29 +0300
+Subject: [PATCH] fbsplash: support console switching
+
+---
+ miscutils/fbsplash.c | 82 ++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 75 insertions(+), 7 deletions(-)
+
+diff --git a/miscutils/fbsplash.c b/miscutils/fbsplash.c
+index bc3c61055..1c206ef53 100644
+--- a/miscutils/fbsplash.c
++++ b/miscutils/fbsplash.c
+@@ -47,7 +47,7 @@
+ //kbuild:lib-$(CONFIG_FBSPLASH) += fbsplash.o
+ 
+ //usage:#define fbsplash_trivial_usage
+-//usage:       "-s IMGFILE [-c] [-d DEV] [-i INIFILE] [-f CMD]"
++//usage:       "-s IMGFILE [-c] [-d DEV] [-i INIFILE] [-f CMD] [-T tty]"
+ //usage:#define fbsplash_full_usage "\n\n"
+ //usage:       "	-s	Image"
+ //usage:     "\n	-c	Hide cursor"
+@@ -57,11 +57,17 @@
+ //usage:     "\n			BAR_R,BAR_G,BAR_B,IMG_LEFT,IMG_TOP"
+ //usage:     "\n	-f	Control pipe (else exit after drawing image)"
+ //usage:     "\n			commands: 'NN' (% for progress bar) or 'exit'"
++//usage:     "\n	-T	Switch to TTY to hide all console messages"
+ 
+ #include "libbb.h"
+ #include "common_bufsiz.h"
+ #include <linux/fb.h>
+ 
++#include <sys/vt.h>
++#include <sys/ioctl.h>
++#include <linux/tiocl.h>
++#include <linux/kd.h>
++
+ /* If you want logging messages on /tmp/fbsplash.log... */
+ #define DEBUG 0
+ 
+@@ -75,6 +81,8 @@ struct globals {
+ 	unsigned char *addr;	// pointer to framebuffer memory
+ 	unsigned ns[9];		// n-parameters
+ 	const char *image_filename;
++	int silent_tty, fd_tty_s;
++	bool do_not_draw;
+ 	struct fb_var_screeninfo scr_var;
+ 	struct fb_fix_screeninfo scr_fix;
+ 	unsigned bytes_per_pixel;
+@@ -488,6 +496,11 @@ static void init(const char *cfg_filename)
+ 	config_close(parser);
+ }
+ 
++static void sighandler(int sig)
++{
++	ioctl(G.fd_tty_s, VT_RELDISP, sig == SIGUSR1 ? 1 : 2);
++	G.do_not_draw = (sig != SIGUSR2);
++}
+ 
+ int fbsplash_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
+ int fbsplash_main(int argc UNUSED_PARAM, char **argv)
+@@ -497,6 +510,9 @@ int fbsplash_main(int argc UNUSED_PARAM, char **argv)
+ 	char *num_buf;
+ 	unsigned num;
+ 	bool bCursorOff;
++	int fd_tty0, active_vt;
++	struct vt_stat vtstat;
++	struct vt_mode vt;
+ 
+ 	INIT_G();
+ 
+@@ -504,8 +520,9 @@ int fbsplash_main(int argc UNUSED_PARAM, char **argv)
+ 	fb_device = "/dev/fb0";
+ 	cfg_filename = NULL;
+ 	fifo_filename = NULL;
+-	bCursorOff = 1 & getopt32(argv, "cs:d:i:f:",
+-			&G.image_filename, &fb_device, &cfg_filename, &fifo_filename);
++	bCursorOff = 1 & getopt32(argv, "cs:d:i:f:T:+",
++			&G.image_filename, &fb_device, &cfg_filename, &fifo_filename,
++			&G.silent_tty);
+ 
+ 	// parse configuration file
+ 	if (cfg_filename)
+@@ -515,11 +532,43 @@ int fbsplash_main(int argc UNUSED_PARAM, char **argv)
+ 	if (!G.image_filename)
+ 		bb_show_usage();
+ 
++	fd_tty0 = get_console_fd_or_die();
++	if (G.silent_tty) {
++		char buf[16];
++
++		/* Initialize TTY */
++		bb_signals((1LL << SIGUSR1) | (1LL << SIGUSR2), sighandler);
++		snprintf(buf, sizeof(buf), "/dev/tty%d", G.silent_tty);
++		G.fd_tty_s = xopen(buf, O_RDWR | O_NOCTTY);
++
++		/* Activate TTY */
++		xioctl(fd_tty0, VT_GETSTATE, &vtstat);
++		active_vt = vtstat.v_active;
++		console_make_active(fd_tty0, G.silent_tty);
++
++		/* Get notifications on console changes */
++		vt.mode   = VT_PROCESS;
++		vt.waitv  = 0;
++		vt.relsig = SIGUSR1;
++		vt.acqsig = SIGUSR2;
++		ioctl(G.fd_tty_s, VT_SETMODE, &vt);
++
++		/* Redirect all kernel messages to tty1 so that they don't get
++		 * printed over our silent splash image. And clear it. */
++		buf[0] = TIOCL_SETKMSGREDIRECT;
++		buf[1] = 1;
++		ioctl(G.fd_tty_s, TIOCLINUX, buf);
++		full_write(G.fd_tty_s, "\e[H\e[2J" "\e[?17;0c", 7+8);
++		ioctl(G.fd_tty_s, KDSETMODE, KD_GRAPHICS);
++	} else {
++		G.fd_tty_s = STDOUT_FILENO;
++	}
++
+ 	fb_open(fb_device);
+ 
+ 	if (fifo_filename && bCursorOff) {
+ 		// hide cursor (BEFORE any fb ops)
+-		full_write(STDOUT_FILENO, ESC"[?25l", 6);
++		full_write(G.fd_tty_s, ESC"[?25l", 6);
+ 	}
+ 
+ 	fb_drawimage();
+@@ -527,6 +576,7 @@ int fbsplash_main(int argc UNUSED_PARAM, char **argv)
+ 	if (!fifo_filename)
+ 		return EXIT_SUCCESS;
+ 
++	sig_block(SIGUSR1);
+ 	fp = xfopen_stdin(fifo_filename);
+ 	if (fp != stdin) {
+ 		// For named pipes, we want to support this:
+@@ -542,8 +592,9 @@ int fbsplash_main(int argc UNUSED_PARAM, char **argv)
+ 		// and become an additional writer :)
+ 		open(fifo_filename, O_WRONLY); // errors are ignored
+ 	}
+-
+ 	fb_drawprogressbar(0);
++	sig_unblock(SIGUSR1);
++
+ 	// Block on read, waiting for some input.
+ 	// Use of <stdio.h> style I/O allows to correctly
+ 	// handle a case when we have many buffered lines
+@@ -558,12 +609,29 @@ int fbsplash_main(int argc UNUSED_PARAM, char **argv)
+ #if DEBUG
+ 			DEBUG_MESSAGE(itoa(num));
+ #endif
+-			fb_drawprogressbar(num);
++			sig_block(SIGUSR1);
++			if (!G.do_not_draw)
++				fb_drawprogressbar(num);
++			sig_unblock(SIGUSR1);
+ 		}
+ 		free(num_buf);
+ 	}
+ 
+-	if (bCursorOff) // restore cursor
++	if (G.silent_tty) {
++		usleep(100*1000);
++
++		ioctl(G.fd_tty_s, VT_RELDISP, 1);
++		ioctl(G.fd_tty_s, KDSETMODE, KD_TEXT);
++		vt.mode  = VT_AUTO;
++		vt.waitv = 0;
++		ioctl(G.fd_tty_s, VT_SETMODE, &vt);
++		close(G.fd_tty_s);
++
++		xioctl(fd_tty0, VT_GETSTATE, &vtstat);
++		if (vtstat.v_active == G.silent_tty)
++			console_make_active(fd_tty0, active_vt);
++		ioctl(fd_tty0, VT_DISALLOCATE, (void *)(ptrdiff_t)G.silent_tty);
++	} else if (bCursorOff) // restore cursor
+ 		full_write(STDOUT_FILENO, ESC"[?25h", 6);
+ 
+ 	return EXIT_SUCCESS;

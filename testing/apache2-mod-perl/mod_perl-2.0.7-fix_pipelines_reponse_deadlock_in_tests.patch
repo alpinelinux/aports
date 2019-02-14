@@ -1,0 +1,108 @@
+Fix pipelined response deadlock in tests
+
+There's a race condition that can cause mod_perl's test suite to hang
+in t/filter/in_str_declined.t.  The problem is that the response handler
+starts generating response body, and so triggers header output, before
+it reads the request body.  If LWP::Protocol::http, which is the client
+for this test, receives a complete set of response headers, it will stop
+sending the request body.  (However, if the request body is no more than
+8192 octets then it will send the whole body before it starts looking
+for a response.  The failure only shows up with an appreciably large
+request body.)
+
+RFC 2616 doesn't explicitly address this sort of pipelining, but the
+start of section 6 does say "After receiving and interpreting a request
+message, a server responds with an HTTP response message.", which can be
+read as prohibiting sending any part of the response before the entire
+request has been received.
+
+The attached patch fixes this issue by making all the POST handlers in
+the test suite read the body before doing anything that generates output
+(specifically plan()).
+
+-zefram
+
+CPAN RT#82409
+Debian bug #676754
+
+--- a/t/filter/TestFilter/in_str_declined.pm	2011-02-08 02:00:11.000000000 +0000
++++ b/t/filter/TestFilter/in_str_declined.pm	2013-01-04 16:08:14.000000000 +0000
+@@ -35,13 +35,17 @@
+ sub response {
+     my $r = shift;
+ 
++    my $data;
++    if ($r->method_number == Apache2::Const::M_POST) {
++        # consume the data so the input filter is invoked
++        $data = TestCommon::Utils::read_post($r);
++    }
++
+     plan $r, tests => 2;
+ 
+     $r->content_type('text/plain');
+ 
+     if ($r->method_number == Apache2::Const::M_POST) {
+-        # consume the data so the input filter is invoked
+-        my $data = TestCommon::Utils::read_post($r);
+         ok t_cmp(length $data, 20000, "the request body received ok");
+     }
+ 
+--- a/t/filter/TestFilter/in_str_declined_read.pm	2011-02-08 02:00:11.000000000 +0000
++++ b/t/filter/TestFilter/in_str_declined_read.pm	2013-01-04 16:06:28.000000000 +0000
+@@ -31,14 +31,19 @@
+ sub response {
+     my $r = shift;
+ 
++    my $err;
++    if ($r->method_number == Apache2::Const::M_POST) {
++        # this should fail, because of the failing filter
++        eval { TestCommon::Utils::read_post($r) };
++        $err = $@;
++    }
++
+     plan $r, tests => 1;
+ 
+     $r->content_type('text/plain');
+ 
+     if ($r->method_number == Apache2::Const::M_POST) {
+-        # this should fail, because of the failing filter
+-        eval { TestCommon::Utils::read_post($r) };
+-        ok $@;
++        ok $err;
+     }
+ 
+     Apache2::Const::OK;
+--- a/t/filter/TestFilter/in_str_msg.pm	2011-02-08 02:00:11.000000000 +0000
++++ b/t/filter/TestFilter/in_str_msg.pm	2013-01-04 16:08:27.000000000 +0000
+@@ -76,10 +76,10 @@
+ sub response {
+     my $r = shift;
+ 
+-    plan $r, tests => 1;
+-
+     my $received = TestCommon::Utils::read_post($r);
+ 
++    plan $r, tests => 1;
++
+     ok t_cmp($received, $expected,
+              "request filter must have upcased the data");
+ 
+--- a/t/response/TestModperl/post_utf8.pm	2011-02-08 02:00:12.000000000 +0000
++++ b/t/response/TestModperl/post_utf8.pm	2013-01-04 16:04:39.000000000 +0000
+@@ -29,14 +29,14 @@
+ #    $r->content_type("text/plain; charset=utf-8");
+ #    $r->print("expected: $expected_utf8\n");
+ 
++    my $received = TestCommon::Utils::read_post($r) || "";
++
+     # utf encode/decode was added only in 5.8.0
+     # XXX: currently binmode is only available with perlio (used on the
+     # server side on the tied/perlio STDOUT)
+     plan $r, tests => 2,
+         need need_min_perl_version(5.008), need_perl('perlio');
+ 
+-    my $received = TestCommon::Utils::read_post($r) || "";
+-
+     # workaround for perl-5.8.0, which doesn't decode correctly a
+     # tainted variable
+     require ModPerl::Util;

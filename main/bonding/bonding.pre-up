@@ -1,0 +1,144 @@
+#!/bin/sh
+
+[ "$VERBOSITY" = 1 ] && set -x
+
+IFSTATE=/var/run/ifstate
+
+add_master()
+{
+	# Return if $BOND_MASTER is already a bonding interface.
+	[ -f "/sys/class/net/$BOND_MASTER/bonding/slaves" ] && return
+
+	# If the bonding module is not yet loaded, load it.
+	if [ ! -r /sys/class/net/bonding_masters ]; then
+		modprobe -q bonding
+	fi
+
+	# Create the master interface.
+	if ! grep -sq "\\<$BOND_MASTER\\>" /sys/class/net/bonding_masters; then
+		echo "+$BOND_MASTER" > /sys/class/net/bonding_masters
+	fi
+}
+
+sysfs()
+{
+	# Called with :
+	# $1 = value to write. Won't write if $1 is empty.
+	# $2 = basename of the file in bonding/ to write to.
+	if [ "$1" ] ; then
+		echo "$1" > "/sys/class/net/$BOND_MASTER/bonding/$2"
+		return $?
+	fi
+	return 0
+}
+
+sysfs_add()
+{
+	# Called with :
+	# $1 = values to write.
+	# $2 = target filename.
+	for value in $1; do
+		# Do not add $1 to $2 if already present.
+		if ! grep -sq "\\<$value\\>" /sys/class/net/$BOND_MASTER/bonding/$2
+		then
+		    sysfs "+$value" "$2"
+		fi 
+	done
+}
+
+ifup_once()
+{
+	local v=
+	[ "$VERBOSITY" = 1 ] && v=-v
+	if [ "$1" != "$IFACE" ] && ! grep -q "^$1=" $IFSTATE && ifup -n "$1" >/dev/null 2>&1; then
+		ifup $v $1
+	fi
+}
+
+enslave_slaves()
+{
+	case "$BOND_SLAVES" in
+		none)
+			BOND_SLAVES=""
+			;;
+		all)
+			BOND_SLAVES=`sed -ne 's/ *\(eth[^:]*\):.*/\1/p' /proc/net/dev`
+			AUTOIF="yes"
+			;;
+	esac
+
+	for slave in $BOND_SLAVES ; do
+		if ( [ "$AUTOIF" ] && grep -q "^$slave=" $IFSTATE ) ; then
+			echo "Not enslaving interface $slave since it is already configured"
+		else
+			# Ensure $slave is down.
+			ip link set "$slave" down 2>/dev/null
+			if ! sysfs_add "$slave" slaves 2>/dev/null ; then
+				echo "Failed to enslave $slave to $BOND_MASTER. Is $BOND_MASTER ready and a bonding interface ?" >&2
+			else
+				# Bring up slave if it is defined in interfaces 
+				# This is usefull to bring up slaves that need extra setup.
+				ifup_once $slave
+			fi
+		fi
+	done
+}
+
+setup_master()
+{
+	sysfs "$IF_BOND_MODE" mode
+	sysfs "$IF_BOND_MIIMON" miimon
+	sysfs "$IF_BOND_USE_CARRIER" use_carrier
+	sysfs "$IF_BOND_UPDELAY" updelay
+	sysfs "$IF_BOND_DOWNDELAY" downdelay
+	sysfs "$IF_BOND_ARP_INTERVAL" arp_interval
+	sysfs "$IF_BOND_ARP_VALIDATE" arp_validate
+	sysfs "$IF_BOND_FAIL_OVER_MAC" fail_over_mac
+	sysfs "$IF_BOND_XMIT_HASH_POLICY" xmit_hash_policy
+	sysfs "$IF_BOND_LACP_RATE" lacp_rate
+	sysfs_add "$IF_BOND_ARP_IP_TARGET" arp_ip_target
+}
+
+setup_slaves()
+{
+	# The first slave in bond-primary found in current slaves becomes the primary.
+	# If no slave in bond-primary is found, then primary does not change.
+	for slave in $IF_BOND_PRIMARY ; do
+		if grep -sq "\\<$slave\\>" "/sys/class/net/$BOND_MASTER/bonding/slaves" ; then
+			sysfs "$slave" primary
+			break
+		fi
+	done
+
+	if [ "$IF_BOND_ACTIVE_SLAVE" ] ; then
+		# Need to force interface up before. Bonding will refuse to activate a down interface.
+		ip link set "$IF_BOND_ACTIVE_SLAVE" up
+		sysfs "$IF_BOND_ACTIVE_SLAVE" active_slave
+	fi
+}
+
+# Are there anything to do ?
+
+# Option slaves deprecated, replaced by bond-slaves, but still supported for backward compatibility.
+IF_BOND_SLAVES=${IF_BOND_SLAVES:-$IF_SLAVES}
+
+if [ "$IF_BOND_MASTER" ] ; then
+	BOND_MASTER="$IF_BOND_MASTER"
+	BOND_SLAVES="$IFACE"
+	if ! [ -e /sys/class/net/$IFACE/master ]; then
+		ifup_once $BOND_MASTER
+	fi
+else
+	if [ "$IF_BOND_SLAVES$IF_BOND_MODE" ]; then
+		BOND_MASTER="$IFACE"
+		BOND_SLAVES="$IF_BOND_SLAVES"
+	fi
+fi
+
+# Exit if nothing to do...
+[ -z "$BOND_MASTER$BOND_SLAVES" ] && exit
+
+add_master
+setup_master
+enslave_slaves
+setup_slaves

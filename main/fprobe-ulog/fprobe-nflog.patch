@@ -1,0 +1,617 @@
+diff -ru fprobe-ulog-1.2.orig/src/Makefile.am fprobe-ulog-1.2/src/Makefile.am
+--- fprobe-ulog-1.2.orig/src/Makefile.am	2014-12-23 19:26:37.000000000 -0200
++++ fprobe-ulog-1.2/src/Makefile.am	2015-07-10 11:23:21.839152998 -0300
+@@ -11,4 +11,4 @@
+ 
+ EXTRA_DIST = ${man_MANS}
+ 
+-fprobe_ulog_LDADD = -lnetfilter_log_libipulog
++fprobe_ulog_LDADD = -lnetfilter_log -lnfnetlink
+diff -ru fprobe-ulog-1.2.orig/src/Makefile.in fprobe-ulog-1.2/src/Makefile.in
+--- fprobe-ulog-1.2.orig/src/Makefile.in	2014-12-23 20:02:22.000000000 -0200
++++ fprobe-ulog-1.2/src/Makefile.in	2015-07-10 11:23:32.279250285 -0300
+@@ -293,7 +293,7 @@
+ 
+ man_MANS = fprobe-ulog.8
+ EXTRA_DIST = ${man_MANS}
+-fprobe_ulog_LDADD = -lnetfilter_log_libipulog
++fprobe_ulog_LDADD = -lnetfilter_log -lnfnetlink
+ all: all-am
+ 
+ .SUFFIXES:
+diff -ru fprobe-ulog-1.2.orig/src/fprobe-ulog.c fprobe-ulog-1.2/src/fprobe-ulog.c
+--- fprobe-ulog-1.2.orig/src/fprobe-ulog.c	2015-07-10 11:22:29.668666836 -0300
++++ fprobe-ulog-1.2/src/fprobe-ulog.c	2015-07-10 11:23:06.479009860 -0300
+@@ -27,14 +27,8 @@
+ #include <asm/types.h>
+ #include <sys/socket.h>
+ #include <linux/netlink.h>
+-#include <libnetfilter_log/libipulog.h>
+-struct ipulog_handle {
+-	int fd;
+-	u_int8_t blocking;
+-	struct sockaddr_nl local;
+-	struct sockaddr_nl peer;
+-	struct nlmsghdr* last_nlhdr;
+-};
++#include <libnfnetlink/libnfnetlink.h>
++#include <libnetfilter_log/libnetfilter_log.h>
+ 
+ /* inet_*() (Linux, FreeBSD, Solaris), getpid() */
+ #include <sys/types.h>
+@@ -106,7 +100,6 @@
+ 	Uflag,
+ 	uflag,
+ 	vflag,
+-	Xflag,
+ };
+ 
+ static struct getopt_parms parms[] = {
+@@ -129,7 +122,6 @@
+ 	{'U', MY_GETOPT_ARG_REQUIRED, 0, 0},
+ 	{'u', MY_GETOPT_ARG_REQUIRED, 0, 0},
+ 	{'v', MY_GETOPT_ARG_REQUIRED, 0, 0},
+-	{'X', MY_GETOPT_ARG_REQUIRED, 0, 0},
+ 	{0, 0, 0, 0}
+ };
+ 
+@@ -208,21 +200,19 @@
+ static pid_t pid;
+ static int killed;
+ static int emit_timeout = EMIT_TIMEOUT, unpending_timeout = UNPENDING_TIMEOUT;
+-static struct ipulog_handle *ulog_handle;
+-static uint32_t ulog_gmask = 1;
++static struct nflog_handle *nflog_handle;
++static uint32_t nflog_gmask = 1;
+ static unsigned char *cap_buf;
+-static int nsnmp_rules;
+-static struct snmp_rule *snmp_rules;
+ static struct passwd *pw = 0;
+ 
+ void usage()
+ {
+ 	fprintf(stdout,
+-		"fprobe-ulog: a NetFlow probe. Version %s\n"
+-		"Usage: fprobe-ulog [options] remote:port[/[local][/type]] ...\n"
++		"fprobe-nflog: a NetFlow probe. Version %s\n"
++		"Usage: fprobe-nflog [options] remote:port[/[local][/type]] ...\n"
+ 		"\n"
+ 		"-h\t\tDisplay this help\n"
+-		"-U <mask>\tULOG group bitwise mask [1]\n"
++		"-U <mask>\tNFLOG group bitwise mask [1]\n"
+ 		"-s <seconds>\tHow often scan for expired flows [5]\n"
+ 		"-g <seconds>\tFragmented flow lifetime [30]\n"
+ 		"-d <seconds>\tIdle flow lifetime (inactive timer) [60]\n"
+@@ -275,13 +265,18 @@
+ 	}
+ }
+ 
++static void timeval2time(struct timeval *tv, struct Time *t)
++{
++	t->sec = tv->tv_sec;
++	t->usec = tv->tv_usec;
++}
++
+ void gettime(struct Time *now)
+ {
+ 	struct timeval t;
+ 
+ 	gettimeofday(&t, 0);
+-	now->sec = t.tv_sec;
+-	now->usec = t.tv_usec;
++	timeval2time(&t, now);
+ }
+ 
+ inline time_t cmpmtime(struct Time *t1, struct Time *t2)
+@@ -302,21 +297,6 @@
+ 	else return hash(flow, sizeof(struct Flow_TL));
+ }
+ 
+-uint16_t snmp_index(char *name) {
+-	uint32_t i;
+-
+-	if (!*name) return 0;
+-
+-	for (i = 0; (int) i < nsnmp_rules; i++) {
+-		if (strncmp(snmp_rules[i].basename, name, snmp_rules[i].len)) continue;
+-		return atoi(&name[snmp_rules[i].len]) + snmp_rules[i].base;
+-	}
+-
+-	if ((i = if_nametoindex(name))) return i;
+-
+-	return -1;
+-}
+-
+ inline void copy_flow(struct Flow *src, struct Flow *dst)
+ {
+ 	dst->iif = src->iif;
+@@ -845,226 +825,230 @@
+ 	}
+ }
+ 
+-void *cap_thread()
++static int fprobe_cb(struct nflog_g_handle *gh, struct nfgenmsg *nfmsg,
++		struct nflog_data *nfd, void *data)
+ {
+-	struct ulog_packet_msg *ulog_msg;
++	struct timeval tv;
++	char *payload;
+ 	struct ip *nl;
+ 	void *tl;
+ 	struct Flow *flow;
+ 	int off_frag, psize;
+-	ssize_t len;
+ #if ((DEBUG) & DEBUG_C)
+ 	char buf[64];
+ 	char logbuf[256];
+ #endif
+ 
+-	while (!killed) {
+-		len = ipulog_read(ulog_handle, cap_buf, CAPTURE_SIZE, 1);
+-		if (len <= 0) {
+-			my_log(LOG_ERR, "ipulog_read(): %s", ipulog_strerror(ipulog_errno));
+-			continue;
+-		}
+-		while ((ulog_msg = ipulog_get_packet(ulog_handle, cap_buf, len))) {
++	if (killed)
++		return NFNL_CB_STOP;
+ 
++	psize = nflog_get_payload(nfd, &payload);
++	nl = (struct ip*) payload;
+ #if ((DEBUG) & DEBUG_C)
+-			sprintf(logbuf, "C: %d", ulog_msg->data_len);
++	sprintf(logbuf, "C: %d", psize);
+ #endif
+ 
+-			nl = (void *) &ulog_msg->payload;
+-			psize = ulog_msg->data_len;
+-
+-			/* Sanity check */
+-			if (psize < (signed) sizeof(struct ip) || nl->ip_v != 4) {
++	/* Sanity check */
++	if (psize < (signed) sizeof(struct ip) || nl->ip_v != 4) {
+ #if ((DEBUG) & DEBUG_C)
+-				strcat(logbuf, " U");
+-				my_log(LOG_DEBUG, "%s", logbuf);
++		strcat(logbuf, " U");
++		my_log(LOG_DEBUG, "%s", logbuf);
+ #endif
+ #if ((DEBUG) & DEBUG_I)
+-				pkts_ignored++;
++		pkts_ignored++;
+ #endif
+-				continue;
+-			}
++		return NFNL_CB_CONTINUE;
++	}
+ 
+-			if (pending_head->flags) {
++	if (pending_head->flags) {
+ #if ((DEBUG) & DEBUG_C) || defined MESSAGES
+-				my_log(LOG_ERR,
++		my_log(LOG_ERR,
+ # if ((DEBUG) & DEBUG_C)
+-					"%s %s %s", logbuf,
++			"%s %s %s", logbuf,
+ # else
+-					"%s %s",
++			"%s %s",
+ # endif
+-					"pending queue full:", "packet lost");
++			"pending queue full:", "packet lost");
+ #endif
+ #if ((DEBUG) & DEBUG_I)
+-				pkts_lost_capture++;
++		pkts_lost_capture++;
+ #endif
+-				goto done;
+-			}
++		goto done;
++	}
+ 
+ #if ((DEBUG) & DEBUG_I)
+-			pkts_total++;
++	pkts_total++;
+ #endif
+ 
+-			flow = pending_head;
++	flow = pending_head;
+ 
+-			/* ?FIXME? Add sanity check for ip_len? */
+-			flow->size = ntohs(nl->ip_len);
++	/* ?FIXME? Add sanity check for ip_len? */
++	flow->size = ntohs(nl->ip_len);
+ #if ((DEBUG) & DEBUG_I)
+-			size_total += flow->size;
++	size_total += flow->size;
+ #endif
+ 
+-			flow->sip = nl->ip_src;
+-			flow->dip = nl->ip_dst;
+-			flow->iif = snmp_index(ulog_msg->indev_name);
+-			flow->oif = snmp_index(ulog_msg->outdev_name);
+-			flow->tos = mark_is_tos ? ulog_msg->mark : nl->ip_tos;
+-			flow->proto = nl->ip_p;
+-			flow->id = 0;
+-			flow->tcp_flags = 0;
+-			flow->pkts = 1;
+-			flow->sizeF = 0;
+-			flow->sizeP = 0;
+-			/* Packets captured from OUTPUT table didn't contains valid timestamp */
+-			if (ulog_msg->timestamp_sec) {
+-				flow->ctime.sec = ulog_msg->timestamp_sec;
+-				flow->ctime.usec = ulog_msg->timestamp_usec;
+-			} else gettime(&flow->ctime);
+-			flow->mtime = flow->ctime;
+-
+-			off_frag = (ntohs(nl->ip_off) & IP_OFFMASK) << 3;
+-
+-			/*
+-			Offset (from network layer) to transport layer header/IP data
+-			IOW IP header size ;-)
+-
+-			?FIXME?
+-			Check ip_hl for valid value (>=5)? Maybe check CRC? No, thanks...
+-			*/
+-			off_tl = nl->ip_hl << 2;
+-			tl = (void *) nl + off_tl;
+-
+-			/* THIS packet data size: data_size = total_size - ip_header_size*4 */
+-			flow->sizeF = ntohs(nl->ip_len) - off_tl;
+-			psize -= off_tl;
+-			if ((signed) flow->sizeF < 0) flow->sizeF = 0;
+-			if (psize > (signed) flow->sizeF) psize = flow->sizeF;
++	flow->sip = nl->ip_src;
++	flow->dip = nl->ip_dst;
++	flow->iif = nflog_get_indev(nfd);
++	flow->oif = nflog_get_outdev(nfd);
++	flow->tos = mark_is_tos ? nflog_get_nfmark(nfd) : nl->ip_tos;
++	flow->proto = nl->ip_p;
++	flow->id = 0;
++	flow->tcp_flags = 0;
++	flow->pkts = 1;
++	flow->sizeF = 0;
++	flow->sizeP = 0;
++	/* Packets captured from OUTPUT table didn't contains valid timestamp */
++	if (nflog_get_timestamp(nfd, &tv) >= 0)
++		timeval2time(&tv, &flow->ctime);
++	else
++		gettime(&flow->ctime);
++	flow->mtime = flow->ctime;
++
++	off_frag = (ntohs(nl->ip_off) & IP_OFFMASK) << 3;
++
++	/*
++	Offset (from network layer) to transport layer header/IP data
++	IOW IP header size ;-)
++
++	?FIXME?
++	Check ip_hl for valid value (>=5)? Maybe check CRC? No, thanks...
++	*/
++	off_tl = nl->ip_hl << 2;
++	tl = (void *) nl + off_tl;
++
++	/* THIS packet data size: data_size = total_size - ip_header_size*4 */
++	flow->sizeF = ntohs(nl->ip_len) - off_tl;
++	psize -= off_tl;
++	if ((signed) flow->sizeF < 0) flow->sizeF = 0;
++	if (psize > (signed) flow->sizeF) psize = flow->sizeF;
+ 
+-			if (ntohs(nl->ip_off) & (IP_MF | IP_OFFMASK)) {
+-				/* Fragmented packet (IP_MF flag == 1 or fragment offset != 0) */
++	if (ntohs(nl->ip_off) & (IP_MF | IP_OFFMASK)) {
++		/* Fragmented packet (IP_MF flag == 1 or fragment offset != 0) */
+ #if ((DEBUG) & DEBUG_C)
+-				strcat(logbuf, " F");
++		strcat(logbuf, " F");
+ #endif
+ #if ((DEBUG) & DEBUG_I)
+-				pkts_total_fragmented++;
++		pkts_total_fragmented++;
+ #endif
+-				flow->flags |= FLOW_FRAG;
+-				flow->id = nl->ip_id;
++		flow->flags |= FLOW_FRAG;
++		flow->id = nl->ip_id;
+ 
+-				if (!(ntohs(nl->ip_off) & IP_MF)) {
+-					/* Packet whith IP_MF contains information about whole datagram size */
+-					flow->flags |= FLOW_LASTFRAG;
+-					/* size = frag_offset*8 + data_size */
+-					flow->sizeP = off_frag + flow->sizeF;
+-				}
+-			}
++		if (!(ntohs(nl->ip_off) & IP_MF)) {
++			/* Packet whith IP_MF contains information about whole datagram size */
++			flow->flags |= FLOW_LASTFRAG;
++			/* size = frag_offset*8 + data_size */
++			flow->sizeP = off_frag + flow->sizeF;
++		}
++	}
+ 
+ #if ((DEBUG) & DEBUG_C)
+-			sprintf(buf, " %s@%u>", inet_ntoa(flow->sip), flow->iif);
+-			strcat(logbuf, buf);
+-			sprintf(buf, "%s@%u P:%x", inet_ntoa(flow->dip), flow->oif, flow->proto);
+-			strcat(logbuf, buf);
++	sprintf(buf, " %s@%u>", inet_ntoa(flow->sip), flow->iif);
++	strcat(logbuf, buf);
++	sprintf(buf, "%s@%u P:%x", inet_ntoa(flow->dip), flow->oif, flow->proto);
++	strcat(logbuf, buf);
+ #endif
+ 
+-			/*
+-			Fortunately most interesting transport layer information fit
+-			into first 8 bytes of IP data field (minimal nonzero size).
+-			Thus we don't need actual packet reassembling to build whole
+-			transport layer data. We only check the fragment offset for
+-			zero value to find packet with this information.
+-			*/
+-			if (!off_frag && psize >= 8) {
+-				switch (flow->proto) {
+-					case IPPROTO_TCP:
+-					case IPPROTO_UDP:
+-						flow->sp = ((struct udphdr *)tl)->uh_sport;
+-						flow->dp = ((struct udphdr *)tl)->uh_dport;
+-						goto tl_known;
++	/*
++	Fortunately most interesting transport layer information fit
++	into first 8 bytes of IP data field (minimal nonzero size).
++	Thus we don't need actual packet reassembling to build whole
++	transport layer data. We only check the fragment offset for
++	zero value to find packet with this information.
++	*/
++	if (!off_frag && psize >= 8) {
++		switch (flow->proto) {
++			case IPPROTO_TCP:
++			case IPPROTO_UDP:
++				flow->sp = ((struct udphdr *)tl)->uh_sport;
++				flow->dp = ((struct udphdr *)tl)->uh_dport;
++				goto tl_known;
+ 
+ #ifdef ICMP_TRICK
+-					case IPPROTO_ICMP:
+-						flow->sp = htons(((struct icmp *)tl)->icmp_type);
+-						flow->dp = htons(((struct icmp *)tl)->icmp_code);
+-						goto tl_known;
++			case IPPROTO_ICMP:
++				flow->sp = htons(((struct icmp *)tl)->icmp_type);
++				flow->dp = htons(((struct icmp *)tl)->icmp_code);
++				goto tl_known;
+ #endif
+ #ifdef ICMP_TRICK_CISCO
+-					case IPPROTO_ICMP:
+-						flow->dp = *((int32_t *) tl);
+-						goto tl_known;
++			case IPPROTO_ICMP:
++				flow->dp = *((int32_t *) tl);
++				goto tl_known;
+ #endif
+ 
+-					default:
+-						/* Unknown transport layer */
++			default:
++				/* Unknown transport layer */
+ #if ((DEBUG) & DEBUG_C)
+-						strcat(logbuf, " U");
++				strcat(logbuf, " U");
+ #endif
+-						flow->sp = 0;
+-						flow->dp = 0;
+-						break;
++				flow->sp = 0;
++				flow->dp = 0;
++				break;
+ 
+-					tl_known:
++			tl_known:
+ #if ((DEBUG) & DEBUG_C)
+-						sprintf(buf, " %d>%d", ntohs(flow->sp), ntohs(flow->dp));
+-						strcat(logbuf, buf);
++				sprintf(buf, " %d>%d", ntohs(flow->sp), ntohs(flow->dp));
++				strcat(logbuf, buf);
+ #endif
+-						flow->flags |= FLOW_TL;
+-				}
+-			}
++				flow->flags |= FLOW_TL;
++		}
++	}
+ 
+-			/* Check for tcp flags presence (including CWR and ECE). */
+-			if (flow->proto == IPPROTO_TCP
+-				&& off_frag < 16
+-				&& psize >= 16 - off_frag) {
+-				flow->tcp_flags = *((uint8_t *)(tl + 13 - off_frag));
++	/* Check for tcp flags presence (including CWR and ECE). */
++	if (flow->proto == IPPROTO_TCP
++		&& off_frag < 16
++		&& psize >= 16 - off_frag) {
++		flow->tcp_flags = *((uint8_t *)(tl + 13 - off_frag));
+ #if ((DEBUG) & DEBUG_C)
+-				sprintf(buf, " TCP:%x", flow->tcp_flags);
+-				strcat(logbuf, buf);
++		sprintf(buf, " TCP:%x", flow->tcp_flags);
++		strcat(logbuf, buf);
+ #endif
+-			}
++	}
+ 
+ #if ((DEBUG) & DEBUG_C)
+-			sprintf(buf, " => %x", (unsigned) flow);
+-			strcat(logbuf, buf);
+-			my_log(LOG_DEBUG, "%s", logbuf);
++	sprintf(buf, " => %x", (unsigned) flow);
++	strcat(logbuf, buf);
++	my_log(LOG_DEBUG, "%s", logbuf);
+ #endif
+ 
+ #if ((DEBUG) & DEBUG_I)
+-			pkts_pending++;
+-			pending_queue_trace_candidate = pkts_pending - pkts_pending_done;
+-			if (pending_queue_trace < pending_queue_trace_candidate)
+-				pending_queue_trace = pending_queue_trace_candidate;
++	pkts_pending++;
++	pending_queue_trace_candidate = pkts_pending - pkts_pending_done;
++	if (pending_queue_trace < pending_queue_trace_candidate)
++		pending_queue_trace = pending_queue_trace_candidate;
+ #endif
+ 
+-			/* Flow complete - inform unpending_thread() about it */
+-			pending_head->flags |= FLOW_PENDING;
+-			pending_head = pending_head->next;
+-		done:
+-			pthread_cond_signal(&unpending_cond);
+-		}
+-	}
++	/* Flow complete - inform unpending_thread() about it */
++	pending_head->flags |= FLOW_PENDING;
++	pending_head = pending_head->next;
++done:
++	pthread_cond_signal(&unpending_cond);
++
++	return NFNL_CB_CONTINUE;
++}
++
++void *cap_thread()
++{
++	while (!killed)
++		nfnl_catch(nflog_nfnlh(nflog_handle));
++
+ 	return 0;
+ }
+ 
+ int main(int argc, char **argv)
+ {
+ 	char errpbuf[512];
+-	char *dhost, *dport, *lhost, *type = 0, *log_suffix = 0, *rule;
++	char *dhost, *dport, *lhost, *type = 0, *log_suffix = 0;
+ 	int c, i, sock, memory_limit = 0;
++	struct nflog_g_handle *gh;
+ 	struct addrinfo hints, *res;
+ 	struct sockaddr_in saddr;
+ 	pthread_attr_t tattr;
+ 	struct sigaction sigact;
+ 	static void *threads[THREADS - 1] = {&emit_thread, &scan_thread, &unpending_thread, &cap_thread};
+ 	struct timeval timeout;
++	size_t s;
+ 
+ 	sched_min = sched_get_priority_min(SCHED);
+ 	sched_max = sched_get_priority_max(SCHED);
+@@ -1088,7 +1072,7 @@
+ 		}
+ 	}
+ 
+-	if (parms[Uflag].count) ulog_gmask = atoi(parms[Uflag].arg);
++	if (parms[Uflag].count) nflog_gmask = atoi(parms[Uflag].arg);
+ 	if (parms[sflag].count) scan_interval = atoi(parms[sflag].arg);
+ 	if (parms[gflag].count) frag_lifetime = atoi(parms[gflag].arg);
+ 	if (parms[dflag].count) inactive_lifetime = atoi(parms[dflag].arg);
+@@ -1156,31 +1140,6 @@
+ 		}
+ 	}
+ 	if (parms[mflag].count) memory_limit = atoi(parms[mflag].arg) << 10;
+-	if (parms[Xflag].count) {
+-		for(i = 0; parms[Xflag].arg[i]; i++)
+-			if (parms[Xflag].arg[i] == ':') nsnmp_rules++;
+-		if (!(snmp_rules = malloc(nsnmp_rules * sizeof(struct snmp_rule))))
+-			goto err_malloc;
+-		rule = strtok(parms[Xflag].arg, ":");
+-		for (i = 0; rule; i++) {
+-			snmp_rules[i].len = strlen(rule);
+-			if (snmp_rules[i].len > IFNAMSIZ) {
+-				fprintf(stderr, "Illegal %s\n", "interface basename");
+-				exit(1);
+-			}
+-			strncpy(snmp_rules[i].basename, rule, snmp_rules[i].len);
+-			if (!*(rule - 1)) *(rule - 1) = ',';
+-			rule = strtok(NULL, ",");
+-			if (!rule) {
+-				fprintf(stderr, "Illegal %s\n", "SNMP rule");
+-				exit(1);
+-			}
+-			snmp_rules[i].base = atoi(rule);
+-			*(rule - 1) = ':';
+-			rule = strtok(NULL, ":");
+-		}
+-		nsnmp_rules = i;
+-	}
+ 	if (parms[tflag].count)
+ 		sscanf(parms[tflag].arg, "%d:%d", &emit_rate_bytes, &emit_rate_delay);
+ 	if (parms[aflag].count) {
+@@ -1266,16 +1225,34 @@
+ 	}
+ 
+ 	if (!(cap_buf = malloc(CAPTURE_SIZE))) goto err_malloc;
+-	ulog_handle = ipulog_create_handle(ulog_gmask, CAPTURE_SIZE);
+-	if (!ulog_handle) {
+-		fprintf(stderr, "libipulog initialization error: %s",
+-			ipulog_strerror(ipulog_errno));
++	nflog_handle = nflog_open();
++	if (!nflog_handle) {
++		fprintf(stderr, "libnflog initialization error: %s",
++			strerror(nflog_errno));
+ 		exit(1);
+ 	}
+-	if (sockbufsize)
+-		if (setsockopt(ulog_handle->fd, SOL_SOCKET, SO_RCVBUF,
+-			&sockbufsize, sizeof(sockbufsize)) < 0)
+-			fprintf(stderr, "setsockopt(): %s", strerror(errno));
++
++	if (sockbufsize &&
++	    nfnl_rcvbufsiz(nflog_nfnlh(nflog_handle), sockbufsize) == 0)
++		fprintf(stderr, "nfnl_rcvbufsiz(): %s", strerror(errno));
++
++	if (nflog_bind_pf(nflog_handle, PF_INET) < 0) {
++		fprintf(stderr, "libnflog failed to bind PF_INET %d: %s",
++			i, strerror(nflog_errno));
++		exit(1);
++	}
++
++	for (s = 0; s < sizeof(nflog_gmask) * 8; s++) {
++		if (!(nflog_gmask & (1UL << s)))
++			continue;
++		gh = nflog_bind_group(nflog_handle, s + 1);
++		if (!gh) {
++			fprintf(stderr, "libnflog failed to bind group %d: %s",
++				i, strerror(nflog_errno));
++			exit(1);
++		}
++		nflog_callback_register(gh, fprobe_cb, NULL);
++	}
+ 
+ 	/* Daemonize (if log destination stdout-free) */
+ 
+@@ -1402,15 +1379,11 @@
+ 	my_log(LOG_INFO, "pid: %d", pid);
+ 	my_log(LOG_INFO, "options: u=%u s=%u g=%u d=%u e=%u n=%u a=%s "
+ 		"M=%d b=%u m=%u q=%u B=%u r=%u t=%u:%u c=%s u=%s v=%u l=%u%s",
+-		ulog_gmask, scan_interval, frag_lifetime, inactive_lifetime, active_lifetime,
++		nflog_gmask, scan_interval, frag_lifetime, inactive_lifetime, active_lifetime,
+ 		netflow->Version, inet_ntoa(saddr.sin_addr), mark_is_tos, bulk_quantity,
+ 		memory_limit >> 10, pending_queue_length, sockbufsize >> 10, schedp.sched_priority - 1,
+ 		emit_rate_bytes, emit_rate_delay, parms[cflag].count ? parms[cflag].arg : "",
+ 		parms[uflag].count ? parms[uflag].arg : "", verbosity, log_dest, log_suffix ? log_suffix : "");
+-	for (i = 0; i < nsnmp_rules; i++) {
+-		my_log(LOG_INFO, "SNMP rule #%d %s:%d",
+-			i + 1, snmp_rules[i].basename, snmp_rules[i].base);
+-	}
+ 	for (i = 0; i < npeers; i++) {
+ 		switch (peers[i].type) {
+ 			case PEER_MIRROR:
+diff -ru fprobe-ulog-1.2.orig/src/fprobe-ulog.h fprobe-ulog-1.2/src/fprobe-ulog.h
+--- fprobe-ulog-1.2.orig/src/fprobe-ulog.h	2005-01-29 21:30:41.000000000 -0200
++++ fprobe-ulog-1.2/src/fprobe-ulog.h	2015-07-10 11:23:06.479009860 -0300
+@@ -117,12 +117,6 @@
+ 	uint32_t seq;
+ };
+ 
+-struct snmp_rule {
+-	char basename[IFNAMSIZ];
+-	int len;
+-	int base;
+-} snmp_rule_t;
+-
+ #define PEER_MIRROR 0
+ #define PEER_ROTATE 1
+ 

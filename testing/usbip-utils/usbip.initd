@@ -1,0 +1,244 @@
+#!/sbin/openrc-run
+
+description="Load USBIP kernel modules and run daemon"
+
+: ${USBIP_EXEC:=$(which usbip)}
+: ${USBIP_EXEC_DAEMON:=$(which usbipd)}
+
+depend()
+{
+  provide usbip
+  need sysfs net
+}
+
+LoadKernelModule ()
+{
+  local module=$1
+  #-----------------
+  result=
+  if [ -z "$(/sbin/lsmod | grep "^$(basename $module)")" ]
+  then
+    local filename=$(find lib/modules/`uname -r`/kernel -type f -name $module.ko -printf '%f\n')
+    if [ -n "$filename" ]
+    then
+      if ! /sbin/modprobe $module
+      then
+        eerror "Cannot load kernel module '$module'."
+        result=failed
+      fi
+    else
+      eerror "Cannot find kernel module '$module'."
+      result=failed
+    fi
+  fi
+  [ -z "$result" ]
+}
+
+IsAvailable ()
+{
+  local bus_or_device=$(echo $1 | tr '[A-Z]' '[a-z]')
+  local host=$2
+  #-----------------
+  host=${host:+--remote=$host}
+  : ${host:=--local}
+  $USBIP_EXEC list --parsable $host |
+    sed -n 's|.*busid='$bus_or_device'#.*|yes|p; \
+            s|.*usbid='$bus_or_device'#.*|yes|p'
+}
+
+GetBus ()
+{
+  local device=$(echo $1 | tr '[A-Z]' '[a-z]')
+  local host=$2
+  #-----------------
+  host=${host:+--remote=$host}
+  : ${host:=--local}
+  case "$host" in
+    "--remote"*) # FIXME: USBIP bug causing remote devices not to be listed parsable
+      $USBIP_EXEC list --parsable $host |
+        sed -n 's|^[ \t]*\([0-9][0-9]*-[0-9][0-9]*\):.*('"$device"').*|\1|p';;
+    *)
+      $USBIP_EXEC list --parsable $host |
+        sed -n 's|.*busid=\([0-9][0-9]*-[0-9][0-9]*\)#usbid='"$device"'#.*|\1|p';;
+  esac
+}
+
+ExecuteUsbip()
+{
+  local command=$1
+  local bus=$2
+  local host=$3
+  local port=$4
+  #-----------------
+  local result=
+  if [ -n "$command" ]
+  then
+    if $USBIP_EXEC $command ${bus:+--busid=$bus} ${host:+--remote=$host} ${port:+--port $port} 1> /dev/null 2> /dev/null
+    then
+      einfo "Executed command '$command'${bus:+ with bus '$bus'}${host:+ on host '$host'}${port:+ on port '$port'}, successfully."
+    else
+      ewarn "Executing command '$command'${bus:+ with bus '$bus'}${host:+ on host '$host'}${port:+ on port '$port'} failed."
+      result=failed
+    fi
+  fi
+  [ -z "$result" ]
+}
+
+ValidateCommand ()
+{
+  local command=$1
+  local bus_or_device=$2
+  local host=$3
+  #-----------------
+  local result=
+  local bus=
+  if [ -z "$host" -o -n "$(echo $host | grep '^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$')" ]
+  then
+    if [ -n "$(echo $bus_or_device | grep '^[[:xdigit:]]\{4\}:[[:xdigit:]]\{4\}$')" ]
+    then
+      bus="$(GetBus $bus_or_device $host)"
+      if [ -z "$bus" ]
+      then
+        ewarn "Device '$bus_or_device' not available${host:+ on host '$host'}."
+        result=failed
+      fi
+    else
+      if [ -n "$(echo $bus_or_device | grep '^[0-9][0-9]*-[0-9][0-9]*$')" ]
+      then
+        bus=$bus_or_device
+      else
+        ewarn "Unrecognized bus or device '$bus_or_device'."
+        result=failed
+      fi
+    fi
+    if [ -n "$bus" ]
+    then
+      case "$command" in
+        "bind"|"unbind")
+          ExecuteUsbip $command $bus || result=failed;;
+        "attach")
+          if [ -n "$host" ]
+          then
+            ExecuteUsbip $command $bus $host || result=failed
+          else
+            ewarn "Host statement is missing in command '$command'."
+            result=failed
+          fi
+          ;;
+        *)
+          ewarn "Unhandled command '$command'."; result=failed;;
+      esac
+    fi
+  else
+    ewarn "Illegal host ip address '$host'."
+    result=failed
+  fi
+  [ -z "$result" ]
+}
+
+ProcessList ()
+{
+  local command=$1
+  shift
+  local list=$*
+  #-----------------
+  local result=
+  local no_host=
+  case "$command" in
+    "bind"|"unbind") no_host=yes;;
+    *)               no_host=;;
+  esac
+  local host=
+  local item=
+  ( for item in $list
+  do
+    if [ -n "$host" -o -n "$no_host" ]
+    then
+      ValidateCommand $command $item $host || result=failed
+      host=
+    else
+      host=$item
+    fi
+  done
+  [ -z "$result" ] )
+}
+
+DetachAll ()
+{
+  # FIXME: At this stage, there is no way to get the vhci_hcd port id of any attached device
+  for port in $(seq 0 15)
+  do
+    $USBIP_EXEC detach --port $port 2> /dev/null
+  done
+  [ 1 -eq 1 ]
+}
+
+UnbindAll ()
+{
+  local result=
+  ProcessList unbind "$($USBIP_EXEC list --parsable --local | sed -n 's|^busid=\([0-9][0-9]*-[0-9][0-9]*\)#.*=usbip-host#$|\1|p' | tr '\n' ' ')"
+}
+
+start_daemon()
+{
+  ebegin "Starting usbip daemon"
+  if LoadKernelModule usbip-host
+  then
+    start-stop-daemon --start --exec $USBIP_EXEC_DAEMON -- -D
+  fi
+  eend $?
+}
+
+start()
+{
+  ebegin "Starting usbip"
+  if LoadKernelModule usbip-core
+  then
+    if LoadKernelModule vhci-hcd
+    then
+      eend 0
+      if yesno "${USBIP_START_DAEMON:-no}"
+      then
+        start_daemon
+      fi
+      if [ -n "$USBIP_AUTO_BIND" ]
+      then
+        ebegin "Auto-binding local busses"
+        ProcessList bind $USBIP_AUTO_BIND
+        eend $?
+      fi
+      if [ -n "$USBIP_AUTO_ATTACH" ]
+      then
+        ebegin "Auto-attaching remote busses"
+        ProcessList attach $USBIP_AUTO_ATTACH
+        eend $?
+      fi
+    else
+      eend 1
+    fi
+  else
+    eend 1
+  fi
+}
+
+stop_daemon()
+{
+  ebegin "Stopping usbip daemon"
+  start-stop-daemon --stop --exec $USBIP_EXEC_DAEMON
+  eend $?
+}
+
+stop()
+{
+  ebegin "Detaching remote busses"
+  DetachAll
+  eend $?
+  ebegin "Un-binding local busses"
+  UnbindAll
+  eend $?
+  if [ -n "$(pidof $(basename "$USBIP_EXEC_DAEMON"))" ]
+  then
+    stop_daemon
+  fi
+}
+

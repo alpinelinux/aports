@@ -1,0 +1,110 @@
+#!/sbin/openrc-run
+
+description="OpenBSD Secure Shell server"
+description_checkconfig="Verify configuration file"
+description_reload="Reload configuration"
+
+extra_commands="checkconfig"
+extra_started_commands="reload"
+
+# NOTE: SSHD_* variables are deprecated and will be removed in future!
+: ${sshd_disable_keygen:="${SSHD_DISABLE_KEYGEN:-"no"}"}
+: ${cfgfile:=${SSHD_CONFIG:-"${SSHD_CONFDIR:-"/etc/ssh"}/sshd_config"}}
+
+pidfile="${SSHD_PIDFILE:-"/run/$RC_SVCNAME.pid"}"
+command="${SSHD_BINARY:-"/usr/sbin/sshd"}"
+command_args="${command_args:-${SSHD_OPTS:-}}"
+
+required_files="$cfgfile"
+
+depend() {
+	use logger dns
+
+	if [ "${rc_need+set}" = "set" ] ; then
+		: # Do nothing, the user has explicitly set rc_need
+	else
+		local x warn_addr
+		for x in $(awk '/^ListenAddress/{ print $2 }' "$cfgfile" 2>/dev/null) ; do
+			case "$x" in
+				0.0.0.0|0.0.0.0:*) ;;
+				::|\[::\]*) ;;
+				*) warn_addr="$warn_addr $x" ;;
+			esac
+		done
+		if [ -n "$warn_addr" ] ; then
+			need net
+			ewarn "You are binding an interface in ListenAddress statement in your sshd_config!"
+			ewarn "You must add rc_need=\"net.FOO\" to your /etc/conf.d/sshd"
+			ewarn "where FOO is the interface(s) providing the following address(es):"
+			ewarn "$warn_addr"
+		fi
+	fi
+}
+
+checkconfig() {
+	warn_deprecated_var SSHD_BINARY
+	warn_deprecated_var SSHD_CONFDIR
+	warn_deprecated_var SSHD_CONFIG cfgfile
+	warn_deprecated_var SSHD_DISABLE_KEYGEN sshd_disable_keygen
+	warn_deprecated_var SSHD_OPTS command_args
+	warn_deprecated_var SSHD_PIDFILE
+
+	if [ ! -d /var/empty ] ; then
+		mkdir -p /var/empty || return 1
+	fi
+
+	if ! yesno "$sshd_disable_keygen"; then
+		ssh-keygen -A || return 1
+	fi
+
+	[ "$pidfile" != "/run/sshd.pid" ] \
+		&& command_args="$command_args -o PidFile=$pidfile"
+
+	[ "$cfgfile" != "/etc/ssh/sshd_config" ] \
+		&& command_args="$command_args -f $cfgfile"
+
+	"$command" -t $command_args || return 1
+}
+
+start_pre() {
+	checkconfig
+}
+
+stop() {
+	if [ "${RC_CMD}" = "restart" ] ; then
+		checkconfig || return 1
+	fi
+
+	ebegin "Stopping $RC_SVCNAME"
+	start-stop-daemon --stop --exec "$command" \
+		--pidfile "$pidfile" --quiet
+	eend $?
+
+	if [ "$RC_RUNLEVEL" = "shutdown" ]; then
+		_sshd_pids=$(pgrep "${command##*/}")
+		if [ -n "$_sshd_pids" ]; then
+			ebegin "Shutting down ssh connections"
+			kill -TERM $_sshd_pids >/dev/null 2>&1
+			eend 0
+		fi
+	fi
+}
+
+reload() {
+	checkconfig || return 1
+
+	ebegin "Reloading $RC_SVCNAME"
+	start-stop-daemon --signal HUP \
+		--exec "$command" --pidfile "$pidfile"
+	eend $?
+}
+
+warn_deprecated_var() {
+	local varname="$1"
+	local replacement="${2:-}"
+
+	eval "test -n \"\$$varname\"" || return 0
+
+	ewarn "Variable \$$varname is deprecated and will be removed in the future!"
+	[ "$replacement" ] && ewarn "Use \$$replacement instead of \$$varname." ||:
+}

@@ -1,0 +1,118 @@
+#!/bin/sh
+#
+# This hook checks that all local sources specified in the staged APKBUILDs
+# are staged too or already committed and that checksums are correct.
+#
+set -eu
+
+# Maximal allowed size (in bytes) of a file.
+FILE_SIZE_LIMIT=262144  # 256 kiB
+
+
+if ! command -v sha512sum >/dev/null; then
+	# macOS / BSDs (?) don't have sha512sum, but shasum.
+	alias sha512sum='shasum -a 512'
+fi
+
+error() {
+	printf '\033[0;31mpre-commit:\033[0m %s\n' "$1" >&2  # red
+}
+
+# Prints paths of created or modified files being committed.
+changed_files() {
+	git diff-index \
+		--name-only \
+		--cached \
+		--diff-filter=ACMR HEAD \
+		-- "$@"
+}
+
+# Prints file names and checksums (in format <SHA-512>:<filename>) of local
+# sources specified in the APKBUILD ($1).
+abuild_local_sources() {
+	apkbuild="$1"
+
+	set +eu
+	. "$apkbuild" || {
+		error "$apkbuild is invalid"
+		return 1
+	}
+	set -eu
+
+	status=0
+	: ${source:=""}
+	for src in $source; do
+		# Skip remote sources.
+		case "$src" in */*) continue;; esac
+
+		echo "$sha512sums" | awk -v src="$src" '
+				{ if ($2 == src) { ok=1; print($2 ":" $1) } }
+				END { if (ok != 1) exit 1 }' || {
+			status=1
+			error "${apkbuild%/*}: file \"$src\" is missing in \$sha512sums (hint: run abuild checksum)"
+		}
+	done
+
+	return $status
+}
+
+# check if given object is a symlink
+is_symlink() {
+	test "$(git ls-files --stage "$1" | awk '{print $1}')" = "120000"
+}
+
+# Checks that all local sources specified in the APKBUILD file ($1) are
+# available in git tree and checksums are correct.
+check_local_sources() {
+	local apkbuild="$1"
+	local startdir="${apkbuild%/*}"
+	local status=0
+	local checksum_act checksum_exp content filename line sources
+
+	sources=$(abuild_local_sources "$apkbuild")
+	for line in $sources; do
+		filename=${line%%:*}
+		checksum_exp=${line#*:}
+
+		if ! git cat-file -e ":$startdir/$filename" 2>/dev/null; then
+			error "$startdir: missing file \"$filename\""
+			status=1
+			continue
+		fi
+
+		if is_symlink ":$startdir/$filename"; then
+			continue
+		fi
+
+		checksum_act=$(git show ":$startdir/$filename" | sha512sum)
+		if [ "$checksum_act" != "$checksum_exp  -" ]; then
+			error "$startdir: bad checksum for file \"$filename\" (hint: run abuild checksum)"
+			status=1
+		fi
+	done
+
+	return $status
+}
+
+# Checks if the file ($1) being committed is not bigger than FILE_SIZE_LIMIT.
+check_file_size() {
+	local path="$1"
+	local size
+
+	size=$(git cat-file -s ":$path")
+	if [ $size -gt $FILE_SIZE_LIMIT ]; then
+		local size_kb=$(( size / 1024 ))
+
+		error "file \"$path\" is quite big ($(( size / 1024 )) kiB), better to upload it to dev.alpinelinux.org"
+		return 1
+	fi
+}
+
+
+for apkbuild in $(changed_files '**/APKBUILD'); do
+	check_local_sources "$apkbuild"
+done
+
+for path in $(changed_files); do
+	check_file_size "$path"
+done

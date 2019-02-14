@@ -1,0 +1,140 @@
+From ddea82ad5cb547f3582060d6a0265bb96a0634ea Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Tue, 3 Jun 2014 08:53:47 +0000
+Subject: [PATCH] pppd: add support for defaultroute-metric option
+
+This allows user to specify the 'metric' (or 'prio') for the default
+route set by pppd. This is useful in multi-ISP setups where there
+might be more than one default gateway.
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ pppd/options.c   |  5 +++++
+ pppd/pppd.8      |  6 ++++++
+ pppd/sys-linux.c | 24 ++++++++++++++++--------
+ 3 files changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/pppd/options.c b/pppd/options.c
+index 45fa742..ca3f875 100644
+--- a/pppd/options.c
++++ b/pppd/options.c
+@@ -121,6 +121,7 @@ bool	dryrun;			/* print out option values and exit */
+ char	*domain;		/* domain name set by domain option */
+ int	child_wait = 5;		/* # seconds to wait for children at exit */
+ struct userenv *userenv_list;	/* user environment variables */
++int	dfl_route_metric = -1;	/* metric of the default route to set over the PPP link */
+ 
+ #ifdef MAXOCTETS
+ unsigned int  maxoctets = 0;    /* default - no limit */
+@@ -299,6 +300,10 @@ option_t general_options[] = {
+       "Unset user environment variable",
+       OPT_A2PRINTER | OPT_NOPRINT, (void *)user_unsetprint },
+ 
++    { "defaultroute-metric", o_int, &dfl_route_metric,
++      "Metric to use for the default route (Linux only; -1 for default behavior)",
++      OPT_PRIV|OPT_LLIMIT|OPT_INITONLY, NULL, 0, -1 },
++
+ #ifdef HAVE_MULTILINK
+     { "multilink", o_bool, &multilink,
+       "Enable multilink operation", OPT_PRIO | 1 },
+diff --git a/pppd/pppd.8 b/pppd/pppd.8
+index e2768b1..c508d27 100644
+--- a/pppd/pppd.8
++++ b/pppd/pppd.8
+@@ -121,6 +121,12 @@ the gateway, when IPCP negotiation is successfully completed.
+ This entry is removed when the PPP connection is broken.  This option
+ is privileged if the \fInodefaultroute\fR option has been specified.
+ .TP
++.B defaultroute-metric
++Define the metric of the \fIdefaultroute\fR and only add it if there
++is no other default route with the same metric.  With the default
++value of -1, the route is only added if there is no default route at
++all.
++.TP
+ .B disconnect \fIscript
+ Execute the command specified by \fIscript\fR, by passing it to a
+ shell, after
+diff --git a/pppd/sys-linux.c b/pppd/sys-linux.c
+index 72a7727..6d71530 100644
+--- a/pppd/sys-linux.c
++++ b/pppd/sys-linux.c
+@@ -232,7 +232,7 @@ static int baud_rate_of (int speed);
+ static void close_route_table (void);
+ static int open_route_table (void);
+ static int read_route_table (struct rtentry *rt);
+-static int defaultroute_exists (struct rtentry *rt);
++static int defaultroute_exists (struct rtentry *rt, int metric);
+ static int get_ether_addr (u_int32_t ipaddr, struct sockaddr *hwaddr,
+ 			   char *name, int namelen);
+ static void decode_version (char *buf, int *version, int *mod, int *patch);
+@@ -242,6 +242,8 @@ static int make_ppp_unit(void);
+ 
+ extern u_char	inpacket_buf[];	/* borrowed from main.c */
+ 
++extern int dfl_route_metric;
++
+ /*
+  * SET_SA_FAMILY - set the sa_family field of a struct sockaddr,
+  * if it exists.
+@@ -1550,9 +1552,10 @@ static int read_route_table(struct rtentry *rt)
+ /********************************************************************
+  *
+  * defaultroute_exists - determine if there is a default route
++ * with the given metric (or negative for any)
+  */
+ 
+-static int defaultroute_exists (struct rtentry *rt)
++static int defaultroute_exists (struct rtentry *rt, int metric)
+ {
+     int result = 0;
+ 
+@@ -1565,7 +1568,8 @@ static int defaultroute_exists (struct rtentry *rt)
+ 
+ 	if (kernel_version > KVERSION(2,1,0) && SIN_ADDR(rt->rt_genmask) != 0)
+ 	    continue;
+-	if (SIN_ADDR(rt->rt_dst) == 0L) {
++	if (SIN_ADDR(rt->rt_dst) == 0L && (metric < 0 ||
++			 (metric >= 0 && (rt->rt_metric + 1) == metric))) {
+ 	    result = 1;
+ 	    break;
+ 	}
+@@ -1612,13 +1616,13 @@ int sifdefaultroute (int unit, u_int32_t ouraddr, u_int32_t gateway)
+ {
+     struct rtentry rt;
+ 
+-    if (defaultroute_exists(&rt) && strcmp(rt.rt_dev, ifname) != 0) {
++    if (defaultroute_exists(&rt, dfl_route_metric) && strcmp(rt.rt_dev, ifname) != 0) {
+ 	if (rt.rt_flags & RTF_GATEWAY)
+-	    error("not replacing existing default route via %I",
+-		  SIN_ADDR(rt.rt_gateway));
++	    error("not replacing existing default route via %I with metric %d",
++		  SIN_ADDR(rt.rt_gateway), dfl_route_metric);
+ 	else
+-	    error("not replacing existing default route through %s",
+-		  rt.rt_dev);
++	    error("not replacing existing default route through %s with metric %d",
++		  rt.rt_dev, dfl_route_metric);
+ 	return 0;
+     }
+ 
+@@ -1626,6 +1630,7 @@ int sifdefaultroute (int unit, u_int32_t ouraddr, u_int32_t gateway)
+     SET_SA_FAMILY (rt.rt_dst, AF_INET);
+ 
+     rt.rt_dev = ifname;
++    rt.rt_metric = dfl_route_metric + 1; /* +1 for binary compatibility */
+ 
+     if (kernel_version > KVERSION(2,1,0)) {
+ 	SET_SA_FAMILY (rt.rt_genmask, AF_INET);
+@@ -1660,6 +1665,9 @@ int cifdefaultroute (int unit, u_int32_t ouraddr, u_int32_t gateway)
+ 
+     rt.rt_dev = ifname;
+ 
++    rt.rt_dev = ifname;
++    rt.rt_metric = dfl_route_metric + 1; /* +1 for binary compatibility */
++
+     if (kernel_version > KVERSION(2,1,0)) {
+ 	SET_SA_FAMILY (rt.rt_genmask, AF_INET);
+ 	SIN_ADDR(rt.rt_genmask) = 0L;
+-- 
+2.0.0
+

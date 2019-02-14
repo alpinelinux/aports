@@ -1,0 +1,194 @@
+From 9513a2daae84660f2ddd7d60d39bb49cd678adbe Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Tue, 29 Mar 2016 18:59:22 +0200
+Subject: [PATCH] ping: make ping work without root privileges
+
+---
+ networking/ping.c | 103 +++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 87 insertions(+), 16 deletions(-)
+
+diff --git a/networking/ping.c b/networking/ping.c
+index 8f85d3ec2..dc3f50968 100644
+--- a/networking/ping.c
++++ b/networking/ping.c
+@@ -165,6 +165,7 @@ enum {
+ 	pingsock = 0,
+ };
+ 
++static int using_dgram;
+ static void
+ #if ENABLE_PING6
+ create_icmp_socket(len_and_sockaddr *lsa)
+@@ -181,9 +182,23 @@ create_icmp_socket(void)
+ #endif
+ 		sock = socket(AF_INET, SOCK_RAW, 1); /* 1 == ICMP */
+ 	if (sock < 0) {
+-		if (errno == EPERM)
+-			bb_error_msg_and_die(bb_msg_perm_denied_are_you_root);
+-		bb_perror_msg_and_die(bb_msg_can_not_create_raw_socket);
++		if (errno != EPERM)
++			bb_perror_msg_and_die(bb_msg_can_not_create_raw_socket);
++#if defined(__linux__) || defined(__APPLE__)
++		/* We don't have root privileges.  Try SOCK_DGRAM instead.
++		 * Linux needs net.ipv4.ping_group_range for this to work.
++		 * MacOSX allows ICMP_ECHO, ICMP_TSTAMP or ICMP_MASKREQ
++		 */
++#if ENABLE_PING6
++		if (lsa->u.sa.sa_family == AF_INET6)
++			sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6);
++		else
++#endif
++			sock = socket(AF_INET, SOCK_DGRAM, 1); /* 1 == ICMP */
++		if (sock < 0)
++#endif
++		bb_error_msg_and_die(bb_msg_perm_denied_are_you_root);
++		using_dgram = 1;
+ 	}
+ 
+ 	xmove_fd(sock, pingsock);
+@@ -236,10 +251,12 @@ static void ping4(len_and_sockaddr *lsa)
+ 				bb_perror_msg("recvfrom");
+ 			continue;
+ 		}
+-		if (c >= 76) {			/* ip + icmp */
+-			struct iphdr *iphdr = (struct iphdr *) G.packet;
++		if (c >= 76 || using_dgram && (c == 64)) {			/* ip + icmp */
++			if(!using_dgram) {
++				struct iphdr *iphdr = (struct iphdr *) G.packet;
+ 
+-			pkt = (struct icmp *) (G.packet + (iphdr->ihl << 2));	/* skip ip hdr */
++				pkt = (struct icmp *) (G.packet + (iphdr->ihl << 2));	/* skip ip hdr */
++			} else pkt = (struct icmp *) G.packet;
+ 			if (pkt->icmp_id != G.myid)
+ 				continue; /* not our ping */
+ 			if (pkt->icmp_type == ICMP_ECHOREPLY)
+@@ -636,19 +653,21 @@ static void unpack_tail(int sz, uint32_t *tp,
+ }
+ static int unpack4(char *buf, int sz, struct sockaddr_in *from)
+ {
+-	struct icmp *icmppkt;
+ 	struct iphdr *iphdr;
++	struct icmp *icmppkt;
+ 	int hlen;
+ 
+ 	/* discard if too short */
+ 	if (sz < (datalen + ICMP_MINLEN))
+ 		return 0;
++	if(!using_dgram) {
++		/* check IP header */
++		iphdr = (struct iphdr *) buf;
++		hlen = iphdr->ihl << 2;
++		sz -= hlen;
++		icmppkt = (struct icmp *) (buf + hlen);
++	} else icmppkt = (struct icmp *) buf;
+ 
+-	/* check IP header */
+-	iphdr = (struct iphdr *) buf;
+-	hlen = iphdr->ihl << 2;
+-	sz -= hlen;
+-	icmppkt = (struct icmp *) (buf + hlen);
+ 	if (icmppkt->icmp_id != myid)
+ 		return 0;				/* not our ping */
+ 
+@@ -660,7 +679,7 @@ static int unpack4(char *buf, int sz, struct sockaddr_in *from)
+ 			tp = (uint32_t *) icmppkt->icmp_data;
+ 		unpack_tail(sz, tp,
+ 			inet_ntoa(*(struct in_addr *) &from->sin_addr.s_addr),
+-			recv_seq, iphdr->ttl);
++			recv_seq, using_dgram ? 42 : iphdr->ttl);
+ 		return 1;
+ 	}
+ 	if (icmppkt->icmp_type != ICMP_ECHO) {
+@@ -710,11 +729,31 @@ static void ping4(len_and_sockaddr *lsa)
+ 	int sockopt;
+ 
+ 	pingaddr.sin = lsa->u.sin;
+-	if (source_lsa) {
++	if (source_lsa && !using_dgram) {
+ 		if (setsockopt(pingsock, IPPROTO_IP, IP_MULTICAST_IF,
+ 				&source_lsa->u.sa, source_lsa->len))
+ 			bb_error_msg_and_die("can't set multicast source interface");
+ 		xbind(pingsock, &source_lsa->u.sa, source_lsa->len);
++	} else if(using_dgram) {
++		struct sockaddr_in sa;
++		socklen_t sl;
++
++		sa.sin_family = AF_INET;
++		sa.sin_port = 0;
++		sa.sin_addr.s_addr = source_lsa ?
++			source_lsa->u.sin.sin_addr.s_addr : 0;
++		sl = sizeof(sa);
++
++		if (bind(pingsock, (struct sockaddr *) &sa, sl) == -1) {
++			perror("bind");
++			exit(2);
++		}
++
++		if (getsockname(pingsock, (struct sockaddr *) &sa, &sl) == -1) {
++			perror("getsockname");
++			exit(2);
++		}
++		myid = sa.sin_port;
+ 	}
+ 
+ 	/* enable broadcast pings */
+@@ -731,6 +770,15 @@ static void ping4(len_and_sockaddr *lsa)
+ 		setsockopt_int(pingsock, IPPROTO_IP, IP_MULTICAST_TTL, opt_ttl);
+ 	}
+ 
++	if(using_dgram) {
++		int hold = 65536;
++		if (setsockopt(pingsock, SOL_IP, IP_RECVTTL, (char *)&hold, sizeof(hold)))
++			perror("WARNING: setsockopt(IP_RECVTTL)");
++		if (setsockopt(pingsock, SOL_IP, IP_RETOPTS, (char *)&hold, sizeof(hold)))
++			perror("WARNING: setsockopt(IP_RETOPTS)");
++
++	}
++
+ 	signal(SIGINT, print_stats_and_exit);
+ 
+ 	/* start the ping's going ... */
+@@ -768,10 +816,33 @@ static void ping6(len_and_sockaddr *lsa)
+ 	char control_buf[CMSG_SPACE(36)];
+ 
+ 	pingaddr.sin6 = lsa->u.sin6;
+-	if (source_lsa)
++	if (source_lsa && !using_dgram)
+ 		xbind(pingsock, &source_lsa->u.sa, source_lsa->len);
++	else if(using_dgram) {
++		struct sockaddr_in6 sa = {0};
++		socklen_t sl;
++
++		sa.sin6_family = AF_INET6;
++		sa.sin6_port = 0;
++		if(source_lsa) {
++			memcpy(&sa.sin6_addr, &source_lsa->u.sin6.sin6_addr, sizeof(struct in6_addr));
++		}
++		sl = sizeof(sa);
++
++		if (bind(pingsock, (struct sockaddr *) &sa, sl) == -1) {
++			perror("bind");
++			exit(2);
++		}
++
++		if (getsockname(pingsock, (struct sockaddr *) &sa, &sl) == -1) {
++			perror("getsockname");
++			exit(2);
++		}
++		myid = sa.sin6_port;
++	}
+ 
+ #ifdef ICMP6_FILTER
++	if(!using_dgram)
+ 	{
+ 		struct icmp6_filter filt;
+ 		if (!(option_mask32 & OPT_VERBOSE)) {
+@@ -911,7 +982,7 @@ static int common_ping_main(int opt, char **argv)
+ 		G.deadline_us = 1 | ((d * 1000000) + monotonic_us());
+ 	}
+ 
+-	myid = (uint16_t) getpid();
++	if (!using_dgram) myid = (uint16_t) getpid();
+ 	hostname = argv[optind];
+ #if ENABLE_PING6
+ 	{

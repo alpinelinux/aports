@@ -1,0 +1,92 @@
+#!/sbin/openrc-run
+
+: ${conffile:="/etc/tor/torrc"}
+: ${user:="tor"}
+: ${graceful_timeout:="${GRACEFUL_TIMEOUT:-60}"}
+
+command="/usr/bin/tor"
+command_args="-f $conffile --runasdaemon 0"
+command_background="yes"
+start_stop_daemon_args="--chdir /var/lib/tor"
+pidfile="/run/tor/tor.pid"
+
+extra_commands="checkconfig"
+extra_started_commands="gracefulstop reload"
+
+description="Anonymizing overlay network for TCP"
+description_checkconfig="Check if config file is valid."
+description_reload="Reload the configuration."
+# See bug #523552, and https://trac.torproject.org/projects/tor/ticket/5525
+description_gracefulstop="Gracefully stop (wait $gracefulstop until all connections are properly closed)."
+
+
+depend() {
+	need net
+}
+
+checkconfig() {
+	# First check that it exists.
+	if [ ! -f "$conffile" ] ; then
+		eerror "You need to setup $conffile first, see $conffile.sample for example"
+		return 1
+	fi
+
+	# Now verify whether the configuration is valid.
+	# If User directive is set in $conffile, then we must run tor as root,
+	# even --verify-config, otherwise it fails when verifying permissions
+	# of DataDirectory.
+	if conf_has User; then
+		local user="root"
+	fi
+	local out
+	out="$(su -s /bin/sh -c "$command $command_args --verify-config" $user 2>&1)" || {
+		eerror "Tor configuration $conffile is not valid"
+		printf '%s\n' "$out"
+		return 1
+	}
+}
+
+start_pre() {
+	checkconfig || return 1
+
+	# If User directive is set in $conffile, start tor as root and let it
+	# drop privileges itself (may be needed e.g. to bind to a privileged
+	# port). Otherwise run tor as $user (recommended).
+	if conf_has User; then
+		local user="$(conf_get User)"
+	else
+		start_stop_daemon_args="$start_stop_daemon_args --user $user"
+	fi
+
+	if conf_has DataDirectory; then
+		checkpath -d -m 0700 -o "$user" "$(conf_get DataDirectory)"
+	fi
+	checkpath -d -m 0755 -o "$user" "$(dirname "$pidfile")"
+}
+
+gracefulstop() {
+	ebegin "Gracefully stopping Tor, this can take up to $graceful_timeout seconds"
+	start-stop-daemon --stop \
+		--progress \
+		--signal INT \
+		--retry $graceful_timeout \
+		--pidfile "$pidfile" \
+		--exec $command -- $command_args
+	eend $?
+}
+
+reload() {
+	start_pre || return 1
+
+	ebegin "Reloading Tor configuration"
+	start-stop-daemon --signal HUP --pidfile "$pidfile"
+	eend $?
+}
+
+conf_get() {
+	sed -n "s/^\s*$1 \([^#]*\)/\1/p" "$conffile"
+}
+
+conf_has() {
+	grep -q "^\s*$1 " "$conffile"
+}

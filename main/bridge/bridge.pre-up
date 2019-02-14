@@ -1,0 +1,141 @@
+#!/bin/sh
+
+# Copyright (C) 2012 Natanael Copa <ncopa@alpinelinux.org>
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 as published
+# by the Free Software Foundation. See http://www.gnu.org/ for details.
+
+all_ports_exist() {
+	local i=
+	for i in "$@"; do
+		[ -d /sys/class/net/$i ] || return 1
+	done
+	return 0
+}
+
+wait_ports() {
+	local timeout= waitports=
+	[ -z "$IF_BRIDGE_WAITPORT" ] && return 0
+	set -- $IF_BRIDGE_WAITPORT
+	timeout="$1"
+	shift
+	waitports="$@"
+	[ -z "$waitports" ] && waitports="$PORTS"
+	while ! all_ports_exist $waitports; do
+		[ "$timeout" -eq 0 ] && return 0
+		timeout=$(($timeout - 1))
+		sleep 1
+	done
+}
+
+all_ports() {
+	local i=
+	for i in /sys/class/net/*/ifindex; do
+		i=${i%/*}
+		i=${i##*/}
+		case "$i" in
+		lo|$IFACE) continue;;
+		*) echo $i;;
+		esac
+	done
+}
+
+add_ports() {
+	local port=
+	for port in $PORTS; do
+		if [ -x /etc/network/if-pre-up.d/vlan ]; then
+			env IFACE=$port /etc/network/if-pre-up.d/vlan
+		fi
+		if [ -n "$IF_BRIDGE_HW" ]; then
+			ip link set dev $port addr $IF_BRIDGE_HW
+		fi
+		brctl addif $IFACE $port && ip link set dev $port up
+	done
+}
+
+del_ports() {
+	local port=
+	for port in $PORTS; do
+		ip link set dev $port down
+		brctl delif $IFACE $port
+		if [ -x /etc/network/ip-post-down.d/vlan ]; then
+			env IFACE=$port /etc/network/if-post-down.d/vlan
+		fi
+	done
+}
+
+set_bridge_opts() {
+	[ -n "$IF_BRIDGE_AGEING" ] \
+		&& brctl setageing $IFACE $IF_BRIDGE_AGEING
+	[ -n "$IF_BRIDGE_BRIDGEPRIO" ] \
+		&& brctl setbridgeprio $IFACE $IF_BRIDGE_BRIDGEPRIO
+	[ -n "$IF_BRIDGE_FD" ] \
+		&& brctl setfd $IFACE $IF_BRIDGE_FD
+	[ -n "$IF_BRIDGE_GCINT" ] \
+		&& brctl setgcint $IFACE $IF_BRIDGE_GCINT
+	[ -n "$IF_BRIDGE_HELLO" ] \
+		&& brctl sethello $IFACE $IF_BRIDGE_HELLO
+	[ -n "$IF_BRIDGE_MAXAGE" ] \
+		&& brctl setmaxage $IFACE $IF_BRIDGE_MAXAGE
+	[ -n "$IF_BRIDGE_PATHCOST" ] \
+		&& brctl setpathcost $IFACE $IF_BRIDGE_PATHCOST
+	[ -n "$IF_BRIDGE_PORTPRIO" ] \
+		&& brctl setportprio $IFACE $IF_BRIDGE_PORTPRIO
+	[ -n "$IF_BRIDGE_STP" ] \
+		&& brctl stp $IFACE $IF_BRIDGE_STP
+}
+
+all_ports_ready() {
+	local port=
+	for port in $PORTS; do
+		case $(cat /sys/class/net/$IFACE/brif/$port/state) in
+		""|0|3)	;; # 0 = disabled, 3 = forwarding
+		[12]) 	return 1;;
+		esac
+	done
+	return 0
+}
+
+find_maxwait() {
+	awk '{printf("%.f\n", 2 * $0 / 100); }' \
+		/sys/class/net/$IFACE/bridge/forward_delay
+}
+
+wait_bridge() {
+	local timeout=$IF_BRIDGE_MAXWAIT
+	if [ -z "$timeout" ]; then
+		timeout=$(find_maxwait)
+	fi
+	ip link set dev $IFACE up
+	while ! all_ports_ready; do
+		[ $timeout -eq 0 ] && break
+		timeout=$(($timeout - 1))
+		sleep 1
+	done
+}
+
+case "$IF_BRIDGE_PORTS" in
+"")	;;
+none)	PORTS="";;
+all)	PORTS=$(all_ports);;
+*)	PORTS="$IF_BRIDGE_PORTS";;
+esac
+
+[ -z "$PORTS" ] && ! env | grep -q "^IF_BRIDGE" && exit
+
+
+case "$MODE" in
+start)
+	brctl addbr $IFACE || exit 1
+	wait_ports
+	set_bridge_opts
+	add_ports
+	wait_bridge
+	;;
+stop)	del_ports
+	ip link set dev $IFACE down
+	brctl delbr $IFACE || exit 1
+	;;
+esac
+

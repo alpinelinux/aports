@@ -1,0 +1,354 @@
+#!/bin/sh
+# Contributor: Stuart Cardall <developer@it-offshore.co.uk>
+# dnscrypt-proxy setup script to choose DNS Resolver & install / configure / remove DNS Caching
+###############################################################################################
+
+config='/etc/conf.d/dnscrypt-proxy'
+dhcpconfig='/etc/dhcp/dhclient.conf'
+unboundconfig='/etc/unbound/unbound.conf'
+
+SCRIPT=$(echo "`basename $0`")
+
+NORMAL="\033[1;0m"
+STRONG="\033[1;1m"
+RED="\033[1;31m"
+GREEN="\033[1;32m"
+
+print_question() {
+        local prompt="${STRONG}$1 ${RED}$2${NORMAL}"
+        printf "${prompt} %s"
+}
+
+print_strong() {
+        local prompt="${STRONG}$1 ${RED}$2${NORMAL}"
+        printf "${prompt} %s\n"
+}
+
+print_green() {
+        local prompt="${GREEN}${STRONG}$1 ${NORMAL}"
+        printf "${prompt} %s\n"
+}
+
+print_table() {
+        local choice="${RED}${STRONG}$1${NORMAL}"
+	local resolver="${STRONG}$2"
+	local location="${GREEN}$3"
+	printf "${choice} ${resolver} ${location} %s\n"
+}
+
+die() {
+    print_table "ERROR:" "$1" > /dev/null 1>&2
+    exit 1
+}
+
+restart_interface(){
+INTERFACES=$(echo | ifconfig | grep "Link encap" | sed '/lo/d' | cut -d"L" -f1)
+print_question "\nChoose external interface to restart from the following:"
+print_question "\n\n$INTERFACES" "[ default: eth0 ]"
+
+while :
+do
+	read RESTART
+	# Sanitize input
+	export RESTART_CLEAN="`echo "${RESTART}" | tr -cd '[:[alnum]:]'`"
+
+	if [ ! $RESTART ] ;then
+		RESTART_CLEAN=eth0
+	fi
+
+	# tr will strip invalid input to nothing which passes grep
+	if [ "$RESTART_CLEAN" != "" ] && echo "$INTERFACES" | grep -e "$RESTART_CLEAN" 1>/dev/null; then
+		break
+	else
+		#move the cursor & clear the line
+		echo -en "\033[1A\033[28C\022[K"
+	fi
+done
+}
+
+choose_ip(){
+IPADDR=$(ifconfig |grep -B1 "inet addr" |awk '{ if ( $1 == "inet" ) { print $2 } else if ( $2 == "Link" ) { printf "%s:" ,$1 } }' |awk -F" " '{ print $1 ": " $3 }'| sed 's/addr//')
+if echo "$IPADDR" | grep -e "127.0.0.2" 1>/dev/null && which unbound 1> /dev/null; then
+        defaultip='127.0.0.2'
+	IPADDR_CHOICE=$(echo "$IPADDR" | sed '/lo::127.0.0.1:/d')
+else
+        defaultip='127.0.0.1'
+	IPADDR_CHOICE=$(echo "$IPADDR" | sed '/lo:1::127.0.0.2:/d')
+fi
+
+print_question "\nChoose Dnscrypt IP from the following addresses:\n"
+print_question "\n$IPADDR_CHOICE\t" "[ default: $defaultip ]"
+
+while :
+do
+	read IP
+	# Sanitize input
+        export IP_CLEAN="`echo "${IP}" | tr -cd '[:xdigit:] [:\::] [:\.:]'`"
+	if [ ! $IP ]; then
+		IP_CLEAN=$defaultip
+	fi
+	# tr will strip invalid input to nothing which passes grep
+	if [ "$IP_CLEAN" != "" ] && echo "$IPADDR_CHOICE" | grep -e "$IP_CLEAN" 1>/dev/null; then
+		print_green "\nIP: $IP_CLEAN Selected"; break
+	else
+		#move the cursor & clear the line
+		echo -en "\033[1A\033[49C\033[K"
+	fi
+done
+}
+
+choose_port(){
+if grep -e "127.0.0.2" /etc/network/interfaces 1>/dev/null; then
+	defaultport=40
+else
+	defaultport=53
+fi
+
+print_question "\nChoose Dnscrypt Port:" "[ default: $defaultport ]"
+while :
+do
+        read DNSPORT
+	# Sanitize input to an integer and assign to new variable
+	export DNSPORT_CLEAN="`echo "${DNSPORT}" | tr -cd '[:[0-9]:]'`"
+        if [ ! $DNSPORT ]; then
+		DNSPORT_CLEAN=$defaultport
+        fi
+
+	if [ $DNSPORT_CLEAN -gt 0 2>/dev/null ] && [ $DNSPORT_CLEAN -le 65535 2>/dev/null ]; then
+		print_green "\nPort: $DNSPORT_CLEAN Selected"; break
+	else
+		#move the cursor & clear the line
+		echo -en "\033[1A\033[39C\033[K"
+	fi
+done
+}
+
+update_unbound(){
+if [ -f $unboundconfig ]; then
+	if grep "Settings from "$SCRIPT"" $unboundconfig 1>/dev/null; then
+		#update forward zone
+		START=$(sed -n "\%Settings from $SCRIPT%=" $unboundconfig)
+		LINE=$(expr $START + 3 )
+		sed "$LINE c \  forward-addr: $IP_CLEAN@$DNSPORT_CLEAN" $unboundconfig -i
+
+	else
+		# allow querying of localhost
+		START=$(sed -n '/do-not-query-localhost:/=' $unboundconfig)
+		sed "$START c \do-not-query-localhost: no #set by $SCRIPT" $unboundconfig -i
+		# create catch all forward zone
+		echo -e "##### Settings from $SCRIPT #####" >> $unboundconfig
+		echo -e 'forward-zone:' >> $unboundconfig
+		echo -e '  name: "."' >> $unboundconfig
+		echo -e "  forward-addr: $IP_CLEAN@$DNSPORT_CLEAN" >> $unboundconfig
+	fi
+print_strong "\n$unboundconfig settings updated to:"
+print_green "--------------------------------------------------------"
+print_table "do-not-query-localhost: no"
+print_table ""
+print_table 'forward-zone:'
+print_table '  name: "."'
+print_table "  forward-addr: $IP_CLEAN@$DNSPORT_CLEAN"
+print_green "--------------------------------------------------------"
+fi
+}
+
+restart_services(){
+# add / restart services - dnscrypt must be restarted first
+echo ""
+for srv in "dnscrypt-proxy" "unbound"; do
+        if which $srv 1> /dev/null; then
+                rc-status default | grep $srv 1> /dev/null
+                if [ "$?" != "0" ]; then
+                        print_green "Adding $srv to Default Run Level"
+                        rc-update add $srv default
+                fi
+                rc-service $srv restart
+        fi
+done
+}
+
+modify_config(){
+choose_ip; choose_port
+
+# update dnscrypt listening ip & port
+LINE=$(sed -n '/DNSCRYPT_LOCALIP=/=' $config)
+sed "$LINE c DNSCRYPT_LOCALIP=$IP_CLEAN:$DNSPORT_CLEAN" $config -i
+
+# update dhclient.conf
+if [ -f $dhcpconfig ]; then
+	if grep 'supersede domain-name-servers' $dhcpconfig 1>/dev/null; then
+		LINE=$(sed -n '/supersede domain-name-servers/=' $dhcpconfig)
+		sed "$LINE c supersede domain-name-servers $IP" $dhcpconfig -i
+	else
+		echo "supersede domain-name-servers $IP" >> $dhcpconfig
+	fi
+fi
+
+# update resolv.conf & unbound
+LINE=$(sed -n '/nameserver/=' /etc/resolv.conf)
+sed "$LINE c nameserver 127.0.0.1" /etc/resolv.conf -i
+if [ "$removecache" != "Y" ] && [ "$removecache" != "y" ]; then
+	update_unbound
+fi
+
+restart_interface
+
+print_strong "\n/etc/conf.d/dnscrypt-proxy Listening Address updated to:"
+print_green "--------------------------------------------------------"
+print_table "DNSCRYPT_LOCALIP=$IP_CLEAN:$DNSPORT_CLEAN"
+print_green "--------------------------------------------------------\n"
+}
+
+rm_loopback(){
+START=$(sed -n "\%Settings from $SCRIPT%=" /etc/network/interfaces)
+LINE=$(expr $START + 4)
+sed -i ''$START','$LINE'd' /etc/network/interfaces
+print_green "2nd Loopback interface removed"
+}
+
+# END Functions ###################################################################################
+
+# Do some sanity checking.
+if [ $(/usr/bin/id -u) != "0" ]; then
+   die 'DNScrypt Setup must be run by root'
+fi
+
+##### Download DNS Resolver details ################################################################
+
+url='https://raw.githubusercontent.com/dyne/dnscrypt-proxy/master/dnscrypt-resolvers.csv'
+output='/tmp/dnscrypt.list'
+
+echo -e "Retrieving current list of free DNS Resolvers\n"
+wget -q --no-check-certificate $url -O $output
+sed -i 's|\"||g' $output
+
+totalservers=$(cat $output | tail -n +2 | wc -l)
+
+if [ $totalservers = 0 ]; then
+	die "Could not contact $url"
+fi
+
+# colour table ##################################################################################
+
+colourheading=$(awk 'BEGIN { format = "%-8s%-35s%-30s%-10s%-10s%-10s%-25s\n"
+	printf format, "#", "Name", "Location", "DNSSEC", "No Logs", "Namecoin", "Resolver Address" }')
+
+colourline=$(awk 'BEGIN { format = "%-8s%-35s%-30s%-10s%-10s%-10s%-25s\n"
+	printf format, "----", "----------------------------------------", "------------------------------", "----------",\
+			"----------", "----------", "-----------------------------------" }')
+
+print_green "$colourheading"
+print_green "$colourline"
+
+tmpfile=$(mktemp)
+
+cat $output | awk 'BEGIN{FS=""}{gsub(/,\ /,"\ "); print}' | tail -n +2 > $tmpfile
+
+awk -F"\," 'BEGIN {format="%-8s%-35s%-30s%-10s%-10s%-10s%-25s\n"}{ printf format, "\["NR"\]",$1,$4,$8,$9,$10,$11}' $tmpfile
+
+print_green "$colourline"
+print_question "Please choose a DNS Resolver for dnscrypt-proxy to query:" "[1 - $totalservers]"
+
+###### Process Input #############################################################################
+
+while :
+do
+	read DNS
+	# Sanitize input to an integer
+	export DNS_CLEAN="`echo "${DNS}" | tr -cd '[:[0-9]:]'`"
+
+	if [ $DNS_CLEAN -gt 0 2>/dev/null ] && [ $DNS_CLEAN -le $totalservers 2>/dev/null ]; then
+		break
+	else
+		#move the cursor & clear the line
+		echo -en "\033[1A\033[67C\033[K"
+	fi
+done
+
+RESOLVER=$(cat $tmpfile | tr -d "\"" | tr "," ";" | sed -n "$DNS_CLEAN"p |awk -F';' '{print $11}')
+PROVIDER=$(cat $tmpfile | tr -d "\"" | tr "," ";" | sed -n "$DNS_CLEAN"p |awk -F';' '{print $12}')
+PUBKEY=$(cat $tmpfile | tr -d "\"" | tr "," ";" | sed -n "$DNS_CLEAN"p |awk -F';' '{print $13}')
+
+######## END Changes ###########################################################################
+
+if [ ! -f "$config" ]; then
+	touch $config
+	echo "DNSCRYPT_LOGFILE=/var/log/dnscrypt-proxy/dnscrypt-proxy.log" >> $config
+	echo "DNSCRYPT_LOCALIP=127.0.0.1:53" >> $config
+fi
+
+# remove existing Resolver config
+if grep "RESOLVER" $config 1> /dev/null; then
+	sed -e '/RESOLVER/d' -e '/PROVIDER/d' -e '/PUBKEY/d' $config -i
+fi
+
+# update Resolver config
+echo "RESOLVER=$RESOLVER" >> $config
+echo "PROVIDER=$PROVIDER" >> $config
+echo "PUBKEY=$PUBKEY" >> $config
+
+print_strong "\nResolver Settings updated in:" "$config"
+print_green "---------------------------------------------------------------------------------------------"
+print_table "RESOLVER   :" "$RESOLVER"
+print_table "PROVIDER   :" "$PROVIDER"
+print_table "PUBLIC KEY :" "$PUBKEY"
+print_green "---------------------------------------------------------------------------------------------"
+
+# install unbound
+if ! which unbound 1> /dev/null; then
+	print_question "Install Unbound (Caching DNS Server)" "[ Y / N: Default ]"
+	read installsrv
+	if [ "$(echo $installsrv | tr '[A-Z]' '[a-z]')" = "y" ]; then
+	      apk add -q unbound
+	else
+	      echo "nameserver 127.0.0.1" > /etc/resolv.conf
+	fi
+fi
+
+# check for / setup secondary loopback for dns caching
+if which unbound 1> /dev/null && ! grep "address 127.0.0.2" /etc/network/interfaces 1> /dev/null; then
+	IP=127.0.0.2
+	echo "##### Settings from $SCRIPT #####" >> /etc/network/interfaces
+	echo "auto lo:1" >> /etc/network/interfaces
+	echo "iface lo:1 inet static" >> /etc/network/interfaces
+	echo "address $IP" >> /etc/network/interfaces
+	echo "netmask 255.0.0.0" >> /etc/network/interfaces
+	ifconfig lo:1 $IP up
+fi
+
+# modify caching
+if grep "address 127.0.0.2" /etc/network/interfaces 1> /dev/null && [ ! $installsrv ]; then
+	print_question "\nRemove DNS Caching (Unbound) / Secondary loopback device ?" "[ Y / N: Default ]"; read removecache
+	if [ "$(echo $removecache | tr '[A-Z]' '[a-z]')" = "y" ]; then
+		# remove loopback settings
+		rm_loopback
+		echo -e ""; rc-service unbound stop; apk del unbound
+	else
+		print_green "\nSecondary Loopback for DNS Caching configured @ 127.0.0.2"
+		IP=127.0.0.2
+	fi
+fi
+
+# modify ip / ports
+if [ $installsrv ] || [ "$(echo $removecache | tr '[A-Z]' '[a-z]')" = "y" ]; then
+	modify_config
+elif grep -q 127.0.0.2 /etc/network/interfaces && ! which unbound 1> /dev/null; then
+	rm_loopback
+	kill $(cat /var/run/unbound/unbound.pid)
+	modify_config
+else
+	print_question "\nModify dnscrypt-proxy ip / port ?" "[ Y / N: default ]"; read updateip
+	if [ "$(echo $updateip | tr '[A-Z]' '[a-z]')" = "y" ]; then
+		modify_config
+	fi
+fi
+
+if [ "$RESTART_CLEAN" != "" ]; then
+	ifdown $RESTART_CLEAN && ifup $RESTART_CLEAN
+	print_green "Interface $RESTART_CLEAN restarted"
+fi
+
+restart_services
+
+exit 0
+

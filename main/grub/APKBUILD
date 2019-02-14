@@ -1,0 +1,188 @@
+# Contributor: Carlo Landmeter <clandmeter@gmail.com>
+# Maintainer: Timo Teräs <timo.teras@iki.fi>
+pkgname=grub
+pkgver=2.02
+pkgrel=14
+pkgdesc="Bootloader with support for Linux, Multiboot and more"
+url="https://www.gnu.org/software/grub/"
+arch="all !s390x"
+license="GPL-3.0-or-later"
+depends="mkinitfs"
+triggers="grub.trigger=/boot"
+depends_dev=""
+makedepends="$depends_dev bison flex linux-headers xz-dev lvm2-dev
+	automake autoconf libtool python3 freetype-dev unifont"
+install="$pkgname.post-upgrade"
+# strip handled by grub Makefiles, abuild strip breaks xen pv-grub
+options="!check !strip"  # Cannot test boot loader.
+subpackages="$pkgname-dev $pkgname-doc"
+
+# currently grub only builds on x86*, aarch64 and ppc* systems
+flavors=""
+case "$CARCH" in
+x86)		flavors="efi bios";;
+x86_64)		flavors="efi bios xenhost";;
+aarch64|arm*)	flavors="efi";;
+mips*)		flavors="qemu_mips";;
+ppc*)		flavors="ieee1275"; makedepends="$makedepends powerpc-utils" ;;
+s390x)		flavors="emu" ;;
+esac
+for f in $flavors; do
+	subpackages="$subpackages $pkgname-$f"
+done
+
+source="https://ftp.gnu.org/gnu/grub/grub-$pkgver.tar.xz
+	fix-gcc-no-pie-specs.patch
+	grub2-accept-empty-module.patch
+	grub-xen-host_grub.cfg
+	2.02_beta3-mkconfig-alpine.patch
+	0008-Fix-packed-not-aligned-error-on-GCC-8.patch
+	0009-xfs-Accept-filesystem-with-sparse-inodes.patch
+	x86-64-Treat-R_X86_64_PLT32-as-R_X86_64_PC32.patch
+	alpine-use-uuid.patch
+	f2fs-support.patch
+	"
+builddir="$srcdir/grub-$pkgver"
+
+prepare() {
+	default_prepare
+	PYTHON=python3 ./autogen.sh
+}
+
+_build_flavor() {
+	local flavor="$1"
+	shift
+	local _configure="$@"
+
+	msg "Building grub for platform $flavor"
+	mkdir -p "$srcdir"/build-$flavor
+	cd "$srcdir"/build-$flavor
+	$builddir/configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--target=$CTARGET \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--localstatedir=/var \
+		--disable-nls \
+		--disable-werror \
+		$_configure
+	make
+}
+
+build() {
+	local f
+	for f in $flavors; do
+		case "$f" in
+		bios)		_build_flavor $f --with-platform=pc;;
+		efi)		_build_flavor $f --with-platform=efi --disable-efiemu;;
+		xenhost)	_build_flavor $f --with-platform=xen;;
+		*)		_build_flavor $f --with-platform=$f;;
+		esac
+	done
+}
+
+_install_xen() {
+	grub_dir=`mktemp -d`
+	cfg=`mktemp`
+	grub_memdisk=`mktemp`
+
+	mkdir -p $grub_dir/boot/grub
+	echo 'normal (memdisk)/grub.cfg' > $cfg
+	sed -e "s/@@PVBOOT_ARCH@@/$CARCH/g" \
+		$srcdir/grub-xen-host_grub.cfg \
+			> $grub_dir/grub.cfg
+	tar -cf - -C $grub_dir grub.cfg > $grub_memdisk
+
+	./grub-mkimage \
+		-O $CARCH-xen \
+		-c $cfg \
+		-d ./grub-core ./grub-core/*.mod \
+		-m $grub_memdisk \
+		-o $pkgdir/grub-$CARCH-xen.bin
+
+	rm -r "$grub_dir"
+	rm "$cfg" "$grub_memdisk"
+}
+
+_install_flavor() {
+	local flavor="$1"
+	cd "$srcdir"/build-$flavor
+	case $flavor in
+	xenhost)	_install_xen;;
+	*)	 	make DESTDIR="$pkgdir" install-strip;;
+	esac
+}
+
+package() {
+	# install BIOS & EFI version into the same directory
+	# and overwrite similar files.
+	for f in $flavors; do
+		_install_flavor $f
+	done
+
+	rm -f "$pkgdir"/usr/lib/charset.alias
+	# remove grub-install warning of missing directory
+	mkdir -p "$pkgdir"/usr/share/locale
+
+	mkdir -p "$pkgdir"/etc/default/
+	cat >"$pkgdir"/etc/default/grub <<-EOF
+	GRUB_DISTRIBUTOR="Alpine"
+	GRUB_TIMEOUT=2
+	GRUB_DISABLE_SUBMENU=y
+	GRUB_DISABLE_RECOVERY=true
+	EOF
+}
+
+bios() {
+	pkgdesc="$pkgdesc (BIOS version)"
+	depends="$pkgname"
+	mkdir -p $subpkgdir/usr/lib/grub
+	mv $pkgdir/usr/lib/grub/*-pc $subpkgdir/usr/lib/grub/
+}
+
+efi() {
+	pkgdesc="$pkgdesc (EFI version)"
+	depends="$pkgname"
+	mkdir -p $subpkgdir/usr/lib/grub
+	mv $pkgdir/usr/lib/grub/*-efi $subpkgdir/usr/lib/grub/
+}
+
+xenhost() {
+	pkgdesc="$pkgdesc (XEN host version)"
+	mkdir -p $subpkgdir/usr/lib/grub-xen
+	mv $pkgdir/*-xen.bin $subpkgdir/usr/lib/grub-xen/
+}
+
+qemu_mips() {
+	pkgdesc="$pkgdesc (QEMU MIPS version)"
+	depends="$pkgname"
+	mkdir -p $subpkgdir/usr/lib/grub
+	mv $pkgdir/usr/lib/grub/*-qemu_mips $subpkgdir/usr/lib/grub/
+}
+
+ieee1275() {
+	pkgdesc="$pkgdesc (IEEE1275 version)"
+	depends="$pkgname powerpc-utils"
+	mkdir -p $subpkgdir/usr/lib/grub
+	mv $pkgdir/usr/lib/grub/*-ieee1275 $subpkgdir/usr/lib/grub/
+}
+
+emu() {
+	pkgdesc="$pkgdesc (EMU version)"
+	depends="$pkgname"
+	mkdir -p $subpkgdir/usr/lib/grub
+	mv $pkgdir/usr/lib/grub/*-emu $subpkgdir/usr/lib/grub/
+}
+
+sha512sums="cc6eb0a42b5c8df2f671cc128ff725afb3ff1f8832a196022e433cf0d3b75decfca2316d0aa5fabea75747d55e88f3d021dd93508563f8ca80fd7b9e7fe1f088  grub-2.02.tar.xz
+f2a7d9ab6c445f4e402e790db56378cecd6631b5c367451aa6ce5c01cd95b95c83c3dd24d6d4b857f8f42601eba82c855607513eb6ce5b2af6bd6c71f046e288  fix-gcc-no-pie-specs.patch
+098a1742aef131c85d63b934a9815879b991f2e73030cb90ac4b5dcd07d249fa0dd0a281e52ada0e10f05d59223493bd416eb47543242bf0ba336a0ebc9b2a1a  grub2-accept-empty-module.patch
+4e7394e0fff6772c89683039ccf81099ebbfe4f498e6df408977a1488fd59389b6e19afdbf0860ec271e2b2aea0df7216243dcc8235d1ca3af0e7f4d0a9d60a4  grub-xen-host_grub.cfg
+065453d336d3c6a2943690faab7d05c09ac307bc360957976a08d88d6a57742dd068a6839bcb31c7dbb703d3ef19ae2f7f44844f1bef2a1a6c19a871544bddb5  2.02_beta3-mkconfig-alpine.patch
+088455205f2f397d60e43eab19ed73994880ea1f442661f7975846cceaf2b112d92fd1341119d7dbfad3af2174dfd4d4721f31dead1ac35f4a3cb7c0d92f8a04  0008-Fix-packed-not-aligned-error-on-GCC-8.patch
+4723c5dd9fd6e9b6c8677e32e4906c7995d695c7e85e834b1b29eb1d9a024678f8fa75846c7b929d1db9b5911b604c69c1b0379cb3b9adc98d5bb6d6719eb2c4  0009-xfs-Accept-filesystem-with-sparse-inodes.patch
+e11f62b5012ecc8abf9d4912db12a263470887671b05ccb4de54981fb3b32a52d4557439a160e69e0654e35a57fdb0afd5fe801709b8037a6ea4a50d8b8455ec  x86-64-Treat-R_X86_64_PLT32-as-R_X86_64_PC32.patch
+ce788fa909bb89a3ccabbc144bb46226373cf846ffe1f315b0bf8b02403220d95c8fe67baf3c37c4e12cb36f22d70f62bbd2d0c5ff6b7230f05e5964b5c548ac  alpine-use-uuid.patch
+e4e7716cef9f183810eade57751617595c5d5fac740223a5ac3ed13e2215bbb38781328a3f8da3d4c71dd39ffec55d27d3e55b55c189dce55748e9a8512d4b41  f2fs-support.patch"

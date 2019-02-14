@@ -1,0 +1,220 @@
+#!/sbin/openrc-run
+
+extra_started_commands="reload"
+description_reload="Reload configuration"
+
+extra_stopped_commands="setup"
+description_setup="Initialize a new PostgreSQL cluster"
+
+# Note: Uppercase variables are here for backward compatibility.
+
+: ${user:=${PGUSER:-"postgres"}}
+: ${group:=${PGGROUP:-"postgres"}}
+
+: ${auto_setup:=${AUTO_SETUP:-"yes"}}
+: ${start_timeout:=${START_TIMEOUT:-10}}
+: ${nice_timeout:=${NICE_TIMEOUT:-60}}
+: ${rude_quit:=${RUDE_QUIT:-"yes"}}
+: ${rude_timeout:=${RUDE_TIMEOUT:-30}}
+: ${force_quit:=${FORCE_QUIT:-"no"}}
+: ${force_timeout:=${FORCE_TIMEOUT:-2}}
+
+: ${data_dir:=${PGDATA:-"/var/lib/postgresql/@VERSION@/data"}}
+: ${conf_dir:=$data_dir}
+: ${env_vars:=${PG_EXTRA_ENV:-}}
+: ${initdb_opts:=${PG_INITDB_OPTS:-}}
+: ${logfile:="$data_dir/postmaster.log"}
+: ${pg_opts:=${PGOPTS:-}}
+: ${port:=${PGPORT:-5432}}
+
+command="/usr/bin/postgres"
+
+conffile="$conf_dir/postgresql.conf"
+pidfile="$data_dir/postmaster.pid"
+start_stop_daemon_args="
+	--user $user
+	--group $group
+	--pidfile $pidfile
+	--wait 100"
+
+depend() {
+	use net
+	after firewall
+
+	if [ "$(get_config log_destination)" = "syslog" ]; then
+		use logger
+	fi
+}
+
+start_pre() {
+	check_deprecated_var WAIT_FOR_START start_timeout
+	check_deprecated_var WAIT_FOR_DISCONNECT nice_timeout
+	check_deprecated_var WAIT_FOR_CLEANUP rude_timeout
+	check_deprecated_var WAIT_FOR_QUIT force_timeout
+
+	if [ ! -d "$data_dir/base" ]; then
+		if yesno "$auto_setup"; then
+			setup || return 1
+		else
+			eerror "Database not found at: $data_dir"
+			eerror "Please make sure that 'data_dir' points to the right path."
+			eerror "You can run '/etc/init.d/postgresql setup' to setup a new database cluster."
+			return 1
+		fi
+	fi
+
+	local socket_dirs=$(get_config "unix_socket_directories" "/run/postgresql")
+	local port=$(get_config "port" "$port")
+
+	start_stop_daemon_args="$start_stop_daemon_args --env PGPORT=$port"
+
+	(
+		# Set the proper permission for the socket paths and create them if
+		# then don't exist.
+		set -f; IFS=","
+		for dir in $socket_dirs; do
+			if [ -e "${dir%/}/.s.PGSQL.$port" ]; then
+				eerror "Socket conflict. A server is already listening on:"
+				eerror "    ${dir%/}/.s.PGSQL.$port"
+				eerror "Hint: Change 'port' to listen on a different socket."
+				return 1
+			elif [ "${dir%/}" != "/tmp" ]; then
+				checkpath -d -m 1775 -o $user:$group "$dir"
+			fi
+		done
+	)
+}
+
+start() {
+	local retval
+
+	ebegin "Starting PostgreSQL"
+
+	local var; for var in $env_vars; do
+		start_stop_daemon_args="$start_stop_daemon_args --env $var"
+	done
+
+	rm -f "$pidfile"
+	start-stop-daemon --start \
+		$start_stop_daemon_args \
+		--exec /usr/bin/pg_ctl \
+		-- start \
+			--silent \
+			-w --timeout="$start_timeout" \
+			--log="$logfile" \
+			--pgdata="$conf_dir" \
+			-o "--data-directory=$data_dir $pg_opts"
+	retval=$?
+
+	if [ $retval -ne 0 ]; then
+		eerror "Check the log for a possible explanation of the above error:"
+		eerror "    $logfile"
+	fi
+	eend $retval
+}
+
+stop() {
+	local retry="SIGTERM/$nice_timeout"
+
+	yesno "$rude_quit" \
+		&& retry="$retry/SIGINT/$rude_timeout" \
+		|| rude_timeout=0
+
+	yesno "$force_quit" \
+		&& retry="$retry/SIGQUIT/$force_timeout" \
+		|| force_timeout=0
+
+	local seconds=$(( $nice_timeout + $rude_timeout + $force_timeout ))
+
+	ebegin "Stopping PostgreSQL (this can take up to $seconds seconds)"
+
+	start-stop-daemon --stop \
+		--exec "$command" \
+		--retry "$retry" \
+		--progress \
+		--pidfile "$pidfile"
+	eend $?
+}
+
+reload() {
+	ebegin "Reloading PostgreSQL configuration"
+
+	start-stop-daemon --signal HUP --pidfile "$pidfile"
+	eend $?
+}
+
+setup() {
+	local bkpdir
+
+	ebegin "Creating a new PostgreSQL database cluster"
+
+	if [ -d "$data_dir/base" ]; then
+		eend 1 "$data_dir/base already exists!"; return 1
+	fi
+
+	# If data_dir exists, backup configs.
+	if [ -d "$data_dir" ]; then
+		bkpdir="$(mktemp -d)"
+		find "$data_dir" -type f -name "*.conf" -maxdepth 1 \
+			-exec mv -v {} "$bkpdir"/ \;
+		rm -rf "$data_dir"/*
+	fi
+
+	install -d -m 0700 -o $user -g $group "$data_dir"
+	install -d -m 0750 -o $user -g $group "$conf_dir"
+
+	cd "$data_dir"  # to avoid the: could not change directory to "/root"
+	su $user -c "/usr/bin/initdb $initdb_opts --pgdata $data_dir"
+	local retval=$?
+
+	if [ -d "$bkpdir" ]; then
+		# Move backuped configs back.
+		mv -v "$bkpdir"/* "$data_dir"/
+		rm -rf "$bkpdir"
+	fi
+
+	if [ "${data_dir%/}" != "${conf_dir%/}" ]; then
+		# Move configs from data_dir to conf_dir and symlink them to data_dir.
+		local name newname
+		for name in postgresql.conf pg_hba.conf pg_ident.conf; do
+			newname="$name"
+			[ ! -e "$conf_dir"/$name ] || newname="$name.new"
+
+			mv "$data_dir"/$name "$conf_dir"/$newname
+			ln -s "$conf_dir"/$name "$data_dir"/$name
+		done
+	fi
+
+	eend $retval
+} 
+
+
+get_config() {
+	local name="$1"
+	local default="${2:-}"
+
+	if [ ! -f "$conffile" ]; then
+		printf '%s\n' "$default"
+		return 1
+	fi
+	sed -En "/^\s*${name}\b/{                      # find line starting with the name
+		  s/^\s*${name}\s*=?\s*([^#]+).*/\1/;  # capture the value
+		  s/\s*$//;                            # trim trailing whitespaces
+		  s/^['\"](.*)['\"]$/\1/;              # remove delimiting quotes
+		  p
+		}" "$conffile" \
+		| grep . || printf '%s\n' "$default"
+}
+
+check_deprecated_var() {
+	local old_name="$1"
+	local new_name="$2"
+
+	if [ -n "$(getval "$old_name")" ]; then
+		ewarn "Variable '$old_name' has been removed, please use '$new_name' instead."
+	fi
+}
+
+getval() {
+	eval "printf '%s\n' \"\$$1\""
+}

@@ -1,0 +1,173 @@
+From: Aron Xu <aron@debian.org>
+Date: Mon, 13 Feb 2012 14:57:45 +0800
+Subject: send crlf
+
+---
+ nc.1     |  6 ++++--
+ netcat.c | 50 ++++++++++++++++++++++++++++++++++++--------------
+ 2 files changed, 40 insertions(+), 16 deletions(-)
+
+diff --git a/nc.1 b/nc.1
+index 67cc19f..746d3b6 100644
+--- a/nc.1
++++ b/nc.1
+@@ -34,7 +34,7 @@
+ .Sh SYNOPSIS
+ .Nm nc
+ .Bk -words
+-.Op Fl 46DdFhklNnrStUuvz
++.Op Fl 46CDdFhklNnrStUuvz
+ .Op Fl I Ar length
+ .Op Fl i Ar interval
+ .Op Fl O Ar length
+@@ -98,6 +98,8 @@ to use IPv4 addresses only.
+ Forces
+ .Nm
+ to use IPv6 addresses only.
++.It Fl C
++Send CRLF as line-ending.
+ .It Fl D
+ Enable debugging on the socket.
+ .It Fl d
+@@ -377,7 +379,7 @@ More complicated examples can be built up when the user knows the format
+ of requests required by the server.
+ As another example, an email may be submitted to an SMTP server using:
+ .Bd -literal -offset indent
+-$ nc localhost 25 \*(Lt\*(Lt EOF
++$ nc [\-C] localhost 25 \*(Lt\*(Lt EOF
+ HELO host.example.com
+ MAIL FROM:\*(Ltuser@host.example.com\*(Gt
+ RCPT TO:\*(Ltuser2@host.example.com\*(Gt
+diff --git a/netcat.c b/netcat.c
+index e0ad5c7..1c90145 100644
+--- a/netcat.c
++++ b/netcat.c
+@@ -118,6 +118,7 @@
+ #define CONNECTION_TIMEOUT 2
+ 
+ /* Command Line Options */
++int     Cflag = 0;                              /* CRLF line-ending */
+ int	dflag;					/* detached, no stdin */
+ int	Fflag;					/* fdpass sock to stdout */
+ unsigned int iflag;				/* Interval Flag */
+@@ -164,7 +165,7 @@ void	set_common_sockopts(int, int);
+ int	map_tos(char *, int *);
+ void	report_connect(const struct sockaddr *, socklen_t);
+ void	usage(int);
+-ssize_t drainbuf(int, unsigned char *, size_t *);
++ssize_t drainbuf(int, unsigned char *, size_t *, int);
+ ssize_t fillbuf(int, unsigned char *, size_t *);
+ 
+ static int connect_with_timeout(int fd, const struct sockaddr *sa,
+@@ -194,7 +195,7 @@ main(int argc, char *argv[])
+ 	signal(SIGPIPE, SIG_IGN);
+ 
+ 	while ((ch = getopt(argc, argv,
+-	    "46DdFhI:i:klNnO:P:p:rSs:tT:UuV:vw:X:x:z")) != -1) {
++	    "46CDdFhI:i:klNnO:P:p:rSs:tT:UuV:vw:X:x:z")) != -1) {
+ 		switch (ch) {
+ 		case '4':
+ 			family = AF_INET;
+@@ -322,6 +323,9 @@ main(int argc, char *argv[])
+ 			if (Tflag < 0 || Tflag > 255 || errstr || errno)
+ 				errx(1, "illegal tos value %s", optarg);
+ 			break;
++                case 'C':
++                        Cflag = 1;
++                        break;
+ 		default:
+ 			usage(1);
+ 		}
+@@ -928,12 +932,6 @@ readwrite(int net_fd)
+ 			return;
+ 		}
+ 
+-		/* help says -i is for "wait between lines sent". We read and
+-		 * write arbitrary amounts of data, and we don't want to start
+-		 * scanning for newlines, so this is as good as it gets */
+-		if (iflag)
+-			sleep(iflag);
+-
+ 		/* poll */
+ 		num_fds = poll(pfd, 4, timeout);
+ 
+@@ -999,7 +997,7 @@ readwrite(int net_fd)
+ 		/* try to write to network */
+ 		if (pfd[POLL_NETOUT].revents & POLLOUT && stdinbufpos > 0) {
+ 			ret = drainbuf(pfd[POLL_NETOUT].fd, stdinbuf,
+-			    &stdinbufpos);
++			    &stdinbufpos, (iflag || Cflag) ? 1 : 0);
+ 			if (ret == -1)
+ 				pfd[POLL_NETOUT].fd = -1;
+ 			/* buffer empty - remove self from polling */
+@@ -1034,7 +1032,7 @@ readwrite(int net_fd)
+ 		/* try to write to stdout */
+ 		if (pfd[POLL_STDOUT].revents & POLLOUT && netinbufpos > 0) {
+ 			ret = drainbuf(pfd[POLL_STDOUT].fd, netinbuf,
+-			    &netinbufpos);
++			    &netinbufpos, 0);
+ 			if (ret == -1)
+ 				pfd[POLL_STDOUT].fd = -1;
+ 			/* buffer empty - remove self from polling */
+@@ -1059,17 +1057,40 @@ readwrite(int net_fd)
+ }
+ 
+ ssize_t
+-drainbuf(int fd, unsigned char *buf, size_t *bufpos)
++drainbuf(int fd, unsigned char *buf, size_t *bufpos, int oneline)
+ {
+-	ssize_t n;
++	ssize_t n, r;
+ 	ssize_t adjust;
++	unsigned char *lf = NULL;
++
++	if (oneline)
++		lf = memchr(buf, '\n', *bufpos);
++	if (lf == NULL) {
++		n = *bufpos;
++		oneline = 0;
++	}
++	else if (Cflag && (lf == buf || buf[lf - buf - 1] != '\r')) {
++		n = lf - buf;
++		oneline = 2;
++	}
++	else
++		n = lf - buf + 1;
++	if (n > 0)
++		n = write(fd, buf, n);
+ 
+-	n = write(fd, buf, *bufpos);
+ 	/* don't treat EAGAIN, EINTR as error */
+ 	if (n == -1 && (errno == EAGAIN || errno == EINTR))
+ 		n = -2;
++	if (oneline == 2 && n >= 0)
++		n++;
+ 	if (n <= 0)
+ 		return n;
++
++	if (oneline == 2 && (r = atomicio(vwrite, fd, "\r\n", 2)) != 2)
++		err(1, "write failed (%zu/2)", r);
++	if (oneline > 0 && iflag)
++		sleep(iflag);
++
+ 	/* adjust buffer */
+ 	adjust = *bufpos - n;
+ 	if (adjust > 0)
+@@ -1401,6 +1422,7 @@ help(void)
+ 	fprintf(stderr, "\tCommand Summary:\n\
+ 	\t-4		Use IPv4\n\
+ 	\t-6		Use IPv6\n\
++	\t-C		Send CRLF as line-ending\n\
+ 	\t-D		Enable the debug socket option\n\
+ 	\t-d		Detach from stdin\n\
+ 	\t-F		Pass socket fd\n\
+@@ -1435,7 +1457,7 @@ void
+ usage(int ret)
+ {
+ 	fprintf(stderr,
+-	    "usage: nc [-46DdFhklNnrStUuvz] [-I length] [-i interval] [-O length]\n"
++	    "usage: nc [-46CDdFhklNnrStUuvz] [-I length] [-i interval] [-O length]\n"
+ 	    "\t  [-P proxy_username] [-p source_port] [-s source] [-T toskeyword]\n"
+ 	    "\t  [-V rtable] [-w timeout] [-X proxy_protocol]\n"
+ 	    "\t  [-x proxy_address[:port]] [destination] [port]\n");
+-- 

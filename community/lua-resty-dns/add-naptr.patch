@@ -1,0 +1,244 @@
+From 2d39a1bc09441c2b77d6911f43f94e9438c2d96c Mon Sep 17 00:00:00 2001
+From: Sergey Lukin <sergey.lukin@inbox.lv>
+Date: Fri, 5 Aug 2016 12:09:11 +0300
+Subject: [PATCH] add NAPTR record support
+
+---
+ README.markdown            | 11 +++++++++
+ lib/resty/dns/resolver.lua | 61 ++++++++++++++++++++++++++++++++++++++++++++++
+ t/TestDNS.pm               | 19 ++++++++++++++-
+ t/mock.t                   | 51 ++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 141 insertions(+), 1 deletion(-)
+
+diff --git a/README.markdown b/README.markdown
+index 78c4632..1699f77 100644
+--- a/README.markdown
++++ b/README.markdown
+@@ -28,6 +28,7 @@ Table of Contents
+     * [TYPE_TXT](#type_txt)
+     * [TYPE_AAAA](#type_aaaa)
+     * [TYPE_SRV](#type_srv)
++    * [TYPE_NAPTR](#type_naptr)
+     * [TYPE_SPF](#type_spf)
+     * [CLASS_IN](#class_in)
+     * [SECTION_AN](#section_an)
+@@ -375,6 +376,16 @@ See RFC 2782 for details.
+ 
+ [Back to TOC](#table-of-contents)
+ 
++TYPE_NAPTR
++----------
++`syntax: typ = r.TYPE_NAPTR`
++
++The `NAPTR` resource record type, equal to the decimal number `35`.
++
++See RFC 2915 for details.
++
++[Back to TOC](#table-of-contents)
++
+ TYPE_SPF
+ ---------
+ `syntax: typ = r.TYPE_SPF`
+diff --git a/lib/resty/dns/resolver.lua b/lib/resty/dns/resolver.lua
+index cecb7e3..576db03 100644
+--- a/lib/resty/dns/resolver.lua
++++ b/lib/resty/dns/resolver.lua
+@@ -46,6 +46,7 @@ local TYPE_MX     = 15
+ local TYPE_TXT    = 16
+ local TYPE_AAAA   = 28
+ local TYPE_SRV    = 33
++local TYPE_NAPTR  = 35
+ local TYPE_SPF    = 99
+ 
+ local CLASS_IN    = 1
+@@ -65,6 +66,7 @@ local _M = {
+     TYPE_TXT    = TYPE_TXT,
+     TYPE_AAAA   = TYPE_AAAA,
+     TYPE_SRV    = TYPE_SRV,
++    TYPE_NAPTR  = TYPE_NAPTR,
+     TYPE_SPF    = TYPE_SPF,
+     CLASS_IN    = CLASS_IN,
+     SECTION_AN  = SECTION_AN,
+@@ -208,6 +210,21 @@ local function _encode_name(s)
+ end
+ 
+ 
++local function _decode_string(buf, pos)
++    local slen = byte(buf, pos)
++
++    if slen == 0 then
++        return "", pos + 1
++    end
++
++    if pos + 1 + slen > #buf then
++        return nil, 'truncated'
++    end
++
++    return sub(buf, pos + 1, pos + slen), pos + slen + 1
++end
++
++
+ local function _decode_name(buf, pos)
+     local labels = {}
+     local nptrs = 0
+@@ -481,6 +498,50 @@ local function parse_section(answers, section, buf, start_pos, size,
+ 
+             pos = p
+ 
++        elseif typ == TYPE_NAPTR then
++            if len < 7 then
++                return nil, "bad NAPTR record value length: " .. len
++            end
++
++            local order_hi = byte(buf, pos)
++            local order_lo = byte(buf, pos + 1)
++            ans.order = lshift(order_hi, 8) + order_lo
++
++            local preference_hi = byte(buf, pos + 2)
++            local preference_lo = byte(buf, pos + 3)
++            ans.preference = lshift(preference_hi, 8) + preference_lo
++
++            local flags_str, p = _decode_string(buf, pos + 4)
++            if not flags_str then
++                return nil, pos
++            end
++            ans.flags = flags_str
++
++            local services_str, p = _decode_string(buf, p)
++            if not services_str then
++                return nil, pos
++            end
++            ans.services = services_str
++
++            local regexp_str, p = _decode_string(buf, p)
++            if not regexp_str then
++                return nil, pos
++            end
++            ans.regexp = regexp_str
++
++            local replacements_str,p = _decode_name(buf, p)
++            if not replacements_str then
++                return nil, pos
++            end
++            ans.replacements = replacements_str
++
++            if p - pos ~= len then
++                return nil, format("bad NAPTR record length: %d ~= %d",
++                                   p - pos, len)
++            end
++
++            pos = p
++
+         elseif typ == TYPE_NS then
+ 
+             local name, p = _decode_name(buf, pos)
+diff --git a/t/TestDNS.pm b/t/TestDNS.pm
+index cf01f29..9971c80 100644
+--- a/t/TestDNS.pm
++++ b/t/TestDNS.pm
+@@ -13,6 +13,7 @@ use constant {
+     TYPE_CNAME => 5,
+     TYPE_AAAA => 28,
+     TYPE_SRV => 33,
++    TYPE_NAPTR => 35,
+     CLASS_INTERNET => 1,
+ };
+ 
+@@ -261,6 +262,11 @@ sub encode_name ($) {
+     return $name;
+ }
+ 
++sub encode_str ($) {
++    my $str = shift;
++    return chr(length($str)) . $str;
++}
++
+ sub encode_record ($) {
+     my $ans = shift;
+     my $name = $ans->{name};
+@@ -304,7 +310,6 @@ sub encode_record ($) {
+         $class //= CLASS_INTERNET;
+     }
+ 
+-
+     my $srv = $ans->{srv};
+     if (defined $srv) {
+         $rddata //= pack("nnn", $ans->{priority}, $ans->{weight}, $ans->{port}) . encode_name($srv);
+@@ -313,6 +318,18 @@ sub encode_record ($) {
+         $class //= CLASS_INTERNET;
+     }
+ 
++    my $services = $ans->{services};
++    if (defined $services) {
++        $rddata //= pack("nn", $ans->{order}, $ans->{preference})
++          . encode_str($ans->{flags})
++          . encode_str($ans->{services})
++          . encode_str($ans->{regexp})
++          . encode_name($ans->{replacements});
++        $rdlength //= length $rddata;
++        $type //= TYPE_NAPTR;
++        $class //= CLASS_INTERNET;
++    }
++
+     $type //= 0;
+     $class //= 0;
+     $ttl //= 0;
+diff --git a/t/mock.t b/t/mock.t
+index 6d43c6f..cc727f0 100644
+--- a/t/mock.t
++++ b/t/mock.t
+@@ -1721,3 +1721,54 @@ GET /t
+ records: [{"address":"127.0.0.1","section":1,"type":1,"class":1,"name":"www.google.com","ttl":123456}]
+ --- no_error_log
+ [error]
++
++
++=== TEST 35: NAPTR
++--- http_config eval: $::HttpConfig
++--- config
++    location /t {
++        content_by_lua '
++            local resolver = require "resty.dns.resolver"
++
++            local r, err = resolver:new{
++                nameservers = { {"127.0.0.1", 1953} }
++            }
++            if not r then
++                ngx.say("failed to instantiate resolver: ", err)
++                return
++            end
++
++            r._id = 125
++
++            local ans, err = r:query("5.4.3.2.1.e164.arpa", { qtype = r.TYPE_NAPTR })
++            if not ans then
++                ngx.say("failed to query: ", err)
++                return
++            end
++
++            local cjson = require "cjson"
++            ngx.say("records: ", cjson.encode(ans))
++        ';
++    }
++--- udp_listen: 1953
++--- udp_reply dns
++{
++    id => 125,
++    opcode => 0,
++    qtype => 35,  # NAPTR
++    qname => '5.4.3.2.1.e164.arpa',
++    answer => [
++        { name => "5.4.3.2.1.e164.arpa", ttl => 2, order => 10, preference => 100,
++          flags => "u",
++          services => "E2U+sip",
++          regexp => "!^\\+123456(.*)\$!sip:\\1\@example.org!",
++          replacements => ""
++        }
++    ],
++}
++--- request
++GET /t
++--- response_body
++records: [{"order":10,"preference":100,"class":1,"regexp":"!^\\+123456(.*)$!sip:\\1@example.org!","replacements":"","section":1,"flags":"u","type":35,"ttl":2,"name":"5.4.3.2.1.e164.arpa","services":"E2U+sip"}]
++--- no_error_log
++[error]

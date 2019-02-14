@@ -1,0 +1,202 @@
+#!/bin/sh
+
+lockfile=/var/run/mqtt-exec.aports-build/aports-build.pid
+pid=$(cat $lockfile 2>/dev/null)
+
+if [ -n "$pid" ]; then
+	if [ -d /proc/"$pid" ]; then
+		# already running
+		exit 0
+	fi
+fi
+echo $$ > $lockfile || exit 1
+
+logurl=
+conf=/etc/conf.d/mqtt-exec.aports-build
+. $conf || exit 1
+
+if [ -z "$git_branch" ]; then
+	echo "Please set 'git_branch' in $conf" >&2
+	exit 1
+fi
+
+rel=$upload_release
+
+if [ -z "$rel" ]; then
+	case "$git_branch" in
+		master)		rel="edge";;
+		[0-9]*-stable)	rel=v${git_branch%-stable} ;;
+	esac
+fi
+
+arch=$(abuild -A)
+
+aports=${APORTS:-$HOME/aports}
+isodir=$HOME/alpine-iso
+packages=${REPOSDIR:-$HOME/packages}
+releasedir="$packages/releases/$arch"
+repos=${REPOS:-"main community testing"}
+
+: ${buildrepo:="buildrepo -p"}
+: ${upload_host:="dl-master.alpinelinux.org"}
+: ${upload_prefix:="$upload_host:alpine"}
+upload_pkg="$upload_prefix/$rel/"
+upload_iso="$upload_prefix/$rel/releases/$arch/"
+
+: ${hostname:=$(hostname)}
+: ${mqtt_broker:="msg.alpinelinux.org"}
+: ${status_msg:="mosquitto_pub -h $mqtt_broker -t build/$hostname -r -m"}
+: ${upload_msg:="mosquitto_pub -h $mqtt_broker -t rsync/$upload_host/$rel/$arch -m"}
+: ${logdir:="/var/cache/distfiles/buildlogs"}
+: ${logurlprefix:="http://build.alpinelinux.org/buildlogs"}
+
+log() {
+	echo "$hostname: $@"
+	$status_msg "$1"
+}
+
+# create new_release
+create_release() {
+	local release="$1"
+	local release_deps="abuild apk-tools alpine-conf busybox fakeroot
+		xorriso rsync openssh-client squashfs-tools acct mkinitfs
+		mtools"
+	case "$arch" in
+	aarch64|arm*) release_deps="$release_deps mtools grub-efi";;
+	x86*) release_deps="$release_deps syslinux mtools grub-efi";;
+	ppc64le) release_deps="$release_deps grub grub-ieee1275";;
+	s390x) release_deps="$release_deps s390-tools";;
+	esac
+
+	cd "$aports"
+	abuild-apk add --virtual .alpine-release-deps $release_deps
+	if [ "$rel" = "edge" ]; then
+		sh scripts/mkimage.sh --repository $packages/main --yaml \
+			--tag "$release" --outdir $releasedir --profile "minirootfs netboot" \
+			|| return 1
+	else
+		sh scripts/mkimage.sh --repository $packages/main --yaml \
+			--tag "$release" --outdir $releasedir || return 1
+	fi
+
+	if $use_network; then
+		ssh $upload_host mkdir -p "${upload_iso#${upload_host}:}"
+		rsync -ruva $rsync_opts "$releasedir"/* "$upload_iso" || return 1
+	fi
+	abuild-apk del .alpine-release-deps
+}
+
+build() {
+	( $buildrepo "$@" || echo "FAIL" ) | while read line; do
+		case "$line" in
+		FAIL) return 1;;
+		[0-9]*/[0-9]*) $status_msg "$line";;
+		*) echo "$line";;
+		esac
+	done
+}
+
+cd $aports || return 1
+[ -z "$repos" ] && return 1
+
+use_network=true
+force_release=false
+skip_build=false
+
+# parse opts
+while getopts "fFu:ns" opt; do
+	case $opt in
+	'f') force=true;;
+	'F') force_release=true;;
+	'u') logurl=" $OPTARG";;
+	'n') use_network=false
+	     status_msg="echo status_msg:"
+	     upload_msg="echo upload_msg:"
+	     ;;
+	's') skip_build=true;;
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+while true; do
+	do_release=false
+	cd $aports || return 1
+	# check if we need to rebuild
+	_old=$(git describe)
+	_old_tag=$(git describe --abbrev=0)
+	if $use_network; then
+		log "pulling git"
+		git checkout $git_branch
+		git pull || return 1
+	fi
+	_current=$(git describe)
+	_current_tag=$(git describe --abbrev=0)
+	if [ "$_old_tag" != "$_current_tag" ]; then
+		log "$_old_tag -> $_current_tag"
+		do_release=true
+	fi
+	if [ "$_old" = "$_current" ] && [ -f /tmp/uploaded ] && [ -z "$force" ] && [ "$_current_tag" = "$_old_tag" ]; then
+		break
+	fi
+
+	if $force_release; then
+		do_release=true
+	fi
+	force=
+
+	# check if we need make new release
+	if $do_release; then
+		_new_release=1
+		# we want build the realease from this tag
+		git checkout "$_current_tag"
+		_current=$(git describe)
+	fi
+
+	rm -f /tmp/uploaded
+
+	# do the compile, send output to log
+	log "building $_current"
+	rm -f "$logdir"/$hostname.log
+	rc=0
+	! $skip_build && for repo in $repos; do
+		if ! build $repo >>"$logdir"/$hostname.log 2>&1 ; then
+			errlog=$hostname.$_current.log
+			cp "$logdir"/$hostname.log "$logdir"/$errlog
+			# todo: revert last commit?
+			log "failed"
+			exit 1
+		fi
+
+		# upgrade our running system
+		log "upgrading system"
+		abuild-apk upgrade -U -a --quiet || log 'failed to apk upgrade'
+
+		# copy for distribution
+		cd "$packages" || return 1
+		if [ -z "$upload_pkg" ]; then
+			continue
+		fi
+
+		log "uploading packages to $repo"
+		$use_network && for i in $upload_pkg; do
+			rsync -rui --delete-delay --delay-updates $rsync_opts \
+				$repo/$arch $i/$repo/ > /tmp/upload-$repo
+			if [ $? -ne 0 ]; then
+				rc=1
+			elif [ -s /tmp/upload-$repo ]; then
+				$upload_msg "$rel/$repo/$arch"
+			fi
+		done
+	done
+	[ $rc -eq 0 ] && touch /tmp/uploaded && abuild-apk update
+
+	if $do_release && create_release ${_current_tag#v}; then
+		$upload_msg "$rel/releases/$arch"
+	fi
+
+done
+
+# cleanup
+log "idle"
+rm -f $lockfile
+
