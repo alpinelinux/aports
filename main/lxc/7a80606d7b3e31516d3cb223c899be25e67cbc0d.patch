@@ -1,0 +1,167 @@
+From 7a80606d7b3e31516d3cb223c899be25e67cbc0d Mon Sep 17 00:00:00 2001
+From: Christian Brauner <christian.brauner@ubuntu.com>
+Date: Thu, 14 Feb 2019 14:37:46 +0100
+Subject: [PATCH] Revert "rexec: remove needless /proc/cmdline parsing"
+
+The ELF binary spec does specify in [1]:
+
+SHT_INIT_ARRAY
+This section contains an array of pointers to initialization functions,
+as described in ``Initialization and Termination Functions'' in Chapter
+5. Each pointer in the array is taken as a parameterless procedure with
+a void return.
+
+which means libcs other than glibc might not pass down argc and argv to
+constructors.
+
+This reverts commit 0c816b346788afa9d601766e31544fdcce67d780.
+
+[1]: http://www.sco.com/developers/gabi/latest/ch4.sheader.html#init_array
+
+Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+---
+ src/lxc/rexec.c            | 70 +++++++++++++++++++++++++++++++++++---
+ src/lxc/rexec.h            |  2 +-
+ src/lxc/tools/lxc_attach.c |  4 +--
+ 3 files changed, 68 insertions(+), 8 deletions(-)
+
+diff --git a/src/lxc/rexec.c b/src/lxc/rexec.c
+index 17e1806fe..024728d85 100644
+--- a/src/lxc/rexec.c
++++ b/src/lxc/rexec.c
+@@ -25,7 +25,6 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <unistd.h>
+ 
+ #include "config.h"
+ #include "file_utils.h"
+@@ -40,6 +39,58 @@
+ #define LXC_MEMFD_REXEC_SEALS \
+ 	(F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE)
+ 
++static int push_vargs(char *data, int data_length, char ***output)
++{
++	int num = 0;
++	char *cur = data;
++
++	if (!data || *output)
++		return -1;
++
++	*output = must_realloc(NULL, sizeof(**output));
++
++	while (cur < data + data_length) {
++		num++;
++		*output = must_realloc(*output, (num + 1) * sizeof(**output));
++
++		(*output)[num - 1] = cur;
++		cur += strlen(cur) + 1;
++	}
++	(*output)[num] = NULL;
++	return num;
++}
++
++static int parse_exec_params(char ***argv, char ***envp)
++{
++	int ret;
++	char *cmdline = NULL, *env = NULL;
++	size_t cmdline_size, env_size;
++
++	cmdline = file_to_buf("/proc/self/cmdline", &cmdline_size);
++	if (!cmdline)
++		goto on_error;
++
++	env = file_to_buf("/proc/self/environ", &env_size);
++	if (!env)
++		goto on_error;
++
++	ret = push_vargs(cmdline, cmdline_size, argv);
++	if (ret <= 0)
++		goto on_error;
++
++	ret = push_vargs(env, env_size, envp);
++	if (ret <= 0)
++		goto on_error;
++
++	return 0;
++
++on_error:
++	free(env);
++	free(cmdline);
++
++	return -1;
++}
++
+ static int is_memfd(void)
+ {
+ 	int fd, saved_errno, seals;
+@@ -91,9 +142,10 @@ static void lxc_rexec_as_memfd(char **argv, char **envp, const char *memfd_name)
+ 	errno = saved_errno;
+ }
+ 
+-int lxc_rexec(char *argv[], const char *memfd_name)
++int lxc_rexec(const char *memfd_name)
+ {
+ 	int ret;
++	char **argv = NULL, **envp = NULL;
+ 
+ 	ret = is_memfd();
+ 	if (ret < 0 && ret == -ENOTRECOVERABLE) {
+@@ -105,7 +157,15 @@ int lxc_rexec(char *argv[], const char *memfd_name)
+ 		return 0;
+ 	}
+ 
+-	lxc_rexec_as_memfd(argv, environ, memfd_name);
++	ret = parse_exec_params(&argv, &envp);
++	if (ret < 0) {
++		fprintf(stderr,
++			"%s - Failed to parse command line parameters\n",
++			strerror(errno));
++		return -1;
++	}
++
++	lxc_rexec_as_memfd(argv, envp, memfd_name);
+ 	fprintf(stderr, "%s - Failed to rexec as memfd\n", strerror(errno));
+ 	return -1;
+ }
+@@ -117,9 +177,9 @@ int lxc_rexec(char *argv[], const char *memfd_name)
+  * container are in the same user namespace or have set up an identity id
+  * mapping: CVE-2019-5736.
+  */
+-__attribute__((constructor)) static void liblxc_rexec(int argc, char *argv[])
++__attribute__((constructor)) static void liblxc_rexec(void)
+ {
+-	if (getenv("LXC_MEMFD_REXEC") && lxc_rexec(argv, "liblxc")) {
++	if (getenv("LXC_MEMFD_REXEC") && lxc_rexec("liblxc")) {
+ 		fprintf(stderr, "Failed to re-execute liblxc via memory file descriptor\n");
+ 		_exit(EXIT_FAILURE);
+ 	}
+diff --git a/src/lxc/rexec.h b/src/lxc/rexec.h
+index ba612d969..088ded932 100644
+--- a/src/lxc/rexec.h
++++ b/src/lxc/rexec.h
+@@ -21,6 +21,6 @@
+ #ifndef __LXC_REXEC_H
+ #define __LXC_REXEC_H
+ 
+-extern int lxc_rexec(char *argv[], const char *memfd_name);
++extern int lxc_rexec(const char *memfd_name);
+ 
+ #endif /* __LXC_REXEC_H */
+diff --git a/src/lxc/tools/lxc_attach.c b/src/lxc/tools/lxc_attach.c
+index 60b2ec64f..d10b6ecc2 100644
+--- a/src/lxc/tools/lxc_attach.c
++++ b/src/lxc/tools/lxc_attach.c
+@@ -57,9 +57,9 @@ lxc_log_define(lxc_attach, lxc);
+  * mapping: CVE-2019-5736.
+  */
+ #ifdef ENFORCE_MEMFD_REXEC
+-__attribute__((constructor)) static void lxc_attach_rexec(int argc, char *argv[])
++__attribute__((constructor)) static void lxc_attach_rexec(void)
+ {
+-	if (!getenv("LXC_MEMFD_REXEC") && lxc_rexec(argv, "lxc-attach")) {
++	if (!getenv("LXC_MEMFD_REXEC") && lxc_rexec("lxc-attach")) {
+ 		fprintf(stderr, "Failed to re-execute lxc-attach via memory file descriptor\n");
+ 		_exit(EXIT_FAILURE);
+ 	}

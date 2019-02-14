@@ -1,0 +1,127 @@
+From cee55b59cd0f7446bae25d02bcd23805ce43aaa4 Mon Sep 17 00:00:00 2001
+From: Christian Brauner <christian.brauner@ubuntu.com>
+Date: Thu, 14 Feb 2019 14:48:41 +0100
+Subject: [PATCH] rexec: remove envp parsing in favour of environ
+
+My first attempt to simplify this and make it less costly focussed on
+the way constructors are called. I was under the impression that the ELF
+specification mandated that arg, argv, and actually even envp need to be
+passed to functions located in the .init_array section (aka
+"constructors"). Actually, the specifications is (cf. [2]):
+
+SHT_INIT_ARRAY
+This section contains an array of pointers to initialization functions,
+as described in ``Initialization and Termination Functions'' in Chapter
+5. Each pointer in the array is taken as a parameterless procedure with
+a void return.
+
+which means that this becomes a libc specific decision. Glibc passes
+down those args, musl doesn't. So this approach can't work. However, we
+can at least remove the environment parsing part based on POSIX since
+[1] mandates that there should be an environ variable defined in
+unistd.h which provides access to the environment. See also the relevant
+Open Group specification [1].
+
+[1]: http://pubs.opengroup.org/onlinepubs/9699919799/
+[2]: http://www.sco.com/developers/gabi/latest/ch4.sheader.html#init_array
+
+Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+---
+ src/lxc/rexec.c | 40 ++++++++++++++++++----------------------
+ 1 file changed, 18 insertions(+), 22 deletions(-)
+
+diff --git a/src/lxc/rexec.c b/src/lxc/rexec.c
+index 024728d85..fe362f284 100644
+--- a/src/lxc/rexec.c
++++ b/src/lxc/rexec.c
+@@ -25,9 +25,12 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <unistd.h>
+ 
+ #include "config.h"
+ #include "file_utils.h"
++#include "macro.h"
++#include "memory_utils.h"
+ #include "raw_syscalls.h"
+ #include "string_utils.h"
+ #include "syscall_wrappers.h"
+@@ -60,35 +63,22 @@ static int push_vargs(char *data, int data_length, char ***output)
+ 	return num;
+ }
+ 
+-static int parse_exec_params(char ***argv, char ***envp)
++static int parse_argv(char ***argv)
+ {
++	__do_free char *cmdline = NULL;
+ 	int ret;
+-	char *cmdline = NULL, *env = NULL;
+-	size_t cmdline_size, env_size;
++	size_t cmdline_size;
+ 
+ 	cmdline = file_to_buf("/proc/self/cmdline", &cmdline_size);
+ 	if (!cmdline)
+-		goto on_error;
+-
+-	env = file_to_buf("/proc/self/environ", &env_size);
+-	if (!env)
+-		goto on_error;
++		return -1;
+ 
+ 	ret = push_vargs(cmdline, cmdline_size, argv);
+ 	if (ret <= 0)
+-		goto on_error;
+-
+-	ret = push_vargs(env, env_size, envp);
+-	if (ret <= 0)
+-		goto on_error;
++		return -1;
+ 
++	steal_ptr(cmdline);
+ 	return 0;
+-
+-on_error:
+-	free(env);
+-	free(cmdline);
+-
+-	return -1;
+ }
+ 
+ static int is_memfd(void)
+@@ -142,10 +132,16 @@ static void lxc_rexec_as_memfd(char **argv, char **envp, const char *memfd_name)
+ 	errno = saved_errno;
+ }
+ 
++/*
++ * Get cheap access to the environment. This must be declared by the user as
++ * mandated by POSIX. The definition is located in unistd.h.
++ */
++extern char **environ;
++
+ int lxc_rexec(const char *memfd_name)
+ {
+ 	int ret;
+-	char **argv = NULL, **envp = NULL;
++	char **argv = NULL;
+ 
+ 	ret = is_memfd();
+ 	if (ret < 0 && ret == -ENOTRECOVERABLE) {
+@@ -157,7 +153,7 @@ int lxc_rexec(const char *memfd_name)
+ 		return 0;
+ 	}
+ 
+-	ret = parse_exec_params(&argv, &envp);
++	ret = parse_argv(&argv);
+ 	if (ret < 0) {
+ 		fprintf(stderr,
+ 			"%s - Failed to parse command line parameters\n",
+@@ -165,7 +161,7 @@ int lxc_rexec(const char *memfd_name)
+ 		return -1;
+ 	}
+ 
+-	lxc_rexec_as_memfd(argv, envp, memfd_name);
++	lxc_rexec_as_memfd(argv, environ, memfd_name);
+ 	fprintf(stderr, "%s - Failed to rexec as memfd\n", strerror(errno));
+ 	return -1;
+ }
