@@ -20,7 +20,7 @@ build_kernel() {
 section_kernels() {
 	local _f _a _pkgs
 	for _f in $kernel_flavors; do
-		_pkgs="linux-$_f linux-firmware"
+		_pkgs="linux-$_f linux-firmware wireless-regdb $modloop_addons"
 		for _a in $kernel_addons; do
 			_pkgs="$_pkgs $_a-$_f"
 		done
