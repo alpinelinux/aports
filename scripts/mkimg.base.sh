@@ -12,6 +12,7 @@ build_kernel() {
 		--arch "$ARCH" \
 		--package "$_pkgs" \
 		--feature "$initfs_features" \
+		--modloopfw "$modloopfw" \
 		--repositories-file "$APKROOT/etc/apk/repositories" \
 		"$DESTDIR"
 }
