@@ -22,7 +22,7 @@ set -e
 all_sections=""
 all_profiles=""
 all_checksums="sha256 sha512"
-all_arches="aarch64 armhf x86 x86_64"
+all_arches="aarch64 armhf armv7 x86 x86_64"
 all_dirs=""
 build_date="$(date +%y%m%d)"
 default_arch="$(apk --print-arch)"
