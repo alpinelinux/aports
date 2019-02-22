@@ -50,7 +50,7 @@ int is_in_group(gid_t group)
 {
 	int ngroups_max = sysconf(_SC_NGROUPS_MAX) + 1;
 	gid_t *buf = malloc(ngroups_max * sizeof(gid_t));
-	int ngroups, ret = 0;
+	int ngroups;
 	int i;
 	if (buf == NULL) {
 		perror("malloc");
