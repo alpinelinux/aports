@@ -20,6 +20,12 @@ rpi_gen_config() {
 		[pi1]
 		kernel=boot/vmlinuz-rpi
 		initramfs boot/initramfs-rpi
+		[all]
+		include usercfg.txt
+		EOF
+	;;
+	armv7)
+		cat <<-EOF
 		[pi2]
 		kernel=boot/vmlinuz-rpi2
 		initramfs boot/initramfs-rpi2
