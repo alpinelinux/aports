@@ -1,0 +1,1427 @@
+Author: Portola Project <portola-dev@openjdk.java.net>
+URL: https://openjdk.java.net/projects/portola/
+Summary: Provide a port of the JDK to the musl C library
+----
+
+diff -upr a/hotspot/make/lib/CompileJvm.gmk b/hotspot/make/lib/CompileJvm.gmk
+--- a/hotspot/make/lib/CompileJvm.gmk
++++ b/hotspot/make/lib/CompileJvm.gmk
+@@ -128,6 +128,10 @@ else
+   OPENJDK_TARGET_CPU_VM_VERSION := $(OPENJDK_TARGET_CPU)
+ endif
+ 
++ifneq ($(HOTSPOT_TARGET_LIBC),)
++  LIBC_DEFINE := -DHOTSPOT_LIBC='"$(HOTSPOT_TARGET_LIBC)"'
++endif
++
+ CFLAGS_VM_VERSION := \
+     $(VERSION_CFLAGS) \
+     -DHOTSPOT_VERSION_STRING='"$(VERSION_STRING)"' \
+@@ -135,6 +139,7 @@ CFLAGS_VM_VERSION := \
+     -DHOTSPOT_BUILD_USER='"$(USERNAME)"' \
+     -DHOTSPOT_VM_DISTRO='"$(HOTSPOT_VM_DISTRO)"' \
+     -DCPU='"$(OPENJDK_TARGET_CPU_VM_VERSION)"' \
++    $(LIBC_DEFINE) \
+     #
+ 
+ # -DDONT_USE_PRECOMPILED_HEADER will exclude all includes in precompiled.hpp.
+diff -upr a/hotspot/make/lib/Lib-jdk.hotspot.agent.gmk b/hotspot/make/lib/Lib-jdk.hotspot.agent.gmk
+--- a/hotspot/make/lib/Lib-jdk.hotspot.agent.gmk
++++ b/hotspot/make/lib/Lib-jdk.hotspot.agent.gmk
+@@ -1,5 +1,5 @@
+ #
+-# Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
++# Copyright (c) 2015, 2017, Oracle and/or its affiliates. All rights reserved.
+ # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ #
+ # This code is free software; you can redistribute it and/or modify it
+@@ -57,7 +57,10 @@ ifeq ($(OPENJDK_TARGET_OS), linux)
+   SA_CFLAGS := $(CFLAGS_JDKLIB) -D_FILE_OFFSET_BITS=64 \
+       $(SA_MACHINE_FLAG_linux)
+   SA_LDFLAGS := $(LDFLAGS_JDKLIB) $(SA_MACHINE_FLAG_linux)
+-  SA_LIBS := -lthread_db $(LIBDL)
++  SA_LIBS := $(LIBDL)
++  ifeq ($(INCLUDE_SA_ATTACH), true)
++    SA_LIBS += -lthread_db
++  endif
+ 
+ else ifeq ($(OPENJDK_TARGET_OS), solaris)
+   SA_TOOLCHAIN := TOOLCHAIN_LINK_CXX
+@@ -95,6 +98,12 @@ else ifeq ($(OPENJDK_TARGET_OS), windows
+   endif
+ endif
+ 
++ifeq ($(INCLUDE_SA_ATTACH), true)
++  SA_CFLAGS += -DINCLUDE_SA_ATTACH
++endif
++
++SA_CFLAGS += -DLIBC=\"$(OPENJDK_TARGET_LIBC)\"
++
+ ################################################################################
+ 
+ $(eval $(call SetupNativeCompilation, BUILD_LIBSA, \
+diff -upr a/hotspot/src/cpu/aarch64/vm/bytes_aarch64.hpp b/hotspot/src/cpu/aarch64/vm/bytes_aarch64.hpp
+--- a/hotspot/src/cpu/aarch64/vm/bytes_aarch64.hpp
++++ b/hotspot/src/cpu/aarch64/vm/bytes_aarch64.hpp
+@@ -30,12 +30,6 @@
+ 
+ class Bytes: AllStatic {
+  public:
+-  // Returns true if the byte ordering used by Java is different from the native byte ordering
+-  // of the underlying machine. For example, this is true for Intel x86, but false for Solaris
+-  // on Sparc.
+-  static inline bool is_Java_byte_ordering_different(){ return true; }
+-
+-
+   // Efficient reading and writing of unaligned unsigned data in platform-specific byte ordering
+   // (no special code is needed since x86 CPUs can access unaligned data)
+   static inline u2   get_native_u2(address p)         { return *(u2*)p; }
+diff -upr a/hotspot/src/cpu/arm/vm/bytes_arm.hpp b/hotspot/src/cpu/arm/vm/bytes_arm.hpp
+--- a/hotspot/src/cpu/arm/vm/bytes_arm.hpp
++++ b/hotspot/src/cpu/arm/vm/bytes_arm.hpp
+@@ -35,12 +35,6 @@
+ class Bytes: AllStatic {
+ 
+  public:
+-  // Returns true if the byte ordering used by Java is different from the native byte ordering
+-  // of the underlying machine.
+-  static inline bool is_Java_byte_ordering_different() {
+-    return VM_LITTLE_ENDIAN != 0;
+-  }
+-
+   static inline u2 get_Java_u2(address p) {
+     return (u2(p[0]) << 8) | u2(p[1]);
+   }
+diff -upr a/hotspot/src/cpu/ppc/vm/bytes_ppc.hpp b/hotspot/src/cpu/ppc/vm/bytes_ppc.hpp
+--- a/hotspot/src/cpu/ppc/vm/bytes_ppc.hpp
++++ b/hotspot/src/cpu/ppc/vm/bytes_ppc.hpp
+@@ -37,10 +37,6 @@ class Bytes: AllStatic {
+ 
+ #if defined(VM_LITTLE_ENDIAN)
+ 
+-  // Returns true, if the byte ordering used by Java is different from the native byte ordering
+-  // of the underlying machine. For example, true for Intel x86, False, for Solaris on Sparc.
+-  static inline bool is_Java_byte_ordering_different() { return true; }
+-
+   // Forward declarations of the compiler-dependent implementation
+   static inline u2 swap_u2(u2 x);
+   static inline u4 swap_u4(u4 x);
+@@ -155,10 +151,6 @@ class Bytes: AllStatic {
+ 
+ #else // !defined(VM_LITTLE_ENDIAN)
+ 
+-  // Returns true, if the byte ordering used by Java is different from the nativ byte ordering
+-  // of the underlying machine. For example, true for Intel x86, False, for Solaris on Sparc.
+-  static inline bool is_Java_byte_ordering_different() { return false; }
+-
+   // Thus, a swap between native and Java ordering is always a no-op:
+   static inline u2   swap_u2(u2 x)  { return x; }
+   static inline u4   swap_u4(u4 x)  { return x; }
+diff -upr a/hotspot/src/cpu/s390/vm/bytes_s390.hpp b/hotspot/src/cpu/s390/vm/bytes_s390.hpp
+--- a/hotspot/src/cpu/s390/vm/bytes_s390.hpp
++++ b/hotspot/src/cpu/s390/vm/bytes_s390.hpp
+@@ -42,12 +42,6 @@ class Bytes: AllStatic {
+   //
+   // In short, it makes no sense on z/Architecture to piecemeal get or put unaligned data.
+ 
+-  // Returns true if the byte ordering used by Java is different from
+-  // the native byte ordering of the underlying machine.
+-  // z/Arch is big endian, thus, a swap between native and Java ordering
+-  // is always a no-op.
+-  static inline bool is_Java_byte_ordering_different() { return false; }
+-
+   // Only swap on little endian machines => suffix `_le'.
+   static inline u2   swap_u2_le(u2 x) { return x; }
+   static inline u4   swap_u4_le(u4 x) { return x; }
+diff -upr a/hotspot/src/cpu/sparc/vm/bytes_sparc.hpp b/hotspot/src/cpu/sparc/vm/bytes_sparc.hpp
+--- a/hotspot/src/cpu/sparc/vm/bytes_sparc.hpp
++++ b/hotspot/src/cpu/sparc/vm/bytes_sparc.hpp
+@@ -34,10 +34,6 @@ class Bytes: AllStatic {
+ 
+   // can I count on address always being a pointer to an unsigned char? Yes
+ 
+-  // Returns true, if the byte ordering used by Java is different from the nativ byte ordering
+-  // of the underlying machine. For example, true for Intel x86, False, for Solaris on Sparc.
+-  static inline bool is_Java_byte_ordering_different() { return false; }
+-
+   // Thus, a swap between native and Java ordering is always a no-op:
+   static inline u2   swap_u2(u2 x)  { return x; }
+   static inline u4   swap_u4(u4 x)  { return x; }
+diff -upr a/hotspot/src/cpu/x86/vm/bytes_x86.hpp b/hotspot/src/cpu/x86/vm/bytes_x86.hpp
+--- a/hotspot/src/cpu/x86/vm/bytes_x86.hpp
++++ b/hotspot/src/cpu/x86/vm/bytes_x86.hpp
+@@ -36,36 +36,85 @@ class Bytes: AllStatic {
+ #endif // AMD64
+ 
+  public:
+-  // Returns true if the byte ordering used by Java is different from the native byte ordering
+-  // of the underlying machine. For example, this is true for Intel x86, but false for Solaris
+-  // on Sparc.
+-  static inline bool is_Java_byte_ordering_different(){ return true; }
+-
+-
+   // Efficient reading and writing of unaligned unsigned data in platform-specific byte ordering
+-  // (no special code is needed since x86 CPUs can access unaligned data)
+-  static inline u2   get_native_u2(address p)         { return *(u2*)p; }
+-  static inline u4   get_native_u4(address p)         { return *(u4*)p; }
+-  static inline u8   get_native_u8(address p)         { return *(u8*)p; }
+-
+-  static inline void put_native_u2(address p, u2 x)   { *(u2*)p = x; }
+-  static inline void put_native_u4(address p, u4 x)   { *(u4*)p = x; }
+-  static inline void put_native_u8(address p, u8 x)   { *(u8*)p = x; }
+-
++  template <typename T>
++  static inline T get_native(const void* p) {
++    assert(p != NULL, "null pointer");
++
++    T x;
++
++    if (is_ptr_aligned(p, sizeof(T))) {
++      x = *(T*)p;
++    } else {
++      memcpy(&x, p, sizeof(T));
++    }
++
++    return x;
++  }
++
++  template <typename T>
++  static inline void put_native(void* p, T x) {
++    assert(p != NULL, "null pointer");
++
++    if (is_ptr_aligned(p, sizeof(T))) {
++      *(T*)p = x;
++    } else {
++      memcpy(p, &x, sizeof(T));
++    }
++  }
++
++  static inline u2   get_native_u2(address p)         { return get_native<u2>((void*)p); }
++  static inline u4   get_native_u4(address p)         { return get_native<u4>((void*)p); }
++  static inline u8   get_native_u8(address p)         { return get_native<u8>((void*)p); }
++  static inline void put_native_u2(address p, u2 x)   { put_native<u2>((void*)p, x); }
++  static inline void put_native_u4(address p, u4 x)   { put_native<u4>((void*)p, x); }
++  static inline void put_native_u8(address p, u8 x)   { put_native<u8>((void*)p, x); }
+ 
+   // Efficient reading and writing of unaligned unsigned data in Java
+   // byte ordering (i.e. big-endian ordering). Byte-order reversal is
+   // needed since x86 CPUs use little-endian format.
+-  static inline u2   get_Java_u2(address p)           { return swap_u2(get_native_u2(p)); }
+-  static inline u4   get_Java_u4(address p)           { return swap_u4(get_native_u4(p)); }
+-  static inline u8   get_Java_u8(address p)           { return swap_u8(get_native_u8(p)); }
+-
+-  static inline void put_Java_u2(address p, u2 x)     { put_native_u2(p, swap_u2(x)); }
+-  static inline void put_Java_u4(address p, u4 x)     { put_native_u4(p, swap_u4(x)); }
+-  static inline void put_Java_u8(address p, u8 x)     { put_native_u8(p, swap_u8(x)); }
+-
++  template <typename T>
++  static inline T get_Java(const address p) {
++    T x = get_native<T>(p);
++
++    if (Endian::is_Java_byte_ordering_different()) {
++      x = swap<T>(x);
++    }
++
++    return x;
++  }
++
++  template <typename T>
++  static inline void put_Java(address p, T x) {
++    if (Endian::is_Java_byte_ordering_different()) {
++      x = swap<T>(x);
++    }
++
++    put_native<T>(p, x);
++  }
++
++  static inline u2   get_Java_u2(address p)           { return get_Java<u2>(p); }
++  static inline u4   get_Java_u4(address p)           { return get_Java<u4>(p); }
++  static inline u8   get_Java_u8(address p)           { return get_Java<u8>(p); }
++
++  static inline void put_Java_u2(address p, u2 x)     { put_Java<u2>(p, x); }
++  static inline void put_Java_u4(address p, u4 x)     { put_Java<u4>(p, x); }
++  static inline void put_Java_u8(address p, u8 x)     { put_Java<u8>(p, x); }
+ 
+   // Efficient swapping of byte ordering
++  template <typename T>
++  static T swap(T x) {
++    switch (sizeof(T)) {
++    case sizeof(u1): return x;
++    case sizeof(u2): return swap_u2(x);
++    case sizeof(u4): return swap_u4(x);
++    case sizeof(u8): return swap_u8(x);
++    default:
++      guarantee(false, "invalid size: " SIZE_FORMAT "\n", sizeof(T));
++      return 0;
++    }
++  }
++
+   static inline u2   swap_u2(u2 x);                   // compiler-dependent implementation
+   static inline u4   swap_u4(u4 x);                   // compiler-dependent implementation
+   static inline u8   swap_u8(u8 x);
+diff -upr a/hotspot/src/cpu/zero/vm/bytes_zero.hpp b/hotspot/src/cpu/zero/vm/bytes_zero.hpp
+--- a/hotspot/src/cpu/zero/vm/bytes_zero.hpp
++++ b/hotspot/src/cpu/zero/vm/bytes_zero.hpp
+@@ -36,16 +36,6 @@ typedef union unaligned {
+ 
+ class Bytes: AllStatic {
+  public:
+-  // Returns true if the byte ordering used by Java is different
+-  // from the native byte ordering of the underlying machine.
+-  static inline bool is_Java_byte_ordering_different() {
+-#ifdef VM_LITTLE_ENDIAN
+-    return true;
+-#else
+-    return false;
+-#endif
+-  }
+-
+   // Efficient reading and writing of unaligned unsigned data in
+   // platform-specific byte ordering.
+   static inline u2 get_native_u2(address p){
+diff -upr a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/libproc_impl.c b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/libproc_impl.c
+--- a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/libproc_impl.c
++++ b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/libproc_impl.c
+@@ -26,7 +26,11 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <fcntl.h>
++#ifdef INCLUDE_SA_ATTACH
+ #include <thread_db.h>
++#else
++#include <dirent.h>
++#endif
+ #include "libproc_impl.h"
+ 
+ #define SA_ALTROOT "SA_ALTROOT"
+@@ -116,11 +120,13 @@ bool init_libproc(bool debug) {
+    // init debug mode
+    _libsaproc_debug = debug;
+ 
++#ifdef INCLUDE_SA_ATTACH
+    // initialize the thread_db library
+    if (td_init() != TD_OK) {
+      print_debug("libthread_db's td_init failed\n");
+      return false;
+    }
++#endif
+ 
+    return true;
+ }
+@@ -273,6 +279,7 @@ thread_info* add_thread_info(struct ps_p
+ }
+ 
+ 
++#ifdef INCLUDE_SA_ATTACH
+ // struct used for client data from thread_db callback
+ struct thread_db_client_data {
+    struct ps_prochandle* ph;
+@@ -299,9 +306,12 @@ static int thread_db_callback(const td_t
+ 
+   return TD_OK;
+ }
++#endif // INCLUDE_SA_ATTACH
+ 
+-// read thread_info using libthread_db
++// read thread_info using libthread_db or by iterating through the entries
++// in /proc/<pid>/task/
+ bool read_thread_info(struct ps_prochandle* ph, thread_info_callback cb) {
++#ifdef INCLUDE_SA_ATTACH
+   struct thread_db_client_data mydata;
+   td_thragent_t* thread_agent = NULL;
+   if (td_ta_new(ph, &thread_agent) != TD_OK) {
+@@ -322,10 +332,33 @@ bool read_thread_info(struct ps_prochand
+ 
+   // delete thread agent
+   td_ta_delete(thread_agent);
++#else
++  DIR *dir = NULL;
++  struct dirent *ent = NULL;
++  char taskpath[80];
++  pid_t pid = ph->pid;
++
++  // Find the lwpids to attach to by traversing the /proc/<pid>/task/ directory.
++  snprintf(taskpath, sizeof (taskpath), "/proc/%ld/task", (unsigned long)pid);
++  if ((dir = opendir(taskpath)) != NULL) {
++    while ((ent = readdir(dir)) != NULL) {
++      unsigned long lwp;
++
++      if ((lwp = strtoul(ent->d_name, NULL, 10)) != 0) {
++        // Create and add the thread info.
++        (*cb)(ph, 0, lwp);
++      }
++    }
++  } else {
++    print_debug("Could not open /proc/%ld/task.\n", (unsigned long)pid);
++    return false;
++  }
++
++  closedir(dir);
++#endif
+   return true;
+ }
+ 
+-
+ // get number of threads
+ int get_num_threads(struct ps_prochandle* ph) {
+    return ph->num_threads;
+diff -upr a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/libproc_impl.h b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/libproc_impl.h
+--- a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/libproc_impl.h
++++ b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/libproc_impl.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -27,6 +27,9 @@
+ 
+ #include <unistd.h>
+ #include <limits.h>
++
++struct ps_prochandle;
++
+ #include "libproc.h"
+ #include "symtab.h"
+ 
+@@ -126,4 +129,32 @@ thread_info* add_thread_info(struct ps_p
+ // a test for ELF signature without using libelf
+ bool is_elf_file(int fd);
+ 
++// ps_getpid() is only defined on Linux to return a thread's process ID
++pid_t ps_getpid(struct ps_prochandle *ph);
++
++// ps_pglobal_lookup() looks up the symbol sym_name in the symbol table
++// of the load object object_name in the target process identified by ph.
++// It returns the symbol's value as an address in the target process in
++// *sym_addr.
++
++ps_err_e ps_pglobal_lookup(struct ps_prochandle *ph, const char *object_name,
++                    const char *sym_name, psaddr_t *sym_addr);
++// read "size" bytes of data from debuggee at address "addr"
++ps_err_e ps_pdread(struct ps_prochandle *ph, psaddr_t  addr,
++                   void *buf, size_t size);
++
++// write "size" bytes of data to debuggee at address "addr"
++ps_err_e ps_pdwrite(struct ps_prochandle *ph, psaddr_t addr,
++                    const void *buf, size_t size);
++
++ps_err_e ps_lsetfpregs(struct ps_prochandle *ph, lwpid_t lid, const prfpregset_t *fpregs);
++
++ps_err_e ps_lsetregs(struct ps_prochandle *ph, lwpid_t lid, const prgregset_t gregset);
++
++ps_err_e  ps_lgetfpregs(struct  ps_prochandle  *ph,  lwpid_t lid, prfpregset_t *fpregs);
++
++ps_err_e ps_lgetregs(struct ps_prochandle *ph, lwpid_t lid, prgregset_t gregset);
++
++// new libthread_db of NPTL seem to require this symbol
++ps_err_e ps_get_thread_area();
+ #endif //_LIBPROC_IMPL_H_
+diff -upr a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/LinuxDebuggerLocal.c b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/LinuxDebuggerLocal.c
+--- a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/LinuxDebuggerLocal.c
++++ b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/LinuxDebuggerLocal.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2002, 2013, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2002, 2017, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -24,6 +24,7 @@
+ 
+ #include <jni.h>
+ #include "libproc.h"
++#include "libproc_impl.h"
+ 
+ #include <elf.h>
+ #include <sys/types.h>
+diff -upr a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/proc_service.h b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/proc_service.h
+--- a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/proc_service.h
++++ b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/proc_service.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2003, 2015, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -26,7 +26,10 @@
+ #define _PROC_SERVICE_H_
+ 
+ #include <stdio.h>
++#include <sys/procfs.h>
++#ifdef INCLUDE_SA_ATTACH
+ #include <thread_db.h>
++#endif
+ 
+ // Linux does not have the proc service library, though it does provide the
+ // thread_db library which can be used to manipulate threads without having
+@@ -42,35 +45,4 @@ typedef enum {
+         PS_NOSYM,       /* p_lookup() could not find given symbol */
+         PS_NOFREGS      /* FPU register set not available for given lwp */
+ } ps_err_e;
+-
+-// ps_getpid() is only defined on Linux to return a thread's process ID
+-pid_t ps_getpid(struct ps_prochandle *ph);
+-
+-// ps_pglobal_lookup() looks up the symbol sym_name in the symbol table
+-// of the load object object_name in the target process identified by ph.
+-// It returns the symbol's value as an address in the target process in
+-// *sym_addr.
+-
+-ps_err_e ps_pglobal_lookup(struct ps_prochandle *ph, const char *object_name,
+-                    const char *sym_name, psaddr_t *sym_addr);
+-
+-// read "size" bytes of data from debuggee at address "addr"
+-ps_err_e ps_pdread(struct ps_prochandle *ph, psaddr_t  addr,
+-                   void *buf, size_t size);
+-
+-// write "size" bytes of data to debuggee at address "addr"
+-ps_err_e ps_pdwrite(struct ps_prochandle *ph, psaddr_t addr,
+-                    const void *buf, size_t size);
+-
+-ps_err_e ps_lsetfpregs(struct ps_prochandle *ph, lwpid_t lid, const prfpregset_t *fpregs);
+-
+-ps_err_e ps_lsetregs(struct ps_prochandle *ph, lwpid_t lid, const prgregset_t gregset);
+-
+-ps_err_e  ps_lgetfpregs(struct  ps_prochandle  *ph,  lwpid_t lid, prfpregset_t *fpregs);
+-
+-ps_err_e ps_lgetregs(struct ps_prochandle *ph, lwpid_t lid, prgregset_t gregset);
+-
+-// new libthread_db of NPTL seem to require this symbol
+-ps_err_e ps_get_thread_area();
+-
+ #endif /* _PROC_SERVICE_H_ */
+diff -upr a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/ps_core.c b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/ps_core.c
+--- a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/ps_core.c
++++ b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/ps_core.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -731,6 +731,10 @@ static bool read_lib_segments(struct ps_
+   ELF_PHDR* phbuf;
+   ELF_PHDR* lib_php = NULL;
+ 
++#ifndef LIBC
++#error "LIBC not set"
++#endif
++
+   int page_size = sysconf(_SC_PAGE_SIZE);
+ 
+   if ((phbuf = read_program_header_table(lib_fd, lib_ehdr)) == NULL) {
+@@ -755,7 +759,8 @@ static bool read_lib_segments(struct ps_
+         // Coredump stores value of p_memsz elf field
+         // rounded up to page boundary.
+ 
+-        if ((existing_map->memsz != page_size) &&
++        if ((strcmp(LIBC, "musl")) &&
++            (existing_map->memsz != page_size) &&
+             (existing_map->fd != lib_fd) &&
+             (ROUNDUP(existing_map->memsz, page_size) != ROUNDUP(lib_php->p_memsz, page_size))) {
+ 
+diff -upr a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/ps_proc.c b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/ps_proc.c
+--- a/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/ps_proc.c
++++ b/hotspot/src/jdk.hotspot.agent/linux/native/libsaproc/ps_proc.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -218,9 +218,11 @@ static bool ptrace_waitpid(pid_t pid) {
+ static bool ptrace_attach(pid_t pid, char* err_buf, size_t err_buf_len) {
+   if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
+     char buf[200];
+-    char* msg = strerror_r(errno, buf, sizeof(buf));
+-    snprintf(err_buf, err_buf_len, "ptrace(PTRACE_ATTACH, ..) failed for %d: %s", pid, msg);
+-    print_debug("%s\n", err_buf);
++    if (strerror_r(errno, buf, sizeof(buf) == 0)) {
++      snprintf(err_buf, err_buf_len,
++               "ptrace(PTRACE_ATTACH, ..) failed for %d: %s", pid, buf);
++      print_debug("%s\n", err_buf);
++    }
+     return false;
+   } else {
+     return ptrace_waitpid(pid);
+@@ -406,7 +408,7 @@ struct ps_prochandle* Pgrab(pid_t pid, c
+   thr = ph->threads;
+   while (thr) {
+      // don't attach to the main thread again
+-    if (ph->pid != thr->lwp_id && ptrace_attach(thr->lwp_id, err_buf, err_buf_len) != true) {
++     if (pid != thr->lwp_id && ptrace_attach(thr->lwp_id, err_buf, err_buf_len) != true) {
+         // even if one attach fails, we get return NULL
+         Prelease(ph);
+         return NULL;
+diff -upr a/hotspot/src/os/aix/vm/os_aix.inline.hpp b/hotspot/src/os/aix/vm/os_aix.inline.hpp
+--- a/hotspot/src/os/aix/vm/os_aix.inline.hpp
++++ b/hotspot/src/os/aix/vm/os_aix.inline.hpp
+@@ -32,7 +32,7 @@
+ 
+ #include <unistd.h>
+ #include <sys/socket.h>
+-#include <sys/poll.h>
++#include <poll.h>
+ #include <sys/ioctl.h>
+ #include <netdb.h>
+ 
+diff -upr a/hotspot/src/os/bsd/vm/os_bsd.inline.hpp b/hotspot/src/os/bsd/vm/os_bsd.inline.hpp
+--- a/hotspot/src/os/bsd/vm/os_bsd.inline.hpp
++++ b/hotspot/src/os/bsd/vm/os_bsd.inline.hpp
+@@ -31,7 +31,7 @@
+ 
+ #include <unistd.h>
+ #include <sys/socket.h>
+-#include <sys/poll.h>
++#include <poll.h>
+ #include <netdb.h>
+ 
+ // File names are case-sensitive on windows only
+diff -upr a/hotspot/src/os/linux/vm/os_linux.cpp b/hotspot/src/os/linux/vm/os_linux.cpp
+--- a/hotspot/src/os/linux/vm/os_linux.cpp
++++ b/hotspot/src/os/linux/vm/os_linux.cpp
+@@ -98,7 +98,6 @@
+ # include <string.h>
+ # include <syscall.h>
+ # include <sys/sysinfo.h>
+-# include <gnu/libc-version.h>
+ # include <sys/ipc.h>
+ # include <sys/shm.h>
+ # include <link.h>
+@@ -143,8 +142,8 @@ pthread_t os::Linux::_main_thread;
+ int os::Linux::_page_size = -1;
+ bool os::Linux::_supports_fast_thread_cpu_time = false;
+ uint32_t os::Linux::_os_version = 0;
+-const char * os::Linux::_glibc_version = NULL;
+-const char * os::Linux::_libpthread_version = NULL;
++const char * os::Linux::_glibc_version = "unknown";
++const char * os::Linux::_libpthread_version = "unknown";
+ pthread_condattr_t os::Linux::_condattr[1];
+ 
+ static jlong initial_time_count=0;
+@@ -502,17 +501,21 @@ void os::Linux::libpthread_init() {
+   #error "glibc too old (< 2.3.2)"
+ #endif
+ 
+-  size_t n = confstr(_CS_GNU_LIBC_VERSION, NULL, 0);
+-  assert(n > 0, "cannot retrieve glibc version");
+-  char *str = (char *)malloc(n, mtInternal);
+-  confstr(_CS_GNU_LIBC_VERSION, str, n);
+-  os::Linux::set_glibc_version(str);
++  size_t n;
++
++  n = confstr(_CS_GNU_LIBC_VERSION, NULL, 0);
++  if (n > 0) {
++    char* str = (char *)malloc(n, mtInternal);
++    confstr(_CS_GNU_LIBC_VERSION, str, n);
++    os::Linux::set_glibc_version(str);
++  }
+ 
+   n = confstr(_CS_GNU_LIBPTHREAD_VERSION, NULL, 0);
+-  assert(n > 0, "cannot retrieve pthread version");
+-  str = (char *)malloc(n, mtInternal);
+-  confstr(_CS_GNU_LIBPTHREAD_VERSION, str, n);
+-  os::Linux::set_libpthread_version(str);
++  if (n > 0) {
++    char* str = (char *)malloc(n, mtInternal);
++    confstr(_CS_GNU_LIBPTHREAD_VERSION, str, n);
++    os::Linux::set_libpthread_version(str);
++  }
+ }
+ 
+ /////////////////////////////////////////////////////////////////////////////
+@@ -2809,11 +2812,23 @@ extern "C" JNIEXPORT void numa_error(cha
+ // If we are running with earlier version, which did not have symbol versions,
+ // we should use the base version.
+ void* os::Linux::libnuma_dlsym(void* handle, const char *name) {
+-  void *f = dlvsym(handle, name, "libnuma_1.1");
+-  if (f == NULL) {
+-    f = dlsym(handle, name);
++  typedef void* (*dlvsym_func_type)(void* handle, const char* name, const char* version);
++  static dlvsym_func_type dlvsym_func;
++  static bool initialized = false;
++
++  if (!initialized) {
++    dlvsym_func = (dlvsym_func_type)dlsym(RTLD_NEXT, "dlvsym");
++    initialized = true;
+   }
+-  return f;
++
++  if (dlvsym_func != NULL) {
++    void *f = dlvsym_func(handle, name, "libnuma_1.1");
++    if (f != NULL) {
++      return f;
++    }
++  }
++
++  return dlsym(handle, name);
+ }
+ 
+ bool os::Linux::libnuma_init() {
+@@ -4713,6 +4728,63 @@ void os::Linux::check_signal_handler(int
+ extern void report_error(char* file_name, int line_no, char* title,
+                          char* format, ...);
+ 
++// Some linux distributions (notably: Alpine Linux) include the
++// grsecurity in the kernel by default. Of particular interest from a
++// JVM perspective is PaX (https://pax.grsecurity.net/), which adds
++// some security features related to page attributes. Specifically,
++// the MPROTECT PaX functionality
++// (https://pax.grsecurity.net/docs/mprotect.txt) prevents dynamic
++// code generation by disallowing a (previously) writable page to be
++// marked as executable. This is, of course, exactly what HotSpot does
++// for both JIT compiled method, as well as for stubs, adapters, etc.
++//
++// Instead of crashing "lazily" when trying to make a page executable,
++// this code probes for the presence of PaX and reports the failure
++// eagerly.
++static void check_pax(void) {
++  // Zero doesn't generate code dynamically, so no need to perform the PaX check
++#ifndef ZERO
++  size_t size = os::Linux::page_size();
++
++  void* p = ::mmap(NULL, size, PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
++  if (p == MAP_FAILED) {
++    vm_exit_out_of_memory(size, OOM_MMAP_ERROR, "failed to allocate memory for PaX check.");
++  }
++
++  int res = ::mprotect(p, size, PROT_WRITE|PROT_EXEC);
++  if (res == -1) {
++    vm_exit_during_initialization("Failed to mark memory page as executable",
++                                  "Please check if grsecurity/PaX is enabled in your kernel.\n"
++                                  "\n"
++                                  "For example, you can do this by running (note: you may need root privileges):\n"
++                                  "\n"
++                                  "    sysctl kernel.pax.softmode\n"
++                                  "\n"
++                                  "If PaX is included in the kernel you will see something like this:\n"
++                                  "\n"
++                                  "    kernel.pax.softmode = 0\n"
++                                  "\n"
++                                  "In particular, if the value is 0 (zero), then PaX is enabled.\n"
++                                  "\n"
++                                  "PaX includes security functionality which interferes with the dynamic code\n"
++                                  "generation the JVM relies on. Specifically, the MPROTECT functionality as\n"
++                                  "described on https://pax.grsecurity.net/docs/mprotect.txt is not compatible\n"
++                                  "with the JVM. If you want to allow the JVM to run you will have to disable PaX.\n"
++                                  "You can do this on a per-executable basis using the paxctl tool, for example:\n"
++                                  "\n"
++                                  "    paxctl -cm bin/java\n"
++                                  "\n"
++                                  "Please note that this modifies the executable binary in-place, so you may want\n"
++                                  "to make a backup of it first. Also note that you have to repeat this for other\n"
++                                  "executables like javac, jar, jcmd, etc.\n"
++                                  );
++
++  }
++
++  ::munmap(p, size);
++#endif
++}
++
+ // this is called _before_ the most of global arguments have been parsed
+ void os::init(void) {
+   char dummy;   // used to get a guess on initial stack address
+@@ -4764,6 +4836,7 @@ void os::init(void) {
+   Linux::_pthread_setname_np =
+     (int(*)(pthread_t, const char*))dlsym(RTLD_DEFAULT, "pthread_setname_np");
+ 
++  check_pax();
+ }
+ 
+ // To install functions for atexit system call
+diff -upr a/hotspot/src/os/linux/vm/os_linux.inline.hpp b/hotspot/src/os/linux/vm/os_linux.inline.hpp
+--- a/hotspot/src/os/linux/vm/os_linux.inline.hpp
++++ b/hotspot/src/os/linux/vm/os_linux.inline.hpp
+@@ -31,7 +31,7 @@
+ 
+ #include <unistd.h>
+ #include <sys/socket.h>
+-#include <sys/poll.h>
++#include <poll.h>
+ #include <netdb.h>
+ 
+ // File names are case-sensitive on windows only
+diff -upr a/hotspot/src/os/posix/vm/os_posix.cpp b/hotspot/src/os/posix/vm/os_posix.cpp
+--- a/hotspot/src/os/posix/vm/os_posix.cpp
++++ b/hotspot/src/os/posix/vm/os_posix.cpp
+@@ -207,30 +207,30 @@ void os::Posix::print_rlimit_info(output
+   st->print(" STACK ");
+   getrlimit(RLIMIT_STACK, &rlim);
+   if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
+-  else st->print("%luk", rlim.rlim_cur >> 10);
++  else st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_cur) >> 10);
+ 
+   st->print(", CORE ");
+   getrlimit(RLIMIT_CORE, &rlim);
+   if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
+-  else st->print("%luk", rlim.rlim_cur >> 10);
++  else st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_cur) >> 10);
+ 
+   // Isn't there on solaris
+ #if !defined(SOLARIS) && !defined(AIX)
+   st->print(", NPROC ");
+   getrlimit(RLIMIT_NPROC, &rlim);
+   if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
+-  else st->print("%lu", rlim.rlim_cur);
++  else st->print(UINT64_FORMAT, uint64_t(rlim.rlim_cur));
+ #endif
+ 
+   st->print(", NOFILE ");
+   getrlimit(RLIMIT_NOFILE, &rlim);
+   if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
+-  else st->print("%lu", rlim.rlim_cur);
++  else st->print(UINT64_FORMAT, uint64_t(rlim.rlim_cur));
+ 
+   st->print(", AS ");
+   getrlimit(RLIMIT_AS, &rlim);
+   if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
+-  else st->print("%luk", rlim.rlim_cur >> 10);
++  else st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_cur) >> 10);
+   st->cr();
+ }
+ 
+diff -upr a/hotspot/src/os/solaris/vm/os_solaris.inline.hpp b/hotspot/src/os/solaris/vm/os_solaris.inline.hpp
+--- a/hotspot/src/os/solaris/vm/os_solaris.inline.hpp
++++ b/hotspot/src/os/solaris/vm/os_solaris.inline.hpp
+@@ -31,7 +31,7 @@
+ #include <sys/param.h>
+ #include <dlfcn.h>
+ #include <sys/socket.h>
+-#include <sys/poll.h>
++#include <poll.h>
+ #include <sys/filio.h>
+ #include <unistd.h>
+ #include <netdb.h>
+diff -upr a/hotspot/src/os_cpu/linux_x86/vm/os_linux_x86.cpp b/hotspot/src/os_cpu/linux_x86/vm/os_linux_x86.cpp
+--- a/hotspot/src/os_cpu/linux_x86/vm/os_linux_x86.cpp
++++ b/hotspot/src/os_cpu/linux_x86/vm/os_linux_x86.cpp
+@@ -73,7 +73,9 @@
+ # include <pwd.h>
+ # include <poll.h>
+ # include <ucontext.h>
++#ifndef AMD64
+ # include <fpu_control.h>
++#endif
+ 
+ #ifdef AMD64
+ #define REG_SP REG_RSP
+diff -upr a/hotspot/src/share/vm/classfile/classFileParser.cpp b/hotspot/src/share/vm/classfile/classFileParser.cpp
+--- a/hotspot/src/share/vm/classfile/classFileParser.cpp
++++ b/hotspot/src/share/vm/classfile/classFileParser.cpp
+@@ -1674,19 +1674,13 @@ void ClassFileParser::parse_fields(const
+ }
+ 
+ 
+-static void copy_u2_with_conversion(u2* dest, const u2* src, int length) {
+-  while (length-- > 0) {
+-    *dest++ = Bytes::get_Java_u2((u1*) (src++));
+-  }
+-}
+-
+-const u2* ClassFileParser::parse_exception_table(const ClassFileStream* const cfs,
+-                                                 u4 code_length,
+-                                                 u4 exception_table_length,
+-                                                 TRAPS) {
++const void* ClassFileParser::parse_exception_table(const ClassFileStream* const cfs,
++                                                   u4 code_length,
++                                                   u4 exception_table_length,
++                                                   TRAPS) {
+   assert(cfs != NULL, "invariant");
+ 
+-  const u2* const exception_table_start = cfs->get_u2_buffer();
++  const void* const exception_table_start = cfs->get_u1_buffer();
+   assert(exception_table_start != NULL, "null exception table");
+ 
+   cfs->guarantee_more(8 * exception_table_length, CHECK_NULL); // start_pc,
+@@ -1804,13 +1798,13 @@ static void copy_lvt_element(const Class
+ 
+ // Function is used to parse both attributes:
+ // LocalVariableTable (LVT) and LocalVariableTypeTable (LVTT)
+-const u2* ClassFileParser::parse_localvariable_table(const ClassFileStream* cfs,
+-                                                     u4 code_length,
+-                                                     u2 max_locals,
+-                                                     u4 code_attribute_length,
+-                                                     u2* const localvariable_table_length,
+-                                                     bool isLVTT,
+-                                                     TRAPS) {
++const void* ClassFileParser::parse_localvariable_table(const ClassFileStream* cfs,
++                                                       u4 code_length,
++                                                       u2 max_locals,
++                                                       u4 code_attribute_length,
++                                                       u2* const localvariable_table_length,
++                                                       bool isLVTT,
++                                                       TRAPS) {
+   const char* const tbl_name = (isLVTT) ? "LocalVariableTypeTable" : "LocalVariableTable";
+   *localvariable_table_length = cfs->get_u2(CHECK_NULL);
+   const unsigned int size =
+@@ -1824,7 +1818,7 @@ const u2* ClassFileParser::parse_localva
+                        "%s has wrong length in class file %s", tbl_name, CHECK_NULL);
+   }
+ 
+-  const u2* const localvariable_table_start = cfs->get_u2_buffer();
++  const u1* const localvariable_table_start = cfs->get_u1_buffer();
+   assert(localvariable_table_start != NULL, "null local variable table");
+   if (!_need_verify) {
+     cfs->skip_u2_fast(size);
+@@ -1940,10 +1934,10 @@ static const u1* parse_stackmap_table(co
+   return stackmap_table_start;
+ }
+ 
+-const u2* ClassFileParser::parse_checked_exceptions(const ClassFileStream* const cfs,
+-                                                    u2* const checked_exceptions_length,
+-                                                    u4 method_attribute_length,
+-                                                    TRAPS) {
++const void* ClassFileParser::parse_checked_exceptions(const ClassFileStream* const cfs,
++                                                      u2* const checked_exceptions_length,
++                                                      u4 method_attribute_length,
++                                                      TRAPS) {
+   assert(cfs != NULL, "invariant");
+   assert(checked_exceptions_length != NULL, "invariant");
+ 
+@@ -1951,7 +1945,7 @@ const u2* ClassFileParser::parse_checked
+   *checked_exceptions_length = cfs->get_u2_fast();
+   const unsigned int size =
+     (*checked_exceptions_length) * sizeof(CheckedExceptionElement) / sizeof(u2);
+-  const u2* const checked_exceptions_start = cfs->get_u2_buffer();
++  const void* const checked_exceptions_start = cfs->get_u1_buffer();
+   assert(checked_exceptions_start != NULL, "null checked exceptions");
+   if (!_need_verify) {
+     cfs->skip_u2_fast(size);
+@@ -2118,10 +2112,10 @@ void ClassFileParser::ClassAnnotationCol
+ void ClassFileParser::copy_localvariable_table(const ConstMethod* cm,
+                                                int lvt_cnt,
+                                                u2* const localvariable_table_length,
+-                                               const u2**const localvariable_table_start,
++                                               const void** const localvariable_table_start,
+                                                int lvtt_cnt,
+                                                u2* const localvariable_type_table_length,
+-                                               const u2**const localvariable_type_table_start,
++                                               const void** const localvariable_type_table_start,
+                                                TRAPS) {
+ 
+   ResourceMark rm(THREAD);
+@@ -2316,10 +2310,10 @@ Method* ClassFileParser::parse_method(co
+   u4 code_length = 0;
+   const u1* code_start = 0;
+   u2 exception_table_length = 0;
+-  const u2* exception_table_start = NULL;
++  const void* exception_table_start = NULL; // (potentially unaligned) pointer to array of u2 elements
+   Array<int>* exception_handlers = Universe::the_empty_int_array();
+   u2 checked_exceptions_length = 0;
+-  const u2* checked_exceptions_start = NULL;
++  const void* checked_exceptions_start = NULL; // (potentially unaligned) pointer to array of u2 elements
+   CompressedLineNumberWriteStream* linenumber_table = NULL;
+   int linenumber_table_length = 0;
+   int total_lvt_length = 0;
+@@ -2329,9 +2323,9 @@ Method* ClassFileParser::parse_method(co
+   u2 max_lvt_cnt = INITIAL_MAX_LVT_NUMBER;
+   u2 max_lvtt_cnt = INITIAL_MAX_LVT_NUMBER;
+   u2* localvariable_table_length = NULL;
+-  const u2** localvariable_table_start = NULL;
++  const void** localvariable_table_start = NULL; // (potentially unaligned) pointer to array of LVT attributes
+   u2* localvariable_type_table_length = NULL;
+-  const u2** localvariable_type_table_start = NULL;
++  const void** localvariable_type_table_start = NULL; // (potentially unaligned) pointer to LVTT attributes
+   int method_parameters_length = -1;
+   const u1* method_parameters_data = NULL;
+   bool method_parameters_seen = false;
+@@ -2472,17 +2466,17 @@ Method* ClassFileParser::parse_method(co
+             localvariable_table_length = NEW_RESOURCE_ARRAY_IN_THREAD(
+               THREAD, u2,  INITIAL_MAX_LVT_NUMBER);
+             localvariable_table_start = NEW_RESOURCE_ARRAY_IN_THREAD(
+-              THREAD, const u2*, INITIAL_MAX_LVT_NUMBER);
++              THREAD, const void*, INITIAL_MAX_LVT_NUMBER);
+             localvariable_type_table_length = NEW_RESOURCE_ARRAY_IN_THREAD(
+               THREAD, u2,  INITIAL_MAX_LVT_NUMBER);
+             localvariable_type_table_start = NEW_RESOURCE_ARRAY_IN_THREAD(
+-              THREAD, const u2*, INITIAL_MAX_LVT_NUMBER);
++              THREAD, const void*, INITIAL_MAX_LVT_NUMBER);
+             lvt_allocated = true;
+           }
+           if (lvt_cnt == max_lvt_cnt) {
+             max_lvt_cnt <<= 1;
+             localvariable_table_length = REALLOC_RESOURCE_ARRAY(u2, localvariable_table_length, lvt_cnt, max_lvt_cnt);
+-            localvariable_table_start  = REALLOC_RESOURCE_ARRAY(const u2*, localvariable_table_start, lvt_cnt, max_lvt_cnt);
++            localvariable_table_start  = REALLOC_RESOURCE_ARRAY(const void*, localvariable_table_start, lvt_cnt, max_lvt_cnt);
+           }
+           localvariable_table_start[lvt_cnt] =
+             parse_localvariable_table(cfs,
+@@ -2501,18 +2495,18 @@ Method* ClassFileParser::parse_method(co
+             localvariable_table_length = NEW_RESOURCE_ARRAY_IN_THREAD(
+               THREAD, u2,  INITIAL_MAX_LVT_NUMBER);
+             localvariable_table_start = NEW_RESOURCE_ARRAY_IN_THREAD(
+-              THREAD, const u2*, INITIAL_MAX_LVT_NUMBER);
++              THREAD, const void*, INITIAL_MAX_LVT_NUMBER);
+             localvariable_type_table_length = NEW_RESOURCE_ARRAY_IN_THREAD(
+               THREAD, u2,  INITIAL_MAX_LVT_NUMBER);
+             localvariable_type_table_start = NEW_RESOURCE_ARRAY_IN_THREAD(
+-              THREAD, const u2*, INITIAL_MAX_LVT_NUMBER);
++              THREAD, const void*, INITIAL_MAX_LVT_NUMBER);
+             lvt_allocated = true;
+           }
+           // Parse local variable type table
+           if (lvtt_cnt == max_lvtt_cnt) {
+             max_lvtt_cnt <<= 1;
+             localvariable_type_table_length = REALLOC_RESOURCE_ARRAY(u2, localvariable_type_table_length, lvtt_cnt, max_lvtt_cnt);
+-            localvariable_type_table_start  = REALLOC_RESOURCE_ARRAY(const u2*, localvariable_type_table_start, lvtt_cnt, max_lvtt_cnt);
++            localvariable_type_table_start  = REALLOC_RESOURCE_ARRAY(const void*, localvariable_type_table_start, lvtt_cnt, max_lvtt_cnt);
+           }
+           localvariable_type_table_start[lvtt_cnt] =
+             parse_localvariable_table(cfs,
+@@ -2783,10 +2777,10 @@ Method* ClassFileParser::parse_method(co
+ 
+   // Copy exception table
+   if (exception_table_length > 0) {
+-    int size =
+-      exception_table_length * sizeof(ExceptionTableElement) / sizeof(u2);
+-    copy_u2_with_conversion((u2*) m->exception_table_start(),
+-                            exception_table_start, size);
++    Copy::conjoint_swap_if_needed<Endian::JAVA>(exception_table_start,
++                                                m->exception_table_start(),
++                                                exception_table_length * sizeof(ExceptionTableElement),
++                                                sizeof(u2));
+   }
+ 
+   // Copy method parameters
+@@ -2802,11 +2796,10 @@ Method* ClassFileParser::parse_method(co
+ 
+   // Copy checked exceptions
+   if (checked_exceptions_length > 0) {
+-    const int size =
+-      checked_exceptions_length * sizeof(CheckedExceptionElement) / sizeof(u2);
+-    copy_u2_with_conversion((u2*) m->checked_exceptions_start(),
+-                            checked_exceptions_start,
+-                            size);
++    Copy::conjoint_swap_if_needed<Endian::JAVA>(checked_exceptions_start,
++                                                m->checked_exceptions_start(),
++                                                checked_exceptions_length * sizeof(CheckedExceptionElement),
++                                                sizeof(u2));
+   }
+ 
+   // Copy class file LVT's/LVTT's into the HotSpot internal LVT.
+diff -upr a/hotspot/src/share/vm/classfile/classFileParser.hpp b/hotspot/src/share/vm/classfile/classFileParser.hpp
+--- a/hotspot/src/share/vm/classfile/classFileParser.hpp
++++ b/hotspot/src/share/vm/classfile/classFileParser.hpp
+@@ -238,28 +238,28 @@ class ClassFileParser VALUE_OBJ_CLASS_SP
+                      bool* const declares_nonstatic_concrete_methods,
+                      TRAPS);
+ 
+-  const u2* parse_exception_table(const ClassFileStream* const stream,
+-                                  u4 code_length,
+-                                  u4 exception_table_length,
+-                                  TRAPS);
++  const void* parse_exception_table(const ClassFileStream* const stream,
++                                    u4 code_length,
++                                    u4 exception_table_length,
++                                    TRAPS);
+ 
+   void parse_linenumber_table(u4 code_attribute_length,
+                               u4 code_length,
+                               CompressedLineNumberWriteStream**const write_stream,
+                               TRAPS);
+ 
+-  const u2* parse_localvariable_table(const ClassFileStream* const cfs,
+-                                      u4 code_length,
+-                                      u2 max_locals,
+-                                      u4 code_attribute_length,
+-                                      u2* const localvariable_table_length,
+-                                      bool isLVTT,
+-                                      TRAPS);
+-
+-  const u2* parse_checked_exceptions(const ClassFileStream* const cfs,
+-                                     u2* const checked_exceptions_length,
+-                                     u4 method_attribute_length,
+-                                     TRAPS);
++  const void* parse_localvariable_table(const ClassFileStream* const cfs,
++                                        u4 code_length,
++                                        u2 max_locals,
++                                        u4 code_attribute_length,
++                                        u2* const localvariable_table_length,
++                                        bool isLVTT,
++                                        TRAPS);
++
++  const void* parse_checked_exceptions(const ClassFileStream* const cfs,
++                                       u2* const checked_exceptions_length,
++                                       u4 method_attribute_length,
++                                       TRAPS);
+ 
+   void parse_type_array(u2 array_length,
+                         u4 code_length,
+@@ -453,10 +453,10 @@ class ClassFileParser VALUE_OBJ_CLASS_SP
+   void copy_localvariable_table(const ConstMethod* cm,
+                                 int lvt_cnt,
+                                 u2* const localvariable_table_length,
+-                                const u2**const localvariable_table_start,
++                                const void** const localvariable_table_start,
+                                 int lvtt_cnt,
+                                 u2* const localvariable_type_table_length,
+-                                const u2** const localvariable_type_table_start,
++                                const void** const localvariable_type_table_start,
+                                 TRAPS);
+ 
+   void copy_method_annotations(ConstMethod* cm,
+diff -upr a/hotspot/src/share/vm/classfile/classFileStream.hpp b/hotspot/src/share/vm/classfile/classFileStream.hpp
+--- a/hotspot/src/share/vm/classfile/classFileStream.hpp
++++ b/hotspot/src/share/vm/classfile/classFileStream.hpp
+@@ -128,10 +128,6 @@ class ClassFileStream: public ResourceOb
+     return _current;
+   }
+ 
+-  const u2* get_u2_buffer() const {
+-    return (const u2*) _current;
+-  }
+-
+   // Skip length u1 or u2 elements from stream
+   void skip_u1(int length, TRAPS) const;
+   void skip_u1_fast(int length) const {
+diff -upr a/hotspot/src/share/vm/interpreter/abstractInterpreter.hpp b/hotspot/src/share/vm/interpreter/abstractInterpreter.hpp
+--- a/hotspot/src/share/vm/interpreter/abstractInterpreter.hpp
++++ b/hotspot/src/share/vm/interpreter/abstractInterpreter.hpp
+@@ -249,7 +249,7 @@ class AbstractInterpreter: AllStatic {
+     return (oop*) slot_addr;
+   }
+   static jint* int_addr_in_slot(intptr_t* slot_addr) {
+-    if ((int) sizeof(jint) < wordSize && !Bytes::is_Java_byte_ordering_different())
++    if ((int) sizeof(jint) < wordSize && !Endian::is_Java_byte_ordering_different())
+       // big-endian LP64
+       return (jint*)(slot_addr + 1) - 1;
+     else
+diff -upr a/hotspot/src/share/vm/interpreter/bytecode.hpp b/hotspot/src/share/vm/interpreter/bytecode.hpp
+--- a/hotspot/src/share/vm/interpreter/bytecode.hpp
++++ b/hotspot/src/share/vm/interpreter/bytecode.hpp
+@@ -122,7 +122,7 @@ class Bytecode: public StackObj {
+   static void assert_constant_size(int required_size, int where, Bytecodes::Code bc, bool is_wide = false) NOT_DEBUG_RETURN;
+   static void assert_native_index(Bytecodes::Code bc, bool is_wide = false) NOT_DEBUG_RETURN;
+   static bool can_use_native_byte_order(Bytecodes::Code bc, bool is_wide = false) {
+-    return (!Bytes::is_Java_byte_ordering_different() || Bytecodes::native_byte_order(bc /*, is_wide*/));
++    return (!Endian::is_Java_byte_ordering_different() || Bytecodes::native_byte_order(bc /*, is_wide*/));
+   }
+ };
+ 
+diff -upr a/hotspot/src/share/vm/runtime/vm_version.cpp b/hotspot/src/share/vm/runtime/vm_version.cpp
+--- a/hotspot/src/share/vm/runtime/vm_version.cpp
++++ b/hotspot/src/share/vm/runtime/vm_version.cpp
+@@ -262,8 +262,14 @@ const char* Abstract_VM_Version::interna
+     #define FLOAT_ARCH_STR XSTR(FLOAT_ARCH)
+   #endif
+ 
++  #ifdef HOTSPOT_LIBC
++    #define LIBC_STR "-" HOTSPOT_LIBC
++  #else
++    #define LIBC_STR ""
++  #endif
++
+   #define INTERNAL_VERSION_SUFFIX VM_RELEASE ")" \
+-         " for " OS "-" CPU FLOAT_ARCH_STR \
++         " for " OS "-" CPU FLOAT_ARCH_STR LIBC_STR \
+          " JRE (" VERSION_STRING "), built on " __DATE__ " " __TIME__ \
+          " by " XSTR(HOTSPOT_BUILD_USER) " with " HOTSPOT_BUILD_COMPILER
+ 
+diff -upr a/hotspot/src/share/vm/services/heapDumper.cpp b/hotspot/src/share/vm/services/heapDumper.cpp
+--- a/hotspot/src/share/vm/services/heapDumper.cpp
++++ b/hotspot/src/share/vm/services/heapDumper.cpp
+@@ -1134,7 +1134,7 @@ void DumperSupport::dump_prim_array(Dump
+ 
+   switch (type) {
+     case T_INT : {
+-      if (Bytes::is_Java_byte_ordering_different()) {
++      if (Endian::is_Java_byte_ordering_different()) {
+         WRITE_ARRAY(array, int, u4, length);
+       } else {
+         writer->write_raw((void*)(array->int_at_addr(0)), length_in_bytes);
+@@ -1146,7 +1146,7 @@ void DumperSupport::dump_prim_array(Dump
+       break;
+     }
+     case T_CHAR : {
+-      if (Bytes::is_Java_byte_ordering_different()) {
++      if (Endian::is_Java_byte_ordering_different()) {
+         WRITE_ARRAY(array, char, u2, length);
+       } else {
+         writer->write_raw((void*)(array->char_at_addr(0)), length_in_bytes);
+@@ -1154,7 +1154,7 @@ void DumperSupport::dump_prim_array(Dump
+       break;
+     }
+     case T_SHORT : {
+-      if (Bytes::is_Java_byte_ordering_different()) {
++      if (Endian::is_Java_byte_ordering_different()) {
+         WRITE_ARRAY(array, short, u2, length);
+       } else {
+         writer->write_raw((void*)(array->short_at_addr(0)), length_in_bytes);
+@@ -1162,7 +1162,7 @@ void DumperSupport::dump_prim_array(Dump
+       break;
+     }
+     case T_BOOLEAN : {
+-      if (Bytes::is_Java_byte_ordering_different()) {
++      if (Endian::is_Java_byte_ordering_different()) {
+         WRITE_ARRAY(array, bool, u1, length);
+       } else {
+         writer->write_raw((void*)(array->bool_at_addr(0)), length_in_bytes);
+@@ -1170,7 +1170,7 @@ void DumperSupport::dump_prim_array(Dump
+       break;
+     }
+     case T_LONG : {
+-      if (Bytes::is_Java_byte_ordering_different()) {
++      if (Endian::is_Java_byte_ordering_different()) {
+         WRITE_ARRAY(array, long, u8, length);
+       } else {
+         writer->write_raw((void*)(array->long_at_addr(0)), length_in_bytes);
+diff -upr a/hotspot/src/share/vm/utilities/bytes.hpp b/hotspot/src/share/vm/utilities/bytes.hpp
+--- a/hotspot/src/share/vm/utilities/bytes.hpp
++++ b/hotspot/src/share/vm/utilities/bytes.hpp
+@@ -27,6 +27,27 @@
+ 
+ #include "utilities/macros.hpp"
+ 
++class Endian : AllStatic {
++public:
++  enum Order {
++    LITTLE,
++    BIG,
++    JAVA = BIG,
++    NATIVE =
++#ifdef VM_LITTLE_ENDIAN
++    LITTLE
++#else
++    BIG
++#endif
++  };
++
++  // Returns true, if the byte ordering used by Java is different from
++  // the native byte ordering of the underlying machine.
++  static inline bool is_Java_byte_ordering_different() {
++    return NATIVE != JAVA;
++  }
++};
++
+ #include CPU_HEADER(bytes)
+ 
+ #endif // SHARE_VM_UTILITIES_BYTES_HPP
+diff -upr a/hotspot/src/share/vm/utilities/copy.cpp b/hotspot/src/share/vm/utilities/copy.cpp
+--- a/hotspot/src/share/vm/utilities/copy.cpp
++++ b/hotspot/src/share/vm/utilities/copy.cpp
+@@ -56,14 +56,17 @@ void Copy::conjoint_memory_atomic(void*
+ class CopySwap : AllStatic {
+ public:
+   /**
+-   * Copy and byte swap elements
++   * Copy and optionally byte swap elements
++   *
++   * <swap> - true if elements should be byte swapped
+    *
+    * @param src address of source
+    * @param dst address of destination
+    * @param byte_count number of bytes to copy
+    * @param elem_size size of the elements to copy-swap
+    */
+-  static void conjoint_swap(address src, address dst, size_t byte_count, size_t elem_size) {
++  template<bool swap>
++  static void conjoint_swap_if_needed(const void* src, void* dst, size_t byte_count, size_t elem_size) {
+     assert(src != NULL, "address must not be NULL");
+     assert(dst != NULL, "address must not be NULL");
+     assert(elem_size == 2 || elem_size == 4 || elem_size == 8,
+@@ -71,12 +74,12 @@ public:
+     assert(is_size_aligned(byte_count, elem_size),
+            "byte_count " SIZE_FORMAT " must be multiple of element size " SIZE_FORMAT, byte_count, elem_size);
+ 
+-    address src_end = src + byte_count;
++    address src_end = (address)src + byte_count;
+ 
+     if (dst <= src || dst >= src_end) {
+-      do_conjoint_swap<RIGHT>(src, dst, byte_count, elem_size);
++      do_conjoint_swap<RIGHT,swap>(src, dst, byte_count, elem_size);
+     } else {
+-      do_conjoint_swap<LEFT>(src, dst, byte_count, elem_size);
++      do_conjoint_swap<LEFT,swap>(src, dst, byte_count, elem_size);
+     }
+   }
+ 
+@@ -125,18 +128,19 @@ private:
+    * @param dst address of destination
+    * @param byte_count number of bytes to copy
+    */
+-  template <typename T, CopyDirection D, bool is_src_aligned, bool is_dst_aligned>
+-  static void do_conjoint_swap(address src, address dst, size_t byte_count) {
+-    address cur_src, cur_dst;
++  template <typename T, CopyDirection D, bool swap, bool is_src_aligned, bool is_dst_aligned>
++  static void do_conjoint_swap(const void* src, void* dst, size_t byte_count) {
++    const char* cur_src;
++    char* cur_dst;
+ 
+     switch (D) {
+     case RIGHT:
+-      cur_src = src;
+-      cur_dst = dst;
++      cur_src = (const char*)src;
++      cur_dst = (char*)dst;
+       break;
+     case LEFT:
+-      cur_src = src + byte_count - sizeof(T);
+-      cur_dst = dst + byte_count - sizeof(T);
++      cur_src = (const char*)src + byte_count - sizeof(T);
++      cur_dst = (char*)dst + byte_count - sizeof(T);
+       break;
+     }
+ 
+@@ -149,7 +153,9 @@ private:
+         memcpy(&tmp, cur_src, sizeof(T));
+       }
+ 
+-      tmp = byte_swap(tmp);
++      if (swap) {
++        tmp = byte_swap(tmp);
++      }
+ 
+       if (is_dst_aligned) {
+         *(T*)cur_dst = tmp;
+@@ -173,26 +179,27 @@ private:
+   /**
+    * Copy and byte swap elements
+    *
+-   * <T> - type of element to copy
+-   * <D> - copy direction
++   * <T>    - type of element to copy
++   * <D>    - copy direction
++   * <swap> - true if elements should be byte swapped
+    *
+    * @param src address of source
+    * @param dst address of destination
+    * @param byte_count number of bytes to copy
+    */
+-  template <typename T, CopyDirection direction>
+-  static void do_conjoint_swap(address src, address dst, size_t byte_count) {
++  template <typename T, CopyDirection direction, bool swap>
++  static void do_conjoint_swap(const void* src, void* dst, size_t byte_count) {
+     if (is_ptr_aligned(src, sizeof(T))) {
+       if (is_ptr_aligned(dst, sizeof(T))) {
+-        do_conjoint_swap<T,direction,true,true>(src, dst, byte_count);
++        do_conjoint_swap<T,direction,swap,true,true>(src, dst, byte_count);
+       } else {
+-        do_conjoint_swap<T,direction,true,false>(src, dst, byte_count);
++        do_conjoint_swap<T,direction,swap,true,false>(src, dst, byte_count);
+       }
+     } else {
+       if (is_ptr_aligned(dst, sizeof(T))) {
+-        do_conjoint_swap<T,direction,false,true>(src, dst, byte_count);
++        do_conjoint_swap<T,direction,swap,false,true>(src, dst, byte_count);
+       } else {
+-        do_conjoint_swap<T,direction,false,false>(src, dst, byte_count);
++        do_conjoint_swap<T,direction,swap,false,false>(src, dst, byte_count);
+       }
+     }
+   }
+@@ -201,26 +208,31 @@ private:
+   /**
+    * Copy and byte swap elements
+    *
+-   * <D> - copy direction
++   * <D>    - copy direction
++   * <swap> - true if elements should be byte swapped
+    *
+    * @param src address of source
+    * @param dst address of destination
+    * @param byte_count number of bytes to copy
+    * @param elem_size size of the elements to copy-swap
+    */
+-  template <CopyDirection D>
+-  static void do_conjoint_swap(address src, address dst, size_t byte_count, size_t elem_size) {
++  template <CopyDirection D, bool swap>
++  static void do_conjoint_swap(const void* src, void* dst, size_t byte_count, size_t elem_size) {
+     switch (elem_size) {
+-    case 2: do_conjoint_swap<uint16_t,D>(src, dst, byte_count); break;
+-    case 4: do_conjoint_swap<uint32_t,D>(src, dst, byte_count); break;
+-    case 8: do_conjoint_swap<uint64_t,D>(src, dst, byte_count); break;
++    case 2: do_conjoint_swap<uint16_t,D,swap>(src, dst, byte_count); break;
++    case 4: do_conjoint_swap<uint32_t,D,swap>(src, dst, byte_count); break;
++    case 8: do_conjoint_swap<uint64_t,D,swap>(src, dst, byte_count); break;
+     default: guarantee(false, "do_conjoint_swap: Invalid elem_size " SIZE_FORMAT "\n", elem_size);
+     }
+   }
+ };
+ 
+-void Copy::conjoint_swap(address src, address dst, size_t byte_count, size_t elem_size) {
+-  CopySwap::conjoint_swap(src, dst, byte_count, elem_size);
++void Copy::conjoint_copy(const void* src, void* dst, size_t byte_count, size_t elem_size) {
++  CopySwap::conjoint_swap_if_needed<false>(src, dst, byte_count, elem_size);
++}
++
++void Copy::conjoint_swap(const void* src, void* dst, size_t byte_count, size_t elem_size) {
++  CopySwap::conjoint_swap_if_needed<true>(src, dst, byte_count, elem_size);
+ }
+ 
+ // Fill bytes; larger units are filled atomically if everything is aligned.
+diff -upr a/hotspot/src/share/vm/utilities/copy.hpp b/hotspot/src/share/vm/utilities/copy.hpp
+--- a/hotspot/src/share/vm/utilities/copy.hpp
++++ b/hotspot/src/share/vm/utilities/copy.hpp
+@@ -229,6 +229,16 @@ class Copy : AllStatic {
+   }
+ 
+   /**
++   * Copy elements
++   *
++   * @param src address of source
++   * @param dst address of destination
++   * @param byte_count number of bytes to copy
++   * @param elem_size size of the elements to copy-swap
++   */
++  static void conjoint_copy(const void* src, void* dst, size_t byte_count, size_t elem_size);
++
++  /**
+    * Copy and *unconditionally* byte swap elements
+    *
+    * @param src address of source
+@@ -236,7 +246,24 @@ class Copy : AllStatic {
+    * @param byte_count number of bytes to copy
+    * @param elem_size size of the elements to copy-swap
+    */
+-  static void conjoint_swap(address src, address dst, size_t byte_count, size_t elem_size);
++  static void conjoint_swap(const void* src, void* dst, size_t byte_count, size_t elem_size);
++
++  /**
++   * Copy and byte swap elements from the specified endian to the native (cpu) endian if needed (if they differ)
++   *
++   * @param src address of source
++   * @param dst address of destination
++   * @param byte_count number of bytes to copy
++   * @param elem_size size of the elements to copy-swap
++   */
++  template <Endian::Order endian>
++  static void conjoint_swap_if_needed(const void* src, void* dst, size_t byte_count, size_t elem_size) {
++    if (Endian::NATIVE != endian) {
++      conjoint_swap(src, dst, byte_count, elem_size);
++    } else {
++      conjoint_copy(src, dst, byte_count, elem_size);
++    }
++  }
+ 
+   // Fill methods
+ 
+diff -upr a/hotspot/src/share/vm/utilities/globalDefinitions_gcc.hpp b/hotspot/src/share/vm/utilities/globalDefinitions_gcc.hpp
+--- a/hotspot/src/share/vm/utilities/globalDefinitions_gcc.hpp
++++ b/hotspot/src/share/vm/utilities/globalDefinitions_gcc.hpp
+@@ -216,7 +216,7 @@ inline int g_isnan(double f) { return is
+ #elif defined(__APPLE__)
+ inline int g_isnan(double f) { return isnan(f); }
+ #elif defined(LINUX) || defined(_ALLBSD_SOURCE)
+-inline int g_isnan(float  f) { return isnanf(f); }
++inline int g_isnan(float  f) { return isnan(f); }
+ inline int g_isnan(double f) { return isnan(f); }
+ #else
+ #error "missing platform-specific definition here"
+diff -upr a/hotspot/src/share/vm/utilities/globalDefinitions.hpp b/hotspot/src/share/vm/utilities/globalDefinitions.hpp
+--- a/hotspot/src/share/vm/utilities/globalDefinitions.hpp
++++ b/hotspot/src/share/vm/utilities/globalDefinitions.hpp
+@@ -487,7 +487,7 @@ inline bool is_size_aligned(size_t size,
+   return align_size_up_(size, alignment) == size;
+ }
+ 
+-inline bool is_ptr_aligned(void* ptr, size_t alignment) {
++inline bool is_ptr_aligned(const void* ptr, size_t alignment) {
+   return align_size_up_((intptr_t)ptr, (intptr_t)alignment) == (intptr_t)ptr;
+ }
+ 
