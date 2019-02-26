@@ -82,6 +82,7 @@ profile_rpi() {
 	initfs_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
 	hostname="rpi"
 	modloopfw="brcm/brcmfmac43455-sdio.clm_blob"
+	grub_mod=
 }
 
 build_uboot() {
