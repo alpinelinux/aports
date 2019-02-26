@@ -73,10 +73,10 @@ profile_rpi() {
 		Designed for RPI 1, 2 and 3.
 		And much more..."
 	image_ext="tar.gz"
-	arch="aarch64 armhf"
+	arch="aarch64 armhf armv7"
 	kernel_flavors="rpi"
 	case "$ARCH" in
-		armhf) kernel_flavors="$kernel_flavors rpi2";;
+		armv7) kernel_flavors="rpi2";;
 	esac
 	kernel_cmdline="dwc_otg.lpm_enable=0 console=tty1"
 	initfs_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
