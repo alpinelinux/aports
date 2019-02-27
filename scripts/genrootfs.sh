@@ -54,6 +54,4 @@ http://dl-cdn.alpinelinux.org/alpine/$branch/main
 http://dl-cdn.alpinelinux.org/alpine/$branch/community
 EOF
 
-#rm -rf "$tmp"/var/cache/apk/*
-
-tar --numeric-owner -c -C "$tmp" . | gzip -9n > "$outfile"
+tar --numeric-owner --exclude='dev/*' -c -C "$tmp" . | gzip -9n > "$outfile"
