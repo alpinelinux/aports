@@ -1,7 +1,7 @@
 # Contributor: Natanael Copa <ncopa@alpinelinux.org>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
-pkgver=3.10_alpha20190227
+pkgver=3.10_alpha20190228
 pkgrel=0
 pkgdesc="Meta package for minimal alpine base"
 url="http://alpinelinux.org"
