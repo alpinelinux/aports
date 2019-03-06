@@ -39,6 +39,9 @@ ${APK:-apk} fetch --keys-dir "$keys_dir" --no-cache \
 	--repositories-file "$repositories_file" \
 	--stdout --quiet alpine-base | tar -zx -C "$tmp" etc/
 
+# make sure root login is disabled
+sed -i -e 's/^root::/root:!:/' "$tmp"/etc/shadow
+
 branch=edge
 VERSION_ID=$(awk -F= '$1=="VERSION_ID" {print $2}'  "$tmp"/etc/os-release)
 case $VERSION_ID in
@@ -51,6 +54,4 @@ http://dl-cdn.alpinelinux.org/alpine/$branch/main
 http://dl-cdn.alpinelinux.org/alpine/$branch/community
 EOF
 
-#rm -rf "$tmp"/var/cache/apk/*
-
-tar --numeric-owner -c -C "$tmp" . | gzip -9n > "$outfile"
+tar --numeric-owner --exclude='dev/*' -c -C "$tmp" . | gzip -9n > "$outfile"

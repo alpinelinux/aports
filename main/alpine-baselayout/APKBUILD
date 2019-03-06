@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -190,13 +190,6 @@ package() {
 		/dev/cdrom	/media/cdrom	iso9660	noauto,ro 0 0
 		/dev/usbdisk	/media/usb	vfat	noauto,ro 0 0
 	EOF
-
-	if [ "$CARCH" = "s390x" ]; then
-		local i; for i in $(seq 1 6); do
-			sed -i "s/tty$i::/\#tty$i::/g" "$srcdir"/inittab
-		done
-		echo "console::respawn:/sbin/getty 38400 /dev/console" >> "$srcdir"/inittab
-	fi
 
 	install -m644 \
 		"$srcdir"/group \

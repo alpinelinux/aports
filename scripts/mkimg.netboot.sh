@@ -10,9 +10,10 @@ profile_netboot() {
 	desc="Kernel, initramfs and modloop for
 		netboot.
 		"
-	arch="aarch64 armhf ppc64le x86 x86_64 s390x"
+	arch="aarch64 armhf armv7 ppc64le x86 x86_64 s390x"
 	kernel_cmdline="nomodeset"
 	kernel_flavors="vanilla"
+	modloop_sign=yes
 	apks=""
 	initfs_features="base network squashfs usb virtio"
 	output_format="netboot"

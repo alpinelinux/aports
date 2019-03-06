@@ -1,0 +1,127 @@
+From 3169af3337938e18bf9ecc6ce936d644e14ff3de Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Tue, 28 Mar 2017 13:52:51 +0100
+Subject: [PATCH 5/5] Change binding of virConnectGetAllDomainStats to return
+ dom UUID.
+
+The virDomainPtr object returned by this binding isn't a reliable
+virDomainPtr object.  The only thing we can safely do with it is to
+get its UUID.  Modify the API correspondingly.
+
+Updates commit 380f1e05b244ae4750ca5101b5b5a182dcd0d1fd.
+---
+ examples/get_all_domain_stats.ml |  7 ++++---
+ libvirt/libvirt.ml               |  6 +++---
+ libvirt/libvirt.mli              |  6 +++---
+ libvirt/libvirt_c_oneoffs.c      | 13 +++++++++++--
+ 4 files changed, 21 insertions(+), 11 deletions(-)
+
+diff --git a/examples/get_all_domain_stats.ml b/examples/get_all_domain_stats.ml
+index cc86da6..be91f77 100644
+--- a/examples/get_all_domain_stats.ml
++++ b/examples/get_all_domain_stats.ml
+@@ -8,10 +8,11 @@ open Printf
+ module C = Libvirt.Connect
+ module D = Libvirt.Domain
+ 
+-let print_stats stats =
++let print_stats conn stats =
+   try
+     Array.iter (
+-      fun { D.dom = dom; D.params = params } ->
++      fun { D.dom_uuid = uuid; D.params = params } ->
++        let dom = D.lookup_by_uuid conn uuid in
+         printf "domain %s:\n" (D.get_name dom);
+         Array.iteri (
+           fun i (field, value) ->
+@@ -55,7 +56,7 @@ let () =
+   while not !quit do
+     let stats = D.get_all_domain_stats conn what who in
+ 
+-    if stats <> [||] then print_stats stats
++    if stats <> [||] then print_stats conn stats
+     else (
+       printf "no guests found\n";
+       quit := true
+diff --git a/libvirt/libvirt.ml b/libvirt/libvirt.ml
+index ce1878a..d03a127 100644
+--- a/libvirt/libvirt.ml
++++ b/libvirt/libvirt.ml
+@@ -408,8 +408,8 @@ struct
+     | StatsState | StatsCpuTotal | StatsBalloon | StatsVcpu
+     | StatsInterface | StatsBlock | StatsPerf
+ 
+-  type 'a domain_stats_record = {
+-    dom : 'a t;
++  type domain_stats_record = {
++    dom_uuid : uuid;
+     params : typed_param array;
+   }
+ 
+@@ -467,7 +467,7 @@ struct
+   external block_peek : [>`W] t -> string -> int64 -> int -> string -> int -> unit = "ocaml_libvirt_domain_block_peek_bytecode" "ocaml_libvirt_domain_block_peek_native"
+   external memory_peek : [>`W] t -> memory_flag list -> int64 -> int -> string -> int -> unit = "ocaml_libvirt_domain_memory_peek_bytecode" "ocaml_libvirt_domain_memory_peek_native"
+ 
+-  external get_all_domain_stats : 'a Connect.t -> stats_type list -> get_all_domain_stats_flag list -> 'a domain_stats_record array = "ocaml_libvirt_domain_get_all_domain_stats"
++  external get_all_domain_stats : [>`R] Connect.t -> stats_type list -> get_all_domain_stats_flag list -> domain_stats_record array = "ocaml_libvirt_domain_get_all_domain_stats"
+ 
+   external const : [>`R] t -> ro t = "%identity"
+ 
+diff --git a/libvirt/libvirt.mli b/libvirt/libvirt.mli
+index d1b5992..dc0033b 100644
+--- a/libvirt/libvirt.mli
++++ b/libvirt/libvirt.mli
+@@ -494,8 +494,8 @@ sig
+     | StatsState | StatsCpuTotal | StatsBalloon | StatsVcpu
+     | StatsInterface | StatsBlock | StatsPerf
+ 
+-  type 'a domain_stats_record = {
+-    dom : 'a t;
++  type domain_stats_record = {
++    dom_uuid : uuid;
+     params : typed_param array;
+   }
+ 
+@@ -636,7 +636,7 @@ sig
+ 
+ 	See also {!max_peek}. *)
+ 
+-  external get_all_domain_stats : 'a Connect.t -> stats_type list -> get_all_domain_stats_flag list -> 'a domain_stats_record array = "ocaml_libvirt_domain_get_all_domain_stats"
++  external get_all_domain_stats : [>`R] Connect.t -> stats_type list -> get_all_domain_stats_flag list -> domain_stats_record array = "ocaml_libvirt_domain_get_all_domain_stats"
+     (** [get_all_domain_stats conn stats flags] allows you to read
+         all stats across multiple/all domains in a single call.
+ 
+diff --git a/libvirt/libvirt_c_oneoffs.c b/libvirt/libvirt_c_oneoffs.c
+index 17412f5..958ba69 100644
+--- a/libvirt/libvirt_c_oneoffs.c
++++ b/libvirt/libvirt_c_oneoffs.c
+@@ -570,6 +570,7 @@ ocaml_libvirt_domain_get_all_domain_stats (value connv,
+   virDomainStatsRecordPtr *rstats;
+   unsigned int stats = 0, flags = 0;
+   int i, j, r;
++  unsigned char uuid[VIR_UUID_BUFLEN];
+ 
+   /* Get stats and flags. */
+   for (; statsv != Val_int (0); statsv = Field (statsv, 1)) {
+@@ -619,8 +620,16 @@ ocaml_libvirt_domain_get_all_domain_stats (value connv,
+   rv = caml_alloc (r, 0);       /* domain_stats_record array. */
+   for (i = 0; i < r; ++i) {
+     dsv = caml_alloc (2, 0);    /* domain_stats_record */
+-    virDomainRef (rstats[i]->dom);
+-    Store_field (dsv, 0, Val_domain (rstats[i]->dom, connv));
++
++    /* Libvirt returns something superficially resembling a
++     * virDomainPtr, but it's not a real virDomainPtr object
++     * (eg. dom->id == -1, and its refcount is wrong).  The only thing
++     * we can safely get from it is the UUID.
++     */
++    v = caml_alloc_string (VIR_UUID_BUFLEN);
++    virDomainGetUUID (rstats[i]->dom, uuid);
++    memcpy (String_val (v), uuid, VIR_UUID_BUFLEN);
++    Store_field (dsv, 0, v);
+ 
+     tpv = caml_alloc (rstats[i]->nparams, 0); /* typed_param array */
+     for (j = 0; j < rstats[i]->nparams; ++j) {
+-- 
+2.9.3
+
