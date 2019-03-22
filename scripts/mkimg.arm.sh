@@ -81,7 +81,6 @@ profile_rpi() {
 	kernel_cmdline="dwc_otg.lpm_enable=0 console=tty1"
 	initfs_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
 	hostname="rpi"
-	modloopfw="brcm/brcmfmac43455-sdio.clm_blob"
 	grub_mod=
 }
 
