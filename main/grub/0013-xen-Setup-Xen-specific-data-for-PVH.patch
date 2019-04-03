@@ -1,0 +1,194 @@
+From 49ff2168260da6223ca90342d681d8b40909ae5b Mon Sep 17 00:00:00 2001
+From: Juergen Gross <jgross@suse.com>
+Date: Fri, 7 Dec 2018 13:11:41 +0100
+Subject: [PATCH 13/20] xen: Setup Xen specific data for PVH
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Initialize the needed Xen specific data. This is:
+
+- the Xen start of day page containing the console and Xenstore ring
+  page PFN and event channel
+- the grant table
+- the shared info page
+
+Write back the possibly modified memory map to the hypervisor in case
+the guest is reading it from there again.
+
+Set the RSDP address for the guest from the start_info page passed
+as boot parameter.
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+Reviewed-by: Daniel Kiper <daniel.kiper@oracle.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+Tested-by: Hans van Kranenburg <hans@knorrie.org>
+(cherry picked from commit 4c9b4a7c92c9373315fd8b0f8f889275814bba41)
+---
+ grub-core/kern/i386/xen/pvh.c | 123 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 123 insertions(+)
+
+diff --git a/grub-core/kern/i386/xen/pvh.c b/grub-core/kern/i386/xen/pvh.c
+index 2b68ac333..472085ed1 100644
+--- a/grub-core/kern/i386/xen/pvh.c
++++ b/grub-core/kern/i386/xen/pvh.c
+@@ -27,6 +27,7 @@
+ #include <grub/i386/linux.h>
+ #include <grub/machine/kernel.h>
+ #include <grub/machine/memory.h>
++#include <xen/hvm/params.h>
+ #include <xen/memory.h>
+ 
+ #define XEN_MEMORY_MAP_SIZE   128
+@@ -37,6 +38,7 @@ static char hypercall_page[GRUB_XEN_PAGE_SIZE]
+   __attribute__ ((aligned (GRUB_XEN_PAGE_SIZE)));
+ 
+ static grub_uint32_t xen_cpuid_base;
++static struct start_info grub_xen_start_page;
+ static struct grub_e820_mmap_entry map[XEN_MEMORY_MAP_SIZE];
+ static unsigned int nr_map_entries;
+ 
+@@ -111,6 +113,36 @@ grub_xen_hypercall (grub_uint32_t callno, grub_uint32_t a0,
+   return res;
+ }
+ 
++static grub_uint32_t
++grub_xen_get_param (int idx)
++{
++  struct xen_hvm_param xhv;
++  int r;
++
++  xhv.domid = DOMID_SELF;
++  xhv.index = idx;
++  r = grub_xen_hypercall (__HYPERVISOR_hvm_op, HVMOP_get_param,
++			  (grub_uint32_t) (&xhv), 0, 0, 0, 0);
++  if (r < 0)
++    grub_xen_panic ("Could not get parameter from Xen!\n");
++  return xhv.value;
++}
++
++static void *
++grub_xen_add_physmap (unsigned int space, void *addr)
++{
++  struct xen_add_to_physmap xatp;
++
++  xatp.domid = DOMID_SELF;
++  xatp.idx = 0;
++  xatp.space = space;
++  xatp.gpfn = (grub_addr_t) addr >> GRUB_XEN_LOG_PAGE_SIZE;
++  if (grub_xen_hypercall (__HYPERVISOR_memory_op, XENMEM_add_to_physmap,
++			  (grub_uint32_t) (&xatp), 0, 0, 0, 0))
++    grub_xen_panic ("Memory_op hypercall failed!\n");
++  return addr;
++}
++
+ static void
+ grub_xen_sort_mmap (void)
+ {
+@@ -197,12 +229,103 @@ grub_xen_get_mmap (void)
+   grub_xen_sort_mmap ();
+ }
+ 
++static void
++grub_xen_set_mmap (void)
++{
++  struct xen_foreign_memory_map memmap;
++
++  memmap.domid = DOMID_SELF;
++  memmap.map.nr_entries = nr_map_entries;
++  set_xen_guest_handle (memmap.map.buffer, map);
++  grub_xen_hypercall (__HYPERVISOR_memory_op, XENMEM_set_memory_map,
++		      (grub_uint32_t) (&memmap), 0, 0, 0, 0);
++}
++
++static grub_uint64_t
++grub_xen_find_page (grub_uint64_t start)
++{
++  unsigned int i, j;
++  grub_uint64_t last = start;
++
++  /*
++   * Try to find a e820 map hole below 4G.
++   * Relies on page-aligned entries (addr and len) and input (start).
++   */
++
++  for (i = 0; i < nr_map_entries; i++)
++    {
++      if (last > map[i].addr + map[i].len)
++	continue;
++      if (last < map[i].addr)
++	return last;
++      if ((map[i].addr >> 32) || ((map[i].addr + map[i].len) >> 32))
++	break;
++      last = map[i].addr + map[i].len;
++    }
++    if (i == nr_map_entries)
++      return last;
++
++  /* No hole found, use the highest RAM page below 4G and reserve it. */
++  if (nr_map_entries == ARRAY_SIZE (map))
++    grub_xen_panic ("Memory map size limit reached!\n");
++  for (i = 0, j = 0; i < nr_map_entries; i++)
++    {
++      if (map[i].type != GRUB_MEMORY_AVAILABLE)
++	continue;
++      if (map[i].addr >> 32)
++	break;
++      j = i;
++      if ((map[i].addr + map[i].len) >> 32)
++	break;
++    }
++  if (map[j].type != GRUB_MEMORY_AVAILABLE)
++    grub_xen_panic ("No free memory page found!\n");
++  if ((map[j].addr + map[j].len) >> 32)
++    last = (1ULL << 32) - GRUB_XEN_PAGE_SIZE;
++  else
++    last = map[j].addr + map[j].len - GRUB_XEN_PAGE_SIZE;
++  map[nr_map_entries].addr = last;
++  map[nr_map_entries].len = GRUB_XEN_PAGE_SIZE;
++  map[nr_map_entries].type = GRUB_MEMORY_RESERVED;
++  nr_map_entries++;
++  grub_xen_sort_mmap ();
++
++  return last;
++}
++
+ void
+ grub_xen_setup_pvh (void)
+ {
++  grub_addr_t par;
++
+   grub_xen_cpuid_base ();
+   grub_xen_setup_hypercall_page ();
+   grub_xen_get_mmap ();
++
++  /* Setup Xen data. */
++  grub_xen_start_page_addr = &grub_xen_start_page;
++
++  par = grub_xen_get_param (HVM_PARAM_CONSOLE_PFN);
++  grub_xen_start_page_addr->console.domU.mfn = par;
++  grub_xen_xcons = (void *) (grub_addr_t) (par << GRUB_XEN_LOG_PAGE_SIZE);
++  par = grub_xen_get_param (HVM_PARAM_CONSOLE_EVTCHN);
++  grub_xen_start_page_addr->console.domU.evtchn = par;
++
++  par = grub_xen_get_param (HVM_PARAM_STORE_PFN);
++  grub_xen_start_page_addr->store_mfn = par;
++  grub_xen_xenstore = (void *) (grub_addr_t) (par << GRUB_XEN_LOG_PAGE_SIZE);
++  par = grub_xen_get_param (HVM_PARAM_STORE_EVTCHN);
++  grub_xen_start_page_addr->store_evtchn = par;
++
++  par = grub_xen_find_page (0);
++  grub_xen_grant_table = grub_xen_add_physmap (XENMAPSPACE_grant_table,
++					       (void *) par);
++  par = grub_xen_find_page (par + GRUB_XEN_PAGE_SIZE);
++  grub_xen_shared_info = grub_xen_add_physmap (XENMAPSPACE_shared_info,
++					       (void *) par);
++  grub_xen_set_mmap ();
++
++  grub_rsdp_addr = pvh_start_info->rsdp_paddr;
+ }
+ 
+ grub_err_t
+-- 
+2.21.0
+

@@ -1,0 +1,145 @@
+From 5f462874a5ee6471faa55f05d3a09369a5dcff2d Mon Sep 17 00:00:00 2001
+From: Juergen Gross <jgross@suse.com>
+Date: Fri, 7 Dec 2018 13:11:39 +0100
+Subject: [PATCH 11/20] xen: Setup hypercall page for PVH
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add the needed code to setup the hypercall page for calling into the
+Xen hypervisor.
+
+Import the XEN_HVM_DEBUGCONS_IOPORT define from Xen unstable into
+include/xen/arch-x86/xen.h
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+Reviewed-by: Daniel Kiper <daniel.kiper@oracle.com>
+Tested-by: Hans van Kranenburg <hans@knorrie.org>
+(cherry picked from commit da81e42a7ccb545513368ec7488cdf5019c1c2ba)
+---
+ grub-core/kern/i386/xen/pvh.c | 80 +++++++++++++++++++++++++++++++++++
+ include/xen/arch-x86/xen.h    |  7 +++
+ 2 files changed, 87 insertions(+)
+
+diff --git a/grub-core/kern/i386/xen/pvh.c b/grub-core/kern/i386/xen/pvh.c
+index 4f629b15e..a2554fb1d 100644
+--- a/grub-core/kern/i386/xen/pvh.c
++++ b/grub-core/kern/i386/xen/pvh.c
+@@ -20,15 +20,95 @@
+ #include <grub/misc.h>
+ #include <grub/memory.h>
+ #include <grub/mm.h>
++#include <grub/i386/cpuid.h>
++#include <grub/i386/io.h>
+ #include <grub/xen.h>
+ #include <xen/hvm/start_info.h>
+ #include <grub/machine/kernel.h>
+ 
+ grub_uint64_t grub_rsdp_addr;
+ 
++static char hypercall_page[GRUB_XEN_PAGE_SIZE]
++  __attribute__ ((aligned (GRUB_XEN_PAGE_SIZE)));
++
++static grub_uint32_t xen_cpuid_base;
++
++static void
++grub_xen_cons_msg (const char *msg)
++{
++  const char *c;
++
++  for (c = msg; *c; c++)
++    grub_outb (*c, XEN_HVM_DEBUGCONS_IOPORT);
++}
++
++static void
++grub_xen_panic (const char *msg)
++{
++  grub_xen_cons_msg (msg);
++  grub_xen_cons_msg ("System halted!\n");
++
++  asm volatile ("cli");
++
++  while (1)
++    {
++      asm volatile ("hlt");
++    }
++}
++
++static void
++grub_xen_cpuid_base (void)
++{
++  grub_uint32_t base, eax, signature[3];
++
++  for (base = 0x40000000; base < 0x40010000; base += 0x100)
++    {
++      grub_cpuid (base, eax, signature[0], signature[1], signature[2]);
++      if (!grub_memcmp ("XenVMMXenVMM", signature, 12) && (eax - base) >= 2)
++	{
++	  xen_cpuid_base = base;
++	  return;
++	}
++    }
++
++  grub_xen_panic ("Found no Xen signature!\n");
++}
++
++static void
++grub_xen_setup_hypercall_page (void)
++{
++  grub_uint32_t msr, addr, eax, ebx, ecx, edx;
++
++  /* Get base address of Xen-specific MSRs. */
++  grub_cpuid (xen_cpuid_base + 2, eax, ebx, ecx, edx);
++  msr = ebx;
++  addr = (grub_uint32_t) (&hypercall_page);
++
++  /* Specify hypercall page address for Xen. */
++  asm volatile ("wrmsr" : : "c" (msr), "a" (addr), "d" (0) : "memory");
++}
++
++int
++grub_xen_hypercall (grub_uint32_t callno, grub_uint32_t a0,
++		    grub_uint32_t a1, grub_uint32_t a2,
++		    grub_uint32_t a3, grub_uint32_t a4,
++		    grub_uint32_t a5 __attribute__ ((unused)))
++{
++  grub_uint32_t res;
++
++  asm volatile ("call *%[callno]"
++		: "=a" (res), "+b" (a0), "+c" (a1), "+d" (a2),
++		  "+S" (a3), "+D" (a4)
++		: [callno] "a" (&hypercall_page[callno * 32])
++		: "memory");
++  return res;
++}
++
+ void
+ grub_xen_setup_pvh (void)
+ {
++  grub_xen_cpuid_base ();
++  grub_xen_setup_hypercall_page ();
+ }
+ 
+ grub_err_t
+diff --git a/include/xen/arch-x86/xen.h b/include/xen/arch-x86/xen.h
+index f35804b88..56be26cb6 100644
+--- a/include/xen/arch-x86/xen.h
++++ b/include/xen/arch-x86/xen.h
+@@ -260,6 +260,13 @@ typedef struct arch_shared_info arch_shared_info_t;
+ #define XEN_CPUID          XEN_EMULATE_PREFIX "cpuid"
+ #endif
+ 
++/*
++ * Debug console IO port, also called "port E9 hack". Each character written
++ * to this IO port will be printed on the hypervisor console, subject to log
++ * level restrictions.
++ */
++#define XEN_HVM_DEBUGCONS_IOPORT 0xe9
++
+ #endif /* __XEN_PUBLIC_ARCH_X86_XEN_H__ */
+ 
+ /*
+-- 
+2.21.0
+
