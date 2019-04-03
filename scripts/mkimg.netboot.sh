@@ -21,6 +21,8 @@ profile_netboot() {
 	case "$ARCH" in
 	x86_64) kernel_flavors="$kernel_flavors virt";;
 	s390x) initfs_features="$initfs_features dasd_mod qeth";;
+	aarch64) kernel_flavors="$kernel_flavors rpi";;
+	armhf|armv7) kernel_flavors="$kernel_flavors rpi rpi2";;
 	esac
 }
 
