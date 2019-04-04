@@ -87,8 +87,8 @@ profile_rpi() {
 		armhf) kernel_flavors="rpi rpi2";;
 		armv7) kernel_flavors="rpi2";;
 	esac
-	kernel_cmdline="dwc_otg.lpm_enable=0 console=tty1"
-	initfs_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
+	kernel_cmdline="console=tty1"
+	initfs_features="base squashfs mmc usb kms dhcp https"
 	hostname="rpi"
 	grub_mod=
 }
