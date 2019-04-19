@@ -89,8 +89,8 @@ int fetch(char *url, const char *destdir)
 		.l_len = 0,
 	};
 	struct cmdarray curlcmd = {
-		.argc = 6,
-		.argv = { "curl", "-k", "-L", "-f", "-o", partfile, NULL }
+		.argc = 5,
+		.argv = { "curl", "-L", "-f", "-o", partfile, NULL }
 	};
 	struct cmdarray wgetcmd = {
 		.argc = 3,
