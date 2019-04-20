@@ -1,0 +1,432 @@
+From 8ec4de7501d9ea340a950107c56513cced9bc97e Mon Sep 17 00:00:00 2001
+From: Sebastian Kemper <sebastian_ml@gmx.net>
+Date: Tue, 2 Apr 2019 22:49:52 +0200
+Subject: [PATCH] loader: support for permanent dlopen()
+
+Asterisk assumes that dlopen() will always run the constructor of a
+shared library and every dlclose() will run its destructor. But dlopen()
+may be permanent, meaning the constructor will only be run once, as is
+the case with musl libc.
+
+With a permanent dlopen() the Asterisk module loader does not work
+correctly, because it's expectations regarding when the constructors and
+destructors are run are not met. In fact a segmentation fault will occur
+when the first module is "re-opened" that has AST_MODFLAG_GLOBAL_SYMBOLS
+set (the dlopen() does not call the constructor, resource_being_loaded
+is not set to NULL, then strlen is called with NULL instead of a string,
+see issue ASTERISK-28319).
+
+This commit adds code to the loader that will manually run the
+constructors/destructors of the (non-builtin) modules where needed. To
+achieve this a new ao2 container (linked list) is started and filled
+with objects that contain the names of the modules and the pointers to
+their respective info structs.
+
+This behavior can be activated when configuring Asterisk
+(--enable-permanent-dlopen). By default this is disabled, of course.
+
+ASTERISK-28319 #close
+
+Signed-off-by: Sebastian Kemper <sebastian_ml@gmx.net>
+Change-Id: I86693a0ecf25d5ba81c73773a03df4abc3426875
+---
+ configure                        |   50 +++++++------
+ configure.ac                     |   14 ++++
+ include/asterisk/autoconfig.h.in |    3 +
+ main/loader.c                    |  147 ++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 194 insertions(+), 20 deletions(-)
+
+diff --git a/configure b/configure
+index d8e1cbf..bb3244d 100755
+--- a/configure
++++ b/configure
+@@ -702,6 +702,7 @@ PBX_DYNAMIC_LIST
+ POW_LIB
+ PBX_WORKING_FORK
+ LIBOBJS
++PERMANENT_DLOPEN
+ DISABLE_XMLDOC
+ CONFIG_LIBXML2
+ JANSSON_LIBS
+@@ -1337,7 +1338,6 @@ infodir
+ docdir
+ oldincludedir
+ includedir
+-runstatedir
+ localstatedir
+ sharedstatedir
+ sysconfdir
+@@ -1446,6 +1446,7 @@ with_vpb
+ with_x11
+ with_z
+ enable_xmldoc
++enable_permanent_dlopen
+ enable_largefile
+ enable_internal_poll
+ enable_asteriskssl
+@@ -1525,7 +1526,6 @@ datadir='${datarootdir}'
+ sysconfdir='${prefix}/etc'
+ sharedstatedir='${prefix}/com'
+ localstatedir='${prefix}/var'
+-runstatedir='${localstatedir}/run'
+ includedir='${prefix}/include'
+ oldincludedir='/usr/include'
+ docdir='${datarootdir}/doc/${PACKAGE_TARNAME}'
+@@ -1778,15 +1778,6 @@ do
+   | -silent | --silent | --silen | --sile | --sil)
+     silent=yes ;;
+ 
+-  -runstatedir | --runstatedir | --runstatedi | --runstated \
+-  | --runstate | --runstat | --runsta | --runst | --runs \
+-  | --run | --ru | --r)
+-    ac_prev=runstatedir ;;
+-  -runstatedir=* | --runstatedir=* | --runstatedi=* | --runstated=* \
+-  | --runstate=* | --runstat=* | --runsta=* | --runst=* | --runs=* \
+-  | --run=* | --ru=* | --r=*)
+-    runstatedir=$ac_optarg ;;
+-
+   -sbindir | --sbindir | --sbindi | --sbind | --sbin | --sbi | --sb)
+     ac_prev=sbindir ;;
+   -sbindir=* | --sbindir=* | --sbindi=* | --sbind=* | --sbin=* \
+@@ -1924,7 +1915,7 @@ fi
+ for ac_var in	exec_prefix prefix bindir sbindir libexecdir datarootdir \
+ 		datadir sysconfdir sharedstatedir localstatedir includedir \
+ 		oldincludedir docdir infodir htmldir dvidir pdfdir psdir \
+-		libdir localedir mandir runstatedir
++		libdir localedir mandir
+ do
+   eval ac_val=\$$ac_var
+   # Remove trailing slashes.
+@@ -2077,7 +2068,6 @@ Fine tuning of the installation directories:
+   --sysconfdir=DIR        read-only single-machine data [PREFIX/etc]
+   --sharedstatedir=DIR    modifiable architecture-independent data [PREFIX/com]
+   --localstatedir=DIR     modifiable single-machine data [PREFIX/var]
+-  --runstatedir=DIR       modifiable per-process data [LOCALSTATEDIR/run]
+   --libdir=DIR            object code libraries [EPREFIX/lib]
+   --includedir=DIR        C header files [PREFIX/include]
+   --oldincludedir=DIR     C header files for non-gcc [/usr/include]
+@@ -2116,6 +2106,9 @@ Optional Features:
+   --enable-dev-mode       Turn on developer mode
+   --enable-coverage       Turn on code coverage tracking (for gcov)
+   --disable-xmldoc        Explicitly disable XML documentation
++  --enable-permanent-dlopen
++                          Enable when your libc has a permanent dlopen like
++                          musl
+   --disable-largefile     omit support for large files
+   --enable-internal-poll  Use Asterisk's poll implementation
+   --disable-asteriskssl   Disable Asterisk's SSL wrapper library
+@@ -14816,6 +14809,25 @@ fi
+ 
+ fi
+ 
++# Check whether --enable-permanent-dlopen was given.
++if test "${enable_permanent_dlopen+set}" = set; then :
++  enableval=$enable_permanent_dlopen; case "${enableval}" in
++		y|ye|yes) PERMANENT_DLOPEN=yes ;;
++		n|no)  PERMANENT_DLOPEN=no ;;
++		*) as_fn_error $? "bad value ${enableval} for --enable-permanent-dlopen" "$LINENO" 5  ;;
++	esac
++else
++  PERMANENT_DLOPEN=no
++fi
++
++
++
++if test "${PERMANENT_DLOPEN}" == "yes"; then
++
++$as_echo "#define HAVE_PERMANENT_DLOPEN 1" >>confdefs.h
++
++fi
++
+ # some embedded systems omit internationalization (locale) support
+ for ac_header in xlocale.h
+ do :
+@@ -14880,7 +14892,7 @@ else
+     We can't simply define LARGE_OFF_T to be 9223372036854775807,
+     since some C++ compilers masquerading as C compilers
+     incorrectly reject 9223372036854775807.  */
+-#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
++#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
+ 		       && LARGE_OFF_T % 2147483647 == 1)
+ 		      ? 1 : -1];
+@@ -14926,7 +14938,7 @@ else
+     We can't simply define LARGE_OFF_T to be 9223372036854775807,
+     since some C++ compilers masquerading as C compilers
+     incorrectly reject 9223372036854775807.  */
+-#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
++#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
+ 		       && LARGE_OFF_T % 2147483647 == 1)
+ 		      ? 1 : -1];
+@@ -14950,7 +14962,7 @@ rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
+     We can't simply define LARGE_OFF_T to be 9223372036854775807,
+     since some C++ compilers masquerading as C compilers
+     incorrectly reject 9223372036854775807.  */
+-#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
++#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
+ 		       && LARGE_OFF_T % 2147483647 == 1)
+ 		      ? 1 : -1];
+@@ -14995,7 +15007,7 @@ else
+     We can't simply define LARGE_OFF_T to be 9223372036854775807,
+     since some C++ compilers masquerading as C compilers
+     incorrectly reject 9223372036854775807.  */
+-#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
++#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
+ 		       && LARGE_OFF_T % 2147483647 == 1)
+ 		      ? 1 : -1];
+@@ -15019,7 +15031,7 @@ rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
+     We can't simply define LARGE_OFF_T to be 9223372036854775807,
+     since some C++ compilers masquerading as C compilers
+     incorrectly reject 9223372036854775807.  */
+-#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
++#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
+ 		       && LARGE_OFF_T % 2147483647 == 1)
+ 		      ? 1 : -1];
+@@ -16319,8 +16331,6 @@ main ()
+     if (*(data + i) != *(data3 + i))
+       return 14;
+   close (fd);
+-  free (data);
+-  free (data3);
+   return 0;
+ }
+ _ACEOF
+diff --git a/configure.ac b/configure.ac
+index 7acfcbc..3c64307 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -727,6 +727,20 @@ if test "${DISABLE_XMLDOC}" != "yes"; then
+ 
+ fi
+ 
++AC_ARG_ENABLE([permanent-dlopen],
++	[AS_HELP_STRING([--enable-permanent-dlopen],
++		[Enable when your libc has a permanent dlopen like musl])],
++	[case "${enableval}" in
++		y|ye|yes) PERMANENT_DLOPEN=yes ;;
++		n|no)  PERMANENT_DLOPEN=no ;;
++		*) AC_MSG_ERROR(bad value ${enableval} for --enable-permanent-dlopen)  ;;
++	esac], [PERMANENT_DLOPEN=no])
++
++AC_SUBST([PERMANENT_DLOPEN])
++if test "${PERMANENT_DLOPEN}" == "yes"; then
++	AC_DEFINE([HAVE_PERMANENT_DLOPEN], 1, [Define to support libc with permanent dlopen.])
++fi
++
+ # some embedded systems omit internationalization (locale) support
+ AC_CHECK_HEADERS([xlocale.h])
+ 
+diff --git a/include/asterisk/autoconfig.h.in b/include/asterisk/autoconfig.h.in
+index 72f6ee0..9de15e5 100644
+--- a/include/asterisk/autoconfig.h.in
++++ b/include/asterisk/autoconfig.h.in
+@@ -603,6 +603,9 @@
+ /* Define to 1 if your system defines the file flag O_SYMLINK in fcntl.h */
+ #undef HAVE_O_SYMLINK
+ 
++/* Define to support libc with permanent dlopen. */
++#undef HAVE_PERMANENT_DLOPEN
++
+ /* Define to indicate the PostgreSQL library */
+ #undef HAVE_PGSQL
+ 
+diff --git a/main/loader.c b/main/loader.c
+index 3749c95..b46f745 100644
+--- a/main/loader.c
++++ b/main/loader.c
+@@ -153,6 +153,117 @@ static unsigned int loader_ready;
+ static struct ast_vector_string startup_errors;
+ static struct ast_str *startup_error_builder;
+ 
++#if defined(HAVE_PERMANENT_DLOPEN)
++#define FIRST_DLOPEN 999
++
++struct ao2_container *info_list = NULL;
++
++struct info_list_obj {
++	const struct ast_module_info *info;
++	int dlopened;
++	char name[0];
++};
++
++static struct info_list_obj *info_list_obj_alloc(const char *name,
++	const struct ast_module_info *info)
++{
++	struct info_list_obj *new_entry;
++
++	new_entry = ao2_alloc(sizeof(*new_entry) + strlen(name) + 1, NULL);
++
++	if (!new_entry) {
++		return NULL;
++	}
++
++	strcpy(new_entry->name, name); /* SAFE */
++	new_entry->info = info;
++	new_entry->dlopened = FIRST_DLOPEN;
++
++	return new_entry;
++}
++
++AO2_STRING_FIELD_CMP_FN(info_list_obj, name)
++
++static char *get_name_from_resource(const char *resource)
++{
++	int len;
++	const char *last_three;
++	char *mod_name;
++
++	if (!resource) {
++		return NULL;
++	}
++
++	len = strlen(resource);
++	if (len > 3) {
++		last_three = &resource[len-3];
++		if (!strcasecmp(last_three, ".so")) {
++			mod_name = ast_calloc(1, len - 2);
++			if (mod_name) {
++				ast_copy_string(mod_name, resource, len - 2);
++				return mod_name;
++			} else {
++				/* Unable to allocate memory. */
++				return NULL;
++			}
++		}
++	}
++
++	/* Resource is the name - happens when manually unloading a module. */
++	mod_name = ast_calloc(1, len + 1);
++	if (mod_name) {
++		ast_copy_string(mod_name, resource, len + 1);
++		return mod_name;
++	}
++
++	/* Unable to allocate memory. */
++	return NULL;
++}
++
++static void manual_mod_reg(const void *lib, const char *resource)
++{
++	struct info_list_obj *obj_tmp;
++	char *mod_name;
++
++	if (lib) {
++		mod_name = get_name_from_resource(resource);
++		if (mod_name) {
++			obj_tmp = ao2_find(info_list, mod_name, OBJ_SEARCH_KEY);
++			if (obj_tmp) {
++				if (obj_tmp->dlopened == FIRST_DLOPEN) {
++					obj_tmp->dlopened = 1;
++				} else {
++					ast_module_register(obj_tmp->info);
++				}
++				ao2_ref(obj_tmp, -1);
++			}
++			ast_free(mod_name);
++		}
++	}
++}
++
++static void manual_mod_unreg(const char *resource)
++{
++	struct info_list_obj *obj_tmp;
++	char *mod_name;
++
++	/* When Asterisk shuts down the destructor is called automatically. */
++	if (ast_shutdown_final()) {
++		return;
++	}
++
++	mod_name = get_name_from_resource(resource);
++	if (mod_name) {
++		obj_tmp = ao2_find(info_list, mod_name, OBJ_SEARCH_KEY);
++		if (obj_tmp) {
++			ast_module_unregister(obj_tmp->info);
++			ao2_ref(obj_tmp, -1);
++		}
++		ast_free(mod_name);
++	}
++}
++#endif
++
+ static __attribute__((format(printf, 1, 2))) void module_load_error(const char *fmt, ...)
+ {
+ 	char *copy = NULL;
+@@ -597,6 +708,23 @@ void ast_module_register(const struct ast_module_info *info)
+ 
+ 	/* give the module a copy of its own handle, for later use in registrations and the like */
+ 	*((struct ast_module **) &(info->self)) = mod;
++
++#if defined(HAVE_PERMANENT_DLOPEN)
++	if (mod->flags.builtin != 1) {
++		struct info_list_obj *obj_tmp = ao2_find(info_list, info->name,
++			OBJ_SEARCH_KEY);
++
++		if (!obj_tmp) {
++			obj_tmp = info_list_obj_alloc(info->name, info);
++			if (obj_tmp) {
++				ao2_link(info_list, obj_tmp);
++				ao2_ref(obj_tmp, -1);
++			}
++		} else {
++			ao2_ref(obj_tmp, -1);
++		}
++	}
++#endif
+ }
+ 
+ static int module_post_register(struct ast_module *mod)
+@@ -843,6 +971,10 @@ static void logged_dlclose(const char *name, void *lib)
+ 		error = dlerror();
+ 		ast_log(AST_LOG_ERROR, "Failure in dlclose for module '%s': %s\n",
+ 			S_OR(name, "unknown"), S_OR(error, "Unknown error"));
++#if defined(HAVE_PERMANENT_DLOPEN)
++	} else {
++		manual_mod_unreg(name);
++#endif
+ 	}
+ }
+ 
+@@ -949,6 +1081,9 @@ static struct ast_module *load_dlopen(const char *resource_in, const char *so_ex
+ 
+ 	resource_being_loaded = mod;
+ 	mod->lib = dlopen(filename, flags);
++#if defined(HAVE_PERMANENT_DLOPEN)
++	manual_mod_reg(mod->lib, mod->resource);
++#endif
+ 	if (resource_being_loaded) {
+ 		struct ast_str *list;
+ 		int c = 0;
+@@ -968,6 +1103,9 @@ static struct ast_module *load_dlopen(const char *resource_in, const char *so_ex
+ 
+ 		resource_being_loaded = mod;
+ 		mod->lib = dlopen(filename, RTLD_LAZY | RTLD_LOCAL);
++#if defined(HAVE_PERMANENT_DLOPEN)
++		manual_mod_reg(mod->lib, mod->resource);
++#endif
+ 		if (resource_being_loaded) {
+ 			resource_being_loaded = NULL;
+ 
+@@ -2206,6 +2344,15 @@ int load_modules(void)
+ 
+ 	ast_verb(1, "Asterisk Dynamic Loader Starting:\n");
+ 
++#if defined(HAVE_PERMANENT_DLOPEN)
++	info_list = ao2_container_alloc_list(AO2_ALLOC_OPT_LOCK_NOLOCK, 0, NULL,
++		info_list_obj_cmp_fn); /* must not be cleaned at shutdown */
++	if (!info_list) {
++		fprintf(stderr, "Module info list allocation failure.\n");
++		return 1;
++	}
++#endif
++
+ 	AST_LIST_HEAD_INIT_NOLOCK(&load_order);
+ 	AST_DLLIST_LOCK(&module_list);
+ 
+-- 
+1.7.9.5
+
