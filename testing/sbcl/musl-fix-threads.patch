@@ -1,0 +1,180 @@
+Patch-Source: https://bugs.launchpad.net/sbcl/+bug/1768368
+
+diff --git a/contrib/sb-bsd-sockets/constants.lisp b/contrib/sb-bsd-sockets/constants.lisp
+index 88f5bb7c4..23fd87277 100644
+--- a/contrib/sb-bsd-sockets/constants.lisp
++++ b/contrib/sb-bsd-sockets/constants.lisp
+@@ -93,8 +93,8 @@
+  (:integer EAFNOSUPPORT "EAFNOSUPPORT")
+  (:integer EINPROGRESS "EINPROGRESS")
+ 
+- (:integer NETDB-INTERNAL #+hpux "h_NETDB_INTERNAL" #-hpux "NETDB_INTERNAL" "See errno.")
+- (:integer NETDB-SUCCESS #+hpux "h_NETDB_SUCCESS" #-hpux "NETDB_SUCCESS" "No problem.")
++ (:integer-no-check NETDB-INTERNAL #-os-provides-netdb-internal "-1" #+(and os-provides-netdb-internal hpux) "h_NETDB_INTERNAL" #+(and os-provides-netdb-internal (not hpux)) "NETDB_INTERNAL" "See errno.")
++ (:integer-no-check NETDB-SUCCESS #-os-provides-netdb-internal "0" #+(and os-provides-netdb-internal hpux) "h_NETDB_SUCCESS" #+(and os-provides-netdb-internal (not hpux)) "NETDB_SUCCESS" "No problem.")
+  (:integer HOST-NOT-FOUND "HOST_NOT_FOUND" "Authoritative Answer Host not found.")
+  (:integer TRY-AGAIN "TRY_AGAIN" "Non-Authoritative Host not found, or SERVERFAIL.")
+  (:integer NO-RECOVERY "NO_RECOVERY" "Non recoverable errors, FORMERR, REFUSED, NOTIMP.")
+diff --git a/src/runtime/linux-os.c b/src/runtime/linux-os.c
+index fa4f5e490..60b5fea4e 100644
+--- a/src/runtime/linux-os.c
++++ b/src/runtime/linux-os.c
+@@ -187,8 +187,15 @@ isnptl (void)
+       if (strstr (buf, "NPTL")) {
+           return 1;
+       }
++      else {
++          return 0;
++      }
++  }
++  else {
++      /* If the configuration variable is empty, just assume we have a
++       * good enough thread implementation. */
++      return 1;
+   }
+-  return 0;
+ }
+ #endif
+ 
+diff --git a/tests/foreign.test.sh b/tests/foreign.test.sh
+index 7fb757813..9ba8ed3cf 100755
+--- a/tests/foreign.test.sh
++++ b/tests/foreign.test.sh
+@@ -248,16 +248,20 @@ cat > $TEST_FILESTEM.test.lisp <<EOF
+   (assert (= 13 foo))
+   (assert (= 42 (bar)))
+   (note "/original definitions ok")
+-  (rename-file "$TEST_FILESTEM-b.so" "$TEST_FILESTEM-b.bak")
+-  (rename-file "$TEST_FILESTEM-b2.so" "$TEST_FILESTEM-b.so")
+-  (load-shared-object (truename "$TEST_FILESTEM-b.so"))
+-  (note "/reloading ok")
+-  (assert (= 42 foo))
+-  (assert (= 13 (bar)))
+-  (note "/redefined versions ok")
+-  (rename-file "$TEST_FILESTEM-b.so" "$TEST_FILESTEM-b2.so")
+-  (rename-file "$TEST_FILESTEM-b.bak" "$TEST_FILESTEM-b.so")
+-  (note "/renamed back to originals")
++  #+dlclose-is-noop
++  (note "/skipping reloading tests")
++  #-dlclose-is-noop
++  (progn
++    (rename-file "$TEST_FILESTEM-b.so" "$TEST_FILESTEM-b.bak")
++    (rename-file "$TEST_FILESTEM-b2.so" "$TEST_FILESTEM-b.so")
++    (load-shared-object (truename "$TEST_FILESTEM-b.so"))
++    (note "/reloading ok")
++    (assert (= 42 foo))
++    (assert (= 13 (bar)))
++    (note "/redefined versions ok")
++    (rename-file "$TEST_FILESTEM-b.so" "$TEST_FILESTEM-b2.so")
++    (rename-file "$TEST_FILESTEM-b.bak" "$TEST_FILESTEM-b.so")
++    (note "/renamed back to originals"))
+ 
+   ;; test late resolution
+   #+linkage-table
+@@ -274,13 +278,17 @@ cat > $TEST_FILESTEM.test.lisp <<EOF
+     (load-shared-object (truename "$TEST_FILESTEM-c.so"))
+     (assert (= 43 late-foo))
+     (assert (= 14 (late-bar)))
+-    (unload-shared-object (truename "$TEST_FILESTEM-c.so"))
+-    (multiple-value-bind (val err) (ignore-errors late-foo)
+-      (assert (not val))
+-      (assert (typep err 'undefined-alien-error)))
+-    (multiple-value-bind (val err) (ignore-errors (late-bar))
+-      (assert (not val))
+-      (assert (typep err 'undefined-alien-error)))
++    #+dlclose-is-noop
++    (note "/skipping unloading tests")
++    #-dlclose-is-noop
++    (progn
++      (unload-shared-object (truename "$TEST_FILESTEM-c.so"))
++      (multiple-value-bind (val err) (ignore-errors late-foo)
++        (assert (not val))
++        (assert (typep err 'undefined-alien-error)))
++      (multiple-value-bind (val err) (ignore-errors (late-bar))
++        (assert (not val))
++        (assert (typep err 'undefined-alien-error))))
+     (note "/linkage table ok"))
+ 
+   (sb-ext:exit :code $EXIT_LISP_WIN) ; success convention for Lisp program
+diff --git a/tools-for-build/Makefile b/tools-for-build/Makefile
+index 3f6e4ecf9..39bab2b92 100644
+--- a/tools-for-build/Makefile
++++ b/tools-for-build/Makefile
+@@ -16,6 +16,9 @@ LDLIBS:=$(OS_LIBS)
+ 
+ all: grovel-headers determine-endianness where-is-mcontext
+ 
++dlclose-is-noop-test-helper.so: dlclose-is-noop-test-helper.c
++	@$(CC) $(LDFLAGS) -shared $< -o $@ $(LOADLIBES) $(LDLIBS)
++
+ clean:
+ 	rm -f *.o grovel-headers determine-endianness where-is-mcontext
+ 	rm -f *.exe
+diff --git a/tools-for-build/dlclose-is-noop-test-helper.c b/tools-for-build/dlclose-is-noop-test-helper.c
+new file mode 100644
+index 000000000..4be7a8e5b
+--- /dev/null
++++ b/tools-for-build/dlclose-is-noop-test-helper.c
+@@ -0,0 +1 @@
++int sbcl_dl_close_test = 42;
+diff --git a/tools-for-build/dlclose-is-noop-test.c b/tools-for-build/dlclose-is-noop-test.c
+new file mode 100644
+index 000000000..f4eab26a5
+--- /dev/null
++++ b/tools-for-build/dlclose-is-noop-test.c
+@@ -0,0 +1,19 @@
++/* test to build and run so that we know if we have a noop dlclose
++ */
++
++#include <dlfcn.h>
++#include <stddef.h>
++
++int main ()
++{
++   void * handle = dlopen("./dlclose-is-noop-test-helper.so", RTLD_NOW | RTLD_GLOBAL);
++   dlclose(handle);
++
++   handle = dlopen("./dlclose-is-noop-test-helper.so", RTLD_NOW | RTLD_NOLOAD);
++
++   if (handle != NULL) {
++       return 104;
++   } else {
++       return 0;
++   }
++}
+diff --git a/tools-for-build/grovel-features.sh b/tools-for-build/grovel-features.sh
+index ffc4307eb..bf1448a6a 100644
+--- a/tools-for-build/grovel-features.sh
++++ b/tools-for-build/grovel-features.sh
+@@ -33,4 +33,13 @@ featurep os-provides-getprotoby-r
+ 
+ featurep os-provides-poll
+ 
++featurep os-provides-netdb-internal
++
+ featurep arm-softfp
++
++# We need a helper shared library to test dlclose-is-noop
++$GNUMAKE dlclose-is-noop-test-helper.so > /dev/null 2>&1
++
++featurep dlclose-is-noop
++
++rm -f dlclose-is-noop-test-helper.so
+diff --git a/tools-for-build/os-provides-netdb-internal-test.c b/tools-for-build/os-provides-netdb-internal-test.c
+new file mode 100644
+index 000000000..cab08cc41
+--- /dev/null
++++ b/tools-for-build/os-provides-netdb-internal-test.c
+@@ -0,0 +1,12 @@
++#include <netdb.h>
++
++int main ()
++{
++#if defined NETDB_INTERNAL && defined NETDB_SUCCESS
++    return 104;
++#elif defined h_NETDB_INTERNAL && defined h_NETDB_SUCCESS
++    return 104;
++#else
++    return 0;
++#endif
++}

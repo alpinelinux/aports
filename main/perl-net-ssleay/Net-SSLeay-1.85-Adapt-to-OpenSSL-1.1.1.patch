@@ -1,0 +1,237 @@
+From b01291bf88dd84529c93973da7c275e0ffe5cc1f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Fri, 3 Aug 2018 14:30:22 +0200
+Subject: [PATCH] Adapt to OpenSSL 1.1.1
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+OpenSSL 1.1.1 defaults to TLS 1.3 that handles session tickets and
+session shutdowns differently. This leads to failing various Net-SSLeay
+tests that exhibits use cases that are not possible with OpenSSL 1.1.1
+anymore or where the library behaves differently.
+
+Since Net-SSLeay is a low-level wrapper, Net-SSLeay will be corrected
+in tests. Higher-level code as IO::Socket::SSL and other Net::SSLeay
+applications need to be adjusted on case-to-case basis.
+
+This patche changes:
+
+- Retry SSL_read() and SSL_write() (by sebastian [...] breakpoint.cc)
+- Disable session tickets in t/local/07_sslecho.t.
+- Adaps t/local/36_verify.t to a session end when Net::SSLeay::read()
+  returns undef.
+
+https://rt.cpan.org/Public/Bug/Display.html?id=125218
+https://github.com/openssl/openssl/issues/5637
+https://github.com/openssl/openssl/issues/6904
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+---
+ SSLeay.xs            | 56 ++++++++++++++++++++++++++++++++++++++++++++++++----
+ lib/Net/SSLeay.pod   | 46 ++++++++++++++++++++++++++++++++++++++++++
+ t/local/07_sslecho.t | 15 ++++++++++++--
+ t/local/36_verify.t  |  2 +-
+ 4 files changed, 112 insertions(+), 7 deletions(-)
+
+diff --git a/SSLeay.xs b/SSLeay.xs
+index bf148c0..5aed4d7 100644
+--- a/SSLeay.xs
++++ b/SSLeay.xs
+@@ -1999,7 +1999,17 @@ SSL_read(s,max=32768)
+ 	int got;
+     PPCODE:
+ 	New(0, buf, max, char);
+-	got = SSL_read(s, buf, max);
++
++	do {
++		int err;
++
++		got = SSL_read(s, buf, max);
++		if (got > 0)
++			break;
++		err = SSL_get_error(s, got);
++		if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
++			break;
++	} while (1);
+ 
+ 	/* If in list context, return 2-item list:
+ 	 *   first return value:  data gotten, or undef on error (got<0)
+@@ -2051,10 +2061,20 @@ SSL_write(s,buf)
+      SSL *   s
+      PREINIT:
+      STRLEN len;
++     int err;
++     int ret;
+      INPUT:
+      char *  buf = SvPV( ST(1), len);
+      CODE:
+-     RETVAL = SSL_write (s, buf, (int)len);
++     do {
++	     ret = SSL_write (s, buf, (int)len);
++	     if (ret > 0)
++		     break;
++	     err = SSL_get_error(s, ret);
++	     if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
++		     break;
++     } while (1);
++     RETVAL = ret;
+      OUTPUT:
+      RETVAL
+ 
+@@ -2083,8 +2103,20 @@ SSL_write_partial(s,from,count,buf)
+      if (len < 0) {
+        croak("from beyound end of buffer");
+        RETVAL = -1;
+-     } else
+-       RETVAL = SSL_write (s, &(buf[from]), (count<=len)?count:len);
++     } else {
++	     int ret;
++	     int err;
++
++	     do {
++		     ret = SSL_write (s, &(buf[from]), (count<=len)?count:len);
++		     if (ret > 0)
++			     break;
++		     err = SSL_get_error(s, ret);
++		     if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
++			     break;
++	     } while (1);
++	     RETVAL = ret;
++     }
+      OUTPUT:
+      RETVAL
+ 
+@@ -6957,4 +6989,20 @@ SSL_export_keying_material(ssl, outlen, label, p)
+ 
+ #endif
+ 
++#if OPENSSL_VERSION_NUMBER >= 0x1010100fL
++
++int
++SSL_CTX_set_num_tickets(SSL_CTX *ctx,size_t num_tickets)
++
++size_t
++SSL_CTX_get_num_tickets(SSL_CTX *ctx)
++
++int
++SSL_set_num_tickets(SSL *ssl,size_t num_tickets)
++
++size_t
++SSL_get_num_tickets(SSL *ssl)
++
++#endif
++
+ #define REM_EOF "/* EOF - SSLeay.xs */"
+diff --git a/lib/Net/SSLeay.pod b/lib/Net/SSLeay.pod
+index 2e1aae3..bca7be4 100644
+--- a/lib/Net/SSLeay.pod
++++ b/lib/Net/SSLeay.pod
+@@ -4437,6 +4437,52 @@ getticket($ssl,$ticket,$data) -> $return_value
+ 
+ This function is based on the OpenSSL function SSL_set_session_ticket_ext_cb.
+ 
++=item * CTX_set_num_tickets
++
++B<COMPATIBILITY:> not available in Net-SSLeay-1.85 and before; requires at least OpenSSL 1.1.1
++
++Set number of session tickets that will be sent to a client.
++
++ my $rv = Net::SSLeay::CTX_set_num_tickets($ctx, $number_of_tickets);
++ # $ctx  - value corresponding to openssl's SSL_CTX structure
++ # $number_of_tickets - number of tickets to send
++ # returns: 1 on success, 0 on failure
++
++Set to zero if you do not no want to support a session resumption.
++
++=item * CTX_get_num_tickets
++
++B<COMPATIBILITY:> not available in Net-SSLeay-1.85 and before; requires at least OpenSSL 1.1.1
++
++Get number of session tickets that will be sent to a client.
++
++ my $number_of_tickets = Net::SSLeay::CTX_get_num_tickets($ctx);
++ # $ctx  - value corresponding to openssl's SSL_CTX structure
++ # returns: number of tickets to send
++
++=item * set_num_tickets
++
++B<COMPATIBILITY:> not available in Net-SSLeay-1.85 and before; requires at least OpenSSL 1.1.1
++
++Set number of session tickets that will be sent to a client.
++
++ my $rv = Net::SSLeay::set_num_tickets($ssl, $number_of_tickets);
++ # $ssl  - value corresponding to openssl's SSL structure
++ # $number_of_tickets - number of tickets to send
++ # returns: 1 on success, 0 on failure
++
++Set to zero if you do not no want to support a session resumption.
++
++=item * get_num_tickets
++
++B<COMPATIBILITY:> not available in Net-SSLeay-1.85 and before; requires at least OpenSSL 1.1.1
++
++Get number of session tickets that will be sent to a client.
++
++ my $number_of_tickets = Net::SSLeay::get_num_tickets($ctx);
++ # $ctx  - value corresponding to openssl's SSL structure
++ # returns: number of tickets to send
++
+ =item * set_shutdown
+ 
+ Sets the shutdown state of $ssl to $mode.
+diff --git a/t/local/07_sslecho.t b/t/local/07_sslecho.t
+index 5e16b04..5dc946a 100644
+--- a/t/local/07_sslecho.t
++++ b/t/local/07_sslecho.t
+@@ -13,7 +13,8 @@ BEGIN {
+   plan skip_all => "fork() not supported on $^O" unless $Config{d_fork};
+ }
+ 
+-plan tests => 78;
++plan tests => 79;
++$SIG{'PIPE'} = 'IGNORE';
+ 
+ my $sock;
+ my $pid;
+@@ -61,6 +62,16 @@ Net::SSLeay::library_init();
+     ok(Net::SSLeay::CTX_set_cipher_list($ctx, 'ALL'), 'CTX_set_cipher_list');
+     my ($dummy, $errs) = Net::SSLeay::set_cert_and_key($ctx, $cert_pem, $key_pem);
+     ok($errs eq '', "set_cert_and_key: $errs");
++    SKIP: {
++        skip 'Disabling session tickets requires OpenSSL >= 1.1.1', 1
++            unless (&Net::SSLeay::OPENSSL_VERSION_NUMBER >= 0x1010100f);
++        # TLS 1.3 server sends session tickets after a handhake as part of
++        # the SSL_accept(). If a client finishes all its job including closing
++        # TCP connectino before a server sends the tickets, SSL_accept() fails
++        # with SSL_ERROR_SYSCALL and EPIPE errno and the server receives
++        # SIGPIPE signal. <https://github.com/openssl/openssl/issues/6904>
++        ok(Net::SSLeay::CTX_set_num_tickets($ctx, 0), 'Session tickets disabled');
++    }
+ 
+     $pid = fork();
+     BAIL_OUT("failed to fork: $!") unless defined $pid;
+@@ -351,7 +362,7 @@ waitpid $pid, 0;
+ push @results, [ $? == 0, 'server exited with 0' ];
+ 
+ END {
+-    Test::More->builder->current_test(51);
++    Test::More->builder->current_test(52);
+     for my $t (@results) {
+         ok( $t->[0], $t->[1] );
+     }
+diff --git a/t/local/36_verify.t b/t/local/36_verify.t
+index 92afc52..e55b138 100644
+--- a/t/local/36_verify.t
++++ b/t/local/36_verify.t
+@@ -282,7 +282,7 @@ sub run_server
+ 
+ 	# Termination request or other message from client
+ 	my $msg = Net::SSLeay::read($ssl);
+-	if ($msg eq 'end')
++	if (defined $msg and $msg eq 'end')
+ 	{
+ 	    Net::SSLeay::write($ssl, 'end');
+ 	    exit (0);
+-- 
+2.14.4
+

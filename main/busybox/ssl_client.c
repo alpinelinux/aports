@@ -80,7 +80,7 @@ int do_poll(struct pollfd *fds, int nfds)
 	return r;
 }
 
-static void copy_loop(struct tls *ctx, int sfd)
+static void copy_loop(struct tls *ctx, int sfd, int eofexit)
 {
 	struct pollfd fds[2] = {
 		{ .fd = STDIN_FILENO,	.events = POLLIN },
@@ -89,8 +89,11 @@ static void copy_loop(struct tls *ctx, int sfd)
 
 	while (1) {
 		int r = do_poll(fds, 2);
-		if (fds[0].revents)
+		if (fds[0].revents) {
 			copy_from_stdin_to_tls(ctx, &fds[0].fd);
+			if (eofexit && fds[0].fd == -1)
+				break;
+		}
 
 		if (fds[1].revents && copy_from_tls_to_stdout(ctx))
 			break;
@@ -98,7 +101,7 @@ static void copy_loop(struct tls *ctx, int sfd)
 }
 
 void usage(const char *prog, int ret) {
-	printf("usage: %s [-s FD] [-I] -n SNI\n", prog);
+	printf("usage: %s [-s FD] [-I] [-e] -n SNI\n", prog);
 	exit(ret);
 }
 
@@ -109,9 +112,13 @@ int main(int argc, char *argv[])
 	struct tls_config *tc;
 	struct tls *ctx;
 	int insecure = 0;
+	int localeofexit = 0;
 
-	while ((c = getopt(argc, argv, "hs:n:I")) != -1) {
+	while ((c = getopt(argc, argv, "ehs:n:I")) != -1) {
 		switch (c) {
+		case 'e':
+			localeofexit = 1;
+			break;
 		case 'h':
 			usage(argv[0], 0);
 			break;
@@ -152,7 +159,7 @@ int main(int argc, char *argv[])
 	if (tls_handshake(ctx) == -1)
 		errx(1, "%s: %s", sni, tls_error(ctx));
 
-	copy_loop(ctx, sfd);
+	copy_loop(ctx, sfd, localeofexit);
 	tls_close(ctx);
 	return 0;
 }

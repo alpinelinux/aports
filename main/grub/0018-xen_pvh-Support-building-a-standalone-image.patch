@@ -1,0 +1,199 @@
+From f8edde763ef26a2eb9cab40998d97e8bc50bf7ef Mon Sep 17 00:00:00 2001
+From: Juergen Gross <jgross@suse.com>
+Date: Fri, 7 Dec 2018 13:11:46 +0100
+Subject: [PATCH 18/20] xen_pvh: Support building a standalone image
+
+Support mkimage for xen_pvh.
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+Reviewed-by: Daniel Kiper <daniel.kiper@oracle.com>
+Tested-by: Hans van Kranenburg <hans@knorrie.org>
+(cherry picked from commit 78899c42d74d638a48c9b3f0f25f39445b3c1d4c)
+---
+ include/grub/util/mkimage.h |  3 ++-
+ util/grub-mkimage32.c       |  4 +++-
+ util/grub-mkimage64.c       |  4 +++-
+ util/grub-mkimagexx.c       | 44 +++++++++++++++++++++++++++++++++----
+ util/mkimage.c              | 23 ++++++++++++++++++-
+ 5 files changed, 70 insertions(+), 8 deletions(-)
+
+diff --git a/include/grub/util/mkimage.h b/include/grub/util/mkimage.h
+index 1a18708a8..776c58581 100644
+--- a/include/grub/util/mkimage.h
++++ b/include/grub/util/mkimage.h
+@@ -71,7 +71,8 @@ struct grub_install_image_target_desc
+     IMAGE_I386_IEEE1275,
+     IMAGE_LOONGSON_ELF, IMAGE_QEMU, IMAGE_PPC, IMAGE_YEELOONG_FLASH,
+     IMAGE_FULOONG2F_FLASH, IMAGE_I386_PC_PXE, IMAGE_MIPS_ARC,
+-    IMAGE_QEMU_MIPS_FLASH, IMAGE_UBOOT, IMAGE_XEN, IMAGE_I386_PC_ELTORITO
++    IMAGE_QEMU_MIPS_FLASH, IMAGE_UBOOT, IMAGE_XEN, IMAGE_I386_PC_ELTORITO,
++    IMAGE_XEN_PVH
+   } id;
+   enum
+     {
+diff --git a/util/grub-mkimage32.c b/util/grub-mkimage32.c
+index 9b31397bc..b2a4be7e6 100644
+--- a/util/grub-mkimage32.c
++++ b/util/grub-mkimage32.c
+@@ -17,6 +17,8 @@
+ # define ELF_R_SYM(val)		ELF32_R_SYM(val)
+ # define ELF_R_TYPE(val)		ELF32_R_TYPE(val)
+ # define ELF_ST_TYPE(val)		ELF32_ST_TYPE(val)
+-#define XEN_NOTE_SIZE 132
++
++#define XEN_NOTE_SIZE		132
++#define XEN_PVH_NOTE_SIZE	20
+ 
+ #include "grub-mkimagexx.c"
+diff --git a/util/grub-mkimage64.c b/util/grub-mkimage64.c
+index d83345924..aef033743 100644
+--- a/util/grub-mkimage64.c
++++ b/util/grub-mkimage64.c
+@@ -17,6 +17,8 @@
+ # define ELF_R_SYM(val)		ELF64_R_SYM(val)
+ # define ELF_R_TYPE(val)		ELF64_R_TYPE(val)
+ # define ELF_ST_TYPE(val)		ELF64_ST_TYPE(val)
+-#define XEN_NOTE_SIZE 120
++
++#define XEN_NOTE_SIZE		120
++#define XEN_PVH_NOTE_SIZE	24
+ 
+ #include "grub-mkimagexx.c"
+diff --git a/util/grub-mkimagexx.c b/util/grub-mkimagexx.c
+index e7b8cf161..bf8f9bf9c 100644
+--- a/util/grub-mkimagexx.c
++++ b/util/grub-mkimagexx.c
+@@ -208,12 +208,12 @@ SUFFIX (grub_mkimage_generate_elf) (const struct grub_install_image_target_desc
+       phnum++;
+       footer_size += sizeof (struct grub_ieee1275_note);
+     }
+-  if (image_target->id == IMAGE_XEN)
++  if (image_target->id == IMAGE_XEN || image_target->id == IMAGE_XEN_PVH)
+     {
+       phnum++;
+       shnum++;
+       string_size += sizeof (".xen");
+-      footer_size += XEN_NOTE_SIZE;
++      footer_size += (image_target->id == IMAGE_XEN) ? XEN_NOTE_SIZE : XEN_PVH_NOTE_SIZE;
+     }
+   header_size = ALIGN_UP (sizeof (*ehdr) + phnum * sizeof (*phdr)
+ 			  + shnum * sizeof (*shdr) + string_size, align);
+@@ -392,6 +392,39 @@ SUFFIX (grub_mkimage_generate_elf) (const struct grub_install_image_target_desc
+       phdr->p_offset = grub_host_to_target32 (header_size + program_size);
+     }
+ 
++  if (image_target->id == IMAGE_XEN_PVH)
++    {
++      char *note_start = (elf_img + program_size + header_size);
++      Elf_Nhdr *note_ptr;
++      char *ptr = (char *) note_start;
++
++      grub_util_info ("adding XEN NOTE segment");
++
++      /* Phys32 Entry.  */
++      note_ptr = (Elf_Nhdr *) ptr;
++      note_ptr->n_namesz = grub_host_to_target32 (sizeof (GRUB_XEN_NOTE_NAME));
++      note_ptr->n_descsz = grub_host_to_target32 (image_target->voidp_sizeof);
++      note_ptr->n_type = grub_host_to_target32 (XEN_ELFNOTE_PHYS32_ENTRY);
++      ptr += sizeof (Elf_Nhdr);
++      memcpy (ptr, GRUB_XEN_NOTE_NAME, sizeof (GRUB_XEN_NOTE_NAME));
++      ptr += ALIGN_UP (sizeof (GRUB_XEN_NOTE_NAME), 4);
++      memset (ptr, 0, image_target->voidp_sizeof);
++      *(grub_uint32_t *) ptr = GRUB_KERNEL_I386_XEN_PVH_LINK_ADDR;
++      ptr += image_target->voidp_sizeof;
++
++      assert (XEN_PVH_NOTE_SIZE == (ptr - note_start));
++
++      phdr++;
++      phdr->p_type = grub_host_to_target32 (PT_NOTE);
++      phdr->p_flags = grub_host_to_target32 (PF_R);
++      phdr->p_align = grub_host_to_target32 (image_target->voidp_sizeof);
++      phdr->p_vaddr = 0;
++      phdr->p_paddr = 0;
++      phdr->p_filesz = grub_host_to_target32 (XEN_PVH_NOTE_SIZE);
++      phdr->p_memsz = 0;
++      phdr->p_offset = grub_host_to_target32 (header_size + program_size);
++    }
++
+   if (note)
+     {
+       int note_size = sizeof (struct grub_ieee1275_note);
+@@ -467,7 +500,7 @@ SUFFIX (grub_mkimage_generate_elf) (const struct grub_install_image_target_desc
+     shdr->sh_entsize = grub_host_to_target32 (0);
+     shdr++;
+ 
+-    if (image_target->id == IMAGE_XEN)
++    if (image_target->id == IMAGE_XEN || image_target->id == IMAGE_XEN_PVH)
+       {
+ 	memcpy (ptr, ".xen", sizeof (".xen"));
+ 	shdr->sh_name = grub_host_to_target32 (ptr - str_start);
+@@ -475,7 +508,10 @@ SUFFIX (grub_mkimage_generate_elf) (const struct grub_install_image_target_desc
+ 	shdr->sh_type = grub_host_to_target32 (SHT_PROGBITS);
+ 	shdr->sh_addr = grub_host_to_target_addr (target_addr + kernel_size);
+ 	shdr->sh_offset = grub_host_to_target_addr (program_size + header_size);
+-	shdr->sh_size = grub_host_to_target32 (XEN_NOTE_SIZE);
++	if (image_target->id == IMAGE_XEN)
++	  shdr->sh_size = grub_host_to_target32 (XEN_NOTE_SIZE);
++	else
++	  shdr->sh_size = grub_host_to_target32 (XEN_PVH_NOTE_SIZE);
+ 	shdr->sh_link = grub_host_to_target32 (0);
+ 	shdr->sh_info = grub_host_to_target32 (0);
+ 	shdr->sh_addralign = grub_host_to_target32 (image_target->voidp_sizeof);
+diff --git a/util/mkimage.c b/util/mkimage.c
+index 9ad4cfe42..c3bd23479 100644
+--- a/util/mkimage.c
++++ b/util/mkimage.c
+@@ -132,6 +132,24 @@ static const struct grub_install_image_target_desc image_targets[] =
+       .link_addr = GRUB_KERNEL_I386_PC_LINK_ADDR,
+       .default_compression = GRUB_COMPRESSION_LZMA
+     },
++    {
++      .dirname = "i386-xen_pvh",
++      .names = { "i386-xen_pvh", NULL },
++      .voidp_sizeof = 4,
++      .bigendian = 0,
++      .id = IMAGE_XEN_PVH,
++      .flags = PLATFORM_FLAGS_NONE,
++      .total_module_size = TARGET_NO_FIELD,
++      .decompressor_compressed_size = TARGET_NO_FIELD,
++      .decompressor_uncompressed_size = TARGET_NO_FIELD,
++      .decompressor_uncompressed_addr = TARGET_NO_FIELD,
++      .elf_target = EM_386,
++      .section_align = 1,
++      .vaddr_offset = 0,
++      .link_addr = GRUB_KERNEL_I386_XEN_PVH_LINK_ADDR,
++      .mod_align = GRUB_KERNEL_I386_XEN_PVH_MOD_ALIGN,
++      .link_align = 4
++    },
+     {
+       .dirname = "i386-pc",
+       .names = { "i386-pc-pxe", NULL },
+@@ -816,7 +834,8 @@ grub_install_generate_image (const char *dir, const char *prefix,
+   else
+     kernel_img = grub_mkimage_load_image64 (kernel_path, total_module_size,
+ 					    &layout, image_target);
+-  if (image_target->id == IMAGE_XEN && layout.align < 4096)
++  if ((image_target->id == IMAGE_XEN || image_target->id == IMAGE_XEN_PVH) &&
++      layout.align < 4096)
+     layout.align = 4096;
+ 
+   if ((image_target->flags & PLATFORM_FLAGS_DECOMPRESSORS)
+@@ -1046,6 +1065,7 @@ grub_install_generate_image (const char *dir, const char *prefix,
+     case IMAGE_MIPS_ARC:
+     case IMAGE_QEMU_MIPS_FLASH:
+     case IMAGE_XEN:
++    case IMAGE_XEN_PVH:
+       break;
+     case IMAGE_SPARC64_AOUT:
+     case IMAGE_SPARC64_RAW:
+@@ -1622,6 +1642,7 @@ grub_install_generate_image (const char *dir, const char *prefix,
+     case IMAGE_LOONGSON_ELF:
+     case IMAGE_PPC:
+     case IMAGE_XEN:
++    case IMAGE_XEN_PVH:
+     case IMAGE_COREBOOT:
+     case IMAGE_I386_IEEE1275:
+       {
+-- 
+2.21.0
+

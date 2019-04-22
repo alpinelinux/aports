@@ -45,11 +45,11 @@ profile_extended() {
 		ncurses-terminfo net-snmp net-snmp-tools nrpe nsd
 		opennhrp openvpn openvswitch pingu ppp quagga
 		quagga-nhrp rpcbind sntpc socat ssmtp strongswan
-		sysklogd tcpdump tcpproxy tinyproxy unbound
+		sysklogd tcpdump tinyproxy unbound
 		wireless-tools wpa_supplicant zonenotify
 
 		btrfs-progs cksfv dosfstools cryptsetup
-		cciss_vol_status grub-efi lvm2 mdadm mkinitfs mtools nfs-utils
+		cciss_vol_status grub-bios grub-efi lvm2 mdadm mkinitfs mtools nfs-utils
 		parted rsync sfdisk syslinux unrar util-linux xfsprogs
 		zfs
 		"
