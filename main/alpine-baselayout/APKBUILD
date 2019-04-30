@@ -1,8 +1,8 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=3.1.0
-pkgrel=3
+pkgver=3.1.1
+pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -119,7 +119,6 @@ package() {
 		"$srcdir"/kms.conf \
 		"$pkgdir"/etc/modprobe.d/
 
-	echo "UTC" > "$pkgdir"/etc/TZ
 	echo "localhost" > "$pkgdir"/etc/hostname
 	cat > "$pkgdir"/etc/hosts <<-EOF
 		127.0.0.1	localhost localhost.localdomain

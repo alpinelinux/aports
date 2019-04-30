@@ -6,7 +6,7 @@ Alpine Linux package, along with the required patches and scripts,
 if any.
 
 It also contains some extra files and directories related to testing
-(and therefore, building) those packages on GitHub (via Travis).
+(and therefore, building) those packages on GitHub (via Travis and Drone.io).
 
 If you want to contribute, please read the
 [contributor guide](https://wiki.alpinelinux.org/wiki/Alpine_Linux:Contribute)
