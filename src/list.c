@@ -61,7 +61,7 @@ static int is_orphaned(const struct apk_name *name)
 	/* repo 1 is always installed-db, so if other bits are set it means the package is available somewhere
 	 * (either cache or in a proper repo)
 	 */
-	return (repos & ~BIT(1)) == 0;
+	return (repos & ~BIT(APK_REPOSITORY_CACHED)) == 0;
 }
 
 /* returns the currently installed package if there is a newer package that satisfies `name` */
@@ -144,7 +144,7 @@ static void filter_package(const struct apk_package *pkg, const struct list_ctx 
 	if (ctx->orphaned && !is_orphaned(pkg->name))
 		return;
 
-	if (ctx->available && pkg->repos == BIT(1))
+	if (ctx->available && pkg->repos == BIT(APK_REPOSITORY_CACHED))
 		return;
 
 	if (ctx->upgradable && !is_upgradable(pkg->name, pkg))
