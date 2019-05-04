@@ -37,13 +37,14 @@ This means you care about the quality of your contributions.
     * When adding a new aport: testing/apkname: new aport
     * When modifying an aport: testing/apkname: short description about changes
   * If needed provide a proper formatted (line wrapped) description of what your patch will do. You can provide a description in the PR, but you must include a message for this specific commit in the commit description. If in the future we would like to distance ourselves from Github the PR information could be lost.
-5. Open your copy of the aports repository at github.com and switch to your feature branch. You should now see an option to create your PR. [More info](https://help.github.com/articles/creating-a-pull-request/)
-6. Wait for an Alpine Linux developer to review your changes.
-7. If all is ok your PR will be merged but if a developer asks for changes please do as follows:
+5. Add your branch to your copy of the aports repository on GitHub `git push -u origin my_new_feature`.
+6. Open your copy of the aports repository at github.com and switch to your feature branch. You should now see an option to create your PR. [More info](https://help.github.com/articles/creating-a-pull-request/)
+7. Wait for an Alpine Linux developer to review your changes.
+8. If all is ok your PR will be merged but if a developer asks for changes please do as follows:
   * Make the requested changes.
   * Add your file(s) to git and commit (we will squash your commits if needed).
   * Push your changes `git push origin my_new_feature`.
-8. Goto #6.
+9. Goto #7.
 
 ### Submitting a package with new dependencies
 
