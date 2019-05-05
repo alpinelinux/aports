@@ -1,4 +1,10 @@
+# XXX: @CF: 20190405: Switch to alpine:edge soon, as it uses musl-1.1.22 by default
+# XXX: @CF: 20190405: alpine:edge because libboost_unit_test_framework.a is only installed as a shared lib rather than static. Cannot find main.
 FROM alpine:latest
+
+# this needs to be manually extracted from /home/${UNAME}/aports/main/musl/APKBUILD
+ENV MUSL_VER 1.1.22
+ENV MUSL_REV r0
 
 ENV UNAME alpine
 ENV THRIFT_VER 0.11.0
@@ -27,16 +33,13 @@ RUN git clone https://github.com/alpinelinux/aports
 RUN abuild-keygen -a -i
 
 #
-# XXX: @CF: 20180709: need to patch musl implementation of getaddrinfo to support AI_ADDRCONFIG
+# XXX: @CF: 20190405: Install >= musl-1.1.20
 #
 WORKDIR /home/${UNAME}/aports/main/musl
-COPY musl-1.1.19-getaddrinfo-ai-addrconfig.patch 3000-getaddrinfo-ai-addrconfig.patch
-RUN sed -e 's|\(2000-pthread.*\)|\1\n3000-getaddrinfo-ai-addrconfig.patch|g' < APKBUILD > APKBUILD.new
-RUN mv APKBUILD.new APKBUILD 
 RUN abuild checksum
 RUN abuild -r
 WORKDIR /home/${UNAME}/packages/main/x86_64
-RUN sudo apk add musl-1.1.19-r10.apk musl-dev-1.1.19-r10.apk musl-utils-1.1.19-r10.apk libc6-compat-1.1.19-r10.apk
+RUN sudo apk add musl-${MUSL_VER}-${MUSL_REV}.apk musl-dev-${MUSL_VER}-${MUSL_REV}.apk musl-utils-${MUSL_VER}-${MUSL_REV}.apk libc6-compat-${MUSL_VER}-${MUSL_REV}.apk
 
 #RUN newapkbuild \
 # -n thrift \
