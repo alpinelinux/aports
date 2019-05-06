@@ -1,0 +1,166 @@
+Related
+https://bugzilla.mozilla.org/show_bug.cgi?id=1543659
+https://bugzilla.mozilla.org/show_bug.cgi?id=1543843
+https://hg.mozilla.org/mozilla-central/rev/bc11fcee5741
+https://bugzilla.mozilla.org/show_bug.cgi?id=1488552
+https://salsa.debian.org/gnome-team/mozjs60/blob/debian/master/debian/patches/jsproperty-endian.patch
+
+diff --git a/js/src/jsapi.h b/js/src/jsapi.h
+index 0f11787..5042af2 100644
+--- a/js/src/jsapi.h
++++ b/js/src/jsapi.h
+@@ -1581,7 +1581,12 @@ struct JSPropertySpec {
+     uintptr_t type;
+     union {
+       const char* string;
+-      int32_t int32;
++      struct {
++#if MOZ_BIG_ENDIAN && JS_BITS_PER_WORD == 64
++        uint32_t    padding;
++#endif
++        int32_t     int32;
++      };
+     };
+   };
+ 
+Bug 1488552 - Ensure proper running on 64-bit and 32-bit BE platforms.
+
+diff --git a/js/src/gc/RelocationOverlay.h b/js/src/gc/RelocationOverlay.h
+--- a/js/src/gc/RelocationOverlay.h
++++ b/js/src/gc/RelocationOverlay.h
+@@ -29,23 +29,34 @@ struct Cell;
+  * This structure overlays a Cell that has been moved and provides a way to find
+  * its new location. It's used during generational and compacting GC.
+  */
+ class RelocationOverlay {
+   /* See comment in js/public/HeapAPI.h. */
+   static const uint32_t Relocated = js::gc::Relocated;
+ 
++#if MOZ_LITTLE_ENDIAN || JS_BITS_PER_WORD == 32
+   /*
+-   * Keep the low 32 bits untouched. Use them to distinguish strings from
++   * Keep the first 32 bits untouched. Use them to distinguish strings from
+    * objects in the nursery.
+    */
+   uint32_t preserve_;
+ 
+   /* Set to Relocated when moved. */
+   uint32_t magic_;
++#elif JS_BITS_PER_WORD == 64
++  /*
++   * On big-endian, we need to reorder to keep preserve_ lined up with the
++   * low 32 bits of the aligned group_ pointer in JSObject.
++   */
++  uint32_t magic_;
++  uint32_t preserve_;
++#else
++#  error "Unknown endianness or word size"
++#endif
+ 
+   /* The location |this| was moved to. */
+   Cell* newLocation_;
+ 
+   /* A list entry to track all relocated things. */
+   RelocationOverlay* next_;
+ 
+  public:
+diff --git a/js/src/vm/StringType.h b/js/src/vm/StringType.h
+--- a/js/src/vm/StringType.h
++++ b/js/src/vm/StringType.h
+@@ -2,16 +2,17 @@
+  * vim: set ts=8 sts=4 et sw=4 tw=99:
+  * This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #ifndef vm_StringType_h
+ #define vm_StringType_h
+ 
++#include "mozilla/EndianUtils.h"
+ #include "mozilla/MemoryReporting.h"
+ #include "mozilla/PodOperations.h"
+ #include "mozilla/Range.h"
+ 
+ #include "jsapi.h"
+ #include "jsfriendapi.h"
+ 
+ #include "builtin/String.h"
+@@ -168,8 +168,20 @@ class JSString : public js::gc::Cell
+   struct Data {
+     union {
+       struct {
++#if MOZ_LITTLE_ENDIAN || JS_BITS_PER_WORD == 32
+         uint32_t flags;  /* JSString */
+         uint32_t length; /* JSString */
++#elif JS_BITS_PER_WORD == 64
++        /*
++         * On big-endian, we need to reorder to keep flags lined up
++         * with the low 32 bits of the aligned group_ pointer in
++         * JSObject.
++         */
++        uint32_t length; /* JSString */
++        uint32_t flags;  /* JSString */
++#else
++#  error "Unknown endianness or word size"
++#endif
+       };
+       uintptr_t flattenData; /* JSRope (temporary while flattening) */
+     } u1;
+--- thunderbird-60.2.1/js/src/gc/Marking-inl.h.old	2018-10-01 14:51:12.000000000 +0000
++++ thunderbird-60.2.1/js/src/gc/Marking-inl.h	2018-10-12 19:08:28.260000000 +0000
+@@ -92,13 +92,29 @@
+   MOZ_ASSERT(!isForwarded());
+   // The location of magic_ is important because it must never be valid to see
+   // the value Relocated there in a GC thing that has not been moved.
++#if MOZ_LITTLE_ENDIAN || JS_BITS_PER_WORD == 32
++  // On 32-bit, the magic_ aliases with whatever comes after the first
++  // pointer; on little-endian 64-bit, the magic_ aliases with the
++  // 32 most significant bits of the pointer, which are the second half.
+   static_assert(offsetof(RelocationOverlay, magic_) ==
+                     offsetof(JSObject, group_) + sizeof(uint32_t),
+                 "RelocationOverlay::magic_ is in the wrong location");
+   static_assert(offsetof(RelocationOverlay, magic_) ==
+                     offsetof(js::Shape, base_) + sizeof(uint32_t),
+                 "RelocationOverlay::magic_ is in the wrong location");
++#elif JS_BITS_PER_WORD == 64
++  // On big-endian 64-bit, the magic_ aliases with the 32 most
++  // significant bits of the pointer, but now that's the first half.
++  static_assert(offsetof(RelocationOverlay, magic_) ==
++                    offsetof(JSObject, group_),
++                "RelocationOverlay::magic_ is in the wrong location");
++  static_assert(offsetof(RelocationOverlay, magic_) ==
++                    offsetof(js::Shape, base_),
++                "RelocationOverlay::magic_ is in the wrong location");
++#else
++#  error "Unknown endianness or word size"
++#endif
+   static_assert(
+       offsetof(RelocationOverlay, magic_) == offsetof(JSString, d.u1.length),
+       "RelocationOverlay::magic_ is in the wrong location");
+   magic_ = Relocated;
+--- thunderbird-60.2.1/js/src/jsfriendapi.h.old	2018-10-01 14:51:13.000000000 +0000
++++ thunderbird-60.2.1/js/src/jsfriendapi.h	2018-10-12 19:12:06.190000000 +0000
+@@ -9,6 +9,7 @@
+ 
+ #include "mozilla/Atomics.h"
+ #include "mozilla/Casting.h"
++#include "mozilla/EndianUtils.h"
+ #include "mozilla/Maybe.h"
+ #include "mozilla/MemoryReporting.h"
+ #include "mozilla/UniquePtr.h"
+@@ -640,8 +641,15 @@
+   static const uint32_t LATIN1_CHARS_BIT = JS_BIT(6);
+   static const uint32_t EXTERNAL_FLAGS = LINEAR_BIT | NON_ATOM_BIT | JS_BIT(5);
+   static const uint32_t TYPE_FLAGS_MASK = JS_BIT(6) - 1;
++#if MOZ_LITTLE_ENDIAN || JS_BITS_PER_WORD == 32
+   uint32_t flags;
+   uint32_t length;
++#elif JS_BITS_PER_WORD == 64
++  uint32_t length;
++  uint32_t flags;
++#else
++#  error "Unknown endianness or word size"
++#endif
+   union {
+     const JS::Latin1Char* nonInlineCharsLatin1;
+     const char16_t* nonInlineCharsTwoByte;
