@@ -2,20 +2,34 @@
 pkgname=dhcp
 pkgver=4.4.1
 _realver=${pkgver/_p/-P}
-pkgrel=2
+pkgrel=3
 pkgdesc="ISC Dynamic Host Configuration Protocol (DHCP)"
 url="https://www.isc.org/"
 arch="all"
-license="ISC"
-depends=
+license="MPL-2.0"
+depends="$pkgname-server"
+depends_server_empty="$pkgname-server-vanilla"
+depends_server_ldap="!$pkgname-server-vanilla $pkgname"
+depends_server_vanilla="!$pkgname-server-ldap $pkgname"
+#
 # busybox utils are not sufficient for dhclient
 #depends_dhclient_optional="bash iputils net-tools sed util-linux"
 depends_dhclient="coreutils iproute2 run-parts $depends_dhclient_optional"
+#
+# do not inherit depends from $pkgname
+depends_dbg=""
+depends_dhcrelay=""
+depends_openrc=""
+#
 pkgusers="dhcp"
 pkggroups="dhcp"
-makedepends="perl linux-headers $depends_dhclient $depends_dhclient_optional"
+makedepends="krb5-dev linux-headers openldap-dev perl $depends_dhclient"
 install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade"
-subpackages="$pkgname-doc $pkgname-dev $pkgname-dbg dhclient dhcrelay"
+subpackages="$pkgname-doc $pkgname-dev $pkgname-dbg $pkgname-openrc
+	dhclient dhcrelay dhcrelay-openrc
+	$pkgname-server-vanilla:server_vanilla
+	$pkgname-server-ldap:server_ldap
+	$pkgname-server:server_empty:noarch"
 source="http://ftp.isc.org/isc/$pkgname/${_realver}/$pkgname-$_realver.tar.gz
 	01-dhclient-script-fix-bare-ip.patch
 	02-dhclient-script-remove-bashisms.patch
@@ -28,49 +42,141 @@ source="http://ftp.isc.org/isc/$pkgname/${_realver}/$pkgname-$_realver.tar.gz
 
 builddir="$srcdir/$pkgname-$_realver"
 
-build() {
-	cd "$builddir"
+# secfixes:
+#   4.4.1-r0:
+#     - CVE-2018-5732
+#     - CVE-2018-5733
+
+_configure() {
 	# fix ipv6
 	export CFLAGS="$CFLAGS -D_GNU_SOURCE \
 		-D_PATH_DHCLIENT_CONF='\"/etc/dhcp/dhclient.conf\"'"
+
 	./configure \
 		--build=$CBUILD \
 		--host=$CHOST \
 		--prefix=/usr \
 		--sysconfdir=/etc/dhcp \
-		--with-cli-pid-file=/var/run/dhcp/dhclient.pid \
-		--with-cli-lease-file=/var/lib/dhcp/dhclient.leases \
-		--with-srv-pid-file=/var/run/dhcp/dhcpd.pid \
+		--localstatedir=/var \
+		--with-srv-conf-file=/etc/dhcp/dhcpd.conf \
 		--with-srv-lease-file=/var/lib/dhcp/dhcpd.leases \
+		--with-srv6-lease-file=/var/lib/dhcp/dhcpd6.leases \
+		--with-cli-lease-file=/var/lib/dhcp/dhclient.leases \
+		--with-cli6-lease-file=/var/lib/dhcp/dhclient6.leases \
+		--with-srv-pid-file=/var/run/dhcp/dhcpd.pid \
+		--with-srv6-pid-file=/var/run/dhcp/dhcpd6.pid \
+		--with-cli-pid-file=/var/run/dhcp/dhclient.pid \
+		--with-cli6-pid-file=/var/run/dhcp/dhclient6.pid \
 		--with-relay-pid-file=/var/run/dhcp/dhcrelay.pid \
-		--enable-dhcpv6 \
+		--with-relay6-pid-file=/var/run/dhcp/dhcrelay6.pid \
+		--with-libbind=no \
+		--enable-dhcpv4o6 \
 		--enable-paranoia \
-		--mandir=/usr/share/man \
-		--infodir=/usr/share/info
+		--enable-log-pid \
+		"$@"
 
+}
+
+build() {
+	cd "$builddir"
+	cp -a "$builddir" "${builddir}-ldap"
+
+	_configure
+	make -j1 -C bind && make
+
+	cd "${builddir}-ldap"
+	_configure \
+		--with-ldap \
+		--with-ldapcrypto \
+		--with-ldap-gssapi
 	make -j1 -C bind && make
 }
 
 check() {
 	cd "$builddir"
 	make check
+
+	cd "${builddir}-ldap"
+	make check
 }
 
 package() {
 	cd "$builddir"
-	make DESTDIR="$pkgdir" install
 
 	install -m755 -D "$srcdir"/dhcpd.initd "$pkgdir"/etc/init.d/dhcpd
 	install -m644 -D "$srcdir"/dhcpd.confd "$pkgdir"/etc/conf.d/dhcpd
+	mv "$pkgdir"/etc "$pkgdir/etc.$pkgname"
+	install -m755 -D "$srcdir"/dhcrelay.initd "$pkgdir"/etc/init.d/dhcrelay
+	install -m644 -D "$srcdir"/dhcrelay.confd "$pkgdir"/etc/conf.d/dhcrelay
+	mv "$pkgdir"/etc "$pkgdir"/etc.dhcrelay
+
+	make DESTDIR="$pkgdir" install
+
 	#install -m751 -D "$builddir"/client/scripts/linux "$pkgdir"/sbin/dhclient-script
 	install -m751 -D "$srcdir"/dhclient-script-alpine "$pkgdir"/sbin/dhclient-script
 	install -d "$pkgdir"/var/lib/dhcp
 	install -d "$pkgdir"/var/run/dhcp
 }
 
+dbg() {
+	depends="$depends_dbg"
+
+	default_dbg
+}
+
+openrc() {
+	local _name _etcdir _dir
+	depends="$depends_openrc"
+
+	_name="${subpkgname%-openrc}"
+	_etcdir="$pkgdir/etc.${_name}"
+	for _dir in conf.d init.d; do
+		if [ -d "$_etcdir/$_dir" ]; then
+			mkdir -p "$pkgdir"/etc
+			mv "$_etcdir/$_dir" "$pkgdir"/etc/
+		fi
+	done
+	rmdir "$_etcdir" || :
+
+	default_openrc
+	install_if="openrc ${_name}=$pkgver-r$pkgrel"
+}
+
+server_empty() {
+	pkgdesc="ISC dhcpd server (virtual)"
+	depends="$depends_server_empty"
+	provider_priority=0
+
+	install -d "$subpkgdir"
+	rmdir "$pkgdir/usr/sbin" || :
+}
+
+server_ldap() {
+	pkgdesc="ISC dhcpd server with LDAP support"
+	depends="$depends_server_ldap"
+	provides="dhcp-server"
+	provider_priority=100
+
+	install -d "$subpkgdir"
+	make DESTDIR="$subpkgdir" -C "${builddir}-ldap/server" install-sbinPROGRAMS
+	cd "$builddir"
+	rm -rf "${builddir}-ldap"
+}
+
+server_vanilla() {
+	pkgdesc="ISC dhcpd server"
+	depends="$depends_server_vanilla"
+	provides="dhcp-server"
+	provider_priority=200
+
+	install -d "$subpkgdir"/usr/sbin
+	mv "$pkgdir/usr/sbin/dhcpd" "$subpkgdir/usr/sbin/"
+}
+
 dhclient() {
 	pkgdesc="ISC dhcp client"
 	depends="$depends_dhclient"
+
 	install -d -o dhcp -g dhcp "$subpkgdir"/var/lib/dhcp
 	install -d -o dhcp -g dhcp "$subpkgdir"/var/run/dhcp
 	install -d "$subpkgdir"/usr/sbin
@@ -84,14 +190,12 @@ dhclient() {
 
 dhcrelay() {
 	pkgdesc="ISC dhcp relay server"
+	depends="$depends_dhcrelay"
 	replaces="dhcp"
+
 	install -d "$subpkgdir"/var/run/dhcp \
 		"$subpkgdir"/usr/sbin
 	mv "$pkgdir"/usr/sbin/dhcrelay "$subpkgdir"/usr/sbin/
-	install -m755 -D "$srcdir"/dhcrelay.initd \
-		"$subpkgdir"/etc/init.d/dhcrelay
-	install -m644 -D "$srcdir"/dhcrelay.confd \
-		"$subpkgdir"/etc/conf.d/dhcrelay
 }
 
 sha512sums="684ae349f224918c9f8cec7bd6c55cd0b83ad2b5827375b2876ca088eb05b7ff1364e50f6dc24f2485c610d9be94d4ba3020f60a0fa0ef63962349d191b887e7  dhcp-4.4.1.tar.gz
@@ -99,7 +203,7 @@ sha512sums="684ae349f224918c9f8cec7bd6c55cd0b83ad2b5827375b2876ca088eb05b7ff1364
 a70e4a7e80ee65c8ced6b61db80f7ccd0f35015b5cccf2e7c51705ae129230aa49ba9926bb88f7418018e7a112c2a40451f24b88e04464b590ff20091e8d8709  02-dhclient-script-remove-bashisms.patch
 d5697a56fbbff25199962608986e7ffb533ed4afd3e344e3c79d2010dda73cc0b088f06c454e9f0c69eb054e09a374455fa71d3f73306e0c98fa76df4dd321b7  dhcp-3.0-fix-perms.patch
 d1dce58875793316761f168e29feddc1d3454d1d917d063d43ae102b7b6aab256c3cb420478335c57ebcdb2b7c804afa4d8a1f9ab06a29a4dd23bc5d87db8df2  dhclient-script-alpine
-0c3eee11ee9771a3bd7f8076827e57296136a36e6c00c3149e7274fb7a479feae4dc7d744f3c66ac78ffc96f036e14a7a5a0806095495441f98d76737a34faa6  dhcrelay.initd
+2fcb8e729e55d2917d309758b0a0409f4150a4088af72a5cefc58919f5d9da9d3ada1249f0d856dad71bfa6701af74cb73f08dc176ff917bf7fb8c9a80002ca3  dhcrelay.initd
 fd15dbaa4c61c3c26f407bf13dde859470a1adba134da064b653ccc152ce42635ee8de2fe113ae21ba8470e97e3caad8c1a47b69eb25e5e92b40e26790b96f6d  dhcrelay.confd
 7b7a77b7826b475a4113ebeee54501ce417cc56e85754301a82a185d88b4713d198f615a366e63e0e2b0aef988c8137dcd1e18c4036d993378257079da17693d  dhcpd.confd
 96ebc64e7c8a484133c23e9d1d7afe965247aaf54bc619b4fa81ed80f56b6bdb7e2c22d3f26db4c87c2a6ffd29ae2db6408954feac4c2104df712975cdfccc60  dhcpd.initd"
