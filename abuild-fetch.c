@@ -29,11 +29,13 @@ THE SOFTWARE.
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+bool insecure = false;
 static char *program;
 static char lockfile[PATH_MAX] = "";
 
@@ -133,6 +135,11 @@ int fetch(char *url, const char *destdir)
 	if (access(outfile, F_OK) == 0)
 		goto fetch_done;
 
+	if (insecure) {
+		add_opt(&curlcmd, "--insecure");
+		add_opt(&wgetcmd, "--no-check-certificate");
+	}
+
 	if (access(partfile, F_OK) == 0) {
 		printf("Partial download found. Trying to resume.\n");
 		add_opt(&curlcmd, "-C");
@@ -192,13 +199,16 @@ int main(int argc, char *argv[])
 	char *destdir = "/var/cache/distfiles";
 
 	program = argv[0];
-	while ((opt = getopt(argc, argv, "hd:")) != -1) {
+	while ((opt = getopt(argc, argv, "hd:k")) != -1) {
 		switch (opt) {
 		case 'h':
 			return usage(0);
 			break;
 		case 'd':
 			destdir = optarg;
+			break;
+		case 'k':
+			insecure = true;
 			break;
 		default:
 			printf("Unknown option '%c'\n", opt);
