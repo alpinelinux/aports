@@ -135,7 +135,8 @@ int fetch(char *url, const char *destdir)
 	if (access(outfile, F_OK) == 0)
 		goto fetch_done;
 
-	if (insecure) {
+	/* enable insecure mode when http. This may be useful when it redirects to https */
+	if (insecure || strstr(url, "http://") == url) {
 		add_opt(&curlcmd, "--insecure");
 		add_opt(&wgetcmd, "--no-check-certificate");
 	}
