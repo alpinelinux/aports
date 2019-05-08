@@ -35,7 +35,6 @@ THE SOFTWARE.
 #include <string.h>
 #include <unistd.h>
 
-bool insecure = false;
 static char *program;
 static char lockfile[PATH_MAX] = "";
 
@@ -79,7 +78,7 @@ int fork_exec(char *argv[], int showerr)
 }
 
 /* create or wait for an NFS-safe lockfile and fetch url with curl or wget */
-int fetch(char *url, const char *destdir)
+int fetch(char *url, const char *destdir, bool insecure)
 {
 	int lockfd, status=0;
 	char outfile[PATH_MAX], partfile[PATH_MAX];
@@ -197,6 +196,7 @@ void sighandler(int sig)
 int main(int argc, char *argv[])
 {
 	int opt;
+	bool insecure = false;
 	char *destdir = "/var/cache/distfiles";
 
 	program = argv[0];
@@ -229,5 +229,5 @@ int main(int argc, char *argv[])
 	signal(SIGQUIT, sighandler);
 	signal(SIGTERM, sighandler);
 
-	return fetch(argv[0], destdir);
+	return fetch(argv[0], destdir, insecure);
 }
