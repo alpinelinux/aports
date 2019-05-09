@@ -1,10 +1,6 @@
 # XXX: @CF: 20190405: Switch to alpine:edge soon, as it uses musl-1.1.22 by default
 # XXX: @CF: 20190405: alpine:edge because libboost_unit_test_framework.a is only installed as a shared lib rather than static. Cannot find main.
-FROM alpine:latest
-
-# this needs to be manually extracted from /home/${UNAME}/aports/main/musl/APKBUILD
-ENV MUSL_VER 1.1.22
-ENV MUSL_REV r0
+FROM alpine:edge
 
 ENV UNAME alpine
 ENV THRIFT_VER 0.11.0
@@ -32,15 +28,6 @@ RUN git config --global user.email "invalid@alpinelinux.org"
 RUN git clone https://github.com/alpinelinux/aports
 RUN abuild-keygen -a -i
 
-#
-# XXX: @CF: 20190405: Install >= musl-1.1.20
-#
-WORKDIR /home/${UNAME}/aports/main/musl
-RUN abuild checksum
-RUN abuild -r
-WORKDIR /home/${UNAME}/packages/main/x86_64
-RUN sudo apk add musl-${MUSL_VER}-${MUSL_REV}.apk musl-dev-${MUSL_VER}-${MUSL_REV}.apk musl-utils-${MUSL_VER}-${MUSL_REV}.apk libc6-compat-${MUSL_VER}-${MUSL_REV}.apk
-
 #RUN newapkbuild \
 # -n thrift \
 # -d "Thrift is a lightweight, language-independent software stack with an associated code generation mechanism for RPC" \
@@ -55,7 +42,6 @@ WORKDIR /home/${UNAME}/thrift
 COPY lib-lua-makefile-am-longnumber.patch .
 COPY lib-perl-makefile-am-prefix.patch .
 COPY lib-cpp-makefile-am-libadd-zlib-libevent.patch .
-COPY configure-ac-boost-thread-mt.patch .
 COPY lib-cpp-test-TNonblockingSSLServerTest-cpp-signal-h.patch .
 COPY lib-cpp-test-Makefile-am-TEST-ENVIRONMENT.patch .
 COPY configure-ac-lua-${LUA_VER}.patch .
@@ -64,6 +50,8 @@ COPY lib-c_glib-test-testdebugproto-musl-broken-neginf.patch .
 COPY lib-c_glib-test-testtransportsslsocket-musl-different-string-for-unknown-host.patch .
 COPY lib-py-src-ext-endian-h-use-system-endian-h.patch .
 COPY test-py-ignore-poorly-written-python-triggers-eaddrinuse.patch .
+COPY configure-ac-boost-so.patch .
+COPY configure-ac-define-boost-test-dyn-link.patch .
 RUN abuild checksum
 RUN abuild -r
 
@@ -75,7 +63,8 @@ RUN sudo apk add libthriftc-${THRIFT_VER}-r${PKG_REV}.apk
 RUN sudo apk add libthriftc-dev-${THRIFT_VER}-r${PKG_REV}.apk
 RUN sudo apk add lua-thrift-${THRIFT_VER}-r${PKG_REV}.apk
 RUN sudo apk add perl-thrift-${THRIFT_VER}-r${PKG_REV}.apk
-RUN sudo apk add py-thrift-${THRIFT_VER}-r${PKG_REV}.apk
+# XXX: @CF: 20190508: python support broken in alpine:edge
+#RUN sudo apk add py-thrift-${THRIFT_VER}-r${PKG_REV}.apk
 # XXX: @CF: 20180715: users should probably just stick with "npm install thrift"
 # RUN sudo apk add node-thrift-${THRIFT_VER}-r${PKG_REV}.apk
 
