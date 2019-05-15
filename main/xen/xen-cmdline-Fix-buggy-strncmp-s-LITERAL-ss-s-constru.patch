@@ -1,0 +1,464 @@
+From e202feb7131e66ed9186ad8766c9582502c98998 Mon Sep 17 00:00:00 2001
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Fri, 1 Feb 2019 11:34:35 +0100
+Subject: [PATCH] xen/cmdline: Fix buggy strncmp(s, LITERAL, ss - s) construct
+
+When the command line parsing was updated to use const strings and no longer
+tokenise with NUL characters, string matches could no longer be made with
+strcmp().
+
+Unfortunately, the replacement was buggy.  strncmp(s, "opt", ss - s) matches
+"o", "op" and "opt" on the command line, as ss - s may be shorter than the
+passed literal.  Furthermore, parse_bool() is affected by this, so substrings
+such as "d", "e" and "o" are considered valid, with the latter being ambiguous
+between "on" and "off".
+
+Introduce a new strcmp-like function for the task, which looks for exact
+string matches, but declares success when the NUL of the literal matches a
+comma, colon or semicolon in the command line fragment.
+
+No change to the intended parsing functionality, but fixes cases where a
+partial string on the command line will inadvertently trigger options.
+
+A few areas were more than just a trivial change:
+
+ * parse_irq_vector_map_param() gained some style corrections.
+ * parse_vpmu_params() was rewritten to use the normal list-of-options form,
+   rather than just fixing up parse_vpmu_param() and leaving the parsing being
+   hard to follow.
+ * Instead of making the trivial fix of adding an explicit length check in
+   parse_bool(), use the length to select which token to we search for, which
+   is more efficient than the previous linear search over all possible tokens.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: Julien Grall <julien.grall@arm.com>
+master commit: 2ddf7e3e341df3ccf21613ff7ffd4b7693abe9e9
+master date: 2019-01-15 12:58:34 +0000
+---
+ xen/arch/x86/cpu/vpmu.c               | 49 ++++++-----------
+ xen/arch/x86/irq.c                    | 12 ++--
+ xen/arch/x86/psr.c                    |  4 +-
+ xen/arch/x86/spec_ctrl.c              | 12 ++--
+ xen/arch/x86/x86_64/mmconfig-shared.c |  4 +-
+ xen/common/efi/boot.c                 |  4 +-
+ xen/common/kernel.c                   | 79 +++++++++++++++++++++------
+ xen/drivers/cpufreq/cpufreq.c         |  6 +-
+ xen/drivers/passthrough/iommu.c       | 28 +++++-----
+ xen/drivers/passthrough/pci.c         |  4 +-
+ xen/include/xen/lib.h                 |  7 +++
+ 11 files changed, 124 insertions(+), 85 deletions(-)
+
+diff --git a/xen/arch/x86/cpu/vpmu.c b/xen/arch/x86/cpu/vpmu.c
+index b978e05613..2be61606b4 100644
+--- a/xen/arch/x86/cpu/vpmu.c
++++ b/xen/arch/x86/cpu/vpmu.c
+@@ -61,42 +61,31 @@ static unsigned vpmu_count;
+ 
+ static DEFINE_PER_CPU(struct vcpu *, last_vcpu);
+ 
+-static int parse_vpmu_param(const char *s, unsigned int len)
+-{
+-    if ( !*s || !len )
+-        return 0;
+-    if ( !strncmp(s, "bts", len) )
+-        vpmu_features |= XENPMU_FEATURE_INTEL_BTS;
+-    else if ( !strncmp(s, "ipc", len) )
+-        vpmu_features |= XENPMU_FEATURE_IPC_ONLY;
+-    else if ( !strncmp(s, "arch", len) )
+-        vpmu_features |= XENPMU_FEATURE_ARCH_ONLY;
+-    else
+-        return 1;
+-    return 0;
+-}
+-
+ static int __init parse_vpmu_params(const char *s)
+ {
+-    const char *sep, *p = s;
++    const char *ss;
+ 
+     switch ( parse_bool(s, NULL) )
+     {
+     case 0:
+         break;
+     default:
+-        for ( ; ; )
+-        {
+-            sep = strchr(p, ',');
+-            if ( sep == NULL )
+-                sep = strchr(p, 0);
+-            if ( parse_vpmu_param(p, sep - p) )
+-                goto error;
+-            if ( !*sep )
+-                /* reached end of flags */
+-                break;
+-            p = sep + 1;
+-        }
++        do {
++            ss = strchr(s, ',');
++            if ( !ss )
++                ss = strchr(s, '\0');
++
++            if ( !cmdline_strcmp(s, "bts") )
++                vpmu_features |= XENPMU_FEATURE_INTEL_BTS;
++            else if ( !cmdline_strcmp(s, "ipc") )
++                vpmu_features |= XENPMU_FEATURE_IPC_ONLY;
++            else if ( !cmdline_strcmp(s, "arch") )
++                vpmu_features |= XENPMU_FEATURE_ARCH_ONLY;
++            else
++                return -EINVAL;
++
++            s = ss + 1;
++        } while ( *ss );
+         /* fall through */
+     case 1:
+         /* Default VPMU mode */
+@@ -105,10 +94,6 @@ static int __init parse_vpmu_params(const char *s)
+         break;
+     }
+     return 0;
+-
+- error:
+-    printk("VPMU: unknown flags: %s - vpmu disabled!\n", s);
+-    return -EINVAL;
+ }
+ 
+ void vpmu_lvtpc_update(uint32_t val)
+diff --git a/xen/arch/x86/irq.c b/xen/arch/x86/irq.c
+index 87ef2e801f..0ceb9b9a1c 100644
+--- a/xen/arch/x86/irq.c
++++ b/xen/arch/x86/irq.c
+@@ -70,12 +70,12 @@ static int __init parse_irq_vector_map_param(const char *s)
+         if ( !ss )
+             ss = strchr(s, '\0');
+ 
+-        if ( !strncmp(s, "none", ss - s))
+-            opt_irq_vector_map=OPT_IRQ_VECTOR_MAP_NONE;
+-        else if ( !strncmp(s, "global", ss - s))
+-            opt_irq_vector_map=OPT_IRQ_VECTOR_MAP_GLOBAL;
+-        else if ( !strncmp(s, "per-device", ss - s))
+-            opt_irq_vector_map=OPT_IRQ_VECTOR_MAP_PERDEV;
++        if ( !cmdline_strcmp(s, "none") )
++            opt_irq_vector_map = OPT_IRQ_VECTOR_MAP_NONE;
++        else if ( !cmdline_strcmp(s, "global") )
++            opt_irq_vector_map = OPT_IRQ_VECTOR_MAP_GLOBAL;
++        else if ( !cmdline_strcmp(s, "per-device") )
++            opt_irq_vector_map = OPT_IRQ_VECTOR_MAP_PERDEV;
+         else
+             rc = -EINVAL;
+ 
+diff --git a/xen/arch/x86/psr.c b/xen/arch/x86/psr.c
+index 0ba8ef88d4..5866a261e3 100644
+--- a/xen/arch/x86/psr.c
++++ b/xen/arch/x86/psr.c
+@@ -591,13 +591,13 @@ static int __init parse_psr_param(const char *s)
+         if ( val_delim > ss )
+             val_delim = ss;
+ 
+-        if ( *val_delim && !strncmp(s, "rmid_max", val_delim - s) )
++        if ( *val_delim && !cmdline_strcmp(s, "rmid_max") )
+         {
+             opt_rmid_max = simple_strtoul(val_delim + 1, &q, 0);
+             if ( *q && *q != ',' )
+                 rc = -EINVAL;
+         }
+-        else if ( *val_delim && !strncmp(s, "cos_max", val_delim - s) )
++        else if ( *val_delim && !cmdline_strcmp(s, "cos_max") )
+         {
+             opt_cos_max = simple_strtoul(val_delim + 1, &q, 0);
+             if ( *q && *q != ',' )
+diff --git a/xen/arch/x86/spec_ctrl.c b/xen/arch/x86/spec_ctrl.c
+index eb480c1f08..e641894f17 100644
+--- a/xen/arch/x86/spec_ctrl.c
++++ b/xen/arch/x86/spec_ctrl.c
+@@ -83,11 +83,11 @@ static int __init parse_bti(const char *s)
+         {
+             s += 6;
+ 
+-            if ( !strncmp(s, "retpoline", ss - s) )
++            if ( !cmdline_strcmp(s, "retpoline") )
+                 opt_thunk = THUNK_RETPOLINE;
+-            else if ( !strncmp(s, "lfence", ss - s) )
++            else if ( !cmdline_strcmp(s, "lfence") )
+                 opt_thunk = THUNK_LFENCE;
+-            else if ( !strncmp(s, "jmp", ss - s) )
++            else if ( !cmdline_strcmp(s, "jmp") )
+                 opt_thunk = THUNK_JMP;
+             else
+                 rc = -EINVAL;
+@@ -194,11 +194,11 @@ static int __init parse_spec_ctrl(const char *s)
+         {
+             s += 10;
+ 
+-            if ( !strncmp(s, "retpoline", ss - s) )
++            if ( !cmdline_strcmp(s, "retpoline") )
+                 opt_thunk = THUNK_RETPOLINE;
+-            else if ( !strncmp(s, "lfence", ss - s) )
++            else if ( !cmdline_strcmp(s, "lfence") )
+                 opt_thunk = THUNK_LFENCE;
+-            else if ( !strncmp(s, "jmp", ss - s) )
++            else if ( !cmdline_strcmp(s, "jmp") )
+                 opt_thunk = THUNK_JMP;
+             else
+                 rc = -EINVAL;
+diff --git a/xen/arch/x86/x86_64/mmconfig-shared.c b/xen/arch/x86/x86_64/mmconfig-shared.c
+index 7c3b7fd30b..01b5720445 100644
+--- a/xen/arch/x86/x86_64/mmconfig-shared.c
++++ b/xen/arch/x86/x86_64/mmconfig-shared.c
+@@ -46,8 +46,8 @@ static int __init parse_mmcfg(const char *s)
+         case 1:
+             break;
+         default:
+-            if ( !strncmp(s, "amd_fam10", ss - s) ||
+-                 !strncmp(s, "amd-fam10", ss - s) )
++            if ( !cmdline_strcmp(s, "amd_fam10") ||
++                 !cmdline_strcmp(s, "amd-fam10") )
+                 pci_probe |= PCI_CHECK_ENABLE_AMD_MMCONF;
+             else
+                 rc = -EINVAL;
+diff --git a/xen/common/efi/boot.c b/xen/common/efi/boot.c
+index 6be0b3986f..a9917f31f1 100644
+--- a/xen/common/efi/boot.c
++++ b/xen/common/efi/boot.c
+@@ -1323,14 +1323,14 @@ static int __init parse_efi_param(const char *s)
+         if ( !ss )
+             ss = strchr(s, '\0');
+ 
+-        if ( !strncmp(s, "rs", ss - s) )
++        if ( !cmdline_strcmp(s, "rs") )
+         {
+             if ( val )
+                 __set_bit(EFI_RS, &efi_flags);
+             else
+                 __clear_bit(EFI_RS, &efi_flags);
+         }
+-        else if ( !strncmp(s, "attr=uc", ss - s) )
++        else if ( !cmdline_strcmp(s, "attr=uc") )
+             efi_map_uc = val;
+         else
+             rc = -EINVAL;
+diff --git a/xen/common/kernel.c b/xen/common/kernel.c
+index 5766a0f784..053c31d391 100644
+--- a/xen/common/kernel.c
++++ b/xen/common/kernel.c
+@@ -221,25 +221,51 @@ void __init cmdline_parse(const char *cmdline)
+ 
+ int parse_bool(const char *s, const char *e)
+ {
+-    unsigned int len;
++    size_t len = e ? ({ ASSERT(e >= s); e - s; }) : strlen(s);
+ 
+-    len = e ? ({ ASSERT(e >= s); e - s; }) : strlen(s);
+-    if ( !len )
+-        return -1;
++    switch ( len )
++    {
++    case 1:
++        if ( *s == '1' )
++            return 1;
++        if ( *s == '0' )
++            return 0;
++        break;
+ 
+-    if ( !strncmp("no", s, len) ||
+-         !strncmp("off", s, len) ||
+-         !strncmp("false", s, len) ||
+-         !strncmp("disable", s, len) ||
+-         !strncmp("0", s, len) )
+-        return 0;
++    case 2:
++        if ( !strncmp("on", s, 2) )
++            return 1;
++        if ( !strncmp("no", s, 2) )
++            return 0;
++        break;
++
++    case 3:
++        if ( !strncmp("yes", s, 3) )
++            return 1;
++        if ( !strncmp("off", s, 3) )
++            return 0;
++        break;
++
++    case 4:
++        if ( !strncmp("true", s, 4) )
++            return 1;
++        break;
++
++    case 5:
++        if ( !strncmp("false", s, 5) )
++            return 0;
++        break;
+ 
+-    if ( !strncmp("yes", s, len) ||
+-         !strncmp("on", s, len) ||
+-         !strncmp("true", s, len) ||
+-         !strncmp("enable", s, len) ||
+-         !strncmp("1", s, len) )
+-        return 1;
++    case 6:
++        if ( !strncmp("enable", s, 6) )
++            return 1;
++        break;
++
++    case 7:
++        if ( !strncmp("disable", s, 7) )
++            return 0;
++        break;
++    }
+ 
+     return -1;
+ }
+@@ -271,6 +297,27 @@ int parse_boolean(const char *name, const char *s, const char *e)
+     return -1;
+ }
+ 
++int cmdline_strcmp(const char *frag, const char *name)
++{
++    for ( ; ; frag++, name++ )
++    {
++        unsigned char f = *frag, n = *name;
++        int res = f - n;
++
++        if ( res || n == '\0' )
++        {
++            /*
++             * NUL in 'name' matching a comma, colon or semicolon in 'frag'
++             * implies success.
++             */
++            if ( n == '\0' && (f == ',' || f == ':' || f == ';') )
++                res = 0;
++
++            return res;
++        }
++    }
++}
++
+ unsigned int tainted;
+ 
+ /**
+diff --git a/xen/drivers/cpufreq/cpufreq.c b/xen/drivers/cpufreq/cpufreq.c
+index 212f48f9f4..6152a045d9 100644
+--- a/xen/drivers/cpufreq/cpufreq.c
++++ b/xen/drivers/cpufreq/cpufreq.c
+@@ -73,7 +73,7 @@ static int __init setup_cpufreq_option(const char *str)
+         arg = strchr(str, '\0');
+     choice = parse_bool(str, arg);
+ 
+-    if ( choice < 0 && !strncmp(str, "dom0-kernel", arg - str) )
++    if ( choice < 0 && !cmdline_strcmp(str, "dom0-kernel") )
+     {
+         xen_processor_pmbits &= ~XEN_PROCESSOR_PM_PX;
+         cpufreq_controller = FREQCTL_dom0_kernel;
+@@ -81,14 +81,14 @@ static int __init setup_cpufreq_option(const char *str)
+         return 0;
+     }
+ 
+-    if ( choice == 0 || !strncmp(str, "none", arg - str) )
++    if ( choice == 0 || !cmdline_strcmp(str, "none") )
+     {
+         xen_processor_pmbits &= ~XEN_PROCESSOR_PM_PX;
+         cpufreq_controller = FREQCTL_none;
+         return 0;
+     }
+ 
+-    if ( choice > 0 || !strncmp(str, "xen", arg - str) )
++    if ( choice > 0 || !cmdline_strcmp(str, "xen") )
+     {
+         xen_processor_pmbits |= XEN_PROCESSOR_PM_PX;
+         cpufreq_controller = FREQCTL_xen;
+diff --git a/xen/drivers/passthrough/iommu.c b/xen/drivers/passthrough/iommu.c
+index 2c44fabf99..f9b13b018c 100644
+--- a/xen/drivers/passthrough/iommu.c
++++ b/xen/drivers/passthrough/iommu.c
+@@ -95,36 +95,36 @@ static int __init parse_iommu_param(const char *s)
+         b = parse_bool(s, ss);
+         if ( b >= 0 )
+             iommu_enable = b;
+-        else if ( !strncmp(s, "force", ss - s) ||
+-                  !strncmp(s, "required", ss - s) )
++        else if ( !cmdline_strcmp(s, "force") ||
++                  !cmdline_strcmp(s, "required") )
+             force_iommu = val;
+-        else if ( !strncmp(s, "workaround_bios_bug", ss - s) )
++        else if ( !cmdline_strcmp(s, "workaround_bios_bug") )
+             iommu_workaround_bios_bug = val;
+-        else if ( !strncmp(s, "igfx", ss - s) )
++        else if ( !cmdline_strcmp(s, "igfx") )
+             iommu_igfx = val;
+-        else if ( !strncmp(s, "verbose", ss - s) )
++        else if ( !cmdline_strcmp(s, "verbose") )
+             iommu_verbose = val;
+-        else if ( !strncmp(s, "snoop", ss - s) )
++        else if ( !cmdline_strcmp(s, "snoop") )
+             iommu_snoop = val;
+-        else if ( !strncmp(s, "qinval", ss - s) )
++        else if ( !cmdline_strcmp(s, "qinval") )
+             iommu_qinval = val;
+-        else if ( !strncmp(s, "intremap", ss - s) )
++        else if ( !cmdline_strcmp(s, "intremap") )
+             iommu_intremap = val;
+-        else if ( !strncmp(s, "intpost", ss - s) )
++        else if ( !cmdline_strcmp(s, "intpost") )
+             iommu_intpost = val;
+-        else if ( !strncmp(s, "debug", ss - s) )
++        else if ( !cmdline_strcmp(s, "debug") )
+         {
+             iommu_debug = val;
+             if ( val )
+                 iommu_verbose = 1;
+         }
+-        else if ( !strncmp(s, "amd-iommu-perdev-intremap", ss - s) )
++        else if ( !cmdline_strcmp(s, "amd-iommu-perdev-intremap") )
+             amd_iommu_perdev_intremap = val;
+-        else if ( !strncmp(s, "dom0-passthrough", ss - s) )
++        else if ( !cmdline_strcmp(s, "dom0-passthrough") )
+             iommu_passthrough = val;
+-        else if ( !strncmp(s, "dom0-strict", ss - s) )
++        else if ( !cmdline_strcmp(s, "dom0-strict") )
+             iommu_dom0_strict = val;
+-        else if ( !strncmp(s, "sharept", ss - s) )
++        else if ( !cmdline_strcmp(s, "sharept") )
+             iommu_hap_pt_share = val;
+         else
+             rc = -EINVAL;
+diff --git a/xen/drivers/passthrough/pci.c b/xen/drivers/passthrough/pci.c
+index 1db69d5b99..f51cae7f4e 100644
+--- a/xen/drivers/passthrough/pci.c
++++ b/xen/drivers/passthrough/pci.c
+@@ -212,12 +212,12 @@ static int __init parse_pci_param(const char *s)
+         if ( !ss )
+             ss = strchr(s, '\0');
+ 
+-        if ( !strncmp(s, "serr", ss - s) )
++        if ( !cmdline_strcmp(s, "serr") )
+         {
+             cmd_mask = PCI_COMMAND_SERR;
+             brctl_mask = PCI_BRIDGE_CTL_SERR | PCI_BRIDGE_CTL_DTMR_SERR;
+         }
+-        else if ( !strncmp(s, "perr", ss - s) )
++        else if ( !cmdline_strcmp(s, "perr") )
+         {
+             cmd_mask = PCI_COMMAND_PARITY;
+             brctl_mask = PCI_BRIDGE_CTL_PARITY;
+diff --git a/xen/include/xen/lib.h b/xen/include/xen/lib.h
+index 1d9771340c..750f809968 100644
+--- a/xen/include/xen/lib.h
++++ b/xen/include/xen/lib.h
+@@ -81,6 +81,13 @@ int parse_bool(const char *s, const char *e);
+  */
+ int parse_boolean(const char *name, const char *s, const char *e);
+ 
++/**
++ * Very similar to strcmp(), but will declare a match if the NUL in 'name'
++ * lines up with comma, colon or semicolon in 'frag'.  Designed for picking
++ * exact string matches out of a delimited command line list.
++ */
++int cmdline_strcmp(const char *frag, const char *name);
++
+ /*#define DEBUG_TRACE_DUMP*/
+ #ifdef DEBUG_TRACE_DUMP
+ extern void debugtrace_dump(void);
+-- 
+2.20.1
+
