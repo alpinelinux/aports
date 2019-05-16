@@ -1,0 +1,207 @@
+From 7dfea782b83684d4b69d88b36a83bed0c34478cf Mon Sep 17 00:00:00 2001
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Fri, 3 May 2019 11:05:56 +0200
+Subject: [PATCH] x86/tsx: Implement controls for RTM force-abort mode
+
+The CPUID bit and MSR are deliberately not exposed to guests, because they
+won't exist on newer processors.  As vPMU isn't security supported, the
+misbehaviour of PCR3 isn't expected to impact production deployments.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+master commit: 6be613f29b4205349275d24367bd4c82fb2960dd
+master date: 2019-03-12 17:05:21 +0000
+---
+ docs/misc/xen-command-line.markdown         | 17 ++++++++++++++++-
+ tools/misc/xen-cpuid.c                      |  6 +++++-
+ xen/arch/x86/cpu/intel.c                    |  3 +++
+ xen/arch/x86/cpu/vpmu.c                     |  9 +++++++++
+ xen/arch/x86/msr.c                          |  4 ++++
+ xen/include/asm-x86/cpufeature.h            |  3 +++
+ xen/include/asm-x86/msr-index.h             |  3 +++
+ xen/include/asm-x86/vpmu.h                  |  1 +
+ xen/include/public/arch-x86/cpufeatureset.h |  1 +
+ 9 files changed, 45 insertions(+), 2 deletions(-)
+
+diff --git a/docs/misc/xen-command-line.markdown b/docs/misc/xen-command-line.markdown
+index ffa55a8345..23c3da69bf 100644
+--- a/docs/misc/xen-command-line.markdown
++++ b/docs/misc/xen-command-line.markdown
+@@ -1990,7 +1990,7 @@ Use Virtual Processor ID support if available.  This prevents the need for TLB
+ flushes on VM entry and exit, increasing performance.
+ 
+ ### vpmu
+-> `= ( <boolean> | { bts | ipc | arch [, ...] } )`
++> `= ( <boolean> | { bts | ipc | arch | rtm-abort=<bool> [, ...] } )`
+ 
+ > Default: `off`
+ 
+@@ -2016,6 +2016,21 @@ in the Pre-Defined Architectural Performance Events table from the Intel 64
+ and IA-32 Architectures Software Developer's Manual, Volume 3B, System
+ Programming Guide, Part 2.
+ 
++vpmu=rtm-abort controls a trade-off between working Restricted Transactional
++Memory, and working performance counters.
++
++All processors released to date (Q1 2019) supporting Transactional Memory
++Extensions suffer an erratum which has been addressed in microcode.
++
++Processors based on the Skylake microarchitecture with up-to-date
++microcode internally use performance counter 3 to work around the erratum.
++A consequence is that the counter gets reprogrammed whenever an `XBEGIN`
++instruction is executed.
++
++An alternative mode exists where PCR3 behaves as before, at the cost of
++`XBEGIN` unconditionally aborting.  Enabling `rtm-abort` mode will
++activate this alternative mode.
++
+ If a boolean is not used, combinations of flags are allowed, comma separated.
+ For example, vpmu=arch,bts.
+ 
+diff --git a/tools/misc/xen-cpuid.c b/tools/misc/xen-cpuid.c
+index 85298d277d..6c91a4899f 100644
+--- a/tools/misc/xen-cpuid.c
++++ b/tools/misc/xen-cpuid.c
+@@ -162,7 +162,11 @@ static const char *str_7d0[32] =
+ 
+     [ 2] = "avx512_4vnniw", [ 3] = "avx512_4fmaps",
+ 
+-    [4 ... 25] = "REZ",
++    [4 ... 11] = "REZ",
++
++    [12] = "REZ",           [13] = "tsx-force-abort",
++
++    [14 ... 25] = "REZ",
+ 
+     [26] = "ibrsb",         [27] = "stibp",
+     [28] = "l1d_flush",     [29] = "arch_caps",
+diff --git a/xen/arch/x86/cpu/intel.c b/xen/arch/x86/cpu/intel.c
+index 508e56f5c1..7305cddcad 100644
+--- a/xen/arch/x86/cpu/intel.c
++++ b/xen/arch/x86/cpu/intel.c
+@@ -291,6 +291,9 @@ static void Intel_errata_workarounds(struct cpuinfo_x86 *c)
+ 	if (c->x86 == 6 && cpu_has_clflush &&
+ 	    (c->x86_model == 29 || c->x86_model == 46 || c->x86_model == 47))
+ 		__set_bit(X86_FEATURE_CLFLUSH_MONITOR, c->x86_capability);
++
++	if (cpu_has_tsx_force_abort && opt_rtm_abort)
++		wrmsrl(MSR_TSX_FORCE_ABORT, TSX_FORCE_ABORT_RTM);
+ }
+ 
+ 
+diff --git a/xen/arch/x86/cpu/vpmu.c b/xen/arch/x86/cpu/vpmu.c
+index 0a3ed0cd01..c4ccd6f79f 100644
+--- a/xen/arch/x86/cpu/vpmu.c
++++ b/xen/arch/x86/cpu/vpmu.c
+@@ -53,6 +53,7 @@ CHECK_pmu_params;
+ static unsigned int __read_mostly opt_vpmu_enabled;
+ unsigned int __read_mostly vpmu_mode = XENPMU_MODE_OFF;
+ unsigned int __read_mostly vpmu_features = 0;
++bool __read_mostly opt_rtm_abort;
+ static int parse_vpmu_params(const char *s);
+ custom_param("vpmu", parse_vpmu_params);
+ 
+@@ -71,6 +72,8 @@ static int __init parse_vpmu_params(const char *s)
+         break;
+     default:
+         do {
++            int val;
++
+             ss = strchr(s, ',');
+             if ( !ss )
+                 ss = strchr(s, '\0');
+@@ -81,11 +84,17 @@ static int __init parse_vpmu_params(const char *s)
+                 vpmu_features |= XENPMU_FEATURE_IPC_ONLY;
+             else if ( !cmdline_strcmp(s, "arch") )
+                 vpmu_features |= XENPMU_FEATURE_ARCH_ONLY;
++            else if ( (val = parse_boolean("rtm-abort", s, ss)) >= 0 )
++                opt_rtm_abort = val;
+             else
+                 return -EINVAL;
+ 
+             s = ss + 1;
+         } while ( *ss );
++
++        if ( !vpmu_features ) /* rtm-abort doesn't imply vpmu=1 */
++            break;
++
+         /* fall through */
+     case 1:
+         /* Default VPMU mode */
+diff --git a/xen/arch/x86/msr.c b/xen/arch/x86/msr.c
+index 8e39d5f271..a20eec4cc3 100644
+--- a/xen/arch/x86/msr.c
++++ b/xen/arch/x86/msr.c
+@@ -133,6 +133,8 @@ int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
+     case MSR_PRED_CMD:
+     case MSR_FLUSH_CMD:
+         /* Write-only */
++    case MSR_TSX_FORCE_ABORT:
++        /* Not offered to guests. */
+         goto gp_fault;
+ 
+     case MSR_SPEC_CTRL:
+@@ -184,6 +186,8 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
+     case MSR_INTEL_PLATFORM_INFO:
+     case MSR_ARCH_CAPABILITIES:
+         /* Read-only */
++    case MSR_TSX_FORCE_ABORT:
++        /* Not offered to guests. */
+         goto gp_fault;
+ 
+     case MSR_AMD_PATCHLOADER:
+diff --git a/xen/include/asm-x86/cpufeature.h b/xen/include/asm-x86/cpufeature.h
+index 50432311ea..b10d8ef092 100644
+--- a/xen/include/asm-x86/cpufeature.h
++++ b/xen/include/asm-x86/cpufeature.h
+@@ -100,6 +100,9 @@
+ /* CPUID level 0x80000007.edx */
+ #define cpu_has_itsc            boot_cpu_has(X86_FEATURE_ITSC)
+ 
++/* CPUID level 0x00000007:0.edx */
++#define cpu_has_tsx_force_abort boot_cpu_has(X86_FEATURE_TSX_FORCE_ABORT)
++
+ /* Synthesized. */
+ #define cpu_has_arch_perfmon    boot_cpu_has(X86_FEATURE_ARCH_PERFMON)
+ #define cpu_has_cpuid_faulting  boot_cpu_has(X86_FEATURE_CPUID_FAULTING)
+diff --git a/xen/include/asm-x86/msr-index.h b/xen/include/asm-x86/msr-index.h
+index dfeba2821d..874ffc6a28 100644
+--- a/xen/include/asm-x86/msr-index.h
++++ b/xen/include/asm-x86/msr-index.h
+@@ -53,6 +53,9 @@
+ #define MSR_FLUSH_CMD			0x0000010b
+ #define FLUSH_CMD_L1D			(_AC(1, ULL) << 0)
+ 
++#define MSR_TSX_FORCE_ABORT             0x0000010f
++#define TSX_FORCE_ABORT_RTM             (_AC(1, ULL) <<  0)
++
+ /* Intel MSRs. Some also available on other CPUs */
+ #define MSR_IA32_PERFCTR0		0x000000c1
+ #define MSR_IA32_A_PERFCTR0		0x000004c1
+diff --git a/xen/include/asm-x86/vpmu.h b/xen/include/asm-x86/vpmu.h
+index 5e778ab7ba..1287b9fb6e 100644
+--- a/xen/include/asm-x86/vpmu.h
++++ b/xen/include/asm-x86/vpmu.h
+@@ -125,6 +125,7 @@ static inline int vpmu_do_rdmsr(unsigned int msr, uint64_t *msr_content)
+ 
+ extern unsigned int vpmu_mode;
+ extern unsigned int vpmu_features;
++extern bool opt_rtm_abort;
+ 
+ /* Context switch */
+ static inline void vpmu_switch_from(struct vcpu *prev)
+diff --git a/xen/include/public/arch-x86/cpufeatureset.h b/xen/include/public/arch-x86/cpufeatureset.h
+index 6c82816fd3..aa2656d792 100644
+--- a/xen/include/public/arch-x86/cpufeatureset.h
++++ b/xen/include/public/arch-x86/cpufeatureset.h
+@@ -242,6 +242,7 @@ XEN_CPUFEATURE(IBPB,          8*32+12) /*A  IBPB support only (no IBRS, used by
+ /* Intel-defined CPU features, CPUID level 0x00000007:0.edx, word 9 */
+ XEN_CPUFEATURE(AVX512_4VNNIW, 9*32+ 2) /*A  AVX512 Neural Network Instructions */
+ XEN_CPUFEATURE(AVX512_4FMAPS, 9*32+ 3) /*A  AVX512 Multiply Accumulation Single Precision */
++XEN_CPUFEATURE(TSX_FORCE_ABORT, 9*32+13) /* MSR_TSX_FORCE_ABORT.RTM_ABORT */
+ XEN_CPUFEATURE(IBRSB,         9*32+26) /*A  IBRS and IBPB support (used by Intel) */
+ XEN_CPUFEATURE(STIBP,         9*32+27) /*A  STIBP */
+ XEN_CPUFEATURE(L1D_FLUSH,     9*32+28) /*S  MSR_FLUSH_CMD and L1D flush. */
+-- 
+2.18.1
+
