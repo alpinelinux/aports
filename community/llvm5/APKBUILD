@@ -1,0 +1,265 @@
+# Contributor: Travis Tilley <ttilley@gmail.com>
+# Contributor: Mitch Tishmack <mitch.tishmack@gmail.com>
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Maintainer:
+_pkgname=llvm
+pkgver=5.0.2
+_majorver=${pkgver%%.*}
+pkgname=$_pkgname$_majorver
+pkgrel=1
+pkgdesc="Low Level Virtual Machine compiler system, version $_majorver"
+arch="all"
+url="https://llvm.org/"
+license="UOI-NCSA"
+depends_dev="$pkgname=$pkgver-r$pkgrel"
+makedepends="binutils-dev chrpath cmake file libffi-dev paxmark python2 py-setuptools zlib-dev"
+subpackages="$pkgname-static $pkgname-libs $pkgname-dev $pkgname-test-utils:_test_utils"
+source="https://releases.llvm.org/$pkgver/llvm-$pkgver.src.tar.xz
+	cmake-fix-libLLVM-name.patch
+	disable-FileSystemTest.CreateDir-perms-assert.patch
+	0001-Disable-dynamic-lib-tests-for-musl-s-dlclose-is-noop.patch
+	fix-CheckAtomic.cmake.patch
+	dynamiclibrary-fix-build-musl.patch
+	fix-memory-mf_exec-on-aarch64.patch
+	fix-LLVMConfig-cmake-install-prefix.patch
+	fix-return-type-in-ORC-readMem-client-interface.patch
+	fix-too-strict-gtest-banner-check.patch
+	"
+builddir="$srcdir/$_pkgname-$pkgver.src"
+options="!checkroot"
+
+# ARM has few failures in test suite that we don't care about currently and
+# also it takes forever to run them on the builder.
+case "$CARCH" in
+	arm*) options="$options !check";;
+esac
+
+# Whether is this package the default (latest) LLVM version.
+_default_llvm="no"
+
+if [ "$_default_llvm" = yes ]; then
+	provides="llvm=$pkgver-r$pkgrel"
+	replaces="llvm"
+fi
+
+# NOTE: It seems that there's no (sane) way how to change includedir, sharedir
+# etc. separately, just the CMAKE_INSTALL_PREFIX. Standard CMake variables and
+# even  LLVM-specific variables, that are related to these paths, actually
+# don't work (in llvm 3.7).
+#
+# When building a software that depends on LLVM, utility llvm-config should be
+# used to discover where is LLVM installed. It provides options to print
+# path of bindir, includedir, and libdir separately, but in its source, all
+# these paths are actually hard-coded against INSTALL_PREFIX. We can patch it
+# and move paths manually, but I'm really not sure what it may break...
+#
+# Also note that we should *not* add version suffix to files in llvm bindir!
+# It breaks build system of some software that depends on LLVM, because they
+# don't expect these files to have a sufix.
+#
+# So, we install all the LLVM files into /usr/lib/llvm$_majorver.
+# BTW, Fedora and Debian do the same thing.
+#
+_prefix="usr/lib/llvm$_majorver"
+
+prepare() {
+	default_prepare
+	cd "$builddir"
+
+	# https://bugs.llvm.org//show_bug.cgi?id=31870
+	rm test/tools/llvm-symbolizer/print_context.c
+
+	mkdir -p "$builddir"/build
+}
+
+build() {
+	cd "$builddir"/build
+
+	# Auto-detect it by guessing either.
+	local ffi_include_dir="$(pkg-config --cflags-only-I libffi | sed 's|^-I||g')"
+
+	cmake -Wno-dev \
+		-DCMAKE_BUILD_TYPE=MinSizeRel \
+		-DCMAKE_C_FLAGS_MINSIZEREL_INIT="$CFLAGS" \
+		-DCMAKE_CXX_FLAGS_MINSIZEREL_INIT="$CXXFLAGS" \
+		-DCMAKE_EXE_LINKER_FLAGS_MINSIZEREL_INIT="$LDFLAGS" \
+		-DCMAKE_INSTALL_PREFIX=/$_prefix \
+		\
+		-DFFI_INCLUDE_DIR="$ffi_include_dir" \
+		-DLLVM_BINUTILS_INCDIR=/usr/include \
+		-DLLVM_BUILD_DOCS=OFF \
+		-DLLVM_BUILD_EXAMPLES=OFF \
+		-DLLVM_BUILD_EXTERNAL_COMPILER_RT=ON \
+		-DLLVM_BUILD_LLVM_DYLIB=ON \
+		-DLLVM_BUILD_TESTS=ON \
+		-DLLVM_DEFAULT_TARGET_TRIPLE="$CBUILD" \
+		-DLLVM_ENABLE_ASSERTIONS=OFF \
+		-DLLVM_ENABLE_CXX1Y=ON \
+		-DLLVM_ENABLE_FFI=ON \
+		-DLLVM_ENABLE_LIBCXX=OFF \
+		-DLLVM_ENABLE_PIC=ON \
+		-DLLVM_ENABLE_RTTI=ON \
+		-DLLVM_ENABLE_SPHINX=OFF \
+		-DLLVM_ENABLE_TERMINFO=ON \
+		-DLLVM_ENABLE_ZLIB=ON \
+		-DLLVM_HOST_TRIPLE="$CHOST" \
+		-DLLVM_INCLUDE_EXAMPLES=OFF \
+		-DLLVM_LINK_LLVM_DYLIB=ON \
+		-DLLVM_TARGETS_TO_BUILD='X86;ARM;AArch64;PowerPC;SystemZ;AMDGPU;NVPTX;Mips;BPF' \
+		-DLLVM_APPEND_VC_REV=OFF \
+		"$builddir"
+
+	make llvm-tblgen
+	make
+
+	paxmark m \
+		bin/llvm-rtdyld \
+		bin/lli \
+		bin/lli-child-target \
+		unittests/ExecutionEngine/MCJIT/MCJITTests \
+		unittests/ExecutionEngine/Orc/OrcJITTests \
+		unittests/Support/SupportTests
+
+	python2 ../utils/lit/setup.py build
+}
+
+check() {
+	cd "$builddir"/build
+
+	make check-llvm
+}
+
+package() {
+	cd "$builddir"/build
+
+	make DESTDIR="$pkgdir" install
+
+	cd "$pkgdir"/$_prefix
+
+	# Remove RPATHs.
+	file lib/*.so bin/* \
+		| awk -F: '$2~/ELF/{print $1}' \
+		| xargs -r chrpath -d
+
+	# Symlink files from /usr/lib/llvm*/bin to /usr/bin.
+	mkdir -p "$pkgdir"/usr/bin
+	local name newname path
+	for path in bin/*; do
+		name=${path##*/}
+		# Add version infix/suffix to the executable name.
+		case "$name" in
+			llvm-*) newname="llvm$_majorver-${name#llvm-}";;
+			*) newname="$name$_majorver";;
+		esac
+		# If this package provides=llvm (i.e. it's the default/latest
+		# llvm package), omit version infix/suffix.
+		if [ "$_default_llvm" = yes ]; then
+			newname=$name
+		fi
+		case "$name" in
+			FileCheck | obj2yaml | yaml2obj) continue;;
+		esac
+		ln -s ../lib/llvm$_majorver/bin/$name "$pkgdir"/usr/bin/$newname
+	done
+
+	# Move /usr/lib/$pkgname/include/ into /usr/include/$pkgname/
+	# and symlink it back.
+	_mv include/* "$pkgdir"/usr/include/$pkgname/
+	rmdir include
+	ln -s ../../include/$pkgname include
+
+	# Move /usr/lib/$pkgname/lib/cmake/llvm/ into /usr/lib/cmake/$pkgname/
+	# and symlink it back.
+	_mv lib/cmake/llvm/* "$pkgdir"/usr/lib/cmake/$pkgname/
+	rmdir lib/cmake/llvm
+	ln -s ../../../cmake/$pkgname lib/cmake/llvm
+}
+
+static() {
+	pkgdesc="LLVM $_majorver static libraries"
+	_common_subpkg
+
+	_mv "$pkgdir"/$_prefix/lib/*.a "$subpkgdir"/$_prefix/lib/
+}
+
+libs() {
+	pkgdesc="LLVM $_majorver runtime library"
+	local soname="libLLVM-$_majorver.0.so"
+	local soname2="libLLVM-$pkgver.so"
+	_common_subpkg
+
+	mkdir -p "$subpkgdir"
+	cd "$subpkgdir"
+
+	# libLLVM should be in /usr/lib. This is needed for binaries that are
+	# dynamically linked with libLLVM, so they can find it on default path.
+	_mv "$pkgdir"/$_prefix/lib/$soname usr/lib/
+	ln -s $soname usr/lib/$soname2
+
+	# And also symlink it back to the LLVM prefix.
+	mkdir -p $_prefix/lib
+	ln -s ../../$soname $_prefix/lib/$soname
+	ln -s ../../$soname $_prefix/lib/$soname2
+}
+
+dev() {
+	_common_subpkg
+	default_dev
+	cd "$subpkgdir"
+
+	_mv "$pkgdir"/$_prefix/lib $_prefix/
+	_mv "$pkgdir"/$_prefix/include $_prefix/
+
+	_mv "$pkgdir"/$_prefix/bin/llvm-config $_prefix/bin/
+
+	if [ "$_default_llvm" = yes ]; then
+		ln -sf llvm$_majorver/lib/LLVMgold.so usr/lib/
+		ln -sf llvm$_majorver/lib/libLTO.so usr/lib/
+		ln -sf llvm$_majorver usr/lib/cmake/llvm
+	fi
+}
+
+_test_utils() {
+	pkgdesc="LLVM $_majorver utilities for executing LLVM and Clang style test suites"
+	depends="python2 py-setuptools"
+	_common_subpkg
+	replaces=""
+
+	local litver=$(python2 "$builddir"/utils/lit/setup.py --version 2>/dev/null \
+		| sed 's/\.dev.*$//')
+	test -n "$litver"
+	provides="$provides lit=$litver-r$pkgrel"
+
+	cd "$builddir"/build
+
+	install -D -m 755 bin/count "$subpkgdir"/$_prefix/bin/count
+	install -D -m 755 bin/FileCheck "$subpkgdir"/$_prefix/bin/FileCheck
+	install -D -m 755 bin/not "$subpkgdir"/$_prefix/bin/not
+
+	python2 ../utils/lit/setup.py install --prefix=/usr --root="$subpkgdir"
+	ln -s ../../../bin/lit "$subpkgdir"/$_prefix/bin/lit
+}
+
+_common_subpkg() {
+	if [ "$_default_llvm" = yes ]; then
+		replaces="llvm${subpkgname#$pkgname}"
+		provides="$replaces=$pkgver-r$pkgrel"
+	fi
+}
+
+_mv() {
+	local dest; for dest; do true; done  # get last argument
+	mkdir -p "$dest"
+	mv $@
+}
+
+sha512sums="3588be5ed969c3f7f6f16f56a12a6af2814d3d3c960d4a36ffebb0446cc75f19220bccee7fc605f9b01f5d5c188a905a046193cc12dec42dd5922048b5c27fe1  llvm-5.0.2.src.tar.xz
+6d1a716e5aa24e6b9a3acf4cc11e2504b1b01abf574074e9e5617b991de87d5e4e687eb18e85e73d5e632568afe2fc357771c4c96f9e136502071991496fb78c  cmake-fix-libLLVM-name.patch
+49c47f125014b60d0ea7870f981a2c1708ad705793f89287ed846ee881a837a4dc0170bf467e03f2ef56177473128945287749ac80dc2d13cfabcf8b929ba58a  disable-FileSystemTest.CreateDir-perms-assert.patch
+695502bd3b5454c2f5630c59a8cf5f8aeb0deac16a76a8a4df34849e1e35c12ed4234572a320fe4c7e96f974f572f429eb816c5aa3dcfb17057f550eac596495  0001-Disable-dynamic-lib-tests-for-musl-s-dlclose-is-noop.patch
+3bcfeccc1f14567f99029a131b1289290226d48855857f2eb6a251e041981a8b8b2d7965099df16ebf0a406e48130679f97235ef3f3524577413bb51cf40e613  fix-CheckAtomic.cmake.patch
+5e61bbeafa64dd858cde2e85d3001f3abc0379f7ca057e9f49684eeabc8b4663f79136d688aff8a83a480b3e7cde76823d381e9dd6933187a36ff59da85532b2  dynamiclibrary-fix-build-musl.patch
+c9ef3cd95c4bd1d6ac69bbcd471b01755126d00f59d27d4a2a2ef5623943be73f8407e2fd731294d1a9d81a66e459f45f3f1d5dc5f9646f4f2fb2d8d891b5279  fix-memory-mf_exec-on-aarch64.patch
+7d4825d16107e56a14b7b05be847f03d75e2e05952bea0742a1233b5b0441c9934d8058e612abb6471272884372d9bfd3348355fbd3c19cba82a554003cc3eec  fix-LLVMConfig-cmake-install-prefix.patch
+f57c734687c8ceae8d1bbfcbfdeecb75a5059a112967f4ba639d78d2484e0cc1deabf02ba2d3a6f5283443bf8b3230f38ad143800f8f3327cca0d2691a3ddc3d  fix-return-type-in-ORC-readMem-client-interface.patch
+95b335237328e249c7de71648385d90e736932b1d47cf07a9188ea98d4c2bc740f217e4145f65cb9822058515b6fccaeaf28fb0319fd692e7278a2d542186f54  fix-too-strict-gtest-banner-check.patch"
