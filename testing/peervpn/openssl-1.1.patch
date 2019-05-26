@@ -1,0 +1,280 @@
+From: Elias Werberich <elias@werberich.de>
+Date: Thu, 16 Mar 2017 11:00:22 +0100
+Subject: [PATCH] src: Add support for OpenSSL 1.1.0 and higher
+
+With OpenSSL 1.1.0 and higher API changes were introduced so some
+structures have become opaque which makes direct access impossible. In
+order to support builds with newer OpenSSL versions, PeerVPN has to be
+patched to access needed data of these structures indirectly.
+
+More information can be found at https://www.openssl.org/news/cl110.txt
+
+Signed-off-by: Elias Werberich <elias@werberich.de>
+---
+ src/libp2psec/crypto.c | 87 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/libp2psec/dh.c     | 16 ++++++++++
+ 2 files changed, 102 insertions(+), 1 deletion(-)
+
+diff --git a/libp2psec/crypto.c b/libp2psec/crypto.c
+index d499963..802f8aa 100644
+--- a/libp2psec/crypto.c
++++ b/libp2psec/crypto.c
+@@ -47,9 +47,15 @@
+ 
+ // cipher context storage
+ struct s_crypto {
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	EVP_CIPHER_CTX enc_ctx;
+ 	EVP_CIPHER_CTX dec_ctx;
+ 	HMAC_CTX hmac_ctx;
++#else
++	EVP_CIPHER_CTX *enc_ctx;
++	EVP_CIPHER_CTX *dec_ctx;
++	HMAC_CTX *hmac_ctx;
++#endif
+ };
+ 
+ 
+@@ -169,44 +175,77 @@ static int cryptoSetKeys(struct s_crypto *ctxs, const int count, const unsigned
+ 	const EVP_MD *out_md = EVP_sha256();
+ 	const EVP_CIPHER *out_cipher = EVP_aes_256_cbc();
+ 	const int key_size = EVP_CIPHER_key_length(out_cipher);
+-	HMAC_CTX hmac_ctx;
+ 	int16_t i;
+ 	unsigned char in[2];
+ 	int j,k;
+ 
+ 	// setup hmac as the pseudorandom function
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
++	HMAC_CTX hmac_ctx;
+ 	HMAC_CTX_init(&hmac_ctx);
++#else
++	HMAC_CTX *hmac_ctx = HMAC_CTX_new();
++#endif
+ 	
+ 	// calculate seed key
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	HMAC_Init_ex(&hmac_ctx, nonce_buf, nonce_len, keygen_md, NULL);
+ 	HMAC_Update(&hmac_ctx, secret_buf, secret_len);
+ 	HMAC_Final(&hmac_ctx, seed_key, (unsigned int *)&seed_key_len);
++#else
++	HMAC_Init_ex(hmac_ctx, nonce_buf, nonce_len, keygen_md, NULL);
++	HMAC_Update(hmac_ctx, secret_buf, secret_len);
++	HMAC_Final(hmac_ctx, seed_key, (unsigned int *)&seed_key_len);
++#endif
+ 	
+ 	// calculate derived keys
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	HMAC_Init_ex(&hmac_ctx, seed_key, seed_key_len, keygen_md, NULL);
+ 	HMAC_Update(&hmac_ctx, nonce_buf, nonce_len);
+ 	HMAC_Final(&hmac_ctx, cur_key, (unsigned int *)&cur_key_len);
++#else
++	HMAC_Init_ex(hmac_ctx, seed_key, seed_key_len, keygen_md, NULL);
++	HMAC_Update(hmac_ctx, nonce_buf, nonce_len);
++	HMAC_Final(hmac_ctx, cur_key, (unsigned int *)&cur_key_len);
++#endif
+ 	i = 0;
+ 	j = 0;
+ 	k = 0;
+ 	while(k < count) {
+ 		// calculate next key
+ 		utilWriteInt16(in, i);
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 		HMAC_Init_ex(&hmac_ctx, NULL, -1, NULL, NULL);
+ 		HMAC_Update(&hmac_ctx, cur_key, cur_key_len);
+ 		HMAC_Update(&hmac_ctx, nonce_buf, nonce_len);
+ 		HMAC_Update(&hmac_ctx, in, 2);
+ 		HMAC_Final(&hmac_ctx, cur_key, (unsigned int *)&cur_key_len);
++#else
++		HMAC_Init_ex(hmac_ctx, NULL, -1, NULL, NULL);
++		HMAC_Update(hmac_ctx, cur_key, cur_key_len);
++		HMAC_Update(hmac_ctx, nonce_buf, nonce_len);
++		HMAC_Update(hmac_ctx, in, 2);
++		HMAC_Final(hmac_ctx, cur_key, (unsigned int *)&cur_key_len);
++#endif
+ 		if(cur_key_len < key_size) return 0; // check if key is long enough
+ 		switch(j) {
+ 			case 1:
+ 				// save this key as the decryption and encryption key
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 				if(!EVP_EncryptInit_ex(&ctxs[k].enc_ctx, out_cipher, NULL, cur_key, NULL)) return 0;
+ 				if(!EVP_DecryptInit_ex(&ctxs[k].dec_ctx, out_cipher, NULL, cur_key, NULL)) return 0;
++#else
++				if(!EVP_EncryptInit_ex(ctxs[k].enc_ctx, out_cipher, NULL, cur_key, NULL)) return 0;
++				if(!EVP_DecryptInit_ex(ctxs[k].dec_ctx, out_cipher, NULL, cur_key, NULL)) return 0;
++#endif
+ 				break;
+ 			case 2:
+ 				// save this key as the hmac key
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 				HMAC_Init_ex(&ctxs[k].hmac_ctx, cur_key, cur_key_len, out_md, NULL);
++#else
++				HMAC_Init_ex(ctxs[k].hmac_ctx, cur_key, cur_key_len, out_md, NULL);
++#endif
+ 				break;
+ 			default:
+ 				// throw this key away
+@@ -221,7 +260,11 @@ static int cryptoSetKeys(struct s_crypto *ctxs, const int count, const unsigned
+ 	}
+ 	
+ 	// clean up
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	HMAC_CTX_cleanup(&hmac_ctx);
++#else
++	HMAC_CTX_free(hmac_ctx);
++#endif
+ 	return 1;
+ }
+ 
+@@ -241,9 +284,15 @@ static void cryptoDestroy(struct s_crypto *ctxs, const int count) {
+ 	int i;
+ 	cryptoSetKeysRandom(ctxs, count);
+ 	for(i=0; i<count; i++) {
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 		HMAC_CTX_cleanup(&ctxs[i].hmac_ctx);
+ 		EVP_CIPHER_CTX_cleanup(&ctxs[i].dec_ctx);
+ 		EVP_CIPHER_CTX_cleanup(&ctxs[i].enc_ctx);
++#else
++		HMAC_CTX_free(ctxs[i].hmac_ctx);
++		EVP_CIPHER_CTX_free(ctxs[i].dec_ctx);
++		EVP_CIPHER_CTX_free(ctxs[i].enc_ctx);
++#endif
+ 	}
+ }
+ 
+@@ -252,9 +301,15 @@ static void cryptoDestroy(struct s_crypto *ctxs, const int count) {
+ static int cryptoCreate(struct s_crypto *ctxs, const int count) {
+ 	int i;
+ 	for(i=0; i<count; i++) {
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 		EVP_CIPHER_CTX_init(&ctxs[i].enc_ctx);
+ 		EVP_CIPHER_CTX_init(&ctxs[i].dec_ctx);
+ 		HMAC_CTX_init(&ctxs[i].hmac_ctx);
++#else
++		ctxs[i].enc_ctx = EVP_CIPHER_CTX_new();
++		ctxs[i].dec_ctx = EVP_CIPHER_CTX_new();
++		ctxs[i].hmac_ctx = HMAC_CTX_new();
++#endif
+ 	}
+ 	if(cryptoSetKeysRandom(ctxs, count)) {
+ 		return 1;
+@@ -270,9 +325,15 @@ static int cryptoCreate(struct s_crypto *ctxs, const int count) {
+ static int cryptoHMAC(struct s_crypto *ctx, unsigned char *hmac_buf, const int hmac_len, const unsigned char *in_buf, const int in_len) {
+ 	unsigned char hmac[EVP_MAX_MD_SIZE];
+ 	int len;
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	HMAC_Init_ex(&ctx->hmac_ctx, NULL, -1, NULL, NULL);
+ 	HMAC_Update(&ctx->hmac_ctx, in_buf, in_len);
+ 	HMAC_Final(&ctx->hmac_ctx, hmac, (unsigned int *)&len);
++#else
++	HMAC_Init_ex(ctx->hmac_ctx, NULL, -1, NULL, NULL);
++	HMAC_Update(ctx->hmac_ctx, in_buf, in_len);
++	HMAC_Final(ctx->hmac_ctx, hmac, (unsigned int *)&len);
++#endif
+ 	if(len < hmac_len) return 0;
+ 	memcpy(hmac_buf, hmac, hmac_len);
+ 	return 1;
+@@ -302,9 +363,15 @@ static int cryptoSetSessionKeys(struct s_crypto *session_ctx, struct s_crypto *c
+ 	if(!cryptoHMAC(md_keygen_ctx, hmac_key, key_size, nonce, nonce_len)) return 0;
+ 
+ 	// set the keys
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	if(!EVP_EncryptInit_ex(&session_ctx->enc_ctx, st_cipher.cipher, NULL, cipher_key, NULL)) return 0;
+ 	if(!EVP_DecryptInit_ex(&session_ctx->dec_ctx, st_cipher.cipher, NULL, cipher_key, NULL)) return 0;
+ 	HMAC_Init_ex(&session_ctx->hmac_ctx, hmac_key, key_size, st_md.md, NULL);
++#else
++	if(!EVP_EncryptInit_ex(session_ctx->enc_ctx, st_cipher.cipher, NULL, cipher_key, NULL)) return 0;
++	if(!EVP_DecryptInit_ex(session_ctx->dec_ctx, st_cipher.cipher, NULL, cipher_key, NULL)) return 0;
++	HMAC_Init_ex(session_ctx->hmac_ctx, hmac_key, key_size, st_md.md, NULL);
++#endif
+ 
+ 	return 1;
+ }
+@@ -326,10 +393,19 @@ static int cryptoEnc(struct s_crypto *ctx, unsigned char *enc_buf, const int enc
+ 	cryptoRand(iv, iv_len);
+ 	memcpy(&enc_buf[hmac_len], iv, iv_len);
+ 
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	if(!EVP_EncryptInit_ex(&ctx->enc_ctx, NULL, NULL, NULL, iv)) { return 0; }
+ 	if(!EVP_EncryptUpdate(&ctx->enc_ctx, &enc_buf[(hdr_len)], &len, dec_buf, dec_len)) { return 0; }
++#else
++	if(!EVP_EncryptInit_ex(ctx->enc_ctx, NULL, NULL, NULL, iv)) { return 0; }
++	if(!EVP_EncryptUpdate(ctx->enc_ctx, &enc_buf[(hdr_len)], &len, dec_buf, dec_len)) { return 0; }
++#endif
+ 	cr_len = len;
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	if(!EVP_EncryptFinal(&ctx->enc_ctx, &enc_buf[(hdr_len + cr_len)], &len)) { return 0; }
++#else
++	if(!EVP_EncryptFinal(ctx->enc_ctx, &enc_buf[(hdr_len + cr_len)], &len)) { return 0; }
++#endif
+ 	cr_len += len;
+ 
+ 	if(!cryptoHMAC(ctx, hmac, hmac_len, &enc_buf[hmac_len], (iv_len + cr_len))) { return 0; }
+@@ -357,10 +433,19 @@ static int cryptoDec(struct s_crypto *ctx, unsigned char *dec_buf, const int dec
+ 	memset(iv, 0, crypto_MAXIVSIZE);
+ 	memcpy(iv, &enc_buf[hmac_len], iv_len);
+ 
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	if(!EVP_DecryptInit_ex(&ctx->dec_ctx, NULL, NULL, NULL, iv)) { return 0; }
+ 	if(!EVP_DecryptUpdate(&ctx->dec_ctx, dec_buf, &len, &enc_buf[hdr_len], (enc_len - hdr_len))) { return 0; }
++#else
++	if(!EVP_DecryptInit_ex(ctx->dec_ctx, NULL, NULL, NULL, iv)) { return 0; }
++	if(!EVP_DecryptUpdate(ctx->dec_ctx, dec_buf, &len, &enc_buf[hdr_len], (enc_len - hdr_len))) { return 0; }
++#endif
+ 	cr_len = len;
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	if(!EVP_DecryptFinal(&ctx->dec_ctx, &dec_buf[cr_len], &len)) { return 0; }
++#else
++	if(!EVP_DecryptFinal(ctx->dec_ctx, &dec_buf[cr_len], &len)) { return 0; }
++#endif
+ 	cr_len += len;
+ 	
+ 	return cr_len;
+diff --git a/libp2psec/dh.c b/libp2psec/dh.c
+index d66f1b9..b77b680 100644
+--- a/libp2psec/dh.c
++++ b/libp2psec/dh.c
+@@ -81,10 +81,18 @@ CXzWzPkElg5L22pMUCPfYxo10HKoUHmSYwIBAg==\n\
+ 
+ // Generate a key.
+ static int dhGenKey(struct s_dh_state *dhstate) {
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	BIGNUM *bn;
++#else
++	const BIGNUM *bn;
++#endif
+ 	int bn_size;
+ 	if(DH_generate_key(dhstate->dh)) {
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 		bn = dhstate->dh->pub_key;
++#else
++		DH_get0_key(dhstate->dh, &bn, NULL);
++#endif
+ 		bn_size = BN_num_bytes(bn);
+ 		if((bn_size > dh_MINSIZE) && (bn_size < dh_MAXSIZE)) {
+ 			BN_bn2bin(bn, dhstate->pubkey);
+@@ -152,13 +160,21 @@ static int dhGetPubkey(unsigned char *buf, const int buf_size, const struct s_dh
+ // Generate symmetric keys. Returns 1 if succesful.
+ static int dhGenCryptoKeys(struct s_crypto *ctx, const int ctx_count, const struct s_dh_state *dhstate, const unsigned char *peerkey, const int peerkey_len, const unsigned char *nonce, const int nonce_len) {
+ 	BIGNUM *bn = dhstate->bn;
++#if OPENSSL_VERSION_NUMBER >= 0x10100000L
++	const BIGNUM *bndh;
++#endif
+ 	DH *dh = dhstate->dh;
+ 	int ret = 0;
+ 	int maxsize = DH_size(dh);
+ 	unsigned char secret[maxsize];
+ 	int size;
+ 	BN_bin2bn(peerkey, peerkey_len, bn);
++#if OPENSSL_VERSION_NUMBER < 0x10100000L
+ 	if(BN_ucmp(bn, dh->pub_key) != 0) {
++#else
++	DH_get0_key(dh, &bndh, NULL);
++	if(BN_ucmp(bn, bndh) != 0) {
++#endif
+ 		size = DH_compute_key(secret, bn, dh);
+ 		if(size > 0) {
+ 			ret = cryptoSetKeys(ctx, ctx_count, secret, size, nonce, nonce_len);
+-- 
+2.12.2
+
