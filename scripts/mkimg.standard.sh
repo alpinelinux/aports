@@ -44,7 +44,7 @@ profile_extended() {
 		iptables iputils irssi ldns-tools links
 		ncurses-terminfo net-snmp net-snmp-tools nrpe nsd
 		opennhrp openvpn openvswitch pingu ppp quagga
-		quagga-nhrp rpcbind sntpc socat ssmtp strongswan
+		quagga-nhrp rng-tools rpcbind sntpc socat ssmtp strongswan
 		sysklogd tcpdump tinyproxy unbound
 		wireless-tools wpa_supplicant zonenotify
 
