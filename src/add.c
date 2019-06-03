@@ -93,6 +93,9 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 
 	if (actx->virtpkg) {
 		apk_blob_t b = APK_BLOB_STR(actx->virtpkg);
+		struct tm tm;
+		time_t now;
+		char ver[32];
 
 		apk_blob_pull_dep(&b, db, &virtdep);
 		if (APK_BLOB_IS_NULL(b) || virtdep.conflict ||
@@ -105,17 +108,23 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 		if (virtdep.name->name[0] != '.' && non_repository_check(db))
 			return -1;
 
+		time(&now);
+		localtime_r(&now, &tm);
+		strftime(ver, sizeof ver, "%Y%m%d.%H%M%S", &tm);
+
 		virtpkg = apk_pkg_new();
 		if (virtpkg == NULL) {
 			apk_error("Failed to allocate virtual meta package");
 			return -1;
 		}
 		virtpkg->name = virtdep.name;
-		apk_blob_checksum(APK_BLOB_STR(virtpkg->name->name),
-				  apk_checksum_default(), &virtpkg->csum);
-		virtpkg->version = apk_blob_atomize(APK_BLOB_STR("0"));
+		apk_blob_checksum(APK_BLOB_STR(ver), apk_checksum_default(), &virtpkg->csum);
+		virtpkg->version = apk_blob_atomize(APK_BLOB_STR(ver));
 		virtpkg->description = strdup("virtual meta package");
 		virtpkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
+
+		virtdep.result_mask = APK_VERSION_EQUAL;
+		virtdep.version = virtpkg->version;
 	}
 
 	foreach_array_item(parg, args) {
