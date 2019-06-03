@@ -14,6 +14,7 @@
 
 #include <endian.h>
 #include <string.h>
+#include <time.h>
 
 #define ARRAY_SIZE(x)	(sizeof(x) / sizeof((x)[0]))
 #define BIT(x)		(1 << (x))
@@ -120,6 +121,8 @@ extern char **apk_argv;
 #define APK_MAX_REPOS		32	/* see struct apk_package */
 #define APK_MAX_TAGS		16	/* see solver; unsigned short */
 #define APK_CACHE_CSUM_BYTES	4
+
+time_t apk_time(void);
 
 static inline size_t apk_calc_installed_size(size_t size)
 {

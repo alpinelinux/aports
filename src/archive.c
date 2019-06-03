@@ -396,7 +396,7 @@ int apk_tar_write_entry(struct apk_ostream *os, const struct apk_file_info *ae,
 		PUT_OCTAL(buf.uid, ae->uid);
 		PUT_OCTAL(buf.gid, ae->gid);
 		PUT_OCTAL(buf.mode, ae->mode & 07777);
-		PUT_OCTAL(buf.mtime, ae->mtime ?: time(NULL));
+		PUT_OCTAL(buf.mtime, ae->mtime ?: apk_time());
 
 		/* Checksum */
 		strcpy(buf.magic, "ustar  ");

@@ -47,6 +47,15 @@ static struct apk_string_array *test_repos;
 
 char **apk_argv;
 
+time_t apk_time(void)
+{
+#ifdef TEST_MODE
+	return 1559567666;
+#else
+	return time(NULL);
+#endif
+}
+
 static void version(void)
 {
 	printf("apk-tools " APK_VERSION ", compiled for " APK_DEFAULT_ARCH ".\n"

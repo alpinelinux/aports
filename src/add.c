@@ -108,7 +108,7 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array 
 		if (virtdep.name->name[0] != '.' && non_repository_check(db))
 			return -1;
 
-		time(&now);
+		now = apk_time();
 		localtime_r(&now, &tm);
 		strftime(ver, sizeof ver, "%Y%m%d.%H%M%S", &tm);
 
