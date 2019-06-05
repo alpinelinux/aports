@@ -1,18 +1,14 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-keys
 pkgver=2.1
-pkgrel=1
+pkgrel=2
 pkgdesc="Public keys for Alpine Linux packages"
-url="http://alpinelinux.org"
+url="https://alpinelinux.org"
 # we install arch specific keys to /etc so we cannot do arch=noarch
 arch="all"
 license="MIT"
-depends=""
-makedepends=""
-install=""
-subpackages=""
 replaces="alpine-base"
-source=
+options="!check" # No testsuite
 
 _arch_keys="
 	aarch64:alpine-devel@lists.alpinelinux.org-58199dcc.rsa.pub
@@ -30,11 +26,6 @@ _arch_keys="
 for _i in $_arch_keys; do
 	source="$source ${_i#*:}"
 done
-
-build() {
-	return 0
-}
-
 
 _ins_key() {
 	msg "- $2 ($1)"
