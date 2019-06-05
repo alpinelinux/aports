@@ -4,6 +4,7 @@ get_block() {
 	awk '/^@'$1'/{p=1;next} /^@/{p=0} p{print}'
 }
 
+export TZ=UTC
 APK_TEST="../src/apk-test"
 TEST_TO_RUN="$@"
 
