@@ -588,11 +588,11 @@ int main(int argc, char **argv)
 				help_requested = 1;
 				break;
 			}
-			if (r != -ENOTSUP) goto err_and_usage;
+			if (r != -ENOTSUP) goto err;
 		}
 	}
 
-	if (help_requested) {
+	if (help_requested || r == -ENOTSUP) {
 		r = usage(applet);
 		goto err;
 	}
@@ -686,12 +686,9 @@ int main(int argc, char **argv)
 	r = 0;
 #endif
 
-err_and_usage:
-	if (r == -EINVAL)
-		r = usage(applet);
+err:
 	if (r == -ESHUTDOWN)
 		r = 0;
-err:
 	if (ctx)
 		free(ctx);
 
