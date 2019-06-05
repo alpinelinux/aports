@@ -42,7 +42,7 @@ static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int opt
 		uctx->solver_flags |= APK_SOLVERF_LATEST;
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }

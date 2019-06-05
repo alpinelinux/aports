@@ -416,7 +416,7 @@ static int option_parse_applet(void *pctx, struct apk_db_options *dbopts, int op
 		ctx->subaction_mask = 0xffffffff;
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }

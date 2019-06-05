@@ -103,7 +103,7 @@ static int option_parse_applet(void *ctx, struct apk_db_options *dbopts, int opt
 		ictx->show_all = 1;
 		break;
 	default:
-		return -1;
+		return -ENOTSUP;
 	}
 	return 0;
 }
