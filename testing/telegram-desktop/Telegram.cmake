@@ -53,10 +53,13 @@ list(APPEND THIRD_PARTY_INCLUDE_DIRS
 	${THIRD_PARTY_DIR}/emoji_suggestions
 	${THIRD_PARTY_DIR}/libtgvoip
 	${THIRD_PARTY_DIR}/variant/include
+	${THIRD_PARTY_DIR}/qtlottie/src/imports
+	${THIRD_PARTY_DIR}/qtlottie/src/bodymovin
 )
 
 add_subdirectory(${THIRD_PARTY_DIR}/crl)
 add_subdirectory(${THIRD_PARTY_DIR}/libtgvoip)
+add_subdirectory(${THIRD_PARTY_DIR}/qtlottie)
 
 set(TELEGRAM_SOURCES_DIR ${CMAKE_SOURCE_DIR}/SourceFiles)
 set(TELEGRAM_RESOURCES_DIR ${CMAKE_SOURCE_DIR}/Resources)
@@ -102,6 +105,7 @@ file(GLOB FLAT_SOURCE_FILES
 	SourceFiles/storage/*.cpp
 	SourceFiles/storage/cache/*.cpp
 	SourceFiles/support/*cpp
+	SourceFiles/lottie/*cpp
 	${THIRD_PARTY_DIR}/emoji_suggestions/*.cpp
 )
 file(GLOB FLAT_EXTRA_FILES
@@ -161,6 +165,7 @@ set(TELEGRAM_LINK_LIBRARIES
 	xxhash
 	crl
 	tgvoip
+	qtlottie
 	OpenSSL::Crypto
 	OpenSSL::SSL
 	Qt5::DBus
