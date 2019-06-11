@@ -3,10 +3,10 @@
 pkgname=openjdk9
 pkgver=9.0.4_p12
 _pkgver=${pkgver/_p/+}
-pkgrel=1
+pkgrel=2
 pkgdesc="Oracle OpenJDK 9"
 url="https://hg.openjdk.java.net/jdk-updates/jdk9u"
-arch="all !x86 !armhf !armv7" # build fails on 32bit arches
+arch="all"
 license="GPL-2.0 with Classpath"
 makedepends="autoconf
 bash
@@ -38,7 +38,7 @@ $pkgname-demos:_demos:noarch
 $pkgname-doc:_doc:noarch
 $pkgname-dbg:_dbg
 $pkgname-jre:_jre
-$pkgname-src:_src
+$pkgname-src:_src:noarch
 $pkgname-jre-headless:_jre_headless
 $pkgname-jdk:_jdk
 "
@@ -51,7 +51,6 @@ jdk-$_pkgver-jdk.tar.bz2::http://hg.openjdk.java.net/jdk-updates/jdk9u/jdk/archi
 jdk-$_pkgver-langtools.tar.bz2::http://hg.openjdk.java.net/jdk-updates/jdk9u/langtools/archive/jdk-$_pkgver.tar.bz2
 jdk-$_pkgver-nashorn.tar.bz2::http://hg.openjdk.java.net/jdk-updates/jdk9u/nashorn/archive/jdk-$_pkgver.tar.bz2
 
-2019-01-05_config.sub::https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;h=3b4c7624b68d2d7f84618e1b5fa2badd43a48325;hb=286a38db91ea2dce1749ab7d1d9ea5ae344a16c1
 build.patch
 aarch64.patch
 arm.patch
@@ -59,6 +58,9 @@ ppc64le.patch
 x86.patch
 
 HelloWorld.java
+TestECDSA.java
+TestCryptoLevel.java
+Alpine_Bug_10126.java
 "
 builddir="$srcdir/jdk9u-jdk-$_pkgver"
 
@@ -68,10 +70,10 @@ sonameprefix="$pkgname:"
 
 # enable running the JTReg tests in check?
 # see comment in that function for explanation
-_run_jtreg=0
+_run_jtreg=${_run_jtreg:-0}
 if [ $_run_jtreg -ne 0 ]; then
 	makedepends="$makedepends java-jtreg"
-	checkdepends="$checkdepends ttf-freefont xvfb"
+	checkdepends="$checkdepends ttf-freefont xvfb-run"
 fi
 
 
@@ -94,8 +96,9 @@ unpack() {
 prepare() {
 	default_prepare
 
-	# update the config.sub file to detect alpine
-	cp $srcdir/2019-01-05_config.sub common/autoconf/build-aux/autoconf-config.sub
+	# update autoconf files to detect alpine
+	update_config_sub
+	update_config_guess
 
 	# remove not compilable module (hotspot jdk.hotspot.agent)
 	# this needs libthread_db which is only provided by glibc
@@ -119,9 +122,11 @@ build() {
 	#  --with-extra-cxxflags="${CXXFLAGS}"
 	#  --with-extra-ldflags="${LDFLAGS}"
 	# See also paragraph "Configure Control Variables from "jdk9-${_hg_tag}/common/doc/building.md
-	CFLAGS= CXXFLAGS= LDFLAGS= \
+	CFLAGS='' CXXFLAGS='' LDFLAGS='' \
 		bash ./configure \
-		--openjdk-target=$CHOST \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--target=$CTARGET \
 		--prefix="$_java_home" \
 		--sysconfdir=/etc \
 		--mandir=/usr/share/man \
@@ -148,20 +153,33 @@ build() {
 		--with-version-opt=alpine-r${pkgrel} \
 		--with-version-build=${_pkgver#*+}
 
-	MAKEFLAGS= make jdk-image
+	MAKEFLAGS='' make jdk-image
 }
 
 check() {
 	cd "$builddir"
 
-	# compile and run a simple hello world
-	cp "$srcdir/HelloWorld.java" .
-	./build/*-normal-server-release/images/jdk/bin/javac HelloWorld.java
-	./build/*-normal-server-release/images/jdk/bin/java HelloWorld
+	local _java_bin="./build/*-normal-server-release/images/jdk/bin"
+
+	# 1) compile and run a simple hello world
+	$_java_bin/javac -d . "$srcdir"/HelloWorld.java
+	$_java_bin/java HelloWorld
+
+	# 2) compile and run a testcase for unlimited policy
+	$_java_bin/javac -d . "$srcdir"/TestCryptoLevel.java
+	$_java_bin/java -cp . --add-opens java.base/javax.crypto=ALL-UNNAMED TestCryptoLevel
+
+	# 3) compile and run a testcase for ECDSA signatures
+	$_java_bin/javac -d . "$srcdir"/TestECDSA.java
+	$_java_bin/java TestECDSA
+
+	# 4) compile and run testcase for bug 10126
+	$_java_bin/javac -d . "$srcdir"/Alpine_Bug_10126.java
+	$_java_bin/java Alpine_Bug_10126
 
 	# run the gtest unittest suites
 	# they don't take long, DO NOT DISABLE THEM!
-	MAKEFLAGS= make test-hotspot-gtest
+	MAKEFLAGS='' make test-hotspot-gtest
 
 	# The jtreg tests take very, very long to finish and show some failures (9 - 12 on my machine, varying between runs)
 	# I think these are not critical and can be safely ignored.
@@ -169,21 +187,13 @@ check() {
 	# When updating this aport please let them run at least once on your machine to see if the failure count changes.
 	if [ $_run_jtreg -ne 0 ]; then
 		_logfile=$( mktemp -p "$builddir" )
-		if [ -z "$DISPLAY" ]; then
-			Xvfb :99 &
-			_xvfb_pid=$!
-			DISPLAY=:99
-		fi
-		MAKEFLAGS= DISPLAY=$DISPLAY make \
+		MAKEFLAGS='' xvfb-run make \
 			run-test-tier1 \
 			run-test-tier2 \
 			run-test-tier3 \
 			| tee "$_logfile"
 		msg "---------------------------------------"
 		msg "The build log can be found at $_logfile"
-		if [ -n "$_xvfb_pid" ]; then
-			kill $_xvfb_pid
-		fi
 		false
 	fi
 }
@@ -325,10 +335,12 @@ sha512sums="cef3655ae7db657e6c81aa86587e451e58896bb6ee786495f6d757096334435b6a4d
 259228d3f439dde239e38cdebb8c3bbb83804ab141d87a9c236310707de9c58cd78cd80ceb4c17755cc1048071f24462839988112c2698f7ec1453a8810610f2  jdk-9.0.4+12-jdk.tar.bz2
 ef3c70be906a4b0dd9c9195c88da045909ee3ef144941fb7b4495ed66b4162f481095cad87626d2bd38e5a62134b440223cd008dd6123b6b43c00e338610a692  jdk-9.0.4+12-langtools.tar.bz2
 848c6ece418e250561572ad704baeb565580098cfc5f849d4e1a3b41b916aae3487eb4d8d0b319f3a503d122ec064ed4de0678d06821c9a2bdb09c990e589c97  jdk-9.0.4+12-nashorn.tar.bz2
-74e3d868d766e605921542969dd2f646a8adec1b82181aaeb02b623a524cb9011e44c261d4e13ab24268c79c6bc1d260e62d41a928b1b402b186dc5676272e36  2019-01-05_config.sub
-386490c3be4c9aa9dc4b73911bc0b97298ff8b1a50e53bd601f4d2a7b3e469f5b8e70e446b2bbe6876854302a373522b4819fde24c85eafc00f9524268096615  build.patch
+ea02bc4653fc50fafa90b0208336bfb93b9b4b003be10aaf2ca617c2712dcd27e3bc138a25fbd6e0198d3a15ec460a0051d9a30993e9184d94559cfcf7e1cbdd  build.patch
 3cc00d9b81377fdffb7f5b3f732a35cebd2575825d85df88330740903dd98de30fe75e69229811d52f2ef192c1df0715c2696edf31f64c8d7de4b502a16792e4  aarch64.patch
 fa9fcc0c2f0972435b078669175c44f7d5d3cc29fbecb3e053d196c041ef0ff3feee8ec189a86fce0b35c5fd647ff71963a15e1e6fa50775cc2b6fa35d2ccf0a  arm.patch
 7244d0dfdb78d2f03ea992ef770ed888e2bd48f49e58438e7f0a763633c9aa8fc27b953d82c023f8f99ff23009a15031c99b2ef5550d277c63db684cd984ce8e  ppc64le.patch
-427c525e184e2a74f511aad8192dd411fe7fcc4e7a4dc03a3496fb030cec0177b3b520cbdd1c7700f6761a15ff2e5cce59c93d7079b744954122f684d34ce723  x86.patch
-d1767dddd8e0956e25c0f77ed45c6fc86a1191bae1704a6dc33be490fd20eaa50461fe5c2a3349512059d555651e2eb41437dd3c1096c351e8ee68b4534a2579  HelloWorld.java"
+607a77eb37e318e508dde518df9048dbe0e597faf6e2b2194f755d67c9adffb99368120dc02f226d63f812a5612b418b800f7d1eae4ede2c1ab147799fe93316  x86.patch
+d1767dddd8e0956e25c0f77ed45c6fc86a1191bae1704a6dc33be490fd20eaa50461fe5c2a3349512059d555651e2eb41437dd3c1096c351e8ee68b4534a2579  HelloWorld.java
+27e91edef89d26c0c5b9a813e2045f8d2b348745a506ae37b34b660fa7093da9a4e0e676ea41dc4a5c901bce02e5304d95e90f68d6c99cbf461b2da40a7a9853  TestECDSA.java
+b02dff8d549f88317bb4c741a9e269e8d59eef990197d085388fc49c7423a4eb9367dbe1e02bffb10e7862f5980301eb58d4494e177d0e8f60af6b05c7fbbe60  TestCryptoLevel.java
+18f72fcc3b09e772da10d6875a7081fe21d3b387e1d4d9a45bb9cc3e306393960b19c27dac61d33a20d7484c22109c2d091c062523d5575b8d30b20949b74f70  Alpine_Bug_10126.java"
