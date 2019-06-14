@@ -32,6 +32,12 @@ static const char* valid_cmds[] = {
 	NULL
 };
 
+static const char* invalid_opts[] = {
+	"--allow-untrusted",
+	"--keys-dir",
+	NULL,
+};
+
 const char *get_command_path(const char *cmd)
 {
 	const char *p;
@@ -44,6 +50,14 @@ const char *get_command_path(const char *cmd)
 			return valid_cmds[i];
 	}
 	return NULL;
+}
+
+void check_option(const char *opt)
+{
+	int i;
+	for (i = 0; invalid_opts[i] != NULL; i++)
+		if (strcmp(opt, invalid_opts[i]) == 0)
+			errx(1, "%s: not allowed option", opt);
 }
 
 int is_in_group(gid_t group)
@@ -105,10 +119,8 @@ int main(int argc, const char *argv[])
 	if (path == NULL)
 		errx(1, "%s: Not a valid subcommand", cmd);
 
-	/* we dont allow --allow-untrusted option */
 	for (i = 1; i < argc; i++)
-		if (strcmp(argv[i], "--allow-untrusted") == 0)
-			errx(1, "%s: not allowed option", "--allow-untrusted");
+		check_option(argv[i]);
 
 	argv[0] = path;
 	/* set our uid to root so bbsuid --install works */
