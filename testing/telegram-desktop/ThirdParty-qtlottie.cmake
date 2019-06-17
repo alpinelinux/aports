@@ -1,6 +1,14 @@
 project(qtlottie)
 
-find_package(Qt5 REQUIRED COMPONENTS Core Widgets Gui)
+set(CMAKE_CXX_STANDARD 17)
+
+set(CMAKE_INCLUDE_CURRENT_DIR ON)
+
+list(APPEND CMAKE_MODULE_PATH
+	${CMAKE_SOURCE_DIR}/gyp
+)
+
+find_package(Qt5 REQUIRED COMPONENTS Core Gui)
 
 foreach(__qt_module IN ITEMS QtCore QtGui)
 	list(APPEND QT_PRIVATE_INCLUDE_DIRS
@@ -8,14 +16,28 @@ foreach(__qt_module IN ITEMS QtCore QtGui)
 		${QT_INCLUDE_DIR}/${__qt_module}/${Qt5_VERSION}/${__qt_module}
 	)
 endforeach()
-message(STATUS "Using Qt private include directories: ${QT_PRIVATE_INCLUDE_DIRS}")
 
 file(GLOB QTLOTTIE_SOURCE_FILES
 	src/bodymovin/*.cpp
-	src/imports/rasterrenderer/*.cpp
+	src/imports/rasterrenderer/rasterrenderer.cpp
+	../../SourceFiles/lottie/*.cpp
 )
 
 add_library(${PROJECT_NAME} STATIC ${QTLOTTIE_SOURCE_FILES})
 
-target_include_directories(${PROJECT_NAME} PUBLIC src src/bodymovin ${QT_PRIVATE_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} Qt5::Core Qt5::Widgets Qt5::Gui)
+include(PrecompiledHeader)
+add_precompiled_header(${PROJECT_NAME} ../../SourceFiles/lottie/lottie_pch.h)
+
+target_include_directories(${PROJECT_NAME} PUBLIC
+	src
+	src/bodymovin
+	src/imports
+	${CMAKE_SOURCE_DIR}/SourceFiles
+	${CMAKE_SOURCE_DIR}/ThirdParty/GSL/include
+	${CMAKE_SOURCE_DIR}/ThirdParty/variant/include
+	${QT_PRIVATE_INCLUDE_DIRS}
+)
+set_target_properties(${PROJECT_NAME} PROPERTIES AUTOMOC_MOC_OPTIONS -bqtlottie_pch/lottie_pch.h)
+target_compile_definitions(${PROJECT_NAME} PUBLIC BODYMOVIN_LIBRARY)
+target_link_libraries(${PROJECT_NAME} crl Qt5::Core Qt5::Widgets)
+

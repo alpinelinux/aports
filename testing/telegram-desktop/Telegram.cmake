@@ -27,6 +27,7 @@ find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 find_package(X11 REQUIRED)
 find_package(ZLIB REQUIRED)
+find_package(RapidJSON REQUIRED)
 
 find_package(Qt5 REQUIRED COMPONENTS Core DBus Gui Widgets Network)
 get_target_property(QTCORE_INCLUDE_DIRS Qt5::Core INTERFACE_INCLUDE_DIRECTORIES)
@@ -53,8 +54,6 @@ list(APPEND THIRD_PARTY_INCLUDE_DIRS
 	${THIRD_PARTY_DIR}/emoji_suggestions
 	${THIRD_PARTY_DIR}/libtgvoip
 	${THIRD_PARTY_DIR}/variant/include
-	${THIRD_PARTY_DIR}/qtlottie/src/imports
-	${THIRD_PARTY_DIR}/qtlottie/src/bodymovin
 )
 
 add_subdirectory(${THIRD_PARTY_DIR}/crl)
@@ -96,6 +95,7 @@ file(GLOB FLAT_SOURCE_FILES
 	SourceFiles/inline_bots/*.cpp
 	SourceFiles/intro/*.cpp
 	SourceFiles/lang/*.cpp
+	SourceFiles/main/*.cpp
 	SourceFiles/mtproto/*.cpp
 	SourceFiles/overview/*.cpp
 	SourceFiles/passport/*.cpp
@@ -105,7 +105,6 @@ file(GLOB FLAT_SOURCE_FILES
 	SourceFiles/storage/*.cpp
 	SourceFiles/storage/cache/*.cpp
 	SourceFiles/support/*cpp
-	SourceFiles/lottie/*cpp
 	${THIRD_PARTY_DIR}/emoji_suggestions/*.cpp
 )
 file(GLOB FLAT_EXTRA_FILES
@@ -157,6 +156,7 @@ set(TELEGRAM_INCLUDE_DIRS
 	${MINIZIP_INCLUDE_DIRS}
 	${OPENAL_INCLUDE_DIR}
 	${QT_PRIVATE_INCLUDE_DIRS}
+	${RAPIDJSON_INCLUDE_DIRS}
 	${THIRD_PARTY_INCLUDE_DIRS}
 	${ZLIB_INCLUDE_DIR}
 )
@@ -164,8 +164,8 @@ set(TELEGRAM_INCLUDE_DIRS
 set(TELEGRAM_LINK_LIBRARIES
 	xxhash
 	crl
-	tgvoip
 	qtlottie
+	tgvoip
 	OpenSSL::Crypto
 	OpenSSL::SSL
 	Qt5::DBus
