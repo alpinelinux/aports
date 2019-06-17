@@ -2,13 +2,13 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.1.1
-pkgrel=1
+pkgrel=2
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
-license="GPL-2.0"
+license="GPL-2.0-only"
 pkggroups="shadow"
-options="!fhs"
+options="!fhs !check"
 install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
 	$pkgname.post-install"
 source="mkmntdirs.c
@@ -217,6 +217,6 @@ bfe947bdd69e7d93b32c8cb4e2cabe5717cb6c1e1f49a74015ac2cfb13e96d1f12c4be23ae93a1d6
 e6775b9e1c6421338aaceee375b3b74aa100fd444e369b280ce45c9167119b76bebc11737d7f929e50e20a553a35e0e25f7d0f71deb0483d3bccc08e319dcf98  group
 fdab6f8fec2a556ab817d90a73635a927ea04dbc4e0470ed59ee6a62c87393f9534c9b746b09a776d938c25b8af9c9fb1686578e24f8307d1d074921ade1bdc7  inittab
 17c40af54f29daf542d36da1947913ea9e14af94656efc3e30b9ec2d22d12e3cf3b456466904cf56bc99412e0f650c7a0187c706820da68ce0c99253e53f6338  passwd
-c4088a7148c0f161809852d248d2c2272d9c72be3f968c2e2ba40806f508238496eda0f8f2a42aa092773a56800b1dae9f843a42d93f1bb16ba5f58c111d531b  profile
+b0c2adfae99a949b6a2d06c8a9b2296283af07e793961bf18be1256612e6ba5af61e82154f7654c4dbd02b6f4bfb9009c779b863913d0dae52db9a3b9a32635e  profile
 f1548a2b5a107479446f15905f0f2fbf8762815b2215188d49d905c803786d35de6d98005dc0828fb2486b04aaa356f1216a964befddf1e72cb169656e23b6ac  protocols
 cecfc06b1f455d65b0c54a5651e601298b455771333e39d0109eeffd7ebd8d81b7738738eb647e6d3076230b6f3707782b83662ea3764ec33dc5e0b3453d3965  services"
