@@ -96,7 +96,7 @@ profile_rpi() {
 build_uboot() {
 	set -x
 	# FIXME: Fix apk-tools to extract packages directly
-	local pkg pkgs="$(apk fetch  --simulate --root "$APKROOT" --recursive u-boot-all | sed -ne "s/^Downloading \([^0-9.]*\)\-.*$/\1/p")"
+	local pkg pkgs="$(apk fetch  --simulate --root "$APKROOT" --recursive u-boot-all | sed -ne "s/^Downloading \(.*\)\-[0-9].*$/\1/p")"
 	for pkg in $pkgs; do
 		[ "$pkg" = "u-boot-all" ] || apk fetch --root "$APKROOT" --stdout $pkg | tar -C "$DESTDIR" -xz usr
 	done
