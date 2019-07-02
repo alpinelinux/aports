@@ -1,0 +1,109 @@
+From b45415b1096e76f40b32326d2798123f81fe5976 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Tue, 2 Jul 2019 15:27:57 +0300
+Subject: [PATCH] add: fix virtual package id generation
+
+Fixes 37fbafcd by adding more input to the hash than just second
+grained time stamp - collisions would happen when running apk
+scripted.
+
+For virtual package the hash works only as unique identifier, so
+try to add elements that should make it unique in most cases.
+
+Fixes #10648
+---
+ src/add.c | 51 +++++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 35 insertions(+), 16 deletions(-)
+
+diff --git a/src/add.c b/src/add.c
+index 2d342ab..e028736 100644
+--- a/src/add.c
++++ b/src/add.c
+@@ -11,6 +11,7 @@
+ 
+ #include <errno.h>
+ #include <stdio.h>
++#include <unistd.h>
+ #include "apk_applet.h"
+ #include "apk_database.h"
+ #include "apk_print.h"
+@@ -80,6 +81,38 @@ static int non_repository_check(struct apk_database *db)
+ 	return 1;
+ }
+ 
++static struct apk_package *create_virtual_package(struct apk_database *db, struct apk_name *name)
++{
++	char ver[32];
++	struct apk_package *virtpkg;
++	struct tm tm;
++	EVP_MD_CTX *mdctx;
++	time_t now = apk_time();
++	pid_t pid = getpid();
++
++	localtime_r(&now, &tm);
++	strftime(ver, sizeof ver, "%Y%m%d.%H%M%S", &tm);
++
++	virtpkg = apk_pkg_new();
++	if (virtpkg == NULL) return 0;
++
++	virtpkg->name = name;
++	virtpkg->version = apk_blob_atomize(APK_BLOB_STR(ver));
++	virtpkg->description = strdup("virtual meta package");
++	virtpkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
++
++	mdctx = EVP_MD_CTX_new();
++	EVP_DigestInit_ex(mdctx, apk_checksum_default(), NULL);
++	EVP_DigestUpdate(mdctx, &tm, sizeof tm);
++	EVP_DigestUpdate(mdctx, &pid, sizeof pid);
++	EVP_DigestUpdate(mdctx, virtpkg->name->name, strlen(virtpkg->name->name) + 1);
++	virtpkg->csum.type = EVP_MD_CTX_size(mdctx);
++	EVP_DigestFinal_ex(mdctx, virtpkg->csum.data, NULL);
++	EVP_MD_CTX_free(mdctx);
++
++	return virtpkg;
++}
++
+ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array *args)
+ {
+ 	struct add_ctx *actx = (struct add_ctx *) ctx;
+@@ -93,10 +126,6 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array
+ 
+ 	if (actx->virtpkg) {
+ 		apk_blob_t b = APK_BLOB_STR(actx->virtpkg);
+-		struct tm tm;
+-		time_t now;
+-		char ver[32];
+-
+ 		apk_blob_pull_dep(&b, db, &virtdep);
+ 		if (APK_BLOB_IS_NULL(b) || virtdep.conflict ||
+ 		    virtdep.result_mask != APK_DEPMASK_ANY ||
+@@ -104,24 +133,14 @@ static int add_main(void *ctx, struct apk_database *db, struct apk_string_array
+ 			apk_error("%s: bad package specifier");
+ 			return -1;
+ 		}
+-
+ 		if (virtdep.name->name[0] != '.' && non_repository_check(db))
+ 			return -1;
+ 
+-		now = apk_time();
+-		localtime_r(&now, &tm);
+-		strftime(ver, sizeof ver, "%Y%m%d.%H%M%S", &tm);
+-
+-		virtpkg = apk_pkg_new();
+-		if (virtpkg == NULL) {
++		virtpkg = create_virtual_package(db, virtdep.name);
++		if (!virtpkg) {
+ 			apk_error("Failed to allocate virtual meta package");
+ 			return -1;
+ 		}
+-		virtpkg->name = virtdep.name;
+-		apk_blob_checksum(APK_BLOB_STR(ver), apk_checksum_default(), &virtpkg->csum);
+-		virtpkg->version = apk_blob_atomize(APK_BLOB_STR(ver));
+-		virtpkg->description = strdup("virtual meta package");
+-		virtpkg->arch = apk_blob_atomize(APK_BLOB_STR("noarch"));
+ 
+ 		virtdep.result_mask = APK_VERSION_EQUAL;
+ 		virtdep.version = virtpkg->version;
+-- 
+2.22.0
+
