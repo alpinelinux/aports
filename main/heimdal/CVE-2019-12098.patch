@@ -1,0 +1,171 @@
+From 2f7f3d9960aa6ea21358bdf3687cee5149aa35cf Mon Sep 17 00:00:00 2001
+From: Luke Howard <lukeh@padl.com>
+Date: Tue, 7 May 2019 13:15:15 +1000
+Subject: [PATCH] CVE-2019-12098: krb5: always confirm PA-PKINIT-KX for anon
+ PKINIT
+
+RFC8062 Section 7 requires verification of the PA-PKINIT-KX key excahnge
+when anonymous PKINIT is used.  Failure to do so can permit an active
+attacker to become a man-in-the-middle.
+
+Introduced by a1ef548600c5bb51cf52a9a9ea12676506ede19f.  First tagged
+release Heimdal 1.4.0.
+
+CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N (4.8)
+
+Change-Id: I6cc1c0c24985936468af08693839ac6c3edda133
+Signed-off-by: Jeffrey Altman <jaltman@auristor.com>
+Approved-by: Jeffrey Altman <jaltman@auritor.com>
+(cherry picked from commit 38c797e1ae9b9c8f99ae4aa2e73957679031fd2b)
+---
+ lib/krb5/init_creds_pw.c | 20 +++++++++
+ lib/krb5/krb5_locl.h     |  1 +
+ lib/krb5/pkinit.c        | 92 ++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 113 insertions(+)
+
+diff --git a/lib/krb5/init_creds_pw.c b/lib/krb5/init_creds_pw.c
+index 1eece1760d..9ec07d0609 100644
+--- a/lib/krb5/init_creds_pw.c
++++ b/lib/krb5/init_creds_pw.c
+@@ -2267,6 +2267,26 @@ krb5_init_creds_step(krb5_context context,
+ 				       &ctx->req_buffer,
+ 				       NULL,
+ 				       NULL);
++	    if (ret == 0 && ctx->pk_init_ctx) {
++		PA_DATA *pa_pkinit_kx;
++		int idx = 0;
++
++		pa_pkinit_kx =
++		    krb5_find_padata(rep.kdc_rep.padata->val,
++				     rep.kdc_rep.padata->len,
++				     KRB5_PADATA_PKINIT_KX,
++				     &idx);
++
++		ret = _krb5_pk_kx_confirm(context, ctx->pk_init_ctx,
++					  ctx->fast_state.reply_key,
++					  &ctx->cred.session,
++					  pa_pkinit_kx);
++		if (ret)
++		    krb5_set_error_message(context, ret,
++					   N_("Failed to confirm PA-PKINIT-KX", ""));
++		else if (pa_pkinit_kx != NULL)
++		    ctx->ic_flags |= KRB5_INIT_CREDS_PKINIT_KX_VALID;
++	    }
+ 	    if (ret == 0)
+ 		ret = copy_EncKDCRepPart(&rep.enc_part, &ctx->enc_part);
+ 
+diff --git a/lib/krb5/krb5_locl.h b/lib/krb5/krb5_locl.h
+index 9d77b9f8a3..f61b66e999 100644
+--- a/lib/krb5/krb5_locl.h
++++ b/lib/krb5/krb5_locl.h
+@@ -208,6 +208,7 @@ struct _krb5_get_init_creds_opt_private {
+ #define KRB5_INIT_CREDS_CANONICALIZE		1
+ #define KRB5_INIT_CREDS_NO_C_CANON_CHECK	2
+ #define KRB5_INIT_CREDS_NO_C_NO_EKU_CHECK	4
++#define KRB5_INIT_CREDS_PKINIT_KX_VALID		32
+     struct {
+         krb5_gic_process_last_req func;
+         void *ctx;
+diff --git a/lib/krb5/pkinit.c b/lib/krb5/pkinit.c
+index b16ee69d3c..e178242ea3 100644
+--- a/lib/krb5/pkinit.c
++++ b/lib/krb5/pkinit.c
+@@ -1220,6 +1220,98 @@ pk_rd_pa_reply_enckey(krb5_context context,
+     return ret;
+ }
+ 
++/*
++ * RFC 8062 section 7:
++ *
++ *  The client then decrypts the KDC contribution key and verifies that
++ *  the ticket session key in the returned ticket is the combined key of
++ *  the KDC contribution key and the reply key.
++ */
++KRB5_LIB_FUNCTION krb5_error_code KRB5_LIB_CALL
++_krb5_pk_kx_confirm(krb5_context context,
++		    krb5_pk_init_ctx ctx,
++		    krb5_keyblock *reply_key,
++		    krb5_keyblock *session_key,
++		    PA_DATA *pa_pkinit_kx)
++{
++    krb5_error_code ret;
++    EncryptedData ed;
++    krb5_keyblock ck, sk_verify;
++    krb5_crypto ck_crypto = NULL;
++    krb5_crypto rk_crypto = NULL;
++    size_t len;
++    krb5_data data;
++    krb5_data p1 = { sizeof("PKINIT") - 1, "PKINIT" };
++    krb5_data p2 = { sizeof("KEYEXCHANGE") - 1, "KEYEXCHANGE" };
++
++    heim_assert(ctx != NULL, "PKINIT context is non-NULL");
++    heim_assert(reply_key != NULL, "reply key is non-NULL");
++    heim_assert(session_key != NULL, "session key is non-NULL");
++
++    /* PA-PKINIT-KX is optional unless anonymous */
++    if (pa_pkinit_kx == NULL)
++	return ctx->anonymous ? KRB5_KDCREP_MODIFIED : 0;
++
++    memset(&ed, 0, sizeof(ed));
++    krb5_keyblock_zero(&ck);
++    krb5_keyblock_zero(&sk_verify);
++    krb5_data_zero(&data);
++
++    ret = decode_EncryptedData(pa_pkinit_kx->padata_value.data,
++			       pa_pkinit_kx->padata_value.length,
++			       &ed, &len);
++    if (ret)
++	goto out;
++
++    if (len != pa_pkinit_kx->padata_value.length) {
++	ret = KRB5_KDCREP_MODIFIED;
++	goto out;
++    }
++
++    ret = krb5_crypto_init(context, reply_key, 0, &rk_crypto);
++    if (ret)
++	goto out;
++
++    ret = krb5_decrypt_EncryptedData(context, rk_crypto,
++				     KRB5_KU_PA_PKINIT_KX,
++				     &ed, &data);
++    if (ret)
++	goto out;
++
++    ret = decode_EncryptionKey(data.data, data.length,
++			       &ck, &len);
++    if (ret)
++	goto out;
++
++    ret = krb5_crypto_init(context, &ck, 0, &ck_crypto);
++    if (ret)
++	goto out;
++
++    ret = krb5_crypto_fx_cf2(context, ck_crypto, rk_crypto,
++			     &p1, &p2, session_key->keytype,
++			     &sk_verify);
++    if (ret)
++	goto out;
++
++    if (sk_verify.keytype != session_key->keytype ||
++	krb5_data_ct_cmp(&sk_verify.keyvalue, &session_key->keyvalue) != 0) {
++	ret = KRB5_KDCREP_MODIFIED;
++	goto out;
++    }
++
++out:
++    free_EncryptedData(&ed);
++    krb5_free_keyblock_contents(context, &ck);
++    krb5_free_keyblock_contents(context, &sk_verify);
++    if (ck_crypto)
++	krb5_crypto_destroy(context, ck_crypto);
++    if (rk_crypto)
++	krb5_crypto_destroy(context, rk_crypto);
++    krb5_data_free(&data);
++
++    return ret;
++}
++
+ static krb5_error_code
+ pk_rd_pa_reply_dh(krb5_context context,
+ 		  const heim_octet_string *indata,
