@@ -11,6 +11,7 @@ int main(void)
 	z_stream zs;
 	int r = Z_OK, rc = 1, fd = -1;
 	size_t len;
+	size_t offset;
 
 	if (inflateInit2(&zs, 15+32) != Z_OK)
 		goto err;
@@ -33,9 +34,15 @@ int main(void)
 		if (len) {
 			if (fd < 0) {
 				const char *fn;
-				if (strncmp(obuf, ".SIGN.", 6) == 0)
+
+				if (strncmp(obuf, "PaxHeader/", 10) == 0)
+					offset = 10;
+				else
+					offset = 0;
+
+				if (strncmp(obuf + offset, ".SIGN.", 6) == 0)
 					fn = "signatures.tar.gz";
-				else if (strncmp(obuf, ".PKGINFO", 8) == 0)
+				else if (strncmp(obuf + offset, ".PKGINFO", 8) == 0)
 					fn = "control.tar.gz";
 				else if (rc == 1)
 					fn = "data.tar.gz", rc = 2;
