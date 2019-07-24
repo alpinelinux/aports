@@ -6,7 +6,7 @@ and thus the quality of Alpine Linux, we kindly ask to follow these
 recommendations.
 
 ## Language
-Alpine Linux APKBUILD files are inherently just POSIX shell scripts. Try avoid
+Alpine Linux APKBUILD files are inherently just POSIX shell scripts. Please avoid
 extensions, even if they work or are accepted by busybox ash. (using keyword
 `local` is an exception)
 
@@ -14,8 +14,8 @@ extensions, even if they work or are accepted by busybox ash. (using keyword
 Use snake_case. Functions, variables etc. should be lower-cased with
 underscores to separate words.
 
-Local 'private' variables and functions n global scope should be pre-fixed
-with a single underscore to avoid nameclash with internal variables in
+Local 'private' variables and functions in global scope should be prefixed
+with a single underscore to avoid name collisions with internal variables in
 `abuild`.
 
 Double underscores are reserved and should not be used.
@@ -24,7 +24,7 @@ _my_variable="data"
 ```
 
 ### Bracing
-Curly braces for functions are on the same line.
+Curly braces for functions should be on the same line.
 
 ```sh
 prepare() {
@@ -32,7 +32,7 @@ prepare() {
 }
 ```
 
-Markers to indicate a compound statement, are on the same line.
+Markers to indicate a compound statement should be on the same line.
 
 
 #### if ...; then
@@ -52,7 +52,7 @@ Markers to indicate a compound statement, are on the same line.
 
 #### for ...; do
 ```sh
-	for ...; do
+	for x in foo bar baz; do
 		...
 	done
 ```
@@ -60,13 +60,13 @@ Markers to indicate a compound statement, are on the same line.
 ### Spacing
 All keywords and operators are separated by a space.
 
-For cleanliness sake, make sure there is however never any trailing whitespace.
+For cleanliness sake, ensure there is no trailing whitespace.
 
 ## Identation
-Indentation is one tab character, alignment is done using spaces. For example
-using the >------- characters to indicate a tab:
+Indentation is one tab character per level, alignment is done using spaces.
+For example (using the >------- characters to indicate a tab):
 ```sh
-prepare()
+build()
 {
 >-------make DESTDIR="${pkgdir}" \
 >-------     PREFIX="/usr"
@@ -99,7 +99,7 @@ foo_bar="$foo"
 ```
 
 ## Subshell usage
-Use `$()` syntax, not backticks, as backticks are hard to spot.
+Use `$()` syntax, not backticks.
 
 ## Sorting
 Some items tend to benefit from being sorted. A list of sources, dependencies
