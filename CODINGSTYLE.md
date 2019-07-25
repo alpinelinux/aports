@@ -78,7 +78,7 @@ This ensures code is always neatly aligned and properly indented.
 Space before tab should be avoided.
 
 ## Line length
-A line should not be longer then 80 lines. While this is not a hard limit, it
+A line should not be longer than 80 characters. While this is not a hard limit, it
 is strongly recommended to avoid having longer lines, as long lines reduce
 readability and invite deep nesting.
 
