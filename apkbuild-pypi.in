@@ -13,36 +13,40 @@ my %pkgmap = ();
 my %licenses = ();
 
 my $template = <<'EOF';
-# Contributor: [% contributor %]
-# Maintainer: [% maintainer %]
+[% authors %]
 pkgname=[% pkgname %]
 _pkgreal=[% pkgreal %]
 pkgver=[% pkgver %]
 pkgrel=0
-pkgdesc=[% pkgdesc %]
+pkgdesc="[% pkgdesc %]"
 url="http://packages.python.org/pypi/[% pkgreal %]"
 arch="noarch"
-license="PSF"
+license="[% license %]"
 pydepends=""
 pymakedepends=""
-depends="python $pydepends"
-makedepends="python-dev $pymakedepends"
-subpackages="$pkgname-doc"
+depends="python3 $pydepends"
+checkdepends="python3-dev"
+makedepends="py3-setuptools $pymakedepends"
+subpackages=""
 source="[% source %]"
 builddir="$srcdir/$_pkgreal-$pkgver"
 
 build() {
-	cd "$builddir"
-	python setup.py build
+	python3 setup.py build
 }
 
 package() {
-	cd "$builddir"
-	python setup.py install \
+	PYTHONPATH=$pkgdir`python3 -c "import site; print(site.getsitepackages()[0])"` \
+	python3 setup.py install \
 		--prefix=/usr \
 		--root="$pkgdir" \
 		--single-version-externally-managed
 }
+
+check() {
+	python3 setup.py test
+}
+
 EOF
 
 my $ua = LWP::UserAgent->new();
@@ -60,19 +64,22 @@ sub read_file {
 
 sub read_assignments_from_file {
     my ($filename) = @_;
+    return () if ( ! -e $filename );
     my $text = read_file($filename);
     my %sline = $text =~ /^(\w+)\s*=\s*([^\"\n]*)$/mg;
     my %mline = $text =~ /^(\w+)\s*=\s*\"([^\"]*)\"$/mg;
+    my %hash = ( %sline, %mline );
 
-    my %temp = (%sline, %mline);
+    my $authors = join("\n", $text =~ /^# Contributor: .*$/mg, $text =~ /^# Maintainer: .*$/mg);
+    $hash{'authors'} = $authors if length($authors) > 1;
 
-    return \%temp;
+    return \%hash;
 }
 
 sub map_pypi_to_apk {
     my ($pypi) = @_;
     return $pkgmap{$pypi} unless !exists($pkgmap{$pypi});
-    return 'py-'.lc($pypi);
+    return 'py3-'.lc($pypi);
 }
 
 sub map_license {
@@ -97,15 +104,16 @@ sub read_apkbuild {
 }
 
 sub write_apkbuild {
-    my ($distdata) = @_;
+    my ($distdata, $authors) = @_;
 
     my %repl = (
-        packager => $packager,
+	authors  => ($authors or "# Contributor: $packager\n# Maintainer: $packager"),
         pkgname  => map_pypi_to_apk($distdata->{info}{name}),
         pkgreal  => $distdata->{info}{name},
         pkgver   => $distdata->{info}{version},
         source   => get_source($distdata),
         license  => map_license($distdata->{info}{license}),
+        pkgdesc  => $distdata->{info}{summary},
     );
     $template =~ s/\[% (.*?) %\]/$repl{$1}/g;
 
@@ -124,7 +132,7 @@ sub prepare_tree {
 
 sub get_data {
     my ($package) = @_;
-    my $response = $ua->get("http://pypi.python.org/pypi/$package/json");
+    my $response = $ua->get("https://pypi.python.org/pypi/$package/json");
     $response->is_success or die $response->status_line;
     my $distdata = $json->decode($response->decoded_content);
 
@@ -135,7 +143,7 @@ sub get_deps {
     my ($data) = @_;
 
     chdir "src/$data->{pkgreal}-$data->{pkgver}";
-    my $reqs = `python ./setup.py --requires`;
+    my $reqs = `python3 ./setup.py --requires`;
 
     my @reqs = split /\n/, $reqs;
 
@@ -161,6 +169,9 @@ sub get_deps {
 
 my $abuild_conf = read_assignments_from_file('/etc/abuild.conf');
 $packager = $abuild_conf->{PACKAGER} if $abuild_conf->{PACKAGER};
+
+my $user_abuild_conf = read_assignments_from_file($ENV{"HOME"} . "/.abuild/abuild.conf");
+$packager = $user_abuild_conf->{PACKAGER} if $user_abuild_conf->{PACKAGER};
 
 sub usage {
     say <<'EOF';
@@ -188,16 +199,17 @@ given ($ARGV[0]) {
         mkdir $apkname;
         chdir $apkname;
 
-        my $data = write_apkbuild($distdata);
+        my $data = write_apkbuild($distdata, undef);
         prepare_tree;
 
         get_deps($data);
     } when ('recreate') {
         my $apkbuild = read_apkbuild;
         my $distdata = get_data($apkbuild->{_pkgreal});
+	my $data = write_apkbuild($distdata, $apkbuild->{authors});
 
         prepare_tree;
-        get_deps;
+        get_deps($data);
     } when ('upgrade') {
         my $apkbuild = read_apkbuild;
         my $distdata = get_data($apkbuild->{_pkgreal});
