@@ -1959,94 +1959,6 @@ up2date() {
 	apk_up2date && abuildindex_up2date
 }
 
-# rebuild package and abuildrepo index if needed
-abuildindex() {
-	up2date && return 0
-	build_abuildrepo
-}
-
-# source all APKBUILDs and output:
-#  1) origin of package
-#  2) all dependencies
-# the output is i in a format easy parseable for awk
-parse_aports_makedepends() {
-	# lets run this in a subshell since we source all APKBUILD here
-	(
-	aportsdir=$(realpath ${APKBUILD%/APKBUILD}/..)
-	for i in $aportsdir/*/APKBUILD; do
-		# no forks in this loop or it will be painfully slow!
-		pkgname=
-		subpackages=
-		depends=
-		makedepends=
-		checkdepends=
-		. $i
-		dir=${i%/APKBUILD}
-		deps=
-		# filter out conflicts from deps and version info
-		wantdepends="$depends $makedepends"
-		want_check && wantdepends="$wantdepends $checkdepends"
-		for j in $wantdepends; do
-			case "$j" in
-				!*) continue;;
-			esac
-			deps="$deps ${j%%[<>=]*}"
-		done
-		for j in $pkgname $subpackages; do
-			echo "o ${j%%:*} $dir"
-			set -- $deps
-			if [ $# -eq 0 ]; then
-				echo "d ${j%%:*}"
-				continue
-			fi
-			echo -n "d ${j%%:*} $1"
-			shift
-			while [ $# -gt 0 ]; do
-				echo -n ",$1"
-				shift
-			done
-			echo
-		done
-	done
-	)
-}
-
-trace_makedepends() {
-	local deps= i=
-	# strip versions from deps
-	for i in "$@"; do
-		deps="$deps ${i%%[<>=]*}"
-	done
-	[ -z "$deps" ] && return 0
-	(	parse_aports_makedepends
-		if [ -z "$upgrade" ]; then
-			# list installed pkgs and prefix with 'i '
-			$APK info --quiet | sort |  sed 's/^/i /'
-		fi
-	) | awk -v pkgs="$deps" '
-
-	function depgraph(pkg,	a, i) {
-		if (visited[pkg])
-			return 0;
-		visited[pkg] = 1;
-		split(deps[pkg], a, ",");
-		for (i in a)
-			depgraph(a[i]);
-		print pkg ":" origin[pkg];
-
-	}
-
-	$1 == "i" { visited[$2] = 1 }
-	$1 == "o" { origin[$2] = $3 }
-	$1 == "d" { deps[$2] = $3 }
-	END {
-		split(pkgs, pkgarray);
-		for (i in pkgarray)
-			depgraph(pkgarray[i]);
-	}
-	'
-}
-
 calcdeps() {
 	builddeps=
 	hostdeps=
@@ -2084,7 +1996,7 @@ get_missing_deps() {
 				error "Conflicting package installed: $cp"
 				return 1
 			fi
-		elif [ "$upgrade" ] || ! $cmd $1; then
+		elif ! $cmd $1; then
 			echo $1
 		fi
 		shift
@@ -2113,64 +2025,18 @@ builddeps() {
 	mhd=$(get_missing_deps "--root $CBUILDROOT --arch $CTARGET_ARCH" $hostdeps) || return 1
 	missing=$(echo $mbd $mhd)
 
-	if [ -z "$install_deps" ] && [ -z "$recursive" ]; then
+	if [ -z "$install_deps" ]; then
 		# if we dont have any missing deps we are done now
 		[ -z "$missing" ] && return 0
-		error "Missing dependencies (use -r to autoinstall or -R to build them): $missing"
+		error "Missing dependencies (use -r to autoinstall them): $missing"
 		return 1
 	fi
 
 	uninstall_after=".makedepends-$pkgname $uninstall_after"
-	if [ -n "$install_deps" ] && [ -z "$recursive" ]; then
-		# make a --simulate run first to detect missing deps
-		# apk-tools --virtual is no goot at reporting those.
-		deps "--quiet --simulate" || return 1
-		deps || return 1
-		return 0
-	fi
-
-	[ -z "$recursive" ] && return 1
-
-	if [ -n "$CBUILDROOT" ]; then
-		error "Recursive rebuilding (-R) is not supported when cross compiling."
-		return 1
-	fi
-
-	# find dependencies that are installed but missing in repo.
-	for i in $builddeps; do
-		local m=$($APK search --repository "$REPODEST/$repo" ${i%%[<>=]*})
-		if [ -z "$m" ]; then
-			missing="$missing $i"
-		fi
-	done
-
-	for i in $(trace_makedepends $missing); do
-		# i = pkg:dir
-		local dir=${i#*:}
-		local pkg=${i%:*}
-
-		# ignore if dependency is in other repo
-		[ -d "$dir" ] || continue
-
-		# check if dep is blacklisted
-		if list_has $pkg $ABUILD_BLACKLIST; then
-			error "$pkg is blacklisted"
-			return 1
-		fi
-
-		# break circular deps
-		list_has $pkg $ABUILD_VISITED && continue
-		export ABUILD_VISITED="$ABUILD_VISITED $pkg"
-
-		msg "Entering $dir"
-		cd "$dir" && "$abuild_path" $forceroot $keep $keep_build $quiet \
-			$install_deps $recursive $upgrade $color_opt \
-			abuildindex || return 1
-	done
-	$SUDO_APK add --upgrade --repository "$REPODEST/$repo" \
-		$apk_opt_wait \
-		--virtual .makedepends-$pkgname $builddeps \
-		|| return 1
+	# make a --simulate run first to detect missing deps
+	# apk-tools --virtual is no goot at reporting those.
+	deps "--quiet --simulate" || return 1
+	deps || return 1
 }
 
 # replace the md5sums in the APKBUILD
@@ -2531,9 +2397,7 @@ usage() {
 		 -P  Set REPODEST as the repository location for created packages
 		 -q  Quiet
 		 -r  Install missing dependencies from system repository (using sudo)
-		 -R  Recursively build and install missing dependencies (using sudo)
 		 -s  Set source package destination directory
-		 -u  Recursively build and upgrade all dependencies (using sudo)
 		 -v  Verbose: show every command as it is run (very noisy)
 
 		Commands:
@@ -2571,7 +2435,6 @@ usage() {
 
 APKBUILD="${APKBUILD:-./APKBUILD}"
 unset force
-unset recursive
 while getopts ":AcdD:fFhkKmnP:qrRs:uv" opt; do
 	case $opt in
 		'A') echo "$CARCH"; exit 0;;
@@ -2590,10 +2453,7 @@ while getopts ":AcdD:fFhkKmnP:qrRs:uv" opt; do
 		'P') REPODEST=$OPTARG;;
 		'q') quiet="-q";;
 		'r') install_deps="-r";;
-		'R') recursive="-R";;
 		's') SRCDEST=$OPTARG;;
-		'u') upgrade="-u"
-		     recursive="-R";;
 		'v') set -x;;
 		'?') die "Unrecognized option: $OPTARG";;
 	esac
