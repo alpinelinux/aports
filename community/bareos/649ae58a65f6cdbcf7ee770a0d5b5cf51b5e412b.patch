@@ -1,0 +1,248 @@
+This is the official patch for the SEGV issue with incorrect pthread usage.
+
+https://gitlab.alpinelinux.org/alpine/aports/issues/10156
+https://github.com/alpinelinux/aports/pull/6951
+
+Patch downloaded from:
+https://github.com/bareos/bareos/commit/649ae58a65f6cdbcf7ee770a0d5b5cf51b5e412b
+(patch had to be modified slightly to apply)
+
+As soon as this patch is included in in upstream release, this patch may be removed.
+As far as I can see, this should be the case with bareos 18.2.7 or later.
+
+--- old/core/cmake/BareosFindAllLibraries.cmake
++++ new/core/cmake/BareosFindAllLibraries.cmake
+@@ -84,3 +84,4 @@
+ endif()
+ 
+ find_package(Readline)
++INCLUDE(thread)
+--- /dev/null
++++ new/core/cmake/thread.cmake
+@@ -0,0 +1,21 @@
++INCLUDE(CheckIncludeFiles)
++INCLUDE(CheckCSourceCompiles)
++
++# check for extra non-portable header-file
++CHECK_INCLUDE_FILES("pthread.h;pthread_np.h" HAVE_PTHREAD_NP_H)
++
++# pthread_attr_get_np - e.g. on FreeBSD
++SET(CMAKE_REQUIRED_LIBRARIES ${PTHREAD_LIBRARIES})
++IF(HAVE_PTHREAD_NP_H)
++  CHECK_C_SOURCE_COMPILES("
++    #include <pthread.h>
++    #include <pthread_np.h>
++    int main() { pthread_attr_t a; pthread_attr_get_np(pthread_self(), &a); }
++    " HAVE_PTHREAD_ATTR_GET_NP)
++ELSE()
++  CHECK_C_SOURCE_COMPILES("
++    #include <pthread.h>
++    int main() { pthread_attr_t a; pthread_attr_get_np(pthread_self(), &a); }
++    " HAVE_PTHREAD_ATTR_GET_NP)
++ENDIF()
++SET(CMAKE_REQUIRED_LIBRARIES)
+--- old/core/src/dird/CMakeLists.txt
++++ new/core/src/dird/CMakeLists.txt
+@@ -37,7 +37,7 @@
+    ua_cmds.cc ua_configure.cc ua_db.cc ua_dotcmds.cc ua_input.cc ua_impexp.cc
+    ua_label.cc ua_output.cc ua_prune.cc ua_purge.cc ua_query.cc ua_restore.cc
+    ua_run.cc ua_select.cc ua_server.cc ua_status.cc ua_tree.cc ua_update.cc
+-   vbackup.cc verify.cc)
++   vbackup.cc verify.cc pthread_detach_if_not_detached.cc)
+ IF(HAVE_WIN32)
+    LIST(APPEND DIRD_OBJECTS_SRCS ../win32/dird/dirdres.rc)
+ ENDIF()
+--- old/core/src/dird/dird.cc
++++ new/core/src/dird/dird.cc
+@@ -661,6 +661,7 @@
+    is_reloading = false;
+    return reloaded;
+ }
++
+ } /* namespace directordaemon */
+ 
+ /*
+--- /dev/null
++++ b/core/src/dird/pthread_detach_if_not_detached.cc
+@@ -0,0 +1,48 @@
++/*
++   BAREOS® - Backup Archiving REcovery Open Sourced
++
++   Copyright (C) 2019-2019 Bareos GmbH & Co. KG
++
++   This program is Free Software; you can redistribute it and/or
++   modify it under the terms of version three of the GNU Affero General Public
++   License as published by the Free Software Foundation and included
++   in the file LICENSE.
++
++   This program is distributed in the hope that it will be useful, but
++   WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
++   Affero General Public License for more details.
++
++   You should have received a copy of the GNU Affero General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
++   02110-1301, USA.
++*/
++#include "include/hostconfig.h"
++#include <pthread.h>
++#if defined(HAVE_PTHREAD_NP_H)
++#include <pthread_np.h>
++#endif
++#include "pthread_detach_if_not_detached.h"
++
++namespace directordaemon {
++void DetachIfNotDetached(pthread_t thr)
++{
++#if defined(HAVE_WIN32)
++  pthread_detach(thr);
++#else
++  /* only detach if not yet detached */
++  int _detachstate;
++  pthread_attr_t _gattr;
++#if defined(HAVE_PTHREAD_ATTR_GET_NP)
++  pthread_attr_init(&_gattr);
++  pthread_attr_get_np(thr, &_gattr);
++#else
++  pthread_getattr_np(thr, &_gattr);
++#endif
++  pthread_attr_getdetachstate(&_gattr, &_detachstate);
++  pthread_attr_destroy(&_gattr);
++  if (_detachstate != PTHREAD_CREATE_DETACHED) { pthread_detach(thr); }
++#endif
++}
++}  // namespace directordaemon
+--- /dev/null
++++ b/core/src/dird/pthread_detach_if_not_detached.h
+@@ -0,0 +1,29 @@
++/*
++   BAREOS® - Backup Archiving REcovery Open Sourced
++
++   Copyright (C) 2019-2019 Bareos GmbH & Co. KG
++
++   This program is Free Software; you can redistribute it and/or
++   modify it under the terms of version three of the GNU Affero General Public
++   License as published by the Free Software Foundation and included
++   in the file LICENSE.
++
++   This program is distributed in the hope that it will be useful, but
++   WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
++   Affero General Public License for more details.
++
++   You should have received a copy of the GNU Affero General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
++   02110-1301, USA.
++*/
++
++#ifndef BAREOS_DIRD_THREAD_H_
++#define BAREOS_DIRD_THREAD_H_
++#include <pthread.h>
++
++namespace directordaemon {
++void DetachIfNotDetached(pthread_t thr);
++}  // namespace directordaemon
++#endif // BAREOS_DIRD_THREAD_H_
+--- old/core/src/dird/job.cc
++++ new/core/src/dird/job.cc
+@@ -39,6 +39,7 @@
+ #include "dird/fd_cmds.h"
+ #include "dird/job.h"
+ #include "dird/migration.h"
++#include "dird/pthread_detach_if_not_detached.h"
+ #include "dird/restore.h"
+ #include "dird/sd_cmds.h"
+ #include "dird/stats.h"
+@@ -455,7 +456,7 @@
+ {
+    JobControlRecord *jcr = (JobControlRecord *)arg;
+ 
+-   pthread_detach(pthread_self());
++   DetachIfNotDetached(pthread_self());
+    Dsm_check(100);
+ 
+    Dmsg0(200, "=====Start Job=========\n");
+--- old/core/src/dird/ua_server.cc
++++ new/core/src/dird/ua_server.cc
+@@ -34,6 +34,7 @@
+ #include "dird/authenticate.h"
+ #include "dird/authenticate_console.h"
+ #include "dird/job.h"
++#include "dird/pthread_detach_if_not_detached.h"
+ #include "dird/ua_cmds.h"
+ #include "dird/ua_db.h"
+ #include "dird/ua_input.h"
+@@ -41,6 +42,7 @@
+ #include "dird/ua_server.h"
+ #include "lib/bnet.h"
+ 
++
+ namespace directordaemon {
+ 
+ /**
+@@ -77,7 +79,7 @@
+  */
+ void *HandleUserAgentClientRequest(BareosSocket *user_agent_socket)
+ {
+-   pthread_detach(pthread_self());
++   DetachIfNotDetached(pthread_self());
+ 
+    JobControlRecord *jcr = new_control_jcr("-Console-", JT_CONSOLE);
+ 
+--- old/core/src/include/config.h.in
++++ new/core/src/include/config.h.in
+@@ -34,6 +34,12 @@
+ /* Define to 1 if you have 4.4BSD and OSF1 statfs to get filesystem type */
+ #cmakedefine FSTYPE_STATFS @FSTYPE_STATFS@
+ 
++// Define to 1 for pthread_attr_get_np() instead of pthread_getattr_np()
++#cmakedefine HAVE_PTHREAD_ATTR_GET_NP @HAVE_PTHREAD_ATTR_GET_NP@
++
++// Define to 1 if pthread_*_np() are in a seperate header
++#cmakedefine HAVE_PTHREAD_NP_H @HAVE_PTHREAD_NP_H@
++
+ /* Define to 1 if you have SVR4 statvfs to get filesystem type */
+ #cmakedefine FSTYPE_STATVFS @FSTYPE_STATVFS@
+ 
+--- old/core/src/lib/jcr.cc
++++ new/core/src/lib/jcr.cc
+@@ -79,6 +79,7 @@
+ static pthread_mutex_t job_start_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_mutex_t last_jobs_mutex = PTHREAD_MUTEX_INITIALIZER;
+ 
++static bool jcr_initialized = false;
+ #ifdef HAVE_WIN32
+ static bool tsd_initialized = false;
+ static pthread_key_t jcr_key; /* Pointer to jcr for each thread */
+@@ -324,6 +325,8 @@
+   if (status != 0) {
+     BErrNo be;
+     Jmsg1(nullptr, M_ABORT, 0, _("pthread key create failed: ERR=%s\n"), be.bstrerror(status));
++  } else {
++    jcr_initialized = true;
+   }
+ }
+ 
+@@ -681,7 +684,10 @@
+  */
+ JobControlRecord *get_jcr_from_tsd()
+ {
+-  JobControlRecord *jcr = (JobControlRecord *)pthread_getspecific(jcr_key);
++  JobControlRecord* jcr = (JobControlRecord*)INVALID_JCR;
++  if (jcr_initialized){
++    jcr = (JobControlRecord*)pthread_getspecific(jcr_key);
++  }
+ 
+   /*
+    * Set any INVALID_JCR to nullptr which the rest of BAREOS understands
+@@ -696,7 +702,7 @@
+  */
+ uint32_t GetJobidFromTsd()
+ {
+-  JobControlRecord *jcr = (JobControlRecord *)pthread_getspecific(jcr_key);
++  JobControlRecord* jcr = get_jcr_from_tsd();
+   uint32_t JobId        = 0;
+ 
+   if (jcr && jcr != INVALID_JCR) { JobId = (uint32_t)jcr->JobId; }
