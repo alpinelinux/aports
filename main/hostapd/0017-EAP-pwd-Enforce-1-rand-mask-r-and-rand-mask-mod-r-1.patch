@@ -1,0 +1,121 @@
+From 4396f74a36e16e32a51238d84bf6225b89c8b25c Mon Sep 17 00:00:00 2001
+From: Jouni Malinen <jouni@codeaurora.org>
+Date: Fri, 5 Apr 2019 12:37:21 +0300
+Subject: [PATCH] EAP-pwd: Enforce 1 < rand,mask < r and rand+mask mod r > 1
+
+RFC 5931 has these conditions as MUST requirements, so better follow
+them explicitly even if the rand,mask == 0 or rand+mask == 0 or 1 cases
+are very unlikely to occur in practice while generating random values
+locally.
+
+Signed-off-by: Jouni Malinen <jouni@codeaurora.org>
+---
+ src/eap_common/eap_pwd_common.c | 28 ++++++++++++++++++++++++++++
+ src/eap_common/eap_pwd_common.h |  3 +++
+ src/eap_peer/eap_pwd.c          | 14 ++------------
+ src/eap_server/eap_server_pwd.c | 13 ++-----------
+ 4 files changed, 35 insertions(+), 23 deletions(-)
+
+diff --git a/src/eap_common/eap_pwd_common.c b/src/eap_common/eap_pwd_common.c
+index c28b56d62..4288b5299 100644
+--- a/src/eap_common/eap_pwd_common.c
++++ b/src/eap_common/eap_pwd_common.c
+@@ -534,3 +534,31 @@ struct crypto_bignum * eap_pwd_get_scalar(EAP_PWD_group *group, const u8 *buf)
+ 
+ 	return scalar;
+ }
++
++
++int eap_pwd_get_rand_mask(EAP_PWD_group *group, struct crypto_bignum *_rand,
++			  struct crypto_bignum *_mask,
++			  struct crypto_bignum *scalar)
++{
++	const struct crypto_bignum *order;
++	int count;
++
++	order = crypto_ec_get_order(group->group);
++
++	/* Select two random values rand,mask such that 1 < rand,mask < r and
++	 * rand + mask mod r > 1. */
++	for (count = 0; count < 100; count++) {
++		if (crypto_bignum_rand(_rand, order) == 0 &&
++		    !crypto_bignum_is_zero(_rand) &&
++		    crypto_bignum_rand(_mask, order) == 0 &&
++		    !crypto_bignum_is_zero(_mask) &&
++		    crypto_bignum_add(_rand, _mask, scalar) == 0 &&
++		    crypto_bignum_mod(scalar, order, scalar) == 0 &&
++		    !crypto_bignum_is_zero(scalar) &&
++		    !crypto_bignum_is_one(scalar))
++			return 0;
++	}
++
++	wpa_printf(MSG_INFO, "EAP-pwd: unable to get randomness");
++	return -1;
++}
+diff --git a/src/eap_common/eap_pwd_common.h b/src/eap_common/eap_pwd_common.h
+index 2387e59a2..c48acee20 100644
+--- a/src/eap_common/eap_pwd_common.h
++++ b/src/eap_common/eap_pwd_common.h
+@@ -70,5 +70,8 @@ void eap_pwd_h_final(struct crypto_hash *hash, u8 *digest);
+ struct crypto_ec_point * eap_pwd_get_element(EAP_PWD_group *group,
+ 					     const u8 *buf);
+ struct crypto_bignum * eap_pwd_get_scalar(EAP_PWD_group *group, const u8 *buf);
++int eap_pwd_get_rand_mask(EAP_PWD_group *group, struct crypto_bignum *_rand,
++			  struct crypto_bignum *_mask,
++			  struct crypto_bignum *scalar);
+ 
+ #endif  /* EAP_PWD_COMMON_H */
+diff --git a/src/eap_peer/eap_pwd.c b/src/eap_peer/eap_pwd.c
+index f37b974eb..5f6c00218 100644
+--- a/src/eap_peer/eap_pwd.c
++++ b/src/eap_peer/eap_pwd.c
+@@ -542,19 +542,9 @@ eap_pwd_perform_commit_exchange(struct eap_sm *sm, struct eap_pwd_data *data,
+ 		goto fin;
+ 	}
+ 
+-	if (crypto_bignum_rand(data->private_value,
+-			       crypto_ec_get_order(data->grp->group)) < 0 ||
+-	    crypto_bignum_rand(mask,
+-			       crypto_ec_get_order(data->grp->group)) < 0 ||
+-	    crypto_bignum_add(data->private_value, mask,
+-			      data->my_scalar) < 0 ||
+-	    crypto_bignum_mod(data->my_scalar,
+-			      crypto_ec_get_order(data->grp->group),
+-			      data->my_scalar) < 0) {
+-		wpa_printf(MSG_INFO,
+-			   "EAP-pwd (peer): unable to get randomness");
++	if (eap_pwd_get_rand_mask(data->grp, data->private_value, mask,
++				  data->my_scalar) < 0)
+ 		goto fin;
+-	}
+ 
+ 	if (crypto_ec_point_mul(data->grp->group, data->grp->pwe, mask,
+ 				data->my_element) < 0) {
+diff --git a/src/eap_server/eap_server_pwd.c b/src/eap_server/eap_server_pwd.c
+index f6c75cf80..cf6affdaf 100644
+--- a/src/eap_server/eap_server_pwd.c
++++ b/src/eap_server/eap_server_pwd.c
+@@ -261,18 +261,9 @@ static void eap_pwd_build_commit_req(struct eap_sm *sm,
+ 		goto fin;
+ 	}
+ 
+-	if (crypto_bignum_rand(data->private_value,
+-			       crypto_ec_get_order(data->grp->group)) < 0 ||
+-	    crypto_bignum_rand(mask,
+-			       crypto_ec_get_order(data->grp->group)) < 0 ||
+-	    crypto_bignum_add(data->private_value, mask, data->my_scalar) < 0 ||
+-	    crypto_bignum_mod(data->my_scalar,
+-			      crypto_ec_get_order(data->grp->group),
+-			      data->my_scalar) < 0) {
+-		wpa_printf(MSG_INFO,
+-			   "EAP-pwd (server): unable to get randomness");
++	if (eap_pwd_get_rand_mask(data->grp, data->private_value, mask,
++				  data->my_scalar) < 0)
+ 		goto fin;
+-	}
+ 
+ 	if (crypto_ec_point_mul(data->grp->group, data->grp->pwe, mask,
+ 				data->my_element) < 0) {
+-- 
+2.22.0
+
