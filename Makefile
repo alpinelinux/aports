@@ -1,4 +1,3 @@
-
 PACKAGE		:= abuild
 VERSION		:= 3.4.0
 
@@ -119,6 +118,9 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild/
 	cp $(AUTOTOOLS_TOOLCHAIN_FILES) $(DESTDIR)/$(prefix)/share/abuild/
 	cp functions.sh $(DESTDIR)/$(sharedir)/
+
+depends depend:
+	sudo apk --no-cache add -U openssl-dev zlib-dev
 
 .gitignore: Makefile
 	echo "*.tar.bz2" > $@
