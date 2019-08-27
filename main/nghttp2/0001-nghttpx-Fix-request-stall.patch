@@ -1,0 +1,179 @@
+From db2f612a30d54aa152ce5530fa1d683738baa4d1 Mon Sep 17 00:00:00 2001
+From: Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+Date: Tue, 6 Aug 2019 20:48:50 +0900
+Subject: [PATCH 1/4] nghttpx: Fix request stall
+
+Fix request stall if backend connection is reused and buffer is full.
+---
+ integration-tests/nghttpx_http1_test.go | 29 +++++++++++++++++++++++++
+ integration-tests/server_tester.go      |  4 +++-
+ src/shrpx_downstream.cc                 | 12 +++++++++-
+ src/shrpx_downstream.h                  |  4 ++++
+ src/shrpx_http_downstream_connection.cc | 16 +++++++++++++-
+ src/shrpx_https_upstream.cc             |  4 +---
+ 6 files changed, 63 insertions(+), 6 deletions(-)
+
+diff --git a/integration-tests/nghttpx_http1_test.go b/integration-tests/nghttpx_http1_test.go
+index a765333e..3d416771 100644
+--- a/integration-tests/nghttpx_http1_test.go
++++ b/integration-tests/nghttpx_http1_test.go
+@@ -625,6 +625,35 @@ func TestH1H1HTTPSRedirectPort(t *testing.T) {
+ 	}
+ }
+ 
++// TestH1H1POSTRequests tests that server can handle 2 requests with
++// request body.
++func TestH1H1POSTRequests(t *testing.T) {
++	st := newServerTester(nil, t, noopHandler)
++	defer st.Close()
++
++	res, err := st.http1(requestParam{
++		name: "TestH1H1POSTRequestsNo1",
++		body: make([]byte, 1),
++	})
++	if err != nil {
++		t.Fatalf("Error st.http1() = %v", err)
++	}
++	if got, want := res.status, 200; got != want {
++		t.Errorf("res.status: %v; want %v", got, want)
++	}
++
++	res, err = st.http1(requestParam{
++		name: "TestH1H1POSTRequestsNo2",
++		body: make([]byte, 65536),
++	})
++	if err != nil {
++		t.Fatalf("Error st.http1() = %v", err)
++	}
++	if got, want := res.status, 200; got != want {
++		t.Errorf("res.status: %v; want %v", got, want)
++	}
++}
++
+ // // TestH1H2ConnectFailure tests that server handles the situation that
+ // // connection attempt to HTTP/2 backend failed.
+ // func TestH1H2ConnectFailure(t *testing.T) {
+diff --git a/integration-tests/server_tester.go b/integration-tests/server_tester.go
+index d4631318..859fc5fb 100644
+--- a/integration-tests/server_tester.go
++++ b/integration-tests/server_tester.go
+@@ -662,7 +662,9 @@ func cloneHeader(h http.Header) http.Header {
+ 	return h2
+ }
+ 
+-func noopHandler(w http.ResponseWriter, r *http.Request) {}
++func noopHandler(w http.ResponseWriter, r *http.Request) {
++	ioutil.ReadAll(r.Body)
++}
+ 
+ type APIResponse struct {
+ 	Status string                 `json:"status,omitempty"`
+diff --git a/src/shrpx_downstream.cc b/src/shrpx_downstream.cc
+index 66daff66..5e27fde0 100644
+--- a/src/shrpx_downstream.cc
++++ b/src/shrpx_downstream.cc
+@@ -144,7 +144,8 @@ Downstream::Downstream(Upstream *upstream, MemchunkPool *mcpool,
+       request_header_sent_(false),
+       accesslog_written_(false),
+       new_affinity_cookie_(false),
+-      blocked_request_data_eof_(false) {
++      blocked_request_data_eof_(false),
++      expect_100_continue_(false) {
+ 
+   auto &timeoutconf = get_config()->http2.timeout;
+ 
+@@ -857,6 +858,11 @@ void Downstream::inspect_http1_request() {
+       chunked_request_ = true;
+     }
+   }
++
++  auto expect = req_.fs.header(http2::HD_EXPECT);
++  expect_100_continue_ =
++      expect &&
++      util::strieq(expect->value, StringRef::from_lit("100-continue"));
+ }
+ 
+ void Downstream::inspect_http1_response() {
+@@ -1159,4 +1165,8 @@ void Downstream::set_blocked_request_data_eof(bool f) {
+ 
+ void Downstream::set_ws_key(const StringRef &key) { ws_key_ = key; }
+ 
++bool Downstream::get_expect_100_continue() const {
++  return expect_100_continue_;
++}
++
+ } // namespace shrpx
+diff --git a/src/shrpx_downstream.h b/src/shrpx_downstream.h
+index d82d7c9b..fff49a1a 100644
+--- a/src/shrpx_downstream.h
++++ b/src/shrpx_downstream.h
+@@ -511,6 +511,8 @@ public:
+ 
+   void set_ws_key(const StringRef &key);
+ 
++  bool get_expect_100_continue() const;
++
+   enum {
+     EVENT_ERROR = 0x1,
+     EVENT_TIMEOUT = 0x2,
+@@ -602,6 +604,8 @@ private:
+   // true if eof is received from client before sending header fields
+   // to backend.
+   bool blocked_request_data_eof_;
++  // true if request contains "expect: 100-continue" header field.
++  bool expect_100_continue_;
+ };
+ 
+ } // namespace shrpx
+diff --git a/src/shrpx_http_downstream_connection.cc b/src/shrpx_http_downstream_connection.cc
+index c03e2723..23442bef 100644
+--- a/src/shrpx_http_downstream_connection.cc
++++ b/src/shrpx_http_downstream_connection.cc
+@@ -694,7 +694,8 @@ int HttpDownstreamConnection::push_request_headers() {
+   // enables us to send headers and data in one writev system call.
+   if (req.method == HTTP_CONNECT ||
+       downstream_->get_blocked_request_buf()->rleft() ||
+-      (!req.http2_expect_body && req.fs.content_length == 0)) {
++      (!req.http2_expect_body && req.fs.content_length == 0) ||
++      downstream_->get_expect_100_continue()) {
+     signal_write();
+   }
+ 
+@@ -1177,6 +1178,19 @@ int HttpDownstreamConnection::write_first() {
+   auto buf = downstream_->get_blocked_request_buf();
+   buf->reset();
+ 
++  // upstream->resume_read() might be called in
++  // write_tls()/write_clear(), but before blocked_request_buf_ is
++  // reset.  So upstream read might still be blocked.  Let's do it
++  // again here.
++  auto input = downstream_->get_request_buf();
++  if (input->rleft() == 0) {
++    auto upstream = downstream_->get_upstream();
++    auto &req = downstream_->request();
++
++    upstream->resume_read(SHRPX_NO_BUFFER, downstream_,
++                          req.unconsumed_body_length);
++  }
++
+   return 0;
+ }
+ 
+diff --git a/src/shrpx_https_upstream.cc b/src/shrpx_https_upstream.cc
+index a640ef5c..3a543acd 100644
+--- a/src/shrpx_https_upstream.cc
++++ b/src/shrpx_https_upstream.cc
+@@ -505,9 +505,7 @@ int htp_hdrs_completecb(llhttp_t *htp) {
+     // and let them decide whether responds with 100 Continue or not.
+     // For alternative mode, we have no backend, so just send 100
+     // Continue here to make the client happy.
+-    auto expect = req.fs.header(http2::HD_EXPECT);
+-    if (expect &&
+-        util::strieq(expect->value, StringRef::from_lit("100-continue"))) {
++    if (downstream->get_expect_100_continue()) {
+       auto output = downstream->get_response_buf();
+       constexpr auto res = StringRef::from_lit("HTTP/1.1 100 Continue\r\n\r\n");
+       output->append(res);
+-- 
+2.23.0
+
