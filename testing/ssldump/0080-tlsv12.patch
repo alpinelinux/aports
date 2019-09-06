@@ -1,0 +1,218 @@
+Patch by David Holmes <dholmesf5@users.sourceforge.net> (revised by Paul Aurich
+<darkrain@users.sourceforge.net>, minor changes for compilation by Robert Scheck
+<robert@fedoraproject.org>) for ssldump >= 0.9b3 which adds TLSv1.1 and TLSv1.2
+application data decrypt support. For further information please have a look to
+http://sourceforge.net/p/ssldump/patches/8/.
+
+--- ssldump-0.9b3/ssl/ssl_rec.c			2014-05-04 02:02:58.000000000 +0200
++++ ssldump-0.9b3/ssl/ssl_rec.c.tlsv12		2014-05-04 05:30:22.000000000 +0200
+@@ -68,19 +68,28 @@
+ };
+ 
+ 
+-static char *digests[]={
++char *digests[]={
+      "MD5",
+      "SHA1"
++     "SHA224",
++     "SHA256",
++     "SHA384",
++     "SHA512",
++     NULL
+ };
+ 
+-static char *ciphers[]={
++char *ciphers[]={
+      "DES",
+-     "DES3",
++     "3DES",
+      "RC4",
+      "RC2",
+      "IDEA",
+      "AES128",
+-     "AES256"
++     "AES256",
++     "CAMELLIA128",
++     "CAMELLIA256",
++     "SEED",
++     NULL
+ };
+ 
+ 
+@@ -192,6 +201,19 @@
+         ERETURN(r);
+     }
+     else{
++      /* TLS 1.1 and beyond: remove explicit IV, only used with
++       * non-stream ciphers. */
++      if (ssl->version>=0x0302 && ssl->cs->block > 1) {
++          UINT4 blk = ssl->cs->block;
++          if (blk <= *outl) {
++              *outl-=blk;
++              memmove(out, out+blk, *outl);
++          }
++          else {
++              DBG((0,"Block size greater than Plaintext!"));
++              ERETURN(SSL_BAD_MAC);
++          }
++      }
+       if(r=tls_check_mac(d,ct,version,out,*outl,mac))
+         ERETURN(r);
+     }
+@@ -231,7 +253,7 @@
+     HMAC_CTX hm;
+     const EVP_MD *md;
+     UINT4 l;
+-    UCHAR buf[20];
++    UCHAR buf[128];
+     
+     md=EVP_get_digestbyname(digests[d->cs->dig-0x40]);
+     HMAC_Init(&hm,d->mac_key->data,d->mac_key->len,md);
+--- ssldump-0.9b3/ssl/sslciphers.h		2014-05-04 02:02:58.000000000 +0200
++++ ssldump-0.9b3/ssl/sslciphers.h.tlsv12	2014-05-04 05:07:20.000000000 +0200
+@@ -73,10 +73,17 @@
+ #define ENC_IDEA	0x34
+ #define ENC_AES128	0x35
+ #define ENC_AES256	0x36
+-#define ENC_NULL	0x37
++#define ENC_CAMELLIA128	0x37
++#define ENC_CAMELLIA256	0x38
++#define ENC_SEED	0x39
++#define ENC_NULL	0x3a
+ 
+ #define DIG_MD5		0x40
+ #define DIG_SHA		0x41
++#define DIG_SHA224	0x42  /* Not sure why EKR didn't follow RFC for */
++#define DIG_SHA256	0x43  /* these values, but whatever, just adding on */
++#define DIG_SHA384	0x44
++#define DIG_SHA512	0x45
+ 
+ int ssl_find_cipher PROTO_LIST((int num,SSL_CipherSuite **cs));
+ 
+--- ssldump-0.9b3/ssl/ssldecode.c		2014-05-04 02:02:58.000000000 +0200
++++ ssldump-0.9b3/ssl/ssldecode.c.tlsv12	2014-05-04 05:29:43.000000000 +0200
+@@ -61,11 +61,14 @@
+ 
+ #define PRF(ssl,secret,usage,rnd1,rnd2,out) (ssl->version==SSLV3_VERSION)? \
+         ssl3_prf(ssl,secret,usage,rnd1,rnd2,out): \
+-        tls_prf(ssl,secret,usage,rnd1,rnd2,out)
++        ((ssl->version == TLSV12_VERSION) ? \
++            tls12_prf(ssl,secret,usage,rnd1,rnd2,out): \
++            tls_prf(ssl,secret,usage,rnd1,rnd2,out))
+ 
+ 
+ static char *ssl_password;
+ 
++extern char *digests;
+ extern UINT4 SSL_print_flags;
+ 
+ struct ssl_decode_ctx_ {
+@@ -98,6 +101,8 @@
+ #ifdef OPENSSL
+ static int tls_P_hash PROTO_LIST((ssl_obj *ssl,Data *secret,Data *seed,
+   const EVP_MD *md,Data *out));
++static int tls12_prf PROTO_LIST((ssl_obj *ssl,Data *secret,char *usage,
++  Data *rnd1,Data *rnd2,Data *out));
+ static int tls_prf PROTO_LIST((ssl_obj *ssl,Data *secret,char *usage,
+   Data *rnd1,Data *rnd2,Data *out));
+ static int ssl3_prf PROTO_LIST((ssl_obj *ssl,Data *secret,char *usage,
+@@ -432,10 +437,9 @@
+ 
+     switch(ssl->version){
+       case SSLV3_VERSION:
+-	if(r=ssl_generate_keying_material(ssl,d))
+-          ABORT(r);
+-	break;
+       case TLSV1_VERSION:
++      case TLSV11_VERSION:
++      case TLSV12_VERSION:
+ 	if(r=ssl_generate_keying_material(ssl,d))
+ 	  ABORT(r);
+ 	break;
+@@ -535,10 +539,9 @@
+     
+     switch(ssl->version){
+       case SSLV3_VERSION:
+-	if(r=ssl_generate_keying_material(ssl,d))
+-          ABORT(r);
+-	break;
+       case TLSV1_VERSION:
++      case TLSV11_VERSION:
++      case TLSV12_VERSION:
+ 	if(r=ssl_generate_keying_material(ssl,d))
+ 	  ABORT(r);
+ 	break;
+@@ -572,7 +575,7 @@
+     int left=out->len;
+     int tocpy;
+     UCHAR *A;
+-    UCHAR _A[20],tmp[20];
++    UCHAR _A[128],tmp[128];
+     unsigned int A_l,tmp_l;
+     HMAC_CTX hm;
+ 
+@@ -665,6 +668,53 @@
+ 
+   }
+ 
++static int tls12_prf(ssl,secret,usage,rnd1,rnd2,out)
++  ssl_obj *ssl;
++  Data *secret;
++  char *usage;
++  Data *rnd1;
++  Data *rnd2;
++  Data *out;
++
++  {
++    const EVP_MD *md;
++    int r,_status;
++    Data *sha_out=0;
++    Data *seed;
++    UCHAR *ptr;
++    int i, dgi;
++
++    if(r=r_data_alloc(&sha_out,MAX(out->len,64))) /* assume max SHA512 */
++      ABORT(r);
++    if(r=r_data_alloc(&seed,strlen(usage)+rnd1->len+rnd2->len))
++      ABORT(r);
++    ptr=seed->data;
++    memcpy(ptr,usage,strlen(usage)); ptr+=strlen(usage);
++    memcpy(ptr,rnd1->data,rnd1->len); ptr+=rnd1->len;
++    memcpy(ptr,rnd2->data,rnd2->len); ptr+=rnd2->len;    
++
++    /* Earlier versions of openssl didn't have SHA256 of course... */
++    dgi = MAX(DIG_SHA256, ssl->cs->dig)-0x40;
++    if ((md=EVP_get_digestbyname(digests[dgi])) == NULL) {
++        DBG((0,"Cannot get EVP for digest %s, openssl library current?",
++                    digests[dgi]));
++        ERETURN(SSL_BAD_MAC);
++    }
++    if(r=tls_P_hash(ssl,secret,seed,md,sha_out))
++      ABORT(r);
++
++    for(i=0;i<out->len;i++)
++      out->data[i]=sha_out->data[i];
++
++    CRDUMPD("PRF out",out);
++    _status=0;
++  abort:
++    r_data_destroy(&sha_out);
++    r_data_destroy(&seed);
++    return(_status);
++
++  }
++
+ static int ssl3_generate_export_iv(ssl,r1,r2,out)
+   ssl_obj *ssl;
+   Data *r1;
+--- ssldump-0.9b3/ssl/ssl_h.h			2002-08-17 03:33:17.000000000 +0200
++++ ssldump-0.9b3/ssl/ssl_h.h.tlsv12		2014-05-04 05:17:30.000000000 +0200
+@@ -121,6 +121,8 @@
+ 
+ #define SSLV3_VERSION	       0x300
+ #define TLSV1_VERSION	       0x301
++#define TLSV11_VERSION	       0x302
++#define TLSV12_VERSION	       0x303
+ 
+ /*State defines*/
+ #define SSL_ST_SENT_NOTHING             0
