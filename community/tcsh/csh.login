@@ -35,8 +35,8 @@ setenv SHELL /bin/tcsh
 ##
 ## Setup a default MAIL variable
 ##
-if ( -f /var/spool/mail/$USER ) then
-    setenv MAIL /var/spool/mail/$USER
+if ( -f /var/mail/$USER ) then
+    setenv MAIL /var/mail/$USER
     set mail=$MAIL
 endif
 
