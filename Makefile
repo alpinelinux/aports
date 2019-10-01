@@ -69,7 +69,7 @@ P=$(PACKAGE)-$(VERSION)
 all:	$(USR_BIN_FILES) functions.sh
 
 clean:
-	@rm -f $(USR_BIN_FILES) functions.sh
+	@rm -f $(USR_BIN_FILES) *.o functions.sh
 
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS-$@) -o $@ -c $<
