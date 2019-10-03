@@ -1,0 +1,201 @@
+diff --git a/README b/README
+index 6ed7de2..f5dc7f2 100644
+--- a/README
++++ b/README
+@@ -59,7 +59,7 @@ REQUIREMENTS
+ The use of CacheFiles and its daemon requires the following features to be
+ available in the system and in the cache filesystem:
+ 
+-	- dnotify.
++	- inotify.
+ 
+ 	- extended attributes (xattrs).
+ 
+@@ -255,7 +255,7 @@ The active cache objects all reside in the first directory.  The CacheFiles
+ kernel module moves any retired or culled objects that it can't simply unlink
+ to the graveyard from which the daemon will actually delete them.
+ 
+-The daemon uses dnotify to monitor the graveyard directory, and will delete
++The daemon uses inotify to monitor the graveyard directory, and will delete
+ anything that appears therein.
+ 
+ 
+diff --git a/cachefilesd.c b/cachefilesd.c
+index d4d236f..130b718 100644
+--- a/cachefilesd.c
++++ b/cachefilesd.c
+@@ -88,7 +88,12 @@ static int nopendir;
+ 
+ /* current scan point */
+ static struct object *scan_cursor;
+-static bool scan_signalled, stop_signalled, reap_signalled;
++static bool scan_signalled, stop_signalled;
++
++/* inotify file descriptor, watch descriptor, and poll struct array */
++static int inotify_fd;
++static int watch_d;
++static struct pollfd poll_fds[1];
+ 
+ /* ranked order of cullable objects
+  * - we have two tables: one we're building and one that's full of ready to be
+@@ -216,8 +221,8 @@ void __message(int dlevel, int level, const char *fmt, ...)
+ 
+ static void open_cache(void);
+ static void cachefilesd(void) __attribute__((noreturn));
+-static void reap_graveyard(void);
+-static void reap_graveyard_aux(const char *dirname);
++static void clear_watched_events(void);
++static void reap_graveyard(const char *dirname);
+ static void read_cache_state(void);
+ static int is_object_in_use(const char *filename);
+ static void cull_file(const char *filename);
+@@ -241,15 +246,6 @@ static void sigterm(int sig)
+ 	stop_signalled = true;
+ }
+ 
+-/*****************************************************************************/
+-/*
+- * the graveyard was populated
+- */
+-static void sigio(int sig)
+-{
+-	reap_signalled = true;
+-}
+-
+ /*****************************************************************************/
+ /*
+  * redo scan after a time since the last scan turned up no results
+@@ -616,6 +612,19 @@ static void open_cache(void)
+ 	if (graveyardfd < 0)
+ 		oserror("Unable to open graveyard directory");
+ 
++	/* set up notification on graveyard */
++	inotify_fd = inotify_init1(IN_NONBLOCK);
++	if (inotify_fd == -1)
++		oserror("Unable to initialize inotify on graveyard directory");
++
++	watch_d = inotify_add_watch(inotify_fd, graveyardpath,
++		IN_MOVED_TO | IN_CREATE);
++	if (watch_d == -1)
++		oserror("Unable to add inotify watch on graveyard directory");
++
++	poll_fds[0].fd = inotify_fd;
++	poll_fds[0].events = POLLIN;
++
+ 	if (fstatfs(graveyardfd, &sfs) < 0)
+ 		oserror("Unable to stat cache filesystem");
+ 
+@@ -652,7 +661,6 @@ static void cachefilesd(void)
+ 	 * before calling poll so that we don't race and miss something.
+ 	 */
+ 	sigemptyset(&sigs);
+-	sigaddset(&sigs, SIGIO);
+ 	sigaddset(&sigs, SIGINT);
+ 	sigaddset(&sigs, SIGTERM);
+ 	sigaddset(&sigs, SIGALRM);
+@@ -661,7 +669,7 @@ static void cachefilesd(void)
+ 	signal(SIGINT, sigterm);
+ 
+ 	/* check the graveyard for graves */
+-	reap_graveyard();
++	reap_graveyard(graveyardpath);
+ 
+ 	while (!stop_signalled) {
+ 		bool do_cull = false;
+@@ -730,12 +738,11 @@ static void cachefilesd(void)
+ 		 * scan initiation before polling so that we sleep without
+ 		 * racing against the signal handlers.
+ 		 */
+-		if (!scan_in_progress && !reap_signalled && !do_cull) {
++		if (!scan_in_progress && !do_cull) {
+ 			if (sigprocmask(SIG_BLOCK, &sigs, &osigs) < 0)
+ 				oserror("Unable to block signals");
+ 
+-			if (!reap_signalled &&
+-			    !stop_signalled &&
++			if (!stop_signalled &&
+ 			    !scan_signalled) {
+ 				debug(1, "Poll");
+ 				if (ppoll(pollfds, 1, NULL, &osigs) < 0 &&
+@@ -782,34 +789,49 @@ static void cachefilesd(void)
+ 			}
+ 		}
+ 
+-		if (reap_signalled)
+-			reap_graveyard();
++		/* if we saw something created/moved to the graveyard, reap it */
++		if (poll(poll_fds, 1, -1) == 0) {
++			if (poll_fds[0].revents && POLLIN) {
++				/* graveyard events happened */
++				clear_watched_events();
++				reap_graveyard(graveyardpath);
++			}
++		} else {
++			if (errno != EINTR)
++				oserror("Error while polling graveyard watch");
++		}
+ 	}
+ 
++	/* cleanup inotify_fd */
++	close(inotify_fd);
++
+ 	notice("Daemon Terminated");
+ 	exit(0);
+ }
+ 
+ /*****************************************************************************/
+ /*
+- * check the graveyard directory for graves to delete
++ * clear available watched events by reading them
+  */
+-static void reap_graveyard(void)
++static void clear_watched_events(void)
+ {
+-	/* set a one-shot notification to catch more graves appearing */
+-	reap_signalled = false;
+-	signal(SIGIO, sigio);
+-	if (fcntl(graveyardfd, F_NOTIFY, DN_CREATE) < 0)
+-		oserror("unable to set notification on graveyard");
+-
+-	reap_graveyard_aux(graveyardpath);
++	char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
++	ssize_t len;
++
++	while (true) {
++		len = read(inotify_fd, buf, sizeof buf);
++		if (len == -1 && errno != EAGAIN)
++			oserror("Error reading inotify events");
++		if (len <= 0)
++			break;
++	}
+ }
+ 
+ /*****************************************************************************/
+ /*
+  * recursively remove dead stuff from the graveyard
+  */
+-static void reap_graveyard_aux(const char *dirname)
++static void reap_graveyard(const char *dirname)
+ {
+ 	struct dirent *de;
+ 	size_t len;
+@@ -838,8 +860,8 @@ static void reap_graveyard_aux(const char *dirname)
+ 			if (de->d_name[0] == '.') {
+ 				if (de->d_name[1] == '\0')
+ 					continue;
+-				if (de->d_name[1] == '.' ||
+-				    de->d_name[1] == '\0')
++				if (de->d_name[1] == '.' &&
++				    de->d_name[2] == '\0')
+ 					continue;
+ 			}
+ 
+@@ -864,7 +886,7 @@ static void reap_graveyard_aux(const char *dirname)
+ 			}
+ 			memcpy(name, de->d_name, len);
+ 
+-			reap_graveyard_aux(name);
++			reap_graveyard(name);
+ 
+ 			/* which we then attempt to remove */
+ 			debug(1, "rmdir %s", name);
