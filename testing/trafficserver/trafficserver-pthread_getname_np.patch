@@ -1,33 +1,141 @@
+From 9e03dc66db5c20177ce0a9d4065e99d729e3ac13 Mon Sep 17 00:00:00 2001
+From: Masakazu Kitajo <maskit@apache.org>
+Date: Sun, 11 Nov 2018 21:54:57 +0900
+Subject: [PATCH] Print thread name instead of thread id
+
+---
+ configure.ac                     | 40 ++++++++++++++++++++++++++++++++
+ include/tscore/ink_thread.h      | 18 ++++++++++++++
+ src/tscore/BufferWriterFormat.cc |  7 ++----
+ src/tscore/Diags.cc              |  5 ++--
+ 4 files changed, 62 insertions(+), 8 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index eb758d2e55..eb89e5cd42 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1807,6 +1807,46 @@ AC_LINK_IFELSE([
+     AC_MSG_RESULT([no])
+ ])
+ 
++# pthread_getname_np / pthread_get_name_np:
++AC_MSG_CHECKING([pthread_getname_np()])
++AC_LINK_IFELSE([
++    AC_LANG_PROGRAM([
++#if HAVE_PTHREAD_H
++#include <pthread.h>
++#endif
++#if PTHREAD_NP_H
++#include <pthread_np.h>
++#endif
++      ], [
++        char name[[32]];
++        pthread_getname_np(pthread_self(), name, sizeof(name));
++    ])
++  ], [
++    AC_DEFINE(HAVE_PTHREAD_GETNAME_NP, 1, [Whether pthread_getname_np() is available])
++    AC_MSG_RESULT([yes])
++  ], [
++    AC_MSG_RESULT([no])
++    AC_MSG_CHECKING([pthread_get_name_np()])
++    AC_LINK_IFELSE([
++        AC_LANG_PROGRAM([
++    #if HAVE_PTHREAD_H
++    #include <pthread.h>
++    #endif
++    #if PTHREAD_NP_H
++    #include <pthread_np.h>
++    #endif
++          ], [
++            char name[[32]];
++            pthread_get_name_np(pthread_self(), name, sizeof(name));
++        ])
++      ], [
++        AC_DEFINE(HAVE_PTHREAD_GET_NAME_NP, 1, [Whether pthread_get_name_np() is available])
++        AC_MSG_RESULT([yes])
++      ], [
++        AC_MSG_RESULT([no])
++    ])
++])
++
+ # BSD-derived systems populate the socket length in the structure itself. It's
+ # redundant to check all of these, but hey, I need the typing practice.
+ AC_CHECK_MEMBER([struct sockaddr.sa_len], [], [], [#include <netinet/in.h>])
+diff --git a/include/tscore/ink_thread.h b/include/tscore/ink_thread.h
+index 4e321316e2..5382c9a2a5 100644
+--- a/include/tscore/ink_thread.h
++++ b/include/tscore/ink_thread.h
+@@ -47,6 +47,10 @@
+ #include <pthread_np.h>
+ #endif
+ 
++#if HAVE_SYS_PRCTL_H && defined(PR_SET_NAME)
++#include <sys/prctl.h>
++#endif
++
+ #define INK_MUTEX_INIT PTHREAD_MUTEX_INITIALIZER
+ #define INK_THREAD_STACK_MIN PTHREAD_STACK_MIN
+ 
+@@ -307,4 +311,18 @@ ink_set_thread_name(const char *name ATS_UNUSED)
+ #endif
+ }
+ 
++static inline void
++ink_get_thread_name(char *name, size_t len)
++{
++#if defined(HAVE_PTHREAD_GETNAME_NP)
++  pthread_getname_np(pthread_self(), name, len);
++#elif defined(HAVE_PTHREAD_GET_NAME_NP)
++  pthread_get_name_np(pthread_self(), name, len);
++#elif defined(HAVE_SYS_PRCTL_H) && defined(PR_GET_NAME)
++  prctl(PR_GET_NAME, name, 0, 0, 0);
++#else
++  snprintf(name, len, "0x%" PRIx64, (uint64_t)ink_thread_self());
++#endif
++}
++
+ #endif /* #if defined(POSIX_THREAD) */
 diff --git a/src/tscore/BufferWriterFormat.cc b/src/tscore/BufferWriterFormat.cc
-index d5152e6..c83c49a 100644
+index d5152e6f24..e3bf9a7843 100644
 --- a/src/tscore/BufferWriterFormat.cc
 +++ b/src/tscore/BufferWriterFormat.cc
-@@ -993,13 +993,11 @@ BWF_ThreadID(ts::BufferWriter &w, ts::BWFSpec const &spec)
+@@ -23,6 +23,7 @@
+ 
+ #include "tscore/BufferWriter.h"
+ #include "tscore/bwf_std_format.h"
++#include "tscore/ink_thread.h"
+ #include <unistd.h>
+ #include <sys/param.h>
+ #include <cctype>
+@@ -993,13 +994,9 @@ BWF_ThreadID(ts::BufferWriter &w, ts::BWFSpec const &spec)
  void
  BWF_ThreadName(ts::BufferWriter &w, ts::BWFSpec const &spec)
  {
 -#if defined(__FreeBSD_version)
 -  bwformat(w, spec, "thread"sv); // no thread names in FreeBSD.
 -#else
--  char name[32]; // manual says at least 16, bump that up a bit.
-+  char name[32] = "thread"; // manual says at least 16, bump that up a bit.
-+#if defined(HAVE_PTHREAD_GETNAME_NP)
-   pthread_getname_np(pthread_self(), name, sizeof(name));
--  bwformat(w, spec, std::string_view{name});
- #endif
-+  bwformat(w, spec, std::string_view{name});
+   char name[32]; // manual says at least 16, bump that up a bit.
+-  pthread_getname_np(pthread_self(), name, sizeof(name));
++  ink_get_thread_name(name, sizeof(name));
+   bwformat(w, spec, std::string_view{name});
+-#endif
  }
  
  static bool BW_INITIALIZED __attribute__((unused)) = []() -> bool {
-diff --git a/configure.ac b/configure.ac
-index dc9b69e..da79663 100644
---- a/configure.ac
-+++ b/configure.ac
-@@ -1141,6 +1141,7 @@ dnl specifically for pthread_yield() here. In addition, ASAN hijacks pthread_cre
- dnl we can't use that anymore.
- AC_SEARCH_LIBS([pthread_yield], [pthread], [], [])
- AC_CHECK_FUNCS([pthread_mutexattr_settype])
-+AC_CHECK_FUNCS([pthread_getname_np])
+diff --git a/src/tscore/Diags.cc b/src/tscore/Diags.cc
+index 8d2cd02a18..179be9ec8a 100644
+--- a/src/tscore/Diags.cc
++++ b/src/tscore/Diags.cc
+@@ -243,10 +243,9 @@ Diags::print_va(const char *debug_tag, DiagsLevel diags_level, const SourceLocat
+   size_t timestamp_end_offset = format_writer.size();
  
- dnl XXX The following check incorrectly causes the build to succeed
- dnl on Darwin. We should be using AC_SEARCH_LIBS, but rest_init is
+   ///////////////////////
+-  // add the thread id //
++  // add the thread name //
+   ///////////////////////
+-  format_writer.fill(
+-    snprintf(format_writer.auxBuffer(), format_writer.remaining(), "{0x%" PRIx64 "} ", (uint64_t)ink_thread_self()));
++  format_writer.print("{thread-name} ");
+ 
+   //////////////////////////////////
+   // append the diag level prefix //
