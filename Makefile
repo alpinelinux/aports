@@ -102,7 +102,7 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	for i in $(USR_BIN_FILES); do\
 		install -m 755 $$i $(DESTDIR)/$(bindir)/$$i;\
 	done
-	chmod 4111 $(DESTDIR)/$(prefix)/bin/abuild-sudo
+	chmod 4555 $(DESTDIR)/$(prefix)/bin/abuild-sudo
 	for i in adduser addgroup apk; do \
 		ln -fs abuild-sudo $(DESTDIR)/$(bindir)/abuild-$$i; \
 	done
