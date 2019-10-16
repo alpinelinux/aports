@@ -2,53 +2,62 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 
 pkgname=edk2
-pkgver=0.0.20170624
-_commitid=vUDK2017
+pkgver=0.0.201908
+_realver=edk2-stable201908
+_sslver=1.1.1b
+_sfver=3e
 pkgrel=0
 pkgdesc="EFI Development Kit II"
 url="https://github.com/tianocore/tianocore.github.io/wiki/EDK-II/"
-arch="x86_64"
+arch="x86_64 aarch64"
 license="BSD"
-depends=""
-makedepends="bash python2 iasl nasm util-linux-dev"
-install=""
-subpackages="ovmf"
-source="$pkgname-$pkgver.tar.gz::https://github.com/tianocore/$pkgname/archive/$_commitid.tar.gz
-	build-hack.patch"
-builddir="$srcdir/$pkgname-$_commitid"
+makedepends="bash python3 iasl nasm util-linux-dev"
+options="!check" # has no checks
+subpackages="ovmf::noarch"
+source="$pkgname-$pkgver.tar.gz::https://github.com/tianocore/$pkgname/archive/$_realver.tar.gz
+	https://www.openssl.org/source/openssl-$_sslver.tar.gz
+	http://www.jhauser.us/arithmetic/SoftFloat-$_sfver.zip
+	build-hack.patch
+	disable-werror.patch
+	"
+builddir="$srcdir/$pkgname-$_realver"
 
 case "$CARCH" in
-x86)		TARGET_ARCH=IA32; OVMFPKG=OvmfPkgIa32.dsc;;
-x86_64)		TARGET_ARCH=X64; OVMFPKG=OvmfPkgX64.dsc;;
+x86)	 TARGET_ARCH=IA32;	PLATFORM=OvmfPkg/OvmfPkgIa32X64.dsc;;
+x86_64)	 TARGET_ARCH=X64;	PLATFORM=OvmfPkg/OvmfPkgX64.dsc;;
+aarch64) TARGET_ARCH=AARCH64;	PLATFORM=ArmVirtPkg/ArmVirtQemu.dsc;;
 esac
 
-# use GCC49 instead of GCC5 until gcc 6.3 (see: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=70955)
-TOOLCHAIN=GCC49
-RELEASE=DEBUG
+TOOLCHAIN=GCC5
+RELEASE=RELEASE
 
 prepare() {
-	cd "$builddir"
 	# unix line endings for the files to be patched
-	sed -e 's/\r$//' -i BaseTools/Source/C/VfrCompile/VfrUtilityLib.cpp BaseTools/Source/C/VolInfo/VolInfo.c
+	sed -e 's/\r$//' -i BaseTools/Source/C/VfrCompile/VfrUtilityLib.cpp \
+		BaseTools/Source/C/VolInfo/VolInfo.c
+	rm -rf CryptoPkg/Library/OpensslLib/openssl
+	ln -s "$srcdir"/openssl-$_sslver CryptoPkg/Library/OpensslLib/openssl
+	rm -rf ArmPkg/Library/ArmSoftFloatLib/berkeley-softfloat-3
+	ln -s "$srcdir"/SoftFloat-$_sfver \
+		ArmPkg/Library/ArmSoftFloatLib/berkeley-softfloat-3
 	default_prepare
 }
 
 build() {
-	cd "$builddir"
-	bash -c ". edksetup.sh" || return 1
-	make -j1 -C BaseTools || return 1
-
+	export PYTHON_COMMAND=python3
 	export WORKSPACE=$PWD
 	export PACKAGES_PATH=$PWD
 	export EDK_TOOLS_PATH=$PWD/BaseTools/
 	export PATH=$PWD/BaseTools/BinWrappers/PosixLike/:$PATH
 
+	bash -c ". edksetup.sh"
+	make -C BaseTools
+
 	msg "Building OVMF"
-	command build -b ${RELEASE} -a ${TARGET_ARCH} -p OvmfPkg/${OVMFPKG} -t ${TOOLCHAIN} -n ${JOBS:-2} || return 1
+	command build -b ${RELEASE} -a ${TARGET_ARCH} -t ${TOOLCHAIN} -p ${PLATFORM} -n ${JOBS:-2}
 }
 
 package() {
-	cd "$builddir"
 	mkdir -p "$pkgdir"/usr/bin \
 		"$pkgdir"/usr/share/$pkgname/Conf \
 		"$pkgdir"/usr/share/$pkgname/Scripts
@@ -59,27 +68,41 @@ package() {
 	install BaseTools/Conf/*.template "$pkgdir"/usr/share/$pkgname/Conf
 	install BaseTools/Scripts/GccBase.lds "$pkgdir"/usr/share/$pkgname/Scripts
 
-	cp -R BaseTools/Source/Python "$pkgdir"/usr/share/$pkgname/Python
-	for i in build BPDG Ecc GenDepex GenFds GenPatchPcdTable PatchPcdValue TargetTool Trim UPT; do
-		echo '#!/bin/sh
-export PYTHONPATH=/usr/share/$pkgname/Python
-exec python '/usr/share/$pkgname/Python/$i/$i.py' "$@"' > "$pkgdir"/usr/bin/$i
-		chmod +x "$pkgdir"/usr/bin/$i
+	for i in $(find BaseTools/Source/Python -type d -maxdepth 1); do
+		local mod=${i##*/}
+		test -f "$i/$mod.py" || continue
+		cp -R BaseTools/Source/Python/"$mod" "$pkgdir"/usr/share/edk2/Python/
+		cat <<- EOF > "$pkgdir"/usr/bin/"$mod".py
+		#!/bin/sh
+		export PYTHONPATH=/usr/share/edk2/Python
+		exec $PYTHON_COMMAND /usr/share/edk2/Python/$mod/$mod.py "\$@"
+		EOF
+		chmod +x "$pkgdir"/usr/bin/"$mod".py
 	done
-	install -d "$pkgdir"/usr/share/OVMF
-	install Build/Ovmf${TARGET_ARCH}/${RELEASE}_${TOOLCHAIN}/FV/OVMF*.fd "$pkgdir"/usr/share/OVMF/
 }
 
 ovmf() {
 	pkgdesc="Open Virtual Machine Firmware (OVMF) BIOS"
 	license="BSD MIT"
 
+	for fw in "$builddir"/Build/*/${RELEASE}_${TOOLCHAIN}/FV/*.fd; do
+		install -D $fw "$subpkgdir"/usr/share/OVMF/${fw##*/}
+	done
 
-	mkdir -p "$subpkgdir"/usr/share/$subpkgname
-	mv "$pkgdir"/usr/share/OVMF "$subpkgdir"/usr/share/
+	# dont ship memfd for now to save space
+	rm -f "$subpkgdir"/usr/share/OVMF/MEMFD.fd
+
 	# compat symlink
-	ln -s ../OVMF/OVMF.fd "$subpkgdir"/usr/share/ovmf/bios.bin
+	case $CARCH in
+		x86_64) local bios=OVMF.fd;;
+		aarch64) local bios=QEMU_EFI.fd;;
+	esac
+	install -d "$subpkgdir"/usr/share/ovmf
+	ln -sf ../OVMF/$bios "$subpkgdir"/usr/share/ovmf/bios.bin
 }
 
-sha512sums="d941a661d570b0f69962105920b3524c4aac1f4883468914305eb68015148d70f6593c52872a79a6143cf87dc44e9ce2b8957834b4524cb8a04b12473c6d7d81  edk2-0.0.20170624.tar.gz
-a7d4ab2c82b62ba01c86e59f53bd3896d661c9bfbb9db9598734155b66d5fe03eca4a2a9993a14d3bf555992c6d01ba5d7a15868ff9ec6ed98b8a9b3895bb7df  build-hack.patch"
+sha512sums="439ed3d1ba0cfe7db4aa1a0b1298a4906e289bcb5600f9c248a3fcd9b9894b5591062c8f720ca432513a27e56ef0b858d15e33b38602258b09cecd5d2f9959a4  edk2-0.0.201908.tar.gz
+b54025fbb4fe264466f3b0d762aad4be45bd23cd48bdb26d901d4c41a40bfd776177e02230995ab181a695435039dbad313f4b9a563239a70807a2e19ecf045d  openssl-1.1.1b.tar.gz
+3fedcd0060affb2d8fc7995894133cfed6a495c8717df0d30c89885223c38749f25743598383736036332dad6353c6a3f027f5a94a696660f7c4b607e33e534c  SoftFloat-3e.zip
+a7d4ab2c82b62ba01c86e59f53bd3896d661c9bfbb9db9598734155b66d5fe03eca4a2a9993a14d3bf555992c6d01ba5d7a15868ff9ec6ed98b8a9b3895bb7df  build-hack.patch
+a7c566f2347ee08ee062be45c340f38dc047c31b1541b8eca994692c8d04f48fea45830dce5933699e9bf9207deeaf22e09639c605a896171f01d9bcd68878ce  disable-werror.patch"
