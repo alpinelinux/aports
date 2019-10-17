@@ -6,6 +6,7 @@ cleanup() {
 
 tmp="$(mktemp -d)"
 trap cleanup EXIT
+chmod 0755 "$tmp"
 
 arch="$(apk --print-arch)"
 repositories_file=/etc/apk/repositories
