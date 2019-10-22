@@ -218,6 +218,7 @@ while [ $# -gt 0 ]; do
 	--simulate) _simulate="yes";;
 	--checksum) _checksum="yes";;
 	--yaml) _yaml="yes";;
+	--help) usage; exit 0;;
 	--) break ;;
 	-*) usage; exit 1;;
 	esac

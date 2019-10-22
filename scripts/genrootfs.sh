@@ -6,6 +6,7 @@ cleanup() {
 
 tmp="$(mktemp -d)"
 trap cleanup EXIT
+chmod 0755 "$tmp"
 
 arch="$(apk --print-arch)"
 repositories_file=/etc/apk/repositories
@@ -29,14 +30,14 @@ fi
 
 ${APK:-apk} add --keys-dir "$keys_dir" --no-cache \
 	--repositories-file "$repositories_file" \
-	--no-script --root "$tmp" --initdb \
+	--no-script --root "$tmp" --initdb --arch "$arch" \
 	"$@"
 for link in $("$tmp"/bin/busybox --list-full); do
 	[ -e "$tmp"/$link ] || ln -s /bin/busybox "$tmp"/$link
 done
 
 ${APK:-apk} fetch --keys-dir "$keys_dir" --no-cache \
-	--repositories-file "$repositories_file" \
+	--repositories-file "$repositories_file" --root "$tmp" \
 	--stdout --quiet alpine-base | tar -zx -C "$tmp" etc/
 
 # make sure root login is disabled

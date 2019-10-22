@@ -7,19 +7,32 @@ rpi_gen_cmdline() {
 }
 
 rpi_gen_config() {
+	cat <<-EOF
+	# do not modify this file as it will be overwritten on upgrade.
+	# create and/or modify usercfg.txt instead.
+	# https://www.raspberrypi.org/documentation/configuration/config-txt
+	EOF
 	case "$ARCH" in
 	armhf)
 		cat <<-EOF
-		disable_splash=1
-		boot_delay=0
-		gpu_mem=256
-		gpu_mem_256=64
 		[pi0]
+		kernel=boot/vmlinuz-rpi
+		initramfs boot/initramfs-rpi
+		[pi0w]
 		kernel=boot/vmlinuz-rpi
 		initramfs boot/initramfs-rpi
 		[pi1]
 		kernel=boot/vmlinuz-rpi
 		initramfs boot/initramfs-rpi
+		[pi2]
+		kernel=boot/vmlinuz-rpi2
+		initramfs boot/initramfs-rpi2
+		[pi3]
+		kernel=boot/vmlinuz-rpi2
+		initramfs boot/initramfs-rpi2
+		[pi3+]
+		kernel=boot/vmlinuz-rpi2
+		initramfs boot/initramfs-rpi2
 		[all]
 		include usercfg.txt
 		EOF
@@ -41,14 +54,9 @@ rpi_gen_config() {
 	;;
 	aarch64)
 		cat <<-EOF
-		disable_splash=1
-		boot_delay=0
 		arm_control=0x200
 		kernel=boot/vmlinuz-rpi
 		initramfs boot/initramfs-rpi
-		# uncomment line to enable serial on ttyS0 on rpi3
-		# NOTE: This fixes the core_freq to 250Mhz
-		# enable_uart=1
 		include usercfg.txt
 		EOF
 	;;
@@ -79,8 +87,8 @@ profile_rpi() {
 		armhf) kernel_flavors="rpi rpi2";;
 		armv7) kernel_flavors="rpi2";;
 	esac
-	kernel_cmdline="dwc_otg.lpm_enable=0 console=tty1"
-	initfs_features="base bootchart squashfs ext4 f2fs kms mmc raid scsi usb"
+	kernel_cmdline="console=tty1"
+	initfs_features="base squashfs mmc usb kms dhcp https"
 	hostname="rpi"
 	grub_mod=
 }
@@ -88,7 +96,7 @@ profile_rpi() {
 build_uboot() {
 	set -x
 	# FIXME: Fix apk-tools to extract packages directly
-	local pkg pkgs="$(apk fetch  --simulate --root "$APKROOT" --recursive u-boot-all | sed -ne "s/^Downloading \([^0-9.]*\)\-.*$/\1/p")"
+	local pkg pkgs="$(apk fetch  --simulate --root "$APKROOT" --recursive u-boot-all | sed -ne "s/^Downloading \(.*\)\-[0-9].*$/\1/p")"
 	for pkg in $pkgs; do
 		[ "$pkg" = "u-boot-all" ] || apk fetch --root "$APKROOT" --stdout $pkg | tar -C "$DESTDIR" -xz usr
 	done
