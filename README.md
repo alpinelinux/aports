@@ -6,13 +6,14 @@ Alpine Linux package, along with the required patches and scripts,
 if any.
 
 It also contains some extra files and directories related to testing
-(and therefore, building) those packages on GitHub (via Travis and Drone.io).
+(and therefore, building) those packages on GitLab (via GitLab CI)
+and GitHub (via Travis and Drone.io).
 
 If you want to contribute, please read the
 [contributor guide](https://wiki.alpinelinux.org/wiki/Alpine_Linux:Contribute)
 and feel free to either submit a git patch on the Alpine aports
 mailing list (<alpine-aports@lists.alpinelinux.org>), or to submit a
-pull request on [GitHub](https://github.com/alpinelinux/aports).
+merge request on [GitLab](https://gitlab.alpinelinux.org/alpine/aports).
 
 
 Git Hooks
