@@ -1,5 +1,6 @@
 setup() {
 	export ABUILD=../abuild
+	export ABUILD_SHAREDIR=$PWD/..
 }
 
 @test "help text" {
