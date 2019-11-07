@@ -93,6 +93,9 @@ help:
 	@echo "$(P) makefile"
 	@echo "usage: make install [ DESTDIR=<path> ]"
 
+check: $(USR_BIN_FILE) functions.sh
+	cd tests && bats *.bats
+
 install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	install -d $(DESTDIR)/$(bindir) $(DESTDIR)/$(sysconfdir) \
 		$(DESTDIR)/$(datadir) $(DESTDIR)/$(mandir)/man1 \
