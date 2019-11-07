@@ -5,7 +5,7 @@ VERSION		:= 3.4.0
 prefix		?= /usr
 bindir		?= $(prefix)/bin
 sysconfdir	?= /etc
-datadir		?= $(prefix)/share/$(PACKAGE)
+sharedir		?= $(prefix)/share/$(PACKAGE)
 mandir		?= $(prefix)/share/man
 
 SCRIPTS		:= abuild abuild-keygen abuild-sign newapkbuild \
@@ -36,7 +36,7 @@ LINK		= $(CC) $(OBJS-$@) -o $@ $(LDFLAGS) $(LDFLAGS-$@) $(LIBS-$@)
 SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@prefix@:$(prefix):g' \
 			-e 's:@sysconfdir@:$(sysconfdir):g' \
-			-e 's:@datadir@:$(datadir):g' \
+			-e 's:@sharedir@:$(sharedir):g' \
 
 SSL_CFLAGS	?= $(shell pkg-config --cflags openssl)
 SSL_LDFLAGS	?= $(shell pkg-config --cflags openssl)
@@ -98,7 +98,7 @@ check: $(USR_BIN_FILE) functions.sh
 
 install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	install -d $(DESTDIR)/$(bindir) $(DESTDIR)/$(sysconfdir) \
-		$(DESTDIR)/$(datadir) $(DESTDIR)/$(mandir)/man1 \
+		$(DESTDIR)/$(sharedir) $(DESTDIR)/$(mandir)/man1 \
 		$(DESTDIR)/$(mandir)/man5
 	for i in $(USR_BIN_FILES); do\
 		install -m 755 $$i $(DESTDIR)/$(bindir)/$$i;\
@@ -118,7 +118,7 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	fi
 	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild/
 	cp $(AUTOTOOLS_TOOLCHAIN_FILES) $(DESTDIR)/$(prefix)/share/abuild/
-	cp functions.sh $(DESTDIR)/$(datadir)/
+	cp functions.sh $(DESTDIR)/$(sharedir)/
 
 .gitignore: Makefile
 	echo "*.tar.bz2" > $@
