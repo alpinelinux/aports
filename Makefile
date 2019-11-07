@@ -120,7 +120,7 @@ install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
 	cp functions.sh $(DESTDIR)/$(sharedir)/
 
 depends depend:
-	sudo apk --no-cache add -U openssl-dev zlib-dev
+	sudo apk --no-cache -U --virtual .abuild-depends add openssl-dev zlib-dev
 
 .gitignore: Makefile
 	echo "*.tar.bz2" > $@
