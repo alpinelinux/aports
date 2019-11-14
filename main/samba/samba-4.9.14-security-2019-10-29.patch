@@ -1,0 +1,539 @@
+From fc6022b9b19473076c4236fdf4ac474f44ca73e2 Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jra@samba.org>
+Date: Mon, 5 Aug 2019 13:39:53 -0700
+Subject: [PATCH 1/7] CVE-2019-10218 - s3: libsmb: Protect SMB1 client code
+ from evil server returned names.
+
+Disconnect with NT_STATUS_INVALID_NETWORK_RESPONSE if so.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14071
+
+Signed-off-by: Jeremy Allison <jra@samba.org>
+---
+ source3/libsmb/clilist.c | 75 ++++++++++++++++++++++++++++++++++++++++
+ source3/libsmb/proto.h   |  3 ++
+ 2 files changed, 78 insertions(+)
+
+diff --git a/source3/libsmb/clilist.c b/source3/libsmb/clilist.c
+index 5cb1fce4338..4f518339e2b 100644
+--- a/source3/libsmb/clilist.c
++++ b/source3/libsmb/clilist.c
+@@ -24,6 +24,66 @@
+ #include "trans2.h"
+ #include "../libcli/smb/smbXcli_base.h"
+ 
++/****************************************************************************
++ Check if a returned directory name is safe.
++****************************************************************************/
++
++static NTSTATUS is_bad_name(bool windows_names, const char *name)
++{
++	const char *bad_name_p = NULL;
++
++	bad_name_p = strchr(name, '/');
++	if (bad_name_p != NULL) {
++		/*
++		 * Windows and POSIX names can't have '/'.
++		 * Server is attacking us.
++		 */
++		return NT_STATUS_INVALID_NETWORK_RESPONSE;
++	}
++	if (windows_names) {
++		bad_name_p = strchr(name, '\\');
++		if (bad_name_p != NULL) {
++			/*
++			 * Windows names can't have '\\'.
++			 * Server is attacking us.
++			 */
++			return NT_STATUS_INVALID_NETWORK_RESPONSE;
++		}
++	}
++	return NT_STATUS_OK;
++}
++
++/****************************************************************************
++ Check if a returned directory name is safe. Disconnect if server is
++ sending bad names.
++****************************************************************************/
++
++NTSTATUS is_bad_finfo_name(const struct cli_state *cli,
++			const struct file_info *finfo)
++{
++	NTSTATUS status = NT_STATUS_OK;
++	bool windows_names = true;
++
++	if (cli->requested_posix_capabilities & CIFS_UNIX_POSIX_PATHNAMES_CAP) {
++		windows_names = false;
++	}
++	if (finfo->name != NULL) {
++		status = is_bad_name(windows_names, finfo->name);
++		if (!NT_STATUS_IS_OK(status)) {
++			DBG_ERR("bad finfo->name\n");
++			return status;
++		}
++	}
++	if (finfo->short_name != NULL) {
++		status = is_bad_name(windows_names, finfo->short_name);
++		if (!NT_STATUS_IS_OK(status)) {
++			DBG_ERR("bad finfo->short_name\n");
++			return status;
++		}
++	}
++	return NT_STATUS_OK;
++}
++
+ /****************************************************************************
+  Calculate a safe next_entry_offset.
+ ****************************************************************************/
+@@ -492,6 +552,13 @@ static NTSTATUS cli_list_old_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
+ 			TALLOC_FREE(finfo);
+ 			return NT_STATUS_NO_MEMORY;
+ 		}
++
++		status = is_bad_finfo_name(state->cli, finfo);
++		if (!NT_STATUS_IS_OK(status)) {
++			smbXcli_conn_disconnect(state->cli->conn, status);
++			TALLOC_FREE(finfo);
++			return status;
++		}
+ 	}
+ 	*pfinfo = finfo;
+ 	return NT_STATUS_OK;
+@@ -727,6 +794,14 @@ static void cli_list_trans_done(struct tevent_req *subreq)
+ 			ff_eos = true;
+ 			break;
+ 		}
++
++		status = is_bad_finfo_name(state->cli, finfo);
++		if (!NT_STATUS_IS_OK(status)) {
++			smbXcli_conn_disconnect(state->cli->conn, status);
++			tevent_req_nterror(req, status);
++			return;
++		}
++
+ 		if (!state->first && (state->mask[0] != '\0') &&
+ 		    strcsequal(finfo->name, state->mask)) {
+ 			DEBUG(1, ("Error: Looping in FIND_NEXT as name %s has "
+diff --git a/source3/libsmb/proto.h b/source3/libsmb/proto.h
+index 2bd61b1d2c2..e708e911b97 100644
+--- a/source3/libsmb/proto.h
++++ b/source3/libsmb/proto.h
+@@ -722,6 +722,9 @@ NTSTATUS cli_posix_whoami(struct cli_state *cli,
+ 
+ /* The following definitions come from libsmb/clilist.c  */
+ 
++NTSTATUS is_bad_finfo_name(const struct cli_state *cli,
++			const struct file_info *finfo);
++
+ NTSTATUS cli_list_old(struct cli_state *cli,const char *Mask,uint16_t attribute,
+ 		      NTSTATUS (*fn)(const char *, struct file_info *,
+ 				 const char *, void *), void *state);
+-- 
+2.17.1
+
+
+From 167f78aa97af6502cb2027dc9dad40399b0a9c4f Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jra@samba.org>
+Date: Tue, 6 Aug 2019 12:08:09 -0700
+Subject: [PATCH 2/7] CVE-2019-10218 - s3: libsmb: Protect SMB2 client code
+ from evil server returned names.
+
+Disconnect with NT_STATUS_INVALID_NETWORK_RESPONSE if so.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14071
+
+Signed-off-by: Jeremy Allison <jra@samba.org>
+---
+ source3/libsmb/cli_smb2_fnum.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/source3/libsmb/cli_smb2_fnum.c b/source3/libsmb/cli_smb2_fnum.c
+index 1cfa50ffbac..3cdf68dc24b 100644
+--- a/source3/libsmb/cli_smb2_fnum.c
++++ b/source3/libsmb/cli_smb2_fnum.c
+@@ -1017,6 +1017,13 @@ NTSTATUS cli_smb2_list(struct cli_state *cli,
+ 				goto fail;
+ 			}
+ 
++			/* Protect against server attack. */
++			status = is_bad_finfo_name(cli, finfo);
++			if (!NT_STATUS_IS_OK(status)) {
++				smbXcli_conn_disconnect(cli->conn, status);
++				goto fail;
++			}
++
+ 			if (dir_check_ftype((uint32_t)finfo->mode,
+ 					(uint32_t)attribute)) {
+ 				/*
+-- 
+2.17.1
+
+
+From e6de467a763b93152eef27726957a32879268fb7 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Thu, 19 Sep 2019 11:50:01 +1200
+Subject: [PATCH 3/7] CVE-2019-14833: Use utf8 characters in the unacceptable
+ password
+
+This shows that the "check password script" handling has a bug.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12438
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ selftest/knownfail.d/unacceptable-passwords | 1 +
+ selftest/target/Samba4.pm                   | 2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+ create mode 100644 selftest/knownfail.d/unacceptable-passwords
+
+diff --git a/selftest/knownfail.d/unacceptable-passwords b/selftest/knownfail.d/unacceptable-passwords
+new file mode 100644
+index 00000000000..75fa2fc32b8
+--- /dev/null
++++ b/selftest/knownfail.d/unacceptable-passwords
+@@ -0,0 +1 @@
++^samba.tests.samba_tool.user_check_password_script.samba.tests.samba_tool.user_check_password_script.UserCheckPwdTestCase.test_checkpassword_unacceptable\(chgdcpass:local\)
+\ No newline at end of file
+diff --git a/selftest/target/Samba4.pm b/selftest/target/Samba4.pm
+index b565d466477..d7c22ce4e23 100755
+--- a/selftest/target/Samba4.pm
++++ b/selftest/target/Samba4.pm
+@@ -1986,7 +1986,7 @@ sub provision_chgdcpass($$)
+ 	my $extra_provision_options = undef;
+ 	# This environment disallows the use of this password
+ 	# (and also removes the default AD complexity checks)
+-	my $unacceptable_password = "widk3Dsle32jxdBdskldsk55klASKQ";
++	my $unacceptable_password = "Paßßword-widk3Dsle32jxdBdskldsk55klASKQ";
+ 	push (@{$extra_provision_options}, "--dns-backend=BIND9_DLZ");
+ 	my $ret = $self->provision($prefix,
+ 				   "domain controller",
+-- 
+2.17.1
+
+
+From 70078d4ddf3b842eeadee058dadeef82ec4edf0b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bj=C3=B6rn=20Baumbach?= <bb@sernet.de>
+Date: Tue, 6 Aug 2019 16:32:32 +0200
+Subject: [PATCH 4/7] CVE-2019-14833 dsdb: send full password to check password
+ script
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+utf8_len represents the number of characters (not bytes) of the
+password. If the password includes multi-byte characters it is required
+to write the total number of bytes to the check password script.
+Otherwise the last bytes of the password string would be ignored.
+
+Therefore we rename utf8_len to be clear what it does and does
+not represent.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12438
+
+Signed-off-by: Björn Baumbach <bb@sernet.de>
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ selftest/knownfail.d/unacceptable-passwords |  1 -
+ source4/dsdb/common/util.c                  | 33 +++++++++++++++++----
+ 2 files changed, 27 insertions(+), 7 deletions(-)
+ delete mode 100644 selftest/knownfail.d/unacceptable-passwords
+
+diff --git a/selftest/knownfail.d/unacceptable-passwords b/selftest/knownfail.d/unacceptable-passwords
+deleted file mode 100644
+index 75fa2fc32b8..00000000000
+--- a/selftest/knownfail.d/unacceptable-passwords
++++ /dev/null
+@@ -1 +0,0 @@
+-^samba.tests.samba_tool.user_check_password_script.samba.tests.samba_tool.user_check_password_script.UserCheckPwdTestCase.test_checkpassword_unacceptable\(chgdcpass:local\)
+\ No newline at end of file
+diff --git a/source4/dsdb/common/util.c b/source4/dsdb/common/util.c
+index 18f700370a3..c7893bff43b 100644
+--- a/source4/dsdb/common/util.c
++++ b/source4/dsdb/common/util.c
+@@ -2088,21 +2088,36 @@ enum samr_ValidationStatus samdb_check_password(TALLOC_CTX *mem_ctx,
+ 						const uint32_t pwdProperties,
+ 						const uint32_t minPwdLength)
+ {
+-	const char *utf8_pw = (const char *)utf8_blob->data;
+-	size_t utf8_len = strlen_m(utf8_pw);
+ 	char *password_script = NULL;
++	const char *utf8_pw = (const char *)utf8_blob->data;
++
++	/*
++	 * This looks strange because it is.
++	 *
++	 * The check for the number of characters in the password
++	 * should clearly not be against the byte length, or else a
++	 * single UTF8 character would count for more than one.
++	 *
++	 * We have chosen to use the number of 16-bit units that the
++	 * password encodes to as the measure of length.  This is not
++	 * the same as the number of codepoints, if a password
++	 * contains a character beyond the Basic Multilingual Plane
++	 * (above 65535) it will count for more than one "character".
++	 */
++
++	size_t password_characters_roughly = strlen_m(utf8_pw);
+ 
+ 	/* checks if the "minPwdLength" property is satisfied */
+-	if (minPwdLength > utf8_len) {
++	if (minPwdLength > password_characters_roughly) {
+ 		return SAMR_VALIDATION_STATUS_PWD_TOO_SHORT;
+ 	}
+ 
+-	/* checks the password complexity */
++	/* We might not be asked to check the password complexity */
+ 	if (!(pwdProperties & DOMAIN_PASSWORD_COMPLEX)) {
+ 		return SAMR_VALIDATION_STATUS_SUCCESS;
+ 	}
+ 
+-	if (utf8_len == 0) {
++	if (password_characters_roughly == 0) {
+ 		return SAMR_VALIDATION_STATUS_NOT_COMPLEX_ENOUGH;
+ 	}
+ 
+@@ -2110,6 +2125,7 @@ enum samr_ValidationStatus samdb_check_password(TALLOC_CTX *mem_ctx,
+ 	if (password_script != NULL && *password_script != '\0') {
+ 		int check_ret = 0;
+ 		int error = 0;
++		ssize_t nwritten = 0;
+ 		struct tevent_context *event_ctx = NULL;
+ 		struct tevent_req *req = NULL;
+ 		struct samba_runcmd_state *run_cmd = NULL;
+@@ -2134,7 +2150,12 @@ enum samr_ValidationStatus samdb_check_password(TALLOC_CTX *mem_ctx,
+ 					tevent_timeval_current_ofs(10, 0),
+ 					100, 100, cmd, NULL);
+ 		run_cmd = tevent_req_data(req, struct samba_runcmd_state);
+-		if (write(run_cmd->fd_stdin, utf8_pw, utf8_len) != utf8_len) {
++		nwritten = write(run_cmd->fd_stdin,
++				 utf8_blob->data,
++				 utf8_blob->length);
++		if (nwritten != utf8_blob->length) {
++			close(run_cmd->fd_stdin);
++			run_cmd->fd_stdin = -1;
+ 			TALLOC_FREE(password_script);
+ 			TALLOC_FREE(event_ctx);
+ 			return SAMR_VALIDATION_STATUS_PASSWORD_FILTER_ERROR;
+-- 
+2.17.1
+
+
+From ea39bdd6293041af668f1bfdfea39a725733bad3 Mon Sep 17 00:00:00 2001
+From: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Date: Fri, 3 May 2019 17:27:51 +1200
+Subject: [PATCH 5/7] CVE-2019-14847 dsdb/modules/dirsync: ensure attrs exist
+ (CID 1107212)
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14040
+
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Reviewed-by: Gary Lockyer <gary@catalyst.net.nz>
+(cherry picked from commit 23f72c4d712f8d1fec3d67a66d477709d5b0abe2)
+---
+ source4/dsdb/samdb/ldb_modules/dirsync.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/source4/dsdb/samdb/ldb_modules/dirsync.c b/source4/dsdb/samdb/ldb_modules/dirsync.c
+index b5510eccd24..62a66fef8d4 100644
+--- a/source4/dsdb/samdb/ldb_modules/dirsync.c
++++ b/source4/dsdb/samdb/ldb_modules/dirsync.c
+@@ -343,6 +343,10 @@ skip:
+ 
+ 		attr = dsdb_attribute_by_lDAPDisplayName(dsc->schema,
+ 				el->name);
++		if (attr == NULL) {
++			continue;
++		}
++
+ 		keep = false;
+ 
+ 		if (attr->linkID & 1) {
+-- 
+2.17.1
+
+
+From bdb3e3f669bd991da819040e726e003e4e2b841d Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Tue, 15 Oct 2019 16:28:46 +1300
+Subject: [PATCH 6/7] CVE-2019-14847 dsdb: Demonstrate the correct interaction
+ of ranged_results style attributes and dirsync
+
+Incremental results are provided by a flag on the dirsync control, not
+by changing the attribute name.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14040
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ selftest/knownfail.d/dirsync         |  1 +
+ source4/dsdb/tests/python/dirsync.py | 26 ++++++++++++++++++++++++++
+ 2 files changed, 27 insertions(+)
+ create mode 100644 selftest/knownfail.d/dirsync
+
+diff --git a/selftest/knownfail.d/dirsync b/selftest/knownfail.d/dirsync
+new file mode 100644
+index 00000000000..bc49fe0d9bb
+--- /dev/null
++++ b/selftest/knownfail.d/dirsync
+@@ -0,0 +1 @@
++^samba4.ldap.dirsync.python\(ad_dc_ntvfs\).__main__.ExtendedDirsyncTests.test_dirsync_linkedattributes_range\(
+\ No newline at end of file
+diff --git a/source4/dsdb/tests/python/dirsync.py b/source4/dsdb/tests/python/dirsync.py
+index 136f4d3bba6..b6f7022a50b 100755
+--- a/source4/dsdb/tests/python/dirsync.py
++++ b/source4/dsdb/tests/python/dirsync.py
+@@ -28,6 +28,7 @@ from samba.tests.subunitrun import TestProgram, SubunitOptions
+ import samba.getopt as options
+ import base64
+ 
++import ldb
+ from ldb import LdbError, SCOPE_BASE
+ from ldb import Message, MessageElement, Dn
+ from ldb import FLAG_MOD_ADD, FLAG_MOD_DELETE
+@@ -590,6 +591,31 @@ class SimpleDirsyncTests(DirsyncBaseTests):
+ 
+ class ExtendedDirsyncTests(SimpleDirsyncTests):
+ 
++    def test_dirsync_linkedattributes_range(self):
++        self.ldb_simple = self.get_ldb_connection(self.simple_user, self.user_pass)
++        res = self.ldb_admin.search(self.base_dn,
++                                    attrs=["member;range=1-1"],
++                                    expression="(name=Administrators)",
++                                    controls=["dirsync:1:0:0"])
++
++        self.assertTrue(len(res) > 0)
++        self.assertTrue(res[0].get("member;range=1-1") is None)
++        self.assertTrue(res[0].get("member") is not None)
++        self.assertTrue(len(res[0].get("member")) > 0)
++
++    def test_dirsync_linkedattributes_range_user(self):
++        self.ldb_simple = self.get_ldb_connection(self.simple_user, self.user_pass)
++        try:
++            res = self.ldb_simple.search(self.base_dn,
++                                         attrs=["member;range=1-1"],
++                                         expression="(name=Administrators)",
++                                        controls=["dirsync:1:0:0"])
++        except LdbError as e:
++            (num, _) = e.args
++            self.assertEquals(num, ldb.ERR_INSUFFICIENT_ACCESS_RIGHTS)
++        else:
++            self.fail()
++
+     def test_dirsync_linkedattributes(self):
+         flag_incr_linked = 2147483648
+         self.ldb_simple = self.get_ldb_connection(self.simple_user, self.user_pass)
+-- 
+2.17.1
+
+
+From 77b10b360f4ffb7ac90bc5fce0a80306515c1aca Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Tue, 15 Oct 2019 15:44:34 +1300
+Subject: [PATCH 7/7] CVE-2019-14847 dsdb: Correct behaviour of ranged_results
+ when combined with dirsync
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14040
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ selftest/knownfail.d/dirsync                  |  1 -
+ source4/dsdb/samdb/ldb_modules/dirsync.c      | 11 ++++----
+ .../dsdb/samdb/ldb_modules/ranged_results.c   | 25 ++++++++++++++++---
+ 3 files changed, 28 insertions(+), 9 deletions(-)
+ delete mode 100644 selftest/knownfail.d/dirsync
+
+diff --git a/selftest/knownfail.d/dirsync b/selftest/knownfail.d/dirsync
+deleted file mode 100644
+index bc49fe0d9bb..00000000000
+--- a/selftest/knownfail.d/dirsync
++++ /dev/null
+@@ -1 +0,0 @@
+-^samba4.ldap.dirsync.python\(ad_dc_ntvfs\).__main__.ExtendedDirsyncTests.test_dirsync_linkedattributes_range\(
+\ No newline at end of file
+diff --git a/source4/dsdb/samdb/ldb_modules/dirsync.c b/source4/dsdb/samdb/ldb_modules/dirsync.c
+index 62a66fef8d4..4ac5faad403 100644
+--- a/source4/dsdb/samdb/ldb_modules/dirsync.c
++++ b/source4/dsdb/samdb/ldb_modules/dirsync.c
+@@ -998,7 +998,7 @@ static int dirsync_ldb_search(struct ldb_module *module, struct ldb_request *req
+ 	}
+ 
+ 	/*
+-	 * check if there's an extended dn control
++	 * check if there's a dirsync control
+ 	 */
+ 	control = ldb_request_get_control(req, LDB_CONTROL_DIRSYNC_OID);
+ 	if (control == NULL) {
+@@ -1327,11 +1327,12 @@ static int dirsync_ldb_search(struct ldb_module *module, struct ldb_request *req
+ 
+ 	}
+ 	/*
+-	 * Remove our control from the list of controls
++	 * Mark dirsync control as uncritical (done)
++	 *
++	 * We need this so ranged_results knows how to behave with
++	 * dirsync
+ 	 */
+-	if (!ldb_save_controls(control, req, NULL)) {
+-		return ldb_operr(ldb);
+-	}
++	control->critical = false;
+ 	dsc->schema = dsdb_get_schema(ldb, dsc);
+ 	/*
+ 	 * At the begining we make the hypothesis that we will return a complete
+diff --git a/source4/dsdb/samdb/ldb_modules/ranged_results.c b/source4/dsdb/samdb/ldb_modules/ranged_results.c
+index 13bf3a2d0a9..98438799997 100644
+--- a/source4/dsdb/samdb/ldb_modules/ranged_results.c
++++ b/source4/dsdb/samdb/ldb_modules/ranged_results.c
+@@ -35,14 +35,14 @@
+ struct rr_context {
+ 	struct ldb_module *module;
+ 	struct ldb_request *req;
++	bool dirsync_in_use;
+ };
+ 
+ static struct rr_context *rr_init_context(struct ldb_module *module,
+ 					  struct ldb_request *req)
+ {
+-	struct rr_context *ac;
+-
+-	ac = talloc_zero(req, struct rr_context);
++	struct ldb_control *dirsync_control = NULL;
++	struct rr_context *ac = talloc_zero(req, struct rr_context);
+ 	if (ac == NULL) {
+ 		ldb_set_errstring(ldb_module_get_ctx(module), "Out of Memory");
+ 		return NULL;
+@@ -51,6 +51,16 @@ static struct rr_context *rr_init_context(struct ldb_module *module,
+ 	ac->module = module;
+ 	ac->req = req;
+ 
++	/*
++	 * check if there's a dirsync control (as there is an
++	 * interaction between these modules)
++	 */
++	dirsync_control = ldb_request_get_control(req,
++						  LDB_CONTROL_DIRSYNC_OID);
++	if (dirsync_control != NULL) {
++		ac->dirsync_in_use = true;
++	}
++
+ 	return ac;
+ }
+ 
+@@ -82,6 +92,15 @@ static int rr_search_callback(struct ldb_request *req, struct ldb_reply *ares)
+ 					ares->response, ares->error);
+ 	}
+ 
++	if (ac->dirsync_in_use) {
++		/*
++		 * We return full attribute values when mixed with
++		 * dirsync
++		 */
++		return ldb_module_send_entry(ac->req,
++					     ares->message,
++					     ares->controls);
++	}
+ 	/* LDB_REPLY_ENTRY */
+ 
+ 	temp_ctx = talloc_new(ac->req);
+-- 
+2.17.1
+
