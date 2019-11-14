@@ -48,15 +48,26 @@ rpi_gen_config() {
 		[pi3+]
 		kernel=boot/vmlinuz-rpi2
 		initramfs boot/initramfs-rpi2
+		[pi4]
+		kernel=boot/vmlinuz-rpi4
+		initramfs boot/initramfs-rpi4
 		[all]
 		include usercfg.txt
 		EOF
 	;;
 	aarch64)
 		cat <<-EOF
-		arm_control=0x200
+		[pi3]
 		kernel=boot/vmlinuz-rpi
 		initramfs boot/initramfs-rpi
+		[pi3+]
+		kernel=boot/vmlinuz-rpi
+		initramfs boot/initramfs-rpi
+		[pi4]
+		kernel=boot/vmlinuz-rpi4
+		initramfs boot/initramfs-rpi4
+		[all]
+		arm_64bit=1
 		include usercfg.txt
 		EOF
 	;;
@@ -85,7 +96,8 @@ profile_rpi() {
 	kernel_flavors="rpi"
 	case "$ARCH" in
 		armhf) kernel_flavors="rpi rpi2";;
-		armv7) kernel_flavors="rpi2";;
+		armv7) kernel_flavors="rpi2 rpi4";;
+		aarch64) kernel_flavors="rpi rpi4";;
 	esac
 	kernel_cmdline="console=tty1"
 	initfs_features="base squashfs mmc usb kms dhcp https"
