@@ -98,7 +98,7 @@ apk info --quiet --installed --root "$CBUILDROOT" libgcc libstdc++ musl-dev || \
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   openssl ca-certificates libbsd libtls-standalone busybox busybox-initscripts binutils make \
 	   apk-tools file \
-	   gmp mpfr3 mpc1 isl cloog gcc \
+	   gmp mpfr4 mpc1 isl cloog gcc \
 	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base build-base \
 	   attr libcap patch sudo acl fakeroot tar \
 	   pax-utils lzip abuild ncurses libedit openssh \
