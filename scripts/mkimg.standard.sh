@@ -6,7 +6,7 @@ profile_standard() {
 	profile_base
 	profile_abbrev="std"
 	image_ext="iso"
-	arch="x86 x86_64 ppc64le s390x"
+	arch="aarch64 x86 x86_64 ppc64le s390x"
 	output_format="iso"
 	kernel_cmdline="nomodeset"
 	kernel_addons="xtables-addons"
@@ -71,7 +71,7 @@ profile_virt() {
 	desc="Similar to standard.
 		Slimmed down kernel.
 		Optimized for virtual systems."
-	arch="x86 x86_64"
+	arch="aarch64 x86 x86_64"
 	kernel_addons=
 	kernel_flavors="virt"
 	kernel_cmdline="console=tty0 console=ttyS0,115200"
