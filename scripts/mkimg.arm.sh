@@ -118,7 +118,7 @@ profile_uboot() {
 		Supports armhf and aarch64."
 	image_ext="tar.gz"
 	arch="aarch64 armhf armv7"
-	kernel_flavors="vanilla"
+	kernel_flavors="lts"
 	kernel_addons="xtables-addons"
 	initfs_features="base bootchart squashfs ext4 kms mmc raid scsi usb"
 	apkovl="genapkovl-dhcp.sh"

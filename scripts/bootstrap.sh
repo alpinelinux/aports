@@ -6,7 +6,7 @@ TARGET_ARCH="$1"
 SUDO_APK=abuild-apk
 
 # optional cross build packages
-KERNEL_PKG="linux-firmware linux-vanilla"
+KERNEL_PKG="linux-firmware linux-lts"
 
 # get abuild configurables
 [ -e /usr/share/abuild/functions.sh ] || (echo "abuild not found" ; exit 1)
@@ -46,7 +46,7 @@ Steps for introducing new architecture include:
 - adding the arch type detection to apk-tools
 - adjusting build rules for packages that are arch aware:
   gcc, openssl, linux-headers
-- create new kernel config for linux-vanilla
+- create new kernel config for linux-lts
 
 After these steps the initial cross-build can be completed
 by running this with the target arch as parameter, e.g.:

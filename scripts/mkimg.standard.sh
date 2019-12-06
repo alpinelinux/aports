@@ -30,9 +30,9 @@ profile_extended() {
 		Suitable for routers and servers.
 		Runs from RAM."
 	arch="x86 x86_64"
-	kernel_addons="dahdi-linux xtables-addons zfs spl"
+	kernel_addons="xtables-addons zfs"
 	apks="$apks
-		dahdi-linux dahdi-tools ethtool hwdata lftp links
+		ethtool hwdata lftp links doas
 		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
 		pax-utils paxmark pciutils screen strace sudo tmux
 		usbutils v86d vim xtables-addons curl
