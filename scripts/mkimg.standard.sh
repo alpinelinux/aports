@@ -32,7 +32,7 @@ profile_extended() {
 	arch="x86 x86_64"
 	kernel_addons="xtables-addons zfs"
 	apks="$apks
-		ethtool hwdata lftp links doas
+		ethtool hwids lftp links doas
 		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
 		pax-utils paxmark pciutils screen strace sudo tmux
 		usbutils v86d vim xtables-addons curl
@@ -43,7 +43,7 @@ profile_extended() {
 		igmpproxy ip6tables iproute2 iproute2-qos ipsec-tools
 		iptables iputils irssi ldns-tools links
 		ncurses-terminfo net-snmp net-snmp-tools nrpe nsd
-		opennhrp openvpn openvswitch pingu ppp quagga
+		opennhrp openvpn pingu ppp quagga
 		quagga-nhrp rng-tools rpcbind sntpc socat ssmtp strongswan
 		sysklogd tcpdump tinyproxy unbound
 		wireless-tools wpa_supplicant zonenotify
