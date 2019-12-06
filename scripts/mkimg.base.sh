@@ -289,7 +289,7 @@ create_image_targz() {
 }
 
 profile_base() {
-	kernel_flavors="vanilla"
+	kernel_flavors="lts"
 	initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage quiet"
 	initfs_features="ata base bootchart cdrom squashfs ext4 mmc raid scsi usb virtio"
 	modloop_sign=yes
