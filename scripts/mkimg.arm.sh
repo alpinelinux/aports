@@ -33,6 +33,9 @@ rpi_gen_config() {
 		[pi3+]
 		kernel=boot/vmlinuz-rpi2
 		initramfs boot/initramfs-rpi2
+		[pi4]
+		kernel=boot/vmlinuz-rpi4
+		initramfs boot/initramfs-rpi4
 		[all]
 		include usercfg.txt
 		EOF
@@ -54,9 +57,15 @@ rpi_gen_config() {
 	;;
 	aarch64)
 		cat <<-EOF
-		arm_control=0x200
+		[rpi3]
 		kernel=boot/vmlinuz-rpi
 		initramfs boot/initramfs-rpi
+		[rpi4]
+		enable_gic=1
+		kernel=boot/vmlinuz-rpi4
+		initramfs boot/initramfs-rpi4
+		[all]
+		arm_64bit=1
 		include usercfg.txt
 		EOF
 	;;
@@ -78,14 +87,15 @@ profile_rpi() {
 	profile_base
 	title="Raspberry Pi"
 	desc="Includes Raspberry Pi kernel.
-		Designed for RPI 1, 2 and 3.
+		Designed for RPI 1, 2, 3 and 4.
 		And much more..."
 	image_ext="tar.gz"
 	arch="aarch64 armhf armv7"
 	kernel_flavors="rpi"
 	case "$ARCH" in
+		aarch64) kernel_flavors="rpi rpi4";;
 		armhf) kernel_flavors="rpi rpi2";;
-		armv7) kernel_flavors="rpi2";;
+		armv7) kernel_flavors="rpi2 rpi4";;
 	esac
 	kernel_cmdline="console=tty1"
 	initfs_features="base squashfs mmc usb kms dhcp https"
