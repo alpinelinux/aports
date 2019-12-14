@@ -104,7 +104,7 @@ syslinux_gen_config() {
 				MENU LABEL Linux $_f
 				KERNEL /boot/vmlinuz-$_f
 				INITRD /boot/initramfs-$_f
-				DEVICETREEDIR /boot/dtbs
+				FDTDIR /boot/dtbs-$_f
 				APPEND $initfs_cmdline $kernel_cmdline
 			EOF
 		else
