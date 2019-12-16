@@ -12,7 +12,10 @@ profile_netboot() {
 		"
 	arch="aarch64 armhf armv7 ppc64le x86 x86_64 s390x"
 	kernel_cmdline="nomodeset"
-	kernel_flavors="lts"
+	case "$ARCH" in
+		armhf) kernel_flavors= ;;
+		*) kernel_flavors="lts";;
+	esac
 	modloop_sign=yes
 	apks=""
 	initfs_features="base network squashfs usb virtio"
