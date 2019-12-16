@@ -57,10 +57,13 @@ rpi_gen_config() {
 	;;
 	aarch64)
 		cat <<-EOF
-		[rpi3]
+		[pi3]
 		kernel=boot/vmlinuz-rpi
 		initramfs boot/initramfs-rpi
-		[rpi4]
+		[pi3+]
+		kernel=boot/vmlinuz-rpi
+		initramfs boot/initramfs-rpi
+		[pi4]
 		enable_gic=1
 		kernel=boot/vmlinuz-rpi4
 		initramfs boot/initramfs-rpi4
