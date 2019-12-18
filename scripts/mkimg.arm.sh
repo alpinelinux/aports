@@ -33,9 +33,6 @@ rpi_gen_config() {
 		[pi3+]
 		kernel=boot/vmlinuz-rpi2
 		initramfs boot/initramfs-rpi2
-		[pi4]
-		kernel=boot/vmlinuz-rpi4
-		initramfs boot/initramfs-rpi4
 		[all]
 		include usercfg.txt
 		EOF
@@ -51,6 +48,9 @@ rpi_gen_config() {
 		[pi3+]
 		kernel=boot/vmlinuz-rpi2
 		initramfs boot/initramfs-rpi2
+		[pi4]
+		kernel=boot/vmlinuz-rpi4
+		initramfs boot/initramfs-rpi4
 		[all]
 		include usercfg.txt
 		EOF
