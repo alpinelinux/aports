@@ -2,6 +2,8 @@ create_image_netboot() {
 	rm -rf "${OUTDIR}"/netboot-$RELEASE "${OUTDIR}"/netboot
 	cp -aL "${DESTDIR}"/boot "${OUTDIR}"/netboot-$RELEASE
 	ln -s netboot-$RELEASE "${OUTDIR}"/netboot
+	# let webserver read initramfs
+	chmod a+r "${OUTDIR}"/netboot-$RELEASE/*
 	tar -C "${DESTDIR}" -chzf ${OUTDIR}/${output_filename} boot/
 }
 
