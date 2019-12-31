@@ -1,0 +1,94 @@
+From 33d051917d5ef38f678b507a3c832afde48b9b49 Mon Sep 17 00:00:00 2001
+From: George Dunlap <george.dunlap@citrix.com>
+Date: Thu, 10 Oct 2019 17:57:49 +0100
+Subject: [PATCH 01/11] x86/mm: L1TF checks don't leave a partial entry
+
+On detection of a potential L1TF issue, most validation code returns
+-ERESTART to allow the switch to shadow mode to happen and cause the
+original operation to be restarted.
+
+However, in the validation code, the return value -ERESTART has been
+repurposed to indicate 1) the function has partially completed
+something which needs to be undone, and 2) calling put_page_type()
+should cleanly undo it.  This causes problems in several places.
+
+For L1 tables, on receiving an -ERESTART return from alloc_l1_table(),
+alloc_page_type() will set PGT_partial on the page.  If for some
+reason the original operation never restarts, then on domain
+destruction, relinquish_memory() will call free_page_type() on the
+page.
+
+Unfortunately, alloc_ and free_l1_table() aren't set up to deal with
+PGT_partial.  When returning a failure, alloc_l1_table() always
+de-validates whatever it's validated so far, and free_l1_table()
+always devalidates the whole page.  This means that if
+relinquish_memory() calls free_page_type() on an L1 that didn't
+complete due to an L1TF, it will call put_page_from_l1e() on "page
+entries" that have never been validated.
+
+For L2+ tables, setting rc to ERESTART causes the rest of the
+alloc_lN_table() function to *think* that the entry in question will
+have PGT_partial set.  This will cause it to set partial_pte = 1.  If
+relinqush_memory() then calls free_page_type() on one of those pages,
+then free_lN_table() will call put_page_from_lNe() on the entry when
+it shouldn't.
+
+Rather than indicating -ERESTART, indicate -EINTR.  This is the code
+to indicate that nothing has changed from when you started the call
+(which is effectively how alloc_l1_table() handles errors).
+
+mod_lN_entry() shouldn't have any of these types of problems, so leave
+potential changes there for a clean-up patch later.
+
+This is part of XSA-299.
+
+Reported-by: George Dunlap <george.dunlap@citrix.com>
+Signed-off-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/arch/x86/mm.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 3557cd1178..a1b55c10ff 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -1409,7 +1409,7 @@ static int alloc_l1_table(struct page_info *page)
+     {
+         if ( !(l1e_get_flags(pl1e[i]) & _PAGE_PRESENT) )
+         {
+-            ret = pv_l1tf_check_l1e(d, pl1e[i]) ? -ERESTART : 0;
++            ret = pv_l1tf_check_l1e(d, pl1e[i]) ? -EINTR : 0;
+             if ( ret )
+                 goto out;
+         }
+@@ -1517,7 +1517,7 @@ static int alloc_l2_table(struct page_info *page, unsigned long type)
+         {
+             if ( !pv_l1tf_check_l2e(d, l2e) )
+                 continue;
+-            rc = -ERESTART;
++            rc = -EINTR;
+         }
+         else
+             rc = get_page_from_l2e(l2e, pfn, d, partial);
+@@ -1603,7 +1603,7 @@ static int alloc_l3_table(struct page_info *page)
+         {
+             if ( !pv_l1tf_check_l3e(d, l3e) )
+                 continue;
+-            rc = -ERESTART;
++            rc = -EINTR;
+         }
+         else
+             rc = get_page_from_l3e(l3e, pfn, d, partial);
+@@ -1783,7 +1783,7 @@ static int alloc_l4_table(struct page_info *page)
+         {
+             if ( !pv_l1tf_check_l4e(d, l4e) )
+                 continue;
+-            rc = -ERESTART;
++            rc = -EINTR;
+         }
+         else
+             rc = get_page_from_l4e(l4e, pfn, d, partial);
+-- 
+2.23.0
+

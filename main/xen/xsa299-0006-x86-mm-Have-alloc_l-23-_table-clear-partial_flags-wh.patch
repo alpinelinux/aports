@@ -1,0 +1,111 @@
+From 4ad70553611a7a4e4494d5a3b51b5cc295a488e0 Mon Sep 17 00:00:00 2001
+From: George Dunlap <george.dunlap@citrix.com>
+Date: Thu, 10 Oct 2019 17:57:49 +0100
+Subject: [PATCH 06/11] x86/mm: Have alloc_l[23]_table clear partial_flags when
+ preempting
+
+In order to allow recursive pagetable promotions and demotions to be
+interrupted, Xen must keep track of the state of the sub-pages
+promoted or demoted.  This is stored in two elements in the page
+struct: nr_entries_validated and partial_flags.
+
+The rule is that entries [0, nr_entries_validated) should always be
+validated and hold a general reference count.  If partial_flags is
+zero, then [nr_entries_validated] is not validated and no reference
+count is held.  If PTF_partial_set is set, then [nr_entries_validated]
+is partially validated.
+
+At the moment, a distinction is made between promotion and demotion
+with regard to whether the entry itself "holds" a general reference
+count: when entry promotion is interrupted (i.e., returns -ERESTART),
+the entry is not considered to hold a reference; when entry demotion
+is interrupted, the entry is still considered to hold a general
+reference.
+
+PTF_partial_general_ref is used to distinguish between these cases.
+If clear, it's a partial promotion => no general reference count held
+by the entry; if set, it's partial demotion, so a general reference
+count held.  Because promotions and demotions can be interleaved, this
+value is passed to get_page_and_type_from_mfn and put_page_from_l*e,
+to be able to properly handle reference counts.
+
+Unfortunately, when alloc_l[23]_table check hypercall_preempt_check()
+and return -ERESTART, they set nr_entries_validated, but don't clear
+partial_flags.
+
+If we were picking up from a previously-interrupted promotion, that
+means that PTF_partial_set would be set even though
+[nr_entries_validated] was not partially validated.  This means that
+if the page in this state were de-validated, put_page_type() would
+erroneously be called on that entry.
+
+Perhaps worse, if we were racing with a de-validation, then we might
+leave both PTF_partial_set and PTF_partial_general_ref; and when
+de-validation picked up again, both the type and the general ref would
+be erroneously dropped from [nr_entries_validated].
+
+In a sense, the real issue here is code duplication.  Rather than
+duplicate the interruption code, set rc to -EINTR and fall through to
+the code which already handles that case correctly.
+
+Given the logic at this point, it should be impossible for
+partial_flags to be non-zero; add an ASSERT() to catch any changes.
+
+This is part of XSA-299.
+
+Reported-by: George Dunlap <george.dunlap@citrix.com>
+Signed-off-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/arch/x86/mm.c | 25 ++++++-------------------
+ 1 file changed, 6 insertions(+), 19 deletions(-)
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 0a4d39a2c3..bbd29a68f4 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -1554,21 +1554,13 @@ static int alloc_l2_table(struct page_info *page, unsigned long type)
+     for ( i = page->nr_validated_ptes; i < L2_PAGETABLE_ENTRIES;
+           i++, partial_flags = 0 )
+     {
+-        l2_pgentry_t l2e;
++        l2_pgentry_t l2e = pl2e[i];
+ 
+         if ( i > page->nr_validated_ptes && hypercall_preempt_check() )
+-        {
+-            page->nr_validated_ptes = i;
+-            rc = -ERESTART;
+-            break;
+-        }
+-
+-        if ( !is_guest_l2_slot(d, type, i) )
++            rc = -EINTR;
++        else if ( !is_guest_l2_slot(d, type, i) )
+             continue;
+-
+-        l2e = pl2e[i];
+-
+-        if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) )
++        else if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) )
+         {
+             if ( !pv_l1tf_check_l2e(d, l2e) )
+                 continue;
+@@ -1640,13 +1632,8 @@ static int alloc_l3_table(struct page_info *page)
+         l3_pgentry_t l3e = pl3e[i];
+ 
+         if ( i > page->nr_validated_ptes && hypercall_preempt_check() )
+-        {
+-            page->nr_validated_ptes = i;
+-            rc = -ERESTART;
+-            break;
+-        }
+-
+-        if ( is_pv_32bit_domain(d) && (i == 3) )
++            rc = -EINTR;
++        else if ( is_pv_32bit_domain(d) && (i == 3) )
+         {
+             if ( !(l3e_get_flags(l3e) & _PAGE_PRESENT) ||
+                  (l3e_get_flags(l3e) & l3_disallow_mask(d)) )
+-- 
+2.23.0
+

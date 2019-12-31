@@ -1,0 +1,378 @@
+From 51fe4e67d954649fcf103116be6206a769f0db1e Mon Sep 17 00:00:00 2001
+From: George Dunlap <george.dunlap@citrix.com>
+Date: Thu, 10 Oct 2019 17:57:49 +0100
+Subject: [PATCH 07/11] x86/mm: Always retain a general ref on partial
+
+In order to allow recursive pagetable promotions and demotions to be
+interrupted, Xen must keep track of the state of the sub-pages
+promoted or demoted.  This is stored in two elements in the page struct:
+nr_entries_validated and partial_flags.
+
+The rule is that entries [0, nr_entries_validated) should always be
+validated and hold a general reference count.  If partial_flags is
+zero, then [nr_entries_validated] is not validated and no reference
+count is held.  If PTF_partial_set is set, then [nr_entries_validated]
+is partially validated.
+
+At the moment, a distinction is made between promotion and demotion
+with regard to whether the entry itself "holds" a general reference
+count: when entry promotion is interrupted (i.e., returns -ERESTART),
+the entry is not considered to hold a reference; when entry demotion
+is interrupted, the entry is still considered to hold a general
+reference.
+
+PTF_partial_general_ref is used to distinguish between these cases.
+If clear, it's a partial promotion => no general reference count held
+by the entry; if set, it's partial demotion, so a general reference
+count held.  Because promotions and demotions can be interleaved, this
+value is passed to get_page_and_type_from_mfn and put_page_from_l*e,
+to be able to properly handle reference counts.
+
+Unfortunately, because a refcount is not held, it is possible to
+engineer a situation where PFT_partial_set is set but the page in
+question has been assigned to another domain.  A sketch is provided in
+the appendix.
+
+Fix this by having the parent page table entry hold a general
+reference count whenever PFT_partial_set is set.  (For clarity of
+change, keep two separate flags.  These will be collapsed in a
+subsequent changeset.)
+
+This has two basic implications.  On the put_page_from_lNe() side,
+this mean that the (partial_set && !partial_ref) case can never happen,
+and no longer needs to be special-cased.
+
+Secondly, because both flags are set together, there's no need to carry over
+existing bits from partial_pte.
+
+(NB there is still another issue with calling _put_page_type() on a
+page which had PGT_partial set; that will be handled in a subsequent
+patch.)
+
+On the get_page_and_type_from_mfn() side, we need to distinguish
+between callers which hold a reference on partial (i.e.,
+alloc_lN_table()), and those which do not (new_cr3, PIN_LN_TABLE, and
+so on): pass a flag if the type should be retained on interruption.
+
+NB that since l1 promotion can't be preempted, that get_page_from_l2e
+can't return -ERESTART.
+
+This is part of XSA-299.
+
+Reported-by: George Dunlap <george.dunlap@citrix.com>
+Signed-off-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+-----
+* Appendix: Engineering PTF_partial_set while a page belongs to a
+  foreign domain
+
+Suppose A is a page which can be promoted to an l3, and B is a page
+which can be promoted to an l2, and A[x] points to B.  B has
+PGC_allocated set but no other general references.
+
+V1:  PIN_L3 A.
+  A is validated, B is validated.
+  A.type_count = 1 | PGT_validated | PGT_pinned
+  B.type_count = 1 | PGT_validated
+  B.count = 2 | PGC_allocated (A[x] holds a general ref)
+
+V1: UNPIN A.
+  A begins de-validation.
+  Arrange to be interrupted when i < x
+  V1->old_guest_table = A
+  V1->old_guest_table_ref_held = false
+  A.type_count = 1 | PGT_partial
+  A.nr_validated_entries = i < x
+  B.type_count = 0
+  B.count = 1 | PGC_allocated
+
+V2: MOD_L4_ENTRY to point some l4e to A.
+  Picks up re-validation of A.
+  Arrange to be interrupted halfway through B's validation
+  B.type_count = 1 | PGT_partial
+  B.count = 2 | PGC_allocated (PGT_partial holds a general ref)
+  A.type_count = 1 | PGT_partial
+  A.nr_validated_entries = x
+  A.partial_pte = PTF_partial_set
+
+V3: MOD_L3_ENTRY to point some other l3e (not in A) to B.
+  Validates B.
+  B.type_count = 1 | PGT_validated
+  B.count = 2 | PGC_allocated ("other l3e" holds a general ref)
+
+V3: MOD_L3_ENTRY to clear l3e pointing to B.
+  Devalidates B.
+  B.type_count = 0
+  B.count = 1 | PGC_allocated
+
+V3: decrease_reservation(B)
+  Clears PGC_allocated
+  B.count = 0 => B is freed
+
+B gets assigned to a different domain
+
+V1: Restarts UNPIN of A
+  put_old_guest_table(A)
+    ...
+      free_l3_table(A)
+
+Now since A.partial_flags has PTF_partial_set, free_l3_table() will
+call put_page_from_l3e() on A[x], which points to B, while B is owned
+by another domain.
+
+If A[x] held a general refcount for B on partial validation, as it does
+for partial de-validation, then B would still have a reference count of
+1 after PGC_allocated was freed; so B wouldn't be freed until after
+put_page_from_l3e() had happend on A[x].
+---
+ xen/arch/x86/mm.c        | 84 +++++++++++++++++++++++-----------------
+ xen/include/asm-x86/mm.h | 15 ++++---
+ 2 files changed, 58 insertions(+), 41 deletions(-)
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index bbd29a68f4..4d3ebf341d 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -1102,10 +1102,11 @@ get_page_from_l1e(
+  * page->pte[page->nr_validated_entries].  See the comment in mm.h for
+  * more information.
+  */
+-#define PTF_partial_set         (1 << 0)
+-#define PTF_partial_general_ref (1 << 1)
+-#define PTF_preemptible         (1 << 2)
+-#define PTF_defer               (1 << 3)
++#define PTF_partial_set           (1 << 0)
++#define PTF_partial_general_ref   (1 << 1)
++#define PTF_preemptible           (1 << 2)
++#define PTF_defer                 (1 << 3)
++#define PTF_retain_ref_on_restart (1 << 4)
+ 
+ static int get_page_and_type_from_mfn(
+     mfn_t mfn, unsigned long type, struct domain *d,
+@@ -1114,7 +1115,11 @@ static int get_page_and_type_from_mfn(
+     struct page_info *page = mfn_to_page(mfn);
+     int rc;
+     bool preemptible = flags & PTF_preemptible,
+-         partial_ref = flags & PTF_partial_general_ref;
++         partial_ref = flags & PTF_partial_general_ref,
++         partial_set = flags & PTF_partial_set,
++         retain_ref  = flags & PTF_retain_ref_on_restart;
++
++    ASSERT(partial_ref == partial_set);
+ 
+     if ( likely(!partial_ref) &&
+          unlikely(!get_page_from_mfn(mfn, d)) )
+@@ -1127,13 +1132,15 @@ static int get_page_and_type_from_mfn(
+      * - page is fully validated (rc == 0)
+      * - page is not validated (rc < 0) but:
+      *   - We came in with a reference (partial_ref)
++     *   - page is partially validated (rc == -ERESTART), and the
++     *     caller has asked the ref to be retained in that case
+      *   - page is partially validated but there's been an error
+      *     (page == current->arch.old_guest_table)
+      *
+      * The partial_ref-on-error clause is worth an explanation.  There
+      * are two scenarios where partial_ref might be true coming in:
+-     * - mfn has been partially demoted as type `type`; i.e. has
+-     *   PGT_partial set
++     * - mfn has been partially promoted / demoted as type `type`;
++     *   i.e. has PGT_partial set
+      * - mfn has been partially demoted as L(type+1) (i.e., a linear
+      *   page; e.g. we're being called from get_page_from_l2e with
+      *   type == PGT_l1_table, but the mfn is PGT_l2_table)
+@@ -1156,7 +1163,8 @@ static int get_page_and_type_from_mfn(
+      */
+     if ( likely(!rc) || partial_ref )
+         /* nothing */;
+-    else if ( page == current->arch.old_guest_table )
++    else if ( page == current->arch.old_guest_table ||
++              (retain_ref && rc == -ERESTART) )
+         ASSERT(preemptible);
+     else
+         put_page(page);
+@@ -1354,8 +1362,8 @@ static int put_page_from_l2e(l2_pgentry_t l2e, unsigned long pfn,
+         if ( (flags & (PTF_partial_set | PTF_partial_general_ref)) ==
+               PTF_partial_set )
+         {
+-            ASSERT(!(flags & PTF_defer));
+-            rc = _put_page_type(pg, PTF_preemptible, ptpg);
++            /* partial_set should always imply partial_ref */
++            BUG();
+         }
+         else if ( flags & PTF_defer )
+         {
+@@ -1400,8 +1408,8 @@ static int put_page_from_l3e(l3_pgentry_t l3e, unsigned long pfn,
+     if ( (flags & (PTF_partial_set | PTF_partial_general_ref)) ==
+          PTF_partial_set )
+     {
+-        ASSERT(!(flags & PTF_defer));
+-        return _put_page_type(pg, PTF_preemptible, mfn_to_page(_mfn(pfn)));
++        /* partial_set should always imply partial_ref */
++        BUG();
+     }
+ 
+     if ( flags & PTF_defer )
+@@ -1431,8 +1439,8 @@ static int put_page_from_l4e(l4_pgentry_t l4e, unsigned long pfn,
+         if ( (flags & (PTF_partial_set | PTF_partial_general_ref)) ==
+               PTF_partial_set )
+         {
+-            ASSERT(!(flags & PTF_defer));
+-            return _put_page_type(pg, PTF_preemptible, mfn_to_page(_mfn(pfn)));
++            /* partial_set should always imply partial_ref */
++            BUG();
+         }
+ 
+         if ( flags & PTF_defer )
+@@ -1569,13 +1577,22 @@ static int alloc_l2_table(struct page_info *page, unsigned long type)
+         else
+             rc = get_page_from_l2e(l2e, pfn, d, partial_flags);
+ 
+-        if ( rc == -ERESTART )
+-        {
+-            page->nr_validated_ptes = i;
+-            /* Set 'set', retain 'general ref' */
+-            page->partial_flags = partial_flags | PTF_partial_set;
+-        }
+-        else if ( rc == -EINTR && i )
++        /*
++         * It shouldn't be possible for get_page_from_l2e to return
++         * -ERESTART, since we never call this with PTF_preemptible.
++         * (alloc_l1_table may return -EINTR on an L1TF-vulnerable
++         * entry.)
++         *
++         * NB that while on a "clean" promotion, we can never get
++         * PGT_partial.  It is possible to arrange for an l2e to
++         * contain a partially-devalidated l2; but in that case, both
++         * of the following functions will fail anyway (the first
++         * because the page in question is not an l1; the second
++         * because the page is not fully validated).
++         */
++        ASSERT(rc != -ERESTART);
++
++        if ( rc == -EINTR && i )
+         {
+             page->nr_validated_ptes = i;
+             page->partial_flags = 0;
+@@ -1584,6 +1601,7 @@ static int alloc_l2_table(struct page_info *page, unsigned long type)
+         else if ( rc < 0 && rc != -EINTR )
+         {
+             gdprintk(XENLOG_WARNING, "Failure in alloc_l2_table: slot %#x\n", i);
++            ASSERT(current->arch.old_guest_table == NULL);
+             if ( i )
+             {
+                 page->nr_validated_ptes = i;
+@@ -1642,7 +1660,7 @@ static int alloc_l3_table(struct page_info *page)
+                 rc = get_page_and_type_from_mfn(
+                     l3e_get_mfn(l3e),
+                     PGT_l2_page_table | PGT_pae_xen_l2, d,
+-                    partial_flags | PTF_preemptible);
++                    partial_flags | PTF_preemptible | PTF_retain_ref_on_restart);
+         }
+         else if ( !(l3e_get_flags(l3e) & _PAGE_PRESENT) )
+         {
+@@ -1651,13 +1669,14 @@ static int alloc_l3_table(struct page_info *page)
+             rc = -EINTR;
+         }
+         else
+-            rc = get_page_from_l3e(l3e, pfn, d, partial_flags);
++            rc = get_page_from_l3e(l3e, pfn, d,
++                                   partial_flags | PTF_retain_ref_on_restart);
+ 
+         if ( rc == -ERESTART )
+         {
+             page->nr_validated_ptes = i;
+             /* Set 'set', leave 'general ref' set if this entry was set */
+-            page->partial_flags = partial_flags | PTF_partial_set;
++            page->partial_flags = PTF_partial_set | PTF_partial_general_ref;
+         }
+         else if ( rc == -EINTR && i )
+         {
+@@ -1833,13 +1852,14 @@ static int alloc_l4_table(struct page_info *page)
+             rc = -EINTR;
+         }
+         else
+-            rc = get_page_from_l4e(l4e, pfn, d, partial_flags);
++            rc = get_page_from_l4e(l4e, pfn, d,
++                                   partial_flags | PTF_retain_ref_on_restart);
+ 
+         if ( rc == -ERESTART )
+         {
+             page->nr_validated_ptes = i;
+             /* Set 'set', leave 'general ref' set if this entry was set */
+-            page->partial_flags = partial_flags | PTF_partial_set;
++            page->partial_flags = PTF_partial_set | PTF_partial_general_ref;
+         }
+         else if ( rc < 0 )
+         {
+@@ -1936,9 +1956,7 @@ static int free_l2_table(struct page_info *page)
+     else if ( rc == -ERESTART )
+     {
+         page->nr_validated_ptes = i;
+-        page->partial_flags = (partial_flags & PTF_partial_set) ?
+-            partial_flags :
+-            (PTF_partial_set | PTF_partial_general_ref);
++        page->partial_flags = PTF_partial_set | PTF_partial_general_ref;
+     }
+     else if ( rc == -EINTR && i < L2_PAGETABLE_ENTRIES - 1 )
+     {
+@@ -1986,9 +2004,7 @@ static int free_l3_table(struct page_info *page)
+     if ( rc == -ERESTART )
+     {
+         page->nr_validated_ptes = i;
+-        page->partial_flags = (partial_flags & PTF_partial_set) ?
+-            partial_flags :
+-            (PTF_partial_set | PTF_partial_general_ref);
++        page->partial_flags = PTF_partial_set | PTF_partial_general_ref;
+     }
+     else if ( rc == -EINTR && i < L3_PAGETABLE_ENTRIES - 1 )
+     {
+@@ -2019,9 +2035,7 @@ static int free_l4_table(struct page_info *page)
+     if ( rc == -ERESTART )
+     {
+         page->nr_validated_ptes = i;
+-        page->partial_flags = (partial_flags & PTF_partial_set) ?
+-            partial_flags :
+-            (PTF_partial_set | PTF_partial_general_ref);
++        page->partial_flags = PTF_partial_set | PTF_partial_general_ref;
+     }
+     else if ( rc == -EINTR && i < L4_PAGETABLE_ENTRIES - 1 )
+     {
+diff --git a/xen/include/asm-x86/mm.h b/xen/include/asm-x86/mm.h
+index 8406ac3c37..02079e1324 100644
+--- a/xen/include/asm-x86/mm.h
++++ b/xen/include/asm-x86/mm.h
+@@ -238,22 +238,25 @@ struct page_info
+          * page.
+          *
+          * This happens:
+-         * - During de-validation, if de-validation of the page was
++         * - During validation or de-validation, if the operation was
+          *   interrupted
+          * - During validation, if an invalid entry is encountered and
+          *   validation is preemptible
+          * - During validation, if PTF_partial_general_ref was set on
+-         *   this entry to begin with (perhaps because we're picking
+-         *   up from a partial de-validation).
++         *   this entry to begin with (perhaps because it picked up a
++         *   previous operation)
+          *
+-         * When resuming validation, if PTF_partial_general_ref is clear,
+-         * then a general reference must be re-acquired; if it is set, no
+-         * reference should be acquired.
++         * When resuming validation, if PTF_partial_general_ref is
++         * clear, then a general reference must be re-acquired; if it
++         * is set, no reference should be acquired.
+          *
+          * When resuming de-validation, if PTF_partial_general_ref is
+          * clear, no reference should be dropped; if it is set, a
+          * reference should be dropped.
+          *
++         * NB at the moment, PTF_partial_set should be set if and only if
++         * PTF_partial_general_ref is set.
++         *
+          * NB that PTF_partial_set and PTF_partial_general_ref are
+          * defined in mm.c, the only place where they are used.
+          *
+-- 
+2.23.0
+

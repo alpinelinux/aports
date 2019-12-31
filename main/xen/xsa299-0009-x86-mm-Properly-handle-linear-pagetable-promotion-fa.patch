@@ -1,0 +1,106 @@
+From da3d1d258e54fe600f7f75287183b74d957ec63b Mon Sep 17 00:00:00 2001
+From: George Dunlap <george.dunlap@citrix.com>
+Date: Thu, 10 Oct 2019 17:57:49 +0100
+Subject: [PATCH 09/11] x86/mm: Properly handle linear pagetable promotion
+ failures
+
+In order to allow recursive pagetable promotions and demotions to be
+interrupted, Xen must keep track of the state of the sub-pages
+promoted or demoted.  This is stored in two elements in the page
+struct: nr_entries_validated and partial_flags.
+
+The rule is that entries [0, nr_entries_validated) should always be
+validated and hold a general reference count.  If partial_flags is
+zero, then [nr_entries_validated] is not validated and no reference
+count is held.  If PTF_partial_set is set, then [nr_entries_validated]
+is partially validated, and a general reference count is held.
+
+Unfortunately, in cases where an entry began with PTF_partial_set set,
+and get_page_from_lNe() returns -EINVAL, the PTF_partial_set bit is
+erroneously dropped.  (This scenario can be engineered mainly by the
+use of interleaving of promoting and demoting a page which has "linear
+pagetable" entries; see the appendix for a sketch.)  This means that
+we will "leak" a general reference count on the page in question,
+preventing the page from being freed.
+
+Fix this by setting page->partial_flags to the partial_flags local
+variable.
+
+This is part of XSA-299.
+
+Reported-by: George Dunlap <george.dunlap@citrix.com>
+Signed-off-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+-----
+Appendix
+
+Suppose A and B can both be promoted to L2 pages, and A[x] points to B.
+
+V1: PIN_L2 B.
+  B.type_count = 1 | PGT_validated
+  B.count = 2 | PGC_allocated
+
+V1: MOD_L3_ENTRY pointing something to A.
+  In the process of validating A[x], grab an extra type / ref on B:
+  B.type_count = 2 | PGT_validated
+  B.count = 3 | PGC_allocated
+  A.type_count = 1 | PGT_validated
+  A.count = 2 | PGC_allocated
+
+V1: UNPIN B.
+  B.type_count = 1 | PGT_validate
+  B.count = 2 | PGC_allocated
+
+V1: MOD_L3_ENTRY removing the reference to A.
+  De-validate A, down to A[x], which points to B.
+  Drop the final type on B.  Arrange to be interrupted.
+  B.type_count = 1 | PGT_partial
+  B.count = 2 | PGC_allocated
+  A.type_count = 1 | PGT_partial
+  A.nr_validated_entries = x
+  A.partial_pte = -1
+
+V2: MOD_L3_ENTRY adds a reference to A.
+
+At this point, get_page_from_l2e(A[x]) tries
+get_page_and_type_from_mfn(), which fails because it's the wrong type;
+and get_l2_linear_pagetable() also fails, because B isn't validated as
+an l2 anymore.
+---
+ xen/arch/x86/mm.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 886e93b8aa..0a094291da 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -1581,7 +1581,7 @@ static int alloc_l2_table(struct page_info *page, unsigned long type)
+             if ( i )
+             {
+                 page->nr_validated_ptes = i;
+-                page->partial_flags = 0;
++                page->partial_flags = partial_flags;
+                 current->arch.old_guest_ptpg = NULL;
+                 current->arch.old_guest_table = page;
+             }
+@@ -1674,7 +1674,7 @@ static int alloc_l3_table(struct page_info *page)
+         if ( i )
+         {
+             page->nr_validated_ptes = i;
+-            page->partial_flags = 0;
++            page->partial_flags = partial_flags;
+             current->arch.old_guest_ptpg = NULL;
+             current->arch.old_guest_table = page;
+         }
+@@ -1845,7 +1845,7 @@ static int alloc_l4_table(struct page_info *page)
+             if ( i )
+             {
+                 page->nr_validated_ptes = i;
+-                page->partial_flags = 0;
++                page->partial_flags = partial_flags;
+                 if ( rc == -EINTR )
+                     rc = -ERESTART;
+                 else
+-- 
+2.23.0
+

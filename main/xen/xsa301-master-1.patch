@@ -1,0 +1,80 @@
+From 19d6330f142cb941b6340a88592e8a294de0ff8c Mon Sep 17 00:00:00 2001
+From: Julien Grall <julien.grall@arm.com>
+Date: Tue, 15 Oct 2019 17:10:40 +0100
+Subject: [PATCH 1/3] xen/arm: p2m: Avoid aliasing guest physical frame
+
+The P2M helpers implementation is quite lax and will end up to ignore
+the unused top bits of a guest physical frame.
+
+This effectively means that p2m_set_entry() will create a mapping for a
+different frame (it is always equal to gfn & (mask unused bits)). Yet
+p2m->max_mapped_gfn will be updated using the original frame.
+
+At the moment, p2m_get_entry() and p2m_resolve_translation_fault()
+assume that p2m_get_root_pointer() will always return a non-NULL pointer
+when the GFN is smaller than p2m->max_mapped_gfn.
+
+Unfortunately, because of the aliasing described above, it would be
+possible to set p2m->max_mapped_gfn high enough so it covers frame that
+would lead p2m_get_root_pointer() to return NULL.
+
+As we don't sanity check the guest physical frame provided by a guest, a
+malicious guest could craft a series of hypercalls that will hit the
+BUG_ON() and therefore DoS Xen.
+
+To prevent aliasing, the function p2m_get_root_pointer() is now reworked
+to return NULL If any of the unused top bits are not zero. The caller
+can then decide what's the appropriate action to do. Since the two paths
+(i.e. P2M_ROOT_PAGES == 1 and P2M_ROOT_PAGES != 1) are now very
+similarly, take the opportunity to consolidate them making the code a
+bit simpler.
+
+With this change, p2m_get_entry() will not try to insert a mapping as
+the root pointer is invalid.
+
+Note that root_table is now switch to unsigned long as unsigned int is
+not enough to hold part of a GFN.
+
+This is part of XSA-301.
+
+Reported-by: Julien Grall <Julien.Grall@arm.com>
+Signed-off-by: Julien Grall <julien.grall@arm.com>
+Reviewed-by: Stefano Stabellini <sstabellini@kernel.org>
+---
+ xen/arch/arm/p2m.c | 17 +++++------------
+ 1 file changed, 5 insertions(+), 12 deletions(-)
+
+diff --git a/xen/arch/arm/p2m.c b/xen/arch/arm/p2m.c
+index a2749d9b6f..d0045a8b28 100644
+--- a/xen/arch/arm/p2m.c
++++ b/xen/arch/arm/p2m.c
+@@ -229,21 +229,14 @@ void p2m_tlb_flush_sync(struct p2m_domain *p2m)
+ static lpae_t *p2m_get_root_pointer(struct p2m_domain *p2m,
+                                     gfn_t gfn)
+ {
+-    unsigned int root_table;
+-
+-    if ( P2M_ROOT_PAGES == 1 )
+-        return __map_domain_page(p2m->root);
++    unsigned long root_table;
+ 
+     /*
+-     * Concatenated root-level tables. The table number will be the
+-     * offset at the previous level. It is not possible to
+-     * concatenate a level-0 root.
++     * While the root table index is the offset from the previous level,
++     * we can't use (P2M_ROOT_LEVEL - 1) because the root level might be
++     * 0. Yet we still want to check if all the unused bits are zeroed.
+      */
+-    ASSERT(P2M_ROOT_LEVEL > 0);
+-
+-    root_table = gfn_x(gfn) >> (level_orders[P2M_ROOT_LEVEL - 1]);
+-    root_table &= LPAE_ENTRY_MASK;
+-
++    root_table = gfn_x(gfn) >> (level_orders[P2M_ROOT_LEVEL] + LPAE_SHIFT);
+     if ( root_table >= P2M_ROOT_PAGES )
+         return NULL;
+ 
+-- 
+2.23.0
+

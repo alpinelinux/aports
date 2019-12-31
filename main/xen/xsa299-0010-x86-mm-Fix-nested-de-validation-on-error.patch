@@ -1,0 +1,166 @@
+From b3e169dc8daeae85b0b51c25fdb142e2e552ec7f Mon Sep 17 00:00:00 2001
+From: George Dunlap <george.dunlap@citrix.com>
+Date: Thu, 10 Oct 2019 17:57:49 +0100
+Subject: [PATCH 10/11] x86/mm: Fix nested de-validation on error
+
+If an invalid entry is discovered when validating a page-table tree,
+the entire tree which has so far been validated must be de-validated.
+Since this may take a long time, alloc_l[2-4]_table() set current
+vcpu's old_guest_table immediately; put_old_guest_table() will make
+sure that put_page_type() will be called to finish off the
+de-validation before any other MMU operations can happen on the vcpu.
+
+The invariant for partial pages should be:
+
+* Entries [0, nr_validated_ptes) should be completely validated;
+  put_page_type() will de-validate these.
+
+* If [nr_validated_ptes] is partially validated, partial_flags should
+  set PTF_partiaL_set.  put_page_type() will be called on this page to
+  finish off devalidation, and the appropriate refcount adjustments
+  will be done.
+
+alloc_l[2-3]_table() indicates partial validation to its callers by
+setting current->old_guest_table.
+
+Unfortunately, this is mishandled.
+
+Take the case where validating lNe[x] returns an error.
+
+First, alloc_l3_table() doesn't check old_guest_table at all; as a
+result, partial_flags is not set when it should be.  nr_validated_ptes
+is set to x; and since PFT_partial_set clear, de-validation resumes at
+nr_validated_ptes-1.  This means that the l2 page at pl3e[x] will not
+have put_page_type() called on it when de-validating the rest of the
+l3: it will be stuck in the PGT_partial state until the domain is
+destroyed, or until it is re-used as an l2.  (Any other page type will
+fail.)
+
+Worse, alloc_l4_table(), rather than setting PTF_partial_set as it
+should, sets nr_validated_ptes to x+1.  When de-validating, since
+partial is 0, this will correctly resume calling put_page_type at [x];
+but, if the put_page_type() is never called, but instead
+get_page_type() is called, validation will pick up at [x+1],
+neglecting to validate [x].  If the rest of the validation succeeds,
+the l4 will be validated even though [x] is invalid.
+
+Fix this in both cases by setting PTF_partial_set if old_guest_table
+is set.
+
+While here, add some safety catches:
+- old_guest_table must point to the page contained in
+  [nr_validated_ptes].
+- alloc_l1_page shouldn't set old_guest_table
+
+If we experience one of these situations in production builds, it's
+safer to avoid calling put_page_type for the pages in question.  If
+they have PGT_partial set, they will be cleaned up on domain
+destruction; if not, we have no idea whether a type count is safe to
+drop.  Retaining an extra type ref that should have been dropped may
+trigger a BUG() on the free_domain_page() path, but dropping a type
+count that shouldn't be dropped may cause a privilege escalation.
+
+This is part of XSA-299.
+
+Reported-by: George Dunlap <george.dunlap@citrix.com>
+Signed-off-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/arch/x86/mm.c | 53 +++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 51 insertions(+), 2 deletions(-)
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 0a094291da..a432e69c74 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -1580,6 +1580,20 @@ static int alloc_l2_table(struct page_info *page, unsigned long type)
+             ASSERT(current->arch.old_guest_table == NULL);
+             if ( i )
+             {
++                /*
++                 * alloc_l1_table() doesn't set old_guest_table; it does
++                 * its own tear-down immediately on failure.  If it
++                 * did we'd need to check it and set partial_flags as we
++                 * do in alloc_l[34]_table().
++                 *
++                 * Note on the use of ASSERT: if it's non-null and
++                 * hasn't been cleaned up yet, it should have
++                 * PGT_partial set; and so the type will be cleaned up
++                 * on domain destruction.  Unfortunately, we would
++                 * leak the general ref held by old_guest_table; but
++                 * leaking a page is less bad than a host crash.
++                 */
++                ASSERT(current->arch.old_guest_table == NULL);
+                 page->nr_validated_ptes = i;
+                 page->partial_flags = partial_flags;
+                 current->arch.old_guest_ptpg = NULL;
+@@ -1607,6 +1621,7 @@ static int alloc_l3_table(struct page_info *page)
+     unsigned int   i;
+     int            rc = 0;
+     unsigned int   partial_flags = page->partial_flags;
++    l3_pgentry_t   l3e = l3e_empty();
+ 
+     pl3e = map_domain_page(_mfn(pfn));
+ 
+@@ -1623,7 +1638,7 @@ static int alloc_l3_table(struct page_info *page)
+     for ( i = page->nr_validated_ptes; i < L3_PAGETABLE_ENTRIES;
+           i++, partial_flags = 0 )
+     {
+-        l3_pgentry_t l3e = pl3e[i];
++        l3e = pl3e[i];
+ 
+         if ( i > page->nr_validated_ptes && hypercall_preempt_check() )
+             rc = -EINTR;
+@@ -1675,6 +1690,24 @@ static int alloc_l3_table(struct page_info *page)
+         {
+             page->nr_validated_ptes = i;
+             page->partial_flags = partial_flags;
++            if ( current->arch.old_guest_table )
++            {
++                /*
++                 * We've experienced a validation failure.  If
++                 * old_guest_table is set, "transfer" the general
++                 * reference count to pl3e[nr_validated_ptes] by
++                 * setting PTF_partial_set.
++                 *
++                 * As a precaution, check that old_guest_table is the
++                 * page pointed to by pl3e[nr_validated_ptes].  If
++                 * not, it's safer to leak a type ref on production
++                 * builds.
++                 */
++                if ( current->arch.old_guest_table == l3e_get_page(l3e) )
++                    page->partial_flags = PTF_partial_set;
++                else
++                    ASSERT_UNREACHABLE();
++            }
+             current->arch.old_guest_ptpg = NULL;
+             current->arch.old_guest_table = page;
+         }
+@@ -1851,7 +1884,23 @@ static int alloc_l4_table(struct page_info *page)
+                 else
+                 {
+                     if ( current->arch.old_guest_table )
+-                        page->nr_validated_ptes++;
++                    {
++                        /*
++                         * We've experienced a validation failure.  If
++                         * old_guest_table is set, "transfer" the general
++                         * reference count to pl3e[nr_validated_ptes] by
++                         * setting PTF_partial_set.
++                         *
++                         * As a precaution, check that old_guest_table is the
++                         * page pointed to by pl4e[nr_validated_ptes].  If
++                         * not, it's safer to leak a type ref on production
++                         * builds.
++                         */
++                        if ( current->arch.old_guest_table == l4e_get_page(l4e) )
++                            page->partial_flags = PTF_partial_set;
++                        else
++                            ASSERT_UNREACHABLE();
++                    }
+                     current->arch.old_guest_ptpg = NULL;
+                     current->arch.old_guest_table = page;
+                 }
+-- 
+2.23.0
+

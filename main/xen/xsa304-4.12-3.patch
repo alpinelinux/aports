@@ -1,0 +1,108 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/vtx: Allow runtime modification of the exec-sp setting
+
+See patch for details.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: George Dunlap <george.dunlap@citrix.com>
+
+diff --git a/docs/misc/xen-command-line.pandoc b/docs/misc/xen-command-line.pandoc
+index e283017015..84221fe60a 100644
+--- a/docs/misc/xen-command-line.pandoc
++++ b/docs/misc/xen-command-line.pandoc
+@@ -936,6 +936,21 @@ introduced with the Nehalem architecture.
+     If HVM guest kernels are trusted not to mount a DoS against the system,
+     this option can enabled to regain performance.
+ 
++    This boolean may be modified at runtime using `xl set-parameters
++    ept=[no-]exec-sp` to switch between fast and secure.
++
++    *   When switching from secure to fast, preexisting HVM domains will run
++        at their current performance until they are rebooted; new domains will
++        run without any overhead.
++
++    *   When switching from fast to secure, all HVM domains will immediately
++        suffer a performance penalty.
++
++    **Warning: No guarantee is made that this runtime option will be retained
++      indefinitely, or that it will retain this exact behaviour.  It is
++      intended as an emergency option for people who first chose fast, then
++      change their minds to secure, and wish not to reboot.**
++
+ ### extra_guest_irqs
+ > `= [<domU number>][,<dom0 number>]`
+ 
+diff --git a/xen/arch/x86/hvm/vmx/vmcs.c b/xen/arch/x86/hvm/vmx/vmcs.c
+index ec5ab860ad..c4d8a5ba78 100644
+--- a/xen/arch/x86/hvm/vmx/vmcs.c
++++ b/xen/arch/x86/hvm/vmx/vmcs.c
+@@ -95,6 +95,41 @@ static int __init parse_ept_param(const char *s)
+ }
+ custom_param("ept", parse_ept_param);
+ 
++static int parse_ept_param_runtime(const char *s)
++{
++    int val;
++
++    if ( !cpu_has_vmx_ept || !hvm_funcs.hap_supported ||
++         !(hvm_funcs.hap_capabilities &
++           (HVM_HAP_SUPERPAGE_2MB | HVM_HAP_SUPERPAGE_1GB)) )
++    {
++        printk("VMX: EPT not available, or not in use - ignoring\n");
++        return 0;
++    }
++
++    if ( (val = parse_boolean("exec-sp", s, NULL)) < 0 )
++        return -EINVAL;
++
++    if ( val != opt_ept_exec_sp )
++    {
++        struct domain *d;
++
++        opt_ept_exec_sp = val;
++
++        rcu_read_lock(&domlist_read_lock);
++        for_each_domain ( d )
++            if ( paging_mode_hap(d) )
++                p2m_change_entry_type_global(d, p2m_ram_rw, p2m_ram_rw);
++        rcu_read_unlock(&domlist_read_lock);
++    }
++
++    printk("VMX: EPT executable superpages %sabled\n",
++           val ? "en" : "dis");
++
++    return 0;
++}
++custom_runtime_only_param("ept", parse_ept_param_runtime);
++
+ /* Dynamic (run-time adjusted) execution control flags. */
+ u32 vmx_pin_based_exec_control __read_mostly;
+ u32 vmx_cpu_based_exec_control __read_mostly;
+diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
+index f518f86493..16608098b1 100644
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -289,15 +289,20 @@ static void change_entry_type_global(struct p2m_domain *p2m,
+                                      p2m_type_t ot, p2m_type_t nt)
+ {
+     p2m->change_entry_type_global(p2m, ot, nt);
+-    p2m->global_logdirty = (nt == p2m_ram_logdirty);
++    /* Don't allow 'recalculate' operations to change the logdirty state. */
++    if ( ot != nt )
++        p2m->global_logdirty = (nt == p2m_ram_logdirty);
+ }
+ 
++/*
++ * May be called with ot = nt = p2m_ram_rw for its side effect of
++ * recalculating all PTEs in the p2m.
++ */
+ void p2m_change_entry_type_global(struct domain *d,
+                                   p2m_type_t ot, p2m_type_t nt)
+ {
+     struct p2m_domain *hostp2m = p2m_get_hostp2m(d);
+ 
+-    ASSERT(ot != nt);
+     ASSERT(p2m_is_changeable(ot) && p2m_is_changeable(nt));
+ 
+     p2m_lock(hostp2m);

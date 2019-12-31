@@ -1,0 +1,89 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: x86/PV: check GDT/LDT limits during emulation
+
+Accesses beyond the LDT limit originating from emulation would trigger
+the ASSERT() in pv_map_ldt_shadow_page(). On production builds such
+accesses would cause an attempt to promote the touched page (offset from
+the present LDT base address) to a segment descriptor one. If this
+happens to succeed, guest user mode would be able to elevate its
+privileges to that of the guest kernel. This is particularly easy when
+there's no LDT at all, in which case the LDT base stored internally to
+Xen is simply zero.
+
+Also adjust the ASSERT() that was triggering: It was off by one to
+begin with, and for production builds we also better use
+ASSERT_UNREACHABLE() instead with suitable recovery code afterwards.
+
+This is XSA-298.
+
+Reported-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Andrew Cooper <andrew.cooper3@citrix.com>
+---
+v2: Correct 64-bit-only limit check (by folding into the common one).
+
+--- a/xen/arch/x86/pv/emul-gate-op.c
++++ b/xen/arch/x86/pv/emul-gate-op.c
+@@ -51,7 +51,13 @@ static int read_gate_descriptor(unsigned
+     const seg_desc_t *pdesc = gdt_ldt_desc_ptr(gate_sel);
+ 
+     if ( (gate_sel < 4) ||
+-         ((gate_sel >= FIRST_RESERVED_GDT_BYTE) && !(gate_sel & 4)) ||
++         /*
++          * We're interested in call gates only, which occupy a single
++          * seg_desc_t for 32-bit and a consecutive pair of them for 64-bit.
++          */
++         ((gate_sel >> 3) + !is_pv_32bit_vcpu(v) >=
++          (gate_sel & 4 ? v->arch.pv.ldt_ents
++                        : v->arch.pv.gdt_ents)) ||
+          __get_user(desc, pdesc) )
+         return 0;
+ 
+@@ -70,7 +76,7 @@ static int read_gate_descriptor(unsigned
+     if ( !is_pv_32bit_vcpu(v) )
+     {
+         if ( (*ar & 0x1f00) != 0x0c00 ||
+-             (gate_sel >= FIRST_RESERVED_GDT_BYTE - 8 && !(gate_sel & 4)) ||
++             /* Limit check done above already. */
+              __get_user(desc, pdesc + 1) ||
+              (desc.b & 0x1f00) )
+             return 0;
+--- a/xen/arch/x86/pv/emulate.c
++++ b/xen/arch/x86/pv/emulate.c
+@@ -31,7 +31,14 @@ int pv_emul_read_descriptor(unsigned int
+ {
+     seg_desc_t desc;
+ 
+-    if ( sel < 4)
++    if ( sel < 4 ||
++         /*
++          * Don't apply the GDT limit here, as the selector may be a Xen
++          * provided one. __get_user() will fail (without taking further
++          * action) for ones falling in the gap between guest populated
++          * and Xen ones.
++          */
++         ((sel & 4) && (sel >> 3) >= v->arch.pv.ldt_ents) )
+         desc.b = desc.a = 0;
+     else if ( __get_user(desc, gdt_ldt_desc_ptr(sel)) )
+         return 0;
+--- a/xen/arch/x86/pv/mm.c
++++ b/xen/arch/x86/pv/mm.c
+@@ -92,12 +92,16 @@ bool pv_map_ldt_shadow_page(unsigned int
+     BUG_ON(unlikely(in_irq()));
+ 
+     /*
+-     * Hardware limit checking should guarantee this property.  NB. This is
++     * Prior limit checking should guarantee this property.  NB. This is
+      * safe as updates to the LDT can only be made by MMUEXT_SET_LDT to the
+      * current vcpu, and vcpu_reset() will block until this vcpu has been
+      * descheduled before continuing.
+      */
+-    ASSERT((offset >> 3) <= curr->arch.pv.ldt_ents);
++    if ( unlikely((offset >> 3) >= curr->arch.pv.ldt_ents) )
++    {
++        ASSERT_UNREACHABLE();
++        return false;
++    }
+ 
+     if ( is_pv_32bit_domain(currd) )
+         linear = (uint32_t)linear;

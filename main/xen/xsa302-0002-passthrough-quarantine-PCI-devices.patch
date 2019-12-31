@@ -1,0 +1,499 @@
+From 278d8e585a9f110a1af0bd92a9fc43733c9c7227 Mon Sep 17 00:00:00 2001
+From: Paul Durrant <paul.durrant@citrix.com>
+Date: Mon, 14 Oct 2019 17:52:59 +0100
+Subject: [PATCH 2/2] passthrough: quarantine PCI devices
+
+When a PCI device is assigned to an untrusted domain, it is possible for
+that domain to program the device to DMA to an arbitrary address. The
+IOMMU is used to protect the host from malicious DMA by making sure that
+the device addresses can only target memory assigned to the guest. However,
+when the guest domain is torn down the device is assigned back to dom0,
+thus allowing any in-flight DMA to potentially target critical host data.
+
+This patch introduces a 'quarantine' for PCI devices using dom_io. When
+the toolstack makes a device assignable (by binding it to pciback), it
+will now also assign it to DOMID_IO and the device will only be assigned
+back to dom0 when the device is made unassignable again. Whilst device is
+assignable it will only ever transfer between dom_io and guest domains.
+dom_io is actually only used as a sentinel domain for quarantining purposes;
+it is not configured with any IOMMU mappings. Assignment to dom_io simply
+means that the device's initiator (requestor) identifier is not present in
+the IOMMU's device table and thus any DMA transactions issued will be
+terminated with a fault condition.
+
+In addition, a fix to assignment handling is made for VT-d.  Failure
+during the assignment step should not lead to a device still being
+associated with its prior owner. Hand the device to DomIO temporarily,
+until the assignment step has completed successfully.  Remove the PI
+hooks from the source domain then earlier as well.
+
+Failure of the recovery reassign_device_ownership() may not go silent:
+There e.g. may still be left over RMRR mappings in the domain assignment
+to which has failed, and hence we can't allow that domain to continue
+executing.
+
+NOTE: This patch also includes one printk() cleanup; the
+      "XEN_DOMCTL_assign_device: " tag is dropped in iommu_do_pci_domctl(),
+      since similar printk()-s elsewhere also don't log such a tag.
+
+This is XSA-302.
+
+Signed-off-by: Paul Durrant <paul.durrant@citrix.com>
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Signed-off-by: Ian Jackson <ian.jackson@eu.citrix.com>
+(cherry picked from commit ec99857f59f7f06236f11ca8b0b2303e5e745cc4)
+---
+ tools/libxl/libxl_pci.c                     | 25 +++++++++++-
+ xen/arch/x86/mm.c                           |  2 +
+ xen/common/domctl.c                         | 14 ++++++-
+ xen/drivers/passthrough/amd/pci_amd_iommu.c | 10 ++++-
+ xen/drivers/passthrough/iommu.c             |  9 +++++
+ xen/drivers/passthrough/pci.c               | 59 ++++++++++++++++++++++-------
+ xen/drivers/passthrough/vtd/iommu.c         | 40 ++++++++++++++++---
+ xen/include/xen/pci.h                       |  3 ++
+ 8 files changed, 138 insertions(+), 24 deletions(-)
+
+diff --git a/tools/libxl/libxl_pci.c b/tools/libxl/libxl_pci.c
+index 88c324ea23..d6a23fb5f8 100644
+--- a/tools/libxl/libxl_pci.c
++++ b/tools/libxl/libxl_pci.c
+@@ -754,6 +754,7 @@ static int libxl__device_pci_assignable_add(libxl__gc *gc,
+                                             libxl_device_pci *pcidev,
+                                             int rebind)
+ {
++    libxl_ctx *ctx = libxl__gc_owner(gc);
+     unsigned dom, bus, dev, func;
+     char *spath, *driver_path = NULL;
+     int rc;
+@@ -779,7 +780,7 @@ static int libxl__device_pci_assignable_add(libxl__gc *gc,
+     }
+     if ( rc ) {
+         LOG(WARN, PCI_BDF" already assigned to pciback", dom, bus, dev, func);
+-        return 0;
++        goto quarantine;
+     }
+ 
+     /* Check to see if there's already a driver that we need to unbind from */
+@@ -810,6 +811,19 @@ static int libxl__device_pci_assignable_add(libxl__gc *gc,
+         return ERROR_FAIL;
+     }
+ 
++quarantine:
++    /*
++     * DOMID_IO is just a sentinel domain, without any actual mappings,
++     * so always pass XEN_DOMCTL_DEV_RDM_RELAXED to avoid assignment being
++     * unnecessarily denied.
++     */
++    rc = xc_assign_device(ctx->xch, DOMID_IO, pcidev_encode_bdf(pcidev),
++                          XEN_DOMCTL_DEV_RDM_RELAXED);
++    if ( rc < 0 ) {
++        LOG(ERROR, "failed to quarantine "PCI_BDF, dom, bus, dev, func);
++        return ERROR_FAIL;
++    }
++
+     return 0;
+ }
+ 
+@@ -817,9 +831,18 @@ static int libxl__device_pci_assignable_remove(libxl__gc *gc,
+                                                libxl_device_pci *pcidev,
+                                                int rebind)
+ {
++    libxl_ctx *ctx = libxl__gc_owner(gc);
+     int rc;
+     char *driver_path;
+ 
++    /* De-quarantine */
++    rc = xc_deassign_device(ctx->xch, DOMID_IO, pcidev_encode_bdf(pcidev));
++    if ( rc < 0 ) {
++        LOG(ERROR, "failed to de-quarantine "PCI_BDF, pcidev->domain, pcidev->bus,
++            pcidev->dev, pcidev->func);
++        return ERROR_FAIL;
++    }
++
+     /* Unbind from pciback */
+     if ( (rc=pciback_dev_is_assigned(gc, pcidev)) < 0 ) {
+         return ERROR_FAIL;
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 3557cd1178..11d753d8d2 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -295,9 +295,11 @@ void __init arch_init_memory(void)
+      * Initialise our DOMID_IO domain.
+      * This domain owns I/O pages that are within the range of the page_info
+      * array. Mappings occur at the priv of the caller.
++     * Quarantined PCI devices will be associated with this domain.
+      */
+     dom_io = domain_create(DOMID_IO, NULL, false);
+     BUG_ON(IS_ERR(dom_io));
++    INIT_LIST_HEAD(&dom_io->arch.pdev_list);
+ 
+     /*
+      * Initialise our COW domain.
+diff --git a/xen/common/domctl.c b/xen/common/domctl.c
+index d08b6274e2..e3c4be2b48 100644
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -391,6 +391,16 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
+ 
+     switch ( op->cmd )
+     {
++    case XEN_DOMCTL_assign_device:
++    case XEN_DOMCTL_deassign_device:
++        if ( op->domain == DOMID_IO )
++        {
++            d = dom_io;
++            break;
++        }
++        else if ( op->domain == DOMID_INVALID )
++            return -ESRCH;
++        /* fall through */
+     case XEN_DOMCTL_test_assign_device:
+         if ( op->domain == DOMID_INVALID )
+         {
+@@ -412,7 +422,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
+ 
+     if ( !domctl_lock_acquire() )
+     {
+-        if ( d )
++        if ( d && d != dom_io )
+             rcu_unlock_domain(d);
+         return hypercall_create_continuation(
+             __HYPERVISOR_domctl, "h", u_domctl);
+@@ -1074,7 +1084,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
+     domctl_lock_release();
+ 
+  domctl_out_unlock_domonly:
+-    if ( d )
++    if ( d && d != dom_io )
+         rcu_unlock_domain(d);
+ 
+     if ( copyback && __copy_to_guest(u_domctl, op, 1) )
+diff --git a/xen/drivers/passthrough/amd/pci_amd_iommu.c b/xen/drivers/passthrough/amd/pci_amd_iommu.c
+index 33a3798f36..15c13e1163 100644
+--- a/xen/drivers/passthrough/amd/pci_amd_iommu.c
++++ b/xen/drivers/passthrough/amd/pci_amd_iommu.c
+@@ -120,6 +120,10 @@ static void amd_iommu_setup_domain_device(
+     u8 bus = pdev->bus;
+     const struct domain_iommu *hd = dom_iommu(domain);
+ 
++    /* dom_io is used as a sentinel for quarantined devices */
++    if ( domain == dom_io )
++        return;
++
+     BUG_ON( !hd->arch.root_table || !hd->arch.paging_mode ||
+             !iommu->dev_table.buffer );
+ 
+@@ -277,6 +281,10 @@ void amd_iommu_disable_domain_device(struct domain *domain,
+     int req_id;
+     u8 bus = pdev->bus;
+ 
++    /* dom_io is used as a sentinel for quarantined devices */
++    if ( domain == dom_io )
++        return;
++
+     BUG_ON ( iommu->dev_table.buffer == NULL );
+     req_id = get_dma_requestor_id(iommu->seg, PCI_BDF2(bus, devfn));
+     dte = iommu->dev_table.buffer + (req_id * IOMMU_DEV_TABLE_ENTRY_SIZE);
+@@ -363,7 +371,7 @@ static int amd_iommu_assign_device(struct domain *d, u8 devfn,
+             ivrs_mappings[req_id].read_permission);
+     }
+ 
+-    return reassign_device(hardware_domain, d, devfn, pdev);
++    return reassign_device(pdev->domain, d, devfn, pdev);
+ }
+ 
+ static void deallocate_next_page_table(struct page_info *pg, int level)
+diff --git a/xen/drivers/passthrough/iommu.c b/xen/drivers/passthrough/iommu.c
+index a6697d58fb..2762e1342f 100644
+--- a/xen/drivers/passthrough/iommu.c
++++ b/xen/drivers/passthrough/iommu.c
+@@ -232,6 +232,9 @@ void iommu_teardown(struct domain *d)
+ {
+     struct domain_iommu *hd = dom_iommu(d);
+ 
++    if ( d == dom_io )
++        return;
++
+     hd->status = IOMMU_STATUS_disabled;
+     hd->platform_ops->teardown(d);
+     tasklet_schedule(&iommu_pt_cleanup_tasklet);
+@@ -241,6 +244,9 @@ int iommu_construct(struct domain *d)
+ {
+     struct domain_iommu *hd = dom_iommu(d);
+ 
++    if ( d == dom_io )
++        return 0;
++
+     if ( hd->status == IOMMU_STATUS_initialized )
+         return 0;
+ 
+@@ -521,6 +527,9 @@ int __init iommu_setup(void)
+     printk("I/O virtualisation %sabled\n", iommu_enabled ? "en" : "dis");
+     if ( iommu_enabled )
+     {
++        if ( iommu_domain_init(dom_io) )
++            panic("Could not set up quarantine\n");
++
+         printk(" - Dom0 mode: %s\n",
+                iommu_hwdom_passthrough ? "Passthrough" :
+                iommu_hwdom_strict ? "Strict" : "Relaxed");
+diff --git a/xen/drivers/passthrough/pci.c b/xen/drivers/passthrough/pci.c
+index d7420bd8bf..d66a8a1daf 100644
+--- a/xen/drivers/passthrough/pci.c
++++ b/xen/drivers/passthrough/pci.c
+@@ -1426,19 +1426,29 @@ static int iommu_remove_device(struct pci_dev *pdev)
+     return hd->platform_ops->remove_device(pdev->devfn, pci_to_dev(pdev));
+ }
+ 
+-/*
+- * If the device isn't owned by the hardware domain, it means it already
+- * has been assigned to other domain, or it doesn't exist.
+- */
+ static int device_assigned(u16 seg, u8 bus, u8 devfn)
+ {
+     struct pci_dev *pdev;
++    int rc = 0;
+ 
+     pcidevs_lock();
+-    pdev = pci_get_pdev_by_domain(hardware_domain, seg, bus, devfn);
++
++    pdev = pci_get_pdev(seg, bus, devfn);
++
++    if ( !pdev )
++        rc = -ENODEV;
++    /*
++     * If the device exists and it is not owned by either the hardware
++     * domain or dom_io then it must be assigned to a guest, or be
++     * hidden (owned by dom_xen).
++     */
++    else if ( pdev->domain != hardware_domain &&
++              pdev->domain != dom_io )
++        rc = -EBUSY;
++
+     pcidevs_unlock();
+ 
+-    return pdev ? 0 : -EBUSY;
++    return rc;
+ }
+ 
+ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
+@@ -1452,7 +1462,8 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
+ 
+     /* Prevent device assign if mem paging or mem sharing have been 
+      * enabled for this domain */
+-    if ( unlikely((is_hvm_domain(d) &&
++    if ( d != dom_io &&
++         unlikely((is_hvm_domain(d) &&
+                    d->arch.hvm.mem_sharing_enabled) ||
+                   vm_event_check_ring(d->vm_event_paging) ||
+                   p2m_get_hostp2m(d)->global_logdirty) )
+@@ -1468,12 +1479,20 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
+         return rc;
+     }
+ 
+-    pdev = pci_get_pdev_by_domain(hardware_domain, seg, bus, devfn);
++    pdev = pci_get_pdev(seg, bus, devfn);
++
++    rc = -ENODEV;
+     if ( !pdev )
+-    {
+-        rc = pci_get_pdev(seg, bus, devfn) ? -EBUSY : -ENODEV;
+         goto done;
+-    }
++
++    rc = 0;
++    if ( d == pdev->domain )
++        goto done;
++
++    rc = -EBUSY;
++    if ( pdev->domain != hardware_domain &&
++         pdev->domain != dom_io )
++        goto done;
+ 
+     if ( pdev->msix )
+         msixtbl_init(d);
+@@ -1496,6 +1515,10 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
+     }
+ 
+  done:
++    /* The device is assigned to dom_io so mark it as quarantined */
++    if ( !rc && d == dom_io )
++        pdev->quarantine = true;
++
+     if ( !has_arch_pdevs(d) && has_iommu_pt(d) )
+         iommu_teardown(d);
+     pcidevs_unlock();
+@@ -1508,6 +1531,7 @@ int deassign_device(struct domain *d, u16 seg, u8 bus, u8 devfn)
+ {
+     const struct domain_iommu *hd = dom_iommu(d);
+     struct pci_dev *pdev = NULL;
++    struct domain *target;
+     int ret = 0;
+ 
+     if ( !iommu_enabled || !hd->platform_ops )
+@@ -1518,12 +1542,16 @@ int deassign_device(struct domain *d, u16 seg, u8 bus, u8 devfn)
+     if ( !pdev )
+         return -ENODEV;
+ 
++    /* De-assignment from dom_io should de-quarantine the device */
++    target = (pdev->quarantine && pdev->domain != dom_io) ?
++        dom_io : hardware_domain;
++
+     while ( pdev->phantom_stride )
+     {
+         devfn += pdev->phantom_stride;
+         if ( PCI_SLOT(devfn) != PCI_SLOT(pdev->devfn) )
+             break;
+-        ret = hd->platform_ops->reassign_device(d, hardware_domain, devfn,
++        ret = hd->platform_ops->reassign_device(d, target, devfn,
+                                                 pci_to_dev(pdev));
+         if ( !ret )
+             continue;
+@@ -1534,7 +1562,7 @@ int deassign_device(struct domain *d, u16 seg, u8 bus, u8 devfn)
+     }
+ 
+     devfn = pdev->devfn;
+-    ret = hd->platform_ops->reassign_device(d, hardware_domain, devfn,
++    ret = hd->platform_ops->reassign_device(d, target, devfn,
+                                             pci_to_dev(pdev));
+     if ( ret )
+     {
+@@ -1544,6 +1572,9 @@ int deassign_device(struct domain *d, u16 seg, u8 bus, u8 devfn)
+         return ret;
+     }
+ 
++    if ( pdev->domain == hardware_domain  )
++        pdev->quarantine = false;
++
+     pdev->fault.count = 0;
+ 
+     if ( !has_arch_pdevs(d) && has_iommu_pt(d) )
+@@ -1722,7 +1753,7 @@ int iommu_do_pci_domctl(
+             ret = hypercall_create_continuation(__HYPERVISOR_domctl,
+                                                 "h", u_domctl);
+         else if ( ret )
+-            printk(XENLOG_G_ERR "XEN_DOMCTL_assign_device: "
++            printk(XENLOG_G_ERR
+                    "assign %04x:%02x:%02x.%u to dom%d failed (%d)\n",
+                    seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn),
+                    d->domain_id, ret);
+diff --git a/xen/drivers/passthrough/vtd/iommu.c b/xen/drivers/passthrough/vtd/iommu.c
+index 1db1cd9f2d..a8d1baa064 100644
+--- a/xen/drivers/passthrough/vtd/iommu.c
++++ b/xen/drivers/passthrough/vtd/iommu.c
+@@ -1338,6 +1338,10 @@ int domain_context_mapping_one(
+     int agaw, rc, ret;
+     bool_t flush_dev_iotlb;
+ 
++    /* dom_io is used as a sentinel for quarantined devices */
++    if ( domain == dom_io )
++        return 0;
++
+     ASSERT(pcidevs_locked());
+     spin_lock(&iommu->lock);
+     maddr = bus_to_context_maddr(iommu, bus);
+@@ -1573,6 +1577,10 @@ int domain_context_unmap_one(
+     int iommu_domid, rc, ret;
+     bool_t flush_dev_iotlb;
+ 
++    /* dom_io is used as a sentinel for quarantined devices */
++    if ( domain == dom_io )
++        return 0;
++
+     ASSERT(pcidevs_locked());
+     spin_lock(&iommu->lock);
+ 
+@@ -1705,6 +1713,10 @@ static int domain_context_unmap(struct domain *domain, u8 devfn,
+         goto out;
+     }
+ 
++    /* dom_io is used as a sentinel for quarantined devices */
++    if ( domain == dom_io )
++        goto out;
++
+     /*
+      * if no other devices under the same iommu owned by this domain,
+      * clear iommu in iommu_bitmap and clear domain_id in domid_bitmp
+@@ -2441,6 +2453,15 @@ static int reassign_device_ownership(
+     if ( ret )
+         return ret;
+ 
++    if ( devfn == pdev->devfn )
++    {
++        list_move(&pdev->domain_list, &dom_io->arch.pdev_list);
++        pdev->domain = dom_io;
++    }
++
++    if ( !has_arch_pdevs(source) )
++        vmx_pi_hooks_deassign(source);
++
+     if ( !has_arch_pdevs(target) )
+         vmx_pi_hooks_assign(target);
+ 
+@@ -2459,15 +2480,13 @@ static int reassign_device_ownership(
+         pdev->domain = target;
+     }
+ 
+-    if ( !has_arch_pdevs(source) )
+-        vmx_pi_hooks_deassign(source);
+-
+     return ret;
+ }
+ 
+ static int intel_iommu_assign_device(
+     struct domain *d, u8 devfn, struct pci_dev *pdev, u32 flag)
+ {
++    struct domain *s = pdev->domain;
+     struct acpi_rmrr_unit *rmrr;
+     int ret = 0, i;
+     u16 bdf, seg;
+@@ -2510,8 +2529,8 @@ static int intel_iommu_assign_device(
+         }
+     }
+ 
+-    ret = reassign_device_ownership(hardware_domain, d, devfn, pdev);
+-    if ( ret )
++    ret = reassign_device_ownership(s, d, devfn, pdev);
++    if ( ret || d == dom_io )
+         return ret;
+ 
+     /* Setup rmrr identity mapping */
+@@ -2524,11 +2543,20 @@ static int intel_iommu_assign_device(
+             ret = rmrr_identity_mapping(d, 1, rmrr, flag);
+             if ( ret )
+             {
+-                reassign_device_ownership(d, hardware_domain, devfn, pdev);
++                int rc;
++
++                rc = reassign_device_ownership(d, s, devfn, pdev);
+                 printk(XENLOG_G_ERR VTDPREFIX
+                        " cannot map reserved region (%"PRIx64",%"PRIx64"] for Dom%d (%d)\n",
+                        rmrr->base_address, rmrr->end_address,
+                        d->domain_id, ret);
++                if ( rc )
++                {
++                    printk(XENLOG_ERR VTDPREFIX
++                           " failed to reclaim %04x:%02x:%02x.%u from %pd (%d)\n",
++                           seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), d, rc);
++                    domain_crash(d);
++                }
+                 break;
+             }
+         }
+diff --git a/xen/include/xen/pci.h b/xen/include/xen/pci.h
+index 8b21e8dc84..a031fd6020 100644
+--- a/xen/include/xen/pci.h
++++ b/xen/include/xen/pci.h
+@@ -88,6 +88,9 @@ struct pci_dev {
+ 
+     nodeid_t node; /* NUMA node */
+ 
++    /* Device to be quarantined, don't automatically re-assign to dom0 */
++    bool quarantine;
++
+     /* Device with errata, ignore the BARs. */
+     bool ignore_bars;
+ 
+-- 
+2.11.0
+
