@@ -1,0 +1,298 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/vtx: Disable executable EPT superpages to work around
+ CVE-2018-12207
+
+CVE-2018-12207 covers a set of errata on various Intel processors, whereby a
+machine check exception can be generated in a corner case when an executable
+mapping changes size or cacheability without TLB invalidation.  HVM guest
+kernels can trigger this to DoS the host.
+
+To mitigate, in affected hardware, all EPT superpages are marked NX.  When an
+instruction fetch violation is observed against the superpage, the superpage
+is shattered to 4k and has execute permissions restored.  This prevents the
+guest kernel from being able to create the necessary preconditions in the iTLB
+to exploit the vulnerability.
+
+This does come with a workload-dependent performance overhead, caused by
+increased TLB pressure.  Performance can be restored, if guest kernels are
+trusted not to mount an attack, by specifying ept=exec-sp on the command line.
+
+This is part of XSA-304 / CVE-2018-12207
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Acked-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+diff --git a/docs/misc/xen-command-line.markdown b/docs/misc/xen-command-line.markdown
+index c63a07d29b..684671cb7b 100644
+--- a/docs/misc/xen-command-line.markdown
++++ b/docs/misc/xen-command-line.markdown
+@@ -828,7 +828,7 @@ effect the inverse meaning.
+ >> set as UC.
+ 
+ ### ept (Intel)
+-> `= List of ( {no-}pml | {no-}ad )`
++> `= List of [ {no-}pml,  {no-}ad, {no-}exec-sp ]`
+ 
+ Controls EPT related features.
+ 
+@@ -851,6 +851,16 @@ Controls EPT related features.
+ 
+ >> Have hardware keep accessed/dirty (A/D) bits updated.
+ 
++*   The `exec-sp` boolean controls whether EPT superpages with execute
++    permissions are permitted.  In general this is good for performance.
++
++    However, on processors vulnerable CVE-2018-12207, HVM guest kernels can
++    use executable superpages to crash the host.  By default, executable
++    superpages are disabled on affected hardware.
++
++    If HVM guest kernels are trusted not to mount a DoS against the system,
++    this option can enabled to regain performance.
++
+ ### extra\_guest\_irqs
+ > `= [<domU number>][,<dom0 number>]`
+ 
+diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
+index f4a6a37149..1924434960 100644
+--- a/xen/arch/x86/hvm/hvm.c
++++ b/xen/arch/x86/hvm/hvm.c
+@@ -1706,6 +1706,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
+     struct p2m_domain *p2m, *hostp2m;
+     int rc, fall_through = 0, paged = 0;
+     int sharing_enomem = 0;
++    unsigned int page_order = 0;
+     vm_event_request_t *req_ptr = NULL;
+     bool_t ap2m_active, sync = 0;
+ 
+@@ -1774,7 +1775,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
+     hostp2m = p2m_get_hostp2m(currd);
+     mfn = get_gfn_type_access(hostp2m, gfn, &p2mt, &p2ma,
+                               P2M_ALLOC | (npfec.write_access ? P2M_UNSHARE : 0),
+-                              NULL);
++                              &page_order);
+ 
+     if ( ap2m_active )
+     {
+@@ -1786,7 +1787,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
+             goto out;
+         }
+ 
+-        mfn = get_gfn_type_access(p2m, gfn, &p2mt, &p2ma, 0, NULL);
++        mfn = get_gfn_type_access(p2m, gfn, &p2mt, &p2ma, 0, &page_order);
+     }
+     else
+         p2m = hostp2m;
+@@ -1828,6 +1829,24 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
+             break;
+         }
+ 
++        /*
++         * Workaround for XSA-304 / CVE-2018-12207.  If we take an execution
++         * fault against a non-executable superpage, shatter it to regain
++         * execute permissions.
++         */
++        if ( page_order > 0 && npfec.insn_fetch && npfec.present && !violation )
++        {
++            int res = p2m_set_entry(p2m, _gfn(gfn), mfn, PAGE_ORDER_4K,
++                                    p2mt, p2ma);
++
++            if ( res )
++                printk(XENLOG_ERR "Failed to shatter gfn %"PRI_gfn": %d\n",
++                       gfn, res);
++
++            rc = !res;
++            goto out_put_gfn;
++        }
++
+         if ( violation )
+         {
+             /* Should #VE be emulated for this fault? */
+diff --git a/xen/arch/x86/hvm/vmx/vmcs.c b/xen/arch/x86/hvm/vmx/vmcs.c
+index 493986e84a..8821a3b536 100644
+--- a/xen/arch/x86/hvm/vmx/vmcs.c
++++ b/xen/arch/x86/hvm/vmx/vmcs.c
+@@ -67,6 +67,7 @@ integer_param("ple_window", ple_window);
+ 
+ static bool_t __read_mostly opt_pml_enabled = 1;
+ static s8 __read_mostly opt_ept_ad = -1;
++int8_t __read_mostly opt_ept_exec_sp = -1;
+ 
+ /*
+  * The 'ept' parameter controls functionalities that depend on, or impact the
+@@ -94,6 +95,8 @@ static int __init parse_ept_param(const char *s)
+             opt_pml_enabled = val;
+         else if ( !cmdline_strcmp(s, "ad") )
+             opt_ept_ad = val;
++        else if ( !cmdline_strcmp(s, "exec-sp") )
++            opt_ept_exec_sp = val;
+         else
+             rc = -EINVAL;
+ 
+diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
+index 840dc2b44d..a568d62643 100644
+--- a/xen/arch/x86/hvm/vmx/vmx.c
++++ b/xen/arch/x86/hvm/vmx/vmx.c
+@@ -2415,6 +2415,102 @@ static void pi_notification_interrupt(struct cpu_user_regs *regs)
+ static void __init lbr_tsx_fixup_check(void);
+ static void __init bdw_erratum_bdf14_fixup_check(void);
+ 
++/*
++ * Calculate whether the CPU is vulnerable to Instruction Fetch page
++ * size-change MCEs.
++ */
++static bool __init has_if_pschange_mc(void)
++{
++    uint64_t caps = 0;
++
++    /*
++     * If we are virtualised, there is nothing we can do.  Our EPT tables are
++     * shadowed by our hypervisor, and not walked by hardware.
++     */
++    if ( cpu_has_hypervisor )
++        return false;
++
++    if ( boot_cpu_has(X86_FEATURE_ARCH_CAPS) )
++        rdmsrl(MSR_ARCH_CAPABILITIES, caps);
++
++    if ( caps & ARCH_CAPS_IF_PSCHANGE_MC_NO )
++        return false;
++
++    /*
++     * IF_PSCHANGE_MC is only known to affect Intel Family 6 processors at
++     * this time.
++     */
++    if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL ||
++         boot_cpu_data.x86 != 6 )
++        return false;
++
++    switch ( boot_cpu_data.x86_model )
++    {
++        /*
++         * Core processors since at least Nehalem are vulnerable.
++         */
++    case 0x1f: /* Auburndale / Havendale */
++    case 0x1e: /* Nehalem */
++    case 0x1a: /* Nehalem EP */
++    case 0x2e: /* Nehalem EX */
++    case 0x25: /* Westmere */
++    case 0x2c: /* Westmere EP */
++    case 0x2f: /* Westmere EX */
++    case 0x2a: /* SandyBridge */
++    case 0x2d: /* SandyBridge EP/EX */
++    case 0x3a: /* IvyBridge */
++    case 0x3e: /* IvyBridge EP/EX */
++    case 0x3c: /* Haswell */
++    case 0x3f: /* Haswell EX/EP */
++    case 0x45: /* Haswell D */
++    case 0x46: /* Haswell H */
++    case 0x3d: /* Broadwell */
++    case 0x47: /* Broadwell H */
++    case 0x4f: /* Broadwell EP/EX */
++    case 0x56: /* Broadwell D */
++    case 0x4e: /* Skylake M */
++    case 0x5e: /* Skylake D */
++    case 0x55: /* Skylake-X / Cascade Lake */
++    case 0x8e: /* Kaby / Coffee / Whiskey Lake M */
++    case 0x9e: /* Kaby / Coffee / Whiskey Lake D */
++        return true;
++
++        /*
++         * Atom processors are not vulnerable.
++         */
++    case 0x1c: /* Pineview */
++    case 0x26: /* Lincroft */
++    case 0x27: /* Penwell */
++    case 0x35: /* Cloverview */
++    case 0x36: /* Cedarview */
++    case 0x37: /* Baytrail / Valleyview (Silvermont) */
++    case 0x4d: /* Avaton / Rangely (Silvermont) */
++    case 0x4c: /* Cherrytrail / Brasswell */
++    case 0x4a: /* Merrifield */
++    case 0x5a: /* Moorefield */
++    case 0x5c: /* Goldmont */
++    case 0x5d: /* SoFIA 3G Granite/ES2.1 */
++    case 0x65: /* SoFIA LTE AOSP */
++    case 0x5f: /* Denverton */
++    case 0x6e: /* Cougar Mountain */
++    case 0x75: /* Lightning Mountain */
++    case 0x7a: /* Gemini Lake */
++    case 0x86: /* Jacobsville */
++
++        /*
++         * Knights processors are not vulnerable.
++         */
++    case 0x57: /* Knights Landing */
++    case 0x85: /* Knights Mill */
++        return false;
++
++    default:
++        printk("Unrecognised CPU model %#x - assuming vulnerable to IF_PSCHANGE_MC\n",
++               boot_cpu_data.x86_model);
++        return true;
++    }
++}
++
+ const struct hvm_function_table * __init start_vmx(void)
+ {
+     set_in_cr4(X86_CR4_VMXE);
+@@ -2435,6 +2531,17 @@ const struct hvm_function_table * __init start_vmx(void)
+      */
+     if ( cpu_has_vmx_ept && (cpu_has_vmx_pat || opt_force_ept) )
+     {
++        bool cpu_has_bug_pschange_mc = has_if_pschange_mc();
++
++        if ( opt_ept_exec_sp == -1 )
++        {
++            /* Default to non-executable superpages on vulnerable hardware. */
++            opt_ept_exec_sp = !cpu_has_bug_pschange_mc;
++
++            if ( cpu_has_bug_pschange_mc )
++                printk("VMX: Disabling executable EPT superpages due to CVE-2018-12207\n");
++        }
++
+         vmx_function_table.hap_supported = 1;
+         vmx_function_table.altp2m_supported = 1;
+ 
+diff --git a/xen/arch/x86/mm/p2m-ept.c b/xen/arch/x86/mm/p2m-ept.c
+index ce46201d45..93e08f89a2 100644
+--- a/xen/arch/x86/mm/p2m-ept.c
++++ b/xen/arch/x86/mm/p2m-ept.c
+@@ -215,6 +215,12 @@ static void ept_p2m_type_to_flags(struct p2m_domain *p2m, ept_entry_t *entry,
+             break;
+     }
+     
++    /*
++     * Don't create executable superpages if we need to shatter them to
++     * protect against CVE-2018-12207.
++     */
++    if ( !opt_ept_exec_sp && is_epte_superpage(entry) )
++        entry->x = 0;
+ }
+ 
+ #define GUEST_TABLE_MAP_FAILED  0
+diff --git a/xen/include/asm-x86/hvm/vmx/vmx.h b/xen/include/asm-x86/hvm/vmx/vmx.h
+index 89619e4afd..20eb7f6082 100644
+--- a/xen/include/asm-x86/hvm/vmx/vmx.h
++++ b/xen/include/asm-x86/hvm/vmx/vmx.h
+@@ -28,6 +28,8 @@
+ #include <asm/hvm/trace.h>
+ #include <asm/hvm/vmx/vmcs.h>
+ 
++extern int8_t opt_ept_exec_sp;
++
+ typedef union {
+     struct {
+         u64 r       :   1,  /* bit 0 - Read permission */
+diff --git a/xen/include/asm-x86/msr-index.h b/xen/include/asm-x86/msr-index.h
+index b8151d2d9f..89ae3e03f1 100644
+--- a/xen/include/asm-x86/msr-index.h
++++ b/xen/include/asm-x86/msr-index.h
+@@ -54,6 +54,7 @@
+ #define ARCH_CAPS_SKIP_L1DFL		(_AC(1, ULL) << 3)
+ #define ARCH_CAPS_SSB_NO		(_AC(1, ULL) << 4)
+ #define ARCH_CAPS_MDS_NO		(_AC(1, ULL) << 5)
++#define ARCH_CAPS_IF_PSCHANGE_MC_NO	(_AC(1, ULL) << 6)
+ 
+ #define MSR_FLUSH_CMD			0x0000010b
+ #define FLUSH_CMD_L1D			(_AC(1, ULL) << 0)
