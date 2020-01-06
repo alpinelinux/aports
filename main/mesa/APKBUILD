@@ -1,20 +1,22 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=mesa
 pkgver=19.3.2
-pkgrel=0
+pkgrel=1
 pkgdesc="Mesa DRI OpenGL library"
 url="https://www.mesa3d.org"
 arch="all"
 license="MIT SGI-B-2.0 BSL-1.0"
 subpackages="
 	$pkgname-dev
-	$pkgname-dri-ati:_dri
-	$pkgname-dri-nouveau:_dri
-	$pkgname-dri-swrast:_dri
-	$pkgname-dri-virtio:_dri
+	$pkgname-dri-classic:_dri
+	$pkgname-dri-gallium:_dri
+	$pkgname-va-gallium:_va
+	$pkgname-vdpau-gallium:_vdpau
 	$pkgname-glapi $pkgname-egl $pkgname-gl $pkgname-gles
 	$pkgname-xatracker $pkgname-osmesa $pkgname-gbm
 	$pkgname-vulkan-ati:_vulkan
+	$pkgname-dri-ati:_dri_deprecated
+	$pkgname-dri-nouveau:_dri_deprecated
 	"
 _llvmver=9
 depends_dev="
@@ -29,6 +31,7 @@ makedepends="
 	bison
 	eudev-dev
 	expat-dev
+	findutils
 	flex
 	gettext
 	elfutils-dev
@@ -69,6 +72,7 @@ fi
 _dri_driverdir=/usr/lib/xorg/modules/dri
 _dri_drivers="r100,r200,nouveau"
 _gallium_drivers="r300,r600,radeonsi,nouveau,swrast,virgl"
+_gallium_provides="$pkgname-dri-swrast $pkgname-dri-virtio"
 _vulkan_drivers="amd"
 _arch_opts=""
 _vulkan_overlay_layer=false
@@ -80,10 +84,10 @@ x86*)
 	_vulkan_overlay_layer=true
 	makedepends="$makedepends glslang"
 	subpackages="$subpackages \
-			$pkgname-dri-intel:_dri \
-			$pkgname-dri-vmwgfx:_dri \
+			$pkgname-dri-intel:_dri_deprecated \
 			$pkgname-vulkan-intel:_vulkan \
 			$pkgname-vulkan-layer:_vulkan_layer"
+	_gallium_provides="$_gallium_provides $pkgname-dri-vmwgfx"
 	_arch_opts="-Ddri3=true"
 	case "$CARCH" in
 	x86)
@@ -92,15 +96,15 @@ x86*)
 	;;
 armhf|armv7|aarch64)
 	_gallium_drivers="${_gallium_drivers},vc4,v3d,freedreno,kmsro,lima,panfrost,etnaviv,tegra"
-	subpackages="$subpackages
-		$pkgname-dri-vc4:_dri
-		$pkgname-dri-v3d:_dri
-		$pkgname-dri-freedreno:_dri
-		$pkgname-dri-kmsro:_dri
-		$pkgname-dri-lima:_dri
-		$pkgname-dri-panfrost:_dri
-		$pkgname-dri-etnaviv:_dri
-		$pkgname-dri-tegra:_dri
+	_gallium_provides="$_gallium_provides
+		$pkgname-dri-vc4
+		$pkgname-dri-v3d
+		$pkgname-dri-freedreno
+		$pkgname-dri-kmsro
+		$pkgname-dri-lima
+		$pkgname-dri-panfrost
+		$pkgname-dri-etnaviv
+		$pkgname-dri-tegra
 		"
 	;;
 esac
@@ -204,35 +208,14 @@ gbm() {
 	mv "$pkgdir"/usr/lib/libgbm.so.* "$subpkgdir"/usr/lib/
 }
 
-_mv_dri() {
-	install -d "$subpkgdir"/$_dri_driverdir
-
-	while [ $# -gt 0 ]; do
-		mv "$pkgdir"/$_dri_driverdir/$1.so \
-			"$subpkgdir"/$_dri_driverdir/
-		shift
-	done
-}
-
-_mv_vdpau() {
-	local i
-	install -d "$subpkgdir"/usr/lib/vdpau
-	for i in "$@"; do
-		mv "$pkgdir"/usr/lib/vdpau/libvdpau_$i.* \
-			"$subpkgdir"/usr/lib/vdpau/
-	done
-}
-
-_mv_gpipe() {
-	return 0
-	# http://cgit.freedesktop.org/mesa/mesa/commit/?id=44ec468e8033553c26a112cebba41c343db00eb1
-	# https://code.google.com/p/chromium/issues/detail?id=412089
-#	local i
-#	install -d "$subpkgdir"/usr/lib/gallium-pipe
-#	for i in "$@"; do
-#		mv "$pkgdir"/usr/lib/gallium-pipe/pipe_$i.* \
-#			"$subpkgdir"/usr/lib/gallium-pipe/
-#	done
+# Move links referencing the same file to the subpackage.
+# Usage: _mv_links <base directory> <example>
+# where <example> is one of the libraries covered by the megadriver.
+# The example is used to find other links that point to the same file.
+_mv_links() {
+	install -d "$subpkgdir"/$1
+	find -L "$pkgdir"/$1 -samefile "$pkgdir"/$1/$2 -print0 \
+		| xargs -0 -I{} mv {} "$subpkgdir"/$1/
 }
 
 _mv_vulkan() {
@@ -245,69 +228,62 @@ _mv_vulkan() {
 	done
 }
 
-_mv_va() {
-	local i
-	install -d "$subpkgdir"/usr/lib/dri
-	for i in "$@"; do
-		mv "$pkgdir"/usr/lib/dri/${i}_drv_video.so \
-			"$subpkgdir"/usr/lib/dri/
-	done
-}
+# Mesa uses "megadrivers" where multiple drivers are linked into one shared
+# library. This library is then hard-linked to separate files (one for each driver).
+# Each subpackage contains one megadriver so that all the hard-links are preserved.
 
 _dri() {
 	local n=${subpkgname##*-dri-}
-	pkgdesc="Mesa DRI driver for $n"
+	pkgdesc="Mesa $n DRI drivers"
 	depends="mesa"
 
 	case $n in
-	ati)
-		_mv_dri radeon_dri r200_dri r300_dri r600_dri radeonsi_dri \
-			&& _mv_vdpau r300 r600 radeonsi \
-			&& _mv_gpipe r300 r600 \
-			&& _mv_va r600 radeonsi
+	classic)
+		# libmesa_dri_drivers.so
+		_mv_links $_dri_driverdir radeon_dri.so ;;
+	gallium)
+		# libgallium_dri.so
+		_mv_links $_dri_driverdir swrast_dri.so
+		provides="$_gallium_provides"
 		;;
-	intel)
-		_mv_dri i915_dri i965_dri iris_dri
-		;;
-	nouveau)
-		_mv_dri nouveau_dri nouveau_vieux_dri \
-			&& _mv_vdpau nouveau \
-			&& _mv_gpipe nouveau \
-			&& _mv_va nouveau
-		;;
-	freedreno)
-		_mv_dri msm_dri kgsl_dri
-		;;
-	swrast)
-		_mv_dri swrast_dri kms_swrast_dri && _mv_gpipe swrast
-		;;
-	vc4)
-		_mv_dri vc4_dri
-		;;
-	v3d)
-		_mv_dri v3d_dri
-		;;
-	vmwgfx)
-		_mv_dri vmwgfx_dri && _mv_gpipe vmwgfx
-		;;
-	virtio)
-		_mv_dri virtio_gpu_dri
-		;;
-	kmsro)
-		_mv_dri exynos_dri hx8357d_dri ili9225_dri ili9341_dri meson_dri mi0283qt_dri pl111_dri repaper_dri rockchip_dri st7586_dri st7735r_dri sun4i-drm_dri
-		;;
-	lima)
-		_mv_dri lima_dri
-		;;
-	panfrost)
-		_mv_dri panfrost_dri
-		;;
-	etnaviv)
-		_mv_dri armada-drm_dri imx-drm_dri etnaviv_dri
-		;;
-	tegra)
-		_mv_dri tegra_dri
-		;;
+	esac
+}
+
+# Compatibility packages for upgrading from the old (driver-specific) subpackages
+_dri_deprecated() {
+	local n=${subpkgname##*-dri-}
+	pkgdesc="Mesa DRI drivers for $n (DEPRECATED)"
+	depends="mesa-dri-classic mesa-dri-gallium"
+
+	case $n in
+	ati|nouveau)
+		depends="$depends mesa-va-gallium mesa-vdpau-gallium" ;;
+	esac
+
+	mkdir "$subpkgdir"
+}
+
+_va() {
+	local n=${subpkgname##*-va-}
+	pkgdesc="Mesa $n VAAPI drivers"
+	depends="mesa libva"
+
+	case $n in
+	gallium)
+		# libgallium_drv_video.so
+		_mv_links /usr/lib/dri radeonsi_drv_video.so ;;
+	esac
+}
+
+_vdpau() {
+	local n=${subpkgname##*-vdpau-}
+	pkgdesc="Mesa $n VDPAU drivers"
+	depends="mesa libvdpau"
+
+	case $n in
+	gallium)
+		# libvdpau_gallium.so.1.0.0
+		_mv_links /usr/lib/vdpau libvdpau_radeonsi.so.1.0.0 ;;
 	esac
 }
 
