@@ -1,0 +1,146 @@
+diff --git a/turbo/cdef.lua b/turbo/cdef.lua
+index 62895de..62830e7 100755
+--- a/turbo/cdef.lua
++++ b/turbo/cdef.lua
+@@ -611,6 +611,7 @@ if _G.TURBO_SSL then
+         typedef void ASN1_STRING;
+         typedef unsigned int SHA_LONG;
+         typedef void EVP_MD;
++	typedef void OPENSSL_INIT_SETTINGS;
+         typedef struct SHAstate_st{
+             SHA_LONG h0,h1,h2,h3,h4;
+             SHA_LONG Nl,Nh;
+@@ -618,11 +619,9 @@ if _G.TURBO_SSL then
+             unsigned int num;
+         } SHA_CTX;
+ 
+-        const SSL_METHOD *SSLv3_server_method(void);
+-        const SSL_METHOD *SSLv3_client_method(void);
+-        const SSL_METHOD *SSLv23_method(void);
+-        const SSL_METHOD *SSLv23_server_method(void);
+-        const SSL_METHOD *SSLv23_client_method(void);
++        const SSL_METHOD *TLS_method(void);
++        const SSL_METHOD *TLS_server_method(void);
++        const SSL_METHOD *TLS_client_method(void);
+         const SSL_METHOD *TLSv1_method(void);
+         const SSL_METHOD *TLSv1_server_method(void);
+         const SSL_METHOD *TLSv1_client_method(void);
+@@ -632,10 +631,8 @@ if _G.TURBO_SSL then
+         const SSL_METHOD *TLSv1_2_method(void);
+         const SSL_METHOD *TLSv1_2_server_method(void);
+         const SSL_METHOD *TLSv1_2_client_method(void);
+-        void OPENSSL_add_all_algorithms_noconf(void);
+-        void SSL_load_error_strings(void);
+         void ERR_free_strings(void);
+-        int SSL_library_init(void);
++	int OPENSSL_init_ssl(uint64_t opts, const OPENSSL_INIT_SETTINGS *settings);
+         void EVP_cleanup(void);
+         SSL_CTX *SSL_CTX_new(const SSL_METHOD *meth);
+         void SSL_CTX_free(SSL_CTX *);
+@@ -656,8 +653,13 @@ if _G.TURBO_SSL then
+             const char *CApath);
+         int SSL_CTX_check_private_key(const SSL_CTX *ctx);
+         SSL *SSL_new(SSL_CTX *ctx);
++	int SSL_set1_host(SSL *s, const char *hostname);
++	int SSL_add1_host(SSL *s, const char *hostname);
++	void SSL_set_hostflags(SSL *s, unsigned int flags);
++	const char *SSL_get0_peername(SSL *s);
+         void SSL_set_connect_state(SSL *s);
+         void SSL_set_accept_state(SSL *s);
++	long SSL_ctrl(SSL *ssl, int cmd, long larg, void *parg);
+         int SSL_do_handshake(SSL *s);
+         int SSL_set_fd(SSL *s, int fd);
+         int SSL_accept(SSL *ssl);
+diff --git a/turbo/crypto_linux.lua b/turbo/crypto_linux.lua
+index 1473022..54c07a9 100644
+--- a/turbo/crypto_linux.lua
++++ b/turbo/crypto_linux.lua
+@@ -23,7 +23,7 @@ require "turbo.cdef"
+ 
+ local crypto = {} -- crypto namespace
+ 
+-local lssl = ffi.load(os.getenv("TURBO_LIBSSL") or "ssl")
++local lssl = ffi.load(os.getenv("TURBO_LIBSSL") or "/usr/lib/libssl.so.1.1")
+ local libtffi = util.load_libtffi()
+ 
+ local EWOULDBLOCK, EINPROGRESS, ECONNRESET =
+@@ -32,6 +32,7 @@ local EWOULDBLOCK, EINPROGRESS, ECONNRESET =
+ crypto.X509_FILETYPE_PEM =          1
+ crypto.X509_FILETYPE_ASN1 =         2
+ crypto.X509_FILETYPE_DEFAULT =      3
++crypto.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS = 0x4
+ crypto.SSL_FILETYPE_ASN1 =          crypto.X509_FILETYPE_ASN1
+ crypto.SSL_FILETYPE_PEM =           crypto.X509_FILETYPE_PEM
+ crypto.SSL_ERROR_NONE =             0
+@@ -77,9 +78,7 @@ end
+ function crypto.ssl_init()
+     if not _G._TURBO_SSL_INITED then
+        _TURBO_SSL_INITED = true
+-        lssl.SSL_load_error_strings()
+-        lssl.SSL_library_init()
+-        lssl.OPENSSL_add_all_algorithms_noconf()
++       lssl.OPENSSL_init_ssl(0, nil)
+     end
+ end
+ if _G.TURBO_SSL then
+@@ -107,7 +106,7 @@ function crypto.ssl_create_client_context(
+     -- Use standardish path to ca-certificates if not specified by user.
+     -- May not be present on all Unix systems.
+     ca_cert_path = ca_cert_path or "/etc/ssl/certs/ca-certificates.crt"
+-    meth = sslv or lssl.SSLv23_client_method()
++    meth = sslv or lssl.TLS_client_method()
+     if meth == nil then
+         err = lssl.ERR_peek_error()
+         lssl.ERR_clear_error()
+@@ -142,7 +141,7 @@ function crypto.ssl_create_client_context(
+     end
+     if verify == true then
+         if lssl.SSL_CTX_load_verify_locations(ctx,
+-                ca_cert_path, nil) ~= 1 then
++                ca_cert_path, "/etc/ssl/certs/") ~= 1 then
+             err = lssl.ERR_peek_error()
+             lssl.ERR_clear_error()
+             return err, crypto.ERR_error_string(err)
+@@ -172,7 +171,7 @@ function crypto.ssl_create_server_context(cert_file, prv_file, ca_cert_path, ssl
+     elseif not prv_file then
+         return -1, "No priv file given in arguments";
+     end
+-    meth = sslv or lssl.SSLv23_server_method()
++    meth = sslv or lssl.TLS_server_method()
+     if meth == nil then
+         err = lssl.ERR_peek_error()
+         lssl.ERR_clear_error()
+@@ -249,6 +248,18 @@ function crypto.ssl_do_handshake(SSLIOStream)
+     -- EINPROGRESS or equaivalent on prior calls. The OpenSSL
+     -- documentation states that SSL_do_handshake should be called again
+     -- when its needs are satisfied.
++    if SSLIOStream._ssl_verify then
++        lssl.SSL_set_hostflags(ssl, crypto.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS)
++	if lssl.SSL_set1_host(ssl, SSLIOStream._ssl_hostname) <= 0 then
++            err = crypto.lib.ERR_peek_error()
++            crypto.lib.ERR_clear_error()
++            error(string.format(
++                "Could not do SSL handshake. \
++                     Failed to set SSL hostname: %s",
++                crypto.ERR_error_string(err)))
++	end
++	print("DEBUG!!!: set ssl hostname", SSLIOStream._ssl_hostname)
++    end
+     rc = crypto.lib.SSL_do_handshake(ssl)
+     if rc <= 0 then
+         if client and SSLIOStream._ssl_verify then
+@@ -308,14 +319,6 @@ function crypto.ssl_do_handshake(SSLIOStream)
+                 "Could not do SSL handshake. SSL_do_hanshake returned %d",
+                 err))
+         end
+-    else
+-        if client and SSLIOStream._ssl_verify then
+-            rc = libtffi.validate_hostname(SSLIOStream._ssl_hostname, ssl)
+-            if rc ~= crypto.validate.MatchFound then
+-                error("SSL certficate hostname validation failed, rc " ..
+-                tonumber(rc))
+-            end
+-        end
+     end
+     return true
+ end
