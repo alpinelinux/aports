@@ -1,0 +1,75 @@
+From e9f835982a726ae16997c566b5eafab74f8b4cb7 Mon Sep 17 00:00:00 2001
+From: George Dunlap <george.dunlap@citrix.com>
+Date: Mon, 28 Oct 2019 14:33:51 +0000
+Subject: [PATCH 3/3] x86/mm: relinquish_memory: Grab an extra type ref when
+ setting PGT_partial
+
+The PGT_partial bit in page->type_info holds both a type count and a
+general ref count.  During domain tear-down, when free_page_type()
+returns -ERESTART, relinquish_memory() correctly handles the general
+ref count, but fails to grab an extra type count when setting
+PGT_partial.  When this bit is eventually cleared, type_count underflows
+and triggers the following BUG in page_alloc.c:free_domheap_pages():
+
+    BUG_ON((pg[i].u.inuse.type_info & PGT_count_mask) != 0);
+
+As far as we can tell, this page underflow cannot be exploited any any
+other way: The page can't be used as a pagetable by the dying domain
+because it's dying; it can't be used as a pagetable by any other
+domain since it belongs to the dying domain; and ownership can't
+transfer to any other domain without hitting the BUG_ON() in
+free_domheap_pages().
+
+(steal_page() won't work on a page in this state, since it requires
+PGC_allocated to be set, and PGC_allocated will already have been
+cleared.)
+
+Fix this by grabbing an extra type ref if setting PGT_partial in
+relinquish_memory.
+
+This is part of XSA-310.
+
+Reported-by: Sarah Newman <srn@prgmr.com>
+Signed-off-by: George Dunlap <george.dunlap@citrix.com>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+---
+v2:
+- Move discussion of potential exploits into the commit message
+- Keep PGT_partial and put_page() ordering
+---
+ xen/arch/x86/domain.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/xen/arch/x86/domain.c b/xen/arch/x86/domain.c
+index f1dd86e12e..51880fc50d 100644
+--- a/xen/arch/x86/domain.c
++++ b/xen/arch/x86/domain.c
+@@ -2049,6 +2049,25 @@ static int relinquish_memory(
+                     goto out;
+                 case -ERESTART:
+                     page_list_add(page, list);
++                    /*
++                     * PGT_partial holds a type ref and a general ref.
++                     * If we came in with PGT_partial set, then we 1)
++                     * don't need to grab an extra type count, and 2)
++                     * do need to drop the extra page ref we grabbed
++                     * at the top of the loop.  If we didn't come in
++                     * with PGT_partial set, we 1) do need to drab an
++                     * extra type count, but 2) can transfer the page
++                     * ref we grabbed above to it.
++                     *
++                     * Note that we must increment type_info before
++                     * setting PGT_partial.  Theoretically it should
++                     * be safe to drop the page ref before setting
++                     * PGT_partial, but do it afterwards just to be
++                     * extra safe.
++                     */
++                    if ( !(x & PGT_partial) )
++                        page->u.inuse.type_info++;
++                    smp_wmb();
+                     page->u.inuse.type_info |= PGT_partial;
+                     if ( x & PGT_partial )
+                         put_page(page);
+-- 
+2.24.0
+

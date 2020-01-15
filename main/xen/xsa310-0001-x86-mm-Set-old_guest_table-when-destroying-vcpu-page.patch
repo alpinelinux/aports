@@ -1,0 +1,167 @@
+From 7c537dc8d28a03064a14171ed5c6fc329531816a Mon Sep 17 00:00:00 2001
+From: George Dunlap <george.dunlap@citrix.com>
+Date: Tue, 19 Nov 2019 11:40:34 +0000
+Subject: [PATCH 1/3] x86/mm: Set old_guest_table when destroying vcpu
+ pagetables
+
+Changeset 6c4efc1eba ("x86/mm: Don't drop a type ref unless you held a
+ref to begin with"), part of XSA-299, changed the calling discipline
+of put_page_type() such that if put_page_type() returned -ERESTART
+(indicating a partially de-validated page), subsequent calls to
+put_page_type() must be called with PTF_partial_set.  If called on a
+partially de-validated page but without PTF_partial_set, Xen will
+BUG(), because to do otherwise would risk opening up the kind of
+privilege escalation bug described in XSA-299.
+
+One place this was missed was in vcpu_destroy_pagetables().
+put_page_and_type_preemptible() is called, but on -ERESTART, the
+entire operation is simply restarted, causing put_page_type() to be
+called on a partially de-validated page without PTF_partial_set.  The
+result was that if such an operation were interrupted, Xen would hit a
+BUG().
+
+Fix this by having vcpu_destroy_pagetables() consistently pass off
+interrupted de-validations to put_old_page_type():
+- Unconditionally clear references to the page, even if
+  put_page_and_type failed
+- Set old_guest_table and old_guest_table_partial appropriately
+
+While here, do some refactoring:
+
+ - Move clearing of arch.cr3 to the top of the function
+
+ - Now that clearing is unconditional, move the unmap to the same
+   conditional as the l4tab mapping.  This also allows us to reduce
+   the scope of the l4tab variable.
+
+ - Avoid code duplication by looping to drop references on
+   guest_table_user
+
+This is part of XSA-310.
+
+Reported-by: Sarah Newman <srn@prgmr.com>
+Signed-off-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+Added in v2.
+
+Changes in v3:
+- Minor comment / whitespace fixes
+---
+ xen/arch/x86/mm.c | 75 +++++++++++++++++++++++++++++------------------
+ 1 file changed, 47 insertions(+), 28 deletions(-)
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 01393fb0da..a759afc9e3 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -3142,40 +3142,36 @@ int put_old_guest_table(struct vcpu *v)
+ int vcpu_destroy_pagetables(struct vcpu *v)
+ {
+     unsigned long mfn = pagetable_get_pfn(v->arch.guest_table);
+-    struct page_info *page;
+-    l4_pgentry_t *l4tab = NULL;
++    struct page_info *page = NULL;
+     int rc = put_old_guest_table(v);
++    bool put_guest_table_user = false;
+ 
+     if ( rc )
+         return rc;
+ 
++    v->arch.cr3 = 0;
++
++    /*
++     * Get the top-level guest page; either the guest_table itself, for
++     * 64-bit, or the top-level l4 entry for 32-bit.  Either way, remove
++     * the reference to that page.
++     */
+     if ( is_pv_32bit_vcpu(v) )
+     {
+-        l4tab = map_domain_page(_mfn(mfn));
+-        mfn = l4e_get_pfn(*l4tab);
+-    }
++        l4_pgentry_t *l4tab = map_domain_page(_mfn(mfn));
+ 
+-    if ( mfn )
+-    {
+-        page = mfn_to_page(_mfn(mfn));
+-        if ( paging_mode_refcounts(v->domain) )
+-            put_page(page);
+-        else
+-            rc = put_page_and_type_preemptible(page);
+-    }
+-
+-    if ( l4tab )
+-    {
+-        if ( !rc )
+-            l4e_write(l4tab, l4e_empty());
++        mfn = l4e_get_pfn(*l4tab);
++        l4e_write(l4tab, l4e_empty());
+         unmap_domain_page(l4tab);
+     }
+-    else if ( !rc )
++    else
+     {
+         v->arch.guest_table = pagetable_null();
++        put_guest_table_user = true;
++    }
+ 
+-        /* Drop ref to guest_table_user (from MMUEXT_NEW_USER_BASEPTR) */
+-        mfn = pagetable_get_pfn(v->arch.guest_table_user);
++    /* Free that page if non-zero */
++    do {
+         if ( mfn )
+         {
+             page = mfn_to_page(_mfn(mfn));
+@@ -3183,18 +3179,41 @@ int vcpu_destroy_pagetables(struct vcpu *v)
+                 put_page(page);
+             else
+                 rc = put_page_and_type_preemptible(page);
++            mfn = 0;
+         }
+-        if ( !rc )
+-            v->arch.guest_table_user = pagetable_null();
+-    }
+ 
+-    v->arch.cr3 = 0;
++        if ( !rc && put_guest_table_user )
++        {
++            /* Drop ref to guest_table_user (from MMUEXT_NEW_USER_BASEPTR) */
++            mfn = pagetable_get_pfn(v->arch.guest_table_user);
++            v->arch.guest_table_user = pagetable_null();
++            put_guest_table_user = false;
++        }
++    } while ( mfn );
+ 
+     /*
+-     * put_page_and_type_preemptible() is liable to return -EINTR. The
+-     * callers of us expect -ERESTART so convert it over.
++     * If a "put" operation was interrupted, finish things off in
++     * put_old_guest_table() when the operation is restarted.
+      */
+-    return rc != -EINTR ? rc : -ERESTART;
++    switch ( rc )
++    {
++    case -EINTR:
++    case -ERESTART:
++        v->arch.old_guest_ptpg = NULL;
++        v->arch.old_guest_table = page;
++        v->arch.old_guest_table_partial = (rc == -ERESTART);
++        rc = -ERESTART;
++        break;
++    default:
++        /*
++         * Failure to 'put' a page may cause it to leak, but that's
++         * less bad than a crash.
++         */
++        ASSERT(rc == 0);
++        break;
++    }
++
++    return rc;
+ }
+ 
+ int new_guest_cr3(mfn_t mfn)
+-- 
+2.24.0
+

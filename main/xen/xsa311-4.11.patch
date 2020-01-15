@@ -1,0 +1,187 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: AMD/IOMMU: Cease using a dynamic height for the IOMMU pagetables
+
+update_paging_mode() has multiple bugs:
+
+ 1) Booting with iommu=debug will cause it to inform you that that it called
+    without the pdev_list lock held.
+ 2) When growing by more than a single level, it leaks the newly allocated
+    table(s) in the case of a further error.
+
+Furthermore, the choice of default level for a domain has issues:
+
+ 1) All HVM guests grow from 2 to 3 levels during construction because of the
+    position of the VRAM just below the 4G boundary, so defaulting to 2 is a
+    waste of effort.
+ 2) The limit for PV guests doesn't take memory hotplug into account, and
+    isn't dynamic at runtime like HVM guests.  This means that a PV guest may
+    get RAM which it can't map in the IOMMU.
+
+The dynamic height is a property unique to AMD, and adds a substantial
+quantity of complexity for what is a marginal performance improvement.  Remove
+the complexity by removing the dynamic height.
+
+PV guests now get 3 or 4 levels based on any hotplug regions in the host.
+This only makes a difference for hardware which previously had all RAM below
+the 512G boundary, and a hotplug region above.
+
+HVM guests now get 4 levels (which will be sufficient until 256TB guests
+become a thing), because we don't currently have the information to know when
+3 would be safe to use.
+
+The overhead of this extra level is not expected to be noticeable.  It costs
+one page (4k) per domain, and one extra IO-TLB paging structure cache entry
+which is very hot and less likely to be evicted.
+
+This is XSA-311.
+
+Reported-by: XXX PERSON <XXX EMAIL>3
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+
+--- a/xen/drivers/passthrough/amd/iommu_map.c
++++ b/xen/drivers/passthrough/amd/iommu_map.c
+@@ -569,97 +569,6 @@ static int iommu_pde_from_gfn(struct dom
+     return 0;
+ }
+ 
+-static int update_paging_mode(struct domain *d, unsigned long gfn)
+-{
+-    u16 bdf;
+-    void *device_entry;
+-    unsigned int req_id, level, offset;
+-    unsigned long flags;
+-    struct pci_dev *pdev;
+-    struct amd_iommu *iommu = NULL;
+-    struct page_info *new_root = NULL;
+-    struct page_info *old_root = NULL;
+-    void *new_root_vaddr;
+-    unsigned long old_root_mfn;
+-    struct domain_iommu *hd = dom_iommu(d);
+-
+-    if ( gfn == gfn_x(INVALID_GFN) )
+-        return -EADDRNOTAVAIL;
+-    ASSERT(!(gfn >> DEFAULT_DOMAIN_ADDRESS_WIDTH));
+-
+-    level = hd->arch.paging_mode;
+-    old_root = hd->arch.root_table;
+-    offset = gfn >> (PTE_PER_TABLE_SHIFT * (level - 1));
+-
+-    ASSERT(spin_is_locked(&hd->arch.mapping_lock) && is_hvm_domain(d));
+-
+-    while ( offset >= PTE_PER_TABLE_SIZE )
+-    {
+-        /* Allocate and install a new root table.
+-         * Only upper I/O page table grows, no need to fix next level bits */
+-        new_root = alloc_amd_iommu_pgtable();
+-        if ( new_root == NULL )
+-        {
+-            AMD_IOMMU_DEBUG("%s Cannot allocate I/O page table\n",
+-                            __func__);
+-            return -ENOMEM;
+-        }
+-
+-        new_root_vaddr = __map_domain_page(new_root);
+-        old_root_mfn = mfn_x(page_to_mfn(old_root));
+-        set_iommu_pde_present(new_root_vaddr, old_root_mfn, level,
+-                              !!IOMMUF_writable, !!IOMMUF_readable);
+-        level++;
+-        old_root = new_root;
+-        offset >>= PTE_PER_TABLE_SHIFT;
+-        unmap_domain_page(new_root_vaddr);
+-    }
+-
+-    if ( new_root != NULL )
+-    {
+-        hd->arch.paging_mode = level;
+-        hd->arch.root_table = new_root;
+-
+-        if ( !pcidevs_locked() )
+-            AMD_IOMMU_DEBUG("%s Try to access pdev_list "
+-                            "without aquiring pcidevs_lock.\n", __func__);
+-
+-        /* Update device table entries using new root table and paging mode */
+-        for_each_pdev( d, pdev )
+-        {
+-            bdf = PCI_BDF2(pdev->bus, pdev->devfn);
+-            iommu = find_iommu_for_device(pdev->seg, bdf);
+-            if ( !iommu )
+-            {
+-                AMD_IOMMU_DEBUG("%s Fail to find iommu.\n", __func__);
+-                return -ENODEV;
+-            }
+-
+-            spin_lock_irqsave(&iommu->lock, flags);
+-            do {
+-                req_id = get_dma_requestor_id(pdev->seg, bdf);
+-                device_entry = iommu->dev_table.buffer +
+-                               (req_id * IOMMU_DEV_TABLE_ENTRY_SIZE);
+-
+-                /* valid = 0 only works for dom0 passthrough mode */
+-                amd_iommu_set_root_page_table((u32 *)device_entry,
+-                                              page_to_maddr(hd->arch.root_table),
+-                                              d->domain_id,
+-                                              hd->arch.paging_mode, 1);
+-
+-                amd_iommu_flush_device(iommu, req_id);
+-                bdf += pdev->phantom_stride;
+-            } while ( PCI_DEVFN2(bdf) != pdev->devfn &&
+-                      PCI_SLOT(bdf) == PCI_SLOT(pdev->devfn) );
+-            spin_unlock_irqrestore(&iommu->lock, flags);
+-        }
+-
+-        /* For safety, invalidate all entries */
+-        amd_iommu_flush_all_pages(d);
+-    }
+-    return 0;
+-}
+-
+ int amd_iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
+                        unsigned int flags)
+ {
+@@ -685,19 +594,6 @@ int amd_iommu_map_page(struct domain *d,
+         return rc;
+     }
+ 
+-    /* Since HVM domain is initialized with 2 level IO page table,
+-     * we might need a deeper page table for lager gfn now */
+-    if ( is_hvm_domain(d) )
+-    {
+-        if ( update_paging_mode(d, gfn) )
+-        {
+-            spin_unlock(&hd->arch.mapping_lock);
+-            AMD_IOMMU_DEBUG("Update page mode failed gfn = %lx\n", gfn);
+-            domain_crash(d);
+-            return -EFAULT;
+-        }
+-    }
+-
+     if ( iommu_pde_from_gfn(d, gfn, pt_mfn, true) || (pt_mfn[1] == 0) )
+     {
+         spin_unlock(&hd->arch.mapping_lock);
+--- a/xen/drivers/passthrough/amd/pci_amd_iommu.c
++++ b/xen/drivers/passthrough/amd/pci_amd_iommu.c
+@@ -242,11 +242,17 @@ static int amd_iommu_domain_init(struct
+ {
+     struct domain_iommu *hd = dom_iommu(d);
+ 
+-    /* For pv and dom0, stick with get_paging_mode(max_page)
+-     * For HVM dom0, use 2 level page table at first */
+-    hd->arch.paging_mode = is_hvm_domain(d) ?
+-                      IOMMU_PAGING_MODE_LEVEL_2 :
+-                      get_paging_mode(max_page);
++    /*
++     * Choose the number of levels for the IOMMU page tables.
++     * - PV needs 3 or 4, depending on whether there is RAM (including hotplug
++     *   RAM) above the 512G boundary.
++     * - HVM could in principle use 3 or 4 depending on how much guest
++     *   physical address space we give it, but this isn't known yet so use 4
++     *   unilaterally.
++     */
++    hd->arch.paging_mode = is_hvm_domain(d)
++        ? IOMMU_PAGING_MODE_LEVEL_4 : get_paging_mode(get_upper_mfn_bound());
++
+     return 0;
+ }
+ 
