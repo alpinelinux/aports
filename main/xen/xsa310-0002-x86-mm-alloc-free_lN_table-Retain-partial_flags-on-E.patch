@@ -1,0 +1,104 @@
+From 128cb126aee9b4a2855ab898fdfbfe7009fbf1f5 Mon Sep 17 00:00:00 2001
+From: George Dunlap <george.dunlap@citrix.com>
+Date: Thu, 31 Oct 2019 11:17:38 +0000
+Subject: [PATCH 2/3] x86/mm: alloc/free_lN_table: Retain partial_flags on
+ -EINTR
+
+When validating or de-validating pages (in alloc_lN_table and
+free_lN_table respectively), the `partial_flags` local variable is
+used to keep track of whether the "current" PTE started the entire
+operation in a "may be partial" state.
+
+One of the patches in XSA-299 addressed the fact that it is possible
+for a previously-partially-validated entry to subsequently be found to
+have invalid entries (indicated by returning -EINVAL); in which case
+page->partial_flags needs to be set to indicate that the current PTE
+may have the partial bit set (and thus _put_page_type() should be
+called with PTF_partial_set).
+
+Unfortunately, the patches in XSA-299 assumed that once
+put_page_from_lNe() returned -ERESTART on a page, it was not possible
+for it to return -EINTR.  This turns out to be true for
+alloc_lN_table() and free_lN_table, but not for _get_page_type() and
+_put_page_type(): both can return -EINTR when called on pages with
+PGT_partial set.  In these cases, the pages PGT_partial will still be
+set; failing to set partial_flags appropriately may allow an attacker
+to do a privilege escalation similar to those described in XSA-299.
+
+Fix this by always copying the local partial_flags variable into
+page->partial_flags when exiting early.
+
+NB that on the "get" side, no adjustment to nr_validated_entries is
+needed: whether pte[i] is partially validated or entirely
+un-validated, we want nr_validated_entries = i.  On the "put" side,
+however, we need to adjust nr_validated_entries appropriately: if
+pte[i] is entirely validated, we want nr_validated_entries = i + 1; if
+pte[i] is partially validated, we want nr_validated_entries = i.
+
+This is part of XSA-310.
+
+Reported-by: Sarah Newman <srn@prgmr.com>
+Signed-off-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/arch/x86/mm.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index a759afc9e3..97c8d73b7b 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -1557,7 +1557,7 @@ static int alloc_l2_table(struct page_info *page, unsigned long type)
+         if ( rc == -EINTR && i )
+         {
+             page->nr_validated_ptes = i;
+-            page->partial_flags = 0;
++            page->partial_flags = partial_flags;;
+             rc = -ERESTART;
+         }
+         else if ( rc < 0 && rc != -EINTR )
+@@ -1660,7 +1660,7 @@ static int alloc_l3_table(struct page_info *page)
+         else if ( rc == -EINTR && i )
+         {
+             page->nr_validated_ptes = i;
+-            page->partial_flags = 0;
++            page->partial_flags = partial_flags;
+             rc = -ERESTART;
+         }
+         if ( rc < 0 )
+@@ -1982,8 +1982,8 @@ static int free_l2_table(struct page_info *page)
+     }
+     else if ( rc == -EINTR && i < L2_PAGETABLE_ENTRIES - 1 )
+     {
+-        page->nr_validated_ptes = i + 1;
+-        page->partial_flags = 0;
++        page->nr_validated_ptes = i + !(partial_flags & PTF_partial_set);
++        page->partial_flags = partial_flags;
+         rc = -ERESTART;
+     }
+ 
+@@ -2030,8 +2030,8 @@ static int free_l3_table(struct page_info *page)
+     }
+     else if ( rc == -EINTR && i < L3_PAGETABLE_ENTRIES - 1 )
+     {
+-        page->nr_validated_ptes = i + 1;
+-        page->partial_flags = 0;
++        page->nr_validated_ptes = i + !(partial_flags & PTF_partial_set);
++        page->partial_flags = partial_flags;
+         rc = -ERESTART;
+     }
+     return rc > 0 ? 0 : rc;
+@@ -2061,8 +2061,8 @@ static int free_l4_table(struct page_info *page)
+     }
+     else if ( rc == -EINTR && i < L4_PAGETABLE_ENTRIES - 1 )
+     {
+-        page->nr_validated_ptes = i + 1;
+-        page->partial_flags = 0;
++        page->nr_validated_ptes = i + !(partial_flags & PTF_partial_set);
++        page->partial_flags = partial_flags;
+         rc = -ERESTART;
+     }
+ 
+-- 
+2.24.0
+
