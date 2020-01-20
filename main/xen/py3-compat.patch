@@ -1,0 +1,472 @@
+From 1430c5a8cad45d689b035255f3d7ca6a07ae02e4 Mon Sep 17 00:00:00 2001
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Wed, 18 Dec 2019 14:00:16 +0000
+Subject: [PATCH] tools/python: Python 3 compatibility
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+convert-legacy-stream is only used for incomming migration from pre Xen 4.7,
+and verify-stream-v2 appears to only be used by me during migration
+development - it is little surprise that they missed the main converstion
+effort in Xen 4.13.
+
+Fix it all up.
+
+Move open_file_or_fd() into a new util.py to avoid duplication, making it a
+more generic wrapper around open() or fdopen().
+
+In libxc.py, drop all long() conversion.  Python 2 will DTRT with int => long
+promotion, even on 32bit builds.
+
+In convert-legacy-stream, don't pass empty strings to write_record().  Join on
+the empty argl will do the right thing.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Acked-by: Marek Marczykowski-Górecki <marmarek@invisiblethingslab.com>
+---
+ tools/python/scripts/convert-legacy-stream | 77 +++++++---------------
+ tools/python/scripts/verify-stream-v2      | 42 +++---------
+ tools/python/xen/__init__.py               |  1 -
+ tools/python/xen/lowlevel/__init__.py      |  1 -
+ tools/python/xen/migration/libxc.py        | 34 +++++-----
+ tools/python/xen/migration/libxl.py        |  2 +-
+ tools/python/xen/migration/verify.py       |  4 +-
+ tools/python/xen/util.py                   | 23 +++++++
+ 8 files changed, 74 insertions(+), 110 deletions(-)
+ create mode 100644 tools/python/xen/util.py
+
+diff --git a/tools/python/scripts/convert-legacy-stream b/tools/python/scripts/convert-legacy-stream
+index 5f80f1365417..6b68ef5923f6 100755
+--- a/tools/python/scripts/convert-legacy-stream
++++ b/tools/python/scripts/convert-legacy-stream
+@@ -5,6 +5,8 @@
+ Convert a legacy migration stream to a v2 stream.
+ """
+ 
++from __future__ import print_function
++
+ import sys
+ import os, os.path
+ import syslog
+@@ -12,6 +14,7 @@ import traceback
+ 
+ from struct import calcsize, unpack, pack
+ 
++from xen.util import open_file_or_fd as open_file_or_fd
+ from xen.migration import legacy, public, libxc, libxl, xl
+ 
+ __version__ = 1
+@@ -39,16 +42,16 @@ def info(msg):
+             for line in msg.split("\n"):
+                 syslog.syslog(syslog.LOG_INFO, line)
+         else:
+-            print msg
++            print(msg)
+ 
+ def err(msg):
+     """Error message, routed to appropriate destination"""
+     if log_to_syslog:
+         for line in msg.split("\n"):
+             syslog.syslog(syslog.LOG_ERR, line)
+-    print >> sys.stderr, msg
++    print(msg, file = sys.stderr)
+ 
+-class StreamError(StandardError):
++class StreamError(Exception):
+     """Error with the incoming migration stream"""
+     pass
+ 
+@@ -70,7 +73,7 @@ class VM(object):
+ 
+         # libxl
+         self.libxl = fmt == "libxl"
+-        self.emu_xenstore = "" # NUL terminated key&val pairs from "toolstack" records
++        self.emu_xenstore = b"" # NUL terminated key&val pairs from "toolstack" records
+ 
+ def write_libxc_ihdr():
+     stream_write(pack(libxc.IHDR_FORMAT,
+@@ -102,12 +105,12 @@ def write_libxl_hdr():
+                       ))
+ 
+ def write_record(rt, *argl):
+-    alldata = ''.join(argl)
++    alldata = b''.join(argl)
+     length = len(alldata)
+ 
+     record = pack(libxc.RH_FORMAT, rt, length) + alldata
+     plen = (8 - (length & 7)) & 7
+-    record += '\x00' * plen
++    record += b'\x00' * plen
+ 
+     stream_write(record)
+ 
+@@ -164,10 +167,10 @@ def write_libxc_hvm_params(params):
+                  pack("Q" * len(params), *params))
+ 
+ def write_libxl_end():
+-    write_record(libxl.REC_TYPE_end, "")
++    write_record(libxl.REC_TYPE_end)
+ 
+ def write_libxl_libxc_context():
+-    write_record(libxl.REC_TYPE_libxc_context, "")
++    write_record(libxl.REC_TYPE_libxc_context)
+ 
+ def write_libxl_emulator_xenstore_data(data):
+     write_record(libxl.REC_TYPE_emulator_xenstore_data,
+@@ -225,7 +228,7 @@ def read_pv_extended_info(vm):
+         so_far += datasz
+ 
+         # Eww, but this is how it is done :(
+-        if blkid == "vcpu":
++        if blkid == b"vcpu":
+ 
+             vm.basic_len = datasz
+ 
+@@ -242,10 +245,10 @@ def read_pv_extended_info(vm):
+ 
+             write_libxc_pv_info(vm)
+ 
+-        elif blkid == "extv":
++        elif blkid == b"extv":
+             vm.extd = True
+ 
+-        elif blkid == "xcnt":
++        elif blkid == b"xcnt":
+             vm.xsave_len, = unpack("I", data[:4])
+             info("xcnt sz 0x%x" % (vm.xsave_len, ))
+ 
+@@ -296,7 +299,7 @@ def read_pv_tail(vm):
+     info("Got shinfo")
+ 
+     write_record(libxc.REC_TYPE_shared_info, shinfo)
+-    write_record(libxc.REC_TYPE_end, "")
++    write_record(libxc.REC_TYPE_end)
+ 
+ 
+ def read_libxl_toolstack(vm, data):
+@@ -336,18 +339,18 @@ def read_libxl_toolstack(vm, data):
+         if twidth == 64:
+             name = name[:-4]
+ 
+-        if name[-1] != '\x00':
++        if name[-1] != b'\x00':
+             raise StreamError("physmap name not NUL terminated")
+ 
+-        root = "physmap/%x" % (phys,)
+-        kv = [root + "/start_addr", "%x" % (start, ),
+-              root + "/size",       "%x" % (size, ),
+-              root + "/name",       name[:-1]]
++        root = b"physmap/%x" % (phys, )
++        kv = [root + b"/start_addr", b"%x" % (start, ),
++              root + b"/size",       b"%x" % (size, ),
++              root + b"/name",       name[:-1]]
+ 
+         for key, val in zip(kv[0::2], kv[1::2]):
+-            info("    '%s' = '%s'" % (key, val))
++            info("    '%s' = '%s'" % (key.decode(), val.decode()))
+ 
+-        vm.emu_xenstore += '\x00'.join(kv) + '\x00'
++        vm.emu_xenstore += b'\x00'.join(kv) + b'\x00'
+ 
+ 
+ def read_chunks(vm):
+@@ -524,7 +527,7 @@ def read_hvm_tail(vm):
+     blob = rdexact(blobsz)
+ 
+     write_record(libxc.REC_TYPE_hvm_context, blob)
+-    write_record(libxc.REC_TYPE_end, "")
++    write_record(libxc.REC_TYPE_end)
+ 
+ 
+ 
+@@ -534,7 +537,7 @@ def read_qemu(vm):
+     sig, = unpack("21s", rawsig)
+     info("Qemu signature: %s" % (sig, ))
+ 
+-    if sig == "DeviceModelRecord0002":
++    if sig == b"DeviceModelRecord0002":
+         rawsz = rdexact(4)
+         sz, = unpack("I", rawsz)
+         qdata = rdexact(sz)
+@@ -617,36 +620,6 @@ def read_legacy_stream(vm):
+         return 2
+     return 0
+ 
+-def open_file_or_fd(val, mode):
+-    """
+-    If 'val' looks like a decimal integer, open it as an fd.  If not, try to
+-    open it as a regular file.
+-    """
+-
+-    fd = -1
+-    try:
+-        # Does it look like an integer?
+-        try:
+-            fd = int(val, 10)
+-        except ValueError:
+-            pass
+-
+-        # Try to open it...
+-        if fd != -1:
+-            return os.fdopen(fd, mode, 0)
+-        else:
+-            return open(val, mode, 0)
+-
+-    except StandardError, e:
+-        if fd != -1:
+-            err("Unable to open fd %d: %s: %s" %
+-                (fd, e.__class__.__name__, e))
+-        else:
+-            err("Unable to open file '%s': %s: %s" %
+-                (val, e.__class__.__name__, e))
+-
+-    raise SystemExit(1)
+-
+ 
+ def main():
+     from optparse import OptionParser
+@@ -723,7 +696,7 @@ def main():
+ if __name__ == "__main__":
+     try:
+         sys.exit(main())
+-    except SystemExit, e:
++    except SystemExit as e:
+         sys.exit(e.code)
+     except KeyboardInterrupt:
+         sys.exit(1)
+diff --git a/tools/python/scripts/verify-stream-v2 b/tools/python/scripts/verify-stream-v2
+index 3daf25791e59..8bac04d5666f 100755
+--- a/tools/python/scripts/verify-stream-v2
++++ b/tools/python/scripts/verify-stream-v2
+@@ -3,12 +3,15 @@
+ 
+ """ Verify a v2 format migration stream """
+ 
++from __future__ import print_function
++
+ import sys
+ import struct
+ import os, os.path
+ import syslog
+ import traceback
+ 
++from xen.util import open_file_or_fd as open_file_or_fd
+ from xen.migration.verify import StreamError, RecordError
+ from xen.migration.libxc import VerifyLibxc
+ from xen.migration.libxl import VerifyLibxl
+@@ -25,7 +28,7 @@ def info(msg):
+             for line in msg.split("\n"):
+                 syslog.syslog(syslog.LOG_INFO, line)
+         else:
+-            print msg
++            print(msg)
+ 
+ def err(msg):
+     """Error message, routed to appropriate destination"""
+@@ -33,7 +36,7 @@ def err(msg):
+         if log_to_syslog:
+             for line in msg.split("\n"):
+                 syslog.syslog(syslog.LOG_ERR, line)
+-        print >> sys.stderr, msg
++        print(msg, file = sys.stderr)
+ 
+ def stream_read(_ = None):
+     """Read from input"""
+@@ -56,7 +59,7 @@ def skip_xl_header():
+     """Skip over an xl header in the stream"""
+ 
+     hdr = rdexact(32)
+-    if hdr != "Xen saved domain, xl format\n \0 \r":
++    if hdr != b"Xen saved domain, xl format\n \0 \r":
+         raise StreamError("No xl header")
+ 
+     _, mflags, _, optlen = unpack_exact("=IIII")
+@@ -86,7 +89,7 @@ def read_stream(fmt):
+         err(traceback.format_exc())
+         return 1
+ 
+-    except StandardError:
++    except Exception:
+         err("Script Error:")
+         err(traceback.format_exc())
+         err("Please fix me")
+@@ -94,35 +97,6 @@ def read_stream(fmt):
+ 
+     return 0
+ 
+-def open_file_or_fd(val, mode, buffering):
+-    """
+-    If 'val' looks like a decimal integer, open it as an fd.  If not, try to
+-    open it as a regular file.
+-    """
+-
+-    fd = -1
+-    try:
+-        # Does it look like an integer?
+-        try:
+-            fd = int(val, 10)
+-        except ValueError:
+-            pass
+-
+-        # Try to open it...
+-        if fd != -1:
+-            return os.fdopen(fd, mode, buffering)
+-        else:
+-            return open(val, mode, buffering)
+-
+-    except StandardError, e:
+-        if fd != -1:
+-            err("Unable to open fd %d: %s: %s" %
+-                (fd, e.__class__.__name__, e))
+-        else:
+-            err("Unable to open file '%s': %s: %s" %
+-                (val, e.__class__.__name__, e))
+-
+-    raise SystemExit(2)
+ 
+ def main():
+     """ main """
+@@ -168,7 +142,7 @@ def main():
+ if __name__ == "__main__":
+     try:
+         sys.exit(main())
+-    except SystemExit, e:
++    except SystemExit as e:
+         sys.exit(e.code)
+     except KeyboardInterrupt:
+         sys.exit(2)
+diff --git a/tools/python/xen/__init__.py b/tools/python/xen/__init__.py
+index 8d1c8b69c3fc..e69de29bb2d1 100644
+--- a/tools/python/xen/__init__.py
++++ b/tools/python/xen/__init__.py
+@@ -1 +0,0 @@
+- 
+diff --git a/tools/python/xen/lowlevel/__init__.py b/tools/python/xen/lowlevel/__init__.py
+index 8d1c8b69c3fc..e69de29bb2d1 100644
+--- a/tools/python/xen/lowlevel/__init__.py
++++ b/tools/python/xen/lowlevel/__init__.py
+@@ -1 +0,0 @@
+- 
+diff --git a/tools/python/xen/migration/libxc.py b/tools/python/xen/migration/libxc.py
+index f24448a9eff7..0a329c209030 100644
+--- a/tools/python/xen/migration/libxc.py
++++ b/tools/python/xen/migration/libxc.py
+@@ -14,10 +14,6 @@
+ 
+ from xen.migration.verify import StreamError, RecordError, VerifyBase
+ 
+-# In Python3 long type have been merged into int, 1L syntax is no longer valid
+-if sys.version_info > (3,):
+-    long = int
+-
+ # Image Header
+ IHDR_FORMAT = "!QIIHHI"
+ 
+@@ -87,23 +83,23 @@
+ 
+ # page_data
+ PAGE_DATA_FORMAT             = "II"
+-PAGE_DATA_PFN_MASK           = (long(1) << 52) - 1
+-PAGE_DATA_PFN_RESZ_MASK      = ((long(1) << 60) - 1) & ~((long(1) << 52) - 1)
++PAGE_DATA_PFN_MASK           = (1 << 52) - 1
++PAGE_DATA_PFN_RESZ_MASK      = ((1 << 60) - 1) & ~((1 << 52) - 1)
+ 
+ # flags from xen/public/domctl.h: XEN_DOMCTL_PFINFO_* shifted by 32 bits
+ PAGE_DATA_TYPE_SHIFT         = 60
+-PAGE_DATA_TYPE_LTABTYPE_MASK = (long(0x7) << PAGE_DATA_TYPE_SHIFT)
+-PAGE_DATA_TYPE_LTAB_MASK     = (long(0xf) << PAGE_DATA_TYPE_SHIFT)
+-PAGE_DATA_TYPE_LPINTAB       = (long(0x8) << PAGE_DATA_TYPE_SHIFT) # Pinned pagetable
+-
+-PAGE_DATA_TYPE_NOTAB         = (long(0x0) << PAGE_DATA_TYPE_SHIFT) # Regular page
+-PAGE_DATA_TYPE_L1TAB         = (long(0x1) << PAGE_DATA_TYPE_SHIFT) # L1 pagetable
+-PAGE_DATA_TYPE_L2TAB         = (long(0x2) << PAGE_DATA_TYPE_SHIFT) # L2 pagetable
+-PAGE_DATA_TYPE_L3TAB         = (long(0x3) << PAGE_DATA_TYPE_SHIFT) # L3 pagetable
+-PAGE_DATA_TYPE_L4TAB         = (long(0x4) << PAGE_DATA_TYPE_SHIFT) # L4 pagetable
+-PAGE_DATA_TYPE_BROKEN        = (long(0xd) << PAGE_DATA_TYPE_SHIFT) # Broken
+-PAGE_DATA_TYPE_XALLOC        = (long(0xe) << PAGE_DATA_TYPE_SHIFT) # Allocate-only
+-PAGE_DATA_TYPE_XTAB          = (long(0xf) << PAGE_DATA_TYPE_SHIFT) # Invalid
++PAGE_DATA_TYPE_LTABTYPE_MASK = (0x7 << PAGE_DATA_TYPE_SHIFT)
++PAGE_DATA_TYPE_LTAB_MASK     = (0xf << PAGE_DATA_TYPE_SHIFT)
++PAGE_DATA_TYPE_LPINTAB       = (0x8 << PAGE_DATA_TYPE_SHIFT) # Pinned pagetable
++
++PAGE_DATA_TYPE_NOTAB         = (0x0 << PAGE_DATA_TYPE_SHIFT) # Regular page
++PAGE_DATA_TYPE_L1TAB         = (0x1 << PAGE_DATA_TYPE_SHIFT) # L1 pagetable
++PAGE_DATA_TYPE_L2TAB         = (0x2 << PAGE_DATA_TYPE_SHIFT) # L2 pagetable
++PAGE_DATA_TYPE_L3TAB         = (0x3 << PAGE_DATA_TYPE_SHIFT) # L3 pagetable
++PAGE_DATA_TYPE_L4TAB         = (0x4 << PAGE_DATA_TYPE_SHIFT) # L4 pagetable
++PAGE_DATA_TYPE_BROKEN        = (0xd << PAGE_DATA_TYPE_SHIFT) # Broken
++PAGE_DATA_TYPE_XALLOC        = (0xe << PAGE_DATA_TYPE_SHIFT) # Allocate-only
++PAGE_DATA_TYPE_XTAB          = (0xf << PAGE_DATA_TYPE_SHIFT) # Invalid
+ 
+ # x86_pv_info
+ X86_PV_INFO_FORMAT        = "BBHI"
+@@ -223,7 +219,7 @@ def verify_record(self):
+             self.squashed_pagedata_records += 1
+ 
+         padding = content[length:]
+-        if padding != "\x00" * len(padding):
++        if padding != b"\x00" * len(padding):
+             raise StreamError("Padding containing non0 bytes found")
+ 
+         if rtype not in record_verifiers:
+diff --git a/tools/python/xen/migration/libxl.py b/tools/python/xen/migration/libxl.py
+index d5f54dc48932..79f4024e7280 100644
+--- a/tools/python/xen/migration/libxl.py
++++ b/tools/python/xen/migration/libxl.py
+@@ -128,7 +128,7 @@ def verify_record(self):
+         content = self.rdexact(contentsz)
+ 
+         padding = content[length:]
+-        if padding != "\x00" * len(padding):
++        if padding != b"\x00" * len(padding):
+             raise StreamError("Padding containing non0 bytes found")
+ 
+         if rtype not in record_verifiers:
+diff --git a/tools/python/xen/migration/verify.py b/tools/python/xen/migration/verify.py
+index 7a42dbfc5868..1e38f4a3c01e 100644
+--- a/tools/python/xen/migration/verify.py
++++ b/tools/python/xen/migration/verify.py
+@@ -7,11 +7,11 @@
+ 
+ from struct import calcsize, unpack
+ 
+-class StreamError(StandardError):
++class StreamError(Exception):
+     """Error with the stream"""
+     pass
+ 
+-class RecordError(StandardError):
++class RecordError(Exception):
+     """Error with a record in the stream"""
+     pass
+ 
+diff --git a/tools/python/xen/util.py b/tools/python/xen/util.py
+new file mode 100644
+index 000000000000..a11358eefa13
+--- /dev/null
++++ b/tools/python/xen/util.py
+@@ -0,0 +1,23 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++
++import os
++
++def open_file_or_fd(val, *argl, **kwargs):
++    """
++    If 'val' looks like a decimal integer, open it as an fd.  If not, try to
++    open it as a regular file.
++    """
++
++    fd = -1
++    try:
++        # Does it look like an integer?
++        fd = int(val, 10)
++    except ValueError:
++        pass
++
++    # Try to open it...
++    if fd != -1:
++        return os.fdopen(fd, *argl, **kwargs)
++    else:
++        return open(val, *argl, **kwargs)
