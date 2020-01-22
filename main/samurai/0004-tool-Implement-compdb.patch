@@ -1,0 +1,197 @@
+From 9c1f015c21211c5df5822f70d3d5be81bd54fee2 Mon Sep 17 00:00:00 2001
+From: Michael Forney <mforney@mforney.org>
+Date: Wed, 22 Jan 2020 11:50:03 -0800
+Subject: [PATCH 4/4] tool: Implement compdb
+
+This tool outputs a JSON compilation database[0], which is used for
+integration with certain IDEs (for example, GNOME Builder).
+
+Fixes #33.
+
+[0] https://clang.llvm.org/docs/JSONCompilationDatabase.html
+---
+ samu.1 | 21 +++++++++++--
+ tool.c | 99 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 117 insertions(+), 3 deletions(-)
+
+diff --git a/samu.1 b/samu.1
+index a4f3f70..0f10e93 100644
+--- a/samu.1
++++ b/samu.1
+@@ -1,4 +1,4 @@
+-.Dd July 3, 2019
++.Dd January 22, 2019
+ .Dt SAMU 1
+ .Os
+ .Sh NAME
+@@ -20,6 +20,12 @@
+ .Fl t Cm clean
+ .Op Fl gr
+ .Op Ar target...
++.Nm
++.Op Fl C Ar dir
++.Op Fl f Ar buildfile
++.Fl t Cm compdb
++.Op Fl x
++.Op Ar rule...
+ .Sh DESCRIPTION
+ .Nm
+ loads a build manifest from
+@@ -48,6 +54,12 @@ Targets built with
+ rules are only removed if
+ .Fl g
+ is specified.
++.Pp
++If the
++.Cm compdb
++tool is used, a compilation database
++.Lk ( https://clang.llvm.org/docs/JSONCompilationDatabase.html )
++is printed instead.
+ .Sh OPTIONS
+ .Bl -tag -width Ds
+ .It Fl C
+@@ -106,9 +118,10 @@ only print a diagnostic message.
+ .It Fl t
+ Instead of building, invoke a subtool.
+ All arguments and flags after the subtool are interpreted by the subtool.
+-Currently,
++The currently supported subtools are
+ .Cm clean
+-is the only subtool.
++and
++.Cm compdb .
+ .It Fl g
+ When cleaning, also clean outputs of
+ .Sy generator
+@@ -117,6 +130,8 @@ actions.
+ .Ar targets
+ are interpreted as rules, and all outputs of actions with the specified rule
+ types will be cleaned instead.
++.It Fl x
++When printing a compilation database, replace @$rspfile with $rspfile_content (with <blank> in place of <newline>).
+ .El
+ .Sh ENVIRONMENT
+ .Bl -tag -width SAMUFLAGS
+diff --git a/tool.c b/tool.c
+index aae97c0..f77931e 100644
+--- a/tool.c
++++ b/tool.c
+@@ -1,7 +1,10 @@
++#define _POSIX_C_SOURCE 200809L
+ #include <errno.h>
++#include <limits.h>
+ #include <stdbool.h>
+ #include <stdio.h>
+ #include <string.h>
++#include <unistd.h>
+ #include "arg.h"
+ #include "env.h"
+ #include "graph.h"
+@@ -123,8 +126,104 @@ clean(int argc, char *argv[])
+ 	return ret;
+ }
+ 
++static void
++printjson(const char *s, size_t n, bool join)
++{
++	size_t i;
++	char c;
++
++	for (i = 0; i < n; ++i) {
++		c = s[i];
++		switch (c) {
++		case '"':
++		case '\\':
++			putchar('\\');
++			break;
++		case '\n':
++			if (join)
++				c = ' ';
++			break;
++		case '\0':
++			return;
++		}
++		putchar(c);
++	}
++}
++
++static int
++compdb(int argc, char *argv[])
++{
++	char dir[PATH_MAX], *p;
++	struct edge *e;
++	struct string *cmd, *rspfile, *content;
++	bool expandrsp = false, first = true;
++	int i;
++	size_t off;
++
++	ARGBEGIN {
++	case 'x':
++		expandrsp = true;
++		break;
++	default:
++		fprintf(stderr, "usage: %s ... -t compdb [-x] rules...\n", argv0);
++		return 2;
++	} ARGEND
++
++	if (!getcwd(dir, sizeof(dir)))
++		fatal("getcwd:");
++
++	putchar('[');
++	for (e = alledges; e; e = e->allnext) {
++		if (e->nin == 0)
++			continue;
++		for (i = 0; i < argc; ++i) {
++			if (strcmp(e->rule->name, argv[i]) == 0) {
++				if (first)
++					first = false;
++				else
++					putchar(',');
++
++				printf("\n  {\n    \"directory\": \"");
++				printjson(dir, -1, false);
++
++				printf("\",\n    \"command\": \"");
++				cmd = edgevar(e, "command", true);
++				rspfile = expandrsp ? edgevar(e, "rspfile", true) : NULL;
++				p = rspfile ? strstr(cmd->s, rspfile->s) : NULL;
++				if (!p || p == cmd->s || p[-1] != '@') {
++					printjson(cmd->s, cmd->n, false);
++				} else {
++					off = p - cmd->s;
++					printjson(cmd->s, off - 1, false);
++					content = edgevar(e, "rspfile_content", true);
++					printjson(content->s, content->n, true);
++					off += rspfile->n;
++					printjson(cmd->s + off, cmd->n - off, false);
++				}
++
++				printf("\",\n    \"file\": \"");
++				printjson(e->in[0]->path->s, -1, false);
++
++				printf("\",\n    \"output\": \"");
++				printjson(e->out[0]->path->s, -1, false);
++
++				printf("\",\n  }");
++				break;
++			}
++		}
++	}
++	puts("\n]");
++
++	fflush(stdout);
++	if (ferror(stdout))
++		fatal("write failed");
++
++	return 0;
++}
++
+ static const struct tool tools[] = {
+ 	{"clean", clean},
++	{"compdb", compdb},
+ };
+ 
+ const struct tool *
+-- 
+2.24.0
+
