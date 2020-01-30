@@ -1,0 +1,144 @@
+#2020/01/30 Patch has not yet been accepted upstream
+From 30403cfef2327e1df92b5e29201ee1ddf54a8dfd Mon Sep 17 00:00:00 2001
+From: Eric Timmons <etimmons@mit.edu>
+Date: Sun, 2 Dec 2018 14:20:24 -0500
+Subject: [PATCH 3/4] Fix foreign tests on musl libc
+
+Musl libc's implementation of dlclose(3) is (intentionally) a noop (see:
+https://wiki.musl-libc.org/functional-differences-from-glibc.html). Add a build
+time test for this and a new feature :os-dlclose-is-noop. Additionally, use this
+feature to skip some regression tests if it is present.
+---
+ tests/foreign.test.sh                         | 42 +++++++++++--------
+ tools-for-build/Makefile                      |  3 ++
+ tools-for-build/grovel-features.sh            |  7 ++++
+ .../os-dlclose-is-noop-test-helper.c          |  1 +
+ tools-for-build/os-dlclose-is-noop-test.c     | 19 +++++++++
+ 5 files changed, 55 insertions(+), 17 deletions(-)
+ create mode 100644 tools-for-build/os-dlclose-is-noop-test-helper.c
+ create mode 100644 tools-for-build/os-dlclose-is-noop-test.c
+
+diff --git a/tests/foreign.test.sh b/tests/foreign.test.sh
+index fabba1246..5574b1ef7 100755
+--- a/tests/foreign.test.sh
++++ b/tests/foreign.test.sh
+@@ -250,16 +250,20 @@ cat > $TEST_FILESTEM.test.lisp <<EOF
+   (assert (= 13 foo))
+   (assert (= 42 (bar)))
+   (note "/original definitions ok")
+-  (rename-file "$TEST_FILESTEM-b.so" "$TEST_FILESTEM-b.bak")
+-  (rename-file "$TEST_FILESTEM-b2.so" "$TEST_FILESTEM-b.so")
+-  (load-shared-object (truename "$TEST_FILESTEM-b.so"))
+-  (note "/reloading ok")
+-  (assert (= 42 foo))
+-  (assert (= 13 (bar)))
+-  (note "/redefined versions ok")
+-  (rename-file "$TEST_FILESTEM-b.so" "$TEST_FILESTEM-b2.so")
+-  (rename-file "$TEST_FILESTEM-b.bak" "$TEST_FILESTEM-b.so")
+-  (note "/renamed back to originals")
++  #+os-dlclose-is-noop
++  (note "/skipping reloading tests")
++  #-os-dlclose-is-noop
++  (progn
++    (rename-file "$TEST_FILESTEM-b.so" "$TEST_FILESTEM-b.bak")
++    (rename-file "$TEST_FILESTEM-b2.so" "$TEST_FILESTEM-b.so")
++    (load-shared-object (truename "$TEST_FILESTEM-b.so"))
++    (note "/reloading ok")
++    (assert (= 42 foo))
++    (assert (= 13 (bar)))
++    (note "/redefined versions ok")
++    (rename-file "$TEST_FILESTEM-b.so" "$TEST_FILESTEM-b2.so")
++    (rename-file "$TEST_FILESTEM-b.bak" "$TEST_FILESTEM-b.so")
++    (note "/renamed back to originals"))
+ 
+   ;; test late resolution
+   #+linkage-table
+@@ -276,13 +280,17 @@ cat > $TEST_FILESTEM.test.lisp <<EOF
+     (load-shared-object (truename "$TEST_FILESTEM-c.so"))
+     (assert (= 43 late-foo))
+     (assert (= 14 (late-bar)))
+-    (unload-shared-object (truename "$TEST_FILESTEM-c.so"))
+-    (multiple-value-bind (val err) (ignore-errors late-foo)
+-      (assert (not val))
+-      (assert (typep err 'undefined-alien-error)))
+-    (multiple-value-bind (val err) (ignore-errors (late-bar))
+-      (assert (not val))
+-      (assert (typep err 'undefined-alien-error)))
++    #+os-dlclose-is-noop
++    (note "/skipping unloading tests")
++    #-os-dlclose-is-noop
++    (progn
++      (unload-shared-object (truename "$TEST_FILESTEM-c.so"))
++      (multiple-value-bind (val err) (ignore-errors late-foo)
++        (assert (not val))
++        (assert (typep err 'undefined-alien-error)))
++      (multiple-value-bind (val err) (ignore-errors (late-bar))
++        (assert (not val))
++        (assert (typep err 'undefined-alien-error))))
+     (note "/linkage table ok"))
+ 
+   (sb-ext:exit :code $EXIT_LISP_WIN) ; success convention for Lisp program
+diff --git a/tools-for-build/Makefile b/tools-for-build/Makefile
+index 1be91e9df..434e03081 100644
+--- a/tools-for-build/Makefile
++++ b/tools-for-build/Makefile
+@@ -16,6 +16,9 @@ LDLIBS:=$(OS_LIBS)
+ 
+ all: grovel-headers determine-endianness where-is-mcontext mmap-rwx
+ 
++os-dlclose-is-noop-test-helper.so: os-dlclose-is-noop-test-helper.c
++	@$(CC) $(LDFLAGS) -shared $< -o $@ $(LOADLIBES) $(LDLIBS)
++
+ clean:
+ 	rm -f *.o grovel-headers determine-endianness where-is-mcontext mmap-rwx
+ 	rm -f *.exe
+diff --git a/tools-for-build/grovel-features.sh b/tools-for-build/grovel-features.sh
+index 4790c0f11..7d8e547b4 100644
+--- a/tools-for-build/grovel-features.sh
++++ b/tools-for-build/grovel-features.sh
+@@ -38,3 +38,10 @@ featurep os-provides-netdb-internal
+ if [ $sbcl_arch == arm ] ; then
+    featurep arm-softfp
+ fi
++
++# We need a helper shared library to test os-dlclose-is-noop
++$GNUMAKE os-dlclose-is-noop-test-helper.so > /dev/null 2>&1
++
++featurep os-dlclose-is-noop
++
++rm -f os-dlclose-is-noop-test-helper.so
+diff --git a/tools-for-build/os-dlclose-is-noop-test-helper.c b/tools-for-build/os-dlclose-is-noop-test-helper.c
+new file mode 100644
+index 000000000..4be7a8e5b
+--- /dev/null
++++ b/tools-for-build/os-dlclose-is-noop-test-helper.c
+@@ -0,0 +1 @@
++int sbcl_dl_close_test = 42;
+diff --git a/tools-for-build/os-dlclose-is-noop-test.c b/tools-for-build/os-dlclose-is-noop-test.c
+new file mode 100644
+index 000000000..3678870d5
+--- /dev/null
++++ b/tools-for-build/os-dlclose-is-noop-test.c
+@@ -0,0 +1,19 @@
++/* test to build and run so that we know if we have a noop dlclose
++ */
++
++#include <dlfcn.h>
++#include <stddef.h>
++
++int main ()
++{
++   void * handle = dlopen("./os-dlclose-is-noop-test-helper.so", RTLD_NOW | RTLD_GLOBAL);
++   dlclose(handle);
++
++   handle = dlopen("./os-dlclose-is-noop-test-helper.so", RTLD_NOW | RTLD_NOLOAD);
++
++   if (handle != NULL) {
++       return 104;
++   } else {
++       return 0;
++   }
++}
+-- 
+2.24.1
+
