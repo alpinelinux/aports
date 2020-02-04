@@ -1,0 +1,176 @@
+From adf24e909cda1ae30767d8ca4902eac92781d932 Mon Sep 17 00:00:00 2001
+From: Jo-Philipp Wich <jo@mein.io>
+Date: Thu, 27 Jun 2019 17:27:28 +0200
+Subject: [PATCH 1/2] nslookup: handle replies without RRs
+
+Under some circumstances, a DNS reply might contain no resource records,
+e.g. when a valid domain is queried that does not have records of the
+requested type.
+
+Example with nslookup from BIND dnsutils:
+
+    $ nslookup -q=SRV example.org
+    Server:	10.11.12.13
+    Address:	10.11.12.13#53
+
+    Non-authoritative answer:
+    *** Can't find example.org: No answer
+
+Currently the busybox nslookup applet simply prints nothing after the
+"Non-authoritative answer:" line in the same situation.
+
+This change modifies nslookup to either print "Parse error" or "No answer"
+diagnostics, depending on the parse_reply() return value.
+
+function                                             old     new   delta
+send_queries                                        1676    1711     +35
+
+Signed-off-by: Jo-Philipp Wich <jo@mein.io>
+Signed-off-by: Denys Vlasenko <vda.linux@googlemail.com>
+(cherry picked from commit 8c3b520d4f937b1d1856898dec5f634b12d9cc36)
+---
+ networking/nslookup.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/networking/nslookup.c b/networking/nslookup.c
+index 24e09d4f0..f7fd1d377 100644
+--- a/networking/nslookup.c
++++ b/networking/nslookup.c
+@@ -615,9 +615,15 @@ static int send_queries(struct ns *ns)
+ 					G.query[qn].name, rcodes[rcode]);
+ 			G.exitcode = EXIT_FAILURE;
+ 		} else {
+-			if (parse_reply(reply, recvlen) < 0) {
++			switch (parse_reply(reply, recvlen)) {
++			case -1:
+ 				printf("*** Can't find %s: Parse error\n", G.query[qn].name);
+ 				G.exitcode = EXIT_FAILURE;
++				break;
++
++			case 0:
++				printf("*** Can't find %s: No answer\n", G.query[qn].name);
++				break;
+ 			}
+ 		}
+ 		bb_putchar('\n');
+-- 
+2.25.0
+
+
+From 1fc999c00aa6649f17f0879b960427313dac64ae Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Tue, 4 Feb 2020 11:04:37 +0000
+Subject: [PATCH 2/2] nslookup: fix exitcode with search domains, closes 12541
+
+Return success if there are any valid answer rather than exit with error.
+
+bloatcheck on x86_64:
+
+function                                             old     new   delta
+nslookup_main                                        917     924      +7
+send_queries                                        2115    2121      +6
+.rodata                                           136606  136609      +3
+------------------------------------------------------------------------------
+(add/remove: 0/0 grow/shrink: 3/0 up/down: 16/0)               Total: 16
+bytes
+   text    data     bss     dec     hex filename
+ 839394   14660    2080  856134   d1046 busybox_old
+ 839410   14660    2080  856150   d1056 busybox_unstripped
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ networking/nslookup.c | 34 ++++++++++++++++++----------------
+ 1 file changed, 18 insertions(+), 16 deletions(-)
+
+diff --git a/networking/nslookup.c b/networking/nslookup.c
+index f7fd1d377..d66b13039 100644
+--- a/networking/nslookup.c
++++ b/networking/nslookup.c
+@@ -265,7 +265,7 @@ struct query {
+ 	const char *name;
+ 	unsigned qlen;
+ //	unsigned latency;
+-//	uint8_t rcode;
++	uint8_t rcode;
+ 	unsigned char query[512];
+ //	unsigned char reply[512];
+ };
+@@ -320,7 +320,7 @@ struct globals {
+ 	struct query *query;
+ 	char *search;
+ 	smalluint have_search_directive;
+-	smalluint exitcode;
++	smallint answer;
+ } FIX_ALIASING;
+ #define G (*(struct globals*)bb_common_bufsiz1)
+ #define INIT_G() do { \
+@@ -605,28 +605,31 @@ static int send_queries(struct ns *ns)
+ 
+ 		/* Process reply */
+ 		G.query[qn].qlen = 0; /* flag: "reply received" */
++		G.query[qn].rcode = rcode;
+ 		tcur = monotonic_ms();
+ #if 1
+ 		if (option_mask32 & OPT_debug) {
+ 			printf("Query #%d completed in %ums:\n", qn, tcur - tstart);
+ 		}
+ 		if (rcode != 0) {
+-			printf("** server can't find %s: %s\n",
+-					G.query[qn].name, rcodes[rcode]);
+-			G.exitcode = EXIT_FAILURE;
++			printf("** server can't find %s: %s\n\n",
++				G.query[qn].name, rcodes[rcode]);
+ 		} else {
+ 			switch (parse_reply(reply, recvlen)) {
+ 			case -1:
+-				printf("*** Can't find %s: Parse error\n", G.query[qn].name);
+-				G.exitcode = EXIT_FAILURE;
++				printf("*** Can't find %s: Parse error\n\n", G.query[qn].name);
++				G.query[qn].rcode = 0x10;
+ 				break;
+ 
+ 			case 0:
+-				printf("*** Can't find %s: No answer\n", G.query[qn].name);
++				G.query[qn].rcode = 0x20;
++				break;
++			default:
++				bb_putchar('\n');
++				G.answer++;
+ 				break;
+ 			}
+ 		}
+-		bb_putchar('\n');
+ 		n_replies++;
+ 		if (n_replies >= G.query_count)
+ 			goto ret;
+@@ -984,21 +987,20 @@ int nslookup_main(int argc UNUSED_PARAM, char **argv)
+ 	}
+ 
+ 	err = 0;
+-	for (rc = 0; rc < G.query_count; rc++) {
+-		if (G.query[rc].qlen) {
+-			printf("*** Can't find %s: No answer\n", G.query[rc].name);
+-			err = 1;
++	for (rc = 0; !G.answer && rc < G.query_count; rc++) {
++		if (G.query[rc].qlen || G.query[rc].rcode == 0x20) {
++			printf("*** Can't find %s: No answer\n\n", G.query[rc].name);
++		} else if (G.query[rc].rcode != 0) {
++			err = EXIT_FAILURE;
+ 		}
+ 	}
+-	if (err) /* should this affect exicode too? */
+-		bb_putchar('\n');
+ 
+ 	if (ENABLE_FEATURE_CLEAN_UP) {
+ 		free(G.server);
+ 		free(G.query);
+ 	}
+ 
+-	return G.exitcode;
++	return err;
+ }
+ 
+ #endif
+-- 
+2.25.0
+
