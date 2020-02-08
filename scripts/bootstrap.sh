@@ -91,9 +91,8 @@ CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname build-base) abuild
 
 msg "Cross building base system"
 
-# add implicit target prerequisite packages
-apk info --quiet --installed --root "$CBUILDROOT" libgcc libstdc++ musl-dev || \
-	${SUDO_APK} --root "$CBUILDROOT" add --repository "$REPODEST/main" libgcc libstdc++ musl-dev
+# Implicit dependencies for early targets
+EXTRADEPENDS_TARGET="libgcc libstdc++ musl-dev"
 
 # ordered cross-build
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
@@ -108,18 +107,17 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   community/go libffi community/ghc \
 	   $KERNEL_PKG ; do
 
+	EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET" \
 	CHOST=$TARGET_ARCH BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild -r
 
 	case "$PKG" in
-	fortify-headers | libc-dev | build-base)
-		# headers packages which are implicit but mandatory dependency
-		apk info --quiet --installed --root "$CBUILDROOT" $PKG || \
-			${SUDO_APK} --update --root "$CBUILDROOT" --repository "$REPODEST/main" add $PKG
+	fortify-headers | libc-dev)
+		# Additional implicit dependencies once built
+		EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET $PKG"
 		;;
-	musl | gcc)
-		# target libraries rebuilt, force upgrade
-		[ "$(apk upgrade --root "$CBUILDROOT" --repository "$REPODEST/main" --available --simulate | wc -l)" -gt 1 ] &&
-			${SUDO_APK} upgrade --root "$CBUILDROOT" --repository "$REPODEST/main" --available
+	build-base)
+		# After build-base, that alone is sufficient dependency in the target
+		EXTRADEPENDS_TARGET="$PKG"
 		;;
 	esac
 done
