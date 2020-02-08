@@ -14,6 +14,7 @@ CBUILDROOT="$(CTARGET=$TARGET_ARCH . /usr/share/abuild/functions.sh ; echo $CBUI
 . /usr/share/abuild/functions.sh
 [ -z "$CBUILD_ARCH" ] && die "abuild is too old (use 2.29.0 or later)"
 [ -z "$CBUILDROOT" ] && die "CBUILDROOT not set for $TARGET_ARCH"
+export CBUILD
 
 # deduce aports directory
 [ -z "$APORTS" ] && APORTS=$(realpath $(dirname $0)/../)
