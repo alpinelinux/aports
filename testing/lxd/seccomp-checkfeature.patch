@@ -1,0 +1,273 @@
+From 37b4d1576fe7fc68a1052da7d9ebebe7921800e7 Mon Sep 17 00:00:00 2001
+From: Christian Brauner <christian.brauner@ubuntu.com>
+Date: Wed, 5 Feb 2020 20:17:50 +0100
+Subject: [PATCH 1/4] lxd/main_checkfeature: add explicit _exit() even if it's
+ not needed
+
+Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+---
+ lxd/main_checkfeature.go | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/lxd/main_checkfeature.go b/lxd/main_checkfeature.go
+index 403dcfb231..42aae72f31 100644
+--- a/lxd/main_checkfeature.go
++++ b/lxd/main_checkfeature.go
+@@ -266,8 +266,11 @@ static void is_user_notification_continue_aware(void)
+ 	if (pid < 0)
+ 		return;
+ 
+-	if (pid == 0)
++	if (pid == 0) {
+ 		__do_user_notification_continue();
++		// Should not be reached.
++		_exit(EXIT_FAILURE);
++	}
+ 
+ 	ret = waitpid(pid, &status, 0);
+ 	if ((ret == pid) && WIFEXITED(status) && !WEXITSTATUS(status))
+
+From 445de54e319348b938cbe0d343ff092ad8c94226 Mon Sep 17 00:00:00 2001
+From: Christian Brauner <christian.brauner@ubuntu.com>
+Date: Wed, 5 Feb 2020 20:20:35 +0100
+Subject: [PATCH 2/4] lxd/main_checkfeature: s/exit()/_exit()/g
+
+Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+---
+ lxd/main_checkfeature.go | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/lxd/main_checkfeature.go b/lxd/main_checkfeature.go
+index 42aae72f31..77d80386be 100644
+--- a/lxd/main_checkfeature.go
++++ b/lxd/main_checkfeature.go
+@@ -178,11 +178,11 @@ __noreturn static void __do_user_notification_continue(void)
+ 
+ 	listener = user_trap_syscall(__NR_dup, SECCOMP_FILTER_FLAG_NEW_LISTENER);
+ 	if (listener < 0)
+-		exit(1);
++		_exit(EXIT_FAILURE);
+ 
+ 	pid = fork();
+ 	if (pid < 0)
+-		exit(1);
++		_exit(EXIT_FAILURE);
+ 
+ 	if (pid == 0) {
+ 		int dup_fd, pipe_fds[2];
+@@ -192,21 +192,21 @@ __noreturn static void __do_user_notification_continue(void)
+ 		// will be closed anyway.
+ 		ret = pipe(pipe_fds);
+ 		if (ret < 0)
+-			exit(1);
++			_exit(EXIT_FAILURE);
+ 
+ 		// O_CLOEXEC doesn't matter as we're in the child and we're
+ 		// not going to exec.
+ 		dup_fd = dup(pipe_fds[0]);
+ 		if (dup_fd < 0)
+-			exit(1);
++			_exit(EXIT_FAILURE);
+ 
+ 		self = getpid();
+ 
+ 		ret = filecmp(self, self, pipe_fds[0], dup_fd);
+ 		if (ret)
+-			exit(2);
++			_exit(EXIT_FAILURE);
+ 
+-		exit(0);
++		_exit(EXIT_SUCCESS);
+ 	}
+ 
+ 	pollfd.fd = listener;
+@@ -249,8 +249,8 @@ __noreturn static void __do_user_notification_continue(void)
+ cleanup_wait:
+ 	ret = waitpid(pid, &status, 0);
+ 	if ((ret != pid) || !WIFEXITED(status) || WEXITSTATUS(status))
+-		exit(1);
+-	exit(0);
++		_exit(EXIT_FAILURE);
++	_exit(EXIT_SUCCESS);
+ 
+ cleanup_sigkill:
+ 	kill(pid, SIGKILL);
+
+From 9e89729860828215070a03529c7bffcdd8683567 Mon Sep 17 00:00:00 2001
+From: Christian Brauner <christian.brauner@ubuntu.com>
+Date: Wed, 5 Feb 2020 20:26:11 +0100
+Subject: [PATCH 3/4] cgo: export wait_for_pid() helper
+
+to handle being interrupted by a signal in other parts of the codebase.
+
+Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+---
+ lxd/main_checkfeature.go | 15 ++++++++-------
+ lxd/main_forkproxy.go    | 19 +------------------
+ lxd/main_nsexec.go       | 19 +++++++++++++++++++
+ 3 files changed, 28 insertions(+), 25 deletions(-)
+
+diff --git a/lxd/main_checkfeature.go b/lxd/main_checkfeature.go
+index 77d80386be..aa50fa9fe6 100644
+--- a/lxd/main_checkfeature.go
++++ b/lxd/main_checkfeature.go
+@@ -17,10 +17,10 @@ import (
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <sched.h>
++#include <signal.h>
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+-#include <sys/wait.h>
+ #include <unistd.h>
+ #include <syscall.h>
+ #include <linux/seccomp.h>
+@@ -39,6 +39,7 @@ __ro_after_init int seccomp_notify_aware = 0;
+ __ro_after_init char errbuf[4096];
+ 
+ extern int can_inject_uevent(const char *uevent, size_t len);
++extern int wait_for_pid(pid_t pid);
+ 
+ static int netns_set_nsid(int fd)
+ {
+@@ -171,7 +172,7 @@ __noreturn static void __do_user_notification_continue(void)
+ {
+ 	pid_t pid;
+ 	int ret;
+-	int status, listener;
++	int listener;
+ 	struct seccomp_notif req = {};
+ 	struct seccomp_notif_resp resp = {};
+ 	struct pollfd pollfd;
+@@ -247,8 +248,8 @@ __noreturn static void __do_user_notification_continue(void)
+ 	}
+ 
+ cleanup_wait:
+-	ret = waitpid(pid, &status, 0);
+-	if ((ret != pid) || !WIFEXITED(status) || WEXITSTATUS(status))
++	ret = wait_for_pid(pid);
++	if (ret)
+ 		_exit(EXIT_FAILURE);
+ 	_exit(EXIT_SUCCESS);
+ 
+@@ -259,7 +260,7 @@ cleanup_sigkill:
+ 
+ static void is_user_notification_continue_aware(void)
+ {
+-	int ret, status;
++	int ret;
+ 	pid_t pid;
+ 
+ 	pid = fork();
+@@ -272,8 +273,8 @@ static void is_user_notification_continue_aware(void)
+ 		_exit(EXIT_FAILURE);
+ 	}
+ 
+-	ret = waitpid(pid, &status, 0);
+-	if ((ret == pid) && WIFEXITED(status) && !WEXITSTATUS(status))
++	ret = wait_for_pid(pid);
++	if (!ret)
+ 		seccomp_notify_aware = 2;
+ }
+ 
+diff --git a/lxd/main_forkproxy.go b/lxd/main_forkproxy.go
+index ec758b3a73..8bf38af7e4 100644
+--- a/lxd/main_forkproxy.go
++++ b/lxd/main_forkproxy.go
+@@ -41,6 +41,7 @@ import (
+ extern char* advance_arg(bool required);
+ extern void attach_userns(int pid);
+ extern int dosetns(int pid, char *nstype);
++extern int wait_for_pid(pid_t pid);
+ 
+ int whoami = -ESRCH;
+ 
+@@ -59,24 +60,6 @@ static int switch_uid_gid(uint32_t uid, uint32_t gid)
+ 	return 0;
+ }
+ 
+-static int wait_for_pid(pid_t pid)
+-{
+-	int status, ret;
+-
+-again:
+-	ret = waitpid(pid, &status, 0);
+-	if (ret == -1) {
+-		if (errno == EINTR)
+-			goto again;
+-		return -1;
+-	}
+-	if (ret != pid)
+-		goto again;
+-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+-		return -1;
+-	return 0;
+-}
+-
+ static int lxc_epoll_wait_nointr(int epfd, struct epoll_event* events,
+ 				 int maxevents, int timeout)
+ {
+diff --git a/lxd/main_nsexec.go b/lxd/main_nsexec.go
+index 5e98408f1e..79ce48570e 100644
+--- a/lxd/main_nsexec.go
++++ b/lxd/main_nsexec.go
+@@ -33,6 +33,7 @@ package main
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <sys/wait.h>
+ #include <unistd.h>
+ 
+ #include "include/memory_utils.h"
+@@ -51,6 +52,24 @@ char *cmdline_buf = NULL;
+ char *cmdline_cur = NULL;
+ ssize_t cmdline_size = -1;
+ 
++int wait_for_pid(pid_t pid)
++{
++	int status, ret;
++
++again:
++	ret = waitpid(pid, &status, 0);
++	if (ret == -1) {
++		if (errno == EINTR)
++			goto again;
++		return -1;
++	}
++	if (ret != pid)
++		goto again;
++	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
++		return -1;
++	return 0;
++}
++
+ char* advance_arg(bool required) {
+ 	while (*cmdline_cur != 0)
+ 		cmdline_cur++;
+
+From 2df51307cf58fc7a046579ea693f13d9543baa73 Mon Sep 17 00:00:00 2001
+From: Christian Brauner <christian.brauner@ubuntu.com>
+Date: Wed, 5 Feb 2020 20:30:06 +0100
+Subject: [PATCH 4/4] lxd/main_checkfeature: close listener
+
+Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+---
+ lxd/main_checkfeature.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lxd/main_checkfeature.go b/lxd/main_checkfeature.go
+index aa50fa9fe6..a584b00e8a 100644
+--- a/lxd/main_checkfeature.go
++++ b/lxd/main_checkfeature.go
+@@ -170,9 +170,9 @@ static int filecmp(pid_t pid1, pid_t pid2, int fd1, int fd2)
+ 
+ __noreturn static void __do_user_notification_continue(void)
+ {
++	__do_close_prot_errno int listener = -EBADF;
+ 	pid_t pid;
+ 	int ret;
+-	int listener;
+ 	struct seccomp_notif req = {};
+ 	struct seccomp_notif_resp resp = {};
+ 	struct pollfd pollfd;
