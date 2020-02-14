@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.2.0
-pkgrel=3
+pkgrel=4
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -189,6 +189,11 @@ package() {
 		# escalation vulnerabilities.
 		fs.protected_hardlinks = 1
 		fs.protected_symlinks = 1
+
+		# Disable unprivileged use of the bpf(2) syscall.
+		# Allowing unprivileged use of the bpf(2) syscall may allow a
+		# malicious user to compromise the machine.
+		kernel.unprivileged_bpf_disabled = 1
 	EOF
 	cat > "$pkgdir"/etc/fstab <<-EOF
 		/dev/cdrom	/media/cdrom	iso9660	noauto,ro 0 0
