@@ -35,7 +35,6 @@ prepare() {
 }
 
 build() {
-	cd "$builddir"
 	${CC:-${CROSS_COMPILE}gcc} $CPPFLAGS $CFLAGS $LDFLAGS \
 		"$srcdir"/mkmntdirs.c -o "$builddir"/mkmntdirs
 
@@ -76,6 +75,7 @@ package() {
 		home \
 		lib/firmware \
 		lib/mdev \
+		lib/modules-load.d \
 		media/cdrom \
 		media/floppy \
 		media/usb \
@@ -87,6 +87,7 @@ package() {
 		srv \
 		sys \
 		usr/bin \
+		usr/lib/modules-load.d \
 		usr/local/bin \
 		usr/local/lib \
 		usr/local/share \
