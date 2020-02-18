@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.2.0
-pkgrel=4
+pkgrel=5
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -76,6 +76,7 @@ package() {
 		lib/firmware \
 		lib/mdev \
 		lib/modules-load.d \
+		lib/sysctl.d \
 		media/cdrom \
 		media/floppy \
 		media/usb \
@@ -154,7 +155,7 @@ package() {
 	cat > "$pkgdir"/etc/sysctl.conf <<-EOF
 		# content of this file will override /etc/sysctl.d/*
 	EOF
-	cat > "$pkgdir"/etc/sysctl.d/00-alpine.conf <<-EOF
+	cat > "$pkgdir"/lib/sysctl.d/00-alpine.conf <<-EOF
 		# Prevents SYN DOS attacks. Applies to ipv6 as well, despite name.
 		net.ipv4.tcp_syncookies = 1
 
