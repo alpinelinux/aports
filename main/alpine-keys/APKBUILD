@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-keys
-pkgver=2.1
-pkgrel=2
+pkgver=2.2
+pkgrel=0
 pkgdesc="Public keys for Alpine Linux packages"
 url="https://alpinelinux.org"
 # we install arch specific keys to /etc so we cannot do arch=noarch
@@ -21,6 +21,8 @@ _arch_keys="
 	ppc64le:alpine-devel@lists.alpinelinux.org-58cbb476.rsa.pub
 
 	s390x:alpine-devel@lists.alpinelinux.org-58e4f17d.rsa.pub
+
+	mips64:alpine-devel@lists.alpinelinux.org-5e69ca50.rsa.pub
 	"
 
 for _i in $_arch_keys; do
@@ -56,6 +58,12 @@ _install_s390x() {
 	esac
 }
 
+_install_mips() {
+	case "$1" in
+	mips64) _ins_key $1 $2 ;;
+	esac
+}
+
 package() {
 	# copy keys for repos
 	mkdir -p "$pkgdir"/etc/apk/keys
@@ -74,6 +82,7 @@ package() {
 			arm*|aarch64) _install_arm $_arch $_key ;;
 			ppc*) _install_ppc $_arch $_key ;;
 			s390x) _install_s390x $_arch $_key ;;
+			mips*) _install_mips $_arch $_key ;;
 			esac
 		done
 	done
@@ -85,4 +94,5 @@ e18e65ee911eb1f8ea869f758e8f2c94cf2ac254ee7ab90a3de1d47b94a547c2066214abf710da21
 2d4064cbe09ff958493ec86bcb925af9b7517825d1d9d8d00f2986201ad5952f986fea83d1e2c177e92130700bafa8c0bff61411b3cdb59a41e460ed719580a6  alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub
 721134f289ab1e7dde9158359906017daee40983199fe55f28206c8cdc46b8fcf177a36f270ce374b0eba5dbe01f68cbb3e385ae78a54bb0a2ed1e83a4d820a5  alpine-devel@lists.alpinelinux.org-5261cecb.rsa.pub
 bb5a3df8fac14a62d5936fb3722873fa6a121219b703cba955eb77de38c4384aeaf378fb9321a655e255f0be761e894e309b3789867279c1524dab6300cd8ef1  alpine-devel@lists.alpinelinux.org-58cbb476.rsa.pub
-0666389ca53121453578cd4bef5fd06e159e291164b3e3233e7d6521604f8bebd30caeef1663adcd5309e07278833402c8a92c33294ec0c5cada24dc47c8cc98  alpine-devel@lists.alpinelinux.org-58e4f17d.rsa.pub"
+0666389ca53121453578cd4bef5fd06e159e291164b3e3233e7d6521604f8bebd30caeef1663adcd5309e07278833402c8a92c33294ec0c5cada24dc47c8cc98  alpine-devel@lists.alpinelinux.org-58e4f17d.rsa.pub
+66ce9677e9c2a7961d5d7bc5b162ed3114a7aef6d01181073c1f42a9934966eecded2ec09deb210f5a389d434d1641ba35fe3abdd5246b2e97d5a5b26a945c5c  alpine-devel@lists.alpinelinux.org-5e69ca50.rsa.pub"
