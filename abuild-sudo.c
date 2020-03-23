@@ -92,17 +92,18 @@ int main(int argc, const char *argv[])
 		errx(1, "%s: Group not found", ABUILD_GROUP);
 
 	char *name = NULL;
-	pw = getpwuid(getuid());
+	uid_t uid = getuid();
+	pw = getpwuid(uid);
 	if (pw)
 		name = pw->pw_name;
 
-	if (!is_in_group(grent->gr_gid)) {
+	if (uid != 0 && !is_in_group(grent->gr_gid)) {
 		errx(1, "User %s is not a member of group %s\n",
 			name ? name : "(unknown)", ABUILD_GROUP);
 	}
 
 	if (name == NULL)
-		warnx("Could not find username for uid %d\n", getuid());
+		warnx("Could not find username for uid %d\n", uid);
 	setenv("USER", name ?: "", 1);
 
 	cmd = strrchr(argv[0], '/');
