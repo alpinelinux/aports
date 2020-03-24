@@ -1,0 +1,118 @@
+From 48bc80fcb26f3e15d23766e100a3e2488c49f9ec Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Tue, 24 Mar 2020 11:31:41 +0100
+Subject: [PATCH] _dbus_generate_random_bytes: fallback to getrandom(2)
+
+Fall back to getrandom(2) in case /dev/urandom is missing. This may for
+example happen if dbus-uuidgen is called in a chroot or at early boot.
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ cmake/ConfigureChecks.cmake |  2 ++
+ cmake/config.h.cmake        |  2 ++
+ configure.ac                |  3 ++-
+ dbus/dbus-sysdeps-unix.c    | 17 +++++++++++++++++
+ 4 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/cmake/ConfigureChecks.cmake b/cmake/ConfigureChecks.cmake
+index a9a5fc90..f920c75f 100644
+--- a/cmake/ConfigureChecks.cmake
++++ b/cmake/ConfigureChecks.cmake
+@@ -26,6 +26,7 @@ check_include_file(strings.h     HAVE_STRINGS_H)
+ check_include_file(syslog.h     HAVE_SYSLOG_H)
+ check_include_files("stdint.h;sys/types.h;sys/event.h" HAVE_SYS_EVENT_H)
+ check_include_file(sys/inotify.h     HAVE_SYS_INOTIFY_H)
++check_include_file(sys/random.h     HAVE_SYS_RANDOM_H)
+ check_include_file(sys/resource.h     HAVE_SYS_RESOURCE_H)
+ check_include_file(sys/stat.h     HAVE_SYS_STAT_H)
+ check_include_file(sys/types.h     HAVE_SYS_TYPES_H)
+@@ -62,6 +63,7 @@ check_symbol_exists(inotify_init1 "sys/inotify.h"           HAVE_INOTIFY_INIT1)
+ check_symbol_exists(SCM_RIGHTS    "sys/types.h;sys/socket.h;sys/un.h" HAVE_UNIX_FD_PASSING)
+ check_symbol_exists(prctl        "sys/prctl.h"              HAVE_PRCTL)
+ check_symbol_exists(raise        "signal.h"                 HAVE_RAISE)
++check_symbol_exists(getrandom    "sys/random.h"             HAVE_GETRANDOM)
+ check_symbol_exists(getrlimit    "sys/resource.h;sys/time.h" HAVE_GETRLIMIT)
+ check_symbol_exists(prlimit      "sys/resource.h;sys/time.h" HAVE_PRLIMIT)
+ check_symbol_exists(setrlimit    "sys/resource.h;sys/time.h" HAVE_SETRLIMIT)
+diff --git a/cmake/config.h.cmake b/cmake/config.h.cmake
+index 11191821..10388fce 100644
+--- a/cmake/config.h.cmake
++++ b/cmake/config.h.cmake
+@@ -128,6 +128,7 @@
+ #cmakedefine HAVE_SYS_EVENTS_H
+ #cmakedefine HAVE_SYS_INOTIFY_H
+ #cmakedefine HAVE_SYS_PRCTL_H
++#cmakedefine HAVE_SYS_RANDOM_H 1
+ #cmakedefine HAVE_SYS_RESOURCE_H
+ #cmakedefine HAVE_SYS_STAT_H
+ 
+@@ -205,6 +206,7 @@
+ #cmakedefine HAVE_ACCEPT4 1
+ #cmakedefine HAVE_DIRFD 1
+ #cmakedefine HAVE_INOTIFY_INIT1 1
++#cmakedefine HAVE_GETRANDOM 1
+ #cmakedefine HAVE_GETRLIMIT 1
+ #cmakedefine HAVE_PRLIMIT 1
+ #cmakedefine HAVE_SETRLIMIT 1
+diff --git a/configure.ac b/configure.ac
+index a1ba877a..c9f50b0f 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -619,7 +619,7 @@ AC_DEFINE_UNQUOTED([DBUS_USE_SYNC], [$have_sync], [Use the gcc __sync extension]
+ AC_SEARCH_LIBS(socket,[socket network])
+ AC_CHECK_FUNC(gethostbyname,,[AC_CHECK_LIB(nsl,gethostbyname)])
+ 
+-AC_CHECK_FUNCS([vsnprintf vasprintf nanosleep usleep setenv clearenv unsetenv socketpair getgrouplist fpathconf setrlimit poll setlocale localeconv strtoll strtoull issetugid getresuid setresuid getrlimit prlimit])
++AC_CHECK_FUNCS([vsnprintf vasprintf nanosleep usleep setenv clearenv unsetenv socketpair getgrouplist fpathconf setrlimit poll setlocale localeconv strtoll strtoull issetugid getresuid setresuid getrlimit getrandom prlimit])
+ 
+ AC_CHECK_HEADERS([syslog.h])
+ if test "x$ac_cv_header_syslog_h" = "xyes"; then
+@@ -667,6 +667,7 @@ fi
+ 
+ AC_CHECK_HEADERS(sys/resource.h)
+ AC_CHECK_HEADERS([sys/time.h])
++AC_CHECK_HEADERS([sys/random.h])
+ 
+ AC_CHECK_HEADERS(dirent.h)
+ 
+diff --git a/dbus/dbus-sysdeps-unix.c b/dbus/dbus-sysdeps-unix.c
+index e8cd5b33..fc9facc3 100644
+--- a/dbus/dbus-sysdeps-unix.c
++++ b/dbus/dbus-sysdeps-unix.c
+@@ -80,6 +80,9 @@
+ #ifdef HAVE_ALLOCA_H
+ #include <alloca.h>
+ #endif
++#ifdef HAVE_SYS_RANDOM_H
++#include <sys/random.h>
++#endif
+ 
+ #ifdef HAVE_ADT
+ #include <bsm/adt.h>
+@@ -3170,9 +3173,23 @@ _dbus_generate_random_bytes (DBusString *str,
+ 
+   if (fd < 0)
+     {
++#ifdef HAVE_GETRANDOM
++      result = getrandom (str, n_bytes, GRND_NONBLOCK);
++      if (result == n_bytes)
++        return TRUE;
++
++      if (result < 0)
++        dbus_set_error (error, _dbus_error_from_errno (errno),
++                        "Could not read from getrandom(): %s",
++                        _dbus_strerror (errno));
++      else
++        dbus_set_error (error, DBUS_ERROR_IO_ERROR,
++                       "Short read from getrandom()");
++#else
+       dbus_set_error (error, _dbus_error_from_errno (errno),
+                       "Could not open /dev/urandom: %s",
+                       _dbus_strerror (errno));
++#endif
+       return FALSE;
+     }
+ 
+-- 
+2.25.2
+
