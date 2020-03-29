@@ -1,0 +1,262 @@
+From 6fc07ae25a7c3e2375f02f7ab65c92073303e8d0 Mon Sep 17 00:00:00 2001
+From: Aleksander Morgado <aleksander@aleksander.es>
+Date: Fri, 18 Oct 2019 11:37:17 +0200
+Subject: [PATCH 1/2] qmi-device: support and detect smdpkt managed QMI control
+ ports
+
+Fixes https://gitlab.freedesktop.org/mobile-broadband/libqmi/issues/20
+---
+ .../libqmi-glib/libqmi-glib-common.sections   |  2 +
+ src/libqmi-glib/qmi-device.c                  | 68 ++++++++---------
+ src/libqmi-glib/qmi-utils.c                   | 73 ++++++++++++++++---
+ src/libqmi-glib/qmi-utils.h                   | 10 ++-
+ 4 files changed, 106 insertions(+), 47 deletions(-)
+
+diff --git a/docs/reference/libqmi-glib/libqmi-glib-common.sections b/docs/reference/libqmi-glib/libqmi-glib-common.sections
+index 1e35f0c..e381c71 100644
+--- a/docs/reference/libqmi-glib/libqmi-glib-common.sections
++++ b/docs/reference/libqmi-glib/libqmi-glib-common.sections
+@@ -1405,6 +1405,8 @@ QmiEndian
+ <SUBSECTION Traces>
+ qmi_utils_get_traces_enabled
+ qmi_utils_set_traces_enabled
++<SUBSECTION Private>
++__QmiTransportType
+ </SECTION>
+ 
+ <SECTION>
+diff --git a/src/libqmi-glib/qmi-device.c b/src/libqmi-glib/qmi-device.c
+index 14dbb53..8b1f387 100644
+--- a/src/libqmi-glib/qmi-device.c
++++ b/src/libqmi-glib/qmi-device.c
+@@ -1897,68 +1897,68 @@ device_create_endpoint (QmiDevice *self,
+ }
+ 
+ static gboolean
+-device_setup_open_flags_by_driver (QmiDevice          *self,
+-                                   DeviceOpenContext  *ctx,
+-                                   GError            **error)
+-{
+-    gchar  *driver;
+-    GError *inner_error = NULL;
+-
+-    driver = __qmi_utils_get_driver (qmi_file_get_path (self->priv->file), &inner_error);
+-    if (driver)
+-        g_debug ("[%s] loaded driver of cdc-wdm port: %s", qmi_file_get_path_display (self->priv->file), driver);
+-    else if (!self->priv->no_file_check)
+-        g_warning ("[%s] couldn't load driver of cdc-wdm port: %s", qmi_file_get_path_display (self->priv->file), inner_error->message);
++device_setup_open_flags_by_transport (QmiDevice          *self,
++                                      DeviceOpenContext  *ctx,
++                                      GError            **error)
++{
++    __QmiTransportType  transport;
++    GError             *inner_error = NULL;
++
++    transport = __qmi_utils_get_transport_type (qmi_file_get_path (self->priv->file), &inner_error);
++    if ((transport == __QMI_TRANSPORT_TYPE_UNKNOWN) && !self->priv->no_file_check)
++        g_warning ("[%s] couldn't detect transport type of port: %s", qmi_file_get_path_display (self->priv->file), inner_error->message);
+     g_clear_error (&inner_error);
+ 
+ #if defined MBIM_QMUX_ENABLED
+ 
+     /* Auto mode requested? */
+     if (ctx->flags & QMI_DEVICE_OPEN_FLAGS_AUTO) {
+-        if (!g_strcmp0 (driver, "cdc_mbim")) {
++        switch (transport) {
++        case __QMI_TRANSPORT_TYPE_MBIM:
+             g_debug ("[%s] automatically selecting MBIM mode", qmi_file_get_path_display (self->priv->file));
+             ctx->flags |= QMI_DEVICE_OPEN_FLAGS_MBIM;
+-            goto out;
+-        }
+-        if (!g_strcmp0 (driver, "qmi_wwan")) {
++            break;
++        case __QMI_TRANSPORT_TYPE_QMUX:
+             g_debug ("[%s] automatically selecting QMI mode", qmi_file_get_path_display (self->priv->file));
+             ctx->flags &= ~QMI_DEVICE_OPEN_FLAGS_MBIM;
+-            goto out;
++            break;
++        case __QMI_TRANSPORT_TYPE_UNKNOWN:
++            g_set_error (&inner_error, QMI_CORE_ERROR, QMI_CORE_ERROR_FAILED,
++                         "Cannot automatically select QMI/MBIM mode");
++            break;
+         }
+-        g_set_error (&inner_error,
+-                     QMI_CORE_ERROR,
+-                     QMI_CORE_ERROR_FAILED,
+-                     "Cannot automatically select QMI/MBIM mode: driver %s",
+-                     driver ? driver : "unknown");
+         goto out;
+     }
+ 
+     /* MBIM mode requested? */
+     if (ctx->flags & QMI_DEVICE_OPEN_FLAGS_MBIM) {
+-        if (g_strcmp0 (driver, "cdc_mbim") && !self->priv->no_file_check)
+-            g_warning ("[%s] requested MBIM mode but unexpected driver found: %s", qmi_file_get_path_display (self->priv->file), driver);
++        if ((transport != __QMI_TRANSPORT_TYPE_MBIM) && !self->priv->no_file_check)
++            g_warning ("[%s] requested MBIM mode but unexpected transport type found", qmi_file_get_path_display (self->priv->file));
+         goto out;
+     }
+ 
+ #else
+ 
+-    if (ctx->flags & QMI_DEVICE_OPEN_FLAGS_AUTO)
++    /* Auto mode requested? */
++    if (ctx->flags & QMI_DEVICE_OPEN_FLAGS_AUTO) {
+         g_warning ("[%s] requested auto mode but no MBIM QMUX support available", qmi_file_get_path_display (self->priv->file));
+-    if (ctx->flags & QMI_DEVICE_OPEN_FLAGS_MBIM)
++        goto out;
++    }
++
++    /* MBIM mode requested? */
++    if (ctx->flags & QMI_DEVICE_OPEN_FLAGS_MBIM) {
+         g_warning ("[%s] requested MBIM mode but no MBIM QMUX support available", qmi_file_get_path_display (self->priv->file));
++        goto out;
++    }
+ 
+ #endif /* MBIM_QMUX_ENABLED */
+ 
+     /* QMI mode requested? */
+-    if (g_strcmp0 (driver, "qmi_wwan") && !self->priv->no_file_check)
+-        g_warning ("[%s] requested QMI mode but unexpected driver found: %s",
+-                   qmi_file_get_path_display (self->priv->file), driver ? driver : "unknown");
++    if ((transport != __QMI_TRANSPORT_TYPE_QMUX) && !self->priv->no_file_check)
++        g_warning ("[%s] requested QMI mode but unexpected transport type found",
++                   qmi_file_get_path_display (self->priv->file));
+ 
+-#if defined MBIM_QMUX_ENABLED
+ out:
+-#endif
+-
+-    g_free (driver);
+ 
+     if (inner_error) {
+         g_propagate_error (error, inner_error);
+@@ -1984,7 +1984,7 @@ device_open_step (GTask *task)
+         /* Fall through */
+ 
+     case DEVICE_OPEN_CONTEXT_STEP_DRIVER:
+-        if (!device_setup_open_flags_by_driver (self, ctx, &error)) {
++        if (!device_setup_open_flags_by_transport (self, ctx, &error)) {
+             g_task_return_error (task, error);
+             g_object_unref (task);
+             return;
+diff --git a/src/libqmi-glib/qmi-utils.c b/src/libqmi-glib/qmi-utils.c
+index 162db0a..6e46be9 100644
+--- a/src/libqmi-glib/qmi-utils.c
++++ b/src/libqmi-glib/qmi-utils.c
+@@ -417,18 +417,13 @@ __qmi_string_utf8_from_ucs2le (const guint8 *ucs2le,
+ }
+ /*****************************************************************************/
+ 
+-gchar *
+-__qmi_utils_get_driver (const gchar *cdc_wdm_path,
+-                        GError **error)
++static gchar *
++utils_get_driver (const gchar  *device_basename,
++                  GError      **error)
+ {
+     static const gchar *subsystems[] = { "usbmisc", "usb" };
+-    guint i;
+-    gchar *device_basename;
+-    gchar *driver = NULL;
+-
+-    device_basename = __qmi_utils_get_devname (cdc_wdm_path, error);
+-    if (!device_basename)
+-        return NULL;
++    guint               i;
++    gchar              *driver = NULL;
+ 
+     for (i = 0; !driver && i < G_N_ELEMENTS (subsystems); i++) {
+         gchar *tmp;
+@@ -450,9 +445,65 @@ __qmi_utils_get_driver (const gchar *cdc_wdm_path,
+         g_free (path);
+     }
+ 
++    if (!driver)
++        g_set_error (error, QMI_CORE_ERROR, QMI_CORE_ERROR_FAILED,
++                     "couldn't detect device driver");
++    return driver;
++}
++
++__QmiTransportType
++__qmi_utils_get_transport_type (const gchar  *path,
++                                GError      **error)
++{
++    __QmiTransportType  transport = __QMI_TRANSPORT_TYPE_UNKNOWN;
++    gchar              *device_basename = NULL;
++    gchar              *driver = NULL;
++    gchar              *sysfs_path = NULL;
++    GError             *inner_error = NULL;
++
++    device_basename = __qmi_utils_get_devname (path, &inner_error);
++    if (!device_basename)
++        goto out;
++
++    driver = utils_get_driver (device_basename, &inner_error);
++
++    /* On Android systems we get access to the QMI control port through
++     * virtual smdcntl devices in the smdpkt subsystem. */
++    if (!driver) {
++        path = g_strdup_printf ("/sys/devices/virtual/smdpkt/%s", device_basename);
++        if (g_file_test (path, G_FILE_TEST_EXISTS)) {
++            g_clear_error (&inner_error);
++            transport = __QMI_TRANSPORT_TYPE_QMUX;
++        }
++        goto out;
++    }
++
++    if (!g_strcmp0 (driver, "cdc_mbim")) {
++        transport = __QMI_TRANSPORT_TYPE_MBIM;
++        goto out;
++    }
++
++    if (!g_strcmp0 (driver, "qmi_wwan")) {
++        transport = __QMI_TRANSPORT_TYPE_QMUX;
++        goto out;
++    }
++
++    g_set_error (&inner_error, QMI_CORE_ERROR, QMI_CORE_ERROR_FAILED,
++                 "unexpected driver detected: %s", driver);
++
++ out:
++
+     g_free (device_basename);
++    g_free (driver);
++    g_free (sysfs_path);
+ 
+-    return driver;
++    if (inner_error) {
++        g_assert (transport == __QMI_TRANSPORT_TYPE_UNKNOWN);
++        g_propagate_error (error, inner_error);
++    } else
++        g_assert (transport != __QMI_TRANSPORT_TYPE_UNKNOWN);
++
++    return transport;
+ }
+ 
+ gchar *
+diff --git a/src/libqmi-glib/qmi-utils.h b/src/libqmi-glib/qmi-utils.h
+index 7283101..6963851 100644
+--- a/src/libqmi-glib/qmi-utils.h
++++ b/src/libqmi-glib/qmi-utils.h
+@@ -97,9 +97,15 @@ G_GNUC_INTERNAL
+ gchar *__qmi_string_utf8_from_ucs2le (const guint8 *ucs2le,
+                                       gsize         ucs2le_len);
+ 
++typedef enum {
++    __QMI_TRANSPORT_TYPE_UNKNOWN,
++    __QMI_TRANSPORT_TYPE_QMUX,
++    __QMI_TRANSPORT_TYPE_MBIM,
++} __QmiTransportType;
++
+ G_GNUC_INTERNAL
+-gchar *__qmi_utils_get_driver (const gchar *cdc_wdm_path,
+-                               GError **error);
++__QmiTransportType __qmi_utils_get_transport_type (const gchar  *path,
++                                                   GError      **error);
+ 
+ G_GNUC_INTERNAL
+ gchar *__qmi_utils_get_devpath (const gchar *cdc_wdm_path,
+-- 
+2.26.0
+
