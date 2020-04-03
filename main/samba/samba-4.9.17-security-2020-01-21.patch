@@ -1,0 +1,1662 @@
+From 77d55b64af6acd38a08096b89ee051bc4ce72f43 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Thu, 28 Nov 2019 17:16:16 +1300
+Subject: [PATCH 01/13] CVE-2019-14902 selftest: Add test for replication of
+ inherited security descriptors
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12497
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ selftest/knownfail.d/repl_secdesc          |   2 +
+ source4/selftest/tests.py                  |   5 +
+ source4/torture/drs/python/repl_secdesc.py | 258 +++++++++++++++++++++
+ 3 files changed, 265 insertions(+)
+ create mode 100644 selftest/knownfail.d/repl_secdesc
+ create mode 100644 source4/torture/drs/python/repl_secdesc.py
+
+diff --git a/selftest/knownfail.d/repl_secdesc b/selftest/knownfail.d/repl_secdesc
+new file mode 100644
+index 00000000000..2aa24c61375
+--- /dev/null
++++ b/selftest/knownfail.d/repl_secdesc
+@@ -0,0 +1,2 @@
++^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inheirt_renamed_object_in_conflict
++^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inherit_existing_object
+diff --git a/source4/selftest/tests.py b/source4/selftest/tests.py
+index 2ec0bee923b..7244535791d 100755
+--- a/source4/selftest/tests.py
++++ b/source4/selftest/tests.py
+@@ -1004,6 +1004,11 @@ for env in ['vampire_dc', 'promoted_dc']:
+                            extra_path=[os.path.join(samba4srcdir, 'torture/drs/python')],
+                            environ={'DC1': "$DC_SERVER", 'DC2': '$%s_SERVER' % env.upper()},
+                            extra_args=['-U$DOMAIN/$DC_USERNAME%$DC_PASSWORD'])
++    planoldpythontestsuite(env, "repl_secdesc",
++                           name="samba4.drs.repl_secdesc.python(%s)" % env,
++                           extra_path=[os.path.join(samba4srcdir, 'torture/drs/python')],
++                           environ={'DC1': "$DC_SERVER", 'DC2': '$SERVER'},
++                           extra_args=['-U$DOMAIN/$DC_USERNAME%$DC_PASSWORD'])
+     planoldpythontestsuite(env, "repl_move",
+                            extra_path=[os.path.join(samba4srcdir, 'torture/drs/python')],
+                            name="samba4.drs.repl_move.python(%s)" % env,
+diff --git a/source4/torture/drs/python/repl_secdesc.py b/source4/torture/drs/python/repl_secdesc.py
+new file mode 100644
+index 00000000000..4ed449a8a18
+--- /dev/null
++++ b/source4/torture/drs/python/repl_secdesc.py
+@@ -0,0 +1,258 @@
++#!/usr/bin/env python3
++# -*- coding: utf-8 -*-
++#
++# Unix SMB/CIFS implementation.
++# Copyright (C) Catalyst.Net Ltd. 2017
++# Copyright (C) Andrew Bartlett <abartlet@samba.org> 2019
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++#
++import drs_base
++import ldb
++import samba
++from samba import sd_utils
++from ldb import LdbError
++
++class ReplAclTestCase(drs_base.DrsBaseTestCase):
++
++    def setUp(self):
++        super(ReplAclTestCase, self).setUp()
++        self.sd_utils_dc1 = sd_utils.SDUtils(self.ldb_dc1)
++        self.sd_utils_dc2 = sd_utils.SDUtils(self.ldb_dc2)
++
++        self.ou = samba.tests.create_test_ou(self.ldb_dc1,
++                                             "test_acl_inherit")
++
++        # disable replication for the tests so we can control at what point
++        # the DCs try to replicate
++        self._disable_all_repl(self.dnsname_dc1)
++        self._disable_all_repl(self.dnsname_dc2)
++
++        # make sure DCs are synchronized before the test
++        self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True)
++        self._net_drs_replicate(DC=self.dnsname_dc1, fromDC=self.dnsname_dc2, forced=True)
++
++    def tearDown(self):
++        self.ldb_dc1.delete(self.ou, ["tree_delete:1"])
++
++        # re-enable replication
++        self._enable_all_repl(self.dnsname_dc1)
++        self._enable_all_repl(self.dnsname_dc2)
++
++        super(ReplAclTestCase, self).tearDown()
++
++    def test_acl_inheirt_new_object_1_pass(self):
++        # Set the inherited ACL on the parent OU
++        mod =  "(A;CIOI;GA;;;SY)"
++        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++
++        # Make a new object
++        dn = ldb.Dn(self.ldb_dc1, "OU=l2,%s" % self.ou)
++        self.ldb_dc1.add({"dn": dn, "objectclass": "organizationalUnit"})
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Confirm inherited ACLs are identical
++
++        self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(dn),
++                          self.sd_utils_dc2.get_sd_as_sddl(dn))
++
++    def test_acl_inheirt_new_object(self):
++        # Set the inherited ACL on the parent OU
++        mod =  "(A;CIOI;GA;;;SY)"
++        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++
++        # Replicate to DC2
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Make a new object
++        dn = ldb.Dn(self.ldb_dc1, "OU=l2,%s" % self.ou)
++        self.ldb_dc1.add({"dn": dn, "objectclass": "organizationalUnit"})
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Confirm inherited ACLs are identical
++
++        self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(dn),
++                          self.sd_utils_dc2.get_sd_as_sddl(dn))
++
++    def test_acl_inherit_existing_object(self):
++        # Make a new object
++        dn = ldb.Dn(self.ldb_dc1, "OU=l2,%s" % self.ou)
++        self.ldb_dc1.add({"dn": dn, "objectclass": "organizationalUnit"})
++
++        try:
++            self.ldb_dc2.search(scope=ldb.SCOPE_BASE,
++                                base=dn,
++                                attrs=[])
++            self.fail()
++        except LdbError as err:
++            enum = err.args[0]
++            self.assertEqual(enum, ldb.ERR_NO_SUCH_OBJECT)
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Confirm it is now replicated
++        self.ldb_dc2.search(scope=ldb.SCOPE_BASE,
++                            base=dn,
++                            attrs=[])
++
++        # Set the inherited ACL on the parent OU
++        mod =  "(A;CIOI;GA;;;SY)"
++        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++
++        # Replicate to DC2
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Confirm inherited ACLs are identical
++
++        self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(dn),
++                          self.sd_utils_dc2.get_sd_as_sddl(dn))
++
++    def test_acl_inheirt_existing_object_1_pass(self):
++        # Make a new object
++        dn = ldb.Dn(self.ldb_dc1, "OU=l2,%s" % self.ou)
++        self.ldb_dc1.add({"dn": dn, "objectclass": "organizationalUnit"})
++
++        try:
++            self.ldb_dc2.search(scope=ldb.SCOPE_BASE,
++                                base=dn,
++                                attrs=[])
++            self.fail()
++        except LdbError as err:
++            enum = err.args[0]
++            self.assertEqual(enum, ldb.ERR_NO_SUCH_OBJECT)
++
++        # Set the inherited ACL on the parent OU
++        mod =  "(A;CIOI;GA;;;SY)"
++        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++
++        # Replicate to DC2
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Confirm inherited ACLs are identical
++
++        self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(dn),
++                          self.sd_utils_dc2.get_sd_as_sddl(dn))
++
++    def test_acl_inheirt_renamed_object(self):
++        # Make a new object
++        new_ou = samba.tests.create_test_ou(self.ldb_dc1,
++                                            "acl_test_l2")
++
++        sub_ou_dn = ldb.Dn(self.ldb_dc1, "OU=l2,%s" % self.ou)
++
++        try:
++            self.ldb_dc2.search(scope=ldb.SCOPE_BASE,
++                                base=new_ou,
++                                attrs=[])
++            self.fail()
++        except LdbError as err:
++            enum = err.args[0]
++            self.assertEqual(enum, ldb.ERR_NO_SUCH_OBJECT)
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Confirm it is now replicated
++        self.ldb_dc2.search(scope=ldb.SCOPE_BASE,
++                            base=new_ou,
++                            attrs=[])
++
++        # Set the inherited ACL on the parent OU on DC1
++        mod =  "(A;CIOI;GA;;;SY)"
++        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++
++        # Replicate to DC2
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Rename to under self.ou
++
++        self.ldb_dc1.rename(new_ou, sub_ou_dn)
++
++        # Replicate to DC2
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Confirm inherited ACLs are identical
++        self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(sub_ou_dn),
++                          self.sd_utils_dc2.get_sd_as_sddl(sub_ou_dn))
++
++
++    def test_acl_inheirt_renamed_object_in_conflict(self):
++        # Make a new object to be renamed under self.ou
++        new_ou = samba.tests.create_test_ou(self.ldb_dc1,
++                                            "acl_test_l2")
++
++        # Make a new OU under self.ou (on DC2)
++        sub_ou_dn = ldb.Dn(self.ldb_dc2, "OU=l2,%s" % self.ou)
++        self.ldb_dc2.add({"dn": sub_ou_dn,
++                          "objectclass": "organizationalUnit"})
++
++        # Set the inherited ACL on the parent OU
++        mod =  "(A;CIOI;GA;;;SY)"
++        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++
++        # Replicate to DC2
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Rename to under self.ou
++        self.ldb_dc1.rename(new_ou, sub_ou_dn)
++
++        # Replicate to DC2 (will cause a conflict, DC1 to win, version
++        # is higher since named twice)
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        children = self.ldb_dc2.search(scope=ldb.SCOPE_ONELEVEL,
++                                       base=self.ou,
++                                       attrs=[])
++        for child in children:
++            self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(sub_ou_dn),
++                              self.sd_utils_dc2.get_sd_as_sddl(child.dn))
++
++        # Replicate back
++        self._net_drs_replicate(DC=self.dnsname_dc1,
++                                fromDC=self.dnsname_dc2,
++                                forced=True)
++
++        for child in children:
++            self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(child.dn),
++                              self.sd_utils_dc2.get_sd_as_sddl(child.dn))
+-- 
+2.17.1
+
+
+From c5a005a45389c8d8fc0eae7137eab1904ea92d42 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Tue, 10 Dec 2019 15:16:24 +1300
+Subject: [PATCH 02/13] CVE-2019-14902 selftest: Add test for a special case
+ around replicated renames
+
+It appears Samba is currently string-name based in the ACL inheritence code.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12497
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ selftest/knownfail.d/repl_secdesc          |  1 +
+ source4/torture/drs/python/repl_secdesc.py | 69 ++++++++++++++++++++++
+ 2 files changed, 70 insertions(+)
+
+diff --git a/selftest/knownfail.d/repl_secdesc b/selftest/knownfail.d/repl_secdesc
+index 2aa24c61375..7d554ff237a 100644
+--- a/selftest/knownfail.d/repl_secdesc
++++ b/selftest/knownfail.d/repl_secdesc
+@@ -1,2 +1,3 @@
+ ^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inheirt_renamed_object_in_conflict
+ ^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inherit_existing_object
++^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inheirt_renamed_child_object
+diff --git a/source4/torture/drs/python/repl_secdesc.py b/source4/torture/drs/python/repl_secdesc.py
+index 4ed449a8a18..58861af3bac 100644
+--- a/source4/torture/drs/python/repl_secdesc.py
++++ b/source4/torture/drs/python/repl_secdesc.py
+@@ -211,6 +211,75 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                           self.sd_utils_dc2.get_sd_as_sddl(sub_ou_dn))
+ 
+ 
++    def test_acl_inheirt_renamed_child_object(self):
++        # Make a new OU
++        new_ou = samba.tests.create_test_ou(self.ldb_dc1,
++                                            "acl_test_l2")
++
++        # Here is where the new OU will end up at the end.
++        sub2_ou_dn_final = ldb.Dn(self.ldb_dc1, "OU=l2,%s" % self.ou)
++
++        sub3_ou_dn = ldb.Dn(self.ldb_dc1, "OU=l3,%s" % new_ou)
++        sub3_ou_dn_final = ldb.Dn(self.ldb_dc1, "OU=l3,%s" % sub2_ou_dn_final)
++
++        self.ldb_dc1.add({"dn": sub3_ou_dn,
++                          "objectclass": "organizationalUnit"})
++
++        sub4_ou_dn = ldb.Dn(self.ldb_dc1, "OU=l4,%s" % sub3_ou_dn)
++        sub4_ou_dn_final = ldb.Dn(self.ldb_dc1, "OU=l4,%s" % sub3_ou_dn_final)
++
++        self.ldb_dc1.add({"dn": sub4_ou_dn,
++                          "objectclass": "organizationalUnit"})
++
++        try:
++            self.ldb_dc2.search(scope=ldb.SCOPE_BASE,
++                                base=new_ou,
++                                attrs=[])
++            self.fail()
++        except LdbError as err:
++            enum = err.args[0]
++            self.assertEqual(enum, ldb.ERR_NO_SUCH_OBJECT)
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Confirm it is now replicated
++        self.ldb_dc2.search(scope=ldb.SCOPE_BASE,
++                            base=new_ou,
++                            attrs=[])
++
++        #
++        # Given a tree new_ou -> l3 -> l4
++        #
++
++        # Set the inherited ACL on the grandchild OU (l3) on DC1
++        mod =  "(A;CIOI;GA;;;SY)"
++        self.sd_utils_dc1.dacl_add_ace(sub3_ou_dn, mod)
++
++        # Rename new_ou (l2) to under self.ou (this must happen second).  If the
++        # inheritence between l3 and l4 is name-based, this could
++        # break.
++
++        # The tree is now self.ou -> l2 -> l3 -> l4
++
++        self.ldb_dc1.rename(new_ou, sub2_ou_dn_final)
++
++        # Replicate to DC2
++
++        self._net_drs_replicate(DC=self.dnsname_dc2,
++                                fromDC=self.dnsname_dc1,
++                                forced=True)
++
++        # Confirm set ACLs (on l3 ) are identical.
++        self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(sub3_ou_dn_final),
++                          self.sd_utils_dc2.get_sd_as_sddl(sub3_ou_dn_final))
++
++        # Confirm inherited ACLs (from l3 to l4) are identical.
++        self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(sub4_ou_dn_final),
++                          self.sd_utils_dc2.get_sd_as_sddl(sub4_ou_dn_final))
++
++
+     def test_acl_inheirt_renamed_object_in_conflict(self):
+         # Make a new object to be renamed under self.ou
+         new_ou = samba.tests.create_test_ou(self.ldb_dc1,
+-- 
+2.17.1
+
+
+From 4afff32debe5ea4bf1219f42c3042eb65c3e1d6b Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Mon, 16 Dec 2019 11:29:27 +1300
+Subject: [PATCH 03/13] selftest: Add test to confirm ACL inheritence really
+ happens
+
+While we have a seperate test (sec_descriptor.py) that confirms inheritance in
+general we want to lock in these specific patterns as this test covers
+rename.
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ source4/torture/drs/python/repl_secdesc.py | 115 +++++++++++++++++----
+ 1 file changed, 94 insertions(+), 21 deletions(-)
+
+diff --git a/source4/torture/drs/python/repl_secdesc.py b/source4/torture/drs/python/repl_secdesc.py
+index 58861af3bac..58212907e23 100644
+--- a/source4/torture/drs/python/repl_secdesc.py
++++ b/source4/torture/drs/python/repl_secdesc.py
+@@ -28,6 +28,10 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+ 
+     def setUp(self):
+         super(ReplAclTestCase, self).setUp()
++        self.mod = "(A;CIOI;GA;;;SY)"
++        self.mod_becomes = "(A;OICIIO;GA;;;SY)"
++        self.mod_inherits_as = "(A;OICIIOID;GA;;;SY)"
++
+         self.sd_utils_dc1 = sd_utils.SDUtils(self.ldb_dc1)
+         self.sd_utils_dc2 = sd_utils.SDUtils(self.ldb_dc2)
+ 
+@@ -54,8 +58,11 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+ 
+     def test_acl_inheirt_new_object_1_pass(self):
+         # Set the inherited ACL on the parent OU
+-        mod =  "(A;CIOI;GA;;;SY)"
+-        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++        self.sd_utils_dc1.dacl_add_ace(self.ou, self.mod)
++
++        # Assert ACL set stuck as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc1.get_sd_as_sddl(self.ou))
+ 
+         # Make a new object
+         dn = ldb.Dn(self.ldb_dc1, "OU=l2,%s" % self.ou)
+@@ -65,15 +72,24 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                                 fromDC=self.dnsname_dc1,
+                                 forced=True)
+ 
+-        # Confirm inherited ACLs are identical
++        # Assert ACL replicated as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc2.get_sd_as_sddl(self.ou))
+ 
++        # Confirm inherited ACLs are identical and were inherited
++
++        self.assertIn(self.mod_inherits_as,
++                      self.sd_utils_dc1.get_sd_as_sddl(dn))
+         self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(dn),
+                           self.sd_utils_dc2.get_sd_as_sddl(dn))
+ 
+     def test_acl_inheirt_new_object(self):
+         # Set the inherited ACL on the parent OU
+-        mod =  "(A;CIOI;GA;;;SY)"
+-        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++        self.sd_utils_dc1.dacl_add_ace(self.ou, self.mod)
++
++        # Assert ACL set stuck as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc1.get_sd_as_sddl(self.ou))
+ 
+         # Replicate to DC2
+ 
+@@ -89,8 +105,14 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                                 fromDC=self.dnsname_dc1,
+                                 forced=True)
+ 
+-        # Confirm inherited ACLs are identical
++        # Assert ACL replicated as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc2.get_sd_as_sddl(self.ou))
+ 
++        # Confirm inherited ACLs are identical and were inheritied
++
++        self.assertIn(self.mod_inherits_as,
++                      self.sd_utils_dc1.get_sd_as_sddl(dn))
+         self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(dn),
+                           self.sd_utils_dc2.get_sd_as_sddl(dn))
+ 
+@@ -118,8 +140,11 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                             attrs=[])
+ 
+         # Set the inherited ACL on the parent OU
+-        mod =  "(A;CIOI;GA;;;SY)"
+-        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++        self.sd_utils_dc1.dacl_add_ace(self.ou, self.mod)
++
++        # Assert ACL set stuck as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc1.get_sd_as_sddl(self.ou))
+ 
+         # Replicate to DC2
+ 
+@@ -127,8 +152,14 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                                 fromDC=self.dnsname_dc1,
+                                 forced=True)
+ 
+-        # Confirm inherited ACLs are identical
++        # Confirm inherited ACLs are identical and were inherited
+ 
++        # Assert ACL replicated as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc2.get_sd_as_sddl(self.ou))
++
++        self.assertIn(self.mod_inherits_as,
++                      self.sd_utils_dc1.get_sd_as_sddl(dn))
+         self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(dn),
+                           self.sd_utils_dc2.get_sd_as_sddl(dn))
+ 
+@@ -147,8 +178,11 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+             self.assertEqual(enum, ldb.ERR_NO_SUCH_OBJECT)
+ 
+         # Set the inherited ACL on the parent OU
+-        mod =  "(A;CIOI;GA;;;SY)"
+-        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++        self.sd_utils_dc1.dacl_add_ace(self.ou, self.mod)
++
++        # Assert ACL set as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc1.get_sd_as_sddl(self.ou))
+ 
+         # Replicate to DC2
+ 
+@@ -156,8 +190,14 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                                 fromDC=self.dnsname_dc1,
+                                 forced=True)
+ 
+-        # Confirm inherited ACLs are identical
++        # Assert ACL replicated as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc2.get_sd_as_sddl(self.ou))
+ 
++        # Confirm inherited ACLs are identical and were inherited
++
++        self.assertIn(self.mod_inherits_as,
++                      self.sd_utils_dc1.get_sd_as_sddl(dn))
+         self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(dn),
+                           self.sd_utils_dc2.get_sd_as_sddl(dn))
+ 
+@@ -187,8 +227,11 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                             attrs=[])
+ 
+         # Set the inherited ACL on the parent OU on DC1
+-        mod =  "(A;CIOI;GA;;;SY)"
+-        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++        self.sd_utils_dc1.dacl_add_ace(self.ou, self.mod)
++
++        # Assert ACL set as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc1.get_sd_as_sddl(self.ou))
+ 
+         # Replicate to DC2
+ 
+@@ -196,6 +239,10 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                                 fromDC=self.dnsname_dc1,
+                                 forced=True)
+ 
++        # Assert ACL replicated as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc2.get_sd_as_sddl(self.ou))
++
+         # Rename to under self.ou
+ 
+         self.ldb_dc1.rename(new_ou, sub_ou_dn)
+@@ -206,7 +253,9 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                                 fromDC=self.dnsname_dc1,
+                                 forced=True)
+ 
+-        # Confirm inherited ACLs are identical
++        # Confirm inherited ACLs are identical and were inherited
++        self.assertIn(self.mod_inherits_as,
++                      self.sd_utils_dc1.get_sd_as_sddl(sub_ou_dn))
+         self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(sub_ou_dn),
+                           self.sd_utils_dc2.get_sd_as_sddl(sub_ou_dn))
+ 
+@@ -254,8 +303,11 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+         #
+ 
+         # Set the inherited ACL on the grandchild OU (l3) on DC1
+-        mod =  "(A;CIOI;GA;;;SY)"
+-        self.sd_utils_dc1.dacl_add_ace(sub3_ou_dn, mod)
++        self.sd_utils_dc1.dacl_add_ace(sub3_ou_dn, self.mod)
++
++        # Assert ACL set stuck as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc1.get_sd_as_sddl(sub3_ou_dn))
+ 
+         # Rename new_ou (l2) to under self.ou (this must happen second).  If the
+         # inheritence between l3 and l4 is name-based, this could
+@@ -265,17 +317,26 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+ 
+         self.ldb_dc1.rename(new_ou, sub2_ou_dn_final)
+ 
++        # Assert ACL set remained as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc1.get_sd_as_sddl(sub3_ou_dn_final))
++
+         # Replicate to DC2
+ 
+         self._net_drs_replicate(DC=self.dnsname_dc2,
+                                 fromDC=self.dnsname_dc1,
+                                 forced=True)
+ 
+-        # Confirm set ACLs (on l3 ) are identical.
++        # Confirm set ACLs (on l3 ) are identical and were inherited
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc2.get_sd_as_sddl(sub3_ou_dn_final))
+         self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(sub3_ou_dn_final),
+                           self.sd_utils_dc2.get_sd_as_sddl(sub3_ou_dn_final))
+ 
+-        # Confirm inherited ACLs (from l3 to l4) are identical.
++        # Confirm inherited ACLs (from l3 to l4) are identical
++        # and where inherited
++        self.assertIn(self.mod_inherits_as,
++                      self.sd_utils_dc1.get_sd_as_sddl(sub4_ou_dn_final))
+         self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(sub4_ou_dn_final),
+                           self.sd_utils_dc2.get_sd_as_sddl(sub4_ou_dn_final))
+ 
+@@ -291,8 +352,11 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                           "objectclass": "organizationalUnit"})
+ 
+         # Set the inherited ACL on the parent OU
+-        mod =  "(A;CIOI;GA;;;SY)"
+-        self.sd_utils_dc1.dacl_add_ace(self.ou, mod)
++        self.sd_utils_dc1.dacl_add_ace(self.ou, self.mod)
++
++        # Assert ACL set stuck as expected
++        self.assertIn(self.mod_becomes,
++                      self.sd_utils_dc1.get_sd_as_sddl(self.ou))
+ 
+         # Replicate to DC2
+ 
+@@ -302,6 +366,8 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+ 
+         # Rename to under self.ou
+         self.ldb_dc1.rename(new_ou, sub_ou_dn)
++        self.assertIn(self.mod_inherits_as,
++                      self.sd_utils_dc1.get_sd_as_sddl(sub_ou_dn))
+ 
+         # Replicate to DC2 (will cause a conflict, DC1 to win, version
+         # is higher since named twice)
+@@ -314,6 +380,8 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                                        base=self.ou,
+                                        attrs=[])
+         for child in children:
++            self.assertIn(self.mod_inherits_as,
++                          self.sd_utils_dc2.get_sd_as_sddl(child.dn))
+             self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(sub_ou_dn),
+                               self.sd_utils_dc2.get_sd_as_sddl(child.dn))
+ 
+@@ -322,6 +390,11 @@ class ReplAclTestCase(drs_base.DrsBaseTestCase):
+                                 fromDC=self.dnsname_dc2,
+                                 forced=True)
+ 
++        self.assertIn(self.mod_inherits_as,
++                      self.sd_utils_dc1.get_sd_as_sddl(sub_ou_dn))
++
+         for child in children:
++            self.assertIn(self.mod_inherits_as,
++                          self.sd_utils_dc1.get_sd_as_sddl(child.dn))
+             self.assertEquals(self.sd_utils_dc1.get_sd_as_sddl(child.dn),
+                               self.sd_utils_dc2.get_sd_as_sddl(child.dn))
+-- 
+2.17.1
+
+
+From 17215b36b22d309a58a3b7bd08123f06e89657c9 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Tue, 26 Nov 2019 15:44:32 +1300
+Subject: [PATCH 04/13] CVE-2019-14902 dsdb: Explain that
+ descriptor_sd_propagation_recursive() is proctected by a transaction
+
+This means we can trust the DB did not change between the two search
+requests.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12497
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ source4/dsdb/samdb/ldb_modules/descriptor.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/source4/dsdb/samdb/ldb_modules/descriptor.c b/source4/dsdb/samdb/ldb_modules/descriptor.c
+index 9018b750ab5..fb2854438e1 100644
+--- a/source4/dsdb/samdb/ldb_modules/descriptor.c
++++ b/source4/dsdb/samdb/ldb_modules/descriptor.c
+@@ -1199,6 +1199,9 @@ static int descriptor_sd_propagation_recursive(struct ldb_module *module,
+ 	 * LDB_SCOPE_SUBTREE searches are expensive.
+ 	 *
+ 	 * Note: that we do not search for deleted/recycled objects
++	 *
++	 * We know this is safe against a rename race as we are in the
++	 * prepare_commit(), so must be in a transaction.
+ 	 */
+ 	ret = dsdb_module_search(module,
+ 				 change,
+-- 
+2.17.1
+
+
+From 589d1e4846bbac0e5388af3ef0c6d6c41b5ff991 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Tue, 26 Nov 2019 16:17:32 +1300
+Subject: [PATCH 05/13] CVE-2019-14902 dsdb: Add comments explaining why SD
+ propagation needs to be done here
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12497
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ source4/dsdb/samdb/ldb_modules/descriptor.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/source4/dsdb/samdb/ldb_modules/descriptor.c b/source4/dsdb/samdb/ldb_modules/descriptor.c
+index fb2854438e1..7070affa645 100644
+--- a/source4/dsdb/samdb/ldb_modules/descriptor.c
++++ b/source4/dsdb/samdb/ldb_modules/descriptor.c
+@@ -876,6 +876,9 @@ static int descriptor_modify(struct ldb_module *module, struct ldb_request *req)
+ 			return ldb_oom(ldb);
+ 		}
+ 
++		/*
++		 * Force SD propagation on children of this record
++		 */
+ 		ret = dsdb_module_schedule_sd_propagation(module, nc_root,
+ 							  dn, false);
+ 		if (ret != LDB_SUCCESS) {
+@@ -966,6 +969,10 @@ static int descriptor_rename(struct ldb_module *module, struct ldb_request *req)
+ 			return ldb_oom(ldb);
+ 		}
+ 
++		/*
++		 * Force SD propagation on this record (get a new
++		 * inherited SD from the potentially new parent
++		 */
+ 		ret = dsdb_module_schedule_sd_propagation(module, nc_root,
+ 							  newdn, true);
+ 		if (ret != LDB_SUCCESS) {
+-- 
+2.17.1
+
+
+From 0fa9a362e55abb289cbf0fe24baa09c45af4837e Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Fri, 6 Dec 2019 17:54:23 +1300
+Subject: [PATCH 06/13] CVE-2019-14902 dsdb: Ensure we honour both
+ change->force_self and change->force_children
+
+If we are renaming a DN we can be in a situation where we need to
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12497
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ source4/dsdb/samdb/ldb_modules/descriptor.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/source4/dsdb/samdb/ldb_modules/descriptor.c b/source4/dsdb/samdb/ldb_modules/descriptor.c
+index 7070affa645..b9f465fc36f 100644
+--- a/source4/dsdb/samdb/ldb_modules/descriptor.c
++++ b/source4/dsdb/samdb/ldb_modules/descriptor.c
+@@ -1291,6 +1291,13 @@ static int descriptor_sd_propagation_recursive(struct ldb_module *module,
+ 
+ 		if (cur != NULL) {
+ 			DLIST_REMOVE(change->children, cur);
++		} else if (i == 0) {
++			/*
++			 * in the change->force_self case
++			 * res->msgs[0]->elements was not overwritten,
++			 * so set cur here
++			 */
++			cur = change;
+ 		}
+ 
+ 		for (c = stopped_stack; c; c = stopped_stack) {
+-- 
+2.17.1
+
+
+From 9ac2b09fa5a2de44967a0b190918825e7dca8d53 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Fri, 6 Dec 2019 18:05:54 +1300
+Subject: [PATCH 07/13] CVE-2019-14902 repl_meta_data: schedule SD propagation
+ to a renamed DN
+
+We need to check the SD of the parent if we rename, it is not the same as an incoming SD change.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12497
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ source4/dsdb/samdb/ldb_modules/repl_meta_data.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/source4/dsdb/samdb/ldb_modules/repl_meta_data.c b/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
+index 04a51ecab51..52ff3d75ee2 100644
+--- a/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
++++ b/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
+@@ -6290,7 +6290,22 @@ static int replmd_replicated_apply_merge(struct replmd_replicated_request *ar)
+ 		  ar->index_current, msg->num_elements);
+ 
+ 	if (renamed) {
+-		sd_updated = true;
++		/*
++		 * This is an new name for this object, so we must
++		 * inherit from the parent
++		 *
++		 * This is needed because descriptor is above
++		 * repl_meta_data in the module stack, so this will
++		 * not be trigered 'naturally' by the flow of
++		 * operations.
++		 */
++		ret = dsdb_module_schedule_sd_propagation(ar->module,
++							  ar->objs->partition_dn,
++							  msg->dn,
++							  true);
++		if (ret != LDB_SUCCESS) {
++			return ldb_operr(ldb);
++		}
+ 	}
+ 
+ 	if (sd_updated && !isDeleted) {
+-- 
+2.17.1
+
+
+From 9e6b09e0fd52c664de7f0589074fef872c753fa2 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Tue, 26 Nov 2019 15:50:35 +1300
+Subject: [PATCH 08/13] CVE-2019-14902 repl_meta_data: Fix issue where
+ inherited Security Descriptors were not replicated.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12497
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ selftest/knownfail.d/repl_secdesc             |  1 -
+ .../dsdb/samdb/ldb_modules/repl_meta_data.c   | 22 ++++++++++++++++++-
+ 2 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/selftest/knownfail.d/repl_secdesc b/selftest/knownfail.d/repl_secdesc
+index 7d554ff237a..13a9ce458dd 100644
+--- a/selftest/knownfail.d/repl_secdesc
++++ b/selftest/knownfail.d/repl_secdesc
+@@ -1,3 +1,2 @@
+ ^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inheirt_renamed_object_in_conflict
+-^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inherit_existing_object
+ ^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inheirt_renamed_child_object
+diff --git a/source4/dsdb/samdb/ldb_modules/repl_meta_data.c b/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
+index 52ff3d75ee2..9812ded99fb 100644
+--- a/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
++++ b/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
+@@ -5527,6 +5527,15 @@ static int replmd_replicated_apply_add(struct replmd_replicated_request *ar)
+ 	replmd_ldb_message_sort(msg, ar->schema);
+ 
+ 	if (!remote_isDeleted) {
++		/*
++		 * Ensure any local ACL inheritence is applied from
++		 * the parent object.
++		 *
++		 * This is needed because descriptor is above
++		 * repl_meta_data in the module stack, so this will
++		 * not be trigered 'naturally' by the flow of
++		 * operations.
++		 */
+ 		ret = dsdb_module_schedule_sd_propagation(ar->module,
+ 							  ar->objs->partition_dn,
+ 							  msg->dn, true);
+@@ -6309,9 +6318,20 @@ static int replmd_replicated_apply_merge(struct replmd_replicated_request *ar)
+ 	}
+ 
+ 	if (sd_updated && !isDeleted) {
++		/*
++		 * This is an existing object, so there is no need to
++		 * inherit from the parent, but we must inherit any
++		 * incoming changes to our child objects.
++		 *
++		 * This is needed because descriptor is above
++		 * repl_meta_data in the module stack, so this will
++		 * not be trigered 'naturally' by the flow of
++		 * operations.
++		 */
+ 		ret = dsdb_module_schedule_sd_propagation(ar->module,
+ 							  ar->objs->partition_dn,
+-							  msg->dn, true);
++							  msg->dn,
++							  false);
+ 		if (ret != LDB_SUCCESS) {
+ 			return ldb_operr(ldb);
+ 		}
+-- 
+2.17.1
+
+
+From 7071888d5b556213be79545cac059a8b3f62baee Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Fri, 6 Dec 2019 18:26:42 +1300
+Subject: [PATCH 09/13] CVE-2019-14902 repl_meta_data: Set renamed = true (and
+ so do SD inheritance) after any rename
+
+Previously if there was a conflict, but the incoming object would still
+win, this was not marked as a rename, and so inheritence was not done.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12497
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ selftest/knownfail.d/repl_secdesc               |  1 -
+ source4/dsdb/samdb/ldb_modules/repl_meta_data.c | 13 +++++++++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/selftest/knownfail.d/repl_secdesc b/selftest/knownfail.d/repl_secdesc
+index 13a9ce458dd..9dd632d99ed 100644
+--- a/selftest/knownfail.d/repl_secdesc
++++ b/selftest/knownfail.d/repl_secdesc
+@@ -1,2 +1 @@
+-^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inheirt_renamed_object_in_conflict
+ ^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inheirt_renamed_child_object
+diff --git a/source4/dsdb/samdb/ldb_modules/repl_meta_data.c b/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
+index 9812ded99fb..e67c3b0281e 100644
+--- a/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
++++ b/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
+@@ -6134,6 +6134,19 @@ static int replmd_replicated_apply_merge(struct replmd_replicated_request *ar)
+ 		 * replmd_replicated_apply_search_callback())
+ 		 */
+ 		ret = replmd_replicated_handle_rename(ar, msg, ar->req, &renamed);
++
++		/*
++		 * This looks strange, but we must set this after any
++		 * rename, otherwise the SD propegation will not
++		 * happen (which might matter if we have a new parent)
++		 *
++		 * The additional case of calling
++		 * replmd_op_name_modify_callback (below) is:
++		 *  - a no-op if there was no name change
++		 * and
++		 *  - called in the default case regardless.
++		 */
++		renamed = true;
+ 	}
+ 
+ 	if (ret != LDB_SUCCESS) {
+-- 
+2.17.1
+
+
+From 16b377276ee82c04d069666e53deaa95a7633dd4 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Thu, 12 Dec 2019 14:44:57 +1300
+Subject: [PATCH 10/13] CVE-2019-14902 dsdb: Change basis of descriptor module
+ deferred processing to be GUIDs
+
+We can not process on the basis of a DN, as the DN may have changed in a rename,
+not only that this module can see, but also from repl_meta_data below.
+
+Therefore remove all the complex tree-based change processing, leaving only
+a tree-based sort of the possible objects to be changed, and a single
+stopped_dn variable containing the DN to stop processing below (after
+a no-op change).
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=12497
+
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+---
+ selftest/knownfail.d/repl_secdesc             |   1 -
+ source4/dsdb/samdb/ldb_modules/acl_util.c     |   4 +-
+ source4/dsdb/samdb/ldb_modules/descriptor.c   | 296 +++++++++---------
+ .../dsdb/samdb/ldb_modules/repl_meta_data.c   |   7 +-
+ source4/dsdb/samdb/samdb.h                    |   2 +-
+ 5 files changed, 156 insertions(+), 154 deletions(-)
+ delete mode 100644 selftest/knownfail.d/repl_secdesc
+
+diff --git a/selftest/knownfail.d/repl_secdesc b/selftest/knownfail.d/repl_secdesc
+deleted file mode 100644
+index 9dd632d99ed..00000000000
+--- a/selftest/knownfail.d/repl_secdesc
++++ /dev/null
+@@ -1 +0,0 @@
+-^samba4.drs.repl_secdesc.python\(.*\).repl_secdesc.ReplAclTestCase.test_acl_inheirt_renamed_child_object
+diff --git a/source4/dsdb/samdb/ldb_modules/acl_util.c b/source4/dsdb/samdb/ldb_modules/acl_util.c
+index 6d645b10fe2..b9931795e19 100644
+--- a/source4/dsdb/samdb/ldb_modules/acl_util.c
++++ b/source4/dsdb/samdb/ldb_modules/acl_util.c
+@@ -286,7 +286,7 @@ uint32_t dsdb_request_sd_flags(struct ldb_request *req, bool *explicit)
+ 
+ int dsdb_module_schedule_sd_propagation(struct ldb_module *module,
+ 					struct ldb_dn *nc_root,
+-					struct ldb_dn *dn,
++					struct GUID guid,
+ 					bool include_self)
+ {
+ 	struct ldb_context *ldb = ldb_module_get_ctx(module);
+@@ -299,7 +299,7 @@ int dsdb_module_schedule_sd_propagation(struct ldb_module *module,
+ 	}
+ 
+ 	op->nc_root = nc_root;
+-	op->dn = dn;
++	op->guid = guid;
+ 	op->include_self = include_self;
+ 
+ 	ret = dsdb_module_extended(module, op, NULL,
+diff --git a/source4/dsdb/samdb/ldb_modules/descriptor.c b/source4/dsdb/samdb/ldb_modules/descriptor.c
+index b9f465fc36f..daa08c2ebc7 100644
+--- a/source4/dsdb/samdb/ldb_modules/descriptor.c
++++ b/source4/dsdb/samdb/ldb_modules/descriptor.c
+@@ -46,9 +46,8 @@
+ 
+ struct descriptor_changes {
+ 	struct descriptor_changes *prev, *next;
+-	struct descriptor_changes *children;
+ 	struct ldb_dn *nc_root;
+-	struct ldb_dn *dn;
++	struct GUID guid;
+ 	bool force_self;
+ 	bool force_children;
+ 	struct ldb_dn *stopped_dn;
+@@ -771,7 +770,8 @@ static int descriptor_modify(struct ldb_module *module, struct ldb_request *req)
+ 				    current_attrs,
+ 				    DSDB_FLAG_NEXT_MODULE |
+ 				    DSDB_FLAG_AS_SYSTEM |
+-				    DSDB_SEARCH_SHOW_RECYCLED,
++				    DSDB_SEARCH_SHOW_RECYCLED |
++				    DSDB_SEARCH_SHOW_EXTENDED_DN,
+ 				    req);
+ 	if (ret != LDB_SUCCESS) {
+ 		ldb_debug(ldb, LDB_DEBUG_ERROR,"descriptor_modify: Could not find %s\n",
+@@ -832,7 +832,7 @@ static int descriptor_modify(struct ldb_module *module, struct ldb_request *req)
+ 		user_sd = old_sd;
+ 	}
+ 
+-	sd = get_new_descriptor(module, dn, req,
++	sd = get_new_descriptor(module, current_res->msgs[0]->dn, req,
+ 				objectclass, parent_sd,
+ 				user_sd, old_sd, sd_flags);
+ 	if (sd == NULL) {
+@@ -869,18 +869,32 @@ static int descriptor_modify(struct ldb_module *module, struct ldb_request *req)
+ 			return ldb_oom(ldb);
+ 		}
+ 	} else if (cmp_ret != 0) {
++		struct GUID guid;
+ 		struct ldb_dn *nc_root;
++		NTSTATUS status;
+ 
+-		ret = dsdb_find_nc_root(ldb, msg, dn, &nc_root);
++		ret = dsdb_find_nc_root(ldb,
++					msg,
++					current_res->msgs[0]->dn,
++					&nc_root);
+ 		if (ret != LDB_SUCCESS) {
+ 			return ldb_oom(ldb);
+ 		}
+ 
++		status = dsdb_get_extended_dn_guid(current_res->msgs[0]->dn,
++						   &guid,
++						   "GUID");
++		if (!NT_STATUS_IS_OK(status)) {
++			return ldb_operr(ldb);
++		}
++
+ 		/*
+ 		 * Force SD propagation on children of this record
+ 		 */
+-		ret = dsdb_module_schedule_sd_propagation(module, nc_root,
+-							  dn, false);
++		ret = dsdb_module_schedule_sd_propagation(module,
++							  nc_root,
++							  guid,
++							  false);
+ 		if (ret != LDB_SUCCESS) {
+ 			return ldb_operr(ldb);
+ 		}
+@@ -963,20 +977,31 @@ static int descriptor_rename(struct ldb_module *module, struct ldb_request *req)
+ 
+ 	if (ldb_dn_compare(olddn, newdn) != 0) {
+ 		struct ldb_dn *nc_root;
++		struct GUID guid;
+ 
+ 		ret = dsdb_find_nc_root(ldb, req, newdn, &nc_root);
+ 		if (ret != LDB_SUCCESS) {
+ 			return ldb_oom(ldb);
+ 		}
+ 
+-		/*
+-		 * Force SD propagation on this record (get a new
+-		 * inherited SD from the potentially new parent
+-		 */
+-		ret = dsdb_module_schedule_sd_propagation(module, nc_root,
+-							  newdn, true);
+-		if (ret != LDB_SUCCESS) {
+-			return ldb_operr(ldb);
++		ret = dsdb_module_guid_by_dn(module,
++					     olddn,
++					     &guid,
++					     req);
++		if (ret == LDB_SUCCESS) {
++			/*
++			 * Without disturbing any errors if the olddn
++			 * does not exit, force SD propagation on
++			 * this record (get a new inherited SD from
++			 * the potentially new parent
++			 */
++			ret = dsdb_module_schedule_sd_propagation(module,
++								  nc_root,
++								  guid,
++								  true);
++			if (ret != LDB_SUCCESS) {
++				return ldb_operr(ldb);
++			}
+ 		}
+ 	}
+ 
+@@ -992,9 +1017,7 @@ static int descriptor_extended_sec_desc_propagation(struct ldb_module *module,
+ 	struct ldb_context *ldb = ldb_module_get_ctx(module);
+ 	struct dsdb_extended_sec_desc_propagation_op *op;
+ 	TALLOC_CTX *parent_mem = NULL;
+-	struct descriptor_changes *parent_change = NULL;
+ 	struct descriptor_changes *c;
+-	int ret;
+ 
+ 	op = talloc_get_type(req->op.extended.data,
+ 			     struct dsdb_extended_sec_desc_propagation_op);
+@@ -1011,32 +1034,6 @@ static int descriptor_extended_sec_desc_propagation(struct ldb_module *module,
+ 
+ 	parent_mem = descriptor_private->trans_mem;
+ 
+-	for (c = descriptor_private->changes; c; c = c->next) {
+-		ret = ldb_dn_compare(c->nc_root, op->nc_root);
+-		if (ret != 0) {
+-			continue;
+-		}
+-
+-		ret = ldb_dn_compare(c->dn, op->dn);
+-		if (ret == 0) {
+-			if (op->include_self) {
+-				c->force_self = true;
+-			} else {
+-				c->force_children = true;
+-			}
+-			return ldb_module_done(req, NULL, NULL, LDB_SUCCESS);
+-		}
+-
+-		ret = ldb_dn_compare_base(c->dn, op->dn);
+-		if (ret != 0) {
+-			continue;
+-		}
+-
+-		parent_mem = c;
+-		parent_change = c;
+-		break;
+-	}
+-
+ 	c = talloc_zero(parent_mem, struct descriptor_changes);
+ 	if (c == NULL) {
+ 		return ldb_module_oom(module);
+@@ -1045,21 +1042,14 @@ static int descriptor_extended_sec_desc_propagation(struct ldb_module *module,
+ 	if (c->nc_root == NULL) {
+ 		return ldb_module_oom(module);
+ 	}
+-	c->dn = ldb_dn_copy(c, op->dn);
+-	if (c->dn == NULL) {
+-		return ldb_module_oom(module);
+-	}
++	c->guid = op->guid;
+ 	if (op->include_self) {
+ 		c->force_self = true;
+ 	} else {
+ 		c->force_children = true;
+ 	}
+ 
+-	if (parent_change != NULL) {
+-		DLIST_ADD_END(parent_change->children, c);
+-	} else {
+-		DLIST_ADD_END(descriptor_private->changes, c);
+-	}
++	DLIST_ADD_END(descriptor_private->changes, c);
+ 
+ 	return ldb_module_done(req, NULL, NULL, LDB_SUCCESS);
+ }
+@@ -1179,41 +1169,75 @@ static int descriptor_sd_propagation_msg_sort(struct ldb_message **m1,
+ 	return ldb_dn_compare(dn2, dn1);
+ }
+ 
+-static int descriptor_sd_propagation_dn_sort(struct ldb_dn *dn1,
+-					     struct ldb_dn *dn2)
+-{
+-	/*
+-	 * This sorts in tree order, parents first
+-	 */
+-	return ldb_dn_compare(dn2, dn1);
+-}
+-
+ static int descriptor_sd_propagation_recursive(struct ldb_module *module,
+ 					       struct descriptor_changes *change)
+ {
+-	struct ldb_context *ldb = ldb_module_get_ctx(module);
++	struct ldb_result *guid_res = NULL;
+ 	struct ldb_result *res = NULL;
+ 	unsigned int i;
+ 	const char * const no_attrs[] = { "@__NONE__", NULL };
+-	struct descriptor_changes *c;
+-	struct descriptor_changes *stopped_stack = NULL;
+-	enum ldb_scope scope;
++	struct ldb_dn *stopped_dn = NULL;
++	struct GUID_txt_buf guid_buf;
+ 	int ret;
++	bool stop = false;
+ 
+ 	/*
+-	 * First confirm this object has children, or exists (depending on change->force_self)
++	 * First confirm this object has children, or exists
++	 * (depending on change->force_self)
+ 	 * 
+ 	 * LDB_SCOPE_SUBTREE searches are expensive.
+ 	 *
+-	 * Note: that we do not search for deleted/recycled objects
+-	 *
+ 	 * We know this is safe against a rename race as we are in the
+ 	 * prepare_commit(), so must be in a transaction.
+ 	 */
++
++	/* Find the DN by GUID, as this is stable under rename */
++	ret = dsdb_module_search(module,
++				 change,
++				 &guid_res,
++				 change->nc_root,
++				 LDB_SCOPE_SUBTREE,
++				 no_attrs,
++				 DSDB_FLAG_NEXT_MODULE |
++				 DSDB_FLAG_AS_SYSTEM |
++				 DSDB_SEARCH_SHOW_DELETED |
++				 DSDB_SEARCH_SHOW_RECYCLED,
++				 NULL, /* parent_req */
++				 "(objectGUID=%s)",
++				 GUID_buf_string(&change->guid,
++						 &guid_buf));
++
++	if (ret != LDB_SUCCESS) {
++		return ret;
++	}
++
++	if (guid_res->count != 1) {
++		/*
++		 * We were just given this GUID during the same
++		 * transaction, if it is missing this is a big
++		 * problem.
++		 *
++		 * Cleanup of tombstones does not trigger this module
++		 * as it just does a delete.
++		 */
++		ldb_asprintf_errstring(ldb_module_get_ctx(module),
++				       "failed to find GUID %s under %s "
++				       "for transaction-end SD inheritance: %d results",
++				       GUID_buf_string(&change->guid,
++						       &guid_buf),
++				       ldb_dn_get_linearized(change->nc_root),
++				       guid_res->count);
++		return LDB_ERR_OPERATIONS_ERROR;
++	}
++
++	/*
++	 * OK, so there was a parent, are there children?  Note: that
++	 * this time we do not search for deleted/recycled objects
++	 */
+ 	ret = dsdb_module_search(module,
+ 				 change,
+ 				 &res,
+-				 change->dn,
++				 guid_res->msgs[0]->dn,
+ 				 LDB_SCOPE_ONELEVEL,
+ 				 no_attrs,
+ 				 DSDB_FLAG_NEXT_MODULE |
+@@ -1221,26 +1245,55 @@ static int descriptor_sd_propagation_recursive(struct ldb_module *module,
+ 				 NULL, /* parent_req */
+ 				 "(objectClass=*)");
+ 	if (ret != LDB_SUCCESS) {
++		/*
++		 * LDB_ERR_NO_SUCH_OBJECT, say if the DN was a deleted
++		 * object, is ignored by the caller
++		 */
+ 		return ret;
+ 	}
+ 
+ 	if (res->count == 0 && !change->force_self) {
++		/* All done, no children */
+ 		TALLOC_FREE(res);
+ 		return LDB_SUCCESS;
+-	} else if (res->count == 0 && change->force_self) {
+-		scope = LDB_SCOPE_BASE;
+-	} else {
+-		scope = LDB_SCOPE_SUBTREE;
+ 	}
+ 
+ 	/*
++	 * First, if we are in force_self mode (eg renamed under new
++	 * parent) then apply the SD to the top object
++	 */
++	if (change->force_self) {
++		ret = descriptor_sd_propagation_object(module,
++						       guid_res->msgs[0],
++						       &stop);
++		if (ret != LDB_SUCCESS) {
++			TALLOC_FREE(guid_res);
++			return ret;
++		}
++
++		if (stop == true && !change->force_children) {
++			/* There was no change, nothing more to do */
++			TALLOC_FREE(guid_res);
++			return LDB_SUCCESS;
++		}
++
++		if (res->count == 0) {
++			/* All done! */
++			TALLOC_FREE(guid_res);
++			return LDB_SUCCESS;
++		}
++	}
++
++	/*
++	 * Look for children
++	 *
+ 	 * Note: that we do not search for deleted/recycled objects
+ 	 */
+ 	ret = dsdb_module_search(module,
+ 				 change,
+ 				 &res,
+-				 change->dn,
+-				 scope,
++				 guid_res->msgs[0]->dn,
++				 LDB_SCOPE_SUBTREE,
+ 				 no_attrs,
+ 				 DSDB_FLAG_NEXT_MODULE |
+ 				 DSDB_FLAG_AS_SYSTEM,
+@@ -1253,90 +1306,39 @@ static int descriptor_sd_propagation_recursive(struct ldb_module *module,
+ 	TYPESAFE_QSORT(res->msgs, res->count,
+ 		       descriptor_sd_propagation_msg_sort);
+ 
+-	for (c = change->children; c; c = c->next) {
+-		struct ldb_message *msg = NULL;
+-
+-		BINARY_ARRAY_SEARCH_P(res->msgs, res->count, dn, c->dn,
+-				      descriptor_sd_propagation_dn_sort,
+-				      msg);
+-
+-		if (msg == NULL) {
+-			ldb_debug(ldb, LDB_DEBUG_WARNING,
+-				"descriptor_sd_propagation_recursive: "
+-				"%s not found under %s",
+-				ldb_dn_get_linearized(c->dn),
+-				ldb_dn_get_linearized(change->dn));
+-			continue;
+-		}
+-
+-		msg->elements = (struct ldb_message_element *)c;
+-	}
+-
+-	DLIST_ADD(stopped_stack, change);
+-
+-	if (change->force_self) {
+-		i = 0;
+-	} else {
+-		i = 1;
+-	}
+-
+-	for (; i < res->count; i++) {
+-		struct descriptor_changes *cur;
+-		bool stop = false;
+-
+-		cur = talloc_get_type(res->msgs[i]->elements,
+-				      struct descriptor_changes);
+-		res->msgs[i]->elements = NULL;
+-		res->msgs[i]->num_elements = 0;
+-
+-		if (cur != NULL) {
+-			DLIST_REMOVE(change->children, cur);
+-		} else if (i == 0) {
++	/* We start from 1, the top object has been done */
++	for (i = 1; i < res->count; i++) {
++		/*
++		 * ldb_dn_compare_base() does not match for NULL but
++		 * this is clearer
++		 */
++		if (stopped_dn != NULL) {
++			ret = ldb_dn_compare_base(stopped_dn,
++						  res->msgs[i]->dn);
+ 			/*
+-			 * in the change->force_self case
+-			 * res->msgs[0]->elements was not overwritten,
+-			 * so set cur here
++			 * Skip further processing of this
++			 * sub-subtree
+ 			 */
+-			cur = change;
+-		}
+-
+-		for (c = stopped_stack; c; c = stopped_stack) {
+-			ret = ldb_dn_compare_base(c->dn,
+-						  res->msgs[i]->dn);
+-			if (ret == 0) {
+-				break;
+-			}
+-
+-			c->stopped_dn = NULL;
+-			DLIST_REMOVE(stopped_stack, c);
+-		}
+-
+-		if (cur != NULL) {
+-			DLIST_ADD(stopped_stack, cur);
+-		}
+-
+-		if (stopped_stack->stopped_dn != NULL) {
+-			ret = ldb_dn_compare_base(stopped_stack->stopped_dn,
+-						  res->msgs[i]->dn);
+ 			if (ret == 0) {
+ 				continue;
+ 			}
+-			stopped_stack->stopped_dn = NULL;
+ 		}
+-
+-		ret = descriptor_sd_propagation_object(module, res->msgs[i],
++		ret = descriptor_sd_propagation_object(module,
++						       res->msgs[i],
+ 						       &stop);
+ 		if (ret != LDB_SUCCESS) {
+ 			return ret;
+ 		}
+ 
+-		if (cur != NULL && cur->force_children) {
+-			continue;
+-		}
+-
+ 		if (stop) {
+-			stopped_stack->stopped_dn = res->msgs[i]->dn;
+-			continue;
++			/*
++			 * If this child didn't change, then nothing
++			 * under it needs to change
++			 *
++			 * res has been sorted into tree order so the
++			 * next few entries can be skipped
++			 */
++			stopped_dn = res->msgs[i]->dn;
+ 		}
+ 	}
+ 
+diff --git a/source4/dsdb/samdb/ldb_modules/repl_meta_data.c b/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
+index e67c3b0281e..a2a6bcc98f3 100644
+--- a/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
++++ b/source4/dsdb/samdb/ldb_modules/repl_meta_data.c
+@@ -5538,7 +5538,8 @@ static int replmd_replicated_apply_add(struct replmd_replicated_request *ar)
+ 		 */
+ 		ret = dsdb_module_schedule_sd_propagation(ar->module,
+ 							  ar->objs->partition_dn,
+-							  msg->dn, true);
++							  ar->objs->objects[ar->index_current].object_guid,
++							  true);
+ 		if (ret != LDB_SUCCESS) {
+ 			return replmd_replicated_request_error(ar, ret);
+ 		}
+@@ -6323,7 +6324,7 @@ static int replmd_replicated_apply_merge(struct replmd_replicated_request *ar)
+ 		 */
+ 		ret = dsdb_module_schedule_sd_propagation(ar->module,
+ 							  ar->objs->partition_dn,
+-							  msg->dn,
++							  ar->objs->objects[ar->index_current].object_guid,
+ 							  true);
+ 		if (ret != LDB_SUCCESS) {
+ 			return ldb_operr(ldb);
+@@ -6343,7 +6344,7 @@ static int replmd_replicated_apply_merge(struct replmd_replicated_request *ar)
+ 		 */
+ 		ret = dsdb_module_schedule_sd_propagation(ar->module,
+ 							  ar->objs->partition_dn,
+-							  msg->dn,
++							  ar->objs->objects[ar->index_current].object_guid,
+ 							  false);
+ 		if (ret != LDB_SUCCESS) {
+ 			return ldb_operr(ldb);
+diff --git a/source4/dsdb/samdb/samdb.h b/source4/dsdb/samdb/samdb.h
+index e1b0e4aa4e3..3f47b863a83 100644
+--- a/source4/dsdb/samdb/samdb.h
++++ b/source4/dsdb/samdb/samdb.h
+@@ -338,7 +338,7 @@ struct dsdb_extended_allocate_rid {
+ #define DSDB_EXTENDED_SEC_DESC_PROPAGATION_OID "1.3.6.1.4.1.7165.4.4.7"
+ struct dsdb_extended_sec_desc_propagation_op {
+ 	struct ldb_dn *nc_root;
+-	struct ldb_dn *dn;
++	struct GUID guid;
+ 	bool include_self;
+ };
+ 
+-- 
+2.17.1
+
+
+From 030fa9e5455125e30b71c90be80baadb657d8993 Mon Sep 17 00:00:00 2001
+From: Noel Power <noel.power@suse.com>
+Date: Fri, 24 May 2019 13:37:00 +0000
+Subject: [PATCH 11/13] CVE-2019-14907 lib/util/charset: clang: Fix Value
+ stored to 'reason' is never read warning
+
+Fixes:
+
+lib/util/charset/convert_string.c:301:5: warning: Value stored to 'reason' is never read <--[clang]
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14208
+
+Signed-off-by: Noel Power <noel.power@suse.com>
+Reviewed-by: Gary Lockyer gary@catalyst.net.nz
+(cherry picked from commit add47e288bc80c1bf45765d1588a9fa5998ea677)
+---
+ lib/util/charset/convert_string.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/lib/util/charset/convert_string.c b/lib/util/charset/convert_string.c
+index 196302aacfd..34facab6fe6 100644
+--- a/lib/util/charset/convert_string.c
++++ b/lib/util/charset/convert_string.c
+@@ -300,13 +300,13 @@ bool convert_string_handle(struct smb_iconv_handle *ic,
+ 			{
+ 				reason="No more room";
+ 				if (from == CH_UNIX) {
+-					DEBUG(3,("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u - '%s'\n",
++					DEBUG(3,("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u - '%s' error: %s\n",
+ 						 charset_name(ic, from), charset_name(ic, to),
+-						 (unsigned int)srclen, (unsigned int)destlen, (const char *)src));
++						 (unsigned int)srclen, (unsigned int)destlen, (const char *)src, reason));
+ 				} else {
+-					DEBUG(3,("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u\n",
++					DEBUG(3,("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u error: %s\n",
+ 						 charset_name(ic, from), charset_name(ic, to),
+-						 (unsigned int)srclen, (unsigned int)destlen));
++						 (unsigned int)srclen, (unsigned int)destlen, reason));
+ 				}
+ 				break;
+ 			}
+-- 
+2.17.1
+
+
+From ad0e68d354ad33c577dbf146fc4a1b8254857558 Mon Sep 17 00:00:00 2001
+From: Andrew Bartlett <abartlet@samba.org>
+Date: Fri, 29 Nov 2019 20:58:47 +1300
+Subject: [PATCH 12/13] CVE-2019-14907 lib/util: Do not print the failed to
+ convert string into the logs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The string may be in another charset, or may be sensitive and
+certainly may not be terminated.  It is not safe to just print.
+
+Found by Robert Święcki using a fuzzer he wrote for smbd.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=14208
+Signed-off-by: Andrew Bartlett <abartlet@samba.org>
+
+(adapted from master commit)
+---
+ lib/util/charset/convert_string.c | 33 +++++++++++++++++--------------
+ 1 file changed, 18 insertions(+), 15 deletions(-)
+
+diff --git a/lib/util/charset/convert_string.c b/lib/util/charset/convert_string.c
+index 34facab6fe6..b546e056953 100644
+--- a/lib/util/charset/convert_string.c
++++ b/lib/util/charset/convert_string.c
+@@ -293,31 +293,31 @@ bool convert_string_handle(struct smb_iconv_handle *ic,
+ 		switch(errno) {
+ 			case EINVAL:
+ 				reason="Incomplete multibyte sequence";
+-				DEBUG(3,("convert_string_internal: Conversion error: %s(%s)\n",
+-					 reason, (const char *)src));
++				DBG_NOTICE("Conversion error: %s\n",
++					 reason);
+ 				break;
+ 			case E2BIG:
+ 			{
+ 				reason="No more room";
+ 				if (from == CH_UNIX) {
+-					DEBUG(3,("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u - '%s' error: %s\n",
+-						 charset_name(ic, from), charset_name(ic, to),
+-						 (unsigned int)srclen, (unsigned int)destlen, (const char *)src, reason));
++					DBG_NOTICE("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u error: %s\n",
++						   charset_name(ic, from), charset_name(ic, to),
++						   (unsigned int)srclen, (unsigned int)destlen, reason);
+ 				} else {
+-					DEBUG(3,("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u error: %s\n",
+-						 charset_name(ic, from), charset_name(ic, to),
+-						 (unsigned int)srclen, (unsigned int)destlen, reason));
++					DBG_NOTICE("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u error: %s\n",
++						   charset_name(ic, from), charset_name(ic, to),
++						   (unsigned int)srclen, (unsigned int)destlen, reason);
+ 				}
+ 				break;
+ 			}
+ 			case EILSEQ:
+ 				reason="Illegal multibyte sequence";
+-				DEBUG(3,("convert_string_internal: Conversion error: %s(%s)\n",
+-					 reason, (const char *)src));
++				DBG_NOTICE("convert_string_internal: Conversion error: %s\n",
++					   reason);
+ 				break;
+ 			default:
+-				DEBUG(0,("convert_string_internal: Conversion error: %s(%s)\n",
+-					 reason, (const char *)src));
++				DBG_ERR("convert_string_internal: Conversion error: %s\n",
++					reason);
+ 				break;
+ 		}
+ 		/* smb_panic(reason); */
+@@ -427,16 +427,19 @@ bool convert_string_talloc_handle(TALLOC_CTX *ctx, struct smb_iconv_handle *ic,
+ 		switch(errno) {
+ 			case EINVAL:
+ 				reason="Incomplete multibyte sequence";
+-				DEBUG(3,("convert_string_talloc: Conversion error: %s(%s)\n",reason,inbuf));
++				DBG_NOTICE("Conversion error: %s\n",
++					   reason);
+ 				break;
+ 			case E2BIG:
+ 				goto convert;
+ 			case EILSEQ:
+ 				reason="Illegal multibyte sequence";
+-				DEBUG(3,("convert_string_talloc: Conversion error: %s(%s)\n",reason,inbuf));
++				DBG_NOTICE("Conversion error: %s\n",
++					   reason);
+ 				break;
+ 			default:
+-				DEBUG(0,("Conversion error: %s(%s)\n",reason,inbuf));
++				DBG_ERR("Conversion error: %s\n",
++					reason);
+ 				break;
+ 		}
+ 		/* smb_panic(reason); */
+-- 
+2.17.1
+
+
