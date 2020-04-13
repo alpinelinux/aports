@@ -1,0 +1,137 @@
+From 3e1946536974b778e71cda1790fa6fdf7c3708fe Mon Sep 17 00:00:00 2001
+From: Martin Kinkelin <noone@nowhere.com>
+Date: Fri, 21 Feb 2020 00:13:13 +0100
+Subject: [PATCH 1/2] Fix tail calls in thunks by applying the callee function
+ attributes to the call instruction
+
+This apparently isn't required for x86, but makes all the difference for
+AArch64 and fixes #3329.
+---
+ ir/irclass.cpp                    | 14 ++++++-----
+ tests/codegen/sret_thunk_gh3329.d | 42 +++++++++++++++++++++++++++++++
+ 2 files changed, 50 insertions(+), 6 deletions(-)
+ create mode 100644 tests/codegen/sret_thunk_gh3329.d
+
+diff --git a/ir/irclass.cpp b/ir/irclass.cpp
+index ac3ca1aa87..4a683ac861 100644
+--- a/ir/irclass.cpp
++++ b/ir/irclass.cpp
+@@ -203,7 +203,8 @@ LLConstant *IrAggr::getVtblInit() {
+         Logger::println("Running late functionSemantic to infer return type.");
+         if (!fd->functionSemantic()) {
+           if (fd->semantic3Errors) {
+-            Logger::println("functionSemantic failed; using null for vtbl entry.");
++            Logger::println(
++                "functionSemantic failed; using null for vtbl entry.");
+             constants.push_back(getNullValue(voidPtrType));
+             continue;
+           }
+@@ -301,8 +302,8 @@ llvm::GlobalVariable *IrAggr::getInterfaceVtblSymbol(BaseClass *b,
+ 
+   const auto irMangle = getIRMangledVarName(mangledName.peekChars(), LINKd);
+ 
+-  LLGlobalVariable *gvar =
+-      declareGlobal(cd->loc, gIR->module, vtblType, irMangle, /*isConstant=*/true);
++  LLGlobalVariable *gvar = declareGlobal(cd->loc, gIR->module, vtblType,
++                                         irMangle, /*isConstant=*/true);
+ 
+   // insert into the vtbl map
+   interfaceVtblMap.insert({{b->sym, interfaces_index}, gvar});
+@@ -462,9 +463,10 @@ void IrAggr::defineInterfaceVtbl(BaseClass *b, bool new_instance,
+ 
+       // call the real vtbl function.
+       llvm::CallInst *call = gIR->ir->CreateCall(callee, args);
+-      call->setCallingConv(irFunc->getCallingConv());
+-      call->setTailCallKind(thunk->isVarArg() ? llvm::CallInst::TCK_MustTail
+-                                              : llvm::CallInst::TCK_Tail);
++      call->setCallingConv(callee->getCallingConv());
++      call->setAttributes(callee->getAttributes());
++      call->setTailCallKind(callee->isVarArg() ? llvm::CallInst::TCK_MustTail
++                                               : llvm::CallInst::TCK_Tail);
+ 
+       // return from the thunk
+       if (thunk->getReturnType() == LLType::getVoidTy(gIR->context())) {
+diff --git a/tests/codegen/sret_thunk_gh3329.d b/tests/codegen/sret_thunk_gh3329.d
+new file mode 100644
+index 0000000000..7f2d7c62fe
+--- /dev/null
++++ b/tests/codegen/sret_thunk_gh3329.d
+@@ -0,0 +1,42 @@
++// RUN: %ldc -run %s
++
++extern(C) int printf(const(char)* format, ...);
++
++struct NoPOD
++{
++    size_t x;
++    ~this() {}
++}
++
++interface I
++{
++    NoPOD doIt(size_t arg);
++}
++
++__gshared C c;
++
++class C : I
++{
++    this()
++    {
++        c = this;
++        printf("c: %p\n", c);
++    }
++
++    NoPOD doIt(size_t arg)
++    {
++        printf("doIt this: %p; arg: %p\n", this, arg);
++        assert(this == c);
++        assert(arg == 0x2A);
++        return NoPOD(arg << 4);
++    }
++}
++
++void main()
++{
++    I i = new C;
++    printf("i: %p\n", i);
++    NoPOD r = i.doIt(0x2A);
++    printf("&r: %p\n", &r);
++    assert(r.x == 0x2A0);
++}
+
+From 803941307b1da278b63df1d5c2050b5ef6e153ac Mon Sep 17 00:00:00 2001
+From: Martin Kinkelin <noone@nowhere.com>
+Date: Fri, 21 Feb 2020 00:59:53 +0100
+Subject: [PATCH 2/2] Shippable CI: Remove workarounds for previously broken
+ debug libs
+
+---
+ shippable.yml | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/shippable.yml b/shippable.yml
+index 00aea59a7e..35cb54c9cd 100644
+--- a/shippable.yml
++++ b/shippable.yml
+@@ -83,14 +83,14 @@ build:
+     # Run LDC D unittests
+     - ctest --output-on-failure -R "ldc2-unittest"
+     # Run LIT testsuite, ignore the errors
+-    - PATH=$PWD/../llvm/bin:$PATH ctest -V -R "lit-tests" || true
++    - cd tests
++    - PATH="$PWD/../../llvm/bin:$PATH" python runlit.py -v -j 32 . || true
++    - cd ..
+     # Run DMD testsuite, ignore the errors
+-    # FIXME: the debug libs seem not really usable, most runnable tests crash
+-    - sed -i 's|REQUIRED_ARGS=-g -link-defaultlib-debug|REQUIRED_ARGS=-g|g' tests/d2/CTestTestfile.cmake
+-    - DMD_TESTSUITE_MAKE_ARGS='-j16 GDB_FLAGS=OFF' ctest -V -R "dmd-testsuite" || true
+-    # Run defaultlib unittests (non-debug only for now, excl. hanging core.thread.fiber)
++    - DMD_TESTSUITE_MAKE_ARGS='-j32 GDB_FLAGS=OFF' ctest -V -R "dmd-testsuite" || true
++    # Run defaultlib unittests (excl. hanging core.thread.fiber)
+     # & druntime stand-alone tests, ignore the errors
+-    - ctest -j16 --output-on-failure -E "dmd-testsuite|lit-tests|ldc2-unittest|-debug(-shared)?$|^core.thread.fiber($|-)" || true
++    - ctest -j32 --output-on-failure -E "dmd-testsuite|lit-tests|ldc2-unittest|^core.thread.fiber($|-)" || true
+     # Install LDC & make portable
+     - ninja install > /dev/null
+     - cd ..
