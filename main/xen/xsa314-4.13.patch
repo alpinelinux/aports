@@ -1,0 +1,121 @@
+From ab49f005f7d01d4004d76f2e295d31aca7d4f93a Mon Sep 17 00:00:00 2001
+From: Julien Grall <jgrall@amazon.com>
+Date: Thu, 20 Feb 2020 20:54:40 +0000
+Subject: [PATCH] xen/rwlock: Add missing memory barrier in the unlock path of
+ rwlock
+
+The rwlock unlock paths are using atomic_sub() to release the lock.
+However the implementation of atomic_sub() rightfully doesn't contain a
+memory barrier. On Arm, this means a processor is allowed to re-order
+the memory access with the preceeding access.
+
+In other words, the unlock may be seen by another processor before all
+the memory accesses within the "critical" section.
+
+The rwlock paths already contains barrier indirectly, but they are not
+very useful without the counterpart in the unlock paths.
+
+The memory barriers are not necessary on x86 because loads/stores are
+not re-ordered with lock instructions.
+
+So add arch_lock_release_barrier() in the unlock paths that will only
+add memory barrier on Arm.
+
+Take the opportunity to document each lock paths explaining why a
+barrier is not necessary.
+
+This is XSA-314.
+
+Signed-off-by: Julien Grall <jgrall@amazon.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Stefano Stabellini <sstabellini@kernel.org>
+
+---
+ xen/include/xen/rwlock.h | 29 ++++++++++++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/xen/include/xen/rwlock.h b/xen/include/xen/rwlock.h
+index 3dfea1ac2a..516486306f 100644
+--- a/xen/include/xen/rwlock.h
++++ b/xen/include/xen/rwlock.h
+@@ -48,6 +48,10 @@ static inline int _read_trylock(rwlock_t *lock)
+     if ( likely(!(cnts & _QW_WMASK)) )
+     {
+         cnts = (u32)atomic_add_return(_QR_BIAS, &lock->cnts);
++        /*
++         * atomic_add_return() is a full barrier so no need for an
++         * arch_lock_acquire_barrier().
++         */
+         if ( likely(!(cnts & _QW_WMASK)) )
+             return 1;
+         atomic_sub(_QR_BIAS, &lock->cnts);
+@@ -64,11 +68,19 @@ static inline void _read_lock(rwlock_t *lock)
+     u32 cnts;
+ 
+     cnts = atomic_add_return(_QR_BIAS, &lock->cnts);
++    /*
++     * atomic_add_return() is a full barrier so no need for an
++     * arch_lock_acquire_barrier().
++     */
+     if ( likely(!(cnts & _QW_WMASK)) )
+         return;
+ 
+     /* The slowpath will decrement the reader count, if necessary. */
+     queue_read_lock_slowpath(lock);
++    /*
++     * queue_read_lock_slowpath() is using spinlock and therefore is a
++     * full barrier. So no need for an arch_lock_acquire_barrier().
++     */
+ }
+ 
+ static inline void _read_lock_irq(rwlock_t *lock)
+@@ -92,6 +104,7 @@ static inline unsigned long _read_lock_irqsave(rwlock_t *lock)
+  */
+ static inline void _read_unlock(rwlock_t *lock)
+ {
++    arch_lock_release_barrier();
+     /*
+      * Atomically decrement the reader count
+      */
+@@ -121,11 +134,20 @@ static inline int _rw_is_locked(rwlock_t *lock)
+  */
+ static inline void _write_lock(rwlock_t *lock)
+ {
+-    /* Optimize for the unfair lock case where the fair flag is 0. */
++    /*
++     * Optimize for the unfair lock case where the fair flag is 0.
++     *
++     * atomic_cmpxchg() is a full barrier so no need for an
++     * arch_lock_acquire_barrier().
++     */
+     if ( atomic_cmpxchg(&lock->cnts, 0, _QW_LOCKED) == 0 )
+         return;
+ 
+     queue_write_lock_slowpath(lock);
++    /*
++     * queue_write_lock_slowpath() is using spinlock and therefore is a
++     * full barrier. So no need for an arch_lock_acquire_barrier().
++     */
+ }
+ 
+ static inline void _write_lock_irq(rwlock_t *lock)
+@@ -157,11 +179,16 @@ static inline int _write_trylock(rwlock_t *lock)
+     if ( unlikely(cnts) )
+         return 0;
+ 
++    /*
++     * atomic_cmpxchg() is a full barrier so no need for an
++     * arch_lock_acquire_barrier().
++     */
+     return likely(atomic_cmpxchg(&lock->cnts, 0, _QW_LOCKED) == 0);
+ }
+ 
+ static inline void _write_unlock(rwlock_t *lock)
+ {
++    arch_lock_release_barrier();
+     /*
+      * If the writer field is atomic, it can be cleared directly.
+      * Otherwise, an atomic subtraction will be used to clear it.
+-- 
+2.17.1
+
