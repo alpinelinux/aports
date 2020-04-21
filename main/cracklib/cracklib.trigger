@@ -1,3 +1,3 @@
 #!/bin/sh
 
-create-cracklib-dict /usr/share/cracklib/*
+create-cracklib-dict /usr/share/cracklib/*.gz
