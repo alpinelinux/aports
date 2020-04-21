@@ -1,0 +1,211 @@
+From e99809f29da1002e8b9246e9278084ad231174e5 Mon Sep 17 00:00:00 2001
+From: Victor Zverovich <viz@fb.com>
+Date: Sun, 12 Apr 2020 07:38:54 -0700
+Subject: [PATCH] Fix ostream support in sprintf (#1631)
+
+---
+ include/fmt/core.h    | 12 +++++++-----
+ include/fmt/ostream.h | 33 ++++++++++++++++++++++++++++-----
+ include/fmt/printf.h  |  9 +++++++--
+ test/core-test.cc     |  3 ++-
+ test/format-test.cc   |  5 +++--
+ test/printf-test.cc   |  4 +---
+ 6 files changed, 48 insertions(+), 18 deletions(-)
+
+diff --git a/include/fmt/core.h b/include/fmt/core.h
+index cab3dfe0b..1a75100ad 100644
+--- a/include/fmt/core.h
++++ b/include/fmt/core.h
+@@ -827,7 +827,8 @@ template <typename Char> struct string_value {
+ template <typename Context> struct custom_value {
+   using parse_context = basic_format_parse_context<typename Context::char_type>;
+   const void* value;
+-  void (*format)(const void* arg, parse_context& parse_ctx, Context& ctx);
++  void (*format)(const void* arg,
++                 typename Context::parse_context_type& parse_ctx, Context& ctx);
+ };
+ 
+ // A formatting argument value.
+@@ -887,9 +888,9 @@ template <typename Context> class value {
+  private:
+   // Formats an argument of a custom type, such as a user-defined class.
+   template <typename T, typename Formatter>
+-  static void format_custom_arg(
+-      const void* arg, basic_format_parse_context<char_type>& parse_ctx,
+-      Context& ctx) {
++  static void format_custom_arg(const void* arg,
++                                typename Context::parse_context_type& parse_ctx,
++                                Context& ctx) {
+     Formatter f;
+     parse_ctx.advance_to(f.parse(parse_ctx));
+     ctx.advance_to(f.format(*static_cast<const T*>(arg), ctx));
+@@ -1066,7 +1067,7 @@ template <typename Context> class basic_format_arg {
+    public:
+     explicit handle(internal::custom_value<Context> custom) : custom_(custom) {}
+ 
+-    void format(basic_format_parse_context<char_type>& parse_ctx,
++    void format(typename Context::parse_context_type& parse_ctx,
+                 Context& ctx) const {
+       custom_.format(custom_.value, parse_ctx, ctx);
+     }
+@@ -1277,6 +1278,7 @@ template <typename OutputIt, typename Char> class basic_format_context {
+  public:
+   using iterator = OutputIt;
+   using format_arg = basic_format_arg<basic_format_context>;
++  using parse_context_type = basic_format_parse_context<Char>;
+   template <typename T> using formatter_type = formatter<T, char_type>;
+ 
+   basic_format_context(const basic_format_context&) = delete;
+diff --git a/include/fmt/ostream.h b/include/fmt/ostream.h
+index c4831533d..4526f5238 100644
+--- a/include/fmt/ostream.h
++++ b/include/fmt/ostream.h
+@@ -9,9 +9,14 @@
+ #define FMT_OSTREAM_H_
+ 
+ #include <ostream>
++
+ #include "format.h"
+ 
+ FMT_BEGIN_NAMESPACE
++
++template <typename CHar> class basic_printf_parse_context;
++template <typename OutputIt, typename Char> class basic_printf_context;
++
+ namespace internal {
+ 
+ template <class Char> class formatbuf : public std::basic_streambuf<Char> {
+@@ -93,9 +98,9 @@ void format_value(buffer<Char>& buf, const T& value,
+                   locale_ref loc = locale_ref()) {
+   formatbuf<Char> format_buf(buf);
+   std::basic_ostream<Char> output(&format_buf);
+-  #if !defined(FMT_STATIC_THOUSANDS_SEPARATOR)
++#if !defined(FMT_STATIC_THOUSANDS_SEPARATOR)
+   if (loc) output.imbue(loc.get<std::locale>());
+-  #endif
++#endif
+   output.exceptions(std::ios_base::failbit | std::ios_base::badbit);
+   output << value;
+   buf.resize(buf.size());
+@@ -104,14 +109,32 @@ void format_value(buffer<Char>& buf, const T& value,
+ // Formats an object of type T that has an overloaded ostream operator<<.
+ template <typename T, typename Char>
+ struct fallback_formatter<T, Char, enable_if_t<is_streamable<T, Char>::value>>
+-    : formatter<basic_string_view<Char>, Char> {
+-  template <typename Context>
+-  auto format(const T& value, Context& ctx) -> decltype(ctx.out()) {
++    : private formatter<basic_string_view<Char>, Char> {
++  auto parse(basic_format_parse_context<Char>& ctx) -> decltype(ctx.begin()) {
++    return formatter<basic_string_view<Char>, Char>::parse(ctx);
++  }
++  template <typename ParseCtx,
++            FMT_ENABLE_IF(std::is_same<
++                          ParseCtx, basic_printf_parse_context<Char>>::value)>
++  auto parse(ParseCtx& ctx) -> decltype(ctx.begin()) {
++    return ctx.begin();
++  }
++
++  template <typename OutputIt>
++  auto format(const T& value, basic_format_context<OutputIt, Char>& ctx)
++      -> OutputIt {
+     basic_memory_buffer<Char> buffer;
+     format_value(buffer, value, ctx.locale());
+     basic_string_view<Char> str(buffer.data(), buffer.size());
+     return formatter<basic_string_view<Char>, Char>::format(str, ctx);
+   }
++  template <typename OutputIt>
++  auto format(const T& value, basic_printf_context<OutputIt, Char>& ctx)
++      -> OutputIt {
++    basic_memory_buffer<Char> buffer;
++    format_value(buffer, value, ctx.locale());
++    return std::copy(buffer.begin(), buffer.end(), ctx.out());
++  }
+ };
+ }  // namespace internal
+ 
+diff --git a/include/fmt/printf.h b/include/fmt/printf.h
+index bfbaa0479..9c7b85ac5 100644
+--- a/include/fmt/printf.h
++++ b/include/fmt/printf.h
+@@ -189,6 +189,10 @@ using internal::vprintf;
+ 
+ template <typename Range> class printf_arg_formatter;
+ 
++template <typename Char>
++class basic_printf_parse_context : public basic_format_parse_context<Char> {
++  using basic_format_parse_context<Char>::basic_format_parse_context;
++};
+ template <typename OutputIt, typename Char> class basic_printf_context;
+ 
+ /**
+@@ -324,6 +328,7 @@ template <typename OutputIt, typename Char> class basic_printf_context {
+   using char_type = Char;
+   using iterator = OutputIt;
+   using format_arg = basic_format_arg<basic_printf_context>;
++  using parse_context_type = basic_printf_parse_context<Char>;
+   template <typename T> using formatter_type = printf_formatter<T>;
+ 
+  private:
+@@ -331,7 +336,7 @@ template <typename OutputIt, typename Char> class basic_printf_context {
+ 
+   OutputIt out_;
+   basic_format_args<basic_printf_context> args_;
+-  basic_format_parse_context<Char> parse_ctx_;
++  parse_context_type parse_ctx_;
+ 
+   static void parse_flags(format_specs& specs, const Char*& it,
+                           const Char* end);
+@@ -362,7 +367,7 @@ template <typename OutputIt, typename Char> class basic_printf_context {
+ 
+   format_arg arg(int id) const { return args_.get(id); }
+ 
+-  basic_format_parse_context<Char>& parse_context() { return parse_ctx_; }
++  parse_context_type& parse_context() { return parse_ctx_; }
+ 
+   FMT_CONSTEXPR void on_error(const char* message) {
+     parse_ctx_.on_error(message);
+diff --git a/test/core-test.cc b/test/core-test.cc
+index f19d0423b..735fcde26 100644
+--- a/test/core-test.cc
++++ b/test/core-test.cc
+@@ -210,7 +210,8 @@ TEST(ArgTest, FormatArgs) {
+ }
+ 
+ struct custom_context {
+-  typedef char char_type;
++  using char_type = char;
++  using parse_context_type = fmt::format_parse_context;
+ 
+   template <typename T> struct formatter_type {
+     template <typename ParseContext>
+diff --git a/test/format-test.cc b/test/format-test.cc
+index 6a873185c..e2bd98d27 100644
+--- a/test/format-test.cc
++++ b/test/format-test.cc
+@@ -2260,8 +2260,9 @@ struct test_parse_context {
+ };
+ 
+ struct test_context {
+-  typedef char char_type;
+-  typedef fmt::basic_format_arg<test_context> format_arg;
++  using char_type = char;
++  using format_arg = fmt::basic_format_arg<test_context>;
++  using parse_context_type = fmt::format_parse_context;
+ 
+   template <typename T> struct formatter_type {
+     typedef fmt::formatter<T, char_type> type;
+diff --git a/test/printf-test.cc b/test/printf-test.cc
+index 545e02aab..70b1238da 100644
+--- a/test/printf-test.cc
++++ b/test/printf-test.cc
+@@ -508,9 +508,7 @@ TEST(PrintfTest, PrintfError) {
+ TEST(PrintfTest, WideString) { EXPECT_EQ(L"abc", fmt::sprintf(L"%s", L"abc")); }
+ 
+ TEST(PrintfTest, PrintfCustom) {
+-  // The test is disabled for now because it requires decoupling
+-  // fallback_formatter::format from format_context.
+-  //EXPECT_EQ("abc", test_sprintf("%s", TestString("abc")));
++  EXPECT_EQ("abc", test_sprintf("%s", TestString("abc")));
+ }
+ 
+ TEST(PrintfTest, OStream) {
