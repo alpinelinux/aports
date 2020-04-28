@@ -12,7 +12,7 @@ profile_netboot() {
 	desc="Kernel, initramfs and modloop for
 		netboot.
 		"
-	arch="aarch64 armhf armv7 ppc64le x86 x86_64 s390x mips64"
+	arch="aarch64 armhf armv7 ppc64le x86 x86_64 s390x"
 	kernel_cmdline="nomodeset"
 	case "$ARCH" in
 		armhf) kernel_flavors= ;;
@@ -28,7 +28,6 @@ profile_netboot() {
 	s390x) initfs_features="$initfs_features dasd_mod qeth";;
 	aarch64) kernel_flavors="$kernel_flavors rpi";;
 	armhf|armv7) kernel_flavors="$kernel_flavors rpi rpi2";;
-	mips64) kernel_flavors="$kernel_flavors octeon";;
 	esac
 }
 
