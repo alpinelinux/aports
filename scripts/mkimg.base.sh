@@ -1,5 +1,5 @@
 build_kernel() {
-	local _flavor="$2" _modloopsign=
+	local _flavor="$2" _modloopsign= _add
 	shift 3
 	local _pkgs="$@"
 	[ "$modloop_sign" = "yes" ] && _modloopsign="--modloopsign"
@@ -15,6 +15,11 @@ build_kernel() {
 		--modloopfw "$modloopfw" \
 		--repositories-file "$APKROOT/etc/apk/repositories" \
 		"$DESTDIR"
+    if [ -n "$boot_addons" ]; then
+        for _add in $boot_addons; do
+           apk fetch --quiet --stdout $_add | tar -C "${DESTDIR}" -zx boot/
+        done
+    fi
 }
 
 section_kernels() {
@@ -95,15 +100,22 @@ syslinux_gen_config() {
 	echo "PROMPT ${syslinux_prompt:-1}"
 	echo "DEFAULT ${kernel_flavors%% *}"
 
-	local _f
+	local _f _p _initrd
 	for _f in $kernel_flavors; do
 		if [ -z "${xen_params+set}" ]; then
+			_initrd="/boot/initramfs-$_f"
+			if [ -n "$initrd_ucode" ]; then
+				for _p in $initrd_ucode; do
+					_initrd="$_p,$_initrd"
+				done
+			fi
+
 			cat <<- EOF
 
 			LABEL $_f
 				MENU LABEL Linux $_f
 				KERNEL /boot/vmlinuz-$_f
-				INITRD /boot/initramfs-$_f
+				INITRD $_initrd
 				FDTDIR /boot/dtbs-$_f
 				APPEND $initfs_cmdline $kernel_cmdline
 			EOF
@@ -120,15 +132,22 @@ syslinux_gen_config() {
 }
 
 grub_gen_config() {
-	local _f
+	local _f _p _initrd
 	echo "set timeout=2"
 	for _f in $kernel_flavors; do
 		if [ -z "${xen_params+set}" ]; then
+			_initrd="/boot/initramfs-$_f"
+			if [ -n "$initrd_ucode" ]; then
+				for _p in $initrd_ucode; do
+					_initrd="$_p $_initrd"
+				done
+			fi
+
 			cat <<- EOF
 
 			menuentry "Linux $_f" {
 				linux	/boot/vmlinuz-$_f $initfs_cmdline $kernel_cmdline
-				initrd	/boot/initramfs-$_f
+				initrd	$_initrd
 			}
 			EOF
 		else
