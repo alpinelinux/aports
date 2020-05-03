@@ -1,5 +1,7 @@
 #!/bin/sh
 
-exec /usr/lib/vlc/vlc-cache-gen "$@"  >&/dev/null
+if [ -f /usr/lib/vlc/vlc-cache-gen ]; then
+	exec /usr/lib/vlc/vlc-cache-gen "$@"  >&/dev/null
+fi
 exit 0
 
