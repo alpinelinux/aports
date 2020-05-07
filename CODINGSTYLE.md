@@ -56,6 +56,7 @@ Put `; do` and `; then` on the same line as the `while`, `for` or `if`.
 
 * Don't indent alternatives.
 * A one-line alternative needs a space after the close parenthesis of the pattern and before the `;;`.
+* End the last case with `;;`.
 
 ### Variable expansion
 
