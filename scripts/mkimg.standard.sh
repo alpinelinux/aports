@@ -49,7 +49,8 @@ profile_extended() {
 		wireless-tools wpa_supplicant zonenotify
 
 		btrfs-progs cksfv dosfstools cryptsetup
-		cciss_vol_status grub-bios grub-efi lvm2 mdadm mkinitfs mtools nfs-utils
+		cciss_vol_status efibootmgr
+		grub-bios grub-efi lvm2 mdadm mkinitfs mtools nfs-utils
 		parted rsync sfdisk syslinux unrar util-linux xfsprogs
 		zfs
 		"
