@@ -58,9 +58,9 @@ static inline int dx(int c)
 	return -1;
 }
 
-static int get_octal(char *s, size_t l)
+static size_t get_octal(char *s, size_t l)
 {
-	unsigned int val;
+	size_t val;
 	int ch;
 
 	val = 0;
