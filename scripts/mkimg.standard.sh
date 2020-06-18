@@ -8,7 +8,6 @@ profile_standard() {
 	image_ext="iso"
 	arch="aarch64 x86 x86_64 ppc64le s390x"
 	output_format="iso"
-	kernel_cmdline="nomodeset"
 	kernel_addons="xtables-addons"
 	case "$ARCH" in
 	s390x)
