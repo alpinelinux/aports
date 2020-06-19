@@ -1,3 +1,3 @@
 #!/bin/sh
 
-desktop-file-update -q
+update-desktop-database -q
