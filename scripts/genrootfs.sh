@@ -51,8 +51,8 @@ case $VERSION_ID in
 esac
 
 cat > "$tmp"/etc/apk/repositories <<EOF
-https://alpine.global.ssl.fastly.net/alpine/$branch/main
-https://alpine.global.ssl.fastly.net/alpine/$branch/community
+https://dl-cdn.alpinelinux.org/alpine/$branch/main
+https://dl-cdn.alpinelinux.org/alpine/$branch/community
 EOF
 
 tar --numeric-owner --exclude='dev/*' -c -C "$tmp" . | gzip -9n > "$outfile"
