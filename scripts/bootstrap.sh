@@ -99,8 +99,8 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   openssl ca-certificates libbsd libtls-standalone busybox busybox-initscripts binutils make \
 	   apk-tools file \
 	   gmp mpfr4 mpc1 isl cloog gcc \
-	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base build-base \
-	   attr libcap patch sudo acl fakeroot tar \
+	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
+	   attr libcap sudo acl fakeroot tar \
 	   pax-utils lzip abuild ncurses libedit openssh \
 	   libcap-ng util-linux libaio lvm2 popt xz \
 	   json-c argon2 cryptsetup kmod lddtree mkinitfs \
