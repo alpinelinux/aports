@@ -26,9 +26,24 @@ from cloudinit.settings import PER_INSTANCE
 LOG = logging.getLogger(__name__)
 
 
+NETWORK_FILE_HEADER = """\
+# This file is generated from information provided by the datasource.  Changes
+# to it will not persist across an instance reboot.  To disable cloud-init's
+# network configuration capabilities, write a file
+# /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg with the following:
+# network: {config: disabled}
+"""
+
+
 class Distro(distros.Distro):
-    network_conf_fn = "/etc/network/interfaces"
+    network_conf_fn = {
+        "eni": "/etc/network/interfaces"
+    }
     init_cmd = ['rc-service']  # init scripts
+    renderer_configs = {
+        "eni": {"eni_path": network_conf_fn["eni"],
+                "eni_header": NETWORK_FILE_HEADER}
+    }
 
     def __init__(self, name, cfg, paths):
         distros.Distro.__init__(self, name, cfg, paths)
@@ -47,9 +62,8 @@ class Distro(distros.Distro):
         self.update_package_sources()
         self.package_command('add', pkgs=pkglist)
 
-    def _write_network(self, settings):
-        util.write_file(self.network_conf_fn, settings)
-        return ['all']
+    def _write_network_config(self, netconfig):
+        return self._supported_write_network_config(netconfig)
 
     def _bring_up_interfaces(self, device_names):
         use_all = False
@@ -57,7 +71,7 @@ class Distro(distros.Distro):
             if d == 'all':
                 use_all = True
         if use_all:
-            return distros.Distro._bring_up_interface(self, '--all')
+            return distros.Distro._bring_up_interface(self, '-a')
         else:
             return distros.Distro._bring_up_interfaces(self, device_names)
 
@@ -130,76 +144,12 @@ class Distro(distros.Distro):
         self._runner.run("update-sources", self.package_command,
                          ["update"], freq=PER_INSTANCE)
 
-    def add_user(self, name, **kwargs):
-        if util.is_user(name):
-            LOG.info("User %s already exists, skipping." % name)
-            return
+    @property
+    def preferred_ntp_clients(self):
+        """Allow distro to determine the preferred ntp client list"""
+        if not self._preferred_ntp_clients:
+            self._preferred_ntp_clients = ['chrony']
 
-        adduser_cmd = ['adduser', name, '-D']
-        log_adduser_cmd = ['adduser', name, '-D']
+        return self._preferred_ntp_clients
 
-        # Since we are creating users, we want to carefully validate the
-        # inputs. If something goes wrong, we can end up with a system
-        # that nobody can login to.
-        adduser_opts = {
-            "gecos": '-g',
-            "homedir": '-h',
-            "uid": '-u',
-            "shell": '-s',
-        }
-
-        adduser_flags = {
-            "system": '-S',
-        }
-
-        redact_opts = ['passwd']
-
-        # Check the values and create the command
-        for key, val in kwargs.items():
-
-            if key in adduser_opts and val and isinstance(val, str):
-                adduser_cmd.extend([adduser_opts[key], val])
-
-                # Redact certain fields from the logs
-                if key in redact_opts:
-                    log_adduser_cmd.extend([adduser_opts[key], 'REDACTED'])
-                else:
-                    log_adduser_cmd.extend([adduser_opts[key], val])
-
-            elif key in adduser_flags and val:
-                adduser_cmd.append(adduser_flags[key])
-                log_adduser_cmd.append(adduser_flags[key])
-
-        # Don't create the home directory if directed so or if the user is a
-        # system user
-        if 'no_create_home' in kwargs or 'system' in kwargs:
-            adduser_cmd.append('-H')
-            log_adduser_cmd.append('-H')
-
-        # Run the command
-        LOG.debug("Adding user %s", name)
-        try:
-            util.subp(adduser_cmd, logstring=log_adduser_cmd)
-        except Exception as e:
-            util.logexc(LOG, "Failed to create user %s", name)
-            raise e
-
-        # Unlock the user
-        LOG.debug("Unlocking user %s", name)
-        try:
-            util.subp(['passwd', '-u', name], logstring=['passwd', '-u', name])
-        except Exception as e:
-            util.logexc(LOG, "Failed to unlock user %s", name)
-            raise e
-
-        if 'groups' in kwargs:
-            groups = kwargs['groups']
-            if groups and isinstance(groups, str):
-                # Why are these even a single string in the first place?
-                groups = groups.split(',')
-            for group in groups:
-                try:
-                    util.subp(['adduser', name, group], logstring=['adduser', name, group])
-                except Exception as e:
-                    util.logexc(LOG, "Failed to add user %s to group %s", name, group)
-                    raise e
+# vi: ts=4 expandtab
