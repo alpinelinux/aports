@@ -116,6 +116,7 @@ static int usage(void)
 "			regular	entries and output tar archive on stdout\n"
 "  --cut		Remove the end of file tar record\n"
 "\n");
+	return 1;
 }
 
 static ssize_t full_read(int fd, void *buf, size_t count)
@@ -248,9 +249,8 @@ static int buf_write_fd(struct buf *b, int fd)
 	return -ENOSPC;
 }
 
-static int buf_add_ext_header_hexdump(struct buf *b, const char *hdr, const char *value, int valuelen)
+static int buf_add_ext_header_hexdump(struct buf *b, const char *hdr, const unsigned char *value, int valuelen)
 {
-	size_t oldsize = b->size;
 	int i, len;
 
 	/* "%u %s=%s\n" */
@@ -260,13 +260,13 @@ static int buf_add_ext_header_hexdump(struct buf *b, const char *hdr, const char
 	if (buf_resize(b, b->size + len)) return -ENOMEM;
 	b->size += snprintf(&b->ptr[b->size], len, "%u %s=", len, hdr);
 	for (i = 0; i < valuelen; i++)
-		b->size += snprintf(&b->ptr[b->size], 3, "%02x", (int)(unsigned char)value[i]);
+		b->size += snprintf(&b->ptr[b->size], 3, "%02x", (int)value[i]);
 	b->ptr[b->size++] = '\n';
 
 	return 0;
 }
 
-static void add_legacy_checksum(struct tar_header *hdr, const EVP_MD *md, const char *digest)
+static void add_legacy_checksum(struct tar_header *hdr, const EVP_MD *md, const unsigned char *digest)
 {
 	struct {
 		char id[4];
@@ -284,7 +284,8 @@ static void add_legacy_checksum(struct tar_header *hdr, const EVP_MD *md, const 
 
 static int do_it(const EVP_MD *md, int cut)
 {
-	char checksumhdr[32], digest[EVP_MAX_MD_SIZE];
+	char checksumhdr[32];
+	unsigned char digest[EVP_MAX_MD_SIZE];
 	struct buf data = BUF_INITIALIZER, pax = BUF_INITIALIZER;
 	struct tar_header hdr, paxhdr;
 	size_t size, aligned_size;
