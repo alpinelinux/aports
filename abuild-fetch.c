@@ -81,7 +81,7 @@ int fork_exec(char *argv[], int showerr)
 int fetch(char *url, const char *destdir, bool insecure)
 {
 	int lockfd, status=0;
-	char outfile[PATH_MAX], partfile[PATH_MAX];
+	char outfile[PATH_MAX-5], partfile[PATH_MAX];
 	char *name, *p;
 	struct flock fl = {
 		.l_type = F_WRLCK,
