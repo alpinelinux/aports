@@ -17,12 +17,12 @@ int main(void)
 		goto err;
 
 	zs.avail_out = sizeof obuf;
-	zs.next_out  = obuf;
+	zs.next_out  = (Bytef *)obuf;
 
 	while (1) {
 		if (zs.avail_in == 0) {
 			zs.avail_in = read(STDIN_FILENO, ibuf, sizeof ibuf);
-			zs.next_in = ibuf;
+			zs.next_in = (Bytef *)ibuf;
 			if (zs.avail_in < 0) goto err;
 			if (zs.avail_in == 0 && r == Z_STREAM_END) goto ok;
 		}
@@ -51,7 +51,7 @@ int main(void)
 				fd = open(fn, O_CREAT|O_TRUNC|O_WRONLY, 0777);
 				if (fd < 0) goto err;
 			}
-			zs.next_out = obuf;
+			zs.next_out = (Bytef *)obuf;
 			zs.avail_out = sizeof obuf;
 		}
 
@@ -59,7 +59,7 @@ int main(void)
 			len = (void *)zs.next_in - (void *)ibuf;
 			if (write(fd, ibuf, len) != len) goto err;
 			memmove(ibuf, zs.next_in, zs.avail_in);
-			zs.next_in = ibuf;
+			zs.next_in = (Bytef *)ibuf;
 		}
 
 		if (r == Z_STREAM_END) {
