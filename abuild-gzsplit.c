@@ -6,13 +6,23 @@
 
 #include <zlib.h>
 
+static int find_section(const char *buf, size_t bufsize, const char *str) {
+	int len = strlen(str);
+	const char *p;
+
+	if (len >= bufsize) return 0;
+
+	p = strrchr(buf, '/');
+	if (p++ == NULL) p = buf;
+	return strncmp(p, str, len) == 0;
+}
+
 int main(void)
 {
 	char obuf[8*1024], ibuf[8*1024];
 	z_stream zs;
 	int r = Z_OK, rc = 1, fd = -1;
 	size_t len;
-	size_t offset;
 
 	if (inflateInit2(&zs, 15+32) != Z_OK)
 		goto err;
@@ -44,14 +54,9 @@ int main(void)
 			if (fd < 0) {
 				const char *fn;
 
-				if (strncmp(obuf, "PaxHeader/", 10) == 0)
-					offset = 10;
-				else
-					offset = 0;
-
-				if (strncmp(obuf + offset, ".SIGN.", 6) == 0)
+				if (find_section(obuf, len, ".SIGN."))
 					fn = "signatures.tar.gz";
-				else if (strncmp(obuf + offset, ".PKGINFO", 8) == 0)
+				else if (find_section(obuf, len, ".PKGINFO"))
 					fn = "control.tar.gz";
 				else if (rc == 1)
 					fn = "data.tar.gz", rc = 2;
