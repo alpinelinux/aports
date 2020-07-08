@@ -3,10 +3,10 @@ setup() {
 	export ABUILD_SHAREDIR=$PWD/..
 }
 
-@test "help text" {
+@test "abuild: help text" {
 	$ABUILD -h
 }
 
-@test "version string" {
+@test "abuild: version string" {
 	$ABUILD -V
 }

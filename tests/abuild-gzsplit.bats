@@ -15,13 +15,13 @@ teardown() {
 	cd "$startdir"
 }
 
-@test "abuild-gzsplit with 3.11 package" {
+@test "abuild-gzsplit: 3.11 package" {
 
 	run $ABUILD_GZSPLIT < "$datadir"/alpine-base-3.11.6-r0.apk
 	[ "$status" -eq 0 ]
 }
 
-@test "abuild-gzsplit with 3.12 package" {
+@test "abuild-gzsplit: 3.12 package" {
 	run $ABUILD_GZSPLIT < "$datadir"/alpine-base-3.12.0-r0.apk
 	[ "$status" -eq 0 ]
 }
