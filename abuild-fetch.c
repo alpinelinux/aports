@@ -142,7 +142,7 @@ int fetch(char *url, const char *destdir, bool insecure)
 
 	if (access(partfile, F_OK) == 0) {
 		printf("Partial download found. Trying to resume.\n");
-		add_opt(&curlcmd, "-C");
+		add_opt(&curlcmd, "--continue-at");
 		add_opt(&curlcmd, "-");
 		add_opt(&wgetcmd, "-c");
 	}
@@ -154,8 +154,16 @@ int fetch(char *url, const char *destdir, bool insecure)
 
 	/* CURLE_RANGE_ERROR (33)
 	   The server does not support or accept range requests. */
-	if (status == 33)
+	if (status == 33) {
 		unlink(partfile);
+		if( curlcmd.argc >=3) {
+			/* remove --continue-at - options */
+			curlcmd.argv[curlcmd.argc-3] = curlcmd.argv[curlcmd.argc-1];
+			curlcmd.argv[curlcmd.argc-2] = NULL;
+			curlcmd.argc -= 2;
+			status = fork_exec(curlcmd.argv, 0);
+		}
+	}
 
 	/* is we failed execute curl, then fallback to wget */
 	if (status == 201)
