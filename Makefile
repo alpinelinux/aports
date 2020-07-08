@@ -32,7 +32,7 @@ SED		:= sed
 TAR		:= tar
 LINK		= $(CC) $(OBJS-$@) -o $@ $(LDFLAGS) $(LDFLAGS-$@) $(LIBS-$@)
 
-CFLAGS		?= -Wall -Werror
+CFLAGS		?= -Wall -Werror -g
 
 SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@prefix@:$(prefix):g' \
