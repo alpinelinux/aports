@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <err.h>
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
@@ -20,15 +21,23 @@ int main(void)
 	zs.next_out  = (Bytef *)obuf;
 
 	while (1) {
+		const char *fn = NULL;
+
 		if (zs.avail_in == 0) {
 			zs.avail_in = read(STDIN_FILENO, ibuf, sizeof ibuf);
 			zs.next_in = (Bytef *)ibuf;
-			if (zs.avail_in < 0) goto err;
+			if (zs.avail_in < 0) {
+				warn("Failed to read input");
+				goto err;
+			}
 			if (zs.avail_in == 0 && r == Z_STREAM_END) goto ok;
 		}
 
 		r = inflate(&zs, Z_NO_FLUSH);
-		if (r != Z_OK && r != Z_STREAM_END) goto err;
+		if (r != Z_OK && r != Z_STREAM_END) {
+			warnx("Failed to inflate input");
+			goto err;
+		}
 
 		len = sizeof obuf - zs.avail_out;
 		if (len) {
@@ -46,10 +55,15 @@ int main(void)
 					fn = "control.tar.gz";
 				else if (rc == 1)
 					fn = "data.tar.gz", rc = 2;
-				else
+				else {
+					warnx("Failed to find .PKGINFO section");
 					goto err;
+				}
 				fd = open(fn, O_CREAT|O_TRUNC|O_WRONLY, 0777);
-				if (fd < 0) goto err;
+				if (fd < 0) {
+					warn("Failed to open %s", fn);
+					goto err;
+				}
 			}
 			zs.next_out = (Bytef *)obuf;
 			zs.avail_out = sizeof obuf;
@@ -57,7 +71,10 @@ int main(void)
 
 		if (zs.avail_in == 0 || r == Z_STREAM_END) {
 			len = (void *)zs.next_in - (void *)ibuf;
-			if (write(fd, ibuf, len) != len) goto err;
+			if (write(fd, ibuf, len) != len) {
+				warn("Failed to write to %s", fn);
+				goto err;
+			}
 			memmove(ibuf, zs.next_in, zs.avail_in);
 			zs.next_in = (Bytef *)ibuf;
 		}
@@ -68,7 +85,10 @@ int main(void)
 				fd = -1;
 			}
 			inflateEnd(&zs);
-			if (inflateInit2(&zs, 15+32) != Z_OK) goto err;
+			if (inflateInit2(&zs, 15+32) != Z_OK) {
+				warnx("inflateInit2 failed");
+				goto err;
+			}
 		}
 	}
 ok:
@@ -76,7 +96,6 @@ ok:
 err:
 	if (fd >= 0) close(fd);
 	inflateEnd(&zs);
-	if (rc) fprintf(stderr, "failed\n");
 	return rc;
 }
 
