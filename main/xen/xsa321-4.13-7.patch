@@ -1,0 +1,153 @@
+From: <security@xenproject.org>
+Subject: x86/ept: flush cache when modifying PTEs and sharing page tables
+
+Modifications made to the page tables by EPT code need to be written
+to memory when the page tables are shared with the IOMMU, as Intel
+IOMMUs can be non-coherent and thus require changes to be written to
+memory in order to be visible to the IOMMU.
+
+In order to achieve this make sure data is written back to memory
+after writing an EPT entry when the recalc bit is not set in
+atomic_write_ept_entry. If such bit is set, the entry will be
+adjusted and atomic_write_ept_entry will be called a second time
+without the recalc bit set. Note that when splitting a super page the
+new tables resulting of the split should also be written back.
+
+Failure to do so can allow devices behind the IOMMU access to the
+stale super page, or cause coherency issues as changes made by the
+processor to the page tables are not visible to the IOMMU.
+
+This allows to remove the VT-d specific iommu_pte_flush helper, since
+the cache write back is now performed by atomic_write_ept_entry, and
+hence iommu_iotlb_flush can be used to flush the IOMMU TLB. The newly
+used method (iommu_iotlb_flush) can result in less flushes, since it
+might sometimes be called rightly with 0 flags, in which case it
+becomes a no-op.
+
+This is part of XSA-321.
+
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+--- a/xen/arch/x86/mm/p2m-ept.c
++++ b/xen/arch/x86/mm/p2m-ept.c
+@@ -58,6 +58,19 @@ static int atomic_write_ept_entry(struct
+ 
+     write_atomic(&entryptr->epte, new.epte);
+ 
++    /*
++     * The recalc field on the EPT is used to signal either that a
++     * recalculation of the EMT field is required (which doesn't effect the
++     * IOMMU), or a type change. Type changes can only be between ram_rw,
++     * logdirty and ioreq_server: changes to/from logdirty won't work well with
++     * an IOMMU anyway, as IOMMU #PFs are not synchronous and will lead to
++     * aborts, and changes to/from ioreq_server are already fully flushed
++     * before returning to guest context (see
++     * XEN_DMOP_map_mem_type_to_ioreq_server).
++     */
++    if ( !new.recalc && iommu_use_hap_pt(p2m->domain) )
++        iommu_sync_cache(entryptr, sizeof(*entryptr));
++
+     return 0;
+ }
+ 
+@@ -278,6 +291,9 @@ static bool_t ept_split_super_page(struc
+             break;
+     }
+ 
++    if ( iommu_use_hap_pt(p2m->domain) )
++        iommu_sync_cache(table, EPT_PAGETABLE_ENTRIES * sizeof(ept_entry_t));
++
+     unmap_domain_page(table);
+ 
+     /* Even failed we should install the newly allocated ept page. */
+@@ -337,6 +353,9 @@ static int ept_next_level(struct p2m_dom
+         if ( !next )
+             return GUEST_TABLE_MAP_FAILED;
+ 
++        if ( iommu_use_hap_pt(p2m->domain) )
++            iommu_sync_cache(next, EPT_PAGETABLE_ENTRIES * sizeof(ept_entry_t));
++
+         rc = atomic_write_ept_entry(p2m, ept_entry, e, next_level);
+         ASSERT(rc == 0);
+     }
+@@ -821,7 +840,10 @@ out:
+          need_modify_vtd_table )
+     {
+         if ( iommu_use_hap_pt(d) )
+-            rc = iommu_pte_flush(d, gfn, &ept_entry->epte, order, vtd_pte_present);
++            rc = iommu_iotlb_flush(d, _dfn(gfn), (1u << order),
++                                   (iommu_flags ? IOMMU_FLUSHF_added : 0) |
++                                   (vtd_pte_present ? IOMMU_FLUSHF_modified
++                                                    : 0));
+         else if ( need_iommu_pt_sync(d) )
+             rc = iommu_flags ?
+                 iommu_legacy_map(d, _dfn(gfn), mfn, order, iommu_flags) :
+--- a/xen/drivers/passthrough/vtd/iommu.c
++++ b/xen/drivers/passthrough/vtd/iommu.c
+@@ -1884,53 +1884,6 @@ static int intel_iommu_lookup_page(struc
+     return 0;
+ }
+ 
+-int iommu_pte_flush(struct domain *d, uint64_t dfn, uint64_t *pte,
+-                    int order, int present)
+-{
+-    struct acpi_drhd_unit *drhd;
+-    struct vtd_iommu *iommu = NULL;
+-    struct domain_iommu *hd = dom_iommu(d);
+-    bool_t flush_dev_iotlb;
+-    int iommu_domid;
+-    int rc = 0;
+-
+-    iommu_sync_cache(pte, sizeof(struct dma_pte));
+-
+-    for_each_drhd_unit ( drhd )
+-    {
+-        iommu = drhd->iommu;
+-        if ( !test_bit(iommu->index, &hd->arch.iommu_bitmap) )
+-            continue;
+-
+-        flush_dev_iotlb = !!find_ats_dev_drhd(iommu);
+-        iommu_domid= domain_iommu_domid(d, iommu);
+-        if ( iommu_domid == -1 )
+-            continue;
+-
+-        rc = iommu_flush_iotlb_psi(iommu, iommu_domid,
+-                                   __dfn_to_daddr(dfn),
+-                                   order, !present, flush_dev_iotlb);
+-        if ( rc > 0 )
+-        {
+-            iommu_flush_write_buffer(iommu);
+-            rc = 0;
+-        }
+-    }
+-
+-    if ( unlikely(rc) )
+-    {
+-        if ( !d->is_shutting_down && printk_ratelimit() )
+-            printk(XENLOG_ERR VTDPREFIX
+-                   " d%d: IOMMU pages flush failed: %d\n",
+-                   d->domain_id, rc);
+-
+-        if ( !is_hardware_domain(d) )
+-            domain_crash(d);
+-    }
+-
+-    return rc;
+-}
+-
+ static int __init vtd_ept_page_compatible(struct vtd_iommu *iommu)
+ {
+     u64 ept_cap, vtd_cap = iommu->cap;
+--- a/xen/include/asm-x86/iommu.h
++++ b/xen/include/asm-x86/iommu.h
+@@ -97,10 +97,6 @@ static inline int iommu_adjust_irq_affin
+            : 0;
+ }
+ 
+-/* While VT-d specific, this must get declared in a generic header. */
+-int __must_check iommu_pte_flush(struct domain *d, u64 gfn, u64 *pte,
+-                                 int order, int present);
+-
+ static inline bool iommu_supports_x2apic(void)
+ {
+     return iommu_init_ops && iommu_init_ops->supports_x2apic
