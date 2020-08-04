@@ -1,6 +1,8 @@
 #    Copyright (C) 2016 Matt Dainty
+#    Copyright (C) 2020 Dermot Bradley
 #
 #    Author: Matt Dainty <matt@bodgit-n-scarper.com>
+#    Author: Dermot Bradley <dermot_bradley@yahoo.com>
 #
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License version 3, as
@@ -25,23 +27,22 @@ from cloudinit.settings import PER_INSTANCE
 
 LOG = logging.getLogger(__name__)
 
-
 NETWORK_FILE_HEADER = """\
-# This file is generated from information provided by the datasource.  Changes
-# to it will not persist across an instance reboot.  To disable cloud-init's
+# This file is generated from information provided by the datasource. Changes
+# to it will not persist across an instance reboot. To disable cloud-init's
 # network configuration capabilities, write a file
 # /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg with the following:
 # network: {config: disabled}
+
 """
 
 
 class Distro(distros.Distro):
-    network_conf_fn = {
-        "eni": "/etc/network/interfaces"
-    }
     init_cmd = ['rc-service']  # init scripts
+    locale_conf_fn = "/etc/profile.d/locale.sh"
+    network_conf_fn = "/etc/network/interfaces"
     renderer_configs = {
-        "eni": {"eni_path": network_conf_fn["eni"],
+        "eni": {"eni_path": network_conf_fn,
                 "eni_header": NETWORK_FILE_HEADER}
     }
 
@@ -51,12 +52,34 @@ class Distro(distros.Distro):
         # calls from repeatly happening (when they
         # should only happen say once per instance...)
         self._runner = helpers.Runners(paths)
+        self.default_locale = 'C.UTF-8'
         self.osfamily = 'alpine'
         cfg['ssh_svcname'] = 'sshd'
 
+    def get_locale(self):
+        """The default locale for Alpine Linux is different than
+           cloud-init's DataSource default.
+        """
+        return self.default_locale
+
     def apply_locale(self, locale, out_fn=None):
-        # No locale support yet
-        pass
+        # Alpine has limited locale support due to musl library limitations
+
+        if not locale:
+            locale = self.default_locale
+        if not out_fn:
+            out_fn = self.locale_conf_fn
+
+        lines = [
+            "#",
+            "# This file is created by cloud-init once per new instance boot",
+            "#",
+            "export CHARSET=UTF-8",
+            "export LANG=%s" % locale,
+            "export LC_COLLATE=C",
+            "",
+        ]
+        util.write_file(out_fn, "\n".join(lines), 0o644)
 
     def install_packages(self, pkglist):
         self.update_package_sources()
@@ -74,13 +97,6 @@ class Distro(distros.Distro):
             return distros.Distro._bring_up_interface(self, '-a')
         else:
             return distros.Distro._bring_up_interfaces(self, device_names)
-
-    def _select_hostname(self, hostname, fqdn):
-        # Prefer the short hostname over the long
-        # fully qualified domain name
-        if not hostname:
-            return fqdn
-        return hostname
 
     def _write_hostname(self, your_hostname, out_fn):
         conf = None
@@ -115,6 +131,9 @@ class Distro(distros.Distro):
             return default
         return hostname
 
+    def _get_localhost_ip(self):
+        return "127.0.1.1"
+
     def set_timezone(self, tz):
         distros.set_etc_timezone(tz=tz, tz_file=self._find_tz_file(tz))
 
@@ -148,7 +167,7 @@ class Distro(distros.Distro):
     def preferred_ntp_clients(self):
         """Allow distro to determine the preferred ntp client list"""
         if not self._preferred_ntp_clients:
-            self._preferred_ntp_clients = ['chrony']
+            self._preferred_ntp_clients = ['chrony', 'ntp']
 
         return self._preferred_ntp_clients
 
