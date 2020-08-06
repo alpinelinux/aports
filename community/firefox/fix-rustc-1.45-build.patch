@@ -1,0 +1,98 @@
+Upstream: Yes, combination of https://hg.mozilla.org/integration/autoland/rev/bb79da633a2e and https://hg.mozilla.org/integration/autoland/rev/e5d2a6d5187b
+Reason: Fixes build w/ Rust 1.45
+
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1654465
+# HG changeset patch
+# User Mike Hommey <mh+mozilla@glandium.org>
+# Date 1595885037 0
+# Node ID 9181214a2308b5b614e7a60c6e99bd3130a9ed2b
+# Parent  212d37ac070125486a182c2095f3a87e7581b9dd
+Bug 1654465 - Set -Cembed-bitcode=yes instead of CARGO_PROFILE_RELEASE_LTO. r=firefox-build-system-reviewers,rstewart, a=RyanVM
+
+It turns out setting CARGO_PROFILE_RELEASE_LTO has unwanted side
+effects.
+
+First it's not actually strictly equivalent to using `cargo rustc --
+-Clto`. For instance, it apparently also enables cross-language LTO in
+newer versions of cargo.
+
+Second, it changes the rust computed hash for all the dependencies of
+the crate being built with the variable set, which makes them diverge
+from when the same dependencies are built through another crate in the
+tree that is not LTOed. This effectively makes us build a _lot_ of
+crates twice, many of which are not cacheable.
+
+Since the original problem is that cargo >= 1.45 passes extra flags (`-C
+embed-bitcode=no`) to rustc that are incompatible with `-Clto`, and while
+it knows to adjust based on the `lto` setting in the build profile
+(which CARGO_PROFILE_RELEASE_LTO overrides the default of), cargo
+ignores flags passed via `cargo rustc -- ...` when making those
+adjustments.
+
+So, we need to override with `-C embed-bitcode=yes` on our own at the
+same time we pass `-Clto`. But doing that through `cargo rustc -- ...`
+is not enough because all the dependencies of the crate built with
+`-Clto` need to be built with `-C embed-bitcode=yes`. So we need to
+override with `RUSTFLAGS`, which will affect all the dependencies.
+But we also need to do this consistently across all crates, not only the
+dependencies of crates built with `-Clto`, otherwise we'd still end up
+building crates twice (once with and once without the override).
+
+Unfortunately, the `-C embed-bitcode=*` flag is also not supported in
+versions older than 1.45, so we have to avoid adding it on older
+versions.
+
+We unfortunately support a large range of versions of rustc (albeit only
+for tools/crashreporter), but we actually need to upgrade the smaller
+supported version because rustc < 1.38 doesn't support our top-level
+Cargo.lock. This makes the version check slightly less awful.
+
+Differential Revision: https://phabricator.services.mozilla.com/D84652
+diff --git a/config/makefiles/rust.mk b/config/makefiles/rust.mk
+index a9abcc9af4..b5c7973104 100644
+--- a/config/makefiles/rust.mk
++++ b/config/makefiles/rust.mk
+@@ -63,6 +63,11 @@ ifndef MOZ_DEBUG_RUST
+ ifeq (,$(findstring gkrust_gtest,$(RUST_LIBRARY_FILE)))
+ cargo_rustc_flags += -Clto
+ endif
++# Versions of rust >= 1.45 need -Cembed-bitcode=yes for all crates when
++# using -Clto.
++ifeq (,$(filter 1.38.% 1.39.% 1.40.% 1.41.% 1.42.% 1.43.% 1.44.%,$(RUSTC_VERSION)))
++RUSTFLAGS += -Cembed-bitcode=yes
++endif
+ endif
+ endif
+ 
+diff --git a/python/mozbuild/mozbuild/test/configure/test_toolchain_configure.py b/python/mozbuild/mozbuild/test/configure/test_toolchain_configure.py
+index e1921ece68..759d4d98cc 100755
+--- a/python/mozbuild/mozbuild/test/configure/test_toolchain_configure.py
++++ b/python/mozbuild/mozbuild/test/configure/test_toolchain_configure.py
+@@ -1796,13 +1796,6 @@ class RustTest(BaseConfigureTest):
+                                      arm_arch=7, fpu='neon', thumb2=True, float_abi='softfp')),
+             'thumbv7neon-linux-androideabi')
+ 
+-        self.assertEqual(
+-            self.get_rust_target('arm-unknown-linux-androideabi',
+-                                 version='1.32.0',
+-                                 arm_target=ReadOnlyNamespace(
+-                                     arm_arch=7, fpu='neon', thumb2=True, float_abi='softfp')),
+-            'armv7-linux-androideabi')
+-
+         self.assertEqual(
+             self.get_rust_target('arm-unknown-linux-androideabi',
+                                  arm_target=ReadOnlyNamespace(
+@@ -1821,13 +1814,6 @@ class RustTest(BaseConfigureTest):
+                                      arm_arch=7, fpu='neon', thumb2=True, float_abi='hard')),
+             'thumbv7neon-unknown-linux-gnueabihf')
+ 
+-        self.assertEqual(
+-            self.get_rust_target('armv7-unknown-linux-gnueabihf',
+-                                 version='1.32.0',
+-                                 arm_target=ReadOnlyNamespace(
+-                                     arm_arch=7, fpu='neon', thumb2=True, float_abi='hard')),
+-            'armv7-unknown-linux-gnueabihf')
+-
+         self.assertEqual(
+             self.get_rust_target('armv7-unknown-linux-gnueabihf',
+                                  arm_target=ReadOnlyNamespace(
