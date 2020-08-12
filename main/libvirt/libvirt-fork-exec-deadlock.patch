@@ -1,0 +1,263 @@
+Bugreport: https://gitlab.alpinelinux.org/alpine/aports/-/issues/11602
+Upstream: https://gitlab.com/libvirt/libvirt/-/issues/52
+
+diff --git a/src/util/vircommand.c b/src/util/vircommand.c
+index 5ce69ef..2ee1312 100644
+--- a/src/util/vircommand.c
++++ b/src/util/vircommand.c
+@@ -304,7 +304,7 @@ virFork(void)
+         /* Make sure any hook logging is sent to stderr, since child
+          * process may close the logfile FDs */
+         logprio = virLogGetDefaultPriority();
+-        virLogReset();
++        virLogResetForExec();
+         virLogSetDefaultPriority(logprio);
+ 
+         /* Clear out all signal handlers from parent so nothing
+@@ -861,7 +861,7 @@ virExec(virCommandPtr cmd)
+        goto fork_error;
+ 
+     /* Close logging again to ensure no FDs leak to child */
+-    virLogReset();
++    virLogResetForExec();
+ 
+     if (cmd->env)
+         execve(binary, cmd->args, cmd->env);
+diff --git a/src/util/virlog.c b/src/util/virlog.c
+index dabfe7e..d44165c 100644
+--- a/src/util/virlog.c
++++ b/src/util/virlog.c
+@@ -108,8 +108,8 @@ static size_t virLogNbOutputs;
+  */
+ static virLogPriority virLogDefaultPriority = VIR_LOG_DEFAULT;
+ 
+-static void virLogResetFilters(void);
+-static void virLogResetOutputs(void);
++static void virLogResetFilters(bool freemem);
++static void virLogResetOutputs(bool freemem);
+ static void virLogOutputToFd(virLogSourcePtr src,
+                              virLogPriority priority,
+                              const char *filename,
+@@ -284,8 +284,30 @@ virLogReset(void)
+         return -1;
+ 
+     virLogLock();
+-    virLogResetFilters();
+-    virLogResetOutputs();
++    virLogResetFilters(true);
++    virLogResetOutputs(true);
++    virLogDefaultPriority = VIR_LOG_DEFAULT;
++    virLogUnlock();
++    return 0;
++}
++
++/**
++ * virLogResetForExec:
++ *
++ * Reset the logging module to its default initial state, but avoid doing
++ * async unsafe calls
++ *
++ * Returns 0 if successful, and -1 in case or error
++ */
++int
++virLogResetForExec(void)
++{
++    if (virLogInitialize() < 0)
++        return -1;
++
++    virLogLock();
++    virLogResetFilters(false);
++    virLogResetOutputs(false);
+     virLogDefaultPriority = VIR_LOG_DEFAULT;
+     virLogUnlock();
+     return 0;
+@@ -324,9 +346,10 @@ virLogSetDefaultPriority(virLogPriority priority)
+  * Removes the set of logging filters defined.
+  */
+ static void
+-virLogResetFilters(void)
++virLogResetFilters(bool freemem)
+ {
+-    virLogFilterListFree(virLogFilters, virLogNbFilters);
++    if (freemem)
++        virLogFilterListFree(virLogFilters, virLogNbFilters);
+     virLogFilters = NULL;
+     virLogNbFilters = 0;
+     virLogFiltersSerial++;
+@@ -371,9 +394,10 @@ virLogFilterListFree(virLogFilterPtr *list, int count)
+  * Removes the set of logging output defined.
+  */
+ static void
+-virLogResetOutputs(void)
++virLogResetOutputs(bool freemem)
+ {
+-    virLogOutputListFree(virLogOutputs, virLogNbOutputs);
++    if (freemem)
++        virLogOutputListFree(virLogOutputs, virLogNbOutputs);
+     virLogOutputs = NULL;
+     virLogNbOutputs = 0;
+ }
+@@ -1390,7 +1414,7 @@ virLogDefineOutputs(virLogOutputPtr *outputs, size_t noutputs)
+         return -1;
+ 
+     virLogLock();
+-    virLogResetOutputs();
++    virLogResetOutputs(true);
+ 
+ #if HAVE_SYSLOG_H
+     /* syslog needs to be special-cased, since it keeps the fd in private */
+@@ -1433,7 +1457,7 @@ virLogDefineFilters(virLogFilterPtr *filters, size_t nfilters)
+         return -1;
+ 
+     virLogLock();
+-    virLogResetFilters();
++    virLogResetFilters(true);
+     virLogFilters = filters;
+     virLogNbFilters = nfilters;
+     virLogUnlock();
+diff --git a/src/util/virlog.h b/src/util/virlog.h
+index feb2f85..c82b62e 100644
+--- a/src/util/virlog.h
++++ b/src/util/virlog.h
+@@ -190,6 +190,7 @@ void virLogSetDefaultOutput(const char *fname, bool godaemon, bool privileged);
+ void virLogLock(void);
+ void virLogUnlock(void);
+ int virLogReset(void);
++int virLogResetForExec(void);
+ int virLogParseDefaultPriority(const char *priority);
+ int virLogPriorityFromSyslog(int priority);
+ void virLogMessage(virLogSourcePtr source,
+diff --git a/src/util/vircommand.c b/src/util/vircommand.c
+index 76f7eb9a3d..1efb3ba1d2 100644
+--- a/src/util/vircommand.c
++++ b/src/util/vircommand.c
+@@ -494,10 +494,48 @@ virCommandMassCloseGetFDsGeneric(virCommandPtr cmd G_GNUC_UNUSED,
+ }
+ # endif /* !__linux__ */
+ 
++static virBitmapPtr
++virCommandMassCloseGetFDs(virCommandPtr cmd)
++{
++    virBitmapPtr fds = NULL;
++    int openmax = sysconf(_SC_OPEN_MAX);
++
++    /* In general, it is not safe to call malloc() between fork() and exec()
++     * because the child might have forked at the worst possible time, i.e.
++     * when another thread was in malloc() and thus held its lock. That is to
++     * say, POSIX does not mandate malloc() to be async-safe. Fortunately,
++     * glibc developers are aware of this and made malloc() async-safe.
++     * Therefore we can safely allocate memory here (and transitively call
++     * opendir/readdir) without a deadlock. */
++
++    if (openmax < 0) {
++        virReportSystemError(errno, "%s", _("sysconf(_SC_OPEN_MAX) failed"));
++	return -1;
++    }
++
++    if (!(fds = virBitmapNew(openmax)))
++        return NULL;
++
++#  ifdef __linux__
++    if (virCommandMassCloseGetFDsLinux(cmd, fds) < 0) {
++        virBitmapFree(fds);
++        return NULL;
++    }
++#  else
++    if (virCommandMassCloseGetFDsGeneric(cmd, fds) < 0) {
++        virBitmapFree(fds);
++        return NULL;
++    }
++#  endif
++    return fds;
++}
++
++
+ # ifdef __FreeBSD__
+ 
+ static int
+ virCommandMassClose(virCommandPtr cmd,
++                    virBitmapPtr fds G_GNUC_UNUSED,
+                     int childin,
+                     int childout,
+                     int childerr)
+@@ -550,39 +588,13 @@ virCommandMassClose(virCommandPtr cmd,
+ 
+ static int
+ virCommandMassClose(virCommandPtr cmd,
++                    virBitmapPtr fds,
+                     int childin,
+                     int childout,
+                     int childerr)
+ {
+-    g_autoptr(virBitmap) fds = NULL;
+-    int openmax = sysconf(_SC_OPEN_MAX);
+-    int fd = -1;
+-
+-    /* In general, it is not safe to call malloc() between fork() and exec()
+-     * because the child might have forked at the worst possible time, i.e.
+-     * when another thread was in malloc() and thus held its lock. That is to
+-     * say, POSIX does not mandate malloc() to be async-safe. Fortunately,
+-     * glibc developers are aware of this and made malloc() async-safe.
+-     * Therefore we can safely allocate memory here (and transitively call
+-     * opendir/readdir) without a deadlock. */
+-
+-    if (openmax < 0) {
+-        virReportSystemError(errno, "%s", _("sysconf(_SC_OPEN_MAX) failed"));
+-        return -1;
+-    }
+-
+-    if (!(fds = virBitmapNew(openmax)))
+-        return -1;
+-
+-#  ifdef __linux__
+-    if (virCommandMassCloseGetFDsLinux(cmd, fds) < 0)
+-        return -1;
+-#  else
+-    if (virCommandMassCloseGetFDsGeneric(cmd, fds) < 0)
+-        return -1;
+-#  endif
++    int fd = virBitmapNextSetBit(fds, 2);
+ 
+-    fd = virBitmapNextSetBit(fds, 2);
+     for (; fd >= 0; fd = virBitmapNextSetBit(fds, fd)) {
+         if (fd == childin || fd == childout || fd == childerr)
+             continue;
+@@ -621,6 +633,7 @@ virExec(virCommandPtr cmd)
+     int ret;
+     g_autofree gid_t *groups = NULL;
+     int ngroups;
++    virBitmapPtr fds = NULL;
+ 
+     if (cmd->args[0][0] != '/') {
+         if (!(binary = binarystr = virFindFileInPath(cmd->args[0]))) {
+@@ -688,13 +701,20 @@ virExec(virCommandPtr cmd)
+     if ((ngroups = virGetGroupList(cmd->uid, cmd->gid, &groups)) < 0)
+         goto cleanup;
+ 
++    /* get fds bitmap before we fork */
++    if ((fds = virCommandMassCloseGetFDs(cmd)) == NULL)
++        goto cleanup;
++
+     pid = virFork();
+ 
+-    if (pid < 0)
++    if (pid < 0) {
++	virBitmapFree(fds);
+         goto cleanup;
++    }
+ 
+     if (pid) { /* parent */
+         VIR_FORCE_CLOSE(null);
++	virBitmapFree(fds);
+         if (cmd->outfdptr && *cmd->outfdptr == -1) {
+             VIR_FORCE_CLOSE(pipeout[1]);
+             *cmd->outfdptr = pipeout[0];
+@@ -715,7 +735,7 @@ virExec(virCommandPtr cmd)
+         umask(cmd->mask);
+     ret = EXIT_CANCELED;
+ 
+-    if (virCommandMassClose(cmd, childin, childout, childerr) < 0)
++    if (virCommandMassClose(cmd, fds, childin, childout, childerr) < 0)
+         goto fork_error;
+ 
+     if (prepareStdFd(childin, STDIN_FILENO) < 0) {
