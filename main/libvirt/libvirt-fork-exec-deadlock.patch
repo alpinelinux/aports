@@ -1,8 +1,22 @@
-Bugreport: https://gitlab.alpinelinux.org/alpine/aports/-/issues/11602
-Upstream: https://gitlab.com/libvirt/libvirt/-/issues/52
+From c0c3240552c833c354c3cf2deb86f928df7e7e4f Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Wed, 12 Aug 2020 19:51:05 +0200
+Subject: [PATCH 1/2] util: avoid free() when reset log after fork
+
+Doing malloc/free after fork is techincally not allowed in POSIX and
+deadlocks[1] with musl libc.
+
+[1]: https://gitlab.com/libvirt/libvirt/-/issues/52
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ src/util/vircommand.c |  4 ++--
+ src/util/virlog.c     | 44 +++++++++++++++++++++++++++++++++----------
+ src/util/virlog.h     |  1 +
+ 3 files changed, 37 insertions(+), 12 deletions(-)
 
 diff --git a/src/util/vircommand.c b/src/util/vircommand.c
-index 5ce69ef..2ee1312 100644
+index 76f7eb9a3d..17e5bb00d3 100644
 --- a/src/util/vircommand.c
 +++ b/src/util/vircommand.c
 @@ -304,7 +304,7 @@ virFork(void)
@@ -10,7 +24,7 @@ index 5ce69ef..2ee1312 100644
           * process may close the logfile FDs */
          logprio = virLogGetDefaultPriority();
 -        virLogReset();
-+        virLogResetForExec();
++        virLogResetWithoutFree();
          virLogSetDefaultPriority(logprio);
  
          /* Clear out all signal handlers from parent so nothing
@@ -19,12 +33,12 @@ index 5ce69ef..2ee1312 100644
  
      /* Close logging again to ensure no FDs leak to child */
 -    virLogReset();
-+    virLogResetForExec();
++    virLogResetWithoutFree();
  
      if (cmd->env)
          execve(binary, cmd->args, cmd->env);
 diff --git a/src/util/virlog.c b/src/util/virlog.c
-index dabfe7e..d44165c 100644
+index 3217e5eb73..3959de5ca7 100644
 --- a/src/util/virlog.c
 +++ b/src/util/virlog.c
 @@ -108,8 +108,8 @@ static size_t virLogNbOutputs;
@@ -52,15 +66,15 @@ index dabfe7e..d44165c 100644
 +}
 +
 +/**
-+ * virLogResetForExec:
++ * virLogResetWithoutFree:
 + *
 + * Reset the logging module to its default initial state, but avoid doing
-+ * async unsafe calls
++ * free() so it can be used after fork and before exec.
 + *
 + * Returns 0 if successful, and -1 in case or error
 + */
 +int
-+virLogResetForExec(void)
++virLogResetWithoutFree(void)
 +{
 +    if (virLogInitialize() < 0)
 +        return -1;
@@ -97,7 +111,7 @@ index dabfe7e..d44165c 100644
      virLogOutputs = NULL;
      virLogNbOutputs = 0;
  }
-@@ -1390,7 +1414,7 @@ virLogDefineOutputs(virLogOutputPtr *outputs, size_t noutputs)
+@@ -1392,7 +1416,7 @@ virLogDefineOutputs(virLogOutputPtr *outputs, size_t noutputs)
          return -1;
  
      virLogLock();
@@ -106,7 +120,7 @@ index dabfe7e..d44165c 100644
  
  #if HAVE_SYSLOG_H
      /* syslog needs to be special-cased, since it keeps the fd in private */
-@@ -1433,7 +1457,7 @@ virLogDefineFilters(virLogFilterPtr *filters, size_t nfilters)
+@@ -1435,7 +1459,7 @@ virLogDefineFilters(virLogFilterPtr *filters, size_t nfilters)
          return -1;
  
      virLogLock();
@@ -116,148 +130,156 @@ index dabfe7e..d44165c 100644
      virLogNbFilters = nfilters;
      virLogUnlock();
 diff --git a/src/util/virlog.h b/src/util/virlog.h
-index feb2f85..c82b62e 100644
+index 984a9d5a43..69f7b1ef94 100644
 --- a/src/util/virlog.h
 +++ b/src/util/virlog.h
-@@ -190,6 +190,7 @@ void virLogSetDefaultOutput(const char *fname, bool godaemon, bool privileged);
+@@ -168,6 +168,7 @@ void virLogSetDefaultOutput(const char *fname, bool godaemon, bool privileged);
  void virLogLock(void);
  void virLogUnlock(void);
  int virLogReset(void);
-+int virLogResetForExec(void);
++int virLogResetWithoutFree(void);
  int virLogParseDefaultPriority(const char *priority);
  int virLogPriorityFromSyslog(int priority);
  void virLogMessage(virLogSourcePtr source,
+-- 
+2.28.0
+
+
+From 9d070b977c7031263504e32a753facc6a28f5980 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Wed, 19 Aug 2020 11:28:43 +0200
+Subject: [PATCH 2/2] util: command: improve generic mass close of fds
+
+Add a portable generic implementation of virMassClose as fallback on
+non-FreeBSD and non-glibc.
+
+This implementation uses poll(2) to look for open files to keep
+performance reasonable while not using any mallocs.
+
+This solves a deadlock with musl libc.
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ src/util/vircommand.c | 76 +++++++++++++++++++++++++++++++++----------
+ 1 file changed, 58 insertions(+), 18 deletions(-)
+
 diff --git a/src/util/vircommand.c b/src/util/vircommand.c
-index 76f7eb9a3d..1efb3ba1d2 100644
+index 17e5bb00d3..06579cfb44 100644
 --- a/src/util/vircommand.c
 +++ b/src/util/vircommand.c
-@@ -494,10 +494,48 @@ virCommandMassCloseGetFDsGeneric(virCommandPtr cmd G_GNUC_UNUSED,
+@@ -443,7 +443,7 @@ virExecCommon(virCommandPtr cmd, gid_t *groups, int ngroups)
+     return 0;
  }
- # endif /* !__linux__ */
  
-+static virBitmapPtr
-+virCommandMassCloseGetFDs(virCommandPtr cmd)
-+{
-+    virBitmapPtr fds = NULL;
-+    int openmax = sysconf(_SC_OPEN_MAX);
-+
-+    /* In general, it is not safe to call malloc() between fork() and exec()
-+     * because the child might have forked at the worst possible time, i.e.
-+     * when another thread was in malloc() and thus held its lock. That is to
-+     * say, POSIX does not mandate malloc() to be async-safe. Fortunately,
-+     * glibc developers are aware of this and made malloc() async-safe.
-+     * Therefore we can safely allocate memory here (and transitively call
-+     * opendir/readdir) without a deadlock. */
-+
-+    if (openmax < 0) {
-+        virReportSystemError(errno, "%s", _("sysconf(_SC_OPEN_MAX) failed"));
-+	return -1;
-+    }
-+
-+    if (!(fds = virBitmapNew(openmax)))
-+        return NULL;
-+
-+#  ifdef __linux__
-+    if (virCommandMassCloseGetFDsLinux(cmd, fds) < 0) {
-+        virBitmapFree(fds);
-+        return NULL;
-+    }
-+#  else
-+    if (virCommandMassCloseGetFDsGeneric(cmd, fds) < 0) {
-+        virBitmapFree(fds);
-+        return NULL;
-+    }
-+#  endif
-+    return fds;
-+}
-+
-+
+-# ifdef __linux__
++# if defined(__linux__) && defined(__GLIBC__)
+ /* On Linux, we can utilize procfs and read the table of opened
+  * FDs and selectively close only those FDs we don't want to pass
+  * onto child process (well, the one we will exec soon since this
+@@ -482,17 +482,7 @@ virCommandMassCloseGetFDsLinux(virCommandPtr cmd G_GNUC_UNUSED,
+     VIR_DIR_CLOSE(dp);
+     return ret;
+ }
+-
+-# else /* !__linux__ */
+-
+-static int
+-virCommandMassCloseGetFDsGeneric(virCommandPtr cmd G_GNUC_UNUSED,
+-                                 virBitmapPtr fds)
+-{
+-    virBitmapSetAll(fds);
+-    return 0;
+-}
+-# endif /* !__linux__ */
++# endif /* __linux__ && __GLIBC__ */
+ 
  # ifdef __FreeBSD__
  
- static int
- virCommandMassClose(virCommandPtr cmd,
-+                    virBitmapPtr fds G_GNUC_UNUSED,
-                     int childin,
-                     int childout,
-                     int childerr)
-@@ -550,39 +588,13 @@ virCommandMassClose(virCommandPtr cmd,
+@@ -546,7 +536,7 @@ virCommandMassClose(virCommandPtr cmd,
+     return 0;
+ }
+ 
+-# else /* ! __FreeBSD__ */
++# elif defined(__GLIBC__)  /* ! __FreeBSD__ */
  
  static int
  virCommandMassClose(virCommandPtr cmd,
-+                    virBitmapPtr fds,
-                     int childin,
-                     int childout,
-                     int childerr)
- {
--    g_autoptr(virBitmap) fds = NULL;
--    int openmax = sysconf(_SC_OPEN_MAX);
--    int fd = -1;
--
--    /* In general, it is not safe to call malloc() between fork() and exec()
--     * because the child might have forked at the worst possible time, i.e.
--     * when another thread was in malloc() and thus held its lock. That is to
--     * say, POSIX does not mandate malloc() to be async-safe. Fortunately,
--     * glibc developers are aware of this and made malloc() async-safe.
--     * Therefore we can safely allocate memory here (and transitively call
--     * opendir/readdir) without a deadlock. */
--
--    if (openmax < 0) {
--        virReportSystemError(errno, "%s", _("sysconf(_SC_OPEN_MAX) failed"));
--        return -1;
--    }
--
--    if (!(fds = virBitmapNew(openmax)))
--        return -1;
--
+@@ -574,13 +564,8 @@ virCommandMassClose(virCommandPtr cmd,
+     if (!(fds = virBitmapNew(openmax)))
+         return -1;
+ 
 -#  ifdef __linux__
--    if (virCommandMassCloseGetFDsLinux(cmd, fds) < 0)
--        return -1;
+     if (virCommandMassCloseGetFDsLinux(cmd, fds) < 0)
+         return -1;
 -#  else
 -    if (virCommandMassCloseGetFDsGeneric(cmd, fds) < 0)
 -        return -1;
 -#  endif
-+    int fd = virBitmapNextSetBit(fds, 2);
  
--    fd = virBitmapNextSetBit(fds, 2);
+     fd = virBitmapNextSetBit(fds, 2);
      for (; fd >= 0; fd = virBitmapNextSetBit(fds, fd)) {
-         if (fd == childin || fd == childout || fd == childerr)
-             continue;
-@@ -621,6 +633,7 @@ virExec(virCommandPtr cmd)
-     int ret;
-     g_autofree gid_t *groups = NULL;
-     int ngroups;
-+    virBitmapPtr fds = NULL;
+@@ -598,6 +583,61 @@ virCommandMassClose(virCommandPtr cmd,
+     return 0;
+ }
  
-     if (cmd->args[0][0] != '/') {
-         if (!(binary = binarystr = virFindFileInPath(cmd->args[0]))) {
-@@ -688,13 +701,20 @@ virExec(virCommandPtr cmd)
-     if ((ngroups = virGetGroupList(cmd->uid, cmd->gid, &groups)) < 0)
-         goto cleanup;
- 
-+    /* get fds bitmap before we fork */
-+    if ((fds = virCommandMassCloseGetFDs(cmd)) == NULL)
-+        goto cleanup;
++#else /* ! __FreeBSD__ && ! __GLIBC__ */
++static int
++virCommandMassClose(virCommandPtr cmd,
++                    int childin,
++                    int childout,
++                    int childerr)
++{
++    static struct pollfd pfds[1024];
++    int fd = 0;
++    int i, total;
++    int max_fd = sysconf(_SC_OPEN_MAX);
 +
-     pid = virFork();
- 
--    if (pid < 0)
-+    if (pid < 0) {
-+	virBitmapFree(fds);
-         goto cleanup;
++    if (max_fd < 0) {
++        virReportSystemError(errno, "%s", _("sysconf(_SC_OPEN_MAX) failed"));
++        return -1;
 +    }
++
++    total = max_fd - fd;
++    for (i = 0; i < (total < 1024 ? total : 1024); i++)
++        pfds[i].events = 0;
++
++    while (fd < max_fd) {
++        int nfds, r = 0;
++
++        total = max_fd - fd;
++        nfds =  total < 1024 ? total : 1024;
++
++        for (i = 0; i < nfds; i++)
++            pfds[i].fd = fd + i;
++
++        do {
++            r = poll(pfds, nfds, 0);
++        } while (r == -1 && errno == EINTR);
++
++        if (r < 0) {
++            virReportSystemError(errno, "%s", _("poll() failed"));
++            return -1;
++        }
++
++        for (i = 0; i < nfds; i++)
++            if (pfds[i].revents != POLLNVAL) {
++                if (pfds[i].fd == childin || pfds[i].fd == childout || pfds[i].fd == childerr)
++                    continue;
++                if (!virCommandFDIsSet(cmd, pfds[i].fd)) {
++                    VIR_MASS_CLOSE(pfds[i].fd);
++                } else if (virSetInherit(pfds[i].fd, true) < 0) {
++                    virReportSystemError(errno, _("failed to preserve fd %d"), pfds[i].fd);
++                    return -1;
++                }
++            }
++        fd += nfds;
++    }
++    return 0;
++}
++
+ # endif /* ! __FreeBSD__ */
  
-     if (pid) { /* parent */
-         VIR_FORCE_CLOSE(null);
-+	virBitmapFree(fds);
-         if (cmd->outfdptr && *cmd->outfdptr == -1) {
-             VIR_FORCE_CLOSE(pipeout[1]);
-             *cmd->outfdptr = pipeout[0];
-@@ -715,7 +735,7 @@ virExec(virCommandPtr cmd)
-         umask(cmd->mask);
-     ret = EXIT_CANCELED;
- 
--    if (virCommandMassClose(cmd, childin, childout, childerr) < 0)
-+    if (virCommandMassClose(cmd, fds, childin, childout, childerr) < 0)
-         goto fork_error;
- 
-     if (prepareStdFd(childin, STDIN_FILENO) < 0) {
+ /*
+-- 
+2.28.0
+
