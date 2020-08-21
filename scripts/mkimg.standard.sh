@@ -12,8 +12,8 @@ profile_standard() {
 	case "$ARCH" in
 	s390x)
 		apks="$apks s390-tools"
-		initfs_features="$initfs_features dasd_mod qeth"
-		initfs_cmdline="modules=loop,squashfs,dasd_mod,qeth quiet"
+		initfs_features="$initfs_features dasd_mod qeth zfcp"
+		initfs_cmdline="modules=loop,squashfs,dasd_mod,qeth,zfcp quiet"
 		;;
 	ppc64le)
 		initfs_cmdline="modules=loop,squashfs,sd-mod,usb-storage,ibmvscsi quiet"
