@@ -1,0 +1,520 @@
+From d6599f89ba558ec2a68d4bc4af15cf3513218054 Mon Sep 17 00:00:00 2001
+From: Richard Sandiford <richard.sandiford@arm.com>
+Date: Mon, 3 Aug 2020 09:48:36 +0100
+Subject: [PATCH 29/30] c: Fix bogus vector initialisation error [PR96377]
+
+One of the problems in this PR was that if we had:
+
+  vector_type1 array[] = { vector_value1 };
+
+process_init_element would only treat vector_value1 as initialising
+a vector_type1 if they had the same TYPE_MAIN_VARIANT.  This has
+several problems:
+
+(1) It gives confusing error messages if the vector types are
+    incompatible.  (Tested by gcc.dg/pr96377-1.c.)
+
+(2) It means that we reject code that should be valid with
+    -flax-vector-conversions.  (Tested by gcc.dg/pr96377-2.c.)
+
+(3) On arm and aarch64 targets, it means that we reject some
+    initializers that mix Advanced SIMD and standard GNU vectors.
+    These vectors have traditionally had different TYPE_MAIN_VARIANTs
+    because they have different mangling schemes.  (Tested by
+    gcc.dg/pr96377-[3-6].c.)
+
+(4) It means that we reject SVE initializers that should be valid.
+    (Tested by gcc.target/aarch64/sve/gnu_vectors_[34].c.)
+
+(5) After r11-1741-g:31427b974ed7b7dd54e2 we reject:
+
+      arm_neon_type1 array[] = { k ^ arm_neon_value1 };
+
+    because applying the binary operator to arm_neon_value1 strips
+    the "Advanced SIMD type" attributes that were added in that patch.
+    Stripping the attributes is problematic for other reasons though,
+    so that still needs to be fixed separately.
+
+g++.target/aarch64/sve/gnu_vectors_[34].C already pass.
+
+gcc/c/
+	PR c/96377
+	* c-typeck.c (process_init_element): Split test for whether to
+	recurse into a record, union or array into...
+	(initialize_elementwise_p): ...this new function.  Don't recurse
+	into a vector type if the initialization value is also a vector.
+
+gcc/testsuite/
+	PR c/96377
+	* gcc.dg/pr96377-1.c: New test.
+	* gcc.dg/pr96377-2.c: Likewise.
+	* gcc.dg/pr96377-3.c: Likewise.
+	* gcc.dg/pr96377-4.c: Likewise.
+	* gcc.dg/pr96377-5.c: Likewise.
+	* gcc.dg/pr96377-6.c: Likewise.
+	* gcc.target/aarch64/pr96377-1.c: Likewise.
+	* gcc.target/aarch64/sve/acle/general-c/gnu_vectors_3.c: Likewise.
+	* gcc.target/aarch64/sve/acle/general-c/gnu_vectors_4.c: Likewise.
+	* g++.target/aarch64/sve/acle/general-c++/gnu_vectors_3.C: Likewise.
+	* g++.target/aarch64/sve/acle/general-c++/gnu_vectors_4.C: Likewise.
+
+(cherry picked from commit 7d599ad27b9bcf5165f87710f1abc64bbabd06ae)
+---
+ gcc/c/c-typeck.c                              | 59 ++++++++++++++-----
+ .../sve/acle/general-c++/gnu_vectors_3.C      | 15 +++++
+ .../sve/acle/general-c++/gnu_vectors_4.C      | 15 +++++
+ gcc/testsuite/gcc.dg/pr96377-1.c              | 32 ++++++++++
+ gcc/testsuite/gcc.dg/pr96377-2.c              | 31 ++++++++++
+ gcc/testsuite/gcc.dg/pr96377-3.c              | 33 +++++++++++
+ gcc/testsuite/gcc.dg/pr96377-4.c              | 32 ++++++++++
+ gcc/testsuite/gcc.dg/pr96377-5.c              | 33 +++++++++++
+ gcc/testsuite/gcc.dg/pr96377-6.c              | 32 ++++++++++
+ gcc/testsuite/gcc.target/aarch64/pr96377-1.c  | 20 +++++++
+ .../sve/acle/general-c/gnu_vectors_3.c        | 15 +++++
+ .../sve/acle/general-c/gnu_vectors_4.c        | 15 +++++
+ 12 files changed, 317 insertions(+), 15 deletions(-)
+ create mode 100644 gcc/testsuite/g++.target/aarch64/sve/acle/general-c++/gnu_vectors_3.C
+ create mode 100644 gcc/testsuite/g++.target/aarch64/sve/acle/general-c++/gnu_vectors_4.C
+ create mode 100644 gcc/testsuite/gcc.dg/pr96377-1.c
+ create mode 100644 gcc/testsuite/gcc.dg/pr96377-2.c
+ create mode 100644 gcc/testsuite/gcc.dg/pr96377-3.c
+ create mode 100644 gcc/testsuite/gcc.dg/pr96377-4.c
+ create mode 100644 gcc/testsuite/gcc.dg/pr96377-5.c
+ create mode 100644 gcc/testsuite/gcc.dg/pr96377-6.c
+ create mode 100644 gcc/testsuite/gcc.target/aarch64/pr96377-1.c
+ create mode 100644 gcc/testsuite/gcc.target/aarch64/sve/acle/general-c/gnu_vectors_3.c
+ create mode 100644 gcc/testsuite/gcc.target/aarch64/sve/acle/general-c/gnu_vectors_4.c
+
+diff --git a/gcc/c/c-typeck.c b/gcc/c/c-typeck.c
+index eb4b641e6bb..58762f10a93 100644
+--- a/gcc/c/c-typeck.c
++++ b/gcc/c/c-typeck.c
+@@ -9910,6 +9910,47 @@ output_pending_init_elements (int all, struct obstack * braced_init_obstack)
+   goto retry;
+ }
+ 
++/* Expression VALUE coincides with the start of type TYPE in a braced
++   initializer.  Return true if we should treat VALUE as initializing
++   the first element of TYPE, false if we should treat it as initializing
++   TYPE as a whole.
++
++   If the initializer is clearly invalid, the question becomes:
++   which choice gives the best error message?  */
++
++static bool
++initialize_elementwise_p (tree type, tree value)
++{
++  if (type == error_mark_node || value == error_mark_node)
++    return false;
++
++  gcc_checking_assert (TYPE_MAIN_VARIANT (type) == type);
++
++  tree value_type = TREE_TYPE (value);
++  if (value_type == error_mark_node)
++    return false;
++
++  /* GNU vectors can be initialized elementwise.  However, treat any
++     kind of vector value as initializing the vector type as a whole,
++     regardless of whether the value is a GNU vector.  Such initializers
++     are valid if and only if they would have been valid in a non-braced
++     initializer like:
++
++	TYPE foo = VALUE;
++
++     so recursing into the vector type would be at best confusing or at
++     worst wrong.  For example, when -flax-vector-conversions is in effect,
++     it's possible to initialize a V8HI from a V4SI, even though the vectors
++     have different element types and different numbers of elements.  */
++  if (gnu_vector_type_p (type))
++    return !VECTOR_TYPE_P (value_type);
++
++  if (AGGREGATE_TYPE_P (type))
++    return type != TYPE_MAIN_VARIANT (value_type);
++
++  return false;
++}
++
+ /* Add one non-braced element to the current constructor level.
+    This adjusts the current position within the constructor's type.
+    This may also start or terminate implicit levels
+@@ -10089,11 +10130,7 @@ process_init_element (location_t loc, struct c_expr value, bool implicit,
+ 	  /* Otherwise, if we have come to a subaggregate,
+ 	     and we don't have an element of its type, push into it.  */
+ 	  else if (value.value != NULL_TREE
+-		   && value.value != error_mark_node
+-		   && TYPE_MAIN_VARIANT (TREE_TYPE (value.value)) != fieldtype
+-		   && (fieldcode == RECORD_TYPE || fieldcode == ARRAY_TYPE
+-		       || fieldcode == UNION_TYPE
+-		       || gnu_vector_type_p (fieldtype)))
++		   && initialize_elementwise_p (fieldtype, value.value))
+ 	    {
+ 	      push_init_level (loc, 1, braced_init_obstack);
+ 	      continue;
+@@ -10181,11 +10218,7 @@ process_init_element (location_t loc, struct c_expr value, bool implicit,
+ 	  /* Otherwise, if we have come to a subaggregate,
+ 	     and we don't have an element of its type, push into it.  */
+ 	  else if (value.value != NULL_TREE
+-		   && value.value != error_mark_node
+-		   && TYPE_MAIN_VARIANT (TREE_TYPE (value.value)) != fieldtype
+-		   && (fieldcode == RECORD_TYPE || fieldcode == ARRAY_TYPE
+-		       || fieldcode == UNION_TYPE
+-		       || gnu_vector_type_p (fieldtype)))
++		   && initialize_elementwise_p (fieldtype, value.value))
+ 	    {
+ 	      push_init_level (loc, 1, braced_init_obstack);
+ 	      continue;
+@@ -10224,11 +10257,7 @@ process_init_element (location_t loc, struct c_expr value, bool implicit,
+ 	  /* Otherwise, if we have come to a subaggregate,
+ 	     and we don't have an element of its type, push into it.  */
+ 	  else if (value.value != NULL_TREE
+-		   && value.value != error_mark_node
+-		   && TYPE_MAIN_VARIANT (TREE_TYPE (value.value)) != elttype
+-		   && (eltcode == RECORD_TYPE || eltcode == ARRAY_TYPE
+-		       || eltcode == UNION_TYPE
+-		       || gnu_vector_type_p (elttype)))
++		   && initialize_elementwise_p (elttype, value.value))
+ 	    {
+ 	      push_init_level (loc, 1, braced_init_obstack);
+ 	      continue;
+diff --git a/gcc/testsuite/g++.target/aarch64/sve/acle/general-c++/gnu_vectors_3.C b/gcc/testsuite/g++.target/aarch64/sve/acle/general-c++/gnu_vectors_3.C
+new file mode 100644
+index 00000000000..e607d58d726
+--- /dev/null
++++ b/gcc/testsuite/g++.target/aarch64/sve/acle/general-c++/gnu_vectors_3.C
+@@ -0,0 +1,15 @@
++/* { dg-options "-msve-vector-bits=256" } */
++
++#include <arm_sve.h>
++
++typedef uint8_t gnu_uint8_t __attribute__ ((vector_size (32)));
++typedef int8_t gnu_int8_t __attribute__ ((vector_size (32)));
++
++void
++f (svuint8_t sve_u1, svint8_t sve_s1,
++   gnu_uint8_t gnu_u1, gnu_int8_t gnu_s1)
++{
++  gnu_uint8_t arr1[] = { gnu_u1, sve_u1 };
++  gnu_uint8_t arr2[] = { gnu_s1 }; // { dg-error "cannot convert" }
++  gnu_uint8_t arr3[] = { sve_s1 }; // { dg-error "cannot convert" }
++}
+diff --git a/gcc/testsuite/g++.target/aarch64/sve/acle/general-c++/gnu_vectors_4.C b/gcc/testsuite/g++.target/aarch64/sve/acle/general-c++/gnu_vectors_4.C
+new file mode 100644
+index 00000000000..ac4e0d12ff8
+--- /dev/null
++++ b/gcc/testsuite/g++.target/aarch64/sve/acle/general-c++/gnu_vectors_4.C
+@@ -0,0 +1,15 @@
++/* { dg-options "-msve-vector-bits=256 -flax-vector-conversions" } */
++
++#include <arm_sve.h>
++
++typedef uint8_t gnu_uint8_t __attribute__ ((vector_size (32)));
++typedef int8_t gnu_int8_t __attribute__ ((vector_size (32)));
++
++void
++f (svuint8_t sve_u1, svint8_t sve_s1,
++   gnu_uint8_t gnu_u1, gnu_int8_t gnu_s1)
++{
++  gnu_uint8_t arr1[] = { gnu_u1, sve_u1 };
++  gnu_uint8_t arr2[] = { gnu_s1 };
++  gnu_uint8_t arr3[] = { sve_s1 };
++}
+diff --git a/gcc/testsuite/gcc.dg/pr96377-1.c b/gcc/testsuite/gcc.dg/pr96377-1.c
+new file mode 100644
+index 00000000000..2bf3f816331
+--- /dev/null
++++ b/gcc/testsuite/gcc.dg/pr96377-1.c
+@@ -0,0 +1,32 @@
++/* { dg-options "-fno-lax-vector-conversions" } */
++/* { dg-message "use '-flax-vector-conversions' to permit conversions" "" { target *-*-* } 0 } */
++
++typedef int v4si __attribute__((vector_size(16)));
++typedef short v8hi __attribute__((vector_size(16)));
++
++struct s { v8hi x; v4si y; };
++union u1 { v8hi x; v4si y; };
++union u2 { v4si s; v8hi y; };
++
++void
++foo (v4si i, v8hi h)
++{
++  struct s x1 = { i, i }; // { dg-error "incompatible types when initializing type '__vector" }
++  struct s x2 = { h, h }; // { dg-error "incompatible types" }
++  struct s x3 = { i, h }; // { dg-error "incompatible types" }
++  struct s x4 = { h, i };
++
++  union u1 y1 = { i }; // { dg-error "incompatible types" }
++  union u1 y2 = { h };
++  union u2 y3 = { i };
++  union u2 y4 = { h }; // { dg-error "incompatible types" }
++
++  v4si z1[] = { i, i };
++  v4si z2[] = { i, h }; // { dg-error "incompatible types" }
++  v4si z3[] = { h, i }; // { dg-error "incompatible types" }
++  v4si z4[] = { h, h }; // { dg-error "incompatible types" }
++  v8hi z5[] = { i, i }; // { dg-error "incompatible types" }
++  v8hi z6[] = { i, h }; // { dg-error "incompatible types" }
++  v8hi z7[] = { h, i }; // { dg-error "incompatible types" }
++  v8hi z8[] = { h, h };
++}
+diff --git a/gcc/testsuite/gcc.dg/pr96377-2.c b/gcc/testsuite/gcc.dg/pr96377-2.c
+new file mode 100644
+index 00000000000..f58b06d9076
+--- /dev/null
++++ b/gcc/testsuite/gcc.dg/pr96377-2.c
+@@ -0,0 +1,31 @@
++/* { dg-options "-flax-vector-conversions" } */
++
++typedef int v4si __attribute__((vector_size(16)));
++typedef short v8hi __attribute__((vector_size(16)));
++
++struct s { v8hi x; v4si y; };
++union u1 { v8hi x; v4si y; };
++union u2 { v4si s; v8hi y; };
++
++void
++foo (v4si i, v8hi h)
++{
++  struct s x1 = { i, i };
++  struct s x2 = { h, h };
++  struct s x3 = { i, h };
++  struct s x4 = { h, i };
++
++  union u1 y1 = { i };
++  union u1 y2 = { h };
++  union u2 y3 = { i };
++  union u2 y4 = { h };
++
++  v4si z1[] = { i, i };
++  v4si z2[] = { i, h };
++  v4si z3[] = { h, i };
++  v4si z4[] = { h, h };
++  v8hi z5[] = { i, i };
++  v8hi z6[] = { i, h };
++  v8hi z7[] = { h, i };
++  v8hi z8[] = { h, h };
++}
+diff --git a/gcc/testsuite/gcc.dg/pr96377-3.c b/gcc/testsuite/gcc.dg/pr96377-3.c
+new file mode 100644
+index 00000000000..66dce01f277
+--- /dev/null
++++ b/gcc/testsuite/gcc.dg/pr96377-3.c
+@@ -0,0 +1,33 @@
++/* { dg-do compile { target aarch64*-*-* } } */
++/* { dg-options "-fno-lax-vector-conversions" } */
++/* { dg-message "use '-flax-vector-conversions' to permit conversions" "" { target *-*-* } 0 } */
++
++typedef int v4si __attribute__((vector_size(16)));
++typedef short v8hi __attribute__((vector_size(16)));
++
++struct s { v8hi x; v4si y; };
++union u1 { v8hi x; v4si y; };
++union u2 { v4si s; v8hi y; };
++
++void
++foo (__Int32x4_t i, __Int16x8_t h)
++{
++  struct s x1 = { i, i }; // { dg-error "incompatible types when initializing type '__vector" }
++  struct s x2 = { h, h }; // { dg-error "incompatible types" }
++  struct s x3 = { i, h }; // { dg-error "incompatible types" }
++  struct s x4 = { h, i };
++
++  union u1 y1 = { i }; // { dg-error "incompatible types" }
++  union u1 y2 = { h };
++  union u2 y3 = { i };
++  union u2 y4 = { h }; // { dg-error "incompatible types" }
++
++  v4si z1[] = { i, i };
++  v4si z2[] = { i, h }; // { dg-error "incompatible types" }
++  v4si z3[] = { h, i }; // { dg-error "incompatible types" }
++  v4si z4[] = { h, h }; // { dg-error "incompatible types" }
++  v8hi z5[] = { i, i }; // { dg-error "incompatible types" }
++  v8hi z6[] = { i, h }; // { dg-error "incompatible types" }
++  v8hi z7[] = { h, i }; // { dg-error "incompatible types" }
++  v8hi z8[] = { h, h };
++}
+diff --git a/gcc/testsuite/gcc.dg/pr96377-4.c b/gcc/testsuite/gcc.dg/pr96377-4.c
+new file mode 100644
+index 00000000000..f7aaf490031
+--- /dev/null
++++ b/gcc/testsuite/gcc.dg/pr96377-4.c
+@@ -0,0 +1,32 @@
++/* { dg-do compile { target aarch64*-*-* } } */
++/* { dg-options "-flax-vector-conversions" } */
++
++typedef int v4si __attribute__((vector_size(16)));
++typedef short v8hi __attribute__((vector_size(16)));
++
++struct s { v8hi x; v4si y; };
++union u1 { v8hi x; v4si y; };
++union u2 { v4si s; v8hi y; };
++
++void
++foo (__Int32x4_t i, __Int16x8_t h)
++{
++  struct s x1 = { i, i };
++  struct s x2 = { h, h };
++  struct s x3 = { i, h };
++  struct s x4 = { h, i };
++
++  union u1 y1 = { i };
++  union u1 y2 = { h };
++  union u2 y3 = { i };
++  union u2 y4 = { h };
++
++  v4si z1[] = { i, i };
++  v4si z2[] = { i, h };
++  v4si z3[] = { h, i };
++  v4si z4[] = { h, h };
++  v8hi z5[] = { i, i };
++  v8hi z6[] = { i, h };
++  v8hi z7[] = { h, i };
++  v8hi z8[] = { h, h };
++}
+diff --git a/gcc/testsuite/gcc.dg/pr96377-5.c b/gcc/testsuite/gcc.dg/pr96377-5.c
+new file mode 100644
+index 00000000000..3d0c24befa6
+--- /dev/null
++++ b/gcc/testsuite/gcc.dg/pr96377-5.c
+@@ -0,0 +1,33 @@
++/* { dg-do compile { target aarch64*-*-* } } */
++/* { dg-options "-fno-lax-vector-conversions" } */
++/* { dg-message "use '-flax-vector-conversions' to permit conversions" "" { target *-*-* } 0 } */
++
++typedef int v4si __attribute__((vector_size(16)));
++typedef short v8hi __attribute__((vector_size(16)));
++
++struct s { __Int16x8_t x; __Int32x4_t y; };
++union u1 { __Int16x8_t x; __Int32x4_t y; };
++union u2 { __Int32x4_t s; __Int16x8_t y; };
++
++void
++foo (v4si i, v8hi h)
++{
++  struct s x1 = { i, i }; // { dg-error "incompatible types when initializing type '__Int16x8_t" }
++  struct s x2 = { h, h }; // { dg-error "incompatible types" }
++  struct s x3 = { i, h }; // { dg-error "incompatible types" }
++  struct s x4 = { h, i };
++
++  union u1 y1 = { i }; // { dg-error "incompatible types" }
++  union u1 y2 = { h };
++  union u2 y3 = { i };
++  union u2 y4 = { h }; // { dg-error "incompatible types" }
++
++  v4si z1[] = { i, i };
++  v4si z2[] = { i, h }; // { dg-error "incompatible types" }
++  v4si z3[] = { h, i }; // { dg-error "incompatible types" }
++  v4si z4[] = { h, h }; // { dg-error "incompatible types" }
++  v8hi z5[] = { i, i }; // { dg-error "incompatible types" }
++  v8hi z6[] = { i, h }; // { dg-error "incompatible types" }
++  v8hi z7[] = { h, i }; // { dg-error "incompatible types" }
++  v8hi z8[] = { h, h };
++}
+diff --git a/gcc/testsuite/gcc.dg/pr96377-6.c b/gcc/testsuite/gcc.dg/pr96377-6.c
+new file mode 100644
+index 00000000000..165327fa292
+--- /dev/null
++++ b/gcc/testsuite/gcc.dg/pr96377-6.c
+@@ -0,0 +1,32 @@
++/* { dg-do compile { target aarch64*-*-* } } */
++/* { dg-options "-flax-vector-conversions" } */
++
++typedef int v4si __attribute__((vector_size(16)));
++typedef short v8hi __attribute__((vector_size(16)));
++
++struct s { __Int16x8_t x; __Int32x4_t y; };
++union u1 { __Int16x8_t x; __Int32x4_t y; };
++union u2 { __Int32x4_t s; __Int16x8_t y; };
++
++void
++foo (v4si i, v8hi h)
++{
++  struct s x1 = { i, i };
++  struct s x2 = { h, h };
++  struct s x3 = { i, h };
++  struct s x4 = { h, i };
++
++  union u1 y1 = { i };
++  union u1 y2 = { h };
++  union u2 y3 = { i };
++  union u2 y4 = { h };
++
++  v4si z1[] = { i, i };
++  v4si z2[] = { i, h };
++  v4si z3[] = { h, i };
++  v4si z4[] = { h, h };
++  v8hi z5[] = { i, i };
++  v8hi z6[] = { i, h };
++  v8hi z7[] = { h, i };
++  v8hi z8[] = { h, h };
++}
+diff --git a/gcc/testsuite/gcc.target/aarch64/pr96377-1.c b/gcc/testsuite/gcc.target/aarch64/pr96377-1.c
+new file mode 100644
+index 00000000000..51e3e36edfc
+--- /dev/null
++++ b/gcc/testsuite/gcc.target/aarch64/pr96377-1.c
+@@ -0,0 +1,20 @@
++/* { dg-options "" } */
++
++#include <arm_neon.h>
++
++struct aegis128_state {
++ uint8x16_t v[5];
++};
++
++void foo(const void *key, const void *iv, const void *const0, const void *const1)
++{
++ uint8x16_t k = vld1q_u8(key);
++ uint8x16_t kiv = k ^ vld1q_u8(iv);
++ struct aegis128_state st = {{
++  kiv,
++  vld1q_u8(const1),
++  vld1q_u8(const0),
++  k ^ vld1q_u8(const0),
++  k ^ vld1q_u8(const1),
++ }};
++}
+diff --git a/gcc/testsuite/gcc.target/aarch64/sve/acle/general-c/gnu_vectors_3.c b/gcc/testsuite/gcc.target/aarch64/sve/acle/general-c/gnu_vectors_3.c
+new file mode 100644
+index 00000000000..0f1a2b0e46b
+--- /dev/null
++++ b/gcc/testsuite/gcc.target/aarch64/sve/acle/general-c/gnu_vectors_3.c
+@@ -0,0 +1,15 @@
++/* { dg-options "-msve-vector-bits=256" } */
++
++#include <arm_sve.h>
++
++typedef uint8_t gnu_uint8_t __attribute__ ((vector_size (32)));
++typedef int8_t gnu_int8_t __attribute__ ((vector_size (32)));
++
++void
++f (svuint8_t sve_u1, svint8_t sve_s1,
++   gnu_uint8_t gnu_u1, gnu_int8_t gnu_s1)
++{
++  gnu_uint8_t arr1[] = { gnu_u1, sve_u1 };
++  gnu_uint8_t arr2[] = { gnu_s1 }; // { dg-error "incompatible types" }
++  gnu_uint8_t arr3[] = { sve_s1 }; // { dg-error "incompatible types" }
++}
+diff --git a/gcc/testsuite/gcc.target/aarch64/sve/acle/general-c/gnu_vectors_4.c b/gcc/testsuite/gcc.target/aarch64/sve/acle/general-c/gnu_vectors_4.c
+new file mode 100644
+index 00000000000..ac4e0d12ff8
+--- /dev/null
++++ b/gcc/testsuite/gcc.target/aarch64/sve/acle/general-c/gnu_vectors_4.c
+@@ -0,0 +1,15 @@
++/* { dg-options "-msve-vector-bits=256 -flax-vector-conversions" } */
++
++#include <arm_sve.h>
++
++typedef uint8_t gnu_uint8_t __attribute__ ((vector_size (32)));
++typedef int8_t gnu_int8_t __attribute__ ((vector_size (32)));
++
++void
++f (svuint8_t sve_u1, svint8_t sve_s1,
++   gnu_uint8_t gnu_u1, gnu_int8_t gnu_s1)
++{
++  gnu_uint8_t arr1[] = { gnu_u1, sve_u1 };
++  gnu_uint8_t arr2[] = { gnu_s1 };
++  gnu_uint8_t arr3[] = { sve_s1 };
++}
+-- 
+2.27.0
+
