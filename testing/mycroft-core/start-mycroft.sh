@@ -63,8 +63,15 @@ launch_background() {
 		echo "         8181 with a firewall as appropriate."
 	fi
 
-	# Launch process in background, sending logs to standard location
-	${_module} "$_params" >> /var/log/mycroft/"${1}".log 2>&1 &
+	# Launch process in background
+	# Send logs to XDG Base Directories cache location
+	if [ ! -z ${XDG_CACHE_HOME+x} ]; then
+		logdir="$XDG_CACHE_HOME/mycroft/${1}.log"
+	else
+		logdir="$HOME/.cache/mycroft/${1}.log"
+	fi
+
+	${_module} "$_params" >> "$logdir" 2>&1 &
 }
 
 launch_all() {
