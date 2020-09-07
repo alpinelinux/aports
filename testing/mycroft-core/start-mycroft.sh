@@ -65,13 +65,17 @@ launch_background() {
 
 	# Launch process in background
 	# Send logs to XDG Base Directories cache location
-	if [ ! -z ${XDG_CACHE_HOME+x} ]; then
-		logdir="$XDG_CACHE_HOME/mycroft/${1}.log"
+	if [ -n "${XDG_CACHE_HOME+x}" ]; then
+		logdir="$XDG_CACHE_HOME/mycroft"
 	else
-		logdir="$HOME/.cache/mycroft/${1}.log"
+		logdir="$HOME/.cache/mycroft"
 	fi
 
-	${_module} "$_params" >> "$logdir" 2>&1 &
+	if [ ! -d "$logdir" ]; then
+		mkdir -p "$logdir"
+	fi
+
+	${_module} "$_params" >> "$logdir/${1}.log" 2>&1 &
 }
 
 launch_all() {
