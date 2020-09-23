@@ -1,0 +1,203 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: evtchn: arrange for preemption in evtchn_reset()
+
+Like for evtchn_destroy() looping over all possible event channels to
+close them can take a significant amount of time. Unlike done there, we
+can't alter domain properties (i.e. d->valid_evtchns) here. Borrow, in a
+lightweight form, the paging domctl continuation concept, redirecting
+the continuations to different sub-ops. Just like there this is to be
+able to allow for predictable overall results of the involved sub-ops:
+Racing requests should either complete or be refused.
+
+Note that a domain can't interfere with an already started (by a remote
+domain) reset, due to being paused. It can prevent a remote reset from
+happening by leaving a reset unfinished, but that's only going to affect
+itself.
+
+This is part of XSA-344.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: Julien Grall <jgrall@amazon.com>
+Reviewed-by: Stefano Stabellini <sstabellini@kernel.org>
+
+--- a/xen/common/domain.c
++++ b/xen/common/domain.c
+@@ -1214,7 +1214,7 @@ void domain_unpause_except_self(struct d
+         domain_unpause(d);
+ }
+ 
+-int domain_soft_reset(struct domain *d)
++int domain_soft_reset(struct domain *d, bool resuming)
+ {
+     struct vcpu *v;
+     int rc;
+@@ -1228,7 +1228,7 @@ int domain_soft_reset(struct domain *d)
+         }
+     spin_unlock(&d->shutdown_lock);
+ 
+-    rc = evtchn_reset(d);
++    rc = evtchn_reset(d, resuming);
+     if ( rc )
+         return rc;
+ 
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -572,12 +572,22 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+     }
+ 
+     case XEN_DOMCTL_soft_reset:
++    case XEN_DOMCTL_soft_reset_cont:
+         if ( d == current->domain ) /* no domain_pause() */
+         {
+             ret = -EINVAL;
+             break;
+         }
+-        ret = domain_soft_reset(d);
++        ret = domain_soft_reset(d, op->cmd == XEN_DOMCTL_soft_reset_cont);
++        if ( ret == -ERESTART )
++        {
++            op->cmd = XEN_DOMCTL_soft_reset_cont;
++            if ( !__copy_field_to_guest(u_domctl, op, cmd) )
++                ret = hypercall_create_continuation(__HYPERVISOR_domctl,
++                                                    "h", u_domctl);
++            else
++                ret = -EFAULT;
++        }
+         break;
+ 
+     case XEN_DOMCTL_destroydomain:
+--- a/xen/common/event_channel.c
++++ b/xen/common/event_channel.c
+@@ -1057,7 +1057,7 @@ int evtchn_unmask(unsigned int port)
+     return 0;
+ }
+ 
+-int evtchn_reset(struct domain *d)
++int evtchn_reset(struct domain *d, bool resuming)
+ {
+     unsigned int i;
+     int rc = 0;
+@@ -1065,11 +1065,40 @@ int evtchn_reset(struct domain *d)
+     if ( d != current->domain && !d->controller_pause_count )
+         return -EINVAL;
+ 
+-    for ( i = 0; port_is_valid(d, i); i++ )
++    spin_lock(&d->event_lock);
++
++    /*
++     * If we are resuming, then start where we stopped. Otherwise, check
++     * that a reset operation is not already in progress, and if none is,
++     * record that this is now the case.
++     */
++    i = resuming ? d->next_evtchn : !d->next_evtchn;
++    if ( i > d->next_evtchn )
++        d->next_evtchn = i;
++
++    spin_unlock(&d->event_lock);
++
++    if ( !i )
++        return -EBUSY;
++
++    for ( ; port_is_valid(d, i); i++ )
++    {
+         evtchn_close(d, i, 1);
+ 
++        /* NB: Choice of frequency is arbitrary. */
++        if ( !(i & 0x3f) && hypercall_preempt_check() )
++        {
++            spin_lock(&d->event_lock);
++            d->next_evtchn = i;
++            spin_unlock(&d->event_lock);
++            return -ERESTART;
++        }
++    }
++
+     spin_lock(&d->event_lock);
+ 
++    d->next_evtchn = 0;
++
+     if ( d->active_evtchns > d->xen_evtchns )
+         rc = -EAGAIN;
+     else if ( d->evtchn_fifo )
+@@ -1204,7 +1233,8 @@ long do_event_channel_op(int cmd, XEN_GU
+         break;
+     }
+ 
+-    case EVTCHNOP_reset: {
++    case EVTCHNOP_reset:
++    case EVTCHNOP_reset_cont: {
+         struct evtchn_reset reset;
+         struct domain *d;
+ 
+@@ -1217,9 +1247,13 @@ long do_event_channel_op(int cmd, XEN_GU
+ 
+         rc = xsm_evtchn_reset(XSM_TARGET, current->domain, d);
+         if ( !rc )
+-            rc = evtchn_reset(d);
++            rc = evtchn_reset(d, cmd == EVTCHNOP_reset_cont);
+ 
+         rcu_unlock_domain(d);
++
++        if ( rc == -ERESTART )
++            rc = hypercall_create_continuation(__HYPERVISOR_event_channel_op,
++                                               "ih", EVTCHNOP_reset_cont, arg);
+         break;
+     }
+ 
+--- a/xen/include/public/domctl.h
++++ b/xen/include/public/domctl.h
+@@ -1152,7 +1152,10 @@ struct xen_domctl {
+ #define XEN_DOMCTL_iomem_permission              20
+ #define XEN_DOMCTL_ioport_permission             21
+ #define XEN_DOMCTL_hypercall_init                22
+-#define XEN_DOMCTL_arch_setup                    23 /* Obsolete IA64 only */
++#ifdef __XEN__
++/* #define XEN_DOMCTL_arch_setup                 23 Obsolete IA64 only */
++#define XEN_DOMCTL_soft_reset_cont               23
++#endif
+ #define XEN_DOMCTL_settimeoffset                 24
+ #define XEN_DOMCTL_getvcpuaffinity               25
+ #define XEN_DOMCTL_real_mode_area                26 /* Obsolete PPC only */
+--- a/xen/include/public/event_channel.h
++++ b/xen/include/public/event_channel.h
+@@ -74,6 +74,9 @@
+ #define EVTCHNOP_init_control    11
+ #define EVTCHNOP_expand_array    12
+ #define EVTCHNOP_set_priority    13
++#ifdef __XEN__
++#define EVTCHNOP_reset_cont      14
++#endif
+ /* ` } */
+ 
+ typedef uint32_t evtchn_port_t;
+--- a/xen/include/xen/event.h
++++ b/xen/include/xen/event.h
+@@ -171,7 +171,7 @@ void evtchn_check_pollers(struct domain
+ void evtchn_2l_init(struct domain *d);
+ 
+ /* Close all event channels and reset to 2-level ABI. */
+-int evtchn_reset(struct domain *d);
++int evtchn_reset(struct domain *d, bool resuming);
+ 
+ /*
+  * Low-level event channel port ops.
+--- a/xen/include/xen/sched.h
++++ b/xen/include/xen/sched.h
+@@ -394,6 +394,8 @@ struct domain
+      * EVTCHNOP_reset).  Read/write access like for active_evtchns.
+      */
+     unsigned int     xen_evtchns;
++    /* Port to resume from in evtchn_reset(), when in a continuation. */
++    unsigned int     next_evtchn;
+     spinlock_t       event_lock;
+     const struct evtchn_port_ops *evtchn_port_ops;
+     struct evtchn_fifo_domain *evtchn_fifo;
+@@ -663,7 +665,7 @@ int domain_shutdown(struct domain *d, u8
+ void domain_resume(struct domain *d);
+ void domain_pause_for_debugger(void);
+ 
+-int domain_soft_reset(struct domain *d);
++int domain_soft_reset(struct domain *d, bool resuming);
+ 
+ int vcpu_start_shutdown_deferral(struct vcpu *v);
+ void vcpu_end_shutdown_deferral(struct vcpu *v);
