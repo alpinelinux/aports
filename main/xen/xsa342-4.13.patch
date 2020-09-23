@@ -1,0 +1,145 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: evtchn/x86: enforce correct upper limit for 32-bit guests
+
+The recording of d->max_evtchns in evtchn_2l_init(), in particular with
+the limited set of callers of the function, is insufficient. Neither for
+PV nor for HVM guests the bitness is known at domain_create() time, yet
+the upper bound in 2-level mode depends upon guest bitness. Recording
+too high a limit "allows" x86 32-bit domains to open not properly usable
+event channels, management of which (inside Xen) would then result in
+corruption of the shared info and vCPU info structures.
+
+Keep the upper limit dynamic for the 2-level case, introducing a helper
+function to retrieve the effective limit. This helper is now supposed to
+be private to the event channel code. The used in do_poll() and
+domain_dump_evtchn_info() weren't consistent with port uses elsewhere
+and hence get switched to port_is_valid().
+
+Furthermore FIFO mode's setup_ports() gets adjusted to loop only up to
+the prior ABI limit, rather than all the way up to the new one.
+
+Finally a word on the change to do_poll(): Accessing ->max_evtchns
+without holding a suitable lock was never safe, as it as well as
+->evtchn_port_ops may change behind do_poll()'s back. Using
+port_is_valid() instead widens some the window for potential abuse,
+until we've dealt with the race altogether (see XSA-343).
+
+This is XSA-342.
+
+Reported-by: Julien Grall <jgrall@amazon.com>
+Fixes: 48974e6ce52e ("evtchn: use a per-domain variable for the max number of event channels")
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Stefano Stabellini <sstabellini@kernel.org>
+Reviewed-by: Julien Grall <jgrall@amazon.com>
+
+--- a/xen/common/event_2l.c
++++ b/xen/common/event_2l.c
+@@ -103,7 +103,6 @@ static const struct evtchn_port_ops evtc
+ void evtchn_2l_init(struct domain *d)
+ {
+     d->evtchn_port_ops = &evtchn_port_ops_2l;
+-    d->max_evtchns = BITS_PER_EVTCHN_WORD(d) * BITS_PER_EVTCHN_WORD(d);
+ }
+ 
+ /*
+--- a/xen/common/event_channel.c
++++ b/xen/common/event_channel.c
+@@ -151,7 +151,7 @@ static void free_evtchn_bucket(struct do
+ 
+ int evtchn_allocate_port(struct domain *d, evtchn_port_t port)
+ {
+-    if ( port > d->max_evtchn_port || port >= d->max_evtchns )
++    if ( port > d->max_evtchn_port || port >= max_evtchns(d) )
+         return -ENOSPC;
+ 
+     if ( port_is_valid(d, port) )
+@@ -1396,13 +1396,11 @@ static void domain_dump_evtchn_info(stru
+ 
+     spin_lock(&d->event_lock);
+ 
+-    for ( port = 1; port < d->max_evtchns; ++port )
++    for ( port = 1; port_is_valid(d, port); ++port )
+     {
+         const struct evtchn *chn;
+         char *ssid;
+ 
+-        if ( !port_is_valid(d, port) )
+-            continue;
+         chn = evtchn_from_port(d, port);
+         if ( chn->state == ECS_FREE )
+             continue;
+--- a/xen/common/event_fifo.c
++++ b/xen/common/event_fifo.c
+@@ -478,7 +478,7 @@ static void cleanup_event_array(struct d
+     d->evtchn_fifo = NULL;
+ }
+ 
+-static void setup_ports(struct domain *d)
++static void setup_ports(struct domain *d, unsigned int prev_evtchns)
+ {
+     unsigned int port;
+ 
+@@ -488,7 +488,7 @@ static void setup_ports(struct domain *d
+      * - save its pending state.
+      * - set default priority.
+      */
+-    for ( port = 1; port < d->max_evtchns; port++ )
++    for ( port = 1; port < prev_evtchns; port++ )
+     {
+         struct evtchn *evtchn;
+ 
+@@ -546,6 +546,8 @@ int evtchn_fifo_init_control(struct evtc
+     if ( !d->evtchn_fifo )
+     {
+         struct vcpu *vcb;
++        /* Latch the value before it changes during setup_event_array(). */
++        unsigned int prev_evtchns = max_evtchns(d);
+ 
+         for_each_vcpu ( d, vcb ) {
+             rc = setup_control_block(vcb);
+@@ -562,8 +564,7 @@ int evtchn_fifo_init_control(struct evtc
+             goto error;
+ 
+         d->evtchn_port_ops = &evtchn_port_ops_fifo;
+-        d->max_evtchns = EVTCHN_FIFO_NR_CHANNELS;
+-        setup_ports(d);
++        setup_ports(d, prev_evtchns);
+     }
+     else
+         rc = map_control_block(v, gfn, offset);
+--- a/xen/common/schedule.c
++++ b/xen/common/schedule.c
+@@ -1434,7 +1434,7 @@ static long do_poll(struct sched_poll *s
+             goto out;
+ 
+         rc = -EINVAL;
+-        if ( port >= d->max_evtchns )
++        if ( !port_is_valid(d, port) )
+             goto out;
+ 
+         rc = 0;
+--- a/xen/include/xen/event.h
++++ b/xen/include/xen/event.h
+@@ -105,6 +105,12 @@ void notify_via_xen_event_channel(struct
+ #define bucket_from_port(d, p) \
+     ((group_from_port(d, p))[((p) % EVTCHNS_PER_GROUP) / EVTCHNS_PER_BUCKET])
+ 
++static inline unsigned int max_evtchns(const struct domain *d)
++{
++    return d->evtchn_fifo ? EVTCHN_FIFO_NR_CHANNELS
++                          : BITS_PER_EVTCHN_WORD(d) * BITS_PER_EVTCHN_WORD(d);
++}
++
+ static inline bool_t port_is_valid(struct domain *d, unsigned int p)
+ {
+     if ( p >= read_atomic(&d->valid_evtchns) )
+--- a/xen/include/xen/sched.h
++++ b/xen/include/xen/sched.h
+@@ -382,7 +382,6 @@ struct domain
+     /* Event channel information. */
+     struct evtchn   *evtchn;                         /* first bucket only */
+     struct evtchn  **evtchn_group[NR_EVTCHN_GROUPS]; /* all other buckets */
+-    unsigned int     max_evtchns;     /* number supported by ABI */
+     unsigned int     max_evtchn_port; /* max permitted port number */
+     unsigned int     valid_evtchns;   /* number of allocated event channels */
+     spinlock_t       event_lock;
