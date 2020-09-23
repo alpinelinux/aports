@@ -1,0 +1,130 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: evtchn: arrange for preemption in evtchn_destroy()
+
+Especially closing of fully established interdomain channels can take
+quite some time, due to the locking involved. Therefore we shouldn't
+assume we can clean up still active ports all in one go. Besides adding
+the necessary preemption check, also avoid pointlessly starting from
+(or now really ending at) 0; 1 is the lowest numbered port which may
+need closing.
+
+Since we're now reducing ->valid_evtchns, free_xen_event_channel(),
+and (at least to be on the safe side) notify_via_xen_event_channel()
+need to cope with attempts to close / unbind from / send through already
+closed (and no longer valid, as per port_is_valid()) ports.
+
+This is part of XSA-344.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: Julien Grall <jgrall@amazon.com>
+Reviewed-by: Stefano Stabellini <sstabellini@kernel.org>
+
+--- a/xen/common/domain.c
++++ b/xen/common/domain.c
+@@ -770,12 +770,14 @@ int domain_kill(struct domain *d)
+             return domain_kill(d);
+         d->is_dying = DOMDYING_dying;
+         argo_destroy(d);
+-        evtchn_destroy(d);
+         gnttab_release_mappings(d);
+         vnuma_destroy(d->vnuma);
+         domain_set_outstanding_pages(d, 0);
+         /* fallthrough */
+     case DOMDYING_dying:
++        rc = evtchn_destroy(d);
++        if ( rc )
++            break;
+         rc = domain_relinquish_resources(d);
+         if ( rc != 0 )
+             break;
+--- a/xen/common/event_channel.c
++++ b/xen/common/event_channel.c
+@@ -1297,7 +1297,16 @@ int alloc_unbound_xen_event_channel(
+ 
+ void free_xen_event_channel(struct domain *d, int port)
+ {
+-    BUG_ON(!port_is_valid(d, port));
++    if ( !port_is_valid(d, port) )
++    {
++        /*
++         * Make sure ->is_dying is read /after/ ->valid_evtchns, pairing
++         * with the spin_barrier() and BUG_ON() in evtchn_destroy().
++         */
++        smp_rmb();
++        BUG_ON(!d->is_dying);
++        return;
++    }
+ 
+     evtchn_close(d, port, 0);
+ }
+@@ -1309,7 +1318,17 @@ void notify_via_xen_event_channel(struct
+     struct domain *rd;
+     unsigned long flags;
+ 
+-    ASSERT(port_is_valid(ld, lport));
++    if ( !port_is_valid(ld, lport) )
++    {
++        /*
++         * Make sure ->is_dying is read /after/ ->valid_evtchns, pairing
++         * with the spin_barrier() and BUG_ON() in evtchn_destroy().
++         */
++        smp_rmb();
++        ASSERT(ld->is_dying);
++        return;
++    }
++
+     lchn = evtchn_from_port(ld, lport);
+ 
+     spin_lock_irqsave(&lchn->lock, flags);
+@@ -1380,8 +1399,7 @@ int evtchn_init(struct domain *d, unsign
+     return 0;
+ }
+ 
+-
+-void evtchn_destroy(struct domain *d)
++int evtchn_destroy(struct domain *d)
+ {
+     unsigned int i;
+ 
+@@ -1390,14 +1408,29 @@ void evtchn_destroy(struct domain *d)
+     spin_barrier(&d->event_lock);
+ 
+     /* Close all existing event channels. */
+-    for ( i = 0; port_is_valid(d, i); i++ )
++    for ( i = d->valid_evtchns; --i; )
++    {
+         evtchn_close(d, i, 0);
+ 
++        /*
++         * Avoid preempting when called from domain_create()'s error path,
++         * and don't check too often (choice of frequency is arbitrary).
++         */
++        if ( i && !(i & 0x3f) && d->is_dying != DOMDYING_dead &&
++             hypercall_preempt_check() )
++        {
++            write_atomic(&d->valid_evtchns, i);
++            return -ERESTART;
++        }
++    }
++
+     ASSERT(!d->active_evtchns);
+ 
+     clear_global_virq_handlers(d);
+ 
+     evtchn_fifo_destroy(d);
++
++    return 0;
+ }
+ 
+ 
+--- a/xen/include/xen/sched.h
++++ b/xen/include/xen/sched.h
+@@ -136,7 +136,7 @@ struct evtchn
+ } __attribute__((aligned(64)));
+ 
+ int  evtchn_init(struct domain *d, unsigned int max_port);
+-void evtchn_destroy(struct domain *d); /* from domain_kill */
++int  evtchn_destroy(struct domain *d); /* from domain_kill */
+ void evtchn_destroy_final(struct domain *d); /* from complete_domain_destroy */
+ 
+ struct waitqueue_vcpu;

@@ -1,0 +1,76 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/pv: Avoid double exception injection
+
+There is at least one path (SYSENTER with NT set, Xen converts to #GP) which
+ends up injecting the #GP fault twice, first in compat_sysenter(), and then a
+second time in compat_test_all_events(), due to the stale TBF_EXCEPTION left
+in TRAPBOUNCE_flags.
+
+The guest kernel sees the second fault first, which is a kernel level #GP
+pointing at the head of the #GP handler, and is therefore a userspace
+trigger-able DoS.
+
+This particular bug has bitten us several times before, so rearrange
+{compat_,}create_bounce_frame() to clobber TRAPBOUNCE on success, rather than
+leaving this task to one area of code which isn't used uniformly.
+
+Other scenarios which might result in a double injection (e.g. two calls
+directly to compat_create_bounce_frame) will now crash the guest, which is far
+more obvious than letting the kernel run with corrupt state.
+
+This is XSA-339
+
+Fixes: fdac9515607b ("x86: clear EFLAGS.NT in SYSENTER entry path")
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+diff --git a/xen/arch/x86/x86_64/compat/entry.S b/xen/arch/x86/x86_64/compat/entry.S
+index c3e62f8734..73619f57ca 100644
+--- a/xen/arch/x86/x86_64/compat/entry.S
++++ b/xen/arch/x86/x86_64/compat/entry.S
+@@ -78,7 +78,6 @@ compat_process_softirqs:
+         sti
+ .Lcompat_bounce_exception:
+         call  compat_create_bounce_frame
+-        movb  $0, TRAPBOUNCE_flags(%rdx)
+         jmp   compat_test_all_events
+ 
+ 	ALIGN
+@@ -352,7 +351,13 @@ __UNLIKELY_END(compat_bounce_null_selector)
+         movl  %eax,UREGS_cs+8(%rsp)
+         movl  TRAPBOUNCE_eip(%rdx),%eax
+         movl  %eax,UREGS_rip+8(%rsp)
++
++        /* Trapbounce complete.  Clobber state to avoid an erroneous second injection. */
++        xor   %eax, %eax
++        mov   %ax,  TRAPBOUNCE_cs(%rdx)
++        mov   %al,  TRAPBOUNCE_flags(%rdx)
+         ret
++
+ .section .fixup,"ax"
+ .Lfx13:
+         xorl  %edi,%edi
+diff --git a/xen/arch/x86/x86_64/entry.S b/xen/arch/x86/x86_64/entry.S
+index 1e880eb9f6..71a00e846b 100644
+--- a/xen/arch/x86/x86_64/entry.S
++++ b/xen/arch/x86/x86_64/entry.S
+@@ -90,7 +90,6 @@ process_softirqs:
+         sti
+ .Lbounce_exception:
+         call  create_bounce_frame
+-        movb  $0, TRAPBOUNCE_flags(%rdx)
+         jmp   test_all_events
+ 
+         ALIGN
+@@ -512,6 +511,11 @@ UNLIKELY_START(z, create_bounce_frame_bad_bounce_ip)
+         jmp   asm_domain_crash_synchronous  /* Does not return */
+ __UNLIKELY_END(create_bounce_frame_bad_bounce_ip)
+         movq  %rax,UREGS_rip+8(%rsp)
++
++        /* Trapbounce complete.  Clobber state to avoid an erroneous second injection. */
++        xor   %eax, %eax
++        mov   %rax, TRAPBOUNCE_eip(%rdx)
++        mov   %al,  TRAPBOUNCE_flags(%rdx)
+         ret
+ 
+         .pushsection .fixup, "ax", @progbits
