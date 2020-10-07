@@ -1,8 +1,8 @@
 /*
- * Vault configuration. See: https://vaultproject.io/docs/config/
+ * Vault configuration. See: https://www.vaultproject.io/docs/configuration
  */
 
-backend "file" {
+storage "file" {
 	path = "/var/lib/vault"
 }
 
@@ -13,3 +13,5 @@ listener "tcp" {
 	 */
 	tls_disable = 1
 }
+
+api_addr = "http://127.0.0.1:8200"
