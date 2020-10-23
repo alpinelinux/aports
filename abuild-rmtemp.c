@@ -1,7 +1,7 @@
 /*
  * abuild-rmtemp
  * Copyright (c) 2017 Kaarle Ritvanen
- * Distributed under GPL-2
+ * Distributed under GPL-2.0-only
  */
 
 #define _XOPEN_SOURCE 700
