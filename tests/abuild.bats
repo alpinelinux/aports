@@ -41,15 +41,16 @@ teardown() {
 
 @test "abuild: verify that packages are reproducible built" {
 	cd testrepo/pkg1
-	$ABUILD
 	arch=$($ABUILD -A)
 	pkgs=$($ABUILD listpkg)
-	checksums=$( cd "$REPODEST"/testrepo/$arch && md5sum $pkgs)
+
+	$ABUILD
+	checksums=$(cd "$REPODEST"/testrepo/$arch && md5sum $pkgs)
 	echo "$checksums"
+
 	$ABUILD cleanpkg all
 	checksums2=$(cd "$REPODEST"/testrepo/$arch && md5sum $pkgs)
 	echo "$checksums2"
-	[ "$checksums" = "$checksums2" ]
-	$ABUILD cleanpkg
 
+	[ "$checksums" = "$checksums2" ]
 }
