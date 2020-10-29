@@ -23,7 +23,18 @@ teardown() {
 
 @test "abuild: build failure" {
 	cd testrepo/buildfail
-	run $ABUILD
+	run $ABUILD cleanpkg all
 	[ $status -ne 0 ]
 }
 
+@test "abuild: test check for /usr/lib64" {
+	cd testrepo/lib64test
+	run $ABUILD cleanpkg all
+	[ $status -ne 0 ]
+}
+
+@test "abuild: test options=lib64" {
+	cd testrepo/lib64test
+	options=lib64 $ABUILD
+	$ABUILD cleanpkg
+}
