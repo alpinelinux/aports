@@ -4,6 +4,10 @@ setup() {
 	export REPODEST="$BATS_TMPDIR"/packages
 }
 
+teardown() {
+	rm -rf "$REPODEST"
+}
+
 @test "abuild: help text" {
 	$ABUILD -h
 }
