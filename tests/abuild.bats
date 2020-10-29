@@ -16,3 +16,10 @@ setup() {
 	cd testrepo/pkg1
 	$ABUILD
 }
+
+@test "abuild: build failure" {
+	cd testrepo/buildfail
+	run $ABUILD
+	[ $status -ne 0 ]
+}
+
