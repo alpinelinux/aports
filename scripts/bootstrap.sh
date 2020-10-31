@@ -104,7 +104,8 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   pax-utils lzip abuild ncurses libedit openssh \
 	   libcap-ng util-linux libaio lvm2 popt xz \
 	   json-c argon2 cryptsetup kmod lddtree mkinitfs \
-	   community/go libffi community/ghc community/rust \
+	   community/go libffi community/ghc \
+	   brotli libev c-ares cunit nghttp2 curl community/rust \
 	   $KERNEL_PKG ; do
 
 	EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET" \
