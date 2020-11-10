@@ -1,7 +1,11 @@
+Subject: Fix compilation with different ucontext_t on musl
+Upstream: No
 Author: Simon Frankenberger <simon-alpine@fraho.eu>
-Upstream: no
-Reason: Musl libc offers a different structure for context_t*,
-        so we need a patch to access the structure fields correctly.
+
+The machine state registers have to be accessed differently when
+running on musl libc. This patch fix this by replacing
+"uc_mcontext.regs->grp" with "uc_mcontext.gp_regs"
+and accessing the named fields (like "->nip") by the array index constants.
 
 --- old/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
 +++ new/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
@@ -65,7 +69,7 @@ Reason: Musl libc offers a different structure for context_t*,
    }
 --- old/src/hotspot/cpu/ppc/vm_version_ppc.cpp
 +++ new/src/hotspot/cpu/ppc/vm_version_ppc.cpp
-@@ -893,7 +893,7 @@
+@@ -904,7 +904,7 @@
    unsigned long auxv = getauxval(AT_HWCAP2);
  
    if (auxv & PPC_FEATURE2_HTM_NOSC) {
@@ -76,6 +80,16 @@ Reason: Musl libc offers a different structure for context_t*,
        // POWER9 DD2.1 NV has a few issues that need a couple of firmware
 --- old/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
 +++ new/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
+@@ -75,6 +75,9 @@
+ # include <poll.h>
+ # include <ucontext.h>
+
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++# include <asm/ptrace.h>
++#endif
+
+ address os::current_stack_pointer() {
+   intptr_t* csp;
 @@ -108,24 +108,42 @@
    // - if uc was filled by getcontext(), it is undefined - getcontext() does not fill
    //   it because the volatile registers are not needed to make setcontext() work.
@@ -85,7 +99,7 @@ Reason: Musl libc offers a different structure for context_t*,
    return (address)uc->uc_mcontext.regs->nip;
 +#else // Musl
 +  guarantee(uc->uc_mcontext.gp_regs != NULL, "only use ucontext_get_pc in sigaction context");
-+  return (address)uc->uc_mcontext.gp_regs[32];
++  return (address)uc->uc_mcontext.gp_regs[PT_NIP];
 +#endif
  }
  
@@ -98,7 +112,7 @@ Reason: Musl libc offers a different structure for context_t*,
    uc->uc_mcontext.regs->nip = (unsigned long)pc;
 +#else // Musl
 +  guarantee(uc->uc_mcontext.gp_regs != NULL, "only use ucontext_set_pc in sigaction context");
-+  uc->uc_mcontext.gp_regs[32] = (unsigned long)pc;
++  uc->uc_mcontext.gp_regs[PT_NIP] = (unsigned long)pc;
 +#endif
  }
  
@@ -106,7 +120,7 @@ Reason: Musl libc offers a different structure for context_t*,
 +#if defined(__GLIBC__) || defined(__UCLIBC__)
    return (address)uc->uc_mcontext.regs->link;
 +#else // Musl
-+  return (address)uc->uc_mcontext.gp_regs[36];
++  return (address)uc->uc_mcontext.gp_regs[PT_LNK];
 +#endif
  }
  
@@ -126,21 +140,19 @@ Reason: Musl libc offers a different structure for context_t*,
 +#if defined(__GLIBC__) || defined(__UCLIBC__)
    return uc->uc_mcontext.regs->trap;
 +#else // Musl
-+  return uc->uc_mcontext.gp_regs[40];
++  return uc->uc_mcontext.gp_regs[PT_TRAP];
 +#endif
  }
  
  ExtendedPC os::fetch_frame_from_context(const void* ucVoid,
-@@ -259,7 +281,13 @@
+@@ -259,7 +279,11 @@
      // 3.2.1 "Machine State Register"), however note that ISA notation for bit
      // numbering is MSB 0, so for normal bit numbering (LSB 0) they come to be
      // bits 33 and 34. It's not related to endianness, just a notation matter.
 +#if defined(__GLIBC__) || defined(__UCLIBC__)
      if (second_uc->uc_mcontext.regs->msr & 0x600000000) {
 +#else // Musl
-+    // why 33?
-+    // see comment for glibc NGREG: "r0-r31, nip, msr, lr, etc."
-+    if (second_uc->uc_mcontext.gp_regs[33] & 0x600000000) {
++    if (second_uc->uc_mcontext.gp_regs[PT_MSR] & 0x600000000) {
 +#endif
        if (TraceTraps) {
          tty->print_cr("caught signal in transaction, "
@@ -158,9 +170,9 @@ Reason: Musl libc offers a different structure for context_t*,
      if (i % 3 == 2) st->cr();
    }
 +#else // Musl
-+  st->print("pc =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[32]);
-+  st->print("lr =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[36]);
-+  st->print("ctr=" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[35]);
++  st->print("pc =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_NIP]);
++  st->print("lr =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_LNK]);
++  st->print("ctr=" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_CTR]);
    st->cr();
 +  for (int i = 0; i < 32; i++) {
 +    st->print("r%-2d=" INTPTR_FORMAT "  ", i, uc->uc_mcontext.gp_regs[i]);
@@ -181,9 +193,9 @@ Reason: Musl libc offers a different structure for context_t*,
    st->print("lr ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->link);
    st->print("ctr ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->ctr);
 +#else // Musl
-+  st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[32]);
-+  st->print("lr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[36]);
-+  st->print("ctr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[35]);
++  st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_NIP]);
++  st->print("lr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_LNK]);
++  st->print("ctr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_CTR]);
 +#endif
    for (int i = 0; i < 32; i++) {
      st->print("r%-2d=", i);
@@ -197,6 +209,17 @@ Reason: Musl libc offers a different structure for context_t*,
  }
 --- old/src/hotspot/os_cpu/linux_ppc/thread_linux_ppc.cpp
 +++ new/src/hotspot/os_cpu/linux_ppc/thread_linux_ppc.cpp
+@@ -27,6 +27,10 @@
+ #include "runtime/frame.inline.hpp"
+ #include "runtime/thread.hpp"
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
++
+ frame JavaThread::pd_last_frame() {
+   assert(has_last_Java_frame(), "must have last_Java_sp() when suspended");
+ 
 @@ -56,8 +56,13 @@
    // if we were running Java code when SIGPROF came in.
    if (isInJava) {
@@ -206,7 +229,7 @@ Reason: Musl libc offers a different structure for context_t*,
                       (address)uc->uc_mcontext.regs->nip);
 +#else // Musl
 +    frame ret_frame((intptr_t*)uc->uc_mcontext.gp_regs[1/*REG_SP*/],
-+                     (address)uc->uc_mcontext.gp_regs[32]);
++                     (address)uc->uc_mcontext.gp_regs[PT_NIP]);
 +#endif
  
      if (ret_frame.pc() == NULL) {
