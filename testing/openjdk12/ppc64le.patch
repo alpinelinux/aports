@@ -1,3 +1,12 @@
+Subject: Fix compilation with different ucontext_t on musl
+Upstream: No
+Author: Simon Frankenberger <simon-alpine@fraho.eu>
+
+The machine state registers have to be accessed differently when
+running on musl libc. This patch fix this by replacing
+"uc_mcontext.regs->grp" with "uc_mcontext.gp_regs"
+and accessing the named fields (like "->nip") by the array index constants.
+
 --- old/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
 +++ new/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
 @@ -1290,7 +1290,11 @@
@@ -46,6 +55,16 @@
        // POWER9 DD2.1 NV has a few issues that need a couple of firmware
 --- old/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
 +++ new/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
+@@ -76,6 +76,9 @@
+ # include <poll.h>
+ # include <ucontext.h>
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
+ 
+ address os::current_stack_pointer() {
+   intptr_t* csp;
 @@ -108,24 +108,42 @@
    // - if uc was filled by getcontext(), it is undefined - getcontext() does not fill
    //   it because the volatile registers are not needed to make setcontext() work.
@@ -55,7 +74,7 @@
    return (address)uc->uc_mcontext.regs->nip;
 +#else // Musl
 +  guarantee(uc->uc_mcontext.gp_regs != NULL, "only use ucontext_get_pc in sigaction context");
-+  return (address)uc->uc_mcontext.gp_regs[32];
++  return (address)uc->uc_mcontext.gp_regs[PT_NIP];
 +#endif
  }
  
@@ -68,7 +87,7 @@
    uc->uc_mcontext.regs->nip = (unsigned long)pc;
 +#else // Musl
 +  guarantee(uc->uc_mcontext.gp_regs != NULL, "only use ucontext_set_pc in sigaction context");
-+  uc->uc_mcontext.gp_regs[32] = (unsigned long)pc;
++  uc->uc_mcontext.gp_regs[PT_NIP] = (unsigned long)pc;
 +#endif
  }
  
@@ -76,7 +95,7 @@
 +#if defined(__GLIBC__) || defined(__UCLIBC__)
    return (address)uc->uc_mcontext.regs->link;
 +#else // Musl
-+  return (address)uc->uc_mcontext.gp_regs[36];
++  return (address)uc->uc_mcontext.gp_regs[PT_LNK];
 +#endif
  }
  
@@ -89,16 +108,14 @@
  }
  
  intptr_t* os::Linux::ucontext_get_fp(const ucontext_t * uc) {
-@@ -255,7 +273,13 @@
+@@ -255,7 +273,11 @@
      // 3.2.1 "Machine State Register"), however note that ISA notation for bit
      // numbering is MSB 0, so for normal bit numbering (LSB 0) they come to be
      // bits 33 and 34. It's not related to endianness, just a notation matter.
 +#if defined(__GLIBC__) || defined(__UCLIBC__)
      if (second_uc->uc_mcontext.regs->msr & 0x600000000) {
 +#else // Musl
-+    // why 33?
-+    // see comment for glibc NGREG: "r0-r31, nip, msr, lr, etc."
-+    if (second_uc->uc_mcontext.gp_regs[33] & 0x600000000) {
++    if (second_uc->uc_mcontext.gp_regs[PT_MSR] & 0x600000000) {
 +#endif
        if (TraceTraps) {
          tty->print_cr("caught signal in transaction, "
@@ -116,9 +133,9 @@
      if (i % 3 == 2) st->cr();
    }
 +#else // Musl
-+  st->print("pc =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[32]);
-+  st->print("lr =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[36]);
-+  st->print("ctr=" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[35]);
++  st->print("pc =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_NIP]);
++  st->print("lr =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_LNK]);
++  st->print("ctr=" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_CTR]);
    st->cr();
 +  for (int i = 0; i < 32; i++) {
 +    st->print("r%-2d=" INTPTR_FORMAT "  ", i, uc->uc_mcontext.gp_regs[i]);
@@ -130,7 +147,7 @@
  
    intptr_t *sp = (intptr_t *)os::Linux::ucontext_get_sp(uc);
    st->print_cr("Top of Stack: (sp=" PTR_FORMAT ")", p2i(sp));
-@@ -587,12 +622,22 @@
+@@ -586,12 +621,22 @@
    st->print_cr("Register to memory mapping:");
    st->cr();
  
@@ -139,9 +156,9 @@
    st->print("lr ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->link);
    st->print("ctr ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->ctr);
 +#else // Musl
-+  st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[32]);
-+  st->print("lr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[36]);
-+  st->print("ctr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[35]);
++  st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_NIP]);
++  st->print("lr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_LNK]);
++  st->print("ctr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_CTR]);
 +#endif
    for (int i = 0; i < 32; i++) {
      st->print("r%-2d=", i);
@@ -155,6 +172,17 @@
  }
 --- old/src/hotspot/os_cpu/linux_ppc/thread_linux_ppc.cpp
 +++ new/src/hotspot/os_cpu/linux_ppc/thread_linux_ppc.cpp
+@@ -27,6 +27,10 @@
+ #include "runtime/frame.inline.hpp"
+ #include "runtime/thread.hpp"
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
++
+ frame JavaThread::pd_last_frame() {
+   assert(has_last_Java_frame(), "must have last_Java_sp() when suspended");
+ 
 @@ -56,8 +56,13 @@
    // if we were running Java code when SIGPROF came in.
    if (isInJava) {
@@ -164,7 +192,7 @@
                       (address)uc->uc_mcontext.regs->nip);
 +#else // Musl
 +    frame ret_frame((intptr_t*)uc->uc_mcontext.gp_regs[1/*REG_SP*/],
-+                     (address)uc->uc_mcontext.gp_regs[32]);
++                     (address)uc->uc_mcontext.gp_regs[PT_NIP]);
 +#endif
  
      if (ret_frame.pc() == NULL) {
