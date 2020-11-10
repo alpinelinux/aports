@@ -1,6 +1,6 @@
 public class Alpine_Bug_10126 {
     public static void main(String[] args) throws Exception {
-        try (java.net.Socket sock = javax.net.ssl.SSLSocketFactory.getDefault().createSocket("bugs.alpinelinux.org", 443);
+        try (java.net.Socket sock = javax.net.ssl.SSLSocketFactory.getDefault().createSocket("gitlab.alpinelinux.org", 443);
              java.io.InputStream in = sock.getInputStream();
              java.io.OutputStream out = sock.getOutputStream()) {
             out.write("GET / HTTP/1.0\n\nHost: gitlab.alpinelinux.org\n\nConnection: close\n\n\n\n".getBytes());
