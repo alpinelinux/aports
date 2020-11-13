@@ -1,0 +1,88 @@
+From c1e5d243b7e39b2fbfb17144608ce045575d8e95 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Tue, 10 Nov 2020 19:32:09 -0500
+Subject: [PATCH 2/5] drop use of getdelim/stdio in dynamic linker
+
+the only place stdio was used here was for reading the ldso path file,
+taking advantage of getdelim to automatically allocate and resize the
+buffer. the motivation for use here was that, with shared libraries,
+stdio is already available anyway and free to use. this has long been
+a nuisance to users because getdelim's use of realloc here triggered a
+valgrind bug, but removing it doesn't really fix that; on some archs
+even calling the valgrind-interposed malloc at this point will crash.
+
+the actual motivation for this change is moving towards getting rid of
+use of application-provided malloc in parts of libc where it would be
+called with libc-internal locks held, leading to the possibility of
+deadlock if the malloc implementation doesn't follow unwritten rules
+about which libc functions are safe for it to call. since getdelim is
+required to produce a pointer as if by malloc (i.e. that can be passed
+to reallor or free), it necessarily must use the public malloc.
+
+instead of performing a realloc loop as the path file is read, first
+query its size with fstat and allocate only once. this produces
+slightly different truncation behavior when racing with writes to a
+file, but neither behavior is or could be made safe anyway; on a live
+system, ldso path files should be replaced by atomic rename only. the
+change should also reduce memory waste.
+---
+ ldso/dynlink.c | 27 ++++++++++++++++++++++-----
+ 1 file changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/ldso/dynlink.c b/ldso/dynlink.c
+index f9ac0100..502e52c5 100644
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -1,6 +1,5 @@
+ #define _GNU_SOURCE
+ #define SYSCALL_NO_TLS 1
+-#include <stdio.h>
+ #include <stdlib.h>
+ #include <stdarg.h>
+ #include <stddef.h>
+@@ -556,6 +555,20 @@ static void reclaim_gaps(struct dso *dso)
+ 	}
+ }
+ 
++static ssize_t read_loop(int fd, void *p, size_t n)
++{
++	for (size_t i=0; i<n; ) {
++		ssize_t l = read(fd, (char *)p+i, n-i);
++		if (l<0) {
++			if (errno==EINTR) continue;
++			else return -1;
++		}
++		if (l==0) return i;
++		i += l;
++	}
++	return n;
++}
++
+ static void *mmap_fixed(void *p, size_t n, int prot, int flags, int fd, off_t off)
+ {
+ 	static int no_map_fixed;
+@@ -1060,13 +1073,17 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
+ 				snprintf(etc_ldso_path, sizeof etc_ldso_path,
+ 					"%.*s/etc/ld-musl-" LDSO_ARCH ".path",
+ 					(int)prefix_len, prefix);
+-				FILE *f = fopen(etc_ldso_path, "rbe");
+-				if (f) {
+-					if (getdelim(&sys_path, (size_t[1]){0}, 0, f) <= 0) {
++				fd = open(etc_ldso_path, O_RDONLY|O_CLOEXEC);
++				if (fd>=0) {
++					size_t n = 0;
++					if (!fstat(fd, &st)) n = st.st_size;
++					if ((sys_path = malloc(n+1)))
++						sys_path[n] = 0;
++					if (!sys_path || read_loop(fd, sys_path, n)<0) {
+ 						free(sys_path);
+ 						sys_path = "";
+ 					}
+-					fclose(f);
++					close(fd);
+ 				} else if (errno != ENOENT) {
+ 					sys_path = "";
+ 				}
+-- 
+2.21.0
+

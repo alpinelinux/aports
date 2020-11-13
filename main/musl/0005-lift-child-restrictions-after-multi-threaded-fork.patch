@@ -1,8 +1,68 @@
+From 167390f05564e0a4d3fcb4329377fd7743267560 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Wed, 11 Nov 2020 13:37:33 -0500
+Subject: [PATCH] lift child restrictions after multi-threaded fork
+
+as the outcome of Austin Group tracker issue #62, future editions of
+POSIX have dropped the requirement that fork be AS-safe. this allows
+but does not require implementations to synchronize fork with internal
+locks and give forked children of multithreaded parents a partly or
+fully unrestricted execution environment where they can continue to
+use the standard library (per POSIX, they can only portably use
+AS-safe functions).
+
+up until recently, taking this allowance did not seem desirable.
+however, commit 8ed2bd8bfcb4ea6448afb55a941f4b5b2b0398c0 exposed the
+extent to which applications and libraries are depending on the
+ability to use malloc and other non-AS-safe interfaces in MT-forked
+children, by converting latent very-low-probability catastrophic state
+corruption into predictable deadlock. dealing with the fallout has
+been a huge burden for users/distros.
+
+while it looks like most of the non-portable usage in applications
+could be fixed given sufficient effort, at least some of it seems to
+occur in language runtimes which are exposing the ability to run
+unrestricted code in the child as part of the contract with the
+programmer. any attempt at fixing such contracts is not just a
+technical problem but a social one, and is probably not tractable.
+
+this patch extends the fork function to take locks for all libc
+singletons in the parent, and release or reset those locks in the
+child, so that when the underlying fork operation takes place, the
+state protected by these locks is consistent and ready for the child
+to use. locking is skipped in the case where the parent is
+single-threaded so as not to interfere with legacy AS-safety property
+of fork in single-threaded programs. lock order is mostly arbitrary,
+but the malloc locks (including bump allocator in case it's used) must
+be taken after the locks on any subsystems that might use malloc, and
+non-AS-safe locks cannot be taken while the thread list lock is held,
+imposing a requirement that it be taken last.
+---
+ ldso/dynlink.c                | 19 ++++++++++
+ src/exit/at_quick_exit.c      |  2 +
+ src/exit/atexit.c             |  2 +
+ src/internal/fork_impl.h      | 19 ++++++++++
+ src/ldso/dlerror.c            |  2 +
+ src/locale/dcngettext.c       |  5 ++-
+ src/locale/locale_map.c       |  5 ++-
+ src/malloc/lite_malloc.c      |  5 ++-
+ src/malloc/mallocng/glue.h    | 14 ++++++-
+ src/malloc/oldmalloc/malloc.c | 19 ++++++++++
+ src/misc/syslog.c             |  2 +
+ src/prng/random.c             |  2 +
+ src/process/fork.c            | 70 +++++++++++++++++++++++++++++++++++
+ src/stdio/ofl.c               |  2 +
+ src/thread/sem_open.c         |  2 +
+ src/thread/vmlock.c           |  2 +
+ src/time/__tz.c               |  2 +
+ 17 files changed, 170 insertions(+), 4 deletions(-)
+ create mode 100644 src/internal/fork_impl.h
+
 diff --git a/ldso/dynlink.c b/ldso/dynlink.c
-index f9ac0100..acd8e59b 100644
+index 61714f40..6b868c84 100644
 --- a/ldso/dynlink.c
 +++ b/ldso/dynlink.c
-@@ -21,6 +21,7 @@
+@@ -20,6 +20,7 @@
  #include <semaphore.h>
  #include <sys/membarrier.h>
  #include "pthread_impl.h"
@@ -10,7 +70,7 @@ index f9ac0100..acd8e59b 100644
  #include "libc.h"
  #include "dynlink.h"
  
-@@ -1404,6 +1405,17 @@ void __libc_exit_fini()
+@@ -1426,6 +1427,17 @@ void __libc_exit_fini()
  	}
  }
  
@@ -28,7 +88,7 @@ index f9ac0100..acd8e59b 100644
  static struct dso **queue_ctors(struct dso *dso)
  {
  	size_t cnt, qpos, spos, i;
-@@ -1462,6 +1474,13 @@ static struct dso **queue_ctors(struct dso *dso)
+@@ -1484,6 +1496,13 @@ static struct dso **queue_ctors(struct dso *dso)
  	}
  	queue[qpos] = 0;
  	for (i=0; i<qpos; i++) queue[i]->mark = 0;
@@ -62,7 +122,7 @@ index d3ce6522..e4b5d78d 100644
  void __funcs_on_quick_exit()
  {
 diff --git a/src/exit/atexit.c b/src/exit/atexit.c
-index 160d277a..2804a1d7 100644
+index fcd940fa..854e9fdd 100644
 --- a/src/exit/atexit.c
 +++ b/src/exit/atexit.c
 @@ -2,6 +2,7 @@
@@ -71,9 +131,9 @@ index 160d277a..2804a1d7 100644
  #include "lock.h"
 +#include "fork_impl.h"
  
- /* Ensure that at least 32 atexit handlers can be registered without malloc */
- #define COUNT 32
-@@ -15,6 +16,7 @@ static struct fl
+ #define malloc __libc_malloc
+ #define calloc __libc_calloc
+@@ -20,6 +21,7 @@ static struct fl
  
  static int slot;
  static volatile int lock[1];
@@ -83,16 +143,17 @@ index 160d277a..2804a1d7 100644
  {
 diff --git a/src/internal/fork_impl.h b/src/internal/fork_impl.h
 new file mode 100644
-index 00000000..0e116aae
+index 00000000..5892c13b
 --- /dev/null
 +++ b/src/internal/fork_impl.h
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,19 @@
 +#include <features.h>
 +
 +extern hidden volatile int *const __at_quick_exit_lockptr;
 +extern hidden volatile int *const __atexit_lockptr;
 +extern hidden volatile int *const __dlerror_lockptr;
 +extern hidden volatile int *const __gettext_lockptr;
++extern hidden volatile int *const __locale_lockptr;
 +extern hidden volatile int *const __random_lockptr;
 +extern hidden volatile int *const __sem_open_lockptr;
 +extern hidden volatile int *const __stdio_ofl_lockptr;
@@ -106,7 +167,7 @@ index 00000000..0e116aae
 +hidden void __malloc_atfork(int);
 +hidden void __ldso_atfork(int);
 diff --git a/src/ldso/dlerror.c b/src/ldso/dlerror.c
-index 3fcc7779..009beecb 100644
+index c782ca6c..afe59253 100644
 --- a/src/ldso/dlerror.c
 +++ b/src/ldso/dlerror.c
 @@ -4,6 +4,7 @@
@@ -115,9 +176,9 @@ index 3fcc7779..009beecb 100644
  #include "lock.h"
 +#include "fork_impl.h"
  
- char *dlerror()
- {
-@@ -19,6 +20,7 @@ char *dlerror()
+ #define malloc __libc_malloc
+ #define calloc __libc_calloc
+@@ -24,6 +25,7 @@ char *dlerror()
  
  static volatile int freebuf_queue_lock[1];
  static void **freebuf_queue;
@@ -126,7 +187,7 @@ index 3fcc7779..009beecb 100644
  void __dl_thread_cleanup(void)
  {
 diff --git a/src/locale/dcngettext.c b/src/locale/dcngettext.c
-index 4c304393..805fe83b 100644
+index 39a98e83..d1e6c6d1 100644
 --- a/src/locale/dcngettext.c
 +++ b/src/locale/dcngettext.c
 @@ -10,6 +10,7 @@
@@ -135,9 +196,9 @@ index 4c304393..805fe83b 100644
  #include "lock.h"
 +#include "fork_impl.h"
  
- struct binding {
- 	struct binding *next;
-@@ -34,9 +35,11 @@ static char *gettextdir(const char *domainname, size_t *dirlen)
+ #define malloc __libc_malloc
+ #define calloc __libc_calloc
+@@ -39,9 +40,11 @@ static char *gettextdir(const char *domainname, size_t *dirlen)
  	return 0;
  }
  
@@ -150,8 +211,33 @@ index 4c304393..805fe83b 100644
  	struct binding *p, *q;
  
  	if (!domainname) return 0;
+diff --git a/src/locale/locale_map.c b/src/locale/locale_map.c
+index 94f1b04e..fa51f2e3 100644
+--- a/src/locale/locale_map.c
++++ b/src/locale/locale_map.c
+@@ -5,6 +5,7 @@
+ #include "locale_impl.h"
+ #include "libc.h"
+ #include "lock.h"
++#include "fork_impl.h"
+ 
+ #define malloc __libc_malloc
+ #define calloc undef
+@@ -27,9 +28,11 @@ static const char envvars[][12] = {
+ 	"LC_MESSAGES",
+ };
+ 
++static volatile int lock[1];
++volatile int *const __locale_lockptr = lock;
++
+ const struct __locale_map *__get_locale(int cat, const char *val)
+ {
+-	static volatile int lock[1];
+ 	static void *volatile loc_head;
+ 	const struct __locale_map *p;
+ 	struct __locale_map *new = 0;
 diff --git a/src/malloc/lite_malloc.c b/src/malloc/lite_malloc.c
-index f8931ba5..f6736ec4 100644
+index 0f461617..43a988fb 100644
 --- a/src/malloc/lite_malloc.c
 +++ b/src/malloc/lite_malloc.c
 @@ -6,6 +6,7 @@
@@ -177,10 +263,10 @@ index f8931ba5..f6736ec4 100644
  	size_t align=1;
  	void *p;
 diff --git a/src/malloc/mallocng/glue.h b/src/malloc/mallocng/glue.h
-index 16acd1ea..980ce396 100644
+index 8d7d9a3b..151c48b8 100644
 --- a/src/malloc/mallocng/glue.h
 +++ b/src/malloc/mallocng/glue.h
-@@ -56,7 +56,8 @@ __attribute__((__visibility__("hidden")))
+@@ -60,7 +60,8 @@ __attribute__((__visibility__("hidden")))
  extern int __malloc_lock[1];
  
  #define LOCK_OBJ_DEF \
@@ -190,7 +276,7 @@ index 16acd1ea..980ce396 100644
  
  static inline void rdlock()
  {
-@@ -73,5 +74,16 @@ static inline void unlock()
+@@ -77,5 +78,16 @@ static inline void unlock()
  static inline void upgradelock()
  {
  }
@@ -208,7 +294,7 @@ index 16acd1ea..980ce396 100644
  
  #endif
 diff --git a/src/malloc/oldmalloc/malloc.c b/src/malloc/oldmalloc/malloc.c
-index c0997ad8..8ac68a24 100644
+index 0c082bce..53f5f959 100644
 --- a/src/malloc/oldmalloc/malloc.c
 +++ b/src/malloc/oldmalloc/malloc.c
 @@ -9,6 +9,7 @@
@@ -217,9 +303,9 @@ index c0997ad8..8ac68a24 100644
  #include "malloc_impl.h"
 +#include "fork_impl.h"
  
- #if defined(__GNUC__) && defined(__PIC__)
- #define inline inline __attribute__((always_inline))
-@@ -527,3 +528,21 @@ void __malloc_donate(char *start, char *end)
+ #define malloc __libc_malloc
+ #define realloc __libc_realloc
+@@ -531,3 +532,21 @@ void __malloc_donate(char *start, char *end)
  	c->csize = n->psize = C_INUSE | (end-start);
  	__bin_chunk(c);
  }
@@ -282,10 +368,10 @@ index 633a17f6..d3780fa7 100644
  static uint32_t lcg31(uint32_t x) {
  	return (1103515245*x + 12345) & 0x7fffffff;
 diff --git a/src/process/fork.c b/src/process/fork.c
-index 8d34a9c4..25808d85 100644
+index 8d34a9c4..54bc2892 100644
 --- a/src/process/fork.c
 +++ b/src/process/fork.c
-@@ -1,15 +1,83 @@
+@@ -1,15 +1,85 @@
  #include <unistd.h>
  #include <errno.h>
  #include "libc.h"
@@ -299,6 +385,7 @@ index 8d34a9c4..25808d85 100644
 +weak_alias(dummy_lockptr, __atexit_lockptr);
 +weak_alias(dummy_lockptr, __dlerror_lockptr);
 +weak_alias(dummy_lockptr, __gettext_lockptr);
++weak_alias(dummy_lockptr, __locale_lockptr);
 +weak_alias(dummy_lockptr, __random_lockptr);
 +weak_alias(dummy_lockptr, __sem_open_lockptr);
 +weak_alias(dummy_lockptr, __stdio_ofl_lockptr);
@@ -313,6 +400,7 @@ index 8d34a9c4..25808d85 100644
 +	&__atexit_lockptr,
 +	&__dlerror_lockptr,
 +	&__gettext_lockptr,
++	&__locale_lockptr,
 +	&__random_lockptr,
 +	&__sem_open_lockptr,
 +	&__stdio_ofl_lockptr,
@@ -385,7 +473,7 @@ index f2d3215a..aad3d171 100644
  FILE **__ofl_lock()
  {
 diff --git a/src/thread/sem_open.c b/src/thread/sem_open.c
-index de8555c5..f198056e 100644
+index dad8f177..0ad29de9 100644
 --- a/src/thread/sem_open.c
 +++ b/src/thread/sem_open.c
 @@ -12,6 +12,7 @@
@@ -394,9 +482,9 @@ index de8555c5..f198056e 100644
  #include "lock.h"
 +#include "fork_impl.h"
  
- static struct {
- 	ino_t ino;
-@@ -19,6 +20,7 @@ static struct {
+ #define malloc __libc_malloc
+ #define calloc __libc_calloc
+@@ -24,6 +25,7 @@ static struct {
  	int refcnt;
  } *semtab;
  static volatile int lock[1];
@@ -418,7 +506,7 @@ index 75f3cb76..fa0a8e3c 100644
  void __vm_wait()
  {
 diff --git a/src/time/__tz.c b/src/time/__tz.c
-index 49a7371e..72c0d58b 100644
+index 3044d206..dd2c42c0 100644
 --- a/src/time/__tz.c
 +++ b/src/time/__tz.c
 @@ -6,6 +6,7 @@
@@ -427,9 +515,9 @@ index 49a7371e..72c0d58b 100644
  #include "lock.h"
 +#include "fork_impl.h"
  
- long  __timezone = 0;
- int   __daylight = 0;
-@@ -30,6 +31,7 @@ static char *old_tz = old_tz_buf;
+ #define malloc __libc_malloc
+ #define calloc undef
+@@ -35,6 +36,7 @@ static char *old_tz = old_tz_buf;
  static size_t old_tz_size = sizeof old_tz_buf;
  
  static volatile int lock[1];
@@ -437,3 +525,6 @@ index 49a7371e..72c0d58b 100644
  
  static int getint(const char **p)
  {
+-- 
+2.21.0
+
