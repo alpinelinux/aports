@@ -37,7 +37,7 @@ Indent with tabs, don't use spaces. Avoid whitespaces.
 ### Line Length
 
 Maximum line length is 80 characters, this should be considered a
-recommendation and not a string requirement which must be followed at
+recommendation and not a strict requirement which must be followed at
 all costs. Most notably, automatically generated parts (e.g. by `abuild
 checksum`) are except from this rule.
 
