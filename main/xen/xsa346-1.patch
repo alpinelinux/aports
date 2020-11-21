@@ -1,0 +1,50 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: IOMMU: suppress "iommu_dont_flush_iotlb" when about to free a page
+
+Deferring flushes to a single, wide range one - as is done when
+handling XENMAPSPACE_gmfn_range - is okay only as long as
+pages don't get freed ahead of the eventual flush. While the only
+function setting the flag (xenmem_add_to_physmap()) suggests by its name
+that it's only mapping new entries, in reality the way
+xenmem_add_to_physmap_one() works means an unmap would happen not only
+for the page being moved (but not freed) but, if the destination GFN is
+populated, also for the page being displaced from that GFN. Collapsing
+the two flushes for this GFN into just one (end even more so deferring
+it to a batched invocation) is not correct.
+
+This is part of XSA-346.
+
+Fixes: cf95b2a9fd5a ("iommu: Introduce per cpu flag (iommu_dont_flush_iotlb) to avoid unnecessary iotlb... ")
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+Acked-by: Julien Grall <jgrall@amazon.com>
+
+--- a/xen/common/memory.c
++++ b/xen/common/memory.c
+@@ -293,6 +293,7 @@ int guest_remove_page(struct domain *d,
+     p2m_type_t p2mt;
+ #endif
+     mfn_t mfn;
++    bool *dont_flush_p, dont_flush;
+     int rc;
+ 
+ #ifdef CONFIG_X86
+@@ -379,8 +380,18 @@ int guest_remove_page(struct domain *d,
+         return -ENXIO;
+     }
+ 
++    /*
++     * Since we're likely to free the page below, we need to suspend
++     * xenmem_add_to_physmap()'s suppressing of IOMMU TLB flushes.
++     */
++    dont_flush_p = &this_cpu(iommu_dont_flush_iotlb);
++    dont_flush = *dont_flush_p;
++    *dont_flush_p = false;
++
+     rc = guest_physmap_remove_page(d, _gfn(gmfn), mfn, 0);
+ 
++    *dont_flush_p = dont_flush;
++
+     /*
+      * With the lack of an IOMMU on some platforms, domains with DMA-capable
+      * device must retrieve the same pfn when the hypercall populate_physmap

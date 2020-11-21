@@ -1,0 +1,166 @@
+From 10bb63c203f42d931fa1fa7dbbae7ce1765cecf2 Mon Sep 17 00:00:00 2001
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Mon, 19 Oct 2020 15:51:22 +0100
+Subject: [PATCH 2/2] x86/pv: Flush TLB in response to paging structure changes
+
+With MMU_UPDATE, a PV guest can make changes to higher level pagetables.  This
+is safe from Xen's point of view (as the update only affects guest mappings),
+and the guest is required to flush (if necessary) after making updates.
+
+However, Xen's use of linear pagetables (UPDATE_VA_MAPPING, GNTTABOP_map,
+writeable pagetables, etc.) is an implementation detail outside of the
+API/ABI.
+
+Changes in the paging structure require invalidations in the linear pagetable
+range for subsequent accesses into the linear pagetables to access non-stale
+mappings.  Xen must provide suitable flushing to prevent intermixed guest
+actions from accidentally accessing/modifying the wrong pagetable.
+
+For all L2 and higher modifications, flush the TLB.  PV guests cannot create
+L2 or higher entries with the Global bit set, so no mappings established in
+the linear range can be global.  (This could in principle be an order 39 flush
+starting at LINEAR_PT_VIRT_START, but no such mechanism exists in practice.)
+
+Express the necessary flushes as a set of booleans which accumulate across the
+operation.  Comment the flushing logic extensively.
+
+This is XSA-286.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+(cherry picked from commit 16a20963b3209788f2c0d3a3eebb7d92f03f5883)
+---
+ xen/arch/x86/mm.c | 69 ++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 59 insertions(+), 10 deletions(-)
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 1caa2df0a5..61cf6a7b9b 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -3896,7 +3896,8 @@ long do_mmu_update(
+     struct vcpu *curr = current, *v = curr;
+     struct domain *d = v->domain, *pt_owner = d, *pg_owner;
+     mfn_t map_mfn = INVALID_MFN, mfn;
+-    bool sync_guest = false;
++    bool flush_linear_pt = false, flush_root_pt_local = false,
++        flush_root_pt_others = false;
+     uint32_t xsm_needed = 0;
+     uint32_t xsm_checked = 0;
+     int rc = put_old_guest_table(curr);
+@@ -4046,6 +4047,8 @@ long do_mmu_update(
+                         break;
+                     rc = mod_l2_entry(va, l2e_from_intpte(req.val), mfn,
+                                       cmd == MMU_PT_UPDATE_PRESERVE_AD, v);
++                    if ( !rc )
++                        flush_linear_pt = true;
+                     break;
+ 
+                 case PGT_l3_page_table:
+@@ -4053,6 +4056,8 @@ long do_mmu_update(
+                         break;
+                     rc = mod_l3_entry(va, l3e_from_intpte(req.val), mfn,
+                                       cmd == MMU_PT_UPDATE_PRESERVE_AD, v);
++                    if ( !rc )
++                        flush_linear_pt = true;
+                     break;
+ 
+                 case PGT_l4_page_table:
+@@ -4060,6 +4065,8 @@ long do_mmu_update(
+                         break;
+                     rc = mod_l4_entry(va, l4e_from_intpte(req.val), mfn,
+                                       cmd == MMU_PT_UPDATE_PRESERVE_AD, v);
++                    if ( !rc )
++                        flush_linear_pt = true;
+                     if ( !rc && pt_owner->arch.pv.xpti )
+                     {
+                         bool local_in_use = false;
+@@ -4068,7 +4075,7 @@ long do_mmu_update(
+                                     mfn) )
+                         {
+                             local_in_use = true;
+-                            get_cpu_info()->root_pgt_changed = true;
++                            flush_root_pt_local = true;
+                         }
+ 
+                         /*
+@@ -4080,7 +4087,7 @@ long do_mmu_update(
+                              (1 + !!(page->u.inuse.type_info & PGT_pinned) +
+                               mfn_eq(pagetable_get_mfn(curr->arch.guest_table_user),
+                                      mfn) + local_in_use) )
+-                            sync_guest = true;
++                            flush_root_pt_others = true;
+                     }
+                     break;
+ 
+@@ -4182,19 +4189,61 @@ long do_mmu_update(
+     if ( va )
+         unmap_domain_page(va);
+ 
+-    if ( sync_guest )
++    /*
++     * Perform required TLB maintenance.
++     *
++     * This logic currently depend on flush_linear_pt being a superset of the
++     * flush_root_pt_* conditions.
++     *
++     * pt_owner may not be current->domain.  This may occur during
++     * construction of 32bit PV guests, or debugging of PV guests.  The
++     * behaviour cannot be correct with domain unpaused.  We therefore expect
++     * pt_owner->dirty_cpumask to be empty, but it is a waste of effort to
++     * explicitly check for, and exclude, this corner case.
++     *
++     * flush_linear_pt requires a FLUSH_TLB to all dirty CPUs.  The flush must
++     * be performed now to maintain correct behaviour across a multicall.
++     * i.e. we cannot relax FLUSH_TLB to FLUSH_ROOT_PGTBL, given that the
++     * former is a side effect of the latter, because the resync (which is in
++     * the return-to-guest path) happens too late.
++     *
++     * flush_root_pt_* requires FLUSH_ROOT_PGTBL on either the local CPU
++     * (implies pt_owner == current->domain and current->processor set in
++     * pt_owner->dirty_cpumask), and/or all *other* dirty CPUs as there are
++     * references we can't account for locally.
++     */
++    if ( flush_linear_pt /* || flush_root_pt_local || flush_root_pt_others */ )
+     {
++        unsigned int cpu = smp_processor_id();
++        cpumask_t *mask = pt_owner->dirty_cpumask;
++
+         /*
+-         * Force other vCPU-s of the affected guest to pick up L4 entry
+-         * changes (if any).
++         * Always handle local flushing separately (if applicable), to
++         * separate the flush invocations appropriately for scope of the two
++         * flush_root_pt_* variables.
+          */
+-        unsigned int cpu = smp_processor_id();
+-        cpumask_t *mask = per_cpu(scratch_cpumask, cpu);
++        if ( likely(cpumask_test_cpu(cpu, mask)) )
++        {
++            mask = per_cpu(scratch_cpumask, cpu);
+ 
+-        cpumask_andnot(mask, pt_owner->dirty_cpumask, cpumask_of(cpu));
++            cpumask_copy(mask, pt_owner->dirty_cpumask);
++            __cpumask_clear_cpu(cpu, mask);
++
++            flush_local(FLUSH_TLB |
++                        (flush_root_pt_local ? FLUSH_ROOT_PGTBL : 0));
++        }
++        else
++            /* Sanity check.  flush_root_pt_local implies local cpu is dirty. */
++            ASSERT(!flush_root_pt_local);
++
++        /* Flush the remote dirty CPUs.  Does not include the local CPU. */
+         if ( !cpumask_empty(mask) )
+-            flush_mask(mask, FLUSH_ROOT_PGTBL);
++            flush_mask(mask, FLUSH_TLB |
++                       (flush_root_pt_others ? FLUSH_ROOT_PGTBL : 0));
+     }
++    else
++        /* Sanity check.  flush_root_pt_* implies flush_linear_pt. */
++        ASSERT(!flush_root_pt_local && !flush_root_pt_others);
+ 
+     perfc_add(num_page_updates, i);
+ 
+-- 
+2.20.1
+

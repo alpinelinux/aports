@@ -1,0 +1,249 @@
+From 6b020418d0554d9ec6eb201f50776a72db67739b Mon Sep 17 00:00:00 2001
+From: Hongyan Xia <hongyxia@amazon.com>
+Date: Sat, 11 Jan 2020 21:57:43 +0000
+Subject: [PATCH 3/3] x86/mm: Prevent some races in hypervisor mapping updates
+
+map_pages_to_xen will attempt to coalesce mappings into 2MiB and 1GiB
+superpages if possible, to maximize TLB efficiency.  This means both
+replacing superpage entries with smaller entries, and replacing
+smaller entries with superpages.
+
+Unfortunately, while some potential races are handled correctly,
+others are not.  These include:
+
+1. When one processor modifies a sub-superpage mapping while another
+processor replaces the entire range with a superpage.
+
+Take the following example:
+
+Suppose L3[N] points to L2.  And suppose we have two processors, A and
+B.
+
+* A walks the pagetables, get a pointer to L2.
+* B replaces L3[N] with a 1GiB mapping.
+* B Frees L2
+* A writes L2[M] #
+
+This is race exacerbated by the fact that virt_to_xen_l[21]e doesn't
+handle higher-level superpages properly: If you call virt_xen_to_l2e
+on a virtual address within an L3 superpage, you'll either hit a BUG()
+(most likely), or get a pointer into the middle of a data page; same
+with virt_xen_to_l1 on a virtual address within either an L3 or L2
+superpage.
+
+So take the following example:
+
+* A reads pl3e and discovers it to point to an L2.
+* B replaces L3[N] with a 1GiB mapping
+* A calls virt_to_xen_l2e() and hits the BUG_ON() #
+
+2. When two processors simultaneously try to replace a sub-superpage
+mapping with a superpage mapping.
+
+Take the following example:
+
+Suppose L3[N] points to L2.  And suppose we have two processors, A and B,
+both trying to replace L3[N] with a superpage.
+
+* A walks the pagetables, get a pointer to pl3e, and takes a copy ol3e pointing to L2.
+* B walks the pagetables, gets a pointre to pl3e, and takes a copy ol3e pointing to L2.
+* A writes the new value into L3[N]
+* B writes the new value into L3[N]
+* A recursively frees all the L1's under L2, then frees L2
+* B recursively double-frees all the L1's under L2, then double-frees L2 #
+
+Fix this by grabbing a lock for the entirety of the mapping update
+operation.
+
+Rather than grabbing map_pgdir_lock for the entire operation, however,
+repurpose the PGT_locked bit from L3's page->type_info as a lock.
+This means that rather than locking the entire address space, we
+"only" lock a single 512GiB chunk of hypervisor address space at a
+time.
+
+There was a proposal for a lock-and-reverify approach, where we walk
+the pagetables to the point where we decide what to do; then grab the
+map_pgdir_lock, re-verify the information we collected without the
+lock, and finally make the change (starting over again if anything had
+changed).  Without being able to guarantee that the L2 table wasn't
+freed, however, that means every read would need to be considered
+potentially unsafe.  Thinking carefully about that is probably
+something that wants to be done on public, not under time pressure.
+
+This is part of XSA-345.
+
+Reported-by: Hongyan Xia <hongyxia@amazon.com>
+Signed-off-by: Hongyan Xia <hongyxia@amazon.com>
+Signed-off-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/arch/x86/mm.c | 92 +++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 89 insertions(+), 3 deletions(-)
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 2468347a45..9c55b2b9e3 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -2088,6 +2088,50 @@ void page_unlock(struct page_info *page)
+     current_locked_page_set(NULL);
+ }
+ 
++/*
++ * L3 table locks:
++ *
++ * Used for serialization in map_pages_to_xen() and modify_xen_mappings().
++ *
++ * For Xen PT pages, the page->u.inuse.type_info is unused and it is safe to
++ * reuse the PGT_locked flag. This lock is taken only when we move down to L3
++ * tables and below, since L4 (and above, for 5-level paging) is still globally
++ * protected by map_pgdir_lock.
++ *
++ * PV MMU update hypercalls call map_pages_to_xen while holding a page's page_lock().
++ * This has two implications:
++ * - We cannot reuse reuse current_locked_page_* for debugging
++ * - To avoid the chance of deadlock, even for different pages, we
++ *   must never grab page_lock() after grabbing l3t_lock().  This
++ *   includes any page_lock()-based locks, such as
++ *   mem_sharing_page_lock().
++ *
++ * Also note that we grab the map_pgdir_lock while holding the
++ * l3t_lock(), so to avoid deadlock we must avoid grabbing them in
++ * reverse order.
++ */
++static void l3t_lock(struct page_info *page)
++{
++    unsigned long x, nx;
++
++    do {
++        while ( (x = page->u.inuse.type_info) & PGT_locked )
++            cpu_relax();
++        nx = x | PGT_locked;
++    } while ( cmpxchg(&page->u.inuse.type_info, x, nx) != x );
++}
++
++static void l3t_unlock(struct page_info *page)
++{
++    unsigned long x, nx, y = page->u.inuse.type_info;
++
++    do {
++        x = y;
++        BUG_ON(!(x & PGT_locked));
++        nx = x & ~PGT_locked;
++    } while ( (y = cmpxchg(&page->u.inuse.type_info, x, nx)) != x );
++}
++
+ #ifdef CONFIG_PV
+ /*
+  * PTE flags that a guest may change without re-validating the PTE.
+@@ -5078,6 +5122,23 @@ l1_pgentry_t *virt_to_xen_l1e(unsigned long v)
+                          flush_area_local((const void *)v, f) : \
+                          flush_area_all((const void *)v, f))
+ 
++#define L3T_INIT(page) (page) = ZERO_BLOCK_PTR
++
++#define L3T_LOCK(page)        \
++    do {                      \
++        if ( locking )        \
++            l3t_lock(page);   \
++    } while ( false )
++
++#define L3T_UNLOCK(page)                           \
++    do {                                           \
++        if ( locking && (page) != ZERO_BLOCK_PTR ) \
++        {                                          \
++            l3t_unlock(page);                      \
++            (page) = ZERO_BLOCK_PTR;               \
++        }                                          \
++    } while ( false )
++
+ int map_pages_to_xen(
+     unsigned long virt,
+     mfn_t mfn,
+@@ -5089,6 +5150,7 @@ int map_pages_to_xen(
+     l1_pgentry_t *pl1e, ol1e;
+     unsigned int  i;
+     int rc = -ENOMEM;
++    struct page_info *current_l3page;
+ 
+ #define flush_flags(oldf) do {                 \
+     unsigned int o_ = (oldf);                  \
+@@ -5104,13 +5166,20 @@ int map_pages_to_xen(
+     }                                          \
+ } while (0)
+ 
++    L3T_INIT(current_l3page);
++
+     while ( nr_mfns != 0 )
+     {
+-        l3_pgentry_t ol3e, *pl3e = virt_to_xen_l3e(virt);
++        l3_pgentry_t *pl3e, ol3e;
+ 
++        L3T_UNLOCK(current_l3page);
++
++        pl3e = virt_to_xen_l3e(virt);
+         if ( !pl3e )
+             goto out;
+ 
++        current_l3page = virt_to_page(pl3e);
++        L3T_LOCK(current_l3page);
+         ol3e = *pl3e;
+ 
+         if ( cpu_has_page1gb &&
+@@ -5450,6 +5519,7 @@ int map_pages_to_xen(
+     rc = 0;
+ 
+  out:
++    L3T_UNLOCK(current_l3page);
+     return rc;
+ }
+ 
+@@ -5478,6 +5548,7 @@ int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int nf)
+     unsigned int  i;
+     unsigned long v = s;
+     int rc = -ENOMEM;
++    struct page_info *current_l3page;
+ 
+     /* Set of valid PTE bits which may be altered. */
+ #define FLAGS_MASK (_PAGE_NX|_PAGE_DIRTY|_PAGE_ACCESSED|_PAGE_RW|_PAGE_PRESENT)
+@@ -5486,11 +5557,22 @@ int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int nf)
+     ASSERT(IS_ALIGNED(s, PAGE_SIZE));
+     ASSERT(IS_ALIGNED(e, PAGE_SIZE));
+ 
++    L3T_INIT(current_l3page);
++
+     while ( v < e )
+     {
+-        l3_pgentry_t *pl3e = virt_to_xen_l3e(v);
++        l3_pgentry_t *pl3e;
++
++        L3T_UNLOCK(current_l3page);
+ 
+-        if ( !pl3e || !(l3e_get_flags(*pl3e) & _PAGE_PRESENT) )
++        pl3e = virt_to_xen_l3e(v);
++        if ( !pl3e )
++            goto out;
++
++        current_l3page = virt_to_page(pl3e);
++        L3T_LOCK(current_l3page);
++
++        if ( !(l3e_get_flags(*pl3e) & _PAGE_PRESENT) )
+         {
+             /* Confirm the caller isn't trying to create new mappings. */
+             ASSERT(!(nf & _PAGE_PRESENT));
+@@ -5716,9 +5798,13 @@ int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int nf)
+     rc = 0;
+ 
+  out:
++    L3T_UNLOCK(current_l3page);
+     return rc;
+ }
+ 
++#undef L3T_LOCK
++#undef L3T_UNLOCK
++
+ #undef flush_area
+ 
+ int destroy_xen_mappings(unsigned long s, unsigned long e)
+-- 
+2.25.1
+
