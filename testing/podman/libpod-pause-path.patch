@@ -1,0 +1,204 @@
+From ab886328357184cd0a8375a5dedf816ba91789f9 Mon Sep 17 00:00:00 2001
+From: Matthew Heon <mheon@redhat.com>
+Date: Wed, 2 Dec 2020 10:05:34 -0500
+Subject: [PATCH] Use Libpod tmpdir for pause path
+
+Previously, we always computed pause path from the Rootless
+runtime directory. Problem: this does not match the behavior of
+Libpod when the directory changes. Libpod will continue to use
+the previous directory, cached in the database; Pause pidfiles
+will swap to the new path. This is problematic when the directory
+needs to exist to write the pidfile, and Libpod is what creates
+the directory.
+
+There are two potential solutions - allow the pause pidfile to
+move and just make the directory when we want to write it, or use
+the cached Libpod paths for a guaranteed location. This patch
+does the second, because it seems safer - we will never miss a
+previously-existing pidfile because the location is now
+consistent.
+
+Fixes #8539
+
+Signed-off-by: Matthew Heon <mheon@redhat.com>
+---
+ libpod/reset.go                       |  2 +-
+ libpod/runtime.go                     | 11 ++++++++++-
+ libpod/runtime_migrate.go             |  6 +++---
+ libpod/runtime_migrate_unsupported.go |  2 +-
+ pkg/domain/infra/abi/system.go        | 17 +++++++++++++----
+ pkg/util/utils_supported.go           | 13 ++++++++++++-
+ pkg/util/utils_windows.go             |  6 ++++++
+ 7 files changed, 46 insertions(+), 11 deletions(-)
+
+diff --git a/libpod/reset.go b/libpod/reset.go
+index f8828fed4a..6d28427232 100644
+--- a/libpod/reset.go
++++ b/libpod/reset.go
+@@ -46,7 +46,7 @@ func (r *Runtime) Reset(ctx context.Context) error {
+ 		}
+ 	}
+ 
+-	if err := stopPauseProcess(); err != nil {
++	if err := r.stopPauseProcess(); err != nil {
+ 		logrus.Errorf("Error stopping pause process: %v", err)
+ 	}
+ 
+diff --git a/libpod/runtime.go b/libpod/runtime.go
+index df3dfae2bd..cdf66a4d0f 100644
+--- a/libpod/runtime.go
++++ b/libpod/runtime.go
+@@ -472,7 +472,7 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
+ 		// we will need to access the storage.
+ 		if os.Geteuid() != 0 {
+ 			aliveLock.Unlock() // Unlock to avoid deadlock as BecomeRootInUserNS will reexec.
+-			pausePid, err := util.GetRootlessPauseProcessPidPath()
++			pausePid, err := util.GetRootlessPauseProcessPidPathGivenDir(runtime.config.Engine.TmpDir)
+ 			if err != nil {
+ 				return errors.Wrapf(err, "could not get pause process pid file path")
+ 			}
+@@ -538,6 +538,15 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
+ 	return nil
+ }
+ 
++// TmpDir gets the current Libpod temporary files directory.
++func (r *Runtime) TmpDir() (string, error) {
++	if !r.valid {
++		return "", define.ErrRuntimeStopped
++	}
++
++	return r.config.Engine.TmpDir, nil
++}
++
+ // GetConfig returns a copy of the configuration used by the runtime
+ func (r *Runtime) GetConfig() (*config.Config, error) {
+ 	r.lock.RLock()
+diff --git a/libpod/runtime_migrate.go b/libpod/runtime_migrate.go
+index 1ad32fe9cf..f0f800ef0c 100644
+--- a/libpod/runtime_migrate.go
++++ b/libpod/runtime_migrate.go
+@@ -18,9 +18,9 @@ import (
+ 	"github.com/sirupsen/logrus"
+ )
+ 
+-func stopPauseProcess() error {
++func (r *Runtime) stopPauseProcess() error {
+ 	if rootless.IsRootless() {
+-		pausePidPath, err := util.GetRootlessPauseProcessPidPath()
++		pausePidPath, err := util.GetRootlessPauseProcessPidPathGivenDir(r.config.Engine.TmpDir)
+ 		if err != nil {
+ 			return errors.Wrapf(err, "could not get pause process pid file path")
+ 		}
+@@ -98,5 +98,5 @@ func (r *Runtime) migrate(ctx context.Context) error {
+ 		}
+ 	}
+ 
+-	return stopPauseProcess()
++	return r.stopPauseProcess()
+ }
+diff --git a/libpod/runtime_migrate_unsupported.go b/libpod/runtime_migrate_unsupported.go
+index e362cca637..a9d3513186 100644
+--- a/libpod/runtime_migrate_unsupported.go
++++ b/libpod/runtime_migrate_unsupported.go
+@@ -10,6 +10,6 @@ func (r *Runtime) migrate(ctx context.Context) error {
+ 	return nil
+ }
+ 
+-func stopPauseProcess() error {
++func (r *Runtime) stopPauseProcess() error {
+ 	return nil
+ }
+diff --git a/pkg/domain/infra/abi/system.go b/pkg/domain/infra/abi/system.go
+index 72fd98ac10..ec2532bea9 100644
+--- a/pkg/domain/infra/abi/system.go
++++ b/pkg/domain/infra/abi/system.go
+@@ -11,6 +11,7 @@ import (
+ 	"strings"
+ 
+ 	"github.com/containers/common/pkg/config"
++	"github.com/containers/podman/v2/libpod"
+ 	"github.com/containers/podman/v2/libpod/define"
+ 	"github.com/containers/podman/v2/pkg/cgroups"
+ 	"github.com/containers/podman/v2/pkg/domain/entities"
+@@ -86,7 +87,11 @@ func (ic *ContainerEngine) SetupRootless(_ context.Context, cmd *cobra.Command)
+ 		return nil
+ 	}
+ 
+-	pausePidPath, err := util.GetRootlessPauseProcessPidPath()
++	tmpDir, err := ic.Libpod.TmpDir()
++	if err != nil {
++		return err
++	}
++	pausePidPath, err := util.GetRootlessPauseProcessPidPathGivenDir(tmpDir)
+ 	if err != nil {
+ 		return errors.Wrapf(err, "could not get pause process pid file path")
+ 	}
+@@ -112,7 +117,7 @@ func (ic *ContainerEngine) SetupRootless(_ context.Context, cmd *cobra.Command)
+ 	}
+ 
+ 	became, ret, err = rootless.TryJoinFromFilePaths(pausePidPath, true, paths)
+-	if err := movePauseProcessToScope(); err != nil {
++	if err := movePauseProcessToScope(ic.Libpod); err != nil {
+ 		conf, err := ic.Config(context.Background())
+ 		if err != nil {
+ 			return err
+@@ -133,8 +138,12 @@ func (ic *ContainerEngine) SetupRootless(_ context.Context, cmd *cobra.Command)
+ 	return nil
+ }
+ 
+-func movePauseProcessToScope() error {
+-	pausePidPath, err := util.GetRootlessPauseProcessPidPath()
++func movePauseProcessToScope(r *libpod.Runtime) error {
++	tmpDir, err := r.TmpDir()
++	if err != nil {
++		return err
++	}
++	pausePidPath, err := util.GetRootlessPauseProcessPidPathGivenDir(tmpDir)
+ 	if err != nil {
+ 		return errors.Wrapf(err, "could not get pause process pid file path")
+ 	}
+diff --git a/pkg/util/utils_supported.go b/pkg/util/utils_supported.go
+index 2d636a7cb0..a63c764152 100644
+--- a/pkg/util/utils_supported.go
++++ b/pkg/util/utils_supported.go
+@@ -99,7 +99,8 @@ func GetRootlessConfigHomeDir() (string, error) {
+ }
+ 
+ // GetRootlessPauseProcessPidPath returns the path to the file that holds the pid for
+-// the pause process
++// the pause process.
++// DEPRECATED - switch to GetRootlessPauseProcessPidPathGivenDir
+ func GetRootlessPauseProcessPidPath() (string, error) {
+ 	runtimeDir, err := GetRuntimeDir()
+ 	if err != nil {
+@@ -107,3 +108,13 @@ func GetRootlessPauseProcessPidPath() (string, error) {
+ 	}
+ 	return filepath.Join(runtimeDir, "libpod", "pause.pid"), nil
+ }
++
++// GetRootlessPauseProcessPidPathGivenDir returns the path to the file that
++// holds the PID of the pause process, given the location of Libpod's temporary
++// files.
++func GetRootlessPauseProcessPidPathGivenDir(libpodTmpDir string) (string, error) {
++	if libpodTmpDir == "" {
++		return "", errors.Errorf("must provide non-empty tmporary directory")
++	}
++	return filepath.Join(libpodTmpDir, "pause.pid"), nil
++}
+diff --git a/pkg/util/utils_windows.go b/pkg/util/utils_windows.go
+index 9bba2d1ee7..46ca5e7f18 100644
+--- a/pkg/util/utils_windows.go
++++ b/pkg/util/utils_windows.go
+@@ -25,6 +25,12 @@ func GetRootlessPauseProcessPidPath() (string, error) {
+ 	return "", errors.Wrap(errNotImplemented, "GetRootlessPauseProcessPidPath")
+ }
+ 
++// GetRootlessPauseProcessPidPath returns the path to the file that holds the pid for
++// the pause process
++func GetRootlessPauseProcessPidPathGivenDir(unused string) (string, error) {
++	return "", errors.Wrap(errNotImplemented, "GetRootlessPauseProcessPidPath")
++}
++
+ // GetRuntimeDir returns the runtime directory
+ func GetRuntimeDir() (string, error) {
+ 	return "", errors.New("this function is not implemented for windows")
