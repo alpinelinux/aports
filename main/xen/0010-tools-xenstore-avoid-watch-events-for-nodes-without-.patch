@@ -1,0 +1,375 @@
+From e57b7687b43b033fe45e755e285efbe67bc71921 Mon Sep 17 00:00:00 2001
+From: Juergen Gross <jgross@suse.com>
+Date: Thu, 11 Jun 2020 16:12:46 +0200
+Subject: [PATCH 10/10] tools/xenstore: avoid watch events for nodes without
+ access
+
+Today watch events are sent regardless of the access rights of the
+node the event is sent for. This enables any guest to e.g. setup a
+watch for "/" in order to have a detailed record of all Xenstore
+modifications.
+
+Modify that by sending only watch events for nodes that the watcher
+has a chance to see otherwise (either via direct reads or by querying
+the children of a node). This includes cases where the visibility of
+a node for a watcher is changing (permissions being removed).
+
+This is part of XSA-115.
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+[julieng: Handle rebase conflict]
+Reviewed-by: Julien Grall <jgrall@amazon.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ tools/xenstore/xenstored_core.c        | 28 +++++-----
+ tools/xenstore/xenstored_core.h        | 15 ++++--
+ tools/xenstore/xenstored_domain.c      |  6 +--
+ tools/xenstore/xenstored_transaction.c | 21 +++++++-
+ tools/xenstore/xenstored_watch.c       | 75 +++++++++++++++++++-------
+ tools/xenstore/xenstored_watch.h       |  2 +-
+ 6 files changed, 104 insertions(+), 43 deletions(-)
+
+diff --git a/tools/xenstore/xenstored_core.c b/tools/xenstore/xenstored_core.c
+index 720bec269dd3..1c2845454560 100644
+--- a/tools/xenstore/xenstored_core.c
++++ b/tools/xenstore/xenstored_core.c
+@@ -358,8 +358,8 @@ static void initialize_fds(int sock, int *p_sock_pollfd_idx,
+  * If it fails, returns NULL and sets errno.
+  * Temporary memory allocations will be done with ctx.
+  */
+-static struct node *read_node(struct connection *conn, const void *ctx,
+-			      const char *name)
++struct node *read_node(struct connection *conn, const void *ctx,
++		       const char *name)
+ {
+ 	TDB_DATA key, data;
+ 	struct xs_tdb_record_hdr *hdr;
+@@ -494,7 +494,7 @@ enum xs_perm_type perm_for_conn(struct connection *conn,
+  * Get name of node parent.
+  * Temporary memory allocations are done with ctx.
+  */
+-static char *get_parent(const void *ctx, const char *node)
++char *get_parent(const void *ctx, const char *node)
+ {
+ 	char *parent;
+ 	char *slash = strrchr(node + 1, '/');
+@@ -566,10 +566,10 @@ static int errno_from_parents(struct connection *conn, const void *ctx,
+  * If it fails, returns NULL and sets errno.
+  * Temporary memory allocations are done with ctx.
+  */
+-struct node *get_node(struct connection *conn,
+-		      const void *ctx,
+-		      const char *name,
+-		      enum xs_perm_type perm)
++static struct node *get_node(struct connection *conn,
++			     const void *ctx,
++			     const char *name,
++			     enum xs_perm_type perm)
+ {
+ 	struct node *node;
+ 
+@@ -1056,7 +1056,7 @@ static int do_write(struct connection *conn, struct buffered_data *in)
+ 			return errno;
+ 	}
+ 
+-	fire_watches(conn, in, name, false);
++	fire_watches(conn, in, name, node, false, NULL);
+ 	send_ack(conn, XS_WRITE);
+ 
+ 	return 0;
+@@ -1078,7 +1078,7 @@ static int do_mkdir(struct connection *conn, struct buffered_data *in)
+ 		node = create_node(conn, in, name, NULL, 0);
+ 		if (!node)
+ 			return errno;
+-		fire_watches(conn, in, name, false);
++		fire_watches(conn, in, name, node, false, NULL);
+ 	}
+ 	send_ack(conn, XS_MKDIR);
+ 
+@@ -1141,7 +1141,7 @@ static int delete_node(struct connection *conn, const void *ctx,
+ 		talloc_free(name);
+ 	}
+ 
+-	fire_watches(conn, ctx, node->name, true);
++	fire_watches(conn, ctx, node->name, node, true, NULL);
+ 	delete_node_single(conn, node);
+ 	delete_child(conn, parent, basename(node->name));
+ 	talloc_free(node);
+@@ -1165,13 +1165,14 @@ static int _rm(struct connection *conn, const void *ctx, struct node *node,
+ 	parent = read_node(conn, ctx, parentname);
+ 	if (!parent)
+ 		return (errno == ENOMEM) ? ENOMEM : EINVAL;
++	node->parent = parent;
+ 
+ 	/*
+ 	 * Fire the watches now, when we can still see the node permissions.
+ 	 * This fine as we are single threaded and the next possible read will
+ 	 * be handled only after the node has been really removed.
+ 	 */
+-	fire_watches(conn, ctx, name, false);
++	fire_watches(conn, ctx, name, node, false, NULL);
+ 	return delete_node(conn, ctx, parent, node);
+ }
+ 
+@@ -1237,7 +1238,7 @@ static int do_get_perms(struct connection *conn, struct buffered_data *in)
+ 
+ static int do_set_perms(struct connection *conn, struct buffered_data *in)
+ {
+-	struct node_perms perms;
++	struct node_perms perms, old_perms;
+ 	char *name, *permstr;
+ 	struct node *node;
+ 
+@@ -1273,6 +1274,7 @@ static int do_set_perms(struct connection *conn, struct buffered_data *in)
+ 	    perms.p[0].id != node->perms.p[0].id)
+ 		return EPERM;
+ 
++	old_perms = node->perms;
+ 	domain_entry_dec(conn, node);
+ 	node->perms = perms;
+ 	domain_entry_inc(conn, node);
+@@ -1280,7 +1282,7 @@ static int do_set_perms(struct connection *conn, struct buffered_data *in)
+ 	if (write_node(conn, node, false))
+ 		return errno;
+ 
+-	fire_watches(conn, in, name, false);
++	fire_watches(conn, in, name, node, false, &old_perms);
+ 	send_ack(conn, XS_SET_PERMS);
+ 
+ 	return 0;
+diff --git a/tools/xenstore/xenstored_core.h b/tools/xenstore/xenstored_core.h
+index f3da6bbc943d..e050b27cbdde 100644
+--- a/tools/xenstore/xenstored_core.h
++++ b/tools/xenstore/xenstored_core.h
+@@ -152,15 +152,17 @@ void send_ack(struct connection *conn, enum xsd_sockmsg_type type);
+ /* Canonicalize this path if possible. */
+ char *canonicalize(struct connection *conn, const void *ctx, const char *node);
+ 
++/* Get access permissions. */
++enum xs_perm_type perm_for_conn(struct connection *conn,
++				const struct node_perms *perms);
++
+ /* Write a node to the tdb data base. */
+ int write_node_raw(struct connection *conn, TDB_DATA *key, struct node *node,
+ 		   bool no_quota_check);
+ 
+-/* Get this node, checking we have permissions. */
+-struct node *get_node(struct connection *conn,
+-		      const void *ctx,
+-		      const char *name,
+-		      enum xs_perm_type perm);
++/* Get a node from the tdb data base. */
++struct node *read_node(struct connection *conn, const void *ctx,
++		       const char *name);
+ 
+ struct connection *new_connection(connwritefn_t *write, connreadfn_t *read);
+ void check_store(void);
+@@ -171,6 +173,9 @@ enum xs_perm_type perm_for_conn(struct connection *conn,
+ /* Is this a valid node name? */
+ bool is_valid_nodename(const char *node);
+ 
++/* Get name of parent node. */
++char *get_parent(const void *ctx, const char *node);
++
+ /* Tracing infrastructure. */
+ void trace_create(const void *data, const char *type);
+ void trace_destroy(const void *data, const char *type);
+diff --git a/tools/xenstore/xenstored_domain.c b/tools/xenstore/xenstored_domain.c
+index 7afabe0ae084..711a11b18ad6 100644
+--- a/tools/xenstore/xenstored_domain.c
++++ b/tools/xenstore/xenstored_domain.c
+@@ -206,7 +206,7 @@ static int destroy_domain(void *_domain)
+ 			unmap_interface(domain->interface);
+ 	}
+ 
+-	fire_watches(NULL, domain, "@releaseDomain", false);
++	fire_watches(NULL, domain, "@releaseDomain", NULL, false, NULL);
+ 
+ 	wrl_domain_destroy(domain);
+ 
+@@ -244,7 +244,7 @@ static void domain_cleanup(void)
+ 	}
+ 
+ 	if (notify)
+-		fire_watches(NULL, NULL, "@releaseDomain", false);
++		fire_watches(NULL, NULL, "@releaseDomain", NULL, false, NULL);
+ }
+ 
+ /* We scan all domains rather than use the information given here. */
+@@ -410,7 +410,7 @@ int do_introduce(struct connection *conn, struct buffered_data *in)
+ 		/* Now domain belongs to its connection. */
+ 		talloc_steal(domain->conn, domain);
+ 
+-		fire_watches(NULL, in, "@introduceDomain", false);
++		fire_watches(NULL, in, "@introduceDomain", NULL, false, NULL);
+ 	} else if ((domain->mfn == mfn) && (domain->conn != conn)) {
+ 		/* Use XS_INTRODUCE for recreating the xenbus event-channel. */
+ 		if (domain->port)
+diff --git a/tools/xenstore/xenstored_transaction.c b/tools/xenstore/xenstored_transaction.c
+index e87897573469..a7d8c5d475ec 100644
+--- a/tools/xenstore/xenstored_transaction.c
++++ b/tools/xenstore/xenstored_transaction.c
+@@ -114,6 +114,9 @@ struct accessed_node
+ 	/* Generation count (or NO_GENERATION) for conflict checking. */
+ 	uint64_t generation;
+ 
++	/* Original node permissions. */
++	struct node_perms perms;
++
+ 	/* Generation count checking required? */
+ 	bool check_gen;
+ 
+@@ -260,6 +263,15 @@ int access_node(struct connection *conn, struct node *node,
+ 		i->node = talloc_strdup(i, node->name);
+ 		if (!i->node)
+ 			goto nomem;
++		if (node->generation != NO_GENERATION && node->perms.num) {
++			i->perms.p = talloc_array(i, struct xs_permissions,
++						  node->perms.num);
++			if (!i->perms.p)
++				goto nomem;
++			i->perms.num = node->perms.num;
++			memcpy(i->perms.p, node->perms.p,
++			       i->perms.num * sizeof(*i->perms.p));
++		}
+ 
+ 		introduce = true;
+ 		i->ta_node = false;
+@@ -368,9 +380,14 @@ static int finalize_transaction(struct connection *conn,
+ 				talloc_free(data.dptr);
+ 				if (ret)
+ 					goto err;
+-			} else if (tdb_delete(tdb_ctx, key))
++				fire_watches(conn, trans, i->node, NULL, false,
++					     i->perms.p ? &i->perms : NULL);
++			} else {
++				fire_watches(conn, trans, i->node, NULL, false,
++					     i->perms.p ? &i->perms : NULL);
++				if (tdb_delete(tdb_ctx, key))
+ 					goto err;
+-			fire_watches(conn, trans, i->node, false);
++			}
+ 		}
+ 
+ 		if (i->ta_node && tdb_delete(tdb_ctx, ta_key))
+diff --git a/tools/xenstore/xenstored_watch.c b/tools/xenstore/xenstored_watch.c
+index f4e289362eb6..71c108ea99f1 100644
+--- a/tools/xenstore/xenstored_watch.c
++++ b/tools/xenstore/xenstored_watch.c
+@@ -85,22 +85,6 @@ static void add_event(struct connection *conn,
+ 	unsigned int len;
+ 	char *data;
+ 
+-	if (!check_special_event(name)) {
+-		/* Can this conn load node, or see that it doesn't exist? */
+-		struct node *node = get_node(conn, ctx, name, XS_PERM_READ);
+-		/*
+-		 * XXX We allow EACCES here because otherwise a non-dom0
+-		 * backend driver cannot watch for disappearance of a frontend
+-		 * xenstore directory. When the directory disappears, we
+-		 * revert to permissions of the parent directory for that path,
+-		 * which will typically disallow access for the backend.
+-		 * But this breaks device-channel teardown!
+-		 * Really we should fix this better...
+-		 */
+-		if (!node && errno != ENOENT && errno != EACCES)
+-			return;
+-	}
+-
+ 	if (watch->relative_path) {
+ 		name += strlen(watch->relative_path);
+ 		if (*name == '/') /* Could be "" */
+@@ -117,12 +101,60 @@ static void add_event(struct connection *conn,
+ 	talloc_free(data);
+ }
+ 
++/*
++ * Check permissions of a specific watch to fire:
++ * Either the node itself or its parent have to be readable by the connection
++ * the watch has been setup for. In case a watch event is created due to
++ * changed permissions we need to take the old permissions into account, too.
++ */
++static bool watch_permitted(struct connection *conn, const void *ctx,
++			    const char *name, struct node *node,
++			    struct node_perms *perms)
++{
++	enum xs_perm_type perm;
++	struct node *parent;
++	char *parent_name;
++
++	if (perms) {
++		perm = perm_for_conn(conn, perms);
++		if (perm & XS_PERM_READ)
++			return true;
++	}
++
++	if (!node) {
++		node = read_node(conn, ctx, name);
++		if (!node)
++			return false;
++	}
++
++	perm = perm_for_conn(conn, &node->perms);
++	if (perm & XS_PERM_READ)
++		return true;
++
++	parent = node->parent;
++	if (!parent) {
++		parent_name = get_parent(ctx, node->name);
++		if (!parent_name)
++			return false;
++		parent = read_node(conn, ctx, parent_name);
++		if (!parent)
++			return false;
++	}
++
++	perm = perm_for_conn(conn, &parent->perms);
++
++	return perm & XS_PERM_READ;
++}
++
+ /*
+  * Check whether any watch events are to be sent.
+  * Temporary memory allocations are done with ctx.
++ * We need to take the (potential) old permissions of the node into account
++ * as a watcher losing permissions to access a node should receive the
++ * watch event, too.
+  */
+ void fire_watches(struct connection *conn, const void *ctx, const char *name,
+-		  bool exact)
++		  struct node *node, bool exact, struct node_perms *perms)
+ {
+ 	struct connection *i;
+ 	struct watch *watch;
+@@ -134,8 +166,13 @@ void fire_watches(struct connection *conn, const void *ctx, const char *name,
+ 	/* Create an event for each watch. */
+ 	list_for_each_entry(i, &connections, list) {
+ 		/* introduce/release domain watches */
+-		if (check_special_event(name) && !check_perms_special(name, i))
+-			continue;
++		if (check_special_event(name)) {
++			if (!check_perms_special(name, i))
++				continue;
++		} else {
++			if (!watch_permitted(i, ctx, name, node, perms))
++				continue;
++		}
+ 
+ 		list_for_each_entry(watch, &i->watches, list) {
+ 			if (exact) {
+diff --git a/tools/xenstore/xenstored_watch.h b/tools/xenstore/xenstored_watch.h
+index 1b3c80d3dda1..03094374f379 100644
+--- a/tools/xenstore/xenstored_watch.h
++++ b/tools/xenstore/xenstored_watch.h
+@@ -26,7 +26,7 @@ int do_unwatch(struct connection *conn, struct buffered_data *in);
+ 
+ /* Fire all watches: !exact means all the children are affected (ie. rm). */
+ void fire_watches(struct connection *conn, const void *tmp, const char *name,
+-		  bool exact);
++		  struct node *node, bool exact, struct node_perms *perms);
+ 
+ void conn_delete_all_watches(struct connection *conn);
+ 
+-- 
+2.17.1
+

@@ -1,0 +1,217 @@
+From 461c880600175c06e23a63e62d9f1ccab755d708 Mon Sep 17 00:00:00 2001
+From: Juergen Gross <jgross@suse.com>
+Date: Thu, 11 Jun 2020 16:12:42 +0200
+Subject: [PATCH 06/10] tools/xenstore: rework node removal
+
+Today a Xenstore node is being removed by deleting it from the parent
+first and then deleting itself and all its children. This results in
+stale entries remaining in the data base in case e.g. a memory
+allocation is failing during processing. This would result in the
+rather strange behavior to be able to read a node (as its still in the
+data base) while not being visible in the tree view of Xenstore.
+
+Fix that by deleting the nodes from the leaf side instead of starting
+at the root.
+
+As fire_watches() is now called from _rm() the ctx parameter needs a
+const attribute.
+
+This is part of XSA-115.
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+Reviewed-by: Julien Grall <jgrall@amazon.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ tools/xenstore/xenstored_core.c  | 99 ++++++++++++++++----------------
+ tools/xenstore/xenstored_watch.c |  4 +-
+ tools/xenstore/xenstored_watch.h |  2 +-
+ 3 files changed, 54 insertions(+), 51 deletions(-)
+
+diff --git a/tools/xenstore/xenstored_core.c b/tools/xenstore/xenstored_core.c
+index 6afd58431111..1cb729a2cd5f 100644
+--- a/tools/xenstore/xenstored_core.c
++++ b/tools/xenstore/xenstored_core.c
+@@ -1087,74 +1087,76 @@ static int do_mkdir(struct connection *conn, struct buffered_data *in)
+ 	return 0;
+ }
+ 
+-static void delete_node(struct connection *conn, struct node *node)
+-{
+-	unsigned int i;
+-	char *name;
+-
+-	/* Delete self, then delete children.  If we crash, then the worst
+-	   that can happen is the children will continue to take up space, but
+-	   will otherwise be unreachable. */
+-	delete_node_single(conn, node);
+-
+-	/* Delete children, too. */
+-	for (i = 0; i < node->childlen; i += strlen(node->children+i) + 1) {
+-		struct node *child;
+-
+-		name = talloc_asprintf(node, "%s/%s", node->name,
+-				       node->children + i);
+-		child = name ? read_node(conn, node, name) : NULL;
+-		if (child) {
+-			delete_node(conn, child);
+-		}
+-		else {
+-			trace("delete_node: Error deleting child '%s/%s'!\n",
+-			      node->name, node->children + i);
+-			/* Skip it, we've already deleted the parent. */
+-		}
+-		talloc_free(name);
+-	}
+-}
+-
+-
+ /* Delete memory using memmove. */
+ static void memdel(void *mem, unsigned off, unsigned len, unsigned total)
+ {
+ 	memmove(mem + off, mem + off + len, total - off - len);
+ }
+ 
+-
+-static int remove_child_entry(struct connection *conn, struct node *node,
+-			      size_t offset)
++static void remove_child_entry(struct connection *conn, struct node *node,
++			       size_t offset)
+ {
+ 	size_t childlen = strlen(node->children + offset);
++
+ 	memdel(node->children, offset, childlen + 1, node->childlen);
+ 	node->childlen -= childlen + 1;
+-	return write_node(conn, node, true);
++	if (write_node(conn, node, true))
++		corrupt(conn, "Can't update parent node '%s'", node->name);
+ }
+ 
+-
+-static int delete_child(struct connection *conn,
+-			struct node *node, const char *childname)
++static void delete_child(struct connection *conn,
++			 struct node *node, const char *childname)
+ {
+ 	unsigned int i;
+ 
+ 	for (i = 0; i < node->childlen; i += strlen(node->children+i) + 1) {
+ 		if (streq(node->children+i, childname)) {
+-			return remove_child_entry(conn, node, i);
++			remove_child_entry(conn, node, i);
++			return;
+ 		}
+ 	}
+ 	corrupt(conn, "Can't find child '%s' in %s", childname, node->name);
+-	return ENOENT;
+ }
+ 
++static int delete_node(struct connection *conn, struct node *parent,
++		       struct node *node)
++{
++	char *name;
++
++	/* Delete children. */
++	while (node->childlen) {
++		struct node *child;
++
++		name = talloc_asprintf(node, "%s/%s", node->name,
++				       node->children);
++		child = name ? read_node(conn, node, name) : NULL;
++		if (child) {
++			if (delete_node(conn, node, child))
++				return errno;
++		} else {
++			trace("delete_node: Error deleting child '%s/%s'!\n",
++			      node->name, node->children);
++			/* Quit deleting. */
++			errno = ENOMEM;
++			return errno;
++		}
++		talloc_free(name);
++	}
++
++	delete_node_single(conn, node);
++	delete_child(conn, parent, basename(node->name));
++	talloc_free(node);
++
++	return 0;
++}
+ 
+ static int _rm(struct connection *conn, const void *ctx, struct node *node,
+ 	       const char *name)
+ {
+-	/* Delete from parent first, then if we crash, the worst that can
+-	   happen is the child will continue to take up space, but will
+-	   otherwise be unreachable. */
++	/*
++	 * Deleting node by node, so the result is always consistent even in
++	 * case of a failure.
++	 */
+ 	struct node *parent;
+ 	char *parentname = get_parent(ctx, name);
+ 
+@@ -1165,11 +1167,13 @@ static int _rm(struct connection *conn, const void *ctx, struct node *node,
+ 	if (!parent)
+ 		return (errno == ENOMEM) ? ENOMEM : EINVAL;
+ 
+-	if (delete_child(conn, parent, basename(name)))
+-		return EINVAL;
+-
+-	delete_node(conn, node);
+-	return 0;
++	/*
++	 * Fire the watches now, when we can still see the node permissions.
++	 * This fine as we are single threaded and the next possible read will
++	 * be handled only after the node has been really removed.
++	 */
++	fire_watches(conn, ctx, name, true);
++	return delete_node(conn, parent, node);
+ }
+ 
+ 
+@@ -1207,7 +1211,6 @@ static int do_rm(struct connection *conn, struct buffered_data *in)
+ 	if (ret)
+ 		return ret;
+ 
+-	fire_watches(conn, in, name, true);
+ 	send_ack(conn, XS_RM);
+ 
+ 	return 0;
+diff --git a/tools/xenstore/xenstored_watch.c b/tools/xenstore/xenstored_watch.c
+index f2f1bed47cc6..f0bbfe7a6dc6 100644
+--- a/tools/xenstore/xenstored_watch.c
++++ b/tools/xenstore/xenstored_watch.c
+@@ -77,7 +77,7 @@ static bool is_child(const char *child, const char *parent)
+  * Temporary memory allocations are done with ctx.
+  */
+ static void add_event(struct connection *conn,
+-		      void *ctx,
++		      const void *ctx,
+ 		      struct watch *watch,
+ 		      const char *name)
+ {
+@@ -121,7 +121,7 @@ static void add_event(struct connection *conn,
+  * Check whether any watch events are to be sent.
+  * Temporary memory allocations are done with ctx.
+  */
+-void fire_watches(struct connection *conn, void *ctx, const char *name,
++void fire_watches(struct connection *conn, const void *ctx, const char *name,
+ 		  bool recurse)
+ {
+ 	struct connection *i;
+diff --git a/tools/xenstore/xenstored_watch.h b/tools/xenstore/xenstored_watch.h
+index c72ea6a68542..54d4ea7e0d41 100644
+--- a/tools/xenstore/xenstored_watch.h
++++ b/tools/xenstore/xenstored_watch.h
+@@ -25,7 +25,7 @@ int do_watch(struct connection *conn, struct buffered_data *in);
+ int do_unwatch(struct connection *conn, struct buffered_data *in);
+ 
+ /* Fire all watches: recurse means all the children are affected (ie. rm). */
+-void fire_watches(struct connection *conn, void *tmp, const char *name,
++void fire_watches(struct connection *conn, const void *tmp, const char *name,
+ 		  bool recurse);
+ 
+ void conn_delete_all_watches(struct connection *conn);
+-- 
+2.17.1
+

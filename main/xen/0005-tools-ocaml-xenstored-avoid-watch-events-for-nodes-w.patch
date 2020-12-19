@@ -1,0 +1,406 @@
+From: =?UTF-8?q?Edwin=20T=C3=B6r=C3=B6k?= <edvin.torok@citrix.com>
+Subject: tools/ocaml/xenstored: avoid watch events for nodes without access
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Today watch events are sent regardless of the access rights of the
+node the event is sent for. This enables any guest to e.g. setup a
+watch for "/" in order to have a detailed record of all Xenstore
+modifications.
+
+Modify that by sending only watch events for nodes that the watcher
+has a chance to see otherwise (either via direct reads or by querying
+the children of a node). This includes cases where the visibility of
+a node for a watcher is changing (permissions being removed).
+
+Permissions for nodes are looked up either in the old (pre
+transaction/command) or current trees (post transaction).  If
+permissions are changed multiple times in a transaction only the final
+version is checked, because considering a transaction atomic the
+individual permission changes would not be noticable to an outside
+observer.
+
+Two trees are only needed for set_perms: here we can either notice the
+node disappearing (if we loose permission), appearing
+(if we gain permission), or changing (if we preserve permission).
+
+RM needs to only look at the old tree: in the new tree the node would be
+gone, or could have different permissions if it was recreated (the
+recreation would get its own watch fired).
+
+Inside a tree we lookup the watch path's parent, and then the watch path
+child itself.  This gets us 4 sets of permissions in worst case, and if
+either of these allows a watch, then we permit it to fire.  The
+permission lookups are done without logging the failures, otherwise we'd
+get confusing errors about permission denied for some paths, but a watch
+still firing. The actual result is logged in xenstored-access log:
+
+  'w event ...' as usual if watch was fired
+  'w notfired...' if the watch was not fired, together with path and
+  permission set to help in troubleshooting
+
+Adding a watch bypasses permission checks and always fires the watch
+once immediately. This is consistent with the specification, and no
+information is gained (the watch is fired both if the path exists or
+doesn't, and both if you have or don't have access, i.e. it reflects the
+path a domain gave it back to that domain).
+
+There are some semantic changes here:
+
+  * Write+rm in a single transaction of the same path is unobservable
+    now via watches: both before and after a transaction the path
+    doesn't exist, thus both tree lookups come up with the empty
+    permission set, and noone, not even Dom0 can see this. This is
+    consistent with transaction atomicity though.
+  * Similar to above if we temporarily grant and then revoke permission
+    on a path any watches fired inbetween are ignored as well
+  * There is a new log event (w notfired) which shows the permission set
+    of the path, and the path.
+  * Watches on paths that a domain doesn't have access to are now not
+    seen, which is the purpose of the security fix.
+
+This is part of XSA-115.
+
+Signed-off-by: Edwin Török <edvin.torok@citrix.com>
+Acked-by: Christian Lindig <christian.lindig@citrix.com>
+Reviewed-by: Andrew Cooper <andrew.cooper3@citrix.com>
+
+diff --git a/tools/ocaml/xenstored/connection.ml b/tools/ocaml/xenstored/connection.ml
+index e5df62d9e7..644a448f2e 100644
+--- a/tools/ocaml/xenstored/connection.ml
++++ b/tools/ocaml/xenstored/connection.ml
+@@ -196,11 +196,36 @@ let list_watches con =
+ 		con.watches [] in
+ 	List.concat ll
+ 
+-let fire_single_watch watch =
++let dbg fmt = Logging.debug "connection" fmt
++let info fmt = Logging.info "connection" fmt
++
++let lookup_watch_perm path = function
++| None -> []
++| Some root ->
++	try Store.Path.apply root path @@ fun parent name ->
++		Store.Node.get_perms parent ::
++		try [Store.Node.get_perms (Store.Node.find parent name)]
++		with Not_found -> []
++	with Define.Invalid_path | Not_found -> []
++
++let lookup_watch_perms oldroot root path =
++	lookup_watch_perm path oldroot @ lookup_watch_perm path (Some root)
++
++let fire_single_watch_unchecked watch =
+ 	let data = Utils.join_by_null [watch.path; watch.token; ""] in
+ 	send_reply watch.con Transaction.none 0 Xenbus.Xb.Op.Watchevent data
+ 
+-let fire_watch watch path =
++let fire_single_watch (oldroot, root) watch =
++	let abspath = get_watch_path watch.con watch.path |> Store.Path.of_string in
++	let perms = lookup_watch_perms oldroot root abspath in
++	if List.exists (Perms.has watch.con.perm READ) perms then
++		fire_single_watch_unchecked watch
++	else
++		let perms = perms |> List.map (Perms.Node.to_string ~sep:" ") |> String.concat ", " in
++		let con = get_domstr watch.con in
++		Logging.watch_not_fired ~con perms (Store.Path.to_string abspath)
++
++let fire_watch roots watch path =
+ 	let new_path =
+ 		if watch.is_relative && path.[0] = '/'
+ 		then begin
+@@ -210,7 +235,7 @@ let fire_watch watch path =
+ 		end else
+ 			path
+ 	in
+-	fire_single_watch { watch with path = new_path }
++	fire_single_watch roots { watch with path = new_path }
+ 
+ (* Search for a valid unused transaction id. *)
+ let rec valid_transaction_id con proposed_id =
+diff --git a/tools/ocaml/xenstored/connections.ml b/tools/ocaml/xenstored/connections.ml
+index f2c4318c88..9f9f7ee2f0 100644
+--- a/tools/ocaml/xenstored/connections.ml
++++ b/tools/ocaml/xenstored/connections.ml
+@@ -135,25 +135,26 @@ let del_watch cons con path token =
+  	watch
+ 
+ (* path is absolute *)
+-let fire_watches cons path recurse =
++let fire_watches ?oldroot root cons path recurse =
+ 	let key = key_of_path path in
+ 	let path = Store.Path.to_string path in
++	let roots = oldroot, root in
+ 	let fire_watch _ = function
+ 		| None         -> ()
+-		| Some watches -> List.iter (fun w -> Connection.fire_watch w path) watches
++		| Some watches -> List.iter (fun w -> Connection.fire_watch roots w path) watches
+ 	in
+ 	let fire_rec _x = function
+ 		| None         -> ()
+ 		| Some watches ->
+-			  List.iter (fun w -> Connection.fire_single_watch w) watches
++			List.iter (Connection.fire_single_watch roots) watches
+ 	in
+ 	Trie.iter_path fire_watch cons.watches key;
+ 	if recurse then
+ 		Trie.iter fire_rec (Trie.sub cons.watches key)
+ 
+-let fire_spec_watches cons specpath =
++let fire_spec_watches root cons specpath =
+ 	iter cons (fun con ->
+-		List.iter (fun w -> Connection.fire_single_watch w) (Connection.get_watches con specpath))
++		List.iter (Connection.fire_single_watch (None, root)) (Connection.get_watches con specpath))
+ 
+ let set_target cons domain target_domain =
+ 	let con = find_domain cons domain in
+diff --git a/tools/ocaml/xenstored/logging.ml b/tools/ocaml/xenstored/logging.ml
+index c5cba79e92..1ede131329 100644
+--- a/tools/ocaml/xenstored/logging.ml
++++ b/tools/ocaml/xenstored/logging.ml
+@@ -161,6 +161,8 @@ let xenstored_log_nb_lines = ref 13215
+ let xenstored_log_nb_chars = ref (-1)
+ let xenstored_logger = ref (None: logger option)
+ 
++let debug_enabled () = !xenstored_log_level = Debug
++
+ let set_xenstored_log_destination s =
+ 	xenstored_log_destination := log_destination_of_string s
+ 
+@@ -204,6 +206,7 @@ type access_type =
+ 	| Commit
+ 	| Newconn
+ 	| Endconn
++	| Watch_not_fired
+ 	| XbOp of Xenbus.Xb.Op.operation
+ 
+ let string_of_tid ~con tid =
+@@ -217,6 +220,7 @@ let string_of_access_type = function
+ 	| Commit                  -> "commit   "
+ 	| Newconn                 -> "newconn  "
+ 	| Endconn                 -> "endconn  "
++	| Watch_not_fired         -> "w notfired"
+ 
+ 	| XbOp op -> match op with
+ 	| Xenbus.Xb.Op.Debug             -> "debug    "
+@@ -331,3 +335,7 @@ let xb_answer ~tid ~con ~ty data =
+ 		| _ -> false, Debug
+ 	in
+ 	if print then access_logging ~tid ~con ~data (XbOp ty) ~level
++
++let watch_not_fired ~con perms path =
++	let data = Printf.sprintf "EPERM perms=[%s] path=%s" perms path in
++	access_logging ~tid:0 ~con ~data Watch_not_fired ~level:Info
+diff --git a/tools/ocaml/xenstored/perms.ml b/tools/ocaml/xenstored/perms.ml
+index 3ea193ea14..23b80aba3d 100644
+--- a/tools/ocaml/xenstored/perms.ml
++++ b/tools/ocaml/xenstored/perms.ml
+@@ -79,9 +79,9 @@ let of_string s =
+ let string_of_perm perm =
+ 	Printf.sprintf "%c%u" (char_of_permty (snd perm)) (fst perm)
+ 
+-let to_string permvec =
++let to_string ?(sep="\000") permvec =
+ 	let l = ((permvec.owner, permvec.other) :: permvec.acl) in
+-	String.concat "\000" (List.map string_of_perm l)
++	String.concat sep (List.map string_of_perm l)
+ 
+ end
+ 
+@@ -132,8 +132,8 @@ let check_owner (connection:Connection.t) (node:Node.t) =
+ 	then Connection.is_owner connection (Node.get_owner node)
+ 	else true
+ 
+-(* check if the current connection has the requested perm on the current node *)
+-let check (connection:Connection.t) request (node:Node.t) =
++(* check if the current connection lacks the requested perm on the current node *)
++let lacks (connection:Connection.t) request (node:Node.t) =
+ 	let check_acl domainid =
+ 		let perm =
+ 			if List.mem_assoc domainid (Node.get_acl node)
+@@ -154,11 +154,19 @@ let check (connection:Connection.t) request (node:Node.t) =
+ 			info "Permission denied: Domain %d has write only access" domainid;
+ 			false
+ 	in
+-	if !activate
++	!activate
+ 	&& not (Connection.is_dom0 connection)
+ 	&& not (check_owner connection node)
+ 	&& not (List.exists check_acl (Connection.get_owners connection))
++
++(* check if the current connection has the requested perm on the current node.
++*  Raises an exception if it doesn't. *)
++let check connection request node =
++	if lacks connection request node
+ 	then raise Define.Permission_denied
+ 
++(* check if the current connection has the requested perm on the current node *)
++let has connection request node = not (lacks connection request node)
++
+ let equiv perm1 perm2 =
+ 	(Node.to_string perm1) = (Node.to_string perm2)
+diff --git a/tools/ocaml/xenstored/process.ml b/tools/ocaml/xenstored/process.ml
+index e528d1ecb2..f99b9e935c 100644
+--- a/tools/ocaml/xenstored/process.ml
++++ b/tools/ocaml/xenstored/process.ml
+@@ -56,15 +56,17 @@ let split_one_path data con =
+ 	| path :: "" :: [] -> Store.Path.create path (Connection.get_path con)
+ 	| _                -> raise Invalid_Cmd_Args
+ 
+-let process_watch ops cons =
++let process_watch t cons =
++	let oldroot = t.Transaction.oldroot in
++	let newroot = Store.get_root t.store in
++	let ops = Transaction.get_paths t |> List.rev in
+ 	let do_op_watch op cons =
+-		let recurse = match (fst op) with
+-		| Xenbus.Xb.Op.Write    -> false
+-		| Xenbus.Xb.Op.Mkdir    -> false
+-		| Xenbus.Xb.Op.Rm       -> true
+-		| Xenbus.Xb.Op.Setperms -> false
++		let recurse, oldroot, root = match (fst op) with
++		| Xenbus.Xb.Op.Write|Xenbus.Xb.Op.Mkdir -> false, None, newroot
++		| Xenbus.Xb.Op.Rm       -> true, None, oldroot
++		| Xenbus.Xb.Op.Setperms -> false, Some oldroot, newroot
+ 		| _              -> raise (Failure "huh ?") in
+-		Connections.fire_watches cons (snd op) recurse in
++		Connections.fire_watches ?oldroot root cons (snd op) recurse in
+ 	List.iter (fun op -> do_op_watch op cons) ops
+ 
+ let create_implicit_path t perm path =
+@@ -205,7 +207,7 @@ let reply_ack fct con t doms cons data =
+ 	fct con t doms cons data;
+ 	Packet.Ack (fun () ->
+ 		if Transaction.get_id t = Transaction.none then
+-			process_watch (Transaction.get_paths t) cons
++			process_watch t cons
+ 	)
+ 
+ let reply_data fct con t doms cons data =
+@@ -353,14 +355,17 @@ let transaction_replay c t doms cons =
+ 			ignore @@ Connection.end_transaction c tid None
+ 		)
+ 
+-let do_watch con _t _domains cons data =
++let do_watch con t _domains cons data =
+ 	let (node, token) =
+ 		match (split None '\000' data) with
+ 		| [node; token; ""]   -> node, token
+ 		| _                   -> raise Invalid_Cmd_Args
+ 		in
+ 	let watch = Connections.add_watch cons con node token in
+-	Packet.Ack (fun () -> Connection.fire_single_watch watch)
++	Packet.Ack (fun () ->
++		(* xenstore.txt says this watch is fired immediately,
++		   implying even if path doesn't exist or is unreadable *)
++		Connection.fire_single_watch_unchecked watch)
+ 
+ let do_unwatch con _t _domains cons data =
+ 	let (node, token) =
+@@ -391,7 +396,7 @@ let do_transaction_end con t domains cons data =
+ 	if not success then
+ 		raise Transaction_again;
+ 	if commit then begin
+-		process_watch (List.rev (Transaction.get_paths t)) cons;
++		process_watch t cons;
+ 		match t.Transaction.ty with
+ 		| Transaction.No ->
+ 			() (* no need to record anything *)
+@@ -399,7 +404,7 @@ let do_transaction_end con t domains cons data =
+ 			record_commit ~con ~tid:id ~before:oldstore ~after:cstore
+ 	end
+ 
+-let do_introduce con _t domains cons data =
++let do_introduce con t domains cons data =
+ 	if not (Connection.is_dom0 con)
+ 	then raise Define.Permission_denied;
+ 	let (domid, mfn, port) =
+@@ -420,14 +425,14 @@ let do_introduce con _t domains cons data =
+ 		else try
+ 			let ndom = Domains.create domains domid mfn port in
+ 			Connections.add_domain cons ndom;
+-			Connections.fire_spec_watches cons Store.Path.introduce_domain;
++			Connections.fire_spec_watches (Transaction.get_root t) cons Store.Path.introduce_domain;
+ 			ndom
+ 		with _ -> raise Invalid_Cmd_Args
+ 	in
+ 	if (Domain.get_remote_port dom) <> port || (Domain.get_mfn dom) <> mfn then
+ 		raise Domain_not_match
+ 
+-let do_release con _t domains cons data =
++let do_release con t domains cons data =
+ 	if not (Connection.is_dom0 con)
+ 	then raise Define.Permission_denied;
+ 	let domid =
+@@ -439,7 +444,7 @@ let do_release con _t domains cons data =
+ 	Domains.del domains domid;
+ 	Connections.del_domain cons domid;
+ 	if fire_spec_watches
+-	then Connections.fire_spec_watches cons Store.Path.release_domain
++	then Connections.fire_spec_watches (Transaction.get_root t) cons Store.Path.release_domain
+ 	else raise Invalid_Cmd_Args
+ 
+ let do_resume con _t domains _cons data =
+@@ -507,6 +512,8 @@ let maybe_ignore_transaction = function
+ 		Transaction.none
+ 	| _ -> fun x -> x
+ 
++
++let () = Printexc.record_backtrace true
+ (**
+  * Nothrow guarantee.
+  *)
+@@ -548,7 +555,8 @@ let process_packet ~store ~cons ~doms ~con ~req =
+ 		(* Put the response on the wire *)
+ 		send_response ty con t rid response
+ 	with exn ->
+-		error "process packet: %s" (Printexc.to_string exn);
++		let bt = Printexc.get_backtrace () in
++		error "process packet: %s. %s" (Printexc.to_string exn) bt;
+ 		Connection.send_error con tid rid "EIO"
+ 
+ let do_input store cons doms con =
+diff --git a/tools/ocaml/xenstored/transaction.ml b/tools/ocaml/xenstored/transaction.ml
+index 963734a653..25bc8c3b4a 100644
+--- a/tools/ocaml/xenstored/transaction.ml
++++ b/tools/ocaml/xenstored/transaction.ml
+@@ -82,6 +82,7 @@ type t = {
+ 	start_count: int64;
+ 	store: Store.t; (* This is the store that we change in write operations. *)
+ 	quota: Quota.t;
++	oldroot: Store.Node.t;
+ 	mutable paths: (Xenbus.Xb.Op.operation * Store.Path.t) list;
+ 	mutable operations: (Packet.request * Packet.response) list;
+ 	mutable read_lowpath: Store.Path.t option;
+@@ -123,6 +124,7 @@ let make ?(internal=false) id store =
+ 		start_count = !counter;
+ 		store = if id = none then store else Store.copy store;
+ 		quota = Quota.copy store.Store.quota;
++		oldroot = Store.get_root store;
+ 		paths = [];
+ 		operations = [];
+ 		read_lowpath = None;
+@@ -137,6 +139,8 @@ let make ?(internal=false) id store =
+ let get_store t = t.store
+ let get_paths t = t.paths
+ 
++let get_root t = Store.get_root t.store
++
+ let is_read_only t = t.paths = []
+ let add_wop t ty path = t.paths <- (ty, path) :: t.paths
+ let add_operation ~perm t request response =
+diff --git a/tools/ocaml/xenstored/xenstored.ml b/tools/ocaml/xenstored/xenstored.ml
+index 8d0c50bfa4..f7b88065bb 100644
+--- a/tools/ocaml/xenstored/xenstored.ml
++++ b/tools/ocaml/xenstored/xenstored.ml
+@@ -337,7 +337,9 @@ let _ =
+ 					let (notify, deaddom) = Domains.cleanup domains in
+ 					List.iter (Connections.del_domain cons) deaddom;
+ 					if deaddom <> [] || notify then
+-						Connections.fire_spec_watches cons Store.Path.release_domain
++						Connections.fire_spec_watches
++							(Store.get_root store)
++							cons Store.Path.release_domain
+ 				)
+ 				else
+ 					let c = Connections.find_domain_by_port cons port in
