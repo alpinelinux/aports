@@ -1,0 +1,118 @@
+From 6ca2e14b43aecc79effc1a0cd528a4aceef44d42 Mon Sep 17 00:00:00 2001
+From: Juergen Gross <jgross@suse.com>
+Date: Thu, 11 Jun 2020 16:12:43 +0200
+Subject: [PATCH 07/10] tools/xenstore: fire watches only when removing a
+ specific node
+
+Instead of firing all watches for removing a subtree in one go, do so
+only when the related node is being removed.
+
+The watches for the top-most node being removed include all watches
+including that node, while watches for nodes below that are only fired
+if they are matching exactly. This avoids firing any watch more than
+once when removing a subtree.
+
+This is part of XSA-115.
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+Reviewed-by: Julien Grall <jgrall@amazon.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ tools/xenstore/xenstored_core.c  | 11 ++++++-----
+ tools/xenstore/xenstored_watch.c | 13 ++++++++-----
+ tools/xenstore/xenstored_watch.h |  4 ++--
+ 3 files changed, 16 insertions(+), 12 deletions(-)
+
+diff --git a/tools/xenstore/xenstored_core.c b/tools/xenstore/xenstored_core.c
+index 1cb729a2cd5f..d7c025616ead 100644
+--- a/tools/xenstore/xenstored_core.c
++++ b/tools/xenstore/xenstored_core.c
+@@ -1118,8 +1118,8 @@ static void delete_child(struct connection *conn,
+ 	corrupt(conn, "Can't find child '%s' in %s", childname, node->name);
+ }
+ 
+-static int delete_node(struct connection *conn, struct node *parent,
+-		       struct node *node)
++static int delete_node(struct connection *conn, const void *ctx,
++		       struct node *parent, struct node *node)
+ {
+ 	char *name;
+ 
+@@ -1131,7 +1131,7 @@ static int delete_node(struct connection *conn, struct node *parent,
+ 				       node->children);
+ 		child = name ? read_node(conn, node, name) : NULL;
+ 		if (child) {
+-			if (delete_node(conn, node, child))
++			if (delete_node(conn, ctx, node, child))
+ 				return errno;
+ 		} else {
+ 			trace("delete_node: Error deleting child '%s/%s'!\n",
+@@ -1143,6 +1143,7 @@ static int delete_node(struct connection *conn, struct node *parent,
+ 		talloc_free(name);
+ 	}
+ 
++	fire_watches(conn, ctx, node->name, true);
+ 	delete_node_single(conn, node);
+ 	delete_child(conn, parent, basename(node->name));
+ 	talloc_free(node);
+@@ -1172,8 +1173,8 @@ static int _rm(struct connection *conn, const void *ctx, struct node *node,
+ 	 * This fine as we are single threaded and the next possible read will
+ 	 * be handled only after the node has been really removed.
+ 	 */
+-	fire_watches(conn, ctx, name, true);
+-	return delete_node(conn, parent, node);
++	fire_watches(conn, ctx, name, false);
++	return delete_node(conn, ctx, parent, node);
+ }
+ 
+ 
+diff --git a/tools/xenstore/xenstored_watch.c b/tools/xenstore/xenstored_watch.c
+index f0bbfe7a6dc6..3836675459fa 100644
+--- a/tools/xenstore/xenstored_watch.c
++++ b/tools/xenstore/xenstored_watch.c
+@@ -122,7 +122,7 @@ static void add_event(struct connection *conn,
+  * Temporary memory allocations are done with ctx.
+  */
+ void fire_watches(struct connection *conn, const void *ctx, const char *name,
+-		  bool recurse)
++		  bool exact)
+ {
+ 	struct connection *i;
+ 	struct watch *watch;
+@@ -134,10 +134,13 @@ void fire_watches(struct connection *conn, const void *ctx, const char *name,
+ 	/* Create an event for each watch. */
+ 	list_for_each_entry(i, &connections, list) {
+ 		list_for_each_entry(watch, &i->watches, list) {
+-			if (is_child(name, watch->node))
+-				add_event(i, ctx, watch, name);
+-			else if (recurse && is_child(watch->node, name))
+-				add_event(i, ctx, watch, watch->node);
++			if (exact) {
++				if (streq(name, watch->node))
++					add_event(i, ctx, watch, name);
++			} else {
++				if (is_child(name, watch->node))
++					add_event(i, ctx, watch, name);
++			}
+ 		}
+ 	}
+ }
+diff --git a/tools/xenstore/xenstored_watch.h b/tools/xenstore/xenstored_watch.h
+index 54d4ea7e0d41..1b3c80d3dda1 100644
+--- a/tools/xenstore/xenstored_watch.h
++++ b/tools/xenstore/xenstored_watch.h
+@@ -24,9 +24,9 @@
+ int do_watch(struct connection *conn, struct buffered_data *in);
+ int do_unwatch(struct connection *conn, struct buffered_data *in);
+ 
+-/* Fire all watches: recurse means all the children are affected (ie. rm). */
++/* Fire all watches: !exact means all the children are affected (ie. rm). */
+ void fire_watches(struct connection *conn, const void *tmp, const char *name,
+-		  bool recurse);
++		  bool exact);
+ 
+ void conn_delete_all_watches(struct connection *conn);
+ 
+-- 
+2.17.1
+

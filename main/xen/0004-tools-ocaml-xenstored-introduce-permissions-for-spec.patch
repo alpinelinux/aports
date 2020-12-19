@@ -1,0 +1,117 @@
+From: =?UTF-8?q?Edwin=20T=C3=B6r=C3=B6k?= <edvin.torok@citrix.com>
+Subject: tools/ocaml/xenstored: introduce permissions for special watches
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The special watches "@introduceDomain" and "@releaseDomain" should be
+allowed for privileged callers only, as they allow to gain information
+about presence of other guests on the host. So send watch events for
+those watches via privileged connections only.
+
+Start to address this by treating the special watches as regular nodes
+in the tree, which gives them normal semantics for permissions.  A later
+change will restrict the handling, so that they can't be listed, etc.
+
+This is part of XSA-115.
+
+Signed-off-by: Edwin Török <edvin.torok@citrix.com>
+Acked-by: Christian Lindig <christian.lindig@citrix.com>
+Reviewed-by: Andrew Cooper <andrew.cooper3@citrix.com>
+
+diff --git a/tools/ocaml/xenstored/process.ml b/tools/ocaml/xenstored/process.ml
+index fd79ef564f..e528d1ecb2 100644
+--- a/tools/ocaml/xenstored/process.ml
++++ b/tools/ocaml/xenstored/process.ml
+@@ -420,7 +420,7 @@ let do_introduce con _t domains cons data =
+ 		else try
+ 			let ndom = Domains.create domains domid mfn port in
+ 			Connections.add_domain cons ndom;
+-			Connections.fire_spec_watches cons "@introduceDomain";
++			Connections.fire_spec_watches cons Store.Path.introduce_domain;
+ 			ndom
+ 		with _ -> raise Invalid_Cmd_Args
+ 	in
+@@ -439,7 +439,7 @@ let do_release con _t domains cons data =
+ 	Domains.del domains domid;
+ 	Connections.del_domain cons domid;
+ 	if fire_spec_watches
+-	then Connections.fire_spec_watches cons "@releaseDomain"
++	then Connections.fire_spec_watches cons Store.Path.release_domain
+ 	else raise Invalid_Cmd_Args
+ 
+ let do_resume con _t domains _cons data =
+diff --git a/tools/ocaml/xenstored/store.ml b/tools/ocaml/xenstored/store.ml
+index 92b6289b5e..52b88b3ee1 100644
+--- a/tools/ocaml/xenstored/store.ml
++++ b/tools/ocaml/xenstored/store.ml
+@@ -214,6 +214,11 @@ let rec lookup node path fct =
+ 
+ let apply rnode path fct =
+ 	lookup rnode path fct
++
++let introduce_domain = "@introduceDomain"
++let release_domain = "@releaseDomain"
++let specials = List.map of_string [ introduce_domain; release_domain ]
++
+ end
+ 
+ (* The Store.t type *)
+diff --git a/tools/ocaml/xenstored/utils.ml b/tools/ocaml/xenstored/utils.ml
+index b252db799b..e8c9fe4e94 100644
+--- a/tools/ocaml/xenstored/utils.ml
++++ b/tools/ocaml/xenstored/utils.ml
+@@ -88,19 +88,17 @@ let read_file_single_integer filename =
+ 	Unix.close fd;
+ 	int_of_string (Bytes.sub_string buf 0 sz)
+ 
+-let path_complete path connection_path =
+-	if String.get path 0 <> '/' then
+-		connection_path ^ path
+-	else
+-		path
+-
++(* @path may be guest data and needs its length validating.  @connection_path
++ * is generated locally in xenstored and always of the form "/local/domain/$N/" *)
+ let path_validate path connection_path =
+-	if String.length path = 0 || String.length path > 1024 then
+-		raise Define.Invalid_path
+-	else
+-		let cpath = path_complete path connection_path in
+-		if String.get cpath 0 <> '/' then
+-			raise Define.Invalid_path
+-		else
+-			cpath
++	let len = String.length path in
++
++	if len = 0 || len > 1024 then raise Define.Invalid_path;
++
++	let abs_path =
++		match String.get path 0 with
++		| '/' | '@' -> path
++		| _   -> connection_path ^ path
++	in
+ 
++	abs_path
+diff --git a/tools/ocaml/xenstored/xenstored.ml b/tools/ocaml/xenstored/xenstored.ml
+index 7e7824761b..8d0c50bfa4 100644
+--- a/tools/ocaml/xenstored/xenstored.ml
++++ b/tools/ocaml/xenstored/xenstored.ml
+@@ -286,6 +286,8 @@ let _ =
+ 	let quit = ref false in
+ 
+ 	Logging.init_xenstored_log();
++	List.iter (fun path ->
++		Store.write store Perms.Connection.full_rights path "") Store.Path.specials;
+ 
+ 	let filename = Paths.xen_run_stored ^ "/db" in
+ 	if cf.restart && Sys.file_exists filename then (
+@@ -335,7 +337,7 @@ let _ =
+ 					let (notify, deaddom) = Domains.cleanup domains in
+ 					List.iter (Connections.del_domain cons) deaddom;
+ 					if deaddom <> [] || notify then
+-						Connections.fire_spec_watches cons "@releaseDomain"
++						Connections.fire_spec_watches cons Store.Path.release_domain
+ 				)
+ 				else
+ 					let c = Connections.find_domain_by_port cons port in

@@ -1,0 +1,237 @@
+From cddf74031b3c8a108e8fd7db0bf56e9c2809d3e2 Mon Sep 17 00:00:00 2001
+From: Juergen Gross <jgross@suse.com>
+Date: Thu, 11 Jun 2020 16:12:45 +0200
+Subject: [PATCH 09/10] tools/xenstore: allow special watches for privileged
+ callers only
+
+The special watches "@introduceDomain" and "@releaseDomain" should be
+allowed for privileged callers only, as they allow to gain information
+about presence of other guests on the host. So send watch events for
+those watches via privileged connections only.
+
+In order to allow for disaggregated setups where e.g. driver domains
+need to make use of those special watches add support for calling
+"set permissions" for those special nodes, too.
+
+This is part of XSA-115.
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+Reviewed-by: Julien Grall <jgrall@amazon.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ docs/misc/xenstore.txt            |  5 +++
+ tools/xenstore/xenstored_core.c   | 27 ++++++++------
+ tools/xenstore/xenstored_core.h   |  2 ++
+ tools/xenstore/xenstored_domain.c | 60 +++++++++++++++++++++++++++++++
+ tools/xenstore/xenstored_domain.h |  5 +++
+ tools/xenstore/xenstored_watch.c  |  4 +++
+ 6 files changed, 93 insertions(+), 10 deletions(-)
+
+diff --git a/docs/misc/xenstore.txt b/docs/misc/xenstore.txt
+index 6f8569d5760f..32969eb3fecd 100644
+--- a/docs/misc/xenstore.txt
++++ b/docs/misc/xenstore.txt
+@@ -170,6 +170,9 @@ SET_PERMS		<path>|<perm-as-string>|+?
+ 		n<domid>	no access
+ 	See http://wiki.xen.org/wiki/XenBus section
+ 	`Permissions' for details of the permissions system.
++	It is possible to set permissions for the special watch paths
++	"@introduceDomain" and "@releaseDomain" to enable receiving those
++	watches in unprivileged domains.
+ 
+ ---------- Watches ----------
+ 
+@@ -194,6 +197,8 @@ WATCH			<wpath>|<token>|?
+ 	    @releaseDomain 	occurs on any domain crash or
+ 				shutdown, and also on RELEASE
+ 				and domain destruction
++	<wspecial> events are sent to privileged callers or explicitly
++	via SET_PERMS enabled domains only.
+ 
+ 	When a watch is first set up it is triggered once straight
+ 	away, with <path> equal to <wpath>.  Watches may be triggered
+diff --git a/tools/xenstore/xenstored_core.c b/tools/xenstore/xenstored_core.c
+index fe9943113b9f..720bec269dd3 100644
+--- a/tools/xenstore/xenstored_core.c
++++ b/tools/xenstore/xenstored_core.c
+@@ -468,8 +468,8 @@ static int write_node(struct connection *conn, struct node *node,
+ 	return write_node_raw(conn, &key, node, no_quota_check);
+ }
+ 
+-static enum xs_perm_type perm_for_conn(struct connection *conn,
+-				       const struct node_perms *perms)
++enum xs_perm_type perm_for_conn(struct connection *conn,
++				const struct node_perms *perms)
+ {
+ 	unsigned int i;
+ 	enum xs_perm_type mask = XS_PERM_READ|XS_PERM_WRITE|XS_PERM_OWNER;
+@@ -1245,22 +1245,29 @@ static int do_set_perms(struct connection *conn, struct buffered_data *in)
+ 	if (perms.num < 2)
+ 		return EINVAL;
+ 
+-	/* First arg is node name. */
+-	/* We must own node to do this (tools can do this too). */
+-	node = get_node_canonicalized(conn, in, in->buffer, &name,
+-				      XS_PERM_WRITE | XS_PERM_OWNER);
+-	if (!node)
+-		return errno;
+-
+ 	permstr = in->buffer + strlen(in->buffer) + 1;
+ 	perms.num--;
+ 
+-	perms.p = talloc_array(node, struct xs_permissions, perms.num);
++	perms.p = talloc_array(in, struct xs_permissions, perms.num);
+ 	if (!perms.p)
+ 		return ENOMEM;
+ 	if (!xs_strings_to_perms(perms.p, perms.num, permstr))
+ 		return errno;
+ 
++	/* First arg is node name. */
++	if (strstarts(in->buffer, "@")) {
++		if (set_perms_special(conn, in->buffer, &perms))
++			return errno;
++		send_ack(conn, XS_SET_PERMS);
++		return 0;
++	}
++
++	/* We must own node to do this (tools can do this too). */
++	node = get_node_canonicalized(conn, in, in->buffer, &name,
++				      XS_PERM_WRITE | XS_PERM_OWNER);
++	if (!node)
++		return errno;
++
+ 	/* Unprivileged domains may not change the owner. */
+ 	if (domain_is_unprivileged(conn) &&
+ 	    perms.p[0].id != node->perms.p[0].id)
+diff --git a/tools/xenstore/xenstored_core.h b/tools/xenstore/xenstored_core.h
+index 193d93142636..f3da6bbc943d 100644
+--- a/tools/xenstore/xenstored_core.h
++++ b/tools/xenstore/xenstored_core.h
+@@ -165,6 +165,8 @@ struct node *get_node(struct connection *conn,
+ struct connection *new_connection(connwritefn_t *write, connreadfn_t *read);
+ void check_store(void);
+ void corrupt(struct connection *conn, const char *fmt, ...);
++enum xs_perm_type perm_for_conn(struct connection *conn,
++				const struct node_perms *perms);
+ 
+ /* Is this a valid node name? */
+ bool is_valid_nodename(const char *node);
+diff --git a/tools/xenstore/xenstored_domain.c b/tools/xenstore/xenstored_domain.c
+index dc51cdfa9aa7..7afabe0ae084 100644
+--- a/tools/xenstore/xenstored_domain.c
++++ b/tools/xenstore/xenstored_domain.c
+@@ -41,6 +41,9 @@ static evtchn_port_t virq_port;
+ 
+ xenevtchn_handle *xce_handle = NULL;
+ 
++static struct node_perms dom_release_perms;
++static struct node_perms dom_introduce_perms;
++
+ struct domain
+ {
+ 	struct list_head list;
+@@ -589,6 +592,59 @@ void restore_existing_connections(void)
+ {
+ }
+ 
++static int set_dom_perms_default(struct node_perms *perms)
++{
++	perms->num = 1;
++	perms->p = talloc_array(NULL, struct xs_permissions, perms->num);
++	if (!perms->p)
++		return -1;
++	perms->p->id = 0;
++	perms->p->perms = XS_PERM_NONE;
++
++	return 0;
++}
++
++static struct node_perms *get_perms_special(const char *name)
++{
++	if (!strcmp(name, "@releaseDomain"))
++		return &dom_release_perms;
++	if (!strcmp(name, "@introduceDomain"))
++		return &dom_introduce_perms;
++	return NULL;
++}
++
++int set_perms_special(struct connection *conn, const char *name,
++		      struct node_perms *perms)
++{
++	struct node_perms *p;
++
++	p = get_perms_special(name);
++	if (!p)
++		return EINVAL;
++
++	if ((perm_for_conn(conn, p) & (XS_PERM_WRITE | XS_PERM_OWNER)) !=
++	    (XS_PERM_WRITE | XS_PERM_OWNER))
++		return EACCES;
++
++	p->num = perms->num;
++	talloc_free(p->p);
++	p->p = perms->p;
++	talloc_steal(NULL, perms->p);
++
++	return 0;
++}
++
++bool check_perms_special(const char *name, struct connection *conn)
++{
++	struct node_perms *p;
++
++	p = get_perms_special(name);
++	if (!p)
++		return false;
++
++	return perm_for_conn(conn, p) & XS_PERM_READ;
++}
++
+ static int dom0_init(void) 
+ { 
+ 	evtchn_port_t port;
+@@ -610,6 +666,10 @@ static int dom0_init(void)
+ 
+ 	xenevtchn_notify(xce_handle, dom0->port);
+ 
++	if (set_dom_perms_default(&dom_release_perms) ||
++	    set_dom_perms_default(&dom_introduce_perms))
++		return -1;
++
+ 	return 0; 
+ }
+ 
+diff --git a/tools/xenstore/xenstored_domain.h b/tools/xenstore/xenstored_domain.h
+index 56ae01597475..259183962a9c 100644
+--- a/tools/xenstore/xenstored_domain.h
++++ b/tools/xenstore/xenstored_domain.h
+@@ -65,6 +65,11 @@ void domain_watch_inc(struct connection *conn);
+ void domain_watch_dec(struct connection *conn);
+ int domain_watch(struct connection *conn);
+ 
++/* Special node permission handling. */
++int set_perms_special(struct connection *conn, const char *name,
++		      struct node_perms *perms);
++bool check_perms_special(const char *name, struct connection *conn);
++
+ /* Write rate limiting */
+ 
+ #define WRL_FACTOR   1000 /* for fixed-point arithmetic */
+diff --git a/tools/xenstore/xenstored_watch.c b/tools/xenstore/xenstored_watch.c
+index 3836675459fa..f4e289362eb6 100644
+--- a/tools/xenstore/xenstored_watch.c
++++ b/tools/xenstore/xenstored_watch.c
+@@ -133,6 +133,10 @@ void fire_watches(struct connection *conn, const void *ctx, const char *name,
+ 
+ 	/* Create an event for each watch. */
+ 	list_for_each_entry(i, &connections, list) {
++		/* introduce/release domain watches */
++		if (check_special_event(name) && !check_perms_special(name, i))
++			continue;
++
+ 		list_for_each_entry(watch, &i->watches, list) {
+ 			if (exact) {
+ 				if (streq(name, watch->node))
+-- 
+2.17.1
+
