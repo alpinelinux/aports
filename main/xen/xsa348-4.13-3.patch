@@ -1,0 +1,163 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: x86: avoid calling {svm,vmx}_do_resume()
+
+These functions follow the following path: hvm_do_resume() ->
+handle_hvm_io_completion() -> hvm_wait_for_io() ->
+wait_on_xen_event_channel() -> do_softirq() -> schedule() ->
+sched_context_switch() -> continue_running() and hence may
+recursively invoke themselves. If this ends up happening a couple of
+times, a stack overflow would result.
+
+Prevent this by also resetting the stack at the
+->arch.ctxt_switch->tail() invocations (in both places for consistency)
+and thus jumping to the functions instead of calling them.
+
+This is XSA-348 / CVE-2020-29566.
+
+Reported-by: Julien Grall <jgrall@amazon.com>
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Juergen Gross <jgross@suse.com>
+
+--- sle15sp2.orig/xen/arch/x86/domain.c	2020-11-10 17:51:46.354546349 +0100
++++ sle15sp2/xen/arch/x86/domain.c	2020-11-10 17:56:58.758730088 +0100
+@@ -130,7 +130,7 @@ void play_dead(void)
+         dead_idle();
+ }
+ 
+-static void idle_loop(void)
++static void noreturn idle_loop(void)
+ {
+     unsigned int cpu = smp_processor_id();
+     /*
+@@ -182,11 +182,6 @@ void startup_cpu_idle_loop(void)
+     reset_stack_and_jump(idle_loop);
+ }
+ 
+-static void noreturn continue_idle_domain(struct vcpu *v)
+-{
+-    reset_stack_and_jump(idle_loop);
+-}
+-
+ void init_hypercall_page(struct domain *d, void *ptr)
+ {
+     memset(ptr, 0xcc, PAGE_SIZE);
+@@ -535,7 +530,7 @@ int arch_domain_create(struct domain *d,
+         static const struct arch_csw idle_csw = {
+             .from = paravirt_ctxt_switch_from,
+             .to   = paravirt_ctxt_switch_to,
+-            .tail = continue_idle_domain,
++            .tail = idle_loop,
+         };
+ 
+         d->arch.ctxt_switch = &idle_csw;
+@@ -1833,20 +1828,12 @@ void context_switch(struct vcpu *prev, s
+     /* Ensure that the vcpu has an up-to-date time base. */
+     update_vcpu_system_time(next);
+ 
+-    /*
+-     * Schedule tail *should* be a terminal function pointer, but leave a
+-     * bug frame around just in case it returns, to save going back into the
+-     * context switching code and leaving a far more subtle crash to diagnose.
+-     */
+-    nextd->arch.ctxt_switch->tail(next);
+-    BUG();
++    reset_stack_and_jump_ind(nextd->arch.ctxt_switch->tail);
+ }
+ 
+ void continue_running(struct vcpu *same)
+ {
+-    /* See the comment above. */
+-    same->domain->arch.ctxt_switch->tail(same);
+-    BUG();
++    reset_stack_and_jump_ind(same->domain->arch.ctxt_switch->tail);
+ }
+ 
+ int __sync_local_execstate(void)
+--- sle15sp2.orig/xen/arch/x86/hvm/svm/svm.c	2020-11-10 17:51:10.898525723 +0100
++++ sle15sp2/xen/arch/x86/hvm/svm/svm.c	2020-11-10 17:56:58.762730090 +0100
+@@ -987,8 +987,9 @@ static void svm_ctxt_switch_to(struct vc
+         wrmsr_tsc_aux(v->arch.msrs->tsc_aux);
+ }
+ 
+-static void noreturn svm_do_resume(struct vcpu *v)
++static void noreturn svm_do_resume(void)
+ {
++    struct vcpu *v = current;
+     struct vmcb_struct *vmcb = v->arch.hvm.svm.vmcb;
+     bool debug_state = (v->domain->debugger_attached ||
+                         v->domain->arch.monitor.software_breakpoint_enabled ||
+--- sle15sp2.orig/xen/arch/x86/hvm/vmx/vmcs.c	2020-11-10 17:51:10.898525723 +0100
++++ sle15sp2/xen/arch/x86/hvm/vmx/vmcs.c	2020-11-10 17:56:58.762730090 +0100
+@@ -1830,8 +1830,9 @@ void vmx_vmentry_failure(void)
+     domain_crash(curr->domain);
+ }
+ 
+-void vmx_do_resume(struct vcpu *v)
++void vmx_do_resume(void)
+ {
++    struct vcpu *v = current;
+     bool_t debug_state;
+     unsigned long host_cr4;
+ 
+--- sle15sp2.orig/xen/arch/x86/pv/domain.c	2020-11-10 17:51:10.898525723 +0100
++++ sle15sp2/xen/arch/x86/pv/domain.c	2020-11-10 17:56:58.762730090 +0100
+@@ -58,7 +58,7 @@ static int parse_pcid(const char *s)
+ }
+ custom_runtime_param("pcid", parse_pcid);
+ 
+-static void noreturn continue_nonidle_domain(struct vcpu *v)
++static void noreturn continue_nonidle_domain(void)
+ {
+     check_wakeup_from_wait();
+     reset_stack_and_jump(ret_from_intr);
+--- sle15sp2.orig/xen/include/asm-x86/current.h	2020-11-10 17:51:10.902525725 +0100
++++ sle15sp2/xen/include/asm-x86/current.h	2020-11-10 17:56:58.762730090 +0100
+@@ -129,16 +129,23 @@ unsigned long get_stack_dump_bottom (uns
+ # define CHECK_FOR_LIVEPATCH_WORK ""
+ #endif
+ 
+-#define reset_stack_and_jump(fn)                                        \
++#define switch_stack_and_jump(fn, instr, constr)                        \
+     ({                                                                  \
+         __asm__ __volatile__ (                                          \
+             "mov %0,%%"__OP"sp;"                                        \
+             CHECK_FOR_LIVEPATCH_WORK                                    \
+-             "jmp %c1"                                                  \
+-            : : "r" (guest_cpu_user_regs()), "i" (fn) : "memory" );     \
++            instr "1"                                                   \
++            : : "r" (guest_cpu_user_regs()), constr (fn) : "memory" );  \
+         unreachable();                                                  \
+     })
+ 
++#define reset_stack_and_jump(fn)                                        \
++    switch_stack_and_jump(fn, "jmp %c", "i")
++
++/* The constraint may only specify non-call-clobbered registers. */
++#define reset_stack_and_jump_ind(fn)                                    \
++    switch_stack_and_jump(fn, "INDIRECT_JMP %", "b")
++
+ /*
+  * Which VCPU's state is currently running on each CPU?
+  * This is not necesasrily the same as 'current' as a CPU may be
+--- sle15sp2.orig/xen/include/asm-x86/domain.h	2020-10-30 17:22:39.000000000 +0100
++++ sle15sp2/xen/include/asm-x86/domain.h	2020-11-10 17:56:58.762730090 +0100
+@@ -313,7 +313,7 @@ struct arch_domain
+     const struct arch_csw {
+         void (*from)(struct vcpu *);
+         void (*to)(struct vcpu *);
+-        void (*tail)(struct vcpu *);
++        void noreturn (*tail)(void);
+     } *ctxt_switch;
+ 
+ #ifdef CONFIG_HVM
+--- sle15sp2.orig/xen/include/asm-x86/hvm/vmx/vmx.h	2019-12-18 16:18:59.000000000 +0100
++++ sle15sp2/xen/include/asm-x86/hvm/vmx/vmx.h	2020-11-10 17:56:58.762730090 +0100
+@@ -95,7 +95,7 @@ typedef enum {
+ void vmx_asm_vmexit_handler(struct cpu_user_regs);
+ void vmx_asm_do_vmentry(void);
+ void vmx_intr_assist(void);
+-void noreturn vmx_do_resume(struct vcpu *);
++void noreturn vmx_do_resume(void);
+ void vmx_vlapic_msr_changed(struct vcpu *v);
+ void vmx_realmode_emulate_one(struct hvm_emulate_ctxt *hvmemul_ctxt);
+ void vmx_realmode(struct cpu_user_regs *regs);
