@@ -1,0 +1,140 @@
+From: =?UTF-8?q?Edwin=20T=C3=B6r=C3=B6k?= <edvin.torok@citrix.com>
+Subject: tools/ocaml/xenstored: Fix path length validation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Currently, oxenstored checks the length of paths against 1024, then
+prepends "/local/domain/$DOMID/" to relative paths.  This allows a domU
+to create paths which can't subsequently be read by anyone, even dom0.
+This also interferes with listing directories, etc.
+
+Define a new oxenstored.conf entry: quota-path-max, defaulting to 1024
+as before.  For paths that begin with "/local/domain/$DOMID/" check the
+relative path length against this quota. For all other paths check the
+entire path length.
+
+This ensures that if the domid changes (and thus the length of a prefix
+changes) a path that used to be valid stays valid (e.g. after a
+live-migration).  It also ensures that regardless how the client tries
+to access a path (domid-relative or absolute) it will get consistent
+results, since the limit is always applied on the final canonicalized
+path.
+
+Delete the unused Domain.get_path to avoid it being confused with
+Connection.get_path (which differs by a trailing slash only).
+
+Rewrite Util.path_validate to apply the appropriate length restriction
+based on whether the path is relative or not.  Remove the check for
+connection_path being absolute, because it is not guest controlled data.
+
+This is part of XSA-323.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Signed-off-by: Edwin Török <edvin.torok@citrix.com>
+Acked-by: Christian Lindig <christian.lindig@citrix.com>
+
+diff --git a/tools/ocaml/libs/xb/partial.ml b/tools/ocaml/libs/xb/partial.ml
+index d4d1c7bdec..b6e2a716e2 100644
+--- a/tools/ocaml/libs/xb/partial.ml
++++ b/tools/ocaml/libs/xb/partial.ml
+@@ -28,6 +28,7 @@ external header_of_string_internal: string -> int * int * int * int
+          = "stub_header_of_string"
+ 
+ let xenstore_payload_max = 4096 (* xen/include/public/io/xs_wire.h *)
++let xenstore_rel_path_max = 2048 (* xen/include/public/io/xs_wire.h *)
+ 
+ let of_string s =
+ 	let tid, rid, opint, dlen = header_of_string_internal s in
+diff --git a/tools/ocaml/libs/xb/partial.mli b/tools/ocaml/libs/xb/partial.mli
+index 359a75e88d..b9216018f5 100644
+--- a/tools/ocaml/libs/xb/partial.mli
++++ b/tools/ocaml/libs/xb/partial.mli
+@@ -9,6 +9,7 @@ external header_size : unit -> int = "stub_header_size"
+ external header_of_string_internal : string -> int * int * int * int
+   = "stub_header_of_string"
+ val xenstore_payload_max : int
++val xenstore_rel_path_max : int
+ val of_string : string -> pkt
+ val append : pkt -> string -> int -> unit
+ val to_complete : pkt -> int
+diff --git a/tools/ocaml/xenstored/define.ml b/tools/ocaml/xenstored/define.ml
+index ea9e1b7620..ebe18b8e31 100644
+--- a/tools/ocaml/xenstored/define.ml
++++ b/tools/ocaml/xenstored/define.ml
+@@ -31,6 +31,8 @@ let conflict_rate_limit_is_aggregate = ref true
+ 
+ let domid_self = 0x7FF0
+ 
++let path_max = ref Xenbus.Partial.xenstore_rel_path_max
++
+ exception Not_a_directory of string
+ exception Not_a_value of string
+ exception Already_exist
+diff --git a/tools/ocaml/xenstored/domain.ml b/tools/ocaml/xenstored/domain.ml
+index aeb185ff7e..81cb59b8f1 100644
+--- a/tools/ocaml/xenstored/domain.ml
++++ b/tools/ocaml/xenstored/domain.ml
+@@ -38,7 +38,6 @@ type t =
+ }
+ 
+ let is_dom0 d = d.id = 0
+-let get_path dom = "/local/domain/" ^ (sprintf "%u" dom.id)
+ let get_id domain = domain.id
+ let get_interface d = d.interface
+ let get_mfn d = d.mfn
+diff --git a/tools/ocaml/xenstored/oxenstored.conf.in b/tools/ocaml/xenstored/oxenstored.conf.in
+index f843482981..4ae48e42d4 100644
+--- a/tools/ocaml/xenstored/oxenstored.conf.in
++++ b/tools/ocaml/xenstored/oxenstored.conf.in
+@@ -61,6 +61,7 @@ quota-maxsize = 2048
+ quota-maxwatch = 100
+ quota-transaction = 10
+ quota-maxrequests = 1024
++quota-path-max = 1024
+ 
+ # Activate filed base backend
+ persistent = false
+diff --git a/tools/ocaml/xenstored/utils.ml b/tools/ocaml/xenstored/utils.ml
+index e8c9fe4e94..eb79bf0146 100644
+--- a/tools/ocaml/xenstored/utils.ml
++++ b/tools/ocaml/xenstored/utils.ml
+@@ -93,7 +93,7 @@ let read_file_single_integer filename =
+ let path_validate path connection_path =
+ 	let len = String.length path in
+ 
+-	if len = 0 || len > 1024 then raise Define.Invalid_path;
++	if len = 0 then raise Define.Invalid_path;
+ 
+ 	let abs_path =
+ 		match String.get path 0 with
+@@ -101,4 +101,17 @@ let path_validate path connection_path =
+ 		| _   -> connection_path ^ path
+ 	in
+ 
++	(* Regardless whether client specified absolute or relative path,
++	   canonicalize it (above) and, for domain-relative paths, check the
++	   length of the relative part.
++
++	   This prevents paths becoming invalid across migrate when the length
++	   of the domid changes in @param connection_path.
++	 *)
++	let len = String.length abs_path in
++	let on_absolute _ _ = len in
++	let on_relative _ offset = len - offset in
++	let len = Scanf.ksscanf abs_path on_absolute "/local/domain/%d/%n" on_relative in
++	if len > !Define.path_max then raise Define.Invalid_path;
++
+ 	abs_path
+diff --git a/tools/ocaml/xenstored/xenstored.ml b/tools/ocaml/xenstored/xenstored.ml
+index ff9fbbbac2..39d6d767e4 100644
+--- a/tools/ocaml/xenstored/xenstored.ml
++++ b/tools/ocaml/xenstored/xenstored.ml
+@@ -102,6 +102,7 @@ let parse_config filename =
+ 		("quota-maxentity", Config.Set_int Quota.maxent);
+ 		("quota-maxsize", Config.Set_int Quota.maxsize);
+ 		("quota-maxrequests", Config.Set_int Define.maxrequests);
++		("quota-path-max", Config.Set_int Define.path_max);
+ 		("test-eagain", Config.Set_bool Transaction.test_eagain);
+ 		("persistent", Config.Set_bool Disk.enable);
+ 		("xenstored-log-file", Config.String Logging.set_xenstored_log_destination);
