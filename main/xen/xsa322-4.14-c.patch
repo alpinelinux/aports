@@ -1,0 +1,532 @@
+From: Juergen Gross <jgross@suse.com>
+Subject: tools/xenstore: revoke access rights for removed domains
+
+Access rights of Xenstore nodes are per domid. Unfortunately existing
+granted access rights are not removed when a domain is being destroyed.
+This means that a new domain created with the same domid will inherit
+the access rights to Xenstore nodes from the previous domain(s) with
+the same domid.
+
+This can be avoided by adding a generation counter to each domain.
+The generation counter of the domain is set to the global generation
+counter when a domain structure is being allocated. When reading or
+writing a node all permissions of domains which are younger than the
+node itself are dropped. This is done by flagging the related entry
+as invalid in order to avoid modifying permissions in a way the user
+could detect.
+
+A special case has to be considered: for a new domain the first
+Xenstore entries are already written before the domain is officially
+introduced in Xenstore. In order not to drop the permissions for the
+new domain a domain struct is allocated even before introduction if
+the hypervisor is aware of the domain. This requires adding another
+bool "introduced" to struct domain in xenstored. In order to avoid
+additional padding holes convert the shutdown flag to bool, too.
+
+As verifying permissions has its price regarding runtime add a new
+quota for limiting the number of permissions an unprivileged domain
+can set for a node. The default for that new quota is 5.
+
+This is part of XSA-322.
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+Acked-by: Julien Grall <julien@amazon.com>
+
+diff --git a/tools/xenstore/include/xenstore_lib.h b/tools/xenstore/include/xenstore_lib.h
+index 0ffbae9eb5..4c9b6d1685 100644
+--- a/tools/xenstore/include/xenstore_lib.h
++++ b/tools/xenstore/include/xenstore_lib.h
+@@ -34,6 +34,7 @@ enum xs_perm_type {
+ 	/* Internal use. */
+ 	XS_PERM_ENOENT_OK = 4,
+ 	XS_PERM_OWNER = 8,
++	XS_PERM_IGNORE = 16,
+ };
+ 
+ struct xs_permissions
+diff --git a/tools/xenstore/xenstored_core.c b/tools/xenstore/xenstored_core.c
+index 92bfd54cff..505560a5de 100644
+--- a/tools/xenstore/xenstored_core.c
++++ b/tools/xenstore/xenstored_core.c
+@@ -104,6 +104,7 @@ int quota_nb_entry_per_domain = 1000;
+ int quota_nb_watch_per_domain = 128;
+ int quota_max_entry_size = 2048; /* 2K */
+ int quota_max_transaction = 10;
++int quota_nb_perms_per_node = 5;
+ 
+ void trace(const char *fmt, ...)
+ {
+@@ -409,8 +410,13 @@ struct node *read_node(struct connection *conn, const void *ctx,
+ 
+ 	/* Permissions are struct xs_permissions. */
+ 	node->perms.p = hdr->perms;
++	if (domain_adjust_node_perms(node)) {
++		talloc_free(node);
++		return NULL;
++	}
++
+ 	/* Data is binary blob (usually ascii, no nul). */
+-	node->data = node->perms.p + node->perms.num;
++	node->data = node->perms.p + hdr->num_perms;
+ 	/* Children is strings, nul separated. */
+ 	node->children = node->data + node->datalen;
+ 
+@@ -426,6 +432,9 @@ int write_node_raw(struct connection *conn, TDB_DATA *key, struct node *node,
+ 	void *p;
+ 	struct xs_tdb_record_hdr *hdr;
+ 
++	if (domain_adjust_node_perms(node))
++		return errno;
++
+ 	data.dsize = sizeof(*hdr)
+ 		+ node->perms.num * sizeof(node->perms.p[0])
+ 		+ node->datalen + node->childlen;
+@@ -485,8 +494,9 @@ enum xs_perm_type perm_for_conn(struct connection *conn,
+ 		return (XS_PERM_READ|XS_PERM_WRITE|XS_PERM_OWNER) & mask;
+ 
+ 	for (i = 1; i < perms->num; i++)
+-		if (perms->p[i].id == conn->id
+-                        || (conn->target && perms->p[i].id == conn->target->id))
++		if (!(perms->p[i].perms & XS_PERM_IGNORE) &&
++		    (perms->p[i].id == conn->id ||
++		     (conn->target && perms->p[i].id == conn->target->id)))
+ 			return perms->p[i].perms & mask;
+ 
+ 	return perms->p[0].perms & mask;
+@@ -1248,8 +1258,12 @@ static int do_set_perms(struct connection *conn, struct buffered_data *in)
+ 	if (perms.num < 2)
+ 		return EINVAL;
+ 
+-	permstr = in->buffer + strlen(in->buffer) + 1;
+ 	perms.num--;
++	if (domain_is_unprivileged(conn) &&
++	    perms.num > quota_nb_perms_per_node)
++		return ENOSPC;
++
++	permstr = in->buffer + strlen(in->buffer) + 1;
+ 
+ 	perms.p = talloc_array(in, struct xs_permissions, perms.num);
+ 	if (!perms.p)
+@@ -1904,6 +1918,7 @@ static void usage(void)
+ "  -S, --entry-size <size> limit the size of entry per domain, and\n"
+ "  -W, --watch-nb <nb>     limit the number of watches per domain,\n"
+ "  -t, --transaction <nb>  limit the number of transaction allowed per domain,\n"
++"  -A, --perm-nb <nb>      limit the number of permissions per node,\n"
+ "  -R, --no-recovery       to request that no recovery should be attempted when\n"
+ "                          the store is corrupted (debug only),\n"
+ "  -I, --internal-db       store database in memory, not on disk\n"
+@@ -1924,6 +1939,7 @@ static struct option options[] = {
+ 	{ "entry-size", 1, NULL, 'S' },
+ 	{ "trace-file", 1, NULL, 'T' },
+ 	{ "transaction", 1, NULL, 't' },
++	{ "perm-nb", 1, NULL, 'A' },
+ 	{ "no-recovery", 0, NULL, 'R' },
+ 	{ "internal-db", 0, NULL, 'I' },
+ 	{ "verbose", 0, NULL, 'V' },
+@@ -1946,7 +1962,7 @@ int main(int argc, char *argv[])
+ 	int timeout;
+ 
+ 
+-	while ((opt = getopt_long(argc, argv, "DE:F:HNPS:t:T:RVW:", options,
++	while ((opt = getopt_long(argc, argv, "DE:F:HNPS:t:A:T:RVW:", options,
+ 				  NULL)) != -1) {
+ 		switch (opt) {
+ 		case 'D':
+@@ -1988,6 +2004,9 @@ int main(int argc, char *argv[])
+ 		case 'W':
+ 			quota_nb_watch_per_domain = strtol(optarg, NULL, 10);
+ 			break;
++		case 'A':
++			quota_nb_perms_per_node = strtol(optarg, NULL, 10);
++			break;
+ 		case 'e':
+ 			dom0_event = strtol(optarg, NULL, 10);
+ 			break;
+diff --git a/tools/xenstore/xenstored_domain.c b/tools/xenstore/xenstored_domain.c
+index 9fad470f83..dc635e9be3 100644
+--- a/tools/xenstore/xenstored_domain.c
++++ b/tools/xenstore/xenstored_domain.c
+@@ -67,8 +67,14 @@ struct domain
+ 	/* The connection associated with this. */
+ 	struct connection *conn;
+ 
++	/* Generation count at domain introduction time. */
++	uint64_t generation;
++
+ 	/* Have we noticed that this domain is shutdown? */
+-	int shutdown;
++	bool shutdown;
++
++	/* Has domain been officially introduced? */
++	bool introduced;
+ 
+ 	/* number of entry from this domain in the store */
+ 	int nbentry;
+@@ -188,6 +194,9 @@ static int destroy_domain(void *_domain)
+ 
+ 	list_del(&domain->list);
+ 
++	if (!domain->introduced)
++		return 0;
++
+ 	if (domain->port) {
+ 		if (xenevtchn_unbind(xce_handle, domain->port) == -1)
+ 			eprintf("> Unbinding port %i failed!\n", domain->port);
+@@ -209,21 +218,34 @@ static int destroy_domain(void *_domain)
+ 	return 0;
+ }
+ 
++static bool get_domain_info(unsigned int domid, xc_dominfo_t *dominfo)
++{
++	return xc_domain_getinfo(*xc_handle, domid, 1, dominfo) == 1 &&
++	       dominfo->domid == domid;
++}
++
+ static void domain_cleanup(void)
+ {
+ 	xc_dominfo_t dominfo;
+ 	struct domain *domain;
+ 	struct connection *conn;
+ 	int notify = 0;
++	bool dom_valid;
+ 
+  again:
+ 	list_for_each_entry(domain, &domains, list) {
+-		if (xc_domain_getinfo(*xc_handle, domain->domid, 1,
+-				      &dominfo) == 1 &&
+-		    dominfo.domid == domain->domid) {
++		dom_valid = get_domain_info(domain->domid, &dominfo);
++		if (!domain->introduced) {
++			if (!dom_valid) {
++				talloc_free(domain);
++				goto again;
++			}
++			continue;
++		}
++		if (dom_valid) {
+ 			if ((dominfo.crashed || dominfo.shutdown)
+ 			    && !domain->shutdown) {
+-				domain->shutdown = 1;
++				domain->shutdown = true;
+ 				notify = 1;
+ 			}
+ 			if (!dominfo.dying)
+@@ -289,58 +311,84 @@ static char *talloc_domain_path(void *context, unsigned int domid)
+ 	return talloc_asprintf(context, "/local/domain/%u", domid);
+ }
+ 
+-static struct domain *new_domain(void *context, unsigned int domid,
+-				 int port)
++static struct domain *find_domain_struct(unsigned int domid)
++{
++	struct domain *i;
++
++	list_for_each_entry(i, &domains, list) {
++		if (i->domid == domid)
++			return i;
++	}
++	return NULL;
++}
++
++static struct domain *alloc_domain(void *context, unsigned int domid)
+ {
+ 	struct domain *domain;
+-	int rc;
+ 
+ 	domain = talloc(context, struct domain);
+-	if (!domain)
++	if (!domain) {
++		errno = ENOMEM;
+ 		return NULL;
++	}
+ 
+-	domain->port = 0;
+-	domain->shutdown = 0;
+ 	domain->domid = domid;
+-	domain->path = talloc_domain_path(domain, domid);
+-	if (!domain->path)
+-		return NULL;
++	domain->generation = generation;
++	domain->introduced = false;
+ 
+-	wrl_domain_new(domain);
++	talloc_set_destructor(domain, destroy_domain);
+ 
+ 	list_add(&domain->list, &domains);
+-	talloc_set_destructor(domain, destroy_domain);
++
++	return domain;
++}
++
++static int new_domain(struct domain *domain, int port)
++{
++	int rc;
++
++	domain->port = 0;
++	domain->shutdown = false;
++	domain->path = talloc_domain_path(domain, domain->domid);
++	if (!domain->path) {
++		errno = ENOMEM;
++		return errno;
++	}
++
++	wrl_domain_new(domain);
+ 
+ 	/* Tell kernel we're interested in this event. */
+-	rc = xenevtchn_bind_interdomain(xce_handle, domid, port);
++	rc = xenevtchn_bind_interdomain(xce_handle, domain->domid, port);
+ 	if (rc == -1)
+-	    return NULL;
++		return errno;
+ 	domain->port = rc;
+ 
++	domain->introduced = true;
++
+ 	domain->conn = new_connection(writechn, readchn);
+-	if (!domain->conn)
+-		return NULL;
++	if (!domain->conn)  {
++		errno = ENOMEM;
++		return errno;
++	}
+ 
+ 	domain->conn->domain = domain;
+-	domain->conn->id = domid;
++	domain->conn->id = domain->domid;
+ 
+ 	domain->remote_port = port;
+ 	domain->nbentry = 0;
+ 	domain->nbwatch = 0;
+ 
+-	return domain;
++	return 0;
+ }
+ 
+ 
+ static struct domain *find_domain_by_domid(unsigned int domid)
+ {
+-	struct domain *i;
++	struct domain *d;
+ 
+-	list_for_each_entry(i, &domains, list) {
+-		if (i->domid == domid)
+-			return i;
+-	}
+-	return NULL;
++	d = find_domain_struct(domid);
++
++	return (d && d->introduced) ? d : NULL;
+ }
+ 
+ static void domain_conn_reset(struct domain *domain)
+@@ -386,15 +434,21 @@ int do_introduce(struct connection *conn, struct buffered_data *in)
+ 	if (port <= 0)
+ 		return EINVAL;
+ 
+-	domain = find_domain_by_domid(domid);
++	domain = find_domain_struct(domid);
+ 
+ 	if (domain == NULL) {
++		/* Hang domain off "in" until we're finished. */
++		domain = alloc_domain(in, domid);
++		if (domain == NULL)
++			return ENOMEM;
++	}
++
++	if (!domain->introduced) {
+ 		interface = map_interface(domid);
+ 		if (!interface)
+ 			return errno;
+ 		/* Hang domain off "in" until we're finished. */
+-		domain = new_domain(in, domid, port);
+-		if (!domain) {
++		if (new_domain(domain, port)) {
+ 			rc = errno;
+ 			unmap_interface(interface);
+ 			return rc;
+@@ -503,8 +557,8 @@ int do_resume(struct connection *conn, struct buffered_data *in)
+ 	if (IS_ERR(domain))
+ 		return -PTR_ERR(domain);
+ 
+-	domain->shutdown = 0;
+-	
++	domain->shutdown = false;
++
+ 	send_ack(conn, XS_RESUME);
+ 
+ 	return 0;
+@@ -647,8 +701,10 @@ static int dom0_init(void)
+ 	if (port == -1)
+ 		return -1;
+ 
+-	dom0 = new_domain(NULL, xenbus_master_domid(), port);
+-	if (dom0 == NULL)
++	dom0 = alloc_domain(NULL, xenbus_master_domid());
++	if (!dom0)
++		return -1;
++	if (new_domain(dom0, port))
+ 		return -1;
+ 
+ 	dom0->interface = xenbus_map();
+@@ -729,6 +785,66 @@ void domain_entry_inc(struct connection *conn, struct node *node)
+ 	}
+ }
+ 
++/*
++ * Check whether a domain was created before or after a specific generation
++ * count (used for testing whether a node permission is older than a domain).
++ *
++ * Return values:
++ * -1: error
++ *  0: domain has higher generation count (it is younger than a node with the
++ *     given count), or domain isn't existing any longer
++ *  1: domain is older than the node
++ */
++static int chk_domain_generation(unsigned int domid, uint64_t gen)
++{
++	struct domain *d;
++	xc_dominfo_t dominfo;
++
++	if (!xc_handle && domid == 0)
++		return 1;
++
++	d = find_domain_struct(domid);
++	if (d)
++		return (d->generation <= gen) ? 1 : 0;
++
++	if (!get_domain_info(domid, &dominfo))
++		return 0;
++
++	d = alloc_domain(NULL, domid);
++	return d ? 1 : -1;
++}
++
++/*
++ * Remove permissions for no longer existing domains in order to avoid a new
++ * domain with the same domid inheriting the permissions.
++ */
++int domain_adjust_node_perms(struct node *node)
++{
++	unsigned int i;
++	int ret;
++
++	ret = chk_domain_generation(node->perms.p[0].id, node->generation);
++	if (ret < 0)
++		return errno;
++
++	/* If the owner doesn't exist any longer give it to priv domain. */
++	if (!ret)
++		node->perms.p[0].id = priv_domid;
++
++	for (i = 1; i < node->perms.num; i++) {
++		if (node->perms.p[i].perms & XS_PERM_IGNORE)
++			continue;
++		ret = chk_domain_generation(node->perms.p[i].id,
++					    node->generation);
++		if (ret < 0)
++			return errno;
++		if (!ret)
++			node->perms.p[i].perms |= XS_PERM_IGNORE;
++	}
++
++	return 0;
++}
++
+ void domain_entry_dec(struct connection *conn, struct node *node)
+ {
+ 	struct domain *d;
+diff --git a/tools/xenstore/xenstored_domain.h b/tools/xenstore/xenstored_domain.h
+index 259183962a..5e00087206 100644
+--- a/tools/xenstore/xenstored_domain.h
++++ b/tools/xenstore/xenstored_domain.h
+@@ -56,6 +56,9 @@ bool domain_can_write(struct connection *conn);
+ 
+ bool domain_is_unprivileged(struct connection *conn);
+ 
++/* Remove node permissions for no longer existing domains. */
++int domain_adjust_node_perms(struct node *node);
++
+ /* Quota manipulation */
+ void domain_entry_inc(struct connection *conn, struct node *);
+ void domain_entry_dec(struct connection *conn, struct node *);
+diff --git a/tools/xenstore/xenstored_transaction.c b/tools/xenstore/xenstored_transaction.c
+index a7d8c5d475..2881f3b2e4 100644
+--- a/tools/xenstore/xenstored_transaction.c
++++ b/tools/xenstore/xenstored_transaction.c
+@@ -47,7 +47,12 @@
+  * transaction.
+  * Each time the global generation count is copied to either a node or a
+  * transaction it is incremented. This ensures all nodes and/or transactions
+- * are having a unique generation count.
++ * are having a unique generation count. The increment is done _before_ the
++ * copy as that is needed for checking whether a domain was created before
++ * or after a node has been written (the domain's generation is set with the
++ * actual generation count without incrementing it, in order to support
++ * writing a node for a domain before the domain has been officially
++ * introduced).
+  *
+  * Transaction conflicts are detected by checking the generation count of all
+  * nodes read in the transaction to match with the generation count in the
+@@ -161,7 +166,7 @@ struct transaction
+ };
+ 
+ extern int quota_max_transaction;
+-static uint64_t generation;
++uint64_t generation;
+ 
+ static void set_tdb_key(const char *name, TDB_DATA *key)
+ {
+@@ -237,7 +242,7 @@ int access_node(struct connection *conn, struct node *node,
+ 	bool introduce = false;
+ 
+ 	if (type != NODE_ACCESS_READ) {
+-		node->generation = generation++;
++		node->generation = ++generation;
+ 		if (conn && !conn->transaction)
+ 			wrl_apply_debit_direct(conn);
+ 	}
+@@ -374,7 +379,7 @@ static int finalize_transaction(struct connection *conn,
+ 				if (!data.dptr)
+ 					goto err;
+ 				hdr = (void *)data.dptr;
+-				hdr->generation = generation++;
++				hdr->generation = ++generation;
+ 				ret = tdb_store(tdb_ctx, key, data,
+ 						TDB_REPLACE);
+ 				talloc_free(data.dptr);
+@@ -462,7 +467,7 @@ int do_transaction_start(struct connection *conn, struct buffered_data *in)
+ 	INIT_LIST_HEAD(&trans->accessed);
+ 	INIT_LIST_HEAD(&trans->changed_domains);
+ 	trans->fail = false;
+-	trans->generation = generation++;
++	trans->generation = ++generation;
+ 
+ 	/* Pick an unused transaction identifier. */
+ 	do {
+diff --git a/tools/xenstore/xenstored_transaction.h b/tools/xenstore/xenstored_transaction.h
+index 3386bac565..43a162bea3 100644
+--- a/tools/xenstore/xenstored_transaction.h
++++ b/tools/xenstore/xenstored_transaction.h
+@@ -27,6 +27,8 @@ enum node_access_type {
+ 
+ struct transaction;
+ 
++extern uint64_t generation;
++
+ int do_transaction_start(struct connection *conn, struct buffered_data *node);
+ int do_transaction_end(struct connection *conn, struct buffered_data *in);
+ 
+diff --git a/tools/xenstore/xs_lib.c b/tools/xenstore/xs_lib.c
+index 3e43f8809d..d407d5713a 100644
+--- a/tools/xenstore/xs_lib.c
++++ b/tools/xenstore/xs_lib.c
+@@ -152,7 +152,7 @@ bool xs_strings_to_perms(struct xs_permissions *perms, unsigned int num,
+ bool xs_perm_to_string(const struct xs_permissions *perm,
+                        char *buffer, size_t buf_len)
+ {
+-	switch ((int)perm->perms) {
++	switch ((int)perm->perms & ~XS_PERM_IGNORE) {
+ 	case XS_PERM_WRITE:
+ 		*buffer = 'w';
+ 		break;
