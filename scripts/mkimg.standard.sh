@@ -27,9 +27,12 @@ profile_extended() {
 	title="Extended"
 	desc="Most common used packages included.
 		Suitable for routers and servers.
-		Runs from RAM."
+		Runs from RAM.
+		Includes AMD and Intel microcode updates."
 	arch="x86 x86_64"
 	kernel_addons="xtables-addons zfs"
+	boot_addons="amd-ucode intel-ucode"
+	initrd_ucode="/boot/amd-ucode.img /boot/intel-ucode.img"
 	apks="$apks
 		ethtool hwids lftp links doas
 		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
