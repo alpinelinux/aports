@@ -1,0 +1,236 @@
+# Maintainer: Milan P. Stanić <mps@arvanta.net>
+
+_flavor=elm
+pkgname=linux-${_flavor}
+# NOTE: this kernel is intended for testing
+# please resist urge to upgrade it blindly
+pkgver=5.10.2
+case $pkgver in
+	*.*.*)	_kernver=${pkgver%.*};;
+	*.*) _kernver=$pkgver;;
+esac
+pkgrel=0
+pkgdesc="Linux latest stable kernel for elm chromebooks"
+url="https://www.kernel.org"
+#depends="mkinitfs linux-firmware-any"
+_depends_dev="perl gmp-dev elfutils-dev bash flex bison"
+makedepends="$_depends_dev sed installkernel bc linux-headers linux-firmware-any openssl-dev
+	diffutils findutils vboot-utils"
+options="!strip"
+_config=${config:-config-elm.${CARCH}}
+install=
+
+#subpackages="$pkgname-dev:_dev:$CBUILD_ARCH"
+source="https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/linux-$_kernver.tar.xz"
+case $pkgver in
+	*.*.0)	source="$source";;
+	*.*.*)	source="$source
+	https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/patch-$pkgver.xz" ;;
+esac
+
+	source="$source
+	config-elm.aarch64
+	kernel.its.elm
+	"
+
+arch="aarch64"
+license="GPL-2.0"
+
+_flavors=
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-${_f}::$CBUILD_ARCH linux-${_f}-dev:_dev:$CBUILD_ARCH"
+		fi
+		;;
+	esac
+done
+
+_carch=${CARCH}
+case "$_carch" in
+aarch64*) _carch="arm64" ;;
+arm*) _carch="arm" ;;
+esac
+
+prepare() {
+	local _patch_failed=
+	cd "$srcdir"/linux-$_kernver
+	case $pkgver in
+		*.*.0);;
+		*)
+		msg "Applying patch-$pkgver.xz"
+		unxz -c < "$srcdir"/patch-$pkgver.xz | patch -p1 -N ;;
+	esac
+
+	# first apply patches in specified order
+	for i in $source; do
+		case $i in
+		*.patch)
+			msg "Applying $i..."
+			if ! patch -s -p1 -N -i "$srcdir"/$i; then
+				echo $i >>failed
+				_patch_failed=1
+			fi
+			;;
+		esac
+	done
+
+	if ! [ -z "$_patch_failed" ]; then
+		error "The following patches failed:"
+		cat failed
+		return 1
+	fi
+
+	# remove localversion from patch if any
+	rm -f localversion*
+	oldconfig
+}
+
+oldconfig() {
+	for i in $_flavors; do
+		local _config=config-$i.${CARCH}
+		local _builddir="$srcdir"/build-$i.$CARCH
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$i" > "$_builddir"/localversion-alpine \
+			|| return 1
+
+		cp "$srcdir"/$_config "$_builddir"/.config
+		make -C "$srcdir"/linux-$_kernver \
+			O="$_builddir" \
+			ARCH="$_carch" \
+			listnewconfig oldconfig
+	done
+}
+
+build() {
+	unset LDFLAGS
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+	for i in $_flavors; do
+		cd "$srcdir"/build-$i.$CARCH
+		make ARCH="$_carch" CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+	done
+}
+
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=${pkgver}-${pkgrel}-${_buildflavor}
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+	cd "$srcdir"/build-$_buildflavor.$CARCH
+	# modules_install seems to regenerate a defect Modules.symvers on s390x. Work
+	# around it by backing it up and restore it after modules_install
+	cp Module.symvers Module.symvers.backup
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+
+	local _install
+	case "$CARCH" in
+		arm*|aarch64) _install="zinstall dtbs_install";;
+		*) _install=install;;
+	esac
+
+	make -j1 modules_install $_install \
+		ARCH="$_carch" \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_PATH="$_outdir"/boot \
+		INSTALL_DTBS_PATH="$_outdir/boot/dtbs-$_buildflavor"
+
+	cp Module.symvers.backup Module.symvers
+
+	rm -f "$_outdir"/lib/modules/${_abi_release}/build \
+		"$_outdir"/lib/modules/${_abi_release}/source
+	rm -rf "$_outdir"/lib/firmware
+
+	install -D include/config/kernel.release \
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+}
+
+# main flavor installs in $pkgdir
+package() {
+
+	_package elm "$pkgdir"
+	local _builddir="$srcdir"/build-$_flavor.$CARCH
+	cd $_builddir
+	cp $srcdir/kernel.its.elm .
+	mkimage -D "-I dts -O dtb -p 2048" -f kernel.its.elm vmlinux.uimg
+
+	dd if=/dev/zero of=bootloader.bin bs=512 count=1
+	echo "console=tty1 earlyprintk=tty1 init=/sbin/init root=PARTUUID=%U/PARTNROFF=1 rootwait rw noinitrd loglevel=7" > cmdline
+	vbutil_kernel \
+		--pack $pkgdir/boot/vmlinux.kpart-$pkgver-$pkgrel-$_flavor \
+		--version 1 \
+		--vmlinuz vmlinux.uimg \
+		--arch aarch64 \
+		--keyblock /usr/share/vboot/devkeys/kernel.keyblock \
+		--signprivate kernel_data_key.vbprivk \
+		--signprivate /usr/share/vboot/devkeys/kernel_data_key.vbprivk \
+		--config cmdline \
+		--bootloader bootloader.bin
+
+	rm cmdline bootloader.bin
+	rm $pkgdir/boot/vmlinuz-elm
+	cd $pkgdir/boot
+	ln -s vmlinux-5.10.2-elm vmlinux.kpart 
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _abi_release=${pkgver}-${pkgrel}-$_flavor
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# simlar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="$_depends_dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
+	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine
+
+	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" ARCH="$_carch" \
+		syncconfig prepare modules_prepare scripts
+
+	# remove the stuff that points to real sources. we want 3rd party
+	# modules to believe this is the soruces
+	rm "$dir"/Makefile "$dir"/source
+
+	# copy the needed stuff from real sources
+	#
+	# this is taken from ubuntu kernel build script
+	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
+	cd "$srcdir"/linux-$_kernver
+	find .  -path './include/*' -prune \
+		-o -path './scripts/*' -prune -o -type f \
+		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
+		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) \
+		-print | cpio -pdm "$dir"
+
+	cp -a scripts include "$dir"
+
+	find $(find arch -name include -type d -print) -type f \
+		| cpio -pdm "$dir"
+
+	install -Dm644 "$srcdir"/build-$_flavor.$CARCH/Module.symvers \
+		"$dir"/Module.symvers
+
+	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
+	ln -sf /usr/src/linux-headers-${_abi_release} \
+		"$subpkgdir"/lib/modules/${_abi_release}/build
+}
+
+sha512sums="95bc137d0cf9148da6a9d1f1a878698dc27b40f68e22c597544010a6c591ce1b256f083489d3ff45ff77753289b535135590194d88ef9f007d0ddab3d74de70e  linux-5.10.tar.xz
+bc68175046235bdb74783e82b8f6d6a6e37e7a93d972989703ffb8bce450d70f4883b317033122482d22ba2ebeddd1742f32ba8051ad4c8b8259a8be7322a3e9  patch-5.10.2.xz
+5eb083495f76751df0ecc17825a65779794811af1407e372ea925b4e589ecef6ebd59455ad877be6ffe750314a9ae6f1f0289a10a25c8ef59d48032ccbd22c82  config-elm.aarch64
+2b999f151dac0dcfe9021ff67059753641b647dcfa08aace1449c8df5ecbbd363616d525c301dfccb533499b7f0bc1138746b5bf24c78624e2497836e8c0f127  kernel.its.elm"
