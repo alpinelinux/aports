@@ -127,13 +127,13 @@ Renames an aport.
 
 Example: `community/bar: rename from foo`
 
----
-
-#### Rules
+###### Rules
 
 One commit per renamed aport.
 
-##### Add
+---
+
+### Add
 
 Introduces a new aport.
 
