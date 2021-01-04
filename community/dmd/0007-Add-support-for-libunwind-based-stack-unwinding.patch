@@ -1,0 +1,254 @@
+From e6c1146a567a6b2e90d5d1595645a5c38946fd21 Mon Sep 17 00:00:00 2001
+From: Geod24 <pro.mathias.lang@gmail.com>
+Date: Sat, 2 Jan 2021 11:44:22 +0900
+Subject: Add support for libunwind-based stack unwinding
+
+libunwind is a portable, lightweight, widely adopted library to unwind the stack.
+It is part of GCC via libiberty, and LLVM as well.
+
+It is an alternative to the `backtrace` approach, which is not always available,
+e.g. Musl libc does not provide a `backtrace` implementation, and the alternative,
+libexecinfo, is known to have some bugs.
+
+This is currently hidden behind a version, meaning only packagers or power users
+will get access to it, so it can be properly tested.
+---
+ mak/COPY                              |   1 +
+ mak/DOCS                              |   1 +
+ mak/SRCS                              |   1 +
+ src/core/internal/backtrace/dwarf.d   |  19 +++++
+ src/core/internal/backtrace/handler.d | 117 ++++++++++++++++++++++++++
+ src/core/runtime.d                    |  19 ++++-
+ 6 files changed, 157 insertions(+), 1 deletion(-)
+ create mode 100644 src/core/internal/backtrace/handler.d
+
+diff --git a/mak/COPY b/mak/COPY
+index fa97e1207..73b4465ce 100644
+--- a/druntime/mak/COPY
++++ b/druntime/mak/COPY
+@@ -53,6 +53,7 @@ COPY=\
+ 	\
+ 	$(IMPDIR)\core\internal\backtrace\dwarf.d \
+ 	$(IMPDIR)\core\internal\backtrace\elf.d \
++	$(IMPDIR)\core\internal\backtrace\handler.d \
+ 	$(IMPDIR)\core\internal\backtrace\libunwind.d \
+ 	$(IMPDIR)\core\internal\backtrace\macho.d \
+ 	\
+diff --git a/mak/DOCS b/mak/DOCS
+index 90b16a19e..e45f538ee 100644
+--- a/druntime/mak/DOCS
++++ b/druntime/mak/DOCS
+@@ -87,6 +87,7 @@ DOCS=\
+ 	\
+ 	$(DOCDIR)\core_internal_backtrace_dwarf.html \
+ 	$(DOCDIR)\core_internal_backtrace_elf.html \
++	$(DOCDIR)\core_internal_backtrace_handler.html \
+ 	$(DOCDIR)\core_internal_backtrace_libunwind.html \
+ 	$(DOCDIR)\core_internal_backtrace_macho.html \
+ 	\
+diff --git a/mak/SRCS b/mak/SRCS
+index 05cb923e1..eafac3795 100644
+--- a/druntime/mak/SRCS
++++ b/druntime/mak/SRCS
+@@ -53,6 +53,7 @@ SRCS=\
+ 	\
+ 	src\core\internal\backtrace\dwarf.d \
+ 	src\core\internal\backtrace\elf.d \
++	src\core\internal\backtrace\handler.d \
+ 	src\core\internal\backtrace\libunwind.d \
+ 	src\core\internal\backtrace\macho.d \
+ 	\
+diff --git a/src/core/internal/backtrace/dwarf.d b/src/core/internal/backtrace/dwarf.d
+index 8f082c783..7e3520ff6 100644
+--- a/druntime/src/core/internal/backtrace/dwarf.d
++++ b/druntime/src/core/internal/backtrace/dwarf.d
+@@ -187,6 +187,25 @@ static if (hasExecinfo)
+     }
+ }
+ 
++int traceHandlerOpApplyImpl2(T)(const T[] input, scope int delegate(ref size_t, ref const(char[])) dg)
++{
++    auto image = Image.openSelf();
++
++    // find address -> file, line mapping using dwarf debug_line
++    Array!Location locations;
++    locations.length = input.length;
++    foreach (idx, const ref inp; input)
++    {
++        locations[idx].address = inp.address;
++        locations[idx].procedure = inp.name;
++    }
++
++    return image.isValid
++        ? image.processDebugLineSectionData(
++            (line) => locations[].processCallstack(line, image.baseAddress, dg))
++        : locations[].processCallstack(null, image.baseAddress, dg);
++}
++
+ struct TraceInfoBuffer
+ {
+     private char[1536] buf = void;
+diff --git a/src/core/internal/backtrace/handler.d b/src/core/internal/backtrace/handler.d
+new file mode 100644
+index 000000000..c41d5388a
+--- /dev/null
++++ b/druntime/src/core/internal/backtrace/handler.d
+@@ -0,0 +1,117 @@
++/**
++ * Libunwind-based implementation of `TraceInfo`
++ *
++ * This module exposes an handler that uses libunwind to print stack traces.
++ * It is used when druntime is packaged with `DRuntime_Use_Libunwind` or when
++ * the user uses the following in `main`:
++ * ---
++ * import core.runtime;
++ * import core.internal.backtrace.handler;
++ * Runtime.traceHandler = &libunwindDefaultTraceHandler;
++ * ---
++ *
++ * Authors: Mathias 'Geod24' Lang
++ * Copyright: D Language Foundation - 2020
++ * See_Also: https://www.nongnu.org/libunwind/man/libunwind(3).html
++ */
++module core.internal.backtrace.handler;
++
++version (DRuntime_Use_Libunwind):
++
++import core.internal.backtrace.dwarf;
++import core.internal.backtrace.libunwind;
++
++/// Ditto
++class LibunwindHandler : Throwable.TraceInfo
++{
++    private static struct FrameInfo
++    {
++        char[1024] buff = void;
++
++        const(char)[] name;
++        const(void)* address;
++    }
++
++    size_t numframes;
++    enum MAXFRAMES = 128;
++    FrameInfo[MAXFRAMES] callstack = void;
++
++    /**
++     * Create a new instance of this trace handler saving the current context
++     *
++     * Params:
++     *   frames_to_skip = The number of frames leading to this one.
++     *                    Defaults to 5. Should normally default to 1,
++     *                    but since this information is not currently
++     *                    propagated in druntime, the default is right
++     *                    for druntime
++     */
++    public this (size_t frames_to_skip = 5) nothrow @nogc
++    {
++        import core.stdc.string : strlen;
++
++        static assert(typeof(FrameInfo.address).sizeof == unw_word_t.sizeof,
++                      "Mismatch in type size for call to unw_get_proc_name");
++
++        unw_context_t context;
++        unw_cursor_t cursor;
++        unw_getcontext(&context);
++        unw_init_local(&cursor, &context);
++
++        while (frames_to_skip > 0 && unw_step(&cursor) > 0)
++            --frames_to_skip;
++
++        unw_proc_info_t pip = void;
++        foreach (idx, ref frame; this.callstack)
++        {
++            if (int r = unw_get_proc_name(
++                    &cursor, frame.buff.ptr, frame.buff.length,
++                    cast(unw_word_t*) &frame.address))
++                frame.name = "<ERROR: Unable to retrieve function name>";
++            else
++                frame.name = frame.buff[0 .. strlen(frame.buff.ptr)];
++
++            if (unw_get_proc_info(&cursor, &pip) == 0)
++                frame.address += pip.start_ip;
++
++            this.numframes++;
++            if (unw_step(&cursor) <= 0)
++                break;
++        }
++    }
++
++    ///
++    override int opApply (scope int delegate(ref const(char[])) dg) const
++    {
++        return this.opApply((ref size_t, ref const(char[]) buf) => dg(buf));
++    }
++
++    ///
++    override int opApply (scope int delegate(ref size_t, ref const(char[])) dg) const
++    {
++        return traceHandlerOpApplyImpl2(this.callstack[0 .. this.numframes], dg);
++    }
++
++    ///
++    override string toString () const
++    {
++        string buf;
++        foreach ( i, line; this )
++            buf ~= i ? "\n" ~ line : line;
++        return buf;
++    }
++}
++
++/**
++ * Convenience function for power users wishing to test this module
++ * See `core.runtime.defaultTraceHandler` for full documentation.
++ */
++Throwable.TraceInfo defaultTraceHandler (void* ptr = null)
++{
++    // avoid recursive GC calls in finalizer, trace handlers should be made @nogc instead
++    import core.memory : gc_inFinalizer;
++    if (gc_inFinalizer)
++        return null;
++
++    return new LibunwindHandler();
++}
+diff --git a/src/core/runtime.d b/src/core/runtime.d
+index 9ed0d56b2..89f23811b 100644
+--- a/druntime/src/core/runtime.d
++++ b/druntime/src/core/runtime.d
+@@ -21,6 +21,17 @@ else version (TVOS)
+ else version (WatchOS)
+     version = Darwin;
+ 
++version (DRuntime_Use_Libunwind)
++{
++    import core.internal.backtrace.libunwind;
++    // This shouldn't be necessary but ensure that code doesn't get mixed
++    // It does however prevent the unittest SEGV handler to be installed,
++    // which is desireable as it uses backtrace directly.
++    private enum hasExecInfo = false;
++}
++else
++    import core.internal.execinfo;
++
+ /// C interface for Runtime.loadLibrary
+ extern (C) void* rt_loadLibrary(const char* name);
+ /// ditto
+@@ -730,8 +741,14 @@ unittest
+     }
+ }
+ 
++version (DRuntime_Use_Libunwind)
++{
++    import core.internal.backtrace.handler;
++
++    alias DefaultTraceInfo = LibunwindHandler;
++}
+ /// Default implementation for most POSIX systems
+-static if (hasExecinfo) private class DefaultTraceInfo : Throwable.TraceInfo
++else static if (hasExecinfo) private class DefaultTraceInfo : Throwable.TraceInfo
+ {
+     import core.demangle;
+     import core.stdc.stdlib : free;
+-- 
+2.24.3 (Apple Git-128)
+
