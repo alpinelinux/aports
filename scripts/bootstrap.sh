@@ -6,7 +6,7 @@ TARGET_ARCH="$1"
 SUDO_APK=abuild-apk
 
 # optional cross build packages
-KERNEL_PKG="linux-firmware linux-lts"
+: ${KERNEL_PKG=linux-firmware linux-lts}
 
 # get abuild configurables
 [ -e /usr/share/abuild/functions.sh ] || (echo "abuild not found" ; exit 1)
@@ -98,9 +98,9 @@ EXTRADEPENDS_TARGET="libgcc libstdc++ musl-dev"
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   openssl ca-certificates libbsd libtls-standalone busybox busybox-initscripts binutils make \
 	   apk-tools file \
-	   gmp mpfr4 mpc1 isl cloog libucontext gcc \
+	   gmp mpfr4 mpc1 isl22 cloog libucontext gcc \
 	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
-	   attr libcap sudo acl fakeroot tar \
+	   attr libcap acl fakeroot tar \
 	   pax-utils lzip abuild ncurses libedit openssh \
 	   libcap-ng util-linux libaio lvm2 popt xz \
 	   json-c argon2 cryptsetup kmod lddtree mkinitfs \
