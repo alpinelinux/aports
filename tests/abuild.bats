@@ -1,6 +1,7 @@
 setup() {
 	export ABUILD="$PWD/../abuild"
 	export ABUILD_SHAREDIR="$PWD/.."
+	export ABUILD_CONF=/dev/null
 	export REPODEST="$BATS_TMPDIR"/packages
 }
 
