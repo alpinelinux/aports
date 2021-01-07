@@ -6,6 +6,7 @@
 
 \set cfgname 'czech'
 \set dictname 'czech_ispell'
+\set stemmer 'czech_stem'  -- change to 'simple' if you don't have czech stemmer
 \set namespace 'pg_catalog'
 
 \out /dev/null
@@ -23,18 +24,16 @@ SELECT EXISTS (SELECT 1 FROM pg_ts_dict WHERE dictnamespace = :'namespace'::regn
   \echo text search dictionary :"dictname" already exists in namespace :"namespace"
 \else
   \echo creating text search dictionary :"dictname" in namespace :"namespace"
-  CREATE TEXT SEARCH DICTIONARY :"dictname" (template=ispell, dictfile = czech, afffile=czech, stopwords=czech);
+  CREATE TEXT SEARCH DICTIONARY :"dictname" (
+    template = ispell,
+    dictfile = czech,
+    afffile = czech,
+    stopwords = czech
+  );
 \endif
 
--- Create TS configuration if not exists
+-- Update TS configuration
 
-SELECT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgnamespace = :'namespace'::regnamespace AND cfgname = :'cfgname') AS has_config;
-\gset
-
-\if :has_config
-  \echo text search configuration :"cfgname" already exists in namespace :"namespace"
-\else
-  \echo creating text search configuration :"cfgname" in namespace :"namespace"
-  CREATE TEXT SEARCH CONFIGURATION :"cfgname" (copy=english);
-  ALTER TEXT SEARCH CONFIGURATION :"cfgname" ALTER MAPPING FOR word, asciiword WITH :"dictname", simple;
-\endif
+\echo updating text search configuration :"cfgname" in namespace :"namespace"
+ALTER TEXT SEARCH CONFIGURATION :"cfgname"
+  ALTER MAPPING FOR asciiword, asciihword, hword, hword_asciipart, hword_part, word WITH :"dictname", :"stemmer";
