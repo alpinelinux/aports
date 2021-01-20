@@ -1,0 +1,402 @@
+From 51820329b69fa37423474aecf8c70d731452dea2 Mon Sep 17 00:00:00 2001
+From: Bart Ribbers <bribbers@disroot.org>
+Date: Fri, 15 Jan 2021 12:59:25 +0100
+Subject: [PATCH 1/2] Replace mycroft-{start,stop} with scripts that can launch
+ properly installed setups
+
+These scripts will work with system-wide setups
+(/usr/bin/mycroft-start), user setups (~/.local/bin/mycroft-start) and
+virtual environments (.venv/bin/mycroft-start).
+
+A big benefit is that they don't care where they're installed. They'll
+launch from a virtual environment, user setups or system-wide setup, in
+that order.
+
+Also make sure these scripts are actually installed by setup.py.
+
+These changes should make it possible to create a PyPi package
+installable with pip.
+---
+ bin/mycroft-start | 157 ++++++++++++++++++++++++++++++++++++++++++++--
+ bin/mycroft-stop  | 109 ++++++++++++++++++++++++++++++--
+ setup.py          |   6 +-
+ 3 files changed, 261 insertions(+), 11 deletions(-)
+
+diff --git a/bin/mycroft-start b/bin/mycroft-start
+index 65723c2c373..36ddc9fcbe6 100755
+--- a/bin/mycroft-start
++++ b/bin/mycroft-start
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env bash
++#!/bin/sh
+ 
+ # Copyright 2019 Mycroft AI Inc.
+ #
+@@ -14,8 +14,155 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-SOURCE="${BASH_SOURCE[0]}"
+-cd -P "$( dirname "$SOURCE" )"/..
+-DIR="$( pwd )"
++script=${0}
++script=${script##*/}
+ 
+-. "$DIR/start-mycroft.sh" $@
++help() {
++	echo "${script}:  Mycroft command/service launcher"
++	echo "usage: ${script} [COMMAND] [restart] [params]"
++	echo
++	echo "Services COMMANDs:"
++	echo "  all                      runs core services: bus, audio, skills, voice"
++	echo "  debug                    runs core services, then starts the CLI"
++	echo "  audio                    the audio playback service"
++	echo "  bus                      the messagebus service"
++	echo "  skills                   the skill service"
++	echo "  voice                    voice capture service"
++	echo "  enclosure                mark_1 enclosure service"
++	echo
++	echo "Tool COMMANDs:"
++	echo "  cli                      the Command Line Interface"
++	echo
++	echo "Options:"
++	echo "  restart                  (optional) Force the service to restart if running"
++	echo
++	echo "Examples:"
++	echo "  ${script} all"
++	echo "  ${script} all restart"
++	echo "  ${script} bus"
++	echo "  ${script} voice"
++
++	exit 1
++}
++
++name_to_script_path() {
++	case ${1} in
++		"bus")		_module="mycroft.messagebus.service" ;;
++		"skills")	_module="mycroft.skills" ;;
++		"audio")	_module="mycroft.audio" ;;
++		"voice")	_module="mycroft.client.speech" ;;
++		"cli")		_module="mycroft.client.text" ;;
++		"enclosure")	_module="mycroft.client.enclosure" ;;
++
++		*)
++			echo "Error: Unknown name '${1}'"
++			exit 1
++	esac
++}
++
++require_process() {
++	name_to_script_path "${1}"
++	if ! pgrep -f "python3 (.*)-m ${_module}" > /dev/null; then
++		launch_background "${1}"
++	fi
++}
++
++launch_process() {
++	name_to_script_path "${1}"
++
++	# Luanch process in foreground
++	echo "Starting $1"
++	python3 -m ${_module} "$_params"
++}
++
++launch_background() {
++	name_to_script_path "${1}"
++
++	if pgrep -f "python3 (.*)-m ${_module}" > /dev/null; then
++		if ($_force_restart); then
++			echo "Restarting: ${1}"
++			mycroft-stop "${1}"
++		else
++			# Already running, no need to restart
++			return
++		fi
++	else
++		echo "Starting background service $1"
++	fi
++
++	# Security warning/reminder for the user
++	if [ "${1}" = "bus" ] ; then
++		echo "CAUTION: The Mycroft bus is an open websocket with no built-in security"
++		echo "         measures.  You are responsible for protecting the local port"
++		echo "         8181 with a firewall as appropriate."
++	fi
++
++	# Launch process in background
++	# Send logs to XDG Base Directories cache location
++	if [ -n "${XDG_CACHE_HOME+x}" ]; then
++		logdir="$XDG_CACHE_HOME/mycroft"
++	else
++		logdir="$HOME/.cache/mycroft"
++	fi
++
++	if [ ! -d "$logdir" ]; then
++		mkdir -p "$logdir"
++	fi
++
++	python3 -m ${_module} "$_params" >> "$logdir/${1}.log" 2>&1 &
++}
++
++launch_all() {
++	echo "Starting all mycroft-core services"
++	launch_background bus
++	launch_background skills
++	launch_background audio
++	launch_background voice
++	launch_background enclosure
++}
++
++_opt=$1
++_force_restart=false
++shift
++if [ "${1}" = "restart" ] || [ "${_opt}" = "restart" ]; then
++	_force_restart=true
++	if [ "${_opt}" = "restart" ]; then
++		# Support "start-mycroft restart all" as well as "start-mycroft all restart"
++		_opt=$1
++	fi
++	shift
++fi
++_params=$*
++
++case ${_opt} in
++	"all")
++		launch_all
++		;;
++	"bus")
++		launch_background "${_opt}"
++		;;
++	"audio")
++		launch_background "${_opt}"
++		;;
++	"skills")
++		launch_background "${_opt}"
++		;;
++	"voice")
++		launch_background "${_opt}"
++		;;
++	"debug")
++		launch_all
++		launch_process cli
++		;;
++	"cli")
++		require_process bus
++		require_process skills
++		launch_process "${_opt}"
++		;;
++	"enclosure")
++		launch-background "${_opt}"
++		;;
++	*)
++		help
++		;;
++esac
+diff --git a/bin/mycroft-stop b/bin/mycroft-stop
+index b86b0ea6557..289c736959a 100755
+--- a/bin/mycroft-stop
++++ b/bin/mycroft-stop
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env bash
++#!/bin/sh
+ 
+ # Copyright 2019 Mycroft AI Inc.
+ #
+@@ -14,8 +14,107 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-SOURCE="${BASH_SOURCE[0]}"
+-cd -P "$( dirname "$SOURCE" )"/..
+-DIR="$( pwd )"
++script=${0}
++script=${script##*/}
+ 
+-. "$DIR/stop-mycroft.sh" $@
++help() {
++	echo "${script}:  Mycroft service stopper"
++	echo "usage: ${script} [service]"
++	echo
++	echo "Service:"
++	echo "  all       ends core services: bus, audio, skills, voice"
++	echo "  (none)    same as \"all\""
++	echo "  bus       stop the Mycroft messagebus service"
++	echo "  audio     stop the audio playback service"
++	echo "  skills    stop the skill service"
++	echo "  voice     stop voice capture service"
++	echo "  enclosure stop enclosure (hardware/gui interface) service"
++	echo
++	echo "Examples:"
++	echo "  ${script}"
++	echo "  ${script} audio"
++
++	exit 0
++}
++
++process_running() {
++	if [ "$( pgrep -f "python3 (.*)-m mycroft.*${1}" )" ]; then
++		return 0
++	else
++		return 1
++	fi
++}
++
++end_process() {
++	if process_running "$1"; then
++		# Find the process by name, only returning the oldest if it has children
++		pid=$( pgrep -o -f "python3 (.*)-m mycroft.*${1}" )
++		echo "Stopping $1 (${pid})..."
++		kill -SIGINT "${pid}"
++
++		# Wait up to 5 seconds (50 * 0.1) for process to stop
++		c=1
++		while [ $c -le 50 ]; do
++			if process_running "$1"; then
++				sleep 0.1
++				c=$((c + 1))
++			else
++				c=999 # end loop
++			fi
++		done
++
++		if process_running "$1"; then
++			echo "Failed to stop."
++			pid=$( pgrep -o -f "python3 (.*)-m mycroft.*${1}" )
++			echo "  Killing $1 (${pid})..."
++			kill -9 "${pid}"
++			echo "Killed."
++			result=120
++		else
++			echo "Stopped."
++			if [ $result -eq 0 ] ; then
++				result=100
++			fi
++		fi
++	fi
++}
++
++result=0 # default, no change
++
++OPT=$1
++shift
++
++case ${OPT} in
++	"all"|"")
++		echo "Stopping all mycroft-core services"
++		end_process "skills"
++		end_process "audio"
++		end_process "speech"
++		end_process "enclosure"
++		end_process "messagebus.service"
++		;;
++	"bus")
++		end_process "messagebus.service"
++		;;
++	"audio")
++		end_process "audio"
++		;;
++	"skills")
++		end_process "skills"
++		;;
++	"voice")
++		end_process "speech"
++		;;
++	"enclosure")
++		end_process "enclosure"
++		;;
++	*)
++		help
++		;;
++esac
++
++# Exit codes:
++#	0   if nothing changed (e.g. --help or no process was running)
++#	100 at least one process was stopped
++#	120 if any process had to be killed
++exit $result
+diff --git a/setup.py b/setup.py
+index 963c503e4d2..89eefa496fc 100644
+--- a/setup.py
++++ b/setup.py
+@@ -80,5 +80,9 @@ def required(requirements_file):
+             'mycroft-enclosure-client=mycroft.client.enclosure.__main__:main',
+             'mycroft-cli-client=mycroft.client.text.__main__:main'
+         ]
+-    }
++    },
++    scripts=[
++        'bin/mycroft-start',
++        'bin/mycroft-stop'
++    ]
+ )
+
+From befd8a1d0a849ff2ccaf2f58e79ffe4d339882c2 Mon Sep 17 00:00:00 2001
+From: Bart Ribbers <bribbers@disroot.org>
+Date: Fri, 15 Jan 2021 13:18:35 +0100
+Subject: [PATCH 2/2] Update README to reflect properly installed setups
+
+---
+ README.md | 38 +++++++++++++++++++++++++++-----------
+ 1 file changed, 27 insertions(+), 11 deletions(-)
+
+diff --git a/README.md b/README.md
+index 1665b0a68dd..9de90003ca7 100644
+--- a/README.md
++++ b/README.md
+@@ -30,29 +30,45 @@ Mycroft is a hackable open source voice assistant.
+ 
+ # Getting Started
+ 
+-First, get the code on your system!  The simplest method is via git ([git installation instructions](https://gist.github.com/derhuerst/1b15ff4652a867391f03)):
+-- `cd ~/`
+-- `git clone https://github.com/MycroftAI/mycroft-core.git`
+-- `cd mycroft-core`
+-- `bash dev_setup.sh`
++Mycroft might be packaged by your distribution already, in that case installing it might be as simple as `apk add mycroft-core` or equivalent for your distribution.
++Otherwise, the simplest method is downloading the latest release on the [Github releases page](https://github.com/MycroftAI/mycroft-core/releases) and unpacking it somewhere.
++Then run `python3 setup.py install` in the unpacked directory.
+ 
++For development on Mycroft it's recommended to use Git instead ([git installation instructions](https://gist.github.com/derhuerst/1b15ff4652a867391f03)).
++
++```sh
++cd ~/
++git clone https://github.com/MycroftAI/mycroft-core.git
++cd mycroft-core
++./dev_setup.sh
++```
+ 
+ This script sets up dependencies and a [virtualenv][about-virtualenv].  If running in an environment besides Ubuntu/Debian, Arch or Fedora you may need to manually install packages as instructed by dev_setup.sh.
+ 
+ [about-virtualenv]:https://virtualenv.pypa.io/en/stable/
+ 
+-NOTE: The default branch for this repository is 'dev', which should be considered a work-in-progress. If you want to clone a more stable version, switch over to the 'master' branch.
++**NOTE:** The default branch for this repository is 'dev', which should be considered a work-in-progress. If you want to clone a more stable version, switch over to the 'master' branch.
+ 
+ # Running Mycroft
+ 
+-Mycroft provides `start-mycroft.sh` to perform common tasks. This script uses a virtualenv created by `dev_setup.sh`.  Assuming you installed mycroft-core in your home directory run:
+-- `cd ~/mycroft-core`
+-- `./start-mycroft.sh debug`
++Mycroft provides `mycroft-start` to perform common tasks. Assuming you installed mycroft-core via your systems package manager or via `setup.py`:
++
++```sh
++mycroft-start debug
++```
+ 
+-The "debug" command will start the background services (microphone listener, skill, messagebus, and audio subsystems) as well as bringing up a text-based Command Line Interface (CLI) you can use to interact with Mycroft and see the contents of the various logs. Alternatively you can run `./start-mycroft.sh all` to begin the services without the command line interface.  Later you can bring up the CLI using `./start-mycroft.sh cli`.
++The "debug" command will start the background services (microphone listener, skill, messagebus, and audio subsystems) as well as bringing up a text-based Command Line Interface (CLI) you can use to interact with Mycroft and see the contents of the various logs.
++Alternatively you can run `mycroft-start all` to begin the services without the command line interface.
++Later you can bring up the CLI using `mycroft-start cli`.
+ 
+ The background services can be stopped as a group with:
+-- `./stop-mycroft.sh`
++
++```sh
++mycroft-stop
++```
++
++If you want to develop for Mycroft, please use `start-mycroft.sh` and `stop-mycroft.sh` instead of the aforementioned commands.
++These provide extra options for development purposes.
+ 
+ # Using Mycroft
+ 
