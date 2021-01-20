@@ -1,0 +1,299 @@
+From 94dda0501e4039c7ce8b074ebd5f4f34e8d22be0 Mon Sep 17 00:00:00 2001
+From: Bart Ribbers <bribbers@disroot.org>
+Date: Fri, 8 Jan 2021 21:19:06 +0100
+Subject: [PATCH 3/4] Install to and read skills from the XDG home directory
+
+To be fully XDG compliant, we should be reading from the other XDG Data
+directories as well (/usr/share and /usr/local/share), but that will
+cause problems with skill_id's and the likes. For this reason we'll only
+read from the user home directory for now ($XDG_DATA_HOME/mycroft/skills
+or $HOME/mycroft/skills).
+
+Also stop pip from ever using sudo. MSM will only install skills for a
+user, not system-wide, and thus the Python dependencies should be
+installed as such as well
+---
+ msm/__main__.py               |  6 ++----
+ msm/mycroft_skills_manager.py | 27 +++++++++++++++++++++------
+ msm/skill_entry.py            |  7 ++-----
+ msm/skill_repo.py             |  6 ++++--
+ pytest.ini                    |  3 +++
+ setup.py                      |  1 +
+ tests/test_main.py            | 10 +++-------
+ tests/test_skill_repo.py      |  4 ----
+ 8 files changed, 36 insertions(+), 28 deletions(-)
+ create mode 100644 pytest.ini
+
+diff --git a/msm/__main__.py b/msm/__main__.py
+index cb6efb4..2907059 100644
+--- a/msm/__main__.py
++++ b/msm/__main__.py
+@@ -54,8 +54,6 @@ def main(args=None, printer=print):
+                         default='default')
+     parser.add_argument('-u', '--repo-url')
+     parser.add_argument('-b', '--repo-branch')
+-    parser.add_argument('-d', '--skills-dir')
+-    parser.add_argument('-c', '--repo-cache')
+     parser.add_argument('-l', '--latest', action='store_false',
+                         dest='versioned', help="Disable skill versioning")
+     parser.add_argument('-r', '--raw', action='store_true')
+@@ -91,10 +89,10 @@ def add_search_args(subparser, skill_is_optional=False):
+         LOG.level = ERROR
+ 
+     repo = SkillRepo(
+-        url=args.repo_url, branch=args.repo_branch, path=args.repo_cache
++        url=args.repo_url, branch=args.repo_branch
+     )
+     msm = MycroftSkillsManager(
+-        args.platform, args.skills_dir, repo, args.versioned
++        args.platform, None, None, repo, args.versioned
+     )
+     main_functions = {
+         'install': lambda: msm.install(args.skill, args.author,
+diff --git a/msm/mycroft_skills_manager.py b/msm/mycroft_skills_manager.py
+index f4aa468..0b76029 100644
+--- a/msm/mycroft_skills_manager.py
++++ b/msm/mycroft_skills_manager.py
+@@ -30,6 +30,8 @@
+ from multiprocessing.pool import ThreadPool
+ from os import path
+ from typing import Dict, List
++import shutil
++from xdg import BaseDirectory
+ 
+ from msm import GitException
+ from msm.exceptions import (
+@@ -86,14 +88,18 @@ def func_wrapper(self, *args, **kwargs):
+ class MycroftSkillsManager(object):
+     SKILL_GROUPS = {'default', 'mycroft_mark_1', 'picroft', 'kde',
+                     'respeaker', 'mycroft_mark_2', 'mycroft_mark_2pi'}
+-    DEFAULT_SKILLS_DIR = "/opt/mycroft/skills"
+ 
+-    def __init__(self, platform='default', skills_dir=None, repo=None,
+-                 versioned=True):
++    def __init__(self, platform='default', old_skills_dir=None,
++                 skills_dir=None, repo=None, versioned=True):
+         self.platform = platform
+-        self.skills_dir = (
+-                path.expanduser(skills_dir or '') or self.DEFAULT_SKILLS_DIR
+-        )
++
++        # Keep this variable alive for a while, is used to move skills from the
++        # old config based location to XDG
++        self.old_skills_dir = path.expanduser(old_skills_dir or '') or None
++        # We accept skills_dir for testing purposes, otherwise always use XDG
++        self.skills_dir = (skills_dir or 
++                           BaseDirectory.save_data_path('mycroft/skills'))
++
+         self.repo = repo or SkillRepo()
+         self.versioned = versioned
+         self.lock = MsmProcessLock()
+@@ -183,6 +189,15 @@ def _get_remote_skills(self):
+     def _merge_remote_with_local(self, remote_skills):
+         """Merge the skills found in the repo with those installed locally."""
+         all_skills = []
++
++        # First move locally installed skills from old to new location 
++        if self.old_skills_dir:
++            for old_skill_dir in glob(path.join(self.old_skills_dir, '*/')):
++                skill_name = old_skill_dir.rstrip('/').rsplit('/', 1)[1]
++                new_skill_path = self.skills_dir + "/" + skill_name
++                if not path.isdir(new_skill_path):
++                    shutil.move(old_skill_dir, self.skills_dir + "/" + skill_name)
++
+         for skill_file in glob(path.join(self.skills_dir, '*', '__init__.py')):
+             skill = SkillEntry.from_folder(path.dirname(skill_file), msm=self,
+                                            use_cache=False)
+diff --git a/msm/skill_entry.py b/msm/skill_entry.py
+index 3170656..64167ac 100644
+--- a/msm/skill_entry.py
++++ b/msm/skill_entry.py
+@@ -295,14 +295,11 @@ def run_pip(self, constraints=None):
+             constraints = DEFAULT_CONSTRAINTS
+ 
+         LOG.info('Installing requirements.txt for ' + self.name)
+-        can_pip = os.access(dirname(sys.executable), os.W_OK | os.X_OK)
+-        pip_args = [sys.executable, '-m', 'pip', 'install']
++        pip_args = ['pip', 'install']
++
+         if constraints:
+             pip_args += ['-c', constraints]
+ 
+-        if not can_pip:
+-            pip_args = ['sudo', '-n'] + pip_args
+-
+         with self.pip_lock:
+             """
+             Iterate over the individual Python packages and
+diff --git a/msm/skill_repo.py b/msm/skill_repo.py
+index d1cf1ad..8bf109c 100644
+--- a/msm/skill_repo.py
++++ b/msm/skill_repo.py
+@@ -24,6 +24,7 @@
+ from os.path import exists, join, isdir, dirname, basename, normpath
+ import json
+ from tempfile import gettempdir
++from xdg import BaseDirectory
+ 
+ from git import Repo
+ from git.exc import GitCommandError, GitError
+@@ -111,8 +112,9 @@ def load_skills_data(branch, path):
+ 
+ 
+ class SkillRepo(object):
+-    def __init__(self, path=None, url=None, branch=None):
+-        self.path = path or "/opt/mycroft/.skills-repo"
++    def __init__(self, url=None, branch=None):
++        self.path = join(BaseDirectory.save_data_path('mycroft'),
++                         '.skills-repo')
+         self.url = url or "https://github.com/MycroftAI/mycroft-skills"
+         self.branch = branch or "20.08"
+         self.repo_info = {}
+diff --git a/pytest.ini b/pytest.ini
+new file mode 100644
+index 0000000..a3108b2
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,3 @@
++[pytest]
++env =
++    XDG_DATA_HOME=/tmp/mycroft-test
+diff --git a/setup.py b/setup.py
+index 81fa076..b2c4447 100644
+--- a/setup.py
++++ b/setup.py
+@@ -28,6 +28,7 @@
+     name='msm',
+     version='0.8.8',
+     packages=['msm'],
++    tests_require=['pytest', 'pytest-env'],
+     install_requires=[
+         'GitPython', 'fasteners', 'pyyaml', 'pako',
+         'lazy', 'pyxdg'
+diff --git a/tests/test_main.py b/tests/test_main.py
+index 129d282..bda9348 100644
+--- a/tests/test_main.py
++++ b/tests/test_main.py
+@@ -20,6 +20,7 @@
+ # specific language governing permissions and limitations
+ # under the License.
+ from os.path import dirname, abspath, join, exists
++from xdg import BaseDirectory
+ 
+ import pytest
+ from shutil import rmtree
+@@ -29,18 +30,13 @@
+ 
+ class TestMain(object):
+     def setup(self):
+-        self.root = root = dirname(abspath(__file__))
+         self.base_params = [
+             '-u', 'https://github.com/mycroftai/mycroft-skills-manager',
+-            '-b', 'test-repo',
+-            '-c', join(root, 'repo-instance'),
+-            '-d', join(root, 'test-skills')
++            '-b', 'test-repo'
+         ]
+ 
+     def teardown(self):
+-        for i in ['repo-instance', 'test-skills']:
+-            if join(self.root, i):
+-                rmtree(join(self.root, i))
++        rmtree(BaseDirectory.save_data_path('mycroft'))
+ 
+     def __call__(self, *args):
+         params = self.base_params + ' '.join(map(str, args)).split(' ')
+diff --git a/tests/test_skill_repo.py b/tests/test_skill_repo.py
+index 0b2414a..836c99d 100644
+--- a/tests/test_skill_repo.py
++++ b/tests/test_skill_repo.py
+@@ -31,7 +31,6 @@ def setup(self):
+         root = dirname(abspath(__file__))
+         chdir(root)
+         self.repo = SkillRepo(
+-            join(root, 'repo-instance'),
+             'https://github.com/mycroftai/mycroft-skills-manager', 'test-repo'
+         )
+         self.repo.update()
+@@ -77,6 +76,3 @@ def test_get_default_skill_names(self):
+             'default': ['skill-a'],
+             'platform-1': ['skill-b']
+         }
+-
+-    def teardown(self):
+-        rmtree('repo-instance')
+
+From 44cdf571618350bcfd393df3146607c5868d864c Mon Sep 17 00:00:00 2001
+From: Bart Ribbers <bribbers@disroot.org>
+Date: Mon, 18 Jan 2021 12:11:30 +0100
+Subject: [PATCH 4/4] Make setup.py install deps from requirement files and
+ move those to it's own folder
+
+---
+ .../requirements.txt                            |  4 +++-
+ requirements/tests.txt                          |  2 ++
+ setup.py                                        | 17 ++++++++++++-----
+ 3 files changed, 17 insertions(+), 6 deletions(-)
+ rename requirements.txt => requirements/requirements.txt (58%)
+ create mode 100644 requirements/tests.txt
+
+diff --git a/requirements.txt b/requirements/requirements.txt
+similarity index 58%
+rename from requirements.txt
+rename to requirements/requirements.txt
+index 4c184b0..ec5ae6a 100644
+--- a/requirements.txt
++++ b/requirements/requirements.txt
+@@ -1,4 +1,6 @@
+-requests
+ GitPython
+ fasteners
+ lazy
++pyyaml
++pako
++pyxdg
+diff --git a/requirements/tests.txt b/requirements/tests.txt
+new file mode 100644
+index 0000000..aa2b810
+--- /dev/null
++++ b/requirements/tests.txt
+@@ -0,0 +1,2 @@
++pytest
++pytest-env
+diff --git a/setup.py b/setup.py
+index b2c4447..865ceac 100644
+--- a/setup.py
++++ b/setup.py
+@@ -19,20 +19,27 @@
+ # KIND, either express or implied.  See the License for the
+ # specific language governing permissions and limitations
+ # under the License.
++import os
+ from setuptools import setup
+ 
++BASEDIR = os.path.abspath(os.path.dirname(__file__))
++
+ with open("README.md", "r") as fh:
+     long_description = fh.read()
+ 
++def required(requirements_file):
++    """ Read requirements file and remove comments and empty lines. """
++    with open(os.path.join(BASEDIR, requirements_file), 'r') as f:
++        requirements = f.read().splitlines()
++        return [pkg for pkg in requirements
++                if pkg.strip() and not pkg.startswith("#")]
++
+ setup(
+     name='msm',
+     version='0.8.8',
+     packages=['msm'],
+-    tests_require=['pytest', 'pytest-env'],
+-    install_requires=[
+-        'GitPython', 'fasteners', 'pyyaml', 'pako',
+-        'lazy', 'pyxdg'
+-    ],
++    install_requires=required('requirements/requirements.txt'),
++    tests_require=required('requirements/tests.txt'),
+     python_requires='>=3.5',
+     url='https://github.com/MycroftAI/mycroft-skills-manager',
+     license='Apache-2.0',
