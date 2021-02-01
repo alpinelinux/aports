@@ -1,31 +1,35 @@
 #!/sbin/openrc-run
 
-extra_started_commands="reload"
+name="PostgreSQL"
+description="PostgreSQL @VERSION@ server"
+
+extra_started_commands="stop_fast stop_force stop_smart reload reload_force"
+description_stop_fast="Stop using Fast Shutdown mode (SIGINT)"
+description_stop_force="Stop using Immediate Shutdown mode (SIGQUIT)"
+description_stop_smart="Stop using Smart Shutdown mode (SIGTERM)"
 description_reload="Reload configuration"
+description_reload_force="Reload configuration and restart if needed"
 
 extra_stopped_commands="setup"
 description_setup="Initialize a new PostgreSQL cluster"
 
-# Note: Uppercase variables are here for backward compatibility.
+: ${user:="postgres"}
+: ${group:="postgres"}
 
-: ${user:=${PGUSER:-"postgres"}}
-: ${group:=${PGGROUP:-"postgres"}}
+: ${auto_setup:="yes"}
+: ${start_timeout:=10}
+# nice_timeout, rude_timeout and force_timeout are for backward compatibility.
+: ${stop_smart_timeout:=${nice_timeout:-5}}
+: ${stop_fast_timeout:=${rude_timeout:-10}}
+: ${stop_force_timeout:=${force_timeout:-0}}
 
-: ${auto_setup:=${AUTO_SETUP:-"yes"}}
-: ${start_timeout:=${START_TIMEOUT:-10}}
-: ${nice_timeout:=${NICE_TIMEOUT:-60}}
-: ${rude_quit:=${RUDE_QUIT:-"yes"}}
-: ${rude_timeout:=${RUDE_TIMEOUT:-30}}
-: ${force_quit:=${FORCE_QUIT:-"no"}}
-: ${force_timeout:=${FORCE_TIMEOUT:-2}}
-
-: ${data_dir:=${PGDATA:-"/var/lib/postgresql/@VERSION@/data"}}
+: ${data_dir:="/var/lib/postgresql/@VERSION@/data"}
 : ${conf_dir:=$data_dir}
-: ${env_vars:=${PG_EXTRA_ENV:-}}
-: ${initdb_opts:=${PG_INITDB_OPTS:-}}
 : ${logfile:="$data_dir/postmaster.log"}
-: ${pg_opts:=${PGOPTS:-}}
-: ${port:=${PGPORT:-5432}}
+: ${env_vars:=}
+: ${initdb_opts:=}
+: ${pg_opts:=}
+: ${port:=5432}
 
 command="/usr/bin/postgres"
 
@@ -47,10 +51,15 @@ depend() {
 }
 
 start_pre() {
-	check_deprecated_var WAIT_FOR_START start_timeout
-	check_deprecated_var WAIT_FOR_DISCONNECT nice_timeout
-	check_deprecated_var WAIT_FOR_CLEANUP rude_timeout
-	check_deprecated_var WAIT_FOR_QUIT force_timeout
+	check_deprecated_var nice_timeout stop_smart_timeout
+	check_deprecated_var rude_timeout stop_fast_timeout
+	check_deprecated_var rude_quit stop_fast_timeout
+	check_deprecated_var force_timeout stop_force_timeout
+	check_deprecated_var force_quit stop_force_timeout
+
+	# For backward compatibility only.
+	[ "$rude_quit" = no ] && [ "stop_fast_timeout" -eq 10 ] && stop_fast_timeout=0
+	[ "$force_quit" = yes ] && [ "$stop_force_timeout" -eq 0 ] && stop_force_timeout=2
 
 	if [ ! -d "$data_dir/base" ]; then
 		if yesno "$auto_setup"; then
@@ -67,6 +76,10 @@ start_pre() {
 	local port=$(get_config "port" "$port")
 
 	start_stop_daemon_args="$start_stop_daemon_args --env PGPORT=$port"
+
+	local var; for var in $env_vars; do
+		start_stop_daemon_args="$start_stop_daemon_args --env $var"
+	done
 
 	(
 		# Set the proper permission for the socket paths and create them if
@@ -88,11 +101,7 @@ start_pre() {
 start() {
 	local retval
 
-	ebegin "Starting PostgreSQL"
-
-	local var; for var in $env_vars; do
-		start_stop_daemon_args="$start_stop_daemon_args --env $var"
-	done
+	ebegin "Starting $name"
 
 	rm -f "$pidfile"
 	start-stop-daemon --start \
@@ -114,19 +123,20 @@ start() {
 }
 
 stop() {
-	local retry="SIGTERM/$nice_timeout"
+	local retry=''
 
-	yesno "$rude_quit" \
-		&& retry="$retry/SIGINT/$rude_timeout" \
-		|| rude_timeout=0
+	[ "$stop_smart_timeout" -eq 0 ] \
+		|| retry="SIGTERM/$stop_smart_timeout"
+	[ "$stop_fast_timeout" -eq 0 ] \
+		|| retry="${retry:+$retry/}SIGINT/$stop_fast_timeout"
+	[ "$stop_force_timeout" -eq 0 ] \
+		|| retry="${retry:+$retry/}SIGQUIT/$stop_force_timeout"
+	[ "$retry" ] \
+		|| retry='SIGINT/5'
 
-	yesno "$force_quit" \
-		&& retry="$retry/SIGQUIT/$force_timeout" \
-		|| force_timeout=0
+	local seconds=$(( $stop_smart_timeout + $stop_fast_timeout + $stop_force_timeout ))
 
-	local seconds=$(( $nice_timeout + $rude_timeout + $force_timeout ))
-
-	ebegin "Stopping PostgreSQL (this can take up to $seconds seconds)"
+	ebegin "Stopping $name (this can take up to $seconds seconds)"
 
 	start-stop-daemon --stop \
 		--exec "$command" \
@@ -136,21 +146,57 @@ stop() {
 	eend $?
 }
 
+stop_smart() {
+	_stop SIGTERM "smart shutdown"
+}
+
+stop_fast() {
+	_stop SIGINT "fast shutdown"
+}
+
+stop_force() {
+	_stop SIGQUIT "immediate shutdown"
+}
+
+_stop() {
+	ebegin "Stopping $name ($2)"
+
+	start-stop-daemon --stop \
+		--exec "$command" \
+		--signal "$1" \
+		--pidfile "$pidfile" \
+		&& mark_service_stopped "$RC_SVCNAME"
+	eend $?
+}
+
 reload() {
-	ebegin "Reloading PostgreSQL configuration"
+	ebegin "Reloading $name configuration"
 
 	start-stop-daemon --signal HUP --pidfile "$pidfile" && check_config_errors
 	local retval=$?
 
-	check_pending_restart
+	is_pending_restart || true
 
+	eend $retval
+}
+
+reload_force() {
+	ebegin "Reloading $name configuration"
+
+	start-stop-daemon --signal HUP --pidfile "$pidfile" && check_config_errors
+	local retval=$?
+
+	if [ $retval -eq 0 ] && is_pending_restart; then
+		rc-service --nodeps "$RC_SVCNAME" restart
+		retval=$?
+	fi
 	eend $retval
 }
 
 setup() {
 	local bkpdir
 
-	ebegin "Creating a new PostgreSQL database cluster"
+	ebegin "Creating a new $name database cluster"
 
 	if [ -d "$data_dir/base" ]; then
 		eend 1 "$data_dir/base already exists!"; return 1
@@ -211,7 +257,7 @@ get_config() {
 }
 
 check_config_errors() {
-	local out=$(psql_command "
+	local out; out=$(psql_command "
 		select
 		  sourcefile || ': line ' || sourceline || ': ' || error ||
 		    case when name is not null
@@ -222,9 +268,7 @@ check_config_errors() {
 		where error is not null
 		  and name not in (select name from pg_settings where pending_restart = true);
 		")
-	local retval=$?
-
-	if [ "$retval" -eq 0 ] && [ "$out" ]; then
+	if [ $? -eq 0 ] && [ "$out" ]; then
 		eerror 'Configuration file contains errors:'
 		printf '%s\n' "$out" | while read line; do
 			eerror "  $line"
@@ -233,16 +277,17 @@ check_config_errors() {
 	fi
 }
 
-check_pending_restart() {
-	local out=$(psql_command "select name from pg_settings where pending_restart = true;")
-	local retval=$?
+is_pending_restart() {
+	local out; out=$(psql_command "select name from pg_settings where pending_restart = true;")
 
-	if [ "$retval" -eq 0 ] && [ "$out" ]; then
+	if [ $? -eq 0 ] && [ "$out" ]; then
 		ewarn 'PostgreSQL must be restarted to apply changes in the following parameters:'
 		local line; for line in $out; do
 			ewarn "  $line"
 		done
+		return 0
 	fi
+	return 1
 }
 
 check_deprecated_var() {
@@ -250,7 +295,7 @@ check_deprecated_var() {
 	local new_name="$2"
 
 	if [ -n "$(getval "$old_name")" ]; then
-		ewarn "Variable '$old_name' has been removed, please use '$new_name' instead."
+		ewarn "Variable '$old_name' is deprecated, please use '$new_name' instead."
 	fi
 }
 
