@@ -6,7 +6,8 @@
 
 \set cfgname 'czech'
 \set dictname 'czech_ispell'
-\set stemmer 'czech_stem'  -- change to 'simple' if you don't have czech stemmer
+-- change to 'simple' if you don't have czech stemmer
+\set stemmer 'czech_stem'
 \set namespace 'pg_catalog'
 
 \out /dev/null
