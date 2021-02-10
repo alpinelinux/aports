@@ -103,7 +103,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   attr libcap acl fakeroot tar \
 	   pax-utils lzip abuild ncurses libedit openssh \
 	   libcap-ng util-linux libaio lvm2 popt xz \
-	   json-c argon2 cryptsetup kmod lddtree mkinitfs \
+	   json-c argon2 cryptsetup zstd kmod lddtree mkinitfs \
 	   community/go libffi community/ghc \
 	   brotli libev c-ares cunit nghttp2 curl \
 	   pcre libssh2 community/http-parser community/libgit2 \
