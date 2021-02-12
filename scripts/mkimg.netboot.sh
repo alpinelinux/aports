@@ -15,19 +15,19 @@ profile_netboot() {
 	arch="aarch64 armhf armv7 ppc64le x86 x86_64 s390x"
 	kernel_cmdline="nomodeset"
 	case "$ARCH" in
-		armhf) kernel_flavors= ;;
+		aarch64) kernel_flavors="lts rpi";;
+		armhf) kernel_flavors="rpi rpi2";;
+		armv7) kernel_flavors="lts rpi rpi2";;
+		x86_64) kernel_flavors="lts virt";;
 		*) kernel_flavors="lts";;
+	esac
+	case "$ARCH" in
+		s390x) initfs_features="base network squashfs usb dasd_mod qeth zfcp";;
+		*) initfs_features="base network squashfs usb virtio"
 	esac
 	modloop_sign=yes
 	apks=""
-	initfs_features="base network squashfs usb virtio"
 	output_format="netboot"
 	image_ext="tar.gz"
-	case "$ARCH" in
-	x86_64) kernel_flavors="$kernel_flavors virt";;
-	s390x) initfs_features="$initfs_features dasd_mod qeth zfcp";;
-	aarch64) kernel_flavors="$kernel_flavors rpi";;
-	armhf|armv7) kernel_flavors="$kernel_flavors rpi rpi2";;
-	esac
 }
 
