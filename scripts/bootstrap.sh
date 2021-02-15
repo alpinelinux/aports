@@ -120,7 +120,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 		;;
 	build-base)
 		# After build-base, that alone is sufficient dependency in the target
-		EXTRADEPENDS_TARGET="$PKG"
+		EXTRADEPENDS_TARGET="busybox $PKG"
 		;;
 	esac
 done
