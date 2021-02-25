@@ -1,0 +1,197 @@
+From 8b2528d4d1969c4fb1482868944308fcbfbf63e3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonah=20Br=C3=BCchert?= <jbb.prv@gmx.de>
+Date: Thu, 25 Feb 2021 08:36:35 +0100
+Subject: [PATCH] Fix phone number normalization
+
+Currently we have two problems:
+* There were some places not doing normalization, but always having consistent identifiers is exactly the point
+* KContacts::PhoneNumber(const QString &).normalizedNumber() only keeps digits and special characters, but some carriers like to send strings.
+  If after normalization the result is empty, it probably was a string. (I'm already looking forward to the first carrier name that contains a digit)
+---
+ daemon/channellogger.cpp    |  3 ++-
+ lib/CMakeLists.txt          |  4 ++--
+ lib/phonenumberutils.cpp    | 18 ++++++++++++++++++
+ lib/phonenumberutils.h      |  9 +++++++++
+ src/avatarimageprovider.cpp |  4 +++-
+ src/chatlistmodel.cpp       |  6 ++++--
+ src/contactmapper.cpp       |  5 +++--
+ src/contactmapper.h         |  4 +++-
+ 8 files changed, 44 insertions(+), 9 deletions(-)
+ create mode 100644 lib/phonenumberutils.cpp
+ create mode 100644 lib/phonenumberutils.h
+
+diff --git a/daemon/channellogger.cpp b/daemon/channellogger.cpp
+index 15016fd..7d2b101 100644
+--- a/daemon/channellogger.cpp
++++ b/daemon/channellogger.cpp
+@@ -20,6 +20,7 @@
+ #include <global.h>
+ #include <database.h>
+ #include <accountutils.h>
++#include <phonenumberutils.h>
+ 
+ ChannelLogger::ChannelLogger(QObject *parent)
+     : QObject(parent)
+@@ -80,7 +81,7 @@ void ChannelLogger::handleIncomingMessage(const Tp::TextChannelPtr& /* channel *
+     message.sentByMe = false; // SMS doesn't have any kind of synchronization, so received messages are always from the chat partner.
+     message.datetime = receivedMessage.received();
+     message.delivered = true; // It arrived, soo
+-    message.phoneNumber = receivedMessage.sender()->id();
++    message.phoneNumber = normalizePhoneNumber(receivedMessage.sender()->id());
+     message.id = m_database->lastId() + 1;
+     message.read = false;
+ 
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index 62f410f..6873091 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -3,7 +3,7 @@ target_compile_definitions(database PRIVATE -DQT_NO_CAST_FROM_ASCII)
+ target_link_libraries(database PUBLIC Qt5::Core Qt5::Sql)
+ target_include_directories(database PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+ 
+-add_library(tputils STATIC accountutils.cpp)
++add_library(tputils STATIC accountutils.cpp phonenumberutils.cpp)
+ target_compile_definitions(tputils PRIVATE -DQT_NO_CAST_FROM_ASCII)
+-target_link_libraries(tputils PUBLIC Qt5::Core TelepathyQt5::Core)
++target_link_libraries(tputils PUBLIC Qt5::Core TelepathyQt5::Core KF5::Contacts)
+ target_include_directories(tputils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+diff --git a/lib/phonenumberutils.cpp b/lib/phonenumberutils.cpp
+new file mode 100644
+index 0000000..da8b560
+--- /dev/null
++++ b/lib/phonenumberutils.cpp
+@@ -0,0 +1,18 @@
++// SPDX-FileCopyrightText: 2021 Jonah Brüchert <jbb@kaidan.im>
++//
++// SPDX-License-Identifier: LicenseRef-KDE-Accepted-GPL
++
++#include "phonenumberutils.h"
++
++#include <KContacts/PhoneNumber>
++
++QString normalizePhoneNumber(const QString &phoneNumber)
++{
++    const QString normalized = KContacts::PhoneNumber(phoneNumber).normalizedNumber();
++    // "Number" is probably a string, which should be kept intact
++    if (normalized.isEmpty()) {
++        return phoneNumber;
++    } else {
++        return normalized;
++    }
++}
+diff --git a/lib/phonenumberutils.h b/lib/phonenumberutils.h
+new file mode 100644
+index 0000000..4923eff
+--- /dev/null
++++ b/lib/phonenumberutils.h
+@@ -0,0 +1,9 @@
++// SPDX-FileCopyrightText: 2021 Jonah Brüchert <jbb@kaidan.im>
++//
++// SPDX-License-Identifier: LicenseRef-KDE-Accepted-GPL
++
++#pragma once
++
++class QString;
++
++QString normalizePhoneNumber(const QString &phoneNumber);
+diff --git a/src/avatarimageprovider.cpp b/src/avatarimageprovider.cpp
+index 59f75e4..a31c001 100644
+--- a/src/avatarimageprovider.cpp
++++ b/src/avatarimageprovider.cpp
+@@ -8,6 +8,8 @@
+ #include <KPeopleBackend/AbstractContact>
+ #include <KContacts/PhoneNumber>
+ 
++#include <phonenumberutils.h>
++
+ #include "contactmapper.h"
+ 
+ AvatarImageProvider::AvatarImageProvider()
+@@ -20,7 +22,7 @@ QPixmap AvatarImageProvider::requestPixmap(const QString &number, QSize *size, c
+ {
+     Q_UNUSED(requestedSize)
+ 
+-    const QString normalizedNumber = KContacts::PhoneNumber(number).normalizedNumber();
++    const QString normalizedNumber = normalizePhoneNumber(number);
+     const auto personData = KPeople::PersonData(ContactMapper::instance().uriForNumber(normalizedNumber));
+ 
+     QPixmap avatar;
+diff --git a/src/chatlistmodel.cpp b/src/chatlistmodel.cpp
+index fb907f9..5e1d678 100644
+--- a/src/chatlistmodel.cpp
++++ b/src/chatlistmodel.cpp
+@@ -23,6 +23,8 @@
+ 
+ #include <KContacts/PhoneNumber>
+ 
++#include <phonenumberutils.h>
++
+ #include <global.h>
+ #include "channelhandler.h"
+ #include "messagemodel.h"
+@@ -42,7 +44,7 @@ ChatListModel::ChatListModel(const ChannelHandlerPtr &handler, QObject *parent)
+         for (const auto &number : affectedNumbers) {
+             // Find the Chat object for the phone number
+             const auto chatIt = std::find_if(m_chats.begin(), m_chats.end(), [&number](const Chat &chat) {
+-                return KContacts::PhoneNumber(chat.phoneNumber).normalizedNumber() == number;
++                return normalizePhoneNumber(chat.phoneNumber) == number;
+             });
+ 
+             int i = std::distance(m_chats.begin(), chatIt);
+@@ -98,7 +100,7 @@ QVariant ChatListModel::data(const QModelIndex &index, int role) const
+     case PhotoRole:
+         return KPeople::PersonData(m_mapper.uriForNumber(m_chats.at(index.row()).phoneNumber)).photo();
+     case PhoneNumberRole:
+-        return KContacts::PhoneNumber(m_chats.at(index.row()).phoneNumber).normalizedNumber();
++        return normalizePhoneNumber(m_chats.at(index.row()).phoneNumber);
+     case LastContactedRole:
+         return m_chats.at(index.row()).lastContacted;
+     case UnreadMessagesRole:
+diff --git a/src/contactmapper.cpp b/src/contactmapper.cpp
+index 3bef9af..92e5389 100644
+--- a/src/contactmapper.cpp
++++ b/src/contactmapper.cpp
+@@ -7,7 +7,8 @@
+ #include <KContacts/VCardConverter>
+ #include <KPeopleBackend/AbstractContact>
+ #include <QDebug>
+-#include <QThread>
++
++#include <phonenumberutils.h>
+ 
+ ContactMapper::ContactMapper()
+     : QObject()
+@@ -33,7 +34,7 @@ void ContactMapper::processRows(const int first, const int last)
+         const auto personUri = m_model->data(index, KPeople::PersonsModel::PersonUriRole).toString();
+ 
+         for (const auto &number : phoneNumbers) {
+-            const auto normalizedNumber = KContacts::PhoneNumber(number).normalizedNumber();
++            const auto normalizedNumber = normalizePhoneNumber(number);
+             m_numberToUri[normalizedNumber] = personUri;
+             affectedNumbers.append(normalizedNumber);
+         }
+diff --git a/src/contactmapper.h b/src/contactmapper.h
+index 9ba5a95..5e84c02 100644
+--- a/src/contactmapper.h
++++ b/src/contactmapper.h
+@@ -8,6 +8,8 @@
+ #include <KContacts/PhoneNumber>
+ #include <QObject>
+ 
++#include <phonenumberutils.h>
++
+ class ContactMapper : public QObject
+ {
+     Q_OBJECT
+@@ -23,7 +25,7 @@ public:
+      * @return the uri belonging to the phone number
+      */
+     inline QString uriForNumber(const QString &phoneNumber) const {
+-        return m_numberToUri.value(KContacts::PhoneNumber(phoneNumber).normalizedNumber());
++        return m_numberToUri.value(normalizePhoneNumber(phoneNumber));
+     }
+ 
+     static ContactMapper &instance();
+-- 
+GitLab
+
