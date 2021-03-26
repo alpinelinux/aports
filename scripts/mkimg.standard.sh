@@ -36,7 +36,7 @@ profile_extended() {
 	apks="$apks
 		ethtool hwids lftp links doas
 		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
-		pax-utils paxmark pciutils screen strace sudo tmux
+		pciutils screen strace sudo tmux
 		usbutils v86d vim xtables-addons curl
 
 		acct arpon arpwatch awall bridge-utils bwm-ng
