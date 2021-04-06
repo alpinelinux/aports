@@ -1,0 +1,232 @@
+From d524a35c49bdbf7132f91ac7678cbb9876091a68 Mon Sep 17 00:00:00 2001
+From: Christian Brauner <christian.brauner@ubuntu.com>
+Date: Thu, 4 Feb 2021 12:20:05 +0100
+Subject: [PATCH] cgroups: fix cgroup mounting
+
+Fixes: #3640
+Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+---
+ src/lxc/cgroups/cgfsng.c   | 27 +++++++++++++-------
+ src/lxc/cgroups/cgroup.h   |  4 +--
+ src/lxc/conf.c             |  5 +---
+ src/lxc/syscall_wrappers.h | 19 ++++++++++++++
+ src/lxc/utils.c            | 52 ++++++++++++++++++++++++++++++++++++++
+ src/lxc/utils.h            |  4 +++
+ 6 files changed, 96 insertions(+), 15 deletions(-)
+
+diff --git a/src/lxc/cgroups/cgfsng.c b/src/lxc/cgroups/cgfsng.c
+index 303c2f6ab0..1c3ee7a1a6 100644
+--- a/src/lxc/cgroups/cgfsng.c
++++ b/src/lxc/cgroups/cgfsng.c
+@@ -44,6 +44,7 @@
+ #include "mainloop.h"
+ #include "memory_utils.h"
+ #include "storage/storage.h"
++#include "syscall_wrappers.h"
+ #include "utils.h"
+ 
+ #ifndef HAVE_STRLCPY
+@@ -1806,11 +1807,12 @@ static inline int cg_mount_cgroup_full(int type, struct hierarchy *h,
+ }
+ 
+ __cgfsng_ops static bool cgfsng_mount(struct cgroup_ops *ops,
+-				      struct lxc_handler *handler,
+-				      const char *root, int type)
++				      struct lxc_conf *conf, int type)
+ {
+ 	__do_free char *cgroup_root = NULL;
+ 	bool has_cgns = false, wants_force_mount = false;
++	struct lxc_rootfs *rootfs = &conf->rootfs;
++	const char *root = rootfs->path ? rootfs->mount : "";
+ 	int ret;
+ 
+ 	if (!ops)
+@@ -1819,7 +1821,7 @@ __cgfsng_ops static bool cgfsng_mount(struct cgroup_ops *ops,
+ 	if (!ops->hierarchies)
+ 		return true;
+ 
+-	if (!handler || !handler->conf)
++	if (!conf)
+ 		return ret_set_errno(false, EINVAL);
+ 
+ 	if ((type & LXC_AUTO_CGROUP_MASK) == 0)
+@@ -1831,7 +1833,7 @@ __cgfsng_ops static bool cgfsng_mount(struct cgroup_ops *ops,
+ 	}
+ 
+ 	if (!wants_force_mount) {
+-		wants_force_mount = lxc_wants_cap(CAP_SYS_ADMIN, handler->conf);
++		wants_force_mount = !lxc_wants_cap(CAP_SYS_ADMIN, conf);
+ 
+ 		/*
+ 		 * Most recent distro versions currently have init system that
+@@ -1870,13 +1872,20 @@ __cgfsng_ops static bool cgfsng_mount(struct cgroup_ops *ops,
+ 		return cg_mount_cgroup_full(type, ops->unified, cgroup_root) == 0;
+ 	}
+ 
+-	/* mount tmpfs */
+-	ret = safe_mount_beneath(root, NULL, DEFAULT_CGROUP_MOUNTPOINT, "tmpfs",
+-				 MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_RELATIME,
+-				 "size=10240k,mode=755");
++	/*
++	 * Mount a tmpfs over DEFAULT_CGROUP_MOUNTPOINT. Note that we're
++	 * relying on RESOLVE_BENEATH so we need to skip the leading "/" in the
++	 * DEFAULT_CGROUP_MOUNTPOINT define.
++	 */
++	ret = mount_at(rootfs->mntpt_fd, NULL, DEFAULT_CGROUP_MOUNTPOINT_RELATIVE,
++		       PROTECT_OPATH_DIRECTORY, PROTECT_LOOKUP_BENEATH_XDEV,
++		       "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_RELATIME,
++		       "size=10240k,mode=755");
+ 	if (ret < 0) {
+ 		if (errno != ENOSYS)
+-			return false;
++			return log_error_errno(false, errno,
++					       "Failed to mount tmpfs on %s",
++					       DEFAULT_CGROUP_MOUNTPOINT_RELATIVE);
+ 
+ 		ret = safe_mount(NULL, cgroup_root, "tmpfs",
+ 				 MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_RELATIME,
+diff --git a/src/lxc/cgroups/cgroup.h b/src/lxc/cgroups/cgroup.h
+index 7dec05a5c2..8f46330303 100644
+--- a/src/lxc/cgroups/cgroup.h
++++ b/src/lxc/cgroups/cgroup.h
+@@ -11,6 +11,7 @@
+ #include "macro.h"
+ #include "memory_utils.h"
+ 
++#define DEFAULT_CGROUP_MOUNTPOINT_RELATIVE "sys/fs/cgroup"
+ #define DEFAULT_CGROUP_MOUNTPOINT "/sys/fs/cgroup"
+ #define DEFAULT_PAYLOAD_CGROUP_PREFIX "lxc.payload."
+ #define DEFAULT_MONITOR_CGROUP_PREFIX "lxc.monitor."
+@@ -170,8 +171,7 @@ struct cgroup_ops {
+ 	bool (*chown)(struct cgroup_ops *ops, struct lxc_conf *conf);
+ 	bool (*attach)(struct cgroup_ops *ops, const struct lxc_conf *conf,
+ 		       const char *name, const char *lxcpath, pid_t pid);
+-	bool (*mount)(struct cgroup_ops *ops, struct lxc_handler *handler,
+-		      const char *root, int type);
++	bool (*mount)(struct cgroup_ops *ops, struct lxc_conf *conf, int type);
+ 	bool (*devices_activate)(struct cgroup_ops *ops,
+ 				 struct lxc_handler *handler);
+ 	bool (*monitor_delegate_controllers)(struct cgroup_ops *ops);
+diff --git a/src/lxc/conf.c b/src/lxc/conf.c
+index ae4972551e..786582776e 100644
+--- a/src/lxc/conf.c
++++ b/src/lxc/conf.c
+@@ -718,10 +718,7 @@ static int lxc_mount_auto_mounts(struct lxc_conf *conf, int flags, struct lxc_ha
+ 		if (flags & LXC_AUTO_CGROUP_FORCE)
+ 			cg_flags |= LXC_AUTO_CGROUP_FORCE;
+ 
+-		if (!handler->cgroup_ops->mount(handler->cgroup_ops,
+-						handler,
+-						conf->rootfs.path ? conf->rootfs.mount : "",
+-						cg_flags))
++		if (!handler->cgroup_ops->mount(handler->cgroup_ops, conf, cg_flags))
+ 			return log_error_errno(-1, errno, "Failed to mount \"/sys/fs/cgroup\"");
+ 	}
+ 
+diff --git a/src/lxc/syscall_wrappers.h b/src/lxc/syscall_wrappers.h
+index 37aa76c284..26574002b3 100644
+--- a/src/lxc/syscall_wrappers.h
++++ b/src/lxc/syscall_wrappers.h
+@@ -254,6 +254,25 @@ struct lxc_open_how {
+ 					(similar to chroot(2)). */
+ #endif
+ 
++#define PROTECT_LOOKUP_BENEATH  (RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS)
++#define PROTECT_LOOKUP_BENEATH_WITH_SYMLINKS (PROTECT_LOOKUP_BENEATH & ~RESOLVE_NO_SYMLINKS)
++#define PROTECT_LOOKUP_BENEATH_WITH_MAGICLINKS (PROTECT_LOOKUP_BENEATH & ~(RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS))
++#define PROTECT_LOOKUP_BENEATH_XDEV (PROTECT_LOOKUP_BENEATH & ~RESOLVE_NO_XDEV)
++
++#define PROTECT_LOOKUP_ABSOLUTE (PROTECT_LOOKUP_BENEATH & ~RESOLVE_BENEATH)
++#define PROTECT_LOOKUP_ABSOLUTE_WITH_SYMLINKS (PROTECT_LOOKUP_ABSOLUTE & ~RESOLVE_NO_SYMLINKS)
++#define PROTECT_LOOKUP_ABSOLUTE_WITH_MAGICLINKS (PROTECT_LOOKUP_ABSOLUTE & ~(RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS))
++#define PROTECT_LOOKUP_ABSOLUTE_XDEV (PROTECT_LOOKUP_ABSOLUTE & ~RESOLVE_NO_XDEV)
++
++#define PROTECT_OPATH_FILE (O_NOFOLLOW | O_PATH | O_CLOEXEC)
++#define PROTECT_OPATH_DIRECTORY (PROTECT_OPATH_FILE | O_DIRECTORY)
++
++#define PROTECT_OPEN_WITH_TRAILING_SYMLINKS (O_CLOEXEC | O_NOCTTY | O_RDONLY)
++#define PROTECT_OPEN (PROTECT_OPEN_WITH_TRAILING_SYMLINKS | O_NOFOLLOW)
++
++#define PROTECT_OPEN_W_WITH_TRAILING_SYMLINKS (O_CLOEXEC | O_NOCTTY | O_WRONLY)
++#define PROTECT_OPEN_W (PROTECT_OPEN_WITH_TRAILING_SYMLINKS | O_NOFOLLOW)
++
+ #ifndef HAVE_OPENAT2
+ static inline int openat2(int dfd, const char *filename, struct lxc_open_how *how, size_t size)
+ {
+diff --git a/src/lxc/utils.c b/src/lxc/utils.c
+index 2ea54f7b3d..05cdb7f60e 100644
+--- a/src/lxc/utils.c
++++ b/src/lxc/utils.c
+@@ -1208,6 +1208,58 @@ int safe_mount(const char *src, const char *dest, const char *fstype,
+ 	return 0;
+ }
+ 
++int mount_at(int dfd,
++	     const char *src_under_dfd,
++	     const char *dst_under_dfd,
++	     __u64 o_flags,
++	     __u64 resolve_flags,
++	     const char *fstype,
++	     unsigned int mnt_flags,
++	     const void *data)
++{
++	__do_close int source_fd = -EBADF, target_fd = -EBADF;
++	struct lxc_open_how how = {
++		.flags		= o_flags,
++		.resolve	= resolve_flags,
++	};
++	int ret;
++	char src_buf[LXC_PROC_PID_FD_LEN], dst_buf[LXC_PROC_PID_FD_LEN];
++
++	if (dfd < 0)
++		return ret_errno(EINVAL);
++
++	if (!is_empty_string(src_buf) && *src_buf == '/')
++		return log_error_errno(-EINVAL, EINVAL, "Absolute path specified");
++
++	if (is_empty_string(dst_under_dfd))
++		return log_error_errno(-EINVAL, EINVAL, "No target path specified");
++
++	if (!is_empty_string(src_under_dfd)) {
++		source_fd = openat2(dfd, src_under_dfd, &how, sizeof(how));
++		if (source_fd < 0)
++			return -errno;
++
++		ret = snprintf(src_buf, sizeof(src_buf), "/proc/self/fd/%d", source_fd);
++		if (ret < 0 || ret >= sizeof(src_buf))
++			return -EIO;
++	}
++
++	target_fd = openat2(dfd, dst_under_dfd, &how, sizeof(how));
++	if (target_fd < 0)
++		return log_error_errno(-errno, errno, "Failed to open %d(%s)", dfd, dst_under_dfd);
++
++	ret = snprintf(dst_buf, sizeof(dst_buf), "/proc/self/fd/%d", target_fd);
++	if (ret < 0 || ret >= sizeof(dst_buf))
++		return -EIO;
++
++	if (!is_empty_string(src_buf))
++		ret = mount(src_under_dfd, dst_buf, fstype, mnt_flags, data);
++	else
++		ret = mount(NULL, dst_buf, fstype, mnt_flags, data);
++
++	return ret;
++}
++
+ /*
+  * Mount a proc under @rootfs if proc self points to a pid other than
+  * my own.  This is needed to have a known-good proc mount for setting
+diff --git a/src/lxc/utils.h b/src/lxc/utils.h
+index bebbcb64e4..41044f5d25 100644
+--- a/src/lxc/utils.h
++++ b/src/lxc/utils.h
+@@ -243,5 +243,9 @@ __hidden extern int safe_mount_beneath(const char *beneath, const char *src, con
+ 				       const char *fstype, unsigned int flags, const void *data);
+ __hidden extern int safe_mount_beneath_at(int beneat_fd, const char *src, const char *dst,
+ 					  const char *fstype, unsigned int flags, const void *data);
++__hidden extern int mount_at(int dfd, const char *src_under_dfd,
++			     const char *dst_under_dfd, __u64 o_flags,
++			     __u64 resolve_flags, const char *fstype,
++			     unsigned int mnt_flags, const void *data);
+ 
+ #endif /* __LXC_UTILS_H */
