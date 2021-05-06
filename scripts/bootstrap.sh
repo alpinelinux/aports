@@ -96,7 +96,7 @@ EXTRADEPENDS_TARGET="libgcc libstdc++ musl-dev"
 
 # ordered cross-build
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
-	   openssl ca-certificates libmd libbsd libtls-standalone busybox busybox-initscripts binutils make \
+	   openssl ca-certificates libmd libbsd libretls busybox busybox-initscripts binutils make \
 	   apk-tools file \
 	   gmp mpfr4 mpc1 isl22 cloog libucontext gcc \
 	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
