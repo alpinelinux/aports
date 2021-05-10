@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.2.0
-pkgrel=12
+pkgrel=13
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -11,6 +11,7 @@ pkggroups="shadow"
 options="!fhs !check"
 install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
 	$pkgname.post-install"
+_nbver=6.2
 source="mkmntdirs.c
 	crontab
 	color_prompt
@@ -25,15 +26,16 @@ source="mkmntdirs.c
 	inittab
 	passwd
 	profile
-	protocols
-	services-$pkgver-$pkgrel::https://salsa.debian.org/md/netbase/-/raw/v6.1/etc/services
+	protocols-$_nbver::https://salsa.debian.org/md/netbase/-/raw/v$_nbver/etc/protocols
+	services-$_nbver::https://salsa.debian.org/md/netbase/-/raw/v$_nbver/etc/services
 	"
 builddir="$srcdir/build"
 
 prepare() {
 	default_prepare
 	mkdir -p "$builddir"
-	mv "$srcdir"/services-$pkgver-$pkgrel "$srcdir"/services
+	mv "$srcdir"/protocols-$_nbver "$srcdir"/protocols
+	mv "$srcdir"/services-$_nbver "$srcdir"/services
 }
 
 build() {
@@ -222,7 +224,8 @@ package() {
 	ln -s /var/mail "$pkgdir"/var/spool/mail
 }
 
-sha512sums="199a34716b1f029407b08679fed4fda58384a1ccefbbec9abe1c64f4a3f7ad2a89bc7c02fc19a7f791f7c6bb87f9f0c708cb3f18c027cb7f54f25976eba4b839  mkmntdirs.c
+sha512sums="
+199a34716b1f029407b08679fed4fda58384a1ccefbbec9abe1c64f4a3f7ad2a89bc7c02fc19a7f791f7c6bb87f9f0c708cb3f18c027cb7f54f25976eba4b839  mkmntdirs.c
 6e169c0975a1ad1ad871a863e8ee83f053de9ad0b58d94952efa4c28a8c221445d9e9732ad8b52832a50919c2f39aa965a929b3d5b3f9e62f169e2b2e0813d82  crontab
 7fcb5df98b0f19e609cb9444b2e6ca5ee97f5f308eb407436acdd0115781623fd89768a9285e9816e36778e565b6f27055f2a586a58f19d6d880de5446d263c4  color_prompt
 b2fc9b72846a43a45ba9a8749e581cef34d1915836833b51b7919dfbf4e275b7d55fec4dea7b23df3796380910971a41331e53e8cf0d304834e3da02cc135e5a  locale.sh
@@ -234,5 +237,6 @@ abb391a9b5c2b418ad9ea15dcc373a0a0946e5e438d371d00d4bd6c8c60fa81613429a3b8d431397
 fdab6f8fec2a556ab817d90a73635a927ea04dbc4e0470ed59ee6a62c87393f9534c9b746b09a776d938c25b8af9c9fb1686578e24f8307d1d074921ade1bdc7  inittab
 06d12a7b9ca14fe17e412d0f24814620b67d035ae859be7906cbf4782dd69e359a6a555dafb98060b7fb7e4714aaa676c88d9017cded36e6d8398e23369bb290  passwd
 73cad571186f8c3202ca87af3d735d85b276a0e0c0877fc6f248de22a57f5995963173d6265dff42e0534c9dc96c2ad09bb21ded6add94dc01363382b95da10f  profile
-f1548a2b5a107479446f15905f0f2fbf8762815b2215188d49d905c803786d35de6d98005dc0828fb2486b04aaa356f1216a964befddf1e72cb169656e23b6ac  protocols
-680add49729cb9d88a03dfdd35c49784a951a18289adbf567f2126eb96b0378deca7b1d7999dac1579295466fca49e1cd5251341dd75da1a0f06f970ba8e0293  services-3.2.0-12"
+eadc83e47fcc354ab83fd109bee452bda170886fb684e67faf615930c11480919505f4af60c685b124efc54af0ded9522663132f911eac6622144f8b4c8be695  protocols-6.2
+adfae0d2f569c2a2f413b7e27683a007fc8ca689b8c3349672fe0dcb6208c192ede4402eff09c604b7e7b4fd9d8df93b875efa5bdaa6c14ff1d8022a7caad5cd  services-6.2
+"
