@@ -94,6 +94,16 @@ msg "Cross building base system"
 # Implicit dependencies for early targets
 EXTRADEPENDS_TARGET="libgcc libstdc++ musl-dev"
 
+# On a few architectures like riscv64 we need to account for
+# gcc requiring -ltomic to be set explicitly if a C[++]11 program
+# uses atomics (e.g. #include <atomic>):
+# https://github.com/riscv/riscv-gnu-toolchain/issues/183#issuecomment-253721765
+# The reason gcc itself is needed is because .so is in that package,
+# not in libatomic.
+if [ "$TARGET_ARCH" = "riscv64" ]; then
+	NEEDS_LIBATOMIC="yes"
+fi
+
 # ordered cross-build
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   openssl ca-certificates libmd \
@@ -111,13 +121,21 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   libxml2 pax-utils llvm11 community/rust \
 	   $KERNEL_PKG ; do
 
-	EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET" \
+	if [ "$NEEDS_LIBATOMIC" = "yes" ]; then
+		EXTRADEPENDS_BUILD="libatomic gcc-$TARGET_ARCH g++-$TARGET_ARCH"
+	fi
+	EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET"  EXTRADEPENDS_BUILD="$EXTRADEPENDS_BUILD" \
 	CHOST=$TARGET_ARCH BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild -r
 
 	case "$PKG" in
 	fortify-headers | libc-dev)
 		# Additional implicit dependencies once built
 		EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET $PKG"
+		;;
+	gcc)
+		if [ "$NEEDS_LIBATOMIC" = "yes" ]; then
+			EXTRADEPENDS_TARGET="libatomic gcc $EXTRADEPENDS_TARGET"
+		fi
 		;;
 	build-base)
 		# After build-base, that alone is sufficient dependency in the target
