@@ -60,7 +60,7 @@ fi
 if [ ! -d "$CBUILDROOT" ]; then
 	msg "Creating sysroot in $CBUILDROOT"
 	mkdir -p "$CBUILDROOT/etc/apk/keys"
-	cp -a /etc/apk/keys/* "$CBUILDROOT/etc/apk/keys"
+	cp -a /etc/apk/keys/* ~/.abuild/*.pub "$CBUILDROOT/etc/apk/keys"
 	${SUDO_APK} add --quiet --initdb --arch $TARGET_ARCH --root $CBUILDROOT
 fi
 
