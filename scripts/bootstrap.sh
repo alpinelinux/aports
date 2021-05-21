@@ -96,9 +96,10 @@ EXTRADEPENDS_TARGET="libgcc libstdc++ musl-dev"
 
 # ordered cross-build
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
-	   openssl ca-certificates libmd libbsd libretls busybox busybox-initscripts binutils make \
+	   openssl ca-certificates libmd \
+	   gmp mpfr4 mpc1 isl22 cloog libucontext binutils gcc \
+	   libbsd libtls-standalone busybox busybox-initscripts make \
 	   apk-tools file \
-	   gmp mpfr4 mpc1 isl22 cloog libucontext gcc \
 	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
 	   attr libcap acl fakeroot tar \
 	   lzip abuild ncurses libedit openssh \
@@ -107,7 +108,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   community/go libffi community/ghc \
 	   brotli libev c-ares cunit nghttp2 curl \
 	   pcre libssh2 community/http-parser community/libgit2 \
-	   libxml2 llvm10 community/rust \
+	   libxml2 pax-utils llvm11 community/rust \
 	   $KERNEL_PKG ; do
 
 	EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET" \
