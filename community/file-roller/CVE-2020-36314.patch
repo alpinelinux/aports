@@ -1,0 +1,218 @@
+From e970f4966bf388f6e7c277357c8b186c645683ae Mon Sep 17 00:00:00 2001
+From: Ondrej Holy <oholy@redhat.com>
+Date: Thu, 11 Mar 2021 16:24:35 +0100
+Subject: [PATCH] libarchive: Skip files with symlinks in parents
+
+Currently, it is still possible that some files are extracted outside of
+the destination dir in case of malicious archives. The checks from commit
+21dfcdbf can be still bypassed in certain cases. See GNOME/file-roller#108
+for more details. After some investigation, I am convinced that it would be
+best to simply disallow symlinks in parents. For example, `tar` fails to
+extract such files with the `ENOTDIR` error. Let's do the same here.
+
+Fixes: https://gitlab.gnome.org/GNOME/file-roller/-/issues/108
+---
+ src/fr-archive-libarchive.c | 136 ++++++------------------------------
+ 1 file changed, 20 insertions(+), 116 deletions(-)
+
+diff --git a/src/fr-archive-libarchive.c b/src/fr-archive-libarchive.c
+index 4f698ee4..e61f8821 100644
+--- a/src/fr-archive-libarchive.c
++++ b/src/fr-archive-libarchive.c
+@@ -697,115 +697,12 @@ _g_output_stream_add_padding (ExtractData    *extract_data,
+ 	return success;
+ }
+ 
+-
+-static gboolean
+-_symlink_is_external_to_destination (GFile      *file,
+-				     const char *symlink,
+-				     GFile      *destination,
+-				     GHashTable *external_links);
+-
+-
+-static gboolean
+-_g_file_is_external_link (GFile      *file,
+-			  GFile      *destination,
+-			  GHashTable *external_links)
+-{
+-	GFileInfo *info;
+-	gboolean   external;
+-
+-	if (g_hash_table_lookup (external_links, file) != NULL)
+-		return TRUE;
+-
+-	info = g_file_query_info (file,
+-				  G_FILE_ATTRIBUTE_STANDARD_IS_SYMLINK "," G_FILE_ATTRIBUTE_STANDARD_SYMLINK_TARGET,
+-				  G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+-				  NULL,
+-				  NULL);
+-
+-	if (info == NULL)
+-		return FALSE;
+-
+-	external = FALSE;
+-
+-	if (g_file_info_get_is_symlink (info)) {
+-		if (_symlink_is_external_to_destination (file,
+-							 g_file_info_get_symlink_target (info),
+-							 destination,
+-							 external_links))
+-		{
+-			g_hash_table_insert (external_links, g_object_ref (file), GINT_TO_POINTER (1));
+-			external = TRUE;
+-		}
+-	}
+-
+-	g_object_unref (info);
+-
+-	return external;
+-}
+-
+-
+ static gboolean
+-_symlink_is_external_to_destination (GFile      *file,
+-				     const char *symlink,
+-				     GFile      *destination,
+-				     GHashTable *external_links)
++_g_file_contains_symlinks_in_path (const char *relative_path,
++				   GFile      *destination,
++				   GHashTable *symlinks)
+ {
+-	gboolean  external = FALSE;
+-	GFile    *parent;
+-	char    **components;
+-	int       i;
+-
+-	if ((file == NULL) || (symlink == NULL))
+-		return FALSE;
+-
+-	if (symlink[0] == '/')
+-		return TRUE;
+-
+-	parent = g_file_get_parent (file);
+-	components = g_strsplit (symlink, "/", -1);
+-	for (i = 0; components[i] != NULL; i++) {
+-		char  *name = components[i];
+-		GFile *tmp;
+-
+-		if ((name[0] == 0) || ((name[0] == '.') && (name[1] == 0)))
+-			continue;
+-
+-		if ((name[0] == '.') && (name[1] == '.') && (name[2] == 0)) {
+-			if (g_file_equal (parent, destination)) {
+-				external = TRUE;
+-				break;
+-			}
+-			else {
+-				tmp = g_file_get_parent (parent);
+-				g_object_unref (parent);
+-				parent = tmp;
+-			}
+-		}
+-		else {
+-			tmp = g_file_get_child (parent, components[i]);
+-			g_object_unref (parent);
+-			parent = tmp;
+-		}
+-
+-		if (_g_file_is_external_link (parent, destination, external_links)) {
+-			external = TRUE;
+-			break;
+-		}
+-	}
+-
+-	g_strfreev (components);
+-	g_object_unref (parent);
+-
+-	return external;
+-}
+-
+-
+-static gboolean
+-_g_path_is_external_to_destination (const char *relative_path,
+-				    GFile      *destination,
+-				    GHashTable *external_links)
+-{
+-	gboolean  external = FALSE;
++	gboolean  contains_symlinks = FALSE;
+ 	GFile    *parent;
+ 	char    **components;
+ 	int       i;
+@@ -828,8 +725,8 @@ _g_path_is_external_to_destination (const char *relative_path,
+ 		g_object_unref (parent);
+ 		parent = tmp;
+ 
+-		if (_g_file_is_external_link (parent, destination, external_links)) {
+-			external = TRUE;
++		if (g_hash_table_contains (symlinks, parent)) {
++			contains_symlinks = TRUE;
+ 			break;
+ 		}
+ 	}
+@@ -837,7 +734,7 @@ _g_path_is_external_to_destination (const char *relative_path,
+ 	g_strfreev (components);
+ 	g_object_unref (parent);
+ 
+-	return external;
++	return contains_symlinks;
+ }
+ 
+ 
+@@ -851,7 +748,7 @@ extract_archive_thread (GSimpleAsyncResult *result,
+ 	GHashTable           *checked_folders;
+ 	GHashTable           *created_files;
+ 	GHashTable           *folders_created_during_extraction;
+-	GHashTable           *external_links;
++	GHashTable           *symlinks;
+ 	struct archive       *a;
+ 	struct archive_entry *entry;
+ 	int                   r;
+@@ -868,7 +765,7 @@ extract_archive_thread (GSimpleAsyncResult *result,
+ 	checked_folders = g_hash_table_new_full (g_file_hash, (GEqualFunc) g_file_equal, g_object_unref, NULL);
+ 	created_files = g_hash_table_new_full (g_file_hash, (GEqualFunc) g_file_equal, g_object_unref, g_object_unref);
+ 	folders_created_during_extraction = g_hash_table_new_full (g_file_hash, (GEqualFunc) g_file_equal, g_object_unref, NULL);
+-	external_links = g_hash_table_new_full (g_file_hash, (GEqualFunc) g_file_equal, g_object_unref, NULL);
++	symlinks = g_hash_table_new_full (g_file_hash, (GEqualFunc) g_file_equal, g_object_unref, NULL);
+ 	fr_archive_progress_set_total_files (load_data->archive, extract_data->n_files_to_extract);
+ 
+ 	while ((r = archive_read_next_header (a, &entry)) == ARCHIVE_OK) {
+@@ -902,7 +799,14 @@ extract_archive_thread (GSimpleAsyncResult *result,
+ 			continue;
+ 		}
+ 
+-		if (_g_path_is_external_to_destination (relative_path, extract_data->destination, external_links)) {
++		/* Symlinks in parents are dangerous as it can easily happen
++		 * that files are written outside of the destination. The tar
++		 * cmd fails to extract such archives with ENOTDIR. Let's skip
++		 * those files here for sure. This is most probably malicious,
++		 * or corrupted archive.
++		 */
++		if (_g_file_contains_symlinks_in_path (relative_path, extract_data->destination, symlinks)) {
++			g_warning ("Skipping '%s' file as it has symlink in parents.", relative_path);
+ 			fr_archive_progress_inc_completed_files (load_data->archive, 1);
+ 			fr_archive_progress_inc_completed_bytes (load_data->archive, archive_entry_size_is_set (entry) ? archive_entry_size (entry) : 0);
+ 			archive_read_data_skip (a);
+@@ -1123,8 +1027,8 @@ extract_archive_thread (GSimpleAsyncResult *result,
+ 						load_data->error = g_error_copy (local_error);
+ 					g_clear_error (&local_error);
+ 				}
+-				if ((load_data->error == NULL) && _symlink_is_external_to_destination (file, archive_entry_symlink (entry), extract_data->destination, external_links))
+-					g_hash_table_insert (external_links, g_object_ref (file), GINT_TO_POINTER (1));
++				if (load_data->error == NULL)
++					g_hash_table_add (symlinks, g_object_ref (file));
+ 				archive_read_data_skip (a);
+ 				break;
+ 
+@@ -1159,7 +1063,7 @@ extract_archive_thread (GSimpleAsyncResult *result,
+ 	g_hash_table_unref (folders_created_during_extraction);
+ 	g_hash_table_unref (created_files);
+ 	g_hash_table_unref (checked_folders);
+-	g_hash_table_unref (external_links);
++	g_hash_table_unref (symlinks);
+ 	archive_read_free (a);
+ 	extract_data_free (extract_data);
+ }
+-- 
+GitLab
+
