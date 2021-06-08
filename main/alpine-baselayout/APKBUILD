@@ -14,7 +14,7 @@ install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
 _nbver=6.2
 source="mkmntdirs.c
 	crontab
-	color_prompt
+	color_prompt.sh.disabled
 	locale.sh
 
 	aliases.conf
@@ -120,7 +120,7 @@ package() {
 
 	install -m600 "$srcdir"/crontab "$pkgdir"/etc/crontabs/root
 	install -m644 \
-		"$srcdir"/color_prompt \
+		"$srcdir"/color_prompt.sh.disabled \
 		"$srcdir"/locale.sh \
 		"$pkgdir"/etc/profile.d/
 	install -m644 \
@@ -235,7 +235,7 @@ package() {
 sha512sums="
 199a34716b1f029407b08679fed4fda58384a1ccefbbec9abe1c64f4a3f7ad2a89bc7c02fc19a7f791f7c6bb87f9f0c708cb3f18c027cb7f54f25976eba4b839  mkmntdirs.c
 6e169c0975a1ad1ad871a863e8ee83f053de9ad0b58d94952efa4c28a8c221445d9e9732ad8b52832a50919c2f39aa965a929b3d5b3f9e62f169e2b2e0813d82  crontab
-7fcb5df98b0f19e609cb9444b2e6ca5ee97f5f308eb407436acdd0115781623fd89768a9285e9816e36778e565b6f27055f2a586a58f19d6d880de5446d263c4  color_prompt
+7fcb5df98b0f19e609cb9444b2e6ca5ee97f5f308eb407436acdd0115781623fd89768a9285e9816e36778e565b6f27055f2a586a58f19d6d880de5446d263c4  color_prompt.sh.disabled
 b2fc9b72846a43a45ba9a8749e581cef34d1915836833b51b7919dfbf4e275b7d55fec4dea7b23df3796380910971a41331e53e8cf0d304834e3da02cc135e5a  locale.sh
 bfe947bdd69e7d93b32c8cb4e2cabe5717cb6c1e1f49a74015ac2cfb13e96d1f12c4be23ae93a1d61aaa3760d33a032fa9bd99f227fb21223a76b5f5908acc65  aliases.conf
 0b93db8ba1b5d16b2c23f9b6daea27a3a76c059a1f5ea0369af526ea3f4ff92a6040face89e95c45cf7daaa7a663f229df0f6c1ba24073ef4b2f7b74b298fdae  blacklist.conf
