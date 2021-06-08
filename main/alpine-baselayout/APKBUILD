@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.2.0
-pkgrel=13
+pkgrel=14
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -204,6 +204,14 @@ package() {
 	cat > "$pkgdir"/etc/fstab <<-EOF
 		/dev/cdrom	/media/cdrom	iso9660	noauto,ro 0 0
 		/dev/usbdisk	/media/usb	vfat	noauto,ro 0 0
+	EOF
+	cat > "$pkgdir"/etc/profile.d/README <<-EOF
+		This directory should contain shell scripts configuring system-wide
+		environment on users' shells.
+
+		Files with the .sh extension found in this directory are evaluated by
+		Bourne-compatible shells (like ash, bash or zsh) when started as a
+		login shell.
 	EOF
 
 	install -m644 \
