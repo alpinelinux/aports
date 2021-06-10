@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-keys
 pkgver=2.3
-pkgrel=0
+pkgrel=1
 pkgdesc="Public keys for Alpine Linux packages"
 url="https://alpinelinux.org"
 # we install arch specific keys to /etc so we cannot do arch=noarch
@@ -12,7 +12,7 @@ options="!check" # No testsuite
 
 _arch_keys="
 	aarch64:alpine-devel@lists.alpinelinux.org-58199dcc.rsa.pub
-	armhf:alpine-devel@lists.alpinelinux.org-524d27bb.rsa.pub
+	armhf,armv7:alpine-devel@lists.alpinelinux.org-524d27bb.rsa.pub
 
 	x86:alpine-devel@lists.alpinelinux.org-5243ef4b.rsa.pub
 	x86,x86_64:alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub
