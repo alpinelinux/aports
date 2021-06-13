@@ -3,6 +3,9 @@ MRuby::Build.new do |conf|
 
   # include the default GEMs
   conf.gembox 'default'
+
+  conf.enable_bintest
+  conf.enable_test
 end
 
 MRuby::Build.new('host-debug') do |conf|
