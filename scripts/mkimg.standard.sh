@@ -74,7 +74,7 @@ profile_virt() {
 	desc="Similar to standard.
 		Slimmed down kernel.
 		Optimized for virtual systems."
-	arch="aarch64 x86 x86_64"
+	arch="aarch64 armv7 x86 x86_64"
 	kernel_addons=
 	kernel_flavors="virt"
 	kernel_cmdline="console=tty0 console=ttyS0,115200"
