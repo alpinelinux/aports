@@ -1,0 +1,128 @@
+# Contributor: Oleg Titov <oleg.titov@gmail.com>
+# Contributor: Jesse Chan <jc@linux.com>
+# Maintainer: Jesse Chan <jc@linux.com>
+pkgname=bazel4
+pkgver=4.1.0
+pkgrel=0
+pkgdesc="A fast, scalable, multi-language and extensible build system"
+url="https://bazel.build/"
+arch="all"
+arch="$arch !x86 !armhf !armv7 !mips !mips64" # JDK dropped support
+arch="$arch !ppc64le" # absl: Must implement UnscaledCycleClock::Frequency()
+arch="$arch !s390x" # aborted: SIGFPE (0x8) at pc=0x000003ffb1f18462 (sent by kill)
+license="Apache-2.0"
+depends="bash java-jdk libarchive unzip zip"
+makedepends="coreutils linux-headers protobuf python3 coreutils"
+options="!strip"
+subpackages="
+	$pkgname-doc
+	$pkgname-bash-completion
+	$pkgname-fish-completion
+	$pkgname-zsh-completion
+	"
+source="https://github.com/bazelbuild/bazel/releases/download/$pkgver/bazel-$pkgver-dist.zip
+	patch_TEMP_FAILURE_RETRY.patch
+	patch_do_not_use_glibc_prebuilt.patch
+	patch_default_system_java_toolchain.patch
+	patch_fix_jdk_13.patch
+	patch_stop_hardcoding_verify_none_1.patch
+	patch_stop_hardcoding_verify_none_2.patch
+	patch_go_back_to_pre16_permit.patch"
+
+build() {
+	export JAVA_HOME="/usr/lib/jvm/default-jvm"
+
+	# horrible of horribles, just to have python in the PATH
+	# https://github.com/bazelbuild/bazel/issues/8665
+	mkdir -p ./bin-hack
+	ln -s /usr/bin/python3 ./bin-hack/python
+	export PATH=$(pwd)/bin-hack:$PATH
+
+	# Stage 1: build Bazel with bootstrap script
+
+	# based on
+	# https://github.com/vbatts/copr-build-bazel/blob/master/bazel.spec
+	# EXTRA_BAZEL_ARGS is used by bootstrap script only
+	export EXTRA_BAZEL_ARGS="--sandbox_debug --verbose_failures"
+
+	mkdir tmphome-stage1
+
+	env HOME="$(pwd)/tmphome-stage1" bash ./compile.sh
+	env HOME="$(pwd)/tmphome-stage1" ./output/bazel shutdown
+
+	# Stage 2: use Bazel to build Bazel in optimized mode
+	mkdir tmphome-stage2
+
+	# We can't use embedded JDK, as there is no alpine support
+	echo startup --server_javabase=$JAVA_HOME \
+		>> tmphome-stage2/.bazelrc
+
+	env HOME="$(pwd)/tmphome-stage2" ./output/bazel build \
+		-c opt \
+		--stamp \
+		--embed_label $pkgver \
+		--distdir=derived/distdir \
+		$EXTRA_BAZEL_ARGS \
+		//scripts/packages:without-jdk/install.sh
+	env HOME="$(pwd)/tmphome-stage2" ./output/bazel shutdown
+
+	# Copy outputs
+	rm -rf output && mkdir output
+	cp bazel-bin/scripts/packages/without-jdk/bazel output
+	cp bazel-bin/scripts/packages/without-jdk/bazel-real output
+	cp bazel-bin/scripts/bazel-complete.bash output
+	cp bazel-bin/scripts/bazel.fish output
+	cp scripts/zsh_completion/_bazel output
+	cp tmphome-stage2/.bazelrc output/bazel.bazelrc
+}
+
+check() {
+	mkdir tmphome-check
+	cp output/bazel.bazelrc tmphome-check/.bazelrc
+
+	env HOME="$(pwd)/tmphome-check" ./output/bazel test \
+		--distdir=derived/distdir \
+		--spawn_strategy=standalone \
+		--genrule_strategy=standalone \
+		--verbose_failures \
+		--verbose_test_summary \
+		--test_verbose_timeout_warnings \
+		examples/cpp:hello-success_test \
+		examples/py_native:test \
+		examples/java-starlark/src/test/java/com/example/myproject:pass \
+		examples/java-native/src/test/java/com/example/myproject:hello
+
+	env HOME="$(pwd)/tmphome-check" ./output/bazel shutdown
+}
+
+package() {
+	install -Dm755 output/bazel "$pkgdir"/usr/bin/bazel
+	install -Dm755 output/bazel-real "$pkgdir"/usr/bin/bazel-real
+	install -Dm644 output/bazel.bazelrc \
+		"$pkgdir"/etc/bazel.bazelrc
+
+	install -m644 -D -t "$pkgdir"/usr/share/doc/$pkgname README.md
+
+	install -Dm644 output/bazel-complete.bash \
+		"$pkgdir"/usr/share/bash-completion/completions/"$pkgname"
+	install -Dm644 output/bazel.fish \
+		"$pkgdir"/usr/share/fish/completions/"$pkgname".fish
+	install -Dm644 output/_bazel \
+		"$pkgdir"/usr/share/zsh/site-functions/_"$pkgname"
+}
+
+unpack() {
+	mkdir -p "$builddir"
+	unzip "$srcdir"/bazel-$pkgver-dist.zip -d "$builddir" > /dev/null
+}
+
+sha512sums="
+18a8f4087b87e2d1dea118491458981bcb162ca736cc451169da9f638520071d846de77d32e4542a0142641f7e94d56d4cca7b0c17098d3d7dc67875528c634c  bazel-4.1.0-dist.zip
+85b1a4954c762c0144ba38a5c859ec7a77a0dc4fa0042684ef7113ff167375d89053850541528dbabdd577ebb82b50c5f6d04ba2650c154503a75ee4455b01fb  patch_TEMP_FAILURE_RETRY.patch
+b8858494f7c600145610d44d2ca81d2cf0e58924b5d876361043b395c88b1166bf9a17de2864ee718e6dce723b7f0c4d71cf8fb9c2ab316eb9013eb5e450ddbe  patch_do_not_use_glibc_prebuilt.patch
+fe1862bbd392f8a2d7af5f7c5e08fa6cf6dab0ba7b88280c28c4b072241613480e861af60212ceee1aebc10eb629f964c5def2b3e0a75c48453da8c397f4e93b  patch_default_system_java_toolchain.patch
+0b4b3e541eaa496253e83d6fd88ba98d14c2a53324b7438f57d240b45f2c3c63b659038224e2b66706d4420eccb7c17c834260839f2fd39e3c6b3dea2613b735  patch_fix_jdk_13.patch
+f8456643419ac108a7cd72eaccd931e9c269c828611b0a62a79ad80a4f542b83cf5fa69af026e04bfb8d9f2c70527b5b25f9af56edb0a5a696ce66b3032df48d  patch_stop_hardcoding_verify_none_1.patch
+c5ad25926e5672cd86b27c791c7347b21b57777296cc26d92d2bd9ae6eb39ee81d48008edb666285432135082e91daa9162ea67c719625bcede8f2d5647c9633  patch_stop_hardcoding_verify_none_2.patch
+94840b77904cabbaff4d2b011b79699f9b6114e9893af4f8649e397f34ffb0e8c2d9c6d481f9a0cdab39fd00d13c8c76efa8a8fe781c0d3162421764a0a1d6d5  patch_go_back_to_pre16_permit.patch
+"
