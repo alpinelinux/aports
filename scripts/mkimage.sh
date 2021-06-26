@@ -14,9 +14,47 @@ set -e
 [ -e /usr/share/abuild/functions.sh ] || (echo "abuild not found" ; exit 1)
 . /usr/share/abuild/functions.sh
 
+scriptdir="$(dirname "$0")"
+git=$(command -v git) || git=true
+
 # deduce aports directory
-[ -n "$APORTS" ] || APORTS=$(realpath $(dirname $0)/../)
+[ -n "$APORTS" ] || APORTS=$(realpath "$scriptdir/../")
 [ -e "$APORTS/main/build-base" ] || die "Unable to deduce aports base checkout"
+
+# echo '-dirty' if git is not clean
+git_dirty() {
+	[ $($git status -s -- "$scriptdir" | wc -l) -ne 0 ] && echo "-dirty"
+}
+
+# echo last commit hash id
+git_last_commit() {
+	$git log --format=oneline -n 1 -- "$scriptdir" | awk '{print $1}'
+}
+
+# date of last commit
+git_last_commit_epoch() {
+	$git log -1 --format=%cd --date=unix "$1" -- "$scriptdir"
+}
+
+set_source_date() {
+	# dont error out if we're not in git
+	if ! $git rev-parse --show-toplevel >/dev/null 2>&1; then
+		git=true
+	fi
+	# set time stamp for reproducible builds
+	if [ -z "$ABUILD_LAST_COMMIT" ]; then
+		export ABUILD_LAST_COMMIT="$(git_last_commit)$(git_dirty)"
+	fi
+	if [ -z "$SOURCE_DATE_EPOCH" ] && [ "${ABUILD_LAST_COMMIT%-dirty}" = "$ABUILD_LAST_COMMIT" ]; then
+		SOURCE_DATE_EPOCH=$(git_last_commit_epoch "$ABUILD_LAST_COMMIT")
+	fi
+	if [ -z "$SOURCE_DATE_EPOCH" ]; then
+		SOURCE_DATE_EPOCH=$(date -u "+%s")
+	fi
+	export SOURCE_DATE_EPOCH
+}
+
+set_source_date
 
 # 
 all_sections=""
@@ -24,13 +62,12 @@ all_profiles=""
 all_checksums="sha256 sha512"
 all_arches="aarch64 armhf armv7 x86 x86_64"
 all_dirs=""
-build_date="$(date +%y%m%d)"
+build_date="$(date -u +%y%m%d -d "@$SOURCE_DATE_EPOCH")"
 default_arch="$(apk --print-arch)"
 _hostkeys=""
 _simulate=""
 _checksum=""
 
-scriptdir="$(dirname $0)"
 OUTDIR="$PWD"
 RELEASE="${build_date}"
 

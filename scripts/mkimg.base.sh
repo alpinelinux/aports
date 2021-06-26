@@ -304,7 +304,10 @@ create_image_iso() {
 }
 
 create_image_targz() {
-	tar -C "${DESTDIR}" -chzf ${OUTDIR}/${output_filename} .
+	tar -C "${DESTDIR}" \
+		--mtime="@${SOURCE_DATE_EPOCH}" \
+		--owner=0 --group=0 --numeric-owner \
+		-chzf "${OUTDIR}/${output_filename}" .
 }
 
 profile_base() {
