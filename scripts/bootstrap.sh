@@ -108,7 +108,7 @@ fi
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   openssl ca-certificates libmd \
 	   gmp mpfr4 mpc1 isl22 cloog libucontext binutils gcc \
-	   libbsd libtls-standalone busybox busybox-initscripts make \
+	   libbsd libretls busybox busybox-initscripts make \
 	   apk-tools file \
 	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
 	   attr libcap acl fakeroot tar \
