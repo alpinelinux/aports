@@ -18,7 +18,7 @@ PS1='${HOSTNAME%%.*}:$PWD'
 export PS1
 
 for script in /etc/profile.d/*.sh ; do
-        if [ -r $script ] ; then
-                . $script
-        fi
+	if [ -r $script ] ; then
+		. $script
+	fi
 done
