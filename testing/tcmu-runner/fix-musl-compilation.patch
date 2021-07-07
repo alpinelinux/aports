@@ -1,0 +1,143 @@
+Summary: Fixes musl compatibility
+Upstream: in progress
+
+diff --git a/api.c b/api.c
+index 490e257..d55da0a 100644
+--- a/api.c
++++ b/api.c
+@@ -28,6 +28,8 @@
+ #include "libtcmu_priv.h"
+ #include "be_byteshift.h"
+ 
++__thread int __tcmu_is_ework_thread = 0;
++
+ int tcmu_cdb_get_length(uint8_t *cdb)
+ {
+ 	uint8_t group_code = cdb[0] >> 5;
+@@ -74,7 +76,7 @@ uint64_t tcmu_cdb_get_lba(uint8_t *cdb)
+ 	case 16:
+ 		return be64toh(*((u_int64_t *)&cdb[2]));
+ 	default:
+-		assert_perror(EINVAL);
++		assert(0);
+ 		return 0;	/* not reached */
+ 	}
+ }
+@@ -91,7 +93,7 @@ uint32_t tcmu_cdb_get_xfer_length(uint8_t *cdb)
+ 	case 16:
+ 		return be32toh(*((u_int32_t *)&cdb[10]));
+ 	default:
+-		assert_perror(EINVAL);
++		assert(0);
+ 		return 0;	/* not reached */
+ 	}
+ }
+diff --git a/libtcmu.c b/libtcmu.c
+index c75bb10..1127218 100644
+--- a/libtcmu.c
++++ b/libtcmu.c
+@@ -843,24 +843,20 @@ const char *tcmu_dev_get_uio_name(struct tcmu_device *dev)
+ void tcmu_set_thread_name(const char *prefix, struct tcmu_device *dev)
+ {
+ 	const char *uio = dev ? tcmu_dev_get_uio_name(dev) : NULL;
+-	char cname[TCMU_THREAD_NAME_LEN];
+ 	char *pname;
+ 
+-	if (pthread_getname_np(pthread_self(), cname, TCMU_THREAD_NAME_LEN))
+-		return;
+-
+ 	/*
+ 	 * If we are trying to set the pthread name in the
+ 	 * event work thread, we must ignore it.
+ 	 */
+-	if (!strcmp(cname, "ework-thread")) {
++	if (__tcmu_is_ework_thread) {
+ 		tcmu_dev_warn(dev, "Do not set name for event work thread in the callback fn\n");
+ 		return;
+ 	}
+ 
+ 	if (!prefix) {
+ 		tcmu_dev_err(dev, "Failed to set name for thread %lu\n",
+-			     pthread_self());
++			     (long unsigned int)pthread_self());
+ 		return;
+ 	}
+ 
+diff --git a/libtcmu_common.h b/libtcmu_common.h
+index 350693b..2897e1f 100644
+--- a/libtcmu_common.h
++++ b/libtcmu_common.h
+@@ -14,6 +14,7 @@
+ #define __LIBTCMU_COMMON_H
+ 
+ #include <stdbool.h>
++#include <pthread.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -193,6 +194,8 @@ void __tcmu_sense_set_data(uint8_t *sense_buf, uint8_t key, uint16_t asc_ascq);
+  */
+ void tcmu_thread_cancel(pthread_t thread);
+ 
++extern __thread int __tcmu_is_ework_thread;
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libtcmu_log.c b/libtcmu_log.c
+index f7b6e2f..fee27a4 100644
+--- a/libtcmu_log.c
++++ b/libtcmu_log.c
+@@ -403,7 +403,6 @@ static int output_to_fd(int pri, const char *timestamp,
+ 	int fd = (intptr_t) data;
+ 	char *buf, *msg;
+ 	int count, ret, written = 0, r, pid = 0;
+-	char pname[TCMU_THREAD_NAME_LEN];
+ 
+ 	if (fd == -1)
+ 		return -1;
+@@ -412,13 +411,10 @@ static int output_to_fd(int pri, const char *timestamp,
+ 	if (pid <= 0)
+ 		return -1;
+ 
+-	if (pthread_getname_np(pthread_self(), pname, TCMU_THREAD_NAME_LEN))
+-		return -1;
+-
+ 	/*
+ 	 * format: timestamp pid [loglevel] msg
+ 	 */
+-	ret = asprintf(&msg, "%s %d:%s [%s] %s", timestamp, pid, pname,
++	ret = asprintf(&msg, "%s %d [%s] %s", timestamp, pid,
+ 		       loglevel_string(pri), str);
+ 	if (ret < 0)
+ 		return -1;
+diff --git a/tcmur_work.c b/tcmur_work.c
+index ee567e9..801e305 100644
+--- a/tcmur_work.c
++++ b/tcmur_work.c
+@@ -41,16 +41,11 @@ free_work:
+ 
+ static void __tcmur_flush_work(struct tcmur_work *work)
+ {
+-	char pname[TCMU_THREAD_NAME_LEN];
+-
+-	if (pthread_getname_np(pthread_self(), pname, TCMU_THREAD_NAME_LEN))
+-		return;
+-
+ 	/*
+ 	 * The event work thread may need to do a handler reopen
+ 	 * call and try to flush itself. Just ignore.
+ 	 */
+-	if (!strcmp(pname, "ework-thread"))
++	if (__tcmu_is_ework_thread)
+ 		return;
+ 
+ 	/*
+@@ -79,6 +74,7 @@ static void *tcmur_work_fn(void *data)
+ 	struct private *p = data;
+ 
+ 	tcmu_set_thread_name("ework-thread", NULL);
++	__tcmu_is_ework_thread = 1;
+ 
+ 	p->work_fn(p->data);
+ 
