@@ -1,0 +1,140 @@
+From b2d24e3cc6015aa6a4b01b1fdbad1e68b6fccb96 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timo=20Ter=C3=A4s?= <timo.teras@iki.fi>
+Date: Fri, 9 Jul 2021 10:57:20 +0300
+Subject: add configure option to enable .eh_frame generation
+
+Add --enable-eh-frame to enable .eh_frame generation. This adds
+about 80kB to ELF size on x86_64.
+
+This is useful to run continuous profilers, gdb, valgrind and other
+debugging utilities to generate backtrace information without having
+to install the full musl-dbg package.
+
+As side effect, this might seem to make exception handling work
+through C-library fuctions when they are calling a callback (e.g. qsort),
+but this continues to be UB and is not supported. This actually is the
+case on ARM where .ARM.exidx is used for unwind info which is present
+always on the musl DSO.
+
+---
+ Makefile                 |  4 ++--
+ configure                | 30 ++++++++++++++++++++++--------
+ tools/add-cfi.i386.awk   |  2 +-
+ tools/add-cfi.x86_64.awk |  2 +-
+ 4 files changed, 26 insertions(+), 12 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index e8cc4436..2b501c25 100644
+--- a/Makefile
++++ b/Makefile
+@@ -134,8 +134,8 @@ $(LOBJS) $(LDSO_OBJS): CFLAGS_ALL += -fPIC
+ CC_CMD = $(CC) $(CFLAGS_ALL) -c -o $@ $<
+ 
+ # Choose invocation of assembler to be used
+-ifeq ($(ADD_CFI),yes)
+-	AS_CMD = LC_ALL=C awk -f $(srcdir)/tools/add-cfi.common.awk -f $(srcdir)/tools/add-cfi.$(ARCH).awk $< | $(CC) $(CFLAGS_ALL) -x assembler -c -o $@ -
++ifneq ($(ADD_CFI),no)
++	AS_CMD = LC_ALL=C awk -v CFI_SECTIONS="$(ADD_CFI)" -f $(srcdir)/tools/add-cfi.common.awk -f $(srcdir)/tools/add-cfi.$(ARCH).awk $< | $(CC) $(CFLAGS_ALL) -x assembler -c -o $@ -
+ else
+ 	AS_CMD = $(CC_CMD)
+ endif
+diff --git a/configure b/configure
+index a5231a0e..eea16e6c 100755
+--- a/configure
++++ b/configure
+@@ -30,6 +30,7 @@ System types:
+ Optional features:
+   --enable-optimize=...   optimize listed components for speed over size [auto]
+   --enable-debug          build with debugging information [disabled]
++  --enable-eh-frame       keep .eh_frame on main binary [disabled]
+   --disable-warnings      build with recommended warnings flags [enabled]
+   --enable-wrapper=...    build given musl toolchain wrapper [auto]
+   --disable-shared        inhibit building shared library [enabled]
+@@ -142,6 +143,7 @@ static=yes
+ wrapper=auto
+ gcc_wrapper=no
+ clang_wrapper=no
++eh_frame=no
+ malloc_dir=mallocng
+ 
+ for arg ; do
+@@ -172,6 +174,8 @@ case "$arg" in
+ --disable-wrapper|--enable-wrapper=no) wrapper=no ;;
+ --enable-gcc-wrapper|--enable-gcc-wrapper=yes) wrapper=yes ; gcc_wrapper=yes ;;
+ --disable-gcc-wrapper|--enable-gcc-wrapper=no) wrapper=no ;;
++--enable-eh-frame|--enable-eh-frame=yes) eh_frame=yes ;;
++--disable-eh-frame|--enable-eh-frame=no) eh_frame=no ;;
+ --with-malloc=*) malloc_dir=${arg#*=} ;;
+ --enable-*|--disable-*|--with-*|--without-*|--*dir=*) ;;
+ --host=*|--target=*) target=${arg#*=} ;;
+@@ -407,14 +411,22 @@ test "$debug" = yes && CFLAGS_AUTO=-g
+ # enabled, our assembler supports the needed directives, and the
+ # preprocessing script has been written for our architecture.
+ #
+-printf "checking whether we should preprocess assembly to add debugging information... "
+-if fnmatch '-g*|*\ -g*' "$CFLAGS_AUTO $CFLAGS" &&
+-   test -f "tools/add-cfi.$ARCH.awk" &&
++printf "checking whether we should preprocess assembly to add unwind information... "
++
++ADD_CFI="no"
++if test -f "tools/add-cfi.$ARCH.awk" &&
+    printf ".file 1 \"srcfile.s\"\n.line 1\n.cfi_startproc\n.cfi_endproc" | $CC -g -x assembler -c -o /dev/null 2>/dev/null -
+ then
+-  ADD_CFI=yes
+-else
+-  ADD_CFI=no
++  if test "$eh_frame" = "yes" && fnmatch '-g*|*\ -g*' "$CFLAGS_AUTO $CFLAGS"
++  then
++    ADD_CFI=".eh_frame, .debug_frame"
++  elif test "$eh_frame" = "yes"
++  then
++    ADD_CFI=".eh_frame"
++  elif fnmatch '-g*|*\ -g*' "$CFLAGS_AUTO $CFLAGS"
++  then
++    ADD_CFI=".debug_frame"
++  fi
+ fi
+ printf "%s\n" "$ADD_CFI"
+ 
+@@ -478,8 +490,10 @@ fi
+ # unstrippable. These options force them back to debug sections (and
+ # cause them not to get generated at all if debugging is off).
+ #
+-tryflag CFLAGS_AUTO -fno-unwind-tables
+-tryflag CFLAGS_AUTO -fno-asynchronous-unwind-tables
++if test "$eh_frame" = "no"; then
++  tryflag CFLAGS_AUTO -fno-unwind-tables
++  tryflag CFLAGS_AUTO -fno-asynchronous-unwind-tables
++fi
+ 
+ #
+ # Attempt to put each function and each data object in its own
+diff --git a/tools/add-cfi.i386.awk b/tools/add-cfi.i386.awk
+index d05037de..f758acec 100644
+--- a/tools/add-cfi.i386.awk
++++ b/tools/add-cfi.i386.awk
+@@ -9,7 +9,7 @@
+ 
+ BEGIN {
+   # don't put CFI data in the .eh_frame ELF section (which we don't keep)
+-  print ".cfi_sections .debug_frame"
++  print ".cfi_sections " CFI_SECTIONS
+ 
+   # only emit CFI directives inside a function
+   in_function = 0
+diff --git a/tools/add-cfi.x86_64.awk b/tools/add-cfi.x86_64.awk
+index 7e1513d6..4a2ae029 100644
+--- a/tools/add-cfi.x86_64.awk
++++ b/tools/add-cfi.x86_64.awk
+@@ -2,7 +2,7 @@
+ 
+ BEGIN {
+   # don't put CFI data in the .eh_frame ELF section (which we don't keep)
+-  print ".cfi_sections .debug_frame"
++  print ".cfi_sections " CFI_SECTIONS
+ 
+   # only emit CFI directives inside a function
+   in_function = 0
+-- 
+2.32.0
+
