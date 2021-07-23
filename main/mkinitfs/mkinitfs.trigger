@@ -1,5 +1,12 @@
 #!/bin/sh
 
+CONFIG='/etc/mkinitfs/mkinitfs.conf'
+if [ -f "$CONFIG" ]; then
+	case "$(. "$CONFIG" >/dev/null; printf %s "$disable_trigger")" in
+		yes | YES | true | TRUE | 1) exit 0;;
+	esac
+fi
+
 for i in "$@"; do
 	# get last element in path
 	flavor=${i##*/}
