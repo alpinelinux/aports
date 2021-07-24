@@ -1,0 +1,98 @@
+#!/bin/ash
+# vim: set ts=4:
+set -euo pipefail
+
+readonly HOOK_NAME='secureboot'
+
+# Defaults
+cmdline=
+signing_cert='/etc/uefi-keys/db.crt'
+signing_key='/etc/uefi-keys/db.key'
+signing_disabled=no
+openssl_engine=
+microcode=
+splash_image='/dev/null'
+output_dir='/boot/efi/Alpine'
+output_name='linux-{flavor}.efi'
+backup_old=yes
+
+die() {
+	printf "$HOOK_NAME: %s\n" "$2" >&2
+	exit $1
+}
+
+
+if [ $# -lt 2 ]; then
+	echo "Usage: $0 <flavor> <new-version> <old-version>" >&2
+	exit 1
+fi
+
+readonly FLAVOR=$1
+readonly NEW_VERSION=$2
+readonly OLD_VERSION=${3:-}
+
+# Hook triggered for the kernel removal, nothing to do here.
+[ "$NEW_VERSION" ] || exit 0
+
+. /etc/kernel-hooks.d/secureboot.conf
+
+[ "$cmdline" ] \
+	|| die 0 "cmdline is not specified in /etc/kernel-hooks.d/$HOOK_NAME.conf, skipping hook!"
+
+if [ "$signing_disabled" != yes ]; then
+	[ -r "$signing_cert" ] \
+		|| die 2 "ERROR: signing cert '$signing_cert' does not exist or not readable!"
+
+	[ -r "$signing_key" ] \
+		|| die 2 "ERROR: signing key '$signing_key' does not exist or not readable!"
+fi
+
+vmlinuz="/boot/vmlinuz-$FLAVOR"
+output_name=$(echo "$output_name" \
+	| sed "s/{flavor}/$FLAVOR/; s/{version}/$NEW_VERSION/")
+output="$output_dir/$output_name"
+
+[ "$microcode" ] || for path in /boot/intel-ucode.img /boot/amd-ucode.img; do
+	[ -f "$path" ] && microcode="$path"
+done
+
+tmpdir=$(mktemp -dt "$HOOK_NAME.XXXXXX")
+trap "rm -f '$tmpdir'/*; rmdir '$tmpdir'" EXIT HUP INT TERM
+
+if [ "$backup_old" = yes ] && [ -f "$output" ]; then
+	cp -a "$output" "$output.bak"
+fi
+
+/sbin/mkinitfs -o "$tmpdir"/initramfs "$NEW_VERSION-$FLAVOR"
+
+echo "==> $HOOK_NAME: creating UEFI Unified Kernel Image with $vmlinuz"
+/usr/bin/efi-mkuki \
+	-c "$cmdline" \
+	-s "$splash_image" \
+	-o "$tmpdir"/unsigned.efi \
+	"$vmlinuz" $microcode "$tmpdir"/initramfs
+
+mkdir -p "$output_dir"
+
+if [ "$signing_disabled" = yes ]; then
+	echo "==> $HOOK_NAME: writing *unsigned* UEFI image to $output (signing is disabled!)"
+	mv "$tmpdir"/unsigned.efi "$output"
+else
+	echo "==> $HOOK_NAME: signing UEFI image and writing to $output"
+	/usr/bin/sbsign \
+		--cert "$signing_cert" \
+		--key "$signing_key" \
+		--output "$output" \
+		${openssl_engine:+--engine $openssl_engine} \
+		"$tmpdir"/unsigned.efi \
+		2>&1 | { grep -Fv -e ' gaps between PE/COFF ' -e 'Signing Unsigned ' ||:; } >&2
+		# this is not an issue ^
+fi
+
+# Just a simple sanity check.
+dir="/$output_dir"  # '/' is to avoid endless loop if misconfigured
+while [ "$dir" ]; do
+	mount -t vfat | grep -Fq " on $dir type vfat " && exit 0
+	dir=${dir%/*}
+done
+die 0 "WARNING: $output_dir is not on UEFI System Partition as it should be!"
