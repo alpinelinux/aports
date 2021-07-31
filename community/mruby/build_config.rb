@@ -6,6 +6,9 @@ MRuby::Build.new do |conf|
 
   conf.enable_bintest
   conf.enable_test
+
+  # Configuration macros
+  conf.cc.defines = %w(MRB_USE_READLINE)
 end
 
 MRuby::Build.new('host-debug') do |conf|
@@ -16,8 +19,8 @@ MRuby::Build.new('host-debug') do |conf|
   # include the default GEMs
   conf.gembox 'default'
 
-  # C compiler settings
-  conf.cc.defines = %w(MRB_USE_DEBUG_HOOK)
+  # Configuration macros
+  conf.cc.defines = %w(MRB_USE_READLINE MRB_USE_DEBUG_HOOK)
 
   # Generate mruby debugger command (require mruby-eval)
   conf.gem :core => "mruby-bin-debugger"
