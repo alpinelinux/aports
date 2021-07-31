@@ -8,7 +8,7 @@ MRuby::Build.new do |conf|
   conf.enable_test
 
   # Configuration macros
-  conf.cc.defines = %w(MRB_USE_READLINE)
+  conf.cc.defines = %w(MRB_USE_READLINE MRB_UTF8_STRING)
 end
 
 MRuby::Build.new('host-debug') do |conf|
@@ -20,7 +20,7 @@ MRuby::Build.new('host-debug') do |conf|
   conf.gembox 'default'
 
   # Configuration macros
-  conf.cc.defines = %w(MRB_USE_READLINE MRB_USE_DEBUG_HOOK)
+  conf.cc.defines = %w(MRB_USE_READLINE MRB_UTF8_STRING MRB_USE_DEBUG_HOOK)
 
   # Generate mruby debugger command (require mruby-eval)
   conf.gem :core => "mruby-bin-debugger"
