@@ -19,7 +19,6 @@ for path in "$@"; do
 	flavors_vers="$flavors_vers $flavor:$ver"
 done
 
-ret=0
 for flavor in $(printf '%s\n' $flavors_vers | sort | cut -d: -f1 | uniq); do
 	relfile=/usr/share/kernel/$flavor/kernel.release
 
@@ -43,9 +42,11 @@ for flavor in $(printf '%s\n' $flavors_vers | sort | cut -d: -f1 | uniq); do
 		$hook "$flavor" "$new_ver" "$old_ver" && continue
 		
 		echo "$PROGNAME: ERROR: hook $name failed, skipping hooks for linux-$flavor" >&2
-		ret=1
 		break
 	done
 done
 
-exit $ret
+# Triggers exiting with a non-zero status cause headaches. APK marks the
+# corresponding package and the world as broken. Consequently, it exists with
+# status 1 even after e.g. successful installation of a new package.
+exit 0
