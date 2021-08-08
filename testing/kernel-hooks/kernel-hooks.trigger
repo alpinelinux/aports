@@ -39,10 +39,8 @@ for flavor in $(printf '%s\n' $flavors_vers | sort | cut -d: -f1 | uniq); do
 
 		echo "$PROGNAME: executing hook $name ($flavor, $new_ver, $old_ver)" >&2
 
-		$hook "$flavor" "$new_ver" "$old_ver" && continue
-		
-		echo "$PROGNAME: ERROR: hook $name failed, skipping hooks for linux-$flavor" >&2
-		break
+		$hook "$flavor" "$new_ver" "$old_ver" \
+			|| echo "$PROGNAME: ERROR: hook $name failed" >&2
 	done
 done
 
