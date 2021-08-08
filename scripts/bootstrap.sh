@@ -64,7 +64,13 @@ fi
 if [ ! -d "$CBUILDROOT" ]; then
 	msg "Creating sysroot in $CBUILDROOT"
 	mkdir -p "$CBUILDROOT/etc/apk/keys"
-	cp -a /etc/apk/keys/* ~/.abuild/*.pub "$CBUILDROOT/etc/apk/keys"
+	# /etc/apk/keys and ~/.abuild/ can contain files with the same names.
+	# if that is the case, cp will abort copying and fail. Then on the next
+	# run of the bootstrap script, 1) the keys are not in the sysroot and 
+	# 2) the apk database is not initialized the sysroot
+	# Thus it's unusable at that point and needs to be deleted manually.
+	cp -a /etc/apk/keys/* "$CBUILDROOT/etc/apk/keys"
+	cp -a ~/.abuild/*.pub "$CBUILDROOT/etc/apk/keys"
 	${SUDO_APK} add --quiet --initdb --arch $TARGET_ARCH --root $CBUILDROOT
 fi
 
