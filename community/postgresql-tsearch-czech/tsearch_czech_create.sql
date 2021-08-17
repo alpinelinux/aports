@@ -31,6 +31,7 @@ SELECT EXISTS (SELECT 1 FROM pg_ts_dict WHERE dictnamespace = :'namespace'::regn
     afffile = czech,
     stopwords = czech
   );
+  COMMENT ON TEXT SEARCH DICTIONARY :"dictname" IS 'Ispell dictionary for czech language';
 \endif
 
 -- Update TS configuration
