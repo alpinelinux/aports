@@ -1,0 +1,178 @@
+Backport from master:
+https://github.com/gpodder/gpodder/pull/1106
+
+From 2f542aa9c7bec7641343253a70d27283bf2222bf Mon Sep 17 00:00:00 2001
+From: Oliver Smith <ollieparanoid@postmarketos.org>
+Date: Sat, 17 Jul 2021 13:12:37 +0200
+Subject: [PATCH 2/2] gtkui: properly scale cover/pill on hires displays
+
+Fix the cover images and "pill" looking blurry on high resolution
+displays. For example, when the adaptive version of gPodder is used with
+Phosh on the PinePhone.
+
+Get the scale parameter from the gtkTreeView object and pass it down to
+the cover thumbnail size and to draw_text_pill. If the scaling is not 1,
+then use the new draw_iconcell_scale() function to draw the pixbuf with
+high resolution.
+---
+ src/gpodder/gtkui/draw.py  | 45 +++++++++++++++++++++++++++++++++-----
+ src/gpodder/gtkui/main.py  |  9 ++++++--
+ src/gpodder/gtkui/model.py | 11 +++++++---
+ 3 files changed, 55 insertions(+), 10 deletions(-)
+
+diff --git a/src/gpodder/gtkui/draw.py b/src/gpodder/gtkui/draw.py
+index 5beb97a4..ccedba36 100644
+--- a/src/gpodder/gtkui/draw.py
++++ b/src/gpodder/gtkui/draw.py
+@@ -169,7 +169,8 @@ def draw_cake(percentage, text=None, emblem=None, size=None):
+     return surface
+ 
+ 
+-def draw_text_pill(left_text, right_text, x=0, y=0, border=2, radius=14, widget=None):
++def draw_text_pill(left_text, right_text, x=0, y=0, border=2, radius=14,
++                   widget=None, scale=1):
+ 
+     # Padding (in px) at the right edge of the image (for Ubuntu; bug 1533)
+     padding_right = 7
+@@ -200,10 +201,13 @@ def draw_text_pill(left_text, right_text, x=0, y=0, border=2, radius=14, widget=
+     left_side_width = width_left + x_border * 2
+     right_side_width = width_right + x_border * 2
+ 
+-    image_height = int(y + text_height + border * 2)
+-    image_width = int(x + left_side_width + right_side_width + padding_right)
++    image_height = int(scale * (y + text_height + border * 2))
++    image_width = int(scale * (x + left_side_width + right_side_width
++                               + padding_right))
+ 
+     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, image_width, image_height)
++    surface.set_device_scale(scale, scale)
++
+     ctx = cairo.Context(surface)
+ 
+     # Clip so as to not draw on the right padding (for Ubuntu; bug 1533)
+@@ -288,8 +292,9 @@ def draw_cake_pixbuf(percentage, text=None, emblem=None, size=None):
+     return cairo_surface_to_pixbuf(draw_cake(percentage, text, emblem, size=size))
+ 
+ 
+-def draw_pill_pixbuf(left_text, right_text, widget=None):
+-    return cairo_surface_to_pixbuf(draw_text_pill(left_text, right_text, widget=widget))
++def draw_pill_pixbuf(left_text, right_text, widget=None, scale=1):
++    return cairo_surface_to_pixbuf(draw_text_pill(left_text, right_text,
++                                                  widget=widget, scale=scale))
+ 
+ 
+ def cake_size_from_widget(widget=None):
+@@ -479,3 +484,33 @@ def investigate_widget_colors(type_classes_and_widgets):
+ 
+         f.write("</dl></td></tr>\n")
+         f.write("</table></html>\n")
++
++
++def draw_iconcell_scale(column, cell, model, iter, scale):
++    """
++    Draw cell's pixbuf to a surface with proper scaling for high resolution
++    displays. To be used as gtk.TreeViewColumn.set_cell_data_func.
++
++    :param column: gtk.TreeViewColumn (ignored)
++    :param cell: gtk.CellRenderer
++    :param model: gtk.TreeModel (ignored)
++    :param iter: gtk.TreeIter (ignored)
++    :param scale: factor of the target display (e.g. 1 or 2)
++    """
++    pixbuf = cell.props.pixbuf
++    if not pixbuf:
++        return
++
++    width = pixbuf.get_width()
++    height = pixbuf.get_height()
++    scale_inv = 1 / scale
++
++    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
++    surface.set_device_scale(scale, scale)
++
++    cr = cairo.Context(surface)
++    cr.scale(scale_inv, scale_inv)
++    Gdk.cairo_set_source_pixbuf(cr, cell.props.pixbuf, 0, 0)
++    cr.paint()
++
++    cell.props.surface = surface
+diff --git a/src/gpodder/gtkui/main.py b/src/gpodder/gtkui/main.py
+index 62cb49a1..dc22efa9 100644
+--- a/src/gpodder/gtkui/main.py
++++ b/src/gpodder/gtkui/main.py
+@@ -48,7 +48,7 @@ from .desktop.welcome import gPodderWelcome
+ from .desktopfile import UserAppsReader
+ from .download import DownloadStatusModel
+ from .draw import (cake_size_from_widget, draw_cake_pixbuf,
+-                   draw_text_box_centered)
++                   draw_iconcell_scale, draw_text_box_centered)
+ from .interface.addpodcast import gPodderAddPodcast
+ from .interface.common import BuilderWidget, TreeViewHelper
+ from .interface.progress import ProgressIndicator
+@@ -677,7 +677,8 @@ class gPodder(BuilderWidget, dbus.service.Object):
+ 
+     def init_podcast_list_treeview(self):
+         size = cake_size_from_widget(self.treeChannels) * 2
+-        self.podcast_list_model.set_max_image_size(size)
++        scale = self.treeChannels.get_scale_factor()
++        self.podcast_list_model.set_max_image_size(size, scale)
+         # Set up podcast channel tree view widget
+         column = Gtk.TreeViewColumn('')
+         iconcell = Gtk.CellRendererPixbuf()
+@@ -685,6 +686,8 @@ class gPodder(BuilderWidget, dbus.service.Object):
+         column.pack_start(iconcell, False)
+         column.add_attribute(iconcell, 'pixbuf', PodcastListModel.C_COVER)
+         column.add_attribute(iconcell, 'visible', PodcastListModel.C_COVER_VISIBLE)
++        if scale != 1:
++            column.set_cell_data_func(iconcell, draw_iconcell_scale, scale)
+ 
+         namecell = Gtk.CellRendererText()
+         namecell.set_property('ellipsize', Pango.EllipsizeMode.END)
+@@ -696,6 +699,8 @@ class gPodder(BuilderWidget, dbus.service.Object):
+         column.pack_start(iconcell, False)
+         column.add_attribute(iconcell, 'pixbuf', PodcastListModel.C_PILL)
+         column.add_attribute(iconcell, 'visible', PodcastListModel.C_PILL_VISIBLE)
++        if scale != 1:
++            column.set_cell_data_func(iconcell, draw_iconcell_scale, scale)
+ 
+         self.treeChannels.append_column(column)
+ 
+diff --git a/src/gpodder/gtkui/model.py b/src/gpodder/gtkui/model.py
+index 40eedf6c..186d683c 100644
+--- a/src/gpodder/gtkui/model.py
++++ b/src/gpodder/gtkui/model.py
+@@ -585,6 +585,7 @@ class PodcastListModel(Gtk.ListStore):
+ 
+         self._cover_cache = {}
+         self._max_image_side = 40
++        self._scale = 1
+         self._cover_downloader = cover_downloader
+ 
+         self.ICON_DISABLED = 'media-playback-pause'
+@@ -653,8 +654,9 @@ class PodcastListModel(Gtk.ListStore):
+     def get_search_term(self):
+         return self._search_term
+ 
+-    def set_max_image_size(self, size):
+-        self._max_image_side = size
++    def set_max_image_size(self, size, scale):
++        self._max_image_side = size * scale
++        self._scale = scale
+         self._cover_cache = {}
+ 
+     def _resize_pixbuf_keep_ratio(self, url, pixbuf):
+@@ -773,7 +775,10 @@ class PodcastListModel(Gtk.ListStore):
+ 
+     def _get_pill_image(self, channel, count_downloaded, count_unplayed):
+         if count_unplayed > 0 or count_downloaded > 0:
+-            return draw.draw_pill_pixbuf('{:n}'.format(count_unplayed), '{:n}'.format(count_downloaded), widget=self.widget)
++            return draw.draw_pill_pixbuf('{:n}'.format(count_unplayed),
++                                         '{:n}'.format(count_downloaded),
++                                         widget=self.widget,
++                                         scale=self._scale)
+         else:
+             return None
+ 
+-- 
+2.20.1
+
