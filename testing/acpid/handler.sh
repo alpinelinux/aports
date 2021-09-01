@@ -1,77 +1,36 @@
 #!/bin/sh
 # vim: set ts=4:
-# Default ACPI script that takes an entry for all actions
+#
+# This is the default ACPI handler script that is configured in
+# /etc/acpi/events/anything to be called for every ACPI event.
+# You can edit it and add your own actions; treat it as a configuration file.
+#
+PATH="/usr/share/acpid:$PATH"
+alias log='logger -t acpid'
 
-case "$1" in
-	button/power)
-		case "$2" in
-			PBTN|PWRF)
-				logger 'PowerButton pressed'
-			;;
-			*)
-				logger "ACPI action undefined: $2"
-			;;
-		esac
-	;;
-	button/sleep)
-		case "$2" in
-			SLPB|SBTN)
-				logger 'SleepButton pressed'
-			;;
-			*)
-				logger "ACPI action undefined: $2"
-			;;
-		esac
-	;;
-	ac_adapter)
-		case "$2" in
-			AC|ACAD|ADP0)
-				case "$4" in
-					00000000)
-						logger 'AC unpluged'
-					;;
-					00000001)
-						logger 'AC pluged'
-					;;
-				esac
-			;;
-			*)
-				logger "ACPI action undefined: $2"
-			;;
-		esac
-	;;
-	battery)
-		case "$2" in
-			BAT0)
-				case "$4" in
-					00000000)
-						logger 'Battery online'
-					;;
-					00000001)
-						logger 'Battery offline'
-					;;
-				esac
-			;;
-			CPU0) ;;
-			*)
-				logger "ACPI action undefined: $2"
-			;;
-		esac
-	;;
-	button/lid)
-		case "$3" in
-			close)
-				logger 'LID closed'
-			;;
-			open)
-				logger 'LID opened'
-			;;
-			*)
-				logger "ACPI action undefined: $3"
-			;;
-		esac
-	;;
-	*)
-		logger "ACPI group/action undefined: $1 / $2"
-	;;
+# <dev-class>:<dev-name>:<notif-value>:<sup-value>
+case "$1:$2:$3:$4" in
+
+button/power:PWRF:*)
+	log 'Power button pressed'
+	# Shutdown the system unless it has a lid (notebook).
+	[ -e /proc/acpi/button/lid/LID ] || poweroff
+;;
+button/sleep:SLPB:*)
+	log 'Sleep button pressed'
+	# Suspend to RAM.
+	zzz
+;;
+button/lid:*:close:*)
+	log 'Lid closed'
+	# Suspend to RAM if AC adapter is not connected.
+	power-supply-ac || zzz
+;;
+ac_adapter:*:*:*0)
+	log 'AC adapter unplugged'
+	# Suspend to RAM if notebook's lid is closed.
+	lid-closed && zzz
+;;
 esac
+
+exit 0
