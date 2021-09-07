@@ -1,0 +1,102 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: IOMMU: also pass p2m_access_t to p2m_get_iommu_flags()
+
+A subsequent change will want to customize the IOMMU permissions based
+on this.
+
+This is part of XSA-378.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+
+--- a/xen/arch/x86/mm/p2m-ept.c
++++ b/xen/arch/x86/mm/p2m-ept.c
+@@ -680,7 +680,7 @@ ept_set_entry(struct p2m_domain *p2m, gf
+     uint8_t ipat = 0;
+     bool_t need_modify_vtd_table = 1;
+     bool_t vtd_pte_present = 0;
+-    unsigned int iommu_flags = p2m_get_iommu_flags(p2mt, mfn);
++    unsigned int iommu_flags = p2m_get_iommu_flags(p2mt, p2ma, mfn);
+     bool_t needs_sync = 1;
+     ept_entry_t old_entry = { .epte = 0 };
+     ept_entry_t new_entry = { .epte = 0 };
+@@ -808,8 +808,8 @@ ept_set_entry(struct p2m_domain *p2m, gf
+ 
+         /* Safe to read-then-write because we hold the p2m lock */
+         if ( ept_entry->mfn == new_entry.mfn &&
+-             p2m_get_iommu_flags(ept_entry->sa_p2mt, _mfn(ept_entry->mfn)) ==
+-             iommu_flags )
++             p2m_get_iommu_flags(ept_entry->sa_p2mt, ept_entry->access,
++                                 _mfn(ept_entry->mfn)) == iommu_flags )
+             need_modify_vtd_table = 0;
+ 
+         ept_p2m_type_to_flags(p2m, &new_entry);
+--- a/xen/arch/x86/mm/p2m-pt.c
++++ b/xen/arch/x86/mm/p2m-pt.c
+@@ -480,6 +480,16 @@ int p2m_pt_handle_deferred_changes(uint6
+     return rc;
+ }
+ 
++/* Reconstruct a fake p2m_access_t from stored PTE flags. */
++static p2m_access_t p2m_flags_to_access(unsigned int flags)
++{
++    if ( flags & _PAGE_PRESENT )
++        return p2m_access_n;
++
++    /* No need to look at _PAGE_NX for now. */
++    return flags & _PAGE_RW ? p2m_access_rw : p2m_access_r;
++}
++
+ /* Checks only applicable to entries with order > PAGE_ORDER_4K */
+ static void check_entry(mfn_t mfn, p2m_type_t new, p2m_type_t old,
+                         unsigned int order)
+@@ -514,7 +524,7 @@ p2m_pt_set_entry(struct p2m_domain *p2m,
+     l2_pgentry_t l2e_content;
+     l3_pgentry_t l3e_content;
+     int rc;
+-    unsigned int iommu_pte_flags = p2m_get_iommu_flags(p2mt, mfn);
++    unsigned int iommu_pte_flags = p2m_get_iommu_flags(p2mt, p2ma, mfn);
+     /*
+      * old_mfn and iommu_old_flags control possible flush/update needs on the
+      * IOMMU: We need to flush when MFN or flags (i.e. permissions) change.
+@@ -577,6 +587,7 @@ p2m_pt_set_entry(struct p2m_domain *p2m,
+                 old_mfn = l1e_get_pfn(*p2m_entry);
+                 iommu_old_flags =
+                     p2m_get_iommu_flags(p2m_flags_to_type(flags),
++                                        p2m_flags_to_access(flags),
+                                         _mfn(old_mfn));
+             }
+             else
+@@ -619,9 +630,10 @@ p2m_pt_set_entry(struct p2m_domain *p2m,
+                                    0, L1_PAGETABLE_ENTRIES);
+         ASSERT(p2m_entry);
+         old_mfn = l1e_get_pfn(*p2m_entry);
++        flags = l1e_get_flags(*p2m_entry);
+         iommu_old_flags =
+-            p2m_get_iommu_flags(p2m_flags_to_type(l1e_get_flags(*p2m_entry)),
+-                                _mfn(old_mfn));
++            p2m_get_iommu_flags(p2m_flags_to_type(flags),
++                                p2m_flags_to_access(flags), _mfn(old_mfn));
+ 
+         if ( mfn_valid(mfn) || p2m_allows_invalid_mfn(p2mt) )
+             entry_content = p2m_l1e_from_pfn(mfn_x(mfn),
+@@ -649,6 +661,7 @@ p2m_pt_set_entry(struct p2m_domain *p2m,
+                 old_mfn = l1e_get_pfn(*p2m_entry);
+                 iommu_old_flags =
+                     p2m_get_iommu_flags(p2m_flags_to_type(flags),
++                                        p2m_flags_to_access(flags),
+                                         _mfn(old_mfn));
+             }
+             else
+--- a/xen/include/asm-x86/p2m.h
++++ b/xen/include/asm-x86/p2m.h
+@@ -903,7 +903,8 @@ static inline void p2m_altp2m_check(stru
+ /*
+  * p2m type to IOMMU flags
+  */
+-static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt, mfn_t mfn)
++static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt,
++                                               p2m_access_t p2ma, mfn_t mfn)
+ {
+     unsigned int flags;
+ 

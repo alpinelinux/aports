@@ -1,0 +1,385 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: IOMMU: generalize VT-d's tracking of mapped RMRR regions
+
+In order to re-use it elsewhere, move the logic to vendor independent
+code and strip it of RMRR specifics.
+
+Note that the prior "map" parameter gets folded into the new "p2ma" one
+(which AMD IOMMU code will want to make use of), assigning alternative
+meaning ("unmap") to p2m_access_x. Prepare set_identity_p2m_entry() and
+p2m_get_iommu_flags() for getting passed access types other than
+p2m_access_rw (in the latter case just for p2m_mmio_direct requests).
+
+Note also that, to be on the safe side, an overlap check gets added to
+the main loop of iommu_identity_mapping().
+
+This is part of XSA-378.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -1353,7 +1353,7 @@ int set_identity_p2m_entry(struct domain
+         if ( !is_iommu_enabled(d) )
+             return 0;
+         return iommu_legacy_map(d, _dfn(gfn_l), _mfn(gfn_l), PAGE_ORDER_4K,
+-                                IOMMUF_readable | IOMMUF_writable);
++                                p2m_access_to_iommu_flags(p2ma));
+     }
+ 
+     gfn_lock(p2m, gfn, 0);
+--- a/xen/drivers/passthrough/vtd/iommu.c
++++ b/xen/drivers/passthrough/vtd/iommu.c
+@@ -42,12 +42,6 @@
+ #include "vtd.h"
+ #include "../ats.h"
+ 
+-struct mapped_rmrr {
+-    struct list_head list;
+-    u64 base, end;
+-    unsigned int count;
+-};
+-
+ /* Possible unfiltered LAPIC/MSI messages from untrusted sources? */
+ bool __read_mostly untrusted_msi;
+ 
+@@ -1800,17 +1794,12 @@ out:
+ static void iommu_domain_teardown(struct domain *d)
+ {
+     struct domain_iommu *hd = dom_iommu(d);
+-    struct mapped_rmrr *mrmrr, *tmp;
+     const struct acpi_drhd_unit *drhd;
+ 
+     if ( list_empty(&acpi_drhd_units) )
+         return;
+ 
+-    list_for_each_entry_safe ( mrmrr, tmp, &hd->arch.mapped_rmrrs, list )
+-    {
+-        list_del(&mrmrr->list);
+-        xfree(mrmrr);
+-    }
++    iommu_identity_map_teardown(d);
+ 
+     ASSERT(is_iommu_enabled(d));
+ 
+@@ -1966,74 +1955,6 @@ static void iommu_set_pgd(struct domain
+         pagetable_get_paddr(pagetable_from_mfn(pgd_mfn));
+ }
+ 
+-static int rmrr_identity_mapping(struct domain *d, bool_t map,
+-                                 const struct acpi_rmrr_unit *rmrr,
+-                                 u32 flag)
+-{
+-    unsigned long base_pfn = rmrr->base_address >> PAGE_SHIFT_4K;
+-    unsigned long end_pfn = PAGE_ALIGN_4K(rmrr->end_address) >> PAGE_SHIFT_4K;
+-    struct mapped_rmrr *mrmrr;
+-    struct domain_iommu *hd = dom_iommu(d);
+-
+-    ASSERT(pcidevs_locked());
+-    ASSERT(rmrr->base_address < rmrr->end_address);
+-
+-    /*
+-     * No need to acquire hd->arch.mapping_lock: Both insertion and removal
+-     * get done while holding pcidevs_lock.
+-     */
+-    list_for_each_entry( mrmrr, &hd->arch.mapped_rmrrs, list )
+-    {
+-        if ( mrmrr->base == rmrr->base_address &&
+-             mrmrr->end == rmrr->end_address )
+-        {
+-            int ret = 0;
+-
+-            if ( map )
+-            {
+-                ++mrmrr->count;
+-                return 0;
+-            }
+-
+-            if ( --mrmrr->count )
+-                return 0;
+-
+-            while ( base_pfn < end_pfn )
+-            {
+-                if ( clear_identity_p2m_entry(d, base_pfn) )
+-                    ret = -ENXIO;
+-                base_pfn++;
+-            }
+-
+-            list_del(&mrmrr->list);
+-            xfree(mrmrr);
+-            return ret;
+-        }
+-    }
+-
+-    if ( !map )
+-        return -ENOENT;
+-
+-    while ( base_pfn < end_pfn )
+-    {
+-        int err = set_identity_p2m_entry(d, base_pfn, p2m_access_rw, flag);
+-
+-        if ( err )
+-            return err;
+-        base_pfn++;
+-    }
+-
+-    mrmrr = xmalloc(struct mapped_rmrr);
+-    if ( !mrmrr )
+-        return -ENOMEM;
+-    mrmrr->base = rmrr->base_address;
+-    mrmrr->end = rmrr->end_address;
+-    mrmrr->count = 1;
+-    list_add_tail(&mrmrr->list, &hd->arch.mapped_rmrrs);
+-
+-    return 0;
+-}
+-
+ static int intel_iommu_add_device(u8 devfn, struct pci_dev *pdev)
+ {
+     struct acpi_rmrr_unit *rmrr;
+@@ -2065,7 +1986,9 @@ static int intel_iommu_add_device(u8 dev
+              * Since RMRRs are always reserved in the e820 map for the hardware
+              * domain, there shouldn't be a conflict.
+              */
+-            ret = rmrr_identity_mapping(pdev->domain, 1, rmrr, 0);
++            ret = iommu_identity_mapping(pdev->domain, p2m_access_rw,
++                                         rmrr->base_address, rmrr->end_address,
++                                         0);
+             if ( ret )
+                 dprintk(XENLOG_ERR VTDPREFIX, "d%d: RMRR mapping failed\n",
+                         pdev->domain->domain_id);
+@@ -2110,7 +2033,8 @@ static int intel_iommu_remove_device(u8
+          * Any flag is nothing to clear these mappings but here
+          * its always safe and strict to set 0.
+          */
+-        rmrr_identity_mapping(pdev->domain, 0, rmrr, 0);
++        iommu_identity_mapping(pdev->domain, p2m_access_x, rmrr->base_address,
++                               rmrr->end_address, 0);
+     }
+ 
+     return domain_context_unmap(pdev->domain, devfn, pdev);
+@@ -2309,7 +2233,8 @@ static void __hwdom_init setup_hwdom_rmr
+          * domain, there shouldn't be a conflict. So its always safe and
+          * strict to set 0.
+          */
+-        ret = rmrr_identity_mapping(d, 1, rmrr, 0);
++        ret = iommu_identity_mapping(d, p2m_access_rw, rmrr->base_address,
++                                     rmrr->end_address, 0);
+         if ( ret )
+             dprintk(XENLOG_ERR VTDPREFIX,
+                      "IOMMU: mapping reserved region failed\n");
+@@ -2480,7 +2405,9 @@ static int reassign_device_ownership(
+                  * Any RMRR flag is always ignored when remove a device,
+                  * but its always safe and strict to set 0.
+                  */
+-                ret = rmrr_identity_mapping(source, 0, rmrr, 0);
++                ret = iommu_identity_mapping(source, p2m_access_x,
++                                             rmrr->base_address,
++                                             rmrr->end_address, 0);
+                 if ( ret != -ENOENT )
+                     return ret;
+             }
+@@ -2577,7 +2504,8 @@ static int intel_iommu_assign_device(
+              PCI_BUS(bdf) == bus &&
+              PCI_DEVFN2(bdf) == devfn )
+         {
+-            ret = rmrr_identity_mapping(d, 1, rmrr, flag);
++            ret = iommu_identity_mapping(d, p2m_access_rw, rmrr->base_address,
++                                         rmrr->end_address, flag);
+             if ( ret )
+             {
+                 int rc;
+--- a/xen/drivers/passthrough/x86/iommu.c
++++ b/xen/drivers/passthrough/x86/iommu.c
+@@ -139,7 +139,7 @@ int arch_iommu_domain_init(struct domain
+     struct domain_iommu *hd = dom_iommu(d);
+ 
+     spin_lock_init(&hd->arch.mapping_lock);
+-    INIT_LIST_HEAD(&hd->arch.mapped_rmrrs);
++    INIT_LIST_HEAD(&hd->arch.identity_maps);
+ 
+     return 0;
+ }
+@@ -148,6 +148,99 @@ void arch_iommu_domain_destroy(struct do
+ {
+ }
+ 
++struct identity_map {
++    struct list_head list;
++    paddr_t base, end;
++    p2m_access_t access;
++    unsigned int count;
++};
++
++int iommu_identity_mapping(struct domain *d, p2m_access_t p2ma,
++                           paddr_t base, paddr_t end,
++                           unsigned int flag)
++{
++    unsigned long base_pfn = base >> PAGE_SHIFT_4K;
++    unsigned long end_pfn = PAGE_ALIGN_4K(end) >> PAGE_SHIFT_4K;
++    struct identity_map *map;
++    struct domain_iommu *hd = dom_iommu(d);
++
++    ASSERT(pcidevs_locked());
++    ASSERT(base < end);
++
++    /*
++     * No need to acquire hd->arch.mapping_lock: Both insertion and removal
++     * get done while holding pcidevs_lock.
++     */
++    list_for_each_entry( map, &hd->arch.identity_maps, list )
++    {
++        if ( map->base == base && map->end == end )
++        {
++            int ret = 0;
++
++            if ( p2ma != p2m_access_x )
++            {
++                if ( map->access != p2ma )
++                    return -EADDRINUSE;
++                ++map->count;
++                return 0;
++            }
++
++            if ( --map->count )
++                return 0;
++
++            while ( base_pfn < end_pfn )
++            {
++                if ( clear_identity_p2m_entry(d, base_pfn) )
++                    ret = -ENXIO;
++                base_pfn++;
++            }
++
++            list_del(&map->list);
++            xfree(map);
++
++            return ret;
++        }
++
++        if ( end >= map->base && map->end >= base )
++            return -EADDRINUSE;
++    }
++
++    if ( p2ma == p2m_access_x )
++        return -ENOENT;
++
++    while ( base_pfn < end_pfn )
++    {
++        int err = set_identity_p2m_entry(d, base_pfn, p2ma, flag);
++
++        if ( err )
++            return err;
++        base_pfn++;
++    }
++
++    map = xmalloc(struct identity_map);
++    if ( !map )
++        return -ENOMEM;
++    map->base = base;
++    map->end = end;
++    map->access = p2ma;
++    map->count = 1;
++    list_add_tail(&map->list, &hd->arch.identity_maps);
++
++    return 0;
++}
++
++void iommu_identity_map_teardown(struct domain *d)
++{
++    struct domain_iommu *hd = dom_iommu(d);
++    struct identity_map *map, *tmp;
++
++    list_for_each_entry_safe ( map, tmp, &hd->arch.identity_maps, list )
++    {
++        list_del(&map->list);
++        xfree(map);
++    }
++}
++
+ static bool __hwdom_init hwdom_iommu_map(const struct domain *d,
+                                          unsigned long pfn,
+                                          unsigned long max_pfn)
+--- a/xen/include/asm-x86/iommu.h
++++ b/xen/include/asm-x86/iommu.h
+@@ -16,6 +16,7 @@
+ 
+ #include <xen/errno.h>
+ #include <xen/list.h>
++#include <xen/mem_access.h>
+ #include <xen/spinlock.h>
+ #include <asm/apicdef.h>
+ #include <asm/processor.h>
+@@ -49,7 +50,7 @@ struct arch_iommu
+     spinlock_t mapping_lock;            /* io page table lock */
+     int agaw;     /* adjusted guest address width, 0 is level 2 30-bit */
+     u64 iommu_bitmap;              /* bitmap of iommu(s) that the domain uses */
+-    struct list_head mapped_rmrrs;
++    struct list_head identity_maps;
+ 
+     /* amd iommu support */
+     int paging_mode;
+@@ -112,6 +113,11 @@ static inline void iommu_disable_x2apic(
+         iommu_ops.disable_x2apic();
+ }
+ 
++int iommu_identity_mapping(struct domain *d, p2m_access_t p2ma,
++                           paddr_t base, paddr_t end,
++                           unsigned int flag);
++void iommu_identity_map_teardown(struct domain *d);
++
+ extern bool untrusted_msi;
+ 
+ int pi_update_irte(const struct pi_desc *pi_desc, const struct pirq *pirq,
+--- a/xen/include/asm-x86/p2m.h
++++ b/xen/include/asm-x86/p2m.h
+@@ -900,6 +900,34 @@ struct p2m_domain *p2m_get_altp2m(struct
+ static inline void p2m_altp2m_check(struct vcpu *v, uint16_t idx) {}
+ #endif
+ 
++/* p2m access to IOMMU flags */
++static inline unsigned int p2m_access_to_iommu_flags(p2m_access_t p2ma)
++{
++    switch ( p2ma )
++    {
++    case p2m_access_rw:
++    case p2m_access_rwx:
++        return IOMMUF_readable | IOMMUF_writable;
++
++    case p2m_access_r:
++    case p2m_access_rx:
++    case p2m_access_rx2rw:
++        return IOMMUF_readable;
++
++    case p2m_access_w:
++    case p2m_access_wx:
++        return IOMMUF_writable;
++
++    case p2m_access_n:
++    case p2m_access_x:
++    case p2m_access_n2rwx:
++        return 0;
++    }
++
++    ASSERT_UNREACHABLE();
++    return 0;
++}
++
+ /*
+  * p2m type to IOMMU flags
+  */
+@@ -921,9 +949,10 @@ static inline unsigned int p2m_get_iommu
+         flags = IOMMUF_readable;
+         break;
+     case p2m_mmio_direct:
+-        flags = IOMMUF_readable;
+-        if ( !rangeset_contains_singleton(mmio_ro_ranges, mfn_x(mfn)) )
+-            flags |= IOMMUF_writable;
++        flags = p2m_access_to_iommu_flags(p2ma);
++        if ( (flags & IOMMUF_writable) &&
++             rangeset_contains_singleton(mmio_ro_ranges, mfn_x(mfn)) )
++            flags &= ~IOMMUF_writable;
+         break;
+     default:
+         flags = 0;

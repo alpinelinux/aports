@@ -1,0 +1,218 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: AMD/IOMMU: correct device unity map handling
+
+Blindly assuming all addresses between any two such ranges, specified by
+firmware in the ACPI tables, should also be unity-mapped can't be right.
+Nor can it be correct to merge ranges with differing permissions. Track
+ranges individually; don't merge at all, but check for overlaps instead.
+This requires bubbling up error indicators, such that IOMMU init can be
+failed when allocation of a new tracking struct wasn't possible, or an
+overlap was detected.
+
+At this occasion also stop ignoring
+amd_iommu_reserve_domain_unity_map()'s return value.
+
+This is part of XSA-378 / CVE-2021-28695.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+
+--- a/xen/drivers/passthrough/amd/iommu.h
++++ b/xen/drivers/passthrough/amd/iommu.h
+@@ -107,20 +107,24 @@ struct amd_iommu {
+     struct list_head ats_devices;
+ };
+ 
++struct ivrs_unity_map {
++    bool read:1;
++    bool write:1;
++    paddr_t addr;
++    unsigned long length;
++    struct ivrs_unity_map *next;
++};
++
+ struct ivrs_mappings {
+     uint16_t dte_requestor_id;
+     bool valid:1;
+     bool dte_allow_exclusion:1;
+-    bool unity_map_enable:1;
+-    bool write_permission:1;
+-    bool read_permission:1;
+ 
+     /* ivhd device data settings */
+     uint8_t device_flags;
+ 
+-    unsigned long addr_range_start;
+-    unsigned long addr_range_length;
+     struct amd_iommu *iommu;
++    struct ivrs_unity_map *unity_map;
+ 
+     /* per device interrupt remapping table */
+     void *intremap_table;
+--- a/xen/drivers/passthrough/amd/iommu_acpi.c
++++ b/xen/drivers/passthrough/amd/iommu_acpi.c
+@@ -146,32 +146,48 @@ static int __init reserve_iommu_exclusio
+     return 0;
+ }
+ 
+-static void __init reserve_unity_map_for_device(
+-    u16 seg, u16 bdf, unsigned long base,
+-    unsigned long length, u8 iw, u8 ir)
++static int __init reserve_unity_map_for_device(
++    uint16_t seg, uint16_t bdf, unsigned long base,
++    unsigned long length, bool iw, bool ir)
+ {
+     struct ivrs_mappings *ivrs_mappings = get_ivrs_mappings(seg);
+-    unsigned long old_top, new_top;
++    struct ivrs_unity_map *unity_map = ivrs_mappings[bdf].unity_map;
+ 
+-    /* need to extend unity-mapped range? */
+-    if ( ivrs_mappings[bdf].unity_map_enable )
++    /* Check for overlaps. */
++    for ( ; unity_map; unity_map = unity_map->next )
+     {
+-        old_top = ivrs_mappings[bdf].addr_range_start +
+-            ivrs_mappings[bdf].addr_range_length;
+-        new_top = base + length;
+-        if ( old_top > new_top )
+-            new_top = old_top;
+-        if ( ivrs_mappings[bdf].addr_range_start < base )
+-            base = ivrs_mappings[bdf].addr_range_start;
+-        length = new_top - base;
+-    }
+-
+-    /* extend r/w permissioms and keep aggregate */
+-    ivrs_mappings[bdf].write_permission = iw;
+-    ivrs_mappings[bdf].read_permission = ir;
+-    ivrs_mappings[bdf].unity_map_enable = true;
+-    ivrs_mappings[bdf].addr_range_start = base;
+-    ivrs_mappings[bdf].addr_range_length = length;
++        /*
++         * Exact matches are okay. This can in particular happen when
++         * register_exclusion_range_for_device() calls here twice for the
++         * same (s,b,d,f).
++         */
++        if ( base == unity_map->addr && length == unity_map->length &&
++             ir == unity_map->read && iw == unity_map->write )
++            return 0;
++
++        if ( unity_map->addr + unity_map->length > base &&
++             base + length > unity_map->addr )
++        {
++            AMD_IOMMU_DEBUG("IVMD Error: overlap [%lx,%lx) vs [%lx,%lx)\n",
++                            base, base + length, unity_map->addr,
++                            unity_map->addr + unity_map->length);
++            return -EPERM;
++        }
++    }
++
++    /* Populate and insert a new unity map. */
++    unity_map = xmalloc(struct ivrs_unity_map);
++    if ( !unity_map )
++        return -ENOMEM;
++
++    unity_map->read = ir;
++    unity_map->write = iw;
++    unity_map->addr = base;
++    unity_map->length = length;
++    unity_map->next = ivrs_mappings[bdf].unity_map;
++    ivrs_mappings[bdf].unity_map = unity_map;
++
++    return 0;
+ }
+ 
+ static int __init register_exclusion_range_for_all_devices(
+@@ -194,13 +210,13 @@ static int __init register_exclusion_ran
+         length = range_top - base;
+         /* reserve r/w unity-mapped page entries for devices */
+         /* note: these entries are part of the exclusion range */
+-        for ( bdf = 0; bdf < ivrs_bdf_entries; bdf++ )
+-            reserve_unity_map_for_device(seg, bdf, base, length, iw, ir);
++        for ( bdf = 0; !rc && bdf < ivrs_bdf_entries; bdf++ )
++            rc = reserve_unity_map_for_device(seg, bdf, base, length, iw, ir);
+         /* push 'base' just outside of virtual address space */
+         base = iommu_top;
+     }
+     /* register IOMMU exclusion range settings */
+-    if ( limit >= iommu_top )
++    if ( !rc && limit >= iommu_top )
+     {
+         for_each_amd_iommu( iommu )
+         {
+@@ -242,15 +258,15 @@ static int __init register_exclusion_ran
+         length = range_top - base;
+         /* reserve unity-mapped page entries for device */
+         /* note: these entries are part of the exclusion range */
+-        reserve_unity_map_for_device(seg, bdf, base, length, iw, ir);
+-        reserve_unity_map_for_device(seg, req, base, length, iw, ir);
++        rc = reserve_unity_map_for_device(seg, bdf, base, length, iw, ir) ?:
++             reserve_unity_map_for_device(seg, req, base, length, iw, ir);
+ 
+         /* push 'base' just outside of virtual address space */
+         base = iommu_top;
+     }
+ 
+     /* register IOMMU exclusion range settings for device */
+-    if ( limit >= iommu_top  )
++    if ( !rc && limit >= iommu_top  )
+     {
+         rc = reserve_iommu_exclusion_range(iommu, base, limit,
+                                            false /* all */, iw, ir);
+@@ -281,15 +297,15 @@ static int __init register_exclusion_ran
+         length = range_top - base;
+         /* reserve r/w unity-mapped page entries for devices */
+         /* note: these entries are part of the exclusion range */
+-        for ( bdf = 0; bdf < ivrs_bdf_entries; bdf++ )
++        for ( bdf = 0; !rc && bdf < ivrs_bdf_entries; bdf++ )
+         {
+             if ( iommu == find_iommu_for_device(iommu->seg, bdf) )
+             {
+-                reserve_unity_map_for_device(iommu->seg, bdf, base, length,
+-                                             iw, ir);
+                 req = get_ivrs_mappings(iommu->seg)[bdf].dte_requestor_id;
+-                reserve_unity_map_for_device(iommu->seg, req, base, length,
+-                                             iw, ir);
++                rc = reserve_unity_map_for_device(iommu->seg, bdf, base, length,
++                                                  iw, ir) ?:
++                     reserve_unity_map_for_device(iommu->seg, req, base, length,
++                                                  iw, ir);
+             }
+         }
+ 
+@@ -298,7 +314,7 @@ static int __init register_exclusion_ran
+     }
+ 
+     /* register IOMMU exclusion range settings */
+-    if ( limit >= iommu_top )
++    if ( !rc && limit >= iommu_top )
+         rc = reserve_iommu_exclusion_range(iommu, base, limit,
+                                            true /* all */, iw, ir);
+ 
+--- a/xen/drivers/passthrough/amd/pci_amd_iommu.c
++++ b/xen/drivers/passthrough/amd/pci_amd_iommu.c
+@@ -366,15 +366,17 @@ static int amd_iommu_assign_device(struc
+     struct ivrs_mappings *ivrs_mappings = get_ivrs_mappings(pdev->seg);
+     int bdf = PCI_BDF2(pdev->bus, devfn);
+     int req_id = get_dma_requestor_id(pdev->seg, bdf);
++    const struct ivrs_unity_map *unity_map;
+ 
+-    if ( ivrs_mappings[req_id].unity_map_enable )
++    for ( unity_map = ivrs_mappings[req_id].unity_map; unity_map;
++          unity_map = unity_map->next )
+     {
+-        amd_iommu_reserve_domain_unity_map(
+-            d,
+-            ivrs_mappings[req_id].addr_range_start,
+-            ivrs_mappings[req_id].addr_range_length,
+-            ivrs_mappings[req_id].write_permission,
+-            ivrs_mappings[req_id].read_permission);
++        int rc = amd_iommu_reserve_domain_unity_map(
++                     d, unity_map->addr, unity_map->length,
++                     unity_map->write, unity_map->read);
++
++        if ( rc )
++            return rc;
+     }
+ 
+     return reassign_device(pdev->domain, d, devfn, pdev);
