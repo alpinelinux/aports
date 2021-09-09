@@ -1,0 +1,186 @@
+diff --git a/config.m4 b/config.m4
+index 5a3fe1a..6178d4e 100644
+--- a/config.m4
++++ b/config.m4
+@@ -5,6 +5,15 @@ Make sure that the comment is aligned:
+ [  --with-msgpack             Include msgpack support])
+ 
+ if test "$PHP_MSGPACK" != "no"; then
++  AC_MSG_CHECKING([for APC/APCU includes])
++  if test -f "$phpincludedir/ext/apcu/apc_serializer.h"; then
++    apc_inc_path="$phpincludedir"
++    AC_MSG_RESULT([APCU in $apc_inc_path])
++    AC_DEFINE(HAVE_APCU_SUPPORT,1,[Whether to enable apcu support])
++  else
++    AC_MSG_RESULT([not found])
++  fi
++
+   PHP_NEW_EXTENSION(msgpack, msgpack.c msgpack_pack.c msgpack_unpack.c msgpack_class.c msgpack_convert.c, $ext_shared)
+ 
+   ifdef([PHP_INSTALL_HEADERS],
+diff --git a/msgpack.c b/msgpack.c
+index bc01848..1d332b5 100644
+--- a/msgpack.c
++++ b/msgpack.c
+@@ -13,6 +13,10 @@
+ #include "ext/session/php_session.h" /* for php_session_register_serializer */
+ #endif
+ 
++#if defined(HAVE_APCU_SUPPORT)
++#include "ext/apcu/apc_serializer.h"
++#endif /* HAVE_APCU_SUPPORT */
++
+ #include "php_msgpack.h"
+ #include "msgpack_pack.h"
+ #include "msgpack_unpack.h"
+@@ -54,6 +58,12 @@ PHP_INI_END()
+ PS_SERIALIZER_FUNCS(msgpack);
+ #endif
+ 
++#if defined(HAVE_APCU_SUPPORT)
++/** Apc serializer function prototypes */
++static int APC_SERIALIZER_NAME(msgpack) (APC_SERIALIZER_ARGS);
++static int APC_UNSERIALIZER_NAME(msgpack) (APC_UNSERIALIZER_ARGS);
++#endif
++
+ static zend_function_entry msgpack_functions[] = {
+     ZEND_FE(msgpack_serialize, arginfo_msgpack_serialize)
+     ZEND_FE(msgpack_unserialize, arginfo_msgpack_unserialize)
+@@ -88,6 +98,13 @@ static ZEND_MINIT_FUNCTION(msgpack) /* {{{ */ {
+     php_session_register_serializer("msgpack", PS_SERIALIZER_ENCODE_NAME(msgpack), PS_SERIALIZER_DECODE_NAME(msgpack));
+ #endif
+ 
++#if defined(HAVE_APCU_SUPPORT)
++    apc_register_serializer("msgpack",
++        APC_SERIALIZER_NAME(msgpack),
++        APC_UNSERIALIZER_NAME(msgpack),
++        NULL);
++#endif
++
+     msgpack_init_class();
+ 
+     REGISTER_LONG_CONSTANT("MESSAGEPACK_OPT_PHPONLY",
+@@ -109,6 +126,11 @@ static ZEND_MINFO_FUNCTION(msgpack) /* {{{ */ {
+     php_info_print_table_row(2, "MessagePack Support", "enabled");
+ #if HAVE_PHP_SESSION
+     php_info_print_table_row(2, "Session Support", "enabled" );
++#endif
++#if defined(HAVE_APCU_SUPPORT)
++    php_info_print_table_row(2, "MessagePack APCu Serializer ABI", APC_SERIALIZER_ABI);
++#else
++    php_info_print_table_row(2, "MessagePack APCu Serializer ABI", "no");
+ #endif
+     php_info_print_table_row(2, "extension Version", PHP_MSGPACK_VERSION);
+     php_info_print_table_row(2, "header Version", MSGPACK_VERSION);
+@@ -300,6 +322,30 @@ static ZEND_FUNCTION(msgpack_unserialize) /* {{{ */ {
+ }
+ /* }}} */
+ 
++#if defined(HAVE_APCU_SUPPORT)
++static int APC_SERIALIZER_NAME(msgpack) ( APC_SERIALIZER_ARGS ) /* {{{ */ {
++    smart_str res = {0};
++    php_msgpack_serialize(&res, (zval *) value);
++
++    if (res.s) {
++        smart_str_0(&res);
++        *buf = (unsigned char *) estrndup(ZSTR_VAL(res.s), ZSTR_LEN(res.s));
++        *buf_len = ZSTR_LEN(res.s);
++        return 1;
++    }
++    return 0;
++}
++/* }}} */
++
++static int APC_UNSERIALIZER_NAME(msgpack) ( APC_UNSERIALIZER_ARGS ) /* {{{ */ {
++    if (buf_len > 0 && php_msgpack_unserialize(value, buf, buf_len) == SUCCESS) {
++        return 1;
++    }
++    return 0;
++}
++/* }}} */
++#endif
++
+ /*
+  * Local variables:
+  * tab-width: 4
+diff --git a/tests/029.phpt b/tests/029.phpt
+index a7e3887..45eb732 100644
+--- a/tests/029.phpt
++++ b/tests/029.phpt
+@@ -44,6 +44,7 @@ msgpack
+ 
+ MessagePack Support => enabled
+ Session Support => enabled
++MessagePack APCu Serializer ABI => %s
+ extension Version => %s
+ header Version => %s
+ 
+diff --git a/tests/apcu.phpt b/tests/apcu.phpt
+new file mode 100644
+index 0000000..7f1c554
+--- /dev/null
++++ b/tests/apcu.phpt
+@@ -0,0 +1,63 @@
++--TEST--
++APCu serialization
++--INI--
++apc.enabled=1
++apc.enable_cli=1
++apc.serializer=msgpack
++--SKIPIF--
++<?php
++if (!extension_loaded("msgpack")) print "skip";
++if (!extension_loaded("apcu")) {
++   echo "skip needs APCu enabled";
++}
++?>
++--FILE--
++<?php
++echo ini_get('apc.serializer'), "\n";
++
++apcu_store('foo', 100);
++var_dump(apcu_fetch('foo'));
++
++$foo = 'hello world';
++
++apcu_store('foo', $foo);
++var_dump(apcu_fetch('foo'));
++
++apcu_store('foo\x00bar', $foo);
++var_dump(apcu_fetch('foo\x00bar'));
++
++apcu_store('foo', ['foo' => $foo]);
++var_dump(apcu_fetch('foo'));
++
++class Foo {
++    public $int = 10;
++    protected $array = [];
++    private $string = 'foo';
++}
++
++$a = new Foo;
++apcu_store('foo', $a);
++unset($a);
++var_dump(apcu_fetch('foo'));
++
++?>
++===DONE===
++--EXPECT--
++msgpack
++int(100)
++string(11) "hello world"
++string(11) "hello world"
++array(1) {
++  ["foo"]=>
++  string(11) "hello world"
++}
++object(Foo)#1 (3) {
++  ["int"]=>
++  int(10)
++  ["array":protected]=>
++  array(0) {
++  }
++  ["string":"Foo":private]=>
++  string(3) "foo"
++}
++===DONE===
