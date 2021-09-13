@@ -1,0 +1,186 @@
+From: Dermot Bradley <dermot_bradley@yahoo.com>
+Date: Thu, 26 Aug 2021 00:58 +0100
+Subject: [PATCH] cloud-init: Add doas support
+
+Add doas support to users_groups module.
+
+---
+
+diff -aur a/cloudinit/config/cc_users_groups.py b/cloudinit/config/cc_users_groups.py
+--- a/cloudinit/config/cc_users_groups.py
++++ b/cloudinit/config/cc_users_groups.py
+@@ -26,6 +26,9 @@
+ config keys for an entry in ``users`` are as follows:
+ 
+     - ``name``: The user's login name
++    - ``doas``: Optional. Doas rule to use, list of Doas rules to use or False.
++      Default: none. An absence of doas key, or a value of none or false
++      will result in no doas rules being written for the user.
+     - ``expiredate``: Optional. Date on which the user's account will be
+       disabled. Default: none
+     - ``gecos``: Optional. Comment about the user, usually a comma-separated
+@@ -76,14 +79,20 @@
+     if the cloud-config can be intercepted. SSH authentication is preferred.
+ 
+ .. note::
++    If specifying a doas rule for a user, ensure that the syntax for the rule
++    is valid, as the only checking performed by cloud-init is to ensure that
++    the user referenced in the rule is the correct user.
++
++.. note::
+     If specifying a sudo rule for a user, ensure that the syntax for the rule
+     is valid, as it is not checked by cloud-init.
+ 
+ .. note::
+     Most of these configuration options will not be honored if the user
+     already exists. The following options are the exceptions; they are applied
+-    to already-existing users: ``plain_text_passwd``, ``hashed_passwd``,
+-    ``lock_passwd``, ``sudo``, ``ssh_authorized_keys``, ``ssh_redirect_user``.
++    to already-existing users: ``plain_text_passwd``, ``doas``,
++    ``hashed_passwd``, ``lock_passwd``, ``sudo``, ``ssh_authorized_keys``,
++    ``ssh_redirect_user``.
+ 
+ **Internal name:** ``cc_users_groups``
+ 
+@@ -103,6 +112,7 @@
+         - name: <some_restricted_user>
+           sudo: false
+         - name: <username>
++          doas: <doas config>
+           expiredate: '<date>'
+           gecos: <comment>
+           groups: <additional groups>
+diff -aur a/cloudinit/distros/__init__.py b/cloudinit/distros/__init__.py
+--- a/cloudinit/distros/__init__.py
++++ b/cloudinit/distros/__init__.py
+@@ -71,6 +71,7 @@
+ 
+     usr_lib_exec = "/usr/lib"
+     hosts_fn = "/etc/hosts"
++    ci_doas_fn = "/etc/doas.d/cloud-init.conf"
+     ci_sudoers_fn = "/etc/sudoers.d/90-cloud-init-users"
+     hostname_conf_fn = "/etc/hostname"
+     tz_zone_dir = "/usr/share/zoneinfo"
+@@ -567,6 +568,7 @@
+         * ``plain_text_passwd``
+         * ``hashed_passwd``
+         * ``lock_passwd``
++        * ``doas``
+         * ``sudo``
+         * ``ssh_authorized_keys``
+         * ``ssh_redirect_user``
+@@ -592,6 +594,10 @@
+         if kwargs.get('lock_passwd', True):
+             self.lock_passwd(name)
+ 
++        # Configure doas access
++        if 'doas' in kwargs and kwargs['doas'] is not False:
++            self.write_doas_rules(name, kwargs['doas'])
++
+         # Configure sudo access
+         if 'sudo' in kwargs and kwargs['sudo'] is not False:
+             self.write_sudo_rules(name, kwargs['sudo'])
+@@ -673,6 +679,85 @@
+ 
+         return True
+ 
++    def ensure_doas_dir(self, path):
++        # Ensure the directory actually exists
++        util.ensure_dir(path, 0o750)
++
++    def is_doas_rule_valid(self, user, rule):
++        rule_pattern = r"^(?:permit|deny)" + \
++                       r"(?:\s+(?:nolog|nopass|persist|keepenv|setenv \{[^}]+\})+)*" + \
++                       r"\s+([a-zA-Z0-9_]+)+" + \
++                       r"(?:\s+as\s+[a-zA-Z0-9_]+)*" + \
++                       r"(?:\s+cmd\s+[^\s]+(?:\s+args\s+[^\s]+(?:\s*[^\s]+)*)*)*" + \
++                       r"\s*$"
++
++        LOG.debug("Checking if user '%s' is referenced in doas rule %r",
++                  user, rule)
++
++        valid_match = re.search(rule_pattern, rule)
++        if valid_match:
++            LOG.debug("User '%s' referenced in doas rule",
++                      valid_match.group(1))
++            if valid_match.group(1) == user:
++                LOG.debug("Correct user is referenced in doas rule")
++                return True
++            else:
++                LOG.debug("Incorrect user '%s' is referenced in doas rule",
++                          valid_match.group(1))
++                return False
++        else:
++            LOG.debug("Doas rule does not appear to reference any user")
++            return False
++
++    def write_doas_rules(self, user, rules, doas_file=None):
++        if not doas_file:
++            doas_file = self.ci_doas_fn
++
++        if isinstance(rules, (list, tuple)):
++            for rule in rules:
++                if not self.is_doas_rule_valid(user, rule):
++                    msg = "Invalid Doas rule %r for user '%s', not writing any Doas rules for user!" % (rule, user)
++                    LOG.error(msg)
++                    return
++        elif isinstance(rules, str):
++            if not self.is_doas_rule_valid(user, rule):
++                msg = "Invalid Doas rule %r for user '%s', not writing any Doas rules for user!" % (rule, user)
++                LOG.error(msg)
++                return
++
++        lines = [
++            '',
++            "# User rules for %s" % user,
++        ]
++        if isinstance(rules, (list, tuple)):
++            for rule in rules:
++                lines.append("%s" % rule)
++        elif isinstance(rules, str):
++            lines.append("%s" % rules)
++        else:
++            msg = "Can not create Doas rule addition with type %r"
++            raise TypeError(msg % (type_utils.obj_name(rules)))
++        content = "\n".join(lines)
++        content += "\n"  # trailing newline
++
++        self.ensure_doas_dir(os.path.dirname(doas_file))
++        if not os.path.exists(doas_file):
++            contents = [
++                util.make_header(),
++                content,
++            ]
++            try:
++                util.write_file(doas_file, "\n".join(contents), 0o440)
++            except IOError as e:
++                util.logexc(LOG, "Failed to write Doas file %s", doas_file)
++                raise e
++        else:
++            try:
++                util.append_file(doas_file, content)
++            except IOError as e:
++                util.logexc(LOG, "Failed to append Doas file %s", doas_file)
++                raise e
++
+     def ensure_sudo_dir(self, path, sudo_base='/etc/sudoers'):
+         # Ensure the dir is included and that
+         # it actually exists as a directory
+diff -aur a/config/cloud.cfg.tmpl b/config/cloud.cfg.tmpl
+--- a/config/cloud.cfg.tmpl
++++ b/config/cloud.cfg.tmpl
+@@ -245,10 +245,13 @@
+      lock_passwd: True
+      gecos: {{ variant }} Cloud User
+ {% endif %}
++{% if variant == "alpine" %}
++     doas: ["permit persist alpine"]
++{% endif %}
+ {% if variant == "suse" %}
+      groups: [cdrom, users]
+ {% elif variant == "alpine" %}
+-     groups: [adm, sudo]
++     groups: [adm, sudo, wheel]
+ {% elif variant == "arch" %}
+      groups: [wheel, users]
+ {% else %}
