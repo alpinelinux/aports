@@ -224,6 +224,7 @@ section_grub_efi() {
 	arm*)	_format="arm-efi";    _efi="bootarm.efi"  ;;
 	x86)	_format="i386-efi";   _efi="bootia32.efi" ;;
 	x86_64) _format="x86_64-efi"; _efi="bootx64.efi"  ;;
+	riscv64) _format="riscv64-efi"; _efi="bootriscv64.efi"  ;;
 	*)	return 0 ;;
 	esac
 
