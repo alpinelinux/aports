@@ -297,7 +297,7 @@ for ARCH in $req_arch; do
 		# create root for caching packages
 		mkdir -p "$APKROOT/etc/apk/cache"
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
-		abuild-apk --arch "$ARCH" --root "$APKROOT" add --initdb
+		apk --arch "$ARCH" --root "$APKROOT" add --initdb
 
 		if [ -z "$REPOS" ]; then
 			warning "no repository set"
@@ -307,7 +307,7 @@ for ARCH in $req_arch; do
 			echo "$repo" >> "$APKROOT/etc/apk/repositories"
 		done
 	fi
-	abuild-apk update --root "$APKROOT"
+	apk update --root "$APKROOT"
 
 	if [ "$_yaml" = "yes" ]; then
 		_yaml_out=${OUTDIR:-.}/latest-releases.yaml
