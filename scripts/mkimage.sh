@@ -272,8 +272,7 @@ fi
 # setup defaults
 if [ -z "$WORKDIR" ]; then
 	WORKDIR="$(mktemp -d -t mkimage.XXXXXX)"
-	trap 'rm -rf $WORKDIR' INT
-	mkdir -p "$WORKDIR"
+	trap 'rm -rf $WORKDIR' INT EXIT
 fi
 req_profiles=${req_profiles:-${all_profiles}}
 req_arch=${req_arch:-${default_arch}}
