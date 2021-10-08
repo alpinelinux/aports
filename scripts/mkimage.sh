@@ -92,7 +92,8 @@ usage() {
 
 $0	[--tag RELEASE] [--outdir OUTDIR] [--workdir WORKDIR]
 		[--arch ARCH] [--profile PROFILE] [--hostkeys] [--simulate]
-		[--repository REPO [--repository REPO]] [--yaml FILE]
+		[--repository REPO [--repository REPO]]
+		[--repositories-file REPO_FILE] [--yaml FILE]
 $0	--help
 
 options:
@@ -101,6 +102,7 @@ options:
 --hostkeys		Copy system apk signing keys to created images
 --outdir		Specify directory for the created images
 --profile		Specify which profiles to build
+--repositories-file	List of repositories to use for the image create
 --repository		Package repository to use for the image create
 --simulate		Don't execute commands
 --tag			Build images for tag RELEASE
@@ -234,6 +236,7 @@ while [ $# -gt 0 ]; do
 	opt="$1"
 	shift
 	case "$opt" in
+	--repositories-file) REPOS_FILE="$1"; shift ;;
 	--repository)
 		if [ -z "$REPOS" ]; then
 			REPOS="$1"
@@ -303,9 +306,13 @@ for ARCH in $req_arch; do
 		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
 		apk --arch "$ARCH" --root "$APKROOT" add --initdb
 
-		echo "$REPOS" > "$APKROOT/etc/apk/repositories"
+		_repositories="$APKROOT/etc/apk/repositories"
+		if [ -n "$REPOS_FILE" ]; then
+			cat "$REPOS_FILE" > "$_repositories"
+		fi
+		echo "$REPOS" >> "$_repositories"
 		for repo in $EXTRAREPOS; do
-			echo "$repo" >> "$APKROOT/etc/apk/repositories"
+			echo "$repo" >> "$_repositories"
 		done
 	fi
 	apk update --root "$APKROOT"
