@@ -1,0 +1,132 @@
+From a02fbadaf59521b5f1af3f05b45933b245093531 Mon Sep 17 00:00:00 2001
+From: Matthew Pickering <matthewtpickering@gmail.com>
+Date: Fri, 11 Jun 2021 10:48:25 +0100
+Subject: [PATCH] Optimiser: Correctly deal with strings starting with unicode
+ characters in exprConApp_maybe
+
+For example:
+
+"\0" is encoded to "C0 80", then the rule would correct use a decoding
+function to work out the first character was "C0 80" but then just used
+BS.tail so the rest of the string was "80". This resulted in
+
+"\0" being transformed into '\C0\80' : unpackCStringUTF8# "80"
+
+Which is obviously bogus.
+
+I rewrote the function to call utf8UnconsByteString directly and avoid
+the roundtrip through Faststring so now the head/tail is computed by the
+same call.
+
+Fixes #19976
+
+(cherry picked from commit 7f6454fb8cd92b2b2ad4e88fa6d81e34d43edb9a)
+---
+ compiler/GHC/Core/SimpleOpt.hs                | 38 +++++++++----------
+ compiler/GHC/Utils/Encoding.hs                |  9 +++++
+ .../tests/simplCore/should_compile/T9400.hs   |  4 ++
+ 3 files changed, 30 insertions(+), 21 deletions(-)
+
+diff --git a/compiler/GHC/Core/SimpleOpt.hs b/compiler/GHC/Core/SimpleOpt.hs
+index 5f1ed2ba528..9fca9d0b4b8 100644
+--- a/compiler/GHC/Core/SimpleOpt.hs
++++ b/compiler/GHC/Core/SimpleOpt.hs
+@@ -52,13 +52,13 @@ import GHC.Builtin.Types
+ import GHC.Builtin.Names
+ import GHC.Types.Basic
+ import GHC.Unit.Module ( Module )
++import GHC.Utils.Encoding
+ import GHC.Utils.Error
+ import GHC.Driver.Session
+ import GHC.Utils.Outputable
+ import GHC.Data.Pair
+ import GHC.Utils.Misc
+ import GHC.Data.Maybe       ( orElse )
+-import GHC.Data.FastString
+ import Data.List
+ import qualified Data.ByteString as BS
+ 
+@@ -841,9 +841,8 @@ calls to unpackCString# and returns:
+ 
+ Just (':', [Char], ['a', unpackCString# "bc"]).
+ 
+-We need to be careful about UTF8 strings here. ""# contains a ByteString, so
+-we must parse it back into a FastString to split off the first character.
+-That way we can treat unpackCString# and unpackCStringUtf8# in the same way.
++We need to be careful about UTF8 strings here. ""# contains an encoded ByteString, so
++we call utf8UnconsByteString to correctly deal with the encoding and splitting.
+ 
+ We must also be careful about
+    lvl = "foo"#
+@@ -852,6 +851,8 @@ to ensure that we see through the let-binding for 'lvl'.  Hence the
+ (exprIsLiteral_maybe .. arg) in the guard before the call to
+ dealWithStringLiteral.
+ 
++The tests for this function are in T9400.
++
+ Note [Push coercions in exprIsConApp_maybe]
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ In #13025 I found a case where we had
+@@ -1204,23 +1205,18 @@ dealWithStringLiteral :: Var -> BS.ByteString -> Coercion
+ -- This is not possible with user-supplied empty literals, GHC.Core.Make.mkStringExprFS
+ -- turns those into [] automatically, but just in case something else in GHC
+ -- generates a string literal directly.
+-dealWithStringLiteral _   str co
+-  | BS.null str
+-  = pushCoDataCon nilDataCon [Type charTy] co
+-
+-dealWithStringLiteral fun str co
+-  = let strFS = mkFastStringByteString str
+-
+-        char = mkConApp charDataCon [mkCharLit (headFS strFS)]
+-        charTail = BS.tail (bytesFS strFS)
+-
+-        -- In singleton strings, just add [] instead of unpackCstring# ""#.
+-        rest = if BS.null charTail
+-                 then mkConApp nilDataCon [Type charTy]
+-                 else App (Var fun)
+-                          (Lit (LitString charTail))
+-
+-    in pushCoDataCon consDataCon [Type charTy, char, rest] co
++dealWithStringLiteral fun str co =
++  case utf8UnconsByteString str of
++    Nothing -> pushCoDataCon nilDataCon [Type charTy] co
++    Just (char, charTail) ->
++      let char_expr = mkConApp charDataCon [mkCharLit char]
++          -- In singleton strings, just add [] instead of unpackCstring# ""#.
++          rest = if BS.null charTail
++                   then mkConApp nilDataCon [Type charTy]
++                   else App (Var fun)
++                            (Lit (LitString charTail))
++
++      in pushCoDataCon consDataCon [Type charTy, char_expr, rest] co
+ 
+ {-
+ Note [Unfolding DFuns]
+diff --git a/compiler/GHC/Utils/Encoding.hs b/compiler/GHC/Utils/Encoding.hs
+index 24637a3bffa..273706befe5 100644
+--- a/compiler/GHC/Utils/Encoding.hs
++++ b/compiler/GHC/Utils/Encoding.hs
+@@ -18,6 +18,7 @@ module GHC.Utils.Encoding (
+         utf8CharStart,
+         utf8DecodeChar,
+         utf8DecodeByteString,
++        utf8UnconsByteString,
+         utf8DecodeShortByteString,
+         utf8DecodeStringLazy,
+         utf8EncodeChar,
+@@ -154,6 +155,14 @@ utf8DecodeByteString :: ByteString -> [Char]
+ utf8DecodeByteString (BS.PS fptr offset len)
+   = utf8DecodeStringLazy fptr offset len
+ 
++utf8UnconsByteString :: ByteString -> Maybe (Char, ByteString)
++utf8UnconsByteString (BS.PS _ _ 0) = Nothing
++utf8UnconsByteString (BS.PS fptr offset len)
++  = unsafeDupablePerformIO $
++      withForeignPtr fptr $ \ptr -> do
++        let (c,n) = utf8DecodeChar (ptr `plusPtr` offset)
++        return $ Just (c, BS.PS fptr (offset + n) (len - n))
++
+ utf8DecodeStringLazy :: ForeignPtr Word8 -> Int -> Int -> [Char]
+ utf8DecodeStringLazy fp offset (I# len#)
+   = unsafeDupablePerformIO $ do
