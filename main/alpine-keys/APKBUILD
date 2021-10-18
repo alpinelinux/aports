@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-keys
 pkgver=2.4
-pkgrel=0
+pkgrel=1
 pkgdesc="Public keys for Alpine Linux packages"
 url="https://alpinelinux.org"
 # we install arch specific keys to /etc so we cannot do arch=noarch
@@ -32,6 +32,7 @@ _arch_keys="
 	mips64:alpine-devel@lists.alpinelinux.org-5e69ca50.rsa.pub
 
 	riscv64:alpine-devel@lists.alpinelinux.org-60ac2099.rsa.pub
+	riscv64:alpine-devel@lists.alpinelinux.org-616db30d.rsa.pub
 	"
 
 for _i in $_arch_keys; do
@@ -121,4 +122,5 @@ bad4da65221150a5d4cc6f63981e4dd203d40844d32e82c17f346eee5350e460e32d28f0e231a2b7
 83fc29066f6073418ecf01176ce24c1c0e788508f3083a97691706e2c78323e53448060fb0d2abb8118a759570f1f0db9d39953c63fe26fe06da2be05dff393c  alpine-devel@lists.alpinelinux.org-616ac3bc.rsa.pub
 66ce9677e9c2a7961d5d7bc5b162ed3114a7aef6d01181073c1f42a9934966eecded2ec09deb210f5a389d434d1641ba35fe3abdd5246b2e97d5a5b26a945c5c  alpine-devel@lists.alpinelinux.org-5e69ca50.rsa.pub
 34514100e502f449dcabe0aa550232c3330ed2f0b789b977eb228d4ac86afc93479474ac005914992a3b47c18ee3eb32ca27ccd0d392700a8f11f47d64a78969  alpine-devel@lists.alpinelinux.org-60ac2099.rsa.pub
+7cea57204a50d72bddff201c509ccbf06773d87062a3ead0a206cc6e4a00e0960f52d21f7cee7aaec6a4abba7a697e2e2e7f630fa1ccef7ee2c33908fca18998  alpine-devel@lists.alpinelinux.org-616db30d.rsa.pub
 "
