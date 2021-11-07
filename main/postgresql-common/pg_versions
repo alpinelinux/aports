@@ -1,0 +1,216 @@
+#!/bin/sh
+#---help---
+# Usage: pg_versions [options] [action [args...]]
+#
+# Change the default PostgreSQL version, i.e. update symlinks in /etc, /usr/bin
+# and /usr/share/man to the selected major version.
+#
+# Actions:
+#   get-default
+#     Print the current default version (major version number).
+#     Exits with status 101 if no default version is set (i.e. path
+#     /usr/libexec/postgresql/PG_VERSION does not exist).
+#
+#   set-default <pgver>
+#     Install symlinks for version <pgver>; either a major version number of
+#     installed postgresql package or "latest" for the latest installed
+#     version.
+#
+#   fix
+#     Re-install symlinks for the current default version and/or remove broken
+#     symlinks.
+#
+#   list
+#     List all installed PostgreSQL versions (major version numbers) sorted
+#     from the highest to the lowest. Exits with status 101 if no version found.
+#
+#   uninstall
+#     Remove all symlinks (it does *not* uninstall any packages).
+#
+# Options:
+#   -q         Be quiet, don't print errors.
+#   -v         Be verbose.
+#   -h --help  Show this message and exit.
+#
+# Please report bugs at <https://gitlab.alpinelinux.org/alpine/aports/-/issues>.
+#---help---
+#
+# NOTE: This is a poor man's "alternatives" replacement specifically for PostgreSQL.
+#  It will be replaced by a generic "alternatives" mechanism in the future.
+set -eu -o pipefail
+
+readonly PROGNAME='pg_versions'
+readonly DIR_LINKS='/etc/postgresql /usr/libexec/postgresql /usr/share/postgresql'
+
+
+help() {
+	local tag='#---help---'
+	sed -n "/^$tag/,/^$tag/{/^$tag/d; s/^# \\?//; p}" "$0"
+}
+
+err() {
+	$QUIET || printf "$PROGNAME: %s\n" "$@" >&2
+}
+
+die() {
+	err "$2"
+	exit $1
+}
+
+_ln() {
+	local opt=''; $VERBOSE && opt='-v'
+	ln $opt "$@"
+}
+
+_rm() {
+	local opt=''; $VERBOSE && opt='-v'
+	rm $opt "$@"
+}
+
+mklink() {
+	local target=$1
+	local link=$2
+
+	if [ -e "$link" ] && ! [ -L "$link" ]; then
+		err "WARN: $link exists and it's not a symlink!"
+		return 1
+	else
+		_ln -sfn "$target" "$link"
+	fi
+}
+
+must_run_as_root() {
+	[ "$(id -u)" -eq 0 ] || die 100 'must be run as root'
+}
+
+create_links() {
+	local pgver=$1
+	local dir file rc=0
+
+	for dir in $DIR_LINKS; do
+		[ -d "$dir$pgver" ] || continue
+		mklink postgresql$pgver $dir || rc=1
+	done
+
+	for file in /usr/libexec/postgresql/*; do
+		[ -f "$file" ] || continue
+		mklink $file /usr/bin/${file##*/} || rc=1
+	done
+
+	local mandir='/usr/share/postgresql/man'
+	for dir in "$mandir"/man[0-9]; do
+		[ -d "$dir" ] || continue
+		mkdir -p /usr/share/man/${dir##*/} || rc=1
+
+		for file in $dir/*; do
+			[ -f "$file" ] || continue
+			mklink $file /usr/share/man/${file#$mandir} || rc=1
+		done
+	done
+
+	return $rc
+}
+
+clean_broken_links() {
+	local link
+
+	for link in $DIR_LINKS; do
+		[ -e "$link" ] || _rm -f "$link"
+	done
+
+	for link in $(find /usr/bin /usr/share/man -type l ! -exec test -e {} \; -print); do
+		case "$(readlink $link)" in
+			/usr/libexec/postgresql/* | /usr/share/postgresql/*) _rm "$link";;
+		esac
+	done
+}
+
+list() {
+	cat /usr/libexec/postgresql[0-9]*/PG_VERSION 2>/dev/null | sort -nr \
+		|| die 101 'no postgresql is installed'
+}
+
+get_default() {
+	cat /usr/libexec/postgresql/PG_VERSION 2>/dev/null \
+		|| die 101 'symlink for the default version does not exist'
+}
+
+set_default() {
+	local pgver=$1
+	local rc=0
+
+	[ "$pgver" = latest ] && pgver=$(list | head -n1)
+
+	[ -f /usr/libexec/postgresql$1/PG_VERSION ] \
+		|| die 101 "postgresql$1-client is not installed"
+
+	create_links "$pgver" || rc=1
+	clean_broken_links || rc=1
+
+	return $rc
+}
+
+fix() {
+	local pgver rc=0
+
+	if pgver=$(cat /usr/libexec/postgresql/PG_VERSION 2>/dev/null); then
+		create_links "$pgver" || rc=1
+	fi
+	clean_broken_links || rc=1
+
+	return $rc
+}
+
+uninstall() {
+	local rc=0
+
+	local link; for link in $DIR_LINKS; do
+		[ -L $link ] || continue
+		_rm $link || rc=1
+	done
+	clean_broken_links || rc=1
+
+	return $rc
+}
+
+
+ACTION=
+case "${1:-}" in
+	-h | --help) help; exit 0;;
+	'' | -*) ;;
+	*) ACTION=$1; shift;;
+esac
+
+QUIET=false
+VERBOSE=false
+while getopts ':hqv' OPT; do
+	case "$OPT" in
+		h) help; exit 0;;
+		q) QUIET=true; VERBOSE=false;;
+		v) QUIET=false; VERBOSE=true;;
+		\?) die 100 "unknown option -$OPTARG (see '$PROGNAME -h')";;
+	esac
+done
+shift $((OPTIND - 1))
+
+if ! [ "$ACTION" ] && [ $# -gt 0 ]; then
+	ACTION=$1; shift
+fi
+
+case "$ACTION" in
+	get-default | '')
+		ACTION='get_default'
+	;;
+	set-default)
+		[ $# -ge 1 ] || die 100 "missing argument <pgver> (see '$PROGNAME -h')"
+		must_run_as_root
+		ACTION='set_default'
+	;;
+	fix | uninstall)
+		must_run_as_root
+	;;
+	list) ;;
+	*) die 100 "unknown action '$ACTION' (see '$PROGNAME -h')";;
+esac
+
+$ACTION "$@"
