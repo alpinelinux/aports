@@ -5,7 +5,7 @@ rocks_trees = {
    -- System-wide Lua and Lua/C modules for specific Lua version installed by apk.
    { name = 'distro-modules',
      root = '/usr' },
-   -- System-wide Lua modules compatible with Lua 5.1-5.3 installed by apk.
+   -- System-wide Lua modules compatible with Lua 5.1-5.4 installed by apk.
    { name = 'distro-modules-common',
      root = '/usr',
      lua_dir = '/usr/share/lua/common',
