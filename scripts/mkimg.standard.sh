@@ -39,24 +39,24 @@ profile_extended() {
 	boot_addons="amd-ucode intel-ucode"
 	initrd_ucode="/boot/amd-ucode.img /boot/intel-ucode.img"
 	apks="$apks
-		ethtool hwids lftp links doas
-		logrotate lua5.3 lsof lm_sensors lxc lxc-templates nano
-		pciutils screen strace sudo tmux
+		coreutils ethtool hwids doas
+		logrotate lsof lm_sensors lxc lxc-templates nano
+		pciutils strace sudo tmux
 		usbutils v86d vim xtables-addons curl
 
 		acct arpon arpwatch awall bridge-utils bwm-ng
 		ca-certificates conntrack-tools cutter cyrus-sasl dhcp
-		dhcpcd dhcrelay dnsmasq email fping fprobe haserl htop
+		dhcpcd dhcrelay dnsmasq fping fprobe htop
 		igmpproxy ip6tables iproute2 iproute2-qos
 		iptables iputils irssi ldns-tools links
 		ncurses-terminfo net-snmp net-snmp-tools nrpe nsd
 		opennhrp openvpn pingu ppp quagga
-		quagga-nhrp rng-tools rpcbind sntpc socat ssmtp strongswan
+		quagga-nhrp rng-tools sntpc socat ssmtp strongswan
 		sysklogd tcpdump tinyproxy unbound
-		wireless-tools wpa_supplicant zonenotify
+		wireguard-tools wireless-tools wpa_supplicant zonenotify
 
 		btrfs-progs cksfv dosfstools cryptsetup
-		cciss_vol_status e2fsprogs e2fsprogs-extra efibootmgr
+		e2fsprogs e2fsprogs-extra efibootmgr f2fs-tools
 		grub-bios grub-efi lvm2 mdadm mkinitfs mtools nfs-utils
 		parted rsync sfdisk syslinux util-linux xfsprogs zfs
 		"
