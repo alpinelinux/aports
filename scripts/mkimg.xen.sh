@@ -17,6 +17,6 @@ profile_xen() {
 	arch="x86_64"
 	kernel_cmdline="nomodeset"
 	xen_params=""
-	apks="$apks ethtool lvm2 mdadm multipath-tools rng-tools sfdisk xen xen-bridge"
+	apks="$apks ethtool lvm2 mdadm multipath-tools rng-tools sfdisk xen xen-bridge syslinux"
 #	apkovl="genapkovl-xen.sh"
 }
