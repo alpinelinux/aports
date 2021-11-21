@@ -1,0 +1,288 @@
+From 943f4af2870a1b87ec47f4a07eca057308d4198c Mon Sep 17 00:00:00 2001
+From: Angus Ainslie <angus@akkea.ca>
+Date: Fri, 18 Dec 2020 14:25:38 +0000
+Subject: [PATCH 1/3] src/gclue-location.c: don't parse NULL timestamps
+
+Fix crashes due to NULL timestamps
+
+Signed-off-by: Angus Ainslie <angus@akkea.ca>
+---
+ src/gclue-location.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/gclue-location.c b/src/gclue-location.c
+index 7ca5a83..9aac51e 100644
+--- a/src/gclue-location.c
++++ b/src/gclue-location.c
+@@ -493,6 +493,9 @@ parse_nmea_timestamp (const char *nmea_ts)
+         now = g_date_time_new_now_utc ();
+         ret = g_date_time_to_unix (now);
+ 
++	if( now == NULL)
++                goto parse_error;
++
+         if (strlen (nmea_ts) < 6) {
+                 if (strlen (nmea_ts) >= 1)
+                         /* Empty string just means no ts, so no warning */
+@@ -516,6 +519,8 @@ parse_nmea_timestamp (const char *nmea_ts)
+                                   hours,
+                                   minutes,
+                                   seconds);
++        if (ts == NULL)
++                goto parse_error;
+ 
+         if (g_date_time_difference (ts, now) > TIME_DIFF_THRESHOLD) {
+                 g_debug ("NMEA timestamp '%s' in future. Assuming yesterday's.",
+-- 
+GitLab
+
+
+From 6ebfc32f636b6e48ffab32c6286348166a351cd2 Mon Sep 17 00:00:00 2001
+From: Angus Ainslie <angus@akkea.ca>
+Date: Sun, 27 Dec 2020 00:12:18 +0000
+Subject: [PATCH 2/3] src/gclue-nmea-source.c: add a unix socket file option
+
+Make the unix socket option and an option to specify the path.
+
+Signed-off-by: Angus Ainslie <angus@akkea.ca>
+---
+ data/geoclue.conf.in    |  3 +++
+ src/gclue-config.c      | 14 ++++++++++++++
+ src/gclue-config.h      |  4 ++++
+ src/gclue-main.c        | 10 ++++++++++
+ src/gclue-nmea-source.c |  7 +++++++
+ 5 files changed, 38 insertions(+)
+
+diff --git a/data/geoclue.conf.in b/data/geoclue.conf.in
+index bebe471..5478bc2 100644
+--- a/data/geoclue.conf.in
++++ b/data/geoclue.conf.in
+@@ -18,6 +18,9 @@ whitelist=@demo_agent@gnome-shell;io.elementary.desktop.agent-geoclue2
+ # Fetch location from NMEA sources on local network?
+ enable=true
+ 
++# use aa nmea unix socket as the data source
++# nmea-socket=/var/run/gps-share.sock
++
+ # 3G source configuration options
+ [3g]
+ 
+diff --git a/src/gclue-config.c b/src/gclue-config.c
+index 95f78df..8e07910 100644
+--- a/src/gclue-config.c
++++ b/src/gclue-config.c
+@@ -45,6 +45,7 @@ struct _GClueConfigPrivate
+         gboolean enable_wifi_source;
+         char *wifi_submit_url;
+         char *wifi_submit_nick;
++        char *nmea_socket;
+ 
+         GList *app_configs;
+ };
+@@ -432,6 +433,12 @@ gclue_config_is_system_component (GClueConfig *config,
+         return (app_config != NULL && app_config->system);
+ }
+ 
++const char *
++gclue_config_get_nmea_socket (GClueConfig *config)
++{
++        return config->priv->nmea_socket;
++}
++
+ const char *
+ gclue_config_get_wifi_url (GClueConfig *config)
+ {
+@@ -494,6 +501,13 @@ gclue_config_get_enable_nmea_source (GClueConfig *config)
+         return config->priv->enable_nmea_source;
+ }
+ 
++void
++gclue_config_set_nmea_socket (GClueConfig *config,
++                                   const char  *nmea_socket)
++{
++        config->priv->nmea_socket = g_strdup(nmea_socket);
++}
++
+ void
+ gclue_config_set_wifi_submit_data (GClueConfig *config,
+                                    gboolean     submit)
+diff --git a/src/gclue-config.h b/src/gclue-config.h
+index 6dc10c9..bcf0bef 100644
+--- a/src/gclue-config.h
++++ b/src/gclue-config.h
+@@ -73,6 +73,10 @@ GClueAppPerm        gclue_config_get_app_perm           (GClueConfig     *config
+                                                          GClueClientInfo *app_info);
+ gboolean            gclue_config_is_system_component    (GClueConfig     *config,
+                                                          const char      *desktop_id);
++const char *        gclue_config_get_nmea_socket        (GClueConfig     *config);
++void                gclue_config_set_nmea_socket        (GClueConfig     *config,
++                                                         const char  *nmea_socket);
++
+ const char *        gclue_config_get_wifi_url           (GClueConfig     *config);
+ const char *        gclue_config_get_wifi_submit_url    (GClueConfig     *config);
+ const char *        gclue_config_get_wifi_submit_nick   (GClueConfig     *config);
+diff --git a/src/gclue-main.c b/src/gclue-main.c
+index 811666f..d14cadc 100644
+--- a/src/gclue-main.c
++++ b/src/gclue-main.c
+@@ -36,6 +36,7 @@ static gboolean version = FALSE;
+ static gint inactivity_timeout = 60;
+ static gboolean submit_data = FALSE;
+ static char *submit_nick = NULL;
++static char *nmea_socket = NULL;
+ 
+ static GOptionEntry entries[] =
+ {
+@@ -67,6 +68,13 @@ static GOptionEntry entries[] =
+           &submit_nick,
+           N_("Nickname to submit network data under (2-32 characters)"),
+           "NICK" },
++        { "nmea-socket",
++          'u',
++          0,
++          G_OPTION_ARG_STRING,
++          &nmea_socket,
++          N_("Path to nmea UNIX socket"),
++          NULL },
+         { NULL }
+ };
+ 
+@@ -180,6 +188,8 @@ main (int argc, char **argv)
+                 gclue_config_set_wifi_submit_data (config, submit_data);
+         if (submit_nick != NULL)
+                 gclue_config_set_wifi_submit_nick (config, submit_nick);
++        if (nmea_socket != NULL)
++                gclue_config_set_nmea_socket (config, nmea_socket);
+ 
+         owner_id = g_bus_own_name (G_BUS_TYPE_SYSTEM,
+                                    BUS_NAME,
+diff --git a/src/gclue-nmea-source.c b/src/gclue-nmea-source.c
+index 9f7e6cf..bf0bea8 100644
+--- a/src/gclue-nmea-source.c
++++ b/src/gclue-nmea-source.c
+@@ -23,6 +23,7 @@
+ 
+ #include <stdlib.h>
+ #include <glib.h>
++#include "gclue-config.h"
+ #include "gclue-nmea-source.h"
+ #include "gclue-location.h"
+ #include "config.h"
+@@ -675,6 +676,8 @@ gclue_nmea_source_init (GClueNMEASource *source)
+         AvahiServiceBrowser *service_browser;
+         const AvahiPoll *poll_api;
+         AvahiGLibPoll *glib_poll;
++        const char *nmea_socket;
++        GClueConfig *config;
+         int error;
+ 
+         source->priv = G_TYPE_INSTANCE_GET_PRIVATE ((source),
+@@ -687,6 +690,10 @@ gclue_nmea_source_init (GClueNMEASource *source)
+ 
+         priv->cancellable = g_cancellable_new ();
+ 
++        config = gclue_config_get_singleton ();
++
++        nmea_socket = gclue_config_get_nmea_socket (config);
++
+         avahi_client_new (poll_api,
+                           0,
+                           client_callback,
+-- 
+GitLab
+
+
+From d3f47cb10bb3f2262dd4b2caec29f2427efbcaa3 Mon Sep 17 00:00:00 2001
+From: Angus Ainslie <angus@akkea.ca>
+Date: Fri, 18 Dec 2020 14:32:42 +0000
+Subject: [PATCH 3/3] src/gclue-nmea-source.c: add the Unix socket nmea source
+
+gps-share can export a Unix socket so open that as an nmea source
+
+Signed-off-by: Angus Ainslie <angus@akkea.ca>
+---
+ src/gclue-nmea-source.c | 40 +++++++++++++++++++++++++++++++++-------
+ 1 file changed, 33 insertions(+), 7 deletions(-)
+
+diff --git a/src/gclue-nmea-source.c b/src/gclue-nmea-source.c
+index bf0bea8..7461b79 100644
+--- a/src/gclue-nmea-source.c
++++ b/src/gclue-nmea-source.c
+@@ -34,6 +34,7 @@
+ #include <avahi-common/malloc.h>
+ #include <avahi-common/error.h>
+ #include <avahi-glib/glib-watch.h>
++#include <gio/gunixsocketaddress.h>
+ 
+ typedef struct AvahiServiceInfo AvahiServiceInfo;
+ 
+@@ -202,6 +203,12 @@ add_new_service (GClueNMEASource *source,
+         GEnumClass *enum_class;
+         GEnumValue *enum_value;
+ 
++        if (port == 0) {
++	        accuracy = GCLUE_ACCURACY_LEVEL_EXACT;
++
++	        goto CREATE_SERVICE;
++        }
++
+         node = avahi_string_list_find (txt, "accuracy");
+ 
+         if (node == NULL) {
+@@ -598,6 +605,8 @@ static void
+ connect_to_service (GClueNMEASource *source)
+ {
+         GClueNMEASourcePrivate *priv = source->priv;
++        GSocketAddress *addr;
++        GSocketConnectable *connectable;
+ 
+         if (priv->all_services == NULL)
+                 return;
+@@ -610,13 +619,23 @@ connect_to_service (GClueNMEASource *source)
+          */
+         priv->active_service = (AvahiServiceInfo *) priv->all_services->data;
+ 
+-        g_socket_client_connect_to_host_async
+-                (priv->client,
+-                 priv->active_service->host_name,
+-                 priv->active_service->port,
+-                 priv->cancellable,
+-                 on_connection_to_location_server,
+-                 source);
++        if ( priv->active_service->port != 0 )
++		g_socket_client_connect_to_host_async
++			(priv->client,
++			 priv->active_service->host_name,
++			 priv->active_service->port,
++			 priv->cancellable,
++			 on_connection_to_location_server,
++			 source);
++        else {
++		addr = g_unix_socket_address_new(priv->active_service->host_name);
++		connectable = G_SOCKET_CONNECTABLE (addr);
++		g_socket_client_connect_async (priv->client,
++                               connectable,
++                               priv->cancellable,
++                               on_connection_to_location_server,
++                               source);
++        }
+ }
+ 
+ static void
+@@ -693,6 +712,13 @@ gclue_nmea_source_init (GClueNMEASource *source)
+         config = gclue_config_get_singleton ();
+ 
+         nmea_socket = gclue_config_get_nmea_socket (config);
++        if (nmea_socket != NULL) {
++                add_new_service (source,
++                                 "nmea-socket",
++                                 nmea_socket,
++                                 0,
++                                 NULL);
++        }
+ 
+         avahi_client_new (poll_api,
+                           0,
+-- 
+GitLab
+
