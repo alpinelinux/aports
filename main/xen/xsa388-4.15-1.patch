@@ -1,0 +1,174 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: x86/PoD: deal with misaligned GFNs
+
+Users of XENMEM_decrease_reservation and XENMEM_populate_physmap aren't
+required to pass in order-aligned GFN values. (While I consider this
+bogus, I don't think we can fix this there, as that might break existing
+code, e.g Linux'es swiotlb, which - while affecting PV only - until
+recently had been enforcing only page alignment on the original
+allocation.) Only non-PoD code paths (guest_physmap_{add,remove}_page(),
+p2m_set_entry()) look to be dealing with this properly (in part by being
+implemented inefficiently, handling every 4k page separately).
+
+Introduce wrappers taking care of splitting the incoming request into
+aligned chunks, without putting much effort in trying to determine the
+largest possible chunk at every iteration.
+
+Also "handle" p2m_set_entry() failure for non-order-0 requests by
+crashing the domain in one more place. Alongside putting a log message
+there, also add one to the other similar path.
+
+Note regarding locking: This is left in the actual worker functions on
+the assumption that callers aren't guaranteed atomicity wrt acting on
+multiple pages at a time. For mis-aligned GFNs gfn_lock() wouldn't have
+locked the correct GFN range anyway, if it didn't simply resolve to
+p2m_lock(), and for well-behaved callers there continues to be only a
+single iteration, i.e. behavior is unchanged for them. (FTAOD pulling
+out just pod_lock() into p2m_pod_decrease_reservation() would result in
+a lock order violation.)
+
+This is CVE-2021-28704 and CVE-2021-28707 / part of XSA-388.
+
+Fixes: 3c352011c0d3 ("x86/PoD: shorten certain operations on higher order ranges")
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+
+--- a/xen/arch/x86/mm/p2m-pod.c
++++ b/xen/arch/x86/mm/p2m-pod.c
+@@ -496,7 +496,7 @@ p2m_pod_zero_check_superpage(struct p2m_
+ 
+ 
+ /*
+- * This function is needed for two reasons:
++ * This pair of functions is needed for two reasons:
+  * + To properly handle clearing of PoD entries
+  * + To "steal back" memory being freed for the PoD cache, rather than
+  *   releasing it.
+@@ -504,8 +504,8 @@ p2m_pod_zero_check_superpage(struct p2m_
+  * Once both of these functions have been completed, we can return and
+  * allow decrease_reservation() to handle everything else.
+  */
+-unsigned long
+-p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn, unsigned int order)
++static unsigned long
++decrease_reservation(struct domain *d, gfn_t gfn, unsigned int order)
+ {
+     unsigned long ret = 0, i, n;
+     struct p2m_domain *p2m = p2m_get_hostp2m(d);
+@@ -552,8 +552,10 @@ p2m_pod_decrease_reservation(struct doma
+          * All PoD: Mark the whole region invalid and tell caller
+          * we're done.
+          */
+-        if ( p2m_set_entry(p2m, gfn, INVALID_MFN, order, p2m_invalid,
+-                           p2m->default_access) )
++        int rc = p2m_set_entry(p2m, gfn, INVALID_MFN, order, p2m_invalid,
++                               p2m->default_access);
++
++        if ( rc )
+         {
+             /*
+              * If this fails, we can't tell how much of the range was changed.
+@@ -561,7 +563,12 @@ p2m_pod_decrease_reservation(struct doma
+              * impossible.
+              */
+             if ( order != 0 )
++            {
++                printk(XENLOG_G_ERR
++                       "%pd: marking GFN %#lx (order %u) as non-PoD failed: %d\n",
++                       d, gfn_x(gfn), order, rc);
+                 domain_crash(d);
++            }
+             goto out_unlock;
+         }
+         ret = 1UL << order;
+@@ -670,6 +677,22 @@ out_unlock:
+     return ret;
+ }
+ 
++unsigned long
++p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn, unsigned int order)
++{
++    unsigned long left = 1UL << order, ret = 0;
++    unsigned int chunk_order = find_first_set_bit(gfn_x(gfn) | left);
++
++    do {
++        ret += decrease_reservation(d, gfn, chunk_order);
++
++        left -= 1UL << chunk_order;
++        gfn = gfn_add(gfn, 1UL << chunk_order);
++    } while ( left );
++
++    return ret;
++}
++
+ void p2m_pod_dump_data(struct domain *d)
+ {
+     struct p2m_domain *p2m = p2m_get_hostp2m(d);
+@@ -1273,19 +1296,15 @@ remap_and_retry:
+     return true;
+ }
+ 
+-
+-int
+-guest_physmap_mark_populate_on_demand(struct domain *d, unsigned long gfn_l,
+-                                      unsigned int order)
++static int
++mark_populate_on_demand(struct domain *d, unsigned long gfn_l,
++                        unsigned int order)
+ {
+     struct p2m_domain *p2m = p2m_get_hostp2m(d);
+     gfn_t gfn = _gfn(gfn_l);
+     unsigned long i, n, pod_count = 0;
+     int rc = 0;
+ 
+-    if ( !paging_mode_translate(d) )
+-        return -EINVAL;
+-
+     gfn_lock(p2m, gfn, order);
+ 
+     P2M_DEBUG("mark pod gfn=%#lx\n", gfn_l);
+@@ -1325,12 +1344,44 @@ guest_physmap_mark_populate_on_demand(st
+ 
+         ioreq_request_mapcache_invalidate(d);
+     }
++    else if ( order )
++    {
++        /*
++         * If this failed, we can't tell how much of the range was changed.
++         * Best to crash the domain.
++         */
++        printk(XENLOG_G_ERR
++               "%pd: marking GFN %#lx (order %u) as PoD failed: %d\n",
++               d, gfn_l, order, rc);
++        domain_crash(d);
++    }
+ 
+ out:
+     gfn_unlock(p2m, gfn, order);
+ 
+     return rc;
+ }
++
++int
++guest_physmap_mark_populate_on_demand(struct domain *d, unsigned long gfn,
++                                      unsigned int order)
++{
++    unsigned long left = 1UL << order;
++    unsigned int chunk_order = find_first_set_bit(gfn | left);
++    int rc;
++
++    if ( !paging_mode_translate(d) )
++        return -EINVAL;
++
++    do {
++        rc = mark_populate_on_demand(d, gfn, chunk_order);
++
++        left -= 1UL << chunk_order;
++        gfn += 1UL << chunk_order;
++    } while ( !rc && left );
++
++    return rc;
++}
+ 
+ void p2m_pod_init(struct p2m_domain *p2m)
+ {
