@@ -125,7 +125,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   lzip abuild ncurses libedit openssh \
 	   libcap-ng util-linux libaio lvm2 popt xz \
 	   json-c argon2 cryptsetup zstd kmod lddtree mkinitfs \
-	   community/go libffi \
+	   libffi \
 	   brotli libev c-ares cunit nghttp2 curl \
 	   pcre libssh2 \
 	   libxml2 pax-utils llvm14 community/ghc community/rust \
