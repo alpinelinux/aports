@@ -1,27 +1,34 @@
-Patch-Source: https://src.fedoraproject.org/rpms/postgresql/blob/f35/f/postgresql-datalayout-mismatch-on-s390.patch
-From 0edaa982336823d4d7af8f10b91579fe0099ef3d Mon Sep 17 00:00:00 2001
 From: Tom Stellard <tstellar@redhat.com>
-Date: Tue, 20 Apr 2021 20:14:21 -0700
-Subject: [PATCH] jit: Workaround potential datalayout mismatch on s390x
+From: Jakub Jirutka <jakub@jirutka.cz>
+Date: Sat, 18 Dec 2021 23:09:03 +0100
+Subject: [PATCH] jit: Workaround datalayout mismatch on s390x and x86
 
-LLVM's s390x target uses a different datalayout for z13 and newer processors.
-If llvmjit_types.bc is compiled to target a processor older than z13, and
-then the JIT runs on a z13 or newer processor, then there will be a mismatch
-in datalayouts between llvmjit_types.bc and the JIT engine.  This mismatch
-causes the JIT to fail at runtime.
----
- src/backend/jit/llvm/llvmjit.c | 46 ++++++++++++++++++++++++++++++++--
- 1 file changed, 44 insertions(+), 2 deletions(-)
+This patch is based on https://src.fedoraproject.org/rpms/postgresql/blob/f35/f/postgresql-datalayout-mismatch-on-s390.patch.
+
+Original description:
+
+> LLVM's s390x target uses a different datalayout for z13 and newer processors.
+> If llvmjit_types.bc is compiled to target a processor older than z13, and
+> then the JIT runs on a z13 or newer processor, then there will be a mismatch
+> in datalayouts between llvmjit_types.bc and the JIT engine.  This mismatch
+> causes the JIT to fail at runtime.
+
+We encountered an analogous problem even on x86 (legacy 32bit arch).
+However, I didn't wanna waste my time researching what exact CPU features
+are problematic on this dead architecture, so I just disabled usage of any
+host specific CPU features when creating the JIT on x86. And while I was on
+it, I also conditioned the s390x workaround for s390x only. -jirutka
 
 diff --git a/src/backend/jit/llvm/llvmjit.c b/src/backend/jit/llvm/llvmjit.c
 index 98a27f08bf..05b6438ba8 100644
 --- a/src/backend/jit/llvm/llvmjit.c
 +++ b/src/backend/jit/llvm/llvmjit.c
-@@ -776,6 +776,35 @@ llvm_compile_module(LLVMJitContext *context)
+@@ -776,7 +776,38 @@
  			 errhidecontext(true)));
  }
  
-+/*
++#if defined(__s390__) || defined(__s390x__)
+ /*
 + * For the systemz target, LLVM uses a different datalayout for z13 and newer
 + * CPUs than it does for older CPUs.  This can cause a mismatch in datalayouts
 + * in the case where the llvm_types_module is compiled with a pre-z13 CPU
@@ -49,11 +56,13 @@ index 98a27f08bf..05b6438ba8 100644
 +	LLVMDisposeTargetData(llvm_layoutref);
 +	return ret;
 +}
++#endif
 +
- /*
++/*
   * Per session initialization.
   */
-@@ -785,6 +814,7 @@ llvm_session_initialize(void)
+ static void
+@@ -785,6 +816,7 @@
  	MemoryContext oldcontext;
  	char	   *error = NULL;
  	char	   *cpu = NULL;
@@ -61,26 +70,31 @@ index 98a27f08bf..05b6438ba8 100644
  	char	   *features = NULL;
  	LLVMTargetMachineRef opt0_tm;
  	LLVMTargetMachineRef opt3_tm;
-@@ -816,10 +846,17 @@ llvm_session_initialize(void)
+@@ -815,11 +847,22 @@
+ 	 * latter is needed because some CPU architectures default to enabling
  	 * features not all CPUs have (weird, huh).
  	 */
++#if !defined(__i386__) && !defined(__i386)  // XXX: quick workaround for 32-bit x86
  	cpu = LLVMGetHostCPUName();
 -	features = LLVMGetHostCPUFeatures();
 +	features = host_features = LLVMGetHostCPUFeatures();
  	elog(DEBUG2, "LLVMJIT detected CPU \"%s\", with features \"%s\"",
  		 cpu, features);
++#endif
  
++#if defined(__s390__) || defined(__s390x__)
 +	if (needs_systemz_workaround())
 +	{
 +		const char *no_vector =",-vector";
 +		features = malloc(sizeof(char) * (strlen(host_features) + strlen(no_vector) + 1));
 +		sprintf(features, "%s%s", host_features, no_vector);
 +	}
++#endif
 +
  	opt0_tm =
  		LLVMCreateTargetMachine(llvm_targetref, llvm_triple, cpu, features,
  								LLVMCodeGenLevelNone,
-@@ -833,8 +870,13 @@ llvm_session_initialize(void)
+@@ -833,8 +876,13 @@
  
  	LLVMDisposeMessage(cpu);
  	cpu = NULL;
@@ -95,6 +109,3 @@ index 98a27f08bf..05b6438ba8 100644
  
  	/* force symbols in main binary to be loaded */
  	LLVMLoadLibraryPermanently(NULL);
--- 
-2.27.0
-
