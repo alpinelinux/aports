@@ -10,7 +10,7 @@ rpi_gen_config() {
 	cat <<-EOF
 	# do not modify this file as it will be overwritten on upgrade.
 	# create and/or modify usercfg.txt instead.
-	# https://www.raspberrypi.org/documentation/configuration/config-txt
+	# https://www.raspberrypi.com/documentation/computers/config_txt.html
 	EOF
 	case "$ARCH" in
 	armhf)
