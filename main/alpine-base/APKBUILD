@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.15.0
-pkgrel=0
+pkgrel=1
 pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
@@ -46,6 +46,6 @@ ID=alpine
 VERSION_ID=$pkgver
 PRETTY_NAME="Alpine Linux $_rel"
 HOME_URL="https://alpinelinux.org/"
-BUG_REPORT_URL="https://bugs.alpinelinux.org/"
+BUG_REPORT_URL="https://gitlab.alpinelinux.org/alpine/aports/-/issues"
 EOF
 }
