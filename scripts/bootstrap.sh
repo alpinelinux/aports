@@ -116,7 +116,7 @@ fi
 
 # ordered cross-build
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
-	   openssl openssl1.1-compat ca-certificates libmd \
+	   openssl ca-certificates libmd \
 	   gmp mpfr4 mpc1 isl22 cloog libucontext binutils gcc \
 	   libbsd libretls busybox busybox-initscripts make \
 	   apk-tools file \
