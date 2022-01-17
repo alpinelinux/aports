@@ -1,0 +1,148 @@
+From 55c53080dbbd2d81ebd0c3d98bb0e0831d6064d0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pablo=20Correa=20G=C3=B3mez?= <ablocorrea@hotmail.com>
+Date: Sat, 15 Jan 2022 22:51:10 +0100
+Subject: [PATCH 3/5] appstream: implement parsing media_baseurl
+
+This property was not documented for XML data until quite
+recently: https://github.com/ximion/appstream/pull/371
+
+However, remote icons and screenshots generated with appstream-generator
+only contain urls relative to media_baseurl property. Fix all relative uris
+prepending the corresponding media_baseurl for those objects to be downloadable.
+---
+ lib/gs-appstream.c                 | 19 +++++++++
+ lib/gs-appstream.h                 |  2 +
+ plugins/core/gs-plugin-appstream.c | 64 ++++++++++++++++++++++++++++++
+ 3 files changed, 85 insertions(+)
+
+diff --git a/lib/gs-appstream.c b/lib/gs-appstream.c
+index df91dd0f..8e157595 100644
+--- a/lib/gs-appstream.c
++++ b/lib/gs-appstream.c
+@@ -1824,3 +1824,22 @@ gs_appstream_component_add_extra_info (XbBuilderNode *component)
+ 		break;
+ 	}
+ }
++
++/* Resolve any media URIs which are actually relative
++ * paths against the media_baseurl property */
++void
++gs_appstream_component_fix_url (XbBuilderNode *component, const gchar *baseurl)
++{
++	const gchar *text = xb_builder_node_get_text (component);
++	g_autofree gchar *url = NULL;
++
++	if (text == NULL)
++		return;
++
++	if (g_str_has_prefix (text, "http:") ||
++	    g_str_has_prefix (text, "https:"))
++		return;
++
++	url = g_strconcat (baseurl, "/", text, NULL);
++	xb_builder_node_set_text (component, url , -1);
++}
+diff --git a/lib/gs-appstream.h b/lib/gs-appstream.h
+index 5bddf913..fbc68a1a 100644
+--- a/lib/gs-appstream.h
++++ b/lib/gs-appstream.h
+@@ -72,5 +72,7 @@ void		 gs_appstream_component_add_icon	(XbBuilderNode	*component,
+ 							 const gchar	*str);
+ void		 gs_appstream_component_add_provide	(XbBuilderNode	*component,
+ 							 const gchar	*str);
++void		 gs_appstream_component_fix_url		(XbBuilderNode  *component,
++							 const gchar    *baseurl);
+ 
+ G_END_DECLS
+diff --git a/plugins/core/gs-plugin-appstream.c b/plugins/core/gs-plugin-appstream.c
+index 5d61c5b6..950316f2 100644
+--- a/plugins/core/gs-plugin-appstream.c
++++ b/plugins/core/gs-plugin-appstream.c
+@@ -133,6 +133,60 @@ gs_plugin_appstream_add_origin_keyword_cb (XbBuilderFixup *self,
+ 	return TRUE;
+ }
+ 
++static void
++gs_plugin_appstream_media_baseurl_free (gpointer user_data)
++{
++	g_string_free ((GString *) user_data, TRUE);
++}
++
++static gboolean
++gs_plugin_appstream_media_baseurl_cb (XbBuilderFixup *self,
++				      XbBuilderNode *bn,
++				      gpointer user_data,
++				      GError **error)
++{
++	GString *baseurl = user_data;
++	if (g_strcmp0 (xb_builder_node_get_element (bn), "components") == 0) {
++		const gchar *url = xb_builder_node_get_attr (bn, "media_baseurl");
++		if (url == NULL) {
++			g_string_truncate (baseurl, 0);
++			return TRUE;
++		}
++		g_string_assign (baseurl, url);
++		return TRUE;
++	}
++
++	if (baseurl->len == 0)
++		return TRUE;
++
++	if (g_strcmp0 (xb_builder_node_get_element (bn), "icon") == 0) {
++		const gchar *type = xb_builder_node_get_attr (bn, "type");
++		if (g_strcmp0 (type, "remote") != 0)
++			return TRUE;
++		gs_appstream_component_fix_url (bn, baseurl->str);
++	} else if (g_strcmp0 (xb_builder_node_get_element (bn), "screenshots") == 0) {
++		GPtrArray *screenshots = xb_builder_node_get_children (bn);
++		for (guint i = 0; i < screenshots->len; i++) {
++			XbBuilderNode *screenshot = g_ptr_array_index (screenshots, i);
++			GPtrArray *children = NULL;
++			/* Type-check for security */
++			if (g_strcmp0 (xb_builder_node_get_element (screenshot), "screenshot") != 0) {
++				continue;
++			}
++			children = xb_builder_node_get_children (screenshot);
++			for (guint j = 0; j < children->len; j++) {
++				XbBuilderNode *child = g_ptr_array_index (children, j);
++				const gchar *element = xb_builder_node_get_element (child);
++				if (g_strcmp0 (element, "image") != 0 &&
++				    g_strcmp0 (element, "video") != 0)
++					continue;
++				gs_appstream_component_fix_url (child, baseurl->str);
++			}
++		}
++	}
++	return TRUE;
++}
++
+ static gboolean
+ gs_plugin_appstream_load_appdata_fn (GsPlugin *plugin,
+ 				     XbBuilder *builder,
+@@ -398,6 +452,8 @@ gs_plugin_appstream_load_appstream_fn (GsPlugin *plugin,
+ #if LIBXMLB_CHECK_VERSION(0,3,1)
+ 	g_autoptr(XbBuilderFixup) fixup4 = NULL;
+ #endif
++	g_autoptr(XbBuilderFixup) fixup5 = NULL;
++	GString *media_baseurl = g_string_new (NULL);
+ 	g_autoptr(XbBuilderSource) source = xb_builder_source_new ();
+ 
+ 	/* add support for DEP-11 files */
+@@ -453,6 +509,14 @@ gs_plugin_appstream_load_appstream_fn (GsPlugin *plugin,
+ 	xb_builder_source_add_fixup (source, fixup4);
+ #endif
+ 
++	/* prepend media_baseurl to remote relative URLs */
++	fixup5 = xb_builder_fixup_new ("MediaBaseUrl",
++				       gs_plugin_appstream_media_baseurl_cb,
++				       media_baseurl,
++				       gs_plugin_appstream_media_baseurl_free);
++	xb_builder_fixup_set_max_depth (fixup5, 3);
++	xb_builder_source_add_fixup (source, fixup5);
++
+ 	/* success */
+ 	xb_builder_import_source (builder, source);
+ 	return TRUE;
+-- 
+2.25.1
+
