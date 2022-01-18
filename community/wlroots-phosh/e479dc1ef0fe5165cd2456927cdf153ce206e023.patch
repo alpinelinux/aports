@@ -1,0 +1,219 @@
+From e479dc1ef0fe5165cd2456927cdf153ce206e023 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Fri, 29 Jan 2021 16:45:44 +0100
+Subject: [PATCH] xwayland: Allow to retrieve startup-id via _NET_STARTUP_INFO
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A launchee notifies with a "remove"¹ message when done starting up.
+Catch these and forward to the compositor. This allows the compositor to
+end the startup sequence that might have been started by another
+protocol like xdg-activation.
+
+We don't handle other messages since we expect the launcher to use a
+wayland protocol like xdg-activation.
+
+While `_NET_STARTUP_ID` helps to associate toplevels with startup-ids
+this signals the end of the startup sequence.
+
+1) https://specifications.freedesktop.org/startup-notification-spec/startup-notification-latest.txt
+---
+ include/wlr/xwayland.h |  6 +++
+ include/xwayland/xwm.h |  3 ++
+ xwayland/xwayland.c    |  1 +
+ xwayland/xwm.c         | 86 ++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 96 insertions(+)
+
+diff --git a/include/wlr/xwayland.h b/include/wlr/xwayland.h
+index a91638eb..3689b8b3 100644
+--- a/include/wlr/xwayland.h
++++ b/include/wlr/xwayland.h
+@@ -72,6 +72,7 @@ struct wlr_xwayland {
+ 	struct {
+ 		struct wl_signal ready;
+ 		struct wl_signal new_surface;
++		struct wl_signal remove_startup_info;
+ 	} events;
+ 
+ 	/**
+@@ -232,6 +233,11 @@ struct wlr_xwayland_move_event {
+ 	struct wlr_xwayland_surface *surface;
+ };
+ 
++struct wlr_xwayland_remove_startup_info_event  {
++	const char *id;
++	xcb_window_t window;
++};
++
+ struct wlr_xwayland_resize_event {
+ 	struct wlr_xwayland_surface *surface;
+ 	uint32_t edges;
+diff --git a/include/xwayland/xwm.h b/include/xwayland/xwm.h
+index 5e6bfee3..0cdf6ea1 100644
+--- a/include/xwayland/xwm.h
++++ b/include/xwayland/xwm.h
+@@ -56,6 +56,8 @@ enum atom_name {
+ 	TIMESTAMP,
+ 	DELETE,
+ 	NET_STARTUP_ID,
++	NET_STARTUP_INFO,
++	NET_STARTUP_INFO_BEGIN,
+ 	NET_WM_WINDOW_TYPE_NORMAL,
+ 	NET_WM_WINDOW_TYPE_UTILITY,
+ 	NET_WM_WINDOW_TYPE_TOOLTIP,
+@@ -113,6 +115,7 @@ struct wlr_xwm {
+ 	// Surfaces in bottom-to-top stacking order, for _NET_CLIENT_LIST_STACKING
+ 	struct wl_list surfaces_in_stack_order; // wlr_xwayland_surface::stack_link
+ 	struct wl_list unpaired_surfaces; // wlr_xwayland_surface::unpaired_link
++	struct wl_list pending_startup_ids; // pending_startup_id
+ 
+ 	struct wlr_drag *drag;
+ 	struct wlr_xwayland_surface *drag_focus;
+diff --git a/xwayland/xwayland.c b/xwayland/xwayland.c
+index dc782284..86e8c6eb 100644
+--- a/xwayland/xwayland.c
++++ b/xwayland/xwayland.c
+@@ -81,6 +81,7 @@ struct wlr_xwayland *wlr_xwayland_create(struct wl_display *wl_display,
+ 
+ 	wl_signal_init(&xwayland->events.new_surface);
+ 	wl_signal_init(&xwayland->events.ready);
++	wl_signal_init(&xwayland->events.remove_startup_info);
+ 
+ 	struct wlr_xwayland_server_options options = {
+ 		.lazy = lazy,
+diff --git a/xwayland/xwm.c b/xwayland/xwm.c
+index b8b152fb..313bfc0a 100644
+--- a/xwayland/xwm.c
++++ b/xwayland/xwm.c
+@@ -61,6 +61,8 @@ const char *const atom_map[ATOM_LAST] = {
+ 	[TIMESTAMP] = "TIMESTAMP",
+ 	[DELETE] = "DELETE",
+ 	[NET_STARTUP_ID] = "_NET_STARTUP_ID",
++	[NET_STARTUP_INFO] = "_NET_STARTUP_INFO",
++	[NET_STARTUP_INFO_BEGIN] = "_NET_STARTUP_INFO_BEGIN",
+ 	[NET_WM_WINDOW_TYPE_NORMAL] = "_NET_WM_WINDOW_TYPE_NORMAL",
+ 	[NET_WM_WINDOW_TYPE_UTILITY] = "_NET_WM_WINDOW_TYPE_UTILITY",
+ 	[NET_WM_WINDOW_TYPE_TOOLTIP] = "_NET_WM_WINDOW_TYPE_TOOLTIP",
+@@ -89,6 +91,14 @@ const char *const atom_map[ATOM_LAST] = {
+ 	[NET_CLIENT_LIST_STACKING] = "_NET_CLIENT_LIST_STACKING",
+ };
+ 
++#define STARTUP_INFO_REMOVE_PREFIX "remove: ID="
++struct pending_startup_id {
++	char *msg;
++	size_t len;
++	xcb_window_t window;
++	struct wl_list link;
++};
++
+ static const struct wlr_surface_role xwayland_surface_role;
+ 
+ bool wlr_surface_is_xwayland_surface(struct wlr_surface *surface) {
+@@ -1361,6 +1371,73 @@ static void xwm_handle_net_active_window_message(struct wlr_xwm *xwm,
+ 	wlr_signal_emit_safe(&surface->events.request_activate, surface);
+ }
+ 
++static void pending_startup_id_destroy(struct pending_startup_id *pending) {
++	wl_list_remove(&pending->link);
++	free(pending->msg);
++	free(pending);
++}
++
++static void xwm_handle_net_startup_info_message(struct wlr_xwm *xwm,
++		xcb_client_message_event_t *ev) {
++	struct pending_startup_id *pending, *curr = NULL;
++	wl_list_for_each(pending, &xwm->pending_startup_ids, link) {
++		if (pending->window == ev->window) {
++			curr = pending;
++			break;
++		}
++	}
++
++	char *start;
++	size_t buf_len = sizeof(ev->data);
++	if (curr) {
++		curr->msg = realloc(curr->msg, curr->len + buf_len);
++		if (!curr->msg) {
++			pending_startup_id_destroy(curr);
++			return;
++		}
++		start = curr->msg + curr->len;
++		curr->len += buf_len;
++	} else {
++		curr = calloc(1, sizeof(struct pending_startup_id));
++		if (!curr)
++			return;
++		curr->window = ev->window;
++		curr->msg = malloc(buf_len);
++		if (!curr->msg) {
++			free(curr);
++			return;
++		}
++		start = curr->msg;
++		curr->len = buf_len;
++		wl_list_insert(&xwm->pending_startup_ids, &curr->link);
++	}
++
++	char *id = NULL;
++	const char *data = (const char *)ev->data.data8;
++	for (size_t i = 0; i < buf_len; i++) {
++		start[i] = data[i];
++		if (start[i] == '\0') {
++			if (strncmp(curr->msg, STARTUP_INFO_REMOVE_PREFIX,
++					strlen(STARTUP_INFO_REMOVE_PREFIX)) == 0 &&
++					strlen(curr->msg) > strlen(STARTUP_INFO_REMOVE_PREFIX)) {
++				id = curr->msg + strlen(STARTUP_INFO_REMOVE_PREFIX);
++				break;
++			} else {
++				wlr_log(WLR_ERROR, "Unhandled message '%s'\n", curr->msg);
++				pending_startup_id_destroy(curr);
++				return;
++			}
++		}
++	}
++
++	if (id) {
++		struct wlr_xwayland_remove_startup_info_event data = { id, ev->window };
++		wlr_log(WLR_DEBUG, "Got startup id: %s", id);
++		wlr_signal_emit_safe(&xwm->xwayland->events.remove_startup_info, &data);
++		pending_startup_id_destroy(curr);
++	}
++}
++
+ static void xwm_handle_wm_change_state_message(struct wlr_xwm *xwm,
+ 		xcb_client_message_event_t *ev) {
+ 	struct wlr_xwayland_surface *xsurface = lookup_surface(xwm, ev->window);
+@@ -1399,6 +1476,9 @@ static void xwm_handle_client_message(struct wlr_xwm *xwm,
+ 		xwm_handle_wm_protocols_message(xwm, ev);
+ 	} else if (ev->type == xwm->atoms[NET_ACTIVE_WINDOW]) {
+ 		xwm_handle_net_active_window_message(xwm, ev);
++	} else if (ev->type == xwm->atoms[NET_STARTUP_INFO] ||
++			ev->type == xwm->atoms[NET_STARTUP_INFO_BEGIN]) {
++		xwm_handle_net_startup_info_message(xwm, ev);
+ 	} else if (ev->type == xwm->atoms[WM_CHANGE_STATE]) {
+ 		xwm_handle_wm_change_state_message(xwm, ev);
+ 	} else if (!xwm_handle_selection_client_message(xwm, ev)) {
+@@ -1718,6 +1798,11 @@ void xwm_destroy(struct wlr_xwm *xwm) {
+ 	wl_list_remove(&xwm->compositor_destroy.link);
+ 	xcb_disconnect(xwm->xcb_conn);
+ 
++	struct pending_startup_id *pending, *next;
++	wl_list_for_each_safe(pending, next, &xwm->pending_startup_ids, link) {
++		pending_startup_id_destroy(pending);
++	}
++
+ 	xwm->xwayland->xwm = NULL;
+ 	free(xwm);
+ }
+@@ -1958,6 +2043,7 @@ struct wlr_xwm *xwm_create(struct wlr_xwayland *xwayland, int wm_fd) {
+ 	wl_list_init(&xwm->surfaces);
+ 	wl_list_init(&xwm->surfaces_in_stack_order);
+ 	wl_list_init(&xwm->unpaired_surfaces);
++	wl_list_init(&xwm->pending_startup_ids);
+ 	xwm->ping_timeout = 10000;
+ 
+ 	xwm->xcb_conn = xcb_connect_to_fd(wm_fd, NULL);
+-- 
+GitLab
+
