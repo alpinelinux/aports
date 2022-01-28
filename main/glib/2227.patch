@@ -1,0 +1,397 @@
+From bd7a3e2561ca3809d3633244c26310f0d01bd718 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Mon, 4 Oct 2021 10:04:47 +0200
+Subject: [PATCH 1/3] gappinfo: Modernize GAppInfo signals docs a bit
+
+Use type::signal instead of ::signal so gtk-doc can create links and use
+`` for variable names and GVariant type string bits.
+---
+ gio/gappinfo.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/gio/gappinfo.c b/gio/gappinfo.c
+index eff18da83..eed35a92f 100644
+--- a/gio/gappinfo.c
++++ b/gio/gappinfo.c
+@@ -1147,7 +1147,7 @@ g_app_launch_context_class_init (GAppLaunchContextClass *klass)
+    * @context: the object emitting the signal
+    * @startup_notify_id: the startup notification id for the failed launch
+    *
+-   * The ::launch-failed signal is emitted when a #GAppInfo launch
++   * The #GAppLaunchContext::launch-failed signal is emitted when a #GAppInfo launch
+    * fails. The startup notification id is provided, so that the launcher
+    * can cancel the startup notification.
+    *
+@@ -1166,11 +1166,11 @@ g_app_launch_context_class_init (GAppLaunchContextClass *klass)
+    * @info: the #GAppInfo that was just launched
+    * @platform_data: additional platform-specific data for this launch
+    *
+-   * The ::launched signal is emitted when a #GAppInfo is successfully
++   * The #GAppLaunchContext::launched signal is emitted when a #GAppInfo is successfully
+    * launched. The @platform_data is an GVariant dictionary mapping
+-   * strings to variants (ie a{sv}), which contains additional,
++   * strings to variants (ie `a{sv}`), which contains additional,
+    * platform-specific data about this launch. On UNIX, at least the
+-   * "pid" and "startup-notification-id" keys will be present.
++   * `pid` and `startup-notification-id` keys will be present.
+    *
+    * Since: 2.36
+    */
+-- 
+GitLab
+
+
+From 5890b2bdea351a0a01e2fef84e2febdb1fcc4fd1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Thu, 19 Aug 2021 12:15:27 +0200
+Subject: [PATCH 2/3] gdesktopappinfo: Emit "launched" and "launch-failed"
+ signals for DBus activation too
+
+When using g_desktop_app_info_launch_uris_as_manager the "launched"
+signal allows to map a desktop-startup-id to a GAppInfo. Make this
+possible for DBus activation too.
+
+Since we don't have a PID there we pass a 0. Update the signal
+description accordingly.
+---
+ gio/gappinfo.c        |  4 +++
+ gio/gdesktopappinfo.c | 75 +++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 77 insertions(+), 2 deletions(-)
+
+diff --git a/gio/gappinfo.c b/gio/gappinfo.c
+index eed35a92f..75340c43f 100644
+--- a/gio/gappinfo.c
++++ b/gio/gappinfo.c
+@@ -1172,6 +1172,10 @@ g_app_launch_context_class_init (GAppLaunchContextClass *klass)
+    * platform-specific data about this launch. On UNIX, at least the
+    * `pid` and `startup-notification-id` keys will be present.
+    *
++   * Since 2.72 the `pid` may be 0 if the process id wasn't known (for
++   * example if the process was launched via D-Bus). The `pid` may not be
++   * set at all in subsequent releases.
++   *
+    * Since: 2.36
+    */
+   signals[LAUNCHED] = g_signal_new (I_("launched"),
+diff --git a/gio/gdesktopappinfo.c b/gio/gdesktopappinfo.c
+index 229e62143..4a2592a64 100644
+--- a/gio/gdesktopappinfo.c
++++ b/gio/gdesktopappinfo.c
+@@ -2959,6 +2959,64 @@ g_desktop_app_info_make_platform_data (GDesktopAppInfo   *info,
+   return g_variant_builder_end (&builder);
+ }
+ 
++typedef struct
++{
++  GDesktopAppInfo     *info; /* (owned) */
++  GAppLaunchContext   *launch_context; /* (owned) (nullable) */
++  GAsyncReadyCallback  callback;
++  gchar               *startup_id; /* (owned) */
++  gpointer             user_data;
++} LaunchUrisWithDBusData;
++
++static void
++launch_uris_with_dbus_data_free (LaunchUrisWithDBusData *data)
++{
++  g_clear_object (&data->info);
++  g_clear_object (&data->launch_context);
++  g_free (data->startup_id);
++
++  g_free (data);
++}
++
++static void
++launch_uris_with_dbus_signal_cb (GObject      *object,
++                                 GAsyncResult *result,
++                                 gpointer      user_data)
++{
++  LaunchUrisWithDBusData *data = user_data;
++  GVariantBuilder builder;
++
++  if (data->launch_context)
++    {
++      if (g_task_had_error (G_TASK (result)))
++        g_app_launch_context_launch_failed (data->launch_context, data->startup_id);
++      else
++        {
++          GVariant *platform_data;
++
++          g_variant_builder_init (&builder, G_VARIANT_TYPE_ARRAY);
++          /* the docs guarantee `pid` will be set, but we can’t
++           * easily know it for a D-Bus process, so set it to zero */
++          g_variant_builder_add (&builder, "{sv}", "pid", g_variant_new_int32 (0));
++          if (data->startup_id)
++            g_variant_builder_add (&builder, "{sv}",
++                                   "startup-notification-id",
++                                   g_variant_new_string (data->startup_id));
++          platform_data = g_variant_ref_sink (g_variant_builder_end (&builder));
++          g_signal_emit_by_name (data->launch_context,
++                                 "launched",
++                                 data->info,
++                                 platform_data);
++          g_variant_unref (platform_data);
++        }
++    }
++
++  if (data->callback)
++    data->callback (object, result, data->user_data);
++
++  launch_uris_with_dbus_data_free (data);
++}
++
+ static void
+ launch_uris_with_dbus (GDesktopAppInfo    *info,
+                        GDBusConnection    *session_bus,
+@@ -2968,8 +3026,11 @@ launch_uris_with_dbus (GDesktopAppInfo    *info,
+                        GAsyncReadyCallback callback,
+                        gpointer            user_data)
+ {
++  GVariant *platform_data;
+   GVariantBuilder builder;
++  GVariantDict dict;
+   gchar *object_path;
++  LaunchUrisWithDBusData *data;
+ 
+   g_variant_builder_init (&builder, G_VARIANT_TYPE_TUPLE);
+ 
+@@ -2983,13 +3044,23 @@ launch_uris_with_dbus (GDesktopAppInfo    *info,
+       g_variant_builder_close (&builder);
+     }
+ 
+-  g_variant_builder_add_value (&builder, g_desktop_app_info_make_platform_data (info, uris, launch_context));
++  platform_data = g_desktop_app_info_make_platform_data (info, uris, launch_context);
+ 
++  g_variant_builder_add_value (&builder, platform_data);
+   object_path = object_path_from_appid (info->app_id);
++
++  data = g_new0 (LaunchUrisWithDBusData, 1);
++  data->info = g_object_ref (info);
++  data->callback = callback;
++  data->user_data = user_data;
++  data->launch_context = launch_context ? g_object_ref (launch_context) : NULL;
++  g_variant_dict_init (&dict, platform_data);
++  g_variant_dict_lookup (&dict, "desktop-startup-id", "s", &data->startup_id);
++
+   g_dbus_connection_call (session_bus, info->app_id, object_path, "org.freedesktop.Application",
+                           uris ? "Open" : "Activate", g_variant_builder_end (&builder),
+                           NULL, G_DBUS_CALL_FLAGS_NONE, -1,
+-                          cancellable, callback, user_data);
++                          cancellable, launch_uris_with_dbus_signal_cb, g_steal_pointer (&data));
+   g_free (object_path);
+ }
+ 
+-- 
+GitLab
+
+
+From 7665b748bb86b0506f2d1c6d21d1d373689e1817 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 29 Sep 2021 08:19:09 +0200
+Subject: [PATCH 3/3] gappinfo: Add launch-started signal
+
+Emit this when we're about to spawn or DBus activate a GAppInfo.  This
+allows lauchers to keep the appinfo associated with a startup id.
+
+We use a GVariant to allow for future exansion of the supplied data.
+---
+ gio/gappinfo.c               | 36 ++++++++++++++++++++++++++++++++++++
+ gio/gappinfo.h               |  4 +++-
+ gio/gdesktopappinfo.c        | 25 +++++++++++++++++++++++++
+ gio/tests/desktop-app-info.c | 28 ++++++++++++++++++++++++++--
+ 4 files changed, 90 insertions(+), 3 deletions(-)
+
+diff --git a/gio/gappinfo.c b/gio/gappinfo.c
+index 75340c43f..d9d2bdaf7 100644
+--- a/gio/gappinfo.c
++++ b/gio/gappinfo.c
+@@ -1103,6 +1103,7 @@ g_app_info_delete (GAppInfo *appinfo)
+ 
+ enum {
+   LAUNCH_FAILED,
++  LAUNCH_STARTED,
+   LAUNCHED,
+   LAST_SIGNAL
+ };
+@@ -1160,6 +1161,41 @@ g_app_launch_context_class_init (GAppLaunchContextClass *klass)
+                                          NULL, NULL, NULL,
+                                          G_TYPE_NONE, 1, G_TYPE_STRING);
+ 
++  /**
++   * GAppLaunchContext::launch-started:
++   * @context: the object emitting the signal
++   * @info: the #GAppInfo that is about to be launched
++   * @platform_data: (nullable): additional platform-specific data for this launch
++   *
++   * The #GAppLaunchContext::launch-started signal is emitted when a #GAppInfo is
++   * about to be launched. If non-null the @platform_data is an
++   * GVariant dictionary mapping strings to variants (ie `a{sv}`), which
++   * contains additional, platform-specific data about this launch. On
++   * UNIX, at least the `startup-notification-id` keys will be
++   * present.
++   *
++   * The value of the `startup-notification-id` key (type `s`) is a startup
++   * notification ID corresponding to the format from the [startup-notification
++   * specification](https://specifications.freedesktop.org/startup-notification-spec/startup-notification-0.1.txt).
++   * It allows tracking the progress of the launchee through startup.
++   *
++   * It is guaranteed that this signal is followed by either a #GAppLaunchContext::launched or
++   * #GAppLaunchContext::launch-failed signal.
++   *
++   * Since: 2.72
++   */
++  signals[LAUNCH_STARTED] = g_signal_new (I_("launch-started"),
++                                          G_OBJECT_CLASS_TYPE (object_class),
++                                          G_SIGNAL_RUN_LAST,
++                                          G_STRUCT_OFFSET (GAppLaunchContextClass, launch_started),
++                                          NULL, NULL,
++                                          _g_cclosure_marshal_VOID__OBJECT_VARIANT,
++                                          G_TYPE_NONE, 2,
++                                          G_TYPE_APP_INFO, G_TYPE_VARIANT);
++  g_signal_set_va_marshaller (signals[LAUNCH_STARTED],
++                              G_TYPE_FROM_CLASS (klass),
++                              _g_cclosure_marshal_VOID__OBJECT_VARIANTv);
++
+   /**
+    * GAppLaunchContext::launched:
+    * @context: the object emitting the signal
+diff --git a/gio/gappinfo.h b/gio/gappinfo.h
+index d26d048a5..ad3068e31 100644
+--- a/gio/gappinfo.h
++++ b/gio/gappinfo.h
+@@ -293,12 +293,14 @@ struct _GAppLaunchContextClass
+   void   (* launched)              (GAppLaunchContext *context,
+                                     GAppInfo          *info,
+                                     GVariant          *platform_data);
++  void   (* launch_started)        (GAppLaunchContext *context,
++                                    GAppInfo          *info,
++                                    GVariant          *platform_data);
+ 
+   /* Padding for future expansion */
+   void (*_g_reserved1) (void);
+   void (*_g_reserved2) (void);
+   void (*_g_reserved3) (void);
+-  void (*_g_reserved4) (void);
+ };
+ 
+ GLIB_AVAILABLE_IN_ALL
+diff --git a/gio/gdesktopappinfo.c b/gio/gdesktopappinfo.c
+index 4a2592a64..55312fdfb 100644
+--- a/gio/gdesktopappinfo.c
++++ b/gio/gdesktopappinfo.c
+@@ -2731,6 +2731,26 @@ notify_desktop_launch (GDBusConnection  *session_bus,
+   g_object_unref (msg);
+ }
+ 
++static void
++emit_launch_started (GAppLaunchContext *context,
++                     GDesktopAppInfo   *info,
++                     const gchar       *startup_id)
++{
++  GVariantBuilder builder;
++  GVariant *platform_data = NULL;
++
++  if (startup_id)
++    {
++      g_variant_builder_init (&builder, G_VARIANT_TYPE_ARRAY);
++      g_variant_builder_add (&builder, "{sv}",
++                             "startup-notification-id",
++                             g_variant_new_string (startup_id));
++      platform_data = g_variant_ref_sink (g_variant_builder_end (&builder));
++    }
++  g_signal_emit_by_name (context, "launch-started", info, platform_data);
++  g_clear_pointer (&platform_data, g_variant_unref);
++}
++
+ #define _SPAWN_FLAGS_DEFAULT (G_SPAWN_SEARCH_PATH)
+ 
+ static gboolean
+@@ -2826,6 +2846,8 @@ g_desktop_app_info_launch_uris_with_spawn (GDesktopAppInfo            *info,
+             }
+ 
+           g_list_free_full (launched_files, g_object_unref);
++
++          emit_launch_started (launch_context, info, sn_id);
+         }
+ 
+       /* Wrap the @argv in a command which will set the
+@@ -3057,6 +3079,9 @@ launch_uris_with_dbus (GDesktopAppInfo    *info,
+   g_variant_dict_init (&dict, platform_data);
+   g_variant_dict_lookup (&dict, "desktop-startup-id", "s", &data->startup_id);
+ 
++  if (launch_context)
++    emit_launch_started (launch_context, info, data->startup_id);
++
+   g_dbus_connection_call (session_bus, info->app_id, object_path, "org.freedesktop.Application",
+                           uris ? "Open" : "Activate", g_variant_builder_end (&builder),
+                           NULL, G_DBUS_CALL_FLAGS_NONE, -1,
+diff --git a/gio/tests/desktop-app-info.c b/gio/tests/desktop-app-info.c
+index 15dcd8f1c..95a2a1589 100644
+--- a/gio/tests/desktop-app-info.c
++++ b/gio/tests/desktop-app-info.c
+@@ -728,6 +728,20 @@ test_show_in (void)
+   assert_shown ("invalid-desktop.desktop", FALSE, "../invalid/desktop:../invalid/desktop");
+ }
+ 
++static void
++on_launch_started (GAppLaunchContext *context, GAppInfo *info, GVariant *platform_data, gpointer data)
++{
++  gboolean *invoked = data;
++
++  g_assert_true (G_IS_APP_LAUNCH_CONTEXT (context));
++  g_assert_true (G_IS_APP_INFO (info));
++  /* Our default context doesn't fill in any platform data */
++  g_assert_null (platform_data);
++
++  g_assert_false (*invoked);
++  *invoked = TRUE;
++}
++
+ /* Test g_desktop_app_info_launch_uris_as_manager() and
+  * g_desktop_app_info_launch_uris_as_manager_with_fds()
+  */
+@@ -738,6 +752,8 @@ test_launch_as_manager (void)
+   GError *error = NULL;
+   gboolean retval;
+   const gchar *path;
++  gboolean invoked = FALSE;
++  GAppLaunchContext *context;
+ 
+   if (g_getenv ("DISPLAY") == NULL || g_getenv ("DISPLAY")[0] == '\0')
+     {
+@@ -754,23 +770,31 @@ test_launch_as_manager (void)
+       return;
+     }
+ 
+-  retval = g_desktop_app_info_launch_uris_as_manager (appinfo, NULL, NULL, 0,
++  context = g_app_launch_context_new ();
++  g_signal_connect (context, "launch-started",
++                    G_CALLBACK (on_launch_started),
++                    &invoked);
++  retval = g_desktop_app_info_launch_uris_as_manager (appinfo, NULL, context, 0,
+                                                       NULL, NULL,
+                                                       NULL, NULL,
+                                                       &error);
+   g_assert_no_error (error);
+   g_assert_true (retval);
++  g_assert_true (invoked);
+ 
++  invoked = FALSE;
+   retval = g_desktop_app_info_launch_uris_as_manager_with_fds (appinfo,
+-                                                               NULL, NULL, 0,
++                                                               NULL, context, 0,
+                                                                NULL, NULL,
+                                                                NULL, NULL,
+                                                                -1, -1, -1,
+                                                                &error);
+   g_assert_no_error (error);
+   g_assert_true (retval);
++  g_assert_true (invoked);
+ 
+   g_object_unref (appinfo);
++  g_assert_finalize_object (context);
+ }
+ 
+ int
+-- 
+GitLab
+
