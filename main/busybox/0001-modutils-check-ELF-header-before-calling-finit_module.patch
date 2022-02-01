@@ -1,0 +1,152 @@
+Patch-Source: http://lists.busybox.net/pipermail/busybox/2021-January/088398.html
+Patch-Source: http://lists.busybox.net/pipermail/busybox/2021-January/088399.html
+See-Also: https://gitlab.alpinelinux.org/alpine/aports/-/issues/13427
+
+The purpose of this patch is to remove confusing error messages
+"Module has invalid ELF structures" produced by kernel when loading gzip
+compressed kernel modules using busybox modprobe.
+--
+From: Qu Wenruo <wqu@suse.com>
+Date: Sun, 03 Jan 2021 04:10:52 +0000
+Subject: [PATCH v2] modutils: check ELF header before calling finit_module()
+
+finit_module() and init_module() system calls have clear specification
+to only accept valid ELF image.
+
+Although we try finit_module() on compressed modules to let the kernel
+determine if it's an ELF image, but it's not ideal, especially when
+newer kernel will complain when some invalid files/memory is passed in.
+
+Treat the kernel better by just doing a very basic ELF header check
+before calling finit_module().
+
+Signed-off-by: Qu Wenruo <wqu at suse.com>
+
+diff --git a/modutils/modutils.c b/modutils/modutils.c
+index f7ad5e8058fe..037d609e42df 100644
+--- a/modutils/modutils.c
++++ b/modutils/modutils.c
+@@ -7,6 +7,7 @@
+  */
+ #include "modutils.h"
+ 
++#include <elf.h>
+ #include <sys/syscall.h>
+ 
+ #define init_module(mod, len, opts) syscall(__NR_init_module, mod, len, opts)
+@@ -186,6 +187,33 @@ void* FAST_FUNC try_to_mmap_module(const char *filename, size_t *image_size_p)
+ }
+ #endif
+ 
++#ifdef __NR_finit_module
++/*
++ * Return:
++ * 0 on success,
++ * <0 for error.
++ *
++ * finit_module()/init_module() only accepts ELF format.
++ * Do basic ELF check to avoid calling finit_module() with compressed module.
++ */
++static int check_elf_header(int fd)
++{
++	unsigned char buf[EI_NIDENT];
++	int ret;
++
++	ret = pread(fd, buf, sizeof(buf), 0);
++	if (ret < sizeof(buf))
++		return -EIO;
++	if (buf[EI_MAG0] != ELFMAG0 ||
++	    buf[EI_MAG1] != ELFMAG1 ||
++	    buf[EI_MAG2] != ELFMAG2 ||
++	    buf[EI_MAG3] != ELFMAG3)
++		return -EINVAL;
++	/* Other more comprehensive check will be done inside kernel */
++	return 0;
++}
++#endif
++
+ /* Return:
+  * 0 on success,
+  * -errno on open/read error,
+@@ -212,12 +240,19 @@ int FAST_FUNC bb_init_module(const char *filename, const char *options)
+ 	 * to only allow loading of modules off of secure storage (like a read-
+ 	 * only rootfs) which needs the finit_module call.  If it fails, we fall
+ 	 * back to normal module loading to support compressed modules.
++	 *
++	 * Note that finit_module()/init_module() only accept ELF image, do
++	 * basic check before calling finit_module() to avoid kernel
++	 * complaining.
+ 	 */
+ # ifdef __NR_finit_module
+ 	{
+ 		int fd = open(filename, O_RDONLY | O_CLOEXEC);
+ 		if (fd >= 0) {
+-			rc = finit_module(fd, options, 0) != 0;
++			if (!check_elf_header(fd))
++				rc = finit_module(fd, options, 0) != 0;
++			else
++				rc = 1;
+ 			close(fd);
+ 			if (rc == 0)
+ 				return rc;
+
+diff --git a/modutils/modprobe-small.c b/modutils/modprobe-small.c
+index db44a2ed0ab5..d2cd6a64c1d0 100644
+--- a/modutils/modprobe-small.c
++++ b/modutils/modprobe-small.c
+@@ -24,6 +24,7 @@
+ //kbuild:lib-$(CONFIG_MODPROBE_SMALL) += modprobe-small.o
+ 
+ #include "libbb.h"
++#include <elf.h> /* for ELF header magic */
+ /* After libbb.h, since it needs sys/types.h on some systems */
+ #include <sys/utsname.h> /* uname() */
+ #include <fnmatch.h>
+@@ -249,6 +250,33 @@ static const char *moderror(int err)
+ 	}
+ }
+ 
++#ifdef __NR_finit_module
++/*
++ * Return:
++ * 0 on success,
++ * <0 for error.
++ *
++ * finit_module()/init_module() only accepts ELF format.
++ * Do basic ELF check to avoid calling finit_module() with compressed module.
++ */
++static int check_elf_header(int fd)
++{
++	unsigned char buf[EI_NIDENT];
++	int ret;
++
++	ret = pread(fd, buf, sizeof(buf), 0);
++	if (ret < sizeof(buf))
++		return -EIO;
++	if (buf[EI_MAG0] != ELFMAG0 ||
++	    buf[EI_MAG1] != ELFMAG1 ||
++	    buf[EI_MAG2] != ELFMAG2 ||
++	    buf[EI_MAG3] != ELFMAG3)
++		return -EINVAL;
++	/* Other more comprehensive check will be done inside kernel */
++	return 0;
++}
++#endif
++
+ static int load_module(const char *fname, const char *options)
+ {
+ #if 1
+@@ -272,7 +300,10 @@ static int load_module(const char *fname, const char *options)
+ 	{
+ 		int fd = open(fname, O_RDONLY | O_CLOEXEC);
+ 		if (fd >= 0) {
+-			r = finit_module(fd, options, 0) != 0;
++			if (!check_elf_header(fd))
++				r = finit_module(fd, options, 0) != 0;
++			else
++				r = 1;
+ 			close(fd);
+ 		}
+ 	}
+-- 
+2.29.2
