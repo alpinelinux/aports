@@ -1,0 +1,101 @@
+commit c3be8d9db9c0051972df782ae6ee350328482360
+Author: Benjamin Schaaf <ben.schaaf@gmail.com>
+Date:   Thu Nov 25 23:42:18 2021 +1100
+
+    libcamera: pipeline: simple: Support output size ranges
+    
+    Use the list of supported ranges from the video format to configure the stream
+    and subdev instead of the capture size, allowing streams to be configured below
+    the maximum resolution.
+    
+    Signed-off-by: Benjamin Schaaf <ben.schaaf@gmail.com>
+
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 701fb4be..a597e27f 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -213,7 +213,7 @@ public:
+ 		PixelFormat captureFormat;
+ 		Size captureSize;
+ 		std::vector<PixelFormat> outputFormats;
+-		SizeRange outputSizes;
++		std::vector<SizeRange> outputSizes;
+ 	};
+ 
+ 	std::vector<Stream> streams_;
+@@ -492,10 +492,10 @@ int SimpleCameraData::init()
+ 
+ 			if (!converter_) {
+ 				config.outputFormats = { pixelFormat };
+-				config.outputSizes = config.captureSize;
++				config.outputSizes = videoFormat.second;
+ 			} else {
+ 				config.outputFormats = converter_->formats(pixelFormat);
+-				config.outputSizes = converter_->sizes(format.size);
++				config.outputSizes = { converter_->sizes(format.size) };
+ 			}
+ 
+ 			configs_.push_back(config);
+@@ -804,17 +804,23 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
+ 			status = Adjusted;
+ 		}
+ 
+-		if (!pipeConfig_->outputSizes.contains(cfg.size)) {
++		auto sizeIt = std::find_if(pipeConfig_->outputSizes.begin(),
++					   pipeConfig_->outputSizes.end(),
++					   [&](SizeRange r) { return r.contains(cfg.size); });
++		if (sizeIt == pipeConfig_->outputSizes.end()) {
+ 			LOG(SimplePipeline, Debug)
+ 				<< "Adjusting size from " << cfg.size.toString()
+ 				<< " to " << pipeConfig_->captureSize.toString();
+-			cfg.size = pipeConfig_->captureSize;
++
++			cfg.size = pipeConfig_->outputSizes[0].max;
+ 			status = Adjusted;
++
++			/* \todo Create a libcamera core class to group format and size */
++			if (cfg.size != pipeConfig_->captureSize)
++				needConversion_ = true;
+ 		}
+ 
+-		/* \todo Create a libcamera core class to group format and size */
+-		if (cfg.pixelFormat != pipeConfig_->captureFormat ||
+-		    cfg.size != pipeConfig_->captureSize)
++		if (cfg.pixelFormat != pipeConfig_->captureFormat)
+ 			needConversion_ = true;
+ 
+ 		/* Set the stride, frameSize and bufferCount. */
+@@ -907,8 +913,14 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 	if (ret < 0)
+ 		return ret;
+ 
++	Size size;
++	for (unsigned int i = 0; i < config->size(); ++i) {
++		StreamConfiguration &cfg = config->at(i);
++		size.expandTo(cfg.size);
++	}
++
+ 	const SimpleCameraData::Configuration *pipeConfig = config->pipeConfig();
+-	V4L2SubdeviceFormat format{ pipeConfig->code, data->sensor_->resolution() };
++	V4L2SubdeviceFormat format{ pipeConfig->code, size };
+ 
+ 	ret = data->setupFormats(&format, V4L2Subdevice::ActiveFormat);
+ 	if (ret < 0)
+@@ -919,7 +931,7 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 
+ 	V4L2DeviceFormat captureFormat;
+ 	captureFormat.fourcc = videoFormat;
+-	captureFormat.size = pipeConfig->captureSize;
++	captureFormat.size = size;
+ 
+ 	ret = video->setFormat(&captureFormat);
+ 	if (ret)
+@@ -932,7 +944,7 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 	}
+ 
+ 	if (captureFormat.fourcc != videoFormat ||
+-	    captureFormat.size != pipeConfig->captureSize) {
++	    captureFormat.size != size) {
+ 		LOG(SimplePipeline, Error)
+ 			<< "Unable to configure capture in "
+ 			<< pipeConfig->captureSize.toString() << "-"
