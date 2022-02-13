@@ -22,19 +22,18 @@ export PATH
 export PAGER=less
 umask 022
 
-# set up fallback default PS1
-: "${HOSTNAME:=$(hostname)}"
-PS1='${HOSTNAME%%.*}:$PWD'
-[ "$(id -u)" = "0" ] && PS1="${PS1}# "
-[ "$(id -u)" = "0" ] || PS1="${PS1}\$ "
-
 # use nicer PS1 for bash and busybox ash
-[ -n "$BASH_VERSION" -o "$BB_ASH_VERSION" ] && PS1='\h:\w\$ '
-
+if [ -n "$BASH_VERSION" -o "$BB_ASH_VERSION" ]; then
+	PS1='\h:\w\$ '
 # use nicer PS1 for zsh
-[ -n "$ZSH_VERSION" ] && PS1='%m:%~%# '
-
-# export PS1 as before
+elif [ -n "$ZSH_VERSION" ]; then
+	PS1='%m:%~%# '
+# set up fallback default PS1
+else
+	: "${HOSTNAME:=$(hostname)}"
+	PS1='${HOSTNAME%%.*}:$PWD'
+	[ "$(id -u)" -eq 0 ] && PS1="${PS1}# " || PS1="${PS1}\$ "
+fi
 export PS1
 
 for script in /etc/profile.d/*.sh ; do
