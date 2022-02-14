@@ -41,7 +41,7 @@ profile_extended() {
 	apks="$apks
 		coreutils ethtool hwids doas
 		logrotate lsof lm_sensors lxc lxc-templates nano
-		pciutils strace doas tmux
+		pciutils strace tmux
 		usbutils v86d vim xtables-addons curl
 
 		acct arpon arpwatch awall bridge-utils bwm-ng
