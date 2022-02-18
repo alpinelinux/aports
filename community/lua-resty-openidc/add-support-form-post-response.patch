@@ -1,0 +1,186 @@
+From 789cf8ac48086b95c8522cb7b34bf63252341968 Mon Sep 17 00:00:00 2001
+From: Hans Zandbelt <hans.zandbelt@zmartzone.eu>
+Date: Wed, 13 Dec 2017 14:41:03 +0100
+Subject: [PATCH 1/4] support for response_mode form_post
+
+Signed-off-by: Hans Zandbelt <hans.zandbelt@zmartzone.eu>
+
+whitespace
+---
+ lib/resty/openidc.lua | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/lib/resty/openidc.lua b/lib/resty/openidc.lua
+index 753ab22..415ad29 100644
+--- a/lib/resty/openidc.lua
++++ b/lib/resty/openidc.lua
+@@ -354,6 +354,10 @@ local function openidc_authorize(opts, session, target_url, prompt)
+     params.code_challenge = openidc_s256(code_verifier)
+   end
+
++  if opts.response_mode then
++    params.response_mode = opts.response_mode
++  end
++
+   -- merge any provided extra parameters
+   if opts.authorization_params then
+     for k, v in pairs(opts.authorization_params) do params[k] = v end
+@@ -1076,8 +1080,14 @@ end
+
+ -- handle a "code" authorization response from the OP
+ local function openidc_authorization_response(opts, session)
+-  local args = ngx.req.get_uri_args()
+-  local err, log_err, client_err
++  local args, err, log_err, client_err
++
++  if opts.response_mode and opts.response_mode == "form_post" then
++    ngx.req.read_body()
++    args = ngx.req.get_post_args()
++  else
++    args = ngx.req.get_uri_args()
++  end
+
+   if not args.code or not args.state then
+     err = "unhandled request to the redirect_uri: " .. ngx.var.request_uri
+
+From 493eefcbe963cecd2c3b0c3f243016eac0aa0e10 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <stefan.bodewig@innoq.com>
+Date: Wed, 3 Jan 2018 13:55:37 +0100
+Subject: [PATCH 2/4] spec for form_post support
+
+---
+ tests/spec/form_post_spec.lua | 94 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 94 insertions(+)
+ create mode 100644 tests/spec/form_post_spec.lua
+
+diff --git a/tests/spec/form_post_spec.lua b/tests/spec/form_post_spec.lua
+new file mode 100644
+index 0000000..a539c4d
+--- /dev/null
++++ b/tests/spec/form_post_spec.lua
+@@ -0,0 +1,94 @@
++local http = require("socket.http")
++local test_support = require("test_support")
++local ltn12 = require("ltn12")
++require 'busted.runner'()
++
++describe("when response_mode is form_post", function()
++  test_support.start_server({oidc_opts = {response_mode = "form_post"}})
++  teardown(test_support.stop_server)
++  local _, status, headers = http.request({
++    url = "http://127.0.0.1/default/t",
++    redirect = false
++  })
++  it("then it is included", function()
++    assert.truthy(string.match(headers["location"], ".*response_mode=form_post.*"))
++  end)
++end)
++
++local function do_post(cookie_header, body)
++  local x, y, z = http.request({
++      method = "POST",
++      url = "http://localhost/default/redirect_uri",
++      headers = {
++        ["Content-Type"] = "application/x-www-form-urlencoded",
++        ["Content-Length"] = string.len(body),
++        cookie = cookie_header,
++      },
++      source = ltn12.source.string(body),
++      redirect = false
++    })
++  return x, y, z
++end
++
++describe("when a form_post is received", function()
++  test_support.start_server({oidc_opts = {response_mode = "form_post"}})
++  teardown(test_support.stop_server)
++  local _, _, headers = http.request({
++    url = "http://localhost/default/t",
++    redirect = false
++  })
++  local state = test_support.grab(headers, 'state')
++  test_support.register_nonce(headers)
++  local cookie_header = test_support.extract_cookies(headers)
++  describe("without an active user session", function()
++    local _, redirStatus = http.request({
++        method = 'POST',
++        url = "http://localhost/default/redirect_uri",
++        headers = {
++          ["Content-Type"] = "application/x-www-form-urlencoded",
++        },
++        source = ltn12.source.string("code=foo&state=" .. state)
++    })
++    it("should be rejected", function()
++       assert.are.equals(401, redirStatus)
++    end)
++    it("will log an error message", function()
++      assert.error_log_contains("but there's no session state found")
++    end)
++  end)
++  describe("with bad state", function()
++    local _, redirStatus = do_post(cookie_header, "code=foo&state=X" .. state)
++    it("should be rejected", function()
++       assert.are.equals(401, redirStatus)
++    end)
++    it("will log an error message", function()
++      assert.error_log_contains("does not match state restored from session")
++    end)
++  end)
++  describe("without state", function()
++    local _, redirStatus = do_post(cookie_header, "code=foo")
++    it("should be rejected", function()
++       assert.are.equals(401, redirStatus)
++    end)
++    it("will log an error message", function()
++      assert.error_log_contains("unhandled request to the redirect_uri")
++    end)
++  end)
++  describe("without code", function()
++    local _, redirStatus = do_post(cookie_header, "state=" .. state)
++    it("should be rejected", function()
++       assert.are.equals(401, redirStatus)
++    end)
++    it("will log an error message", function()
++      assert.error_log_contains("unhandled request to the redirect_uri")
++    end)
++  end)
++  describe("with all things set", function()
++    local _, redirStatus, h = do_post(cookie_header, "code=foo&state=" .. state)
++    it("redirects to the original URI", function()
++       assert.are.equals(302, redirStatus)
++       assert.are.equals("/default/t", h.location)
++    end)
++  end)
++end)
++
+
+From 3ba8fe14db0356426a043d37c3ba929f6f4c1995 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <stefan.bodewig@innoq.com>
+Date: Wed, 3 Jan 2018 14:05:01 +0100
+Subject: [PATCH 3/4] make sure request is rejected for the correct reason
+
+---
+ tests/spec/form_post_spec.lua | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/tests/spec/form_post_spec.lua b/tests/spec/form_post_spec.lua
+index a539c4d..d9989b0 100644
+--- a/tests/spec/form_post_spec.lua
++++ b/tests/spec/form_post_spec.lua
+@@ -41,13 +41,15 @@ describe("when a form_post is received", function()
+   test_support.register_nonce(headers)
+   local cookie_header = test_support.extract_cookies(headers)
+   describe("without an active user session", function()
++    local body = "code=foo&state=" .. state
+     local _, redirStatus = http.request({
+         method = 'POST',
+         url = "http://localhost/default/redirect_uri",
+         headers = {
+           ["Content-Type"] = "application/x-www-form-urlencoded",
++          ["Content-Length"] = string.len(body),
+         },
+-        source = ltn12.source.string("code=foo&state=" .. state)
++        source = ltn12.source.string(body)
+     })
+     it("should be rejected", function()
+        assert.are.equals(401, redirStatus)
