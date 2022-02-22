@@ -1,0 +1,217 @@
+# Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>
+# Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
+
+# Variables for dotnet-stage0 build version 3.1
+# This APKBUILD is designed to be the same for version 5.0 and under
+# except for the variables in this first section
+
+pkgname=dotnet31-stage0
+pkgver=3.1.416
+pkgrel=0
+_artifactsver="3.1.120"
+_nappo_get=''
+_nappo_exclude='
+	*Intermediate*
+	runtime.linux-x64.Microsoft.NETCore.Runtime.CoreCLR*
+	'
+_source_artifactsver="0.1.0-$_artifactsver-1440359-20211022.3"
+_source_referencesver="1.0.0-beta.21479.1"
+
+# Following for dotnet-stage0 build version 5.0 and below
+_pkgver_macro=${pkgver%.*}
+_pkgver_prior=1
+_pkgver_name=${_pkgver_macro//[.0]}
+pkgdesc="The .NET $_pkgver_macro SDK, Microsoft build for use by dotnet$_pkgver_name aport"
+arch="x86_64"
+url=https://www.microsoft.com/net/core
+license="MIT"
+makedepends="
+	krb5-libs
+	libcurl
+	libintl
+	lttng-ust
+	py3-packaging
+	unzip
+	zlib
+	"
+subpackages="dotnet$_pkgver_name-stage0-artifacts"
+options="!check" # No test suite
+_default_source="
+	https://dotnetcli.azureedge.net/source-built-artifacts/assets/Private.SourceBuilt.Artifacts.$_source_artifactsver.tar.gz
+	https://dotnetfeed.blob.core.windows.net/dotnet-core/assets/Private.SourceBuild.ReferencePackages.$_source_referencesver.tar.gz
+	https://gist.githubusercontent.com/omajid/c04b6025de49d0b7b18ab4a7e789484e/raw/b33c57f6bf9c00bb8633375123d2d3594fe81c26/nappo.py
+	"
+builddir="$srcdir"
+
+# custom function that converts Alpine arch syntax to dotnet arch syntax
+_get_arch() {
+	case $1 in
+		x86_64) local arch=x64;;
+		aarch64) local arch=arm64;;
+		armv7) local arch=arm;;
+	esac
+	echo $arch
+}
+_dotnet_arch=$(_get_arch $CARCH)
+
+# custom source updater function for all dotnet versions
+#
+# Prebuilt artifacts only provides linux-x64 nukgs. As Alpine uses linux-musl,
+# the below scripts updates source to fetch the musl version of those packages,
+# allowing packaging of the correct architecture. Thus, everytime Artifacts
+# is updated, or new architectures are added, this function needs to be
+# executed using 'abuild _update_source'
+_update_source() {
+	[ -z "$source" ] \
+		&& msg "Removing source from APKBUILD"
+	sed -E -i \
+		-e '/^source=".*"$/d' \
+		-e '/^source="/,/"$/d' \
+		\
+		-e "/^source='.*'\$/d" \
+		-e "/^source='/,/'\$/d" \
+		APKBUILD
+
+	source="$_default_source"
+	fetch
+	local nuget_source="$_default_source"
+	msg "Updating source"
+	local nappo_exclude="$_nappo_exclude"
+	# shellcheck disable=3045
+	local nappo_exclude="$(printf '--exclude %s ' $nappo_exclude)"
+	local nappo_get=$(tar --list -f "$srcdir"/Private.SourceBuilt.Artifacts.*.tar.gz --wildcards '*.linux-x64.*' $nappo_exclude)
+	local nappo_get="$_nappo_get $nappo_get"
+	for package in $nappo_get; do
+		for _arch in $arch; do
+			local filename=${package##*/} # Extracts just filename
+			local suffix=${filename##*[0-9]} # Extracts what's after version number
+			local nupkg=${filename/$suffix} # Extracts nupkg name with version
+			[ -z "${filename##*servicing*}" ] && local nupkg=${filename%%-servicing*}
+			local name=${nupkg%*.*.*.*} # Extracts name without version
+			local version=${nupkg/$name.} # Extracts version out of nupkg using name
+			local name=${name/linux-x64/linux-musl-$(_get_arch $_arch)} # Converts to current arch
+			[ -z "${filename##*servicing*}" ] && unset version
+			echo "Getting $name [${version:-latest}] (replaces $package)"
+			local nappo_out="$(python3 "$srcdir"/nappo.py download --verbose $name ${version:-})"
+			local nupkg="${nappo_out#*.nupkg}"
+			local uri=${nappo_out/$nupkg}
+			local nupkg=$(echo $nupkg | tr -d '\n')
+			[ -f "$nupkg" ] && mv $nupkg "$SRCDEST"/.
+			local nuget_source="$nuget_source $uri"
+			[ -z "${name##*linux*}" ] || break
+		done
+	done
+	for _arch in $arch; do
+		local nuget_source="$nuget_source https://dotnetcli.azureedge.net/dotnet/Sdk/$pkgver/dotnet-sdk-$pkgver-linux-musl-$(_get_arch $_arch).tar.gz"
+	done
+	local nuget_source="$(printf '%s\n' $nuget_source)"
+	printf 'source="\n%s\n"\n' "$nuget_source" >>"$APKBUILD"
+}
+
+unpack() {
+	verify
+	initdcheck
+	mkdir -p "$srcdir"
+	msg "Unpacking Private.SourceBuilt.Artifacts"
+	gunzip Private.SourceBuilt.Artifacts.*.tar.gz
+	msg "Unpacking Private.SourceBuild.Reference.Packages"
+	gunzip Private.SourceBuild.Reference*.tar.gz
+}
+
+package() {
+	# directory creation
+	install -dm 755 "$pkgdir"/usr/share/dotnet/bootstrap/$pkgver
+
+	# unpack prebuilt sdk / runtimes
+	tar -xzf "$srcdir"/dotnet-sdk-$_pkgver_macro*$_dotnet_arch.tar.gz -C "$pkgdir"/usr/share/dotnet/bootstrap/$pkgver --no-same-owner
+}
+
+artifacts() {
+	pkgdesc="Internal package for building .NET $_pkgver_macro Software Development Kit, Microsoft build for use by dotnet$_pkgver_name aport"
+
+	# directory creation
+	install -dm 755 \
+		"$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/SourceBuildReferencePackages \
+		"$subpkgdir"/usr/share/licenses
+
+	# extracts artifact without Intermediate and binary packages
+	tar -xf "$srcdir"/Private.SourceBuilt.Artifacts.*.tar -C "$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/ --no-same-owner\
+		--exclude '*x64*' \
+		--exclude '*Intermediate*'
+
+	# replace loose x64 bits with arch bits
+	for i in "$subpkgdir"/usr/share/dotnet/artifacts/"$pkgver"/coreclr-tools/*; do
+		case $i in
+			*.md) continue ;;
+			*ilasm) unzip -ojqXK "$srcdir"/runtime.linux-musl-$_dotnet_arch.microsoft.netcore.ilasm.*.nupkg runtimes/linux-musl-$_dotnet_arch/native/ilasm -d "$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/coreclr-tools/. ;;
+			*ildasm) unzip -ojqXK "$srcdir"/runtime.linux-musl-$_dotnet_arch.microsoft.netcore.ildasm.*.nupkg runtimes/linux-musl-$_dotnet_arch/native/ildasm -d "$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/coreclr-tools/. ;;
+			*) unzip -ojqXK "$srcdir"/runtime.linux-musl-$_dotnet_arch.microsoft.netcore.app.*.nupkg runtimes/linux-musl-$_dotnet_arch/native/${i##*/} -d "$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/coreclr-tools/. ;;
+		esac
+		chmod 755 "$i"
+	done
+
+	# place proper binary packages
+	for i in "$srcdir"/*.nupkg; do
+		case $i in
+			*linux*) install -m 644 "$srcdir"/*$_dotnet_arch*.nupkg "$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/. ;;
+			*) install -m 644 "$srcdir"/*.nupkg "$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/. ;;
+		esac
+	done
+
+	# extract reference packages, a couple of packages need to be excludes due to
+	# causing conflict with non-reference packages
+	tar -xf "$srcdir"/Private.SourceBuild.Reference*.tar -C "$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/SourceBuildReferencePackages/ --no-same-owner
+}
+
+source="
+https://dotnetcli.azureedge.net/source-built-artifacts/assets/Private.SourceBuilt.Artifacts.0.1.0-3.1.120-1440359-20211022.3.tar.gz
+https://dotnetfeed.blob.core.windows.net/dotnet-core/assets/Private.SourceBuild.ReferencePackages.1.0.0-beta.21479.1.tar.gz
+https://gist.githubusercontent.com/omajid/c04b6025de49d0b7b18ab4a7e789484e/raw/b33c57f6bf9c00bb8633375123d2d3594fe81c26/nappo.py
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/45bacae2-5efb-47c8-91e5-8ec20c22b4f8/nuget/v3/flat2//Microsoft.AspNetCore.App.Runtime.linux-musl-x64/3.1.19/microsoft.aspnetcore.app.runtime.linux-musl-x64.3.1.19.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/45bacae2-5efb-47c8-91e5-8ec20c22b4f8/nuget/v3/flat2//Microsoft.NETCore.App.Host.linux-musl-x64/3.1.19/microsoft.netcore.app.host.linux-musl-x64.3.1.19.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/45bacae2-5efb-47c8-91e5-8ec20c22b4f8/nuget/v3/flat2//Microsoft.NETCore.App.Runtime.linux-musl-x64/3.1.19/microsoft.netcore.app.runtime.linux-musl-x64.3.1.19.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/45bacae2-5efb-47c8-91e5-8ec20c22b4f8/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.App/2.2.0-preview2-26905-02/runtime.linux-musl-x64.microsoft.netcore.app.2.2.0-preview2-26905-02.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/45bacae2-5efb-47c8-91e5-8ec20c22b4f8/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.DotNetAppHost/3.1.19/runtime.linux-musl-x64.microsoft.netcore.dotnetapphost.3.1.19.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/45bacae2-5efb-47c8-91e5-8ec20c22b4f8/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.DotNetHost/3.1.19/runtime.linux-musl-x64.microsoft.netcore.dotnethost.3.1.19.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/45bacae2-5efb-47c8-91e5-8ec20c22b4f8/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.DotNetHostPolicy/3.1.19/runtime.linux-musl-x64.microsoft.netcore.dotnethostpolicy.3.1.19.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/45bacae2-5efb-47c8-91e5-8ec20c22b4f8/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.DotNetHostResolver/3.1.19/runtime.linux-musl-x64.microsoft.netcore.dotnethostresolver.3.1.19.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.ILAsm/5.0.0-alpha1.19459.9/runtime.linux-musl-x64.microsoft.netcore.ilasm.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.ILDAsm/5.0.0-alpha1.19459.9/runtime.linux-musl-x64.microsoft.netcore.ildasm.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.Jit/5.0.0-alpha1.19459.9/runtime.linux-musl-x64.microsoft.netcore.jit.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.Native/5.0.0-alpha1.19459.9/runtime.linux-musl-x64.microsoft.netcore.native.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.NETCore.TestHost/5.0.0-alpha1.19459.9/runtime.linux-musl-x64.microsoft.netcore.testhost.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//runtime.linux-musl-x64.Microsoft.Private.CoreFx.NETCoreApp/5.0.0-alpha1.19457.3/runtime.linux-musl-x64.microsoft.private.corefx.netcoreapp.5.0.0-alpha1.19457.3.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//transport.runtime.linux-musl-x64.Microsoft.NETCore.ILAsm/5.0.0-alpha1.19459.9/transport.runtime.linux-musl-x64.microsoft.netcore.ilasm.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//transport.runtime.linux-musl-x64.Microsoft.NETCore.ILDAsm/5.0.0-alpha1.19459.9/transport.runtime.linux-musl-x64.microsoft.netcore.ildasm.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//transport.runtime.linux-musl-x64.Microsoft.NETCore.Jit/5.0.0-alpha1.19459.9/transport.runtime.linux-musl-x64.microsoft.netcore.jit.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//transport.runtime.linux-musl-x64.Microsoft.NETCore.Native/5.0.0-alpha1.19459.9/transport.runtime.linux-musl-x64.microsoft.netcore.native.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//transport.runtime.linux-musl-x64.Microsoft.NETCore.Runtime.CoreCLR/5.0.0-alpha1.19459.9/transport.runtime.linux-musl-x64.microsoft.netcore.runtime.coreclr.5.0.0-alpha1.19459.9.nupkg
+https://pkgs.dev.azure.com/dnceng/9ee6d478-d288-47f7-aacc-f6e6d082ae6d/_packaging/a8a526e9-91b3-4569-ba2d-ff08dbb7c110/nuget/v3/flat2//transport.runtime.linux-musl-x64.Microsoft.NETCore.TestHost/5.0.0-alpha1.19459.9/transport.runtime.linux-musl-x64.microsoft.netcore.testhost.5.0.0-alpha1.19459.9.nupkg
+https://dotnetcli.azureedge.net/dotnet/Sdk/3.1.416/dotnet-sdk-3.1.416-linux-musl-x64.tar.gz
+"
+sha512sums="
+ba5af3c6b68b90d6eae837a8cea7baaa7cdd6e44c35fc1667a41d4fad0c7d24f90e117259015f0e23db8b11bdeb67e2328e8d1e1e77e9b76600bc87a4dbc068d  Private.SourceBuilt.Artifacts.0.1.0-3.1.120-1440359-20211022.3.tar.gz
+bf2b971537f2aeb0d391686794026837f3603da17f2463f2e684af0bf5a3475af22293f67ad34e874eae2b5fb793eb4552b3ad5a086fc5f5641c3a13d88fc3f4  Private.SourceBuild.ReferencePackages.1.0.0-beta.21479.1.tar.gz
+90b3ec14fd02cbef8af2086c26ef2f4f23c4c5ce83dac39cacbb36e506ea9914aae6c3b3580af2e71141b8f0435b4910f60970333011b4ddd594839f5fd7ec8e  nappo.py
+9070aa3b2416abb0d2a213b6bd85f28c6afd06ebfaeed3d63b8b5dc4e43573bba704ceb4cedc3fb136fc15f34dca913b39ccea96432f5f7d719628a4807d1503  microsoft.aspnetcore.app.runtime.linux-musl-x64.3.1.19.nupkg
+13e847c935c4356bb4882c2aa801a30da7837762b3d7ba30fcc137a5b4303ba9a954a42e98e3246f80e3a3f5b5a6991c6cd49d26c7c37622dc3a509e6f3c9b9f  microsoft.netcore.app.host.linux-musl-x64.3.1.19.nupkg
+24d08bd21fbfbb5cf982e46309fd8ff683f67d66f7a0c34ac5b413ccc6c2674f07146d486bcf4a7c52eb1d6deda531d6eb5ad92f26324b47a5d23364c5a86122  microsoft.netcore.app.runtime.linux-musl-x64.3.1.19.nupkg
+ec01c7482f040c06726ca7bf67fd9c83e83b6af4f46ccd16f7892c1034ae408c0d9220e24952060316e19df38f15f86b8d5ae8f1f52d3e38d658b4e94304d42b  runtime.linux-musl-x64.microsoft.netcore.app.2.2.0-preview2-26905-02.nupkg
+c18349fcc70880b8d8e7299297c53d6622ee8d35849cbc5dca6a1fa20659f65bd9b55778701d2c0d8db40ad6b2190e555e80ef8149294b67c156371676a43670  runtime.linux-musl-x64.microsoft.netcore.dotnetapphost.3.1.19.nupkg
+464c24592b928f6a8449b914194a90f92288e315ccd73c4e220354dd3fc1c524ed265d3908a43484998816dc6a6d9e83c94e3e69d45e32e37b33cd19b5222ec8  runtime.linux-musl-x64.microsoft.netcore.dotnethost.3.1.19.nupkg
+d1280b21d84b127684fc6fd1a71ba2228a38d1fa2818bb2a42029e04ee832ed937d95ae43771669502f53748ed9a32a8d6ea5adae923d3bcfbcbd774fbe192d3  runtime.linux-musl-x64.microsoft.netcore.dotnethostpolicy.3.1.19.nupkg
+98317c8d12ff071059d3e8608b71d39efe436d328169d91ed0ebc8f3a93b3c68659e5a41d969a26ba8099a4522cb0bf7858f8e39d03237ffdfecb20b66f1b66c  runtime.linux-musl-x64.microsoft.netcore.dotnethostresolver.3.1.19.nupkg
+b5c03376ed2e56955463a4c8328ec8682d11fca5085c091025df989b1add13ef5510d5079c1c541238610180d5871ad0a7ec2b4a617d40ca4fdbdf85500769b2  runtime.linux-musl-x64.microsoft.netcore.ilasm.5.0.0-alpha1.19459.9.nupkg
+44609e872e0aa76c682ffa34951cbdbe2e590686342263e71b8ec012ef3e5d242f17ab23576679dc27d451b3a5a59f1a1bf9abd8a620e777e8552486d366058c  runtime.linux-musl-x64.microsoft.netcore.ildasm.5.0.0-alpha1.19459.9.nupkg
+f7266e2da619eacea2855cc131245711966f54115cf763ea338213ab029e138a84dc1daf0a7692fc9879337a6a490f4c76849ad51ed20f3b3e649573ce25b79b  runtime.linux-musl-x64.microsoft.netcore.jit.5.0.0-alpha1.19459.9.nupkg
+65607d7cb01d2ebeef6795af9694fd485b24e9b773287f75b99c1e89cfa1d1fc883d4c2b733afe4885adf2d6366866045c0277f66b48321f8c58b9e2c01096db  runtime.linux-musl-x64.microsoft.netcore.native.5.0.0-alpha1.19459.9.nupkg
+7d9f6f15fa66ee512989d63ccfb996171f046aa6c853d4856284ec696042676ffee24027595fa358ea8c01083370548f2a1f8b42a422a86b99c10d31114dc9f1  runtime.linux-musl-x64.microsoft.netcore.testhost.5.0.0-alpha1.19459.9.nupkg
+6f4b46a20cfc68b7838741767aa97617cbd654ad3876ff0909e72dd7d8720e4586816b620205491a6b81b0e96ec6340d192e8a62a2551866320ad9362fd0d49e  runtime.linux-musl-x64.microsoft.private.corefx.netcoreapp.5.0.0-alpha1.19457.3.nupkg
+8ee53783e0747b805dc6e6544dfabd52f6d30cdc0ae70f56dfc711c6d063f17bda82c6ce4cf18871fe05d8bf98391b15a50f2557b09d3875b2366cab3da199f8  transport.runtime.linux-musl-x64.microsoft.netcore.ilasm.5.0.0-alpha1.19459.9.nupkg
+640c7f0f22a1652bfd3bb522266bba46af368e421b29b3feece438684ef88db23b92c6aba45c576475f2ad8a65182ffbf9ce473593e17f3bc542ec01e1400842  transport.runtime.linux-musl-x64.microsoft.netcore.ildasm.5.0.0-alpha1.19459.9.nupkg
+c701fc3ec4f4c1a29bca2a45d752207fedb6c4437ded9ea5ae928d184772ee6b63432ae214e5ef1a5e99d14ab2f9a9aa6da694cdda277adbcf3b2f3c0686c5f3  transport.runtime.linux-musl-x64.microsoft.netcore.jit.5.0.0-alpha1.19459.9.nupkg
+98061582947420e265a28fb2eedf4d6bb3420e8fb9baf6660f6c7489110cbe1683024a3882b4d7faecbb3f85a30e1552ff3fdf67fd7b28c8bb028db0c100a18e  transport.runtime.linux-musl-x64.microsoft.netcore.native.5.0.0-alpha1.19459.9.nupkg
+097bf3c61b855ddf97e254be5cd982603ca8e90af5c018a8d090d95f727ae1a3c023b6154cdc031af6ed1371a7f20ae60de96c5ff136bdf10b40cb5f36d99c2d  transport.runtime.linux-musl-x64.microsoft.netcore.runtime.coreclr.5.0.0-alpha1.19459.9.nupkg
+e6b6928a30a1eae6b0d91dfdcc9ed0e91615ed4f01fe7a73d66f72569a6f4feb001d6cf79437fa2ae7269039e9e50a9afed86f0cd9fc6fa343174a39450720a2  transport.runtime.linux-musl-x64.microsoft.netcore.testhost.5.0.0-alpha1.19459.9.nupkg
+252837690f099ee756705559a030715dd19836c8f7b2d0364beb9998fc78596586d045e2a7f23e16143be2dbccf19470eec1818486790bf8d9160c166eeb72dc  dotnet-sdk-3.1.416-linux-musl-x64.tar.gz
+"
