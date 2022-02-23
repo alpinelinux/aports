@@ -1,0 +1,350 @@
+# Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>
+# Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
+
+#
+# Variables for dotnet build version 5.0
+# This APKBUILD is designed to be the same for version 5.0 and under
+# except for the variables in this first section
+#
+
+pkgname=dotnet5-build
+pkgver=5.0.211
+pkgrel=0
+
+# Tag of tarball generator. This may change from usual due to mistakes from upstream
+_installertag="v$pkgver-SDK"
+
+# Tag of SBRP builder for dotnet 5.0
+_sbrptag=6ce5818b1c1828ccdc8ac63d460d029c6391a401
+
+# this should match what is sourced by source-build's ./prep.sh script
+# and, at the very least, the artifacts version sourced, as defined in
+# eng/Version.Details.xml by var PrivateSourceBuiltArtifactsPackageVersion
+# Sometimes, this needs updating by stage0 scripts, thus it is bumped from this
+# version to establish that we are moving away from upstream
+_bootstrapver=5.0.211-r0
+
+# LLVM version to be used for this build
+_llvmver=12
+
+# Patches to be used. String before '_' refers to repo to patch
+# Look for patch notes within each patch for what they fix / where they come from
+# build_* patches applies directly to $builddir
+_patches="
+	application-insights_fix-net40-location.patch
+	build_darc-fix-alpine.patch
+	build_musl-build.patch
+	installer_forgotten-MicrosoftAspNetCoreAppRuntimePac.patch
+	references_sh-build-fix.patch
+	roslyn_added-previously-built-artifacts-repo.patch
+	runtime_add-rid-for-alpine-315.patch
+	runtime_use-latest-microsoftnetcoreplatformspackage.patch
+	runtime_link-order.patch
+	runtime_non-portable-distrorid-fix-alpine.patch
+	sdk_add-zsh-compdef-completion-script.patch
+	sdk_telemetry-optout.patch
+	"
+
+# Custom prepare
+default_prepare() {
+	local _artifactsver=$(find /usr/share/dotnet/artifacts/$_pkgver_macro* -maxdepth 0 -type d | tail -n1 | sed 's|..*\/||')
+	sed -i "s|/path/to/artifacts|/usr/share/dotnet/artifacts/$_artifactsver|" "$srcdir"/roslyn_added-previously-built-artifacts-repo.patch
+}
+
+# Following for for dotnet builds version 5.0 and under
+_pkgver_macro=${pkgver%.*}
+_pkgver_prior=${pkgver%.*.*}
+_pkgver_name=${_pkgver_macro//[.0]}
+pkgdesc="The .NET $_pkgver_macro SDK"
+arch="x86_64"
+case $CARCH in
+	x86_64) _dotnet_arch=x64;;
+	aarch64) _dotnet_arch=arm64;;
+	armv7) _dotnet_arch=arm;;
+esac
+url=https://www.microsoft.com/net/core
+license="MIT"
+_bootstrappkg="bootstrap"
+makedepends="
+	bash
+	clang
+	cmake
+	dotnet$_pkgver_name-$_bootstrappkg=$_bootstrapver
+	dotnet$_pkgver_name-$_bootstrappkg-artifacts=$_bootstrapver
+	findutils
+	git
+	grep
+	icu-dev
+	inetutils-syslogd
+	krb5-dev
+	libgit2-dev
+	libintl
+	libunwind-dev
+	libxml2-dev
+	libxml2-utils
+	linux-headers
+	lldb-dev
+	llvm$_llvmver-dev
+	lttng-ust-dev
+	nodejs
+	openssl-dev
+	zlib-dev
+	"
+options="!check" # No test suite
+
+# packages artifacts if building bootstrap
+[ "$_bootstrappkg" = "stage0" ] && subpackages="$pkgname-artifacts"
+
+source="
+	source-build-$_installertag.tar.gz::https://github.com/dotnet/source-build/archive/refs/tags/$_installertag.tar.gz
+	source-build-reference-packages-$_sbrptag.tar.gz::https://github.com/dotnet/source-build-reference-packages/archive/$_sbrptag.tar.gz
+	$_patches
+	"
+builddir="$srcdir/source-build-${_installertag/v}"
+_sbrpdir="$srcdir"/source-build-reference-packages-$_sbrptag
+_artifactsdir="/usr/share/dotnet/artifacts/${_bootstrapver/-*}"
+_referencesdir="/usr/share/dotnet/artifacts/${_bootstrapver/-*}/SourceBuildReferencePackages"
+_cli_root="$srcdir"/bootstrap
+
+# Custom patch logics for dotnet version 5.0 and under
+_patch() {
+	local i failed=
+	if ! have_patches; then
+		return 0
+	fi
+	[ -d "$builddir" ] || { error "Is \$builddir set correctly?"; return 1; }
+	msg "Deploying patches"
+	for i in $source; do
+		case ${i%::*} in
+			build_*.patch)
+				echo "applying $i to sourcebuild"
+				cd "$builddir"
+				patch ${patch_args:--Np1} -i "$srcdir/$(filename_from_uri $i)" || failed="$failed $i"
+			;;
+			references_*.patch)
+				echo "applying $i to references"
+				cd "$_sbrpdir"
+				patch ${patch_args:--Np1} -i "$srcdir/$(filename_from_uri $i)" || failed="$failed $i"
+			;;
+			*.patch)
+				local _package=$(echo $i | sed 's|_.*||')
+				local _patch=$(echo $i | sed "s|$_package\_||")
+				echo "deploying $_patch to $_package for application by sourcebuild"
+				[ -d "$builddir"/patches/$_package ] || mkdir -p "$builddir"/patches/$_package
+				cp "$srcdir"/"$i" "$builddir"/patches/$_package/$_patch
+			;;
+		esac
+	done
+
+	if [ -z "$failed" ]; then
+		return 0
+	fi
+	error "The following patches failed to apply:"
+	for i in $failed; do
+		printf "  %s\n" "$i"
+	done
+}
+
+# aport for bootstrap is effectively a copy of this aport, except that it
+# builds using stage0 bits, which are sourced from Microsoft prebuilts.
+# Another major difference is that rather than package build artifacts
+# under $dotnet_path/build to be packages later, it send artifacts to
+# $dotnet_path/bootstrap, as this is the directory that is sourced by
+# _prepare_bootstrap for build.
+_update_bootstrap() {
+	msg "Updating bootstrap APKBUILD"
+	# Copy patches
+	rm ../dotnet$_pkgver_name-bootstrap/*.patch || true
+	for i in ../dotnet"$_pkgver_name"-build/*.patch; do
+		cp $i ${i/$_pkgver_name-build/$_pkgver_name-bootstrap}
+	done
+
+	# Generate bootstrap
+	{
+		echo -n "# "
+		echo "Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>"
+		echo "# Contributor: Antoine Martin (ayakael) <dev@ayakael.net>"
+		echo
+		echo "#"
+		echo "# This is generated from dotnet$_pkgver_name-build's APKBUILD."
+		echo "# Any modifications to be done in that APKBUILD and propagated by"
+		echo -n "# executing 'abuild _update_bootstrap'"
+		sed \
+			-e "s/pkgname=dotnet$_pkgver_name-build/pkgname=dotnet$_pkgver_name-bootstrap/" \
+			-e "s/_bootstrappkg=\"bootstrap\"/_bootstrappkg=\"stage0\"/" \
+			-e "1,2d" \
+			../dotnet$_pkgver_name-build/APKBUILD
+	} > ../dotnet$_pkgver_name-bootstrap/APKBUILD
+}
+
+_build_sbrp() {
+	msg "Building source build reference packages"
+	cd "$_sbrpdir"
+	./build.sh \
+		--with-sdk "$_cli_root" \
+		--with-packages "$builddir"/artifacts/$_dotnet_arch/Release/Private.SourceBuilt.Artifacts.*.tar.gz \
+		> build.log || { tail -n 1000 build.log; return; }
+}
+
+# dotnet relies on itself when building, we thus need a bootstrap runtime
+# that is copied to write-capable folder
+_prepare_bootstrap() {
+	msg "Settings up bootstrap"
+	cp -r /usr/share/dotnet/bootstrap/${_bootstrapver/-*} "$_cli_root"
+
+	# Corrupt libcoreclrtraceptprovider.so when lttng <=2.13.0
+	# is detected as tracing is broken on dotnet platform
+	# due to ABI changes
+	# See https://github.com/dotnet/runtime/issues/57784.
+	if [ -f "/usr/lib/liblttng-ust.so.1 " ]; then
+		rm "$_cli_root"/shared/Microsoft.NETCore.App/*/libcoreclrtraceptprovider.so
+	fi
+}
+
+# Build doesn't set all the right executable bits for the right file types
+_fix_executable() {
+	# add executable bit
+	find "$1" -type f \( \
+		-name 'apphost' -o \
+		-name 'singlefilehost' -o \
+		-name 'lib*so' \
+			\) \
+		-exec chmod +x '{}' \;
+
+	# remove executable bit
+	find "$1" -type f \( \
+		-name '*.a' -o \
+		-name '*.dll' -o \
+		-name '*.h' -o \
+		-name '*.json' -o \
+		-name '*.pdb' -o \
+		-name '*.props' -o \
+		-name '*.pubxml' -o \
+		-name '*.targets' -o \
+		-name '*.txt' -o \
+		-name '*.xml' \
+			\) \
+		-exec chmod -x '{}' \;
+}
+
+prepare() {
+	default_prepare
+
+	# source-build expects to be in a git repo
+	git init
+	git add ./*
+	git commit -m 'initial commit'
+	git remote add origin https://github.com/dotnet/source-build.git
+
+	_patch
+	_prepare_bootstrap
+
+	# by default build populates these folders using Artifacts and SBRP archives
+	# we are instead going to populate them from the prebuilt artifacts provided
+	# by dotnetx-bootstrap-artifacts
+	[ -f "$builddir/packages" ] || mkdir -p "$builddir"/packages
+	cp -r "$_artifactsdir" "$builddir"/packages/prebuilt
+	mv "$builddir"/packages/prebuilt/SourceBuildReferencePackages "$builddir"/packages/reference
+	# make sure archives wont be downloaded or aren't expected.
+	[ -d "$builddir"/packages/archive ] && rm -r "$builddir"/packages/archive
+
+	# by default, coreclr-tools is not sourced from dotnetx-bootstrap-artifacts, thus
+	# it'll be the wrong architecture. Below replaces default coreclr-tools with
+	# versions from artifacts, which have been built properly
+	mkdir -p "$builddir"/Tools/source-built
+	cp -r "$builddir"/packages/prebuilt/coreclr-tools "$builddir"/Tools/source-built/.
+}
+
+build() {
+	msg "Building $pkgname-$pkgver"
+
+	# logs args, else the output is forwarded to log files which isn't ideal in a
+	# pipeline environment
+	local args="
+		/v:minimal
+		/p:LogVerbosity=minimal
+		/p:MinimalConsoleLogOutput=true
+		"
+
+	# defaults args for build on Alpine
+	local args="$args
+		/p:SkipDownloadingPreviouslySourceBuiltPackages=true
+		/p:SkipDownloadingReferencePackages=true
+		/p:ContinueOnPrebuiltBaselineError=true
+		/p:SkipPrebuiltEnforcement=true
+		/p:UseSystemLibraries=true
+		/p:UseSystemLibunwind=true
+		"
+
+	./build.sh \
+		--with-sdk "$_cli_root" \
+		$args | tee -a build.log
+
+	# only build references when building with stage0
+	if [ "$_bootstrappkg" = "stage0" ]; then _build_sbrp; fi
+}
+
+package() {
+	local subdir=${pkgname/*-}
+	local targetdir="$pkgdir"/usr/share/dotnet/$subdir/$pkgver
+
+	# directory creation
+	install -dm 755 \
+		"$targetdir"/docs \
+		"$targetdir"/comp
+
+	# unpack build artifacts to subdir defined by pkgname. If bootstrap, unpacks
+	# to bootstrap, if build unpacks to build
+	tar -xzf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz -C "$targetdir"/ --no-same-owner
+
+	# assemble completions
+	install -m 755 "$builddir"/artifacts/src/sdk.*/scripts/register-completions.bash "$targetdir"/comp/
+	install -m 755 "$builddir"/artifacts/src/sdk.*/scripts/register-completions.zsh "$targetdir"/comp/
+
+	# assemble docs
+	find "$builddir" -iname 'dotnet*.1' -type f -exec cp '{}' "$targetdir"/docs/ \;
+
+	# some files either should or should not have executable bits
+	_fix_executable "$pkgdir"
+
+	# See https://github.com/dotnet/source-build/issues/2579
+	find "$pkgdir" -type f -name 'testhost.x86' -delete
+	find "$pkgdir" -type f -name 'vstest.console' -delete
+}
+
+# build relies on a plethora of nupkgs which are provided by this Artifacts file.
+# stage0 sources these from Microsoft, which then allows bootstrap to build
+# locally hosted versions. The following unpacks built tarball into directory
+# for use by future builds.
+artifacts() {
+	pkgdesc="Internal package for building .NET $_pkgver_macro Software Development Kit"
+
+	# directory creation
+	install -dm 755 \
+		"$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/SourceBuildReferencePackages \
+		"$subpkgdir"/usr/share/licenses
+
+	# extract artifacts to artifacts dir for use by future dotnet builds
+	tar -xzf "$builddir"/artifacts/$_dotnet_arch/Release/Private.SourceBuilt.Artifacts.*.tar.gz -C "$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/ --no-same-owner \
+		--exclude '*Intermediate*'
+
+	# pulls SBRP artifacts
+	install -m 644 "$_sbrpdir"/artifacts/reference-packages/* "$subpkgdir"/usr/share/dotnet/artifacts/$pkgver/SourceBuildReferencePackages/.
+}
+
+sha512sums="
+e4866c779d7a67ae934d80216af2623914dc5c2b64682171be004a429120e5aa31122bef9efe9b728abc1df68e953c6bd6646d9490925cc576371880c8a88fc5  source-build-v5.0.211-SDK.tar.gz
+4d15c4a62342c6186053a5d9391567e0ee2c916382a1c81d6a8aff0dc0092f7889d49d7d5b357abda85d4c709d9599726bba8c2593236360b0373c35e3261208  source-build-reference-packages-6ce5818b1c1828ccdc8ac63d460d029c6391a401.tar.gz
+fb1cffcacba8cf6439c05781442167905b8147d36665aef8df4fc7a573c26fa3dd0f1ed2ec680039715d25d73646c3633f5ad9f658f6e9ec85f6850efec87935  application-insights_fix-net40-location.patch
+d77500c50ce9a9ce35281d54a1f6d9c00e1ca391567f1a05f3b0509aa6212353f48c2163fc277103930ee21ee143304997c55522fdf8e3de83d0ea9d7e2a6b13  build_darc-fix-alpine.patch
+1df4da20afe8bc65ebe1ea6e8c2684be4a73794c255597429197aab52a690ae34563da0e4d23755e314c98edc4f3f584b53c33ccbb23e8415a64de185fc518d9  build_musl-build.patch
+6f620d9d2644dd4a2b5157c1713aec8c0865c41a2b94499b290869f4fef724e5d60950e25ee767b5b9af6be3961ca4f42fde3c3714c4b24f08c65cd5dadaa447  installer_forgotten-MicrosoftAspNetCoreAppRuntimePac.patch
+8acf2f6df8310eee7a786715b304100247cfbaebae17c51449b0c81085763e5babd17774f995668f487107ebd5ac7a1cda77ebc8b91409c88725fcf63581d1ce  references_sh-build-fix.patch
+72ee7064fb9042d4c37ca22c1fe8cd5c393db51086279db3c965142ac8367f6b34b3e6f7d1f36269d945d65587cd0cda068fa0f5e94a203a2383db530f805964  roslyn_added-previously-built-artifacts-repo.patch
+70ca8f5177f9ef3b40c9d0ad0d527877a4179e61db7e4e90e69fb7a0ed214034b6a963ff1fd93dca197ef1b9ea03ca1fa85f84dea685d6f02589a88f84aa732d  runtime_add-rid-for-alpine-315.patch
+8cb8e38fb0d4bfc10b3a214ed2deabbcabaef85cbe2f2ad02cac9589a3e9a613116ef79e38122474fd5c3d6d1a24a2f7efe8f5c61855bb386e90198388bfcd4d  runtime_use-latest-microsoftnetcoreplatformspackage.patch
+619ebecf68bac7bd4ecf68effe31e84d1d338f3b850bc49288b957a5528fe3ed27ed844032f99c2c337c3ed214d1163db81923507100e6ec5f78af502dd610e1  runtime_link-order.patch
+4a480d9502ad9d8c0c9a11879de29f181c2f7eff2e88ef7bd61611dc62ac23fbff9cf904b59186a05d4f5bb7a48d74aae4e09105f16d85a7a95082e2a9af2dd0  runtime_non-portable-distrorid-fix-alpine.patch
+55afa9c74be6f5a87f1ff5aa44caad094cf620eb4388f6407218acf3d58a878f5565a0e875e95c3dbe0efca1879c120ee4b8076c521bfc9d6069a652c4a4fdd8  sdk_add-zsh-compdef-completion-script.patch
+9fabfa18197f5a8104f816e2cd64156c72565709470b81fa323516b3cd5c55dbaf5383b065e2b7ae995303ee1020205995a5b52987b539abecc3700c261b59e4  sdk_telemetry-optout.patch
+"
