@@ -2,13 +2,15 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.2.0
-pkgrel=19
+pkgrel=20
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
 license="GPL-2.0-only"
 pkggroups="shadow"
 options="!fhs !check"
+depends="$pkgname-data=${pkgver}-r${pkgrel}"
+subpackages="$pkgname-data"
 install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
 	$pkgname.post-install"
 _nbver=6.2
@@ -48,6 +50,25 @@ build() {
 		if ($1 == "root") { pw = "::" }
 		print($1 pw ":0:::::")
 	}' "$srcdir"/passwd > shadow
+}
+
+data() {
+	replaces="alpine-baselayout"
+
+	amove etc/fstab
+	amove etc/group
+	amove etc/hostname
+	amove etc/hosts
+	amove etc/inittab
+	amove etc/modules
+	amove etc/mtab
+	amove etc/passwd
+	amove etc/profile
+	amove etc/protocols
+	amove etc/services
+	amove etc/shadow
+	amove etc/shells
+	amove etc/sysctl.conf
 }
 
 package() {
