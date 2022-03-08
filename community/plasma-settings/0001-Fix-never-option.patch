@@ -1,0 +1,451 @@
+From 4bf28f52113c4c57008fb6ddffad6b75eb608783 Mon Sep 17 00:00:00 2001
+From: Devin Lin <espidev@gmail.com>
+Date: Sat, 22 Jan 2022 18:23:21 -0500
+Subject: [PATCH] [powermanagement] Rework kcm, add dpms support, fix "Never"
+ option
+
+---
+ modules/powermanagement/mobilepower.cpp       | 244 +++++++++---------
+ modules/powermanagement/mobilepower.h         |  38 +--
+ .../package/contents/ui/Power.qml              |  20 +-
+ 3 files changed, 149 insertions(+), 153 deletions(-)
+
+diff --git a/modules/powermanagement/mobilepower.cpp b/modules/powermanagement/mobilepower.cpp
+index fa33cff..cd47644 100644
+--- a/modules/powermanagement/mobilepower.cpp
++++ b/modules/powermanagement/mobilepower.cpp
+@@ -13,9 +13,8 @@ K_PLUGIN_CLASS_WITH_JSON(MobilePower, "powermanagement.json")
+ 
+ struct MobilePower::Private {
+     qreal suspendSessionTime;
+-    qreal sleepScreenTime;
+-    bool lockScreen;
+-    bool sleepScreen;
++    qreal dimScreenTime;
++    qreal screenOffTime;
+ 
+     QStringList timeValues = {
+         i18n("30 sec"),
+@@ -65,68 +64,6 @@ MobilePower::MobilePower(QObject *parent, const QVariantList &args)
+ 
+ MobilePower::~MobilePower() = default;
+ 
+-bool MobilePower::lockScreen() const
+-{
+-    return d->lockScreen;
+-}
+-
+-void MobilePower::setLockScreen(bool value)
+-{
+-    if (d->lockScreen == value) {
+-        return;
+-    }
+-
+-    d->lockScreen = value;
+-    Q_EMIT lockScreenChanged(value);
+-    save();
+-}
+-
+-qreal MobilePower::suspendSessionTime() const
+-{
+-    return d->suspendSessionTime;
+-}
+-
+-void MobilePower::setLockScreenTime(qreal value)
+-{
+-    if (qFuzzyCompare(d->suspendSessionTime, value)) {
+-        return;
+-    }
+-    d->suspendSessionTime = value;
+-
+-    Q_EMIT suspendSessionTimeChanged(value);
+-    save();
+-}
+-
+-bool MobilePower::sleepScreen() const
+-{
+-    return d->sleepScreen;
+-}
+-
+-void MobilePower::setSleepScreen(bool value)
+-{
+-    if (d->sleepScreen == value) {
+-        return;
+-    }
+-    d->sleepScreen = value;
+-    Q_EMIT sleepScreenChanged(value);
+-    save();
+-}
+-
+-qreal MobilePower::sleepScreenTime() const
+-{
+-    return d->sleepScreenTime;
+-}
+-
+-void MobilePower::setSleepScreenTime(qreal value)
+-{
+-    if (qFuzzyCompare(d->sleepScreenTime, value)) {
+-        return;
+-    }
+-    d->sleepScreenTime = value;
+-    Q_EMIT sleepScreenTimeChanged(value);
+-    save();
+-}
+-
+ // contents of powermanagementprofilesrc
+ //
+ // [Battery][SuspendSession] // our LockScreen
+@@ -144,48 +81,91 @@ void MobilePower::setSleepScreenTime(qreal value)
+ 
+ void MobilePower::load()
+ {
++    // we assume that the [AC], [Battery], and [LowBattery] groups have the same value
++    // (which is done by this kcm)
++
+     KConfigGroup batteryGroup = d->profilesConfig->group("Battery");
+ 
+     if (batteryGroup.hasGroup("DimDisplay")) {
+-        qDebug() << "Group is valid";
++        qDebug() << "[Battery][DimDisplay] group is listed";
+         KConfigGroup dimSettings = batteryGroup.group("DimDisplay");
+-        d->sleepScreen = true;
+ 
+         // powerdevil/dimdisplayconfig.cpp - here we load time / 60 / 1000
+         // We should really, really, stop doing that.
+-        d->sleepScreenTime = (dimSettings.readEntry("idleTime").toDouble() / 60) / 1000;
++        d->dimScreenTime = (dimSettings.readEntry("idleTime").toDouble() / 60) / 1000;
+     } else {
+-        qDebug() << "Group is invalid, setting sleep screen to false";
+-        d->sleepScreen = false;
++        qDebug() << "[Battery][DimDisplay] Group is not listed";
++        d->dimScreenTime = 0;
+     }
+ 
+-    KConfigGroup suspendSessionGroup = batteryGroup.group("SuspendSession");
+-    d->lockScreen = true;
+-    d->suspendSessionTime = suspendSessionGroup.readEntry("idleTime").toDouble() / 60 / 1000;
++    if (batteryGroup.hasGroup("DPMSControl")) {
++        qDebug() << "[Battery][DPMSControl] group is listed";
++        KConfigGroup dpmsSettings = batteryGroup.group("DPMSControl");
++        d->screenOffTime = dpmsSettings.readEntry("idleTime").toDouble() / 60 / 1000;
++    } else {
++        qDebug() << "[Battery][DPMSControl] is not listed";
++        d->screenOffTime = 0;
++    }
+ 
+-    Q_EMIT lockScreenChanged(d->lockScreen);
+-    Q_EMIT suspendSessionTimeChanged(d->suspendSessionTime);
+-    Q_EMIT sleepScreenChanged(d->sleepScreen);
+-    Q_EMIT sleepScreenTimeChanged(d->sleepScreenTime);
+-    qDebug() << "Loaded the values" << d->lockScreen << d->sleepScreen;
++    if (batteryGroup.hasGroup("SuspendSession")) {
++        qDebug() << "[Battery][SuspendSession] group is listed";
++        KConfigGroup suspendSessionGroup = batteryGroup.group("SuspendSession");
++        d->suspendSessionTime = suspendSessionGroup.readEntry("idleTime").toDouble() / 60 / 1000;
++    } else {
++        qDebug() << "[Battery][SuspendSession] is not listed";
++        d->suspendSessionTime = 0;
++    }
+ }
+ 
+ void MobilePower::save()
+ {
++    // we set all profiles at the same time, since our UI is quite a simple global toggle
++    KConfigGroup acGroup = d->profilesConfig->group("AC");
+     KConfigGroup batteryGroup = d->profilesConfig->group("Battery");
+-    if (!d->sleepScreen) {
++    KConfigGroup lowBatteryGroup = d->profilesConfig->group("LowBattery");
++
++    if (d->dimScreenTime == 0) {
+         qDebug() << "Deleting the group DimDisplay";
++
++        acGroup.deleteGroup("DimDisplay");
+         batteryGroup.deleteGroup("DimDisplay");
++        lowBatteryGroup.deleteGroup("DimDisplay");
+     } else {
+-        KConfigGroup dimDisplayGroup = batteryGroup.group("DimDisplay");
+-
+         // powerdevil/dimdisplayconfig.cpp - here we store time * 60 * 1000
+         // We should really, really, stop doing that.
+-        dimDisplayGroup.writeEntry("idleTime", d->sleepScreenTime * 60 * 1000);
++        acGroup.group("DimDisplay").writeEntry("idleTime", d->dimScreenTime * 60 * 1000);
++        batteryGroup.group("DimDisplay").writeEntry("idleTime", d->dimScreenTime * 60 * 1000);
++        lowBatteryGroup.group("DimDisplay").writeEntry("idleTime", d->dimScreenTime * 60 * 1000);
++    }
++
++    if (d->screenOffTime == 0) {
++        qDebug() << "Deleting the group DPMSControl";
++
++        acGroup.deleteGroup("DPMSControl");
++        batteryGroup.deleteGroup("DPMSControl");
++        lowBatteryGroup.deleteGroup("DPMSControl");
++    } else {
++        acGroup.group("DPMSControl").writeEntry("idleTime", d->screenOffTime * 60 * 1000);
++        batteryGroup.group("DPMSControl").writeEntry("idleTime", d->screenOffTime * 60 * 1000);
++        lowBatteryGroup.group("DPMSControl").writeEntry("idleTime", d->screenOffTime * 60 * 1000);
+     }
+ 
+-    KConfigGroup suspendSessionGroup = batteryGroup.group("SuspendSession");
+-    suspendSessionGroup.writeEntry("idleTime", d->suspendSessionTime * 60 * 1000);
++    if (d->suspendSessionTime == 0) {
++        qDebug() << "Deleting the group SuspendDisplay";
++
++        acGroup.deleteGroup("SuspendSession");
++        batteryGroup.deleteGroup("SuspendSession");
++        lowBatteryGroup.deleteGroup("SuspendSession");
++    } else {
++        acGroup.group("SuspendSession").writeEntry("idleTime", d->suspendSessionTime * 60 * 1000);
++        acGroup.group("SuspendSession").writeEntry("suspendType", 1);
++
++        batteryGroup.group("SuspendSession").writeEntry("idleTime", d->suspendSessionTime * 60 * 1000);
++        batteryGroup.group("SuspendSession").writeEntry("suspendType", 1);
++
++        lowBatteryGroup.group("SuspendSession").writeEntry("idleTime", d->suspendSessionTime * 60 * 1000);
++        lowBatteryGroup.group("SuspendSession").writeEntry("suspendType", 1);
++    }
+ 
+     d->profilesConfig->sync();
+     // Do not mess with Suspend Type
+@@ -197,61 +177,71 @@ QStringList MobilePower::timeOptions() const
+     return d->timeValues;
+ }
+ 
+-void MobilePower::setLockScreenIdx(int idx)
++void MobilePower::setDimScreenIdx(int idx)
+ {
+     qreal value = d->idxToMinutes.value(idx);
+     qDebug() << "Got the value" << value;
+ 
+-    if (value == 0) {
+-        if (!d->lockScreen) {
+-            return;
+-        }
+-        qDebug() << "Setting to never lock";
++    if (d->dimScreenTime == value) {
++        return;
++    }
+ 
+-        d->lockScreen = false;
++    if (value == 0) {
++        qDebug() << "Setting to never dim";
+     } else {
+-        d->lockScreen = true;
+-        if (d->suspendSessionTime == value) {
+-            return;
+-        }
+-        d->suspendSessionTime = value;
+-        qDebug() << "SEtting to lock in " << value << "Minutes";
++        qDebug() << "Setting to dim in " << value << "Minutes";
+     }
+-    Q_EMIT suspendSessionIdxChanged();
++
++    d->dimScreenTime = value;
++    Q_EMIT dimScreenIdxChanged();
+     save();
+ }
+ 
+-void MobilePower::setSleepScreenIdx(int idx)
++void MobilePower::setScreenOffIdx(int idx)
+ {
+     qreal value = d->idxToMinutes.value(idx);
+     qDebug() << "Got the value" << value;
++
++    if (d->screenOffTime == value) {
++        return;
++    }
++
+     if (value == 0) {
+-        if (!d->sleepScreen) {
+-            return;
+-        }
+-        qDebug() << "Setting to never sleep";
+-        d->sleepScreen = false;
++        qDebug() << "Setting to never screen off";
+     } else {
+-        d->sleepScreen = true;
+-        if (d->sleepScreenTime == value) {
+-            return;
+-        }
+-        d->sleepScreenTime = value;
+-        qDebug() << "SEtting to sleep in " << value << "Minutes";
++        qDebug() << "Setting to screen off in " << value << "Minutes";
+     }
+-    Q_EMIT sleepScreenIdxChanged();
++    d->screenOffTime = value;
++
++    Q_EMIT screenOffIdxChanged();
+     save();
+ }
+ 
+-int MobilePower::suspendSessionIdx()
++void MobilePower::setSuspendSessionIdx(int idx)
+ {
+-    qDebug() << "lock screen is" << d->lockScreen;
++    qreal value = d->idxToMinutes.value(idx);
++    qDebug() << "Got the value" << value;
+ 
+-    if (!d->lockScreen) {
+-        return MobilePower::Private::NEVER;
++    if (d->suspendSessionTime == value) {
++        return;
+     }
+ 
+-    if (qFuzzyIsNull(d->suspendSessionTime)) {
++    if (value == 0) {
++        qDebug() << "Setting to never suspend";
++    } else {
++        qDebug() << "Setting to suspend in " << value << "Minutes";
++    }
++
++    d->suspendSessionTime = value;
++    Q_EMIT suspendSessionIdxChanged();
++    save();
++}
++
++int MobilePower::suspendSessionIdx()
++{
++    if (d->suspendSessionTime == 0) {
++        return MobilePower::Private::NEVER;
++    } else if (qFuzzyIsNull(d->suspendSessionTime)) {
+         return MobilePower::Private::NEVER;
+     } else if (qFuzzyCompare(d->suspendSessionTime, 0.5)) {
+         return MobilePower::Private::THIRTY_SECONDS;
+@@ -260,20 +250,30 @@ int MobilePower::suspendSessionIdx()
+     return d->idxToMinutes.key(std::round(d->suspendSessionTime));
+ }
+ 
+-int MobilePower::sleepScreenIdx()
++int MobilePower::dimScreenIdx()
+ {
+-    qDebug() << "sleep screen is" << d->sleepScreen << d->sleepScreenTime;
+-    if (!d->sleepScreen) {
++    if (d->dimScreenTime == 0) {
++        return MobilePower::Private::NEVER;
++    } else if (qFuzzyIsNull(d->dimScreenTime)) {
+         return MobilePower::Private::NEVER;
++    } else if (qFuzzyCompare(d->dimScreenTime, 0.5)) {
++        return MobilePower::Private::THIRTY_SECONDS;
+     }
+ 
+-    if (qFuzzyIsNull(d->sleepScreenTime)) {
++    return d->idxToMinutes.key(std::round(d->dimScreenTime));
++}
++
++int MobilePower::screenOffIdx()
++{
++    if (d->screenOffTime == 0) {
++        return MobilePower::Private::NEVER;
++    } else if (qFuzzyIsNull(d->screenOffTime)) {
+         return MobilePower::Private::NEVER;
+-    } else if (qFuzzyCompare(d->sleepScreenTime, 0.5)) {
++    } else if (qFuzzyCompare(d->screenOffTime, 0.5)) {
+         return MobilePower::Private::THIRTY_SECONDS;
+     }
+ 
+-    return d->idxToMinutes.key(std::round(d->sleepScreenTime));
++    return d->idxToMinutes.key(std::round(d->screenOffTime));
+ }
+ 
+ #include "mobilepower.moc"
+diff --git a/modules/powermanagement/mobilepower.h b/modules/powermanagement/mobilepower.h
+index ae7109a..53a766d 100644
+--- a/modules/powermanagement/mobilepower.h
++++ b/modules/powermanagement/mobilepower.h
+@@ -10,43 +10,29 @@
+ class MobilePower : public KQuickAddons::ConfigModule
+ {
+     Q_OBJECT
+-    Q_PROPERTY(bool lockScreen READ lockScreen WRITE setLockScreen NOTIFY lockScreenChanged)
+-    Q_PROPERTY(qreal suspendSessionTime READ suspendSessionTime WRITE setLockScreenTime NOTIFY suspendSessionTimeChanged)
+-    Q_PROPERTY(bool sleepScreen READ sleepScreen WRITE setSleepScreen NOTIFY sleepScreenChanged)
+-    Q_PROPERTY(qreal sleepScreenTime READ sleepScreenTime WRITE setSleepScreenTime NOTIFY sleepScreenTimeChanged)
+-    Q_PROPERTY(int sleepScreenIdx READ sleepScreenIdx WRITE setSleepScreenIdx NOTIFY sleepScreenIdxChanged)
+-    Q_PROPERTY(int suspendSessionIdx READ suspendSessionIdx WRITE setLockScreenIdx NOTIFY suspendSessionIdxChanged)
++    Q_PROPERTY(int dimScreenIdx READ dimScreenIdx WRITE setDimScreenIdx NOTIFY dimScreenIdxChanged)
++    Q_PROPERTY(int screenOffIdx READ screenOffIdx WRITE setScreenOffIdx NOTIFY screenOffIdxChanged)
++    Q_PROPERTY(int suspendSessionIdx READ suspendSessionIdx WRITE setSuspendSessionIdx NOTIFY suspendSessionIdxChanged)
+ 
+ public:
+     MobilePower(QObject *parent, const QVariantList &args);
+     ~MobilePower();
+ 
+     Q_INVOKABLE QStringList timeOptions() const;
+-    Q_INVOKABLE void setLockScreenIdx(int idx);
+-    Q_INVOKABLE void setSleepScreenIdx(int idx);
+-    int sleepScreenIdx();
++
++    void setDimScreenIdx(int idx);
++    void setScreenOffIdx(int idx);
++    void setSuspendSessionIdx(int idx);
++    int dimScreenIdx();
++    int screenOffIdx();
+     int suspendSessionIdx();
+-    Q_SIGNAL void sleepScreenIdxChanged();
++
++    Q_SIGNAL void dimScreenIdxChanged();
++    Q_SIGNAL void screenOffIdxChanged();
+     Q_SIGNAL void suspendSessionIdxChanged();
+ 
+     QString stringForValue(int value);
+ 
+-    bool lockScreen() const;
+-    Q_SLOT void setLockScreen(bool value);
+-    Q_SIGNAL void lockScreenChanged(bool value);
+-
+-    qreal suspendSessionTime() const;
+-    Q_SLOT void setLockScreenTime(double value);
+-    Q_SIGNAL void suspendSessionTimeChanged(double value);
+-
+-    bool sleepScreen() const;
+-    Q_SLOT void setSleepScreen(bool value);
+-    Q_SIGNAL void sleepScreenChanged(bool value);
+-
+-    qreal sleepScreenTime() const;
+-    Q_SLOT void setSleepScreenTime(double value);
+-    Q_SIGNAL void sleepScreenTimeChanged(double value);
+-
+     void load() override;
+     void save() override;
+ 
+diff --git a/modules/powermanagement/package/contents/ui/main.qml b/modules/powermanagement/package/contents/ui/main.qml
+index cbcce07..ad7835f 100644
+--- a/modules/powermanagement/package/contents/ui/Power.qml
++++ b/modules/powermanagement/package/contents/ui/Power.qml
+@@ -21,19 +21,29 @@ SimpleKCM {
+ 
+     Kirigami.FormLayout {
+         id: mainItem
++        wideMode: false
+ 
+         QQC2.ComboBox {
+-            id: sleepCombo
+-            Kirigami.FormData.label: i18nc("Part of a sentence like 'Dim Display after 5 minutes'", "Dim Display")
++            id: dimScreenCombo
++            Kirigami.FormData.label: i18nc("Part of a sentence like 'Dim screen after 5 minutes'", "Dim screen after:")
+             model: kcm.timeOptions()
+-            currentIndex: kcm.sleepScreenIdx
+-            onActivated: kcm.sleepScreenIdx = currentIndex
++            currentIndex: kcm.dimScreenIdx
++            onActivated: kcm.dimScreenIdx = currentIndex
++            onCurrentIndexChanged: print(currentIndex)
++        }
++        
++        QQC2.ComboBox {
++            id: screenOffCombo
++            Kirigami.FormData.label: i18nc("Part of a sentence like 'Turn off screen after 5 minutes'", "Turn off screen after:")
++            model: kcm.timeOptions()
++            currentIndex: kcm.screenOffIdx
++            onActivated: kcm.screenOffIdx = currentIndex
+             onCurrentIndexChanged: print(currentIndex)
+         }
+ 
+         QQC2.ComboBox {
+             id: suspendCombo
+-            Kirigami.FormData.label: i18nc("Part of a sentence like 'Suspend Session after 5 minutes'", "Suspend Session")
++            Kirigami.FormData.label: i18nc("Part of a sentence like 'Suspend device after 5 minutes'", "Suspend device after:")
+             model: kcm.timeOptions()
+             currentIndex: kcm.suspendSessionIdx
+             onActivated: kcm.suspendSessionIdx = currentIndex
+-- 
+GitLab
+
