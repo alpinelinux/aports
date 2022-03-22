@@ -1,0 +1,159 @@
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Maintainer: Jakub Jirutka <jakub@jirutka.cz>
+pkgname=gitstatus
+pkgver=1.5.4
+pkgrel=0
+pkgdesc="Git status for Bash and Zsh prompt"
+url="https://github.com/romkatv/gitstatus"
+arch="all"
+license="GPL-3.0-or-later"
+makedepends="
+	cmake
+	http-parser-dev
+	pcre-dev
+	zlib-dev
+	zsh
+	"
+checkdepends="bash"
+subpackages="
+	$pkgname-bash-plugin:_bash_plugin:noarch
+	$pkgname-zsh-plugin:_zsh_plugin:noarch
+	"
+# IMPORTANT: Keep in sync with $libgit2_version in build.info file.
+# NOTE: The upstream maintains a fork of libgit2 with patches specific for
+#  gitstatus, it cannot be built with vanilla libgit2.
+_libgit2_ver="tag-0ad3d776aa86dd607dc86dcd7f77ad3ed7ebec61"
+source="https://github.com/romkatv/gitstatus/archive/v$pkgver/gitstatus-$pkgver.tar.gz
+	https://github.com/romkatv/libgit2/archive/$_libgit2_ver/libgit2-$_libgit2_ver.tar.gz
+	make-ldlibs.patch
+	install
+	"
+
+prepare() {
+	mv "$srcdir"/libgit2-$_libgit2_ver deps/libgit2
+
+	# Replace with our script that doesn't download prebuilt gitstatusd,
+	# just executes the one installed with this package.
+	cp "$srcdir"/install .
+
+	local ver=$(. ./build.info && echo "$libgit2_version")
+	if [ "$_libgit2_ver" != "$ver" ]; then
+		error "incorrect libgit2 version, update _libgit2_ver=$ver"
+		return 1
+	fi
+
+	default_prepare
+}
+
+# NOTE: The build script provided by the upstream is very complex and builds
+#  a static binary with all dependencies bundled (zlib, PCRE, http_parser).
+#  That's not very distro-friendly. That's why we don't use this build script
+#  and instead replicate it here with some changes.
+build() {
+	# Flags copied from gitstatus' build script (except -flto).
+	local common_cflags="-fno-plt -Wformat -Werror=format-security -fstack-clash-protection -flto"
+
+	export CFLAGS="${CFLAGS/-Os/-O2} $common_cflags"
+	export LDFLAGS="$LDFLAGS -flto"
+
+	cd deps/libgit2
+
+	# Build patched libgit2 as a static lib.
+	#
+	# 1st group of flags is copied from the gitstatus' build script.
+	# 2nd group is also present in the build script, but they were changed
+	# in favour of shared dependencies.
+	cmake -B build \
+		-DCMAKE_BUILD_TYPE=None \
+		-DZERO_NSEC=ON \
+		-DTHREADSAFE=ON \
+		-DUSE_SSH=OFF \
+		-DUSE_HTTPS=OFF \
+		-DBUILD_CLAR=OFF \
+		-DUSE_GSSAPI=OFF \
+		-DUSE_NTLMCLIENT=OFF \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DENABLE_REPRODUCIBLE_BUILDS=ON \
+		\
+		-DUSE_BUNDLED_ZLIB=OFF \
+		-DREGEX_BACKEND=pcre \
+		-DUSE_HTTP_PARSER=system \
+		\
+		-DCMAKE_VERBOSE_MAKEFILE=ON
+	cmake --build build
+
+	cd ../..
+
+	# Build gitstatus.
+	#
+	# CXXFLAGS starting with -DGITSTATUS_ZERO_NSEC are copied from
+	# gitstatus' build script.
+	CXXFLAGS="${CXXFLAGS/-Os/-O2} $common_cflags -Ideps/libgit2/include \
+		-DGITSTATUS_ZERO_NSEC -D_GNU_SOURCE -D_GLIBCXX_ASSERTIONS" \
+	 LDFLAGS="$LDFLAGS -Ldeps/libgit2/build" \
+	 LDLIBS="-lz -lpcre -lhttp_parser" \
+	make
+
+	# Compile Zsh scripts.
+	make zwc
+	rm -f install.zwc
+}
+
+check() {
+	export GITSTATUS_DAEMON="$builddir/usrbin/gitstatusd"
+
+	mkdir -p .tmp
+	cp -a gitstatus.*.*sh install .tmp/
+
+	# This doesn't work on CI (setopt:7: can't change option: monitor).
+	sed -i '/\bsetopt monitor\b/d' .tmp/gitstatus.plugin.zsh
+
+	# We can't run Bash on CI in interactive mode, so just remove the check.
+	sed -i '/\[\[ \$- == \*i\* \]\]/d' .tmp/gitstatus.plugin.sh
+
+	msg "Testing on Zsh"
+	zsh --no-rcs --interactive -c "
+		source .tmp/gitstatus.prompt.zsh
+		gitstatus_prompt_update
+		"
+
+	msg "Testing on Bash"
+	bash --noprofile --norc -c "
+		source .tmp/gitstatus.prompt.sh
+		gitstatus_prompt_update
+		"
+
+	rm -rf .tmp
+}
+
+package() {
+	install -D -m755 usrbin/gitstatusd -t "$pkgdir"/usr/libexec/
+}
+
+_bash_plugin() {
+	pkgdesc="Git status for Bash prompt"
+	depends="$pkgname=$pkgver-r$pkgrel bash"
+
+	cd "$builddir"
+	install -D -m644 -t "$subpkgdir"/usr/share/bash/plugins/gitstatus/ \
+		gitstatus.*.sh \
+		"$srcdir"/install
+}
+
+_zsh_plugin() {
+	pkgdesc="Git status for Zsh prompt"
+	depends="$pkgname=$pkgver-r$pkgrel zsh"
+
+	cd "$builddir"
+	install -D -m644 -t "$subpkgdir"/usr/share/zsh/plugins/gitstatus/ \
+		gitstatus.*.zsh \
+		gitstatus.*.zwc \
+		"$srcdir"/install
+}
+
+sha512sums="
+db7b082f302851e516c79fb464972fc065aafae426dc1d732b2a08e72d88e47a35b11c079cd7bb8795b8363dc8a583c1c62bb44566d82e5c925a335c015c0329  gitstatus-1.5.4.tar.gz
+ffd637fc9e8ed440953f5fc39ca736785ff961f6391bff541dee3fe4e89b3d9eb44ef54767963eb63a14c314c7e53538e00e1ad7d83090d03eead40f160045a5  libgit2-tag-0ad3d776aa86dd607dc86dcd7f77ad3ed7ebec61.tar.gz
+862b94977c117419c94a287e1f854fe027a8011667b27160229baf369d5c545e29356093e82bdfd53d94dff1f62fbf19ff1f612d1f4cbccde09dbd5221c26243  make-ldlibs.patch
+565991bbe55e1538f9ac5ecb77d0dc9edc2e6fb4376555b3bb09a7b5dceb63c1df85526ff993994b6026e30424f710f3673e248d85c66cb234fd5493db0e98f2  install
+"
