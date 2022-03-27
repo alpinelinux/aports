@@ -1,4 +1,4 @@
-From 134a834b463e0db59ba6da9fc031d4babbf50589 Mon Sep 17 00:00:00 2001
+From 076c2552aeff88a27fe275dfaae61dedf4bb4bd5 Mon Sep 17 00:00:00 2001
 From: "Jason A. Donenfeld" <Jason@zx2c4.com>
 Date: Thu, 24 Mar 2022 22:07:16 -0600
 Subject: [PATCH] Use seedrng for seeding the random number generator
@@ -13,16 +13,17 @@ call it. It shouldn't be called by other things on the system, so it
 lives in rc_sbindir.
 
 Closes #506.
+Closes #507.
 
 Signed-off-by: Jason A. Donenfeld <Jason@zx2c4.com>
 ---
  AUTHORS            |   1 +
- conf.d/urandom     |   3 +-
- init.d/urandom.in  |  40 ++--
+ conf.d/urandom     |   9 +-
+ init.d/urandom.in  |  41 ++--
  src/rc/Makefile    |   6 +-
  src/rc/meson.build |  10 +-
- src/rc/seedrng.c   | 458 +++++++++++++++++++++++++++++++++++++++++++++
- 6 files changed, 497 insertions(+), 21 deletions(-)
+ src/rc/seedrng.c   | 453 +++++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 499 insertions(+), 21 deletions(-)
  create mode 100644 src/rc/seedrng.c
 
 diff --git a/AUTHORS b/AUTHORS
@@ -38,18 +39,24 @@ index 0616d5175..ede0f471b 100644
  Joe Harvell <jharvell@dogpad.net>
  Joe M <joe9mail@gmail.com>
 diff --git a/conf.d/urandom b/conf.d/urandom
-index f721a2491..3b5f5633c 100644
+index f721a2491..744e4f702 100644
 --- a/conf.d/urandom
 +++ b/conf.d/urandom
-@@ -2,4 +2,5 @@
+@@ -2,4 +2,11 @@
  # (say for crypt swap), so you will need to customize this
  # behavior.  If you have /var on a separate partition, then
  # make sure this path lives on your root device somewhere.
 -urandom_seed="/var/lib/misc/random-seed"
 +seed_dir="/var/lib/seedrng"
 +lock_file="/var/run/seedrng.lock"
++
++# Set this to true if you do not want seed files to actually
++# credit the RNG. Set this if you plan to replicate this
++# file system image and do not have the wherewithal to first
++# delete the contents of /var/lib/seedrng.
++skip_credit="false"
 diff --git a/init.d/urandom.in b/init.d/urandom.in
-index 0d6ab66e0..a3983085f 100644
+index 0d6ab66e0..cda431fdb 100644
 --- a/init.d/urandom.in
 +++ b/init.d/urandom.in
 @@ -1,5 +1,5 @@
@@ -59,18 +66,19 @@ index 0d6ab66e0..a3983085f 100644
  # See the Authors file at the top-level directory of this distribution and
  # https://github.com/OpenRC/openrc/blob/HEAD/AUTHORS
  #
-@@ -9,7 +9,9 @@
+@@ -9,7 +9,10 @@
  # This file may not be copied, modified, propagated, or distributed
  # except according to the terms contained in the LICENSE file.
  
 -: ${urandom_seed:=${URANDOM_SEED:-/var/lib/misc/random-seed}}
 +export SEEDRNG_SEED_DIR="${seed_dir:-/var/lib/seedrng}"
 +export SEEDRNG_LOCK_FILE="${lock_file:-/var/run/seedrng.lock}"
++export SEEDRNG_SKIP_CREDIT="${skip_credit:-false}"
 +: ${urandom_seed:=${SEEDRNG_SEED_DIR}/../misc/random-seed}
  description="Initializes the random number generator."
  
  depend()
-@@ -21,33 +23,35 @@ depend()
+@@ -21,33 +24,35 @@ depend()
  
  save_seed()
  {
@@ -123,7 +131,7 @@ index 0d6ab66e0..a3983085f 100644
 +	fi
  }
 diff --git a/src/rc/Makefile b/src/rc/Makefile
-index fd796d920..08b80b9bb 100644
+index fd796d920..62539f134 100644
 --- a/src/rc/Makefile
 +++ b/src/rc/Makefile
 @@ -15,7 +15,7 @@ endif
@@ -149,9 +157,9 @@ index fd796d920..08b80b9bb 100644
  	${CC} ${LOCAL_CFLAGS} ${LOCAL_LDFLAGS} ${CFLAGS} ${LDFLAGS} -o $@ $^ ${LDADD}
 +
 +seedrng: seedrng.o
-+	${CC} ${LOCAL_CFLAGS} ${LOCAL_LDFLAGS} ${CFLAGS} ${LDFLAGS} -o $@ $^ -leinfo
++	${CC} ${LOCAL_CFLAGS} ${LOCAL_LDFLAGS} ${CFLAGS} ${LDFLAGS} -o $@ $^ ${LDADD}
 diff --git a/src/rc/meson.build b/src/rc/meson.build
-index 8fdf3ac3b..28e2fc974 100644
+index 8fdf3ac3b..b724c51f2 100644
 --- a/src/rc/meson.build
 +++ b/src/rc/meson.build
 @@ -268,7 +268,15 @@ if os == 'Linux'
@@ -163,8 +171,8 @@ index 8fdf3ac3b..28e2fc974 100644
 +  executable('seedrng',
 +    ['seedrng.c'],
 +    c_args : cc_branding_flags,
-+    include_directories: [incdir, einfo_incdir],
-+    link_with: [libeinfo],
++    include_directories: [incdir, einfo_incdir, rc_incdir],
++    link_with: [libeinfo, librc],
 +    install: true,
 +    install_dir: rc_sbindir)
 +endif
@@ -173,10 +181,10 @@ index 8fdf3ac3b..28e2fc974 100644
    ['shell_var.c'],
 diff --git a/src/rc/seedrng.c b/src/rc/seedrng.c
 new file mode 100644
-index 000000000..22aaf5a67
+index 000000000..c1f941457
 --- /dev/null
 +++ b/src/rc/seedrng.c
-@@ -0,0 +1,458 @@
+@@ -0,0 +1,453 @@
 +/*
 + * seedrng.c
 + * Seed kernel RNG from seed file, based on code from:
@@ -213,6 +221,7 @@ index 000000000..22aaf5a67
 +#include <stdio.h>
 +#include <stdlib.h>
 +
++#include "rc.h"
 +#include "einfo.h"
 +#include "helpers.h"
 +
@@ -570,13 +579,11 @@ index 000000000..22aaf5a67
 +	struct timespec realtime = { 0 }, boottime = { 0 };
 +	struct blake2s_state hash;
 +
-+	populate_global_paths();
 +	umask(0077);
-+	if (getuid()) {
-+		eerror("This program requires root");
-+		return 1;
-+	}
++	if (getuid())
++		eerrorx("This rc helper program requires root");
 +
++	populate_global_paths();
 +	blake2s_init(&hash, BLAKE2S_HASH_LEN);
 +	blake2s_update(&hash, seedrng_prefix, strlen(seedrng_prefix));
 +	clock_gettime(CLOCK_REALTIME, &realtime);
@@ -584,21 +591,17 @@ index 000000000..22aaf5a67
 +	blake2s_update(&hash, &realtime, sizeof(realtime));
 +	blake2s_update(&hash, &boottime, sizeof(boottime));
 +
-+	if (mkdir(SEED_DIR, 0700) < 0 && errno != EEXIST) {
-+		eerror("Unable to create \"%s\" directory: %s", SEED_DIR, strerror(errno));
-+		return 1;
-+	}
++	if (mkdir(SEED_DIR, 0700) < 0 && errno != EEXIST)
++		eerrorx("Unable to create \"%s\" directory: %s", SEED_DIR, strerror(errno));
 +
 +	lock = open(LOCK_FILE, O_WRONLY | O_CREAT, 0000);
-+	if (lock < 0 || flock(lock, LOCK_EX) < 0) {
-+		eerror("Unable to open lock file: %s", strerror(errno));
-+		return 1;
-+	}
++	if (lock < 0 || flock(lock, LOCK_EX) < 0)
++		eerrorx("Unable to open lock file: %s", strerror(errno));
 +
 +	ret = seed_from_file_if_exists(NON_CREDITABLE_SEED, false, &hash);
 +	if (ret < 0)
 +		program_ret |= 1 << 1;
-+	ret = seed_from_file_if_exists(CREDITABLE_SEED, true, &hash);
++	ret = seed_from_file_if_exists(CREDITABLE_SEED, !rc_yesno(getenv("SEEDRNG_SKIP_CREDIT")), &hash);
 +	if (ret < 0)
 +		program_ret |= 1 << 2;
 +
