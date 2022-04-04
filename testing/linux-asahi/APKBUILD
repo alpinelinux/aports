@@ -1,0 +1,206 @@
+# Maintainer: Milan P. Stanić <mps@arvanta.net>
+
+_flavor=asahi
+pkgname=linux-${_flavor}
+pkgver=5.17.0_rc7
+
+_commit_id=00e23945f258f06ed0cb0dd9ea44272cbdfc7346
+pkgdesc="Apple Silicon (M1 development kernel)"
+pkgrel=0
+url="https://www.kernel.org"
+depends="mkinitfs"
+_depends_dev="perl gmp-dev elfutils-dev bash flex bison"
+makedepends="$_depends_dev sed bc linux-headers
+	linux-firmware-any openssl1.1-compat-dev diffutils findutils"
+options="!strip !check"
+_config=${config:-config-asahi.${CARCH}}
+
+subpackages="$pkgname-dev:_dev:$CBUILD_ARCH"
+source="linux-asahi-$pkgver.tar.gz::https://github.com/AsahiLinux/linux/archive/${_commit_id}.tar.gz
+	config-asahi.aarch64
+	"
+
+builddir="$srcdir/linux-${_commit_id}"
+_builddir="$srcdir/linux-${_commit_id}"
+arch="aarch64"
+license="GPL-2.0"
+
+_flavors=
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-${_f}::$CBUILD_ARCH linux-${_f}-dev:_dev:$CBUILD_ARCH"
+		fi
+		;;
+	esac
+done
+
+_carch=${CARCH}
+case "$_carch" in
+aarch64*) _carch="arm64" ;;
+arm*) _carch="arm" ;;
+esac
+
+prepare() {
+	local _patch_failed=
+  cd "$srcdir"/linux-${_commit_id}
+	case $pkgver in
+		*.*.0);;
+		*)
+		msg "Applying patch-$pkgver.xz"
+	#	unxz -c < "$srcdir"/patch-$pkgver.xz | patch -p1 -N ;;
+	esac
+
+	# first apply patches in specified order
+	for i in $source; do
+		case $i in
+		*.patch)
+			msg "Applying $i..."
+			if ! patch -s -p1 -N -i "$srcdir"/$i; then
+				echo $i >>failed
+				_patch_failed=1
+			fi
+			;;
+		esac
+	done
+
+	if ! [ -z "$_patch_failed" ]; then
+		error "The following patches failed:"
+		cat failed
+		return 1
+	fi
+  sed -i 's/^#EXTRAVERSION =/EXTRAVERSION =/' "$srcdir"/linux-${_commit_id}/Makefile
+  sed -i 's/^EXTRAVERSION :=/#EXTRAVERSION :=/' "$srcdir"/linux-${_commit_id}/Makefile
+	# remove localversion from patch if any
+	rm -f localversion*
+	oldconfig
+}
+
+oldconfig() {
+	for i in $_flavors; do
+		local _config=config-$i.${CARCH}
+		local _builddir="$srcdir"/build-$i.$CARCH
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$i" > "$_builddir"/localversion-alpine \
+			|| return 1
+
+		cp "$srcdir"/$_config "$_builddir"/.config
+		make -C "$srcdir"/linux-$_commit_id \
+			O="$_builddir" \
+			ARCH="$_carch" \
+			listnewconfig oldconfig
+	done
+}
+
+build() {
+	unset LDFLAGS
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+	for i in $_flavors; do
+		cd "$srcdir"/build-$i.$CARCH
+		make ARCH="$_carch" CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+	done
+}
+
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=${pkgver}-${pkgrel}-${_buildflavor}
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+	cd "$srcdir"/build-$_buildflavor.$CARCH
+	# modules_install seems to regenerate a defect Modules.symvers on s390x. Work
+	# around it by backing it up and restore it after modules_install
+	cp Module.symvers Module.symvers.backup
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+
+	local _install
+	case "$CARCH" in
+		arm*|aarch64) _install="zinstall dtbs_install";;
+		*) _install=install;;
+	esac
+
+	make -j1 modules_install $_install \
+		ARCH="$_carch" \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_PATH="$_outdir"/boot \
+		INSTALL_DTBS_PATH="$_outdir/boot/dtbs-$_buildflavor"
+
+	cp Module.symvers.backup Module.symvers
+
+	rm -f "$_outdir"/lib/modules/${_abi_release}/build \
+		"$_outdir"/lib/modules/${_abi_release}/source
+	rm -rf "$_outdir"/lib/firmware
+
+	install -D -m644 include/config/kernel.release \
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+	mv $pkgdir/boot/vmlinuz-*asahi $pkgdir/boot/vmlinuz-asahi
+}
+
+# main flavor installs in $pkgdir
+package() {
+	depends="$depends linux-firmware-any"
+
+	_package asahi "$pkgdir"
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _abi_release=${pkgver}-${pkgrel}-$_flavor
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# simlar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="$_depends_dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
+	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine
+
+	make -j1 -C "$srcdir"/linux-${_commit_id} O="$dir" ARCH="$_carch" \
+		syncconfig prepare modules_prepare scripts
+
+	# remove the stuff that points to real sources. we want 3rd party
+	# modules to believe this is the soruces
+	rm "$dir"/Makefile "$dir"/source
+
+	# copy the needed stuff from real sources
+	#
+	# this is taken from ubuntu kernel build script
+	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
+  cd "$srcdir"/linux-${_commit_id}
+	find .  -path './include/*' -prune \
+		-o -path './scripts/*' -prune -o -type f \
+		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
+		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) \
+		-print | cpio -pdm "$dir"
+
+	cp -a scripts include "$dir"
+
+	find $(find arch -name include -type d -print) -type f \
+		| cpio -pdm "$dir"
+
+	install -Dm644 "$srcdir"/build-$_flavor.$CARCH/Module.symvers \
+		"$dir"/Module.symvers
+
+	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
+	ln -sf /usr/src/linux-headers-${_abi_release} \
+		"$subpkgdir"/lib/modules/${_abi_release}/build
+}
+
+sha512sums="
+7b02a46a2d94f4c7190444a0cb11c109c0f9d85cb7befcfa192a08a822d7dc648bc4a1876b3748a24dede9c941e987942b91b200b3f7bd8dcfab7e227b1ffd57  linux-asahi-5.17.0_rc7.tar.gz
+fddbb96b75eae4eb2e9d68198be5b25d5ad482c8567fc9a331f3aaa1644179c7dcc1322376f15309dee9728721ed769882287e2fe24873ef2a5fcae103c3f9ac  config-asahi.aarch64
+"
