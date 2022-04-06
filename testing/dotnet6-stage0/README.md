@@ -1,16 +1,14 @@
 # Description
-APKBUILD for dotnet6-stage0, prebuilt bits sourced from Microsoft
+APKBUILD for dotnet6-stage0, initial bootstrap for dotnet
 
 # Generated packages
 * dotnet6-stage0-bootstrap
 * dotnet6-stage0-artifacts 
 
 # How to build dotnet6 stack
-* Build testing/dotnet6-stage0 (provides prebuilt bits for first bootstrap bld)
-* Build testing/dotnet6-bootstrap (provides "tainted" SDK for first build)
-* Build testing/dotnet6-build ("untainted" build of dotnet)
-* Build testing/dotnet6-runtime (packages runtime bits from dotnet6-build)
-* Build testing/dotnet6-sdk (packages sdk bits from dotnet6-build)
+* Build testing/dotnet6-stage0 (builds stage0 dotnet bootstrap)
+* Build testing/dotnet6-build ("untainted" build of dotnet, and packages sdk)
+* Build testing/dotnet6-runtime (packages runtime bits from dotnet6-build
 
 # Special functions
 * abuild _update_source: Stage0 adapts prebuilt artifacts packages by replacing
