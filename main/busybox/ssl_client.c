@@ -5,7 +5,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include <tls.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
 
 #define BUFSIZE 16384
 
@@ -17,7 +19,13 @@
 # define dbg(...) ((void)0)
 #endif
 
-static void copy_from_stdin_to_tls(struct tls *ctx, int *fd)
+static void ssl_fatal(const char *msg)
+{
+	ERR_print_errors_fp(stderr);
+	errx(1, "%s", msg);
+}
+
+static void copy_from_stdin_to_tls(SSL *ssl, int *fd)
 {
 	static size_t buf[BUFSIZE];
 	ssize_t n;
@@ -34,17 +42,28 @@ static void copy_from_stdin_to_tls(struct tls *ctx, int *fd)
 	}
 
 	while (n > 0) {
-		ssize_t r = tls_write(ctx, &buf[i], n);
-		if (r == TLS_WANT_POLLIN || r == TLS_WANT_POLLOUT)
-			continue;
-		if (r < 0)
-			err(1, "tls_write: %s", tls_error(ctx));
+		ssize_t r = SSL_write(ssl, &buf[i], n);
+		if (r < 0) {
+			if (SSL_get_error(ssl, r) == SSL_ERROR_WANT_WRITE) {
+				ERR_clear_error();
+				continue;
+			}
+			ssl_fatal("SSL_write");
+		}
 		i += r;
 		n -= r;
 	}
 }
 
-static int copy_from_tls_to_stdout(struct tls *ctx)
+static int should_retry_read(SSL *ssl, int n)
+{
+	if (n >= 0 || SSL_get_error(ssl, n) != SSL_ERROR_WANT_READ)
+		return 0;
+	ERR_clear_error();
+	return 1;
+}
+
+static int copy_from_tls_to_stdout(SSL *ssl)
 {
 	static size_t buf[BUFSIZE];
 	ssize_t n,r;
@@ -52,10 +71,11 @@ static int copy_from_tls_to_stdout(struct tls *ctx)
 
 	dbg("DEBUG: data from TLS\n");
 	do {
-		n = tls_read(ctx, buf, sizeof(buf));
-	} while (n == TLS_WANT_POLLIN || r == TLS_WANT_POLLOUT);
+		n = SSL_read(ssl, buf, sizeof(buf));
+
+	} while (should_retry_read(ssl, n));
 	if (n < 0)
-		err(1, "tls read: %s", tls_error(ctx));
+		ssl_fatal("SSL_read");
 
 	if (n == 0)
 		return 1;
@@ -70,17 +90,15 @@ static int copy_from_tls_to_stdout(struct tls *ctx)
 	return 0;
 }
 
-int do_poll(struct pollfd *fds, int nfds)
+void do_poll(struct pollfd *fds, int nfds)
 {
-	int r;
-	while ((r = poll(fds, nfds, -1)) < 0) {
+	while (poll(fds, nfds, -1) < 0) {
 		if (errno != EINTR && errno != ENOMEM)
 			err(1, "poll");
 	}
-	return r;
 }
 
-static void copy_loop(struct tls *ctx, int sfd, int eofexit)
+static void copy_loop(SSL *ssl, int sfd)
 {
 	struct pollfd fds[2] = {
 		{ .fd = STDIN_FILENO,	.events = POLLIN },
@@ -88,20 +106,18 @@ static void copy_loop(struct tls *ctx, int sfd, int eofexit)
 	};
 
 	while (1) {
-		int r = do_poll(fds, 2);
+		do_poll(fds, 2);
 		if (fds[0].revents) {
-			copy_from_stdin_to_tls(ctx, &fds[0].fd);
-			if (eofexit && fds[0].fd == -1)
-				break;
+			copy_from_stdin_to_tls(ssl, &fds[0].fd);
 		}
 
-		if (fds[1].revents && copy_from_tls_to_stdout(ctx))
+		if (fds[1].revents && copy_from_tls_to_stdout(ssl))
 			break;
 	}
 }
 
 void usage(const char *prog, int ret) {
-	printf("usage: %s [-s FD] [-I] [-e] -n SNI\n", prog);
+	printf("usage: %s [-s FD] [-I] -n SNI\n", prog);
 	exit(ret);
 }
 
@@ -109,16 +125,12 @@ int main(int argc, char *argv[])
 {
 	int c, sfd = 1;;
 	const char *sni = NULL;
-	struct tls_config *tc;
-	struct tls *ctx;
 	int insecure = 0;
-	int localeofexit = 0;
+	SSL_CTX *ctx;
+	SSL *ssl = NULL;
 
-	while ((c = getopt(argc, argv, "ehs:n:I")) != -1) {
+	while ((c = getopt(argc, argv, "hs:n:I")) != -1) {
 		switch (c) {
-		case 'e':
-			localeofexit = 1;
-			break;
 		case 'h':
 			usage(argv[0], 0);
 			break;
@@ -136,30 +148,36 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (tls_init() == -1)
-		errx(1, "tls_init() failed");
+	OPENSSL_init_ssl(0, NULL);
 
-	if ((ctx = tls_client()) == NULL)
-		errx(1, "tls_client() failed");
+	if ((ctx = SSL_CTX_new(TLS_client_method())) == NULL)
+		ssl_fatal("SSL_CTX_new");
 
-	if (insecure) {
-		if ((tc = tls_config_new()) == NULL)
-			errx(1, "tls_config_new() failed");
-		tls_config_insecure_noverifycert(tc);
-		tls_config_insecure_noverifyname(tc);
-		tls_config_insecure_noverifytime(tc);
-		if (tls_configure(ctx, tc) == -1)
-			err(1, "tls_configure: %s", tls_error(ctx));
-		tls_config_free(tc);
+	SSL_CTX_set_default_verify_paths(ctx);
+
+	if ((ssl = SSL_new(ctx)) == NULL)
+		ssl_fatal("SSL_new");
+
+	SSL_set_fd(ssl, sfd);
+	SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
+	SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+
+	if (SSL_set_tlsext_host_name(ssl, sni) != 1)
+		ssl_fatal("SSL_set_tlsext_host_name");
+
+	if (SSL_set1_host(ssl, sni) != 1)
+		ssl_fatal(sni);
+
+	if (!insecure) {
+		SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL);
 	}
 
-	if (tls_connect_fds(ctx, sfd, sfd, sni) == -1)
-		errx(1, "%s: TLS connect failed", sni);
+	ERR_clear_error();
+	if (SSL_connect(ssl) != 1)
+		ssl_fatal("SSL_connect");
 
-	if (tls_handshake(ctx) == -1)
-		errx(1, "%s: %s", sni, tls_error(ctx));
+	copy_loop(ssl, sfd);
 
-	copy_loop(ctx, sfd, localeofexit);
-	tls_close(ctx);
+	SSL_CTX_free(ctx);
 	return 0;
 }
