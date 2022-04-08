@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.16.0_alpha20220328
-pkgrel=1
+pkgrel=2
 pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
@@ -47,5 +47,12 @@ VERSION_ID=$pkgver
 PRETTY_NAME="Alpine Linux $_rel"
 HOME_URL="https://alpinelinux.org/"
 BUG_REPORT_URL="https://gitlab.alpinelinux.org/alpine/aports/-/issues"
+EOF
+
+	# create secfixes.d repository list
+	mkdir -p "$pkgdir"/etc/secfixes.d
+	cat >"$pkgdir"/etc/secfixes.d/alpine<<EOF
+https://secdb.alpinelinux.org/$_rel/main.json
+https://secdb.alpinelinux.org/$_rel/community.json
 EOF
 }
