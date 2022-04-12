@@ -1,0 +1,101 @@
+#!/bin/sh
+#---help---
+# Usage: dkimsign-genkey [options]
+#
+# Generate DKIM signing key and print instructions for DNS and OpenSMTPD.
+#
+# Options:
+#   -a <alg>       The signing algorithm to use: "rsa" or "ed25519".
+#
+#   -d <domain>    The domain name where the public key will be found
+#                  (informational only).
+#
+#   -k <file>      Where to write the private key; defaults to
+#                  /etc/smtpd/dkim/<selector>.key.
+#
+#   -s <selector>  The selector within the _domainkey subdomain of <domain>
+#                  where the public key will be found (informational only).
+#
+#   -h             Print this message and exit.
+#
+# Please report bugs at <https://gitlab.alpinelinux.org/alpine/aports/-/issues>.
+#---help---
+set -euo pipefail
+
+PROGNAME='dkimsign-genkey'
+FILTER_USER='dkimsign'
+FILTER_GROUP='dkimsign'
+
+die() {
+	printf '%s: %s\n' "$PROGNAME" "$1" >&2
+	exit 1
+}
+
+help() {
+	local tag='#---help---'
+	sed -n "/^$tag/,/^$tag/{/^$tag/d; s/^# \\?//; p}" "$0"
+}
+
+alg='rsa'
+domain='example.org'
+keyfile=
+selector='mail'
+while getopts ':a:d:o:s:h' OPT; do
+	case "$OPT" in
+		a) alg=$OPTARG;;
+		d) domain=$OPTARG;;
+		k) keyfile=$OPTARG;;
+		s) selector=$OPTARG;;
+		h) help; exit 0;;
+		\?) die "unknown option: -$OPTARG (try '$0 -h')";;
+	esac
+done
+
+: ${keyfile:="/etc/smtpd/dkim/$selector.key"}
+txtfile="${keyfile%.key}.txt"
+
+command -v openssl >/dev/null \
+	|| die "openssl command is not installed, run: 'apk add cmd:openssl'"
+
+[ "$(id -u)" -eq 0 ] \
+	|| die 'must be run as root'
+
+[ -d "${keyfile%/*}" ] \
+	|| install -m 750 -g "$FILTER_GROUP" -d "${keyfile%/*}"
+
+case "$alg" in
+	rsa)
+		openssl genpkey -algorithm rsa -pkeyopt rsa_keygen_bits:2048 -outform PEM -out "$keyfile"
+		pubkey=$(openssl rsa -in "$keyfile" -pubout \
+			| sed '1d;:nl;${s/-----.*//;q;};N;s/\n//g;b nl')
+	;;
+	ed25519)
+		openssl genpkey -algorithm ed25519 -outform PEM -out "$keyfile"
+		pubkey=$(openssl pkey -outform DER -pubout -in "$keyfile" \
+			| tail -c +13 \
+			| openssl base64)
+	;;
+	*) die "unknown algorithm: $alg";;
+esac
+
+chgrp "$FILTER_GROUP" "$keyfile"
+chmod 440 "$keyfile"
+
+printf '%s._domainkey.%s.\tIN\tTXT\t"v=DKIM1; k=%s; p=%s;"\n' \
+	"$selector" "$domain" "$alg" "$pubkey" > "$txtfile"
+
+cat <<EOF
+
+Add the following record to DNS:
+------✂-------------------------
+$(cat "$txtfile")
+------✂-------------------------
+
+Declare dkimsign filter in /etc/smtpd/smtpd.conf:
+------✂------------------------------------------
+filter dkimsign \\
+	proc-exec "filter-dkimsign -a $alg-sha256 -d $domain -s $selector -k $keyfile" \\
+	user $FILTER_USER \\
+	group $FILTER_GROUP
+------✂------------------------------------------
+EOF
