@@ -250,8 +250,9 @@ create_image_iso() {
 	fi
 	if [ -e "${DESTDIR}/efi" -a -e "${DESTDIR}/boot/grub" ]; then
 		# Create the EFI boot partition image
-		mformat -i ${DESTDIR}/boot/grub/efi.img -C -f 1440 ::
+		mformat -i ${DESTDIR}/boot/grub/efi.img -C -f 1440 -N 0 ::
 		mcopy -i ${DESTDIR}/boot/grub/efi.img -s ${DESTDIR}/efi ::
+		touch -md "@${SOURCE_DATE_EPOCH}" ${DESTDIR}/boot/grub/efi.img
 
 		# Enable EFI boot
 		if [ -z "$_isolinux" ]; then
