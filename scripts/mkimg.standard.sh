@@ -6,7 +6,7 @@ profile_standard() {
 	profile_base
 	profile_abbrev="std"
 	image_ext="iso"
-	arch="aarch64 x86 x86_64 ppc64le riscv64 s390x"
+	arch="aarch64 armv7 x86 x86_64 ppc64le riscv64 s390x"
 	output_format="iso"
 	kernel_addons="xtables-addons"
 	case "$ARCH" in
