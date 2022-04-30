@@ -1,0 +1,171 @@
+Patch-Source: https://github.com/lxc/lxd/pull/10348
+From fd6845ddda3f80cdd24a8f94c42acce6bff0c41f Mon Sep 17 00:00:00 2001
+From: Thomas Parrott <thomas.parrott@canonical.com>
+Date: Fri, 29 Apr 2022 11:12:48 +0100
+Subject: [PATCH] lxd/secommp: Fix sysinfo syscall interception on 32 bit
+ platforms
+
+Fixes #10347
+
+Signed-off-by: Thomas Parrott <thomas.parrott@canonical.com>
+---
+ lxd/seccomp/seccomp.go    | 22 ++++++++++++++--------
+ lxd/seccomp/sysinfo.go    | 13 +++++++++++++
+ lxd/seccomp/sysinfo_32.go | 19 +++++++++++++++++++
+ lxd/seccomp/sysinfo_64.go | 19 +++++++++++++++++++
+ 4 files changed, 65 insertions(+), 8 deletions(-)
+ create mode 100644 lxd/seccomp/sysinfo.go
+ create mode 100644 lxd/seccomp/sysinfo_32.go
+ create mode 100644 lxd/seccomp/sysinfo_64.go
+
+diff --git a/lxd/seccomp/seccomp.go b/lxd/seccomp/seccomp.go
+index 03fee3c71a0..203d408a828 100644
+--- a/lxd/seccomp/seccomp.go
++++ b/lxd/seccomp/seccomp.go
+@@ -1709,6 +1709,7 @@ func (s *Server) HandleSysinfoSyscall(c Instance, siov *Iovec) int {
+ 
+ 	defer l.Debug("Handling sysinfo syscall")
+ 
++	// Pre-fill sysinfo struct with metrics from host system.
+ 	info := unix.Sysinfo_t{}
+ 	err := unix.Sysinfo(&info)
+ 	if err != nil {
+@@ -1718,6 +1719,8 @@ func (s *Server) HandleSysinfoSyscall(c Instance, siov *Iovec) int {
+ 		return 0
+ 	}
+ 
++	instMetrics := Sysinfo{} // Architecture independent place to hold instance metrics.
++
+ 	cg, err := cgroup.NewFileReadWriter(int(siov.msg.init_pid), liblxc.HasApiExtension("cgroup2"))
+ 	if err != nil {
+ 		l.Warn("Failed loading cgroup", logger.Ctx{"err": err, "pid": siov.msg.init_pid})
+@@ -1735,7 +1738,7 @@ func (s *Server) HandleSysinfoSyscall(c Instance, siov *Iovec) int {
+ 		return 0
+ 	}
+ 
+-	info.Uptime = int64(time.Now().Sub(f.ModTime()).Seconds())
++	instMetrics.Uptime = int64(time.Now().Sub(f.ModTime()).Seconds())
+ 
+ 	// Get instance process count.
+ 	pids, err := cg.GetTotalProcesses()
+@@ -1746,7 +1749,7 @@ func (s *Server) HandleSysinfoSyscall(c Instance, siov *Iovec) int {
+ 		return 0
+ 	}
+ 
+-	info.Procs = uint16(pids)
++	instMetrics.Procs = uint16(pids)
+ 
+ 	// Get instance memory stats.
+ 	memStats, err := cg.GetMemoryStats()
+@@ -1760,9 +1763,9 @@ func (s *Server) HandleSysinfoSyscall(c Instance, siov *Iovec) int {
+ 	for k, v := range memStats {
+ 		switch k {
+ 		case "shmem":
+-			info.Sharedram = v
++			instMetrics.Sharedram = v
+ 		case "cache":
+-			info.Bufferram = v
++			instMetrics.Bufferram = v
+ 		}
+ 	}
+ 
+@@ -1784,8 +1787,8 @@ func (s *Server) HandleSysinfoSyscall(c Instance, siov *Iovec) int {
+ 		return 0
+ 	}
+ 
+-	info.Totalram = uint64(memoryLimit)
+-	info.Freeram = info.Totalram - uint64(memoryUsage) - info.Bufferram
++	instMetrics.Totalram = uint64(memoryLimit)
++	instMetrics.Freeram = instMetrics.Totalram - uint64(memoryUsage) - instMetrics.Bufferram
+ 
+ 	// Get instance swap info.
+ 	if s.s.OS.CGInfo.Supports(cgroup.MemorySwapUsage, cg) {
+@@ -1805,14 +1808,17 @@ func (s *Server) HandleSysinfoSyscall(c Instance, siov *Iovec) int {
+ 			return 0
+ 		}
+ 
+-		info.Totalswap = uint64(swapLimit)
+-		info.Freeswap = info.Totalswap - uint64(swapUsage)
++		instMetrics.Totalswap = uint64(swapLimit)
++		instMetrics.Freeswap = instMetrics.Totalswap - uint64(swapUsage)
+ 	}
+ 
+ 	// Get writable pointer to buffer of sysinfo syscall result.
+ 	const sz = int(unsafe.Sizeof(info))
+ 	var b []byte = (*(*[sz]byte)(unsafe.Pointer(&info)))[:]
+ 
++	// Write instance metrics to native sysinfo struct.
++	instMetrics.ToNative(&info)
++
+ 	// Write sysinfo response into buffer.
+ 	_, err = unix.Pwrite(siov.memFd, b, int64(siov.req.data.args[0]))
+ 	if err != nil {
+diff --git a/lxd/seccomp/sysinfo.go b/lxd/seccomp/sysinfo.go
+new file mode 100644
+index 00000000000..b255894af26
+--- /dev/null
++++ b/lxd/seccomp/sysinfo.go
+@@ -0,0 +1,13 @@
++package seccomp
++
++// Sysinfo architecture independent sysinfo struct.
++type Sysinfo struct {
++	Uptime    int64
++	Totalram  uint64
++	Freeram   uint64
++	Sharedram uint64
++	Bufferram uint64
++	Totalswap uint64
++	Freeswap  uint64
++	Procs     uint16
++}
+diff --git a/lxd/seccomp/sysinfo_32.go b/lxd/seccomp/sysinfo_32.go
+new file mode 100644
+index 00000000000..e52808300dd
+--- /dev/null
++++ b/lxd/seccomp/sysinfo_32.go
+@@ -0,0 +1,19 @@
++//go:build 386 || arm || ppc || s390 || mips || mipsle
++
++package seccomp
++
++import (
++	"golang.org/x/sys/unix"
++)
++
++// ToNative fills fields from s into native fields.
++func (s *Sysinfo) ToNative(n *unix.Sysinfo_t) {
++	n.Bufferram = uint32(s.Bufferram)
++	n.Freeram = uint32(s.Freeram)
++	n.Freeswap = uint32(s.Freeswap)
++	n.Procs = s.Procs
++	n.Sharedram = uint32(s.Sharedram)
++	n.Totalram = uint32(s.Totalram)
++	n.Totalswap = uint32(s.Totalswap)
++	n.Uptime = int32(s.Uptime)
++}
+diff --git a/lxd/seccomp/sysinfo_64.go b/lxd/seccomp/sysinfo_64.go
+new file mode 100644
+index 00000000000..84383b1c5a8
+--- /dev/null
++++ b/lxd/seccomp/sysinfo_64.go
+@@ -0,0 +1,19 @@
++//go:build amd64 || ppc64 || ppc64le || arm64 || s390x || mips64 || mips64le || riscv64
++
++package seccomp
++
++import (
++	"golang.org/x/sys/unix"
++)
++
++// ToNative fills fields from s into native fields.
++func (s *Sysinfo) ToNative(n *unix.Sysinfo_t) {
++	n.Bufferram = s.Bufferram
++	n.Freeram = s.Freeram
++	n.Freeswap = s.Freeswap
++	n.Procs = s.Procs
++	n.Sharedram = s.Sharedram
++	n.Totalram = s.Totalram
++	n.Totalswap = s.Totalswap
++	n.Uptime = s.Uptime
++}
