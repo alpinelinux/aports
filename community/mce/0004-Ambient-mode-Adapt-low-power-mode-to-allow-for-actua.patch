@@ -1,0 +1,631 @@
+From d1ddfc4611ebbd9ac7beebb1add42d66e68b7094 Mon Sep 17 00:00:00 2001
+From: MagneFire <IDaNLContact@gmail.com>
+Date: Sun, 7 Mar 2021 22:49:48 +0100
+Subject: [PATCH] Ambient mode: Adapt low-power-mode to allow for actual
+ ambient mode. Refactor the low power mode to actually work in low power
+ mode(deep sleep). There are some challenges when it comes to transitions
+ (i.e. screen on -> screen lpm). There are multiple parts responsible for
+ setting the next screen state.
+
+Depending on what state the screen is the following may happen:
+- Default, screen on (currently watchface is shown) -> screen lpm.
+- In the `long timeout`(from asteroid-launcher) state, the screen may first go from screen on -> screen dim -> screen lpm
+- When the screen is off and a notification arrives the screen isn't actually in the on state, so there is a change needed in tklock.c to fix that.
+
+Another part that is very important is the ambient light sensor module.
+There is also the filter-brightness-als module. This module is responsible for changing the range of the brightness depending on the currently set brightness and the ambient light sensor value.
+So if the brightness is set to 0% the brightness profile use is 0, for 100% the profile 20 is used. These profiles are defined in `als-defaults.ini`.
+For LPM/ambient mode a special profiles set is used (LPM).
+In LPM mode we want to limit the maximum brightness.
+So a default profile is used that limits the maximum brightness to 28%. If the als reports a lower value then a lower screen brightness is also possible.
+An important side note is that, the als mode is enabled even if no such sensor exist. For those devices, the als value of 400 is used.
+This value also signifies the maximum brightness in LPM mode.
+Because the minimum brightness can vary between devices it is suggested to create alternative profiles for such devices.
+
+---
+ inifiles/als-defaults.ini       |  13 +-
+ inifiles/mce.ini                |   2 +-
+ mce-dbus.h                      |   4 +
+ mce-fbdev.c                     |  19 ++-
+ mce-fbdev.h                     |   1 +
+ mce.conf                        |   6 +
+ modules/display.c               | 210 ++++++++++++++++++++++++++++++--
+ modules/display.h               |   6 +-
+ modules/filter-brightness-als.c |  13 +-
+ powerkey.h                      |   2 +-
+ tklock.c                        |   2 +-
+ 11 files changed, 253 insertions(+), 25 deletions(-)
+
+diff --git a/inifiles/als-defaults.ini b/inifiles/als-defaults.ini
+index 4a77fc3..c5339c0 100644
+--- a/inifiles/als-defaults.ini
++++ b/inifiles/als-defaults.ini
+@@ -1,10 +1,11 @@
+ # Configuration file for MCE - Automatic display/led/keypad brightness control
+ #
+-# Configuration for tuning lisplay backlight, keypad backlight and indication led
++# Configuration for tuning display backlight, keypad backlight and indication led
+ # brightness base on data from Ambient Light Sensor
+ #
+ # Limits are Ambient light sensor values [lux]
+ # Levels are brightness percentages
++# Profiles are input brightness percentages converted to profile range (40% -> Profile 8)
+ #
+ # Minimum, ..., Maximum correspond with brightness setting 1 ... 5
+ 
+@@ -85,5 +86,11 @@ LevelsProfile0=30;33;36;39;42;45;48;51;54;57;64;68;72;76;80;84;88;92;96;100
+ 
+ [BrightnessLPM]
+ 
+-LimitsProfile0=1;4;27;99;700;778;864;960;1066;1184;1315;1460;1622;1801;2000
+-LevelsProfile0=1;2;3;4;5;15;24;34;43;53;62;72;81;91;100
++# Use Limits and Levels profiles to select the desired brightness for a given ALS and current brightness.
++# When the device doesn't have an ambient light sensor the default value for 400 will be used.
++# The value 400 is over 350, so the value for 100000(=> 28%) will be used.
++# Profiles can be added to have different LPM brightness levels at different input brightness levels.
++# This sets the maximum brightness to 28% in ambient mode.
++# Why 28%? Because this is the brightness level when input brightness is set to 0 and als is not available.
++LimitsProfile0=1;2;4;6;11;19;34;61;109;195;350;100000
++LevelsProfile0=1;3;5;7;9;11;13;15;17;19;20;28
+\ No newline at end of file
+diff --git a/inifiles/mce.ini b/inifiles/mce.ini
+index 756b224..c208342 100644
+--- a/inifiles/mce.ini
++++ b/inifiles/mce.ini
+@@ -16,7 +16,8 @@
+ # to avoid unnecessary brightness fluctuations on mce startup
+ #
+ # Note: the name should not include the "lib"-prefix
+-Modules=radiostates;filter-brightness-als;display;keypad;led;battery-udev;inactivity;alarm;callstate;audiorouting;proximity;powersavemode;cpu-keepalive;doubletap;packagekit;sensor-gestures;bluetooth;memnotify;mempressure;usbmode;buttonbacklight;fingerprint;charging;
++Modules=radiostates;display;filter-brightness-als;keypad;led;battery-udev;inactivity;alarm;callstate;audiorouting;proximity;powersavemode;cpu-keepalive;doubletap;packagekit;sensor-gestures;bluetooth;memnotify;mempressure;usbmode;buttonbacklight;fingerprint;charging;
++
+ 
+ [KeyPad]
+
+diff --git a/mce-dbus.h b/mce-dbus.h
+index e43da0b..828ffb5 100644
+--- a/mce-dbus.h
++++ b/mce-dbus.h
+@@ -101,6 +101,10 @@
+ /* Enabling/disabling display updates via compositor service */
+ # define COMPOSITOR_SET_UPDATES_ENABLED           "setUpdatesEnabled"
+ 
++#define COMPOSITOR_SET_AMBIENT_UPDATES_ENABLED "setAmbientUpdatesEnabled"
++#define COMPOSITOR_SET_AMBIENT_MODE_ENABLED "setAmbientEnabled"
++#define MCE_DISPLAY_LPM_SET_SUPPORTED "set_lpm_supported"
++
+ /** Query owner of topmost ui window */
+ # define COMPOSITOR_GET_TOPMOST_WINDOW_PID        "privateTopmostWindowProcessId"
+ 
+diff --git a/mce-fbdev.c b/mce-fbdev.c
+index 7db8762..6212a91 100644
+--- a/mce-fbdev.c
++++ b/mce-fbdev.c
+@@ -58,6 +58,8 @@ static bool fbdev_use_hybris = false;
+ /** Flag for: Opening frame buffer device is allowed */
+ static bool mce_fbdev_allow_open = false;
+ 
++static bool mce_fbdev_power_vsync_suspend = false;
++
+ /* ========================================================================= *
+  * FBDEV_FILE_DESCRIPTOR
+  * ========================================================================= */
+@@ -239,6 +241,12 @@ void mce_fbdev_linger_after_exit(int delay_ms)
+  * FRAMEBUFFER_POWER
+  * ========================================================================= */
+ 
++void mce_fbdev_set_suspend_mode(bool vsync_suspend)
++{
++    mce_log(LL_DEBUG, "fbdev suspend_mode %s", vsync_suspend ? "on" : "off");
++    mce_fbdev_power_vsync_suspend = vsync_suspend;
++}
++
+ /** Set the frame buffer power state
+  *
+  * MCE uses this function for display power control only if autosuspend
+@@ -252,10 +260,17 @@ void mce_fbdev_linger_after_exit(int delay_ms)
+  */
+ void mce_fbdev_set_power(bool power_on)
+ {
+-    mce_log(LL_DEBUG, "fbdev power %s", power_on ? "up" : "down");
++    mce_log(LL_DEBUG, "fbdev power %s", power_on ? "up" : (mce_fbdev_power_vsync_suspend ? "ambient" : "down"));
+ 
+     if( mce_fbdev_handle != -1 ) {
+-        int value = power_on ? FB_BLANK_UNBLANK : FB_BLANK_POWERDOWN;
++        int value;
++        if (power_on) {
++            value = FB_BLANK_UNBLANK;
++        } else if (mce_fbdev_power_vsync_suspend) {
++            value = FB_BLANK_VSYNC_SUSPEND;
++        } else {
++            value = FB_BLANK_POWERDOWN;
++        }
+ 
+         if( ioctl(mce_fbdev_handle, FBIOBLANK, value) == -1 )
+             mce_log(LL_ERR, "%s: ioctl(FBIOBLANK,%d): %m", FB_DEVICE, value);
+diff --git a/mce-fbdev.h b/mce-fbdev.h
+index 03f09f5..18a1a08 100644
+--- a/mce-fbdev.h
++++ b/mce-fbdev.h
+@@ -36,6 +36,7 @@ void mce_fbdev_close             (void);
+ void mce_fbdev_reopen            (void);
+ bool mce_fbdev_is_open           (void);
+ 
++void mce_fbdev_set_suspend_mode  (bool vsync_suspend);
+ void mce_fbdev_set_power         (bool power_on);
+ 
+ void mce_fbdev_linger_after_exit (int delay_ms);
+diff --git a/mce.conf b/mce.conf
+index 11d764e..9b46094 100644
+--- a/mce.conf
++++ b/mce.conf
+@@ -110,6 +110,12 @@
+ 		<allow send_destination="com.nokia.mce"
+ 		       send_interface="com.nokia.mce.request"
+ 		       send_member="req_display_state_lpm"/>
++		<allow send_destination="com.nokia.mce"
++		       send_interface="com.nokia.mce.request"
++		       send_member="set_lpm_supported"/>
++		<allow send_destination="com.nokia.mce"
++		       send_interface="com.nokia.mce.request"
++		       send_member="get_lpm_available"/>
+ 
+ 		<allow send_destination="com.nokia.mce"
+ 		       send_interface="com.nokia.mce.request"
+diff --git a/modules/display.c b/modules/display.c
+index f33ec64..42ca0e5 100644
+--- a/modules/display.c
++++ b/modules/display.c
+@@ -412,6 +412,7 @@ static bool                mdy_shutdown_in_progress(void);
+  * DATAPIPE_TRACKING
+  * ------------------------------------------------------------------------- */
+ 
++static void                mdy_datapipe_ambient_light_level_cb(gconstpointer data);;
+ static void                mdy_datapipe_packagekit_locked_cb(gconstpointer data);;
+ static void                mdy_datapipe_system_state_cb(gconstpointer data);
+ static void                mdy_datapipe_submode_cb(gconstpointer data);
+@@ -709,6 +710,9 @@ static void                 compositor_stm_send_pid_query    (compositor_stm_t *
+ static void                 compositor_stm_forget_pid_query  (compositor_stm_t *self);
+ static void                 compositor_stm_pid_query_cb      (DBusPendingCall *pc, void *aptr);
+ 
++static void                 compositor_stm_send_lpm_request (compositor_stm_t *self);
++static void                 compositor_stm_lpm_request_cb   (DBusPendingCall *pc, void *aptr);
++
+ static void                 compositor_stm_send_ctrl_request (compositor_stm_t *self);
+ static void                 compositor_stm_forget_ctrl_request(compositor_stm_t *self);
+ static void                 compositor_stm_ctrl_request_cb   (DBusPendingCall *pc, void *aptr);
+@@ -933,6 +937,7 @@ static gboolean            mdy_dbus_handle_blanking_pause_cancel_req(DBusMessage
+ static gboolean            mdy_dbus_handle_display_stats_get_req(DBusMessage *const req);
+ 
+ static gboolean            mdy_dbus_handle_desktop_started_sig(DBusMessage *const msg);
++static gboolean            mdy_dbus_timed_wakeup_sig(DBusMessage *const msg);
+ 
+ static void                mdy_dbus_init(void);
+ static void                mdy_dbus_quit(void);
+@@ -1396,6 +1401,29 @@ xlat(int src_lo, int src_hi, int dst_lo, int dst_hi, int val)
+  * DATAPIPE_TRACKING
+  * ========================================================================= */
+ 
++/** Ambient light level; assume sensor not available.
++ * This is used to avoid changing the backlight when the als is disabled.
++ */
++static int ambient_light_level = -1;
++/**
++ * Handle ambient light level updates.
++ *
++ * @param data The ambient light level in a pointer
++ */
++static void mdy_datapipe_ambient_light_level_cb(gconstpointer data)
++{
++    bool prev = ambient_light_level;
++    ambient_light_level = GPOINTER_TO_INT(data);
++
++    if( ambient_light_level == prev )
++        goto EXIT;
++
++    /* Log by default as it might help analyzing lpm problems */
++    mce_log(LL_DEBUG, "ambient_light_level = %d", ambient_light_level);
++EXIT:
++    return;
++}
++
+ /** Cached exceptional ui state */
+ static uiexception_type_t uiexception_type = UIEXCEPTION_TYPE_NONE;
+ 
+@@ -1827,7 +1855,9 @@ static void mdy_datapipe_lpm_brightness_cb(gconstpointer data)
+ 
+     mce_log(LL_DEBUG, "input: %d -> %d", prev, curr);
+ 
+-    if( curr == prev )
++    // Sometimes it happens that the brightness changes while the als is disabled(ambient_light_level = -1), this cause the 
++    // filter to return 100%, resulting in max brightness ambient mode.
++    if( (curr == prev) || (ambient_light_level < 0))
+         goto EXIT;
+ 
+     mdy_brightness_set_lpm_level(curr);
+@@ -2242,6 +2272,10 @@ static datapipe_handler_t mdy_datapipe_handlers[] =
+         .datapipe  = &audio_route_pipe,
+         .output_cb = mdy_datapipe_audio_route_cb,
+     },
++    {
++        .datapipe  = &light_sensor_filtered_pipe,
++        .output_cb = mdy_datapipe_ambient_light_level_cb,
++    },
+     {
+         .datapipe  = &packagekit_locked_pipe,
+         .output_cb = mdy_datapipe_packagekit_locked_cb,
+@@ -3527,12 +3561,11 @@ static void mdy_brightness_set_lpm_level(gint level)
+      * display state we are in or transitioning to */
+     switch( display_state_next ) {
+     case MCE_DISPLAY_LPM_ON:
++    case MCE_DISPLAY_OFF:
++    case MCE_DISPLAY_LPM_OFF:
+         mdy_brightness_set_fade_target_als(mdy_brightness_level_display_lpm);
+         break;
+-
+     default:
+-    case MCE_DISPLAY_OFF:
+-    case MCE_DISPLAY_LPM_OFF:
+     case MCE_DISPLAY_DIM:
+     case MCE_DISPLAY_ON:
+     case MCE_DISPLAY_UNDEF:
+@@ -4159,8 +4192,7 @@ static gboolean mdy_blanking_off_cb(gpointer data)
+     case MCE_DISPLAY_DIM:
+         if( lipstick_service_state != SERVICE_STATE_RUNNING )
+             break;
+-        if( mdy_blanking_from_lockscreen() )
+-            next_state = MCE_DISPLAY_LPM_ON;
++        next_state = MCE_DISPLAY_LPM_ON;
+         break;
+     default:
+         break;
+@@ -6164,6 +6196,12 @@ struct compositor_stm_t
+      */
+     DBusPendingCall       *csi_ctrl_request_pc;
+ 
++    /** Currently pending compositor D-Bus method call
++     *
++     * Managed by compositor_stm_send_ctrl_request() & co
++     */
++    DBusPendingCall       *csi_lpm_request_pc;
++
+     /** Timer id for killing unresponsive compositor process
+      *
+      * Managed by compositor_stm_schedule_killer() & co
+@@ -6213,6 +6251,7 @@ compositor_stm_ctor(compositor_stm_t *self)
+ 
+     /* No pending compositor dbus method call */
+     self->csi_ctrl_request_pc = 0;
++    self->csi_lpm_request_pc = 0;
+ 
+     /* Retry timer is inactive */
+     self->csi_retry_timer_id = 0;
+@@ -6411,6 +6450,70 @@ EXIT:
+     return;
+ }
+ 
++static void
++compositor_stm_send_lpm_request(compositor_stm_t *self)
++{
++    mce_log(LL_DEBUG, "compositor_stm_send_lpm_request");
++    dbus_bool_t dta = mdy_use_low_power_mode;
++
++    bool ack = dbus_send_ex2(COMPOSITOR_SERVICE,
++                             COMPOSITOR_PATH,
++                             COMPOSITOR_IFACE,
++                             COMPOSITOR_SET_AMBIENT_MODE_ENABLED,
++                             compositor_stm_lpm_request_cb,
++                             COMPOSITOR_STM_DBUS_CALL_TIMEOUT,
++                             self, 0,
++                             &self->csi_lpm_request_pc,
++                             DBUS_TYPE_BOOLEAN, &dta,
++                             DBUS_TYPE_INVALID);
++
++    if( !ack )
++        mce_log(LL_NOTICE, "Failed to send low power mode enable request");
++}
++
++/** Handle reply to pending compositor state request
++ */
++static void
++compositor_stm_lpm_request_cb(DBusPendingCall *pc, void *aptr)
++{
++    compositor_stm_t       *self = aptr;
++    DBusMessage *rsp  = 0;
++    DBusError    err  = DBUS_ERROR_INIT;
++    bool         ack  = false;
++    mce_log(LL_DEBUG, "compositor_stm_lpm_request_cb");
++
++    if( self->csi_lpm_request_pc != pc )
++        goto EXIT;
++
++    dbus_pending_call_unref(self->csi_lpm_request_pc),
++        self->csi_lpm_request_pc = 0;
++
++    if( !(rsp = dbus_pending_call_steal_reply(pc)) )
++        goto EXIT;
++
++    if( dbus_set_error_from_message(&err, rsp) ) {
++        mce_log(LL_WARN, "%s: %s", err.name, err.message);
++        goto EXIT;
++    }
++
++    ack = true;
++
++EXIT:
++    if( ack ) {
++        mce_log(LL_DEBUG, "Compositor ack LPM request support: %d, enable: %d",
++                mdy_low_power_mode_supported, mdy_use_low_power_mode);
++        mce_fbdev_set_suspend_mode(mdy_use_low_power_mode && mdy_low_power_mode_supported);
++    } else {
++        mce_log(LL_DEBUG, "LPM request wasn't acknowledged, is the compositor available?");
++    }
++
++    if( rsp ) dbus_message_unref(rsp);
++
++    dbus_error_free(&err);
++
++    return;
++}
++
+ /* ------------------------------------------------------------------------- *
+  * managing org.nemomobile.compositor.setUpdatesEnabled() method calls
+  * ------------------------------------------------------------------------- */
+@@ -7662,7 +7765,8 @@ static void mdy_display_state_changed(void)
+     case MCE_DISPLAY_OFF:
+     case MCE_DISPLAY_LPM_OFF:
+         /* Blanking or already blanked -> set zero brightness */
+-        mdy_brightness_force_level(0);
++        if (!mdy_use_low_power_mode || !mdy_low_power_mode_supported)
++            mdy_brightness_force_level(0);
+         break;
+ 
+     case MCE_DISPLAY_LPM_ON:
+@@ -7753,8 +7857,8 @@ static void mdy_display_state_leave(display_state_t prev_state,
+     bool have_power = mdy_stm_display_state_needs_power(prev_state);
+     bool need_power = mdy_stm_display_state_needs_power(next_state);
+ 
+-    /* Deny ALS brightness when heading to powered off state */
+-    if( !need_power ) {
++    /* Deny ALS brightness when heading to powered off state, but allow in ambient mode */
++    if( !need_power && !(mdy_use_low_power_mode && mdy_low_power_mode_supported)) {
+         mce_log(LL_DEBUG, "deny als fade");
+         mdy_brightness_als_fade_allowed = false;
+     }
+@@ -7786,7 +7890,8 @@ static void mdy_display_state_leave(display_state_t prev_state,
+     case MCE_DISPLAY_OFF:
+     case MCE_DISPLAY_LPM_OFF:
+         mdy_brightness_level_display_resume = 0;
+-        mdy_brightness_set_fade_target_blank();
++        if (!mdy_use_low_power_mode || !mdy_low_power_mode_supported)
++            mdy_brightness_set_fade_target_blank();
+         break;
+ 
+     case MCE_DISPLAY_UNDEF:
+@@ -9786,6 +9891,39 @@ static gboolean mdy_dbus_handle_display_off_req(DBusMessage *const msg)
+     return TRUE;
+ }
+ 
++static gboolean mdy_dbus_handle_lpm_enabled_req(DBusMessage *const msg)
++{
++    gboolean status = FALSE;
++    dbus_bool_t low_power_mode_supported = false;
++    DBusError error = DBUS_ERROR_INIT;
++
++    mce_log(LL_DEVEL, "Received lpm support from %s",
++            mce_dbus_get_message_sender_ident(msg));
++
++    /* Extract result */
++    if (dbus_message_get_args(msg, &error,
++                              DBUS_TYPE_BOOLEAN, &low_power_mode_supported,
++                              DBUS_TYPE_INVALID) == FALSE) {
++        mce_log(LL_ERR, "Failed to get argument from %s.%s; %s",
++                "org.freedesktop.DBus", "NameOwnerChanged",
++                error.message);
++        goto EXIT;
++    }
++    status = TRUE;
++
++EXIT:
++    mce_log(LL_DEVEL, "The compositor %s support for ambient mode.",
++            low_power_mode_supported ? "has" : "hasn't");
++
++    // We have a variable that we should use to set lpm mode availability based on ack.
++    mdy_low_power_mode_supported = low_power_mode_supported;
++
++    // Enable/disable lpm mode based on support from the compositor.
++    compositor_stm_send_lpm_request(mdy_compositor_ipc);
++
++    return status;
++}
++
+ /** D-Bus callback for the display lpm method call
+  *
+  * @param msg The D-Bus message
+@@ -10254,6 +10392,40 @@ static gboolean mdy_dbus_handle_desktop_started_sig(DBusMessage *const msg)
+     return status;
+ }
+ 
++/**
++ * D-Bus callback for timed wakeup event, used to update ambient display.
++ *
++ * @param msg The D-Bus message
++ * @return TRUE on success, FALSE on failure
++ */
++static gboolean mdy_dbus_timed_wakeup_sig(DBusMessage *const msg)
++{
++    gboolean status = FALSE;
++    dbus_bool_t dta = TRUE;
++    (void)msg;
++
++    mce_log(LL_DEBUG, "Received timed wakeup event, updating ambient display");
++    if (mdy_use_low_power_mode && mdy_low_power_mode_supported) {
++        bool ack = dbus_send_ex2(COMPOSITOR_SERVICE,
++                            COMPOSITOR_PATH,
++                            COMPOSITOR_IFACE,
++                            COMPOSITOR_SET_AMBIENT_UPDATES_ENABLED,
++                            NULL,
++                            COMPOSITOR_STM_DBUS_CALL_TIMEOUT,
++                            NULL, 0,
++                            NULL,
++                            DBUS_TYPE_BOOLEAN, &dta,
++                            DBUS_TYPE_INVALID);
++
++        if( !ack ) 
++            mce_log(LL_CRIT, "Failed to send ambient mode update request");
++    }
++
++    status = TRUE;
++
++    return status;
++}
++
+ /** Array of dbus message handlers */
+ static mce_dbus_handler_t mdy_dbus_handlers[] =
+ {
+@@ -10301,6 +10473,12 @@ static mce_dbus_handler_t mdy_dbus_handlers[] =
+         .type      = DBUS_MESSAGE_TYPE_SIGNAL,
+         .callback  = mdy_dbus_handle_desktop_started_sig,
+     },
++    {
++        .interface = "com.nokia.time",
++        .name      = "wakeup_event",
++        .type      = DBUS_MESSAGE_TYPE_SIGNAL,
++        .callback  = mdy_dbus_timed_wakeup_sig,
++    },
+     {
+         .interface = COMPOSITOR_IFACE,
+         .name      = COMPOSITOR_TOPMOST_WINDOW_PID_CHANGED,
+@@ -10348,6 +10526,14 @@ static mce_dbus_handler_t mdy_dbus_handlers[] =
+         .args      =
+             "    <arg direction=\"out\" name=\"cabc_mode\" type=\"s\"/>\n"
+     },
++    {
++        .interface = MCE_REQUEST_IF,
++        .name      = MCE_DISPLAY_LPM_SET_SUPPORTED,
++        .type      = DBUS_MESSAGE_TYPE_METHOD_CALL,
++        .callback  = mdy_dbus_handle_lpm_enabled_req,
++        .args      =
++            "    <arg direction=\"out\" name=\"enabled\" type=\"b\"/>\n"
++    },
+     {
+         .interface = MCE_REQUEST_IF,
+         .name      = MCE_DISPLAY_ON_REQ,
+@@ -10829,6 +11015,7 @@ static void mdy_setting_cb(GConfClient *const gcc, const guint id,
+     }
+     else if (id == mdy_use_low_power_mode_setting_id) {
+         mdy_use_low_power_mode = gconf_value_get_bool(gcv);
++        compositor_stm_send_lpm_request(mdy_compositor_ipc);
+ 
+         if (((display_state_curr == MCE_DISPLAY_LPM_OFF) ||
+              (display_state_curr == MCE_DISPLAY_LPM_ON)) &&
+@@ -11223,7 +11410,8 @@ static void mdy_setting_init(void)
+                            MCE_DEFAULT_USE_LOW_POWER_MODE,
+                            mdy_setting_cb,
+                            &mdy_use_low_power_mode_setting_id);
+-
++    
++    compositor_stm_send_lpm_request(mdy_compositor_ipc);
+     /* Blanking inhibit modes */
+     mce_setting_track_int(MCE_SETTING_BLANKING_INHIBIT_MODE,
+                           &mdy_blanking_inhibit_mode,
+diff --git a/modules/display.h b/modules/display.h
+index 8075401..8bd4513 100644
+--- a/modules/display.h
++++ b/modules/display.h
+@@ -385,7 +385,7 @@
+ 
+ /** Display blanking delay from lpm-on state [s] */
+ # define MCE_SETTING_DISPLAY_BLANK_FROM_LPM_ON_TIMEOUT   MCE_SETTING_DISPLAY_PATH "/display_blank_from_lpm_on_timeout"
+-# define MCE_DEFAULT_DISPLAY_BLANK_FROM_LPM_ON_TIMEOUT   5
++# define MCE_DEFAULT_DISPLAY_BLANK_FROM_LPM_ON_TIMEOUT   1
+ 
+ /** Display blanking delay from lpm-off state [s]
+  *
+@@ -394,7 +394,7 @@
+  *       will cause transition back to lpm-on state.
+  */
+ # define MCE_SETTING_DISPLAY_BLANK_FROM_LPM_OFF_TIMEOUT  MCE_SETTING_DISPLAY_PATH "/display_blank_from_lpm_off_timeout"
+-# define MCE_DEFAULT_DISPLAY_BLANK_FROM_LPM_OFF_TIMEOUT  5
++# define MCE_DEFAULT_DISPLAY_BLANK_FROM_LPM_OFF_TIMEOUT  1
+ 
+ /** Whether display blanking is forbidden
+  *
+@@ -512,7 +512,7 @@ typedef enum {
+  * to blank the screen after a while.
+  */
+ # define MCE_SETTING_USE_LOW_POWER_MODE                  MCE_SETTING_DISPLAY_PATH "/use_low_power_mode"
+-# define MCE_DEFAULT_USE_LOW_POWER_MODE                  false
++# define MCE_DEFAULT_USE_LOW_POWER_MODE                  true
+ 
+ /* ------------------------------------------------------------------------- *
+  * Power Management related settings
+diff --git a/modules/filter-brightness-als.c b/modules/filter-brightness-als.c
+index 26ff3e2..54eed91 100644
+--- a/modules/filter-brightness-als.c
++++ b/modules/filter-brightness-als.c
+@@ -810,11 +810,11 @@ fba_inputflt_sampling_output(int lux)
+ 
+     fba_inputflt_output_lux = lux;
+ 
+-    fba_datapipe_execute_brightness_change();
+-
+     /* Feed filtered sensor data to datapipe */
+     datapipe_exec_full(&light_sensor_filtered_pipe,
+                        GINT_TO_POINTER(fba_inputflt_output_lux));
++
++    fba_datapipe_execute_brightness_change();
+ EXIT:
+     return;
+ }
+@@ -1288,9 +1288,12 @@ fba_datapipe_lpm_brightness_filter(gpointer data)
+     if( lut_lpm.profiles < 1 )
+         goto EXIT;
+ 
++    int max_prof = lut_lpm.profiles - 1;
++
++    int prof = mce_xlat_int(1,100, 0,max_prof, value);
+     /* Note: Input value is ignored and output is
+      *       determined only by the als config */
+-    value = fba_als_filter_run(&lut_lpm, 0, fba_inputflt_output_lux);
++    value = fba_als_filter_run(&lut_lpm, prof, fba_inputflt_output_lux);
+ 
+ EXIT:
+     return GINT_TO_POINTER(value);
+@@ -1746,6 +1749,10 @@ fba_status_rethink(void)
+     mce_log(LL_DEBUG, "enabled=%d; autobright=%d; filter_lid=%d -> enable=%d",
+             fba_setting_als_enabled, fba_setting_als_autobrightness, fba_setting_filter_lid_with_als, enable_new);
+ 
++    /* When the display module is loaded the function datapipe binding is inited, this causes a a brightness update without filtering.
++     * fba_status_rethink is called when the module is loaded. Also execute the brightness filter pipe. Fixing als not filtering on boot. */
++    fba_datapipe_execute_brightness_change();
++
+     enable_old = enable_new;
+ 
+     if( enable_new ) {
+diff --git a/powerkey.h b/powerkey.h
+index 6d90108..4c342a0 100644
+--- a/powerkey.h
++++ b/powerkey.h
+@@ -63,7 +63,7 @@ typedef enum
+ 
+ /** How power key "blank" action should behave */
+ # define MCE_SETTING_POWERKEY_BLANKING_MODE        MCE_SETTING_POWERKEY_PATH "/blanking_mode"
+-# define MCE_DEFAULT_POWERKEY_BLANKING_MODE        0 // = PWRKEY_BLANK_TO_OFF
++# define MCE_DEFAULT_POWERKEY_BLANKING_MODE        1 // = PWRKEY_BLANK_TO_LPM
+ 
+ /** How many consequent power key presses trigger proximity override
+  *
+diff --git a/tklock.c b/tklock.c
+index 867deaa..1188cb6 100644
+--- a/tklock.c
++++ b/tklock.c
+@@ -4100,7 +4100,7 @@ static void tklock_uiexception_finish(void)
+     default:
+         /* If the display was not clearly ON when exception started,
+          * turn it OFF after exceptions are over. */
+-        mce_datapipe_request_display_state(MCE_DISPLAY_OFF);
++        mce_datapipe_request_display_state(MCE_DISPLAY_LPM_ON);
+         break;
+ 
+     case MCE_DISPLAY_ON:

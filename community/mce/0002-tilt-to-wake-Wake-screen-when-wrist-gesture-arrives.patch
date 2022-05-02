@@ -1,0 +1,592 @@
+From f37925316e80f8b9765e51909bce21eba1843c0d Mon Sep 17 00:00:00 2001
+From: MagneFire <IDaNLContact@gmail.com>
+Date: Sun, 7 Mar 2021 21:44:09 +0100
+Subject: [PATCH] tilt-to-wake: Wake screen when wrist gesture arrives.
+
+---
+ builtin-gconf.c           |  10 ++
+ datapipe.c                |   4 +
+ datapipe.h                |   1 +
+ evdev.h                   |   1 +
+ mce-sensorfw.c            | 206 ++++++++++++++++++++++++++++++++++++++
+ mce-sensorfw.h            |   4 +
+ modules/display.h         |   8 ++
+ modules/sensor-gestures.c |  25 +++++
+ tests/ut/ut_display.c     |   5 +
+ tools/mcetool.c           |  32 ++++++
+ 10 files changed, 296 insertions(+)
+
+diff --git a/builtin-gconf.c b/builtin-gconf.c
+index 5517292..b04689c 100644
+--- a/builtin-gconf.c
++++ b/builtin-gconf.c
+@@ -1265,6 +1265,16 @@ static const setting_t gconf_defaults[] =
+     .type = "b",
+     .def  = G_STRINGIFY(MCE_DEFAULT_FLIPOVER_GESTURE_ENABLED),
+   },
++  {
++    .key  = MCE_SETTING_WRIST_GESTURE_ENABLED,
++    .type = "b",
++    .def  = G_STRINGIFY(MCE_DEFAULT_WRIST_GESTURE_ENABLED),
++  },
++  {
++    .key  = MCE_SETTING_WRIST_GESTURE_AVAILABLE,
++    .type = "i",
++    .def  = G_STRINGIFY(MCE_DEFAULT_WRIST_GESTURE_AVAILABLE),
++  },
+   {
+     .key  = MCE_SETTING_ORIENTATION_CHANGE_IS_ACTIVITY,
+     .type = "b",
+diff --git a/datapipe.c b/datapipe.c
+index 8daee62..89c550d 100644
+--- a/datapipe.c
++++ b/datapipe.c
+@@ -700,6 +700,9 @@ datapipe_t proximity_sensor_required_pipe       = DATAPIPE_INIT(proximity_sensor
+ /** proximity blanking; read only */
+ datapipe_t proximity_blanked_pipe               = DATAPIPE_INIT(proximity_blanked, boolean, false, 0, DATAPIPE_FILTERING_DENIED, DATAPIPE_CACHE_DEFAULT);
+ 
++/** wrist gesture; read only */
++datapipe_t wristgesture_sensor_pipe             = DATAPIPE_INIT(wristgesture_sensor, boolean, false, 0, DATAPIPE_FILTERING_DENIED, DATAPIPE_CACHE_DEFAULT);
++
+ /** Ambient light sensor; read only */
+ datapipe_t light_sensor_actual_pipe             = DATAPIPE_INIT(light_sensor_actual, int, 400, 0, DATAPIPE_FILTERING_DENIED, DATAPIPE_CACHE_DEFAULT);
+ 
+@@ -1346,6 +1349,7 @@ void mce_datapipe_quit(void)
+     datapipe_free(&proximity_sensor_effective_pipe);
+     datapipe_free(&proximity_sensor_required_pipe);
+     datapipe_free(&proximity_blanked_pipe);
++    datapipe_free(&wristgesture_sensor_pipe);
+     datapipe_free(&light_sensor_actual_pipe);
+     datapipe_free(&light_sensor_filtered_pipe);
+     datapipe_free(&light_sensor_poll_request_pipe);
+diff --git a/datapipe.h b/datapipe.h
+index 780881f..f5827a3 100644
+--- a/datapipe.h
++++ b/datapipe.h
+@@ -243,6 +243,7 @@ extern datapipe_t proximity_sensor_actual_pipe;
+ extern datapipe_t proximity_sensor_effective_pipe;
+ extern datapipe_t proximity_sensor_required_pipe;
+ extern datapipe_t proximity_blanked_pipe;
++extern datapipe_t wristgesture_sensor_pipe;
+ extern datapipe_t light_sensor_actual_pipe;
+ extern datapipe_t light_sensor_filtered_pipe;
+ extern datapipe_t light_sensor_poll_request_pipe;
+diff --git a/evdev.h b/evdev.h
+index be89a42..e7faf7a 100644
+--- a/evdev.h
++++ b/evdev.h
+@@ -55,6 +55,7 @@ typedef enum {
+     GESTURE_SWIPE_FROM_BOTTOM = 3,
+     GESTURE_DOUBLETAP         = 4, /* To conform with value used in
+                                     * Nokia N9 kernel driver */
++    GESTURE_TILT_TO_WAKE      = 5,
+     GESTURE_FPWAKEUP          = 16,
+ 
+     /* Modifiers */
+diff --git a/mce-sensorfw.c b/mce-sensorfw.c
+index c71e5f7..7c49104 100644
+--- a/mce-sensorfw.c
++++ b/mce-sensorfw.c
+@@ -30,6 +30,8 @@
+ #include "mce-log.h"
+ #include "mce-dbus.h"
+ #include "libwakelock.h"
++#include "evdev.h"
++#include "mce-setting.h"
+ 
+ #include <linux/input.h>
+ 
+@@ -195,6 +197,7 @@ typedef enum
+     SFW_SENSOR_ID_PS,
+     SFW_SENSOR_ID_ALS,
+     SFW_SENSOR_ID_ORIENT,
++    SFW_SENSOR_ID_WRIST,
+     SFW_SENSOR_ID_ACCELEROMETER,
+     SFW_SENSOR_ID_COMPASS,
+     SFW_SENSOR_ID_GYROSCOPE,
+@@ -218,6 +221,7 @@ sensor_id_available(sensor_id_t id)
+     case SFW_SENSOR_ID_PS:
+     case SFW_SENSOR_ID_ALS:
+     case SFW_SENSOR_ID_ORIENT:
++    case SFW_SENSOR_ID_WRIST:
+         break;
+     default:
+         available = mce_in_sensortest_mode();
+@@ -268,6 +272,7 @@ sensor_id_available(sensor_id_t id)
+ #define SFW_SENSOR_INTERFACE_PS             "local.ProximitySensor"
+ #define SFW_SENSOR_INTERFACE_ALS            "local.ALSSensor"
+ #define SFW_SENSOR_INTERFACE_ORIENT         "local.OrientationSensor"
++#define SFW_SENSOR_INTERFACE_WRIST          "local.WristGestureSensor"
+ #define SFW_SENSOR_INTERFACE_ACCELEROMETER  "local.AccelerometerSensor"
+ #define SFW_SENSOR_INTERFACE_COMPASS        "local.CompassSensor"
+ #define SFW_SENSOR_INTERFACE_GYROSCOPE      "local.GyroscopeSensor"
+@@ -311,6 +316,7 @@ sensor_id_available(sensor_id_t id)
+ #define SFW_SENSOR_METHOD_READ_PS             "proximity"
+ #define SFW_SENSOR_METHOD_READ_ALS            "lux"
+ #define SFW_SENSOR_METHOD_READ_ORIENT         "orientation"
++#define SFW_SENSOR_METHOD_READ_WRIST          "wristgesture"
+ #define SFW_SENSOR_METHOD_READ_ACCELEROMETER  "xyz"
+ #define SFW_SENSOR_METHOD_READ_COMPASS        "value" // or "declinationvalue"?
+ #define SFW_SENSOR_METHOD_READ_GYROSCOPE      "value"
+@@ -335,6 +341,7 @@ sensor_id_available(sensor_id_t id)
+ #define SFW_SENSOR_NAME_PS                "proximitysensor"
+ #define SFW_SENSOR_NAME_ALS               "alssensor"
+ #define SFW_SENSOR_NAME_ORIENT            "orientationsensor"
++#define SFW_SENSOR_NAME_WRIST             "wristgesturesensor"
+ #define SFW_SENSOR_NAME_ACCELEROMETER     "accelerometersensor"
+ #define SFW_SENSOR_NAME_COMPASS           "compasssensor"
+ #define SFW_SENSOR_NAME_GYROSCOPE         "gyroscopesensor"
+@@ -348,6 +355,13 @@ sensor_id_available(sensor_id_t id)
+ #define SFW_SENSOR_NAME_TEMPERATURE       "temperaturesensor"
+ 
+ // ----------------------------------------------------------------
++#ifndef MCE_SETTING_DISPLAY_PATH
++#define MCE_SETTING_DISPLAY_PATH                       "/system/osso/dsm/display"
++#endif
++
++#ifndef MCE_SETTING_WRIST_GESTURE_AVAILABLE
++#define MCE_SETTING_WRIST_GESTURE_AVAILABLE            MCE_SETTING_DISPLAY_PATH "/wrist_sensor_available"
++#endif
+ 
+ /* ========================================================================= *
+  * FORWARD_DECLARATIONS
+@@ -365,6 +379,7 @@ typedef struct sfw_backend_t              sfw_backend_t;
+ typedef struct sfw_sample_als_t           sfw_sample_als_t;
+ typedef struct sfw_sample_ps_t            sfw_sample_ps_t;
+ typedef struct sfw_sample_orient_t        sfw_sample_orient_t;
++typedef struct sfw_sample_wrist_t         sfw_sample_wrist_t;
+ typedef struct sfw_sample_accelerometer_t sfw_sample_accelerometer_t;
+ typedef struct sfw_sample_compass_t       sfw_sample_compass_t;
+ typedef struct sfw_sample_gyroscope_t     sfw_sample_gyroscope_t;
+@@ -400,6 +415,9 @@ typedef struct sfw_sample_temperature_t   sfw_sample_temperature_t;
+ /** Ambient light level [lux] to use when sensor can't be enabled */
+ #define SFW_NOTIFY_DEFAULT_ALS 400
+ 
++#define SFW_NOTIFY_DEFAULT_WRIST false
++#define SFW_NOTIFY_EXCEPTION_WRIST false
++
+ /** Orientation state to use when sensor can't be enabled */
+ #define SFW_NOTIFY_DEFAULT_ORIENT MCE_ORIENTATION_UNDEFINED
+ 
+@@ -479,6 +497,16 @@ struct sfw_sample_orient_t
+ 
+ static const char *sfw_sample_orient_repr(const sfw_sample_orient_t *self);
+ 
++/** Wrist gesture data block as sensord sends them */
++struct sfw_sample_wrist_t
++{
++    /* microseconds, monotonic */
++    uint64_t wrist_timestamp;
++
++    /* wrist tilted [bool] */
++    uint8_t  wrist_tilted;
++};
++
+ typedef enum sfw_lid_type_t
+ {
+     SFW_LID_TYPE_UNKNOWN = -1, // UnknownLid
+@@ -724,6 +752,7 @@ static bool sfw_backend_parse_data              (DBusMessageIter *data, int arg_
+ static bool sfw_backend_als_value_cb            (sfw_plugin_t *plugin, DBusMessageIter *data);
+ static bool sfw_backend_ps_value_cb             (sfw_plugin_t *plugin, DBusMessageIter *data);
+ static bool sfw_backend_orient_value_cb         (sfw_plugin_t *plugin, DBusMessageIter *data);
++static bool sfw_backend_wrist_value_cb          (sfw_plugin_t *plugin, DBusMessageIter *data);
+ static bool sfw_backend_accelerometer_value_cb  (sfw_plugin_t *plugin, DBusMessageIter *data);
+ static bool sfw_backend_compass_value_cb        (sfw_plugin_t *plugin, DBusMessageIter *data);
+ static bool sfw_backend_gyroscope_value_cb      (sfw_plugin_t *plugin, DBusMessageIter *data);
+@@ -739,6 +768,7 @@ static bool sfw_backend_temperature_value_cb    (sfw_plugin_t *plugin, DBusMessa
+ static void sfw_backend_als_sample_cb           (sfw_plugin_t *plugin, sfw_notify_t type, const void *sample);
+ static void sfw_backend_ps_sample_cb            (sfw_plugin_t *plugin, sfw_notify_t type, const void *sample);
+ static void sfw_backend_orient_sample_cb        (sfw_plugin_t *plugin, sfw_notify_t type, const void *sample);
++static void sfw_backend_wrist_sample_cb         (sfw_plugin_t *plugin, sfw_notify_t type, const void *sample);
+ static void sfw_backend_accelerometer_sample_cb (sfw_plugin_t *plugin, sfw_notify_t type, const void *sample);
+ static void sfw_backend_compass_sample_cb       (sfw_plugin_t *plugin, sfw_notify_t type, const void *sample);
+ static void sfw_backend_gyroscope_sample_cb     (sfw_plugin_t *plugin, sfw_notify_t type, const void *sample);
+@@ -1209,6 +1239,8 @@ static void              sfw_service_do_query           (sfw_service_t *self);
+ static sfw_plugin_t     *sfw_service_plugin             (const sfw_service_t *self, sensor_id_t id);
+ static void              sfw_service_set_sensor         (const sfw_service_t *self, sensor_id_t id, bool enable);
+ 
++static void              sfw_set_wrist_available        (sfw_plugin_t * plugin);
++
+ /* ========================================================================= *
+  * SENSORFW_EXCEPTION
+  * ========================================================================= */
+@@ -1246,6 +1278,9 @@ static void (*sfw_notify_als_cb)(int lux) = 0;
+ /** Orientation change callback used for notifying upper level logic */
+ static void (*sfw_notify_orient_cb)(int state) = 0;
+ 
++/** Wrist gesture change callback used for notifying upper level logic */
++static void (*sfw_notify_wrist_cb)(int state) = 0;
++
+ // (exported API defined in "mce-sensorfw.h")
+ 
+ static gboolean mce_sensorfw_evdev_cb    (GIOChannel *chn, GIOCondition cnd, gpointer aptr);
+@@ -1582,6 +1617,31 @@ EXIT:
+     return ack;
+ }
+ 
++static bool
++sfw_backend_wrist_value_cb(sfw_plugin_t *plugin, DBusMessageIter *data)
++{
++    bool          ack = false;
++    dbus_uint64_t tck  = 0;
++    dbus_uint32_t val  = 0;
++
++    if( !sfw_backend_parse_data(data,
++                                DBUS_TYPE_UINT64, &tck,
++                                DBUS_TYPE_UINT32, &val,
++                                DBUS_TYPE_INVALID) )
++        goto EXIT;
++
++    const sfw_sample_wrist_t sample = {
++        .wrist_timestamp = tck,
++        .wrist_tilted    = (val < 1) ? true : false,
++    };
++
++    sfw_plugin_handle_sample(plugin, &sample);
++
++    ack = true;
++EXIT:
++    return ack;
++}
++
+ static bool
+ sfw_backend_accelerometer_value_cb(sfw_plugin_t *plugin, DBusMessageIter *data)
+ {
+@@ -2116,6 +2176,114 @@ sfw_backend_orient_sample_cb(sfw_plugin_t *plugin, sfw_notify_t type, const void
+     return;
+ }
+ 
++extern void evin_iomon_generate_activity (struct input_event *ev, bool cooked, bool raw);
++
++/** Callback for handling wrist events from sensord */
++static void
++sfw_backend_wrist_sample_cb(sfw_plugin_t *plugin, sfw_notify_t type, const void *sampledata)
++{
++    static const sfw_sample_wrist_t default_value = {
++        .wrist_tilted = SFW_NOTIFY_DEFAULT_WRIST,
++    };
++
++    static sfw_sample_wrist_t cached_value = {
++        .wrist_tilted = SFW_NOTIFY_DEFAULT_WRIST,
++    };
++
++    static bool     tracking_active = false;
++
++    struct input_event *ev;
++
++    (void)plugin;
++    const sfw_sample_wrist_t *sample = sampledata;
++
++    if( sample ) {
++        mce_log(LL_DEBUG, "WRIST: UPDATE %s %s",
++                sfw_notify_name(type),
++                sample ? "tiled" : "untiled");
++    }
++
++    switch( type ) {
++    default:
++    case NOTIFY_REPEAT:
++        break;
++
++    case NOTIFY_FORGET:
++    case NOTIFY_RESET:
++        sfw_set_wrist_available(plugin);
++        tracking_active = false;
++        cached_value = default_value;
++        break;
++
++    case NOTIFY_RESTORE:
++        sfw_set_wrist_available(plugin);
++        tracking_active = true;
++        break;
++
++    case NOTIFY_EVDEV:
++    case NOTIFY_SENSORD:
++        sfw_set_wrist_available(plugin);
++        cached_value = *sample;
++        break;
++    }
++
++    /* Default value is used unless we are in fully working state */
++    sample = tracking_active ? &cached_value : &default_value ;
++
++    if( sfw_notify_wrist_cb ) {
++        mce_log(LL_DEBUG, "WRIST: NOTIFY %s %s",
++                sfw_notify_name(type),
++                sample ? "tiled" : "untiled");
++        sfw_notify_wrist_cb(sample->wrist_tilted);
++    }
++
++    ev = malloc(sizeof(struct input_event));
++
++    mce_log(LL_DEVEL, "tilt-to-wake gesture from wrist gesture");
++
++    ev->type  = EV_MSC;
++    ev->code  = MSC_GESTURE;
++    ev->value = GESTURE_TILT_TO_WAKE;
++ 
++    evin_iomon_generate_activity(ev, true, true);
++
++    submode_t submode = mce_get_submode_int32();
++
++    /* If the event eater is active, don't send anything */
++    if( submode & MCE_SUBMODE_EVEATER )
++        goto EXIT;
++
++    /* Gesture events count as actual non-synthetized
++     * user activity. */
++    evin_iomon_generate_activity(ev, false, true);
++
++    /* But otherwise are handled in powerkey.c. */
++    datapipe_exec_full(&keypress_event_pipe, &ev);
++EXIT:
++    return;
++}
++
++/** Set availability of wrist tilt sensor based on connection state.
++ */
++static void
++sfw_set_wrist_available(sfw_plugin_t *plugin)
++{
++    mce_log(LL_DEBUG, "WRIST: sfw_set_wrist_available: %d", plugin->plg_session->ses_state);
++    switch(plugin->plg_session->ses_state) {
++        case SESSION_INITIAL:
++        case SESSION_IDLE:
++        case SESSION_REQUESTING:
++        case SESSION_INVALID:
++            mce_setting_set_int(MCE_SETTING_WRIST_GESTURE_AVAILABLE, 0);
++            break;
++        case SESSION_ACTIVE:
++            /* Only when a session is active we know that the sensor can be enabled. */
++            mce_setting_set_int(MCE_SETTING_WRIST_GESTURE_AVAILABLE, 1);
++        case SESSION_ERROR:
++            break;
++    }
++}
++
+ /** Callback for handling accelerometer events from sensord */
+ static void
+ sfw_backend_accelerometer_sample_cb(sfw_plugin_t *plugin, sfw_notify_t type, const void *sampledata)
+@@ -2608,6 +2776,15 @@ static const sfw_backend_t sfw_backend_lut[SFW_SENSOR_ID_COUNT] =
+         .be_sample_cb        = sfw_backend_orient_sample_cb,
+         .be_value_method     = SFW_SENSOR_METHOD_READ_ORIENT,
+     },
++    [SFW_SENSOR_ID_WRIST] = {
++        .be_sensor_name      = SFW_SENSOR_NAME_WRIST,
++        .be_sensor_object    = 0,
++        .be_sensor_interface = SFW_SENSOR_INTERFACE_WRIST,
++        .be_sample_size      = sizeof(sfw_sample_wrist_t),
++        .be_value_cb         = sfw_backend_wrist_value_cb,
++        .be_sample_cb        = sfw_backend_wrist_sample_cb,
++        .be_value_method     = SFW_SENSOR_METHOD_READ_WRIST,
++    },
+     [SFW_SENSOR_ID_ACCELEROMETER] = {
+         .be_sensor_name      = SFW_SENSOR_NAME_ACCELEROMETER,
+         .be_sensor_object    = 0,
+@@ -5183,6 +5360,35 @@ mce_sensorfw_orient_disable(void)
+ 
+ // ----------------------------------------------------------------
+ 
++/** Set Wrist notification callback
++ *
++ * @param cb function to call when Orientation events are received
++ */
++void
++mce_sensorfw_wrist_set_notify(void (*cb)(int state))
++{
++    sfw_plugin_t *plugin = sfw_service_plugin(sfw_service, SFW_SENSOR_ID_WRIST);
++    sfw_plugin_repeat_value(plugin);
++}
++
++/** Try to enable Wrist input
++ */
++void
++mce_sensorfw_wrist_enable(void)
++{
++    sfw_service_set_sensor(sfw_service, SFW_SENSOR_ID_WRIST, true);
++}
++
++/** Try to disable Wrist input
++ */
++void
++mce_sensorfw_wrist_disable(void)
++{
++    sfw_service_set_sensor(sfw_service, SFW_SENSOR_ID_WRIST, false);
++}
++
++// ----------------------------------------------------------------
++
+ /** Callback function for processing evdev events
+  *
+  * @param chn  io channel
+diff --git a/mce-sensorfw.h b/mce-sensorfw.h
+index cfd8d66..1daf3c0 100644
+--- a/mce-sensorfw.h
++++ b/mce-sensorfw.h
+@@ -50,6 +50,10 @@ void mce_sensorfw_orient_set_notify(void (*cb)(int state));
+ void mce_sensorfw_orient_enable(void);
+ void mce_sensorfw_orient_disable(void);
+ 
++void mce_sensorfw_wrist_set_notify(void (*cb)(int state));
++void mce_sensorfw_wrist_enable(void);
++void mce_sensorfw_wrist_disable(void);
++
+ # ifdef __cplusplus
+ };
+ # endif
+diff --git a/modules/display.h b/modules/display.h
+index bfb9d4d..8075401 100644
+--- a/modules/display.h
++++ b/modules/display.h
+@@ -186,6 +186,14 @@
+ # define MCE_SETTING_ORIENTATION_CHANGE_IS_ACTIVITY      MCE_SETTING_DISPLAY_PATH "/orientation_change_is_activity"
+ # define MCE_DEFAULT_ORIENTATION_CHANGE_IS_ACTIVITY      true
+ 
++/** Whether MCE is allowed to use wrist gesture sensor */
++# define MCE_SETTING_WRIST_GESTURE_ENABLED              MCE_SETTING_DISPLAY_PATH "/wrist_sensor_enabled"
++# define MCE_DEFAULT_WRIST_GESTURE_ENABLED              true
++
++/** Whether the wrist gesture sensor is available on the hardware */
++# define MCE_SETTING_WRIST_GESTURE_AVAILABLE            MCE_SETTING_DISPLAY_PATH "/wrist_sensor_available"
++# define MCE_DEFAULT_WRIST_GESTURE_AVAILABLE            1
++
+ /* ------------------------------------------------------------------------- *
+  * Color profile related settings
+  * ------------------------------------------------------------------------- */
+diff --git a/modules/sensor-gestures.c b/modules/sensor-gestures.c
+index f648009..5d606eb 100644
+--- a/modules/sensor-gestures.c
++++ b/modules/sensor-gestures.c
+@@ -57,6 +57,9 @@ static gint orientation_sensor_effective_id = 0;
+ static gboolean sg_flipover_gesture_enabled = MCE_DEFAULT_FLIPOVER_GESTURE_ENABLED;
+ static guint    sg_flipover_gesture_enabled_setting_id = 0;
+ 
++/** Use of wrist gesture enabled */
++static gboolean sg_wrist_gesture_enabled = MCE_DEFAULT_WRIST_GESTURE_ENABLED;
++static guint    sg_wrist_gesture_enabled_setting_id = 0;
+ /* ========================================================================= *
+  * FUNCTIONS
+  * ========================================================================= */
+@@ -465,6 +468,15 @@ static void sg_setting_cb(GConfClient *const gcc, const guint id,
+     if( id == sg_flipover_gesture_enabled_setting_id ) {
+         sg_flipover_gesture_enabled = gconf_value_get_bool(gcv);
+     }
++    else if( id == sg_wrist_gesture_enabled_setting_id ) {
++        sg_wrist_gesture_enabled = gconf_value_get_bool(gcv);
++		mce_log(LL_CRIT, "sg_wrist_gesture_enabled: %d", sg_wrist_gesture_enabled);
++        if (sg_wrist_gesture_enabled) {
++            mce_sensorfw_wrist_enable();
++        } else {
++            mce_sensorfw_wrist_disable();
++        }
++    }
+     else {
+         mce_log(LL_WARN, "Spurious GConf value received; confused!");
+     }
+@@ -482,6 +494,11 @@ static void sg_setting_init(void)
+                            MCE_DEFAULT_FLIPOVER_GESTURE_ENABLED,
+                            sg_setting_cb,
+                            &sg_flipover_gesture_enabled_setting_id);
++    mce_setting_track_bool(MCE_SETTING_WRIST_GESTURE_ENABLED,
++                           &sg_wrist_gesture_enabled,
++                           MCE_DEFAULT_WRIST_GESTURE_ENABLED,
++                           sg_setting_cb,
++                           &sg_wrist_gesture_enabled_setting_id);
+ }
+ 
+ /** Stop tracking setting changes */
+@@ -489,6 +506,8 @@ static void sg_setting_quit(void)
+ {
+     mce_setting_notifier_remove(sg_flipover_gesture_enabled_setting_id),
+         sg_flipover_gesture_enabled_setting_id = 0;
++    mce_setting_notifier_remove(sg_wrist_gesture_enabled_setting_id),
++        sg_wrist_gesture_enabled_setting_id = 0;
+ }
+ 
+ /* ========================================================================= *
+@@ -508,6 +527,12 @@ const gchar *g_module_check_init(GModule *module)
+     sg_setting_init();
+     sg_datapipe_init();
+ 
++    if (sg_wrist_gesture_enabled) {
++        mce_sensorfw_wrist_enable();
++    } else {
++        mce_sensorfw_wrist_disable();
++    }
++
+     return NULL;
+ }
+ 
+diff --git a/tests/ut/ut_display.c b/tests/ut/ut_display.c
+index 216b3d8..673d01c 100644
+--- a/tests/ut/ut_display.c
++++ b/tests/ut/ut_display.c
+@@ -821,6 +821,11 @@ void, mce_sensorfw_orient_set_notify, (void (*cb)(int state)))
+ 	(void)cb;
+ }
+ 
++EXTERN_STUB (
++void, mce_sensorfw_wrist_enable, (void))
++{
++}
++
+ /*
+  * tklock.c stubs {{{1
+  */
+diff --git a/tools/mcetool.c b/tools/mcetool.c
+index e067c43..f5d519d 100644
+--- a/tools/mcetool.c
++++ b/tools/mcetool.c
+@@ -4159,6 +4159,29 @@ static void xmce_get_orientation_change_is_activity(void)
+         printf("%-"PAD1"s %s\n", "Orientation change is activity:", txt);
+ }
+ 
++/** Set wrist gesture detection toggle
++ *
++ * @param args string suitable for interpreting as enabled/disabled
++ */
++static bool xmce_set_wrist_gesture_detection(const char *args)
++{
++        gboolean val = xmce_parse_enabled(args);
++        xmce_setting_set_bool(MCE_SETTING_WRIST_GESTURE_ENABLED, val);
++        return true;
++}
++
++/** Show wrist gesture detection toggle
++ */
++static void xmce_get_wrist_gesture_detection(void)
++{
++        gboolean val = 0;
++        char txt[32] = "unknown";
++
++        if( xmce_setting_get_bool(MCE_SETTING_WRIST_GESTURE_ENABLED, &val) )
++                snprintf(txt, sizeof txt, "%s", val ? "enabled" : "disabled");
++        printf("%-"PAD1"s %s\n", "Wrist tilt gesture detection:", txt);
++}
++
+ /** Set flipover gesture detection toggle
+  *
+  * @param args string suitable for interpreting as enabled/disabled
+@@ -6532,6 +6555,7 @@ static bool xmce_get_status(const char *args)
+         xmce_get_orientation_sensor_mode();
+         xmce_get_orientation_change_is_activity();
+         xmce_get_flipover_gesture_detection();
++        xmce_get_wrist_gesture_detection();
+         xmce_get_ps_mode();
+         xmce_get_ps_on_demand();
+         xmce_get_ps_uncover_delay();
+@@ -7542,6 +7566,14 @@ static const mce_opt_t options[] =
+                         "  'enabled'  flipover gestures can be used to silence calls/alarms\n"
+                         "  'disabled' turning device over does not affect calls/alarms\n"
+         },
++        {
++                .name        = "set-wrist-gesture-detection",
++                .with_arg    = xmce_set_wrist_gesture_detection,
++                .values      = "enabled|disabled",
++                        "set the wrist gesture detection toggle; valid modes are:\n"
++                        "  'enabled'  flipover gestures can be used to silence calls/alarms\n"
++                        "  'disabled' turning device over does not affect calls/alarms\n"
++        },
+         {
+                 .name        = "get-color-profile-ids",
+                 .flag        = 'a',
