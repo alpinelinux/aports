@@ -54,7 +54,7 @@ done
 
 # Find the latest available major version.
 latest_ver=$(apk list -Pa postgresql \
-             	| sed -En 's/.*\{postgresql(\d+)\}.*/\1/p' \
+             	| sed -En 's/.*\{postgresql([0-9]+)\}.*/\1/p' \
              	| sort | tail -n1) || exit 0
 
 default_ver=$(pg_versions get-default -q) || exit 0
