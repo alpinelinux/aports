@@ -13,7 +13,7 @@ for i in "$@"; do
 	fi
 	read abi_release < "$i"/kernel.release
 	initfs=booster-$flavor
-	booster -kernelVersion $abi_release -output /boot/$initfs -force
+	booster build --force --kernel-version $abi_release /boot/$initfs
 done
 
 # extlinux will use path relative partition, so if /boot is on a
