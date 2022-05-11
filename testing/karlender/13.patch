@@ -1,0 +1,214 @@
+From 78783f2470f20b48cf4c5f3ccb8c5cf21444d95e Mon Sep 17 00:00:00 2001
+From: Florian Loers <florianloers@mailbox.org>
+Date: Thu, 12 May 2022 20:16:18 +0200
+Subject: [PATCH] fix: Karlender does not rely on date command for timezone
+ detection.
+
+Karlender crashed in environments that had different a `date` implementation like busybox.
+---
+ .gitlab-ci.yml         | 34 +++++++++++++-------------
+ src/adapters/caldav.rs |  4 +--
+ src/domain/time.rs     | 55 ++++++++++++++----------------------------
+ src/pages/editor.rs    |  2 +-
+ src/store/settings.rs  |  2 +-
+ 5 files changed, 39 insertions(+), 58 deletions(-)
+
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+index c1d5514..6abd6f9 100644
+--- a/.gitlab-ci.yml
++++ b/.gitlab-ci.yml
+@@ -90,20 +90,20 @@ bundle flatpak x86-64:
+       - target/${CI_PROJECT_NAME}.flatpak
+     expire_in: 2 days
+ 
+-bundle flatpak aarch64:
+-  tags:
+-    - aarch64
+-  stage: tests
+-  extends: [.run_on_merge_request]
+-  script:
+-    - cargo gra --version
+-    - cargo gra gen
+-    - cargo gra flatpak
+-  timeout: 5 hours
+-  artifacts:
+-    paths:
+-      - target/karlender.flatpak
+-    expire_in: 2 days
++# bundle flatpak aarch64:
++#   tags:
++#     - aarch64
++#   stage: tests
++#   extends: [.run_on_merge_request]
++#   script:
++#     - cargo gra --version
++#     - cargo gra gen
++#     - cargo gra flatpak
++#   timeout: 5 hours
++#   artifacts:
++#     paths:
++#       - target/karlender.flatpak
++#     expire_in: 2 days
+ 
+ release:
+   image: registry.gitlab.com/loers/cargo-gra/public-x86-64:main
+@@ -162,14 +162,14 @@ publish to flathub:
+     - curl -O "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${CI_PROJECT_NAME}/$TAG_VERSION/$APP_ID.yml"
+     - git status
+     - git add -A
+-    - > 
+-        git commit -m "chore(version): v$TAG_VERSION"
++    - >
++      git commit -m "chore(version): v$TAG_VERSION"
+     - git push origin HEAD:main
+ 
+ released:
+   image: registry.gitlab.com/loers/cargo-gra/public-flatpak:main
+   stage: post-release
+-  rules: 
++  rules:
+     - if: $CI_COMMIT_MESSAGE =~ /chore\(version\):.*/
+   script:
+     - echo "Everything is fine"
+diff --git a/src/adapters/caldav.rs b/src/adapters/caldav.rs
+index 1229949..e7dab14 100644
+--- a/src/adapters/caldav.rs
++++ b/src/adapters/caldav.rs
+@@ -425,13 +425,13 @@ impl From<(String, minicaldav::Event)> for Event {
+         let start = event.property("DTSTART").unwrap();
+         if let Some(tz_name) = start.attribute("TZID") {
+             let tz_name = tz_name.replace('-', "/");
+-            tz = KarlenderTimezone::from_str(&tz_name).ok();
++            tz = Some(KarlenderTimezone::from_str(&tz_name));
+         }
+         let end = event.property("DTEND").unwrap();
+         if tz.is_none() {
+             if let Some(tz_name) = end.attribute("TZID") {
+                 let tz_name = tz_name.replace('-', "/");
+-                tz = KarlenderTimezone::from_str(&tz_name).ok();
++                tz = Some(KarlenderTimezone::from_str(&tz_name));
+             }
+         }
+ 
+diff --git a/src/domain/time.rs b/src/domain/time.rs
+index fdc9699..75a3ce4 100644
+--- a/src/domain/time.rs
++++ b/src/domain/time.rs
+@@ -6,6 +6,8 @@ use std::{
+ };
+ use time::{format_description::well_known::Rfc3339, macros::format_description, UtcOffset};
+ 
++//use super::timezones::TIMEZONES;
++
+ const PREFIXES: [&str; 15] = [
+     "Africa",
+     "America",
+@@ -313,26 +315,13 @@ impl KarlenderTimezone {
+         &self.name
+     }
+ 
+-    fn get_utc_offset(timezone: &str) -> std::io::Result<i32> {
+-        let output = std::process::Command::new("date")
+-            .env("TZ", timezone)
+-            .arg("--date")
+-            .arg("2020-04-05 04:00:15 +00")
+-            .arg("+%:z")
+-            .output()?;
+-        let output = String::from_utf8_lossy(&output.stdout);
+-        let (hours, minutes) = output.trim().split_once(':').unwrap();
+-        let hours = hours
+-            .parse::<i32>()
+-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+-        let minutes = minutes
+-            .parse::<i32>()
+-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+-
+-        if hours >= 0 {
+-            Ok(hours * 60 * 60 + minutes * 60)
++    fn get_utc_offset(timezone: &str) -> i32 {
++        if let Ok(now) = glib::DateTime::now_local() {
++            let tz = glib::TimeZone::new(Some(timezone));
++            let interval = tz.find_interval(glib::TimeType::Universal, now.to_unix());
++            tz.offset(interval)
+         } else {
+-            Ok(hours * 60 * 60 - minutes * 60)
++            0
+         }
+     }
+ 
+@@ -350,7 +339,7 @@ impl KarlenderTimezone {
+                 let city = city_entry.file_name().to_string_lossy().to_string();
+ 
+                 let name = format!("{}/{}", prefix, city);
+-                let offset = Self::get_utc_offset(&name)?;
++                let offset = Self::get_utc_offset(&name);
+                 list.push(Self { name, offset })
+             }
+         }
+@@ -367,28 +356,20 @@ impl KarlenderTimezone {
+             {
+                 let timezone = &zone[1..];
+ 
+-                return Self::get_utc_offset(timezone)
+-                    .ok()
+-                    .map(|offset| KarlenderTimezone {
+-                        name: timezone.into(),
+-                        offset,
+-                    })
+-                    .unwrap_or_else(Self::utc);
++                return KarlenderTimezone {
++                    name: timezone.into(),
++                    offset: Self::get_utc_offset(timezone),
++                };
+             }
+         }
+         Self::utc()
+     }
+ 
+-    pub fn from_str(timezone: &str) -> std::io::Result<Self> {
+-        Self::get_utc_offset(timezone)
+-            .map(|offset| KarlenderTimezone {
+-                name: timezone.into(),
+-                offset,
+-            })
+-            .map_err(|e| {
+-                warn!("Received unknown timezone: '{}'", e);
+-                e
+-            })
++    pub fn from_str(timezone: &str) -> Self {
++        return KarlenderTimezone {
++            name: timezone.into(),
++            offset: Self::get_utc_offset(timezone),
++        };
+     }
+ 
+     pub fn utc() -> Self {
+diff --git a/src/pages/editor.rs b/src/pages/editor.rs
+index 9f955e7..3bb8538 100644
+--- a/src/pages/editor.rs
++++ b/src/pages/editor.rs
+@@ -216,7 +216,7 @@ impl EditorPage {
+                 repetition_row.set_state(event.repeat.as_ref());
+                 if let Some(notes) = &event.notes {
+                     let buffer = notes_text_view.buffer();
+-                    buffer.set_text(notes.as_str());
++                    buffer.set_text(notes.replace("\\n", "\n").as_str());
+                 } else {
+                     let buffer = notes_text_view.buffer();
+                     buffer.set_text("");
+diff --git a/src/store/settings.rs b/src/store/settings.rs
+index 1732bd6..5b2c16e 100644
+--- a/src/store/settings.rs
++++ b/src/store/settings.rs
+@@ -37,7 +37,7 @@ impl Settings {
+     pub fn timezone(&self) -> Option<KarlenderTimezone> {
+         self.timezone
+             .as_ref()
+-            .and_then(|t| KarlenderTimezone::from_str(t).ok())
++            .map(|t| KarlenderTimezone::from_str(t))
+     }
+ }
+ 
+-- 
+GitLab
+
