@@ -4,7 +4,7 @@
 # or ~/.local/share/flare for user installation.
 # It's better to place it inside user directory because each user could have their own game assets.
 
-FG_VERSION=1.12
+FG_VERSION=1.13.04
 INST_DIRECTORY="$HOME/.local/share/flare"
 
 echo "Downloading Flare Game data (version $FG_VERSION) ..."
