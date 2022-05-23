@@ -96,7 +96,7 @@ section_syslinux() {
 
 syslinux_gen_config() {
 	[ -z "$syslinux_serial" ] || echo "SERIAL $syslinux_serial"
-	echo "TIMEOUT ${syslinux_timeout:-20}"
+	echo "TIMEOUT ${syslinux_timeout:-10}"
 	echo "PROMPT ${syslinux_prompt:-1}"
 	echo "DEFAULT ${kernel_flavors%% *}"
 
@@ -133,7 +133,7 @@ syslinux_gen_config() {
 
 grub_gen_config() {
 	local _f _p _initrd
-	echo "set timeout=2"
+	echo "set timeout=1"
 	for _f in $kernel_flavors; do
 		if [ -z "${xen_params+set}" ]; then
 			_initrd="/boot/initramfs-$_f"
