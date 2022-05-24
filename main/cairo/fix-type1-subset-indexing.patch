@@ -1,0 +1,153 @@
+Patch-Source: https://github.com/freedesktop/cairo/commit/ff4fd6f960deb7afdac233465a1f4e807234ad15
+From ff4fd6f960deb7afdac233465a1f4e807234ad15 Mon Sep 17 00:00:00 2001
+From: Adrian Johnson <ajohnson@redneon.com>
+Date: Sun, 3 Apr 2022 20:03:58 +0930
+Subject: [PATCH] Fix type1-subset indexing
+
+Fixes #551
+---
+ src/cairo-type1-subset.c | 50 ++++++++++++++++++++++++++--------------
+ 1 file changed, 33 insertions(+), 17 deletions(-)
+
+diff --git a/src/cairo-type1-subset.c b/src/cairo-type1-subset.c
+index 73f414dc4..0166f7a78 100644
+--- a/src/cairo-type1-subset.c
++++ b/src/cairo-type1-subset.c
+@@ -70,7 +70,7 @@ typedef struct _cairo_type1_font_subset {
+     struct {
+ 	unsigned int font_id;
+ 	char *base_font;
+-	unsigned int num_glyphs;
++	unsigned int num_glyphs; /* Num /CharStrings in font */
+ 	double x_min, y_min, x_max, y_max;
+ 	double ascent, descent;
+ 	double units_per_em;
+@@ -81,6 +81,9 @@ typedef struct _cairo_type1_font_subset {
+ 	unsigned long  trailer_size;
+     } base;
+ 
++    /* Num glyphs in subset. May be greater than
++     * scaled_font_subset->num_glyphs due to glyphs required by the
++     * SEAC operator. */
+     int num_glyphs;
+ 
+     /* The glyphs and glyph_names arrays are indexed by the order of
+@@ -89,12 +92,12 @@ typedef struct _cairo_type1_font_subset {
+      * function is used to map the glyph index to the glyph order in
+      * the Charstrings. */
+ 
+-    glyph_data_t *glyphs;
+-    char **glyph_names;
+     cairo_array_t glyphs_array;
++    glyph_data_t *glyphs; /* pointer to first element of above array */
+     cairo_array_t glyph_names_array;
++    char **glyph_names; /* pointer to first element of above array */
+ 
+-    int num_subrs;
++    int num_subrs; /* Num /Subrs routines in the font */
+     cairo_bool_t subset_subrs;
+     struct {
+ 	const char *subr_string;
+@@ -102,12 +105,17 @@ typedef struct _cairo_type1_font_subset {
+ 	const char *np;
+ 	int np_length;
+ 	cairo_bool_t used;
+-    } *subrs;
++    } *subrs; /* array with num_subrs elements */
+ 
+-    /* Indexed by subset_index this maps to the glyph order in the
+-     * glyph_names and glyphs arrays. Has font->num_glyphs
+-     * elements. */
+-    int *subset_index_to_glyphs;
++    /* Maps scaled_font_subset index to glyphs_array.
++     * Array size = scaled_font_subset->num_glyphs. */
++    int *scaled_subset_index_to_glyphs;
++
++    /* Keeps track of the glyphs that will be emitted in the subset.
++     * Allocated size = base.num_glyphs. Number of entries = num_glyphs.
++     * Array values are glyph_array indexes.
++     */
++    int *type1_subset_index_to_glyphs;
+ 
+     cairo_output_stream_t *output;
+     cairo_array_t contents;
+@@ -159,7 +167,12 @@ _cairo_type1_font_subset_init (cairo_type1_font_subset_t  *font,
+ 
+     _cairo_array_init (&font->glyphs_array, sizeof (glyph_data_t));
+     _cairo_array_init (&font->glyph_names_array, sizeof (char *));
+-    font->subset_index_to_glyphs = NULL;
++    font->scaled_subset_index_to_glyphs = calloc (scaled_font_subset->num_glyphs, sizeof font->scaled_subset_index_to_glyphs[0]);
++    if (unlikely (font->scaled_subset_index_to_glyphs == NULL))
++        return _cairo_error (CAIRO_STATUS_NO_MEMORY);
++
++
++    font->type1_subset_index_to_glyphs = NULL;
+     font->base.num_glyphs = 0;
+     font->num_subrs = 0;
+     font->subset_subrs = TRUE;
+@@ -180,7 +193,7 @@ cairo_type1_font_subset_use_glyph (cairo_type1_font_subset_t *font, int glyph)
+ 	return;
+ 
+     font->glyphs[glyph].subset_index = font->num_glyphs;
+-    font->subset_index_to_glyphs[font->num_glyphs] = glyph;
++    font->type1_subset_index_to_glyphs[font->num_glyphs] = glyph;
+     font->num_glyphs++;
+ }
+ 
+@@ -552,7 +565,7 @@ cairo_type1_font_subset_write_header (cairo_type1_font_subset_t *font,
+ 	}
+     } else {
+ 	for (i = 1; i < font->scaled_font_subset->num_glyphs; i++) {
+-	    glyph = font->scaled_font_subset->glyphs[i];
++	    glyph = font->scaled_subset_index_to_glyphs[i];
+ 	    _cairo_output_stream_printf (font->output,
+ 					 "dup %d /%s put\n",
+ 					 i,
+@@ -1391,8 +1404,8 @@ cairo_type1_font_subset_write_private_dict (cairo_type1_font_subset_t *font,
+     font->glyphs = _cairo_array_index (&font->glyphs_array, 0);
+     font->glyph_names = _cairo_array_index (&font->glyph_names_array, 0);
+     font->base.num_glyphs = _cairo_array_num_elements (&font->glyphs_array);
+-    font->subset_index_to_glyphs = calloc (font->base.num_glyphs, sizeof font->subset_index_to_glyphs[0]);
+-    if (unlikely (font->subset_index_to_glyphs == NULL))
++    font->type1_subset_index_to_glyphs = calloc (font->base.num_glyphs, sizeof font->type1_subset_index_to_glyphs[0]);
++    if (unlikely (font->type1_subset_index_to_glyphs == NULL))
+         return _cairo_error (CAIRO_STATUS_NO_MEMORY);
+ 
+     backend = font->scaled_font_subset->scaled_font->backend;
+@@ -1414,6 +1427,7 @@ cairo_type1_font_subset_write_private_dict (cairo_type1_font_subset_t *font,
+ 	    return status;
+ 
+ 	cairo_type1_font_subset_use_glyph (font, index);
++	font->scaled_subset_index_to_glyphs[i] = index;
+     }
+ 
+     /* Go through the charstring of each glyph in use, get the glyph
+@@ -1421,7 +1435,7 @@ cairo_type1_font_subset_write_private_dict (cairo_type1_font_subset_t *font,
+      * seac operator (which may cause font->num_glyphs to increase
+      * while this loop is executing). Also subset the Subrs. */
+     for (j = 0; j < font->num_glyphs; j++) {
+-	glyph = font->subset_index_to_glyphs[j];
++	glyph = font->type1_subset_index_to_glyphs[j];
+ 	font->build_stack.sp = 0;
+ 	font->ps_stack.sp = 0;
+ 	status = cairo_type1_font_subset_parse_charstring (font,
+@@ -1711,7 +1725,9 @@ _cairo_type1_font_subset_fini (cairo_type1_font_subset_t *font)
+ 
+     free (font->base.base_font);
+ 
+-    free (font->subset_index_to_glyphs);
++    free (font->scaled_subset_index_to_glyphs);
++
++    free (font->type1_subset_index_to_glyphs);
+ 
+     free (font->cleartext);
+ 
+@@ -1765,7 +1781,7 @@ _cairo_type1_subset_init (cairo_type1_subset_t		*type1_subset,
+ 	goto fail2;
+ 
+     for (i = 0; i < font.scaled_font_subset->num_glyphs; i++) {
+-	glyph = font.scaled_font_subset->glyphs[i];
++	glyph = font.scaled_subset_index_to_glyphs[i];
+ 	type1_subset->widths[i] = font.glyphs[glyph].width;
+     }
+ 
