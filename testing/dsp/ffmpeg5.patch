@@ -1,0 +1,177 @@
+Patch-Source: https://github.com/bmc0/dsp/commit/f3ac94b546361260349edeea5f1ee0ce7fac322a
+From f3ac94b546361260349edeea5f1ee0ce7fac322a Mon Sep 17 00:00:00 2001
+From: Michael Barbour <barbour.michael.0@gmail.com>
+Date: Thu, 17 Feb 2022 21:50:55 -0500
+Subject: [PATCH] ffmpeg.c: FFmpeg 5.0 fixes.
+
+Turns out that I didn't read the documentation very carefully when writing
+the ffmpeg_seek() code. AVStream->cur_dts was never part of the public API.
+
+av_register_all() has been deprecated since FFmpeg 4.0 and was removed in
+FFmpeg 5.0.
+---
+ ffmpeg.c | 97 +++++++++++++++++++++++++++++++-------------------------
+ 1 file changed, 53 insertions(+), 44 deletions(-)
+
+diff --git a/ffmpeg.c b/ffmpeg.c
+index 9ac5bef..42c5a66 100644
+--- a/ffmpeg.c
++++ b/ffmpeg.c
+@@ -1,5 +1,6 @@
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <stdint.h>
+ #include <libavcodec/avcodec.h>
+ #include <libavformat/avformat.h>
+ #include <libavutil/mathematics.h>
+@@ -14,10 +15,11 @@ struct ffmpeg_state {
+ 	void (*readp_func)(char **, sample_t *, int, ssize_t, ssize_t);
+ 	int planar, bytes, stream_index, got_frame;
+ 	ssize_t frame_pos;
++	int64_t last_ts;
+ };
+ 
+ static const char codec_name[] = "ffmpeg";
+-static int av_registered = 0;
++static int av_initialized = 0;
+ 
+ /* Planar sample conversion functions */
+ 
+@@ -81,45 +83,58 @@ static void read_buf_doublep(char **in, sample_t *out, int channels, ssize_t sta
+ 	}
+ }
+ 
++static int get_new_frame(struct ffmpeg_state *state)
++{
++	AVPacket packet;
++	int r;
++	if (state->got_frame)
++		av_frame_unref(state->frame);
++	state->got_frame = 0;
++	state->frame_pos = 0;
++	retry:
++	if ((r = avcodec_receive_frame(state->cc, state->frame)) < 0) {
++		switch (r) {
++		case AVERROR_EOF:
++			return -1;
++		case AVERROR(EAGAIN):
++			skip_packet:
++			if (av_read_frame(state->container, &packet) < 0) {
++				avcodec_send_packet(state->cc, NULL);  /* send flush packet */
++				goto retry;
++			}
++			if (packet.stream_index != state->stream_index) {
++				av_packet_unref(&packet);
++				goto skip_packet;
++			}
++			state->last_ts = (packet.pts == AV_NOPTS_VALUE) ? packet.dts : packet.pts;
++			if (avcodec_send_packet(state->cc, &packet) < 0)
++				return 1;  /* FIXME: handle decoding errors more intelligently */
++			av_packet_unref(&packet);
++			break;
++		default:
++			return 1;  /* FIXME: handle decoding errors more intelligently */
++		}
++	}
++	state->got_frame = 1;
++	return 0;
++}
++
+ ssize_t ffmpeg_read(struct codec *c, sample_t *buf, ssize_t frames)
+ {
+ 	struct ffmpeg_state *state = (struct ffmpeg_state *) c->data;
+-	AVPacket packet;
+ 	int r, done = 0;  /* set to 1 at EOF */
+ 	ssize_t buf_pos = 0, avail = 0;
+ 	if (state->got_frame)
+ 		avail = state->frame->nb_samples - state->frame_pos;
+ 	while (buf_pos < frames && !(done && avail == 0)) {
+ 		if (avail == 0) {
+-			if (state->got_frame)
+-				av_frame_unref(state->frame);
+-			state->got_frame = 0;
+-			state->frame_pos = 0;
+-			retry:
+-			if ((r = avcodec_receive_frame(state->cc, state->frame)) < 0) {
+-				switch (r) {
+-				case AVERROR_EOF:
+-					done = 1;
+-					continue;
+-				case AVERROR(EAGAIN):
+-					skip_packet:
+-					if (av_read_frame(state->container, &packet) < 0) {
+-						avcodec_send_packet(state->cc, NULL);  /* send flush packet */
+-						goto retry;
+-					}
+-					if (packet.stream_index != state->stream_index) {
+-						av_packet_unref(&packet);
+-						goto skip_packet;
+-					}
+-					if (avcodec_send_packet(state->cc, &packet) < 0)
+-						return 0;  /* FIXME: handle decoding errors more intelligently */
+-					av_packet_unref(&packet);
+-					break;
+-				default:
+-					return 0;  /* FIXME: handle decoding errors more intelligently */
+-				}
++			r = get_new_frame(state);
++			if (r < 0) {
++				done = 1;
++				continue;
+ 			}
+-			state->got_frame = 1;
++			else if (r > 0)
++				return 0;
+ 		}
+ 		if (state->got_frame) {
+ 			avail = (avail > frames - buf_pos) ? frames - buf_pos : avail;
+@@ -145,8 +160,7 @@ ssize_t ffmpeg_write(struct codec *c, sample_t *buf, ssize_t frames)
+ ssize_t ffmpeg_seek(struct codec *c, ssize_t pos)
+ {
+ 	AVStream *st;
+-	int64_t timestamp;
+-	int seek_flags = 0;
++	int64_t seek_ts;
+ 	struct ffmpeg_state *state = (struct ffmpeg_state *) c->data;
+ 	if (c->frames == -1)
+ 		return -1;
+@@ -155,16 +169,12 @@ ssize_t ffmpeg_seek(struct codec *c, ssize_t pos)
+ 	else if (pos >= c->frames)
+ 		pos = c->frames - 1;
+ 	st = state->container->streams[state->stream_index];
+-	timestamp = av_rescale(pos, st->time_base.den, st->time_base.num) / c->fs;
+-	if (timestamp < st->cur_dts)
+-		seek_flags |= AVSEEK_FLAG_BACKWARD;
+-	if (av_seek_frame(state->container, state->stream_index, timestamp, seek_flags) < 0)
++	seek_ts = av_rescale(pos, st->time_base.den, st->time_base.num) / c->fs;
++	if (avformat_seek_file(state->container, state->stream_index, INT64_MIN, seek_ts, INT64_MAX, 0) < 0)
+ 		return -1;
+ 	avcodec_flush_buffers(state->cc);
+-	if (state->got_frame)
+-		av_frame_unref(state->frame);
+-	state->got_frame = 0;
+-	pos = av_rescale(st->cur_dts, st->time_base.num * c->fs, st->time_base.den);
++	get_new_frame(state);
++	pos = av_rescale(state->last_ts, st->time_base.num * c->fs, st->time_base.den);
+ 	return pos;
+ }
+ 
+@@ -199,15 +209,14 @@ struct codec * ffmpeg_codec_init(const char *path, const char *type, const char
+ 	struct ffmpeg_state *state = NULL;
+ 	struct codec *c = NULL;
+ 	AVStream *st;
+-	AVCodec *codec = NULL;
++	const AVCodec *codec = NULL;
+ 
+-	if (!av_registered) {
++	if (!av_initialized) {
+ 		if (LOGLEVEL(LL_VERBOSE))
+ 			av_log_set_level(AV_LOG_VERBOSE);
+ 		else if (LOGLEVEL(LL_SILENT))
+ 			av_log_set_level(AV_LOG_QUIET);
+-		av_register_all();
+-		av_registered = 1;
++		av_initialized = 1;
+ 	}
+ 
+ 	/* open input and find stream info */
