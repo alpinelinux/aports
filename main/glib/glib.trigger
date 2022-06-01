@@ -5,7 +5,7 @@ for i in "$@"; do
 		continue
 	fi
 	case "$i" in
-	*/modules)
+	*/modules|*gtk-4.0)
 		/usr/bin/gio-querymodules "$i"
 		;;
 	*/schemas)
