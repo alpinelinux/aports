@@ -1,0 +1,94 @@
+From 3813e89e3622b034b0e51acae496493a717555cc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?S=C3=B6ren=20Tempel?= <soeren+git@soeren-tempel.net>
+Date: Wed, 1 Jun 2022 11:51:40 +0200
+Subject: [PATCH] ash: Fix use-after-free on idx variable
+
+Consider the following code from ash.c:
+
+	STPUTC(*idx, expdest);
+	if (quotes && (unsigned char)*idx == CTLESC) {
+
+The idx variable points to a value in the stack string (as managed
+by STPUTC). STPUTC may resize this stack string via realloc(3). If
+this happens, the idx pointer needs to be updated. Otherwise,
+dereferencing idx may result in a use-after free.
+
+The valgrind output for this edge case looks as follows:
+
+	Invalid read of size 1
+	   at 0x113AD7: subevalvar (ash.c:7326)
+	   by 0x112EC7: evalvar (ash.c:7674)
+	   by 0x113219: argstr (ash.c:6891)
+	   by 0x113D10: expandarg (ash.c:8098)
+	   by 0x118989: evalcommand (ash.c:10377)
+	   by 0x116744: evaltree (ash.c:9373)
+	   by 0x1170DC: cmdloop (ash.c:13577)
+	   by 0x1191E4: ash_main (ash.c:14756)
+	   by 0x10CB3B: run_applet_no_and_exit (appletlib.c:967)
+	   by 0x10CBCA: run_applet_and_exit (appletlib.c:986)
+	   by 0x10CBCA: main (appletlib.c:1126)
+	 Address 0x48b4099 is 857 bytes inside a block of size 2,736 free'd
+	   at 0x48A6FC9: realloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+	   by 0x125B03: xrealloc (xfuncs_printf.c:61)
+	   by 0x10F9D2: growstackblock (ash.c:1736)
+	   by 0x10FA4E: growstackstr (ash.c:1775)
+	   by 0x10FA71: _STPUTC (ash.c:1816)
+	   by 0x113A94: subevalvar (ash.c:7325)
+	   by 0x112EC7: evalvar (ash.c:7674)
+	   by 0x113219: argstr (ash.c:6891)
+	   by 0x113D10: expandarg (ash.c:8098)
+	   by 0x118989: evalcommand (ash.c:10377)
+	   by 0x116744: evaltree (ash.c:9373)
+	   by 0x1170DC: cmdloop (ash.c:13577)
+	 Block was alloc'd at
+	   at 0x48A26D5: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+	   by 0x125AE9: xmalloc (xfuncs_printf.c:50)
+	   by 0x10ED56: stalloc (ash.c:1622)
+	   by 0x10F9FF: growstackblock (ash.c:1746)
+	   by 0x10FB2A: growstackto (ash.c:1783)
+	   by 0x10FB47: makestrspace (ash.c:1795)
+	   by 0x10FDE7: memtodest (ash.c:6390)
+	   by 0x10FE91: strtodest (ash.c:6417)
+	   by 0x112CC5: varvalue (ash.c:7558)
+	   by 0x112D80: evalvar (ash.c:7603)
+	   by 0x113219: argstr (ash.c:6891)
+	   by 0x113D10: expandarg (ash.c:8098)
+
+This patch fixes this issue by updating the pointers again via
+the restart label if STPUTC re-sized the stack. This issue
+has been reported to us at Alpine Linux downstream.
+
+Also: Move the second realloc-check inside the if statement
+that follows so it isn't done twice if the condition evaluates
+to false.
+
+See also:
+
+* https://gitlab.alpinelinux.org/alpine/aports/-/issues/13900
+* http://lists.busybox.net/pipermail/busybox/2022-April/089655.html
+---
+ shell/ash.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/shell/ash.c b/shell/ash.c
+index ef4a47afe..cbc50eefe 100644
+--- a/shell/ash.c
++++ b/shell/ash.c
+@@ -7323,13 +7323,15 @@ subevalvar(char *start, char *str, int strloc,
+ 				if (idx >= end)
+ 					break;
+ 				STPUTC(*idx, expdest);
++				if (stackblock() != restart_detect)
++					goto restart;
+ 				if (quotes && (unsigned char)*idx == CTLESC) {
+ 					idx++;
+ 					len++;
+ 					STPUTC(*idx, expdest);
++					if (stackblock() != restart_detect)
++						goto restart;
+ 				}
+-				if (stackblock() != restart_detect)
+-					goto restart;
+ 				idx++;
+ 				len++;
+ 				rmesc++;
