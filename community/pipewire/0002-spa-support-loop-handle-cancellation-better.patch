@@ -1,0 +1,190 @@
+From 44c017ee43ee1097442b5f91e95421adbe51d807 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Barnab=C3=A1s=20P=C5=91cze?= <pobrn@protonmail.com>
+Date: Wed, 1 Jun 2022 16:36:56 +0200
+Subject: [PATCH 1/2] spa: support: loop: handle cancellation better
+
+Register a pthread cleanup handler to guarantee
+that `spa_source::{priv, rmask}` are cleared even
+if the thread is cancelled while the loop is dispatching.
+
+This is necessary, otherwise `spa_source::priv` could point
+to the stack of the cancelled thread, which will lead to
+problems like this later:
+
+  Program terminated with signal SIGSEGV, Segmentation fault.
+  #0  0x00007f846b025be2 in detach_source (source=0x7f845f435f60) at ../spa/plugins/support/loop.c:144
+  144      e->data = NULL;
+  [Current thread is 1 (LWP 5274)]
+  (gdb) p e
+  $1 = (struct spa_poll_event *) 0x7f845e297820
+  (gdb) bt
+  #0  0x00007f846b025be2 in detach_source (source=0x7f845f435f60) at ../spa/plugins/support/loop.c:144
+  #1  0x00007f846b0276ad in free_source (s=0x7f845f435f60) at ../spa/plugins/support/loop.c:359
+  #2  0x00007f846b02a453 in loop_destroy_source (object=0x7f845f3af478, source=0x7f845f435f60) at ../spa/plugins/support/loop.c:786
+  #3  0x00007f846b02a886 in impl_clear (handle=0x7f845f3af478) at ../spa/plugins/support/loop.c:859
+  #4  0x00007f846b172f40 in unref_handle (handle=0x7f845f3af450) at ../src/pipewire/pipewire.c:211
+  #5  0x00007f846b173579 in pw_unload_spa_handle (handle=0x7f845f3af478) at ../src/pipewire/pipewire.c:346
+  #6  0x00007f846b15a761 in pw_loop_destroy (loop=0x7f845f434e30) at ../src/pipewire/loop.c:159
+  #7  0x00007f846b135d8e in pw_data_loop_destroy (loop=0x7f845f434cb0) at ../src/pipewire/data-loop.c:166
+  #8  0x00007f846b12c31c in pw_context_destroy (context=0x7f845f41c690) at ../src/pipewire/context.c:485
+  #9  0x00007f846b3ddf9e in jack_client_close (client=0x7f845f3c1030) at ../pipewire-jack/src/pipewire-jack.c:3481
+  ...
+
+(cherry picked from commit 479896279e98132649c823945da10528a6d4f63a)
+---
+ spa/plugins/support/loop.c | 29 ++++++++++----
+ test/test-loop.c           | 77 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 99 insertions(+), 7 deletions(-)
+
+diff --git a/spa/plugins/support/loop.c b/spa/plugins/support/loop.c
+index 63d1b0a4b..e02cbed87 100644
+--- a/spa/plugins/support/loop.c
++++ b/spa/plugins/support/loop.c
+@@ -370,6 +370,24 @@ static inline void process_destroy(struct impl *impl)
+ 	spa_list_init(&impl->destroy_list);
+ }
+ 
++struct cancellation_handler_data {
++	struct spa_poll_event *ep;
++	int ep_count;
++};
++
++static void cancellation_handler(void *closure)
++{
++	const struct cancellation_handler_data *data = closure;
++
++	for (int i = 0; i < data->ep_count; i++) {
++		struct spa_source *s = data->ep[i].data;
++		if (SPA_LIKELY(s)) {
++			s->rmask = 0;
++			s->priv = NULL;
++		}
++	}
++}
++
+ static int loop_iterate(void *object, int timeout)
+ {
+ 	struct impl *impl = object;
+@@ -384,6 +402,9 @@ static int loop_iterate(void *object, int timeout)
+ 	spa_loop_control_hook_after(&impl->hooks_list);
+ 	impl->polling = false;
+ 
++	struct cancellation_handler_data cdata = { ep, nfds };
++	pthread_cleanup_push(cancellation_handler, &cdata);
++
+ 	/* first we set all the rmasks, then call the callbacks. The reason is that
+ 	 * some callback might also want to look at other sources it manages and
+ 	 * can then reset the rmask to suppress the callback */
+@@ -409,13 +430,7 @@ static int loop_iterate(void *object, int timeout)
+ 			s->func(s);
+ 	}
+ 
+-	for (i = 0; i < nfds; i++) {
+-		struct spa_source *s = ep[i].data;
+-		if (SPA_LIKELY(s)) {
+-			s->rmask = 0;
+-			s->priv = NULL;
+-		}
+-	}
++	pthread_cleanup_pop(true);
+ 
+ 	return nfds;
+ }
+diff --git a/test/test-loop.c b/test/test-loop.c
+index 3e5021e50..bfdb1e4ce 100644
+--- a/test/test-loop.c
++++ b/test/test-loop.c
+@@ -374,6 +374,82 @@ PWTEST(destroy_managed_source_before_dispatch_recurse)
+ 	return PWTEST_PASS;
+ }
+ 
++struct ctwd_data {
++	struct spa_source source;
++	int handler_running_barrier;
++};
++
++static void ctwd_event_handler(struct spa_source *source)
++{
++	struct ctwd_data *data = source->data;
++
++	write_eventfd(data->handler_running_barrier);
++
++	for (;;)
++		pause(); /* the purpose of this is to block the loop */
++}
++
++static int ctwd_add_source(struct spa_loop *loop, bool async, uint32_t seq,
++			   const void *d, size_t size, void *user_data)
++{
++	struct ctwd_data *data = user_data;
++
++	pwtest_neg_errno_ok(spa_loop_add_source(loop, &data->source));
++
++	return 0;
++}
++
++PWTEST(cancel_thread_while_dispatching)
++{
++	static const struct spa_dict_item data_loop_props_items[] = {
++		{ "loop.cancel", "true" },
++	};
++	static const struct spa_dict data_loop_props = SPA_DICT_INIT_ARRAY(data_loop_props_items);
++
++	struct ctwd_data data = {
++		.source = {
++			.data = &data,
++			.func = ctwd_event_handler,
++			.mask = SPA_IO_IN,
++			.fd = eventfd(0, 0),
++		},
++		.handler_running_barrier = eventfd(0, 0),
++	};
++
++	pw_init(NULL, NULL);
++
++	struct pw_data_loop *dl = pw_data_loop_new(&data_loop_props);
++	pwtest_ptr_notnull(dl);
++
++	struct pw_loop *l = pw_data_loop_get_loop(dl);
++	pwtest_ptr_notnull(l);
++
++	pwtest_neg_errno_ok(pw_data_loop_start(dl));
++
++	pw_loop_invoke(l, ctwd_add_source, 0, NULL, 0, true, &data);
++	pwtest_ptr_notnull(data.source.loop);
++
++	write_eventfd(data.source.fd);
++	read_eventfd(data.handler_running_barrier);
++
++	pwtest_neg_errno_ok(pw_data_loop_stop(dl));
++
++	/* these are the important checks */
++	pwtest_ptr_null(data.source.priv);
++	pwtest_int_eq(data.source.rmask, UINT32_C(0));
++
++	pw_loop_remove_source(l, &data.source);
++
++	pw_data_loop_destroy(dl);
++
++	close(data.source.fd);
++	close(data.handler_running_barrier);
++
++	pw_deinit();
++
++	return PWTEST_PASS;
++}
++
+ PWTEST_SUITE(support)
+ {
+ 	pwtest_add(pwtest_loop_destroy2, PWTEST_NOARG);
+@@ -381,6 +457,7 @@ PWTEST_SUITE(support)
+ 	pwtest_add(pwtest_loop_recurse2, PWTEST_NOARG);
+ 	pwtest_add(destroy_managed_source_before_dispatch, PWTEST_NOARG);
+ 	pwtest_add(destroy_managed_source_before_dispatch_recurse, PWTEST_NOARG);
++	pwtest_add(cancel_thread_while_dispatching, PWTEST_NOARG);
+ 
+ 	return PWTEST_PASS;
+ }
+-- 
+2.36.1
+
