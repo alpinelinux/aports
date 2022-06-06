@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.2.0
-pkgrel=20
+pkgrel=21
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -54,6 +54,7 @@ build() {
 
 data() {
 	replaces="alpine-baselayout"
+	depends=
 
 	amove etc/fstab
 	amove etc/group
