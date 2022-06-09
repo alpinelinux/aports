@@ -120,8 +120,8 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   gmp mpfr4 mpc1 isl22 cloog libucontext binutils gcc \
 	   libbsd libretls busybox busybox-initscripts make \
 	   apk-tools file \
-	   openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
-	   attr libcap acl fakeroot tar \
+	   libcap openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
+	   attr acl fakeroot tar \
 	   lzip abuild ncurses libedit openssh \
 	   libcap-ng util-linux libaio lvm2 popt xz \
 	   json-c argon2 cryptsetup zstd kmod lddtree mkinitfs \
