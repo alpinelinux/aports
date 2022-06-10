@@ -1,0 +1,148 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/pv: Track and flush non-coherent mappings of RAM
+
+There are legitimate uses of WC mappings of RAM, e.g. for DMA buffers with
+devices that make non-coherent writes.  The Linux sound subsystem makes
+extensive use of this technique.
+
+For such usecases, the guest's DMA buffer is mapped and consistently used as
+WC, and Xen doesn't interact with the buffer.
+
+However, a mischevious guest can use WC mappings to deliberately create
+non-coherency between the cache and RAM, and use this to trick Xen into
+validating a pagetable which isn't actually safe.
+
+Allocate a new PGT_non_coherent to track the non-coherency of mappings.  Set
+it whenever a non-coherent writeable mapping is created.  If the page is used
+as anything other than PGT_writable_page, force a cache flush before
+validation.  Also force a cache flush before the page is returned to the heap.
+
+This is CVE-2022-26364, part of XSA-402.
+
+Reported-by: Jann Horn <jannh@google.com>
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: George Dunlap <george.dunlap@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index ab32d13a1a0d..bab9624fabb7 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -997,6 +997,15 @@ get_page_from_l1e(
+         return -EACCES;
+     }
+ 
++    /*
++     * Track writeable non-coherent mappings to RAM pages, to trigger a cache
++     * flush later if the target is used as anything but a PGT_writeable page.
++     * We care about all writeable mappings, including foreign mappings.
++     */
++    if ( !boot_cpu_has(X86_FEATURE_XEN_SELFSNOOP) &&
++         (l1f & (PAGE_CACHE_ATTRS | _PAGE_RW)) == (_PAGE_WC | _PAGE_RW) )
++        set_bit(_PGT_non_coherent, &page->u.inuse.type_info);
++
+     return 0;
+ 
+  could_not_pin:
+@@ -2454,6 +2463,19 @@ static int cleanup_page_mappings(struct page_info *page)
+         }
+     }
+ 
++    /*
++     * Flush the cache if there were previously non-coherent writeable
++     * mappings of this page.  This forces the page to be coherent before it
++     * is freed back to the heap.
++     */
++    if ( __test_and_clear_bit(_PGT_non_coherent, &page->u.inuse.type_info) )
++    {
++        void *addr = __map_domain_page(page);
++
++        cache_flush(addr, PAGE_SIZE);
++        unmap_domain_page(addr);
++    }
++
+     return rc;
+ }
+ 
+@@ -3028,6 +3050,22 @@ static int _get_page_type(struct page_info *page, unsigned long type,
+     if ( unlikely(!(nx & PGT_validated)) )
+     {
+         /*
++         * Flush the cache if there were previously non-coherent mappings of
++         * this page, and we're trying to use it as anything other than a
++         * writeable page.  This forces the page to be coherent before we
++         * validate its contents for safety.
++         */
++        if ( (nx & PGT_non_coherent) && type != PGT_writable_page )
++        {
++            void *addr = __map_domain_page(page);
++
++            cache_flush(addr, PAGE_SIZE);
++            unmap_domain_page(addr);
++
++            page->u.inuse.type_info &= ~PGT_non_coherent;
++        }
++
++        /*
+          * No special validation needed for writable or shared pages.  Page
+          * tables and GDT/LDT need to have their contents audited.
+          *
+diff --git a/xen/arch/x86/pv/grant_table.c b/xen/arch/x86/pv/grant_table.c
+index 0325618c9883..81c72e61ed55 100644
+--- a/xen/arch/x86/pv/grant_table.c
++++ b/xen/arch/x86/pv/grant_table.c
+@@ -109,7 +109,17 @@ int create_grant_pv_mapping(uint64_t addr, mfn_t frame,
+ 
+     ol1e = *pl1e;
+     if ( UPDATE_ENTRY(l1, pl1e, ol1e, nl1e, gl1mfn, curr, 0) )
++    {
++        /*
++         * We always create mappings in this path.  However, our caller,
++         * map_grant_ref(), only passes potentially non-zero cache_flags for
++         * MMIO frames, so this path doesn't create non-coherent mappings of
++         * RAM frames and there's no need to calculate PGT_non_coherent.
++         */
++        ASSERT(!cache_flags || is_iomem_page(frame));
++
+         rc = GNTST_okay;
++    }
+ 
+  out_unlock:
+     page_unlock(page);
+@@ -294,7 +304,18 @@ int replace_grant_pv_mapping(uint64_t addr, mfn_t frame,
+                  l1e_get_flags(ol1e), addr, grant_pte_flags);
+ 
+     if ( UPDATE_ENTRY(l1, pl1e, ol1e, nl1e, gl1mfn, curr, 0) )
++    {
++        /*
++         * Generally, replace_grant_pv_mapping() is used to destroy mappings
++         * (n1le = l1e_empty()), but it can be a present mapping on the
++         * GNTABOP_unmap_and_replace path.
++         *
++         * In such cases, the PTE is fully transplanted from its old location
++         * via steal_linear_addr(), so we need not perform PGT_non_coherent
++         * checking here.
++         */
+         rc = GNTST_okay;
++    }
+ 
+  out_unlock:
+     page_unlock(page);
+diff --git a/xen/include/asm-x86/mm.h b/xen/include/asm-x86/mm.h
+index 8a9a43bb0a9d..7464167ae192 100644
+--- a/xen/include/asm-x86/mm.h
++++ b/xen/include/asm-x86/mm.h
+@@ -53,8 +53,12 @@
+ #define _PGT_partial      PG_shift(8)
+ #define PGT_partial       PG_mask(1, 8)
+ 
++/* Has this page been mapped writeable with a non-coherent memory type? */
++#define _PGT_non_coherent PG_shift(9)
++#define PGT_non_coherent  PG_mask(1, 9)
++
+  /* Count of uses of this frame as its current type. */
+-#define PGT_count_width   PG_shift(8)
++#define PGT_count_width   PG_shift(9)
+ #define PGT_count_mask    ((1UL<<PGT_count_width)-1)
+ 
+ /* Are the 'type mask' bits identical? */

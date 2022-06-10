@@ -1,0 +1,83 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/amd: Work around CLFLUSH ordering on older parts
+
+On pre-CLFLUSHOPT AMD CPUs, CLFLUSH is weakely ordered with everything,
+including reads and writes to the address, and LFENCE/SFENCE instructions.
+
+This creates a multitude of problematic corner cases, laid out in the manual.
+Arrange to use MFENCE on both sides of the CLFLUSH to force proper ordering.
+
+This is part of XSA-402.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+diff --git a/xen/arch/x86/cpu/amd.c b/xen/arch/x86/cpu/amd.c
+index a8e37dbb1f5c..b3b9a0df5fed 100644
+--- a/xen/arch/x86/cpu/amd.c
++++ b/xen/arch/x86/cpu/amd.c
+@@ -812,6 +812,14 @@ static void init_amd(struct cpuinfo_x86 *c)
+ 	if (!cpu_has_lfence_dispatch)
+ 		__set_bit(X86_FEATURE_MFENCE_RDTSC, c->x86_capability);
+ 
++	/*
++	 * On pre-CLFLUSHOPT AMD CPUs, CLFLUSH is weakly ordered with
++	 * everything, including reads and writes to address, and
++	 * LFENCE/SFENCE instructions.
++	 */
++	if (!cpu_has_clflushopt)
++		setup_force_cpu_cap(X86_BUG_CLFLUSH_MFENCE);
++
+ 	switch(c->x86)
+ 	{
+ 	case 0xf ... 0x11:
+diff --git a/xen/arch/x86/flushtlb.c b/xen/arch/x86/flushtlb.c
+index 0c912b8669f8..dcbb4064012e 100644
+--- a/xen/arch/x86/flushtlb.c
++++ b/xen/arch/x86/flushtlb.c
+@@ -259,6 +259,13 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
+     return flags;
+ }
+ 
++/*
++ * On pre-CLFLUSHOPT AMD CPUs, CLFLUSH is weakly ordered with everything,
++ * including reads and writes to address, and LFENCE/SFENCE instructions.
++ *
++ * This function only works safely after alternatives have run.  Luckily, at
++ * the time of writing, we don't flush the caches that early.
++ */
+ void cache_flush(const void *addr, unsigned int size)
+ {
+     /*
+@@ -268,6 +275,8 @@ void cache_flush(const void *addr, unsigned int size)
+     unsigned int clflush_size = current_cpu_data.x86_clflush_size ?: 16;
+     const void *end = addr + size;
+ 
++    alternative("", "mfence", X86_BUG_CLFLUSH_MFENCE);
++
+     addr -= (unsigned long)addr & (clflush_size - 1);
+     for ( ; addr < end; addr += clflush_size )
+     {
+@@ -283,7 +292,9 @@ void cache_flush(const void *addr, unsigned int size)
+                        [p] "m" (*(const char *)(addr)));
+     }
+ 
+-    alternative("", "sfence", X86_FEATURE_CLFLUSHOPT);
++    alternative_2("",
++                  "sfence", X86_FEATURE_CLFLUSHOPT,
++                  "mfence", X86_BUG_CLFLUSH_MFENCE);
+ }
+ 
+ void cache_writeback(const void *addr, unsigned int size)
+diff --git a/xen/include/asm-x86/cpufeatures.h b/xen/include/asm-x86/cpufeatures.h
+index 7413febd7ad8..ff3157d52d13 100644
+--- a/xen/include/asm-x86/cpufeatures.h
++++ b/xen/include/asm-x86/cpufeatures.h
+@@ -47,6 +47,7 @@ XEN_CPUFEATURE(XEN_IBT,           X86_SYNTH(27)) /* Xen uses CET Indirect Branch
+ 
+ #define X86_BUG_FPU_PTRS          X86_BUG( 0) /* (F)X{SAVE,RSTOR} doesn't save/restore FOP/FIP/FDP. */
+ #define X86_BUG_NULL_SEG          X86_BUG( 1) /* NULL-ing a selector preserves the base and limit. */
++#define X86_BUG_CLFLUSH_MFENCE    X86_BUG( 2) /* MFENCE needed to serialise CLFLUSH */
+ 
+ /* Total number of capability words, inc synth and bug words. */
+ #define NCAPINTS (FSCAPINTS + X86_NR_SYNTH + X86_NR_BUG) /* N 32-bit words worth of info */

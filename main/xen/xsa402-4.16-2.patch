@@ -1,0 +1,213 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86: Don't change the cacheability of the directmap
+
+Changeset 55f97f49b7ce ("x86: Change cache attributes of Xen 1:1 page mappings
+in response to guest mapping requests") attempted to keep the cacheability
+consistent between different mappings of the same page.
+
+The reason wasn't described in the changelog, but it is understood to be in
+regards to a concern over machine check exceptions, owing to errata when using
+mixed cacheabilities.  It did this primarily by updating Xen's mapping of the
+page in the direct map when the guest mapped a page with reduced cacheability.
+
+Unfortunately, the logic didn't actually prevent mixed cacheability from
+occurring:
+ * A guest could map a page normally, and then map the same page with
+   different cacheability; nothing prevented this.
+ * The cacheability of the directmap was always latest-takes-precedence in
+   terms of guest requests.
+ * Grant-mapped frames with lesser cacheability didn't adjust the page's
+   cacheattr settings.
+ * The map_domain_page() function still unconditionally created WB mappings,
+   irrespective of the page's cacheattr settings.
+
+Additionally, update_xen_mappings() had a bug where the alias calculation was
+wrong for mfn's which were .init content, which should have been treated as
+fully guest pages, not Xen pages.
+
+Worse yet, the logic introduced a vulnerability whereby necessary
+pagetable/segdesc adjustments made by Xen in the validation logic could become
+non-coherent between the cache and main memory.  The CPU could subsequently
+operate on the stale value in the cache, rather than the safe value in main
+memory.
+
+The directmap contains primarily mappings of RAM.  PAT/MTRR conflict
+resolution is asymmetric, and generally for MTRR=WB ranges, PAT of lesser
+cacheability resolves to being coherent.  The special case is WC mappings,
+which are non-coherent against MTRR=WB regions (except for fully-coherent
+CPUs).
+
+Xen must not have any WC cacheability in the directmap, to prevent Xen's
+actions from creating non-coherency.  (Guest actions creating non-coherency is
+dealt with in subsequent patches.)  As all memory types for MTRR=WB ranges
+inter-operate coherently, so leave Xen's directmap mappings as WB.
+
+Only PV guests with access to devices can use reduced-cacheability mappings to
+begin with, and they're trusted not to mount DoSs against the system anyway.
+
+Drop PGC_cacheattr_{base,mask} entirely, and the logic to manipulate them.
+Shift the later PGC_* constants up, to gain 3 extra bits in the main reference
+count.  Retain the check in get_page_from_l1e() for special_pages() because a
+guest has no business using reduced cacheability on these.
+
+This reverts changeset 55f97f49b7ce6c3520c555d19caac6cf3f9a5df0
+
+This is CVE-2022-26363, part of XSA-402.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: George Dunlap <george.dunlap@citrix.com>
+
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index c6429b0f749a..ab32d13a1a0d 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -783,28 +783,6 @@ bool is_iomem_page(mfn_t mfn)
+     return (page_get_owner(page) == dom_io);
+ }
+ 
+-static int update_xen_mappings(unsigned long mfn, unsigned int cacheattr)
+-{
+-    int err = 0;
+-    bool alias = mfn >= PFN_DOWN(xen_phys_start) &&
+-         mfn < PFN_UP(xen_phys_start + xen_virt_end - XEN_VIRT_START);
+-    unsigned long xen_va =
+-        XEN_VIRT_START + ((mfn - PFN_DOWN(xen_phys_start)) << PAGE_SHIFT);
+-
+-    if ( boot_cpu_has(X86_FEATURE_XEN_SELFSNOOP) )
+-        return 0;
+-
+-    if ( unlikely(alias) && cacheattr )
+-        err = map_pages_to_xen(xen_va, _mfn(mfn), 1, 0);
+-    if ( !err )
+-        err = map_pages_to_xen((unsigned long)mfn_to_virt(mfn), _mfn(mfn), 1,
+-                     PAGE_HYPERVISOR | cacheattr_to_pte_flags(cacheattr));
+-    if ( unlikely(alias) && !cacheattr && !err )
+-        err = map_pages_to_xen(xen_va, _mfn(mfn), 1, PAGE_HYPERVISOR);
+-
+-    return err;
+-}
+-
+ #ifndef NDEBUG
+ struct mmio_emul_range_ctxt {
+     const struct domain *d;
+@@ -1009,47 +987,14 @@ get_page_from_l1e(
+         goto could_not_pin;
+     }
+ 
+-    if ( pte_flags_to_cacheattr(l1f) !=
+-         ((page->count_info & PGC_cacheattr_mask) >> PGC_cacheattr_base) )
++    if ( (l1f & PAGE_CACHE_ATTRS) != _PAGE_WB && is_special_page(page) )
+     {
+-        unsigned long x, nx, y = page->count_info;
+-        unsigned long cacheattr = pte_flags_to_cacheattr(l1f);
+-        int err;
+-
+-        if ( is_special_page(page) )
+-        {
+-            if ( write )
+-                put_page_type(page);
+-            put_page(page);
+-            gdprintk(XENLOG_WARNING,
+-                     "Attempt to change cache attributes of Xen heap page\n");
+-            return -EACCES;
+-        }
+-
+-        do {
+-            x  = y;
+-            nx = (x & ~PGC_cacheattr_mask) | (cacheattr << PGC_cacheattr_base);
+-        } while ( (y = cmpxchg(&page->count_info, x, nx)) != x );
+-
+-        err = update_xen_mappings(mfn, cacheattr);
+-        if ( unlikely(err) )
+-        {
+-            cacheattr = y & PGC_cacheattr_mask;
+-            do {
+-                x  = y;
+-                nx = (x & ~PGC_cacheattr_mask) | cacheattr;
+-            } while ( (y = cmpxchg(&page->count_info, x, nx)) != x );
+-
+-            if ( write )
+-                put_page_type(page);
+-            put_page(page);
+-
+-            gdprintk(XENLOG_WARNING, "Error updating mappings for mfn %" PRI_mfn
+-                     " (pfn %" PRI_pfn ", from L1 entry %" PRIpte ") for d%d\n",
+-                     mfn, get_gpfn_from_mfn(mfn),
+-                     l1e_get_intpte(l1e), l1e_owner->domain_id);
+-            return err;
+-        }
++        if ( write )
++            put_page_type(page);
++        put_page(page);
++        gdprintk(XENLOG_WARNING,
++                 "Attempt to change cache attributes of Xen heap page\n");
++        return -EACCES;
+     }
+ 
+     return 0;
+@@ -2467,25 +2412,10 @@ static int mod_l4_entry(l4_pgentry_t *pl4e,
+  */
+ static int cleanup_page_mappings(struct page_info *page)
+ {
+-    unsigned int cacheattr =
+-        (page->count_info & PGC_cacheattr_mask) >> PGC_cacheattr_base;
+     int rc = 0;
+     unsigned long mfn = mfn_x(page_to_mfn(page));
+ 
+     /*
+-     * If we've modified xen mappings as a result of guest cache
+-     * attributes, restore them to the "normal" state.
+-     */
+-    if ( unlikely(cacheattr) )
+-    {
+-        page->count_info &= ~PGC_cacheattr_mask;
+-
+-        BUG_ON(is_special_page(page));
+-
+-        rc = update_xen_mappings(mfn, 0);
+-    }
+-
+-    /*
+      * If this may be in a PV domain's IOMMU, remove it.
+      *
+      * NB that writable xenheap pages have their type set and cleared by
+diff --git a/xen/include/asm-x86/mm.h b/xen/include/asm-x86/mm.h
+index cb9052749963..8a9a43bb0a9d 100644
+--- a/xen/include/asm-x86/mm.h
++++ b/xen/include/asm-x86/mm.h
+@@ -69,25 +69,22 @@
+  /* Set when is using a page as a page table */
+ #define _PGC_page_table   PG_shift(3)
+ #define PGC_page_table    PG_mask(1, 3)
+- /* 3-bit PAT/PCD/PWT cache-attribute hint. */
+-#define PGC_cacheattr_base PG_shift(6)
+-#define PGC_cacheattr_mask PG_mask(7, 6)
+  /* Page is broken? */
+-#define _PGC_broken       PG_shift(7)
+-#define PGC_broken        PG_mask(1, 7)
++#define _PGC_broken       PG_shift(4)
++#define PGC_broken        PG_mask(1, 4)
+  /* Mutually-exclusive page states: { inuse, offlining, offlined, free }. */
+-#define PGC_state         PG_mask(3, 9)
+-#define PGC_state_inuse   PG_mask(0, 9)
+-#define PGC_state_offlining PG_mask(1, 9)
+-#define PGC_state_offlined PG_mask(2, 9)
+-#define PGC_state_free    PG_mask(3, 9)
++#define PGC_state           PG_mask(3, 6)
++#define PGC_state_inuse     PG_mask(0, 6)
++#define PGC_state_offlining PG_mask(1, 6)
++#define PGC_state_offlined  PG_mask(2, 6)
++#define PGC_state_free      PG_mask(3, 6)
+ #define page_state_is(pg, st) (((pg)->count_info&PGC_state) == PGC_state_##st)
+ /* Page is not reference counted (see below for caveats) */
+-#define _PGC_extra        PG_shift(10)
+-#define PGC_extra         PG_mask(1, 10)
++#define _PGC_extra        PG_shift(7)
++#define PGC_extra         PG_mask(1, 7)
+ 
+ /* Count of references to this frame. */
+-#define PGC_count_width   PG_shift(10)
++#define PGC_count_width   PG_shift(7)
+ #define PGC_count_mask    ((1UL<<PGC_count_width)-1)
+ 
+ /*
