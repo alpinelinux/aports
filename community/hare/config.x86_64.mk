@@ -29,3 +29,20 @@ SCDOC=scdoc
 
 # Where to store build artifacts
 HARECACHE=.cache
+BINOUT = .bin
+
+# Cross-compiling settings
+AARCH64_AS=aarch64-alpine-linux-musl-as
+AARCH64_AR=aarch64-alpine-linux-musl-ar
+AARCH64_CC=aarch64-alpine-linux-musl-cc
+AARCH64_LD=aarch64-alpine-linux-musl-ld
+
+RISCV64_AS=riscv64-alpine-linux-musl-as
+RISCV64_AR=riscv64-alpine-linux-musl-ar
+RISCV64_CC=riscv64-alpine-linux-musl-cc
+RISCV64_LD=riscv64-alpine-linux-musl-ld
+
+X86_64_AS=as
+X86_64_AR=ar
+X86_64_CC=cc
+X86_64_LD=ld
