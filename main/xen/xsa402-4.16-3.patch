@@ -1,0 +1,284 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86: Split cache_flush() out of cache_writeback()
+
+Subsequent changes will want a fully flushing version.
+
+Use the new helper rather than opencoding it in flush_area_local().  This
+resolves an outstanding issue where the conditional sfence is on the wrong
+side of the clflushopt loop.  clflushopt is ordered with respect to older
+stores, not to younger stores.
+
+Rename gnttab_cache_flush()'s helper to avoid colliding in name.
+grant_table.c can see the prototype from cache.h so the build fails
+otherwise.
+
+This is part of XSA-402.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+Xen 4.16 and earlier:
+ * Also backport half of c/s 3330013e67396 "VT-d / x86: re-arrange cache
+   syncing" to split cache_writeback() out of the IOMMU logic, but without the
+   associated hooks changes.
+
+diff --git a/xen/arch/x86/flushtlb.c b/xen/arch/x86/flushtlb.c
+index 25798df50f54..0c912b8669f8 100644
+--- a/xen/arch/x86/flushtlb.c
++++ b/xen/arch/x86/flushtlb.c
+@@ -234,7 +234,7 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
+     if ( flags & FLUSH_CACHE )
+     {
+         const struct cpuinfo_x86 *c = &current_cpu_data;
+-        unsigned long i, sz = 0;
++        unsigned long sz = 0;
+ 
+         if ( order < (BITS_PER_LONG - PAGE_SHIFT) )
+             sz = 1UL << (order + PAGE_SHIFT);
+@@ -244,13 +244,7 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
+              c->x86_clflush_size && c->x86_cache_size && sz &&
+              ((sz >> 10) < c->x86_cache_size) )
+         {
+-            alternative("", "sfence", X86_FEATURE_CLFLUSHOPT);
+-            for ( i = 0; i < sz; i += c->x86_clflush_size )
+-                alternative_input(".byte " __stringify(NOP_DS_PREFIX) ";"
+-                                  " clflush %0",
+-                                  "data16 clflush %0",      /* clflushopt */
+-                                  X86_FEATURE_CLFLUSHOPT,
+-                                  "m" (((const char *)va)[i]));
++            cache_flush(va, sz);
+             flags &= ~FLUSH_CACHE;
+         }
+         else
+@@ -265,6 +259,80 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
+     return flags;
+ }
+ 
++void cache_flush(const void *addr, unsigned int size)
++{
++    /*
++     * This function may be called before current_cpu_data is established.
++     * Hence a fallback is needed to prevent the loop below becoming infinite.
++     */
++    unsigned int clflush_size = current_cpu_data.x86_clflush_size ?: 16;
++    const void *end = addr + size;
++
++    addr -= (unsigned long)addr & (clflush_size - 1);
++    for ( ; addr < end; addr += clflush_size )
++    {
++        /*
++         * Note regarding the "ds" prefix use: it's faster to do a clflush
++         * + prefix than a clflush + nop, and hence the prefix is added instead
++         * of letting the alternative framework fill the gap by appending nops.
++         */
++        alternative_io("ds; clflush %[p]",
++                       "data16 clflush %[p]", /* clflushopt */
++                       X86_FEATURE_CLFLUSHOPT,
++                       /* no outputs */,
++                       [p] "m" (*(const char *)(addr)));
++    }
++
++    alternative("", "sfence", X86_FEATURE_CLFLUSHOPT);
++}
++
++void cache_writeback(const void *addr, unsigned int size)
++{
++    unsigned int clflush_size;
++    const void *end = addr + size;
++
++    /* Fall back to CLFLUSH{,OPT} when CLWB isn't available. */
++    if ( !boot_cpu_has(X86_FEATURE_CLWB) )
++        return cache_flush(addr, size);
++
++    /*
++     * This function may be called before current_cpu_data is established.
++     * Hence a fallback is needed to prevent the loop below becoming infinite.
++     */
++    clflush_size = current_cpu_data.x86_clflush_size ?: 16;
++    addr -= (unsigned long)addr & (clflush_size - 1);
++    for ( ; addr < end; addr += clflush_size )
++    {
++/*
++ * The arguments to a macro must not include preprocessor directives. Doing so
++ * results in undefined behavior, so we have to create some defines here in
++ * order to avoid it.
++ */
++#if defined(HAVE_AS_CLWB)
++# define CLWB_ENCODING "clwb %[p]"
++#elif defined(HAVE_AS_XSAVEOPT)
++# define CLWB_ENCODING "data16 xsaveopt %[p]" /* clwb */
++#else
++# define CLWB_ENCODING ".byte 0x66, 0x0f, 0xae, 0x30" /* clwb (%%rax) */
++#endif
++
++#define BASE_INPUT(addr) [p] "m" (*(const char *)(addr))
++#if defined(HAVE_AS_CLWB) || defined(HAVE_AS_XSAVEOPT)
++# define INPUT BASE_INPUT
++#else
++# define INPUT(addr) "a" (addr), BASE_INPUT(addr)
++#endif
++
++        asm volatile (CLWB_ENCODING :: INPUT(addr));
++
++#undef INPUT
++#undef BASE_INPUT
++#undef CLWB_ENCODING
++    }
++
++    asm volatile ("sfence" ::: "memory");
++}
++
+ unsigned int guest_flush_tlb_flags(const struct domain *d)
+ {
+     bool shadow = paging_mode_shadow(d);
+diff --git a/xen/common/grant_table.c b/xen/common/grant_table.c
+index 66f8ce71741c..4c742cd8fe81 100644
+--- a/xen/common/grant_table.c
++++ b/xen/common/grant_table.c
+@@ -3431,7 +3431,7 @@ gnttab_swap_grant_ref(XEN_GUEST_HANDLE_PARAM(gnttab_swap_grant_ref_t) uop,
+     return 0;
+ }
+ 
+-static int cache_flush(const gnttab_cache_flush_t *cflush, grant_ref_t *cur_ref)
++static int _cache_flush(const gnttab_cache_flush_t *cflush, grant_ref_t *cur_ref)
+ {
+     struct domain *d, *owner;
+     struct page_info *page;
+@@ -3525,7 +3525,7 @@ gnttab_cache_flush(XEN_GUEST_HANDLE_PARAM(gnttab_cache_flush_t) uop,
+             return -EFAULT;
+         for ( ; ; )
+         {
+-            int ret = cache_flush(&op, cur_ref);
++            int ret = _cache_flush(&op, cur_ref);
+ 
+             if ( ret < 0 )
+                 return ret;
+diff --git a/xen/drivers/passthrough/vtd/extern.h b/xen/drivers/passthrough/vtd/extern.h
+index 01e010a10d61..401079299725 100644
+--- a/xen/drivers/passthrough/vtd/extern.h
++++ b/xen/drivers/passthrough/vtd/extern.h
+@@ -76,7 +76,6 @@ int __must_check qinval_device_iotlb_sync(struct vtd_iommu *iommu,
+                                           struct pci_dev *pdev,
+                                           u16 did, u16 size, u64 addr);
+ 
+-unsigned int get_cache_line_size(void);
+ void flush_all_cache(void);
+ 
+ uint64_t alloc_pgtable_maddr(unsigned long npages, nodeid_t node);
+diff --git a/xen/drivers/passthrough/vtd/iommu.c b/xen/drivers/passthrough/vtd/iommu.c
+index 8975c1de61bc..bc377c9bcfa4 100644
+--- a/xen/drivers/passthrough/vtd/iommu.c
++++ b/xen/drivers/passthrough/vtd/iommu.c
+@@ -31,6 +31,7 @@
+ #include <xen/pci.h>
+ #include <xen/pci_regs.h>
+ #include <xen/keyhandler.h>
++#include <asm/cache.h>
+ #include <asm/msi.h>
+ #include <asm/nops.h>
+ #include <asm/irq.h>
+@@ -206,54 +207,6 @@ static void check_cleanup_domid_map(const struct domain *d,
+     }
+ }
+ 
+-static void sync_cache(const void *addr, unsigned int size)
+-{
+-    static unsigned long clflush_size = 0;
+-    const void *end = addr + size;
+-
+-    if ( clflush_size == 0 )
+-        clflush_size = get_cache_line_size();
+-
+-    addr -= (unsigned long)addr & (clflush_size - 1);
+-    for ( ; addr < end; addr += clflush_size )
+-/*
+- * The arguments to a macro must not include preprocessor directives. Doing so
+- * results in undefined behavior, so we have to create some defines here in
+- * order to avoid it.
+- */
+-#if defined(HAVE_AS_CLWB)
+-# define CLWB_ENCODING "clwb %[p]"
+-#elif defined(HAVE_AS_XSAVEOPT)
+-# define CLWB_ENCODING "data16 xsaveopt %[p]" /* clwb */
+-#else
+-# define CLWB_ENCODING ".byte 0x66, 0x0f, 0xae, 0x30" /* clwb (%%rax) */
+-#endif
+-
+-#define BASE_INPUT(addr) [p] "m" (*(const char *)(addr))
+-#if defined(HAVE_AS_CLWB) || defined(HAVE_AS_XSAVEOPT)
+-# define INPUT BASE_INPUT
+-#else
+-# define INPUT(addr) "a" (addr), BASE_INPUT(addr)
+-#endif
+-        /*
+-         * Note regarding the use of NOP_DS_PREFIX: it's faster to do a clflush
+-         * + prefix than a clflush + nop, and hence the prefix is added instead
+-         * of letting the alternative framework fill the gap by appending nops.
+-         */
+-        alternative_io_2(".byte " __stringify(NOP_DS_PREFIX) "; clflush %[p]",
+-                         "data16 clflush %[p]", /* clflushopt */
+-                         X86_FEATURE_CLFLUSHOPT,
+-                         CLWB_ENCODING,
+-                         X86_FEATURE_CLWB, /* no outputs */,
+-                         INPUT(addr));
+-#undef INPUT
+-#undef BASE_INPUT
+-#undef CLWB_ENCODING
+-
+-    alternative_2("", "sfence", X86_FEATURE_CLFLUSHOPT,
+-                      "sfence", X86_FEATURE_CLWB);
+-}
+-
+ /* Allocate page table, return its machine address */
+ uint64_t alloc_pgtable_maddr(unsigned long npages, nodeid_t node)
+ {
+@@ -273,7 +226,7 @@ uint64_t alloc_pgtable_maddr(unsigned long npages, nodeid_t node)
+         clear_page(vaddr);
+ 
+         if ( (iommu_ops.init ? &iommu_ops : &vtd_ops)->sync_cache )
+-            sync_cache(vaddr, PAGE_SIZE);
++            cache_writeback(vaddr, PAGE_SIZE);
+         unmap_domain_page(vaddr);
+         cur_pg++;
+     }
+@@ -1305,7 +1258,7 @@ int __init iommu_alloc(struct acpi_drhd_unit *drhd)
+     iommu->nr_pt_levels = agaw_to_level(agaw);
+ 
+     if ( !ecap_coherent(iommu->ecap) )
+-        vtd_ops.sync_cache = sync_cache;
++        vtd_ops.sync_cache = cache_writeback;
+ 
+     /* allocate domain id bitmap */
+     iommu->domid_bitmap = xzalloc_array(unsigned long, BITS_TO_LONGS(nr_dom));
+diff --git a/xen/drivers/passthrough/vtd/x86/vtd.c b/xen/drivers/passthrough/vtd/x86/vtd.c
+index 6681dccd6970..55f0faa521cb 100644
+--- a/xen/drivers/passthrough/vtd/x86/vtd.c
++++ b/xen/drivers/passthrough/vtd/x86/vtd.c
+@@ -47,11 +47,6 @@ void unmap_vtd_domain_page(const void *va)
+     unmap_domain_page(va);
+ }
+ 
+-unsigned int get_cache_line_size(void)
+-{
+-    return ((cpuid_ebx(1) >> 8) & 0xff) * 8;
+-}
+-
+ void flush_all_cache()
+ {
+     wbinvd();
+diff --git a/xen/include/asm-x86/cache.h b/xen/include/asm-x86/cache.h
+index 1f7173d8c72c..e4770efb22b9 100644
+--- a/xen/include/asm-x86/cache.h
++++ b/xen/include/asm-x86/cache.h
+@@ -11,4 +11,11 @@
+ 
+ #define __read_mostly __section(".data.read_mostly")
+ 
++#ifndef __ASSEMBLY__
++
++void cache_flush(const void *addr, unsigned int size);
++void cache_writeback(const void *addr, unsigned int size);
++
++#endif
++
+ #endif
