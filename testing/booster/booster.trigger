@@ -22,13 +22,5 @@ if ! [ -e /boot/boot ]; then
 	ln -sf . /boot/boot 2>/dev/null # silence error in case of FAT
 fi
 
-# cleanup unused booster images
-for i in /boot/booster-[0-9]*; do
-	[ -f $i ] || continue
-	if ! [ -f /boot/vmlinuz-${i#/boot/booster-} ]; then
-		rm "$i"
-	fi
-done
-
 sync
 exit 0
