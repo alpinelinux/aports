@@ -28,13 +28,5 @@ if ! [ -e /boot/boot ]; then
 	ln -sf . /boot/boot 2>/dev/null # silence error in case of FAT
 fi
 
-# cleanup unused initramfs
-for i in /boot/initramfs-[0-9]*; do
-	[ -f $i ] || continue
-	if ! [ -f /boot/vmlinuz-${i#/boot/initramfs-} ]; then
-		rm "$i"
-	fi
-done
-
 sync
 exit 0
