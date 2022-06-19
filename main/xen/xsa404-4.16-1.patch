@@ -1,0 +1,239 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/spec-ctrl: Make VERW flushing runtime conditional
+
+Currently, VERW flushing to mitigate MDS is boot time conditional per domain
+type.  However, to provide mitigations for DRPW (CVE-2022-21166), we need to
+conditionally use VERW based on the trustworthiness of the guest, and the
+devices passed through.
+
+Remove the PV/HVM alternatives and instead issue a VERW on the return-to-guest
+path depending on the SCF_verw bit in cpuinfo spec_ctrl_flags.
+
+Introduce spec_ctrl_init_domain() and d->arch.verw to calculate the VERW
+disposition at domain creation time, and context switch the SCF_verw bit.
+
+For now, VERW flushing is used and controlled exactly as before, but later
+patches will add per-domain cases too.
+
+No change in behaviour.
+
+This is part of XSA-404.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+
+diff --git a/docs/misc/xen-command-line.pandoc b/docs/misc/xen-command-line.pandoc
+index 1d08fb7e9aa6..d5cb09f86541 100644
+--- a/docs/misc/xen-command-line.pandoc
++++ b/docs/misc/xen-command-line.pandoc
+@@ -2258,9 +2258,8 @@ in place for guests to use.
+ Use of a positive boolean value for either of these options is invalid.
+ 
+ The booleans `pv=`, `hvm=`, `msr-sc=`, `rsb=` and `md-clear=` offer fine
+-grained control over the alternative blocks used by Xen.  These impact Xen's
+-ability to protect itself, and Xen's ability to virtualise support for guests
+-to use.
++grained control over the primitives by Xen.  These impact Xen's ability to
++protect itself, and Xen's ability to virtualise support for guests to use.
+ 
+ * `pv=` and `hvm=` offer control over all suboptions for PV and HVM guests
+   respectively.
+diff --git a/xen/arch/x86/domain.c b/xen/arch/x86/domain.c
+index ef1812dc1402..1fe6644a71ae 100644
+--- a/xen/arch/x86/domain.c
++++ b/xen/arch/x86/domain.c
+@@ -863,6 +863,8 @@ int arch_domain_create(struct domain *d,
+ 
+     d->arch.msr_relaxed = config->arch.misc_flags & XEN_X86_MSR_RELAXED;
+ 
++    spec_ctrl_init_domain(d);
++
+     return 0;
+ 
+  fail:
+@@ -2017,14 +2019,15 @@ static void __context_switch(void)
+ void context_switch(struct vcpu *prev, struct vcpu *next)
+ {
+     unsigned int cpu = smp_processor_id();
++    struct cpu_info *info = get_cpu_info();
+     const struct domain *prevd = prev->domain, *nextd = next->domain;
+     unsigned int dirty_cpu = read_atomic(&next->dirty_cpu);
+ 
+     ASSERT(prev != next);
+     ASSERT(local_irq_is_enabled());
+ 
+-    get_cpu_info()->use_pv_cr3 = false;
+-    get_cpu_info()->xen_cr3 = 0;
++    info->use_pv_cr3 = false;
++    info->xen_cr3 = 0;
+ 
+     if ( unlikely(dirty_cpu != cpu) && dirty_cpu != VCPU_CPU_CLEAN )
+     {
+@@ -2088,6 +2091,11 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
+                 *last_id = next_id;
+             }
+         }
++
++        /* Update the top-of-stack block with the VERW disposition. */
++        info->spec_ctrl_flags &= ~SCF_verw;
++        if ( nextd->arch.verw )
++            info->spec_ctrl_flags |= SCF_verw;
+     }
+ 
+     sched_context_switched(prev, next);
+diff --git a/xen/arch/x86/hvm/vmx/entry.S b/xen/arch/x86/hvm/vmx/entry.S
+index 49651f3c435a..5f5de45a1309 100644
+--- a/xen/arch/x86/hvm/vmx/entry.S
++++ b/xen/arch/x86/hvm/vmx/entry.S
+@@ -87,7 +87,7 @@ UNLIKELY_END(realmode)
+ 
+         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
+         /* SPEC_CTRL_EXIT_TO_VMX   Req: %rsp=regs/cpuinfo              Clob:    */
+-        ALTERNATIVE "", __stringify(verw CPUINFO_verw_sel(%rsp)), X86_FEATURE_SC_VERW_HVM
++        DO_SPEC_CTRL_COND_VERW
+ 
+         mov  VCPU_hvm_guest_cr2(%rbx),%rax
+ 
+diff --git a/xen/arch/x86/spec_ctrl.c b/xen/arch/x86/spec_ctrl.c
+index c19464da70ce..21730aa03071 100644
+--- a/xen/arch/x86/spec_ctrl.c
++++ b/xen/arch/x86/spec_ctrl.c
+@@ -36,8 +36,8 @@ static bool __initdata opt_msr_sc_pv = true;
+ static bool __initdata opt_msr_sc_hvm = true;
+ static int8_t __initdata opt_rsb_pv = -1;
+ static bool __initdata opt_rsb_hvm = true;
+-static int8_t __initdata opt_md_clear_pv = -1;
+-static int8_t __initdata opt_md_clear_hvm = -1;
++static int8_t __read_mostly opt_md_clear_pv = -1;
++static int8_t __read_mostly opt_md_clear_hvm = -1;
+ 
+ /* Cmdline controls for Xen's speculative settings. */
+ static enum ind_thunk {
+@@ -932,6 +932,13 @@ static __init void mds_calculations(uint64_t caps)
+     }
+ }
+ 
++void spec_ctrl_init_domain(struct domain *d)
++{
++    bool pv = is_pv_domain(d);
++
++    d->arch.verw = pv ? opt_md_clear_pv : opt_md_clear_hvm;
++}
++
+ void __init init_speculation_mitigations(void)
+ {
+     enum ind_thunk thunk = THUNK_DEFAULT;
+@@ -1196,21 +1203,20 @@ void __init init_speculation_mitigations(void)
+                             boot_cpu_has(X86_FEATURE_MD_CLEAR));
+ 
+     /*
+-     * Enable MDS defences as applicable.  The PV blocks need using all the
+-     * time, and the Idle blocks need using if either PV or HVM defences are
+-     * used.
++     * Enable MDS defences as applicable.  The Idle blocks need using if
++     * either PV or HVM defences are used.
+      *
+      * HVM is more complicated.  The MD_CLEAR microcode extends L1D_FLUSH with
+-     * equivelent semantics to avoid needing to perform both flushes on the
+-     * HVM path.  The HVM blocks don't need activating if our hypervisor told
+-     * us it was handling L1D_FLUSH, or we are using L1D_FLUSH ourselves.
++     * equivalent semantics to avoid needing to perform both flushes on the
++     * HVM path.  Therefore, we don't need VERW in addition to L1D_FLUSH.
++     *
++     * After calculating the appropriate idle setting, simplify
++     * opt_md_clear_hvm to mean just "should we VERW on the way into HVM
++     * guests", so spec_ctrl_init_domain() can calculate suitable settings.
+      */
+-    if ( opt_md_clear_pv )
+-        setup_force_cpu_cap(X86_FEATURE_SC_VERW_PV);
+     if ( opt_md_clear_pv || opt_md_clear_hvm )
+         setup_force_cpu_cap(X86_FEATURE_SC_VERW_IDLE);
+-    if ( opt_md_clear_hvm && !(caps & ARCH_CAPS_SKIP_L1DFL) && !opt_l1d_flush )
+-        setup_force_cpu_cap(X86_FEATURE_SC_VERW_HVM);
++    opt_md_clear_hvm &= !(caps & ARCH_CAPS_SKIP_L1DFL) && !opt_l1d_flush;
+ 
+     /*
+      * Warn the user if they are on MLPDS/MFBDS-vulnerable hardware with HT
+diff --git a/xen/include/asm-x86/cpufeatures.h b/xen/include/asm-x86/cpufeatures.h
+index ff3157d52d13..bd45a144ee78 100644
+--- a/xen/include/asm-x86/cpufeatures.h
++++ b/xen/include/asm-x86/cpufeatures.h
+@@ -35,8 +35,7 @@ XEN_CPUFEATURE(SC_RSB_HVM,        X86_SYNTH(19)) /* RSB overwrite needed for HVM
+ XEN_CPUFEATURE(XEN_SELFSNOOP,     X86_SYNTH(20)) /* SELFSNOOP gets used by Xen itself */
+ XEN_CPUFEATURE(SC_MSR_IDLE,       X86_SYNTH(21)) /* (SC_MSR_PV || SC_MSR_HVM) && default_xen_spec_ctrl */
+ XEN_CPUFEATURE(XEN_LBR,           X86_SYNTH(22)) /* Xen uses MSR_DEBUGCTL.LBR */
+-XEN_CPUFEATURE(SC_VERW_PV,        X86_SYNTH(23)) /* VERW used by Xen for PV */
+-XEN_CPUFEATURE(SC_VERW_HVM,       X86_SYNTH(24)) /* VERW used by Xen for HVM */
++/* Bits 23,24 unused. */
+ XEN_CPUFEATURE(SC_VERW_IDLE,      X86_SYNTH(25)) /* VERW used by Xen for idle */
+ XEN_CPUFEATURE(XEN_SHSTK,         X86_SYNTH(26)) /* Xen uses CET Shadow Stacks */
+ XEN_CPUFEATURE(XEN_IBT,           X86_SYNTH(27)) /* Xen uses CET Indirect Branch Tracking */
+diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
+index 92d54de0b9a1..2398a1d99da9 100644
+--- a/xen/include/asm-x86/domain.h
++++ b/xen/include/asm-x86/domain.h
+@@ -319,6 +319,9 @@ struct arch_domain
+     uint32_t pci_cf8;
+     uint8_t cmos_idx;
+ 
++    /* Use VERW on return-to-guest for its flushing side effect. */
++    bool verw;
++
+     union {
+         struct pv_domain pv;
+         struct hvm_domain hvm;
+diff --git a/xen/include/asm-x86/spec_ctrl.h b/xen/include/asm-x86/spec_ctrl.h
+index f76029523610..751355f471f4 100644
+--- a/xen/include/asm-x86/spec_ctrl.h
++++ b/xen/include/asm-x86/spec_ctrl.h
+@@ -24,6 +24,7 @@
+ #define SCF_use_shadow (1 << 0)
+ #define SCF_ist_wrmsr  (1 << 1)
+ #define SCF_ist_rsb    (1 << 2)
++#define SCF_verw       (1 << 3)
+ 
+ #ifndef __ASSEMBLY__
+ 
+@@ -32,6 +33,7 @@
+ #include <asm/msr-index.h>
+ 
+ void init_speculation_mitigations(void);
++void spec_ctrl_init_domain(struct domain *d);
+ 
+ extern bool opt_ibpb;
+ extern bool opt_ssbd;
+diff --git a/xen/include/asm-x86/spec_ctrl_asm.h b/xen/include/asm-x86/spec_ctrl_asm.h
+index 02b3b18ce69f..5a590bac44aa 100644
+--- a/xen/include/asm-x86/spec_ctrl_asm.h
++++ b/xen/include/asm-x86/spec_ctrl_asm.h
+@@ -136,6 +136,19 @@
+ #endif
+ .endm
+ 
++.macro DO_SPEC_CTRL_COND_VERW
++/*
++ * Requires %rsp=cpuinfo
++ *
++ * Issue a VERW for its flushing side effect, if indicated.  This is a Spectre
++ * v1 gadget, but the IRET/VMEntry is serialising.
++ */
++    testb $SCF_verw, CPUINFO_spec_ctrl_flags(%rsp)
++    jz .L\@_verw_skip
++    verw CPUINFO_verw_sel(%rsp)
++.L\@_verw_skip:
++.endm
++
+ .macro DO_SPEC_CTRL_ENTRY maybexen:req
+ /*
+  * Requires %rsp=regs (also cpuinfo if !maybexen)
+@@ -231,8 +244,7 @@
+ #define SPEC_CTRL_EXIT_TO_PV                                            \
+     ALTERNATIVE "",                                                     \
+         DO_SPEC_CTRL_EXIT_TO_GUEST, X86_FEATURE_SC_MSR_PV;              \
+-    ALTERNATIVE "", __stringify(verw CPUINFO_verw_sel(%rsp)),           \
+-        X86_FEATURE_SC_VERW_PV
++    DO_SPEC_CTRL_COND_VERW
+ 
+ /*
+  * Use in IST interrupt/exception context.  May interrupt Xen or PV context.
