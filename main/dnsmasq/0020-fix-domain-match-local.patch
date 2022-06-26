@@ -1,0 +1,276 @@
+Patch-Source: https://thekelleys.org.uk/gitweb/?p=dnsmasq.git;a=patch;h=de372d6914ae20a1f9997815f258efbf3b14c39b (modified)
+--
+From de372d6914ae20a1f9997815f258efbf3b14c39b Mon Sep 17 00:00:00 2001
+From: Simon Kelley <simon@thekelleys.org.uk>
+Date: Sat, 18 Sep 2021 23:01:12 +0100
+Subject: [PATCH 1/1] Fix confusion is server=/domain/# combined with
+ server|address=/domain/....
+
+The 2.86 domain matching rewrite failed to take into account the possibilty that
+
+server=/example.com/#
+
+could be combined with, for example
+
+address=/example.com/1.2.3.4
+
+resulting in the struct server datastructure for the former getting passed
+to forward_query(), rapidly followed by a SEGV.
+
+This fix makes server=/example.com/# a fully fledged member of the
+priority list, which is now  IPv6 addr, IPv4 addr, all zero return,
+resolvconf servers, upstream servers, no-data return
+
+Thanks to dl6er@dl6er.de for finding and characterising the bug.
+---
+ src/dnsmasq.h      |  34 +++++++-------
+ src/domain-match.c | 113 +++++++++++++++++++++++----------------------
+ 2 files changed, 75 insertions(+), 72 deletions(-)
+
+diff --git a/src/dnsmasq.h b/src/dnsmasq.h
+index 56a3f1d..327ad65 100644
+--- a/src/dnsmasq.h
++++ b/src/dnsmasq.h
+@@ -530,23 +530,23 @@ union mysockaddr {
+ 
+ 
+ /* The actual values here matter, since we sort on them to get records in the order
+-   IPv6 addr, IPv4 addr, all zero return, no-data return, send upstream. */
+-#define SERV_LITERAL_ADDRESS   1  /* addr is the answer, or NoDATA is the answer, depending on the next three flags */
+-#define SERV_ALL_ZEROS         2  /* return all zeros for A and AAAA */
+-#define SERV_4ADDR             4  /* addr is IPv4 */
+-#define SERV_6ADDR             8  /* addr is IPv6 */
+-#define SERV_HAS_SOURCE       16  /* source address defined */
+-#define SERV_FOR_NODOTS       32  /* server for names with no domain part only */
+-#define SERV_WARNED_RECURSIVE 64  /* avoid warning spam */
+-#define SERV_FROM_DBUS       128  /* 1 if source is DBus */
+-#define SERV_MARK            256  /* for mark-and-delete and log code */
+-#define SERV_WILDCARD        512  /* domain has leading '*' */ 
+-#define SERV_USE_RESOLV     1024  /* forward this domain in the normal way */
+-#define SERV_FROM_RESOLV    2048  /* 1 for servers from resolv, 0 for command line. */
+-#define SERV_FROM_FILE      4096  /* read from --servers-file */
+-#define SERV_LOOP           8192  /* server causes forwarding loop */
+-#define SERV_DO_DNSSEC     16384  /* Validate DNSSEC when using this server */
+-#define SERV_GOT_TCP       32768  /* Got some data from the TCP connection */
++   IPv6 addr, IPv4 addr, all zero return, resolvconf servers, upstream server, no-data return  */
++#define SERV_LITERAL_ADDRESS    1  /* addr is the answer, or NoDATA is the answer, depending on the next four flags */
++#define SERV_USE_RESOLV         2  /* forward this domain in the normal way */
++#define SERV_ALL_ZEROS          4  /* return all zeros for A and AAAA */
++#define SERV_4ADDR              8  /* addr is IPv4 */
++#define SERV_6ADDR             16  /* addr is IPv6 */
++#define SERV_HAS_SOURCE        32  /* source address defined */
++#define SERV_FOR_NODOTS        64  /* server for names with no domain part only */
++#define SERV_WARNED_RECURSIVE 128  /* avoid warning spam */
++#define SERV_FROM_DBUS        256  /* 1 if source is DBus */
++#define SERV_MARK             512  /* for mark-and-delete and log code */
++#define SERV_WILDCARD        1024  /* domain has leading '*' */ 
++#define SERV_FROM_RESOLV     2048  /* 1 for servers from resolv, 0 for command line. */
++#define SERV_FROM_FILE       4096  /* read from --servers-file */
++#define SERV_LOOP            8192  /* server causes forwarding loop */
++#define SERV_DO_DNSSEC      16384  /* Validate DNSSEC when using this server */
++#define SERV_GOT_TCP        32768  /* Got some data from the TCP connection */
+ 
+ struct serverfd {
+   int fd;
+diff --git a/src/domain-match.c b/src/domain-match.c
+index b22948c..8f29621 100644
+--- a/src/domain-match.c
++++ b/src/domain-match.c
+@@ -207,16 +207,16 @@ int lookup_domain(char *domain, int flags, int *lowout, int *highout)
+ 		}
+ 	    }
+ 	  
+-	  if (found)
++	  if (found && filter_servers(try, flags, &nlow, &nhigh))
++	    /* We have a match, but it may only be (say) an IPv6 address, and
++	       if the query wasn't for an AAAA record, it's no good, and we need
++	       to continue generalising */
+ 	    {
+ 	      /* We've matched a setting which says to use servers without a domain.
+ 		 Continue the search with empty query */
+-	      if (daemon->serverarray[try]->flags & SERV_USE_RESOLV)
++	      if (daemon->serverarray[nlow]->flags & SERV_USE_RESOLV)
+ 		crop_query = qlen;
+-	      else if (filter_servers(try, flags, &nlow, &nhigh))
+-		/* We have a match, but it may only be (say) an IPv6 address, and
+-		   if the query wasn't for an AAAA record, it's no good, and we need
+-		   to continue generalising */
++	      else
+ 		break;
+ 	    }
+ 	}
+@@ -273,7 +273,7 @@ int filter_servers(int seed, int flags, int *lowout, int *highout)
+     nlow--;
+   
+   while (nhigh < daemon->serverarraysz-1 && order_servers(daemon->serverarray[nhigh], daemon->serverarray[nhigh+1]) == 0)
+-	nhigh++;
++    nhigh++;
+   
+   nhigh++;
+   
+@@ -293,10 +293,10 @@ int filter_servers(int seed, int flags, int *lowout, int *highout)
+   else
+     {
+       /* Now the servers are on order between low and high, in the order
+-	 IPv6 addr, IPv4 addr, return zero for both, send upstream, no-data return.
++	 IPv6 addr, IPv4 addr, return zero for both, resolvconf servers, send upstream, no-data return.
+ 	 
+ 	 See which of those match our query in that priority order and narrow (low, high) */
+-
++      
+       for (i = nlow; i < nhigh && (daemon->serverarray[i]->flags & SERV_6ADDR); i++);
+       
+       if (i != nlow && (flags & F_IPV6))
+@@ -321,32 +321,40 @@ int filter_servers(int seed, int flags, int *lowout, int *highout)
+ 		{
+ 		  nlow = i;
+ 		  
+-		  /* now look for a server */
+-		  for (i = nlow; i < nhigh && !(daemon->serverarray[i]->flags & SERV_LITERAL_ADDRESS); i++);
+-
++		  /* Short to resolv.conf servers */
++		  for (i = nlow; i < nhigh && (daemon->serverarray[i]->flags & SERV_USE_RESOLV); i++);
++		  
+ 		  if (i != nlow)
+-		    {
+-		      /* If we want a server that can do DNSSEC, and this one can't, 
+-			 return nothing, similarly if were looking only for a server
+-			 for a particular domain. */
+-		      if ((flags & F_DNSSECOK) && !(daemon->serverarray[nlow]->flags & SERV_DO_DNSSEC))
+-			nlow = nhigh;
+-		      else if ((flags & F_DOMAINSRV) && daemon->serverarray[nlow]->domain_len == 0)
+-			nlow = nhigh;
+-		      else
+-			nhigh = i;
+-		    }
++		    nhigh = i;
+ 		  else
+ 		    {
+-		      /* --local=/domain/, only return if we don't need a server. */
+-		      if (flags & (F_DNSSECOK | F_DOMAINSRV | F_SERVER))
+-			nhigh = i;
++		      /* now look for a server */
++		      for (i = nlow; i < nhigh && !(daemon->serverarray[i]->flags & SERV_LITERAL_ADDRESS); i++);
++		      
++		      if (i != nlow)
++			{
++			  /* If we want a server that can do DNSSEC, and this one can't, 
++			     return nothing, similarly if were looking only for a server
++			     for a particular domain. */
++			  if ((flags & F_DNSSECOK) && !(daemon->serverarray[nlow]->flags & SERV_DO_DNSSEC))
++			    nlow = nhigh;
++			  else if ((flags & F_DOMAINSRV) && daemon->serverarray[nlow]->domain_len == 0)
++			    nlow = nhigh;
++			  else
++			    nhigh = i;
++			}
++		      else
++			{
++			  /* --local=/domain/, only return if we don't need a server. */
++			  if (flags & (F_DNSSECOK | F_DOMAINSRV | F_SERVER))
++			    nhigh = i;
++			}
+ 		    }
+ 		}
+ 	    }
+ 	}
+     }
+-  
++
+   *lowout = nlow;
+   *highout = nhigh;
+   
+@@ -522,10 +530,10 @@ static int order_qsort(const void *a, const void *b)
+   /* Sort all literal NODATA and local IPV4 or IPV6 responses together,
+      in a very specific order. We flip the SERV_LITERAL_ADDRESS bit
+      so the order is IPv6 literal, IPv4 literal, all-zero literal, 
+-     upstream server, NXDOMAIN literal. */
++     unqualified servers, upstream server, NXDOMAIN literal. */
+   if (rc == 0)
+-    rc = ((s2->flags & (SERV_LITERAL_ADDRESS | SERV_4ADDR | SERV_6ADDR | SERV_ALL_ZEROS)) ^ SERV_LITERAL_ADDRESS) -
+-      ((s1->flags & (SERV_LITERAL_ADDRESS | SERV_4ADDR | SERV_6ADDR | SERV_ALL_ZEROS)) ^ SERV_LITERAL_ADDRESS);
++    rc = ((s2->flags & (SERV_LITERAL_ADDRESS | SERV_4ADDR | SERV_6ADDR | SERV_USE_RESOLV | SERV_ALL_ZEROS)) ^ SERV_LITERAL_ADDRESS) -
++      ((s1->flags & (SERV_LITERAL_ADDRESS | SERV_4ADDR | SERV_6ADDR | SERV_USE_RESOLV | SERV_ALL_ZEROS)) ^ SERV_LITERAL_ADDRESS);
+ 
+   /* Finally, order by appearance in /etc/resolv.conf etc, for --strict-order */
+   if (rc == 0)
+@@ -635,7 +643,7 @@ int add_update_server(int flags,
+     {
+       size_t size;
+ 
+-      if (flags & SERV_LITERAL_ADDRESS)
++      if (flags & SERV_IS_LOCAL)
+ 	{
+ 	  if (flags & SERV_6ADDR)
+ 	    size = sizeof(struct serv_addr6);
+@@ -657,10 +665,19 @@ int add_update_server(int flags,
+ 	{
+ 	  serv->next = daemon->local_domains;
+ 	  daemon->local_domains = serv;
++
++	  if (flags & SERV_4ADDR)
++	    ((struct serv_addr4*)serv)->addr = local_addr->addr4;
++	  
++	  if (flags & SERV_6ADDR)
++	    ((struct serv_addr6*)serv)->addr = local_addr->addr6;
+ 	}
+       else
+ 	{
+ 	  struct server *s;
++
++	  memset(serv, 0, sizeof(struct server));
++	  
+ 	  /* Add to the end of the chain, for order */
+ 	  if (!daemon->servers)
+ 	    daemon->servers = serv;
+@@ -670,37 +687,23 @@ int add_update_server(int flags,
+ 	      s->next = serv;
+ 	    }
+ 	  
+-	  serv->next = NULL;
++#ifdef HAVE_LOOP
++	  serv->uid = rand32();
++#endif      
++	  
++	  if (interface)
++	    safe_strncpy(serv->interface, interface, sizeof(serv->interface));
++	  if (addr)
++	    serv->addr = *addr;
++	  if (source_addr)
++	    serv->source_addr = *source_addr;
+ 	}
+     }
+   
+-  if (!(flags & SERV_IS_LOCAL))
+-    memset(serv, 0, sizeof(struct server));
+-  
+   serv->flags = flags;
+   serv->domain = alloc_domain;
+   serv->domain_len = strlen(alloc_domain);
+   
+-  if (flags & SERV_4ADDR)
+-    ((struct serv_addr4*)serv)->addr = local_addr->addr4;
+-
+-  if (flags & SERV_6ADDR)
+-    ((struct serv_addr6*)serv)->addr = local_addr->addr6;
+-  
+-  if (!(flags & SERV_IS_LOCAL))
+-    {
+-#ifdef HAVE_LOOP
+-      serv->uid = rand32();
+-#endif      
+-      
+-      if (interface)
+-	safe_strncpy(serv->interface, interface, sizeof(serv->interface));
+-      if (addr)
+-	serv->addr = *addr;
+-      if (source_addr)
+-	serv->source_addr = *source_addr;
+-    }
+-
+   return 1;
+ }
+ 
+-- 
+2.20.1
+
