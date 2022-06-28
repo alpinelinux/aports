@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.2.0
-pkgrel=22
+pkgrel=23
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="all"
@@ -171,7 +171,7 @@ package() {
 
 		The Alpine Wiki contains a large amount of how-to guides and general
 		information about administrating Alpine systems.
-		See <http://wiki.alpinelinux.org/>.
+		See <https://wiki.alpinelinux.org/>.
 
 		You can setup the system with the command: setup-alpine
 
