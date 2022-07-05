@@ -1,0 +1,52 @@
+Patch-Source: https://src.fedoraproject.org/rpms/at/blob/f36/f/at-3.2.5-aborted-jobs.patch (updated)
+--
+From 65700164d93a096fc1dc0aeb295e70c8b2225e07 Mon Sep 17 00:00:00 2001
+From: Marcela Mašláňová <mmaslano@redhat.com>
+Date: Dec 02 2013 15:34:37 +0000
+Subject: There are two bugs:
+
+1. It looks like the at command does not validate that it has succeeded
+to write all data before it makes the file executable (i.e on a disk
+full an empty file might get created).
+2. After 60 minutes (run_time + CHECK_INTERVAL <= now), atd (approx line
+750) starts to unlink the lockfile and retries the execution of the job,
+leaving us with this unfortunate loop.
+
+Reproducer:
+ATD_PID=$(ps -C atd -o pid=)
+QUEUE=a
+JOBNO=$(printf '%05x' 123)
+BAD_TIME=$(expr $(date +%s) / 60 - 61)
+CTM=$(printf '%08x' $BAD_TIME )
+FILENAME=/var/spool/at/${QUEUE}${JOBNO}${CTM}
+touch $FILENAME
+chmod 0700 $FILENAME
+kill -HUP ${ATD_PID}
+sleep 0.5
+ls -l $FILENAME
+rm -f $FILENAME
+
+Thanks to: Anders Blomdell
+
+diff --git a/atd.c b/atd.c
+--- a/atd.c
++++ b/atd.c
+@@ -696,12 +696,18 @@ run_loop()
+ 	/* Is the file already locked?
+ 	 */
+ 	if (buf.st_nlink > 1) {
++	    if (run_time < buf.st_mtime)
++		run_time = buf.st_mtime;
+ 	    if (run_time + CHECK_INTERVAL <= now) {
+ 
+ 		/* Something went wrong the last time this was executed.
+ 		 * Let's remove the lockfile and reschedule.
++		 * We also change the timestamp to avoid rerunning the job more
++		 * than once every CHECK_INTERVAL.
+ 		 */
+ 		strncpy(lock_name, dirent->d_name, sizeof(lock_name));
++		if (utime(lock_name, 0) < 0)
++			syslog(LOG_ERR, "utime couldn't be set for lock file %s\n", lock_name);
+ 		lock_name[0] = '=';
+ 		unlink(lock_name);
+ 		next_job = now;
