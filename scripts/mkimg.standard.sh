@@ -68,7 +68,7 @@ profile_extended() {
 			apks="$apks $_a-$_k"
 		done
 	done
-	apks="$apks linux-firmware"
+	apks="$apks linux-firmware linux-firmware-none"
 }
 
 profile_virt() {
