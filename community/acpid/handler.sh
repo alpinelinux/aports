@@ -11,10 +11,14 @@ alias log='logger -t acpid'
 # <dev-class>:<dev-name>:<notif-value>:<sup-value>
 case "$1:$2:$3:$4" in
 
-button/power:PWRF:*)
+button/power:PWRF:* | button/power:PBTN:*)
 	log 'Power button pressed'
-	# Shutdown the system unless it has a lid (notebook).
-	[ -e /proc/acpi/button/lid/LID ] || poweroff
+	# If we have a lid (notebook), suspend to RAM, otherwise power off.
+	if [ -e /proc/acpi/button/lid/LID ]; then
+		zzz
+	else
+		poweroff
+	fi
 ;;
 button/sleep:SLPB:*)
 	log 'Sleep button pressed'
