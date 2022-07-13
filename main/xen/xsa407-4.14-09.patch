@@ -1,0 +1,285 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/spec-ctrl: Support IBPB-on-entry
+
+We are going to need this to mitigate Branch Type Confusion on AMD/Hygon CPUs,
+but as we've talked about using it in other cases too, arrange to support it
+generally.  However, this is also very expensive in some cases, so we're going
+to want per-domain controls.
+
+Introduce SCF_ist_ibpb and SCF_entry_ibpb controls, adding them to the IST and
+DOM masks as appropriate.  Also introduce X86_FEATURE_IBPB_ENTRY_{PV,HVM} to
+to patch the code blocks.
+
+For SVM, the STGI is serialising enough to protect against Spectre-v1 attacks,
+so no "else lfence" is necessary.  VT-x will use use the MSR host load list,
+so doesn't need any code in the VMExit path.
+
+For the IST path, we can't safely check CPL==0 to skip a flush, as we might
+have hit an entry path before it's IBPB.  As IST hitting Xen is rare, flush
+irrespective of CPL.  A later path, SCF_ist_sc_msr, provides Spectre-v1
+safety.
+
+For the PV paths, we know we're interrupting CPL>0, while for the INTR paths,
+we can safely check CPL==0.  Only flush when interrupting guest context.
+
+An "else lfence" is needed for safety, but we want to be able to skip it on
+unaffected CPUs, so the block wants to be an alternative, which means the
+lfence has to be inline rather than UNLIKELY() (the replacement block doesn't
+have displacements fixed up for anything other than the first instruction).
+
+As with SPEC_CTRL_ENTRY_FROM_INTR_IST, %rdx is 0 on entry so rely on this to
+shrink the logic marginally.  Update the comments to specify this new
+dependency.
+
+This is part of XSA-407.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+diff --git a/xen/arch/x86/hvm/svm/entry.S b/xen/arch/x86/hvm/svm/entry.S
+index 055e6f4564c6..7aab67899bea 100644
+--- a/xen/arch/x86/hvm/svm/entry.S
++++ b/xen/arch/x86/hvm/svm/entry.S
+@@ -101,7 +101,19 @@ __UNLIKELY_END(nsvm_hap)
+ 
+         GET_CURRENT(bx)
+ 
+-        /* SPEC_CTRL_ENTRY_FROM_SVM    Req: %rsp=regs/cpuinfo         Clob: acd */
++        /* SPEC_CTRL_ENTRY_FROM_SVM    Req: %rsp=regs/cpuinfo, %rdx=0 Clob: acd */
++
++        .macro svm_vmexit_cond_ibpb
++            testb  $SCF_entry_ibpb, CPUINFO_xen_spec_ctrl(%rsp)
++            jz     .L_skip_ibpb
++
++            mov    $MSR_PRED_CMD, %ecx
++            mov    $PRED_CMD_IBPB, %eax
++            wrmsr
++.L_skip_ibpb:
++	.endm
++        ALTERNATIVE "", svm_vmexit_cond_ibpb, X86_FEATURE_IBPB_ENTRY_HVM
++
+         ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_HVM
+ 
+         .macro svm_vmexit_spec_ctrl
+@@ -118,6 +130,10 @@ __UNLIKELY_END(nsvm_hap)
+         ALTERNATIVE "", svm_vmexit_spec_ctrl, X86_FEATURE_SC_MSR_HVM
+         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+ 
++        /*
++         * STGI is executed unconditionally, and is sufficiently serialising
++         * to safely resolve any Spectre-v1 concerns in the above logic.
++         */
+         STGI
+ GLOBAL(svm_stgi_label)
+         mov  %rsp,%rdi
+diff --git a/xen/arch/x86/hvm/vmx/vmcs.c b/xen/arch/x86/hvm/vmx/vmcs.c
+index 1466064d0cc9..3d271178e8bb 100644
+--- a/xen/arch/x86/hvm/vmx/vmcs.c
++++ b/xen/arch/x86/hvm/vmx/vmcs.c
+@@ -1332,6 +1332,10 @@ static int construct_vmcs(struct vcpu *v)
+         rc = vmx_add_msr(v, MSR_FLUSH_CMD, FLUSH_CMD_L1D,
+                          VMX_MSR_GUEST_LOADONLY);
+ 
++    if ( !rc && (d->arch.spec_ctrl_flags & SCF_entry_ibpb) )
++        rc = vmx_add_msr(v, MSR_PRED_CMD, PRED_CMD_IBPB,
++                         VMX_MSR_HOST);
++
+  out:
+     vmx_vmcs_exit(v);
+ 
+diff --git a/xen/arch/x86/x86_64/compat/entry.S b/xen/arch/x86/x86_64/compat/entry.S
+index b67468f7c934..302530e65e0b 100644
+--- a/xen/arch/x86/x86_64/compat/entry.S
++++ b/xen/arch/x86/x86_64/compat/entry.S
+@@ -18,7 +18,7 @@ ENTRY(entry_int82)
+         movl  $HYPERCALL_VECTOR, 4(%rsp)
+         SAVE_ALL compat=1 /* DPL1 gate, restricted to 32bit PV guests only. */
+ 
+-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
++        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, %rdx=0, Clob: acd */
+         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+ 
+         CR4_PV32_RESTORE
+@@ -212,7 +212,7 @@ ENTRY(cstar_enter)
+         movl  $TRAP_syscall, 4(%rsp)
+         SAVE_ALL
+ 
+-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
++        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, %rdx=0, Clob: acd */
+         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+ 
+         GET_STACK_END(bx)
+diff --git a/xen/arch/x86/x86_64/entry.S b/xen/arch/x86/x86_64/entry.S
+index 87bf9cb6942b..153e89e24694 100644
+--- a/xen/arch/x86/x86_64/entry.S
++++ b/xen/arch/x86/x86_64/entry.S
+@@ -248,7 +248,7 @@ ENTRY(lstar_enter)
+         movl  $TRAP_syscall, 4(%rsp)
+         SAVE_ALL
+ 
+-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
++        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, %rdx=0, Clob: acd */
+         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+ 
+         GET_STACK_END(bx)
+@@ -287,7 +287,7 @@ GLOBAL(sysenter_eflags_saved)
+         movl  $TRAP_syscall, 4(%rsp)
+         SAVE_ALL
+ 
+-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
++        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, %rdx=0, Clob: acd */
+         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+ 
+         GET_STACK_END(bx)
+@@ -339,7 +339,7 @@ ENTRY(int80_direct_trap)
+         movl  $0x80, 4(%rsp)
+         SAVE_ALL
+ 
+-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
++        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, %rdx=0, Clob: acd */
+         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+ 
+         GET_STACK_END(bx)
+@@ -600,7 +600,7 @@ ENTRY(common_interrupt)
+ 
+         GET_STACK_END(14)
+ 
+-        SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, Clob: acd */
++        SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, %rdx=0, Clob: acd */
+         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+ 
+         mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
+@@ -633,7 +633,7 @@ GLOBAL(handle_exception)
+ 
+         GET_STACK_END(14)
+ 
+-        SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, Clob: acd */
++        SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, %rdx=0, Clob: acd */
+         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+ 
+         mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
+diff --git a/xen/include/asm-x86/cpufeatures.h b/xen/include/asm-x86/cpufeatures.h
+index f7488d3ccbfa..b233e5835fb5 100644
+--- a/xen/include/asm-x86/cpufeatures.h
++++ b/xen/include/asm-x86/cpufeatures.h
+@@ -39,6 +39,8 @@ XEN_CPUFEATURE(XEN_LBR,           X86_SYNTH(22)) /* Xen uses MSR_DEBUGCTL.LBR */
+ XEN_CPUFEATURE(SC_VERW_IDLE,      X86_SYNTH(25)) /* VERW used by Xen for idle */
+ XEN_CPUFEATURE(XEN_SHSTK,         X86_SYNTH(26)) /* Xen uses CET Shadow Stacks */
+ XEN_CPUFEATURE(XEN_IBT,           X86_SYNTH(27)) /* Xen uses CET Indirect Branch Tracking */
++XEN_CPUFEATURE(IBPB_ENTRY_PV,     X86_SYNTH(28)) /* MSR_PRED_CMD used by Xen for PV */
++XEN_CPUFEATURE(IBPB_ENTRY_HVM,    X86_SYNTH(29)) /* MSR_PRED_CMD used by Xen for HVM */
+ 
+ /* Bug words follow the synthetic words. */
+ #define X86_NR_BUG 1
+diff --git a/xen/include/asm-x86/spec_ctrl.h b/xen/include/asm-x86/spec_ctrl.h
+index fd8162ca9ab9..10cd0cd2518f 100644
+--- a/xen/include/asm-x86/spec_ctrl.h
++++ b/xen/include/asm-x86/spec_ctrl.h
+@@ -34,6 +34,8 @@
+ #define SCF_ist_sc_msr (1 << 1)
+ #define SCF_ist_rsb    (1 << 2)
+ #define SCF_verw       (1 << 3)
++#define SCF_ist_ibpb   (1 << 4)
++#define SCF_entry_ibpb (1 << 5)
+ 
+ /*
+  * The IST paths (NMI/#MC) can interrupt any arbitrary context.  Some
+@@ -46,13 +48,13 @@
+  * These are the controls to inhibit on the S3 resume path until microcode has
+  * been reloaded.
+  */
+-#define SCF_IST_MASK (SCF_ist_sc_msr)
++#define SCF_IST_MASK (SCF_ist_sc_msr | SCF_ist_ibpb)
+ 
+ /*
+  * Some speculative protections are per-domain.  These settings are merged
+  * into the top-of-stack block in the context switch path.
+  */
+-#define SCF_DOM_MASK (SCF_verw)
++#define SCF_DOM_MASK (SCF_verw | SCF_entry_ibpb)
+ 
+ #ifndef __ASSEMBLY__
+ 
+diff --git a/xen/include/asm-x86/spec_ctrl_asm.h b/xen/include/asm-x86/spec_ctrl_asm.h
+index 15e24cde00d1..9eb4ad9ab71d 100644
+--- a/xen/include/asm-x86/spec_ctrl_asm.h
++++ b/xen/include/asm-x86/spec_ctrl_asm.h
+@@ -88,6 +88,35 @@
+  *  - SPEC_CTRL_EXIT_TO_{SVM,VMX}
+  */
+ 
++.macro DO_SPEC_CTRL_COND_IBPB maybexen:req
++/*
++ * Requires %rsp=regs (also cpuinfo if !maybexen)
++ * Requires %r14=stack_end (if maybexen), %rdx=0
++ * Clobbers %rax, %rcx, %rdx
++ *
++ * Conditionally issue IBPB if SCF_entry_ibpb is active.  In the maybexen
++ * case, we can safely look at UREGS_cs to skip taking the hit when
++ * interrupting Xen.
++ */
++    .if \maybexen
++        testb  $SCF_entry_ibpb, STACK_CPUINFO_FIELD(spec_ctrl_flags)(%r14)
++        jz     .L\@_skip
++        testb  $3, UREGS_cs(%rsp)
++    .else
++        testb  $SCF_entry_ibpb, CPUINFO_xen_spec_ctrl(%rsp)
++    .endif
++    jz     .L\@_skip
++
++    mov     $MSR_PRED_CMD, %ecx
++    mov     $PRED_CMD_IBPB, %eax
++    wrmsr
++    jmp     .L\@_done
++
++.L\@_skip:
++    lfence
++.L\@_done:
++.endm
++
+ .macro DO_OVERWRITE_RSB tmp=rax
+ /*
+  * Requires nothing
+@@ -225,12 +254,16 @@
+ 
+ /* Use after an entry from PV context (syscall/sysenter/int80/int82/etc). */
+ #define SPEC_CTRL_ENTRY_FROM_PV                                         \
++    ALTERNATIVE "", __stringify(DO_SPEC_CTRL_COND_IBPB maybexen=0),     \
++        X86_FEATURE_IBPB_ENTRY_PV;                                      \
+     ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_PV;            \
+     ALTERNATIVE "", __stringify(DO_SPEC_CTRL_ENTRY maybexen=0),         \
+         X86_FEATURE_SC_MSR_PV
+ 
+ /* Use in interrupt/exception context.  May interrupt Xen or PV context. */
+ #define SPEC_CTRL_ENTRY_FROM_INTR                                       \
++    ALTERNATIVE "", __stringify(DO_SPEC_CTRL_COND_IBPB maybexen=1),     \
++        X86_FEATURE_IBPB_ENTRY_PV;                                      \
+     ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_PV;            \
+     ALTERNATIVE "", __stringify(DO_SPEC_CTRL_ENTRY maybexen=1),         \
+         X86_FEATURE_SC_MSR_PV
+@@ -254,11 +287,23 @@
+  * Requires %rsp=regs, %r14=stack_end, %rdx=0
+  * Clobbers %rax, %rbx, %rcx, %rdx
+  *
+- * This is logical merge of DO_OVERWRITE_RSB and DO_SPEC_CTRL_ENTRY
+- * maybexen=1, but with conditionals rather than alternatives.
++ * This is logical merge of:
++ *    DO_SPEC_CTRL_COND_IBPB maybexen=0
++ *    DO_OVERWRITE_RSB
++ *    DO_SPEC_CTRL_ENTRY maybexen=1
++ * but with conditionals rather than alternatives.
+  */
+     movzbl STACK_CPUINFO_FIELD(spec_ctrl_flags)(%r14), %ebx
+ 
++    test    $SCF_ist_ibpb, %bl
++    jz      .L\@_skip_ibpb
++
++    mov     $MSR_PRED_CMD, %ecx
++    mov     $PRED_CMD_IBPB, %eax
++    wrmsr
++
++.L\@_skip_ibpb:
++
+     test $SCF_ist_rsb, %bl
+     jz .L\@_skip_rsb
+ 

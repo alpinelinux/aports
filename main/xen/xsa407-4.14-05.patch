@@ -1,0 +1,153 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/spec-ctrl: Rework spec_ctrl_flags context switching
+
+We are shortly going to need to context switch new bits in both the vcpu and
+S3 paths.  Introduce SCF_IST_MASK and SCF_DOM_MASK, and rework d->arch.verw
+into d->arch.spec_ctrl_flags to accommodate.
+
+No functional change.
+
+This is part of XSA-407.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+diff --git a/xen/arch/x86/acpi/power.c b/xen/arch/x86/acpi/power.c
+index 774e0fcd35d7..06f3e0e9f3e0 100644
+--- a/xen/arch/x86/acpi/power.c
++++ b/xen/arch/x86/acpi/power.c
+@@ -246,8 +246,8 @@ static int enter_state(u32 state)
+         error = 0;
+ 
+     ci = get_cpu_info();
+-    /* Avoid NMI/#MC using MSR_SPEC_CTRL until we've reloaded microcode. */
+-    ci->spec_ctrl_flags &= ~SCF_ist_wrmsr;
++    /* Avoid NMI/#MC using unsafe MSRs until we've reloaded microcode. */
++    ci->spec_ctrl_flags &= ~SCF_IST_MASK;
+ 
+     ACPI_FLUSH_CPU_CACHE();
+ 
+@@ -290,8 +290,8 @@ static int enter_state(u32 state)
+     if ( !recheck_cpu_features(0) )
+         panic("Missing previously available feature(s)\n");
+ 
+-    /* Re-enabled default NMI/#MC use of MSR_SPEC_CTRL. */
+-    ci->spec_ctrl_flags |= (default_spec_ctrl_flags & SCF_ist_wrmsr);
++    /* Re-enabled default NMI/#MC use of MSRs now microcode is loaded. */
++    ci->spec_ctrl_flags |= (default_spec_ctrl_flags & SCF_IST_MASK);
+ 
+     if ( boot_cpu_has(X86_FEATURE_IBRSB) || boot_cpu_has(X86_FEATURE_IBRS) )
+     {
+diff --git a/xen/arch/x86/domain.c b/xen/arch/x86/domain.c
+index 5ea5ef6ba037..305a63b67e2d 100644
+--- a/xen/arch/x86/domain.c
++++ b/xen/arch/x86/domain.c
+@@ -1838,10 +1838,10 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
+             }
+         }
+ 
+-        /* Update the top-of-stack block with the VERW disposition. */
+-        info->spec_ctrl_flags &= ~SCF_verw;
+-        if ( nextd->arch.verw )
+-            info->spec_ctrl_flags |= SCF_verw;
++        /* Update the top-of-stack block with the new spec_ctrl settings. */
++        info->spec_ctrl_flags =
++            (info->spec_ctrl_flags       & ~SCF_DOM_MASK) |
++            (nextd->arch.spec_ctrl_flags &  SCF_DOM_MASK);
+     }
+ 
+     sched_context_switched(prev, next);
+diff --git a/xen/arch/x86/spec_ctrl.c b/xen/arch/x86/spec_ctrl.c
+index 225fe08259b3..0fabfbe2a9f4 100644
+--- a/xen/arch/x86/spec_ctrl.c
++++ b/xen/arch/x86/spec_ctrl.c
+@@ -981,9 +981,12 @@ void spec_ctrl_init_domain(struct domain *d)
+ {
+     bool pv = is_pv_domain(d);
+ 
+-    d->arch.verw =
+-        (pv ? opt_md_clear_pv : opt_md_clear_hvm) ||
+-        (opt_fb_clear_mmio && is_iommu_enabled(d));
++    bool verw = ((pv ? opt_md_clear_pv : opt_md_clear_hvm) ||
++                 (opt_fb_clear_mmio && is_iommu_enabled(d)));
++
++    d->arch.spec_ctrl_flags =
++        (verw   ? SCF_verw         : 0) |
++        0;
+ }
+ 
+ void __init init_speculation_mitigations(void)
+diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
+index 4ee76bba45da..53d5a43ec0ce 100644
+--- a/xen/include/asm-x86/domain.h
++++ b/xen/include/asm-x86/domain.h
+@@ -308,8 +308,7 @@ struct arch_domain
+     uint32_t pci_cf8;
+     uint8_t cmos_idx;
+ 
+-    /* Use VERW on return-to-guest for its flushing side effect. */
+-    bool verw;
++    uint8_t spec_ctrl_flags; /* See SCF_DOM_MASK */
+ 
+     union {
+         struct pv_domain pv;
+diff --git a/xen/include/asm-x86/spec_ctrl.h b/xen/include/asm-x86/spec_ctrl.h
+index 12283573cdd5..60d6d2dc9407 100644
+--- a/xen/include/asm-x86/spec_ctrl.h
++++ b/xen/include/asm-x86/spec_ctrl.h
+@@ -20,12 +20,40 @@
+ #ifndef __X86_SPEC_CTRL_H__
+ #define __X86_SPEC_CTRL_H__
+ 
+-/* Encoding of cpuinfo.spec_ctrl_flags */
++/*
++ * Encoding of:
++ *   cpuinfo.spec_ctrl_flags
++ *   default_spec_ctrl_flags
++ *   domain.spec_ctrl_flags
++ *
++ * Live settings are in the top-of-stack block, because they need to be
++ * accessable when XPTI is active.  Some settings are fixed from boot, some
++ * context switched per domain, and some inhibited in the S3 path.
++ */
+ #define SCF_use_shadow (1 << 0)
+ #define SCF_ist_wrmsr  (1 << 1)
+ #define SCF_ist_rsb    (1 << 2)
+ #define SCF_verw       (1 << 3)
+ 
++/*
++ * The IST paths (NMI/#MC) can interrupt any arbitrary context.  Some
++ * functionality requires updated microcode to work.
++ *
++ * On boot, this is easy; we load microcode before figuring out which
++ * speculative protections to apply.  However, on the S3 resume path, we must
++ * be able to disable the configured mitigations until microcode is reloaded.
++ *
++ * These are the controls to inhibit on the S3 resume path until microcode has
++ * been reloaded.
++ */
++#define SCF_IST_MASK (SCF_ist_wrmsr)
++
++/*
++ * Some speculative protections are per-domain.  These settings are merged
++ * into the top-of-stack block in the context switch path.
++ */
++#define SCF_DOM_MASK (SCF_verw)
++
+ #ifndef __ASSEMBLY__
+ 
+ #include <asm/alternative.h>
+diff --git a/xen/include/asm-x86/spec_ctrl_asm.h b/xen/include/asm-x86/spec_ctrl_asm.h
+index 5a590bac44aa..66b00d511fc6 100644
+--- a/xen/include/asm-x86/spec_ctrl_asm.h
++++ b/xen/include/asm-x86/spec_ctrl_asm.h
+@@ -248,9 +248,6 @@
+ 
+ /*
+  * Use in IST interrupt/exception context.  May interrupt Xen or PV context.
+- * Fine grain control of SCF_ist_wrmsr is needed for safety in the S3 resume
+- * path to avoid using MSR_SPEC_CTRL before the microcode introducing it has
+- * been reloaded.
+  */
+ .macro SPEC_CTRL_ENTRY_FROM_INTR_IST
+ /*

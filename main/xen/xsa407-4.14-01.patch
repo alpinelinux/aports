@@ -1,0 +1,78 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/spec-ctrl: Only adjust MSR_SPEC_CTRL for idle with legacy IBRS
+
+Back at the time of the original Spectre-v2 fixes, it was recommended to clear
+MSR_SPEC_CTRL when going idle.  This is because of the side effects on the
+sibling thread caused by the microcode IBRS and STIBP implementations which
+were retrofitted to existing CPUs.
+
+However, there are no relevant cross-thread impacts for the hardware
+IBRS/STIBP implementations, so this logic should not be used on Intel CPUs
+supporting eIBRS, or any AMD CPUs; doing so only adds unnecessary latency to
+the idle path.
+
+Furthermore, there's no point playing with MSR_SPEC_CTRL in the idle paths if
+SMT is disabled for other reasons.
+
+Fixes: 8d03080d2a33 ("x86/spec-ctrl: Cease using thunk=lfence on AMD")
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+(cherry picked from commit ffc7694e0c99eea158c32aa164b7d1e1bb1dc46b)
+
+diff --git a/xen/arch/x86/spec_ctrl.c b/xen/arch/x86/spec_ctrl.c
+index 58a2797dfea1..d7f767b0739c 100644
+--- a/xen/arch/x86/spec_ctrl.c
++++ b/xen/arch/x86/spec_ctrl.c
+@@ -1104,8 +1104,14 @@ void __init init_speculation_mitigations(void)
+     /* (Re)init BSP state now that default_spec_ctrl_flags has been calculated. */
+     init_shadow_spec_ctrl_state();
+ 
+-    /* If Xen is using any MSR_SPEC_CTRL settings, adjust the idle path. */
+-    if ( default_xen_spec_ctrl )
++    /*
++     * For microcoded IBRS only (i.e. Intel, pre eIBRS), it is recommended to
++     * clear MSR_SPEC_CTRL before going idle, to avoid impacting sibling
++     * threads.  Activate this if SMT is enabled, and Xen is using a non-zero
++     * MSR_SPEC_CTRL setting.
++     */
++    if ( boot_cpu_has(X86_FEATURE_IBRSB) && !(caps & ARCH_CAPS_IBRS_ALL) &&
++         hw_smt_enabled && default_xen_spec_ctrl )
+         setup_force_cpu_cap(X86_FEATURE_SC_MSR_IDLE);
+ 
+     xpti_init_default(caps);
+diff --git a/xen/include/asm-x86/cpufeatures.h b/xen/include/asm-x86/cpufeatures.h
+index 9eaab7a2a1fa..f7488d3ccbfa 100644
+--- a/xen/include/asm-x86/cpufeatures.h
++++ b/xen/include/asm-x86/cpufeatures.h
+@@ -33,7 +33,7 @@ XEN_CPUFEATURE(SC_MSR_HVM,        X86_SYNTH(17)) /* MSR_SPEC_CTRL used by Xen fo
+ XEN_CPUFEATURE(SC_RSB_PV,         X86_SYNTH(18)) /* RSB overwrite needed for PV */
+ XEN_CPUFEATURE(SC_RSB_HVM,        X86_SYNTH(19)) /* RSB overwrite needed for HVM */
+ XEN_CPUFEATURE(XEN_SELFSNOOP,     X86_SYNTH(20)) /* SELFSNOOP gets used by Xen itself */
+-XEN_CPUFEATURE(SC_MSR_IDLE,       X86_SYNTH(21)) /* (SC_MSR_PV || SC_MSR_HVM) && default_xen_spec_ctrl */
++XEN_CPUFEATURE(SC_MSR_IDLE,       X86_SYNTH(21)) /* Clear MSR_SPEC_CTRL on idle */
+ XEN_CPUFEATURE(XEN_LBR,           X86_SYNTH(22)) /* Xen uses MSR_DEBUGCTL.LBR */
+ /* Bits 23,24 unused. */
+ XEN_CPUFEATURE(SC_VERW_IDLE,      X86_SYNTH(25)) /* VERW used by Xen for idle */
+diff --git a/xen/include/asm-x86/spec_ctrl.h b/xen/include/asm-x86/spec_ctrl.h
+index 68f6c46c470c..12283573cdd5 100644
+--- a/xen/include/asm-x86/spec_ctrl.h
++++ b/xen/include/asm-x86/spec_ctrl.h
+@@ -78,7 +78,8 @@ static always_inline void spec_ctrl_enter_idle(struct cpu_info *info)
+     uint32_t val = 0;
+ 
+     /*
+-     * Branch Target Injection:
++     * It is recommended in some cases to clear MSR_SPEC_CTRL when going idle,
++     * to avoid impacting sibling threads.
+      *
+      * Latch the new shadow value, then enable shadowing, then update the MSR.
+      * There are no SMP issues here; only local processor ordering concerns.
+@@ -114,7 +115,7 @@ static always_inline void spec_ctrl_exit_idle(struct cpu_info *info)
+     uint32_t val = info->xen_spec_ctrl;
+ 
+     /*
+-     * Branch Target Injection:
++     * Restore MSR_SPEC_CTRL on exit from idle.
+      *
+      * Disable shadowing before updating the MSR.  There are no SMP issues
+      * here; only local processor ordering concerns.

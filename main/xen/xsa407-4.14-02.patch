@@ -1,0 +1,219 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/spec-ctrl: Knobs for STIBP and PSFD, and follow hardware STIBP
+ hint
+
+STIBP and PSFD are slightly weird bits, because they're both implied by other
+bits in MSR_SPEC_CTRL.  Add fine grain controls for them, and take the
+implications into account when setting IBRS/SSBD.
+
+Rearrange the IBPB text/variables/logic to keep all the MSR_SPEC_CTRL bits
+together, for consistency.
+
+However, AMD have a hardware hint CPUID bit recommending that STIBP be set
+unilaterally.  This is advertised on Zen3, so follow the recommendation.
+Furthermore, in such cases, set STIBP behind the guest's back for now.  This
+has negligible overhead for the guest, but saves a WRMSR on vmentry.  This is
+the only default change.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+(cherry picked from commit fef244b179c06fcdfa581f7d57fa6e578c49ff50)
+
+diff --git a/docs/misc/xen-command-line.pandoc b/docs/misc/xen-command-line.pandoc
+index d1d5852cdd84..2302cec91fea 100644
+--- a/docs/misc/xen-command-line.pandoc
++++ b/docs/misc/xen-command-line.pandoc
+@@ -2105,8 +2105,9 @@ By default SSBD will be mitigated at runtime (i.e `ssbd=runtime`).
+ 
+ ### spec-ctrl (x86)
+ > `= List of [ <bool>, xen=<bool>, {pv,hvm,msr-sc,rsb,md-clear}=<bool>,
+->              bti-thunk=retpoline|lfence|jmp, {ibrs,ibpb,ssbd,eager-fpu,
+->              l1d-flush,branch-harden,srb-lock,unpriv-mmio}=<bool> ]`
++>              bti-thunk=retpoline|lfence|jmp, {ibrs,ibpb,ssbd,psfd,
++>              eager-fpu,l1d-flush,branch-harden,srb-lock,
++>              unpriv-mmio}=<bool> ]`
+ 
+ Controls for speculative execution sidechannel mitigations.  By default, Xen
+ will pick the most appropriate mitigations based on compiled in support,
+@@ -2156,9 +2157,10 @@ On hardware supporting IBRS (Indirect Branch Restricted Speculation), the
+ If Xen is not using IBRS itself, functionality is still set up so IBRS can be
+ virtualised for guests.
+ 
+-On hardware supporting IBPB (Indirect Branch Prediction Barrier), the `ibpb=`
+-option can be used to force (the default) or prevent Xen from issuing branch
+-prediction barriers on vcpu context switches.
++On hardware supporting STIBP (Single Thread Indirect Branch Predictors), the
++`stibp=` option can be used to force or prevent Xen using the feature itself.
++By default, Xen will use STIBP when IBRS is in use (IBRS implies STIBP), and
++when hardware hints recommend using it as a blanket setting.
+ 
+ On hardware supporting SSBD (Speculative Store Bypass Disable), the `ssbd=`
+ option can be used to force or prevent Xen using the feature itself.  On AMD
+@@ -2166,6 +2168,15 @@ hardware, this is a global option applied at boot, and not virtualised for
+ guest use.  On Intel hardware, the feature is virtualised for guests,
+ independently of Xen's choice of setting.
+ 
++On hardware supporting PSFD (Predictive Store Forwarding Disable), the `psfd=`
++option can be used to force or prevent Xen using the feature itself.  By
++default, Xen will not use PSFD.  PSFD is implied by SSBD, and SSBD is off by
++default.
++
++On hardware supporting IBPB (Indirect Branch Prediction Barrier), the `ibpb=`
++option can be used to force (the default) or prevent Xen from issuing branch
++prediction barriers on vcpu context switches.
++
+ On all hardware, the `eager-fpu=` option can be used to force or prevent Xen
+ from using fully eager FPU context switches.  This is currently implemented as
+ a global control.  By default, Xen will choose to use fully eager context
+diff --git a/xen/arch/x86/hvm/svm/vmcb.c b/xen/arch/x86/hvm/svm/vmcb.c
+index 55da9302e5d7..a0bf9f4e056a 100644
+--- a/xen/arch/x86/hvm/svm/vmcb.c
++++ b/xen/arch/x86/hvm/svm/vmcb.c
+@@ -29,6 +29,7 @@
+ #include <asm/hvm/support.h>
+ #include <asm/hvm/svm/svm.h>
+ #include <asm/hvm/svm/svmdebug.h>
++#include <asm/spec_ctrl.h>
+ 
+ struct vmcb_struct *alloc_vmcb(void)
+ {
+@@ -175,6 +176,14 @@ static int construct_vmcb(struct vcpu *v)
+             vmcb->_pause_filter_thresh = SVM_PAUSETHRESH_INIT;
+     }
+ 
++    /*
++     * When default_xen_spec_ctrl simply SPEC_CTRL_STIBP, default this behind
++     * the back of the VM too.  Our SMT topology isn't accurate, the overhead
++     * is neglegable, and doing this saves a WRMSR on the vmentry path.
++     */
++    if ( default_xen_spec_ctrl == SPEC_CTRL_STIBP )
++        v->arch.msrs->spec_ctrl.raw = SPEC_CTRL_STIBP;
++
+     return 0;
+ }
+ 
+diff --git a/xen/arch/x86/spec_ctrl.c b/xen/arch/x86/spec_ctrl.c
+index d7f767b0739c..06790897e496 100644
+--- a/xen/arch/x86/spec_ctrl.c
++++ b/xen/arch/x86/spec_ctrl.c
+@@ -48,9 +48,13 @@ static enum ind_thunk {
+     THUNK_LFENCE,
+     THUNK_JMP,
+ } opt_thunk __initdata = THUNK_DEFAULT;
++
+ static int8_t __initdata opt_ibrs = -1;
++int8_t __initdata opt_stibp = -1;
++bool __read_mostly opt_ssbd;
++int8_t __initdata opt_psfd = -1;
++
+ bool __read_mostly opt_ibpb = true;
+-bool __read_mostly opt_ssbd = false;
+ int8_t __read_mostly opt_eager_fpu = -1;
+ int8_t __read_mostly opt_l1d_flush = -1;
+ bool __read_mostly opt_branch_harden = true;
+@@ -173,12 +177,20 @@ static int __init parse_spec_ctrl(const char *s)
+             else
+                 rc = -EINVAL;
+         }
++
++        /* Bits in MSR_SPEC_CTRL. */
+         else if ( (val = parse_boolean("ibrs", s, ss)) >= 0 )
+             opt_ibrs = val;
+-        else if ( (val = parse_boolean("ibpb", s, ss)) >= 0 )
+-            opt_ibpb = val;
++        else if ( (val = parse_boolean("stibp", s, ss)) >= 0 )
++            opt_stibp = val;
+         else if ( (val = parse_boolean("ssbd", s, ss)) >= 0 )
+             opt_ssbd = val;
++        else if ( (val = parse_boolean("psfd", s, ss)) >= 0 )
++            opt_psfd = val;
++
++        /* Misc settings. */
++        else if ( (val = parse_boolean("ibpb", s, ss)) >= 0 )
++            opt_ibpb = val;
+         else if ( (val = parse_boolean("eager-fpu", s, ss)) >= 0 )
+             opt_eager_fpu = val;
+         else if ( (val = parse_boolean("l1d-flush", s, ss)) >= 0 )
+@@ -377,7 +389,7 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
+                "\n");
+ 
+     /* Settings for Xen's protection, irrespective of guests. */
+-    printk("  Xen settings: BTI-Thunk %s, SPEC_CTRL: %s%s%s%s, Other:%s%s%s%s%s\n",
++    printk("  Xen settings: BTI-Thunk %s, SPEC_CTRL: %s%s%s%s%s, Other:%s%s%s%s%s\n",
+            thunk == THUNK_NONE      ? "N/A" :
+            thunk == THUNK_RETPOLINE ? "RETPOLINE" :
+            thunk == THUNK_LFENCE    ? "LFENCE" :
+@@ -391,6 +403,9 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
+            (!boot_cpu_has(X86_FEATURE_SSBD) &&
+             !boot_cpu_has(X86_FEATURE_AMD_SSBD))     ? "" :
+            (default_xen_spec_ctrl & SPEC_CTRL_SSBD)  ? " SSBD+" : " SSBD-",
++           (!boot_cpu_has(X86_FEATURE_PSFD) &&
++            !boot_cpu_has(X86_FEATURE_INTEL_PSFD))   ? "" :
++           (default_xen_spec_ctrl & SPEC_CTRL_PSFD)  ? " PSFD+" : " PSFD-",
+            !(caps & ARCH_CAPS_TSX_CTRL)              ? "" :
+            (opt_tsx & 1)                             ? " TSX+" : " TSX-",
+            !cpu_has_srbds_ctrl                       ? "" :
+@@ -951,10 +966,7 @@ void __init init_speculation_mitigations(void)
+         if ( !has_spec_ctrl )
+             printk(XENLOG_WARNING "?!? CET active, but no MSR_SPEC_CTRL?\n");
+         else if ( opt_ibrs == -1 )
+-        {
+             opt_ibrs = ibrs = true;
+-            default_xen_spec_ctrl |= SPEC_CTRL_IBRS | SPEC_CTRL_STIBP;
+-        }
+ 
+         if ( opt_thunk == THUNK_DEFAULT || opt_thunk == THUNK_RETPOLINE )
+             thunk = THUNK_JMP;
+@@ -1058,14 +1070,49 @@ void __init init_speculation_mitigations(void)
+             setup_force_cpu_cap(X86_FEATURE_SC_MSR_HVM);
+     }
+ 
+-    /* If we have IBRS available, see whether we should use it. */
++    /* Figure out default_xen_spec_ctrl. */
+     if ( has_spec_ctrl && ibrs )
++    {
++        /* IBRS implies STIBP.  */
++        if ( opt_stibp == -1 )
++            opt_stibp = 1;
++
+         default_xen_spec_ctrl |= SPEC_CTRL_IBRS;
++    }
++
++    /*
++     * Use STIBP by default if the hardware hint is set.  Otherwise, leave it
++     * off as it a severe performance pentalty on pre-eIBRS Intel hardware
++     * where it was retrofitted in microcode.
++     */
++    if ( opt_stibp == -1 )
++        opt_stibp = !!boot_cpu_has(X86_FEATURE_STIBP_ALWAYS);
++
++    if ( opt_stibp && (boot_cpu_has(X86_FEATURE_STIBP) ||
++                       boot_cpu_has(X86_FEATURE_AMD_STIBP)) )
++        default_xen_spec_ctrl |= SPEC_CTRL_STIBP;
+ 
+-    /* If we have SSBD available, see whether we should use it. */
+     if ( opt_ssbd && (boot_cpu_has(X86_FEATURE_SSBD) ||
+                       boot_cpu_has(X86_FEATURE_AMD_SSBD)) )
++    {
++        /* SSBD implies PSFD */
++        if ( opt_psfd == -1 )
++            opt_psfd = 1;
++
+         default_xen_spec_ctrl |= SPEC_CTRL_SSBD;
++    }
++
++    /*
++     * Don't use PSFD by default.  AMD designed the predictor to
++     * auto-clear on privilege change.  PSFD is implied by SSBD, which is
++     * off by default.
++     */
++    if ( opt_psfd == -1 )
++        opt_psfd = 0;
++
++    if ( opt_psfd && (boot_cpu_has(X86_FEATURE_PSFD) ||
++                      boot_cpu_has(X86_FEATURE_INTEL_PSFD)) )
++        default_xen_spec_ctrl |= SPEC_CTRL_PSFD;
+ 
+     /*
+      * PV guests can poison the RSB to any virtual address from which
