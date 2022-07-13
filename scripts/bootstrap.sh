@@ -127,8 +127,8 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   json-c argon2 cryptsetup zstd kmod lddtree mkinitfs \
 	   community/go libffi community/ghc \
 	   brotli libev c-ares cunit nghttp2 curl \
-	   pcre libssh2 community/http-parser community/libgit2 \
-	   libxml2 pax-utils llvm13 community/rust \
+	   pcre libssh2 \
+	   libxml2 pax-utils llvm14 community/rust \
 	   $KERNEL_PKG ; do
 
 	if [ "$NEEDS_LIBATOMIC" = "yes" ]; then
