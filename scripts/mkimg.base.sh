@@ -14,7 +14,8 @@ build_kernel() {
 		--feature "$initfs_features" \
 		--modloopfw "$modloopfw" \
 		--repositories-file "$APKROOT/etc/apk/repositories" \
-		"$DESTDIR"
+		"$DESTDIR" \
+		|| return 1
     if [ -n "$boot_addons" ]; then
         for _add in $boot_addons; do
            apk fetch --quiet --stdout $_add | tar -C "${DESTDIR}" -zx boot/
