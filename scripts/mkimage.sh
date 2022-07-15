@@ -217,13 +217,12 @@ build_profile() {
 				echo "$(${_c}sum "$output_file" | cut -d' '  -f1)  ${output_filename}" > "${output_file}.${_c}"
 			done
 		fi
-
-		if [ -n "$_yaml_out" ]; then
-			$mkimage_yaml --release $RELEASE \
-				--title "$title" \
-				--desc "$desc" \
-				"$output_file" >> "$_yaml_out"
-		fi
+	fi
+	if [ -n "$_yaml_out" ]; then
+		$mkimage_yaml --release $RELEASE \
+			--title "$title" \
+			--desc "$desc" \
+			"$output_file" >> "$_yaml_out"
 	fi
 }
 
