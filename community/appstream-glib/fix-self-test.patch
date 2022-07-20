@@ -1,0 +1,276 @@
+Patch-Source: https://github.com/hughsie/appstream-glib/pull/446
+From 2f533cf483053397b57207ea4c5299a3225f44ba Mon Sep 17 00:00:00 2001
+From: "Jan Alexander Steffens (heftig)" <jan.steffens@gmail.com>
+Date: Fri, 15 Jul 2022 20:33:50 +0200
+Subject: [PATCH 1/3] Properly initialize AsNodeToXmlHelper
+
+Fixes: https://github.com/hughsie/appstream-glib/issues/445
+---
+ libappstream-glib/as-node.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libappstream-glib/as-node.c b/libappstream-glib/as-node.c
+index 4d438f59..b6650e44 100644
+--- a/libappstream-glib/as-node.c
++++ b/libappstream-glib/as-node.c
+@@ -826,7 +826,7 @@ as_node_from_xml_internal (const gchar *data, gssize data_sz,
+ 			   AsNodeFromXmlFlags flags,
+ 			   GError **error)
+ {
+-	AsNodeToXmlHelper helper;
++	AsNodeToXmlHelper helper = {0};
+ 	AsNode *root = NULL;
+ 	gboolean ret;
+ 	g_autoptr(GError) error_local = NULL;
+@@ -963,7 +963,7 @@ as_node_from_file (GFile *file,
+ 		   GCancellable *cancellable,
+ 		   GError **error)
+ {
+-	AsNodeToXmlHelper helper;
++	AsNodeToXmlHelper helper = {0};
+ 	GError *error_local = NULL;
+ 	AsNode *root = NULL;
+ 	const gchar *content_type = NULL;
+
+From 22aaa960da6d3e69ef30ebacc8994c92283cfaaf Mon Sep 17 00:00:00 2001
+From: "Jan Alexander Steffens (heftig)" <jan.steffens@gmail.com>
+Date: Fri, 15 Jul 2022 20:34:59 +0200
+Subject: [PATCH 2/3] trivial: Turn is_{em,code}_text fields into bitfields
+
+---
+ libappstream-glib/as-node.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libappstream-glib/as-node.c b/libappstream-glib/as-node.c
+index b6650e44..9c6d5d48 100644
+--- a/libappstream-glib/as-node.c
++++ b/libappstream-glib/as-node.c
+@@ -555,8 +555,8 @@ typedef struct {
+ 	AsNode			*current;
+ 	AsNodeFromXmlFlags	 flags;
+ 	const gchar * const	*locales;
+-	guint8			 is_em_text;
+-	guint8			 is_code_text;
++	guint8			 is_em_text:1;
++	guint8			 is_code_text:1;
+ } AsNodeToXmlHelper;
+ 
+ /**
+
+From 144bdd84e7ef64cee1ba5724d35c642add65c0ff Mon Sep 17 00:00:00 2001
+From: "Jan Alexander Steffens (heftig)" <jan.steffens@gmail.com>
+Date: Fri, 15 Jul 2022 21:18:47 +0200
+Subject: [PATCH 3/3] Improve handling of <em> and <code> tags
+
+This is still not great code but at least somewhat an improvement. Tests
+were expanded to showcase the new behavior.
+
+I think, ideally, we would append opening/closing tags to the ancestor
+`p` or `li` node's cdata as soon as we encounter the start/end of an
+`em` or `code` element. This would then also handle empty elements
+correctly.
+---
+ libappstream-glib/as-node.c      | 108 ++++++++++++++++++-------------
+ libappstream-glib/as-self-test.c |  39 ++++++++++-
+ 2 files changed, 101 insertions(+), 46 deletions(-)
+
+diff --git a/libappstream-glib/as-node.c b/libappstream-glib/as-node.c
+index 9c6d5d48..5cf9dcc8 100644
+--- a/libappstream-glib/as-node.c
++++ b/libappstream-glib/as-node.c
+@@ -674,6 +674,7 @@ as_node_end_element_cb (GMarkupParseContext *context,
+ 			GError             **error)
+ {
+ 	AsNodeToXmlHelper *helper = (AsNodeToXmlHelper *) user_data;
++	AsNodeData *data = helper->current->data;
+ 
+ 	/* do not create a child node for em and code tags */
+ 	if (g_strcmp0 (element_name, "em") == 0) {
+@@ -684,6 +685,42 @@ as_node_end_element_cb (GMarkupParseContext *context,
+ 		helper->is_code_text = 0;
+ 		return;
+ 	}
++
++	if (data->cdata != NULL) {
++		/* split up into lines and add each with spaces stripped */
++		if ((helper->flags & AS_NODE_FROM_XML_FLAG_LITERAL_TEXT) == 0) {
++			AsRefString *cdata = data->cdata;
++			data->cdata = as_node_reflow_text (cdata, strlen (cdata));
++			as_ref_string_unref (cdata);
++		}
++
++		/* intern commonly duplicated tag values and save a bit of memory */
++		if (data->is_tag_valid) {
++			AsNode *root = g_node_get_root (helper->current);
++			switch (data->tag) {
++			case AS_TAG_CATEGORY:
++			case AS_TAG_COMPULSORY_FOR_DESKTOP:
++			case AS_TAG_CONTENT_ATTRIBUTE:
++			case AS_TAG_DEVELOPER_NAME:
++			case AS_TAG_EXTENDS:
++			case AS_TAG_ICON:
++			case AS_TAG_ID:
++			case AS_TAG_KUDO:
++			case AS_TAG_LANG:
++			case AS_TAG_METADATA_LICENSE:
++			case AS_TAG_MIMETYPE:
++			case AS_TAG_PROJECT_GROUP:
++			case AS_TAG_PROJECT_LICENSE:
++			case AS_TAG_SOURCE_PKGNAME:
++			case AS_TAG_URL:
++				as_node_cdata_to_intern (root, data);
++				break;
++			default:
++				break;
++			}
++		}
++	}
++
+ 	helper->current = helper->current->parent;
+ }
+ 
+@@ -715,22 +752,9 @@ as_node_text_cb (GMarkupParseContext *context,
+ 	if (i >= text_len)
+ 		return;
+ 
+-	/* split up into lines and add each with spaces stripped */
+-	if (data->cdata != NULL) {
+-		/* support em and code tags */
+-		if (g_strcmp0 (as_tag_data_get_name (data), "p") == 0 ||
+-			g_strcmp0 (as_tag_data_get_name (data), "li") == 0) {
+-			g_autoptr(GString) str = g_string_new (data->cdata);
+-			as_ref_string_unref (data->cdata);
+-			if (helper->is_em_text)
+-				g_string_append_printf (str, "<em>%s</em>", text);
+-			else if (helper->is_code_text)
+-				g_string_append_printf (str, "<code>%s</code>", text);
+-			else
+-				g_string_append (str, text);
+-			data->cdata = as_ref_string_new_with_length (str->str, str->len);
+-			return;
+-		}
++	if (data->cdata != NULL &&
++	    g_strcmp0 (as_tag_data_get_name (data), "p") != 0 &&
++	    g_strcmp0 (as_tag_data_get_name (data), "li") != 0) {
+ 		g_set_error (error,
+ 			     AS_NODE_ERROR,
+ 			     AS_NODE_ERROR_INVALID_MARKUP,
+@@ -739,37 +763,33 @@ as_node_text_cb (GMarkupParseContext *context,
+ 			     data->cdata, text);
+ 		return;
+ 	}
+-	if ((helper->flags & AS_NODE_FROM_XML_FLAG_LITERAL_TEXT) > 0) {
+-		data->cdata = as_ref_string_new_with_length (text, text_len + 1);
+-	} else {
+-		data->cdata = as_node_reflow_text (text, (gssize) text_len);
+-	}
+ 
+-	/* intern commonly duplicated tag values and save a bit of memory */
+-	if (data->is_tag_valid && data->cdata != NULL) {
+-		AsNode *root = g_node_get_root (helper->current);
+-		switch (data->tag) {
+-		case AS_TAG_CATEGORY:
+-		case AS_TAG_COMPULSORY_FOR_DESKTOP:
+-		case AS_TAG_CONTENT_ATTRIBUTE:
+-		case AS_TAG_DEVELOPER_NAME:
+-		case AS_TAG_EXTENDS:
+-		case AS_TAG_ICON:
+-		case AS_TAG_ID:
+-		case AS_TAG_KUDO:
+-		case AS_TAG_LANG:
+-		case AS_TAG_METADATA_LICENSE:
+-		case AS_TAG_MIMETYPE:
+-		case AS_TAG_PROJECT_GROUP:
+-		case AS_TAG_PROJECT_LICENSE:
+-		case AS_TAG_SOURCE_PKGNAME:
+-		case AS_TAG_URL:
+-			as_node_cdata_to_intern (root, data);
+-			break;
+-		default:
+-			break;
++	/* support em and code tags */
++	if (helper->is_em_text || helper->is_code_text || data->cdata != NULL) {
++		g_autoptr(GString) str = g_string_new (NULL);
++
++		if (data->cdata != NULL) {
++			g_string_append (str, data->cdata);
++			as_ref_string_unref (data->cdata);
+ 		}
++
++		if (helper->is_em_text)
++			g_string_append (str, "<em>");
++		if (helper->is_code_text)
++			g_string_append (str, "<code>");
++
++		g_string_append_len (str, text, text_len);
++
++		if (helper->is_code_text)
++			g_string_append (str, "</code>");
++		if (helper->is_em_text)
++			g_string_append (str, "</em>");
++
++		data->cdata = as_ref_string_new_with_length (str->str, str->len);
++		return;
+ 	}
++
++	data->cdata = as_ref_string_new_with_length (text, text_len);
+ }
+ 
+ static void
+diff --git a/libappstream-glib/as-self-test.c b/libappstream-glib/as-self-test.c
+index 11b51b68..aade35c7 100644
+--- a/libappstream-glib/as-self-test.c
++++ b/libappstream-glib/as-self-test.c
+@@ -2870,6 +2870,15 @@ as_test_node_xml_func (void)
+ 			     "It now also supports <em>em</em> and <code>code</code> tags."
+ 			     "</p>"
+ 			     "</description>";
++	const gchar *valid_em_code_2 = "<description>"
++			     "<p><em>Emphasis</em> at the start of the paragraph</p>"
++			     "</description>";
++	const gchar *valid_em_code_empty = "<description>"
++			     "<p><em></em></p>"
++			     "</description>";
++	const gchar *valid_em_code_empty_2 = "<description>"
++			     "<p>empty <em></em> emphasis</p>"
++			     "</description>";
+ 	GError *error = NULL;
+ 	AsNode *n2;
+ 	AsNode *root;
+@@ -2940,8 +2949,34 @@ as_test_node_xml_func (void)
+ 
+ 	n2 = as_node_find (root, "description/p");
+ 	g_assert (n2 != NULL);
+-	printf ("<%s>\n", as_node_get_data (n2));
+-	g_assert_cmpstr (as_node_get_data (n2), ==, "It now also supports<em>em</em> and <code>code</code> tags.");
++	g_assert_cmpstr (as_node_get_data (n2), ==, "It now also supports <em>em</em> and <code>code</code> tags.");
++	as_node_unref (root);
++
++	root = as_node_from_xml (valid_em_code_2, 0, &error);
++	g_assert_no_error (error);
++	g_assert (root != NULL);
++
++	n2 = as_node_find (root, "description/p");
++	g_assert (n2 != NULL);
++	g_assert_cmpstr (as_node_get_data (n2), ==, "<em>Emphasis</em> at the start of the paragraph");
++	as_node_unref (root);
++
++	root = as_node_from_xml (valid_em_code_empty, 0, &error);
++	g_assert_no_error (error);
++	g_assert (root != NULL);
++
++	n2 = as_node_find (root, "description/p");
++	g_assert (n2 != NULL);
++	g_assert_cmpstr (as_node_get_data (n2), ==, NULL);
++	as_node_unref (root);
++
++	root = as_node_from_xml (valid_em_code_empty_2, 0, &error);
++	g_assert_no_error (error);
++	g_assert (root != NULL);
++
++	n2 = as_node_find (root, "description/p");
++	g_assert (n2 != NULL);
++	g_assert_cmpstr (as_node_get_data (n2), ==, "empty  emphasis");
+ 	as_node_unref (root);
+ 
+ 	/* keep comments */
