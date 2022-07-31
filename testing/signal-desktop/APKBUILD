@@ -1,0 +1,414 @@
+# Contributor: Lauren N. Liberda <lauren@selfisekai.rocks>
+# Maintainer: Lauren N. Liberda <lauren@selfisekai.rocks>
+pkgname=signal-desktop
+pkgver=5.51.1
+pkgrel=0
+pkgdesc="A messaging app for simple private communication with friends"
+url="https://github.com/signalapp/Signal-Desktop/"
+# same as electron
+# aarch64: polyval-0.5.3 crate subdep uses unstable stdsimd feature
+arch="x86_64"
+license="AGPL-3.0-only"
+# this build system sucks massive ass and does not add needed to anything
+depends="
+	electron
+	ffmpeg-libs
+	font-barlow
+	font-eb-garamond
+	font-inter
+	font-parisienne
+	libevent
+	opus
+	"
+makedepends="
+	alsa-lib-dev
+	bsd-compat-headers
+	cargo
+	clang
+	electron-dev
+	ffmpeg-dev
+	glib-dev
+	gn
+	libepoxy-dev
+	libevent-dev
+	lld
+	llvm-dev
+	mesa-dev
+	nodejs
+	npm
+	openssl-dev
+	opus-dev
+	pipewire-dev
+	protoc
+	pulseaudio-dev
+	py3-setuptools
+	python3
+	samurai
+	teapot-tools
+	tcl
+	vips-dev
+	yarn
+	"
+options="net !check"
+
+# follow signal-desktop package.json -> @signalapp/libsignal-client
+_libsignalver=0.18.1
+
+# follow signal-desktop package.json -> ringrtc -> commit title
+_ringrtcver=2.20.11
+
+# follow ringrtc (on version above) -> config/version.sh -> WEBRTC_VERSION
+# downloading tarball generated with abuild snapshot (with gclient dependencies fetched)
+_webrtcver=4896f
+
+# follow signal-desktop package.json -> better-sqlite3
+_bettersqlitever=3c4a7eebba3d5f5d8cb88fe83be1c01b8c0dea7d
+
+# do not follow signal, update freely (but just in case, it's in
+# better-sqlite3 repository -> deps/sqlcipher.tar.gz -> VERSION.txt)
+_sqlcipherver=4.5.1
+
+source="
+	https://github.com/signalapp/Signal-Desktop/archive/refs/tags/v$pkgver/Signal-Desktop-$pkgver.tar.gz
+	https://github.com/signalapp/libsignal/archive/refs/tags/v$_libsignalver/libsignal-$_libsignalver.tar.gz
+	https://github.com/signalapp/ringrtc/archive/refs/tags/v$_ringrtcver/ringrtc-$_ringrtcver.tar.gz
+	https://s3.sakamoto.pl/lnl-aports-snapshots/webrtc-$_webrtcver.tar.xz
+	https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v$_sqlcipherver/sqlcipher-$_sqlcipherver.tar.gz
+
+	bettersqlite-fix-build.patch
+	signal-disable-updates.patch
+	signal-engines.patch
+	webrtc-canonicalize-file-name.patch
+	webrtc-use-alpine-target.patch
+
+	signal-desktop
+	signal-desktop.desktop
+	"
+builddir="$srcdir/Signal-Desktop-$pkgver"
+
+export CC=clang
+export CXX=clang++
+
+# required to find the tools
+export AR=llvm-ar
+export NM=llvm-nm
+export LD=clang++
+
+# less log spam, reproducible, allow lto with rust
+export CFLAGS="${CFLAGS/-g/} -O2 -Wno-unknown-warning-option -Wno-builtin-macro-redefined"
+export CXXFLAGS="${CXXFLAGS/-g/} -O2 -Wno-unknown-warning-option -Wno-builtin-macro-redefined"
+export CPPFLAGS="$CPPFLAGS -D__DATE__=  -D__TIME__=  -D__TIMESTAMP__="
+
+export CARGO_PROFILE_RELEASE_LTO=true
+export CARGO_PROFILE_RELEASE_PANIC=abort
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+export CARGO_PROFILE_RELEASE_OPT_LEVEL=2
+export CARGO_PROFILE_RELEASE_STRIP="symbols"
+export RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld"
+
+# webrtc only, the other dependencies are fine with tarballs
+snapshot() {
+	mkdir -p "$srcdir"
+	cd "$srcdir"
+
+	git clone --depth=1 --branch=$_webrtcver https://github.com/signalapp/webrtc.git webrtc-$_webrtcver
+
+	(
+		cd webrtc-$_webrtcver
+		echo "
+solutions = [{
+	'name': '.',
+	'url': '',
+	'tpot_no_checkout': True,
+}]
+target_cpu = ['arm64', 'x64']
+target_cpu_only = True
+" > .gclient
+
+		gclient sync --no-history --nohooks
+
+		# needed DEPS hooks
+		python3 'src/build/landmines.py' --landmine-scripts 'tools_webrtc/get_landmines.py' --src-dir 'src'
+		python3 'src/build/util/lastchange.py' -o 'src/build/util/LASTCHANGE'
+	)
+
+	for elf in $(scanelf -RA -F "%F" webrtc-$_webrtcver); do
+		rm -f "$elf"
+	done
+
+	msg "generating tarball.."
+	tar -cf webrtc-$_webrtcver.tar \
+		--exclude="ChangeLog*" \
+		--exclude="testdata/" \
+		--exclude="test_data/" \
+		--exclude="android_rust_toolchain/toolchain/" \
+		--exclude-backups \
+		--exclude-caches-all \
+		--exclude-vcs \
+		webrtc-$_webrtcver
+
+	xz -T0 -e -9 -vv -k webrtc-$_webrtcver.tar
+}
+
+prepare() {
+	ln -s "$srcdir"/webrtc-$_webrtcver "$srcdir"/ringrtc-$_ringrtcver/src/webrtc
+	ln -sf "$srcdir"/ringrtc-$_ringrtcver/src "$srcdir"/webrtc-$_webrtcver/ringrtc
+
+	for dir in tools build buildtools base third_party testing; do
+		ln -s "$srcdir"/webrtc-$_webrtcver/src/$dir "$srcdir"/webrtc-$_webrtcver/$dir
+	done
+
+	msg "Applying patches"
+	for x in $source; do
+		case "$x" in
+		signal-*.patch)
+			msg "$x"
+			patch -p1 -i "$srcdir"/$x -d "$srcdir"/Signal-Desktop-$pkgver
+			;;
+		ringrtc-*.patch)
+			msg "$x"
+			patch -p1 -i "$srcdir"/$x -d "$srcdir"/ringrtc-$_ringrtcver
+			;;
+		webrtc-*.patch)
+			msg "$x"
+			patch -p1 -i "$srcdir"/$x -d "$srcdir"/webrtc-$_webrtcver/src
+			;;
+		esac
+	done
+
+	(
+		cd "$srcdir"/webrtc-$_webrtcver/src
+
+		local use_system="
+			ffmpeg
+			fontconfig
+			freetype
+			harfbuzz-ng
+			icu
+			libdrm
+			libevent
+			libjpeg
+			libpng
+			libwebp
+			libxml
+			libxslt
+			opus
+			re2
+			snappy
+			zlib
+			"
+		for _lib in $use_system libjpeg_turbo; do
+			msg "Removing buildscripts for system provided $_lib"
+			find . -type f -path "*third_party/$_lib/*" \
+				\! -path "*third_party/$_lib/chromium/*" \
+				\! -path "*third_party/$_lib/google/*" \
+				\! -path './base/third_party/icu/*' \
+				\! -path './third_party/libxml/*' \
+				\! -path './third_party/pdfium/third_party/freetype/include/pstables.h' \
+				\! -path './third_party/harfbuzz-ng/utils/hb_scoped.h' \
+				\! -path './third_party/crashpad/crashpad/third_party/zlib/zlib_crashpad.h' \
+				\! -regex '.*\.\(gn\|gni\|isolate\|py\)' \
+				-delete
+		done
+
+		msg "Replacing gn files"
+		python3 build/linux/unbundle/replace_gn_files.py --system-libraries \
+			$use_system
+
+		# allow system dependencies in "official builds"
+		sed -i 's/OFFICIAL_BUILD/GOOGLE_CHROME_BUILD/' \
+			tools/generate_shim_headers/generate_shim_headers.py
+	)
+
+	(
+		cd "$srcdir"/libsignal-$_libsignalver/node
+
+		# fix target
+		sed -i 's/unknown-linux-gnu/alpine-linux-musl/g' binding.gyp
+	)
+
+	# remove shipped fonts for system-provided (part 1)
+	rm -rf fonts/
+}
+
+build() {
+	chromium_arch="$(node -e 'console.log(process.arch)')"
+
+	# required dependency of ringrtc
+	(
+		cd "$srcdir"/webrtc-$_webrtcver/src
+
+		local webrtc_args="
+			rtc_build_examples=false
+			rtc_build_tools=false
+			rtc_enable_protobuf=false
+			rtc_enable_sctp=false
+			rtc_include_tests=false
+			rtc_include_ilbc=false
+			rtc_libvpx_build_vp9=true
+			rtc_use_x11=false
+
+			build_with_mozilla=false
+			chrome_pgo_phase=0
+			clang_use_chrome_plugins=false
+			custom_toolchain=\"//build/toolchain/linux/unbundle:default\"
+			is_cfi=false
+			is_clang=true
+			is_debug=false
+			is_official_build=true
+			host_toolchain=\"//build/toolchain/linux/unbundle:default\"
+			proprietary_codecs=true
+			rtc_link_pipewire=true
+			rtc_use_pipewire=true
+			symbol_level=0
+			use_custom_libcxx=false
+			use_sysroot=false
+			use_system_freetype=true
+			use_system_harfbuzz=true
+			use_system_libjpeg=true
+		"
+		mkdir -p "$srcdir"/ringrtc-$_ringrtcver/out/release
+		msg "Building signal's webrtc"
+		gn gen "$srcdir"/ringrtc-$_ringrtcver/out/release --args="$(echo $webrtc_args)"
+		ninja -C "$srcdir"/ringrtc-$_ringrtcver/out/release webrtc
+	)
+
+	# add lto for the remaining c steps (sqlite)
+	export CFLAGS="$CFLAGS -flto"
+	export CXXFLAGS="$CXXFLAGS -flto"
+	export LDFLAGS="$LDFLAGS -flto -fuse-ld=lld"
+
+	(
+		cd "$srcdir"/ringrtc-$_ringrtcver/src/rust
+
+		msg "Building libringrtc"
+		OUTPUT_DIR="$srcdir"/ringrtc-$_ringrtcver/out \
+			cargo build --features electron --release
+		mkdir -p ../node/build/linux
+		cp -fv target/release/libringrtc.so ../node/build/linux/libringrtc-$chromium_arch.node
+	)
+
+	(
+		cd "$srcdir"/ringrtc-$_ringrtcver/src/node
+		msg "Building ringrtc JS glue code"
+		yarn --frozen-lockfile --ignore-scripts
+		yarn build
+	)
+
+
+	# module on npm intentionally unbuildable: https://github.com/signalapp/libsignal/issues/464#issuecomment-1160665052
+	(
+		cd "$srcdir"/libsignal-$_libsignalver/node
+
+		msg "Installing libsignal js dependencies"
+		yarn --ignore-scripts --frozen-lockfile
+
+		msg "Building libsignal"
+		yarn node-gyp configure
+		yarn node-gyp build
+
+		mkdir -p prebuilds/linux-$chromium_arch
+		mv build/Release/libsignal_client_linux_$chromium_arch.node prebuilds/linux-$chromium_arch/node.napi.node
+
+		msg "Building libsignal glue code"
+		yarn tsc
+	)
+
+	# TODO: make better-sqlite3 build with the sqlcipher from sqlcipher-dev package instead
+	(
+		cd "$srcdir"/sqlcipher-$_sqlcipherver
+
+		./configure \
+			--build=$CBUILD \
+			--host=$CHOST \
+			--enable-tempstore=yes \
+			--enable-fts5
+
+		make sqlite3.c sqlite3.h sqlite3ext.h
+	)
+
+	msg "Installing signal-desktop JS dependencies"
+	yarn --ignore-scripts --frozen-lockfile
+
+	mv -fv \
+		"$srcdir"/sqlcipher-$_sqlcipherver/sqlite3.c \
+		"$srcdir"/sqlcipher-$_sqlcipherver/sqlite3.h \
+		"$srcdir"/sqlcipher-$_sqlcipherver/sqlite3ext.h \
+		"$srcdir"/Signal-Desktop-$pkgver/node_modules/better-sqlite3/deps/sqlite3
+
+	# from package.json postinstall
+	yarn build:acknowledgments
+	yarn patch-package
+	#yarn electron:install-app-deps
+	rm -rf node_modules/dtrace-provider
+
+	# use our libsignal
+	rm -rf node_modules/@signalapp/libsignal-client/
+	ln -s "$srcdir"/libsignal-$_libsignalver/node/ node_modules/@signalapp/libsignal-client
+
+	# use our libringrtc
+	rm -rf node_modules/ringrtc/
+	ln -s "$srcdir"/ringrtc-$_ringrtcver/src/node/ node_modules/ringrtc
+
+	# patch the sqlcipher module
+	for x in $source; do
+		case "$x" in
+		bettersqlite-*.patch)
+			msg "$x"
+			patch -Np1 -i "$srcdir"/$x -d "$srcdir"/Signal-Desktop-$pkgver/node_modules/better-sqlite3/
+			;;
+		esac
+	done
+
+
+	# use system-provided font
+	echo '' > node_modules/typeface-inter/inter.css
+	rm -rf 'node_modules/typeface-inter/Inter '*
+
+	npm rebuild sharp better-sqlite3 --nodedir=/usr/include/electron/node_headers --build-from-source
+
+	NODE_ENV=production \
+	SIGNAL_ENV=production \
+	yarn build:dev
+
+	NODE_ENV=production \
+	SIGNAL_ENV=production \
+	yarn build:electron \
+		--config.extraMetadata.environment=production \
+		--config.directories.output=release \
+		--linux=dir
+}
+
+check() {
+	# tests run against downloaded build of electron for glibc, probably can be patched
+	yarn test
+}
+
+package() {
+	cd "$builddir"/release/linux-unpacked
+
+	install -Dm644 resources/app.asar "$pkgdir"/usr/lib/$pkgname/app.asar
+	cp -r resources/app.asar.unpacked "$pkgdir"/usr/lib/$pkgname/app.asar.unpacked
+
+	install -Dm755 "$srcdir"/$pkgname "$pkgdir"/usr/bin/$pkgname
+	install -Dm644 "$srcdir"/$pkgname.desktop "$pkgdir"/usr/share/applications/$pkgname.desktop
+
+	for i in 16 32 48 128 250 256 1024; do
+		install -Dm644 "$builddir"/images/icon_$i.png "$pkgdir"/usr/share/icons/hicolor/${i}x$i/apps/$pkgname.png
+	done
+}
+
+sha512sums="
+9eba5ecf5a059e8e5150eaa9a142db204b38565ae56f182ac60c386f4bd3e2c7e6dbd63a1cc5336af03e07ede2f0f9093702984c821fb5d559301ad493f64daf  Signal-Desktop-5.51.1.tar.gz
+792c5f9acd1e7a4fbd7a398ec2dc46649d07cf62c8e3a2a7c9b3a4b7f9b759588fd8af04c31223225af9d40fe3035663b8bf1ff55769664fe52566f80ee0fc3d  libsignal-0.18.1.tar.gz
+801eb303698b43b93e8e3f7a75c97a0a3800f132fb8c1a37d27f871b1c0faa240d260489ec3f29371bdc420e481055b9e085fccd59981ff3fdca68cfac9bc81f  ringrtc-2.20.11.tar.gz
+7cd567db767cf685400f447b28875179c8da986952a5e82446ddebebae862511e59fcc028b58e537f1b9fd88d3c1b4ff3b9a4eef7ff9dd5a269b812efffe2501  webrtc-4896f.tar.xz
+157ab90e1b80ae9ae85c68c6b77008fe8ab5b526cbb2604297a5ba54279286b4cac1fecd0db552e0113a75ff61a198f649611b8bde4dec5156c443e7b7fbe0c3  sqlcipher-4.5.1.tar.gz
+029e1be057ae6f453ffdcc79df59c642da7c8a88c6301ba9776bfacccbeffeb1b12b6ed93044cdb0a9acf949ae3c75b956ca9a87b59752651dbddaae0383cd5b  bettersqlite-fix-build.patch
+60a45285d885922f5c21f64b761a10efbee9081baf3efa4c8c13abc6a43dc4d27662ed10e239b0fa2071ab9e3a0dbbb4b11d6e3d26fe2b74a19f39e72b74a5bd  signal-disable-updates.patch
+c526161c0aef1047f5e87009d7e2e1d58eb43a0d54a51f8b3d9fc5fc190ad6c7634d72c7b23d63a22eb8d62afcf2b98e1aaed77f632fb2309158f2442dcafd42  signal-engines.patch
+252b37a2ecc5e7a25385943045f426dc2e30991b28d206ceaff1be7fd8ffeeb024310a8fca6b3e69a4b1c57db535d51c570935351053525f393682d5ecd0f9a9  webrtc-canonicalize-file-name.patch
+6add8b4c293f5392748a2eec9486cb4a6534e161977c6a98de71617b9abcdd1e8ad94b44014256a4b52e33eb9dd4aca380279d4161629a1bb2d7b15f8eb5b459  webrtc-use-alpine-target.patch
+87534e7b5ad7365509eab75629e6bd1a9ed61ee92f7e358405a0abaf0df57de14623fb3894eb082f8785422e5c087e1c50f9e2e5cafbb2529591fd7bf447f7f5  signal-desktop
+87ef5f3ffcf64e3cae308aa0f6bc208fb05dd8568f6a288217cdf8498ae1523f276987a7be8d6f5208f13394bab350e08734d806a8e7c08849dd8ba0dda49d66  signal-desktop.desktop
+"
