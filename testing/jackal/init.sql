@@ -1,0 +1,3 @@
+CREATE ROLE jackal WITH LOGIN PASSWORD '${psql_password}';
+CREATE DATABASE jackal;
+GRANT ALL PRIVILEGES ON DATABASE jackal TO jackal;
