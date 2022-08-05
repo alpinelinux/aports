@@ -1,11 +1,11 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=3.2.0
-pkgrel=23
+pkgver=3.3.0
+pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
-arch="all"
+arch="noarch"
 license="GPL-2.0-only"
 pkggroups="shadow"
 options="!fhs !check"
@@ -14,8 +14,7 @@ subpackages="$pkgname-data"
 install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
 	$pkgname.post-install"
 _nbver=6.2
-source="mkmntdirs.c
-	crontab
+source="crontab
 	color_prompt.sh.disabled
 	locale.sh
 
@@ -41,9 +40,6 @@ prepare() {
 }
 
 build() {
-	${CC:-${CROSS_COMPILE}gcc} $CPPFLAGS $CFLAGS $LDFLAGS \
-		"$srcdir"/mkmntdirs.c -o "$builddir"/mkmntdirs
-
 	# generate shadow
 	awk -F: '{
 		pw = ":!:"
@@ -138,7 +134,6 @@ package() {
 	install -d -m 0555 var/empty
 	install -d -m 0700 "$pkgdir"/root
 	install -d -m 1777 "$pkgdir"/tmp "$pkgdir"/var/tmp
-	install -m755 "$builddir"/mkmntdirs "$pkgdir"/sbin/mkmntdirs
 
 	install -m600 "$srcdir"/crontab "$pkgdir"/etc/crontabs/root
 	install -m644 \
@@ -255,7 +250,6 @@ package() {
 }
 
 sha512sums="
-199a34716b1f029407b08679fed4fda58384a1ccefbbec9abe1c64f4a3f7ad2a89bc7c02fc19a7f791f7c6bb87f9f0c708cb3f18c027cb7f54f25976eba4b839  mkmntdirs.c
 6e169c0975a1ad1ad871a863e8ee83f053de9ad0b58d94952efa4c28a8c221445d9e9732ad8b52832a50919c2f39aa965a929b3d5b3f9e62f169e2b2e0813d82  crontab
 558071efdce2fe92afe4277006235b1a6368b070337c7567e5632a1a3fe531f87ca692eb36f3dda498d4d29d1f834fc8f7139f2985669ae3400b6d103d6f4c5e  color_prompt.sh.disabled
 b2fc9b72846a43a45ba9a8749e581cef34d1915836833b51b7919dfbf4e275b7d55fec4dea7b23df3796380910971a41331e53e8cf0d304834e3da02cc135e5a  locale.sh
