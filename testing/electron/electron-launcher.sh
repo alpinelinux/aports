@@ -11,4 +11,4 @@ done
 # default ELECTRON_FLAGS (from /etc/electron/default.conf).
 ELECTRON_FLAGS=${ELECTRON_USER_FLAGS:-"$ELECTRON_FLAGS"}
 
-exec "/usr/lib/electron/electron" ${ELECTRON_FLAGS} "$@"
+exec "/usr/lib/electron/electron" "$@" ${ELECTRON_FLAGS}
