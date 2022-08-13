@@ -4,9 +4,9 @@ _flavor=asahi
 pkgname=linux-${_flavor}
 pkgver=5.19.0
 kver=${pkgver//_/-}
-_commit_id=570e5d3a0b4895c1199ecb1aeb1419d63404f087
+_commit_id=1c4858092b2c3b8edce243ec0ae222ab795cdc9b
 pkgdesc="Apple Silicon (M1 development kernel)"
-pkgrel=0
+pkgrel=1
 url="https://www.kernel.org"
 depends="initramfs-generator"
 _depends_dev="perl gmp-dev elfutils-dev bash flex bison"
@@ -18,12 +18,9 @@ _config=${config:-config-asahi.${CARCH}}
 subpackages="$pkgname-dev:_dev:$CBUILD_ARCH"
 source="linux-asahi-$pkgver-${_commit_id}.tar.gz::https://github.com/AsahiLinux/linux/archive/${_commit_id}.tar.gz
 	config-asahi.aarch64
-
-	mps-ter12x24-font-kernel.patch
 	"
 
 builddir="$srcdir/linux-${_commit_id}"
-_builddir="$srcdir/linux-${_commit_id}"
 arch="aarch64"
 license="GPL-2.0"
 
@@ -49,7 +46,7 @@ esac
 
 prepare() {
 	local _patch_failed=
-  cd "$srcdir"/linux-${_commit_id}
+  cd $builddir
 	case $pkgver in
 		*.*.0);;
 		*)
@@ -85,7 +82,7 @@ prepare() {
 oldconfig() {
 	for i in $_flavors; do
 		local _config=config-$i.${CARCH}
-		local _builddir="$srcdir"/build-$i.$CARCH
+		local _builddir="$srcdir"/linux-$_commit_id
 		mkdir -p "$_builddir"
 		echo "-$pkgrel-$i" > "$_builddir"/localversion-alpine \
 			|| return 1
@@ -101,11 +98,9 @@ oldconfig() {
 build() {
 	unset LDFLAGS
 	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
-	for i in $_flavors; do
-		cd "$srcdir"/build-$i.$CARCH
-		make ARCH="$_carch" CC="${CC:-gcc}" \
-			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
-	done
+	cd $builddir
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
 }
 
 _package() {
@@ -113,7 +108,7 @@ _package() {
 	local _abi_release=${kver}-${pkgrel}-${_buildflavor}
 	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
 
-	cd "$srcdir"/build-$_buildflavor.$CARCH
+	cd $builddir
 	# modules_install seems to regenerate a defect Modules.symvers on s390x. Work
 	# around it by backing it up and restore it after modules_install
 	cp Module.symvers Module.symvers.backup
@@ -140,7 +135,7 @@ _package() {
 
 	install -D -m644 include/config/kernel.release \
 		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
-	cp "$srcdir"/build-$_flavor.$CARCH/.config $pkgdir/boot/config-$_flavor
+	cp "$builddir"/.config $pkgdir/boot/config-$_flavor
 
 }
 
@@ -171,40 +166,74 @@ _dev() {
 	mkdir -p "$dir"
 	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
 	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine
+	cd $builddir
 
-	make -j1 -C "$srcdir"/linux-${_commit_id} O="$dir" ARCH="$_carch" \
-		syncconfig prepare modules_prepare scripts
+  echo "Installing headers..."
+  cp -t "$dir" -a $builddir/include
 
-	# remove the stuff that points to real sources. we want 3rd party
-	# modules to believe this is the soruces
-	rm "$dir"/Makefile "$dir"/source
+  install -Dt "${dir}/arch/${_carch}" -m644 $builddir/arch/${_carch}/Makefile
+  install -Dt "${dir}/arch/${_carch}/kernel" -m644 $builddir/arch/${_carch}/kernel/asm-offsets.s
+  cp -t "${dir}/arch/${_carch}" -a $builddir/arch/${_carch}/include
 
-	# copy the needed stuff from real sources
-	#
-	# this is taken from ubuntu kernel build script
-	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
-  cd "$srcdir"/linux-${_commit_id}
-	find .  -path './include/*' -prune \
-		-o -path './scripts/*' -prune -o -type f \
-		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
-		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) \
-		-print | cpio -pdm "$dir"
+  install -Dt "$dir/drivers/md" -m644 drivers/md/*.h
+  install -Dt "$dir/net/mac80211" -m644 net/mac80211/*.h
 
-	cp -a scripts include "$dir"
+  # https://bugs.archlinux.org/task/13146
+  install -Dt "$dir/drivers/media/i2c" -m644 drivers/media/i2c/msp3400-driver.h
 
-	find $(find arch -name include -type d -print) -type f \
-		| cpio -pdm "$dir"
+  # https://bugs.archlinux.org/task/20402
+  install -Dt "$dir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
+  install -Dt "$dir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
+  install -Dt "$dir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
 
-	install -Dm644 "$srcdir"/build-$_flavor.$CARCH/Module.symvers \
-		"$dir"/Module.symvers
+  # https://bugs.archlinux.org/task/71392
+  install -Dt "$dir/drivers/iio/common/hid-sensors" -m644 drivers/iio/common/hid-sensors/*.h
 
+  echo "Installing KConfig files..."
+  find . -name 'Kconfig*' -exec install -Dm644 {} "$builddir/{}" \;
+
+  echo "Removing unneeded architectures..."
+  local arch
+  for arch in "$dir"/arch/*/; do
+		case $(basename "$arch") in $_carch) continue ;; esac
+    echo "Removing $(basename "$arch")"
+    rm -r "$arch"
+  done
+
+#  echo "Removing documentation..."
+#  rm -r "$builddir/Documentation"
+
+  echo "Removing broken symlinks..."
+  find -L "$builddir" -type l -printf 'Removing %P\n' -delete
+
+  echo "Removing loose objects..."
+  find "$builddir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+
+  echo "Stripping build tools..."
+  local file
+  while read -rd '' file; do
+    case "$(file -bi "$file")" in
+      application/x-sharedlib\;*)      # Libraries (.so)
+        strip -v $STRIP_SHARED "$file" ;;
+      application/x-archive\;*)        # Libraries (.a)
+        strip -v $STRIP_STATIC "$file" ;;
+      application/x-executable\;*)     # Binaries
+        strip -v $STRIP_BINARIES "$file" ;;
+      application/x-pie-executable\;*) # Relocatable binaries
+        strip -v $STRIP_SHARED "$file" ;;
+    esac
+  done < <(find "$builddir" -type f -perm -u+x ! -name vmlinux -print0)
+
+  echo "Stripping vmlinux..."
+  strip -v $STRIP_STATIC "$builddir/vmlinux"
+
+  echo "Adding symlink..."
 	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
 	ln -sf /usr/src/linux-headers-${_abi_release} \
 		"$subpkgdir"/lib/modules/${_abi_release}/build
 }
 
 sha512sums="
-2d0ffe8a52d905501a55f320fd91acf361b78b02b0aaaac5de085a159f9537845d4a258f74e0e0ef6f614363fceff956da09d29ecdd018a676832e2ce10cb116  linux-asahi-5.19.0-570e5d3a0b4895c1199ecb1aeb1419d63404f087.tar.gz
-e21498275fb49c97511832b88412d538e3caa91058a8f37bbc2f1139b2e95e0a00811e15dbb93d64fe90e60aeb9c88171ee4ec23477d4fb939b072b11b9ae984  config-asahi.aarch64
-fcea50a1ba2356d64a9c3ee0b7b7c326654996956d68eb445fafdb4320b4104b6321f768f0ce4ceb5cd4696be3a7332908ba1de7054fb20bf8c97f4234bfa6a4  mps-ter12x24-font-kernel.patch
+5eded45e5699b328a6d9628618929168332ca24d7b008929b9d460d81daefc005f9d9e21ac535ab9c6235e8112da19f78154fb3d801c25806ad89269a9e38f5a  linux-asahi-5.19.0-1c4858092b2c3b8edce243ec0ae222ab795cdc9b.tar.gz
+98aba0c34160bca37356264f16da4e8fd194bd3cd72de934bdd1fb62a803770ee2c55d32e1253bf32193cf53777240702526be9cb2411e1e72670ed15532bdad  config-asahi.aarch64
 "
