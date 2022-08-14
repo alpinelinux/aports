@@ -9,8 +9,10 @@ case $pkgver in
 	*.*.*)	_kernver=${pkgver%.*};;
 	*.*) _kernver=$pkgver;;
 esac
-pkgrel=0
+pkgrel=1
 pkgdesc="Linux latest stable kernel"
+provides="linux-edge4virt=$pkgver-$pkgrel"
+replaces="linux-edge4virt"
 url="https://www.kernel.org"
 depends="mkinitfs"
 _depends_dev="perl gmp-dev elfutils-dev bash flex bison"
@@ -33,12 +35,9 @@ esac
 	config-edge.armv7
 	config-edge.x86_64
 	config-edge.riscv64
-	config-edge4virt.aarch64
-	config-edge4virt.armv7
-	config-edge4virt.x86_64
-	config-edge4virt.riscv64
 	"
 
+builddir="$srcdir/linux-${_kernver}"
 arch="armv7 aarch64 x86_64 riscv64"
 license="GPL-2.0"
 
@@ -65,7 +64,7 @@ esac
 
 prepare() {
 	local _patch_failed=
-	cd "$srcdir"/linux-$_kernver
+  cd $builddir
 	case $pkgver in
 		*.*.0);;
 		*)
@@ -100,14 +99,13 @@ prepare() {
 oldconfig() {
 	for i in $_flavors; do
 		local _config=config-$i.${CARCH}
-		local _builddir="$srcdir"/build-$i.$CARCH
-		mkdir -p "$_builddir"
-		echo "-$pkgrel-$i" > "$_builddir"/localversion-alpine \
+		mkdir -p "$builddir"
+		echo "-$pkgrel-$i" > "$builddir"/localversion-alpine \
 			|| return 1
 
-		cp "$srcdir"/$_config "$_builddir"/.config
-		make -C "$srcdir"/linux-$_kernver \
-			O="$_builddir" \
+		cp "$srcdir"/$_config "$builddir"/.config
+		make -C $builddir \
+			O="$builddir" \
 			ARCH="$_carch" \
 			listnewconfig oldconfig
 	done
@@ -117,7 +115,7 @@ build() {
 	unset LDFLAGS
 	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
 	for i in $_flavors; do
-		cd "$srcdir"/build-$i.$CARCH
+		cd "$builddir"
 		make ARCH="$_carch" CC="${CC:-gcc}" \
 			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
 	done
@@ -128,7 +126,7 @@ _package() {
 	local _abi_release=${pkgver}-${pkgrel}-${_buildflavor}
 	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
 
-	cd "$srcdir"/build-$_buildflavor.$CARCH
+	cd "$builddir"
 	# modules_install seems to regenerate a defect Modules.symvers on s390x. Work
 	# around it by backing it up and restore it after modules_install
 	cp Module.symvers Module.symvers.backup
@@ -165,11 +163,6 @@ package() {
 	_package edge "$pkgdir"
 }
 
-# subflavors install in $subpkgdir
-edge4virt() {
-	_package edge4virt "$subpkgdir"
-}
-
 _dev() {
 	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
 	local _abi_release=${pkgver}-${pkgrel}-$_flavor
@@ -190,33 +183,71 @@ _dev() {
 	mkdir -p "$dir"
 	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
 	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine
+	cd $builddir
 
-	make -j1 -C "$srcdir"/linux-$_kernver O="$dir" ARCH="$_carch" \
-		syncconfig prepare modules_prepare scripts
+	case "$_carch" in
+		x86_64) _carch="x86" ;;
+	esac
+  echo "Installing headers..."
+  cp -t "$dir" -a $builddir/include
 
-	# remove the stuff that points to real sources. we want 3rd party
-	# modules to believe this is the soruces
-	rm "$dir"/Makefile "$dir"/source
+  install -Dt "${dir}/arch/${_carch}" -m644 $builddir/arch/${_carch}/Makefile
+  install -Dt "${dir}/arch/${_carch}/kernel" -m644 $builddir/arch/${_carch}/kernel/asm-offsets.s
+  cp -t "${dir}/arch/${_carch}" -a $builddir/arch/${_carch}/include
 
-	# copy the needed stuff from real sources
-	#
-	# this is taken from ubuntu kernel build script
-	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
-	cd "$srcdir"/linux-$_kernver
-	find .  -path './include/*' -prune \
-		-o -path './scripts/*' -prune -o -type f \
-		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
-		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) \
-		-print | cpio -pdm "$dir"
+  install -Dt "$dir/drivers/md" -m644 drivers/md/*.h
+  install -Dt "$dir/net/mac80211" -m644 net/mac80211/*.h
 
-	cp -a scripts include "$dir"
+  # https://bugs.archlinux.org/task/13146
+  install -Dt "$dir/drivers/media/i2c" -m644 drivers/media/i2c/msp3400-driver.h
 
-	find $(find arch -name include -type d -print) -type f \
-		| cpio -pdm "$dir"
+  # https://bugs.archlinux.org/task/20402
+  install -Dt "$dir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
+  install -Dt "$dir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
+  install -Dt "$dir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
 
-	install -Dm644 "$srcdir"/build-$_flavor.$CARCH/Module.symvers \
-		"$dir"/Module.symvers
+  # https://bugs.archlinux.org/task/71392
+  install -Dt "$dir/drivers/iio/common/hid-sensors" -m644 drivers/iio/common/hid-sensors/*.h
 
+  echo "Installing KConfig files..."
+  find . -name 'Kconfig*' -exec install -Dm644 {} "$builddir/{}" \;
+
+  echo "Removing unneeded architectures..."
+  local arch
+  for arch in "$dir"/arch/*/; do
+		case $(basename "$arch") in $_carch) continue ;; esac
+    echo "Removing $(basename "$arch")"
+    rm -r "$arch"
+  done
+
+#  echo "Removing documentation..."
+#  rm -r "$builddir/Documentation"
+
+  echo "Removing broken symlinks..."
+  find -L "$builddir" -type l -printf 'Removing %P\n' -delete
+
+  echo "Removing loose objects..."
+  find "$builddir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+
+  echo "Stripping build tools..."
+  local file
+  while read -rd '' file; do
+    case "$(file -bi "$file")" in
+      application/x-sharedlib\;*)      # Libraries (.so)
+        strip -v $STRIP_SHARED "$file" ;;
+      application/x-archive\;*)        # Libraries (.a)
+        strip -v $STRIP_STATIC "$file" ;;
+      application/x-executable\;*)     # Binaries
+        strip -v $STRIP_BINARIES "$file" ;;
+      application/x-pie-executable\;*) # Relocatable binaries
+        strip -v $STRIP_SHARED "$file" ;;
+    esac
+  done < <(find "$builddir" -type f -perm -u+x ! -name vmlinux -print0)
+
+  echo "Stripping vmlinux..."
+  strip -v $STRIP_STATIC "$builddir/vmlinux"
+
+  echo "Adding symlink..."
 	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
 	ln -sf /usr/src/linux-headers-${_abi_release} \
 		"$subpkgdir"/lib/modules/${_abi_release}/build
@@ -225,12 +256,8 @@ _dev() {
 sha512sums="
 00313b2f9b82d2dc3fb8294007cf7d7599d254b717ed2de23c81fa7a1bbcbc2798ad286cb94e2f7f5bd54132d1d764facd90d30f79dbcc6616cc7f926adc2623  linux-5.19.tar.xz
 a61c71c6fb935b4b256ff3cbdfdaba502af98f2b4b905dfc8f669aae502049bb4b44eb08e362cd6108e17190343e4cc6f39474b1a62287756401b359205708db  patch-5.19.1.xz
-e14b3e87d9fd25052ab2cb986f383ced081e91f831f748a4912d553c088e68a18ecbf8784377cc153834e5cba3c0a433ab33e9ac2deff197ad8eba5d564a0962  config-edge.aarch64
-8748f74efc7ab27ad5faecad93f2c68bb63505fc0956dc1e53954df53185f7e8b67e1724bd91c4462912fc11f2ccf696ec3b97ae8b527ae1ba26a732f97cc229  config-edge.armv7
+f0209c6322a41ced8d77446d32ad3e8e1ca4968f37b4c5e2bdacacee62fa32fbacc7423ce71fb7f3e4c9f204f129d2d8398a648336662a9fd0440d1b885edfca  config-edge.aarch64
+f0f1921b73da50039fbdd3d086abdbb05fc615cad40227b97f30350d52fef8812c5efbef26c349d5c7e4e4066e4736f21f681e9b9cca316f309c7993ae3535ab  config-edge.armv7
 f1b3377d6474a325f827130cf2971869f1cfc884b776ad418b74add2f6fc3f28128f93bf53720ffad5bb1bdace483bd8bc78dc118751fdb55504f801af106a86  config-edge.x86_64
-9cf3d4b1b56be42f162ee19a0ee85852cfa44e6bc94f76039ea475d57c63c48c148ba8cedf94d6d50a9ec4a61b23e1c2d97f36cf9ed54d869c889555982f74a6  config-edge.riscv64
-91ad0acc5094a7bfc2d5a644fe59b0a1dab9485adf0c8483c9d062d9beec9cd3889a190881e94b69d4a7ba5c72e0d6c3df0d0227f4c3e40d552ceca778cf16b4  config-edge4virt.aarch64
-1bdf034d96d385cc38786828d2b8325bb5cc18f2623f280bc1137802d6cee440b137ee167bff6d3e6b07b4c7ed98373c1974a8473be942bd0a4a37878477260e  config-edge4virt.armv7
-2933733a3b848f7a38c4fb1d8b60708562cdec808c1679b81a9e368e4c3d790a9612e1b01970b59295f39ab21319986df65693a9c82ba4a8534c059837aa5953  config-edge4virt.x86_64
-258cdf8d0176d7d0e8ed81e65eb65872a3f7913bef4e03f349f1092eb07c9d3f6eb6d05dd507f11abe4164de06d0f7ee35514f69ae459aef053037529a906b01  config-edge4virt.riscv64
+8935a510d11d8c0b9af2f58ba26021b2c0baac56a610ca60cdfc692ab13664bf044887ba6a3962cf3571fe8513e98cac6a625af98eb343f8cfc8230799e34805  config-edge.riscv64
 "
