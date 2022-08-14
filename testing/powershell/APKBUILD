@@ -1,28 +1,32 @@
 # Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>
 # Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
-
 pkgname=powershell
 pkgver=7.2.6
-pkgrel=0
+pkgrel=1
 pkgdesc="A cross-platform automation and configuration tool/framework"
-arch="x86_64" # arm / arm64 seem to require crosscompilation
+arch="x86_64 aarch64 armv7" # blocked by dotnet runtime
 url="https://github.com/PowerShell/PowerShell"
 license="MIT"
+depends="
+	dotnet6-runtime
+	libpsl-native
+	"
 makedepends="
-	cmake
 	dotnet6-sdk
 	git
-	icu-dev
-	lttng-ust-dev
-	openssl-dev>3
-	zlib-dev
 	"
 source="
 	$pkgname-$pkgver.tar.gz::https://github.com/PowerShell/PowerShell/archive/refs/tags/v$pkgver.tar.gz
-	disable-test-mode.patch
-	Microsoft.PowerShell.SDK.csproj.TypeCatalog.targets
+	dependency-gatherer.targets
+	fix-filesystem-test.patch
 	"
 builddir="$srcdir"/PowerShell-$pkgver
+
+# check on aarch64 is broken for dotnet6-sdk v6.0.1xx due to
+# https://github.com/microsoft/vstest/issues/2566
+if [ "$CARCH" = "aarch64" ]; then
+	options="!check"
+fi
 
 case $CARCH in
 	x86_64) _dotnet_arch=x64;;
@@ -34,7 +38,11 @@ esac
 # to set _runtime_id
 # shellcheck disable=SC2034
 . /etc/os-release
-[ -n "${VERSION_ID//[^_]}" ] && _runtime_id="alpine.${VERSION_ID%_*}-$_dotnet_arch" || _runtime_id="alpine.${VERSION_ID%.*}-$_dotnet_arch"
+if [ -n "${VERSION_ID//[^_]}" ]; then
+	_runtime_id="alpine.${VERSION_ID%_*}-$_dotnet_arch"
+else
+	_runtime_id="alpine.${VERSION_ID%.*}-$_dotnet_arch"
+fi
 
 prepare() {
 	default_prepare
@@ -47,32 +55,53 @@ prepare() {
 }
 
 build() {
-	## Restore
+	msg "Building $pkgname"
+	# change nuget cache
+	export NUGET_PACKAGES="$srcdir"/nuget_cache
+
+	# Restore
 	dotnet restore src/powershell-unix
 	dotnet restore src/ResGen
 	dotnet restore src/TypeCatalogGen
 
-	## Setup the build target to gather dependency information
-	cp "$srcdir/Microsoft.PowerShell.SDK.csproj.TypeCatalog.targets" "src/Microsoft.PowerShell.SDK/obj/Microsoft.PowerShell.SDK.csproj.TypeCatalog.targets"
-	dotnet msbuild src/Microsoft.PowerShell.SDK/Microsoft.PowerShell.SDK.csproj /t:_GetDependencies "/property:DesignTimeBuild=true;_DependencyFile=$(pwd)/src/TypeCatalogGen/powershell.inc" /nologo
+	# Setup the build target to gather dependency information
+	cp "$srcdir/dependency-gatherer.targets" \
+		"src/Microsoft.PowerShell.SDK/obj/Microsoft.PowerShell.SDK.csproj.TypeCatalog.targets"
+	dotnet msbuild src/Microsoft.PowerShell.SDK/Microsoft.PowerShell.SDK.csproj \
+		/t:_GetDependencies \
+		"/property:DesignTimeBuild=true;_DependencyFile=$PWD/src/TypeCatalogGen/powershell.inc" \
+		/nologo
 
-	## Generate 'powershell.version'
+	# Generate 'powershell.version'
 	echo "v$pkgver" > powershell.version
 
-	## Generate resource binding C# files
+	# Generate resource binding C# files
 	cd "$builddir"/src/ResGen
 	dotnet run
 
-	## Generate 'CorePsTypeCatalog.cs'
+	# Generate 'CorePsTypeCatalog.cs'
 	cd "$builddir"/src/TypeCatalogGen
 	dotnet run ../System.Management.Automation/CoreCLR/CorePsTypeCatalog.cs powershell.inc
 
-	## Build powershell core
+	# Build powershell core
 	cd "$builddir"
-	dotnet publish --configuration Linux "src/powershell-unix/" --output bin --no-self-contained --runtime $_runtime_id
+	# crossgen2 is broken on linux-musl-arm and linux-musl-arm64 due to
+	# https://github.com/dotnet/runtime/issues/73908, thus its
+	# use is disabled using -p:PublishReadyToRun=false
+	if [ "$CARCH" = "aarch64" ] || [ "$CARCH" = "armv7" ]; then
+		local use_crossgen2=false
+	else
+		local use_crossgen2=true
+	fi
+	dotnet publish --configuration Linux "src/powershell-unix/" \
+		--output bin \
+		--no-self-contained \
+		--runtime $_runtime_id \
+		-p:PublishReadyToRun=$use_crossgen2
 }
 
 check() {
+	msg "Checking $pkgname"
 	cd "$builddir"/test/xUnit
 	dotnet test -c Release --runtime $_runtime_id
 }
@@ -80,13 +109,17 @@ check() {
 package() {
 	# directory creation
 	install -dm 755 \
-		"$pkgdir"/usr/lib/$pkgname \
+		"$pkgdir"/usr/lib \
 		"$pkgdir"/usr/bin
 
 	# libary copy
-	cp -ar "$builddir"/src/powershell-unix/bin/Linux/net6.0/$_runtime_id/* "$pkgdir"/usr/lib/$pkgname/
+	cp -ar "$builddir"/src/powershell-unix/bin/Linux/net6.0/$_runtime_id "$pkgdir"/usr/lib/$pkgname
 
-	# clean-up non musl files
+	# already provided by 'libpsl-native' aport
+	rm "$pkgdir"/usr/lib/$pkgname/libpsl-native.so
+
+	# does not build for linux-musl, thus points to libc.so rather than musl
+	# see https://github.com/dotnet/runtime/issues/63187
 	rm "$pkgdir"/usr/lib/$pkgname/libSystem.IO.Ports.Native.so
 
 	# binary link
@@ -94,6 +127,6 @@ package() {
 }
 sha512sums="
 d1f4ccab38b31b5707a160a84f7bf4eab8c19c26f8d5e4ba3662b44ee304502319828d89292e409cb03fee0351989b27772ccc815be9e3c2aa8d1591721eb407  powershell-7.2.6.tar.gz
-14f1d5be6c390a216012a5ef48886ed398804443731836bb4dc1eb5af26f733144a2d627e5ea109a39fb02a9557003064e14dffb150c1e4752dc8b95f8d4325a  disable-test-mode.patch
-e9c4aeebd4fead1542b2c48c70134efcdb6c573273d8d05b1f8a2ece070e26899876b30264749992beac3044059716ca8c07b3bf970a419e525057c422f843c6  Microsoft.PowerShell.SDK.csproj.TypeCatalog.targets
+e9c4aeebd4fead1542b2c48c70134efcdb6c573273d8d05b1f8a2ece070e26899876b30264749992beac3044059716ca8c07b3bf970a419e525057c422f843c6  dependency-gatherer.targets
+0e7550d8b702eeb9ebbd42100b32cbf7a0be676c5922cd6ee03ecdd3ba11d20d42a468f73ee428c6c92c8b7b18f9b022591a368191c2a358034ba4d7e78d2b84  fix-filesystem-test.patch
 "
