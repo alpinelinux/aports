@@ -7,13 +7,14 @@ pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
 license="MIT"
-depends="alpine-baselayout alpine-conf apk-tools busybox busybox-suid busybox-openrc
-	openrc libc-utils alpine-keys"
+depends="alpine-baselayout alpine-conf apk-tools busybox busybox-suid busybox-openrc dev-openrc
+	openrc libc-utils alpine-release"
 makedepends=""
 install=""
 subpackages="alpine-release:release"
 replaces="alpine-baselayout"
 source=""
+options="!check"
 
 build() {
 	return 0
