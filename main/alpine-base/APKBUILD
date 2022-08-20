@@ -2,16 +2,16 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.17_alpha20220809
-pkgrel=0
+pkgrel=1
 pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
 license="MIT"
 depends="alpine-baselayout alpine-conf apk-tools busybox busybox-suid busybox-initscripts
-	openrc libc-utils alpine-keys"
+	openrc libc-utils alpine-release"
 makedepends=""
 install=""
-subpackages=""
+subpackages="alpine-release:release"
 replaces="alpine-baselayout"
 source=""
 
@@ -20,9 +20,16 @@ build() {
 }
 
 package() {
-	mkdir -p "$pkgdir"/etc
+	mkdir -p "$pkgdir"
+}
+
+release() {
+	depends="alpine-keys"
+	pkgdesc="Alpine release data"
+
+	mkdir -p "$subpkgdir"/etc
 	# create /etc/alpine-release
-	echo $pkgver > "$pkgdir"/etc/alpine-release
+	echo $pkgver > "$subpkgdir"/etc/alpine-release
 	local _ver="$(echo "$pkgver" | grep -E -o '^[0-9]+\.[0-9]+')"
 	local _rel="v$_ver"
 	case "$pkgver" in
@@ -33,14 +40,14 @@ package() {
 	esac
 
 	# create /etc/issue
-	cat >"$pkgdir"/etc/issue<<EOF
+	cat >"$subpkgdir"/etc/issue<<EOF
 Welcome to Alpine Linux $_ver
 Kernel \\r on an \\m (\\l)
 
 EOF
 
 	# create os-release
-	cat >"$pkgdir"/etc/os-release<<EOF
+	cat >"$subpkgdir"/etc/os-release<<EOF
 NAME="Alpine Linux"
 ID=alpine
 VERSION_ID=$pkgver
@@ -50,8 +57,8 @@ BUG_REPORT_URL="https://gitlab.alpinelinux.org/alpine/aports/-/issues"
 EOF
 
 	# create secfixes.d repository list
-	mkdir -p "$pkgdir"/etc/secfixes.d
-	cat >"$pkgdir"/etc/secfixes.d/alpine<<EOF
+	mkdir -p "$subpkgdir"/etc/secfixes.d
+	cat >"$subpkgdir"/etc/secfixes.d/alpine<<EOF
 https://secdb.alpinelinux.org/$_rel/main.json
 https://secdb.alpinelinux.org/$_rel/community.json
 EOF
