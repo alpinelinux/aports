@@ -2,12 +2,19 @@
 # Maintainer: Duncan Bellamy <dunk@denkimushi.com>
 # based on arch linux PKGBUILD
 pkgname=apache-arrow
-pkgver=8.0.1
-pkgrel=4
+pkgver=9.0.0
+pkgrel=0
 pkgdesc="multi-language toolbox for accelerated data interchange and in-memory processing"
 url="https://arrow.apache.org/"
 arch="all !s390x" # missing thrift
 license="Apache-2.0"
+_py3depends="
+	cython
+	py3-setuptools
+	py3-setuptools_scm
+	py3-wheel
+	python3-dev
+	"
 makedepends="
 	boost-dev
 	brotli-dev
@@ -30,22 +37,44 @@ makedepends="
 	utf8proc-dev
 	zlib-dev
 	zstd-dev
+	$_py3depends
 	"
-checkdepends="bash grep gzip perl python3 tzdata"
-subpackages="$pkgname-dev $pkgname-tools $pkgname-doc"
-_arrowsha="83ada4ec0f2cfe36f4168628d7f470e6199e663a"
-_parquetsha="acd375eb86a81cd856476fca0f52ba6036a067ff"
+_py3checkdepends="
+	py3-cffi
+	py3-hypothesis
+	py3-pandas
+	py3-pytest
+	py3-pytest-lazy-fixture
+	py3-pytest-xdist
+	"
+checkdepends="bash grep gzip perl python3 tzdata $_py3checkdepends"
+subpackages="$pkgname-dev $pkgname-tools $pkgname-doc py3-$pkgname:python_arrow"
+_arrowsha="5bab2f264a23f5af68f69ea93d24ef1e8e77fc88"
+_parquetsha="aafd3fc9df431c2625a514fb46626e5614f1d199"
 source="https://downloads.apache.org/arrow/arrow-$pkgver/apache-arrow-$pkgver.tar.gz
-	https://github.com/apache/arrow-testing/archive/$_arrowsha.zip
-	https://github.com/apache/parquet-testing/archive/$_parquetsha.zip
+	$pkgname-arrow-testing.tar.gz::https://github.com/apache/arrow-testing/archive/$_arrowsha.tar.gz
+	$pkgname-parquet-testing.tar.gz::https://github.com/apache/parquet-testing/archive/$_parquetsha.tar.gz
+	$pkgname-sysconf-cache.patch::https://github.com/apache/arrow/commit/7d8e1fbc96a0b527475b736e82580894363fc7cf.patch
 	"
+
+case "$CARCH" in
+aarch64|x86|x86_64)
+	_SIMD="MAX"
+	makedepends="$makedepends xsimd-dev"
+	;;
+*)
+	_SIMD="NONE"
+	;;
+esac
+
+export SETUPTOOLS_SCM_PRETEND_VERSION=$pkgver
 
 build() {
 	if [ "$CBUILD" != "$CHOST" ]; then
 		CMAKE_CROSSOPTS="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_HOST_SYSTEM_NAME=Linux"
 	fi
-	cmake -B build \
-		-G Ninja \
+
+	cmake -B build-cpp -G Ninja \
 		-DCMAKE_INSTALL_PREFIX=/usr \
 		-DCMAKE_INSTALL_LIBDIR=lib \
 		-DBUILD_SHARED_LIBS=True \
@@ -53,6 +82,8 @@ build() {
 		-DARROW_BUILD_STATIC=OFF \
 		-DARROW_DEPENDENCY_SOURCE=SYSTEM \
 		-DARROW_SIMD_LEVEL="NONE" \
+		-DARROW_RUNTIME_SIMD_LEVEL="$_SIMD" \
+		-DARROW_BUILD_EXAMPLES=OFF \
 		-DARROW_BUILD_TESTS=ON \
 		-DARROW_COMPUTE=ON \
 		-DARROW_FLIGHT=ON \
@@ -72,35 +103,74 @@ build() {
 		-DARROW_WITH_SNAPPY=ON \
 		-DARROW_WITH_ZLIB=ON \
 		-DARROW_WITH_ZSTD=ON \
-		-DZSTD_LIB=/usr/lib/libzstd.so \
 		-DPARQUET_REQUIRE_ENCRYPTION=ON \
 		-S cpp \
 		$CMAKE_CROSSOPTS
-	cmake --build build
+	cmake --build build-cpp
+
+	# install in ARROW_HOME for python build to find
+	DESTDIR="$builddir/dist-cpp" cmake --install build-cpp
+
+	cd python
+	ARROW_HOME="$builddir/dist-cpp/usr" \
+	python3 setup.py build_ext --inplace \
+		--extra-cmake-args="-DARROW_SIMD_LEVEL=NONE -DARROW_RUNTIME_SIMD_LEVEL=$_SIMD -DPYARROW_BUILD_DATASET=ON" \
+		--cmake-generator Ninja
 }
 
 check() {
-	cd build
+	cd build-cpp
 	export PARQUET_TEST_DATA="$srcdir/parquet-testing-$_parquetsha/data"
 	export ARROW_TEST_DATA="$srcdir/arrow-testing-$_arrowsha/data"
 	# exclude broken tests
-	PYTHON=python3 ctest --output-on-failure -E "arrow-buffer-test|arrow-misc-test|\
+	ctest -j4 --output-on-failure -E "arrow-buffer-test|arrow-misc-test|\
 arrow-utility-test|arrow-csv-test|arrow-compute-aggregate-test|arrow-flight-test|arrow-compute-scalar-test|\
-arrow-dataset-file-ipc-test|arrow-dataset-scanner-test"
+arrow-dataset-file-ipc-test|arrow-dataset-scanner-test|plasma-client-tests"
+
+	cd ../python
+	ARROW_HOME="$builddir/dist-cpp/usr" \
+	python3 setup.py install --root="$PWD/dist-python"
+	PYTHONPATH="$(echo $PWD/dist-python/usr/lib/python3*/site-packages)" \
+	LIBRARY_PATH="$builddir/dist-cpp/usr/lib:$LIBRARY_PATH" \
+	LD_LIBRARY_PATH="$builddir/dist-cpp/usr/lib:$LD_LIBRARY_PATH" \
+	pytest -n 4 pyarrow --deselect=pyarrow/tests/test_memory.py \
+		--deselect=pyarrow/tests/test_csv.py \
+		--deselect=pyarrow/tests/parquet/test_data_types.py \
+		--deselect=pyarrow/tests/test_array.py::test_dictionary_to_numpy \
+		--deselect=pyarrow/tests/test_io.py::test_python_file_large_seeks \
+		--deselect=pyarrow/tests/test_io.py::test_foreign_buffer \
+		--deselect=pyarrow/tests/test_io.py::test_memory_map_large_seeks \
+		--deselect=pyarrow/tests/test_pandas.py::TestConvertStructTypes::test_from_numpy_nested \
+		--deselect=pyarrow/tests/test_schema.py::test_schema_sizeof \
+		--deselect=pyarrow/tests/test_serialization.py::test_primitive_serialization \
+		--deselect=pyarrow/tests/test_serialization.py::test_integer_limits \
+		--deselect=pyarrow/tests/parquet/test_dataset.py::test_partitioned_dataset
 }
 
 package() {
-	DESTDIR="$pkgdir" cmake --install build
-	find "$pkgdir"/usr/lib/ -name '*testing*' -delete
+	DESTDIR="$pkgdir" cmake --install build-cpp
+
+	cd python
+	python3 setup.py install --root="$pkgdir" --skip-build
+
+	rm -r "$pkgdir"/usr/lib/python3*/site-packages/pyarrow/tests
 }
 
 tools() {
 	pkgdesc="$pkgdesc (extra tools)"
+
 	amove usr/bin/plasma-store-server
 }
 
+python_arrow() {
+	pkgdesc="$pkgdesc (python module)"
+
+	amove usr/lib/python3* usr/bin/plasma_store
+}
+
 sha512sums="
-b261a857a07ee900054e92b38a627962b5754a34af667b260f67fdad616c691c0fcad93e6ff7b4d7852c0e26ad742e4a4ad6b83da2c687639d72b47a7eec5c16  apache-arrow-8.0.1.tar.gz
-7d3c3678f69e4a244a1f8fdc4e509e29f3c21f8a8e38e9c9e3188dad0297a964201157853abd57bad75df698ab9b005ad0fca12c2965bbc4a25ccb5fd19311bb  83ada4ec0f2cfe36f4168628d7f470e6199e663a.zip
-b3af78d5045ee3a224cafcd6246acf5b347187972b8ab50d55e6bbf4120ca06a55a8f73bec0901ed279c0c2059e3b1e3b12bba68a8c4f3bb5a7f13d1766e4f13  acd375eb86a81cd856476fca0f52ba6036a067ff.zip
+6eb14c766e4542e110a2d6748cea19a71d7035b8a3fda095efe36b5f02c134abc8c5bbcc9cd72dbc40ae1e87c28399a116501d983b5501b9b277fbcbfa09d7e5  apache-arrow-9.0.0.tar.gz
+95ee4f375aa616dc6c41f4cc585532564d00b65f6a7ceeeba85887903829e0cceb1bc07538d57784d98431816db2ea1ad58bf690528c5a851ce21c91ec32d974  apache-arrow-arrow-testing.tar.gz
+bb53dd8d407a89239b8c5bd39ccbf8aa5d9e8474bda20280406be05b32e2ce4fcc326b1ff23993fa7dab037a93395c714c303ecf02b7a8289136171d50b6774c  apache-arrow-parquet-testing.tar.gz
+0aa47066b0737491ea509b136a4c1cd510c80b9ed71bbf918b986dd1177baac6f725cae6fe3af14e55f4a389cd34449a126993412875a00935d062216ca739bc  apache-arrow-sysconf-cache.patch
 "
