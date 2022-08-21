@@ -1,0 +1,297 @@
+#!/sbin/openrc-run
+
+name="AgensGraph"
+description="AgensGraph server"
+
+extra_started_commands="stop_fast stop_force stop_smart reload reload_force"
+description_stop_fast="Stop using Fast Shutdown mode (SIGINT)"
+description_stop_force="Stop using Immediate Shutdown mode (SIGQUIT)"
+description_stop_smart="Stop using Smart Shutdown mode (SIGTERM)"
+description_reload="Reload configuration"
+description_reload_force="Reload configuration and restart if needed"
+
+extra_stopped_commands="setup"
+description_setup="Initialize a new $name cluster"
+
+: ${user:="agens"}
+: ${group:="agens"}
+
+: ${auto_setup:="yes"}
+: ${start_timeout:=10}
+# nice_timeout, rude_timeout and force_timeout are for backward compatibility.
+: ${stop_smart_timeout:=5}
+: ${stop_fast_timeout:=10}
+: ${stop_force_timeout:=0}
+
+: ${bin_dir:="/usr/libexec/agensgraph"}
+: ${data_dir:="/var/lib/agensgraph/12/data"}
+: ${conf_dir:="/etc/agensgraph"}
+: ${logfile:="/var/log/agensgraph/postmaster.log"}
+: ${env_vars:=}
+: ${initdb_opts:="--encoding=UTF-8 --locale=C"}
+: ${pg_opts:=}
+: ${port:=5432}
+
+command="$bin_dir/postgres"
+
+conffile="$conf_dir/postgresql.conf"
+pidfile="$data_dir/postmaster.pid"
+start_stop_daemon_args="
+	--user $user
+	--group $group
+	--pidfile $pidfile
+	--wait 100"
+
+depend() {
+	use net
+	after firewall
+
+	if [ "$(get_config log_destination)" = "syslog" ]; then
+		use logger
+	fi
+}
+
+start_pre() {
+	if [ ! -d "$data_dir/base" ]; then
+		if yesno "$auto_setup"; then
+			setup || return 1
+		else
+			eerror "Database not found at: $data_dir"
+			eerror "Please make sure that 'data_dir' points to the right path."
+			eerror "You can run '/etc/init.d/agensgraph setup' to setup a new database cluster."
+			return 1
+		fi
+	fi
+
+	local socket_dirs=$(get_config "unix_socket_directories" "/run/agensgraph")
+	local port=$(get_config "port" "$port")
+
+	start_stop_daemon_args="$start_stop_daemon_args --env PGPORT=$port"
+
+	local var; for var in $env_vars; do
+		start_stop_daemon_args="$start_stop_daemon_args --env $var"
+	done
+
+	(
+		# Set the proper permission for the socket paths and create them if
+		# they don't exist.
+		set -f; IFS=","
+		for dir in $socket_dirs; do
+			if [ -e "${dir%/}/.s.PGSQL.$port" ]; then
+				eerror "Socket conflict. A server is already listening on:"
+				eerror "    ${dir%/}/.s.PGSQL.$port"
+				eerror "Hint: Change 'port' to listen on a different socket."
+				return 1
+			elif [ "${dir%/}" != "/tmp" ]; then
+				checkpath -d -m 1775 -o $user:$group "$dir"
+			fi
+		done
+	)
+}
+
+start() {
+	ebegin "Starting $name"
+
+	rm -f "$pidfile"
+	start-stop-daemon --start \
+		$start_stop_daemon_args \
+		--exec "$bin_dir"/ag_ctl \
+		-- start \
+			--silent \
+			-w --timeout="$start_timeout" \
+			--log="$logfile" \
+			-D "$conf_dir" \
+			-o "--data-directory=$data_dir $pg_opts"
+
+	if eend $? "Failed to start $name"; then
+		service_set_value "command" "$command"
+		service_set_value "pidfile" "$pidfile"
+	else
+		eerror "Check the log for a possible explanation of the above error:"
+		eerror "    $logfile"
+		return 1
+	fi
+}
+
+stop() {
+	local command=$(service_get_value "command" || echo "$command")
+	local pidfile=$(service_get_value "pidfile" || echo "$pidfile")
+	local retry=''
+
+	[ "$stop_smart_timeout" -eq 0 ] \
+		|| retry="SIGTERM/$stop_smart_timeout"
+	[ "$stop_fast_timeout" -eq 0 ] \
+		|| retry="${retry:+$retry/}SIGINT/$stop_fast_timeout"
+	[ "$stop_force_timeout" -eq 0 ] \
+		|| retry="${retry:+$retry/}SIGQUIT/$stop_force_timeout"
+	[ "$retry" ] \
+		|| retry='SIGINT/5'
+
+	local seconds=$(( $stop_smart_timeout + $stop_fast_timeout + $stop_force_timeout ))
+
+	ebegin "Stopping $name (this can take up to $seconds seconds)"
+
+	start-stop-daemon --stop \
+		--exec "$command" \
+		--retry "$retry" \
+		--progress \
+		--pidfile "$pidfile"
+	eend $? "Failed to stop $name"
+}
+
+stop_smart() {
+	_stop SIGTERM "smart shutdown"
+}
+
+stop_fast() {
+	_stop SIGINT "fast shutdown"
+}
+
+stop_force() {
+	_stop SIGQUIT "immediate shutdown"
+}
+
+_stop() {
+	local command=$(service_get_value "command" || echo "$command")
+	local pidfile=$(service_get_value "pidfile" || echo "$pidfile")
+
+	ebegin "Stopping $name ($2)"
+
+	start-stop-daemon --stop \
+		--exec "$command" \
+		--signal "$1" \
+		--pidfile "$pidfile" \
+		&& mark_service_stopped "$RC_SVCNAME"
+	eend $? "Failed to stop $name"
+}
+
+reload() {
+	ebegin "Reloading $name configuration"
+
+	start-stop-daemon --signal HUP --pidfile "$pidfile" && check_config_errors
+	local retval=$?
+
+	is_pending_restart || true
+
+	eend $retval
+}
+
+reload_force() {
+	ebegin "Reloading $name configuration"
+
+	start-stop-daemon --signal HUP --pidfile "$pidfile" && check_config_errors
+	local retval=$?
+
+	if [ $retval -eq 0 ] && is_pending_restart; then
+		rc-service --nodeps "$RC_SVCNAME" restart
+		retval=$?
+	fi
+	eend $retval
+}
+
+setup() {
+	local bkpdir
+
+	ebegin "Creating a new $name database cluster"
+
+	if [ -d "$data_dir/base" ]; then
+		eend 1 "$data_dir/base already exists!"; return 1
+	fi
+
+	# If data_dir exists, backup configs.
+	if [ -d "$data_dir" ]; then
+		bkpdir="$(mktemp -d)"
+		find "$data_dir" -type f -name "*.conf" -maxdepth 1 \
+			-exec mv -v {} "$bkpdir"/ \;
+		rm -rf "$data_dir"/*
+	fi
+
+	install -d -m 0700 -o $user -g $group "$data_dir"
+	install -d -m 0750 -o $user -g $group "$conf_dir"
+
+	cd "$data_dir"  # to avoid the: could not change directory to "/root"
+	su $user -c "$bin_dir/initdb $initdb_opts -D $data_dir"
+	local retval=$?
+
+	if [ -d "$bkpdir" ]; then
+		# Move backuped configs back.
+		mv -v "$bkpdir"/* "$data_dir"/
+		rm -rf "$bkpdir"
+	fi
+
+	local conf_dir=$(readlink -f "$conf_dir")
+
+	if [ "${data_dir%/}" != "${conf_dir%/}" ]; then
+		# Move configs from data_dir to conf_dir and symlink them to data_dir.
+		local name newname
+		for name in postgresql.conf pg_hba.conf pg_ident.conf; do
+			newname="$name"
+			[ ! -e "$conf_dir"/$name ] || newname="$name.new"
+
+			mv "$data_dir"/$name "$conf_dir"/$newname
+			ln -s "$conf_dir"/$name "$data_dir"/$name
+		done
+	fi
+
+	eend $retval
+} 
+
+
+get_config() {
+	local name="$1"
+	local default="${2:-}"
+
+	if [ ! -f "$conffile" ]; then
+		printf '%s\n' "$default"
+		return 1
+	fi
+	sed -En "/^\s*${name}\b/{                      # find line starting with the name
+		  s/^\s*${name}\s*=?\s*([^#]+).*/\1/;  # capture the value
+		  s/\s*$//;                            # trim trailing whitespaces
+		  s/^['\"](.*)['\"]$/\1/;              # remove delimiting quotes
+		  p
+		}" "$conffile" \
+		| grep . || printf '%s\n' "$default"
+}
+
+check_config_errors() {
+	local out; out=$(psql_command "
+		select
+		  sourcefile || ': line ' || sourceline || ': ' || error ||
+		    case when name is not null
+		    then ': ' || name || ' = ''' || setting || ''''
+		    else ''
+		    end
+		from pg_file_settings
+		where error is not null
+		  and name not in (select name from pg_settings where pending_restart = true);
+		")
+	if [ $? -eq 0 ] && [ "$out" ]; then
+		eerror 'Configuration file contains errors:'
+		printf '%s\n' "$out" | while read line; do
+			eerror "  $line"
+		done
+		return 1
+	fi
+}
+
+is_pending_restart() {
+	local out; out=$(psql_command "select name from pg_settings where pending_restart = true;")
+
+	if [ $? -eq 0 ] && [ "$out" ]; then
+		ewarn "$name must be restarted to apply changes in the following parameters:"
+		local line; for line in $out; do
+			ewarn "  $line"
+		done
+		return 0
+	fi
+	return 1
+}
+
+getval() {
+	eval "printf '%s\n' \"\$$1\""
+}
+
+psql_command() {
+	su $user -c "$bin_dir/agens --no-psqlrc --no-align --tuples-only -q -c \"$1\""
+}
