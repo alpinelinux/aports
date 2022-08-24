@@ -7,46 +7,16 @@
 #   6.0.108-r0:
 #     - CVE-2022-34716
 
-#
-# Variables for dotnet build version 6.0
-# This APKBUILD is designed to be the same for version 6.0 and up
-# except for the variables in this first section
-#
-
 pkgname=dotnet6-build
 pkgver=6.0.108
-pkgrel=1
+pkgrel=2
 
 # Tag of tarball generator. This may change from usual due to mistakes from upstream
 _installertag=v$pkgver
 
 # Test suite tags
 _testtag=ddc8576cc4ffccf6b102eed55125b2596336e684
-_turkeytag=71880bd94711519f7b786248a88a827a401207a2
-
-# Tests timeout (in seconds)
-_tests_timeout=600
-# Test suite disable flags
-# following tests can only work after packaging step
-_disabled_tests="man-pages distribution-package bash-completion"
-# we don't care if not latest release and not installed location
-_disabled_tests="$_disabled_tests release-version-sane install-location"
-# test broken: no musl release for omnisharp
-_disabled_tests="$_disabled_tests omnisharp"
-# test broken: permission issue on lxc / pipelines
-_disabled_tests="$_disabled_tests createdump-aspnet workload"
-# liblttng-ust_sys-sdt.h: no 'NT_STAPSDT' on Alpine's lttng-ust package
-# lttng: known issue, see https://github.com/dotnet/runtime/issues/57784
-_disabled_tests="$_disabled_tests liblttng-ust_sys-sdt.h lttng"
-# {bundled,system}-libunwind: use system version on all but aarch64/armv7, as broken
-# see https://github.com/redhat-developer/dotnet-regular-tests/issues/113
-[ "$CARCH" = "aarch64" ] && _disabled_tests="$_disabled_tests system-libunwind"
-[ "$CARCH" = "armv7" ] && _disabled_tests="$_disabled_tests system-libunwind"
-[ "$CARCH" = "x86_64" ] && _disabled_tests="$_disabled_tests bundled-libunwind"
-# publish-ready-to-run: broken due to crossgen2 nupkg on musl-arm64 / musl-arm platform being broken
-# should be fixed with https://github.com/dotnet/runtime/pull/66814
-[ "$CARCH" = "aarch64" ] && _disabled_tests="$_disabled_tests publish-ready-to-run publish-ready-to-run-linux"
-[ "$CARCH" = "armv7" ] && _disabled_tests="$_disabled_tests publish-ready-to-run publish-ready-to-run-linux"
+_bunnytag=71880bd94711519f7b786248a88a827a401207a2
 
 # Patches to be used. String before '_' refers to repo to patch
 # Look for patch notes within each patch for what they fix / where they come from
@@ -62,6 +32,7 @@ _patches="
 	installer_musl-build-fix.patch
 	installer_portable-runtime-id.patch
 	installer_reprodicible-tarball.patch
+	runtime_deprecate-icu-ucol-safeclone.patch
 	runtime_detect-armv8.patch
 	runtime_fix-musl-123.patch
 	runtime_lld-fix.patch
@@ -73,12 +44,6 @@ _patches="
 	sdk_telemetry-optout.patch
 	"
 
-# Custom prepare
-default_prepare() {
-	return
-}
-
-# Following for dotnet build version 6.0 and up
 _pkgver_macro=${pkgver%.*}
 _pkgver_prior=${pkgver%.*.*}
 _pkgver_name=${_pkgver_macro//[.0]}
@@ -131,6 +96,7 @@ makedepends="
 	nodejs
 	openssl-dev
 	pigz
+	rsync
 	tar
 	zlib-dev
 	"
@@ -144,28 +110,26 @@ subpackages="
 	netstandard21-targeting-pack:netstandard_targeting_pack:noarch
 	"
 source="
-	source-build-tarball-$pkgver.tar.gz::https://tarball
-	source-build-testssuite-$_testtag.tar.gz::https://github.com/redhat-developer/dotnet-regular-tests/archive/$_testtag.tar.gz
-	source-build-turkey-$_turkeytag.tar.gz::https://github.com/redhat-developer/dotnet-bunny/archive/$_turkeytag.tar.gz
+	dotnet-v$pkgver.tar.gz::https://repo.gpg.nz/apk/archives/dotnet-v$pkgver.tar.gz
+	dotnet-testsuite-$_testtag.tar.gz::https://github.com/redhat-developer/dotnet-regular-tests/archive/$_testtag.tar.gz
+	dotnet-bunny-$_bunnytag.tar.gz::https://github.com/redhat-developer/dotnet-bunny/archive/$_bunnytag.tar.gz
 	$_patches
 	"
-builddir="$srcdir"/source-build-tarball-$pkgver
-_checkdir="$srcdir/dotnet-bunny-${_turkeytag/v}"
+builddir="$srcdir"/dotnet-v$pkgver
+_checkdir="$srcdir"/dotnet-bunny-${_bunnytag/v}
 _testdir="$srcdir"/dotnet-regular-tests-$_testtag
 _cli_root="$srcdir"/bootstrap
 _artifactsdir="$_cli_root"/artifacts
 _libdir="/usr/lib"
 
-# custom function that converts Alpine arch syntax to dotnet arch syntax
-_get_arch() {
-	case $1 in
-		x86_64) local arch=x64;;
-		aarch64) local arch=arm64;;
-		armv7|armhf) local arch=arm;;
-	esac
-	echo $arch
-}
-_dotnet_arch=$(_get_arch $CARCH)
+case $CARCH in
+	x86) _dotnet_arch="x86";;
+	x86_64) _dotnet_arch="x64";;
+	aarch64) _dotnet_arch="arm64";;
+	armv7|armhf) _dotnet_arch="arm";;
+	s390x) _dotnet_arch="s390x";;
+	ppc64le) _dotnet_arch="ppc64le";;
+esac
 
 # Custom patch logics
 _patch() {
@@ -212,23 +176,6 @@ _patch() {
 	done
 }
 
-# dotnet relies on itself when building, we thus need a bootstrap runtime
-# that is copied to write-capable folder
-_prepare_bootstrap() {
-	msg "Settings up bootstrap"
-
-	_bootstrapdir=$(find $_libdir/dotnet/bootstrap/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
-	cp -r "$_bootstrapdir" "$_cli_root"
-
-	# Corrupt libcoreclrtraceptprovider.so when lttng <=2.13.0
-	# is detected as tracing is broken on dotnet platform
-	# due to ABI changes
-	# See https://github.com/dotnet/runtime/issues/57784.
-	if [ -f "/usr/lib/liblttng-ust.so.1 " ]; then
-		rm "$_cli_root"/shared/Microsoft.NETCore.App/*/libcoreclrtraceptprovider.so
-	fi
-}
-
 # Build doesn't set all the right executable bits for the right file types
 _fix_executable() {
 	# add executable bit
@@ -255,67 +202,42 @@ _fix_executable() {
 		-exec chmod -x '{}' \;
 }
 
-# dotnet build is a two step process. The first step involves sourcing the
-# source code to various components, and then the build can proceed as a second
-# step. To be able to assure integrity of sources and permit caching, we want to
-# build a tarball that can be checked with checksum. Following function is
-# executed automatically in fetch() if tarball is not in SRCDEST.
-_build_tarball() {
-	deps
-	[ -d "$srcdir" ] || { mkdir -p "$srcdir" && cd "$srcdir"; } && cd "$srcdir"
-
-	# preparations
-	[ -d "installer" ] || { git clone https://github.com/dotnet/installer --branch $_installertag && cd "$srcdir"/installer; } && cd "$srcdir"/installer
-	_prepare_bootstrap
-
-	# makes tarball reproducible
-	patch -Np1 -i "$startdir"/installer_reprodicible-tarball.patch || true
-
-	# without these exports, build still attempts a download of dotnet sdk
-	export _InitializeDotNetCli="$_cli_root"
-	export DOTNET_INSTALL_DIR="$_cli_root"
-	export DotNetBuildFromSource=true
-
-	# following args activate tarball build
-	local args="
-		/p:ArcadeBuildTarball=true
-		/p:TarballDir=$builddir
-		/p:TarballFilePath=$SRCDEST/${builddir##*/}.tar.gz
-		"
-	./build.sh $args | tee -a "$srcdir"/installer/build.log
-
-	# unsets export so they don't bleed into other steps
-	unset _InitializeDotNetCli DOTNET_INSTALL_DIR DotNetBuildFromSource
+# So lint is happy
+default_prepare() {
+	return
 }
 
-fetch() {
-	# Builds tarball if not built
-	[ -f "$SRCDEST"/${builddir##*/}.tar.gz ] || _build_tarball
+# generates tarball containing all components built by dotnet
+snapshot() {
+	local _upload="repo.gpg.nz:/archive/$pkgname/"
+	local _pkg=$SRCDEST/${builddir##*/}.tar.gz
+	[ -d "$srcdir" ] || { mkdir -p "$srcdir" && cd "$srcdir"; } && cd "$srcdir"
+	[ -d "installer" ] || { git clone https://github.com/dotnet/installer --branch $_installertag && cd "$srcdir"/installer; } && cd "$srcdir"/installer
+	patch -Np1 -i "$startdir"/installer_reprodicible-tarball.patch || true
 
-	default_fetch
+	_InitializeDotNetCli="$_libdir/dotnet" DOTNET_INSTALL_DIR="$_libdir/dotnet" DotNetBuildFromSource=true ./build.sh \
+		/p:ArcadeBuildTarball=true \
+		/p:TarballDir=$builddir \
+		/p:TarballFilePath=$_pkg
+
+	abuild checksum
+	msg "Uploading $_pkg"
+	rsync -Lave ssh $_pkg $_upload
 }
 
 prepare() {
 	default_prepare
-
 	_patch
-	_prepare_bootstrap
 
-	# makes sure Artifacts archive is not expected, else build fails as it
-	# expected a file that tells it what artifacts tarball it should unpack
-	# As artifacts in Alpine's build process are provided by a package, and
-	# installed in a folder, this is pulled using --with-packages
+	# dotnet requires its bootstrap to be in a writable dir
+	local _bootstrapdir=$(find $_libdir/dotnet/bootstrap/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
+	[ -d "$_cli_root" ] || cp -r "$_bootstrapdir" "$_cli_root"
+
+	# ensure that dotnet does not download artifacts provided by dotnet-artifacts
 	[ -d "$builddir"/packages/archive ] && rm -r "$builddir"/packages/archive
 
-	# readjusts OfficialBuildId back to current date. By default this is not
-	# necessary. Unfortunately, by default source tarball isn't reproducible
-	# installer_reprodicible-tarball.patch makes it so, but at the cost of
-	# setting OfficialBuildId of certain volatile packages to a date in 1990.
-	# Thus, to adequately prepare tarball we have to reset git-info build ids
-	# to current date, as expected.
-	for i in "$builddir"/git-info/*; do
-		sed -i "s|<OfficialBuildId>19900101.1</OfficialBuildId>|<OfficialBuildId>$(date +"%Y%m%d.1")</OfficialBuildId>|" "$i"
-	done
+	# Adjusts OfficialBuildId to current date on tarball
+	sed -i "s|<OfficialBuildId>19900101.1</OfficialBuildId>|<OfficialBuildId>$(date +"%Y%m%d.1")</OfficialBuildId>|" "$builddir"/git-info/*
 }
 
 build() {
@@ -323,8 +245,14 @@ build() {
 
 	ulimit -n 4096
 
+	# Disable use of LTTng as tracing on lttng <=2,13,0 is broken
+	# See https://github.com/dotnet/runtime/issues/57784.
+	if [ -f "/usr/lib/liblttng-ust.so.1 " ]; then
+		export DOTNET_LTTng=0
+	fi
+
 	# looks for most recent recent version of _artifactsdir
-	_artifactsdir=$(find $_libdir/dotnet/artifacts/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
+	local _artifactsdir=$(find $_libdir/dotnet/artifacts/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
 
 	# logs args, else the output is forwarded to log files which isn't ideal in a
 	# pipeline environment
@@ -348,14 +276,6 @@ build() {
 	. /etc/os-release
 	[ -n "${VERSION_ID//[^_]}" ] && local args="$args /p:TargetRid=alpine.${VERSION_ID%_*}-$_dotnet_arch"
 
-	# by default, build sources artifacts from tarball in packages/archive
-	# SDK from Microsoft. Due to wanting to use self-hosted versions of
-	# both of these, they are packaged by stage0 and bootstrap and provided
-	# in $_libdir/dotnet/{bootstrap,artifacts}. SDK is then sourced
-	# using _prepare_bootstrap function, and then pointed to using
-	# --with-sdk arg. Artifacts are sourced using --with-packages. Due to
-	# this being a read-only folder, this breaks without build_copy-sbrp.patch
-	# which makes build copy SBRP subfolder rather than move it.
 	./build.sh \
 		--with-sdk "$_cli_root" \
 		--with-packages "$_artifactsdir" \
@@ -363,6 +283,32 @@ build() {
 }
 
 check() {
+	# Tests timeout (in seconds)
+	local _tests_timeout=600
+	# Test suite disable flags
+	# following tests can only work after packaging step
+	local _disabled_tests="man-pages distribution-package bash-completion"
+	# we don't care if not latest release and not installed location
+	local _disabled_tests="$_disabled_tests release-version-sane install-location"
+	# test broken: no musl release for omnisharp
+	local _disabled_tests="$_disabled_tests omnisharp"
+	# test broken: permission issue on lxc / pipelines
+	local _disabled_tests="$_disabled_tests createdump-aspnet workload"
+	# liblttng-ust_sys-sdt.h: no 'NT_STAPSDT' on Alpine's lttng-ust package
+	# lttng: known issue, see https://github.com/dotnet/runtime/issues/57784
+	local _disabled_tests="$_disabled_tests liblttng-ust_sys-sdt.h lttng"
+	# {bundled,system}-libunwind: use system version on all but aarch64/armv7, as broken
+	# see https://github.com/redhat-developer/dotnet-regular-tests/issues/113
+	case $CARCH in
+		x86_64) local _disabled_tests="$_disabled_tests bundled-libunwind";;
+		*) local _disabled_tests="$_disabled_tests system-libunwind";;
+	esac
+	# publish-ready-to-run: broken due to crossgen2 nupkg on musl-arm64 / musl-arm platform being broken
+	# should be fixed with https://github.com/dotnet/runtime/pull/66814
+	if [ "$CARCH" = "aarch64" ] || [ "$CARCH" = "armv7" ]; then
+		_disabled_tests="$_disabled_tests publish-ready-to-run publish-ready-to-run-linux"
+	fi
+
 	msg "Unpacking produced dotnet"
 	export DOTNET_ROOT="$_checkdir/release"
 	if [ ! -d "$DOTNET_ROOT" ]; then
@@ -377,7 +323,7 @@ check() {
 	# (done again during packaging - this is for tests)
 	_fix_executable "$DOTNET_ROOT"
 
-	msg "Building turkey test suite"
+	msg "Building turkey tester"
 	if [ ! -d "$_checkdir"/turkey ]; then
 		cd "$_checkdir"/Turkey
 		dotnet publish \
@@ -421,6 +367,12 @@ package() {
 
 	# some files either should or should not have executable bits
 	_fix_executable "$pkgdir"
+
+	# Disable use of LTTng as tracing on lttng <=2,13,0 is broken
+	# See https://github.com/dotnet/runtime/issues/57784.
+	if [ -f "/usr/lib/liblttng-ust.so.1 " ]; then
+		rm "$pkgdir"/$_libdir/dotnet/bootstrap/*/shared/Microsoft.NETCore.App/*/libcoreclrtraceptprovider.so
+	fi
 }
 
 sdk() {
@@ -487,10 +439,6 @@ templates() {
 	_fix_executable "$subpkgdir"
 }
 
-# build relies on a plethora of nupkgs which are provided by this Artifacts file.
-# stage0 sources these from Microsoft, which then allows bootstrap to build
-# locally hosted versions. The following unpacks built tarball into directory
-# for use by future builds.
 artifacts() {
 	pkgdesc="Internal package for building .NET $_pkgver_macro Software Development Kit"
 	# hack to allow artifacts to pull itself
@@ -548,9 +496,9 @@ doc() {
 }
 
 sha512sums="
-d512ff34c630632c35a58367e5a3375a1ab92ae13874e47e1591660afbfae6a537818fa0be30a4bd27ca7a9d403d05ec732103a8aa9f1dff56ad4be5bcd3058d  source-build-tarball-6.0.108.tar.gz
-fff94ca2b01ab360f0ef7d8b5408e49d867733f0008b8b70ebcc8eaaa8e832001510275f075848d24f9f71eb968daf57e30fe24f1ea9d0a38405936f9a2caf26  source-build-testssuite-ddc8576cc4ffccf6b102eed55125b2596336e684.tar.gz
-fc281df5fcf0d31dc9ff7f5b0e870960cfbe3c4fa0f6a6bb50b22c4ee18d2c608c827205bc79bd7f686d77ac917582fc26f68432cdd86c4a33b910c0c7416d09  source-build-turkey-71880bd94711519f7b786248a88a827a401207a2.tar.gz
+d601d026c09b7ade9fa90762a4f77b8117e7e2b3ef7d6cebd6c0959a201e87e440ce9833f8818ee3f9093abdf6c73b282b1cb4fad2b16a702c9fdfbbdd8abaaa  dotnet-v6.0.108.tar.gz
+fff94ca2b01ab360f0ef7d8b5408e49d867733f0008b8b70ebcc8eaaa8e832001510275f075848d24f9f71eb968daf57e30fe24f1ea9d0a38405936f9a2caf26  dotnet-testsuite-ddc8576cc4ffccf6b102eed55125b2596336e684.tar.gz
+fc281df5fcf0d31dc9ff7f5b0e870960cfbe3c4fa0f6a6bb50b22c4ee18d2c608c827205bc79bd7f686d77ac917582fc26f68432cdd86c4a33b910c0c7416d09  dotnet-bunny-71880bd94711519f7b786248a88a827a401207a2.tar.gz
 a2b21c38ed739f9bd18b39a28ef21b940ae32beeb2c8f99575289111e5ecaae40e017a500b3b452ef5df7c7e12dff2f8385acada92ca7507d1ed351c6aa9e311  aspnetcore_musl-build-fix.patch
 6e9663f466007fc5fa7010e6859f054b6a4e59affa7aae7fd4d9ab4ba8410d4855b680f58f938ad21d0b3d2a7c7b097c7e9494a4dde2c43478ddddbf37539545  build_arm-build.patch
 d25690181c9a19d78d1bd757f4add966cf07457c955546b2f1eafcc37a0a5856f04f87e5997f2300f40013237675d2bf4605caab01ad04a90a526cb38d8fc55a  build_musl-build-fix.patch
@@ -560,7 +508,8 @@ ce36d0233d33cdc96888a64ab83a4099f877413269bcb5602704cedfb6aa89bf6d86157545f6f624
 385599c3b35cf34c7cc008ce1e28ab724f51567d759cbd04d64bd9977a139fa9c1d97e4038fc1249b3fca04e0abb99b7abfdde57d1ae4d83742ca76e6b7c40e0  installer_forgotten-MicrosoftAspNetCoreAppRuntimePac.patch
 a1e89c860bd6526293038746ed9a963e139b3f199931244b8a3d27e31c9eacba7484523e4151a1a0d7d3137edd271d907954b116619426f5db48361053740e27  installer_musl-build-fix.patch
 e14c5861c389c7e1d9a7ec96446be96335723bde403b685b16028a3f87ff6f6614400c876432d7302d3e2b4cd38e8d24979597c8ba909c0ad1d7b6cf2b4c3bfc  installer_portable-runtime-id.patch
-49893f1824f3626885bb248fb6a279b6ac455988747028af4a0da63a7e93d8c50c72313b2e261c9154c07ccd11e8bd9c730fd41f8f1897d6a8cf785ba0502c31  installer_reprodicible-tarball.patch
+61795ea094e88eecfe05d010f3c4716534ca1700e66ae295f88ba76bd2338e3faa1cc30540963afe142566a015fb66286096e66e2e59f192f5d26b36a01649ab  installer_reprodicible-tarball.patch
+11c119fee76488e7f3669a0cccbb8b6ce5f6a6dd38a0e6dcbe89fc8f71b4f81b38505d1bd705bf9527f56953235135b538ad41a79a30374d15e1eb085346a3b8  runtime_deprecate-icu-ucol-safeclone.patch
 2e79e27b201a3e4423d63666b3dd575d0cb5ddbe258af24d9a2d0f9eb4cc8d177070249cfd08536fa7c3c6debdf939239a7e2c1aadd692d3e903bbb168f241b5  runtime_detect-armv8.patch
 aef649d2480d71ce68b030c0d67c2bfd965349a7ab52dbdca7c954edadb308ee6fbebf357113292d1323bfa9b2f8f01fe28d3904b2ebcc7a555742135bfdc726  runtime_fix-musl-123.patch
 dda6b463af8e0c8342b9c0d1a584f6d6410fb48df9fb0ef3c07d5ee7eb4abf2a29a01bf7a39fc70c2f5986c0b24c7bfe602cbfbeb1157cb0e0fb0eaa7fb03d1c  runtime_lld-fix.patch
