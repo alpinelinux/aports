@@ -1,23 +1,77 @@
 #!/sbin/openrc-run
-supervisor=supervise-daemon
-respawn_delay=5
-respawn_max=0
-healthcheck_timer=30
 
-name='Minio Block Storage Server'
-command=/usr/bin/minio
-command_args="server \
-    ${address:+--address=$address} \
-    $MINIO_OPTS \
-    $MINIO_VOLUMES"
-command_user="minio:minio"
+name="MinIO"
+description="Minio Block Storage Server"
+
+: ${data_dirs:="/var/lib/minio/data"}
+: ${logfile="/var/log/$RC_SVCNAME.log"}
+: ${command_user:="minio:minio"}
+: ${healthcheck_timer:=30}
+: ${respawn_delay:=5}
+: ${respawn_max:=0}
+
+command="/usr/bin/minio"
+command_args="server
+	${certs_dir:+"--certs-dir=$certs_dir"}
+	${command_args-"--quiet --anonymous"}
+	$data_dirs
+	"
+command_background="yes"
+pidfile="/run/$RC_SVCNAME.pid"
+output_log="$logfile"
+error_log="$logfile"
 
 start_pre() {
-    # make sure the default volume exists
-    checkpath --directory --mode 0700 --owner minio:minio "/var/lib/${RC_SVCNAME}"
+	# TODO: Remove before Alpine v3.17 release.
+	if [ "$data_dirs" = '/var/lib/minio/data' ] && [ -d "/srv/$RC_SVCNAME/.minio" ]; then
+		eerror "Found /srv/$RC_SVCNAME/.minio, but data_dirs=/var/lib/minio/data,"
+		eerror "update your /etc/conf.d/minio!"
+		return 1
+	fi
+
+	# Replace root user and password placeholders with random strings.
+	if [ "$MINIO_ROOT_USER" = 'change-me' ] || [ "$MINIO_ROOT_PASSWORD" = 'change-me' ]; then
+		local conf
+		for conf in "/etc/conf.d/${RC_SVCNAME%%.*}" "/etc/conf.d/$RC_SVCNAME" ""; do
+			[ -w "$conf" ] && break
+		done
+		if [ "$conf" ]; then
+			_randomize_secrets "$conf"
+		else  # no writable config found
+			ewarn "Change MINIO_ROOT_USER and MINIO_ROOT_PASSWORD in /etc/conf.d/"
+			ewarn "to unique and long values!"
+		fi
+	fi
+
+	# If the first directory is a local directory (starts with "/"), ensure it exists.
+	case "$data_dirs" in /*)
+		local first_dir=$(echo "$data_dirs" | grep -Eo '\S+' | head -n1)
+
+		checkpath --directory --mode 0700 --owner "$command_user" "$first_dir" || return 1
+	esac
+
+	if [ "$logfile" ]; then
+		checkpath --file --mode 0640 --owner "$command_user" "$logfile" || return 1
+	fi
 }
 
 healthcheck() {
-    [ -x /usr/bin/curl ] || return 0
-    /usr/bin/curl -q "${address:-localhost:9000}"/minio/health/ready
+	[ -x /usr/bin/curl ] || return 0
+	/usr/bin/curl -q "${MINIO_ADDRESS:-"localhost:9000"}"/minio/health/ready
+}
+
+_randomize_secrets() {
+	einfo "Replacing MINIO_ROOT_USER and MINIO_ROOT_PASSWORD in $1 with random values..."
+
+	local user=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || _gen_pass 16)
+	local pass=$(_gen_pass 32)
+
+	sed -Ei \
+		-e 's/^(MINIO_ROOT_USER)="change-me"/\1="'"$user"'"/' \
+		-e 's/^(MINIO_ROOT_PASSWORD)="change-me"/\1="'"$pass"'"/' \
+		"$1"
+}
+
+_gen_pass() {
+	head /dev/urandom | tr -dc A-Za-z0-9 | head -c $1 && echo ''
 }
