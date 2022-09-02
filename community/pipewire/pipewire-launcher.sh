@@ -19,4 +19,4 @@ elif [ -x /usr/bin/pipewire-media-session ]; then
 	exec /usr/bin/pipewire-media-session &
 fi
 
-[ -f "/usr/share/pipewire/pipewire-pulse.conf" ] && exec /usr/bin/pipewire -c pipewire-pulse.conf &
+[ -f "/usr/share/pipewire/pipewire-pulse.conf" ] && exec /usr/bin/pipewire-pulse &
