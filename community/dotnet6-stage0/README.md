@@ -10,7 +10,7 @@ APKBUILD for dotnet6-stage0, initial bootstrap for dotnet
 * Build testing/dotnet6-build ("untainted" build of dotnet, and packages sdk)
 * Build testing/dotnet6-runtime (packages runtime bits from dotnet6-build
 
-# Special functions
-* abuild _update_source: Stage0 adapts prebuilt artifacts packages by replacing
-linux-x64 nupkgs with linux-musl-x64 versions. Any updates to artifacts will
-require executing this function to update source with up to date nuget packages
+# Notes on pulled bootstraps
+stage0 uses bootstraps built using `dotnet6-cross` aport available [here](https://gitlab.alpinelinux.org/ayakael/dotnet6-cross)
+To bootstrap a new architecture, that aport can be used to crossgen the minimum components from `x86_64`, which stage0 can then
+pull to build out the full stack from within the official aport.
