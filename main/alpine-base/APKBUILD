@@ -2,13 +2,24 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.17_alpha20220809
-pkgrel=2
+pkgrel=3
 pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
 license="MIT"
-depends="alpine-baselayout alpine-conf apk-tools busybox busybox-suid busybox-openrc dev-openrc
-	openrc libc-utils alpine-release"
+depends="
+	alpine-baselayout
+	alpine-conf
+	alpine-release
+	apk-tools
+	busybox
+	busybox-openrc
+	busybox-suid
+	dev-openrc
+	libc-utils
+	mdev-conf
+	openrc
+	"
 makedepends=""
 install=""
 subpackages="alpine-release:release"
