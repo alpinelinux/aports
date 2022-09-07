@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.3.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="noarch"
@@ -57,6 +57,7 @@ data() {
 	amove etc/hostname
 	amove etc/hosts
 	amove etc/inittab
+	amove etc/nsswitch.conf
 	amove etc/modules
 	amove etc/mtab
 	amove etc/passwd
