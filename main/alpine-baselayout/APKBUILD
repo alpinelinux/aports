@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.3.0
-pkgrel=0
+pkgrel=1
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="noarch"
@@ -229,6 +229,13 @@ package() {
 		Files with the .sh extension found in this directory are evaluated by
 		Bourne-compatible shells (like ash, bash or zsh) when started as a
 		login shell.
+	EOF
+	cat > "$pkgdir"/etc/nsswitch.conf <<-EOF
+		# musl itself does not support NSS, however some third-party DNS
+		# implementations use the nsswitch.conf file to determine what
+		# policy to follow.
+		# Editing this file is not recommended.
+		hosts: files dns
 	EOF
 
 	install -m644 \
