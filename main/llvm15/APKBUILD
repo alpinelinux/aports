@@ -1,0 +1,301 @@
+# Contributor: Rasmus Thomsen <oss@cogitri.dev>
+# Contributor: Martell Malone <martell@marinelayer.io>
+# Contributor: Travis Tilley <ttilley@gmail.com>
+# Contributor: Mitch Tishmack <mitch.tishmack@gmail.com>
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Contributor: Ariadne Conill <ariadne@dereferenced.org>
+# Contributor: omni <omni+alpine@hack.org>
+# Maintainer: psykose <alice@ayaya.dev>
+_pkgname=llvm
+pkgver=15.0.1
+_majorver=${pkgver%%.*}
+pkgname=$_pkgname$_majorver
+pkgrel=0
+pkgdesc="Low Level Virtual Machine compiler system, version $_majorver"
+arch="all"
+url="https://llvm.org/"
+license="Apache-2.0"
+depends_dev="$pkgname=$pkgver-r$pkgrel libffi-dev zlib-dev zstd-dev"
+# See https://gitlab.alpinelinux.org/alpine/aports/-/commit/51d2fba931fb2ef0046dea19405a9290c8735051#note_234651
+[ -z "$BOOTSTRAP" ] && depends_dev="$depends_dev $pkgname-test-utils=$pkgver-r$pkgrel"
+makedepends_host="$depends_dev binutils-dev libxml2-dev"
+makedepends_build="cmake chrpath python3 py3-setuptools samurai"
+# diffutils for diff: unrecognized option: strip-trailing-cr
+# coreutils for 'od' binary
+checkdepends="bash coreutils diffutils"
+subpackages="$pkgname-static $pkgname-libs $pkgname-dev $pkgname-test-utils:_test_utils"
+source="https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/llvm-project-$pkgver.src.tar.xz
+	0001-Disable-dynamic-lib-tests-for-musl-s-dlclose-is-noop.patch
+	fix-memory-mf_exec-on-aarch64.patch
+	install-prefix.patch
+	llvm-stack-size.patch
+	"
+builddir="$srcdir/$_pkgname-project-$pkgver.src"
+
+# If crosscompiling, we need llvm-tblgen on the build machine.
+if [ -n "$BOOTSTRAP" ]; then
+	makedepends_build="$makedepends_build cmd:llvm-tblgen"
+	cmake_cross_options="
+		-DCMAKE_CROSSCOMPILING=ON
+		-DLLVM_TABLEGEN=/usr/bin/llvm-tblgen
+	"
+fi
+
+# Whether is this package the default (latest) LLVM version.
+_default_llvm="yes"
+
+if [ "$_default_llvm" = yes ]; then
+	provides="llvm=$pkgver-r$pkgrel"
+	replaces="llvm"
+fi
+
+# explicit override for previous version as well
+replaces="llvm14"
+
+# NOTE: It seems that there's no (sane) way how to change includedir, sharedir
+# etc. separately, just the CMAKE_INSTALL_PREFIX. Standard CMake variables and
+# even  LLVM-specific variables, that are related to these paths, actually
+# don't work (in llvm 3.7).
+#
+# When building a software that depends on LLVM, utility llvm-config should be
+# used to discover where is LLVM installed. It provides options to print
+# path of bindir, includedir, and libdir separately, but in its source, all
+# these paths are actually hard-coded against INSTALL_PREFIX. We can patch it
+# and move paths manually, but I'm really not sure what it may break...
+#
+# Also note that we should *not* add version suffix to files in llvm bindir!
+# It breaks build system of some software that depends on LLVM, because they
+# don't expect these files to have a sufix.
+#
+# So, we install all the LLVM files into /usr/lib/llvm$_majorver.
+# BTW, Fedora and Debian do the same thing.
+#
+_prefix="usr/lib/llvm$_majorver"
+
+prepare() {
+	default_prepare
+
+	cd llvm
+
+	# Known broken test on musl
+	rm -v test/CodeGen/AArch64/wineh4.mir
+	# https://github.com/llvm/llvm-project/issues/47657
+	rm -v test/ExecutionEngine/Interpreter/intrinsics.ll
+
+	case "$CARCH" in
+	x86)
+		rm -v test/Object/macho-invalid.test \
+			test/tools/llvm-size/radix.test \
+			unittests/Support/JSONTest.cpp
+		sed -i "/JSONTest.cpp/d" \
+			unittests/Support/CMakeLists.txt
+		;;
+	arm*)
+		rm -v test/tools/llvm-readobj/ELF/dependent-libraries.test \
+			test/Object/macho-invalid.test \
+			test/tools/llvm-size/radix.test \
+			test/tools/gold/X86/split-dwarf.ll \
+			test/ExecutionEngine/frem.ll \
+			test/tools/llvm-dwarfdump/X86/prettyprint_types.s \
+			test/tools/llvm-dwarfdump/X86/simplified-template-names.s \
+			unittests/ExecutionEngine/Orc/OrcCAPITest.cpp \
+			test/CodeGen/RISCV/rv32zbp.ll \
+			test/CodeGen/RISCV/rv64zbp.ll
+		sed -i "/OrcCAPITest.cpp/d" \
+			unittests/ExecutionEngine/Orc/CMakeLists.txt
+		;;
+	esac
+
+	# Known broken codegen for Hexagon target, reported upstream.
+	# https://github.com/llvm/llvm-project/issues/48936
+	rm -v \
+		test/CodeGen/Hexagon/csr-stubs-spill-threshold.ll \
+		test/CodeGen/Hexagon/long-calls.ll \
+		test/CodeGen/Hexagon/mlong-calls.ll \
+		test/CodeGen/Hexagon/pic-regusage.ll \
+		test/CodeGen/Hexagon/runtime-stkchk.ll \
+		test/CodeGen/Hexagon/swp-memrefs-epilog.ll \
+		test/CodeGen/Hexagon/vararg-formal.ll \
+		test/tools/llvm-objcopy/MachO/universal-object.test \
+		test/DebugInfo/X86/vla-multi.ll
+}
+
+build() {
+	# Auto-detect it by guessing either.
+	local ffi_include_dir="$(pkg-config --cflags-only-I libffi | sed 's|^-I||g')"
+
+	# NOTE: DO NOT change CMAKE_BUILD_TYPE! Buildmodes like None will enable
+	# debug assertions for LLVM!
+	cmake -B build -G Ninja -Wno-dev -S llvm \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/$_prefix \
+		-DCMAKE_INSTALL_RPATH=/$_prefix \
+		\
+		-DLLVM_DEFAULT_TARGET_TRIPLE="$CBUILD" \
+		-DLLVM_HOST_TRIPLE="$CHOST" \
+		\
+		-DFFI_INCLUDE_DIR="$ffi_include_dir" \
+		-DLLVM_APPEND_VC_REV=OFF \
+		-DLLVM_BINUTILS_INCDIR=/usr/include \
+		-DLLVM_BUILD_DOCS=OFF \
+		-DLLVM_BUILD_EXAMPLES=OFF \
+		-DLLVM_BUILD_EXTERNAL_COMPILER_RT=ON \
+		-DLLVM_BUILD_LLVM_DYLIB=ON \
+		-DLLVM_BUILD_TESTS="$(want_check && echo ON || echo OFF)" \
+		-DLLVM_ENABLE_ASSERTIONS=OFF \
+		-DLLVM_ENABLE_EH=ON \
+		-DLLVM_ENABLE_FFI=ON \
+		-DLLVM_ENABLE_LIBCXX=OFF \
+		-DLLVM_ENABLE_PIC=ON \
+		-DLLVM_ENABLE_RTTI=ON \
+		-DLLVM_ENABLE_SPHINX=OFF \
+		-DLLVM_ENABLE_TERMINFO=ON \
+		-DLLVM_ENABLE_ZLIB=ON \
+		-DLLVM_INCLUDE_BENCHMARKS=OFF \
+		-DLLVM_INCLUDE_EXAMPLES=OFF \
+		-DLLVM_INSTALL_UTILS=ON \
+		-DLLVM_LINK_LLVM_DYLIB=ON \
+		$cmake_cross_options
+
+	cmake --build build
+
+	python3 llvm/utils/lit/setup.py build
+}
+
+check() {
+	LD_LIBRARY_PATH="$PWD/build/lib" \
+	ninja -C build check-llvm
+}
+
+package() {
+	DESTDIR="$pkgdir" cmake --install build
+
+	cd "$pkgdir"/$_prefix
+
+	# Symlink files from /usr/lib/llvm*/bin to /usr/bin.
+	mkdir -p "$pkgdir"/usr/bin
+	local name newname path
+	for path in bin/*; do
+		name=${path##*/}
+		# Add version infix/suffix to the executable name.
+		case "$name" in
+			llvm-*) newname="llvm$_majorver-${name#llvm-}";;
+			*) newname="$name$_majorver";;
+		esac
+		# If this package provides=llvm (i.e. it's the default/latest
+		# llvm package), omit version infix/suffix.
+		if [ "$_default_llvm" = yes ]; then
+			newname=$name
+		fi
+		case "$name" in
+			FileCheck | obj2yaml | yaml2obj) continue;;
+		esac
+		ln -s ../lib/llvm$_majorver/bin/$name "$pkgdir"/usr/bin/$newname
+	done
+
+	# Move /usr/lib/$pkgname/include/ into /usr/include/$pkgname/
+	# and symlink it back.
+	mkdir "$pkgdir"/usr/include/
+	mv include "$pkgdir"/usr/include/$pkgname
+	ln -s ../../include/$pkgname include
+
+	# Move /usr/lib/$pkgname/lib/cmake/llvm/ into /usr/lib/cmake/$pkgname/
+	# and symlink it back.
+	mkdir "$pkgdir"/usr/lib/cmake/
+	mv lib/cmake/llvm "$pkgdir"/usr/lib/cmake/$pkgname
+	ln -s ../../../cmake/$pkgname lib/cmake/llvm
+}
+
+static() {
+	pkgdesc="LLVM $_majorver static libraries"
+	_common_subpkg
+
+	_mv "$pkgdir"/$_prefix/lib/*.a "$subpkgdir"/$_prefix/lib/
+}
+
+libs() {
+	pkgdesc="LLVM $_majorver runtime library"
+	local soname="libLLVM-$_majorver.so"
+	local soname2="libLLVM-$pkgver.so"
+
+	mkdir -p "$subpkgdir"
+	cd "$subpkgdir"
+
+	# libLLVM should be in /usr/lib. This is needed for binaries that are
+	# dynamically linked with libLLVM, so they can find it on default path.
+	_mv "$pkgdir"/$_prefix/lib/$soname usr/lib/
+	ln -s $soname usr/lib/$soname2
+
+	# And also symlink it back to the LLVM prefix.
+	mkdir -p $_prefix/lib
+	ln -s ../../$soname $_prefix/lib/$soname
+	ln -s ../../$soname $_prefix/lib/$soname2
+}
+
+dev() {
+	_common_subpkg
+	default_dev
+	cd "$subpkgdir"
+
+	_mv "$pkgdir"/$_prefix/lib $_prefix/
+	_mv "$pkgdir"/$_prefix/include $_prefix/
+
+	_mv "$pkgdir"/$_prefix/bin/llvm-config $_prefix/bin/
+
+	# Move libLTO and LLVMgold back
+	_mv "$subpkgdir"/$_prefix/lib/libLTO.so.* \
+		"$subpkgdir"/$_prefix/lib/LLVMgold* \
+		"$pkgdir"/$_prefix/lib
+
+	if [ "$_default_llvm" = yes ]; then
+		ln -sf llvm$_majorver usr/lib/cmake/llvm
+		ln -sf llvm$_majorver/lib/LLVMgold.so "$pkgdir"/usr/lib/
+		ln -sf llvm$_majorver/lib/libLTO.so "$pkgdir"/usr/lib/
+	fi
+}
+
+_test_utils() {
+	pkgdesc="LLVM $_majorver utilities for executing LLVM and Clang style test suites"
+	depends="python3 py3-setuptools"
+	_common_subpkg
+
+	local litver=$(python3 "$builddir"/llvm/utils/lit/setup.py --version 2>/dev/null \
+		| sed 's/\.dev.*$//')
+	test -n "$litver"
+	provides="$provides lit=$litver-r$pkgrel"
+
+	python3 "$builddir"/llvm/utils/lit/setup.py install --prefix=/usr --root="$subpkgdir"
+
+	amove usr/lib/$pkgname/bin/FileCheck \
+		usr/lib/$pkgname/bin/count \
+		usr/lib/$pkgname/bin/not
+
+	mv "$subpkgdir"/usr/bin/lit "$subpkgdir"/$_prefix/bin/lit
+	ln -s /$_prefix/bin/lit "$subpkgdir"/$_prefix/bin/llvm-lit
+
+	if [ "$_default_llvm" = yes ]; then
+		amove usr/bin/count usr/bin/not
+		ln -s /$_prefix/bin/lit "$subpkgdir"/usr/bin/lit
+	fi
+}
+
+_common_subpkg() {
+	if [ "$_default_llvm" = yes ]; then
+		replaces="llvm${subpkgname#"$pkgname"}"
+		provides="$replaces=$pkgver-r$pkgrel"
+	fi
+}
+
+_mv() {
+	local dest; for dest; do true; done  # get last argument
+	mkdir -p "$dest"
+	mv "$@"
+}
+
+sha512sums="
+cef84bc173118a30db3ece5e5c6f874bf689c77afc40a4792fdcb7556555ac14a8e6de1dc811755405e5d162d63bc69abaecba30d220a42765160d69f0073fda  llvm-project-15.0.1.src.tar.xz
+84ed6b165445d0cdb59daa59f612a7d960bf67b13a1b19bdd2a19d46548013e756faca6b8249cb6c60354f3a9aaef46652e5f531944c71294e46d2f7bfd8b832  0001-Disable-dynamic-lib-tests-for-musl-s-dlclose-is-noop.patch
+18a8270dec2c86e88dc2686de655f98c22fd26c71cd2d06d0de68029a1b363851a07b897694c5af0871805e2f59ecaab9363375e0223d27bbd04838462edf5c8  fix-memory-mf_exec-on-aarch64.patch
+ebc0be314c129ef38f00c8c2be9d589658cae89ac8cda109e35933b5044e775a3d370c0c584d3e501e4d43167b8523d8c5e5a85653d8ebe853571697ae40fb35  install-prefix.patch
+18668bc5ba056b6f0cc2ef28db1d1a7a60d2ff67e8a741cbd704aba510128e6564f70a1bbc3140562445e03a83169f6cdf0ee4a6adba1a5009a689a7a3bb6541  llvm-stack-size.patch
+"
