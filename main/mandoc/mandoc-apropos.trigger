@@ -1,3 +1,3 @@
 #!/bin/sh
 
-exec /usr/sbin/makewhatis -a -T utf8 /usr/share/man
+exec /usr/sbin/makewhatis -T utf8
