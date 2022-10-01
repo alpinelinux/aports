@@ -5,4 +5,3 @@ for i in "$@"; do
 		update-mime-database "$i" > /dev/null 2>&1
 	fi
 done
-sync
