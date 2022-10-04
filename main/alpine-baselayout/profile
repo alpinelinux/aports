@@ -34,7 +34,6 @@ else
 	PS1='${HOSTNAME%%.*}:$PWD'
 	[ "$(id -u)" -eq 0 ] && PS1="${PS1}# " || PS1="${PS1}\$ "
 fi
-export PS1
 
 for script in /etc/profile.d/*.sh ; do
 	if [ -r "$script" ] ; then
