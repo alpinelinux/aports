@@ -1,0 +1,159 @@
+Patch-Source: https://gitlab.com/timvisee/ffsend/-/merge_requests/40
+--
+From 1de1b3a8572b48fb5041ba36af81495efcf81515 Mon Sep 17 00:00:00 2001
+From: Jakub Jirutka <jakub@jirutka.cz>
+Date: Sun, 9 Oct 2022 19:49:46 +0200
+Subject: [PATCH] Add support for clipboard on Wayland using wl-copy(1)
+
+wl-copy(1) from the wl-clipboard package is equivalent of xcopy(1)
+on Wayland desktops.
+---
+ Cargo.toml  |  2 +-
+ README.md   |  8 ++++----
+ build.rs    |  3 ++-
+ src/util.rs | 36 +++++++++++++++++++++++++++++++-----
+ 4 files changed, 38 insertions(+), 11 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index b91b9cd..e434248 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -98,7 +98,7 @@ infer-command = []
+ # Compile without colored output support
+ no-color = ["colored/no-color"]
+ 
+-# Automatic using build.rs: use xclip/xsel binary method for clipboard support
++# Automatic using build.rs: use wl-copy/xclip/xsel binary method for clipboard support
+ clipboard-bin = ["clipboard"]
+ 
+ # Automatic using build.rs: use native clipboard crate for clipboard support
+diff --git a/README.md b/README.md
+index cc9caf0..257cfee 100644
+--- a/README.md
++++ b/README.md
+@@ -140,10 +140,10 @@ all available subcommands.
+ - Linux:
+   - OpenSSL & CA certificates:
+     - Ubuntu, Debian and derivatives: `apt install openssl ca-certificates`
+-  - Optional: `xclip` or `xsel` for clipboard support
+-    - Ubuntu, Debian and derivatives: `apt install xclip`
+-    - CentOS/Red Hat/openSUSE/Fedora: `yum install xclip`
+-    - Arch: `pacman -S xclip`
++  - Optional: `wl-copy` (on Wayland), `xclip` (on Xorg) or `xsel` (on Xorg) for clipboard support
++    - Ubuntu, Debian and derivatives: `apt install wl-clipboard` or `apt install xclip`
++    - CentOS/Red Hat/openSUSE/Fedora: `yum install wl-clipboard` or `yum install xclip`
++    - Arch: `pacman -S wl-clipboard` or `pacman -S xclip`
+ - Windows specific:
+   - Optional OpenSSL with `crypto-openssl` feature: [» Installer][openssl-windows-installer] (`v1.1.0j` or above)
+ - macOS specific:
+diff --git a/build.rs b/build.rs
+index 32b3d32..dd4006c 100644
+--- a/build.rs
++++ b/build.rs
+@@ -14,7 +14,8 @@ fn main() {
+         #[cfg(not(feature = "clipboard-crate"))]
+         println!("cargo:rustc-cfg=feature=\"clipboard-bin\"");
+ 
+-        // xclip and xsel paths are inserted at compile time
++        // wl-copy, xclip and xsel paths are inserted at compile time
++        println!("cargo:rerun-if-env-changed=WL_COPY_PATH");
+         println!("cargo:rerun-if-env-changed=XCLIP_PATH");
+         println!("cargo:rerun-if-env-changed=XSEL_PATH");
+     }
+diff --git a/src/util.rs b/src/util.rs
+index d4dad97..d7e6237 100644
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -327,6 +327,12 @@ pub enum ClipboardType {
+     #[cfg(feature = "clipboard-crate")]
+     Native,
+ 
++    /// Manage clipboard through `wl-copy` (wl-clipboard) on Linux.
++    ///
++    /// May contain a binary path if specified at compile time through the `WL_COPY_PATH` variable.
++    #[cfg(feature = "clipboard-bin")]
++    Wlcopy(Option<String>),
++
+     /// Manage clipboard through `xclip` on Linux.
+     ///
+     /// May contain a binary path if specified at compile time through the `XCLIP_PATH` variable.
+@@ -351,10 +357,14 @@ impl ClipboardType {
+ 
+         #[cfg(feature = "clipboard-bin")]
+         {
+-            if let Some(path) = option_env!("XCLIP_PATH") {
++            if let Some(path) = option_env!("WL_COPY_PATH") {
++                ClipboardType::Wlcopy(Some(path.to_owned()))
++            } else if let Some(path) = option_env!("XCLIP_PATH") {
+                 ClipboardType::Xclip(Some(path.to_owned()))
+             } else if let Some(path) = option_env!("XSEL_PATH") {
+                 ClipboardType::Xsel(Some(path.to_owned()))
++            } else if which("wl-copy").is_ok() {
++                ClipboardType::Wlcopy(None)
+             } else if which("xclip").is_ok() {
+                 ClipboardType::Xclip(None)
+             } else if which("xsel").is_ok() {
+@@ -372,6 +382,8 @@ impl ClipboardType {
+             #[cfg(feature = "clipboard-crate")]
+             ClipboardType::Native => Self::native_set(content),
+             #[cfg(feature = "clipboard-bin")]
++            ClipboardType::Wlcopy(path) => Self::wlcopy_set(path.clone(), &content),
++            #[cfg(feature = "clipboard-bin")]
+             ClipboardType::Xclip(path) => Self::xclip_set(path.clone(), &content),
+             #[cfg(feature = "clipboard-bin")]
+             ClipboardType::Xsel(path) => Self::xsel_set(path.clone(), &content),
+@@ -389,6 +401,15 @@ impl ClipboardType {
+             .map_err(ClipboardError::Native)
+     }
+ 
++    #[cfg(feature = "clipboard-bin")]
++    fn wlcopy_set(path: Option<String>, content: &str) -> Result<(), ClipboardError> {
++        Self::sys_cmd_set(
++            "wl-copy",
++            &mut Command::new(path.unwrap_or_else(|| "wl-copy".into())),
++            content,
++        )
++    }
++
+     #[cfg(feature = "clipboard-bin")]
+     fn xclip_set(path: Option<String>, content: &str) -> Result<(), ClipboardError> {
+         Self::sys_cmd_set(
+@@ -456,6 +477,11 @@ impl fmt::Display for ClipboardType {
+             #[cfg(feature = "clipboard-crate")]
+             ClipboardType::Native => write!(f, "native"),
+             #[cfg(feature = "clipboard-bin")]
++            ClipboardType::Wlcopy(path) => match path {
++                None => write!(f, "wl-copy"),
++                Some(path) => write!(f, "wl-copy ({})", path),
++            },
++            #[cfg(feature = "clipboard-bin")]
+             ClipboardType::Xclip(path) => match path {
+                 None => write!(f, "xclip"),
+                 Some(path) => write!(f, "xclip ({})", path),
+@@ -479,19 +505,19 @@ pub enum ClipboardError {
+     #[fail(display = "failed to access clipboard")]
+     Native(#[cause] Compat<Error>),
+ 
+-    /// The `xclip` or `xsel` binary could not be found on the system, required for clipboard support.
++    /// The `wl-copy`, `xclip` or `xsel` binary could not be found on the system, required for clipboard support.
+     #[cfg(feature = "clipboard-bin")]
+-    #[fail(display = "failed to access clipboard, xclip or xsel is not installed")]
++    #[fail(display = "failed to access clipboard, neither wl-copy, xclip nor xsel is installed")]
+     NoBinary,
+ 
+-    /// An error occurred while using `xclip` or `xsel` to set the clipboard contents.
++    /// An error occurred while using `wl-copy`, `xclip` or `xsel` to set the clipboard contents.
+     /// This problem probably occurred when starting, or while piping the clipboard contents to
+     /// the process.
+     #[cfg(feature = "clipboard-bin")]
+     #[fail(display = "failed to access clipboard using {}", _0)]
+     BinaryIo(&'static str, #[cause] IoError),
+ 
+-    /// `xclip` or `xsel` unexpectedly exited with a non-successful status code.
++    /// `wl-copy`, `xclip` or `xsel` unexpectedly exited with a non-successful status code.
+     #[cfg(feature = "clipboard-bin")]
+     #[fail(
+         display = "failed to use clipboard, {} exited with status code {}",
+-- 
+GitLab
+
