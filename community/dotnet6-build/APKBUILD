@@ -6,9 +6,13 @@
 #     - CVE-2022-30184
 #   6.0.108-r0:
 #     - CVE-2022-34716
+#   6.0.109-r0:
+#     - CVE-2022-38013
+#   6.0.110-r0:
+#     - CVE-2022-41032
 
 pkgname=dotnet6-build
-pkgver=6.0.109
+pkgver=6.0.110
 pkgrel=0
 _gittag=v$pkgver
 _giturl="https://github.com/dotnet/installer"
@@ -25,12 +29,8 @@ _patches="
 	installer_musl-build-fix.patch
 	installer_portable-runtime-id.patch
 	installer_reprodicible-tarball.patch
-	runtime_detect-armv8.patch
-	runtime_deprecate-icu-ucol-safeclone.patch
-	runtime_fix-musl-123.patch
 	runtime_lld-fix.patch
 	runtime_non-portable-distrorid-fix-alpine.patch
-	runtime_rid-alpine-317.patch
 	sdk_add-zsh-compdef-completion-script.patch
 	sdk_portable-runtime-id.patch
 	sdk_telemetry-optout.patch
@@ -41,7 +41,7 @@ _pkgver_prior=${pkgver%.*.*}
 _pkgver_name=${_pkgver_macro//[.0]}
 pkgdesc="The .NET $_pkgver_macro bootstrap"
 arch="x86_64 aarch64 armv7"
-url=https://www.microsoft.com/net/core
+url=https://dotnet.microsoft.com
 license="MIT"
 # hack for dotnetx-build to be able to pull itself for bootstrapping
 provides="dotnet$_pkgver_name-bootstrap"
@@ -118,8 +118,9 @@ case $CARCH in
 	x86_64) _dotnet_arch="x64";;
 	aarch64) _dotnet_arch="arm64";;
 	armv7) _dotnet_arch="arm";;
-	armhf) _dotet_arch="armv6";;
-	s390x|ppc64le|x86) _dotnet_arch="$CARCH";;
+	armhf) _dotnet_arch="armv6";;
+	i586) _dotnet_arch="x86";;
+	*) _dotnet_arch="$CARCH";;
 esac
 
 # Build doesn't set all the right executable bits for the right file types
@@ -151,6 +152,7 @@ _fix_executable() {
 # generates tarball containing all components built by dotnet
 snapshot() {
 	local _pkg=$SRCDEST/${builddir##*/}.tar.gz
+	ulimit -n 4096
 	if [ -d "$srcdir" ]; then cd "$srcdir"; else mkdir -p "$srcdir" && cd "$srcdir"; fi
 	if [ -d "installer" ]; then cd "$srcdir"/installer; else git clone $_giturl --branch $_gittag && cd "$srcdir"/installer;fi
 
@@ -168,28 +170,30 @@ snapshot() {
 prepare() {
 	default_prepare
 
+	# check patches
+	msg "check_rid-alpine-generation.diff"
+	patch -p1 -d "$_testdir" -i "$srcdir"/check_rid-alpine-generation.diff
+
 	# Official crossgen package is broken on arm, x86, s390x
 	# see https://github.com/dotnet/runtime/issues/73908
 	if [ "$CARCH" = "armhf" ] || [ "$CARCH" = "armv7" ] || [ "$CARCH" = "x86" ] || [ "$CARCH" = "s390x" ]; then
+		msg "Disabling use of crossgen"
 		sed -i 's|<BuildCommandArgs>$(BuildCommandArgs) /p:EnablePackageValidation=false|<BuildCommandArgs>$(BuildCommandArgs) /p:CrossgenOutput=false /p:EnablePackageValidation=false|' repos/aspnetcore.proj
 		sed -i 's|<BuildCommandArgs>$(BuildCommandArgs) /p:UsePortableLinuxSharedFramework=false|<BuildCommandArgs>$(BuildCommandArgs) /p:DISABLE_CROSSGEN=True /p:UsePortableLinuxSharedFramework=false|' repos/installer.proj
 	fi
 	# Using system libunwind is broken on aarch64
 	# see https://github.com/dotnet/source-build/issues/2408,
 	if [ "$CARCH" != "aarch64" ] && [ "$CARCH" != "armv7" ] && [ "$CARCH" != "armhf" ]; then
+		msg "Using system libunwind"
 		sed -i 's|<InnerBuildArgs>$(InnerBuildArgs) /p:BuildDebPackage=false</InnerBuildArgs>|<InnerBuildArgs>$(InnerBuildArgs) /p:BuildDebPackage=false --cmakeargs -DCLR_CMAKE_USE_SYSTEM_LIBUNWIND=TRUE</InnerBuildArgs>|' src/runtime/eng/SourceBuild.props
 	fi
 
-	# patch for check
-	patch -p1 -d "$_testdir" -i "$srcdir"/check_rid-alpine-generation.diff
-
 	# dotnet requires its bootstrap to be in a writable dir
+	msg "Setting up bootstrap"
 	local _bootstrapdir=$(find $_libdir/dotnet/bootstrap/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
 	if [ ! -d "$_cli_root" ]; then cp -r "$_bootstrapdir" "$_cli_root"; fi
-
 	# ensure that dotnet does not download artifacts provided by dotnet-artifacts
 	rm -rf "$builddir"/packages/archive
-
 	# Adjusts OfficialBuildId to current date on tarball
 	sed -i "s|<OfficialBuildId>19900101.1</OfficialBuildId>|<OfficialBuildId>$(date +"%Y%m%d.1")</OfficialBuildId>|" "$builddir"/git-info/*
 }
@@ -201,27 +205,19 @@ build() {
 
 	# Disable use of LTTng as tracing on lttng <=2,13,0 is broken
 	# See https://github.com/dotnet/runtime/issues/57784.
-	if [ -f "/usr/lib/liblttng-ust.so.1 " ]; then
-		export DOTNET_LTTng=0
-	fi
+	if [ -f "/usr/lib/liblttng-ust.so.1 " ]; then export DOTNET_LTTng=0; fi
 
 	# looks for most recent recent version of _artifactsdir
 	local _artifactsdir=$(find $_libdir/dotnet/artifacts/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
 
-	# logs args, else the output is forwarded to log files which isn't ideal in a
-	# pipeline environment
+	# ci args, else the output is forwarded to log files which isn't ideal in a
+	# pipeline environment, and build by defaults uses lots of space
 	local args="
 		/v:minimal
 		/p:LogVerbosity=minimal
 		/p:MinimalConsoleLogOutput=true
+		/p:CleanWhileBuilding=true
 		"
-
-	# Build uses a lot of storage space. This cleans-up as we build for pipelines.
-	local args="$args /p:CleanWhileBuilding=true"
-
-	# PrebuiltPackagesPath needs to be set despite --with-packages,
-	# as build tools has an error
-	local args="$args /p:PrebuiltPackagesPath=$_artifactsdir"
 
 	# between releases, /etc/os-release sometimes has a VERSION_ID that is
 	# unsupported by dotnet's Rid format. As mitigation, TargetRid is set
@@ -244,8 +240,10 @@ check() {
 	local _disabled_tests="man-pages distribution-package bash-completion"
 	# we don't care if not latest release and not installed location
 	local _disabled_tests="$_disabled_tests release-version-sane install-location"
-	# test broken: no musl release for omnisharp
-	local _disabled_tests="$_disabled_tests omnisharp"
+	# test broken on all but x86_64 and aarch64: no musl release for omnisharp
+	if [ "$CARCH" != "x86_64" ] && [ "$CARCH" != "aarch64" ]; then
+		local _disabled_tests="$_disabled_tests omnisharp"
+	fi
 	# test broken: permission issue on lxc / pipelines
 	local _disabled_tests="$_disabled_tests createdump-aspnet workload"
 	# liblttng-ust_sys-sdt.h: no 'NT_STAPSDT' on Alpine's lttng-ust package
@@ -279,14 +277,8 @@ check() {
 	_fix_executable "$DOTNET_ROOT"
 
 	msg "Building turkey test suite"
-	if [ ! -d "$_checkdir"/turkey ]; then
-		cd "$_checkdir"/Turkey
-		dotnet publish \
-			-f netcoreapp3.1 \
-			-c Release \
-			-p:VersionPrefix=1 \
-			-p:VersionSuffix="$(git rev-parse --short HEAD)" \
-			-o "$_checkdir"/turkey
+	if [ ! -d "$_checkdir"/turkey ]; then cd "$_checkdir"/Turkey
+		dotnet publish -f netcoreapp3.1 -c Release -p:VersionPrefix=1 -p:VersionSuffix="$(git rev-parse --short HEAD)" -o "$_checkdir"/turkey
 	fi
 
 	msg "Running test suite"
@@ -301,7 +293,6 @@ check() {
 			msg "Dumping $i"
 			cat "$i"
 		done
-		return 1
 	fi
 }
 
@@ -451,7 +442,7 @@ doc() {
 }
 
 sha512sums="
-f743b1cd41b96bdabe5ef2dc84a5246592931fea6c7fb5c0bb2d1fd9af82a8815b1bf7ba4ee136866c1303734f4fc8b6afd407ab5c17ae28150c1ef97f381593  dotnet-v6.0.109.tar.gz
+b6e11caf180f1e8db4daa384d00a029a717c9b94379ad8a80252196a3900c18b627885e152ded7e7fd3bf33212d1b512593215439dc27e4cd19e71f74b3d1f85  dotnet-v6.0.110.tar.gz
 994e5145653698551408a87e34d19368e85a2531af9e2bfe61b903af0f016bfd5e4a7691795bdf09ba74bf6f41fc666973ee8cfde9088738f9a2f83f4bafa5e4  dotnet-testsuite-4832cef147bac35fdd5c57275a795e683bba0bb8.tar.gz
 fc281df5fcf0d31dc9ff7f5b0e870960cfbe3c4fa0f6a6bb50b22c4ee18d2c608c827205bc79bd7f686d77ac917582fc26f68432cdd86c4a33b910c0c7416d09  dotnet-bunny-71880bd94711519f7b786248a88a827a401207a2.tar.gz
 4394debb3cfec7bec7f223029c8283fd57b28ad765d47f354c7ca667756cbfc1ae4a51b216a0f81452400f60b58f08347bac327cd717a1947dad737b37cbe3ef  aspnetcore_musl-build-fix.patch
@@ -464,12 +455,8 @@ c8ab4e5beb2a169376f67fd467b16ed5e0762fbff3955dd99315b8b0fe514c8f6b2f9f75b92ee5fa
 8855d9090f473d61c975a2d08a2cfc1c1e9a868ce13a99b1932640973842ca9465e84f0d26216fd6313f0b83bc8e8436fc6336650ff1602e0d9037f7fc946c8b  installer_musl-build-fix.patch
 1fee07d86a390aa676a34c16d489905c3add7c1c1fb88a97e0f5680e1046ac7d4ebb4d2f057188e90301d012d24ecbd432309994ddcad8aaf71170e2c1970392  installer_portable-runtime-id.patch
 d95082cedd1a7e57744d9f5435b95f1031f6433256451e3469cfa5ec6da7110ef6231e8256e19e2c6366e18f819b2ec90d8c5afe63c8d2a385c897abf0c65d61  installer_reprodicible-tarball.patch
-1965a23de81ef989a4917de350c91b7d4432563505c2945ecbff3ff6aef7a7d938114839a6f49d8f2235ea183d2c5ee8b4e8d77f50361ceb8c8d691b74efdfd5  runtime_detect-armv8.patch
-20ef7b93b51ad11011a1a5e1058e2c490ce3f52e6859d6df655fce09e033ac3f0e5af17be1c640be38dc8884e0f3e0829db915dffd312484c6e83774afa2b333  runtime_deprecate-icu-ucol-safeclone.patch
-0706d32b9eba6da5d7bb925a185c6a3c8548065b8dc597b7b72e9cbbe688f1ca77f50da417def17c5fe15c8aa6fd537470c0824d21b318579ebb46d47e8a995c  runtime_fix-musl-123.patch
 5f465f6e3bfbff66551a5690eb41be46735f8e0b1e6e6503038521a8cc60cd66b7839426319ec304f785c9f074ef588b1f189ad6dbb6ced53257af28b09388f2  runtime_lld-fix.patch
-13c69df30e489213b4989140c552306a7b54253f111fc15923860433b6ba0429f0d53a0486152a8f410fa947d3dde645299808446ff6af29df3ef89bcc1c69a5  runtime_non-portable-distrorid-fix-alpine.patch
-2822d3ae1e722dfbfda8c33c1b97919e073a627f376b8e9e0831c32a4374da348fd0afe3d742617bfd0d413ba2becb8f85e6074fc7c6a7b415a9f48c385e8a0e  runtime_rid-alpine-317.patch
+8be4b028fb15d4bc0ba34711f7491c49b4908e017a9c46fcd3817c59aa1459c0217dca405f46cfaf5e115ad0fbcd60d2593c05c6e1da2632612bf6179867cd10  runtime_non-portable-distrorid-fix-alpine.patch
 d1b4ebcbb1a6815fc0ce4c471485c232618e60968a879309fb8336821a9351d2e0028d9f7726c0c041c750b497a0baa47400c78c9ceff550b91b4a6c2816fc41  sdk_add-zsh-compdef-completion-script.patch
 06490a00df6e52cf54dd757189381dbd98b4d36cdf5c6280e8c80d0074b38935160bf31613519816bccb593d417f04757c8fe7da3b175450c7fb5b337111251e  sdk_portable-runtime-id.patch
 815de1dad37412579b16d763debe2ecceffb44f5c46bd3f4ac00b3e431b20c677db435794eac41cea5601030b4e0f03f19e2d53c7a1ead896de2ffbca787eb84  sdk_telemetry-optout.patch
