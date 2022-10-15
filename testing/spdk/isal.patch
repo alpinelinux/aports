@@ -1,0 +1,223 @@
+submitted as: https://review.spdk.io/gerrit/c/spdk/spdk/+/14996
+
+--- a/CONFIG
++++ b/CONFIG
+@@ -158,6 +158,9 @@
+ 
+ # Build ISA-L library
+ CONFIG_ISAL=y
++CONFIG_ISAL_INC_DIR=
++CONFIG_ISAL_LIB_DIR=
++CONFIG_ISAL_PKG_CONFIG=n
+ 
+ # Build with IO_URING support
+ CONFIG_URING=n
+--- a/Makefile
++++ b/Makefile
+@@ -17,7 +17,9 @@
+ DIRS-$(CONFIG_APPS) += app
+ DIRS-y += test
+ DIRS-$(CONFIG_IPSEC_MB) += ipsecbuild
++ifneq ($(CONFIG_ISAL_PKG_CONFIG),y)
+ DIRS-$(CONFIG_ISAL) += isalbuild
++endif
+ DIRS-$(CONFIG_VFIO_USER) += vfiouserbuild
+ DIRS-y += python
+ DIRS-$(CONFIG_XNVME) += xnvmebuild
+@@ -58,10 +60,12 @@
+ DPDK_DEPS += ipsecbuild
+ endif
+ 
++ifneq ($(CONFIG_ISAL_PKG_CONFIG),y)
+ ifeq ($(CONFIG_ISAL),y)
+ ISALBUILD = isalbuild
+ LIB += isalbuild
+ DPDK_DEPS += isalbuild
++endif
+ endif
+ 
+ ifeq ($(CONFIG_VFIO_USER),y)
+--- a/configure
++++ b/configure
+@@ -52,6 +52,8 @@
+ 	echo "                           Implies --without-dpdk."
+ 	echo " --with-idxd               Build the IDXD library and accel framework plug-in module."
+ 	echo " --without-idxd            Disabled while experimental. Only built for x86 when enabled."
++	echo " --with-isal               Build against a system isa-l version. By default, the isa-l"
++	echo "                           submodule in spdk tree will be used."
+ 	echo " --with-crypto             Build vbdev crypto module."
+ 	echo " --without-crypto          No path required."
+ 	echo " --with-fio[=DIR]          Build fio_plugin."
+@@ -421,6 +423,22 @@
+ 		--without-dpdk)
+ 			CONFIG[DPDK_DIR]=
+ 			;;
++		--with-isal)
++			# Can we use pkg-config?
++			if command -v "pkg-config" > /dev/null 2>&1 && pkg-config --exists libisal; then
++				isal_libdir=$(pkg-config --variable=libdir libisal)
++				isal_libdir=$(readlink -f $isal_libdir)
++				isal_incdir=$(pkg-config --variable=includedir libisal)
++				echo "Using isa-l lib dir $isal_libdir"
++				CONFIG[ISAL_LIB_DIR]=$isal_libdir
++				CONFIG[ISAL_INC_DIR]=$isal_incdir
++				CONFIG[ISAL_PKG_CONFIG]=y
++				CFLAGS="${CFLAGS:+$CFLAGS }$(pkg-config --cflags libisal)"
++			else
++				echo "libisal.pc not found, aborting"
++				exit 1
++			fi
++			;;
+ 		--with-wpdk=*)
+ 			check_dir "$i"
+ 			CONFIG[WPDK_DIR]=$(readlink -f ${i#*=})
+@@ -1113,50 +1131,55 @@
+ 	exit 1
+ fi
+ 
+-if [[ $arch == x86_64* ]] || [[ $arch == aarch64* ]]; then
++if [[ "${CONFIG[ISAL_PKG_CONFIG]}" = "y" ]]; then
++	echo "Using system ISA-L"
+ 	CONFIG[ISAL]=y
+-	# make sure the submodule is initialized
+-	if [ ! -f "$rootdir"/isa-l/autogen.sh ]; then
+-		echo "ISA-L is required but was not found, please init the submodule with:"
+-		echo "  git submodule update --init"
+-		echo "and then re-run this script."
+-		exit 1
+-	fi
+-	# for x86 only, check the nasm version for ISA-L and IPSEC
+-	if [[ $arch == x86_64* ]]; then
+-		ver=$(nasm -v 2> /dev/null | awk '{print $3}' | awk -Fr '{print $1}')
+-		if lt "$ver" 2.14; then
+-			CONFIG[ISAL]=n
+-			# IPSEC has nasm requirement and DPDK crypto relies on IPSEC
+-			CONFIG[IPSEC_MB]=n
+-			echo "WARNING: ISA-L & DPDK crypto cannot be used as nasm ver must be 2.14 or newer."
++else
++	if [[ $arch == x86_64* ]] || [[ $arch == aarch64* ]]; then
++		CONFIG[ISAL]=y
++		# make sure the submodule is initialized
++		if [ ! -f "$rootdir"/isa-l/autogen.sh ]; then
++			echo "ISA-L is required but was not found, please init the submodule with:"
++			echo "  git submodule update --init"
++			echo "and then re-run this script."
++			exit 1
+ 		fi
++		# for x86 only, check the nasm version for ISA-L and IPSEC
++		if [[ $arch == x86_64* ]]; then
++			ver=$(nasm -v 2> /dev/null | awk '{print $3}' | awk -Fr '{print $1}')
++			if lt "$ver" 2.14; then
++				CONFIG[ISAL]=n
++				# IPSEC has nasm requirement and DPDK crypto relies on IPSEC
++				CONFIG[IPSEC_MB]=n
++				echo "WARNING: ISA-L & DPDK crypto cannot be used as nasm ver must be 2.14 or newer."
++			fi
++		fi
++	else
++		# for PPC
++		CONFIG[ISAL]=n
++		echo "WARNING: ISA-L cannot be used due to architecture incompatibility."
+ 	fi
+-else
+-	# for PPC
+-	CONFIG[ISAL]=n
+-	echo "WARNING: ISA-L cannot be used due to architecture incompatibility."
+-fi
+ 
+-# now either configure ISA-L or disable unavailable features
+-if [[ "${CONFIG[ISAL]}" = "y" ]]; then
+-	cd $rootdir/isa-l
+-	ISAL_LOG=$rootdir/isa-l/spdk-isal.log
+-	if [[ -n "${CONFIG[CROSS_PREFIX]}" ]]; then
+-		ISAL_OPTS=("--host=${CONFIG[CROSS_PREFIX]}")
++	# now either configure ISA-L or disable unavailable features
++	if [[ "${CONFIG[ISAL]}" = "y" ]]; then
++		cd $rootdir/isa-l
++		ISAL_LOG=$rootdir/isa-l/spdk-isal.log
++		if [[ -n "${CONFIG[CROSS_PREFIX]}" ]]; then
++			ISAL_OPTS=("--host=${CONFIG[CROSS_PREFIX]}")
++		else
++			ISAL_OPTS=()
++		fi
++		echo -n "Configuring ISA-L (logfile: $ISAL_LOG)..."
++		./autogen.sh &> $ISAL_LOG
++		./configure CFLAGS="-fPIC -g -O2" "${ISAL_OPTS[@]}" --enable-shared=no >> $ISAL_LOG 2>&1
++		echo "done."
++		cd $rootdir
+ 	else
+-		ISAL_OPTS=()
++		echo "Without ISA-L, there is no software support for crypto or compression,"
++		echo "so these features will be disabled."
++		CONFIG[CRYPTO]=n
++		CONFIG[REDUCE]=n
+ 	fi
+-	echo -n "Configuring ISA-L (logfile: $ISAL_LOG)..."
+-	./autogen.sh &> $ISAL_LOG
+-	./configure CFLAGS="-fPIC -g -O2" "${ISAL_OPTS[@]}" --enable-shared=no >> $ISAL_LOG 2>&1
+-	echo "done."
+-	cd $rootdir
+-else
+-	echo "Without ISA-L, there is no software support for crypto or compression,"
+-	echo "so these features will be disabled."
+-	CONFIG[CRYPTO]=n
+-	CONFIG[REDUCE]=n
+ fi
+ 
+ if [[ "${CONFIG[SMA]}" = "y" ]]; then
+--- a/lib/accel/accel_sw.c
++++ b/lib/accel/accel_sw.c
+@@ -20,7 +20,11 @@
+ #endif
+ 
+ #ifdef SPDK_CONFIG_ISAL
++#ifndef SPDK_CONFIG_ISAL_PKG_CONFIG
+ #include "../isa-l/include/igzip_lib.h"
++#else
++#include "isa-l/igzip_lib.h"
++#endif
+ #endif
+ 
+ struct sw_accel_io_channel {
+--- a/lib/util/crc16.c
++++ b/lib/util/crc16.c
+@@ -11,7 +11,11 @@
+  */
+ 
+ #ifdef SPDK_CONFIG_ISAL
++#ifndef SPDK_CONFIG_ISAL_PKG_CONFIG
+ #include "isa-l/include/crc.h"
++#else
++#include "isa-l/crc.h"
++#endif
+ 
+ uint16_t
+ spdk_crc16_t10dif(uint16_t init_crc, const void *buf, size_t len)
+--- a/lib/util/crc32c.c
++++ b/lib/util/crc32c.c
+@@ -8,7 +8,11 @@
+ 
+ #ifdef SPDK_CONFIG_ISAL
+ #define SPDK_HAVE_ISAL
++#ifndef SPDK_CONFIG_ISAL_PKG_CONFIG
+ #include <isa-l/include/crc.h>
++#else
++#include <isa-l/crc.h>
++#endif
+ #elif defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
+ #define SPDK_HAVE_ARM_CRC
+ #include <arm_acle.h>
+--- a/lib/util/xor.c
++++ b/lib/util/xor.c
+@@ -85,7 +85,11 @@
+ }
+ 
+ #ifdef SPDK_CONFIG_ISAL
++#ifndef SPDK_CONFIG_ISAL_PKG_CONFIG
+ #include "isa-l/include/raid.h"
++#else
++#include "isa-l/raid.h"
++#endif
+ 
+ #define SPDK_XOR_BUF_ALIGN 32
+ 
