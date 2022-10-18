@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.3.0
-pkgrel=2
+pkgrel=3
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="noarch"
@@ -13,7 +13,7 @@ depends="$pkgname-data=${pkgver}-r${pkgrel}"
 subpackages="$pkgname-data"
 install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
 	$pkgname.post-install"
-_nbver=6.2
+_nbver=6.4
 source="crontab
 	color_prompt.sh.disabled
 	locale.sh
@@ -269,6 +269,6 @@ bfe947bdd69e7d93b32c8cb4e2cabe5717cb6c1e1f49a74015ac2cfb13e96d1f12c4be23ae93a1d6
 fdab6f8fec2a556ab817d90a73635a927ea04dbc4e0470ed59ee6a62c87393f9534c9b746b09a776d938c25b8af9c9fb1686578e24f8307d1d074921ade1bdc7  inittab
 06d12a7b9ca14fe17e412d0f24814620b67d035ae859be7906cbf4782dd69e359a6a555dafb98060b7fb7e4714aaa676c88d9017cded36e6d8398e23369bb290  passwd
 dfc810763c5d94ef6bd149bdb0b152712c0c0aadc7ad3c5c916e2c6e8ed57246e3cdac50d2743b9d009267bdbd47e91b6ad58fe6d068baf132043c38e8fd820d  profile
-eadc83e47fcc354ab83fd109bee452bda170886fb684e67faf615930c11480919505f4af60c685b124efc54af0ded9522663132f911eac6622144f8b4c8be695  protocols-6.2
-adfae0d2f569c2a2f413b7e27683a007fc8ca689b8c3349672fe0dcb6208c192ede4402eff09c604b7e7b4fd9d8df93b875efa5bdaa6c14ff1d8022a7caad5cd  services-6.2
+3a00083bcdf5a9e884c9d07877d52311e3d99e79cbee656e236ba06e08ba0dddb7ba76494fdc9dd1a826c48e197a790a69e6bb458e9df64832d6b5e904e9fd15  protocols-6.4
+47b0f3ee73af2d259bd206a026204be0ea25531a895a0b035a904b38fe5407bc3dd2beab7f8fcb3d760587e6159702ebdb9cbc4f508942befdf7f10c10c87888  services-6.4
 "
