@@ -1,0 +1,173 @@
+From 577a70afa472a2b7aa8e05947e185d920f42b23d Mon Sep 17 00:00:00 2001
+Patch-Source: https://github.com/dotnet/runtime/pull/60675
+From: Adeel Mujahid <3840695+am11@users.noreply.github.com>
+Date: Tue, 2 Nov 2021 17:47:37 +0200
+Subject: [PATCH] Fix gcc warnings during mono linux-x64 build (#60675)
+ 
+* Fix gcc warnings during mono linux-x64 build
+ 
+main with Debug configuration: 822 warnings - http://sprunge.us/2GzrDE
+PR with Debug configuration: 3 warnings related to deprecated sys/sysctl.h includes - http://sprunge.us/JuyA3K
+ 
+after fixing Debug warnings, there were 13 additional warnings in Release configuration:
+http://sprunge.us/PJCivP
+ 
+PR with Release configuration: (same) 3 warnings - http://sprunge.us/NwKHNE
+ 
+* Address CR feedback
+---
+ src/mono/cmake/config.h.in                    |  7 +--
+ src/mono/cmake/configure.cmake                | 40 +++++++++++---
+ src/mono/cmake/defines-todo.cmake             |  1 -
+ src/mono/mono/eglib/src/runtime/gstr.c                    | 14 ++---
+ src/mono/mono/utils/mono-proclib.c            | 28 +++++-----
+ 5 files changed, 173 insertions(+), 192 deletions(-)
+ 
+diff --git a/src/runtime/src/mono/cmake/config.h.in b/src/runtime/src/mono/cmake/config.h.in
+index 48a82ec6db8c4..648ad60dd0494 100644
+--- a/src/runtime/src/mono/cmake/config.h.in
++++ b/src/runtime/src/mono/cmake/config.h.in
+@@ -510,14 +510,11 @@
+ /* Define to 1 if you have the `strerror_r' function. */
+ #cmakedefine HAVE_STRERROR_R 1
+ 
+-/* Define to 1 if strerror_r returns char *. */
+-#cmakedefine STRERROR_R_CHAR_P 1
+-
+ /* Have GLIBC_BEFORE_2_3_4_SCHED_SETAFFINITY */
+ #cmakedefine GLIBC_BEFORE_2_3_4_SCHED_SETAFFINITY 1
+ 
+ /* GLIBC has CPU_COUNT macro in sched.h */
+-#cmakedefine GLIBC_HAS_CPU_COUNT 1
++#cmakedefine HAVE_GNU_CPU_COUNT
+ 
+ /* Have large file support */
+ #cmakedefine HAVE_LARGE_FILE_SUPPORT 1
+@@ -712,6 +709,8 @@
+ /* The size of `size_t', as computed by sizeof. */
+ #define SIZEOF_SIZE_T @SIZEOF_SIZE_T@
+ 
++#cmakedefine01 HAVE_GNU_STRERROR_R
++
+ /* Define to 1 if the system has the type `struct sockaddr'. */
+ #cmakedefine HAVE_STRUCT_SOCKADDR 1
+ 
+diff --git a/src/runtime/src/mono/cmake/configure.cmake b/src/runtime/src/mono/cmake/configure.cmake
+index 7bee1c6b98553..e8e9fb9e67d79 100644
+--- a/src/runtime/src/mono/cmake/configure.cmake
++++ b/src/runtime/src/mono/cmake/configure.cmake
+@@ -135,6 +135,37 @@
+ check_type_size("long long" SIZEOF_LONG_LONG)
+ check_type_size("size_t" SIZEOF_SIZE_T)
+ 
++if (HOST_LINUX OR HOST_ANDROID)
++  set(CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
++endif()
++
++check_c_source_compiles(
++  "
++  #include <string.h>
++  int main(void)
++  {
++    char buffer[1];
++    char c = *strerror_r(0, buffer, 0);
++    return 0;
++  }
++  "
++  HAVE_GNU_STRERROR_R)
++
++check_c_source_compiles(
++  "
++  #include <sched.h>
++  int main(void)
++  {
++    CPU_COUNT((void *) 0);
++    return 0;
++  }
++  "
++  HAVE_GNU_CPU_COUNT)
++
++if (HOST_LINUX OR HOST_ANDROID)
++  set(CMAKE_REQUIRED_DEFINITIONS)
++endif()
++
+ # ICONV
+ set(ICONV_LIB)
+ find_library(LIBICONV_FOUND iconv)
+@@ -142,14 +173,6 @@
+   set(ICONV_LIB "iconv")
+ endif()
+ 
+-file(WRITE ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/CMakeTmp/test.c
+-  "#include <sched.h>\n"
+-  "void main () { CPU_COUNT((void *) 0); }\n"
+-)
+-try_compile(GLIBC_HAS_CPU_COUNT ${CMAKE_BINARY_DIR}/CMakeTmp SOURCES "${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/CMakeTmp/test.c"
+-    COMPILE_DEFINITIONS "-D_GNU_SOURCE")
+-
+-
+ if(HOST_WIN32)
+   # checking for this doesn't work for some reason, hardcode result
+   set(HAVE_WINTERNL_H 1)
+diff --git a/src/runtime/src/mono/cmake/defines-todo.cmake b/src/runtime/src/mono/cmake/defines-todo.cmake
+index d45098d4eea4f..8d2828d53e9ba 100644
+--- a/src/runtime/src/mono/cmake/defines-todo.cmake
++++ b/src/runtime/src/mono/cmake/defines-todo.cmake
+@@ -4,7 +4,6 @@
+ 
+ #option (MAJOR_IN_MKDEV "Define to 1 if `major', `minor', and `makedev' are declared in <mkdev.h>.")
+ #option (MAJOR_IN_SYSMACROS "Define to 1 if `major', `minor', and `makedev' are declared in <sysmacros.h>.")
+-#option (STRERROR_R_CHAR_P "Define to 1 if strerror_r returns char *.")
+ #option (HAVE_LIBICONV "Define to 1 if you have the `iconv' library (-liconv).")
+ #option (ANDROID_UNIFIED_HEADERS "Whether Android NDK unified headers are used")
+ #option (MONO_DL_NEED_USCORE "Does dlsym require leading underscore.")
+diff --git a/src/runtime/src/mono/mono/eglib/src/runtime/gstr.c b/src/mono/mono/eglib/gstr.c
+index c549b241894f1..cbf63d8f02b97 100644
+--- a/src/runtime/src/mono/mono/eglib/src/runtime/gstr.c
++++ b/src/runtime/src/mono/mono/eglib/gstr.c
+@@ -249,7 +249,11 @@ g_strerror (gint errnum)
+ 		size_t buff_len = sizeof (tmp_buff);
+ 		buff [0] = 0;
+ 
+-#ifndef STRERROR_R_CHAR_P
++#if HAVE_GNU_STRERROR_R
++                buff = strerror_r (errnum, buff, buff_len);
++                if (!error_messages [errnum])
++                        error_messages [errnum] = g_strdup (buff);
++#else /* HAVE_GNU_STRERROR_R */
+ 		int r;
+ 		while ((r = strerror_r (errnum, buff, buff_len - 1))) {
+ 			if (r != ERANGE) {
+@@ -261,17 +265,13 @@ g_strerror (gint errnum)
+ 			else
+ 				buff = g_realloc (buff, buff_len * 2);
+ 			buff_len *= 2;
+-		 //Spec is not clean on whether size argument includes space for null terminator or not	
++		 //Spec is not clean on whether size argument includes space for null terminator or not
+ 		}
+ 		if (!error_messages [errnum])
+ 			error_messages [errnum] = g_strdup (buff);
+ 		if (buff != tmp_buff)
+ 			g_free (buff);
+-#else /* STRERROR_R_CHAR_P */
+-		buff = strerror_r (errnum, buff, buff_len);
+-		if (!error_messages [errnum])
+-			error_messages [errnum] = g_strdup (buff);
+-#endif /* STRERROR_R_CHAR_P */
++#endif /* HAVE_GNU_STRERROR_R */
+ 
+ #else /* HAVE_STRERROR_R */
+ 		if (!error_messages [errnum])
+diff --git a/src/runtime/src/mono/mono/utils/mono-proclib.c b/src/runtime/src/mono/mono/utils/mono-proclib.c
+index 1fe731d9fe0f5..9a33fc2924e6b 100644
+--- a/src/runtime/src/mono/mono/utils/mono-proclib.c
++++ b/src/runtime/src/mono/mono/utils/mono-proclib.c
+@@ -81,7 +81,7 @@
+ #endif
+ 
+ #ifdef HAVE_SCHED_GETAFFINITY
+-#  ifndef GLIBC_HAS_CPU_COUNT
++#  ifndef HAVE_GNU_CPU_COUNT
+ static int
+ CPU_COUNT(cpu_set_t *set)
+ {
