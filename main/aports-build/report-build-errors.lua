@@ -6,6 +6,26 @@ local f = io.open("/proc/sys/kernel/hostname")
 hostname = f:read()
 f:close()
 
+local function read_mosquitto_conf()
+	local cfg = {}
+	local f = io.open((os.getenv("XDG_CONFIG_HOME") or "").."/mosquitto_pub") or io.open((os.getenv("HOME") or "").."/.config/mosquitto_pub")
+	if f == nil then
+		return cfg
+	end
+	for line in f:lines() do
+		key,value = line:match("^%-%-([^ ]+)%s+(.*)")
+		if key and value then
+			cfg[key] = value
+		end
+	end
+	f:close()
+	return cfg
+end
+local mcfg = read_mosquitto_conf()
+publish.hostname = mcfg.hostname or "localhost"
+publish.username = mcfg.username
+publish.password = mcfg.pw
+
 local m = {}
 
 function shell_escape(args)
