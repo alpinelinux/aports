@@ -3,26 +3,30 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=nss
 pkgver=3.84
-pkgrel=0
+pkgrel=1
 pkgdesc="Mozilla Network Security Services"
 url="https://developer.mozilla.org/docs/Mozilla/Projects/NSS"
 arch="all"
 license="MPL-2.0"
 depends_dev="nspr-dev"
-makedepends="nspr-dev sqlite-dev zlib-dev perl bsd-compat-headers linux-headers"
-checkdepends="bash"
-subpackages="$pkgname-static $pkgname-dev $pkgname-tools"
+makedepends="
+	$depends_dev
+	bash
+	bsd-compat-headers
+	linux-headers
+	gyp
+	perl
+	sqlite-dev
+	zlib-dev
+	"
+subpackages="$pkgname-dev $pkgname-tools"
 source="https://ftp.mozilla.org/pub/security/nss/releases/NSS_${pkgver//./_}_RTM/src/nss-$pkgver.tar.gz
+	gyp-config.patch
 	nss.pc.in
 	nss-util.pc.in
 	nss-softokn.pc.in
 	nss-config.in
 	"
-# FIPS mode requires a signed cryptographic module.  Stripping the binaries
-# invalidates the signatures generated during the build process.  In reality,
-# we should probably just drop FIPS support because we're not FIPS-certified,
-# but we can debate that later.
-options="!strip"
 
 # secfixes:
 #   3.76.1-r0:
@@ -47,54 +51,19 @@ options="!strip"
 #   3.39-r0:
 #     - CVE-2018-12384
 
-prepare() {
-	default_prepare
-
-	# Respect LDFLAGS
-	sed 's/\$(MKSHLIB) -o/\$(MKSHLIB) \$(LDFLAGS) -o/g' \
-		-i nss/coreconf/rules.mk
-
-	# Fix missing includes
-	echo 'INCLUDES += -I../include' \
-		>> nss/lib/dbm/src/manifest.mn
-	sed 's|-Ideprecated|-Ideprecated -I../util -I../softoken -I.|' \
-		-i nss/lib/freebl/Makefile
-	echo 'INCLUDES += -I../util' \
-		>> nss/lib/sysinit/manifest.mn
-}
-
 build() {
-	unset CFLAGS
-	unset CXXFLAGS
-	# Don't do a debug build
-	export BUILD_OPT=1
-	# Use -Os instead of -O2 where possible
-	export OPT_CODE_SIZE=1
-	# Explicitly link freebl lib with nspr
-	export FREEBL_NO_DEPEND=0
-	export NSS_USE_SYSTEM_SQLITE=1
-	export NSS_DISABLE_GTESTS=1
-	# Disable deprecated cipher
-	export NSS_DISABLE_DEPRECATED_SEED=1
-	export NSS_DISABLE_DEPRECATED_RC2=1
-	export NSPR_INCLUDE_DIR=$(pkg-config --cflags-only-I nspr | sed 's/-I//')
-	export NSPR_LIB_DIR=$(pkg-config --libs-only-L nspr | sed 's/-L//')
-	case "$CARCH" in
-		*64* | s390x) export USE_64=1;;
-	esac
-
-	make -C nss/coreconf
-	make -C nss/lib/util
-	make -C nss/lib/dbm
-	make -C nss/lib/sysinit
-	# "all" really doesn't build all targets, so we have to list the others we want above
-	make -C nss all
+	cd nss
+	./build.sh \
+		--opt \
+		--system-nspr \
+		--system-sqlite \
+		--enable-libpkix
 }
 
 check() {
 	cd nss/tests
-	# other tests are failing with NSS_DISABLE_DEPRECATED_SEED=1 and NSS_DISABLE_GTESTS=1
-	export NSS_TESTS="cipher libpkix"
+	# other tests are failing for some reason and prompt an interactive password
+	export NSS_TESTS="cipher lowhash libpkix"
 	export NSS_CYCLES=standard
 	HOST=localhost DOMSUF=localdomain bash ./all.sh
 }
@@ -102,15 +71,12 @@ check() {
 package() {
 	replaces="nss-dev libnss"
 
-	install -m755 -d "$pkgdir"/usr/lib/pkgconfig
-	install -m755 -d "$pkgdir"/usr/bin
-	install -m755 -d "$pkgdir"/usr/include/nss/private
-
 	NSS_VMAJOR=$(awk '/#define.*NSS_VMAJOR/ {print $3}' nss/lib/nss/nss.h)
 	NSS_VMINOR=$(awk '/#define.*NSS_VMINOR/ {print $3}' nss/lib/nss/nss.h)
 	NSS_VPATCH=$(awk '/#define.*NSS_VPATCH/ {print $3}' nss/lib/nss/nss.h)
 
 	# pkgconfig files
+	mkdir -p "$pkgdir"/usr/lib/pkgconfig
 	local _pc; for _pc in nss.pc nss-util.pc nss-softokn.pc; do
 		sed "$srcdir"/$_pc.in \
 			-e "s,%libdir%,/usr/lib,g" \
@@ -127,6 +93,7 @@ package() {
 	chmod 644 "$pkgdir"/usr/lib/pkgconfig/*.pc
 
 	# nss-config
+	mkdir -p "$pkgdir"/usr/bin
 	sed "$srcdir"/nss-config.in \
 		-e "s,@libdir@,/usr/lib,g" \
 		-e "s,@prefix@,/usr/bin,g" \
@@ -137,42 +104,34 @@ package() {
 		-e "s,@MOD_PATCH_VERSION@,${NSS_VPATCH},g" \
 		> "$pkgdir"/usr/bin/nss-config
 	chmod 755 "$pkgdir"/usr/bin/nss-config
+
 	local minor=${pkgver#*.}
 	minor=${minor%.*}
-	for file in $(find dist/*.OBJ/lib -name "*.so"); do
-		install -m755 $file \
+	for file in $(find dist/Release/lib -name "*.so"); do
+		install -Dm755 $file \
 			"$pkgdir"/usr/lib/${file##*/}.$minor
 		ln -s ${file##*/}.$minor "$pkgdir"/usr/lib/${file##*/}
 	done
-	install -m644 dist/*.OBJ/lib/*.a "$pkgdir"/usr/lib/
-	install -m644 dist/*.OBJ/lib/*.chk "$pkgdir"/usr/lib/
 
 	for file in certutil cmsutil crlutil modutil pk12util shlibsign \
 			signtool signver ssltap; do
-		install -m755 dist/*.OBJ/bin/$file "$pkgdir"/usr/bin/
+		install -Dm755 dist/Release/bin/$file -t "$pkgdir"/usr/bin/
 	done
-	install -m644 dist/public/nss/*.h "$pkgdir"/usr/include/nss/
-	install -m644 dist/private/nss/blapi.h dist/private/nss/alghmac.h "$pkgdir"/usr/include/nss/private/
-}
 
-static() {
-	default_static
-
-	# remove libssl.a which conflicts with openssl
-	rm "$subpkgdir"/usr/lib/libssl.a
+	install -Dm644 dist/public/nss/*.h -t "$pkgdir"/usr/include/nss/
+	install -Dm644 dist/private/nss/blapi.h dist/private/nss/alghmac.h -t "$pkgdir"/usr/include/nss/private/
 }
 
 dev() {
 	# we cannot use default_dev because we need the .so symlinks in main package
 	local i
 	pkgdesc="Development files for nss"
-	depends="$pkgname $depends_dev"
+	depends="$pkgname=$pkgver-r$pkgrel $depends_dev"
 
-	mkdir -p "$subpkgdir"/usr/bin
-	mv "$pkgdir"/usr/bin/nss-config "$subpkgdir"/usr/bin
+	amove usr/bin/nss-config
 
 	cd "$pkgdir"
-	for i in usr/include usr/lib/pkgconfig usr/lib/*.a; do
+	for i in usr/include usr/lib/pkgconfig; do
 		if [ -e "$pkgdir/$i" ] || [ -L "$pkgdir/$i" ]; then
 			d="$subpkgdir/${i%/*}"  # dirname $i
 			mkdir -p "$d"
@@ -185,12 +144,13 @@ dev() {
 tools() {
 	pkgdesc="Tools for the Network Security Services"
 	replaces="nss"
-	mkdir -p "$subpkgdir"/usr/
-	mv "$pkgdir"/usr/bin "$subpkgdir"/usr/
+
+	amove usr/bin
 }
 
 sha512sums="
 b4ed4b2e44d9f896a4a4c33f92813a84825dc4502f4e14e047f3583666c453138515e6edbcd71144c4b02a8ee16b3443803f1ff12458fd82c338ee1dd911b175  nss-3.84.tar.gz
+8e0f711c53955e5374d5a562265f9b8f70d51f3615adfbd39b89d22f3ba4314a6555b1ec81f36ee4e4c660c8a604cd331e0ef94649043ae9afafb5fd48f9ab44  gyp-config.patch
 75dbd648a461940647ff373389cc73bc8ec609139cd46c91bcce866af02be6bcbb0524eb3dfb721fbd5b0bc68c20081ed6f7debf6b24317f2a7ba823e8d3c531  nss.pc.in
 0f2efa8563b11da68669d281b4459289a56f5a3a906eb60382126f3adcfe47420cdcedc6ab57727a3afeeffa2bbb4c750b43bef8b5f343a75c968411dfa30e09  nss-util.pc.in
 09c69d4cc39ec9deebc88696a80d0f15eb2d8c94d9daa234a2adfec941b63805eb4ce7f2e1943857b938bddcaee1beac246a0ec627b71563d9f846e6119a4a15  nss-softokn.pc.in
