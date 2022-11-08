@@ -106,7 +106,6 @@ profile_rpi() {
 	image_ext="tar.gz"
 	arch="aarch64 armhf armv7"
 	kernel_flavors="rpi"
-	apks="$apks linux-firmware-brcm"
 	case "$ARCH" in
 		aarch64) kernel_flavors="rpi rpi4";;
 		armhf) kernel_flavors="rpi rpi2";;
