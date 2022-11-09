@@ -1,0 +1,99 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/spec-ctrl: Mitigate IBPB not flushing the RSB/RAS
+
+Introduce spec_ctrl_new_guest_context() to encapsulate all logic pertaining to
+using MSR_PRED_CMD for a new guest context, even if it only has one user
+presently.
+
+Introduce X86_BUG_IBPB_NO_RET, and use it extend spec_ctrl_new_guest_context()
+with a manual fixup for hardware which mis-implements IBPB.
+
+This is part of XSA-422 / CVE-2022-23824.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+
+diff --git a/xen/arch/x86/asm-macros.c b/xen/arch/x86/asm-macros.c
+index b963d56a5663..8c585697b9f6 100644
+--- a/xen/arch/x86/asm-macros.c
++++ b/xen/arch/x86/asm-macros.c
+@@ -1 +1,2 @@
+ #include <asm/alternative-asm.h>
++#include <asm/spec_ctrl_asm.h>
+diff --git a/xen/arch/x86/domain.c b/xen/arch/x86/domain.c
+index 4fb78d38e719..b3774af1a5f6 100644
+--- a/xen/arch/x86/domain.c
++++ b/xen/arch/x86/domain.c
+@@ -1832,7 +1832,7 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
+              */
+             if ( *last_id != next_id )
+             {
+-                wrmsrl(MSR_PRED_CMD, PRED_CMD_IBPB);
++                spec_ctrl_new_guest_context();
+                 *last_id = next_id;
+             }
+         }
+diff --git a/xen/arch/x86/spec_ctrl.c b/xen/arch/x86/spec_ctrl.c
+index 679fbac57ec7..c650e07b0629 100644
+--- a/xen/arch/x86/spec_ctrl.c
++++ b/xen/arch/x86/spec_ctrl.c
+@@ -777,6 +777,14 @@ static void __init ibpb_calculations(void)
+     }
+ 
+     /*
++     * AMD/Hygon CPUs to date (June 2022) don't flush the the RAS.  Future
++     * CPUs are expected to enumerate IBPB_RET when this has been fixed.
++     * Until then, cover the difference with the software sequence.
++     */
++    if ( boot_cpu_has(X86_FEATURE_IBPB) && !boot_cpu_has(X86_FEATURE_IBPB_RET) )
++        setup_force_cpu_cap(X86_BUG_IBPB_NO_RET);
++
++    /*
+      * IBPB-on-entry mitigations for Branch Type Confusion.
+      *
+      * IBPB && !BTC_NO selects all AMD/Hygon hardware, not known to be safe,
+diff --git a/xen/include/asm-x86/cpufeatures.h b/xen/include/asm-x86/cpufeatures.h
+index b233e5835fb5..bdb119a34c5d 100644
+--- a/xen/include/asm-x86/cpufeatures.h
++++ b/xen/include/asm-x86/cpufeatures.h
+@@ -48,6 +48,7 @@ XEN_CPUFEATURE(IBPB_ENTRY_HVM,    X86_SYNTH(29)) /* MSR_PRED_CMD used by Xen for
+ 
+ #define X86_BUG_FPU_PTRS          X86_BUG( 0) /* (F)X{SAVE,RSTOR} doesn't save/restore FOP/FIP/FDP. */
+ #define X86_BUG_CLFLUSH_MFENCE    X86_BUG( 2) /* MFENCE needed to serialise CLFLUSH */
++#define X86_BUG_IBPB_NO_RET       X86_BUG( 3) /* IBPB doesn't flush the RSB/RAS */
+ 
+ /* Total number of capability words, inc synth and bug words. */
+ #define NCAPINTS (FSCAPINTS + X86_NR_SYNTH + X86_NR_BUG) /* N 32-bit words worth of info */
+diff --git a/xen/include/asm-x86/spec_ctrl.h b/xen/include/asm-x86/spec_ctrl.h
+index 33e845991b0a..e400ff227391 100644
+--- a/xen/include/asm-x86/spec_ctrl.h
++++ b/xen/include/asm-x86/spec_ctrl.h
+@@ -65,6 +65,28 @@
+ void init_speculation_mitigations(void);
+ void spec_ctrl_init_domain(struct domain *d);
+ 
++/*
++ * Switch to a new guest prediction context.
++ *
++ * This flushes all indirect branch predictors (BTB, RSB/RAS), so guest code
++ * which has previously run on this CPU can't attack subsequent guest code.
++ *
++ * As this flushes the RSB/RAS, it destroys the predictions of the calling
++ * context.  For best performace, arrange for this to be used when we're going
++ * to jump out of the current context, e.g. with reset_stack_and_jump().
++ *
++ * For hardware which mis-implements IBPB, fix up by flushing the RSB/RAS
++ * manually.
++ */
++static always_inline void spec_ctrl_new_guest_context(void)
++{
++    wrmsrl(MSR_PRED_CMD, PRED_CMD_IBPB);
++
++    /* (ab)use alternative_input() to specify clobbers. */
++    alternative_input("", "DO_OVERWRITE_RSB", X86_BUG_IBPB_NO_RET,
++                      : "rax", "rcx");
++}
++
+ extern int8_t opt_ibpb_ctxt_switch;
+ extern bool opt_ssbd;
+ extern int8_t opt_eager_fpu;
