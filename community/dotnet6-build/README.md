@@ -1,4 +1,4 @@
-# dotnet6.0
+# dotnet6-build
 
 This is the .NET 6.0 package for Alpine Linux.
 
