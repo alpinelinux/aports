@@ -1,0 +1,232 @@
+Link dynamically against libclang
+diff -rupN a/c2rust/Cargo.toml b/c2rust/Cargo.toml
+--- a/c2rust/Cargo.toml	2024-01-06 22:49:13.145706727 +0100
++++ b/c2rust/Cargo.toml	2024-01-06 22:49:56.895188304 +0100
+@@ -31,7 +31,3 @@ time-macros = "=0.2.6"
+ 
+ [build-dependencies]
+ c2rust-build-paths = { path = "../c2rust-build-paths", version = "0.18.0" }
+-
+-[features]
+-# Force static linking of LLVM
+-llvm-static = ["c2rust-transpile/llvm-static"]
+diff -rupN a/c2rust-ast-exporter/Cargo.toml b/c2rust-ast-exporter/Cargo.toml
+--- a/c2rust-ast-exporter/Cargo.toml	2024-01-06 22:49:13.132373552 +0100
++++ b/c2rust-ast-exporter/Cargo.toml	2024-01-06 22:50:53.591183135 +0100
+@@ -24,8 +24,3 @@ clang-sys = "1.3"
+ cmake = "0.1.49"
+ env_logger = "0.10"
+ c2rust-build-paths = { path = "../c2rust-build-paths", version = "0.18.0" }
+-
+-[features]
+-default = []
+-# Force static linking of LLVM
+-llvm-static = []
+diff -rupN a/c2rust-ast-exporter/build.rs b/c2rust-ast-exporter/build.rs
+--- a/c2rust-ast-exporter/build.rs	2024-01-06 22:49:13.132373552 +0100
++++ b/c2rust-ast-exporter/build.rs	2024-01-06 22:49:18.425644161 +0100
+@@ -147,55 +147,7 @@ fn build_native(llvm_info: &LLVMInfo) {
+ 
+     println!("cargo:rustc-link-search=native={}", llvm_lib_dir);
+ 
+-    // Some distro's, including arch and Fedora, no longer build with
+-    // BUILD_SHARED_LIBS=ON; programs linking to clang are required to
+-    // link to libclang-cpp.so instead of individual libraries.
+-    let use_libclang = if cfg!(target_os = "macos") {
+-        // We hit an issue linking against the shared libraries for the homebrew
+-        // version of LLVM 15 because they use a feature (opaque pointers) which
+-        // are not understood by earlier versions of LLVM so we link against
+-        // libclang unless static linking has been explicitly requested.
+-        !cfg!(feature = "llvm-static")
+-    } else {
+-        // target_os = "linux"
+-        let mut libclang_path = PathBuf::new();
+-        libclang_path.push(llvm_lib_dir);
+-        libclang_path.push("libclang-cpp.so");
+-        libclang_path.exists()
+-    };
+-
+-    if use_libclang {
+-        println!("cargo:rustc-link-lib=clang-cpp");
+-    } else {
+-        // Link against these Clang libs. The ordering here is important! Libraries
+-        // must be listed before their dependencies when statically linking.
+-        let mut clang_libs = vec![
+-            "clangTooling",
+-            "clangFrontend",
+-            "clangASTMatchers",
+-            "clangParse",
+-            "clangSerialization",
+-            "clangSema",
+-            "clangEdit",
+-            "clangAnalysis",
+-            "clangDriver",
+-            "clangFormat",
+-            "clangToolingCore",
+-            "clangAST",
+-            "clangRewrite",
+-            "clangLex",
+-            "clangBasic",
+-        ];
+-        if llvm_info.llvm_major_version >= 15 {
+-            // insert after clangSema
+-            let sema_pos = clang_libs.iter().position(|&r| r == "clangSema").unwrap();
+-            clang_libs.insert(sema_pos + 1, "clangSupport");
+-        }
+-
+-        for lib in &clang_libs {
+-            println!("cargo:rustc-link-lib={}", lib);
+-        }
+-    }
++    println!("cargo:rustc-link-lib=clang-cpp");
+ 
+     for lib in &llvm_info.libs {
+         // IMPORTANT: We cannot specify static= or dylib= here because rustc
+diff -rupN a/c2rust-ast-exporter/src/CMakeLists.txt b/c2rust-ast-exporter/src/CMakeLists.txt
+--- a/c2rust-ast-exporter/src/CMakeLists.txt	2024-01-06 22:49:13.132373552 +0100
++++ b/c2rust-ast-exporter/src/CMakeLists.txt	2024-01-06 22:49:18.425644161 +0100
+@@ -95,11 +95,7 @@ set_target_properties(c2rust-ast-exporte
+ # PRIVATE was added to make c2rust-ast-exporter build with LLVM 6.0. Keyword
+ # description: https://cmake.org/pipermail/cmake/2016-May/063400.html
+ target_link_libraries(c2rust-ast-exporter PRIVATE
+-  clangAST
+-  clangFrontend
+-  clangTooling
+-  clangBasic
+-  clangASTMatchers
++  clang-cpp
+   tinycbor
+   )
+ 
+diff -rupN a/c2rust-ast-exporter/src/CMakeLists.txt.orig b/c2rust-ast-exporter/src/CMakeLists.txt.orig
+--- a/c2rust-ast-exporter/src/CMakeLists.txt.orig	1970-01-01 01:00:00.000000000 +0100
++++ b/c2rust-ast-exporter/src/CMakeLists.txt.orig	2023-05-22 22:14:35.000000000 +0200
+@@ -0,0 +1,117 @@
++cmake_minimum_required(VERSION 3.4.3)
++project(ASTExporter)
++
++#################################################
++# TinyCBOR                                      #
++#################################################
++
++set(TINYCBOR_REPO "https://github.com/intel/tinycbor.git" CACHE STRING "tinycbor git repo URL")
++
++# v0.6.3 tag, but using the commit hash instead (of the tarball hash) for integrity checks
++# unlike a .tar.gz MD5 hash, this SHA-1 commit hash should stay stable regardless of compression/archiving
++# (GitHub has changed this), and still retains the integrity check
++set(TINYCBOR_TAG "d393c16f3eb30d0c47e6f9d92db62272f0ec4dc7" CACHE STRING "tinycbor git tag/branch/commit hash")
++
++set(TINYCBOR_PREFIX "${CMAKE_BINARY_DIR}/tinycbor" CACHE STRING "tinycbor install prefix")
++
++if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    set(MAKE "gmake")
++else()
++    set(MAKE "make")
++endif()
++
++include(ExternalProject)
++ExternalProject_Add(tinycbor_build
++            PREFIX ${TINYCBOR_PREFIX}
++            INSTALL_DIR ${CMAKE_BINARY_DIR}
++            GIT_REPOSITORY ${TINYCBOR_REPO}
++            GIT_TAG ${TINYCBOR_TAG}
++            # the fd redirection here fails when the build run inside Cargo.
++            # patch from upstream:
++            # https://github.com/intel/tinycbor/commit/6176e0a28d7c5ef3a5e9cbd02521999c412de72c
++            PATCH_COMMAND patch --forward -p1 < ${CMAKE_CURRENT_SOURCE_DIR}/tinycbor_fix_build.patch || true
++            CONFIGURE_COMMAND ${MAKE} .config && cat ${CMAKE_CURRENT_SOURCE_DIR}/tinycbor.config >> .config
++            BUILD_COMMAND ${MAKE} --quiet prefix=<INSTALL_DIR> CFLAGS=-fPIC
++            INSTALL_COMMAND ${MAKE} --quiet prefix=<INSTALL_DIR> install
++            BUILD_IN_SOURCE 1
++            BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/lib/libtinycbor.a
++)
++
++include_directories(${CMAKE_BINARY_DIR}/include)
++
++add_library(tinycbor STATIC IMPORTED)
++set_target_properties(tinycbor PROPERTIES IMPORTED_LOCATION ${CMAKE_BINARY_DIR}/lib/libtinycbor.a)
++add_dependencies(tinycbor tinycbor_build)
++
++set(AST_EXPORTER_SRCS
++  AstExporter.cpp
++  FloatingLexer.cpp
++  ExportResult.cpp
++  )
++
++set(AST_EXPORTER_BIN_SRCS
++  ${AST_EXPORTER_SRCS}
++  Main.cpp
++  )
++
++find_package(LLVM REQUIRED CONFIG)
++
++# Debian and Ubuntu's clang cmake files are broken, so we can't require the
++# package here. We already have to manually order the link against the clang
++# libs in build.rs, so that's not so bad.
++find_package(Clang CONFIG)
++
++include_directories(${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
++add_definitions(${LLVM_DEFINITIONS} ${CLANG_DEFINITIONS})
++
++if (DEFINED CLANG_INSTALL_PREFIX)
++  add_definitions(-DCLANG_BIN_PATH="${CLANG_INSTALL_PREFIX}/bin")
++elseif(DEFINED LLVM_INSTALL_PREFIX)
++  add_definitions(-DCLANG_BIN_PATH="${LLVM_INSTALL_PREFIX}/bin")
++elseif(DEFINED LLVM_TOOLS_BINARY_DIR)
++  add_definitions(-DCLANG_BIN_PATH="${LLVM_TOOLS_BINARY_DIR}")
++else()
++  message(FATAL_ERROR "Cannot find path to clang binary")
++endif()
++add_definitions(-DCLANG_VERSION_STRING="${LLVM_PACKAGE_VERSION}")
++
++set(LLVM_LINK_COMPONENTS support)
++
++# LLVM is not always built with RTTI, we don't need it either.
++set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
++
++# The executable
++add_executable(c2rust-ast-exporter ${AST_EXPORTER_BIN_SRCS})
++
++# The library
++add_library(clangAstExporter STATIC ${AST_EXPORTER_SRCS})
++
++add_definitions(-DCLANG_LIBDIR_SUFFIX="${LLVM_LIBDIR_SUFFIX}")
++
++set_target_properties(c2rust-ast-exporter PROPERTIES
++  CXX_STANDARD 14
++  CXX_EXTENSIONS OFF
++  )
++# PRIVATE was added to make c2rust-ast-exporter build with LLVM 6.0. Keyword
++# description: https://cmake.org/pipermail/cmake/2016-May/063400.html
++target_link_libraries(c2rust-ast-exporter PRIVATE
++  clangAST
++  clangFrontend
++  clangTooling
++  clangBasic
++  clangASTMatchers
++  tinycbor
++  )
++
++set_target_properties(clangAstExporter PROPERTIES
++  CXX_STANDARD 17 # will decay to 14 if compiler doesn't support c++17
++  CXX_EXTENSIONS OFF
++  )
++target_link_libraries(clangAstExporter PRIVATE
++  clangAST
++  clangFrontend
++  clangTooling
++  clangBasic
++  clangASTMatchers
++  tinycbor
++  )
+diff -rupN a/c2rust-transpile/Cargo.toml b/c2rust-transpile/Cargo.toml
+--- a/c2rust-transpile/Cargo.toml	2024-01-06 22:49:13.145706727 +0100
++++ b/c2rust-transpile/Cargo.toml	2024-01-06 22:49:18.425644161 +0100
+@@ -38,7 +38,3 @@ smallvec = "1.0"
+ strum = "0.24"
+ strum_macros = "0.24"
+ syn = { version = "1.0", features = ["full", "extra-traits", "parsing", "printing"]}
+-
+-[features]
+-# Force static linking of LLVM
+-llvm-static = ["c2rust-ast-exporter/llvm-static"]
