@@ -1,0 +1,244 @@
+From 9c8638166a1b6fb2b851e0af883b08f4c081b9e4 Mon Sep 17 00:00:00 2001
+PatchSource: https://github.com/dotnet/runtime/pull/74504
+From: Tom Deseyn <tom.deseyn@gmail.com>
+Date: Tue, 11 Oct 2022 18:52:37 +0200
+Subject: [PATCH] Pass source build args.
+
+---
+ eng/SourceBuild.props                         | 21 ++++++++++++-------
+ eng/build.sh                                  | 10 +++++++++
+ eng/common/templates/steps/source-build.yml   |  6 ++++++
+ eng/native/build-commons.sh                   | 16 ++++++++++++++
+ eng/pipelines/common/global-build-job.yml     |  2 ++
+ .../tools/aot/ILCompiler/ILCompiler.csproj    |  2 +-
+ .../NativeExports/NativeExports.csproj        |  2 +-
+ src/native/corehost/build.sh                  |  7 +++----
+ src/native/corehost/corehost.proj             |  1 +
+ 9 files changed, 54 insertions(+), 13 deletions(-)
+
+diff --git a/src/runtime/eng/SourceBuild.props b/src/runtime/eng/SourceBuild.props
+index c197d8afd..8fe2c8c59 100644
+--- a/src/runtime/eng/SourceBuild.props
++++ b/src/runtime/eng/SourceBuild.props
+@@ -11,14 +11,20 @@
+     <SourceBuildPortable>true</SourceBuildPortable>
+     <SourceBuildPortable Condition="'$(SourceBuildNonPortable)' == 'true'">false</SourceBuildPortable>
+ 
+-    <!-- If TargetRid not specified, detect RID based on portability. -->
++    <!-- TargetRid names what gets built. -->
+     <TargetRid Condition="'$(TargetRid)' == '' and '$(SourceBuildNonPortable)' == 'true'">$([System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier)</TargetRid>
+     <TargetRid Condition="'$(TargetRid)' == ''">$(__DistroRid)</TargetRid>
+ 
+     <!-- Split e.g. 'fedora.33-x64' into 'fedora.33' and 'x64'. -->
+     <_targetRidPlatformIndex>$(TargetRid.LastIndexOf('-'))</_targetRidPlatformIndex>
+-    <TargetRidWithoutPlatform>$(TargetRid.Substring(0, $(_targetRidPlatformIndex)))</TargetRidWithoutPlatform>
+-    <TargetRidPlatform>$(TargetRid.Substring($(_targetRidPlatformIndex)).TrimStart('-'))</TargetRidPlatform>
++    <TargetArch>$(TargetRid.Substring($(_targetRidPlatformIndex)).TrimStart('-'))</TargetArch>
++
++    <!-- RuntimeOS is the build host rid OS. -->
++    <RuntimeOS>$(TargetRid.Substring(0, $(_targetRidPlatformIndex)))</RuntimeOS>
++
++    <!-- BaseOS is an expected known rid in the graph that TargetRid is compatible with.
++         It's used to add TargetRid in the graph if the parent can't be detected. -->
++    <BaseOS>$(RuntimeOS)</BaseOS>
+ 
+     <LogVerbosity Condition="'$(LogVerbosity)' == ''">minimal</LogVerbosity>
+   </PropertyGroup>
+@@ -26,19 +32,20 @@
+   <Target Name="GetRuntimeSourceBuildCommandConfiguration"
+           BeforeTargets="GetSourceBuildCommandConfiguration">
+     <PropertyGroup>
+-      <InnerBuildArgs>$(InnerBuildArgs) --arch $(TargetRidPlatform)</InnerBuildArgs>
++      <InnerBuildArgs>$(InnerBuildArgs) --arch $(TargetArch)</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) --configuration $(Configuration)</InnerBuildArgs>
+       <InnerBuildArgs Condition="'$(SourceBuildNonPortable)' == 'true'">$(InnerBuildArgs) --allconfigurations</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) --verbosity $(LogVerbosity)</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) --nodereuse false</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) --warnAsError false</InnerBuildArgs>
+-      <InnerBuildArgs>$(InnerBuildArgs) /p:PackageRid=$(TargetRid)</InnerBuildArgs>
++      <InnerBuildArgs>$(InnerBuildArgs) --outputrid $(TargetRid)</InnerBuildArgs>
++      <InnerBuildArgs>$(InnerBuildArgs) --portablebuild $(SourceBuildPortable)</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) /p:NoPgoOptimize=true</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) /p:KeepNativeSymbols=true</InnerBuildArgs>
+-      <InnerBuildArgs>$(InnerBuildArgs) /p:RuntimeOS=$(TargetRidWithoutPlatform)</InnerBuildArgs>
+-      <InnerBuildArgs>$(InnerBuildArgs) /p:PortableBuild=$(SourceBuildPortable)</InnerBuildArgs>
++      <InnerBuildArgs>$(InnerBuildArgs) /p:RuntimeOS=$(RuntimeOS)</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) /p:BuildDebPackage=false</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) /p:EnableNgenOptimization=false</InnerBuildArgs>
++      <InnerBuildArgs>$(InnerBuildArgs) /p:AdditionalRuntimeIdentifierParent=$(BaseOS)</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) /p:EnablePackageValidation=false</InnerBuildArgs>
+       <InnerBuildArgs>$(InnerBuildArgs) /p:DisableSourceLink=false</InnerBuildArgs>
+     </PropertyGroup>
+diff --git a/src/runtime/eng/build.sh b/src/runtime/eng/build.sh
+index 84a4fd746..352761a52 100755
+--- a/src/runtime/eng/build.sh
++++ b/src/runtime/eng/build.sh
+@@ -31,6 +31,7 @@ usage()
+   echo "  --os                            Target operating system: windows, Linux, FreeBSD, OSX, MacCatalyst, tvOS,"
+   echo "                                  tvOSSimulator, iOS, iOSSimulator, Android, Browser, NetBSD, illumos or Solaris."
+   echo "                                  [Default: Your machine's OS.]"
++  echo "  --outputrid <rid>               Optional argument that overrides the target rid name."
+   echo "  --projects <value>              Project or solution file(s) to build."
+   echo "  --runtimeConfiguration (-rc)    Runtime build configuration: Debug, Release or Checked."
+   echo "                                  Checked is exclusive to the CLR runtime. It is the same as Debug, except code is"
+@@ -402,6 +403,15 @@ while [[ $# > 0 ]]; do
+       shift 1
+       ;;
+ 
++     -outputrid)
++      if [ -z ${2+x} ]; then
++        echo "No value for outputrid is supplied. See help (--help) for supported values." 1>&2
++        exit 1
++      fi
++      arguments="$arguments /p:OutputRid=$(echo "$2" | tr "[:upper:]" "[:lower:]")"
++      shift 2
++      ;;
++
+      -portablebuild)
+       if [ -z ${2+x} ]; then
+         echo "No value for portablebuild is supplied. See help (--help) for supported values." 1>&2
+diff --git a/src/runtime/eng/common/templates/steps/source-build.yml b/src/runtime/eng/common/templates/steps/source-build.yml
+index 12a8ff94d..4624885e3 100644
+--- a/src/runtime/eng/common/templates/steps/source-build.yml
++++ b/src/runtime/eng/common/templates/steps/source-build.yml
+@@ -63,6 +63,11 @@ steps:
+       targetRidArgs='/p:TargetRid=${{ parameters.platform.targetRID }}'
+     fi
+ 
++    runtimeOsArgs=
++    if [ '${{ parameters.platform.runtimeOS }}' != '' ]; then
++      runtimeOsArgs='/p:RuntimeOS=${{ parameters.platform.runtimeOS }}'
++    fi
++
+     publishArgs=
+     if [ '${{ parameters.platform.skipPublishValidation }}' != 'true' ]; then
+       publishArgs='--publish'
+@@ -75,6 +80,7 @@ steps:
+       $internalRuntimeDownloadArgs \
+       $internalRestoreArgs \
+       $targetRidArgs \
++      $runtimeOsArgs \
+       /p:SourceBuildNonPortable=${{ parameters.platform.nonPortable }} \
+       /p:ArcadeBuildFromSource=true
+   displayName: Build
+diff --git a/src/runtime/eng/native/build-commons.sh b/src/runtime/eng/native/build-commons.sh
+index 4199828f2..bc0083eed 100755
+--- a/src/runtime/eng/native/build-commons.sh
++++ b/src/runtime/eng/native/build-commons.sh
+@@ -212,6 +212,7 @@ usage()
+     echo "-gccx.y: optional argument to build using gcc version x.y."
+     echo "-ninja: target ninja instead of GNU make"
+     echo "-numproc: set the number of build processes."
++    echo "-outputrid: optional argument that overrides the target rid name."
+     echo "-portablebuild: pass -portablebuild=false to force a non-portable build."
+     echo "-skipconfigure: skip build configuration."
+     echo "-keepnativesymbols: keep native/unmanaged debug symbols."
+@@ -232,6 +233,7 @@ __TargetArch=$arch
+ __TargetOS=$os
+ __HostOS=$os
+ __BuildOS=$os
++__OutputRid=''
+ 
+ # Get the number of processors available to the scheduler
+ # Other techniques such as `nproc` only get the number of
+@@ -396,6 +398,16 @@ while :; do
+             __TargetArch=wasm
+             ;;
+ 
++        outputrid|-outputrid)
++            if [[ -n "$2" ]]; then
++                __OutputRid="$2"
++                shift
++            else
++                echo "ERROR: 'outputrid' requires a non-empty option argument"
++                exit 1
++            fi
++            ;;
++
+         ppc64le|-ppc64le)
+             __TargetArch=ppc64le
+             ;;
+@@ -478,3 +490,7 @@ fi
+ 
+ # init the target distro name
+ initTargetDistroRid
++
++if [ -z "$__OutputRid" ]; then
++    __OutputRid="$(echo $__DistroRid | tr '[:upper:]' '[:lower:]')"
++fi
+diff --git a/src/runtime/eng/pipelines/common/global-build-job.yml b/src/runtime/eng/pipelines/common/global-build-job.yml
+index e1a8e45ba..e043c0040 100644
+--- a/src/runtime/eng/pipelines/common/global-build-job.yml
++++ b/src/runtime/eng/pipelines/common/global-build-job.yml
+@@ -141,6 +141,8 @@ jobs:
+           platform:
+             buildScript: $(_sclEnableCommand) $(Build.SourcesDirectory)$(dir)build$(scriptExt)
+             nonPortable: true
++            targetRID: banana.24-x64
++            runtimeOS: linux
+ 
+     - ${{ if in(parameters.osGroup, 'OSX', 'iOS', 'tvOS', 'MacCatalyst') }}:
+       - script: $(Build.SourcesDirectory)/eng/install-native-dependencies.sh ${{ parameters.osGroup }} ${{ parameters.archType }} azDO
+diff --git a/src/runtime/src/coreclr/tools/aot/ILCompiler/ILCompiler.csproj b/src/runtime/src/coreclr/tools/aot/ILCompiler/ILCompiler.csproj
+index 3b70c7b42..eeb4b7923 100644
+--- a/src/runtime/src/coreclr/tools/aot/ILCompiler/ILCompiler.csproj
++++ b/src/runtime/src/coreclr/tools/aot/ILCompiler/ILCompiler.csproj
+@@ -1,7 +1,7 @@
+ ﻿<Project Sdk="Microsoft.NET.Sdk">
+   <PropertyGroup>
+     <OutputPath>$(RuntimeBinDir)ilc/</OutputPath>
+-    <RuntimeIdentifier>$(OutputRid)</RuntimeIdentifier>
++    <RuntimeIdentifier>$(PackageRID)</RuntimeIdentifier>
+   </PropertyGroup>
+ 
+   <Import Project="ILCompiler.props" />
+diff --git a/src/runtime/src/libraries/System.Runtime.InteropServices/tests/TestAssets/NativeExports/NativeExports.csproj b/src/runtime/src/libraries/System.Runtime.InteropServices/tests/TestAssets/NativeExports/NativeExports.csproj
+index d420161d1..57344f047 100644
+--- a/src/runtime/src/libraries/System.Runtime.InteropServices/tests/TestAssets/NativeExports/NativeExports.csproj
++++ b/src/runtime/src/libraries/System.Runtime.InteropServices/tests/TestAssets/NativeExports/NativeExports.csproj
+@@ -9,7 +9,7 @@
+     <DnneGenRollForward>Major</DnneGenRollForward>
+     <!-- To integrate with DNNE's architecture calculation, we need to set the RID for this project. -->
+     <RuntimeIdentifier>$(OutputRid)</RuntimeIdentifier>
+-    <AppHostRuntimeIdentifier>$(OutputRid)</AppHostRuntimeIdentifier>
++    <AppHostRuntimeIdentifier>$(PackageRID)</AppHostRuntimeIdentifier>
+     <_TargetsAppleOS Condition="'$(TargetOS)' == 'OSX' or '$(TargetOS)' == 'MacCatalyst' or
+       '$(TargetOS)' == 'iOS' or '$(TargetOS)' == 'tvOS' or '$(TargetOS)' == 'iOSSimulator' or
+       '$(TargetOS)' == 'tvOSSimulator'">true</_TargetsAppleOS>
+diff --git a/src/runtime/src/native/corehost/build.sh b/src/runtime/src/native/corehost/build.sh
+index ae44091c5..f300b10f6 100755
+--- a/src/runtime/src/native/corehost/build.sh
++++ b/src/runtime/src/native/corehost/build.sh
+@@ -74,14 +74,13 @@ __LogsDir="$__RootBinDir/log"
+ __MsbuildDebugLogsDir="$__LogsDir/MsbuildDebugLogs"
+ 
+ # Set the remaining variables based upon the determined build configuration
+-__DistroRidLower="$(echo $__DistroRid | tr '[:upper:]' '[:lower:]')"
+-__BinDir="$__RootBinDir/bin/$__DistroRidLower.$__BuildType"
+-__IntermediatesDir="$__RootBinDir/obj/$__DistroRidLower.$__BuildType"
++__BinDir="$__RootBinDir/bin/$__OutputRid.$__BuildType"
++__IntermediatesDir="$__RootBinDir/obj/$__OutputRid.$__BuildType"
+ 
+ export __BinDir __IntermediatesDir __RuntimeFlavor
+ 
+ __CMakeArgs="-DCLI_CMAKE_HOST_VER=\"$__host_ver\" -DCLI_CMAKE_COMMON_HOST_VER=\"$__apphost_ver\" -DCLI_CMAKE_HOST_FXR_VER=\"$__fxr_ver\" $__CMakeArgs"
+-__CMakeArgs="-DCLI_CMAKE_HOST_POLICY_VER=\"$__policy_ver\" -DCLI_CMAKE_PKG_RID=\"$__DistroRid\" -DCLI_CMAKE_COMMIT_HASH=\"$__commit_hash\" $__CMakeArgs"
++__CMakeArgs="-DCLI_CMAKE_HOST_POLICY_VER=\"$__policy_ver\" -DCLI_CMAKE_PKG_RID=\"$__OutputRid\" -DCLI_CMAKE_COMMIT_HASH=\"$__commit_hash\" $__CMakeArgs"
+ __CMakeArgs="-DRUNTIME_FLAVOR=\"$__RuntimeFlavor\" $__CMakeArgs"
+ __CMakeArgs="-DFEATURE_DISTRO_AGNOSTIC_SSL=$__PortableBuild $__CMakeArgs"
+ 
+diff --git a/src/runtime/src/native/corehost/corehost.proj b/src/runtime/src/native/corehost/corehost.proj
+index 9ce1a640e..a320ab4d8 100644
+--- a/src/runtime/src/native/corehost/corehost.proj
++++ b/src/runtime/src/native/corehost/corehost.proj
+@@ -81,6 +81,7 @@
+       <BuildArgs Condition="'$(Ninja)' == 'true'">$(BuildArgs) -ninja</BuildArgs>
+       <BuildArgs>$(BuildArgs) -runtimeflavor $(RuntimeFlavor)</BuildArgs>
+       <BuildArgs Condition="'$(OfficialBuildId)' != ''">$(BuildArgs) /p:OfficialBuildId="$(OfficialBuildId)"</BuildArgs>
++      <BuildArgs>$(BuildArgs) -outputrid $(OutputRid)</BuildArgs>
+     </PropertyGroup>
+ 
+     <!--
+-- 
+2.37.3
+
