@@ -1,0 +1,308 @@
+From 98054ea87ce70247bb09ceafd2ad1a0b36d2fef4 Mon Sep 17 00:00:00 2001
+PatchSource: https://github.com/dotnet/runtime/pull/76500
+From: Antoine Martin <dev@ayakael.net>
+Date: Sat, 1 Oct 2022 09:21:58 -0400
+Subject: [PATCH] Mono musl support
+
+---
+ Directory.Build.props                    |  1 +
+ eng/common/cross/toolchain.cmake         | 38 +++++++++++++++++++-----
+ eng/native/configurecompiler.cmake       |  7 +++++
+ eng/native/tryrun.cmake                  |  6 +++-
+ src/coreclr/pal/src/CMakeLists.txt       |  5 ++++
+ src/coreclr/pal/src/misc/perfjitdump.cpp |  2 +-
+ src/coreclr/vm/i386/cgenx86.cpp          |  4 +++
+ src/mono/CMakeLists.txt                  | 33 ++++++++++++++++++++
+ src/mono/mono.proj                       | 32 +++++++++++++-------
+ src/mono/mono/mini/mini-runtime.c        | 29 ++++++++++++++++++
+ src/mono/mono/utils/mono-context.h       |  8 +++++
+ 11 files changed, 146 insertions(+), 19 deletions(-)
+
+diff --git a/src/runtime/Directory.Build.props b/src/runtime/Directory.Build.props
+index 6f9b97c0a9c..4298a6df1d3 100644
+--- a/src/runtime/Directory.Build.props
++++ b/src/runtime/Directory.Build.props
+@@ -22,7 +22,6 @@
+     <TargetOS Condition="'$(TargetOS)' == ''">$(_hostOS)</TargetOS>
+     <TargetsMobile Condition="'$(TargetOS)' == 'iOS' or '$(TargetOS)' == 'iOSSimulator' or '$(TargetOS)' == 'MacCatalyst' or '$(TargetOS)' == 'tvOS' or '$(TargetOS)' == 'tvOSSimulator' or '$(TargetOS)' == 'Android' or '$(TargetOS)' == 'Browser'">true</TargetsMobile>
+     <TargetsAppleMobile Condition="'$(TargetOS)' == 'iOS' or '$(TargetOS)' == 'iOSSimulator' or '$(TargetOS)' == 'MacCatalyst' or '$(TargetOS)' == 'tvOS' or '$(TargetOS)' == 'tvOSSimulator'">true</TargetsAppleMobile>
+-    <TargetsLinuxBionic Condition="$(OutputRid.StartsWith('linux-bionic'))">true</TargetsLinuxBionic>
+   </PropertyGroup>
+ 
+   <!-- Platform property is required by RepoLayout.props in Arcade SDK. -->
+@@ -200,6 +199,9 @@
+ 
+     <OutputRid Condition="'$(OutputRid)' == ''">$(PackageRID)</OutputRid>
+     <OutputRid Condition="'$(PortableBuild)' == 'true'">$(_portableOS)-$(TargetArchitecture)</OutputRid>
++
++    <TargetsLinuxBionic Condition="$(OutputRid.StartsWith('linux-bionic'))">true</TargetsLinuxBionic>
++    <TargetsLinuxMusl Condition="$(OutputRid.StartsWith('linux-musl')) or $(OutputRid.StartsWith('alpine'))">true</TargetsLinuxMusl>
+   </PropertyGroup>
+ 
+   <PropertyGroup Label="CalculateTargetOSName" Condition="'$(SkipInferTargetOSName)' != 'true'">
+diff --git a/src/runtime/eng/native/configurecompiler.cmake b/src/runtime/eng/native/configurecompiler.cmake
+index c7cb47bfcbb..f26345e7906 100644
+--- a/src/runtime/eng/native/configurecompiler.cmake
++++ b/src/runtime/eng/native/configurecompiler.cmake
+@@ -448,6 +454,7 @@ if (CLR_CMAKE_HOST_UNIX)
+     add_compile_options(-Wno-incompatible-ms-struct)
+ 
+     add_compile_options(-Wno-reserved-identifier)
++    add_compile_options(-Wno-sign-conversion)
+   else()
+     add_compile_options(-Wno-uninitialized)
+     add_compile_options(-Wno-strict-aliasing)
+diff --git a/src/runtime/eng/native/tryrun.cmake b/src/runtime/eng/native/tryrun.cmake
+index 6355b0988f7..056c6606b17 100644
+--- a/src/runtime/eng/native/tryrun.cmake
++++ b/src/runtime/eng/native/tryrun.cmake
+@@ -8,7 +8,11 @@ endmacro()
+ 
+ if(EXISTS ${CROSS_ROOTFS}/usr/lib/gcc/armv7-alpine-linux-musleabihf OR
+    EXISTS ${CROSS_ROOTFS}/usr/lib/gcc/armv6-alpine-linux-musleabihf OR
+-   EXISTS ${CROSS_ROOTFS}/usr/lib/gcc/aarch64-alpine-linux-musl)
++   EXISTS ${CROSS_ROOTFS}/usr/lib/gcc/aarch64-alpine-linux-musl OR
++   EXISTS ${CROSS_ROOTFS}/usr/lib/gcc/s390x-alpine-linux-musl OR
++   EXISTS ${CROSS_ROOTFS}/usr/lib/gcc/ppc64le-alpine-linux-musl OR
++   EXISTS ${CROSS_ROOTFS}/usr/lib/gcc/i586-alpine-linux-musl OR
++   EXISTS ${CROSS_ROOTFS}/usr/lib/gcc/riscv64-alpine-linux-musl)
+ 
+   set(ALPINE_LINUX 1)
+ elseif(EXISTS ${CROSS_ROOTFS}/bin/freebsd-version)
+diff --git a/src/runtime/src/coreclr/pal/src/CMakeLists.txt b/src/runtime/src/coreclr/pal/src/CMakeLists.txt
+index 1088bb17918..59d954e1cbf 100644
+--- a/src/runtime/src/coreclr/pal/src/CMakeLists.txt
++++ b/src/runtime/src/coreclr/pal/src/CMakeLists.txt
+@@ -318,6 +318,11 @@ if(CLR_CMAKE_TARGET_LINUX)
+     target_link_libraries(coreclrpal ${UNWIND_LIBS})
+   endif(CLR_CMAKE_USE_SYSTEM_LIBUNWIND)
+ 
++  # bundled libunwind requires using libucontext on alpine and x86
++  if(CLR_CMAKE_TARGET_ALPINE_LINUX AND (CLR_CMAKE_TARGET_ARCH_I386 OR CLR_CMAKE_TARGET_ARCH_POWERPC64))
++    target_link_libraries(coreclrpal ucontext)
++  endif(CLR_CMAKE_TARGET_ALPINE_LINUX AND (CLR_CMAKE_TARGET_ARCH_I386 OR CLR_CMAKE_TARGET_ARCH_POWERPC64))
++
+ endif(CLR_CMAKE_TARGET_LINUX)
+ 
+ if(CLR_CMAKE_TARGET_NETBSD)
+diff --git a/src/runtime/src/coreclr/pal/src/misc/perfjitdump.cpp b/src/runtime/src/coreclr/pal/src/misc/perfjitdump.cpp
+index 8d7f79ed3f0..043939ad2da 100644
+--- a/src/runtime/src/coreclr/pal/src/misc/perfjitdump.cpp
++++ b/src/runtime/src/coreclr/pal/src/misc/perfjitdump.cpp
+@@ -25,7 +25,7 @@
+ #include <sys/uio.h>
+ #include <time.h>
+ #include <unistd.h>
+-#include <linux/limits.h>
++#include <limits.h>
+ 
+ #include "../inc/llvm/ELF.h"
+ 
+diff --git a/src/runtime/src/coreclr/vm/i386/cgenx86.cpp b/src/runtime/src/coreclr/vm/i386/cgenx86.cpp
+index 811c84a140d..4e958a44b30 100644
+--- a/src/runtime/src/coreclr/vm/i386/cgenx86.cpp
++++ b/src/runtime/src/coreclr/vm/i386/cgenx86.cpp
+@@ -1133,6 +1133,7 @@ extern "C" DWORD __stdcall avx512StateSupport()
+ 
+ #else // !TARGET_UNIX
+ 
++#if !__has_builtin(__cpuid)
+ void __cpuid(int cpuInfo[4], int function_id)
+ {
+     // Based on the Clang implementation provided in cpuid.h:
+@@ -1143,7 +1144,9 @@ void __cpuid(int cpuInfo[4], int function_id)
+         : "0"(function_id)
+     );
+ }
++#endif
+ 
++#if !__has_builtin(__cpuidex)
+ void __cpuidex(int cpuInfo[4], int function_id, int subFunction_id)
+ {
+     // Based on the Clang implementation provided in cpuid.h:
+@@ -1154,6 +1157,7 @@ void __cpuidex(int cpuInfo[4], int function_id, int subFunction_id)
+         : "0"(function_id), "2"(subFunction_id)
+     );
+ }
++#endif
+ 
+ extern "C" DWORD __stdcall xmmYmmStateSupport()
+ {
+diff --git a/src/runtime/src/mono/CMakeLists.txt b/src/runtime/src/mono/CMakeLists.txt
+index 85a0f819da4..078168f19a3 100644
+--- a/src/runtime/src/mono/CMakeLists.txt
++++ b/src/runtime/src/mono/CMakeLists.txt
+@@ -219,6 +219,33 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+   # Enable the "full RELRO" options (RELRO & BIND_NOW) at link time
+   add_link_options(-Wl,-z,relro)
+   add_link_options(-Wl,-z,now)
++  # Detect Linux ID
++  set(LINUX_ID_FILE "/etc/os-release")
++  if(CMAKE_CROSSCOMPILING)
++      set(LINUX_ID_FILE "${CMAKE_SYSROOT}${LINUX_ID_FILE}")
++  endif()
++
++  if(EXISTS ${LINUX_ID_FILE})
++      execute_process(
++          COMMAND bash -c "source ${LINUX_ID_FILE} && echo \$ID"
++          OUTPUT_VARIABLE LINUX_ID
++          OUTPUT_STRIP_TRAILING_WHITESPACE)
++
++      execute_process(
++          COMMAND bash -c "if strings \"${CMAKE_SYSROOT}/usr/bin/ldd\" 2>&1 | grep -q musl; then echo musl; fi"
++          OUTPUT_VARIABLE LINUX_MUSL
++          OUTPUT_STRIP_TRAILING_WHITESPACE)
++  endif()
++
++  if(DEFINED LINUX_ID)
++	  if(LINUX_ID STREQUAL alpine)
++          set(HOST_ALPINE_LINUX 1)
++      endif()
++
++      if(LINUX_MUSL STREQUAL musl)
++          set(HOST_LINUX_MUSL 1)
++      endif()
++  endif(DEFINED LINUX_ID)
+ elseif(CMAKE_SYSTEM_NAME STREQUAL "Android")
+   set(HOST_LINUX 1)
+   add_definitions(-D_GNU_SOURCE -D_REENTRANT)
+@@ -901,6 +928,12 @@ if(HOST_IOS OR HOST_ANDROID OR HOST_MACCAT)
+ else()
+   set(DISABLE_DLLMAP 1)
+ endif()
++
++if(HOST_ALPINE_LINUX)
++  # On Alpine Linux, we need to ensure that the reported stack range for the primary thread is
++  # larger than the initial committed stack size.
++  add_definitions(-DENSURE_PRIMARY_STACK_SIZE)
++endif()
+ ### End of OS specific checks
+ 
+ include_directories("${CLR_SRC_NATIVE_DIR}")
+diff --git a/src/runtime/src/mono/mono.proj b/src/runtime/src/mono/mono.proj
+index 38731e96866..753c0d7ffa9 100644
+--- a/src/runtime/src/mono/mono.proj
++++ b/src/runtime/src/mono/mono.proj
+@@ -464,11 +464,21 @@
+     <!-- Linux options -->
+     <ItemGroup Condition="'$(TargetsLinux)' == true">
+       <_MonoCFLAGS Include="-Wl,--build-id=sha1" />
++      <_MonoCFLAGS Include="-Wno-int-conversion" />
+       <_MonoCXXFLAGS Include="-Wl,--build-id=sha1" />
++      <_MonoCXXFLAGS Include="-Wno-int-conversion" />
+     </ItemGroup>
+     <ItemGroup Condition="'$(RealTargetOS)' == 'Linux'">
+       <_MonoAOTCFLAGS Include="-Wl,--build-id=sha1" />
++      <_MonoAOTCFLAGS Include="-Wno-int-conversion" />
+       <_MonoAOTCXXFLAGS Include="-Wl,--build-id=sha1" />
++      <_MonoAOTCXXFLAGS Include="-Wno-int-conversion" />
++    </ItemGroup>
++    <ItemGroup Condition="'$(TargetsLinuxMusl)' == 'true'">
++      <_MonoAOTCFLAGS Include="-lucontext" />
++      <_MonoAOTCXXFLAGS Include="-lucontext" />
++      <_MonoCFLAGS Include="-lucontext" />
++      <_MonoCXXFLAGS Include="-lucontext" />
+     </ItemGroup>
+ 
+     <!-- Devloop features -->
+@@ -554,19 +564,21 @@
+       <MonoToolchainPrebuiltOS Condition="$([MSBuild]::IsOSPlatform('OSX'))">darwin-x86_64</MonoToolchainPrebuiltOS>
+       <MonoToolchainPrebuiltOS Condition="'$(HostOS)' == 'windows'">windows-x86_64</MonoToolchainPrebuiltOS>
+       <_MonoRuntimeFilePath>$(MonoObjDir)out\lib\$(MonoFileName)</_MonoRuntimeFilePath>
+-      <_LinuxAbi Condition="'$(TargetsAndroid)' != 'true' and '$(TargetsLinuxBionic)' != 'true'">gnu</_LinuxAbi>
+-      <_LinuxAbi Condition="'$(TargetsAndroid)' == 'true' or '$(TargetsLinuxBionic)' == 'true'">android</_LinuxAbi>
++      <_LinuxAbi Condition="'$(TargetsAndroid)' != 'true' and '$(TargetsLinuxBionic)' != 'true' and '$(TargetsLinuxMusl)' != 'true'">linux-gnu</_LinuxAbi>
++      <_LinuxAbi Condition="'$(TargetsAndroid)' != 'true' and '$(TargetsLinuxBionic)' != 'true' and '$(TargetsLinuxMusl)' == 'true'">alpine-linux-musl</_LinuxAbi>
++      <_LinuxAbi Condition="'$(TargetsAndroid)' == 'true' or '$(TargetsLinuxBionic)' == 'true'">linux-android</_LinuxAbi>
+       <_LinuxFloatAbi Condition="'$(TargetsAndroid)' != 'true' and '$(TargetsLinuxBionic)' != 'true'">hf</_LinuxFloatAbi>
+       <_Objcopy>objcopy</_Objcopy>
+-      <_Objcopy Condition="'$(Platform)' == 'arm'">arm-linux-$(_LinuxAbi)eabi$(_LinuxFloatAbi)-$(_Objcopy)</_Objcopy>
+-      <_Objcopy Condition="'$(Platform)' == 'armv6'">arm-linux-$(_LinuxAbi)eabi$(_LinuxFloatAbi)-$(_Objcopy)</_Objcopy>
+-      <_Objcopy Condition="'$(Platform)' == 'arm64'">aarch64-linux-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
+-      <_Objcopy Condition="'$(Platform)' == 'riscv64'">riscv64-linux-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
+-      <_Objcopy Condition="'$(Platform)' == 's390x'">s390x-linux-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
+-      <_Objcopy Condition="'$(Platform)' == 'ppc64le'">powerpc64le-linux-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
+-      <_Objcopy Condition="'$(Platform)' == 'x64'">x86_64-linux-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
+-      <_Objcopy Condition="'$(Platform)' == 'x86'">i686-linux-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
++      <_Objcopy Condition="'$(Platform)' == 'arm'">arm-$(_LinuxAbi)eabi$(_LinuxFloatAbi)-$(_Objcopy)</_Objcopy>
++      <_Objcopy Condition="'$(Platform)' == 'armv6'">arm-$(_LinuxAbi)eabi$(_LinuxFloatAbi)-$(_Objcopy)</_Objcopy>
++      <_Objcopy Condition="'$(Platform)' == 'arm64'">aarch64-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
++      <_Objcopy Condition="'$(Platform)' == 'riscv64'">riscv64-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
++      <_Objcopy Condition="'$(Platform)' == 's390x'">s390x-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
++      <_Objcopy Condition="'$(Platform)' == 'ppc64le'">powerpc64le-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
++      <_Objcopy Condition="'$(Platform)' == 'x64'">x86_64-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
++      <_Objcopy Condition="'$(Platform)' == 'x86'">i686-$(_LinuxAbi)-$(_Objcopy)</_Objcopy>
+       <_Objcopy Condition="'$(TargetsAndroid)' == 'true' or '$(TargetsLinuxBionic)' == 'true'">$(ANDROID_NDK_ROOT)/toolchains/llvm/prebuilt/$(MonoToolchainPrebuiltOS)/bin/llvm-objcopy</_Objcopy>
++      <_Objcopy Condition="'$(TargetsLinuxMusl)' == 'true' and '$(CrossBuild)' != 'true'">objcopy</_Objcopy>
+ 
+       <_ObjcopyPrefix Condition="'$(MonoCrossDir)' != '' and '$(Platform)' == 'riscv64'">llvm-objcopy-</_ObjcopyPrefix>
+     </PropertyGroup>
+diff --git a/src/runtime/src/mono/mono/mini/mini-runtime.c b/src/runtime/src/mono/mono/mini/mini-runtime.c
+index c66a227a242..a68a620a66f 100644
+--- a/src/runtime/src/mono/mono/mini/mini-runtime.c
++++ b/src/runtime/src/mono/mono/mini/mini-runtime.c
+@@ -4408,6 +4408,30 @@ mini_llvm_init (void)
+ #endif
+ }
+ 
++#ifdef ENSURE_PRIMARY_STACK_SIZE
++/*++ 
++ Function: 
++   EnsureStackSize 
++  
++ Abstract: 
++   This fixes a problem on MUSL where the initial stack size reported by the 
++   pthread_attr_getstack is about 128kB, but this limit is not fixed and 
++   the stack can grow dynamically. The problem is that it makes the 
++   functions ReflectionInvocation::[Try]EnsureSufficientExecutionStack 
++   to fail for real life scenarios like e.g. compilation of corefx. 
++   Since there is no real fixed limit for the stack, the code below 
++   ensures moving the stack limit to a value that makes reasonable 
++   real life scenarios work. 
++  
++ --*/
++static MONO_NO_OPTIMIZATION MONO_NEVER_INLINE void
++ensure_stack_size (size_t size)
++{
++	volatile uint8_t *s = (uint8_t *)g_alloca(size);
++	*s = 0;
++}
++#endif // ENSURE_PRIMARY_STACK_SIZE
++
+ void
+ mini_add_profiler_argument (const char *desc)
+ {
+@@ -4565,6 +4589,11 @@ mini_init (const char *filename)
+ 	mono_w32handle_init ();
+ #endif
+ 
++#ifdef ENSURE_PRIMARY_STACK_SIZE 
++	// TODO: https://github.com/dotnet/runtime/issues/72920
++	ensure_stack_size (5 * 1024 * 1024);
++#endif // ENSURE_PRIMARY_STACK_SIZE
++
+ 	mono_thread_info_runtime_init (&ticallbacks);
+ 
+ 	if (g_hasenv ("MONO_DEBUG")) {
+diff --git a/src/runtime/src/mono/mono/utils/mono-context.h b/src/runtime/src/mono/mono/utils/mono-context.h
+index a1f0fe6f68e..a9db2d336ca 100644
+--- a/src/runtime/src/mono/mono/utils/mono-context.h
++++ b/src/runtime/src/mono/mono/utils/mono-context.h
+@@ -11,6 +11,14 @@
+ #ifndef __MONO_MONO_CONTEXT_H__
+ #define __MONO_MONO_CONTEXT_H__
+ 
++/* 
++ * Handle non-gnu libc versions with nothing in features.h 
++ * We have no idea what they're compatible with, so always fail.
++ */
++#ifndef __GLIBC_PREREQ
++# define __GLIBC_PREREQ(x,y) 0
++#endif
++
+ #include "mono-compiler.h"
+ #include "mono-sigcontext.h"
+ #include "mono-machine.h"
+-- 
+2.36.3
+
