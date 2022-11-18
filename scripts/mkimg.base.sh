@@ -323,7 +323,7 @@ profile_base() {
 	x86*) grub_mod="$grub_mod multiboot2 efi_uga";;
 	esac
 	apks="alpine-base busybox chrony dhcpcd doas e2fsprogs haveged
-		kbd-bkeymap snetwork-extras openntpd openssl openssh
+		kbd-bkeymaps network-extras openntpd openssl openssh
 		tzdata wget"
 	apkovl=
 	hostname="alpine"
