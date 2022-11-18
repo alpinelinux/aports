@@ -322,7 +322,9 @@ profile_base() {
 	case "$ARCH" in
 	x86*) grub_mod="$grub_mod multiboot2 efi_uga";;
 	esac
-	apks="alpine-base busybox kbd-bkeymaps chrony dhcpcd e2fsprogs haveged network-extras openntpd openssl openssh tzdata wget"
+	apks="alpine-base busybox chrony dhcpcd doas e2fsprogs haveged
+		kbd-bkeymap snetwork-extras openntpd openssl openssh
+		tzdata wget"
 	apkovl=
 	hostname="alpine"
 }
