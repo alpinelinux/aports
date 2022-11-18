@@ -2,17 +2,33 @@ After the cloud-init package is installed you will need to run the
 "setup-cloud-init" command to prepare the OS for cloud-init use.
 
 This command will enable cloud-init's init.d services so that they are run
-upon future boots/reboots. It also enables eudev's init.d services as udev is
-used by cloud-init for both disk configuration and network card persistent
-naming.
+upon future boots/reboots.
 
+
+mdev / mdevd / eudev
+--------------------
+
+As of Alpine release v3.17 (and Edge from mid-Nov 2022 onwards) the Alpine
+cloud-init package can be used together with either eudev (aka udev), mdev,
+or mdevd.
+
+Due to this change the cloud-init package no longer declares a dependency on
+the eudev package - you will need to manually install either eudev or mdevd
+to your Alpine disk image if required. You may also need to run
+"setup-devd mdevd" or "setup-devd udev" accordingly to enable those instead
+of mdev.
+
+Upstream cloud-init is only designed and tested to work with udev and
+therefore some cloud-init functionality may not work when either mdev or mdevd
+are used instead. This document will, over time, detail any known mdev or
+mdevd incompatible cloud-init modules and/or Data Sources.
 
 
 Sudo & Doas
 -----------
 
 Cloud-init has always had support for 'sudo' when adding users (via
-user-data). As Alpine is now moving towards preferring the use of 'doas'
+user-data). As Alpine has now moved towards preferring the use of 'doas'
 rather than 'sudo' support for 'doas' has been added to the cc_users_groups
 module.
 
@@ -20,7 +36,6 @@ As a result, the Alpine cloud-init package no longer declares a dependency
 on sudo - you must ensure to install either the 'doas' or 'sudo' package (or
 indeed both), depending on which you wish to use, in order to be able to
 create users that can run commands as a privileged user.
-
 
 
 Doas
@@ -59,7 +74,6 @@ user-data, as well as the rule for the default 'alpine' user.
 NOTE: if you specify a "users:" section in user-data you MUST specify a
 "default" entry in addition to any other entries, otherwise the default
 'alpine' user will NOT be created.
-
 
 
 NTP
@@ -140,22 +154,69 @@ listens for udev hotplug events and triggers cloud-init to react to them.
 
 This daemon, via its init.d script, is *not* at present enabled by the
 setup-cloud-init script as hotplug is currently *only* supported by the
-ConfigDrive, EC2, and OpenStack DataSources.
+'ConfigDrive', 'Ec2', and 'OpenStack' DataSources.
 
 In order to make use of network hotplug you will need to do the following
-*two* things:
+*three* things:
 
-- firstly, add the /etc/init.d/cloud-init-hotplugd script to the "default"
+- install and enable the Alpine "eudev" package for managing devices.
+
+- add the /etc/init.d/cloud-init-hotplugd script to the "default"
   run-level, i.e.
 
 	rc-update add cloud-init-hotplugd default
 
-- secondly, enable hotplug for the relevant DataSource by adding the following
-  to either the /etc/cloud.cfg file or else to the supplied user-data:
+- enable hotplug for the relevant DataSource by adding the following to
+  either the /etc/cloud.cfg file or else to the supplied user-data:
 
 	updates:
 	  network:
 	    when: ['boot','hotplug']
+
+
+Limitations
+===========
+
+Unable to resize LVM or LUKS rootfs partitions and filesystems on them
+----------------------------------------------------------------------
+
+cloud-init's cc_growpart module, if enabled, attempts to resize the root
+partition. If however the rootfs is on a /dev/mapper/ devices (whether LVM,
+or LUKS, or LVM-on-LUKS, or LUKS-on-LVM, cc_growpart will be unable to
+resize the partition - this is due to a difference in behaviour between mdev
+(always used by Alpine's initramfs **even if eudev is used by the rest of
+the OS once the rootfs is mounted**) and eudev.
+
+When the initramfs' init runs it will trigger mdev to create a /dev/mapper/
+entry, if required, for the rootfs. With mdev this entry is an actual file,
+whereas eudev would create it as a softlink to the underlying /dev/dm-*
+device. Cloud-init's cc_growpart attempts to determine the device that
+provides the rootfs and, due to this mdev limitation, believes this is
+/dev/mapper/<whatever> rather that the actual /dev/dm-<whatever> device. The
+/growpart utility can resize /dev/dm-*
+
+This issues affects partition growing/fs resizing regardless of whether
+udev, mdev, or mdevd is enabled in the Alpine disk image - Alpine's
+initramfs' init *always* runs mdev regardless.
+
+As a workaround, in user-data provided to the VM the runcmd module can be
+used to perform any resizing as follows:
+
+For a LUKS-encrypted rootfs (assuming it is on a LUKS partition labelled
+"lukspart" and is device /dev/sda2):
+
+  runcmd:
+    - growpart /dev/sda2
+    - cryptsetup resize lukspart
+    - resize2fs /dev/mapper/lukspart
+
+For a LVM-based rootfs (assuming it is on a LVM VG called "rootfs" in VG
+"vg0" with /dev/sda2 being the partition LVM is using):
+
+  runcmd:
+    - growpart /dev/sda2
+    - lvextend -l +100%FREE /dev/mapper/vg0-rootfs
+    - resize2fs /dev/mapper/vg0-rootfs
 
 
 
@@ -173,7 +234,7 @@ key-based SSH logins.
 
 Solution: install the openssh-server-pam package (rather than
 openssh-server) and edit /etc/ssh/sshd_config to ensure that it defines
-"EnablePAM yes".
+"UsePAM yes".
 
 In the future this package may add "openssh-server-pam" as a dependency but
 as it is possible some individuals may wish to use cloud-init without any
@@ -192,9 +253,9 @@ manually install additional packages required by some cloud-init modules.
 
 The following modules should work, in general, with the defined dependencies:
 
+	cc_apk_configure
 	cc_bootcmd
 	cc_ca_certs
-	cc_debug
 	cc_disable_ec2_metadata
 	cc_disk_setup
 	cc_final_message
@@ -242,15 +303,22 @@ the appropriate tools:
 	ZFS:		zfs
 
 Cloud-init assumes the use of dhclient for DHCP purposes. However other DHCP
-clients do also work (although perhaps not as fully) with cloud-init.
-Therefore "dhclient" has not been set as a hard dependancy for the Alpine
-package.
+clients do also work, in part, with cloud-init. Therefore "dhclient" has not
+been set as a hard dependancy for the Alpine package.
+
+However if you are using a DataSource (i.e. AWS Ec2, Azure, GCE, Hetzner, NWCS,
+OpenStack, Oracle, Scaleway, UpCloud, and Vultr) that needs to set up a
+Ephemeral (temporary) DHCPv4 connection in order to talk to a Metadata Server
+(to retrieve metadata, network configuration, and user-data information from)
+then this DataSource expect "dhclient" to be installed and will try and execute
+it directly and therefore retrieving information from the metadata server will
+fail if dhclient is not installed).
 
 
 cc_ca_certs module
 ------------------
 
-The remove-defaults option of the cloud-init cc_ca_certs module does not
+The "remove-defaults" option of the cloud-init cc_ca_certs module does not
 currently work correctly. This option will delete certificates installed by
 the Alpine ca-certificates package as expected. However the certificates
 provided by the ca-certificates-bundle package, which is always automatically
