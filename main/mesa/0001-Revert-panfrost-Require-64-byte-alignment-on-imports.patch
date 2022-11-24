@@ -1,0 +1,166 @@
+From b5ca991ed70e992267561951c4634007f04a777b Mon Sep 17 00:00:00 2001
+From: Newbyte <newbie13xd@gmail.com>
+Date: Thu, 24 Nov 2022 21:20:28 +0100
+Subject: [PATCH] Revert "panfrost: Require 64-byte alignment on imports"
+
+This reverts commit e1fe4a64d3f319731152bb48e6cb15e899452b15.
+
+This causes more problems than it solves.
+
+Relevant Mesa issue:
+https://gitlab.freedesktop.org/mesa/mesa/-/issues/7731
+
+Relevant postmarketOS issue:
+https://gitlab.com/postmarketOS/pmaports/-/issues/1791
+---
+ .pick_status.json              |  2 +-
+ src/panfrost/lib/pan_layout.c  | 54 ++--------------------------------
+ src/panfrost/lib/pan_texture.c |  8 -----
+ src/panfrost/lib/pan_texture.h |  6 ----
+ 4 files changed, 4 insertions(+), 66 deletions(-)
+
+diff --git a/.pick_status.json b/.pick_status.json
+index c17161c8101..bedb90ff6eb 100644
+--- a/.pick_status.json
++++ b/.pick_status.json
+@@ -2479,7 +2479,7 @@
+         "description": "panfrost: Require 64-byte alignment on imports",
+         "nominated": true,
+         "nomination_type": 0,
+-        "resolution": 1,
++        "resolution": 0,
+         "main_sha": null,
+         "because_sha": null
+     },
+diff --git a/src/panfrost/lib/pan_layout.c b/src/panfrost/lib/pan_layout.c
+index 51b511a9a9d..127ad6c7815 100644
+--- a/src/panfrost/lib/pan_layout.c
++++ b/src/panfrost/lib/pan_layout.c
+@@ -275,34 +275,6 @@ panfrost_texture_offset(const struct pan_image_layout *layout,
+                (surface_idx * layout->slices[level].surface_stride);
+ }
+ 
+-/*
+- * Return the minimum stride alignment in bytes for a given texture format.
+- *
+- * There is no format on any supported Mali with a minimum alignment greater
+- * than 64 bytes, but 64 bytes is the required alignment of all regular formats
+- * in v7 and newer. If this alignment is not met, imprecise faults may be
+- * raised.
+- *
+- * This may not be necessary on older hardware but we enforce it there too for
+- * uniformity. If this poses a problem there, we'll need a solution that can
+- * handle v7 as well.
+- *
+- * Certain non-regular formats require smaller power-of-two alignments.
+- * This requirement could be loosened in the future if there is a compelling
+- * reason, by making this query more precise.
+- */
+-uint32_t
+-pan_stride_align_B(UNUSED enum pipe_format format)
+-{
+-        return 64;
+-}
+-
+-bool
+-pan_is_stride_aligned(enum pipe_format format, uint32_t stride_B)
+-{
+-        return (stride_B % pan_stride_align_B(format)) == 0;
+-}
+-
+ bool
+ pan_image_layout_init(struct pan_image_layout *layout,
+                       const struct pan_image_explicit_layout *explicit_layout)
+@@ -316,15 +288,8 @@ pan_image_layout_init(struct pan_image_layout *layout,
+              layout->nr_slices > 1 || layout->crc_mode == PAN_IMAGE_CRC_INBAND))
+                 return false;
+ 
+-        /* Require both offsets and strides to be aligned to the hardware
+-         * requirement. Panfrost allocates offsets and strides like this, so
+-         * this requirement is satisfied by any image that was exported from
+-         * another process with Panfrost. However, it does restrict imports of
+-         * EGL external images.
+-         */
+-        if (explicit_layout &&
+-            !(pan_is_stride_aligned(layout->format, explicit_layout->offset) &&
+-              pan_is_stride_aligned(layout->format, explicit_layout->row_stride)))
++        /* Mandate 64 byte alignement */
++        if (explicit_layout && (explicit_layout->offset & 63))
+                 return false;
+ 
+         unsigned fmt_blocksize = util_format_get_blocksize(layout->format);
+@@ -378,19 +343,10 @@ pan_image_layout_init(struct pan_image_layout *layout,
+ 
+                         row_stride = explicit_layout->row_stride;
+                 } else if (linear) {
+-                        /* Keep lines alignment on 64 byte for performance.
+-                         *
+-                         * Note that this is a multiple of the minimum
+-                         * stride alignment, so the hardware requirement is
+-                         * satisfied as a result.
+-                         */
++                        /* Keep lines alignment on 64 byte for performance */
+                         row_stride = ALIGN_POT(row_stride, 64);
+                 }
+ 
+-
+-                assert(pan_is_stride_aligned(layout->format, row_stride) &&
+-                       "alignment gauranteed in both code paths");
+-
+                 unsigned slice_one_size = row_stride * (effective_height / block_size.height);
+ 
+                 /* Compute AFBC sizes if necessary */
+@@ -430,10 +386,6 @@ pan_image_layout_init(struct pan_image_layout *layout,
+ 
+                 slice->surface_stride = slice_one_size;
+ 
+-                assert(pan_is_stride_aligned(layout->format, slice->surface_stride) &&
+-                       "integer multiple of aligned is still aligned, "
+-                       "and AFBC header is at least 64 byte aligned");
+-
+                 /* Compute AFBC sizes if necessary */
+ 
+                 offset += slice_full_size;
+diff --git a/src/panfrost/lib/pan_texture.c b/src/panfrost/lib/pan_texture.c
+index 9fa8c4496f7..446fffe234c 100644
+--- a/src/panfrost/lib/pan_texture.c
++++ b/src/panfrost/lib/pan_texture.c
+@@ -247,18 +247,10 @@ panfrost_get_surface_strides(const struct pan_image_layout *layout,
+                  * repurposed as a Y offset which we don't use */
+                 *row_stride = PAN_ARCH < 7 ? 0 : slice->row_stride;
+                 *surf_stride = slice->afbc.surface_stride;
+-
+-                /* Row stride alignment requirement does not apply to AFBC */
+         } else {
+                 *row_stride = slice->row_stride;
+                 *surf_stride = slice->surface_stride;
+-
+-                /* Particular for linear, the row stride must be aligned */
+-                assert(pan_is_stride_aligned(layout->format, *row_stride));
+         }
+-
+-        /* All surface strides are aligned, required for linear */
+-        assert(pan_is_stride_aligned(layout->format, *surf_stride));
+ }
+ 
+ static mali_ptr
+diff --git a/src/panfrost/lib/pan_texture.h b/src/panfrost/lib/pan_texture.h
+index 875f008e71b..bd773fa374e 100644
+--- a/src/panfrost/lib/pan_texture.h
++++ b/src/panfrost/lib/pan_texture.h
+@@ -248,12 +248,6 @@ panfrost_from_legacy_stride(unsigned legacy_stride,
+                             enum pipe_format format,
+                             uint64_t modifier);
+ 
+-uint32_t
+-pan_stride_align_B(enum pipe_format format);
+-
+-bool
+-pan_is_stride_aligned(enum pipe_format format, unsigned stride_B);
+-
+ struct pan_surface {
+         union {
+                 mali_ptr data;
+-- 
+2.38.1
+
