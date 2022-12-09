@@ -3,7 +3,7 @@
 
 pkgname=dotnet7-stage0
 pkgver=7.0.100
-pkgrel=1
+pkgrel=2
 
 [ "$CBUILD" != "$CHOST" ] && _cross="-$CARCH" || _cross=""
 
@@ -27,9 +27,14 @@ _patches="
 	build_set-local-repo.patch
 	installer_2780-reprodicible-tarball.patch
 	installer_runtimepacks.patch
-	roslyn_allow-setting-bl-location.patch
+	roslyn_allow-extra-params.patch
 	runtime_76500-mono-musl-support.patch
-	runtime_crossbuild-fixes.patch
+	runtime_76500-properly-set-toolchain-for-alpine.patch
+	runtime_77269-fix-opcheckthis.patch
+	runtime_77270-fixed-fsharp-crash-issue.patch
+	runtime_77364-mono-createdirectory-workaround.patch
+	runtime_77682-mono-cgroup-min-memory.patch
+	runtime_78146-fixed-clang15-build-issue.patch
 	runtime_make-lld-use-depend-on-existing-on-target.patch
 	runtime_non-portable-distrorid-fix-alpine.patch
 	sdk_dummyshim-fix.patch
@@ -43,8 +48,7 @@ pkgdesc="The .NET Core stage0 bits for dotnet build"
 # x86: blocked by https://github.com/dotnet/runtime/issues/77667
 # armhf: blocked by https://github.com/dotnet/runtime/issues/77663
 # riscv64: port WIP https://github.com/dotnet/runtime/issues/36748
-# ppc64le: blocked by https://github.com/dotnet/runtime/issues/77364
-arch="all !x86 !armhf !riscv64 !ppc64le"
+arch="all !x86 !armhf !riscv64"
 url=https://dotnet.microsoft.com
 license="MIT"
 options="!check" # Testsuite in main -build aport
@@ -58,6 +62,7 @@ source="
 	dotnet-sdk-$_bootstrapver-linux-musl-arm64.noextract::https://dotnetcli.azureedge.net/dotnet/Sdk/$_bootstrapver/dotnet-sdk-$_bootstrapver-linux-musl-arm64.tar.gz
 	dotnet-sdk-$_bootstrapver-linux-musl-arm.noextract::https://dotnetcli.azureedge.net/dotnet/Sdk/$_bootstrapver/dotnet-sdk-$_bootstrapver-linux-musl-arm.tar.gz
 	dotnet-sdk-$_bootstrapver-linux-musl-s390x.noextract::https://repo.gpg.nz/apk/archives/dotnet-sdk-$_bootstrapver-linux-musl-s390x.tar.gz
+	dotnet-sdk-$_bootstrapver-linux-musl-ppc64le.noextract::https://repo.gpg.nz/apk/archives/dotnet-sdk-$_bootstrapver-linux-musl-ppc64le.tar.gz
 	Private.SourceBuilt.Artifacts.$_artifactsver.noextract::https://dotnetcli.azureedge.net/source-built-artifacts/assets/Private.SourceBuilt.Artifacts.$_artifactsver.tar.gz
 	$_extra_nupkgs
 	$_patches
@@ -189,6 +194,18 @@ prepare() {
 	mkdir -p "$_cli_root"
 	mkdir -p $_packagesdir $_downloaddir $_outputdir $_nugetdir $_logdir
 
+	# links logfiles to pipeline logs for easy pickup in pipelines
+	mkdir -p "$_logdir" "$builddir"/artifacts
+	ln -s "$_logdir" "$builddir"/artifacts/logs
+	ln -s "$_logdir" "$builddir"/artifacts/log
+	for i in "$builddir"/src/*; do
+		if [ -f "$i" ]; then
+			continue
+		fi
+		mkdir -p "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts
+		ln -s "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts/log
+	done
+
 	tar --use-compress-program="pigz" -xf "$srcdir"/dotnet-sdk-$_pkgver_macro*$_dotnet_arch.* -C "$_cli_root" --no-same-owner
 
 	for i in $_extra_nupkgs; do
@@ -197,6 +214,7 @@ prepare() {
 }
 
 _runtime() {
+	"$_cli_root"/dotnet build-server shutdown
 	if [ -z "${_runtimever+x}" ]; then
 		local _runtimever=$(grep OutputPackageVersion "$builddir"/git-info/runtime.props | sed -E 's|</?OutputPackageVersion>||g' | tr -d ' ')
 	fi
@@ -206,10 +224,11 @@ _runtime() {
 	cd "$builddir"/src/runtime
 
 	local args="
-		$_globalargs
+		-c Release
+		-bl
 		-clang
 		-arch $_dotnet_target
-		-bl:$_logdir/$pkgname-runtime.binlog
+		/consoleLoggerParameters:ShowTimestamp
 		/p:NoPgoOptimize=true
 		/p:EnableNgenOptimization=false
 		/p:GitCommitHash=$(cat ./.git/HEAD)
@@ -230,6 +249,7 @@ _runtime() {
 }
 
 _roslyn() {
+	"$_cli_root"/dotnet build-server shutdown
 	if [ -z "${_roslynver+x}" ]; then
 		local _roslynver=$(grep OutputPackageVersion "$builddir"/git-info/roslyn.props | sed -E 's|</?OutputPackageVersion>||g' | tr -d ' ')
 	fi
@@ -239,9 +259,10 @@ _roslyn() {
 	cd "$builddir"/src/roslyn
 
 	local args="
-		$_globalargs
+		-c Release
+		-bl
+		/consoleLoggerParameters:ShowTimestamp
 		/p:GitCommitHash=$(cat ./.git/HEAD)
-		/bl:$_logdir/$pkgname-roslyn.binlog
 		"
 	if [ "$_roslynver" != "${_roslynver##*-}" ]; then
 		local args="$args /p:VersionSuffix=${_roslynver##*-}"
@@ -254,6 +275,7 @@ _roslyn() {
 }
 
 _sdk() {
+	"$_cli_root"/dotnet build-server shutdown
 	if [ -z "${_sdkver+x}" ]; then
 		local _sdkver=$(grep OutputPackageVersion "$builddir"/git-info/sdk.props | sed -E 's|</?OutputPackageVersion>||g' | tr -d ' ')
 	fi
@@ -263,8 +285,9 @@ _sdk() {
 	cd "$builddir"/src/sdk
 
 	local args="
-		$_globalargs
-		-bl:$_logdir/$pkgname-sdk.binlog
+		-c Release
+		-bl
+		/consoleLoggerParameters:ShowTimestamp
 		/p:GitCommitHash=$(cat ./.git/HEAD)
 		/p:Architecture=$_dotnet_target
 		"
@@ -284,6 +307,7 @@ _sdk() {
 }
 
 _aspnetcore() {
+	"$_cli_root"/dotnet build-server shutdown
 	if [ -z "${_aspnetver+x}" ]; then
 		local _aspnetver=$(grep OutputPackageVersion "$builddir"/git-info/aspnetcore.props | sed -E 's|</?OutputPackageVersion>||g' | tr -d ' ')
 	fi
@@ -292,11 +316,12 @@ _aspnetcore() {
 	msg "[$(date)] Build aspnetcore version $_aspnetver"
 	cd "$builddir"/src/aspnetcore
 	local args="
-		$_globalargs
+		-c Release
+		-bl
 		--os-name linux-musl
 		-arch $_dotnet_target
 		-no-build-nodejs
-		-bl:$_logdir/$pkgname-aspnetcore.binlog
+		/consoleLoggerParameters:ShowTimestamp
 		/p:BuildNodeJs=false
 		/p:GitCommitHash=$(cat ./.git/HEAD)
 		/p:DotNetAssetRootUrl=file://$_downloaddir/
@@ -319,12 +344,14 @@ _aspnetcore() {
 }
 
 _installer() {
+	"$_cli_root"/dotnet build-server shutdown
 	msg "[$(date)] Building installer version $_installerver"
 	cd "$builddir"/src/installer
 
 	local args="
-		$_globalargs
-		-bl:$_logdir/$pkgname-installer.binlog
+		-c Release
+		-bl
+		/consoleLoggerParameters:ShowTimestamp
 		/p:OSName=linux-musl
 		/p:HostOSName=linux-musl
 		/p:Architecture=$_dotnet_target
@@ -363,12 +390,12 @@ build() {
 
 	ulimit -n 4096
 
-	_globalargs="-c Release"
-
 	# Parallel restore is broken on mono-based builds since dotnet7
 	# see https://github.com/dotnet/runtime/issues/77364
+	# A workaround via runtime_77364-mono-createdirectory-workaround.patch
+	# removes the error, but env var is added in case
 	case $CARCH in
-		s390x|ppc64le)_globalargs="$_globalargs /p:RestoreDisableParallel=true";;
+		s390x|ppc64le) export RestoreDisableParallel=true CopyRetryCount=10;;
 	esac
 
 	_runtime
@@ -477,17 +504,23 @@ sha512sums="
 2ee0a055a3e46c6d9ced3cada5f91141b3966e76f4c4b11e58cd4c89ea69408a5b0efaaa21aaa04f743add38f1435f5a5852271a4222d5cd858907ec44f0af2e  dotnet-sdk-7.0.100-linux-musl-x64.noextract
 8b3e95cc3e80eb05c7a0bc7ede1033320e03c78f4ecb7cc99b85fa99f56d72bc06342f342fe957e4aadacf9fb83fff15e658ae62c8fa8b29051898929c5ea833  dotnet-sdk-7.0.100-linux-musl-arm64.noextract
 26b7ca079c8c2bafb32b5794de698dd325837897ee4120d0a7bbbcdc7f034de5031c6f30536866ccd7d1338625f937f41cfa5524c64163faded58846bfa674af  dotnet-sdk-7.0.100-linux-musl-arm.noextract
-e4882126f6c15d00aa2ca4cab501b682e8d5d92ce3280fd2c955b5b0a248f66a6c893fd7397e9792b071e10bc62aeceffde4f865847dcf9d8b5fec1a2343fccd  dotnet-sdk-7.0.100-linux-musl-s390x.noextract
+c61eead91329015d1cc2f73846cf080d1959e0906033b0a9a19839c495e356a493bef6e604d8f5a9700dd4f20edb412733dd34c099e5e5ba018df2c1901ed616  dotnet-sdk-7.0.100-linux-musl-s390x.noextract
+0a45c2e01309de656e448f84f32d67cc55cfbec750a3d3eadb052096e32e9269a1e78a3b04d627f791c4b976dc1d0c40a031ef80320d0f17d33b54a4929c2a40  dotnet-sdk-7.0.100-linux-musl-ppc64le.noextract
 cafb24303cdf92cdc8e2c703aa81684001fecf4a6f609a8008fd32ded9e06552bc04e38e21b6c26b0cf899686a9d05f6fad26a98bc73bd5d6347d682eec275a8  Private.SourceBuilt.Artifacts.7.0.100.noextract
 2ede8d9352a51861a5b2550010ff55da8241381a6fa6cc49e025f1c289b230b8c0177e93850de4ea8b6f702c1f2d50d81a9f4d890ca9441c257b614f2a5e05dd  stylecop.analyzers.1.2.0-beta.435.nupkg
 4394debb3cfec7bec7f223029c8283fd57b28ad765d47f354c7ca667756cbfc1ae4a51b216a0f81452400f60b58f08347bac327cd717a1947dad737b37cbe3ef  aspnetcore_use-linux-musl-crossgen-on-non-x64.patch
 97d3194f8ad96521002e3693261451154d6ba567ea807e9daa4d55e1cda0693791fab4443e3d0d0fa8bc51ba53dd9b4077c723fa8f1f34cdd1661df828ce4227  build_set-local-repo.patch
-e68be02038672a3d2a2f539b1c7309b055c3c5256f5e4c9d24edbc203df5b4358b1759fe3626fbefd234182817fa1018e574ab64093dab90e60272d686e8e05f  installer_2780-reprodicible-tarball.patch
+0215d0fdbb4f46ab1cab547076cff39ccbe3e6ef0fdd26a60a562c60e1c022ee14286692a3880d75c665410a3db137f817e04c8c311a3960f8dede0036488741  installer_2780-reprodicible-tarball.patch
 1fe84c55f63c3b32fe7c58aa23ba25e2e9ddeee21acd664947206b8a9678bf38e2c1a95252243d7981dd9423bda49f40dd463fa6e619fe7f329a31794829ee88  installer_runtimepacks.patch
-f2073b2713a32d36ff52a4b37170b00fd646b42e1dad4c268afd9b478d2457df0aa565006b6e2f68385319ebeaf147ed92700ae28490f73a0f512681362a3ce8  roslyn_allow-setting-bl-location.patch
-37767ac200d95598e35acb8e9850bef5291e971991551a27014e95ae1f634ed6b6293dd2d83dedc63509c9d62024bf3b853004d5b9ae0b3fe71f31c1109e11ec  runtime_76500-mono-musl-support.patch
-de674edb37789fd8f30ff0085adcc57f3b5e4be752be9f60de0ad22ddd2ef3deefe71f58c0f6e785f1d480658c608f0da1818113590d3f92b50b82b495ff3cc8  runtime_crossbuild-fixes.patch
-3624e14029e4fd5ad0f3dafb6b9b5e5efa8268a25083d8af8119ac680663a9278658c96d8926892e9f65680af5be13da0be51c82f68a99700fe1456a2765da2b  runtime_make-lld-use-depend-on-existing-on-target.patch
+ead82bb2276acc273d661e42597c76661984143bb7736cd6a64241f51b2da3b9b8625b6232e24c7f9a6965436f65a5b7bf1ba7669a01e6b9774ebd3a62f7ebe0  roslyn_allow-extra-params.patch
+bbb97954f2fef5cfbb5b10b9396987bc525e0bba8215636892f7d6108d992710c4af4c159fa312c7841edeb4ab517033ae8231ce888296370646f17933777520  runtime_76500-mono-musl-support.patch
+24f3fed752922d2ca3c151f21fedf6a257c7c74a155105a1aa09cdc847ba24e496212cb2d8548b134a8901c7da8d78c27fa93579211f7bdeadc598f808fed4a8  runtime_76500-properly-set-toolchain-for-alpine.patch
+7e1834d7917bdfe330e92c9c658c4cfeb0926956799e389990a9fcd2fba21bbaacce41d27af089c3d70613f829331e9071dec00ca9ec0f88b2516b79c57a20a0  runtime_77269-fix-opcheckthis.patch
+169ccf375696e82017b8d67dbcf6deb8d09c1f89681bc49b7ead699d45587a2bd407c1675cd14ad5a8701991312e14074af339bec58049a8ed9432fa851871cd  runtime_77270-fixed-fsharp-crash-issue.patch
+d6ed172723915c0b67aa5153e34d52c002432ca0cada9e02a2a1975c3fd9cffd3ba24e4ab1d6b9866d91f964598b79c7876528a5f2f5a7b4ffb376c2d601c8b0  runtime_77364-mono-createdirectory-workaround.patch
+f6d6785815d87072784354b5b962ad1dd2e713c534976de953b970d086afb6f166da01237b2767a62dc97ced9af3b6f90a21d6d08e6c6487bcd5871715255a22  runtime_77682-mono-cgroup-min-memory.patch
+896ab17e3ecb36b80c6f7a6790c583655f8e82d9dda4062f7911952880ff41f483af16a64a0e1645cd6ee508a1f21578ddfc1e0ab43998b690e9e92324126283  runtime_78146-fixed-clang15-build-issue.patch
+2ff8b42bce25b8389177bb6389bfdc796c104c5d992e72a6e7c8af0cda8f70f26f480071db380df78db745eee72e4343220f79ec6b22aa880fa2531eda8c8593  runtime_make-lld-use-depend-on-existing-on-target.patch
 8be4b028fb15d4bc0ba34711f7491c49b4908e017a9c46fcd3817c59aa1459c0217dca405f46cfaf5e115ad0fbcd60d2593c05c6e1da2632612bf6179867cd10  runtime_non-portable-distrorid-fix-alpine.patch
 b5f28aa8bdbd24c589276a60893859965eb78b0abfbdac7a6e86715ac87e3bbd8bc271852ff62a41ea83b53af02e1c1814abcccc8862c07b3ac74633d1be0a32  sdk_dummyshim-fix.patch
 "
