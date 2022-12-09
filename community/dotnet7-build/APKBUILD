@@ -3,21 +3,22 @@
 
 pkgname=dotnet7-build
 pkgver=7.0.100
-pkgrel=3
+pkgrel=4
 _gittag=v7.0.100-rtm.22521.12
 _giturl="https://github.com/dotnet/installer"
-_testtag=a061db200ef72f2f5ad60e9bf0ed16e92e68891b
+_testtag=e7c6559bb87f55298ac5cd7486920b0accc4e25a
 _bunnytag=b6a6f7cb5eb7cd86c7f9baa512015181eabfe0c6
 _patches="
-	aspnetcore_14792-support-building-with-mono-runtime.patch
+	aspnetcore_44977-support-building-with-mono-runtime.patch
 	aspnetcore_44978-support-building-with-nonportable-runtime.patch
 	aspnetcore_disable-generate-composites.patch
 	aspnetcore_disable-package-validation.patch
 	build_14549-non-portable-build.patch
 	build_14647-update-portable-rid-logic.patch
 	build_14792-support-building-with-mono-runtime.patch
-	build_pass-restore-parallel-disable.patch
-	build_set-nativeaotsupported-as-false-on-arm.patch
+	build_15039-set-nativeaotsupported-as-false-on-arm.patch
+	build_enable-timestamps.patch
+	build_shutdown-build-servers-at-each-build-step.patch
 	check_rid-alpine-generation.diff
 	installer_14549-crossgen2-rid.patch
 	installer_14549-rename-MicrosoftAspNetCoreAppRuntimePackageVersion.patch
@@ -26,16 +27,20 @@ _patches="
 	installer_2780-reprodicible-tarball.patch
 	installer_fix-mono-workload-version.patch
 	roslyn-analyzer_disable-apphost.patch
-	runtime_14792-support-building-with-mono-runtime.patch
 	runtime_74504-pass-targetrid-to-native-scripts.patch
 	runtime_75597-support-building-runtime-with-non-portable-runtime.patch
 	runtime_76068-use-generated-runtimejson-when-building-sharedframework.patch
 	runtime_76500-mono-musl-support.patch
+	runtime_77269-fix-opcheckthis.patch
+	runtime_77270-fixed-fsharp-crash-issue.patch
+	runtime_77364-mono-createdirectory-workaround.patch
+	runtime_77682-mono-cgroup-min-memory.patch
+	runtime_78146-fixed-clang15-build-issue.patch
+	runtime_78395-support-building-with-mono-runtime.patch
 	runtime_enable-system-libunwind.diff
 	sdk_14239-add-zsh-compdef-completion-script.patch
-	sdk_14792-support-building-with-mono-runtime.patch
 	sdk_28380-map-nonportable-rids-when-targetos-is-determined.patch
-	source-build-externals_pass-restore-disable-parallel.patch
+	sdk_28674-support-building-with-mono-runtime.patch
 	"
 
 _pkgver_macro=${pkgver%.*}
@@ -45,8 +50,7 @@ pkgdesc="The .NET $_pkgver_macro bootstrap"
 # x86: blocked by https://github.com/dotnet/runtime/issues/77667
 # armhf: blocked by https://github.com/dotnet/runtime/issues/77663
 # riscv64: port WIP https://github.com/dotnet/runtime/issues/36748
-# ppc64le: blocked by https://github.com/dotnet/runtime/issues/77364
-arch="all !x86 !armhf !riscv64 !ppc64le"
+arch="all !x86 !armhf !riscv64"
 url=https://dotnet.microsoft.com
 license="MIT"
 # hack for dotnetx-build to be able to pull itself for bootstrapping
@@ -71,8 +75,8 @@ makedepends="
 	bash
 	clang
 	cmake
-	dotnet$_pkgver_name-bootstrap
-	dotnet$_pkgver_name-bootstrap-artifacts
+	dotnet$_pkgver_name-stage0-bootstrap
+	dotnet$_pkgver_name-stage0-artifacts
 	dotnet$_pkgver_name-stage0
 	findutils
 	git
@@ -219,7 +223,6 @@ prepare() {
 			;;
 	esac
 
-
 	# ensure that dotnet does not download artifacts provided by dotnet-artifacts
 	rm -rf "$builddir"/packages/archive
 	# Adjusts OfficialBuildId to current date on tarball
@@ -229,6 +232,13 @@ prepare() {
 	mkdir -p "$_logdir" "$builddir"/artifacts
 	ln -s "$_logdir" "$builddir"/artifacts/logs
 	ln -s "$_logdir" "$builddir"/artifacts/log
+	for i in "$builddir"/src/*; do
+		if [ -f "$i" ]; then
+			continue
+		fi
+		mkdir -p "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts
+		ln -s "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts/log
+	done
 
 	# dotnet requires its bootstrap to be in a writable dir
 	msg "Setting up bootstrap"
@@ -259,14 +269,14 @@ build() {
 		/p:LogVerbosity=minimal
 		/p:MinimalConsoleLogOutput=true
 		/p:CleanWhileBuilding=true
-		/p:OSName=linux-musl
-		/p:HostOSName=linux-musl
 		"
 
 	# Parallel restore is broken on mono-based builds since dotnet7
 	# see https://github.com/dotnet/runtime/issues/77364
+	# A workaround via runtime_77364-mono-createdirectory-workaround.patch
+	# removes the error, but env var is added in case
 	case $CARCH in
-		s390x|ppc64le) local args="$args /p:RestoreDisableParallel=true";;
+		s390x|ppc64le) export RestoreDisableParallel=true CopyRetryCount=10;;
 	esac
 
 	# between releases, /etc/os-release sometimes has a VERSION_ID that is
@@ -296,12 +306,10 @@ build() {
 
 check() {
 	# Tests timeout (in seconds)
-	local _tests_timeout=600
+	local _tests_timeout=1000
 	# Test suite disable flags
 	# following tests can only work after packaging step
 	local _disabled_tests="man-pages distribution-package bash-completion install-local release-version-sane"
-	# test broken: no omnisharp release for .net7
-	local _disabled_tests="$_disabled_tests omnisharp"
 	# test broken: permission issue on lxc / pipelines
 	local _disabled_tests="$_disabled_tests createdump-aspnet workload"
 	# liblttng-ust_sys-sdt.h: no 'NT_STAPSDT' on Alpine's lttng-ust package
@@ -389,6 +397,7 @@ package() {
 
 sdk() {
 	pkgdesc="The .NET $_pkgver_macro SDK"
+	# libucontext isn't automatically detected on all platforms
 	depends="
 		aspnetcore$_pkgver_name-runtime
 		aspnetcore$_pkgver_name-targeting-pack
@@ -396,6 +405,7 @@ sdk() {
 		dotnet$_pkgver_name-targeting-pack
 		dotnet$_pkgver_name-templates
 		netstandard21-targeting-pack
+		libucontext
 		"
 	provides="
 		dotnet-sdk-$_pkgver_macro=$pkgver-r$pkgrel
@@ -510,33 +520,38 @@ doc() {
 
 sha512sums="
 1f0e7e6efb7076bc7d5a11e0589c27258cfe2bfa6d81a6d41f172c7292dab60f62b3e95e3873d4ee024d765f09507851d169a35ae06e75ce815d76717adb5025  dotnet-v7.0.100-rtm.22521.12.tar.xz
-2f9acd7bf2f346f1611aa1da4f201366205bb3fe8ec6cff28ce44f3982283a6a3462962b7276537d78d1778c431d043d897eb59a575e798b39df9979c4e21188  dotnet-testsuite-a061db200ef72f2f5ad60e9bf0ed16e92e68891b.tar.gz
+63279c6f6432b2cf98239b401bc007c3463911d5983e1bf91688ed90d805feb9030718bc74b2608347cc21d9143e595d6d37aaadf2cb6ec6439601b35045639d  dotnet-testsuite-e7c6559bb87f55298ac5cd7486920b0accc4e25a.tar.gz
 3663030bbd22efe90dd9b402ef29db879539c92c2e5d5404f10712661494e4c55c3a1dab7d09a129c5e9e41668aa2d9cb0c3251055a810dbdf7c1cee7279be49  dotnet-bunny-b6a6f7cb5eb7cd86c7f9baa512015181eabfe0c6.tar.gz
-39a3dcd54d99a7e0e482c7f67edc75493efda001f7f32259b754bfda81eb5943f1eb51727121d86dc2e0daf9f9ce27db265b17275cb9fce246128c0bc0bb8d44  aspnetcore_14792-support-building-with-mono-runtime.patch
-a6d2c5cf098803f690e51946395697ba3c0a5643f24211002cc9af18ff3eee5290db9a129990f21ca1b2fabe0fcafa34bc29990c8d9c591adf640149347347c0  aspnetcore_44978-support-building-with-nonportable-runtime.patch
-4073baaa57376701a3d3edf8c9ed33b7d141f863d981c2c34fbe5b2874611ec1eb4ed30b2c5d0dbf50c01803346f01e234f58603c82fbdc0af4e785d5a63059f  aspnetcore_disable-generate-composites.patch
+72cbf507c4906376d190146f6b1d80c142395a32cebdde418ed03a84237e3f368ead06423c03e2bd6798d2f9d9072e30553f396ea4a9a51f8a8786dbc5a3061d  aspnetcore_44977-support-building-with-mono-runtime.patch
+c9fe10b2622981c53b2d9c58c831c28af57774c5b64af5542d283499c6d5fc432582ac26c61cca45ddbe3ef062f82270e9c2a2c5b3487ea8888f255b1f447713  aspnetcore_44978-support-building-with-nonportable-runtime.patch
+f911478ec1c046bebd5fa7ad0fbea8a3f06278b830c7855e6c9e590a43c1a0f2c38a89fc6a2262a633e90421f1336f397a8a0a329460c265431599d9f50b88cf  aspnetcore_disable-generate-composites.patch
 c73fbbfe06fb3144d61037d6ef61110816a61e7f3fdae58c00f3200f2721ecae9a374235b77c4a50960f9b081fa5bedc09951c3543a8f58947ba9b27083e4887  aspnetcore_disable-package-validation.patch
-2e6d68df03376417547b26b2e5fce1b0e6eef49530592c697a91bf22f36b6549d039df7f5a9da412f94542b34a6141cdb3a038338223bff50094f35de8a1dda3  build_14549-non-portable-build.patch
+755043a26afa08d4696886ad5e9dfadf554cb723b3e5aa7a5fa44851715a3cd9ed43d08dedb2fba8fdb4b53476a6942d2d3bc5c45dd6223123a01f272146914e  build_14549-non-portable-build.patch
 8f90abe6db4be3f5616a0f369fe812e0ad2a9baa89364791281bee944e4c990c1ba4be6061560034316d644011f5f312f5309d48280597e9a468b12e3fb4cea9  build_14647-update-portable-rid-logic.patch
-050a0c89f8a341468b1ba7b79afcc0f5ab8eeedb535315647544a779c4e3738d0ed42bfd3939cf1b08b5ab6f8e5ae2e636b6a2b5596faa2fe4f22087e1d4d451  build_14792-support-building-with-mono-runtime.patch
-727f08094d0f6e304b9d24032eea9c836859e0e451297c565f58de9c4453032eeabfd79e49e80f1269ec1d65fe97371d82b420a390fe81c2e2f3aa85e5e3bd4f  build_pass-restore-parallel-disable.patch
-134d6c712256b788cd5c68d230630f66993d37803a2cfce17193a0b37eee38b9032754724afcf874e66af330147532fe05b4e0229bb7c8d4465b9742a740a9d9  build_set-nativeaotsupported-as-false-on-arm.patch
+15abb87493ec033633682f5e246f63a2ca2897f8bfb2e55d3b326fe85e25da112bebc391423878c4b47820a5b826e9987842a6aa0feae3e67297cc2ef564dc6e  build_14792-support-building-with-mono-runtime.patch
+24a018e9c338b38334e083fc3875b0b2a0ed277078cd3b1cd8bc923dfa5f728fb900941bc2039e1be27a0a0686d53c9025dde11a80ea2407e6ae0238357d46b1  build_15039-set-nativeaotsupported-as-false-on-arm.patch
+86fbaa058f78bba100f534f4c4bd6d7254181909f70d264c0390d3dd89c878a14ba9b5d2de05271b2c07b73ead70e029488c926221f676d59e27e387e3e579e9  build_enable-timestamps.patch
+0049b27fad32f35ee99ef620aeee518600c24bde28c7a146261c7ae4313d747f3bdbe3e8b74a3154e025a80d5c62d545aa226c20c9376599e11091a31390abe6  build_shutdown-build-servers-at-each-build-step.patch
 941b430b55e323f723bbc5160447f060f40d18ce32e5803ab7dda16bfc60a0f5ec1dccd246e68475d7115ee265a9433824d8a5d997c302531311194a90deeca9  check_rid-alpine-generation.diff
-0eab6ac7e0be5b499016b014338e43d9239c3988a8d1fc0b2ee00b91db38615796843636b5c30fefff3bfc4f5ef4aa746e5ab1d868e0e913c90d5b578e4bef34  installer_14549-crossgen2-rid.patch
-7abaa2758080ac4da72488f856382c45be0a5d1f62108471290fa4a5dc6ef368ee8f0adcd27e8dbb3d296c6096db7843c0784b485b9bb92060147283b20deefc  installer_14549-rename-MicrosoftAspNetCoreAppRuntimePackageVersion.patch
+202d927a67f5d7c11f55e19df2de05ed63d2c5cedbbf47ba08d268f43202c3f20fd50cdc3247bb58d1a2d97168f6a64ad06ef37989caa161cc183d90ecb482d6  installer_14549-crossgen2-rid.patch
+98a0afddc685b4095fa969a973891708b1d44bd7089044b22f1828c8d95331d8113111b3d015ba1f8843c44c12f6698b7b4ca7177887495360b61cc15d499887  installer_14549-rename-MicrosoftAspNetCoreAppRuntimePackageVersion.patch
 f2e347a18d9aa7f190b201f2269521ec7f3623b6b25d7503e54d28568294fe0991184b804422951bb044d635b4599d3e320e8ffc8bad52716d0045cd0e3197d1  installer_14647-update-portable-rid-logic.patch
-ab258308add349de797b1fadd64314e14632f3455c3d55402c990c6218e9c96a8197356c67f5f6563ddbb62c0c29b51c44a78866067a9f4d5f43d5a4a1755a0e  installer_14792-support-building-with-mono-runtime.patch
-e68be02038672a3d2a2f539b1c7309b055c3c5256f5e4c9d24edbc203df5b4358b1759fe3626fbefd234182817fa1018e574ab64093dab90e60272d686e8e05f  installer_2780-reprodicible-tarball.patch
+d3e988c7d70201bd84e44b5331c8c038e2a53b3d7e1d6274efbb81771cba95113ee295e375394be2ae9d86ca0f1d1a6268b32c6a78cf128751ad667cfb27272e  installer_14792-support-building-with-mono-runtime.patch
+0215d0fdbb4f46ab1cab547076cff39ccbe3e6ef0fdd26a60a562c60e1c022ee14286692a3880d75c665410a3db137f817e04c8c311a3960f8dede0036488741  installer_2780-reprodicible-tarball.patch
 073bd0c473639ff145eb3f48382bfd632bd54cf7432df9436f4a1d9d58bdd79d99f5201d9f775920ef60e3c16b02ce15cfc70b690b3ea22e8d4471a25a8df66b  installer_fix-mono-workload-version.patch
 4ac92d2d9190a55ee20d3e145a28a6953c98d3eb838c8acfb808b8839316443cb64da4a2c5787df0171fce7ef96ff6381043085ed90c23ec09ce9ac81571e675  roslyn-analyzer_disable-apphost.patch
-7dea74f6657dec5b94a280cc6cd1c23f137973860485fbc249775f97ab0531992819edefd8a71da1b1f44f6efbc9296914b1efc1dfb910e967d4d47de65886af  runtime_14792-support-building-with-mono-runtime.patch
-e1516f15f982677c3deb9cbd5a906f58c34020c30bdda64377b2c4a6da55292e28bdd6ed9c84afaaec553840d71d3b1cf64cf5ffd56b7df03566a2cabc353452  runtime_74504-pass-targetrid-to-native-scripts.patch
-aafcf2245f7b5de1dcc8685b01b359f9564457cf0cfe16c423fc53112c2b2c8ef07bd7faeedd44074adb6cb6bee4a1041d038bd05c2781ceb6095964f9c679d3  runtime_75597-support-building-runtime-with-non-portable-runtime.patch
-66691872a2fc09a96b21ad6aef3788a945889914d2eb851a73bec167e9de4791e571dff4f91597f6f53e6a27aee64646bac9bb9249b060f8558eadeb7760edf1  runtime_76068-use-generated-runtimejson-when-building-sharedframework.patch
-37767ac200d95598e35acb8e9850bef5291e971991551a27014e95ae1f634ed6b6293dd2d83dedc63509c9d62024bf3b853004d5b9ae0b3fe71f31c1109e11ec  runtime_76500-mono-musl-support.patch
+6c737cbe92d5c4b9e5ed4af64cc6e328a5e457473c6daa214bbf313f2edfbdbe2029a465325737905df906d0b6f15eb1ab0f2deb18b0bebd5bd9aca74469c39d  runtime_74504-pass-targetrid-to-native-scripts.patch
+3944e91cc1f8c11d42b2086bfa7f79229bbc0beda4b3e6c164d7aa6784a47a9dbc12227d2f8d28f52547236d0a751dcdf8cd1b2e64687973922358339255fc00  runtime_75597-support-building-runtime-with-non-portable-runtime.patch
+947e59aea02e385a278cb77f64d7438c4d2de142cbec4613465826c325b5875804a14100a6c7ee182eba5ac55a6ffd85f08c719132ef64c089a43a52bc73b799  runtime_76068-use-generated-runtimejson-when-building-sharedframework.patch
+bbb97954f2fef5cfbb5b10b9396987bc525e0bba8215636892f7d6108d992710c4af4c159fa312c7841edeb4ab517033ae8231ce888296370646f17933777520  runtime_76500-mono-musl-support.patch
+7e1834d7917bdfe330e92c9c658c4cfeb0926956799e389990a9fcd2fba21bbaacce41d27af089c3d70613f829331e9071dec00ca9ec0f88b2516b79c57a20a0  runtime_77269-fix-opcheckthis.patch
+169ccf375696e82017b8d67dbcf6deb8d09c1f89681bc49b7ead699d45587a2bd407c1675cd14ad5a8701991312e14074af339bec58049a8ed9432fa851871cd  runtime_77270-fixed-fsharp-crash-issue.patch
+d6ed172723915c0b67aa5153e34d52c002432ca0cada9e02a2a1975c3fd9cffd3ba24e4ab1d6b9866d91f964598b79c7876528a5f2f5a7b4ffb376c2d601c8b0  runtime_77364-mono-createdirectory-workaround.patch
+f6d6785815d87072784354b5b962ad1dd2e713c534976de953b970d086afb6f166da01237b2767a62dc97ced9af3b6f90a21d6d08e6c6487bcd5871715255a22  runtime_77682-mono-cgroup-min-memory.patch
+896ab17e3ecb36b80c6f7a6790c583655f8e82d9dda4062f7911952880ff41f483af16a64a0e1645cd6ee508a1f21578ddfc1e0ab43998b690e9e92324126283  runtime_78146-fixed-clang15-build-issue.patch
+5730ce7f5ce6c932ab1c23afb93cbf19cccdbd73454a271041e91d7ed9f40243a371c5c9e5e071ee637826f0be71400651f7fd71795c29b397741cc1cdf4b48a  runtime_78395-support-building-with-mono-runtime.patch
 68a46aa4230d1bbaa81585e87b0b9da4b80ffc0763040e89fc255f4fc337ba15077bb457ef28e620d28828db50cb13d8665bebe9adb792bfd4f723f3ef686301  runtime_enable-system-libunwind.diff
-26b11f5bfa4e5224478cd6f68ad7cc93685695bb42278a28b9cc099501b1052f28bbc9ea452485fd019a02fa683cbca4a0331ebc86ceed3f39d1b1f94fdc92a2  sdk_14239-add-zsh-compdef-completion-script.patch
-a0bba080dff2bb87ff5752817414caebb181a4135348626eae05ede06065be7b3bf5d5afe425f74ba7bdfc7e6e421aa95494e0f9b7fafbeffe8b57ce2a131966  sdk_14792-support-building-with-mono-runtime.patch
-cf544caff9d7e44a9063637045b8f7ef440fe6567b626f67722e909b8f2ec01f1598ec626d54a5cefb77626c215b66d23d6261244cf237e2d9e75f6fcd181c20  sdk_28380-map-nonportable-rids-when-targetos-is-determined.patch
-1da62782bcb4a732db68fb5dea72528915d588557c389528632f0cd9c77404cbcc579568c230e20bf948dce39603ddd4bc8212c3d2fade9d5bed884643e0c121  source-build-externals_pass-restore-disable-parallel.patch
+d1b4ebcbb1a6815fc0ce4c471485c232618e60968a879309fb8336821a9351d2e0028d9f7726c0c041c750b497a0baa47400c78c9ceff550b91b4a6c2816fc41  sdk_14239-add-zsh-compdef-completion-script.patch
+be95fdbb00aa4a38d8270dd74891143dd090018630526c0c9a270afa3c95022fca6c91b4f70158169b9767e9d37f0b1d4ebaacdab78d82f09473ec5cf8b93880  sdk_28380-map-nonportable-rids-when-targetos-is-determined.patch
+9aad6bd948787eb976e77a248bbdcc66695c25d1b67617fee02661e688dfa84b989dd7e768e9b717a6fc5d4d423e1e139e779bd16b46cffdcf057659cee70186  sdk_28674-support-building-with-mono-runtime.patch
 "
