@@ -19,11 +19,8 @@ depends="
 	libc-utils
 	openrc
 	"
-makedepends=""
-install=""
 subpackages="alpine-release:release"
 replaces="alpine-baselayout"
-source=""
 options="!check"
 
 build() {
