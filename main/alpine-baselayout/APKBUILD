@@ -9,7 +9,7 @@ arch="noarch"
 license="GPL-2.0-only"
 pkggroups="shadow"
 options="!fhs !check"
-depends="$pkgname-data=${pkgver}-r${pkgrel}"
+depends="$pkgname-data=$pkgver-r$pkgrel"
 subpackages="$pkgname-data"
 install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
 	$pkgname.post-install"
