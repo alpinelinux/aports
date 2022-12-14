@@ -1,0 +1,317 @@
+From 4f4d770a1e40f719d5a310cffdac29cbb4e20c11 Mon Sep 17 00:00:00 2001
+From: Lars Uebernickel <lars.uebernickel@canonical.com>
+Date: Wed, 14 Dec 2022 11:29:10 +0000
+Subject: [PATCH] gmenumodel: disallow exporting large menus on the bus
+
+This solves problems with validating untrusted inputs from D-Bus, where
+invalid numbers of added and removed menu entries, and positions, could
+be specified.
+
+Original patch from
+https://bugzilla.gnome.org/show_bug.cgi?id=728733#c7, tweaked by Philip
+Withnall to add a few code comments and make
+`G_MENU_EXPORTER_MAX_SECTION_SIZE` public so callers can check their
+inputs against it if they want. Also tweaked to use `g_warning()` instead
+of the nonexistent `g_dbus_warning()`.
+
+Backport 2.74: Made the new public symbol internal-only to avoid adding
+new API in a stable release series.
+
+Fixes: #861
+---
+ gio/gdbusmenumodel.c   |  33 +++++++++-
+ gio/gmenuexporter.c    |  25 ++++++-
+ gio/tests/gmenumodel.c | 144 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 198 insertions(+), 4 deletions(-)
+
+diff --git a/gio/gdbusmenumodel.c b/gio/gdbusmenumodel.c
+index a6cc0fc036..87b4c09cb5 100644
+--- a/gio/gdbusmenumodel.c
++++ b/gio/gdbusmenumodel.c
+@@ -25,6 +25,9 @@
+ 
+ #include "gmenumodel.h"
+ 
++/* Copied from gmenuexporter.c for the glib-2-74 backport */
++#define G_MENU_EXPORTER_MAX_SECTION_SIZE 1000
++
+ /* Prelude {{{1 */
+ 
+ /**
+@@ -580,6 +583,8 @@ g_dbus_menu_group_deactivate (GDBusMenuGroup *group)
+     }
+ }
+ 
++/* @menu_id, @position, @removed and @added are all untrusted since they can
++ * come from an external process. */
+ static void
+ g_dbus_menu_group_changed (GDBusMenuGroup *group,
+                            guint           menu_id,
+@@ -593,6 +598,20 @@ g_dbus_menu_group_changed (GDBusMenuGroup *group,
+   GSequence *items;
+   GVariant *item;
+   gint n_added;
++  gint n_items;
++
++  /* Caller has to check this. */
++  g_assert (g_variant_is_of_type (added, G_VARIANT_TYPE ("aa{sv}")));
++
++  n_added = g_variant_n_children (added);
++
++  if (position < 0 || position >= G_MENU_EXPORTER_MAX_SECTION_SIZE ||
++      removed < 0 || removed >= G_MENU_EXPORTER_MAX_SECTION_SIZE ||
++      n_added >= G_MENU_EXPORTER_MAX_SECTION_SIZE)
++    {
++      g_warning ("invalid arguments");
++      return;
++    }
+ 
+   /* We could have signals coming to us when we're not active (due to
+    * some other process having subscribed to this group) or when we're
+@@ -611,9 +630,17 @@ g_dbus_menu_group_changed (GDBusMenuGroup *group,
+       g_hash_table_insert (group->menus, GINT_TO_POINTER (menu_id), items);
+     }
+ 
+-  point = g_sequence_get_iter_at_pos (items, position + removed);
++  /* Don’t need to worry about overflow due to the low value of
++   * %G_MENU_EXPORTER_MAX_SECTION_SIZE. */
++  n_items = g_sequence_get_length (items);
++  if (position + removed > n_items ||
++      n_items - removed + n_added > G_MENU_EXPORTER_MAX_SECTION_SIZE)
++    {
++      g_warning ("invalid arguments");
++      return;
++    }
+ 
+-  g_return_if_fail (point != NULL);
++  point = g_sequence_get_iter_at_pos (items, position + removed);
+ 
+   if (removed)
+     {
+@@ -623,7 +650,7 @@ g_dbus_menu_group_changed (GDBusMenuGroup *group,
+       g_sequence_remove_range (start, point);
+     }
+ 
+-  n_added = g_variant_iter_init (&iter, added);
++  g_variant_iter_init (&iter, added);
+   while (g_variant_iter_loop (&iter, "@a{sv}", &item))
+     g_sequence_insert_before (point, g_dbus_menu_group_create_item (item));
+ 
+diff --git a/gio/gmenuexporter.c b/gio/gmenuexporter.c
+index 8d6dfe421f..55efdbb542 100644
+--- a/gio/gmenuexporter.c
++++ b/gio/gmenuexporter.c
+@@ -28,6 +28,18 @@
+ #include "gdbusnamewatching.h"
+ #include "gdbuserror.h"
+ 
++/*
++ * G_MENU_EXPORTER_MAX_SECTION_SIZE:
++ *
++ * The maximum number of entries in a menu section supported by
++ * g_dbus_connection_export_menu_model().
++ *
++ * The exact value of the limit may change in future GLib versions.
++ *
++ * Since: 2.76
++ */
++#define G_MENU_EXPORTER_MAX_SECTION_SIZE 1000
++
+ /**
+  * SECTION:gmenuexporter
+  * @title: GMenuModel exporter
+@@ -252,10 +264,17 @@ g_menu_exporter_menu_items_changed (GMenuModel *model,
+   GMenuExporterMenu *menu = user_data;
+   GSequenceIter *point;
+   gint i;
++  gint n_items;
+ 
+   g_assert (menu->model == model);
+   g_assert (menu->item_links != NULL);
+-  g_assert (position + removed <= g_sequence_get_length (menu->item_links));
++
++  n_items = g_sequence_get_length (menu->item_links);
++  g_assert (position >= 0 && position < G_MENU_EXPORTER_MAX_SECTION_SIZE);
++  g_assert (removed >= 0 && removed < G_MENU_EXPORTER_MAX_SECTION_SIZE);
++  g_assert (added < G_MENU_EXPORTER_MAX_SECTION_SIZE);
++  g_assert (position + removed <= n_items);
++  g_assert (n_items - removed + added < G_MENU_EXPORTER_MAX_SECTION_SIZE);
+ 
+   point = g_sequence_get_iter_at_pos (menu->item_links, position + removed);
+   g_sequence_remove_range (g_sequence_get_iter_at_pos (menu->item_links, position), point);
+@@ -770,6 +789,10 @@ g_menu_exporter_method_call (GDBusConnection       *connection,
+  * constraint is violated, the export will fail and 0 will be
+  * returned (with @error set accordingly).
+  *
++ * Exporting menus with sections containing more than
++ * 1000 items is not supported and results in
++ * undefined behavior.
++ *
+  * You can unexport the menu model using
+  * g_dbus_connection_unexport_menu_model() with the return value of
+  * this function.
+diff --git a/gio/tests/gmenumodel.c b/gio/tests/gmenumodel.c
+index 618a29eae6..9d3e5cbf26 100644
+--- a/gio/tests/gmenumodel.c
++++ b/gio/tests/gmenumodel.c
+@@ -1505,6 +1505,149 @@ test_menuitem (void)
+   g_object_unref (submenu);
+ }
+ 
++static GDBusInterfaceInfo *
++org_gtk_Menus_get_interface (void)
++{
++  static GDBusInterfaceInfo *interface_info;
++
++  if (interface_info == NULL)
++    {
++      GError *error = NULL;
++      GDBusNodeInfo *info;
++
++      info = g_dbus_node_info_new_for_xml ("<node>"
++                                           "  <interface name='org.gtk.Menus'>"
++                                           "    <method name='Start'>"
++                                           "      <arg type='au' name='groups' direction='in'/>"
++                                           "      <arg type='a(uuaa{sv})' name='content' direction='out'/>"
++                                           "    </method>"
++                                           "    <method name='End'>"
++                                           "      <arg type='au' name='groups' direction='in'/>"
++                                           "    </method>"
++                                           "    <signal name='Changed'>"
++                                           "      arg type='a(uuuuaa{sv})' name='changes'/>"
++                                           "    </signal>"
++                                           "  </interface>"
++                                           "</node>", &error);
++      if (info == NULL)
++        g_error ("%s\n", error->message);
++      interface_info = g_dbus_node_info_lookup_interface (info, "org.gtk.Menus");
++      g_assert (interface_info != NULL);
++      g_dbus_interface_info_ref (interface_info);
++      g_dbus_node_info_unref (info);
++    }
++
++  return interface_info;
++}
++
++static void
++g_menu_exporter_method_call (GDBusConnection       *connection,
++                             const gchar           *sender,
++                             const gchar           *object_path,
++                             const gchar           *interface_name,
++                             const gchar           *method_name,
++                             GVariant              *parameters,
++                             GDBusMethodInvocation *invocation,
++                             gpointer               user_data)
++{
++  const struct {
++    guint position;
++    guint removed;
++  } data[] = {
++      { -2, 4 },
++      { 0, 3 },
++      { 4, 1 }
++  };
++  gsize i;
++  GError *error = NULL;
++
++  g_dbus_method_invocation_return_value (invocation, g_variant_new_parsed ("@(a(uuaa{sv})) ([(0, 0, [{ 'label': <'test'> }])],)"));
++
++  /* invalid signatures */
++  g_dbus_connection_emit_signal (connection, sender, "/", "org.gtk.Menus", "Changed",
++                                 g_variant_new_parsed ("([(1, 2, 3)],)"), &error);
++  g_assert_no_error (error);
++
++  /* add an item at an invalid position */
++  g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_WARNING, "*invalid*");
++  g_dbus_connection_emit_signal (connection, sender, "/", "org.gtk.Menus", "Changed",
++                                 g_variant_new_parsed ("@(a(uuuuaa{sv})) ([(%u, %u, %u, %u, [{ 'label': <'test'> }])],)", 0, 0, 2, 0),
++                                 &error);
++  g_assert_no_error (error);
++
++  for (i = 0; i < G_N_ELEMENTS (data); i++)
++    {
++      GVariant *params;
++
++      g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_WARNING, "*invalid*");
++      params = g_variant_new_parsed ("@(a(uuuuaa{sv})) ([(%u, %u, %u, %u, [])],)", 0, 0, data[i].position, data[i].removed);
++      g_dbus_connection_emit_signal (connection, sender, "/", "org.gtk.Menus", "Changed", params, &error);
++      g_assert_no_error (error);
++    }
++}
++
++static void
++menu_changed (GMenuModel *menu,
++             gint        position,
++              gint        removed,
++              gint        added,
++              gpointer    user_data)
++{
++  unsigned int *counter = user_data;
++
++  *counter += 1;
++}
++
++static void
++test_input_validation (void)
++{
++  const GDBusInterfaceVTable vtable = {
++    g_menu_exporter_method_call, NULL, NULL, { NULL, }
++  };
++  GError *error = NULL;
++  GDBusConnection *bus;
++  GDBusMenuModel *proxy;
++  guint id;
++  const gchar *bus_name;
++  GMainLoop *loop;
++  unsigned int n_signal_emissions = 0;
++  gulong signal_id;
++
++  g_test_bug ("https://gitlab.gnome.org/GNOME/glib/-/issues/861");
++
++  bus = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
++  g_assert_no_error (error);
++
++  id = g_dbus_connection_register_object (bus, "/", org_gtk_Menus_get_interface (),
++                                          &vtable, NULL, NULL, &error);
++  g_assert_no_error (error);
++
++  bus_name = g_dbus_connection_get_unique_name (bus);
++  proxy = g_dbus_menu_model_get (bus, bus_name, "/");
++
++  signal_id = g_signal_connect (proxy, "items-changed", G_CALLBACK (menu_changed), &n_signal_emissions);
++
++  /* get over laziness */
++  g_menu_model_get_n_items (G_MENU_MODEL (proxy));
++
++  loop = g_main_loop_new (NULL, FALSE);
++  g_timeout_add (100, stop_loop, loop);
++  g_main_loop_run (loop);
++
++  /* "items-changed" should only be emitted for the initial contents of
++   * the menu. Subsequent calls are all invalid.
++   */
++  g_assert_cmpuint (n_signal_emissions, ==, 1);
++
++  g_test_assert_expected_messages ();
++
++  g_main_loop_unref (loop);
++  g_dbus_connection_unregister_object (bus, id);
++  g_signal_handler_disconnect (proxy, signal_id);
++  g_object_unref (proxy);
++  g_object_unref (bus);
++}
++
+ /* Epilogue {{{1 */
+ int
+ main (int argc, char **argv)
+@@ -1528,6 +1671,7 @@ main (int argc, char **argv)
+   g_test_add_func ("/gmenu/mutable", test_mutable);
+   g_test_add_func ("/gmenu/convenience", test_convenience);
+   g_test_add_func ("/gmenu/menuitem", test_menuitem);
++  g_test_add_func ("/gmenu/input-validation", test_input_validation);
+ 
+   ret = g_test_run ();
+ 
+-- 
+GitLab
+
