@@ -11,4 +11,4 @@ JPEGLIB = -ljpeg
 PNGLIB = -lpng
 ZLIB = -lz
 X11LIB = -lX11
-NETPBM_DOCURL = http://netpbm.sourceforge.net/doc/
+NETPBM_DOCURL = https://netpbm.sourceforge.net/doc/
