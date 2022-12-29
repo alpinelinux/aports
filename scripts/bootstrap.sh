@@ -20,7 +20,7 @@ Steps for introducing new architecture include:
 - adding the compiler triplet and arch type to abuild
 - adding the arch type detection to apk-tools
 - adjusting build rules for packages that are arch aware:
-  gcc, openssl, linux-headers
+  gcc, openssl, linux-headers, musl
 - create new kernel config for linux-lts
 
 After these steps the initial cross-build can be completed
