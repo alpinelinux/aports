@@ -9,7 +9,7 @@ kver=${pkgver%_p*}
 kver=${kver//_/-}
 _asahiver=$kver-$_rel
 pkgdesc="Apple Silicon (M1 development kernel)"
-pkgrel=2
+pkgrel=3
 url="https://www.kernel.org"
 depends="initramfs-generator"
 _depends_dev="perl gmp-dev elfutils-dev bash flex bison"
@@ -26,9 +26,9 @@ source="linux-asahi-$_asahiver.tar.gz::https://github.com/AsahiLinux/linux/archi
 
 builddir="$srcdir/linux-asahi-$_asahiver"
 arch="aarch64"
-license="GPL-2.0"
+license="GPL-2.0-only"
 
-_flavors=
+unset _flavors
 for _i in $source; do
 	case $_i in
 	config-*.$CARCH)
@@ -49,50 +49,21 @@ arm*) _carch="arm" ;;
 esac
 
 prepare() {
-	local _patch_failed=
-  cd $builddir
-	case $pkgver in
-		*.*.0);;
-		*)
-		msg "Applying patch-$pkgver.xz"
-	#	unxz -c < "$srcdir"/patch-$pkgver.xz | patch -p1 -N ;;
-	esac
-
-	# first apply patches in specified order
-	for i in $source; do
-		case $i in
-		*.patch)
-			msg "Applying $i..."
-			if ! patch -s -p1 -N -i "$srcdir"/$i; then
-				echo $i >>failed
-				_patch_failed=1
-			fi
-			;;
-		esac
-	done
-
-	if ! [ -z "$_patch_failed" ]; then
-		error "The following patches failed:"
-		cat failed
-		return 1
-	fi
-  sed -i 's/^#EXTRAVERSION =/EXTRAVERSION =/' "$builddir"/Makefile
-  sed -i 's/^EXTRAVERSION :=/#EXTRAVERSION :=/' "$builddir"/Makefile
-	# remove localversion from patch if any
-	rm -f localversion*
+	default_prepare
+	rm "$builddir"/localversion*
+	echo "-$_rel-asahi-$pkgrel" > "$builddir"/localversion-alpine
 	oldconfig
 }
 
 oldconfig() {
 	for i in $_flavors; do
 		local _config=config-$i.${CARCH}
-		mkdir -p "$builddir"
-		echo "-$pkgrel-$i" > "$builddir"/localversion-alpine \
-			|| return 1
+		local _builddir="$srcdir"/build-$i
+		mkdir -p "$_builddir"
 
-		cp "$srcdir"/$_config "$builddir"/.config
+		cp "$srcdir"/$_config "$_builddir"/.config
 		make -C $builddir \
-			O="$builddir" \
+			O="$_builddir" \
 			ARCH="$_carch" \
 			listnewconfig oldconfig
 	done
@@ -101,45 +72,36 @@ oldconfig() {
 build() {
 	unset LDFLAGS
 	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
-	cd $builddir
-	make ARCH="$_carch" CC="${CC:-gcc}" \
-		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+	for i in $_flavors; do
+		local _builddir="$srcdir"/build-$i
+		make -C "$srcdir"/build-$i \
+			ARCH="$_carch" CC="${CC:-gcc}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+	done
 }
 
 _package() {
 	local _buildflavor="$1" _outdir="$2"
-	local _abi_release=${kver}-${pkgrel}-${_buildflavor}
 	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
 
-	cd $builddir
-	# modules_install seems to regenerate a defect Modules.symvers on s390x. Work
-	# around it by backing it up and restore it after modules_install
-	cp Module.symvers Module.symvers.backup
+	cd "$srcdir"/build-$_buildflavor
+	local _abi_release="$(make -s kernelrelease)"
 
 	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
 
-	local _install
-	case "$CARCH" in
-		arm*|aarch64) _install="zinstall dtbs_install";;
-		*) _install=install;;
-	esac
-
-	make -j1 modules_install $_install \
+	make -j1 modules_install zinstall dtbs_install \
 		ARCH="$_carch" \
 		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_MOD_STRIP=1 \
 		INSTALL_PATH="$_outdir"/boot \
 		INSTALL_DTBS_PATH="$_outdir/boot/dtbs-$_buildflavor"
 
-	cp Module.symvers.backup Module.symvers
-
-	rm -f "$_outdir"/lib/modules/${_abi_release}/build \
+	rm -f -- "$_outdir"/lib/modules/${_abi_release}/build \
 		"$_outdir"/lib/modules/${_abi_release}/source
-	rm -rf "$_outdir"/lib/firmware
+	rm -rf -- "$_outdir"/lib/firmware
 
 	install -D -m644 include/config/kernel.release \
 		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
-	cp "$builddir"/.config $pkgdir/boot/config-$_flavor
-
 }
 
 # main flavor installs in $pkgdir
@@ -151,7 +113,8 @@ package() {
 
 _dev() {
 	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
-	local _abi_release=${pkgver}-${pkgrel}-$_flavor
+	local O="$srcdir/build-$_flavor"
+	local _abi_release="$(make -C "$O" -s kernelrelease)"
 	# copy the only the parts that we really need for build 3rd party
 	# kernel modules and install those as /usr/src/linux-headers,
 	# simlar to what ubuntu does
@@ -164,74 +127,78 @@ _dev() {
 	local dir="$subpkgdir"/usr/src/linux-headers-${_abi_release}
 	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
 
-	# first we import config, run prepare to set up for building
-	# external modules, and create the scripts
-	mkdir -p "$dir"
-	cp "$srcdir"/config-$_flavor.${CARCH} "$dir"/.config
-	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine
-	cd $builddir
+	# kernel sources
+	cd "$builddir"
 
-  echo "Installing headers..."
-  cp -t "$dir" -a $builddir/include
+	msg "Installing build files"
+	install -Dt "$dir" -m644  Makefile localversion* \
+		"$O/.config" "$O/Module.symvers" "$O/System.map" \
+		"$O/vmlinux"
+	install -Dt "$dir"/kernel -m644 kernel/Makefile
+	cp -t "$dir" -a scripts "$O/scripts"
 
-  install -Dt "${dir}" -m644 $builddir/Makefile
-  install -Dt "${dir}/arch/${_carch}" -m644 $builddir/arch/${_carch}/Makefile
-  install -Dt "${dir}/arch/${_carch}/kernel" -m644 $builddir/arch/${_carch}/kernel/asm-offsets.s
-  cp -t "${dir}/arch/${_carch}" -a $builddir/arch/${_carch}/include
+	msg "Installing headers..."
+	cp -t "$dir" -a include "$O/include"
 
-  install -Dt "$dir/drivers/md" -m644 drivers/md/*.h
-  install -Dt "$dir/net/mac80211" -m644 net/mac80211/*.h
+	install -Dt "$dir/arch/$_carch" -m644 $builddir/arch/$_carch/Makefile
+	install -Dt "$dir/arch/$_carch/kernel" -m644 "$O"/arch/$_carch/kernel/asm-offsets.s
+	cp -t "$dir/arch/$_carch" -a arch/$_carch/include $O/arch/$_carch/include
 
-  # https://bugs.archlinux.org/task/13146
-  install -Dt "$dir/drivers/media/i2c" -m644 drivers/media/i2c/msp3400-driver.h
+	install -Dt "$dir/drivers/md" -m644 drivers/md/*.h
+	install -Dt "$dir/net/mac80211" -m644 net/mac80211/*.h
 
-  # https://bugs.archlinux.org/task/20402
-  install -Dt "$dir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
-  install -Dt "$dir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
-  install -Dt "$dir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
+	# https://bugs.archlinux.org/task/13146
+	install -Dt "$dir/drivers/media/i2c" -m644 drivers/media/i2c/msp3400-driver.h
 
-  # https://bugs.archlinux.org/task/71392
-  install -Dt "$dir/drivers/iio/common/hid-sensors" -m644 drivers/iio/common/hid-sensors/*.h
+	# https://bugs.archlinux.org/task/20402
+	install -Dt "$dir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
+	install -Dt "$dir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
+	install -Dt "$dir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
 
-  echo "Installing KConfig files..."
-  find . -name 'Kconfig*' -exec install -Dm644 {} "$builddir/{}" \;
+	# https://bugs.archlinux.org/task/71392
+	install -Dt "$dir/drivers/iio/common/hid-sensors" -m644 drivers/iio/common/hid-sensors/*.h
 
-  echo "Removing unneeded architectures..."
-  local arch
-  for arch in "$dir"/arch/*/; do
-		case $(basename "$arch") in $_carch) continue ;; esac
-    echo "Removing $(basename "$arch")"
-    rm -r "$arch"
-  done
+	msg "Installing KConfig files..."
+	find . -name 'Kconfig*' -exec install -Dm644 {} "$dir/{}" \;
 
-#  echo "Removing documentation..."
-#  rm -r "$builddir/Documentation"
+	msg "Removing unneeded architectures..."
+	local arch
+	for arch in "$dir"/arch/*/; do
+		case $(basename "$arch") in
+			$_carch) continue ;;
+		esac
+		echo " - Removing $(basename "$arch")"
+		rm -r "$arch"
+	done
 
-  echo "Removing broken symlinks..."
-  find -L "$builddir" -type l -printf 'Removing %P\n' -delete
+	msg "Removing documentation"
+	rm -r "$dir"/Documentation
 
-  echo "Removing loose objects..."
-  find "$builddir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+	msg "Removing broken symlinks..."
+	find -L "$dir" -type l -printf 'Removing %P\n' -delete
 
-  echo "Stripping build tools..."
-  local file
-  while read -rd '' file; do
-    case "$(file -bi "$file")" in
-      application/x-sharedlib\;*)      # Libraries (.so)
-        strip -v $STRIP_SHARED "$file" ;;
-      application/x-archive\;*)        # Libraries (.a)
-        strip -v $STRIP_STATIC "$file" ;;
-      application/x-executable\;*)     # Binaries
-        strip -v $STRIP_BINARIES "$file" ;;
-      application/x-pie-executable\;*) # Relocatable binaries
-        strip -v $STRIP_SHARED "$file" ;;
-    esac
-  done < <(find "$builddir" -type f -perm -u+x ! -name vmlinux -print0)
+	msg "Removing loose objects..."
+	find "$dir" -type f -name '*.o' -printf 'Removing %P\n' -delete
 
-  echo "Stripping vmlinux..."
-  strip -v $STRIP_STATIC "$builddir/vmlinux"
+	msg "Stripping build tools..."
+	local file
+	find "$dir" -type f -perm -u+x ! -name vmlinux -print0 | while read -rd '' file; do
+		case "$(file -bi "$file")" in
+			application/x-sharedlib\;*)			# Libraries (.so)
+				strip -v $STRIP_SHARED "$file" ;;
+			application/x-archive\;*)				# Libraries (.a)
+				strip -v $STRIP_STATIC "$file" ;;
+			application/x-executable\;*)		 # Binaries
+				strip -v $STRIP_BINARIES "$file" ;;
+			application/x-pie-executable\;*) # Relocatable binaries
+				strip -v $STRIP_SHARED "$file" ;;
+		esac
+	done
 
-  echo "Adding symlink..."
+	msg "Stripping vmlinux..."
+	strip -v $STRIP_STATIC "$dir/vmlinux"
+
+	msg "Adding symlink..."
 	mkdir -p "$subpkgdir"/lib/modules/${_abi_release}
 	ln -sf /usr/src/linux-headers-${_abi_release} \
 		"$subpkgdir"/lib/modules/${_abi_release}/build
