@@ -4,20 +4,24 @@
 pkgname=openblas
 _pkgname=OpenBLAS
 pkgver=0.3.21
-pkgrel=1
+pkgrel=2
 pkgdesc="fast BSD-licensed BLAS based on gotoBLAS2, with LAPACK"
 url="https://www.openblas.net/"
 arch="all"
 license="BSD-3-Clause"
 depends_dev="gfortran"
 makedepends="$depends_dev perl linux-headers"
-subpackages="$pkgname-static $pkgname-dev $pkgname-doc"
+subpackages="
+	$pkgname-dev
+	$pkgname-doc
+	liblapack
+	liblapacke
+	"
 source="https://github.com/xianyi/$_pkgname/archive/v$pkgver/openblas-$pkgver.tar.gz
 	separate-tests.patch
 	https://gitweb.gentoo.org/repo/gentoo.git/plain/sci-libs/openblas/files/openblas-0.3.12-shared-blas-lapack.patch
 	"
 builddir="$srcdir/$_pkgname-$pkgver"
-
 _builddir64="$builddir-64"
 
 # ILP64 is not supported on aarch64 (https://github.com/xianyi/OpenBLAS/issues/956)
@@ -30,31 +34,67 @@ fi
 # USE_OPENMP=0: see GCC bug 60035
 # NO_AFFINITY: don't expect to work on musl, also breaks R and not
 #              recommended for Julia
-_flags="USE_OPENMP=0
-	NO_LAPACK=0
-	NO_LAPACKE=1
+# NO_STATIC: this is absolutely massive and not used anywhere in aports
+_flags="
 	MAJOR_VERSION=3
 	NO_AFFINITY=1
+	NO_STATIC=1
+	USE_OPENMP=0
+	PREFIX=/usr
 	"
 case "$CARCH" in
-	ppc64le) _flags="$_flags NUM_THREADS=64";;  # POWER machines are big
-	*64|s390x) _flags="$_flags NUM_THREADS=32";;  # match kernel's CONFIG_NR_CPUS
-	*) _flags="$_flags NUM_THREADS=8";;  # 32bit machines usually have less cores
+ppc64le)
+	# POWER machines are big and have 4/8 way SMT
+	_flags="$_flags NUM_THREADS=64"
+	;;
+*64|s390x)
+	# match kernel's CONFIG_NR_CPUS
+	_flags="$_flags NUM_THREADS=32"
+	;;
+*)
+	# 32bit machines usually have fewer cores
+	_flags="$_flags NUM_THREADS=8"
+	;;
 esac
 
-# DYNAMIC_ARCH is supported on x86* only, see https://github.com/xianyi/OpenBLAS/issues/709
-[ "${CARCH%%_64*}" = "x86" ] && _flags="$_flags DYNAMIC_ARCH=1" || _flags="$_flags DYNAMIC_ARCH=0"
 case "$CARCH" in
-	x86*) _flags="$_flags TARGET=CORE2";;
-	armhf) _flags="$_flags TARGET=ARMV7";;
-	aarch64) _flags="$_flags TARGET=ARMV8";;
-	ppc64le) _flags="$_flags TARGET=POWER8";;
-	s390x) _flags="$_flags TARGET=ZARCH_GENERIC";;
-	riscv64) _flags="$_flags TARGET=RISCV64_GENERIC";;
+x86*)
+	# DYNAMIC_ARCH is supported on x86* only, see
+	# https://github.com/xianyi/OpenBLAS/issues/709
+	_flags="$_flags DYNAMIC_ARCH=1"
+	;;
+*)
+	_flags="$_flags DYNAMIC_ARCH=0"
+	;;
+esac
+
+case "$CARCH" in
+x86*)
+	_flags="$_flags TARGET=CORE2"
+	;;
+armhf)
+	_flags="$_flags TARGET=ARMV6"
+	;;
+armv7)
+	_flags="$_flags TARGET=ARMV7"
+	;;
+aarch64)
+	_flags="$_flags TARGET=ARMV8"
+	;;
+ppc64le)
+	_flags="$_flags TARGET=POWER8"
+	;;
+s390x)
+	_flags="$_flags TARGET=ZARCH_GENERIC"
+	;;
+riscv64)
+	_flags="$_flags TARGET=RISCV64_GENERIC"
+	;;
 esac
 
 # Flags for ILP64 variant.
-_flags64="$_flags
+_flags64="
+	$_flags
 	INTERFACE64=1
 	SYMBOLSUFFIX=64_
 	"
@@ -73,16 +113,16 @@ prepare() {
 build() {
 	# OpenBLAS library is huge and it's heavily optimized for performance.
 	# It doesn't make sense to compile it with -Os.
-	CFLAGS=${CFLAGS/-Os/-O2}
+	export CFLAGS=${CFLAGS/-Os/-O2}
 
-	CFLAGS= make -C "$builddir" \
-		$_flags CFLAGS="$CFLAGS" PREFIX=/usr
-	CFLAGS= make -C "$builddir"/interface \
-		$_flags CFLAGS="$CFLAGS" PREFIX=/usr shared-blas-lapack
+	make -C "$builddir" \
+		$_flags CFLAGS="$CFLAGS"
+	make -C "$builddir"/interface \
+		$_flags CFLAGS="$CFLAGS" shared-blas-lapack
 
 	if $_ilp64; then
 		msg "Building with ILP64..."
-		CFLAGS= make -C "$_builddir64" $_flags64 CFLAGS="$CFLAGS" PREFIX=/usr
+		make -C "$_builddir64" $_flags64 CFLAGS="$CFLAGS"
 	fi
 }
 
@@ -94,15 +134,15 @@ dev() {
 }
 
 check() {
-	CFLAGS= make $_flags CFLAGS="$CFLAGS" tests
+	make $_flags CFLAGS="$CFLAGS" tests
 }
 
 package() {
 	if $_ilp64; then
-		make -C "$_builddir64" $_flags64 PREFIX="$pkgdir/usr" install
+		make -C "$_builddir64" $_flags64 DESTDIR="$pkgdir" install
 	fi
 
-	make MAJOR_VERSION=3 PREFIX="$pkgdir/usr" install
+	make $_flags DESTDIR="$pkgdir" install
 	install -Dm755 interface/liblapack.so.3 \
 		"$pkgdir"/usr/lib/liblapack.so.3
 	ln -s liblapack.so.3 "$pkgdir"/usr/lib/liblapack.so
@@ -110,22 +150,24 @@ package() {
 		"$pkgdir"/usr/lib/liblapacke.so.3
 	ln -s liblapacke.so.3 "$pkgdir"/usr/lib/liblapacke.so
 
-	# Remove reference to $pkgdir.
-	sed -e "s|$pkgdir||" \
-		-i "$pkgdir"/usr/lib/cmake/$pkgname/OpenBLASConfig.cmake \
-		-i "$pkgdir"/usr/lib/pkgconfig/openblas.pc
-
 	install -Dm 0644 Changelog.txt TargetList.txt USAGE.md \
 		-t "$pkgdir"/usr/share/doc/$pkgname/
-
-	install -Dm 0644 LICENSE \
-		-t "$pkgdir"/usr/share/licenses/$pkgname/
 }
 
 ilp64() {
 	pkgdesc="$pkgdesc (ILP64)"
 
 	amove usr/lib/libopenblas64_*
+}
+
+liblapack() {
+	pkgdesc="$pkgdesc (LAPACK library)"
+	amove usr/lib/liblapack.so.*
+}
+
+liblapacke() {
+	pkgdesc="$pkgdesc (LAPACKE library)"
+	amove usr/lib/liblapacke.so.*
 }
 
 sha512sums="
