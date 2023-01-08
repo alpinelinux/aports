@@ -117,14 +117,14 @@ fi
 # ordered cross-build
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   openssl ca-certificates libmd \
-	   gmp mpfr4 mpc1 isl25 libucontext binutils gcc \
+	   gmp mpfr4 mpc1 isl25 libucontext zstd binutils gcc \
 	   libbsd libretls busybox make \
 	   apk-tools file \
 	   libcap openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
 	   attr acl fakeroot tar \
 	   lzip abuild ncurses libedit openssh \
 	   libcap-ng util-linux libaio lvm2 popt xz \
-	   json-c argon2 cryptsetup zstd kmod lddtree mkinitfs \
+	   json-c argon2 cryptsetup kmod lddtree mkinitfs \
 	   libffi \
 	   brotli libev c-ares cunit nghttp2 curl \
 	   pcre libssh2 \
