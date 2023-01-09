@@ -1,3 +1,3 @@
 #!/bin/sh
-/usr/sbin/update-ca-certificates --fresh  &> /dev/null
+/usr/sbin/update-ca-certificates &> /dev/null
 exit 0
