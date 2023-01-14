@@ -1,3 +1,3 @@
 #!/bin/sh
 
-exec /usr/bin/mandb /usr/share/man
+exec /usr/bin/mandb -q /usr/share/man
