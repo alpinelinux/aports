@@ -1,3 +1,6 @@
+#ifndef _SYS_CDEFS_H_
+#define _SYS_CDEFS_H_
+
 #warning usage of non-standard #include <sys/cdefs.h> is deprecated
 
 #undef __P
@@ -24,3 +27,5 @@
 # define __THROW
 # define __NTH(fct)     fct
 #endif
+
+#endif /* _SYS_CDEFS_H_ */
