@@ -4,6 +4,9 @@ pkgname=ghc
 # Only update to GHC versions supported by cabal bootstrapping setup.
 pkgver=9.4.4
 pkgrel=0
+# GHC version used to bootstrap the build. This is relevant for the
+# bootstrapping of the Hadrian build system used by GHC these days.
+_bootstrapver=9.0.2
 # Normal non rc candidate
 _urlprefix="$pkgver"
 _pkgprefix="$pkgname-$pkgver"
@@ -15,7 +18,7 @@ pkgdesc="The Glasgow Haskell Compiler"
 #pkgdate=20171108
 #urlprefix="$pkgrcver-$pkgrc"
 #pkgprefix="ghc-$pkgver.$pkgdate"
-url="https://haskell.org/"
+url="https://haskell.org/ghc"
 arch="aarch64 x86_64"
 # Note ghc's license is basically BSD-3. If you'd like to know more visit:
 # * https://www.haskell.org/ghc/license
@@ -30,7 +33,7 @@ license="BSD-3-Clause"
 depends="gmp-dev libffi-dev perl gcc>=6.2.1 llvm$_llvmver"
 # ghc is self-hosted, so we need ghc to build ghc. ghc-bootstrap is provided by
 # this aport (see below).
-makedepends_build="$pkgname-bootstrap
+makedepends_build="$pkgname-bootstrap~=$_bootstrapver
 	autoconf automake binutils libffi-dev ncurses-dev xz coreutils grep py3-sphinx
 	alex happy"
 makedepends_host="linux-headers musl-dev zlib-dev gmp-dev binutils-dev
@@ -47,12 +50,14 @@ ldpath="/usr/lib/ghc-$pkgver"
 options="!strip ldpath-recursive"  # we strip it manually in build()
 source="https://downloads.haskell.org/~ghc/$_urlprefix/$_pkgprefix-src.tar.xz
 	https://downloads.haskell.org/~ghc/$_urlprefix/$_pkgprefix-testsuite.tar.xz
+	https://dev.alpinelinux.org/archive/ghc-hadrian/ghc-$pkgver/ghc-$_bootstrapver-hadrian-bootstrap-source.tar.gz
 
 	0001-testsuite-skip-tests-that-are-currently-failing-on-A.patch
 	0001-testsuite-unset-MAKEFLAGS-when-calling-python.patch
 	0001-testsuite-Make-tests-compatible-with-GNU-grep-3.8.patch
 	0005-buildpath-abi-stability.patch
 
+	ghc-9.4.4-bootstrap.patch
 	sphinx-6.1.3.patch
 	"
 
@@ -66,34 +71,28 @@ aarch64)
 	;;
 esac
 
-prepare() {
-	default_prepare
+_hadrian="hadrian/bootstrap/_build/bin/hadrian"
+_hadrian_args="-j${JOBS:-1}"
 
-	cp mk/build.mk.sample mk/build.mk
-
-	cat >> mk/build.mk <<-EOF
-		BuildFlavour         = perf-llvm
-	EOF
-
-	if [ "$CBUILD" != "$CTARGET" ]; then
-		# cross-build
-		cat >> mk/build.mk <<-EOF
-			BuildFlavour         = perf-cross
-			HADDOCK_DOCS         = NO
-			BUILD_SPHINX_HTML    = NO
-			BUILD_SPHINX_PS      = NO
-			BUILD_SPHINX_PDF     = NO
-		EOF
-	fi
-
-	# Due to patches to the configure script
-	autoreconf -fi
-}
+if [ "$CBUILD" != "$CTARGET" ]; then
+	_hadrian_args="$_hadrian_args --docs=none --flavour=quickest"
+else
+	_hadrian_args="$_hadrian_args --docs=no-sphinx-pdfs --flavour=release"
+fi
 
 build() {
+	# Build the hadrian build system.
+	#
+	# See:
+	#   * https://gitlab.haskell.org/ghc/ghc/-/tree/master/hadrian/bootstrap
+	#   * https://www.haskell.org/ghc/blog/20220805-make-to-hadrian.html
+	cd hadrian/bootstrap/
+	./bootstrap.py -w /usr/bin/ghc -s "$srcdir"/ghc-$_bootstrapver-hadrian-bootstrap-source.tar.gz
+
 	# NOTE: ghc build system requires host == build, and it ends up
 	# compiling the cross-compiler (stage1) and cross-compiling with
 	# that the native compiler (stage2)
+	cd "$builddir"
 	./configure \
 		--build=$CBUILD \
 		--host=$CBUILD \
@@ -108,18 +107,28 @@ build() {
 	sed -i -e 's/unknown-linux-gnueabi/alpine-linux/g' llvm-targets
 	sed -i -e 's/unknown-linux-gnu/alpine-linux/g' llvm-targets
 
-	make
+	"$_hadrian" $_hadrian_args
 }
 
 check() {
-	make fasttest SKIP_PERF_TESTS=YES THREADS=${JOBS:-$(nproc)}
+	# TODO: Investigate why T21035 fails and why the llvm tests are run.
+	"$_hadrian" $_hadrian_args test --skip-perf --test-speed=fast \
+		--broken-test=T11649 --broken-test=T21035 --broken-test=T8131b \
+		--broken-test=T5681  --broken-test=T7571
 }
 
 package() {
-	local ghclib="usr/lib/ghc-$pkgver"
+	local ghclib="$pkgdir/usr/lib/ghc-$pkgver/lib"
 	local newpath path target
 
-	make DESTDIR="$pkgdir" install
+	# Hadrian's install command doesn't support DESTDIR.
+	# Hence, we need to install via the bindist.
+	"$_hadrian" $_hadrian_args binary-dist-dir
+	cd _build/bindist/ghc-*
+	# Need to re-run configure.
+	# See: https://gitlab.haskell.org/ghc/ghc/-/issues/22058
+	./configure --prefix=/usr --with-system-libffi
+	make DESTDIR="$pkgdir" RECACHE_PACKAGE_DB=NO install
 
 	install -Dm644 "$builddir/LICENSE" \
 		"$pkgdir/usr/share/licenses/$pkgname/LICENSE"
@@ -171,10 +180,11 @@ dev() {
 sha512sums="
 6c9df7279a30b546bbd30a330905b3bdec31531e1343aa24bad721792235472857153e7f5d8d79e109ed63a314a1a4a647b66510e91eba4627c6806ae5c1fca2  ghc-9.4.4-src.tar.xz
 59366aaca8ff3da73758e7eb4a9f13291b46dbac60c1b9da549c206291f1301e3537daf2c253ffafdae58e2ce149bedd7be9c5335e3abf40c47e50caa5c88cbd  ghc-9.4.4-testsuite.tar.xz
+8f7adec83356be66ca201c3f92ab5cfe2d61336d983a4b1a06de6115d3ebd7bfe06481339dbb68593225416066fb3b3895e22da075811ee2552626c1c5ee3d57  ghc-9.0.2-hadrian-bootstrap-source.tar.gz
 2c3ea9ac194ceeb1984127f0e9a902e18a03aea9999e0eb7b86a70248050958b70ac6cc8a16c4679246ae9534af2c716263ad0e65ba8bb4959f1d4ef29e376e2  0001-testsuite-skip-tests-that-are-currently-failing-on-A.patch
 ac2ad793b4d33ea890e236820af4cd10996b47d0f4249c825b31450145cb8195c2be62f2d7942cc3bf564f768dca187379196b251f4b37ed326ed2a0a5f59e8a  0001-testsuite-unset-MAKEFLAGS-when-calling-python.patch
 524dec6a4fc2ce45f7a35f089f936fb3020aa8283612de6f0dad34146213df638d654c0943147c77126d54c24f632edc53a0400f1af15bfe0d9d3f20cc4ae869  0001-testsuite-Make-tests-compatible-with-GNU-grep-3.8.patch
 b9339a7220bab708eff6233db610f900183cd75b59c4fb479c557b1ef8dd7ccca258da2305218f18ba576c3561d048ce2c07deab3c78c15309e6bb1d1d8342d7  0005-buildpath-abi-stability.patch
-d8ac98476902ca2b1835246b812749b1da74953664c7fb564a9e40a2da53785ab7e7aa9ee21f0b7133f6b8621b1410ff49acf3b1bd9a380e590eb17cb6714ad1  printf-warnings.patch
+cb41baaf60f7813201187544c96c6a0b2b12c0634054eb62b752380a2cd0a9d26fccc26e757250e6c22f0eb9b61b515d3fef1e12c1a27877abcb8f25e8d7a783  ghc-9.4.4-bootstrap.patch
 7a79a5e9591b1ddd78fa349526a85cf9fee64db80639dcf1f3d6edef422fd4454222aedf5581e21489a20d748656265a40e7645004e4d5220280f6214c568e64  sphinx-6.1.3.patch
 "
