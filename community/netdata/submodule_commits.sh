@@ -33,6 +33,5 @@ printf "_aclk_schemas_commit=%s\n" "$(echo "$netdata_submodules" | submodule_com
 printf "_ml_json_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit ml/json)"
 printf "_ml_dlib_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit ml/dlib)"
 printf "_mqtt_websockets_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit mqtt_websockets)"
-printf "_mqtt_c_commit=%s\n" "$(echo "$websockets_submodules" | submodule_commit MQTT-C)"
 printf "_c_rbuf_commit=%s\n" "$(echo "$websockets_submodules" | submodule_commit c-rbuf)"
-
+printf "_c_rhash_commit=%s\n" "$(echo "$websockets_submodules" | submodule_commit c_rhash)"
