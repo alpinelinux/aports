@@ -1,0 +1,496 @@
+# https://sourceforge.net/p/hylafax/HylaFAX+/2699/
+# https://sourceforge.net/p/hylafax/HylaFAX+/2701/
+# https://sourceforge.net/p/hylafax/HylaFAX+/2702/
+# https://sourceforge.net/p/hylafax/HylaFAX+/2703/
+
+--- a/CHANGES
++++ b/CHANGES
+@@ -1,6 +1,10 @@
+ #	$Id: CHANGES 1188 2013-08-06 23:13:37Z faxguy $
+
+ New Changes
++
++* cope with color senders that do not include G3FAX marker (4 Feb 2023)
++
++(7.0.7)
+
+ * constrain job priority to 0-255 (20 Jan 2023)
+ * add support for libtiff v4.5.0 (4-5 Jan 2023)
+
+ --- a/faxd/Class1Send.c++
++++ b/faxd/Class1Send.c++
+@@ -2452,7 +2452,7 @@
+ 	    FILE* out = open_memstream(&outptr, &outsize);
+ #endif
+ 	    if (out) {
+-		char kk[256];
++		char* kk = (char*)malloc(256);
+ 		bool ok = convertRawRGBtoITULAB(dp, off, w, h, out, kk, 256);
+ 		if (!ok || kk[0] != 0) {
+ 		    emsg = fxStr::format("Error converting image to JPEG data: %s", kk);
+
+--- a/faxd/CopyQuality.c++
++++ b/faxd/CopyQuality.c++
+@@ -924,6 +924,13 @@
+ 	    protoTrace("RECV: fixing zero image frame length in SOF marker at byte %lu to %lu", i, recvEOLCount);
+ 	}
+     }
++
++    if (conf.saverawimage) imagefd = Sys::open("/tmp/in.fax", O_RDWR|O_CREAT|O_EXCL);
++    if (imagefd > 0) {
++	Sys::write(imagefd, (const char*) recvRow, pagesize);
++	Sys::close(imagefd);
++    }
++
+ #if defined(HAVE_JPEG) && ( defined(HAVE_LCMS) || defined(HAVE_LCMS2) )
+     /*
+      * We convert the colorspace from ITULAB to sRGB because most
+@@ -945,9 +952,9 @@
+ 	FILE* in = fmemopen(recvRow, pagesize, "r");
+ #endif
+ 	if (in) {
+-	    char kk[256];
++	    char* kk = (char*)malloc(256);
+ 	    bool ok = convertJPEGfromITULAB(in, out, kk, 256);
+-	    if (ok && kk[0] == 0) {
++	    if (ok) {
+ 		// conversion from ITULAB to sRGB was successful
+ #if HAS_NO_OPEN_MEMSTREAM
+ 		pagesize = ftell(out);
+@@ -958,6 +965,9 @@
+ 		recvRow = (u_char*) outptr;
+ 		pagesize = outsize;
+ #endif
++		if (kk[0] != 0) {
++		    serverTrace("JPEG warning: \"%s\"", kk);
++		}
+ 	    } else {
+ 		serverTrace("JPEG conversion error: \"%s\". JPEG colorspace will be incorrect in TIFF tags.", kk);
+ 	    }
+
+--- a/faxd/itufaxicc.c++
++++ b/faxd/itufaxicc.c++
+@@ -486,7 +486,7 @@
+ should be found in emsg.
+ */
+
+-bool convertJPEGfromITULAB(FILE* src, FILE* dst, char* emsg, size_t max_emsg_bytes )
++bool convertJPEGfromITULAB(FILE* src, FILE* dst, char*& emsg, size_t max_emsg_bytes )
+ {
+ 	jpeg_decompress_struct Decompressor;
+ 	jpeg_compress_struct   Compressor;
+@@ -514,8 +514,7 @@
+
+ 	// Sanity check
+ 	if (!IsITUFax(Decompressor.marker_list)) {
+-		if (emsg[0] == 0) emsg = (char*) "Is not ITUFAX.";
+-		return false;
++		if (emsg[0] == 0) emsg = (char*) "T.4 Annex E G3FAX marker not found.";
+ 	}
+
+ 	// Create dest compressor
+@@ -559,7 +558,7 @@
+ error occurred.  If an error occurred, then the error message should be found in emsg.
+ */
+
+-bool convertJPEGtoITULAB( FILE* src, FILE* dst, char* emsg, size_t max_emsg_bytes )
++bool convertJPEGtoITULAB( FILE* src, FILE* dst, char*& emsg, size_t max_emsg_bytes )
+ {
+
+ 	jpeg_decompress_struct Decompressor;
+@@ -609,7 +608,7 @@
+ error occurred.  If an error occurred, then the error message should be found in emsg.
+ */
+
+-bool convertRawRGBtoITULAB( tdata_t src, tsize_t srclen, uint32_t width, uint32_t height, FILE* dst, char* emsg, size_t max_emsg_bytes )
++bool convertRawRGBtoITULAB( tdata_t src, tsize_t srclen, uint32_t width, uint32_t height, FILE* dst, char*& emsg, size_t max_emsg_bytes )
+ {
+ 	jpeg_compress_struct   Compressor;
+
+@@ -654,7 +653,7 @@
+ {
+
+ 	FILE*in, *out;
+-	char kk[256];
++	char* kk = (char*)malloc(256);
+
+
+ 	printf("Demo of IT/Lab to sRGB library. It will convert a JPEG called 'ramps.jpg'\n");
+@@ -692,7 +691,7 @@
+ int main()
+ {
+ 	FILE *in, *out;
+-	char kk[256];
++	char* kk = (char*)malloc(256);
+
+ 	printf("Demo of IT/Lab library.\n");
+ 	printf("It will convert a single-strip uncompressed RGB TIFF\n");
+--- a/faxd/itufaxicc.h
++++ b/faxd/itufaxicc.h
+@@ -35,7 +35,7 @@
+ should be found in emsg.
+ */
+ 
+-bool convertJPEGfromITULAB(FILE* src, FILE* dst, char* emsg, size_t max_emsg_bytes );
++bool convertJPEGfromITULAB(FILE* src, FILE* dst, char*& emsg, size_t max_emsg_bytes );
+ 
+ 
+ /*
+@@ -48,7 +48,7 @@
+ error occurred.  If an error occurred, then the error message should be found in emsg.
+ */
+ 
+-bool convertJPEGtoITULAB( FILE* src, FILE* dst, char* emsg, size_t max_emsg_bytes );
++bool convertJPEGtoITULAB( FILE* src, FILE* dst, char*& emsg, size_t max_emsg_bytes );
+ 
+ 
+ /*
+@@ -61,7 +61,7 @@
+ error occurred.  If an error occurred, then the error message should be found in emsg.
+ */
+ 
+-bool convertRawRGBtoITULAB( tdata_t src, tsize_t srclen, uint32_t width, uint32_t height, FILE* dst, char* emsg, size_t max_emsg_bytes );
++bool convertRawRGBtoITULAB( tdata_t src, tsize_t srclen, uint32_t width, uint32_t height, FILE* dst, char*& emsg, size_t max_emsg_bytes );
+ 
+ 
+ #define __itufaxicc_H
+
+--- a/faxd/Class1Send.c++
++++ b/faxd/Class1Send.c++
+@@ -2453,10 +2453,13 @@
+ #endif
+ 	    if (out) {
+ 		char* kk = (char*)malloc(256);
++		memset(kk, 0, 256);
+ 		bool ok = convertRawRGBtoITULAB(dp, off, w, h, out, kk, 256);
+ 		if (!ok || kk[0] != 0) {
+ 		    emsg = fxStr::format("Error converting image to JPEG data: %s", kk);
+ 		    protoTrace(emsg);
++		    free(kk);
++		    fclose(out);
+ 		    return (false);
+ 		}
+ 		// JPEG compression succeeded, redirect pointers
+@@ -2469,6 +2472,7 @@
+ 		dp = (u_char*) outptr;
+ 		totdata = outsize;
+ #endif
++		free(kk);
+ 		fclose(out);
+ 	    } else {
+ #endif
+
+--- a/faxd/CopyQuality.c++
++++ b/faxd/CopyQuality.c++
+@@ -953,6 +953,7 @@
+ #endif
+ 	if (in) {
+ 	    char* kk = (char*)malloc(256);
++	    memset(kk, 0, 256);
+ 	    bool ok = convertJPEGfromITULAB(in, out, kk, 256);
+ 	    if (ok) {
+ 		// conversion from ITULAB to sRGB was successful
+@@ -971,10 +972,12 @@
+ 	    } else {
+ 		serverTrace("JPEG conversion error: \"%s\". JPEG colorspace will be incorrect in TIFF tags.", kk);
+ 	    }
+-	    fclose(in); fclose(out);
++	    fclose(in);
++	    free(kk);
+ 	} else {
+ 	    serverTrace("Could not open JPEG input conversion stream. JPEG colorspace will be incorrect in TIFF tags.");
+ 	}
++	fclose(out);
+     } else {
+ 	serverTrace("Could not open JPEG output conversion stream. JPEG colorspace will be incorrect in TIFF tags.");
+     }
+--- a/faxd/itufaxicc.c++
++++ b/faxd/itufaxicc.c++
+@@ -498,28 +498,27 @@
+ 	*emsg = 0;
+ 
+ 	if (setjmp(State)) {
+-
+ 		strncpy(emsg, ErrorMessage, max_emsg_bytes-1);
+ 		emsg[max_emsg_bytes-1] = 0;
+-		if (emsg[0] == 0) emsg = (char*) "Unspecified libjpeg error.";
++		if (emsg[0] == 0) strncpy(emsg, "Unspecified libjpeg error.", max_emsg_bytes-1);
+ 		return false;
+ 	}
+ 
+ 
+-	// Create input decompressor. 
++	// Create input decompressor.
+ 	if (!OpenInput(src, &Decompressor, JCS_YCbCr)) {
+-		if (emsg[0] == 0) emsg = (char*) "Could not create input decompressor.";
++		if (emsg[0] == 0) strncpy(emsg, "Could not create input decompressor.", max_emsg_bytes-1);
+ 		return false;
+ 	}
+ 
+ 	// Sanity check
+ 	if (!IsITUFax(Decompressor.marker_list)) {
+-		if (emsg[0] == 0) emsg = (char*) "T.4 Annex E G3FAX marker not found.";
++		if (emsg[0] == 0) strncpy(emsg, "T.4 Annex E G3FAX marker not found.", max_emsg_bytes-1);
+ 	}
+ 
+ 	// Create dest compressor
+ 	if (!OpenOutput(dst, &Compressor, JCS_RGB)) {
+-		if (emsg[0] == 0) emsg = (char*) "Could not create output compressor.";
++		if (emsg[0] == 0) strncpy(emsg, "Could not create output compressor.", max_emsg_bytes-1);
+ 		return false;
+ 	}
+ 
+@@ -533,7 +532,7 @@
+ 	cmsHTRANSFORM hXform = cmsCreateTransform( hITUFax, TYPE_Lab_8, hsRGB, TYPE_RGB_8, INTENT_PERCEPTUAL, cmsFLAGS_NOWHITEONWHITEFIXUP);
+ 
+ 	if (!DoTransform(hXform, &Decompressor, &Compressor, false)) {
+-		if (emsg[0] == 0) emsg = (char*) "Could not perform transform.";
++		if (emsg[0] == 0) strncpy(emsg, "Could not perform transform.", max_emsg_bytes-1);
+ 		return false;
+ 	}
+ 
+@@ -653,8 +652,6 @@
+ {
+ 
+ 	FILE*in, *out;
+-	char* kk = (char*)malloc(256);
+-
+ 
+ 	printf("Demo of IT/Lab to sRGB library. It will convert a JPEG called 'ramps.jpg'\n");
+ 	printf("to ITU/Lab itu2.jpeg, and then back to sRGB into a file caled 'srgb.jpg'\n");
+@@ -666,6 +663,8 @@
+ 	   printf("Unable to open 'ramps.jpg'!\n");
+ 	   return 1;
+ 	}
++	char* kk = (char*)malloc(256);
++	memset(kk, 0, 256);
+ 
+ 	out = fopen("itu2.jpg", "wb");
+ 	convertJPEGtoITULAB(in, out, kk, 256);
+@@ -681,6 +680,7 @@
+ 	fclose(in); fclose(out);
+ 
+ 	printf("itu2.jpg ==> srgb.jpg Status='%s'\n", kk);
++	free(kk);
+ 
+ 	printf("Done!\n");
+ 	return 0;
+@@ -691,7 +691,6 @@
+ int main()
+ {
+ 	FILE *in, *out;
+-	char* kk = (char*)malloc(256);
+ 
+ 	printf("Demo of IT/Lab library.\n");
+ 	printf("It will convert a single-strip uncompressed RGB TIFF\n");
+@@ -755,8 +754,9 @@
+ 
+ 		fclose(outfile);
+ 	}
+-
+ 	out = fopen("itu2.jpg", "wb");
++	char* kk = (char*)malloc(256);
++	memset(kk, 0, 256);
+ 	convertRawRGBtoITULAB(data, off, w, h, out, kk, 256);
+ 	TIFFClose(tif); fclose(out);
+ 
+@@ -769,6 +769,7 @@
+ 	fclose(in); fclose(out);
+ 
+ 	printf("itu2.jpg ==> srgb.jpg Status='%s'\n", kk);
++	free(kk);
+ 
+ 	printf("Done!\n");
+ 	return 0;
+
+--- a/CHANGES
++++ b/CHANGES
+@@ -2,6 +2,7 @@
+
+ New Changes
+
++* cope with libjpeg informative messages (6 Feb 2023)
+ * cope with color senders that do not include G3FAX marker (4 Feb 2023)
+
+ (7.0.7)
+
+--- a/faxd/itufaxicc.c++
++++ b/faxd/itufaxicc.c++
+@@ -48,6 +48,7 @@
+ static char ErrorMessage[JMSG_LENGTH_MAX];
+ static jpeg_error_mgr ErrorHandler;
+ static jmp_buf State;
++static jmp_buf State2;
+ 
+ // Error handler for IJG library
+ static
+@@ -55,6 +56,12 @@
+ {   
+ 	(*cinfo->err->format_message) (cinfo, ErrorMessage);  
+ 	longjmp(State, 1);
++}
++static
++void jpg_warning_exit(j_common_ptr cinfo)
++{
++	(*cinfo->err->format_message) (cinfo, ErrorMessage);
++	longjmp(State2, 1);
+ }
+ 
+ // Error handler for lcms library
+@@ -352,7 +359,7 @@
+ 
+ 	Decompressor ->err  = jpeg_std_error(&ErrorHandler);
+ 	ErrorHandler.error_exit      = jpg_error_exit;
+-	ErrorHandler.output_message  = jpg_error_exit;
++	ErrorHandler.output_message  = jpg_warning_exit;
+ 
+ 	jpeg_create_decompress(Decompressor);
+ 	jpeg_stdio_src(Decompressor, InFile);
+@@ -380,7 +387,7 @@
+ {   
+ 	Compressor -> err = jpeg_std_error(&ErrorHandler);
+ 	ErrorHandler.error_exit      = jpg_error_exit;
+-	ErrorHandler.output_message  = jpg_error_exit;
++	ErrorHandler.output_message  = jpg_warning_exit;
+ 
+ 	jpeg_create_compress(Compressor);
+ 	jpeg_stdio_dest(Compressor, OutFile);  
+@@ -503,7 +510,12 @@
+ 		if (emsg[0] == 0) strncpy(emsg, "Unspecified libjpeg error.", max_emsg_bytes-1);
+ 		return false;
+ 	}
+-
++	if (setjmp(State2)) {
++		strncpy(emsg, ErrorMessage, max_emsg_bytes-1);
++		emsg[max_emsg_bytes-1] = 0;
++		if (emsg[0] == 0) strncpy(emsg, "Unspecified libjpeg warning.", max_emsg_bytes-1);
++		return true;
++	}
+ 
+ 	// Create input decompressor.
+ 	if (!OpenInput(src, &Decompressor, JCS_YCbCr)) {
+@@ -574,6 +586,11 @@
+ 		emsg[max_emsg_bytes-1] = 0;
+ 		return false;
+ 	}
++	if (setjmp(State2)) {
++		strncpy(emsg, ErrorMessage, max_emsg_bytes-1);
++		emsg[max_emsg_bytes-1] = 0;
++		return true;
++	}
+ 
+ 	if (!OpenOutput(dst, &Compressor, JCS_YCbCr)) return false;
+ 	if (!OpenInput(src, &Decompressor, JCS_RGB)) return false;
+@@ -621,6 +638,11 @@
+ 		strncpy(emsg, ErrorMessage, max_emsg_bytes-1);
+ 		emsg[max_emsg_bytes-1] = 0;
+ 		return false;
++	}
++	if (setjmp(State2)) {
++		strncpy(emsg, ErrorMessage, max_emsg_bytes-1);
++		emsg[max_emsg_bytes-1] = 0;
++		return true;
+ 	}
+ 
+ 	if (!OpenOutput(dst, &Compressor, JCS_YCbCr)) return false;
+
+--- a/CHANGES
++++ b/CHANGES
+@@ -2,7 +2,7 @@
+
+ New Changes
+
+-* cope with libjpeg informative messages (6 Feb 2023)
++* cope with libjpeg informative messages (6, 8 Feb 2023)
+ * cope with color senders that do not include G3FAX marker (4 Feb 2023)
+
+ (7.0.7)
+
+--- a/faxd/Class1Send.c++
++++ b/faxd/Class1Send.c++
+@@ -2444,16 +2444,12 @@
+ 	    uint32_t w, h;
+ 	    TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
+ 	    TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
+-#if HAS_NO_OPEN_MEMSTREAM
++
+ 	    FILE* out = Sys::tmpfile();
+-#else
+-	    size_t outsize;
+-	    char *outptr;
+-	    FILE* out = open_memstream(&outptr, &outsize);
+-#endif
+ 	    if (out) {
+ 		char* kk = (char*)malloc(256);
+ 		memset(kk, 0, 256);
++
+ 		bool ok = convertRawRGBtoITULAB(dp, off, w, h, out, kk, 256);
+ 		if (!ok || kk[0] != 0) {
+ 		    emsg = fxStr::format("Error converting image to JPEG data: %s", kk);
+@@ -2463,15 +2459,10 @@
+ 		    return (false);
+ 		}
+ 		// JPEG compression succeeded, redirect pointers
+-#if HAS_NO_OPEN_MEMSTREAM
+ 		totdata = ftell(out);
+ 		dp = (u_char*) malloc(totdata);
+ 		rewind(out);
+ 		fread(dp, 1, totdata, out);
+-#else
+-		dp = (u_char*) outptr;
+-		totdata = outsize;
+-#endif
+ 		free(kk);
+ 		fclose(out);
+ 	    } else {
+
+--- a/faxd/CopyQuality.c++
++++ b/faxd/CopyQuality.c++
+@@ -936,38 +936,28 @@
+      * We convert the colorspace from ITULAB to sRGB because most
+      * image processors will not know how to handle ITULAB correctly.
+      */
+-#if HAS_NO_OPEN_MEMSTREAM
+     FILE* out = Sys::tmpfile();
+-#else
+-    size_t outsize;
+-    char *outptr;
+-    FILE* out = open_memstream(&outptr, &outsize);
+-#endif
+     if (out) {
+-#if HAS_NO_OPEN_MEMSTREAM
+ 	FILE* in = Sys::tmpfile();
+ 	fwrite(recvRow, 1, pagesize, in);
+ 	rewind(in);
+-#else
+-	FILE* in = fmemopen(recvRow, pagesize, "r");
+-#endif
+ 	if (in) {
+ 	    char* kk = (char*)malloc(256);
+ 	    memset(kk, 0, 256);
+ 	    bool ok = convertJPEGfromITULAB(in, out, kk, 256);
+ 	    if (ok) {
+ 		// conversion from ITULAB to sRGB was successful
+-#if HAS_NO_OPEN_MEMSTREAM
+-		pagesize = ftell(out);
+-		recvRow = (u_char*) malloc(pagesize);
+-		rewind(out);
+-		fread(recvRow, 1, pagesize, out);
+-#else
+-		recvRow = (u_char*) outptr;
+-		pagesize = outsize;
+-#endif
+ 		if (kk[0] != 0) {
+ 		    serverTrace("JPEG warning: \"%s\"", kk);
++		}
++		size_t outsize = ftell(out);
++		if (outsize) {
++		    pagesize = outsize;
++		    recvRow = (u_char*) malloc(pagesize);
++		    rewind(out);
++		    fread(recvRow, 1, pagesize, out);
++		} else {
++		    serverTrace("JPEG conversion produced no data!");
+ 		}
+ 	    } else {
+ 		serverTrace("JPEG conversion error: \"%s\". JPEG colorspace will be incorrect in TIFF tags.", kk);
