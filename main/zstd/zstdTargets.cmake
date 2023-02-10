@@ -7,7 +7,7 @@ if(CMAKE_VERSION VERSION_LESS "2.8.3")
    message(FATAL_ERROR "CMake >= 2.8.3 required")
 endif()
 cmake_policy(PUSH)
-cmake_policy(VERSION 2.8.3...3.22)
+cmake_policy(VERSION 2.8.3...3.23)
 #----------------------------------------------------------------
 # Generated CMake target import file.
 #----------------------------------------------------------------
@@ -48,15 +48,6 @@ unset(_cmake_expected_targets)
 
 # Compute the installation prefix relative to this file.
 get_filename_component(_IMPORT_PREFIX "${CMAKE_CURRENT_LIST_FILE}" PATH)
-# Use original install prefix when loaded through a
-# cross-prefix symbolic link such as /lib -> /usr/lib.
-get_filename_component(_realCurr "${_IMPORT_PREFIX}" REALPATH)
-get_filename_component(_realOrig "/usr/lib/cmake/zstd" REALPATH)
-if(_realCurr STREQUAL _realOrig)
-  set(_IMPORT_PREFIX "/usr/lib/cmake/zstd")
-endif()
-unset(_realOrig)
-unset(_realCurr)
 get_filename_component(_IMPORT_PREFIX "${_IMPORT_PREFIX}" PATH)
 get_filename_component(_IMPORT_PREFIX "${_IMPORT_PREFIX}" PATH)
 get_filename_component(_IMPORT_PREFIX "${_IMPORT_PREFIX}" PATH)
