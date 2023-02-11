@@ -32,5 +32,6 @@ if ! [ -e /boot/boot ]; then
 	ln -sf . /boot/boot 2>/dev/null # silence error in case of FAT
 fi
 
-sync
+# sync only the filesystem on /boot as that is where we are writing the initfs.
+sync -f /boot
 exit 0
