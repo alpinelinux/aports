@@ -58,7 +58,7 @@ profile_extended() {
 		btrfs-progs cksfv dosfstools cryptsetup
 		e2fsprogs e2fsprogs-extra efibootmgr f2fs-tools
 		grub-bios grub-efi lvm2 lz4 mdadm mkinitfs mtools nfs-utils
-		parted rsync sfdisk syslinux util-linux xfsprogs xz zstd zfs
+		parted rsync sfdisk syslinux util-linux xfsprogs zstd zfs
 		"
 
 	local _k _a
