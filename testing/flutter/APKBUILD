@@ -1,0 +1,487 @@
+# Contributor: Lauren N. Liberda <lauren@selfisekai.rocks>
+# Maintainer: Lauren N. Liberda <lauren@selfisekai.rocks>
+pkgname=flutter
+pkgver=3.10.6
+pkgrel=0
+pkgdesc="Cross-platform apps, built in Omelas"
+url="https://flutter.dev/"
+arch="aarch64 x86_64"	# officially supported for linux desktop
+license="BSD-3-Clause"
+_dartver=3.0.7
+_depends_common="
+	bash
+	clang
+	cmake
+	dart-sdk~=$_dartver
+	git
+	gtk+3.0-dev
+	pkgconf
+	samurai
+	"
+makedepends="
+	$_depends_common
+	fontconfig-dev
+	freetype-dev
+	gn
+	harfbuzz-dev
+	icu-dev
+	jpeg-dev
+	libpng-dev
+	llvm
+	python3
+	spirv-tools-dev
+	sqlite-dev
+	zlib-dev
+	zstd
+	"
+subpackages="
+	$pkgname-common
+	$pkgname-desktop
+	$pkgname-developer
+	$pkgname-glfw
+	$pkgname-gtk
+	$pkgname-tool
+	$pkgname-tool-developer:tool_developer
+	"
+
+case "$pkgver" in
+	*.*.*_alpha*)
+		_canonver="${pkgver/_alpha/-}"
+		_canonver="${_canonver/-r/.}.dev"
+		;;
+	*.*.*_beta*)
+		_canonver="${pkgver/_beta/-}"
+		_canonver="${_canonver/-r/.}.beta"
+		;;
+	*.*.*_pre*)
+		_canonver="${pkgver/_pre/-}"
+		_canonver="${_canonver/-r/.}.pre"
+		;;
+	*.*.*)
+		_canonver="$pkgver"
+		;;
+esac
+
+case "$_dartver" in
+	*.*.*_alpha*)
+		_dartcanonver="${_dartver/_alpha/-}"
+		_dartcanonver="${_canonver/-r/.}.dev"
+		;;
+	*.*.*_beta*)
+		_dartcanonver="${_dartver/_beta/-}"
+		_dartcanonver="${_canonver/-r/.}.beta"
+		;;
+	*.*.*)
+		_dartcanonver="$_dartver"
+		;;
+esac
+
+_enginever=cdbeda788a293fa29665dc3fa3d6e63bd221cb0d
+_materialfontsver=3012db47f3130e62f7cc0beabff968a33cbec8d8
+_gradlewver=fd5c1f2c013565a3bea56ada6df9d2b8e96d56aa
+options="!check"	# idk no attempt to build tests even with --enable-unittests
+source="
+	https://github.com/flutter/flutter/archive/refs/tags/$_canonver/flutter-$_canonver.tar.gz
+	https://s3.sakamoto.pl/lnl-aports-snapshots/flutter-engine-$_enginever.tar.zst
+	https://s3.sakamoto.pl/lnl-aports-snapshots/dart-sdk-$_dartcanonver.tar.zst
+	fonts-$_materialfontsver.zip.noauto::https://storage.googleapis.com/flutter_infra_release/flutter/fonts/$_materialfontsver/fonts.zip
+	gradle-wrapper-$_gradlewver.tar.gz.noauto::https://storage.googleapis.com/flutter_infra_release/gradle-wrapper/$_gradlewver/gradle-wrapper.tgz
+
+	alpine-target.patch
+	doctor.patch
+	no-lock.patch
+	no-runtime-download.patch
+	opt-in-analytics.patch
+	unbundle.patch
+	version.patch
+
+	pmos-if-touch-is-a-mouse-then-mouse-is-touch.patch
+
+	git-revision.patch.engine
+	target-musl.patch.engine
+	musl-no-execinfo.patch.engine
+	musl-no-execinfo-2.patch.engine
+	musl-no-mallinfo.patch.engine
+	musl-random_r.patch.engine
+	no-vpython.patch.engine
+	shared-libcxx.patch.engine
+	libstdc++13.patch.engine
+	system-icu.patch.engine
+	unbundle.patch.engine
+	gn-args.patch.engine
+
+	flutter
+	"
+builddir="$srcdir/flutter-$_canonver"
+
+export PUB_CACHE="$srcdir/flutter-$_canonver/pub_cache"
+
+case "$CARCH" in
+	x86_64) _flutter_arch="x64" ;;
+	aarch64) _flutter_arch="arm64" ;;
+esac
+_out="$srcdir"/flutter-engine-$_enginever/out
+_modes='release profile debug'
+_release_out="$_out"/linux_release_$_flutter_arch
+_debug_out="$_out"/linux_debug_$_flutter_arch
+
+# gclient comes from teapot-tools
+snapshot() {
+	mkdir -p "$srcdir"
+	cd "$srcdir"
+
+	rm -rf src
+	rm -rf flutter-engine-$_enginever
+	rm -f flutter-engine-$_enginever.tar
+	rm -f flutter-engine-$_enginever.tar.zst
+
+	echo "
+solutions = [{
+	'name': 'src/flutter',
+	'url': 'https://github.com/flutter/engine.git@$_enginever',
+	'custom_vars': {
+		'download_android_deps': False,
+		'download_dart_sdk': False,
+	},
+}]
+target_cpu = ['x64', 'arm', 'arm64', 'riscv64']
+target_cpu_only = True
+" > .gclient
+
+	gclient sync --no-history --nohooks --tpot-cipd-ignore-platformed
+
+	for elf in $(scanelf -RA -F "%F" src); do
+		rm -f "$elf"
+	done
+
+	mv src flutter-engine-$_enginever
+
+	msg "generating tarball.."
+	tar -cf flutter-engine-$_enginever.tar \
+		--exclude="ChangeLog*" \
+		--exclude=".build-id" \
+		--exclude="third_party/dart" \
+		--exclude-backups \
+		--exclude-caches-all \
+		--exclude-vcs \
+		flutter-engine-$_enginever
+
+	zstd --ultra --long -22 -T4 -vv flutter-engine-$_enginever.tar
+}
+
+prepare() {
+	dos2unix "$srcdir"/flutter-engine-$_enginever/third_party/vulkan_memory_allocator/include/vk_mem_alloc.h
+
+	default_prepare
+
+	msg "Applying more patches"
+	for x in $source; do
+		case "$x" in
+		*.patch.engine)
+			msg "$x"
+			patch -p1 -i "$srcdir"/$x -d "$srcdir"/flutter-engine-$_enginever
+			;;
+		esac
+	done
+
+	_dart_installed="$(cat /usr/lib/dart/version)"
+	if [ "$_dart_installed" != "$_dartcanonver" ]; then
+		echo "mismatch between installed dart version ($_dart_installed) and downloaded source code ($_dartcanonver)"
+		exit 1
+	fi
+
+	echo -n "$_canonver" > version
+	mkdir bin/cache
+
+	(
+		cd "$srcdir"/flutter-engine-$_enginever
+
+		# bind dart source code
+		rm -rf third_party/dart
+		ln -s "$srcdir"/dart-sdk-$_dartcanonver third_party/dart
+		# bind dart build
+		mkdir -p third_party/dart/tools/sdks/dart-sdk/
+		ln -s /usr/lib/dart/bin third_party/dart/tools/sdks/dart-sdk/bin
+		mkdir -p flutter/prebuilts/linux-$_flutter_arch/dart-sdk/
+		ln -s /usr/lib/dart/bin flutter/prebuilts/linux-$_flutter_arch/dart-sdk/bin
+
+		mkdir -p flutter/third_party/gn/
+		ln -s /usr/bin/gn flutter/third_party/gn/gn
+
+		# https://github.com/dart-lang/sdk/issues/52295
+		mkdir -p third_party/dart/.git/logs
+		touch third_party/dart/.git/logs/HEAD
+
+		# DEPS hooks
+		python3 third_party/dart/tools/generate_package_config.py
+		python3 third_party/dart/tools/generate_sdk_version_file.py
+		python3 flutter/tools/pub_get_offline.py
+
+		# reusable system library settings
+		local use_system="
+			fontconfig
+			freetype2
+			harfbuzz
+			icu
+			libjpeg-turbo
+			libpng
+			libwebp
+			libxml
+			sqlite
+			vulkan-SPIRV-Headers
+			vulkan-SPIRV-Tools
+			zlib
+			"
+		for _lib in $use_system vulkan-deps/spirv-headers vulkan-deps/spirv-tools; do
+			msg "Removing buildscripts for system provided $_lib"
+			find . -type f -path "*third_party/$_lib/*" \
+				\! -path "*third_party/$_lib/chromium/*" \
+				\! -path "*third_party/$_lib/google/*" \
+				\! -path './third_party/libxml/*' \
+				\! -regex '.*\.\(gn\|gni\|isolate\|py\)' \
+				-delete
+		done
+
+		msg "Replacing gn files"
+		python3 build/linux/unbundle/replace_gn_files.py --system-libraries \
+			$use_system
+	)
+
+	(
+		cd packages/flutter_tools/
+
+		# no pubspec.lock in repo (?)
+		dart pub get --no-offline --no-precompile
+	)
+}
+
+build() {
+
+	(
+		cd "$srcdir"/flutter-engine-$_enginever
+
+		# shellcheck disable=2089
+		local gn_args="
+			host_libc=\"musl\"
+			target_libc=\"musl\"
+			use_custom_libcxx=false
+			use_default_linux_sysroot=false
+		"
+		local gnw_args="
+			--no-goma
+			--no-dart-version-git-info
+			--linux
+			--linux-cpu=$_flutter_arch
+			--lto
+			--clang
+			--target-triple=$CTARGET
+			--no-backtrace
+			--no-stripped
+			--prebuilt-dart-sdk
+			--build-glfw-shell
+			--build-engine-artifacts
+			--no-enable-unittests
+			--enable-fontconfig
+		"
+		for _mode in $_modes; do
+			msg "Generating ninja files for engine - $_mode"
+			# shellcheck disable=2090,2116
+			python3 ./flutter/tools/gn \
+				$gnw_args \
+				--runtime-mode="$_mode" \
+				--gn-args="$(echo $gn_args)"
+			msg "Build engine artifacts - $_mode"
+			ninja -C "$_out"/linux_${_mode}_$_flutter_arch artifacts
+		done
+		msg "Build flutter common and product patched sdk"
+		ninja -C "$_release_out" flutter flutter_patched_sdk sky
+		msg "Build debug patched sdk"
+		ninja -C "$_debug_out" flutter_patched_sdk
+	)
+
+	dart --verbosity=error --disable-dart-dev \
+		--snapshot="bin/cache/flutter_tools.snapshot" --snapshot-kind="app-jit" \
+		--packages="packages/flutter_tools/.dart_tool/package_config.json" \
+		--no-enable-mirrors "packages/flutter_tools/bin/flutter_tools.dart"
+
+	sed -Ei 's|'"$PUB_CACHE"'|/usr/lib/flutter/pub_cache|g' packages/flutter_tools/.dart_tool/package_config.json
+}
+
+check() {
+	(
+		cd "$srcdir"/flutter-engine-$_enginever
+
+		ln -s ./linux_debug_$_flutter_arch ./out/linux_debug_unopt
+
+		python3 flutter/testing/run_tests.py --type=engine
+	)
+}
+
+package() {
+	depends="flutter-developer=$pkgver-r$pkgrel"
+
+	# our entrypoint
+	install -Dm755 "$srcdir"/flutter "$pkgdir"/usr/lib/flutter/bin/flutter
+	mkdir -p "$pkgdir"/usr/bin/
+	ln -s ../lib/flutter/bin/flutter "$pkgdir"/usr/bin/flutter
+
+	# our dart
+	mkdir -p "$pkgdir"/usr/lib/flutter/bin/cache/
+	ln -s ../../../dart "$pkgdir"/usr/lib/flutter/bin/cache/dart-sdk
+
+	# flutter tool (cli) snapshot
+	install -Dm755 "$builddir"/bin/cache/flutter_tools.snapshot "$pkgdir"/usr/lib/flutter/bin/cache/flutter_tools.snapshot
+
+	# patched sdk
+	mkdir -p "$pkgdir"/usr/lib/flutter/bin/cache/artifacts/engine/common
+	cp -r "$_release_out"/flutter_patched_sdk/ \
+		"$pkgdir"/usr/lib/flutter/bin/cache/artifacts/engine/common/flutter_patched_sdk_product
+	cp -r "$_debug_out"/flutter_patched_sdk/ \
+		"$pkgdir"/usr/lib/flutter/bin/cache/artifacts/engine/common/flutter_patched_sdk
+
+	# dart:ui package
+	mkdir -p "$pkgdir"/usr/lib/flutter/bin/cache/pkg
+	cp -rL "$_release_out"/gen/dart-pkg/sky_engine "$pkgdir"/usr/lib/flutter/bin/cache/pkg/sky_engine
+
+	# flutter tool and framework packages (as part of sdk)
+	cp -r "$builddir"/packages "$pkgdir"/usr/lib/flutter/packages
+	# needed for flutter analyze 🤨
+	cp -r "$builddir"/dev "$pkgdir"/usr/lib/flutter/dev
+	cp -r "$builddir"/examples "$pkgdir"/usr/lib/flutter/examples
+	# pub dependencies of flutter (part of sdk)
+	cp -r "$PUB_CACHE" "$pkgdir"/usr/lib/flutter/pub_cache
+
+	# version files
+	echo -n "$_canonver" > "$pkgdir"/usr/lib/flutter/version
+	mkdir -p "$pkgdir"/usr/lib/flutter/bin/internal/
+	echo -n "$_enginever" > "$pkgdir"/usr/lib/flutter/bin/internal/engine.version
+
+	# fonts
+	mkdir -p "$pkgdir"/usr/lib/flutter/bin/cache/artifacts/material_fonts
+	unzip "$srcdir"/fonts-"$_materialfontsver".zip.noauto \
+		-d "$pkgdir"/usr/lib/flutter/bin/cache/artifacts/material_fonts
+
+	# gradle wrapper (-developer only, needed for flutter create)
+	mkdir -p "$pkgdir"/usr/lib/flutter/bin/cache/artifacts/gradle_wrapper
+	tar xf "$srcdir"/gradle-wrapper-"$_gradlewver".tar.gz.noauto \
+		-C "$pkgdir"/usr/lib/flutter/bin/cache/artifacts/gradle_wrapper
+
+	# build-time artifacts from engine (for use by tool)
+	for _mode in $_modes; do
+		case "$_mode" in
+			debug) _mode_art_name=linux-$_flutter_arch ;;
+			*) _mode_art_name=linux-$_flutter_arch-$_mode ;;
+		esac
+		mkdir -p "$pkgdir"/usr/lib/flutter/bin/cache/artifacts/engine/$_mode_art_name/
+		unzip "$_out"/linux_${_mode}_$_flutter_arch/zip_archives/$_mode_art_name/artifacts.zip \
+			-d "$pkgdir"/usr/lib/flutter/bin/cache/artifacts/engine/$_mode_art_name/
+	done
+	# they are all the same, simply copied from tree
+	cp -r "$_release_out"/flutter_linux/ \
+		"$pkgdir"/usr/lib/flutter/bin/cache/artifacts/engine/linux-$_flutter_arch/flutter_linux
+	ln -s ../linux-$_flutter_arch/flutter_linux "$pkgdir"/usr/lib/flutter/bin/cache/artifacts/engine/linux-$_flutter_arch-profile/flutter_linux
+	ln -s ../linux-$_flutter_arch/flutter_linux "$pkgdir"/usr/lib/flutter/bin/cache/artifacts/engine/linux-$_flutter_arch-release/flutter_linux
+	mkdir -p "$pkgdir"/usr/include/
+	ln -s ../lib/flutter/bin/cache/artifacts/engine/linux-$_flutter_arch/flutter_linux \
+		"$pkgdir"/usr/include/flutter_linux
+
+	install -Dm755 "$_release_out"/libflutter_linux_gtk.so \
+		"$pkgdir"/usr/lib/libflutter_linux_gtk.so
+
+	# see system-icu.patch.engine
+	ln -s /usr/share/icu/*/icudt*l.dat "$pkgdir"/usr/lib/flutter/icudtl.dat
+
+	install -Dm755 "$_release_out"/libflutter_linux_glfw.so "$pkgdir"/usr/lib/libflutter_linux_glfw.so
+}
+
+common() {
+	pkgdesc="$pkgdesc (parts common to all targets)"
+	depends="$_depends_common"
+
+	amove usr/lib/flutter/bin/cache/artifacts/engine/common
+	amove usr/lib/flutter/bin/cache/artifacts/material_fonts
+	amove usr/lib/flutter/bin/cache/dart-sdk
+	amove usr/lib/flutter/bin/cache/pkg
+	amove usr/lib/flutter/bin/internal
+	amove usr/lib/flutter/packages
+	amove usr/lib/flutter/pub_cache
+}
+
+desktop() {
+	pkgdesc="$pkgdesc (release linux desktop target)"
+	depends="flutter-common=$pkgver-r$pkgrel flutter-glfw=$pkgver-r$pkgrel flutter-gtk=$pkgver-r$pkgrel flutter-tool=$pkgver-r$pkgrel"
+
+	amove usr/include/flutter_linux
+	amove usr/lib/flutter/bin/cache/artifacts/engine/linux-$_flutter_arch
+	amove usr/lib/flutter/bin/cache/artifacts/engine/linux-$_flutter_arch-release
+}
+
+developer() {
+	pkgdesc="$pkgdesc (app developer tools)"
+	depends="flutter-desktop=$pkgver-r$pkgrel flutter-tool-developer=$pkgver-r$pkgrel"
+
+	amove usr/lib/flutter/bin/cache/artifacts/engine/linux-$_flutter_arch-profile
+	amove usr/lib/flutter/bin/cache/artifacts/gradle_wrapper
+}
+
+gtk() {
+	pkgdesc="$pkgdesc (GTK embedder runtime)"
+	depends=""
+
+	amove usr/lib/libflutter_linux_gtk.so
+	amove usr/lib/flutter/icudtl.dat
+}
+
+glfw() {
+	pkgdesc="$pkgdesc (GLFW embedder runtime)"
+	depends=""
+
+	amove usr/lib/libflutter_linux_glfw.so
+}
+
+tool() {
+	pkgdesc="$pkgdesc (CLI tool)"
+	depends="flutter-common=$pkgver-r$pkgrel"
+
+	amove usr/bin/flutter
+	amove usr/lib/flutter/bin/cache/flutter_tools.snapshot
+	amove usr/lib/flutter/bin/flutter
+	amove usr/lib/flutter/version
+}
+
+tool_developer() {
+	pkgdesc="$pkgdesc (CLI tool, parts for app developers)"
+	depends="flutter-tool=$pkgver-r$pkgrel"
+
+	amove usr/lib/flutter/dev
+	amove usr/lib/flutter/examples
+}
+
+sha512sums="
+f393c7896af4926b65e830978fe171b026649f242cc46d058e94aeae3b3c05f359646a2bef846948731f5c38121d28a609a90c6edd5efc2f3208f73e213f6659  flutter-3.10.6.tar.gz
+c89f3ed27bc1dc2f1bd7d97b825dd3e805c5ff93a9ee7a0734e6a85caa47f21cf73dfc51112bf4f0ddbffc22637a92c035a22d52e45afb3e955a906e61b5fc25  flutter-engine-cdbeda788a293fa29665dc3fa3d6e63bd221cb0d.tar.zst
+330206410b98c4d79cd46375c52437d7c0c31f107db10b410621162e03b8e3e5b9fb97469152969a810b148d9c5996cd7a0a32daed767bf676fb3a2fd8d4ef29  dart-sdk-3.0.7.tar.zst
+604f9a256fb1ec8c1b3eb6636baa97f195012b89b68197aef28104ed59dbcb70bde4fc1c7e154018999beabda160b60fa1378bcc1cd1ebe71c79071f40ebb26f  fonts-3012db47f3130e62f7cc0beabff968a33cbec8d8.zip.noauto
+fcce6b1659f3a4ee7849bf7f65a9b8e9b3046fc0cfae70d364efabbff2d6c1ed41e6e9009e5fabc522117cbd2f92c5c664f64426e2606fce6b69d9960dd6ca63  gradle-wrapper-fd5c1f2c013565a3bea56ada6df9d2b8e96d56aa.tar.gz.noauto
+a7d6e459a8884bd2b7083b15e6d113576e454c68feba8fcf467c6d288e6abca656a1e669eee2b9973d0b30a1dfbbd736d8ee65292d42bbd832059703b7067dd8  alpine-target.patch
+a9db5df026cf641728f744ffd3428db9cf3918718233c707fd154a88b321c4a7af8e41ac6c3b08f1f4614c6b49e0689653b3b01e35c1e3ff3c5c9e7920fdd8d4  doctor.patch
+f47f3bb1e97c79bdaf5fdd3b466936a335d80d48bffafa7c015a32d97a665d5450e63a33fd5eb0560215de57d556721eaa92db05848257427dd582b10543adda  no-lock.patch
+b2705a855163660cc3c472f6416d5839d9d4947164e2ea0ed97e93645255f27b7b513e7dc7de196cae5685b5e328b35ebd65b614be9b32f2fddd1fc8053a3963  no-runtime-download.patch
+91e598d9da383519f107c75669d8ec71f85afea38fa9e9a89e2f6c6088ce27f3107ab57e68931c5b27aec73788c9cd81123bcfae87152d878a170465aec9a193  opt-in-analytics.patch
+9855cf075781e1d1032f6a8dcc160cdcfc4d360875bc4fe005c83ca87dec767f1ce15e7c55d653688f1f2f0cb6b0b0328ccfd826e18ececc50d5d41d8b5b89d2  unbundle.patch
+f8d0a0ec9dd3e2df3a46a06540c4c236994fb058cecebdbf0dbe2fcc7bda19069341c0e65464b0c7f06c77acaa6b3b9a6832fd29ea58429000ffa5d94b34afc0  version.patch
+38673902256ee546c45cefd8e82f310ab7207ac50a038efcbf34c67dee04d626fa37462456729e7725729495ecd4ed7c0b16b72967ef768153d189d7b10c7439  pmos-if-touch-is-a-mouse-then-mouse-is-touch.patch
+cf07aec8878965cf4729700217857d66c37b9258ccab9a9cf4dd199f97f084504b6ad5dbf8d79ca538cbe86f94092f41be53251940ba0f062ca7fcb6d4de616a  git-revision.patch.engine
+5276b7d94c51c7362938693b5d5668008787b27a191ee2680efd3f9d71edeffe953622658604e43939b73ecc60f5afe004e60170ae70625f803ff611befb25a7  target-musl.patch.engine
+862f5ff1825309d8a0efc21e3b70668037646be8eb673df88935afd739f805b4dd2abf49e1b736afe1065ceb4e3415b0e2c88e56b9e6f926c74d762bde28a851  musl-no-execinfo.patch.engine
+ec58a07778ae2c6924da98eb343f2c19a84f5201f660b02e2f7a71593550cce364930add5661910726d47203cba942a5557d7b23e86d9b60d3491fb8ff28117f  musl-no-execinfo-2.patch.engine
+3fc4769fff7267c9956cf1f318fb1d8d592b9b4ddfd32268bede69e6315e80bb297cc28a4b47922d96f5f71d45fe2dff3d84a3469043ee742ea490b0b1cd7bba  musl-no-mallinfo.patch.engine
+b4996af19dc3b38cf508d6c3e101fb2cfdcd325583003ebdbff5d4e5fcc41edcb585d246fa8077a20bb007a1bccc5f207739e86d9748dce7ef742c2583d9a0b6  musl-random_r.patch.engine
+6634043f5618835dd9f33a3ec473cdf11bfae2456ee670e2ea24c14f8f1f9d45f9dc273dcb035400d18404e74833c4df1d57e78a00de8010aa7e1e68099db6cd  no-vpython.patch.engine
+ae90bd902c5b7b232d1142f21c93a0a81ef62d19f4c6efd4bc5841a6be8e4b17e4227b2c6230f69832263de7dff964c89cdab94b25df02fd8dc268b440f7dbe2  shared-libcxx.patch.engine
+4af257ab2ef60b1b3e127183eeddd8d5c2b95bbd37dddfe5dd1754ccb26624b032b5d9e598f25b3522f8e664425bf2032b2177142159a9d7e3eb58202252b39a  libstdc++13.patch.engine
+c0066e5668405c8377292d17e8f5ec26b7c24caae1a44a64528130f5da2c2913f9f87718504983af9ab858b3f9783dbff9e3dcac70264e3195ae01b3c87aa87f  system-icu.patch.engine
+77afe1c7e22f00eace1b67486e92cfd75b1658f52f2326290720a149d42e1536eb20e254f1bd80fa6456713dabc6be4b9eb17d2affce04a48b4b6b5c9054810a  unbundle.patch.engine
+21937b76539cd3317dac6cd5292e5c18188c6a934fe5f0b5dad64d822055419c0f90ab942bfbfd6470802896bef40b99279d2a834fac3e5ac53cbd087c0d9791  gn-args.patch.engine
+9c6cb9b0bdb4333f139d1d7115792de688ac99e0ab6987b0f7e5881a83a1feab2d635bc483cd7aed246e4077a65974c83cfe489acbe59853e93abafdfa0cd7d8  flutter
+"
