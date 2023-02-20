@@ -1,0 +1,72 @@
+Patch-Source: https://github.com/xbmc/xbmc/commit/e7c9ac72b5f4dc89208f3552fea1f6aeb99f45c2
+--
+From 9dc30e83c830d379c063eaf3a4a64a9fb57ca782 Mon Sep 17 00:00:00 2001
+From: Lukas Rusak <lorusak@gmail.com>
+Date: Mon, 6 Feb 2023 14:12:47 -0800
+Subject: [PATCH] CNFSFile: retry if nfs_open returns EAGAIN
+
+That means the nfsv4 context has expired and needs to be recreated
+
+Signed-off-by: Lukas Rusak <lorusak@gmail.com>
+---
+ xbmc/filesystem/NFSFile.cpp | 36 ++++++++++++++++++++++++------------
+ 1 file changed, 24 insertions(+), 12 deletions(-)
+
+diff --git a/xbmc/filesystem/NFSFile.cpp b/xbmc/filesystem/NFSFile.cpp
+index 0c758f2ec3f68..e7179c11007b3 100644
+--- a/xbmc/filesystem/NFSFile.cpp
++++ b/xbmc/filesystem/NFSFile.cpp
+@@ -572,7 +572,6 @@ int64_t CNFSFile::GetLength()
+ 
+ bool CNFSFile::Open(const CURL& url)
+ {
+-  int ret = 0;
+   Close();
+   // we can't open files like nfs://file.f or nfs://server/file.f
+   // if a file matches the if below return false, it can't exist on a nfs share.
+@@ -586,21 +585,34 @@ bool CNFSFile::Open(const CURL& url)
+ 
+   std::unique_lock<CCriticalSection> lock(gNfsConnection);
+ 
+-  if(!gNfsConnection.Connect(url, filename))
+-    return false;
++  auto NfsOpen = [this](const CURL& url, std::string& filename) -> bool
++  {
++    if (!gNfsConnection.Connect(url, filename))
++      return false;
+ 
+-  m_pNfsContext = gNfsConnection.GetNfsContext();
+-  m_exportPath = gNfsConnection.GetContextMapId();
++    m_pNfsContext = gNfsConnection.GetNfsContext();
++    m_exportPath = gNfsConnection.GetContextMapId();
+ 
+-  ret = nfs_open(m_pNfsContext, filename.c_str(), O_RDONLY, &m_pFileHandle);
++    return nfs_open(m_pNfsContext, filename.c_str(), O_RDONLY, &m_pFileHandle) == 0;
++  };
+ 
+-  if (ret != 0)
++  if (!NfsOpen(url, filename))
+   {
+-    CLog::Log(LOGINFO, "CNFSFile::Open: Unable to open file : '{}'  error : '{}'",
+-              url.GetFileName(), nfs_get_error(m_pNfsContext));
+-    m_pNfsContext = NULL;
+-    m_exportPath.clear();
+-    return false;
++    CLog::Log(LOGERROR,
++              "CNFSFile::Open: Unable to open file - trying again with a new context: error: '{}'",
++              nfs_get_error(m_pNfsContext));
++
++    gNfsConnection.Deinit();
++
++    if (!NfsOpen(url, filename))
++    {
++      CLog::Log(LOGERROR, "CNFSFile::Open: Unable to open file: '{}' error: '{}'",
++                url.GetFileName(), nfs_get_error(m_pNfsContext));
++
++      m_pNfsContext = nullptr;
++      m_exportPath.clear();
++      return false;
++    }
+   }
+ 
+   CLog::Log(LOGDEBUG, "CNFSFile::Open - opened {}", url.GetFileName());
