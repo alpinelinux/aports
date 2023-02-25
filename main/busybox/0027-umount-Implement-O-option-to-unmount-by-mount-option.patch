@@ -1,0 +1,195 @@
+From 7ea459b570760f8e836d05e58422dbd3a7d1b016 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?S=C3=B6ren=20Tempel?= <soeren+git@soeren-tempel.net>
+Date: Sun, 19 Jun 2022 17:49:41 +0200
+Subject: [PATCH] umount: Implement -O option to unmount by mount options
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This commit adds an implementation of the umount -O option, as provided
+by util-linux's mount(8) implementation, to BusyBox. Similar to -t, the
+option is intended to be used in conjunction with -a thereby allowing
+users to filter which file systems are unmounted by mount options.
+Multiple options can be specified with -O, all of which need to match.
+Each option can be prefixed with `no` to indicate that no action should
+be taken for a mount point with this mount option. The "no" prefix
+interpretation can be disabled using the "+" prefix.
+
+At Alpine, this feature is often requested by users as the OpenRC
+netmount service uses `umount -a -O _netdev` to amount all network
+file systems [1] [2].
+
+This implementation is functionally equivalent to the util-linux
+implementation with the exception that it implements no special handling
+for `key="value"` mount options to keep the implementation simple.
+Therefore, filesystems mounted with options like `foo="bar"` won't
+be matched by `umount -a -O foo`.
+
+[1]: https://gitlab.alpinelinux.org/alpine/aports/-/issues/9923
+[2]: https://gitlab.alpinelinux.org/alpine/aports/-/issues/13789
+
+Signed-off-by: Sören Tempel <soeren@soeren-tempel.net>
+Signed-off-by: Sören Tempel <soeren+git@soeren-tempel.net>
+---
+ include/libbb.h      |  1 +
+ libbb/Kbuild.src     |  1 +
+ libbb/match_fsopts.c | 69 ++++++++++++++++++++++++++++++++++++++++++++
+ util-linux/umount.c  | 10 +++++--
+ 4 files changed, 78 insertions(+), 3 deletions(-)
+ create mode 100644 libbb/match_fsopts.c
+
+diff --git a/include/libbb.h b/include/libbb.h
+index cca33a177..ad41adec8 100644
+--- a/include/libbb.h
++++ b/include/libbb.h
+@@ -1586,6 +1586,7 @@ const struct hwtype *get_hwntype(int type) FAST_FUNC;
+ 
+ 
+ extern int fstype_matches(const char *fstype, const char *comma_list) FAST_FUNC;
++extern int fsopts_matches(const char *opts_list, const char *reqopts_list) FAST_FUNC;
+ #ifdef HAVE_MNTENT_H
+ extern struct mntent *find_mount_point(const char *name, int subdir_too) FAST_FUNC;
+ #endif
+diff --git a/libbb/Kbuild.src b/libbb/Kbuild.src
+index 653025e56..4bb8260b9 100644
+--- a/libbb/Kbuild.src
++++ b/libbb/Kbuild.src
+@@ -120,6 +120,7 @@ lib-y += xrealloc_vector.o
+ 
+ lib-$(CONFIG_MOUNT) += match_fstype.o
+ lib-$(CONFIG_UMOUNT) += match_fstype.o
++lib-$(CONFIG_UMOUNT) += match_fsopts.o
+ 
+ lib-$(CONFIG_FEATURE_UTMP) += utmp.o
+ 
+diff --git a/libbb/match_fsopts.c b/libbb/match_fsopts.c
+new file mode 100644
+index 000000000..b1cc85c3c
+--- /dev/null
++++ b/libbb/match_fsopts.c
+@@ -0,0 +1,69 @@
++/* vi: set sw=4 ts=4: */
++/*
++ * Match fsopts for use in mount unmount -O.
++ *
++ * Returns 1 for a match, otherwise 0.
++ *
++ * Licensed under GPLv2 or later, see file LICENSE in this source tree.
++ */
++
++#include "libbb.h"
++
++static int fsopt_matches(const char *opts_list, const char *opt, size_t optlen)
++{
++	int match = 1;
++
++	if (optlen >= 2 && opt[0] == 'n' && opt[1] == 'o') {
++		match--;
++		opt += 2; optlen -= 2;
++	}
++
++	/* The alone "no" is an error, all matching ends with False. */
++	if (optlen == 0)
++		return 0;
++
++	/* The "no" prefix interpretation can be disabled by the "+" prefix. */
++	if (match && optlen > 1 && *opt == '+') {
++		opt++; optlen--;
++	}
++
++	while (1) {
++		if (strncmp(opts_list, opt, optlen) == 0) {
++			const char *after_opt = opts_list + optlen;
++			if (*after_opt == '\0' || *after_opt == ',')
++				return match;
++		}
++
++		opts_list = strchr(opts_list, ',');
++		if (!opts_list)
++			break;
++		opts_list++;
++	}
++
++	return !match;
++}
++
++/* This function implements the mnt_match_options function from libmount. */
++int FAST_FUNC fsopts_matches(const char *opts_list, const char *reqopts_list)
++{
++	if (!reqopts_list)
++		return 1; /* no options requested, match anything */
++
++	while (1) {
++		size_t len;
++		const char *comma = strchr(reqopts_list, ',');
++		if (!comma)
++			len = strlen(reqopts_list);
++		else
++			len = comma - reqopts_list;
++
++		if (len && !fsopt_matches(opts_list, reqopts_list, len))
++			return 0;
++
++		if (!comma)
++			break;
++		reqopts_list = ++comma;
++	}
++
++	return 1;
++}
+diff --git a/util-linux/umount.c b/util-linux/umount.c
+index 23da32868..7a54cafb0 100644
+--- a/util-linux/umount.c
++++ b/util-linux/umount.c
+@@ -41,7 +41,7 @@
+ //kbuild:lib-$(CONFIG_UMOUNT) += umount.o
+ 
+ //usage:#define umount_trivial_usage
+-//usage:       "[-rlf"IF_FEATURE_MTAB_SUPPORT("m")IF_FEATURE_MOUNT_LOOP("d")IF_FEATURE_UMOUNT_ALL("a")"] [-t FSTYPE] FILESYSTEM|DIRECTORY"
++//usage:       "[-rlf"IF_FEATURE_MTAB_SUPPORT("m")IF_FEATURE_MOUNT_LOOP("d")IF_FEATURE_UMOUNT_ALL("a")"] [-t FSTYPE] [-O FSOPT] FILESYSTEM|DIRECTORY"
+ //usage:#define umount_full_usage "\n\n"
+ //usage:       "Unmount filesystems\n"
+ //usage:	IF_FEATURE_UMOUNT_ALL(
+@@ -57,6 +57,7 @@
+ //usage:     "\n	-d	Free loop device if it has been used"
+ //usage:	)
+ //usage:     "\n	-t FSTYPE[,...]	Unmount only these filesystem type(s)"
++//usage:     "\n	-O FSOPT[,...]	Unmount only filesystem mounted with the given options"
+ //usage:
+ //usage:#define umount_example_usage
+ //usage:       "$ umount /dev/hdc1\n"
+@@ -82,7 +83,7 @@ static struct mntent *getmntent_r(FILE* stream, struct mntent* result,
+ #endif
+ 
+ /* ignored: -c -v -i */
+-#define OPTION_STRING           "fldnrat:" "cvi"
++#define OPTION_STRING           "fldnrat:O:" "cvi"
+ #define OPT_FORCE               (1 << 0) // Same as MNT_FORCE
+ #define OPT_LAZY                (1 << 1) // Same as MNT_DETACH
+ #define OPT_FREELOOP            (1 << 2)
+@@ -96,6 +97,7 @@ int umount_main(int argc UNUSED_PARAM, char **argv)
+ 	int doForce;
+ 	struct mntent me;
+ 	FILE *fp;
++	char *opts = NULL;
+ 	char *fstype = NULL;
+ 	int status = EXIT_SUCCESS;
+ 	unsigned opt;
+@@ -105,7 +107,7 @@ int umount_main(int argc UNUSED_PARAM, char **argv)
+ 		struct mtab_list *next;
+ 	} *mtl, *m;
+ 
+-	opt = getopt32(argv, OPTION_STRING, &fstype);
++	opt = getopt32(argv, OPTION_STRING, &fstype, &opts);
+ 	//argc -= optind;
+ 	argv += optind;
+ 
+@@ -133,6 +135,8 @@ int umount_main(int argc UNUSED_PARAM, char **argv)
+ 			/* Match fstype (fstype==NULL matches always) */
+ 			if (!fstype_matches(me.mnt_type, fstype))
+ 				continue;
++			if (!fsopts_matches(me.mnt_opts, opts))
++				continue;
+ 			m = xzalloc(sizeof(*m));
+ 			m->next = mtl;
+ 			m->device = xstrdup(me.mnt_fsname);
