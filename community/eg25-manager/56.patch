@@ -1,0 +1,571 @@
+From b8ff1ef3d49b31ae6ae01dd8be0b0503b091e80d Mon Sep 17 00:00:00 2001
+From: marcin <marcin@ipv8.pl>
+Date: Mon, 13 May 2024 21:43:58 +0200
+Subject: [PATCH 1/5] gpio: libgpiod 2.0: port gpiod_chip_open_by_label
+
+---
+ src/gpio.c | 92 ++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 89 insertions(+), 3 deletions(-)
+
+diff --git a/src/gpio.c b/src/gpio.c
+index ad74f34..318e013 100644
+--- a/src/gpio.c
++++ b/src/gpio.c
+@@ -8,6 +8,8 @@
+ #include "gpio.h"
+ 
+ #include <unistd.h>
++#include <dirent.h>
++#include <sys/stat.h>
+ 
+ /* Those defines are used for legacy config files only */
+ #define GPIO_CHIP1_LABEL "1c20800.pinctrl"
+@@ -133,6 +135,90 @@ struct gpiod_line *gpio_get_input_line(struct EG25Manager *manager, int chip, in
+     return gpio_line;
+ }
+ 
++static int gpio_chip_dir_filter(const struct dirent *entry)
++{
++    struct stat sb;
++    int ret = 0;
++    char *path;
++
++    if (asprintf(&path, "/dev/%s", entry->d_name) < 0)
++        return 0;
++
++    if ((lstat(path, &sb) == 0) && (!S_ISLNK(sb.st_mode)) &&
++        gpiod_is_gpiochip_device(path))
++        ret = 1;
++
++    free(path);
++
++    return ret;
++}
++
++int gpio_all_chip_paths(char ***paths_ptr)
++{
++    int i, j, num_chips, ret = 0;
++    struct dirent **entries;
++    char **paths;
++
++    num_chips = scandir("/dev/", &entries, gpio_chip_dir_filter, alphasort);
++    if (num_chips < 0)
++        g_error("gpio: unable to scan /dev: %s", g_strerror(errno));
++
++    paths = calloc(num_chips, sizeof(*paths));
++    if (paths == NULL)
++        g_error("gpio: out of memory");
++
++    for (i = 0; i < num_chips; i++) {
++        if (asprintf(&paths[i], "/dev/%s", entries[i]->d_name) < 0) {
++            for (j = 0; j < i; j++)
++                free(paths[j]);
++
++            free(paths);
++            return 0;
++        }
++    }
++
++    *paths_ptr = paths;
++    ret = num_chips;
++
++    for (i = 0; i < num_chips; i++)
++        free(entries[i]);
++
++    free(entries);
++    return ret;
++}
++
++struct gpiod_chip *gpio_chip_open_by_label(const char *label)
++{
++    int num_chips, i;
++    char **paths;
++    const char *clabel;
++    struct gpiod_chip *chip;
++    struct gpiod_chip_info *cinfo;
++
++    num_chips = gpio_all_chip_paths(&paths);
++
++    for (i = 0; i < num_chips; i++) {
++        chip = gpiod_chip_open(paths[i]);
++        if (!chip)
++            continue;
++
++        cinfo = gpiod_chip_get_info(chip);
++        if (!cinfo)
++            goto clean_chip_open;
++
++        clabel = gpiod_chip_info_get_label(cinfo);
++
++        if (strcmp(label, clabel) == 0) {
++            return chip;
++        }
++
++clean_chip_open:
++        gpiod_chip_close(chip);
++    }
++
++    return NULL;
++}
++
+ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+ {
+     int i;
+@@ -169,7 +255,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+             toml_datum_t data = toml_string_at(chipslist, i);
+             if (!data.ok)
+                 continue;
+-            manager->gpiochip[i] = gpiod_chip_open_by_label(data.u.s);
++            manager->gpiochip[i] = gpio_chip_open_by_label(data.u.s);
+             if (!manager->gpiochip[i])
+                 g_error("Unable to find GPIO chip '%s'", data.u.s);
+         }
+@@ -220,11 +306,11 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+         guint offset, chipidx, gpio_idx;
+ 
+         /* Legacy config file, only used on the OG PinePhone */
+-        manager->gpiochip[0] = gpiod_chip_open_by_label(GPIO_CHIP1_LABEL);
++        manager->gpiochip[0] = gpio_chip_open_by_label(GPIO_CHIP1_LABEL);
+         if (!manager->gpiochip[0])
+             g_error("Unable to open GPIO chip " GPIO_CHIP1_LABEL);
+ 
+-        manager->gpiochip[1] = gpiod_chip_open_by_label(GPIO_CHIP2_LABEL);
++        manager->gpiochip[1] = gpio_chip_open_by_label(GPIO_CHIP2_LABEL);
+         if (!manager->gpiochip[1])
+             g_error("Unable to open GPIO chip " GPIO_CHIP2_LABEL);
+ 
+-- 
+GitLab
+
+
+From 88e85ae7c22d8c98f96466220f3724cbdda7ce42 Mon Sep 17 00:00:00 2001
+From: marcin <marcin@ipv8.pl>
+Date: Mon, 13 May 2024 22:20:01 +0200
+Subject: [PATCH 2/5] gpio: libgpiod 2.0: port gpio_get_{input,output}_line
+
+---
+ src/gpio.c    | 76 +++++++++++++++++++++++++++++++--------------------
+ src/manager.h |  4 +--
+ 2 files changed, 49 insertions(+), 31 deletions(-)
+
+diff --git a/src/gpio.c b/src/gpio.c
+index 318e013..995f6a3 100644
+--- a/src/gpio.c
++++ b/src/gpio.c
+@@ -103,36 +103,54 @@ int gpio_sequence_sleep(struct EG25Manager *manager)
+     return 0;
+ }
+ 
+-struct gpiod_line *gpio_get_output_line(struct EG25Manager *manager, int chip, int line)
+-{
+-    struct gpiod_line *gpio_line;
+-
+-    gpio_line = gpiod_chip_get_line(manager->gpiochip[chip], line);
+-    if (!gpio_line)
++struct gpiod_line_request *gpio_request_line(struct EG25Manager *manager, int chip, unsigned int line, enum gpiod_line_direction direction) {
++    struct gpiod_line_request *request = NULL;
++    struct gpiod_line_settings *settings;
++    struct gpiod_line_config *line_cfg;
++    struct gpiod_request_config *req_cfg;
++    int ret;
++
++    settings = gpiod_line_settings_new();
++    if (!settings)
+         return NULL;
+ 
+-    if (gpiod_line_request_output(gpio_line, "eg25manager", 0) < 0) {
+-        gpiod_line_release(gpio_line);
+-        return NULL;
+-    }
++    gpiod_line_settings_set_direction(settings, direction);
+ 
+-    return gpio_line;
+-}
++    line_cfg = gpiod_line_config_new();
++    if (!line_cfg)
++        goto free_settings;
+ 
+-struct gpiod_line *gpio_get_input_line(struct EG25Manager *manager, int chip, int line)
+-{
+-    struct gpiod_line *gpio_line;
++    ret = gpiod_line_config_add_line_settings(line_cfg, &line, 1, settings);
++    if (ret)
++        goto free_line_config;
+ 
+-    gpio_line = gpiod_chip_get_line(manager->gpiochip[chip], line);
+-    if (!gpio_line)
+-        return NULL;
++    req_cfg = gpiod_request_config_new();
++    if (!req_cfg)
++        goto free_line_config;
+ 
+-    if (gpiod_line_request_input(gpio_line, "eg25manager") < 0) {
+-        gpiod_line_release(gpio_line);
+-        return NULL;
+-    }
++    gpiod_request_config_set_consumer(req_cfg, "eg25-manager");
++
++    request = gpiod_chip_request_lines(manager->gpiochip[chip], req_cfg, line_cfg);
+ 
+-    return gpio_line;
++    gpiod_request_config_free(req_cfg);
++
++free_line_config:
++    gpiod_line_config_free(line_cfg);
++
++free_settings:
++    gpiod_line_settings_free(settings);
++
++    return request;
++}
++
++struct gpiod_line_request *gpio_request_output_line(struct EG25Manager *manager, int chip, unsigned int line)
++{
++    return gpio_request_line(manager, chip, line, GPIOD_LINE_DIRECTION_OUTPUT);
++}
++
++struct gpiod_line_request *gpio_request_input_line(struct EG25Manager *manager, int chip, unsigned int line)
++{
++    return gpio_request_line(manager, chip, line, GPIOD_LINE_DIRECTION_INPUT);
+ }
+ 
+ static int gpio_chip_dir_filter(const struct dirent *entry)
+@@ -274,7 +292,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+             if (!line.ok || line.u.i < 0 || line.u.i > gpiod_chip_num_lines(manager->gpiochip[chip.u.i]))
+                 g_error("Wrong line ID for output GPIO '%s'", gpio_out_names[i]);
+ 
+-            manager->gpio_out[i] = gpio_get_output_line(manager, chip.u.i, line.u.i);
++            manager->gpio_out[i] = gpio_request_output_line(manager, chip.u.i, line.u.i);
+             if (!manager->gpio_out[i])
+                 g_error("Unable to get output GPIO %d", i);
+         }
+@@ -298,7 +316,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+             if (!line.ok || line.u.i < 0 || line.u.i > gpiod_chip_num_lines(manager->gpiochip[chip.u.i]))
+                 g_error("Wrong line ID for input GPIO '%s'", gpio_in_names[i]);
+ 
+-            manager->gpio_in[i] = gpio_get_input_line(manager, chip.u.i, line.u.i);
++            manager->gpio_in[i] = gpio_request_input_line(manager, chip.u.i, line.u.i);
+             if (!manager->gpio_in[i])
+                 g_error("Unable to get input GPIO %d", i);
+         }
+@@ -326,7 +344,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+                 chipidx = 1;
+             }
+ 
+-            manager->gpio_out[i] = gpio_get_input_line(manager, chipidx, offset);
++            manager->gpio_out[i] = gpio_request_input_line(manager, chipidx, offset);
+             if (!manager->gpio_out[i])
+                 g_error("Unable to get output GPIO %d", i);
+         }
+@@ -343,7 +361,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+                 chipidx = 1;
+             }
+ 
+-            manager->gpio_in[i] = gpio_get_input_line(manager, chipidx, offset);
++            manager->gpio_in[i] = gpio_request_input_line(manager, chipidx, offset);
+             if (!manager->gpio_in[i])
+                 g_error("Unable to get input GPIO %d", i);
+         }
+@@ -374,12 +392,12 @@ void gpio_destroy(struct EG25Manager *manager)
+ 
+     for (i = 0; i < GPIO_OUT_COUNT; i++) {
+         if (manager->gpio_out[i])
+-            gpiod_line_release(manager->gpio_out[i]);
++            gpiod_line_request_release(manager->gpio_out[i]);
+     }
+ 
+     for (i = 0; i < GPIO_IN_COUNT; i++) {
+         if (manager->gpio_in[i])
+-            gpiod_line_release(manager->gpio_in[i]);
++            gpiod_line_request_release(manager->gpio_in[i]);
+     }
+ 
+     if (manager->gpiochip[0])
+diff --git a/src/manager.h b/src/manager.h
+index 43d44bd..3c25ecc 100644
+--- a/src/manager.h
++++ b/src/manager.h
+@@ -116,8 +116,8 @@ struct EG25Manager {
+     GUdevClient *udev;
+ 
+     struct gpiod_chip *gpiochip[2];
+-    struct gpiod_line *gpio_out[5];
+-    struct gpiod_line *gpio_in[2];
++    struct gpiod_line_request *gpio_out[5];
++    struct gpiod_line_request *gpio_in[2];
+ };
+ 
+ void modem_configure(struct EG25Manager *data);
+-- 
+GitLab
+
+
+From b1bb871eb756a5fc6bb3b644baa935d43a494609 Mon Sep 17 00:00:00 2001
+From: marcin <marcin@ipv8.pl>
+Date: Mon, 13 May 2024 22:29:23 +0200
+Subject: [PATCH 3/5] gpio: libgpiod 2.0: port gpiod_chip_num_lines
+
+---
+ src/gpio.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/src/gpio.c b/src/gpio.c
+index 995f6a3..f8e1470 100644
+--- a/src/gpio.c
++++ b/src/gpio.c
+@@ -237,6 +237,22 @@ clean_chip_open:
+     return NULL;
+ }
+ 
++unsigned int gpio_chip_num_lines(struct EG25Manager *manager, unsigned int chip_num) {
++    struct gpiod_chip *chip = manager->gpiochip[chip_num];
++    struct gpiod_chip_info *info;
++    unsigned int num_lines;
++
++    info = gpiod_chip_get_info(chip);
++    if (!info)
++        g_error("gpio: failed to read info: %s", strerror(errno));
++
++    num_lines = gpiod_chip_info_get_num_lines(info);
++
++    gpiod_chip_info_free(info);
++
++    return num_lines;
++}
++
+ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+ {
+     int i;
+@@ -289,7 +305,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+                 g_error("Wrong chip ID for output GPIO '%s'", gpio_out_names[i]);
+ 
+             line = toml_int_in(table, "line");
+-            if (!line.ok || line.u.i < 0 || line.u.i > gpiod_chip_num_lines(manager->gpiochip[chip.u.i]))
++            if (!line.ok || line.u.i < 0 || line.u.i > gpio_chip_num_lines(manager, chip.u.i))
+                 g_error("Wrong line ID for output GPIO '%s'", gpio_out_names[i]);
+ 
+             manager->gpio_out[i] = gpio_request_output_line(manager, chip.u.i, line.u.i);
+@@ -313,7 +329,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+                 g_error("Wrong chip ID for input GPIO '%s'", gpio_in_names[i]);
+ 
+             line = toml_int_in(table, "line");
+-            if (!line.ok || line.u.i < 0 || line.u.i > gpiod_chip_num_lines(manager->gpiochip[chip.u.i]))
++            if (!line.ok || line.u.i < 0 || line.u.i > gpio_chip_num_lines(manager, chip.u.i))
+                 g_error("Wrong line ID for input GPIO '%s'", gpio_in_names[i]);
+ 
+             manager->gpio_in[i] = gpio_request_input_line(manager, chip.u.i, line.u.i);
+-- 
+GitLab
+
+
+From bc5a25b17ea77b66fe41b505d7a656a11b071a40 Mon Sep 17 00:00:00 2001
+From: marcin <marcin@ipv8.pl>
+Date: Mon, 13 May 2024 22:55:48 +0200
+Subject: [PATCH 4/5] gpio: libgpiod 2.0: port gpiod_line_{get,set}_value
+
+---
+ src/gpio.c    | 56 ++++++++++++++++++++++++++++++++++++++++++---------
+ src/manager.h |  3 +++
+ 2 files changed, 49 insertions(+), 10 deletions(-)
+
+diff --git a/src/gpio.c b/src/gpio.c
+index f8e1470..c8d63dc 100644
+--- a/src/gpio.c
++++ b/src/gpio.c
+@@ -42,11 +42,43 @@ static char *gpio_in_names[] = {
+     "status",
+ };
+ 
++int gpio_line_get_value(struct EG25Manager *manager, int line) {
++    enum gpiod_line_value value;
++    value = gpiod_line_request_get_value(manager->gpio_in[line], manager->gpio_in_offset[line]);
++
++    switch (value) {
++        case GPIOD_LINE_VALUE_ACTIVE:
++            return 1;
++        case GPIOD_LINE_VALUE_INACTIVE:
++            return 0;
++        case GPIOD_LINE_VALUE_ERROR:
++            g_warning("gpio: couldn't get value on line %d", line);
++    }
++
++    return -1;
++}
++
++int gpio_line_set_value(struct EG25Manager *manager, int line, int value) {
++    enum gpiod_line_value line_value = value ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
++    int ret;
++
++    ret = gpiod_line_request_set_value(manager->gpio_out[line], manager->gpio_out_offset[line], line_value);
++
++    if (ret) {
++        g_warning("gpio: couldn't set value %d on line %d", value, line);
++        return -1;
++    }
++    else {
++        manager->gpio_out_value[line] = value;
++        return 0;
++    }
++}
++
+ int gpio_sequence_poweron(struct EG25Manager *manager)
+ {
+-    gpiod_line_set_value(manager->gpio_out[GPIO_OUT_PWRKEY], 1);
++    gpio_line_set_value(manager, GPIO_OUT_PWRKEY, 1);
+     sleep(1);
+-    gpiod_line_set_value(manager->gpio_out[GPIO_OUT_PWRKEY], 0);
++    gpio_line_set_value(manager, GPIO_OUT_PWRKEY, 0);
+ 
+     g_message("Executed power-on/off sequence");
+ 
+@@ -55,7 +87,7 @@ int gpio_sequence_poweron(struct EG25Manager *manager)
+ 
+ int gpio_sequence_shutdown(struct EG25Manager *manager)
+ {
+-    gpiod_line_set_value(manager->gpio_out[GPIO_OUT_DISABLE], 1);
++    gpio_line_set_value(manager, GPIO_OUT_DISABLE, 1);
+     gpio_sequence_poweron(manager);
+ 
+     g_message("Executed power-off sequence");
+@@ -65,7 +97,7 @@ int gpio_sequence_shutdown(struct EG25Manager *manager)
+ 
+ int gpio_sequence_suspend(struct EG25Manager *manager)
+ {
+-    gpiod_line_set_value(manager->gpio_out[GPIO_OUT_APREADY], 1);
++    gpio_line_set_value(manager, GPIO_OUT_APREADY, 1);
+ 
+     g_message("Executed suspend sequence");
+ 
+@@ -74,7 +106,7 @@ int gpio_sequence_suspend(struct EG25Manager *manager)
+ 
+ int gpio_sequence_resume(struct EG25Manager *manager)
+ {
+-    gpiod_line_set_value(manager->gpio_out[GPIO_OUT_APREADY], 0);
++    gpio_line_set_value(manager, GPIO_OUT_APREADY, 0);
+ 
+     g_message("Executed resume sequence");
+ 
+@@ -83,8 +115,8 @@ int gpio_sequence_resume(struct EG25Manager *manager)
+ 
+ int gpio_sequence_wake(struct EG25Manager *manager)
+ {
+-    if (gpiod_line_get_value(manager->gpio_out[GPIO_OUT_DTR])) {
+-        gpiod_line_set_value(manager->gpio_out[GPIO_OUT_DTR], 0);
++    if (manager->gpio_out_value[GPIO_OUT_DTR]) {
++        gpio_line_set_value(manager, GPIO_OUT_DTR, 0);
+ 
+         /* Give the modem 200ms to wake from soft sleep */
+         usleep(200000);
+@@ -97,7 +129,7 @@ int gpio_sequence_wake(struct EG25Manager *manager)
+ 
+ int gpio_sequence_sleep(struct EG25Manager *manager)
+ {
+-    gpiod_line_set_value(manager->gpio_out[GPIO_OUT_DTR], 1);
++    gpio_line_set_value(manager, GPIO_OUT_DTR, 1);
+     g_message("Executed soft sleep sequence");
+ 
+     return 0;
+@@ -311,6 +343,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+             manager->gpio_out[i] = gpio_request_output_line(manager, chip.u.i, line.u.i);
+             if (!manager->gpio_out[i])
+                 g_error("Unable to get output GPIO %d", i);
++            manager->gpio_out_offset[i] = line.u.i;
+         }
+ 
+         for (i = 0; i < GPIO_IN_COUNT; i++) {
+@@ -335,6 +368,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+             manager->gpio_in[i] = gpio_request_input_line(manager, chip.u.i, line.u.i);
+             if (!manager->gpio_in[i])
+                 g_error("Unable to get input GPIO %d", i);
++            manager->gpio_in_offset[i] = line.u.i;
+         }
+     } else {
+         guint offset, chipidx, gpio_idx;
+@@ -363,6 +397,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+             manager->gpio_out[i] = gpio_request_input_line(manager, chipidx, offset);
+             if (!manager->gpio_out[i])
+                 g_error("Unable to get output GPIO %d", i);
++            manager->gpio_out_offset[i] = offset;
+         }
+ 
+         for (i = 0; i < GPIO_IN_COUNT; i++) {
+@@ -380,6 +415,7 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+             manager->gpio_in[i] = gpio_request_input_line(manager, chipidx, offset);
+             if (!manager->gpio_in[i])
+                 g_error("Unable to get input GPIO %d", i);
++            manager->gpio_in_offset[i] = offset;
+         }
+     }
+ 
+@@ -389,11 +425,11 @@ int gpio_init(struct EG25Manager *manager, toml_table_t *config[])
+ gboolean gpio_check_poweroff(struct EG25Manager *manager, gboolean keep_down)
+ {
+     if (manager->gpio_in[GPIO_IN_STATUS] &&
+-        gpiod_line_get_value(manager->gpio_in[GPIO_IN_STATUS]) == 1) {
++        gpio_line_get_value(manager, GPIO_IN_STATUS) == 1) {
+ 
+         if (keep_down && manager->gpio_out[GPIO_OUT_RESET]) {
+             // Asserting RESET line to prevent modem from rebooting
+-            gpiod_line_set_value(manager->gpio_out[GPIO_OUT_RESET], 1);
++            gpio_line_set_value(manager, GPIO_OUT_RESET, 1);
+         }
+ 
+         return TRUE;
+diff --git a/src/manager.h b/src/manager.h
+index 3c25ecc..4d90e31 100644
+--- a/src/manager.h
++++ b/src/manager.h
+@@ -117,7 +117,10 @@ struct EG25Manager {
+ 
+     struct gpiod_chip *gpiochip[2];
+     struct gpiod_line_request *gpio_out[5];
++    guint gpio_out_value[5];
++    guint gpio_out_offset[5];
+     struct gpiod_line_request *gpio_in[2];
++    guint gpio_in_offset[5];
+ };
+ 
+ void modem_configure(struct EG25Manager *data);
+-- 
+GitLab
+
+
+From 93bdfbdfa258aac0933c9397e1042ba7c7b77de5 Mon Sep 17 00:00:00 2001
+From: marcin <marcin@ipv8.pl>
+Date: Mon, 13 May 2024 23:19:28 +0200
+Subject: [PATCH 5/5] libgpiod 2.0: specify that we need at least libgpiod 2.0
+
+---
+ README.md   | 2 +-
+ meson.build | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/README.md b/README.md
+index 6507770..fb648c1 100644
+--- a/README.md
++++ b/README.md
+@@ -15,7 +15,7 @@ It implements the following features:
+ 
+ `eg25-manager` requires the following development libraries:
+ - libglib2.0-dev
+-- libgpiod-dev
++- libgpiod-dev (>= 2.0)
+ - libmm-glib-dev
+ 
+ ## Building
+diff --git a/meson.build b/meson.build
+index ef65fb6..8e6c6fc 100644
+--- a/meson.build
++++ b/meson.build
+@@ -59,7 +59,7 @@ mgr_deps = [
+     dependency('glib-2.0'),
+     dependency('gio-unix-2.0'),
+     dependency('gudev-1.0'),
+-    dependency('libgpiod'),
++    dependency('libgpiod', version: '>= 2.0'),
+     dependency('libusb-1.0'),
+     dependency('libcurl'),
+     mmglib_dep,
+-- 
+GitLab
+
