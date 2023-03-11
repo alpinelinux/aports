@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.18_alpha20230208
-pkgrel=0
+pkgrel=1
 pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
@@ -62,6 +62,11 @@ VERSION_ID=$pkgver
 PRETTY_NAME="Alpine Linux $_rel"
 HOME_URL="https://alpinelinux.org/"
 BUG_REPORT_URL="https://gitlab.alpinelinux.org/alpine/aports/-/issues"
+EOF
+
+	mkdir -p "$subpkgdir"/etc/apk/protected_paths.d
+	cat >"$subpkgdir"/etc/apk/protected_paths.d/alpine-release<<EOF
+-etc/os-release
 EOF
 
 	# create secfixes.d repository list
