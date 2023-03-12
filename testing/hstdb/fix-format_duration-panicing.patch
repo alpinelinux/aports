@@ -1,0 +1,332 @@
+Patch-Source: https://github.com/AlexanderThaller/hstdb/commit/977aa3bc96b27e27020eb98668fd24939eb6b56a
+--
+From 977aa3bc96b27e27020eb98668fd24939eb6b56a Mon Sep 17 00:00:00 2001
+From: Alexander Thaller <alexander.thaller@trivago.com>
+Date: Thu, 7 Jul 2022 14:34:49 +0200
+Subject: [PATCH] Fix format_duration panicing when printing negative duration
+ (#50)
+
+---
+ Cargo.lock     |  19 ++++---
+ Cargo.toml     |   1 +
+ src/main.rs    |   2 +-
+ src/opt.rs     |   4 +-
+ src/run/mod.rs | 138 ++++++++++++++++++++++++++++++++-----------------
+ 5 files changed, 109 insertions(+), 55 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 3f62a3f..163a042 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -306,6 +306,12 @@ dependencies = [
+  "termcolor",
+ ]
+ 
++[[package]]
++name = "exitcode"
++version = "1.1.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "de853764b47027c2e862a995c34978ffa63c1501f2e15f987ba11bd4f9bba193"
++
+ [[package]]
+ name = "fallible-iterator"
+ version = "0.2.0"
+@@ -453,6 +459,7 @@ dependencies = [
+  "csv",
+  "ctrlc",
+  "directories",
++ "exitcode",
+  "flume",
+  "glob",
+  "hostname",
+@@ -635,9 +642,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "once_cell"
+-version = "1.12.0"
++version = "1.13.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7709cef83f0c1f58f666e746a08b21e0085f7440fa6a29cc194d68aac97a4225"
++checksum = "18a6dbe30758c9f83eb00cbea4ac95966305f5a7772f3f42ebfc7fc7eddbd8e1"
+ 
+ [[package]]
+ name = "os_str_bytes"
+@@ -820,9 +827,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "regex"
+-version = "1.5.6"
++version = "1.6.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d83f127d94bdbcda4c8cc2e50f6f84f4b611f69c902699ca385a39c3a75f9ff1"
++checksum = "4c4eb3267174b8c6c2f654116623910a0fef09c4753f8dd83db29c48a0df988b"
+ dependencies = [
+  "aho-corasick",
+  "memchr",
+@@ -837,9 +844,9 @@ checksum = "6c230d73fb8d8c1b9c0b3135c5142a8acee3a0558fb8db5cf1cb65f8d7862132"
+ 
+ [[package]]
+ name = "regex-syntax"
+-version = "0.6.26"
++version = "0.6.27"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "49b3de9ec5dc0a3417da371aab17d729997c15010e7fd24ff707773a33bddb64"
++checksum = "a3f87b73ce11b1619a3c6332f45341e0047173771e8b8b73f87bfeefb7b56244"
+ 
+ [[package]]
+ name = "remove_dir_all"
+diff --git a/Cargo.toml b/Cargo.toml
+index 4619534..4630e39 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -41,6 +41,7 @@ sled = "0.34"
+ thiserror = "1"
+ toml = "0.5"
+ uuid = { version = "1", features = ["serde", "v4"] }
++exitcode = "1.1.2"
+ 
+ [dev-dependencies]
+ tempfile = "3"
+diff --git a/src/main.rs b/src/main.rs
+index fd503ef..238d7f7 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -4,7 +4,6 @@
+ #![forbid(unsafe_code)]
+ 
+ use clap::Parser;
+-use log::error;
+ 
+ mod client;
+ mod config;
+@@ -15,6 +14,7 @@ mod run;
+ mod server;
+ mod store;
+ 
++use log::error;
+ use opt::Opt;
+ 
+ fn main() {
+diff --git a/src/opt.rs b/src/opt.rs
+index 9099228..af7fb97 100644
+--- a/src/opt.rs
++++ b/src/opt.rs
+@@ -400,10 +400,10 @@ impl Opt {
+                 SubCommand::Import(s) => match s {
+                     #[cfg(feature = "histdb-import")]
+                     Import::Histdb(o) => run::import::histdb(&o.import_file, o.data_dir.data_dir)
+-                        .map_err(run::Error::Import),
++                        .map_err(run::Error::ImportHistdb),
+                     Import::Histfile(o) => {
+                         run::import::histfile(&o.import_file, o.data_dir.data_dir)
+-                            .map_err(run::Error::Import)
++                            .map_err(run::Error::ImportHistfile)
+                     }
+                 },
+                 SubCommand::Init => {
+diff --git a/src/run/mod.rs b/src/run/mod.rs
+index d11de89..8caebbc 100644
+--- a/src/run/mod.rs
++++ b/src/run/mod.rs
+@@ -28,7 +28,10 @@ use comfy_table::{
+     Cell,
+     Table,
+ };
+-use log::debug;
++use log::{
++    debug,
++    warn,
++};
+ use std::{
+     convert::TryInto,
+     io::Write,
+@@ -69,11 +72,21 @@ pub enum Error {
+     #[error("can not write to stdout: {0}")]
+     WriteStdout(std::io::Error),
+ 
+-    #[error("can not import entries: {0}")]
+-    Import(import::Error),
+-
+     #[error("can not read configuration file: {0}")]
+     ReadConfig(config::Error),
++
++    #[error("encountered negative duration when trying to format duration")]
++    NegativeDuration,
++
++    #[cfg(feature = "histdb-import")]
++    #[error("can not import from histdb: {0}")]
++    ImportHistdb(import::Error),
++
++    #[error("can not import from histfile: {0}")]
++    ImportHistfile(import::Error),
++
++    #[error("can not format entry: {0}\nentry: {1:?}")]
++    FormatEntry(Box<Error>, Entry),
+ }
+ 
+ #[derive(Debug)]
+@@ -144,7 +157,9 @@ pub fn default(filter: &Filter, display: &TableDisplay, data_dir: PathBuf) -> Re
+     let entries = store::new(data_dir).get_entries(filter)?;
+ 
+     if display.format {
+-        default_format(display, entries)
++        default_format(display, entries);
++
++        Ok(())
+     } else {
+         default_no_format(display, entries)
+     }
+@@ -187,40 +202,56 @@ pub fn default_no_format(display: &TableDisplay, entries: Vec<Entry>) -> Result<
+     }
+ 
+     for entry in entries {
+-        let mut row = vec![format_timestamp(entry.time_finished)];
+-
+-        if display.host.is_show() {
+-            row.push(entry.hostname);
++        if let Err(err) = default_no_format_entry(&mut handle, display, &entry) {
++            warn!("{}", Error::FormatEntry(Box::new(err), entry));
+         }
++    }
+ 
+-        if display.duration.is_show() {
+-            row.push(format_duration(entry.time_start, entry.time_finished)?);
+-        }
++    Ok(())
++}
+ 
+-        if display.status.is_show() {
+-            row.push(format!("{}", entry.result));
+-        }
++fn default_no_format_entry<T>(
++    handle: &mut T,
++    display: &TableDisplay,
++    entry: &Entry,
++) -> Result<(), Error>
++where
++    T: Write,
++{
++    let mut row = vec![format_timestamp(entry.time_finished)];
+ 
+-        if display.session.is_show() {
+-            row.push(format_uuid(entry.session_id));
+-        }
+-        if display.pwd.is_show() {
+-            row.push(format_pwd(&entry.pwd)?);
+-        }
++    if display.host.is_show() {
++        row.push(entry.hostname.clone());
++    }
+ 
+-        row.push(format_command(&entry.command, display.format));
++    if display.duration.is_show() {
++        row.push(format_duration(entry.time_start, entry.time_finished)?);
++    }
+ 
+-        handle
+-            .write_all(row.join("\t").as_bytes())
+-            .map_err(Error::WriteStdout)?;
++    if display.status.is_show() {
++        row.push(format!("{}", entry.result));
++    }
+ 
+-        handle.write_all(b"\n").map_err(Error::WriteStdout)?;
++    if display.session.is_show() {
++        row.push(format_uuid(entry.session_id));
++    }
++
++    if display.pwd.is_show() {
++        row.push(format_pwd(&entry.pwd)?);
+     }
+ 
++    row.push(format_command(&entry.command, display.format));
++
++    handle
++        .write_all(row.join("\t").as_bytes())
++        .map_err(Error::WriteStdout)?;
++
++    handle.write_all(b"\n").map_err(Error::WriteStdout)?;
++
+     Ok(())
+ }
+ 
+-pub fn default_format(display: &TableDisplay, entries: Vec<Entry>) -> Result<(), Error> {
++pub fn default_format(display: &TableDisplay, entries: Vec<Entry>) {
+     let mut table = Table::new();
+     table.load_preset("                   ");
+     table.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
+@@ -254,33 +285,43 @@ pub fn default_format(display: &TableDisplay, entries: Vec<Entry>) -> Result<(),
+     }
+ 
+     for entry in entries {
+-        let mut row = vec![format_timestamp(entry.time_finished)];
+-
+-        if display.host.is_show() {
+-            row.push(entry.hostname);
++        if let Err(err) = default_format_entry(&mut table, display, &entry) {
++            warn!("{}", Error::FormatEntry(Box::new(err), entry));
+         }
++    }
+ 
+-        if display.duration.is_show() {
+-            row.push(format_duration(entry.time_start, entry.time_finished)?);
+-        }
++    println!("{}", table);
++}
+ 
+-        if display.status.is_show() {
+-            row.push(format!("{}", entry.result));
+-        }
++fn default_format_entry(
++    table: &mut Table,
++    display: &TableDisplay,
++    entry: &Entry,
++) -> Result<(), Error> {
++    let mut row = vec![format_timestamp(entry.time_finished)];
+ 
+-        if display.session.is_show() {
+-            row.push(format_uuid(entry.session_id));
+-        }
+-        if display.pwd.is_show() {
+-            row.push(format_pwd(&entry.pwd)?);
+-        }
++    if display.host.is_show() {
++        row.push(entry.hostname.clone());
++    }
+ 
+-        row.push(format_command(&entry.command, display.format));
++    if display.duration.is_show() {
++        row.push(format_duration(entry.time_start, entry.time_finished)?);
++    }
+ 
+-        table.add_row(row);
++    if display.status.is_show() {
++        row.push(format!("{}", entry.result));
+     }
+ 
+-    println!("{}", table);
++    if display.session.is_show() {
++        row.push(format_uuid(entry.session_id));
++    }
++    if display.pwd.is_show() {
++        row.push(format_pwd(&entry.pwd)?);
++    }
++
++    row.push(format_command(&entry.command, display.format));
++
++    table.add_row(row);
+ 
+     Ok(())
+ }
+@@ -418,6 +459,11 @@ fn format_duration(
+ ) -> Result<String, Error> {
+     let duration = time_finished - time_start;
+     let duration_ms = duration.num_milliseconds();
++
++    if duration_ms < 0 {
++        return Err(Error::NegativeDuration);
++    }
++
+     let duration_std =
+         std::time::Duration::from_millis(duration_ms.try_into().map_err(Error::ConvertDuration)?);
+ 
