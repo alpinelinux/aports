@@ -1,0 +1,206 @@
+Subject: Fix compilation with different ucontext_t on musl
+Upstream: No
+Author: Simon Frankenberger <simon-alpine@fraho.eu>
+
+The machine state registers have to be accessed differently when
+running on musl libc. This patch fix this by replacing
+"uc_mcontext.regs->grp" with "uc_mcontext.gp_regs"
+and accessing the named fields (like "->nip") by the array index constants.
+
+--- old/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
++++ new/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
+@@ -47,6 +47,10 @@
+ #include "utilities/macros.hpp"
+ #include "utilities/powerOfTwo.hpp"
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
++
+ #ifdef PRODUCT
+ #define BLOCK_COMMENT(str) // nothing
+ #else
+@@ -1308,7 +1312,11 @@
+   // the safepoing polling page.
+   ucontext_t* uc = (ucontext_t*) ucontext;
+   // Set polling address.
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   address addr = (address)uc->uc_mcontext.regs->gpr[ra] + (ssize_t)ds;
++#else // Musl
++  address addr = (address)uc->uc_mcontext.gp_regs[ra] + (ssize_t) ds;
++#endif
+   if (polling_address_ptr != NULL) {
+     *polling_address_ptr = addr;
+   }
+@@ -1371,11 +1379,20 @@
+       || (is_stdu(instruction) && rs == 1)) {
+     int ds = inv_ds_field(instruction);
+     // return banged address
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+     return ds+(address)uc->uc_mcontext.regs->gpr[ra];
++#else // Musl
++    return ds+(address)uc->uc_mcontext.gp_regs[ra];
++#endif
+   } else if (is_stdux(instruction) && rs == 1) {
+     int rb = inv_rb_field(instruction);
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+     address sp = (address)uc->uc_mcontext.regs->gpr[1];
+     long rb_val = (long)uc->uc_mcontext.regs->gpr[rb];
++#else // Musl
++    address sp = (address)uc->uc_mcontext.gp_regs[1];
++    long rb_val = (long)uc->uc_mcontext.gp_regs[rb];
++#endif
+     return ra != 1 || rb_val >= 0 ? NULL         // not a stack bang
+                                   : sp + rb_val; // banged address
+   }
+--- old/src/hotspot/cpu/ppc/vm_version_ppc.cpp
++++ new/src/hotspot/cpu/ppc/vm_version_ppc.cpp
+@@ -52,6 +52,10 @@
+ #endif
+ #endif
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
++
+ bool VM_Version::_is_determine_features_test_running = false;
+ uint64_t VM_Version::_dscr_val = 0;
+ 
+@@ -682,7 +686,7 @@
+   unsigned long auxv = getauxval(AT_HWCAP2);
+ 
+   if (auxv & PPC_FEATURE2_HTM_NOSC) {
+-    if (auxv & PPC_FEATURE2_HAS_HTM) {
++    if (auxv & PPC_FEATURE2_HTM) {
+       // TM on POWER8 and POWER9 in compat mode (VM) is supported by the JVM.
+       // TM on POWER9 DD2.1 NV (baremetal) is not supported by the JVM (TM on
+       // POWER9 DD2.1 NV has a few issues that need a couple of firmware
+--- old/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
++++ new/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
+@@ -76,7 +76,11 @@
+ # include <poll.h>
+ # include <ucontext.h>
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
+ 
++
+ address os::current_stack_pointer() {
+   return (address)__builtin_frame_address(0);
+ }
+@@ -103,24 +107,42 @@
+   // - if uc was filled by getcontext(), it is undefined - getcontext() does not fill
+   //   it because the volatile registers are not needed to make setcontext() work.
+   //   Hopefully it was zero'd out beforehand.
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   guarantee(uc->uc_mcontext.regs != NULL, "only use ucontext_get_pc in sigaction context");
+   return (address)uc->uc_mcontext.regs->nip;
++#else // Musl
++  guarantee(uc->uc_mcontext.gp_regs != NULL, "only use ucontext_get_pc in sigaction context");
++  return (address)uc->uc_mcontext.gp_regs[PT_NIP];
++#endif
+ }
+ 
+ // modify PC in ucontext.
+ // Note: Only use this for an ucontext handed down to a signal handler. See comment
+ // in ucontext_get_pc.
+ void os::Posix::ucontext_set_pc(ucontext_t * uc, address pc) {
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   guarantee(uc->uc_mcontext.regs != NULL, "only use ucontext_set_pc in sigaction context");
+   uc->uc_mcontext.regs->nip = (unsigned long)pc;
++#else // Musl
++  guarantee(uc->uc_mcontext.gp_regs != NULL, "only use ucontext_set_pc in sigaction context");
++  uc->uc_mcontext.gp_regs[PT_NIP] = (unsigned long)pc;
++#endif
+ }
+ 
+ static address ucontext_get_lr(const ucontext_t * uc) {
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   return (address)uc->uc_mcontext.regs->link;
++#else // Musl
++  return (address)uc->uc_mcontext.gp_regs[PT_LNK];
++#endif
+ }
+ 
+ intptr_t* os::Linux::ucontext_get_sp(const ucontext_t * uc) {
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   return (intptr_t*)uc->uc_mcontext.regs->gpr[1/*REG_SP*/];
++#else // Musl
++  return (intptr_t*)uc->uc_mcontext.gp_regs[1/*REG_SP*/];
++#endif
+ }
+ 
+ intptr_t* os::Linux::ucontext_get_fp(const ucontext_t * uc) {
+@@ -128,7 +150,11 @@
+ }
+ 
+ static unsigned long ucontext_get_trap(const ucontext_t * uc) {
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   return uc->uc_mcontext.regs->trap;
++#else // Musl
++  return uc->uc_mcontext.gp_regs[PT_TRAP];
++#endif
+ }
+ 
+ address os::fetch_frame_from_context(const void* ucVoid,
+@@ -194,7 +220,11 @@
+     // 3.2.1 "Machine State Register"), however note that ISA notation for bit
+     // numbering is MSB 0, so for normal bit numbering (LSB 0) they come to be
+     // bits 33 and 34. It's not related to endianness, just a notation matter.
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+     if (second_uc->uc_mcontext.regs->msr & 0x600000000) {
++#else // Musl
++    if (second_uc->uc_mcontext.gp_regs[PT_MSR] & 0x600000000) {
++#endif
+       if (TraceTraps) {
+         tty->print_cr("caught signal in transaction, "
+                         "ignoring to jump to abort handler");
+@@ -450,6 +480,7 @@
+   const ucontext_t* uc = (const ucontext_t*)context;
+ 
+   st->print_cr("Registers:");
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   st->print("pc =" INTPTR_FORMAT "  ", uc->uc_mcontext.regs->nip);
+   st->print("lr =" INTPTR_FORMAT "  ", uc->uc_mcontext.regs->link);
+   st->print("ctr=" INTPTR_FORMAT "  ", uc->uc_mcontext.regs->ctr);
+@@ -489,6 +489,16 @@
+     st->print("r%-2d=" INTPTR_FORMAT "  ", i, uc->uc_mcontext.regs->gpr[i]);
+     if (i % 3 == 2) st->cr();
+   }
++#else // Musl
++  st->print("pc =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_NIP]);
++  st->print("lr =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_LNK]);
++  st->print("ctr=" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_CTR]);
++  st->cr();
++  for (int i = 0; i < 32; i++) {
++    st->print("r%-2d=" INTPTR_FORMAT "  ", i, uc->uc_mcontext.gp_regs[i]);
++    if (i % 3 == 2) st->cr();
++  }
++#endif
+   st->cr();
+   st->cr();
+ }
+@@ -482,12 +523,22 @@
+   st->print_cr("Register to memory mapping:");
+   st->cr();
+ 
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->nip);
+   st->print("lr ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->link);
+   st->print("ctr ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->ctr);
++#else // Musl
++  st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_NIP]);
++  st->print("lr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_LNK]);
++  st->print("ctr ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_CTR]);
++#endif
+   for (int i = 0; i < 32; i++) {
+     st->print("r%-2d=", i);
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+     print_location(st, uc->uc_mcontext.regs->gpr[i]);
++#else // Musl
++    print_location(st, uc->uc_mcontext.gp_regs[i]);
++#endif
+   }
+   st->cr();
+ }
