@@ -2,19 +2,19 @@
 # Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
 
 pkgname=dotnet7-stage0
-pkgver=7.0.104
+pkgver=7.0.105
 pkgrel=0
 
 [ "$CBUILD" != "$CHOST" ] && _cross="-$CARCH" || _cross=""
 
 # Tag of tarball generator.
-_gittag=v7.0.104
+_gittag=v$pkgver
 
 # Versions of prebuilt artifacts and bootstrap tar
 _artifactsver=7.0.102
-_bootstrapver="7.0.104"
-_bootstraprel=1
-_installerver=$_bootstrapver
+_bootstrapver="7.0.105"
+_bootstraprel=0
+_installerver=${_gittag/v}
 
 # Version of packages that aren't defined in git-info or badly defined
 _iltoolsver=7.0.2-servicing.22607.1
@@ -24,18 +24,15 @@ _aspnetver=7.0.4
 # Look for patch notes within each patch for what they fix / where they come from
 # build_* patches applies directly to $builddir
 _patches="
-	aspnetcore_use-linux-musl-crossgen-on-non-x64.patch
-	installer_runtimepacks.patch
-	roslyn_allow-extra-params.patch
+	installer_set-crossgen2rid-using-buildarchitecture.patch
 	runtime_76500-mono-musl-support.patch
 	runtime_76500-properly-set-toolchain-for-alpine.patch
-	runtime_81573-suppress-clang-16-warnings.patch
 	runtime_82269-mono-thread-coop-undefine-fortify-source.patch
+	runtime_83682-specify-notext-on-linux-musl-x86.patch
+	runtime_84413-support-adding-rids-with-dash-in-base-part.patch
+	runtime_84444-suppress-clang-16-warnings.patch
 	runtime_enable-runtime-marshalling.diff
-	runtime_make-lld-use-depend-on-existing-on-target.patch
-	runtime_no-additional-runtime-id.patch
-	sdk_dummyshim-fix.patch
-	sdk_fix-sdk-download.patch
+	runtime_remove-usage-of-off64-t.patch
 	"
 _extra_nupkgs="https://globalcdn.nuget.org/packages/stylecop.analyzers.1.2.0-beta.435.nupkg"
 
@@ -184,6 +181,7 @@ prepare() {
 
 	# Parallel restore is broken on mono-based builds since dotnet7
 	# see https://github.com/dotnet/runtime/issues/77364
+	# fixed by https://github.com/dotnet/runtime/pull/79856 on dotnet8
 	# A workaround via runtime_enable-runtime-marshalling.diff
 	case $CARCH in
 		s390x|ppc64le)
@@ -191,6 +189,10 @@ prepare() {
 			patch -p1 -i "$srcdir"/runtime_enable-runtime-marshalling.diff
 			;;
 	esac
+
+	# sdk insists on downloading its own dotnet unless ArcadeBuildFromSource
+	# is true, which opens up a can of worms
+	sed 's|ArcadeBuildFromSource=true|Architecture|' -i src/sdk/eng/restore-toolset.sh
 
 	mkdir -p "$_cli_root"
 	mkdir -p $_packagesdir $_downloaddir $_outputdir $_nugetdir $_logdir
@@ -247,11 +249,16 @@ _runtime() {
 		"
 	if [ "$CBUILD" != "$CHOST" ]; then
 		local args="$args -cross"
+		local DotNetBuildFromSource=false
+		# x86 build of mono broken, thus do not build mono
+		case $_dotnet_target in
+			x86) local args="$args /p:DefaultSubsets=clr+libs+host+packs";;
+		esac
 	fi
 	if [ "$_runtimever" != "${_runtimever##*-}" ]; then
 		local args="$args /p:VersionSuffix=${_runtimever##*-}"
 	fi
-	ROOTFS_DIR="$CBUILDROOT" ./build.sh $args
+	DotNetBuildFromSource=$DotNetBuildFromSource ROOTFS_DIR="$CBUILDROOT" ./build.sh $args
 
 	for i in artifacts/packages/*/*/*.nupkg; do
 		$_nuget push $i --source="$_packagesdir"
@@ -273,7 +280,6 @@ _roslyn() {
 	local args="
 		-c Release
 		-bl
-		/consoleLoggerParameters:ShowTimestamp
 		/p:GitCommitHash=$(grep GitCommitHash "$builddir"/git-info/roslyn.props | sed -E 's|</?GitCommitHash>||g' | tr -d ' ')
 		"
 	if [ "$_roslynver" != "${_roslynver##*-}" ]; then
@@ -307,9 +313,7 @@ _sdk() {
 		local args="$args /p:VersionSuffix=${_sdkver##*-}"
 	fi
 
-	# ArgumentsReflector doesn't build correctly when built from source
-	DotNetBuildFromSource=false dotnet build src/Tests/ArgumentsReflector/ArgumentsReflector.csproj $args
-	./build.sh --pack $args
+	./build.sh --pack /p:Projects=$builddir/src/sdk/source-build.slnf $args
 
 	for i in artifacts/packages/*/*/*.nupkg; do
 		$_nuget push $i --source="$_packagesdir"
@@ -334,14 +338,16 @@ _aspnetcore() {
 		-arch $_dotnet_target
 		-no-build-nodejs
 		/consoleLoggerParameters:ShowTimestamp
+		/p:BuildOSName=linux-musl
 		/p:BuildNodeJs=false
 		/p:GitCommitHash=$(grep GitCommitHash "$builddir"/git-info/aspnetcore.props | sed -E 's|</?GitCommitHash>||g' | tr -d ' ')
 		/p:DotNetAssetRootUrl=file://$_downloaddir/
 		/p:EnablePackageValidation=false
 		"
-	if [ "$_dotnet_target" = "x86" ] || [ "$_dotnet_target" = "ppc64le" ]; then
-		local args="$args /p:CrossgenOutput=false"
-	fi
+	# x86 crossgen broken; ppc64le insists on using crossgen
+	case $_dotnet_target in
+		x86|ppc64le) local args="$args /p:DISABLE_CROSSGEN=True";;
+	esac
 	if [ "$_aspnetver" != "${_aspnetver##*-}" ]; then
 		local args="$args /p:VersionSuffix=${_aspnetver##*-}"
 	fi
@@ -377,9 +383,12 @@ _installer() {
 	if [ "$_installerver" != "${_installerver##*-}" ]; then
 		local args="$args /p:VersionSuffix=${_installerver##*-}"
 	fi
-	if [ "$_dotnet_target" = "x86" ]; then
-		local args="$args /p:DISABLE_CROSSGEN=True"
-	fi
+
+	# x86 crossgen broken
+	case $_dotnet_target in
+		x86) local args="$args /p:DISABLE_CROSSGEN=True";;
+	esac
+
 	./build.sh $args
 
 	mkdir  -p "$_downloaddir"/installer/$_installerver
@@ -509,24 +518,21 @@ artifacts() {
 }
 
 sha512sums="
-3adb3cfe451e04c56265306869c3023c281322510d6e0eb182f233e549bdd4b9c738f41bb60470fce09cc386be4d1ea47d78846842f35e4bd9047b04bef16286  dotnet-v7.0.104.tar.xz
-b622027eb455388d9401f7df9d9d1259659739ebda109b24c2a478113bcfe8f588ac9bf1856c5b7ba125e30351aff7ef4eb8f465da13fa1cef0b0d41a07aad38  dotnet-sdk-7.0.104-linux-musl-x64.noextract
-c0b0326e1d00fe0f989a3b81953057d5f1d84f1f33c2d7116ddcb64bd628755f1b4d3912f86a7423b45f27fed2f17e3ecef0292c37f9bb61b52b5632da429c7e  dotnet-sdk-7.0.104-linux-musl-arm64.noextract
-073fbba13f539e4d784e7368afa7ff28b7f477ddc786b007763fe1d46d6501a07a5fdf96b78bfda1e5cefcaf0e66724b1037f1f469c2b6b8750945034752061b  dotnet-sdk-7.0.104-linux-musl-arm.noextract
-1e8670787f517a0fa360a5dfb4176b58efad53f92d78fdd1c357eae2c0d4b3490d13629ea696217ebdca309695e9e90a6ef0180c7fb51599b43fdd2ed95d1da5  dotnet-sdk-7.0.104-r1-linux-musl-s390x.noextract
-956f7f22d01df953c939b5ca38d8a756cc55915ba31b28e953aea86baf61f4317c6023d1f2978417143f27a1f1d41bd1c543a8edc278327913208dced3e1983f  dotnet-sdk-7.0.104-r1-linux-musl-ppc64le.noextract
+bfc122f316673fe4014e891eb101ecf40efc2ed4ecaff0cbd4bb5c17f547ccaa867ae8af22f41813565630cdb68e2972633703a88478fadde39584f91588589d  dotnet-v7.0.105.tar.xz
+8fb7d1754359e3fda35b7a07e13d2a5e9e723196b980dd922b30919aedaddbedd4d82e28b37471437b69cb93e4b1d136ac701e221924e44d0be6b6ba94dc3654  dotnet-sdk-7.0.105-linux-musl-x64.noextract
+c8120c20939232b53a3cdc607d812d93fadd6dea9466f9454df559f8b7eb334c69fdfd31bc60e4c70b6cf4fc519a25a0439902b04cf5c5bd0c29de020024fbe2  dotnet-sdk-7.0.105-linux-musl-arm64.noextract
+9ffa724ccc02dc3e40afe22f0546a9bdf68b6314cf6da03d9387fb010fe3e5935154a5c06c4a2d588ff4ac77f34120a4ae9bc0237fb24452d78e6698435acf72  dotnet-sdk-7.0.105-linux-musl-arm.noextract
+0d6a0f394d53043ffe9aca972a9a4d173f9eb3cad4660422d377080e46cf8cc91f3cbdd05d33095b479c465756d44afe264adb6bdf84d7b05ebc420c3e938837  dotnet-sdk-7.0.105-r0-linux-musl-s390x.noextract
+7b29bce712237634cfcb5fb96c74254736d2279c78e7c74f4471a16391f4af16754819f1a93ac4f24e7dd199a91264c6b398e930020f264dfb4e894acca0e452  dotnet-sdk-7.0.105-r0-linux-musl-ppc64le.noextract
 e5d8f11d5da842309c1e7cf9936eb0cf3cfb56aaa17aeee64fe264b3e6771ee56dd6c405a4c16950b4e4607dab21bc0ec40783f69b0865a6112d7d03b1b57487  Private.SourceBuilt.Artifacts.7.0.102.noextract
 2ede8d9352a51861a5b2550010ff55da8241381a6fa6cc49e025f1c289b230b8c0177e93850de4ea8b6f702c1f2d50d81a9f4d890ca9441c257b614f2a5e05dd  stylecop.analyzers.1.2.0-beta.435.nupkg
-ae8588bf0ee3c60d2d511241a9acdef209218390e9609cbd920c9d88b9180519f5dfba430534d1f97a7efbf891c57265403e13db2d23730c0a4d6a75a9c5602d  aspnetcore_use-linux-musl-crossgen-on-non-x64.patch
-1fe84c55f63c3b32fe7c58aa23ba25e2e9ddeee21acd664947206b8a9678bf38e2c1a95252243d7981dd9423bda49f40dd463fa6e619fe7f329a31794829ee88  installer_runtimepacks.patch
-ead82bb2276acc273d661e42597c76661984143bb7736cd6a64241f51b2da3b9b8625b6232e24c7f9a6965436f65a5b7bf1ba7669a01e6b9774ebd3a62f7ebe0  roslyn_allow-extra-params.patch
+b6a2dfeccac329546f87f1019c1f2cf07e2f294dd33914449ad08d92269c8713b6fa1e330ef257c24e189023fd0b824df97688b0ba6e578a6d0292b07a72b4c1  installer_set-crossgen2rid-using-buildarchitecture.patch
 43355fdb9531a08a9a141b016c049cc61d779e797f182456f56e5dc3af76fd31643d84d7ad7982080921681d2bbfc7bbaaa64f50c3899b023222eb0d841fbb2a  runtime_76500-mono-musl-support.patch
 24f3fed752922d2ca3c151f21fedf6a257c7c74a155105a1aa09cdc847ba24e496212cb2d8548b134a8901c7da8d78c27fa93579211f7bdeadc598f808fed4a8  runtime_76500-properly-set-toolchain-for-alpine.patch
-3d241fce16038a4790151342dd95c77c39c8a63aeba75921bb6cd6a1b9698668b99dceb89e993b30d0087e56c5d3fecd272c016d03f22bf5b25a41d5fa62f3fc  runtime_81573-suppress-clang-16-warnings.patch
 d732df247c721c9f677baabdd7f36dbf4b564814ff64164361065bb1c196b767494a1d39f634eadf01a23032c7b3e64102614b7213065c81096bbf3f8022e6a0  runtime_82269-mono-thread-coop-undefine-fortify-source.patch
+2dd195d5275245fe85bea2f75019fd3cbadcef7f5691b44c08db470265c6e7fcb2a50b3276a96df7547af76953623fdc92bd1ad51ccef6738813b78d22327fa3  runtime_83682-specify-notext-on-linux-musl-x86.patch
+2ed962096eb9d8ae61831d224ceb05b8f77f5692f38a3457048d1b4abef705e8e4f676b81bb1a833e338e75ac8dc80b0631b1a45ad9a15c5597740b7320bfbb5  runtime_84413-support-adding-rids-with-dash-in-base-part.patch
+929d5be2e4a213ad726652c24478e45abe1bf1d444c01a8975da007f246cb056916ad4681e541436faa89447e35c5e0a6101ae4ecaecc8083155b04e7138beb8  runtime_84444-suppress-clang-16-warnings.patch
 1f7be536c4826638853f110ee88bbd554be015cc88c6491c1066830789be18ad324f8ed2b1b75ed7aad74457dcafc812730059cb25d36d6344bfae8a517c00c4  runtime_enable-runtime-marshalling.diff
-2ff8b42bce25b8389177bb6389bfdc796c104c5d992e72a6e7c8af0cda8f70f26f480071db380df78db745eee72e4343220f79ec6b22aa880fa2531eda8c8593  runtime_make-lld-use-depend-on-existing-on-target.patch
-ce7496f734aed63009f25a12b8588e23d1714bd05ac0ea1d744f096dbd5787afb6ccd29f79ef0f14abb43fe0fb6d1ad00e4fbd488678b616a8bbe50dc42e7eed  runtime_no-additional-runtime-id.patch
-b5f28aa8bdbd24c589276a60893859965eb78b0abfbdac7a6e86715ac87e3bbd8bc271852ff62a41ea83b53af02e1c1814abcccc8862c07b3ac74633d1be0a32  sdk_dummyshim-fix.patch
-5fe72c206564ad6a3d96e7a32cf76509819cdbe2620f67266e100e7426c04a3e861985ffd0999afc6baf28a04606e1124482b8a0f46dae3095da59bd57e31697  sdk_fix-sdk-download.patch
+d972e77df27748a80c9b23eca12f9fbd78be97f9034b79cc5703ba58eb6750171d9a115314300f883620ccbca89c65a99ca7a45d54a421b028b590190b4bed80  runtime_remove-usage-of-off64-t.patch
 "
