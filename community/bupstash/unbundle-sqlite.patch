@@ -1,0 +1,106 @@
+Patch-Source: https://github.com/andrewchambers/bupstash/pull/381
+--
+From 9950cabff4d1a2714706622b88537f6572b8a1de Mon Sep 17 00:00:00 2001
+From: Jakub Jirutka <jakub@jirutka.cz>
+Date: Sat, 15 Apr 2023 00:21:14 +0200
+Subject: [PATCH] Allow build with system-provided libsqlite (dynamically
+ linked)
+
+This is mainly for Linux distributions that package bupstash.
+Linux distributions generally dislike bundled (statically linked)
+dependencies, both for security reasons and to save users from wasting
+network traffic and disk space by having dozens of copies of the same
+library bundled in different binaries.
+
+Notes:
+
+The `modern_sqlite` feature of rusqlite is implicitly enabled by the
+`bundled` feature, so it's not new here. This feature is needed because
+it enables `libsqlite3-sys/bundled_bindings` which is needed for
+`src/fstx2.rs` to build (it doesn't build with `buildtime_bindgen`, dunno
+why).
+
+sqlite has a very stable API and ABI, so it's not necessary to ensure
+exact version matching. And it's undesirable when linking with
+system-provided libsqlite, because it would require rebuilding bupstash
+every time libsqlite is upgraded to a new patch version (e.g. with fixed
+security bug). However, I kept the assert and disabled it just for
+builds without bundled sqlite.
+---
+ Cargo.toml      |  4 +++-
+ build.rs        | 16 ++++++++++------
+ src/cksumvfs.rs |  5 +++++
+ 3 files changed, 18 insertions(+), 7 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 48338062..d6faaf48 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -15,7 +15,9 @@ codegen-units = 1
+ incremental = false
+ 
+ [features]
++default = ["bundled-sqlite"]
+ simd-rollsum = []
++bundled-sqlite = ["rusqlite/bundled"]
+ 
+ [dependencies]
+ 
+@@ -24,7 +26,7 @@ crossbeam-utils = "0.8"
+ crossbeam-channel = "0.5"
+ blake3 = "1"
+ itertools = "0.10"
+-rusqlite = { version = "0.25", features = ["bundled"] }
++rusqlite = { version = "0.25", features = ["modern_sqlite"] }
+ lz4 = "1.2"
+ zstd-safe = { version = "6.0", features = ["std", "experimental"] }
+ anyhow = "1"
+diff --git a/build.rs b/build.rs
+index 9809ffb6..ffe8de76 100644
+--- a/build.rs
++++ b/build.rs
+@@ -2,11 +2,15 @@ fn main() {
+     pkg_config::probe_library("libsodium").unwrap();
+ 
+     println!("cargo:rerun-if-changed=csrc/cksumvfs/sqlite3.h");
+-    cc::Build::new()
++
++    let mut build = cc::Build::new();
++    build
+         .warnings(false) // Not our code/warnings to fix.
+-        .flag("-DSQLITE_CKSUMVFS_STATIC")
+-        .flag("-Icsrc/cksumvfs")
+-        .file("csrc/cksumvfs/cksumvfs.c")
+-        .file("csrc/cksumvfs/cksumvfs_sqlite_version_number.c")
+-        .compile("cksumvfs");
++        .flag("-DSQLITE_CKSUMVFS_STATIC");
++    if cfg!(feature = "bundled-sqlite") {
++        build
++            .flag("-Icsrc/cksumvfs")
++            .file("csrc/cksumvfs/cksumvfs_sqlite_version_number.c");
++    }
++    build.file("csrc/cksumvfs/cksumvfs.c").compile("cksumvfs");
+ }
+diff --git a/src/cksumvfs.rs b/src/cksumvfs.rs
+index f95524e5..e9cd5a43 100644
+--- a/src/cksumvfs.rs
++++ b/src/cksumvfs.rs
+@@ -3,13 +3,18 @@
+ // For more info see: https://www.sqlite.org/cksumvfs.html
+ 
+ extern "C" {
++    #[cfg(feature = "bundled-sqlite")]
+     fn cksumvfs_sqlite_version_number() -> ::std::os::raw::c_int;
++
+     fn sqlite3_register_cksumvfs(unused: *const u8) -> ::std::os::raw::c_int;
+ }
+ 
+ pub fn register_cksumvfs() {
+     // Because have our own copy of the sqlite3 header file, this
+     // test ensures we are using the same header rusqlite used.
++    // This is not needed (nor desirable) when building with a
++    // system-provided libsqlite.
++    #[cfg(feature = "bundled-sqlite")]
+     assert_eq!(
+         unsafe { cksumvfs_sqlite_version_number() },
+         rusqlite::version_number()
