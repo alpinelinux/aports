@@ -24,3 +24,9 @@ To use them, run the following command after cloning this repository:
 ```sh
 git config --local core.hooksPath .githooks
 ```
+
+Guidelines
+----------
+
+- [Coding style](CODINGSTYLE.md) - Guidelines for writing APKBUILDs.
+- [Commit style](COMMITSTYLE.md) - Guidelines for git commit messages.
