@@ -1,0 +1,167 @@
+diff --git a/client/build b/client/build
+new file mode 100755
+index 0000000..ab02e3a
+--- /dev/null
++++ b/client/build
+@@ -0,0 +1,63 @@
++#!/usr/bin/env escript
++
++%%% Build escript(s) to be included with an eturnal release.
++%%%
++%%% Copyright (c) 2022 Holger Weiss <holger@zedat.fu-berlin.de>.
++%%% Copyright (c) 2022 ProcessOne, SARL.
++%%% All rights reserved.
++%%%
++%%% Licensed under the Apache License, Version 2.0 (the "License");
++%%% you may not use this file except in compliance with the License.
++%%% You may obtain a copy of the License at
++%%%
++%%%     http://www.apache.org/licenses/LICENSE-2.0
++%%%
++%%% Unless required by applicable law or agreed to in writing, software
++%%% distributed under the License is distributed on an "AS IS" BASIS,
++%%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++%%% See the License for the specific language governing permissions and
++%%% limitations under the License.
++
++-define(SHEBANG, "{{eturnal_prefix}}/erts-{{release_erts_version}}/bin/escript").
++-define(DEFAULT_LIB_DIR, "_build/default/lib").
++-define(COMPILE_OPTS, [binary, deterministic | include_opts()]).
++
++-spec main([string()]) -> ok.
++main(Files) ->
++    ok = maybe_compile_deps(),
++    ok = lists:foreach(fun(File) -> ok = create_escript(File) end, Files).
++
++-spec maybe_compile_deps() -> ok.
++maybe_compile_deps() ->
++    case os:getenv("REBAR_DEPS_DIR") of
++        Dir when is_list(Dir) ->
++            ok;
++        false ->
++            ok = io:put_chars(os:cmd("rebar3 compile"))
++    end.
++
++-spec create_escript(file:filename()) -> ok.
++create_escript(File) ->
++    {ok, _Mod, Code} = compile:file(File ++ ".erl", ?COMPILE_OPTS),
++    ok = escript:create(File, [{shebang, ?SHEBANG}, {beam, Code}]),
++    ok = file:change_mode(File, 8#00755).
++
++-spec include_opts() -> [{i, string()}].
++include_opts() ->
++    LibDir = lib_dir(),
++    CheckoutsDir = filename:join([filename:dirname(LibDir), "checkouts"]),
++    case filelib:is_dir(CheckoutsDir) of
++        true ->
++            [{i, LibDir}, {i, CheckoutsDir}];
++        false ->
++            [{i, LibDir}]
++    end.
++
++-spec lib_dir() -> string().
++lib_dir() ->
++    case os:getenv("REBAR_DEPS_DIR") of
++        Dir when is_list(Dir) ->
++            Dir;
++        false ->
++            ?DEFAULT_LIB_DIR
++    end.
+diff --git a/client/stun.erl b/client/stun.erl
+new file mode 100644
+index 0000000..d5b304e
+--- /dev/null
++++ b/client/stun.erl
+@@ -0,0 +1,92 @@
++%%% Simple STUN client (UDP-only).
++%%%
++%%% Copyright (c) 2022 Holger Weiss <holger@zedat.fu-berlin.de>.
++%%% Copyright (c) 2022 ProcessOne, SARL.
++%%% All rights reserved.
++%%%
++%%% Licensed under the Apache License, Version 2.0 (the "License");
++%%% you may not use this file except in compliance with the License.
++%%% You may obtain a copy of the License at
++%%%
++%%%     http://www.apache.org/licenses/LICENSE-2.0
++%%%
++%%% Unless required by applicable law or agreed to in writing, software
++%%% distributed under the License is distributed on an "AS IS" BASIS,
++%%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++%%% See the License for the specific language governing permissions and
++%%% limitations under the License.
++
++-module(stun).
++-export([main/1]).
++
++-include_lib("stun/include/stun.hrl").
++-define(STUN_TIMEOUT, timer:seconds(5)).
++-define(STUN_PORT, "3478").
++-define(STUN_FAMILY, inet).
++
++-spec main([string()]) -> any().
++main(["-4", Server, Port]) ->
++    query(Server, Port, inet);
++main(["-6", Server, Port]) ->
++    query(Server, Port, inet6);
++main(["-4", Server]) ->
++    query(Server, ?STUN_PORT, inet);
++main(["-6", Server]) ->
++    query(Server, ?STUN_PORT, inet6);
++main([Server, Port]) ->
++    query(Server, Port, ?STUN_FAMILY);
++main([Server]) ->
++    query(Server, ?STUN_PORT, ?STUN_FAMILY);
++main(_Args) ->
++    abort("Usage: stun [-4|-6] <server> [<port>]").
++
++-spec query(inet:hostname(), string(), inet:family()) -> any().
++query(Server0, Port0, Family) ->
++    try
++        {ok, Server} = inet:getaddr(Server0, Family),
++        Port = list_to_integer(Port0),
++        TrID = rand:uniform(1 bsl 96),
++        Msg = #stun{method = ?STUN_METHOD_BINDING,
++                    class = request,
++                    trid = TrID},
++        {ok, Sock} = gen_udp:open(0, [Family, binary, {active, false}]),
++        PktOut = stun_codec:encode(Msg),
++        ok = gen_udp:send(Sock, Server, Port, PktOut),
++        {ok, {_, _, PktIn}} = gen_udp:recv(Sock, 0, ?STUN_TIMEOUT),
++        ok = gen_udp:close(Sock),
++        case stun_codec:decode(PktIn, datagram) of
++            {ok, #stun{trid = TrID, 'XOR-MAPPED-ADDRESS' = {Addr, _}}} ->
++                print_addr(Addr);
++            {ok, #stun{trid = TrID, 'MAPPED-ADDRESS' = {Addr, _}}} ->
++                print_addr(Addr);
++            _ ->
++                exit({error, bad_response})
++        end
++    catch _:Err ->
++            abort("Cannot query ~s:~s: ~s", [Server0, Port0, format_error(Err)])
++    end.
++
++-spec print_addr(inet:ip_address()) -> ok.
++print_addr(Addr) ->
++    ok = io:put_chars(inet:ntoa(Addr)),
++    ok = io:nl().
++
++-spec format_error(any()) -> string().
++format_error({error, bad_response}) ->
++    "invalid STUN response";
++format_error({_, {error, timeout}}) ->
++    "request timed out";
++format_error({_, {error, Reason}}) ->
++    inet:format_error(Reason);
++format_error(Err) ->
++    unicode:characters_to_list(io_lib:format("~p", [Err])).
++
++-spec abort(iolist() | binary() | atom()) -> no_return().
++abort(Msg) ->
++    abort("~s", [Msg]).
++
++-spec abort(io:format(), [term()]) -> no_return().
++abort(Format, Data) ->
++    ok = io:format(standard_error, Format, Data),
++    ok = io:nl(standard_error),
++    halt(1).
