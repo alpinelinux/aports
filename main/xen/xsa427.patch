@@ -1,0 +1,76 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: x86/shadow: account for log-dirty mode when pre-allocating
+
+Pre-allocation is intended to ensure that in the course of constructing
+or updating shadows there won't be any risk of just made shadows or
+shadows being acted upon can disappear under our feet. The amount of
+pages pre-allocated then, however, needs to account for all possible
+subsequent allocations. While the use in sh_page_fault() accounts for
+all shadows which may need making, so far it didn't account for
+allocations coming from log-dirty tracking (which piggybacks onto the
+P2M allocation functions).
+
+Since shadow_prealloc() takes a count of shadows (or other data
+structures) rather than a count of pages, putting the adjustment at the
+call site of this function won't work very well: We simply can't express
+the correct count that way in all cases. Instead take care of this in
+the function itself, by "snooping" for L1 type requests. (While not
+applicable right now, future new request sites of L1 tables would then
+also be covered right away.)
+
+It is relevant to note here that pre-allocations like the one done from
+shadow_alloc_p2m_page() are benign when they fall in the "scope" of an
+earlier pre-alloc which already included that count: The inner call will
+simply find enough pages available then; it'll bail right away.
+
+This is CVE-2022-42332 / XSA-427.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Tim Deegan <tim@xen.org>
+---
+v2: Entirely different approach.
+
+--- a/xen/arch/x86/include/asm/paging.h
++++ b/xen/arch/x86/include/asm/paging.h
+@@ -189,6 +189,10 @@ bool paging_mfn_is_dirty(const struct do
+ #define L4_LOGDIRTY_IDX(pfn) ((pfn_x(pfn) >> (PAGE_SHIFT + 3 + PAGETABLE_ORDER * 2)) & \
+                               (LOGDIRTY_NODE_ENTRIES-1))
+ 
++#define paging_logdirty_levels() \
++    (DIV_ROUND_UP(PADDR_BITS - PAGE_SHIFT - (PAGE_SHIFT + 3), \
++                  PAGE_SHIFT - ilog2(sizeof(mfn_t))) + 1)
++
+ #ifdef CONFIG_HVM
+ /* VRAM dirty tracking support */
+ struct sh_dirty_vram {
+--- a/xen/arch/x86/mm/paging.c
++++ b/xen/arch/x86/mm/paging.c
+@@ -282,6 +282,7 @@ void paging_mark_pfn_dirty(struct domain
+     if ( unlikely(!VALID_M2P(pfn_x(pfn))) )
+         return;
+ 
++    BUILD_BUG_ON(paging_logdirty_levels() != 4);
+     i1 = L1_LOGDIRTY_IDX(pfn);
+     i2 = L2_LOGDIRTY_IDX(pfn);
+     i3 = L3_LOGDIRTY_IDX(pfn);
+--- a/xen/arch/x86/mm/shadow/common.c
++++ b/xen/arch/x86/mm/shadow/common.c
+@@ -1011,7 +1011,17 @@ bool shadow_prealloc(struct domain *d, u
+     if ( unlikely(d->is_dying) )
+        return false;
+ 
+-    ret = _shadow_prealloc(d, shadow_size(type) * count);
++    count *= shadow_size(type);
++    /*
++     * Log-dirty handling may result in allocations when populating its
++     * tracking structures.  Tie this to the caller requesting space for L1
++     * shadows.
++     */
++    if ( paging_mode_log_dirty(d) &&
++         ((SHF_L1_ANY | SHF_FL1_ANY) & (1u << type)) )
++        count += paging_logdirty_levels();
++
++    ret = _shadow_prealloc(d, count);
+     if ( !ret && (!d->is_shutting_down || d->shutdown_code != SHUTDOWN_crash) )
+         /*
+          * Failing to allocate memory required for shadow usage can only result in
