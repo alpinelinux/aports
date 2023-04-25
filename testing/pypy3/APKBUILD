@@ -1,9 +1,9 @@
 # Maintainer: Thomas Liske <thomas@fiasko-nw.net>
 pkgname=pypy3
-pkgver=7.3.9
+pkgver=7.3.11
 _pkgver=${pkgver/_/}
-pkgrel=1
-pkgdesc="Fast, compliant alternative implementation of Python 3.8"
+pkgrel=0
+pkgdesc="Fast, compliant alternative implementation of Python 3.9"
 url="https://www.pypy.org/"
 arch="x86 x86_64 aarch64 s390x"
 license="MIT"
@@ -17,56 +17,117 @@ makedepends="
 	openssl-dev>3
 	pypy
 	readline-dev
-	rsync
 	sqlite-dev
 	tk-dev
 	util-linux-misc
 	xz-dev
 	zlib-dev
 	"
-[ "$CARCH" = "x86" ] && options="textrels" # on x86 has textrels
-source="https://downloads.python.org/pypy/pypy3.8-v$_pkgver-src.tar.bz2
+subpackages="$pkgname-dev $pkgname-tests $pkgname-tkinter $pkgname-pyc"
+source="https://downloads.python.org/pypy/pypy3.9-v$_pkgver-src.tar.bz2
 	0001-time.patch
 	0002-extern-stdio.patch
 	"
-builddir="$srcdir/pypy3.8-v$_pkgver-src"
-options="$options !check" # todo
+builddir="$srcdir/pypy3.9-v$_pkgver-src"
+options="!check" # todo
+
+[ "$CARCH" = "x86" ] && options="$options textrels" # on x86 has textrels
 
 build() {
-	cd pypy/goal
+	if [ "$JOBS" -gt 16 ]; then
+		export JOBS=16
+	fi
 
-	# translate with JIT
-	[[ "$JOBS" -gt 16 ]] && JOBS=16
-	pypy ../../rpython/bin/rpython --opt=jit --shared --make-jobs=${JOBS:-2} targetpypystandalone
+	msg "building pypy3"
+	pypy rpython/bin/rpython --opt=jit --shared --make-jobs=${JOBS:-2} pypy/goal/targetpypystandalone.py
 
-	# compile binary modules
-	PYTHONPATH=../.. ./pypy3-c ../../lib_pypy/pypy_tools/build_cffi_imports.py
+	msg "configuring system dirs"
+	./pypy3.9-c -m sysconfig --generate-posix-vars \
+		LIBDIR=/usr/lib \
+		TZPATH=/usr/share/zoneinfo \
+		INCLUDEPY=/usr/include/pypy3.9
+
+	local out="$(cat pybuilddir.txt)"
+	cp "$out"/_sysconfigdata__*.py lib-python/3/
+
+	msg "generating pattern pickles"
+	./pypy3.9-c - <<-EOF
+		import lib2to3.pygram
+		import lib2to3.patcomp
+		lib2to3.patcomp.PatternCompiler()
+	EOF
+
+	msg "compiling binary modules"
+	./pypy3.9-c lib_pypy/pypy_tools/build_cffi_imports.py
+
+	# cleanup pypy libdir
+	find lib_pypy -name "*_cffi.[co]" -delete
+	find lib_pypy -type d -empty -delete
 }
 
 check() {
-	cd pypy/goal
-	./pypy3-c -u ../test_all.py \
-		../module/pypyjit/test_pypy_c
+	./pypy3.9-c -u pypy/test_all.py \
+		pypy/module/pypyjit/test_pypy_c
 }
 
 package() {
-	install -Dm755 pypy/goal/pypy3-c "$pkgdir"/usr/lib/pypy/bin/pypy3-c
-	install -Dm755 pypy/goal/libpypy3-c.so "$pkgdir"/usr/lib/pypy/bin/libpypy3-c.so
-
-	rsync -r --exclude='__pycache__' --exclude='*.c' --exclude '*.o' lib_pypy/ "$pkgdir"/usr/lib/pypy/lib_pypy/
-
-	rsync -r --exclude='__pycache__' --exclude='test' --exclude='tests' lib-python/ "$pkgdir"/usr/lib/pypy/lib-python/
-
-	rsync -r --include='*.h' -f 'hide,! */' include/ "$pkgdir"/usr/lib/pypy/include/
-
 	# Install symlinks
-	mkdir -p "$pkgdir"/usr/bin "$pkgdir"/usr/lib
-	ln -s ../lib/pypy/bin/pypy3-c "$pkgdir"/usr/bin/pypy3
-	ln -s pypy/bin/libpypy3-c.so "$pkgdir"/usr/lib/libpypy3-c.so
+	mkdir -p "$pkgdir"/usr/bin "$pkgdir"/usr/lib/pypy3.9 "$pkgdir"/usr/include
+	ln -sfv pypy3.9-c "$pkgdir"/usr/bin/pypy3
+	ln -sfv ../lib/pypy3.9/bin/pypy3.9-c "$pkgdir"/usr/bin/pypy3.9-c
+
+	# install stdlib
+	# this puts everything just like python itself does
+	cp -a lib-python/3/. lib_pypy/. "$pkgdir"/usr/lib/pypy3.9/
+
+	# install includes
+	cp -a include/pypy3.9 "$pkgdir"/usr/include/
+
+	install -Dm755 ./pypy3.9-c -t "$pkgdir"/usr/lib/pypy3.9/bin/
+	install -Dm755 ./libpypy3.9-c.so -t "$pkgdir"/usr/lib/
+
+	# allow fail for 2to3 module
+	./pypy3.9-c -m compileall -fq "$pkgdir"/usr/lib || true
+}
+
+dev() {
+	default_dev
+
+	# pyconfig.h is needed at runtime
+	mkdir -p "$pkgdir"/usr/include/pypy3.9
+	mv "$subpkgdir"/usr/include/pypy3.9/pyconfig.h \
+		"$pkgdir"/usr/include/pypy3.9/
+}
+
+tests() {
+	pkgdesc="$pkgdesc (test module)"
+
+	amove \
+		usr/lib/pypy3.9/test \
+		usr/lib/pypy3.9/*/test \
+		usr/lib/pypy3.9/*/tests
+}
+
+pyc() {
+	pkgdesc="Precompiled Python bytecode for ${subpkgname%-pyc}"
+	install_if="${subpkgname%-pyc}=$pkgver-r$pkgrel pyc"
+
+	cd "$pkgdir"
+	local IFS='
+'
+	# shellcheck disable=2046
+	amove $(find usr/lib/pypy3.9 -type d -name __pycache__)
+}
+
+tkinter() {
+	pkgdesc="$pkgdesc (tkinter module)"
+
+	amove usr/lib/pypy3.9/_tkinter \
+		usr/lib/pypy3.9/tkinter
 }
 
 sha512sums="
-2d1f1c0eda08344332fb983a1cd4e76391eb95197519d151d28ff7e6d3a337bc584908eed523a2f26aee0f62e61650353fada1a0d96d57dd197b2f349e033609  pypy3.8-v7.3.9-src.tar.bz2
+33c978ffbeeb39453028d1d1646ccfdace062ce48a5d939245bea41643038dd3687e80e34f88fa0622bcb175d7dd78f75cbe36b24229c8052f09d2d17dcdfd8c  pypy3.9-v7.3.11-src.tar.bz2
 42abc8c67c249ff012010aec568579cd738ed2d74ffdf93755c9427117e85cd859390266c7431fcb4d2fcfd82b61d5ba0c58bd0ceda44e5d12bf22df5935bb24  0001-time.patch
 b648204914072e74367b94065d65b423324bcbabc0e2199ad195ab9822ccc6c51ec552c8c17ed22c26caf73b04d16d6f4c3e14a8d1af0e378d76d6c3b587b784  0002-extern-stdio.patch
 "
