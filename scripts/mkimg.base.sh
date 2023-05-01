@@ -320,7 +320,10 @@ profile_base() {
 	modloop_sign=yes
 	grub_mod="all_video disk part_gpt part_msdos linux normal configfile search search_label efi_gop fat iso9660 cat echo ls test true help gzio"
 	case "$ARCH" in
-	x86*) grub_mod="$grub_mod multiboot2 efi_uga";;
+		x86*) grub_mod="$grub_mod multiboot2 efi_uga";;
+	esac
+	case "$ARCH" in
+		x86_64) initfs_features="$initfs_features nfit";;
 	esac
 	apks="alpine-base busybox chrony dhcpcd doas e2fsprogs
 		kbd-bkeymaps network-extras openntpd openssl openssh
