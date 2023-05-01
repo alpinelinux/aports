@@ -81,10 +81,10 @@ profile_virt() {
 	arch="aarch64 armv7 x86 x86_64"
 	kernel_addons=
 	kernel_flavors="virt"
-	local serial_console="ttyS0,115200"
 	case "$ARCH" in
-		arm*|aarch64) serial_console="ttyAMA0";;
+		arm*|aarch64)
+			kernel_cmdline="console=tty0 console=ttyAMA0"
+			;;
 	esac
-	kernel_cmdline="console=tty0 console=$serial_console"
 	syslinux_serial="0 115200"
 }
