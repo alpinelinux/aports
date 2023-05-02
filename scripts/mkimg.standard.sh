@@ -24,6 +24,7 @@ profile_standard() {
 		kernel_addons=
 		;;
 	esac
+	apks="$apks iw wpa_supplicant"
 }
 
 profile_extended() {
