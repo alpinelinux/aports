@@ -48,7 +48,7 @@ profile_extended() {
 		ca-certificates conntrack-tools cutter cyrus-sasl dhcp
 		dhcpcd dhcrelay dnsmasq fping fprobe htop
 		igmpproxy ip6tables iproute2 iproute2-qos
-		iptables iputils irssi iw kea ldns-tools links
+		iptables iputils iw kea ldns-tools links
 		ncurses-terminfo net-snmp net-snmp-tools nrpe nsd
 		opennhrp openvpn pingu ppp quagga
 		quagga-nhrp rng-tools sntpc socat ssmtp strongswan
