@@ -1,7 +1,7 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=3.4.0
+pkgver=3.4.1
 pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
@@ -16,7 +16,7 @@ install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
 _nbver=6.4
 source="crontab
 	color_prompt.sh.disabled
-	locale.sh
+	20locale.sh
 
 	aliases.conf
 	blacklist.conf
@@ -139,7 +139,7 @@ package() {
 	install -m600 "$srcdir"/crontab "$pkgdir"/etc/crontabs/root
 	install -m644 \
 		"$srcdir"/color_prompt.sh.disabled \
-		"$srcdir"/locale.sh \
+		"$srcdir"/20locale.sh \
 		"$pkgdir"/etc/profile.d/
 	install -m644 \
 		"$srcdir"/aliases.conf \
@@ -260,7 +260,7 @@ package() {
 sha512sums="
 6e169c0975a1ad1ad871a863e8ee83f053de9ad0b58d94952efa4c28a8c221445d9e9732ad8b52832a50919c2f39aa965a929b3d5b3f9e62f169e2b2e0813d82  crontab
 558071efdce2fe92afe4277006235b1a6368b070337c7567e5632a1a3fe531f87ca692eb36f3dda498d4d29d1f834fc8f7139f2985669ae3400b6d103d6f4c5e  color_prompt.sh.disabled
-b2fc9b72846a43a45ba9a8749e581cef34d1915836833b51b7919dfbf4e275b7d55fec4dea7b23df3796380910971a41331e53e8cf0d304834e3da02cc135e5a  locale.sh
+03361d912cf29c127608697ee14bfa5972f82a5c475e653378ca5f7670cbd8183efc7c8c339ff046ff6537944fe00c4a732bb6b552aecaecd1214ed3e11bdf90  20locale.sh
 bfe947bdd69e7d93b32c8cb4e2cabe5717cb6c1e1f49a74015ac2cfb13e96d1f12c4be23ae93a1d61aaa3760d33a032fa9bd99f227fb21223a76b5f5908acc65  aliases.conf
 0a1e1afa580751e80bf26057b65fadffe269c0552e7a1903de498f94973ba3da8453b51f25e649968ca5f4841266f5ccf951700fa28465a8614b83d07344de60  blacklist.conf
 49109d434b577563849c43dd8141961ca798dada74d4d3f49003dac1911f522c43438b8241fa254e4faacdd90058f4d39a7d69b1f493f6d57422c1f706547c95  i386.conf
