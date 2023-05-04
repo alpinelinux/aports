@@ -1,0 +1,193 @@
+From 07b2d764f685c8fab5f0fa2d17df087c51dbcaa9 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Thu, 4 May 2023 11:32:22 +0200
+Subject: [PATCH 2/9] Auto configure network interfaces for nocloud
+
+Let nocloud create a /etc/network/interfaces.
+
+fixes https://gitlab.alpinelinux.org/alpine/cloud/tiny-cloud/-/issues/37
+---
+ lib/tiny-cloud/cloud/nocloud/init | 81 +++++++++++++++++++++++++++++++
+ tests/nocloud-init.test           | 63 ++++++++++++++++++++++++
+ tests/test_env.sh                 | 10 ++++
+ 3 files changed, 154 insertions(+)
+ create mode 100644 lib/tiny-cloud/cloud/nocloud/init
+ create mode 100755 tests/nocloud-init.test
+
+diff --git a/lib/tiny-cloud/cloud/nocloud/init b/lib/tiny-cloud/cloud/nocloud/init
+new file mode 100644
+index 0000000..56114e0
+--- /dev/null
++++ b/lib/tiny-cloud/cloud/nocloud/init
+@@ -0,0 +1,81 @@
++# Tiny Cloud - Init Functions
++# vim:set ts=4 et ft=sh:
++
++# collect ethernet interfaces, sorted by index
++ethernets() {
++    for i in $ROOT/sys/class/net/*; do
++        local iface="${i##*/}"
++        case "$iface" in
++            eth*) echo "$(cat $i/ifindex) $iface";;
++        esac
++    done | sort -n | awk '{print $2}'
++}
++
++# find the interface that is has operstate up
++find_first_interface_up() {
++    local n=0
++    if [ $# -eq 0 ]; then
++        return
++    fi
++    while [ $n -le ${TINY_CLOUD_LINK_WAIT_MAX:-10} ]; do
++        for i in "$@"; do
++            if [ "$(cat "$ROOT"/sys/class/net/$i/operstate)" = "up" ]; then
++                echo "$i"
++                return
++            fi
++        done
++        sleep 0.1
++        n=$((n+1))
++    done
++}
++
++# auto detect which network interface to auto configure
++# check which is connected or fallback to first
++# This will set link to down to all eth* except the found
++auto_detect_ethernet_interface() {
++    local ifaces="$(ethernets)"
++    if [ -z "$ifaces" ]; then
++        return
++    fi
++
++    # find first connected interface
++    for i in $ifaces; do
++        $MOCK ip link set dev $i up >/dev/null
++    done
++    local iface="$(find_first_interface_up $ifaces)"
++
++    # use first if all are disconnected
++    if [ -z "$iface" ]; then
++        set -- $ifaces
++        iface="$1"
++    fi
++
++    # we will use the found interface later so lets keep it up
++    for i in $ifaces; do
++        if [ "$i" != "$iface" ]; then
++            $MOCK ip link set dev $i down >/dev/null
++        fi
++    done
++    echo "$iface"
++}
++
++set_network_config_auto() {
++    mkdir -p "$ROOT"/etc/network
++    printf "%s\n%s\n\n" \
++        "auto lo" \
++        "iface lo inet loopback" \
++        > "$ROOT"/etc/network/interfaces
++
++    local iface="$(auto_detect_ethernet_interface)"
++    if [ -z "$iface" ]; then
++        return
++    fi
++    printf "%s\n%s\n\t%s\n\n" \
++        "auto $iface" \
++        "iface $iface" \
++        "use dhcp"  >> "$ROOT"/etc/network/interfaces
++}
++
++init__set_network_config() {
++    set_network_config_auto
++}
+diff --git a/tests/nocloud-init.test b/tests/nocloud-init.test
+new file mode 100755
+index 0000000..a753ad1
+--- /dev/null
++++ b/tests/nocloud-init.test
+@@ -0,0 +1,63 @@
++#!/usr/bin/env atf-sh
++
++. $(atf_get_srcdir)/test_env.sh
++
++export PREFIX="$srcdir"
++export MOCK=echo
++lib="$srcdir"/lib/tiny-cloud/cloud/nocloud/init
++
++init_tests \
++	ethernets \
++	find_first_interface_up \
++	auto_detect_ethernet_interface \
++	set_network_config_auto
++
++ethernets_body() {
++	fake_interfaces lo br0 eth0 eth2 eth11
++
++	# check that they are sorted by ifindex, not name
++	# and that br0 and lo are excluded
++	atf_check \
++		-o match:"eth0 eth2 eth11" \
++		-o not-match:"br0" \
++		-o not-match:"lo" \
++		sh -c ". $lib; ethernets | tr '\n' ' '"
++}
++
++find_first_interface_up_body() {
++	fake_interfaces eth0 eth1
++	echo up > sys/class/net/eth1/operstate
++
++	atf_check \
++		-o match:"eth1" \
++		sh -c ". $lib; find_first_interface_up eth0 eth1"
++}
++
++auto_detect_ethernet_interface_body() {
++	fake_interfaces eth0 eth1
++	echo up > sys/class/net/eth1/operstate
++
++	atf_check \
++		-o match:"^eth1$" \
++		sh -c ". $lib; auto_detect_ethernet_interface"
++
++	# test that we pick first if all are down
++	echo down > sys/class/net/eth1/operstate
++	atf_check \
++		-o match:"^eth0$" \
++		sh -c ". $lib; TINY_CLOUD_LINK_WAIT_MAX=1; auto_detect_ethernet_interface"
++}
++
++set_network_config_auto_body() {
++	fake_interfaces eth0 eth1
++	echo up > sys/class/net/eth1/operstate
++
++	atf_check \
++		sh -c ". $lib; set_network_config_auto"
++	atf_check \
++		-o match:"auto lo" \
++		-o match:"iface eth1" \
++		-o match:"use dhcp" \
++		cat etc/network/interfaces
++}
++
+diff --git a/tests/test_env.sh b/tests/test_env.sh
+index e958fd2..f197bb8 100644
+--- a/tests/test_env.sh
++++ b/tests/test_env.sh
+@@ -67,3 +67,13 @@ fake_metadata_nocloud() {
+ 	mkdir -p mnt
+ 	fake_umount
+ }
++
++fake_interfaces() {
++	local n=1
++	for i; do
++		mkdir -p sys/class/net/$i
++		echo $n > sys/class/net/$i/ifindex
++		echo down >sys/class/net/$i/operstate
++		n=$((n+1))
++	done
++}
+-- 
+2.40.1
+
