@@ -4,12 +4,15 @@ name="Meilisearch"
 description="A lightning-fast search engine"
 
 : ${command_user:="meilisearch"}
+: ${cfgfile:="/etc/meilisearch/config.toml"}
+: ${master_key_file:="/etc/meilisearch/master_key"}
 : ${datadir:="/var/lib/meilisearch"}
 : ${start_wait:=50}  # milliseconds
 : ${healthcheck_timer:=30}
 : ${respawn_delay:=5}
 
 command="/usr/bin/meilisearch"
+command_args="--config-file-path $cfgfile $command_args"
 command_background="yes"
 directory="$datadir"
 pidfile="/run/$RC_SVCNAME.pid"
@@ -25,38 +28,44 @@ depend() {
 }
 
 start_pre() {
-	# For backward compatibility with Meilisearch <1.0.
-	if yesno "${MEILI_SCHEDULE_SNAPSHOT-}" && [ "{MEILI_SNAPSHOT_INTERVAL_SEC-}" ]; then
-		ewarn "Variable MEILI_SNAPSHOT_INTERVAL_SEC has been replaced by MEILI_SCHEDULE_SNAPSHOT"
-		export MEILI_SCHEDULE_SNAPSHOT="$MEILI_SNAPSHOT_INTERVAL_SEC"
+	# This variable is not supported in Meilisearch >1.0, so we can use it
+	# to detect old config.
+	if [ "${MEILI_MAX_INDEX_SIZE-}" ]; then
+		eerror "You are using an outdated configuration; remove environment variables from"
+		eerror "/etc/conf.d/meilisearch and use $cfgfile instead."
+		return 1
 	fi
 
-	# Replace MEILI_MASTER_KEY placeholder with a random string.
-	if [ "${MEILI_ENV:-}" = 'production' ] && [ "${MEILI_MASTER_KEY:-}" = 'change-me' ]; then
-		local conf
-		for conf in "/etc/conf.d/${RC_SVCNAME%%.*}" "/etc/conf.d/$RC_SVCNAME" ""; do
-			[ -w "$conf" ] && break
-		done
-		if [ "$conf" ]; then
-			einfo "Replacing MEILI_MASTER_KEY in $conf with a random string..."
-			local pass=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
-			sed -Ei 's/^(MEILI_MASTER_KEY)="change-me"/\1="'"$pass"'"/' "$conf"
-
-		else  # no writable config found
-			ewarn "Change MEILI_MASTER_KEY in /etc/conf.d/ to a random alphanumeric string!"
+	if [ -z "${MEILI_MASTER_KEY-}" ] && ! config_get 'master_key' >/dev/null; then
+		if ! [ -f "$master_key_file" ]; then
+			einfo "Generating random master_key in $master_key_file"
+			{ head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32; echo ''; } \
+				| install -D -m 640 -g meilisearch /dev/stdin "$master_key_file"
 		fi
+
+		export MEILI_MASTER_KEY="$(cat "$master_key_file")"
 	fi
-	if [ "${logfile:-}" ]; then
+
+	if [ "${logfile-}" ]; then
 		error_log="$logfile"
 		checkpath -f -m 640 -o "$command_user" "$logfile" || return 1
+	else
+		command_args="$command_args --syslog"
 	fi
 
 	return 0
 }
 
 healthcheck() {
-	[ "${MEILI_HTTP_ADDR:-}" ] || return 0
-	[ -x /usr/bin/curl ] || return 0
+	local http_addr
 
-	/usr/bin/curl -fq "$MEILI_HTTP_ADDR"/health
+	[ -x /usr/bin/curl ] || return 0
+	http_addr="$(config_get 'http_addr')" || return 0
+
+	/usr/bin/curl -fq "$http_addr/health"
+}
+
+config_get() {
+	local key="$1"
+	sed -En 's/^'"$key"'\s*=\s*("([^"]+)"|([^ #]+)).*/\2\3/p' "$cfgfile" | grep -m1 .
 }
