@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+: ${GARAGE_CONFIG_FILE:="/etc/garage.toml"}
+
+case "${1-}" in -h | --help)
+	cat <<-EOF
+		Usage: $0
+
+		Migrate Garage metadata database from Sled to LMDB.
+	EOF
+esac
+
+if [ "$(id -u)" -ne 0 ]; then
+	echo 'ERROR: Must be run as root!' >&2
+	exit 1
+fi
+
+if pgrep /usr/bin/garage >/dev/null; then
+	echo 'ERROR: Garage is running; you must stop it before running this command!' >&2
+	exit 1
+fi
+
+metadata_dir=$(sed -En 's/^metadata_dir\s*=\s*"([^"]+)".*/\1/p' "$GARAGE_CONFIG_FILE")
+: ${metadata_dir:-"/var/lib/garage/meta"}
+
+if ! [ -d "$metadata_dir" ]; then
+	echo "ERROR: metadata_dir '$metadata_dir' does not exist!" >&2
+	exit 1
+fi
+
+uninstall=false
+if ! command -v garage-convert-db >/dev/null; then
+	apk add cmd:garage-convert-db
+	uninstall=true
+fi
+
+if command -v rc-service >/dev/null; then
+	echo 'Stopping garage...'
+	rc-service garage --ifstarted stop
+fi
+
+echo "Converting metadata database in $metadata_dir to LMDB" >&2
+su garage -s /bin/sh -c "garage-convert-db -a sled -i '$metadata_dir/db' -b lmdb -o '$metadata_dir/db.lmdb'"
+
+if $uninstall; then
+	apk del cmd:garage-convert-db
+fi
+
+echo "Changing db_engine to 'lmdb' in $GARAGE_CONFIG_FILE" >&2
+if grep -q '^[# ]*db_engine\s*=' "$GARAGE_CONFIG_FILE"; then
+	sed -Ei 's/^[# ]*(db_engine\s*=\s*).*/\1"lmdb"/' "$GARAGE_CONFIG_FILE"
+else
+	printf '\n\n%s\n' 'db_engine = "lmdb"' >> "$GARAGE_CONFIG_FILE"
+fi
+sed -i "/^# NOTE: Run 'garage-migrate-to-lmdb' to migrate from sled to lmdb./d" "$GARAGE_CONFIG_FILE"
+
+echo 'Finished, now you can start Garage.' >&2
