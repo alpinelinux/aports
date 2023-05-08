@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.18.0_rc4
-pkgrel=0
+pkgrel=1
 pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
@@ -13,9 +13,9 @@ depends="
 	alpine-release
 	apk-tools
 	busybox
+	busybox-mdev-openrc
 	busybox-openrc
 	busybox-suid
-	dev-openrc
 	libc-utils
 	openrc
 	"
