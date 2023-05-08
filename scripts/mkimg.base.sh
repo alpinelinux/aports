@@ -327,7 +327,7 @@ profile_base() {
 	esac
 	apks="alpine-base busybox chrony dhcpcd doas e2fsprogs
 		kbd-bkeymaps network-extras openntpd openssl openssh
-		tzdata wget tiny-cloud-nocloud"
+		tzdata wget tiny-cloud-alpine"
 	apkovl=
 	hostname="alpine"
 }
