@@ -1,0 +1,211 @@
+From e79366cf29e95f812d1b8880d05e927a1d501fe0 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Thu, 4 May 2023 13:12:35 +0200
+Subject: [PATCH 2/5] alpine: add meta-data network-interfaces and resolv_conf
+
+Allow user to set a network-interfaces file in meta-data and set up dns
+servers via resolv_conf.
+
+This is for compatibility with cloud-init, and is a simple way to let
+user configure static ip or advanced network
+
+ref: https://cloudinit.readthedocs.io/en/latest/reference/datasources/nocloud.html#example-meta-data
+ref: https://cloudinit.readthedocs.io/en/latest/reference/modules.html#resolv-conf
+---
+ Makefile                         |  7 +++-
+ lib/tiny-cloud/cloud/alpine/imds |  1 +
+ lib/tiny-cloud/cloud/alpine/init | 26 +++++++++++++
+ lib/tiny-cloud/common            | 25 ++++++++++++
+ tests/tiny-cloud-alpine.test     | 67 ++++++++++++++++++++++++++++++++
+ tests/tiny-cloud.test            |  2 +-
+ 6 files changed, 126 insertions(+), 2 deletions(-)
+ create mode 120000 lib/tiny-cloud/cloud/alpine/imds
+ create mode 100644 lib/tiny-cloud/cloud/alpine/init
+ create mode 100755 tests/tiny-cloud-alpine.test
+
+diff --git a/Makefile b/Makefile
+index 79f75aa..b0aaef2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,6 +1,6 @@
+ PREFIX?=/
+ 
+-SUBPACKAGES = core network openrc aws azure gcp oci nocloud
++SUBPACKAGES = core network openrc aws azure gcp oci nocloud alpine
+ 
+ .PHONY: check install $(SUBPACKAGES)
+ 
+@@ -56,6 +56,11 @@ nocloud:
+ 	install -Dm644 -t $(PREFIX)/lib/tiny-cloud/cloud/nocloud \
+ 		lib/tiny-cloud/cloud/nocloud/*
+ 
++alpine:
++	install -Dm644 -t $(PREFIX)/lib/tiny-cloud/cloud/alpine \
++		lib/tiny-cloud/cloud/alpine/init
++	ln -s ../nocloud/imds $(PREFIX)/lib/tiny-cloud/cloud/alpine/imds
++
+ check: tests/Kyuafile Kyuafile
+ 	kyua test || (kyua report --verbose && exit 1)
+ 
+diff --git a/lib/tiny-cloud/cloud/alpine/imds b/lib/tiny-cloud/cloud/alpine/imds
+new file mode 120000
+index 0000000..104b5ca
+--- /dev/null
++++ b/lib/tiny-cloud/cloud/alpine/imds
+@@ -0,0 +1 @@
++../nocloud/imds
+\ No newline at end of file
+diff --git a/lib/tiny-cloud/cloud/alpine/init b/lib/tiny-cloud/cloud/alpine/init
+new file mode 100644
+index 0000000..75441b8
+--- /dev/null
++++ b/lib/tiny-cloud/cloud/alpine/init
+@@ -0,0 +1,26 @@
++# Tiny Cloud - Init Functions
++# vim:set ts=4 et ft=sh:
++
++INIT_ACTIONS_EARLY="$(replace_word set_default_interfaces set_network_interfaces $INIT_ACTIONS_EARLY)"
++
++set_resolv_conf() {
++    # resolv.conf
++    local nameservers="$(imds meta-data/resolv_conf/nameservers)"
++    for i in $nameservers; do
++        local server="$(imds meta-data/resolv_conf/nameservers/$i)"
++        add_once "$ROOT"/etc/resolv.conf "nameserver $server"
++    done
++}
++
++init__set_network_interfaces() {
++    local interfaces="$(imds meta-data/network-interfaces)"
++    mkdir -p "$ROOT"/etc/network
++    if [ -n "$interfaces" ]; then
++        printf "%s\n" "$interfaces" > "$ROOT"/etc/network/interfaces
++    elif ! [ -f "$ROOT"/etc/network/interfaces ]; then
++        init__set_default_interfaces
++    fi
++    if ! grep -q dhcp "$ROOT"/etc/network/interfaces; then
++        set_resolv_conf
++    fi
++}
+diff --git a/lib/tiny-cloud/common b/lib/tiny-cloud/common
+index b0500a7..74f3460 100644
+--- a/lib/tiny-cloud/common
++++ b/lib/tiny-cloud/common
+@@ -29,3 +29,28 @@ log() {
+         crit|alert|emerg) exit 1 ;;
+     esac
+ }
++
++# usage: replace_word <search> <replace> <list>...
++replace_word() {
++    local search="$1" replace="$2"
++    shift 2
++    for word in "$@"; do
++        if [ "$word" = "$search" ]; then
++            echo "$replace"
++        else
++            echo "$word"
++        fi
++    done
++}
++
++# usage: add_once <file> <line-to-add>...
++add_once() {
++    local file="$1"
++    shift
++    for line; do
++        if ! grep -x -F "$line" "$file" 2>/dev/null; then
++            mkdir -p "${file%/*}"
++            printf "%s\n" "$line" >> "$file"
++        fi
++    done
++}
+diff --git a/tests/tiny-cloud-alpine.test b/tests/tiny-cloud-alpine.test
+new file mode 100755
+index 0000000..fca82ea
+--- /dev/null
++++ b/tests/tiny-cloud-alpine.test
+@@ -0,0 +1,67 @@
++#!/usr/bin/env atf-sh
++
++. $(atf_get_srcdir)/test_env.sh
++
++export PREFIX="$srcdir"
++export MOCK=echo
++export CLOUD=alpine
++lib="$srcdir"/lib/tiny-cloud/cloud/alpine/init
++
++init_tests \
++	set_network_config_network_interfaces \
++	set_network_config_auto \
++
++set_network_config_network_interfaces_body() {
++	fake_metadata_nocloud <<-EOF
++		network-interfaces: |
++		  auto eth1
++		  iface eth1
++		    address 192.168.100.1
++		    netmask 255.255.255.0
++
++		resolv_conf:
++		  nameservers:
++		    - 8.8.8.8
++		    - 8.8.4.4
++	EOF
++
++	atf_check \
++		-o match:"rc-update" \
++		-e match:"set_network_interfaces .*DONE" \
++		tiny-cloud early
++	atf_check \
++		-o match:"auto eth1" \
++		-o match:"iface eth1" \
++		-o match:"address 192.168.100.1" \
++		cat etc/network/interfaces
++
++	atf_check \
++		-o match:"^nameserver 8.8.8.8$" \
++		-o match:"^nameserver 8.8.4.4$" \
++		cat etc/resolv.conf
++}
++
++set_network_config_auto_body() {
++	fake_metadata_nocloud <<-EOF
++		resolv_conf:
++		  nameservers:
++		    - 8.8.8.8
++		    - 8.8.4.4
++	EOF
++	fake_interfaces eth0 eth1 eth2
++	echo up > sys/class/net/eth1/operstate
++
++	atf_check \
++		-o match:"rc-update" \
++		-e match:"set_network_interfaces .*DONE" \
++		tiny-cloud early
++	atf_check \
++		-o match:"auto eth1" \
++		-o match:"iface eth1" \
++		-o match:"use dhcp" \
++		cat etc/network/interfaces
++	# resolv.conf should be ignored with dhcp
++	if [ -e etc/resolv.conf ]; then
++		atf_fail "etc/resolv.conf should not been created with DHCP"
++	fi
++}
+diff --git a/tests/tiny-cloud.test b/tests/tiny-cloud.test
+index 46b1f53..157c97d 100755
+--- a/tests/tiny-cloud.test
++++ b/tests/tiny-cloud.test
+@@ -4,7 +4,7 @@
+ 
+ export PREFIX="$srcdir"
+ export MOCK=echo
+-PROVIDERS="aws azure gcp nocloud oci"
++PROVIDERS="alpine aws azure gcp nocloud oci"
+ 
+ init_tests \
+ 	tiny_cloud_help \
+-- 
+2.40.1
+
