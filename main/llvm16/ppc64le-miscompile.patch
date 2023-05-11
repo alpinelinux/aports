@@ -1,0 +1,81 @@
+Patch-Source: https://github.com/llvm/llvm-project/commit/398d68f624d667a17727d346a2139a951a1ebce4
+--
+From 398d68f624d667a17727d346a2139a951a1ebce4 Mon Sep 17 00:00:00 2001
+From: Fangrui Song <i@maskray.me>
+Date: Mon, 24 Apr 2023 10:02:06 -0700
+Subject: [PATCH] [PPCMIPeephole] Fix incorrect compare elimination
+
+D38236 moves a redundant compare instruction from the loop body to the
+preheader.
+
+It has a bug: when `MBB1 == &MBB2`, there may be only one compare instruction in the
+loop. The code will lift the compare instruction to the preheader, failing to
+account for the change of the compare result in a tail call, leading to a miscompile.
+
+Suppress the compare elimination to fix https://github.com/llvm/llvm-project/issues/62294
+
+Reviewed By: #powerpc, nemanjai
+
+Differential Revision: https://reviews.llvm.org/D149030
+---
+ llvm/lib/Target/PowerPC/PPCMIPeephole.cpp    |  5 ++++-
+ llvm/test/CodeGen/PowerPC/cmp_elimination.ll | 23 ++++++++++++++++++++
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/llvm/lib/Target/PowerPC/PPCMIPeephole.cpp b/llvm/lib/Target/PowerPC/PPCMIPeephole.cpp
+index b9cb0a29a9511..f1d1d2f3757f6 100644
+--- a/llvm/lib/Target/PowerPC/PPCMIPeephole.cpp
++++ b/llvm/lib/Target/PowerPC/PPCMIPeephole.cpp
+@@ -1315,7 +1315,7 @@ static bool eligibleForCompareElimination(MachineBasicBlock &MBB,
+     if (isEligibleBB(*Pred1MBB) && isEligibleForMoveCmp(*Pred2MBB)) {
+       // We assume Pred1MBB is the BB containing the compare to be merged and
+       // Pred2MBB is the BB to which we will append a compare instruction.
+-      // Hence we can proceed as is.
++      // Proceed as is if Pred1MBB is different from MBB.
+     }
+     else if (isEligibleBB(*Pred2MBB) && isEligibleForMoveCmp(*Pred1MBB)) {
+       // We need to swap Pred1MBB and Pred2MBB to canonicalize.
+@@ -1323,6 +1323,9 @@ static bool eligibleForCompareElimination(MachineBasicBlock &MBB,
+     }
+     else return false;
+ 
++    if (Pred1MBB == &MBB)
++      return false;
++
+     // Here, Pred2MBB is the BB to which we need to append a compare inst.
+     // We cannot move the compare instruction if operands are not available
+     // in Pred2MBB (i.e. defined in MBB by an instruction other than PHI).
+diff --git a/llvm/test/CodeGen/PowerPC/cmp_elimination.ll b/llvm/test/CodeGen/PowerPC/cmp_elimination.ll
+index 56af49f0c267e..871cc5df1f5fb 100644
+--- a/llvm/test/CodeGen/PowerPC/cmp_elimination.ll
++++ b/llvm/test/CodeGen/PowerPC/cmp_elimination.ll
+@@ -779,6 +779,29 @@ if.end3:
+   ret void
+ }
+ 
++;; The result of %cmp may change in a tail call. Don't lift %cmp to the entry block.
++; CHECK-LABEL: func_tailrecurse:
++; CHECK-NOT:     cmp
++; CHECK:       .LBB{{.*}}:
++; CHECK:         cmplw
++; CHECK:         blt
++define fastcc zeroext i32 @func_tailrecurse(i32 zeroext %a, i32 zeroext %b) {
++entry:
++  br label %tailrecurse
++
++tailrecurse:                                      ; preds = %tailrecurse, %entry
++  %a.tr = phi i32 [ %a, %entry ], [ %b.tr, %tailrecurse ]
++  %b.tr = phi i32 [ %b, %entry ], [ %a.tr, %tailrecurse ]
++  %cmp = icmp ult i32 %a.tr, %b.tr
++  %conv = zext i1 %cmp to i32
++  %ignore = call signext i32 (i32) @func(i32 %conv)
++  br i1 %cmp, label %tailrecurse, label %if.end
++
++if.end:                                           ; preds = %tailrecurse
++  %sub = sub nsw i32 %a.tr, %b.tr
++  ret i32 %sub
++}
++
+ declare void @dummy1()
+ declare void @dummy2()
+ declare void @dummy3()
