@@ -1,0 +1,166 @@
+From 6d3e44d2d8395076060e9c741e9b173dc5d57b76 Mon Sep 17 00:00:00 2001
+From: RincewindsHat <12514511+RincewindsHat@users.noreply.github.com>
+Date: Mon, 6 Feb 2023 11:39:44 +0100
+Subject: [PATCH 1/2] check_http: Handle chunked encoding without actual
+ content correctly
+
+---
+ plugins/check_http.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/plugins/check_http.c b/plugins/check_http.c
+index 5fa310f5d..8dda046ff 100644
+--- a/plugins/check_http.c
++++ b/plugins/check_http.c
+@@ -1462,7 +1462,13 @@ char *unchunk_content(const char *content) {
+     memcpy(result + (overall_size - size_of_chunk), start_of_chunk, size_of_chunk);
+   }
+ 
+-  result[overall_size] = '\0';
++  if (overall_size == 0 && result == NULL) {
++    // We might just have received the end chunk without previous content, so result is never allocated
++    result = calloc(1, sizeof(char));
++    // No error handling here, we can only return NULL anyway
++  } else {
++    result[overall_size] = '\0';
++  }
+   return result;
+ }
+ 
+
+From 03efbb8e4f736bf2df5d9477dd4191501fe035ea Mon Sep 17 00:00:00 2001
+From: RincewindsHat <12514511+RincewindsHat@users.noreply.github.com>
+Date: Mon, 6 Feb 2023 12:15:46 +0100
+Subject: [PATCH 2/2] check_http: Implement special case test for zero size
+ chunk only
+
+---
+ plugins/tests/check_http.t | 70 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 69 insertions(+), 1 deletion(-)
+
+diff --git a/plugins/tests/check_http.t b/plugins/tests/check_http.t
+index d766ac372..6078b2745 100755
+--- a/plugins/tests/check_http.t
++++ b/plugins/tests/check_http.t
+@@ -9,12 +9,14 @@ use strict;
+ use Test::More;
+ use NPTest;
+ use FindBin qw($Bin);
++use IO::Socket::INET;
+ 
+ $ENV{'LC_TIME'} = "C";
+ 
+ my $common_tests = 71;
+ my $virtual_port_tests = 8;
+ my $ssl_only_tests = 12;
++my $chunked_encoding_special_tests = 1;
+ # Check that all dependent modules are available
+ eval "use HTTP::Daemon 6.01;";
+ plan skip_all => 'HTTP::Daemon >= 6.01 required' if $@;
+@@ -30,7 +32,7 @@ if ($@) {
+ 	plan skip_all => "Missing required module for test: $@";
+ } else {
+ 	if (-x "./$plugin") {
+-		plan tests => $common_tests * 2 + $ssl_only_tests + $virtual_port_tests;
++		plan tests => $common_tests * 2 + $ssl_only_tests + $virtual_port_tests + $chunked_encoding_special_tests;
+ 	} else {
+ 		plan skip_all => "No $plugin compiled";
+ 	}
+@@ -51,6 +53,7 @@ my $port_http = 50000 + int(rand(1000));
+ my $port_https = $port_http + 1;
+ my $port_https_expired = $port_http + 2;
+ my $port_https_clientcert = $port_http + 3;
++my $port_hacked_http = $port_http + 4;
+ 
+ # This array keeps sockets around for implementing timeouts
+ my @persist;
+@@ -72,6 +75,28 @@ if (!$pid) {
+ }
+ push @pids, $pid;
+ 
++# Fork the hacked HTTP server
++undef $pid;
++$pid = fork;
++defined $pid or die "Failed to fork";
++if (!$pid) {
++	# this is the fork
++	undef @pids;
++	my $socket = new IO::Socket::INET (
++		LocalHost => '0.0.0.0',
++		LocalPort => $port_hacked_http,
++		Proto => 'tcp',
++		Listen => 5,
++		Reuse => 1
++	);
++	die "cannot create socket $!n" unless $socket;
++	my $local_sock = $socket->sockport();
++	print "server waiting for client connection on port $local_sock\n";
++	run_hacked_http_server ( $socket );
++	die "hacked http server stopped";
++}
++push @pids, $pid;
++
+ if (exists $servers->{https}) {
+ 	# Fork a normal HTTPS server
+ 	$pid = fork;
+@@ -207,6 +232,37 @@ sub run_server {
+ 	}
+ }
+ 
++sub run_hacked_http_server {
++	my $socket = shift;
++
++	# auto-flush on socket
++	$| = 1;
++
++
++	while(1)
++	{
++		# waiting for a new client connection
++		my $client_socket = $socket->accept();
++
++		# get information about a newly connected client
++		my $client_address = $client_socket->peerhost();
++		my $client_portn = $client_socket->peerport();
++		print "connection from $client_address:$client_portn";
++
++		# read up to 1024 characters from the connected client
++		my $data = "";
++		$client_socket->recv($data, 1024);
++		print "received data: $data";
++
++		# write response data to the connected client
++		$data = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
++		$client_socket->send($data);
++
++		# notify client that response has been sent
++		shutdown($client_socket, 1);
++	}
++}
++
+ END {
+ 	foreach my $pid (@pids) {
+ 		if ($pid) { print "Killing $pid\n"; kill "INT", $pid }
+@@ -222,6 +278,7 @@ if ($ARGV[0] && $ARGV[0] eq "-d") {
+ my $result;
+ my $command = "./$plugin -H 127.0.0.1";
+ 
++run_chunked_encoding_special_test( {command => "$command -p $port_hacked_http"});
+ run_common_tests( { command => "$command -p $port_http" } );
+ SKIP: {
+ 	skip "HTTP::Daemon::SSL not installed", $common_tests + $ssl_only_tests if ! exists $servers->{https};
+@@ -511,3 +568,14 @@ sub run_common_tests {
+ 	};
+ 	is( $@, "", $cmd );
+ }
++
++sub run_chunked_encoding_special_test {
++	my ($opts) = @_;
++	my $command = $opts->{command};
++
++	$cmd = "$command -u / -s 'ChunkedEncodingSpecialTest'";
++	eval {
++		$result = NPTest->testCmd( $cmd, 5 );
++	};
++	is( $@, "", $cmd );
++}
