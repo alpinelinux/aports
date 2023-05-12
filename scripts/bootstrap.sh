@@ -127,7 +127,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   json-c argon2 cryptsetup kmod lddtree mkinitfs \
 	   libffi \
 	   brotli libev c-ares cunit nghttp2 curl \
-	   pcre libssh2 \
+	   libssh2 \
 	   libxml2 pax-utils llvm14 community/ghc llvm15 community/rust \
 	   $KERNEL_PKG ; do
 
