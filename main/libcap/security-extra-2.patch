@@ -1,0 +1,163 @@
+Patch-Source: https://git.kernel.org/pub/scm/libs/libcap/libcap.git/commit/?id=6baf268986bc8791d069a25a0514241b5467e379
+--
+From 6baf268986bc8791d069a25a0514241b5467e379 Mon Sep 17 00:00:00 2001
+From: "Andrew G. Morgan" <morgan@kernel.org>
+Date: Sat, 6 May 2023 22:24:39 -0700
+Subject: Ignore the content of a capability.conf file if it is world-writable.
+
+Other than the case of /dev/null, there is no situation in which pam_cap.so
+should act on world writable config files.
+
+There are legitimate local administration choices for the file being owned
+by non-root users, and similarly writable by a group of trusted users. So,
+we do not require any specific ownership for the file and do not check for
+writable access based on owner of group membership.
+
+Credit for finding this bug in pam_cap.so goes to X41 D-Sec GmbH
+(https://x41-dsec.de/) who performed a security audit of the libcap
+source code in April of 2023. The audit was sponsored by the Open
+Source Technology Improvement Fund (https://ostif.org/).
+
+Audit ref: LCAP-CR-23-101
+
+Signed-off-by: Andrew G. Morgan <morgan@kernel.org>
+---
+ pam_cap/.gitignore     |  1 +
+ pam_cap/Makefile       |  9 ++++++---
+ pam_cap/pam_cap.c      | 26 +++++++++++++++++++++++++-
+ pam_cap/test_pam_cap.c | 13 ++++++++++++-
+ 4 files changed, 44 insertions(+), 5 deletions(-)
+
+diff --git a/pam_cap/.gitignore b/pam_cap/.gitignore
+index 87f4186..dac617b 100644
+--- a/pam_cap/.gitignore
++++ b/pam_cap/.gitignore
+@@ -4,3 +4,4 @@ test_pam_cap
+ lazylink.so
+ pam_cap_linkopts
+ LIBCAP
++incapable.conf
+diff --git a/pam_cap/Makefile b/pam_cap/Makefile
+index d852101..258e519 100644
+--- a/pam_cap/Makefile
++++ b/pam_cap/Makefile
+@@ -70,13 +70,16 @@ test_pam_cap: test_pam_cap.c pam_cap.c ../libcap/libcap.a
+ testlink: test.o pam_cap.o
+ 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $+ -lpam -ldl $(LIBCAPLIB)
+ 
+-test: testlink test_pam_cap pam_cap.so
++incapable.conf:
++	echo "^cap_setuid  alpha" > $@ && chmod o+w $@
++
++test: testlink test_pam_cap pam_cap.so incapable.conf
+ 	./test_pam_cap
+ 	LD_LIBRARY_PATH=../libcap ./pam_cap.so
+ 	LD_LIBRARY_PATH=../libcap ./pam_cap.so --help
+ 	@echo "module can be run as an executable!"
+ 
+-sudotest: test_pam_cap
++sudotest: test_pam_cap incapable.conf
+ 	$(SUDO) ./test_pam_cap root 0x0 0x0 0x0 config=./capability.conf
+ 	$(SUDO) ./test_pam_cap root 0x0 0x0 0x0 config=./sudotest.conf
+ 	$(SUDO) ./test_pam_cap alpha 0x0 0x0 0x0 config=./capability.conf
+@@ -87,4 +90,4 @@ sudotest: test_pam_cap
+ 
+ clean:
+ 	rm -f *.o *.so testlink lazylink.so test_pam_cap pam_cap_linkopts *~
+-	rm -f LIBCAP
++	rm -f LIBCAP incapable.conf
+diff --git a/pam_cap/pam_cap.c b/pam_cap/pam_cap.c
+index 91278dc..b9419cb 100644
+--- a/pam_cap/pam_cap.c
++++ b/pam_cap/pam_cap.c
+@@ -12,6 +12,7 @@
+ #endif
+ 
+ #include <errno.h>
++#include <fcntl.h>
+ #include <grp.h>
+ #include <limits.h>
+ #include <pwd.h>
+@@ -22,6 +23,7 @@
+ #include <syslog.h>
+ #include <sys/capability.h>
+ #include <sys/prctl.h>
++#include <sys/stat.h>
+ #include <sys/types.h>
+ #include <linux/limits.h>
+ 
+@@ -106,6 +108,27 @@ static char *read_capabilities_for_user(const char *user, const char *source)
+ 	D(("failed to open capability file"));
+ 	goto defer;
+     }
++    /*
++     * In all cases other than "/dev/null", the config file should not
++     * be world writable. We do not check for ownership limitations or
++     * group write restrictions as these represent legitimate local
++     * administration choices. Especially in a system operating in
++     * CAP_MODE_PURE1E.
++     */
++    if (strcmp(source, "/dev/null") != 0) {
++	struct stat sb;
++	D(("validate filehandle [for opened %s] does not point to a world"
++	   " writable file", source));
++	if (fstat(fileno(cap_file), &sb) != 0) {
++	    D(("unable to fstat config file: %d", errno));
++	    goto close_out_file;
++	}
++	if ((sb.st_mode & S_IWOTH) != 0) {
++	    D(("open failed [%s] is world writable test: security hole",
++	       source));
++	    goto close_out_file;
++	}
++    }
+ 
+     int found_one = 0;
+     while (!found_one &&
+@@ -167,6 +190,7 @@ static char *read_capabilities_for_user(const char *user, const char *source)
+ 	line = NULL;
+     }
+ 
++close_out_file:
+     fclose(cap_file);
+ 
+ defer:
+@@ -395,7 +419,7 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags,
+     }
+ 
+     if (retval != PAM_SUCCESS) {
+-	D(("pam_get_user failed: %s", pam_strerror(pamh, retval)));
++	D(("pam_get_user failed: pam error=%d", retval));
+ 	memset(&pcs, 0, sizeof(pcs));
+ 	return PAM_AUTH_ERR;
+     }
+diff --git a/pam_cap/test_pam_cap.c b/pam_cap/test_pam_cap.c
+index 886888e..4bcf236 100644
+--- a/pam_cap/test_pam_cap.c
++++ b/pam_cap/test_pam_cap.c
+@@ -237,10 +237,21 @@ int main(int argc, char *argv[]) {
+ 	printf("failed to parse arguments\n");
+ 	exit(1);
+     }
+-    if (read_capabilities_for_user("morgan", "/dev/null") != NULL) {
++    if (read_capabilities_for_user("alpha", "/dev/null") != NULL) {
+ 	printf("/dev/null should return no capabilities\n");
+ 	exit(1);
+     }
++    if (read_capabilities_for_user("unknown", "capability.conf") != NULL) {
++	printf("capability.conf should return no capabilities for unknown\n");
++	exit(1);
++    }
++    char *iab_text = read_capabilities_for_user("alpha", "./incapable.conf");
++    if (iab_text != NULL) {
++	printf("./incapable.conf should grant no capabilities: got=%s\n",
++	       iab_text);
++	free(iab_text);
++	exit(1);
++    }
+ 
+     /*
+      * Start out with a cleared inheritable set.
+-- 
+cgit 
+
