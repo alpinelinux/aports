@@ -1,7 +1,7 @@
 # Contributor: William Walker <w_walker@icloud.com>
 # Maintainer: William Walker <w_walker@icloud.com>
 pkgname=zarf
-pkgver=0.26.2
+pkgver=0.26.4
 pkgrel=0
 pkgdesc="DevSecOps for Air Gap & Limited-Connection Systems"
 url="https://zarf.dev/"
@@ -36,5 +36,5 @@ package() {
 }
 
 sha512sums="
-6aefc398bc0f864b8371905b06627962c487b6a004501bf0e5cc1210167a765171216d175a4dbec830bda82f498cb7b1a4bda53a5047da150670d5eb9e09fcf5  zarf-v0.26.2.tar.gz
+e6686870853f23cff712b5d7246a61ce46196e515bd8d2e3d94d1aa04b37af05fd005e71c6b24fb8f353c3c990032ad5de935ef1a1b3cec4ad52896aea03e16b  zarf-v0.26.4.tar.gz
 "
