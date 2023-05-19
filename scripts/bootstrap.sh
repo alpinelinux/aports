@@ -114,11 +114,10 @@ if [ "$TARGET_ARCH" = "riscv64" ]; then
 	NEEDS_LIBATOMIC="yes"
 fi
 
-# ordered cross-build
 for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   openssl ca-certificates libmd \
-	   gmp mpfr4 mpc1 isl25 libucontext zstd binutils gcc \
-	   libbsd libretls busybox make \
+	   gmp mpfr4 mpc1 isl26 libucontext zstd binutils gcc \
+	   libbsd busybox make \
 	   apk-tools file \
 	   libcap openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
 	   attr acl fakeroot tar \
@@ -128,7 +127,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   libffi \
 	   brotli libev c-ares cunit nghttp2 curl \
 	   libssh2 \
-	   libxml2 pax-utils llvm14 community/ghc llvm15 community/rust \
+	   libxml2 pax-utils llvm14 community/ghc llvm16 community/rust \
 	   $KERNEL_PKG ; do
 
 	if [ "$NEEDS_LIBATOMIC" = "yes" ]; then
