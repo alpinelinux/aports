@@ -30,7 +30,6 @@ tree=$(req underhood/mqtt_websockets/git/commits/"${websockets_commit}" | jq -r 
 websockets_submodules="$(req underhood/mqtt_websockets/git/trees/"${tree}"\?recursive=true | jq '.tree[] | select(.type == "commit")')"
 
 printf "_aclk_schemas_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit aclk/aclk-schemas)"
-printf "_ml_json_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit ml/json)"
 printf "_ml_dlib_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit ml/dlib)"
 printf "_mqtt_websockets_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit mqtt_websockets)"
 printf "_c_rbuf_commit=%s\n" "$(echo "$websockets_submodules" | submodule_commit c-rbuf)"
