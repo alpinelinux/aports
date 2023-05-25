@@ -1,0 +1,192 @@
+git diff v0.2.1..bf64dbfabfc49a574eb361f34b2401f880b5a324 src/
+--
+commit bf64dbfabfc49a574eb361f34b2401f880b5a324
+Merge: a98a4b8 30a38c5
+Author: Y.Horie <u5.horie@gmail.com>
+Date:   Mon Apr 17 22:46:33 2023 +0900
+
+    Merge pull request #270 from u5surf/issue-269
+
+    Fix vtsn.len type #269
+
+commit 30a38c5ad5c18dd14137d78f0593c5f74c0e39c7
+Author: u5surf <u5.horie@gmail.com>
+Date:   Sun Apr 16 17:06:06 2023 +0900
+
+    Fix vtsn.len type #269
+
+commit 4b4dd60bb6eefdb932b80813bfe0a435009555af
+Author: u5surf <u5.horie@gmail.com>
+Date:   Sun Mar 26 07:47:15 2023 +0900
+
+    Fix conditions of the pointer pa
+
+commit a2961efa253ae2471a27c6c429278594cbcb701e
+Author: u5surf <u5.horie@gmail.com>
+Date:   Sun Mar 19 00:33:22 2023 +0900
+
+    Fix ngx_utf8_decode
+
+    * it is necessary while the below patch is released officially.
+    * https://github.com/nginx/nginx/commit/2c5fccd4693c0a68e1c72d65e016ba83e861120e
+
+commit fcc3c1575e102fa1c52a982d46abe14a10dc2097
+Author: u5surf <u5.horie@gmail.com>
+Date:   Mon Feb 20 08:45:12 2023 +0900
+
+    Fix escaping filter_key in prometheus output
+
+    * Fixes #142
+    * it can be escaped the 2 - 4 bytes character
+
+commit 4bbac923842c5e12a89168e208d77f0da6b91f9b
+Author: u5surf <u5.horie@gmail.com>
+Date:   Tue Oct 18 17:38:59 2022 +0900
+
+    Bugfix: fixed issues/228 Change the reffered source of upstream_states in shm_add_upstream()
+
+commit 1277c0121bc19603cf7554d6316fa3303feba6f3
+Author: YoungJoo.Kim <vozltx@gmail.com>
+Date:   Mon Sep 26 23:35:38 2022 +0900
+
+    Bugfix: fixed issues/248 Shared memory (lock|unlock) is set when using the ngx_http_vhost_traffic_status_display_get_size() function
+
+commit 319fe4c84390c4628e558bb248ea7ffc540d4b7e
+Author: u5surf <u5.horie@gmail.com>
+Date:   Mon Sep 26 21:03:16 2022 +0900
+
+    bugfix: Add shmtx unlock
+--
+diff --git a/src/ngx_http_vhost_traffic_status_display.c b/src/ngx_http_vhost_traffic_status_display.c
+index 17b35fc..4f4c01f 100644
+--- a/src/ngx_http_vhost_traffic_status_display.c
++++ b/src/ngx_http_vhost_traffic_status_display.c
+@@ -524,15 +524,25 @@ ngx_http_vhost_traffic_status_display_get_size(ngx_http_request_t *r,
+     ngx_int_t format)
+ {
+     ngx_uint_t                                 size, un;
++    ngx_slab_pool_t                           *shpool;
++    ngx_http_vhost_traffic_status_loc_conf_t  *vtscf;
+     ngx_http_vhost_traffic_status_shm_info_t  *shm_info;
+ 
++    vtscf = ngx_http_get_module_loc_conf(r, ngx_http_vhost_traffic_status_module);
++    shpool = (ngx_slab_pool_t *) vtscf->shm_zone->shm.addr;
++
+     shm_info = ngx_pcalloc(r->pool, sizeof(ngx_http_vhost_traffic_status_shm_info_t));
+     if (shm_info == NULL) {
+         return NGX_ERROR;
+     }
+ 
++    /* Caveat: Do not use duplicate ngx_shmtx_lock() before this function. */
++    ngx_shmtx_lock(&shpool->mutex);
++
+     ngx_http_vhost_traffic_status_shm_info(r, shm_info);
+ 
++    ngx_shmtx_unlock(&shpool->mutex);
++
+     /* allocate memory for the upstream groups even if upstream node not exists */
+     un = shm_info->used_node
+          + (ngx_uint_t) ngx_http_vhost_traffic_status_display_get_upstream_nelts(r);
+diff --git a/src/ngx_http_vhost_traffic_status_dump.c b/src/ngx_http_vhost_traffic_status_dump.c
+index fafe60c..5f31629 100644
+--- a/src/ngx_http_vhost_traffic_status_dump.c
++++ b/src/ngx_http_vhost_traffic_status_dump.c
+@@ -393,7 +393,7 @@ ngx_http_vhost_traffic_status_dump_restore(ngx_event_t *ev)
+         /* read: data */
+         offset += n;
+         n = ngx_read_file(&file, buf, vtsn.len, offset);
+-        if (n != vtsn.len) {
++        if (n >= 0 && vtsn.len <= SSIZE_MAX && n != (ssize_t) vtsn.len) {
+             ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ev->log, 0,
+                           "dump_restore::ngx_read_file() read:%z, data:%z failed",
+                           n, vtsn.len);
+diff --git a/src/ngx_http_vhost_traffic_status_node.h b/src/ngx_http_vhost_traffic_status_node.h
+index 3bbb53e..9cc4a0e 100644
+--- a/src/ngx_http_vhost_traffic_status_node.h
++++ b/src/ngx_http_vhost_traffic_status_node.h
+@@ -100,7 +100,7 @@ typedef struct {
+ #endif
+ 
+     ngx_http_vhost_traffic_status_node_upstream_t          stat_upstream;
+-    u_short                                                len;
++    size_t                                                 len;
+     u_char                                                 data[1];
+ } ngx_http_vhost_traffic_status_node_t;
+ 
+diff --git a/src/ngx_http_vhost_traffic_status_shm.c b/src/ngx_http_vhost_traffic_status_shm.c
+index 31f73e1..78d181c 100644
+--- a/src/ngx_http_vhost_traffic_status_shm.c
++++ b/src/ngx_http_vhost_traffic_status_shm.c
+@@ -130,6 +130,7 @@ ngx_http_vhost_traffic_status_shm_add_node(ngx_http_request_t *r,
+         if (node == NULL) {
+             shm_info = ngx_pcalloc(r->pool, sizeof(ngx_http_vhost_traffic_status_shm_info_t));
+             if (shm_info == NULL) {
++                ngx_shmtx_unlock(&shpool->mutex);
+                 return NGX_ERROR;
+             }
+ 
+@@ -147,7 +148,7 @@ ngx_http_vhost_traffic_status_shm_add_node(ngx_http_request_t *r,
+         vtsn = (ngx_http_vhost_traffic_status_node_t *) &node->color;
+ 
+         node->key = hash;
+-        vtsn->len = (u_short) key->len;
++        vtsn->len = key->len;
+         ngx_http_vhost_traffic_status_node_init(r, vtsn);
+         vtsn->stat_upstream.type = type;
+         ngx_memcpy(vtsn->data, key->data, key->len);
+@@ -480,14 +481,14 @@ ngx_http_vhost_traffic_status_shm_add_upstream(ngx_http_request_t *r)
+ 
+ found:
+ 
+-    state = r->upstream_states->elts;
+-    if (state[0].peer == NULL) {
++    state = u->state;
++    if (state->peer == NULL) {
+         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                       "shm_add_upstream::peer failed");
+         return NGX_ERROR;
+     }
+ 
+-    dst.len = (uscf->port ? 0 : uscf->host.len + sizeof("@") - 1) + state[0].peer->len;
++    dst.len = (uscf->port ? 0 : uscf->host.len + sizeof("@") - 1) + state->peer->len;
+     dst.data = ngx_pnalloc(r->pool, dst.len);
+     if (dst.data == NULL) {
+         return NGX_ERROR;
+@@ -495,13 +496,13 @@ found:
+ 
+     p = dst.data;
+     if (uscf->port) {
+-        p = ngx_cpymem(p, state[0].peer->data, state[0].peer->len);
++        p = ngx_cpymem(p, state->peer->data, state->peer->len);
+         type = NGX_HTTP_VHOST_TRAFFIC_STATUS_UPSTREAM_UA;
+ 
+     } else {
+         p = ngx_cpymem(p, uscf->host.data, uscf->host.len);
+         *p++ = NGX_HTTP_VHOST_TRAFFIC_STATUS_KEY_SEPARATOR;
+-        p = ngx_cpymem(p, state[0].peer->data, state[0].peer->len);
++        p = ngx_cpymem(p, state->peer->data, state->peer->len);
+         type = NGX_HTTP_VHOST_TRAFFIC_STATUS_UPSTREAM_UG;
+     }
+ 
+diff --git a/src/ngx_http_vhost_traffic_status_string.c b/src/ngx_http_vhost_traffic_status_string.c
+index f582b56..cc64e61 100644
+--- a/src/ngx_http_vhost_traffic_status_string.c
++++ b/src/ngx_http_vhost_traffic_status_string.c
+@@ -187,7 +187,7 @@ ngx_http_vhost_traffic_status_escape_prometheus(ngx_pool_t *pool, ngx_str_t *buf
+             }
+         } else {
+             char_end = pa;
+-            if (ngx_utf8_decode(&char_end, last - pa) > 0x10ffff) {
++            if (*pa >= 0xf8 || ngx_utf8_decode(&char_end, last - pa) > 0x10ffff) {
+                 break;
+             } else {
+                 pa = char_end;
+@@ -237,7 +237,7 @@ ngx_http_vhost_traffic_status_escape_prometheus(ngx_pool_t *pool, ngx_str_t *buf
+             }
+         } else {
+             char_end = pa;
+-            if (ngx_utf8_decode(&char_end, last - pa) > 0x10ffff) {
++            if (*pa >= 0xf8 || ngx_utf8_decode(&char_end, last - pa) > 0x10ffff) {
+                 /* invalid UTF-8 - escape single char to allow resynchronization */
+                 c = *pa++;
+                 /* two slashes are required to be valid encoding for prometheus*/
