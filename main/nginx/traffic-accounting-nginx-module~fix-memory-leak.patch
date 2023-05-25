@@ -1,0 +1,253 @@
+Patch-Source: https://github.com/Lax/traffic-accounting-nginx-module/commit/900fceedcb00a840510d547a5b1e135b4f340745
+Patch-Source: https://github.com/Lax/traffic-accounting-nginx-module/commit/c0667a81a3ab3f62f30e9051179dc705261ec556
+--
+From 900fceedcb00a840510d547a5b1e135b4f340745 Mon Sep 17 00:00:00 2001
+From: Tony Liu <Tony.Liu@harmonicinc.com>
+Date: Thu, 19 Aug 2021 08:03:47 +0000
+Subject: [PATCH] use ngx_calloc to replace ngx_pcalloc to avoid memory leak
+ https://github.com/Lax/traffic-accounting-nginx-module/issues/53
+
+---
+ src/http/ngx_http_accounting_module.c       |  8 +++----
+ src/ngx_traffic_accounting.h                |  8 +++----
+ src/ngx_traffic_accounting_module.c         | 11 +++++-----
+ src/ngx_traffic_accounting_module.h         |  4 ++--
+ src/ngx_traffic_accounting_period_metrics.c | 24 ++++++++++-----------
+ src/stream/ngx_stream_accounting_module.c   |  8 +++----
+ 6 files changed, 30 insertions(+), 33 deletions(-)
+
+diff --git a/src/http/ngx_http_accounting_module.c b/src/http/ngx_http_accounting_module.c
+index 63eccf0..23a5fc3 100644
+--- a/src/http/ngx_http_accounting_module.c
++++ b/src/http/ngx_http_accounting_module.c
+@@ -139,7 +139,7 @@ ngx_http_accounting_process_init(ngx_cycle_t *cycle)
+     }
+ 
+     if (amcf->current == NULL) {
+-        if (ngx_traffic_accounting_period_create(cycle->pool, amcf) != NGX_OK)
++        if (ngx_traffic_accounting_period_create(amcf) != NGX_OK)
+             return NGX_ERROR;
+     }
+ 
+@@ -206,7 +206,7 @@ worker_process_alarm_handler(ngx_event_t *ev)
+ 
+     amcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_accounting_module);
+ 
+-    ngx_traffic_accounting_period_rotate(amcf->current->pool, amcf);
++    ngx_traffic_accounting_period_rotate(amcf);
+     ngx_traffic_accounting_period_rbtree_iterate(amcf->previous,
+                               worker_process_export_metrics,
+                               amcf->previous->created_at,
+@@ -243,10 +243,10 @@ ngx_http_accounting_request_handler(ngx_http_request_t *r)
+ 
+     amcf = ngx_http_get_module_main_conf(r, ngx_http_accounting_module);
+ 
+-    metrics = ngx_traffic_accounting_period_fetch_metrics(amcf->current, accounting_id);
++    metrics = ngx_traffic_accounting_period_fetch_metrics(amcf->current, accounting_id, amcf->log);
+     if (metrics == NULL) { return NGX_ERROR; }
+ 
+-    if (ngx_traffic_accounting_metrics_init(metrics, amcf->current->pool, ngx_http_statuses_len) == NGX_ERROR)
++    if (ngx_traffic_accounting_metrics_init(metrics, ngx_http_statuses_len, amcf->log) == NGX_ERROR)
+         return NGX_ERROR;
+ 
+     amcf->current->updated_at = ngx_timeofday();
+diff --git a/src/ngx_traffic_accounting.h b/src/ngx_traffic_accounting.h
+index 1812927..462becf 100644
+--- a/src/ngx_traffic_accounting.h
++++ b/src/ngx_traffic_accounting.h
+@@ -38,21 +38,19 @@ typedef struct {
+     ngx_rbtree_t       rbtree;
+     ngx_rbtree_node_t  sentinel;
+ 
+-    ngx_pool_t        *pool;
+-
+     ngx_time_t        *created_at;
+     ngx_time_t        *updated_at;
+ } ngx_traffic_accounting_period_t;
+ 
+-ngx_int_t ngx_traffic_accounting_metrics_init(ngx_traffic_accounting_metrics_t *metrics, ngx_pool_t *pool, size_t len);
++ngx_int_t ngx_traffic_accounting_metrics_init(ngx_traffic_accounting_metrics_t *metrics, size_t len, ngx_log_t *log);
+ 
+ ngx_int_t ngx_traffic_accounting_period_init(ngx_traffic_accounting_period_t *period);
+-void ngx_traffic_accounting_period_insert(ngx_traffic_accounting_period_t *period, ngx_str_t *name);
++void ngx_traffic_accounting_period_insert(ngx_traffic_accounting_period_t *period, ngx_str_t *name, ngx_log_t *log);
+ void ngx_traffic_accounting_period_insert_metrics(ngx_traffic_accounting_period_t *period, ngx_traffic_accounting_metrics_t *metrics);
+ void ngx_traffic_accounting_period_delete(ngx_traffic_accounting_period_t *period, ngx_str_t *name);
+ void ngx_traffic_accounting_period_delete_metrics(ngx_traffic_accounting_period_t *period, ngx_traffic_accounting_metrics_t *metrics);
+ ngx_traffic_accounting_metrics_t * ngx_traffic_accounting_period_lookup_metrics(ngx_traffic_accounting_period_t *period, ngx_str_t *name);
+-ngx_traffic_accounting_metrics_t * ngx_traffic_accounting_period_fetch_metrics(ngx_traffic_accounting_period_t *period, ngx_str_t *name);
++ngx_traffic_accounting_metrics_t * ngx_traffic_accounting_period_fetch_metrics(ngx_traffic_accounting_period_t *period, ngx_str_t *name, ngx_log_t *log);
+ 
+ typedef ngx_int_t (*ngx_traffic_accounting_period_iterate_func)(void *val, void *para1, void *para2);
+ 
+diff --git a/src/ngx_traffic_accounting_module.c b/src/ngx_traffic_accounting_module.c
+index ebc877a..2291db7 100644
+--- a/src/ngx_traffic_accounting_module.c
++++ b/src/ngx_traffic_accounting_module.c
+@@ -9,15 +9,14 @@
+ 
+ 
+ ngx_int_t
+-ngx_traffic_accounting_period_create(ngx_pool_t *pool, ngx_traffic_accounting_main_conf_t *amcf)
++ngx_traffic_accounting_period_create(ngx_traffic_accounting_main_conf_t *amcf)
+ {
+     ngx_traffic_accounting_period_t   *period;
+ 
+-    period = ngx_pcalloc(pool, sizeof(ngx_traffic_accounting_period_t));
++    period = ngx_calloc(sizeof(ngx_traffic_accounting_period_t), amcf->log);
+     if (period == NULL)
+         return NGX_ERROR;
+ 
+-    period->pool = pool;
+     ngx_traffic_accounting_period_init(period);
+ 
+     period->created_at = ngx_timeofday();
+@@ -28,11 +27,11 @@ ngx_traffic_accounting_period_create(ngx_pool_t *pool, ngx_traffic_accounting_ma
+ }
+ 
+ ngx_int_t
+-ngx_traffic_accounting_period_rotate(ngx_pool_t *pool, ngx_traffic_accounting_main_conf_t *amcf)
++ngx_traffic_accounting_period_rotate(ngx_traffic_accounting_main_conf_t *amcf)
+ {
+-    ngx_pfree(pool, amcf->previous);
++    ngx_free(amcf->previous);
+ 
+     amcf->previous = amcf->current;
+ 
+-    return ngx_traffic_accounting_period_create(pool, amcf);
++    return ngx_traffic_accounting_period_create(amcf);
+ }
+diff --git a/src/ngx_traffic_accounting_module.h b/src/ngx_traffic_accounting_module.h
+index 08881f1..adfccec 100644
+--- a/src/ngx_traffic_accounting_module.h
++++ b/src/ngx_traffic_accounting_module.h
+@@ -46,8 +46,8 @@ ngx_str_t * ngx_traffic_accounting_get_accounting_id(void *entry, ngx_get_loc_co
+     ngx_get_indexed_variable_pt get_indexed_variable);
+ 
+ 
+-ngx_int_t ngx_traffic_accounting_period_create(ngx_pool_t *pool, ngx_traffic_accounting_main_conf_t *amcf);
+-ngx_int_t ngx_traffic_accounting_period_rotate(ngx_pool_t *pool, ngx_traffic_accounting_main_conf_t *amcf);
++ngx_int_t ngx_traffic_accounting_period_create(ngx_traffic_accounting_main_conf_t *amcf);
++ngx_int_t ngx_traffic_accounting_period_rotate(ngx_traffic_accounting_main_conf_t *amcf);
+ 
+ 
+ #endif /* _NGX_TRAFFIC_ACCOUNTING_MODULE_H_INCLUDED_ */
+diff --git a/src/ngx_traffic_accounting_period_metrics.c b/src/ngx_traffic_accounting_period_metrics.c
+index b6b7055..302bd84 100644
+--- a/src/ngx_traffic_accounting_period_metrics.c
++++ b/src/ngx_traffic_accounting_period_metrics.c
+@@ -10,17 +10,17 @@
+ static void ngx_traffic_accounting_period_insert_value(ngx_rbtree_node_t *temp, ngx_rbtree_node_t *node, ngx_rbtree_node_t *sentinel);
+ 
+ ngx_int_t
+-ngx_traffic_accounting_metrics_init(ngx_traffic_accounting_metrics_t *metrics, ngx_pool_t *pool, size_t len)
++ngx_traffic_accounting_metrics_init(ngx_traffic_accounting_metrics_t *metrics, size_t len, ngx_log_t *log)
+ {
+     if (metrics->nr_status == NULL) {
+-        metrics->nr_status = ngx_pcalloc(pool, sizeof(ngx_uint_t) * len);
++        metrics->nr_status = ngx_calloc(sizeof(ngx_uint_t) * len, log);
+ 
+         if (metrics->nr_status == NULL)
+             return NGX_ERROR;
+     }
+ 
+     if (metrics->nr_upstream_status == NULL) {
+-        metrics->nr_upstream_status = ngx_pcalloc(pool, sizeof(ngx_uint_t) * len);
++        metrics->nr_upstream_status = ngx_calloc(sizeof(ngx_uint_t) * len, log);
+ 
+         if (metrics->nr_upstream_status == NULL)
+             return NGX_ERROR;
+@@ -39,14 +39,14 @@ ngx_traffic_accounting_period_init(ngx_traffic_accounting_period_t *period)
+ }
+ 
+ void
+-ngx_traffic_accounting_period_insert(ngx_traffic_accounting_period_t *period, ngx_str_t *name)
++ngx_traffic_accounting_period_insert(ngx_traffic_accounting_period_t *period, ngx_str_t *name, ngx_log_t *log)
+ {
+     ngx_traffic_accounting_metrics_t   *metrics;
+ 
+-    metrics = ngx_pcalloc(period->pool, sizeof(ngx_traffic_accounting_metrics_t));
++    metrics = ngx_calloc(sizeof(ngx_traffic_accounting_metrics_t), log);
+ 
+     void *data;
+-    data = ngx_pcalloc(period->pool, name->len+1);
++    data = ngx_calloc(name->len+1, log);
+     ngx_memcpy(data, name->data, name->len);
+ 
+     metrics->name.data = data;
+@@ -82,7 +82,7 @@ void
+ ngx_traffic_accounting_period_delete_metrics(ngx_traffic_accounting_period_t *period, ngx_traffic_accounting_metrics_t *metrics)
+ {
+     ngx_rbtree_delete(&period->rbtree, &metrics->rbnode);
+-    ngx_pfree(period->pool, metrics);
++    ngx_free(metrics);
+ }
+ 
+ ngx_traffic_accounting_metrics_t *
+@@ -124,7 +124,7 @@ ngx_traffic_accounting_period_lookup_metrics(ngx_traffic_accounting_period_t *pe
+ }
+ 
+ ngx_traffic_accounting_metrics_t *
+-ngx_traffic_accounting_period_fetch_metrics(ngx_traffic_accounting_period_t *period, ngx_str_t *name)
++ngx_traffic_accounting_period_fetch_metrics(ngx_traffic_accounting_period_t *period, ngx_str_t *name, ngx_log_t *log)
+ {
+     ngx_traffic_accounting_metrics_t   *n;
+ 
+@@ -132,7 +132,7 @@ ngx_traffic_accounting_period_fetch_metrics(ngx_traffic_accounting_period_t *per
+     if (n != NULL)
+         return n;
+ 
+-    ngx_traffic_accounting_period_insert(period, name);
++    ngx_traffic_accounting_period_insert(period, name, log);
+ 
+     return ngx_traffic_accounting_period_lookup_metrics(period, name);
+ }
+@@ -158,9 +158,10 @@ ngx_traffic_accounting_period_rbtree_iterate(ngx_traffic_accounting_period_t *pe
+         if (rc == NGX_DONE) {
+             /* NGX_DONE -> destroy node */
+             ngx_rbtree_delete(rbtree, node);
+-            ngx_pfree(period->pool, n->nr_status);
+-            ngx_pfree(period->pool, n->nr_upstream_status);
+-            ngx_pfree(period->pool, n);
++            ngx_free(n->nr_status);
++            ngx_free(n->nr_upstream_status);
++            ngx_free(n->name.data);
++            ngx_free(n);
+ 
+             goto done;
+         }
+diff --git a/src/stream/ngx_stream_accounting_module.c b/src/stream/ngx_stream_accounting_module.c
+index b1839d1..3db787d 100644
+--- a/src/stream/ngx_stream_accounting_module.c
++++ b/src/stream/ngx_stream_accounting_module.c
+@@ -136,7 +136,7 @@ ngx_stream_accounting_process_init(ngx_cycle_t *cycle)
+     }
+ 
+     if (amcf->current == NULL) {
+-        if (ngx_traffic_accounting_period_create(cycle->pool, amcf) != NGX_OK)
++        if (ngx_traffic_accounting_period_create(amcf) != NGX_OK)
+             return NGX_ERROR;
+     }
+ 
+@@ -203,7 +203,7 @@ worker_process_alarm_handler(ngx_event_t *ev)
+ 
+     amcf = ngx_stream_cycle_get_module_main_conf(ngx_cycle, ngx_stream_accounting_module);
+ 
+-    ngx_traffic_accounting_period_rotate(amcf->current->pool, amcf);
++    ngx_traffic_accounting_period_rotate(amcf);
+     ngx_traffic_accounting_period_rbtree_iterate(amcf->previous,
+                               worker_process_export_metrics,
+                               amcf->previous->created_at,
+@@ -240,10 +240,10 @@ ngx_stream_accounting_session_handler(ngx_stream_session_t *s)
+ 
+     amcf = ngx_stream_get_module_main_conf(s, ngx_stream_accounting_module);
+ 
+-    metrics = ngx_traffic_accounting_period_fetch_metrics(amcf->current, accounting_id);
++    metrics = ngx_traffic_accounting_period_fetch_metrics(amcf->current, accounting_id, amcf->log);
+     if (metrics == NULL) { return NGX_ERROR; }
+ 
+-    if (ngx_traffic_accounting_metrics_init(metrics, amcf->current->pool, ngx_stream_statuses_len) == NGX_ERROR)
++    if (ngx_traffic_accounting_metrics_init(metrics, ngx_stream_statuses_len, amcf->log) == NGX_ERROR)
+         return NGX_ERROR;
+ 
+     amcf->current->updated_at = ngx_timeofday();
