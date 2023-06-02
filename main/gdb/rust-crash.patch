@@ -1,0 +1,150 @@
+Patch-Source: https://sourceware.org/git/?p=binutils-gdb.git;a=patch;h=562403d4f5483e0787219fdb88da72c707c8d7f6 
+--
+From 562403d4f5483e0787219fdb88da72c707c8d7f6 Mon Sep 17 00:00:00 2001
+From: Tom Tromey <tromey@adacore.com>
+Date: Fri, 24 Feb 2023 10:40:16 -0700
+Subject: [PATCH] Fix crash in inside_main_func
+
+gdb 13.1 crashes while running the rust compiler's debugger tests.
+The crash has a number of causes.
+
+First, the rust compiler still uses the C++-like _Z mangling, but with
+its own twist -- some hex digits added to the end of a symbol.  So,
+while gdb finds the correct name of "main":
+
+(top-gdb) p name
+$13 = 0x292e0c0 "rustc_gdb_1031745::main"
+
+It isn't found in the minsyms, because C++ demangling yields:
+
+[99] t 0x90c0 _ZN17rustc_gdb_10317454main17h5b5be7fe16a97225E section .text  rustc_gdb_1031745::main::h5b5be7fe16a97225  zko06yobckx336v
+
+This could perhaps be fixed.  I also filed a new PR to suggest
+preferring the linkage name of the main program.
+
+Next, the rust compiler emits both a DW_TAG_subprogram and a
+DW_TAG_namespace for "main".  This happens because the file is named
+"main.rs" -- i.e., the bug is specific to the source file name.  The
+crash also seems to require the nested function inside of 'main', at
+least for me.  The namespace always is generated, but perhaps this
+changes the ordering in the DWARF.
+
+When inside_main_func looks up the main symbol, it finds the namespace
+symbol rather than the function.  (I filed a bug about fixing gdb's
+symbol tables -- long overdue.)
+
+Meanwhile, as I think it's important to fix this crash sooner rather
+than later, this patch changes inside_main_func to check that the
+symbol that is found is LOC_BLOCK.  This perhaps should have been done
+in the first place, anyway.
+
+Bug: https://sourceware.org/bugzilla/show_bug.cgi?id=30158
+
+(cherry picked from commit 5f056fcb3dce947447063f5ab225042177a59722)
+---
+ gdb/frame.c                           |  8 ++++++
+ gdb/testsuite/gdb.rust/main-crash.exp | 35 +++++++++++++++++++++++++++
+ gdb/testsuite/gdb.rust/main.rs        | 30 +++++++++++++++++++++++
+ 3 files changed, 73 insertions(+)
+ create mode 100644 gdb/testsuite/gdb.rust/main-crash.exp
+ create mode 100644 gdb/testsuite/gdb.rust/main.rs
+
+diff --git a/gdb/frame.c b/gdb/frame.c
+index 2f9622ad2b2..3eb823e5c93 100644
+--- a/gdb/frame.c
++++ b/gdb/frame.c
+@@ -2453,6 +2453,14 @@ inside_main_func (frame_info_ptr this_frame)
+       if (bs.symbol == nullptr)
+ 	return false;
+ 
++      /* We might have found some unrelated symbol.  For example, the
++	 Rust compiler can emit both a subprogram and a namespace with
++	 the same name in the same scope; and due to how gdb's symbol
++	 tables currently work, we can't request the one we'd
++	 prefer.  */
++      if (bs.symbol->aclass () != LOC_BLOCK)
++	return false;
++
+       const struct block *block = bs.symbol->value_block ();
+       gdb_assert (block != nullptr);
+       sym_addr = block->start ();
+diff --git a/gdb/testsuite/gdb.rust/main-crash.exp b/gdb/testsuite/gdb.rust/main-crash.exp
+new file mode 100644
+index 00000000000..8eb1aaaad18
+--- /dev/null
++++ b/gdb/testsuite/gdb.rust/main-crash.exp
+@@ -0,0 +1,35 @@
++# Copyright (C) 2023 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# Regression test for a crash in inside_main_func.
++
++load_lib rust-support.exp
++if {[skip_rust_tests]} { return }
++
++standard_testfile main.rs
++if {[prepare_for_testing "failed to prepare" $testfile $srcfile \
++	 {debug rust}]} {
++    return -1
++}
++
++set line [gdb_get_line_number "BREAK"]
++# The bug was that this would crash.
++if {![runto ${srcfile}:$line]} {
++    untested "could not run to breakpoint"
++    return -1
++}
++
++# Test that gdb is alive.
++gdb_test "print 23" " = 23"
+diff --git a/gdb/testsuite/gdb.rust/main.rs b/gdb/testsuite/gdb.rust/main.rs
+new file mode 100644
+index 00000000000..8902446551e
+--- /dev/null
++++ b/gdb/testsuite/gdb.rust/main.rs
+@@ -0,0 +1,30 @@
++// Copyright (C) 2016-2023 Free Software Foundation, Inc.
++
++// This program is free software; you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation; either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++#![allow(dead_code)]
++#![allow(unused_variables)]
++#![allow(unused_assignments)]
++
++fn global_fn(x: u8) {
++    // BREAK
++}
++
++fn main() {
++    fn nested(y: u8) {
++	global_fn(y)
++    }
++
++    nested(23);
++}
+-- 
+2.39.3
+
