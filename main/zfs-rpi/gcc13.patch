@@ -1,0 +1,205 @@
+From e7a91f3cf14b53b9877dd16fbcce7bcf749ac2d3 Mon Sep 17 00:00:00 2001
+From: szubersk <szuberskidamian@gmail.com>
+Date: Wed, 30 Nov 2022 20:27:28 +1000
+Subject: [PATCH] Fix Clang 15 compilation errors
+
+- Clang 15 doesn't support `-fno-ipa-sra` anymore. Do a separate
+  check for `-fno-ipa-sra` support by $KERNEL_CC.
+
+- Don't enable `-mgeneral-regs-only` for certain module files.
+  Fix #13260
+
+- Scope `GCC diagnostic ignored` statements to GCC only. Clang
+  doesn't need them to compile the code.
+
+Porting notes:
+- Moved the stanzas removing -mgeneral-regs-only to Makefile.in
+  since they wouldn't readily work in Kbuild.in and that did.
+
+Reviewed-by: Richard Yao <richard.yao@alumni.stonybrook.edu>
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Signed-off-by: szubersk <szuberskidamian@gmail.com>
+Closes #13260
+Closes #14150
+
+Closes #14624
+Ported-by: Rich Ercolani <rincebrain@gmail.com
+Signed-off-by: Rich Ercolani <rincebrain@gmail.com>
+---
+ config/always-compiler-options.m4   | 31 +++++++++++++++++++++++++++++
+ config/zfs-build.m4                 |  3 ++-
+ module/Kbuild.in                    |  1 +
+ module/icp/algs/edonr/edonr.c       |  4 +++-
+ module/icp/algs/skein/skein_block.c |  2 ++
+ module/lua/ldo.c                    |  3 ++-
+ module/os/linux/spl/spl-generic.c   |  4 ++++
+ module/zcommon/Makefile.in          |  4 ++++
+ module/zfs/Makefile.in              |  5 +++++
+ 9 files changed, 54 insertions(+), 3 deletions(-)
+
+diff --git a/config/always-compiler-options.m4 b/config/always-compiler-options.m4
+index 5046ce0ddb8..0f66db58497 100644
+--- a/config/always-compiler-options.m4
++++ b/config/always-compiler-options.m4
+@@ -221,3 +221,34 @@ AC_DEFUN([ZFS_AC_CONFIG_ALWAYS_CC_NO_IPA_SRA], [
+ 	CFLAGS="$saved_flags"
+ 	AC_SUBST([NO_IPA_SRA])
+ ])
++
++dnl #
++dnl # Check if kernel cc supports -fno-ipa-sra option.
++dnl #
++AC_DEFUN([ZFS_AC_CONFIG_ALWAYS_KERNEL_CC_NO_IPA_SRA], [
++	AC_MSG_CHECKING([whether $KERNEL_CC supports -fno-ipa-sra])
++
++	saved_cc="$CC"
++	saved_flags="$CFLAGS"
++	CC="gcc"
++	CFLAGS="$CFLAGS -Werror -fno-ipa-sra"
++
++	AS_IF([ test -n "$KERNEL_CC" ], [
++		CC="$KERNEL_CC"
++	])
++	AS_IF([ test -n "$KERNEL_LLVM" ], [
++		CC="clang"
++	])
++
++	AC_COMPILE_IFELSE([AC_LANG_PROGRAM([], [])], [
++		KERNEL_NO_IPA_SRA=-fno-ipa-sra
++		AC_MSG_RESULT([yes])
++	], [
++		KERNEL_NO_IPA_SRA=
++		AC_MSG_RESULT([no])
++	])
++
++	CC="$saved_cc"
++	CFLAGS="$saved_flags"
++	AC_SUBST([KERNEL_NO_IPA_SRA])
++])
+diff --git a/config/zfs-build.m4 b/config/zfs-build.m4
+index 2ab6765c3a3..9390812cd3f 100644
+--- a/config/zfs-build.m4
++++ b/config/zfs-build.m4
+@@ -81,7 +81,7 @@ AC_DEFUN([ZFS_AC_DEBUG], [
+ AC_DEFUN([ZFS_AC_DEBUGINFO_ENABLE], [
+ 	DEBUG_CFLAGS="$DEBUG_CFLAGS -g -fno-inline $NO_IPA_SRA"
+ 
+-	KERNEL_DEBUG_CFLAGS="$KERNEL_DEBUG_CFLAGS -fno-inline $NO_IPA_SRA"
++	KERNEL_DEBUG_CFLAGS="$KERNEL_DEBUG_CFLAGS -fno-inline $KERNEL_NO_IPA_SRA"
+ 	KERNEL_MAKE="$KERNEL_MAKE CONFIG_DEBUG_INFO=y"
+ 
+ 	DEBUGINFO_ZFS="_with_debuginfo"
+@@ -217,6 +217,7 @@ AC_DEFUN([ZFS_AC_CONFIG_ALWAYS], [
+ 	ZFS_AC_CONFIG_ALWAYS_CC_NO_FORMAT_ZERO_LENGTH
+ 	ZFS_AC_CONFIG_ALWAYS_CC_NO_OMIT_FRAME_POINTER
+ 	ZFS_AC_CONFIG_ALWAYS_CC_NO_IPA_SRA
++	ZFS_AC_CONFIG_ALWAYS_KERNEL_CC_NO_IPA_SRA
+ 	ZFS_AC_CONFIG_ALWAYS_CC_ASAN
+ 	ZFS_AC_CONFIG_ALWAYS_TOOLCHAIN_SIMD
+ 	ZFS_AC_CONFIG_ALWAYS_SYSTEM
+diff --git a/module/Kbuild.in b/module/Kbuild.in
+index 1507965c575..7675d614fa3 100644
+--- a/module/Kbuild.in
++++ b/module/Kbuild.in
+@@ -44,4 +44,5 @@ endif
+ subdir-asflags-y := $(ZFS_MODULE_CFLAGS) $(ZFS_MODULE_CPPFLAGS)
+ subdir-ccflags-y := $(ZFS_MODULE_CFLAGS) $(ZFS_MODULE_CPPFLAGS)
+ 
++
+ endif
+diff --git a/module/icp/algs/edonr/edonr.c b/module/icp/algs/edonr/edonr.c
+index 7a3ba30c058..baf8bb885a6 100644
+--- a/module/icp/algs/edonr/edonr.c
++++ b/module/icp/algs/edonr/edonr.c
+@@ -343,9 +343,11 @@ Q256(size_t bitlen, const uint32_t *data, uint32_t *restrict p)
+  * which only goes over it by a hair (1248 bytes on ARM32).
+  */
+ #include <sys/isa_defs.h>	/* for _ILP32 */
+-#ifdef _ILP32   /* We're 32-bit, assume small stack frames */
++#if defined(_ILP32)   /* We're 32-bit, assume small stack frames */
++#if defined(__GNUC__) && !defined(__clang__)
+ #pragma GCC diagnostic ignored "-Wframe-larger-than="
+ #endif
++#endif
+ 
+ #if defined(__IBMC__) && defined(_AIX) && defined(__64BIT__)
+ static inline size_t
+diff --git a/module/icp/algs/skein/skein_block.c b/module/icp/algs/skein/skein_block.c
+index 7ba165a4851..3ad52da5f6a 100644
+--- a/module/icp/algs/skein/skein_block.c
++++ b/module/icp/algs/skein/skein_block.c
+@@ -30,7 +30,9 @@
+  * the #pragma here to ignore the warning.
+  */
+ #if defined(_ILP32) || defined(__powerpc)	/* Assume small stack */
++#if defined(__GNUC__) && !defined(__clang__)
+ #pragma GCC diagnostic ignored "-Wframe-larger-than="
++#endif
+ /*
+  * We're running on 32-bit, don't unroll loops to save stack frame space
+  *
+diff --git a/module/lua/ldo.c b/module/lua/ldo.c
+index a9835c4f571..e4abe04e97d 100644
+--- a/module/lua/ldo.c
++++ b/module/lua/ldo.c
+@@ -197,7 +197,8 @@ l_noret luaD_throw (lua_State *L, int errcode) {
+   }
+ }
+ 
+-#if defined(HAVE_INFINITE_RECURSION)
++#if defined(__GNUC__) && !defined(__clang__) && \
++	defined(HAVE_INFINITE_RECURSION)
+ #pragma GCC diagnostic pop
+ #endif
+ 
+diff --git a/module/os/linux/spl/spl-generic.c b/module/os/linux/spl/spl-generic.c
+index 508fb9d4c7f..2cb5251d731 100644
+--- a/module/os/linux/spl/spl-generic.c
++++ b/module/os/linux/spl/spl-generic.c
+@@ -225,8 +225,10 @@ __div_u64(uint64_t u, uint32_t v)
+  * replacements for libgcc-provided functions and will never be called
+  * directly.
+  */
++#if defined(__GNUC__) && !defined(__clang__)
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wmissing-prototypes"
++#endif
+ 
+ /*
+  * Implementation of 64-bit unsigned division for 32-bit machines.
+@@ -425,7 +427,9 @@ __aeabi_ldivmod(int64_t u, int64_t v)
+ EXPORT_SYMBOL(__aeabi_ldivmod);
+ #endif /* __arm || __arm__ */
+ 
++#if defined(__GNUC__) && !defined(__clang__)
+ #pragma GCC diagnostic pop
++#endif
+ 
+ #endif /* BITS_PER_LONG */
+ 
+diff --git a/module/zcommon/Makefile.in b/module/zcommon/Makefile.in
+index ebc53844044..614968a42be 100644
+--- a/module/zcommon/Makefile.in
++++ b/module/zcommon/Makefile.in
+@@ -26,3 +26,7 @@ $(MODULE)-$(CONFIG_X86) += zfs_fletcher_intel.o
+ $(MODULE)-$(CONFIG_X86) += zfs_fletcher_sse.o
+ $(MODULE)-$(CONFIG_X86) += zfs_fletcher_avx512.o
+ $(MODULE)-$(CONFIG_ARM64) += zfs_fletcher_aarch64_neon.o
++
++ifeq ($(CONFIG_ARM64),y)
++CFLAGS_REMOVE_zfs_fletcher_aarch64_neon.o += -mgeneral-regs-only
++endif
+diff --git a/module/zfs/Makefile.in b/module/zfs/Makefile.in
+index 653ea0da9bc..0e04d7ef0cd 100644
+--- a/module/zfs/Makefile.in
++++ b/module/zfs/Makefile.in
+@@ -154,4 +154,9 @@ ifeq ($(CONFIG_ALTIVEC),y)
+ $(obj)/vdev_raidz_math_powerpc_altivec.o: c_flags += -maltivec
+ endif
+ 
++ifeq ($(CONFIG_ARM64),y)
++CFLAGS_REMOVE_vdev_raidz_math_aarch64_neon.o += -mgeneral-regs-only
++CFLAGS_REMOVE_vdev_raidz_math_aarch64_neonx2.o += -mgeneral-regs-only
++endif
++
+ include $(mfdir)/../os/linux/zfs/Makefile
