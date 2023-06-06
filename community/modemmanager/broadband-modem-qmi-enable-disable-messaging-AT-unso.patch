@@ -1,0 +1,222 @@
+Patch-Source: https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/commit/9007d7999dcc96237ebef19413112b09db777876
+--
+From: Sebastian Krzyszkowiak <sebastian.krzyszkowiak@puri.sm>
+Date: Tue, 11 Apr 2023 01:09:31 +0200
+Subject: broadband-modem-qmi: enable/disable messaging AT unsolicited events
+ too
+
+When the host is resuming from system suspend, QMI indications
+sent by the modem at resume time can be lost. The exact reason why it
+happens is still unknown. Until this is fixed, ModemManager currently
+workarounds that in QMI mode by listening and reacting to AT URCs too,
+which are being received reliably. In order to achieve that,
+messaging_setup_unsolicited_events chains the parent's implementation
+with its own, effectively setting up handlers for both AT and QMI
+channels.
+
+This worked fine on modems such as EG25 which enable SMS indications
+by default. However, some modems, such as BM818, don't have these
+indications enabled on boot and don't report incoming messages via AT
+unless requested via AT+CNMI.
+
+To make SMS handling on resume reliable on such modems, make sure
+that MMBroadbandModemQmi also enables/disables unsolicited events
+in the same way it already sets up handlers for them.
+
+Signed-off-by: Sebastian Krzyszkowiak <dos@dosowisko.net>
+---
+ src/mm-broadband-modem-qmi.c | 130 +++++++++++++++++++++++++++++--------------
+ 1 file changed, 88 insertions(+), 42 deletions(-)
+
+diff --git a/src/mm-broadband-modem-qmi.c b/src/mm-broadband-modem-qmi.c
+index 817ff7f..5f79d27 100644
+--- a/src/mm-broadband-modem-qmi.c
++++ b/src/mm-broadband-modem-qmi.c
+@@ -7231,13 +7231,6 @@ messaging_disable_unsolicited_events_finish (MMIfaceModemMessaging *_self,
+                                              GAsyncResult *res,
+                                              GError **error)
+ {
+-    MMBroadbandModemQmi *self = MM_BROADBAND_MODEM_QMI (_self);
+-
+-    /* Handle AT URC only fallback */
+-    if (self->priv->messaging_fallback_at_only && iface_modem_messaging_parent->disable_unsolicited_events_finish) {
+-        return iface_modem_messaging_parent->disable_unsolicited_events_finish (_self, res, error);
+-    }
+-
+     return g_task_propagate_boolean (G_TASK (res), error);
+ }
+ 
+@@ -7246,13 +7239,6 @@ messaging_enable_unsolicited_events_finish (MMIfaceModemMessaging *_self,
+                                             GAsyncResult *res,
+                                             GError **error)
+ {
+-    MMBroadbandModemQmi *self = MM_BROADBAND_MODEM_QMI (_self);
+-
+-    /* Handle AT URC only fallback */
+-    if (self->priv->messaging_fallback_at_only) {
+-        return iface_modem_messaging_parent->enable_unsolicited_events_finish (_self, res, error);
+-    }
+-
+     return g_task_propagate_boolean (G_TASK (res), error);
+ }
+ 
+@@ -7290,20 +7276,20 @@ ser_messaging_indicator_ready (QmiClientWms *client,
+ static void
+ common_enable_disable_messaging_unsolicited_events (MMBroadbandModemQmi *self,
+                                                     gboolean enable,
+-                                                    GAsyncReadyCallback callback,
+-                                                    gpointer user_data)
++                                                    GTask *task)
+ {
+     EnableMessagingUnsolicitedEventsContext *ctx;
+-    GTask *task;
+     QmiClient *client = NULL;
+     QmiMessageWmsSetEventReportInput *input;
++    GError *error = NULL;
+ 
+-    if (!mm_shared_qmi_ensure_client (MM_SHARED_QMI (self),
+-                                      QMI_SERVICE_WMS, &client,
+-                                      callback, user_data))
++    client = mm_shared_qmi_peek_client (MM_SHARED_QMI (self),
++                                        QMI_SERVICE_WMS, MM_PORT_QMI_FLAG_DEFAULT, &error);
++    if (!client) {
++        g_task_return_error (task, error);
++        g_object_unref (task);
+         return;
+-
+-    task = g_task_new (self, NULL, callback, user_data);
++    }
+ 
+     if (enable == self->priv->messaging_unsolicited_events_enabled) {
+         mm_obj_dbg (self, "messaging unsolicited events already %s; skipping",
+@@ -7334,33 +7320,94 @@ common_enable_disable_messaging_unsolicited_events (MMBroadbandModemQmi *self,
+     qmi_message_wms_set_event_report_input_unref (input);
+ }
+ 
++static void
++parent_messaging_disable_unsolicited_events_ready (MMIfaceModemMessaging *_self,
++                                                   GAsyncResult          *res,
++                                                   GTask                 *task)
++{
++    MMBroadbandModemQmi *self = MM_BROADBAND_MODEM_QMI (_self);
++    GError              *error = NULL;
++
++    if (!iface_modem_messaging_parent->disable_unsolicited_events_finish (_self, res, &error)) {
++        if (self->priv->messaging_fallback_at_only) {
++            g_task_return_error (task, error);
++            g_object_unref (task);
++            return;
++        }
++        mm_obj_dbg (self, "disabling parent messaging unsolicited events failed: %s", error->message);
++        g_clear_error (&error);
++    }
++
++    /* handle AT URC only fallback */
++    if (self->priv->messaging_fallback_at_only) {
++        g_task_return_boolean (task, TRUE);
++        g_object_unref (task);
++        return;
++    }
++
++    /* Disable QMI indications */
++    common_enable_disable_messaging_unsolicited_events (self, FALSE, task);
++}
++
+ static void
+ messaging_disable_unsolicited_events (MMIfaceModemMessaging *_self,
+                                       GAsyncReadyCallback callback,
+                                       gpointer user_data)
+ {
+     MMBroadbandModemQmi *self = MM_BROADBAND_MODEM_QMI (_self);
++    GTask *task;
+ 
+-    /* Handle AT URC only fallback */
++    task = g_task_new (self, NULL, callback, user_data);
++
++    /* Generic implementation doesn't actually have a method to disable
++     * unsolicited messaging events */
++    if (iface_modem_messaging_parent->disable_unsolicited_events) {
++        /* Disable AT URCs parent and chain QMI indication disabling */
++        iface_modem_messaging_parent->disable_unsolicited_events (
++            _self,
++            (GAsyncReadyCallback)parent_messaging_disable_unsolicited_events_ready,
++            task);
++        return;
++    }
++
++    /* handle AT URC only fallback */
+     if (self->priv->messaging_fallback_at_only) {
+-        /* Generic implementation doesn't actually have a method to disable
+-         * unsolicited messaging events */
+-        if (!iface_modem_messaging_parent->disable_unsolicited_events) {
+-            GTask *task;
++        g_task_return_boolean (task, TRUE);
++        g_object_unref (task);
++        return;
++    }
+ 
+-            task = g_task_new (self, NULL, callback, user_data);
+-            g_task_return_boolean (task, TRUE);
++    /* Disable QMI indications */
++    common_enable_disable_messaging_unsolicited_events (self, FALSE, task);
++}
++
++static void
++parent_messaging_enable_unsolicited_events_ready (MMIfaceModemMessaging *_self,
++                                                  GAsyncResult          *res,
++                                                  GTask                 *task)
++{
++    MMBroadbandModemQmi *self = MM_BROADBAND_MODEM_QMI (_self);
++    GError              *error = NULL;
++
++    if (!iface_modem_messaging_parent->enable_unsolicited_events_finish (_self, res, &error)) {
++        if (self->priv->messaging_fallback_at_only) {
++            g_task_return_error (task, error);
+             g_object_unref (task);
+             return;
+         }
++        mm_obj_dbg (self, "enabling parent messaging unsolicited events failed: %s", error->message);
++        g_clear_error (&error);
++    }
+ 
+-        return iface_modem_messaging_parent->disable_unsolicited_events (_self, callback, user_data);
++    /* handle AT URC only fallback */
++    if (self->priv->messaging_fallback_at_only) {
++        g_task_return_boolean (task, TRUE);
++        g_object_unref (task);
++        return;
+     }
+ 
+-    common_enable_disable_messaging_unsolicited_events (MM_BROADBAND_MODEM_QMI (self),
+-                                                        FALSE,
+-                                                        callback,
+-                                                        user_data);
++    /* Enable QMI indications */
++    common_enable_disable_messaging_unsolicited_events (self, TRUE, task);
+ }
+ 
+ static void
+@@ -7369,16 +7416,15 @@ messaging_enable_unsolicited_events (MMIfaceModemMessaging *_self,
+                                      gpointer user_data)
+ {
+     MMBroadbandModemQmi *self = MM_BROADBAND_MODEM_QMI (_self);
++    GTask *task;
+ 
+-    /* Handle AT URC only fallback */
+-    if (self->priv->messaging_fallback_at_only) {
+-        return iface_modem_messaging_parent->enable_unsolicited_events (_self, callback, user_data);
+-    }
++    task = g_task_new (self, NULL, callback, user_data);
+ 
+-    common_enable_disable_messaging_unsolicited_events (MM_BROADBAND_MODEM_QMI (self),
+-                                                        TRUE,
+-                                                        callback,
+-                                                        user_data);
++    /* Enable AT URCs parent and chain QMI indication enabling */
++    iface_modem_messaging_parent->enable_unsolicited_events (
++        _self,
++        (GAsyncReadyCallback)parent_messaging_enable_unsolicited_events_ready,
++        task);
+ }
+ 
+ /*****************************************************************************/
