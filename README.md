@@ -10,10 +10,10 @@ It also contains some extra files and directories related to testing
 
 If you want to contribute, please read the
 [contributor guide](https://wiki.alpinelinux.org/wiki/Alpine_Linux:Contribute)
-and feel free to either submit a git patch on the Alpine aports
-mailing list (~alpine/aports@lists.alpinelinux.org), or to submit a
-merge request on [GitLab](https://gitlab.alpinelinux.org/alpine/aports).
-
+and feel free to either submit a merge request on
+[GitLab](https://gitlab.alpinelinux.org/alpine/aports).
+or to submit a git patch on the Alpine aports mailing list
+(~alpine/aports@lists.alpinelinux.org) (note: this mailing list is presently not functional)
 
 Git Hooks
 ---------
