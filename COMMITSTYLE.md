@@ -186,6 +186,45 @@ hold all `Rebuilds` but split instead by repository.
 
 Example: `community/*: rebuild for so:libfoo.so.2`
 
+---
+
+### Addition of maintainership
+
+Adding yourself as maintainer.
+
+#### Template
+
+- `$repository/$pkgname: take over maintainership`
+
+Example: `community/foo: take over maintainership`
+
+#### Rules
+
+One commit per aport assumed maintainership of.
+
+---
+
+### Removal of maintainership
+
+Removing yourself as maintainer.
+
+#### Template
+
+- `$repository/$pkgname: drop maintainership`
+
+Example: `community/foo: drop maintainership`
+
+#### Rules
+
+One commit per aport maintainership is removed from.
+
+#### Exceptions
+
+When removing maintainership from all aports you maintain, the commit can
+hold all maintainership removals but instead be split by repository.
+
+Example: `community/*: drop maintainership`
+
 <!--
 Missing improvements
 Also missing tree-wide changes like usage of abuild-meson instead of meson
