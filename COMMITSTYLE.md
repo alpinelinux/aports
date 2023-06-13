@@ -182,7 +182,7 @@ One commit per rebuilt aport.
 #### Exceptions
 
 When various aports need to be rebuilt for the same reason the commit can
-hold all `Rebuilds` but split instead by by repository.
+hold all `Rebuilds` but split instead by repository.
 
 Example: `community/*: rebuild for so:libfoo.so.2`
 
