@@ -1,0 +1,195 @@
+Patch-Source: https://github.com/curl/curl/pull/10041
+--
+From 64aefea3d9aca43ea84a7ad8a606f4ee49cb1eab Mon Sep 17 00:00:00 2001
+From: Chris Talbot <chris@talbothome.com>
+Date: Mon, 5 Dec 2022 18:05:01 -0500
+Subject: [PATCH] imap: Provide method to disable SASL if it is advertised
+
+- Implement AUTH=+LOGIN for CURLOPT_LOGIN_OPTIONS to prefer plaintext
+  LOGIN over SASL auth.
+
+Prior to this change there was no method to be able to fall back to
+LOGIN if an IMAP server advertises SASL capabilities. However, this may
+be desirable for e.g. a misconfigured server.
+
+Per: https://www.ietf.org/rfc/rfc5092.html#section-3.2
+
+";AUTH=<enc-auth-type>" looks to be the correct way to specify what
+authenication method to use, regardless of SASL or not.
+
+Closes https://github.com/curl/curl/pull/10041
+---
+ docs/cmdline-opts/login-options.d         |  6 +++
+ docs/libcurl/opts/CURLOPT_LOGIN_OPTIONS.3 |  6 +++
+ lib/imap.c                                | 38 +++++++++++-----
+ tests/data/Makefile.inc                   |  1 +
+ tests/data/test799                        | 53 +++++++++++++++++++++++
+ 5 files changed, 92 insertions(+), 12 deletions(-)
+ create mode 100644 tests/data/test799
+
+diff --git a/docs/cmdline-opts/login-options.d b/docs/cmdline-opts/login-options.d
+index dacddc3b5e156..b1bad37278566 100644
+--- a/docs/cmdline-opts/login-options.d
++++ b/docs/cmdline-opts/login-options.d
+@@ -16,3 +16,9 @@ You can use login options to specify protocol specific options that may be
+ used during authentication. At present only IMAP, POP3 and SMTP support
+ login options. For more information about login options please see RFC
+ 2384, RFC 5092 and IETF draft draft-earhart-url-smtp-00.txt
++
++Since 8.2.0, IMAP supports the login option "AUTH=+LOGIN". With this option,
++curl uses the plain (not SASL) LOGIN IMAP command even if the server advertises
++SASL authentication. Care should be taken in using this option, as it will send
++out your password in plain text. This will not work if the IMAP server disables
++the plain LOGIN (e.g. to prevent password snooping).
+diff --git a/docs/libcurl/opts/CURLOPT_LOGIN_OPTIONS.3 b/docs/libcurl/opts/CURLOPT_LOGIN_OPTIONS.3
+index 78b311ed101f9..aaf164fef2e46 100644
+--- a/docs/libcurl/opts/CURLOPT_LOGIN_OPTIONS.3
++++ b/docs/libcurl/opts/CURLOPT_LOGIN_OPTIONS.3
+@@ -43,6 +43,12 @@ options, such as the preferred authentication mechanism via "AUTH=NTLM" or
+ "AUTH=*", and should be used in conjunction with the \fICURLOPT_USERNAME(3)\fP
+ option.
+ 
++Since 8.2.0, IMAP supports the login option "AUTH=+LOGIN". With this option,
++curl uses the plain (not SASL) LOGIN IMAP command even if the server advertises
++SASL authentication. Care should be taken in using this option, as it will send
++out your password in plain text. This will not work if the IMAP server disables
++the plain LOGIN (e.g. to prevent password snooping).
++
+ The application does not have to keep the string around after setting this
+ option.
+ .SH DEFAULT
+diff --git a/lib/imap.c b/lib/imap.c
+index 1a66a1a4f5996..045fe24fd50b6 100644
+--- a/lib/imap.c
++++ b/lib/imap.c
+@@ -1925,6 +1925,7 @@ static CURLcode imap_parse_url_options(struct connectdata *conn)
+   CURLcode result = CURLE_OK;
+   struct imap_conn *imapc = &conn->proto.imapc;
+   const char *ptr = conn->options;
++  bool prefer_login = false;
+ 
+   while(!result && ptr && *ptr) {
+     const char *key = ptr;
+@@ -1938,26 +1939,39 @@ static CURLcode imap_parse_url_options(struct connectdata *conn)
+     while(*ptr && *ptr != ';')
+       ptr++;
+ 
+-    if(strncasecompare(key, "AUTH=", 5))
++    if(strncasecompare(key, "AUTH=+LOGIN", 11)) {
++      /* User prefers plaintext LOGIN over any SASL, including SASL LOGIN */
++      prefer_login = true;
++      imapc->sasl.prefmech = SASL_AUTH_NONE;
++    }
++    else if(strncasecompare(key, "AUTH=", 5)) {
++      prefer_login = false;
+       result = Curl_sasl_parse_url_auth_option(&imapc->sasl,
+                                                value, ptr - value);
+-    else
++    }
++    else {
++      prefer_login = false;
+       result = CURLE_URL_MALFORMAT;
++    }
+ 
+     if(*ptr == ';')
+       ptr++;
+   }
+ 
+-  switch(imapc->sasl.prefmech) {
+-  case SASL_AUTH_NONE:
+-    imapc->preftype = IMAP_TYPE_NONE;
+-    break;
+-  case SASL_AUTH_DEFAULT:
+-    imapc->preftype = IMAP_TYPE_ANY;
+-    break;
+-  default:
+-    imapc->preftype = IMAP_TYPE_SASL;
+-    break;
++  if(prefer_login)
++    imapc->preftype = IMAP_TYPE_CLEARTEXT;
++  else {
++    switch(imapc->sasl.prefmech) {
++    case SASL_AUTH_NONE:
++      imapc->preftype = IMAP_TYPE_NONE;
++      break;
++    case SASL_AUTH_DEFAULT:
++      imapc->preftype = IMAP_TYPE_ANY;
++      break;
++    default:
++      imapc->preftype = IMAP_TYPE_SASL;
++      break;
++    }
+   }
+ 
+   return result;
+diff --git a/tests/data/Makefile.inc b/tests/data/Makefile.inc
+index b5c7ae77811eb..2b003d950bb93 100644
+--- a/tests/data/Makefile.inc
++++ b/tests/data/Makefile.inc
+@@ -102,6 +102,7 @@ test700 test701 test702 test703 test704 test705 test706 test707 test708 \
+ test709 test710 test711 test712 test713 test714 test715 test716 test717 \
+ test718 test719 test720 test721 \
+ \
++test799 \
+ test800 test801 test802 test803 test804 test805 test806 test807 test808 \
+ test809 test810 test811 test812 test813 test814 test815 test816 test817 \
+ test818 test819 test820 test821 test822 test823 test824 test825 test826 \
+diff --git a/tests/data/test799 b/tests/data/test799
+new file mode 100644
+index 0000000000000..9849512608fe8
+--- /dev/null
++++ b/tests/data/test799
+@@ -0,0 +1,53 @@
++<testcase>
++<info>
++<keywords>
++IMAP
++Clear Text
++SASL AUTH +LOGIN
++</keywords>
++</info>
++
++#
++# Server-side
++<reply>
++<servercmd>
++AUTH PLAIN
++REPLY LOGIN A002 OK LOGIN completed
++</servercmd>
++<data>
++From: me@somewhere
++To: fake@nowhere
++
++body
++
++--
++  yours sincerely
++</data>
++</reply>
++
++#
++# Client-side
++<client>
++<server>
++imap
++</server>
++ <name>
++IMAP with --login-options 'AUTH=+LOGIN'
++ </name>
++ <command>
++'imap://%HOSTIP:%IMAPPORT/%TESTNUMBER/;MAILINDEX=1' -u user:secret --login-options AUTH=+LOGIN
++</command>
++</client>
++
++#
++# Verify data after the test has been "shot"
++<verify>
++<protocol>
++A001 CAPABILITY
++A002 LOGIN user secret
++A003 SELECT %TESTNUMBER
++A004 FETCH 1 BODY[]
++A005 LOGOUT
++</protocol>
++</verify>
++</testcase>
