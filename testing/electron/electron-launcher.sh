@@ -9,6 +9,6 @@ done
 
 # Prefer user defined ELECTRON_USER_FLAGS (from env) over system
 # default ELECTRON_FLAGS (from /etc/electron/default.conf).
-ELECTRON_FLAGS=${ELECTRON_USER_FLAGS:-"$ELECTRON_FLAGS"}
+ELECTRON_FLAGS="$ELECTRON_FLAGS ${ELECTRON_USER_FLAGS:-"$ELECTRON_USER_FLAGS"}"
 
 exec "/usr/lib/electron/electron" "$@" ${ELECTRON_FLAGS}
