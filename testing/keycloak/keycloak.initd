@@ -1,0 +1,130 @@
+#!/sbin/openrc-run
+
+extra_commands="$extra_commands rebuild"
+description_rebuild="Rebuild the server image after changing build options."
+
+name="Keycloak"
+description="Open source identity and access management software"
+
+: ${cfgfile:="/etc/keycloak/keycloak.conf"}
+: ${datadir:="/var/lib/keycloak"}
+: ${setup_admin_user:="yes"}
+: ${setup_admin_user_password:="generate"}
+: ${command_user:="keycloak:keycloak"}
+: ${healthcheck_delay:=90}
+: ${healthcheck_timer:=30}
+: ${healthcheck_url="https://127.0.0.1:8443/health/live"}
+: ${retry="TERM/15/KILL/5"}
+
+command="/usr/bin/kc"
+command_args="-cf $cfgfile start ${command_args-"--optimized"}"
+command_background="yes"
+pidfile="/run/$RC_SVCNAME.pid"
+directory="$datadir"
+
+required_files="$cfgfile"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	local first_start=false
+
+	export JAVA_OPTS_APPEND="$java_opts"
+	# Note: Quarkus rotates logs after 10 MiB by default.
+	export QUARKUS_LOG_FILE_ROTATION_FILE_SUFFIX="-yyyyMMdd"
+	export QUARKUS_LOG_FILE_ROTATION_ROTATE_ON_BOOT=false
+
+	if ! [ -e "$datadir"/build/quarkus/build-system.properties ]; then
+		first_start=true
+		rebuild
+	fi
+
+	if [ "$(conf_get 'health-enabled')" != 'true' ]; then
+		healthcheck_url=""
+	fi
+
+	local hostname="$(conf_get 'hostname')"
+	if [ "$hostname" = 'change-me' ]; then
+		ewarn 'Change "hostname" in $cfgfile to the full domain name of the server!'
+		hostname="$(hostname -f)"
+	fi
+
+	local certfile="$(conf_get 'https-certificate-file')"
+	local keyfile="$(conf_get 'https-certificate-key-file')"
+	if [ "$certfile" ] && ! [ -e "$certfile" ] && ! [ -e "$keyfile" ]; then
+		if command -v openssl >/dev/null; then
+			einfo "Generating self-signed certificate and private key..."
+			gen_cert "$hostname" "$certfile" "$keyfile"
+		else
+			eerror "$certfile or $keyfile does not exist!"
+			return 1
+		fi
+	fi
+
+	if $first_start && yesno "$setup_admin_user" && [ -z "${KEYCLOAK_ADMIN_PASSWORD-}" ]; then
+		if [ "$setup_admin_user_password" = 'generate' ]; then
+			setup_admin_user_password="$(gen_pass)"
+			ewarn "Initial admin user \"admin\" will be created with password: $setup_admin_user_password"
+		else
+			ewarn 'Initial admin user "admin" will be created'
+		fi
+		export KEYCLOAK_ADMIN="admin"
+		export KEYCLOAK_ADMIN_PASSWORD="$setup_admin_user_password"
+	fi
+}
+
+healthcheck() {
+	[ -n "$healthcheck_url" ] || return 0
+
+	# Note: We don't check certificate because Keycloak may run with self-signed
+	#  certificate behind a proxy that re-encrypts traffic.
+	if command -v curl >/dev/null; then
+		curl -fq --max-time 10 --insecure --head "$healthcheck_url" >/dev/null 2>&1 || return 1
+
+	elif command -v wget >/dev/null; then
+		wget -q -T 10 --no-check-certificate -O - "$healthcheck_url" >/dev/null 2>&1 || return 1
+	fi
+}
+
+rebuild() {
+	ebegin "Rebuilding $name"
+
+	local builddir="$datadir/build"
+
+	if ! [ -e "$builddir"/quarkus/build-system.properties ]; then
+		# Copy the distribution quarkus files. They will be overwritten by
+		# `kc build`, but this command fails when the directory is empty.
+		mkdir -p "$builddir"/quarkus
+		cp /usr/share/keycloak/lib/quarkus.dist/* "$builddir"/quarkus/
+		ln -s /usr/share/keycloak/lib/app "$builddir"/app
+		chown -R "$command_user" "$builddir"
+	fi
+
+	echo ''
+	# Workaround to avoid errors related to symlinks.
+	QUARKUS_PACKAGE_OUTPUT_DIRECTORY="$builddir" \
+		su "${command_user%:*}" -s /bin/sh -c "$command build"
+}
+
+gen_cert() {
+	openssl req -x509 \
+		-newkey ec \
+		-pkeyopt ec_paramgen_curve:prime256v1 \
+		-nodes \
+		-days 7300 \
+		-subj "/CN=$1" \
+		-out "$2" \
+		-keyout "$3"
+	chown "$command_user" "$certfile" "$keyfile"
+}
+
+gen_pass() {
+	head /dev/urandom | tr -dc A-Za-z0-9 | head -c 12
+}
+
+conf_get() {
+	sed -En "s/^$1=(\S+).*/\1/p" "$cfgfile"
+}
