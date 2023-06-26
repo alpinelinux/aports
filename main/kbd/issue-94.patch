@@ -1,0 +1,115 @@
+Patch-Source: https://github.com/legionus/kbd/commit/7e58ec6867ce6533316c45cb0d91c097561c3825
+--
+From 7e58ec6867ce6533316c45cb0d91c097561c3825 Mon Sep 17 00:00:00 2001
+From: Alexey Gladkov <gladkov.alexey@gmail.com>
+Date: Thu, 22 Jun 2023 13:32:29 +0200
+Subject: [PATCH] Get a font with a charsize of at least 32
+
+The new KD_FONT_OP_GET_TALL uses the height as the size for each
+character (the old KD_FONT_OP_GET always uses 32). This works for fonts
+larger than 32x32. But if we get the old 8x16 font using the
+KD_FONT_OP_GET_TALL for it, then vpitch becomes 16. When saving such a
+font to a file in psf format, the vpitch information will be lost and
+the font will turn into garbage.
+
+psf1 has no height information at all. psf2 preserves the height, but if
+it's less than 32 we can't tell the vpitch for that font from a normal
+font that has 32.
+
+In the future we may add a flag to psf2 to distinguish fonts with vpitch
+< 32, but this would require carrying this information until the font is
+loaded into the linux kernel. There is currently no place to store this
+information.
+
+For now, we will use the KD_FONT_OP_GET for fonts, and only if the
+font has a height greater than 32 will we use KD_FONT_OP_GET_TALL. In
+this case, we can understand that we need to use psf2 to save such a
+font and then, when reading, we can understand which interface should be
+used to load into the kernel.
+
+Fixes: 287a3bae ("font: Leverage KD_FONT_OP_GET/SET_TALL font operations")
+Link: https://github.com/legionus/kbd/issues/94
+Signed-off-by: Alexey Gladkov <gladkov.alexey@gmail.com>
+---
+ src/libkfont/kdfontop.c | 52 +++++++++++++++++++++++++++++------------
+ 1 file changed, 37 insertions(+), 15 deletions(-)
+
+diff --git a/src/libkfont/kdfontop.c b/src/libkfont/kdfontop.c
+index b3873ac..4a45ea5 100644
+--- a/src/libkfont/kdfontop.c
++++ b/src/libkfont/kdfontop.c
+@@ -56,38 +56,60 @@ get_font_kdfontop(struct kfont_context *ctx, int consolefd,
+ {
+ 	struct console_font_op cfo;
+ 
+-#ifdef KD_FONT_OP_GET_TALL
+-	cfo.op = KD_FONT_OP_GET_TALL;
+-#else
+ 	cfo.op = KD_FONT_OP_GET;
+-#endif
+ 	cfo.flags = 0;
+-	cfo.width = 64;
+-	cfo.height = 128;
+-	cfo.charcount = *count;
+-	cfo.data = buf;
++	cfo.width = 32;
++	cfo.height = 32;
++	cfo.charcount = (sizeof(unsigned char) * MAXFONTSIZE) / (64 * 128 / 8); /* max size 64x128, 8 bits/byte */;
++	cfo.data = NULL;
+ 
++	/*
++	 * Check font height and width. We can't do this in one request because
++	 * if KD_FONT_OP_GET_TALL is used then vpitch will be less than 32 for
++	 * 8x16 fonts which will break saving the font to a file. After that,
++	 * such a saved font cannot be distinguished from the old fonts by the
++	 * header.
++	 *
++	 * When we learn how to take into account vpitch in psf format, then
++	 * this code can be redone.
++	 */
+ 	while (1) {
+ 		errno = 0;
+-
+ 		if (ioctl(consolefd, KDFONTOP, &cfo)) {
+ #ifdef KD_FONT_OP_GET_TALL
+-			if (errno == ENOSYS && cfo.op == KD_FONT_OP_GET_TALL) {
+-				/* Kernel before 6.2.  */
+-				cfo.op = KD_FONT_OP_GET;
++			if (errno == ENOSPC && cfo.op != KD_FONT_OP_GET_TALL) {
++				/*
++				 * It looks like the font is larger than the
++				 * regular font and we need to check for tall
++				 * font.
++				 */
++				cfo.op = KD_FONT_OP_GET_TALL;
++				cfo.width = 64;
++				cfo.height = 128;
+ 				continue;
+ 			}
+ #endif
++			KFONT_ERR(ctx, "ioctl(KDFONTOP): %m");
++			return -1;
++		}
++		break;
++	}
++
++	if (buf) {
++		/* actually get font height and width */
++		cfo.data = buf;
++		cfo.charcount = *count;
++
++		errno = 0;
++		if (ioctl(consolefd, KDFONTOP, &cfo)) {
+ 			if (errno != ENOSYS && errno != EINVAL) {
+ 				KFONT_ERR(ctx, "ioctl(KDFONTOP): %m");
+ 				return -1;
+ 			}
+ 			return 1;
+ 		}
+-		break;
+ 	}
+ 
+-
+ 	*count = cfo.charcount;
+ 	if (height)
+ 		*height = cfo.height;
