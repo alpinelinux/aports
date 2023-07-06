@@ -1,0 +1,224 @@
+From 72f5a287a4016ecb405f2e8a4a03ae22a5b0b496 Mon Sep 17 00:00:00 2001
+From: Stefan Behnel <stefan_ml@behnel.de>
+Date: Wed, 5 Jul 2023 22:10:45 +0200
+Subject: [PATCH] Change HTML "prefix" handling in ElementPath to let
+ "element.find('part1:part2')" search for "part1:part2" instead of just
+ "part2" with an unknown prefix. Also adapt the HTML "prefix" parsing test to
+ make it work in libxml2 2.10.4 and later, where HTML "prefixes" are kept as
+ part of the tag name by the parser.
+
+---
+ CHANGES.txt                  | 10 ++++++++++
+ src/lxml/_elementpath.py     | 22 +++++++++++-----------
+ src/lxml/apihelpers.pxi      |  7 +++++++
+ src/lxml/etree.pyx           |  8 ++++----
+ src/lxml/includes/tree.pxd   | 12 ++++++++++++
+ src/lxml/tests/test_etree.py | 26 ++++++++++++++++++++++----
+ 6 files changed, 66 insertions(+), 19 deletions(-)
+
+diff --git a/src/lxml/_elementpath.py b/src/lxml/_elementpath.py
+index eabd81cca..001b345ee 100644
+--- a/src/lxml/_elementpath.py
++++ b/src/lxml/_elementpath.py
+@@ -71,14 +71,14 @@
+     r"\s+"
+     )
+ 
+-def xpath_tokenizer(pattern, namespaces=None):
++def xpath_tokenizer(pattern, namespaces=None, with_prefixes=True):
+     # ElementTree uses '', lxml used None originally.
+     default_namespace = (namespaces.get(None) or namespaces.get('')) if namespaces else None
+     parsing_attribute = False
+     for token in xpath_tokenizer_re.findall(pattern):
+         ttype, tag = token
+         if tag and tag[0] != "{":
+-            if ":" in tag:
++            if ":" in tag and with_prefixes:
+                 prefix, uri = tag.split(":", 1)
+                 try:
+                     if not namespaces:
+@@ -251,7 +251,7 @@ def select(result):
+ _cache = {}
+ 
+ 
+-def _build_path_iterator(path, namespaces):
++def _build_path_iterator(path, namespaces, with_prefixes=True):
+     """compile selector pattern"""
+     if path[-1:] == "/":
+         path += "*"  # implicit all (FIXME: keep this?)
+@@ -279,7 +279,7 @@ def _build_path_iterator(path, namespaces):
+ 
+     if path[:1] == "/":
+         raise SyntaxError("cannot use absolute path on element")
+-    stream = iter(xpath_tokenizer(path, namespaces))
++    stream = iter(xpath_tokenizer(path, namespaces, with_prefixes=with_prefixes))
+     try:
+         _next = stream.next
+     except AttributeError:
+@@ -308,8 +308,8 @@ def _build_path_iterator(path, namespaces):
+ ##
+ # Iterate over the matching nodes
+ 
+-def iterfind(elem, path, namespaces=None):
+-    selector = _build_path_iterator(path, namespaces)
++def iterfind(elem, path, namespaces=None, with_prefixes=True):
++    selector = _build_path_iterator(path, namespaces, with_prefixes=with_prefixes)
+     result = iter((elem,))
+     for select in selector:
+         result = select(result)
+@@ -319,8 +319,8 @@ def iterfind(elem, path, namespaces=None):
+ ##
+ # Find first matching object.
+ 
+-def find(elem, path, namespaces=None):
+-    it = iterfind(elem, path, namespaces)
++def find(elem, path, namespaces=None, with_prefixes=True):
++    it = iterfind(elem, path, namespaces, with_prefixes=with_prefixes)
+     try:
+         return next(it)
+     except StopIteration:
+@@ -330,15 +330,15 @@ def find(elem, path, namespaces=None):
+ ##
+ # Find all matching objects.
+ 
+-def findall(elem, path, namespaces=None):
++def findall(elem, path, namespaces=None, with_prefixes=True):
+     return list(iterfind(elem, path, namespaces))
+ 
+ 
+ ##
+ # Find text for first matching object.
+ 
+-def findtext(elem, path, default=None, namespaces=None):
+-    el = find(elem, path, namespaces)
++def findtext(elem, path, default=None, namespaces=None, with_prefixes=True):
++    el = find(elem, path, namespaces, with_prefixes=with_prefixes)
+     if el is None:
+         return default
+     else:
+diff --git a/src/lxml/apihelpers.pxi b/src/lxml/apihelpers.pxi
+index 4e65c0bb1..ea4caa58d 100644
+--- a/src/lxml/apihelpers.pxi
++++ b/src/lxml/apihelpers.pxi
+@@ -15,6 +15,13 @@ cdef void displayNode(xmlNode* c_node, indent):
+     finally:
+         return  # swallow any exceptions
+ 
++cdef inline bint _isHtmlDocument(_Element element) except -1:
++    cdef xmlNode* c_node = element._c_node
++    return (
++        c_node is not NULL and c_node.doc is not NULL and
++        c_node.doc.properties & tree.XML_DOC_HTML != 0
++    )
++
+ cdef inline int _assertValidNode(_Element element) except -1:
+     assert element._c_node is not NULL, u"invalid Element proxy at %s" % id(element)
+ 
+diff --git a/src/lxml/etree.pyx b/src/lxml/etree.pyx
+index 8fb7d88a7..3938b87a7 100644
+--- a/src/lxml/etree.pyx
++++ b/src/lxml/etree.pyx
+@@ -1546,7 +1546,7 @@ cdef public class _Element [ type LxmlElementType, object LxmlElement ]:
+         """
+         if isinstance(path, QName):
+             path = (<QName>path).text
+-        return _elementpath.find(self, path, namespaces)
++        return _elementpath.find(self, path, namespaces, with_prefixes=not _isHtmlDocument(self))
+ 
+     def findtext(self, path, default=None, namespaces=None):
+         u"""findtext(self, path, default=None, namespaces=None)
+@@ -1559,7 +1559,7 @@ cdef public class _Element [ type LxmlElementType, object LxmlElement ]:
+         """
+         if isinstance(path, QName):
+             path = (<QName>path).text
+-        return _elementpath.findtext(self, path, default, namespaces)
++        return _elementpath.findtext(self, path, default, namespaces, with_prefixes=not _isHtmlDocument(self))
+ 
+     def findall(self, path, namespaces=None):
+         u"""findall(self, path, namespaces=None)
+@@ -1572,7 +1572,7 @@ cdef public class _Element [ type LxmlElementType, object LxmlElement ]:
+         """
+         if isinstance(path, QName):
+             path = (<QName>path).text
+-        return _elementpath.findall(self, path, namespaces)
++        return _elementpath.findall(self, path, namespaces, with_prefixes=not _isHtmlDocument(self))
+ 
+     def iterfind(self, path, namespaces=None):
+         u"""iterfind(self, path, namespaces=None)
+@@ -1585,7 +1585,7 @@ cdef public class _Element [ type LxmlElementType, object LxmlElement ]:
+         """
+         if isinstance(path, QName):
+             path = (<QName>path).text
+-        return _elementpath.iterfind(self, path, namespaces)
++        return _elementpath.iterfind(self, path, namespaces, with_prefixes=not _isHtmlDocument(self))
+ 
+     def xpath(self, _path, *, namespaces=None, extensions=None,
+               smart_strings=True, **_variables):
+diff --git a/src/lxml/includes/tree.pxd b/src/lxml/includes/tree.pxd
+index 312537cbd..5f6f43aa9 100644
+--- a/src/lxml/includes/tree.pxd
++++ b/src/lxml/includes/tree.pxd
+@@ -154,6 +154,17 @@ cdef extern from "libxml/tree.h" nogil:
+         XML_EXTERNAL_PARAMETER_ENTITY=        5
+         XML_INTERNAL_PREDEFINED_ENTITY=       6
+ 
++    ctypedef enum xmlDocProperties:
++        XML_DOC_WELLFORMED          = 1    # /* document is XML well formed */
++        XML_DOC_NSVALID             = 2    # /* document is Namespace valid */
++        XML_DOC_OLD10               = 4    # /* parsed with old XML-1.0 parser */
++        XML_DOC_DTDVALID            = 8    # /* DTD validation was successful */
++        XML_DOC_XINCLUDE            = 16   # /* XInclude substitution was done */
++        XML_DOC_USERBUILT           = 32   # /* Document was built using the API
++                                           #    and not by parsing an instance */
++        XML_DOC_INTERNAL            = 64   # /* built for internal processing */
++        XML_DOC_HTML                = 128  # /* parsed or built HTML document */
++
+     ctypedef struct xmlNs:
+         const_xmlChar* href
+         const_xmlChar* prefix
+@@ -274,6 +285,7 @@ cdef extern from "libxml/tree.h" nogil:
+         void* _private
+         xmlDtd* intSubset
+         xmlDtd* extSubset
++        int properties
+         
+     ctypedef struct xmlAttr:
+         void* _private
+diff --git a/src/lxml/tests/test_etree.py b/src/lxml/tests/test_etree.py
+index 229547f3e..1fdd4d299 100644
+--- a/src/lxml/tests/test_etree.py
++++ b/src/lxml/tests/test_etree.py
+@@ -3141,11 +3141,29 @@ def test_subelement_nsmap(self):
+ 
+     def test_html_prefix_nsmap(self):
+         etree = self.etree
+-        el = etree.HTML('<hha:page-description>aa</hha:page-description>').find('.//page-description')
+-        if etree.LIBXML_VERSION < (2, 9, 11):
+-            self.assertEqual({'hha': None}, el.nsmap)
++        el = etree.HTML('<hha:page-description>aa</hha:page-description>')
++        pd = el[-1]
++        while len(pd):
++            pd = pd[-1]
++
++        if etree.LIBXML_VERSION >= (2, 10, 4):
++            # "Prefix" is kept as part of the tag name.
++            self.assertEqual("hha:page-description", pd.tag)
++            self.assertIsNone(el.find('.//page-description'))
++            self.assertIsNotNone(el.find('.//hha:page-description'))  # no namespaces!
++            for e in el.iter():
++                self.assertEqual({}, e.nsmap)
++        elif etree.LIBXML_VERSION >= (2, 9, 11):
++            # "Prefix" is stripped.
++            self.assertEqual("page-description", pd.tag)
++            self.assertIsNotNone(el.find('.//page-description'))
++            for e in el.iter():
++                self.assertEqual({}, e.nsmap)
+         else:
+-            self.assertEqual({}, el.nsmap)
++            # "Prefix" is parsed as XML prefix.
++            self.assertEqual("page-description", pd.tag)
++            pd = el.find('.//page-description')
++            self.assertEqual({'hha': None}, pd.nsmap)
+ 
+     def test_getchildren(self):
+         Element = self.etree.Element
