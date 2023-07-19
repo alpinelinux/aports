@@ -1,0 +1,285 @@
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Maintainer: Jakub Jirutka <jakub@jirutka.cz>
+pkgname=deno
+pkgver=1.35.2
+pkgrel=0
+pkgdesc="A modern runtime for JavaScript and TypeScript"
+url="https://deno.land/"
+# armhf,armv7,x86: deno currently doesn't support 32-bit arches
+# ppc64le,riscv64,s390x: fails to build ring crate
+arch="aarch64 x86_64"
+license="MIT"
+depends="ca-certificates"
+makedepends="
+	cargo
+	cargo-auditable
+	clang-dev
+	curl
+	glib-dev
+	gn
+	icu-dev
+	jq
+	libffi-dev
+	lld
+	llvm-dev
+	python3
+	samurai
+	sqlite-dev
+	zlib-dev
+	zstd-dev
+	"
+checkdepends="bash"
+subpackages="
+	$pkgname-dbg
+	$pkgname-bash-completion
+	$pkgname-fish-completion
+	$pkgname-zsh-completion
+	"
+# See getrandom-0.1-musl-compat.patch.
+# TODO: Remove after deno update curve25519-dalek to >3.
+_getrandom1_ver=0.1.16
+_rusty_v8_ver=0.74.2
+_stacker_ver=0.1.15
+# Note: We use the crate instead of GitHub tarball due to lacks of submodules
+# in the tarball.
+source="$pkgname-$pkgver.tar.gz::https://github.com/denoland/deno/releases/download/v$pkgver/deno_src.tar.gz
+	$pkgname-getrandom-$_getrandom1_ver.tar.gz::https://github.com/rust-random/getrandom/archive/v$_getrandom1_ver.tar.gz
+	$pkgname-rusty_v8-$_rusty_v8_ver.tar.gz::https://static.crates.io/crates/v8/v8-$_rusty_v8_ver.crate
+	$pkgname-stacker-$_stacker_ver.tar.gz::https://github.com/rust-lang/stacker/archive/stacker-$_stacker_ver.tar.gz
+	$pkgname-generate_shim_headers.py::https://raw.githubusercontent.com/chromium/chromium/117.0.5881.2/tools/generate_shim_headers/generate_shim_headers.py
+	getrandom-0.1-musl-compat.patch
+	stacker-detect-stack-overflow.patch
+	stacker-disable-guess_os_stack_limit.patch
+	v8-build.patch
+	v8-musl-monotonic-pthread-cont_timedwait.patch
+	v8-no-execinfo.patch
+	v8-revert-llvm16-linker-flag.patch
+	v8-use-alpine-target.patch
+	v8-use-system-zlib.patch
+	v8-use-system-icu.patch
+	upgrade-feature.patch
+	glibc_version-musl-compat.patch
+	fix-testing-domains.patch
+	ignore-tests-broken-on-ci.patch
+	unbundle-ca-certs.patch
+	cargo.lock.patch
+	"
+builddir="$srcdir/deno"
+
+# TODO:
+# - build variant without dev tools
+#
+# NOTES:
+# - deno segfaults when built with is_official_build=true and upstream doesn't
+#   enable this flag either.
+# - deno_runtime (build script) fails when built with use_thin_lto=true.
+# - We can link against system libsecp256k1, but author of rust-secp256k1
+#   strongly discourages against it (https://github.com/rust-bitcoin/rust-secp256k1/issues/629).
+#   Also, it reduces the binary size only by 0.1 MiB.
+
+# Don't use prebuilt libv8.a, build it from source (for rusty_v8).
+export V8_FROM_SOURCE=1
+
+# Use system gn and ninja (for v8).
+export GN=/usr/bin/gn
+export NINJA=/usr/bin/ninja
+
+# Build with clang (for v8).
+export AR=llvm-ar
+export CC=clang
+export CXX=clang++
+export LD=clang++
+export NM=llvm-nm
+
+# Flags copied from community/chromium (for building v8)
+export CFLAGS="${CFLAGS/-Os/} -O2 -Wno-unknown-warning-option -Wno-builtin-macro-redefined -Wno-deprecated-declarations"
+export CXXFLAGS="${CXXFLAGS/-Os/} -O2 -Wno-unknown-warning-option -Wno-builtin-macro-redefined -Wno-deprecated-declarations"
+export CPPFLAGS="$CPPFLAGS -D__DATE__=  -D__TIME__=  -D__TIMESTAMP__="
+
+# clang supports stack-clash-protection only on x86(_64), ppc64le and s309x.
+if [ "$CARCH" != 'x86_64' ]; then
+	export CFLAGS="${CFLAGS/-fstack-clash-protection/}"
+	export CXXFLAGS="${CXXFLAGS/-fstack-clash-protection/}"
+fi
+
+# Enable verbose logging for v8 compilation, so we can see actual flags used.
+export SAMUFLAGS="$SAMUFLAGS -v"
+
+# Flags for building v8; inspired by community/chromium and
+# https://github.com/12101111/overlay.
+export GN_ARGS="
+	chrome_pgo_phase=0
+	custom_toolchain=\"//build/toolchain/linux/unbundle:default\"
+	host_toolchain=\"//build/toolchain/linux/unbundle:default\"
+	v8_snapshot_toolchain=\"//build/toolchain/linux/unbundle:default\"
+	fatal_linker_warnings=false
+	is_debug=false
+	symbol_level=0
+	system_icu=false
+	system_zlib=false
+	use_custom_libcxx=false
+	use_sysroot=false
+	"
+export EXTRA_GN_ARGS="use_custom_libcxx=false"
+
+# deno seems to foolishly assume 8MiB stack
+# -A warnings - silence rust linter warnings
+export RUSTFLAGS="$RUSTFLAGS -C linker=clang++ -C link-arg=-fuse-ld=lld -C link-args=-Wl,-zstack-size=8388608 -A warnings"
+
+# Included limited debug info.
+export CARGO_PROFILE_RELEASE_DEBUG=1
+# Use "thin" instead of "fat" to speed up builds (it costs +4% binary size).
+export CARGO_PROFILE_RELEASE_LTO="thin"
+
+# Deno fine-tunes opt-level per crate.
+unset CARGO_PROFILE_RELEASE_OPT_LEVEL
+# Switching to panic=abort is too risky for Deno.
+unset CARGO_PROFILE_RELEASE_PANIC
+
+_cargo_opts="--frozen --no-default-features"
+
+prepare() {
+	mkdir -p vendor
+	mv ../getrandom-$_getrandom1_ver vendor/getrandom1
+	mv ../stacker-stacker-$_stacker_ver vendor/stacker
+	mv ../v8-$_rusty_v8_ver vendor/v8
+	install -Dm755 "$srcdir"/$pkgname-generate_shim_headers.py \
+		vendor/v8/tools/generate_shim_headers/generate_shim_headers.py
+
+	default_prepare
+
+	cd vendor/v8
+
+	local use_system="icu zlib"
+	python3 build/linux/unbundle/replace_gn_files.py --system-libraries $use_system
+	local lib; for lib in $use_system; do
+		sed -i '/"\/\/base"/d' third_party/$lib/BUILD.gn
+		find . -type f -path "*third_party/$lib/*" \
+			\! -regex '.*\.\(gn\|gni\|isolate\|py\)' \
+			\! -name 'compression_utils_portable.*' \
+			-delete
+	done
+
+	cd "$builddir"
+
+	# Build with patched stacker and v8 (see *.patch files).
+	cat >> Cargo.toml <<-EOF
+
+		[patch.crates-io]
+		getrandom1 = { path = "vendor/getrandom1", package = "getrandom" }
+		stacker = { path = "vendor/stacker" }
+		v8 = { path = "vendor/v8" }
+	EOF
+
+	# Disable feature v8_use_custom_libcxx on deno_core.
+	# Link with system-provided libsqlite, libz and libzstd.
+	sed -Ei \
+		-e '/^deno_core\s*=/{ s/\}/, default-features = false }/ }' \
+		-e 's/^flate2\s*=)\s*"([^"]+)".*/\1 { version = "\2", default-features = false, features = ["zlib"] }/' \
+		-e '/^rusqlite\s*=/{ s/"bundled"/"buildtime_bindgen"/ }' \
+		-e 's/^zstd\s*=)\s*"([^"]+)".*/\1 { version = "\2", features = ["pkg-config", "bindgen"] }/' \
+		Cargo.toml
+
+	# Link with system-provided libffi.
+	sed -Ei 's/^(libffi-sys\s*=)\s*"([^"]+)".*/\1 { version = "\2", features = ["system"] }/' \
+		ext/ffi/Cargo.toml
+
+	# Link with system-provided libz.
+	sed -Ei '/^libz-sys\s*/{ s/"static"// }' \
+		ext/node/Cargo.toml
+
+	# Rust target triple.
+	local target=$(rustc -vV | sed -n 's/host: //p')
+
+	# NOTE: zstd "pkg-config" feature doesn't work, so we have to do this.
+	mkdir -p .cargo
+	cat >> .cargo/config.toml <<-EOF
+		[target.$target]
+		zstd = { rustc-link-lib = ["zstd"] }
+	EOF
+
+	cargo fetch --target="$CTARGET" --locked
+
+	local getrandom1_ver="$(_crate_ver 'getrandom' '^0\\.1\\..*')"
+	[ "$getrandom1_ver" ] || die 'Remove getrandom1 workaround'
+
+	local stacker_ver="$(_crate_ver 'stacker')"
+	[ "$stacker_ver" = "$_stacker_ver" ] || die "Update _stacker_ver to $stacker_ver"
+
+	local rusty_v8_ver="$(_crate_ver 'v8')"
+	[ "$rusty_v8_ver" = "$_rusty_v8_ver" ] || die "Update _rusty_v8_ver to $rusty_v8_ver"
+}
+
+build() {
+	export CLANG_BASE_PATH="$(llvm-config --prefix)"
+	# Build with -g1 instead of -g (which is -g2); -g is added by abuild
+	# after sourcing APKBUILD, so is must be modified in a function.
+	export CFLAGS="${CFLAGS/-g/-g1}"
+	export CXXFLAGS="${CXXFLAGS/-g/-g1}"
+
+	cargo auditable build $_cargo_opts --release -vv
+
+	mkdir -p comp
+	local shell; for shell in bash fish zsh; do
+		./target/release/deno completions $shell > comp/deno.$shell
+	done
+}
+
+check() {
+	export CLANG_BASE_PATH="$(llvm-config --prefix)"
+
+	# Build tests in release mode to avoid rebuilding v8 again (in debug mode).
+	local cargo_opts="$_cargo_opts --release --no-fail-fast"
+
+	cargo test $cargo_opts --exclude test_ffi
+
+	case "$CARCH" in
+		# basic test fails on aarch64.
+		# https://gitlab.alpinelinux.org/alpine/aports/-/merge_requests/48979#note_323013
+		# TODO: Figure out why...
+		aarch64) cargo test $cargo_opts --package test_ffi || true;;
+		*) cargo test $cargo_opts --package test_ffi;;
+	esac
+}
+
+package() {
+	install -D -m755 target/release/$pkgname -t "$pkgdir"/usr/bin/
+
+	install -D -m644 comp/$pkgname.bash "$pkgdir"/usr/share/bash-completion/completions/$pkgname
+	install -D -m644 comp/$pkgname.fish "$pkgdir"/usr/share/fish/vendor_completions.d/$pkgname.fish
+	install -D -m644 comp/$pkgname.zsh "$pkgdir"/usr/share/zsh/site-functions/_$pkgname
+}
+
+# Resolves version(s) of crate $1 in the depenendecy graph that satisfies
+# regular expression $2 (default is ".*").
+_crate_ver() {
+	local name="$1"
+	local ver_regex="${2:-".*"}"
+
+	cargo metadata --locked --format-version 1 \
+		| jq -r ".packages[] | select(.name == \"$1\" and (.version | test(\"$2\"))) | .version"
+}
+
+sha512sums="
+651619eb40be20a2665315f68048908bb8ae87065a1be0d10c3597bf23c84ecf7de8680108a79cfba123b5f0f68ba903b87b38ec323f082ac7d41cc24cf7dc76  deno-1.35.2.tar.gz
+0b027f2769a3c15327d6480268de52391cf89a0f796363672bd77c17663fd883ee647350590ed8c4206bdd0fb604d89f582b14c3c7e8b30ba58c605875585aaa  deno-getrandom-0.1.16.tar.gz
+cb675548542eca3da719211141be8b454bfe40b497ef85afb9fc585815cf7a7f3c66baf08241c22d30ddb36b0bb9e2f4038b4d39ef6af5ed77c0d71dd29ce2d4  deno-rusty_v8-0.74.2.tar.gz
+88412e029262a0dffe295a648ba87ec50f782afceb19fbe1eda4239c54fbd56432106fcea5d58c93bfbb5b91317dc6642fc7a8e72136df0ef600c77d99e0970f  deno-stacker-0.1.15.tar.gz
+ecea1432982e55c462f54aae135e1b7d0c964d9faa2f245cf114910e81ba6b3a06379c11ecd56f82cf3528f478cd394ad759cb246b3cdf70f6a40be744e17ecd  deno-generate_shim_headers.py
+e96d978ef457c665fb2c8cd1b8f02974e89abecef2df1074507ae4a1546ff7592b85836565702175b4abff9af81def318fdb054d16205e782ab49487a774f7c5  getrandom-0.1-musl-compat.patch
+08d09c979191d422d71a6db971bdf4472b322ef829b238519bc35db22f9b4639cca40342c7786777684a4ffa4af2c64febf9d9224b2d7d2d33f63671acfa6d5b  stacker-detect-stack-overflow.patch
+f2352e197c1da8011b9c11f19150e85dd48cc9356fdc837ccc9ae74a47ee5cde736c838509646527be529b21badd2d25e002a22cc9cb265d2ceedecd9f808b09  stacker-disable-guess_os_stack_limit.patch
+26de81d145e898983befdd70e00ba6b15d898c280580a9403a8e4921825e754788aa97ff9b80992799791d3ba3d2ed3862a1635f2bc16f26ed70802b5fe1f304  v8-build.patch
+858c7fa2714d290180e4e6b0000ee371f0540c7353762e6b5953f5e673a1800f6feab65e1dc525dab04caf64c4d689ac35700631337fabb4152cb5c375300cdf  v8-musl-monotonic-pthread-cont_timedwait.patch
+a911c92e470823f3b6b578d1dc5784222769228e22cca3dc5bf9895e39835d578b28f48e763b5f92964e76c19f0b10a7a67c0575494d8f74dc1094f508a8efb1  v8-no-execinfo.patch
+35eb224ecab762a972fff4bbc721972d686aec28d901481922b07cabf0c41ca441dc6b47257504932ee1d50011db317b51052b06455e89f351263689f29b5d3c  v8-revert-llvm16-linker-flag.patch
+cb00ccb2055a53100c8d3e2d038443a2028461c62c17c7d0a50a5a33f2af480a9bc6cc1c9b465f9f5be063716e2315127006384e62f0114e9994069cb84f7d93  v8-use-alpine-target.patch
+1be3c56e3aba4354abaff0a612380ab749dac98599a3dd50640b5d55306a27de64cd827bae7b3bd5fa059049a895bb6e44422aa7007f640482de894e13609d86  v8-use-system-zlib.patch
+2b528ba812135e4b9bf84f0d5283a7846db7b72c76efdba78fea20f96f33dffc6c0acf2f8154f0757dcc768f5725d97c3b76847fcf33e9090f58abfe07b89b68  v8-use-system-icu.patch
+f09d070339db5bf88b708714479133cc081d8d5e97a15f94251b121c95524f374b0132f61aa3454218d2532b3ad0d479c4d93bb9233b3404dd749f82cc267c48  upgrade-feature.patch
+23b69b9c0d150c6af0a0aa073ad632bcb3365be0ca79abe2522bc32810ab73aa9dead1288775c0471170673aeaf4aea7977bc7b23eee25b4659e01018d51e04e  glibc_version-musl-compat.patch
+90594a14dd095491e94fb47ab0521b07731767f194464ea0dc4049c34e26b8e8a1cc4d1d2ba2d5711c77ab263e2864c917bac34434e19a8fb9e09c0c1ed42f7f  fix-testing-domains.patch
+9abf55fb0c0b71dd4f86cae0d360ada369bc4bd1ac0ab36de01ef99377f099ec89a53dbe4e3f69be0b33c3376afa72734b0f59340bea8467cfeca11f108a1218  ignore-tests-broken-on-ci.patch
+4f6e83252a4a1834fef839720aa8ee0ee7c25af4c526b349c857e172053e8e5d60cbe3a363dd6be3c4bc5792b952dce1934cc53a9e44835a0281058ec4c1e28a  unbundle-ca-certs.patch
+a4491589ae729bc169165823aa785d16408d2e0bde7f38418fc30dd2258c463774d7f474ef6e4d4313713431859a78e47aa3c2e7925cfff3d5a5c8440d15355b  cargo.lock.patch
+"
