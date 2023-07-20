@@ -1,6 +1,8 @@
 data_dir             = "/var/lib/nomad"
 disable_update_check = true
-enable_syslog        = true
+# Logging is handled by supervise-daemon so disable
+# Syslog to avoid double logging.
+enable_syslog        = false
 plugin_dir           = "/usr/lib/nomad/plugins"
 
 server {
