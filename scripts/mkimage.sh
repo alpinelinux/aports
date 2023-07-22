@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # apk add \
-#	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso
+#	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso cmd:mksquashfs
 #	(for efi:) mtools grub-efi
 
 # FIXME: clean workdir out of unneeded sections
