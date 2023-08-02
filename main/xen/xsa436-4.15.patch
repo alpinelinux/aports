@@ -1,0 +1,288 @@
+From bcb0777692eecb6037f6c13240df591fa70e75ee Mon Sep 17 00:00:00 2001
+From: Luca Fancellu <luca.fancellu@arm.com>
+Date: Mon, 17 Jul 2023 13:25:46 +0100
+Subject: [PATCH] xen/arm: Add Cortex-A77 erratum 1508412 handling
+
+Cortex-A77 cores (r0p0, r1p0) could deadlock on a sequence of a
+store-exclusive or read of PAR_EL1 and a load with device or non-cacheable
+memory attributes.
+A workaround is available, but it depends on a firmware counterpart.
+
+The proposed workaround from the errata document is to modify the software
+running at EL1 and above to include a DMB SY before and after accessing
+PAR_EL1.
+
+In conjunction to the above, the firmware needs to use a specific write
+sequence to several IMPLEMENTATION DEFINED registers to have the hardware
+insert a DMB SY after all load-exclusive and store-exclusive instructions.
+
+Apply the workaround to Xen where PAR_EL1 is read, implementing an helper
+function to do that.
+Since Xen can be interrupted by irqs in any moment, add a barrier on
+entry/exit when we are running on the affected cores.
+
+A guest without the workaround can deadlock the system, so warn the users
+of Xen with the above type of cores to use only trusted guests, by
+printing a message on Xen startup.
+
+Signed-off-by: Luca Fancellu <luca.fancellu@arm.com>
+Reviewed-by: Bertrand Marquis <bertrand.marquis@arm.com>
+Reviewed-by: Julien Grall <jgrall@amazon.com>
+---
+ SUPPORT.md                       |  2 ++
+ docs/misc/arm/silicon-errata.txt |  1 +
+ xen/arch/arm/Kconfig             | 21 +++++++++++++++++++++
+ xen/arch/arm/arm64/entry.S       | 19 +++++++++++++++++++
+ xen/arch/arm/cpuerrata.c         | 16 ++++++++++++----
+ xen/arch/arm/domain.c            |  2 +-
+ xen/include/asm-arm/arm64/page.h | 12 ++++++------
+ xen/include/asm-arm/cpufeature.h |  3 ++-
+ xen/include/asm-arm/sysregs.h    | 24 ++++++++++++++++++++++++
+ 9 files changed, 88 insertions(+), 12 deletions(-)
+
+diff --git a/SUPPORT.md b/SUPPORT.md
+index 0fb262f81f40..d5719f005ba9 100644
+--- a/SUPPORT.md
++++ b/SUPPORT.md
+@@ -39,8 +39,10 @@ supported in this document.
+ 
+     Status: Supported
+     Status, Cortex A57 r0p0-r1p1: Supported, not security supported
++    Status, Cortex A77 r0p0-r1p0: Supported, not security supported
+ 
+ For the Cortex A57 r0p0 - r1p1, see Errata 832075.
++For the Cortex A77 r0p0 - r1p0, see Errata 1508412.
+ 
+ ## Host hardware support
+ 
+diff --git a/docs/misc/arm/silicon-errata.txt b/docs/misc/arm/silicon-errata.txt
+index 1925d8fd4ee0..c4e82df53566 100644
+--- a/docs/misc/arm/silicon-errata.txt
++++ b/docs/misc/arm/silicon-errata.txt
+@@ -58,4 +58,5 @@ stable hypervisors.
+ | ARM            | Cortex-A76      | #1286807        | ARM64_ERRATUM_1286807   |
+ | ARM            | Neoverse-N1     | #1165522        | N/A
+ | ARM            | Neoverse-N1     | #1286807        | ARM64_ERRATUM_1286807   |
++| ARM            | Cortex-A77      | #1508412        | ARM64_ERRATUM_1508412   |
+ | ARM            | MMU-500         | #842869         | N/A                     |
+diff --git a/xen/arch/arm/Kconfig b/xen/arch/arm/Kconfig
+index 330bbf6232d4..e3c8b895943e 100644
+--- a/xen/arch/arm/Kconfig
++++ b/xen/arch/arm/Kconfig
+@@ -284,6 +284,27 @@ config ARM64_ERRATUM_1286807
+ 
+ 	  If unsure, say Y.
+ 
++config ARM64_ERRATUM_1508412
++	bool "Cortex-A77: 1508412: possible deadlock on sequence of NC/Device load and store exclusive or PAR read"
++	default y
++	depends on ARM_64
++	help
++	  This option adds a workaround for Arm Cortex-A77 erratum 1508412.
++
++	  Affected Cortex-A77 cores (r0p0, r1p0) could deadlock on a sequence
++	  of a store-exclusive or read of PAR_EL1 and a load with device or
++	  non-cacheable memory attributes. The workaround depends on a firmware
++	  counterpart.
++
++	  Xen guests must also have the workaround implemented or they can
++	  deadlock the system.
++
++	  Work around the issue by inserting DMB SY barriers around PAR_EL1
++	  register reads and warning Xen users. The DMB barrier is sufficient
++	  to prevent a speculative PAR_EL1 read.
++
++	  If unsure, say Y.
++
+ endmenu
+ 
+ config ARM64_HARDEN_BRANCH_PREDICTOR
+diff --git a/xen/arch/arm/arm64/entry.S b/xen/arch/arm/arm64/entry.S
+index a8c214506786..4f33cef0b3cd 100644
+--- a/xen/arch/arm/arm64/entry.S
++++ b/xen/arch/arm/arm64/entry.S
+@@ -112,6 +112,16 @@
+  * position on the stack before.
+  */
+         .macro  entry, hyp, compat, save_x0_x1=1
++
++        /*
++         * Ensure any PAR_EL1 reads complete, in case we were interrupted
++         * between the PAR_EL1 read and the memory barrier for the erratum
++         * 1508412 workaround.
++         */
++        alternative_if ARM64_WORKAROUND_1508412
++        dmb sy
++        alternative_else_nop_endif
++
+         sub     sp, sp, #(UREGS_SPSR_el1 - UREGS_LR) /* CPSR, PC, SP, LR */
+         push    x28, x29
+         push    x26, x27
+@@ -465,6 +475,15 @@ return_from_trap:
+ 
+         ldr     lr, [sp], #(UREGS_SPSR_el1 - UREGS_LR) /* CPSR, PC, SP, LR */
+ 
++        /*
++         * Ensure any device/NC reads complete, in case we were interrupted
++         * between the memory barrier for the erratum 1508412 workaround and
++         * any PAR_EL1 read.
++         */
++        alternative_if ARM64_WORKAROUND_1508412
++        dmb sy
++        alternative_else_nop_endif
++
+         eret
+         sb
+ 
+diff --git a/xen/arch/arm/cpuerrata.c b/xen/arch/arm/cpuerrata.c
+index ae649d16ef02..ea680fac2e44 100644
+--- a/xen/arch/arm/cpuerrata.c
++++ b/xen/arch/arm/cpuerrata.c
+@@ -668,6 +668,14 @@ static const struct arm_cpu_capabilities arm_errata[] = {
+         .capability = ARM64_WORKAROUND_AT_SPECULATE,
+         MIDR_ALL_VERSIONS(MIDR_CORTEX_A57),
+     },
++#ifdef CONFIG_ARM64_ERRATUM_1508412
++    {
++        /* Cortex-A77 r0p0 - r1p0 */
++        .desc = "ARM erratum 1508412 (hypervisor portion)",
++        .capability = ARM64_WORKAROUND_1508412,
++        MIDR_RANGE(MIDR_CORTEX_A77, 0, 1),
++    },
++#endif
+     {
+         /* Cortex-A55 (All versions as erratum is open in SDEN v14) */
+         .desc = "ARM erratum 1530923",
+@@ -686,11 +694,11 @@ void __init enable_errata_workarounds(void)
+ {
+     enable_cpu_capabilities(arm_errata);
+ 
+-#ifdef CONFIG_ARM64_ERRATUM_832075
+-    if ( cpus_have_cap(ARM64_WORKAROUND_DEVICE_LOAD_ACQUIRE) )
++#if defined(CONFIG_ARM64_ERRATUM_832075) || defined(CONFIG_ARM64_ERRATUM_1508412)
++    if ( cpus_have_cap(ARM64_WORKAROUND_DEVICE_LOAD_ACQUIRE) ||
++         cpus_have_cap(ARM64_WORKAROUND_1508412) )
+     {
+-        printk_once("**** This CPU is affected by the errata 832075.                      ****\n"
+-                    "**** Guests without CPU erratum workarounds can deadlock the system! ****\n"
++        printk_once("**** Guests without CPU erratum workarounds can deadlock the system! ****\n"
+                     "**** Only trusted guests should be used.                             ****\n");
+ 
+         /* Taint the machine has being insecure */
+diff --git a/xen/arch/arm/domain.c b/xen/arch/arm/domain.c
+index 5eaf4c718ec3..961b6dc82a56 100644
+--- a/xen/arch/arm/domain.c
++++ b/xen/arch/arm/domain.c
+@@ -136,7 +136,7 @@ static void ctxt_switch_from(struct vcpu *p)
+     p->arch.ttbr1 = READ_SYSREG64(TTBR1_EL1);
+     if ( is_32bit_domain(p->domain) )
+         p->arch.dacr = READ_SYSREG(DACR32_EL2);
+-    p->arch.par = READ_SYSREG64(PAR_EL1);
++    p->arch.par = read_sysreg_par();
+ #if defined(CONFIG_ARM_32)
+     p->arch.mair0 = READ_CP32(MAIR0);
+     p->arch.mair1 = READ_CP32(MAIR1);
+diff --git a/xen/include/asm-arm/arm64/page.h b/xen/include/asm-arm/arm64/page.h
+index 0cba2663733b..fbfe67bf8951 100644
+--- a/xen/include/asm-arm/arm64/page.h
++++ b/xen/include/asm-arm/arm64/page.h
+@@ -48,11 +48,11 @@ static inline void invalidate_icache_local(void)
+ /* Ask the MMU to translate a VA for us */
+ static inline uint64_t __va_to_par(vaddr_t va)
+ {
+-    uint64_t par, tmp = READ_SYSREG64(PAR_EL1);
++    uint64_t par, tmp = read_sysreg_par();
+ 
+     asm volatile ("at s1e2r, %0;" : : "r" (va));
+     isb();
+-    par = READ_SYSREG64(PAR_EL1);
++    par = read_sysreg_par();
+     WRITE_SYSREG64(tmp, PAR_EL1);
+     return par;
+ }
+@@ -60,28 +60,28 @@ static inline uint64_t __va_to_par(vaddr_t va)
+ /* Ask the MMU to translate a Guest VA for us */
+ static inline uint64_t gva_to_ma_par(vaddr_t va, unsigned int flags)
+ {
+-    uint64_t par, tmp = READ_SYSREG64(PAR_EL1);
++    uint64_t par, tmp = read_sysreg_par();
+ 
+     if ( (flags & GV2M_WRITE) == GV2M_WRITE )
+         asm volatile ("at s12e1w, %0;" : : "r" (va));
+     else
+         asm volatile ("at s12e1r, %0;" : : "r" (va));
+     isb();
+-    par = READ_SYSREG64(PAR_EL1);
++    par = read_sysreg_par();
+     WRITE_SYSREG64(tmp, PAR_EL1);
+     return par;
+ }
+ 
+ static inline uint64_t gva_to_ipa_par(vaddr_t va, unsigned int flags)
+ {
+-    uint64_t par, tmp = READ_SYSREG64(PAR_EL1);
++    uint64_t par, tmp = read_sysreg_par();
+ 
+     if ( (flags & GV2M_WRITE) == GV2M_WRITE )
+         asm volatile ("at s1e1w, %0;" : : "r" (va));
+     else
+         asm volatile ("at s1e1r, %0;" : : "r" (va));
+     isb();
+-    par = READ_SYSREG64(PAR_EL1);
++    par = read_sysreg_par();
+     WRITE_SYSREG64(tmp, PAR_EL1);
+     return par;
+ }
+diff --git a/xen/include/asm-arm/cpufeature.h b/xen/include/asm-arm/cpufeature.h
+index d4e7cde675e5..41aca9c58c6d 100644
+--- a/xen/include/asm-arm/cpufeature.h
++++ b/xen/include/asm-arm/cpufeature.h
+@@ -53,8 +53,9 @@
+ #define ARM_WORKAROUND_BHB_LOOP_24 13
+ #define ARM_WORKAROUND_BHB_LOOP_32 14
+ #define ARM_WORKAROUND_BHB_SMCC_3 15
++#define ARM64_WORKAROUND_1508412 16
+ 
+-#define ARM_NCAPS           16
++#define ARM_NCAPS           17
+ 
+ #ifndef __ASSEMBLY__
+ 
+diff --git a/xen/include/asm-arm/sysregs.h b/xen/include/asm-arm/sysregs.h
+index 5c5c51bbcdbf..61e30c9e517c 100644
+--- a/xen/include/asm-arm/sysregs.h
++++ b/xen/include/asm-arm/sysregs.h
+@@ -9,6 +9,30 @@
+ # error "unknown ARM variant"
+ #endif
+ 
++#ifndef __ASSEMBLY__
++
++#include <asm/alternative.h>
++
++static inline register_t read_sysreg_par(void)
++{
++    register_t par_el1;
++
++    /*
++     * On Cortex-A77 r0p0 and r1p0, read access to PAR_EL1 shall include a
++     * DMB SY before and after accessing it, as part of the workaround for the
++     * errata 1508412.
++     */
++    asm volatile(ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_1508412,
++                 CONFIG_ARM64_ERRATUM_1508412));
++    par_el1 = READ_SYSREG64(PAR_EL1);
++    asm volatile(ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_1508412,
++                 CONFIG_ARM64_ERRATUM_1508412));
++
++    return par_el1;
++}
++
++#endif /*  !__ASSEMBLY__  */
++
+ #endif /* __ASM_ARM_SYSREGS_H */
+ /*
+  * Local variables:
+-- 
+2.40.1
+
