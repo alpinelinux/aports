@@ -1,0 +1,271 @@
+From 89e6aa2c5346999aa4019eac9b08d79afe990766 Mon Sep 17 00:00:00 2001
+From: "lauren n. liberda" <lauren@selfisekai.rocks>
+Date: Sun, 20 Aug 2023 04:44:25 +0200
+Subject: [PATCH] Revert "Reland "Reland "mte: refactor the tagging functions
+ to use ifuncs"""
+
+This reverts commit b2c4ff8d5d8cdbf2487363a5b8d68b6485706069.
+---
+ .../partition_allocator/partition_root.cc     |  4 ++
+ base/allocator/partition_allocator/tagging.cc | 56 ++++++-------------
+ base/allocator/partition_allocator/tagging.h  | 43 +++++++++-----
+ .../partition_allocator/tagging_unittest.cc   |  8 +++
+ 4 files changed, 60 insertions(+), 51 deletions(-)
+
+diff --git a/base/allocator/partition_allocator/partition_root.cc b/base/allocator/partition_allocator/partition_root.cc
+index 3fc0b11fb7156..813afbf836098 100644
+--- a/base/allocator/partition_allocator/partition_root.cc
++++ b/base/allocator/partition_allocator/partition_root.cc
+@@ -868,6 +868,10 @@ void PartitionRoot::Init(PartitionOptions opts) {
+       return;
+     }
+ 
++    // Swaps out the active no-op tagging intrinsics with MTE-capable ones, if
++    // running on the right hardware.
++    ::partition_alloc::internal::InitializeMTESupportIfNeeded();
++
+ #if BUILDFLAG(HAS_64_BIT_POINTERS)
+     // Reserve address space for partition alloc.
+     internal::PartitionAddressSpace::Init();
+diff --git a/base/allocator/partition_allocator/tagging.cc b/base/allocator/partition_allocator/tagging.cc
+index 6f0d49dffc3c6..63368e870fe0c 100644
+--- a/base/allocator/partition_allocator/tagging.cc
++++ b/base/allocator/partition_allocator/tagging.cc
+@@ -12,9 +12,7 @@
+ 
+ #if PA_CONFIG(HAS_MEMORY_TAGGING)
+ #include <arm_acle.h>
+-#include <asm/hwcap.h>
+ #include <sys/auxv.h>
+-#include <sys/ifunc.h>
+ #include <sys/prctl.h>
+ #define PR_SET_TAGGED_ADDR_CTRL 55
+ #define PR_GET_TAGGED_ADDR_CTRL 56
+@@ -121,6 +119,12 @@ namespace {
+   return ret;
+ }
+ 
++#if PA_CONFIG(HAS_MEMORY_TAGGING)
++static bool HasCPUMemoryTaggingExtension() {
++  return base::CPU::GetInstanceNoAllocation().has_mte();
++}
++#endif  // PA_CONFIG(HAS_MEMORY_TAGGING)
++
+ #if PA_CONFIG(HAS_MEMORY_TAGGING)
+ void* TagRegionRandomlyForMTE(void* ptr, size_t sz, uint64_t mask) {
+   // Randomly tag a region (MTE-enabled systems only). The first 16-byte
+@@ -162,6 +166,7 @@ void* RemaskVoidPtrForMTE(void* ptr) {
+   }
+   return nullptr;
+ }
++#endif
+ 
+ void* TagRegionIncrementNoOp(void* ptr, size_t sz) {
+   // Region parameters are checked even on non-MTE systems to check the
+@@ -178,49 +183,24 @@ void* TagRegionRandomlyNoOp(void* ptr, size_t sz, uint64_t mask) {
+ void* RemaskVoidPtrNoOp(void* ptr) {
+   return ptr;
+ }
+-#endif
+ 
+ }  // namespace
+ 
++void InitializeMTESupportIfNeeded() {
+ #if PA_CONFIG(HAS_MEMORY_TAGGING)
+-using RemaskPtrInternalFn = void*(void* ptr);
+-using TagMemoryRangeIncrementInternalFn = void*(void* ptr, size_t size);
+-
+-using TagMemoryRangeRandomlyInternalFn = void*(void* ptr,
+-                                               size_t size,
+-                                               uint64_t mask);
+-
+-extern "C" TagMemoryRangeIncrementInternalFn(
+-    *ResolveTagMemoryRangeIncrement(uint64_t hwcap, struct __ifunc_arg_t* hw)) {
+-  if ((hwcap & _IFUNC_ARG_HWCAP) && (hw->_hwcap2 & HWCAP2_MTE)) {
+-    return TagRegionIncrementForMTE;
++  if (HasCPUMemoryTaggingExtension()) {
++    global_remask_void_ptr_fn = RemaskVoidPtrForMTE;
++    global_tag_memory_range_increment_fn = TagRegionIncrementForMTE;
++    global_tag_memory_range_randomly_fn = TagRegionRandomlyForMTE;
+   }
+-  return TagRegionIncrementNoOp;
+-}
+-
+-extern "C" TagMemoryRangeRandomlyInternalFn(
+-    *ResolveTagMemoryRandomly(uint64_t hwcap, struct __ifunc_arg_t* hw)) {
+-  if ((hwcap & _IFUNC_ARG_HWCAP) && (hw->_hwcap2 & HWCAP2_MTE)) {
+-    return TagRegionRandomlyForMTE;
+-  }
+-  return TagRegionRandomlyNoOp;
+-}
+-
+-extern "C" RemaskPtrInternalFn(
+-    *ResolveRemaskPointer(uint64_t hwcap, struct __ifunc_arg_t* hw)) {
+-  if ((hwcap & _IFUNC_ARG_HWCAP) && (hw->_hwcap2 & HWCAP2_MTE)) {
+-    return RemaskVoidPtrForMTE;
+-  }
+-  return RemaskVoidPtrNoOp;
++#endif
+ }
+ 
+-void* TagMemoryRangeIncrementInternal(void* ptr, size_t size)
+-    __attribute__((ifunc("ResolveTagMemoryRangeIncrement")));
+-void* TagMemoryRangeRandomlyInternal(void* ptr, size_t size, uint64_t mask)
+-    __attribute__((ifunc("ResolveTagMemoryRandomly")));
+-void* RemaskPointerInternal(void* ptr)
+-    __attribute__((ifunc("ResolveRemaskPointer")));
+-#endif // PA_CONFIG(HAS_MEMORY_TAGGING)
++RemaskPtrInternalFn* global_remask_void_ptr_fn = RemaskVoidPtrNoOp;
++TagMemoryRangeIncrementInternalFn* global_tag_memory_range_increment_fn =
++    TagRegionIncrementNoOp;
++TagMemoryRangeRandomlyInternalFn* global_tag_memory_range_randomly_fn =
++    TagRegionRandomlyNoOp;
+ 
+ TagViolationReportingMode GetMemoryTaggingModeForCurrentThread() {
+ #if PA_CONFIG(HAS_MEMORY_TAGGING)
+diff --git a/base/allocator/partition_allocator/tagging.h b/base/allocator/partition_allocator/tagging.h
+index 858c5c3f69fc5..476e84e849c12 100644
+--- a/base/allocator/partition_allocator/tagging.h
++++ b/base/allocator/partition_allocator/tagging.h
+@@ -56,16 +56,32 @@ void ChangeMemoryTaggingModeForAllThreadsPerProcess(TagViolationReportingMode);
+ PA_COMPONENT_EXPORT(PARTITION_ALLOC)
+ TagViolationReportingMode GetMemoryTaggingModeForCurrentThread();
+ 
+-// These forward-defined functions do not really exist in tagging.cc, they're resolved
+-// by the dynamic linker to MTE-capable versions on the right hardware.
+-#if PA_CONFIG(HAS_MEMORY_TAGGING)
+-PA_COMPONENT_EXPORT(PARTITION_ALLOC)
+-void* TagMemoryRangeIncrementInternal(void* ptr, size_t size);
+-PA_COMPONENT_EXPORT(PARTITION_ALLOC)
+-void* TagMemoryRangeRandomlyInternal(void* ptr, size_t size, uint64_t mask);
+-PA_COMPONENT_EXPORT(PARTITION_ALLOC)
+-void* RemaskPointerInternal(void* ptr);
+-#endif
++// Called by the partition allocator after initial startup, this detects MTE
++// support in the current CPU and replaces the active tagging intrinsics with
++// MTE versions if needed.
++PA_COMPONENT_EXPORT(PARTITION_ALLOC) void InitializeMTESupportIfNeeded();
++
++// These global function pointers hold the implementations of the tagging
++// intrinsics (TagMemoryRangeRandomly, TagMemoryRangeIncrement, RemaskPtr).
++// They are designed to be callable without taking a branch. They are initially
++// set to no-op functions in tagging.cc, but can be replaced with MTE-capable
++// ones through InitializeMTEIfNeeded(). This is conceptually similar to an
++// IFUNC, even though less secure. These function pointers were introduced to
++// support older Android releases. With the removal of support for Android M,
++// it became possible to use IFUNC instead.
++// TODO(bartekn): void* -> uintptr_t
++using RemaskPtrInternalFn = void*(void* ptr);
++using TagMemoryRangeIncrementInternalFn = void*(void* ptr, size_t size);
++
++using TagMemoryRangeRandomlyInternalFn = void*(void* ptr,
++                                               size_t size,
++                                               uint64_t mask);
++extern PA_COMPONENT_EXPORT(PARTITION_ALLOC)
++    TagMemoryRangeRandomlyInternalFn* global_tag_memory_range_randomly_fn;
++extern PA_COMPONENT_EXPORT(PARTITION_ALLOC)
++    TagMemoryRangeIncrementInternalFn* global_tag_memory_range_increment_fn;
++extern PA_COMPONENT_EXPORT(PARTITION_ALLOC)
++    RemaskPtrInternalFn* global_remask_void_ptr_fn;
+ 
+ // Increments the tag of the memory range ptr. Useful for provable revocations
+ // (e.g. free). Returns the pointer with the new tag. Ensures that the entire
+@@ -75,7 +91,7 @@ void* RemaskPointerInternal(void* ptr);
+ template <typename T>
+ PA_ALWAYS_INLINE T* TagMemoryRangeIncrement(T* ptr, size_t size) {
+ #if PA_CONFIG(HAS_MEMORY_TAGGING)
+-  return reinterpret_cast<T*>(TagMemoryRangeIncrementInternal(ptr, size));
++  return reinterpret_cast<T*>(global_tag_memory_range_increment_fn(ptr, size));
+ #else
+   return ptr;
+ #endif
+@@ -93,7 +109,8 @@ PA_ALWAYS_INLINE T* TagMemoryRangeRandomly(T* ptr,
+                                            size_t size,
+                                            uint64_t mask = 0u) {
+ #if PA_CONFIG(HAS_MEMORY_TAGGING)
+-  return reinterpret_cast<T*>(TagMemoryRangeRandomlyInternal(ptr, size, mask));
++  return reinterpret_cast<T*>(
++      global_tag_memory_range_randomly_fn(ptr, size, mask));
+ #else
+   return ptr;
+ #endif
+@@ -108,7 +125,7 @@ PA_ALWAYS_INLINE void* TagMemoryRangeRandomly(uintptr_t ptr,
+ template <typename T>
+ PA_ALWAYS_INLINE T* TagPtr(T* ptr) {
+ #if PA_CONFIG(HAS_MEMORY_TAGGING)
+-  return reinterpret_cast<T*>(RemaskPointerInternal(ptr));
++  return reinterpret_cast<T*>(global_remask_void_ptr_fn(ptr));
+ #else
+   return ptr;
+ #endif
+diff --git a/base/allocator/partition_allocator/tagging_unittest.cc b/base/allocator/partition_allocator/tagging_unittest.cc
+index 5c25a46e62015..fab5db7212a34 100644
+--- a/base/allocator/partition_allocator/tagging_unittest.cc
++++ b/base/allocator/partition_allocator/tagging_unittest.cc
+@@ -16,6 +16,7 @@ namespace partition_alloc::internal {
+ 
+ // Check whether we can call the tagging intrinsics safely on all architectures.
+ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeRandomlySafe) {
++  ::partition_alloc::internal::InitializeMTESupportIfNeeded();
+   uintptr_t buffer =
+       AllocPages(PageAllocationGranularity(), PageAllocationGranularity(),
+                  PageAccessibilityConfiguration(
+@@ -31,6 +32,7 @@ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeRandomlySafe) {
+ }
+ 
+ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeIncrementSafe) {
++  ::partition_alloc::internal::InitializeMTESupportIfNeeded();
+   base::CPU cpu;
+   uintptr_t buffer =
+       AllocPages(PageAllocationGranularity(), PageAllocationGranularity(),
+@@ -52,6 +54,7 @@ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeIncrementSafe) {
+ #if defined(ARCH_CPU_64_BITS)
+ // Size / alignment constraints are only enforced on 64-bit architectures.
+ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeBadSz) {
++  ::partition_alloc::internal::InitializeMTESupportIfNeeded();
+   base::CPU cpu;
+   uintptr_t buffer =
+       AllocPages(PageAllocationGranularity(), PageAllocationGranularity(),
+@@ -68,6 +71,7 @@ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeBadSz) {
+ }
+ 
+ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeRandomlyNoSz) {
++  ::partition_alloc::internal::InitializeMTESupportIfNeeded();
+   base::CPU cpu;
+   uintptr_t buffer =
+       AllocPages(PageAllocationGranularity(), PageAllocationGranularity(),
+@@ -83,6 +87,7 @@ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeRandomlyNoSz) {
+ }
+ 
+ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeRandomlyBadAlign) {
++  ::partition_alloc::internal::InitializeMTESupportIfNeeded();
+   base::CPU cpu;
+   uintptr_t buffer =
+       AllocPages(PageAllocationGranularity(), PageAllocationGranularity(),
+@@ -99,6 +104,7 @@ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeRandomlyBadAlign) {
+ }
+ 
+ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeIncrementBadSz) {
++  ::partition_alloc::internal::InitializeMTESupportIfNeeded();
+   base::CPU cpu;
+   uintptr_t buffer =
+       AllocPages(PageAllocationGranularity(), PageAllocationGranularity(),
+@@ -114,6 +120,7 @@ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeIncrementBadSz) {
+ }
+ 
+ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeIncrementNoSz) {
++  ::partition_alloc::internal::InitializeMTESupportIfNeeded();
+   base::CPU cpu;
+   uintptr_t buffer =
+       AllocPages(PageAllocationGranularity(), PageAllocationGranularity(),
+@@ -129,6 +136,7 @@ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeIncrementNoSz) {
+ }
+ 
+ TEST(PartitionAllocMemoryTaggingTest, TagMemoryRangeIncrementBadAlign) {
++  ::partition_alloc::internal::InitializeMTESupportIfNeeded();
+   base::CPU cpu;
+   uintptr_t buffer =
+       AllocPages(PageAllocationGranularity(), PageAllocationGranularity(),
+-- 
+2.41.0
+
