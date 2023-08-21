@@ -9,6 +9,10 @@ done
 
 # Prefer user defined ELECTRON_USER_FLAGS (from env) over system
 # default ELECTRON_FLAGS (from /etc/electron/default.conf).
-ELECTRON_FLAGS="$ELECTRON_FLAGS ${ELECTRON_USER_FLAGS:-"$ELECTRON_USER_FLAGS"}"
+export ELECTRON_FLAGS="$ELECTRON_FLAGS ${ELECTRON_USER_FLAGS:-"$ELECTRON_USER_FLAGS"}"
+
+if [ "$ELECTRON_RUN_AS_NODE" == "1" ] && [ "$ELECTRON_STILL_PASS_THE_DEFAULT_FLAGS" != "1" ]; then
+	exec "/usr/lib/electron/electron" "$@"
+fi
 
 exec "/usr/lib/electron/electron" "$@" ${ELECTRON_FLAGS}
