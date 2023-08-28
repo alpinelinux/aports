@@ -1,0 +1,186 @@
+From 5cdc3a4866bf6e09c10a3cb18581ae32f6e42be1 Mon Sep 17 00:00:00 2001
+From: Alex Dowad <alexinbeijing@gmail.com>
+Date: Fri, 11 Aug 2023 16:00:49 +0200
+Subject: [PATCH] Support forking SIP calls
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When a SIP call is forked, the client will send an INVITE with the
+same Call ID and same From tag as an earlier INVITE, but with a
+different Branch ID in the topmost Via header.
+
+There were two issues with sofia-sip which prevented call forking from
+working; first, its logic for merging SIP requests (as per RFC3261
+section 8.2.2.2) did not respect the Branch ID. It would merge requests
+with a different Branch ID, which is contrary to RFC3261 section 17.2.3.
+
+Second, sofia-sip has some logic for checking whether incoming requests
+are part of an established SIP dialog or not. The matching criteria
+were such that incoming INVITE requests forking a call would be
+treated as part of the already established dialog, and then an error
+would be returned to the client, essentially telling the client that
+this new INVITE is invalid because the call is already established.
+
+Therefore, add some extra matching conditions which ensure that an
+INVITE forking a call will not be treated as part of the previously
+established call leg. The matching conditions are as specific as
+possible, to minimize the chances of unintentionally affecting how
+other types of SIP messages are handled.
+
+Implementing these new matching conditions can only be done by
+recording the Branch ID for established calls, so we can check whether
+another INVITE which comes later has the same Branch ID or a different
+one. This requires adding a new member to nta_leg_s.
+
+Co-Authored-By: João Arruda <joao.arruda@gmail.com>
+---
+ libsofia-sip-ua/nta/nta.c       | 49 +++++++++++++++++++++++++--------
+ libsofia-sip-ua/nua/nua_stack.c |  1 +
+ 2 files changed, 39 insertions(+), 11 deletions(-)
+
+diff --git a/libsofia-sip-ua/nta/nta.c b/libsofia-sip-ua/nta/nta.c
+index 773d2fa1..8b23bbad 100644
+--- a/libsofia-sip-ua/nta/nta.c
++++ b/libsofia-sip-ua/nta/nta.c
+@@ -399,6 +399,7 @@ struct nta_leg_s
+ 
+   url_t const      *leg_url;	/**< Match incoming requests. */
+   char const       *leg_method;	/**< Match incoming requests. */
++  char const       *leg_branch_id; /**< Match incoming INVITE to identify forked calls */
+ 
+   uint32_t	    leg_seq;    /**< Sequence number for next transaction */
+   uint32_t	    leg_rseq;   /**< Remote sequence number */
+@@ -685,7 +686,8 @@ static nta_leg_t *leg_find(nta_agent_t const *sa,
+ 			   url_t const *request_uri,
+ 			   sip_call_id_t const *i,
+ 			   char const *from_tag,
+-			   char const *to_tag);
++			   char const *to_tag,
++			   char const *branch_id);
+ static nta_leg_t *dst_find(nta_agent_t const *sa, url_t const *u0,
+ 			   char const *method);
+ static void leg_recv(nta_leg_t *, msg_t *, sip_t *, tport_t *);
+@@ -3134,7 +3136,8 @@ void agent_recv_request(nta_agent_t *agent,
+ 		      method_name, url,
+ 		      sip->sip_call_id,
+ 		      sip->sip_from->a_tag,
+-		      sip->sip_to->a_tag))) {
++		      sip->sip_to->a_tag,
++		      sip->sip_via ? sip->sip_via->v_branch : NULL))) {
+     /* Try existing dialog */
+     SU_DEBUG_5(("nta: %s (%u) %s\n",
+ 		method_name, cseq, "going to existing leg"));
+@@ -4316,6 +4319,7 @@ nta_leg_t *nta_leg_tcreate(nta_agent_t *agent,
+   su_home_t *home;
+   url_t *url;
+   char const *what = NULL;
++  sip_via_t *via = NULL;
+ 
+   if (agent == NULL)
+     return su_seterrno(EINVAL), NULL;
+@@ -4333,6 +4337,7 @@ nta_leg_t *nta_leg_tcreate(nta_agent_t *agent,
+ 	  SIPTAG_TO_REF(to),
+ 	  SIPTAG_TO_STR_REF(to_str),
+ 	  SIPTAG_ROUTE_REF(route),
++	  SIPTAG_VIA_REF(via),
+ 	  NTATAG_TARGET_REF(contact),
+ 	  NTATAG_REMOTE_CSEQ_REF(rseq),
+ 	  SIPTAG_CSEQ_REF(cs),
+@@ -4353,6 +4358,13 @@ nta_leg_t *nta_leg_tcreate(nta_agent_t *agent,
+     return NULL;
+   home = leg->leg_home;
+ 
++  if (via) {
++    SU_DEBUG_9(("nta_leg_tcreate(): setting branch ID to: %s\n", via->v_branch));
++    leg->leg_branch_id = su_strdup(home, via->v_branch);
++  } else {
++    leg->leg_branch_id = NULL;
++  }
++
+   leg->leg_agent = agent;
+   nta_leg_bind(leg, callback, magic);
+ 
+@@ -4821,12 +4833,12 @@ nta_leg_by_replaces(nta_agent_t *sa, sip_replaces_t const *rp)
+ 
+     id->i_hash = msg_hash_string(id->i_id = rp->rp_call_id);
+ 
+-    leg = leg_find(sa, NULL, NULL, id, from_tag, to_tag);
++    leg = leg_find(sa, NULL, NULL, id, from_tag, to_tag, NULL);
+ 
+     if (leg == NULL && strcmp(from_tag, "0") == 0)
+-      leg = leg_find(sa, NULL, NULL, id, NULL, to_tag);
++      leg = leg_find(sa, NULL, NULL, id, NULL, to_tag, NULL);
+     if (leg == NULL && strcmp(to_tag, "0") == 0)
+-      leg = leg_find(sa, NULL, NULL, id, from_tag, NULL);
++      leg = leg_find(sa, NULL, NULL, id, from_tag, NULL, NULL);
+   }
+ 
+   return leg;
+@@ -5054,7 +5066,8 @@ nta_leg_t *nta_leg_by_dialog(nta_agent_t const *agent,
+ 		 NULL, url,
+ 		 call_id,
+ 		 remote_tag,
+-		 local_tag);
++		 local_tag,
++		 NULL);
+ 
+   if (to_be_freed) su_free(NULL, to_be_freed);
+ 
+@@ -5073,7 +5086,8 @@ nta_leg_t *leg_find(nta_agent_t const *sa,
+ 		    url_t const *request_uri,
+ 		    sip_call_id_t const *i,
+ 		    char const *from_tag,
+-		    char const *to_tag)
++		    char const *to_tag,
++		    char const *branch_id)
+ {
+   hash_value_t hash = i->i_hash;
+   leg_htable_t const *lht = sa->sa_dialogs;
+@@ -5123,6 +5137,13 @@ nta_leg_t *leg_find(nta_agent_t const *sa,
+     if (leg_method && method_name && !su_casematch(method_name, leg_method))
+       continue;
+ 
++    /* Do not match if incoming INVITE To header has no tag AND the topmost Via
++     * Header branch ID in the incoming is different from the existing leg
++     * (this means it's a call being forked)
++     */
++    if (!to_tag && su_casematch(method_name, "INVITE") && branch_id && leg->leg_branch_id && !su_casematch(branch_id, leg->leg_branch_id))
++      continue;
++
+     /* Perfect match if both local and To have tag
+      * or local does not have tag.
+      */
+@@ -6238,10 +6259,16 @@ static nta_incoming_t *incoming_find(nta_agent_t const *agent,
+ 
+     /* RFC3261 - section 8.2.2.2 Merged Requests */
+     if (return_merge) {
+-      if (irq->irq_cseq->cs_method == cseq->cs_method &&
+-	  strcmp(irq->irq_cseq->cs_method_name,
+-		 cseq->cs_method_name) == 0)
+-	*return_merge = irq, return_merge = NULL;
++      /* RFC3261 - section 17.2.3 Matching Requests to Server Transactions */
++      if (irq->irq_via->v_branch &&
++	  su_casematch(irq->irq_via->v_branch, v->v_branch) &&
++	  su_casematch(irq->irq_via->v_host, v->v_host) &&
++	  su_strmatch(irq->irq_via->v_port, v->v_port)) {
++        if (irq->irq_cseq->cs_method == cseq->cs_method &&
++	    strcmp(irq->irq_cseq->cs_method_name,
++		   cseq->cs_method_name) == 0)
++	  *return_merge = irq, return_merge = NULL;
++      }
+     }
+   }
+ 
+diff --git a/libsofia-sip-ua/nua/nua_stack.c b/libsofia-sip-ua/nua/nua_stack.c
+index 2e4dacba..ddbea532 100644
+--- a/libsofia-sip-ua/nua/nua_stack.c
++++ b/libsofia-sip-ua/nua/nua_stack.c
+@@ -1084,6 +1084,7 @@ nua_handle_t *nua_stack_incoming_handle(nua_t *nua,
+ 				 SIPTAG_CALL_ID(sip->sip_call_id),
+ 				 SIPTAG_FROM(sip->sip_to),
+ 				 SIPTAG_TO(sip->sip_from),
++				 SIPTAG_VIA(sip->sip_via),
+ 				 NTATAG_REMOTE_CSEQ(sip->sip_cseq->cs_seq),
+ 				 TAG_END());
+ 
