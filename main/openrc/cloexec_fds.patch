@@ -1,0 +1,309 @@
+From 90744198869f4adf349ee7dba3cc13ad66907d46 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Wed, 30 Aug 2023 11:33:37 +0200
+Subject: [PATCH 1/4] supervise-daemon: rename HAVE_CLOSE_RANGE_EXEC to
+ HAVE_CLOSE_RANGE
+
+Use HAVE_CLOSE_RANGE to tell if system provides a close_range(2)
+wrapper, which better explains the purpose.
+
+Add a compat inline which returns -1 if close_range is unavailable.
+---
+ meson.build                             |  5 ++---
+ src/supervise-daemon/supervise-daemon.c | 16 +++++++++++++---
+ 2 files changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index 73cb9778..d04171b3 100644
+--- a/meson.build
++++ b/meson.build
+@@ -198,9 +198,8 @@ endif
+ if cc.has_function('closefrom', prefix: '#define _GNU_SOURCE\n#include <unistd.h>')
+   add_project_arguments('-DHAVE_CLOSEFROM', language: 'c')
+ endif
+-if cc.has_function('close_range', prefix: '#define _GNU_SOURCE\n#include <unistd.h>') and \
+-    cc.has_header_symbol('unistd.h', 'CLOSE_RANGE_CLOEXEC', prefix: '#define _GNU_SOURCE')
+-  add_project_arguments('-DHAVE_CLOSE_RANGE_CLOEXEC', language: 'c')
++if cc.has_function('close_range', prefix: '#define _GNU_SOURCE\n#include <unistd.h>')
++  add_project_arguments('-DHAVE_CLOSE_RANGE', language: 'c')
+ endif
+ 
+ if cc.has_function('strlcpy', prefix: '#define _GNU_SOURCE\n#include <string.h>')
+diff --git a/src/supervise-daemon/supervise-daemon.c b/src/supervise-daemon/supervise-daemon.c
+index 836a1ec7..e36d0314 100644
+--- a/src/supervise-daemon/supervise-daemon.c
++++ b/src/supervise-daemon/supervise-daemon.c
+@@ -22,7 +22,7 @@
+ #define ONE_SECOND    1000000000
+ #define ONE_MS           1000000
+ 
+-#ifdef HAVE_CLOSE_RANGE_CLOEXEC
++#ifdef HAVE_CLOSE_RANGE
+ /* For close_range() */
+ # define _GNU_SOURCE
+ #endif
+@@ -203,6 +203,18 @@ static inline int ioprio_set(int which RC_UNUSED, int who RC_UNUSED,
+ }
+ #endif
+ 
++#ifndef CLOSE_RANGE_CLOEXEC
++# define CLOSE_RANGE_CLOEXEC	(1U << 2)
++#endif
++#ifndef HAVE_CLOSE_RANGE
++static inline int close_range(int first RC_UNUSED,
++			      int last RC_UNUSED,
++			      unsigned int flags RC_UNUSED)
++{
++	return -1;
++}
++#endif
++
+ static void cleanup(void)
+ {
+ 	free(changeuser);
+@@ -570,9 +582,7 @@ RC_NORETURN static void child_process(char *exec, char **argv)
+ 	if (redirect_stderr || rc_yesno(getenv("EINFO_QUIET")))
+ 		dup2(stderr_fd, STDERR_FILENO);
+ 
+-#ifdef HAVE_CLOSE_RANGE_CLOEXEC
+ 	if (close_range(3, UINT_MAX, CLOSE_RANGE_CLOEXEC) < 0)
+-#endif
+ 		for (i = getdtablesize() - 1; i >= 3; --i)
+ 			fcntl(i, F_SETFD, FD_CLOEXEC);
+ 	cmdline = make_cmdline(argv);
+-- 
+2.42.0
+
+
+From 004ad356e948056c58119b9656937b4ff9bb1b8f Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Wed, 30 Aug 2023 13:17:07 +0200
+Subject: [PATCH 2/4] misc: add cloexec_fds_from() helper function
+
+Move logic to set file descriptors to a cloexec_fds_from() function in
+misc.c so it can be shared by both supervisor-daemon and
+start-stop-daemon, and hide the details behind.
+---
+ src/shared/misc.c                       | 27 +++++++++++++++++++++++++
+ src/shared/misc.h                       |  2 ++
+ src/supervise-daemon/supervise-daemon.c | 22 ++------------------
+ 3 files changed, 31 insertions(+), 20 deletions(-)
+
+diff --git a/src/shared/misc.c b/src/shared/misc.c
+index c987ce8c..429407d4 100644
+--- a/src/shared/misc.c
++++ b/src/shared/misc.c
+@@ -15,6 +15,11 @@
+  *    except according to the terms contained in the LICENSE file.
+  */
+ 
++#ifdef HAVE_CLOSE_RANGE
++/* For close_range() */
++# define _GNU_SOURCE
++#endif
++
+ #include <ctype.h>
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -500,3 +505,25 @@ pid_t get_pid(const char *applet,const char *pidfile)
+ 
+ 	return pid;
+ }
++
++#ifndef HAVE_CLOSE_RANGE
++static inline int close_range(int first RC_UNUSED,
++			      int last RC_UNUSED,
++			      unsigned int flags RC_UNUSED)
++{
++	return -1;
++}
++#endif
++#ifndef CLOSE_RANGE_CLOEXEC
++# define CLOSE_RANGE_CLOEXEC	(1U << 2)
++#endif
++
++void
++cloexec_fds_from(int first)
++{
++	int i;
++	if (close_range(first, UINT_MAX, CLOSE_RANGE_CLOEXEC) < 0) {
++		for (i = getdtablesize() - 1; i >= first; --i)
++			fcntl(i, F_SETFD, FD_CLOEXEC);
++	}
++}
+diff --git a/src/shared/misc.h b/src/shared/misc.h
+index f4ab25ad..b158a786 100644
+--- a/src/shared/misc.h
++++ b/src/shared/misc.h
+@@ -73,4 +73,6 @@ void from_time_t(char *time_string, time_t tv);
+ time_t to_time_t(char *timestring);
+ pid_t get_pid(const char *applet, const char *pidfile);
+ 
++void cloexec_fds_from(int);
++
+ #endif
+diff --git a/src/supervise-daemon/supervise-daemon.c b/src/supervise-daemon/supervise-daemon.c
+index e36d0314..f0f298d2 100644
+--- a/src/supervise-daemon/supervise-daemon.c
++++ b/src/supervise-daemon/supervise-daemon.c
+@@ -22,11 +22,6 @@
+ #define ONE_SECOND    1000000000
+ #define ONE_MS           1000000
+ 
+-#ifdef HAVE_CLOSE_RANGE
+-/* For close_range() */
+-# define _GNU_SOURCE
+-#endif
+-
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <getopt.h>
+@@ -203,18 +198,6 @@ static inline int ioprio_set(int which RC_UNUSED, int who RC_UNUSED,
+ }
+ #endif
+ 
+-#ifndef CLOSE_RANGE_CLOEXEC
+-# define CLOSE_RANGE_CLOEXEC	(1U << 2)
+-#endif
+-#ifndef HAVE_CLOSE_RANGE
+-static inline int close_range(int first RC_UNUSED,
+-			      int last RC_UNUSED,
+-			      unsigned int flags RC_UNUSED)
+-{
+-	return -1;
+-}
+-#endif
+-
+ static void cleanup(void)
+ {
+ 	free(changeuser);
+@@ -582,9 +565,8 @@ RC_NORETURN static void child_process(char *exec, char **argv)
+ 	if (redirect_stderr || rc_yesno(getenv("EINFO_QUIET")))
+ 		dup2(stderr_fd, STDERR_FILENO);
+ 
+-	if (close_range(3, UINT_MAX, CLOSE_RANGE_CLOEXEC) < 0)
+-		for (i = getdtablesize() - 1; i >= 3; --i)
+-			fcntl(i, F_SETFD, FD_CLOEXEC);
++	cloexec_fds_from(3);
++
+ 	cmdline = make_cmdline(argv);
+ 	syslog(LOG_INFO, "Child command line: %s", cmdline);
+ 	free(cmdline);
+-- 
+2.42.0
+
+
+From 1c22d40a329982a6e3e9307625790f40080d3c16 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Wed, 30 Aug 2023 13:20:16 +0200
+Subject: [PATCH 3/4] start-stop-daemon: set fds to CLOEXEC instead of closing
+
+Set file descriptors to CLOEXEC instead of closing them before exec,
+similar to what we do in supervise-daemon.
+
+Use the share cloexec_fds_from() helper for this.
+
+closefrom() is no longer used so remove the test.
+---
+ meson.build                               | 3 ---
+ src/start-stop-daemon/start-stop-daemon.c | 7 +------
+ 2 files changed, 1 insertion(+), 9 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index d04171b3..ec970494 100644
+--- a/meson.build
++++ b/meson.build
+@@ -195,9 +195,6 @@ if cc.compiles(malloc_attribute_test, name : 'malloc attribute with arguments')
+   add_project_arguments('-DHAVE_MALLOC_EXTENDED_ATTRIBUTE', language: 'c')
+ endif
+ 
+-if cc.has_function('closefrom', prefix: '#define _GNU_SOURCE\n#include <unistd.h>')
+-  add_project_arguments('-DHAVE_CLOSEFROM', language: 'c')
+-endif
+ if cc.has_function('close_range', prefix: '#define _GNU_SOURCE\n#include <unistd.h>')
+   add_project_arguments('-DHAVE_CLOSE_RANGE', language: 'c')
+ endif
+diff --git a/src/start-stop-daemon/start-stop-daemon.c b/src/start-stop-daemon/start-stop-daemon.c
+index ef6f454e..3e4a19a1 100644
+--- a/src/start-stop-daemon/start-stop-daemon.c
++++ b/src/start-stop-daemon/start-stop-daemon.c
+@@ -1098,12 +1098,7 @@ int main(int argc, char **argv)
+ 				|| rc_yesno(getenv("EINFO_QUIET")))
+ 			dup2(stderr_fd, STDERR_FILENO);
+ 
+-#ifdef HAVE_CLOSEFROM
+-		closefrom(3);
+-#else
+-		for (i = getdtablesize() - 1; i >= 3; --i)
+-			close(i);
+-#endif
++		cloexec_fds_from(3);
+ 
+ 		if (scheduler != NULL) {
+ 			int scheduler_index;
+-- 
+2.42.0
+
+
+From 56758ae2fd54c66c38ff6b0bb02c1370402eaa63 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Wed, 30 Aug 2023 13:34:23 +0200
+Subject: [PATCH 4/4] misc: add syscall fallback for close_range for musl libc
+
+Add fallback for the close_range syscall wrapper. This is needed for
+musl libc, which currently does not have a close_range wrapper.
+---
+ meson.build       | 2 ++
+ src/shared/misc.c | 8 ++++++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/meson.build b/meson.build
+index ec970494..fea86408 100644
+--- a/meson.build
++++ b/meson.build
+@@ -197,6 +197,8 @@ endif
+ 
+ if cc.has_function('close_range', prefix: '#define _GNU_SOURCE\n#include <unistd.h>')
+   add_project_arguments('-DHAVE_CLOSE_RANGE', language: 'c')
++elif cc.has_header('linux/close_range.h')
++  add_project_arguments('-DHAVE_LINUX_CLOSE_RANGE_H', language: 'c')
+ endif
+ 
+ if cc.has_function('strlcpy', prefix: '#define _GNU_SOURCE\n#include <string.h>')
+diff --git a/src/shared/misc.c b/src/shared/misc.c
+index 429407d4..27665d8d 100644
+--- a/src/shared/misc.c
++++ b/src/shared/misc.c
+@@ -24,6 +24,9 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <limits.h>
++#ifdef HAVE_LINUX_CLOSE_RANGE_H
++#  include <linux/close_range.h>
++#endif
+ #include <signal.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -31,6 +34,7 @@
+ #include <sys/file.h>
+ #include <sys/time.h>
+ #ifdef __linux__
++#  include <sys/syscall.h> /* for close_range */
+ #  include <sys/sysinfo.h>
+ #endif
+ #include <sys/types.h>
+@@ -511,7 +515,11 @@ static inline int close_range(int first RC_UNUSED,
+ 			      int last RC_UNUSED,
+ 			      unsigned int flags RC_UNUSED)
+ {
++#ifdef SYS_close_range
++	return syscall(SYS_close_range, first, last, flags);
++#else
+ 	return -1;
++#endif
+ }
+ #endif
+ #ifndef CLOSE_RANGE_CLOEXEC
+-- 
+2.42.0
+
