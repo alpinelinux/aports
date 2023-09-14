@@ -1,0 +1,174 @@
+From da63e21f0a09761f033c587bb9b93a34925e3f05 Mon Sep 17 00:00:00 2001
+From: "Matthew \"strager\" Glazar" <strager.nds@gmail.com>
+Date: Fri, 15 Sep 2023 01:48:28 -0700
+Subject: [PATCH] fix(logging): fix reading UTF-16 trace files on big-endian
+ architectures
+
+---
+ src/CMakeLists.txt                         |  2 +
+ src/quick-lint-js/logging/trace-reader.cpp | 10 +++--
+ src/quick-lint-js/logging/trace-writer.h   |  8 +++-
+ src/quick-lint-js/port/endian.cpp          | 49 ++++++++++++++++++++++
+ src/quick-lint-js/port/endian.h            | 29 +++++++++++++
+ 5 files changed, 95 insertions(+), 5 deletions(-)
+ create mode 100644 src/quick-lint-js/port/endian.cpp
+ create mode 100644 src/quick-lint-js/port/endian.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 2728bd494..ea1df603a 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -416,6 +416,8 @@ quick_lint_js_add_library(
+   quick-lint-js/port/consteval.h
+   quick-lint-js/port/constinit.h
+   quick-lint-js/port/crash.h
++  quick-lint-js/port/endian.cpp
++  quick-lint-js/port/endian.h
+   quick-lint-js/port/function-ref.h
+   quick-lint-js/port/kqueue.h
+   quick-lint-js/port/max-align.h
+diff --git a/src/quick-lint-js/logging/trace-reader.cpp b/src/quick-lint-js/logging/trace-reader.cpp
+index 227a111e4..8af702c47 100644
+--- a/src/quick-lint-js/logging/trace-reader.cpp
++++ b/src/quick-lint-js/logging/trace-reader.cpp
+@@ -1,6 +1,7 @@
+ // Copyright (C) 2020  Matthew "strager" Glazar
+ // See end of file for extended copyright information.
+ 
++#include "quick-lint-js/port/endian.h"
+ #include <csetjmp>
+ #include <cstddef>
+ #include <quick-lint-js/container/monotonic-allocator.h>
+@@ -117,10 +118,13 @@ void Trace_Reader::parse_header(Checked_Binary_Reader& r) {
+ std::u16string_view Trace_Reader::parse_utf16le_string(
+     Checked_Binary_Reader& r) {
+   std::uint64_t length = r.u64_le();
+-  const std::uint8_t* bytes = r.advance(length * 2);
++  std::uint8_t* bytes = const_cast<std::uint8_t*>(r.advance(length * 2));
+   static_assert(sizeof(char16_t) == 2 * sizeof(std::uint8_t));
+-  // TODO(strager): This assumes the native endian is little endian.
+-  return std::u16string_view(reinterpret_cast<const char16_t*>(bytes), length);
++  Span<char16_t> string(reinterpret_cast<char16_t*>(bytes),
++                        narrow_cast<Span_Size>(length));
++  read_little_endian_in_place(string);
++  return std::u16string_view(string.data(),
++                             narrow_cast<std::size_t>(string.size()));
+ }
+ 
+ String8_View Trace_Reader::parse_utf8_string(Checked_Binary_Reader& r) {
+diff --git a/src/quick-lint-js/logging/trace-writer.h b/src/quick-lint-js/logging/trace-writer.h
+index 009bd8e34..68861ea54 100644
+--- a/src/quick-lint-js/logging/trace-writer.h
++++ b/src/quick-lint-js/logging/trace-writer.h
+@@ -10,6 +10,7 @@
+ #include <quick-lint-js/logging/trace-types.h>
+ #include <quick-lint-js/logging/trace-writer-generated.h>
+ #include <quick-lint-js/port/char8.h>
++#include <quick-lint-js/port/endian.h>
+ #include <quick-lint-js/port/span.h>
+ #include <quick-lint-js/util/binary-writer.h>
+ #include <string_view>
+@@ -54,8 +55,11 @@ void Trace_Writer::write_utf16le_string(String string) {
+   this->append_binary(8, [&](Binary_Writer& w) { w.u64_le(code_unit_count); });
+   this->out_->append_aligned(
+       capacity * sizeof(char16_t), alignof(char16_t), [&](void* data) {
+-        String_Writer::copy_string_u16(
+-            string, reinterpret_cast<char16_t*>(data), capacity);
++        Span<char16_t> buffer(reinterpret_cast<char16_t*>(data),
++                              narrow_cast<Span_Size>(capacity));
++        String_Writer::copy_string_u16(string, buffer.data(),
++                                       narrow_cast<std::size_t>(buffer.size()));
++        write_little_endian_in_place(buffer);
+         return code_unit_count * sizeof(char16_t);
+       });
+ }
+diff --git a/src/quick-lint-js/port/endian.cpp b/src/quick-lint-js/port/endian.cpp
+new file mode 100644
+index 000000000..a16184247
+--- /dev/null
++++ b/src/quick-lint-js/port/endian.cpp
+@@ -0,0 +1,49 @@
++// Copyright (C) 2020  Matthew "strager" Glazar
++// See end of file for extended copyright information.
++
++#include <cstdint>
++#include <cstring>
++#include <quick-lint-js/port/endian.h>
++#include <quick-lint-js/port/span.h>
++
++namespace quick_lint_js {
++void read_little_endian_in_place(Span<char16_t> data) {
++  // TODO(strager): Optimize this on little endian architectures. Clang doesn't
++  // optimize this loop away itself. (It does optimize away the stores, though.)
++  for (char16_t& c : data) {
++    std::uint8_t bytes[2];
++    std::memcpy(&bytes, &c, 2);
++    c = static_cast<char16_t>(static_cast<char16_t>(bytes[0]) |
++                              (static_cast<char16_t>(bytes[1]) << 8));
++  }
++}
++
++void write_little_endian_in_place(Span<char16_t> data) {
++  // TODO(strager): Optimize this on little endian architectures.
++  for (char16_t& c : data) {
++    std::uint8_t bytes[2] = {
++        static_cast<std::uint8_t>(c),
++        static_cast<std::uint8_t>(c >> 8),
++    };
++    std::memcpy(&c, &bytes, 2);
++  }
++}
++}
++
++// quick-lint-js finds bugs in JavaScript programs.
++// Copyright (C) 2020  Matthew "strager" Glazar
++//
++// This file is part of quick-lint-js.
++//
++// quick-lint-js is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// quick-lint-js is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with quick-lint-js.  If not, see <https://www.gnu.org/licenses/>.
+diff --git a/src/quick-lint-js/port/endian.h b/src/quick-lint-js/port/endian.h
+new file mode 100644
+index 000000000..e3d4cf7fc
+--- /dev/null
++++ b/src/quick-lint-js/port/endian.h
+@@ -0,0 +1,29 @@
++// Copyright (C) 2020  Matthew "strager" Glazar
++// See end of file for extended copyright information.
++
++#pragma once
++
++#include <quick-lint-js/port/span.h>
++
++namespace quick_lint_js {
++void read_little_endian_in_place(Span<char16_t> data);
++void write_little_endian_in_place(Span<char16_t> data);
++}
++
++// quick-lint-js finds bugs in JavaScript programs.
++// Copyright (C) 2020  Matthew "strager" Glazar
++//
++// This file is part of quick-lint-js.
++//
++// quick-lint-js is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// quick-lint-js is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with quick-lint-js.  If not, see <https://www.gnu.org/licenses/>.
