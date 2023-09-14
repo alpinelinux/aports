@@ -1,0 +1,278 @@
+Patch-Source: https://github.com/Cogitri/gnome-software-plugin-apk/pull/73
+
+diff --git a/meson.build b/meson.build
+index 55a0439..14e0472 100644
+--- a/meson.build
++++ b/meson.build
+@@ -5,7 +5,7 @@ project(
+     meson_version: '>=0.58'
+ )
+ 
+-gnome_software_dep = dependency('gnome-software', version: '>=43.0')
++gnome_software_dep = dependency('gnome-software', version: '>=44.0')
+ plugin_install_dir = gnome_software_dep.get_variable('plugindir')
+ 
+ cargs = ['-DG_LOG_DOMAIN="GsPluginApk"', '-DI_KNOW_THE_GNOME_SOFTWARE_API_IS_SUBJECT_TO_CHANGE']
+diff --git a/src/gs-plugin-apk/gs-plugin-apk.c b/src/gs-plugin-apk/gs-plugin-apk.c
+index 3f6c1f6..aa0eb7b 100644
+--- a/src/gs-plugin-apk/gs-plugin-apk.c
++++ b/src/gs-plugin-apk/gs-plugin-apk.c
+@@ -436,12 +436,15 @@ gs_plugin_app_remove (GsPlugin *plugin,
+  * over the apps from @list, takes care that it is possible to update them,
+  * and when they are ready to be updated, adds them to @ready.
+  *
++ * Returns: Number of non-proxy apps added to the list
+  **/
+-static void
++static unsigned int
+ gs_plugin_apk_prepare_update (GsPlugin *plugin,
+                               GsAppList *list,
+                               GsAppList *ready)
+ {
++  unsigned int added = 0;
++
+   for (guint i = 0; i < gs_app_list_length (list); i++)
+     {
+       GsApp *app;
+@@ -451,8 +454,14 @@ gs_plugin_apk_prepare_update (GsPlugin *plugin,
+        * a proxy (and thus might contain some apps owned by us) */
+       if (gs_app_has_quirk (app, GS_APP_QUIRK_IS_PROXY))
+         {
+-          gs_plugin_apk_prepare_update (plugin, gs_app_get_related (app), ready);
+-          gs_app_set_state (app, GS_APP_STATE_INSTALLING);
++          unsigned int proxy_added;
++          proxy_added = gs_plugin_apk_prepare_update (plugin, gs_app_get_related (app), ready);
++          if (proxy_added)
++            {
++              gs_app_set_state (app, GS_APP_STATE_INSTALLING);
++              gs_app_list_add (ready, app);
++              added += proxy_added;
++            }
+           continue;
+         }
+ 
+@@ -464,36 +473,89 @@ gs_plugin_apk_prepare_update (GsPlugin *plugin,
+         }
+ 
+       gs_app_set_state (app, GS_APP_STATE_INSTALLING);
+-
+       gs_app_list_add (ready, app);
++      added++;
+     }
++  return added;
+ }
+ 
+-gboolean
+-gs_plugin_update (GsPlugin *plugin,
+-                  GsAppList *list,
+-                  GCancellable *cancellable,
+-                  GError **error)
++static void
++upgrade_apk_packages_cb (GObject *object_source,
++                         GAsyncResult *res,
++                         gpointer user_data);
++
++static void
++gs_plugin_apk_update_apps_async (GsPlugin *plugin,
++                                 GsAppList *list,
++                                 GsPluginUpdateAppsFlags flags,
++                                 GsPluginProgressCallback progress_callback,
++                                 gpointer progress_user_data,
++                                 GsPluginAppNeedsUserActionCallback app_needs_user_action_callback,
++                                 gpointer app_needs_user_action_data,
++                                 GCancellable *cancellable,
++                                 GAsyncReadyCallback callback,
++                                 gpointer user_data)
+ {
+   GsPluginApk *self = GS_PLUGIN_APK (plugin);
+-  g_autoptr (GError) local_error = NULL;
+-  g_autoptr (GsAppList) update_list = gs_app_list_new ();
++  g_autoptr (GTask) task = NULL;
++  GsAppList *list_installing = gs_app_list_new ();
++  unsigned int num_sources;
+   g_autofree const gchar **source_array = NULL;
+ 
++  g_debug ("Updating apps");
++
++  task = g_task_new (plugin, cancellable, callback, user_data);
++  g_task_set_source_tag (task, gs_plugin_apk_update_apps_async);
++
++  if (!(flags & GS_PLUGIN_UPDATE_APPS_FLAGS_NO_DOWNLOAD))
++    {
++      // This needs polkit changes. Ideally we'd download first, and
++      // apply from cache then. We should probably test this out in
++      // pmOS release upgrader script first
++      g_warning ("We don't implement 'NO_DOWNLOAD'");
++    }
++
++  if (flags & GS_PLUGIN_UPDATE_APPS_FLAGS_NO_APPLY)
++    {
++      g_task_return_boolean (task, TRUE);
++      return;
++    }
++
+   /* update UI as this might take some time */
+   gs_plugin_status_update (plugin, NULL, GS_PLUGIN_STATUS_WAITING);
+ 
+-  gs_plugin_apk_prepare_update (plugin, list, update_list);
++  num_sources = gs_plugin_apk_prepare_update (plugin, list, list_installing);
+ 
+-  source_array = g_new0 (const gchar *, gs_app_list_length (update_list) + 1);
+-  for (int i = 0; i < gs_app_list_length (update_list); i++)
++  g_debug ("Found %u apps to update", num_sources);
++
++  source_array = g_new0 (const gchar *, num_sources + 1);
++  for (int i = 0; i < num_sources;)
+     {
+-      GsApp *app = gs_app_list_index (update_list, i);
+-      source_array[i] = gs_app_get_source_default (app);
++      GsApp *app = gs_app_list_index (list_installing, i);
++      const gchar *source = gs_app_get_source_default (app);
++      if (source)
++        {
++          source_array[i] = source;
++          i++;
++        }
+     }
+ 
+-  if (!apk_polkit2_call_upgrade_packages_sync (self->proxy, source_array,
+-                                               cancellable, &local_error))
++  g_task_set_task_data (task, g_steal_pointer (&list_installing), g_object_unref);
++  apk_polkit2_call_upgrade_packages (self->proxy, source_array, cancellable,
++                                     upgrade_apk_packages_cb, g_steal_pointer (&task));
++}
++
++static void
++upgrade_apk_packages_cb (GObject *object_source,
++                         GAsyncResult *res,
++                         gpointer user_data)
++{
++  g_autoptr (GTask) task = G_TASK (g_steal_pointer (&user_data));
++  GsPluginApk *self = g_task_get_source_object (task);
++  GsAppList *list_installing = g_task_get_task_data (task);
++  g_autoptr (GError) local_error = NULL;
++
++  if (!apk_polkit2_call_upgrade_packages_finish (self->proxy, res, &local_error))
+     {
+       /* When and upgrade transaction failed, it could be out of two reasons:
+        * - The world constraints couldn't match. In that case, nothing was
+@@ -506,40 +568,34 @@ gs_plugin_update (GsPlugin *plugin,
+        * and which didn't, so also recover everything and hope the refine
+        * takes care of fixing things in the aftermath. */
+       g_dbus_error_strip_remote_error (local_error);
+-      g_propagate_error (error, g_steal_pointer (&local_error));
+-      for (int i = 0; i < gs_app_list_length (update_list); i++)
++      for (int i = 0; i < gs_app_list_length (list_installing); i++)
+         {
+-          GsApp *app = gs_app_list_index (update_list, i);
++          GsApp *app = gs_app_list_index (list_installing, i);
+           gs_app_set_state_recover (app);
+         }
+ 
+-      /* Roll-back apps from the original list with a quirk */
+-      for (int i = 0; i < gs_app_list_length (list); i++)
+-        {
+-          GsApp *app = gs_app_list_index (list, i);
+-          if (gs_app_has_quirk (app, GS_APP_QUIRK_IS_PROXY))
+-            gs_app_set_state_recover (app);
+-        }
+-
+-      return FALSE;
++      g_task_return_error (task, g_steal_pointer (&local_error));
++      return;
+     }
+ 
+-  for (int i = 0; i < gs_app_list_length (update_list); i++)
++  for (int i = 0; i < gs_app_list_length (list_installing); i++)
+     {
+-      GsApp *app = gs_app_list_index (update_list, i);
++      GsApp *app = gs_app_list_index (list_installing, i);
+       gs_app_set_state (app, GS_APP_STATE_INSTALLED);
+     }
+ 
+-  /* Roll-back apps from the original list with a quirk */
+-  for (int i = 0; i < gs_app_list_length (list); i++)
+-    {
+-      GsApp *app = gs_app_list_index (list, i);
+-      if (gs_app_has_quirk (app, GS_APP_QUIRK_IS_PROXY))
+-        gs_app_set_state (app, GS_APP_STATE_INSTALLED);
+-    }
++  g_debug ("All apps updated correctly");
+ 
+-  gs_plugin_updates_changed (plugin);
+-  return TRUE;
++  gs_plugin_updates_changed (GS_PLUGIN (self));
++  g_task_return_boolean (task, TRUE);
++}
++
++static gboolean
++gs_plugin_apk_update_apps_finish (GsPlugin *plugin,
++                                  GAsyncResult *result,
++                                  GError **error)
++{
++  return g_task_propagate_boolean (G_TASK (result), error);
+ }
+ 
+ void
+@@ -1327,6 +1383,8 @@ gs_plugin_apk_class_init (GsPluginApkClass *klass)
+   plugin_class->install_repository_finish = gs_plugin_apk_install_repository_finish;
+   plugin_class->remove_repository_async = gs_plugin_apk_remove_repository_async;
+   plugin_class->remove_repository_finish = gs_plugin_apk_remove_repository_finish;
++  plugin_class->update_apps_async = gs_plugin_apk_update_apps_async;
++  plugin_class->update_apps_finish = gs_plugin_apk_update_apps_finish;
+ }
+ 
+ GType
+diff --git a/tests/gs-self-test.c b/tests/gs-self-test.c
+index f188f9f..16cacb0 100644
+--- a/tests/gs-self-test.c
++++ b/tests/gs-self-test.c
+@@ -111,7 +111,7 @@ gs_plugins_apk_updates (GsPluginLoader *plugin_loader)
+   GsApp *system_app = NULL;
+   g_autoptr (GsApp) foreign_app = NULL;
+   g_autoptr (GsAppList) update_list = NULL;
+-  g_autoptr (GsAppList) updated_list = NULL;
++  gboolean ret;
+   GsAppList *related = NULL;
+ 
+   // List updates
+@@ -137,29 +137,30 @@ gs_plugins_apk_updates (GsPluginLoader *plugin_loader)
+   system_app = gs_app_list_index (related, 0);
+   g_assert_cmpint (gs_app_get_state (system_app), ==, GS_APP_STATE_UPDATABLE_LIVE);
+ 
+-  // Execute update!
++  // Add app that shouldn't be updated
+   foreign_app = gs_app_new ("foreign");
++  gs_app_set_state (foreign_app, GS_APP_STATE_UPDATABLE_LIVE);
+   gs_app_list_add (update_list, foreign_app); // No management plugin, should get ignored!
++  // Execute update!
+   g_object_unref (plugin_job);
+-  plugin_job = gs_plugin_job_newv (GS_PLUGIN_ACTION_UPDATE,
+-                                   "list", update_list,
+-                                   NULL);
+-  updated_list = gs_plugin_loader_job_process (plugin_loader, plugin_job, NULL, &error);
++  plugin_job = gs_plugin_job_update_apps_new (update_list,
++                                              GS_PLUGIN_UPDATE_APPS_FLAGS_NO_DOWNLOAD);
++  ret = gs_plugin_loader_job_action (plugin_loader, plugin_job, NULL, &error);
+   gs_test_flush_main_context ();
+   g_assert_no_error (error);
+-  g_assert_nonnull (updated_list);
++  g_assert_true (ret);
+ 
+   // Check desktop app: TODO: Check logs!
+-  desktop_app = gs_app_list_index (updated_list, 0);
+-  g_assert_nonnull (desktop_app);
+   g_assert_cmpint (gs_app_get_state (desktop_app), ==, GS_APP_STATE_INSTALLED);
+   // Check generic proxy app: TODO: Check logs!
+-  generic_app = gs_app_list_index (updated_list, 1);
+   g_assert_true (gs_app_has_quirk (generic_app, GS_APP_QUIRK_IS_PROXY));
++  g_assert_cmpint (gs_app_get_state (generic_app), ==, GS_APP_STATE_INSTALLED);
+   related = gs_app_get_related (generic_app);
+   g_assert_cmpint (gs_app_list_length (related), ==, 1);
+   system_app = gs_app_list_index (related, 0);
+   g_assert_cmpint (gs_app_get_state (system_app), ==, GS_APP_STATE_INSTALLED);
++  // Check foreign app: As it was!
++  g_assert_cmpint (gs_app_get_state (foreign_app), ==, GS_APP_STATE_UPDATABLE_LIVE);
+ }
+ 
+ static void
