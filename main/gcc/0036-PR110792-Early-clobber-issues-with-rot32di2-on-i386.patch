@@ -1,0 +1,186 @@
+https://gcc.gnu.org/PR110792
+https://gcc.gnu.org/git/gitweb.cgi?p=gcc.git;h=790c1f60a5662b16eb19eb4b81922995863c7571
+https://github.com/randombit/botan/issues/3637
+
+From 85628c5653ff40963158a24c60eeec6a3b5a8e56 Mon Sep 17 00:00:00 2001
+From: Roger Sayle <roger@nextmovesoftware.com>
+Date: Thu, 3 Aug 2023 07:12:04 +0100
+Subject: [PATCH] PR target/110792: Early clobber issues with
+ rot32di2_doubleword on i386.
+
+This patch is a conservative fix for PR target/110792, a wrong-code
+regression affecting doubleword rotations by BITS_PER_WORD, which
+effectively swaps the highpart and lowpart words, when the source to be
+rotated resides in memory. The issue is that if the register used to
+hold the lowpart of the destination is mentioned in the address of
+the memory operand, the current define_insn_and_split unintentionally
+clobbers it before reading the highpart.
+
+Hence, for the testcase, the incorrectly generated code looks like:
+
+        salq    $4, %rdi		// calculate address
+        movq    WHIRL_S+8(%rdi), %rdi	// accidentally clobber addr
+        movq    WHIRL_S(%rdi), %rbp	// load (wrong) lowpart
+
+Traditionally, the textbook way to fix this would be to add an
+explicit early clobber to the instruction's constraints.
+
+ (define_insn_and_split "<insn>32di2_doubleword"
+- [(set (match_operand:DI 0 "register_operand" "=r,r,r")
++ [(set (match_operand:DI 0 "register_operand" "=r,r,&r")
+        (any_rotate:DI (match_operand:DI 1 "nonimmediate_operand" "0,r,o")
+                       (const_int 32)))]
+
+but unfortunately this currently generates significantly worse code,
+due to a strange choice of reloads (effectively memcpy), which ends up
+looking like:
+
+        salq    $4, %rdi		// calculate address
+        movdqa  WHIRL_S(%rdi), %xmm0	// load the double word in SSE reg.
+        movaps  %xmm0, -16(%rsp)	// store the SSE reg back to the stack
+        movq    -8(%rsp), %rdi		// load highpart
+        movq    -16(%rsp), %rbp		// load lowpart
+
+Note that reload's "&" doesn't distinguish between the memory being
+early clobbered, vs the registers used in an addressing mode being
+early clobbered.
+
+The fix proposed in this patch is to remove the third alternative, that
+allowed offsetable memory as an operand, forcing reload to place the
+operand into a register before the rotation.  This results in:
+
+        salq    $4, %rdi
+        movq    WHIRL_S(%rdi), %rax
+        movq    WHIRL_S+8(%rdi), %rdi
+        movq    %rax, %rbp
+
+I believe there's a more advanced solution, by swapping the order of
+the loads (if first destination register is mentioned in the address),
+or inserting a lea insn (if both destination registers are mentioned
+in the address), but this fix is a minimal "safe" solution, that
+should hopefully be suitable for backporting.
+
+2023-08-03  Roger Sayle  <roger@nextmovesoftware.com>
+
+gcc/ChangeLog
+	PR target/110792
+	* config/i386/i386.md (<any_rotate>ti3): For rotations by 64 bits
+	place operand in a register before gen_<insn>64ti2_doubleword.
+	(<any_rotate>di3): Likewise, for rotations by 32 bits, place
+	operand in a register before gen_<insn>32di2_doubleword.
+	(<any_rotate>32di2_doubleword): Constrain operand to be in register.
+	(<any_rotate>64ti2_doubleword): Likewise.
+
+gcc/testsuite/ChangeLog
+	PR target/110792
+	* g++.target/i386/pr110792.C: New 32-bit C++ test case.
+	* gcc.target/i386/pr110792.c: New 64-bit C test case.
+
+(cherry picked from commit 790c1f60a5662b16eb19eb4b81922995863c7571)
+---
+ gcc/config/i386/i386.md                  | 18 ++++++++++++------
+ gcc/testsuite/g++.target/i386/pr110792.C | 16 ++++++++++++++++
+ gcc/testsuite/gcc.target/i386/pr110792.c | 18 ++++++++++++++++++
+ 3 files changed, 46 insertions(+), 6 deletions(-)
+ create mode 100644 gcc/testsuite/g++.target/i386/pr110792.C
+ create mode 100644 gcc/testsuite/gcc.target/i386/pr110792.c
+
+diff --git a/gcc/config/i386/i386.md b/gcc/config/i386/i386.md
+index f3a3305..a71e837 100644
+--- a/gcc/config/i386/i386.md
++++ b/gcc/config/i386/i386.md
+@@ -14359,7 +14359,10 @@
+     emit_insn (gen_ix86_<insn>ti3_doubleword
+ 		(operands[0], operands[1], operands[2]));
+   else if (CONST_INT_P (operands[2]) && INTVAL (operands[2]) == 64)
+-    emit_insn (gen_<insn>64ti2_doubleword (operands[0], operands[1]));
++    {
++      operands[1] = force_reg (TImode, operands[1]);
++      emit_insn (gen_<insn>64ti2_doubleword (operands[0], operands[1]));
++    }
+   else
+     {
+       rtx amount = force_reg (QImode, operands[2]);
+@@ -14394,7 +14397,10 @@
+     emit_insn (gen_ix86_<insn>di3_doubleword
+ 		(operands[0], operands[1], operands[2]));
+   else if (CONST_INT_P (operands[2]) && INTVAL (operands[2]) == 32)
+-    emit_insn (gen_<insn>32di2_doubleword (operands[0], operands[1]));
++    {
++      operands[1] = force_reg (DImode, operands[1]);
++      emit_insn (gen_<insn>32di2_doubleword (operands[0], operands[1]));
++    }
+   else
+     FAIL;
+ 
+@@ -14562,8 +14568,8 @@
+ })
+ 
+ (define_insn_and_split "<insn>32di2_doubleword"
+- [(set (match_operand:DI 0 "register_operand" "=r,r,r")
+-       (any_rotate:DI (match_operand:DI 1 "nonimmediate_operand" "0,r,o")
++ [(set (match_operand:DI 0 "register_operand" "=r,r")
++       (any_rotate:DI (match_operand:DI 1 "register_operand" "0,r")
+                       (const_int 32)))]
+  "!TARGET_64BIT"
+  "#"
+@@ -14580,8 +14586,8 @@
+ })
+ 
+ (define_insn_and_split "<insn>64ti2_doubleword"
+- [(set (match_operand:TI 0 "register_operand" "=r,r,r")
+-       (any_rotate:TI (match_operand:TI 1 "nonimmediate_operand" "0,r,o")
++ [(set (match_operand:TI 0 "register_operand" "=r,r")
++       (any_rotate:TI (match_operand:TI 1 "register_operand" "0,r")
+                       (const_int 64)))]
+  "TARGET_64BIT"
+  "#"
+diff --git a/gcc/testsuite/g++.target/i386/pr110792.C b/gcc/testsuite/g++.target/i386/pr110792.C
+new file mode 100644
+index 0000000..ce21a7a
+--- /dev/null
++++ b/gcc/testsuite/g++.target/i386/pr110792.C
+@@ -0,0 +1,16 @@
++/* { dg-do compile { target ia32 } } */
++/* { dg-options "-O2" } */
++
++template <int ROT, typename T>
++inline T rotr(T input)
++{
++   return static_cast<T>((input >> ROT) | (input << (8 * sizeof(T) - ROT)));
++}
++
++unsigned long long WHIRL_S[256] = {0x18186018C07830D8};
++unsigned long long whirl(unsigned char x0)
++{
++   const unsigned long long s4 = WHIRL_S[x0&0xFF];
++   return rotr<32>(s4);
++}
++/* { dg-final { scan-assembler-not "movl\tWHIRL_S\\+4\\(,%eax,8\\), %eax" } } */
+diff --git a/gcc/testsuite/gcc.target/i386/pr110792.c b/gcc/testsuite/gcc.target/i386/pr110792.c
+new file mode 100644
+index 0000000..b65125c
+--- /dev/null
++++ b/gcc/testsuite/gcc.target/i386/pr110792.c
+@@ -0,0 +1,18 @@
++/* { dg-do compile { target int128 } } */
++/* { dg-options "-O2" } */
++
++static inline unsigned __int128 rotr(unsigned __int128 input)
++{
++   return ((input >> 64) | (input << (64)));
++}
++
++unsigned __int128 WHIRL_S[256] = {((__int128)0x18186018C07830D8) << 64 |0x18186018C07830D8};
++unsigned __int128 whirl(unsigned char x0)
++{
++   register int t __asm("rdi") = x0&0xFF;
++   const unsigned __int128 s4 = WHIRL_S[t];
++   register unsigned __int128 tt  __asm("rdi") = rotr(s4);
++   asm("":::"memory");
++   return tt;
++}
++/* { dg-final { scan-assembler-not "movq\tWHIRL_S\\+8\\(%rdi\\), %rdi" } } */
+-- 
+2.41.0
+
