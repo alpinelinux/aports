@@ -1,0 +1,185 @@
+From 42614970833467d8b9aaf9def9f062c6c7425dad Mon Sep 17 00:00:00 2001
+From: Roger Pau Monne <roger.pau@citrix.com>
+Date: Tue, 13 Jun 2023 15:01:05 +0200
+Subject: [PATCH] iommu/amd-vi: flush IOMMU TLB when flushing the DTE
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The caching invalidation guidelines from the AMD-Vi specification (48882—Rev
+3.07-PUB—Oct 2022) seem to be misleading on some hardware, as devices will
+malfunction (see stale DMA mappings) if some fields of the DTE are updated but
+the IOMMU TLB is not flushed. This has been observed in practice on AMD
+systems.  Due to the lack of guidance from the currently published
+specification this patch aims to increase the flushing done in order to prevent
+device malfunction.
+
+In order to fix, issue an INVALIDATE_IOMMU_PAGES command from
+amd_iommu_flush_device(), flushing all the address space.  Note this requires
+callers to be adjusted in order to pass the DomID on the DTE previous to the
+modification.
+
+Some call sites don't provide a valid DomID to amd_iommu_flush_device() in
+order to avoid the flush.  That's because the device had address translations
+disabled and hence the previous DomID on the DTE is not valid.  Note the
+current logic relies on the entity disabling address translations to also flush
+the TLB of the in use DomID.
+
+Device I/O TLB flushing when ATS are enabled is not covered by the current
+change, as ATS usage is not security supported.
+
+This is XSA-442 / CVE-2023-34326
+
+Signed-off-by: Roger Pau Monné <roger.pau@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/drivers/passthrough/amd/iommu.h         |  3 ++-
+ xen/drivers/passthrough/amd/iommu_cmd.c     | 10 +++++++++-
+ xen/drivers/passthrough/amd/iommu_guest.c   |  5 +++--
+ xen/drivers/passthrough/amd/iommu_init.c    |  6 +++++-
+ xen/drivers/passthrough/amd/pci_amd_iommu.c | 14 ++++++++++----
+ 5 files changed, 29 insertions(+), 9 deletions(-)
+
+diff --git a/xen/drivers/passthrough/amd/iommu.h b/xen/drivers/passthrough/amd/iommu.h
+index 0d9d976faaea..4e355ef4c12f 100644
+--- a/xen/drivers/passthrough/amd/iommu.h
++++ b/xen/drivers/passthrough/amd/iommu.h
+@@ -265,7 +265,8 @@ void amd_iommu_flush_pages(struct domain *d, unsigned long dfn,
+                            unsigned int order);
+ void amd_iommu_flush_iotlb(u8 devfn, const struct pci_dev *pdev,
+                            uint64_t gaddr, unsigned int order);
+-void amd_iommu_flush_device(struct amd_iommu *iommu, uint16_t bdf);
++void amd_iommu_flush_device(struct amd_iommu *iommu, uint16_t bdf,
++                            domid_t domid);
+ void amd_iommu_flush_intremap(struct amd_iommu *iommu, uint16_t bdf);
+ void amd_iommu_flush_all_caches(struct amd_iommu *iommu);
+ 
+diff --git a/xen/drivers/passthrough/amd/iommu_cmd.c b/xen/drivers/passthrough/amd/iommu_cmd.c
+index dfb8b1c860d1..196e3dce3aec 100644
+--- a/xen/drivers/passthrough/amd/iommu_cmd.c
++++ b/xen/drivers/passthrough/amd/iommu_cmd.c
+@@ -362,12 +362,20 @@ void amd_iommu_flush_pages(struct domain *d,
+     _amd_iommu_flush_pages(d, __dfn_to_daddr(dfn), order);
+ }
+ 
+-void amd_iommu_flush_device(struct amd_iommu *iommu, uint16_t bdf)
++void amd_iommu_flush_device(struct amd_iommu *iommu, uint16_t bdf,
++                            domid_t domid)
+ {
+     ASSERT( spin_is_locked(&iommu->lock) );
+ 
+     invalidate_dev_table_entry(iommu, bdf);
+     flush_command_buffer(iommu, 0);
++
++    /* Also invalidate IOMMU TLB entries when flushing the DTE. */
++    if ( domid != DOMID_INVALID )
++    {
++        invalidate_iommu_pages(iommu, INV_IOMMU_ALL_PAGES_ADDRESS, domid, 0);
++        flush_command_buffer(iommu, 0);
++    }
+ }
+ 
+ void amd_iommu_flush_intremap(struct amd_iommu *iommu, uint16_t bdf)
+diff --git a/xen/drivers/passthrough/amd/iommu_guest.c b/xen/drivers/passthrough/amd/iommu_guest.c
+index 00c5ccd7b5d2..f404e382f019 100644
+--- a/xen/drivers/passthrough/amd/iommu_guest.c
++++ b/xen/drivers/passthrough/amd/iommu_guest.c
+@@ -385,7 +385,7 @@ static int do_completion_wait(struct domain *d, cmd_entry_t *cmd)
+ 
+ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
+ {
+-    uint16_t gbdf, mbdf, req_id, gdom_id, hdom_id;
++    uint16_t gbdf, mbdf, req_id, gdom_id, hdom_id, prev_domid;
+     struct amd_iommu_dte *gdte, *mdte, *dte_base;
+     struct amd_iommu *iommu = NULL;
+     struct guest_iommu *g_iommu;
+@@ -445,11 +445,12 @@ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
+     req_id = get_dma_requestor_id(iommu->seg, mbdf);
+     dte_base = iommu->dev_table.buffer;
+     mdte = &dte_base[req_id];
++    prev_domid = mdte->domain_id;
+ 
+     spin_lock_irqsave(&iommu->lock, flags);
+     dte_set_gcr3_table(mdte, hdom_id, gcr3_mfn << PAGE_SHIFT, gv, glx);
+ 
+-    amd_iommu_flush_device(iommu, req_id);
++    amd_iommu_flush_device(iommu, req_id, prev_domid);
+     spin_unlock_irqrestore(&iommu->lock, flags);
+ 
+     return 0;
+diff --git a/xen/drivers/passthrough/amd/iommu_init.c b/xen/drivers/passthrough/amd/iommu_init.c
+index bb52c181f8cd..4a96f7fbec3c 100644
+--- a/xen/drivers/passthrough/amd/iommu_init.c
++++ b/xen/drivers/passthrough/amd/iommu_init.c
+@@ -1554,7 +1554,11 @@ static int _invalidate_all_devices(
+         if ( iommu )
+         {
+             spin_lock_irqsave(&iommu->lock, flags);
+-            amd_iommu_flush_device(iommu, req_id);
++            /*
++             * IOMMU TLB flush performed separately (see
++             * invalidate_all_domain_pages()).
++             */
++            amd_iommu_flush_device(iommu, req_id, DOMID_INVALID);
+             amd_iommu_flush_intremap(iommu, req_id);
+             spin_unlock_irqrestore(&iommu->lock, flags);
+         }
+diff --git a/xen/drivers/passthrough/amd/pci_amd_iommu.c b/xen/drivers/passthrough/amd/pci_amd_iommu.c
+index e804fdc34fcd..872955566608 100644
+--- a/xen/drivers/passthrough/amd/pci_amd_iommu.c
++++ b/xen/drivers/passthrough/amd/pci_amd_iommu.c
+@@ -183,10 +183,13 @@ static int __must_check amd_iommu_setup_domain_device(
+              iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) )
+             dte->i = ats_enabled;
+ 
+-        amd_iommu_flush_device(iommu, req_id);
++        /* DTE didn't have DMA translations enabled, do not flush the TLB. */
++        amd_iommu_flush_device(iommu, req_id, DOMID_INVALID);
+     }
+     else if ( dte->pt_root != mfn_x(page_to_mfn(root_pg)) )
+     {
++        domid_t prev_domid = dte->domain_id;
++
+         /*
+          * Strictly speaking if the device is the only one with this requestor
+          * ID, it could be allowed to be re-assigned regardless of unity map
+@@ -240,7 +243,7 @@ static int __must_check amd_iommu_setup_domain_device(
+              iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) )
+             ASSERT(dte->i == ats_enabled);
+ 
+-        amd_iommu_flush_device(iommu, req_id);
++        amd_iommu_flush_device(iommu, req_id, prev_domid);
+     }
+ 
+     spin_unlock_irqrestore(&iommu->lock, flags);
+@@ -389,6 +392,8 @@ static void amd_iommu_disable_domain_device(const struct domain *domain,
+     spin_lock_irqsave(&iommu->lock, flags);
+     if ( dte->tv || dte->v )
+     {
++        domid_t prev_domid = dte->domain_id;
++
+         /* See the comment in amd_iommu_setup_device_table(). */
+         dte->int_ctl = IOMMU_DEV_TABLE_INT_CONTROL_ABORTED;
+         smp_wmb();
+@@ -405,7 +410,7 @@ static void amd_iommu_disable_domain_device(const struct domain *domain,
+         smp_wmb();
+         dte->v = true;
+ 
+-        amd_iommu_flush_device(iommu, req_id);
++        amd_iommu_flush_device(iommu, req_id, prev_domid);
+ 
+         AMD_IOMMU_DEBUG("Disable: device id = %#x, "
+                         "domain = %d, paging mode = %d\n",
+@@ -578,7 +583,8 @@ static int amd_iommu_add_device(u8 devfn, struct pci_dev *pdev)
+             iommu->dev_table.buffer + (bdf * IOMMU_DEV_TABLE_ENTRY_SIZE),
+             ivrs_mappings[bdf].intremap_table, iommu, iommu_intremap);
+ 
+-        amd_iommu_flush_device(iommu, bdf);
++        /* DTE didn't have DMA translations enabled, do not flush the TLB. */
++        amd_iommu_flush_device(iommu, bdf, DOMID_INVALID);
+ 
+         spin_unlock_irqrestore(&iommu->lock, flags);
+     }
+-- 
+2.42.0
+
