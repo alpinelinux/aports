@@ -12,7 +12,7 @@ If you want to contribute, please read the
 and feel free to either submit a merge request on
 [GitLab](https://gitlab.alpinelinux.org/alpine/aports),
 or to submit a git patch on the Alpine aports mailing list
-(~alpine/aports@lists.alpinelinux.org). (note: this mailing list is presently not functional)
+([~alpine/aports@lists.alpinelinux.org](mailto:~alpine/aports@lists.alpinelinux.org)). (note: this mailing list is presently not functional)
 
 ## Repositories
 
