@@ -55,7 +55,7 @@ specifically designed to introduce and test packages and as a staging area for
 our other repositories. The packages do not follow any of the previously
 mentioned policies and only need to be able to be build correctly. After the
 package is verified to be working it should be moved to one of the other
-reposities as soon as possible following the polcies set for that repository.
+repositories as soon as possible following the policies set for that repository.
 If the package is not moved within a 6 month period we will notify the
 maintainer and remove it after 9 months.
 
