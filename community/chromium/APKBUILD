@@ -1,10 +1,10 @@
 # Contributor: Carlo Landmeter <clandmeter@alpinelinux.org>
 # Contributor: Natanael Copa <ncopa@alpinelinux.org>
-# Maintainer: psykose <alice@ayaya.dev>
+# Maintainer: Elly Fong-Jones <elly@elly.town>
 pkgname=chromium
-pkgver=117.0.5938.62
+pkgver=119.0.6045.159
 pkgrel=0
-_extra_patches=chromium-115-patchset-2
+_extra_patches=chromium-116-patchset-2
 # https://source.chromium.org/chromium/chromium/src/+/main:third_party/test_fonts/test_fonts.tar.gz.sha1
 # (for the given version, when it changes)
 _testfonts=336e775eec536b2d785cc80eff6ac39051931286
@@ -30,6 +30,7 @@ makedepends="
 	bash
 	bison
 	bsd-compat-headers
+	brotli-dev
 	bzip2-dev
 	cairo-dev
 	clang-dev
@@ -117,35 +118,43 @@ source="https://commondatastorage.googleapis.com/chromium-browser-official/chrom
 	google-api.keys
 
 	chromium-117-old-gn-no-mnemonic.patch
+	atspi-unused.patch
+	blink-nullptr_t.patch
 	chromium-revert-drop-of-system-java.patch
 	chromium-use-alpine-target.patch
-	clang-runtime-path.patch
 	disable-failing-tests.patch
 	fc-cache-version.patch
 	fix-missing-cstdint-include-musl.patch
 	fstatat-32bit.patch
-	gcc12-fixes.patch
 	gdbinit.patch
+	generic-sensor-include.patch
+	gwp-asan-include.patch
 	import-version.patch
-	ipcz-missing-include.patch
 	libstdc++13.patch
 	material-color-stdround.patch
 	mman.patch
+	musl-auxv.patch
 	musl-sandbox.patch
 	musl-tid-caching.patch
 	musl-v8-monotonic-pthread-cont_timedwait.patch
 	no-execinfo.patch
 	no-mallinfo.patch
-	no-mte.patch
 	no-res-ninit-nclose.patch
+	no-sandbox-settls.patch
+	partalloc-ambiguous.patch
+	partalloc-no-tagging-arm64.patch
+	perfetto-libstdc++.patch
 	pvalloc.patch
+	random-fixes.patch
 	revert-llvm16-linker-flag.patch
 	quiche-array.patch
 	temp-failure-retry.patch
+	chromium-icu-74.patch
+	zip-narrow.patch
 	"
 # chrome-sandbox can use suid when user namespaces aren't available, but uses only userns and drops privileges normally
 # tests stopped building with 115 with clang16
-options="suid !check"
+options="suid"
 
 # backwards compat (merged into primary)
 provides="$pkgname-angle=$pkgver-r$pkgrel"
@@ -171,6 +180,8 @@ x86_64)
 esac
 
 # secfixes:
+#   116.0.5845.187-r0:
+#     - CVE-2023-4863
 #   103.0.5060.134-r0:
 #     - CVE-2022-2163
 #     - CVE-2022-2477
@@ -476,11 +487,6 @@ esac
 #   72.0.3626.121-r0:
 #     - CVE-2019-5786
 
-_chromium_testsuites="
-	base_unittests
-	net_unittests
-	"
-
 upstream_version() {
 	curl --silent https://omahaproxy.appspot.com/all \
 		| awk -F, '$1 == "linux" && $2 == "stable" {print $3}'
@@ -490,6 +496,7 @@ prepare() {
 	default_prepare
 
 	patch -Np1 < "$srcdir"/chromium-patches-$_extra_patches/chromium-114-maldoca-include.patch
+	patch -Np1 < "$srcdir"/chromium-patches-$_extra_patches/chromium-114-vk_mem_alloc-include.patch
 
 	mv ../test_fonts/ ./third_party/test_fonts/
 
@@ -578,6 +585,11 @@ _configure() {
 	export CXXFLAGS="${CXXFLAGS/-g/} -O2 -Wno-unknown-warning-option -Wno-builtin-macro-redefined -Wno-deprecated-declarations"
 	export CPPFLAGS="${CPPFLAGS/-g/} -D__DATE__=  -D__TIME__=  -D__TIMESTAMP__="
 
+	# breaks chromium
+	export CXXFLAGS="${CXXFLAGS/-D_GLIBCXX_ASSERTIONS=1}"
+	export CXXFLAGS="${CXXFLAGS/-fstack-clash-protection}"
+	export CFLAGS="${CFLAGS/-fstack-clash-protection}"
+
 	export AR="llvm-ar"
 	export CC="clang"
 	export CXX="clang++"
@@ -609,7 +621,6 @@ _configure() {
 		;;
 	esac
 
-	# maglev does not compile on arches without pointer compression
 	case "$CARCH" in
 	armv7)
 		local maglev=false
@@ -619,19 +630,17 @@ _configure() {
 		;;
 	esac
 
-	# rust is disabled pending fixing the build scripts for it - see failed
-	# pipeline runs on https://gitlab.alpinelinux.org/alpine/aports/-/merge_requests/51557
 	# shellcheck disable=2089
 	local gn_config="
 		blink_enable_generated_code_formatting=false
 		chrome_pgo_phase=0
 		clang_base_path=\"/usr\"
 		clang_use_chrome_plugins=false
-		clang_version=16
 		custom_toolchain=\"//build/toolchain/linux/unbundle:default\"
 		disable_fieldtrial_testing_config=true
 		enable_hangout_services_extension=true
 		enable_nacl=false
+		enable_nocompile_tests_new=false
 		enable_stripping=false
 		enable_rust=false
 		enable_vr=false
@@ -654,6 +663,7 @@ _configure() {
 		symbol_level=$symbol_level
 		treat_warnings_as_errors=false
 		use_custom_libcxx=false
+		use_gnome_keyring=false
 		use_lld=true
 		use_pulseaudio=true
 		use_sysroot=false
@@ -688,8 +698,19 @@ build() {
 		chrome_sandbox \
 		chromedriver.unstripped \
 		chrome_crashpad_handler \
-		$(want_check && echo $_chromium_testsuites)
+		$(want_check && echo base_unittests)
 
+}
+
+check_base_unittests() {
+	# TODO: fix all of these :)
+	broken="StringPieceTest.InvalidLengthDeath"
+	broken="$broken:StringPieceTest.OutOfBoundsDeath"
+	broken="$broken:SafeSPrintfTestPA.EmitNum"
+	broken="$broken:SafeSPrintfTestPA.EmitNULL"
+	broken="$broken:ClampTest.Death"
+	# test-launcher-bot-mode enables parallelism and uncolored output
+	./out/bld/base_unittests --test-launcher-bot-mode --gtest_filter="-$broken"
 }
 
 check() {
@@ -698,10 +719,8 @@ check() {
 	# for vpython3 in cwd
 	export PATH="$PATH:$PWD/third_party/depot_tools"
 
-	for testsuite in $_chromium_testsuites; do
-		msg "running testsuite $testsuite"
-		./out/bld/$testsuite
-	done
+	check_base_unittests
+
 }
 
 package() {
@@ -831,37 +850,45 @@ swiftshader() {
 }
 
 sha512sums="
-768e4089482a2b1f86e53afa909136dfff4f028e4c8cef202a9ab9b8ed7feb8839a7fc0c0dda2824db7ac89210112ff55d7a1a0c55bdbd0570ca807f687a022f  chromium-117-old-gn-no-mnemonic.patch
-9c18a119268aebbf504db300daf43a456d5657418faf045928cc58cdd6d197d56fd7d395981ad0046275b7ef5608c4ab97afa8b6b8ad88d44fce5e5edf18eade  chromium-117.0.5938.62.tar.xz
-27020986ef2add8d58ba6f8d0c18437531dd7169e42678f2bc813f78dd4f8db23e6189895de5d1cf14ed0b1f44901d2db319c6b5f0d91b4285d96e253943b769  chromium-117.0.5938.62-testdata.tar.xz
+37dedcf41c89e2752b9a650ee9daee39ae23a4a1ebda56175a33f51c992b5daa516f586b3726cdcc2e172c714d91cb464653a33c0ab986d0004b7084320dfe6f  chromium-119.0.6045.159.tar.xz
+a8daf470f73c04790611a81f71ecbbf577ec1b5ae0f1ef82f462ebf440735b25bcf2f58abe20c12d59521d582c89511eb577574d58f9fcaec1430b8aed1cd623  chromium-119.0.6045.159-testdata.tar.xz
 bbc928e99ebcd4d953b982688b01526cb754bad018f67be9e777a4f8ac51cdd3e01374e5a63faf55b12e7cee0d52816c88062e012b5bcc4f9bb41f28d8e0b7f7  test_fonts-336e775eec536b2d785cc80eff6ac39051931286.tar.gz
-d27199ef1b5f9d06381730f84664652094a34ccb4743b6d4dc5712b23c098e68f9e707c04fb2a2541ea7c83fa61004c93d8a3f1f4397f60846f03da59bb533b1  chromium-patches-chromium-115-patchset-2.tar.gz
+bc81489d37186790ee1b423ada5d8275fe9c408d1be8635792f7d2984dfe847913b2c8847dd95caa2a7d388fc0914813ceb7f57b9ee2a4c417410f10f944e1a8  chromium-patches-chromium-116-patchset-2.tar.gz
 1b16564f85a03f3eb934ec51289dc6159e2454202d40f48354f947d6ceffac8889e9eb4c0f4dfaafb3a15101566d54039f832bc9a8433c3c463e2d1dac2d2acc  chromium-launcher.sh
 9cfcb41d69c5a515b6f9fe2a629579fa499e1f48eb58a0ce4ec8e5029d450bcafb6d963019aaac9a6838244bee9f9ba7fe5ef6146a0ca6b20fcda4ab7f059476  chromium.conf
-09948599bc411528d5c98d921d79a5e01826b7b043afba7d5f8297f30e77eb953d5f40b6234e565e9312eb687c04a7f21a76b91c31164a7145d150f7b2bd03f9  clang-runtime-path.patch
 2d8237a940ea691bd10b08315429677a587f7ef9692a0cca53bfd066eae82998a6c71f402a8669e9de39f94d7f3280745d1628ea6eac5d76ca7116844d4e0dac  google-api.keys
+768e4089482a2b1f86e53afa909136dfff4f028e4c8cef202a9ab9b8ed7feb8839a7fc0c0dda2824db7ac89210112ff55d7a1a0c55bdbd0570ca807f687a022f  chromium-117-old-gn-no-mnemonic.patch
+391d537ebe3b7c1b78dde59f0fe7697d44a56326193a7fa4059a1c5e3479f320abb41419687ea5da9e4f2eaed274393a9ed2fdd5dbc4f7ad6e66b96490736a7d  atspi-unused.patch
+4fe30bac82ee43e22fb238665358d248b371d49d46b12173c7a8ef62b7781b94195ed28e12b332672e26c285bd886e1f4f88589716e7b0b15b98858092313149  blink-nullptr_t.patch
 29bb685e03356a77df5fd347cdf55194cc8b3265c421cc76e54d64edefc329dbcb052deb26b22e8f587ce68456876c071de1b7d258dd0fcc6ee66c875ec4a020  chromium-revert-drop-of-system-java.patch
 fa291e941076146d0edd5b96c088240a44a6e0aca3dfc744929655607182d2dc47e6c35ecb419f7c623fcf7f26dc3c4dd924dbf5ed10c3b986283f5ef2f72573  chromium-use-alpine-target.patch
-426b3d52384e2b784d4375ad3b6b408c9e67ef5e1b05c9aca759de9e577211be670620b6f4505c3eab1f04c1c5db59d018744a4673b29014b0bac91e1f4c64dc  disable-failing-tests.patch
+42cb900830c517969ce1d2aad586e946c6cf5cf864c86b8c1025dadc21cc6260b9e4d6af5185c4130212368aa0b7aa38dd08b5ce8b459ed6223457cd54b2084d  disable-failing-tests.patch
 5fc5c012c1db6cf1ba82f38c6f3f4f5ca3a209e47ac708a74de379b018e0649b7694877c9571ef79002dde875ffc07b458a3355425f1c01867f362c66c2bc1bf  fc-cache-version.patch
 9200f78bad70e95c648a5e8392d50642190600f655c6baa366ff6467ebad52d3b3f305dad58f3610da67136f4b723557653b174ec5c25be8d8737ee04d9ee09f  fix-missing-cstdint-include-musl.patch
 c63dee5044353eb306a39ca1526158c0f003ab310ecb03d1c368dc2a979454590c84b8d3c15484517d5e66bb8add9b231da9abbadf2e50850abd72ac1345c4ab  fstatat-32bit.patch
-0b3b12139a96cba0cb884f6efc0ea7b6af9ce62dcacecf13f235d586a78d31b7eff41caba04366162ec1dce17c8d746569684d20205b19359c20726d30424738  gcc12-fixes.patch
 33ee60863cc438ef57ffef92ba4cf67a856a5ffc16138bce241bcf87e47b15154aa86918e793c26f7ec4dc62a445257ad5673ed7001daf22c4043cf6cc57da7f  gdbinit.patch
+36a764fa73443b47d38050b52dbe6ad2fa8d67201ff4ccdbad13b52308ef165ca046aac6f9609fe35890a6485f0f3e672e78cc41e3e44f3cdc7f145e540524e8  generic-sensor-include.patch
+c1884bc5fe8d2b08722de964710f1bf7eb48076dd4e482826e0e9ce23b0f13000bb80dd9fe977e64e8c312ffd1aa9671ba9ab2c029900acf2710a512f8763065  gwp-asan-include.patch
 8de65109ece27ea63bd469f2220c56b8c752ba0a50fdf390082a2d5ae74b8e010199126175569f6d5084270dd4e0571e68aec32c0bca8211a6699925b3a09124  import-version.patch
-2c29936aefae1fd6a766648824635bd388943ea0086e11c180ae4fc795c63855d370df085cb55e6cc47960472e1011f2f58847b7e5acf2628c48138a80a34a54  ipcz-missing-include.patch
-658826e40c9803dcc9fd1e36b4835002a445fa0e91c7c65ed912657b0d3503f9e24963f8aa1df2280ce6530cb97a378c444cdce6ae8250463ac4a3f8cb94c9dc  libstdc++13.patch
+2cb3ffe030143543936554a5b15125180a0a8eaee2745f67d0dec1a31c33df87b085b26baf159fb07ae13669199d7dd741470ee4eae5c85c61a1bdc333eefd26  libstdc++13.patch
 acb81536570fe291bc7a059caa4dfbdc20e18e59745a1dc85d8ec49c7609853bfe3fb2f9c63f792fb9e4e888ae540a277e321041566ebd327cc3d22b707b490c  material-color-stdround.patch
 0e991842e23a4b9133898125eeb39e45e3f86f886eef5d2f0d9a72ee143a3e124b3b4f60be94edd57ce4185bcd69704edb51f76d08fdb6207f5559a08dd41ab0  mman.patch
+99bcc7dd485b404a90c606a96addab1d900852128d44fb8cea8acc7303189ef87c89a7b0e749fd0e10c5ef5f6bf1fadeb5c16a34503cab6a59938ce2653d887e  musl-auxv.patch
 50c274a420bb8a7f14fcb56e40920dac8f708792a4520789b4987facea459bef88113d5a2b60fa8c57bee6e92bff3617d6b73fa305c8c44614c638971cffd440  musl-sandbox.patch
 e7163ac5810ac85366cef2447412287c856e3d67c6b77f219a6e5a418b1965b98e449c409424ad0704a5bded9355dd0aec3dc4585918ce5a2ab36c079707afe2  musl-tid-caching.patch
 92eb002718026611f5542362ad69b67f0a398ff71b3fca5c05d55cb5c6f9f29334e5e127bb4860cfaa3fba0f0d4c901e2b98808217e7dc02e254a64a5c9521aa  musl-v8-monotonic-pthread-cont_timedwait.patch
 8cc774e8d84e434960222c0497ad8193ae35c0732f98d3282d5fd4b4930f914809eec97832c199517ca89ca6b9d1d011db5ce533c40c68ce5fa464609d131a23  no-execinfo.patch
 b5479874d125ee95a311295f227f8881a83023ec34fded7a6160b3ae32ea3ba0f2b833a9fb264c57f3d22746b6d8b00bdc8eb2ff86c43c412d6d3b55ae15b16b  no-mallinfo.patch
-803847eac5f19526d7315aa0c91ca63d7c41b30dda8a0312a2fcd57033510508d8c2025eb1da6a1c30ebac3bb06dc18bea70ce846c98b1db2d62796841bceeee  no-mte.patch
 e4c4e5bc6f828f9c883dd418c0ba01887949c29c311f76206a1ec29f620b0c0ba0452949dc2778a9c46ea066405857536964a36436a68eecf7da7952736333cf  no-res-ninit-nclose.patch
+6dc4d8dc92e685dace62265a1ddb3aebc558aed54d20ff6d36b030be0c48d7e84662326c31363612492574d9a03c62653cdc21a60995b97dee1d75cae86a9f9b  no-sandbox-settls.patch
+02f2bdd98be992a17d39275199010e418b222bdbab6565ada04c57b0838252293d31e004360683ea091ee36c8199ea46938a731c47692d32ac7b0fb93ae84688  partalloc-ambiguous.patch
+9cf58d1b3fb7c9ad27a4b451d21429c552cdc987d5feb5124c2d50ab3c90e1d7c09ef1cdad935d93288b26c091819e22fe10cda8bf9c2b1e5260a212f7b2be0e  partalloc-no-tagging-arm64.patch
+8e1aca983890c78d81a6f888b2cf1aa42878d1f8523e87d63b800e1e468cbfd33e5ff6a0975775ca222fe82f30c6497da95505da01b091c8776a44c98ac86f0f  perfetto-libstdc++.patch
 95bd9dd200658f4ca458e53c77a86da50104905db29b0241d701ecbee1573a7dcf14c409d62b7d01f8ee6cc3511dbb79677754b7145ca917c37894f5c853cfb9  pvalloc.patch
+803b8117c65132f76bec42054a4b2257a078b15b07fd08645fec2dfd51aa4e0075a9015300cd579d4ae0d757d9850b9988e080cfc2eea093f6684fdf82c4722c  random-fixes.patch
 b7f45dfbb3ddd186514b0e45f0d6c170b2c46e4e09d633e8a86ec80ae31f386ed02ffa1a18db2c49e324653941b72f09ca71b2c7478e6ef04d3875ec1909554b  revert-llvm16-linker-flag.patch
 86f612dd2b39602984a75b1b11c2ab8bc8cc6b4e78fae998570a777a6901ae45fdcdb22e46dd006dab703a0674e64c72cf8120af2dc5b9e78004f402c7e65358  quiche-array.patch
 e48693e6b7aeebf69a5acbf80d9a35defe4c23835121dfeb58b051ac7c527e758a41004f4d193274fe1b01c0bfb1dbc77b09cb6a404a3fdee507a2918afb0edb  temp-failure-retry.patch
+4c540972fa12acd9f0aafb8dc7e9987c3d6e4f28ff679dde522ebcec2dc5ae1a62d9d255bed0a30b9c79ae3b90ab0f5b9ae1ef5b7bf338612e28d9ef70250ca3  chromium-icu-74.patch
+5dbe63777cdd30a54782da77fc9e60b80e07cc909b2e1ce6f494c726df986da15fd6a8b0a7aa05dbeb480d8eee0214292dde03e368f094f06a824e4c43a5c0cf  zip-narrow.patch
 "
