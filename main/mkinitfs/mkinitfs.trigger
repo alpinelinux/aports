@@ -20,8 +20,8 @@ for i in "$@"; do
 	abi_release=$(cat "$i"/kernel.release)
 	initfs=initramfs-$flavor
 	mkinitfs -o /boot/$initfs $abi_release || {
-		echo "  mkinitfs failed!" >2
-		echo "  your system may not be bootable" >2
+		echo "  mkinitfs failed!" >&2
+		echo "  your system may not be bootable" >&2
 		exit 1
 	}
 done
