@@ -1,7 +1,7 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=3.4.6
+pkgver=3.5.0
 pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
@@ -77,10 +77,7 @@ package() {
 		dev/pts \
 		dev/shm \
 		etc \
-		etc/apk \
-		etc/conf.d \
 		etc/crontabs \
-		etc/init.d \
 		etc/modprobe.d \
 		etc/modules-load.d \
 		etc/network \
@@ -100,7 +97,6 @@ package() {
 		home \
 		lib \
 		lib/firmware \
-		lib/mdev \
 		lib/modules-load.d \
 		lib/sysctl.d \
 		media \
