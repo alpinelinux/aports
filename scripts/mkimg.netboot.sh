@@ -14,9 +14,9 @@ profile_netboot() {
 		"
 	arch="aarch64 armhf armv7 ppc64le x86 x86_64 s390x"
 	case "$ARCH" in
-		aarch64) kernel_flavors="lts rpi rpi4 virt";;
-		armhf) kernel_flavors="rpi rpi2";;
-		armv7) kernel_flavors="lts rpi rpi2";;
+		armhf) kernel_flavors="rpi";;
+		armv7) kernel_flavors="lts rpi";;
+		aarch64) kernel_flavors="lts virt rpi";;
 		x86_64) kernel_flavors="lts virt";;
 		*) kernel_flavors="lts";;
 	esac

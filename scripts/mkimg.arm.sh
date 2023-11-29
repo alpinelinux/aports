@@ -9,81 +9,20 @@ rpi_gen_cmdline() {
 }
 
 rpi_gen_config() {
-	cat <<-EOF
-	# do not modify this file as it will be overwritten on upgrade.
-	# create and/or modify usercfg.txt instead.
-	# https://www.raspberrypi.com/documentation/computers/config_txt.html
-	EOF
+	local arm_64bit=0
 	case "$ARCH" in
-	armhf)
-		cat <<-EOF
-		[pi0]
-		kernel=boot/vmlinuz-rpi
-		initramfs boot/initramfs-rpi
-		[pi0w]
-		kernel=boot/vmlinuz-rpi
-		initramfs boot/initramfs-rpi
-		[pi1]
-		kernel=boot/vmlinuz-rpi
-		initramfs boot/initramfs-rpi
-		[pi02]
-		kernel=boot/vmlinuz-rpi2
-		initramfs boot/initramfs-rpi2
-		[pi2]
-		kernel=boot/vmlinuz-rpi2
-		initramfs boot/initramfs-rpi2
-		[pi3]
-		kernel=boot/vmlinuz-rpi2
-		initramfs boot/initramfs-rpi2
-		[pi3+]
-		kernel=boot/vmlinuz-rpi2
-		initramfs boot/initramfs-rpi2
-		[all]
-		include usercfg.txt
-		EOF
-	;;
-	armv7)
-		cat <<-EOF
-		[pi02]
-		kernel=boot/vmlinuz-rpi2
-		initramfs boot/initramfs-rpi2
-		[pi2]
-		kernel=boot/vmlinuz-rpi2
-		initramfs boot/initramfs-rpi2
-		[pi3]
-		kernel=boot/vmlinuz-rpi2
-		initramfs boot/initramfs-rpi2
-		[pi3+]
-		kernel=boot/vmlinuz-rpi2
-		initramfs boot/initramfs-rpi2
-		[pi4]
-		kernel=boot/vmlinuz-rpi4
-		initramfs boot/initramfs-rpi4
-		[all]
-		include usercfg.txt
-		EOF
-	;;
-	aarch64)
-		cat <<-EOF
-		[pi02]
-		kernel=boot/vmlinuz-rpi
-		initramfs boot/initramfs-rpi
-		[pi3]
-		kernel=boot/vmlinuz-rpi
-		initramfs boot/initramfs-rpi
-		[pi3+]
-		kernel=boot/vmlinuz-rpi
-		initramfs boot/initramfs-rpi
-		[pi4]
-		enable_gic=1
-		kernel=boot/vmlinuz-rpi4
-		initramfs boot/initramfs-rpi4
-		[all]
-		arm_64bit=1
-		include usercfg.txt
-		EOF
-	;;
+		aarch64) arm_64bit=1;;
 	esac
+	cat <<-EOF
+		# do not modify this file as it will be overwritten on upgrade.
+		# create and/or modify usercfg.txt instead.
+		# https://www.raspberrypi.com/documentation/computers/config_txt.html
+
+		kernel=boot/vmlinuz-rpi
+		initramfs boot/initramfs-rpi
+		arm_64bit=$arm_64bit
+		include usercfg.txt
+	EOF
 }
 
 build_rpi_config() {
@@ -101,16 +40,11 @@ profile_rpi() {
 	profile_base
 	title="Raspberry Pi"
 	desc="Includes Raspberry Pi kernel.
-		Designed for RPI 1, 2, 3 and 4.
+		Designed for RPI 1, 2, 3, 4 and 5
 		And much more..."
 	image_ext="tar.gz"
 	arch="aarch64 armhf armv7"
 	kernel_flavors="rpi"
-	case "$ARCH" in
-		aarch64) kernel_flavors="rpi rpi4";;
-		armhf) kernel_flavors="rpi rpi2";;
-		armv7) kernel_flavors="rpi2 rpi4";;
-	esac
 	kernel_cmdline="console=tty1"
 	initfs_features="base squashfs mmc usb kms dhcp https"
 	hostname="rpi"
