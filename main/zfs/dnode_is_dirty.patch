@@ -1,0 +1,90 @@
+From 30d581121bb122c90959658e7b28b1672d342897 Mon Sep 17 00:00:00 2001
+From: Rob N <robn@despairlabs.com>
+Date: Wed, 29 Nov 2023 04:07:57 +1100
+Subject: [PATCH] dnode_is_dirty: check dnode and its data for dirtiness
+
+Over its history this the dirty dnode test has been changed between
+checking for a dnodes being on `os_dirty_dnodes` (`dn_dirty_link`) and
+`dn_dirty_record`.
+
+  de198f2d9 Fix lseek(SEEK_DATA/SEEK_HOLE) mmap consistency
+  2531ce372 Revert "Report holes when there are only metadata changes"
+  ec4f9b8f3 Report holes when there are only metadata changes
+  454365bba Fix dirty check in dmu_offset_next()
+  66aca2473 SEEK_HOLE should not block on txg_wait_synced()
+
+Also illumos/illumos-gate@c543ec060d illumos/illumos-gate@2bcf0248e9
+
+It turns out both are actually required.
+
+In the case of appending data to a newly created file, the dnode proper
+is dirtied (at least to change the blocksize) and dirty records are
+added.  Thus, a single logical operation is represented by separate
+dirty indicators, and must not be separated.
+
+The incorrect dirty check becomes a problem when the first block of a
+file is being appended to while another process is calling lseek to skip
+holes. There is a small window where the dnode part is undirtied while
+there are still dirty records. In this case, `lseek(fd, 0, SEEK_DATA)`
+would not know that the file is dirty, and would go to
+`dnode_next_offset()`. Since the object has no data blocks yet, it
+returns `ESRCH`, indicating no data found, which results in `ENXIO`
+being returned to `lseek()`'s caller.
+
+Since coreutils 9.2, `cp` performs sparse copies by default, that is, it
+uses `SEEK_DATA` and `SEEK_HOLE` against the source file and attempts to
+replicate the holes in the target. When it hits the bug, its initial
+search for data fails, and it goes on to call `fallocate()` to create a
+hole over the entire destination file.
+
+This has come up more recently as users upgrade their systems, getting
+OpenZFS 2.2 as well as a newer coreutils. However, this problem has been
+reproduced against 2.1, as well as on FreeBSD 13 and 14.
+
+This change simply updates the dirty check to check both types of dirty.
+If there's anything dirty at all, we immediately go to the "wait for
+sync" stage, It doesn't really matter after that; both changes are on
+disk, so the dirty fields should be correct.
+
+Sponsored-by: Klara, Inc.
+Sponsored-by: Wasabi Technology, Inc.
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Reviewed-by: Alexander Motin <mav@FreeBSD.org>
+Reviewed-by: Rich Ercolani <rincebrain@gmail.com>
+Signed-off-by: Rob Norris <rob.norris@klarasystems.com>
+Closes #15571
+Closes #15526
+---
+ module/zfs/dnode.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/module/zfs/dnode.c b/module/zfs/dnode.c
+index 029d9df8af8..7ae74ad1318 100644
+--- a/module/zfs/dnode.c
++++ b/module/zfs/dnode.c
+@@ -1778,7 +1778,14 @@ dnode_try_claim(objset_t *os, uint64_t object, int slots)
+ }
+ 
+ /*
+- * Checks if the dnode contains any uncommitted dirty records.
++ * Checks if the dnode itself is dirty, or is carrying any uncommitted records.
++ * It is important to check both conditions, as some operations (eg appending
++ * to a file) can dirty both as a single logical unit, but they are not synced
++ * out atomically, so checking one and not the other can result in an object
++ * appearing to be clean mid-way through a commit.
++ *
++ * Do not change this lightly! If you get it wrong, dmu_offset_next() can
++ * detect a hole where there is really data, leading to silent corruption.
+  */
+ boolean_t
+ dnode_is_dirty(dnode_t *dn)
+@@ -1786,7 +1793,8 @@ dnode_is_dirty(dnode_t *dn)
+ 	mutex_enter(&dn->dn_mtx);
+ 
+ 	for (int i = 0; i < TXG_SIZE; i++) {
+-		if (multilist_link_active(&dn->dn_dirty_link[i])) {
++		if (multilist_link_active(&dn->dn_dirty_link[i]) ||
++		    !list_is_empty(&dn->dn_dirty_records[i])) {
+ 			mutex_exit(&dn->dn_mtx);
+ 			return (B_TRUE);
+ 		}
