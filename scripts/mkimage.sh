@@ -11,7 +11,6 @@
 set -e
 
 # get abuild configurables
-[ -e /usr/share/abuild/functions.sh ] || (echo "abuild not found" ; exit 1)
 . /usr/share/abuild/functions.sh
 
 scriptdir="$(dirname "$0")"
@@ -60,7 +59,6 @@ set_source_date
 all_sections=""
 all_profiles=""
 all_checksums="sha256 sha512"
-all_arches="aarch64 armhf armv7 riscv64 x86 x86_64"
 all_dirs=""
 build_date="$(date -u +%y%m%d -d "@$SOURCE_DATE_EPOCH")"
 default_arch="$(apk --print-arch)"
@@ -94,7 +92,7 @@ usage() {
 
 $0	[--tag RELEASE] [--outdir OUTDIR] [--workdir WORKDIR]
 		[--arch ARCH] [--profile PROFILE] [--hostkeys] [--simulate]
-		[--repository REPO] [--extra-repository REPO] [--yaml FILE]
+		[--repository REPO [--repository REPO]] [--yaml FILE]
 $0	--help
 
 options:
@@ -104,7 +102,6 @@ options:
 --outdir		Specify directory for the created images
 --profile		Specify which profiles to build
 --repository		Package repository to use for the image create
---extra-repository	Add repository to search packages from
 --simulate		Don't execute commands
 --tag			Build images for tag RELEASE
 --workdir		Specify temporary working directory (cache)
@@ -244,7 +241,10 @@ while [ $# -gt 0 ]; do
 			REPOS=$(printf '%s\n%s' "$REPOS" "$1");
 		fi
 		shift ;;
-	--extra-repository) EXTRAREPOS="$EXTRAREPOS $1"; shift ;;
+	--extra-repository)
+		warning "--extra-repository is deprecated. Use multiple --repository"
+		EXTRAREPOS="$EXTRAREPOS $1"
+		shift ;;
 	--workdir) WORKDIR="$1"; shift ;;
 	--outdir) OUTDIR="$1"; shift ;;
 	--tag) RELEASE="$1"; shift ;;
