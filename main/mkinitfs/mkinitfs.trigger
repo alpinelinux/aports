@@ -9,17 +9,30 @@ fi
 
 for i in "$@"; do
 	# get last element in path
-	flavor=${i##*/}
-	if ! [ -f "$i"/kernel.release ]; then
-		# kernel was uninstalled
-		rm -f $( readlink -f /boot/initramfs-$flavor ) \
-			/boot/initramfs-$flavor /boot/vmlinuz-$flavor \
-			/boot/$flavor /boot/$flavor.gz /$flavor /$flavor.gz
-		continue
-	fi
-	abi_release=$(cat "$i"/kernel.release)
-	initfs=initramfs-$flavor
-	mkinitfs -o /boot/$initfs $abi_release || {
+	abi_release=${i##*/}
+
+	suffix="$(cat "$i"/kernel-suffix 2>/dev/null)" || {
+		# clean up on uninstall
+		suffix="$(cat "$i/initramfs-suffix" 2>/dev/null)" || {
+			# fallback suffix
+			flavor="${abi_release##*[0-9]-}"
+			if [ "$flavor" != "$abi_release" ]; then
+				suffix="-$flavor"
+			fi
+		}
+
+		rm -f "$i"/initramfs-suffix
+		if ! [ -e "/boot/vmlinuz$suffix" ] && [ -e "/boot/initramfs$suffix" ]; then
+			# kernel was removed
+			rm -v "/boot/initramfs$suffix"
+			continue
+		fi
+	}
+
+	# store the initramfs suffix for removal
+	echo "$suffix" > "$i"/initramfs-suffix
+	initramfs="/boot/initramfs$suffix"
+	mkinitfs -o "$initramfs" "$abi_release" || {
 		echo "  mkinitfs failed!" >&2
 		echo "  your system may not be bootable" >&2
 		exit 1
