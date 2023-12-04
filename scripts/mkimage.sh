@@ -209,7 +209,7 @@ build_profile() {
 	if [ "$_dirty" = "yes" -o ! -e "$output_file" ]; then
 		# Create image
 		[ -n "$output_format" ] || output_format="${image_ext//[:\.]/}"
-		create_image_${output_format} || { _fail="yes"; false; }
+		create_image_${output_format} || { _fail="yes"; return 1; }
 
 		if [ "$_checksum" = "yes" ]; then
 			for _c in $all_checksums; do
@@ -322,7 +322,7 @@ for ARCH in $req_arch; do
 		echo "---" > "$_yaml_out"
 	fi
 	for PROFILE in $req_profiles; do
-		(build_profile) || exit 1
+		(set -e; build_profile) || exit 1
 	done
 done
 echo "Images generated in $OUTDIR"

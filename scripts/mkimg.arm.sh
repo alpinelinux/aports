@@ -51,8 +51,25 @@ profile_rpi() {
 	grub_mod=
 }
 
+create_image_imggz() {
+	sync "$DESTDIR"
+	local image_size=$(du -L -k -s "$DESTDIR" | awk '{print $1 + 8192}' )
+	local imgfile="${OUTDIR}/${output_filename%.gz}"
+	dd if=/dev/zero of="$imgfile" bs=1M count=$(( image_size / 1024 ))
+	mformat -i "$imgfile" -N 0 ::
+	mcopy -s -i "$imgfile" "$DESTDIR"/* "$DESTDIR"/.alpine-release ::
+	echo "Compressing $imgfile..."
+	pigz -v -f -9 "$imgfile" || gzip -f -9 "$imgfile"
+}
+
+profile_rpiimg() {
+	profile_rpi
+	title="Raspberry Pi Disk Image"
+	image_name="alpine-rpi"
+	image_ext="img.gz"
+}
+
 build_uboot() {
-	set -x
 	# FIXME: Fix apk-tools to extract packages directly
 	local pkg pkgs="$(apk fetch  --simulate --root "$APKROOT" --recursive u-boot-all | sed -ne "s/^Downloading \(.*\)\-[0-9].*$/\1/p")"
 	for pkg in $pkgs; do
