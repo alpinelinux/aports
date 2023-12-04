@@ -22,9 +22,14 @@ for i in "$@"; do
 		}
 
 		rm -f "$i"/initramfs-suffix
-		if ! [ -e "/boot/vmlinuz$suffix" ] && [ -e "/boot/initramfs$suffix" ]; then
+		if ! [ -e "/boot/vmlinuz$suffix" ]; then
 			# kernel was removed
 			rm -v "/boot/initramfs$suffix"
+			continue
+		fi
+
+		# upgrading
+		if ! [ -e "$i"/modules.order ]; then
 			continue
 		fi
 	}
