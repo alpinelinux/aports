@@ -22,6 +22,7 @@ for i in "$@"; do
 		}
 
 		rm -f "$i"/initramfs-suffix
+		rmdir "$i" 2>/dev/null
 		if ! [ -e "/boot/vmlinuz$suffix" ]; then
 			# kernel was removed
 			rm -v "/boot/initramfs$suffix"
