@@ -7,6 +7,7 @@ running on musl libc. This patch fix this by replacing
 "uc_mcontext.regs->grp" with "uc_mcontext.gp_regs"
 and accessing the named fields (like "->nip") by the array index constants.
 
+diff -ru old/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp new/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
 --- old/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
 +++ new/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
 @@ -47,6 +47,10 @@
@@ -20,7 +21,7 @@ and accessing the named fields (like "->nip") by the array index constants.
  #ifdef PRODUCT
  #define BLOCK_COMMENT(str) // nothing
  #else
-@@ -1308,7 +1312,11 @@
+@@ -1316,7 +1320,11 @@
    // the safepoing polling page.
    ucontext_t* uc = (ucontext_t*) ucontext;
    // Set polling address.
@@ -32,7 +33,7 @@ and accessing the named fields (like "->nip") by the array index constants.
    if (polling_address_ptr != NULL) {
      *polling_address_ptr = addr;
    }
-@@ -1371,11 +1379,20 @@
+@@ -1379,11 +1387,20 @@
        || (is_stdu(instruction) && rs == 1)) {
      int ds = inv_ds_field(instruction);
      // return banged address
@@ -53,9 +54,10 @@ and accessing the named fields (like "->nip") by the array index constants.
      return ra != 1 || rb_val >= 0 ? NULL         // not a stack bang
                                    : sp + rb_val; // banged address
    }
+diff -ru old/src/hotspot/cpu/ppc/vm_version_ppc.cpp new/src/hotspot/cpu/ppc/vm_version_ppc.cpp
 --- old/src/hotspot/cpu/ppc/vm_version_ppc.cpp
 +++ new/src/hotspot/cpu/ppc/vm_version_ppc.cpp
-@@ -52,6 +52,10 @@
+@@ -53,6 +53,10 @@
  #endif
  #endif
  
@@ -66,7 +68,7 @@ and accessing the named fields (like "->nip") by the array index constants.
  bool VM_Version::_is_determine_features_test_running = false;
  uint64_t VM_Version::_dscr_val = 0;
  
-@@ -682,7 +686,7 @@
+@@ -683,7 +687,7 @@
    unsigned long auxv = getauxval(AT_HWCAP2);
  
    if (auxv & PPC_FEATURE2_HTM_NOSC) {
@@ -75,21 +77,70 @@ and accessing the named fields (like "->nip") by the array index constants.
        // TM on POWER8 and POWER9 in compat mode (VM) is supported by the JVM.
        // TM on POWER9 DD2.1 NV (baremetal) is not supported by the JVM (TM on
        // POWER9 DD2.1 NV has a few issues that need a couple of firmware
+diff -ru old/src/hotspot/os_cpu/linux_ppc/javaThread_linux_ppc.cpp new/src/hotspot/os_cpu/linux_ppc/javaThread_linux_ppc.cpp
+--- old/src/hotspot/os_cpu/linux_ppc/javaThread_linux_ppc.cpp
++++ new/src/hotspot/os_cpu/linux_ppc/javaThread_linux_ppc.cpp
+@@ -28,6 +28,10 @@
+ #include "runtime/frame.inline.hpp"
+ #include "runtime/javaThread.hpp"
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
++
+ frame JavaThread::pd_last_frame() {
+   assert(has_last_Java_frame(), "must have last_Java_sp() when suspended");
+ 
+@@ -58,14 +62,22 @@
+   // if we were running Java code when SIGPROF came in.
+   if (isInJava) {
+     ucontext_t* uc = (ucontext_t*) ucontext;
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+     address pc = (address)uc->uc_mcontext.regs->nip;
++#else // Musl
++    address pc = (address)uc->uc_mcontext.gp_regs[PT_NIP];
++#endif
+ 
+     if (pc == NULL) {
+       // ucontext wasn't useful
+       return false;
+     }
+ 
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+     frame ret_frame((intptr_t*)uc->uc_mcontext.regs->gpr[1/*REG_SP*/], pc);
++#else // Musl
++    frame ret_frame((intptr_t*)uc->uc_mcontext.gp_regs[1/*REG_SP*/], pc);
++#endif
+ 
+     if (ret_frame.fp() == NULL) {
+       // The found frame does not have a valid frame pointer.
+@@ -84,7 +96,11 @@
+       if (!Method::is_valid_method(m)) return false;
+       if (!Metaspace::contains(m->constMethod())) return false;
+ 
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+       uint64_t reg_bcp = uc->uc_mcontext.regs->gpr[14/*R14_bcp*/];
++#else // Musl
++      uint64_t reg_bcp = uc->uc_mcontext.gp_regs[14/*R14_bcp*/];
++#endif
+       uint64_t istate_bcp = istate->bcp;
+       uint64_t code_start = (uint64_t)(m->code_base());
+       uint64_t code_end = (uint64_t)(m->code_base() + m->code_size());
+diff -ru old/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp new/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
 --- old/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
 +++ new/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
-@@ -76,7 +76,11 @@
+@@ -78,6 +78,10 @@
  # include <poll.h>
  # include <ucontext.h>
  
 +#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
 +#include <asm/ptrace.h>
 +#endif
- 
 +
+ 
  address os::current_stack_pointer() {
    return (address)__builtin_frame_address(0);
- }
-@@ -103,24 +107,42 @@
+@@ -105,24 +109,42 @@
    // - if uc was filled by getcontext(), it is undefined - getcontext() does not fill
    //   it because the volatile registers are not needed to make setcontext() work.
    //   Hopefully it was zero'd out beforehand.
@@ -132,7 +183,7 @@ and accessing the named fields (like "->nip") by the array index constants.
  }
  
  intptr_t* os::Linux::ucontext_get_fp(const ucontext_t * uc) {
-@@ -128,7 +150,11 @@
+@@ -130,7 +152,11 @@
  }
  
  static unsigned long ucontext_get_trap(const ucontext_t * uc) {
@@ -144,7 +195,7 @@ and accessing the named fields (like "->nip") by the array index constants.
  }
  
  address os::fetch_frame_from_context(const void* ucVoid,
-@@ -194,7 +220,11 @@
+@@ -196,7 +222,11 @@
      // 3.2.1 "Machine State Register"), however note that ISA notation for bit
      // numbering is MSB 0, so for normal bit numbering (LSB 0) they come to be
      // bits 33 and 34. It's not related to endianness, just a notation matter.
@@ -156,7 +207,7 @@ and accessing the named fields (like "->nip") by the array index constants.
        if (TraceTraps) {
          tty->print_cr("caught signal in transaction, "
                          "ignoring to jump to abort handler");
-@@ -450,6 +480,7 @@
+@@ -452,6 +482,7 @@
    const ucontext_t* uc = (const ucontext_t*)context;
  
    st->print_cr("Registers:");
@@ -164,7 +215,7 @@ and accessing the named fields (like "->nip") by the array index constants.
    st->print("pc =" INTPTR_FORMAT "  ", uc->uc_mcontext.regs->nip);
    st->print("lr =" INTPTR_FORMAT "  ", uc->uc_mcontext.regs->link);
    st->print("ctr=" INTPTR_FORMAT "  ", uc->uc_mcontext.regs->ctr);
-@@ -489,6 +489,16 @@
+@@ -460,6 +491,16 @@
      st->print("r%-2d=" INTPTR_FORMAT "  ", i, uc->uc_mcontext.regs->gpr[i]);
      if (i % 3 == 2) st->cr();
    }
@@ -181,7 +232,7 @@ and accessing the named fields (like "->nip") by the array index constants.
    st->cr();
    st->cr();
  }
-@@ -482,12 +523,22 @@
+@@ -489,12 +530,22 @@
    st->print_cr("Register to memory mapping:");
    st->cr();
  
