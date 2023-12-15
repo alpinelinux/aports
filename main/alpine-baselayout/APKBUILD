@@ -1,7 +1,7 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=3.4.5
+pkgver=3.4.6
 pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
@@ -83,11 +83,13 @@ package() {
 		etc/init.d \
 		etc/modprobe.d \
 		etc/modules-load.d \
+		etc/network \
 		etc/network/if-down.d \
 		etc/network/if-post-down.d \
 		etc/network/if-pre-up.d \
 		etc/network/if-up.d \
 		etc/opt \
+		etc/periodic \
 		etc/periodic/15min \
 		etc/periodic/daily \
 		etc/periodic/hourly \
@@ -96,10 +98,12 @@ package() {
 		etc/profile.d \
 		etc/sysctl.d \
 		home \
+		lib \
 		lib/firmware \
 		lib/mdev \
 		lib/modules-load.d \
 		lib/sysctl.d \
+		media \
 		media/cdrom \
 		media/floppy \
 		media/usb \
@@ -110,8 +114,11 @@ package() {
 		sbin \
 		srv \
 		sys \
+		usr \
 		usr/bin \
+		usr/lib \
 		usr/lib/modules-load.d \
+		usr/local \
 		usr/local/bin \
 		usr/local/lib \
 		usr/local/share \
@@ -119,11 +126,13 @@ package() {
 		usr/share \
 		usr/share/man \
 		usr/share/misc \
+		var \
 		var/cache \
 		var/cache/misc \
 		var/lib \
 		var/lib/misc \
 		var/local \
+		var/lock \
 		var/lock/subsys \
 		var/log \
 		var/opt \
