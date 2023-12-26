@@ -8,13 +8,14 @@ description_save="Save firewall state"
 description_panic="Drop all packets"
 description_reload="Reload configuration"
 
-extra_commands="save panic"
+extra_commands="check save panic"
 extra_started_commands="reload"
 
 iptables_name=${SVCNAME}
-if [ "${iptables_name}" != "iptables" -a "${iptables_name}" != "ip6tables" ] ; then
-	iptables_name="iptables"
-fi
+case "$iptables_name" in
+	iptables|ip6tables) ;;
+	*) iptables_name="iptables" ;;
+esac
 
 iptables_bin="/sbin/${iptables_name}"
 case ${iptables_name} in
@@ -35,6 +36,7 @@ if [ -n "$netns" ]; then
 fi
 
 depend() {
+	need localmount # in case IPTABLES_SAVE=/var/...
 	before net
 	after sysctl
 	use logger
@@ -42,7 +44,7 @@ depend() {
 }
 
 set_table_policy() {
-	local chains table=$1 policy=$2
+	local chains table="$1" policy="$2"
 	case ${table} in
 		nat)    chains="PREROUTING POSTROUTING OUTPUT";;
 		mangle) chains="PREROUTING INPUT FORWARD OUTPUT POSTROUTING";;
@@ -51,7 +53,7 @@ set_table_policy() {
 	esac
 	local chain
 	for chain in ${chains} ; do
-		${iptables_bin} -w 5 -t ${table} -P ${chain} ${policy}
+		${iptables_bin} --wait 5 --table "${table}" --policy "${chain}" "${policy}"
 	done
 }
 
@@ -61,7 +63,7 @@ get_tables() {
 }
 
 checkconfig() {
-	if [ ! -f ${iptables_save} ] ; then
+	if [ ! -f "${iptables_save}" ] ; then
 		eerror "Not starting ${iptables_name}.  First create some rules then run:"
 		eerror "/etc/init.d/${iptables_name} save"
 		return 1
@@ -78,11 +80,12 @@ start_pre() {
 
 start() {
 	ebegin "Loading ${iptables_name} state and starting firewall"
+	# shellcheck disable=SC2086
 	${iptables_bin}-restore ${SAVE_RESTORE_OPTIONS} < "${iptables_save}"
 	eend $?
 	if yesno "${IPFORWARD}"; then
 		ebegin "Enabling forwarding"
-		/sbin/sysctl -w ${sysctl_ipfwd}=1 > /dev/null
+		/sbin/sysctl -w "${sysctl_ipfwd}=1" > /dev/null
 		eend $?
 	fi
 }
@@ -90,7 +93,7 @@ start() {
 stop() {
 	if yesno "${IPFORWARD}"; then
 		ebegin "Disabling forwarding"
-		/sbin/sysctl -w ${sysctl_ipfwd}=0 > /dev/null
+		/sbin/sysctl -w "${sysctl_ipfwd}=0" > /dev/null
 		eend $?
 	fi
 	if yesno "${SAVE_ON_STOP}"; then
@@ -99,24 +102,37 @@ stop() {
 	ebegin "Stopping firewall"
 	local a
 	for a in $(get_tables) ; do
-		set_table_policy $a ACCEPT
+		set_table_policy "$a" ACCEPT
 
-		${iptables_bin} -w 5 -F -t $a
-		${iptables_bin} -w 5 -X -t $a
+		${iptables_bin} --wait 5 --flush --table "$a"
+		${iptables_bin} --wait 5 --delete-chain --table "$a"
 	done
 	eend $?
 }
 
 reload() {
+	checkrules || return 1
 	ebegin "Flushing firewall"
 	local a
 	for a in $(get_tables) ; do
-		${iptables_bin} -w 5 -F -t $a
-		${iptables_bin} -w 5 -X -t $a
+		${iptables_bin} --wait 5 --flush --table "$a"
+		${iptables_bin} --wait 5 --delete-chain --table "$a"
 	done
 	eend $?
 
 	start
+}
+
+checkrules() {
+	ebegin "Checking rules"
+	# shellcheck disable=SC2086
+	${iptables_bin}-restore --test ${SAVE_RESTORE_OPTIONS} < "${iptables_save}"
+	eend $?
+}
+
+check() {
+	# Short name for users of init.d script.
+	checkrules
 }
 
 save() {
@@ -125,6 +141,7 @@ save() {
 	local exitcode tmp
 
 	tmp="$(mktemp)"
+	# shellcheck disable=SC2086
 	${iptables_bin}-save ${SAVE_RESTORE_OPTIONS} > "${tmp}"
 	exitcode=$?
 	if [ "$exitcode" -eq 0 ]; then
@@ -138,17 +155,17 @@ save() {
 }
 
 panic() {
-	if service_started ${iptables_name}; then
-		rc-service ${iptables_name} stop
+	if service_started "${iptables_name}"; then
+		rc-service "${iptables_name}" stop
 	fi
 
 	local a
 	ebegin "Dropping all packets"
 	for a in $(get_tables) ; do
-		${iptables_bin} -w 5 -F -t $a
-		${iptables_bin} -w 5 -X -t $a
+		${iptables_bin} --wait 5 --flush --table "$a"
+		${iptables_bin} --wait 5 --delete-chain --table "$a"
 
-		set_table_policy $a DROP
+		set_table_policy "$a" DROP
 	done
 	eend $?
 }
