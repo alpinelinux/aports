@@ -39,9 +39,9 @@ section_rpi_config() {
 profile_rpi() {
 	profile_base
 	title="Raspberry Pi"
-	desc="Includes Raspberry Pi kernel.
-		Designed for RPI 1, 2, 3, 4 and 5
-		And much more..."
+	desc="First generation Pis including Zero/W (armhf).
+		Pi 2 to Pi 3+ generations (armv7).
+		Pi 3 to Pi 5 generations (aarch64)."
 	image_ext="tar.gz"
 	arch="aarch64 armhf armv7"
 	kernel_flavors="rpi"
