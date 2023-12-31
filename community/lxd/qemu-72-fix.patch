@@ -1,0 +1,90 @@
+From: Mathias Gibbens <gibmat@debian.org>
+Description: Cherry-pick upstream fix for qemu >= 7.2, rebase, and drop SEV features not in current LTS release
+Origin: https://github.com/lxc/lxd/pull/11594
+diff --git a/lxd/instance/drivers/driver_qemu.go b/lxd/instance/drivers/driver_qemu.go
+index 9dcdd9da7..08211b034 100644
+--- a/lxd/instance/drivers/driver_qemu.go
++++ b/lxd/instance/drivers/driver_qemu.go
+@@ -2878,17 +2878,11 @@ func (d *qemu) generateQemuConfigFile(mountInfo *storagePools.MountInfo, busName
+ // addCPUMemoryConfig adds the qemu config required for setting the number of virtualised CPUs and memory.
+ // If sb is nil then no config is written.
+ func (d *qemu) addCPUMemoryConfig(cfg *[]cfgSection) error {
+-	drivers := DriverStatuses()
+-	info := drivers[instancetype.VM].Info
+-	if info.Name == "" {
+-		return fmt.Errorf("Unable to ascertain QEMU version")
+-	}
+-
+ 	// Figure out what memory object layout we're going to use.
+ 	// Before v6.0 or if version unknown, we use the "repeated" format, otherwise we use "indexed" format.
+ 	qemuMemObjectFormat := "repeated"
+ 	qemuVer6, _ := version.NewDottedVersion("6.0")
+-	qemuVer, _ := version.NewDottedVersion(info.Version)
++	qemuVer, _ := d.version()
+ 	if qemuVer != nil && qemuVer.Compare(qemuVer6) >= 0 {
+ 		qemuMemObjectFormat = "indexed"
+ 	}
+@@ -3154,11 +3148,9 @@ func (d *qemu) addDriveConfig(bootIndexes map[string]int, driveConf deviceConfig
+ 	isRBDImage := strings.HasPrefix(driveConf.DevPath, device.RBDFormatPrefix)
+ 
+ 	// Check supported features.
+-	drivers := DriverStatuses()
+-	info := drivers[d.Type()].Info
+-
+ 	// Use io_uring over native for added performance (if supported by QEMU and kernel is recent enough).
+ 	// We've seen issues starting VMs when running with io_ring AIO mode on kernels before 5.13.
++	info := DriverStatuses()[instancetype.VM].Info
+ 	minVer, _ := version.NewDottedVersion("5.13.0")
+ 	if shared.StringInSlice(device.DiskIOUring, driveConf.Opts) && shared.StringInSlice("io_uring", info.Features) && d.state.OS.KernelVersion.Compare(minVer) >= 0 {
+ 		aioMode = "io_uring"
+@@ -3592,12 +3584,21 @@ func (d *qemu) addNetDevConfig(busName string, qemuDev map[string]string, bootIn
+ 			qemuNetDev := map[string]any{
+ 				"id":         fmt.Sprintf("%s%s", qemuNetDevIDPrefix, escapedDeviceName),
+ 				"type":       "tap",
+-				"vhost":      true,
++				"vhost":      false, // This is selectively enabled based on QEMU version later.
+ 				"script":     "no",
+ 				"downscript": "no",
+ 				"ifname":     nicName,
+ 			}
+ 
++			// vhost-net network accelerator is causing asserts since QEMU 7.2.
++			// Until previous behaviour is restored or we figure out how to pass the veth device using
++			// file descriptors we will just disable the vhost-net accelerator.
++			qemuVer, _ := d.version()
++			vhostMaxVer, _ := version.NewDottedVersion("7.2")
++			if qemuVer != nil && qemuVer.Compare(vhostMaxVer) < 0 {
++				qemuNetDev["vhost"] = true
++			}
++
+ 			queueCount := configureQueues(len(cpus))
+ 			if queueCount > 0 {
+ 				qemuNetDev["queues"] = queueCount
+@@ -6501,6 +6502,17 @@ func (d *qemu) checkFeatures(hostArch int, qemuPath string) ([]string, error) {
+ 	return features, nil
+ }
+ 
++// version returns the QEMU version.
++func (d *qemu) version() (*version.DottedVersion, error) {
++	info := DriverStatuses()[instancetype.VM].Info
++	qemuVer, err := version.NewDottedVersion(info.Version)
++	if err != nil {
++		return nil, fmt.Errorf("Failed parsing QEMU version: %w", err)
++	}
++
++	return qemuVer, nil
++}
++
+ func (d *qemu) Metrics(hostInterfaces []net.Interface) (*metrics.MetricSet, error) {
+ 	if d.agentMetricsEnabled() {
+ 		metrics, err := d.getAgentMetrics()
+@@ -6764,8 +6776,6 @@ func (d *qemu) setCPUs(count int) error {
+ 
+ func (d *qemu) architectureSupportsCPUHotplug() bool {
+ 	// Check supported features.
+-	drivers := DriverStatuses()
+-	info := drivers[d.Type()].Info
+-
++	info := DriverStatuses()[instancetype.VM].Info
+ 	return shared.StringInSlice("cpu_hotplug", info.Features)
+ }
