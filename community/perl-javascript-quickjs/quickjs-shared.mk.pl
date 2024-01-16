@@ -23,7 +23,7 @@ WriteMakefile(
         ],
       ) : ()
     ),
-    INC               => '-Wall --std=c99 -I.',
+    INC               => '-Wall --std=c99',
     LICENSE           => "perl_5",
 
     PMLIBDIRS => ['lib'],
