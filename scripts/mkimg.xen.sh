@@ -16,5 +16,5 @@ profile_xen() {
 		Use for Xen Dom0."
 	arch="x86_64"
 	xen_params=""
-	apks="$apks ethtool lvm2 mdadm multipath-tools rng-tools sfdisk xen xen-bridge syslinux"
+	apks="$apks ethtool lvm2 mdadm multipath-tools rng-tools sfdisk xen xen-bridge xen-qemu syslinux"
 }
