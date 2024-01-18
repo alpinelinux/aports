@@ -1,0 +1,566 @@
+# Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>
+# Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
+
+pkgname=dotnet8-runtime
+pkgver=8.0.1
+pkgrel=0
+_gittag=v8.0.1
+_giturl="https://github.com/dotnet/dotnet"
+_testtag=d3d39e7c404c6e45c3e7ab6621c5f6cabf1540b0
+_bunnytag=v15
+_patches="
+	aspnetcore_portable-build-workaround.patch
+	aspire_fix-gitinfo-target.patch
+	build_enable-timestamps.patch
+	installer_hard-dereference-tar-gz.patch
+	roslyn-analyzer_disable-apphost.patch
+	runtime_82269-mono-thread-coop-undefine-fortify-source.patch
+	runtime_90251-rename-mono-cmake-host-var.patch
+	runtime_enable-system-libunwind.diff
+	runtime_more-clang-16-suppression.patch
+	runtime_remove-usage-of-off64-t.patch
+	vstest_intent-net8.0.patch
+	"
+
+_pkgver_macro=${pkgver%.*}
+_pkgver_prior=${pkgver%.*.*}
+_pkgver_name=${_pkgver_macro//[.0]}
+_pkgver_sdk=${pkgver/0./0.10}
+pkgdesc="The .NET $_pkgver_macro Core runtime"
+# x86: blocked by https://github.com/dotnet/runtime/issues/77667
+# armhf: blocked by https://github.com/dotnet/runtime/issues/77663
+# riscv64: blocked by https://github.com/dotnet/runtime/issues/84834
+# s390x | ppc64le: mono-based builds are not yet stable on musl
+arch="all !x86 !armhf !riscv64 !s390x !ppc64le"
+url=https://dotnet.microsoft.com
+license="MIT"
+provides="dotnet$_pkgver_name=$pkgver-r$pkgrel"
+depends="
+	dotnet$_pkgver_name-hostfxr
+	icu-data-full
+	icu-libs
+	"
+checkdepends="
+	babeltrace
+	binutils
+	coreutils
+	file
+	gawk
+	jq
+	lttng-tools
+	npm
+	procps
+	sed
+	strace
+	util-linux-misc
+	which
+	"
+makedepends="
+	alpine-release
+	bash
+	clang
+	cmake
+	dotnet$_pkgver_name-bootstrap
+	dotnet$_pkgver_name-bootstrap-artifacts
+	dotnet$_pkgver_name-stage0
+	findutils
+	git
+	grep
+	icu-data-full
+	icu-dev
+	inetutils-syslogd
+	krb5-dev
+	libgit2-dev
+	libintl
+	libucontext-dev
+	libunwind-dev
+	libxml2-dev
+	libxml2-utils
+	linux-headers
+	lldb-dev
+	llvm-dev
+	lttng-ust-dev
+	nodejs
+	numactl-dev
+	openssl-dev
+	pigz
+	rsync
+	samurai
+	tar
+	xz
+	zlib-dev
+	"
+case $CARCH in
+	s390x|x86) ;;
+	*) makedepends="$makedepends lld-dev";;
+esac
+
+subpackages="
+	aspnetcore$_pkgver_name-runtime:aspnetcore_runtime:noarch
+	aspnetcore$_pkgver_name-runtime-dbg:aspnetcore_dbg:noarch
+	aspnetcore$_pkgver_name-targeting-pack:aspnetcore_targeting_pack:noarch
+	dotnet$_pkgver_name-runtime-artifacts::noarch
+	dotnet$_pkgver_name-runtime-bootstrap
+	dotnet$_pkgver_name-runtime-dbg:runtime_dbg:noarch
+	dotnet$_pkgver_name-apphost-pack:apphost_pack
+	dotnet$_pkgver_name-hostfxr
+	dotnet$_pkgver_name-targeting-pack:targeting_pack:noarch
+	dotnet-host:host
+	"
+source="
+	dotnet-tarball-$_gittag.tar.gz::https://github.com/dotnet/dotnet/archive/refs/tags/$_gittag.tar.gz
+	dotnet-release-$_gittag.json::https://github.com/dotnet/dotnet/releases/download/$_gittag/release.json
+	dotnet-testsuite-$_testtag.tar.gz::https://github.com/redhat-developer/dotnet-regular-tests/archive/$_testtag.tar.gz
+	dotnet-bunny-$_bunnytag.tar.gz::https://github.com/redhat-developer/dotnet-bunny/archive/$_bunnytag.tar.gz
+	dotnet.sh.in
+	$_patches
+	"
+builddir="$srcdir"/dotnet-${_gittag/v}
+_checkdir="$srcdir"/dotnet-bunny-${_bunnytag/v}
+_testdir="$srcdir"/dotnet-regular-tests-$_testtag
+_cli_root="$srcdir"/bootstrap
+_libdir="/usr/lib"
+# if true, then within pipeline environment, in which case send logs there
+# to be scooped
+if [ -d "$APORTSDIR/logs" ]; then
+	_logdir="$APORTSDIR"/logs/$pkgname
+else
+	_logdir="$srcdir"/logs
+fi
+
+case $CARCH in
+	x86_64) _dotnet_arch="x64";;
+	aarch64) _dotnet_arch="arm64";;
+	armv7) _dotnet_arch="arm";;
+	armhf) _dotnet_arch="armv6";;
+	*) _dotnet_arch="$CARCH";;
+esac
+
+# Build doesn't set all the right executable bits for the right file types
+_fix_executable() {
+	# add executable bit
+	find "$1" -type f \( \
+		-name 'apphost' -o \
+		-name 'singlefilehost' -o \
+		-name 'lib*so' \
+			\) \
+		-exec chmod +x '{}' \;
+
+	# remove executable bit
+	find "$1" -type f \( \
+		-name '*.a' -o \
+		-name '*.dll' -o \
+		-name '*.h' -o \
+		-name '*.json' -o \
+		-name '*.pdb' -o \
+		-name '*.props' -o \
+		-name '*.pubxml' -o \
+		-name '*.targets' -o \
+		-name '*.txt' -o \
+		-name '*.xml' \
+			\) \
+		-exec chmod -x '{}' \;
+}
+
+prepare() {
+	default_prepare
+
+	# Using system libunwind is broken on aarch64|armv7, and unused on mono-based builds
+	# see https://github.com/dotnet/source-build/issues/2408,
+	case $CARCH in
+		aarch64|armv7) msg "Using bundled libunwind";;
+		armhf|s390x|ppc64le) msg "No libunwind used";;
+		*)
+			msg "Using system libunwind"
+			patch -p1 -i "$srcdir"/runtime_enable-system-libunwind.diff
+			;;
+	esac
+
+	# ensure that dotnet does not download artifacts provided by dotnet-artifacts
+	rm -rf "$builddir"/packages/archive
+
+	# links logfiles to pipeline logs for easy pickup in pipelines
+	mkdir -p "$_logdir" "$builddir"/artifacts
+	ln -s "$_logdir" "$builddir"/artifacts/logs
+	ln -s "$_logdir" "$builddir"/artifacts/log
+	for i in "$builddir"/src/*; do
+		if [ -f "$i" ]; then
+			continue
+		fi
+		mkdir -p "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts
+		ln -s "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts/log
+	done
+
+	# dotnet requires its bootstrap to be in a writable dir
+	msg "Setting up bootstrap"
+	local _bootstrapdir=$(find $_libdir/dotnet/bootstrap/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
+	if [ ! -d "$_cli_root" ]; then
+		cp -r "$_bootstrapdir" "$_cli_root"
+	fi
+}
+
+build() {
+	msg "Building $pkgname-$pkgver"
+
+	ulimit -n 4096
+
+	# Disable use of LTTng as tracing on lttng <=2.13.0 is broken
+	# See https://github.com/dotnet/runtime/issues/57784.
+	if [ -f "/usr/lib/liblttng-ust.so.1 " ]; then
+		export DOTNET_LTTng=0
+	fi
+
+	case "$CARCH" in
+		x86*) ;;
+		*)
+			# clang doesn't implement this outside of x86, and it causes a later configure to fail
+			export CFLAGS="${CFLAGS/-fstack-clash-protection}"
+			export CXXFLAGS="${CXXFLAGS/-fstack-clash-protection}"
+		;;
+	esac
+
+	# looks for most recent recent version of _artifactsdir
+	local _artifactsdir=$(find $_libdir/dotnet/artifacts/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
+
+	# ci args, else the output is forwarded to log files which isn't ideal in a
+	# pipeline environment, and build by defaults uses lots of space
+	local args="
+		/v:minimal
+		/p:LogVerbosity=minimal
+		/p:MinimalConsoleLogOutput=true
+		/p:CleanWhileBuilding=true
+		"
+
+	# part of https://github.com/dotnet/installer/pull/14792 that sets this flag
+	# was not integrated in 7.0.1xx yet
+	# UseSharedCompilation=false also reduces chances of hangups on mono-based builds
+	case $CARCH in
+		riscv64|s390x|ppc64le) local args="$args /p:SourceBuildUseMonoRuntime=true /p:UseSharedCompilation=false";;
+	esac
+
+	# Sets TargetRid manually as dotnet cannot be trusted to reliably compute
+	# the machine's runtime ID between releases.
+	# shellcheck disable=SC2034
+	. /etc/os-release
+	local VERSION_ID_DOT="${VERSION_ID//[^.]}"
+	while [ ${#VERSION_ID_DOT} -gt 1 ]; do
+		local VERSION_ID="${VERSION_ID%.*}"
+		local VERSION_ID_DOT="${VERSION_ID//[^.]}"
+	done
+	local VERSION_ID_DASH="${VERSION_ID//[^_]}"
+	while [ ${#VERSION_ID_DASH} -ge 1 ]; do
+		local VERSION_ID="${VERSION_ID%_*}"
+		local VERSION_ID_DASH="${VERSION_ID//[^_]}"
+	done
+	local args="$args /p:TargetRid=$ID.$VERSION_ID-$_dotnet_arch"
+
+	./build.sh \
+		--with-sdk "$_cli_root" \
+		--with-packages "$_artifactsdir" \
+		--release-manifest "$srcdir"/dotnet-release-$_gittag.json \
+		-- $args
+}
+
+check() {
+	ulimit -n 4096
+	# Tests timeout (in seconds)
+	local _tests_timeout=1000
+	# Test suite disable flags
+	# following tests can only work after packaging step
+	local _disabled_tests="man-pages distribution-package bash-completion install-location release-version-sane managed-symbols-available tools-in-path"
+	# test broken: permission issue on lxc / pipelines
+	local _disabled_tests="$_disabled_tests createdump-aspnet"
+	# test broken: cannot pg_ctl can't create postgresql server
+	local _disabled_tests="$_disabled_tests system-data-odbc"
+	# test broken: no such file or directory bug
+	local _disabled_tests="$_disabled_tests limits"
+	# {bundled,system}-libunwind: use system version on all but aarch64/armv7, as broken
+	# see https://github.com/redhat-developer/dotnet-regular-tests/issues/113
+	# disable on mono-flavored runtime as mono does not use libunwind
+	case $CARCH in
+		armv7|aarch64) local _disabled_tests="$_disabled_tests system-libunwind";;
+		s390x|ppc64le|armhf) local _disabled_tests="$_disabled_tests bundled-libunwind system-libunwind";;
+		*) local _disabled_tests="$_disabled_tests bundled-libunwind";;
+	esac
+	# nativeaot is not supported on armv7
+	case $CARCH in
+		armv7) local _disabled_tests="$_disabled_tests nativeaot"
+	esac
+
+	msg "Unpacking produced dotnet"
+	export DOTNET_ROOT="$_checkdir/release"
+	if [ ! -d "$DOTNET_ROOT" ]; then
+		mkdir -p "$DOTNET_ROOT"
+		tar --use-compress-program="pigz" \
+			-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+			-C "$DOTNET_ROOT" \
+			--no-same-owner
+	fi
+	export PATH="$DOTNET_ROOT:$PATH"
+	# some files either should or should not have executable bits
+	# (done again during packaging - this is for tests)
+	_fix_executable "$DOTNET_ROOT"
+
+	msg "Building turkey test suite"
+	if [ ! -d "$_logdir/check" ]; then
+		mkdir -p "$_logdir"/check
+	fi
+	if [ ! -d "$_checkdir"/turkey ]; then
+		cd "$_checkdir"/Turkey
+		dotnet publish -bl:"$_logdir"/check/turkey.binlog -f net6.0 -c Release -p:VersionPrefix=1 -p:VersionSuffix="$(git rev-parse --short HEAD)" -o "$_checkdir"/turkey
+	fi
+
+	msg "Running test suite"
+	cd "$_testdir"
+	for i in $_disabled_tests; do
+		if [ -d "$i" ]; then
+			sed -i 's|"enabled": true|"enabled": false|' $i/test.json
+		fi
+	done
+	dotnet "$_checkdir"/turkey/Turkey.dll -t $_tests_timeout -l "$_logdir"/check || local ERROR=true
+	if [ $ERROR ]; then
+		msg "Check error reported, please check logs"
+	fi
+}
+
+package() {
+	install -dm 755 "$pkgdir"/$_libdir/dotnet/shared
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$pkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		./shared/Microsoft.NETCore.App
+
+	# some files either should or should not have executable bits
+	_fix_executable "$pkgdir"
+
+	# Disable use of LTTng as tracing on lttng <=2,13,0 is broken
+	# See https://github.com/dotnet/runtime/issues/57784.
+	if [ -f "/usr/lib/liblttng-ust.so.1 " ]; then
+		rm "$pkgdir"/$_libdir/dotnet/shared/Microsoft.NETCore.App/*/libcoreclrtraceptprovider.so
+	fi
+}
+
+runtime_dbg() {
+	pkgdesc="The .NET $_pkgver_macro Core runtime - pdb debug files"
+	depends="dotnet$_pkgver_name-runtime"
+	provides="dotnet-runtime-dbg-$_pkgver_macro=$pkgver-r$pkgrel"
+
+	install -dm 755 "$subpkgdir"/$_libdir/dotnet/shared
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-symbols-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		shared/Microsoft.NETCore.App
+
+}
+
+artifacts() {
+	pkgdesc="Internal package for building .NET $_pkgver_macro Software Development Kit"
+	# hack to allow artifacts to pull itself
+	provides="dotnet$_pkgver_name-bootstrap-artifacts"
+	provider_priority=$_pkgver_prior
+
+	# directory creation
+	install -dm 755 \
+		"$subpkgdir"/$_libdir/dotnet/artifacts/$_pkgver_sdk \
+		"$subpkgdir"/usr/share/licenses
+
+	# extract arch-agnostic artifacts to artifacts dir for use by future dotnet builds
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/Private.SourceBuilt.Artifacts.*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/artifacts/$_pkgver_sdk/ \
+		--no-same-owner \
+		--exclude '*Intermediate*' \
+		--exclude '*alpine*'
+}
+
+bootstrap() {
+	pkgdesc="The .NET $_pkgver_macro Core bootstrap"
+	depends=""
+
+	# hack for dotnetx-runtime to be able to pull itself for bootstrapping
+	provides="dotnet$_pkgver_name-bootstrap"
+	provider_priority=$_pkgver_prior
+
+	# directory creation
+	install -dm 755 \
+		"$subpkgdir"/$_libdir/dotnet/bootstrap/$_pkgver_sdk/docs \
+		"$subpkgdir"/$_libdir/dotnet/artifacts/$_pkgver_sdk
+
+	# unpack sdk to bootstrap
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/bootstrap/$_pkgver_sdk/ \
+		--no-same-owner
+
+	# unpack sdk symbols to bootstrap
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-symbols-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/bootstrap/$_pkgver_sdk/ \
+		--no-same-owner
+
+	# extract arch-specific artifacts to artifacts dir for use by future dotnet builds
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/Private.SourceBuilt.Artifacts.*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/artifacts/$_pkgver_sdk/ \
+		--no-same-owner \
+		--wildcards \
+		'*alpine*'
+
+	# assemble docs
+	find "$builddir" -iname 'dotnet*.1' -type f -exec cp '{}' "$subpkgdir"/$_libdir/dotnet/bootstrap/$_pkgver_sdk/docs/. \;
+
+	# completions
+	install -m 755 "$builddir"/src/sdk/scripts/register-completions.bash "$subpkgdir"/$_libdir/dotnet/bootstrap/$_pkgver_sdk/.
+	install -m 755 "$builddir"/src/sdk/scripts/register-completions.zsh "$subpkgdir"/$_libdir/dotnet/bootstrap/$_pkgver_sdk/.
+
+	# some files either should or should not have executable bits
+	_fix_executable "$subpkgdir"
+
+	# Disable use of LTTng as tracing on lttng <=2,13,0 is broken
+	# See https://github.com/dotnet/runtime/issues/57784.
+	if [ -f "/usr/lib/liblttng-ust.so.1 " ]; then
+		rm "$subpkgdir"/$_libdir/dotnet/bootstrap/*/shared/Microsoft.NETCore.App/*/libcoreclrtraceptprovider.so
+	fi
+}
+
+host() {
+	pkgdesc="A generic driver for the .NET Core Command Line Interface"
+	depends=""
+
+	install -dm 755 \
+		"$subpkgdir"/etc/profile.d \
+		"$subpkgdir"/etc/dotnet \
+		"$subpkgdir"/usr/bin \
+		"$subpkgdir"/$_libdir/dotnet
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		./dotnet
+
+	ln -s $_libdir/dotnet/dotnet "$subpkgdir"/usr/bin/dotnet
+	echo "$_libdir/dotnet" > "$subpkgdir"/etc/dotnet/install_location
+	echo "$_libdir/dotnet" > "$subpkgdir"/etc/dotnet/install_location_$_dotnet_arch
+	sed "s|%LIBDIR%|$_libdir/dotnet|" "$srcdir"/dotnet.sh.in > "$subpkgdir"/etc/profile.d/dotnet.sh
+}
+
+hostfxr() {
+	pkgdesc="The .NET host resolver contains the logic to resolve and select the right version of the .NET SDK or runtime to use."
+	depends="dotnet-host"
+	provides="dotnet-hostfxr-$_pkgver_macro=$pkgver-r$pkgrel"
+
+	install -dm 755	"$subpkgdir"/$_libdir/dotnet
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		./host
+
+	# some files either should or should not have executable bits
+	_fix_executable "$subpkgdir"
+}
+
+aspnetcore_runtime() {
+	pkgdesc="The ASP.NET $_pkgver_macro Core runtime"
+	depends="dotnet$_pkgver_name-runtime"
+	provides="aspnetcore-runtime-$_pkgver_macro=$pkgver-r$pkgrel"
+
+	install -dm 755 "$subpkgdir"/$_libdir/dotnet
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		./shared/Microsoft.AspNetCore.App
+
+	# some files either should or should not have executable bits
+	_fix_executable "$subpkgdir"
+}
+
+aspnetcore_dbg() {
+	pkgdesc="The ASP.NET $_pkgver_macro Core runtime - pdb debug files"
+	depends="aspnetcore$_pkgver_name-runtime"
+	provides="aspnetcore-runtime-dbg-$_pkgver_macro=$pkgver-r$pkgrel"
+
+	install -dm 755 "$subpkgdir"/$_libdir/dotnet
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-symbols-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		shared/Microsoft.AspNetCore.App
+}
+
+apphost_pack() {
+	pkgdesc="The .NET $_pkgver_macro Core apphost pack"
+	provides="dotnet-apphost-pack-$_pkgver_macro=$pkgver-r$pkgrel"
+
+	install -dm 755 "$subpkgdir"/$_libdir/dotnet
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		--wildcards \
+		'./packs/Microsoft.NETCore.App.Host.*'
+
+	# some files either should or should not have executable bits
+	_fix_executable "$subpkgdir"
+}
+
+targeting_pack() {
+	pkgdesc="The .NET $_pkgver_macro Core targeting pack"
+	provides="dotnet-targeting-pack-$_pkgver_macro=$pkgver-r$pkgrel"
+
+	install -dm 755 "$subpkgdir"/$_libdir/dotnet
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		./packs/Microsoft.NETCore.App.Ref
+
+	# some files either should or should not have executable bits
+	_fix_executable "$subpkgdir"
+}
+
+aspnetcore_targeting_pack() {
+	pkgdesc="The ASP.NET $_pkgver_macro Core targeting pack"
+	provides="aspnetcore-targeting-pack-$_pkgver_macro=$pkgver-r$pkgrel"
+
+	install -dm 755 "$subpkgdir"/$_libdir/dotnet
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/$_dotnet_arch/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		./packs/Microsoft.AspNetCore.App.Ref
+
+	# some files either should or should not have executable bits
+	_fix_executable "$subpkgdir"
+}
+
+sha512sums="
+f2a1d0bf6159de441a566c53b04b6d8f31c520fdadca42670fe1eba37c5d1900fe6d930023c4b37134edf28cf5816c8bc9116ba691432b1f6d56ce2a814c3412  dotnet-tarball-v8.0.1.tar.gz
+8ddbaed1611294016cd99728b57182ee63bb4fe4b0331556ff4eb0551f9188744f04ffa5ad2034e93168090114a8eaafe411ccec286e26aa7d871da477a1b5d7  dotnet-release-v8.0.1.json
+8fe41ddd03c1b98dc9eec5e337ca0dcc8fbeff65b67ac1a383bd7d1e5fd3c21b820dacd498d1c2268445bb634cfb9dba3e8924e71a98f2ccd8221b17fb079044  dotnet-testsuite-d3d39e7c404c6e45c3e7ab6621c5f6cabf1540b0.tar.gz
+7f59b10878aa90a6953ee4d88d08fa932910a24018dace92b173ee87c847d14734f93dc5fc031982a3d0a5cb4ac223b83d0e548531c23c4e3326dc83510989a9  dotnet-bunny-v15.tar.gz
+c3f31956976b77198e72a3fef3427338b6b2961f8c121416040c1105de0ce8073e46f4c2e9ef22a001aee69cbe39621c2ddac988522693110071dfae42f2e2b7  dotnet.sh.in
+ad7373a112acc07a6a7bbc522d417b26d90b3e3ae9c1e66a6cc70af16af7e7111d9764e7758062d0a5e67f026cc44f2b111051c3d484bd56917f2144db88588b  aspnetcore_portable-build-workaround.patch
+e5b9b947226456844f705e66f3f19d4519ce88f360e3f3413999c2867c31d9008db78f5806bfee7185d7548c6279ef6492a40ff24c20ed9d58b6ef66b167d7a8  aspire_fix-gitinfo-target.patch
+eed7a7481a967f6938de956a6df485efa6dd61bf36ae4a768493cb1f7da0296dc91e0f2f89f7c302083ba9cf0c778e28228ec1b52e902077a00072d7d9957ef3  build_enable-timestamps.patch
+ab362bdbbea8d8116b6bf7bf58e330ce6d7d171b42613ac03514f76afa2574b75d6566148d1b72047fbfe61b40ac67b3f2d8af87a7074c790bf882a5b7e73960  installer_hard-dereference-tar-gz.patch
+097db705c787501782a1b203e8c453453075dfcadc4f5282849c6ffdda4d7832f75c56089bced4542cc83704fe33842cc725084dac2ba261cacdaf54ae468b3c  roslyn-analyzer_disable-apphost.patch
+d732df247c721c9f677baabdd7f36dbf4b564814ff64164361065bb1c196b767494a1d39f634eadf01a23032c7b3e64102614b7213065c81096bbf3f8022e6a0  runtime_82269-mono-thread-coop-undefine-fortify-source.patch
+3354fa721809f1b94c579408ee78004ff3ca2ba79212c1a0ecc424a9955bb5d5a80c115d4c30dd257526f356ea76f0562db6f83d8dd0b6135f8c689886b3348d  runtime_90251-rename-mono-cmake-host-var.patch
+39e1b848d1ae81e4b81758522de7d3e36b11d2ab626565efb8e4cceae8da29018277709f0af8fcfa75be8da79f8d6432eb6aac49a5e82510c3aca34632df4d8e  runtime_enable-system-libunwind.diff
+887112eb2b103eadd6887529ebae7f9a75df2c2cb168e84fd40cc09f9bcd20917d428bbba06968b07b0a463890da82b1b2b1d033a3dd016e6494067464ae6f74  runtime_more-clang-16-suppression.patch
+0c25319125ef5b0ad490b37a643c0c5257c796d5ed24f9ac404f698710b07de790bcbb0b6336d4a50025b94c3bff99b214951bd8f0a79a8d6f543ebaa300740f  runtime_remove-usage-of-off64-t.patch
+5c74abbd7ea71ba6164f71b866c9da564db9ccd95f1a9a8b82f5b0b599fab6d59d64ba1157ec13d7ac36d23145f3d9de2189ed6c40f56e46555ab378c161948b  vstest_intent-net8.0.patch
+"
