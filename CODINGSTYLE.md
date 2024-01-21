@@ -133,7 +133,7 @@ APKBUILDs.
 
 ### Contributor Comment
 
-* All APKBUILDs begin with one or more contributor comments (one per
+* All APKBUILDs may begin with one or more contributor comments (one per
   line) containing a valid [RFC 5322][RFC 5322] address. For example,
   `# Contributor: Max Mustermann <max@example.org>`.
 
@@ -142,8 +142,9 @@ APKBUILDs.
 * All APKBUILDs contain exactly one maintainer comment containing a
   valid RFC 5322 address. For example, `# Maintainer: Max Mustermann
   <max@example.org>`.
-* In addition to a Maintainer Comment a Contributor Comment must be
-  present for said Maintainer.
+* The Maintainer comment should immediately follow the Contributor comment(s).
+* In the case of package being abandoned, the comment should still be present,
+  but left empty: `# Maintainer:`.
 
 ## Metadata Variables
 
