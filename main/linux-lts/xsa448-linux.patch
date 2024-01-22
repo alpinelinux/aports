@@ -1,0 +1,98 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: xen-netback: don't produce zero-size SKB frags
+
+While frontends may submit zero-size requests (wasting a precious slot),
+core networking code as of at least 3ece782693c4b ("sock: skb_copy_ubufs
+support for compound pages") can't deal with SKBs when they have all
+zero-size fragments. Respond to empty requests right when populating
+fragments; all further processing is fragment based and hence won't
+encounter these empty requests anymore.
+
+In a way this should have been that way from the beginning: When no data
+is to be transferred for a particular request, there's not even a point
+in validating the respective grant ref. That's no different from e.g.
+passing NULL into memcpy() when at the same time the size is 0.
+
+This is XSA-448 / CVE-2023-46838.
+
+Reported-by: Pratyush Yadav <ptyadav@amazon.de>
+Cc: stable@vger.kernel.org
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Juergen Gross <jgross@suse.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+Acked-by: Pratyush Yadav <ptyadav@amazon.de>
+
+--- a/drivers/net/xen-netback/netback.c
++++ b/drivers/net/xen-netback/netback.c
+@@ -463,12 +463,25 @@ static void xenvif_get_requests(struct x
+ 	}
+ 
+ 	for (shinfo->nr_frags = 0; nr_slots > 0 && shinfo->nr_frags < MAX_SKB_FRAGS;
+-	     shinfo->nr_frags++, gop++, nr_slots--) {
++	     nr_slots--) {
++		if (unlikely(!txp->size)) {
++			unsigned long flags;
++
++			spin_lock_irqsave(&queue->response_lock, flags);
++			make_tx_response(queue, txp, 0, XEN_NETIF_RSP_OKAY);
++			push_tx_responses(queue);
++			spin_unlock_irqrestore(&queue->response_lock, flags);
++			++txp;
++			continue;
++		}
++
+ 		index = pending_index(queue->pending_cons++);
+ 		pending_idx = queue->pending_ring[index];
+ 		xenvif_tx_create_map_op(queue, pending_idx, txp,
+ 				        txp == first ? extra_count : 0, gop);
+ 		frag_set_pending_idx(&frags[shinfo->nr_frags], pending_idx);
++		++shinfo->nr_frags;
++		++gop;
+ 
+ 		if (txp == first)
+ 			txp = txfrags;
+@@ -481,20 +494,39 @@ static void xenvif_get_requests(struct x
+ 		shinfo = skb_shinfo(nskb);
+ 		frags = shinfo->frags;
+ 
+-		for (shinfo->nr_frags = 0; shinfo->nr_frags < nr_slots;
+-		     shinfo->nr_frags++, txp++, gop++) {
++		for (shinfo->nr_frags = 0; shinfo->nr_frags < nr_slots; ++txp) {
++			if (unlikely(!txp->size)) {
++				unsigned long flags;
++
++				spin_lock_irqsave(&queue->response_lock, flags);
++				make_tx_response(queue, txp, 0,
++						 XEN_NETIF_RSP_OKAY);
++				push_tx_responses(queue);
++				spin_unlock_irqrestore(&queue->response_lock,
++						       flags);
++				continue;
++			}
++
+ 			index = pending_index(queue->pending_cons++);
+ 			pending_idx = queue->pending_ring[index];
+ 			xenvif_tx_create_map_op(queue, pending_idx, txp, 0,
+ 						gop);
+ 			frag_set_pending_idx(&frags[shinfo->nr_frags],
+ 					     pending_idx);
++			++shinfo->nr_frags;
++			++gop;
+ 		}
+ 
+-		skb_shinfo(skb)->frag_list = nskb;
+-	} else if (nskb) {
++		if (shinfo->nr_frags) {
++			skb_shinfo(skb)->frag_list = nskb;
++			nskb = NULL;
++		}
++	}
++
++	if (nskb) {
+ 		/* A frag_list skb was allocated but it is no longer needed
+-		 * because enough slots were converted to copy ops above.
++		 * because enough slots were converted to copy ops above or some
++		 * were empty.
+ 		 */
+ 		kfree_skb(nskb);
+ 	}
