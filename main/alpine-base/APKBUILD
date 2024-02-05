@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.20.0_alpha20231219
-pkgrel=0
+pkgrel=1
 pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
@@ -16,7 +16,7 @@ depends="
 	busybox-mdev-openrc
 	busybox-openrc
 	busybox-suid
-	libc-utils
+	musl-utils
 	openrc
 	"
 subpackages="alpine-release:release"
