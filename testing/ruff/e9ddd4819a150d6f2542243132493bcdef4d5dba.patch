@@ -1,0 +1,173 @@
+From e9ddd4819a150d6f2542243132493bcdef4d5dba Mon Sep 17 00:00:00 2001
+From: Charlie Marsh <charlie.r.marsh@gmail.com>
+Date: Tue, 6 Feb 2024 19:20:27 -0800
+Subject: [PATCH] Make show-settings filters directory-agnostic (#9866)
+
+Closes https://github.com/astral-sh/ruff/issues/9864.
+---
+ crates/ruff/src/commands/show_settings.rs     |  4 +-
+ crates/ruff/tests/show_settings.rs            | 38 ++++++++++---------
+ ...ow_settings__display_default_settings.snap |  4 +-
+ crates/ruff_linter/src/settings/mod.rs        | 21 +++++++++-
+ crates/ruff_workspace/src/settings.rs         |  6 +--
+ 5 files changed, 47 insertions(+), 26 deletions(-)
+
+diff --git a/crates/ruff/src/commands/show_settings.rs b/crates/ruff/src/commands/show_settings.rs
+index a23f31a4967a2..12d275eb655e2 100644
+--- a/crates/ruff/src/commands/show_settings.rs
++++ b/crates/ruff/src/commands/show_settings.rs
+@@ -31,9 +31,9 @@ pub(crate) fn show_settings(
+ 
+     let settings = resolver.resolve(&path);
+ 
+-    writeln!(writer, "Resolved settings for: {path:?}")?;
++    writeln!(writer, "Resolved settings for: \"{}\"", path.display())?;
+     if let Some(settings_path) = pyproject_config.path.as_ref() {
+-        writeln!(writer, "Settings path: {settings_path:?}")?;
++        writeln!(writer, "Settings path: \"{}\"", settings_path.display())?;
+     }
+     write!(writer, "{settings}")?;
+ 
+diff --git a/crates/ruff/tests/show_settings.rs b/crates/ruff/tests/show_settings.rs
+index e2016e378542b..d418b77228f93 100644
+--- a/crates/ruff/tests/show_settings.rs
++++ b/crates/ruff/tests/show_settings.rs
+@@ -4,25 +4,29 @@ use std::process::Command;
+ 
+ const BIN_NAME: &str = "ruff";
+ 
+-#[cfg(not(target_os = "windows"))]
+-const TEST_FILTERS: &[(&str, &str)] = &[
+-    ("\"[^\\*\"]*/pyproject.toml", "\"[BASEPATH]/pyproject.toml"),
+-    ("\".*/crates", "\"[BASEPATH]/crates"),
+-    ("\".*/\\.ruff_cache", "\"[BASEPATH]/.ruff_cache"),
+-    ("\".*/ruff\"", "\"[BASEPATH]\""),
+-];
+-#[cfg(target_os = "windows")]
+-const TEST_FILTERS: &[(&str, &str)] = &[
+-    (r#""[^\*"]*\\pyproject.toml"#, "\"[BASEPATH]/pyproject.toml"),
+-    (r#"".*\\crates"#, "\"[BASEPATH]/crates"),
+-    (r#"".*\\\.ruff_cache"#, "\"[BASEPATH]/.ruff_cache"),
+-    (r#"".*\\ruff""#, "\"[BASEPATH]\""),
+-    (r#"\\+(\w\w|\s|")"#, "/$1"),
+-];
+-
+ #[test]
+ fn display_default_settings() {
+-    insta::with_settings!({ filters => TEST_FILTERS.to_vec() }, {
++    // Navigate from the crate directory to the workspace root.
++    let base_path = Path::new(env!("CARGO_MANIFEST_DIR"))
++        .parent()
++        .unwrap()
++        .parent()
++        .unwrap();
++    let base_path = base_path.to_string_lossy();
++
++    // Escape the backslashes for the regex.
++    let base_path = regex::escape(&base_path);
++
++    #[cfg(not(target_os = "windows"))]
++    let test_filters = &[(base_path.as_ref(), "[BASEPATH]")];
++
++    #[cfg(target_os = "windows")]
++    let test_filters = &[
++        (base_path.as_ref(), "[BASEPATH]"),
++        (r#"\\+(\w\w|\s|\.|")"#, "/$1"),
++    ];
++
++    insta::with_settings!({ filters => test_filters.to_vec() }, {
+         assert_cmd_snapshot!(Command::new(get_cargo_bin(BIN_NAME))
+             .args(["check", "--show-settings", "unformatted.py"]).current_dir(Path::new("./resources/test/fixtures")));
+     });
+diff --git a/crates/ruff/tests/snapshots/show_settings__display_default_settings.snap b/crates/ruff/tests/snapshots/show_settings__display_default_settings.snap
+index 37b5699286474..f784ff99a0629 100644
+--- a/crates/ruff/tests/snapshots/show_settings__display_default_settings.snap
++++ b/crates/ruff/tests/snapshots/show_settings__display_default_settings.snap
+@@ -205,7 +205,9 @@ linter.external = []
+ linter.ignore_init_module_imports = false
+ linter.logger_objects = []
+ linter.namespace_packages = []
+-linter.src = ["[BASEPATH]"]
++linter.src = [
++	"[BASEPATH]",
++]
+ linter.tab_size = 4
+ linter.line_length = 88
+ linter.task_tags = [
+diff --git a/crates/ruff_linter/src/settings/mod.rs b/crates/ruff_linter/src/settings/mod.rs
+index bd6289438eb96..53f41534195ea 100644
+--- a/crates/ruff_linter/src/settings/mod.rs
++++ b/crates/ruff_linter/src/settings/mod.rs
+@@ -123,6 +123,9 @@ macro_rules! display_settings {
+     (@field $fmt:ident, $prefix:ident, $settings:ident.$field:ident | debug) => {
+         writeln!($fmt, "{}{} = {:?}", $prefix, stringify!($field), $settings.$field)?;
+     };
++    (@field $fmt:ident, $prefix:ident, $settings:ident.$field:ident | path) => {
++        writeln!($fmt, "{}{} = \"{}\"", $prefix, stringify!($field), $settings.$field.display())?;
++    };
+     (@field $fmt:ident, $prefix:ident, $settings:ident.$field:ident | quoted) => {
+         writeln!($fmt, "{}{} = \"{}\"", $prefix, stringify!($field), $settings.$field)?;
+     };
+@@ -152,6 +155,20 @@ macro_rules! display_settings {
+             }
+         }
+     };
++    (@field $fmt:ident, $prefix:ident, $settings:ident.$field:ident | paths) => {
++        {
++            write!($fmt, "{}{} = ", $prefix, stringify!($field))?;
++            if $settings.$field.is_empty() {
++                writeln!($fmt, "[]")?;
++            } else {
++                writeln!($fmt, "[")?;
++                for elem in &$settings.$field {
++                    writeln!($fmt, "\t\"{}\",", elem.display())?;
++                }
++                writeln!($fmt, "]")?;
++            }
++        }
++    };
+     (@field $fmt:ident, $prefix:ident, $settings:ident.$field:ident) => {
+         writeln!($fmt, "{}{} = {}", $prefix, stringify!($field), $settings.$field)?;
+     };
+@@ -220,7 +237,7 @@ impl Display for LinterSettings {
+             namespace = "linter",
+             fields = [
+                 self.exclude,
+-                self.project_root | debug,
++                self.project_root | path,
+ 
+                 self.rules | nested,
+                 self.per_file_ignores,
+@@ -238,7 +255,7 @@ impl Display for LinterSettings {
+                 self.ignore_init_module_imports,
+                 self.logger_objects | array,
+                 self.namespace_packages | debug,
+-                self.src | debug,
++                self.src | paths,
+                 self.tab_size,
+                 self.line_length,
+                 self.task_tags | array,
+diff --git a/crates/ruff_workspace/src/settings.rs b/crates/ruff_workspace/src/settings.rs
+index f37dd3723b692..e24b0e9f28083 100644
+--- a/crates/ruff_workspace/src/settings.rs
++++ b/crates/ruff_workspace/src/settings.rs
+@@ -60,9 +60,7 @@ impl fmt::Display for Settings {
+         display_settings! {
+             formatter = f,
+             fields = [
+-                // We want the quotes and lossy UTF8 conversion for this path, so
+-                // using PathBuf's `Debug` formatter suffices.
+-                self.cache_dir     | debug,
++                self.cache_dir     | path,
+                 self.fix,
+                 self.fix_only,
+                 self.output_format,
+@@ -101,7 +99,7 @@ impl fmt::Display for FileResolverSettings {
+                 self.include,
+                 self.extend_include,
+                 self.respect_gitignore,
+-                self.project_root | debug,
++                self.project_root | path,
+             ]
+         }
+         Ok(())
