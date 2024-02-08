@@ -1,27 +1,156 @@
 # Contributor: Carlo Landmeter <clandmeter@alpinelinux.org>
 
-# source the lts kernel apkbuild and update accordingly
-. ../../main/linux-lts/APKBUILD
-
 _flavor=sophgo
 pkgname=linux-$_flavor
 pkgver=6.1.72_git20240119
 _commit=beafa8820ba0ea1e8aab84c4ebb0c907f828c963
-pkgrel=1
+pkgrel=2
 arch=riscv64
 pkgdesc="Linux Sophgo kernel"
-subpackages="$pkgname-dev:_dev:riscv64 $pkgname-doc"
+url="https://www.kernel.org"
+depends="initramfs-generator"
+subpackages="$pkgname-dev $pkgname-doc"
+_depends_dev="perl gmp-dev mpc1-dev mpfr-dev elfutils-dev bash flex bison zstd"
+makedepends="$_depends_dev sed installkernel bc linux-headers linux-firmware-any openssl-dev>3 mawk
+	diffutils findutils zstd pahole python3 gcc>=13.1.1_git20230624"
+options="!strip	!check"
+license="GPL-2.0-only"
 source="$pkgname-$pkgver.tar.gz::https://github.com/sophgo/linux-riscv/archive/$_commit.tar.gz
-        sophgo.riscv64.config
+	sophgo.riscv64.config
+	sophgo_mango_normal_defconfig
 	"
 builddir="$srcdir"/linux-riscv-$_commit
-_flavors="$_flavor"
+arch=riscv64
 
-prepare() {
-	default_prepare
+build()	{
+	unset LDFLAGS CFLAGS CPPFLAGS CXXFLAGS
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+	local _builddir="$srcdir/build-$_flavor-$arch"
+
+	mkdir -p "$_builddir"
+	echo "-$pkgrel-$_flavor" > "$_builddir"/localversion-alpine
+	cp "$srcdir"/"$_flavor.$arch.config" "$_builddir"/.config
+	# cp "$srcdir"/sophgo_mango_normal_defconfig \
+	# 	"$builddir"/arch/riscv/configs/sophgo_mango_normal_defconfig
+	msg "Configuring kernel"
+	make -C "$builddir" \
+		O="$_builddir" \
+		olddefconfig
+
+	msg "Build kernel"
+	cd "$_builddir"
+	make CC="${CC:-gcc}" \
+		AWK="${AWK:-mawk}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
 }
 
+package() {
+	depends="$depends linux-firmware-any"
+
+	# _package "$_flavor" "$pkgdir"
+	local _builddir="$srcdir/build-$_flavor-$arch"
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+	cd "$_builddir"
+	local _abi_release="$(make -s kernelrelease)"
+
+	mkdir -p "$pkgdir"/boot "$pkgdir"/lib/modules
+	make modules_install zinstall dtbs_install \
+		INSTALL_MOD_PATH="$pkgdir" \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_PATH="$pkgdir"/boot \
+		INSTALL_DTBS_PATH="$pkgdir/boot/dtbs-$_flavor"
+
+	rm -f "$pkgdir"/lib/modules/"$_abi_release"/build \
+		"$pkgdir"/lib/modules/"$_abi_release"/source
+	rm -rf "$pkgdir"/lib/firmware
+
+	install -D -m644 include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+
+	mkdir -p "$pkgdir"/usr/share/doc
+	cp -r "$builddir"/Documentation \
+		"$pkgdir"/usr/share/doc/linux-doc-"$pkgver"/
+	# remove files that aren't part of the documentation itself
+	for nondoc in \
+		.gitignore conf.py docutils.conf \
+		dontdiff Kconfig Makefile
+	do
+		rm "$pkgdir"/usr/share/doc/linux-doc-"$pkgver"/"$nondoc"
+	done
+	# create /usr/share/doc/linux-doc symlink
+	cd "$pkgdir"/usr/share/doc; ln -s linux-doc-"$pkgver" linux-doc
+}
+
+
+dev() {
+	local _builddir="$srcdir/build-$_flavor-$arch"
+	local _abi_release="$(make -C "$_builddir" -s kernelrelease)"
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# simlar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="$_depends_dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-"$_abi_release"
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	cp -a "$_builddir"/.config "$_builddir"/localversion-alpine \
+		"$dir"/
+
+	make -C "$builddir" \
+		O="$dir" \
+		AWK="${AWK:-mawk}" \
+		prepare modules_prepare scripts
+
+	# remove the stuff that points to real sources. we want 3rd party
+	# modules to believe this is the sources
+	rm "$dir"/Makefile "$dir"/source
+
+	# copy the needed stuff from real sources
+	#
+	# this is taken from ubuntu kernel build script
+	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
+	cd "$builddir"
+	find .  -path './include/*' -prune \
+		-o -path './scripts/*' -prune -o -type f \
+		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
+		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) \
+		-print | cpio -pdm "$dir"
+
+	cp -a scripts include "$dir"
+
+	find "arch/riscv" -name include -type d -print | while IFS='' read -r folder; do
+		find "$folder" -type f
+	done | sort -u | cpio -pdm "$dir"
+
+	install -Dm644 "$_builddir"/Module.symvers \
+		"$dir"/Module.symvers
+
+	# remove unneeded things
+	msg "Removing documentation..."
+	rm -r "$dir"/Documentation
+	find "$dir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+
+	msg "Removing unneeded arch headers..."
+	for i in "$dir"/arch/*; do
+		if [ "${i##*/}" != riscv ]; then
+			echo "  ${i##*/}"
+			rm -r "$i"
+		fi
+	done
+
+	mkdir -p "$subpkgdir"/lib/modules/"$_abi_release"
+	ln -sf /usr/src/linux-headers-"$_abi_release" \
+		"$subpkgdir"/lib/modules/"$_abi_release"/build
+}
 sha512sums="
 799e7ebe0b7623eeb277d871c1a6b99e39b168c20d77993a2ba29810b0c1be319b6801fb70410c0d63024381269ce818451b013fb56c195e61621e37b81ecfb9  linux-sophgo-6.1.72_git20240119.tar.gz
-bfd87065bda06e847963a963c54159c449c6e1be1b3714e1a940fc872971eb63ee6a497bd211fa7c159d3e6d9201d79d87934ef42e8404598fdd81001abba6ef  sophgo.riscv64.config
+a256c4cc5a52ff5a900fa8f6592b6a1eec38c6e828bb6575d95ae51ae6e242751f03ffc642bf173ad91b6041ad2f97eb8d94efcf71eb78b9c7e09338c94c0bcd  sophgo.riscv64.config
+b30529a651a2ea74f12897c52e10ab8e4e56cf5d72afb68d268d5244f6443b13ca824bbd9f902537b22736f5f9927e7dada1178d4dfd40faa94b422a72b3d935  sophgo_mango_normal_defconfig
 "
