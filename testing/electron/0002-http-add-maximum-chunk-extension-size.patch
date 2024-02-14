@@ -1,0 +1,561 @@
+From bd6c4b8c80846063ea73af6c81c0b4e6b4cab3fa Mon Sep 17 00:00:00 2001
+From: Paolo Insogna <paolo@cowtech.it>
+Date: Tue, 9 Jan 2024 18:10:04 +0100
+Subject: [PATCH 2/6] http: add maximum chunk extension size
+
+PR-URL: https://github.com/nodejs-private/node-private/pull/520
+Refs: https://github.com/nodejs-private/node-private/pull/518
+CVE-ID: CVE-2024-22019
+---
+ deps/llhttp/.gitignore                        |   1 +
+ deps/llhttp/CMakeLists.txt                    |   2 +-
+ deps/llhttp/include/llhttp.h                  |   7 +-
+ deps/llhttp/src/api.c                         |   7 +
+ deps/llhttp/src/llhttp.c                      | 122 ++++++++++++++--
+ doc/api/errors.md                             |  12 ++
+ lib/_http_server.js                           |   8 ++
+ src/node_http_parser.cc                       |  20 ++-
+ .../test-http-chunk-extensions-limit.js       | 131 ++++++++++++++++++
+ tools/update-llhttp.sh                        |   2 +-
+ 10 files changed, 293 insertions(+), 19 deletions(-)
+ create mode 100644 deps/llhttp/.gitignore
+ create mode 100644 test/parallel/test-http-chunk-extensions-limit.js
+
+diff --git a/third_party/electron_node/deps/llhttp/.gitignore b/third_party/electron_node/deps/llhttp/.gitignore
+new file mode 100644
+index 0000000000..98438a2cd3
+--- /dev/null
++++ b/third_party/electron_node/deps/llhttp/.gitignore
+@@ -0,0 +1 @@
++libllhttp.pc
+diff --git a/third_party/electron_node/deps/llhttp/CMakeLists.txt b/third_party/electron_node/deps/llhttp/CMakeLists.txt
+index d0382038b9..747564a76f 100644
+--- a/third_party/electron_node/deps/llhttp/CMakeLists.txt
++++ b/third_party/electron_node/deps/llhttp/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ cmake_minimum_required(VERSION 3.5.1)
+ cmake_policy(SET CMP0069 NEW)
+ 
+-project(llhttp VERSION 6.0.11)
++project(llhttp VERSION 6.1.0)
+ include(GNUInstallDirs)
+ 
+ set(CMAKE_C_STANDARD 99)
+diff --git a/third_party/electron_node/deps/llhttp/include/llhttp.h b/third_party/electron_node/deps/llhttp/include/llhttp.h
+index 2da66f15e6..78f27abc03 100644
+--- a/third_party/electron_node/deps/llhttp/include/llhttp.h
++++ b/third_party/electron_node/deps/llhttp/include/llhttp.h
+@@ -2,8 +2,8 @@
+ #define INCLUDE_LLHTTP_H_
+ 
+ #define LLHTTP_VERSION_MAJOR 6
+-#define LLHTTP_VERSION_MINOR 0
+-#define LLHTTP_VERSION_PATCH 11
++#define LLHTTP_VERSION_MINOR 1
++#define LLHTTP_VERSION_PATCH 0
+ 
+ #ifndef LLHTTP_STRICT_MODE
+ # define LLHTTP_STRICT_MODE 0
+@@ -348,6 +348,9 @@ struct llhttp_settings_s {
+    */
+   llhttp_cb      on_headers_complete;
+ 
++  /* Possible return values 0, -1, HPE_USER */
++  llhttp_data_cb on_chunk_parameters;
++
+   /* Possible return values 0, -1, HPE_USER */
+   llhttp_data_cb on_body;
+ 
+diff --git a/third_party/electron_node/deps/llhttp/src/api.c b/third_party/electron_node/deps/llhttp/src/api.c
+index c4ce197c58..d3065b3664 100644
+--- a/third_party/electron_node/deps/llhttp/src/api.c
++++ b/third_party/electron_node/deps/llhttp/src/api.c
+@@ -355,6 +355,13 @@ int llhttp__on_chunk_header(llhttp_t* s, const char* p, const char* endp) {
+ }
+ 
+ 
++int llhttp__on_chunk_parameters(llhttp_t* s, const char* p, const char* endp) {
++  int err;
++  SPAN_CALLBACK_MAYBE(s, on_chunk_parameters, p, endp - p);
++  return err;
++}
++
++
+ int llhttp__on_chunk_complete(llhttp_t* s, const char* p, const char* endp) {
+   int err;
+   CALLBACK_MAYBE(s, on_chunk_complete);
+diff --git a/third_party/electron_node/deps/llhttp/src/llhttp.c b/third_party/electron_node/deps/llhttp/src/llhttp.c
+index 5e7c5d1093..e6db6e3188 100644
+--- a/third_party/electron_node/deps/llhttp/src/llhttp.c
++++ b/third_party/electron_node/deps/llhttp/src/llhttp.c
+@@ -340,6 +340,8 @@ enum llparse_state_e {
+   s_n_llhttp__internal__n_invoke_is_equal_content_length,
+   s_n_llhttp__internal__n_chunk_size_almost_done,
+   s_n_llhttp__internal__n_chunk_parameters,
++  s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters,
++  s_n_llhttp__internal__n_chunk_parameters_ows,
+   s_n_llhttp__internal__n_chunk_size_otherwise,
+   s_n_llhttp__internal__n_chunk_size,
+   s_n_llhttp__internal__n_chunk_size_digit,
+@@ -539,6 +541,10 @@ int llhttp__on_body(
+     llhttp__internal_t* s, const unsigned char* p,
+     const unsigned char* endp);
+ 
++int llhttp__on_chunk_parameters(
++    llhttp__internal_t* s, const unsigned char* p,
++    const unsigned char* endp);
++
+ int llhttp__on_status(
+     llhttp__internal_t* s, const unsigned char* p,
+     const unsigned char* endp);
+@@ -1226,8 +1232,7 @@ static llparse_state_t llhttp__internal__run(
+           goto s_n_llhttp__internal__n_chunk_parameters;
+         }
+         case 2: {
+-          p++;
+-          goto s_n_llhttp__internal__n_chunk_size_almost_done;
++          goto s_n_llhttp__internal__n_span_end_llhttp__on_chunk_parameters;
+         }
+         default: {
+           goto s_n_llhttp__internal__n_error_10;
+@@ -1236,6 +1241,34 @@ static llparse_state_t llhttp__internal__run(
+       /* UNREACHABLE */;
+       abort();
+     }
++    case s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters:
++    s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters: {
++      if (p == endp) {
++        return s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters;
++      }
++      state->_span_pos0 = (void*) p;
++      state->_span_cb0 = llhttp__on_chunk_parameters;
++      goto s_n_llhttp__internal__n_chunk_parameters;
++      /* UNREACHABLE */;
++      abort();
++    }
++    case s_n_llhttp__internal__n_chunk_parameters_ows:
++    s_n_llhttp__internal__n_chunk_parameters_ows: {
++      if (p == endp) {
++        return s_n_llhttp__internal__n_chunk_parameters_ows;
++      }
++      switch (*p) {
++        case ' ': {
++          p++;
++          goto s_n_llhttp__internal__n_chunk_parameters_ows;
++        }
++        default: {
++          goto s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters;
++        }
++      }
++      /* UNREACHABLE */;
++      abort();
++    }
+     case s_n_llhttp__internal__n_chunk_size_otherwise:
+     s_n_llhttp__internal__n_chunk_size_otherwise: {
+       if (p == endp) {
+@@ -1246,13 +1279,9 @@ static llparse_state_t llhttp__internal__run(
+           p++;
+           goto s_n_llhttp__internal__n_chunk_size_almost_done;
+         }
+-        case ' ': {
+-          p++;
+-          goto s_n_llhttp__internal__n_chunk_parameters;
+-        }
+         case ';': {
+           p++;
+-          goto s_n_llhttp__internal__n_chunk_parameters;
++          goto s_n_llhttp__internal__n_chunk_parameters_ows;
+         }
+         default: {
+           goto s_n_llhttp__internal__n_error_11;
+@@ -6074,6 +6103,24 @@ static llparse_state_t llhttp__internal__run(
+     /* UNREACHABLE */;
+     abort();
+   }
++  s_n_llhttp__internal__n_span_end_llhttp__on_chunk_parameters: {
++    const unsigned char* start;
++    int err;
++    
++    start = state->_span_pos0;
++    state->_span_pos0 = NULL;
++    err = llhttp__on_chunk_parameters(state, start, p);
++    if (err != 0) {
++      state->error = err;
++      state->error_pos = (const char*) (p + 1);
++      state->_current = (void*) (intptr_t) s_n_llhttp__internal__n_chunk_size_almost_done;
++      return s_error;
++    }
++    p++;
++    goto s_n_llhttp__internal__n_chunk_size_almost_done;
++    /* UNREACHABLE */;
++    abort();
++  }
+   s_n_llhttp__internal__n_error_10: {
+     state->error = 0x2;
+     state->reason = "Invalid character in chunk parameters";
+@@ -8441,6 +8488,8 @@ enum llparse_state_e {
+   s_n_llhttp__internal__n_invoke_is_equal_content_length,
+   s_n_llhttp__internal__n_chunk_size_almost_done,
+   s_n_llhttp__internal__n_chunk_parameters,
++  s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters,
++  s_n_llhttp__internal__n_chunk_parameters_ows,
+   s_n_llhttp__internal__n_chunk_size_otherwise,
+   s_n_llhttp__internal__n_chunk_size,
+   s_n_llhttp__internal__n_chunk_size_digit,
+@@ -8635,6 +8684,10 @@ int llhttp__on_body(
+     llhttp__internal_t* s, const unsigned char* p,
+     const unsigned char* endp);
+ 
++int llhttp__on_chunk_parameters(
++    llhttp__internal_t* s, const unsigned char* p,
++    const unsigned char* endp);
++
+ int llhttp__on_status(
+     llhttp__internal_t* s, const unsigned char* p,
+     const unsigned char* endp);
+@@ -9299,8 +9352,7 @@ static llparse_state_t llhttp__internal__run(
+           goto s_n_llhttp__internal__n_chunk_parameters;
+         }
+         case 2: {
+-          p++;
+-          goto s_n_llhttp__internal__n_chunk_size_almost_done;
++          goto s_n_llhttp__internal__n_span_end_llhttp__on_chunk_parameters;
+         }
+         default: {
+           goto s_n_llhttp__internal__n_error_6;
+@@ -9309,6 +9361,34 @@ static llparse_state_t llhttp__internal__run(
+       /* UNREACHABLE */;
+       abort();
+     }
++    case s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters:
++    s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters: {
++      if (p == endp) {
++        return s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters;
++      }
++      state->_span_pos0 = (void*) p;
++      state->_span_cb0 = llhttp__on_chunk_parameters;
++      goto s_n_llhttp__internal__n_chunk_parameters;
++      /* UNREACHABLE */;
++      abort();
++    }
++    case s_n_llhttp__internal__n_chunk_parameters_ows:
++    s_n_llhttp__internal__n_chunk_parameters_ows: {
++      if (p == endp) {
++        return s_n_llhttp__internal__n_chunk_parameters_ows;
++      }
++      switch (*p) {
++        case ' ': {
++          p++;
++          goto s_n_llhttp__internal__n_chunk_parameters_ows;
++        }
++        default: {
++          goto s_n_llhttp__internal__n_span_start_llhttp__on_chunk_parameters;
++        }
++      }
++      /* UNREACHABLE */;
++      abort();
++    }
+     case s_n_llhttp__internal__n_chunk_size_otherwise:
+     s_n_llhttp__internal__n_chunk_size_otherwise: {
+       if (p == endp) {
+@@ -9319,13 +9399,9 @@ static llparse_state_t llhttp__internal__run(
+           p++;
+           goto s_n_llhttp__internal__n_chunk_size_almost_done;
+         }
+-        case ' ': {
+-          p++;
+-          goto s_n_llhttp__internal__n_chunk_parameters;
+-        }
+         case ';': {
+           p++;
+-          goto s_n_llhttp__internal__n_chunk_parameters;
++          goto s_n_llhttp__internal__n_chunk_parameters_ows;
+         }
+         default: {
+           goto s_n_llhttp__internal__n_error_7;
+@@ -13951,6 +14027,24 @@ static llparse_state_t llhttp__internal__run(
+     /* UNREACHABLE */;
+     abort();
+   }
++  s_n_llhttp__internal__n_span_end_llhttp__on_chunk_parameters: {
++    const unsigned char* start;
++    int err;
++    
++    start = state->_span_pos0;
++    state->_span_pos0 = NULL;
++    err = llhttp__on_chunk_parameters(state, start, p);
++    if (err != 0) {
++      state->error = err;
++      state->error_pos = (const char*) (p + 1);
++      state->_current = (void*) (intptr_t) s_n_llhttp__internal__n_chunk_size_almost_done;
++      return s_error;
++    }
++    p++;
++    goto s_n_llhttp__internal__n_chunk_size_almost_done;
++    /* UNREACHABLE */;
++    abort();
++  }
+   s_n_llhttp__internal__n_error_6: {
+     state->error = 0x2;
+     state->reason = "Invalid character in chunk parameters";
+diff --git a/third_party/electron_node/doc/api/errors.md b/third_party/electron_node/doc/api/errors.md
+index 9c88b7d7d4..3974abd50a 100644
+--- a/third_party/electron_node/doc/api/errors.md
++++ b/third_party/electron_node/doc/api/errors.md
+@@ -3107,6 +3107,18 @@ malconfigured clients, if more than 8 KiB of HTTP header data is received then
+ HTTP parsing will abort without a request or response object being created, and
+ an `Error` with this code will be emitted.
+ 
++<a id="HPE_CHUNK_EXTENSIONS_OVERFLOW"></a>
++
++### `HPE_CHUNK_EXTENSIONS_OVERFLOW`
++
++<!-- YAML
++added: REPLACEME
++-->
++
++Too much data was received for a chunk extensions. In order to protect against
++malicious or malconfigured clients, if more than 16 KiB of data is received
++then an `Error` with this code will be emitted.
++
+ <a id="HPE_UNEXPECTED_CONTENT_LENGTH"></a>
+ 
+ ### `HPE_UNEXPECTED_CONTENT_LENGTH`
+diff --git a/third_party/electron_node/lib/_http_server.js b/third_party/electron_node/lib/_http_server.js
+index c010d8fa96..17d227bdd6 100644
+--- a/third_party/electron_node/lib/_http_server.js
++++ b/third_party/electron_node/lib/_http_server.js
+@@ -830,6 +830,11 @@ const requestHeaderFieldsTooLargeResponse = Buffer.from(
+   'Connection: close\r\n\r\n', 'ascii',
+ );
+ 
++const requestChunkExtensionsTooLargeResponse = Buffer.from(
++  `HTTP/1.1 413 ${STATUS_CODES[413]}\r\n` +
++  'Connection: close\r\n\r\n', 'ascii',
++);
++
+ function warnUnclosedSocket() {
+   if (warnUnclosedSocket.emitted) {
+     return;
+@@ -865,6 +870,9 @@ function socketOnError(e) {
+         case 'HPE_HEADER_OVERFLOW':
+           response = requestHeaderFieldsTooLargeResponse;
+           break;
++        case 'HPE_CHUNK_EXTENSIONS_OVERFLOW':
++          response = requestChunkExtensionsTooLargeResponse;
++          break;
+         case 'ERR_HTTP_REQUEST_TIMEOUT':
+           response = requestTimeoutResponse;
+           break;
+diff --git a/third_party/electron_node/src/node_http_parser.cc b/third_party/electron_node/src/node_http_parser.cc
+index 2849d3bee1..71c2117ec5 100644
+--- a/third_party/electron_node/src/node_http_parser.cc
++++ b/third_party/electron_node/src/node_http_parser.cc
+@@ -79,6 +79,8 @@ const uint32_t kOnExecute = 5;
+ const uint32_t kOnTimeout = 6;
+ // Any more fields than this will be flushed into JS
+ const size_t kMaxHeaderFieldsCount = 32;
++// Maximum size of chunk extensions
++const size_t kMaxChunkExtensionsSize = 16384;
+ 
+ const uint32_t kLenientNone = 0;
+ const uint32_t kLenientHeaders = 1 << 0;
+@@ -261,6 +263,7 @@ class Parser : public AsyncWrap, public StreamListener {
+ 
+     num_fields_ = num_values_ = 0;
+     headers_completed_ = false;
++    chunk_extensions_nread_ = 0;
+     last_message_start_ = uv_hrtime();
+     url_.Reset();
+     status_message_.Reset();
+@@ -516,9 +519,22 @@ class Parser : public AsyncWrap, public StreamListener {
+     return 0;
+   }
+ 
+-  // Reset nread for the next chunk
++  int on_chunk_extension(const char* at, size_t length) {
++    chunk_extensions_nread_ += length;
++
++    if (chunk_extensions_nread_ > kMaxChunkExtensionsSize) {
++      llhttp_set_error_reason(&parser_,
++        "HPE_CHUNK_EXTENSIONS_OVERFLOW:Chunk extensions overflow");
++      return HPE_USER;
++    }
++
++    return 0;
++  }
++
++  // Reset nread for the next chunk and also reset the extensions counter
+   int on_chunk_header() {
+     header_nread_ = 0;
++    chunk_extensions_nread_ = 0;
+     return 0;
+   }
+ 
+@@ -986,6 +1002,7 @@ class Parser : public AsyncWrap, public StreamListener {
+   bool headers_completed_ = false;
+   bool pending_pause_ = false;
+   uint64_t header_nread_ = 0;
++  uint64_t chunk_extensions_nread_ = 0;
+   uint64_t max_http_header_size_;
+   uint64_t last_message_start_;
+   ConnectionsList* connectionsList_;
+@@ -1157,6 +1174,7 @@ const llhttp_settings_t Parser::settings = {
+   Proxy<DataCall, &Parser::on_header_field>::Raw,
+   Proxy<DataCall, &Parser::on_header_value>::Raw,
+   Proxy<Call, &Parser::on_headers_complete>::Raw,
++  Proxy<DataCall, &Parser::on_chunk_extension>::Raw,
+   Proxy<DataCall, &Parser::on_body>::Raw,
+   Proxy<Call, &Parser::on_message_complete>::Raw,
+   Proxy<Call, &Parser::on_chunk_header>::Raw,
+diff --git a/third_party/electron_node/test/parallel/test-http-chunk-extensions-limit.js b/third_party/electron_node/test/parallel/test-http-chunk-extensions-limit.js
+new file mode 100644
+index 0000000000..6868b3da6c
+--- /dev/null
++++ b/third_party/electron_node/test/parallel/test-http-chunk-extensions-limit.js
+@@ -0,0 +1,131 @@
++'use strict';
++
++const common = require('../common');
++const http = require('http');
++const net = require('net');
++const assert = require('assert');
++
++// Verify that chunk extensions are limited in size when sent all together.
++{
++  const server = http.createServer((req, res) => {
++    req.on('end', () => {
++      res.writeHead(200, { 'Content-Type': 'text/plain' });
++      res.end('bye');
++    });
++
++    req.resume();
++  });
++
++  server.listen(0, () => {
++    const sock = net.connect(server.address().port);
++    let data = '';
++
++    sock.on('data', (chunk) => data += chunk.toString('utf-8'));
++
++    sock.on('end', common.mustCall(function() {
++      assert.strictEqual(data, 'HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n');
++      server.close();
++    }));
++
++    sock.end('' +
++      'GET / HTTP/1.1\r\n' +
++      'Host: localhost:8080\r\n' +
++      'Transfer-Encoding: chunked\r\n\r\n' +
++      '2;' + 'A'.repeat(20000) + '=bar\r\nAA\r\n' +
++      '0\r\n\r\n'
++    );
++  });
++}
++
++// Verify that chunk extensions are limited in size when sent in intervals.
++{
++  const server = http.createServer((req, res) => {
++    req.on('end', () => {
++      res.writeHead(200, { 'Content-Type': 'text/plain' });
++      res.end('bye');
++    });
++
++    req.resume();
++  });
++
++  server.listen(0, () => {
++    const sock = net.connect(server.address().port);
++    let remaining = 20000;
++    let data = '';
++
++    const interval = setInterval(
++      () => {
++        if (remaining > 0) {
++          sock.write('A'.repeat(1000));
++        } else {
++          sock.write('=bar\r\nAA\r\n0\r\n\r\n');
++          clearInterval(interval);
++        }
++
++        remaining -= 1000;
++      },
++      common.platformTimeout(20),
++    ).unref();
++
++    sock.on('data', (chunk) => data += chunk.toString('utf-8'));
++
++    sock.on('end', common.mustCall(function() {
++      assert.strictEqual(data, 'HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n');
++      server.close();
++    }));
++
++    sock.write('' +
++    'GET / HTTP/1.1\r\n' +
++    'Host: localhost:8080\r\n' +
++    'Transfer-Encoding: chunked\r\n\r\n' +
++    '2;'
++    );
++  });
++}
++
++// Verify the chunk extensions is correctly reset after a chunk
++{
++  const server = http.createServer((req, res) => {
++    req.on('end', () => {
++      res.writeHead(200, { 'content-type': 'text/plain', 'connection': 'close', 'date': 'now' });
++      res.end('bye');
++    });
++
++    req.resume();
++  });
++
++  server.listen(0, () => {
++    const sock = net.connect(server.address().port);
++    let data = '';
++
++    sock.on('data', (chunk) => data += chunk.toString('utf-8'));
++
++    sock.on('end', common.mustCall(function() {
++      assert.strictEqual(
++        data,
++        'HTTP/1.1 200 OK\r\n' +
++        'content-type: text/plain\r\n' +
++        'connection: close\r\n' +
++        'date: now\r\n' +
++        'Transfer-Encoding: chunked\r\n' +
++        '\r\n' +
++        '3\r\n' +
++        'bye\r\n' +
++        '0\r\n' +
++        '\r\n',
++      );
++
++      server.close();
++    }));
++
++    sock.end('' +
++      'GET / HTTP/1.1\r\n' +
++      'Host: localhost:8080\r\n' +
++      'Transfer-Encoding: chunked\r\n\r\n' +
++      '2;' + 'A'.repeat(10000) + '=bar\r\nAA\r\n' +
++      '2;' + 'A'.repeat(10000) + '=bar\r\nAA\r\n' +
++      '2;' + 'A'.repeat(10000) + '=bar\r\nAA\r\n' +
++      '0\r\n\r\n'
++    );
++  });
++}
+diff --git a/third_party/electron_node/tools/update-llhttp.sh b/third_party/electron_node/tools/update-llhttp.sh
+index b45e106a3b..12772e18e2 100755
+--- a/third_party/electron_node/tools/update-llhttp.sh
++++ b/third_party/electron_node/tools/update-llhttp.sh
+@@ -59,5 +59,5 @@ echo ""
+ echo "Please git add llhttp, commit the new version:"
+ echo ""
+ echo "$ git add -A deps/llhttp"
+-echo "$ git commit -m \"deps: update nghttp2 to $LLHTTP_VERSION\""
++echo "$ git commit -m \"deps: update llhttp to $LLHTTP_VERSION\""
+ echo ""
+-- 
+2.43.1
+
