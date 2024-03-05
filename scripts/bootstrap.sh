@@ -114,10 +114,10 @@ if [ "$TARGET_ARCH" = "riscv64" ]; then
 	NEEDS_LIBATOMIC="yes"
 fi
 
-for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
+for PKG in fortify-headers linux-headers musl pkgconf zlib \
 	   openssl ca-certificates libmd \
 	   gmp mpfr4 mpc1 isl26 libucontext zstd binutils gcc \
-	   libbsd busybox make \
+	   bsd-compat-headers libbsd busybox make \
 	   apk-tools file \
 	   libcap openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
 	   attr acl fakeroot tar \
@@ -127,7 +127,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	   libffi \
 	   brotli libev c-ares cunit nghttp2 libidn2 libpsl curl \
 	   libssh2 \
-	   libxml2 pax-utils llvm14 community/ghc llvm16 rust community/go \
+	   libxml2 pax-utils llvm14 community/ghc llvm17 rust community/go \
 	   $KERNEL_PKG ; do
 
 	if [ "$NEEDS_LIBATOMIC" = "yes" ]; then
@@ -137,7 +137,7 @@ for PKG in fortify-headers linux-headers musl libc-dev pkgconf zlib \
 	CHOST=$TARGET_ARCH BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild -r
 
 	case "$PKG" in
-	fortify-headers | libc-dev)
+	fortify-headers)
 		# Additional implicit dependencies once built
 		EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET $PKG"
 		;;
