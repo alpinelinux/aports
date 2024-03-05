@@ -1,0 +1,1 @@
+appstream0.post-install
