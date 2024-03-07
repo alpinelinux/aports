@@ -226,6 +226,7 @@ section_grub_efi() {
 	x86)	_format="i386-efi";   _efi="bootia32.efi" ;;
 	x86_64) _format="x86_64-efi"; _efi="bootx64.efi"  ;;
 	riscv64) _format="riscv64-efi"; _efi="bootriscv64.efi"  ;;
+	loongarch64) _format="loongarch64-efi"; _efi="bootloongarch64.efi"  ;;
 	*)	return 0 ;;
 	esac
 
