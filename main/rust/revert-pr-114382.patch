@@ -1,0 +1,255 @@
+This reverts https://github.com/rust-lang/rust/pull/114382
+which allows Rust 1.73.0 to build successfully on 32-bit ARM
+
+
+--- a/compiler/rustc_codegen_cranelift/src/intrinsics/mod.rs
++++ b/compiler/rustc_codegen_cranelift/src/intrinsics/mod.rs
+@@ -1155,20 +1155,6 @@
+             ret.write_cvalue(fx, CValue::by_val(is_eq_value, ret.layout()));
+         }
+ 
+-        sym::compare_bytes => {
+-            intrinsic_args!(fx, args => (lhs_ptr, rhs_ptr, bytes_val); intrinsic);
+-            let lhs_ptr = lhs_ptr.load_scalar(fx);
+-            let rhs_ptr = rhs_ptr.load_scalar(fx);
+-            let bytes_val = bytes_val.load_scalar(fx);
+-
+-            let params = vec![AbiParam::new(fx.pointer_type); 3];
+-            let returns = vec![AbiParam::new(types::I32)];
+-            let args = &[lhs_ptr, rhs_ptr, bytes_val];
+-            // Here we assume that the `memcmp` provided by the target is a NOP for size 0.
+-            let cmp = fx.lib_call("memcmp", params, returns, args)[0];
+-            ret.write_cvalue(fx, CValue::by_val(cmp, ret.layout()));
+-        }
+-
+         sym::const_allocate => {
+             intrinsic_args!(fx, args => (_size, _align); intrinsic);
+ 
+--- a/compiler/rustc_codegen_gcc/src/intrinsic/mod.rs
++++ b/compiler/rustc_codegen_gcc/src/intrinsic/mod.rs
+@@ -302,21 +302,6 @@
+                     }
+                 }
+ 
+-                sym::compare_bytes => {
+-                    let a = args[0].immediate();
+-                    let b = args[1].immediate();
+-                    let n = args[2].immediate();
+-
+-                    let void_ptr_type = self.context.new_type::<*const ()>();
+-                    let a_ptr = self.bitcast(a, void_ptr_type);
+-                    let b_ptr = self.bitcast(b, void_ptr_type);
+-
+-                    // Here we assume that the `memcmp` provided by the target is a NOP for size 0.
+-                    let builtin = self.context.get_builtin_function("memcmp");
+-                    let cmp = self.context.new_call(None, builtin, &[a_ptr, b_ptr, n]);
+-                    self.sext(cmp, self.type_ix(32))
+-                }
+-
+                 sym::black_box => {
+                     args[0].val.store(self, result);
+ 
+--- a/compiler/rustc_codegen_llvm/src/context.rs
++++ b/compiler/rustc_codegen_llvm/src/context.rs
+@@ -902,8 +902,7 @@
+         ifn!("llvm.prefetch", fn(ptr, t_i32, t_i32, t_i32) -> void);
+ 
+         // This isn't an "LLVM intrinsic", but LLVM's optimization passes
+-        // recognize it like one (including turning it into `bcmp` sometimes)
+-        // and we use it to implement intrinsics like `raw_eq` and `compare_bytes`
++        // recognize it like one and we assume it exists in `core::slice::cmp`
+         match self.sess().target.arch.as_ref() {
+             "avr" | "msp430" => ifn!("memcmp", fn(ptr, ptr, t_isize) -> t_i16),
+             _ => ifn!("memcmp", fn(ptr, ptr, t_isize) -> t_i32),
+--- a/compiler/rustc_codegen_llvm/src/intrinsic.rs
++++ b/compiler/rustc_codegen_llvm/src/intrinsic.rs
+@@ -329,16 +329,6 @@
+                 }
+             }
+ 
+-            sym::compare_bytes => {
+-                // Here we assume that the `memcmp` provided by the target is a NOP for size 0.
+-                let cmp = self.call_intrinsic(
+-                    "memcmp",
+-                    &[args[0].immediate(), args[1].immediate(), args[2].immediate()],
+-                );
+-                // Some targets have `memcmp` returning `i16`, but the intrinsic is always `i32`.
+-                self.sext(cmp, self.type_ix(32))
+-            }
+-
+             sym::black_box => {
+                 args[0].val.store(self, result);
+                 let result_val_span = [result.llval];
+--- a/compiler/rustc_const_eval/src/interpret/intrinsics.rs
++++ b/compiler/rustc_const_eval/src/interpret/intrinsics.rs
+@@ -261,10 +261,6 @@
+             sym::write_bytes => {
+                 self.write_bytes_intrinsic(&args[0], &args[1], &args[2])?;
+             }
+-            sym::compare_bytes => {
+-                let result = self.compare_bytes_intrinsic(&args[0], &args[1], &args[2])?;
+-                self.write_scalar(result, dest)?;
+-            }
+             sym::arith_offset => {
+                 let ptr = self.read_pointer(&args[0])?;
+                 let offset_count = self.read_target_isize(&args[1])?;
+@@ -645,24 +641,6 @@
+ 
+         let bytes = std::iter::repeat(byte).take(len.bytes_usize());
+         self.write_bytes_ptr(dst, bytes)
+-    }
+-
+-    pub(crate) fn compare_bytes_intrinsic(
+-        &mut self,
+-        left: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
+-        right: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
+-        byte_count: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
+-    ) -> InterpResult<'tcx, Scalar<M::Provenance>> {
+-        let left = self.read_pointer(left)?;
+-        let right = self.read_pointer(right)?;
+-        let n = Size::from_bytes(self.read_target_usize(byte_count)?);
+-
+-        let left_bytes = self.read_bytes_ptr_strip_provenance(left, n)?;
+-        let right_bytes = self.read_bytes_ptr_strip_provenance(right, n)?;
+-
+-        // `Ordering`'s discriminants are -1/0/+1, so casting does the right thing.
+-        let result = Ord::cmp(left_bytes, right_bytes) as i32;
+-        Ok(Scalar::from_i32(result))
+     }
+ 
+     pub(crate) fn raw_eq_intrinsic(
+--- a/compiler/rustc_hir_analysis/src/check/intrinsic.rs
++++ b/compiler/rustc_hir_analysis/src/check/intrinsic.rs
+@@ -273,10 +273,6 @@
+                 ],
+                 Ty::new_unit(tcx),
+             ),
+-            sym::compare_bytes => {
+-                let byte_ptr = Ty::new_imm_ptr(tcx, tcx.types.u8);
+-                (0, vec![byte_ptr, byte_ptr, tcx.types.usize], tcx.types.i32)
+-            }
+             sym::write_bytes | sym::volatile_set_memory => (
+                 1,
+                 vec![
+--- a/compiler/rustc_span/src/symbol.rs
++++ b/compiler/rustc_span/src/symbol.rs
+@@ -501,7 +501,6 @@
+         cold,
+         collapse_debuginfo,
+         column,
+-        compare_bytes,
+         compare_exchange,
+         compare_exchange_weak,
+         compile_error,
+--- a/library/core/src/intrinsics.rs
++++ b/library/core/src/intrinsics.rs
+@@ -2385,25 +2385,6 @@
+     #[rustc_nounwind]
+     pub fn raw_eq<T>(a: &T, b: &T) -> bool;
+ 
+-    /// Lexicographically compare `[left, left + bytes)` and `[right, right + bytes)`
+-    /// as unsigned bytes, returning negative if `left` is less, zero if all the
+-    /// bytes match, or positive if `right` is greater.
+-    ///
+-    /// This underlies things like `<[u8]>::cmp`, and will usually lower to `memcmp`.
+-    ///
+-    /// # Safety
+-    ///
+-    /// `left` and `right` must each be [valid] for reads of `bytes` bytes.
+-    ///
+-    /// Note that this applies to the whole range, not just until the first byte
+-    /// that differs.  That allows optimizations that can read in large chunks.
+-    ///
+-    /// [valid]: crate::ptr#safety
+-    #[cfg(not(bootstrap))]
+-    #[rustc_const_unstable(feature = "const_intrinsic_compare_bytes", issue = "none")]
+-    #[rustc_nounwind]
+-    pub fn compare_bytes(left: *const u8, right: *const u8, bytes: usize) -> i32;
+-
+     /// See documentation of [`std::hint::black_box`] for details.
+     ///
+     /// [`std::hint::black_box`]: crate::hint::black_box
+@@ -2842,20 +2823,5 @@
+             [T](dst: *mut T) => is_aligned_and_not_null(dst)
+         );
+         write_bytes(dst, val, count)
+-    }
+-}
+-
+-/// Backfill for bootstrap
+-#[cfg(bootstrap)]
+-pub unsafe fn compare_bytes(left: *const u8, right: *const u8, bytes: usize) -> i32 {
+-    extern "C" {
+-        fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> crate::ffi::c_int;
+-    }
+-
+-    if bytes != 0 {
+-        // SAFETY: Since bytes is non-zero, the caller has met `memcmp`'s requirements.
+-        unsafe { memcmp(left, right, bytes).into() }
+-    } else {
+-        0
+     }
+ }
+--- a/library/core/src/slice/cmp.rs
++++ b/library/core/src/slice/cmp.rs
+@@ -1,12 +1,22 @@
+ //! Comparison traits for `[T]`.
+ 
+ use crate::cmp::{self, BytewiseEq, Ordering};
+-use crate::intrinsics::compare_bytes;
++use crate::ffi;
+ use crate::mem;
+ 
+ use super::from_raw_parts;
+ use super::memchr;
+ 
++extern "C" {
++    /// Calls implementation provided memcmp.
++    ///
++    /// Interprets the data as u8.
++    ///
++    /// Returns 0 for equal, < 0 for less than and > 0 for greater
++    /// than.
++    fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> ffi::c_int;
++}
++
+ #[stable(feature = "rust1", since = "1.0.0")]
+ impl<A, B> PartialEq<[B]> for [A]
+ where
+@@ -64,8 +74,7 @@
+     }
+ }
+ 
+-// When each element can be compared byte-wise, we can compare all the bytes
+-// from the whole size in one call to the intrinsics.
++// Use memcmp for bytewise equality when the types allow
+ impl<A, B> SlicePartialEq<B> for [A]
+ where
+     A: BytewiseEq<B>,
+@@ -79,7 +88,7 @@
+         // The two slices have been checked to have the same size above.
+         unsafe {
+             let size = mem::size_of_val(self);
+-            compare_bytes(self.as_ptr() as *const u8, other.as_ptr() as *const u8, size) == 0
++            memcmp(self.as_ptr() as *const u8, other.as_ptr() as *const u8, size) == 0
+         }
+     }
+ }
+@@ -174,7 +183,7 @@
+     }
+ }
+ 
+-// `compare_bytes` compares a sequence of unsigned bytes lexicographically.
++// memcmp compares a sequence of unsigned bytes lexicographically.
+ // this matches the order we want for [u8], but no others (not even [i8]).
+ impl SliceOrd for u8 {
+     #[inline]
+@@ -186,7 +195,7 @@
+         // SAFETY: `left` and `right` are references and are thus guaranteed to be valid.
+         // We use the minimum of both lengths which guarantees that both regions are
+         // valid for reads in that interval.
+-        let mut order = unsafe { compare_bytes(left.as_ptr(), right.as_ptr(), len) as isize };
++        let mut order = unsafe { memcmp(left.as_ptr(), right.as_ptr(), len) as isize };
+         if order == 0 {
+             order = diff;
+         }
