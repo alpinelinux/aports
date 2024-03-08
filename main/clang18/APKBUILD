@@ -1,0 +1,497 @@
+# Contributor Eric Molitor <eric@molitor.org>
+# Contributor Patrick Gansterer <paroga@paroga.com>
+# Contributor Travis Tilley <ttilley@gmail.com>
+# Contributor omni <omni+alpine@hack.org>
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+pkgname=clang18
+pkgver=18.1.5
+pkgrel=0
+_llvmver=${pkgver%%.*}
+pkgdesc="C language family front-end for LLVM"
+arch="all"
+url="https://llvm.org/"
+license="Apache-2.0 WITH LLVM-exception"
+options="!check" # fail to build
+makedepends="
+	cmake
+	help2man
+	libxml2-dev
+	llvm$_llvmver-dev
+	llvm$_llvmver-gtest
+	llvm$_llvmver-static
+	llvm$_llvmver-test-utils
+	samurai
+	python3
+	"
+checkdepends="diffutils bash gtest-dev"
+depends_dev="$pkgname=$pkgver-r$pkgrel"
+subpackages="
+	$pkgname-static
+	$pkgname-headers
+	$pkgname-libclang
+	$pkgname-libs
+	$pkgname-dev
+	$pkgname-ccache
+	$pkgname-extra-tools:extra
+	"
+source="https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/clang-$pkgver.src.tar.xz
+	https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/clang-tools-extra-$pkgver.src.tar.xz
+	https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/cmake-$pkgver.src.tar.xz
+	https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/llvm-$pkgver.src.tar.xz
+	https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/third-party-$pkgver.src.tar.xz
+	10-add-musl-triples.patch
+	30-Enable-stack-protector-by-default-for-Alpine-Linux.patch
+
+	clang-001-fortify-include.patch
+	clang-002-fortify-enable.patch
+	clang-003-as-needed.patch
+	"
+builddir="$srcdir/clang-$pkgver.src"
+
+prepare() {
+	mv "$srcdir/clang-tools-extra-$pkgver.src" "$builddir/tools/extra"
+	default_prepare
+	mv "$srcdir"/cmake-${pkgver//_/}.src "$srcdir"/cmake
+	mv "$srcdir"/third-party-${pkgver//_/}.src "$srcdir"/thirtd-party
+}
+
+# Whether is this package the default (latest) clang version.
+_default_clang="no"
+
+if [ "$_default_clang" = yes ]; then
+	subpackages="
+		$subpackages
+		$pkgname-doc
+		$pkgname-analyzer::noarch
+		$pkgname-bash-completion:bash:noarch
+		$pkgname-emacs::noarch
+		py3-$pkgname:python:noarch
+		"
+	provides="clang=$pkgver-r$pkgrel"
+	replaces="clang"
+	depends_dev="$depends_dev $pkgname-extra-tools=$pkgver-r$pkgrel"
+fi
+
+build() {
+	local python_version=$(python3 -V | sed 's/.*\([0-9]\{1,\}\.[0-9]\{1,\}\)\..*/\1/')
+
+	if [ $_default_clang = yes ]; then
+		local extras=ON
+	else
+		local extras=OFF
+	fi
+
+	cmake -B build -G Ninja -Wno-dev \
+		-DCLANG_BUILT_STANDALONE=ON \
+		-DCLANG_CONFIG_FILE_SYSTEM_DIR=/etc/clang$_llvmver \
+		-DCLANG_DEFAULT_PIE_ON_LINUX=ON \
+		-DCLANG_ENABLE_ARCMT=$extras \
+		-DCLANG_ENABLE_STATIC_ANALYZER=$extras \
+		-DCLANG_INCLUDE_TESTS="$(want_check && echo ON || echo OFF)" \
+		-DCLANG_LINK_CLANG_DYLIB=ON \
+		-DCLANG_PLUGIN_SUPPORT=ON \
+		-DCLANG_PYTHON_BINDINGS_VERSIONS="$python_version" \
+		-DCLANG_SYSTEMZ_DEFAULT_ARCH=z196 \
+		-DCLANG_VENDOR=Alpine \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr/lib/llvm$_llvmver \
+		-DCMAKE_INSTALL_RPATH=/usr/lib/llvm$_llvmver/lib \
+		-DCMAKE_MODULE_PATH="$srcdir/cmake-$pkgver.src/Modules" \
+		-DENABLE_LINKER_BUILD_ID=ON \
+		-DLIBCLANG_BUILD_STATIC=ON \
+		-DLLVM_INCLUDE_TESTS=OFF \
+		-DLLVM_EXTERNAL_LIT=/usr/bin/lit \
+		-DLLVM_BUILD_TESTS=ON \
+		-DLLVM_ENABLE_RTTI=ON \
+		-DLLVM_LINK_LLVM_DYLIB=ON \
+		-DLLVM_MAIN_SRC_DIR="$srcdir/llvm-$pkgver.src"
+
+	ninja -C build clang-tblgen
+	ninja -C build
+
+	if [ "$_default_clang" = yes ]; then
+		help2man --no-info \
+			--source "Alpine" \
+			--name "Alpine Clang $pkgver-r$pkgrel" \
+			--version-string "$pkgver-r$pkgrel" \
+			--help-option "--help-hidden" \
+			./build/bin/clang > clang.1
+	fi
+}
+
+check() {
+	ninja -C build check-all
+}
+
+package() {
+	# the libraries should always exactly match, not just by soname
+	# gcc is for libgcc-dev which we don't have split
+	depends="
+		$pkgname-headers=$pkgver-r$pkgrel
+		$pkgname-libs=$pkgver-r$pkgrel
+		fortify-headers>=1.1-r2
+		gcc
+		libstdc++-dev
+		llvm$_llvmver-linker-tools
+		musl-dev
+		"
+
+	# create system config
+	# clang doesn't really have a way to set default -march abi options, so use the system config dir
+	# see the clang UsersManual for how this config directory is parsed / fallback order.
+	# this is set based on our gcc baseline. see the --with arguments in main/gcc.
+	mkdir -p "$pkgdir"/etc/clang$_llvmver
+	case "$CARCH" in
+	x86_64)
+		# unsurprisingly, this is the same as gcc
+		touch config.cfg
+		;;
+	x86)
+		# clang defaults to pentium4 on i*86- triples.
+		# see https://github.com/llvm/llvm-project/issues/61347
+		cat > config.cfg <<-EOF
+		-march=pentium-m -mfpmath=sse
+		EOF
+		;;
+	armhf)
+		# clang defaults to 'armv6' for armhf, i.e. no -zk.
+		# -zk is also a deprecated name for -kz.
+		cat > config.cfg <<-EOF
+		-march=armv6kz
+		-mfpu=vfp
+		-mtune=arm1176jzf-s
+		EOF
+		;;
+	armv7)
+		# clang defaults to neon fpu and non-thumb.
+		# XXX: but seemingly changing it from this makes it not really work on armv7
+		# cat > config.cfg <<-EOF
+		# -mfpu=vfpv3-d16
+		# -mthumb
+		# EOF
+		touch config.cfg
+		;;
+	s390x)
+		# this is correct, as this is the one thing that we have a build-time -D for.
+		# see -DCLANG_SYSTEMZ_DEFAULT_ARCH.
+		touch config.cfg
+		;;
+	ppc64le)
+		# this is seemingly correct, clang defaults to secureplt for musl and elfv2.
+		touch config.cfg
+		;;
+	riscv64)
+		# this is correct, as clang defaults to rvXLENimafdc (-gc) for non-unknown.
+		# this is our target already.
+		touch config.cfg
+		;;
+	aarch64)
+		# XXX: this defaults to
+		# CmdArgs.push_back("-mfpu=crypto-neon-fp-armv8");
+		# is that correct? armv8 is always neon, but the others are unclear.
+		# the output still runs on an rpi4 that normally doesn't have "crypto", so maybe that is misleading
+		# (Gnu.cpp)
+		touch config.cfg
+		;;
+	esac
+	# the target triple being built for
+	# in LLVM, we set -DLLVM_DEFAULT_TARGET_TRIPLE to the same thing,
+	# so that is the default triple, and one of the checked files.
+	# it's possible to do CBUILD-clang.cfg and similar to make it per-tool
+	mv config.cfg "$pkgdir"/etc/clang$_llvmver/$CBUILD.cfg
+
+	DESTDIR="$pkgdir" cmake --install build
+	mkdir -p "$pkgdir"/usr/bin
+
+	install -Dm644 build/lib/libclang.a -t "$pkgdir"/usr/lib/llvm$_llvmver/lib/
+
+	if [ $_default_clang = "yes" ]; then
+		rm "$pkgdir"/usr/lib/llvm$_llvmver/share/clang/clang-format-bbedit.applescript \
+			"$pkgdir"/usr/lib/llvm$_llvmver/share/clang/clang-doc-default-stylesheet.css \
+			"$pkgdir"/usr/lib/llvm$_llvmver/share/clang/index.js
+
+		mkdir -p "$pkgdir"/usr/share/bash-completion/completions
+		mv "$pkgdir"/usr/lib/llvm$_llvmver/share/clang/bash-autocomplete.sh \
+			"$pkgdir"/usr/share/bash-completion/completions/clang
+
+		mkdir -p "$pkgdir"/usr/share/emacs/site-lisp
+		mv "$pkgdir"/usr/lib/llvm$_llvmver/share/clang/clang-*.el \
+			"$pkgdir"/usr/share/emacs/site-lisp
+		rmdir -p usr/lib/llvm$_llvmver/share/emacs || true
+
+		mv "$pkgdir"/usr/lib/llvm$_llvmver/share/man "$pkgdir"/usr/share/
+		# XXX: scan-build specifically needs to stay in llvm path, but scan-view has to not be
+		# everything uses different path lookup logic..
+		mv "$pkgdir"/usr/lib/llvm$_llvmver/share/scan-view "$pkgdir"/usr/share/
+
+		local sitedir=$(python3 -c "import site; print(site.getsitepackages()[0])")
+		mv "$pkgdir"/usr/lib/llvm$_llvmver/lib/python3* "$pkgdir"/usr/lib
+		mkdir -p "$pkgdir"/"$sitedir"
+		mv "$pkgdir"/usr/lib/llvm$_llvmver/lib/libscanbuild "$pkgdir"/"$sitedir"
+
+		# symlink everything in the bin dir,
+		# into /usr/bin.
+		local clangexes="
+			analyze-build
+			amdgpu-arch
+			c-index-test
+			clang
+			clang-cl
+			clang-cpp
+			clang-include-cleaner
+			clang-linker-wrapper
+			clang-pseudo
+			clang++
+			clang-$_llvmver
+			clang-apply-replacements
+			clang-change-namespace
+			clang-check
+			clang-doc
+			clang-extdef-mapping
+			clang-format
+			clang-include-fixer
+			clang-move
+			clang-offload-bundler
+			clang-offload-packager
+			clang-query
+			clang-refactor
+			clang-rename
+			clang-reorder-fields
+			clang-repl
+			clang-scan-deps
+			clang-tidy
+			clangd
+			diagtool
+			find-all-symbols
+			git-clang-format
+			hmaptool
+			intercept-build
+			modularize
+			nvptx-arch
+			pp-trace
+			run-clang-tidy
+			scan-build
+			scan-build-py
+			scan-view
+			"
+		for clangexe in $clangexes; do
+			ln -sfv ../lib/llvm$_llvmver/bin/$clangexe "$pkgdir"/usr/bin/$clangexe
+		done
+		ln -sfv ../lib/llvm$_llvmver/bin/clang-$_llvmver "$pkgdir"/usr/bin/clang++-$_llvmver
+
+		install -Dm644 "$builddir"/clang.1 -t "$pkgdir"/usr/share/man/man1/
+	else
+		ln -sfv ../lib/llvm$_llvmver/bin/clang-$_llvmver "$pkgdir"/usr/bin/clang-$_llvmver
+		ln -sfv ../lib/llvm$_llvmver/bin/clang-$_llvmver "$pkgdir"/usr/bin/clang++-$_llvmver
+
+		# delete things we don't want non-latest of
+		rm -r "$pkgdir"/usr/lib/llvm$_llvmver/share
+		rm -r "$pkgdir"/usr/lib/llvm$_llvmver/lib/python3*
+	fi
+
+	local libs="
+		libclang-cpp.so
+		libclang-cpp.so.$_llvmver
+		libclang.so
+		libclang.so.$_llvmver
+		libclang.so.$pkgver
+		"
+	for lib in $libs; do
+		ln -sfv ../lib/llvm$_llvmver/lib/$lib "$pkgdir"/usr/lib/$lib
+	done
+
+	# compat symlink back to fix clang with -no-canonical-prefixes
+	mkdir -p "$pkgdir"/usr/lib/clang/
+	ln -sfv ../llvm$_llvmver/lib/clang/$_llvmver "$pkgdir"/usr/lib/clang/$_llvmver
+}
+
+dev() {
+	default_dev
+	_default_replace
+
+	# move cmake to -dev
+	amove usr/lib/llvm$_llvmver/lib/cmake/clang
+
+	# create cmakedir symlinks, so find_package works
+	# llvm does the same thing- versioned, plus unversioned default.
+	mkdir -p "$subpkgdir"/usr/lib/cmake
+	ln -sfv ../llvm$_llvmver/lib/cmake/clang "$subpkgdir"/usr/lib/cmake/clang$_llvmver
+	if [ $_default_clang = yes ]; then
+		ln -sfv clang$_llvmver "$subpkgdir"/usr/lib/cmake/clang
+	fi
+}
+
+static() {
+	default_static
+	_default_replace
+}
+
+bash() {
+	default_bashcomp
+	_default_replace
+}
+
+libs() {
+	default_libs
+	# this can fail depending on the symlinks and is already moved
+	amove usr/lib/libclang-cpp.so.* || true
+	amove usr/lib/llvm$_llvmver/lib/libclang-cpp.so*
+	_default_replace
+}
+
+libclang() {
+	_default_replace
+	replaces="$replaces clang-libs"
+	depends="$pkgname-headers=$pkgver-r$pkgrel"
+
+	# we add an extra subpackage for this so things that link to libclang don't
+	# have to pull libclang-cpp too (separate)
+	amove usr/lib/libclang.so.*
+	amove usr/lib/llvm$_llvmver/lib/libclang.so*
+}
+
+analyzer() {
+	pkgdesc="Clang source code analysis framework"
+	depends="$pkgname=$pkgver-r$pkgrel py3-$pkgname=$pkgver-r$pkgrel perl python3"
+	_default_replace
+
+	amove \
+		usr/bin/scan* \
+		usr/bin/analyze-build* \
+		usr/bin/intercept-build* \
+		usr/lib/llvm$_llvmver/bin/scan* \
+		usr/lib/llvm$_llvmver/bin/analyze-build* \
+		usr/lib/llvm$_llvmver/bin/intercept-build* \
+		usr/lib/llvm$_llvmver/libexec/*-analyzer* \
+		usr/lib/llvm$_llvmver/libexec/analyze-* \
+		usr/lib/llvm$_llvmver/libexec/intercept-* \
+		usr/lib/llvm$_llvmver/lib/libear* \
+		usr/lib/llvm$_llvmver/share/scan-build \
+		usr/share/scan-view
+}
+
+headers() {
+	_default_replace
+	amove usr/lib/llvm$_llvmver/lib/clang/$_llvmver/include
+}
+
+extra() {
+	pkgdesc="Extra tools built using Clang's tooling APIs"
+	_default_replace
+
+	if [ "$_default_clang" = "yes" ]; then
+		amove \
+			usr/bin/amdgpu-arch \
+			usr/bin/clang-apply-replacements* \
+			usr/bin/clang-change-namespace* \
+			usr/bin/clang-check* \
+			usr/bin/clang-doc* \
+			usr/bin/clang-extdef-mapping* \
+			usr/bin/clang-format* \
+			usr/bin/clang-include-cleaner* \
+			usr/bin/clang-include-fixer* \
+			usr/bin/clang-move* \
+			usr/bin/clang-offload-bundler* \
+			usr/bin/clang-pseudo* \
+			usr/bin/clang-query* \
+			usr/bin/clang-refactor* \
+			usr/bin/clang-rename* \
+			usr/bin/clang-reorder-fields* \
+			usr/bin/clang-repl* \
+			usr/bin/clang-scan-deps* \
+			usr/bin/clang-tidy* \
+			usr/bin/clangd* \
+			usr/bin/c-index-test* \
+			usr/bin/diagtool* \
+			usr/bin/find-all-symbols* \
+			usr/bin/git-clang-format* \
+			usr/bin/hmaptool* \
+			usr/bin/modularize* \
+			usr/bin/nvptx-arch \
+			usr/bin/pp-trace* \
+			usr/bin/run-clang-tidy*
+	fi
+
+#		usr/lib/llvm$_llvmver/bin/clang-check* \
+#		usr/lib/llvm$_llvmver/bin/clang-extdef-mapping* \
+	amove \
+		usr/lib/llvm$_llvmver/bin/clang-apply-replacements* \
+		usr/lib/llvm$_llvmver/bin/clang-change-namespace* \
+		usr/lib/llvm$_llvmver/bin/clang-doc* \
+		usr/lib/llvm$_llvmver/bin/clang-format* \
+		usr/lib/llvm$_llvmver/bin/clang-include-cleaner* \
+		usr/lib/llvm$_llvmver/bin/clang-include-fixer* \
+		usr/lib/llvm$_llvmver/bin/clang-move* \
+		usr/lib/llvm$_llvmver/bin/clang-offload-bundler* \
+		usr/lib/llvm$_llvmver/bin/clang-pseudo* \
+		usr/lib/llvm$_llvmver/bin/clang-query* \
+		usr/lib/llvm$_llvmver/bin/clang-refactor* \
+		usr/lib/llvm$_llvmver/bin/clang-rename* \
+		usr/lib/llvm$_llvmver/bin/clang-reorder-fields* \
+		usr/lib/llvm$_llvmver/bin/clang-repl* \
+		usr/lib/llvm$_llvmver/bin/clang-scan-deps* \
+		usr/lib/llvm$_llvmver/bin/clang-tidy* \
+		usr/lib/llvm$_llvmver/bin/clangd* \
+		usr/lib/llvm$_llvmver/bin/c-index-test* \
+		usr/lib/llvm$_llvmver/bin/diagtool* \
+		usr/lib/llvm$_llvmver/bin/find-all-symbols* \
+		usr/lib/llvm$_llvmver/bin/git-clang-format* \
+		usr/lib/llvm$_llvmver/bin/hmaptool* \
+		usr/lib/llvm$_llvmver/bin/modularize* \
+		usr/lib/llvm$_llvmver/bin/pp-trace* \
+		usr/lib/llvm$_llvmver/bin/run-clang-tidy* \
+#		usr/lib/llvm$_llvmver/share/clang/clang* \
+#		usr/lib/llvm$_llvmver/share/clang/run-find-all-symbols.py
+}
+
+emacs() {
+	_default_replace
+	pkgdesc="clang plugin for emacs"
+	install_if="$pkgname-extra-tools=$pkgver-r$pkgrel emacs"
+
+	amove	usr/share/emacs
+}
+
+python() {
+	pkgdesc="Clang Python Bindings"
+	depends="$pkgname-libs=$pkgver-r$pkgrel python3"
+	provides="py3-clang=$pkgver-r$pkgrel"
+	replaces="py3-clang"
+
+	amove usr/lib/python*
+}
+
+ccache() {
+	_default_replace
+	pkgdesc="$pkgdesc (ccache symlinks)"
+	install_if="$pkgname=$pkgver-r$pkgrel ccache"
+	replaces="$replaces ccache"
+
+	mkdir -p "$subpkgdir"/usr/lib/ccache/bin
+	ln -sfv ../../../bin/ccache "$subpkgdir"/usr/lib/ccache/bin/clang-$_llvmver
+	ln -sfv ../../../bin/ccache "$subpkgdir"/usr/lib/ccache/bin/clang++-$_llvmver
+	if [ "$_default_clang" = yes ]; then
+		ln -sfv ../../../bin/ccache "$subpkgdir"/usr/lib/ccache/bin/clang++
+		ln -sfv ../../../bin/ccache "$subpkgdir"/usr/lib/ccache/bin/clang
+	fi
+}
+
+_default_replace() {
+	if [ "$_default_clang" = yes ]; then
+		replaces="clang${subpkgname#"$pkgname"} clang16${subpkgname#"$pkgname"}"
+		provides="clang${subpkgname#"$pkgname"}=$pkgver-r$pkgrel"
+	fi
+}
+
+sha512sums="
+2a2bba27bd2205a58d99464436658910116c9f049f996ca88323eb2f96e6102c08c3da5bce408d8347999f75073761d602dce9514faf35fb968b74b498210efd  clang-18.1.5.src.tar.xz
+c7402c984e560c2cdc45299c430badefdcaa844c702cdebaffc831abf6bde8f78b34e8ebff9b81a55341e48486773cf1f97a0e21ed2043c657f0beacac132c7d  clang-tools-extra-18.1.5.src.tar.xz
+5ce7c10d077207e6d3125d3d356b391387e81dcde071673640a455d6ed25f700afa14027e27ef036a2e1d62c8f7c489bfa23f2193bd90c788e818e387483e458  cmake-18.1.5.src.tar.xz
+87f4a51d63ac16ef7c931574880fad32d56af8c369cb05da38124f03631c8b9a8a1ccdf0096892fcb8ef1816ec5c2c11878913253c873904b1a39f4a31ead3ee  llvm-18.1.5.src.tar.xz
+e1ae2143a9f4342582d5f4c4a5d6b866c7c8adc5533c57be5237f6fecb2a136d280b6b1ebcee3ef5b884a236fb0ff20f5fca07add09f7d3e20525ceddafe802d  third-party-18.1.5.src.tar.xz
+3010f526598ab2e8d378f9447eaf9e91539f4b1da92e21f9711e1d167557a19f6f31651377f1803d7efc91c79073b286157c46bff5cccdc62db73a812ee10a61  10-add-musl-triples.patch
+f0eb08b24a3dec2a0223e3a6792cc556bc1e0d571240ae644e34383ff5d4fb60550a1a7d38e0ee9351f1642263b1983203522389b76b3929f75e8ee410b05033  30-Enable-stack-protector-by-default-for-Alpine-Linux.patch
+aa2dff990278e0258763934eaa528827baa1733eeb7dc36cc7f1500a4919b8d11870a0522f20f210d454322e3faf5945e9afaeffc9f3a3c4fd422b706370a663  clang-001-fortify-include.patch
+751f8acef2bfd1b50c065dea2ad0c3a20cadd4ff4c842ae519b5085c48372127b49a75d3fd0bd32291f5a69119340e5568a9fba6d94e6f354b14233986f61328  clang-002-fortify-enable.patch
+5f98f147d7d66315e9a56ae6fee602a053d40e57a8b1ee4f2ef1764203bb6fdb9082c8e825c535a9388213a38b49d2702b1e936fcf56560c4a2a56b7e6dd232c  clang-003-as-needed.patch
+"
