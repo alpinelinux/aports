@@ -1,0 +1,663 @@
+From f8280dbcc0b23aed2e55d8db39c220ad900e7825 Mon Sep 17 00:00:00 2001
+From: Mladen Milinkovic <maxrd2@smoothware.net>
+Date: Tue, 20 Feb 2024 18:02:46 +0100
+Subject: [PATCH] Rewritten KIO file operations
+
+---
+ src/CMakeLists.txt               |   2 +-
+ src/application.cpp              |   2 -
+ src/formats/formatmanager.cpp    |  26 ++++----
+ src/helpers/commondefs.cpp       |  34 ++--------
+ src/helpers/fileloadhelper.cpp   | 105 -----------------------------
+ src/helpers/fileloadhelper.h     |  44 -------------
+ src/helpers/filesavehelper.cpp   | 109 -------------------------------
+ src/helpers/filesavehelper.h     |  36 ----------
+ src/helpers/filetrasher.cpp      |  37 -----------
+ src/helpers/filetrasher.h        |  28 --------
+ src/scripting/scriptsmanager.cpp |  42 ++----------
+ 11 files changed, 27 insertions(+), 438 deletions(-)
+ delete mode 100644 src/helpers/fileloadhelper.cpp
+ delete mode 100644 src/helpers/fileloadhelper.h
+ delete mode 100644 src/helpers/filesavehelper.cpp
+ delete mode 100644 src/helpers/filesavehelper.h
+ delete mode 100644 src/helpers/filetrasher.cpp
+ delete mode 100644 src/helpers/filetrasher.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 9bacad75..bf0043ea 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -74,7 +74,7 @@ set(subtitlecomposer_SRCS
+ 	gui/treeview/richlineedit.cpp gui/treeview/richdocumentptr.cpp gui/treeview/treeview.cpp
+ 	#[[ gui/subtitlemetawidget ]] gui/subtitlemeta/subtitlemetawidget.cpp gui/subtitlemeta/csshighlighter.cpp
+ 	gui/subtitlemeta/subtitlepositionwidget.cpp
+-	#[[ helpers ]] helpers/commondefs.cpp helpers/debug.cpp helpers/fileloadhelper.cpp helpers/filesavehelper.cpp helpers/filetrasher.cpp helpers/languagecode.cpp
++	#[[ helpers ]] helpers/commondefs.cpp helpers/debug.cpp helpers/languagecode.cpp
+ 	helpers/pluginhelper.h
+ 	#[[ scripting ]] scripting/scriptsmanager.cpp
+ 	scripting/scripting_rangesmodule.cpp scripting/scripting_stringsmodule.cpp scripting/scripting_subtitlemodule.cpp scripting/scripting_subtitlelinemodule.cpp
+diff --git a/src/application.cpp b/src/application.cpp
+index 9380ea28..ae68bc6e 100644
+--- a/src/application.cpp
++++ b/src/application.cpp
+@@ -39,8 +39,6 @@
+ #include "formats/outputformat.h"
+ #include "formats/textdemux/textdemux.h"
+ #include "helpers/commondefs.h"
+-#include "helpers/fileloadhelper.h"
+-#include "helpers/filesavehelper.h"
+ #include "gui/treeview/lineswidget.h"
+ #include "mainwindow.h"
+ #include "gui/playerwidget.h"
+diff --git a/src/formats/formatmanager.cpp b/src/formats/formatmanager.cpp
+index a3875271..72579945 100644
+--- a/src/formats/formatmanager.cpp
++++ b/src/formats/formatmanager.cpp
+@@ -12,8 +12,6 @@
+ #include "outputformat.h"
+ #include "gui/treeview/lineswidget.h"
+ #include "application.h"
+-#include "helpers/fileloadhelper.h"
+-#include "helpers/filesavehelper.h"
+ #include "dialogs/encodingdetectdialog.h"
+ #include "scconfig.h"
+ 
+@@ -42,6 +40,7 @@
+ #include <QFile>
+ #include <QFileDevice>
+ #include <QFileInfo>
++#include <QSaveFile>
+ #include <QTextCodec>
+ 
+ #include <QUrl>
+@@ -174,12 +173,12 @@ FormatManager::Status
+ FormatManager::readText(Subtitle &subtitle, const QUrl &url, bool primary,
+ 						QTextCodec **codec, QString *formatName) const
+ {
+-	FileLoadHelper fileLoadHelper(url);
+-	if(!fileLoadHelper.open())
++	QFile file(url.toLocalFile());
++	if(!file.open(QIODevice::ReadOnly))
+ 		return ERROR;
+ 	// WARNING: only 1MB of text subtitle is being read here
+-	QByteArray byteData = fileLoadHelper.file()->read(1024 * 1024);
+-	fileLoadHelper.close();
++	QByteArray byteData = file.read(1024 * 1024);
++	file.close();
+ 
+ 	QString stringData;
+ 	if(!codec) {
+@@ -279,25 +278,26 @@ FormatManager::writeSubtitle(const Subtitle &subtitle, bool primary, const QUrl
+ 	if(format == nullptr)
+ 		return false;
+ 
+-	FileSaveHelper fileSaveHelper(url, overwrite);
+-	if(!fileSaveHelper.open())
++	if(!overwrite && QFile::exists(url.toLocalFile()))
++		return false;
++	QSaveFile file(url.toLocalFile());
++	if(!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+ 		return false;
+ 
+-	QFileDevice *file = fileSaveHelper.file();
+ 	QString data = format->writeSubtitle(subtitle, primary);
+ 	if(codec->name().startsWith("UTF-") || codec->name().contains("UCS-"))
+ 		data.prepend(QChar::ByteOrderMark);
+ 	switch(SCConfig::textLineBreak()) {
+ 	case 1: // CRLF
+-		file->write(codec->fromUnicode(data.replace(QChar::LineFeed, QLatin1String("\r\n"))));
++		file.write(codec->fromUnicode(data.replace(QChar::LineFeed, QLatin1String("\r\n"))));
+ 		break;
+ 	case 2: // CR
+-		file->write(codec->fromUnicode(data.replace(QChar::LineFeed, QChar::CarriageReturn)));
++		file.write(codec->fromUnicode(data.replace(QChar::LineFeed, QChar::CarriageReturn)));
+ 		break;
+ 	default: // LF
+-		file->write(codec->fromUnicode(data));
++		file.write(codec->fromUnicode(data));
+ 		break;
+ 	}
+ 
+-	return fileSaveHelper.close();
++	return file.commit();
+ }
+diff --git a/src/helpers/commondefs.cpp b/src/helpers/commondefs.cpp
+index 97ded319..72eac8e9 100644
+--- a/src/helpers/commondefs.cpp
++++ b/src/helpers/commondefs.cpp
+@@ -17,9 +17,6 @@
+ #include <QDebug>
+ #include <QStandardPaths>
+ 
+-#include <kio_version.h>
+-#include <kio/statjob.h>
+-
+ #ifndef Q_OS_WIN
+ #include <unistd.h>
+ #endif
+@@ -197,30 +194,13 @@ System::newUrl(const QUrl &baseUrl, const QString &fileName, const QString &exte
+ 	int i = 2;
+ 	retries += i;
+ 
+-	if(baseUrl.isLocalFile()) {
+-		QFileInfo dirInfo(newFileDir);
+-		if(dirInfo.isDir() && dirInfo.isWritable()) {
+-			QString newFilePath = newFileDir + newFileName;
+-			while(i < retries && QFile::exists(newFilePath))
+-				newFilePath = newFileDir + newFileNameBuilder.arg(i++);
+-			if(i < retries)
+-				return QUrl::fromLocalFile(newFilePath);
+-		}
+-	} else {
+-		QUrl newUrl = baseUrl;
+-		newUrl.setPath(newFileDir + newFileName);
+-		for(;;) {
+-#if KIO_VERSION < QT_VERSION_CHECK(5, 69, 0)
+-			KIO::Job *job = KIO::stat(newUrl, KIO::StatJob::DestinationSide, 2);
+-#else
+-			KIO::Job *job = KIO::statDetails(newUrl, KIO::StatJob::DestinationSide, KIO::StatDefaultDetails, KIO::HideProgressInfo);
+-#endif
+-			if(!job->exec())
+-				return newUrl;
+-			if(i >= retries)
+-				break;
+-			newUrl.setPath(newFileDir + newFileNameBuilder.arg(i++));
+-		}
++	QFileInfo dirInfo(newFileDir);
++	if(dirInfo.isDir() && dirInfo.isWritable()) {
++		QString newFilePath = newFileDir + newFileName;
++		while(i < retries && QFile::exists(newFilePath))
++			newFilePath = newFileDir + newFileNameBuilder.arg(i++);
++		if(i < retries)
++			return QUrl::fromLocalFile(newFilePath);
+ 	}
+ 
+ 	// could not return a writable url in baseUrl so we return one in the temp dir
+diff --git a/src/helpers/fileloadhelper.cpp b/src/helpers/fileloadhelper.cpp
+deleted file mode 100644
+index 13b1657a..00000000
+--- a/src/helpers/fileloadhelper.cpp
++++ /dev/null
+@@ -1,105 +0,0 @@
+-/*
+-    SPDX-FileCopyrightText: 2007-2009 Sergio Pistone <sergio_pistone@yahoo.com.ar>
+-    SPDX-FileCopyrightText: 2010-2022 Mladen Milinkovic <max@smoothware.net>
+-
+-    SPDX-License-Identifier: GPL-2.0-or-later
+-*/
+-
+-#include "fileloadhelper.h"
+-
+-#include <QIODevice>
+-#include <QBuffer>
+-#include <QDebug>
+-
+-#include <kio_version.h>
+-#include <kio/statjob.h>
+-#include <kio/storedtransferjob.h>
+-
+-FileLoadHelper::FileLoadHelper(const QUrl &url) :
+-	m_url(url),
+-	m_file(0)
+-{}
+-
+-FileLoadHelper::~FileLoadHelper()
+-{
+-	if(m_file)
+-		close();
+-}
+-
+-const QUrl &
+-FileLoadHelper::url()
+-{
+-	return m_url;
+-}
+-
+-QIODevice *
+-FileLoadHelper::file()
+-{
+-	return m_file;
+-}
+-
+-bool
+-FileLoadHelper::open()
+-{
+-	if(m_file)
+-		return false;
+-
+-	if(m_url.isLocalFile()) {
+-		m_file = new QFile(m_url.toLocalFile());
+-		if(!m_file->open(QIODevice::ReadOnly)) {
+-			qDebug() << "Couldn't open file" << static_cast<QFile *>(m_file)->fileName();
+-			delete m_file;
+-			m_file = nullptr;
+-			return false;
+-		}
+-	} else {
+-#if KIO_VERSION < QT_VERSION_CHECK(5, 69, 0)
+-		KIO::Job *job = KIO::stat(m_url, KIO::StatJob::SourceSide, 2);
+-#else
+-		KIO::Job *job = KIO::statDetails(m_url, KIO::StatJob::SourceSide, KIO::StatDefaultDetails, KIO::HideProgressInfo);
+-#endif
+-		if(!job->exec()) {
+-			qDebug() << "Failed to start KIO::stat job" << m_url;
+-			return false;
+-		}
+-
+-		KIO::StoredTransferJob *xjob = KIO::storedGet(m_url);
+-		if(!xjob) {
+-			qDebug() << "Couldn't open url" << m_url;
+-			return false;
+-		}
+-		connect(xjob, &KIO::StoredTransferJob::result, this, &FileLoadHelper::downloadComplete);
+-		m_file = new QBuffer(&m_data);
+-	}
+-
+-	return true;
+-}
+-
+-bool
+-FileLoadHelper::close()
+-{
+-	if(!m_file)
+-		return false;
+-
+-	delete m_file;
+-	m_file = nullptr;
+-
+-	return true;
+-}
+-
+-bool
+-FileLoadHelper::exists(const QUrl &url)
+-{
+-#if KIO_VERSION < QT_VERSION_CHECK(5, 69, 0)
+-	KIO::Job *job = KIO::stat(url, KIO::StatJob::SourceSide, 2);
+-#else
+-	KIO::Job *job = KIO::statDetails(url, KIO::StatJob::SourceSide, KIO::StatDefaultDetails, KIO::HideProgressInfo);
+-#endif
+-	return job->exec();
+-}
+-
+-void
+-FileLoadHelper::downloadComplete(KJob *job)
+-{
+-	m_data = static_cast<KIO::StoredTransferJob *>(job)->data();
+-}
+diff --git a/src/helpers/fileloadhelper.h b/src/helpers/fileloadhelper.h
+deleted file mode 100644
+index 85a30051..00000000
+--- a/src/helpers/fileloadhelper.h
++++ /dev/null
+@@ -1,44 +0,0 @@
+-/*
+-    SPDX-FileCopyrightText: 2007-2009 Sergio Pistone <sergio_pistone@yahoo.com.ar>
+-    SPDX-FileCopyrightText: 2010-2022 Mladen Milinkovic <max@smoothware.net>
+-
+-    SPDX-License-Identifier: GPL-2.0-or-later
+-*/
+-
+-#ifndef FILELOADHELPER_H
+-#define FILELOADHELPER_H
+-
+-#include <QObject>
+-#include <QUrl>
+-#include <QByteArray>
+-
+-QT_FORWARD_DECLARE_CLASS(QIODevice)
+-
+-class KJob;
+-
+-class FileLoadHelper : public QObject
+-{
+-	Q_OBJECT
+-
+-public:
+-	FileLoadHelper(const QUrl &url);
+-	~FileLoadHelper();
+-
+-	const QUrl & url();
+-	QIODevice * file();
+-
+-	bool open();
+-	bool close();
+-
+-	static bool exists(const QUrl &url);
+-
+-protected slots:
+-	void downloadComplete(KJob *job);
+-
+-private:
+-	QByteArray m_data;
+-	QUrl m_url;
+-	QIODevice *m_file;
+-};
+-
+-#endif
+diff --git a/src/helpers/filesavehelper.cpp b/src/helpers/filesavehelper.cpp
+deleted file mode 100644
+index 83ac9c2f..00000000
+--- a/src/helpers/filesavehelper.cpp
++++ /dev/null
+@@ -1,109 +0,0 @@
+-/*
+-    SPDX-FileCopyrightText: 2007-2009 Sergio Pistone <sergio_pistone@yahoo.com.ar>
+-    SPDX-FileCopyrightText: 2010-2022 Mladen Milinkovic <max@smoothware.net>
+-
+-    SPDX-License-Identifier: GPL-2.0-or-later
+-*/
+-
+-#include "filesavehelper.h"
+-
+-#include <QDebug>
+-#include <QSaveFile>
+-#include <QTemporaryFile>
+-#include <QFileDevice>
+-
+-#include <kio_version.h>
+-#include <kio/filecopyjob.h>
+-#include <kio/statjob.h>
+-
+-FileSaveHelper::FileSaveHelper(const QUrl &url, bool overwrite) :
+-	m_url(url),
+-	m_overwrite(overwrite),
+-	m_file(0)
+-{}
+-
+-FileSaveHelper::~FileSaveHelper()
+-{
+-	if(m_file)
+-		close();
+-}
+-
+-const QUrl &
+-FileSaveHelper::url()
+-{
+-	return m_url;
+-}
+-
+-bool
+-FileSaveHelper::overwrite()
+-{
+-	return m_overwrite;
+-}
+-
+-QFileDevice *
+-FileSaveHelper::file()
+-{
+-	return m_file;
+-}
+-
+-bool
+-FileSaveHelper::open()
+-{
+-	if(m_file)
+-		return false;
+-
+-	if(!m_overwrite && exists(m_url))
+-		return false;
+-
+-	if(m_url.isLocalFile()) {
+-		m_file = new QSaveFile(m_url.toLocalFile());
+-		if(!m_file->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+-			qDebug() << "Couldn't open output file" << m_file->fileName();
+-			delete m_file;
+-			m_file = nullptr;
+-			return false;
+-		}
+-	} else {
+-		m_file = new QTemporaryFile();
+-		if(!static_cast<QTemporaryFile *>(m_file)->open()) {
+-			qDebug() << "Couldn't open output file" << m_file->fileName();
+-			delete m_file;
+-			m_file = nullptr;
+-			return false;
+-		}
+-	}
+-	return true;
+-}
+-
+-bool
+-FileSaveHelper::close()
+-{
+-	if(!m_file)
+-		return false;
+-
+-	if(m_url.isLocalFile()) {
+-		static_cast<QSaveFile*>(m_file)->commit();
+-		delete m_file;
+-		m_file = nullptr;
+-		return true;
+-	} else {
+-		m_file->close();
+-		KIO::Job *job = KIO::file_copy(QUrl::fromLocalFile(m_file->fileName()), m_url, -1, m_overwrite ? KIO::Overwrite : KIO::DefaultFlags);
+-		bool success = job->exec();
+-		delete m_file;
+-		m_file = nullptr;
+-
+-		return success;
+-	}
+-}
+-
+-bool
+-FileSaveHelper::exists(const QUrl &url)
+-{
+-#if KIO_VERSION < QT_VERSION_CHECK(5, 69, 0)
+-	KIO::Job *job = KIO::stat(url, KIO::StatJob::DestinationSide, 2);
+-#else
+-	KIO::Job *job = KIO::statDetails(url, KIO::StatJob::DestinationSide, KIO::StatDefaultDetails, KIO::HideProgressInfo);
+-#endif
+-	return job->exec();
+-}
+diff --git a/src/helpers/filesavehelper.h b/src/helpers/filesavehelper.h
+deleted file mode 100644
+index 3203ae23..00000000
+--- a/src/helpers/filesavehelper.h
++++ /dev/null
+@@ -1,36 +0,0 @@
+-/*
+-    SPDX-FileCopyrightText: 2007-2009 Sergio Pistone <sergio_pistone@yahoo.com.ar>
+-    SPDX-FileCopyrightText: 2010-2022 Mladen Milinkovic <max@smoothware.net>
+-
+-    SPDX-License-Identifier: GPL-2.0-or-later
+-*/
+-
+-#ifndef FILESAVEHELPER_H
+-#define FILESAVEHELPER_H
+-
+-#include <QUrl>
+-
+-QT_FORWARD_DECLARE_CLASS(QFileDevice)
+-
+-class FileSaveHelper
+-{
+-public:
+-	FileSaveHelper(const QUrl &url, bool overwrite);
+-	~FileSaveHelper();
+-
+-	const QUrl & url();
+-	bool overwrite();
+-	QFileDevice * file();
+-
+-	bool open();
+-	bool close();
+-
+-	static bool exists(const QUrl &url);
+-
+-private:
+-	QUrl m_url;
+-	bool m_overwrite;
+-	QFileDevice *m_file;
+-};
+-
+-#endif
+diff --git a/src/helpers/filetrasher.cpp b/src/helpers/filetrasher.cpp
+deleted file mode 100644
+index 9a99b2e5..00000000
+--- a/src/helpers/filetrasher.cpp
++++ /dev/null
+@@ -1,37 +0,0 @@
+-/*
+-    SPDX-FileCopyrightText: 2007-2009 Sergio Pistone <sergio_pistone@yahoo.com.ar>
+-    SPDX-FileCopyrightText: 2010-2022 Mladen Milinkovic <max@smoothware.net>
+-
+-    SPDX-License-Identifier: GPL-2.0-or-later
+-*/
+-
+-#include "filetrasher.h"
+-
+-#include <kio/copyjob.h>
+-
+-FileTrasher::FileTrasher(const QUrl &url)
+-	: m_url(url)
+-{}
+-
+-FileTrasher::~FileTrasher()
+-{}
+-
+-FileTrasher::FileTrasher(const QString &path) : m_url()
+-{
+-	m_url.setPath(path);
+-	m_url.setScheme(QStringLiteral("file"));
+-}
+-
+-const QUrl &
+-FileTrasher::url()
+-{
+-	return m_url;
+-}
+-
+-bool
+-FileTrasher::exec()
+-{
+-	KIO::CopyJob *job = KIO::trash(m_url);
+-	// NOTE: the call deletes job!
+-	return job->exec();
+-}
+diff --git a/src/helpers/filetrasher.h b/src/helpers/filetrasher.h
+deleted file mode 100644
+index 2e46e690..00000000
+--- a/src/helpers/filetrasher.h
++++ /dev/null
+@@ -1,28 +0,0 @@
+-/*
+-    SPDX-FileCopyrightText: 2007-2009 Sergio Pistone <sergio_pistone@yahoo.com.ar>
+-    SPDX-FileCopyrightText: 2010-2022 Mladen Milinkovic <max@smoothware.net>
+-
+-    SPDX-License-Identifier: GPL-2.0-or-later
+-*/
+-
+-#ifndef FILETRASHER_H
+-#define FILETRASHER_H
+-
+-#include <QUrl>
+-
+-class FileTrasher
+-{
+-public:
+-	FileTrasher(const QUrl &url);
+-	FileTrasher(const QString &path);
+-	~FileTrasher();
+-
+-	const QUrl & url();
+-
+-	bool exec();
+-
+-private:
+-	QUrl m_url;
+-};
+-
+-#endif
+diff --git a/src/scripting/scriptsmanager.cpp b/src/scripting/scriptsmanager.cpp
+index 01607606..cc65d475 100644
+--- a/src/scripting/scriptsmanager.cpp
++++ b/src/scripting/scriptsmanager.cpp
+@@ -13,8 +13,6 @@
+ #include "actions/useractionnames.h"
+ #include "dialogs/textinputdialog.h"
+ #include "helpers/common.h"
+-#include "helpers/fileloadhelper.h"
+-#include "helpers/filetrasher.h"
+ #include "scripting/scripting_rangesmodule.h"
+ #include "scripting/scripting_stringsmodule.h"
+ #include "scripting/scripting_subtitlemodule.h"
+@@ -31,20 +29,9 @@
+ #include <QKeyEvent>
+ #include <QStringBuilder>
+ 
+-#include <kio_version.h>
+ #include <KMessageBox>
+-#if KIO_VERSION < QT_VERSION_CHECK(5, 71, 0)
+-#include <KRun>
+-#endif
+ #include <KActionCollection>
+ #include <KLocalizedString>
+-#if KIO_VERSION >= QT_VERSION_CHECK(5, 71, 0)
+-#include <KIO/OpenUrlJob>
+-#include <KIO/JobUiDelegate>
+-#endif
+-#if KIO_VERSION >= QT_VERSION_CHECK(5, 98, 0)
+-#include <KIO/JobUiDelegateFactory>
+-#endif
+ #include <kwidgetsaddons_version.h>
+ 
+ inline static const QDir &
+@@ -556,16 +543,15 @@ ScriptsManager::addScript(const QUrl &sSU)
+ 		scriptName = nameDlg.value();
+ 	}
+ 
+-	FileLoadHelper fileLoadHelper(srcScriptUrl);
+-
+-	if(!fileLoadHelper.open()) {
++	QFile src(srcScriptUrl.toLocalFile());
++	if(!src.open(QIODevice::ReadOnly)) {
+ 		KMessageBox::error(app()->mainWindow(), i18n("There was an error opening the file <b>%1</b>.", srcScriptUrl.toString(QUrl::PreferLocalFile)));
+ 		return;
+ 	}
+ 
+ 	QFile dest(userScriptDir().absoluteFilePath(scriptName));
+ 	if(!dest.open(QIODevice::WriteOnly | QIODevice::Truncate)
+-			|| dest.write(fileLoadHelper.file()->readAll()) == -1
++			|| dest.write(src.readAll()) == -1
+ 			|| !dest.flush()) {
+ 		KMessageBox::error(app()->mainWindow(), i18n("There was an error copying the file to <b>%1</b>.", dest.fileName()));
+ 		return;
+@@ -585,7 +571,7 @@ ScriptsManager::removeScript(const QString &sN)
+ 			i18n("Do you really want to send file <b>%1</b> to the trash?", script->path()), i18n("Move to Trash")) != KMessageBox::Continue)
+ 		return;
+ 
+-	if(!FileTrasher(script->path()).exec()) {
++	if(!QFile(script->path()).moveToTrash()) {
+ 		KMessageBox::error(app()->mainWindow(), i18n("There was an error removing the file <b>%1</b>.", script->path()));
+ 		return;
+ 	}
+@@ -603,24 +589,8 @@ ScriptsManager::editScript(const QString &sN)
+ 	}
+ 
+ 	const QUrl scriptUrl = QUrl::fromLocalFile(script->path());
+-#ifdef SC_APPIMAGE
+-	{
+-#elif KIO_VERSION >= QT_VERSION_CHECK(5, 98, 0)
+-	KIO::OpenUrlJob *job = new KIO::OpenUrlJob(scriptUrl);
+-	job->setUiDelegate(KIO::createDefaultJobUiDelegate(KJobUiDelegate::AutoHandlingEnabled, app()->mainWindow()));
+-	if(!job->exec()) {
+-#elif KIO_VERSION >= QT_VERSION_CHECK(5, 71, 0)
+-	KIO::OpenUrlJob *job = new KIO::OpenUrlJob(scriptUrl);
+-	job->setUiDelegate(new KIO::JobUiDelegate(KJobUiDelegate::AutoHandlingEnabled, app()->mainWindow()));
+-	if(!job->exec()) {
+-#elif KIO_VERSION >= QT_VERSION_CHECK(5, 31, 0)
+-	if(!KRun::runUrl(scriptUrl, "text/plain", app()->mainWindow(), KRun::RunFlags())) {
+-#else
+-	if(!KRun::runUrl(scriptUrl, "text/plain", app()->mainWindow(), false, false)) {
+-#endif
+-		if(!QDesktopServices::openUrl(scriptUrl))
+-			KMessageBox::error(app()->mainWindow(), i18n("Could not launch external editor.\n"));
+-	}
++	if(!QDesktopServices::openUrl(scriptUrl))
++		KMessageBox::error(app()->mainWindow(), i18n("Could not launch external editor.\n"));
+ }
+ 
+ void
+-- 
+GitLab
+
