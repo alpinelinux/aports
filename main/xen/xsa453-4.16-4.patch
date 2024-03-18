@@ -1,0 +1,113 @@
+From: =?UTF-8?q?Roger=20Pau=20Monn=C3=A9?= <roger.pau@citrix.com>
+Subject: rwlock: introduce support for blocking speculation into critical
+ regions
+
+Introduce inline wrappers as required and add direct calls to
+block_lock_speculation() in order to prevent speculation into the rwlock
+protected critical regions.
+
+Note the rwlock primitives are adjusted to use the non speculation safe variants
+of the spinlock handlers, as a speculation barrier is added in the rwlock
+calling wrappers.
+
+trylock variants are protected by using lock_evaluate_nospec().
+
+This is part of XSA-453 / CVE-2024-2193
+
+Signed-off-by: Roger Pau Monné <roger.pau@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+(cherry picked from commit a1fb15f61692b1fa9945fc51f55471ace49cdd59)
+
+diff --git a/xen/common/rwlock.c b/xen/common/rwlock.c
+index dadab372b5e1..2464f745485d 100644
+--- a/xen/common/rwlock.c
++++ b/xen/common/rwlock.c
+@@ -34,8 +34,11 @@ void queue_read_lock_slowpath(rwlock_t *lock)
+ 
+     /*
+      * Put the reader into the wait queue.
++     *
++     * Use the speculation unsafe helper, as it's the caller responsibility to
++     * issue a speculation barrier if required.
+      */
+-    spin_lock(&lock->lock);
++    _spin_lock(&lock->lock);
+ 
+     /*
+      * At the head of the wait queue now, wait until the writer state
+@@ -64,8 +67,13 @@ void queue_write_lock_slowpath(rwlock_t *lock)
+ {
+     u32 cnts;
+ 
+-    /* Put the writer into the wait queue. */
+-    spin_lock(&lock->lock);
++    /*
++     * Put the writer into the wait queue.
++     *
++     * Use the speculation unsafe helper, as it's the caller responsibility to
++     * issue a speculation barrier if required.
++     */
++    _spin_lock(&lock->lock);
+ 
+     /* Try to acquire the lock directly if no reader is present. */
+     if ( !atomic_read(&lock->cnts) &&
+diff --git a/xen/include/xen/rwlock.h b/xen/include/xen/rwlock.h
+index 0cc9167715b3..fd0458be94ae 100644
+--- a/xen/include/xen/rwlock.h
++++ b/xen/include/xen/rwlock.h
+@@ -247,27 +247,49 @@ static inline int _rw_is_write_locked(rwlock_t *lock)
+     return (atomic_read(&lock->cnts) & _QW_WMASK) == _QW_LOCKED;
+ }
+ 
+-#define read_lock(l)                  _read_lock(l)
+-#define read_lock_irq(l)              _read_lock_irq(l)
++static always_inline void read_lock(rwlock_t *l)
++{
++    _read_lock(l);
++    block_lock_speculation();
++}
++
++static always_inline void read_lock_irq(rwlock_t *l)
++{
++    _read_lock_irq(l);
++    block_lock_speculation();
++}
++
+ #define read_lock_irqsave(l, f)                                 \
+     ({                                                          \
+         BUILD_BUG_ON(sizeof(f) != sizeof(unsigned long));       \
+         ((f) = _read_lock_irqsave(l));                          \
++        block_lock_speculation();                               \
+     })
+ 
+ #define read_unlock(l)                _read_unlock(l)
+ #define read_unlock_irq(l)            _read_unlock_irq(l)
+ #define read_unlock_irqrestore(l, f)  _read_unlock_irqrestore(l, f)
+-#define read_trylock(l)               _read_trylock(l)
++#define read_trylock(l)               lock_evaluate_nospec(_read_trylock(l))
++
++static always_inline void write_lock(rwlock_t *l)
++{
++    _write_lock(l);
++    block_lock_speculation();
++}
++
++static always_inline void write_lock_irq(rwlock_t *l)
++{
++    _write_lock_irq(l);
++    block_lock_speculation();
++}
+ 
+-#define write_lock(l)                 _write_lock(l)
+-#define write_lock_irq(l)             _write_lock_irq(l)
+ #define write_lock_irqsave(l, f)                                \
+     ({                                                          \
+         BUILD_BUG_ON(sizeof(f) != sizeof(unsigned long));       \
+         ((f) = _write_lock_irqsave(l));                         \
++        block_lock_speculation();                               \
+     })
+-#define write_trylock(l)              _write_trylock(l)
++#define write_trylock(l)              lock_evaluate_nospec(_write_trylock(l))
+ 
+ #define write_unlock(l)               _write_unlock(l)
+ #define write_unlock_irq(l)           _write_unlock_irq(l)

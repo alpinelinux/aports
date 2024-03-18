@@ -1,0 +1,313 @@
+From: =?UTF-8?q?Roger=20Pau=20Monn=C3=A9?= <roger.pau@citrix.com>
+Subject: x86/spinlock: introduce support for blocking speculation into
+ critical regions
+
+Introduce a new Kconfig option to block speculation into lock protected
+critical regions.  The Kconfig option is enabled by default, but the mitigation
+won't be engaged unless it's explicitly enabled in the command line using
+`spec-ctrl=lock-harden`.
+
+Convert the spinlock acquire macros into always-inline functions, and introduce
+a speculation barrier after the lock has been taken.  Note the speculation
+barrier is not placed inside the implementation of the spin lock functions, as
+to prevent speculation from falling through the call to the lock functions
+resulting in the barrier also being skipped.
+
+trylock variants are protected using a construct akin to the existing
+evaluate_nospec().
+
+This patch only implements the speculation barrier for x86.
+
+Note spin locks are the only locking primitive taken care in this change,
+further locking primitives will be adjusted by separate changes.
+
+This is part of XSA-453 / CVE-2024-2193
+
+Signed-off-by: Roger Pau Monné <roger.pau@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+(cherry picked from commit 7ef0084418e188d05f338c3e028fbbe8b6924afa)
+
+diff --git a/docs/misc/xen-command-line.pandoc b/docs/misc/xen-command-line.pandoc
+index 029002fa82d6..33c32cfc1cbc 100644
+--- a/docs/misc/xen-command-line.pandoc
++++ b/docs/misc/xen-command-line.pandoc
+@@ -2263,7 +2263,7 @@ By default SSBD will be mitigated at runtime (i.e `ssbd=runtime`).
+ >              {msr-sc,rsb,verw,ibpb-entry}=<bool>|{pv,hvm}=<bool>,
+ >              bti-thunk=retpoline|lfence|jmp, {ibrs,ibpb,ssbd,psfd,
+ >              eager-fpu,l1d-flush,branch-harden,srb-lock,
+->              unpriv-mmio,gds-mit,div-scrub}=<bool> ]`
++>              unpriv-mmio,gds-mit,div-scrub,lock-harden}=<bool> ]`
+ 
+ Controls for speculative execution sidechannel mitigations.  By default, Xen
+ will pick the most appropriate mitigations based on compiled in support,
+@@ -2388,6 +2388,11 @@ On all hardware, the `div-scrub=` option can be used to force or prevent Xen
+ from mitigating the DIV-leakage vulnerability.  By default, Xen will mitigate
+ DIV-leakage on hardware believed to be vulnerable.
+ 
++If Xen is compiled with `CONFIG_SPECULATIVE_HARDEN_LOCK`, the `lock-harden=`
++boolean can be used to force or prevent Xen from using speculation barriers to
++protect lock critical regions.  This mitigation won't be engaged by default,
++and needs to be explicitly enabled on the command line.
++
+ ### sync_console
+ > `= <boolean>`
+ 
+diff --git a/xen/arch/x86/spec_ctrl.c b/xen/arch/x86/spec_ctrl.c
+index 24bf98a018a0..0a7af22a9b3c 100644
+--- a/xen/arch/x86/spec_ctrl.c
++++ b/xen/arch/x86/spec_ctrl.c
+@@ -63,6 +63,7 @@ int8_t __read_mostly opt_ibpb_ctxt_switch = -1;
+ int8_t __read_mostly opt_eager_fpu = -1;
+ int8_t __read_mostly opt_l1d_flush = -1;
+ static bool __initdata opt_branch_harden = true;
++static bool __initdata opt_lock_harden;
+ 
+ bool __initdata bsp_delay_spec_ctrl;
+ uint8_t __read_mostly default_xen_spec_ctrl;
+@@ -131,6 +132,7 @@ static int __init parse_spec_ctrl(const char *s)
+             opt_ssbd = false;
+             opt_l1d_flush = 0;
+             opt_branch_harden = false;
++            opt_lock_harden = false;
+             opt_srb_lock = 0;
+             opt_unpriv_mmio = false;
+             opt_gds_mit = 0;
+@@ -282,6 +284,16 @@ static int __init parse_spec_ctrl(const char *s)
+             opt_l1d_flush = val;
+         else if ( (val = parse_boolean("branch-harden", s, ss)) >= 0 )
+             opt_branch_harden = val;
++        else if ( (val = parse_boolean("lock-harden", s, ss)) >= 0 )
++        {
++            if ( IS_ENABLED(CONFIG_SPECULATIVE_HARDEN_LOCK) )
++                opt_lock_harden = val;
++            else
++            {
++                no_config_param("SPECULATIVE_HARDEN_LOCK", "spec-ctrl", s, ss);
++                rc = -EINVAL;
++            }
++        }
+         else if ( (val = parse_boolean("srb-lock", s, ss)) >= 0 )
+             opt_srb_lock = val;
+         else if ( (val = parse_boolean("unpriv-mmio", s, ss)) >= 0 )
+@@ -481,18 +493,22 @@ static void __init print_details(enum ind_thunk thunk)
+            (e21a & cpufeat_mask(X86_FEATURE_SBPB))           ? " SBPB"           : "");
+ 
+     /* Compiled-in support which pertains to mitigations. */
+-    if ( IS_ENABLED(CONFIG_INDIRECT_THUNK) || IS_ENABLED(CONFIG_SHADOW_PAGING) )
++    if ( IS_ENABLED(CONFIG_INDIRECT_THUNK) || IS_ENABLED(CONFIG_SHADOW_PAGING) ||
++         IS_ENABLED(CONFIG_SPECULATIVE_HARDEN_LOCK) )
+         printk("  Compiled-in support:"
+ #ifdef CONFIG_INDIRECT_THUNK
+                " INDIRECT_THUNK"
+ #endif
+ #ifdef CONFIG_SHADOW_PAGING
+                " SHADOW_PAGING"
++#endif
++#ifdef CONFIG_SPECULATIVE_HARDEN_LOCK
++               " HARDEN_LOCK"
+ #endif
+                "\n");
+ 
+     /* Settings for Xen's protection, irrespective of guests. */
+-    printk("  Xen settings: BTI-Thunk %s, SPEC_CTRL: %s%s%s%s%s, Other:%s%s%s%s%s%s\n",
++    printk("  Xen settings: BTI-Thunk %s, SPEC_CTRL: %s%s%s%s%s, Other:%s%s%s%s%s%s%s\n",
+            thunk == THUNK_NONE      ? "N/A" :
+            thunk == THUNK_RETPOLINE ? "RETPOLINE" :
+            thunk == THUNK_LFENCE    ? "LFENCE" :
+@@ -518,7 +534,8 @@ static void __init print_details(enum ind_thunk thunk)
+            opt_verw_pv || opt_verw_hvm ||
+            opt_verw_mmio                             ? " VERW"  : "",
+            opt_div_scrub                             ? " DIV" : "",
+-           opt_branch_harden                         ? " BRANCH_HARDEN" : "");
++           opt_branch_harden                         ? " BRANCH_HARDEN" : "",
++           opt_lock_harden                           ? " LOCK_HARDEN" : "");
+ 
+     /* L1TF diagnostics, printed if vulnerable or PV shadowing is in use. */
+     if ( cpu_has_bug_l1tf || opt_pv_l1tf_hwdom || opt_pv_l1tf_domu )
+@@ -1889,6 +1906,9 @@ void __init init_speculation_mitigations(void)
+     if ( !opt_branch_harden )
+         setup_force_cpu_cap(X86_FEATURE_SC_NO_BRANCH_HARDEN);
+ 
++    if ( !opt_lock_harden )
++        setup_force_cpu_cap(X86_FEATURE_SC_NO_LOCK_HARDEN);
++
+     /*
+      * We do not disable HT by default on affected hardware.
+      *
+diff --git a/xen/common/Kconfig b/xen/common/Kconfig
+index c9f4b7f49240..01c70109f539 100644
+--- a/xen/common/Kconfig
++++ b/xen/common/Kconfig
+@@ -161,6 +161,23 @@ config SPECULATIVE_HARDEN_GUEST_ACCESS
+ 
+ 	  If unsure, say Y.
+ 
++config SPECULATIVE_HARDEN_LOCK
++	bool "Speculative lock context hardening"
++	default y
++	depends on X86
++	help
++	  Contemporary processors may use speculative execution as a
++	  performance optimisation, but this can potentially be abused by an
++	  attacker to leak data via speculative sidechannels.
++
++	  One source of data leakage is via speculative accesses to lock
++	  critical regions.
++
++	  This option is disabled by default at run time, and needs to be
++	  enabled on the command line.
++
++	  If unsure, say Y.
++
+ endmenu
+ 
+ config HYPFS
+diff --git a/xen/include/asm-x86/cpufeatures.h b/xen/include/asm-x86/cpufeatures.h
+index 70b93b6b443f..7e8221fd85dd 100644
+--- a/xen/include/asm-x86/cpufeatures.h
++++ b/xen/include/asm-x86/cpufeatures.h
+@@ -24,7 +24,7 @@ XEN_CPUFEATURE(APERFMPERF,        X86_SYNTH( 8)) /* APERFMPERF */
+ XEN_CPUFEATURE(MFENCE_RDTSC,      X86_SYNTH( 9)) /* MFENCE synchronizes RDTSC */
+ XEN_CPUFEATURE(XEN_SMEP,          X86_SYNTH(10)) /* SMEP gets used by Xen itself */
+ XEN_CPUFEATURE(XEN_SMAP,          X86_SYNTH(11)) /* SMAP gets used by Xen itself */
+-/* Bit 12 - unused. */
++XEN_CPUFEATURE(SC_NO_LOCK_HARDEN, X86_SYNTH(12)) /* (Disable) Lock critical region hardening */
+ XEN_CPUFEATURE(IND_THUNK_LFENCE,  X86_SYNTH(13)) /* Use IND_THUNK_LFENCE */
+ XEN_CPUFEATURE(IND_THUNK_JMP,     X86_SYNTH(14)) /* Use IND_THUNK_JMP */
+ XEN_CPUFEATURE(SC_NO_BRANCH_HARDEN, X86_SYNTH(15)) /* (Disable) Conditional branch hardening */
+diff --git a/xen/include/asm-x86/nospec.h b/xen/include/asm-x86/nospec.h
+index 7150e76b87fb..0725839e1982 100644
+--- a/xen/include/asm-x86/nospec.h
++++ b/xen/include/asm-x86/nospec.h
+@@ -38,6 +38,32 @@ static always_inline void block_speculation(void)
+     barrier_nospec_true();
+ }
+ 
++static always_inline void arch_block_lock_speculation(void)
++{
++    alternative("lfence", "", X86_FEATURE_SC_NO_LOCK_HARDEN);
++}
++
++/* Allow to insert a read memory barrier into conditionals */
++static always_inline bool barrier_lock_true(void)
++{
++    alternative("lfence #nospec-true", "", X86_FEATURE_SC_NO_LOCK_HARDEN);
++    return true;
++}
++
++static always_inline bool barrier_lock_false(void)
++{
++    alternative("lfence #nospec-false", "", X86_FEATURE_SC_NO_LOCK_HARDEN);
++    return false;
++}
++
++static always_inline bool arch_lock_evaluate_nospec(bool condition)
++{
++    if ( condition )
++        return barrier_lock_true();
++    else
++        return barrier_lock_false();
++}
++
+ #endif /* _ASM_X86_NOSPEC_H */
+ 
+ /*
+diff --git a/xen/include/xen/nospec.h b/xen/include/xen/nospec.h
+index 76255bc46efe..455284640396 100644
+--- a/xen/include/xen/nospec.h
++++ b/xen/include/xen/nospec.h
+@@ -70,6 +70,21 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
+ #define array_access_nospec(array, index)                               \
+     (array)[array_index_nospec(index, ARRAY_SIZE(array))]
+ 
++static always_inline void block_lock_speculation(void)
++{
++#ifdef CONFIG_SPECULATIVE_HARDEN_LOCK
++    arch_block_lock_speculation();
++#endif
++}
++
++static always_inline bool lock_evaluate_nospec(bool condition)
++{
++#ifdef CONFIG_SPECULATIVE_HARDEN_LOCK
++    return arch_lock_evaluate_nospec(condition);
++#endif
++    return condition;
++}
++
+ #endif /* XEN_NOSPEC_H */
+ 
+ /*
+diff --git a/xen/include/xen/spinlock.h b/xen/include/xen/spinlock.h
+index 9fa4e600c1f7..efdb21ea9072 100644
+--- a/xen/include/xen/spinlock.h
++++ b/xen/include/xen/spinlock.h
+@@ -1,6 +1,7 @@
+ #ifndef __SPINLOCK_H__
+ #define __SPINLOCK_H__
+ 
++#include <xen/nospec.h>
+ #include <xen/time.h>
+ #include <asm/system.h>
+ #include <asm/spinlock.h>
+@@ -189,13 +190,30 @@ int _spin_trylock_recursive(spinlock_t *lock);
+ void _spin_lock_recursive(spinlock_t *lock);
+ void _spin_unlock_recursive(spinlock_t *lock);
+ 
+-#define spin_lock(l)                  _spin_lock(l)
+-#define spin_lock_cb(l, c, d)         _spin_lock_cb(l, c, d)
+-#define spin_lock_irq(l)              _spin_lock_irq(l)
++static always_inline void spin_lock(spinlock_t *l)
++{
++    _spin_lock(l);
++    block_lock_speculation();
++}
++
++static always_inline void spin_lock_cb(spinlock_t *l, void (*c)(void *data),
++                                       void *d)
++{
++    _spin_lock_cb(l, c, d);
++    block_lock_speculation();
++}
++
++static always_inline void spin_lock_irq(spinlock_t *l)
++{
++    _spin_lock_irq(l);
++    block_lock_speculation();
++}
++
+ #define spin_lock_irqsave(l, f)                                 \
+     ({                                                          \
+         BUILD_BUG_ON(sizeof(f) != sizeof(unsigned long));       \
+         ((f) = _spin_lock_irqsave(l));                          \
++        block_lock_speculation();                               \
+     })
+ 
+ #define spin_unlock(l)                _spin_unlock(l)
+@@ -203,7 +221,7 @@ void _spin_unlock_recursive(spinlock_t *lock);
+ #define spin_unlock_irqrestore(l, f)  _spin_unlock_irqrestore(l, f)
+ 
+ #define spin_is_locked(l)             _spin_is_locked(l)
+-#define spin_trylock(l)               _spin_trylock(l)
++#define spin_trylock(l)               lock_evaluate_nospec(_spin_trylock(l))
+ 
+ #define spin_trylock_irqsave(lock, flags)       \
+ ({                                              \
+@@ -224,8 +242,15 @@ void _spin_unlock_recursive(spinlock_t *lock);
+  * are any critical regions that cannot form part of such a set, they can use
+  * standard spin_[un]lock().
+  */
+-#define spin_trylock_recursive(l)     _spin_trylock_recursive(l)
+-#define spin_lock_recursive(l)        _spin_lock_recursive(l)
++#define spin_trylock_recursive(l) \
++    lock_evaluate_nospec(_spin_trylock_recursive(l))
++
++static always_inline void spin_lock_recursive(spinlock_t *l)
++{
++    _spin_lock_recursive(l);
++    block_lock_speculation();
++}
++
+ #define spin_unlock_recursive(l)      _spin_unlock_recursive(l)
+ 
+ #endif /* __SPINLOCK_H__ */
