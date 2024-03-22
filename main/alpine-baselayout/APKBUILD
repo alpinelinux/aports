@@ -1,14 +1,15 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=3.6.2
+pkgver=3.6.3
 pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="noarch"
 license="GPL-2.0-only"
 pkggroups="shadow"
-options="!fhs !check"
+replaces_priority=1000
+options="!fhs !check keepdirs"
 depends="$pkgname-data=$pkgver-r$pkgrel"
 subpackages="$pkgname-data"
 install="$pkgname.pre-install $pkgname.pre-upgrade $pkgname.post-upgrade
