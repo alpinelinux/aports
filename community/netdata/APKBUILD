@@ -1,23 +1,31 @@
 # Contributor: Carlo Landmeter <clandmeter@alpinelinux.org>
 # Maintainer: Kevin Daudt <kdaudt@alpinelinux.org>
 pkgname=netdata
-pkgver=1.44.3
+pkgver=1.45.3
 pkgrel=0
 pkgdesc="Real-time performance monitoring"
 url="https://www.netdata.cloud/"
 license="GPL-3.0-or-later"
 arch="all"
-depends="bash"
+depends="bash coreutils"
 makedepends="
 	abseil-cpp-dev
-	autoconf
-	automake
+	brotli-dev
+	cmake
+	cups-dev
 	e2fsprogs-dev
+	elfutils-dev
+	go
 	json-c-dev
+	judy-dev
 	libcap-dev
+	libmnl-dev
+	libnetfilter_acct-dev
+	libuuid
 	libuv-dev
 	linux-headers
 	lz4-dev
+	samurai
 	openssl-dev>3
 	protobuf-dev
 	yaml-dev
@@ -26,32 +34,41 @@ makedepends="
 checkdepends="cmocka-dev"
 pkgusers="netdata"
 pkggroups="netdata"
-subpackages="$pkgname-openrc $pkgname-python::noarch"
+subpackages="$pkgname-openrc $pkgname-python::noarch $pkgname-go-plugins:go"
 install="$pkgname.pre-install"
-options="!check" # Broken tests
+options="!check" # tests require installation to /
 _aclk_schemas_commit=83c661c0dcddb9526814ebbd0668fbc3e281f03f
 _ml_dlib_commit=021cbbb1c2ddec39d8dd4cb6abfbbafdf1cf4482
-_mqtt_websockets_commit=6664789ccf57c95451638364f544d1679efd910e
 # This _h2o_commit fixes CVE-2023-44487, and does not follow upstream
 _h2o_commit=094a6f90f76eeb280a430200cba47bde39b0b8e8
-_c_rbuf_commit=51485be511f8c1d592b699f09f7c783aa2270375
-_c_rhash_commit=f6c21836b921535ab818c7f72b77346d25f60d8e
+_fluentbit_commit=b19e9ce674de872640c00a697fa545b66df0628a
+
 source="$pkgname-$pkgver.tar.gz::https://github.com/netdata/netdata/archive/v$pkgver.tar.gz
 	aclk-schemas-$_aclk_schemas_commit.tar.gz::https://github.com/netdata/aclk-schemas/archive/$_aclk_schemas_commit.tar.gz
 	dlib-$_ml_dlib_commit.tar.gz::https://github.com/davisking/dlib/archive/$_ml_dlib_commit.tar.gz
-	mqtt_websockets-$_mqtt_websockets_commit.tar.gz::https://github.com/underhood/mqtt_websockets/archive/$_mqtt_websockets_commit.tar.gz
 	h2o-$_h2o_commit.tar.gz::https://github.com/h2o/h2o/archive/$_h2o_commit.tar.gz
-	c-rbuf-$_c_rbuf_commit.tar.gz::https://github.com/underhood/c-rbuf/archive/$_c_rbuf_commit.tar.gz
-	c_rhash-$_c_rhash_commit.tar.gz::https://github.com/underhood/c_rhash/archive/$_c_rhash_commit.tar.gz
-	cxx17-2.patch
+	fluent-bit-$_fluentbit_commit.tar.gz::https://github.com/fluent/fluent-bit/archive/$_fluentbit_commit.tar.gz
+
+	openrc-pidfile-not-writable-by-user.patch
+
 	protobuf-23.patch
-	$pkgname.initd
-	$pkgname.confd
+	build-enable-cgo.patch
 	"
 
 # secfixes:
 #   1.43.2-r1:
 #     - CVE-2023-44487
+#   0:
+#     - CVE-2024-32019
+
+_freeipmi=False
+case $CARCH in
+	ppc64le) ;; # no freeipmi
+	*)
+		makedepends="$makedepends freeipmi-dev"
+		_freeipmi=True
+	;;
+esac
 
 copy_submodule() {
 	local name=$1
@@ -65,79 +82,94 @@ copy_submodule() {
 }
 
 prepare() {
-	copy_submodule aclk-schemas "$_aclk_schemas_commit" aclk/aclk-schemas
-	copy_submodule dlib "$_ml_dlib_commit" ml/dlib
-	copy_submodule mqtt_websockets "$_mqtt_websockets_commit" mqtt_websockets
-	copy_submodule h2o "$_h2o_commit" web/server/h2o/libh2o
-	copy_submodule c-rbuf "$_c_rbuf_commit" mqtt_websockets/c-rbuf
-	copy_submodule c_rhash "$_c_rhash_commit" mqtt_websockets/c_rhash
+	copy_submodule aclk-schemas "$_aclk_schemas_commit" src/aclk/aclk-schemas
+	copy_submodule dlib "$_ml_dlib_commit" src/ml/dlib
+	copy_submodule h2o "$_h2o_commit" src/web/server/h2o/libh2o
+	copy_submodule fluent-bit "$_fluentbit_commit" src/fluent-bit
 
 	default_prepare
-	autoreconf -i
 }
 
 build() {
-	CXXFLAGS="$CXXFLAGS -std=c++17" \
-	./configure \
-		--prefix=/usr \
-		--sysconfdir=/etc \
-		--localstatedir=/var \
-		--with-zlib \
-		--with-math \
-		--enable-https \
-		--with-webdir=/usr/share/webapps/netdata \
-		--with-user=netdata
-	make
-}
+	local cmake_crossopts
+	if [ "$CBUILD" != "$CHOST" ]; then
+		cmake_crossopts="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_HOST_SYSTEM_NAME=Linux"
+	fi
 
-check() {
-	msg "check"
-	make check
+	# ENABLE_EXPORTER_PROMETHEUS_REMOTE_WRITE: snappy not found due to lack of
+	# pkgconf
+	# ENABLE_PLUGIN_EBPF: include files missing
+	# ENABLE_LOGS_MANAGEMENT_TESTS: tries to assign read-only stdout/stderr
+	cmake -G Ninja -B build \
+		-DCMAKE_INSTALL_PREFIX=/ \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DWEB_DIR=/usr/share/webapps/netdata \
+		-DENABLE_PLUGIN_SYSTEMD_JOURNAL=False \
+		-DENABLE_PLUGIN_XENSTAT=False \
+		-DENABLE_PLUGIN_CUPS=False \
+		-DENABLE_PLUGIN_EBPF=False \
+		-DENABLE_PLUGIN_GO=True \
+		-DENABLE_PLUGIN_FREEIPMI=$_freeipmi \
+		-DENABLE_EXPORTER_PROMETHEUS_REMOTE_WRITE=False \
+		-DENABLE_EXPORTER_MONGODB=False \
+		-DENABLE_LOGS_MANAGEMENT_TESTS=False \
+		$cmake_crossopts
+	cmake --build build
 }
 
 package() {
-	make DESTDIR="$pkgdir" install
+	DESTDIR="$pkgdir" cmake --install build
 	chgrp -R $pkggroups "$pkgdir"/usr/share/webapps/netdata
-	install -Dm755 $srcdir/$pkgname.initd $pkgdir/etc/init.d/$pkgname
-	install -Dm644 $srcdir/$pkgname.confd $pkgdir/etc/conf.d/$pkgname
+	install -Dm755 build/system/openrc/init.d/netdata -t $pkgdir/etc/init.d/
+	install -Dm644 build/system/openrc/conf.d/netdata -t $pkgdir/etc/conf.d/
 	install -Dm644 ./system/netdata.conf $pkgdir/etc/netdata/netdata.conf
 
-	install -d -m0750 -o netdata -g netdata \
+	# auxilary files for various systems, but not installed at the correct
+	# location
+	rm -r "$pkgdir"/usr/lib/netdata/system
+
+	# Fix permissions
+	chown -R netdata: \
+		"$pkgdir"/var/cache/netdata \
 		"$pkgdir"/var/lib/netdata \
-		"$pkgdir"/var/log/netdata \
-		"$pkgdir"/var/cache/netdata
+		"$pkgdir"/var/log/netdata
+	chmod 0750 "$pkgdir"/var/cache/netdata
+	chmod 0750 "$pkgdir"/var/lib/netdata
+
+	# rundir in /run
+	rmdir "$pkgdir"/var/run
+	install -dm0755 "$pkgdir"/run/netdata
 }
 
 python() {
 	pkgdesc="$pkgdesc (python3 support)"
 	depends="$pkgname python3"
 
-	mkdir -p "$subpkgdir"/etc/netdata
-	mkdir -p "$subpkgdir"/usr/libexec/netdata/plugins.d
-	mkdir -p "$subpkgdir"/usr/lib/netdata/conf.d
+	amove usr/libexec/netdata/python.d
+	amove usr/libexec/netdata/plugins.d/python.d.plugin
+	amove etc/netdata/python.d
+	amove usr/lib/netdata/conf.d/python.d
+	amove usr/lib/netdata/conf.d/python.d.conf
+}
 
-	mv $pkgdir/usr/libexec/netdata/python.d \
-		"$subpkgdir"/usr/libexec/netdata
-	mv $pkgdir/usr/libexec/netdata/plugins.d/python.d.plugin \
-		"$subpkgdir"/usr/libexec/netdata/plugins.d
-	mv $pkgdir/etc/netdata/python.d \
-		$subpkgdir/etc/netdata/
-	mv $pkgdir/usr/lib/netdata/conf.d/python.d \
-		$subpkgdir/usr/lib/netdata/conf.d
-	mv $pkgdir/usr/lib/netdata/conf.d/python.d.conf \
-		$subpkgdir/usr/lib/netdata/conf.d
+go() {
+	pkgdesc="$pkgdesc (go plugins)"
+	depends="$pkgname"
+
+	amove usr/libexec/netdata/plugins.d/go.d.plugin
+	amove usr/lib/netdata/conf.d/go.d.conf
+	amove usr/lib/netdata/conf.d/go.d
+	amove usr/lib/netdata/conf.d/health.d/go.d.plugin.conf
+	amove etc/netdata/go.d
 }
 
 sha512sums="
-783d9de4ff108197c3b081c8945eae8f5faee5cb4c717f1bfa27e3c9efca517c60794960005ee332eb24c672389f87ed4084348f7f5deec8a067bc25ad8e7ab0  netdata-1.44.3.tar.gz
+c425e748b8968e01aa7e20fb2c71ec3102c16c0917e11a49abb2a1f3a11d46ae1fdc72b4229c39ced28009debd3e86356ea0958c7113f12bb7c2c726a34e78ab  netdata-1.45.3.tar.gz
 9687ede999002e73563c118fb604cbf8957670f8fac8f7c51d637c1518c00c1919e3b66bf055f152cda766695fc625a751db19a91174f487c0cc2752d47afb52  aclk-schemas-83c661c0dcddb9526814ebbd0668fbc3e281f03f.tar.gz
 814e3ee5811b43349a218c2b6595e53c1daf5db2c9346b2ec0ff6475cc83b1803adad3f3210f51e219d6523fcf839543087b94eb18501ee144128fb169bd9c0b  dlib-021cbbb1c2ddec39d8dd4cb6abfbbafdf1cf4482.tar.gz
-26dc950804887982fe4472a6c5ce78e36ec89b75fb5e94a8ad9eac3abb7558e2e151cd10652e159910af78da13de054011f266a4cec22becb6f488154ee5737b  mqtt_websockets-6664789ccf57c95451638364f544d1679efd910e.tar.gz
 f494a2bf75fe7a6c97bf64ae8d2a4eabe6bcc5c1a4a038cb27c23b478a65a543f9c2dcc8223b0e05ebe2ee811baa06876d13d5abb344c1bc51bdf5e3e8d3a75b  h2o-094a6f90f76eeb280a430200cba47bde39b0b8e8.tar.gz
-c65c3c72c60654ef575f485b45c0389198a91b307f39ce984baa4d2fc519c62d645fd226f076b2ec059a97599be8892a8270ffb57bba575c0390181244aff228  c-rbuf-51485be511f8c1d592b699f09f7c783aa2270375.tar.gz
-2082de803895a1499006e683f3173205b5033c9f788f1d5a5944463c1da5bc8d8661a187e7a0ec23f9f0e0251557741f72d54a7732a3ad010930e16fa04a0853  c_rhash-f6c21836b921535ab818c7f72b77346d25f60d8e.tar.gz
-39cc473fbfff28862a9c3dbbfe59005c57ccee6664bb328924c2124a8f1faeb5e6247a6405a7e498c01a975e826582c28e66b7dd4552b8923ded446bf42609cd  cxx17-2.patch
-cfe712c6038f483fd276633330bb0cfc92c2779585e1855295da0d54e7f380d4a201a8bd25b939b69df65a8fe5a1dfa6debbcd9f4e8ca88c1caad3869fcc55a0  protobuf-23.patch
-89d5e31a9ff05678bd42b79777069137bb7cb140079fb3c8a8ca52ffdcad0f800eef7a458c065a2ef10fbdd01e96ce5321b59a3d57a7528aa874a49d5a88a8b8  netdata.initd
-990ea3f485d9d5ffda50e5f6169704a209d51d18a5d75f97de742b8539c764745f9f59489007d5d1091cdf9f25e8e46519c32fc43cfe527fe2fc8426b0344612  netdata.confd
+e2cc42781b668a102ca73c49790e652b5daf42999ae7c711e2fffc59b6e556bee2d0008dafbc1746b7a7cebe00ce4b8ee30b7327b5cc58df2575919f76daa442  fluent-bit-b19e9ce674de872640c00a697fa545b66df0628a.tar.gz
+bfa455511b582497c358be5a9408f066495edfade229b7971c5de1a85a8b7a5a503b474c9341eb8f367dc1f70be9663186c978ecc85280096f928941c002671d  openrc-pidfile-not-writable-by-user.patch
+c42a973ad1c7bb7b16a0c0d20580ac168071d37c06ad6b3336388ba7c5d59dd8b90795ea9a7f501d01755062d0a9a405a61b49f05a940c942c2154400d2721ee  protobuf-23.patch
+2f7b5f6a91fac0bd0a9a0a8ed4a53eb74db8f296332e35ca293f5a916fa6e58f2ebc32fd6621d41de68d61d31d1c85b5567c2b0800c7a484aed03cf1b89472eb  build-enable-cgo.patch
 "
