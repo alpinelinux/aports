@@ -59,7 +59,7 @@ latest_ver=$(apk list -Pa postgresql \
 
 default_ver=$(pg_versions get-default -q) || exit 0
 
-if [ "$default_ver" -lt "$latest_ver" ]; then
+if [ "$latest_ver" ] && [ "$default_ver" -lt "$latest_ver" ]; then
 	cat >&2 <<-EOF
 	*
 	* You are using 'postgresql$default_ver'. It's recommended to upgrade to the latest
