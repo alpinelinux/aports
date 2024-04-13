@@ -1,7 +1,7 @@
 # Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
 # Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>
 pkgname=powershell
-pkgver=7.4.1
+pkgver=7.4.2
 pkgrel=0
 pkgdesc="A cross-platform automation and configuration tool/framework"
 arch="x86_64 aarch64 armv7" # blocked by dotnet runtime
@@ -17,6 +17,7 @@ makedepends="
 	"
 source="
 	$pkgname-$pkgver.tar.gz::https://github.com/PowerShell/PowerShell/archive/v$pkgver.tar.gz
+	rollback-system-manage-automation-psversioninfo.patch
 	dependency-gatherer.targets
 	fix-filesystem-test.patch
 	"
@@ -34,12 +35,16 @@ case $CARCH in
 	armhf|s390x|ppc64le) _use_crossgen2=false;;
 esac
 
+# change nuget cache
+export NUGET_PACKAGES="$srcdir"/nuget_cache
+
 # secfixes:
 #   7.3.10-r0:
 #     - CVE-2023-36013
 
 prepare() {
 	default_prepare
+
 	# build expects to be in git directory
 	git init
 	git config user.name "example"
@@ -47,50 +52,61 @@ prepare() {
 	git add ./*
 	git commit -m 'Initial'
 	git tag -a "v$pkgver" -m "Initial"
+	git remote add origin "$url"
 	rm "global.json"
 	mkdir -p "$_logdir"
+
+	# Replicating build.psm1:Start-PSBuild()
+	## Restore-PSPackage()
+	dotnet restore --locked-mode -p:PublishReadyToRun=$_use_crossgen2 --use-current-runtime src/powershell-unix
+	dotnet restore --locked-mode src/TypeCatalogGen
+	dotnet restore --locked-mode src/ResGen
+	dotnet restore --locked-mode src/Modules
+	dotnet restore --locked-mode src/Microsoft.PowerShell.GlobalTool.Shim
 }
 
 build() {
 	msg "Building $pkgname"
-	# change nuget cache
-	export NUGET_PACKAGES="$srcdir"/nuget_cache
 
-	# Restore
-	dotnet restore src/powershell-unix
-	dotnet restore src/ResGen
-	dotnet restore src/TypeCatalogGen
+	## Start-ResGen(): Generate resource binding C# files
+	(
+		cd "$builddir"/src/ResGen
+		dotnet run --no-restore
+	)
 
-	# Setup the build target to gather dependency information
+	## Start-TypeGen(): Setup the build target to gather dependency information
 	cp "$srcdir/dependency-gatherer.targets" \
 		"src/Microsoft.PowerShell.SDK/obj/Microsoft.PowerShell.SDK.csproj.TypeCatalog.targets"
-	dotnet msbuild src/Microsoft.PowerShell.SDK/Microsoft.PowerShell.SDK.csproj \
-		/t:_GetDependencies \
-		"/property:DesignTimeBuild=true;_DependencyFile=$PWD/src/TypeCatalogGen/powershell.inc" \
-		/nologo
 
-	# Generate 'powershell.version'
-	echo "v$pkgver" > powershell.version
+	dotnet msbuild \
+		src/Microsoft.PowerShell.SDK \
+		-t:_GetDependencies \
+		-p:DesignTimeBuild=true \
+		-p:_DependencyFile="$builddir"/src/TypeCatalogGen/powershell.inc \
+		-nologo
 
-	# Generate resource binding C# files
-	cd "$builddir"/src/ResGen
-	dotnet run
+	dotnet run \
+		--no-restore \
+		--project src/TypeCatalogGen \
+		src/System.Management.Automation/CoreCLR/CorePsTypeCatalog.cs \
+		"$builddir"/src/TypeCatalogGen/powershell.inc
 
-	# Generate 'CorePsTypeCatalog.cs'
-	cd "$builddir"/src/TypeCatalogGen
-	dotnet run ../System.Management.Automation/CoreCLR/CorePsTypeCatalog.cs powershell.inc
-
-	# Build powershell core
-	cd "$builddir"
-
+	## Build powershell core
 	dotnet build-server shutdown
 	dotnet publish --configuration Linux "src/powershell-unix/" \
-		--output bin \
+		--output lib \
 		--no-self-contained \
-		--runtime "$(dotnet --info | awk '$1=="RID:"{print $2}')" \
+		--no-restore \
+		--framework "net8.0" \
+		--use-current-runtime \
 		-p:PublishReadyToRun=$_use_crossgen2 \
 		/bl:"$_logdir"/powershell-build.binlog \
 		/consoleLoggerParameters:ShowTimestamp
+
+	## Publish reference assemblies
+	grep 'Microsoft.NETCore.App' "$builddir"/src/TypeCatalogGen/powershell.inc | sed 's/;//' | while read -r assembly; do
+		install -Dm755 -t lib/ref "$assembly"
+	done
 }
 
 check() {
@@ -112,7 +128,7 @@ package() {
 		"$pkgdir"/usr/bin
 
 	# libary copy
-	cp -ar "$builddir"/src/powershell-unix/bin/Linux/*/alpine* "$pkgdir"/usr/lib/$pkgname
+	cp -ar "$builddir"/lib "$pkgdir"/usr/lib/$pkgname
 
 	# already provided by 'libpsl-native' aport
 	rm -f "$pkgdir"/usr/lib/$pkgname/libpsl-native.so
@@ -126,7 +142,8 @@ package() {
 }
 
 sha512sums="
-3cc77b42e59a6fd3dda3003a766be3fa403cca07810f9c13646c58bdcfc74fa6050803f0a51eb96c52e086da723104a3466c33c0f5773c136a5ae38c1992fc23  powershell-7.4.1.tar.gz
-e9c4aeebd4fead1542b2c48c70134efcdb6c573273d8d05b1f8a2ece070e26899876b30264749992beac3044059716ca8c07b3bf970a419e525057c422f843c6  dependency-gatherer.targets
+b98665e2ffd1b3ebb6c897e361bbfed6477fa3beb54116290275168ad48e31dea30c4ed078359f27f51dab0dda2d925675bade0832670d389e39ae1f4aa01f0b  powershell-7.4.2.tar.gz
+bac5ac577fd8e6bb8ba83b5c537269b635619ecde2dfa3b31de754865aab8f4fd004bcb972f08f3218ecbcb7ef33c7fb8489370f7f0aaa0bae2e88e3ec736625  rollback-system-manage-automation-psversioninfo.patch
+5a70efe247cdae8ed5c66702909137e0727cf5e25aca54983891fc17716a56081825f9a6e57c56f8fa8aa5615a159f81c68ca501d42e2ce085c073be633b3025  dependency-gatherer.targets
 0e7550d8b702eeb9ebbd42100b32cbf7a0be676c5922cd6ee03ecdd3ba11d20d42a468f73ee428c6c92c8b7b18f9b022591a368191c2a358034ba4d7e78d2b84  fix-filesystem-test.patch
 "
