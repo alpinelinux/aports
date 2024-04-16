@@ -1,16 +1,18 @@
 # Maintainer: lauren n. liberda <lauren@selfisekai.rocks>
 pkgname=electron
-pkgver=29.3.0
+pkgver=30.0.1
 _semver="${pkgver/_beta/-beta.}"
-pkgrel=1
-_chromium=122.0.6261.156
-_depot_tools=b5509953468edd0906f2dc297886939abbd2bed5
+pkgrel=0
+_chromium=124.0.6367.60
+_copium_tag=124.5
+_depot_tools=495b23b39aaba2ca3b55dd27cadc523f1cb17ee6
 pkgdesc="Electron cross-platform desktop toolkit"
 url="https://github.com/electron/electron"
 arch="aarch64 x86_64" # same as chromium
 license="MIT"
 depends="gtk+3.0 so:libudev.so.1 xdg-utils"
 makedepends="
+	ada-dev
 	alsa-lib-dev
 	aom-dev
 	base64-dev
@@ -33,6 +35,7 @@ makedepends="
 	ffmpeg-dev
 	findutils
 	flac-dev
+	flatbuffers-dev
 	flex
 	freetype-dev
 	gperf
@@ -105,9 +108,10 @@ makedepends="
 subpackages="$pkgname-lang $pkgname-dev"
 # the lower patches are specific to electron, the top ones are from the equivalent chromium version
 source="https://ab-sn.lnl.gay/electron-$_semver-$_chromium.tar.zst
-	chromium-icu-74.patch
+	copium-$_copium_tag.tar.gz::https://codeberg.org/selfisekai/copium/archive/$_copium_tag.tar.gz
 	chromium-revert-drop-of-system-java.patch
 	compiler.patch
+	disable-dns_config_service.patch
 	disable-failing-tests.patch
 	fc-cache-version.patch
 	fix-missing-cstdint-include-musl.patch
@@ -134,23 +138,19 @@ source="https://ab-sn.lnl.gay/electron-$_semver-$_chromium.tar.zst
 	system-zstd.patch
 	temp-failure-retry.patch
 	yes-musl.patch
-	disable-dns_config_service.patch
 
 	icon.patch
 	python-jinja-3.10.patch
 	webpack-hash.patch
 	unbundle-node.patch
-	0001-src-fix-HasOnly-capability-in-node-credentials.patch
-	0002-http-add-maximum-chunk-extension-size.patch
-	0004-lib-update-undici-to-v5.28.3.patch
-	0005-zlib-pause-stream-if-outgoing-buffer-is-full.patch
-	0006-deps-fix-GHSA-f74f-cvh7-c6q6-CVE-2024-24806.patch
-	node-configure-distutils.patch
-	node-gyp-distutils.patch
 
 	default.conf
 	electron.desktop
 	electron-launcher.sh
+	"
+_copium_patches="
+	cr124-iwyu-sys-select-dawn-terminal.patch
+	cr124-libwebp-shim-sharpyuv.patch
 	"
 # tests are todo for some base checks
 options="!check net suid"
@@ -158,7 +158,6 @@ builddir="$srcdir/electron-$_semver-$_chromium"
 
 export PATH="$PATH:/usr/lib/qt5/bin"
 
-# clang uses much less memory (and this doesn't support gcc)
 export CC=clang
 export CXX=clang++
 
@@ -168,8 +167,8 @@ export NM=llvm-nm
 export LD=clang++
 
 # less log spam, reproducible
-export CFLAGS="${CFLAGS/-g/} -O2 -Wno-unknown-warning-option -Wno-builtin-macro-redefined -Wno-deprecated-declarations"
-export CXXFLAGS="${CXXFLAGS/-g/} -O2 -Wno-unknown-warning-option -Wno-builtin-macro-redefined -Wno-deprecated-declarations"
+export CFLAGS="${CFLAGS/-g/} -O2 -Wno-builtin-macro-redefined -Wno-deprecated-declarations -Wno-shift-count-overflow -Wno-ignored-attributes"
+export CXXFLAGS="${CXXFLAGS/-g/} -O2 -Wno-builtin-macro-redefined -Wno-deprecated-declarations -Wno-invalid-constexpr"
 export CPPFLAGS="${CPPFLAGS/-g/} -D__DATE__=  -D__TIME__=  -D__TIMESTAMP__="
 case "$CARCH" in
 	aarch64|arm*|riscv64)
@@ -235,17 +234,6 @@ snapshot() {
 	python3 src/electron/script/apply_all_patches.py \
 		src/electron/patches/config.json
 
-	python3 src/tools/update_pgo_profiles.py \
-		--target=linux \
-		update \
-		--gs-url-base=chromium-optimization-profiles/pgo_profiles
-
-	python3 src/tools/download_optimization_profile.py \
-		--newest_state=src/chrome/android/profiles/newest.txt \
-		--local_state=src/chrome/android/profiles/local.txt \
-		--output_name=src/chrome/android/profiles/afdo.prof \
-		--gs_url_base=chromeos-prebuilt/afdo-job/llvm
-
 	mv src $pkgname-$_semver-$_chromium
 
 	# extra binaries are most likely things we don't want, so nuke them all
@@ -269,9 +257,23 @@ snapshot() {
 }
 
 prepare() {
-	dos2unix third_party/vulkan_memory_allocator/include/vk_mem_alloc.h
-
 	default_prepare
+
+	for i in $_copium_patches; do
+		case "$i" in
+			*.patch)
+				msg "${i%::*}"
+				patch -p1 -i "$srcdir/copium/$i" || failed="$failed $i"
+				;;
+		esac
+	done
+	if [ ! -z "$failed" ]; then
+		error "The following patches failed to apply:"
+		for i in $failed; do
+			printf "  %s\n" "$i" >&2
+		done
+		exit 1
+	fi
 
 	git init -q .
 
@@ -300,9 +302,10 @@ prepare() {
 	)
 
 	# reusable system library settings
-	# libavif - https://github.com/AOMediaCodec/libavif/commit/4d2776a3
+	# libavif - https://github.com/AOMediaCodec/libavif/commit/50a541469c98009016af8dcc9f83a1be79f3a7d9
 	# libaom - https://aomedia.googlesource.com/aom/+/706ee36dcc82%5E%21/
-	# jsoncpp, re2, snappy, swiftshader-spirv, woff2 - requires use_custom_libcxx=false
+	#   but watch this space: https://aomedia-review.googlesource.com/c/aom/+/188606
+	# jsoncpp, re2, snappy, swiftshader, vulkan, woff2 - needs use_custom_libcxx=false
 	local chromium_use_system="
 		brotli
 		crc32c
@@ -310,6 +313,7 @@ prepare() {
 		double-conversion
 		ffmpeg
 		flac
+		flatbuffers
 		fontconfig
 		freetype
 		harfbuzz-ng
@@ -343,8 +347,8 @@ prepare() {
 			-delete
 	done
 
-	# ada - needs use_custom_libcxx=false
 	# llhttp - 9.x needed, 8.x in repo (2023-12-17)
+	# ada - needs use_custom_libcxx=false
 	local node_use_system="
 		base64
 		brotli
@@ -416,61 +420,59 @@ _configure() {
 		;;
 	esac
 
+	local maglev=true
+	local symbol_level=0
+	local vaapi=true
+
 	# shellcheck disable=2089
 	local gn_config="
-		cc_wrapper=\"$cc_wrapper\"
-		clang_base_path=\"/usr\"
-		custom_toolchain=\"//build/toolchain/linux/unbundle:default\"
-		host_toolchain=\"//build/toolchain/linux/unbundle:default\"
 		import(\"//electron/build/args/release.gn\")
 
 		blink_enable_generated_code_formatting=false
+		cc_wrapper=\"$cc_wrapper\"
 		chrome_pgo_phase=0
+		clang_base_path=\"/usr\"
 		clang_use_chrome_plugins=false
 		clang_version=\"${clang_ver%%.*}\"
+		custom_toolchain=\"//build/toolchain/linux/unbundle:default\"
+		disable_fieldtrial_testing_config=true
+		enable_hangout_services_extension=true
+		enable_nacl=false
+		enable_nocompile_tests=false
+		enable_stripping=false
+		enable_rust=true
+		enable_vr=false
 		fatal_linker_warnings=false
 		ffmpeg_branding=\"Chrome\"
-		icu_use_data_file=true
+		host_toolchain=\"//build/toolchain/linux/unbundle:default\"
+		icu_use_data_file=false
 		is_cfi=false
 		is_clang=true
 		is_component_ffmpeg=true
 		is_debug=false
 		is_official_build=true
-		symbol_level=0
-		treat_warnings_as_errors=false
-		rustc_version=\"yes\"
-		rust_sysroot_absolute=\"/usr\"
-
-		angle_enable_gl_null=false
-		build_tflite_with_xnnpack=false
-		build_with_tflite_lib=true
-		disable_fieldtrial_testing_config=true
-		enable_hangout_services_extension=true
-		enable_library_cdms=false
-		enable_media_remoting=false
-		enable_nacl=false
-		enable_nocompile_tests=false
-		enable_paint_preview=false
-		enable_reading_list=false
-		enable_remoting=false
-		enable_reporting=false
-		enable_rust=true
-		enable_screen_ai_service=false
-		enable_service_discovery=false
-		enable_stripping=false
-		enable_vr=false
-		ozone_platform_headless=false
-
 		link_pulseaudio=true
 		proprietary_codecs=true
 		regenerate_x11_protos=true
 		rtc_link_pipewire=true
 		rtc_use_pipewire=true
-		skia_use_dawn=false
+		rustc_version=\"yes\"
+		rust_sysroot_absolute=\"/usr\"
+		symbol_level=$symbol_level
+		treat_warnings_as_errors=false
 		use_custom_libcxx=true
-		use_dawn=false
+		use_lld=true
 		use_pulseaudio=true
+		use_safe_libstdcxx=false
+		use_system_libffi=true
 		use_sysroot=false
+		use_thin_lto=false
+		use_vaapi=$vaapi
+		v8_enable_maglev=$maglev
+
+		skia_use_dawn=false
+		use_dawn=false
+		use_system_ada=false
 		use_system_base64=true
 		use_system_cares=true
 		use_system_histogram=true
@@ -478,8 +480,6 @@ _configure() {
 		use_system_libffi=true
 		use_system_llhttp=false
 		use_system_nghttp2=true
-		use_thin_lto=false
-		use_vaapi=true
 		"
 
 	# shellcheck disable=2086,2090,2116
@@ -490,7 +490,10 @@ _configure() {
 build() {
 	export PATH="$PATH:/usr/lib/qt5/bin"
 
-	ninja -C out/Release \
+	# ~1 GB per concurrent job is not enough with gcc
+	_njobs="${NJOBS:-"$(python3 -c 'import os; print(max((os.cpu_count() - (10 if os.uname().machine == "aarch64" else 8), 1)))')"}"
+
+	ninja -C out/Release -j$_njobs \
 		electron_dist_zip \
 		node_gypi_headers \
 		node_version_header
@@ -541,10 +544,11 @@ lang() {
 }
 
 sha512sums="
-aef4dc07d9924892472637f95485ac0e9ab6216a9da5b290d105d82e8688fc45643515e43a41aee6e002ec4dbce512ae11c8ebe171d6629741cf1587bdda8a5b  electron-29.3.0-122.0.6261.156.tar.zst
-4c540972fa12acd9f0aafb8dc7e9987c3d6e4f28ff679dde522ebcec2dc5ae1a62d9d255bed0a30b9c79ae3b90ab0f5b9ae1ef5b7bf338612e28d9ef70250ca3  chromium-icu-74.patch
+e392385fc2640d350b1a9e082377253664d5129bf45cc8d03395027e9a79d620e46d44b57be9883844c8dd9d655fc4e1ac2e8b312b40727081494938f0bd0499  electron-30.0.1-124.0.6367.60.tar.zst
+13c647dc2024e27ae8a4d7e8f1202037a342f4a7054477226665c332029e1b6f1d8b99004c2b2809bcf1e6c19b1359ef5e1c971552d7ced59c5b43d5a836af88  copium-124.5.tar.gz
 29bb685e03356a77df5fd347cdf55194cc8b3265c421cc76e54d64edefc329dbcb052deb26b22e8f587ce68456876c071de1b7d258dd0fcc6ee66c875ec4a020  chromium-revert-drop-of-system-java.patch
-c116ad6325a79b799b6c56312891d5b3d2f0d0c1c3e2c03f339144b3f93b871db190f83fe5eadc5542303d61849cc362299932a2f93661198e11ba0c1e492e48  compiler.patch
+54eb147c0af2ba096d1df375a289b339ee855ab1a9114e7c747753f0274a6bafb7212c1859b7885454c4529d9a5e3bd9559fc14e8e006f23ccd381895fa68d15  compiler.patch
+4057cc78f10bfd64092bc35a373869abb1d68b880cdbca70422f39ffd78a929c19c7728d4d4c40709aaba25581148a93ae5343e724849fd35323062ed68753fa  disable-dns_config_service.patch
 111bc22fb704d97759988268a40d6b356c51b0bd7a8119a694e905ffe21850ff64e91566cd0dd0c9d62fcb46dca8acc821436c34eb0ba78be872ee4f7ec88a7b  disable-failing-tests.patch
 5fc5c012c1db6cf1ba82f38c6f3f4f5ca3a209e47ac708a74de379b018e0649b7694877c9571ef79002dde875ffc07b458a3355425f1c01867f362c66c2bc1bf  fc-cache-version.patch
 9200f78bad70e95c648a5e8392d50642190600f655c6baa366ff6467ebad52d3b3f305dad58f3610da67136f4b723557653b174ec5c25be8d8737ee04d9ee09f  fix-missing-cstdint-include-musl.patch
@@ -553,13 +557,13 @@ c63dee5044353eb306a39ca1526158c0f003ab310ecb03d1c368dc2a979454590c84b8d3c1548451
 33ee60863cc438ef57ffef92ba4cf67a856a5ffc16138bce241bcf87e47b15154aa86918e793c26f7ec4dc62a445257ad5673ed7001daf22c4043cf6cc57da7f  gdbinit.patch
 36a764fa73443b47d38050b52dbe6ad2fa8d67201ff4ccdbad13b52308ef165ca046aac6f9609fe35890a6485f0f3e672e78cc41e3e44f3cdc7f145e540524e8  generic-sensor-include.patch
 8de65109ece27ea63bd469f2220c56b8c752ba0a50fdf390082a2d5ae74b8e010199126175569f6d5084270dd4e0571e68aec32c0bca8211a6699925b3a09124  import-version.patch
-993ce46dcd2c9e406d18d7af834e6e8cc4227bdba32c0b1804bb0489e11b47467557895281facf110abdb6aacf493b97f23bfb4f72ee95a41a618c547bfcea1a  libstdc++13.patch
+c49a1b06e061faa430d66dd5b404ef6c843e4d8a6e9012e963009a161b4726f8eb92c4da8fa710f8861f6e4daa8be5f68abee41a7d9fc02f2a0eb61ce53b5fdd  libstdc++13.patch
 e75f57ae34c97ca1caf15fa4b4106c6c1e79c31ed66869cf92ed9ea0c449886c9511e455047c17c1e9ad8b9a46ad4948511a4f2995a4b6030fb4d1c7ae21d038  mman.patch
 99bcc7dd485b404a90c606a96addab1d900852128d44fb8cea8acc7303189ef87c89a7b0e749fd0e10c5ef5f6bf1fadeb5c16a34503cab6a59938ce2653d887e  musl-auxv.patch
 50c274a420bb8a7f14fcb56e40920dac8f708792a4520789b4987facea459bef88113d5a2b60fa8c57bee6e92bff3617d6b73fa305c8c44614c638971cffd440  musl-sandbox.patch
 e7163ac5810ac85366cef2447412287c856e3d67c6b77f219a6e5a418b1965b98e449c409424ad0704a5bded9355dd0aec3dc4585918ce5a2ab36c079707afe2  musl-tid-caching.patch
 92eb002718026611f5542362ad69b67f0a398ff71b3fca5c05d55cb5c6f9f29334e5e127bb4860cfaa3fba0f0d4c901e2b98808217e7dc02e254a64a5c9521aa  musl-v8-monotonic-pthread-cont_timedwait.patch
-5eb0b83264e2c9213fb871838827eb7875c05131a42d901032d6d1f05eec98609fefac4772385046887a773daf4f1e0ee5a647e82c1c3d73aec3fcf76f887084  no-execinfo.patch
+73bca6c6f9873f2f11cef04f3f41f71e0ae86e7e2d77e14db4298675fec390744c5081f6fdb14052e5ee2b5885be1198c3aa6068eb2b656d1a665c0c3f36e708  no-execinfo.patch
 8e17101d69e23b456a9c03dc2fe95bcd56846389707ba6f4720192a9e9168406d20d9168dbebbb3a47d921ec92e478f0e390f46e6b9bb43a34dda217c6e6448b  no-mallinfo.patch
 e4c4e5bc6f828f9c883dd418c0ba01887949c29c311f76206a1ec29f620b0c0ba0452949dc2778a9c46ea066405857536964a36436a68eecf7da7952736333cf  no-res-ninit-nclose.patch
 6dc4d8dc92e685dace62265a1ddb3aebc558aed54d20ff6d36b030be0c48d7e84662326c31363612492574d9a03c62653cdc21a60995b97dee1d75cae86a9f9b  no-sandbox-settls.patch
@@ -571,18 +575,10 @@ d4ac7f350806b4410ccb1df3b0ad7e90a7b6d724a16919761aa2d47a6f21008c7374da528b05b754
 b3beb98b539fe160fbc493ba410ae0f68540cc4b6834f1f8ce9a22c3f4f59ef5d583ad48793e10549fd02a701f833a3969791ef4524322cd1e715ca5bf226bc8  system-zstd.patch
 e48693e6b7aeebf69a5acbf80d9a35defe4c23835121dfeb58b051ac7c527e758a41004f4d193274fe1b01c0bfb1dbc77b09cb6a404a3fdee507a2918afb0edb  temp-failure-retry.patch
 914ccf649d7771f19f209ab97f99c481aebc6f66174d68e8b539f6ad4a70bc8cb0fae2df6dadbf0415958ffb3574c420fe029079dcce45f5e5add4db2e903566  yes-musl.patch
-4057cc78f10bfd64092bc35a373869abb1d68b880cdbca70422f39ffd78a929c19c7728d4d4c40709aaba25581148a93ae5343e724849fd35323062ed68753fa  disable-dns_config_service.patch
 465107da7818b237e3c144a318ab80c3c9343b51ed38b8971ef204692d13346929becbe94cefad4c153788d3a200642143584d5ca070f6304e768ba2139c19ec  icon.patch
 e05180199ee1d559e4e577cedd3e589844ecf40d98a86321bf1bea5607b02eeb5feb486deddae40e1005b644550331f6b8500177aa7e79bcb3750d3c1ceb76c3  python-jinja-3.10.patch
 2aa340854316f1284217c0ca17cbf44953684ad6c7da90815117df30928612eb9fb9ffb734b948dfc309cd25d1a67cd57f77aac2d052a3dd9aca07a3a58cbb30  webpack-hash.patch
-c83914c11d9f8f6d53653f67f91020db3d25d0614380053380f85e870418e834bf590afa065b182006d535290cc91a940fe085c1200cae9ca17107faceae1989  unbundle-node.patch
-85973875fb3acddabe2507e255b38fe498cf0b5fce7dcb93e389ccb7b1cae8acd5225f00fa61b7bd556f7cae5080ed03dca7263505fe8974e3fbf3a93937c555  0001-src-fix-HasOnly-capability-in-node-credentials.patch
-4b32258cc05ffe43364dbb775df53d0e7749d108ac31b3642cc069860b6e28d370bcb0cee01c652baed668c2c3111fde714084d0a85acd80b5b86880a703c2b2  0002-http-add-maximum-chunk-extension-size.patch
-b8ea46e2c0ad7bab6383fa3a42619be735eac67156e501b173b36e9522e8c384feb758b48276a16ac6a68b64cab8fb4cd4ed1841720ecf628bc55f45c05b58c4  0004-lib-update-undici-to-v5.28.3.patch
-1dc578fad461f8dc876a1bbbd9fd8f9b235a010fcfb30986cc2654253cce84040dc6fed37fa9fa5e70933ffb9d812c677ba0150e7d6a9d2032d412f9eba7f168  0005-zlib-pause-stream-if-outgoing-buffer-is-full.patch
-793d94cc5aec81eace96ca86bd70ad122d82918a521ecb8d30251c492818c19c7a020eed4dccb13d4129b61f0ca82972bd34f480ad094c45633042552bd39fe9  0006-deps-fix-GHSA-f74f-cvh7-c6q6-CVE-2024-24806.patch
-45e9b3f520a9d343daddda21fd220d675fbbebaeae923a4afb59f8b8d3c35cfa172ab4fdaed6f835d66a8ef470e1a4ab9d6e27c5538f5ce49cc4c1772fa514ef  node-configure-distutils.patch
-e7e2f663e2c9329443fbaece2b3e37266bdb894f5764d9c4ef3720f1de84d13edee75a5e12210e4839912520c88332f4b231a6eacbc0e8dd5f7e3353d40fefba  node-gyp-distutils.patch
+ebb18a0e2eba4b4606e900fa82f4b57fe91dcbdc943e17544bccb3c9a011a49b4331cdbee59629e44b80184bad4ea54ec887c0bfcd00cda8d5686060dbf365e3  unbundle-node.patch
 e8ea87c547546011c4c8fc2de30e4f443b85cd4cfcff92808e2521d2f9ada03feefb8e1b0cf0f6b460919c146e56ef8d5ad4bb5e2461cc5247c30d92eb4d068e  default.conf
 191559fc7aa1ea0353c6fb0cc321ee1d5803a0e44848c8be941cfab96277b0de6a59962d373e2a2a1686c8f9be2bcf2d2f33706759a339a959e297d3f7fda463  electron.desktop
 5f7ba5ad005f196facec1c0f26108356b64cafb1e5cfa462ff714a33b8a4c757ac00bfcb080da09eb5b65032f8eb245d9676a61ec554515d125ed63912708648  electron-launcher.sh
