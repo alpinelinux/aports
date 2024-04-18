@@ -1,0 +1,1869 @@
+diff --git a/configure.ac b/configure.ac
+index 859b315..ff58606 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -43,6 +43,7 @@ case "${host_cpu}" in
+     arm*|sa110)		HOST_CPU="arm" ;;
+     aarch64)		HOST_CPU="aarch64" ;;
+     cris*)		HOST_CPU="cris" ;;
++    loongarch*)		HOST_CPU="loongarch" ;;
+     mips*)		HOST_CPU="mips" ;;
+     powerpc|powerpc64|powerpc64le)	HOST_CPU="ppc" ;;
+     sun4u|sparc64)	HOST_CPU="sparc" ;;
+@@ -318,6 +319,7 @@ AC_CONFIG_FILES([
+ 	sysdeps/linux-gnu/aarch64/Makefile
+ 	sysdeps/linux-gnu/cris/Makefile
+ 	sysdeps/linux-gnu/ia64/Makefile
++	sysdeps/linux-gnu/loongarch/Makefile
+ 	sysdeps/linux-gnu/m68k/Makefile
+ 	sysdeps/linux-gnu/mips/Makefile
+ 	sysdeps/linux-gnu/ppc/Makefile
+diff --git a/sysdeps/linux-gnu/Makefile.am b/sysdeps/linux-gnu/Makefile.am
+index c33c952..22a608b 100644
+--- a/sysdeps/linux-gnu/Makefile.am
++++ b/sysdeps/linux-gnu/Makefile.am
+@@ -16,7 +16,7 @@
+ # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ # 02110-1301 USA
+ 
+-DIST_SUBDIRS = alpha arm cris ia64 m68k mips ppc s390 sparc x86
++DIST_SUBDIRS = alpha arm cris ia64 loongarch m68k mips ppc s390 sparc x86
+ 
+ SUBDIRS = \
+ 	$(HOST_CPU)
+diff --git a/sysdeps/linux-gnu/loongarch/Makefile.am b/sysdeps/linux-gnu/loongarch/Makefile.am
+new file mode 100644
+index 0000000..f4da7cf
+--- /dev/null
++++ b/sysdeps/linux-gnu/loongarch/Makefile.am
+@@ -0,0 +1,25 @@
++# This file is part of ltrace.
++# Copyright (C) 2022-2023 Loongson Technology Corporation Limited.
++#
++# This program is free software; you can redistribute it and/or
++# modify it under the terms of the GNU General Public License as
++# published by the Free Software Foundation; either version 2 of the
++# License, or (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful, but
++# WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++# General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++# 02110-1301 USA
++
++noinst_LTLIBRARIES = ../libcpu.la
++
++___libcpu_la_SOURCES = fetch.c plt.c regs.c trace.c
++
++noinst_HEADERS = arch.h ptrace.h signalent.h syscallent.h
++
++MAINTAINERCLEANFILES = Makefile.in
+diff --git a/sysdeps/linux-gnu/loongarch/arch.h b/sysdeps/linux-gnu/loongarch/arch.h
+new file mode 100644
+index 0000000..3a37334
+--- /dev/null
++++ b/sysdeps/linux-gnu/loongarch/arch.h
+@@ -0,0 +1,47 @@
++/*
++ * This file is part of ltrace.
++ * Copyright (C) 2022-2023 Loongson Technology Corporation Limited.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++#ifndef LTRACE_LOONGARCH_ARCH_H
++#define LTRACE_LOONGARCH_ARCH_H
++
++
++/* | 31                             15 | 14          0 |
++ * | 0 0 0 0 0 0 0 0 0 0 1 0 1 0 1 0 0 |      code     | */
++#define BREAKPOINT_VALUE { 0x00, 0x00, 0x2A, 0x00 }
++#define BREAKPOINT_LENGTH   4
++#define DECR_PC_AFTER_BREAK 0
++#define ARCH_ENDIAN_LITTLE
++
++#define LT_ELFCLASS	ELFCLASS64
++#define LT_ELF_MACHINE	EM_LOONGARCH
++
++#define ARCH_HAVE_SIZEOF
++#define ARCH_HAVE_ALIGNOF
++#define ARCH_HAVE_SW_SINGLESTEP
++#define ARCH_HAVE_FETCH_ARG
++#define ARCH_HAVE_FETCH_PACK
++
++#define RLEN		8
++#define ARG_GAR_START	4
++#define ARG_GAR_END	11
++#define ARG_FAR_START	0
++#define ARG_FAR_END	7
++
++#endif /* LTRACE_LOONGARCH_ARCH_H */
+diff --git a/sysdeps/linux-gnu/loongarch/fetch.c b/sysdeps/linux-gnu/loongarch/fetch.c
+new file mode 100644
+index 0000000..90e8e77
+--- /dev/null
++++ b/sysdeps/linux-gnu/loongarch/fetch.c
+@@ -0,0 +1,771 @@
++/*
++ * This file is part of ltrace.
++ * Copyright (C) 2022-2023 Loongson Technology Corporation Limited.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++#include <sys/ptrace.h>
++#include <asm/ptrace.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdbool.h>
++#include <linux/uio.h>
++#include <gelf.h>
++#include "fetch.h"
++#include "proc.h"
++#include "type.h"
++#include "value.h"
++#include "arch.h"
++#include "expr.h"
++
++enum fetch_method {
++	FETCH_NOP,
++	FETCH_STACK,
++	FETCH_GAR,
++	FETCH_FAR,
++};
++
++struct small_struct_data_t {
++	char fixed_member;
++	char float_member;
++	bool first_member_is_float;
++};
++
++struct fetch_context {
++	struct user_pt_regs gregs;
++	struct user_fp_state fpregs;
++	unsigned int ngr;
++	unsigned int nfr;
++	arch_addr_t stack_pointer;
++	arch_addr_t retval;
++	bool in_varargs;
++};
++
++static int
++loongarch_read_gregs(struct Process *proc, struct user_pt_regs *regs)
++{
++	*regs = (struct user_pt_regs) {};
++	struct iovec iovec;
++	iovec.iov_base = regs;
++	iovec.iov_len = sizeof *regs;
++	return ptrace(PTRACE_GETREGSET, proc->pid, NT_PRSTATUS, &iovec) < 0
++		? -1 : 0;
++}
++
++static int
++loongarch_read_fregs(struct Process *proc, struct user_fp_state  *regs)
++{
++	*regs = (struct user_fp_state) {};
++	struct iovec iovec;
++	iovec.iov_base = regs;
++	iovec.iov_len = sizeof *regs;
++	return ptrace(PTRACE_GETREGSET, proc->pid, NT_FPREGSET, &iovec) < 0
++		? -1 : 0;
++}
++
++static void
++get_array_member(struct arg_type_info *info,
++		 struct small_struct_data_t *small_struct)
++{
++	long len;
++	struct arg_type_info *array_type = info->u.array_info.elt_type;
++	expr_eval_constant(info->u.array_info.length, &len);
++	switch (array_type->type) {
++	case ARGTYPE_STRUCT:
++		break;
++	case ARGTYPE_FLOAT:
++	case ARGTYPE_DOUBLE:
++		small_struct->float_member += len;
++		break;
++	default:
++		if (small_struct->float_member > 0
++		    && small_struct->fixed_member == 0)
++			small_struct->first_member_is_float = true;
++		small_struct->fixed_member += len;
++		break;
++	}
++}
++
++static void
++get_struct_member(struct arg_type_info *info,
++		  struct small_struct_data_t *small_struct)
++{
++	for (size_t i = 0; i < type_struct_size(info); i++) {
++		struct arg_type_info *field = type_struct_get(info, i);
++		assert(field != NULL);
++		switch (field->type) {
++		case ARGTYPE_STRUCT:
++			get_struct_member(field, small_struct);
++			break;
++		case ARGTYPE_ARRAY:
++			get_array_member(field, small_struct);
++			break;
++		case ARGTYPE_FLOAT:
++		case ARGTYPE_DOUBLE:
++			small_struct->float_member++;
++			break;
++		default:
++			if (small_struct->float_member > 0
++			    && small_struct->fixed_member == 0)
++				small_struct->first_member_is_float = true;
++			small_struct->fixed_member++;
++			break;
++		}
++	}
++}
++
++static int
++context_init(struct fetch_context *context, struct Process *proc,
++	     struct arg_type_info *ret_info)
++{
++	if (loongarch_read_gregs(proc, &context->gregs) < 0
++	    || loongarch_read_fregs(proc, &context->fpregs) < 0)
++		return -1;
++
++	context->ngr = ARG_GAR_START;
++	context->nfr = ARG_FAR_START;
++	context->stack_pointer = (arch_addr_t)context->gregs.regs[3];
++	context->retval = 0;
++	context->in_varargs = false;
++
++	return 0;
++}
++
++static int
++fetch_gar(struct fetch_context *context, struct value *value,
++	  size_t offset, size_t len)
++{
++	unsigned char *buf = value_get_raw_data(value);
++	unsigned long u = context->gregs.regs[context->ngr++];
++	memcpy(buf + offset, &u, len);
++
++	return 0;
++}
++
++static int
++fetch_far(struct fetch_context *context, struct value *value,
++	  size_t offset, size_t len)
++{
++	unsigned char *buf = value_get_raw_data(value);
++	uint64_t u = context->fpregs.fpr[context->nfr++];
++	memcpy(buf + offset, &u, len);
++
++	return 0;
++}
++
++static int
++fetch_stack(struct fetch_context *context, struct value *value,
++	    size_t align, size_t sz)
++{
++	if (align < 8)
++		align = 8;
++	size_t amount = ((sz + align - 1) / align) * align;
++	uintptr_t sp = (uintptr_t) context->stack_pointer;
++	sp = ((sp + align - 1) / align) * align;
++
++	value_in_inferior(value, (arch_addr_t) sp);
++
++	sp += amount;
++	context->stack_pointer = (arch_addr_t) sp;
++
++	return 0;
++}
++
++static void
++classify_struct_argument(struct fetch_context const *context,
++			 struct small_struct_data_t small_struct,
++			 enum fetch_method methods[], size_t sz)
++{
++	/* "big" structs are dealt with in arch_fetch_arg_init(). */
++	if (RLEN < sz && sz <= 2 * RLEN) {
++		/* Only fixed-point members, the argument is passed in a
++		 * pair of available GAR,with the low-order bits in the
++		 *  lower-numbered GAR and the high-order bits in the
++		 *  higher-numbered GAR. If only one GAR is available, the
++		 *  low-order bits are in the GAR and the high-order bits
++		 *  are on the stack, and passed on the stack if no GAR is
++		 *  available. */
++		if (small_struct.fixed_member > 0
++		    && small_struct.float_member == 0) {
++			if (context->ngr < ARG_GAR_END)
++				methods[0] = methods[1] = FETCH_GAR;
++			else if (context->ngr == ARG_GAR_END) {
++				methods[0] = FETCH_GAR;
++				methods[1] = FETCH_STACK;
++			}
++			else
++				methods[0] = methods[1] = FETCH_STACK;
++		} else if (small_struct.fixed_member == 0
++			   && small_struct.float_member > 0) {
++			/* The structure has one long double member or one
++			 * double member and two adjacent float members or
++			 * 3-4 float members. The argument is passed in a
++			 * pair of available GAR, with the low-order bits
++			 * in the lower-numbered GAR and the high-order bits
++			 * in the higher-numbered GAR. If only one GAR is
++			 * available, the low-order bits are in the GAR and
++			 * the high-order bits are on the stack, and passed
++			 * on the stack if no GAR is available. */
++			if (small_struct.float_member > 2) {
++				if (context->ngr < ARG_GAR_END)
++					methods[0] = methods[1] = FETCH_GAR;
++				else if (context->ngr == ARG_GAR_END) {
++					methods[0] = FETCH_GAR;
++					methods[1] = FETCH_STACK;
++				}
++				else
++					methods[0] = methods[1] = FETCH_STACK;
++			}
++			if (small_struct.float_member == 1) {
++				if (context->ngr < ARG_GAR_END)
++					methods[0] = methods[1] = FETCH_GAR;
++				else if (context->ngr == ARG_GAR_END) {
++					methods[0] = FETCH_GAR;
++					methods[1] = FETCH_STACK;
++				}
++				else
++					methods[0] = methods[1] = FETCH_STACK;
++			} else if (small_struct.float_member == 2) {
++				/* The structure with two double members is
++				 * passed in a pair of available FARs. If no a
++				 * pair of available FARs, it’s passed in GARs.
++				 * If only one GAR is available, the low-order
++				 * bits are in the GAR and the high-order bits
++				 * are on the stack, and passed on the stack if
++				 * no GAR available, structure with one double
++				 * member and one float member is same. */
++				if (context->nfr < ARG_FAR_END
++				    && !context->in_varargs) {
++					methods[0] = methods[1] = FETCH_FAR;
++				} else {
++					if (context->ngr < ARG_GAR_END)
++						methods[0] = methods[1] = FETCH_GAR;
++					else if (context->ngr == ARG_GAR_END) {
++						methods[0] = FETCH_GAR;
++						methods[1] = FETCH_STACK;
++					}
++					else
++						methods[0] = methods[1] = FETCH_STACK;
++				}
++			}
++		} else if (small_struct.fixed_member > 0
++			   && small_struct.float_member > 0) {
++			/* The structure has one floating-point member and
++			 * one fixed-point member. If one FAR and one GAR
++			 * are available, the floating-point member of the
++			 * structure is passed in the FAR, and the integer
++			 * member of the structure is passed in the GAR;
++			 * If no floating-point registers but two GARs are
++			 * available, it’s passed in the two GARs; If only
++			 * one GAR is available, the low-order bits are in
++			 * the GAR and the high-order bits are on the stack;
++			 * it’s passed on the stack if no GAR is available. */
++			if (small_struct.fixed_member == 1
++			    && small_struct.float_member == 1) {
++				if (context->nfr <= ARG_FAR_END
++				    && context->nfr <= ARG_FAR_END
++				    && !context->in_varargs) {
++					if (small_struct.first_member_is_float) {
++						methods[0] = FETCH_FAR;
++						methods[1] = FETCH_GAR;
++					} else {
++						methods[0] = FETCH_GAR;
++						methods[1] = FETCH_FAR;
++					}
++				} else {
++					if (context->ngr < ARG_GAR_END)
++						methods[0] = methods[1] = FETCH_GAR;
++					else if (context->ngr == ARG_GAR_END) {
++						methods[0] = FETCH_GAR;
++						methods[1] = FETCH_STACK;
++					}
++					else
++						methods[0] = methods[1] = FETCH_STACK;
++				}
++			} else {
++				/* Others, the argument is passed in a pair of
++				 * available GAR, with the low-order bits in the
++				 * lower-numbered GAR and the high-order bits in
++				 * the higher-numbered GAR. If only one GAR is
++				 * available, the low-order bits are in the GAR
++				 * and the high-order bits are on the stack, and
++				 * passed on the stack if no GAR is available. */
++				if (context->ngr < ARG_GAR_END) {
++					methods[0] = methods[1] = FETCH_GAR;
++				}
++				else if (context->ngr == ARG_GAR_END) {
++					methods[0] = FETCH_GAR;
++					methods[1] = FETCH_STACK;
++				}
++				else
++					methods[0] = methods[1] = FETCH_STACK;
++			}
++		}
++	} else if (sz <= RLEN) {
++		/* The structure has only fixed-point members. If there
++		 * is an available GAR, the structure is passed through
++		 * the GAR by value passing; If no GAR is available,
++		 * it’s passed on the stack. */
++		if (small_struct.fixed_member > 0
++		    && small_struct.float_member == 0) {
++			if (context->ngr <= ARG_GAR_END)
++				methods[0] =  FETCH_GAR;
++			else
++				methods[0] = FETCH_STACK;
++		} else if (small_struct.fixed_member == 0
++			   && small_struct.float_member > 0) {
++			/* One floating-point member. The argument is passed
++			 * in a FAR; If no FAR is available, the value is
++			 * passed in a GAR; if no GAR is available, the value
++			 * is passed on the stack. */
++			if (small_struct.float_member == 1) {
++				if (context->nfr <= ARG_FAR_END
++				    && !context->in_varargs) {
++					methods[0] = FETCH_FAR;
++				} else {
++					if (context->ngr <= ARG_GAR_END)
++						methods[0] =  FETCH_GAR;
++					else
++						methods[0] = FETCH_STACK;
++				}
++			} else if (small_struct.float_member == 2) {
++				/* Two floating-point members. argument is
++				 * passed in a pair of available FAR, with
++				 * the low-order float member bits in the
++				 * lower-numbered FAR and the high-order
++				 * float member bits in the higher-numbered
++				 * FAR. If the number of available FAR is
++				 * less than 2, it’s passed in a GAR, and
++				 * passed on stack if no GAR available. */
++				if (context->nfr < ARG_FAR_END
++				    && !context->in_varargs) {
++					methods[0] = methods[1] = FETCH_FAR;
++				} else {
++					if (context->ngr <= ARG_GAR_END)
++						methods[0] =  FETCH_GAR;
++					else
++						methods[0] = FETCH_STACK;
++				}
++			}
++		} else if (small_struct.fixed_member > 0
++			 && small_struct.float_member == 1) {
++			/* Multiple fixed-point members. If there are
++			 * available GAR, the structure passed in a GAR,
++			 * and passed on the stack if no GAR is available. */
++			if (small_struct.fixed_member > 1) {
++				if (context->ngr <= ARG_GAR_END)
++					methods[0] =  FETCH_GAR;
++				else
++					methods[0] = FETCH_STACK;
++			} else if (small_struct.fixed_member == 1) {
++				/* Only one fixed-point member. If one FAR
++				 * and one GAR are available, floating-point
++				 * member of the structure is passed in FAR,
++				 * and the integer member is passed in GAR;
++				 * If no floating-point register but one GAR
++				 * is available, it’s passed in GAR; If no
++				 * GAR is available, it’s passed on stack. */
++				if (context->nfr <= ARG_FAR_END
++				    && context->nfr <= ARG_FAR_END
++				    && !context->in_varargs) {
++					if (small_struct.first_member_is_float) {
++						methods[0] = FETCH_FAR;
++						methods[1] = FETCH_GAR;
++					} else {
++						methods[0] = FETCH_FAR;
++						methods[1] = FETCH_GAR;
++					}
++				} else {
++					if (context->ngr <= ARG_GAR_END)
++						methods[0] =  FETCH_GAR;
++					else
++						methods[0] = FETCH_STACK;
++				}
++			}
++		}
++	}
++}
++
++static int
++classify_argument(struct fetch_context const *context,
++		  struct Process *proc, struct arg_type_info *info,
++		  enum fetch_method methods[])
++{
++	struct small_struct_data_t  small_struct = {0, 0, false};
++	size_t sz = type_sizeof(proc, info);
++	if (sz == (size_t) -1)
++		return -1;
++
++	switch (info->type) {
++	case ARGTYPE_VOID:
++		return -1;
++
++	case ARGTYPE_STRUCT:
++		get_struct_member (info, &small_struct);
++		classify_struct_argument(context, small_struct, methods, sz);
++		return 0;
++	case ARGTYPE_POINTER:
++	case ARGTYPE_ARRAY:
++	case ARGTYPE_INT:
++	case ARGTYPE_UINT:
++	case ARGTYPE_LONG:
++	case ARGTYPE_ULONG:
++	case ARGTYPE_CHAR:
++	case ARGTYPE_SHORT:
++	case ARGTYPE_USHORT:
++		if (context->ngr <= ARG_GAR_END)
++			methods[0] = FETCH_GAR;
++		else
++			methods[0] = FETCH_STACK;
++		return 0;
++	case ARGTYPE_FLOAT:
++	case ARGTYPE_DOUBLE:
++		if (context->nfr <= ARG_FAR_END && !context->in_varargs)
++			methods[0] = FETCH_FAR;
++		else if (context->ngr <= ARG_GAR_END)
++			methods[0] = FETCH_GAR;
++		else
++			methods[0] = FETCH_STACK;
++		return 0;
++	}
++
++	assert(!"Failed to classify argument.");
++	abort();
++}
++
++
++static int
++classify_return_value(struct fetch_context const *context,
++		      struct Process *proc, struct arg_type_info *info,
++		      enum fetch_method methods[])
++{
++	struct small_struct_data_t  small_struct = {0, 0, false};
++	size_t sz = type_sizeof(proc, info);
++	if (sz == (size_t) -1)
++		return -1;
++
++	switch (info->type) {
++	case ARGTYPE_VOID:
++		return 0;
++	case ARGTYPE_STRUCT:
++		get_struct_member (info, &small_struct);
++		/* sz <= RLEN */
++		if (sz <= RLEN) {
++			/* The structure has only fixed-point members.
++			 * passed on $v0. */
++			if (small_struct.fixed_member > 0
++			    && small_struct.float_member == 0)
++				methods[0] =  FETCH_GAR;
++			/* The structure has only floating-point members. */
++			else if (small_struct.fixed_member == 0
++				 && small_struct.float_member > 0) {
++				/* One floating-point member. passed on $fv0 */
++				if (small_struct.float_member == 1)
++					methods[0] =  FETCH_FAR;
++				/* Two floating-point members. passed on $fv0
++				 * and $fv1 */
++				else if (small_struct.float_member == 2) {
++					methods[0] =  FETCH_FAR;
++					methods[1] =  FETCH_FAR;
++				}
++			}
++			/* The structure has both fixed-point and floating
++			 * point members */
++			else if (small_struct.fixed_member > 0
++				 && small_struct.float_member == 1) {
++				/* Multiple fixed-point members. passed on
++				 * $v0. */
++				if (small_struct.fixed_member > 1)
++					methods[0] =  FETCH_GAR;
++				/* Only one fixed-point member. float-point
++				 * member is passed on $fv0, fixed-point member
++				 * is passed on $v0. */
++				else if (small_struct.fixed_member == 1) {
++					if (small_struct.first_member_is_float) {
++						methods[0] =  FETCH_FAR;
++						methods[1] =  FETCH_GAR;
++					} else {
++						methods[0] =  FETCH_GAR;
++						methods[1] =  FETCH_FAR;
++					}
++				}
++			}
++		}
++		/* RLEN < sz && sz <= 2 * RLEN */
++		else if (RLEN < sz && sz <= 2 * RLEN) {
++			/* Only fixed-point members, passed on $v0 and $v1 */
++			if (small_struct.fixed_member > 0
++			    && small_struct.float_member == 0) {
++				methods[0] =  FETCH_GAR;
++				methods[1] =  FETCH_GAR;
++			}
++			/* Only floating-point members. */
++			else if (small_struct.fixed_member == 0
++				 && small_struct.float_member > 0) {
++				/* The structure has one long double member
++				 * or one double member and two adjacent
++				 * float members or 3-4 float members. passed
++				 * on $v0 and $v1. */
++				if (small_struct.float_member == 1
++				    || small_struct.float_member > 2) {
++					methods[0] =  FETCH_GAR;
++					methods[1] =  FETCH_GAR;
++				}
++				/* The structure two double member, passed on
++				 * $fv0 and $fv1. */
++				if (small_struct.float_member == 2) {
++					methods[0] =  FETCH_FAR;
++					methods[1] =  FETCH_FAR;
++				}
++			}
++			/* Both fixed-point and floating-point members. */
++			else if (small_struct.fixed_member > 0
++				 && small_struct.float_member > 0) {
++				/* The structure has one floating-point member
++				 * and one fixed-point member. float-point
++				 * member is passed on $fv0, fixed-point member
++				 * is passed on $v0.*/
++				if (small_struct.fixed_member == 1
++				    && small_struct.float_member == 1) {
++					if (small_struct.first_member_is_float) {
++						methods[0] =  FETCH_FAR;
++						methods[1] =  FETCH_GAR;
++					} else {
++						methods[0] =  FETCH_GAR;
++						methods[1] =  FETCH_FAR;
++					}
++				}
++				/* Others, passed on $v0 and $v1. */
++				else {
++					methods[0] =  FETCH_GAR;
++					methods[1] =  FETCH_GAR;
++				}
++			}
++		}
++		return 0;
++	case ARGTYPE_POINTER:
++	case ARGTYPE_ARRAY:
++	case ARGTYPE_INT:
++	case ARGTYPE_UINT:
++	case ARGTYPE_LONG:
++	case ARGTYPE_ULONG:
++	case ARGTYPE_CHAR:
++	case ARGTYPE_SHORT:
++	case ARGTYPE_USHORT:
++		methods[0] = FETCH_GAR;
++		return 0;
++	case ARGTYPE_FLOAT:
++	case ARGTYPE_DOUBLE:
++		methods[0] = FETCH_FAR;
++		return 0;
++	}
++
++	assert(!"Failed to classify retval.");
++	abort();
++}
++
++static int
++fetch_argument(struct fetch_context *context,
++	  struct Process *proc, struct arg_type_info *info,
++	  struct value *value, enum fetch_method method,
++	  size_t offset, size_t len)
++{
++	switch (method) {
++	case FETCH_NOP:
++		return 0;
++
++	case FETCH_STACK:
++		return fetch_stack(context, value, RLEN, RLEN);
++
++	case FETCH_GAR:
++		return fetch_gar(context, value, offset, len);
++
++	case FETCH_FAR:
++		return fetch_far(context, value, offset, len);
++
++	}
++
++	assert(!"Don't know how to fetch argument.");
++	abort();
++}
++
++static int
++fetch_return_value(struct fetch_context *context, struct Process *proc,
++		   struct arg_type_info *info, struct value *value,
++		   enum fetch_method method, size_t offset, size_t len)
++{
++
++	switch (method) {
++	case FETCH_NOP:
++		return 0;
++	case FETCH_STACK:
++		return 0;
++
++	case FETCH_GAR:
++		return fetch_gar(context, value, offset, len);
++
++	case FETCH_FAR:
++		return fetch_far(context, value, offset, len);
++
++	}
++
++	assert(!"Don't know how to fetch retval.");
++	abort();
++}
++
++struct fetch_context *
++arch_fetch_arg_clone(struct Process *proc, struct fetch_context *context)
++{
++	struct fetch_context *ret = malloc(sizeof(*ret));
++
++	if (ret == NULL)
++		return NULL;
++	return memcpy(ret, context, sizeof(*ret));
++}
++
++struct fetch_context *
++arch_fetch_arg_init(enum tof type, struct Process *proc,
++		    struct arg_type_info *ret_info)
++{
++	struct fetch_context *context = malloc(sizeof *context);
++	if (context == NULL || context_init(context, proc, ret_info) < 0) {
++fail:
++		free(context);
++		return NULL;
++	}
++
++	size_t sz = type_sizeof(proc, ret_info);
++	if (sz == (size_t) -1)
++		goto fail;
++
++	if (sz > 2 * RLEN) {
++		/* The reference of the return value is stored in GAR a0
++		 * if the size of return value is larger than 2*GRLEN bits */
++		context->retval = (arch_addr_t) context->gregs.regs[context->ngr++];
++	}
++
++	return context;
++}
++
++int
++arch_fetch_arg_next(struct fetch_context *context, enum tof type,
++		    struct Process *proc, struct arg_type_info *info,
++		    struct value *value)
++{
++	enum fetch_method methods[2] = {FETCH_NOP, FETCH_NOP};
++	size_t len = RLEN;
++	size_t sz = type_sizeof(proc, info);
++	if (sz == (size_t) -1)
++		return -1;
++	if (sz > 2 * RLEN) {
++		sz = 8;
++		value_pass_by_reference(value);
++		if (context->ngr <= ARG_GAR_END)
++			methods[0] =  FETCH_GAR;
++		else
++			methods[0] = FETCH_STACK;
++	} else {
++		if (classify_argument(context, proc, info, methods) != 0)
++			return -1;
++	}
++
++	if (value_reserve(value, sz) == NULL)
++		return -1;
++
++	if (methods[1] == FETCH_NOP) {
++		fetch_argument(context, proc, info, value, methods[0], 0, RLEN);
++	} else {
++		if (sz <= RLEN)
++			len = RLEN / 2;
++
++		fetch_argument(context, proc, info, value, methods[0], 0, len);
++		fetch_argument(context, proc, info, value, methods[1], len, len);
++	}
++
++	return 0;
++}
++
++int
++arch_fetch_retval(struct fetch_context *context, enum tof type,
++		  struct Process *proc, struct arg_type_info *info,
++		  struct value *value)
++{
++	size_t len = RLEN;
++	size_t sz = type_sizeof(proc, info);
++	if (sz == (size_t) -1)
++		return -1;
++
++	if (type == LT_TOF_FUNCTIONR) {
++		enum fetch_method methods[2] = {FETCH_NOP, FETCH_NOP};
++		if (context->retval != 0) {
++			/* return value is larger than 2*GRLEN
++			 * was extracted when in fetch init. */
++			value_in_inferior(value, context->retval);
++			return 0;
++		}
++
++		if (context_init(context, proc, info) < 0)
++			return -1;
++
++		if (classify_return_value(context, proc, info, methods) != 0)
++			return -1;
++
++		if (value_reserve(value, sz) == NULL)
++			return -1;
++
++		if (methods[1] == FETCH_NOP) {
++			fetch_return_value(context, proc, info, value,
++					    methods[0], 0, RLEN);
++		} else {
++			if (sz <= RLEN)
++				len = RLEN / 2;
++
++			fetch_return_value(context, proc, info, value,
++					   methods[0], 0, len);
++			fetch_return_value(context, proc, info, value,
++					    methods[1], len, len);
++		}
++
++	}
++	/* SYSCALLR,return value in GAR a0 */
++	else if (type == LT_TOF_SYSCALLR)
++		value_in_inferior(value, (arch_addr_t) context->gregs.regs[4]);
++
++	return 0;
++}
++
++void
++arch_fetch_arg_done(struct fetch_context *context)
++{
++	if (context != NULL)
++		free(context);
++}
++
++int
++arch_fetch_param_pack_start(struct fetch_context *context,
++			    enum param_pack_flavor ppflavor)
++{
++	if (ppflavor == PARAM_PACK_VARARGS)
++		context->in_varargs = true;
++	return 0;
++}
++
++void
++arch_fetch_param_pack_end(struct fetch_context *context)
++{
++	context->in_varargs = false;
++}
+diff --git a/sysdeps/linux-gnu/loongarch/plt.c b/sysdeps/linux-gnu/loongarch/plt.c
+new file mode 100644
+index 0000000..d80b769
+--- /dev/null
++++ b/sysdeps/linux-gnu/loongarch/plt.c
+@@ -0,0 +1,58 @@
++/*
++ * This file is part of ltrace.
++ * Copyright (C) 2022-2023 Loongson Technology Corporation Limited.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++#include <gelf.h>
++#include <stdbool.h>
++#include "backend.h"
++#include "proc.h"
++#include "library.h"
++#include "ltrace-elf.h"
++#include "trace.h"
++
++arch_addr_t
++sym2addr(struct Process *proc, struct library_symbol *sym)
++{
++	return sym->enter_addr;
++}
++
++GElf_Addr
++arch_plt_sym_val(struct ltelf *lte, size_t ndx, GElf_Rela *rela)
++{
++	return lte->plt_addr + 32 + ndx * 16;
++}
++
++
++//enum plt_status
++//arch_elf_add_plt_entry(struct Process *proc, struct ltelf *lte,
++//		       const char *a_name, GElf_Rela *rela, size_t ndx,
++//		       struct library_symbol **ret)
++//{
++//#ifdef R_LARCH_IRELATIVE
++//	bool irelative = GELF_R_TYPE(rela->r_info) == R_LARCH_IRELATIVE;
++//#else
++//	bool irelative = false;
++//#endif
++//
++//	if (irelative)
++//		return linux_elf_add_plt_entry_irelative(proc, lte, rela,
++//							 ndx, ret);
++//
++//	return plt_default;
++//}
+diff --git a/sysdeps/linux-gnu/loongarch/ptrace.h b/sysdeps/linux-gnu/loongarch/ptrace.h
+new file mode 100644
+index 0000000..3685186
+--- /dev/null
++++ b/sysdeps/linux-gnu/loongarch/ptrace.h
+@@ -0,0 +1,23 @@
++/*
++ * This file is part of ltrace.
++ * Copyright (C) 2022-2023 Loongson Technology Corporation Limited.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++#include <sys/ptrace.h>
++#include <asm/ptrace.h>
++#include <sys/user.h>
+diff --git a/sysdeps/linux-gnu/loongarch/regs.c b/sysdeps/linux-gnu/loongarch/regs.c
+new file mode 100644
+index 0000000..fc5c23c
+--- /dev/null
++++ b/sysdeps/linux-gnu/loongarch/regs.c
+@@ -0,0 +1,61 @@
++/*
++ * This file is part of ltrace.
++ * Copyright (C) 2022-2023 Loongson Technology Corporation Limited.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++#include "config.h"
++#include <stddef.h>
++#include <sys/types.h>
++#include <sys/ptrace.h>
++#include <asm/ptrace.h>
++#include <linux/uio.h>
++#include "proc.h"
++#include "common.h"
++#include "backend.h"
++
++#if (!defined(PTRACE_PEEKUSER) && defined(PTRACE_PEEKUSR))
++# define PTRACE_PEEKUSER PTRACE_PEEKUSR
++#endif
++
++#if (!defined(PTRACE_POKEUSER) && defined(PTRACE_POKEUSR))
++# define PTRACE_POKEUSER PTRACE_POKEUSR
++#endif
++
++void *
++get_instruction_pointer(struct Process *proc)
++{
++	return (void *)ptrace(PTRACE_PEEKUSER, proc->pid, PC, 0);
++}
++
++void
++set_instruction_pointer(struct Process *proc, void *addr)
++{
++	ptrace(PTRACE_POKEUSER, proc->pid, PC, addr);
++}
++
++void *
++get_stack_pointer(struct Process *proc)
++{
++	return (void *)ptrace(PTRACE_PEEKUSER, proc->pid, GPR_BASE + 3, 0);
++}
++
++void *
++get_return_addr(struct Process *proc, void *stack_pointer)
++{
++	return (void *)ptrace(PTRACE_PEEKUSER, proc->pid, GPR_BASE + 1, 0);
++}
+diff --git a/sysdeps/linux-gnu/loongarch/signalent.h b/sysdeps/linux-gnu/loongarch/signalent.h
+new file mode 100644
+index 0000000..4c0a466
+--- /dev/null
++++ b/sysdeps/linux-gnu/loongarch/signalent.h
+@@ -0,0 +1,52 @@
++/*
++ * This file is part of ltrace.
++ * Copyright (C) 2022-2023 Loongson Technology Corporation Limited.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++	"SIG_0",           /* 0 */
++	"SIGHUP",          /* 1 */
++	"SIGINT",          /* 2 */
++	"SIGQUIT",         /* 3 */
++	"SIGILL",          /* 4 */
++	"SIGTRAP",         /* 5 */
++	"SIGABRT",         /* 6 */
++	"SIGBUS",          /* 7 */
++	"SIGFPE",          /* 8 */
++	"SIGKILL",         /* 9 */
++	"SIGUSR1",         /* 10 */
++	"SIGSEGV",         /* 11 */
++	"SIGUSR2",         /* 12 */
++	"SIGPIPE",         /* 13 */
++	"SIGALRM",         /* 14 */
++	"SIGTERM",         /* 15 */
++	"SIGSTKFLT",       /* 16 */
++	"SIGCHLD",         /* 17 */
++	"SIGCONT",         /* 18 */
++	"SIGSTOP",         /* 19 */
++	"SIGTSTP",         /* 20 */
++	"SIGTTIN",         /* 21 */
++	"SIGTTOU",         /* 22 */
++	"SIGURG",          /* 23 */
++	"SIGXCPU",         /* 24 */
++	"SIGXFSZ",         /* 25 */
++	"SIGVTALRM",       /* 26 */
++	"SIGPROF",         /* 27 */
++	"SIGWINCH",        /* 28 */
++	"SIGIO",           /* 29 */
++	"SIGPWR",          /* 30 */
++	"SIGSYS",          /* 31 */
+diff --git a/sysdeps/linux-gnu/loongarch/syscallent.h b/sysdeps/linux-gnu/loongarch/syscallent.h
+new file mode 100644
+index 0000000..4d50cad
+--- /dev/null
++++ b/sysdeps/linux-gnu/loongarch/syscallent.h
+@@ -0,0 +1,471 @@
++/*
++ * This file is part of ltrace.
++ * Copyright (C) 2022-2023 Loongson Technology Corporation Limited.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++	"io_setup",                        /* 0 */
++	"io_destroy",                      /* 1 */
++	"io_submit",                       /* 2 */
++	"io_cancel",                       /* 3 */
++	"io_getevents",                    /* 4 */
++	"setxattr",                        /* 5 */
++	"lsetxattr",                       /* 6 */
++	"fsetxattr",                       /* 7 */
++	"getxattr",                        /* 8 */
++	"lgetxattr",                       /* 9 */
++	"fgetxattr",                       /* 10 */
++	"listxattr",                       /* 11 */
++	"llistxattr",                      /* 12 */
++	"flistxattr",                      /* 13 */
++	"removexattr",                     /* 14 */
++	"lremovexattr",                    /* 15 */
++	"fremovexattr",                    /* 16 */
++	"getcwd",                          /* 17 */
++	"lookup_dcookie",                  /* 18 */
++	"eventfd2",                        /* 19 */
++	"epoll_create1",                   /* 20 */
++	"epoll_ctl",                       /* 21 */
++	"epoll_pwait",                     /* 22 */
++	"dup",                             /* 23 */
++	"dup3",                            /* 24 */
++	"fcntl",                           /* 25 */
++	"inotify_init1",                   /* 26 */
++	"inotify_add_watch",               /* 27 */
++	"inotify_rm_watch",                /* 28 */
++	"ioctl",                           /* 29 */
++	"ioprio_set",                      /* 30 */
++	"ioprio_get",                      /* 31 */
++	"flock",                           /* 32 */
++	"mknodat",                         /* 33 */
++	"mkdirat",                         /* 34 */
++	"unlinkat",                        /* 35 */
++	"symlinkat",                       /* 36 */
++	"linkat",                          /* 37 */
++	"renameat",                        /* 38 */
++	"umount2",                         /* 39 */
++	"mount",                           /* 40 */
++	"pivot_root",                      /* 41 */
++	"nfsservctl",                      /* 42 */
++	"statfs",                          /* 43 */
++	"fstatfs",                         /* 44 */
++	"truncate",                        /* 45 */
++	"ftruncate",                       /* 46 */
++	"fallocate",                       /* 47 */
++	"faccessat",                       /* 48 */
++	"chdir",                           /* 49 */
++	"fchdir",                          /* 50 */
++	"chroot",                          /* 51 */
++	"fchmod",                          /* 52 */
++	"fchmodat",                        /* 53 */
++	"fchownat",                        /* 54 */
++	"fchown",                          /* 55 */
++	"openat",                          /* 56 */
++	"close",                           /* 57 */
++	"vhangup",                         /* 58 */
++	"pipe2",                           /* 59 */
++	"quotactl",                        /* 60 */
++	"getdents64",                      /* 61 */
++	"lseek",                           /* 62 */
++	"read",                            /* 63 */
++	"write",                           /* 64 */
++	"readv",                           /* 65 */
++	"writev",                          /* 66 */
++	"pread64",                         /* 67 */
++	"pwrite64",                        /* 68 */
++	"preadv",                          /* 69 */
++	"pwritev",                         /* 70 */
++	"sendfile64",                      /* 71 */
++	"pselect6",                        /* 72 */
++	"ppoll",                           /* 73 */
++	"signalfd4",                       /* 74 */
++	"vmsplice",                        /* 75 */
++	"splice",                          /* 76 */
++	"tee",                             /* 77 */
++	"readlinkat",                      /* 78 */
++	"79",                              /* 79 */
++	"80",                              /* 80 */
++	"sync",                            /* 81 */
++	"fsync",                           /* 82 */
++	"fdatasync",                       /* 83 */
++	"sync_file_range",                 /* 84 */
++	"timerfd_create",                  /* 85 */
++	"timerfd_settime",                 /* 86 */
++	"timerfd_gettime",                 /* 87 */
++	"utimensat",                       /* 88 */
++	"acct",                            /* 89 */
++	"capget",                          /* 90 */
++	"capset",                          /* 91 */
++	"personality",                     /* 92 */
++	"exit",                            /* 93 */
++	"exit_group",                      /* 94 */
++	"waitid",                          /* 95 */
++	"set_tid_address",                 /* 96 */
++	"unshare",                         /* 97 */
++	"futex",                           /* 98 */
++	"set_robust_list",                 /* 99 */
++	"get_robust_list",                 /* 100 */
++	"nanosleep",                       /* 101 */
++	"getitimer",                       /* 102 */
++	"setitimer",                       /* 103 */
++	"kexec_load",                      /* 104 */
++	"init_module",                     /* 105 */
++	"delete_module",                   /* 106 */
++	"timer_create",                    /* 107 */
++	"timer_gettime",                   /* 108 */
++	"timer_getoverrun",                /* 109 */
++	"timer_settime",                   /* 110 */
++	"timer_delete",                    /* 111 */
++	"clock_settime",                   /* 112 */
++	"clock_gettime",                   /* 113 */
++	"clock_getres",                    /* 114 */
++	"clock_nanosleep",                 /* 115 */
++	"syslog",                          /* 116 */
++	"ptrace",                          /* 117 */
++	"sched_setparam",                  /* 118 */
++	"sched_setscheduler",              /* 119 */
++	"sched_getscheduler",              /* 120 */
++	"sched_getparam",                  /* 121 */
++	"sched_setaffinity",               /* 122 */
++	"sched_getaffinity",               /* 123 */
++	"sched_yield",                     /* 124 */
++	"sched_get_priority_max",          /* 125 */
++	"sched_get_priority_min",          /* 126 */
++	"sched_rr_get_interval",           /* 127 */
++	"restart_syscall",                 /* 128 */
++	"kill",                            /* 129 */
++	"tkill",                           /* 130 */
++	"tgkill",                          /* 131 */
++	"sigaltstack",                     /* 132 */
++	"rt_sigsuspend",                   /* 133 */
++	"rt_sigaction",                    /* 134 */
++	"rt_sigprocmask",                  /* 135 */
++	"rt_sigpending",                   /* 136 */
++	"rt_sigtimedwait",                 /* 137 */
++	"rt_sigqueueinfo",                 /* 138 */
++	"rt_sigreturn",                    /* 139 */
++	"setpriority",                     /* 140 */
++	"getpriority",                     /* 141 */
++	"reboot",                          /* 142 */
++	"setregid",                        /* 143 */
++	"setgid",                          /* 144 */
++	"setreuid",                        /* 145 */
++	"setuid",                          /* 146 */
++	"setresuid",                       /* 147 */
++	"getresuid",                       /* 148 */
++	"setresgid",                       /* 149 */
++	"getresgid",                       /* 150 */
++	"setfsuid",                        /* 151 */
++	"setfsgid",                        /* 152 */
++	"times",                           /* 153 */
++	"setpgid",                         /* 154 */
++	"getpgid",                         /* 155 */
++	"getsid",                          /* 156 */
++	"setsid",                          /* 157 */
++	"getgroups",                       /* 158 */
++	"setgroups",                       /* 159 */
++	"uname",                           /* 160 */
++	"sethostname",                     /* 161 */
++	"setdomainname",                   /* 162 */
++	"getrlimit",                       /* 163 */
++	"setrlimit",                       /* 164 */
++	"getrusage",                       /* 165 */
++	"umask",                           /* 166 */
++	"prctl",                           /* 167 */
++	"getcpu",                          /* 168 */
++	"gettimeofday",                    /* 169 */
++	"settimeofday",                    /* 170 */
++	"adjtimex",                        /* 171 */
++	"getpid",                          /* 172 */
++	"getppid",                         /* 173 */
++	"getuid",                          /* 174 */
++	"geteuid",                         /* 175 */
++	"getgid",                          /* 176 */
++	"getegid",                         /* 177 */
++	"gettid",                          /* 178 */
++	"sysinfo",                         /* 179 */
++	"mq_open",                         /* 180 */
++	"mq_unlink",                       /* 181 */
++	"mq_timedsend",                    /* 182 */
++	"mq_timedreceive",                 /* 183 */
++	"mq_notify",                       /* 184 */
++	"mq_getsetattr",                   /* 185 */
++	"msgget",                          /* 186 */
++	"msgctl",                          /* 187 */
++	"msgrcv",                          /* 188 */
++	"msgsnd",                          /* 189 */
++	"semget",                          /* 190 */
++	"semctl",                          /* 191 */
++	"semtimedop",                      /* 192 */
++	"semop",                           /* 193 */
++	"shmget",                          /* 194 */
++	"shmctl",                          /* 195 */
++	"shmat",                           /* 196 */
++	"shmdt",                           /* 197 */
++	"socket",                          /* 198 */
++	"socketpair",                      /* 199 */
++	"bind",                            /* 200 */
++	"listen",                          /* 201 */
++	"accept",                          /* 202 */
++	"connect",                         /* 203 */
++	"getsockname",                     /* 204 */
++	"getpeername",                     /* 205 */
++	"sendto",                          /* 206 */
++	"recvfrom",                        /* 207 */
++	"setsockopt",                      /* 208 */
++	"getsockopt",                      /* 209 */
++	"shutdown",                        /* 210 */
++	"sendmsg",                         /* 211 */
++	"recvmsg",                         /* 212 */
++	"readahead",                       /* 213 */
++	"brk",                             /* 214 */
++	"munmap",                          /* 215 */
++	"mremap",                          /* 216 */
++	"add_key",                         /* 217 */
++	"request_key",                     /* 218 */
++	"keyctl",                          /* 219 */
++	"clone",                           /* 220 */
++	"execve",                          /* 221 */
++	"mmap",                            /* 222 */
++	"fadvise64_64",                    /* 223 */
++	"swapon",                          /* 224 */
++	"swapoff",                         /* 225 */
++	"mprotect",                        /* 226 */
++	"msync",                           /* 227 */
++	"mlock",                           /* 228 */
++	"munlock",                         /* 229 */
++	"mlockall",                        /* 230 */
++	"munlockall",                      /* 231 */
++	"mincore",                         /* 232 */
++	"madvise",                         /* 233 */
++	"remap_file_pages",                /* 234 */
++	"mbind",                           /* 235 */
++	"get_mempolicy",                   /* 236 */
++	"set_mempolicy",                   /* 237 */
++	"migrate_pages",                   /* 238 */
++	"move_pages",                      /* 239 */
++	"rt_tgsigqueueinfo",               /* 240 */
++	"perf_event_open",                 /* 241 */
++	"accept4",                         /* 242 */
++	"recvmmsg",                        /* 243 */
++	"arch_specific_syscall",           /* 244 */
++	"245",                             /* 245 */
++	"246",                             /* 246 */
++	"247",                             /* 247 */
++	"248",                             /* 248 */
++	"249",                             /* 249 */
++	"250",                             /* 250 */
++	"251",                             /* 251 */
++	"252",                             /* 252 */
++	"253",                             /* 253 */
++	"254",                             /* 254 */
++	"255",                             /* 255 */
++	"256",                             /* 256 */
++	"257",                             /* 257 */
++	"258",                             /* 258 */
++	"259",                             /* 259 */
++	"wait4",                           /* 260 */
++	"prlimit64",                       /* 261 */
++	"fanotify_init",                   /* 262 */
++	"fanotify_mark",                   /* 263 */
++	"name_to_handle_at",               /* 264 */
++	"open_by_handle_at",               /* 265 */
++	"clock_adjtime",                   /* 266 */
++	"syncfs",                          /* 267 */
++	"setns",                           /* 268 */
++	"sendmmsg",                        /* 269 */
++	"process_vm_readv",                /* 270 */
++	"process_vm_writev",               /* 271 */
++	"kcmp",                            /* 272 */
++	"finit_module",                    /* 273 */
++	"sched_setattr",                   /* 274 */
++	"sched_getattr",                   /* 275 */
++	"renameat2",                       /* 276 */
++	"seccomp",                         /* 277 */
++	"getrandom",                       /* 278 */
++	"memfd_create",                    /* 279 */
++	"bpf",                             /* 280 */
++	"execveat",                        /* 281 */
++	"userfaultfd",                     /* 282 */
++	"membarrier",                      /* 283 */
++	"mlock2",                          /* 284 */
++	"copy_file_range",                 /* 285 */
++	"preadv2",                         /* 286 */
++	"pwritev2",                        /* 287 */
++	"pkey_mprotect",                   /* 288 */
++	"pkey_alloc",                      /* 289 */
++	"pkey_free",                       /* 290 */
++	"statx",                           /* 291 */
++	"io_pgetevents",                   /* 292 */
++	"rseq",                            /* 293 */
++	"kexec_file_load",                 /* 294 */
++	"295",                             /* 295 */
++	"296",                             /* 296 */
++	"297",                             /* 297 */
++	"298",                             /* 298 */
++	"299",                             /* 299 */
++	"300",                             /* 300 */
++	"301",                             /* 301 */
++	"302",                             /* 302 */
++	"303",                             /* 303 */
++	"304",                             /* 304 */
++	"305",                             /* 305 */
++	"306",                             /* 306 */
++	"307",                             /* 307 */
++	"308",                             /* 308 */
++	"309",                             /* 309 */
++	"310",                             /* 310 */
++	"311",                             /* 311 */
++	"312",                             /* 312 */
++	"313",                             /* 313 */
++	"314",                             /* 314 */
++	"315",                             /* 315 */
++	"316",                             /* 316 */
++	"317",                             /* 317 */
++	"318",                             /* 318 */
++	"319",                             /* 319 */
++	"320",                             /* 320 */
++	"321",                             /* 321 */
++	"322",                             /* 322 */
++	"323",                             /* 323 */
++	"324",                             /* 324 */
++	"325",                             /* 325 */
++	"326",                             /* 326 */
++	"327",                             /* 327 */
++	"328",                             /* 328 */
++	"329",                             /* 329 */
++	"330",                             /* 330 */
++	"331",                             /* 331 */
++	"332",                             /* 332 */
++	"333",                             /* 333 */
++	"334",                             /* 334 */
++	"335",                             /* 335 */
++	"336",                             /* 336 */
++	"337",                             /* 337 */
++	"338",                             /* 338 */
++	"339",                             /* 339 */
++	"340",                             /* 340 */
++	"341",                             /* 341 */
++	"342",                             /* 342 */
++	"343",                             /* 343 */
++	"344",                             /* 344 */
++	"345",                             /* 345 */
++	"346",                             /* 346 */
++	"347",                             /* 347 */
++	"348",                             /* 348 */
++	"349",                             /* 349 */
++	"350",                             /* 350 */
++	"351",                             /* 351 */
++	"352",                             /* 352 */
++	"353",                             /* 353 */
++	"354",                             /* 354 */
++	"355",                             /* 355 */
++	"356",                             /* 356 */
++	"357",                             /* 357 */
++	"358",                             /* 358 */
++	"359",                             /* 359 */
++	"360",                             /* 360 */
++	"361",                             /* 361 */
++	"362",                             /* 362 */
++	"363",                             /* 363 */
++	"364",                             /* 364 */
++	"365",                             /* 365 */
++	"366",                             /* 366 */
++	"367",                             /* 367 */
++	"368",                             /* 368 */
++	"369",                             /* 369 */
++	"370",                             /* 370 */
++	"371",                             /* 371 */
++	"372",                             /* 372 */
++	"373",                             /* 373 */
++	"374",                             /* 374 */
++	"375",                             /* 375 */
++	"376",                             /* 376 */
++	"377",                             /* 377 */
++	"378",                             /* 378 */
++	"379",                             /* 379 */
++	"380",                             /* 380 */
++	"381",                             /* 381 */
++	"382",                             /* 382 */
++	"383",                             /* 383 */
++	"384",                             /* 384 */
++	"385",                             /* 385 */
++	"386",                             /* 386 */
++	"387",                             /* 387 */
++	"388",                             /* 388 */
++	"389",                             /* 389 */
++	"390",                             /* 390 */
++	"391",                             /* 391 */
++	"392",                             /* 392 */
++	"393",                             /* 393 */
++	"394",                             /* 394 */
++	"395",                             /* 395 */
++	"396",                             /* 396 */
++	"397",                             /* 397 */
++	"398",                             /* 398 */
++	"399",                             /* 399 */
++	"400",                             /* 400 */
++	"401",                             /* 401 */
++	"402",                             /* 402 */
++	"403",                             /* 403 */
++	"404",                             /* 404 */
++	"405",                             /* 405 */
++	"406",                             /* 406 */
++	"407",                             /* 407 */
++	"408",                             /* 408 */
++	"409",                             /* 409 */
++	"410",                             /* 410 */
++	"411",                             /* 411 */
++	"412",                             /* 412 */
++	"413",                             /* 413 */
++	"414",                             /* 414 */
++	"415",                             /* 415 */
++	"416",                             /* 416 */
++	"417",                             /* 417 */
++	"418",                             /* 418 */
++	"419",                             /* 419 */
++	"420",                             /* 420 */
++	"421",                             /* 421 */
++	"422",                             /* 422 */
++	"423",                             /* 423 */
++	"pidfd_send_signal",               /* 424 */
++	"io_uring_setup",                  /* 425 */
++	"io_uring_enter",                  /* 426 */
++	"io_uring_register",               /* 427 */
++	"open_tree",                       /* 428 */
++	"move_mount",                      /* 429 */
++	"fsopen",                          /* 430 */
++	"fsconfig",                        /* 431 */
++	"fsmount",                         /* 432 */
++	"fspick",                          /* 433 */
++	"pidfd_open",                      /* 434 */
++	"clone3",                          /* 435 */
++	"close_range",                     /* 436 */
++	"openat2",                         /* 437 */
++	"pidfd_getfd",                     /* 438 */
++	"faccessat2",                      /* 439 */
++	"process_madvise",                 /* 440 */
++	"epoll_pwait2",                    /* 441 */
++	"mount_setattr",                   /* 442 */
++	"quotactl_fd",                     /* 443 */
++	"landlock_create_ruleset",         /* 444 */
++	"landlock_add_rule",               /* 445 */
++	"landlock_restrict_self",          /* 446 */
++	"memfd_secret",                    /* 447 */
++	"process_mrelease",                /* 448 */
++	"futex_waitv",                     /* 449 */
++	"set_mempolicy_home_node",         /* 450 */
+diff --git a/sysdeps/linux-gnu/loongarch/trace.c b/sysdeps/linux-gnu/loongarch/trace.c
+new file mode 100644
+index 0000000..1f0ebf4
+--- /dev/null
++++ b/sysdeps/linux-gnu/loongarch/trace.c
+@@ -0,0 +1,274 @@
++/*
++ * This file is part of ltrace.
++ * Copyright (C) 2022-2023 Loongson Technology Corporation Limited.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++#include <sys/ptrace.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++#include <asm/ptrace.h>
++#include <string.h>
++#include <errno.h>
++#include <stdlib.h>
++#include "fetch.h"
++#include "backend.h"
++#include "proc.h"
++#include "type.h"
++#include "debug.h"
++
++#define BRANCH_MASK 0xfc000000
++#define OPCODE_JIRL 0x4c000000
++#define OPCODE_B    0x50000000
++#define OPCODE_BL   0x54000000
++#define OPCODE_BEQ  0x58000000
++#define OPCODE_BNE  0x5c000000
++#define OPCODE_BLT  0x60000000
++#define OPCODE_BGE  0x64000000
++#define OPCODE_BLTU 0x68000000
++#define OPCODE_BGEU 0x6c000000
++#define OPCODE_BEQZ 0x40000000
++#define OPCODE_BNEZ 0x44000000
++
++void
++get_arch_dep(struct Process *proc)
++{
++
++}
++
++/* Sign-extend the number in the bottom B bits of X to a 64-bit integer.
++ * Requires 0 < B < 64 */
++static inline int64_t sign_extend64(uint64_t X, unsigned B)
++{
++	assert(B > 0 && "Bit width can't be 0.");
++	assert(B <= 64 && "Bit width out of range.");
++	return (int64_t)(X << (64 - B)) >> (64 - B);
++}
++
++/* Return the bit field(s) from the most significant bit (msbit) to the
++ * least significant bit (lsbit) of a 32-bit unsigned value. */
++static inline uint32_t bits32(const uint32_t bits, const uint32_t msbit,
++			      const uint32_t lsbit)
++{
++	assert(msbit < 32 && lsbit <= msbit);
++	return (bits >> lsbit) & ((1u << (msbit - lsbit + 1)) - 1);
++}
++
++static int
++loongarch_get_next_pcs(struct Process *proc,
++			arch_addr_t pc, arch_addr_t next_pcs[2])
++{
++	uint32_t insn;
++	uint32_t op;
++	uint32_t rj, imm;
++	int64_t rj_value, signext_imm;
++	int nr = 0;
++
++	insn = (uint32_t)ptrace(PTRACE_PEEKTEXT, proc->pid, pc, 0);
++	op = insn & BRANCH_MASK;
++
++		switch (op) {
++		case OPCODE_JIRL:
++			rj = bits32(insn, 9, 5);
++			rj_value = ptrace(PTRACE_PEEKUSER, proc->pid, rj, 0);
++			imm = bits32(insn, 25, 10);
++			signext_imm = sign_extend64(imm << 2, 18);
++			next_pcs[nr++] = (arch_addr_t)(rj_value + signext_imm);
++			next_pcs[nr++] = pc + 4;
++			break;
++		case OPCODE_B:
++		case OPCODE_BL:
++			imm = bits32(insn, 25, 10) + (bits32(insn, 9, 0) << 16);
++			signext_imm = sign_extend64(imm << 2, 28);
++			next_pcs[nr++] = pc + signext_imm;
++			next_pcs[nr++] = pc + 4;
++			break;
++		case OPCODE_BEQ:
++		case OPCODE_BNE:
++		case OPCODE_BLT:
++		case OPCODE_BGE:
++		case OPCODE_BLTU:
++		case OPCODE_BGEU:
++			imm = bits32(insn, 25, 10);
++			signext_imm = sign_extend64(imm << 2, 18);
++			next_pcs[nr++] = pc + signext_imm;
++			next_pcs[nr++] = pc + 4;
++			break;
++		case OPCODE_BEQZ:
++		case OPCODE_BNEZ:
++			imm = bits32(insn, 25, 10) + (bits32(insn, 4, 0) << 16);
++			signext_imm = sign_extend64(imm << 2, 23);
++			next_pcs[nr++] = pc + signext_imm;
++			next_pcs[nr++] = pc + 4;
++			break;
++		default:
++			next_pcs[nr++] = pc + 4;
++			break;
++		}
++	if (nr <= 0 || nr > 2)
++		goto fail;
++	if (nr == 2) {
++		if (next_pcs[1] == 0)
++			goto fail;
++	}
++	if (next_pcs[0] == 0)
++		goto fail;
++
++	assert(nr == 1 || nr == 2);
++	return nr;
++
++fail:
++	printf("nr=%d pc=%p\n", nr, pc);
++	printf("next_pcs=%p %p\n", next_pcs[0], next_pcs[1]);
++
++	return nr;
++
++}
++
++//enum sw_singlestep_status
++//arch_sw_singlestep(struct Process *proc, struct breakpoint *sbp,
++//		   int (*add_cb)(arch_addr_t, struct sw_singlestep_data *),
++//		   struct sw_singlestep_data *add_cb_data)
++//{
++//	int nr;
++//	arch_addr_t next_pcs[2] = {};
++//	arch_addr_t pc = get_instruction_pointer(proc);
++//	nr = loongarch_get_next_pcs(proc, pc, next_pcs);
++//
++//	while (nr-- > 0) {
++//		arch_addr_t baddr =  next_pcs[nr];
++//		if (DICT_HAS_KEY(proc->leader->breakpoints, &baddr)) {
++//			fprintf(stderr, "skip %p %p\n", baddr, add_cb_data);
++//			continue;
++//		}
++//
++//		if (add_cb(baddr, add_cb_data) < 0)
++//			return SWS_FAIL;
++//	}
++//	debug(1, "PTRACE_CONT");
++//	ptrace(PTRACE_CONT, proc->pid, 0, 0);
++//	return SWS_OK;
++//}
++
++int
++syscall_p(struct Process *proc, int status, int *sysnum)
++{
++	if (WIFSTOPPED(status)
++	    && WSTOPSIG(status) == (SIGTRAP | proc->tracesysgood)) {
++		struct callstack_element *elem = NULL;
++		if (proc->callstack_depth > 0)
++			elem = proc->callstack + proc->callstack_depth - 1;
++		/* sysnum in $a7(r11) on loongarch   */
++		long int ret = ptrace(PTRACE_PEEKUSER, proc->pid,
++				      GPR_BASE + 11, 0);
++		if (ret == -1) {
++			if (errno)
++				return -1;
++		}
++
++		*sysnum = ret;
++
++		if (elem != NULL && elem->is_syscall
++		    && elem->c_un.syscall == *sysnum)
++			return 2;
++
++		if (*sysnum >= 0)
++			return 1;
++	}
++	return 0;
++}
++
++size_t
++arch_type_sizeof(struct Process *proc, struct arg_type_info *info)
++{
++	if (proc == NULL)
++		return (size_t)-2;
++
++	switch (info->type) {
++	case ARGTYPE_VOID:
++		return 0;
++
++	case ARGTYPE_CHAR:
++		return 1;
++
++	case ARGTYPE_SHORT:
++	case ARGTYPE_USHORT:
++		return 2;
++
++	case ARGTYPE_INT:
++	case ARGTYPE_UINT:
++		return 4;
++
++	case ARGTYPE_LONG:
++	case ARGTYPE_ULONG:
++	case ARGTYPE_POINTER:
++		return 8;
++
++	case ARGTYPE_FLOAT:
++		return 4;
++	case ARGTYPE_DOUBLE:
++		return 8;
++
++	case ARGTYPE_ARRAY:
++	case ARGTYPE_STRUCT:
++		/* Use default value.  */
++		return (size_t)-2;
++
++	default:
++		//assert(info->type != info->type);
++		abort();
++	}
++}
++
++size_t
++arch_type_alignof(struct Process *proc, struct arg_type_info *info)
++{
++	if (proc == NULL)
++		return (size_t)-2;
++
++	switch (info->type) {
++
++	case ARGTYPE_CHAR:
++		return 1;
++
++	case ARGTYPE_SHORT:
++	case ARGTYPE_USHORT:
++		return 2;
++
++	case ARGTYPE_INT:
++	case ARGTYPE_UINT:
++		return 4;
++
++	case ARGTYPE_LONG:
++	case ARGTYPE_ULONG:
++	case ARGTYPE_POINTER:
++		return 8;
++
++	case ARGTYPE_FLOAT:
++		return 4;
++	case ARGTYPE_DOUBLE:
++		return 8;
++
++	case ARGTYPE_ARRAY:
++	case ARGTYPE_STRUCT:
++		/* Use default value.  */
++		return (size_t)-2;
++	default:
++		//assert(info->type != info->type);
++		abort();
++	}
++}
