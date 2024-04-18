@@ -8,6 +8,7 @@ if [ -f "$CONFIG" ]; then
 fi
 
 for i in "$@"; do
+	[ -f "$i" ] && continue
 	# get last element in path
 	abi_release=${i##*/}
 

@@ -7,6 +7,7 @@ HOOKS_DIR='/etc/kernel-hooks.d'
 
 flavors_vers=
 for path in "$@"; do
+	[ -f "$path" ] && continue
 	name="${path##*/}"
 
 	case "$name" in

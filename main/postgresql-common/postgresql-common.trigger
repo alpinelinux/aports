@@ -3,6 +3,7 @@
 # Sort dirs in reverse order to prefer a higher version if the user installed
 # multiple versions at once.
 for dir in $(printf '%s\n' "$@" | sort -r); do
+	[ -f "$dir" ] && continue
 	pgver=${dir#*postgresql}
 	expr "$pgver" : '[0-9]*$' >/dev/null || continue
 

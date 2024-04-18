@@ -3,7 +3,7 @@
 for i in "$@"; do
 	if [ -e "$i"/modules.order ]; then
 		/sbin/depmod "${i#*/lib/modules/}"
-	else
+	elif [ -d "$i" ]; then
 		#clean up on uninstall
 		rm -f "$i"/modules.alias \
 			"$i"/modules.builtin.alias.bin \
