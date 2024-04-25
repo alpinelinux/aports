@@ -1,5 +1,5 @@
-import smtpd
-import asyncore
+from test.support import smtpd
+from test.support import asyncore
 
 class FakeSMTPServer(smtpd.SMTPServer):
     """A Fake smtp server"""
