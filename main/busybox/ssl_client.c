@@ -124,8 +124,9 @@ void usage(const char *prog, int ret) {
 int main(int argc, char *argv[])
 {
 	int c, sfd = 1;;
-	const char *sni = NULL;
+	char *sni = NULL;
 	int insecure = 0;
+	size_t sni_len;
 	SSL_CTX *ctx;
 	SSL *ssl = NULL;
 
@@ -147,6 +148,12 @@ int main(int argc, char *argv[])
 			usage(argv[0], 1);
 		}
 	}
+
+	/* openssl doesn't ignore a trailing dot in a domain on it's own.
+	 * https://github.com/openssl/openssl/issues/11560
+	 */
+	if (sni && (sni_len = strlen(sni)) && sni[sni_len - 1] == '.')
+		sni[sni_len - 1] = '\0';
 
 	OPENSSL_init_ssl(0, NULL);
 
