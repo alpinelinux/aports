@@ -1,0 +1,213 @@
+From 9f1542dc2206ebe0508f4a077991c7c226f4847e Mon Sep 17 00:00:00 2001
+From: Matthew Flatt <mflatt@racket-lang.org>
+Date: Fri, 26 Apr 2024 06:08:17 -0600
+Subject: [PATCH] configure: improve inference of compiler flags for pb builds
+ (#829)
+
+When building an pb variant like `tpb64l`, and even when building for
+a platform without native-code support, the "configure" script may
+still be able to infer suitable C compilation and linking flags for
+the kernel. Add an `--os=...` flag that can be used to override that
+inference in case it's not correct (as in the case of cross
+compilation).
+---
+ BUILDING    |  8 ++++++
+ c/build.zuo |  4 +--
+ configure   | 72 ++++++++++++++++++++++++++++++++++++++---------------
+ 3 files changed, 62 insertions(+), 22 deletions(-)
+
+diff --git a/BUILDING b/BUILDING
+index 7b3dc9c8..483f7380 100644
+--- a/BUILDING
++++ b/BUILDING
+@@ -146,6 +146,14 @@ type of build and the installation location. For example,
+ specifies the installation root. Run `./configure --help` for
+ information on the supported options.
+ 
++For platforms without support for native-code compilation in Chez
++Scheme, use a machine specification like `-m=tpb64l`, which is a
++threaded, 64-bit, little-endian build. The "configure" script will
++still attept to infer compilation and linking flags for the kernel; if
++you need to give it a hint, you can use the `--os` flag with something
++like `--os=tXle`, which indicates a threaded configuration (due to the
++leading "t") on Linux (due to the trailing "le").
++
+ The generated makefile mostly just ensures that a `zuo` executable is
+ built in a `bin` directory, and then it defers the actual build work
+ to `zuo`, which uses the "main.zuo" file. If you have `zuo` installed,
+diff --git a/c/build.zuo b/c/build.zuo
+index ae20d148..b6bf244b 100644
+--- a/c/build.zuo
++++ b/c/build.zuo
+@@ -93,7 +93,7 @@
+          kernel-srcs))
+ 
+   (define kernel-asm-files
+-    (if (glob-match? "*nt" (or (lookup 'defaultm) m))
++    (if (glob-match? "*nt" (or (lookup 'flagsm) m))
+ 	(cond
+           [(and msvc?
+                 (string=? arch "a6"))
+@@ -554,7 +554,7 @@
+ (define (for-windows? config)
+   (or (is-msvc? config)
+       (glob-match? "*nt" (hash-ref config 'm))
+-      (glob-match? "*nt" (or (hash-ref config 'defaultm #f) ""))))
++      (glob-match? "*nt" (or (hash-ref config 'flagsm #f) ""))))
+ 
+ (define (lib-build-suffix config)
+   (if (is-msvc? config)
+diff --git a/configure b/configure
+index 2b4b594e..6531bca0 100755
+--- a/configure
++++ b/configure
+@@ -49,8 +49,21 @@ else
+     cflagsset=no    
+ fi
+ 
++# Machine type to build:
+ m=""
++
++# Working directory, defaults to $m
+ w=""
++
++# Machine describing the OS that the kernel runs on, so it determines
++# default compiler and linker flags; when $m is a pb variant, then
++# this OS is inferred if not specified with `--osmachine=`
++flagsm=""
++
++# Used to select a default $m, but in the end corresponds to
++# the target machine for boot files when built via pb
++defaultm=""
++
+ pb=no
+ pbarch=no
+ threads=yes
+@@ -255,6 +268,9 @@ while [ $# != 0 ] ; do
+     --machine=*)
+       m=`echo $1 | sed -e 's/^--machine=//'`
+       ;;
++    --os=*)
++      flagsm=`echo $1 | sed -e 's/^--os=//'`
++      ;;
+     --boot=*)
+       mboot=`echo $1 | sed -e 's/^--boot=//'`
+       ;;
+@@ -469,15 +485,6 @@ if [ $emscripten = yes ] ; then
+     tm32=tpb32l
+ fi
+ 
+-case "$m" in
+-    pb)
+-        echo "Don't select pb using -m or --machine, because pb prefers to use the"
+-        echo " machine as the kernel host machine. Instead, use --pb or --pbarch"
+-        echo " to select a pb (portable bytecode) build."
+-        exit 1
+-        ;;
+-esac
+-
+ if [ "$bits" = "" ] ; then
+   # infer default bits; this will be irrelevant if a machine is specified
+   if [ "$unamebits" != "" ] ; then
+@@ -498,7 +505,14 @@ fi
+ # to the host platform's threadedness, and we want that to default
+ # the same way as when `--pb` is not used
+ if [ "$threads" = "" ] ; then
+-    defaultthreads=yes
++    case "$m" in
++        pb*)
++            defaultthreads=no
++            ;;
++        *)
++            defaultthreads=yes
++            ;;
++    esac
+ else
+     defaultthreads=$threads
+ fi
+@@ -534,26 +548,33 @@ if [ "$m" = "" ] ; then
+   machine_supplied=no
+   if [ $pb = yes ] ; then
+      m=pb
+-     if [ "$threads" = yes ] ; then m=t$m ; fi
+-     if [ $bits = 64 ] ; then mpbhost=$m64 ; else mpbhost=$m32 ; fi
+-     flagsm=$mpbhost
+-     if [ "$mpbhost" = "" ] ; then
+-         flagsm=unknown
++     if [ $bits = 64 ] ; then defaultflagsm=$m64 ; else defaultflagsm=$m32 ; fi
++     if [ "$defaultflagsm" = "" ] ; then
++         defaultflagsm=unknown
++     fi
++     if [ "$threads" = yes ] ; then
++         m=t$m
++         defaultflagsm=t$defaultflagsm
+      fi
+   else
+     if [ "$unknownm" != "yes" ] ; then
+         m=$defaultm
+     fi
+-    flagsm=$defaultm
+-    # note that m (and flagsm) could still be "" at this point, in which
++    defaultflagsm=$defaultm
++    # note that m (and defaultflagsm) could still be "" at this point, in which
+     # case "No suitable machine type" will be reported further below
+   fi
+ elif [ $pb = yes ] ; then
+-  mpbhost=$m
+-  flagsm=$m
++  defaultflagsm=$m
+   m=pb
+ else
+-  flagsm=$m
++  case "${m}" in
++      pb*|tpb*)
++          defaultflagsm=$defaultm
++          ;;
++      *)
++          defaultflagsm=$m
++  esac
+   defaultm=$m
+ fi
+ 
+@@ -561,9 +582,14 @@ if [ $pbarch = yes ] ; then
+     m=pb$bits$pbendian
+     if [ "$defaultthreads" = yes ] ; then
+         m=t$m
++        defaultflagsm=t$defaultflagsm
+     fi
+ fi
+ 
++if [ "$flagsm" = "" ] ; then
++    flagsm=$defaultflagsm
++fi
++
+ if [ "$mboot" = "" ] ; then
+     mboot="$m"
+ else
+@@ -615,6 +641,7 @@ if [ "$help" = "yes" ]; then
+   echo "Options (defaults shown in parens):"
+   echo "  --machine=<machine type>          explicitly specify machine type ($m)"
+   echo "  -m=<machine type>                 same as --machine=<machine type> ($m)"
++  echo "  --os=<machine type>               specify OS as a machine type ($flagsm)"
+   echo "  --threads                         specify threaded version ($threads)"
+   echo "  --nothreads                       specify non-threaded version ($nothreads)"
+   echo "  --32|--64                         specify 32/64-bit version ($bits)"
+@@ -1019,6 +1046,10 @@ else
+     configuringin=" in $w"
+ fi
+ 
++if [ "$flagsm" != "$m" ] ; then
++    configuringin="$configuringin to run on $flagsm"
++fi
++
+ if [ "$m" = "" ] ; then
+     enableFrompb=no
+     forceworkarea=no
+@@ -1090,6 +1121,7 @@ srcdir=$srcdir
+ upsrcdir=$upsrcdir
+ m=$m
+ defaultm=$defaultm
++flagsm=$flagsm
+ mboot=$mboot
+ buildKernelOnly=$buildKernelOnly
+ enableFrompb=$enableFrompb
