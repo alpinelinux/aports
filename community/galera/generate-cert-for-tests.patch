@@ -1,0 +1,369 @@
+Patch-Source: https://github.com/codership/galera/commit/462998ca28e97a95e98e0acb6e6c13cafb95083b.patch
+--
+From 462998ca28e97a95e98e0acb6e6c13cafb95083b Mon Sep 17 00:00:00 2001
+From: Teemu Ollakka <teemu.ollakka@galeracluster.com>
+Date: Mon, 2 Oct 2023 20:31:37 +0300
+Subject: [PATCH] codership/galera#647 Generate keys and certificates for SSL
+ tests
+
+Relying on static certificates causes several problems:
+- Certificates eventually expire, which causes surprises
+  when tests suddenly stop passing without prior warning.
+- Standards change, a certificate created on different
+  platform long time ago may not be usable on some more
+  modern platform.
+- Lack of fine grained control on test scenarios without
+  generating and storing several certificates in source
+  repository.
+
+In order to work around the problems above, generate
+certificates programmatically before the tests are run.
+The generated certificates use the same versioning and
+extensions as the original ones under tests/conf.
+---
+ .gitignore                         |   1 +
+ galerautils/tests/CMakeLists.txt   |   4 +-
+ galerautils/tests/gu_asio_test.cpp | 269 ++++++++++++++++++++++++++++-
+ 3 files changed, 266 insertions(+), 8 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index eb06eb9be..6176a35c5 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -18,6 +18,7 @@ galera/tests/galera_check
+ galera/tests/galera_check.passed
+ galerautils/src/gu_fnv_bench
+ galerautils/tests/gu_tests
++galerautils/tests/certs
+ galerautils/tests/gu_tests++
+ galerautils/tests/gu_tests++.passed
+ galerautils/tests/gu_tests.passed
+diff --git a/galerautils/tests/CMakeLists.txt b/galerautils/tests/CMakeLists.txt
+index f863ce66b..a44b2d6b3 100644
+--- a/galerautils/tests/CMakeLists.txt
++++ b/galerautils/tests/CMakeLists.txt
+@@ -47,7 +47,6 @@ add_test(
+ #
+ # C++ galerautils tests.
+ #
+-
+ add_executable(gu_tests++
+   gu_atomic_test.cpp
+   gu_gtid_test.cpp
+@@ -75,7 +74,7 @@ add_executable(gu_tests++
+ 
+ target_compile_definitions(gu_tests++
+   PRIVATE
+-  -DGU_ASIO_TEST_CERT_DIR="${PROJECT_SOURCE_DIR}/tests/conf")
++  -DGU_ASIO_TEST_CERT_DIR="${CMAKE_CURRENT_BINARY_DIR}/certs")
+ 
+ # TODO: These should be eventually fixed.
+ target_compile_options(gu_tests++
+@@ -93,7 +92,6 @@ add_test(
+   NAME gu_tests++
+   COMMAND gu_tests++
+   )
+-
+ #
+ # Deqmap micro benchmark.
+ #
+diff --git a/galerautils/tests/gu_asio_test.cpp b/galerautils/tests/gu_asio_test.cpp
+index c4c948bda..616902eb1 100644
+--- a/galerautils/tests/gu_asio_test.cpp
++++ b/galerautils/tests/gu_asio_test.cpp
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2019-2020 Codership Oy <info@codership.com>
++ * Copyright (C) 2019-2023 Codership Oy <info@codership.com>
+  */
+ 
+ 
+@@ -920,18 +920,276 @@ END_TEST
+ 
+ #ifdef GALERA_HAVE_SSL
+ 
++#include <openssl/bn.h>
++#include <openssl/conf.h>
++#include <openssl/engine.h>
++#include <openssl/pem.h>
++#include <openssl/x509v3.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <dirent.h>
+ #include <signal.h>
+ 
+-//
+-// SSL
+-//
++#include <vector>
+ 
+ static std::string get_cert_dir()
+ {
+-    // This will be set by CMake/preprocessor.
++    static_assert(::strlen(GU_ASIO_TEST_CERT_DIR) > 0);
++    const std::string ret{ GU_ASIO_TEST_CERT_DIR };
++    auto* dir = opendir(ret.c_str());
++    if (!dir)
++    {
++        if (mkdir(ret.c_str(), S_IRWXU))
++        {
++            const auto* errstr = ::strerror(errno);
++            gu_throw_fatal << "Could not create dir " << ret << ": " << errstr;
++        }
++    }
++    else
++    {
++        closedir(dir);
++    }
+     return GU_ASIO_TEST_CERT_DIR;
+ }
+ 
++static int password_cb(char*, int, int, void*) { return 0; }
++
++static void throw_error(const char* msg)
++{
++    gu_throw_fatal << msg << ": " << ERR_error_string(ERR_get_error(), nullptr);
++}
++
++static EVP_PKEY* create_key()
++{
++#if OPENSSL_VERSION_MAJOR < 3
++    auto* bn = BN_new();
++    if (!bn)
++    {
++        throw_error("could not create BN");
++    }
++    BN_set_word(bn, 0x10001);
++    auto* rsa = RSA_new();
++    if (!rsa)
++    {
++        BN_free(bn);
++        throw_error("could not create RSA");
++    }
++    RSA_generate_key_ex(rsa, 2048, bn, nullptr);
++    auto* pkey = EVP_PKEY_new();
++    if (!pkey)
++    {
++        BN_free(bn);
++        RSA_free(rsa);
++        throw_error("could not create PKEY");
++    }
++    EVP_PKEY_set1_RSA(pkey, rsa);
++    RSA_free(rsa);
++    BN_free(bn);
++    return pkey;
++#else
++    auto* ret = EVP_RSA_gen(2048);
++    if (!ret)
++    {
++        throw_error("could not create RSA");
++    }
++    return ret;
++#endif /* OPENSSL_VERSION_MAJOR < 3 */
++}
++
++static FILE* open_file(const std::string& path, const char* mode)
++{
++    auto* ret = fopen(path.c_str(), mode);
++    if (!ret)
++    {
++        const auto* errstr = ::strerror(errno);
++        gu_throw_fatal << "Could not open file " << path << ": "
++                       << errstr;
++    }
++    return ret;
++}
++
++static void write_key(EVP_PKEY* pkey, const std::string& filename)
++{
++    const std::string cert_dir = get_cert_dir();
++    const std::string key_file_path = cert_dir + "/" + filename;
++    auto* key_file = open_file(key_file_path, "wb");
++    if (!PEM_write_PrivateKey(key_file, pkey, nullptr, nullptr, 0, password_cb,
++                              nullptr))
++    {
++        throw_error("Could not write key");
++    }
++    fclose(key_file);
++}
++
++static void set_x509v3_extensions(X509* x509, X509* issuer)
++{
++    auto* conf_bio = BIO_new(BIO_s_mem());
++    std::string ext{ "[extensions]\n"
++                     "authorityKeyIdentifier=keyid,issuer\n"
++                     "subjectKeyIdentifier=hash\n" };
++    if (!issuer)
++    {
++        ext += "basicConstraints=critical,CA:TRUE\n";
++    }
++    else
++    {
++        ext += "keyUsage=digitalSignature,keyEncipherment\n";
++        ext += "basicConstraints=CA:FALSE\n";
++    }
++    BIO_printf(conf_bio, "%s", ext.c_str());
++    auto* conf = NCONF_new(nullptr);
++    long errorline = -1;
++    int err;
++    if ((err = NCONF_load_bio(conf, conf_bio, &errorline)) <= 0)
++    {
++        gu_throw_fatal << "Could not load conf: " << err;
++    }
++    if (errorline != -1)
++    {
++        gu_throw_fatal << "Could not load conf,  errorline: " << errorline;
++    }
++    // TODO: V3 extensions
++    X509V3_CTX ctx;
++    X509V3_set_ctx(&ctx, issuer ? issuer : x509, x509, nullptr, nullptr, 0);
++    X509V3_set_nconf(&ctx, conf);
++    if (!X509V3_EXT_add_nconf(conf, &ctx, "extensions", x509))
++    {
++        throw_error("Could not add extension");
++    }
++    NCONF_free(conf);
++    BIO_free(conf_bio);
++}
++
++static X509* create_x509(EVP_PKEY* pkey, X509* issuer, const char* cn)
++{
++    auto* x509 = X509_new();
++    /* According to standard, value 2 means version 3. */
++    X509_set_version(x509, 2);
++    ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
++    X509_gmtime_adj(X509_get_notBefore(x509), 0);
++    X509_gmtime_adj(X509_get_notAfter(x509), 31536000L);
++    X509_set_pubkey(x509, pkey);
++
++    auto* name = X509_get_subject_name(x509);
++    X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC, (unsigned char*)"FI",
++                               -1, -1, 0);
++    X509_NAME_add_entry_by_txt(name, "ST", MBSTRING_ASC,
++                               (unsigned char*)"Uusimaa", -1, -1, 0);
++    X509_NAME_add_entry_by_txt(name, "L", MBSTRING_ASC,
++                               (unsigned char*)"Helsinki", -1, -1, 0);
++    X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC,
++                               (unsigned char*)"Codership", -1, -1, 0);
++    X509_NAME_add_entry_by_txt(name, "OU", MBSTRING_ASC,
++                               (unsigned char*)"Galera Devel", -1, -1, 0);
++    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (unsigned char*)cn, -1,
++                               -1, 0);
++    if (!issuer)
++    {
++        /* Self signed */
++        X509_set_issuer_name(x509, name);
++    }
++    else
++    {
++        X509_set_issuer_name(x509, X509_get_subject_name(issuer));
++    }
++
++    set_x509v3_extensions(x509, issuer);
++
++    X509_sign(x509, pkey, EVP_sha256());
++
++    return x509;
++}
++
++static void write_x509(X509* x509, const std::string& filename)
++{
++    const std::string cert_dir = get_cert_dir();
++    const std::string file_path = cert_dir + "/" + filename;
++    auto* file = open_file(file_path, "wb");
++    if (!PEM_write_X509(file, x509))
++    {
++        throw_error("Could not write x509");
++    }
++    fclose(file);
++}
++
++static void write_x509_list(const std::vector<X509*>& certs,
++                            const std::string& filename)
++{
++    const std::string cert_dir = get_cert_dir();
++    const std::string file_path = cert_dir + "/" + filename;
++    auto* file = open_file(file_path, "wb");
++    for (auto* x509 : certs)
++    {
++        if (!PEM_write_X509(file, x509))
++        {
++            throw_error("Could not write x509");
++        }
++    }
++    fclose(file);
++}
++
++/* Self signed CA + certificate */
++static void generate_self_signed()
++{
++    auto* pkey = create_key();
++    write_key(pkey, "galera_key.pem");
++    auto* ca = create_x509(pkey, nullptr, "Galera Root");
++    write_x509(ca, "galera_ca.pem");
++
++    auto* cert = create_x509(pkey, ca, "Galera Cert");
++    write_x509(cert, "galera_cert.pem");
++    X509_free(cert);
++    X509_free(ca);
++    EVP_PKEY_free(pkey);
++}
++
++/*
++                             ---- Server cert 1
++                            /
++  Root CA - Intermediate CA
++                            \---- Server cert 2
++
++  Two bundles consisting of intermediate CA and server certificate
++  are created for servers 1 and 2.
++ */
++static void generate_chains()
++{
++    auto* root_ca_key = create_key();
++    auto* root_ca = create_x509(root_ca_key, nullptr, "Galera Root CA");
++    auto* int_ca_key = create_key();
++    auto* int_ca = create_x509(int_ca_key, root_ca, "Galera Intermediate CA");
++
++    auto* server_1_key = create_key();
++    auto* server_1_cert = create_x509(server_1_key, int_ca, "Galera Server 1");
++    auto* server_2_key = create_key();
++    auto* server_2_cert = create_x509(server_2_key, int_ca, "Galera Server 2");
++
++    write_x509(root_ca, "galera-ca.pem");
++    write_key(server_1_key, "galera-server-1.key");
++    write_x509_list({ server_1_cert, int_ca }, "bundle-galera-server-1.pem");
++    write_key(server_2_key, "galera-server-2.key");
++    write_x509_list({ server_2_cert, int_ca }, "bundle-galera-server-2.pem");
++
++    X509_free(server_2_cert);
++    EVP_PKEY_free(server_2_key);
++    X509_free(server_1_cert);
++    EVP_PKEY_free(server_1_key);
++    X509_free(int_ca);
++    EVP_PKEY_free(int_ca_key);
++    X509_free(root_ca);
++    EVP_PKEY_free(root_ca_key);
++}
++
++static void generate_certificates()
++{
++  generate_self_signed();
++  generate_chains();
++}
++
++//
++// SSL
++//
++
+ static gu::Config get_ssl_config()
+ {
+     gu::Config ret;
+@@ -2173,6 +2431,7 @@ Suite* gu_asio_suite()
+     //
+     // SSL
+     //
++    generate_certificates();
+ 
+     tc = tcase_create("test_ssl_io_service");
+     tcase_add_test(tc, test_ssl_io_service);
