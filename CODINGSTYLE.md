@@ -67,7 +67,7 @@ Put `; do` and `; then` on the same line as the `while`, `for` or `if`.
 ### Quoting
 
 * Always quote string literals (exceptions are assigning `pkgname` and
-  `pkgver`, more on this below).
+  `pkgver`, which must not be quoted).
 * Always quote variables, command substitutions or shell meta characters
   when used in strings. Prefer `"$var"/foo/bar` over `"$var/foo/bar"`.
 * Never quote literal integers.
