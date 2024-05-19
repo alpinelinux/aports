@@ -171,6 +171,14 @@ Metadata Variables are variables used directly by abuild itself, e.g. `pkgname` 
 * Checksum Metadata Variables must be declared after the last function
   declaration, `abuild checksum` will automatically take care of this.
 
+### Comments
+
+* For Metadata Variables such as `options` or `arch`,
+  comments are encouraged to help other contributors understand the choices;
+  in those cases, they should be put either on the same line after the variable,
+  or above it, on a separate line, with an appropriate prefix
+  (e.g. `# check: no test suite` or `# armhf: blocked by qt6-qtwebengine`).
+
 ## Build Functions
 
 ### Function Declaration
