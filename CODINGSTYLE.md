@@ -16,9 +16,9 @@ supported:
    `${var/pattern/string}`). The [bash manual][bash expansion]
    contains further information on these two expansions.
 
-**NOTE:** `busybox ash` is currently used to evaluate APKBUILDs since it
-supports additional POSIX shell extensions your APKBUILD might be
-evaluated correctly even if it is not confirming to this policy
+**NOTE:** `busybox ash` is currently used to evaluate APKBUILDs - since it
+supports additional POSIX shell extensions, your APKBUILD might be
+evaluated correctly, even if it is not confirming to this policy
 document.
 
 # Shell Style Considerations
