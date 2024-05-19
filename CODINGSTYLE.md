@@ -102,10 +102,11 @@ Put `; do` and `; then` on the same line as the `while`, `for` or `if`.
 
 ## Calling Commands
 
-### Command Substitutions and Global Variables
+### Top-level Scope
 
-* Avoid command Substitutions in global variables, use parameter
-  expansions instead.
+* External commands should not be called outside of functions;
+  in variables, use parameter expansions instead
+  (e.g. `${pkgver/-/.}` instead of `$(echo $pkgver | tr '-' '.')`)).
 
 ### Return Values
 
