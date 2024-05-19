@@ -71,6 +71,8 @@ Put `; do` and `; then` on the same line as the `while`, `for` or `if`.
 * Always quote variables, command substitutions or shell meta characters
   when used in strings. Prefer `"$var"/foo/bar` over `"$var/foo/bar"`.
 * Never quote literal integers.
+* Double quotes should be used, unless preventing variable interpolation
+  is necessary.
 
 ## Features
 
