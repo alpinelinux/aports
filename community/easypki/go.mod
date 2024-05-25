@@ -11,4 +11,4 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-replace github.com/boltdb/bolt => gitlab.alpinelinux.org/kdaudt/bolt v1.3.3
+replace github.com/boltdb/bolt => gitlab.alpinelinux.org/kdaudt/bolt v1.3.5
