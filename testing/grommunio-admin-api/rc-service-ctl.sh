@@ -7,8 +7,8 @@
 # Copyright 2024 Miguel Da Silva, Contauro AG
 # Distributed under the terms of the GNU General Public License, v2 or later
 # 
-# Version: 0.2 - 2024-04-04
-# Last change: Added info command for grommunio
+# Version: 0.3 - 2024-05-20
+# Last change: Fixed info command
 #
 
 usage() {
@@ -105,7 +105,7 @@ while [ -n "$2" ]; do
 
         # Retrieve service unit state (enabled/disabled)
         unitstate="disabled"
-        rc-update show | grep -q "$service" && unitstate="enabled"
+        rc-update show | grep -q "$service |" && unitstate="enabled"
 
         # Translate service state to systemd-like activestate and substate
         case "$servicestate" in
