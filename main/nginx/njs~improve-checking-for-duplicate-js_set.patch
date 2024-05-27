@@ -1,0 +1,249 @@
+Patch-Source: https://github.com/nginx/njs/commit/5ab8d47c6d59ce21feae1541d4b7acb1289570dc
+See-Also: https://github.com/nginx/njs/issues/705
+--
+From 5ab8d47c6d59ce21feae1541d4b7acb1289570dc Mon Sep 17 00:00:00 2001
+From: Dmitry Volyntsev <xeioex@nginx.com>
+Date: Mon, 22 Apr 2024 17:51:45 -0700
+Subject: [PATCH] Modules: improved checking for duplicate js_set variables.
+
+Since 6fb1aca4eeaf (0.8.4) the identical js_set variables introduced as
+a part of an include file that is shared amongst multiple vhosts are
+rejected during configuration parsing.
+
+The patch ignores duplicate js_set variables when they refer to the same
+JS function.
+
+This fixes #705 issue on Github.
+---
+ nginx/ngx_http_js_module.c   | 15 ++++++--
+ nginx/ngx_stream_js_module.c | 15 ++++++--
+ nginx/t/js_dup_set.t         | 74 ++++++++++++++++++++++++++++++++++++
+ nginx/t/stream_js_dup_set.t  | 72 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 168 insertions(+), 8 deletions(-)
+ create mode 100644 nginx/t/js_dup_set.t
+ create mode 100644 nginx/t/stream_js_dup_set.t
+
+diff --git a/nginx/ngx_http_js_module.c b/nginx/ngx_http_js_module.c
+index ef494d482..d280ca0f6 100644
+--- a/nginx/ngx_http_js_module.c
++++ b/nginx/ngx_http_js_module.c
+@@ -4732,7 +4732,7 @@ ngx_http_js_periodic(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ static char *
+ ngx_http_js_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ {
+-    ngx_str_t            *value, *fname;
++    ngx_str_t            *value, *fname, *prev;
+     ngx_http_variable_t  *v;
+ 
+     value = cf->args->elts;
+@@ -4759,9 +4759,16 @@ ngx_http_js_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+     *fname = value[2];
+ 
+     if (v->get_handler == ngx_http_js_variable_set) {
+-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+-                           "variable \"%V\" is already declared", &value[1]);
+-        return NGX_CONF_ERROR;
++        prev = (ngx_str_t *) v->data;
++
++        if (fname->len != prev->len
++            || ngx_strncmp(fname->data, prev->data, fname->len) != 0)
++        {
++            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
++                               "variable \"%V\" is redeclared with "
++                               "different function name", &value[1]);
++            return NGX_CONF_ERROR;
++        }
+     }
+ 
+     v->get_handler = ngx_http_js_variable_set;
+diff --git a/nginx/ngx_stream_js_module.c b/nginx/ngx_stream_js_module.c
+index 088b5229a..b8b29a560 100644
+--- a/nginx/ngx_stream_js_module.c
++++ b/nginx/ngx_stream_js_module.c
+@@ -2191,7 +2191,7 @@ ngx_stream_js_periodic(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ static char *
+ ngx_stream_js_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ {
+-    ngx_str_t              *value, *fname;
++    ngx_str_t              *value, *fname, *prev;
+     ngx_stream_variable_t  *v;
+ 
+     value = cf->args->elts;
+@@ -2218,9 +2218,16 @@ ngx_stream_js_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+     *fname = value[2];
+ 
+     if (v->get_handler == ngx_stream_js_variable_set) {
+-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+-                           "variable \"%V\" is already declared", &value[1]);
+-        return NGX_CONF_ERROR;
++        prev = (ngx_str_t *) v->data;
++
++        if (fname->len != prev->len
++            || ngx_strncmp(fname->data, prev->data, fname->len) != 0)
++        {
++            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
++                               "variable \"%V\" is redeclared with "
++                               "different function name", &value[1]);
++            return NGX_CONF_ERROR;
++        }
+     }
+ 
+     v->get_handler = ngx_stream_js_variable_set;
+diff --git a/nginx/t/js_dup_set.t b/nginx/t/js_dup_set.t
+new file mode 100644
+index 000000000..317eaffac
+--- /dev/null
++++ b/nginx/t/js_dup_set.t
+@@ -0,0 +1,74 @@
++#!/usr/bin/perl
++
++# (C) Dmitry Volyntsev
++# (C) Nginx, Inc.
++
++# Tests for http njs module, duplicate identical js_set directives.
++
++###############################################################################
++
++use warnings;
++use strict;
++
++use Test::More;
++
++BEGIN { use FindBin; chdir($FindBin::Bin); }
++
++use lib 'lib';
++use Test::Nginx;
++
++###############################################################################
++
++select STDERR; $| = 1;
++select STDOUT; $| = 1;
++
++my $t = Test::Nginx->new()->has(qw/http/)
++	->write_file_expand('nginx.conf', <<'EOF');
++
++%%TEST_GLOBALS%%
++
++daemon off;
++
++events {
++}
++
++http {
++    %%TEST_GLOBALS_HTTP%%
++
++    js_import test.js;
++
++    server {
++        listen       127.0.0.1:8080;
++        server_name  localhost;
++
++        location /set1 {
++            js_set $test test.foo;
++            return 200 set1:$test;
++        }
++
++        location /set2 {
++            js_set $test test.foo;
++            return 200 set2:$test;
++        }
++    }
++}
++
++EOF
++
++$t->write_file('test.js', <<EOF);
++    function foo(r) {
++        return 42;
++    }
++
++    export default {foo};
++
++EOF
++
++$t->try_run('no njs')->plan(2);
++
++###############################################################################
++
++like(http_get('/set1'), qr/set1:42/, '/set1 location');
++like(http_get('/set2'), qr/set2:42/, '/set2 location');
++
++###############################################################################
+diff --git a/nginx/t/stream_js_dup_set.t b/nginx/t/stream_js_dup_set.t
+new file mode 100644
+index 000000000..09669240b
+--- /dev/null
++++ b/nginx/t/stream_js_dup_set.t
+@@ -0,0 +1,72 @@
++#!/usr/bin/perl
++
++# (C) Dmitry Volyntsev
++# (C) Nginx, Inc.
++
++# Tests for stream njs module, duplicate identical js_set directives.
++
++###############################################################################
++
++use warnings;
++use strict;
++
++use Test::More;
++
++BEGIN { use FindBin; chdir($FindBin::Bin); }
++
++use lib 'lib';
++use Test::Nginx;
++use Test::Nginx::Stream qw/ stream /;
++
++###############################################################################
++
++select STDERR; $| = 1;
++select STDOUT; $| = 1;
++
++my $t = Test::Nginx->new()->has(qw/stream stream_return/)
++	->write_file_expand('nginx.conf', <<'EOF');
++
++%%TEST_GLOBALS%%
++
++daemon off;
++
++events {
++}
++
++stream {
++    %%TEST_GLOBALS_STREAM%%
++
++    js_import test.js;
++
++    server {
++        listen  127.0.0.1:8081;
++        js_set $test test.foo;
++        return  8081:$test;
++    }
++
++    server {
++        listen  127.0.0.1:8082;
++        js_set $test test.foo1;
++        return  8082:$test;
++    }
++}
++
++EOF
++
++$t->write_file('test.js', <<EOF);
++    function foo(r) {
++        return 42;
++    }
++
++    export default {foo};
++
++EOF
++
++$t->try_run('no njs available')->plan(2);
++
++###############################################################################
++
++is(stream('127.0.0.1:' . port(8081))->read(), '8081:42', '8081 server');
++is(stream('127.0.0.1:' . port(8082))->read(), '8082:42', '8082 server');
++
++###############################################################################
