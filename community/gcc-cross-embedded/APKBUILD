@@ -7,15 +7,28 @@
 # Contributor: Martin Schmölzer <mschmoelzer@gmail.com>
 pkgname=gcc-cross-embedded
 pkgver=14.1.0
-pkgrel=0
+pkgrel=1
 pkgdesc="C compilers from the GNU Compiler Collection for embedded targets"
 url="https://gcc.gnu.org/"
 depends="gcc"
-makedepends="bash linux-headers gmp-dev mpfr-dev mpc1-dev zlib-dev isl-dev python3"
+makedepends="
+	bash
+	gmp-dev
+	isl-dev
+	linux-headers
+	mpc1-dev
+	mpfr-dev
+	python3
+	zlib-dev
+	"
 arch="aarch64 armv7 ppc64le x86_64 x86"
 license="GPL-3.0-or-later"
-source="https://mirrors.kernel.org/gnu/gcc/gcc-$pkgver/gcc-$pkgver.tar.xz
-	newlib-getentropy.patch"
+source="
+	https://mirrors.kernel.org/gnu/gcc/gcc-$pkgver/gcc-$pkgver.tar.xz
+
+	newlib-getentropy.patch
+	xtensa-fix-specs.patch
+	"
 options="!check"
 builddir="$srcdir/gcc-$pkgver"
 
@@ -30,6 +43,11 @@ _targets_exotic="
 	msp430-elf
 	or1k-elf
 	aarch64-none-elf
+	xtensa-none-elf
+	xtensa-esp32-elf
+	xtensa-esp32s2-elf
+	xtensa-esp32s3-elf
+	xtensa-esp8266-elf
 	"
 
 # This specifies the supported RISC-V multilib ISA extensions.
@@ -53,6 +71,7 @@ case "$CARCH" in
 x86_64|aarch64)
 	# support all targets on typical workstation / notebook / CI servers
 	_targets="$_targets_mainstream $_targets_exotic"
+	makedepends="$makedepends xtensa-dynconfig"
 	;;
 *)
 	# support only mainstream targets on exotic hosts
@@ -61,7 +80,14 @@ x86_64|aarch64)
 esac
 
 for target in $_targets; do
-	subpackages="gcc-$target:_install_subpkg $subpackages"
+	case "$target" in
+	xtensa-esp*-elf)
+		subpackages="gcc-$target:_install_esp $subpackages"
+		;;
+	*)
+		subpackages="gcc-$target:_install_subpkg $subpackages"
+		;;
+	esac
 	makedepends="$makedepends binutils-$target"
 done
 
@@ -74,12 +100,13 @@ prepare() {
 	done
 }
 
-_build_gcc() {
+_configure_gcc() {
+	local target_specific_flags
 	case "$target" in
 		# Support M and R architecture profiles for ARM
-		arm-none-eabi) _target_specific_flags="--with-multilib-list=rmprofile" ;;
-		riscv-none-elf) _target_specific_flags="--with-multilib-generator=$_riscv_multilib" ;;
-		*) _target_specific_flags="" ;;
+		arm-none-eabi) target_specific_flags="--with-multilib-list=rmprofile" ;;
+		riscv-none-elf) target_specific_flags="--with-multilib-generator=$_riscv_multilib" ;;
+		*) target_specific_flags="" ;;
 	esac
 
 	# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100431
@@ -126,25 +153,40 @@ _build_gcc() {
 		--with-newlib \
 		--with-system-zlib \
 		--with-pkgversion='Alpine Linux' \
-		$_target_specific_flags
-
-	msg "Running make for $target"
-	make INHIBIT_LIBC_CFLAGS='-DUSE_TM_CLONE_REGISTRY=0'
+		$target_specific_flags
 }
 
 build() {
+	local target
 	for target in $_targets; do
-		# Build "regular" variant
+		local workingdir
 		workingdir="$srcdir/build-$target"
 		mkdir "$workingdir"
 		cd "$workingdir"
 		export CFLAGS_FOR_TARGET='-pipe -Os -ffunction-sections -fdata-sections'
 		export CXXFLAGS_FOR_TARGET='-pipe -Os -ffunction-sections -fdata-sections -fno-use-cxa-atexit'
-		_build_gcc
+		case "$target" in
+		xtensa-esp*-elf)
+			local mcu
+			mcu="${target#xtensa-}"
+			mcu="${mcu%-elf}"
+			export XTENSA_GNU_CONFIG="/usr/lib/xtensa-dynconfig/xtensa_$mcu.so"
+			target=xtensa-none-elf
+			_configure_gcc
+			msg "Running make for xtensa-$mcu-elf"
+			make INHIBIT_LIBC_CFLAGS='-DUSE_TM_CLONE_REGISTRY=0' all-target-libgcc
+			;;
+		*)
+			unset XTENSA_GNU_CONFIG
+			_configure_gcc
+			msg "Running make for $target"
+			make INHIBIT_LIBC_CFLAGS='-DUSE_TM_CLONE_REGISTRY=0'
+		esac
 	done
 }
 
 package() {
+	local target
 	for target in $_targets; do
 		depends="$depends gcc-$target"
 	done
@@ -155,6 +197,7 @@ _install_subpkg() {
 	target="${subpkgname#gcc-}"
 	pkgdesc="C compiler of the GNU Compiler Collection for $target targets"
 	depends="$depends binutils-$target"
+	local workingdir
 	workingdir="$srcdir/build-$target"
 	cd "$workingdir"
 	make install DESTDIR="$subpkgdir" -j1
@@ -169,9 +212,70 @@ _install_subpkg() {
 
 	# Strip executables using host binutils
 	find "$subpkgdir"/usr/bin -type f -executable -exec strip '{}' \;
+
+	case "$target" in
+	xtensa-none-elf)
+		# We don't want libgcc and crt* for generic xtensa (which does not exist
+		# in hardware), but only for concrete xtensa CPUs
+		find "$subpkgdir/usr/lib/gcc/xtensa-none-elf/$pkgver" \
+			\( -name '*.o' -o -name '*.a' \) \
+			-exec rm {} \;
+		;;
+	esac
+}
+
+_install_esp() {
+	target="${subpkgname#gcc-}"
+	local mcu
+	mcu="${target#xtensa-}"
+	mcu="${mcu%-elf}"
+	pkgdesc="C compiler of the GNU Compiler Collection for $target targets"
+	depends="binutils-$target gcc-xtensa-none-elf=$pkgver-r$pkgrel xtensa-dynconfig-$mcu"
+	local workingdir
+	workingdir="$srcdir/build-$target"
+	cd "$workingdir"
+	make install-target-libgcc DESTDIR="$subpkgdir"/tmp -j1
+	mkdir -p "$subpkgdir/usr/$target/lib/xtensa-none-elf/$pkgver"
+	find "$subpkgdir/tmp/usr/lib/gcc/xtensa-none-elf/$pkgver" \
+		\( -name '*.o' -o -name '*.a' \) \
+		-exec mv {} "$subpkgdir/usr/$target/lib/xtensa-none-elf/$pkgver" \;
+	rm -rf "$subpkgdir"/tmp
+
+	local cmds
+	cmds="
+		gcc-ar
+		gcc-nm
+		gcc-ranlib
+		gcov
+		gcov-dump
+		gcov-tool
+		lto-dump
+		"
+	mkdir -p "$subpkgdir/usr/bin"
+	for cmd in $cmds; do
+		cat > "$subpkgdir/usr/bin/$target-$cmd" << EOF
+#!/bin/sh
+exec env XTENSA_GNU_CONFIG=/usr/lib/xtensa-dynconfig/xtensa_$mcu.so xtensa-none-elf-$cmd "\$@"
+EOF
+		chmod +x "$subpkgdir/usr/bin/$target-$cmd"
+	done
+
+	cmds="
+		cpp
+		gcc
+		"
+	mkdir -p "$subpkgdir/usr/bin"
+	for cmd in $cmds; do
+		cat > "$subpkgdir/usr/bin/$target-$cmd" << EOF
+#!/bin/sh
+exec env XTENSA_GNU_CONFIG=/usr/lib/xtensa-dynconfig/xtensa_$mcu.so xtensa-none-elf-$cmd --sysroot=/usr/$target "\$@"
+EOF
+		chmod +x "$subpkgdir/usr/bin/$target-$cmd"
+	done
 }
 
 sha512sums="
 e9e224f2b26646fcf038d28dfa08b94c623bc57941f99894a321d01c600f7c68aff6b8837fd25e73e540de1f8de5606e98694a62cdcdfb525ce768b3ef6879ea  gcc-14.1.0.tar.xz
 52e45ba12be74ce6f740eff3a79e3da87c80b06275fd00b2a1193b052fd0891e7c4c09fd6a9c204a82178c135318d69db3e250f12c37eca72edb1e3c0b0be2db  newlib-getentropy.patch
+ce9873d26ea4ab6fd9a50b8d5ac55c88abbad18fb16a79a9f6ac3d1ae3a1c7a9b876bfa9fcba11bec16672ef7a10ffaf3923ce361fc530f0f811858dcc9da9eb  xtensa-fix-specs.patch
 "
