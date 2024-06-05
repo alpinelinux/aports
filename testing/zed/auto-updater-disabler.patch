@@ -1,0 +1,154 @@
+Patch-Source: https://github.com/zed-industries/zed/commit/da29e33f508417b03437cca1e64340086c394e74
+--
+From da29e33f508417b03437cca1e64340086c394e74 Mon Sep 17 00:00:00 2001
+From: Mikayla Maki <mikayla@zed.dev>
+Date: Tue, 4 Jun 2024 15:56:18 -0700
+Subject: [PATCH] Auto updater disabler (#12660)
+
+Supersedes https://github.com/zed-industries/zed/pull/12659
+Fixes https://github.com/zed-industries/zed/issues/12588
+
+One of Zed's core features is our collaboration software. As such, it is
+important that we notify the user when their RPC protocol is out of
+date, and how to update it. This PR adds a mechanism to replace the
+existing auto updater with a message explaining how to update Zed for
+this environment.
+
+Release Notes:
+
+- N/A
+---
+ crates/auto_update/src/auto_update.rs | 67 +++++++++++++++++----------
+ crates/cli/src/main.rs                |  4 +-
+ docs/src/development/linux.md         |  2 +-
+ 3 files changed, 45 insertions(+), 28 deletions(-)
+
+diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
+index 871d053a584..cc7fd0a2b7f 100644
+--- a/crates/auto_update/src/auto_update.rs
++++ b/crates/auto_update/src/auto_update.rs
+@@ -23,7 +23,10 @@ use smol::{fs::File, process::Command};
+ use http::{HttpClient, HttpClientWithUrl};
+ use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
+ use std::{
+-    env::consts::{ARCH, OS},
++    env::{
++        self,
++        consts::{ARCH, OS},
++    },
+     ffi::OsString,
+     path::PathBuf,
+     sync::Arc,
+@@ -138,20 +141,24 @@ pub fn init(http_client: Arc<HttpClientWithUrl>, cx: &mut AppContext) {
+     let auto_updater = cx.new_model(|cx| {
+         let updater = AutoUpdater::new(version, http_client);
+ 
+-        let mut update_subscription = AutoUpdateSetting::get_global(cx)
+-            .0
+-            .then(|| updater.start_polling(cx));
+-
+-        cx.observe_global::<SettingsStore>(move |updater, cx| {
+-            if AutoUpdateSetting::get_global(cx).0 {
+-                if update_subscription.is_none() {
+-                    update_subscription = Some(updater.start_polling(cx))
++        if option_env!("ZED_UPDATE_EXPLANATION").is_none()
++            && env::var("ZED_UPDATE_EXPLANATION").is_err()
++        {
++            let mut update_subscription = AutoUpdateSetting::get_global(cx)
++                .0
++                .then(|| updater.start_polling(cx));
++
++            cx.observe_global::<SettingsStore>(move |updater, cx| {
++                if AutoUpdateSetting::get_global(cx).0 {
++                    if update_subscription.is_none() {
++                        update_subscription = Some(updater.start_polling(cx))
++                    }
++                } else {
++                    update_subscription.take();
+                 }
+-            } else {
+-                update_subscription.take();
+-            }
+-        })
+-        .detach();
++            })
++            .detach();
++        }
+ 
+         updater
+     });
+@@ -159,6 +166,26 @@ pub fn init(http_client: Arc<HttpClientWithUrl>, cx: &mut AppContext) {
+ }
+ 
+ pub fn check(_: &Check, cx: &mut WindowContext) {
++    if let Some(message) = option_env!("ZED_UPDATE_EXPLANATION") {
++        drop(cx.prompt(
++            gpui::PromptLevel::Info,
++            "Zed was installed via a package manager.",
++            Some(message),
++            &["Ok"],
++        ));
++        return;
++    }
++
++    if let Some(message) = env::var("ZED_UPDATE_EXPLANATION").ok() {
++        drop(cx.prompt(
++            gpui::PromptLevel::Info,
++            "Zed was installed via a package manager.",
++            Some(&message),
++            &["Ok"],
++        ));
++        return;
++    }
++
+     if let Some(updater) = AutoUpdater::get(cx) {
+         updater.update(cx, |updater, cx| updater.poll(cx));
+     } else {
+@@ -342,16 +369,6 @@ impl AutoUpdater {
+     }
+ 
+     async fn update(this: Model<Self>, mut cx: AsyncAppContext) -> Result<()> {
+-        // Skip auto-update for flatpaks
+-        #[cfg(target_os = "linux")]
+-        if matches!(std::env::var("ZED_IS_FLATPAK_INSTALL"), Ok(_)) {
+-            this.update(&mut cx, |this, cx| {
+-                this.status = AutoUpdateStatus::Idle;
+-                cx.notify();
+-            })?;
+-            return Ok(());
+-        }
+-
+         let (client, current_version) = this.read_with(&cx, |this, _| {
+             (this.http_client.clone(), this.current_version)
+         })?;
+@@ -509,7 +526,7 @@ async fn install_release_linux(
+     cx: &AsyncAppContext,
+ ) -> Result<()> {
+     let channel = cx.update(|cx| ReleaseChannel::global(cx).dev_name())?;
+-    let home_dir = PathBuf::from(std::env::var("HOME").context("no HOME env var set")?);
++    let home_dir = PathBuf::from(env::var("HOME").context("no HOME env var set")?);
+ 
+     let extracted = temp_dir.path().join("zed");
+     fs::create_dir_all(&extracted)
+diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
+index 5ab9b2029b8..4132be300b5 100644
+--- a/crates/cli/src/main.rs
++++ b/crates/cli/src/main.rs
+@@ -314,7 +314,7 @@ mod flatpak {
+         if let Some(flatpak_dir) = get_flatpak_dir() {
+             let mut args = vec!["/usr/bin/flatpak-spawn".into(), "--host".into()];
+             args.append(&mut get_xdg_env_args());
+-            args.push("--env=ZED_IS_FLATPAK_INSTALL=1".into());
++            args.push("--env=ZED_UPDATE_EXPLANATION=Please use flatpak to update zed".into());
+             args.push(
+                 format!(
+                     "--env={EXTRA_LIB_ENV_NAME}={}",
+@@ -348,7 +341,7 @@
+         {
+             if args.zed.is_none() {
+                 args.zed = Some("/app/libexec/zed-editor".into());
+-                env::set_var("ZED_IS_FLATPAK_INSTALL", "1");
++                env::set_var("ZED_UPDATE_EXPLANATION", "Please use flatpak to update zed");
+             }
+         }
+         args
