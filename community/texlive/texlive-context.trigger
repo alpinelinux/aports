@@ -1,4 +1,3 @@
 #!/bin/sh
-echo " --> mtxrun --generate"
+printf "%-50s" " --> mtxrun --generate"
 mtxrun --generate > /dev/null
-exit 0
