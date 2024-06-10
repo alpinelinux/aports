@@ -1,5 +1,5 @@
 #!/bin/sh
 
 # Reload .mount files
-busybox killall -USR1 gvfsd >&/dev/null
+busybox killall -q USR1 gvfsd
 exit 0
