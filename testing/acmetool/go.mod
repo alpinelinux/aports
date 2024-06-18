@@ -25,7 +25,7 @@ require (
 	github.com/stretchr/testify v1.7.0 // indirect
 	golang.org/x/crypto v0.0.0-20180411161317-d6449816ce06 // indirect
 	golang.org/x/net v0.0.0-20180417003750-8d16fa6dc9a8
-	golang.org/x/sys v0.0.0-20210630005230-0f9fa26af87c // indirect
+	golang.org/x/sys v0.6.0 // indirect
 	golang.org/x/text v0.3.1-0.20180410181320-7922cc490dd5 // indirect
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
 	gopkg.in/cheggaaa/pb.v1 v1.0.22
@@ -41,4 +41,4 @@ require (
 	gopkg.in/yaml.v2 v2.2.1
 )
 
-replace golang.org/x/sys => golang.org/x/sys v0.0.0-20210630005230-0f9fa26af87c
+replace golang.org/x/sys => golang.org/x/sys v0.6.0
