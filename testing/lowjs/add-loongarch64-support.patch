@@ -1,0 +1,176 @@
+diff --git a/src/low_native_api.cpp b/src/low_native_api.cpp
+index 9241a4f..965e3a1 100644
+--- a/src/low_native_api.cpp
++++ b/src/low_native_api.cpp
+@@ -317,6 +317,13 @@ void *native_api_load(const char *data, unsigned int size, const char **err, boo
+         *err = "File is an ELF file, but not one for arm machines.";
+         return NULL;
+     }
++#elif defined(__loongarch64)
++    if(hdr->e_ident[EI_CLASS] != ELFCLASS64
++    || hdr->e_machine != EM_LOONGARCH)
++    {
++        *err = "File is an ELF file, but not one for loongarch64 machines.";
++        return NULL;
++    }
+ #endif
+ 
+     if(!hdr->e_phnum || size < hdr->e_phoff + hdr->e_phnum * sizeof(Elf_Phdr)
+@@ -644,6 +651,64 @@ void *native_api_load(const char *data, unsigned int size, const char **err, boo
+                     *(uintptr_t *)(exec + rel[j].r_offset) += (uintptr_t)exec;
+                     break;
+ 
++                default:
++                    munmap(base, exec_size);
++                    *err = (char *)low_alloc(80);
++                    sprintf((char *)*err, "Unknown relocatable type #%d.", (int)ELF_R_TYPE(rel[j].r_info));
++                    *err_malloc = true;
++                    return NULL;
++                }
++        }
++#elif defined(__loongarch64)
++        if (shdr[i].sh_type == SHT_RELA)
++        {
++            const Elf_Rela *rel = (const Elf_Rela *)(data + shdr[i].sh_offset);
++            for(int j = 0; j < shdr[i].sh_size / sizeof(Elf_Rela); j++)
++                switch(ELF_R_TYPE(rel[j].r_info))
++                {
++                case R_LARCH_NONE: break;
++
++		case R_LARCH_64:
++                case R_LARCH_64_PCREL:
++		case R_LARCH_JUMP_SLOT:
++                    uintptr_t func;
++                    const char *sym;
++
++                    sym = strings + syms[ELF_R_SYM(rel[j].r_info)].st_name;
++                    func = 0;
++
++                    for(int k = 0; k < sizeof(NATIVE_API_ENTRIES) / sizeof(native_api_entry_t); k++)
++                    {
++                        if(strcmp(NATIVE_API_ENTRIES[k].name, sym) == 0)
++                        {
++                            func = NATIVE_API_ENTRIES[k].func;
++                            break;
++                        }
++                    }
++
++                    if(!func)
++                        func = (uintptr_t)dlsym(RTLD_DEFAULT, sym);
++                    if(!func)
++                    {
++                        munmap(base, exec_size);
++                        *err = (char *)low_alloc(80 + strlen(sym));
++                        sprintf((char *)*err, "File asks for symbol '%s' which low.js does not know of.", sym);
++                        *err_malloc = true;
++                        return NULL;
++                    }
++
++                   if(ELF_R_TYPE(rel[j].r_info) == R_LARCH_64_PCREL)
++                        *(uintptr_t *)(exec + rel[j].r_offset) = func + rel[j].r_addend - (uintptr_t)(exec + rel[j].r_offset);
++                    else if(ELF_R_TYPE(rel[j].r_info) == R_LARCH_64)
++                        *(uintptr_t *)(exec + rel[j].r_offset) = func + rel[j].r_addend;
++                    else
++                        *(uintptr_t *)(exec + rel[j].r_offset) = func;
++                    break;
++
++                case R_LARCH_RELATIVE:
++                    *(uintptr_t *)(exec + rel[j].r_offset) = (uintptr_t)exec + rel[j].r_addend;
++                    break;
++
+                 default:
+                     munmap(base, exec_size);
+                     *err = (char *)low_alloc(80);
+@@ -788,7 +853,7 @@ int native_api_call(duk_context *ctx)
+ 
+ void native_api_unload_all()
+ {
+-#if defined(__x86_64__) || defined(__i386__) || defined(__aarch64__) || defined(__arm__)
++#if defined(__x86_64__) || defined(__i386__) || defined(__aarch64__) || defined(__arm__) || defined(__loongarch64)
+     for(int i = 0; i < gNativeAPIRegisteredFrames.size(); i++)
+         __deregister_frame(gNativeAPIRegisteredFrames[i]);
+     gNativeAPIRegisteredFrames.clear();
+diff --git a/src/low_process.cpp b/src/low_process.cpp
+index c37dfc3..6ddef23 100644
+--- a/src/low_process.cpp
++++ b/src/low_process.cpp
+@@ -371,6 +371,8 @@ duk_ret_t low_process_info(duk_context *ctx)
+     duk_push_string(ctx, "x64");
+ #elif defined(__i386__)
+     duk_push_string(ctx, "x32");
++#elif defined(__loongarch64)
++    duk_push_string(ctx, "loongarch64");
+ #else
+ #error "unknown architecture"
+ #endif
+diff --git a/src/sys/elf_common.h b/src/sys/elf_common.h
+index 69aa139..97ef95c 100644
+--- a/src/sys/elf_common.h
++++ b/src/sys/elf_common.h
+@@ -304,6 +304,8 @@ typedef struct {
+ #define	EM_AARCH64	183	/* AArch64 (64-bit ARM) */
+ #define	EM_RISCV	243	/* RISC-V */
+ 
++#define EM_LOONGARCH    258     /* LoongArch */
++
+ /* Non-standard or deprecated. */
+ #define	EM_486		6	/* Intel i486. */
+ #define	EM_MIPS_RS4_BE	10	/* MIPS R4000 Big-Endian */
+@@ -1141,6 +1143,57 @@ typedef struct {
+ #define	R_IA_64_DTPREL64LSB	0xb7	/* word64 LSB	@dtprel(S + A) */
+ #define	R_IA_64_LTOFF_DTPREL22	0xba	/* imm22	@ltoff(@dtprel(S+A)) */
+ 
++#define R_LARCH_NONE              0    /* None */
++#define R_LARCH_32                1    /* *(int32_t *) PC = RtAddr + A */
++#define R_LARCH_64                2    /* *(int64_t *) PC = RtAddr + A */
++#define R_LARCH_RELATIVE          3    /* *(void **) PC = B + A  */
++#define R_LARCH_COPY              4    /* memcpy (PC, RtAddr, sizeof (sym)) */
++#define R_LARCH_JUMP_SLOT         5    /* implementation-defined */
++#define R_LARCH_TLS_DTPMOD32      6    /* *(int32_t *) PC = ID of module defining sym */
++#define R_LARCH_TLS_DTPMOD64      7    /* *(int64_t *) PC = ID of module defining sym */
++#define R_LARCH_TLS_DTPREL32      8    /* *(int32_t *) PC = DTV-relative offset for sym */
++#define R_LARCH_TLS_DTPREL64      9    /* *(int64_t *) PC = DTV-relative offset for sym */
++#define R_LARCH_TLS_TPREL32      10    /* *(int32_t *) PC = T */
++#define R_LARCH_TLS_TPREL64      11    /* *(int64_t *) PC = T */
++#define R_LARCH_IRELATIVE        12    /* *(void **) PC = (((void *)(*)()) (B + A)) () */
++#define R_LARCH_B16              64    /* 18-bit PC-relative jump */
++#define R_LARCH_B21              65    /* 23-bit PC-relative jump */
++#define R_LARCH_B26              66    /* 28-bit PC-relative jump */
++#define R_LARCH_ABS_HI20         67    /* [31 ... 12] bits of 32/64-bit absolute address */
++#define R_LARCH_ABS_LO12         68    /* [11 ... 0] bits of 32/64-bit absolute address */
++#define R_LARCH_ABS64_LO20       69    /* [51 ... 32] bits of 64-bit absolute address  */
++#define R_LARCH_ABS64_HI12       70    /* [63 ... 52] bits of 64-bit absolute address */
++#define R_LARCH_PCALA_HI20       71    /* [31 ... 12] bits of 32/64-bit PC-relative offset */
++#define R_LARCH_PCALA_LO12       72    /* [11 ... 0] bits of 32/64-bit address */
++#define R_LARCH_PCALA64_LO20     73    /* [51 ... 32] bits of 64-bit PC-relative offset */
++#define R_LARCH_PCALA64_HI12     74    /* [63 ... 52] bits of 64-bit PC-relative offset */
++#define R_LARCH_GOT_PC_HI20      75    /* [31 ... 12] bits of 32/64-bit PC-relative offset to GOT entry */
++#define R_LARCH_GOT_PC_LO12      76    /* [11 ... 0] bits of 32/64-bit GOT entry address */
++#define R_LARCH_GOT64_PC_LO20    77    /* [51 ... 32] bits of 64-bit PC-relative offset to GOT entry */
++#define R_LARCH_GOT64_PC_HI12    78    /* [63 ... 52] bits of 64-bit PC-relative offset to GOT entry */
++#define R_LARCH_GOT_HI20         79    /* [31 ... 12] bits of 32/64-bit GOT entry absolute address */
++#define R_LARCH_GOT_LO12         80    /* [11 ... 0] bits of 32/64-bit GOT entry absolute address  */
++#define R_LARCH_GOT64_LO20       81    /* [51 ... 32] bits of 64-bit GOT entry absolute address  */
++#define R_LARCH_GOT64_HI12       82    /* [63 ... 52] bits of 64-bit GOT entry absolute address */
++#define R_LARCH_TLS_LE_HI20      83    /* [31 ... 12] bits of TLS LE 32/64-bit offset from TP register */
++#define R_LARCH_TLS_LE_LO12      84    /* [11 ... 0] bits of TLS LE 32/64-bit offset from TP register */
++#define R_LARCH_TLS_LE64_LO20    85    /* [51 ... 32] bits of TLS LE 64-bit offset from TP register */
++#define R_LARCH_TLS_LE64_HI12    86    /* [63 ... 52] bits of TLS LE 64-bit offset from TP register */
++#define R_LARCH_TLS_IE_PC_HI20   87    /* [31 ... 12] bits of 32/64-bit PC-relative offset to TLS IE GOT entry */
++#define R_LARCH_TLS_IE_PC_LO12   88    /* [11 ... 0] bits of 32/64-bit TLS IE GOT entry address */
++#define R_LARCH_TLS_IE64_PC_LO20 89    /* [51 ... 32] bits of 64-bit PC-relative offset to TLS IE GOT entry */
++#define R_LARCH_TLS_IE64_PC_HI12 90    /* [63 ... 52] bits of 64-bit PC-relative offset to TLS IE GOT entry */
++#define R_LARCH_TLS_IE_HI20      91    /* [31 ... 12] bits of 32/64-bit TLS IE GOT entry absolute address */
++#define R_LARCH_TLS_IE_LO12      92    /* [11 ... 0] bits of 32/64-bit TLS IE GOT entry absolute address */
++#define R_LARCH_TLS_IE64_LO20    93    /* [51 ... 32] bits of 64-bit TLS IE GOT entry absolute address */
++#define R_LARCH_TLS_IE64_HI12    94    /* [63 ... 52] bits of 64-bit TLS IE GOT entry absolute address */
++#define R_LARCH_TLS_LD_PC_HI20   95    /* [31 ... 12] bits of 32/64-bit PC-relative offset to TLS LD GOT entry */
++#define R_LARCH_TLS_LD_HI20      96    /* [31 ... 12] bits of 32/64-bit TLS LD GOT entry absolute address */
++#define R_LARCH_TLS_GD_PC_HI20   97    /* [31 ... 12] bits of 32/64-bit PC-relative offset to TLS GD GOT entry */
++#define R_LARCH_TLS_GD_HI20      98    /* [31 ... 12] bits of 32/64-bit TLS GD GOT entry absolute address */
++#define R_LARCH_32_PCREL         99    /* 32-bit PC relative */
++#define R_LARCH_RELAX            100    /* Instruction can be relaxed, paired with a normal relocation at the same address */
++
+ #define	R_MIPS_NONE	0	/* No reloc */
+ #define	R_MIPS_16	1	/* Direct 16 bit */
+ #define	R_MIPS_32	2	/* Direct 32 bit */
