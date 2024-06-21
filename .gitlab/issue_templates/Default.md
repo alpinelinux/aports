@@ -15,7 +15,7 @@ For other components, separate issue trackers exist:
 
 * Package name: *Enter the apk package name*
 * Package version: *Version as obtained by `apk info`*
-* Alpine version: *Alpine version from `/etc/alpine-release`*
+* Alpine version: *Alpine version from `cat /etc/alpine-release`*
 * Alpine architecture: *Architecture obtained via `apk --print-arch`*
 
 ## Summary
