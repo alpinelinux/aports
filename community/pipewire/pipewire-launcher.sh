@@ -10,7 +10,7 @@ exec /usr/bin/pipewire &
 
 # wait for pipewire to start before attempting to start related daemons
 while [ "$(pgrep -f /usr/bin/pipewire)" = "" ]; do
-        sleep 1
+	sleep 1
 done
 
 if [ -x /usr/bin/wireplumber ]; then
