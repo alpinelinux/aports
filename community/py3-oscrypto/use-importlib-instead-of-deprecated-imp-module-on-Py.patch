@@ -1,0 +1,315 @@
+From 3865f5d528740aa1205d16ddbee84c5b48aeb078 Mon Sep 17 00:00:00 2001
+From: rathann <dominik@greysector.net>
+Date: Wed, 23 Aug 2023 13:03:04 +0200
+Subject: [PATCH] use importlib instead of deprecated imp module on Python 3.5+
+ (#77)
+
+Co-authored-by: wbond <will@wbond.net>
+---
+ dev/_import.py    | 78 ++++++++++++++++++++++++++++++++++++++++---
+ dev/build.py      |  6 ++--
+ dev/coverage.py   |  6 ++--
+ tests/__init__.py | 84 ++++++++++++++++++++++++++++++++++++++++++++---
+ 4 files changed, 157 insertions(+), 17 deletions(-)
+
+diff --git a/dev/_import.py b/dev/_import.py
+index d64c028..c0a1983 100644
+--- a/dev/_import.py
++++ b/dev/_import.py
+@@ -1,17 +1,64 @@
+ # coding: utf-8
+ from __future__ import unicode_literals, division, absolute_import, print_function
+ 
+-import imp
+ import sys
+ import os
+ 
+ from . import build_root, package_name, package_root
+ 
++if sys.version_info < (3, 5):
++    import imp
++else:
++    import importlib
++    import importlib.abc
++    import importlib.util
++
++
+ if sys.version_info < (3,):
+     getcwd = os.getcwdu
+ else:
+     getcwd = os.getcwd
+ 
++if sys.version_info >= (3, 5):
++    class ModCryptoMetaFinder(importlib.abc.MetaPathFinder):
++        def setup(self):
++            self.modules = {}
++            sys.meta_path.insert(0, self)
++
++        def add_module(self, package_name, package_path):
++            if package_name not in self.modules:
++                self.modules[package_name] = package_path
++
++        def find_spec(self, fullname, path, target=None):
++            name_parts = fullname.split('.')
++            if name_parts[0] not in self.modules:
++                return None
++
++            package = name_parts[0]
++            package_path = self.modules[package]
++
++            fullpath = os.path.join(package_path, *name_parts[1:])
++
++            if os.path.isdir(fullpath):
++                filename = os.path.join(fullpath, "__init__.py")
++                submodule_locations = [fullpath]
++            else:
++                filename = fullpath + ".py"
++                submodule_locations = None
++
++            if not os.path.exists(filename):
++                return None
++
++            return importlib.util.spec_from_file_location(
++                fullname,
++                filename,
++                loader=None,
++                submodule_search_locations=submodule_locations
++            )
++
++    CUSTOM_FINDER = ModCryptoMetaFinder()
++    CUSTOM_FINDER.setup()
++
+ 
+ def _import_from(mod, path, mod_dir=None, allow_error=False):
+     """
+@@ -34,14 +81,25 @@ def _import_from(mod, path, mod_dir=None, allow_error=False):
+         None if not loaded, otherwise the module
+     """
+ 
++    if mod in sys.modules:
++        return sys.modules[mod]
++
++    if mod_dir is None:
++        full_mod = mod
++    else:
++        full_mod = mod_dir.replace(os.sep, '.')
++
+     if mod_dir is None:
+         mod_dir = mod.replace('.', os.sep)
+ 
+     if not os.path.exists(path):
+         return None
+ 
+-    if not os.path.exists(os.path.join(path, mod_dir)) \
+-            and not os.path.exists(os.path.join(path, mod_dir + '.py')):
++    source_path = os.path.join(path, mod_dir, '__init__.py')
++    if not os.path.exists(source_path):
++        source_path = os.path.join(path, mod_dir + '.py')
++
++    if not os.path.exists(source_path):
+         return None
+ 
+     if os.sep in mod_dir:
+@@ -49,8 +107,18 @@ def _import_from(mod, path, mod_dir=None, allow_error=False):
+         path = os.path.join(path, append)
+ 
+     try:
+-        mod_info = imp.find_module(mod_dir, [path])
+-        return imp.load_module(mod, *mod_info)
++        if sys.version_info < (3, 5):
++            mod_info = imp.find_module(mod_dir, [path])
++            return imp.load_module(mod, *mod_info)
++
++        else:
++            package = mod.split('.', 1)[0]
++            package_dir = full_mod.split('.', 1)[0]
++            package_path = os.path.join(path, package_dir)
++            CUSTOM_FINDER.add_module(package, package_path)
++
++            return importlib.import_module(mod)
++
+     except ImportError:
+         if allow_error:
+             raise
+diff --git a/dev/build.py b/dev/build.py
+index 4899594..f429fee 100644
+--- a/dev/build.py
++++ b/dev/build.py
+@@ -1,7 +1,6 @@
+ # coding: utf-8
+ from __future__ import unicode_literals, division, absolute_import, print_function
+ 
+-import imp
+ import os
+ import tarfile
+ import zipfile
+@@ -9,6 +8,7 @@
+ import setuptools.sandbox
+ 
+ from . import package_root, package_name, has_tests_package
++from ._import import _import_from
+ 
+ 
+ def _list_zip(filename):
+@@ -45,8 +45,8 @@ def run():
+ 
+     # Trying to call setuptools.sandbox.run_setup(setup, ['--version'])
+     # resulted in a segfault, so we do this instead
+-    module_info = imp.find_module('version', [os.path.join(package_root, package_name)])
+-    version_mod = imp.load_module('%s.version' % package_name, *module_info)
++    package_dir = os.path.join(package_root, package_name)
++    version_mod = _import_from('%s.version' % package_name, package_dir, 'version')
+ 
+     pkg_name_info = (package_name, version_mod.__version__)
+     print('Building %s-%s' % pkg_name_info)
+diff --git a/dev/coverage.py b/dev/coverage.py
+index bb99a4f..98f140b 100644
+--- a/dev/coverage.py
++++ b/dev/coverage.py
+@@ -4,7 +4,6 @@
+ import cgi
+ import codecs
+ import coverage
+-import imp
+ import json
+ import os
+ import unittest
+@@ -17,6 +16,7 @@
+ from fnmatch import fnmatch
+ 
+ from . import package_name, package_root, other_packages
++from ._import import _import_from
+ 
+ if sys.version_info < (3,):
+     str_cls = unicode  # noqa
+@@ -103,9 +103,7 @@ def _load_package_tests(name):
+     if not os.path.exists(package_dir):
+         return []
+ 
+-    tests_module_info = imp.find_module('tests', [package_dir])
+-    tests_module = imp.load_module('%s.tests' % name, *tests_module_info)
+-    return tests_module.test_classes()
++    return _import_from('%s_tests' % name, package_dir, 'tests').test_classes()
+ 
+ 
+ def _env_info():
+diff --git a/tests/__init__.py b/tests/__init__.py
+index 4c65360..3ae721d 100644
+--- a/tests/__init__.py
++++ b/tests/__init__.py
+@@ -1,10 +1,17 @@
+ # coding: utf-8
+ from __future__ import unicode_literals, division, absolute_import, print_function
+ 
+-import imp
+ import os
++import sys
+ import unittest
+ 
++if sys.version_info < (3, 5):
++    import imp
++else:
++    import importlib
++    import importlib.abc
++    import importlib.util
++
+ 
+ __version__ = '1.3.0'
+ __version_info__ = (1, 3, 0)
+@@ -66,6 +73,47 @@ def local_oscrypto():
+     return (_asn1crypto_module, _oscrypto_module)
+ 
+ 
++if sys.version_info >= (3, 5):
++    class ModCryptoMetaFinder(importlib.abc.MetaPathFinder):
++        def setup(self):
++            self.modules = {}
++            sys.meta_path.insert(0, self)
++
++        def add_module(self, package_name, package_path):
++            if package_name not in self.modules:
++                self.modules[package_name] = package_path
++
++        def find_spec(self, fullname, path, target=None):
++            name_parts = fullname.split('.')
++            if name_parts[0] not in self.modules:
++                return None
++
++            package = name_parts[0]
++            package_path = self.modules[package]
++
++            fullpath = os.path.join(package_path, *name_parts[1:])
++
++            if os.path.isdir(fullpath):
++                filename = os.path.join(fullpath, "__init__.py")
++                submodule_locations = [fullpath]
++            else:
++                filename = fullpath + ".py"
++                submodule_locations = None
++
++            if not os.path.exists(filename):
++                return None
++
++            return importlib.util.spec_from_file_location(
++                fullname,
++                filename,
++                loader=None,
++                submodule_search_locations=submodule_locations
++            )
++
++    CUSTOM_FINDER = ModCryptoMetaFinder()
++    CUSTOM_FINDER.setup()
++
++
+ def _import_from(mod, path, mod_dir=None):
+     """
+     Imports a module from a specific path
+@@ -84,18 +132,44 @@ def _import_from(mod, path, mod_dir=None):
+         None if not loaded, otherwise the module
+     """
+ 
++    if mod in sys.modules:
++        return sys.modules[mod]
++
+     if mod_dir is None:
+-        mod_dir = mod
++        full_mod = mod
++    else:
++        full_mod = mod_dir.replace(os.sep, '.')
++
++    if mod_dir is None:
++        mod_dir = mod.replace('.', os.sep)
+ 
+     if not os.path.exists(path):
+         return None
+ 
+-    if not os.path.exists(os.path.join(path, mod_dir)):
++    source_path = os.path.join(path, mod_dir, '__init__.py')
++    if not os.path.exists(source_path):
++        source_path = os.path.join(path, mod_dir + '.py')
++
++    if not os.path.exists(source_path):
+         return None
+ 
++    if os.sep in mod_dir:
++        append, mod_dir = mod_dir.rsplit(os.sep, 1)
++        path = os.path.join(path, append)
++
+     try:
+-        mod_info = imp.find_module(mod_dir, [path])
+-        return imp.load_module(mod, *mod_info)
++        if sys.version_info < (3, 5):
++            mod_info = imp.find_module(mod_dir, [path])
++            return imp.load_module(mod, *mod_info)
++
++        else:
++            package = mod.split('.', 1)[0]
++            package_dir = full_mod.split('.', 1)[0]
++            package_path = os.path.join(path, package_dir)
++            CUSTOM_FINDER.add_module(package, package_path)
++
++            return importlib.import_module(mod)
++
+     except ImportError:
+         return None
+ 
