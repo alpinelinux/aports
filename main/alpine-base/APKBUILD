@@ -23,10 +23,6 @@ subpackages="alpine-release:release"
 replaces="alpine-baselayout"
 options="!check"
 
-build() {
-	return 0
-}
-
 package() {
 	mkdir -p "$pkgdir"
 }
