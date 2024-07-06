@@ -1,0 +1,82 @@
+commit bec5df6e4278dec8b9d592b2f93930327a2b8279
+Author: q66 <q66@chimera-linux.org>
+Date:   Sat Nov 11 02:41:10 2023 +0100
+
+    steamcompmgr: avoid xwayland server mutex deadlock
+    
+    This uses pthread_exit, which does not ensure C++ destructors
+    are called. That means the steamcompmgr mutex may remain locked
+    forever, which will prevent gamescope from quitting, as wlserver
+    will deadlock on trying to lock it.
+    
+    Take this strategy: when steamcompmgr_main exits normally, there
+    is no need to call pthread_exit as the thread will stop on its
+    own via returning from its function; this will correctly release
+    all resources.
+    
+    Upon invocation of error handler however, do call pthread_exit
+    and unlock the mutex manually.
+
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index f53f49e..08784f1 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -743,6 +743,7 @@ extern float g_flMaxWindowScale;
+ bool			synchronize;
+ 
+ std::mutex g_SteamCompMgrXWaylandServerMutex;
++static std::unique_lock<std::mutex> *g_SteamCompMgrXWaylandServerLock;
+ 
+ VBlankTimeInfo_t g_SteamCompMgrVBlankTime = {};
+ 
+@@ -5892,8 +5893,8 @@ error(Display *dpy, XErrorEvent *ev)
+ 	return 0;
+ }
+ 
+-[[noreturn]] static void
+-steamcompmgr_exit(void)
++static void
++steamcompmgr_exit(bool exit)
+ {
+ 	// Clean up any commits.
+ 	{
+@@ -5925,14 +5926,19 @@ steamcompmgr_exit(void)
+ 
+ 	finish_drm( &g_DRM );
+ 
+-	pthread_exit(NULL);
++	if (exit)
++	{
++		// pthread_exit may not call C++ destructors
++		g_SteamCompMgrXWaylandServerLock->unlock();
++		pthread_exit(NULL);
++	}
+ }
+ 
+-static int
++[[noreturn]] static int
+ handle_io_error(Display *dpy)
+ {
+ 	xwm_log.errorf("X11 I/O error");
+-	steamcompmgr_exit();
++	steamcompmgr_exit(true);
+ }
+ 
+ static bool
+@@ -7399,6 +7405,7 @@ steamcompmgr_main(int argc, char **argv)
+ 	assert( vblankFD >= 0 );
+ 
+ 	std::unique_lock<std::mutex> xwayland_server_guard(g_SteamCompMgrXWaylandServerMutex);
++	g_SteamCompMgrXWaylandServerLock = &xwayland_server_guard;
+ 
+ 	// Initialize any xwayland ctxs we have
+ 	{
+@@ -7869,7 +7876,7 @@ steamcompmgr_main(int argc, char **argv)
+ 		vblank = false;
+ 	}
+ 
+-	steamcompmgr_exit();
++	steamcompmgr_exit(false);
+ }
+ 
+ void steamcompmgr_send_frame_done_to_focus_window()
