@@ -29,6 +29,6 @@ echo "Flash initramfs to the '$INITFS_PARTITION' partition (isorec-style) and"
 echo "kernel to the '$KERNEL_PARTITION' partition"
 gunzip -c "$INITFS" | lzop > /tmp/initramfs.lzo
 cat "$KERNEL" "$DTB" > /tmp/vmlinuz-dtb
-heimdall flash --"$INITFS_PARTITION" /tmp/initramfs.lzo --"$KERNEL_PARTITION" /tmp/vmlinuz-dtb
+heimdall flash --wait --"$INITFS_PARTITION" /tmp/initramfs.lzo --"$KERNEL_PARTITION" /tmp/vmlinuz-dtb
 rm /tmp/initramfs.lzo
 rm /tmp/vmlinuz-dtb
