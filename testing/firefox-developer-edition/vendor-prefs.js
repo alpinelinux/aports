@@ -17,3 +17,6 @@ pref("browser.topsites.contile.enabled", false);
 // Disable Widevine CDM support (doesn't work on musl anyway)
 pref("media.gmp-widevinecdm.visible", false);
 pref("media.gmp-widevinecdm.enabled", false);
+
+// Disable Privacy-Preserving Attribution Measurement
+pref("dom.private-attribution.submission.enabled", false);
