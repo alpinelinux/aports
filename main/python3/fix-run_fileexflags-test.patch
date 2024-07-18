@@ -1,0 +1,228 @@
+"Unofficial" backport of https://github.com/python/cpython/pull/118429
+
+
+diff --git a/Include/internal/pycore_fileutils.h b/Include/internal/pycore_fileutils.h
+index 7c2b6ec0bff..2931fefd6b7 100644
+--- a/Include/internal/pycore_fileutils.h
++++ b/Include/internal/pycore_fileutils.h
+@@ -286,6 +286,9 @@ extern HRESULT PathCchSkipRoot(const wchar_t *pszPath, const wchar_t **ppszRootE
+ #  define _Py_END_SUPPRESS_IPH
+ #endif /* _MSC_VER >= 1900 */
+ 
++// Export for '_testcapi' shared extension
++PyAPI_FUNC(int) _Py_IsValidFD(int fd);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Modules/_testcapi/parts.h b/Modules/_testcapi/parts.h
+index 496dd38fbad..6b6a673cf6f 100644
+--- a/Modules/_testcapi/parts.h
++++ b/Modules/_testcapi/parts.h
+@@ -15,6 +15,24 @@
+ // Always enable assertions
+ #undef NDEBUG
+ 
++#ifdef PYTESTCAPI_NEED_INTERNAL_API
++#  ifndef Py_BUILD_CORE_BUILTIN
++#    define Py_BUILD_CORE_MODULE 1
++#  endif
++#else
++   // The _testcapi extension tests the public C API: header files in Include/
++   // and Include/cpython/ directories. The internal C API must not be tested
++   // by _testcapi: use _testinternalcapi for that.
++   //
++   // _testcapi C files can built with the Py_BUILD_CORE_BUILTIN macro defined
++   // if one of the Modules/Setup files asks to build _testcapi as "static"
++   // (gh-109723).
++   //
++   // The Visual Studio projects builds _testcapi with Py_BUILD_CORE_MODULE.
++#  undef Py_BUILD_CORE_MODULE
++#  undef Py_BUILD_CORE_BUILTIN
++#endif
++
+ #if !defined(LIMITED_API_AVAILABLE) && defined(Py_LIMITED_API)
+ // Limited API being unavailable means that with Py_LIMITED_API defined
+ // we can't even include Python.h.
+diff --git a/Modules/_testcapi/run.c b/Modules/_testcapi/run.c
+index 16c7b756c38..cf0fc325378 100644
+--- a/Modules/_testcapi/run.c
++++ b/Modules/_testcapi/run.c
+@@ -1,6 +1,8 @@
+ #define PY_SSIZE_T_CLEAN
++#define PYTESTCAPI_NEED_INTERNAL_API
+ #include "parts.h"
+ #include "util.h"
++#include "pycore_fileutils.h"     // _Py_IsValidFD()
+ 
+ #include <stdio.h>
+ #include <errno.h>
+@@ -72,21 +74,18 @@ run_fileexflags(PyObject *mod, PyObject *pos_args)
+         PyErr_SetFromErrnoWithFilename(PyExc_OSError, filename);
+         return NULL;
+     }
++    int fd = fileno(fp);
+ 
+     result = PyRun_FileExFlags(fp, filename, start, globals, locals, closeit, pflags);
+ 
+-#if defined(__linux__) || defined(MS_WINDOWS) || defined(__APPLE__)
+-    /* The behavior of fileno() after fclose() is undefined, but it is
+-     * the only practical way to check whether the file was closed.
+-     * Only test this on the known platforms. */
+-    if (closeit && result && fileno(fp) >= 0) {
++    if (closeit && result && _Py_IsValidFD(fd)) {
+         PyErr_SetString(PyExc_AssertionError, "File was not closed after excution");
+         Py_DECREF(result);
+         fclose(fp);
+         return NULL;
+     }
+-#endif
+-    if (!closeit && fileno(fp) < 0) {
++
++    if (!closeit && !_Py_IsValidFD(fd)) {
+         PyErr_SetString(PyExc_AssertionError, "Bad file descriptor after excution");
+         Py_XDECREF(result);
+         return NULL;
+diff --git a/Python/fileutils.c b/Python/fileutils.c
+index c7521751cd2..1ef65cbaf1d 100644
+--- a/Python/fileutils.c
++++ b/Python/fileutils.c
+@@ -2940,3 +2940,53 @@ _Py_closerange(int first, int last)
+ #endif /* USE_FDWALK */
+     _Py_END_SUPPRESS_IPH
+ }
++
++
++/* Check if a file descriptor is valid or not.
++   Return 0 if the file descriptor is invalid, return non-zero otherwise. */
++int
++_Py_IsValidFD(int fd)
++{
++/* dup() is faster than fstat(): fstat() can require input/output operations,
++   whereas dup() doesn't. There is a low risk of EMFILE/ENFILE at Python
++   startup. Problem: dup() doesn't check if the file descriptor is valid on
++   some platforms.
++
++   fcntl(fd, F_GETFD) is even faster, because it only checks the process table.
++   It is preferred over dup() when available, since it cannot fail with the
++   "too many open files" error (EMFILE).
++
++   bpo-30225: On macOS Tiger, when stdout is redirected to a pipe and the other
++   side of the pipe is closed, dup(1) succeed, whereas fstat(1, &st) fails with
++   EBADF. FreeBSD has similar issue (bpo-32849).
++
++   Only use dup() on Linux where dup() is enough to detect invalid FD
++   (bpo-32849).
++*/
++    if (fd < 0) {
++        return 0;
++    }
++#if defined(F_GETFD) && ( \
++        defined(__linux__) || \
++        defined(__APPLE__) || \
++        (defined(__wasm__) && !defined(__wasi__)))
++    return fcntl(fd, F_GETFD) >= 0;
++#elif defined(__linux__)
++    int fd2 = dup(fd);
++    if (fd2 >= 0) {
++        close(fd2);
++    }
++    return (fd2 >= 0);
++#elif defined(MS_WINDOWS)
++    HANDLE hfile;
++    _Py_BEGIN_SUPPRESS_IPH
++    hfile = (HANDLE)_get_osfhandle(fd);
++    _Py_END_SUPPRESS_IPH
++    return (hfile != INVALID_HANDLE_VALUE
++            && GetFileType(hfile) != FILE_TYPE_UNKNOWN);
++#else
++    struct stat st;
++    return (fstat(fd, &st) == 0);
++#endif
++}
++
+diff --git a/Python/pylifecycle.c b/Python/pylifecycle.c
+index 2c36527a875..bb18b674c49 100644
+--- a/Python/pylifecycle.c
++++ b/Python/pylifecycle.c
+@@ -2286,54 +2286,6 @@ init_import_site(void)
+     return _PyStatus_OK();
+ }
+ 
+-/* Check if a file descriptor is valid or not.
+-   Return 0 if the file descriptor is invalid, return non-zero otherwise. */
+-static int
+-is_valid_fd(int fd)
+-{
+-/* dup() is faster than fstat(): fstat() can require input/output operations,
+-   whereas dup() doesn't. There is a low risk of EMFILE/ENFILE at Python
+-   startup. Problem: dup() doesn't check if the file descriptor is valid on
+-   some platforms.
+-
+-   fcntl(fd, F_GETFD) is even faster, because it only checks the process table.
+-   It is preferred over dup() when available, since it cannot fail with the
+-   "too many open files" error (EMFILE).
+-
+-   bpo-30225: On macOS Tiger, when stdout is redirected to a pipe and the other
+-   side of the pipe is closed, dup(1) succeed, whereas fstat(1, &st) fails with
+-   EBADF. FreeBSD has similar issue (bpo-32849).
+-
+-   Only use dup() on Linux where dup() is enough to detect invalid FD
+-   (bpo-32849).
+-*/
+-    if (fd < 0) {
+-        return 0;
+-    }
+-#if defined(F_GETFD) && ( \
+-        defined(__linux__) || \
+-        defined(__APPLE__) || \
+-        defined(__wasm__))
+-    return fcntl(fd, F_GETFD) >= 0;
+-#elif defined(__linux__)
+-    int fd2 = dup(fd);
+-    if (fd2 >= 0) {
+-        close(fd2);
+-    }
+-    return (fd2 >= 0);
+-#elif defined(MS_WINDOWS)
+-    HANDLE hfile;
+-    _Py_BEGIN_SUPPRESS_IPH
+-    hfile = (HANDLE)_get_osfhandle(fd);
+-    _Py_END_SUPPRESS_IPH
+-    return (hfile != INVALID_HANDLE_VALUE
+-            && GetFileType(hfile) != FILE_TYPE_UNKNOWN);
+-#else
+-    struct stat st;
+-    return (fstat(fd, &st) == 0);
+-#endif
+-}
+-
+ /* returns Py_None if the fd is not valid */
+ static PyObject*
+ create_stdio(const PyConfig *config, PyObject* io,
+@@ -2347,8 +2299,9 @@ create_stdio(const PyConfig *config, PyObject* io,
+     int buffering, isatty;
+     const int buffered_stdio = config->buffered_stdio;
+ 
+-    if (!is_valid_fd(fd))
++    if (!_Py_IsValidFD(fd)) {
+         Py_RETURN_NONE;
++    }
+ 
+     /* stdin is always opened in buffered mode, first because it shouldn't
+        make a difference in common use cases, second because TextIOWrapper
+@@ -2464,9 +2417,9 @@ create_stdio(const PyConfig *config, PyObject* io,
+     Py_XDECREF(text);
+     Py_XDECREF(raw);
+ 
+-    if (PyErr_ExceptionMatches(PyExc_OSError) && !is_valid_fd(fd)) {
++    if (PyErr_ExceptionMatches(PyExc_OSError) && !_Py_IsValidFD(fd)) {
+         /* Issue #24891: the file descriptor was closed after the first
+-           is_valid_fd() check was called. Ignore the OSError and set the
++           _Py_IsValidFD() check was called. Ignore the OSError and set the
+            stream to None. */
+         PyErr_Clear();
+         Py_RETURN_NONE;
+-- 
+2.45.2
+
