@@ -1,0 +1,264 @@
+Origin: https://github.com/HaxeFoundation/neko/commit/31e9db63291476e0aa811653e5518db9abe77b2f
+From: Apprentice-Alchemist <53486764+Apprentice-Alchemist@users.noreply.github.com>
+Date: Sat, 6 Jul 2024 21:00:37 +0100
+Subject: Migrate to mbedtls 3
+
+---------
+--- a/cmake/patch_mbedtls.cmake
++++ b/cmake/patch_mbedtls.cmake
+@@ -1,67 +1,5 @@
+-# Apply config adjustments similer to Debian's
+-# https://anonscm.debian.org/cgit/collab-maint/mbedtls.git/tree/debian/patches/01_config.patch
+-
+-set(config ${MbedTLS_source}/include/mbedtls/config.h)
+-
+-file(READ ${config} content)
+-
+-# disable support for SSL 3.0
+-string(REPLACE 
+-	"#define MBEDTLS_SSL_PROTO_SSL3"
+-	"//#define MBEDTLS_SSL_PROTO_SSL3"
+-	content ${content}
+-)
+-
+ if (WIN32)
+-	# allow alternate threading implementation
+-	string(REPLACE 
+-		"//#define MBEDTLS_THREADING_ALT"
+-		"#define MBEDTLS_THREADING_ALT"
+-		content ${content}
+-	)
+-	# disable the TCP/IP networking routines
+-	# such that it wouldn't interfere with the #include <windows.h> in our threading_alt.h
+-	string(REPLACE 
+-		"#define MBEDTLS_NET_C"
+-		"//#define MBEDTLS_NET_C"
+-		content ${content}
+-	)
+-
+ 	file(COPY ${source}/libs/ssl/threading_alt.h
+ 		DESTINATION ${MbedTLS_source}/include/mbedtls/
+ 	)
+-else()
+-	# enable pthread mutexes
+-	string(REPLACE 
+-		"//#define MBEDTLS_THREADING_PTHREAD"
+-		"#define MBEDTLS_THREADING_PTHREAD"
+-		content ${content}
+-	)
+ endif()
+-
+-# enable the HAVEGE random generator
+-string(REPLACE 
+-	"//#define MBEDTLS_HAVEGE_C"
+-	"#define MBEDTLS_HAVEGE_C"
+-	content ${content}
+-)
+-# enable support for (rare) MD2-signed X.509 certs
+-string(REPLACE 
+-	"//#define MBEDTLS_MD2_C"
+-	"#define MBEDTLS_MD2_C"
+-	content ${content}
+-)
+-# enable support for (rare) MD4-signed X.509 certs
+-string(REPLACE 
+-	"//#define MBEDTLS_MD4_C"
+-	"#define MBEDTLS_MD4_C"
+-	content ${content}
+-)
+-# allow use of mutexes within mbed TLS
+-string(REPLACE 
+-	"//#define MBEDTLS_THREADING_C"
+-	"#define MBEDTLS_THREADING_C"
+-	content ${content}
+-)
+-
+-file(WRITE ${config} ${content})
+\ No newline at end of file
+--- a/libs/ssl/CMakeLists.txt
++++ b/libs/ssl/CMakeLists.txt
+@@ -10,6 +10,7 @@
+ 		-DENABLE_PROGRAMS=OFF
+ 		-DENABLE_TESTING=OFF
+ 		-DUSE_STATIC_MBEDTLS_LIBRARY=ON
++		-DMBEDTLS_USER_CONFIG_FILE=${CMAKE_CURRENT_SOURCE_DIR}/mbedtls_config.h
+ 	)
+ 	if (UNIX)
+ 		list(APPEND MBEDTLS_CMAKE_ARGS
+@@ -25,7 +26,7 @@
+ 			${CMAKE_BINARY_DIR}/libs/src/MbedTLS-build/library/${CMAKE_CFG_INTDIR}/mbedtls.lib
+ 			${CMAKE_BINARY_DIR}/libs/src/MbedTLS-build/library/${CMAKE_CFG_INTDIR}/mbedcrypto.lib
+ 		)
+-		target_link_libraries(ssl.ndll ws2_32 Advapi32 Crypt32)
++		target_link_libraries(ssl.ndll ws2_32 Advapi32 Crypt32 bcrypt)
+ 	else()
+ 		set(MBEDTLS_LIBRARIES
+ 			${CMAKE_BINARY_DIR}/libs/src/MbedTLS-build/library/libmbedx509.a
+@@ -35,8 +36,8 @@
+ 	endif()
+ 	ExternalProject_Add(MbedTLS
+ 		${EP_CONFIGS}
+-		URL https://tls.mbed.org/download/mbedtls-2.13.0-apache.tgz
+-		URL_MD5 659d96bb03012ca6db414a9137fcdbd6
++		URL https://github.com/Mbed-TLS/mbedtls/releases/download/v3.6.0/mbedtls-3.6.0.tar.bz2
++		URL_HASH SHA256=3ecf94fcfdaacafb757786a01b7538a61750ebd85c4b024f56ff8ba1490fcd38
+ 		CMAKE_ARGS ${MBEDTLS_CMAKE_ARGS}
+ 		PATCH_COMMAND ${CMAKE_COMMAND} -Dsource=${CMAKE_SOURCE_DIR} -DMbedTLS_source=${CMAKE_BINARY_DIR}/libs/src/MbedTLS -P ${CMAKE_SOURCE_DIR}/cmake/patch_mbedtls.cmake
+ 		INSTALL_COMMAND echo skip install
+@@ -57,6 +58,11 @@
+ 	${MBEDTLS_INCLUDE_DIR}
+ )
+ 
++target_compile_definitions(ssl.ndll
++	PRIVATE
++	-DMBEDTLS_USER_CONFIG_FILE="${CMAKE_CURRENT_SOURCE_DIR}/mbedtls_config.h"
++)
++
+ if(APPLE)
+ 	find_library(SECURITY_LIBRARY Security REQUIRED)
+ 	find_library(COREFOUNDATION_LIBRARY CoreFoundation REQUIRED)
+--- /dev/null
++++ b/libs/ssl/mbedtls_config.h
+@@ -0,0 +1,10 @@
++#ifdef _WIN32
++#define MBEDTLS_THREADING_ALT
++#endif
++#ifndef _WIN32
++#define MBEDTLS_THREADING_PTHREAD
++#endif
++
++#undef MBEDTLS_NET_C
++
++#define MBEDTLS_THREADING_C
+--- a/libs/ssl/ssl.c
++++ b/libs/ssl/ssl.c
+@@ -31,7 +31,10 @@
+ #include "mbedtls/oid.h"
+ #include "mbedtls/x509_crt.h"
+ #include "mbedtls/ssl.h"
+-#include "mbedtls/net.h"
++
++#ifdef MBEDTLS_PSA_CRYPTO_C
++#include <psa/crypto.h>
++#endif
+ 
+ #define val_ssl(o)	(mbedtls_ssl_context*)val_data(o)
+ #define val_conf(o)	(mbedtls_ssl_config*)val_data(o)
+@@ -222,7 +225,7 @@
+ 	val_check_kind(ssl,k_ssl);
+ 	r = mbedtls_ssl_read( val_ssl(ssl), &c, 1 );
+ 	if( r <= 0 )
+-		neko_error();
++		ssl_error(r);
+ 	return alloc_int( c );
+ }
+ 
+@@ -242,10 +245,15 @@
+ 		HANDLE_EINTR(recv_again);
+ 		return block_error();
+ 	}
+-	if( dlen == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY )
++	if (dlen == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
++		|| dlen == MBEDTLS_ERR_SSL_WANT_READ
++	#ifdef MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
++		|| dlen == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
++	#endif
++	)
+ 		return alloc_int(0);
+ 	if( dlen < 0 )
+-		neko_error();
++		ssl_error(dlen);
+ 	return alloc_int( dlen );
+ }
+ 
+@@ -264,7 +272,11 @@
+ 			HANDLE_EINTR(read_again);
+ 			return block_error();
+ 		}
+-		if( len == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY )
++		if( len == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || len == MBEDTLS_ERR_SSL_WANT_READ
++#ifdef MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
++		|| len == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
++#endif
++		)
+ 			break;
+ 		if( len == 0 )
+ 			break;
+@@ -505,7 +517,11 @@
+ 	value l = NULL, first = NULL;
+ 	val_check_kind(cert, k_cert);
+ 	crt = val_cert(cert);
++#if MBEDTLS_VERSION_MAJOR >= 3
++	if( mbedtls_x509_crt_has_ext_type( crt, MBEDTLS_X509_EXT_SUBJECT_ALT_NAME ) ){
++#else
+ 	if( crt->ext_types & MBEDTLS_X509_EXT_SUBJECT_ALT_NAME ){
++#endif
+ 		cur = &crt->subject_alt_names;
+ 
+ 		while( cur != NULL ){
+@@ -624,7 +640,11 @@
+ 	if( val_bool(pub) )
+ 		r = mbedtls_pk_parse_public_key( pk, (const unsigned char*)val_string(data), val_strlen(data) );
+ 	else
++#if MBEDTLS_VERSION_MAJOR >= 3
++		r = mbedtls_pk_parse_key( pk, (const unsigned char*)val_string(data), val_strlen(data), NULL, 0, mbedtls_ctr_drbg_random, &ctr_drbg );
++#else
+ 		r = mbedtls_pk_parse_key( pk, (const unsigned char*)val_string(data), val_strlen(data), NULL, 0 );
++#endif
+ 	if( r != 0 ){
+ 		mbedtls_pk_free(pk);
+ 		return ssl_error(r);
+@@ -650,10 +670,17 @@
+ 	mbedtls_pk_init(pk);
+ 	if( val_bool(pub) )
+ 		r = mbedtls_pk_parse_public_key( pk, buf, len );
++#if MBEDTLS_VERSION_MAJOR >= 3
++	else if( val_is_null(pass) )
++		r = mbedtls_pk_parse_key( pk, buf, len, NULL, 0, mbedtls_ctr_drbg_random, &ctr_drbg );
++	else
++		r = mbedtls_pk_parse_key( pk, buf, len, (const unsigned char*)val_string(pass), val_strlen(pass), mbedtls_ctr_drbg_random, &ctr_drbg );
++#else
+ 	else if( val_is_null(pass) )
+ 		r = mbedtls_pk_parse_key( pk, buf, len, NULL, 0 );
+ 	else
+ 		r = mbedtls_pk_parse_key( pk, buf, len, (const unsigned char*)val_string(pass), val_strlen(pass) );
++#endif
+ 	if( r != 0 ){
+ 		mbedtls_pk_free(pk);
+ 		return ssl_error(r);
+@@ -703,9 +730,17 @@
+ 	if( (r = mbedtls_md( md, (const unsigned char *)val_string(data), val_strlen(data), hash )) != 0 )
+ 		return ssl_error(r);
+ 
++#if MBEDTLS_VERSION_MAJOR >= 3
++	out = alloc_empty_string(MBEDTLS_PK_SIGNATURE_MAX_SIZE);
++#else
+ 	out = alloc_empty_string(MBEDTLS_MPI_MAX_SIZE);
++#endif
+ 	buf = (unsigned char *)val_string(out);
++#if MBEDTLS_VERSION_MAJOR >= 3
++	if( (r = mbedtls_pk_sign( val_pkey(key), mbedtls_md_get_type(md), hash, mbedtls_md_get_size(md), buf, MBEDTLS_PK_SIGNATURE_MAX_SIZE, &olen, mbedtls_ctr_drbg_random, &ctr_drbg )) != 0 )
++#else
+ 	if( (r = mbedtls_pk_sign( val_pkey(key), mbedtls_md_get_type(md), hash, 0, buf, &olen, mbedtls_ctr_drbg_random, &ctr_drbg )) != 0 )
++#endif
+ 		return ssl_error(r);
+ 
+ 	buf[olen] = 0;
+@@ -782,6 +817,10 @@
+ 	mbedtls_entropy_init( &entropy );
+ 	mbedtls_ctr_drbg_init( &ctr_drbg );
+ 	mbedtls_ctr_drbg_seed( &ctr_drbg, mbedtls_entropy_func, &entropy, NULL, 0 );
++
++#ifdef MBEDTLS_PSA_CRYPTO_C
++	psa_crypto_init();
++#endif
+ }
+ 
+ DEFINE_PRIM( ssl_new, 1 );
+--- a/libs/ssl/threading_alt.h
++++ b/libs/ssl/threading_alt.h
+@@ -1,3 +1,4 @@
++#define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+ 
+ typedef struct
