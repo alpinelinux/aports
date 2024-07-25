@@ -1,21 +1,21 @@
 # Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
 # Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>
 pkgname=dotnet8-stage0
-pkgver=8.0.103
+pkgver=8.0.107
 pkgrel=0
 
 [ "$CBUILD" != "$CHOST" ] && _cross="-$CARCH" || _cross=""
 
 # Tag of tarball generator.
-_gittag=v8.0.3
+_gittag=v8.0.7
 
 # Versions of prebuilt artifacts and bootstrap tar
-_artifactsver="8.0.103-servicing.24117.1.centos.8-x64"
-_bootstrapver="8.0.103"
+_artifactsver="8.0.107-servicing.24317.1.centos.9-x64"
+_bootstrapver="8.0.107"
 _bootstraprel=0
-_runtimever=8.0.3
-_aspnetver=8.0.3
-_installerver=8.0.103
+_installerver=8.0.107
+_runtimever=8.0.7
+_aspnetver=8.0.7
 
 # Patches to be used. String before '_' refers to repo to patch
 # Look for patch notes within each patch for what they fix / where they come from
@@ -25,8 +25,10 @@ _patches="
 	runtime_82269-mono-thread-coop-undefine-fortify-source.patch
 	runtime_83682-specify-notext-on-linux-musl-x86.patch
 	runtime_90251-rename-mono-cmake-host-var.patch
-	runtime_more-clang-16-suppression.patch
-	runtime_remove-usage-of-off64-t.patch
+	runtime_100781-fix-mono-build-on-arm.patch
+	runtime_reverse-101869-transition-1es-template-work.patch
+	runtime_disable-crossgen-on-riscv64.patch
+	runtime_disable-local-exec-tls-riscv64.patch
 	"
 
 _pkgver_macro=${pkgver%.*}
@@ -42,7 +44,7 @@ arch="all !x86 !armhf !riscv64 !s390x !ppc64le !loongarch64"
 _giturl=https://github.com/dotnet/dotnet
 url=https://dotnet.microsoft.com
 license="MIT"
-options="!check net" # Testsuite in main -build aport
+options="!check net" # Testsuite in main runtime aport
 subpackages="
 	dotnet$_pkgver_name-stage0-artifacts:artifacts:noarch
 	dotnet$_pkgver_name-stage0-bootstrap
@@ -70,6 +72,7 @@ makedepends_host="
 	gcc
 	grep
 	icu-dev
+	icu-data-full
 	krb5-dev
 	libintl
 	libstdc++
@@ -140,9 +143,9 @@ prepare() {
 	mkdir -p "$_cli_root"
 	mkdir -p $_packagesdir $_downloaddir $_outputdir $_nugetdir $_logdir
 
-	# sdk insists on downloading its own dotnet unless ArcadeBuildFromSource
+	# sdk and installer insists on downloading its own dotnet unless ArcadeBuildFromSource
 	# is true, which opens up a can of worms
-	sed 's|ArcadeBuildFromSource=true|Architecture|' -i src/sdk/eng/restore-toolset.sh
+	sed 's|ArcadeBuildFromSource=true|Architecture|' -i src/*/eng/restore-toolset.sh
 
 	# links logfiles to pipeline logs for easy pickup in pipelines
 	mkdir -p "$_logdir" "$builddir"/artifacts
@@ -158,11 +161,17 @@ prepare() {
 
 	tar -xf "$srcdir"/dotnet-sdk-$_pkgver_macro*$_dotnet_arch.noextract -C "$_cli_root" --no-same-owner
 
-	# adjusts sdk version and packagedir to expected
-	for i in runtime sdk installer aspnetcore roslyn; do
-		$_nuget add source $_packagesdir --name local --configfile "$builddir"/src/$i/NuGet.config
-		tmp=$(mktemp)
-		jq ".sdk.version = \"$_bootstrapver\"" "$builddir"/src/$i/global.json > $tmp && mv $tmp "$builddir"/src/$i/global.json
+	local components="$(find "$builddir"/src -maxdepth 1 -mindepth 1 -type d -exec basename '{}' \;)"
+	for i in $components; do
+		if [ -f "$builddir/src/$i/NuGet.config" ]; then
+			$_nuget add source $_packagesdir --name local --configfile "$builddir"/src/$i/NuGet.config
+		fi
+		if [ -f "$builddir/src/$i/global.json" ]; then
+			tmp=$(mktemp)
+			jq ".tools.dotnet = \"$_bootstrapver\"" "$builddir"/src/$i/global.json > $tmp && mv $tmp "$builddir"/src/$i/global.json
+			jq 'del(.sdk.version)' "$builddir"/src/$i/global.json > $tmp && mv $tmp "$builddir"/src/$i/global.json
+			jq 'del(.tools.runtimes)' "$builddir"/src/$i/global.json > $tmp && mv $tmp "$builddir"/src/$i/global.json
+		fi
 	done
 
 	# extracting PackageVersions.props as some version information is there
@@ -171,12 +180,14 @@ prepare() {
 	# sdk looks for TestCli at wrong place
 	sed '/<TestCliNuGetDirectoryTargetFramework/d' -i "$builddir"/src/sdk/src/Layout/redist/targets/GenerateLayout.targets
 }
+
 _init() {
 	export _InitializeDotNetCli=$_cli_root
 	export DOTNET_INSTALL_DIR=$_cli_root
+	export DOTNET_PATH=$_cli_root
+	export DotnetTool=$_cli_root/dotnet
 	export PATH="$_cli_root:$PATH"
 	export NUGET_PACKAGES=$_nugetdir
-	export DotNetBuildFromSource=true
 	export DOTNET_CLI_TELEMETRY_OPTOUT=true
 	export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=true
 	export SHELL=/bin/bash
@@ -216,8 +227,6 @@ _runtime() {
 		"
 	if [ "$CBUILD" != "$CHOST" ]; then
 		local args="$args -cross"
-		# https://github.com/dotnet/runtime/pull/75597 broke crossbuilding when true
-		local DotNetBuildFromSource=false
 		# x86 build of mono broken, thus do not build mono
 		case $_dotnet_target in
 			x86) local args="$args /p:DefaultSubsets=clr+libs+host+packs";;
@@ -226,7 +235,7 @@ _runtime() {
 	if [ "$_runtimever" != "${_runtimever##*-}" ]; then
 		local args="$args /p:VersionSuffix=${_runtimever##*-}"
 	fi
-	DotNetBuildFromSource=$DotNetBuildFromSource ROOTFS_DIR="$CBUILDROOT" ./build.sh $args
+	ROOTFS_DIR="$CBUILDROOT" ./build.sh $args
 
 	for i in artifacts/packages/*/*/*.nupkg; do
 		$_nuget push $i --source="$_packagesdir"
@@ -296,7 +305,7 @@ _aspnetcore() {
 		riscv64|x86) local args="$args /p:CrossgenOutput=false";;
 	esac
 
-	./eng/build.sh --pack $args
+	DotNetBuildFromSource=true ./eng/build.sh --pack $args
 
 	for i in artifacts/packages/*/*/*.nupkg; do
 		$_nuget push $i --source="$_packagesdir"
@@ -372,14 +381,14 @@ bootstrap() {
 		-C "$subpkgdir"/$_libdir/dotnet/bootstrap/$pkgver/ \
 		--no-same-owner
 
-	local _iltoolsArray="
+	local _iltools_array="
 		runtime.*.Microsoft.NETCore.TestHost.*.nupkg
 		runtime.*.Microsoft.NETCore.ILAsm.*.nupkg
 		runtime.*.Microsoft.NETCore.ILDAsm.*.nupkg
 		"
 
-	local _nupkgsArray="
-		$_iltoolsArray
+	local _nupkgs_array="
+		$_iltools_array
 		Microsoft.NETCore.App.Host.*.*.nupkg
 		Microsoft.NETCore.App.Runtime.*.*.nupkg
 		Microsoft.NETCore.App.Crossgen2.*.*.nupkg
@@ -391,12 +400,12 @@ bootstrap() {
 		"
 
 	# copies artifacts to artifacts dir for use by future dotnet builds
-	for i in $_nupkgsArray; do install -Dm644 "$_packagesdir"/$i "$subpkgdir"/$_libdir/dotnet/artifacts/$pkgver/ || true; done
+	for i in $_nupkgs_array; do install -Dm644 "$_packagesdir"/$i "$subpkgdir"/$_libdir/dotnet/artifacts/$pkgver/ || true; done
 
 	msg "Changing iltools version to $_iltoolsver"
 	# source-build expects a certain version of ilasm, ildasm and testhost
 	# following adjusts version
-	for i in $_iltoolsArray; do
+	for i in $_iltools_array; do
 		local nupath="$subpkgdir"$_libdir/dotnet/artifacts/$pkgver/$i
 		local nupath=$(find $nupath || true)
 		local nupkg="${nupath##*/}"
@@ -443,16 +452,18 @@ artifacts() {
 }
 
 sha512sums="
-ee816265db13968fadbc981daf6d4435b6c227184b104f8ca3be952dddbe2c68efc57ca7210adc2567d4126f4179c7e839d279113b5acb58e3469631708ab9f2  dotnet-tarball-v8.0.3.tar.gz
-6ba64033486ca5030011fc89fe4be778df84708545e4dbb718537201cedd2f0562a4e702591376facddf7c16f810a9a2545ff96c64138b986994d8d5275aac1a  dotnet-release-v8.0.3.json
-4792107d445e8b9c8480f3771f0c4697a119586c55d05a8814e4ee97459bad8042f649a1719a37c7772f6707bae70e33477112d7b7ebb035c04866b6635e1dd8  dotnet-sdk-8.0.103-linux-musl-x64.noextract
-3c83259178a053d1b12dfd296dac8981fce30f773e7dc59062bfc0491e76d2537d85419a890ba3658bfd70554e0591270bc920995de2959397e6446e801c4956  dotnet-sdk-8.0.103-linux-musl-arm64.noextract
-83cef7d126034034331baca68d96b5fe892940ac80f9dc4451252cc74f3d281c67d1422f8d767759a566e1ff386c2cecc86f4e32b62c5928ec603d1919b7e058  dotnet-sdk-8.0.103-linux-musl-arm.noextract
-4817a4d7355a3deba625015ec9d948d0ad51cd26be03d87d55626aa2f10bfb6812f837b8cf3d14c1f4619ac294c8dc61e94586ff440165d5aad4d6b8c84d5062  Private.SourceBuilt.Artifacts.8.0.103-servicing.24117.1.centos.8-x64.noextract
+8fe67e9d5ebd79b82c3d99059bed8c933cea1802a622250f8dede24a9ed815c6764509b3f683187998e9ad1cd12699f28f4438d13eead2b744ea8e1751690198  dotnet-tarball-v8.0.7.tar.gz
+b3c6390f9aa3531b7dc288ab0a7511e6d5342a5fa226089db3397f8b0c7f55a8f5382a6c192c056112aaa8a69e98b91b8829a3975bf643d6147182a3ffeff8a0  dotnet-release-v8.0.7.json
+f25c95f9acff4db16593541fda517c32477eb618dc9ad5b3983a4ab5bd62fdd3c03c7d9f56afe1132aff5137bbdc4161e0b83f7c8101cb1766b82ed4072becef  dotnet-sdk-8.0.107-linux-musl-x64.noextract
+5b99a07607cae652e4b392c17a7856ffb5df939e95d741d07c385d422e5511394567b5102213da1dc65183680d0e908d83c43c95b14bfabec305ca7731d9d676  dotnet-sdk-8.0.107-linux-musl-arm64.noextract
+e6e6325c6292bf435a0771c33eaf330dc132a11372ea6d12427f5a6c24cb6db260d95b1dfbba3c232cf9d5166f61192a05c7e3be4210a05a6687634fb0a887c6  dotnet-sdk-8.0.107-linux-musl-arm.noextract
+e0e2896cf493f3165e4fab56f8c13004280303efb20b6fe5c99d0072183f3605f80fceabf926ca7302bfd438d50ea76ba3dea459a7edc8cd9df5de66b9224410  Private.SourceBuilt.Artifacts.8.0.107-servicing.24317.1.centos.9-x64.noextract
 b6a2dfeccac329546f87f1019c1f2cf07e2f294dd33914449ad08d92269c8713b6fa1e330ef257c24e189023fd0b824df97688b0ba6e578a6d0292b07a72b4c1  installer_set-crossgen2rid-using-buildarchitecture.patch
 d732df247c721c9f677baabdd7f36dbf4b564814ff64164361065bb1c196b767494a1d39f634eadf01a23032c7b3e64102614b7213065c81096bbf3f8022e6a0  runtime_82269-mono-thread-coop-undefine-fortify-source.patch
 c983a1ab7f06ac86691e0fa7a61fcad69a074d984ef4a4116bee43f20be918215963c7ec8ddd7edd70432b29b160ff78288183acc89fda15ce4a75bfdbf99ee3  runtime_83682-specify-notext-on-linux-musl-x86.patch
 3354fa721809f1b94c579408ee78004ff3ca2ba79212c1a0ecc424a9955bb5d5a80c115d4c30dd257526f356ea76f0562db6f83d8dd0b6135f8c689886b3348d  runtime_90251-rename-mono-cmake-host-var.patch
-887112eb2b103eadd6887529ebae7f9a75df2c2cb168e84fd40cc09f9bcd20917d428bbba06968b07b0a463890da82b1b2b1d033a3dd016e6494067464ae6f74  runtime_more-clang-16-suppression.patch
-0c25319125ef5b0ad490b37a643c0c5257c796d5ed24f9ac404f698710b07de790bcbb0b6336d4a50025b94c3bff99b214951bd8f0a79a8d6f543ebaa300740f  runtime_remove-usage-of-off64-t.patch
+e748953eeeb13963f4e680fe6d38a5d0d1fc34b45fe9c62ba0b15ea647b23be826aaa7dd6466765c554bfed491b36c5822ac6f71b377dd95f31e16e6e75e0661  runtime_100781-fix-mono-build-on-arm.patch
+5b882e17c92a040a784742f637a19e7c09f10ed9e922436eaedaf0e2238e31fd67547821d073eaff6f7f61110be44af9d9e1786b6227659f72e8e1e549f6f540  runtime_reverse-101869-transition-1es-template-work.patch
+8348b51168709cd1f9e946dbfb02eaf3088d7c68e986390cf5fd861a057e188064013fbc008aa1e12d19d12b9ad7a4091732cd1b0fb8b629ef2a880718def5a7  runtime_disable-crossgen-on-riscv64.patch
+93454767eaa812ac39b38b04764bd41480fea9b5a78f32d2ea1baa072a20eb31d302c475e8737b0fb2a3b8a6f47567795ddd0a7603369e90e7c5944b11357b00  runtime_disable-local-exec-tls-riscv64.patch
 "
