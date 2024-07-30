@@ -127,12 +127,12 @@ for PKG in fortify-headers linux-headers musl pkgconf zlib \
 	   libcap openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
 	   attr acl fakeroot tar \
 	   lzip abuild ncurses libedit openssh \
-	   libcap-ng util-linux libaio lvm2 popt xz \
+	   libcap-ng chrpath readline bash sqlite util-linux libaio lvm2 popt xz \
 	   json-c argon2 cryptsetup kmod lddtree mkinitfs \
 	   libffi \
 	   brotli libev c-ares cunit nghttp2 libidn2 libpsl curl \
 	   libssh2 \
-	   libxml2 pax-utils llvm14 community/ghc llvm17 rust community/go \
+	   libxml2 pax-utils llvm15 community/ghc llvm18 rust community/go \
 	   $KERNEL_PKG ; do
 
 	if [ "$NEEDS_LIBATOMIC" = "yes" ]; then
