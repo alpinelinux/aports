@@ -1,0 +1,387 @@
+From c4e0ead1a02d28344585e909f20cc9b7917caf60 Mon Sep 17 00:00:00 2001
+From: Scott Parlane <scott.parlane@alliedtelesis.co.nz>
+Date: Tue, 5 Oct 2021 15:30:28 +1300
+Subject: [PATCH] Add support for fuse3
+
+This makes it possible to build/run archivemount against fuse3
+---
+ archivemount.c | 150 ++++++++++++++++++++++++++++++++++++++++++-------
+ configure.ac   |   8 ++-
+ 2 files changed, 136 insertions(+), 22 deletions(-)
+
+diff --git a/archivemount.c b/archivemount.c
+index 549407d..920d0e3 100644
+--- a/archivemount.c
++++ b/archivemount.c
+@@ -21,15 +21,22 @@
+ #define _XOPEN_SOURCE 500
+ #endif
+ 
+-#define FUSE_USE_VERSION 26
+ #define MAXBUF 4096
+ 
+ #define BLOCK_SIZE 10240
+ 
+ #include "config.h"
+ 
++#ifdef HAVE_FUSE2
++#define FUSE_USE_VERSION 26
+ #include <fuse.h>
+ #include <fuse/fuse_lowlevel.h>
++#elif defined(HAVE_FUSE3)
++#define FUSE_USE_VERSION 30
++#include <fuse.h>
++#else
++#error No fuse version defined
++#endif
+ #include <fuse_opt.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -1544,7 +1551,7 @@ _ar_getsizeraw(const char *path)
+ }
+ 
+ static int
+-_ar_getattr(const char *path, struct stat *stbuf)
++_ar_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
+ {
+ 	NODE *node;
+ 	int ret;
+@@ -1558,7 +1565,7 @@ _ar_getattr(const char *path, struct stat *stbuf)
+ 	if (archive_entry_hardlink(node->entry)) {
+ 		/* a hardlink, recurse into it */
+ 		ret = _ar_getattr(archive_entry_hardlink(
+-				node->entry), stbuf);
++				node->entry), stbuf, fi);
+ 		return ret;
+ 	}
+ 	if (options.formatraw && ! node->child) {
+@@ -1596,7 +1603,11 @@ _ar_getattr(const char *path, struct stat *stbuf)
+ }
+ 
+ static int
++#ifdef HAVE_FUSE3
++ar_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
++#else
+ ar_getattr(const char *path, struct stat *stbuf)
++#endif
+ {
+ 	//log("ar_getattr called, path: '%s'", path);
+ 	int ret = pthread_mutex_lock(&lock);
+@@ -1604,7 +1615,12 @@ ar_getattr(const char *path, struct stat *stbuf)
+ 		log("failed to get lock: %s\n", strerror(ret));
+ 		return -EIO;
+ 	} else {
+-		ret = _ar_getattr(path, stbuf);
++		ret = _ar_getattr(path, stbuf, 
++#ifdef HAVE_FUSE3
++		                  fi);
++#else
++                                  NULL);
++#endif
+ 		pthread_mutex_unlock(&lock);
+ 	}
+ 	return ret;
+@@ -1863,7 +1879,7 @@ ar_link(const char *from, const char *to)
+ 		return -EEXIST;
+ 	}
+ 	/* extract originals stat info */
+-	_ar_getattr(from, &st);
++	_ar_getattr(from, &st, NULL);
+ 	/* build new node */
+ 	if ((node = init_node()) == NULL) {
+ 		pthread_mutex_unlock(&lock);
+@@ -1932,7 +1948,7 @@ ar_link(const char *from, const char *to)
+ }
+ 
+ static int
+-_ar_truncate(const char *path, off_t size)
++_ar_truncate(const char *path, off_t size, struct fuse_file_info *fi)
+ {
+ 	NODE *node;
+ 	char *location;
+@@ -1951,12 +1967,12 @@ _ar_truncate(const char *path, off_t size)
+ 	if (archive_entry_hardlink(node->entry)) {
+ 		/* file is a hardlink, recurse into it */
+ 		return _ar_truncate(archive_entry_hardlink(
+-				node->entry), size);
++				node->entry), size, fi);
+ 	}
+ 	if (archive_entry_symlink(node->entry)) {
+ 		/* file is a symlink, recurse into it */
+ 		return _ar_truncate(archive_entry_symlink(
+-				node->entry), size);
++				node->entry), size, fi);
+ 	}
+ 	if (node->location) {
+ 		/* open existing temp file */
+@@ -2054,12 +2070,22 @@ _ar_truncate(const char *path, off_t size)
+ }
+ 
+ static int
++#ifdef HAVE_FUSE3
++ar_truncate(const char *path, off_t size, struct fuse_file_info *fi)
++#else
+ ar_truncate(const char *path, off_t size)
++#endif
+ {
+ 	int ret;
+ 	log("ar_truncate called, path '%s'", path);
+ 	pthread_mutex_lock(&lock);
+-	ret = _ar_truncate(path, size);
++	ret = _ar_truncate(path, size, 
++#ifdef HAVE_FUSE3
++                           fi
++#else
++                           NULL
++#endif
++                          );
+ 	pthread_mutex_unlock(&lock);
+ 	return ret;
+ }
+@@ -2319,7 +2345,7 @@ ar_unlink(const char *path)
+ }
+ 
+ static int
+-_ar_chmod(const char *path, mode_t mode)
++_ar_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
+ {
+ 	NODE *node;
+ 
+@@ -2333,11 +2359,11 @@ _ar_chmod(const char *path, mode_t mode)
+ 	}
+ 	if (archive_entry_hardlink(node->entry)) {
+ 		/* file is a hardlink, recurse into it */
+-		return _ar_chmod(archive_entry_hardlink(node->entry), mode);
++		return _ar_chmod(archive_entry_hardlink(node->entry), mode, fi);
+ 	}
+ 	if (archive_entry_symlink(node->entry)) {
+ 		/* file is a symlink, recurse into it */
+-		return _ar_chmod(archive_entry_symlink(node->entry), mode);
++		return _ar_chmod(archive_entry_symlink(node->entry), mode, fi);
+ 	}
+ #ifdef __APPLE__
+ 	/* Make sure the full mode, including file type information, is used */
+@@ -2349,18 +2375,28 @@ _ar_chmod(const char *path, mode_t mode)
+ }
+ 
+ static int
++#ifdef HAVE_FUSE3
++ar_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
++#else
+ ar_chmod(const char *path, mode_t mode)
++#endif
+ {
+ 	log("ar_chmod called, path '%s', mode: %o", path, mode);
+ 	int ret;
+ 	pthread_mutex_lock(&lock);
+-	ret = _ar_chmod(path, mode);
++	ret = _ar_chmod(path, mode,
++#ifdef HAVE_FUSE3
++                        fi
++#else
++                        NULL
++#endif
++                        );
+ 	pthread_mutex_unlock(&lock);
+ 	return ret;
+ }
+ 
+ static int
+-_ar_chown(const char *path, uid_t uid, gid_t gid)
++_ar_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info *fi)
+ {
+ 	NODE *node;
+ 
+@@ -2375,7 +2411,7 @@ _ar_chown(const char *path, uid_t uid, gid_t gid)
+ 	if (archive_entry_hardlink(node->entry)) {
+ 		/* file is a hardlink, recurse into it */
+ 		return _ar_chown(archive_entry_hardlink(node->entry),
+-			uid, gid);
++			uid, gid, NULL);
+ 	}
+ 	/* changing ownership of symlinks is allowed, however */
+ 	archive_entry_set_uid(node->entry, uid);
+@@ -2385,16 +2421,65 @@ _ar_chown(const char *path, uid_t uid, gid_t gid)
+ }
+ 
+ static int
++#ifdef HAVE_FUSE3
++ar_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info *fi)
++#else
+ ar_chown(const char *path, uid_t uid, gid_t gid)
++#endif
+ {
+ 	log("ar_chown called, %s", path);
+ 	int ret;
+ 	pthread_mutex_lock(&lock);
+-	ret = _ar_chown(path, uid, gid);
++	ret = _ar_chown(path, uid, gid,
++#ifdef HAVE_FUSE3
++                        fi
++#else
++                        NULL
++#endif
++                        );
+ 	pthread_mutex_unlock(&lock);
+ 	return ret;
+ }
+ 
++#ifdef HAVE_FUSE3
++static int
++_ar_utimens(const char *path, const struct timespec tv[2], struct fuse_file_info *fi)
++{
++	NODE *node;
++
++	log("_ar_utimens called, %s", path);
++	if (! archiveWriteable || options.readonly) {
++		return -EROFS;
++	}
++	node = get_node_for_path(root, path);
++	if (! node) {
++		return -ENOENT;
++	}
++	if (archive_entry_hardlink(node->entry)) {
++		/* file is a hardlink, recurse into it */
++		return _ar_utimens(archive_entry_hardlink(node->entry), tv, fi);
++	}
++	if (archive_entry_symlink(node->entry)) {
++		/* file is a symlink, recurse into it */
++		return _ar_utimens(archive_entry_symlink(node->entry), tv, fi);
++	}
++	archive_entry_set_mtime(node->entry, tv[0].tv_sec, tv[0].tv_nsec);
++	archive_entry_set_atime(node->entry, tv[1].tv_sec, tv[1].tv_nsec);
++	archiveModified = 1;
++	return 0;
++}
++
++int
++ar_utimens(const char *path, const struct timespec tv[2], struct fuse_file_info *fi)
++{
++	log("ar_utimens called, %s", path);
++	int ret;
++	pthread_mutex_lock(&lock);
++	ret = _ar_utimens(path, tv, fi);
++	pthread_mutex_unlock(&lock);
++	return ret;
++}
++#else
+ static int
+ _ar_utime(const char *path, struct utimbuf *buf)
+ {
+@@ -2432,7 +2517,7 @@ ar_utime(const char *path, struct utimbuf *buf)
+ 	pthread_mutex_unlock(&lock);
+ 	return ret;
+ }
+-
++#endif
+ static int
+ ar_statfs(const char *path, struct statvfs *stbuf)
+ {
+@@ -2456,7 +2541,11 @@ ar_statfs(const char *path, struct statvfs *stbuf)
+ }
+ 
+ static int
++#ifdef HAVE_FUSE3
++ar_rename(const char *from, const char *to, unsigned int flags)
++#else
+ ar_rename(const char *from, const char *to)
++#endif
+ {
+ 	NODE *from_node;
+ 	int ret = 0;
+@@ -2599,9 +2688,20 @@ ar_release(const char *path, struct fuse_file_info *fi)
+ 	return 0;
+ }
+ 
++#ifdef HAVE_FUSE3
++#define DIR_FILLER(F,B,N,S,O) F(B,N,S,O,FUSE_FILL_DIR_PLUS)
++#else
++#define DIR_FILLER(F,B,N,S,O) F(B,N,S,O)
++#endif
++
+ static int
++#ifdef HAVE_FUSE3
++ar_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
++	off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags flags)
++#else
+ ar_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+ 	off_t offset, struct fuse_file_info *fi)
++#endif
+ {
+ 	NODE *node;
+ 	(void) offset;
+@@ -2620,8 +2720,8 @@ ar_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+ 		return -ENOENT;
+ 	}
+ 
+-	filler(buf, ".", NULL, 0);
+-	filler(buf, "..", NULL, 0);
++	DIR_FILLER(filler, buf, ".", NULL, 0);
++	DIR_FILLER(filler, buf, "..", NULL, 0);
+ 
+ 	node = node->child;
+ 
+@@ -2645,7 +2745,7 @@ ar_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+ 		st_copy.st_blocks  = (st_copy.st_size + 511) / 512;
+ 		st_copy.st_blksize = 4096;
+ 
+-		if (filler(buf, node->basename, &st_copy, 0)) {
++		if (DIR_FILLER(filler, buf, node->basename, &st_copy, 0)) {
+ 			pthread_mutex_unlock(&lock);
+ 			return -ENOMEM;
+ 		}
+@@ -2742,7 +2842,11 @@ static struct fuse_operations ar_oper = {
+ 	.chmod		= ar_chmod,
+ 	.chown		= ar_chown,
+ 	.truncate	= ar_truncate,
++#ifdef HAVE_FUSE3
++        .utimens         = ar_utimens,
++#else
+ 	.utime		= ar_utime,
++#endif
+ 	.open		= ar_open,
+ 	.read		= ar_read,
+ 	.write		= ar_write,
+@@ -2912,6 +3016,11 @@ main(int argc, char **argv)
+ 	 */
+ 	fuse_opt_add_arg(&args, "-s");
+ 
++#ifdef HAVE_FUSE3
++		/* now do the real mount */
++		int fuse_ret;
++		fuse_ret = fuse_main(args.argc, args.argv, &ar_oper, NULL);
++#else
+ #if FUSE_VERSION >= 26
+ 	{
+ 		struct fuse *fuse;
+@@ -2980,6 +3089,7 @@ main(int argc, char **argv)
+ 		int fuse_ret;
+ 		fuse_ret = fuse_main(args.argc, args.argv, &ar_oper, NULL);
+ 	}
++#endif
+ #endif
+ 
+ 	/* go back to saved dir */
+diff --git a/configure.ac b/configure.ac
+index 5b0ce40..1e6bc2b 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -14,12 +14,16 @@ AC_SUBST(RELEASE_DATE)
+ 
+ # Check for libfuse
+ PKG_CHECK_EXISTS(fuse)
+-PKG_CHECK_MODULES([FUSE], [fuse >= 2.6],,
+-    AC_MSG_ERROR([libfuse>=2.6 not found.
++PKG_CHECK_MODULES([FUSE], [fuse >= 2.6],
++    AC_DEFINE([HAVE_FUSE2], [], [Need to use the fuse 2.6 API]),
++    PKG_CHECK_MODULES([FUSE], [fuse3 >= 3],
++        AC_DEFINE([HAVE_FUSE3], [], [Need to use the fuse 3.0 API]),
++        AC_MSG_ERROR([libfuse>=2.6 not found.
+ 
+                   If libfuse is installed then perhaps you should set
+                   the PKG_CONFIG_PATH=/dir/containing/fuse.pc environment
+                   variable]))
++    )
+ AC_SUBST([FUSE_LIBS])
+ AC_SUBST([FUSE_CFLAGS])
+ 
