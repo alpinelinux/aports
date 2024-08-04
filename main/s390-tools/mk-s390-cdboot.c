@@ -145,8 +145,15 @@ int main (int argc, char **argv) {
         }
     }
 
+    const off_t real_initrd_start = ftello(fd1);
+
     printf("writing initrd...\n");
-    fseek(fd1, initrd_start, SEEK_SET);
+    if (real_initrd_start < initrd_start) {
+        fseek(fd1, initrd_start, SEEK_SET);
+    } else {
+        initrd_start = real_initrd_start;
+    }
+
     while (1) {
         rc = fread(buffer, 1, 1, fd3);
 
