@@ -294,10 +294,10 @@ create_image_iso() {
 		if [ "$ARCH" = s390x ]; then
 			printf %s "$initfs_cmdline $kernel_cmdline " > ${WORKDIR}/parmfile
 			for _f in $kernel_flavors; do
-				mk-s390-cdboot -p ${WORKDIR}/parmfile \
-					-i ${DESTDIR}/boot/vmlinuz-$_f \
+				mk-s390image -p ${WORKDIR}/parmfile \
 					-r ${DESTDIR}/boot/initramfs-$_f \
-					-o ${DESTDIR}/boot/merged.img
+					${DESTDIR}/boot/vmlinuz-$_f \
+					${DESTDIR}/boot/merged.img
 			done
 			iso_opts="$iso_opts -no-emul-boot -eltorito-boot boot/merged.img"
 		fi
