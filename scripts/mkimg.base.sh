@@ -17,11 +17,9 @@ build_kernel() {
 		--repositories-file "$APKROOT/etc/apk/repositories" \
 		"$DESTDIR" \
 		|| return 1
-    if [ -n "$boot_addons" ]; then
-        for _add in $boot_addons; do
-           apk fetch --root "$APKROOT" --quiet --stdout $_add | tar -C "${DESTDIR}" -zx boot/
-        done
-    fi
+	for _add in $boot_addons; do
+		apk fetch --root "$APKROOT" --quiet --stdout $_add | tar -C "${DESTDIR}" -zx boot/
+	done
 }
 
 section_kernels() {
@@ -107,11 +105,9 @@ syslinux_gen_config() {
 	for _f in $kernel_flavors; do
 		if [ -z "${xen_params+set}" ]; then
 			_initrd="/boot/initramfs-$_f"
-			if [ -n "$initrd_ucode" ]; then
-				for _p in $initrd_ucode; do
-					_initrd="$_p,$_initrd"
-				done
-			fi
+			for _p in $initrd_ucode; do
+				_initrd="$_p,$_initrd"
+			done
 
 			cat <<- EOF
 
@@ -140,11 +136,9 @@ grub_gen_config() {
 	for _f in $kernel_flavors; do
 		if [ -z "${xen_params+set}" ]; then
 			_initrd="/boot/initramfs-$_f"
-			if [ -n "$initrd_ucode" ]; then
-				for _p in $initrd_ucode; do
-					_initrd="$_p $_initrd"
-				done
-			fi
+			for _p in $initrd_ucode; do
+				_initrd="$_p $_initrd"
+			done
 
 			cat <<- EOF
 
