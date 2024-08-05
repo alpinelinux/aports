@@ -2,7 +2,9 @@
 
 # apk add \
 #	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso cmd:mksquashfs
-#	(for efi:) mtools grub-efi
+#	(for efi:) mtools
+#	(for s390x:) s390-tools
+#	(for ppc64le:) grub
 
 # FIXME: clean workdir out of unneeded sections
 # FIXME: --release: cp/mv images to REPODIR/$ARCH/releases/
@@ -302,8 +304,14 @@ for ARCH in $req_arch; do
 	APKROOT="$WORKDIR/apkroot-$ARCH"
 	if [ ! -e "$APKROOT" ]; then
 		# create root for caching packages
-		mkdir -p "$APKROOT/etc/apk/cache"
-		cp -Pr /etc/apk/keys "$APKROOT/etc/apk/"
+		mkdir -p "$APKROOT/etc/apk/cache" "$APKROOT"/etc/apk/keys
+		[ -d /usr/share/apk/keys/"$ARCH" ] &&
+			cp /usr/share/apk/keys/"$ARCH"/* "$APKROOT"/etc/apk/keys
+		if [ -n "$_hostkeys" ]; then
+			cp /etc/apk/keys/* "$APKROOT"/etc/apk/keys
+		else
+			cp "$_abuild_pubkey" "$APKROOT"/etc/apk/keys
+		fi
 		apk --arch "$ARCH" --root "$APKROOT" add --initdb
 
 		_repositories="$APKROOT/etc/apk/repositories"

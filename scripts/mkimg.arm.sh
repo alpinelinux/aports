@@ -1,6 +1,6 @@
 build_rpi_blobs() {
 	for i in raspberrypi-bootloader-common raspberrypi-bootloader; do
-		apk fetch --quiet --stdout "$i" | tar -C "${DESTDIR}" -zx --strip=1 boot/ || return 1
+		apk fetch --root "$APKROOT" --quiet --stdout "$i" | tar -C "${DESTDIR}" -zx --strip=1 boot/ || return 1
 	done
 }
 

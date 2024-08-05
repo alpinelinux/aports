@@ -8,6 +8,7 @@ build_kernel() {
 		${_abuild_pubkey:+--apk-pubkey $_abuild_pubkey} \
 		$_modloopsign \
 		--media \
+		--keys-dir "$APKROOT/etc/apk/keys" \
 		--flavor "$_flavor" \
 		--arch "$ARCH" \
 		--package "$_pkgs" \
@@ -18,7 +19,7 @@ build_kernel() {
 		|| return 1
     if [ -n "$boot_addons" ]; then
         for _add in $boot_addons; do
-           apk fetch --quiet --stdout $_add | tar -C "${DESTDIR}" -zx boot/
+           apk fetch --root "$APKROOT" --quiet --stdout $_add | tar -C "${DESTDIR}" -zx boot/
         done
     fi
 }
@@ -46,6 +47,7 @@ build_apks() {
 	fi
 
 	apk index \
+		--root "$APKROOT" \
 		--description "$RELEASE" \
 		--rewrite-arch "$ARCH" \
 		--index "$_archdir"/APKINDEX.tar.gz \
@@ -197,11 +199,14 @@ build_grub_efi() {
 	local _format="$1"
 	local _efi="$2"
 
+	apk fetch --root "$APKROOT" --quiet --stdout grub-efi | tar -C "$WORKDIR" -zx usr/lib/grub
+
 	# Prepare grub-efi bootloader
 	mkdir -p "$DESTDIR/efi/boot"
 	grub_gen_earlyconf > "$WORKDIR/grub_early.$3.cfg"
 	grub-mkimage \
 		--config="$WORKDIR/grub_early.$3.cfg" \
+		--directory="$WORKDIR"/usr/lib/grub/"$_format" \
 		--prefix="/boot/grub" \
 		--output="$DESTDIR/efi/boot/$_efi" \
 		--format="$_format" \
@@ -277,7 +282,9 @@ create_image_iso() {
 	fi
 
 	if [ "$ARCH" = ppc64le ]; then
+		apk fetch --root "$APKROOT" --quiet --stdout grub-ieee1275 | tar -C "$WORKDIR" -zx usr/lib/grub
 		grub-mkrescue --output ${ISO} ${DESTDIR} -follow-links \
+			--directory="$WORKDIR"/usr/lib/grub/powerpc-ieee1275 \
 			-sysid LINUX \
 			-volid "alpine-${profile_abbrev:-$PROFILE} $RELEASE $ARCH"
 	else
