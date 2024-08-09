@@ -6,9 +6,11 @@ TARGET_ARCH="$1"
 SUDO_APK=abuild-apk
 
 # optional cross build packages
-: ${KERNEL_PKG=linux-firmware linux-lts}
-: ${COMPILER_PKG=libffi brotli libev c-ares cunit nghttp2 libidn2 libpsl curl libssh2 libxml2 pax-utils llvm15 community/ghc llvm18 rust community/go}
+#: ${KERNEL_PKG=linux-firmware linux-lts}
+#: ${COMPILER_PKG=libffi brotli libev c-ares cunit nghttp2 libidn2 libpsl curl libssh2 libxml2 pax-utils llvm15 community/ghc llvm18 rust community/go}
 # FIXME: Maybe subdivide into ghc, rust, and go stuff
+: ${MKINITFS=libcap-ng sqlite ncurses util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs}
+#: ${OPENSSH=libedit openssh}
 
 if [ -z "$TARGET_ARCH" ]; then
 	program=$(basename $0)
@@ -128,9 +130,9 @@ for PKG in fortify-headers linux-headers musl pkgconf zlib \
 	   apk-tools file \
 	   libcap openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
 	   attr acl fakeroot tar \
-	   lzip abuild ncurses libedit openssh \
-	   libcap-ng chrpath readline bash sqlite util-linux libaio lvm2 popt xz \
-	   json-c argon2 cryptsetup kmod lddtree mkinitfs \
+	   lzip abuild \
+	   $OPENSSH \
+	   $MKINITFS \
 	   $COMPILER_PKG \
 	   $KERNEL_PKG ; do
 
