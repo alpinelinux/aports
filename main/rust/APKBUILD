@@ -70,15 +70,17 @@ arm*|riscv64)
 	;;
 esac
 
-subpackages="
+# Only cargo is needed for bootstrapping.
+subpackages="cargo"
+[ -z "$BOOTSTRAP" ] && subpackages="
 	$pkgname-dbg
+	$subpackages
 	$pkgname-doc
 	$pkgname-clippy
 	$pkgname-gdb::noarch
 	$pkgname-lldb::noarch
 	$pkgname-src::noarch
 	$pkgname-wasm
-	cargo
 	cargo-bash-completions:_cargo_bashcomp:noarch
 	cargo-zsh-completion:_cargo_zshcomp:noarch
 	cargo-doc:_cargo_doc:noarch
@@ -170,12 +172,41 @@ _unpack_build_dist() {
 		--exclude=manifest.in --no-same-owner
 }
 
+_bootstrap_install() {
+	local destprefix="$1"
+
+	cd "$builddir"/build/$_build
+
+	install -Dvm755 stage1-rustc/$_target/release/rustc-main \
+		"$destprefix"/bin/rustc
+	install -Dvm755 stage2-tools-bin/cargo \
+		-t "$destprefix"/bin/
+
+	cd "$builddir"/build/$_build/stage2/lib/rustlib/$_target/lib
+
+	install -Dvm644 librustc_driver-*.so libstd-*.so \
+		-t "$destprefix"/lib/
+
+	install -Dvm644 ./*.rlib -t "$destprefix"/lib/rustlib/$_target/lib/
+	cp -Rv self-contained "$destprefix"/lib/rustlib/$_target/lib/
+}
+
 build() {
 	if [ "$_build" != "$_target" ]; then
 		export PKG_CONFIG_ALLOW_CROSS=1
 
 		# Do not carry over toolchain (flags) from $CBUILD.
 		unset RUSTFLAGS CC CXX
+	fi
+	if [ -z "$BOOTSTRAP" ]; then
+		# Skip LTO to allow for faster bootstrapping.
+		case "$CARCH" in
+		riscv64|s390x)
+			;;
+		*)
+			local lto=--set="rust.lto=thin"
+			;;
+		esac
 	fi
 
 	# absolutely do not set these here, rust "knows" what it's doing
@@ -186,14 +217,6 @@ build() {
 
 	export CFLAGS="$CFLAGS -O2"
 	export CXXFLAGS="$CXXFLAGS -O2"
-
-	case "$CARCH" in
-	riscv64|s390x)
-		;;
-	*)
-		local lto=--set="rust.lto=thin"
-		;;
-	esac
 
 	case "$CARCH" in
 	aarch64|ppc64le|x86_64|loongarch64)
@@ -262,7 +285,13 @@ build() {
 		--set="target.$_build.linker=cc" \
 		$extra_conf_opts
 
-	python3 ./x.py dist --jobs ${JOBS:-2}
+	if [ -z "$BOOTSTRAP" ]; then
+		python3 ./x.py dist --jobs ${JOBS:-2}
+	else
+		python3 ./x.py build --jobs ${JOBS:-2} \
+			--host $_target --target $targets \
+			--stage=2 src/tools/cargo
+	fi
 }
 
 check() {
@@ -274,9 +303,13 @@ check() {
 
 	mkdir -p "$builddir/test-rustc"
 
-	_unpack_build_dist rustc "$builddir/test-rustc" &
-	_unpack_build_dist rust-std "$builddir/test-rustc" &
-	wait
+	if [ -z "$BOOTSTRAP" ]; then
+		_unpack_build_dist rustc "$builddir/test-rustc" &
+		_unpack_build_dist rust-std "$builddir/test-rustc" &
+		wait
+	else
+		_bootstrap_install "$builddir/test-rustc"
+	fi
 
 	export LD_LIBRARY_PATH="$builddir/test-rustc/lib/rustlib/$CTARGET/lib"
 
@@ -301,6 +334,17 @@ package() {
 	replaces="rust-stdlib"
 
 	mkdir -p "$pkgdir/usr"
+
+	if [ -n "$BOOTSTRAP" ]; then
+		_bootstrap_install "$pkgdir/usr"
+
+	 	if subpackage_types_has wasm; then
+	 		cp -Rv build/$_build/stage2/lib/rustlib/wasm32-* \
+	 			"$pkgdir"/usr/lib/rustlib/
+	 	fi
+
+		return 0
+	fi
 
 	cd "$pkgdir"
 
