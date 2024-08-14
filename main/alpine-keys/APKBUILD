@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-keys
-pkgver=2.4
-pkgrel=1
+pkgver=2.5
+pkgrel=0
 pkgdesc="Public keys for Alpine Linux packages"
 url="https://alpinelinux.org"
 # we install arch specific keys to /etc so we cannot do arch=noarch
@@ -33,6 +33,8 @@ _arch_keys="
 
 	riscv64:alpine-devel@lists.alpinelinux.org-60ac2099.rsa.pub
 	riscv64:alpine-devel@lists.alpinelinux.org-616db30d.rsa.pub
+
+	loongarch64:alpine-devel@lists.alpinelinux.org-66ba20fe.rsa.pub
 	"
 
 for _i in $_arch_keys; do
@@ -80,6 +82,12 @@ _install_riscv() {
 	esac
 }
 
+_install_loongarch() {
+	case "$1" in
+	loongarch*) _ins_key $1 $2 ;;
+	esac
+}
+
 package() {
 	# copy keys for repos
 	mkdir -p "$pkgdir"/etc/apk/keys
@@ -100,6 +108,7 @@ package() {
 			s390x) _install_s390x $_arch $_key ;;
 			mips*) _install_mips $_arch $_key ;;
 			riscv*) _install_riscv $_arch $_key ;;
+			loongarch*) _install_loongarch $_arch $_key ;;
 			esac
 		done
 	done
@@ -123,4 +132,5 @@ bad4da65221150a5d4cc6f63981e4dd203d40844d32e82c17f346eee5350e460e32d28f0e231a2b7
 66ce9677e9c2a7961d5d7bc5b162ed3114a7aef6d01181073c1f42a9934966eecded2ec09deb210f5a389d434d1641ba35fe3abdd5246b2e97d5a5b26a945c5c  alpine-devel@lists.alpinelinux.org-5e69ca50.rsa.pub
 34514100e502f449dcabe0aa550232c3330ed2f0b789b977eb228d4ac86afc93479474ac005914992a3b47c18ee3eb32ca27ccd0d392700a8f11f47d64a78969  alpine-devel@lists.alpinelinux.org-60ac2099.rsa.pub
 7cea57204a50d72bddff201c509ccbf06773d87062a3ead0a206cc6e4a00e0960f52d21f7cee7aaec6a4abba7a697e2e2e7f630fa1ccef7ee2c33908fca18998  alpine-devel@lists.alpinelinux.org-616db30d.rsa.pub
+383ee8cdd7be983289ac7c31b3d6e8f11dd07008ec615503abad69ff69c96047434ec812a3778b6fe393ed59ff3ac3961a660b29a87febe85667c58493cb9e4b  alpine-devel@lists.alpinelinux.org-66ba20fe.rsa.pub
 "
