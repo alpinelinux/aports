@@ -92,8 +92,13 @@ if ! CHOST=$TARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild up
 	CHOST=$TARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild -r
 fi
 
-# Full cross GCC
+# Build libucontext without docs and pkgconfig file as a dependency for gcc-gdc
+EXTRADEPENDS_BUILD="gcc-pass2-$TARGET_ARCH" \
 EXTRADEPENDS_TARGET="musl musl-dev" \
+CHOST=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname libucontext) abuild -r
+
+# Full cross GCC
+EXTRADEPENDS_TARGET="musl musl-dev libucontext-dev" \
 CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname gcc) abuild -r
 
 # Cross build-base
