@@ -2,7 +2,7 @@
 
 for i in "$@"; do
 	if [ -e "$i"/modules.order ]; then
-		/sbin/depmod ${i#/lib/modules/}
+		/sbin/depmod "${i#*/lib/modules/}"
 	else
 		#clean up on uninstall
 		rm -f "$i"/modules.alias \
