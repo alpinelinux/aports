@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.21.0_alpha20240807
-pkgrel=0
+pkgrel=1
 pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
@@ -51,7 +51,8 @@ Kernel \\r on an \\m (\\l)
 EOF
 
 	# create os-release
-	cat >"$subpkgdir"/etc/os-release<<EOF
+	mkdir -p "$subpkgdir"/usr/lib
+	cat >"$subpkgdir"/usr/lib/os-release<<EOF
 NAME="Alpine Linux"
 ID=alpine
 VERSION_ID=$pkgver
@@ -59,6 +60,7 @@ PRETTY_NAME="Alpine Linux $_rel"
 HOME_URL="https://alpinelinux.org/"
 BUG_REPORT_URL="https://gitlab.alpinelinux.org/alpine/aports/-/issues"
 EOF
+	ln -s ../usr/lib/os-release "$subpkgdir"/etc/os-release
 
 	# create secfixes.d repository list
 	mkdir -p "$subpkgdir"/etc/secfixes.d
