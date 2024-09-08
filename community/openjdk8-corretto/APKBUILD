@@ -1,0 +1,308 @@
+# Maintainer: Celeste <cielesti@protonmail.com>
+pkgname=openjdk8-corretto
+pkgver=8.422.05.1
+pkgrel=0
+_majorver=${pkgver%%.*}
+pkgdesc="Corretto OpenJDK $_majorver"
+provider_priority=$((_majorver - 1)) # prefer community/openjdk8 over this aport
+url="https://github.com/corretto/corretto-$_majorver"
+# armhf, armv7: arch misdetected
+# riscv64: no upstream support
+# s390x: unrecognized opcodes
+# x86: check() encounters fatal error
+arch="aarch64 loongarch64 ppc64le x86_64"
+# https://aws.amazon.com/corretto/faqs/#Licensing_and_Open_Source
+license="GPL-2.0-only WITH Classpath-exception-2.0"
+options="sover-namecheck"
+makedepends_build="
+	openjdk$_majorver-bootstrap
+	autoconf
+	bash
+	gawk
+	grep
+	make
+	zip
+	"
+makedepends_host="
+	alsa-lib-dev
+	cups-dev
+	elfutils-dev
+	fontconfig-dev
+	freetype-dev
+	giflib-dev
+	lcms2-dev
+	libffi-dev
+	libjpeg-turbo-dev
+	libx11-dev
+	libxext-dev
+	libxrandr-dev
+	libxrender-dev
+	libxt-dev
+	libxtst-dev
+	linux-headers
+	"
+subpackages="
+	$pkgname-demos
+	$pkgname-doc
+	$pkgname-jre
+	$pkgname-jre-lib:jrelib:noarch
+	$pkgname-jre-base:jrebase
+	$pkgname-jdk
+	"
+source="jdk-corretto-$pkgver.tar.gz::https://github.com/corretto/corretto-$_majorver/archive/refs/tags/$pkgver.tar.gz
+	icedtea-JDK-6515172.patch
+	icedtea-hotspot-lfs64.patch
+	icedtea-hotspot-musl.patch
+	icedtea-hotspot-musl-ppc.patch
+	icedtea-jdk-disable-vfork.patch
+	icedtea-jdk-fix-ipv6-init.patch
+	icedtea-jdk-fix-libjvm-load.patch
+	icedtea-jdk-implicit.patch
+	Example.java
+	"
+builddir="$srcdir/corretto-$_majorver-$pkgver"
+
+provides="openjdk$_majorver-bootstrap"
+replaces="openjdk$_majorver"
+
+case $CARCH in
+	x86)	_jarch=i386;;
+	x86_64)	_jarch=amd64;;
+	arm*)	_jarch=aarch32;;
+	*)	_jarch="$CARCH";;
+esac
+
+_java_home="/usr/lib/jvm/java-1.8-openjdk"
+_jrelib="$_java_home/jre/lib/$_jarch"
+
+# Exclude xawt from ldpath to avoid duplicate provides for libmawt.so
+# (also in headless). in future this should be a virtual provides.
+ldpath="$_jrelib:$_jrelib/native_threads:$_jrelib/headless:$_jrelib/server:$_jrelib/jli"
+sonameprefix="$pkgname:"
+
+# enable running the JTReg tests in check?
+# see comment in that function for explanation
+_run_jtreg=${_run_jtreg:-0}
+if [ $_run_jtreg -ne 0 ]; then
+	makedepends="$makedepends java-jtreg"
+	checkdepends="$checkdepends font-freefont xvfb-run"
+fi
+
+_jvm_variants=server
+case $CTARGET_ARCH in
+loongarch64)	_jvm_variants=zero	;;
+esac
+
+prepare() {
+	default_prepare
+
+	# update autoconf files to detect alpine
+	update_config_guess
+	update_config_sub
+}
+
+_configure() {
+	if [ $_run_jtreg -ne 0 ]; then
+		_with_jtreg="--with-jtreg=/usr/share/java/jtreg"
+	else
+		_with_jtreg="--with-jtreg=no"
+	fi
+
+	if [ -n "$USE_CCACHE" ]; then
+		# workaround ccache being disallowed
+		export PATH="/usr/bin:/bin:/sbin:/usr/sbin"
+		local ccache="--enable-ccache"
+	fi
+
+	if [ -z "$JOBS" ]; then
+		export JOBS=$(printf '%s\n' "$MAKEFLAGS" | sed -n -e 's/.*-j\([0-9]\+\).*/\1/p')
+	fi
+
+	# CFLAGS, CXXFLAGS and LDFLAGS are ignored as shown by a warning
+	# in the output of ./configure unless used like such:
+	#  --with-extra-cflags="$CFLAGS"
+	#  --with-extra-cxxflags="$CXXFLAGS"
+	#  --with-extra-ldflags="$LDFLAGS"
+	# See also paragraph "Configure Control Variables" from "common/doc/building.md"
+	# shellcheck disable=2097 disable=2098
+	CFLAGS='' CXXFLAGS='' LDFLAGS='' \
+		bash ./configure \
+		--openjdk-target=$CHOST \
+		--prefix="$_java_home" \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--infodir=/usr/share/info \
+		--localstatedir=/var \
+		--with-zlib=bundled \
+		--with-giflib=system \
+		--with-jobs=${JOBS:-4} \
+		--with-native-debug-symbols=none \
+		$ccache \
+		$_with_jtreg \
+		--with-milestone="fcs" \
+		--with-jvm-variants=$_jvm_variants \
+		--with-debug-level=release \
+		--with-vendor-name="Alpine" \
+		--with-vendor-url="https://alpinelinux.org/" \
+		--with-vendor-bug-url="https://gitlab.alpinelinux.org/alpine/aports/issues" \
+		--with-vendor-vm-bug-url="https://gitlab.alpinelinux.org/alpine/aports/issues" \
+		"$@"
+}
+
+build() {
+	_extra_cflags="-DMUSL_LIBC \
+		-Wno-error=stringop-overflow \
+		-Wno-error=nonnull \
+		"
+
+	# we want to build hotspot with better optimisations; it's set to this
+	# (prepended) anyway, and it's huge
+	export CFLAGS="$CFLAGS -O3 $_extra_cflags"
+	export CXXFLAGS="$CXXFLAGS -O3 $_extra_cflags"
+	export CPPFLAGS="$CPPFLAGS $_extra_cflags"
+
+	if [ "$CBUILD" = "$CTARGET" ]; then
+		_configure \
+			--with-extra-cflags="$CFLAGS" \
+			--with-extra-cxxflags="$CXXFLAGS" \
+			--with-extra-ldflags="$LDFLAGS"
+	else
+		_configure \
+			--with-sysroot="$HOME/sysroot-$CTARGET_ARCH" \
+			--with-cups="$HOME/sysroot-$CTARGET_ARCH/usr" \
+			--with-freetype-lib="$HOME/sysroot-$CTARGET_ARCH/usr/lib" \
+			--with-freetype-include="$HOME/sysroot-$CTARGET_ARCH/usr/include/freetype2" \
+			--with-alsa="$HOME/sysroot-$CTARGET_ARCH/usr" \
+			--with-fontconfig="$HOME/sysroot-$CTARGET_ARCH/usr" \
+			--with-extra-cflags="$CFLAGS" \
+			--with-extra-cxxflags="$CXXFLAGS" \
+			--with-extra-ldflags="-Wl,--as-needed,-O1,--sort-common"
+	fi
+
+	MAKEFLAGS='' make JOBS="${JOBS:-4}" images
+}
+
+# TODO: Run JTReg tests if enabled through $_run_jtreg.
+check() {
+	cd build/linux-*-$_jvm_variants-release/images/j2sdk-image
+
+	./bin/java -version
+
+	./bin/javac "$srcdir"/Example.java -d "$builddir"
+	./bin/java -classpath "$builddir" Example
+}
+
+package() {
+	depends="$pkgname-jdk=$pkgver-r$pkgrel"
+
+	mkdir -p "$pkgdir"/$_java_home
+
+	cd build/linux-*-$_jvm_variants-release/images/
+	cp -a j2sdk-image/* "$pkgdir"/$_java_home/
+	rm -v "$pkgdir"/$_java_home/src.zip
+
+	# symlink to shared java cacerts store
+	rm -v "$pkgdir"/$_java_home/jre/lib/security/cacerts
+	ln -sv /etc/ssl/certs/java/cacerts \
+		"$pkgdir"/$_java_home/jre/lib/security/cacerts
+}
+
+jrelib() {
+	pkgdesc="$pkgdesc Java Runtime (class libraries)"
+	depends="java-cacerts"
+	provides="openjdk$_majorver-jre-lib"
+	replaces="openjdk$_majorver-jre-lib"
+
+	amove \
+		$_java_home/jre/lib/images \
+		$_java_home/jre/lib/\*.jar \
+		$_java_home/jre/lib/security \
+		$_java_home/jre/lib/ext/\*.jar \
+		$_java_home/jre/lib/cmm \
+		$_java_home/jre/ASSEMBLY_EXCEPTION \
+		$_java_home/jre/THIRD_PARTY_README \
+		$_java_home/jre/LICENSE
+}
+
+jre() {
+	pkgdesc="$pkgdesc Java Runtime"
+	depends="font-dejavu"
+	provides="java-jre openjdk$_majorver-jre"
+	replaces="openjdk$_majorver-jre"
+
+	amove \
+		$_java_home/jre/bin/policytool \
+		$_java_home/bin/appletviewer \
+		$_java_home/bin/policytool \
+		$_java_home/jre/lib/$_jarch/libawt_xawt.so \
+		$_java_home/jre/lib/$_jarch/libfontmanager.so \
+		$_java_home/jre/lib/$_jarch/libjawt.so \
+		$_java_home/jre/lib/$_jarch/libjsoundalsa.so \
+		$_java_home/jre/lib/$_jarch/libsplashscreen.so
+}
+
+jrebase() {
+	pkgdesc="$pkgdesc Java Runtime (no GUI support)"
+	depends="$pkgname-jre-lib=$pkgver-r$pkgrel java-common"
+	provides="java-jre-headless openjdk$_majorver-jre-base"
+	replaces="openjdk$_majorver-jre-base"
+
+	amove \
+		$_java_home/bin/java \
+		$_java_home/bin/orbd \
+		$_java_home/bin/rmid \
+		$_java_home/bin/servertool \
+		$_java_home/bin/unpack200 \
+		$_java_home/bin/keytool \
+		$_java_home/bin/pack200 \
+		$_java_home/bin/rmiregistry \
+		$_java_home/bin/tnameserv \
+		$_java_home/lib/$_jarch/jli
+
+	# Rest of the jre subdir (which were not taken by -jre subpkg).
+	amove $_java_home/jre
+
+	ln -s java-1.8-openjdk "$subpkgdir"/usr/lib/jvm/java-8-openjdk
+}
+
+doc() {
+	default_doc
+
+	amove $_java_home/man
+}
+
+demos() {
+	pkgdesc="$pkgdesc Java Demos and Samples"
+	depends="$pkgname-jdk=$pkgver-r$pkgrel"
+	provides="openjdk$_majorver-demos"
+	replaces="openjdk$_majorver-demos"
+
+	amove \
+		$_java_home/demo \
+		$_java_home/sample
+}
+
+jdk() {
+	pkgdesc="$pkgdesc (JDK) ($_jvm_variants variant)"
+	depends="$pkgname-jre=$pkgver-r$pkgrel"
+	provides="java-jdk openjdk$_majorver-jdk"
+	replaces="openjdk$_majorver-jdk"
+
+	amove \
+		$_java_home/bin \
+		$_java_home/lib \
+		$_java_home/include
+}
+
+sha512sums="
+6913142ab1f93df23aa55c1a03610d8c7f355e8a61adeff05c1fd439ace852e45ee0ad513ecba90ad87522b8c51b73fcbcccfca1cc8a1258d0210eab9c86cfc0  jdk-corretto-8.422.05.1.tar.gz
+c9808b42e60749eb482762f046230e89fd07d51c95a31b59540628f74ddc49680cfdcc9b45d92b5770076977c54841277e12077863ed27d47c54d70af03750aa  icedtea-JDK-6515172.patch
+6717172162cfc638de0e7a9ef80fd512f215a094d3dd6ca472c735445e612a804c4e97ced32a9618385130c054b6d333670ab2bd644f4f11daf150f93cd077d1  icedtea-hotspot-lfs64.patch
+8afa5f9eda03b5052671840693879998287b95fb56519d0f2b256cc5d8101b1406c98b4170bcc18143b0449e95a56b3d807402f77bba3b1e974b9170f9e2cfd1  icedtea-hotspot-musl.patch
+e6fff8ab886f42006ad5c210f46e82a3a4c0b654edecc4764a0d20f0e5dc81138c2c5181b034095b93f94b5aa96b7e5068f42bafa283809f6fe9d2c8655d64d7  icedtea-hotspot-musl-ppc.patch
+c70fee8f1a10c155494ab9c6e55e979d8a3e23f12358ffe9de2029ae15feff361957f1aa43af43c90ecf00523f92e3333b40311a8d0c132ebd456486cb85ed8a  icedtea-jdk-disable-vfork.patch
+48533f87fc2cf29d26b259be0df51087d2fe5b252e72d00c6ea2f4add7b0fb113141718c116279c5905e03f64a1118082e719393786811367cf4d472b5d36774  icedtea-jdk-fix-ipv6-init.patch
+b135991c76b0db8fa7c363e0903624668e11eda7b54a943035c214aa4d7fc8c3e8110ed200edcec82792f3c9393150a9bd628625ddf7f3e55720ff163fbbb471  icedtea-jdk-fix-libjvm-load.patch
+21a16599d7e0aaf2997db59ada5af63e25484949ca965a34536ee44b950a132a6b5ca0b4922a6919d840a84ba0bb8413d87d2b97ea2c65c00e8766cc470c267d  icedtea-jdk-implicit.patch
+601ac59e59d32cbaf91f7541bd8173b38c68cbec96a7fb74227017afc8e5dc6ce4b8be03e92dd34cf52370e5d52beb780808af57b17c79c53ae8ec64cd34a92d  Example.java
+"
