@@ -4,12 +4,12 @@ do_bb_install=
 
 for i in "$@"; do
 	case "$i" in
-		/lib/modules/*)
+		/lib/modules/* | /usr/lib/modules/*)
 			# don't run busybox depmod if we have kmod installed
 			# we dont need to run it twice.
 			target=$(readlink -f "$(command -v depmod || true)")
 			if [ -d "$i" ] && [ "$target" = "/bin/busybox" ]; then
-				/bin/busybox depmod ${i#/lib/modules/}
+				/bin/busybox depmod ${i#*/lib/modules/}
 			fi
 			;;
 		*) do_bb_install=yes;;
