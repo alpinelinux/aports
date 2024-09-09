@@ -1,7 +1,7 @@
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
-pkgver=3.6.6
+pkgver=3.6.7
 pkgrel=0
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
@@ -135,8 +135,8 @@ package() {
 		var/spool/cron \
 		var/mail
 
-	ln -s /run var/run
-	ln -s /run/lock var/lock
+	ln -s ../run var/run
+	ln -s ../run/lock var/lock
 	install -d -m 0555 var/empty
 	install -d -m 0700 "$pkgdir"/root
 	install -d -m 1777 "$pkgdir"/tmp "$pkgdir"/var/tmp
@@ -257,9 +257,9 @@ package() {
 		"$pkgdir"/etc/
 
 	# symlinks
-	ln -s /etc/crontabs "$pkgdir"/var/spool/cron/crontabs
-	ln -s /proc/mounts "$pkgdir"/etc/mtab
-	ln -s /var/mail "$pkgdir"/var/spool/mail
+	ln -s ../../../etc/crontabs "$pkgdir"/var/spool/cron/crontabs
+	ln -s ../proc/mounts "$pkgdir"/etc/mtab
+	ln -s ../mail "$pkgdir"/var/spool/mail
 }
 
 sha512sums="
