@@ -1,0 +1,125 @@
+From 829c0b2ed51e210843b12146709fd5f092941f99 Mon Sep 17 00:00:00 2001
+From: Xaver Hugl <xaver.hugl@gmail.com>
+Date: Tue, 10 Sep 2024 11:47:39 +0200
+Subject: [PATCH] backends/drm: don't do multi gpu copies if we'd copy from and
+ to the same render device
+
+Some hardware has multiple display devices but only one render device; doing a copy in that
+case reduces performance for no reason.
+---
+ src/backends/drm/drm_egl_layer_surface.cpp |  7 ++++
+ src/opengl/egldisplay.cpp                  | 48 ++++++++++++----------
+ src/opengl/egldisplay.h                    |  2 +
+ 3 files changed, 36 insertions(+), 21 deletions(-)
+
+diff --git a/src/backends/drm/drm_egl_layer_surface.cpp b/src/backends/drm/drm_egl_layer_surface.cpp
+index 372f0610f05..73bea02cfbc 100644
+--- a/src/backends/drm/drm_egl_layer_surface.cpp
++++ b/src/backends/drm/drm_egl_layer_surface.cpp
+@@ -407,6 +407,13 @@ std::unique_ptr<EglGbmLayerSurface::Surface> EglGbmLayerSurface::createSurface(c
+         if (m_gpu == m_eglBackend->gpu()) {
+             return doTestFormats(formats, MultiGpuImportMode::None);
+         }
++        // special case, we're using different display devices but the same render device
++        const auto display = m_eglBackend->displayForGpu(m_gpu);
++        if (display && display->renderNode() == m_eglBackend->eglDisplayObject()->renderNode()) {
++            if (auto surface = doTestFormats(formats, MultiGpuImportMode::None)) {
++                return surface;
++            }
++        }
+         if (auto surface = doTestFormats(formats, MultiGpuImportMode::Egl)) {
+             qCDebug(KWIN_DRM) << "chose egl import with format" << formatName(surface->gbmSwapchain->format()).name << "and modifier" << surface->gbmSwapchain->modifier();
+             return surface;
+diff --git a/src/opengl/egldisplay.cpp b/src/opengl/egldisplay.cpp
+index b4e9a54b97c..50b0f11b369 100644
+--- a/src/opengl/egldisplay.cpp
++++ b/src/opengl/egldisplay.cpp
+@@ -77,6 +77,7 @@ EglDisplay::EglDisplay(::EGLDisplay display, const QList<QByteArray> &extensions
+     : m_handle(display)
+     , m_extensions(extensions)
+     , m_owning(owning)
++    , m_renderNode(getRenderNode())
+     , m_supportsBufferAge(extensions.contains(QByteArrayLiteral("EGL_EXT_buffer_age")) && qgetenv("KWIN_USE_BUFFER_AGE") != "0")
+     , m_supportsNativeFence(extensions.contains(QByteArrayLiteral("EGL_ANDROID_native_fence_sync")))
+ {
+@@ -135,27 +136,7 @@ static bool checkExtension(const QByteArrayView extensions, const QByteArrayView
+ 
+ QString EglDisplay::renderNode() const
+ {
+-    const char *clientExtensions = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+-    if (checkExtension(clientExtensions, "EGL_EXT_device_query")) {
+-        EGLAttrib eglDeviceAttrib;
+-        if (eglQueryDisplayAttribEXT(m_handle, EGL_DEVICE_EXT, &eglDeviceAttrib)) {
+-            EGLDeviceEXT eglDevice = reinterpret_cast<EGLDeviceEXT>(eglDeviceAttrib);
+-
+-            const char *deviceExtensions = eglQueryDeviceStringEXT(eglDevice, EGL_EXTENSIONS);
+-            if (checkExtension(deviceExtensions, "EGL_EXT_device_drm_render_node")) {
+-                if (const char *node = eglQueryDeviceStringEXT(eglDevice, EGL_DRM_RENDER_NODE_FILE_EXT)) {
+-                    return QString::fromLocal8Bit(node);
+-                }
+-            }
+-            if (checkExtension(deviceExtensions, "EGL_EXT_device_drm")) {
+-                // Fallback to display device.
+-                if (const char *node = eglQueryDeviceStringEXT(eglDevice, EGL_DRM_DEVICE_FILE_EXT)) {
+-                    return QString::fromLocal8Bit(node);
+-                }
+-            }
+-        }
+-    }
+-    return QString();
++    return m_renderNode;
+ }
+ 
+ bool EglDisplay::supportsBufferAge() const
+@@ -328,6 +309,31 @@ QHash<uint32_t, EglDisplay::DrmFormatInfo> EglDisplay::queryImportFormats() cons
+     return ret;
+ }
+ 
++QString EglDisplay::getRenderNode() const
++{
++    const char *clientExtensions = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
++    if (checkExtension(clientExtensions, "EGL_EXT_device_query")) {
++        EGLAttrib eglDeviceAttrib;
++        if (eglQueryDisplayAttribEXT(m_handle, EGL_DEVICE_EXT, &eglDeviceAttrib)) {
++            EGLDeviceEXT eglDevice = reinterpret_cast<EGLDeviceEXT>(eglDeviceAttrib);
++
++            const char *deviceExtensions = eglQueryDeviceStringEXT(eglDevice, EGL_EXTENSIONS);
++            if (checkExtension(deviceExtensions, "EGL_EXT_device_drm_render_node")) {
++                if (const char *node = eglQueryDeviceStringEXT(eglDevice, EGL_DRM_RENDER_NODE_FILE_EXT)) {
++                    return QString::fromLocal8Bit(node);
++                }
++            }
++            if (checkExtension(deviceExtensions, "EGL_EXT_device_drm")) {
++                // Fallback to display device.
++                if (const char *node = eglQueryDeviceStringEXT(eglDevice, EGL_DRM_DEVICE_FILE_EXT)) {
++                    return QString::fromLocal8Bit(node);
++                }
++            }
++        }
++    }
++    return QString();
++}
++
+ EGLImageKHR EglDisplay::createImage(EGLContext ctx, EGLenum target, EGLClientBuffer buffer, const EGLint *attrib_list) const
+ {
+     Q_ASSERT(m_functions.createImageKHR);
+diff --git a/src/opengl/egldisplay.h b/src/opengl/egldisplay.h
+index c439f4ff3fc..d4858be5a71 100644
+--- a/src/opengl/egldisplay.h
++++ b/src/opengl/egldisplay.h
+@@ -59,10 +59,12 @@ public:
+ 
+ private:
+     QHash<uint32_t, DrmFormatInfo> queryImportFormats() const;
++    QString getRenderNode() const;
+ 
+     const ::EGLDisplay m_handle;
+     const QList<QByteArray> m_extensions;
+     const bool m_owning;
++    const QString m_renderNode;
+ 
+     const bool m_supportsBufferAge;
+     const bool m_supportsNativeFence;
+-- 
+GitLab
+
