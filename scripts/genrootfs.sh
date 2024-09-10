@@ -25,7 +25,7 @@ shift $(( $OPTIND - 1))
 cat "$repositories_file"
 
 if [ -z "$outfile" ]; then
-	outfile=$name-$arch.tar.gz
+	outfile=rootfs-$arch.tar.gz
 fi
 
 ${APK:-apk} add --keys-dir "$keys_dir" --no-cache \
