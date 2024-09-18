@@ -1,0 +1,287 @@
+From f1c501b7ed25113d9662ca7f82f69abc83c2089b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pablo=20Correa=20G=C3=B3mez?= <ablocorrea@hotmail.com>
+Date: Fri, 30 Aug 2024 01:03:00 +0200
+Subject: [PATCH 2/2] Modify DetelePackage interface to DeletePackages
+
+So that we can remove multiple packages at the same time. This will be
+quite useful for GNOME Software 47, and is a nice optimization
+regardless.
+---
+ apk-polkit-rs/src/dbus_server.rs      | 28 +++++---
+ apk-tools/src/apk_database.rs         | 99 ++++++++++++++-------------
+ data/dev.Cogitri.apkPolkit2.interface | 12 ++--
+ data/dev.Cogitri.apkPolkit2.policy.in |  2 +-
+ data/dev.Cogitri.apkPolkit2.rules.in  |  2 +-
+ 5 files changed, 76 insertions(+), 67 deletions(-)
+
+diff --git a/apk-polkit-rs/src/dbus_server.rs b/apk-polkit-rs/src/dbus_server.rs
+index 2be6f60..2f6e379 100644
+--- a/apk-polkit-rs/src/dbus_server.rs
++++ b/apk-polkit-rs/src/dbus_server.rs
+@@ -124,15 +124,15 @@ impl DBusServer {
+         Ok(())
+     }
+ 
+-    async fn delete_package(
++    async fn delete_packages(
+         &mut self,
+         #[zbus(header)] header: MessageHeader<'_>,
+         #[zbus(connection)] connection: &Connection,
+-        pkgname: &str,
++        packages: Vec<&str>,
+     ) -> error::Result<()> {
+         DBusServer::check_polkit_auth("DeletePackage", &header, connection).await?;
+         let mut db = self.create_database(false)?;
+-        db.delete_package(pkgname)?;
++        db.delete_packages(packages)?;
+         Ok(())
+     }
+ 
+@@ -373,19 +373,25 @@ mod test {
+         let mut server = DBusServer::new(true, Some(repo), Some(root.clone()));
+ 
+         server
+-            .add_packages(get_message_header(), &connection, vec!["test-a"])
++            .add_packages(get_message_header(), &connection, vec!["test-a", "test-b"])
+             .await
+             .unwrap();
+-        let exe_path = std::path::Path::new(&root)
++        let a_path = std::path::Path::new(&root)
+             .join("usr")
+             .join("bin")
+             .join("test-a");
+-        assert!(exe_path.exists());
++        assert!(a_path.exists());
++        let b_path = std::path::Path::new(&root)
++            .join("usr")
++            .join("bin")
++            .join("test-b");
++        assert!(b_path.exists());
+         server
+-            .delete_package(get_message_header(), &connection, "test-a")
++            .delete_packages(get_message_header(), &connection, vec!["test-a", "test-b"])
+             .await
+             .unwrap();
+-        assert!(!exe_path.exists());
++        assert!(!a_path.exists());
++        assert!(!b_path.exists());
+ 
+         temp_dir.close().unwrap();
+     }
+@@ -397,7 +403,7 @@ mod test {
+         let mut server = DBusServer::new(true, Some(repo), Some(root.clone()));
+ 
+         server
+-            .delete_package(get_message_header(), &connection, "test-a")
++            .delete_packages(get_message_header(), &connection, vec!["test-a"])
+             .await
+             .unwrap();
+         let exe_path = std::path::Path::new(&root)
+@@ -695,7 +701,7 @@ mod test {
+         let testa_exe_path = Path::new(&root).join("usr").join("bin").join("test-a");
+         assert!(testa_exe_path.exists());
+         let e = server
+-            .delete_package(get_message_header(), &connection, "test-a")
++            .delete_packages(get_message_header(), &connection, vec!["test-a"])
+             .await;
+         assert!(e.is_err());
+         assert_eq!(e.err().unwrap().to_string(), "dev.Cogitri.apkPolkit2.Apk: Package test-a still required by the following packages: test-b test-e");
+@@ -821,7 +827,7 @@ mod test {
+         let mut server = DBusServer::new(true, Some(repo), Some(root.clone()));
+ 
+         let e = server
+-            .delete_package(get_message_header(), &connection, "test-a 1.0")
++            .delete_packages(get_message_header(), &connection, vec!["test-a 1.0"])
+             .await
+             .err();
+         assert_eq!(
+diff --git a/apk-tools/src/apk_database.rs b/apk-tools/src/apk_database.rs
+index 1a3f758..8f4d6b0 100644
+--- a/apk-tools/src/apk_database.rs
++++ b/apk-tools/src/apk_database.rs
+@@ -153,40 +153,41 @@ impl ApkDatabase {
+     }
+ 
+     /**
+-     * Delete (remove) the package identified by `pkgname`.
++     * Delete (remove) the packages identified by `packages`.
+      *
+      * # Errors
+-     * * Returns an `Error::DeleteRequiredPackage` if the package can't be delete because
+-     *   it's still required by another package.
+-     * * Returns an `Error::Delete` if the package can't be deleted due to some other reason.
++     * * Returns an `Error::DeleteRequiredPackage` if some package can't be delete
++     *   because it's still required by another package.
++     * * Returns an `Error::Delete` some package can't be deleted due to some other reason.
+      */
+-    pub fn delete_package(&mut self, pkgname: &str) -> Result<(), Error> {
+-        info!("Deleting package {}", pkgname);
++    pub fn delete_packages(&mut self, packages: Vec<&str>) -> Result<(), Error> {
++        info!("Deleting packages {:?}", packages);
+         let mut world_copy = unsafe {
+             let mut world_copy: *mut apk_dependency_array =
+                 apk_array_resize(std::ptr::null_mut(), 0, 0).cast();
+             apk_dependency_array_copy(&mut world_copy, (self.db).world);
+             ApkDependencyArray(world_copy)
+         };
+-        let dep = self
+-            .package_name_to_apk_dependency(pkgname)
+-            .map_err(|e| {
+-                Error::Delete(i18n_f(
+-                    "Failed to delete package {} due to error {}",
+-                    &[pkgname, &e.to_string()],
+-                ))
+-            })?
+-            .ok_or_else(|| {
+-                Error::NoSuchPackage(i18n_f("Couldn't delete unknown package {}", &[pkgname]))
+-            })?;
+-        unsafe {
+-            apk_deps_del(&mut world_copy.0, dep.name);
++        for pkgname in &packages {
++            let dep = self
++                .package_name_to_apk_dependency(pkgname)
++                .map_err(|e| {
++                    Error::Delete(i18n_f(
++                        "Failed to delete package {} due to error {}",
++                        &[pkgname, &e.to_string()],
++                    ))
++                })?
++                .ok_or_else(|| {
++                    Error::NoSuchPackage(i18n_f("Couldn't delete unknown package {}", &[pkgname]))
++                })?;
++            unsafe {
++                apk_deps_del(&mut world_copy.0, dep.name);
++            }
+         }
+         let mut changeset = apk_changeset::default();
+         if unsafe { apk_solver_solve(self.db.as_mut(), 0, world_copy.0, &mut changeset) } != 0 {
+-            return Err(Error::Delete(i18n_f(
+-                "Failed to delete package {}! Please run 'apk del {}' for more information.",
+-                &[pkgname, pkgname],
++            return Err(Error::Delete(i18n(
++                "Failed to delete packages! Please run 'apk del' for more information.",
+             )));
+         }
+         for i in 0..unsafe { changeset.changes.as_ref() }.unwrap().num {
+@@ -205,39 +206,41 @@ impl ApkDatabase {
+                 pkg.set_marked(1);
+             }
+         }
+-        let dependants = unsafe {
+-            let mut pkgname_arr: *mut apk_string_array =
+-                apk_array_resize(std::ptr::null_mut(), 0, 0).cast();
+-            *apk_string_array_add(&mut pkgname_arr) = CString::new(pkgname).unwrap().into_raw();
+-
+-            let pkgname_arr = ApkStringArray(pkgname_arr);
+-            let mut dependants: Vec<String> = Vec::new();
+-
+-            apk_db_foreach_matching_name(
+-                self.db.as_mut(),
+-                pkgname_arr.0,
+-                Some(ApkDatabase::foreach_matching),
+-                &mut dependants as *mut _ as *mut c_void,
+-            );
+-            dependants.retain(|e| e != pkgname);
+-            dependants
+-        };
++        for pkgname in &packages {
++            let dependants = unsafe {
++                let mut pkgname_arr: *mut apk_string_array =
++                    apk_array_resize(std::ptr::null_mut(), 0, 0).cast();
++                *apk_string_array_add(&mut pkgname_arr) =
++                    CString::new(*pkgname).unwrap().into_raw();
++
++                let pkgname_arr = ApkStringArray(pkgname_arr);
++                let mut dependants: Vec<String> = Vec::new();
++
++                apk_db_foreach_matching_name(
++                    self.db.as_mut(),
++                    pkgname_arr.0,
++                    Some(ApkDatabase::foreach_matching),
++                    &mut dependants as *mut _ as *mut c_void,
++                );
++                dependants.retain(|e| e != pkgname);
++                dependants
++            };
+ 
+-        if !dependants.is_empty() {
+-            return Err(Error::DeleteRequiredPackage(i18n_f(
+-                "Package {} still required by the following packages: {}",
+-                &[pkgname, &dependants.join(" ")],
+-            )));
++            if !dependants.is_empty() {
++                return Err(Error::DeleteRequiredPackage(i18n_f(
++                    "Package {} still required by the following packages: {}",
++                    &[pkgname, &dependants.join(" ")],
++                )));
++            }
+         }
+         if unsafe {
+             apk_solver_commit_changeset(self.db.as_mut(), &mut changeset, world_copy.0) != 0
+         } {
+-            return Err(Error::Delete(i18n_f(
+-                "Failed to delete package {}! Please run 'apk del {}' for more information.",
+-                &[pkgname, pkgname],
++            return Err(Error::Delete(i18n(
++                "Failed to delete packages! Please run 'apk del' for more information.",
+             )));
+         }
+-        debug!("Done deleting package {}", pkgname);
++        debug!("Done deleting packages {:?}", packages);
+         Ok(())
+     }
+ 
+diff --git a/data/dev.Cogitri.apkPolkit2.interface b/data/dev.Cogitri.apkPolkit2.interface
+index f193df7..5963b00 100644
+--- a/data/dev.Cogitri.apkPolkit2.interface
++++ b/data/dev.Cogitri.apkPolkit2.interface
+@@ -45,14 +45,14 @@
+         </method>
+ 
+         <!--
+-            DeletePackage:
+-            @package: The name of the package to delete (uninstall)
++            DeletePackages:
++            @packages: An array with the name of the package to delete (uninstall)
+ 
+-            Removes a package from the world constraint of the system (and as such
+-            uninstalls it, in case nothing else depends on it).
++            Removes the packages from the world constraint of the system (and as such
++            uninstalls them, in case nothing else depends on them).
+         -->
+-        <method name="DeletePackage">
+-            <arg name="package" type="s" direction="in"/>
++        <method name="DeletePackages">
++            <arg name="package" type="as" direction="in"/>
+         </method>
+ 
+         <!--
+diff --git a/data/dev.Cogitri.apkPolkit2.policy.in b/data/dev.Cogitri.apkPolkit2.policy.in
+index c29f607..8496491 100644
+--- a/data/dev.Cogitri.apkPolkit2.policy.in
++++ b/data/dev.Cogitri.apkPolkit2.policy.in
+@@ -81,7 +81,7 @@
+     <annotate key="org.freedesktop.policykit.imply">dev.Cogitri.apkPolkit2.AddPackage dev.Cogitri.apkPolkit2.DeletePackage dev.Cogitri.apkPolkit2.AddRepository dev.Cogitri.apkPolkit2.RemoveRepository</annotate>
+   </action>
+ 
+-  <action id="dev.Cogitri.apkPolkit2.DeletePackage">
++  <action id="dev.Cogitri.apkPolkit2.DeletePackages">
+     <!-- SECURITY:
+           - Normal users need admin authentication to delete packages
+           - Users in the "wheel" group can delete packages without authentication
+diff --git a/data/dev.Cogitri.apkPolkit2.rules.in b/data/dev.Cogitri.apkPolkit2.rules.in
+index a97489f..52a9aa9 100644
+--- a/data/dev.Cogitri.apkPolkit2.rules.in
++++ b/data/dev.Cogitri.apkPolkit2.rules.in
+@@ -1,7 +1,7 @@
+ polkit.addRule(function(action, subject) {
+     if ((action.id == "dev.Cogitri.apkPolkit2.AddPackages" ||
+          action.id == "dev.Cogitri.apkPolkit2.AddRepository" ||
+-         action.id == "dev.Cogitri.apkPolkit2.DeletePackage"||
++         action.id == "dev.Cogitri.apkPolkit2.DeletePackages"||
+          action.id == "dev.Cogitri.apkPolkit2.RemoveRepository" ||
+          action.id == "dev.Cogitri.apkPolkit2.UpdateRepositories" ||
+          action.id == "dev.Cogitri.apkPolkit2.UpgradePackages") &&
+-- 
+2.46.1
+
