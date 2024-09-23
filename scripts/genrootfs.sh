@@ -38,7 +38,7 @@ done
 
 ${APK:-apk} fetch --keys-dir "$keys_dir" --no-cache \
 	--repositories-file "$repositories_file" --root "$tmp" \
-	--stdout --quiet alpine-release | tar -zx -C "$tmp" etc/
+	--stdout --quiet alpine-release | tar -zx -C "$tmp" etc/ usr/
 
 # make sure root login is disabled
 sed -i -e 's/^root::/root:*:/' "$tmp"/etc/shadow
