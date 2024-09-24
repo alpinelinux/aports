@@ -1,0 +1,112 @@
+From b0c04540d70c27173b2f44c440f2cd512904e54a Mon Sep 17 00:00:00 2001
+From: "Jan Alexander Steffens (heftig)" <jan.steffens@gmail.com>
+Date: Sat, 21 Sep 2024 09:38:23 +0200
+Subject: [PATCH] aperture: Only get devices from the pipewiredeviceprovider
+
+`create_element`'s parameter is for giving the produced element a name.
+It does not select the element type.
+
+Remove the `DeviceMonitor` as it can load and start other providers that
+might give us incompatible cameras while the pipewire provider is still
+busy figuring out whether it should hide these other providers.
+
+Using a device monitor inside a device provider (which itself implicitly
+feeds into the monitor) also introduces recursion, which is probably
+unwise.
+
+Do the filtering the monitor did for us ourselves.
+
+Fixes: e60bdb67e7d9bad8016741ba40d6a560e2478653
+Fixes: https://gitlab.gnome.org/GNOME/snapshot/-/issues/232
+---
+ aperture/src/camera.rs          |  2 +-
+ aperture/src/device_provider.rs | 22 +++++++++++++---------
+ 2 files changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/aperture/src/camera.rs b/aperture/src/camera.rs
+index 3ce7fb6..a5119c7 100644
+--- a/aperture/src/camera.rs
++++ b/aperture/src/camera.rs
+@@ -145,7 +145,7 @@ impl Camera {
+     }
+ 
+     pub(crate) fn create_element(&self) -> Result<gst::Element, glib::BoolError> {
+-        let element = self.device().create_element(Some("pipewiresrc"))?;
++        let element = self.device().create_element(None)?;
+         element.set_property("client-name", crate::APP_ID.get().unwrap());
+         Ok(element)
+     }
+diff --git a/aperture/src/device_provider.rs b/aperture/src/device_provider.rs
+index 8ecb082..0e1c547 100644
+--- a/aperture/src/device_provider.rs
++++ b/aperture/src/device_provider.rs
+@@ -28,7 +28,6 @@ mod imp {
+     #[properties(wrapper_type = super::DeviceProvider)]
+     pub struct DeviceProvider {
+         pub inner: OnceCell<gst::DeviceProvider>,
+-        pub monitor: OnceCell<gst::DeviceMonitor>,
+         pub cameras: RefCell<Vec<crate::Camera>>,
+         pub bus_watch: OnceCell<gst::bus::BusWatchGuard>,
+ 
+@@ -108,10 +107,6 @@ mod imp {
+ 
+             crate::ensure_init();
+ 
+-            let monitor = gst::DeviceMonitor::new();
+-            monitor.add_filter(Some("Video/Source"), Some(&crate::SUPPORTED_CAPS));
+-            self.monitor.set(monitor).unwrap();
+-
+             if let Some(provider) = gst::DeviceProviderFactory::by_name("pipewiredeviceprovider") {
+                 self.inner.set(provider).unwrap();
+             }
+@@ -214,12 +209,11 @@ impl DeviceProvider {
+         };
+         provider.start()?;
+ 
+-        let monitor = imp.monitor.get().unwrap();
+-
+         let mut seen = HashSet::new();
+-        let mut cameras = monitor
++        let mut cameras = provider
+             .devices()
+             .iter()
++            .filter(|d| is_camera(d))
+             .map(crate::Camera::new)
+             .filter(|d| !is_ir_camera(d))
+             .collect::<Vec<_>>();
+@@ -237,7 +231,7 @@ impl DeviceProvider {
+         self.imp().cameras.replace(cameras);
+         self.items_changed(0, 0, n_items);
+ 
+-        let bus = monitor.bus();
++        let bus = provider.bus();
+         let watch = bus
+             .add_watch_local(glib::clone!(
+                 #[weak(rename_to = obj)]
+@@ -358,6 +352,9 @@ impl DeviceProvider {
+                     .structure()
+                     .and_then(|s| s.get::<gst::Device>("device").ok())
+                 {
++                    if !is_camera(&device) {
++                        return;
++                    }
+                     let device = crate::Camera::new(&device);
+                     if !imp.has_camera(&device) {
+                         // We ignore/filter IR cameras.
+@@ -404,6 +401,13 @@ impl DeviceProvider {
+     }
+ }
+ 
++fn is_camera(device: &gst::Device) -> bool {
++    device.has_classes("Video/Source")
++        && device
++            .caps()
++            .is_some_and(|c| c.can_intersect(&crate::SUPPORTED_CAPS))
++}
++
+ fn is_ir_camera(device: &crate::Camera) -> bool {
+     device
+         .device()
+-- 
+2.46.2
+
