@@ -14,7 +14,8 @@ for i in "$@"; do
 			"$i"/modules.builtin.bin \
 			"$i"/modules.dep.bin \
 			"$i"/modules.softdep \
-			"$i"/modules.symbols.bin
+			"$i"/modules.symbols.bin \
+			"$i"/modules.weakdep
 		rmdir "$i" 2>/dev/null || :
 	fi
 done
