@@ -5,7 +5,10 @@ for i in "$@"; do
 	 # encodings dir doesn't include fonts
 		*/encodings) continue;
 	esac
-	mkfontdir "$i"
-	mkfontscale "$i"
+	[ -d "$i" ] || continue
+	rm -f "$i"/fonts.dir "$i"/fonts.scale
+	rmdir "$i" 2>/dev/null || {
+		mkfontdir "$i"
+		mkfontscale "$i"
+	}
 done
-
