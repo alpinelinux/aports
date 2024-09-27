@@ -330,7 +330,7 @@ for ARCH in $req_arch; do
 		echo "---" > "$_yaml_out"
 	fi
 	for PROFILE in $req_profiles; do
-		(set -e; build_profile) || exit 1
+		(set -eo pipefail; build_profile) || exit 1
 	done
 done
 echo "Images generated in $OUTDIR"
