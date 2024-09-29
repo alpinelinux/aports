@@ -1,0 +1,355 @@
+From 848b6326a9ed97427affe4dbeb3177a4b0ad0e98 Mon Sep 17 00:00:00 2001
+From: Robert Mader <robert.mader@posteo.de>
+Date: Sat, 28 Sep 2024 15:15:23 +0200
+Subject: [PATCH] monitor-utils: Rework camera deduplication code
+
+The previous code made some invalid assumptions and was rather
+complicated. Rework and simplify it.
+
+The approach work as follows:
+1. Once a new device gets registered, store its data in a list of pending
+   devices.
+2. Start a timer. On timeout, we check all pending devices and depulicate
+   according to our heuristic. The timer gets reset whenever a device is
+   added in order to avoid race conditions.
+3. On timeout, add the pending devices to categories. For now: UVC cameras
+   from the V4L2 plugin, libcamera cameras and other cameras from the V4L2
+   plugin.
+4. Then process the different categories in order of preference and store
+   their V4L2 device IDs in a list for each plugin.
+5. Before creating a camera, check that the V4L2 device(s) it uses are not
+   yet used by a already existing camera from the other plugin.
+
+While on it, drop support for Pipewire versions that don't report V4L2
+device IDs at all.
+
+Closes https://gitlab.freedesktop.org/pipewire/wireplumber/-/issues/689
+Closes https://gitlab.freedesktop.org/pipewire/wireplumber/-/issues/708
+---
+ src/scripts/lib/monitor-utils.lua             | 220 +++++++-----------
+ .../monitors/libcamera/create-device.lua      |  12 +-
+ src/scripts/monitors/v4l2/create-device.lua   |  12 +-
+ 3 files changed, 89 insertions(+), 155 deletions(-)
+
+diff --git a/src/scripts/lib/monitor-utils.lua b/src/scripts/lib/monitor-utils.lua
+index 455469d8..9d584c51 100644
+--- a/src/scripts/lib/monitor-utils.lua
++++ b/src/scripts/lib/monitor-utils.lua
+@@ -10,7 +10,8 @@
+ log = Log.open_topic ("s-monitors-utils")
+ 
+ local mutils = {
+-  cam_data = {}
++  cam_data = {},
++  cam_source = nil
+ }
+ 
+ -- finds out if any of the managed objects(nodes of a device or devices of
+@@ -25,173 +26,126 @@ function mutils.find_duplicate (parent, id, property, value)
+   return false
+ end
+ 
+-function get_cam_data(self, dev_id)
+-  if not self.cam_data[dev_id] then
+-    self.cam_data[dev_id] = {}
+-    self.cam_data[dev_id]["libcamera"] = {}
+-    self.cam_data[dev_id]["v4l2"] = {}
+-  end
+-  return self.cam_data[dev_id]
++function create_cam_node(cam_data)
++  local api = cam_data.properties["device.api"]
++
++  log:info ("create " .. api .. " node for device: " .. cam_data.obj_path)
++
++  source = source or Plugin.find ("standard-event-source")
++  local e = source:call ("create-event", "create-" .. api .. "-device-node",
++    cam_data.parent, nil)
++  e:set_data ("factory", cam_data.factory)
++  e:set_data ("node-properties", cam_data.properties)
++  e:set_data ("node-sub-id", cam_data.id)
++
++  EventDispatcher.push_event (e)
+ end
+ 
+-function parse_devids_get_cam_data(self, devids)
+-  local dev_ids_json = Json.Raw(devids)
+-  local dev_ids_table = {}
+-
+-  if dev_ids_json:is_array() then
+-    dev_ids_table = dev_ids_json:parse()
+-  else
+-    -- to maintain the backward compatibility with earlier pipewire versions.
+-    for dev_id_str in devids:gmatch("%S+") do
+-      local dev_id = tonumber(dev_id_str)
+-      if dev_id then
+-        table.insert(dev_ids_table, dev_id)
+-      end
++function table_contains(table, element)
++  for _, value in pairs(table) do
++    if value == element then
++      return true
+     end
+   end
++  return false
++end
++
++function mutils.create_cam_nodes(self)
++  log:debug("create_cam_nodes for " .. #self.cam_data .. " devices")
++
++  local libcamera_cameras = {}
++  local v4l2_uvc_cameras = {}
++  local v4l2_other_cameras = {}
++
++  for _, data in ipairs(self.cam_data) do
++    local api = data.properties["device.api"]
++
++    local dev_ids = data.properties["device.devids"]
++    local dev_ids_json = Json.Raw(dev_ids)
+ 
+-  local dev_num = nil
+-  -- `device.devids` is a json array of device numbers
+-  for _, dev_id_str in ipairs(dev_ids_table) do
+-    local dev_id = tonumber(dev_id_str)
+-    if not dev_id then
+-      log:notice ("invalid device number")
+-      return
++    if dev_ids_json:is_array() then
++      data.dev_ids = dev_ids_json:parse()
++    else
++      data.dev_ids = {}
++      -- to maintain the backward compatibility with earlier pipewire versions.
++      for dev_id_str in dev_ids:gmatch("%S+") do
++        local dev_id = tonumber(dev_id_str)
++        if dev_id then
++          table.insert(data.dev_ids, dev_id)
++        end
++      end
+     end
+ 
+-    log:debug ("Working on device " .. dev_id)
+-    local dev_cam_data = get_cam_data (self, dev_id)
+-    if not dev_num then
+-      dev_num = dev_id
+-      if #dev_ids_table > 1 then
+-        -- libcam node can some times use more tha one V4L2 devices, in this
+-        -- case, return the first device id and mark rest of the them as peers
+-        -- to the first one.
+-        log:debug ("Device " .. dev_id .. " uses multi V4L2 devices")
+-        dev_cam_data.uses_multi_v4l2_devices = true
++    if api == 'libcamera' then
++      table.insert(libcamera_cameras, data)
++    elseif api == 'v4l2' then
++      if data.properties["api.v4l2.cap.driver"] == "uvcvideo" then
++        table.insert(v4l2_uvc_cameras, data)
++      else
++        table.insert(v4l2_other_cameras, data)
+       end
+     else
+-      log:debug ("Device " .. dev_id .. " is peer to " .. dev_num)
+-      dev_cam_data.peer_id = dev_num
++      log:warning("Got camera with unknown API, ignoring")
+     end
+   end
+ 
+-  if dev_num then
+-    return self.cam_data[dev_num], dev_num
+-  end
+-end
++  local device_ids_libcamera = {}
++  local device_ids_v4l2 = {}
+ 
+-function mutils.clear_cam_data (self, dev_num)
+-  local dev_cam_data = self.cam_data[dev_num]
+-  if not dev_cam_data then
+-    return
++  for _, data in ipairs(v4l2_uvc_cameras) do
++    create_cam_node (data)
++    table.insert(device_ids_v4l2, data.dev_ids[1])
+   end
+ 
+-  if dev_cam_data.uses_multi_v4l2_devices then
+-    for dev_id, cam_data_ in pairs(self.cam_data) do
+-      if cam_data_.peer_id == dev_num then
+-        log:debug("clear " .. dev_id .. " it is peer to " .. dev_num)
+-        self.cam_data[dev_id] = nil
+-      end
++  for _, data in ipairs(libcamera_cameras) do
++    if table_contains(device_ids_v4l2, data.dev_ids[1]) then
++      log:debug ("skipping device " .. data.obj_path)
++    else
++      create_cam_node (data)
++      table.insert(device_ids_libcamera, data.dev_ids[1])
+     end
+   end
+ 
+-  self.cam_data[dev_num] = nil
+-end
+-
+-function mutils.create_cam_node(self, dev_num)
+-  local api = nil
+-  local cam_data = get_cam_data (self, dev_num)
+-
+-  if cam_data["v4l2"].enum_status and cam_data["libcamera"].enum_status then
+-    if cam_data.uses_multi_v4l2_devices then
+-      api = "libcamera"
+-    elseif cam_data.peer_id ~= nil then
+-      -- no need to create node for peer
+-      log:notice ("timer expired for peer device " .. dev_num)
+-      return
+-    elseif cam_data.is_device_uvc then
+-      api = "v4l2"
++  for _, data in ipairs(v4l2_other_cameras) do
++    if table_contains(device_ids_libcamera, data.dev_ids[1]) then
++      log:debug ("skipping device " .. data.obj_path)
+     else
+-      api = "libcamera"
++      create_cam_node (data)
+     end
+-  else
+-    api = cam_data["v4l2"].enum_status and "v4l2" or "libcamera"
+   end
+ 
+-  log:info (string.format ("create \"%s\" node for device:%s", api,
+-    cam_data.dev_path))
+-
+-  source = source or Plugin.find ("standard-event-source")
+-  local e = source:call ("create-event", "create-" .. api .. "-device-node",
+-    cam_data[api].parent, nil)
+-  e:set_data ("factory", cam_data[api].factory)
+-  e:set_data ("node-properties", cam_data[api].properties)
+-  e:set_data ("node-sub-id", cam_data[api].id)
+-
+-  EventDispatcher.push_event (e)
+-
+-  self:clear_cam_data (dev_num)
++  self.cam_data = {}
+ end
+ 
++
+ -- arbitrates between v4l2 and libcamera on who gets to create the device node
+ -- for a device, logic is based on the device number of the device given by both
+ -- the parties.
+ function mutils.register_cam_node (self, parent, id, factory, properties)
++  local obj_path = properties["object.path"]
+   local api = properties["device.api"]
+   local dev_ids = properties["device.devids"]
+-  log:debug(api .. " reported " .. dev_ids)
+-
+-  local cam_data, dev_num = parse_devids_get_cam_data(self, dev_ids)
++  log:debug(api .. " reported device " .. obj_path .. " with device ids " .. dev_ids)
+ 
+-  if not cam_data then
+-    log:notice (string.format ("device numbers invalid for %s device:%s",
+-      api, properties["device.name"]))
+-    return false
+-  end
+-
+-  -- only v4l2 can give this info
+-  if properties["api.v4l2.cap.driver"] == "uvcvideo" then
+-    log:debug ("Device " .. dev_num .. " is a UVC device")
+-    cam_data.is_device_uvc = true
+-  end
+-
+-  -- only v4l2 can give this info
+-  if properties["api.v4l2.path"] then
+-    cam_data.dev_path = properties["api.v4l2.path"]
+-  end
++  -- cache info, it comes handy when creating node
++  local cam_data = {}
++  cam_data.id = id
++  cam_data.parent = parent
++  cam_data.obj_path = obj_path
++  cam_data.factory = factory
++  cam_data.properties = properties
+ 
+-  local cam_api_data = cam_data[api]
+-  cam_api_data.enum_status = true
++  table.insert(self.cam_data, cam_data)
+ 
+-  -- cache info, it comes handy when creating node
+-  cam_api_data.parent = parent
+-  cam_api_data.id = id
+-  cam_api_data.name = properties["device.name"]
+-  cam_api_data.factory = factory
+-  cam_api_data.properties = properties
+-
+-  local other_api = api == "v4l2" and "libcamera" or "v4l2"
+-  if cam_api_data.enum_status and not cam_data[other_api].enum_status then
+-    log:trace (string.format ("\"%s\" armed a timer for %d", api, dev_num))
+-    cam_data.source = Core.timeout_add (
+-      Settings.get_int ("monitor.camera-discovery-timeout"), function()
+-        log:trace (string.format ("\"%s\" armed timer expired for %d", api, dev_num))
+-        self:create_cam_node (dev_num)
+-        cam_data.source = nil
+-      end)
+-  elseif cam_data.source then
+-    log:trace (string.format ("\"%s\" disarmed timer for %d", api, dev_num))
+-    cam_data.source:destroy ()
+-    cam_data.source = nil
+-    self:create_cam_node (dev_num)
+-  else
+-    log:notice (string.format ("\"%s\" calling after timer expiry for %d:%s%s",
+-      api, dev_num, cam_data.dev_path,
+-      (cam_data.is_device_uvc and "(uvc)" or "")))
++  if self.cam_source then
++    self.cam_source:destroy ()
+   end
+ 
+-  return true
++  self.cam_source = Core.timeout_add (
++    Settings.get_int ("monitor.camera-discovery-timeout"), function()
++      self:create_cam_nodes ()
++      self.cam_source = nil
++  end)
+ end
+ 
+ return mutils
+diff --git a/src/scripts/monitors/libcamera/create-device.lua b/src/scripts/monitors/libcamera/create-device.lua
+index 8842b7fb..79557b87 100644
+--- a/src/scripts/monitors/libcamera/create-device.lua
++++ b/src/scripts/monitors/libcamera/create-device.lua
+@@ -14,17 +14,7 @@ config = {}
+ config.rules = Conf.get_section_as_json ("monitor.libcamera.rules", Json.Array {})
+ 
+ function createLibcamNode (parent, id, type, factory, properties)
+-  local registered = mutils:register_cam_node (parent, id, factory, properties)
+-  if not registered then
+-    source = source or Plugin.find ("standard-event-source")
+-    local e = source:call ("create-event", "create-libcamera-device-node",
+-      parent, nil)
+-    e:set_data ("factory", factory)
+-    e:set_data ("node-properties", properties)
+-    e:set_data ("node-sub-id", id)
+-
+-    EventDispatcher.push_event (e)
+-  end
++  mutils:register_cam_node (parent, id, factory, properties)
+ end
+ 
+ SimpleEventHook {
+diff --git a/src/scripts/monitors/v4l2/create-device.lua b/src/scripts/monitors/v4l2/create-device.lua
+index 167d9623..7b46d552 100644
+--- a/src/scripts/monitors/v4l2/create-device.lua
++++ b/src/scripts/monitors/v4l2/create-device.lua
+@@ -14,17 +14,7 @@ config = {}
+ config.rules = Conf.get_section_as_json ("monitor.v4l2.rules", Json.Array {})
+ 
+ function createV4l2camNode (parent, id, type, factory, properties)
+-  local registered = mutils:register_cam_node (parent, id, factory, properties)
+-  if not registered then
+-    source = source or Plugin.find ("standard-event-source")
+-    local e = source:call ("create-event", "create-v4l2-device-node",
+-      parent, nil)
+-    e:set_data ("factory", factory)
+-    e:set_data ("node-properties", properties)
+-    e:set_data ("node-sub-id", id)
+-
+-    EventDispatcher.push_event (e)
+-  end
++  mutils:register_cam_node (parent, id, factory, properties)
+ end
+ 
+ SimpleEventHook {
+-- 
+2.46.2
+
