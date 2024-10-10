@@ -129,7 +129,7 @@ for PKG in fortify-headers linux-headers musl pkgconf zlib \
 	   bsd-compat-headers libbsd busybox make \
 	   apk-tools file \
 	   libcap openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
-	   attr acl fakeroot tar \
+	   acl fakeroot tar \
 	   lzip abuild \
 	   $OPENSSH \
 	   $MKINITFS \
