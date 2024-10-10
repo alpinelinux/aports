@@ -1,0 +1,91 @@
+# Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
+# Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>
+pkgname=py3-tenant-schemas-celery
+#_pkgreal is used by apkbuild-pypi to find modules at PyPI
+_pkgreal=tenant-schemas-celery
+pkgver=3.0.0
+pkgrel=0
+pkgdesc="Celery integration for django-tenant-schemas and django-tenants"
+url="https://pypi.python.org/project/tenant-schemas-celery"
+# loongarch64|s390x: blocked by py3-celery
+arch="noarch !s390x !loongarch64"
+license="MIT"
+depends="py3-django-tenants py3-celery"
+checkdepends="python3-dev py3-pytest py3-freezegun postgresql rabbitmq-server valkey procps-ng"
+makedepends="py3-setuptools py3-gpep517 py3-wheel py3-pytest-django py3-pytest-cov"
+source="
+	$pkgname-$pkgver.tar.gz::https://codeload.github.com/maciej-gol/tenant-schemas-celery/tar.gz/refs/tags/$pkgver
+	"
+builddir="$srcdir/$_pkgreal-$pkgver"
+subpackages="$pkgname-pyc"
+
+build() {
+	gpep517 build-wheel \
+		--wheel-dir .dist \
+		--output-fd 3 3>&1 >&2
+}
+
+check() {
+	msg "Setting up valkey"
+	valkey-server >/dev/null 2>&1 &
+
+	export POSTGRES_DB=tenant_celery
+	export POSTGRES_USER=tenant_celery
+	export POSTGRES_PASSWORD="qwe123"
+
+	msg "Setting up postgres"
+	rm -Rf "$srcdir"/tmp
+	initdb -D "$srcdir"/tmp
+	postgres -D "$srcdir"/tmp --unix-socket-directories="$srcdir" > "$srcdir"/tmp/psql.log 2>&1 >/dev/null &
+
+	trap "pkill postgres; pkill valkey-server; pkill rabbitmq-server; pkill -f 'python3 -m celery'" EXIT
+	# wait for psql to be ready
+	while ! pg_isready -h "$srcdir" > /dev/null 2>&1; do
+		sleep 0.5
+	done
+	psql -h "$srcdir" -d postgres -c "CREATE ROLE $POSTGRES_USER PASSWORD '$POSTGRES_PASSWORD' INHERIT LOGIN;"
+	psql -h "$srcdir" -d postgres -c "CREATE DATABASE $POSTGRES_DB OWNER $POSTGRES_USER ENCODING 'UTF-8';"
+	psql -h "$srcdir" -d postgres -c "ALTER USER $POSTGRES_USER WITH SUPERUSER;"
+
+	msg "Setting up rabbitmq"
+	# generate test config file to use test certs that are taken from
+	# Dockerfile in tarred source code
+	mkdir -p "$srcdir"/rabbitmq-tests
+	echo "loopback_users = none
+ssl_options.fail_if_no_peer_cert = false
+" > "$srcdir"/rabbitmq-tests/server.conf
+	RABBITMQ_CONFIG_FILE="$srcdir"/rabbitmq-tests/server.conf \
+		RABBITMQ_SERVER_ERL_ARGS="-setcookie rabbit" \
+		RABBITMQ_LOG_BASE="$srcdir"/rabbitmq-tests/log \
+		RABBITMQ_PID_FILE="$srcdir"/rabbitmq-tests/rabbit.pid \
+		RABBITMQ_MNESIA_BASE="$srcdir"/rabbitmq-tests/mnesia \
+		rabbitmq-server > /dev/null 2>&1 &
+	sleep 5 # Wait for rabbitmq to start
+
+	msg "Testing $pkgname"
+	python3 -m venv --clear --without-pip --system-site-packages .testenv
+	.testenv/bin/python3 -m installer .dist/*.whl
+
+	cd test_app
+
+	export DJANGO_SETTINGS_MODULE=test_app.settings
+
+	../.testenv/bin/python3 -m coverage run manage.py makemigrations
+	../.testenv/bin/python3 -m celery -A tenant_schemas_celery.test_app:app worker -l INFO >/dev/null 2>&1 &
+	sleep 5 # wait for Celery to start
+	../.testenv/bin/python3 -m pytest -v ../.testenv/lib/python3.12/site-packages/tenant_schemas_celery
+
+	pkill -f "python3 -m celery"
+	pkill rabbitmq-server
+	pkill valkey-server
+	pkill postgres
+}
+
+package() {
+	python3 -m installer -d "$pkgdir" \
+		.dist/*.whl
+}
+
+sha512sums="
+f52b1b47a7b6b3d4ec75ba4e634b1b2dca694644c86418088411c287176e3ac466b94ef324c592248050dd50d87a5abd0fd00519ffc172450a5c90bfa5f0f6db  py3-tenant-schemas-celery-3.0.0.tar.gz
+"
