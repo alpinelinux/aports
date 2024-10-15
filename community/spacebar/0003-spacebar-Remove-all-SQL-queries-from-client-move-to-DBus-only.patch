@@ -1,0 +1,915 @@
+From ffa20c35e64af3f5225d52b68a5862b703fbd5e1 Mon Sep 17 00:00:00 2001
+From: Devin Lin <espidev@gmail.com>
+Date: Mon, 14 Oct 2024 23:48:15 -0700
+Subject: [PATCH 4/4] Remove all SQL queries from client, move to DBus only
+
+Fixes #66
+
+We seem to be getting conflicts due to the client and daemon both accessing the same sqlite file at the same time. Move to have all client requests be done over DBus instead of direct SQL accesses. This DBus API is an exact translation of the db calls at the moment. I had to remove the auto-generated dbus file (now it's manually specified) because it wasn't properly translating some interface functions.
+
+The current major caveat is that the requests are blocking again on the UI, it can be made async again in the future but I whipped this up quite quickly to have this done....
+---
+ daemon/CMakeLists.txt                    | 13 ++--
+ daemon/channellogger.cpp                 | 53 +++++++++++++
+ daemon/channellogger.h                   |  8 ++
+ daemon/main.cpp                          |  6 ++
+ daemon/org.kde.spacebar.Daemon.xml       | 75 ++++++++++++++++++
+ lib/database/database.cpp                | 83 ++++++++++----------
+ lib/database/database.h                  | 97 +++++++++++++++++++++---
+ lib/telephonySupport/phonenumber.cpp     |  7 +-
+ lib/telephonySupport/phonenumber.h       |  2 +
+ lib/telephonySupport/phonenumberlist.cpp | 17 +++++
+ lib/telephonySupport/phonenumberlist.h   |  2 +
+ src/CMakeLists.txt                       |  5 +-
+ src/channelhandler.cpp                   |  6 --
+ src/channelhandler.h                     |  8 +-
+ src/chatlistmodel.cpp                    | 44 ++++++-----
+ src/chatlistmodel.h                      |  4 +-
+ src/main.cpp                             |  8 ++
+ src/messagemodel.cpp                     | 22 ++++--
+ src/messagemodel.h                       |  4 +-
+ 19 files changed, 365 insertions(+), 99 deletions(-)
+ create mode 100644 daemon/org.kde.spacebar.Daemon.xml
+
+diff --git a/daemon/CMakeLists.txt b/daemon/CMakeLists.txt
+index 3a027b7..6e4950b 100644
+--- a/daemon/CMakeLists.txt
++++ b/daemon/CMakeLists.txt
+@@ -5,15 +5,16 @@ set(spacebar_daemon_SRCS
+ )
+ 
+ # generate DBus adaptor xml
+-qt_generate_dbus_interface(
+-    ${CMAKE_CURRENT_SOURCE_DIR}/channellogger.h
+-    org.kde.spacebar.Daemon.xml
+-    OPTIONS -s -m -P
+-)
++# qt_generate_dbus_interface(
++#     ${CMAKE_CURRENT_SOURCE_DIR}/channellogger.h
++#     org.kde.spacebar.Daemon.xml
++#     OPTIONS -s -m -P
++# )
+ 
+ # use generated DBus adapator xml to generate adaptor source code
+ qt_add_dbus_adaptor(spacebar_daemon_SRCS
+-    ${CMAKE_CURRENT_BINARY_DIR}/org.kde.spacebar.Daemon.xml
++    # ${CMAKE_CURRENT_BINARY_DIR}/org.kde.spacebar.Daemon.xml
++    ${CMAKE_CURRENT_SOURCE_DIR}/org.kde.spacebar.Daemon.xml
+     ${CMAKE_CURRENT_SOURCE_DIR}/channellogger.h ChannelLogger
+ )
+ 
+diff --git a/daemon/channellogger.cpp b/daemon/channellogger.cpp
+index 4b0685a..e607a23 100644
+--- a/daemon/channellogger.cpp
++++ b/daemon/channellogger.cpp
+@@ -100,6 +100,59 @@ QString ChannelLogger::countryCode()
+     return countryCode;
+ }
+ 
++StringMapList ChannelLogger::chats(const QStringList &phoneNumberList)
++{
++    PhoneNumberList phoneList{phoneNumberList};
++
++    const auto chats = QCoro::waitFor(m_database.chats(phoneList));
++    StringMapList serializedChats;
++    for (const auto &chat : chats) {
++        serializedChats.push_back(chat.toMap());
++    }
++
++    return serializedChats;
++}
++
++void ChannelLogger::markChatAsRead(const QStringList &phoneNumberList)
++{
++    PhoneNumberList phoneList{phoneNumberList};
++    QCoro::waitFor(m_database.markChatAsRead(phoneList));
++}
++
++void ChannelLogger::deleteChat(const QStringList &phoneNumberList)
++{
++    PhoneNumberList phoneList{phoneNumberList};
++    QCoro::waitFor(m_database.deleteChat(phoneList));
++}
++
++StringMapList ChannelLogger::messagesForNumber(const QStringList &phoneNumberList, const QString &id, int limit)
++{
++    PhoneNumberList phoneList{phoneNumberList};
++
++    const auto messages = QCoro::waitFor(m_database.messagesForNumber(phoneList, id, limit));
++    StringMapList serializedMessages;
++    for (const auto &message : messages) {
++        serializedMessages.push_back(message.toMap());
++    }
++
++    return serializedMessages;
++}
++
++void ChannelLogger::updateMessageDeliveryState(const QString &id, uint state)
++{
++    QCoro::waitFor(m_database.updateMessageDeliveryState(id, static_cast<MessageState>(state)));
++}
++
++void ChannelLogger::markMessageRead(int id)
++{
++    QCoro::waitFor(m_database.markMessageRead(id));
++}
++
++void ChannelLogger::deleteMessage(const QString &id)
++{
++    QCoro::waitFor(m_database.deleteMessage(id));
++}
++
+ QCoro::Task<void> ChannelLogger::handleIncomingMessage(ModemManager::Sms::Ptr msg)
+ {
+     // If the message is still being received, handle it later when the state changes
+diff --git a/daemon/channellogger.h b/daemon/channellogger.h
+index 96e5a94..78f8931 100644
+--- a/daemon/channellogger.h
++++ b/daemon/channellogger.h
+@@ -42,6 +42,14 @@ public:
+     Q_SCRIPTABLE QString ownNumber();
+     Q_SCRIPTABLE QString countryCode();
+ 
++    Q_SCRIPTABLE StringMapList chats(const QStringList &phoneNumberList);
++    Q_SCRIPTABLE void markChatAsRead(const QStringList &phoneNumberList);
++    Q_SCRIPTABLE void deleteChat(const QStringList &phoneNumberList);
++    Q_SCRIPTABLE StringMapList messagesForNumber(const QStringList &phoneNumberList, const QString &id, int limit);
++    Q_SCRIPTABLE void updateMessageDeliveryState(const QString &id, uint state); // state is of MessageState type
++    Q_SCRIPTABLE void markMessageRead(int id);
++    Q_SCRIPTABLE void deleteMessage(const QString &id);
++
+ private:
+     void checkMessages();
+     QCoro::Task<void> handleIncomingMessage(ModemManager::Sms::Ptr msg);
+diff --git a/daemon/main.cpp b/daemon/main.cpp
+index ced02f5..6ebd6b3 100644
+--- a/daemon/main.cpp
++++ b/daemon/main.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include <QCommandLineParser>
+ #include <QCoreApplication>
++#include <QtDBus/QDBusMetaType>
+ 
+ #include <KAboutData>
+ #include <KCrash>
+@@ -13,6 +14,7 @@
+ #include "../version.h"
+ #include "channellogger.h"
+ #include "global.h"
++#include <database.h>
+ 
+ using namespace Qt::Literals;
+ 
+@@ -32,6 +34,10 @@ int main(int argc, char *argv[])
+ 
+     app.setQuitLockEnabled(false); // prevent a finishing KJob from closing the daemon
+ 
++    qRegisterMetaType<StringMapList>();
++    qDBusRegisterMetaType<StringMap>();
++    qDBusRegisterMetaType<StringMapList>();
++
+     parser.addVersionOption();
+     parser.addHelpOption();
+     parser.setApplicationDescription(i18n("Spacebar background service"));
+diff --git a/daemon/org.kde.spacebar.Daemon.xml b/daemon/org.kde.spacebar.Daemon.xml
+new file mode 100644
+index 0000000..c5559ac
+--- /dev/null
++++ b/daemon/org.kde.spacebar.Daemon.xml
+@@ -0,0 +1,75 @@
++<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
++<node>
++  <interface name="org.kde.spacebar.Daemon">
++    <signal name="messageAdded">
++      <arg name="phoneNumber" type="s" direction="out"/>
++      <arg name="id" type="s" direction="out"/>
++    </signal>
++    <signal name="messageUpdated">
++      <arg name="phoneNumber" type="s" direction="out"/>
++      <arg name="id" type="s" direction="out"/>
++    </signal>
++    <signal name="manualDownloadFinished">
++      <arg name="id" type="s" direction="out"/>
++      <arg name="isEmpty" type="b" direction="out"/>
++    </signal>
++    <method name="disableNotificationsForNumber">
++      <arg name="numbers" type="s" direction="in"/>
++    </method>
++    <method name="manualDownload">
++      <arg name="id" type="s" direction="in"/>
++      <arg name="url" type="s" direction="in"/>
++      <arg name="expires" type="((iii)(iiii)i)" direction="in"/>
++      <annotation name="org.qtproject.QtDBus.QtTypeName.In2" value="QDateTime"/>
++    </method>
++    <method name="sendMessage">
++      <arg name="numbers" type="s" direction="in"/>
++      <arg name="id" type="s" direction="in"/>
++      <arg name="text" type="s" direction="in"/>
++      <arg name="files" type="as" direction="in"/>
++      <arg name="totalSize" type="x" direction="in"/>
++    </method>
++    <method name="sendTapback">
++      <arg name="numbers" type="s" direction="in"/>
++      <arg name="id" type="s" direction="in"/>
++      <arg name="tapback" type="s" direction="in"/>
++      <arg name="isRemoved" type="b" direction="in"/>
++    </method>
++    <method name="syncSettings">
++    </method>
++    <method name="ownNumber">
++      <arg type="s" direction="out"/>
++    </method>
++    <method name="countryCode">
++      <arg type="s" direction="out"/>
++    </method>
++    <method name="chats">
++      <arg type="aa{ss}" direction="out"/>
++      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="StringMapList"/>
++      <arg name="phoneNumberList" type="as" direction="in"/>
++    </method>
++    <method name="markChatAsRead">
++      <arg name="phoneNumberList" type="as" direction="in"/>
++    </method>
++    <method name="deleteChat">
++      <arg name="phoneNumberList" type="as" direction="in"/>
++    </method>
++    <method name="messagesForNumber">
++      <arg type="aa{ss}" direction="out"/>
++      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="StringMapList"/>
++      <arg name="phoneNumberList" type="as" direction="in"/>
++      <arg name="id" type="s" direction="in"/>
++      <arg name="limit" type="i" direction="in"/>
++    </method>
++    <method name="updateMessageDeliveryState">
++      <arg name="id" type="s" direction="in"/>
++      <arg name="state" type="u" direction="in"/>
++    </method>
++    <method name="markMessageRead">
++      <arg name="id" type="i" direction="in"/>
++    </method>
++    <method name="deleteMessage">
++      <arg name="id" type="s" direction="in"/>
++    </method>
++  </interface>
++</node>
+\ No newline at end of file
+diff --git a/lib/database/database.cpp b/lib/database/database.cpp
+index b016913..dcc9252 100644
+--- a/lib/database/database.cpp
++++ b/lib/database/database.cpp
+@@ -53,7 +53,7 @@ Database::Database(QObject *parent)
+     m_database = ThreadedDatabase::establishConnection(config);
+ }
+ 
+-QFuture<std::vector<Message>> Database::messagesForNumber(const PhoneNumberList &phoneNumberList, const QString &id, const int limit) const
++QCoro::Task<std::vector<Message>> Database::messagesForNumber(const PhoneNumberList &phoneNumberList, const QString &id, const int limit) const
+ {
+     QString sql = SL(R"(
+         SELECT
+@@ -89,43 +89,43 @@ QFuture<std::vector<Message>> Database::messagesForNumber(const PhoneNumberList
+             sql.append(SL(" LIMIT -1 OFFSET 30"));
+         }
+ 
+-        return m_database->getResults<Message>(sql, phoneNumberList.toString());
++        co_return co_await m_database->getResults<Message>(sql, phoneNumberList.toString());
+     } else {
+         sql.append(SL("WHERE id == ?"));
+-        return m_database->getResults<Message>(sql, id);
++        co_return co_await m_database->getResults<Message>(sql, id);
+     }
+ }
+ 
+-QFuture<void> Database::updateMessageDeliveryState(const QString &id, const MessageState state)
++QCoro::Task<> Database::updateMessageDeliveryState(const QString &id, const MessageState state)
+ {
+-    return m_database->execute(SL("UPDATE Messages SET delivered = ? WHERE id == ?"), state, id);
++    co_await m_database->execute(SL("UPDATE Messages SET delivered = ? WHERE id == ?"), state, id);
+ }
+ 
+-QFuture<void> Database::updateMessageSent(const QString &id, const QString &messageId, const QString &contentLocation)
++QCoro::Task<> Database::updateMessageSent(const QString &id, const QString &messageId, const QString &contentLocation)
+ {
+-    return m_database->execute(SL("UPDATE Messages SET messageId = ?, contentLocation = ? WHERE id == ?"), messageId, contentLocation, id);
++    co_await m_database->execute(SL("UPDATE Messages SET messageId = ?, contentLocation = ? WHERE id == ?"), messageId, contentLocation, id);
+ }
+ 
+-QFuture<void> Database::updateMessageDeliveryReport(const QString &messageId)
++QCoro::Task<> Database::updateMessageDeliveryReport(const QString &messageId)
+ {
+-    return m_database->execute(SL("UPDATE Messages SET deliveryReport = IFNULL(deliveryReport, 0) + 1 WHERE messageId == ?"), messageId);
++    co_await m_database->execute(SL("UPDATE Messages SET deliveryReport = IFNULL(deliveryReport, 0) + 1 WHERE messageId == ?"), messageId);
+ }
+ 
+-QFuture<void> Database::updateMessageReadReport(const QString &messageId, const PhoneNumber &fromNumber)
++QCoro::Task<> Database::updateMessageReadReport(const QString &messageId, const PhoneNumber &fromNumber)
+ {
+-    return m_database->execute(SL("UPDATE Messages SET readReport = IFNULL(readReport, '') || ? WHERE messageId == ?"),
+-                               fromNumber.toInternational(),
+-                               messageId);
++    co_await m_database->execute(SL("UPDATE Messages SET readReport = IFNULL(readReport, '') || ? WHERE messageId == ?"),
++                                 fromNumber.toInternational(),
++                                 messageId);
+ }
+ 
+-QFuture<void> Database::markMessageRead(const int id)
++QCoro::Task<> Database::markMessageRead(const int id)
+ {
+-    return m_database->execute(SL("UPDATE Messages SET read = True WHERE id == ? AND NOT read = True"), id);
++    co_await m_database->execute(SL("UPDATE Messages SET read = True WHERE id == ? AND NOT read = True"), id);
+ }
+ 
+-QFuture<void> Database::updateMessageTapbacks(const QString &id, const QString tapbacks)
++QCoro::Task<> Database::updateMessageTapbacks(const QString &id, const QString tapbacks)
+ {
+-    return m_database->execute(SL("UPDATE Messages SET tapbacks = ? WHERE id == ?"), tapbacks, id);
++    co_await m_database->execute(SL("UPDATE Messages SET tapbacks = ? WHERE id == ?"), tapbacks, id);
+ }
+ 
+ QCoro::Task<std::optional<QString>> Database::lastMessageWithText(const PhoneNumberList &phoneNumberList, const QString &text)
+@@ -202,14 +202,14 @@ QCoro::Task<std::optional<int>> Database::unreadMessagesForNumber(const PhoneNum
+     });
+ }
+ 
+-QFuture<void> Database::markChatAsRead(const PhoneNumberList &phoneNumberList)
++QCoro::Task<> Database::markChatAsRead(const PhoneNumberList &phoneNumberList)
+ {
+-    return m_database->execute(SL("UPDATE Messages SET read = True WHERE phoneNumber = ? AND NOT read == True"), phoneNumberList.toString());
++    co_await m_database->execute(SL("UPDATE Messages SET read = True WHERE phoneNumber = ? AND NOT read == True"), phoneNumberList.toString());
+ }
+ 
+-QFuture<void> Database::deleteChat(const PhoneNumberList &phoneNumberList)
++QCoro::Task<> Database::deleteChat(const PhoneNumberList &phoneNumberList)
+ {
+-    return m_database->execute(SL("DELETE FROM Messages WHERE phoneNumber = ?"), phoneNumberList.toString());
++    co_await m_database->execute(SL("DELETE FROM Messages WHERE phoneNumber = ?"), phoneNumberList.toString());
+ }
+ 
+ QCoro::Task<> Database::addMessage(const Message &message)
+@@ -254,9 +254,9 @@ QCoro::Task<> Database::addMessage(const Message &message)
+                                  message.size);
+ }
+ 
+-QFuture<void> Database::deleteMessage(const QString &id)
++QCoro::Task<> Database::deleteMessage(const QString &id)
+ {
+-    return m_database->execute(SL("DELETE FROM Messages WHERE id == ?"), id);
++    co_await m_database->execute(SL("DELETE FROM Messages WHERE id == ?"), id);
+ }
+ 
+ QString Database::generateRandomId()
+@@ -524,22 +524,23 @@ Message Message::fromSql(ColumnTypes &&tuple)
+           size,
+           tapbacks] = tuple;
+ 
+-    return Message{id,
+-                   PhoneNumberList(phoneNumberList),
+-                   text,
+-                   QDateTime::fromMSecsSinceEpoch(datetime),
+-                   read,
+-                   MessageState(deliveryStatus),
+-                   sentByMe,
+-                   attachments,
+-                   smil,
+-                   fromNumber,
+-                   messageId,
+-                   deliveryReport,
+-                   readReport,
+-                   pendingDownload,
+-                   contentLocation,
+-                   QDateTime::fromMSecsSinceEpoch(expires),
+-                   size,
+-                   tapbacks};
++    Message message;
++    message.id = id, message.phoneNumberList = PhoneNumberList(phoneNumberList);
++    message.text = text;
++    message.datetime = QDateTime::fromMSecsSinceEpoch(datetime);
++    message.read = read;
++    message.deliveryStatus = MessageState(deliveryStatus);
++    message.sentByMe = sentByMe;
++    message.attachments = attachments;
++    message.smil = smil;
++    message.fromNumber = fromNumber;
++    message.messageId = messageId;
++    message.deliveryReport = deliveryReport;
++    message.readReport = readReport;
++    message.pendingDownload = pendingDownload;
++    message.contentLocation = contentLocation;
++    message.expires = QDateTime::fromMSecsSinceEpoch(expires);
++    message.size = size;
++    message.tapbacks = tapbacks;
++    return message;
+ }
+diff --git a/lib/database/database.h b/lib/database/database.h
+index 8319fe1..bf819c7 100644
+--- a/lib/database/database.h
++++ b/lib/database/database.h
+@@ -38,6 +38,12 @@ inline MessageState parseMessageState(const QString &state)
+     Q_UNREACHABLE();
+ }
+ 
++// For use with DBus
++typedef QMap<QString, QString> StringMap;
++typedef QList<StringMap> StringMapList;
++Q_DECLARE_METATYPE(StringMap)
++Q_DECLARE_METATYPE(StringMapList)
++
+ struct Message {
+     using ColumnTypes =
+         std::tuple<QString, QString, QString, qint64, bool, int, bool, QString, QString, QString, QString, int, QString, bool, QString, qint64, int, QString>;
+@@ -62,6 +68,54 @@ struct Message {
+     QDateTime expires;
+     int size = 0;
+     QString tapbacks;
++
++    Message() = default;
++
++    Message(const StringMap &map)
++    {
++        id = map[SL("id")];
++        phoneNumberList = PhoneNumberList{map[SL("phoneNumberList")]};
++        text = map[SL("text")];
++        datetime = QDateTime::fromString(map[SL("datetime")]);
++        read = QVariant{map[SL("read")]}.toBool();
++        deliveryStatus = static_cast<MessageState>(map[SL("deliveryStatus")].toUInt());
++        sentByMe = QVariant{map[SL("sentByMe")]}.toBool();
++        attachments = map[SL("attachments")];
++        smil = map[SL("smil")];
++        fromNumber = map[SL("fromNumber")];
++        messageId = map[SL("messageId")];
++        deliveryReport = map[SL("deliveryReport")].toInt();
++        readReport = map[SL("readReport")];
++        pendingDownload = QVariant{map[SL("pendingDownload")]}.toBool();
++        contentLocation = map[SL("contentLocation")];
++        expires = QDateTime::fromString(map[SL("expires")]);
++        size = map[SL("size")].toInt();
++        tapbacks = map[SL("tapbacks")];
++    }
++
++    StringMap toMap() const
++    {
++        return {
++            {SL("id"), id},
++            {SL("phoneNumberList"), phoneNumberList.toString()},
++            {SL("text"), text},
++            {SL("datetime"), datetime.toString()},
++            {SL("read"), QString::number(read)},
++            {SL("deliveryStatus"), QString::number(deliveryStatus)},
++            {SL("sentByMe"), QString::number(sentByMe)},
++            {SL("attachments"), attachments},
++            {SL("smil"), smil},
++            {SL("fromNumber"), fromNumber},
++            {SL("messageId"), messageId},
++            {SL("deliveryReport"), QString::number(deliveryReport)},
++            {SL("readReport"), readReport},
++            {SL("pendingDownload"), QString::number(pendingDownload)},
++            {SL("contentLocation"), contentLocation},
++            {SL("expires"), expires.toString()},
++            {SL("size"), QString::number(size)},
++            {SL("tapbacks"), tapbacks},
++        };
++    }
+ };
+ Q_DECLARE_METATYPE(Message)
+ 
+@@ -72,7 +126,30 @@ struct Chat {
+     QDateTime lastDateTime;
+     bool lastSentByMe = false;
+     QString lastAttachment;
++
++    Chat() = default;
++
++    Chat(const StringMap &map)
++    {
++        phoneNumberList = PhoneNumberList{map[SL("phoneNumberList")]};
++        unreadMessages = map[SL("unreadMessages")].toInt();
++        lastMessage = map[SL("lastMessage")];
++        lastDateTime = QDateTime::fromString(map[SL("lastDateTime")]);
++        lastSentByMe = QVariant{map[SL("lastSentByMe")]}.toBool();
++        lastAttachment = map[SL("lastAttachment")];
++    }
++
++    StringMap toMap() const
++    {
++        return {{SL("phoneNumberList"), phoneNumberList.toString()},
++                {SL("unreadMessages"), QString::number(unreadMessages)},
++                {SL("lastMessage"), lastMessage},
++                {SL("lastDateTime"), lastDateTime.toString()},
++                {SL("lastSentByMe"), QString::number(lastSentByMe)},
++                {SL("lastAttachment"), lastAttachment}};
++    }
+ };
++
+ Q_DECLARE_METATYPE(Chat)
+ 
+ class Database : public QObject
+@@ -84,22 +161,22 @@ public:
+ 
+     // Messages
+     QCoro::Task<> addMessage(const Message &message);
+-    QFuture<void> deleteMessage(const QString &id);
+-    QFuture<std::vector<Message>> messagesForNumber(const PhoneNumberList &phoneNumberList, const QString &id = QString(), const int limit = 0) const;
+-    QFuture<void> updateMessageDeliveryState(const QString &id, const MessageState state);
+-    QFuture<void> updateMessageSent(const QString &id, const QString &messageId, const QString &contentLocation);
+-    QFuture<void> updateMessageDeliveryReport(const QString &messageId);
+-    QFuture<void> updateMessageReadReport(const QString &messageId, const PhoneNumber &fromNumber);
+-    QFuture<void> markMessageRead(const int id);
+-    QFuture<void> updateMessageTapbacks(const QString &id, const QString tapbacks);
++    QCoro::Task<> deleteMessage(const QString &id);
++    QCoro::Task<std::vector<Message>> messagesForNumber(const PhoneNumberList &phoneNumberList, const QString &id = QString(), const int limit = 0) const;
++    QCoro::Task<> updateMessageDeliveryState(const QString &id, const MessageState state);
++    QCoro::Task<> updateMessageSent(const QString &id, const QString &messageId, const QString &contentLocation);
++    QCoro::Task<> updateMessageDeliveryReport(const QString &messageId);
++    QCoro::Task<> updateMessageReadReport(const QString &messageId, const PhoneNumber &fromNumber);
++    QCoro::Task<> markMessageRead(const int id);
++    QCoro::Task<> updateMessageTapbacks(const QString &id, const QString tapbacks);
+     QCoro::Task<std::optional<QString>> lastMessageWithText(const PhoneNumberList &phoneNumberList, const QString &text);
+     QCoro::Task<std::optional<QString>> lastMessageWithAttachment(const PhoneNumberList &phoneNumberList);
+ 
+     // Chats
+     QCoro::Task<QVector<Chat>> chats(const PhoneNumberList &phoneNumberList) const;
+     QCoro::Task<std::optional<int>> unreadMessagesForNumber(const PhoneNumberList &phoneNumberList) const;
+-    QFuture<void> markChatAsRead(const PhoneNumberList &phoneNumberList);
+-    QFuture<void> deleteChat(const PhoneNumberList &phoneNumberList);
++    QCoro::Task<> markChatAsRead(const PhoneNumberList &phoneNumberList);
++    QCoro::Task<> deleteChat(const PhoneNumberList &phoneNumberList);
+     QCoro::Task<> mergeChats(const QString &fromNumbers, const QString toNumbers);
+ 
+     static QString generateRandomId();
+diff --git a/lib/telephonySupport/phonenumber.cpp b/lib/telephonySupport/phonenumber.cpp
+index e1a56af..ce4571c 100644
+--- a/lib/telephonySupport/phonenumber.cpp
++++ b/lib/telephonySupport/phonenumber.cpp
+@@ -36,9 +36,9 @@ PhoneNumber::PhoneNumber(const QString &number)
+     if (error == phonenumbers::PhoneNumberUtil::ErrorType::NO_PARSING_ERROR) {
+         d->representation = PhoneNumberPrivate::Parsed;
+     } else {
+-        d->numberString = number;
+         d->representation = PhoneNumberPrivate::String;
+     }
++    d->numberString = number;
+ }
+ 
+ bool PhoneNumber::operator==(const PhoneNumber &other) const
+@@ -102,3 +102,8 @@ void PhoneNumber::setCountryCode(const QString &code)
+ {
+     countryCode = code.toStdString();
+ }
++
++QString PhoneNumber::toString() const
++{
++    return d->numberString;
++}
+\ No newline at end of file
+diff --git a/lib/telephonySupport/phonenumber.h b/lib/telephonySupport/phonenumber.h
+index fe47a3f..9834d80 100644
+--- a/lib/telephonySupport/phonenumber.h
++++ b/lib/telephonySupport/phonenumber.h
+@@ -39,6 +39,8 @@ public:
+     bool isValid() const;
+     static void setCountryCode(const QString &countryCode);
+ 
++    QString toString() const;
++
+ private:
+     QSharedDataPointer<PhoneNumberPrivate> d;
+     static std::string countryCode;
+diff --git a/lib/telephonySupport/phonenumberlist.cpp b/lib/telephonySupport/phonenumberlist.cpp
+index 1ddce3f..01fa681 100644
+--- a/lib/telephonySupport/phonenumberlist.cpp
++++ b/lib/telephonySupport/phonenumberlist.cpp
+@@ -17,6 +17,14 @@ PhoneNumberList::PhoneNumberList(const QString &phoneNumbers)
+     });
+ }
+ 
++PhoneNumberList::PhoneNumberList(const QStringList &phoneNumbers)
++    : QVector<PhoneNumber>()
++{
++    for (const auto &phone : phoneNumbers) {
++        emplace_back(phone);
++    }
++}
++
+ QString PhoneNumberList::toString() const
+ {
+     QStringList individualNumbers;
+@@ -28,3 +36,12 @@ QString PhoneNumberList::toString() const
+ 
+     return individualNumbers.join(u'~');
+ }
++
++QList<QString> PhoneNumberList::toStringList() const
++{
++    QList<QString> numbers;
++    for (auto it = begin(); it != end(); ++it) {
++        numbers.push_back(it->toString());
++    }
++    return numbers;
++}
+diff --git a/lib/telephonySupport/phonenumberlist.h b/lib/telephonySupport/phonenumberlist.h
+index 0706cea..5dd6769 100644
+--- a/lib/telephonySupport/phonenumberlist.h
++++ b/lib/telephonySupport/phonenumberlist.h
+@@ -16,8 +16,10 @@ public:
+     using QVector<PhoneNumber>::QVector;
+ 
+     explicit PhoneNumberList(const QString &phoneNumbers);
++    explicit PhoneNumberList(const QStringList &phoneNumbers);
+ 
+     QString toString() const;
++    QList<QString> toStringList() const;
+ };
+ 
+ Q_DECLARE_METATYPE(PhoneNumberList)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 46b11a7..66246ce 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -7,7 +7,10 @@ set(spacebar_SRCS
+     channelhandler.cpp
+ )
+ 
+-set(DaemonXML ${CMAKE_CURRENT_BINARY_DIR}/../daemon/org.kde.spacebar.Daemon.xml)
++set(DaemonXML ${CMAKE_CURRENT_SOURCE_DIR}/../daemon/org.kde.spacebar.Daemon.xml)
++
++# We need some DBus type definitions from database.h
++set_source_files_properties(${DaemonXML} PROPERTIES INCLUDE database.h)
+ qt_add_dbus_interface(spacebar_SRCS ${DaemonXML} daemoninterface)
+ 
+ qt_add_resources(RESOURCES resources.qrc)
+diff --git a/src/channelhandler.cpp b/src/channelhandler.cpp
+index cb9b9b4..1ea2468 100644
+--- a/src/channelhandler.cpp
++++ b/src/channelhandler.cpp
+@@ -7,7 +7,6 @@
+ 
+ #include <QLocale>
+ 
+-#include <database.h>
+ #include <global.h>
+ 
+ const QString DAEMON_DBUS_SERVICE = QStringLiteral("org.kde.spacebar.Daemon");
+@@ -75,11 +74,6 @@ void ChannelHandler::connectInterfaceSignals()
+     });
+ }
+ 
+-Database &ChannelHandler::database()
+-{
+-    return m_database;
+-}
+-
+ org::kde::spacebar::Daemon *ChannelHandler::interface()
+ {
+     return m_interface;
+diff --git a/src/channelhandler.h b/src/channelhandler.h
+index 0ef3cb5..a267b5c 100644
+--- a/src/channelhandler.h
++++ b/src/channelhandler.h
+@@ -6,12 +6,10 @@
+ 
+ #include <QObject>
+ 
+-#include "daemoninterface.h"
+-
+-#include <database.h>
+-
+ #include <optional>
+ 
++#include "daemoninterface.h"
++
+ class ChannelHandler : public QObject
+ {
+     Q_OBJECT
+@@ -20,7 +18,6 @@ class ChannelHandler : public QObject
+ public:
+     explicit ChannelHandler(QObject *parent = nullptr);
+ 
+-    Database &database();
+     org::kde::spacebar::Daemon *interface();
+ 
+     bool isInterfaceAvailable();
+@@ -29,7 +26,6 @@ private:
+     void connectInterface();
+     void connectInterfaceSignals();
+ 
+-    Database m_database;
+     org::kde::spacebar::Daemon *m_interface{nullptr};
+     bool m_isInterfaceAvailable{false};
+     QDBusServiceWatcher *m_watcher{nullptr};
+diff --git a/src/chatlistmodel.cpp b/src/chatlistmodel.cpp
+index 524819d..ff6283f 100644
+--- a/src/chatlistmodel.cpp
++++ b/src/chatlistmodel.cpp
+@@ -160,7 +160,7 @@ void ChatListModel::startChat(const PhoneNumberList &phoneNumberList)
+ 
+ void ChatListModel::markChatAsRead(const PhoneNumberList &phoneNumberList)
+ {
+-    m_handler.database().markChatAsRead(phoneNumberList);
++    m_handler.interface()->markChatAsRead(phoneNumberList.toStringList());
+ }
+ 
+ void ChatListModel::fetchChats(const PhoneNumberList &phoneNumberList)
+@@ -187,12 +187,16 @@ void ChatListModel::fetchChats(const PhoneNumberList &phoneNumberList)
+     }
+ }
+ 
+-QCoro::Task<void> ChatListModel::fetchChatsInternal()
++void ChatListModel::fetchChatsInternal()
+ {
+-    const auto chats = co_await m_handler.database().chats(PhoneNumberList());
++    const StringMapList serializedChats = m_handler.interface()->chats({});
++    QList<Chat> chats;
++    for (const auto &serializedChat : serializedChats) {
++        chats.push_back(Chat{serializedChat});
++    }
+ 
+     beginResetModel();
+-    m_chats = chats;
++    m_chats = std::move(chats);
+     endResetModel();
+ 
+     Q_EMIT chatsFetched();
+@@ -200,26 +204,32 @@ QCoro::Task<void> ChatListModel::fetchChatsInternal()
+ 
+ void ChatListModel::fetchChatDetails(const PhoneNumberList &phoneNumberList, const bool sort)
+ {
+-    [this, phoneNumberList, sort]() -> QCoro::Task<void> {
+-        co_await fetchChatDetailsInternal(phoneNumberList, sort);
+-    }();
++    // [this, phoneNumberList, sort]() -> QCoro::Task<void> {
++    fetchChatDetailsInternal(phoneNumberList, sort);
++    // }();
+ }
+ 
+-QCoro::Task<void> ChatListModel::fetchChatDetailsInternal(const PhoneNumberList &phoneNumberList, const bool sort)
++void ChatListModel::fetchChatDetailsInternal(const PhoneNumberList &phoneNumberList, const bool sort)
+ {
+     const auto &[chat, idx] = getChatIndex(phoneNumberList);
+ 
+     if (idx > -1) {
+-        const QVector<Chat> chats = co_await m_handler.database().chats(phoneNumberList);
++        const StringMapList serializedChats = m_handler.interface()->chats(phoneNumberList.toStringList());
++        QList<Chat> chats;
++        for (const auto &serializedChat : serializedChats) {
++            chats.push_back(Chat{serializedChat});
++        }
+ 
+-        chat->phoneNumberList = chats.first().phoneNumberList;
+-        chat->unreadMessages = chats.first().unreadMessages;
+-        chat->lastMessage = chats.first().lastMessage;
+-        chat->lastDateTime = chats.first().lastDateTime;
+-        chat->lastSentByMe = chats.first().lastSentByMe;
+-        chat->lastAttachment = chats.first().lastAttachment;
++        if (!chats.empty()) {
++            chat->phoneNumberList = chats.first().phoneNumberList;
++            chat->unreadMessages = chats.first().unreadMessages;
++            chat->lastMessage = chats.first().lastMessage;
++            chat->lastDateTime = chats.first().lastDateTime;
++            chat->lastSentByMe = chats.first().lastSentByMe;
++            chat->lastAttachment = chats.first().lastAttachment;
+ 
+-        Q_EMIT dataChanged(index(idx), index(idx));
++            Q_EMIT dataChanged(index(idx), index(idx));
++        }
+     }
+ 
+     if (sort) {
+@@ -234,7 +244,7 @@ QCoro::Task<void> ChatListModel::fetchChatDetailsInternal(const PhoneNumberList
+ 
+ void ChatListModel::deleteChat(const PhoneNumberList &phoneNumberList)
+ {
+-    m_handler.database().deleteChat(phoneNumberList);
++    m_handler.interface()->deleteChat(phoneNumberList.toStringList());
+ 
+     const QString folder = QString::number(hash(phoneNumberList.toString()));
+     QDir dir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + SL("/spacebar/attachments/") + folder);
+diff --git a/src/chatlistmodel.h b/src/chatlistmodel.h
+index ac3cf18..ddd51d0 100644
+--- a/src/chatlistmodel.h
++++ b/src/chatlistmodel.h
+@@ -67,8 +67,8 @@ Q_SIGNALS:
+ 
+ private:
+     QPair<Chat *, int> getChatIndex(const PhoneNumberList &phoneNumberList);
+-    QCoro::Task<void> fetchChatsInternal();
+-    QCoro::Task<void> fetchChatDetailsInternal(const PhoneNumberList &phoneNumberList, const bool sort = false);
++    void fetchChatsInternal();
++    void fetchChatDetailsInternal(const PhoneNumberList &phoneNumberList, const bool sort = false);
+ 
+     ChannelHandler &m_handler;
+     QVector<Chat> m_chats;
+diff --git a/src/main.cpp b/src/main.cpp
+index 1441307..bc0b723 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -29,6 +29,7 @@
+ #include "utils.h"
+ #include "version.h"
+ #include <contactphonenumbermapper.h>
++#include <database.h>
+ 
+ #include <coroutine>
+ #include <phonenumberlist.h>
+@@ -75,6 +76,12 @@ Q_DECL_EXPORT int main(int argc, char *argv[])
+     parser.addPositionalArgument(QStringLiteral("number"), i18n("Open a chat with the given phone number"));
+     parser.process(app);
+ 
++    // Register DBus types
++    qRegisterMetaType<StringMap>();
++    qRegisterMetaType<StringMapList>();
++    qDBusRegisterMetaType<StringMap>();
++    qDBusRegisterMetaType<StringMapList>();
++
+     KDBusService service(KDBusService::Unique);
+ 
+     QQmlApplicationEngine engine;
+@@ -96,6 +103,7 @@ Q_DECL_EXPORT int main(int argc, char *argv[])
+     qmlRegisterSingletonInstance(APPLICATION_ID, 1, 0, "SettingsManager", SettingsManager::self());
+     qRegisterMetaType<PhoneNumber>();
+     qRegisterMetaType<PhoneNumberList>();
++
+     engine.rootContext()->setContextObject(new KLocalizedContext(&engine));
+     engine.addImageProvider(SL("avatar"), new AvatarImageProvider());
+     engine.load(QUrl(SL("qrc:///main.qml")));
+diff --git a/src/messagemodel.cpp b/src/messagemodel.cpp
+index 8ac68b2..2dcbe7e 100644
+--- a/src/messagemodel.cpp
++++ b/src/messagemodel.cpp
+@@ -48,9 +48,13 @@ MessageModel::MessageModel(ChannelHandler &handler, const PhoneNumberList &phone
+     fetchMessages(QString());
+ }
+ 
+-QCoro::Task<void> MessageModel::fetchMessages(const QString &id, const int limit)
++void MessageModel::fetchMessages(const QString &id, const int limit)
+ {
+-    const auto messages = co_await m_handler.database().messagesForNumber(m_phoneNumberList, id, limit);
++    const StringMapList serializedMessages = m_handler.interface()->messagesForNumber(m_phoneNumberList.toStringList(), id, limit);
++    std::vector<Message> messages;
++    for (const StringMap &serializedMessage : serializedMessages) {
++        messages.push_back(Message{serializedMessage});
++    }
+ 
+     if (limit == -1) {
+         beginInsertRows({}, 0, messages.size() - 1);
+@@ -73,10 +77,14 @@ QCoro::Task<void> MessageModel::fetchMessages(const QString &id, const int limit
+     Q_EMIT messagesFetched();
+ }
+ 
+-QCoro::Task<void> MessageModel::fetchUpdatedMessage(const QString &id)
++void MessageModel::fetchUpdatedMessage(const QString &id)
+ {
+     const auto &[message, i] = getMessageIndex(id);
+-    const auto messages = co_await m_handler.database().messagesForNumber(m_phoneNumberList, id);
++    const StringMapList serializedMessages = m_handler.interface()->messagesForNumber(m_phoneNumberList.toStringList(), id, 0);
++    QList<Message> messages;
++    for (const StringMap &serializedMessage : serializedMessages) {
++        messages.push_back(Message{serializedMessage});
++    }
+ 
+     if (!messages.empty()) {
+         message->text = messages.front().text;
+@@ -283,7 +291,7 @@ void MessageModel::updateMessageState(const QString &id, MessageState state, con
+     message->deliveryStatus = state;
+ 
+     if (!temp) {
+-        m_handler.database().updateMessageDeliveryState(id, state);
++        m_handler.interface()->updateMessageDeliveryState(id, static_cast<uint>(state));
+     }
+ 
+     Q_EMIT dataChanged(index(i), index(i), {Role::DeliveryStateRole});
+@@ -291,7 +299,7 @@ void MessageModel::updateMessageState(const QString &id, MessageState state, con
+ 
+ void MessageModel::markMessageRead(const int id)
+ {
+-    m_handler.database().markMessageRead(id);
++    m_handler.interface()->markMessageRead(id);
+ }
+ 
+ void MessageModel::downloadMessage(const QString &id, const QString &url, const QDateTime &expires)
+@@ -302,7 +310,7 @@ void MessageModel::downloadMessage(const QString &id, const QString &url, const
+ 
+ void MessageModel::deleteMessage(const QString &id, const int index, const QStringList &files)
+ {
+-    m_handler.database().deleteMessage(id);
++    m_handler.interface()->deleteMessage(id);
+ 
+     // delete attachments
+     const QString sourceFolder = attachmentsFolder();
+diff --git a/src/messagemodel.h b/src/messagemodel.h
+index 03d5c9c..53fb8e5 100644
+--- a/src/messagemodel.h
++++ b/src/messagemodel.h
+@@ -141,8 +141,8 @@ private:
+     QVector<Person> m_peopleData;
+ 
+ private Q_SLOTS:
+-    QCoro::Task<void> fetchMessages(const QString &id, const int limit = 0);
+-    QCoro::Task<void> fetchUpdatedMessage(const QString &id);
++    void fetchMessages(const QString &id, const int limit = 0);
++    void fetchUpdatedMessage(const QString &id);
+     void messageAdded(const QString &numbers, const QString &id);
+     void messageUpdated(const QString &numbers, const QString &id);
+ 
+-- 
+2.47.0
+
