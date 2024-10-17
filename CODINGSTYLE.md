@@ -128,8 +128,8 @@ Put `; do` and `; then` on the same line as the `while`, `for` or `if`.
 
 <!--
 This section attempts to document policies enforced by the linter from
-atools <https://github.com/maxice8/atools>, newapkbuild and existing
-APKBUILDs.
+atools-go <https://gitlab.alpinelinux.org/alpine/infra/atools-go>,
+newapkbuild and existing APKBUILDs.
 -->
 
 ## Comments
