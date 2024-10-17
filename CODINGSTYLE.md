@@ -192,6 +192,8 @@ Metadata Variables are variables used directly by abuild itself, e.g. `pkgname` 
   to `$builddir` must be avoided (if possible).
 * Variables local to functions must always be declared with the `local`
   keyword.
+* If a function body is empty, contains only the default comment from `newapkbuild`,
+  or only calls `default_*`, it should be completely omitted from the file.
 
 ### Function Overwriting
 
