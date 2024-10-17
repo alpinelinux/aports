@@ -142,12 +142,7 @@ APKBUILDs.
 
 ### Maintainer Comment
 
-* All APKBUILDs contain exactly one maintainer comment containing a
-  valid RFC 5322 address. For example, `# Maintainer: Max Mustermann
-  <max@example.org>`.
-* The Maintainer comment should immediately follow the Contributor comment(s).
-* In the case of package being abandoned, the comment should still be present,
-  but left empty: `# Maintainer:`.
+* Deprecated, see *Maintainer Variable* below.
 
 ## Metadata Variables
 
@@ -157,6 +152,15 @@ Metadata Variables are variables used directly by abuild itself, e.g. `pkgname` 
 
 * `pkgname` must only contain lowercase characters.
 * `pkgname` must match the name of the directory the `APKBUILD` file is located in.
+
+### Maintainer Variable
+
+* All APKBUILDs should contain exactly one variable named `maintainer`,
+  containing a valid RFC 5322 address. For example,
+  `maintainer="Max Mustermann <max@example.org>"`.
+* `maintainer` should immediately follow the Contributor comment(s), above `pkgname`.
+* In the case of package being abandoned, the variable should still be present,
+  but left empty: `maintainer=""`.
 
 ### Variable Assignments
 
