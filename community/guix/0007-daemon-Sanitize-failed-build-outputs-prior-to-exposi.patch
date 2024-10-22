@@ -1,0 +1,81 @@
+From 57be4bf370b0c4e48c8152bc0dcf070034d4ade8 Mon Sep 17 00:00:00 2001
+From: Reepca Russelstein <reepca@russelstein.xyz>
+Date: Sun, 20 Oct 2024 09:15:00 -0500
+Subject: [PATCH] daemon: Sanitize failed build outputs prior to exposing them.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The only thing keeping a rogue builder and a local user from collaborating to
+usurp control over the builder's user during the build is the fact that
+whatever files the builder may produce are not accessible to any other users
+yet.  If we're going to make them accessible, we should probably do some
+sanity checking to ensure that sort of collaborating can't happen.
+
+Currently this isn't happening when failed build outputs are moved from the
+chroot as an aid to debugging.
+
+* nix/libstore/build.cc (secureFilePerms): new function.
+  (DerivationGoal::buildDone): use it.
+
+Change-Id: I9dce1e3d8813b31cabd87a0e3219bf9830d8be96
+Signed-off-by: Ludovic Courtès <ludo@gnu.org>
+---
+ nix/libstore/build.cc | 36 +++++++++++++++++++++++++++++++++++-
+ 1 file changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/nix/libstore/build.cc b/nix/libstore/build.cc
+index c5383bc756..5b3ac3555d 100644
+--- a/nix/libstore/build.cc
++++ b/nix/libstore/build.cc
+@@ -1301,6 +1301,34 @@ void replaceValidPath(const Path & storePath, const Path tmpPath)
+ MakeError(NotDeterministic, BuildError)
+ 
+ 
++/* Recursively make the file permissions of a path safe for exposure to
++   arbitrary users, but without canonicalising its permissions, timestamp, and
++   user.  Throw an exception if a file type that isn't explicitly known to be
++   safe is found. */
++static void secureFilePerms(Path path)
++{
++  struct stat st;
++  if (lstat(path.c_str(), &st)) return;
++
++  switch(st.st_mode & S_IFMT) {
++  case S_IFLNK:
++    return;
++
++  case S_IFDIR:
++    for (auto & i : readDirectory(path)) {
++      secureFilePerms(path + "/" + i.name);
++    }
++    /* FALLTHROUGH */
++
++  case S_IFREG:
++    chmod(path.c_str(), (st.st_mode & ~S_IFMT) & ~(S_ISUID | S_ISGID | S_IWOTH));
++    break;
++
++  default:
++    throw Error(format("file `%1%' has an unsupported type") % path);
++  }
++}
++
+ void DerivationGoal::buildDone()
+ {
+     trace("build done");
+@@ -1372,8 +1400,14 @@ void DerivationGoal::buildDone()
+                build failures. */
+             if (useChroot && buildMode == bmNormal)
+                 foreach (PathSet::iterator, i, missingPaths)
+-                    if (pathExists(chrootRootDir + *i))
++                    if (pathExists(chrootRootDir + *i)) {
++                      try {
++                        secureFilePerms(chrootRootDir + *i);
+                         rename((chrootRootDir + *i).c_str(), i->c_str());
++                      } catch(Error & e) {
++                        printMsg(lvlError, e.msg());
++                      }
++                    }
+ 
+             if (diskFull)
+                 printMsg(lvlError, "note: build failure may have been caused by lack of free disk space");
