@@ -36,10 +36,6 @@ for link in $("$tmp"/bin/busybox --list-full); do
 	[ -e "$tmp"/$link ] || ln -s /bin/busybox "$tmp"/$link
 done
 
-${APK:-apk} fetch --keys-dir "$keys_dir" --no-cache \
-	--repositories-file "$repositories_file" --root "$tmp" \
-	--stdout --quiet alpine-release | tar -zx -C "$tmp" etc/ usr/
-
 # disable password login but allow login with ssh keys for root
 sed -i -e 's/^root::/root:*:/' "$tmp"/etc/shadow
 
