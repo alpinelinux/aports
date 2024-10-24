@@ -1,0 +1,672 @@
+From 3cdcdf51d342e69897b197140325940801485831 Mon Sep 17 00:00:00 2001
+From: Arnaud Le Blanc <arnaud.lb@gmail.com>
+Date: Fri, 25 Oct 2024 18:16:22 +0200
+Subject: [PATCH] Fix X32 build (#565)
+
+---
+ .github/workflows/test.yml                    | 13 +++-
+ .github/workflows/test/build-librdkafka.sh    | 16 ++++-
+ .github/workflows/test/build-php-rdkafka.sh   | 13 +++-
+ .github/workflows/test/build-php.sh           | 12 ++--
+ .../workflows/test/install-dependencies.sh    | 21 ++++++
+ conf.c                                        |  4 +-
+ kafka_consumer.c                              |  6 +-
+ rdkafka.c                                     | 34 ++++++++--
+ rdkafka.stub.php                              |  2 +-
+ rdkafka_arginfo.h                             | 67 +++++++++++--------
+ rdkafka_legacy_arginfo.h                      | 65 ++++++++++--------
+ tests/bug508.phpt                             |  2 +-
+ tests/oauthbearer_integration.phpt            |  5 +-
+ topic.c                                       | 24 +++----
+ 14 files changed, 188 insertions(+), 96 deletions(-)
+ create mode 100755 .github/workflows/test/install-dependencies.sh
+
+diff --git a/conf.c b/conf.c
+index 9aa8132f..6330e62e 100644
+--- a/conf.c
++++ b/conf.c
+@@ -340,6 +340,7 @@ static void kafka_conf_log_cb(const rd_kafka_t *rk, int level, const char *facil
+     zval_ptr_dtor(&args[3]);
+ }
+ 
++#ifdef HAS_RD_KAFKA_OAUTHBEARER
+ /* 
+ void rd_kafka_conf_set_oauthbearer_token_refresh_cb(
+     rd_kafka_conf_t *conf,
+@@ -371,8 +372,7 @@ static void kafka_conf_set_oauthbearer_token_refresh_cb(rd_kafka_t *rk, const ch
+     zval_ptr_dtor(&args[0]);
+     zval_ptr_dtor(&args[1]);
+ }
+-
+-
++#endif
+ 
+ /* {{{ proto RdKafka\Conf::__construct() */
+ PHP_METHOD(RdKafka_Conf, __construct)
+diff --git a/kafka_consumer.c b/kafka_consumer.c
+index d48abbd2..2c0eddb9 100644
+--- a/kafka_consumer.c
++++ b/kafka_consumer.c
+@@ -767,7 +767,7 @@ PHP_METHOD(RdKafka_KafkaConsumer, queryWatermarkOffsets)
+     object_intern *intern;
+     char *topic;
+     size_t topic_length;
+-    long low, high;
++    int64_t low, high;
+     zend_long partition, timeout;
+     zval *lowResult, *highResult;
+     rd_kafka_resp_err_t err;
+@@ -791,8 +791,8 @@ PHP_METHOD(RdKafka_KafkaConsumer, queryWatermarkOffsets)
+         return;
+     }
+ 
+-    ZVAL_LONG(lowResult, low);
+-    ZVAL_LONG(highResult, high);
++    ZVAL_LONG(lowResult, (zend_long) low);
++    ZVAL_LONG(highResult, (zend_long) high);
+ }
+ /* }}} */
+ 
+diff --git a/rdkafka.c b/rdkafka.c
+index 727fc8c6..ef5656aa 100644
+--- a/rdkafka.c
++++ b/rdkafka.c
+@@ -432,7 +432,7 @@ PHP_METHOD(RdKafka, setLogLevel)
+ /* }}} */
+ 
+ #ifdef HAS_RD_KAFKA_OAUTHBEARER
+-/* {{{ proto void RdKafka::oauthbearerSetToken(string $token_value, int $lifetime_ms, string $principal_name, array $extensions = [])
++/* {{{ proto void RdKafka::oauthbearerSetToken(string $token_value, int|float|string $lifetime_ms, string $principal_name, array $extensions = [])
+  * Set SASL/OAUTHBEARER token and metadata
+  *
+  * The SASL/OAUTHBEARER token refresh callback or event handler should cause
+@@ -449,7 +449,8 @@ PHP_METHOD(RdKafka, oauthbearerSetToken)
+     kafka_object *intern;
+     char *token_value;
+     size_t token_value_len;
+-    zend_long lifetime_ms;
++    zval *zlifetime_ms;
++    int64_t lifetime_ms;
+     char *principal_name;
+     size_t principal_len;
+     HashTable *extensions_hash = NULL;
+@@ -457,10 +458,31 @@ PHP_METHOD(RdKafka, oauthbearerSetToken)
+     char errstr[512];
+     rd_kafka_resp_err_t ret = 0;
+ 
+-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "sls|h", &token_value, &token_value_len, &lifetime_ms, &principal_name, &principal_len, &extensions_hash) == FAILURE) {
++    if (zend_parse_parameters(ZEND_NUM_ARGS(), "szs|h", &token_value, &token_value_len, &zlifetime_ms, &principal_name, &principal_len, &extensions_hash) == FAILURE) {
+         return;
+     }
+ 
++    /* On 32-bits, it might be required to pass $lifetime_ms as a float or a
++     * string */
++    switch (Z_TYPE_P(zlifetime_ms)) {
++        case IS_LONG:
++            lifetime_ms = (int64_t) Z_LVAL_P(zlifetime_ms);
++            break;
++        case IS_DOUBLE:
++            lifetime_ms = (int64_t) Z_DVAL_P(zlifetime_ms);
++            break;
++        case IS_STRING:;
++            char *str = Z_STRVAL_P(zlifetime_ms);
++            char *end;
++            lifetime_ms = (int64_t) strtoll(str, &end, 10);
++            if (end != str + Z_STRLEN_P(zlifetime_ms)) {
++                zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Argument #2 ($lifetime_ms) must be a valid integer");
++                return;
++            }
++            break;
++        EMPTY_SWITCH_DEFAULT_CASE();
++    }
++
+     intern = get_kafka_object(getThis());
+     if (!intern) {
+         return;
+@@ -721,7 +743,7 @@ PHP_METHOD(RdKafka, queryWatermarkOffsets)
+     kafka_object *intern;
+     char *topic;
+     size_t topic_length;
+-    long low, high;
++    int64_t low, high;
+     zend_long partition, timeout;
+     zval *lowResult, *highResult;
+     rd_kafka_resp_err_t err;
+@@ -745,8 +767,8 @@ PHP_METHOD(RdKafka, queryWatermarkOffsets)
+         return;
+     }
+ 
+-    ZVAL_LONG(lowResult, low);
+-    ZVAL_LONG(highResult, high);
++    ZVAL_LONG(lowResult, (zend_long) low);
++    ZVAL_LONG(highResult, (zend_long) high);
+ }
+ /* }}} */
+ 
+diff --git a/rdkafka.stub.php b/rdkafka.stub.php
+index 3d99ef22..ccee8430 100644
+--- a/rdkafka.stub.php
++++ b/rdkafka.stub.php
+@@ -82,7 +82,7 @@ public function resumePartitions(array $topic_partitions): array {}
+         
+         #ifdef HAS_RD_KAFKA_OAUTHBEARER
+         /** @tentative-return-type */
+-        public function oauthbearerSetToken(string $token_value, int $lifetime_ms, string $principal_name, array $extensions = []): void {}
++        public function oauthbearerSetToken(string $token_value, int|float|string $lifetime_ms, string $principal_name, array $extensions = []): void {}
+         
+         /** @tentative-return-type */
+         public function oauthbearerSetTokenFailure(string $error): void {}
+diff --git a/rdkafka_arginfo.h b/rdkafka_arginfo.h
+index 0e4fe52e..2140ab3c 100644
+--- a/rdkafka_arginfo.h
++++ b/rdkafka_arginfo.h
+@@ -1,5 +1,5 @@
+ /* This is a generated file, edit the .stub.php file instead.
+- * Stub hash: ea957a110b42c19bcb4a244655c1eaf99a1e3961 */
++ * Stub hash: 44a34fe532e7450e431d2772ce89df92d2d966b6 */
+ 
+ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_RdKafka___construct, 0, 0, 0)
+ ZEND_END_ARG_INFO()
+@@ -126,11 +126,13 @@ ZEND_BEGIN_ARG_WITH_TENTATIVE_RETURN_TYPE_INFO_EX(arginfo_class_RdKafka_oauthbea
+ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_RdKafka_oauthbearerSetToken, 0, 0, 3)
+ #endif
+ 	ZEND_ARG_TYPE_INFO(0, token_value, IS_STRING, 0)
+-	ZEND_ARG_TYPE_INFO(0, lifetime_ms, IS_LONG, 0)
++	ZEND_ARG_TYPE_MASK(0, lifetime_ms, MAY_BE_LONG|MAY_BE_DOUBLE|MAY_BE_STRING, NULL)
+ 	ZEND_ARG_TYPE_INFO(0, principal_name, IS_STRING, 0)
+ 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, extensions, IS_ARRAY, 0, "[]")
+ ZEND_END_ARG_INFO()
++#endif
+ 
++#if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ #if (PHP_VERSION_ID >= 80100)
+ ZEND_BEGIN_ARG_WITH_TENTATIVE_RETURN_TYPE_INFO_EX(arginfo_class_RdKafka_oauthbearerSetTokenFailure, 0, 1, IS_VOID, 0)
+ #else
+@@ -161,19 +163,26 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_RdKafka_Producer_initTransactions, 0, 0, 1)
+ #endif
+ 	ZEND_ARG_TYPE_INFO(0, timeout_ms, IS_LONG, 0)
+ ZEND_END_ARG_INFO()
++#endif
+ 
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ #if (PHP_VERSION_ID >= 80100)
+ ZEND_BEGIN_ARG_WITH_TENTATIVE_RETURN_TYPE_INFO_EX(arginfo_class_RdKafka_Producer_beginTransaction, 0, 0, IS_VOID, 0)
+ #else
+ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_RdKafka_Producer_beginTransaction, 0, 0, 0)
+ #endif
+ ZEND_END_ARG_INFO()
++#endif
+ 
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ #define arginfo_class_RdKafka_Producer_commitTransaction arginfo_class_RdKafka_Producer_initTransactions
++#endif
+ 
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ #define arginfo_class_RdKafka_Producer_abortTransaction arginfo_class_RdKafka_Producer_initTransactions
+ #endif
+ 
++
+ ZEND_METHOD(RdKafka, __construct);
+ ZEND_METHOD(RdKafka, addBrokers);
+ ZEND_METHOD(RdKafka, getMetadata);
+@@ -195,6 +204,8 @@ ZEND_METHOD(RdKafka, pausePartitions);
+ ZEND_METHOD(RdKafka, resumePartitions);
+ #if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ ZEND_METHOD(RdKafka, oauthbearerSetToken);
++#endif
++#if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ ZEND_METHOD(RdKafka, oauthbearerSetTokenFailure);
+ #endif
+ ZEND_METHOD(RdKafka_Consumer, __construct);
+@@ -202,11 +213,18 @@ ZEND_METHOD(RdKafka_Consumer, newQueue);
+ ZEND_METHOD(RdKafka_Producer, __construct);
+ #if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ ZEND_METHOD(RdKafka_Producer, initTransactions);
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ ZEND_METHOD(RdKafka_Producer, beginTransaction);
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ ZEND_METHOD(RdKafka_Producer, commitTransaction);
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ ZEND_METHOD(RdKafka_Producer, abortTransaction);
+ #endif
+ 
++
+ static const zend_function_entry class_RdKafka_methods[] = {
+ 	ZEND_ME(RdKafka, __construct, arginfo_class_RdKafka___construct, ZEND_ACC_PRIVATE)
+ 	ZEND_ME(RdKafka, addBrokers, arginfo_class_RdKafka_addBrokers, ZEND_ACC_PUBLIC)
+@@ -215,18 +233,10 @@ static const zend_function_entry class_RdKafka_methods[] = {
+ 	ZEND_ME(RdKafka, getControllerId, arginfo_class_RdKafka_getControllerId, ZEND_ACC_PUBLIC)
+ #endif
+ 	ZEND_ME(RdKafka, getOutQLen, arginfo_class_RdKafka_getOutQLen, ZEND_ACC_PUBLIC)
+-#if (PHP_VERSION_ID >= 80400)
+-	ZEND_RAW_FENTRY("metadata", zim_RdKafka_getMetadata, arginfo_class_RdKafka_metadata, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED, NULL, NULL)
+-#else
+-	ZEND_RAW_FENTRY("metadata", zim_RdKafka_getMetadata, arginfo_class_RdKafka_metadata, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+-#endif
++	ZEND_MALIAS(RdKafka, metadata, getMetadata, arginfo_class_RdKafka_metadata, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+ 	ZEND_ME(RdKafka, setLogLevel, arginfo_class_RdKafka_setLogLevel, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+ 	ZEND_ME(RdKafka, newTopic, arginfo_class_RdKafka_newTopic, ZEND_ACC_PUBLIC)
+-#if (PHP_VERSION_ID >= 80400)
+-	ZEND_RAW_FENTRY("outqLen", zim_RdKafka_getOutQLen, arginfo_class_RdKafka_outqLen, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED, NULL, NULL)
+-#else
+-	ZEND_RAW_FENTRY("outqLen", zim_RdKafka_getOutQLen, arginfo_class_RdKafka_outqLen, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+-#endif
++	ZEND_MALIAS(RdKafka, outqLen, getOutQLen, arginfo_class_RdKafka_outqLen, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+ 	ZEND_ME(RdKafka, poll, arginfo_class_RdKafka_poll, ZEND_ACC_PUBLIC)
+ 	ZEND_ME(RdKafka, flush, arginfo_class_RdKafka_flush, ZEND_ACC_PUBLIC)
+ #if defined(HAS_RD_KAFKA_PURGE)
+@@ -239,23 +249,38 @@ static const zend_function_entry class_RdKafka_methods[] = {
+ 	ZEND_ME(RdKafka, resumePartitions, arginfo_class_RdKafka_resumePartitions, ZEND_ACC_PUBLIC)
+ #if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ 	ZEND_ME(RdKafka, oauthbearerSetToken, arginfo_class_RdKafka_oauthbearerSetToken, ZEND_ACC_PUBLIC)
++#endif
++#if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ 	ZEND_ME(RdKafka, oauthbearerSetTokenFailure, arginfo_class_RdKafka_oauthbearerSetTokenFailure, ZEND_ACC_PUBLIC)
+ #endif
+ 	ZEND_FE_END
+ };
+ 
++
++static const zend_function_entry class_RdKafka_Exception_methods[] = {
++	ZEND_FE_END
++};
++
++
+ static const zend_function_entry class_RdKafka_Consumer_methods[] = {
+ 	ZEND_ME(RdKafka_Consumer, __construct, arginfo_class_RdKafka_Consumer___construct, ZEND_ACC_PUBLIC)
+ 	ZEND_ME(RdKafka_Consumer, newQueue, arginfo_class_RdKafka_Consumer_newQueue, ZEND_ACC_PUBLIC)
+ 	ZEND_FE_END
+ };
+ 
++
+ static const zend_function_entry class_RdKafka_Producer_methods[] = {
+ 	ZEND_ME(RdKafka_Producer, __construct, arginfo_class_RdKafka_Producer___construct, ZEND_ACC_PUBLIC)
+ #if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ 	ZEND_ME(RdKafka_Producer, initTransactions, arginfo_class_RdKafka_Producer_initTransactions, ZEND_ACC_PUBLIC)
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ 	ZEND_ME(RdKafka_Producer, beginTransaction, arginfo_class_RdKafka_Producer_beginTransaction, ZEND_ACC_PUBLIC)
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ 	ZEND_ME(RdKafka_Producer, commitTransaction, arginfo_class_RdKafka_Producer_commitTransaction, ZEND_ACC_PUBLIC)
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ 	ZEND_ME(RdKafka_Producer, abortTransaction, arginfo_class_RdKafka_Producer_abortTransaction, ZEND_ACC_PUBLIC)
+ #endif
+ 	ZEND_FE_END
+@@ -266,12 +291,8 @@ static zend_class_entry *register_class_RdKafka(void)
+ 	zend_class_entry ce, *class_entry;
+ 
+ 	INIT_CLASS_ENTRY(ce, "RdKafka", class_RdKafka_methods);
+-#if (PHP_VERSION_ID >= 80400)
+-	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_ABSTRACT);
+-#else
+ 	class_entry = zend_register_internal_class_ex(&ce, NULL);
+ 	class_entry->ce_flags |= ZEND_ACC_ABSTRACT;
+-#endif
+ 
+ 	zval property_error_cb_default_value;
+ 	ZVAL_UNDEF(&property_error_cb_default_value);
+@@ -292,12 +313,8 @@ static zend_class_entry *register_class_RdKafka_Exception(zend_class_entry *clas
+ {
+ 	zend_class_entry ce, *class_entry;
+ 
+-	INIT_NS_CLASS_ENTRY(ce, "RdKafka", "Exception", NULL);
+-#if (PHP_VERSION_ID >= 80400)
+-	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Exception, 0);
+-#else
++	INIT_NS_CLASS_ENTRY(ce, "RdKafka", "Exception", class_RdKafka_Exception_methods);
+ 	class_entry = zend_register_internal_class_ex(&ce, class_entry_Exception);
+-#endif
+ 
+ 	return class_entry;
+ }
+@@ -307,11 +324,7 @@ static zend_class_entry *register_class_RdKafka_Consumer(zend_class_entry *class
+ 	zend_class_entry ce, *class_entry;
+ 
+ 	INIT_NS_CLASS_ENTRY(ce, "RdKafka", "Consumer", class_RdKafka_Consumer_methods);
+-#if (PHP_VERSION_ID >= 80400)
+-	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_RdKafka, 0);
+-#else
+ 	class_entry = zend_register_internal_class_ex(&ce, class_entry_RdKafka);
+-#endif
+ 
+ 	return class_entry;
+ }
+@@ -321,11 +334,7 @@ static zend_class_entry *register_class_RdKafka_Producer(zend_class_entry *class
+ 	zend_class_entry ce, *class_entry;
+ 
+ 	INIT_NS_CLASS_ENTRY(ce, "RdKafka", "Producer", class_RdKafka_Producer_methods);
+-#if (PHP_VERSION_ID >= 80400)
+-	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_RdKafka, 0);
+-#else
+ 	class_entry = zend_register_internal_class_ex(&ce, class_entry_RdKafka);
+-#endif
+ 
+ 	return class_entry;
+ }
+diff --git a/rdkafka_legacy_arginfo.h b/rdkafka_legacy_arginfo.h
+index 49f594b4..1c634346 100644
+--- a/rdkafka_legacy_arginfo.h
++++ b/rdkafka_legacy_arginfo.h
+@@ -1,5 +1,5 @@
+ /* This is a generated file, edit the .stub.php file instead.
+- * Stub hash: ea957a110b42c19bcb4a244655c1eaf99a1e3961 */
++ * Stub hash: 44a34fe532e7450e431d2772ce89df92d2d966b6 */
+ 
+ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_RdKafka___construct, 0, 0, 0)
+ ZEND_END_ARG_INFO()
+@@ -78,7 +78,9 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_RdKafka_oauthbearerSetToken, 0, 0, 3)
+ 	ZEND_ARG_INFO(0, principal_name)
+ 	ZEND_ARG_INFO(0, extensions)
+ ZEND_END_ARG_INFO()
++#endif
+ 
++#if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_RdKafka_oauthbearerSetTokenFailure, 0, 0, 1)
+ 	ZEND_ARG_INFO(0, error)
+ ZEND_END_ARG_INFO()
+@@ -96,15 +98,22 @@ ZEND_END_ARG_INFO()
+ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_RdKafka_Producer_initTransactions, 0, 0, 1)
+ 	ZEND_ARG_INFO(0, timeout_ms)
+ ZEND_END_ARG_INFO()
++#endif
+ 
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_RdKafka_Producer_beginTransaction, 0, 0, 0)
+ ZEND_END_ARG_INFO()
++#endif
+ 
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ #define arginfo_class_RdKafka_Producer_commitTransaction arginfo_class_RdKafka_Producer_initTransactions
++#endif
+ 
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ #define arginfo_class_RdKafka_Producer_abortTransaction arginfo_class_RdKafka_Producer_initTransactions
+ #endif
+ 
++
+ ZEND_METHOD(RdKafka, __construct);
+ ZEND_METHOD(RdKafka, addBrokers);
+ ZEND_METHOD(RdKafka, getMetadata);
+@@ -126,6 +135,8 @@ ZEND_METHOD(RdKafka, pausePartitions);
+ ZEND_METHOD(RdKafka, resumePartitions);
+ #if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ ZEND_METHOD(RdKafka, oauthbearerSetToken);
++#endif
++#if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ ZEND_METHOD(RdKafka, oauthbearerSetTokenFailure);
+ #endif
+ ZEND_METHOD(RdKafka_Consumer, __construct);
+@@ -133,11 +144,18 @@ ZEND_METHOD(RdKafka_Consumer, newQueue);
+ ZEND_METHOD(RdKafka_Producer, __construct);
+ #if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ ZEND_METHOD(RdKafka_Producer, initTransactions);
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ ZEND_METHOD(RdKafka_Producer, beginTransaction);
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ ZEND_METHOD(RdKafka_Producer, commitTransaction);
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ ZEND_METHOD(RdKafka_Producer, abortTransaction);
+ #endif
+ 
++
+ static const zend_function_entry class_RdKafka_methods[] = {
+ 	ZEND_ME(RdKafka, __construct, arginfo_class_RdKafka___construct, ZEND_ACC_PRIVATE)
+ 	ZEND_ME(RdKafka, addBrokers, arginfo_class_RdKafka_addBrokers, ZEND_ACC_PUBLIC)
+@@ -146,18 +164,10 @@ static const zend_function_entry class_RdKafka_methods[] = {
+ 	ZEND_ME(RdKafka, getControllerId, arginfo_class_RdKafka_getControllerId, ZEND_ACC_PUBLIC)
+ #endif
+ 	ZEND_ME(RdKafka, getOutQLen, arginfo_class_RdKafka_getOutQLen, ZEND_ACC_PUBLIC)
+-#if (PHP_VERSION_ID >= 80400)
+-	ZEND_RAW_FENTRY("metadata", zim_RdKafka_getMetadata, arginfo_class_RdKafka_metadata, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED, NULL, NULL)
+-#else
+-	ZEND_RAW_FENTRY("metadata", zim_RdKafka_getMetadata, arginfo_class_RdKafka_metadata, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+-#endif
++	ZEND_MALIAS(RdKafka, metadata, getMetadata, arginfo_class_RdKafka_metadata, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+ 	ZEND_ME(RdKafka, setLogLevel, arginfo_class_RdKafka_setLogLevel, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+ 	ZEND_ME(RdKafka, newTopic, arginfo_class_RdKafka_newTopic, ZEND_ACC_PUBLIC)
+-#if (PHP_VERSION_ID >= 80400)
+-	ZEND_RAW_FENTRY("outqLen", zim_RdKafka_getOutQLen, arginfo_class_RdKafka_outqLen, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED, NULL, NULL)
+-#else
+-	ZEND_RAW_FENTRY("outqLen", zim_RdKafka_getOutQLen, arginfo_class_RdKafka_outqLen, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+-#endif
++	ZEND_MALIAS(RdKafka, outqLen, getOutQLen, arginfo_class_RdKafka_outqLen, ZEND_ACC_PUBLIC|ZEND_ACC_DEPRECATED)
+ 	ZEND_ME(RdKafka, poll, arginfo_class_RdKafka_poll, ZEND_ACC_PUBLIC)
+ 	ZEND_ME(RdKafka, flush, arginfo_class_RdKafka_flush, ZEND_ACC_PUBLIC)
+ #if defined(HAS_RD_KAFKA_PURGE)
+@@ -170,23 +180,38 @@ static const zend_function_entry class_RdKafka_methods[] = {
+ 	ZEND_ME(RdKafka, resumePartitions, arginfo_class_RdKafka_resumePartitions, ZEND_ACC_PUBLIC)
+ #if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ 	ZEND_ME(RdKafka, oauthbearerSetToken, arginfo_class_RdKafka_oauthbearerSetToken, ZEND_ACC_PUBLIC)
++#endif
++#if defined(HAS_RD_KAFKA_OAUTHBEARER)
+ 	ZEND_ME(RdKafka, oauthbearerSetTokenFailure, arginfo_class_RdKafka_oauthbearerSetTokenFailure, ZEND_ACC_PUBLIC)
+ #endif
+ 	ZEND_FE_END
+ };
+ 
++
++static const zend_function_entry class_RdKafka_Exception_methods[] = {
++	ZEND_FE_END
++};
++
++
+ static const zend_function_entry class_RdKafka_Consumer_methods[] = {
+ 	ZEND_ME(RdKafka_Consumer, __construct, arginfo_class_RdKafka_Consumer___construct, ZEND_ACC_PUBLIC)
+ 	ZEND_ME(RdKafka_Consumer, newQueue, arginfo_class_RdKafka_Consumer_newQueue, ZEND_ACC_PUBLIC)
+ 	ZEND_FE_END
+ };
+ 
++
+ static const zend_function_entry class_RdKafka_Producer_methods[] = {
+ 	ZEND_ME(RdKafka_Producer, __construct, arginfo_class_RdKafka_Producer___construct, ZEND_ACC_PUBLIC)
+ #if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ 	ZEND_ME(RdKafka_Producer, initTransactions, arginfo_class_RdKafka_Producer_initTransactions, ZEND_ACC_PUBLIC)
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ 	ZEND_ME(RdKafka_Producer, beginTransaction, arginfo_class_RdKafka_Producer_beginTransaction, ZEND_ACC_PUBLIC)
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ 	ZEND_ME(RdKafka_Producer, commitTransaction, arginfo_class_RdKafka_Producer_commitTransaction, ZEND_ACC_PUBLIC)
++#endif
++#if defined(HAS_RD_KAFKA_TRANSACTIONS)
+ 	ZEND_ME(RdKafka_Producer, abortTransaction, arginfo_class_RdKafka_Producer_abortTransaction, ZEND_ACC_PUBLIC)
+ #endif
+ 	ZEND_FE_END
+@@ -197,12 +222,8 @@ static zend_class_entry *register_class_RdKafka(void)
+ 	zend_class_entry ce, *class_entry;
+ 
+ 	INIT_CLASS_ENTRY(ce, "RdKafka", class_RdKafka_methods);
+-#if (PHP_VERSION_ID >= 80400)
+-	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_ABSTRACT);
+-#else
+ 	class_entry = zend_register_internal_class_ex(&ce, NULL);
+ 	class_entry->ce_flags |= ZEND_ACC_ABSTRACT;
+-#endif
+ 
+ 	zval property_error_cb_default_value;
+ 	ZVAL_NULL(&property_error_cb_default_value);
+@@ -223,12 +244,8 @@ static zend_class_entry *register_class_RdKafka_Exception(zend_class_entry *clas
+ {
+ 	zend_class_entry ce, *class_entry;
+ 
+-	INIT_NS_CLASS_ENTRY(ce, "RdKafka", "Exception", NULL);
+-#if (PHP_VERSION_ID >= 80400)
+-	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Exception, 0);
+-#else
++	INIT_NS_CLASS_ENTRY(ce, "RdKafka", "Exception", class_RdKafka_Exception_methods);
+ 	class_entry = zend_register_internal_class_ex(&ce, class_entry_Exception);
+-#endif
+ 
+ 	return class_entry;
+ }
+@@ -238,11 +255,7 @@ static zend_class_entry *register_class_RdKafka_Consumer(zend_class_entry *class
+ 	zend_class_entry ce, *class_entry;
+ 
+ 	INIT_NS_CLASS_ENTRY(ce, "RdKafka", "Consumer", class_RdKafka_Consumer_methods);
+-#if (PHP_VERSION_ID >= 80400)
+-	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_RdKafka, 0);
+-#else
+ 	class_entry = zend_register_internal_class_ex(&ce, class_entry_RdKafka);
+-#endif
+ 
+ 	return class_entry;
+ }
+@@ -252,11 +265,7 @@ static zend_class_entry *register_class_RdKafka_Producer(zend_class_entry *class
+ 	zend_class_entry ce, *class_entry;
+ 
+ 	INIT_NS_CLASS_ENTRY(ce, "RdKafka", "Producer", class_RdKafka_Producer_methods);
+-#if (PHP_VERSION_ID >= 80400)
+-	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_RdKafka, 0);
+-#else
+ 	class_entry = zend_register_internal_class_ex(&ce, class_entry_RdKafka);
+-#endif
+ 
+ 	return class_entry;
+ }
+diff --git a/tests/bug508.phpt b/tests/bug508.phpt
+index c36d9943..d4f24ff9 100644
+--- a/tests/bug508.phpt
++++ b/tests/bug508.phpt
+@@ -73,7 +73,7 @@ array(10) {
+   ["topic_name"]=>
+   string(%d) "test_rdkafka_%s"
+   ["timestamp"]=>
+-  int(%d)
++  int(%f)
+   ["partition"]=>
+   int(0)
+   ["payload"]=>
+diff --git a/tests/oauthbearer_integration.phpt b/tests/oauthbearer_integration.phpt
+index 1b9399cb..c10ed26f 100644
+--- a/tests/oauthbearer_integration.phpt
++++ b/tests/oauthbearer_integration.phpt
+@@ -53,7 +53,7 @@ $conf->setErrorCb(function ($producer, $err, $errstr) {
+ $conf->setOauthbearerTokenRefreshCb(function ($producer) {
+     echo "Refreshing token and succeeding\n";
+     $token = generateJws();
+-    $producer->oauthbearerSetToken($token['value'], $token['expiryMs'], $token['principal']);
++    $producer->oauthbearerSetToken($token['value'], (string) $token['expiryMs'], $token['principal']);
+ });
+ $producer = new \RdKafka\Producer($conf);
+ $producer->poll(0);
+@@ -64,7 +64,8 @@ try {
+     $producer->getMetadata(false, $topic, 10*1000);
+     echo "Metadata retrieved successfully when refresh callback set token\n";
+ } catch (\RdKafka\Exception $e) {
+-    echo "FAIL: Caught exception when getting metadata after successfully refreshing any token\n";
++    echo "FAIL: Caught exception when getting metadata after successfully refreshing any token:\n";
++    printf("%s: %s\n", get_class($e), $e->getMessage());
+ }
+ 
+ // Test that refresh token with setting token failure will fail when getting metadata
+diff --git a/topic.c b/topic.c
+index f1c0f7f0..d3a9f6be 100644
+--- a/topic.c
++++ b/topic.c
+@@ -128,7 +128,7 @@ PHP_METHOD(RdKafka_ConsumerTopic, consumeCallback)
+     }
+ 
+     if (partition < 0 || partition > 0x7FFFFFFF) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for $partition", partition);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for $partition", partition);
+         return;
+     }
+ 
+@@ -165,7 +165,7 @@ PHP_METHOD(RdKafka_ConsumerTopic, consumeQueueStart)
+     }
+ 
+     if (partition != RD_KAFKA_PARTITION_UA && (partition < 0 || partition > 0x7FFFFFFF)) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for $partition", partition);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for $partition", partition);
+         return;
+     }
+ 
+@@ -223,7 +223,7 @@ PHP_METHOD(RdKafka_ConsumerTopic, consumeStart)
+     }
+ 
+     if (partition != RD_KAFKA_PARTITION_UA && (partition < 0 || partition > 0x7FFFFFFF)) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for $partition", partition);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for $partition", partition);
+         return;
+     }
+ 
+@@ -275,7 +275,7 @@ PHP_METHOD(RdKafka_ConsumerTopic, consumeStop)
+     }
+ 
+     if (partition != RD_KAFKA_PARTITION_UA && (partition < 0 || partition > 0x7FFFFFFF)) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for $partition", partition);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for $partition", partition);
+         return;
+     }
+ 
+@@ -316,7 +316,7 @@ PHP_METHOD(RdKafka_ConsumerTopic, consume)
+     }
+ 
+     if (partition != RD_KAFKA_PARTITION_UA && (partition < 0 || partition > 0x7FFFFFFF)) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for $partition", partition);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for $partition", partition);
+         return;
+     }
+ 
+@@ -357,12 +357,12 @@ PHP_METHOD(RdKafka_ConsumerTopic, consumeBatch)
+     }
+ 
+     if (0 >= batch_size) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for batch_size", batch_size);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for batch_size", batch_size);
+         return;
+     }
+ 
+     if (partition != RD_KAFKA_PARTITION_UA && (partition < 0 || partition > 0x7FFFFFFF)) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for $partition", partition);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for $partition", partition);
+         return;
+     }
+ 
+@@ -406,7 +406,7 @@ PHP_METHOD(RdKafka_ConsumerTopic, offsetStore)
+     }
+ 
+     if (partition < 0 || partition > 0x7FFFFFFF) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for $partition", partition);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for $partition", partition);
+         return;
+     }
+ 
+@@ -455,12 +455,12 @@ PHP_METHOD(RdKafka_ProducerTopic, produce)
+     ZEND_PARSE_PARAMETERS_END();
+ 
+     if (partition != RD_KAFKA_PARTITION_UA && (partition < 0 || partition > 0x7FFFFFFF)) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for $partition", partition);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for $partition", partition);
+         return;
+     }
+ 
+     if (msgflags != 0 && msgflags != RD_KAFKA_MSG_F_BLOCK) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Invalid value '%ld' for $msgflags", msgflags);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Invalid value '" ZEND_LONG_FMT "' for $msgflags", msgflags);
+         return;
+     }
+ 
+@@ -524,12 +524,12 @@ PHP_METHOD(RdKafka_ProducerTopic, producev)
+     ZEND_PARSE_PARAMETERS_END();
+ 
+     if (partition != RD_KAFKA_PARTITION_UA && (partition < 0 || partition > 0x7FFFFFFF)) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '%ld' for $partition", partition);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Out of range value '" ZEND_LONG_FMT "' for $partition", partition);
+         return;
+     }
+ 
+     if (msgflags != 0 && msgflags != RD_KAFKA_MSG_F_BLOCK) {
+-        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Invalid value '%ld' for $msgflags", msgflags);
++        zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0, "Invalid value '" ZEND_LONG_FMT "' for $msgflags", msgflags);
+         return;
+     }
+ 
