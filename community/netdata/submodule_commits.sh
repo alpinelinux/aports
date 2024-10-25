@@ -29,4 +29,3 @@ netdata_submodules="$(req netdata/netdata/git/trees/"${version}"\?recursive=true
 printf "_aclk_schemas_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit src/aclk/aclk-schemas)"
 printf "_ml_dlib_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit src/ml/dlib)"
 printf "_h2o_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit src/web/server/h2o/libh2o)"
-printf "_fluentbit_commit=%s\n" "$(echo "$netdata_submodules" | submodule_commit src/fluent-bit)"
