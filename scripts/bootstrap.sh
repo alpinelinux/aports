@@ -40,9 +40,10 @@ EOF
 fi
 
 # get abuild configurables
-[ -e /usr/share/abuild/functions.sh ] || (echo "abuild not found" ; exit 1)
-CBUILDROOT="$(CTARGET=$TARGET_ARCH . /usr/share/abuild/functions.sh ; echo $CBUILDROOT)"
-. /usr/share/abuild/functions.sh
+sharedir=${ABUILD_SHAREDIR:-/usr/share/abuild}
+[ -e "$sharedir"/functions.sh ] || (echo "abuild not found" ; exit 1)
+CBUILDROOT="$(CTARGET=$TARGET_ARCH . "$sharedir"/functions.sh ; echo $CBUILDROOT)"
+. "$sharedir"/functions.sh
 [ -z "$CBUILD_ARCH" ] && die "abuild is too old (use 2.29.0 or later)"
 [ -z "$CBUILDROOT" ] && die "CBUILDROOT not set for $TARGET_ARCH"
 export CBUILD
