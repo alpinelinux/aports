@@ -1,0 +1,86 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/hvm: Simplify stdvga_mem_accept() further
+
+stdvga_mem_accept() is called on almost all IO emulations, and the
+overwhelming likely answer is to reject the ioreq.  Simply rearranging the
+expression yields an improvement:
+
+  add/remove: 0/0 grow/shrink: 0/1 up/down: 0/-57 (-57)
+  Function                                     old     new   delta
+  stdvga_mem_accept                            109      52     -57
+
+which is best explained looking at the disassembly:
+
+  Before:                                                    After:
+  f3 0f 1e fa           endbr64                              f3 0f 1e fa           endbr64
+  0f b6 4e 1e           movzbl 0x1e(%rsi),%ecx            |  0f b6 46 1e           movzbl 0x1e(%rsi),%eax
+  48 8b 16              mov    (%rsi),%rdx                |  31 d2                 xor    %edx,%edx
+  f6 c1 40              test   $0x40,%cl                  |  a8 30                 test   $0x30,%al
+  75 38                 jne    <stdvga_mem_accept+0x48>   |  75 23                 jne    <stdvga_mem_accept+0x31>
+  31 c0                 xor    %eax,%eax                  <
+  48 81 fa ff ff 09 00  cmp    $0x9ffff,%rdx              <
+  76 26                 jbe    <stdvga_mem_accept+0x41>   <
+  8b 46 14              mov    0x14(%rsi),%eax            <
+  8b 7e 10              mov    0x10(%rsi),%edi            <
+  48 0f af c7           imul   %rdi,%rax                  <
+  48 8d 54 02 ff        lea    -0x1(%rdx,%rax,1),%rdx     <
+  31 c0                 xor    %eax,%eax                  <
+  48 81 fa ff ff 0b 00  cmp    $0xbffff,%rdx              <
+  77 0c                 ja     <stdvga_mem_accept+0x41>   <
+  83 e1 30              and    $0x30,%ecx                 <
+  75 07                 jne    <stdvga_mem_accept+0x41>   <
+  83 7e 10 01           cmpl   $0x1,0x10(%rsi)               83 7e 10 01           cmpl   $0x1,0x10(%rsi)
+  0f 94 c0              sete   %al                        |  75 1d                 jne    <stdvga_mem_accept+0x31>
+  c3                    ret                               |  48 8b 0e              mov    (%rsi),%rcx
+  66 0f 1f 44 00 00     nopw   0x0(%rax,%rax,1)           |  48 81 f9 ff ff 09 00  cmp    $0x9ffff,%rcx
+  8b 46 10              mov    0x10(%rsi),%eax            |  76 11                 jbe    <stdvga_mem_accept+0x31>
+  8b 7e 14              mov    0x14(%rsi),%edi            |  8b 46 14              mov    0x14(%rsi),%eax
+  49 89 d0              mov    %rdx,%r8                   |  48 8d 44 01 ff        lea    -0x1(%rcx,%rax,1),%rax
+  48 83 e8 01           sub    $0x1,%rax                  |  48 3d ff ff 0b 00     cmp    $0xbffff,%rax
+  48 8d 54 3a ff        lea    -0x1(%rdx,%rdi,1),%rdx     |  0f 96 c2              setbe  %dl
+  48 0f af c7           imul   %rdi,%rax                  |  89 d0                 mov    %edx,%eax
+  49 29 c0              sub    %rax,%r8                   <
+  31 c0                 xor    %eax,%eax                  <
+  49 81 f8 ff ff 09 00  cmp    $0x9ffff,%r8               <
+  77 be                 ja     <stdvga_mem_accept+0x2a>   <
+  c3                    ret                                  c3                    ret
+
+By moving the "p->count != 1" check ahead of the
+ioreq_mmio_{first,last}_byte() calls, both multiplies disappear along with a
+lot of surrounding logic.
+
+No functional change.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+(cherry picked from commit 08ffd8705d36c7c445df3ecee8ad9b8f8d65fbe0)
+
+diff --git a/xen/arch/x86/hvm/stdvga.c b/xen/arch/x86/hvm/stdvga.c
+index fd38fb48002c..7554fa10cc96 100644
+--- a/xen/arch/x86/hvm/stdvga.c
++++ b/xen/arch/x86/hvm/stdvga.c
+@@ -70,18 +70,14 @@ static int cf_check stdvga_mem_write(
+ static bool cf_check stdvga_mem_accept(
+     const struct hvm_io_handler *handler, const ioreq_t *p)
+ {
+-    if ( (ioreq_mmio_first_byte(p) < VGA_MEM_BASE) ||
++    /*
++     * Only accept single direct writes, as that's the only thing we can
++     * accelerate using buffered ioreq handling.
++     */
++    if ( p->dir != IOREQ_WRITE || p->data_is_ptr || p->count != 1 ||
++         (ioreq_mmio_first_byte(p) < VGA_MEM_BASE) ||
+          (ioreq_mmio_last_byte(p) >= (VGA_MEM_BASE + VGA_MEM_SIZE)) )
+-        return 0;
+-
+-    if ( p->dir != IOREQ_WRITE || p->data_is_ptr || p->count != 1 )
+-    {
+-        /*
+-         * Only accept single direct writes, as that's the only thing we can
+-         * accelerate using buffered ioreq handling.
+-         */
+         return false;
+-    }
+ 
+     return true;
+ }
