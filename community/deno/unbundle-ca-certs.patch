@@ -2,93 +2,50 @@ From: Jakub Jirutka <jakub@jirutka.cz>
 Date: Sat, 15 Jul 2023 21:29:34 +0200
 Subject: [PATCH] Don't bundle CA certificates, FFS!
 
---- a/ext/tls/Cargo.toml
-+++ b/ext/tls/Cargo.toml
-@@ -22,4 +22,3 @@ rustls = { workspace = true, features = ["dangerous_configuration"] }
- rustls-webpki.workspace = true
- serde.workspace = true
- tokio.workspace = true
--webpki-roots.workspace = true
---- a/ext/tls/lib.rs
-+++ b/ext/tls/lib.rs
-@@ -4,7 +4,7 @@ pub use deno_native_certs;
- pub use rustls;
- pub use rustls_pemfile;
- pub use webpki;
--pub use webpki_roots;
-+//pub use webpki_roots;  XXX-Patched
- 
- use deno_core::anyhow::anyhow;
- use deno_core::error::custom_error;
-@@ -144,16 +144,15 @@ pub struct BasicAuth {
- 
- pub fn create_default_root_cert_store() -> RootCertStore {
-   let mut root_cert_store = RootCertStore::empty();
--  // TODO(@justinmchase): Consider also loading the system keychain here
--  root_cert_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(
--    |ta| {
--      rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
--        ta.subject,
--        ta.spki,
--        ta.name_constraints,
--      )
--    },
--  ));
-+
-+  // XXX-Patched: load system-provided CA certs instead of bundled from webpki_roots.
-+  let roots = deno_native_certs::load_native_certs()
-+    .expect("could not load platform certs");
-+  for root in roots {
-+    root_cert_store
-+      .add(&rustls::Certificate(root.0))
-+      .expect("Failed to add platform cert to root cert store");
-+  }
-   root_cert_store
- }
- 
 --- a/cli/args/flags.rs
 +++ b/cli/args/flags.rs
-@@ -909,8 +909,8 @@
-                          (e.g. "abcde12345@deno.land;54321edcba@github.com")
- 
-     <g>DENO_TLS_CA_STORE</>    Comma-separated list of order dependent certificate
--                         stores. Possible values: "system", "mozilla".
--                         Defaults to "mozilla".
-+                         stores. Possible values: "system".
-+                         Defaults to "system".
- 
-     <g>DENO_CERT</>            Load certificate authority from PEM encoded file
- 
+@@ -1148,8 +1148,8 @@
+   <g>DENO_NO_PACKAGE_JSON</>  Disables auto-resolution of package.json
+   <g>DENO_NO_UPDATE_CHECK</>  Set to disable checking if a newer Deno version is available
+   <g>DENO_TLS_CA_STORE</>     Comma-separated list of order dependent certificate stores.
+-                        Possible values: "system", "mozilla".
+-                         <p(245)>(defaults to "mozilla")</>
++                        Possible values: "system".
++                         <p(245)>(defaults to "system")</>
+   <g>HTTP_PROXY</>            Proxy address for HTTP requests
+                          <p(245)>(module downloads, fetch)</>
+   <g>HTTPS_PROXY</>           Proxy address for HTTPS requests
 --- a/cli/args/mod.rs
 +++ b/cli/args/mod.rs
-@@ -49,7 +49,7 @@ use deno_runtime::deno_tls::deno_native_certs::load_native_certs;
+@@ -59,7 +59,7 @@
  use deno_runtime::deno_tls::rustls;
  use deno_runtime::deno_tls::rustls::RootCertStore;
  use deno_runtime::deno_tls::rustls_pemfile;
 -use deno_runtime::deno_tls::webpki_roots;
 +//use deno_runtime::deno_tls::webpki_roots;  // XXX-Patched
  use deno_runtime::inspector_server::InspectorServer;
- use deno_runtime::permissions::PermissionsOptions;
+ use deno_terminal::colors;
  use dotenvy::from_filename;
-@@ -509,22 +509,19 @@ pub fn get_root_cert_store(
+@@ -642,7 +642,7 @@
+ #[derive(Error, Debug, Clone)]
+ pub enum RootCertStoreLoadError {
+   #[error(
+-    "Unknown certificate store \"{0}\" specified (allowed: \"system,mozilla\")"
++    "Unknown certificate store \"{0}\" specified (allowed: \"system\")"
+   )]
+   UnknownStore(String),
+   #[error("Unable to add pem file to certificate store: {0}")]
+@@ -670,14 +670,18 @@
            .collect(),
        )
      })
 -    .unwrap_or_else(|| vec!["mozilla".to_string()]);
-+    .unwrap_or_else(|| vec!["system".to_string()]);  // XXX-Patched: replaced "mozilla" with "system"
++    .unwrap_or_else(|| vec!["system".to_string()]);
  
    for store in ca_stores.iter() {
      match store.as_str() {
 -      "mozilla" => {
--        root_cert_store.add_trust_anchors(
--          webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
--            rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
--              ta.subject,
--              ta.spki,
--              ta.name_constraints,
--            )
--          }),
--        );
+-        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_vec());
 -      }
 -      "system" => {
 +      // XXX-Patched: removed support for bundled CA certificates
@@ -99,7 +56,43 @@ Subject: [PATCH] Don't bundle CA certificates, FFS!
 +            continue
 +          }
 +        }
-+
          let roots = load_native_certs().expect("could not load platform certs");
          for root in roots {
-           root_cert_store
+           if let Err(err) = root_cert_store
+--- a/ext/tls/Cargo.toml
++++ b/ext/tls/Cargo.toml
+@@ -23,4 +23,3 @@
+ serde.workspace = true
+ thiserror.workspace = true
+ tokio.workspace = true
+-webpki-roots.workspace = true
+--- a/ext/tls/lib.rs
++++ b/ext/tls/lib.rs
+@@ -7,7 +7,7 @@
+ pub use rustls_pemfile;
+ pub use rustls_tokio_stream::*;
+ pub use webpki;
+-pub use webpki_roots;
++//pub use webpki_roots;  XXX-Patched
+ 
+ use rustls::client::danger::HandshakeSignatureValid;
+ use rustls::client::danger::ServerCertVerified;
+@@ -169,9 +169,15 @@
+ }
+ 
+ pub fn create_default_root_cert_store() -> RootCertStore {
+-  let root_cert_store = rustls::RootCertStore {
+-    roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+-  };
++  // XXX-Patched: load system-provided CA certs instead of bundled from webpki_roots.
++  let mut root_cert_store = RootCertStore::empty();
++  let roots = deno_native_certs::load_native_certs()
++    .expect("could not load platform certs");
++  for root in roots {
++    root_cert_store
++      .add(rustls::pki_types::CertificateDer::from(root.0))
++      .expect("Failed to add platform cert to root cert store");
++  }
+   debug_assert!(!root_cert_store.is_empty());
+   root_cert_store
+ }
