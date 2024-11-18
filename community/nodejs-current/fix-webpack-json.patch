@@ -1,0 +1,182 @@
+Patch-Source: https://github.com/nodejs/node/issues/55826
+
+From 5f43e6d409c34d0ab3c3bbd879669f638e64d6a9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Micha=C3=ABl=20Zasso?= <targos@protonmail.com>
+Date: Tue, 12 Nov 2024 14:16:36 +0100
+Subject: [PATCH 1/2] Revert "src: migrate `String::Value` to
+ `String::ValueView`"
+
+This reverts commit 45c6a9e1f6e165eb0ab2f7b5635662aa1875c171.
+---
+ src/inspector_js_api.cc |  6 +++---
+ src/node_buffer.cc      | 27 +++++++++++++++------------
+ src/string_bytes.cc     | 20 ++++++++++----------
+ 3 files changed, 28 insertions(+), 25 deletions(-)
+
+diff --git a/src/inspector_js_api.cc b/src/inspector_js_api.cc
+index a43f1a361ef702..282575601545d1 100644
+--- a/src/inspector_js_api.cc
++++ b/src/inspector_js_api.cc
+@@ -245,9 +245,9 @@ static void AsyncTaskScheduledWrapper(const FunctionCallbackInfo<Value>& args) {
+   Environment* env = Environment::GetCurrent(args);
+ 
+   CHECK(args[0]->IsString());
+-
+-  TwoByteValue task_name_buffer(args.GetIsolate(), args[0]);
+-  StringView task_name_view(*task_name_buffer, task_name_buffer.length());
++  Local<String> task_name = args[0].As<String>();
++  String::Value task_name_value(args.GetIsolate(), task_name);
++  StringView task_name_view(*task_name_value, task_name_value.length());
+ 
+   CHECK(args[1]->IsNumber());
+   int64_t task_id = args[1]->IntegerValue(env->context()).FromJust();
+diff --git a/src/node_buffer.cc b/src/node_buffer.cc
+index 6ea9442ef7c1fe..2402adb3483e3e 100644
+--- a/src/node_buffer.cc
++++ b/src/node_buffer.cc
+@@ -965,9 +965,11 @@ void IndexOfString(const FunctionCallbackInfo<Value>& args) {
+   size_t result = haystack_length;
+ 
+   if (enc == UCS2) {
+-    TwoByteValue needle_buffer(isolate, needle);
++    String::Value needle_value(isolate, needle);
++    if (*needle_value == nullptr)
++      return args.GetReturnValue().Set(-1);
+ 
+-    if (haystack_length < 2 || needle_buffer.length() < 1) {
++    if (haystack_length < 2 || needle_value.length() < 1) {
+       return args.GetReturnValue().Set(-1);
+     }
+ 
+@@ -987,12 +989,13 @@ void IndexOfString(const FunctionCallbackInfo<Value>& args) {
+                                     offset / 2,
+                                     is_forward);
+     } else {
+-      result = nbytes::SearchString(reinterpret_cast<const uint16_t*>(haystack),
+-                                    haystack_length / 2,
+-                                    needle_buffer.out(),
+-                                    needle_buffer.length(),
+-                                    offset / 2,
+-                                    is_forward);
++      result =
++          nbytes::SearchString(reinterpret_cast<const uint16_t*>(haystack),
++                               haystack_length / 2,
++                               reinterpret_cast<const uint16_t*>(*needle_value),
++                               needle_value.length(),
++                               offset / 2,
++                               is_forward);
+     }
+     result *= 2;
+   } else if (enc == UTF8) {
+@@ -1292,10 +1295,10 @@ static void Btoa(const FunctionCallbackInfo<Value>& args) {
+                                   input->Length(),
+                                   buffer.out());
+   } else {
+-    String::ValueView value(env->isolate(), input);
++    String::Value value(env->isolate(), input);
+     MaybeStackBuffer<char> stack_buf(value.length());
+     size_t out_len = simdutf::convert_utf16_to_latin1(
+-        reinterpret_cast<const char16_t*>(value.data16()),
++        reinterpret_cast<const char16_t*>(*value),
+         value.length(),
+         stack_buf.out());
+     if (out_len == 0) {  // error
+@@ -1352,8 +1355,8 @@ static void Atob(const FunctionCallbackInfo<Value>& args) {
+     buffer.SetLength(expected_length);
+     result = simdutf::base64_to_binary(data, input->Length(), buffer.out());
+   } else {  // 16-bit case
+-    String::ValueView value(env->isolate(), input);
+-    auto data = reinterpret_cast<const char16_t*>(value.data16());
++    String::Value value(env->isolate(), input);
++    auto data = reinterpret_cast<const char16_t*>(*value);
+     size_t expected_length =
+         simdutf::maximal_binary_length_from_base64(data, value.length());
+     buffer.AllocateSufficientStorage(expected_length);
+diff --git a/src/string_bytes.cc b/src/string_bytes.cc
+index 9e12fd1585639b..8a94d0eb63245c 100644
+--- a/src/string_bytes.cc
++++ b/src/string_bytes.cc
+@@ -305,10 +305,11 @@ size_t StringBytes::Write(Isolate* isolate,
+               input_view.length());
+         }
+       } else {
++        String::Value value(isolate, str);
+         size_t written_len = buflen;
+         auto result = simdutf::base64_to_binary_safe(
+-            reinterpret_cast<const char16_t*>(input_view.data16()),
+-            input_view.length(),
++            reinterpret_cast<const char16_t*>(*value),
++            value.length(),
+             buf,
+             written_len,
+             simdutf::base64_url);
+@@ -318,8 +319,7 @@ size_t StringBytes::Write(Isolate* isolate,
+           // The input does not follow the WHATWG forgiving-base64 specification
+           // (adapted for base64url with + and / replaced by - and _).
+           // https://infra.spec.whatwg.org/#forgiving-base64-decode
+-          nbytes = nbytes::Base64Decode(
+-              buf, buflen, input_view.data16(), input_view.length());
++          nbytes = nbytes::Base64Decode(buf, buflen, *value, value.length());
+         }
+       }
+       break;
+@@ -344,10 +344,11 @@ size_t StringBytes::Write(Isolate* isolate,
+               input_view.length());
+         }
+       } else {
++        String::Value value(isolate, str);
+         size_t written_len = buflen;
+         auto result = simdutf::base64_to_binary_safe(
+-            reinterpret_cast<const char16_t*>(input_view.data16()),
+-            input_view.length(),
++            reinterpret_cast<const char16_t*>(*value),
++            value.length(),
+             buf,
+             written_len);
+         if (result.error == simdutf::error_code::SUCCESS) {
+@@ -355,8 +356,7 @@ size_t StringBytes::Write(Isolate* isolate,
+         } else {
+           // The input does not follow the WHATWG base64 specification
+           // https://infra.spec.whatwg.org/#forgiving-base64-decode
+-          nbytes = nbytes::Base64Decode(
+-              buf, buflen, input_view.data16(), input_view.length());
++          nbytes = nbytes::Base64Decode(buf, buflen, *value, value.length());
+         }
+       }
+       break;
+@@ -369,8 +369,8 @@ size_t StringBytes::Write(Isolate* isolate,
+                               reinterpret_cast<const char*>(input_view.data8()),
+                               input_view.length());
+       } else {
+-        String::ValueView value(isolate, str);
+-        nbytes = nbytes::HexDecode(buf, buflen, value.data8(), value.length());
++        String::Value value(isolate, str);
++        nbytes = nbytes::HexDecode(buf, buflen, *value, value.length());
+       }
+       break;
+ 
+
+From df0b75f39f2b79932d4145b8350f683caf6331f2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Micha=C3=ABl=20Zasso?= <targos@protonmail.com>
+Date: Tue, 12 Nov 2024 14:34:35 +0100
+Subject: [PATCH 2/2] fixup: lint
+
+---
+ src/node_buffer.cc | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/node_buffer.cc b/src/node_buffer.cc
+index 2402adb3483e3e..2e0e8d4746fb61 100644
+--- a/src/node_buffer.cc
++++ b/src/node_buffer.cc
+@@ -966,8 +966,9 @@ void IndexOfString(const FunctionCallbackInfo<Value>& args) {
+ 
+   if (enc == UCS2) {
+     String::Value needle_value(isolate, needle);
+-    if (*needle_value == nullptr)
++    if (*needle_value == nullptr) {
+       return args.GetReturnValue().Set(-1);
++    }
+ 
+     if (haystack_length < 2 || needle_value.length() < 1) {
+       return args.GetReturnValue().Set(-1);
