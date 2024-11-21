@@ -140,7 +140,7 @@ static int ethers(int argc, char *argv[])
 
 static void groupprint(const struct group *gr)
 {
-	printfmtstrings(gr->gr_mem, ":", ",", "%s:%s:%u",
+	printfmtstrings(gr->gr_mem, "", ",", "%s:%s:%u:",
 			gr->gr_name, gr->gr_passwd, gr->gr_gid);
 }
 
