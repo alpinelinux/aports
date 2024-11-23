@@ -1,0 +1,127 @@
+Patch-Source: https://codereview.qt-project.org/c/pyside/pyside-setup/+/597640
+--
+From dfe3819559ed1e04089f9d5bc009268a7b48b7c2 Mon Sep 17 00:00:00 2001
+From: Friedemann Kleint <Friedemann.Kleint@qt.io>
+Date: Mon, 14 Oct 2024 16:40:34 +0200
+Subject: [PATCH] Fix signature handling for 32bit
+
+Use PyLong_FromVoidPtr()/PyLong_AsVoidPtr() to pass addresses
+instead of converting to size_t, which can cause signedness
+issues when using it with the 'n' format of Py_BuildValue().
+
+Split off a helper function taking an address from
+address_ptr_to_stringlist(), avoiding a conversion.
+
+Fixes: PYSIDE-2891
+Change-Id: I375311fa910a66b776e6355b0664bb5364fbdab7
+Reviewed-by: Fabian Vogt <fabian@ritter-vogt.de>
+Reviewed-by: Christian Tismer <tismer@stackless.com>
+(cherry picked from commit b8af11af6027e83f741c4ee6e19b8e03b57d5dfa)
+---
+
+diff --git a/sources/shiboken6/libshiboken/signature/signature.cpp b/sources/shiboken6/libshiboken/signature/signature.cpp
+index e69de19..f002b88 100644
+--- a/sources/shiboken6/libshiboken/signature/signature.cpp
++++ b/sources/shiboken6/libshiboken/signature/signature.cpp
+@@ -343,7 +343,7 @@
+      * address of a string array. It will not be turned into a real
+      * string list until really used by Python. This is quite optimal.
+      */
+-    AutoDecRef numkey(Py_BuildValue("n", signatures));
++    AutoDecRef numkey(PyLong_FromVoidPtr(signatures));
+     if (type_key.isNull() || numkey.isNull()
+         || PyDict_SetItem(pyside_globals->arg_dict, type_key, numkey) < 0)
+         return -1;
+@@ -354,10 +354,13 @@
+     return PyDict_SetItem(pyside_globals->map_dict, type_key, obtype_mod) == 0 ? 0 : -1;
+ }
+ 
+-static int PySide_BuildSignatureArgsByte(PyObject *obtype_mod, const uint8_t signatures[], size_t size)
++static int PySide_BuildSignatureArgsByte(PyObject *obtype_mod, const uint8_t *signatures,
++                                         size_t size)
+ {
+     AutoDecRef type_key(GetTypeKey(obtype_mod));
+-    AutoDecRef numkey(Py_BuildValue("(nn)", signatures, size));
++    AutoDecRef numkey(PyTuple_New(2));
++    PyTuple_SetItem(numkey.object(), 0, PyLong_FromVoidPtr(const_cast<uint8_t *>(signatures)));
++    PyTuple_SetItem(numkey.object(), 1, PyLong_FromSize_t(size));
+     if (type_key.isNull() || numkey.isNull()
+         || PyDict_SetItem(pyside_globals->arg_dict, type_key, numkey) < 0)
+         return -1;
+@@ -435,13 +438,12 @@
+     if (PyTuple_Check(numkey)) {
+         PyObject *obAddress = PyTuple_GetItem(numkey, 0);
+         PyObject *obSize = PyTuple_GetItem(numkey, 1);
+-        const size_t addr = PyLong_AsSize_t(obAddress);
++        const void *addr = PyLong_AsVoidPtr(obAddress);
+         const Py_ssize_t size = PyLong_AsSsize_t(obSize);
+         const char **cstrings = bytesToStrings(reinterpret_cast<const uint8_t *>(addr), size);
+         if (cstrings == nullptr)
+             return nullptr;
+-        AutoDecRef locKey(Py_BuildValue("n", cstrings));
+-        strings.reset(_address_to_stringlist(locKey));
++        strings.reset(_address_ptr_to_stringlist(cstrings));
+     } else {
+         strings.reset(_address_to_stringlist(numkey));
+     }
+diff --git a/sources/shiboken6/libshiboken/signature/signature_helper.cpp b/sources/shiboken6/libshiboken/signature/signature_helper.cpp
+index e3a4b16..04b4118 100644
+--- a/sources/shiboken6/libshiboken/signature/signature_helper.cpp
++++ b/sources/shiboken6/libshiboken/signature/signature_helper.cpp
+@@ -271,6 +271,20 @@
+     return PyObject_GetAttr(ob, PyMagicName::objclass());
+ }
+ 
++PyObject *_address_ptr_to_stringlist(const char **sig_strings)
++{
++    PyObject *res_list = PyList_New(0);
++    if (res_list == nullptr)
++        return nullptr;
++    for (; *sig_strings != nullptr; ++sig_strings) {
++        const char *sig_str = *sig_strings;
++        AutoDecRef pystr(Py_BuildValue("s", sig_str));
++        if (pystr.isNull() || PyList_Append(res_list, pystr) < 0)
++            return nullptr;
++    }
++    return res_list;
++}
++
+ PyObject *_address_to_stringlist(PyObject *numkey)
+ {
+     /*
+@@ -280,20 +294,10 @@
+      * When needed in `PySide_BuildSignatureProps`, the strings are
+      * finally materialized.
+      */
+-    Py_ssize_t address = PyNumber_AsSsize_t(numkey, PyExc_ValueError);
+-    if (address == -1 && PyErr_Occurred())
++    void *address = PyLong_AsVoidPtr(numkey);
++    if (address == nullptr && PyErr_Occurred())
+         return nullptr;
+-    char **sig_strings = reinterpret_cast<char **>(address);
+-    PyObject *res_list = PyList_New(0);
+-    if (res_list == nullptr)
+-        return nullptr;
+-    for (; *sig_strings != nullptr; ++sig_strings) {
+-        char *sig_str = *sig_strings;
+-        AutoDecRef pystr(Py_BuildValue("s", sig_str));
+-        if (pystr.isNull() || PyList_Append(res_list, pystr) < 0)
+-            return nullptr;
+-    }
+-    return res_list;
++    return _address_ptr_to_stringlist(reinterpret_cast<const char **>(address));
+ }
+ 
+ int _build_func_to_type(PyObject *obtype)
+diff --git a/sources/shiboken6/libshiboken/signature_p.h b/sources/shiboken6/libshiboken/signature_p.h
+index d0c4ee5..3433034 100644
+--- a/sources/shiboken6/libshiboken/signature_p.h
++++ b/sources/shiboken6/libshiboken/signature_p.h
+@@ -63,6 +63,7 @@
+ PyObject *_get_class_of_sm(PyObject *ob_sm);
+ PyObject *_get_class_of_descr(PyObject *ob);
+ PyObject *_address_to_stringlist(PyObject *numkey);
++PyObject *_address_ptr_to_stringlist(const char **sig_strings);
+ int _build_func_to_type(PyObject *obtype);
+ int _finish_nested_classes(PyObject *dict);
+ 
