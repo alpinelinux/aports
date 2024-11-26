@@ -6,7 +6,7 @@ set -e
 # but not for standalone Dart. Emulating this behavior by only exporting
 # if flutter is installed.
 FLUTTER_ROOT=/usr/lib/flutter
-if [ -d "$FLUTTER_ROOT" ]; then
+if [ -f "$FLUTTER_ROOT/version" ]; then
 	export FLUTTER_ROOT
 fi
 
