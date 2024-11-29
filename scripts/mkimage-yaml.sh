@@ -82,7 +82,7 @@ EOF
 	size_and_sum "$image"
 
 	case "$file" in
-	*.gz)
+	*.img.gz)
 		extracted=${image%.gz}
 		if ! [ -f "$extracted" ]; then
 			zcat < "$image" > "$extracted"
