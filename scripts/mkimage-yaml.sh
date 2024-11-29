@@ -42,6 +42,17 @@ releasedir="$branch/releases/$arch"
 
 [ -n "$arch" ] || arch=$(apk --print-arch)
 
+# size_and_sum [file] [prefix]
+size_and_sum() {
+	echo "  ${2}size: $(stat -c "%s" "$1")"
+	for hash in ${checksums}; do
+		# generate checksums if missing
+		if ! [ -f "$1.$hash" ]; then
+			${hash}sum "$1" | sed 's: .*/:  :' > "$1.$hash"
+		fi
+		echo "  $2$hash: $(cut -d' ' -f1 $1.$hash)"
+	done
+}
 
 for image; do
 	filepath="$releasedir/${image##*/}"
@@ -67,15 +78,16 @@ for image; do
 	  iso: $file
 	  date: $date
 	  time: $time
-	  size: $size
 EOF
-	# generate checksums if missing
-	for hash in ${checksums}; do
-		if ! [ -f "$image.$hash" ]; then
-			${hash}sum $image | sed 's: .*/:  :' > $image.$hash
+	size_and_sum "$image"
+
+	case "$file" in
+	*.gz)
+		extracted=${image%.gz}
+		if ! [ -f "$extracted" ]; then
+			zcat < "$image" > "$extracted"
 		fi
-		echo "  $hash: $(cut -d' ' -f1 $image.$hash)"
-	done
-
-
+		size_and_sum "$extracted" extracted_
+		;;
+	esac
 done
