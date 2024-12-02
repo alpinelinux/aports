@@ -327,6 +327,7 @@ profile_base() {
 	esac
 	case "$ARCH" in
 		x86_64) initfs_features="$initfs_features nfit";;
+		arm*|aarch64) initfs_features="$initfs_features phy";;
 	esac
 	apks="alpine-base apk-cron busybox chrony dhcpcd doas e2fsprogs
 		kbd-bkeymaps network-extras openntpd openssl openssh

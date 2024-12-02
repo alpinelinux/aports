@@ -95,7 +95,7 @@ profile_uboot() {
 	arch="aarch64 armv7"
 	kernel_flavors="lts"
 	kernel_addons="xtables-addons"
-	initfs_features="base bootchart ext4 kms mmc nvme raid scsi squashfs usb"
+	initfs_features="base bootchart ext4 kms mmc nvme phy raid scsi squashfs usb"
 	apkovl="genapkovl-dhcp.sh"
 	hostname="alpine"
 	uboot_install="yes"
