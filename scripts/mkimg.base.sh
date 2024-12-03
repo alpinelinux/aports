@@ -182,9 +182,13 @@ build_grub_cfg() {
 	grub_gen_config > "${DESTDIR}"/$grub_cfg
 }
 
+gen_volid() {
+	printf "%s" "alpine-${profile_abbrev:-$PROFILE} ${RELEASE%_rc*} $ARCH" | cut -c1-32
+}
+
 grub_gen_earlyconf() {
 	cat <<- EOF
-	search --no-floppy --set=root --label "alpine-${profile_abbrev:-$PROFILE} $RELEASE $ARCH"
+	search --no-floppy --set=root --label "$(gen_volid)"
 	set prefix=(\$root)/boot/grub
 	EOF
 }
@@ -237,7 +241,6 @@ create_image_iso() {
 	local ISO="${OUTDIR}/${output_filename}"
 	local _isolinux
 	local _efiboot
-	local _volid=$(printf "%s" "alpine-${profile_abbrev:-$PROFILE} ${RELEASE%_rc*} $ARCH" | cut -c1-32)
 
 	if [ -e "${DESTDIR}/boot/syslinux/isolinux.bin" ]; then
 		# isolinux enabled
@@ -281,7 +284,7 @@ create_image_iso() {
 		grub-mkrescue --output ${ISO} ${DESTDIR} -follow-links \
 			--directory="$WORKDIR"/usr/lib/grub/powerpc-ieee1275 \
 			-sysid LINUX \
-			-volid "$_volid"
+			-volid "$(gen_volid)"
 	else
 		if [ "$ARCH" = s390x ]; then
 			printf %s "$initfs_cmdline $kernel_cmdline " > ${WORKDIR}/parmfile
@@ -300,7 +303,7 @@ create_image_iso() {
 			-joliet \
 			-rational-rock \
 			-sysid LINUX \
-			-volid "$_volid" \
+			-volid "$(gen_volid)" \
 			$_isolinux \
 			$_efiboot \
 			-follow-links \
