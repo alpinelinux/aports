@@ -41,8 +41,8 @@ profile_extended() {
 		usbutils v86d vim xtables-addons curl
 
 		acct arpon arpwatch awall bridge-utils bwm-ng
-		ca-certificates conntrack-tools cutter cyrus-sasl dhcp
-		dhcpcd dhcrelay dnsmasq fping fprobe htop
+		ca-certificates conntrack-tools cutter cyrus-sasl
+		dhcpcd dnsmasq fping fprobe htop
 		igmpproxy ip6tables iproute2 iproute2-qos
 		iptables iputils nftables iw kea ldns-tools links
 		ncurses-terminfo net-snmp net-snmp-tools nrpe nsd
