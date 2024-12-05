@@ -1,0 +1,156 @@
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Maintainer: Jakub Jirutka <jakub@jirutka.cz>
+pkgname=wasm-micro-runtime
+pkgver=2.2.0
+pkgrel=0
+pkgdesc="WebAssembly Micro Runtime (WAMR)"
+url="https://github.com/bytecodealliance/wasm-micro-runtime"
+# loongarch64,ppc64le,s390x: not supported by upstream
+arch="all !loongarch64 !ppc64le !s390x"
+license="Apache-2.0"
+makedepends="
+	cmake
+	llvm-dev
+	llvm-static
+	llvm-gtest
+	samurai
+	"
+checkdepends="bash"
+subpackages="
+	iwasm
+	iwasm-gc:_iwasm_gc
+	wamrc
+	"
+_asmjit_rev=7bed2b0e1427fab185eea2da8ab4b9fb5b1f45a9
+source="https://github.com/bytecodealliance/wasm-micro-runtime/archive/WAMR-$pkgver/wasm-micro-runtime-WAMR-$pkgver.tar.gz
+	https://github.com/asmjit/asmjit/archive/$_asmjit_rev/asmjit-$_asmjit_rev.tar.gz
+	test-unit-mindirect-branch-register.patch
+	iwasm
+	"
+builddir="$srcdir/$pkgname-WAMR-$pkgver"
+options="!check"  # TODO: run tests
+
+# NOTE: We don't build iwasm with LLVM JIT because LLVM is huge and this WASM
+#  runtime is supposed to be "micro".
+
+case "$CARCH" in
+# NOTE: asmjit supports aarch64 and x86, but WAMR doesn't
+#  (https://github.com/bytecodealliance/wasm-micro-runtime/issues/3870).
+x86_64) _fastjit=1; subpackages="$subpackages iwasm-jit:_iwasm_jit";;
+*) _fastjit=0;;
+esac
+
+prepare() {
+	default_prepare
+
+	local llvmlibs="$(llvm-config --libs)"
+	find . -name CMakeLists.txt -exec sed -i "s/\${LLVM_AVAILABLE_LIBS}/$llvmlibs/g" {} \;
+}
+
+build() {
+	local warm_target="$(echo "$CARCH" | tr 'a-z' 'A-Z')"
+	case "$CARCH" in
+		arm*) warm_target="ARM";;
+		x86) warm_target="X86_32";;
+	esac
+
+	local common_args="\
+		-G Ninja \
+		-W no-dev \
+		-DCMAKE_BUILD_TYPE=None \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_VERBOSE_MAKEFILE=OFF \
+		-DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+		-DLLVM_DIR=$(llvm-config --cmakedir) \
+		-DWAMR_BUILD_TARGET=$warm_target \
+		-DWAMR_BUILD_WITH_CUSTOM_LLVM=1 \
+		"
+
+	local core_args="\
+		-DFETCHCONTENT_SOURCE_DIR_ASMJIT=$srcdir/asmjit-$_asmjit_rev \
+		-DWAMR_BUILD_SHARED=0
+		-DWAMR_BUILD_AOT=1 \
+		-DWAMR_BUILD_JIT=0 \
+		-DWAMR_BUILD_MULTI_MODULE=1 \
+		-DWAMR_BUILD_THREAD_MGR=1 \
+		-DWAMR_BUILD_LIB_PTHREAD=0 \
+		-DWAMR_BUILD_LIB_WASI_THREADS=1 \
+		-DWAMR_BUILD_TAIL_CALL=1 \
+		-DWAMR_BUILD_REF_TYPES=1 \
+		"
+
+	export CFLAGS="${CFLAGS/-Os/-O2} -flto=auto"
+	export CXXLAGS="${CXXLAGS/-Os/-O2} -flto=auto"
+
+	cmake -B build/iwasm-gc -S product-mini/platforms/linux \
+		$common_args \
+		$core_args \
+		-DWAMR_BUILD_GC=1
+
+	# FastJIT is not compatible with GC.
+	[ "$_fastjit" -eq 1 ] && cmake -B build/iwasm-jit -S product-mini/platforms/linux \
+		$common_args \
+		$core_args \
+		-DWAMR_BUILD_FAST_JIT=1
+
+	cmake -B build/compiler -S wamr-compiler \
+		$common_args
+
+	cmake --build build/iwasm-gc
+	[ "$_fastjit" -eq 1 ] && cmake --build build/iwasm-jit
+	cmake --build build/compiler
+}
+
+package() {
+	mkdir -p "$pkgdir"
+}
+
+iwasm() {
+	pkgdesc="$pkgdesc - CLI"
+
+	install -D -m755 "$srcdir"/iwasm -t "$subpkgdir"/usr/bin/
+}
+
+_iwasm_gc() {
+	pkgdesc="$pkgdesc - CLI (with GC)"
+	install_if="iwasm"
+
+	cd "$builddir"
+	DESTDIR="$subpkgdir" cmake --install build/iwasm-gc
+
+	cd "$subpkgdir"
+	mv usr/bin/iwasm usr/bin/iwasm-gc
+
+	# libiwasm.so doesn't set SONAME.
+	# See https://github.com/bytecodealliance/wasm-micro-runtime/issues/3932
+	rm -rf usr/lib
+}
+
+_iwasm_jit() {
+	pkgdesc="$pkgdesc - CLI (with FastJIT)"
+	license="$license AND Zlib"
+
+	cd "$builddir"
+	DESTDIR="$subpkgdir" cmake --install build/iwasm-jit
+
+	cd "$subpkgdir"
+	mv usr/bin/iwasm usr/bin/iwasm-jit
+
+	# libiwasm.so doesn't set SONAME.
+	# See https://github.com/bytecodealliance/wasm-micro-runtime/issues/3932
+	rm -rf usr/lib
+}
+
+wamrc() {
+	pkgdesc="$pkgdesc - AOT compiler"
+
+	cd "$builddir"
+	DESTDIR="$subpkgdir" cmake --install build/compiler
+}
+
+sha512sums="
+9a1dc0dd17dbf9111cf66a2d6a49565d52a005e5a024a20291cb274d826077aac46ff050c63b71503083301dfb32179a0fd3bfe2eddffce0cfb81a42a60fa439  wasm-micro-runtime-WAMR-2.2.0.tar.gz
+f67e315bb39a996b90cb3d2dd0780c6147db42d1cfda794c450a70aaef07f1baec681b88fcec59fb70752fbf113c38a929b71ea5e337aa219c864843649badba  asmjit-7bed2b0e1427fab185eea2da8ab4b9fb5b1f45a9.tar.gz
+c12b8a87cbf329dd5e3b98cc0a922ffece8cb4f4ad3275cd7493ba8973c43f11a1ed635941ca90a6265c9eaf48c005fa8915ada61f0d59015d50c9069d9352ce  test-unit-mindirect-branch-register.patch
+db83a78a45bb77c3dac5f4506fb951f3b60249d4d76329bdc0278d09e03c122086775169763bfcdf1221a5f0ded6126f418d49df0081231710ba28bd9d83593d  iwasm
+"
