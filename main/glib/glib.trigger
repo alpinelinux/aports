@@ -11,16 +11,10 @@ for i in "$@"; do
 	*/schemas)
 		# Suppressing output since it shows warnings about bad dconf paths
 		# that aren't useful to end users.
-		# Can be removed if all known applications (gsettings-desktop-schemas,
+		# Can be removed once all known applications (gsettings-desktop-schemas,
 		# seahorse, ibus, gcr3) have migrated.
-		if ls -l /bin/sh | grep -q busybox; then
-			# busybox sh can handle process substitution like this
-			/usr/bin/glib-compile-schemas "$i" 2> >(grep -v "are deprecated")
-		else
-			# dash or yash cannot, then throw all errors in the bit bucket
-			/usr/bin/glib-compile-schemas "$i" 2> /dev/null
-		fi
+		( /usr/bin/glib-compile-schemas "$i" 2>&1 1>&3 | \
+			sed -e '/are deprecated/d' 1>&2 ) 3>&1
 		;;
 	esac
 done
-
