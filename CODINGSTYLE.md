@@ -169,6 +169,13 @@ Metadata Variables are variables used directly by abuild itself, e.g. `pkgname` 
 * In the case of package being abandoned, the variable should still be present,
   but left empty: `maintainer=""`.
 
+### Metadata order
+
+The maintainer variable should be immediately followed by `pkgname`, `pkgver`
+and `pkgrel`, in that order. This is to ease review and assignment as the
+maintainer will be visible in the three lines of context, in the diff, when
+`pkgver` or `pkgrel` is changed.
+
 ### Variable Assignments
 
 * Empty Metadata Variable assignments, e.g. `install=""` must be removed.
