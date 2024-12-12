@@ -1,0 +1,130 @@
+From afac06af9866104857b4ccb162d07f5a113a7371 Mon Sep 17 00:00:00 2001
+From: Simon Ser <contact@emersion.fr>
+Date: Thu, 12 Dec 2024 11:50:35 +0100
+Subject: [PATCH] cmd/soju: close HTTP servers on shutdown
+
+This is important to ensure we don't accept any new connections and
+we properly remove Unix sockets.
+
+Leave prometheus and pprof alone for now so that metrics and
+debugging is still possible while shutting down.
+
+Patch-Source: https://codeberg.org/emersion/soju/commit/afac06af9866104857b4ccb162d07f5a113a7371
+---
+ cmd/soju/main.go | 34 ++++++++++++++++++++++++----------
+ 1 file changed, 24 insertions(+), 10 deletions(-)
+
+diff --git a/cmd/soju/main.go b/cmd/soju/main.go
+index 933264c..c784f30 100644
+--- a/cmd/soju/main.go
++++ b/cmd/soju/main.go
+@@ -189,6 +189,7 @@ func main() {
+ 	httpMux.Handle("/uploads", fileUploadHandler)
+ 	httpMux.Handle("/uploads/", fileUploadHandler)
+ 
++	var httpServers []*http.Server
+ 	for _, listen := range cfg.Listen {
+ 		listen := listen // copy
+ 		listenURI := listen
+@@ -280,13 +281,14 @@ func main() {
+ 			if tlsCfg == nil {
+ 				log.Fatalf("failed to listen on %q: missing TLS configuration", listen)
+ 			}
+-			httpSrv := http.Server{
++			httpSrv := &http.Server{
+ 				Addr:      withDefaultPort(u.Host, "https"),
+ 				TLSConfig: tlsCfg,
+ 				Handler:   srv,
+ 			}
++			httpServers = append(httpServers, httpSrv)
+ 			go func() {
+-				if err := httpSrv.ListenAndServeTLS("", ""); err != nil {
++				if err := httpSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+ 					log.Fatalf("serving %q: %v", listen, err)
+ 				}
+ 			}()
+@@ -296,12 +298,13 @@ func main() {
+ 			}
+ 			fallthrough
+ 		case "ws+insecure":
+-			httpSrv := http.Server{
++			httpSrv := &http.Server{
+ 				Addr:    withDefaultPort(u.Host, "http"),
+ 				Handler: srv,
+ 			}
++			httpServers = append(httpServers, httpSrv)
+ 			go func() {
+-				if err := httpSrv.ListenAndServe(); err != nil {
++				if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+ 					log.Fatalf("serving %q: %v", listen, err)
+ 				}
+ 			}()
+@@ -313,8 +316,10 @@ func main() {
+ 			if err := os.Chmod(u.Path, 0775); err != nil {
+ 				log.Printf("failed to chmod Unix WS socket: %v", err)
+ 			}
++			httpSrv := &http.Server{Handler: srv}
++			httpServers = append(httpServers, httpSrv)
+ 			go func() {
+-				if err := http.Serve(ln, srv); err != nil {
++				if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+ 					log.Fatalf("serving %q: %v", listen, err)
+ 				}
+ 			}()
+@@ -389,13 +394,14 @@ func main() {
+ 			if tlsCfg == nil {
+ 				log.Fatalf("failed to listen on %q: missing TLS configuration", listen)
+ 			}
+-			httpSrv := http.Server{
++			httpSrv := &http.Server{
+ 				Addr:      withDefaultPort(u.Host, "https"),
+ 				TLSConfig: tlsCfg,
+ 				Handler:   httpMux,
+ 			}
++			httpServers = append(httpServers, httpSrv)
+ 			go func() {
+-				if err := httpSrv.ListenAndServeTLS("", ""); err != nil {
++				if err := httpSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+ 					log.Fatalf("serving %q: %v", listen, err)
+ 				}
+ 			}()
+@@ -405,12 +411,13 @@ func main() {
+ 			}
+ 			fallthrough
+ 		case "http+insecure":
+-			httpSrv := http.Server{
++			httpSrv := &http.Server{
+ 				Addr:    withDefaultPort(u.Host, "http"),
+ 				Handler: httpMux,
+ 			}
++			httpServers = append(httpServers, httpSrv)
+ 			go func() {
+-				if err := httpSrv.ListenAndServe(); err != nil {
++				if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+ 					log.Fatalf("serving %q: %v", listen, err)
+ 				}
+ 			}()
+@@ -422,8 +429,10 @@ func main() {
+ 			if err := os.Chmod(u.Path, 0775); err != nil {
+ 				log.Printf("failed to chmod Unix HTTP socket: %v", err)
+ 			}
++			httpSrv := &http.Server{Handler: httpMux}
++			httpServers = append(httpServers, httpSrv)
+ 			go func() {
+-				if err := http.Serve(ln, httpMux); err != nil {
++				if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+ 					log.Fatalf("serving %q: %v", listen, err)
+ 				}
+ 			}()
+@@ -458,6 +467,11 @@ func main() {
+ 				srv.SetConfig(serverCfg)
+ 			}
+ 		case syscall.SIGINT, syscall.SIGTERM:
++			for _, httpSrv := range httpServers {
++				if err := httpSrv.Close(); err != nil {
++					log.Printf("failed to close HTTP server: %v", err)
++				}
++			}
+ 			srv.Shutdown()
+ 			return
+ 		}
