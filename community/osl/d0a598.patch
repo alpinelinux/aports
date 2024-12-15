@@ -1,0 +1,456 @@
+From d0a598d754688fa21678c02c37c9627395d34dc5 Mon Sep 17 00:00:00 2001
+From: Larry Gritz <lg@larrygritz.com>
+Date: Fri, 25 Oct 2024 08:54:36 -0700
+Subject: [PATCH] build(deps): Adjust to OIIO changes to TextureOpt structure
+ (#1888)
+
+OIIO 3.0 changes the TextureOpt structure a bit, and we need to
+adjust on the OSL end, too.
+
+Signed-off-by: Larry Gritz <lg@larrygritz.com>
+---
+ Makefile                                 |  6 +--
+ src/include/OSL/batched_texture.h        | 23 +++++++--
+ src/liboslexec/batched_llvm_gen.cpp      | 59 ++++++++++++++++++------
+ src/liboslexec/batched_llvm_instance.cpp | 26 +++++++----
+ src/liboslexec/constfold.cpp             | 15 +++---
+ src/liboslexec/llvm_gen.cpp              | 20 ++++++--
+ src/liboslexec/optexture.cpp             | 40 +++++++++++++++-
+ src/liboslexec/oslexec_pvt.h             | 11 +++--
+ src/testshade/rs_simplerend.cpp          |  2 +
+ 9 files changed, 152 insertions(+), 50 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index b7ea499b3..0d4286f01 100644
+--- a/Makefile
++++ b/Makefile
+@@ -152,10 +152,6 @@ ifneq (${USE_SIMD},)
+ MY_CMAKE_FLAGS += -DUSE_SIMD:STRING="${USE_SIMD}"
+ endif
+ 
+-ifneq (${USE_BATCHED},)
+-MY_CMAKE_FLAGS += -DUSE_BATCHED:STRING="${USE_BATCHED}"
+-endif
+-
+ ifneq (${VEC_REPORT},)
+ MY_CMAKE_FLAGS += -DVEC_REPORT:BOOL="${VEC_REPORT}"
+ endif
+@@ -402,7 +398,7 @@ help:
+ 	@echo "                                  avx, avx2, avx512f)"
+ 	@echo "      OSL_USE_OPTIX=1          Build the OptiX test renderer"
+ 	@echo "      USE_BATCHED=targets      Build batched SIMD execution of shaders for (comma-separated choices:"
+-	@echo "                                  0, b8_AVX, b8_AVX2, b8_AVX2_noFMA,"
++	@echo "                                  0, b4_SSE2, b8_AVX, b8_AVX2, b8_AVX2_noFMA,"
+ 	@echo "                                  b8_AVX512, b8_AVX512_noFMA,"
+ 	@echo "                                  b16_AVX512, b16_AVX512_noFMA)"
+ 	@echo "      VEC_REPORT=0             Generate compiler vectorization reports"
+diff --git a/src/include/OSL/batched_texture.h b/src/include/OSL/batched_texture.h
+index 8f5a5cb73..f0d03051c 100644
+--- a/src/include/OSL/batched_texture.h
++++ b/src/include/OSL/batched_texture.h
+@@ -18,9 +18,11 @@ using OIIO::Tex::Wrap;
+ 
+ struct UniformTextureOptions {
+     // Options that must be the same for all points we're texturing at once
+-    int firstchannel = 0;                  ///< First channel of the lookup
+-    int subimage     = 0;                  ///< Subimage or face ID
+-    ustring subimagename;                  ///< Subimage name
++    int firstchannel = 0;  ///< First channel of the lookup
++    int subimage     = 0;  ///< Subimage or face ID
++    ustring subimagename;  ///< Subimage name
++#if defined(OIIO_TEXTUREOPTBATCH_VERSION) && OIIO_TEXTUREOPTBATCH_VERSION >= 2
++    // Future expansion of an ideal v2 of OIIO's TextureOptBatch. But not yet.
+     Tex::Wrap swrap = Tex::Wrap::Default;  ///< Wrap mode in the s direction
+     Tex::Wrap twrap = Tex::Wrap::Default;  ///< Wrap mode in the t direction
+     Tex::Wrap rwrap
+@@ -28,8 +30,19 @@ struct UniformTextureOptions {
+     Tex::MipMode mipmode = Tex::MipMode::Default;  ///< Mip mode
+     Tex::InterpMode interpmode
+         = Tex::InterpMode::SmartBicubic;  ///< Interpolation mode
+-    int anisotropic           = 32;       ///< Maximum anisotropic ratio
+-    int conservative_filter   = 1;        ///< True: over-blur rather than alias
++    int anisotropic         = 32;         ///< Maximum anisotropic ratio
++    int conservative_filter = 1;          ///< True: over-blur rather than alias
++#else
++    // Original (v1) sizing and layout of the TextureOptBatch struct.
++    int swrap      = int(Tex::Wrap::Default);  ///< Wrap mode in the s direction
++    int twrap      = int(Tex::Wrap::Default);  ///< Wrap mode in the t direction
++    int rwrap      = int(Tex::Wrap::Default);  ///< Wrap mode in r (volumetric)
++    int mipmode    = int(Tex::MipMode::Default);  ///< Mip mode
++    int interpmode = int(
++        Tex::InterpMode::SmartBicubic);  ///< Interpolation mode
++    int anisotropic         = 32;        ///< Maximum anisotropic ratio
++    int conservative_filter = 1;         ///< True: over-blur rather than alias
++#endif
+     float fill                = 0.0f;     ///< Fill value for missing channels
+     const float* missingcolor = nullptr;  ///< Color for missing texture
+ };
+diff --git a/src/liboslexec/batched_llvm_gen.cpp b/src/liboslexec/batched_llvm_gen.cpp
+index 447f021bf..ae5ab30bb 100644
+--- a/src/liboslexec/batched_llvm_gen.cpp
++++ b/src/liboslexec/batched_llvm_gen.cpp
+@@ -4263,8 +4263,15 @@ llvm_batched_texture_options(BatchedBackendLLVM& rop, int opnum,
+     llvm::Value* wide_const_fzero_value = rop.ll.wide_constant(0.0f);
+     llvm::Value* wide_const_fone_value  = rop.ll.wide_constant(1.0f);
+     llvm::Value* const_zero_value       = rop.ll.constant(0);
+-    llvm::Value* wrap_default_value     = rop.ll.constant(
++#if defined(OIIO_TEXTUREOPTBATCH_VERSION) && OIIO_TEXTUREOPTBATCH_VERSION >= 2
++    // Possible future TextureOptBatch v2 -- not active yet
++    llvm::Value* wrap_default_value = rop.ll.constant8(
++        static_cast<uint8_t>(Tex::Wrap::Default));
++#else
++    // OIIO <= 3.0
++    llvm::Value* wrap_default_value = rop.ll.constant(
+         static_cast<int>(Tex::Wrap::Default));
++#endif
+ 
+     llvm::Value* sblur  = wide_const_fzero_value;
+     llvm::Value* tblur  = wide_const_fzero_value;
+@@ -4282,10 +4289,19 @@ llvm_batched_texture_options(BatchedBackendLLVM& rop, int opnum,
+     llvm::Value* swrap        = wrap_default_value;
+     llvm::Value* twrap        = wrap_default_value;
+     llvm::Value* rwrap        = wrap_default_value;
+-    llvm::Value* mipmode      = rop.ll.constant(
++#if defined(OIIO_TEXTUREOPTBATCH_VERSION) && OIIO_TEXTUREOPTBATCH_VERSION >= 2
++    // Possible future TextureOptBatch v2 -- not active yet
++    llvm::Value* mipmode = rop.ll.constant8(
++        static_cast<uint8_t>(Tex::MipMode::Default));
++    llvm::Value* interpmode = rop.ll.constant8(
++        static_cast<uint8_t>(Tex::InterpMode::SmartBicubic));
++#else
++    // OIIO <= 3.0
++    llvm::Value* mipmode = rop.ll.constant(
+         static_cast<int>(Tex::MipMode::Default));
+     llvm::Value* interpmode = rop.ll.constant(
+         static_cast<int>(Tex::InterpMode::SmartBicubic));
++#endif
+     llvm::Value* anisotropic         = rop.ll.constant(32);
+     llvm::Value* conservative_filter = rop.ll.constant(1);
+     llvm::Value* fill                = rop.ll.constant(0.0f);
+@@ -4421,7 +4437,7 @@ llvm_batched_texture_options(BatchedBackendLLVM& rop, int opnum,
+             }
+             llvm::Value* val = nullptr;
+             if (Val.is_constant()) {
+-                int mode = TextureOpt::decode_wrapmode(Val.get_string());
++                int mode = int(TextureOpt::decode_wrapmode(Val.get_string()));
+                 val      = rop.ll.constant(mode);
+             } else {
+                 val = rop.llvm_load_value(Val);
+@@ -4434,14 +4450,33 @@ llvm_batched_texture_options(BatchedBackendLLVM& rop, int opnum,
+             }
+             continue;
+         }
+-        PARAM_UNIFORM_STRING_CODE(swrap, OIIO::TextureOpt::decode_wrapmode,
+-                                  osl_texture_decode_wrapmode, swrap)
+-        PARAM_UNIFORM_STRING_CODE(twrap, OIIO::TextureOpt::decode_wrapmode,
+-                                  osl_texture_decode_wrapmode, twrap)
++#if defined(OIIO_TEXTUREOPTBATCH_VERSION) && OIIO_TEXTUREOPTBATCH_VERSION >= 2
++        // Possible future TextureOptBatch v2 -- not active yet
++        PARAM_UNIFORM_STRING_UINT8_CODE(swrap, OIIO::Tex::decode_wrapmode,
++                                        osl_texture_decode_wrapmode, swrap)
++        PARAM_UNIFORM_STRING_UINT8_CODE(twrap, OIIO::Tex::decode_wrapmode,
++                                        osl_texture_decode_wrapmode, twrap)
++        if (tex3d) {
++            PARAM_UNIFORM_STRING_UINT8_CODE(rwrap, OIIO::Tex::decode_wrapmode,
++                                            osl_texture_decode_wrapmode, rwrap)
++        }
++        PARAM_UNIFORM_STRING_UINT8_CODE(interp, tex_interp_to_code,
++                                        osl_texture_decode_interpmode,
++                                        interpmode)
++#else
++        // OIIO <= 3.0
++        PARAM_UNIFORM_STRING_INT_CODE(swrap, OIIO::TextureOpt::decode_wrapmode,
++                                      osl_texture_decode_wrapmode, swrap)
++        PARAM_UNIFORM_STRING_INT_CODE(twrap, OIIO::TextureOpt::decode_wrapmode,
++                                      osl_texture_decode_wrapmode, twrap)
+         if (tex3d) {
+-            PARAM_UNIFORM_STRING_CODE(rwrap, OIIO::TextureOpt::decode_wrapmode,
+-                                      osl_texture_decode_wrapmode, rwrap)
++            PARAM_UNIFORM_STRING_INT_CODE(rwrap,
++                                          OIIO::TextureOpt::decode_wrapmode,
++                                          osl_texture_decode_wrapmode, rwrap)
+         }
++        PARAM_UNIFORM_STRING_INT_CODE(interp, tex_interp_to_code,
++                                      osl_texture_decode_interpmode, interpmode)
++#endif
+ 
+         PARAM_UNIFORM_FLOAT(fill)
+         PARAM_UNIFORM_INT(firstchannel)
+@@ -4463,10 +4498,6 @@ llvm_batched_texture_options(BatchedBackendLLVM& rop, int opnum,
+             continue;
+         }
+ 
+-        PARAM_UNIFORM_STRING_CODE(interp, tex_interp_to_code,
+-                                  osl_texture_decode_interpmode, interpmode)
+-
+-
+         if (name == Strings::alpha && valtype == TypeDesc::FLOAT) {
+             OSL_ASSERT(
+                 valIsVarying
+@@ -4553,7 +4584,7 @@ llvm_batched_texture_options(BatchedBackendLLVM& rop, int opnum,
+ #undef PARAM_WIDE_FLOAT_S_T_R
+ #undef PARAM_UNIFORM_FLOAT
+ #undef PARAM_UNIFORM_INT
+-#undef PARAM_UNIFORM_STRING_CODE
++#undef PARAM_UNIFORM_STRING_INT_CODE
+     }
+ 
+     // The LLVMMemberIndex will be the same for any width of BatchedTextureOptions,
+diff --git a/src/liboslexec/batched_llvm_instance.cpp b/src/liboslexec/batched_llvm_instance.cpp
+index 772f71f67..7c3fbc5a9 100644
+--- a/src/liboslexec/batched_llvm_instance.cpp
++++ b/src/liboslexec/batched_llvm_instance.cpp
+@@ -717,14 +717,24 @@ BatchedBackendLLVM::llvm_type_batched_texture_options()
+     sg_types.push_back(ll.type_wide_float());  // rnd
+ 
+     // Uniform values of the batch
+-    sg_types.push_back(ll.type_int());                 // firstchannel
+-    sg_types.push_back(ll.type_int());                 // subimage
+-    sg_types.push_back(vp);                            // subimagename
+-    sg_types.push_back(ll.type_int());                 // swrap
+-    sg_types.push_back(ll.type_int());                 // twrap
+-    sg_types.push_back(ll.type_int());                 // rwrap
+-    sg_types.push_back(ll.type_int());                 // mipmode
+-    sg_types.push_back(ll.type_int());                 // interpmode
++    sg_types.push_back(ll.type_int());  // firstchannel
++    sg_types.push_back(ll.type_int());  // subimage
++    sg_types.push_back(vp);             // subimagename
++#if defined(OIIO_TEXTUREOPTBATCH_VERSION) && OIIO_TEXTUREOPTBATCH_VERSION >= 2
++    // Possible future TextureOptBatch v2 -- not active yet
++    sg_types.push_back(ll.type_int8());  // swrap
++    sg_types.push_back(ll.type_int8());  // twrap
++    sg_types.push_back(ll.type_int8());  // rwrap
++    sg_types.push_back(ll.type_int8());  // mipmode
++    sg_types.push_back(ll.type_int8());  // interpmode
++#else
++    // OIIO <= 3.0
++    sg_types.push_back(ll.type_int());  // swrap
++    sg_types.push_back(ll.type_int());  // twrap
++    sg_types.push_back(ll.type_int());  // rwrap
++    sg_types.push_back(ll.type_int());  // mipmode
++    sg_types.push_back(ll.type_int());  // interpmode
++#endif
+     sg_types.push_back(ll.type_int());                 // anisotropic
+     sg_types.push_back(ll.type_int());                 // conservative_filter
+     sg_types.push_back(ll.type_float());               // fill
+diff --git a/src/liboslexec/constfold.cpp b/src/liboslexec/constfold.cpp
+index 05a2f6604..ebea860d7 100644
+--- a/src/liboslexec/constfold.cpp
++++ b/src/liboslexec/constfold.cpp
+@@ -2494,10 +2494,10 @@ DECLFOLDER(constfold_texture)
+ // Keep from repeating the same tedious code for {s,t,r, }{width,blur,wrap}
+ #define CHECK(field, ctype, osltype)                                      \
+     if (name == Strings::field && !field##_set) {                         \
+-        if (valuetype == osltype && *(ctype*)value == opt.field)          \
++        if (valuetype == osltype && *(ctype*)value == (ctype)opt.field)   \
+             elide = true;                                                 \
+         else if (osltype == TypeDesc::FLOAT && valuetype == TypeDesc::INT \
+-                 && *(int*)value == opt.field)                            \
++                 && *(int*)value == (int)opt.field)                       \
+             elide = true;                                                 \
+         else                                                              \
+             field##_set = true;                                           \
+@@ -2513,8 +2513,8 @@ DECLFOLDER(constfold_texture)
+     {                                                                          \
+         if (valuetype == osltype) {                                            \
+             ctype* v = (ctype*)value;                                          \
+-            if (*v == opt.s##field && *v == opt.t##field                       \
+-                && *v == opt.r##field)                                         \
++            if (*v == (ctype)opt.s##field && *v == (ctype)opt.t##field         \
++                && *v == (ctype)opt.r##field)                                  \
+                 elide = true;                                                  \
+             else {                                                             \
+                 s##field##_set = true;                                         \
+@@ -2523,8 +2523,8 @@ DECLFOLDER(constfold_texture)
+             }                                                                  \
+         } else if (osltype == TypeDesc::FLOAT && valuetype == TypeDesc::INT) { \
+             int* v = (int*)value;                                              \
+-            if (*v == opt.s##field && *v == opt.t##field                       \
+-                && *v == opt.r##field)                                         \
++            if (*v == (ctype)opt.s##field && *v == (ctype)opt.t##field         \
++                && *v == (ctype)opt.r##field)                                  \
+                 elide = true;                                                  \
+             else {                                                             \
+                 s##field##_set = true;                                         \
+@@ -2566,7 +2566,8 @@ DECLFOLDER(constfold_texture)
+             else if (name == Strings::interp && !interp_set)
+             {
+                 if (value && valuetype == TypeDesc::STRING
+-                    && tex_interp_to_code(*(ustring*)value) == opt.interpmode)
++                    && tex_interp_to_code(*(ustring*)value)
++                           == (int)opt.interpmode)
+                     elide = true;
+                 else
+                     interp_set = true;
+diff --git a/src/liboslexec/llvm_gen.cpp b/src/liboslexec/llvm_gen.cpp
+index 4c59bc686..759ad46df 100644
+--- a/src/liboslexec/llvm_gen.cpp
++++ b/src/liboslexec/llvm_gen.cpp
+@@ -2568,7 +2568,8 @@ llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
+     bool sblur_set = false, tblur_set = false, rblur_set = false;
+     bool swrap_set = false, twrap_set = false, rwrap_set = false;
+     bool firstchannel_set = false, fill_set = false, interp_set = false;
+-    bool time_set = false, subimage_set = false;
++    // bool time_set = false;
++    bool subimage_set = false;
+ 
+     Opcode& op(rop.inst()->ops()[opnum]);
+     for (int a = first_optional_arg; a < op.nargs(); ++a) {
+@@ -2639,8 +2640,8 @@ llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
+ #define PARAM_STRING_CODE(paramname, decoder, fieldname)                    \
+     if (name == Strings::paramname && valtype == TypeDesc::STRING) {        \
+         if (Val.is_constant()) {                                            \
+-            int code = decoder(Val.get_string());                           \
+-            if (!paramname##_set && code == optdefaults.fieldname)          \
++            int code = (int)decoder(Val.get_string());                      \
++            if (!paramname##_set && code == (int)optdefaults.fieldname)     \
+                 continue;                                                   \
+             if (code >= 0) {                                                \
+                 llvm::Value* val = rop.ll.constant(code);                   \
+@@ -2666,7 +2667,7 @@ llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
+ 
+         if (name == Strings::wrap && valtype == TypeDesc::STRING) {
+             if (Val.is_constant()) {
+-                int mode = TextureOpt::decode_wrapmode(Val.get_string());
++                int mode = (int)TextureOpt::decode_wrapmode(Val.get_string());
+                 llvm::Value* val = rop.ll.constant(mode);
+                 rop.ll.call_function("osl_texture_set_stwrap_code", opt, val);
+                 if (tex3d)
+@@ -2686,7 +2687,6 @@ llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
+         PARAM_STRING_CODE(rwrap, TextureOpt::decode_wrapmode, rwrap)
+ 
+         PARAM_FLOAT(fill)
+-        PARAM_FLOAT(time)
+         PARAM_INT(firstchannel)
+         PARAM_INT(subimage)
+ 
+@@ -2745,6 +2745,16 @@ llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
+                                  rop.ll.constant(nchans), val);
+             continue;
+         }
++
++        // PARAM_FLOAT(time)
++        if (name == Strings::time
++            && (valtype == TypeDesc::FLOAT || valtype == TypeDesc::INT)) {
++            // NOTE: currently no supported 3d texture format makes use of
++            // time. So there is no time in the TextureOpt struct, but will
++            // silently accept and ignore the time option.
++            continue;
++        }
++
+         rop.shadingcontext()->errorfmt(
+             "Unknown texture{} optional argument: \"{}\", <{}> ({}:{})",
+             tex3d ? "3d" : "", name, valtype, op.sourcefile(), op.sourceline());
+diff --git a/src/liboslexec/optexture.cpp b/src/liboslexec/optexture.cpp
+index 5521abe8a..2d5371830 100644
+--- a/src/liboslexec/optexture.cpp
++++ b/src/liboslexec/optexture.cpp
+@@ -32,6 +32,41 @@ osl_get_texture_options(void* sg_)
+     ShaderGlobals* sg = (ShaderGlobals*)sg_;
+     TextureOpt* opt   = sg->context->texture_options_ptr();
+     new (opt) TextureOpt;
++#if defined(OIIO_TEXTUREOPT_VERSION) && OIIO_TEXTUREOPT_VERSION >= 2
++    new (opt) TextureOpt;
++#else
++    // TODO: Simplify when TextureOpt() has __device__ marker.
++    TextureOpt* o          = reinterpret_cast<TextureOpt*>(opt);
++    o->firstchannel        = 0;
++    o->subimage            = 0;
++    o->subimagename        = ustring();
++    o->swrap               = TextureOpt::WrapDefault;
++    o->twrap               = TextureOpt::WrapDefault;
++    o->mipmode             = TextureOpt::MipModeDefault;
++    o->interpmode          = TextureOpt::InterpSmartBicubic;
++    o->anisotropic         = 32;
++    o->conservative_filter = true;
++    o->sblur               = 0.0f;
++    o->tblur               = 0.0f;
++    o->swidth              = 1.0f;
++    o->twidth              = 1.0f;
++    o->fill                = 0.0f;
++    o->missingcolor        = nullptr;
++    o->time                = 0.0f;  // Deprecated
++    o->rnd                 = -1.0f;
++    o->samples             = 1;  // Deprecated
++    o->rwrap               = TextureOpt::WrapDefault;
++    o->rblur               = 0.0f;
++    o->rwidth              = 1.0f;
++#    ifdef OIIO_TEXTURESYSTEM_SUPPORTS_COLORSPACE
++    o->colortransformid = 0;
++    int* envlayout      = (int*)&o->colortransformid + 1;
++#    else
++    int* envlayout = (int*)&o->rwidth + 1;
++#    endif
++    // envlayout is private so we access it from the last public member for now.
++    *envlayout = 0;
++#endif
+     return opt;
+ }
+ 
+@@ -45,7 +80,7 @@ osl_texture_set_firstchannel(void* opt, int x)
+ OSL_SHADEOP int
+ osl_texture_decode_wrapmode(ustring_pod name)
+ {
+-    return OIIO::TextureOpt::decode_wrapmode(ustring_from(USTR(name)));
++    return int(OIIO::TextureOpt::decode_wrapmode(ustring_from(USTR(name))));
+ }
+ 
+ OSL_SHADEOP void
+@@ -158,7 +193,8 @@ osl_texture_set_fill(void* opt, float x)
+ OSL_SHADEOP void
+ osl_texture_set_time(void* opt, float x)
+ {
+-    ((TextureOpt*)opt)->time = x;
++    // Not used by the texture system
++    // ((TextureOpt*)opt)->time = x;
+ }
+ 
+ OSL_SHADEOP int
+diff --git a/src/liboslexec/oslexec_pvt.h b/src/liboslexec/oslexec_pvt.h
+index 3d3b87f20..3374ce148 100644
+--- a/src/liboslexec/oslexec_pvt.h
++++ b/src/liboslexec/oslexec_pvt.h
+@@ -25,9 +25,12 @@
+ #    include "string_hash.h"
+ #endif
+ 
++#include <OpenImageIO/Imath.h>
++
+ #include <OpenImageIO/color.h>
+ #include <OpenImageIO/paramlist.h>
+ #include <OpenImageIO/refcnt.h>
++#include <OpenImageIO/texture.h>
+ #include <OpenImageIO/thread.h>
+ #include <OpenImageIO/ustring.h>
+ 
+@@ -2512,13 +2515,13 @@ tex_interp_to_code(StringParam modename)
+ {
+     int mode = -1;
+     if (modename == STRING_PARAMS(smartcubic))
+-        mode = TextureOpt::InterpSmartBicubic;
++        mode = (int)TextureOpt::InterpSmartBicubic;
+     else if (modename == STRING_PARAMS(linear))
+-        mode = TextureOpt::InterpBilinear;
++        mode = (int)TextureOpt::InterpBilinear;
+     else if (modename == STRING_PARAMS(cubic))
+-        mode = TextureOpt::InterpBicubic;
++        mode = (int)TextureOpt::InterpBicubic;
+     else if (modename == STRING_PARAMS(closest))
+-        mode = TextureOpt::InterpClosest;
++        mode = (int)TextureOpt::InterpClosest;
+     return mode;
+ }
+ 
+diff --git a/src/testshade/rs_simplerend.cpp b/src/testshade/rs_simplerend.cpp
+index b6c9897d4..b8d9f73a4 100644
+--- a/src/testshade/rs_simplerend.cpp
++++ b/src/testshade/rs_simplerend.cpp
+@@ -6,6 +6,8 @@
+ #    error OSL_HOST_RS_BITCODE must be defined by your build system.
+ #endif
+ 
++#include <OpenImageIO/fmath.h>
++
+ #include <OSL/fmt_util.h>
+ #include <OSL/journal.h>
+ #include <OSL/rendererservices.h>
