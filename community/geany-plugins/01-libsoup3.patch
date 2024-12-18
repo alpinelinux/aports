@@ -1,0 +1,151 @@
+Patch-Source: https://github.com/geany/geany-plugins/commit/c33ef2e6940770b4e191d587eac305c1fe99dd4a
+From c33ef2e6940770b4e191d587eac305c1fe99dd4a Mon Sep 17 00:00:00 2001
+From: Colomban Wendling <ban@herbesfolles.org>
+Date: Wed, 24 Apr 2024 12:41:18 +0200
+Subject: [PATCH] updatechecker: Port to libsoup3
+
+libsoup2 is phasing out, and using it in a plugin causes conflicts with
+other plugins using a newer version, including ones using a current
+webkit2gtk.
+---
+ build/updatechecker.m4            |  2 +-
+ updatechecker/README              |  4 +--
+ updatechecker/src/updatechecker.c | 51 +++++++++++++++++++++++--------
+ 3 files changed, 42 insertions(+), 15 deletions(-)
+
+diff --git a/build/updatechecker.m4 b/build/updatechecker.m4
+index 66723e814..bd67139bd 100644
+--- a/build/updatechecker.m4
++++ b/build/updatechecker.m4
+@@ -3,7 +3,7 @@ AC_DEFUN([GP_CHECK_UPDATECHECKER],
+     GP_ARG_DISABLE([Updatechecker], [auto])
+ 
+     GP_CHECK_PLUGIN_DEPS([Updatechecker], UPDATECHECKER,
+-                         [libsoup-2.4 >= 2.42])
++                         [libsoup-3.0])
+ 
+     GP_COMMIT_PLUGIN_STATUS([Updatechecker])
+ 
+diff --git a/updatechecker/README b/updatechecker/README
+index 3ebe58bfc..211f67f9a 100644
+--- a/updatechecker/README
++++ b/updatechecker/README
+@@ -41,8 +41,8 @@ Requirements
+ Updatechecker depends on a recent version of Geany (0.20 or above)
+ as well as on:
+ 
+-* GTK >= 2.12
+-* libsoup 2.4 >= 2.42
++* GTK >= 3.0
++* libsoup 3
+ 
+ To compile it on your own you will need the devel packages for these.
+ 
+diff --git a/updatechecker/src/updatechecker.c b/updatechecker/src/updatechecker.c
+index af6674f27..501b19d23 100644
+--- a/updatechecker/src/updatechecker.c
++++ b/updatechecker/src/updatechecker.c
+@@ -49,9 +49,11 @@ enum {
+ 
+ #define UPDATE_CHECK_URL "https://geany.org/service/version/"
+ 
++#define UPDATECHECKER_TYPE_KEY "updatechecker-type"
++
+ static GtkWidget *main_menu_item = NULL;
+-static void update_check_result_cb(SoupSession *session,
+-    SoupMessage *msg, gpointer user_data);
++static void update_check_result_cb(GObject *session,
++    GAsyncResult *result, gpointer user_data);
+ 
+ static gboolean check_on_startup = FALSE;
+ 
+@@ -84,15 +86,17 @@ static void update_check(gint type)
+ 
+     g_message("Checking for updates (querying URL \"%s\")", UPDATE_CHECK_URL);
+     soup = soup_session_new_with_options(
+-            SOUP_SESSION_USER_AGENT, user_agent,
+-            SOUP_SESSION_TIMEOUT, 10,
++            "user-agent", user_agent,
++            "timeout", 10,
+             NULL);
+ 
+     g_free(user_agent);
+ 
+     msg = soup_message_new ("GET", UPDATE_CHECK_URL);
++    g_object_set_data(G_OBJECT(msg), UPDATECHECKER_TYPE_KEY, GINT_TO_POINTER(type));
+ 
+-    soup_session_queue_message (soup, msg, update_check_result_cb, GINT_TO_POINTER(type));
++    soup_session_send_and_read_async(soup, msg, G_PRIORITY_DEFAULT, NULL,
++                                     update_check_result_cb, msg);
+ }
+ 
+ 
+@@ -185,15 +189,30 @@ version_compare(const gchar *current_version)
+ }
+ 
+ 
+-static void update_check_result_cb(SoupSession *session,
+-    SoupMessage *msg, gpointer user_data)
++static gchar *bytes_to_string(GBytes *bytes)
+ {
+-    gint type = GPOINTER_TO_INT(user_data);
++    gsize bytes_size = g_bytes_get_size(bytes);
++    gchar *str = g_malloc(bytes_size + 1);
++    memcpy(str, g_bytes_get_data(bytes, NULL), bytes_size);
++    str[bytes_size] = 0;
++    return str;
++}
++
++
++static void update_check_result_cb(GObject *session,
++    GAsyncResult *result, gpointer user_data)
++{
++    SoupMessage *msg = user_data;
++    gpointer type_ptr = g_object_get_data(G_OBJECT(msg), UPDATECHECKER_TYPE_KEY);
++    gint type = GPOINTER_TO_INT(type_ptr);
++    GError *err = NULL;
++
++    GBytes *bytes = soup_session_send_and_read_finish(SOUP_SESSION(session), result, &err);
+ 
+     /* Checking whether we did get a valid (200) result */
+-    if (msg->status_code == 200)
++    if (bytes && soup_message_get_status(msg) == 200)
+     {
+-        const gchar *remote_version = msg->response_body->data;
++        gchar *remote_version = bytes_to_string(bytes);
+         if (version_compare(remote_version) == TRUE)
+         {
+             gchar *update_msg = g_strdup_printf(
+@@ -216,12 +235,14 @@ static void update_check_result_cb(SoupSession *session,
+             }
+             g_message("%s", no_update_msg);
+         }
++        g_free(remote_version);
+     }
+     else
+     {
+         gchar *error_message = g_strdup_printf(
+             _("Unable to perform version check.\nError code: %d \nError message: »%s«"),
+-            msg->status_code, msg->reason_phrase);
++            soup_message_get_status(msg),
++            err ? err->message : soup_message_get_reason_phrase(msg));
+         if (type == UPDATECHECK_MANUAL)
+         {
+             dialogs_show_msgbox(GTK_MESSAGE_ERROR, "%s", error_message);
+@@ -230,9 +251,15 @@ static void update_check_result_cb(SoupSession *session,
+         {
+             msgwin_status_add("%s", error_message);
+         }
+-        g_warning("Connection error: Code: %d; Message: %s", msg->status_code, msg->reason_phrase);
++        g_warning(
++            "Connection error: Code: %d; Message: %s",
++            soup_message_get_status(msg),
++            err ? err->message : soup_message_get_reason_phrase(msg));
+         g_free(error_message);
+     }
++
++    g_clear_error(&err);
++    g_bytes_unref(bytes);
+ }
+ 
+ static void manual_check_activated_cb(GtkMenuItem *menuitem, gpointer gdata)

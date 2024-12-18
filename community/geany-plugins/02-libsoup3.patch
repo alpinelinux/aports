@@ -1,0 +1,224 @@
+Patch-Source: https://github.com/geany/geany-plugins/commit/cbfa9112df4dec824cf6101907299a164d4006c2
+From cbfa9112df4dec824cf6101907299a164d4006c2 Mon Sep 17 00:00:00 2001
+From: Colomban Wendling <ban@herbesfolles.org>
+Date: Fri, 26 Apr 2024 22:59:00 +0200
+Subject: [PATCH] geniuspaste: Port to libsoup3
+
+---
+ build/geniuspaste.m4          |  2 +-
+ geniuspaste/README            |  2 +-
+ geniuspaste/src/geniuspaste.c | 89 +++++++++++++++++++++--------------
+ 3 files changed, 56 insertions(+), 37 deletions(-)
+
+diff --git a/build/geniuspaste.m4 b/build/geniuspaste.m4
+index dce1ab538..f37f22c46 100644
+--- a/build/geniuspaste.m4
++++ b/build/geniuspaste.m4
+@@ -3,7 +3,7 @@ AC_DEFUN([GP_CHECK_GENIUSPASTE],
+     GP_ARG_DISABLE([GeniusPaste], [auto])
+ 
+     GP_CHECK_PLUGIN_DEPS([GeniusPaste], GENIUSPASTE,
+-                         [libsoup-2.4 >= 2.4.0])
++                         [libsoup-3.0])
+ 
+     GP_COMMIT_PLUGIN_STATUS([GeniusPaste])
+ 
+diff --git a/geniuspaste/README b/geniuspaste/README
+index 436d264b5..a8a755638 100644
+--- a/geniuspaste/README
++++ b/geniuspaste/README
+@@ -36,7 +36,7 @@ configuration shipped with the plugin, please report the issue to:
+ Requirements
+ ------------
+ 	* GTK+ >= 2.12
+-	* libsoup 2.4 >= 2.4.0
++	* libsoup 3.0
+ 
+ Installation
+ ------------
+diff --git a/geniuspaste/src/geniuspaste.c b/geniuspaste/src/geniuspaste.c
+index 27035bd01..8792a75f2 100644
+--- a/geniuspaste/src/geniuspaste.c
++++ b/geniuspaste/src/geniuspaste.c
+@@ -605,13 +605,15 @@ static SoupMessage *json_request_new(const gchar *method,
+ {
+     SoupMessage  *msg = soup_message_new(method, url);
+     GString      *str = g_string_new(NULL);
++    GBytes       *bytes;
+ 
+     g_string_append_c(str, '{');
+     g_datalist_foreach(fields, append_json_data_item, str);
+     g_string_append_c(str, '}');
+-    soup_message_set_request(msg, "application/json", SOUP_MEMORY_TAKE,
+-                             str->str, str->len);
++    bytes = g_bytes_new_take(str->str, str->len);
+     g_string_free(str, FALSE);
++    soup_message_set_request_body_from_bytes(msg, "application/json", bytes);
++    g_bytes_unref(bytes);
+ 
+     return msg;
+ }
+@@ -657,7 +659,8 @@ static SoupMessage *pastebin_soup_message_new(const Pastebin  *pastebin,
+ 
+         default:
+         case FORMAT_HTML_FORM_URLENCODED:
+-            msg = soup_form_request_new_from_datalist(method, url, &data);
++            msg = soup_message_new_from_encoded_form(method, url,
++                                                     soup_form_encode_datalist(&data));
+             break;
+     }
+     g_datalist_clear(&data);
+@@ -665,11 +668,21 @@ static SoupMessage *pastebin_soup_message_new(const Pastebin  *pastebin,
+     return msg;
+ }
+ 
++static gchar *bytes_to_string(GBytes *bytes)
++{
++    gsize bytes_size = g_bytes_get_size(bytes);
++    gchar *str = g_malloc(bytes_size + 1);
++    memcpy(str, g_bytes_get_data(bytes, NULL), bytes_size);
++    str[bytes_size] = 0;
++    return str;
++}
++
+ /* parses @response and returns the URL of the paste, or %NULL on parse error
+  * or if the URL couldn't be found.
+  * @warning: it may return NULL even if @error is not set */
+ static gchar *pastebin_parse_response(const Pastebin  *pastebin,
+                                       SoupMessage     *msg,
++                                      GBytes          *response_body,
+                                       GeanyDocument   *doc,
+                                       const gchar     *contents,
+                                       GError         **error)
+@@ -684,7 +697,8 @@ static gchar *pastebin_parse_response(const Pastebin  *pastebin,
+     if (! g_key_file_has_group(pastebin->config, PASTEBIN_GROUP_PARSE))
+     {
+         /* by default, use the response URI (redirect) */
+-        url = soup_uri_to_string(soup_message_get_uri(msg), FALSE);
++        url = g_uri_to_string_partial(soup_message_get_uri(msg),
++                                      G_URI_HIDE_PASSWORD);
+     }
+     else
+     {
+@@ -695,7 +709,9 @@ static gchar *pastebin_parse_response(const Pastebin  *pastebin,
+                                            PASTEBIN_GROUP_PARSE_KEY_REPLACE, "\\1");
+         SETPTR(replace, expand_placeholders(replace, pastebin, doc, contents));
+ 
+-        url = regex_replace(search, msg->response_body->data, replace, error);
++        gchar *response_str = bytes_to_string(response_body);
++        url = regex_replace(search, response_str, replace, error);
++        g_free(response_str);
+ 
+         g_free(search);
+         g_free(replace);
+@@ -757,27 +773,21 @@ static void show_msgbox(GtkMessageType type, GtkButtonsType buttons,
+     /* cppcheck-suppress memleak symbolName=dlg */
+ }
+ 
+-static void debug_log_message_body(SoupMessage *msg,
+-                                   SoupMessageBody *body,
+-                                   const gchar *label)
++static void debug_logger(SoupLogger *logger,
++                         SoupLoggerLogLevel level,
++                         char direction,
++                         const char *data,
++                         gpointer user_data)
+ {
+-    if (geany->app->debug_mode)
++    const char *prefix;
++    switch (direction)
+     {
+-        gchar *real_uri = soup_uri_to_string(soup_message_get_uri(msg), FALSE);
+-
+-        soup_message_body_flatten(body);
+-        msgwin_msg_add(COLOR_BLUE, -1, NULL,
+-                       "[geniuspaste] %s:\n"
+-                       "URI: %s\n"
+-                       "Body: %s\n"
+-                       "Code: %d (%s)",
+-                       label,
+-                       real_uri,
+-                       body->data,
+-                       msg->status_code,
+-                       msg->reason_phrase);
+-        g_free(real_uri);
++        case '>': prefix = "Request: "; break;
++        case '<': prefix = "Response: "; break;
++        default: prefix = ""; break;
+     }
++
++    msgwin_msg_add(COLOR_BLUE, -1, NULL, "[geniuspaste] %s%s", prefix, data);
+ }
+ 
+ static void paste(GeanyDocument * doc, const gchar * website)
+@@ -788,6 +798,8 @@ static void paste(GeanyDocument * doc, const gchar * website)
+     SoupMessage *msg;
+     gchar *user_agent = NULL;
+     guint status;
++    GError *err = NULL;
++    GBytes *response;
+ 
+     g_return_if_fail(doc && doc->is_valid);
+ 
+@@ -816,35 +828,40 @@ static void paste(GeanyDocument * doc, const gchar * website)
+     msg = pastebin_soup_message_new(pastebin, doc, f_content);
+ 
+     user_agent = g_strconcat(PLUGIN_NAME, " ", PLUGIN_VERSION, " / Geany ", GEANY_VERSION, NULL);
+-    session = soup_session_async_new_with_options(SOUP_SESSION_USER_AGENT, user_agent, NULL);
++    session = soup_session_new_with_options("user-agent", user_agent, NULL);
++    if (geany->app->debug_mode)
++    {
++        SoupLogger *logger = soup_logger_new(SOUP_LOGGER_LOG_BODY);
++        soup_logger_set_printer(logger, debug_logger, NULL, NULL);
++        soup_session_add_feature(session, SOUP_SESSION_FEATURE(logger));
++        g_object_unref(logger);
++    }
+     g_free(user_agent);
+ 
+-    debug_log_message_body(msg, msg->request_body, "Request");
+-
+-    status = soup_session_send_message(session, msg);
++    response = soup_session_send_and_read(session, msg, NULL, &err);
+     g_object_unref(session);
+ 
+-    debug_log_message_body(msg, msg->response_body, "Response");
+-
+-    if (! SOUP_STATUS_IS_SUCCESSFUL(status))
++    status = soup_message_get_status(msg);
++    if (err || ! SOUP_STATUS_IS_SUCCESSFUL(status))
+     {
+         show_msgbox(GTK_MESSAGE_ERROR, GTK_BUTTONS_CLOSE,
+                     _("Failed to paste the code"),
+                     _("Error pasting the code to the pastebin service %s.\n"
+                       "Error code: %u (%s).\n\n%s"),
+-                    pastebin->name, status, msg->reason_phrase,
+-                    (SOUP_STATUS_IS_TRANSPORT_ERROR(status)
++                    pastebin->name, status,
++                    err ? err->message : soup_message_get_reason_phrase(msg),
++                    (err
+                      ? _("Check your connection or the pastebin configuration and retry.")
+                      : SOUP_STATUS_IS_SERVER_ERROR(status)
+                      ? _("Wait for the service to come back and retry, or retry "
+                          "with another pastebin service.")
+                      : _("Check the pastebin configuration and retry.")));
++        g_clear_error(&err);
+     }
+     else
+     {
+-        GError *err = NULL;
+-        gchar *p_url = pastebin_parse_response(pastebin, msg, doc, f_content,
+-                                               &err);
++        gchar *p_url = pastebin_parse_response(pastebin, msg, response, doc,
++                                               f_content, &err);
+ 
+         if (err || ! p_url)
+         {
+@@ -876,6 +893,8 @@ static void paste(GeanyDocument * doc, const gchar * website)
+         g_free(p_url);
+     }
+ 
++    if (response)
++        g_bytes_unref(response);
+     g_object_unref(msg);
+     g_free(f_content);
+ }
