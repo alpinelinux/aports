@@ -5,6 +5,8 @@ set -e
 TARGET_ARCH="$1"
 SUDO_APK=abuild-apk
 
+shift
+
 # optional cross build packages
 #: ${KERNEL_PKG=linux-firmware linux-lts}
 #: ${COMPILER_PKG=libffi brotli libev c-ares cunit nghttp2 libidn2 libunistring libpsl curl libssh2 libxml2 pax-utils llvm15 community/ghc llvm19 rust community/go}
@@ -124,7 +126,8 @@ if [ "$TARGET_ARCH" = "riscv64" ]; then
 	NEEDS_LIBATOMIC="yes"
 fi
 
-for PKG in fortify-headers linux-headers musl pkgconf zlib \
+if [ $# -eq 0 ]; then
+	set -- fortify-headers linux-headers musl pkgconf zlib \
 	   openssl ca-certificates libmd \
 	   gmp mpfr4 mpc1 isl26 libucontext zstd binutils gcc \
 	   bsd-compat-headers libbsd busybox make \
@@ -135,7 +138,10 @@ for PKG in fortify-headers linux-headers musl pkgconf zlib \
 	   $OPENSSH \
 	   $MKINITFS \
 	   $COMPILER_PKG \
-	   $KERNEL_PKG ; do
+	   $KERNEL_PKG
+fi
+
+for PKG; do
 
 	if [ "$NEEDS_LIBATOMIC" = "yes" ]; then
 		EXTRADEPENDS_BUILD="libatomic gcc-$TARGET_ARCH g++-$TARGET_ARCH"
