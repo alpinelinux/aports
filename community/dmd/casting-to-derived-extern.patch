@@ -1,0 +1,323 @@
+Patch-Source: https://github.com/dlang/dmd/commit/295b0008e4ded0d1eb3c67b7da2c67c41a3d6b53
+--
+From 295b0008e4ded0d1eb3c67b7da2c67c41a3d6b53 Mon Sep 17 00:00:00 2001
+From: Nick Treleaven <ntrel002@gmail.com>
+Date: Wed, 12 Jun 2024 12:49:50 +0100
+Subject: [PATCH] Fix Issue 23957 - Casting to derived extern(C++) class is
+ unsafe (#15294)
+
+Fix Issue 23957 - Casting to derived extern(C++) class is unsafe
+
+Signed-off-by: Nicholas Wilson <thewilsonator@users.noreply.github.com>
+Merged-on-behalf-of: Nicholas Wilson <thewilsonator@users.noreply.github.com>
+---
+ compiler/src/dmd/cppmangle.d              |   2 +-
+ compiler/src/dmd/doc.d                    |   2 +-
+ compiler/src/dmd/dtemplate.d              |   7 +-
+ compiler/src/dmd/expression.d             |   6 +-
+ compiler/src/dmd/expressionsem.d          |  18 +++-
+ compiler/src/dmd/mtype.d                  |   2 +-
+ compiler/src/dmd/safe.d                   |  12 ++-
+ compiler/src/dmd/statement.d              | 103 +++++++++++-----------
+ compiler/test/fail_compilation/cpp_cast.d |  18 ++++
+ 9 files changed, 105 insertions(+), 65 deletions(-)
+ create mode 100644 compiler/test/fail_compilation/cpp_cast.d
+
+diff --git a/compiler/src/dmd/cppmangle.d b/compiler/src/dmd/cppmangle.d
+index 334088b381cd..0609778e4c77 100644
+--- a/dmd/compiler/src/dmd/cppmangle.d
++++ b/dmd/compiler/src/dmd/cppmangle.d
+@@ -2197,7 +2197,7 @@ private extern(C++) final class ComponentVisitor : Visitor
+     /// Set to the result of the comparison
+     private bool result;
+ 
+-    public this(RootObject base) @safe
++    public this(RootObject base) @trusted
+     {
+         switch (base.dyncast())
+         {
+diff --git a/compiler/src/dmd/doc.d b/compiler/src/dmd/doc.d
+index a8b43da625b3..84048af03379 100644
+--- a/dmd/compiler/src/dmd/doc.d
++++ b/dmd/compiler/src/dmd/doc.d
+@@ -2587,7 +2587,7 @@ TypeFunction isTypeFunction(Dsymbol s) @safe
+     {
+         Type t = f.originalType ? f.originalType : f.type;
+         if (t.ty == Tfunction)
+-            return cast(TypeFunction)t;
++            return (() @trusted => cast(TypeFunction)t)();
+     }
+     return null;
+ }
+diff --git a/compiler/src/dmd/dtemplate.d b/compiler/src/dmd/dtemplate.d
+index 33ec6b1849f6..50fbc41fe10d 100644
+--- a/dmd/compiler/src/dmd/dtemplate.d
++++ b/dmd/compiler/src/dmd/dtemplate.d
+@@ -89,7 +89,7 @@ private enum LOG = false;
+ 
+ enum IDX_NOTFOUND = 0x12345678;
+ 
+-pure nothrow @nogc @safe
++pure nothrow @nogc @trusted
+ {
+ 
+ /********************************************
+@@ -143,6 +143,11 @@ inout(TemplateParameter) isTemplateParameter(inout RootObject o)
+     return cast(inout(TemplateParameter))o;
+ }
+ 
++} // end @trusted casts
++
++pure nothrow @nogc @safe
++{
++
+ /**************************************
+  * Is this Object an error?
+  */
+diff --git a/compiler/src/dmd/expression.d b/compiler/src/dmd/expression.d
+index a26f3ab83b99..04b34e9f3a08 100644
+--- a/dmd/compiler/src/dmd/expression.d
++++ b/dmd/compiler/src/dmd/expression.d
+@@ -426,7 +426,7 @@ extern (C++) abstract class Expression : ASTNode
+      * is returned via e0.
+      * Otherwise 'e' is directly returned and e0 is set to NULL.
+      */
+-    extern (D) static Expression extractLast(Expression e, out Expression e0) @safe
++    extern (D) static Expression extractLast(Expression e, out Expression e0) @trusted
+     {
+         if (e.op != EXP.comma)
+         {
+@@ -709,7 +709,7 @@ extern (C++) abstract class Expression : ASTNode
+         return true;
+     }
+ 
+-    final pure inout nothrow @nogc @safe
++    final pure inout nothrow @nogc @trusted
+     {
+         inout(IntegerExp)   isIntegerExp() { return op == EXP.int64 ? cast(typeof(return))this : null; }
+         inout(ErrorExp)     isErrorExp() { return op == EXP.error ? cast(typeof(return))this : null; }
+@@ -3868,7 +3868,7 @@ extern (C++) final class VectorExp : UnaExp
+     uint dim = ~0;      // number of elements in the vector
+     OwnedBy ownedByCtfe = OwnedBy.code;
+ 
+-    extern (D) this(const ref Loc loc, Expression e, Type t) @safe
++    extern (D) this(const ref Loc loc, Expression e, Type t) @trusted
+     {
+         super(loc, EXP.vector, e);
+         assert(t.ty == Tvector);
+diff --git a/compiler/src/dmd/expressionsem.d b/compiler/src/dmd/expressionsem.d
+index 481806d392bd..c2a094413c70 100644
+--- a/dmd/compiler/src/dmd/expressionsem.d
++++ b/dmd/compiler/src/dmd/expressionsem.d
+@@ -9251,12 +9251,22 @@ private extern (C++) final class ExpressionSemanticVisitor : Visitor
+         }
+ 
+         // Check for unsafe casts
+-        if (!isSafeCast(ex, t1b, tob))
++        string msg;
++        if (!isSafeCast(ex, t1b, tob, &msg))
+         {
+-            if (sc.setUnsafe(false, exp.loc, "cast from `%s` to `%s` not allowed in safe code", exp.e1.type, exp.to))
+-            {
++            if (sc.setUnsafe(false, exp.loc,
++                "cast from `%s` to `%s` not allowed in safe code", exp.e1.type, exp.to))
++                return setError();
++        }
++        else if (msg) // deprecated unsafe
++        {
++            const err = sc.setUnsafePreview(FeatureState.default_, false, exp.loc,
++                "cast from `%s` to `%s` not allowed in safe code", exp.e1.type, exp.to);
++            // if message was printed
++            if (sc.func && sc.func.isSafeBypassingInference() && !sc.isDeprecated())
++                deprecationSupplemental(exp.loc, "%s", (msg ~ '\0').ptr);
++            if (err)
+                 return setError();
+-            }
+         }
+ 
+         // `object.__ArrayCast` is a rewrite of an old runtime hook `_d_arraycast`. `_d_arraycast` was not built
+diff --git a/compiler/src/dmd/mtype.d b/compiler/src/dmd/mtype.d
+index a91a0a4ef630..cf9b1d71db8c 100644
+--- a/dmd/compiler/src/dmd/mtype.d
++++ b/dmd/compiler/src/dmd/mtype.d
+@@ -1582,7 +1582,7 @@ extern (C++) abstract class Type : ASTNode
+         }
+     }
+ 
+-    final pure inout nothrow @nogc @safe
++    final pure inout nothrow @nogc @trusted
+     {
+         inout(TypeError)      isTypeError()      { return ty == Terror     ? cast(typeof(return))this : null; }
+         inout(TypeVector)     isTypeVector()     { return ty == Tvector    ? cast(typeof(return))this : null; }
+diff --git a/compiler/src/dmd/safe.d b/compiler/src/dmd/safe.d
+index 5064ac2d9cdb..e28baf45ff5f 100644
+--- a/dmd/compiler/src/dmd/safe.d
++++ b/dmd/compiler/src/dmd/safe.d
+@@ -156,10 +156,11 @@ bool checkUnsafeAccess(Scope* sc, Expression e, bool readonly, bool printmsg)
+  *      e = expression to be cast
+  *      tfrom = type of e
+  *      tto = type to cast e to
++ *      msg = reason why cast is unsafe or deprecated
+  * Returns:
+- *      true if @safe
++ *      true if @safe or deprecated
+  */
+-bool isSafeCast(Expression e, Type tfrom, Type tto)
++bool isSafeCast(Expression e, Type tfrom, Type tto, string* msg = null)
+ {
+     // Implicit conversions are always safe
+     if (tfrom.implicitConvTo(tto))
+@@ -182,9 +183,14 @@ bool isSafeCast(Expression e, Type tfrom, Type tto)
+                 && cdfrom.classKind == ClassKind.d && cdto.classKind == ClassKind.d))
+             return false;
+ 
++        // no RTTI
+         if (cdfrom.isCPPinterface() || cdto.isCPPinterface())
+             return false;
+-
++        if (cdfrom.classKind == ClassKind.cpp || cdto.classKind == ClassKind.cpp)
++        {
++            if (msg)
++                *msg = "No dynamic type information for extern(C++) classes";
++        }
+         if (!MODimplicitConv(tfromb.mod, ttob.mod))
+             return false;
+         return true;
+diff --git a/compiler/src/dmd/statement.d b/compiler/src/dmd/statement.d
+index a79b78acf247..81891ff7aa6b 100644
+--- a/dmd/compiler/src/dmd/statement.d
++++ b/dmd/compiler/src/dmd/statement.d
+@@ -267,57 +267,58 @@ extern (C++) abstract class Statement : ASTNode
+     pure nothrow @nogc
+     inout(ReturnStatement) endsWithReturnStatement() inout { return null; }
+ 
+-    final pure inout nothrow @nogc @safe:
+-
+-    /********************
+-     * A cheaper method of doing downcasting of Statements.
+-     * Returns:
+-     *    the downcast statement if it can be downcasted, otherwise `null`
+-     */
+-    inout(ErrorStatement)       isErrorStatement()       { return stmt == STMT.Error       ? cast(typeof(return))this : null; }
+-    inout(PeelStatement)        isPeelStatement()        { return stmt == STMT.Peel        ? cast(typeof(return))this : null; }
+-    inout(ScopeStatement)       isScopeStatement()       { return stmt == STMT.Scope       ? cast(typeof(return))this : null; }
+-    inout(ExpStatement)         isExpStatement()         { return stmt == STMT.Exp         ? cast(typeof(return))this : null; }
+-    inout(CompoundStatement)    isCompoundStatement()    { return stmt == STMT.Compound    ? cast(typeof(return))this : null; }
+-    inout(ReturnStatement)      isReturnStatement()      { return stmt == STMT.Return      ? cast(typeof(return))this : null; }
+-    inout(IfStatement)          isIfStatement()          { return stmt == STMT.If          ? cast(typeof(return))this : null; }
+-    inout(ConditionalStatement) isConditionalStatement() { return stmt == STMT.Conditional ? cast(typeof(return))this : null; }
+-    inout(StaticForeachStatement) isStaticForeachStatement() { return stmt == STMT.StaticForeach ? cast(typeof(return))this : null; }
+-    inout(CaseStatement)        isCaseStatement()        { return stmt == STMT.Case        ? cast(typeof(return))this : null; }
+-    inout(DefaultStatement)     isDefaultStatement()     { return stmt == STMT.Default     ? cast(typeof(return))this : null; }
+-    inout(LabelStatement)       isLabelStatement()       { return stmt == STMT.Label       ? cast(typeof(return))this : null; }
+-    inout(GotoStatement)        isGotoStatement()        { return stmt == STMT.Goto        ? cast(typeof(return))this : null; }
+-    inout(GotoDefaultStatement) isGotoDefaultStatement() { return stmt == STMT.GotoDefault ? cast(typeof(return))this : null; }
+-    inout(GotoCaseStatement)    isGotoCaseStatement()    { return stmt == STMT.GotoCase    ? cast(typeof(return))this : null; }
+-    inout(BreakStatement)       isBreakStatement()       { return stmt == STMT.Break       ? cast(typeof(return))this : null; }
+-    inout(DtorExpStatement)     isDtorExpStatement()     { return stmt == STMT.DtorExp     ? cast(typeof(return))this : null; }
+-    inout(MixinStatement)       isMixinStatement()       { return stmt == STMT.Mixin       ? cast(typeof(return))this : null; }
+-    inout(ForwardingStatement)  isForwardingStatement()  { return stmt == STMT.Forwarding  ? cast(typeof(return))this : null; }
+-    inout(DoStatement)          isDoStatement()          { return stmt == STMT.Do          ? cast(typeof(return))this : null; }
+-    inout(WhileStatement)       isWhileStatement()       { return stmt == STMT.While       ? cast(typeof(return))this : null; }
+-    inout(ForStatement)         isForStatement()         { return stmt == STMT.For         ? cast(typeof(return))this : null; }
+-    inout(ForeachStatement)     isForeachStatement()     { return stmt == STMT.Foreach     ? cast(typeof(return))this : null; }
+-    inout(SwitchStatement)      isSwitchStatement()      { return stmt == STMT.Switch      ? cast(typeof(return))this : null; }
+-    inout(ContinueStatement)    isContinueStatement()    { return stmt == STMT.Continue    ? cast(typeof(return))this : null; }
+-    inout(WithStatement)        isWithStatement()        { return stmt == STMT.With        ? cast(typeof(return))this : null; }
+-    inout(TryCatchStatement)    isTryCatchStatement()    { return stmt == STMT.TryCatch    ? cast(typeof(return))this : null; }
+-    inout(ThrowStatement)       isThrowStatement()       { return stmt == STMT.Throw       ? cast(typeof(return))this : null; }
+-    inout(DebugStatement)       isDebugStatement()       { return stmt == STMT.Debug       ? cast(typeof(return))this : null; }
+-    inout(TryFinallyStatement)  isTryFinallyStatement()  { return stmt == STMT.TryFinally  ? cast(typeof(return))this : null; }
+-    inout(ScopeGuardStatement)  isScopeGuardStatement()  { return stmt == STMT.ScopeGuard  ? cast(typeof(return))this : null; }
+-    inout(SwitchErrorStatement)  isSwitchErrorStatement()  { return stmt == STMT.SwitchError  ? cast(typeof(return))this : null; }
+-    inout(UnrolledLoopStatement) isUnrolledLoopStatement() { return stmt == STMT.UnrolledLoop ? cast(typeof(return))this : null; }
+-    inout(ForeachRangeStatement) isForeachRangeStatement() { return stmt == STMT.ForeachRange ? cast(typeof(return))this : null; }
+-    inout(CompoundDeclarationStatement) isCompoundDeclarationStatement() { return stmt == STMT.CompoundDeclaration ? cast(typeof(return))this : null; }
+-    inout(CompoundAsmStatement)  isCompoundAsmStatement()  { return stmt == STMT.CompoundAsm  ? cast(typeof(return))this : null; }
+-    inout(PragmaStatement)       isPragmaStatement()       { return stmt == STMT.Pragma       ? cast(typeof(return))this : null; }
+-    inout(StaticAssertStatement) isStaticAssertStatement() { return stmt == STMT.StaticAssert ? cast(typeof(return))this : null; }
+-    inout(CaseRangeStatement)    isCaseRangeStatement()    { return stmt == STMT.CaseRange    ? cast(typeof(return))this : null; }
+-    inout(SynchronizedStatement) isSynchronizedStatement() { return stmt == STMT.Synchronized ? cast(typeof(return))this : null; }
+-    inout(AsmStatement)          isAsmStatement()          { return stmt == STMT.Asm          ? cast(typeof(return))this : null; }
+-    inout(InlineAsmStatement)    isInlineAsmStatement()    { return stmt == STMT.InlineAsm    ? cast(typeof(return))this : null; }
+-    inout(GccAsmStatement)       isGccAsmStatement()       { return stmt == STMT.GccAsm       ? cast(typeof(return))this : null; }
+-    inout(ImportStatement)       isImportStatement()       { return stmt == STMT.Import       ? cast(typeof(return))this : null; }
++    final pure inout nothrow @nogc @trusted
++    {
++        /********************
++         * A cheaper method of doing downcasting of Statements.
++         * Returns:
++         *    the downcast statement if it can be downcasted, otherwise `null`
++         */
++        inout(ErrorStatement)       isErrorStatement()       { return stmt == STMT.Error       ? cast(typeof(return))this : null; }
++        inout(PeelStatement)        isPeelStatement()        { return stmt == STMT.Peel        ? cast(typeof(return))this : null; }
++        inout(ScopeStatement)       isScopeStatement()       { return stmt == STMT.Scope       ? cast(typeof(return))this : null; }
++        inout(ExpStatement)         isExpStatement()         { return stmt == STMT.Exp         ? cast(typeof(return))this : null; }
++        inout(CompoundStatement)    isCompoundStatement()    { return stmt == STMT.Compound    ? cast(typeof(return))this : null; }
++        inout(ReturnStatement)      isReturnStatement()      { return stmt == STMT.Return      ? cast(typeof(return))this : null; }
++        inout(IfStatement)          isIfStatement()          { return stmt == STMT.If          ? cast(typeof(return))this : null; }
++        inout(ConditionalStatement) isConditionalStatement() { return stmt == STMT.Conditional ? cast(typeof(return))this : null; }
++        inout(StaticForeachStatement) isStaticForeachStatement() { return stmt == STMT.StaticForeach ? cast(typeof(return))this : null; }
++        inout(CaseStatement)        isCaseStatement()        { return stmt == STMT.Case        ? cast(typeof(return))this : null; }
++        inout(DefaultStatement)     isDefaultStatement()     { return stmt == STMT.Default     ? cast(typeof(return))this : null; }
++        inout(LabelStatement)       isLabelStatement()       { return stmt == STMT.Label       ? cast(typeof(return))this : null; }
++        inout(GotoStatement)        isGotoStatement()        { return stmt == STMT.Goto        ? cast(typeof(return))this : null; }
++        inout(GotoDefaultStatement) isGotoDefaultStatement() { return stmt == STMT.GotoDefault ? cast(typeof(return))this : null; }
++        inout(GotoCaseStatement)    isGotoCaseStatement()    { return stmt == STMT.GotoCase    ? cast(typeof(return))this : null; }
++        inout(BreakStatement)       isBreakStatement()       { return stmt == STMT.Break       ? cast(typeof(return))this : null; }
++        inout(DtorExpStatement)     isDtorExpStatement()     { return stmt == STMT.DtorExp     ? cast(typeof(return))this : null; }
++        inout(MixinStatement)       isMixinStatement()       { return stmt == STMT.Mixin       ? cast(typeof(return))this : null; }
++        inout(ForwardingStatement)  isForwardingStatement()  { return stmt == STMT.Forwarding  ? cast(typeof(return))this : null; }
++        inout(DoStatement)          isDoStatement()          { return stmt == STMT.Do          ? cast(typeof(return))this : null; }
++        inout(WhileStatement)       isWhileStatement()       { return stmt == STMT.While       ? cast(typeof(return))this : null; }
++        inout(ForStatement)         isForStatement()         { return stmt == STMT.For         ? cast(typeof(return))this : null; }
++        inout(ForeachStatement)     isForeachStatement()     { return stmt == STMT.Foreach     ? cast(typeof(return))this : null; }
++        inout(SwitchStatement)      isSwitchStatement()      { return stmt == STMT.Switch      ? cast(typeof(return))this : null; }
++        inout(ContinueStatement)    isContinueStatement()    { return stmt == STMT.Continue    ? cast(typeof(return))this : null; }
++        inout(WithStatement)        isWithStatement()        { return stmt == STMT.With        ? cast(typeof(return))this : null; }
++        inout(TryCatchStatement)    isTryCatchStatement()    { return stmt == STMT.TryCatch    ? cast(typeof(return))this : null; }
++        inout(ThrowStatement)       isThrowStatement()       { return stmt == STMT.Throw       ? cast(typeof(return))this : null; }
++        inout(DebugStatement)       isDebugStatement()       { return stmt == STMT.Debug       ? cast(typeof(return))this : null; }
++        inout(TryFinallyStatement)  isTryFinallyStatement()  { return stmt == STMT.TryFinally  ? cast(typeof(return))this : null; }
++        inout(ScopeGuardStatement)  isScopeGuardStatement()  { return stmt == STMT.ScopeGuard  ? cast(typeof(return))this : null; }
++        inout(SwitchErrorStatement)  isSwitchErrorStatement()  { return stmt == STMT.SwitchError  ? cast(typeof(return))this : null; }
++        inout(UnrolledLoopStatement) isUnrolledLoopStatement() { return stmt == STMT.UnrolledLoop ? cast(typeof(return))this : null; }
++        inout(ForeachRangeStatement) isForeachRangeStatement() { return stmt == STMT.ForeachRange ? cast(typeof(return))this : null; }
++        inout(CompoundDeclarationStatement) isCompoundDeclarationStatement() { return stmt == STMT.CompoundDeclaration ? cast(typeof(return))this : null; }
++        inout(CompoundAsmStatement)  isCompoundAsmStatement()  { return stmt == STMT.CompoundAsm  ? cast(typeof(return))this : null; }
++        inout(PragmaStatement)       isPragmaStatement()       { return stmt == STMT.Pragma       ? cast(typeof(return))this : null; }
++        inout(StaticAssertStatement) isStaticAssertStatement() { return stmt == STMT.StaticAssert ? cast(typeof(return))this : null; }
++        inout(CaseRangeStatement)    isCaseRangeStatement()    { return stmt == STMT.CaseRange    ? cast(typeof(return))this : null; }
++        inout(SynchronizedStatement) isSynchronizedStatement() { return stmt == STMT.Synchronized ? cast(typeof(return))this : null; }
++        inout(AsmStatement)          isAsmStatement()          { return stmt == STMT.Asm          ? cast(typeof(return))this : null; }
++        inout(InlineAsmStatement)    isInlineAsmStatement()    { return stmt == STMT.InlineAsm    ? cast(typeof(return))this : null; }
++        inout(GccAsmStatement)       isGccAsmStatement()       { return stmt == STMT.GccAsm       ? cast(typeof(return))this : null; }
++        inout(ImportStatement)       isImportStatement()       { return stmt == STMT.Import       ? cast(typeof(return))this : null; }
++    }
+ }
+ 
+ /***********************************************************
+diff --git a/compiler/test/fail_compilation/cpp_cast.d b/compiler/test/fail_compilation/cpp_cast.d
+new file mode 100644
+index 000000000000..e751559750d5
+--- /dev/null
++++ b/compiler/test/fail_compilation/cpp_cast.d
+@@ -0,0 +1,18 @@
++// See also: fail20000.d
++/*
++REQUIRED_ARGS: -de
++TEST_OUTPUT:
++---
++fail_compilation/cpp_cast.d(16): Deprecation: cast from `cpp_cast.C` to `cpp_cast.D` not allowed in safe code
++fail_compilation/cpp_cast.d(16):        No dynamic type information for extern(C++) classes
++---
++*/
++extern(C++) class C { void f() { } }
++extern(C++) class D : C { }
++
++void main() @safe
++{
++    C c;
++    c = cast(D) new C; // reinterpret cast
++    c = cast(C) new D; // OK
++}
