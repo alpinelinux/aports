@@ -16,16 +16,17 @@ section_uboot() {
 
 profile_uboot() {
 	profile_base
-	title="Generic ARM"
-	desc="Has default ARM kernel.
-		Includes the uboot bootloader.
-		Supports armv7 and aarch64."
+	title="Generic U-Boot"
+	desc="Has default LTS kernel.
+		Includes the U-Boot bootloader.
+		Tarball.
+		"
 	image_ext="tar.gz"
-	arch="aarch64 armv7"
+	arch="aarch64 armv7 riscv64"
 	kernel_flavors="lts"
-	kernel_addons="xtables-addons"
-	initfs_features="base bootchart ext4 kms mmc nvme phy raid scsi squashfs usb"
-	apkovl="genapkovl-dhcp.sh"
-	hostname="alpine"
+	case "$ARCH" in
+		aarch64|armv7) kernel_addons="xtables-addons";;
+	esac
+	initfs_features="base ext4 kms mmc nvme phy raid scsi squashfs usb"
 	uboot_install="yes"
 }
