@@ -2,6 +2,12 @@
 
 set -e
 
+abuild_opts="-r"
+if [ "$1" = "-k" ] || [ "$1" = "--keep" ]; then
+	abuild_opts="$abuild_opts -k"
+	shift
+fi
+
 TARGET_ARCH="$1"
 SUDO_APK=abuild-apk
 
@@ -84,32 +90,32 @@ fi
 msg "Building cross-compiler"
 
 # Build and install cross binutils (--with-sysroot)
-CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname binutils) abuild -r
+CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname binutils) abuild $abuild_opts
 
 if ! CHOST=$TARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild up2date 2>/dev/null; then
 	# C-library headers for target
-	CHOST=$TARGET_ARCH BOOTSTRAP=nocc APKBUILD=$(apkbuildname musl) abuild -r
+	CHOST=$TARGET_ARCH BOOTSTRAP=nocc APKBUILD=$(apkbuildname musl) abuild $abuild_opts
 
 	# Minimal cross GCC
 	EXTRADEPENDS_HOST="musl-dev" \
-	CTARGET=$TARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname gcc) abuild -r
+	CTARGET=$TARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname gcc) abuild $abuild_opts
 
 	# Cross build bootstrap C-library for the target
 	EXTRADEPENDS_BUILD="gcc-pass2-$TARGET_ARCH" \
-	CHOST=$TARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild -r
+	CHOST=$TARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild $abuild_opts
 fi
 
 # Build libucontext without docs and pkgconfig file as a dependency for gcc-gdc
 EXTRADEPENDS_BUILD="gcc-pass2-$TARGET_ARCH" \
 EXTRADEPENDS_TARGET="musl musl-dev" \
-CHOST=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname libucontext) abuild -r
+CHOST=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname libucontext) abuild $abuild_opts
 
 # Full cross GCC
 EXTRADEPENDS_TARGET="musl musl-dev libucontext-dev" \
-CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname gcc) abuild -r
+CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname gcc) abuild $abuild_opts
 
 # Cross build-base
-CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname build-base) abuild -r
+CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname build-base) abuild $abuild_opts
 
 msg "Cross building base system"
 
@@ -147,7 +153,7 @@ for PKG; do
 		EXTRADEPENDS_BUILD="libatomic gcc-$TARGET_ARCH g++-$TARGET_ARCH"
 	fi
 	EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET"  EXTRADEPENDS_BUILD="$EXTRADEPENDS_BUILD" \
-	CHOST=$TARGET_ARCH BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild -r
+	CHOST=$TARGET_ARCH BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild $abuild_opts
 
 	case "$PKG" in
 	fortify-headers)
