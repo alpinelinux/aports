@@ -2,7 +2,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-baselayout
 pkgver=3.6.8
-pkgrel=0
+pkgrel=1
 pkgdesc="Alpine base dir structure and init scripts"
 url="https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout"
 arch="noarch"
@@ -108,6 +108,7 @@ package() {
 		proc \
 		opt \
 		run \
+		run/lock \
 		sbin \
 		srv \
 		sys \
