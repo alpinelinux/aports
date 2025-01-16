@@ -38,6 +38,6 @@ RISCV64_AS=riscv64-alpine-linux-musl-as
 RISCV64_CC=riscv64-alpine-linux-musl-cc
 RISCV64_LD=riscv64-alpine-linux-musl-ld
 
-x86_64_AS=x86_64-alpine-linux-musl-as
-x86_64_CC=x86_64-alpine-linux-musl-cc
-x86_64_LD=x86_64-alpine-linux-musl-ld
+X86_64_AS=x86_64-alpine-linux-musl-as
+X86_64_CC=x86_64-alpine-linux-musl-cc
+X86_64_LD=x86_64-alpine-linux-musl-ld
