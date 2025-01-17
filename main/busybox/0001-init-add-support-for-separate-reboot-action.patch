@@ -1,0 +1,199 @@
+From 0e797502f58df6f7bc06202de5b30c3a2df52437 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Fri, 17 Jan 2025 09:12:08 +0100
+Subject: [PATCH] init: add support for separate reboot action
+
+Make it possible for service managers to differentiate a reboot vs
+shutdown event.
+
+Allows user to configure what should happen on SIGTERM (sent by
+/sbin/reboot).
+
+For example:
+
+    ::shutdown:/sbin/openrc shutdown
+
+If no shutdown action is specified in inittab, fall back to shutdown
+action, so we don't break backwards compatibility.
+
+downstream-issue: https://gitlab.alpinelinux.org/alpine/aports/-/issues/16695
+
+function                                             old     new   delta
+run                                                  256     686    +430
+check_delayed_sigs                                   362     447     +85
+run_actions                                          126     141     +15
+static.actions                                        64      71      +7
+parse_inittab                                        477     473      -4
+reset_sighandlers_and_unblock_sigs                    22       -     -22
+open_stdio_to_tty                                     85       -     -85
+run_shutdown_and_kill_processes                      111       -    -111
+init_exec                                            396       -    -396
+------------------------------------------------------------------------------
+(add/remove: 0/4 grow/shrink: 4/1 up/down: 537/-618)          Total: -81 bytes
+   text	   data	    bss	    dec	    hex	filename
+ 824050	  14108	   2008	 840166	  cd1e6	busybox_old
+ 823969	  14108	   2008	 840085	  cd195	busybox_unstripped
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ init/init.c | 52 +++++++++++++++++++++++++++++++++++-----------------
+ 1 file changed, 35 insertions(+), 17 deletions(-)
+
+diff --git a/init/init.c b/init/init.c
+index 2ee1e4cde..47809a1e8 100644
+--- a/init/init.c
++++ b/init/init.c
+@@ -184,17 +184,27 @@
+ /*
+  * Start these before killing all processes in preparation for
+  * running RESTART actions or doing low-level halt/reboot/poweroff
+- * (initiated by SIGUSR1/SIGTERM/SIGUSR2).
++ * (initiated by SIGUSR1/SIGUSR2).
++ * Will also run as fallback if no REBOOT actions were execute on
++ * SIGTERM.
+  * Wait for completion before proceeding.
+  */
+ #define SHUTDOWN    0x40
++/*
++ * Start these before killing all processes in preparation for
++ * doing low-level reboot (initiated by SIGTERM).
++ * If no reboot actions were executed, it will execute the SHUTDOWN
++ * actions as fallback.
++ * Wait for completion before proceeding.
++ */
++#define REBOOT      0x80
+ /*
+  * exec() on SIGQUIT. SHUTDOWN actions are started and waited for,
+  * then all processes are killed, then init exec's 1st RESTART action,
+  * replacing itself by it. If no RESTART action specified,
+  * SIGQUIT has no effect.
+  */
+-#define RESTART     0x80
++#define RESTART     0x100
+ 
+ /* A linked list of init_actions, to be read from inittab */
+ struct init_action {
+@@ -591,17 +601,19 @@ static void waitfor(pid_t pid)
+ }
+ 
+ /* Run all commands of a particular type */
+-static void run_actions(int action_type)
++/* return 0 if no actions were run */
++static int run_actions(int action_type)
+ {
+ 	struct init_action *a;
++	pid_t pid = 0;
+ 
+ 	for (a = G.init_action_list; a; a = a->next) {
+ 		if (!(a->action_type & action_type))
+ 			continue;
+ 
+-		if (a->action_type & (SYSINIT | WAIT | ONCE | CTRLALTDEL | SHUTDOWN)) {
+-			pid_t pid = run(a);
+-			if (a->action_type & (SYSINIT | WAIT | CTRLALTDEL | SHUTDOWN))
++		if (a->action_type & (SYSINIT | WAIT | ONCE | CTRLALTDEL | SHUTDOWN | REBOOT)) {
++			pid = run(a);
++			if (a->action_type & (SYSINIT | WAIT | CTRLALTDEL | SHUTDOWN | REBOOT))
+ 				waitfor(pid);
+ 		}
+ 		if (a->action_type & (RESPAWN | ASKFIRST)) {
+@@ -612,9 +624,10 @@ static void run_actions(int action_type)
+ 				a->pid = run(a);
+ 		}
+ 	}
++	return pid != 0;
+ }
+ 
+-static void new_init_action(uint8_t action_type, const char *command, const char *cons)
++static void new_init_action(uint32_t action_type, const char *command, const char *cons)
+ {
+ 	struct init_action *a, **nextp;
+ 
+@@ -705,7 +718,7 @@ static void parse_inittab(void)
+ 		/* order must correspond to SYSINIT..RESTART constants */
+ 		static const char actions[] ALIGN1 =
+ 			"sysinit\0""wait\0""once\0""respawn\0""askfirst\0"
+-			"ctrlaltdel\0""shutdown\0""restart\0";
++			"ctrlaltdel\0""shutdown\0""reboot\0""restart\0";
+ 		int action;
+ 		char *tty = token[0];
+ 
+@@ -755,12 +768,14 @@ static void pause_and_low_level_reboot(unsigned magic)
+ 	_exit_SUCCESS();
+ }
+ 
+-static void run_shutdown_and_kill_processes(void)
++static void run_shutdown_and_kill_processes(int sig)
+ {
+ 	/* Run everything to be run at "shutdown".  This is done _prior_
+ 	 * to killing everything, in case people wish to use scripts to
+ 	 * shut things down gracefully... */
+-	run_actions(SHUTDOWN);
++	if ((sig != SIGTERM) || (run_actions(REBOOT) == 0)) {
++		(void)run_actions(SHUTDOWN);
++	}
+ 
+ 	message(L_CONSOLE | L_LOG, "The system is going down NOW!");
+ 
+@@ -821,7 +836,7 @@ static void halt_reboot_pwoff(int sig)
+ 	 */
+ 	reset_sighandlers_and_unblock_sigs();
+ 
+-	run_shutdown_and_kill_processes();
++	run_shutdown_and_kill_processes(sig);
+ 
+ 	m = "halt";
+ 	rb = RB_HALT_SYSTEM;
+@@ -854,7 +869,7 @@ static void exec_restart_action(void)
+ 
+ 		reset_sighandlers_and_unblock_sigs();
+ 
+-		run_shutdown_and_kill_processes();
++		run_shutdown_and_kill_processes(SIGQUIT);
+ 
+ #ifdef RB_ENABLE_CAD
+ 		/* Allow Ctrl-Alt-Del to reboot the system.
+@@ -986,7 +1001,7 @@ static void check_delayed_sigs(struct timespec *ts)
+ 		reload_inittab();
+ #endif
+ 	if (sig == SIGINT)
+-		run_actions(CTRLALTDEL);
++		(void)run_actions(CTRLALTDEL);
+ 	if (sig == SIGQUIT) {
+ 		exec_restart_action();
+ 		/* returns only if no restart action defined */
+@@ -1179,18 +1194,18 @@ int init_main(int argc UNUSED_PARAM, char **argv)
+ 
+ 	/* Now run everything that needs to be run */
+ 	/* First run the sysinit command */
+-	run_actions(SYSINIT);
++	(void)run_actions(SYSINIT);
+ 	check_delayed_sigs(&G.zero_ts);
+ 	/* Next run anything that wants to block */
+-	run_actions(WAIT);
++	(void)run_actions(WAIT);
+ 	check_delayed_sigs(&G.zero_ts);
+ 	/* Next run anything to be run only once */
+-	run_actions(ONCE);
++	(void)run_actions(ONCE);
+ 
+ 	/* Now run the looping stuff for the rest of forever */
+ 	while (1) {
+ 		/* (Re)run the respawn/askfirst stuff */
+-		run_actions(RESPAWN | ASKFIRST);
++		(void)run_actions(RESPAWN | ASKFIRST);
+ 
+ 		/* Wait for any signal (typically it's SIGCHLD) */
+ 		check_delayed_sigs(NULL); /* NULL timespec makes it wait */
+@@ -1355,5 +1370,8 @@ int init_main(int argc UNUSED_PARAM, char **argv)
+ //usage:	"	\n"
+ //usage:	"	# Stuff to do before rebooting\n"
+ //usage:	"	::ctrlaltdel:/sbin/reboot\n"
++//usage:	"	::reboot:/bin/umount -a -r\n"
++//usage:	"	::reboot:/sbin/swapoff -a\n"
++//usage:	"	# Stuff to do before poweroff (also fallback when no reboot actions specified)\n"
+ //usage:	"	::shutdown:/bin/umount -a -r\n"
+ //usage:	"	::shutdown:/sbin/swapoff -a\n"
+-- 
+2.48.1
+
