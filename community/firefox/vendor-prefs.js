@@ -11,8 +11,10 @@ pref("browser.shell.checkDefaultBrowser", false);
 pref("extensions.autoDisableScopes", 11);
 pref("extensions.shownSelectionUI", true);
 
-// Disable sponsored tiles from "Mozilla Tiles Service"
+// Disable sponsored content
 pref("browser.topsites.contile.enabled", false);
+pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);
+pref("browser.newtabpage.activity-stream.feeds.section.topstories", false);
 
 // Disable Widevine CDM support (doesn't work on musl anyway)
 pref("media.gmp-widevinecdm.visible", false);
