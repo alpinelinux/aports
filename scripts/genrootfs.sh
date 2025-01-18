@@ -38,6 +38,9 @@ done
 
 # disable password login but allow login with ssh keys for root
 sed -i -e 's/^root::/root:*:/' "$tmp"/etc/shadow
+# Set shadow group manually since we use --no-script above
+# Use gid since we use --numeric-owner below
+chgrp 42 "$tmp"/etc/shadow
 
 branch=edge
 VERSION_ID=$(awk -F= '$1=="VERSION_ID" {print $2}'  "$tmp"/etc/os-release)
