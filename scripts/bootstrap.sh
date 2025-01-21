@@ -18,7 +18,7 @@ shift
 #: ${COMPILER_PKG=libffi brotli libev c-ares cunit nghttp2 libidn2 libunistring libpsl curl libssh2 libxml2 pax-utils llvm15 community/ghc llvm19 rust community/go}
 # FIXME: Maybe subdivide into ghc, rust, and go stuff
 : ${MKINITFS=libcap-ng sqlite ncurses util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs}
-#: ${OPENSSH=ncurses libedit openssh}
+#: ${OPENSSH=openssh}
 
 if [ -z "$TARGET_ARCH" ]; then
 	program=$(basename $0)
