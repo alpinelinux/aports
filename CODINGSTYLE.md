@@ -142,7 +142,12 @@ newapkbuild and existing APKBUILDs.
 
 ### Maintainer Comment
 
-* Deprecated, see *Maintainer Variable* below.
+* All APKBUILDs contain exactly one maintainer comment containing a
+  valid RFC 5322 address. For example, `# Maintainer: Max Mustermann
+  <max@example.org>`.
+* The Maintainer comment should immediately follow the Contributor comment(s).
+* In the case of package being abandoned, the comment should still be present,
+  but left empty: `# Maintainer:`.
 
 ## Metadata Variables
 
@@ -155,6 +160,8 @@ Metadata Variables are variables used directly by abuild itself, e.g. `pkgname` 
 
 ### Maintainer Variable
 
+* **NOTE:** There is a ongoing discussion wheather to use the Maintainer
+  Variable, see https://gitlab.alpinelinux.org/alpine/tsc/-/issues/88.
 * All APKBUILDs should contain exactly one variable named `maintainer`,
   containing a valid RFC 5322 address. For example,
   `maintainer="Max Mustermann <max@example.org>"`.
