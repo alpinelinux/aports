@@ -4,9 +4,9 @@ This documents defines a policy for writing APKBUILDs.
 
 # Standard selection
 
-APKBUILDs are POSIX shell scripts as defined in [POSIX.1-2017 Volume 3]
-[POSIX.1-2017 volume 3]. Additionally, the following extensions are
-supported:
+APKBUILDs are POSIX shell scripts as defined in
+[POSIX.1-2017 Volume 3][POSIX.1-2017 volume 3]. Additionally, the following
+extensions are supported:
 
 1. The `local` keyword for introducing variables local to a function is
    supported, it is briefly documented in the [bash manual][bash functions].
