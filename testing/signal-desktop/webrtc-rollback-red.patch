@@ -1,0 +1,138 @@
+diff --git a/webrtc/ringrtc/rffi/src/sdp_observer.cc b/webrtc/ringrtc/rffi/src/sdp_observer.cc
+index d60f3d5e7ba..d561dedd1d0 100644
+--- a/webrtc/ringrtc/rffi/src/sdp_observer.cc
++++ b/webrtc/ringrtc/rffi/src/sdp_observer.cc
+@@ -6,7 +6,7 @@
+ #include "rffi/api/sdp_observer_intf.h"
+ #include "rffi/src/ptr.h"
+ #include "rffi/src/sdp_observer.h"
+-#include "third_party/re2/src/re2/re2.h"
++#include <regex>
+ 
+ namespace webrtc {
+ namespace rffi {
+@@ -29,10 +29,8 @@ void CreateSessionDescriptionObserverRffi::OnSuccess(SessionDescriptionInterface
+   // TODO tweak the response a little
+   std::string sdp;
+   if (session_description->ToString(&sdp)) {
+-    static LazyRE2 fmtp_re = {"(a=fmtp:111 ((?!cbr=).)*)\r?\n"};
+-    RE2::Replace(&sdp, *fmtp_re, "$1;cbr=1\r\n");
+-    static LazyRE2 ssrc_re = {".+urn:ietf:params:rtp-hdrext:ssrc-audio-level.*\r?\n"};
+-    RE2::Replace(&sdp, *ssrc_re, "");
++    sdp = std::regex_replace(sdp, std::regex("(a=fmtp:111 ((?!cbr=).)*)\r?\n"), "$1;cbr=1\r\n");
++    sdp = std::regex_replace(sdp, std::regex(".+urn:ietf:params:rtp-hdrext:ssrc-audio-level.*\r?\n"), "");
+ 
+     std::unique_ptr<SessionDescriptionInterface> session_description2 = CreateSessionDescription(session_description->GetType(), sdp);
+     delete session_description;
+diff --git a/webrtc/ringrtc/rffi/BUILD.gn b/webrtc/ringrtc/rffi/BUILD.gn
+index 4564e734e63..341535b0fc7 100644
+--- a/webrtc/ringrtc/rffi/BUILD.gn
++++ b/webrtc/ringrtc/rffi/BUILD.gn
+@@ -58,7 +58,6 @@ if (is_android) {
+       "${android_sdk}:libjingle_peerconnection_jni",
+       "${android_sdk}:libjingle_peerconnection_metrics_default_jni",
+       "//pc:libjingle_peerconnection",
+-      "//third_party/re2",
+     ]
+     output_extension = "so"
+   }
+@@ -78,7 +77,6 @@ if (is_ios) {
+ 
+     deps = [
+       "//third_party/libyuv",
+-      "//third_party/re2",
+     ]
+   }
+ }
+@@ -94,7 +92,6 @@ if (is_linux || is_mac || is_win) {
+     deps = [
+       "//sdk:media_constraints",
+       "//media:rtc_simulcast_encoder_adapter",
+-      "//third_party/re2",
+     ]
+   }
+ }
+diff --git a/webrtc/ringrtc/rffi/api/peer_connection_intf.h b/webrtc/ringrtc/rffi/api/peer_connection_intf.h
+index 66958254fed..4cd223beb93 100644
+--- a/webrtc/ringrtc/rffi/api/peer_connection_intf.h
++++ b/webrtc/ringrtc/rffi/api/peer_connection_intf.h
+@@ -105,6 +105,7 @@ RUSTEXPORT webrtc::SessionDescriptionInterface*
+ Rust_sessionDescriptionFromV4(bool offer,
+                               const RffiConnectionParametersV4* v4_borrowed,
+                               bool enable_tcc_audio,
++                              bool enable_red_audio,
+                               bool enable_vp9);
+ 
+ RUSTEXPORT void
+diff --git a/webrtc/ringrtc/rffi/src/peer_connection.cc b/webrtc/ringrtc/rffi/src/peer_connection.cc
+index 9db5ed8219d..0714b3589e3 100644
+--- a/webrtc/ringrtc/rffi/src/peer_connection.cc
++++ b/webrtc/ringrtc/rffi/src/peer_connection.cc
+@@ -42,6 +42,7 @@ int VIDEO_LAYERS_ALLOCATION_EXT_ID = 14;
+ // 101 used by connection.rs
+ int DATA_PT = 101;
+ int OPUS_PT = 102;
++int OPUS_RED_PT = 105;
+ int VP8_PT = 108;
+ int VP8_RTX_PT = 118;
+ int VP9_PT = 109;
+@@ -317,12 +318,14 @@ RUSTEXPORT webrtc::SessionDescriptionInterface*
+ Rust_sessionDescriptionFromV4(bool offer,
+                               const RffiConnectionParametersV4* v4_borrowed,
+                               bool enable_tcc_audio,
++                              bool enable_red_audio,
+                               bool enable_vp9) {
+   // Major changes from the default WebRTC behavior:
+   // 1. We remove all codecs except Opus, VP8, and VP9
+   // 2. We remove all header extensions except for transport-cc, video orientation,
+   //    and abs send time.
+   // 3. Opus CBR and DTX is enabled.
++  // 4. RED is enabled for audio.
+ 
+   // For some reason, WebRTC insists that the video SSRCs for one side don't 
+   // overlap with SSRCs from the other side.  To avoid potential problems, we'll give the
+@@ -361,6 +364,15 @@ Rust_sessionDescriptionFromV4(bool offer,
+   auto video = std::make_unique<cricket::VideoContentDescription>();
+   set_rtp_params(video.get());
+ 
++  // Turn on the RED "meta codec" for Opus redundancy.
++  auto opus_red = cricket::CreateAudioCodec(OPUS_RED_PT, cricket::kRedCodecName, 48000, 2);
++  opus_red.SetParam("", std::to_string(OPUS_PT) + "/" + std::to_string(OPUS_PT));
++
++  if (enable_red_audio) {
++    // Add RED before Opus to use it by default when sending.
++    audio->AddCodec(opus_red);
++  }
++
+   auto opus = cricket::CreateAudioCodec(OPUS_PT, cricket::kOpusCodecName, 48000, 2);
+   // These are the current defaults for WebRTC
+   // We set them explicitly to avoid having the defaults change on us.
+@@ -378,6 +390,11 @@ Rust_sessionDescriptionFromV4(bool offer,
+   opus.AddFeedbackParam(cricket::FeedbackParam(cricket::kRtcpFbParamTransportCc, cricket::kParamValueEmpty));
+   audio->AddCodec(opus);
+ 
++  if (!enable_red_audio) {
++    // Add RED after Opus so that RED packets can at least be decoded properly if received.
++    audio->AddCodec(opus_red);
++  }
++
+   auto add_video_feedback_params = [] (cricket::Codec* video_codec) {
+     video_codec->AddFeedbackParam(cricket::FeedbackParam(cricket::kRtcpFbParamTransportCc, cricket::kParamValueEmpty));
+     video_codec->AddFeedbackParam(cricket::FeedbackParam(cricket::kRtcpFbParamCcm, cricket::kRtcpFbCcmParamFir));
+@@ -589,9 +606,16 @@ CreateSessionDescriptionForGroupCall(bool local,
+   opus.SetParam("cbr", "1");
+   opus.AddFeedbackParam(cricket::FeedbackParam(cricket::kRtcpFbParamTransportCc, cricket::kParamValueEmpty));
+ 
++  // Turn on the RED "meta codec" for Opus redundancy.
++  auto opus_red = cricket::CreateAudioCodec(OPUS_RED_PT, cricket::kRedCodecName, 48000, 2);
++  opus_red.SetParam("", std::to_string(OPUS_PT) + "/" + std::to_string(OPUS_PT));
++
++  // Add RED after Opus so that RED packets can at least be decoded properly if received.
+   local_audio->AddCodec(opus);
++  local_audio->AddCodec(opus_red);
+   for (auto& remote_audio : remote_audios) {
+     remote_audio->AddCodec(opus);
++    remote_audio->AddCodec(opus_red);
+   }
+ 
+   auto add_video_feedback_params = [] (cricket::Codec* video_codec) {
