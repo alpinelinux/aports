@@ -1,0 +1,338 @@
+maintainer="fossdd <fossdd@pwned.life>"
+_flavor=stable
+pkgname=linux-$_flavor
+pkgver=6.14.5
+_kernver=${pkgver%.*}
+pkgrel=0
+pkgdesc="Linux stable kernel"
+url="https://www.kernel.org"
+depends="initramfs-generator"
+_depends_dev="perl gmp-dev mpc1-dev mpfr-dev elfutils-dev bash flex bison zstd"
+makedepends="$_depends_dev sed installkernel bc linux-headers linux-firmware-any openssl-dev>3 mawk
+	diffutils findutils zstd pahole python3 gcc>=13.1.1_git20230624"
+options="!strip !check"
+_config=${config:-config-stable.${CARCH}}
+source="https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/linux-$_kernver.tar.xz
+	0001-powerpc-boot-wrapper-Add-z-notext-flag-for-ppc64le.patch
+	0002-x86-Compress-vmlinux-with-zstd-19-instead-of-22.patch
+	0003-kexec-add-kexec_load_disabled-boot-option.patch
+	0004-objtool-respect-AWK-setting.patch
+	0005-powerpc-config-defang-gcc-check-for-stack-protector-.patch
+
+	stable.aarch64.config
+	stable.armv7.config
+	stable.loongarch64.config
+	stable.ppc64le.config
+	stable.riscv64.config
+	stable.s390x.config
+	stable.x86.config
+	stable.x86_64.config
+	"
+subpackages="$pkgname-dev:_dev:$CBUILD_ARCH $pkgname-doc"
+for _i in $source; do
+	case $_i in
+	*.$CARCH.config)
+		_f=${_i%."$CARCH".config}
+		_flavors="$_flavors $_f"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-$_f::$CBUILD_ARCH linux-$_f-dev:_dev:$CBUILD_ARCH"
+		fi
+		;;
+	esac
+done
+builddir="$srcdir"/linux-$_kernver
+
+if [ "${pkgver%.0}" = "$pkgver" ]; then
+	# Prepend to apply first
+	source="patch-$pkgver.patch.xz::https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/patch-$pkgver.xz $source"
+fi
+arch="all !armhf"
+license="GPL-2.0-only"
+
+prepare() {
+	default_prepare
+
+	# remove localversion from patch if any
+	rm -f localversion*
+}
+
+_kernelarch() {
+	local arch="$1"
+	case "$arch" in
+		aarch64*) arch="arm64" ;;
+		arm*) arch="arm" ;;
+		ppc*) arch="powerpc" ;;
+		s390*) arch="s390" ;;
+		riscv*) arch="riscv" ;;
+		loongarch64) arch="loongarch" ;;
+	esac
+	echo "$arch"
+}
+
+_prepareconfig() {
+	local _flavor="$1"
+	local _arch="$2"
+	local _config=$_flavor.$_arch.config
+	local _builddir="$srcdir"/build-$_flavor.$_arch
+	mkdir -p "$_builddir"
+	echo "-$pkgrel-$_flavor" > "$_builddir"/localversion-alpine
+
+	cp "$srcdir"/$_config "$_builddir"/.config
+	msg "Configuring $_flavor kernel ($_arch)"
+	make -C "$builddir" \
+		O="$_builddir" \
+		ARCH="$(_kernelarch $_arch)" \
+		olddefconfig
+
+	if grep "CONFIG_MODULE_SIG=y" "$_builddir"/.config >/dev/null; then
+		if [ -f "$KERNEL_SIGNING_KEY" ]; then
+			sed -i -e "s:^CONFIG_MODULE_SIG_KEY=.*:CONFIG_MODULE_SIG_KEY=\"$KERNEL_SIGNING_KEY\":" \
+				"$_builddir"/.config
+			msg "Using $KERNEL_SIGNING_KEY to sign $_flavor kernel ($_arch) modules"
+		else
+			warning "KERNEL_SIGNING_KEY was not set. A signing key will be generated, but 3rd"
+			warning "party modules can not be signed"
+		fi
+	fi
+}
+
+listconfigs() {
+	for i in $source; do
+		case "$i" in
+			*.config) echo $i;;
+		esac
+	done
+}
+
+prepareconfigs() {
+	for _config in $(listconfigs); do
+		local _flavor=${_config%%.*}
+		local _arch=${_config%.config}
+		_arch=${_arch#*.}
+		local _builddir="$srcdir"/build-$_flavor.$_arch
+		_prepareconfig "$_flavor" "$_arch"
+	done
+}
+
+# this is supposed to be run before version is bumped so we can compare
+# what new kernel config knobs are introduced
+prepareupdate() {
+	clean && fetch && unpack && prepare && deps
+	prepareconfigs
+	rm -r "$builddir"
+}
+
+updateconfigs() {
+	if ! [ -d "$builddir" ]; then
+		deps && fetch && unpack && prepare
+	fi
+	for _config in ${CONFIGS:-$(listconfigs)}; do
+		msg "updating $_config"
+		local _flavor=${_config%%.*}
+		local _arch=${_config%.config}
+		_arch=${_arch#*.}
+		local _builddir="$srcdir"/build-$_flavor.$_arch
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$_flavor" > "$_builddir"/localversion-alpine
+		local actions="listnewconfig oldconfig"
+		if ! [ -f "$_builddir"/.config ]; then
+			cp "$srcdir"/$_config "$_builddir"/.config
+			actions="olddefconfig"
+		fi
+		env | grep ^CONFIG_ >> "$_builddir"/.config || true
+		make -j1 -C "$builddir" \
+			O="$_builddir" \
+			ARCH="$(_kernelarch $_arch)" \
+			$actions savedefconfig
+
+		cp "$_builddir"/defconfig "$startdir"/$_config
+	done
+}
+
+set_kbuild_timestamp() {
+	# KBUILD_BUILD_TIMESTAMP needs to be parsable by busybox date
+	export KBUILD_BUILD_TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S' -u${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+}
+
+build() {
+	unset LDFLAGS
+	# for some reason these sometimes leak into the kernel build,
+	# -Werror=format-security breaks some stuff
+	unset CFLAGS CPPFLAGS CXXFLAGS
+	set_kbuild_timestamp
+	for i in $_flavors; do
+		_prepareconfig "$i" "$CARCH"
+	done
+	for i in $_flavors; do
+		msg "Building $i kernel"
+		cd "$srcdir"/build-$i.$CARCH
+
+		# set org in cert for modules signing
+		# https://www.kernel.org/doc/html/v6.1/admin-guide/module-signing.html#generating-signing-keys
+		mkdir -p certs
+		sed -e 's/#O = Unspecified company/O = alpinelinux.org/' \
+			"$builddir"/certs/default_x509.genkey \
+			> certs/x509.genkey
+
+		make ARCH="$(_kernelarch $CARCH)" \
+			CC="${CC:-gcc}" \
+			AWK="${AWK:-mawk}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+	done
+}
+
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	set_kbuild_timestamp
+
+	cd "$srcdir"/build-$_buildflavor.$CARCH
+	local _abi_release="$(make -s kernelrelease)"
+	# modules_install seems to regenerate a defect Modules.symvers on s390x. Work
+	# around it by backing it up and restore it after modules_install
+	cp Module.symvers Module.symvers.backup
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+
+	local _install
+	case "$CARCH" in
+		arm*|aarch64|riscv*) _install="zinstall dtbs_install";;
+		*) _install=install;;
+	esac
+
+	make modules_install $_install \
+		ARCH="$(_kernelarch $CARCH)" \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_PATH="$_outdir"/boot \
+		INSTALL_DTBS_PATH="$_outdir/boot/dtbs-$_buildflavor"
+
+	cp Module.symvers.backup Module.symvers
+
+	rm -f "$_outdir"/lib/modules/"$_abi_release"/build \
+		"$_outdir"/lib/modules/"$_abi_release"/source
+	rm -rf "$_outdir"/lib/firmware
+
+	install -D -m644 include/config/kernel.release \
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+
+	case "$CARCH" in
+	loongarch64)
+		mv  "$_outdir"/boot/vmlinuz-$_abi_release \
+			"$_outdir"/boot/vmlinuz-$_buildflavor
+
+		mv  "$_outdir"/boot/config-$_abi_release \
+			"$_outdir"/boot/config-$_buildflavor
+
+		mv  "$_outdir"/boot/System.map-$_abi_release \
+			"$_outdir"/boot/System.map-$_buildflavor
+		;;
+	esac
+}
+
+# main flavor installs in $pkgdir
+package() {
+	depends="$depends linux-firmware-any"
+
+	_package "$_flavor" "$pkgdir"
+
+	# copy files for linux-stable-doc sub package
+	mkdir -p "$pkgdir"/usr/share/doc
+	cp -r "$builddir"/Documentation \
+		"$pkgdir"/usr/share/doc/linux-doc-"$pkgver"/
+	# remove files that aren't part of the documentation itself
+	for nondoc in .gitignore conf.py docutils.conf Kconfig Makefile; do
+		rm "$pkgdir"/usr/share/doc/linux-doc-"$pkgver"/"$nondoc"
+	done
+	# create /usr/share/doc/linux-doc symlink
+	cd "$pkgdir"/usr/share/doc; ln -s linux-doc-"$pkgver" linux-doc
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _builddir="$srcdir"/build-$_flavor.$CARCH
+	local _abi_release="$(make -C "$_builddir" -s kernelrelease)"
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# similar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="$_depends_dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-"$_abi_release"
+	set_kbuild_timestamp
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	cp -a "$_builddir"/.config "$_builddir"/localversion-alpine \
+		"$dir"/
+
+	install -D -t "$dir"/certs "$_builddir"/certs/signing_key.x509 || :
+
+	make -C "$builddir" \
+		O="$dir" \
+		ARCH="$(_kernelarch $CARCH)" \
+		AWK="${AWK:-mawk}" \
+		prepare modules_prepare scripts
+
+	# remove the stuff that points to real sources. we want 3rd party
+	# modules to believe this is the sources
+	rm "$dir"/Makefile "$dir"/source
+
+	# copy the needed stuff from real sources
+	#
+	# this is taken from ubuntu kernel build script
+	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
+	cd "$builddir"
+	find .  -path './include/*' -prune \
+		-o -path './scripts/*' -prune -o -type f \
+		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
+		   -name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) \
+		-print | cpio -pdm "$dir"
+
+	cp -a scripts include "$dir"
+
+	find "arch/$_karch" -name include -type d -print | while IFS='' read -r folder; do
+		find "$folder" -type f
+	done | sort -u | cpio -pdm "$dir"
+
+	install -Dm644 "$srcdir"/build-$_flavor.$CARCH/Module.symvers \
+		"$dir"/Module.symvers
+
+	# remove unneeded things
+	msg "Removing documentation..."
+	rm -r "$dir"/Documentation
+	find "$dir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+	local _karch="$(_kernelarch $CARCH | sed 's/x86_64/x86/')"
+	msg "Removing unneeded arch headers..."
+	for i in "$dir"/arch/*; do
+		if [ "${i##*/}" != "$_karch" ]; then
+			echo "  ${i##*/}"
+			rm -r "$i"
+		fi
+	done
+
+	mkdir -p "$subpkgdir"/lib/modules/"$_abi_release"
+	ln -sf /usr/src/linux-headers-"$_abi_release" \
+		"$subpkgdir"/lib/modules/"$_abi_release"/build
+}
+
+sha512sums="
+35f5a5e2a3d4029b98f0f944482257062616313fece87aba56e8f8ef8c5ccb2139caffae60947dd05ad3a6f43bee2488822ff7991beda742351cafd0a286a2dc  patch-6.14.5.patch.xz
+71dcaa3772d8d9797c3ae30cae9c582b11a7047a3bbcb8dfd479a4dffb40ff0da74cf3d45175f50cc9992e338bcadd46c9c570f54054ca3bde6661768d3d22eb  linux-6.14.tar.xz
+b296717ef0cd63978142b4d47b3bc49faa04daf77e115e702ba611cc254a6e782cdab7d5639e724cd5f029cfb6a3dc33c3036f346d681d1fdfe0df723c7e0321  0001-powerpc-boot-wrapper-Add-z-notext-flag-for-ppc64le.patch
+055e10e7b3e00bb3621389315d5206a8feb5022a1f0dc51c3aa107facfe83d191da05a502a0c62488be7299677a63c1da84f87c42cbf3125788c56db67e810ee  0002-x86-Compress-vmlinux-with-zstd-19-instead-of-22.patch
+7e066473fd0e234a279280eee0351bf9c3efab1e7ad0e1a85cb62193e63df06a7641015229445aaab6f68019c4852e6731b2cb3c4a54c0dbe405fac12b365873  0003-kexec-add-kexec_load_disabled-boot-option.patch
+28c83be4c97152001381cd5e3a8acb8552a42d9dac9aaec8f096e3762b7944035aa5a4363fb4602f9bb427c4f72cfd2f996a0a725f7f9e07ab250317985aff9e  0004-objtool-respect-AWK-setting.patch
+5ce79416f8f111c36393718656e3eeb4cb0adccd117dcf661876d1564010e5c58b6351cc4116d187d0a9a838bcca0fecc236d81ac71afb940b89ccb14f21e179  0005-powerpc-config-defang-gcc-check-for-stack-protector-.patch
+385fab939910a4d3f02b022203345e36a735a5c7a50f17683c98a70c6fd316419b31992c9e0846aa372efe1c08cc18cb23ac2f727947b2399128d4d90a4886a3  stable.aarch64.config
+1129eb235038a2c2d9dfb0f3f57970e11c5cadfa0cb6f63ae2bd63820efa5be9aa30f4bcf3404ed50713d699794ef690c21d5b7d1a5e196bb3be215a38acfe05  stable.armv7.config
+0c538246531178f606c7944a0be601c403e5fe00637251a9bac99a327d107456392ac6aefc71bda54c3941298d2a64a4713042fe2571e858b7a20bc8f97954cc  stable.loongarch64.config
+03570352074ed4d6fea8ee8043e763bc14727b75cef9103981d80d70bb2a75bdf1b5664f51b37e7b52944b0b570aebe8f89cc80c105e08a69f7540e90b3904f4  stable.ppc64le.config
+06c79bfc8a3ed7e8a77bae814a43082585f929340f1e46418a49372d4b47a2a25b9f03fa2dcfa1c1650a9e077a1fa32cebb855969a596845a650e0ffeb569d65  stable.riscv64.config
+dae43140f666a1187e0ed9f59cc0ef6d61922de1a7ae85382a9fc71d187e5aaa3ece62217d4cd4c968c95b191703bcf33caa0f2632f905471df82d3c2e5e5259  stable.s390x.config
+864d3dab6c0d863a9a3c43d50071d1dcd93ab8ddcb44b6144f14d80faa2cbc216e9ba3c6c113869f52441f351cd7b8c7119847afc0479ace98cc019271607c1d  stable.x86.config
+6e7f9093086183250c88bda80fe99095b5b869a04ccff073f8e62129c32cf237dc103d4ce75ade47ac651bd79d1dd99659572339f3ddbf1bcb6e68fd0ef7d440  stable.x86_64.config
+"
