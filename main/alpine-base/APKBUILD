@@ -1,7 +1,7 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
 pkgname=alpine-base
 pkgver=3.22.0_alpha20250108
-pkgrel=0
+pkgrel=1
 pkgdesc="Meta package for minimal alpine base"
 url="https://alpinelinux.org"
 arch="noarch"
@@ -45,7 +45,7 @@ release() {
 	# create /etc/issue
 	cat >"$subpkgdir"/etc/issue<<EOF
 Welcome to Alpine Linux $_ver
-Kernel \\r on an \\m (\\l)
+Kernel \\r on \\m (\\l)
 
 EOF
 
