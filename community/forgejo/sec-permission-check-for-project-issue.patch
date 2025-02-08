@@ -1,0 +1,629 @@
+Patch-Source: https://codeberg.org/forgejo/forgejo/pulls/6838
+---
+From 77fc232e5b4f2e0b7cd39ee3e5d4aa1d550031bd Mon Sep 17 00:00:00 2001
+From: Gusted <postmaster@gusted.xyz>
+Date: Wed, 29 Jan 2025 09:47:37 +0100
+Subject: [PATCH 1/2] fix(sec): permission check for project issue
+
+- Do an access check when loading issues for a project column, currently
+this is not done and exposes the title, labels and existence of a
+private issue that the viewer of the project board may not have access
+to.
+- The number of issues cannot be calculated in a efficient manner
+and stored in the database because their number may vary depending on
+the visibility of the repositories participating in the project. The
+previous implementation used the pre-calculated numbers stored in each
+project, which did not reflect that potential variation.
+- The code is derived from https://github.com/go-gitea/gitea/pull/22865
+
+(cherry picked from commit 2193afaeb9954a5778f5a47aafd0e6fbbf48d000)
+---
+ models/issues/issue_project.go | 62 ++++++++++++++++++++++++++++------
+ models/project/column.go       | 14 --------
+ models/project/issue.go        | 14 --------
+ routers/web/org/projects.go    | 15 +++++++-
+ routers/web/repo/projects.go   | 15 +++++++-
+ templates/projects/list.tmpl   |  4 +--
+ templates/projects/view.tmpl   |  2 +-
+ 7 files changed, 83 insertions(+), 43 deletions(-)
+
+diff --git a/models/issues/issue_project.go b/models/issues/issue_project.go
+index 835ea1db52..f606b713cf 100644
+--- a/models/issues/issue_project.go
++++ b/models/issues/issue_project.go
+@@ -7,8 +7,10 @@ import (
+ 	"context"
+ 
+ 	"code.gitea.io/gitea/models/db"
++	org_model "code.gitea.io/gitea/models/organization"
+ 	project_model "code.gitea.io/gitea/models/project"
+ 	user_model "code.gitea.io/gitea/models/user"
++	"code.gitea.io/gitea/modules/optional"
+ 	"code.gitea.io/gitea/modules/util"
+ )
+ 
+@@ -48,22 +50,29 @@ func (issue *Issue) ProjectColumnID(ctx context.Context) int64 {
+ }
+ 
+ // LoadIssuesFromColumn load issues assigned to this column
+-func LoadIssuesFromColumn(ctx context.Context, b *project_model.Column) (IssueList, error) {
+-	issueList, err := Issues(ctx, &IssuesOptions{
++func LoadIssuesFromColumn(ctx context.Context, b *project_model.Column, doer *user_model.User, org *org_model.Organization, isClosed optional.Option[bool]) (IssueList, error) {
++	issueOpts := &IssuesOptions{
+ 		ProjectColumnID: b.ID,
+ 		ProjectID:       b.ProjectID,
+ 		SortType:        "project-column-sorting",
+-	})
++		IsClosed:        isClosed,
++	}
++	if doer != nil {
++		issueOpts.User = doer
++		issueOpts.Org = org
++	} else {
++		issueOpts.AllPublic = true
++	}
++
++	issueList, err := Issues(ctx, issueOpts)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+ 	if b.Default {
+-		issues, err := Issues(ctx, &IssuesOptions{
+-			ProjectColumnID: db.NoConditionID,
+-			ProjectID:       b.ProjectID,
+-			SortType:        "project-column-sorting",
+-		})
++		issueOpts.ProjectColumnID = db.NoConditionID
++
++		issues, err := Issues(ctx, issueOpts)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -78,10 +87,10 @@ func LoadIssuesFromColumn(ctx context.Context, b *project_model.Column) (IssueLi
+ }
+ 
+ // LoadIssuesFromColumnList load issues assigned to the columns
+-func LoadIssuesFromColumnList(ctx context.Context, bs project_model.ColumnList) (map[int64]IssueList, error) {
++func LoadIssuesFromColumnList(ctx context.Context, bs project_model.ColumnList, doer *user_model.User, org *org_model.Organization, isClosed optional.Option[bool]) (map[int64]IssueList, error) {
+ 	issuesMap := make(map[int64]IssueList, len(bs))
+ 	for i := range bs {
+-		il, err := LoadIssuesFromColumn(ctx, bs[i])
++		il, err := LoadIssuesFromColumn(ctx, bs[i], doer, org, isClosed)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -160,3 +169,36 @@ func IssueAssignOrRemoveProject(ctx context.Context, issue *Issue, doer *user_mo
+ 		})
+ 	})
+ }
++
++// NumIssuesInProjects returns the amount of issues assigned to one of the project
++// in the list which the doer can access.
++func NumIssuesInProjects(ctx context.Context, pl []*project_model.Project, doer *user_model.User, org *org_model.Organization, isClosed optional.Option[bool]) (map[int64]int, error) {
++	numMap := make(map[int64]int, len(pl))
++	for _, p := range pl {
++		num, err := NumIssuesInProject(ctx, p, doer, org, isClosed)
++		if err != nil {
++			return nil, err
++		}
++		numMap[p.ID] = num
++	}
++
++	return numMap, nil
++}
++
++// NumIssuesInProject returns the amount of issues assigned to the project which
++// the doer can access.
++func NumIssuesInProject(ctx context.Context, p *project_model.Project, doer *user_model.User, org *org_model.Organization, isClosed optional.Option[bool]) (int, error) {
++	numIssuesInProject := int(0)
++	bs, err := p.GetColumns(ctx)
++	if err != nil {
++		return 0, err
++	}
++	im, err := LoadIssuesFromColumnList(ctx, bs, doer, org, isClosed)
++	if err != nil {
++		return 0, err
++	}
++	for _, il := range im {
++		numIssuesInProject += len(il)
++	}
++	return numIssuesInProject, nil
++}
+diff --git a/models/project/column.go b/models/project/column.go
+index 222f448599..f6d6614004 100644
+--- a/models/project/column.go
++++ b/models/project/column.go
+@@ -57,20 +57,6 @@ func (Column) TableName() string {
+ 	return "project_board" // TODO: the legacy table name should be project_column
+ }
+ 
+-// NumIssues return counter of all issues assigned to the column
+-func (c *Column) NumIssues(ctx context.Context) int {
+-	total, err := db.GetEngine(ctx).Table("project_issue").
+-		Where("project_id=?", c.ProjectID).
+-		And("project_board_id=?", c.ID).
+-		GroupBy("issue_id").
+-		Cols("issue_id").
+-		Count()
+-	if err != nil {
+-		return 0
+-	}
+-	return int(total)
+-}
+-
+ func (c *Column) GetIssues(ctx context.Context) ([]*ProjectIssue, error) {
+ 	issues := make([]*ProjectIssue, 0, 5)
+ 	if err := db.GetEngine(ctx).Where("project_id=?", c.ProjectID).
+diff --git a/models/project/issue.go b/models/project/issue.go
+index 3361b533b9..984f47ee7c 100644
+--- a/models/project/issue.go
++++ b/models/project/issue.go
+@@ -34,20 +34,6 @@ func deleteProjectIssuesByProjectID(ctx context.Context, projectID int64) error
+ 	return err
+ }
+ 
+-// NumIssues return counter of all issues assigned to a project
+-func (p *Project) NumIssues(ctx context.Context) int {
+-	c, err := db.GetEngine(ctx).Table("project_issue").
+-		Where("project_id=?", p.ID).
+-		GroupBy("issue_id").
+-		Cols("issue_id").
+-		Count()
+-	if err != nil {
+-		log.Error("NumIssues: %v", err)
+-		return 0
+-	}
+-	return int(c)
+-}
+-
+ // NumClosedIssues return counter of closed issues assigned to a project
+ func (p *Project) NumClosedIssues(ctx context.Context) int {
+ 	c, err := db.GetEngine(ctx).Table("project_issue").
+diff --git a/routers/web/org/projects.go b/routers/web/org/projects.go
+index 64d233fc45..6cc2a24c0f 100644
+--- a/routers/web/org/projects.go
++++ b/routers/web/org/projects.go
+@@ -126,6 +126,19 @@ func Projects(ctx *context.Context) {
+ 	ctx.Data["PageIsViewProjects"] = true
+ 	ctx.Data["SortType"] = sortType
+ 
++	numOpenIssues, err := issues_model.NumIssuesInProjects(ctx, projects, ctx.Doer, ctx.Org.Organization, optional.Some(false))
++	if err != nil {
++		ctx.ServerError("NumIssuesInProjects", err)
++		return
++	}
++	numClosedIssues, err := issues_model.NumIssuesInProjects(ctx, projects, ctx.Doer, ctx.Org.Organization, optional.Some(true))
++	if err != nil {
++		ctx.ServerError("NumIssuesInProjects", err)
++		return
++	}
++	ctx.Data["NumOpenIssuesInProject"] = numOpenIssues
++	ctx.Data["NumClosedIssuesInProject"] = numClosedIssues
++
+ 	ctx.HTML(http.StatusOK, tplProjects)
+ }
+ 
+@@ -332,7 +345,7 @@ func ViewProject(ctx *context.Context) {
+ 		return
+ 	}
+ 
+-	issuesMap, err := issues_model.LoadIssuesFromColumnList(ctx, columns)
++	issuesMap, err := issues_model.LoadIssuesFromColumnList(ctx, columns, ctx.Doer, ctx.Org.Organization, optional.None[bool]())
+ 	if err != nil {
+ 		ctx.ServerError("LoadIssuesOfColumns", err)
+ 		return
+diff --git a/routers/web/repo/projects.go b/routers/web/repo/projects.go
+index f4b027dae1..5826418b63 100644
+--- a/routers/web/repo/projects.go
++++ b/routers/web/repo/projects.go
+@@ -125,6 +125,19 @@ func Projects(ctx *context.Context) {
+ 	ctx.Data["IsProjectsPage"] = true
+ 	ctx.Data["SortType"] = sortType
+ 
++	numOpenIssues, err := issues_model.NumIssuesInProjects(ctx, projects, ctx.Doer, ctx.Org.Organization, optional.Some(false))
++	if err != nil {
++		ctx.ServerError("NumIssuesInProjects", err)
++		return
++	}
++	numClosedIssues, err := issues_model.NumIssuesInProjects(ctx, projects, ctx.Doer, ctx.Org.Organization, optional.Some(true))
++	if err != nil {
++		ctx.ServerError("NumIssuesInProjects", err)
++		return
++	}
++	ctx.Data["NumOpenIssuesInProject"] = numOpenIssues
++	ctx.Data["NumClosedIssuesInProject"] = numClosedIssues
++
+ 	ctx.HTML(http.StatusOK, tplProjects)
+ }
+ 
+@@ -310,7 +323,7 @@ func ViewProject(ctx *context.Context) {
+ 		return
+ 	}
+ 
+-	issuesMap, err := issues_model.LoadIssuesFromColumnList(ctx, columns)
++	issuesMap, err := issues_model.LoadIssuesFromColumnList(ctx, columns, ctx.Doer, nil, optional.None[bool]())
+ 	if err != nil {
+ 		ctx.ServerError("LoadIssuesOfColumns", err)
+ 		return
+diff --git a/templates/projects/list.tmpl b/templates/projects/list.tmpl
+index b892cff996..6139bd4a3f 100644
+--- a/templates/projects/list.tmpl
++++ b/templates/projects/list.tmpl
+@@ -49,11 +49,11 @@
+ 				<div class="group">
+ 					<div class="flex-text-block">
+ 						{{svg "octicon-issue-opened" 14}}
+-						{{ctx.Locale.PrettyNumber (.NumOpenIssues ctx)}}&nbsp;{{ctx.Locale.Tr "repo.issues.open_title"}}
++						{{ctx.Locale.PrettyNumber (index $.NumOpenIssuesInProject .ID)}}&nbsp;{{ctx.Locale.Tr "repo.issues.open_title"}}
+ 					</div>
+ 					<div class="flex-text-block">
+ 						{{svg "octicon-check" 14}}
+-						{{ctx.Locale.PrettyNumber (.NumClosedIssues ctx)}}&nbsp;{{ctx.Locale.Tr "repo.issues.closed_title"}}
++						{{ctx.Locale.PrettyNumber (index $.NumClosedIssuesInProject .ID)}}&nbsp;{{ctx.Locale.Tr "repo.issues.closed_title"}}
+ 					</div>
+ 				</div>
+ 				{{if and $.CanWriteProjects (not $.Repository.IsArchived)}}
+diff --git a/templates/projects/view.tmpl b/templates/projects/view.tmpl
+index 08b08b95e5..0e2fc87958 100644
+--- a/templates/projects/view.tmpl
++++ b/templates/projects/view.tmpl
+@@ -70,7 +70,7 @@
+ 				<div class="project-column-header{{if $canWriteProject}} tw-cursor-grab{{end}}">
+ 					<div class="ui large label project-column-title tw-py-1">
+ 						<div class="ui small circular grey label project-column-issue-count">
+-							{{.NumIssues ctx}}
++							{{len (index $.IssuesMap .ID)}}
+ 						</div>
+ 						<span class="project-column-title-label">{{.Title}}</span>
+ 					</div>
+-- 
+2.45.2
+
+
+From 3b4f1b3469160f462b22cddaaecac5f7a251f860 Mon Sep 17 00:00:00 2001
+From: Gusted <postmaster@gusted.xyz>
+Date: Wed, 29 Jan 2025 11:50:25 +0100
+Subject: [PATCH 2/2] fix(sec): add tests for private issues on projects
+
+- Add integration and unit tests to ensure that private issues on
+projects are not shown in any way, shape or form when the doer has no
+access to it.
+
+(cherry picked from commit 55dcc1d06cb12ddb750a0289fbb6e212f93957a8)
+---
+ .../fixtures/PrivateIssueProjects/project.yml |  23 ++++
+ .../PrivateIssueProjects/project_board.yml    |  17 +++
+ .../PrivateIssueProjects/project_issue.yml    |  11 ++
+ models/fixtures/team_unit.yml                 |   7 ++
+ models/issues/issue_project_test.go           | 100 ++++++++++++++++++
+ tests/integration/private_project_test.go     |  84 +++++++++++++++
+ 6 files changed, 242 insertions(+)
+ create mode 100644 models/fixtures/PrivateIssueProjects/project.yml
+ create mode 100644 models/fixtures/PrivateIssueProjects/project_board.yml
+ create mode 100644 models/fixtures/PrivateIssueProjects/project_issue.yml
+ create mode 100644 models/issues/issue_project_test.go
+ create mode 100644 tests/integration/private_project_test.go
+
+diff --git a/models/fixtures/PrivateIssueProjects/project.yml b/models/fixtures/PrivateIssueProjects/project.yml
+new file mode 100644
+index 0000000000..cf63e4e413
+--- /dev/null
++++ b/models/fixtures/PrivateIssueProjects/project.yml
+@@ -0,0 +1,23 @@
++-
++  id: 1001
++  title: Org project that contains private issues
++  owner_id: 3
++  repo_id: 0
++  is_closed: false
++  creator_id: 2
++  board_type: 1
++  type: 3
++  created_unix: 1738000000
++  updated_unix: 1738000000
++
++-
++  id: 1002
++  title: User project that contains private issues
++  owner_id: 2
++  repo_id: 0
++  is_closed: false
++  creator_id: 2
++  board_type: 1
++  type: 1
++  created_unix: 1738000000
++  updated_unix: 1738000000
+diff --git a/models/fixtures/PrivateIssueProjects/project_board.yml b/models/fixtures/PrivateIssueProjects/project_board.yml
+new file mode 100644
+index 0000000000..3f1fe1e705
+--- /dev/null
++++ b/models/fixtures/PrivateIssueProjects/project_board.yml
+@@ -0,0 +1,17 @@
++-
++  id: 1001
++  project_id: 1001
++  title: Triage
++  creator_id: 2
++  default: true
++  created_unix: 1738000000
++  updated_unix: 1738000000
++
++-
++  id: 1002
++  project_id: 1002
++  title: Triage
++  creator_id: 2
++  default: true
++  created_unix: 1738000000
++  updated_unix: 1738000000
+diff --git a/models/fixtures/PrivateIssueProjects/project_issue.yml b/models/fixtures/PrivateIssueProjects/project_issue.yml
+new file mode 100644
+index 0000000000..222b2e5f71
+--- /dev/null
++++ b/models/fixtures/PrivateIssueProjects/project_issue.yml
+@@ -0,0 +1,11 @@
++-
++  id: 1001
++  issue_id: 6
++  project_id: 1001
++  project_board_id: 1001
++
++-
++  id: 1002
++  issue_id: 7
++  project_id: 1002
++  project_board_id: 1002
+diff --git a/models/fixtures/team_unit.yml b/models/fixtures/team_unit.yml
+index de0e8d738b..e8f8d0e422 100644
+--- a/models/fixtures/team_unit.yml
++++ b/models/fixtures/team_unit.yml
+@@ -1,42 +1,49 @@
+ -
+   id: 1
+   team_id: 1
++  org_id: 3
+   type: 1
+   access_mode: 4
+ 
+ -
+   id: 2
+   team_id: 1
++  org_id: 3
+   type: 2
+   access_mode: 4
+ 
+ -
+   id: 3
+   team_id: 1
++  org_id: 3
+   type: 3
+   access_mode: 4
+ 
+ -
+   id: 4
+   team_id: 1
++  org_id: 3
+   type: 4
+   access_mode: 4
+ 
+ -
+   id: 5
+   team_id: 1
++  org_id: 3
+   type: 5
+   access_mode: 4
+ 
+ -
+   id: 6
+   team_id: 1
++  org_id: 3
+   type: 6
+   access_mode: 4
+ 
+ -
+   id: 7
+   team_id: 1
++  org_id: 3
+   type: 7
+   access_mode: 4
+ 
+diff --git a/models/issues/issue_project_test.go b/models/issues/issue_project_test.go
+new file mode 100644
+index 0000000000..6ebc803722
+--- /dev/null
++++ b/models/issues/issue_project_test.go
+@@ -0,0 +1,100 @@
++// Copyright 2025 The Forgejo Authors. All rights reserved.
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package issues_test
++
++import (
++	"testing"
++
++	"code.gitea.io/gitea/models/db"
++	"code.gitea.io/gitea/models/issues"
++	"code.gitea.io/gitea/models/organization"
++	"code.gitea.io/gitea/models/project"
++	"code.gitea.io/gitea/models/unittest"
++	user_model "code.gitea.io/gitea/models/user"
++	"code.gitea.io/gitea/modules/optional"
++	"code.gitea.io/gitea/tests"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestPrivateIssueProjects(t *testing.T) {
++	defer tests.AddFixtures("models/fixtures/PrivateIssueProjects/")()
++	require.NoError(t, unittest.PrepareTestDatabase())
++
++	user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
++	t.Run("Organization project", func(t *testing.T) {
++		org := unittest.AssertExistsAndLoadBean(t, &organization.Organization{ID: 3})
++		orgProject := unittest.AssertExistsAndLoadBean(t, &project.Project{ID: 1001, OwnerID: org.ID})
++		column := unittest.AssertExistsAndLoadBean(t, &project.Column{ID: 1001, ProjectID: orgProject.ID})
++
++		t.Run("Authenticated user", func(t *testing.T) {
++			defer tests.PrintCurrentTest(t)()
++			issueList, err := issues.LoadIssuesFromColumn(db.DefaultContext, column, user2, org, optional.None[bool]())
++			require.NoError(t, err)
++			assert.Len(t, issueList, 1)
++			assert.EqualValues(t, 6, issueList[0].ID)
++
++			issuesNum, err := issues.NumIssuesInProject(db.DefaultContext, orgProject, user2, org, optional.None[bool]())
++			require.NoError(t, err)
++			assert.EqualValues(t, 1, issuesNum)
++
++			issuesNum, err = issues.NumIssuesInProject(db.DefaultContext, orgProject, user2, org, optional.Some(true))
++			require.NoError(t, err)
++			assert.EqualValues(t, 0, issuesNum)
++
++			issuesNum, err = issues.NumIssuesInProject(db.DefaultContext, orgProject, user2, org, optional.Some(false))
++			require.NoError(t, err)
++			assert.EqualValues(t, 1, issuesNum)
++		})
++
++		t.Run("Anonymous user", func(t *testing.T) {
++			defer tests.PrintCurrentTest(t)()
++			issueList, err := issues.LoadIssuesFromColumn(db.DefaultContext, column, nil, org, optional.None[bool]())
++			require.NoError(t, err)
++			assert.Empty(t, issueList)
++
++			issuesNum, err := issues.NumIssuesInProject(db.DefaultContext, orgProject, nil, org, optional.None[bool]())
++			require.NoError(t, err)
++			assert.EqualValues(t, 0, issuesNum)
++		})
++	})
++
++	t.Run("User project", func(t *testing.T) {
++		userProject := unittest.AssertExistsAndLoadBean(t, &project.Project{ID: 1002, OwnerID: user2.ID})
++		column := unittest.AssertExistsAndLoadBean(t, &project.Column{ID: 1002, ProjectID: userProject.ID})
++
++		t.Run("Authenticated user", func(t *testing.T) {
++			defer tests.PrintCurrentTest(t)()
++			issueList, err := issues.LoadIssuesFromColumn(db.DefaultContext, column, user2, nil, optional.None[bool]())
++			require.NoError(t, err)
++			assert.Len(t, issueList, 1)
++			assert.EqualValues(t, 7, issueList[0].ID)
++
++			issuesNum, err := issues.NumIssuesInProject(db.DefaultContext, userProject, user2, nil, optional.None[bool]())
++			require.NoError(t, err)
++			assert.EqualValues(t, 1, issuesNum)
++
++			issuesNum, err = issues.NumIssuesInProject(db.DefaultContext, userProject, user2, nil, optional.Some(true))
++			require.NoError(t, err)
++			assert.EqualValues(t, 0, issuesNum)
++
++			issuesNum, err = issues.NumIssuesInProject(db.DefaultContext, userProject, user2, nil, optional.Some(false))
++			require.NoError(t, err)
++			assert.EqualValues(t, 1, issuesNum)
++		})
++
++		t.Run("Anonymous user", func(t *testing.T) {
++			defer tests.PrintCurrentTest(t)()
++
++			issueList, err := issues.LoadIssuesFromColumn(db.DefaultContext, column, nil, nil, optional.None[bool]())
++			require.NoError(t, err)
++			assert.Empty(t, issueList)
++
++			issuesNum, err := issues.NumIssuesInProject(db.DefaultContext, userProject, nil, nil, optional.None[bool]())
++			require.NoError(t, err)
++			assert.EqualValues(t, 0, issuesNum)
++		})
++	})
++}
+diff --git a/tests/integration/private_project_test.go b/tests/integration/private_project_test.go
+new file mode 100644
+index 0000000000..1a4adb4366
+--- /dev/null
++++ b/tests/integration/private_project_test.go
+@@ -0,0 +1,84 @@
++// Copyright 2025 The Forgejo Authors. All rights reserved.
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package integration
++
++import (
++	"net/http"
++	"strings"
++	"testing"
++
++	org_model "code.gitea.io/gitea/models/organization"
++	project_model "code.gitea.io/gitea/models/project"
++	"code.gitea.io/gitea/models/unittest"
++	user_model "code.gitea.io/gitea/models/user"
++	"code.gitea.io/gitea/tests"
++
++	"github.com/stretchr/testify/assert"
++)
++
++func TestPrivateIssueProject(t *testing.T) {
++	defer tests.AddFixtures("models/fixtures/PrivateIssueProjects/")()
++	defer tests.PrepareTestEnv(t)()
++
++	user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
++	sess := loginUser(t, user2.Name)
++
++	test := func(t *testing.T, sess *TestSession, username string, projectID int64, hasAccess bool) {
++		t.Helper()
++		defer tests.PrintCurrentTest(t, 1)()
++
++		// Test that the projects overview page shows the correct open and close issues.
++		req := NewRequestf(t, "GET", "%s/-/projects", username)
++		resp := sess.MakeRequest(t, req, http.StatusOK)
++
++		htmlDoc := NewHTMLParser(t, resp.Body)
++		openCloseStats := htmlDoc.Find(".milestone-toolbar .group").First().Text()
++		if hasAccess {
++			assert.Contains(t, openCloseStats, "1\u00a0Open")
++		} else {
++			assert.Contains(t, openCloseStats, "0\u00a0Open")
++		}
++		assert.Contains(t, openCloseStats, "0\u00a0Closed")
++
++		// Check that on the project itself the issue is not shown.
++		req = NewRequestf(t, "GET", "%s/-/projects/%d", username, projectID)
++		resp = sess.MakeRequest(t, req, http.StatusOK)
++
++		htmlDoc = NewHTMLParser(t, resp.Body)
++		htmlDoc.AssertElement(t, ".project-column .issue-card", hasAccess)
++
++		// And that the issue count is correct.
++		issueCount := strings.TrimSpace(htmlDoc.Find(".project-column-issue-count").Text())
++		if hasAccess {
++			assert.EqualValues(t, "1", issueCount)
++		} else {
++			assert.EqualValues(t, "0", issueCount)
++		}
++	}
++
++	t.Run("Organization project", func(t *testing.T) {
++		org := unittest.AssertExistsAndLoadBean(t, &org_model.Organization{ID: 3})
++		orgProject := unittest.AssertExistsAndLoadBean(t, &project_model.Project{ID: 1001, OwnerID: org.ID})
++
++		t.Run("Authenticated user", func(t *testing.T) {
++			test(t, sess, org.Name, orgProject.ID, true)
++		})
++
++		t.Run("Anonymous user", func(t *testing.T) {
++			test(t, emptyTestSession(t), org.Name, orgProject.ID, false)
++		})
++	})
++
++	t.Run("User project", func(t *testing.T) {
++		userProject := unittest.AssertExistsAndLoadBean(t, &project_model.Project{ID: 1002, OwnerID: user2.ID})
++
++		t.Run("Authenticated user", func(t *testing.T) {
++			test(t, sess, user2.Name, userProject.ID, true)
++		})
++
++		t.Run("Anonymous user", func(t *testing.T) {
++			test(t, emptyTestSession(t), user2.Name, userProject.ID, false)
++		})
++	})
++}
+-- 
+2.45.2
+

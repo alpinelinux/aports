@@ -1,0 +1,737 @@
+Patch-Source: https://codeberg.org/forgejo/forgejo/pulls/6839
+---
+From c324910c31ac157ce6dba7b378dea7bbf177964e Mon Sep 17 00:00:00 2001
+From: Gusted <postmaster@gusted.xyz>
+Date: Sat, 25 Jan 2025 08:51:59 +0100
+Subject: [PATCH 1/4] fix(sec): web route delete runner
+
+The web route to delete action runners did not check if the ID that was
+given belonged to the context it was requested in, this made it possible
+to delete every existing runner of a instance by a authenticated user.
+
+The code was reworked to ensure that the caller of the delete
+runner function retrieved the runner by ID and then checks if it belongs
+to the context it was requested in, although this is not an optimal
+solution it is consistent with the context checking of other code for
+runners.
+---
+ models/actions/runner.go              | 15 +++++----------
+ models/actions/runner_test.go         |  2 +-
+ routers/web/repo/setting/runners.go   |  2 +-
+ routers/web/shared/actions/runners.go | 15 +++++++++++++--
+ 4 files changed, 20 insertions(+), 14 deletions(-)
+
+diff --git a/models/actions/runner.go b/models/actions/runner.go
+index a679d7d989..b24950d014 100644
+--- a/models/actions/runner.go
++++ b/models/actions/runner.go
+@@ -282,27 +282,22 @@ func UpdateRunner(ctx context.Context, r *ActionRunner, cols ...string) error {
+ }
+ 
+ // DeleteRunner deletes a runner by given ID.
+-func DeleteRunner(ctx context.Context, id int64) error {
+-	runner, err := GetRunnerByID(ctx, id)
+-	if err != nil {
+-		return err
+-	}
+-
++func DeleteRunner(ctx context.Context, r *ActionRunner) error {
+ 	// Replace the UUID, which was either based on the secret's first 16 bytes or an UUIDv4,
+ 	// with a sequence of 8 0xff bytes followed by the little-endian version of the record's
+ 	// identifier. This will prevent the deleted record's identifier from colliding with any
+ 	// new record.
+ 	b := make([]byte, 8)
+-	binary.LittleEndian.PutUint64(b, uint64(id))
+-	runner.UUID = fmt.Sprintf("ffffffff-ffff-ffff-%.2x%.2x-%.2x%.2x%.2x%.2x%.2x%.2x",
++	binary.LittleEndian.PutUint64(b, uint64(r.ID))
++	r.UUID = fmt.Sprintf("ffffffff-ffff-ffff-%.2x%.2x-%.2x%.2x%.2x%.2x%.2x%.2x",
+ 		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7])
+ 
+-	err = UpdateRunner(ctx, runner, "UUID")
++	err := UpdateRunner(ctx, r, "UUID")
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	_, err = db.DeleteByID[ActionRunner](ctx, id)
++	_, err = db.DeleteByID[ActionRunner](ctx, r.ID)
+ 	return err
+ }
+ 
+diff --git a/models/actions/runner_test.go b/models/actions/runner_test.go
+index 26ef4c44c6..2c8d430f94 100644
+--- a/models/actions/runner_test.go
++++ b/models/actions/runner_test.go
+@@ -34,7 +34,7 @@ func TestDeleteRunner(t *testing.T) {
+ 	require.NoError(t, unittest.PrepareTestDatabase())
+ 	before := unittest.AssertExistsAndLoadBean(t, &ActionRunner{ID: recordID})
+ 
+-	err := DeleteRunner(db.DefaultContext, recordID)
++	err := DeleteRunner(db.DefaultContext, &ActionRunner{ID: recordID})
+ 	require.NoError(t, err)
+ 
+ 	var after ActionRunner
+diff --git a/routers/web/repo/setting/runners.go b/routers/web/repo/setting/runners.go
+index a47d3b45e2..9dce5d13b7 100644
+--- a/routers/web/repo/setting/runners.go
++++ b/routers/web/repo/setting/runners.go
+@@ -179,7 +179,7 @@ func RunnerDeletePost(ctx *context.Context) {
+ 		ctx.ServerError("getRunnersCtx", err)
+ 		return
+ 	}
+-	actions_shared.RunnerDeletePost(ctx, ctx.ParamsInt64(":runnerid"), rCtx.RedirectLink, rCtx.RedirectLink+url.PathEscape(ctx.Params(":runnerid")))
++	actions_shared.RunnerDeletePost(ctx, ctx.ParamsInt64(":runnerid"), rCtx.OwnerID, rCtx.RepoID, rCtx.RedirectLink, rCtx.RedirectLink+url.PathEscape(ctx.Params(":runnerid")))
+ }
+ 
+ func RedirectToDefaultSetting(ctx *context.Context) {
+diff --git a/routers/web/shared/actions/runners.go b/routers/web/shared/actions/runners.go
+index f38933226b..739d2d246c 100644
+--- a/routers/web/shared/actions/runners.go
++++ b/routers/web/shared/actions/runners.go
+@@ -142,10 +142,21 @@ func RunnerResetRegistrationToken(ctx *context.Context, ownerID, repoID int64, r
+ }
+ 
+ // RunnerDeletePost response for deleting a runner
+-func RunnerDeletePost(ctx *context.Context, runnerID int64,
++func RunnerDeletePost(ctx *context.Context, runnerID, ownerID, repoID int64,
+ 	successRedirectTo, failedRedirectTo string,
+ ) {
+-	if err := actions_model.DeleteRunner(ctx, runnerID); err != nil {
++	runner, err := actions_model.GetRunnerByID(ctx, runnerID)
++	if err != nil {
++		ctx.ServerError("GetRunnerByID", err)
++		return
++	}
++
++	if !runner.Editable(ownerID, repoID) {
++		ctx.NotFound("Editable", util.NewPermissionDeniedErrorf("no permission to edit this runner"))
++		return
++	}
++
++	if err := actions_model.DeleteRunner(ctx, runner); err != nil {
+ 		log.Warn("DeleteRunnerPost.UpdateRunner failed: %v, url: %s", err, ctx.Req.URL)
+ 		ctx.Flash.Warning(ctx.Tr("actions.runners.delete_runner_failed"))
+ 
+-- 
+2.45.2
+
+
+From 77db7655e06d724cf397f5c839e2ea707640c53c Mon Sep 17 00:00:00 2001
+From: Gusted <postmaster@gusted.xyz>
+Date: Sat, 25 Jan 2025 09:26:50 +0100
+Subject: [PATCH 2/4] fix(sec): web route update and delete runner variables
+
+The web route to update and delete variables of runners did not check if
+the ID that was given belonged to the context it was requested in, this
+made it possible to update and delete every existing runner variable of
+a instance for any authenticated user.
+
+The code has been reworked to always take into account the context of
+the request (owner and repository ID).
+---
+ models/actions/variable.go              | 10 ++++------
+ options/locale/locale_en-US.ini         |  1 +
+ routers/api/v1/org/action.go            |  2 +-
+ routers/api/v1/repo/action.go           |  2 +-
+ routers/api/v1/user/action.go           |  2 +-
+ routers/web/repo/setting/variables.go   |  4 ++--
+ routers/web/shared/actions/variables.go | 24 ++++++++++++++++--------
+ services/actions/variables.go           | 17 ++++++++---------
+ 8 files changed, 34 insertions(+), 28 deletions(-)
+
+diff --git a/models/actions/variable.go b/models/actions/variable.go
+index d0f917d923..39cea95c4b 100644
+--- a/models/actions/variable.go
++++ b/models/actions/variable.go
+@@ -86,7 +86,7 @@ func FindVariables(ctx context.Context, opts FindVariablesOpts) ([]*ActionVariab
+ }
+ 
+ func UpdateVariable(ctx context.Context, variable *ActionVariable) (bool, error) {
+-	count, err := db.GetEngine(ctx).ID(variable.ID).Cols("name", "data").
++	count, err := db.GetEngine(ctx).ID(variable.ID).Where("owner_id = ? AND repo_id = ?", variable.OwnerID, variable.RepoID).Cols("name", "data").
+ 		Update(&ActionVariable{
+ 			Name: variable.Name,
+ 			Data: variable.Data,
+@@ -94,11 +94,9 @@ func UpdateVariable(ctx context.Context, variable *ActionVariable) (bool, error)
+ 	return count != 0, err
+ }
+ 
+-func DeleteVariable(ctx context.Context, id int64) error {
+-	if _, err := db.DeleteByID[ActionVariable](ctx, id); err != nil {
+-		return err
+-	}
+-	return nil
++func DeleteVariable(ctx context.Context, variableID, ownerID, repoID int64) (bool, error) {
++	count, err := db.GetEngine(ctx).Table("action_variable").Where("id = ? AND owner_id = ? AND repo_id = ?", variableID, ownerID, repoID).Delete()
++	return count != 0, err
+ }
+ 
+ func GetVariablesOfRun(ctx context.Context, run *ActionRun) (map[string]string, error) {
+diff --git a/options/locale/locale_en-US.ini b/options/locale/locale_en-US.ini
+index 4d1ebd62c6..53a47f0c17 100644
+--- a/options/locale/locale_en-US.ini
++++ b/options/locale/locale_en-US.ini
+@@ -3894,6 +3894,7 @@ variables.deletion.description = Removing a variable is permanent and cannot be
+ variables.description = Variables will be passed to certain actions and cannot be read otherwise.
+ variables.id_not_exist = Variable with ID %d does not exist.
+ variables.edit = Edit Variable
++variables.not_found = Failed to find the variable.
+ variables.deletion.failed = Failed to remove variable.
+ variables.deletion.success = The variable has been removed.
+ variables.creation.failed = Failed to add variable.
+diff --git a/routers/api/v1/org/action.go b/routers/api/v1/org/action.go
+index 03a1fa8ccc..390d074ad7 100644
+--- a/routers/api/v1/org/action.go
++++ b/routers/api/v1/org/action.go
+@@ -450,7 +450,7 @@ func (Action) UpdateVariable(ctx *context.APIContext) {
+ 	if opt.Name == "" {
+ 		opt.Name = ctx.Params("variablename")
+ 	}
+-	if _, err := actions_service.UpdateVariable(ctx, v.ID, opt.Name, opt.Value); err != nil {
++	if _, err := actions_service.UpdateVariable(ctx, v.ID, ctx.Org.Organization.ID, 0, opt.Name, opt.Value); err != nil {
+ 		if errors.Is(err, util.ErrInvalidArgument) {
+ 			ctx.Error(http.StatusBadRequest, "UpdateVariable", err)
+ 		} else {
+diff --git a/routers/api/v1/repo/action.go b/routers/api/v1/repo/action.go
+index 0c7506b13b..b109497d19 100644
+--- a/routers/api/v1/repo/action.go
++++ b/routers/api/v1/repo/action.go
+@@ -414,7 +414,7 @@ func (Action) UpdateVariable(ctx *context.APIContext) {
+ 	if opt.Name == "" {
+ 		opt.Name = ctx.Params("variablename")
+ 	}
+-	if _, err := actions_service.UpdateVariable(ctx, v.ID, opt.Name, opt.Value); err != nil {
++	if _, err := actions_service.UpdateVariable(ctx, v.ID, 0, ctx.Repo.Repository.ID, opt.Name, opt.Value); err != nil {
+ 		if errors.Is(err, util.ErrInvalidArgument) {
+ 			ctx.Error(http.StatusBadRequest, "UpdateVariable", err)
+ 		} else {
+diff --git a/routers/api/v1/user/action.go b/routers/api/v1/user/action.go
+index ec5289fdb0..c34c5950c0 100644
+--- a/routers/api/v1/user/action.go
++++ b/routers/api/v1/user/action.go
+@@ -228,7 +228,7 @@ func UpdateVariable(ctx *context.APIContext) {
+ 	if opt.Name == "" {
+ 		opt.Name = ctx.Params("variablename")
+ 	}
+-	if _, err := actions_service.UpdateVariable(ctx, v.ID, opt.Name, opt.Value); err != nil {
++	if _, err := actions_service.UpdateVariable(ctx, v.ID, ctx.Doer.ID, 0, opt.Name, opt.Value); err != nil {
+ 		if errors.Is(err, util.ErrInvalidArgument) {
+ 			ctx.Error(http.StatusBadRequest, "UpdateVariable", err)
+ 		} else {
+diff --git a/routers/web/repo/setting/variables.go b/routers/web/repo/setting/variables.go
+index 45b6c0f39a..4fb8c06e84 100644
+--- a/routers/web/repo/setting/variables.go
++++ b/routers/web/repo/setting/variables.go
+@@ -127,7 +127,7 @@ func VariableUpdate(ctx *context.Context) {
+ 		return
+ 	}
+ 
+-	shared.UpdateVariable(ctx, vCtx.RedirectLink)
++	shared.UpdateVariable(ctx, vCtx.OwnerID, vCtx.RepoID, vCtx.RedirectLink)
+ }
+ 
+ func VariableDelete(ctx *context.Context) {
+@@ -136,5 +136,5 @@ func VariableDelete(ctx *context.Context) {
+ 		ctx.ServerError("getVariablesCtx", err)
+ 		return
+ 	}
+-	shared.DeleteVariable(ctx, vCtx.RedirectLink)
++	shared.DeleteVariable(ctx, vCtx.OwnerID, vCtx.RepoID, vCtx.RedirectLink)
+ }
+diff --git a/routers/web/shared/actions/variables.go b/routers/web/shared/actions/variables.go
+index 79c03e4e8c..47f1176f46 100644
+--- a/routers/web/shared/actions/variables.go
++++ b/routers/web/shared/actions/variables.go
+@@ -39,25 +39,33 @@ func CreateVariable(ctx *context.Context, ownerID, repoID int64, redirectURL str
+ 	ctx.JSONRedirect(redirectURL)
+ }
+ 
+-func UpdateVariable(ctx *context.Context, redirectURL string) {
++func UpdateVariable(ctx *context.Context, ownerID, repoID int64, redirectURL string) {
+ 	id := ctx.ParamsInt64(":variable_id")
+ 	form := web.GetForm(ctx).(*forms.EditVariableForm)
+ 
+-	if ok, err := actions_service.UpdateVariable(ctx, id, form.Name, form.Data); err != nil || !ok {
+-		log.Error("UpdateVariable: %v", err)
+-		ctx.JSONError(ctx.Tr("actions.variables.update.failed"))
++	if ok, err := actions_service.UpdateVariable(ctx, id, ownerID, repoID, form.Name, form.Data); err != nil || !ok {
++		if !ok {
++			ctx.JSONError(ctx.Tr("actions.variables.not_found"))
++		} else {
++			log.Error("UpdateVariable: %v", err)
++			ctx.JSONError(ctx.Tr("actions.variables.update.failed"))
++		}
+ 		return
+ 	}
+ 	ctx.Flash.Success(ctx.Tr("actions.variables.update.success"))
+ 	ctx.JSONRedirect(redirectURL)
+ }
+ 
+-func DeleteVariable(ctx *context.Context, redirectURL string) {
++func DeleteVariable(ctx *context.Context, ownerID, repoID int64, redirectURL string) {
+ 	id := ctx.ParamsInt64(":variable_id")
+ 
+-	if err := actions_service.DeleteVariableByID(ctx, id); err != nil {
+-		log.Error("Delete variable [%d] failed: %v", id, err)
+-		ctx.JSONError(ctx.Tr("actions.variables.deletion.failed"))
++	if ok, err := actions_model.DeleteVariable(ctx, id, ownerID, repoID); err != nil || !ok {
++		if !ok {
++			ctx.JSONError(ctx.Tr("actions.variables.not_found"))
++		} else {
++			log.Error("Delete variable [%d] failed: %v", id, err)
++			ctx.JSONError(ctx.Tr("actions.variables.deletion.failed"))
++		}
+ 		return
+ 	}
+ 	ctx.Flash.Success(ctx.Tr("actions.variables.deletion.success"))
+diff --git a/services/actions/variables.go b/services/actions/variables.go
+index 8dde9c4af5..a5703898ab 100644
+--- a/services/actions/variables.go
++++ b/services/actions/variables.go
+@@ -31,7 +31,7 @@ func CreateVariable(ctx context.Context, ownerID, repoID int64, name, data strin
+ 	return v, nil
+ }
+ 
+-func UpdateVariable(ctx context.Context, variableID int64, name, data string) (bool, error) {
++func UpdateVariable(ctx context.Context, variableID, ownerID, repoID int64, name, data string) (bool, error) {
+ 	if err := secret_service.ValidateName(name); err != nil {
+ 		return false, err
+ 	}
+@@ -41,16 +41,14 @@ func UpdateVariable(ctx context.Context, variableID int64, name, data string) (b
+ 	}
+ 
+ 	return actions_model.UpdateVariable(ctx, &actions_model.ActionVariable{
+-		ID:   variableID,
+-		Name: strings.ToUpper(name),
+-		Data: util.ReserveLineBreakForTextarea(data),
++		ID:      variableID,
++		Name:    strings.ToUpper(name),
++		Data:    util.ReserveLineBreakForTextarea(data),
++		OwnerID: ownerID,
++		RepoID:  repoID,
+ 	})
+ }
+ 
+-func DeleteVariableByID(ctx context.Context, variableID int64) error {
+-	return actions_model.DeleteVariable(ctx, variableID)
+-}
+-
+ func DeleteVariableByName(ctx context.Context, ownerID, repoID int64, name string) error {
+ 	if err := secret_service.ValidateName(name); err != nil {
+ 		return err
+@@ -69,7 +67,8 @@ func DeleteVariableByName(ctx context.Context, ownerID, repoID int64, name strin
+ 		return err
+ 	}
+ 
+-	return actions_model.DeleteVariable(ctx, v.ID)
++	_, err = actions_model.DeleteVariable(ctx, v.ID, ownerID, repoID)
++	return err
+ }
+ 
+ func GetVariable(ctx context.Context, opts actions_model.FindVariablesOpts) (*actions_model.ActionVariable, error) {
+-- 
+2.45.2
+
+
+From 5046a10aecb044661398ca49518556fee6baaa33 Mon Sep 17 00:00:00 2001
+From: Gusted <postmaster@gusted.xyz>
+Date: Sat, 25 Jan 2025 12:16:04 +0100
+Subject: [PATCH 3/4] fix(sec): add tests for web route delete runner
+
+Exhaustively test each combination of deleting and updating a action
+runner via the web route. Although updating an action runner was not
+impacted, its good to have a test nonetheless.
+---
+ .../TestRunnerModification/action_runner.yml  |  31 +++++
+ tests/integration/runner_test.go              | 130 ++++++++++++++++++
+ 2 files changed, 161 insertions(+)
+ create mode 100644 tests/integration/fixtures/TestRunnerModification/action_runner.yml
+ create mode 100644 tests/integration/runner_test.go
+
+diff --git a/tests/integration/fixtures/TestRunnerModification/action_runner.yml b/tests/integration/fixtures/TestRunnerModification/action_runner.yml
+new file mode 100644
+index 0000000000..95599b19bd
+--- /dev/null
++++ b/tests/integration/fixtures/TestRunnerModification/action_runner.yml
+@@ -0,0 +1,31 @@
++-
++  id: 1001
++  uuid: "43b5d4d3-401b-42f9-94df-a9d45b447b82"
++  name: "User runner"
++  owner_id: 2
++  repo_id: 0
++  deleted: 0
++
++-
++  id: 1002
++  uuid: "bdc77f4f-2b2b-442d-bd44-e808f4306347"
++  name: "Organisation runner"
++  owner_id: 3
++  repo_id: 0
++  deleted: 0
++
++-
++  id: 1003
++  uuid: "9268bc8c-efbf-4dbe-aeb5-945733cdd098"
++  name: "Repository runner"
++  owner_id: 0
++  repo_id: 1
++  deleted: 0
++
++-
++  id: 1004
++  uuid: "fb857e63-c0ce-4571-a6c9-fde26c128073"
++  name: "Global runner"
++  owner_id: 0
++  repo_id: 0
++  deleted: 0
+diff --git a/tests/integration/runner_test.go b/tests/integration/runner_test.go
+new file mode 100644
+index 0000000000..bab2a67230
+--- /dev/null
++++ b/tests/integration/runner_test.go
+@@ -0,0 +1,130 @@
++// Copyright 2025 The Forgejo Authors. All rights reserved.
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package integration
++
++import (
++	"fmt"
++	"net/http"
++	"testing"
++
++	actions_model "code.gitea.io/gitea/models/actions"
++	repo_model "code.gitea.io/gitea/models/repo"
++	"code.gitea.io/gitea/models/unittest"
++	user_model "code.gitea.io/gitea/models/user"
++	forgejo_context "code.gitea.io/gitea/services/context"
++	"code.gitea.io/gitea/tests"
++
++	"github.com/stretchr/testify/assert"
++)
++
++func TestRunnerModification(t *testing.T) {
++	defer tests.AddFixtures("tests/integration/fixtures/TestRunnerModification")()
++	defer tests.PrepareTestEnv(t)()
++
++	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
++	userRunner := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunner{ID: 1001, OwnerID: user.ID})
++	userURL := "/user/settings/actions/runners"
++	org := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 3, Type: user_model.UserTypeOrganization})
++	orgRunner := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunner{ID: 1002, OwnerID: org.ID})
++	orgURL := "/org/" + org.Name + "/settings/actions/runners"
++	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1, OwnerID: user.ID})
++	repoRunner := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunner{ID: 1003, RepoID: repo.ID})
++	repoURL := "/" + repo.FullName() + "/settings/actions/runners"
++	admin := unittest.AssertExistsAndLoadBean(t, &user_model.User{IsAdmin: true})
++	globalRunner := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunner{ID: 1004}, "owner_id = 0 AND repo_id = 0")
++	adminURL := "/admin/actions/runners"
++
++	adminSess := loginUser(t, admin.Name)
++	adminCSRF := GetCSRF(t, adminSess, "/")
++	sess := loginUser(t, user.Name)
++	csrf := GetCSRF(t, sess, "/")
++
++	test := func(t *testing.T, fail bool, baseURL string, id int64) {
++		defer tests.PrintCurrentTest(t, 1)()
++		t.Helper()
++
++		sess := sess
++		csrf := csrf
++		if baseURL == adminURL {
++			sess = adminSess
++			csrf = adminCSRF
++		}
++
++		req := NewRequestWithValues(t, "POST", baseURL+fmt.Sprintf("/%d", id), map[string]string{
++			"_csrf":       csrf,
++			"description": "New Description",
++		})
++		if fail {
++			sess.MakeRequest(t, req, http.StatusNotFound)
++		} else {
++			sess.MakeRequest(t, req, http.StatusSeeOther)
++			flashCookie := sess.GetCookie(forgejo_context.CookieNameFlash)
++			assert.NotNil(t, flashCookie)
++			assert.EqualValues(t, "success%3DRunner%2Bupdated%2Bsuccessfully", flashCookie.Value)
++		}
++
++		req = NewRequestWithValues(t, "POST", baseURL+fmt.Sprintf("/%d/delete", id), map[string]string{
++			"_csrf": csrf,
++		})
++		if fail {
++			sess.MakeRequest(t, req, http.StatusNotFound)
++		} else {
++			sess.MakeRequest(t, req, http.StatusOK)
++			flashCookie := sess.GetCookie(forgejo_context.CookieNameFlash)
++			assert.NotNil(t, flashCookie)
++			assert.EqualValues(t, "success%3DRunner%2Bdeleted%2Bsuccessfully", flashCookie.Value)
++		}
++	}
++
++	t.Run("User runner", func(t *testing.T) {
++		t.Run("Organisation", func(t *testing.T) {
++			test(t, true, orgURL, userRunner.ID)
++		})
++		t.Run("Repository", func(t *testing.T) {
++			test(t, true, repoURL, userRunner.ID)
++		})
++		t.Run("User", func(t *testing.T) {
++			test(t, false, userURL, userRunner.ID)
++		})
++	})
++
++	t.Run("Organisation runner", func(t *testing.T) {
++		t.Run("Repository", func(t *testing.T) {
++			test(t, true, repoURL, orgRunner.ID)
++		})
++		t.Run("User", func(t *testing.T) {
++			test(t, true, userURL, orgRunner.ID)
++		})
++		t.Run("Organisation", func(t *testing.T) {
++			test(t, false, orgURL, orgRunner.ID)
++		})
++	})
++
++	t.Run("Repository runner", func(t *testing.T) {
++		t.Run("Organisation", func(t *testing.T) {
++			test(t, true, orgURL, repoRunner.ID)
++		})
++		t.Run("User", func(t *testing.T) {
++			test(t, true, userURL, repoRunner.ID)
++		})
++		t.Run("Repository", func(t *testing.T) {
++			test(t, false, repoURL, repoRunner.ID)
++		})
++	})
++
++	t.Run("Global runner", func(t *testing.T) {
++		t.Run("Organisation", func(t *testing.T) {
++			test(t, true, orgURL, globalRunner.ID)
++		})
++		t.Run("User", func(t *testing.T) {
++			test(t, true, userURL, globalRunner.ID)
++		})
++		t.Run("Repository", func(t *testing.T) {
++			test(t, true, repoURL, globalRunner.ID)
++		})
++		t.Run("Admin", func(t *testing.T) {
++			test(t, false, adminURL, globalRunner.ID)
++		})
++	})
++}
+-- 
+2.45.2
+
+
+From 5a7d70658dac186c5831ea04c0e19bfbdedd3902 Mon Sep 17 00:00:00 2001
+From: Gusted <postmaster@gusted.xyz>
+Date: Sat, 25 Jan 2025 13:03:49 +0100
+Subject: [PATCH 4/4] fix(sec): web route test edit and delete variable
+
+Exhaustively test each combination of deleting and updating a action
+action variable via the web route.
+---
+ tests/integration/actions_variables_test.go   | 150 ++++++++++++++++++
+ .../action_variable.yml                       |  31 ++++
+ 2 files changed, 181 insertions(+)
+ create mode 100644 tests/integration/actions_variables_test.go
+ create mode 100644 tests/integration/fixtures/TestActionVariablesModification/action_variable.yml
+
+diff --git a/tests/integration/actions_variables_test.go b/tests/integration/actions_variables_test.go
+new file mode 100644
+index 0000000000..0179a543dc
+--- /dev/null
++++ b/tests/integration/actions_variables_test.go
+@@ -0,0 +1,150 @@
++// Copyright 2025 The Forgejo Authors. All rights reserved.
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package integration
++
++import (
++	"fmt"
++	"net/http"
++	"testing"
++
++	actions_model "code.gitea.io/gitea/models/actions"
++	repo_model "code.gitea.io/gitea/models/repo"
++	"code.gitea.io/gitea/models/unittest"
++	user_model "code.gitea.io/gitea/models/user"
++	forgejo_context "code.gitea.io/gitea/services/context"
++	"code.gitea.io/gitea/tests"
++
++	"github.com/stretchr/testify/assert"
++)
++
++func TestActionVariablesModification(t *testing.T) {
++	defer tests.AddFixtures("tests/integration/fixtures/TestActionVariablesModification")()
++	defer tests.PrepareTestEnv(t)()
++
++	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
++	userVariable := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionVariable{ID: 1001, OwnerID: user.ID})
++	userURL := "/user/settings/actions/variables"
++	org := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 3, Type: user_model.UserTypeOrganization})
++	orgVariable := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionVariable{ID: 1002, OwnerID: org.ID})
++	orgURL := "/org/" + org.Name + "/settings/actions/variables"
++	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1, OwnerID: user.ID})
++	repoVariable := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionVariable{ID: 1003, RepoID: repo.ID})
++	repoURL := "/" + repo.FullName() + "/settings/actions/variables"
++	admin := unittest.AssertExistsAndLoadBean(t, &user_model.User{IsAdmin: true})
++	globalVariable := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionVariable{ID: 1004}, "owner_id = 0 AND repo_id = 0")
++	adminURL := "/admin/actions/variables"
++
++	adminSess := loginUser(t, admin.Name)
++	adminCSRF := GetCSRF(t, adminSess, "/")
++	sess := loginUser(t, user.Name)
++	csrf := GetCSRF(t, sess, "/")
++
++	type errorJSON struct {
++		Error string `json:"errorMessage"`
++	}
++
++	test := func(t *testing.T, fail bool, baseURL string, id int64) {
++		defer tests.PrintCurrentTest(t, 1)()
++		t.Helper()
++
++		sess := sess
++		csrf := csrf
++		if baseURL == adminURL {
++			sess = adminSess
++			csrf = adminCSRF
++		}
++
++		req := NewRequestWithValues(t, "POST", baseURL+fmt.Sprintf("/%d/edit", id), map[string]string{
++			"_csrf": csrf,
++			"name":  "glados_quote",
++			"data":  "I'm fine. Two plus two is...ten, in base four, I'm fine!",
++		})
++		if fail {
++			resp := sess.MakeRequest(t, req, http.StatusBadRequest)
++			var error errorJSON
++			DecodeJSON(t, resp, &error)
++			assert.EqualValues(t, "Failed to find the variable.", error.Error)
++		} else {
++			sess.MakeRequest(t, req, http.StatusOK)
++			flashCookie := sess.GetCookie(forgejo_context.CookieNameFlash)
++			assert.NotNil(t, flashCookie)
++			assert.EqualValues(t, "success%3DThe%2Bvariable%2Bhas%2Bbeen%2Bedited.", flashCookie.Value)
++		}
++
++		req = NewRequestWithValues(t, "POST", baseURL+fmt.Sprintf("/%d/delete", id), map[string]string{
++			"_csrf": csrf,
++		})
++		if fail {
++			resp := sess.MakeRequest(t, req, http.StatusBadRequest)
++			var error errorJSON
++			DecodeJSON(t, resp, &error)
++			assert.EqualValues(t, "Failed to find the variable.", error.Error)
++		} else {
++			sess.MakeRequest(t, req, http.StatusOK)
++			flashCookie := sess.GetCookie(forgejo_context.CookieNameFlash)
++			assert.NotNil(t, flashCookie)
++			assert.EqualValues(t, "success%3DThe%2Bvariable%2Bhas%2Bbeen%2Bremoved.", flashCookie.Value)
++		}
++	}
++
++	t.Run("User variable", func(t *testing.T) {
++		t.Run("Organisation", func(t *testing.T) {
++			test(t, true, orgURL, userVariable.ID)
++		})
++		t.Run("Repository", func(t *testing.T) {
++			test(t, true, repoURL, userVariable.ID)
++		})
++		t.Run("Admin", func(t *testing.T) {
++			test(t, true, adminURL, userVariable.ID)
++		})
++		t.Run("User", func(t *testing.T) {
++			test(t, false, userURL, userVariable.ID)
++		})
++	})
++
++	t.Run("Organisation variable", func(t *testing.T) {
++		t.Run("Repository", func(t *testing.T) {
++			test(t, true, repoURL, orgVariable.ID)
++		})
++		t.Run("User", func(t *testing.T) {
++			test(t, true, userURL, orgVariable.ID)
++		})
++		t.Run("Admin", func(t *testing.T) {
++			test(t, true, adminURL, userVariable.ID)
++		})
++		t.Run("Organisation", func(t *testing.T) {
++			test(t, false, orgURL, orgVariable.ID)
++		})
++	})
++
++	t.Run("Repository variable", func(t *testing.T) {
++		t.Run("Organisation", func(t *testing.T) {
++			test(t, true, orgURL, repoVariable.ID)
++		})
++		t.Run("User", func(t *testing.T) {
++			test(t, true, userURL, repoVariable.ID)
++		})
++		t.Run("Admin", func(t *testing.T) {
++			test(t, true, adminURL, userVariable.ID)
++		})
++		t.Run("Repository", func(t *testing.T) {
++			test(t, false, repoURL, repoVariable.ID)
++		})
++	})
++
++	t.Run("Global variable", func(t *testing.T) {
++		t.Run("Organisation", func(t *testing.T) {
++			test(t, true, orgURL, globalVariable.ID)
++		})
++		t.Run("User", func(t *testing.T) {
++			test(t, true, userURL, globalVariable.ID)
++		})
++		t.Run("Repository", func(t *testing.T) {
++			test(t, true, repoURL, globalVariable.ID)
++		})
++		t.Run("Admin", func(t *testing.T) {
++			test(t, false, adminURL, globalVariable.ID)
++		})
++	})
++}
+diff --git a/tests/integration/fixtures/TestActionVariablesModification/action_variable.yml b/tests/integration/fixtures/TestActionVariablesModification/action_variable.yml
+new file mode 100644
+index 0000000000..925838d0f0
+--- /dev/null
++++ b/tests/integration/fixtures/TestActionVariablesModification/action_variable.yml
+@@ -0,0 +1,31 @@
++-
++  id: 1001
++  name: GLADOS_QUOTE
++  owner_id: 2
++  repo_id: 0
++  data: ""
++  created_unix: 1737000000
++
++-
++  id: 1002
++  name: GLADOS_QUOTE
++  owner_id: 3
++  repo_id: 0
++  data: ""
++  created_unix: 1737000001
++
++-
++  id: 1003
++  name: GLADOS_QUOTE
++  owner_id: 0
++  repo_id: 1
++  data: ""
++  created_unix: 1737000002
++
++-
++  id: 1004
++  name: GLADOS_QUOTE
++  owner_id: 0
++  repo_id: 0
++  data: ""
++  created_unix: 1737000003
+-- 
+2.45.2
+
