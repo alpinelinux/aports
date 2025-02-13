@@ -39,8 +39,8 @@ index 90dc09a0c02..8f88873dc18 100644
    ]
    extra_deps = [
 -    ":icudtl_cc",
-     "..:libdart_precompiled_runtime",
-     "../platform:libdart_platform_precompiled_runtime",
+     "..:libdart_aotruntime",
+     "../platform:libdart_platform_aotruntime",
    ]
 +  if (dart_embed_icu_data) {
 +    extra_deps += [ ":icudtl_cc" ]
