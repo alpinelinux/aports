@@ -1,5 +1,14 @@
 #!/bin/sh
 
+cat >&2 <<EOF
+*
+* This script will be removed in the future to replace it with OpenRC user-services.
+*
+EOF
+
+# Exit if the service is already running through user services
+rc-service --user pipewire status 1>/dev/null 2>&1 && exit 0
+
 # We need to kill any existing pipewire instance to restore sound
 pkill -u "${USER}" -fx /usr/bin/pipewire-pulse 1>/dev/null 2>&1
 pkill -u "${USER}" -fx /usr/bin/pipewire-media-session 1>/dev/null 2>&1
