@@ -22,3 +22,12 @@ pref("media.gmp-widevinecdm.enabled", false);
 
 // Disable Privacy-Preserving Attribution Measurement
 pref("dom.private-attribution.submission.enabled", false);
+
+// Disable various telemetry sources
+pref("browser.newtabpage.activity-stream.telemetry", false);
+pref("toolkit.telemetry.shutdownPingSender.enabled", false);
+pref("toolkit.telemetry.newProfilePing.enabled", false);
+pref("toolkit.telemetry.updatePing.enabled", false);
+pref("toolkit.telemetry.bhrPing.enabled", false);
+pref("datareporting.healthreport.uploadEnabled", false);
+pref("datareporting.usage.uploadEnabled", false);
