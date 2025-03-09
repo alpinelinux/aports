@@ -1,0 +1,858 @@
+From 392ee47d9ce6eecd039351fd94a2822a22d16c2b Mon Sep 17 00:00:00 2001
+From: LN Liberda <lauren@selfisekai.rocks>
+Date: Sun, 9 Mar 2025 18:03:48 +0100
+Subject: [PATCH] Revert "compiler: integrate ZON with the ZIR caching system"
+ and "incremental: add ZON test"
+
+This reverts commits 55a2e535fdb663793b84769cb6c3a261bda3fc66 and d60910c9d0fa4d28a4f738e95357ddada84ae106.
+---
+ lib/std/zig/Zoir.zig             |  25 ---
+ src/Compilation.zig              |  46 +----
+ src/Sema.zig                     |   6 +
+ src/Sema/LowerZon.zig            |   2 +
+ src/Zcu.zig                      | 183 ----------------
+ src/Zcu/PerThread.zig            | 344 +++++++++++++++----------------
+ test/incremental/change_zon_file |  46 -----
+ 7 files changed, 187 insertions(+), 465 deletions(-)
+ delete mode 100644 test/incremental/change_zon_file
+
+diff --git a/lib/std/zig/Zoir.zig b/lib/std/zig/Zoir.zig
+index 700bf6ea32..af93d03261 100644
+--- a/lib/std/zig/Zoir.zig
++++ b/lib/std/zig/Zoir.zig
+@@ -10,31 +10,6 @@ string_bytes: []u8,
+ compile_errors: []Zoir.CompileError,
+ error_notes: []Zoir.CompileError.Note,
+ 
+-/// The data stored at byte offset 0 when ZOIR is stored in a file.
+-pub const Header = extern struct {
+-    nodes_len: u32,
+-    extra_len: u32,
+-    limbs_len: u32,
+-    string_bytes_len: u32,
+-    compile_errors_len: u32,
+-    error_notes_len: u32,
+-
+-    /// We could leave this as padding, however it triggers a Valgrind warning because
+-    /// we read and write undefined bytes to the file system. This is harmless, but
+-    /// it's essentially free to have a zero field here and makes the warning go away,
+-    /// making it more likely that following Valgrind warnings will be taken seriously.
+-    unused: u64 = 0,
+-
+-    stat_inode: std.fs.File.INode,
+-    stat_size: u64,
+-    stat_mtime: i128,
+-
+-    comptime {
+-        // Check that `unused` is working as expected
+-        assert(std.meta.hasUniqueRepresentation(Header));
+-    }
+-};
+-
+ pub fn hasCompileErrors(zoir: Zoir) bool {
+     if (zoir.compile_errors.len > 0) {
+         assert(zoir.nodes.len == 0);
+diff --git a/src/Compilation.zig b/src/Compilation.zig
+index 12221ba3dc..cb79909e2b 100644
+--- a/src/Compilation.zig
++++ b/src/Compilation.zig
+@@ -2292,7 +2292,10 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
+         try comp.astgen_work_queue.ensureUnusedCapacity(zcu.import_table.count());
+         for (zcu.import_table.values()) |file_index| {
+             if (zcu.fileByIndex(file_index).mod.isBuiltin()) continue;
+-            comp.astgen_work_queue.writeItemAssumeCapacity(file_index);
++            const file = zcu.fileByIndex(file_index);
++            if (file.getMode() == .zig) {
++                comp.astgen_work_queue.writeItemAssumeCapacity(file_index);
++            }
+         }
+         if (comp.file_system_inputs) |fsi| {
+             for (zcu.import_table.values()) |file_index| {
+@@ -3910,40 +3913,11 @@ fn performAllTheWorkInner(
+         const pt: Zcu.PerThread = .activate(zcu, .main);
+         defer pt.deactivate();
+ 
+-        // If the cache mode is `whole`, then add every source file to the cache manifest.
+-        switch (comp.cache_use) {
+-            .whole => |whole| if (whole.cache_manifest) |man| {
+-                const gpa = zcu.gpa;
+-                for (zcu.import_table.values()) |file_index| {
+-                    const file = zcu.fileByIndex(file_index);
+-                    const source = file.getSource(gpa) catch |err| {
+-                        try pt.reportRetryableFileError(file_index, "unable to load source: {s}", .{@errorName(err)});
+-                        continue;
+-                    };
+-                    const resolved_path = try std.fs.path.resolve(gpa, &.{
+-                        file.mod.root.root_dir.path orelse ".",
+-                        file.mod.root.sub_path,
+-                        file.sub_file_path,
+-                    });
+-                    errdefer gpa.free(resolved_path);
+-                    whole.cache_manifest_mutex.lock();
+-                    defer whole.cache_manifest_mutex.unlock();
+-                    man.addFilePostContents(resolved_path, source.bytes, source.stat) catch |err| switch (err) {
+-                        error.OutOfMemory => |e| return e,
+-                        else => {
+-                            try pt.reportRetryableFileError(file_index, "unable to update cache: {s}", .{@errorName(err)});
+-                            continue;
+-                        },
+-                    };
+-                }
+-            },
+-            .incremental => {},
+-        }
+-
+         try reportMultiModuleErrors(pt);
+ 
+         const any_fatal_files = for (zcu.import_table.values()) |file_index| {
+             const file = zcu.fileByIndex(file_index);
++            if (file.getMode() == .zon) continue;
+             switch (file.status) {
+                 .never_loaded => unreachable, // everything is loaded by the workers
+                 .retryable_failure, .astgen_failure => break true,
+@@ -3951,7 +3925,7 @@ fn performAllTheWorkInner(
+             }
+         } else false;
+ 
+-        if (any_fatal_files or comp.alloc_failure_occurred) {
++        if (any_fatal_files) {
+             // We give up right now! No updating of ZIR refs, no nothing. The idea is that this prevents
+             // us from invalidating lots of incremental dependencies due to files with e.g. parse errors.
+             // However, this means our analysis data is invalid, so we want to omit all analysis errors.
+@@ -4418,6 +4392,7 @@ fn workerUpdateFile(
+     wg: *WaitGroup,
+     src: Zcu.AstGenSrc,
+ ) void {
++    assert(file.getMode() == .zig);
+     const child_prog_node = prog_node.start(file.sub_file_path, 0);
+     defer child_prog_node.end();
+ 
+@@ -4437,11 +4412,6 @@ fn workerUpdateFile(
+         },
+     };
+ 
+-    switch (file.getMode()) {
+-        .zig => {}, // continue to logic below
+-        .zon => return, // ZON can't import anything so we're done
+-    }
+-
+     // Pre-emptively look for `@import` paths and queue them up.
+     // If we experience an error preemptively fetching the
+     // file, just ignore it and let it happen again later during Sema.
+@@ -4476,7 +4446,7 @@ fn workerUpdateFile(
+                 const imported_path_digest = pt.zcu.filePathDigest(res.file_index);
+                 break :blk .{ res, imported_path_digest };
+             };
+-            if (import_result.is_new) {
++            if (import_result.is_new and import_result.file.getMode() == .zig) {
+                 log.debug("AstGen of {s} has import '{s}'; queuing AstGen of {s}", .{
+                     file.sub_file_path, import_path, import_result.file.sub_file_path,
+                 });
+diff --git a/src/Sema.zig b/src/Sema.zig
+index b30f42c2d7..8a1c569691 100644
+--- a/src/Sema.zig
++++ b/src/Sema.zig
+@@ -14070,6 +14070,12 @@ fn zirImport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
+             return Air.internedToRef(ty);
+         },
+         .zon => {
++            _ = result.file.getTree(zcu.gpa) catch |err| {
++                // TODO: these errors are file system errors; make sure an update() will
++                // retry this and not cache the file system error, which may be transient.
++                return sema.fail(block, operand_src, "unable to open '{s}': {s}", .{ result.file.sub_file_path, @errorName(err) });
++            };
++
+             if (extra.res_ty == .none) {
+                 return sema.fail(block, operand_src, "'@import' of ZON must have a known result type", .{});
+             }
+diff --git a/src/Sema/LowerZon.zig b/src/Sema/LowerZon.zig
+index f30879090b..2b2d16b90a 100644
+--- a/src/Sema/LowerZon.zig
++++ b/src/Sema/LowerZon.zig
+@@ -39,6 +39,8 @@ pub fn run(
+ ) CompileError!InternPool.Index {
+     const pt = sema.pt;
+ 
++    _ = try file.getZoir(pt.zcu);
++
+     const tracked_inst = try pt.zcu.intern_pool.trackZir(pt.zcu.gpa, pt.tid, .{
+         .file = file_index,
+         .inst = .main_struct_inst, // this is the only trackable instruction in a ZON file
+diff --git a/src/Zcu.zig b/src/Zcu.zig
+index dbefec47ca..256f9b132d 100644
+--- a/src/Zcu.zig
++++ b/src/Zcu.zig
+@@ -2655,189 +2655,6 @@ pub fn loadZirCacheBody(gpa: Allocator, header: Zir.Header, cache_file: std.fs.F
+     return zir;
+ }
+ 
+-pub fn saveZirCache(gpa: Allocator, cache_file: std.fs.File, stat: std.fs.File.Stat, zir: Zir) (std.fs.File.WriteError || Allocator.Error)!void {
+-    const safety_buffer = if (data_has_safety_tag)
+-        try gpa.alloc([8]u8, zir.instructions.len)
+-    else
+-        undefined;
+-    defer if (data_has_safety_tag) gpa.free(safety_buffer);
+-
+-    const data_ptr: [*]const u8 = if (data_has_safety_tag)
+-        if (zir.instructions.len == 0)
+-            undefined
+-        else
+-            @ptrCast(safety_buffer.ptr)
+-    else
+-        @ptrCast(zir.instructions.items(.data).ptr);
+-
+-    if (data_has_safety_tag) {
+-        // The `Data` union has a safety tag but in the file format we store it without.
+-        for (zir.instructions.items(.data), 0..) |*data, i| {
+-            const as_struct: *const HackDataLayout = @ptrCast(data);
+-            safety_buffer[i] = as_struct.data;
+-        }
+-    }
+-
+-    const header: Zir.Header = .{
+-        .instructions_len = @intCast(zir.instructions.len),
+-        .string_bytes_len = @intCast(zir.string_bytes.len),
+-        .extra_len = @intCast(zir.extra.len),
+-
+-        .stat_size = stat.size,
+-        .stat_inode = stat.inode,
+-        .stat_mtime = stat.mtime,
+-    };
+-    var iovecs: [5]std.posix.iovec_const = .{
+-        .{
+-            .base = @ptrCast(&header),
+-            .len = @sizeOf(Zir.Header),
+-        },
+-        .{
+-            .base = @ptrCast(zir.instructions.items(.tag).ptr),
+-            .len = zir.instructions.len,
+-        },
+-        .{
+-            .base = data_ptr,
+-            .len = zir.instructions.len * 8,
+-        },
+-        .{
+-            .base = zir.string_bytes.ptr,
+-            .len = zir.string_bytes.len,
+-        },
+-        .{
+-            .base = @ptrCast(zir.extra.ptr),
+-            .len = zir.extra.len * 4,
+-        },
+-    };
+-    try cache_file.writevAll(&iovecs);
+-}
+-
+-pub fn saveZoirCache(cache_file: std.fs.File, stat: std.fs.File.Stat, zoir: Zoir) std.fs.File.WriteError!void {
+-    const header: Zoir.Header = .{
+-        .nodes_len = @intCast(zoir.nodes.len),
+-        .extra_len = @intCast(zoir.extra.len),
+-        .limbs_len = @intCast(zoir.limbs.len),
+-        .string_bytes_len = @intCast(zoir.string_bytes.len),
+-        .compile_errors_len = @intCast(zoir.compile_errors.len),
+-        .error_notes_len = @intCast(zoir.error_notes.len),
+-
+-        .stat_size = stat.size,
+-        .stat_inode = stat.inode,
+-        .stat_mtime = stat.mtime,
+-    };
+-    var iovecs: [9]std.posix.iovec_const = .{
+-        .{
+-            .base = @ptrCast(&header),
+-            .len = @sizeOf(Zoir.Header),
+-        },
+-        .{
+-            .base = @ptrCast(zoir.nodes.items(.tag)),
+-            .len = zoir.nodes.len * @sizeOf(Zoir.Node.Repr.Tag),
+-        },
+-        .{
+-            .base = @ptrCast(zoir.nodes.items(.data)),
+-            .len = zoir.nodes.len * 4,
+-        },
+-        .{
+-            .base = @ptrCast(zoir.nodes.items(.ast_node)),
+-            .len = zoir.nodes.len * 4,
+-        },
+-        .{
+-            .base = @ptrCast(zoir.extra),
+-            .len = zoir.extra.len * 4,
+-        },
+-        .{
+-            .base = @ptrCast(zoir.limbs),
+-            .len = zoir.limbs.len * 4,
+-        },
+-        .{
+-            .base = zoir.string_bytes.ptr,
+-            .len = zoir.string_bytes.len,
+-        },
+-        .{
+-            .base = @ptrCast(zoir.compile_errors),
+-            .len = zoir.compile_errors.len * @sizeOf(Zoir.CompileError),
+-        },
+-        .{
+-            .base = @ptrCast(zoir.error_notes),
+-            .len = zoir.error_notes.len * @sizeOf(Zoir.CompileError.Note),
+-        },
+-    };
+-    try cache_file.writevAll(&iovecs);
+-}
+-
+-pub fn loadZoirCacheBody(gpa: Allocator, header: Zoir.Header, cache_file: std.fs.File) !Zoir {
+-    var zoir: Zoir = .{
+-        .nodes = .empty,
+-        .extra = &.{},
+-        .limbs = &.{},
+-        .string_bytes = &.{},
+-        .compile_errors = &.{},
+-        .error_notes = &.{},
+-    };
+-    errdefer zoir.deinit(gpa);
+-
+-    zoir.nodes = nodes: {
+-        var nodes: std.MultiArrayList(Zoir.Node.Repr) = .empty;
+-        defer nodes.deinit(gpa);
+-        try nodes.setCapacity(gpa, header.nodes_len);
+-        nodes.len = header.nodes_len;
+-        break :nodes nodes.toOwnedSlice();
+-    };
+-
+-    zoir.extra = try gpa.alloc(u32, header.extra_len);
+-    zoir.limbs = try gpa.alloc(std.math.big.Limb, header.limbs_len);
+-    zoir.string_bytes = try gpa.alloc(u8, header.string_bytes_len);
+-
+-    zoir.compile_errors = try gpa.alloc(Zoir.CompileError, header.compile_errors_len);
+-    zoir.error_notes = try gpa.alloc(Zoir.CompileError.Note, header.error_notes_len);
+-
+-    var iovecs: [8]std.posix.iovec = .{
+-        .{
+-            .base = @ptrCast(zoir.nodes.items(.tag)),
+-            .len = header.nodes_len * @sizeOf(Zoir.Node.Repr.Tag),
+-        },
+-        .{
+-            .base = @ptrCast(zoir.nodes.items(.data)),
+-            .len = header.nodes_len * 4,
+-        },
+-        .{
+-            .base = @ptrCast(zoir.nodes.items(.ast_node)),
+-            .len = header.nodes_len * 4,
+-        },
+-        .{
+-            .base = @ptrCast(zoir.extra),
+-            .len = header.extra_len * 4,
+-        },
+-        .{
+-            .base = @ptrCast(zoir.limbs),
+-            .len = header.limbs_len * @sizeOf(std.math.big.Limb),
+-        },
+-        .{
+-            .base = zoir.string_bytes.ptr,
+-            .len = header.string_bytes_len,
+-        },
+-        .{
+-            .base = @ptrCast(zoir.compile_errors),
+-            .len = header.compile_errors_len * @sizeOf(Zoir.CompileError),
+-        },
+-        .{
+-            .base = @ptrCast(zoir.error_notes),
+-            .len = header.error_notes_len * @sizeOf(Zoir.CompileError.Note),
+-        },
+-    };
+-
+-    const bytes_expected = expected: {
+-        var n: usize = 0;
+-        for (iovecs) |v| n += v.len;
+-        break :expected n;
+-    };
+-
+-    const bytes_read = try cache_file.readvAll(&iovecs);
+-    if (bytes_read != bytes_expected) return error.UnexpectedFileSize;
+-    return zoir;
+-}
+-
+ pub fn markDependeeOutdated(
+     zcu: *Zcu,
+     /// When we are diffing ZIR and marking things as outdated, we won't yet have marked the dependencies as PO.
+diff --git a/src/Zcu/PerThread.zig b/src/Zcu/PerThread.zig
+index 699315835a..2884980beb 100644
+--- a/src/Zcu/PerThread.zig
++++ b/src/Zcu/PerThread.zig
+@@ -26,8 +26,6 @@ const Type = @import("../Type.zig");
+ const Value = @import("../Value.zig");
+ const Zcu = @import("../Zcu.zig");
+ const Zir = std.zig.Zir;
+-const Zoir = std.zig.Zoir;
+-const ZonGen = std.zig.ZonGen;
+ 
+ zcu: *Zcu,
+ 
+@@ -75,8 +73,6 @@ pub fn destroyFile(pt: Zcu.PerThread, file_index: Zcu.File.Index) void {
+     if (!is_builtin) gpa.destroy(file);
+ }
+ 
+-/// Ensures that `file` has up-to-date ZIR. If not, loads the ZIR cache or runs
+-/// AstGen as needed. Also updates `file.status`.
+ pub fn updateFile(
+     pt: Zcu.PerThread,
+     file: *Zcu.File,
+@@ -130,27 +126,6 @@ pub fn updateFile(
+         },
+     };
+ 
+-    // The old compile error, if any, is no longer relevant.
+-    pt.lockAndClearFileCompileError(file);
+-
+-    // If `zir` is not null, and `prev_zir` is null, then `TrackedInst`s are associated with `zir`.
+-    // We need to keep it around!
+-    // As an optimization, also check `loweringFailed`; if true, but `prev_zir == null`, then this
+-    // file has never passed AstGen, so we actually need not cache the old ZIR.
+-    if (file.zir != null and file.prev_zir == null and !file.zir.?.loweringFailed()) {
+-        assert(file.prev_zir == null);
+-        const prev_zir_ptr = try gpa.create(Zir);
+-        file.prev_zir = prev_zir_ptr;
+-        prev_zir_ptr.* = file.zir.?;
+-        file.zir = null;
+-    }
+-
+-    // If ZOIR is changing, then we need to invalidate dependencies on it
+-    if (file.zoir != null) file.zoir_invalidated = true;
+-
+-    // We're going to re-load everything, so unload source, AST, ZIR, ZOIR.
+-    file.unload(gpa);
+-
+     // We ask for a lock in order to coordinate with other zig processes.
+     // If another process is already working on this file, we will get the cached
+     // version. Likewise if we're working on AstGen and another process asks for
+@@ -205,164 +180,175 @@ pub fn updateFile(
+     };
+     defer cache_file.close();
+ 
+-    const need_update = while (true) {
+-        const result = switch (file.getMode()) {
+-            inline else => |mode| try loadZirZoirCache(zcu, cache_file, stat, file, mode),
+-        };
+-        switch (result) {
+-            .success => {
+-                log.debug("AstGen cached success: {s}", .{file.sub_file_path});
+-                break false;
+-            },
+-            .invalid => {},
+-            .truncated => log.warn("unexpected EOF reading cached ZIR for {s}", .{file.sub_file_path}),
+-            .stale => log.debug("AstGen cache stale: {s}", .{file.sub_file_path}),
++    while (true) {
++        update: {
++            // First we read the header to determine the lengths of arrays.
++            const header = cache_file.reader().readStruct(Zir.Header) catch |err| switch (err) {
++                // This can happen if Zig bails out of this function between creating
++                // the cached file and writing it.
++                error.EndOfStream => break :update,
++                else => |e| return e,
++            };
++            const unchanged_metadata =
++                stat.size == header.stat_size and
++                stat.mtime == header.stat_mtime and
++                stat.inode == header.stat_inode;
++
++            if (!unchanged_metadata) {
++                log.debug("AstGen cache stale: {s}", .{file.sub_file_path});
++                break :update;
++            }
++            log.debug("AstGen cache hit: {s} instructions_len={d}", .{
++                file.sub_file_path, header.instructions_len,
++            });
++
++            file.zir = Zcu.loadZirCacheBody(gpa, header, cache_file) catch |err| switch (err) {
++                error.UnexpectedFileSize => {
++                    log.warn("unexpected EOF reading cached ZIR for {s}", .{file.sub_file_path});
++                    break :update;
++                },
++                else => |e| return e,
++            };
++            file.stat = .{
++                .size = header.stat_size,
++                .inode = header.stat_inode,
++                .mtime = header.stat_mtime,
++            };
++            file.status = .success;
++            log.debug("AstGen cached success: {s}", .{file.sub_file_path});
++
++            if (file.zir.?.hasCompileErrors()) {
++                comp.mutex.lock();
++                defer comp.mutex.unlock();
++                try zcu.failed_files.putNoClobber(gpa, file, null);
++            }
++            if (file.zir.?.loweringFailed()) {
++                file.status = .astgen_failure;
++                return error.AnalysisFail;
++            }
++            return;
+         }
+ 
+         // If we already have the exclusive lock then it is our job to update.
+-        if (builtin.os.tag == .wasi or lock == .exclusive) break true;
++        if (builtin.os.tag == .wasi or lock == .exclusive) break;
+         // Otherwise, unlock to give someone a chance to get the exclusive lock
+         // and then upgrade to an exclusive lock.
+         cache_file.unlock();
+         lock = .exclusive;
+         try cache_file.lock(lock);
+-    };
++    }
+ 
+-    if (need_update) {
+-        // The cache is definitely stale so delete the contents to avoid an underwrite later.
+-        cache_file.setEndPos(0) catch |err| switch (err) {
+-            error.FileTooBig => unreachable, // 0 is not too big
+-            else => |e| return e,
+-        };
++    // The cache is definitely stale so delete the contents to avoid an underwrite later.
++    cache_file.setEndPos(0) catch |err| switch (err) {
++        error.FileTooBig => unreachable, // 0 is not too big
+ 
+-        if (stat.size > std.math.maxInt(u32))
+-            return error.FileTooBig;
++        else => |e| return e,
++    };
+ 
+-        const source = try gpa.allocSentinel(u8, @as(usize, @intCast(stat.size)), 0);
+-        defer if (file.source == null) gpa.free(source);
+-        const amt = try source_file.readAll(source);
+-        if (amt != stat.size)
+-            return error.UnexpectedEndOfFile;
++    pt.lockAndClearFileCompileError(file);
+ 
+-        file.source = source;
++    // If `zir` is not null, and `prev_zir` is null, then `TrackedInst`s are associated with `zir`.
++    // We need to keep it around!
++    // As an optimization, also check `loweringFailed`; if true, but `prev_zir == null`, then this
++    // file has never passed AstGen, so we actually need not cache the old ZIR.
++    if (file.zir != null and file.prev_zir == null and !file.zir.?.loweringFailed()) {
++        assert(file.prev_zir == null);
++        const prev_zir_ptr = try gpa.create(Zir);
++        file.prev_zir = prev_zir_ptr;
++        prev_zir_ptr.* = file.zir.?;
++        file.zir = null;
++    }
++    file.unload(gpa);
+ 
+-        // Any potential AST errors are converted to ZIR errors when we run AstGen/ZonGen.
+-        file.tree = try Ast.parse(gpa, source, file.getMode());
++    if (stat.size > std.math.maxInt(u32))
++        return error.FileTooBig;
+ 
+-        switch (file.getMode()) {
+-            .zig => {
+-                file.zir = try AstGen.generate(gpa, file.tree.?);
+-                Zcu.saveZirCache(gpa, cache_file, stat, file.zir.?) catch |err| switch (err) {
+-                    error.OutOfMemory => |e| return e,
+-                    else => log.warn("unable to write cached ZIR code for {}{s} to {}{s}: {s}", .{
+-                        file.mod.root, file.sub_file_path, cache_directory, &hex_digest, @errorName(err),
+-                    }),
+-                };
+-            },
+-            .zon => {
+-                file.zoir = try ZonGen.generate(gpa, file.tree.?, .{});
+-                Zcu.saveZoirCache(cache_file, stat, file.zoir.?) catch |err| {
+-                    log.warn("unable to write cached ZOIR code for {}{s} to {}{s}: {s}", .{
+-                        file.mod.root, file.sub_file_path, cache_directory, &hex_digest, @errorName(err),
+-                    });
+-                };
+-            },
+-        }
+-
+-        log.debug("AstGen fresh success: {s}", .{file.sub_file_path});
+-    }
++    const source = try gpa.allocSentinel(u8, @as(usize, @intCast(stat.size)), 0);
++    defer if (file.source == null) gpa.free(source);
++    const amt = try source_file.readAll(source);
++    if (amt != stat.size)
++        return error.UnexpectedEndOfFile;
+ 
+     file.stat = .{
+         .size = stat.size,
+         .inode = stat.inode,
+         .mtime = stat.mtime,
+     };
++    file.source = source;
+ 
+-    // Now, `zir` or `zoir` is definitely populated and up-to-date.
+-    // Mark file successes/failures as needed.
++    file.tree = try Ast.parse(gpa, source, .zig);
+ 
+-    switch (file.getMode()) {
+-        .zig => {
+-            if (file.zir.?.hasCompileErrors()) {
+-                comp.mutex.lock();
+-                defer comp.mutex.unlock();
+-                try zcu.failed_files.putNoClobber(gpa, file, null);
+-            }
+-            if (file.zir.?.loweringFailed()) {
+-                file.status = .astgen_failure;
+-            } else {
+-                file.status = .success;
+-            }
+-        },
+-        .zon => {
+-            if (file.zoir.?.hasCompileErrors()) {
+-                file.status = .astgen_failure;
+-                comp.mutex.lock();
+-                defer comp.mutex.unlock();
+-                try zcu.failed_files.putNoClobber(gpa, file, null);
+-            } else {
+-                file.status = .success;
+-            }
+-        },
+-    }
++    // Any potential AST errors are converted to ZIR errors here.
++    file.zir = try AstGen.generate(gpa, file.tree.?);
++    file.status = .success;
++    log.debug("AstGen fresh success: {s}", .{file.sub_file_path});
+ 
+-    switch (file.status) {
+-        .never_loaded => unreachable,
+-        .retryable_failure => unreachable,
+-        .astgen_failure => return error.AnalysisFail,
+-        .success => return,
++    const safety_buffer = if (Zcu.data_has_safety_tag)
++        try gpa.alloc([8]u8, file.zir.?.instructions.len)
++    else
++        undefined;
++    defer if (Zcu.data_has_safety_tag) gpa.free(safety_buffer);
++    const data_ptr = if (Zcu.data_has_safety_tag)
++        if (file.zir.?.instructions.len == 0)
++            @as([*]const u8, undefined)
++        else
++            @as([*]const u8, @ptrCast(safety_buffer.ptr))
++    else
++        @as([*]const u8, @ptrCast(file.zir.?.instructions.items(.data).ptr));
++    if (Zcu.data_has_safety_tag) {
++        // The `Data` union has a safety tag but in the file format we store it without.
++        for (file.zir.?.instructions.items(.data), 0..) |*data, i| {
++            const as_struct: *const Zcu.HackDataLayout = @ptrCast(data);
++            safety_buffer[i] = as_struct.data;
++        }
+     }
+-}
+-
+-fn loadZirZoirCache(
+-    zcu: *Zcu,
+-    cache_file: std.fs.File,
+-    stat: std.fs.File.Stat,
+-    file: *Zcu.File,
+-    comptime mode: Ast.Mode,
+-) !enum { success, invalid, truncated, stale } {
+-    assert(file.getMode() == mode);
+ 
+-    const gpa = zcu.gpa;
++    const header: Zir.Header = .{
++        .instructions_len = @as(u32, @intCast(file.zir.?.instructions.len)),
++        .string_bytes_len = @as(u32, @intCast(file.zir.?.string_bytes.len)),
++        .extra_len = @as(u32, @intCast(file.zir.?.extra.len)),
+ 
+-    const Header = switch (mode) {
+-        .zig => Zir.Header,
+-        .zon => Zoir.Header,
++        .stat_size = stat.size,
++        .stat_inode = stat.inode,
++        .stat_mtime = stat.mtime,
+     };
+-
+-    // First we read the header to determine the lengths of arrays.
+-    const header = cache_file.reader().readStruct(Header) catch |err| switch (err) {
+-        // This can happen if Zig bails out of this function between creating
+-        // the cached file and writing it.
+-        error.EndOfStream => return .invalid,
+-        else => |e| return e,
++    var iovecs = [_]std.posix.iovec_const{
++        .{
++            .base = @as([*]const u8, @ptrCast(&header)),
++            .len = @sizeOf(Zir.Header),
++        },
++        .{
++            .base = @as([*]const u8, @ptrCast(file.zir.?.instructions.items(.tag).ptr)),
++            .len = file.zir.?.instructions.len,
++        },
++        .{
++            .base = data_ptr,
++            .len = file.zir.?.instructions.len * 8,
++        },
++        .{
++            .base = file.zir.?.string_bytes.ptr,
++            .len = file.zir.?.string_bytes.len,
++        },
++        .{
++            .base = @as([*]const u8, @ptrCast(file.zir.?.extra.ptr)),
++            .len = file.zir.?.extra.len * 4,
++        },
++    };
++    cache_file.writevAll(&iovecs) catch |err| {
++        log.warn("unable to write cached ZIR code for {}{s} to {}{s}: {s}", .{
++            file.mod.root, file.sub_file_path, cache_directory, &hex_digest, @errorName(err),
++        });
+     };
+ 
+-    const unchanged_metadata =
+-        stat.size == header.stat_size and
+-        stat.mtime == header.stat_mtime and
+-        stat.inode == header.stat_inode;
+-
+-    if (!unchanged_metadata) {
+-        return .stale;
++    if (file.zir.?.hasCompileErrors()) {
++        comp.mutex.lock();
++        defer comp.mutex.unlock();
++        try zcu.failed_files.putNoClobber(gpa, file, null);
+     }
+-
+-    switch (mode) {
+-        .zig => {
+-            file.zir = Zcu.loadZirCacheBody(gpa, header, cache_file) catch |err| switch (err) {
+-                error.UnexpectedFileSize => return .truncated,
+-                else => |e| return e,
+-            };
+-        },
+-        .zon => {
+-            file.zoir = Zcu.loadZoirCacheBody(gpa, header, cache_file) catch |err| switch (err) {
+-                error.UnexpectedFileSize => return .truncated,
+-                else => |e| return e,
+-            };
+-        },
++    if (file.zir.?.loweringFailed()) {
++        file.status = .astgen_failure;
++        return error.AnalysisFail;
+     }
+-
+-    return .success;
+ }
+ 
+ const UpdatedFile = struct {
+@@ -1848,6 +1834,7 @@ fn semaFile(pt: Zcu.PerThread, file_index: Zcu.File.Index) Zcu.SemaError!void {
+     defer tracy.end();
+ 
+     const zcu = pt.zcu;
++    const gpa = zcu.gpa;
+     const file = zcu.fileByIndex(file_index);
+     assert(file.getMode() == .zig);
+     assert(zcu.fileRootType(file_index) == .none);
+@@ -1862,6 +1849,36 @@ fn semaFile(pt: Zcu.PerThread, file_index: Zcu.File.Index) Zcu.SemaError!void {
+     });
+     const struct_ty = try pt.createFileRootStruct(file_index, new_namespace_index, false);
+     errdefer zcu.intern_pool.remove(pt.tid, struct_ty);
++
++    switch (zcu.comp.cache_use) {
++        .whole => |whole| if (whole.cache_manifest) |man| {
++            const source = file.getSource(gpa) catch |err| {
++                try pt.reportRetryableFileError(file_index, "unable to load source: {s}", .{@errorName(err)});
++                return error.AnalysisFail;
++            };
++
++            const resolved_path = std.fs.path.resolve(gpa, &.{
++                file.mod.root.root_dir.path orelse ".",
++                file.mod.root.sub_path,
++                file.sub_file_path,
++            }) catch |err| {
++                try pt.reportRetryableFileError(file_index, "unable to resolve path: {s}", .{@errorName(err)});
++                return error.AnalysisFail;
++            };
++            errdefer gpa.free(resolved_path);
++
++            whole.cache_manifest_mutex.lock();
++            defer whole.cache_manifest_mutex.unlock();
++            man.addFilePostContents(resolved_path, source.bytes, source.stat) catch |err| switch (err) {
++                error.OutOfMemory => |e| return e,
++                else => {
++                    try pt.reportRetryableFileError(file_index, "unable to update cache: {s}", .{@errorName(err)});
++                    return error.AnalysisFail;
++                },
++            };
++        },
++        .incremental => {},
++    }
+ }
+ 
+ pub fn importPkg(pt: Zcu.PerThread, mod: *Module) Allocator.Error!Zcu.ImportFileResult {
+@@ -2798,31 +2815,12 @@ pub fn getErrorValueFromSlice(pt: Zcu.PerThread, name: []const u8) Allocator.Err
+ /// Removes any entry from `Zcu.failed_files` associated with `file`. Acquires `Compilation.mutex` as needed.
+ /// `file.zir` must be unchanged from the last update, as it is used to determine if there is such an entry.
+ fn lockAndClearFileCompileError(pt: Zcu.PerThread, file: *Zcu.File) void {
+-    const maybe_has_error = switch (file.status) {
+-        .never_loaded => false,
+-        .retryable_failure => true,
+-        .astgen_failure => true,
+-        .success => switch (file.getMode()) {
+-            .zig => has_error: {
+-                const zir = file.zir orelse break :has_error false;
+-                break :has_error zir.hasCompileErrors();
+-            },
+-            .zon => has_error: {
+-                const zoir = file.zoir orelse break :has_error false;
+-                break :has_error zoir.hasCompileErrors();
+-            },
+-        },
+-    };
+-
+-    // If runtime safety is on, let's quickly lock the mutex and check anyway.
+-    if (!maybe_has_error and !std.debug.runtime_safety) {
+-        return;
+-    }
++    const zir = file.zir orelse return;
++    if (!zir.hasCompileErrors()) return;
+ 
+     pt.zcu.comp.mutex.lock();
+     defer pt.zcu.comp.mutex.unlock();
+     if (pt.zcu.failed_files.fetchSwapRemove(file)) |kv| {
+-        assert(maybe_has_error); // the runtime safety case above
+         if (kv.value) |msg| msg.destroy(pt.zcu.gpa); // delete previous error message
+     }
+ }
+diff --git a/test/incremental/change_zon_file b/test/incremental/change_zon_file
+deleted file mode 100644
+index da55c8ad83..0000000000
+--- a/test/incremental/change_zon_file
++++ /dev/null
+@@ -1,46 +0,0 @@
+-#target=x86_64-linux-selfhosted
+-#target=x86_64-linux-cbe
+-#target=x86_64-windows-cbe
+-//#target=wasm32-wasi-selfhosted
+-#update=initial version
+-#file=main.zig
+-const std = @import("std");
+-const message: []const u8 = @import("message.zon");
+-pub fn main() !void {
+-    try std.io.getStdOut().writeAll(message);
+-}
+-#file=message.zon
+-"Hello, World!\n"
+-#expect_stdout="Hello, World!\n"
+-
+-#update=change ZON file contents
+-#file=message.zon
+-"Hello again, World!\n"
+-#expect_stdout="Hello again, World!\n"
+-
+-#update=delete file
+-#rm_file=message.zon
+-#expect_error=message.zon:1:1: error: unable to load './message.zon': FileNotFound
+-
+-#update=remove reference to ZON file
+-#file=main.zig
+-const std = @import("std");
+-const message: []const u8 = @import("message.zon");
+-pub fn main() !void {
+-    try std.io.getStdOut().writeAll("a hardcoded string\n");
+-}
+-#expect_error=message.zon:1:1: error: unable to load './message.zon': FileNotFound
+-
+-#update=recreate ZON file
+-#file=message.zon
+-"We're back, World!\n"
+-#expect_stdout="a hardcoded string\n"
+-
+-#update=re-introduce reference to ZON file
+-#file=main.zig
+-const std = @import("std");
+-const message: []const u8 = @import("message.zon");
+-pub fn main() !void {
+-    try std.io.getStdOut().writeAll(message);
+-}
+-#expect_stdout="We're back, World!\n"
