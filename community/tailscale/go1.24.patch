@@ -1,0 +1,169 @@
+Patch-Source: https://github.com/tailscale/tailscale/pull/15016/commits/7b771377f488593f2eb212d170c98acba5cba9d1
+---
+From 7b771377f488593f2eb212d170c98acba5cba9d1 Mon Sep 17 00:00:00 2001
+From: Paul Scott <paul@tailscale.com>
+Date: Mon, 17 Feb 2025 15:05:16 +0000
+Subject: [PATCH] cmd/testwrapper: fix for go1.24
+
+Updates #15015
+
+Signed-off-by: Paul Scott <paul@tailscale.com>
+---
+ cmd/testwrapper/testwrapper.go      | 53 ++++++++++++++++-------------
+ cmd/testwrapper/testwrapper_test.go | 15 ++++----
+ 2 files changed, 38 insertions(+), 30 deletions(-)
+
+diff --git a/cmd/testwrapper/testwrapper.go b/cmd/testwrapper/testwrapper.go
+index 67b8a14834929..1df1ef11f9389 100644
+--- a/cmd/testwrapper/testwrapper.go
++++ b/cmd/testwrapper/testwrapper.go
+@@ -10,6 +10,7 @@ package main
+ import (
+ 	"bufio"
+ 	"bytes"
++	"cmp"
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
+@@ -59,11 +60,12 @@ type packageTests struct {
+ }
+ 
+ type goTestOutput struct {
+-	Time    time.Time
+-	Action  string
+-	Package string
+-	Test    string
+-	Output  string
++	Time       time.Time
++	Action     string
++	ImportPath string
++	Package    string
++	Test       string
++	Output     string
+ }
+ 
+ var debug = os.Getenv("TS_TESTWRAPPER_DEBUG") != ""
+@@ -111,42 +113,43 @@ func runTests(ctx context.Context, attempt int, pt *packageTests, goTestArgs, te
+ 	for s.Scan() {
+ 		var goOutput goTestOutput
+ 		if err := json.Unmarshal(s.Bytes(), &goOutput); err != nil {
+-			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+-				break
+-			}
+-
+-			// `go test -json` outputs invalid JSON when a build fails.
+-			// In that case, discard the the output and start reading again.
+-			// The build error will be printed to stderr.
+-			// See: https://github.com/golang/go/issues/35169
+-			if _, ok := err.(*json.SyntaxError); ok {
+-				fmt.Println(s.Text())
+-				continue
+-			}
+-			panic(err)
++			return fmt.Errorf("failed to parse go test output %q: %w", s.Bytes(), err)
+ 		}
+-		pkg := goOutput.Package
++		pkg := cmp.Or(
++			goOutput.Package,
++			"build:"+goOutput.ImportPath, // can be "./cmd" while Package is "tailscale.com/cmd" so use separate namespace
++		)
+ 		pkgTests := resultMap[pkg]
+ 		if pkgTests == nil {
+-			pkgTests = make(map[string]*testAttempt)
++			pkgTests = map[string]*testAttempt{
++				"": {}, // Used for start time and build logs.
++			}
+ 			resultMap[pkg] = pkgTests
+ 		}
+ 		if goOutput.Test == "" {
+ 			switch goOutput.Action {
+ 			case "start":
+-				pkgTests[""] = &testAttempt{start: goOutput.Time}
+-			case "fail", "pass", "skip":
++				pkgTests[""].start = goOutput.Time
++			case "build-output":
++				pkgTests[""].logs.WriteString(goOutput.Output)
++			case "build-fail", "fail", "pass", "skip":
+ 				for _, test := range pkgTests {
+ 					if test.testName != "" && test.outcome == "" {
+ 						test.outcome = "fail"
+ 						ch <- test
+ 					}
+ 				}
++				outcome := goOutput.Action
++				if outcome == "build-fail" {
++					outcome = "FAIL"
++				}
++				pkgTests[""].logs.WriteString(goOutput.Output)
+ 				ch <- &testAttempt{
+ 					pkg:         goOutput.Package,
+-					outcome:     goOutput.Action,
++					outcome:     outcome,
+ 					start:       pkgTests[""].start,
+ 					end:         goOutput.Time,
++					logs:        pkgTests[""].logs,
+ 					pkgFinished: true,
+ 				}
+ 			}
+@@ -215,6 +218,9 @@ func main() {
+ 	}
+ 	toRun := []*nextRun{firstRun}
+ 	printPkgOutcome := func(pkg, outcome string, attempt int, runtime time.Duration) {
++		if pkg == "" {
++			return // We reach this path on a build error.
++		}
+ 		if outcome == "skip" {
+ 			fmt.Printf("?\t%s [skipped/no tests] \n", pkg)
+ 			return
+@@ -270,6 +276,7 @@ func main() {
+ 						// when a package times out.
+ 						failed = true
+ 					}
++					os.Stdout.ReadFrom(&tr.logs)
+ 					printPkgOutcome(tr.pkg, tr.outcome, thisRun.attempt, tr.end.Sub(tr.start))
+ 					continue
+ 				}
+diff --git a/cmd/testwrapper/testwrapper_test.go b/cmd/testwrapper/testwrapper_test.go
+index fb2ed2c52cb2e..ace53ccd0e09a 100644
+--- a/cmd/testwrapper/testwrapper_test.go
++++ b/cmd/testwrapper/testwrapper_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"os/exec"
+ 	"path/filepath"
+ 	"regexp"
++	"strings"
+ 	"sync"
+ 	"testing"
+ )
+@@ -154,24 +155,24 @@ func TestBuildError(t *testing.T) {
+ 		t.Fatalf("writing package: %s", err)
+ 	}
+ 
+-	buildErr := []byte("builderror_test.go:3:1: expected declaration, found derp\nFAIL	command-line-arguments [setup failed]")
++	wantErr := "builderror_test.go:3:1: expected declaration, found derp\nFAIL"
+ 
+ 	// Confirm `go test` exits with code 1.
+ 	goOut, err := exec.Command("go", "test", testfile).CombinedOutput()
+ 	if code, ok := errExitCode(err); !ok || code != 1 {
+-		t.Fatalf("go test %s: expected error with exit code 0 but got: %v", testfile, err)
++		t.Fatalf("go test %s: got exit code %d, want 1 (err: %v)", testfile, code, err)
+ 	}
+-	if !bytes.Contains(goOut, buildErr) {
+-		t.Fatalf("go test %s: expected build error containing %q but got:\n%s", testfile, buildErr, goOut)
++	if !strings.Contains(string(goOut), wantErr) {
++		t.Fatalf("go test %s: got output %q, want output containing %q", testfile, goOut, wantErr)
+ 	}
+ 
+ 	// Confirm `testwrapper` exits with code 1.
+ 	twOut, err := cmdTestwrapper(t, testfile).CombinedOutput()
+ 	if code, ok := errExitCode(err); !ok || code != 1 {
+-		t.Fatalf("testwrapper %s: expected error with exit code 0 but got: %v", testfile, err)
++		t.Fatalf("testwrapper %s: got exit code %d, want 1 (err: %v)", testfile, code, err)
+ 	}
+-	if !bytes.Contains(twOut, buildErr) {
+-		t.Fatalf("testwrapper %s: expected build error containing %q but got:\n%s", testfile, buildErr, twOut)
++	if !strings.Contains(string(twOut), wantErr) {
++		t.Fatalf("testwrapper %s: got output %q, want output containing %q", testfile, twOut, wantErr)
+ 	}
+ 
+ 	if testing.Verbose() {
