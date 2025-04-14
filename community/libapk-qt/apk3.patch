@@ -1,0 +1,415 @@
+diff --git a/src/private/QtApkDatabase_private.cpp b/src/private/QtApkDatabase_private.cpp
+index a7ef452..0cb4fff 100644
+--- a/src/private/QtApkDatabase_private.cpp
++++ b/src/private/QtApkDatabase_private.cpp
+@@ -41,7 +41,6 @@ DatabasePrivate::DatabasePrivate(Database *q)
+ DatabasePrivate::~DatabasePrivate()
+ {
+     close();
+-    w_set_apk_progress_fd(0);
+     if (progress_fd[0] != 0) ::close(progress_fd[0]);
+     if (progress_fd[1] != 0) ::close(progress_fd[1]);
+     progress_fd[0] = 0;
+@@ -59,14 +58,15 @@ bool DatabasePrivate::open(DbOpenFlags flags)
+         open_flags = DBOPENF_READONLY;
+     }
+ 
+-    wdb = w_db_open(open_flags, fakeRoot.toUtf8().constData());
++    QByteArray bytes = fakeRoot.toUtf8();
++    wdb = w_db_open(open_flags, bytes.constData());
+     if (!wdb) {
+         return false;
+     }
+ 
+     if (flags & QTAPK_OPENF_ENABLE_PROGRESSFD) {
+         if (::pipe(progress_fd) == 0) {
+-            w_set_apk_progress_fd(progress_fd[1]); // write end
++            w_set_apk_progress_fd(wdb->db, progress_fd[1]); // write end
+         }
+     }
+     return true;
+@@ -96,21 +96,16 @@ bool DatabasePrivate::update(DbUpdateFlags flags)
+ 
+     // report 0%
+     int buflen;
+-    if (w_get_apk_progress_fd() != 0) {
++    if (w_get_apk_progress_fd(wdb->db) != 0) {
+         buflen = ::snprintf(progress_buf, sizeof(progress_buf), "0/%zu\n",
+                             static_cast<size_t>(w_db_get_num_repos(wdb->db)));
+-        ::write(w_get_apk_progress_fd(), progress_buf, buflen);
++        ::write(w_get_apk_progress_fd(wdb->db), progress_buf, buflen);
+     }
+ 
+     // update each repo
+-    for (unsigned int iRepo = APK_REPOSITORY_FIRST_CONFIGURED;
++    for (unsigned int iRepo = 0;
+          iRepo < w_db_get_num_repos(wdb->db); iRepo++)
+     {
+-        // skip always-configured cache repo
+-        if (iRepo == APK_REPOSITORY_CACHED) {
+-            continue;
+-        }
+-
+         qCDebug(LOG_QTAPK) << "Updating: [" << w_db_get_repo_url(wdb->db, iRepo) << "]"
+                            << w_db_get_repo_desc(wdb->db, iRepo);
+ 
+@@ -123,11 +118,11 @@ bool DatabasePrivate::update(DbUpdateFlags flags)
+ 
+         // report progress to the same progress_fd that libapk uses
+         //     in exactly the same format as libapk does
+-        if (w_get_apk_progress_fd() != 0) {
++        if (w_get_apk_progress_fd(wdb->db) != 0) {
+             buflen = ::snprintf(progress_buf, sizeof(progress_buf), "%zu/%zu\n",
+                                 static_cast<size_t>(iRepo + 1),
+                                 static_cast<size_t>(w_db_get_num_repos(wdb->db)));
+-            ::write(w_get_apk_progress_fd(), progress_buf, buflen);
++            ::write(w_get_apk_progress_fd(wdb->db), progress_buf, buflen);
+         }
+     }
+     qCDebug(LOG_QTAPK) << "Updated, errors: " << w_db_get_repo_update_errors(wdb->db);
+@@ -229,8 +224,8 @@ bool DatabasePrivate::add(const QString &pkgNameSpec, unsigned short solver_flag
+ 
+     struct w_resolved_apk_dependency resolved_dep;
+ 
+-    const char *const pkgNameSpecC = pkgNameSpec.toUtf8().constData();
+-    int r = w_apk_add(wdb->db, pkgNameSpecC, solver_flags, &resolved_dep);
++    QByteArray pkgNameSpecArr = pkgNameSpec.toUtf8();
++    int r = w_apk_add(wdb->db, pkgNameSpecArr.constData(), solver_flags, &resolved_dep);
+ 
+     if (r != 0) {
+         qCWarning(LOG_QTAPK) << "add: Failed to install package: "
+@@ -257,8 +252,8 @@ bool DatabasePrivate::del(const QString &pkgNameSpec, DbDelFlags flags)
+         return false;
+     }
+ 
+-    const char *const pkgname = pkgNameSpec.toUtf8().constData();
+-    int r = w_apk_del(wdb->db, pkgname, flags & QTAPK_DEL_RDEPENDS ? true : false);
++    QByteArray pkgname = pkgNameSpec.toUtf8();
++    int r = w_apk_del(wdb->db, pkgname.constData(), flags & QTAPK_DEL_RDEPENDS ? true : false);
+     if (r) {
+         qCWarning(LOG_QTAPK) << "del: failed to delete package:" << pkgNameSpec
+                              << ": " << w_apk_error_str(r);
+diff --git a/src/private/libapk_c_wrappers.c b/src/private/libapk_c_wrappers.c
+index d766389..35c9db1 100644
+--- a/src/private/libapk_c_wrappers.c
++++ b/src/private/libapk_c_wrappers.c
+@@ -10,6 +10,7 @@
+ #include <apk/apk_blob.h>
+ #include <apk/apk_database.h>
+ #include <apk/apk_defines.h>
++#include <apk/apk_fs.h>
+ #include <apk/apk_version.h>
+ #include <apk/apk_solver.h>
+ #include <apk/apk_package.h>
+@@ -26,67 +27,76 @@ const char *w_apk_error_str(int e)
+ }
+ 
+ // wraps setting ::apk_progress_fd from apk_print.h
+-void w_set_apk_progress_fd(int fd)
++void w_set_apk_progress_fd(struct apk_database *db, int fd)
+ {
+-    apk_progress_fd = fd;
++    db->ctx->out.progress_fd = fd;
+ }
+ 
+-int w_get_apk_progress_fd()
++int w_get_apk_progress_fd(struct apk_database *db)
+ {
+-    return apk_progress_fd;
++    return db->ctx->out.progress_fd;
+ }
+ 
+ struct w_apk_database *w_db_open(unsigned long open_flags, const char *fakeRootPath)
+ {
+-    struct apk_db_options db_opts;
++    struct apk_ctx *ac;
+     struct apk_database *db;
+     struct w_apk_database *wdb;
+     int r;
+ 
+-    memset(&db_opts, 0, sizeof(db_opts));
+-    db_opts.open_flags = open_flags;
++    apk_crypto_init();
++
++    ac = (struct apk_ctx *)malloc(sizeof(struct apk_ctx));
++    if (!ac)
++        return NULL;
++    memset(ac, 0, sizeof(struct apk_ctx));
++    apk_ctx_init(ac);
++    ac->open_flags = open_flags;
+ 
+     // apply "fake" root, if set
+     if (fakeRootPath && (strlen(fakeRootPath) > 0)) {
+-        db_opts.root = strdup(fakeRootPath);
+-        // Do not load scripts when db is opened for writing
+-        // in fake root mode. Scripts don't like it and always fail
++        ac->root = strdup(fakeRootPath);
+         if (open_flags & APK_OPENF_WRITE) {
+-            db_opts.open_flags |= APK_OPENF_NO_SCRIPTS;
++            ac->open_flags |= APK_OPENF_USERMODE;
+         }
+     }
+-    list_init(&db_opts.repository_list);
++    apk_ctx_prepare(ac);
+ 
+     wdb = (struct w_apk_database *)malloc(sizeof(struct w_apk_database));
+     if (!wdb) {
+-        if (db_opts.root) {
+-            free((void *)db_opts.root);
+-            db_opts.root = NULL;
++        if (ac->root) {
++            free((void *)ac->root);
++            ac->root = NULL;
+         }
++        apk_ctx_free(ac);
++        free(ac);
+         return NULL;
+     }
+ 
+     db = (struct apk_database *)malloc(sizeof(struct apk_database));
+     memset(db, 0, sizeof(struct apk_database));
+-    apk_db_init(db);
+-    r = apk_db_open(db, &db_opts);
++    apk_db_init(db, ac);
++    r = apk_db_open(db);
+ 
+     if (r == 0) {
+         // In fakeRoot mode, or if not running as root, make libapk to not attempt
+         // changing file permissions - it will fail without root rights.
+         if (geteuid() != 0 || (fakeRootPath && strlen(fakeRootPath) > 0)) {
+-            db->extract_flags |= APK_EXTRACTF_NO_CHOWN;
++            db->extract_flags |= APK_FSEXTRACTF_NO_CHOWN;
+         }
+         wdb->db = db;
+     } else {
+         // failed to open :(
++        apk_db_close(db);
+         free(db);
+         free(wdb);
+         wdb = NULL;
+-        if (db_opts.root) {
+-            free((void *)db_opts.root);
+-            db_opts.root = NULL;
++        if (ac->root) {
++            free((void *)ac->root);
++            ac->root = NULL;
+         }
++        apk_ctx_free(ac);
++        free(ac);
+     }
+ 
+     return wdb;
+@@ -96,9 +106,9 @@ void w_db_close(struct w_apk_database *wdb)
+ {
+     if (!wdb) return;
+     if (wdb->db) {
+-        if (wdb->db->open_complete) {
+-            apk_db_close(wdb->db);
+-        }
++        apk_db_close(wdb->db);
++        if (wdb->db->ctx) apk_ctx_free(wdb->db->ctx);
++        free(wdb->db->ctx);
+     }
+     free(wdb->db);
+     free(wdb);
+@@ -209,13 +219,12 @@ int w_db_repository_update(struct apk_database *db, int iRepo, bool allow_untrus
+     struct apk_repository *repo = &db->repos[iRepo];
+ 
+     int update_error = 0;
+-    int verify_flag = allow_untrusted ? APK_SIGN_NONE : APK_SIGN_VERIFY;
+-    int autoupdate = 1;
+-    int is_remote = (apk_url_local_file(repo->url) == NULL);
++    int is_remote = (apk_url_local_file(repo->url_index.ptr, PATH_MAX) == NULL);
++
++    db->ctx->trust.allow_untrusted = allow_untrusted ? 1 : 0;
+ 
+-    update_error = apk_cache_download(db, repo, NULL, verify_flag, autoupdate,
+-                           w_internal_repoupdate_progress_cb, (void *)NULL);
+-    if (update_error == -EALREADY) {
++    update_error = apk_cache_download(db, repo, NULL, NULL);
++    if (update_error == -EALREADY || update_error == -APKE_FILE_UNCHANGED) {
+         return 0;
+     }
+     if (update_error != 0) {
+@@ -233,7 +242,7 @@ int w_db_repository_update(struct apk_database *db, int iRepo, bool allow_untrus
+ const char *w_db_get_repo_url(const struct apk_database *db, int iRepo)
+ {
+     const struct apk_repository *repo = &db->repos[iRepo];
+-    return repo->url;
++    return apk_blob_cstr(repo->url_printable);
+ }
+ 
+ const char *w_db_get_repo_desc(const struct apk_database *db, int iRepo)
+@@ -246,6 +255,7 @@ struct apk_changeset *w_create_apk_changeset()
+ {
+     struct apk_changeset *ret = (struct apk_changeset *)malloc(sizeof(struct apk_changeset));
+     memset(ret, 0, sizeof(struct apk_changeset));
++    apk_change_array_init(&ret->changes);
+     return ret;
+ }
+ 
+@@ -273,7 +283,7 @@ int w_apk_changeset_get_num_adjust(const struct apk_changeset *cs)
+ // wraps changeset.changes->num
+ unsigned int w_apk_changeset_get_num_changes(const struct apk_changeset *cs)
+ {
+-    return (unsigned int)cs->changes->num;
++    return apk_array_len(cs->changes);
+ }
+ 
+ // wraps &changeset.changes->item[iChange];
+@@ -339,21 +349,21 @@ const char *w_apk_package_get_maintainer(const struct apk_package *pkg)
+ const char *w_apk_package_get_url(const struct apk_package *pkg)
+ {
+     if (pkg->url) {
+-        return pkg->url;
++        return apk_blob_cstr(*pkg->url);
+     }
+     return s_w_emptyRet;
+ }
+ const char *w_apk_package_get_description(const struct apk_package *pkg)
+ {
+     if (pkg->description) {
+-        return pkg->description;
++        return apk_blob_cstr(*pkg->description);
+     }
+     return s_w_emptyRet;
+ }
+ const char *w_apk_package_get_commit(const struct apk_package *pkg)
+ {
+     if (pkg->commit) {
+-        return pkg->commit;
++        return apk_blob_cstr(*pkg->commit);
+     }
+     return s_w_emptyRet;
+ }
+@@ -390,7 +400,7 @@ int w_apk_solver_commit_changeset(struct apk_database *db, struct apk_changeset
+ static bool w_internal_non_repository_check(struct apk_database *db)
+ {
+     // copied from libapk's add.c
+-    if (apk_force & APK_FORCE_NON_REPOSITORY)
++    if (db->ctx->force & APK_FORCE_NON_REPOSITORY)
+         return true;
+     if (apk_db_cache_active(db))
+         return true;
+@@ -409,16 +419,12 @@ static bool w_internal_package_name_to_apk_dependency(
+     int r;
+     if (strstr(pkgname, ".apk") != NULL) {
+         struct apk_package *pkg = NULL;
+-        struct apk_sign_ctx sctx;
+ 
+         if (!w_internal_non_repository_check(db)) {
+             return false;
+         }
+ 
+-        apk_sign_ctx_init(&sctx, APK_SIGN_VERIFY_AND_GENERATE,
+-                          NULL, db->keys_fd);
+-        r = apk_pkg_read(db, pkgname, &sctx, &pkg);
+-        apk_sign_ctx_free(&sctx);
++        r = apk_pkg_read(db, pkgname, &pkg, true);
+         if (r != 0) {
+             return false;
+         }
+@@ -426,7 +432,7 @@ static bool w_internal_package_name_to_apk_dependency(
+     } else {
+         apk_blob_t b = APK_BLOB_STR(pkgname);
+ 
+-        apk_blob_pull_dep(&b, db, pdep);
++        apk_blob_pull_dep(&b, db, pdep, true);
+         if (APK_BLOB_IS_NULL(b) || b.len > 0) {
+             return false;
+         }
+@@ -457,7 +463,8 @@ int w_apk_add(struct apk_database *db,
+     }
+ 
+     int r;
+-    struct apk_dependency_array *world_copy = NULL;
++    struct apk_dependency_array *world_copy;
++    apk_dependency_array_init(&world_copy);
+     apk_dependency_array_copy(&world_copy, db->world);
+     apk_deps_add(&world_copy, &dep);
+     apk_solver_set_name_flags(dep.name, solver_flags, solver_flags);
+@@ -515,11 +522,12 @@ int w_apk_del(struct apk_database *db,
+               bool recursive_delete)
+ {
+     const apk_blob_t pkgname_blob = APK_BLOB_STR(pkgname);
+-    struct apk_dependency_array *world_copy = NULL;
+-    struct apk_changeset changeset = {};
++    struct apk_dependency_array *world_copy;
++    struct apk_changeset changeset;
+     struct apk_name *name = NULL;
+     struct apk_package *pkg = NULL;
+ 
++    apk_dependency_array_init(&world_copy);
+     apk_dependency_array_copy(&world_copy, db->world);
+ 
+     // fill in deletion context
+@@ -550,6 +558,7 @@ int w_apk_del(struct apk_database *db,
+     }
+ 
+     // solve world
++    apk_change_array_init(&changeset.changes);
+     int r = apk_solver_solve(db, 0, world_copy, &changeset);
+     if (r == 0) {
+         r = apk_solver_commit_changeset(db, &changeset, world_copy);
+diff --git a/src/private/libapk_c_wrappers.h b/src/private/libapk_c_wrappers.h
+index 8fbcbce..3486123 100644
+--- a/src/private/libapk_c_wrappers.h
++++ b/src/private/libapk_c_wrappers.h
+@@ -24,16 +24,6 @@
+ #define APK_OPENF_NO_CMDLINE_REPOS  0x1000
+ #define APK_OPENF_ALLOW_ARCH        0x4000
+ 
+-#define APK_OPENF_NO_REPOS  (APK_OPENF_NO_SYS_REPOS | APK_OPENF_NO_INSTALLED_REPO)
+-#define APK_OPENF_NO_STATE  (APK_OPENF_NO_INSTALLED | APK_OPENF_NO_SCRIPTS | APK_OPENF_NO_WORLD)
+-
+-// Copied from libapk's apk_database.h
+-#define APK_REPOSITORY_CACHED           0
+-#define APK_REPOSITORY_FIRST_CONFIGURED 1
+-
+-#define APK_DEFAULT_REPOSITORY_TAG  0
+-#define APK_DEFAULT_PINNING_MASK    BIT(APK_DEFAULT_REPOSITORY_TAG)
+-
+ // Copied from apk_solver.h
+ #define APK_SOLVERF_UPGRADE         0x0001
+ #define APK_SOLVERF_AVAILABLE       0x0002
+@@ -48,10 +38,6 @@ extern "C" {
+ 
+ const char *w_apk_error_str(int e);
+ 
+-// wraps setting ::apk_progress_fd from apk_print.h
+-void w_set_apk_progress_fd(int fd);
+-int w_get_apk_progress_fd();
+-
+ struct apk_database;
+ struct apk_atom_pool;
+ struct apk_repository;
+@@ -66,6 +52,10 @@ struct w_apk_database
+     struct apk_database *db;
+ };
+ 
++// wraps setting ::apk_progress_fd from apk_print.h
++void w_set_apk_progress_fd(struct apk_database *db, int fd);
++int w_get_apk_progress_fd(struct apk_database *db);
++
+ struct w_apk_database *w_db_open(unsigned long open_flags, const char *fakeRootPath);
+ void w_db_close(struct w_apk_database *wdb);
+ 
+diff --git a/tests/testdata/create_fakeroot.sh b/tests/testdata/create_fakeroot.sh
+index 97f345f..ba54aca 100755
+--- a/tests/testdata/create_fakeroot.sh
++++ b/tests/testdata/create_fakeroot.sh
+@@ -10,11 +10,11 @@ fi
+ mkdir -p $ROOT || exit 1
+ 
+ # Create and initilize new package database
+-apk --root $ROOT add --initdb
++apk --root $ROOT add --initdb --no-chown
+ 
+ # Setup repositories URLs
+-echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/main" >> $ROOT/etc/apk/repositories
+-echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/community" >> $ROOT/etc/apk/repositories
++echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" >> $ROOT/etc/apk/repositories
++echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> $ROOT/etc/apk/repositories
+ 
+ # Install keys for Alpine repositories
+ # After this, we will no longer need the "--allow-untrusted" flag
