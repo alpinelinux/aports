@@ -30,10 +30,10 @@ cross-compile an Alpine Linux base system for new architecture.
 
 Steps for introducing new architecture include:
 - adding the compiler triplet and arch type to abuild
-- adding the arch type detection to apk-tools
 - adjusting build rules for packages that are arch aware:
   gcc, openssl, linux-headers, musl
 - create new kernel config for linux-lts
+- optionally reserve an architecture name in apk-tools
 
 After these steps the initial cross-build can be completed
 by running this with the target arch as parameter, e.g.:
