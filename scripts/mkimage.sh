@@ -308,7 +308,7 @@ for ARCH in $req_arch; do
 		else
 			cp "$_abuild_pubkey" "$APKROOT"/etc/apk/keys
 		fi
-		apk --arch "$ARCH" --root "$APKROOT" add --initdb
+		apk --arch "$ARCH" --root "$APKROOT" add --initdb --no-chown
 
 		_repositories="$APKROOT/etc/apk/repositories"
 		if [ -n "$REPOS_FILE" ]; then
