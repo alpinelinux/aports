@@ -1,0 +1,125 @@
+Patch-Source: https://codeberg.org/forgejo/forgejo/pulls/7752
+---
+From 60c1af244a621d7fc0aeee16db46ee9f93c7a306 Mon Sep 17 00:00:00 2001
+From: Gusted <postmaster@gusted.xyz>
+Date: Wed, 16 Apr 2025 00:11:46 +0200
+Subject: [PATCH] fix(sec): only degrade permission check for git push
+
+- A permission check is done when incoming SSH connections are handled (this is
+run before git hooks). If this check is for write access and AGit flow
+is supported, then this check is degraded to a read check. The
+motivation behind this is that for AGit flow the user does not need
+write permissions but only read permissions.
+- The `if` condition cannot check if this is for AGit flow, as the Git
+protocol has not run yet and thus has to delay this permission check.
+This `if` condition failed to consider that this also might be run for
+LFS which does not care about AGit flow and would not do a delayed
+permission check, so ensure that this degradition only happens when the
+`git-receive-pack` command is being run (which roughly equals to `git
+push`).
+- Clarify code comment.
+- Added integration test.
+---
+ routers/private/serv.go       | 10 ++++++++--
+ tests/integration/git_test.go | 36 ++++++++++++++++++++++++++++++++++-
+ 2 files changed, 43 insertions(+), 3 deletions(-)
+
+diff --git a/routers/private/serv.go b/routers/private/serv.go
+index df61355fb0..4c5b7bbccb 100644
+--- a/routers/private/serv.go
++++ b/routers/private/serv.go
+@@ -296,8 +296,14 @@ func ServCommand(ctx *context.PrivateContext) {
+ 				return
+ 			}
+ 		} else {
+-			// Because of the special ref "refs/for" we will need to delay write permission check
+-			if git.SupportProcReceive && unitType == unit.TypeCode {
++			// We don't know yet which references the Git client wants to write to,
++			// but for AGit flow we have to degrade this check to a read permission.
++			// So if we support proc-receive (needed for AGit flow) and the unit type
++			// is code and we know the Git client wants to write to us, then degrade
++			// the permission check to read. The pre-receive hook will do another
++			// permission check which ensure for non AGit flow references the write
++			// permission is checked.
++			if git.SupportProcReceive && unitType == unit.TypeCode && ctx.FormString("verb") == "git-receive-pack" {
+ 				mode = perm.AccessModeRead
+ 			}
+ 
+diff --git a/tests/integration/git_test.go b/tests/integration/git_test.go
+index d61a28f1e2..391d3b6672 100644
+--- a/tests/integration/git_test.go
++++ b/tests/integration/git_test.go
+@@ -12,9 +12,11 @@ import (
+ 	"net/http"
+ 	"net/url"
+ 	"os"
++	"os/exec"
+ 	"path"
+ 	"path/filepath"
+ 	"strconv"
++	"strings"
+ 	"testing"
+ 	"time"
+ 
+@@ -35,6 +37,7 @@ import (
+ 	files_service "forgejo.org/services/repository/files"
+ 	"forgejo.org/tests"
+ 
++	"github.com/kballard/go-shellquote"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ )
+@@ -113,7 +116,10 @@ func testGit(t *testing.T, u *url.URL) {
+ 
+ 			// Setup key the user ssh key
+ 			withKeyFile(t, keyname, func(keyFile string) {
+-				t.Run("CreateUserKey", doAPICreateUserKey(sshContext, "test-key-"+objectFormat.Name(), keyFile))
++				var publicKeyID int64
++				t.Run("CreateUserKey", doAPICreateUserKey(sshContext, "test-key-"+objectFormat.Name(), keyFile, func(t *testing.T, pk api.PublicKey) {
++					publicKeyID = pk.ID
++				}))
+ 
+ 				// Setup remote link
+ 				// TODO: get url from api
+@@ -140,6 +146,7 @@ func testGit(t *testing.T, u *url.URL) {
+ 				})
+ 
+ 				t.Run("PushCreate", doPushCreate(sshContext, sshURL, objectFormat))
++				t.Run("LFS no access", doLFSNoAccess(sshContext, publicKeyID, objectFormat))
+ 			})
+ 		})
+ 	})
+@@ -1122,3 +1129,30 @@ func TestDataAsync_Issue29101(t *testing.T) {
+ 		defer r2.Close()
+ 	})
+ }
++
++func doLFSNoAccess(ctx APITestContext, publicKeyID int64, objectFormat git.ObjectFormat) func(*testing.T) {
++	return func(t *testing.T) {
++		// This is set in withKeyFile
++		sshCommand := os.Getenv("GIT_SSH_COMMAND")
++
++		// Sanity check, because we are going to execute whatever is in here.
++		require.True(t, strings.HasPrefix(sshCommand, "ssh "))
++
++		// We really have to split on the arguments and pass them individually.
++		sshOptions, err := shellquote.Split(strings.TrimPrefix(sshCommand, "ssh "))
++		require.NoError(t, err)
++
++		sshOptions = append(sshOptions, "-p "+strconv.Itoa(setting.SSH.ListenPort), "git@"+setting.SSH.ListenHost)
++
++		cmd := exec.CommandContext(t.Context(), "ssh", append(sshOptions, "git-lfs-authenticate", "user40/repo60.git", "upload")...)
++		stderr := bytes.Buffer{}
++		cmd.Stderr = &stderr
++
++		require.ErrorContains(t, cmd.Run(), "exit status 1")
++		if objectFormat.Name() == "sha1" {
++			assert.Contains(t, stderr.String(), fmt.Sprintf("Forgejo: User: 2:user2 with Key: %d:test-key-sha1 is not authorized to write to user40/repo60.", publicKeyID))
++		} else {
++			assert.Contains(t, stderr.String(), fmt.Sprintf("Forgejo: User: 2:user2 with Key: %d:test-key-sha256 is not authorized to write to user40/repo60.", publicKeyID))
++		}
++	}
++}
+-- 
+2.45.2
+
