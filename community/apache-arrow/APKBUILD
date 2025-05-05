@@ -1,9 +1,8 @@
 # Contributor: Duncan Bellamy <dunk@denkimushi.com>
 # Maintainer: Duncan Bellamy <dunk@denkimushi.com>
-# based on arch linux PKGBUILD
 pkgname=apache-arrow
-pkgver=19.0.1
-pkgrel=9
+pkgver=20.0.0
+pkgrel=0
 _dotver=${pkgver//./}
 pkgdesc="multi-language toolbox for accelerated data interchange and in-memory processing"
 url="https://arrow.apache.org/"
@@ -63,21 +62,19 @@ subpackages="
 	libarrow_flight:lib
 	libparquet:lib
 	"
-_arrowsha="e81d0c6de35948b3be7984af8e00413b314cde6e"
-_parquetsha="d79a0101d90dfa3bbb10337626f57a3e8c4b5363"
+_arrowsha="d2a13712303498963395318a4eb42872e66aead7"
+_parquetsha="18d17540097fca7c40be3d42c167e6bfad90763c"
+# cpp/thirdparty/versions.txt
+_mimalloc_ver=2.0.6
 source="https://archive.apache.org/dist/arrow/arrow-$pkgver/apache-arrow-$pkgver.tar.gz
 	$pkgname-arrow-testing-$_arrowsha.tar.gz::https://github.com/apache/arrow-testing/archive/$_arrowsha.tar.gz
 	$pkgname-parquet-testing-$_parquetsha.tar.gz::https://github.com/apache/parquet-testing/archive/$_parquetsha.tar.gz
+	mimalloc-$_mimalloc_ver.tar.gz::https://github.com/microsoft/mimalloc/archive/v$_mimalloc_ver.tar.gz
 	"
-options="!check net" # fail with py3.11
 
 case "$CARCH" in
 aarch64|x86|x86_64)
-	_SIMD="MAX"
 	makedepends="$makedepends xsimd-dev"
-	;;
-*)
-	_SIMD="NONE"
 	;;
 esac
 
@@ -85,32 +82,39 @@ build() {
 	if [ "$CBUILD" != "$CHOST" ]; then
 		CMAKE_CROSSOPTS="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_HOST_SYSTEM_NAME=Linux"
 	fi
-
+	local _tests="$(want_check && echo ON || echo OFF)"
 	case "$CARCH" in
+	aarch64|x86|x86_64)
+		local _SIMD="MAX" ;;
 	arm*)
-		local arrowcpu="armv7"
-		;;
+		local _CPU="-DARROW_CPU_FLAG=aarch32"
+		local _SIMD="NONE" ;;
+	ppc64le)
+		_tests=OFF
+		_SIMD="NONE" ;;
+	*)
+		_SIMD="NONE" ;;
 	esac
 
-	export CFLAGS="$CFLAGS -O2 -flto=auto -DNDEBUG"
-	export CXXFLAGS="$CXXFLAGS -O2 -flto=auto -DNDEBUG"
+	export CFLAGS="$CFLAGS -O2 -DNDEBUG"
+	export CXXFLAGS="$CXXFLAGS -O2 -DNDEBUG"
+
+	export ARROW_MIMALLOC_URL="$srcdir/mimalloc-$_mimalloc_ver"
 	cmake -B build-cpp -G Ninja \
 		-DCMAKE_INSTALL_PREFIX=/usr \
 		-DCMAKE_INSTALL_LIBDIR=lib \
-		-DBUILD_SHARED_LIBS=True \
 		-DCMAKE_BUILD_TYPE=MinSizeRel \
 		-DARROW_BUILD_STATIC=OFF \
 		-DARROW_DEPENDENCY_SOURCE=SYSTEM \
 		-DARROW_RUNTIME_SIMD_LEVEL="$_SIMD" \
 		-DARROW_BUILD_EXAMPLES=OFF \
-		-DARROW_BUILD_TESTS="$(want_check && echo ON || echo OFF)" \
+		-DARROW_BUILD_TESTS="$_tests" \
 		-DARROW_COMPUTE=ON \
 		-DARROW_CSV=ON \
 		-DARROW_DATASET=ON \
 		-DARROW_FILESYSTEM=ON \
 		-DARROW_FLIGHT=ON \
 		-DARROW_HDFS=ON \
-		-DARROW_JEMALLOC=OFF \
 		-DARROW_JSON=ON \
 		-DARROW_PARQUET=ON \
 		-DARROW_SIMD_LEVEL="NONE" \
@@ -124,8 +128,7 @@ build() {
 		-DARROW_WITH_SNAPPY=ON \
 		-DARROW_WITH_ZLIB=ON \
 		-DARROW_WITH_ZSTD=ON \
-		-DARROW_CPU_FLAG=$arrowcpu \
-		-DPARQUET_REQUIRE_ENCRYPTION=ON \
+		-DPARQUET_REQUIRE_ENCRYPTION=ON "$_CPU"\
 		-S cpp \
 		$CMAKE_CROSSOPTS
 	cmake3.5 --build build-cpp
@@ -140,39 +143,43 @@ build() {
 	export ArrowDataset_DIR="$Arrow_DIR"
 	export ArrowFlight_DIR="$Arrow_DIR"
 	export Parquet_DIR="$Arrow_DIR"
-	export PYARROW_CMAKE_OPTIONS="-DARROW_RUNTIME_SIMD_LEVEL=$_SIMD -DARROW_CPU_FLAG=$arrowcpu"
+	export PYARROW_CMAKE_OPTIONS="-DARROW_RUNTIME_SIMD_LEVEL=$_SIMD $_CPU"
 	gpep517 build-wheel \
 		--wheel-dir .dist \
 		--output-fd 3 3>&1 >&2
 }
 
 check() {
-	cd build-cpp
 	export PARQUET_TEST_DATA="$srcdir/parquet-testing-$_parquetsha/data"
 	export ARROW_TEST_DATA="$srcdir/arrow-testing-$_arrowsha/data"
-	# exclude broken tests
-	ctest -j4 -E "arrow-buffer-test|arrow-misc-test|\
-arrow-utility-test|arrow-csv-test|arrow-compute-aggregate-test|arrow-flight-test|arrow-compute-scalar-test|\
-arrow-dataset-file-ipc-test|arrow-dataset-scanner-test"
+	python3 -m venv --clear --without-pip --system-site-packages .testenv
+	local _pypath=".testenv$(.testenv/bin/python3 -c 'import site; print(site.getsitepackages()[0].partition(".testenv")[2])')/pyarrow/tests"
+	.testenv/bin/python3 -m installer python/.dist/*.whl
 
-	cd ../python
-	ARROW_HOME="$builddir/dist-cpp/usr" \
-	python3 setup.py install --root="$PWD/dist-python"
-	PYTHONPATH="$(echo $PWD/dist-python/usr/lib/python3*/site-packages)" \
-	LIBRARY_PATH="$builddir/dist-cpp/usr/lib:$LIBRARY_PATH" \
-	LD_LIBRARY_PATH="$builddir/dist-cpp/usr/lib:$LD_LIBRARY_PATH" \
-	pytest -n 4 pyarrow --deselect=pyarrow/tests/test_memory.py \
-		--deselect=pyarrow/tests/test_csv.py \
-		--deselect=pyarrow/tests/parquet/test_data_types.py \
-		--deselect=pyarrow/tests/test_array.py::test_dictionary_to_numpy \
-		--deselect=pyarrow/tests/test_io.py::test_python_file_large_seeks \
-		--deselect=pyarrow/tests/test_io.py::test_foreign_buffer \
-		--deselect=pyarrow/tests/test_io.py::test_memory_map_large_seeks \
-		--deselect=pyarrow/tests/test_pandas.py::TestConvertStructTypes::test_from_numpy_nested \
-		--deselect=pyarrow/tests/test_schema.py::test_schema_sizeof \
-		--deselect=pyarrow/tests/test_serialization.py::test_primitive_serialization \
-		--deselect=pyarrow/tests/test_serialization.py::test_integer_limits \
-		--deselect=pyarrow/tests/parquet/test_dataset.py::test_partitioned_dataset
+	case "$CARCH" in
+	arm*)
+		local _extratests="|arrow-flight-test"
+		local _pyextratests="--deselect=$_pypath/test_flight.py --deselect=$_pypath/test_dataset.py"
+		;;
+	s390x)
+		local _extratests="|arrow-dataset-file-parquet-test|arrow-dataset-file-parquet-encryption-test|arrow-ipc-message-internal-test|\
+parquet-internals-test|parquet-reader-test|parquet-arrow-test|parquet-arrow-internals-test|parquet-encryption-test"
+		;;
+	ppc64le) return ;;
+	esac
+	# exclude broken tests
+	ctest -j4 --test-dir build-cpp -E "arrow-compute-scalar-temporal-test|arrow-orc-adapter-test$_extratests"
+
+	#python tests broken on s390x
+	[ "$CARCH" == "s390x" ] && return
+	PARQUET_TEST_DATA="$srcdir/parquet-testing-$_parquetsha/data" \
+	LD_LIBRARY_PATH="$PWD/dist-cpp/usr/lib:$LD_LIBRARY_PATH" \
+	.testenv/bin/python3 -m pytest -n4 --pyargs pyarrow \
+		--deselect="$_pypath"/test_orc.py::test_timezone_database_absent \
+		--deselect="$_pypath"/test_orc.py::test_timezone_absent \
+		--deselect="$_pypath"/test_extension_type.py::test_cpp_extension_in_python \
+		--deselect="$_pypath"/test_cython.py::test_visit_strings \
+		--deselect="$_pypath"/test_cython.py::test_cython_api $_pyextratests
 }
 
 package() {
@@ -212,7 +219,8 @@ lib() {
 }
 
 sha512sums="
-524187c6f12bbb677b5d4a53e1608c69b56c83a5c8667bfe82d5a10232c33f151a8a7b5e6e26af48d1e0ca25a5d3dc885b27d9b5e798c7e07f115df8f0779516  apache-arrow-19.0.1.tar.gz
-2c31dd48fc070c3b1b25cdd1d58615accf73e3ee864d58b9a92a92c71a531174abeae42c2d0e6a70bcce47fe01c6cf43b1c17fab0636fb51524db8d035efce20  apache-arrow-arrow-testing-e81d0c6de35948b3be7984af8e00413b314cde6e.tar.gz
-5bf4f1341dfab0f71d61d00ef89e2f6a49831af3e5ade1209b9f35abf61d5edcbe311bebb2bb5d8611486e16fe97bfa8c85974dc2ea11325b58fb74c1cc09e3a  apache-arrow-parquet-testing-d79a0101d90dfa3bbb10337626f57a3e8c4b5363.tar.gz
+067e62d7d311cebfca43473b0aacaacc534da47c3450b75328517df69281d8be1e79b0430cc7e975eb613e05c62a62d6ca92a4c4f7882ae7733f826d774d9081  apache-arrow-20.0.0.tar.gz
+e6b76e4ab34744bc804ecfe5baba3e1f483c874f883cc44e8e2504a718b847cb05f0c7559e40a446deab99da20d1f9bbfe03d553ee2bb5543bef889c2b555259  apache-arrow-arrow-testing-d2a13712303498963395318a4eb42872e66aead7.tar.gz
+2cadc694e6cd2e52869b4ff0d2659c77c613fc870b54ca7f4cb64068d0e7956723549b6d5513a117a2e147d4161e2fcdbe15992a3d8e56306b25923676f182a0  apache-arrow-parquet-testing-18d17540097fca7c40be3d42c167e6bfad90763c.tar.gz
+f2fc0fbfb6384e85959897f129e5d5d9acc51bda536d5cabcd7d4177dbda9fb735b8a8c239b961f8bea31d37c9ae10f66da23aa91d497f95393253d4ac792bb3  mimalloc-2.0.6.tar.gz
 "
