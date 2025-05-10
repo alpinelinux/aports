@@ -13,7 +13,7 @@
 set -e
 
 # get abuild configurables
-. /usr/share/abuild/functions.sh
+. "${ABUILD_SHAREDIR:-/usr/share/abuild}"/functions.sh
 
 scriptdir="$(dirname "$0")"
 git=$(command -v git) || git=true
