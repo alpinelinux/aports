@@ -18,10 +18,6 @@ set -e
 scriptdir="$(dirname "$0")"
 git=$(command -v git) || git=true
 
-# deduce aports directory
-[ -n "$APORTS" ] || APORTS=$(realpath "$scriptdir/../")
-[ -e "$APORTS/main/build-base" ] || die "Unable to deduce aports base checkout"
-
 # echo '-dirty' if git is not clean
 git_dirty() {
 	[ $($git status -s -- "$scriptdir" | wc -l) -ne 0 ] && echo "-dirty"
