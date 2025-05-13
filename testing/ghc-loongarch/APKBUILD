@@ -1,0 +1,260 @@
+# Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
+# Contributor: Mitch Tishmack <mitch.tishmack@gmail.com>
+# Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
+# Maintainer: Celeste <cielesti@protonmail.com>
+maintainer="Celeste <cielesti@protonmail.com>"
+pkgname=ghc-loongarch #-stage0
+# XXX: Like other -stage0 aports, this is for bootstrapping purposes, and
+# unsupported for general use. It is untested with community/cabal-stage0,
+# so please use community/ghc (which is tested) when that becomes available.
+# As this aport is primarily for bootstrapping community/ghc, $pkgver may be
+# downgraded and $pkgrel reset to 0, according to the needs of community/ghc.
+pkgver=9.12.2
+pkgrel=0
+# GHC version used to bootstrap the build. This is relevant for the
+# bootstrapping of the Hadrian build system used by GHC these days.
+_bootstrapver=9.12.2
+# I have observed that when $pkgver != $_bootstrapver, at least when they are
+# from different major versions, the Cabal built may not resolve dependencies
+# properly. community/ghc ensures $pkgver = $_bootstrapver but this does not.
+pkgdesc="Glasgow Haskell Compiler (specifically for bootstrapping community/ghc on Loongarch)"
+url="https://haskell.org/ghc"
+arch="loongarch64"
+# Note ghc's license is basically BSD-3. If you'd like to know more visit:
+# * https://www.haskell.org/ghc/license
+# * https://ghc.haskell.org/trac/ghc/wiki/Licensing
+license="BSD-3-Clause"
+
+# Note that ghc is sensitive to the version of llvm used.
+#
+# Ref: https://ghc.haskell.org/trac/ghc/wiki/Status/GHC-8.0.1
+#      https://ghc.haskell.org/trac/ghc/wiki/ImprovedLLVMBackend
+#
+_llvmver=18
+# Without libffi-dev in $depends linking of software via ghc(1) fails.
+depends="
+	cmd:cc
+	gmp-dev
+	libffi-dev
+	llvm$_llvmver
+	"
+makedepends_build="
+	autoconf
+	automake
+	coreutils
+	grep
+	libffi-dev
+	llvm$_llvmver
+	ncurses-dev
+	python3
+	xz
+	"
+makedepends_host="
+	gmp-dev
+	libffi-dev
+	linux-headers
+	musl-dev
+	ncurses-dev
+	zlib-dev
+	"
+
+# XXX: ghc-bootstrap is a hack to allow this abuild to depend on itself.
+# Adding "ghc" to makedepends would not work, because abuild implicitly removes
+# $pkgname and $subpackages from the abuild's dependencies.
+provides="ghc-bootstrap=$pkgver"
+provider_priority=10 # lowest
+install="$pkgname-cmds.post-install"
+subpackages="$pkgname-cmds::noarch $pkgname-doc"
+
+# ghc is self-hosted, so we need ghc to build ghc, initial bootstrap is done
+# via bindist, after which it relies on -bootstrap to build itself (see above).
+case "$_bootstrapver" in
+9.12.2)
+	# bindist available
+	source="https://dev.alpinelinux.org/archive/ghc-loongarch/ghc-$_bootstrapver-$CBUILD.tar.xz"
+	_bindist_bootstrap=true
+	_bindist_dir="$tmpdir/ghcbin-$_bootstrapver"
+	export PATH="$_bindist_dir/bin:$PATH"
+	_ghcbin="$_bindist_dir/bin/ghc"
+	;;
+*)
+	# bindist unavailable
+	makedepends_build="$makedepends_build $pkgname-bootstrap~$_bootstrapver"
+	_bindist_bootstrap=false
+	_ghcbin="/usr/bin/ghc"
+	;;
+esac
+
+# https://gitlab.haskell.org/ghc/ghc/-/merge_requests/13807
+_loong_ncg=a9d5a42637966f6ae1fc911366eec66bd3678332
+source="$source
+	https://downloads.haskell.org/~ghc/$pkgver/ghc-$pkgver-src.tar.xz
+	plan-bootstrap-$pkgver-with-$_bootstrapver.json
+
+	hp2ps-gcc15.patch
+	fix-hadrian-bootstrap-riCabalHash.patch
+	parallel-hadrian-bootstrap.patch
+
+	https://gitlab.haskell.org/ghc/ghc/-/commit/$_loong_ncg.patch
+	loongarch64-ncg-support-ghc$pkgver-adjustment_patch
+	"
+options="$options !check" # stage0 compiler, run tests as part of community/ghc
+options="$options !strip" # we strip it manually in package()
+options="$options net" # required for fetching sources in the Hadrian plan
+options="$options $pkgname-cmds::!tracedeps" # do not provide cmd:ghc=$pkgver
+
+builddir="$srcdir/ghc-$pkgver"
+if [ -f "$HADRIAN" -a -x "$HADRIAN" ]; then
+	_hadrian="$HADRIAN"
+else
+	_hadrian="$builddir/hadrian/bootstrap/_build/bin/hadrian"
+fi
+_hadrian_args="-j${JOBS:-1} --docs=none"
+
+if [ "$CBUILD" != "$CTARGET" ]; then
+	_hadrian_args="$_hadrian_args --flavour=quickest"
+else
+	_hadrian_args="$_hadrian_args --flavour=perf+no_profiled_libs+omit_pragmas --hash-unit-ids"
+fi
+
+_configure() {
+	# clang instead of llvm-as: https://gitlab.haskell.org/ghc/ghc/-/issues/24630
+	./configure \
+		--disable-ld-override \
+		ac_cv_prog_CC="$CC" ac_cv_path_ac_pt_CXX="$CXX" \
+		CC="$CC" CXX="$CXX" LD="$LD" \
+		CLANG=/usr/lib/llvm$_llvmver/bin/clang \
+		LLVMAS=/usr/lib/llvm$_llvmver/bin/clang \
+		LLC=/usr/lib/llvm$_llvmver/bin/llc \
+		OPT=/usr/lib/llvm$_llvmver/bin/opt \
+		"$@"
+}
+
+_subst_alpine_targets() {
+	# Switch llvm-targets from unknown-linux-gnueabihf->alpine-linux
+	# so we can match the llvm vendor string alpine uses
+	sed -i \
+		-e 's/i386-unknown-linux/i586-alpine-linux/g' \
+		-e 's/unknown-linux-musl/alpine-linux-musl/g' \
+		-e 's/unknown-linux-gnueabihf/alpine-linux/g' \
+		-e 's/unknown-linux-gnueabi/alpine-linux/g' \
+		-e 's/unknown-linux-gnu/alpine-linux/g' \
+		-e 's/riscv64-unknown-linux/riscv64-alpine-linux-musl/g' \
+		-e 's/loongarch64-unknown-linux/loongarch64-alpine-linux-musl/g' \
+		"$builddir"/llvm-targets
+}
+
+prepare() {
+	cd "$srcdir"
+	cp -Lv $_loong_ncg.patch \
+		$_loong_ncg.patch.orig
+	rm -v $_loong_ncg.patch
+	patch -No $_loong_ncg.patch \
+		$_loong_ncg.patch.orig \
+		loongarch64-ncg-support-ghc$pkgver-adjustment_patch
+
+	if $_bindist_bootstrap; then
+		mkdir -p "$_bindist_dir"
+		cd "$srcdir/ghc-$_bootstrapver-$CBUILD"
+		_configure --prefix="$_bindist_dir"
+		make install
+	fi
+
+	default_prepare
+	_subst_alpine_targets
+}
+
+build() {
+	# Build the hadrian build system.
+	#
+	# See:
+	#   * https://gitlab.haskell.org/ghc/ghc/-/tree/master/hadrian/bootstrap
+	#   * https://www.haskell.org/ghc/blog/20220805-make-to-hadrian.html
+	cd "$builddir"/hadrian/bootstrap/
+	[ -x "$_hadrian" ] || python3 ./bootstrap.py \
+		-j ${JOBS:-1} \
+		-w "$_ghcbin" \
+		--no-archive \
+		-d "$srcdir"/plan-bootstrap-$pkgver-with-$_bootstrapver.json
+
+	# NOTE: ghc build system requires host == build, and it ends up
+	# compiling the cross-compiler (stage1) and cross-compiling with
+	# that the native compiler (stage2)
+	cd "$builddir"
+	_configure \
+		--build=$CBUILD \
+		--host=$CBUILD \
+		--target=$CTARGET \
+		--prefix=/usr \
+		--with-system-libffi
+
+	"$_hadrian" $_hadrian_args binary-dist-dir
+}
+
+package() {
+	local ghclib="$pkgdir/usr/lib/ghc-$pkgver/lib"
+	local newpath path target
+
+	# Hadrian's install command doesn't support DESTDIR.
+	# Hence, we need to install via the bindist.
+	cd "$builddir"/_build/bindist/ghc-*
+	# Need to re-run configure.
+	# See: https://gitlab.haskell.org/ghc/ghc/-/issues/22058
+	_configure --prefix=/usr
+
+	make DESTDIR="$pkgdir" RECACHE_PACKAGE_DB=NO install
+
+	install -Dm644 "$builddir/LICENSE" \
+		"$pkgdir/usr/share/licenses/ghc/LICENSE"
+
+	cd "$pkgdir"
+
+	# Fixup install tree if needed.
+	if [ -d usr/lib/$CTARGET-ghc-$pkgver ]; then
+		# different location
+		ghclib="$pkgdir/usr/lib/$CTARGET-ghc-$pkgver/lib"
+
+		# Rename binaries and fix links.
+		for path in usr/bin/"$CTARGET"-*; do
+			newpath="${path//$CTARGET-/}"
+
+			if [ -h "$path" ]; then
+				target="$(readlink $path)"
+				ln -sf "${target//$CTARGET-/}" "$newpath"
+				rm "$path"
+			else
+				mv "$path" "$newpath"
+			fi
+		done
+	fi
+
+	# Remove triplet prefix from settings -- the intention is
+	# that the native compiler will use native gcc/ld on the target.
+	sed -i "s|$CTARGET-||g" "$ghclib"/settings
+
+	# Can't do a full strip on archives.
+	find . -type f \( -name "*.so" -o -name "*.a" \) \
+		-exec ${CROSS_COMPILE}strip --strip-unneeded {} \;
+	find "$ghclib"/../bin -type f \
+		-exec ${CROSS_COMPILE}strip {} \;
+}
+
+cmds() {
+	pkgdesc="$pkgdesc (commands)"
+	provides="$pkgname-bootstrap=$pkgver-r$pkgrel"
+	depends="$pkgname=$pkgver-r$pkgrel"
+	install_if="$pkgname=$pkgver-r$pkgrel"
+
+	amove usr/bin
+}
+
+sha512sums="
+c7f066cce6d9518a05c6fc087a8aa6ed5bb1204b9c939297d5c78e60e38f96b4e1bd0cff3a23fbe7a9b7d8a71cc4f8424dc85574515df30d17e136ff26dd3f6b  ghc-9.12.2-loongarch64-alpine-linux-musl.tar.xz
+15f538edd55f2ba950891f6a3ea5c5c42efdc87eada64bc51d2811ef1d44227fb887db74e623a11ed510c043cca56974eaa18470c3e2a1e4e47701d5dbe054bc  ghc-9.12.2-src.tar.xz
+5b7c0f2aaea33c2cbcdd8883ae45c4990035fef085658856339a89f21aee44d6fafbc5b36aa08f99ebf5c39784be53c639cbbb58c01b0f67c528956c3e03cbf4  plan-bootstrap-9.12.2-with-9.12.2.json
+9c5db3957246235cb2f3de9c3ea60eb85fbef04b8fb2493f5a715ef50663fb8856c8fb82cb50b4c6654be8f61a2ca2aa4e683eb35b12d0bcf43ba82da0819587  hp2ps-gcc15.patch
+b86e2cc2a7adcc8933dcc94a09556fa1a0ed61537cf7f84df6e2015ee7a07506996a0b5fd7b93591d87d6a7e9d8c0d47d28a554715136bcc94af297b80d49c3d  fix-hadrian-bootstrap-riCabalHash.patch
+0e59d1c39e1e51ed697edc3aa87f219212a0e19312f5cdfd30b8d219b1bf8e64b36495acf7bc75920dadab8eee04ca66e022e61842152668b0daf4d597010b58  parallel-hadrian-bootstrap.patch
+8007070f040307f6d48a780569163b0881747018465441b15079f2253e6fb2d333679cd8127d2c6d0640fdf049715bcc50db6665bd3d839d53cc8e8dca40fed5  a9d5a42637966f6ae1fc911366eec66bd3678332.patch
+c295abfa8d306f579a6b8cdbe31eb8c28715174fbd9b75b3253ee37ed6f3d2cbc9e1b001d5a26dd229ba1331ee491646934aa1fac43de0a9a0631a3c0e679fa8  loongarch64-ncg-support-ghc9.12.2-adjustment_patch
+"
