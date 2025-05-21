@@ -8,6 +8,7 @@ build_kernel() {
 		${_abuild_pubkey:+--apk-pubkey $_abuild_pubkey} \
 		$_modloopsign \
 		--media \
+		--cache-dir "$APKROOT/etc/apk/cache" \
 		--keys-dir "$APKROOT/etc/apk/keys" \
 		--flavor "$_flavor" \
 		--arch "$ARCH" \
