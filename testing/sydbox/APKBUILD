@@ -1,88 +1,179 @@
 # Contributor: Jakub Jirutka <jakub@jirutka.cz>
 # Maintainer: Jakub Jirutka <jakub@jirutka.cz>
 pkgname=sydbox
-pkgver=3.21.3
+pkgver=3.45.2
 pkgrel=0
-pkgdesc="Rock-solid user-space kernel to sandbox applications on Linux"
+pkgdesc="Application kernel to sandbox applications on Linux"
 url="https://gitlab.exherbo.org/sydbox/sydbox"
-# s390x: fails to build "nix" crate
-# loongarch64: blocked by libc crate
-arch="all !s390x !loongarch64"
+# s390x: blocked by nix crate, https://github.com/nix-rust/nix/issues/2641
+arch="all !s390x"
 license="GPL-3.0-or-later"
+depends="$pkgname-syd=$pkgver-r$pkgrel"
 makedepends="
 	cargo
 	cargo-auditable
 	libseccomp-dev
 	linux-headers
+	mimalloc2-dev
 	scdoc
 	"
 checkdepends="coreutils"
 subpackages="
-	$pkgname-utils
-	$pkgname-vim::noarch
 	$pkgname-doc
+	$pkgname-utils:_utils
+	$pkgname-syd:_syd
+	$pkgname-test:_test
+	$pkgname-vim::noarch
 	"
 source="https://gitlab.exherbo.org/sydbox/sydbox/-/archive/v$pkgver/sydbox-v$pkgver.tar.gz
+	lookup-fix_ELOOP_not_reported_with_MSS_LAST.patch
+	enable-mimalloc-32b.patch
 	make-install-no-build.patch
-	make-fix-install.patch
 	no-systemd.patch
+	no-syd-tck_patch
 	"
 builddir="$srcdir/$pkgname-v$pkgver"
-options="!check"  # FIXME: tests don't work on CI
+
+# panic=abort is "not supported", src/config.rs
+export CARGO_PROFILE_RELEASE_PANIC="unwind"
 
 case "$CARCH" in
-armv7)
-	# Omit "oci" because "nc" crate fails to build on armv7.
-	_features="elf,utils" ;;
+loongarch64|x86)
+	# Omit "oci" because "nc" crate fails to build.
+	# loongarch64: https://github.com/XuShaohua/nc/issues/44
+	# x86: error: inline assembly requires more registers than available
+	_features="asm,log,sh,utils" ;;
 *)
-	_features="elf,oci,utils"
+	_features="asm,log,oci,sh,utils"
 	subpackages="$subpackages $pkgname-oci" ;;
 esac
-# Disable mimalloc and inline-more features.
 _cargo_opts="--frozen --no-default-features --features $_features"
 
 prepare() {
 	default_prepare
 
-	# NOTE: --targetu="$CTARGET" doesn't work here.
-	cargo fetch --locked
+	# Build against system-provided libs
+	mkdir -p .cargo
+	cat >> .cargo/config.toml <<-EOF
+		[target.$CTARGET]
+		mimalloc = { rustc-link-lib = ["mimalloc"] }
+	EOF
+
+	case "$CARCH" in
+	aarch64|x86_64) ;;
+	*)
+		# Disable syd-tck as it is aarch64 & x86_64 specific and other
+		# architectures will fail to fetch the required tick_counter crate
+		msg2 "Patching out syd-tck for $CARCH"
+		patch -Np1 < "$srcdir"/no-syd-tck_patch
+		;;
+	esac
+
+	msg2 "Fetching crates"
+	cargo fetch --target="$CTARGET" --locked
 }
 
 build() {
+	msg2 "Building sydbox release build with features: $_features"
 	cargo auditable build $_cargo_opts --release
 
-	cd lib
-	cargo auditable build --frozen --release
+	msg2 "Building sydbox libs"
+	cd "$builddir"/lib && cargo auditable build --frozen --release
 }
 
 check() {
-	cargo test $_cargo_opts
+	# architecture specific test failures
+	case "$CARCH" in
+	riscv64)
+		# assertion `left == right` failed
+		#   left: NotEnabled
+		#  right: NotImplemented
+		local _skipped_tests="
+		--skip landlock::compat::test_current_landlock_status
+		" ;;
+	esac
+
+	msg2 "Building and running sydbox tests with features: $_features"
+	cargo test $_cargo_opts -- $_skipped_tests \
+		--skip lookup::tests::test_chdir_long \
+		--skip lookup::tests::test_getdir_long_limit_max_components \
+		--skip lookup::tests::test_getdir_long_with_deep_structure \
+		--skip syd_test
+		# the three fs::tests fail on all architectures in CI
+		# syd_test: takes forever in CI
 }
 
 package() {
+	pkgdesc="$pkgdesc (main utilities)"
+
 	make install DESTDIR="$pkgdir" PREFIX=/usr
 
-	# Delete utils for running integration tests.
-	rm -rf "$pkgdir"/usr/bin/syd-test*
+	# journalctl convenience wrapper
+	rm -f "$pkgdir"/usr/bin/syd-log "$pkgdir"/usr/share/man/man1/syd-log.1
 
 	install -D -m644 src/esyd.sh -t "$pkgdir"/usr/libexec/
 	install -D -m644 data/user.syd-3 "$pkgdir"/usr/share/doc/$pkgname/user.syd-3.sample
 }
 
-oci() {
-	pkgdesc="OCI container runtime from sydbox"
+_syd() {
+	pkgdesc="$pkgdesc (bare essentials)"
+	depends=""
+
+	amove usr/bin/syd
+	amove usr/bin/syd-tor
+	# syd invokes syd-tor itself if you set sandbox/proxy:on
+}
+
+_test() {
+	pkgdesc="Utilities to test your sydbox"
 	depends="$pkgname=$pkgver-r$pkgrel"
+
+	amove usr/bin/syd-test
+	amove usr/bin/syd-test-do
+}
+
+oci() {
+	pkgdesc="Syd sandboxed OCI container runtime based on Youki"
+	depends="$pkgname-syd=$pkgver-r$pkgrel"
 
 	amove usr/bin/syd-oci
 }
 
-utils() {
-	pkgdesc="Sydbox utilities"
+_utils() {
+	pkgdesc="$pkgdesc (extra utilities)"
 
 	local bin; for bin in $(ls -1 "$pkgdir"/usr/bin/); do
+	# sort what is considered core utilities (listed under "Main programs" in
+	# Cargo.toml), plus syd-oci, from the rest of the utilities
 		case "$bin" in
-			syd | syd-chk | syd-exec | syd-oci) ;;  # main programs
-			*) amove usr/bin/$bin;;
+			syd | \
+			syd-aes  | \
+			syd-aux  | \
+			syd-bit  | \
+			syd-cap  | \
+			syd-cpu  | \
+			syd-dns  | \
+			syd-elf  | \
+			syd-env  | \
+			syd-exec | \
+			syd-hex  | \
+			syd-info | \
+			syd-key  | \
+			syd-lock | \
+			syd-mdwe | \
+			syd-ofd  | \
+			syd-pause | \
+			syd-pds  | \
+			syd-pty  | \
+			syd-sec | \
+			syd-size | \
+			syd-test | \
+			syd-test-do | \
+			syd-tor | \
+			syd-uts | \
+			syd-x  | \
+			syd-oci) ;;  # Main programs + syd-oci
+			*) amove usr/bin/$bin ;; # Utilities
 		esac
 	done
 }
@@ -94,8 +185,10 @@ vim() {
 }
 
 sha512sums="
-8f8d3e61299d03272262631c37bed9dff223f303a48d64d22b9d098902d806a734848fcd6ca1ef62d723eb16ac45fdb36c4e09201bf255eca47c720f002181c9  sydbox-v3.21.3.tar.gz
-12c413eeee89626ab28a1527a6a6dbbe2e981d6c18c7d1ad298336a29092261c537ae3bca3bc3390f50273d735918152ada98ec17bb821150ba6a2472598c4f0  make-install-no-build.patch
-d5137c97556713289fb483c07ac75b0864678cb668b833c618abad1c8385baa28d4f948c8d65e7e304727134cfad9e1b5ef6488944c8c71cf93eab24ba4e3ae3  make-fix-install.patch
-72a88b4df8f94e0d84e5fe48541d62a02f323d3f651db15b86068c676aaf12c10612027c6c9084b7c8372989c34cfb4060d1c96bc8b359a733b346459a3d2605  no-systemd.patch
+148b12b10589278fe764e56e0b77d68b0fcd8c167595995d9316febbf54cd2f03de5ff94469421682f5da1ff27dd329bdb85010313311b09d6b7a79e48606af9  sydbox-v3.45.2.tar.gz
+c683e72ef6d05501b839f03e0afb459332e5be28f3381e4a64042ba38995879ea9268bf262e96644e21169917c930b9684382fe069dc9a08b0a842da728e7d7f  lookup-fix_ELOOP_not_reported_with_MSS_LAST.patch
+48e8726d308145ec555987392a3ef5cff3f91e5b0fa4a2eff5e9cbfd4da03e641ce72a440d6fb37212702749e90ad80218f89fe340a5c17ba94f2b01ba00303f  enable-mimalloc-32b.patch
+381e60b4ad8bebf533ffc63688ed22c3d106512b2e6bafb6524e333c12592b733e7cd807ec0abc8fe8d35c8e7949aa702b5aa6b97319e01f5c32468a4ab9a82d  make-install-no-build.patch
+71685a0ffbee97d62656efdbd801e2250d1f69c96a8569c73fae4d40c9611b37f99015cdd03a2008cdca67beb738b10e89fc03a0c2e979261a1465730087bd13  no-systemd.patch
+fcad201121513350fbfa30f60f981580b2d9598a24a35c16613bc67d2ecbdb2aee123e77bc3b5c960e0d5ce288594d978e03d794d2148372dbcb61669b9bd354  no-syd-tck_patch
 "
