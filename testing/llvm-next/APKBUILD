@@ -1,8 +1,8 @@
 # Maintainer: Celeste <cielesti@protonmail.com>
 maintainer="Celeste <cielesti@protonmail.com>"
 pkgname=llvm-next
-pkgver=21.0.0_pre20250515
-_gitrev=9f438e0b0670d5d70fc81288a192b4e8815ac77a
+pkgver=21.0.0_pre20250601
+_gitrev=7786ac077acc4e81f987dd1db9cbd109f95ab37a
 pkgrel=0
 pkgdesc="Future LLVM Preview"
 url="https://llvm.org/"
@@ -59,7 +59,8 @@ makedepends="
 	ocaml5-ctypes
 	ocaml5-ocamldoc
 	patchelf
-	py3-setuptools
+	py3-flit-core
+	py3-gpep517
 	python3-dev
 	swig
 	"
@@ -140,9 +141,9 @@ case "$pkgver" in
 	;;
 esac
 
-_butime="2025-05-12_00-38"
-_buepoch=1747010282
-_bucommit=8dc4e62fc94
+_butime="2025-05-29_00-26"
+_buepoch=1748478361
+_bucommit=dbd830f14f7
 _buver=2.44.50
 _bufile="binutils-with-gold-$_buver-$_bucommit"
 _budir="$srcdir/$_bufile"
@@ -152,7 +153,6 @@ source="$source
 	0002-Fix-memory-mf_exec-on-aarch64.patch
 	0003-LLVM-install-prefix.patch
 	0004-LLVM-stack-size.patch
-	0005-Fix-macho-invalid-test.patch
 	0006-Skip-roundeven-tests.patch
 	0007-Add-musl-triples.patch
 	0008-Enable-stack-protector-by-default-for-Alpine-Linux.patch
@@ -169,6 +169,9 @@ source="$source
 	0019-LLD-add-build-shared-libs-option.patch
 	0020-AArch64-llvm-exegesis-musl-remove-redefinition-prctl.patch
 	0021-PyClang-cindex-add-sover-to-libclang.patch
+
+	trim-exports_patch
+	pyproject.toml
 
 	https://snapshots.sourceware.org/binutils/trunk/${_butime}_$_buepoch/src/$_bufile.tar.xz
 	0801-Revert-PR25882-.gnu.attributes-are-not-checked-for-s.patch
@@ -225,6 +228,12 @@ prepare() {
 		"$srcdir"/0021-PyClang-cindex-add-sover-to-libclang.patch
 
 	default_prepare
+
+	cp -RT llvm/utils/lit "$srcdir"/llvm-lit
+	cp -Lv "$srcdir"/pyproject.toml "$srcdir"/llvm-lit/
+	# gpep517 with flit-core refuses to build wheel when
+	# "lit" directory and "lit.py" file are both present
+	rm -v "$srcdir"/llvm-lit/lit.py
 }
 
 build() {
@@ -342,7 +351,12 @@ build() {
 
 	cmake --build build
 
-	python3 llvm/utils/lit/setup.py build
+	(
+		cd "$srcdir"/llvm-lit
+		gpep517 build-wheel \
+			--wheel-dir "$builddir"/.dist \
+			--output-fd 3 3>&1 >&2
+	)
 
 	ln -svf libatomic.so.1 build/lib/clang/$_majorver/lib/$CHOST/libclang_rt.atomic.so
 
@@ -471,9 +485,9 @@ package() {
 
 	DESTDIR="$pkgdir" cmake --install build
 
-	python3 llvm/utils/lit/setup.py install --root="$pkgdir"
+	python3 -m installer -d "$pkgdir" .dist/lit-*.whl
 
-	# setuptools installs lit to /usr/bin, move it to $_prefix
+	# python3 installs lit to /usr/bin, move it to $_prefix
 	mv -v "$pkgdir"/usr/bin/lit "$pkgdir"/$_prefix/bin/lit
 	ln -sv lit "$pkgdir"/$_prefix/bin/llvm-lit
 
@@ -583,38 +597,35 @@ EOF
 	# silent the unused-command-line-argument warning for -fstack-clash-protection,
 	# which is in abuild's default.conf but unimplemented for some architectures.
 	# (reference: https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument)
-	cat > config.cfg <<-EOF
+	cat > clang.cfg <<-EOF
+	-fno-plt
 	-fstack-clash-protection
-	-Wno-unknown-argument
 	EOF
-	case "$CARCH" in
-	x86)
-		# clang defaults to pentium4 on i*86- triples.
-		# see https://github.com/llvm/llvm-project/issues/61347
-		cat >> config.cfg <<-EOF
-		-march=pentium-m -mfpmath=sse
-		EOF
-		;;
-	armhf)
-		# clang defaults to 'armv6' for armhf, i.e. no -zk.
-		# -zk is also a deprecated name for -kz.
-		cat >> config.cfg <<-EOF
-		-march=armv6kz
-		-mfpu=vfp
-		-mtune=arm1176jzf-s
-		EOF
-		;;
-	esac
-	# the target triple being built for
+	cat > clang++.cfg <<-EOF
+	@clang.cfg
+	EOF
+	# clang defaults to pentium4 on i*86- triples.
+	# see https://github.com/llvm/llvm-project/issues/61347
+	cat > "$(arch_to_hostspec x86).cfg" <<-EOF
+	-march=pentium-m -mfpmath=sse
+	EOF
+	# clang defaults to 'armv6' for armhf, i.e. no -zk.
+	# -zk is also a deprecated name for -kz.
+	cat > "$(arch_to_hostspec armhf).cfg" <<-EOF
+	-march=armv6kz
+	-mfpu=vfp
+	-mtune=arm1176jzf-s
+	EOF
+	# $CHOST is the target triple being built for
 	# in LLVM, we set -DLLVM_DEFAULT_TARGET_TRIPLE to the same thing,
 	# so that is the default triple, and one of the checked files.
 	# it's possible to do CHOST-clang.cfg and similar to make it per-tool
-	mv config.cfg "$pkgdir"/etc/clang$_majorver/$CHOST.cfg
+	mv ./clang*.cfg ./*-linux-musl*.cfg "$pkgdir"/etc/clang$_majorver/
 
-	# override $CHOST.cfg options with an empty driver-specific config
-	# file, as -Wno-unknown-argument works for clang-cl but not flang
-	# (flang will error out on options like -fstack-clash-protection)
-	touch "$pkgdir"/etc/clang$_majorver/$CHOST-flang.cfg
+	# trim LLVMExports, so -dev can be used without -gtest, -polly, libclc
+	patch --no-backup-if-mismatch \
+		"$pkgdir"/$_prefix/lib/cmake/llvm/LLVMExports-minsizerel.cmake \
+		"$srcdir"/trim-exports_patch
 
 	# delete things we don't want non-latest of
 	rm -r "$pkgdir"/usr/lib/llvm$_majorver/share/clang/ \
@@ -716,6 +727,7 @@ _gtest() {
 
 llvmstatic() {
 	pkgdesc="$pkgdesc (static libraries)"
+	install_if="$pkgname-dev=$pkgver-r$pkgrel cmake"
 
 	amove $_prefix/lib/libLLVM*.a
 }
@@ -761,8 +773,8 @@ _llvm_lit() {
 	pkgdesc="$pkgdesc (test runner)"
 	depends="$pkgname-test-utils=$pkgver-r$pkgrel"
 
-	local litver=$(python3 "$builddir"/llvm/utils/lit/setup.py --version 2>/dev/null \
-		| sed 's/\.dev.*$//')
+	local litver=$(python3 "$builddir"/llvm/utils/lit/lit.py --version 2>/dev/null \
+		| grep -Eo '[.[:digit:]]+')
 	test -n "$litver"
 	provides="lit=$litver-r$pkgrel"
 	replaces="llvm$_prevmajorver-test-utils" # site-packages
@@ -1262,16 +1274,15 @@ pyc() {
 }
 
 sha512sums="
-d103196a2396464617200caade04739b3e3ae9bb425b5f74a3453c7469b0fe875f2054722d68acea89defae2037074808c8da338278ebc2d1cae8531a9c33da0  llvm-project-9f438e0b0670d5d70fc81288a192b4e8815ac77a.tar.gz
-c74eaaa216ed515ff53c67f043035a99bab795b1a4e8fd9787ceb4523d7888db7fe9d9d0a05b228456673f4b896c751ed3ba5e7362cdba10214f1a16d2fb8127  0001-Disable-dynamic-lib-tests-for-musl-s-dlclose-is-noop.patch
+9e8b597b9269b8956e814c73e8f7d57de6b0bc32e5f1ca90ba6d816f91b367f8b4541455850ab55c3d0a782b435352dd2503a5e48167750e0cf6f75975f8b5e9  llvm-project-7786ac077acc4e81f987dd1db9cbd109f95ab37a.tar.gz
+3f86d2e6808aae4d8e1a59b0fcf4efb1ef8d3e927a076ee2bd23307e52e6ad2b44868dbead18ee031ac1970ee9fd721e0c56c003f2d3104284254be67205c8c3  0001-Disable-dynamic-lib-tests-for-musl-s-dlclose-is-noop.patch
 c51dcd90def5dfcc70e14d50143c53d215a2a13d34051c26a6cad50c8b95be1e97c21295c7b1b3b9671da6add350d1cd26c5e049fd537226e089ab5d16c83907  0002-Fix-memory-mf_exec-on-aarch64.patch
 7384dacff265d9fd3a36433e3289455023c78fec442b3e847ead2c5fc0acbc3f3f81db742d1a298c6d752709a856a2efff8676cb7056983180af61a7aa3b08ec  0003-LLVM-install-prefix.patch
 2ca6276064ee25551524bc08648f728227b4e7ceacac0f3b42fac9db5e4de6ad3bd73bbecf475683b748ab4d2dbc2a82f5b5c60bef906a97179dddc73703da4e  0004-LLVM-stack-size.patch
-1ed23aa98c1e37e4fda9a83651258a9a8b335af3c072ba1ec0832d97e02181826204915af451bc6266eda5fa5ca541c535d36a1620e0e5292a11e1f1f489d1d6  0005-Fix-macho-invalid-test.patch
 a45f078c4ddd5e1bece2e2e6795d4760a88dd3bb0921786d2f0650979268554e87e9190b42be1efa7e76e8d14a5a6db453dc367711576397e00fe647c9261791  0006-Skip-roundeven-tests.patch
-a40e41640f80d9f391205b056a812ffb63e89eeccf568c4b0cd207bc644551c0b58b4d1fbfcafd562d94a6aff93a200b068a750f2e526606ef8cc52f45f3bd3c  0007-Add-musl-triples.patch
-c19cbde7a7ec932397012503e15faacf47debe00347b08152f11c0d3b99b39bbdb94f7f77eefe87467082d3200801ba887ef4e05b801ce158303952535ffee3f  0008-Enable-stack-protector-by-default-for-Alpine-Linux.patch
-78bf91e6dd9263806d850522e93fb7e557fd4f8154a8539730804529b53fc710246945046b8f80a7765632d93ffa3e708d358920cca27cadbfc2196ea1a32bd0  0009-Switch-on-default-now-relro-without-reading-osrelease.patch
+6b7797009715149c3fcc660f577173e0e9299ce900da36c181ad953a6ac3746a512024025b2f18d460e22cfe3782ecc281745872c283d72f6ee2bd7e9ae0ec72  0007-Add-musl-triples.patch
+d752b262a4d15b0ffd774575f1ae27c1865d2914d9b744f328c89857e1e23e62067a689353a3afabaf4d937d3108bca3ea3d37d37fe2c53a4913451b3df8e32e  0008-Enable-stack-protector-by-default-for-Alpine-Linux.patch
+184547d464287124193f35df5ee8891094663e788dcf8d67b93b7d49759000096015b3481cf38c611bc30b6980950742c3476605a0d0050536d4f30a048f01d1  0009-Switch-on-default-now-relro-without-reading-osrelease.patch
 99e5f2274cd76679192fa59dfa4373e40970780aeab2ab132e539aa6567ed9ea7bdba0c1a2ab97d8beeacf512a573748441859224801be6595ef55211b89ed0b  0010-Install-lldb-tblgen-into-llvm-next-dev-subpackage.patch
 52614e2dffaf501a8275d3c715357073bce8b2247d4119c476170eeab56e1bc1326717fe2f3a7cd64e96f0f13c45d2e28905f2563d128b9bd1292d7b7eb0fafb  0011-Use-full-version-for-liblldb-symlink-target.patch
 cfaec3e531dfdb36ec5a5d617e07d7f83658e72b499c47cfdefa0cffae9c77f1755e882395fe7ef5a22a9f563e13f6e0491adb5971487be25c4c4d42f2bb5d9e  0012-Add-version-to-libomp-soname.patch
@@ -1280,11 +1291,13 @@ c4c9775cfaf5b9c84a5448354dd6d302db21e9a847c3cca87abc1aabc95732b5f660c44514e9a1b4
 347b210c8313143d40c2e312a4c44ae8e1ea1715f7fd150cfa6a8831d3b6ac7b9ec233402ab8ea9eff4baff806b66c910bdc129bc73d273a150451af9a084388  0015-PPC-sanitizer-fixes.patch
 c1dd3309533314881201d35d42b85437262fdbe88675cd7e23ef3830b1b026b310c5a5d86aa4ada0b2e1db3c0c6853e1b1202292117c99b1d15f640ec55a52e8  0016-Basic-lsan-fixes-on-various-archs.patch
 524e4177ddcac6de054c2be2baafaa7326aa786cfcd00cca5f6ec2034b6ee3ed329c81bc3732808e5e0fc65bf146f8d35ba5dc1b276d4fcab96bd9e4aac8b47f  0017-32-bit-musl-sanitizer-fixes.patch
-6c6bcb65ea4448f8991ce98e8e684c200b78923c9f0ffa54739568d0f88160be5b0a01276bc8fd183dd739ed6ba83042687b54fc59339b922683525ff8c609a1  0018-Use-gas-as-clang-gnutools-assembler.patch
-2999a055d52bcd7816888c2a4225fa5f70bae620f0294954e8bc759930318626738c4df4b9a3f722199d30dc9ef436c12617c2683d04b55b9515e085be6d7baa  0019-LLD-add-build-shared-libs-option.patch
+134ec8fc604d90a3e5ee4e7327e3f8128da431f4c3ca762ade8bb2b5350a7378b56c87bf321fbf1fc934241fc15bdb39506831d4b2f5633670440dd70b185e41  0018-Use-gas-as-clang-gnutools-assembler.patch
+0e5ec6e690cfe5df3a87413142564ba7f09cac346082f0f7775b5f44be09c905788821c543bb1a3b7e538bfdb53feb9422d37ae7504395cc3865a000d68af8fe  0019-LLD-add-build-shared-libs-option.patch
 2e4edef16b17ef1b54fb9f6e0b0c8429daf0d293de916e7f835103d1d2e67359a3c4379b5cb82b319ee151d23dcd5a1b20e613c60cc766f50fcbd856500d4ddf  0020-AArch64-llvm-exegesis-musl-remove-redefinition-prctl.patch
-30a3907b6e7e8f799f0ed510035524cbecbe6ff47e6d8474d305a0dccbd1db41ce2b44b13adb426ba2c9ff515173b268c26d2587b27903f69ba14cdd3b8a3b75  0021-PyClang-cindex-add-sover-to-libclang.patch
-0f8d2ad94514b709a129cd82c294a47179654be06dfec4886717c6b9017350fcc8a236a8a9e7b15f310f635e01edfd37e08380384f53cb9c3801cc6bf931dfa0  binutils-with-gold-2.44.50-8dc4e62fc94.tar.xz
+046d53051a79d81a3a62ee0163f9571ec73fe640d7f6b898f69b1f33d7b02d694fc6f05b4eff27549ff90db739d598e7cca0596d796928a91a66eec9bad4686f  0021-PyClang-cindex-add-sover-to-libclang.patch
+4852c7a1f322dc3ccbf68773def717852a9326148e272010e044dc554cd6411a5f86babddecc1257c14cb16ab8a14b6e9b8fed0769d424b11b321cc654478ecc  trim-exports_patch
+ac0857c554f890a4de112020d2ba16a66e3c8d44ffd27f8c1901f77a0294c605c13fb292a5bc62c5f76dbd0fc3e8c7b65adbffa1f95f51601263c8f39b43b3b9  pyproject.toml
+6089a15087e21efd726f5e1b5f3a1883bfbc27348a490d449d64c9a766cd6fd851c2fa234226175218e59bb060f0900e072d68e685cc6139c9fafdea0abc69e7  binutils-with-gold-2.44.50-dbd830f14f7.tar.xz
 b305a04cc6ed335fd0c6f4d26d7f3b1cef2764a0d37e8db319d7b8effb1751831b60323cef5c0775ebe001027d84216d7120b11b3907b546e3f797341557273c  0801-Revert-PR25882-.gnu.attributes-are-not-checked-for-s.patch
 1ad8f0ed596a4faadc12d05809525aa1c52b4f76a6e266e88b7eb8ce10ab9337cc14536fd5876adaebbb9e6a03a0d837cc6e99680f8408125212b2228f4266e7  0802-Binutils-ld-fix-static-linking.patch
 "
