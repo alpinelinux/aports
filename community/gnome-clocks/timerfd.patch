@@ -1,0 +1,208 @@
+Patch-Source: https://gitlab.gnome.org/GNOME/gnome-clocks/-/merge_requests/344
+---
+From 21e24df2987484d7ac2af61cb6e28e7b40cf320e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 16 Apr 2025 10:56:05 +0200
+Subject: [PATCH 1/2] build: Add gmobile
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Will be simpler once we can rely on a released version
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+---
+ .gitignore                              |  1 +
+ build-aux/flatpak/org.gnome.clocks.json | 18 ++++++++++++++++++
+ meson.build                             | 21 +++++++++++++++++++++
+ src/meson.build                         |  2 ++
+ subprojects/gmobile.wrap                |  5 +++++
+ 5 files changed, 47 insertions(+)
+ create mode 100644 subprojects/gmobile.wrap
+
+diff --git a/.gitignore b/.gitignore
+index 0b94280d..778c3502 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,3 +4,4 @@ _build
+ .vscode
+ .flatpak-builder/
+ .flatpak/
++subprojects/gmobile/
+diff --git a/build-aux/flatpak/org.gnome.clocks.json b/build-aux/flatpak/org.gnome.clocks.json
+index d0a5a730..c9dd09f7 100644
+--- a/build-aux/flatpak/org.gnome.clocks.json
++++ b/build-aux/flatpak/org.gnome.clocks.json
+@@ -43,6 +43,24 @@
+                 }
+             ]
+         },
++        {
++            "name": "gmobile",
++            "buildsystem": "meson",
++            "config-opts": [
++                "-Dexamples=false",
++                "-Dintrospection=true",
++                "-Dvapi=true",
++                "-Dgtk_doc=true",
++                "-Dtests=false"
++            ],
++            "sources": [
++                {
++                    "type": "git",
++                    "url": "https://gitlab.gnome.org/World/Phosh/gmobile.git",
++                    "branch": "main"
++                }
++            ]
++        },
+         {
+             "name": "libgweather",
+             "buildsystem": "meson",
+diff --git a/meson.build b/meson.build
+index 1ff638c5..8e9dddba 100644
+--- a/meson.build
++++ b/meson.build
+@@ -23,6 +23,27 @@ endif
+ gnomedesktop = dependency('gnome-desktop-4')
+ libgeoclue = dependency('libgeoclue-2.0', version: '>=2.4')
+ libadwaita = dependency ('libadwaita-1', version: '>=1.6.alpha')
++gmobile = dependency('gmobile', version: '>= 0.3.0', required: false)
++
++if not gmobile.found()
++  gmobile_project = subproject(
++    'gmobile',
++    version: '>= 0.3.0',
++    default_options:
++      [ 'examples=false',
++	'introspection=true',
++	'vapi=true',
++	'gtk_doc=false',
++	'tests=false'
++      ]
++  )
++  gmobile = declare_dependency(
++    dependencies: [
++      gmobile_project.get_variable('gmobile_dep'),
++      gmobile_project.get_variable('gmobile_vapi')
++    ]
++  )
++endif
+ 
+ cc = meson.get_compiler('c')
+ math = cc.find_library('m', required: false)
+diff --git a/src/meson.build b/src/meson.build
+index 344781c8..a219326e 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -56,6 +56,7 @@ clocks_vala_args = [
+ 
+ clocks_c_args = [
+   '-include', 'config.h',
++  '-DGMOBILE_USE_UNSTABLE_API',
+   '-DGWEATHER_I_KNOW_THIS_IS_UNSTABLE',
+   '-DGNOME_DESKTOP_USE_UNSTABLE_API',
+ ]
+@@ -63,6 +64,7 @@ clocks_c_args = [
+ clocks_dependencies = [
+   glib,
+   gio,
++  gmobile,
+   gobject,
+   gtk,
+   gweather,
+diff --git a/subprojects/gmobile.wrap b/subprojects/gmobile.wrap
+new file mode 100644
+index 00000000..db820e0e
+--- /dev/null
++++ b/subprojects/gmobile.wrap
+@@ -0,0 +1,5 @@
++[wrap-git]
++directory=gmobile
++url=https://gitlab.gnome.org/World/Phosh/gmobile.git
++revision=main
++depth=1
+-- 
+GitLab
+
+
+From 450af33d051feaa5412e3b7db9198387cb6fe2d2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 16 Apr 2025 10:56:59 +0200
+Subject: [PATCH 2/2] alarm: Use wakeup timer
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This will take the system out of suspend when needed. If not activated
+via systemd (which allows to preserve CAP_WAKE_ALARM) it needs:
+
+sudo setcap 'cap_wake_alarm=ep' _build/src/gnome-clocks
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+---
+ src/alarm-item.vala | 28 +++++++++++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/src/alarm-item.vala b/src/alarm-item.vala
+index 27968f75..22ccee58 100644
+--- a/src/alarm-item.vala
++++ b/src/alarm-item.vala
+@@ -16,6 +16,7 @@
+  * along with this program; if not, write to the Free Software
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+  */
++using Gm;
+ 
+ namespace Clocks {
+ namespace Alarm {
+@@ -69,6 +70,13 @@ private class Item : Object, ContentItem {
+ 
+     public AlarmTime time { get; set; }
+     private GLib.DateTime? _ring_time;
++    private uint wakeup_id;
++
++    private void on_wakeup_timeout () {
++        debug ("Boottime alarm fired");
++        wakeup_id = 0;
++        /* TODO: take suspend inhibitor */
++    }
+ 
+     [CCode (notify = false)]
+     public GLib.DateTime? ring_time {
+@@ -87,6 +95,24 @@ private class Item : Object, ContentItem {
+                 notify_property ("active");
+             }
+             notify_property ("ring-time");
++
++            if (wakeup_id > 0) {
++                GLib.Source.remove (wakeup_id);
++                wakeup_id = 0;
++            }
++
++            if (_ring_time != null) {
++                var now = new GLib.DateTime.now ();
++                var seconds_left = (ulong)(ring_time.difference (now)) / 1000 / 1000;
++                debug (@"Scheduling wakeup in $seconds_left seconds");
++                try {
++                    wakeup_id = Gm.wakeup_timeout_add_seconds_once_full (GLib.Priority.DEFAULT,
++                                                                         seconds_left,
++                                                                         on_wakeup_timeout);
++                } catch (GLib.Error e) {
++                    critical ("Failed to schedule wakeup for alarm: %s", e.message);
++                }
++            }
+         }
+     }
+ 
+@@ -131,7 +157,7 @@ private class Item : Object, ContentItem {
+ 
+     public string time_label {
+          owned get {
+-            // FIXME: Format the time without creating GLib.DateTime
++            /* FIXME: Format the time without creating GLib.DateTime */
+             var wallclock = Utils.WallClock.get_default ();
+             var now = wallclock.date_time;
+             var dt = new GLib.DateTime (wallclock.timezone,
+-- 
+GitLab
+
