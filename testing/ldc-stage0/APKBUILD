@@ -1,0 +1,159 @@
+# Maintainer: Celeste <cielesti@protonmail.com>
+maintainer="Celeste <cielesti@protonmail.com>"
+pkgname=ldc-stage0
+pkgver=1.40.1
+pkgrel=0
+_xrtrel=0
+_llvmver=19
+_qemuuser=10.0.2
+pkgdesc="The LLVM-based D Compiler (for bootstrapping without GDC)"
+url="https://github.com/ldc-developers/ldc"
+arch="ppc64le riscv64" # architectures without main/gcc-gdc
+license="BSD-3-Clause AND BSL-1.0 AND ( Artistic-1.0 OR GPL-2.0-or-later ) AND NCSA AND MIT"
+depends="
+	lld$_llvmver
+	llvm$_llvmver-libs
+	llvm-libunwind-dev
+	tzdata
+	"
+makedepends="
+	bash
+	chrpath
+	clang$_llvmver
+	cmake
+	curl-dev
+	diffutils
+	glib-dev
+	libedit-dev
+	llvm$_llvmver-dev
+	llvm$_llvmver-static
+	meson
+	samurai
+	zlib-dev
+	"
+source="https://github.com/ldc-developers/ldc/releases/download/v$pkgver/ldc-$pkgver-src.tar.gz
+	cmake4.patch
+	no-redundant-rpath.patch
+	skip-debug-runtime.patch
+	druntime-loongarch64_patch
+	druntime-ppc64le_patch
+	druntime-riscv64_patch
+
+	https://download.qemu.org/qemu-$_qemuuser.tar.xz
+	https://github.com/ldc-developers/ldc/releases/download/v$pkgver/ldc2-$pkgver-alpine-x86_64.tar.xz
+	ldc2.conf.patch
+	ldmd-emu.sh.in
+	"
+builddir="$srcdir/ldc-$pkgver-src"
+# !check: stage0 compiler, run tests in community/ldc
+# !tracedeps: do not provide D runtime libraries, community/ldc will do this
+options="!check !tracedeps"
+
+for _arch in $arch; do
+	source="$source
+		https://dl-cdn.alpinelinux.org/alpine/edge/testing/x86_64/ldc-runtime-cross-$_arch-$pkgver-r$_xrtrel.apk
+		"
+done
+
+case "$CARCH" in
+riscv64)
+	depends="$depends libucontext-dev"
+	_link_ucontext=' "-L--push-state", "-L--no-as-needed", "-L-lucontext", "-L--pop-state",'
+	;;
+esac
+
+prepare() {
+	local builddir="$srcdir"
+
+	ln -s ldc-$pkgver-src "$srcdir"/ldc
+	ln -s ldc2-$pkgver-alpine-x86_64 "$srcdir"/ldc-x86_64
+
+	default_prepare
+
+	local f; for f in "$srcdir"/druntime*_patch; do
+		msg "$f"
+		cd "$srcdir"/ldc
+		patch -p1 -i "$f"
+		[ "${f##*/}" = "druntime-ppc64le_patch" ] && continue
+		cd "$srcdir"/ldc-x86_64/import
+		patch -p4 -i "$f"
+	done
+
+	mkdir -p "$srcdir"/ldc-runtime
+	tar -C "$srcdir"/ldc-runtime \
+		-xf "$srcdir"/ldc-runtime-cross-$CARCH-$pkgver-r$_xrtrel.apk \
+		usr/$CHOST/usr/lib
+
+	sed -i -e "s|@@CROSS_LIBDIR@@|$srcdir/ldc-runtime/usr/$CHOST/usr/lib|" \
+		-e "s|@@UCONTEXT@@|$_link_ucontext|" \
+		"$srcdir"/ldc-x86_64/etc/ldc2.conf
+	sed -e "s|@@LDC_FULL_PATH@@|$srcdir/ldc-x86_64/bin/ldc2|" \
+		-e "s|@@CHOST@@|$CHOST|g" "$srcdir"/ldmd-emu.sh.in \
+		> "$srcdir"/ldc/ldmd-emu.sh
+	chmod 0755 "$srcdir"/ldc/ldmd-emu.sh
+}
+
+build() {
+	# use less memory to not oom
+	export CC=clang-$_llvmver
+	export CXX=clang++-$_llvmver
+	export LDFLAGS="$LDFLAGS -fuse-ld=lld"
+
+	# this may be removed once qemu-x86_64 stops segfaulting on riscv64
+	(
+		cd "$srcdir"/qemu-$_qemuuser
+		./configure \
+			--target-list=x86_64-linux-user \
+			--without-default-features
+		make qemu-x86_64
+		install -Dm755 build/qemu-x86_64 -t "$builddir"/
+	)
+
+	case "$CARCH" in
+	loongarch64)
+		_atomic=";atomic"
+		;;
+	riscv64)
+		_atomic=";atomic"
+		_ucontext="ucontext;"
+		;;
+	esac
+
+	unset DFLAGS
+	cmake -B build -G Ninja \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_INSTALL_LIBDIR=lib \
+		-DBUILD_SHARED_LIBS=True \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DD_COMPILER="$builddir/ldmd-emu.sh" \
+		-DD_COMPILER_ID=LDMD \
+		-DC_SYSTEM_LIBS="${_ucontext}unwind;m;pthread;rt;dl$_atomic" \
+		-DADDITIONAL_DEFAULT_LDC_SWITCHES=' "-linker=lld", "-link-defaultlib-shared", "-L--export-dynamic", "-L--eh-frame-hdr",'"$_link_ucontext" \
+		-DLLVM_ROOT_DIR="/usr/lib/llvm$_llvmver" \
+		-DCONF_INST_DIR=/etc/ldc
+	cmake --build build
+}
+
+package() {
+	DESTDIR="$pkgdir" cmake --install build
+	rm -r "$pkgdir"/etc/ldc/bash_completion.d
+
+	# CMake added rpaths to the shared libs - strip them
+	chrpath -d "$pkgdir"/usr/lib/*.so* "$pkgdir"/usr/bin/*
+}
+
+sha512sums="
+5808dc46ccd26d7f5eff7fe3361eefc336136bea6afe94763629edbd2fe577e21ea1e327ecfebdbbd48456ddfe9f46ef5f613ec6427bbcac95acbce4f16ed639  ldc-1.40.1-src.tar.gz
+250cca4f7e99560874d3bf93700f85bd6f665d2abac272ad986b8ae42213e1cc342d37f2cc3566ace902c4a8bb07465398f23861227be52f35b4fdd6e04bff1c  cmake4.patch
+397212d0347ce676a5c5bf131cd973374dc072f4585b661ec21cd886553c293fc1cfbe7eec35089ba60c389a85c4700082177bf424f9d8dfd54ffada02808573  no-redundant-rpath.patch
+f596602b30b0e8932ac3258d82ae352009cdebe6f714dd9d8b906b51ba31523393577102eeb8e88bd36e1dc7e6d4a1abf14224a6893bf76b3a204927fb8ce0d1  skip-debug-runtime.patch
+fd47aea774817e40dc4f0b96d82899d748b5d553fe81bd2ca570e0fe5c9d1876995bec633242a63ed44f827edeef73f0079bd30de1e407d8f0225de514ca549d  druntime-loongarch64_patch
+d7d7907878ccb5931e13a6ed66a39260ce8dfc80221f6240ccd66a31ddaaf8ec4cbaabfa51e21029cf37b8fefb067c79ded555e2364aac0e258d5e0f80003673  druntime-ppc64le_patch
+c1bb664dcdac37cb32536755d87d3380113f0b0688b4ea12010ad8afcfaa42d973a9570d884e05870a94c4cc93c6273ed47711744efc49c9f5d3baf58c0262c0  druntime-riscv64_patch
+7fda582c3845ea663aa5eda21bb38ebcfb6c25bccf8944ea6cdf8b5be6946b5a874b36674a7f5db3e325abb9cca0dd9bc0727837fdceb71a8c947d96169a9b20  qemu-10.0.2.tar.xz
+346f7fc6f5134e42c0a70b1fd05e9724d1e64d9346c9240a41309d85a5bcc61d4b559ff3a900cac9b4222424b323bca691dcfccec16a3155b5ffcaf9e5870ceb  ldc2-1.40.1-alpine-x86_64.tar.xz
+cf3a9c43bcadf82ecf18248a3f5f4346fdd723d5db94efa7325c6d58f92e416f93e0462d51a84a7179dc273725ec1179d8012e9448a9f78000fa7e8590bfc2dd  ldc2.conf.patch
+ddefa028d08f830fd95890cc986c5274f5d5ce8ecf38280ba7cad3c1b714c92b9f63ed92e1994fa94c71b27e44dff13e3f65ef5fcbdeca63ce8332335dfc2d16  ldmd-emu.sh.in
+ca9a2265868a3a7522e346d87e50111a089ee3e8dd7341b60f7948798a27cbb481ea3505267cbba42eb1403ed84a48d21ee9cfeab0fcc8128da80c4a3b4aeb39  ldc-runtime-cross-ppc64le-1.40.1-r0.apk
+ff9dbde60432fffe18efe5fb1f13b95759f2ae49d35954251b9d6f253eb66705f06e62a6d583c56bd6b14eb403731fd9dc2fbf13a9118de3d75343895c1f9bb7  ldc-runtime-cross-riscv64-1.40.1-r0.apk
+"
