@@ -15,9 +15,9 @@ shift
 
 # optional cross build packages
 #: ${KERNEL_PKG=linux-firmware linux-lts}
-#: ${COMPILER_PKG=libffi brotli libev c-ares cunit nghttp2 libidn2 libunistring libpsl curl libssh2 libxml2 pax-utils llvm15 community/ghc llvm20 rust community/go}
+#: ${COMPILER_PKG=libffi brotli libev c-ares cunit nghttp2 libidn2 libunistring libpsl curl libssh2 libxml2 llvm15 community/ghc llvm20 rust community/go}
 # FIXME: Maybe subdivide into ghc, rust, and go stuff
-: ${MKINITFS=libcap-ng ncurses readline sqlite util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs}
+: ${MKINITFS=libcap-ng ncurses readline sqlite util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs pax-utils}
 #: ${OPENSSH=openssh}
 
 if [ -z "$TARGET_ARCH" ]; then
