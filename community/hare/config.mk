@@ -4,6 +4,8 @@ BINDIR = $(PREFIX)/bin
 MANDIR = $(PREFIX)/share/man
 SRCDIR = $(PREFIX)/src
 STDLIB = $(SRCDIR)/hare/stdlib
+LIBEXECDIR = $(PREFIX)/libexec
+TOOLDIR = $(LIBEXECDIR)/hare
 
 # variables used during build
 PLATFORM = linux
