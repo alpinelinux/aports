@@ -2,7 +2,7 @@
 # Contributor: Elly Fong-Jones <elly@elly.town>
 # Maintainer: lauren n. liberda <lauren@selfisekai.rocks>
 pkgname=chromium
-pkgver=138.0.7204.168
+pkgver=139.0.7258.66
 pkgrel=0
 _copium_tag=138.0
 # DEPS file -> deps['src/third_party/test_fonts']['objects'][0]['object_name']
@@ -16,6 +16,7 @@ license="BSD-3-Clause"
 # XXX: eudev-libs replaced by so:libudev.so.1 to allow installation with libudev-zero
 # take care if libudev.so ever updates somajor..
 depends="
+	$pkgname-common=$pkgver-r$pkgrel
 	font-opensans
 	gtk+3.0
 	icu-data-full
@@ -111,21 +112,30 @@ makedepends="
 	"
 checkdepends="py3-six"
 subpackages="
+	$pkgname-common
 	$pkgname-qt6
 	$pkgname-chromedriver
+	$pkgname-headless-shell:headless_shell
 	$pkgname-doc
 	$pkgname-lang
+	$pkgname-angle
 	$pkgname-swiftshader
 	"
-source="https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$pkgver.tar.xz
-	https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$pkgver-testdata.tar.xz
+# In theory Chromium ships its own tarballs via https://chromium-browser-official.commondatastorage.googleapis.com/,
+# however, every sometime they decide to apply patches on top of the source code of Rust, which runs into git conflicts,
+# in which case the CI doesn't publish shit. https://ci.chromium.org/ui/p/infra/builders/cron/publish_tarball
+#
+# The tarballs from Gentoo's kangie also weigh like 5 GiB less, through a very advanced technique of not including
+# .git directories, 2 Debian sysroots, at least 2 full trees of LLVM, full source of GCC, full source and binaries of Rust, ...
+source="
+	https://github.com/chromium-linux-tarballs/chromium-tarballs/releases/download/$pkgver/chromium-$pkgver-linux.tar.xz
+	https://github.com/chromium-linux-tarballs/chromium-tarballs/releases/download/$pkgver/chromium-$pkgver-linux-testdata.tar.xz
 	test_fonts-$_testfonts.tar.gz::https://chromium-fonts.storage.googleapis.com/$_testfonts
 	copium-$_copium_tag.tar.gz::https://codeberg.org/selfisekai/copium/archive/$_copium_tag.tar.gz
 	chromium-launcher.sh
 	chromium.conf
 	google-api.keys
 
-	chromium-revert-drop-of-system-java.patch
 	compiler.patch
 	disable-dns_config_service.patch
 	disable-failing-tests.patch
@@ -134,9 +144,11 @@ source="https://commondatastorage.googleapis.com/chromium-browser-official/chrom
 	fstatat-32bit.patch
 	gdbinit.patch
 	generic-sensor-include.patch
-	musl-auxv.patch
+	headless-shell-no-license.patch
 	musl-sandbox.patch
 	musl-tid-caching.patch
+	net-test-no-vpython.patch
+	net-test-pyws3-py3.12.patch
 	no-execinfo.patch
 	no-mallinfo.patch
 	no-res-ninit-nclose.patch
@@ -155,9 +167,6 @@ _copium_patches="
 # chrome-sandbox can use suid when user namespaces aren't available, but uses only userns and drops privileges normally
 options="suid"
 
-# backwards compat (merged into primary)
-provides="$pkgname-angle=$pkgver-r$pkgrel"
-
 case "$CARCH" in
 riscv64)
 	;;
@@ -168,12 +177,10 @@ riscv64)
 esac
 
 case "$CARCH" in
-x86_64)
+x86_64|aarch64)
 	;;
 *)
 	# 32-bit fails a bunch of tests for various size-related reasons
-	# aarch64 gets timeout related failures due to builder setup, no easy way to
-	# raise timeouts
 	options="$options !check"
 	;;
 esac
@@ -677,7 +684,6 @@ _configure() {
 		custom_toolchain=\"//build/toolchain/linux/unbundle:default\"
 		disable_fieldtrial_testing_config=true
 		enable_hangout_services_extension=true
-		enable_nacl=false
 		enable_nocompile_tests=false
 		enable_stripping=false
 		enable_rust=true
@@ -733,30 +739,48 @@ build() {
 	ninja -C out/bld \
 		chrome \
 		chrome_sandbox \
+		headless_shell \
 		chromedriver.unstripped \
 		chrome_crashpad_handler \
-		$(want_check && echo base_unittests)
+		$(want_check && echo \
+			base_unittests \
+			net_unittests \
+		)
 
 }
 
 check_base_unittests() {
-	# TODO: fix these tests, hopefully
-	# https://issues.chromium.org/issues/40939315
-	broken="MessagePumpLibeventTest.NestedNotification*"
-	broken="$broken:CancelableEventTest.BothCancelFailureAndSucceedOccurUnderContention"
-	broken="$broken:ClampTest.Death"
-	broken="$broken:DriveInfoTest.GetFileDriveInfo"
-	broken="$broken:OptionalTest.DereferencingNoValueCrashes"
-	broken="$broken:PlatformThreadTest.SetCurrentThreadTypeTest"
-	broken="$broken:RawPtrTest.TrivialRelocability"
-	broken="$broken:SafeNumerics.IntMaxOperations"
-	broken="$broken:StackTraceTest.TraceStackFramePointersFromBuffer"
-	broken="$broken:StringPieceTest.InvalidLengthDeath"
-	broken="$broken:StringPieceTest.OutOfBoundsDeath"
-	broken="$broken:ThreadPoolEnvironmentConfig.CanUseBackgroundPriorityForWorker"
-	broken="$broken:ValuesUtilTest.FilePath"
+	# libstdc++ metabug: https://issues.chromium.org/issues/40939315
+	# musl metabug: https://issues.chromium.org/issues/40244828
+
+	# Fails if ${TMPDIR:-/tmp} is tmpfs. https://issues.chromium.org/issues/428005647
+	broken="DriveInfoTest.GetFileDriveInfo"
+
+	broken="$broken:ElfReaderTestWithCurrentImage.ReadElfBuildId"
+	broken="$broken:FileUtilTest.FileToFILE"
+	broken="$broken:NativeLibraryTest.LoadLibraryPreferOwnSymbols"
+	# Fails on CI only (k8s?)
+	broken="$broken:ProcessUtilTest.CloneFlags"
+
 	# test-launcher-bot-mode enables parallelism and uncolored output
 	./out/bld/base_unittests --test-launcher-bot-mode --gtest_filter="-$broken"
+}
+
+check_net_unittests() {
+	# XXX:
+	# CI only (k8s?)
+	broken="AddressTrackerLinuxNetlinkTest.TestInitializeTwoTrackersInPidNamespaces"
+	broken="$broken:CertDatabaseNSSTest.ImportFromPKCS12AsExtractableAndExportAgain"
+	broken="$broken:CertDatabaseNSSTest.ImportFromPKCS12AsUnextractableAndExportAgain"
+	broken="$broken:CertDatabaseNSSTest.ImportFromPKCS12OnlyMarkIncludedKey"
+	broken="$broken:CertDatabaseNSSTest.ImportFromPKCS12Twice"
+	broken="$broken:CertDatabaseNSSTest.ImportFromPKCS12WrongPassword"
+	broken="$broken:TrustStoreNSSTestAllowSpecifiedUserSlot.SystemRootCertOnMultipleSlots"
+	broken="$broken:TrustStoreNSSTestIgnoreSystemCerts.UserDbTrustForSystemRootHonored"
+	broken="$broken:TrustStoreNSSTestIgnoreSystemCerts.UserDbAnchorAndLeafTrustForSystemRootHonored"
+	broken="$broken:UDPSocketTest.SharedMulticastAddress"
+
+	./out/bld/net_unittests --test-launcher-bot-mode --gtest_filter="-$broken"
 }
 
 check() {
@@ -766,6 +790,7 @@ check() {
 	export PATH="$PATH:$PWD/third_party/depot_tools"
 
 	check_base_unittests
+	check_net_unittests
 
 }
 
@@ -787,6 +812,10 @@ package() {
 	# chromedriver
 	install -Dm755 chromedriver.unstripped "$pkgdir"/usr/lib/$pkgname/chromedriver
 	ln -sfv ../lib/$pkgname/chromedriver "$pkgdir"/usr/bin/chromedriver
+
+	# headless shell
+	install -Dm755 headless_shell "$pkgdir"/usr/lib/$pkgname/chromium-headless-shell
+	ln -sfv ../lib/$pkgname/chromium-headless-shell "$pkgdir"/usr/bin/chromium-headless-shell
 
 	# resources
 	install -Dm644 snapshot_blob.bin -t "$pkgdir"/usr/lib/$pkgname/
@@ -861,6 +890,17 @@ package() {
 		"$pkgdir"/usr/share/metainfo/chromium.appdata.xml
 }
 
+common() {
+	pkgdesc="Shared resources for main chromium package and chromium-headless-shell"
+	depends="$pkgname-angle=$pkgver-r$pkgrel"
+
+	# en-US is the default, other locales are handled in -lang subpackage
+	amove usr/lib/$pkgname/locales/en-US.pak
+
+	amove usr/lib/$pkgname/headless_command_resources.pak \
+		usr/lib/$pkgname/v8_context_snapshot.bin
+}
+
 qt6() {
 	pkgdesc="chromium qt6 shim"
 
@@ -875,16 +915,32 @@ chromedriver() {
 		usr/bin/chromedriver
 }
 
+headless_shell() {
+	pkgdesc="Headless shell providing old headless mode for Chromium"
+	depends="$depends $pkgname-swiftshader=$pkgver-r$pkgrel"
+
+	amove usr/lib/$pkgname/chromium-headless-shell \
+		usr/bin/chromium-headless-shell
+	amove usr/lib/$pkgname/headless_*
+}
+
 lang() {
 	pkgdesc="Languages for package $pkgname"
 	install_if="$pkgname=$pkgver-r$pkgrel lang"
+	depends=""
 
 	# Default to en-us and provide everything else through the chromium-lang package
+	# (en-US is split off in -common subpackage)
 	amove usr/lib/$pkgname/locales/*.pak
+}
 
-	mkdir -p "$pkgdir"/usr/lib/$pkgname/locales
-	mv "$subpkgdir"/usr/lib/$pkgname/locales/en-US.pak \
-		"$pkgdir"/usr/lib/$pkgname/locales/
+angle() {
+	pkgdesc="Chromium web browser: ANGLE based hardware acceleration"
+	depends=""
+
+	amove usr/lib/$pkgname/libEGL.so \
+		usr/lib/$pkgname/libGLESv2.so \
+		usr/lib/$pkgname/libvulkan.so.1
 }
 
 swiftshader() {
@@ -896,25 +952,26 @@ swiftshader() {
 }
 
 sha512sums="
-7f7d7cdf5daf490dd29c05601a867d438f3793022f0bc555513572aba212f4964ecd975c566e4777d5f496797153af2893bc1c1f186c7b0a78aeb2f75087328d  chromium-138.0.7204.168.tar.xz
-c9434fb141b74d04307b02eddf95e0a1e72b9e16adad668c22136d2179a8308506d0f7cf4b16e16b7827caed9660df69040b2966f56dd5019604d2888968ef65  chromium-138.0.7204.168-testdata.tar.xz
+00bdc995b90b69f537d3b4206f99f03befc3f511f65752e33ced7448804c3cb7ca5ffdb7f00a085eb62e0c8641f8979964a47f515d23022d5c9dfce7eb406a97  chromium-139.0.7258.66-linux.tar.xz
+594c5c3e489224d569b34514e829994126f1a540f7721870629fdf1b5d9e9a187616bcc2b91677a73cb35a998abbd5c38100a08267e801f009a0af00936cd136  chromium-139.0.7258.66-linux-testdata.tar.xz
 bbc928e99ebcd4d953b982688b01526cb754bad018f67be9e777a4f8ac51cdd3e01374e5a63faf55b12e7cee0d52816c88062e012b5bcc4f9bb41f28d8e0b7f7  test_fonts-336e775eec536b2d785cc80eff6ac39051931286.tar.gz
 32e1edad4d149c489e6c6f6818cf2b2ed3c7ae1cb62600576f54d7315804e5be2c1b62716e1c1bcc445cc1e874299605cc2602b0b8ff5be665fb4b1b4f11f051  copium-138.0.tar.gz
 1b16564f85a03f3eb934ec51289dc6159e2454202d40f48354f947d6ceffac8889e9eb4c0f4dfaafb3a15101566d54039f832bc9a8433c3c463e2d1dac2d2acc  chromium-launcher.sh
 9cfcb41d69c5a515b6f9fe2a629579fa499e1f48eb58a0ce4ec8e5029d450bcafb6d963019aaac9a6838244bee9f9ba7fe5ef6146a0ca6b20fcda4ab7f059476  chromium.conf
 2d8237a940ea691bd10b08315429677a587f7ef9692a0cca53bfd066eae82998a6c71f402a8669e9de39f94d7f3280745d1628ea6eac5d76ca7116844d4e0dac  google-api.keys
-29bb685e03356a77df5fd347cdf55194cc8b3265c421cc76e54d64edefc329dbcb052deb26b22e8f587ce68456876c071de1b7d258dd0fcc6ee66c875ec4a020  chromium-revert-drop-of-system-java.patch
-ac765796ecd46f724f788181b9b76e1d100d18de7d45b32e33406e8540a83fab2fc93f74664c0748ed7839dbfbb9675a81a39f2dc0fbc796179b7d0dbd4fb706  compiler.patch
-4057cc78f10bfd64092bc35a373869abb1d68b880cdbca70422f39ffd78a929c19c7728d4d4c40709aaba25581148a93ae5343e724849fd35323062ed68753fa  disable-dns_config_service.patch
-2470904846e3adde2c9506f9e78220daca0932320b628dd3d427bf2b7c17a8f7880cb97e787b046c28de7aca642e1a8d30824d6049905976da77e7473baa64da  disable-failing-tests.patch
+252cbc3d709de33193cbac728ee9ca85f11321ce95c20f80f4ae157f620307ce614a329c15c59745bf4996f4d5891fa11f5338f20ef77baccde35d593e4671eb  compiler.patch
+1bee1448e409fedff635388ee6f1efa6d23c29ae3e6b6fd31452c56974adb40fcd0088c82d1e643d549154663e402942cbab9807dff5aff2d8997a09de6f5655  disable-dns_config_service.patch
+0ef9168b8b1a4779bc4c8df718735e06d29e459dcfd00f8cbf9a4edaf9fade8089225219e46dead7de81de716bddc8d745dc2069db0ee7f7e5d2f64c5236e2ab  disable-failing-tests.patch
 5fc5c012c1db6cf1ba82f38c6f3f4f5ca3a209e47ac708a74de379b018e0649b7694877c9571ef79002dde875ffc07b458a3355425f1c01867f362c66c2bc1bf  fc-cache-version.patch
-4213a67b2d2f3de2ac980d3ae11dffcc006ddbabdc1bef4d4787e5b596642120a5ac63dd602c75680714ca55e1b6eda47cf57625e888ff806b05c96dd1a0c384  fix-ffmpeg-codec-list.patch
+87f63d83139562e058f3f649eb1f62bf100dd92c2bb6ee393fdce0c8f7d7c188a7062394647aafe4e82c0a8fbbffeb613edc5c8dd9415dd9dda777827ea371c5  fix-ffmpeg-codec-list.patch
 c63dee5044353eb306a39ca1526158c0f003ab310ecb03d1c368dc2a979454590c84b8d3c15484517d5e66bb8add9b231da9abbadf2e50850abd72ac1345c4ab  fstatat-32bit.patch
 33ee60863cc438ef57ffef92ba4cf67a856a5ffc16138bce241bcf87e47b15154aa86918e793c26f7ec4dc62a445257ad5673ed7001daf22c4043cf6cc57da7f  gdbinit.patch
 36a764fa73443b47d38050b52dbe6ad2fa8d67201ff4ccdbad13b52308ef165ca046aac6f9609fe35890a6485f0f3e672e78cc41e3e44f3cdc7f145e540524e8  generic-sensor-include.patch
-99bcc7dd485b404a90c606a96addab1d900852128d44fb8cea8acc7303189ef87c89a7b0e749fd0e10c5ef5f6bf1fadeb5c16a34503cab6a59938ce2653d887e  musl-auxv.patch
+a94cf7a0670abf5178abba33c619cc6d41d73f2e16c7a1fd5b152152f5077df103e049d166e3b8627797c38113821d2f2e6b64cd48d132c1e90ad32d63a349f5  headless-shell-no-license.patch
 51f1959bd622af26a1c3a1f4b0ad9a5bfa461057aa4cf9960c568dddf8ac47d55989c277f5d5ab5db040a04c54925a531af7a1cc767559218b408eaa6bdd7577  musl-sandbox.patch
 e7163ac5810ac85366cef2447412287c856e3d67c6b77f219a6e5a418b1965b98e449c409424ad0704a5bded9355dd0aec3dc4585918ce5a2ab36c079707afe2  musl-tid-caching.patch
+3b7420d58d13dfc4baab5065e3017f666f51fed6de087af42a660a839d7b4444b50d1a93204322d213df36c6722eaf6b08d46d50dc374198a342da2675fafff5  net-test-no-vpython.patch
+e487662b6606ea526ddd716c31e6b9ad3d61f1bee5356cd94b78a903efb3928338cbb48e3d5840b34c3b70a71e8361a228430bd50e707ad301228a7049d59e37  net-test-pyws3-py3.12.patch
 a250cff50d282b02ce0f28880d0a2b4fb8e7df51bc072bfeeddc561c29a7c76453dbcbc7b17b82966a7b30a31409d2555720d1dcf963e1b3fb8a2a06a6abcf46  no-execinfo.patch
 0b41aeb6b212f9c3f61aa0a8d3085c9e865a2e68f3270ceec2376aab67f337ac46eaea7da36d3fd7219e2a1cb731b7aa2d3fb619a374d2b7653976b9f4f384bb  no-mallinfo.patch
 e4c4e5bc6f828f9c883dd418c0ba01887949c29c311f76206a1ec29f620b0c0ba0452949dc2778a9c46ea066405857536964a36436a68eecf7da7952736333cf  no-res-ninit-nclose.patch
