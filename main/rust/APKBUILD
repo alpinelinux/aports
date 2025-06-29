@@ -76,26 +76,36 @@ esac
 
 # Only cargo is needed for bootstrapping.
 subpackages="cargo"
-[ -z "$BOOTSTRAP" ] && subpackages="
-	$pkgname-dbg
-	$subpackages
-	$pkgname-doc
-	$pkgname-clippy
-	$pkgname-gdb::noarch
-	$pkgname-lldb::noarch
-	$pkgname-src::noarch
-	$pkgname-wasm
-	cargo-bash-completions:_cargo_bashcomp:noarch
-	cargo-zsh-completion:_cargo_zshcomp:noarch
-	cargo-doc:_cargo_doc:noarch
-	rustc-dev:_rustc_dev
-	rustfmt
-	"
-[ -z "$BOOTSTRAP" ] && case "$CHOST" in
-	aarch64*|x86_64*)
-	subpackages="$subpackages $pkgname-uefi"
-	;;
-esac
+if [ -z "$BOOTSTRAP" ]; then
+	subpackages="
+		$pkgname-dbg
+		$subpackages
+		$pkgname-doc
+		$pkgname-clippy
+		$pkgname-gdb::noarch
+		$pkgname-lldb::noarch
+		$pkgname-src::noarch
+		$pkgname-wasm
+		cargo-bash-completions:_cargo_bashcomp:noarch
+		cargo-zsh-completion:_cargo_zshcomp:noarch
+		cargo-doc:_cargo_doc:noarch
+		rustc-dev:_rustc_dev
+		rustfmt
+		"
+	case "$CHOST" in
+		aarch64*|x86_64*)
+		subpackages="$subpackages $pkgname-uefi"
+		;;
+	esac
+	makedepends_build="
+		$makedepends_build
+		patchelf
+		"
+	makedepends_host="
+		$makedepends_host
+		scudo-malloc
+		"
+fi
 source="https://static.rust-lang.org/dist/rustc-$pkgver-src.tar.xz
 	alpine-move-py-scripts-to-share.patch
 	alpine-target.patch
@@ -128,17 +138,6 @@ builddir="$srcdir/rustc-$pkgver-src"
 #     - CVE-2019-12083
 #   1.26.0-r0:
 #     - CVE-2019-16760
-
-if [ -z "$BOOTSTRAP" ]; then
-	makedepends_build="
-		$makedepends_build
-		patchelf
-		"
-	makedepends_host="
-		$makedepends_host
-		scudo-malloc
-		"
-fi
 
 # We have to add new architectures in multiple steps:
 # 1. Compile with the upstream triplets, compiling alpine's triplets in
@@ -182,25 +181,6 @@ _unpack_build_dist() {
 		--exclude=manifest.in --no-same-owner
 }
 
-_bootstrap_install() {
-	local destprefix="$1"
-
-	cd "$builddir"/build/$_build
-
-	install -Dvm755 stage1-rustc/$_target/release/rustc-main \
-		"$destprefix"/bin/rustc
-	install -Dvm755 stage2-tools-bin/cargo \
-		-t "$destprefix"/bin/
-
-	cd "$builddir"/build/$_build/stage2/lib/rustlib/$_target/lib
-
-	install -Dvm644 librustc_driver-*.so libstd-*.so \
-		-t "$destprefix"/lib/
-
-	install -Dvm644 ./*.rlib -t "$destprefix"/lib/rustlib/$_target/lib/
-	cp -Rv self-contained "$destprefix"/lib/rustlib/$_target/lib/
-}
-
 build() {
 	local extra_conf_opts=
 
@@ -222,7 +202,18 @@ build() {
 		# same version as the Rust we are building.
 		extra_conf_opts="$extra_conf_opts --set=build.local-rebuild=true"
 	fi
+
+	local tools="cargo"
 	if [ -z "$BOOTSTRAP" ]; then
+		tools="$tools,clippy,src,rustdoc,rustfmt,rust-demangler"
+		case "$CARCH" in
+		aarch64|ppc64le|x86_64|loongarch64)
+			# this doesn't build on s390x, but since it's only useful with rust-analyzer,
+			# and we enable it on these arches only, just do that
+			tools="$tools,rust-analyzer-proc-macro-srv"
+			;;
+		esac
+
 		# Skip LTO to allow for faster bootstrapping.
 		case "$CARCH" in
 		riscv64|s390x|arm*)
@@ -240,17 +231,6 @@ build() {
 	unset CARGO_PROFILE_RELEASE_OPT_LEVEL
 	unset CARGO_PROFILE_RELEASE_PANIC
 	unset CARGO_PROFILE_RELEASE_CODEGEN_UNITS
-
-	case "$CARCH" in
-	aarch64|ppc64le|x86_64|loongarch64)
-		# this doesn't build on s390x, but since it's only useful with rust-analyzer,
-		# and we enable it on these arches only, just do that
-		local rust_analyzer="rust-analyzer-proc-macro-srv,"
-		;;
-	*)
-		local rust_analyzer=""
-		;;
-	esac
 
 	local targets="$_target"
 	if subpackage_types_has wasm; then
@@ -290,7 +270,7 @@ build() {
 		--enable-local-rust \
 		--disable-docs \
 		--enable-extended \
-		--tools="cargo,clippy,src,${rust_analyzer}rustdoc,rustfmt,rust-demangler" \
+		--tools="$tools" \
 		--enable-llvm-link-shared \
 		--enable-option-checking \
 		--enable-locked-deps \
@@ -307,6 +287,7 @@ build() {
 		--set="rust.deny-warnings=false" \
 		--set="rust.remap-debuginfo=true" \
 		--set="rust.lld=false" \
+		--set="rust.incremental=$([ -n "$BOOTSTRAP" ] && echo true || echo false)" \
 		--set="target.$_target.llvm-config=$(command -v llvm-config)" \
 		--set="target.$_target.musl-root=/usr" \
 		--set="target.$_target.crt-static=false" \
@@ -327,13 +308,7 @@ build() {
 		--set="target.$_build.linker=cc" \
 		$extra_conf_opts
 
-	if [ -z "$BOOTSTRAP" ]; then
-		python3 ./x.py dist --jobs ${JOBS:-2}
-	else
-		python3 ./x.py build --jobs ${JOBS:-2} \
-			--host $_target --target $targets \
-			--stage=2 --incremental src/tools/cargo
-	fi
+	python3 ./x.py dist --jobs ${JOBS:-2} ${BOOTSTRAP:+cargo rustc rust-std}
 }
 
 check() {
@@ -345,13 +320,9 @@ check() {
 
 	mkdir -p "$builddir/test-rustc"
 
-	if [ -z "$BOOTSTRAP" ]; then
-		_unpack_build_dist rustc "$builddir/test-rustc" &
-		_unpack_build_dist rust-std "$builddir/test-rustc" &
-		wait
-	else
-		_bootstrap_install "$builddir/test-rustc"
-	fi
+	_unpack_build_dist rustc "$builddir/test-rustc" &
+	_unpack_build_dist rust-std "$builddir/test-rustc" &
+	wait
 
 	export LD_LIBRARY_PATH="$builddir/test-rustc/lib/rustlib/$CHOST/lib"
 
@@ -377,25 +348,22 @@ package() {
 
 	mkdir -p "$pkgdir/usr"
 
-	if [ -n "$BOOTSTRAP" ]; then
-		_bootstrap_install "$pkgdir/usr"
-
-	 	if subpackage_types_has wasm; then
-	 		cp -Rv build/$_build/stage2/lib/rustlib/wasm32-* \
-	 			"$pkgdir"/usr/lib/rustlib/
-	 	fi
-
-		return 0
-	fi
-
 	cd "$pkgdir"
 
 	_unpack_build_dist rustc "$pkgdir/usr" &
 	_unpack_build_dist rust-std "$pkgdir/usr" &
+	_unpack_build_dist cargo "$pkgdir/usr" &
+	wait
+
+	if [ -n "$BOOTSTRAP" ]; then
+		# Only keep files needed to compile the full rust package
+		rm -r usr/bin/rust-gdb* usr/share usr/etc usr/lib/rustlib/etc
+		return 0
+	fi
+
 	_unpack_build_dist rustc-dev "$pkgdir/usr" &
 	_unpack_build_dist rust-src "$pkgdir/usr" &
 	wait
-	_unpack_build_dist cargo "$pkgdir/usr" &
 	_unpack_build_dist clippy "$pkgdir/usr" &
 	_unpack_build_dist rustfmt "$pkgdir/usr" &
 	if subpackage_types_has wasm; then
@@ -444,20 +412,18 @@ package() {
 	find "$pkgdir"/usr/lib/rustlib -type f -perm -600 -exec chmod 0644 {} \+
 	find "$pkgdir"/usr/lib/rustlib -type f -perm -700 -exec chmod 0755 {} \+
 
-	if [ -z "$BOOTSTRAP" ]; then
-		# link scudo to tools by default on architectures where it works well
-		# this is roughly 20+% faster with no downside except slightly higher
-		# memory use, but this is a compiler that already uses a ton of memory
-		case "$CARCH" in
-		arm*) ;;
-		*)
-			patchelf --add-needed libscudo.so \
-				"$pkgdir"/usr/bin/cargo \
-				"$pkgdir"/usr/bin/rustc \
-				"$pkgdir"/usr/bin/rustdoc
-			;;
-		esac
-	fi
+	# link scudo to tools by default on architectures where it works well
+	# this is roughly 20+% faster with no downside except slightly higher
+	# memory use, but this is a compiler that already uses a ton of memory
+	case "$CARCH" in
+	arm*) ;;
+	*)
+		patchelf --add-needed libscudo.so \
+			"$pkgdir"/usr/bin/cargo \
+			"$pkgdir"/usr/bin/rustc \
+			"$pkgdir"/usr/bin/rustdoc
+		;;
+	esac
 }
 
 _rustc_dev() {
