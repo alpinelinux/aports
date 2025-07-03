@@ -28,6 +28,8 @@ if [ -z "$outfile" ]; then
 	outfile=rootfs-$arch.tar.gz
 fi
 
+mkdir -p "$tmp"/usr/lib "$tmp"/usr/bin "$tmp"/usr/sbin
+ln -s usr/bin usr/sbin usr/lib "$tmp"/
 ${APK:-apk} add --keys-dir "$keys_dir" --no-cache \
 	--repositories-file "$repositories_file" \
 	--no-script --root "$tmp" --initdb --arch "$arch" \
