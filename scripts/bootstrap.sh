@@ -85,6 +85,8 @@ if [ ! -d "$CBUILDROOT" ]; then
 	# Thus it's unusable at that point and needs to be deleted manually.
 	cp -a /etc/apk/keys/* "$CBUILDROOT/etc/apk/keys"
 	cp -a ~/.abuild/*.pub "$CBUILDROOT/etc/apk/keys"
+	mkdir -p "$CBUILDROOT"/usr/lib "$CBUILDROOT"/usr/bin "$CBUILDROOT"/usr/sbin
+	ln -s usr/bin usr/sbin usr/lib "$CBUILDROOT"/
 	${SUDO_APK} add --quiet --initdb --arch $TARGET_ARCH --root $CBUILDROOT
 fi
 
