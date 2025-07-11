@@ -2,7 +2,7 @@
 
 # apk add \
 #	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso cmd:mksquashfs
-#	(for efi:) mtools
+#	(for efi:) mtools grub
 #	(for s390x:) s390-tools
 #	(for ppc64le:) grub
 
