@@ -1,0 +1,153 @@
+From 817bdbf158854676930b6e9bdf53b81dea7e759f Mon Sep 17 00:00:00 2001
+From: Doridian <git@doridian.net>
+Date: Sun, 29 Dec 2024 21:29:28 -0800
+Subject: [PATCH] Add support for initgroups hooks in libnss_kanidm
+
+---
+ unix_integration/common/src/unix_proto.rs     |  2 ++
+ unix_integration/nss_kanidm/src/core.rs       | 36 +++++++++++++++++++
+ unix_integration/nss_kanidm/src/hooks.rs      | 14 ++++++++
+ .../resolver/src/bin/kanidm_unixd.rs          |  8 +++++
+ unix_integration/resolver/src/resolver.rs     | 11 ++++++
+ 5 files changed, 71 insertions(+)
+
+diff --git a/unix_integration/common/src/unix_proto.rs b/unix_integration/common/src/unix_proto.rs
+index 69074c094..39a956a6b 100644
+--- a/unix_integration/common/src/unix_proto.rs
++++ b/unix_integration/common/src/unix_proto.rs
+@@ -121,6 +121,7 @@ pub enum ClientRequest {
+     NssGroups,
+     NssGroupByGid(u32),
+     NssGroupByName(String),
++    NssGroupsByMember(String),
+     PamAuthenticateInit {
+         account_id: String,
+         info: PamServiceInfo,
+@@ -144,6 +145,7 @@ impl ClientRequest {
+             ClientRequest::NssGroups => "NssGroups".to_string(),
+             ClientRequest::NssGroupByGid(id) => format!("NssGroupByGid({})", id),
+             ClientRequest::NssGroupByName(id) => format!("NssGroupByName({})", id),
++            ClientRequest::NssGroupsByMember(id) => format!("NssGroupsByMember({})", id),
+             ClientRequest::PamAuthenticateInit { account_id, info } => format!(
+                 "PamAuthenticateInit{{ account_id={} tty={} pam_secvice{} rhost={} }}",
+                 account_id,
+diff --git a/unix_integration/nss_kanidm/src/core.rs b/unix_integration/nss_kanidm/src/core.rs
+index a59c58581..466582331 100644
+--- a/unix_integration/nss_kanidm/src/core.rs
++++ b/unix_integration/nss_kanidm/src/core.rs
+@@ -285,6 +285,42 @@ pub fn get_group_entry_by_name(name: String, req_options: RequestOptions) -> Res
+     }
+ }
+ 
++pub fn get_group_entries_by_member(member: String, req_options: RequestOptions) -> Response<Vec<Group>> {
++    match req_options.connect_to_daemon() {
++        Source::Daemon(mut daemon_client) => {
++            let req = ClientRequest::NssGroupsByMember(member);
++            daemon_client
++                .call_and_wait(&req, None)
++                .map(|r| match r {
++                    ClientResponse::NssGroups(l) => {
++                        l.into_iter().map(group_from_nssgroup).collect()
++                    }
++                    _ => Vec::new(),
++                })
++                .map(Response::Success)
++                .unwrap_or_else(|_| Response::Success(vec![]))
++        }
++        Source::Fallback { users: _, groups } => {
++            if groups.is_empty() {
++                return Response::Unavail;
++            }
++
++            let membergroups = groups
++                .into_iter()
++                .filter_map(|etcgroup| {
++                    if etcgroup.members.contains(&member) {
++                        Some(group_from_etcgroup(etcgroup))
++                    } else {
++                        None
++                    }
++                })
++                .collect();
++
++            Response::Success(membergroups)
++        }
++    }
++}
++
+ fn passwd_from_etcuser(etc: EtcUser) -> Passwd {
+     Passwd {
+         name: etc.name,
+diff --git a/unix_integration/nss_kanidm/src/hooks.rs b/unix_integration/nss_kanidm/src/hooks.rs
+index 62386c987..5b7968438 100644
+--- a/unix_integration/nss_kanidm/src/hooks.rs
++++ b/unix_integration/nss_kanidm/src/hooks.rs
+@@ -3,6 +3,7 @@ use kanidm_unix_common::constants::DEFAULT_CONFIG_PATH;
+ use libnss::group::{Group, GroupHooks};
+ use libnss::interop::Response;
+ use libnss::passwd::{Passwd, PasswdHooks};
++use libnss::initgroups::{InitgroupsHooks};
+ 
+ struct KanidmPasswd;
+ libnss_passwd_hooks!(kanidm, KanidmPasswd);
+@@ -61,3 +62,16 @@ impl GroupHooks for KanidmGroup {
+         core::get_group_entry_by_name(name, req_opt)
+     }
+ }
++
++struct KanidmInitgroups;
++libnss_initgroups_hooks!(kanidm, KanidmInitgroups);
++
++impl InitgroupsHooks for KanidmInitgroups {
++    fn get_entries_by_user(user: String) -> Response<Vec<Group>> {
++        let req_opt = RequestOptions::Main {
++            config_path: DEFAULT_CONFIG_PATH,
++        };
++
++        core::get_group_entries_by_member(user, req_opt)
++    }
++}
+diff --git a/unix_integration/resolver/src/bin/kanidm_unixd.rs b/unix_integration/resolver/src/bin/kanidm_unixd.rs
+index 78c16a048..a4e1cc821 100644
+--- a/unix_integration/resolver/src/bin/kanidm_unixd.rs
++++ b/unix_integration/resolver/src/bin/kanidm_unixd.rs
+@@ -336,6 +336,14 @@ async fn handle_client(
+                     error!("unable to load group, returning empty.");
+                     ClientResponse::NssGroup(None)
+                 }),
++            ClientRequest::NssGroupsByMember(account_id) => cachelayer
++                .get_nssgroups_member_name(account_id.as_str())
++                .await
++                .map(ClientResponse::NssGroups)
++                .unwrap_or_else(|_| {
++                    error!("unable to enum groups");
++                    ClientResponse::NssGroups(Vec::new())
++                }),
+             ClientRequest::PamAuthenticateInit { account_id, info } => {
+                 match &pam_auth_session_state {
+                     Some(_auth_session) => {
+diff --git a/unix_integration/resolver/src/resolver.rs b/unix_integration/resolver/src/resolver.rs
+index 6b20c1038..d28714e87 100644
+--- a/unix_integration/resolver/src/resolver.rs
++++ b/unix_integration/resolver/src/resolver.rs
+@@ -798,6 +798,17 @@ impl Resolver {
+         Ok(r)
+     }
+ 
++    pub async fn get_nssgroups_member_name(&self, account_id: &str) -> Result<Vec<NssGroup>, ()> {
++        let account_name = account_id.to_string();
++        Ok(self
++            .get_nssgroups()
++            .await
++            .unwrap_or_default()
++            .into_iter()
++            .filter(|g| g.members.contains(&account_name))
++            .collect())
++    }
++
+     async fn get_nssgroup(&self, grp_id: Id) -> Result<Option<NssGroup>, ()> {
+         if let Some(mut nss_group) = self.system_provider.get_nssgroup(&grp_id).await {
+             debug!("system provider satisfied request");
+-- 
+2.50.1
+
