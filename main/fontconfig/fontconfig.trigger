@@ -1,4 +1,4 @@
 #!/bin/sh
 
-fc-cache --system-only > /dev/null
+su -s /bin/sh fontconfig -c 'fc-cache --system-only'
 
