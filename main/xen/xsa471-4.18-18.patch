@@ -1,0 +1,333 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Thu, 29 Aug 2024 17:36:11 +0100
+Subject: x86/spec-ctrl: Mitigate Transitive Scheduler Attacks
+
+TSA affects AMD Fam19h CPUs (Zen3 and 4 microarchitectures).
+
+Three new CPUID bits have been defined.  Two (TSA_SQ_NO and TSA_L1_NO)
+indicate that the system is unaffected, and must be synthesised by Xen on
+unaffected parts to date.
+
+A third new bit indicates that VERW now has a flushing side effect.  Xen must
+synthesise this bit on affected systems based on microcode version.  As with
+other VERW-based flushing features, VERW_CLEAR needs OR-ing across a resource
+pool, and guests which have seen it can safely migrate in.
+
+This is part of XSA-471 / CVE-2024-36350 / CVE-2024-36357.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+diff --git a/tools/misc/xen-cpuid.c b/tools/misc/xen-cpuid.c
+index 19b9068d36ec..4fbfd63dfdc4 100644
+--- a/tools/misc/xen-cpuid.c
++++ b/tools/misc/xen-cpuid.c
+@@ -198,6 +198,7 @@ static const char *const str_7a1[32] =
+ static const char *const str_e21a[32] =
+ {
+     [ 2] = "lfence+",
++    /* 4 */                 [ 5] = "verw-clear",
+     [ 6] = "nscb",
+     [ 8] = "auto-ibrs",
+ 
+@@ -256,6 +257,8 @@ static const char *const str_m10Al[64] =
+ 
+ static const char *const str_e21c[32] =
+ {
++    /* 0 */                       [ 1] = "tsa-sq-no",
++    [ 2] = "tsa-l1-no",
+ };
+ 
+ static const struct {
+diff --git a/xen/arch/x86/cpu-policy.c b/xen/arch/x86/cpu-policy.c
+index 662002333879..aae8e4983c03 100644
+--- a/xen/arch/x86/cpu-policy.c
++++ b/xen/arch/x86/cpu-policy.c
+@@ -505,6 +505,17 @@ static void __init guest_common_max_feature_adjustments(uint32_t *fs)
+         if ( test_bit(X86_FEATURE_RTM, fs) )
+             __set_bit(X86_FEATURE_RTM_ALWAYS_ABORT, fs);
+         break;
++
++    case X86_VENDOR_AMD:
++        /*
++         * This bit indicates that the VERW instruction may have gained
++         * scrubbing side effects.  With pooling, it means "you might migrate
++         * somewhere where scrubbing is necessary", and may need exposing on
++         * unaffected hardware.  This is fine, because the VERW instruction
++         * has been around since the 286.
++         */
++        __set_bit(X86_FEATURE_VERW_CLEAR, fs);
++        break;
+     }
+ 
+     /*
+@@ -583,6 +594,17 @@ static void __init guest_common_default_feature_adjustments(uint32_t *fs)
+             __set_bit(X86_FEATURE_RTM_ALWAYS_ABORT, fs);
+         }
+         break;
++
++    case X86_VENDOR_AMD:
++        /*
++         * This bit indicate that the VERW instruction may have gained
++         * scrubbing side effects.  The max policy has it set for migration
++         * reasons, so reset the default policy back to the host value in case
++         * we're unaffected.
++         */
++        if ( !cpu_has_verw_clear )
++            __clear_bit(X86_FEATURE_VERW_CLEAR, fs);
++        break;
+     }
+ 
+     /*
+diff --git a/xen/arch/x86/hvm/svm/entry.S b/xen/arch/x86/hvm/svm/entry.S
+index 9fb457ad958e..db49813d772a 100644
+--- a/xen/arch/x86/hvm/svm/entry.S
++++ b/xen/arch/x86/hvm/svm/entry.S
+@@ -99,6 +99,8 @@ __UNLIKELY_END(nsvm_hap)
+         pop  %rsi
+         pop  %rdi
+ 
++        SPEC_CTRL_COND_VERW     /* Req: %rsp=eframe                    Clob: efl */
++
+         vmrun
+ 
+         SAVE_ALL
+diff --git a/xen/arch/x86/include/asm/cpufeature.h b/xen/arch/x86/include/asm/cpufeature.h
+index 919a9e31f04e..bbae9305de4e 100644
+--- a/xen/arch/x86/include/asm/cpufeature.h
++++ b/xen/arch/x86/include/asm/cpufeature.h
+@@ -192,6 +192,7 @@ static inline bool boot_cpu_has(unsigned int feat)
+ 
+ /* CPUID level 0x80000021.eax */
+ #define cpu_has_lfence_dispatch boot_cpu_has(X86_FEATURE_LFENCE_DISPATCH)
++#define cpu_has_verw_clear      boot_cpu_has(X86_FEATURE_VERW_CLEAR)
+ #define cpu_has_nscb            boot_cpu_has(X86_FEATURE_NSCB)
+ 
+ /* CPUID level 0x00000007:1.edx */
+@@ -218,6 +219,10 @@ static inline bool boot_cpu_has(unsigned int feat)
+ #define cpu_has_pb_opt_ctrl     boot_cpu_has(X86_FEATURE_PB_OPT_CTRL)
+ #define cpu_has_its_no          boot_cpu_has(X86_FEATURE_ITS_NO)
+ 
++/* CPUID level 0x80000021.ecx */
++#define cpu_has_tsa_sq_no       boot_cpu_has(X86_FEATURE_TSA_SQ_NO)
++#define cpu_has_tsa_l1_no       boot_cpu_has(X86_FEATURE_TSA_L1_NO)
++
+ /* Synthesized. */
+ #define cpu_has_arch_perfmon    boot_cpu_has(X86_FEATURE_ARCH_PERFMON)
+ #define cpu_has_cpuid_faulting  boot_cpu_has(X86_FEATURE_CPUID_FAULTING)
+diff --git a/xen/arch/x86/spec_ctrl.c b/xen/arch/x86/spec_ctrl.c
+index d8702b0e189c..c1ad335d9ea9 100644
+--- a/xen/arch/x86/spec_ctrl.c
++++ b/xen/arch/x86/spec_ctrl.c
+@@ -492,7 +492,7 @@ custom_param("pv-l1tf", parse_pv_l1tf);
+ 
+ static void __init print_details(enum ind_thunk thunk)
+ {
+-    unsigned int _7d0 = 0, _7d2 = 0, e8b = 0, e21a = 0, max = 0, tmp;
++    unsigned int _7d0 = 0, _7d2 = 0, e8b = 0, e21a = 0, e21c = 0, max = 0, tmp;
+     uint64_t caps = 0;
+ 
+     /* Collect diagnostics about available mitigations. */
+@@ -503,7 +503,7 @@ static void __init print_details(enum ind_thunk thunk)
+     if ( boot_cpu_data.extended_cpuid_level >= 0x80000008 )
+         cpuid(0x80000008, &tmp, &e8b, &tmp, &tmp);
+     if ( boot_cpu_data.extended_cpuid_level >= 0x80000021 )
+-        cpuid(0x80000021, &e21a, &tmp, &tmp, &tmp);
++        cpuid(0x80000021U, &e21a, &tmp, &e21c, &tmp);
+     if ( cpu_has_arch_caps )
+         rdmsrl(MSR_ARCH_CAPABILITIES, caps);
+ 
+@@ -513,7 +513,7 @@ static void __init print_details(enum ind_thunk thunk)
+      * Hardware read-only information, stating immunity to certain issues, or
+      * suggestions of which mitigation to use.
+      */
+-    printk("  Hardware hints:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
++    printk("  Hardware hints:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+            (caps & ARCH_CAPS_RDCL_NO)                        ? " RDCL_NO"        : "",
+            (caps & ARCH_CAPS_EIBRS)                          ? " EIBRS"          : "",
+            (caps & ARCH_CAPS_RSBA)                           ? " RSBA"           : "",
+@@ -538,10 +538,12 @@ static void __init print_details(enum ind_thunk thunk)
+            (e8b  & cpufeat_mask(X86_FEATURE_IBPB_RET))       ? " IBPB_RET"       : "",
+            (e21a & cpufeat_mask(X86_FEATURE_IBPB_BRTYPE))    ? " IBPB_BRTYPE"    : "",
+            (e21a & cpufeat_mask(X86_FEATURE_SRSO_NO))        ? " SRSO_NO"        : "",
+-           (e21a & cpufeat_mask(X86_FEATURE_SRSO_US_NO))     ? " SRSO_US_NO"     : "");
++           (e21a & cpufeat_mask(X86_FEATURE_SRSO_US_NO))     ? " SRSO_US_NO"     : "",
++           (e21c & cpufeat_mask(X86_FEATURE_TSA_SQ_NO))      ? " TSA_SQ_NO"      : "",
++           (e21c & cpufeat_mask(X86_FEATURE_TSA_L1_NO))      ? " TSA_L1_NO"      : "");
+ 
+     /* Hardware features which need driving to mitigate issues. */
+-    printk("  Hardware features:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
++    printk("  Hardware features:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+            (e8b  & cpufeat_mask(X86_FEATURE_IBPB)) ||
+            (_7d0 & cpufeat_mask(X86_FEATURE_IBRSB))          ? " IBPB"           : "",
+            (e8b  & cpufeat_mask(X86_FEATURE_IBRS)) ||
+@@ -561,7 +563,8 @@ static void __init print_details(enum ind_thunk thunk)
+            (caps & ARCH_CAPS_GDS_CTRL)                       ? " GDS_CTRL"       : "",
+            (caps & ARCH_CAPS_RFDS_CLEAR)                     ? " RFDS_CLEAR"     : "",
+            (e21a & cpufeat_mask(X86_FEATURE_SBPB))           ? " SBPB"           : "",
+-           (e21a & cpufeat_mask(X86_FEATURE_SRSO_MSR_FIX))   ? " SRSO_MSR_FIX"   : "");
++           (e21a & cpufeat_mask(X86_FEATURE_SRSO_MSR_FIX))   ? " SRSO_MSR_FIX"   : "",
++           (e21a & cpufeat_mask(X86_FEATURE_VERW_CLEAR))     ? " VERW_CLEAR"     : "");
+ 
+     /* Compiled-in support which pertains to mitigations. */
+     if ( IS_ENABLED(CONFIG_INDIRECT_THUNK) || IS_ENABLED(CONFIG_SHADOW_PAGING) ||
+@@ -1545,6 +1548,77 @@ static void __init rfds_calculations(void)
+     setup_force_cpu_cap(X86_FEATURE_RFDS_NO);
+ }
+ 
++/*
++ * Transient Scheduler Attacks
++ *
++ * https://www.amd.com/content/dam/amd/en/documents/resources/bulletin/technical-guidance-for-mitigating-transient-scheduler-attacks.pdf
++ */
++static void __init tsa_calculations(void)
++{
++    unsigned int curr_rev, min_rev;
++
++    /* TSA is only known to affect AMD processors at this time. */
++    if ( boot_cpu_data.x86_vendor != X86_VENDOR_AMD )
++        return;
++
++    /* If we're virtualised, don't attempt to synthesise anything. */
++    if ( cpu_has_hypervisor )
++        return;
++
++    /*
++     * According to the whitepaper, some Fam1A CPUs (Models 0x00...0x4f,
++     * 0x60...0x7f) are not vulnerable but don't enumerate TSA_{SQ,L1}_NO.  If
++     * we see either enumerated, assume both are correct ...
++     */
++    if ( cpu_has_tsa_sq_no || cpu_has_tsa_l1_no )
++        return;
++
++    /*
++     * ... otherwise, synthesise them.  CPUs other than Fam19 (Zen3/4) are
++     * stated to be not vulnerable.
++     */
++    if ( boot_cpu_data.x86 != 0x19 )
++    {
++        setup_force_cpu_cap(X86_FEATURE_TSA_SQ_NO);
++        setup_force_cpu_cap(X86_FEATURE_TSA_L1_NO);
++        return;
++    }
++
++    /*
++     * Fam19 CPUs get VERW_CLEAR with new enough microcode, but must
++     * synthesise the CPUID bit.
++     */
++    curr_rev = this_cpu(cpu_sig).rev;
++    switch ( curr_rev >> 8 )
++    {
++    case 0x0a0011: min_rev = 0x0a0011d7; break;
++    case 0x0a0012: min_rev = 0x0a00123b; break;
++    case 0x0a0082: min_rev = 0x0a00820d; break;
++    case 0x0a1011: min_rev = 0x0a10114c; break;
++    case 0x0a1012: min_rev = 0x0a10124c; break;
++    case 0x0a1081: min_rev = 0x0a108109; break;
++    case 0x0a2010: min_rev = 0x0a20102e; break;
++    case 0x0a2012: min_rev = 0x0a201211; break;
++    case 0x0a4041: min_rev = 0x0a404108; break;
++    case 0x0a5000: min_rev = 0x0a500012; break;
++    case 0x0a6012: min_rev = 0x0a60120a; break;
++    case 0x0a7041: min_rev = 0x0a704108; break;
++    case 0x0a7052: min_rev = 0x0a705208; break;
++    case 0x0a7080: min_rev = 0x0a708008; break;
++    case 0x0a70c0: min_rev = 0x0a70c008; break;
++    case 0x0aa002: min_rev = 0x0aa00216; break;
++    default:
++        printk(XENLOG_WARNING
++               "Unrecognised CPU %02x-%02x-%02x, ucode 0x%08x for TSA mitigation\n",
++               boot_cpu_data.x86, boot_cpu_data.x86_model,
++               boot_cpu_data.x86_mask, curr_rev);
++        return;
++    }
++
++    if ( curr_rev >= min_rev )
++        setup_force_cpu_cap(X86_FEATURE_VERW_CLEAR);
++}
++
+ static bool __init cpu_has_gds(void)
+ {
+     /*
+@@ -2238,6 +2312,7 @@ void __init init_speculation_mitigations(void)
+      * https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/intel-analysis-microarchitectural-data-sampling.html
+      * https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/processor-mmio-stale-data-vulnerabilities.html
+      * https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/advisory-guidance/register-file-data-sampling.html
++     * https://www.amd.com/content/dam/amd/en/documents/resources/bulletin/technical-guidance-for-mitigating-transient-scheduler-attacks.pdf
+      *
+      * Relevant ucodes:
+      *
+@@ -2270,9 +2345,18 @@ void __init init_speculation_mitigations(void)
+      *
+      * - March 2023, for RFDS.  Enumerate RFDS_CLEAR to mean that VERW now
+      *   scrubs non-architectural entries from certain register files.
++     *
++     * - July 2025, for TSA.  Introduces VERW side effects to mitigate
++     *   TSA_{SQ/L1}.  Xen must synthesise the VERW_CLEAR feature based on
++     *   microcode version.
++     *
++     *   Note, these microcode updates were produced before the remediation of
++     *   the microcode signature issues, and are included in the firwmare
++     *   updates fixing the entrysign vulnerability from ~December 2024.
+      */
+     mds_calculations();
+     rfds_calculations();
++    tsa_calculations();
+ 
+     /*
+      * Parts which enumerate FB_CLEAR are those with now-updated microcode
+@@ -2304,21 +2388,27 @@ void __init init_speculation_mitigations(void)
+      * MLPDS/MFBDS when SMT is enabled.
+      */
+     if ( opt_verw_pv == -1 )
+-        opt_verw_pv = cpu_has_useful_md_clear || cpu_has_rfds_clear;
++        opt_verw_pv = (cpu_has_useful_md_clear || cpu_has_rfds_clear ||
++                       cpu_has_verw_clear);
+ 
+     if ( opt_verw_hvm == -1 )
+-        opt_verw_hvm = cpu_has_useful_md_clear || cpu_has_rfds_clear;
++        opt_verw_hvm = (cpu_has_useful_md_clear || cpu_has_rfds_clear ||
++                        cpu_has_verw_clear);
+ 
+     /*
+-     * If SMT is active, and we're protecting against MDS or MMIO stale data,
++     * If SMT is active, and we're protecting against any of:
++     *   - MSBDS
++     *   - MMIO stale data
++     *   - TSA-SQ
+      * we need to scrub before going idle as well as on return to guest.
+      * Various pipeline resources are repartitioned amongst non-idle threads.
+      *
+-     * We don't need to scrub on idle for RFDS.  There are no affected cores
+-     * which support SMT, despite there being affected cores in hybrid systems
+-     * which have SMT elsewhere in the platform.
++     * We don't need to scrub on idle for:
++     *   - RFDS (no SMT affected cores)
++     *   - TSA-L1 (utags never shared between threads)
+      */
+     if ( ((cpu_has_useful_md_clear && (opt_verw_pv || opt_verw_hvm)) ||
++          (cpu_has_verw_clear && !cpu_has_tsa_sq_no) ||
+           opt_verw_mmio) && hw_smt_enabled )
+         setup_force_cpu_cap(X86_FEATURE_SC_VERW_IDLE);
+ 
+diff --git a/xen/include/public/arch-x86/cpufeatureset.h b/xen/include/public/arch-x86/cpufeatureset.h
+index 86e44dd85258..7b80cd0c19c5 100644
+--- a/xen/include/public/arch-x86/cpufeatureset.h
++++ b/xen/include/public/arch-x86/cpufeatureset.h
+@@ -288,6 +288,7 @@ XEN_CPUFEATURE(AVX_IFMA,     10*32+23) /*A  AVX-IFMA Instructions */
+ 
+ /* AMD-defined CPU features, CPUID level 0x80000021.eax, word 11 */
+ XEN_CPUFEATURE(LFENCE_DISPATCH,    11*32+ 2) /*A  LFENCE always serializing */
++XEN_CPUFEATURE(VERW_CLEAR,         11*32+ 5) /*!A VERW clears microarchitectural buffers */
+ XEN_CPUFEATURE(NSCB,               11*32+ 6) /*A  Null Selector Clears Base (and limit too) */
+ XEN_CPUFEATURE(AUTO_IBRS,          11*32+ 8) /*S  Automatic IBRS */
+ XEN_CPUFEATURE(CPUID_USER_DIS,     11*32+17) /*   CPUID disable for CPL > 0 software */
+@@ -349,6 +350,8 @@ XEN_CPUFEATURE(PB_OPT_CTRL,        16*32+32) /*   MSR_PB_OPT_CTRL.IBPB_ALT */
+ XEN_CPUFEATURE(ITS_NO,             16*32+62) /*!A No Indirect Target Selection */
+ 
+ /* AMD-defined CPU features, CPUID level 0x80000021.ecx, word 18 */
++XEN_CPUFEATURE(TSA_SQ_NO,          18*32+ 1) /*A  No Store Queue Transitive Scheduler Attacks */
++XEN_CPUFEATURE(TSA_L1_NO,          18*32+ 2) /*A  No L1D Transitive Scheduler Attacks */
+ 
+ #endif /* XEN_CPUFEATURE */
+ 

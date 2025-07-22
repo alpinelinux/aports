@@ -1,0 +1,176 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Tue, 1 Jul 2025 15:51:53 +0100
+Subject: x86/idle: Remove broken MWAIT implementation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+cpuidle_wakeup_mwait() is a TOCTOU race.  The cpumask_and() sampling
+cpuidle_mwait_flags can take a arbitrary period of time, and there's no
+guarantee that the target CPUs are still in MWAIT when writing into
+mwait_wakeup(cpu).
+
+The consequence of the race is that we'll fail to IPI certain targets.  Also,
+there's no guarantee that mwait_idle_with_hints() will raise a TIMER_SOFTIRQ
+on it's way out.
+
+The fundamental bug is that the "in_mwait" variable needs to be in the
+monitored line, and not in a separate cpuidle_mwait_flags variable, in order
+to do this in a race-free way.
+
+Arranging to fix this while keeping the old implementation is prohibitive, so
+strip the current one out in order to implement the new one cleanly.  In the
+interim, this causes IPIs to be used unconditionally which is safe albeit
+suboptimal.
+
+Fixes: 3d521e933e1b ("cpuidle: mwait on softirq_pending & remove wakeup ipis")
+Fixes: 1adb34ea846d ("CPUIDLE: re-implement mwait wakeup process")
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+(cherry picked from commit 3faf0866a33070b926ab78e6298290403f85e76c)
+
+diff --git a/xen/arch/x86/acpi/cpu_idle.c b/xen/arch/x86/acpi/cpu_idle.c
+index f1b9e2fbf6e7..1b316e849d6a 100644
+--- a/xen/arch/x86/acpi/cpu_idle.c
++++ b/xen/arch/x86/acpi/cpu_idle.c
+@@ -448,27 +448,6 @@ static int __init cf_check cpu_idle_key_init(void)
+ }
+ __initcall(cpu_idle_key_init);
+ 
+-/*
+- * The bit is set iff cpu use monitor/mwait to enter C state
+- * with this flag set, CPU can be waken up from C state
+- * by writing to specific memory address, instead of sending an IPI.
+- */
+-static cpumask_t cpuidle_mwait_flags;
+-
+-void cpuidle_wakeup_mwait(cpumask_t *mask)
+-{
+-    cpumask_t target;
+-    unsigned int cpu;
+-
+-    cpumask_and(&target, mask, &cpuidle_mwait_flags);
+-
+-    /* CPU is MWAITing on the cpuidle_mwait_wakeup flag. */
+-    for_each_cpu(cpu, &target)
+-        mwait_wakeup(cpu) = 0;
+-
+-    cpumask_andnot(mask, mask, &target);
+-}
+-
+ /* Force sending of a wakeup IPI regardless of mwait usage. */
+ bool __ro_after_init force_mwait_ipi_wakeup;
+ 
+@@ -477,42 +456,25 @@ bool arch_skip_send_event_check(unsigned int cpu)
+     if ( force_mwait_ipi_wakeup )
+         return false;
+ 
+-    /*
+-     * This relies on softirq_pending() and mwait_wakeup() to access data
+-     * on the same cache line.
+-     */
+-    smp_mb();
+-    return !!cpumask_test_cpu(cpu, &cpuidle_mwait_flags);
++    return false;
+ }
+ 
+ void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
+ {
+     unsigned int cpu = smp_processor_id();
+-    s_time_t expires = per_cpu(timer_deadline, cpu);
+-    const void *monitor_addr = &mwait_wakeup(cpu);
++    const unsigned int *this_softirq_pending = &softirq_pending(cpu);
+ 
+-    monitor(monitor_addr, 0, 0);
++    monitor(this_softirq_pending, 0, 0);
+     smp_mb();
+ 
+-    /*
+-     * Timer deadline passing is the event on which we will be woken via
+-     * cpuidle_mwait_wakeup. So check it now that the location is armed.
+-     */
+-    if ( (expires > NOW() || expires == 0) && !softirq_pending(cpu) )
++    if ( !*this_softirq_pending )
+     {
+         struct cpu_info *info = get_cpu_info();
+ 
+-        cpumask_set_cpu(cpu, &cpuidle_mwait_flags);
+-
+         spec_ctrl_enter_idle(info);
+         mwait(eax, ecx);
+         spec_ctrl_exit_idle(info);
+-
+-        cpumask_clear_cpu(cpu, &cpuidle_mwait_flags);
+     }
+-
+-    if ( expires <= NOW() && expires > 0 )
+-        raise_softirq(TIMER_SOFTIRQ);
+ }
+ 
+ static void acpi_processor_ffh_cstate_enter(struct acpi_processor_cx *cx)
+@@ -913,7 +875,7 @@ void cf_check acpi_dead_idle(void)
+ 
+     if ( cx->entry_method == ACPI_CSTATE_EM_FFH )
+     {
+-        void *mwait_ptr = &mwait_wakeup(smp_processor_id());
++        void *mwait_ptr = &softirq_pending(smp_processor_id());
+ 
+         /*
+          * Cache must be flushed as the last operation before sleeping.
+diff --git a/xen/arch/x86/hpet.c b/xen/arch/x86/hpet.c
+index 317ef63fb5f8..8f5069df2ae7 100644
+--- a/xen/arch/x86/hpet.c
++++ b/xen/arch/x86/hpet.c
+@@ -187,8 +187,6 @@ static void evt_do_broadcast(cpumask_t *mask)
+     if ( __cpumask_test_and_clear_cpu(cpu, mask) )
+         raise_softirq(TIMER_SOFTIRQ);
+ 
+-    cpuidle_wakeup_mwait(mask);
+-
+     if ( !cpumask_empty(mask) )
+        cpumask_raise_softirq(mask, TIMER_SOFTIRQ);
+ }
+diff --git a/xen/arch/x86/include/asm/hardirq.h b/xen/arch/x86/include/asm/hardirq.h
+index 276e3419d778..f3e93cc9b507 100644
+--- a/xen/arch/x86/include/asm/hardirq.h
++++ b/xen/arch/x86/include/asm/hardirq.h
+@@ -5,11 +5,10 @@
+ #include <xen/types.h>
+ 
+ typedef struct {
+-	unsigned int __softirq_pending;
+-	unsigned int __local_irq_count;
+-	unsigned int nmi_count;
+-	unsigned int mce_count;
+-	bool_t __mwait_wakeup;
++    unsigned int __softirq_pending;
++    unsigned int __local_irq_count;
++    unsigned int nmi_count;
++    unsigned int mce_count;
+ } __cacheline_aligned irq_cpustat_t;
+ 
+ #include <xen/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
+diff --git a/xen/include/xen/cpuidle.h b/xen/include/xen/cpuidle.h
+index 705d0c1135f0..120e354fe340 100644
+--- a/xen/include/xen/cpuidle.h
++++ b/xen/include/xen/cpuidle.h
+@@ -92,8 +92,6 @@ extern struct cpuidle_governor *cpuidle_current_governor;
+ bool cpuidle_using_deep_cstate(void);
+ void cpuidle_disable_deep_cstate(void);
+ 
+-extern void cpuidle_wakeup_mwait(cpumask_t *mask);
+-
+ #define CPUIDLE_DRIVER_STATE_START  1
+ 
+ extern void menu_get_trace_data(u32 *expected, u32 *pred);
+diff --git a/xen/include/xen/irq_cpustat.h b/xen/include/xen/irq_cpustat.h
+index b9629f25c266..5f039b4b9a76 100644
+--- a/xen/include/xen/irq_cpustat.h
++++ b/xen/include/xen/irq_cpustat.h
+@@ -24,6 +24,5 @@ extern irq_cpustat_t irq_stat[];
+   /* arch independent irq_stat fields */
+ #define softirq_pending(cpu)	__IRQ_STAT((cpu), __softirq_pending)
+ #define local_irq_count(cpu)	__IRQ_STAT((cpu), __local_irq_count)
+-#define mwait_wakeup(cpu)	__IRQ_STAT((cpu), __mwait_wakeup)
+ 
+ #endif	/* __irq_cpustat_h */

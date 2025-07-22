@@ -1,0 +1,105 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Tue, 1 Jul 2025 21:04:17 +0100
+Subject: xen/softirq: Rework arch_skip_send_event_check() into
+ arch_set_softirq()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+x86 is the only architecture wanting an optimisation here, but the
+test_and_set_bit() is a store into the monitored line (i.e. will wake up the
+target) and, prior to the removal of the broken IPI-elision algorithm, was
+racy, causing unnecessary IPIs to be sent.
+
+To do this in a race-free way, the store to the monited line needs to also
+sample the status of the target in one atomic action.  Implement a new arch
+helper with different semantics; to make the softirq pending and decide about
+IPIs together.  For now, implement the default helper.  It will be overridden
+by x86 in a subsequent change.
+
+No functional change.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+(cherry picked from commit b473e5e212e445d3c193c1c83b52b129af571b19)
+
+diff --git a/xen/arch/x86/acpi/cpu_idle.c b/xen/arch/x86/acpi/cpu_idle.c
+index 4272c33d1ca4..43ab4533b791 100644
+--- a/xen/arch/x86/acpi/cpu_idle.c
++++ b/xen/arch/x86/acpi/cpu_idle.c
+@@ -452,11 +452,6 @@ static int __init cf_check cpu_idle_key_init(void)
+ }
+ __initcall(cpu_idle_key_init);
+ 
+-bool arch_skip_send_event_check(unsigned int cpu)
+-{
+-    return false;
+-}
+-
+ void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
+ {
+     unsigned int cpu = smp_processor_id();
+diff --git a/xen/arch/x86/include/asm/softirq.h b/xen/arch/x86/include/asm/softirq.h
+index 415ee866c79d..e4b194f069fb 100644
+--- a/xen/arch/x86/include/asm/softirq.h
++++ b/xen/arch/x86/include/asm/softirq.h
+@@ -9,6 +9,4 @@
+ #define HVM_DPCI_SOFTIRQ       (NR_COMMON_SOFTIRQS + 4)
+ #define NR_ARCH_SOFTIRQS       5
+ 
+-bool arch_skip_send_event_check(unsigned int cpu);
+-
+ #endif /* __ASM_SOFTIRQ_H__ */
+diff --git a/xen/common/softirq.c b/xen/common/softirq.c
+index 321d26902d37..e733c8f74b44 100644
+--- a/xen/common/softirq.c
++++ b/xen/common/softirq.c
+@@ -94,9 +94,7 @@ void cpumask_raise_softirq(const cpumask_t *mask, unsigned int nr)
+         raise_mask = &per_cpu(batch_mask, this_cpu);
+ 
+     for_each_cpu(cpu, mask)
+-        if ( !test_and_set_bit(nr, &softirq_pending(cpu)) &&
+-             cpu != this_cpu &&
+-             !arch_skip_send_event_check(cpu) )
++        if ( !arch_set_softirq(nr, cpu) && cpu != this_cpu )
+             __cpumask_set_cpu(cpu, raise_mask);
+ 
+     if ( raise_mask == &send_mask )
+@@ -107,9 +105,7 @@ void cpu_raise_softirq(unsigned int cpu, unsigned int nr)
+ {
+     unsigned int this_cpu = smp_processor_id();
+ 
+-    if ( test_and_set_bit(nr, &softirq_pending(cpu))
+-         || (cpu == this_cpu)
+-         || arch_skip_send_event_check(cpu) )
++    if ( arch_set_softirq(nr, cpu) || cpu == this_cpu )
+         return;
+ 
+     if ( !per_cpu(batching, this_cpu) || in_irq() )
+diff --git a/xen/include/xen/softirq.h b/xen/include/xen/softirq.h
+index 33d6f2ecd223..5c2361865b49 100644
+--- a/xen/include/xen/softirq.h
++++ b/xen/include/xen/softirq.h
+@@ -21,6 +21,22 @@ enum {
+ 
+ #define NR_SOFTIRQS (NR_COMMON_SOFTIRQS + NR_ARCH_SOFTIRQS)
+ 
++/*
++ * Ensure softirq @nr is pending on @cpu.  Return true if an IPI can be
++ * skipped, false if the IPI cannot be skipped.
++ */
++#ifndef arch_set_softirq
++static always_inline bool arch_set_softirq(unsigned int nr, unsigned int cpu)
++{
++    /*
++     * Try to set the softirq pending.  If we set the bit (i.e. the old bit
++     * was 0), we're responsible to send the IPI.  If the softirq was already
++     * pending (i.e. the old bit was 1), no IPI is needed.
++     */
++    return test_and_set_bit(nr, &softirq_pending(cpu));
++}
++#endif
++
+ typedef void (*softirq_handler)(void);
+ 
+ void do_softirq(void);
