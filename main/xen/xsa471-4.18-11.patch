@@ -1,0 +1,150 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Tue, 1 Jul 2025 21:26:24 +0100
+Subject: x86/idle: Implement a new MWAIT IPI-elision algorithm
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In order elide IPIs, we must be able to identify whether a target CPU is in
+MWAIT at the point it is woken up.  i.e. the store to wake it up must also
+identify the state.
+
+Create a new in_mwait variable beside __softirq_pending, so we can use a
+CMPXCHG to set the softirq while also observing the status safely.  Implement
+an x86 version of arch_pend_softirq() which does this.
+
+In mwait_idle_with_hints(), advertise in_mwait, with an explanation of
+precisely what it means.  X86_BUG_MONITOR can be accounted for simply by not
+advertising in_mwait.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Acked-by: Roger Pau Monné <roger.pau@citrix.com>
+(cherry picked from commit 3e0bc4b50350bd357304fd79a5dc0472790dba91)
+
+diff --git a/xen/arch/x86/acpi/cpu_idle.c b/xen/arch/x86/acpi/cpu_idle.c
+index 43ab4533b791..be767a2c668f 100644
+--- a/xen/arch/x86/acpi/cpu_idle.c
++++ b/xen/arch/x86/acpi/cpu_idle.c
+@@ -455,7 +455,21 @@ __initcall(cpu_idle_key_init);
+ void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
+ {
+     unsigned int cpu = smp_processor_id();
+-    const unsigned int *this_softirq_pending = &softirq_pending(cpu);
++    irq_cpustat_t *stat = &irq_stat[cpu];
++    const unsigned int *this_softirq_pending = &stat->__softirq_pending;
++
++    /*
++     * By setting in_mwait, we promise to other CPUs that we'll notice changes
++     * to __softirq_pending without being sent an IPI.  We achieve this by
++     * either not going to sleep, or by having hardware notice on our behalf.
++     *
++     * Some errata exist where MONITOR doesn't work properly, and the
++     * workaround is to force the use of an IPI.  Cause this to happen by
++     * simply not advertising ourselves as being in_mwait.
++     */
++    alternative_io("movb $1, %[in_mwait]",
++                   "", X86_BUG_MONITOR,
++                   [in_mwait] "=m" (stat->in_mwait));
+ 
+     monitor(this_softirq_pending, 0, 0);
+ 
+@@ -467,6 +481,10 @@ void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
+         mwait(eax, ecx);
+         spec_ctrl_exit_idle(info);
+     }
++
++    alternative_io("movb $0, %[in_mwait]",
++                   "", X86_BUG_MONITOR,
++                   [in_mwait] "=m" (stat->in_mwait));
+ }
+ 
+ static void acpi_processor_ffh_cstate_enter(struct acpi_processor_cx *cx)
+diff --git a/xen/arch/x86/include/asm/hardirq.h b/xen/arch/x86/include/asm/hardirq.h
+index f3e93cc9b507..1647cff04dc8 100644
+--- a/xen/arch/x86/include/asm/hardirq.h
++++ b/xen/arch/x86/include/asm/hardirq.h
+@@ -5,7 +5,19 @@
+ #include <xen/types.h>
+ 
+ typedef struct {
+-    unsigned int __softirq_pending;
++    /*
++     * The layout is important.  Any CPU can set bits in __softirq_pending,
++     * but in_mwait is a status bit owned by the CPU.  softirq_mwait_raw must
++     * cover both, and must be in a single cacheline.
++     */
++    union {
++        struct {
++            unsigned int __softirq_pending;
++            bool in_mwait;
++        };
++        uint64_t softirq_mwait_raw;
++    };
++
+     unsigned int __local_irq_count;
+     unsigned int nmi_count;
+     unsigned int mce_count;
+diff --git a/xen/arch/x86/include/asm/softirq.h b/xen/arch/x86/include/asm/softirq.h
+index e4b194f069fb..55b65c9747b1 100644
+--- a/xen/arch/x86/include/asm/softirq.h
++++ b/xen/arch/x86/include/asm/softirq.h
+@@ -1,6 +1,8 @@
+ #ifndef __ASM_SOFTIRQ_H__
+ #define __ASM_SOFTIRQ_H__
+ 
++#include <asm/system.h>
++
+ #define NMI_SOFTIRQ            (NR_COMMON_SOFTIRQS + 0)
+ #define TIME_CALIBRATE_SOFTIRQ (NR_COMMON_SOFTIRQS + 1)
+ #define VCPU_KICK_SOFTIRQ      (NR_COMMON_SOFTIRQS + 2)
+@@ -9,4 +11,50 @@
+ #define HVM_DPCI_SOFTIRQ       (NR_COMMON_SOFTIRQS + 4)
+ #define NR_ARCH_SOFTIRQS       5
+ 
++/*
++ * Ensure softirq @nr is pending on @cpu.  Return true if an IPI can be
++ * skipped, false if the IPI cannot be skipped.
++ *
++ * We use a CMPXCHG covering both __softirq_pending and in_mwait, in order to
++ * set softirq @nr while also observing in_mwait in a race-free way.
++ */
++static always_inline bool arch_set_softirq(unsigned int nr, unsigned int cpu)
++{
++    uint64_t *ptr = &irq_stat[cpu].softirq_mwait_raw;
++    uint64_t prev, old, new;
++    unsigned int softirq = 1U << nr;
++
++    old = ACCESS_ONCE(*ptr);
++
++    for ( ;; )
++    {
++        if ( old & softirq )
++            /* Softirq already pending, nothing to do. */
++            return true;
++
++        new = old | softirq;
++
++        prev = cmpxchg(ptr, old, new);
++        if ( prev == old )
++            break;
++
++        old = prev;
++    }
++
++    /*
++     * We have caused the softirq to become pending.  If in_mwait was set, the
++     * target CPU will notice the modification and act on it.
++     *
++     * We can't access the in_mwait field nicely, so use some BUILD_BUG_ON()'s
++     * to cross-check the (1UL << 32) opencoding.
++     */
++    BUILD_BUG_ON(sizeof(irq_stat[0].softirq_mwait_raw) != 8);
++    BUILD_BUG_ON((offsetof(irq_cpustat_t, in_mwait) -
++                  offsetof(irq_cpustat_t, softirq_mwait_raw)) != 4);
++
++    return new & (1UL << 32) /* in_mwait */;
++
++}
++#define arch_set_softirq arch_set_softirq
++
+ #endif /* __ASM_SOFTIRQ_H__ */

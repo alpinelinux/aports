@@ -1,0 +1,131 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Tue, 1 Apr 2025 15:55:29 +0100
+Subject: x86/idle: Remove MFENCEs for CLFLUSH_MONITOR
+
+Commit 48d32458bcd4 ("x86, idle: add barriers to CLFLUSH workaround") was
+inherited from Linux and added MFENCEs around the AAI65 errata fix.
+
+The SDM now states:
+
+  Executions of the CLFLUSH instruction are ordered with respect to each
+  other and with respect to writes, locked read-modify-write instructions,
+  and fence instructions[1].
+
+with footnote 1 reading:
+
+  Earlier versions of this manual specified that executions of the CLFLUSH
+  instruction were ordered only by the MFENCE instruction.  All processors
+  implementing the CLFLUSH instruction also order it relative to the other
+  operations enumerated above.
+
+I.e. the MFENCEs came about because of an incorrect statement in the SDM.
+
+The Spec Update (no longer available on Intel's website) simply says "issue a
+CLFLUSH", with no mention of MFENCEs.
+
+As this erratum is specific to Intel, it's fine to remove the the MFENCEs; AMD
+CPUs of a similar vintage do sport otherwise-unordered CLFLUSHs.
+
+Move the feature bit into the BUG range (rather than FEATURE), and move the
+workaround into monitor() itself.
+
+The erratum check itself must use setup_force_cpu_cap().  It needs activating
+if any CPU needs it, not if all of them need it.
+
+Fixes: 48d32458bcd4 ("x86, idle: add barriers to CLFLUSH workaround")
+Fixes: 96d1b237ae9b ("x86/Intel: work around Xeon 7400 series erratum AAI65")
+Link: https://web.archive.org/web/20090219054841/http://download.intel.com/design/xeon/specupdt/32033601.pdf
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+(cherry picked from commit f77ef3443542a2c2bbd59ee66178287d4fa5b43f)
+
+diff --git a/xen/arch/x86/acpi/cpu_idle.c b/xen/arch/x86/acpi/cpu_idle.c
+index ec2d570dc27b..f1b9e2fbf6e7 100644
+--- a/xen/arch/x86/acpi/cpu_idle.c
++++ b/xen/arch/x86/acpi/cpu_idle.c
+@@ -62,6 +62,9 @@
+ static always_inline void monitor(
+     const void *addr, unsigned int ecx, unsigned int edx)
+ {
++    alternative_input("", "clflush (%[addr])", X86_BUG_CLFLUSH_MONITOR,
++                      [addr] "a" (addr));
++
+     asm volatile ( "monitor"
+                    :: "a" (addr), "c" (ecx), "d" (edx) );
+ }
+@@ -488,13 +491,6 @@ void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
+     s_time_t expires = per_cpu(timer_deadline, cpu);
+     const void *monitor_addr = &mwait_wakeup(cpu);
+ 
+-    if ( boot_cpu_has(X86_FEATURE_CLFLUSH_MONITOR) )
+-    {
+-        mb();
+-        clflush(monitor_addr);
+-        mb();
+-    }
+-
+     monitor(monitor_addr, 0, 0);
+     smp_mb();
+ 
+@@ -929,19 +925,7 @@ void cf_check acpi_dead_idle(void)
+ 
+         while ( 1 )
+         {
+-            /*
+-             * 1. The CLFLUSH is a workaround for erratum AAI65 for
+-             * the Xeon 7400 series.  
+-             * 2. The WBINVD is insufficient due to the spurious-wakeup
+-             * case where we return around the loop.
+-             * 3. Unlike wbinvd, clflush is a light weight but not serializing 
+-             * instruction, hence memory fence is necessary to make sure all 
+-             * load/store visible before flush cache line.
+-             */
+-            mb();
+-            clflush(mwait_ptr);
+             monitor(mwait_ptr, 0, 0);
+-            mb();
+             mwait(cx->address, 0);
+         }
+     }
+diff --git a/xen/arch/x86/cpu/intel.c b/xen/arch/x86/cpu/intel.c
+index 6f2b3fffdd34..04a002e1e0c9 100644
+--- a/xen/arch/x86/cpu/intel.c
++++ b/xen/arch/x86/cpu/intel.c
+@@ -446,6 +446,7 @@ static void __init probe_mwait_errata(void)
+  *
+  * Xeon 7400 erratum AAI65 (and further newer Xeons)
+  * MONITOR/MWAIT may have excessive false wakeups
++ * https://web.archive.org/web/20090219054841/http://download.intel.com/design/xeon/specupdt/32033601.pdf
+  */
+ static void Intel_errata_workarounds(struct cpuinfo_x86 *c)
+ {
+@@ -463,7 +464,7 @@ static void Intel_errata_workarounds(struct cpuinfo_x86 *c)
+ 
+ 	if (c->x86 == 6 && cpu_has_clflush &&
+ 	    (c->x86_model == 29 || c->x86_model == 46 || c->x86_model == 47))
+-		__set_bit(X86_FEATURE_CLFLUSH_MONITOR, c->x86_capability);
++		setup_force_cpu_cap(X86_BUG_CLFLUSH_MONITOR);
+ 
+ 	probe_c3_errata(c);
+ 	if (system_state < SYS_STATE_smp_boot)
+diff --git a/xen/arch/x86/include/asm/cpufeatures.h b/xen/arch/x86/include/asm/cpufeatures.h
+index 9e3ed21c026d..84c93292c80c 100644
+--- a/xen/arch/x86/include/asm/cpufeatures.h
++++ b/xen/arch/x86/include/asm/cpufeatures.h
+@@ -19,7 +19,7 @@ XEN_CPUFEATURE(ARCH_PERFMON,      X86_SYNTH( 3)) /* Intel Architectural PerfMon
+ XEN_CPUFEATURE(TSC_RELIABLE,      X86_SYNTH( 4)) /* TSC is known to be reliable */
+ XEN_CPUFEATURE(XTOPOLOGY,         X86_SYNTH( 5)) /* cpu topology enum extensions */
+ XEN_CPUFEATURE(CPUID_FAULTING,    X86_SYNTH( 6)) /* cpuid faulting */
+-XEN_CPUFEATURE(CLFLUSH_MONITOR,   X86_SYNTH( 7)) /* clflush reqd with monitor */
++/* Bit 7 unused */
+ XEN_CPUFEATURE(APERFMPERF,        X86_SYNTH( 8)) /* APERFMPERF */
+ XEN_CPUFEATURE(MFENCE_RDTSC,      X86_SYNTH( 9)) /* MFENCE synchronizes RDTSC */
+ XEN_CPUFEATURE(XEN_SMEP,          X86_SYNTH(10)) /* SMEP gets used by Xen itself */
+@@ -52,6 +52,7 @@ XEN_CPUFEATURE(USE_VMCALL,        X86_SYNTH(30)) /* Use VMCALL instead of VMMCAL
+ #define X86_BUG_NULL_SEG          X86_BUG( 1) /* NULL-ing a selector preserves the base and limit. */
+ #define X86_BUG_CLFLUSH_MFENCE    X86_BUG( 2) /* MFENCE needed to serialise CLFLUSH */
+ #define X86_BUG_IBPB_NO_RET       X86_BUG( 3) /* IBPB doesn't flush the RSB/RAS */
++#define X86_BUG_CLFLUSH_MONITOR   X86_BUG( 4) /* MONITOR requires CLFLUSH */
+ 
+ #define X86_SPEC_NO_LFENCE_ENTRY_PV X86_BUG(16) /* (No) safety LFENCE for SPEC_CTRL_ENTRY_PV. */
+ #define X86_SPEC_NO_LFENCE_ENTRY_INTR X86_BUG(17) /* (No) safety LFENCE for SPEC_CTRL_ENTRY_INTR. */

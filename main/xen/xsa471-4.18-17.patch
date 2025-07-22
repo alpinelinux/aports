@@ -1,0 +1,135 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Wed, 2 Apr 2025 03:18:59 +0100
+Subject: x86/idle: Rearrange VERW and MONITOR in mwait_idle_with_hints()
+
+In order to mitigate TSA, Xen will need to issue VERW before going idle.
+
+On AMD CPUs, the VERW scrubbing side effects cancel an active MONITOR, causing
+the MWAIT to exit without entering an idle state.  Therefore the VERW must be
+ahead of MONITOR.
+
+Split spec_ctrl_enter_idle() in two and allow the VERW aspect to be handled
+separately.  While adjusting, update a stale comment concerning MSBDS; more
+issues have been mitigated using VERW since it was written.
+
+By moving VERW earlier, it is ahead of the determination of whether to go
+idle.  We can't move the check on softirq_pending (for correctness reasons),
+but we can duplicate it earlier as a best effort attempt to skip the
+speculative overhead.
+
+This is part of XSA-471 / CVE-2024-36350 / CVE-2024-36357.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+
+diff --git a/xen/arch/x86/acpi/cpu_idle.c b/xen/arch/x86/acpi/cpu_idle.c
+index 1589325baa56..2673bc797f1e 100644
+--- a/xen/arch/x86/acpi/cpu_idle.c
++++ b/xen/arch/x86/acpi/cpu_idle.c
+@@ -462,9 +462,18 @@ __initcall(cpu_idle_key_init);
+ void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
+ {
+     unsigned int cpu = smp_processor_id();
++    struct cpu_info *info = get_cpu_info();
+     irq_cpustat_t *stat = &irq_stat[cpu];
+     const unsigned int *this_softirq_pending = &stat->__softirq_pending;
+ 
++    /*
++     * Heuristic: if we're definitely not going to idle, bail early as the
++     * speculative safety can be expensive.  This is a performance
++     * consideration not a correctness issue.
++     */
++    if ( *this_softirq_pending )
++        return;
++
+     /*
+      * By setting in_mwait, we promise to other CPUs that we'll notice changes
+      * to __softirq_pending without being sent an IPI.  We achieve this by
+@@ -478,15 +487,19 @@ void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
+                    "", X86_BUG_MONITOR,
+                    [in_mwait] "=m" (stat->in_mwait));
+ 
++    /*
++     * On AMD systems, side effects from VERW cancel MONITOR, causing MWAIT to
++     * wake up immediately.  Therefore, VERW must come ahead of MONITOR.
++     */
++    __spec_ctrl_enter_idle_verw(info);
++
+     monitor(this_softirq_pending, 0, 0);
+ 
+     ASSERT(!local_irq_is_enabled());
+ 
+     if ( !*this_softirq_pending )
+     {
+-        struct cpu_info *info = get_cpu_info();
+-
+-        spec_ctrl_enter_idle(info);
++        __spec_ctrl_enter_idle(info, false /* VERW handled above */);
+ 
+         if ( ecx & MWAIT_ECX_INTERRUPT_BREAK )
+             mwait(eax, ecx);
+diff --git a/xen/arch/x86/include/asm/spec_ctrl.h b/xen/arch/x86/include/asm/spec_ctrl.h
+index 077225418956..6724d3812029 100644
+--- a/xen/arch/x86/include/asm/spec_ctrl.h
++++ b/xen/arch/x86/include/asm/spec_ctrl.h
+@@ -115,8 +115,22 @@ static inline void init_shadow_spec_ctrl_state(void)
+     info->verw_sel = __HYPERVISOR_DS32;
+ }
+ 
++static always_inline void __spec_ctrl_enter_idle_verw(struct cpu_info *info)
++{
++    /*
++     * Flush/scrub structures which are statically partitioned between active
++     * threads.  Otherwise data of ours (of unknown sensitivity) will become
++     * available to our sibling when we go idle.
++     *
++     * Note: VERW must be encoded with a memory operand, as it is only that
++     * form with side effects.
++     */
++    alternative_input("", "verw %[sel]", X86_FEATURE_SC_VERW_IDLE,
++                      [sel] "m" (info->verw_sel));
++}
++
+ /* WARNING! `ret`, `call *`, `jmp *` not safe after this call. */
+-static always_inline void spec_ctrl_enter_idle(struct cpu_info *info)
++static always_inline void __spec_ctrl_enter_idle(struct cpu_info *info, bool verw)
+ {
+     uint32_t val = 0;
+ 
+@@ -135,21 +149,8 @@ static always_inline void spec_ctrl_enter_idle(struct cpu_info *info)
+                       "a" (val), "c" (MSR_SPEC_CTRL), "d" (0));
+     barrier();
+ 
+-    /*
+-     * Microarchitectural Store Buffer Data Sampling:
+-     *
+-     * On vulnerable systems, store buffer entries are statically partitioned
+-     * between active threads.  When entering idle, our store buffer entries
+-     * are re-partitioned to allow the other threads to use them.
+-     *
+-     * Flush the buffers to ensure that no sensitive data of ours can be
+-     * leaked by a sibling after it gets our store buffer entries.
+-     *
+-     * Note: VERW must be encoded with a memory operand, as it is only that
+-     * form which causes a flush.
+-     */
+-    alternative_input("", "verw %[sel]", X86_FEATURE_SC_VERW_IDLE,
+-                      [sel] "m" (info->verw_sel));
++    if ( verw ) /* Expected to be const-propagated. */
++        __spec_ctrl_enter_idle_verw(info);
+ 
+     /*
+      * Cross-Thread Return Address Predictions:
+@@ -167,6 +168,12 @@ static always_inline void spec_ctrl_enter_idle(struct cpu_info *info)
+                       : "rax", "rcx");
+ }
+ 
++/* WARNING! `ret`, `call *`, `jmp *` not safe after this call. */
++static always_inline void spec_ctrl_enter_idle(struct cpu_info *info)
++{
++    __spec_ctrl_enter_idle(info, true /* VERW */);
++}
++
+ /* WARNING! `ret`, `call *`, `jmp *` not safe before this call. */
+ static always_inline void spec_ctrl_exit_idle(struct cpu_info *info)
+ {

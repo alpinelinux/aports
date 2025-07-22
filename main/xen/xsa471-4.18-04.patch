@@ -1,0 +1,74 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Date: Tue, 24 Jun 2025 15:20:52 +0100
+Subject: Revert part of "x86/mwait-idle: disable IBRS during long idle"
+
+Most of the patch (handling of CPUIDLE_FLAG_IBRS) is fine, but the
+adjustements to mwait_idle() are not; spec_ctrl_enter_idle() does more than
+just alter MSR_SPEC_CTRL.IBRS.
+
+The only reason this doesn't need an XSA is because the unconditional
+spec_ctrl_{enter,exit}_idle() in mwait_idle_with_hints() were left unaltered,
+and thus the MWAIT remained properly protected.
+
+There (would have been) two problems.  In the ibrs_disable (== deep C) case:
+
+ * On entry, VERW and RSB-stuffing are architecturally skipped.
+ * On exit, there's a branch crossing the WRMSR which reinstates the
+   speculative safety for indirect branches.
+
+All this change did was double up the expensive operations in the deep C case,
+and fail to optimise the intended case.
+
+I have an idea of how to plumb this more nicely, but it requires larger
+changes to legacy IBRS handling to not make spec_ctrl_enter_idle() vulnerable
+in other ways.  In the short term, simply take out the perf hit.
+
+Fixes: 08acdf9a2615 ("x86/mwait-idle: disable IBRS during long idle")
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+(cherry picked from commit 07d7163334a7507d329958b19d976be769580999)
+
+diff --git a/xen/arch/x86/cpu/mwait-idle.c b/xen/arch/x86/cpu/mwait-idle.c
+index ff5c808bc952..e95fe5d88907 100644
+--- a/xen/arch/x86/cpu/mwait-idle.c
++++ b/xen/arch/x86/cpu/mwait-idle.c
+@@ -891,7 +891,6 @@ static const struct cpuidle_state snr_cstates[] = {
+ static void cf_check mwait_idle(void)
+ {
+ 	unsigned int cpu = smp_processor_id();
+-	struct cpu_info *info = get_cpu_info();
+ 	struct acpi_processor_power *power = processor_powers[cpu];
+ 	struct acpi_processor_cx *cx = NULL;
+ 	unsigned int next_state;
+@@ -918,6 +917,8 @@ static void cf_check mwait_idle(void)
+ 			pm_idle_save();
+ 		else
+ 		{
++			struct cpu_info *info = get_cpu_info();
++
+ 			spec_ctrl_enter_idle(info);
+ 			safe_halt();
+ 			spec_ctrl_exit_idle(info);
+@@ -944,11 +945,6 @@ static void cf_check mwait_idle(void)
+ 	if ((cx->type >= 3) && errata_c6_workaround())
+ 		cx = power->safe_state;
+ 
+-	if (cx->ibrs_disable) {
+-		ASSERT(!cx->irq_enable_early);
+-		spec_ctrl_enter_idle(info);
+-	}
+-
+ #if 0 /* XXX Can we/do we need to do something similar on Xen? */
+ 	/*
+ 	 * leave_mm() to avoid costly and often unnecessary wakeups
+@@ -980,10 +976,6 @@ static void cf_check mwait_idle(void)
+ 
+ 	/* Now back in C0. */
+ 	update_idle_stats(power, cx, before, after);
+-
+-	if (cx->ibrs_disable)
+-		spec_ctrl_exit_idle(info);
+-
+ 	local_irq_enable();
+ 
+ 	TRACE_6D(TRC_PM_IDLE_EXIT, cx->type, after,
