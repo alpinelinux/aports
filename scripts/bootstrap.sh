@@ -9,7 +9,8 @@ if [ "$1" = "-k" ] || [ "$1" = "--keep" ]; then
 fi
 
 CTARGET="$1"
-unset CTARGET_ARCH CHOST CARCH
+CHOST="$CBUILD"
+CARCH="$CBUILD_ARCH"
 SUDO_APK=abuild-apk
 
 shift
@@ -55,7 +56,7 @@ sharedir=${ABUILD_SHAREDIR:-/usr/share/abuild}
 . "$sharedir"/functions.sh
 [ -z "$CBUILD_ARCH" ] && die "abuild is too old (use 2.29.0 or later)"
 [ -z "$CBUILDROOT" ] && die "CBUILDROOT not set for $CTARGET_ARCH"
-export CBUILD CTARGET
+export CBUILD CBUILD_ARCH CHOST CARCH CTARGET CTARGET_ARCH
 
 # deduce aports directory
 [ -z "$APORTS" ] && APORTS=$(realpath $(dirname $0)/../)
@@ -97,9 +98,9 @@ msg "Building cross-compiler"
 # Build and install cross binutils (--with-sysroot)
 BOOTSTRAP=nobase APKBUILD=$(apkbuildname binutils) abuild $abuild_opts
 
-if ! CHOST=$CTARGET BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild up2date 2>/dev/null; then
+if ! CHOST=$CTARGET CARCH=$CTARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild up2date 2>/dev/null; then
 	# C-library headers for target
-	CHOST=$CTARGET BOOTSTRAP=nocc APKBUILD=$(apkbuildname musl) abuild $abuild_opts
+	CHOST=$CTARGET CARCH=$CTARGET_ARCH BOOTSTRAP=nocc APKBUILD=$(apkbuildname musl) abuild $abuild_opts
 
 	# Minimal cross GCC
 	EXTRADEPENDS_HOST="musl-dev" \
@@ -107,13 +108,13 @@ if ! CHOST=$CTARGET BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild up2dat
 
 	# Cross build bootstrap C-library for the target
 	EXTRADEPENDS_BUILD="gcc-pass2-$CTARGET_ARCH" \
-	CHOST=$CTARGET BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild $abuild_opts
+	CHOST=$CTARGET CARCH=$CTARGET_ARCH BOOTSTRAP=nolibc APKBUILD=$(apkbuildname musl) abuild $abuild_opts
 fi
 
 # Build libucontext without docs and pkgconfig file as a dependency for gcc-gdc
 EXTRADEPENDS_BUILD="gcc-pass2-$CTARGET_ARCH" \
 EXTRADEPENDS_TARGET="musl-dev" \
-CHOST=$CTARGET BOOTSTRAP=nobase APKBUILD=$(apkbuildname libucontext) abuild $abuild_opts
+CHOST=$CTARGET CARCH=$CTARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname libucontext) abuild $abuild_opts
 
 # Full cross GCC
 EXTRADEPENDS_TARGET="musl-dev libucontext-dev" \
@@ -151,7 +152,7 @@ if [ $# -eq 0 ]; then
 fi
 
 for PKG; do
-	CHOST=$CTARGET BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild $abuild_opts
+	CHOST=$CTARGET CARCH=$CTARGET_ARCH BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild $abuild_opts
 
 	case "$PKG" in
 	fortify-headers)
