@@ -94,7 +94,7 @@ Put `; do` and `; then` on the same line as the `while`, `for` or `if`.
 ### Variable Names
 
 * Lower-case, with underscores to separate words. Prefix all
-  non-metadata variables with an underscore character.
+  non-metadata non-local variables with an underscore character.
 
 ### Use Local Variables
 
