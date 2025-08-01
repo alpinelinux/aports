@@ -16,7 +16,7 @@ pref("browser.topsites.contile.enabled", false);
 pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);
 pref("browser.newtabpage.activity-stream.feeds.section.topstories", false);
 
-// Disable Widevine CDM support (doesn't work on musl anyway)
+// Disable Widevine CDM support (unusable error message when gcompat is missing)
 pref("media.gmp-widevinecdm.visible", false);
 pref("media.gmp-widevinecdm.enabled", false);
 
