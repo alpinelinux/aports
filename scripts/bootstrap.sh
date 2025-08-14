@@ -19,6 +19,7 @@ shift
 # FIXME: Maybe subdivide into ghc, rust, and go stuff
 : ${MKINITFS=libcap-ng ncurses readline sqlite util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs pax-utils}
 #: ${OPENSSH=openssh}
+#: ${LUA_APORTS=ncurses readline lua5.4 lua-cjson lua-filesystem lua-optarg lua-aports}
 
 if [ -z "$TARGET_ARCH" ]; then
 	program=$(basename $0)
@@ -144,7 +145,8 @@ if [ $# -eq 0 ]; then
 	   $OPENSSH \
 	   $MKINITFS \
 	   $COMPILER_PKG \
-	   $KERNEL_PKG
+	   $KERNEL_PKG \
+	   $LUA_APORTS
 fi
 
 for PKG; do
