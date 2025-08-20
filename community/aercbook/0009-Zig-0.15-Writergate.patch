@@ -1,0 +1,236 @@
+From e276a16633d5871ee13f593d3af33368717e58ae Mon Sep 17 00:00:00 2001
+From: LN Liberda <lauren@selfisekai.rocks>
+Date: Thu, 21 Aug 2025 00:52:36 +0200
+Subject: [PATCH] Zig 0.15: Writergate
+
+---
+ build.zig             | 12 +++++++----
+ src/args.zig          | 12 +++++++----
+ src/gitversiontag.zig |  2 +-
+ src/main.zig          | 49 +++++++++++++++++++++++++++++--------------
+ 4 files changed, 50 insertions(+), 25 deletions(-)
+
+diff --git a/build.zig b/build.zig
+index 38560b5..a13dd90 100644
+--- a/build.zig
++++ b/build.zig
+@@ -5,20 +5,24 @@ pub fn build(b: *std.Build) void {
+     // write src/version.zig
+     const alloc = std.heap.page_allocator;
+     const gvs = gitVersionTag(alloc);
+-    const efmt = "WARNING: could not write src/version.zig:\n   {!}\n";
++    const efmt = "WARNING: could not write src/version.zig:\n   {t}\n";
++    var stderr_buffer: [512]u8 = undefined;
++    const stderr = std.fs.File.stderr();
++    var errwriter = stderr.writer(&stderr_buffer).interface;
+     if (std.fs.cwd().createFile("src/version.zig", .{})) |file| {
+         defer file.close();
+         const zigfmt = "pub const version_string = \"{s}\";";
+         if (std.fmt.allocPrint(alloc, zigfmt, .{gvs})) |strline| {
+             if (file.writeAll(strline)) {} else |e| {
+-                std.io.getStdErr().writer().print(efmt, .{e}) catch unreachable;
++                errwriter.print(efmt, .{e}) catch unreachable;
+             }
+         } else |err| {
+-            std.io.getStdErr().writer().print(efmt, .{err}) catch unreachable;
++            errwriter.print(efmt, .{err}) catch unreachable;
+         }
+     } else |err| {
+-        std.io.getStdErr().writer().print(efmt, .{err}) catch unreachable;
++        errwriter.print(efmt, .{err}) catch unreachable;
+     }
++    errwriter.flush() catch unreachable;
+ 
+     // Standard target options allows the person running `zig build` to choose
+     // what target to build for. Here we do not override the defaults, which
+diff --git a/src/args.zig b/src/args.zig
+index 2a5be70..4698441 100644
+--- a/src/args.zig
++++ b/src/args.zig
+@@ -591,9 +591,7 @@ pub const Error = struct {
+     /// The kind of error, might include additional information
+     kind: Kind,
+ 
+-    pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+-        _ = fmt;
+-        _ = options;
++    pub fn format(self: Self, writer: anytype) !void {
+         switch (self.kind) {
+             .unknown => try writer.print("The option {s} does not exist", .{self.option}),
+             .invalid_value => |value| try writer.print("Invalid value '{s}' for option {s}", .{ value, self.option }),
+@@ -655,7 +653,13 @@ pub const ErrorHandling = union(enum) {
+             @compileError("src_error must be a error union!");
+         switch (self) {
+             .silent => return src_error,
+-            .print => try std.io.getStdErr().writer().print("{}\n", .{err}),
++            .print => {
++                const stderr = std.fs.File.stderr();
++                var buffer: [1024]u8 = undefined;
++                var writer = stderr.writer(&buffer);
++                try writer.interface.print("{f}\n", .{err});
++                try writer.end();
++            },
+             .collect => |collection| try collection.insert(err),
+         }
+     }
+diff --git a/src/gitversiontag.zig b/src/gitversiontag.zig
+index 2f66e3f..aaa9ddd 100644
+--- a/src/gitversiontag.zig
++++ b/src/gitversiontag.zig
+@@ -14,7 +14,7 @@ pub fn gitVersionTag(a: std.mem.Allocator) []const u8 {
+             return "unknown";
+         }
+     } else |err| {
+-        std.log.err("Unable to spawn and wait:  {!}", .{err});
++        std.log.err("Unable to spawn and wait:  {t}", .{err});
+     }
+     return "unknown";
+ }
+diff --git a/src/main.zig b/src/main.zig
+index 2394207..0e7bf7a 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -160,7 +160,10 @@ fn addToAddressBook(
+     });
+     defer file.close();
+     try file.seekFromEnd(0);
+-    try file.writer().print("\n{s} : {s}", .{ key, value });
++    var read_buffer: [1024]u8 = undefined;
++    var file_writer = file.writer(&read_buffer);
++    try file_writer.interface.print("\n{s} : {s}", .{ key, value });
++    try file_writer.end();
+ }
+ 
+ fn addEmailsToAddressBook(
+@@ -174,6 +177,8 @@ fn addEmailsToAddressBook(
+     });
+     defer file.close();
+     try file.seekFromEnd(0);
++    var read_buffer: [1024]u8 = undefined;
++    var file_writer = file.writer(&read_buffer);
+     var it = emails.iterator();
+     var key_buffer: [512]u8 = undefined;
+     var val_buffer: [512]u8 = undefined;
+@@ -184,7 +189,7 @@ fn addEmailsToAddressBook(
+             continue;
+         }
+         const decoded_val = replaceUtf8(item.value_ptr.*, &val_buffer);
+-        try file.writer().print("\n{s} : {s}", .{
++        try file_writer.interface.print("\n{s} : {s}", .{
+             decoded_key,
+             decoded_val,
+         });
+@@ -193,6 +198,7 @@ fn addEmailsToAddressBook(
+             decoded_val,
+         });
+     }
++    try file_writer.end();
+ }
+ 
+ const ParseMailResult = struct {
+@@ -269,18 +275,21 @@ const ParseMailError = error{
+ };
+ 
+ fn parseMailFromStdin(alloc: std.mem.Allocator) !ParseMailResult {
+-    const stdin = std.io.getStdIn();
++    const stdin = std.fs.File.stdin();
++
++    var temp_buffer: [1024 * 1024]u8 = undefined;
+ 
+     // read the 1st megabyte - we're interested in the header only
+-    const buffer = try alloc.alloc(u8, 1024 * 1024);
++    var buffer: [1024 * 1024]u8 = undefined;
+ 
+-    const howmany = try stdin.reader().read(buffer);
++    var reader = stdin.reader(&temp_buffer);
++    const howmany = try reader.read(&buffer);
+     if (howmany <= 0) return error.ReadError;
+ 
+     var ret = try ParseMailResult.init(alloc);
+ 
+     // we don't tokenize, so we get \r for empty line
+-    var it = std.mem.splitSequence(u8, buffer, "\n");
++    var it = std.mem.splitSequence(u8, &buffer, "\n");
+ 
+     // first collect the headers
+     var from_pos: usize = 0;
+@@ -400,6 +409,14 @@ pub fn main() anyerror!void {
+         var map = std.StringHashMap([]const u8).init(alloc);
+         defer map.deinit();
+ 
++        const stdout = std.fs.File.stdout();
++        var outbuffer: [1024]u8 = undefined;
++        var outwriter = stdout.writer(&outbuffer);
++
++        const stderr = std.fs.File.stderr();
++        var errbuffer: [1024]u8 = undefined;
++        var errwriter = stderr.writer(&errbuffer);
++
+         //
+         // parse email -> add mode
+         //
+@@ -414,8 +431,7 @@ pub fn main() anyerror!void {
+             if (readAddressBook(alloc, filn, max_file_size, &list, &map)) {
+                 // do nothing
+             } else |err| {
+-                const errwriter = std.io.getStdErr().writer();
+-                try errwriter.print("Warning {!}: {s} --> creating it...\n", .{ err, filn });
++                try errwriter.interface.print("Warning {t}: {s} --> creating it...\n", .{ err, filn });
+             }
+             const ret = try parseMailFromStdin(alloc);
+ 
+@@ -451,8 +467,7 @@ pub fn main() anyerror!void {
+             if (readAddressBook(alloc, filn, max_file_size, &list, &map)) {
+                 //
+             } else |err| {
+-                const errwriter = std.io.getStdErr().writer();
+-                try errwriter.print("Warning {!}: {s} --> creating it...\n", .{ err, filn });
++                try errwriter.interface.print("Warning {t}: {s} --> creating it...\n", .{ err, filn });
+             }
+ 
+             var key_buffer: [512]u8 = undefined;
+@@ -488,8 +503,7 @@ pub fn main() anyerror!void {
+         if (readAddressBook(alloc, filn, max_file_size, &list, &map)) {
+             // do nothing
+         } else |err| {
+-            const errwriter = std.io.getStdErr().writer();
+-            try errwriter.print("Error {!}: {s}\n", .{ err, filn });
++            try errwriter.interface.print("Error {t}: {s}\n", .{ err, filn });
+             return;
+         }
+ 
+@@ -500,7 +514,7 @@ pub fn main() anyerror!void {
+             // we output everything
+             var it = map.valueIterator();
+             while (it.next()) |value| {
+-                try std.io.getStdOut().writer().print("{s}\n", .{value.*});
++                try outwriter.interface.print("{s}\n", .{value.*});
+             }
+             return;
+         }
+@@ -516,7 +530,7 @@ pub fn main() anyerror!void {
+             for (list.items) |key| {
+                 if (std.mem.startsWith(u8, key, input[0..index])) {
+                     if (map.get(key)) |v| {
+-                        try std.io.getStdOut().writer().print("{s}\n", .{v});
++                        try outwriter.interface.print("{s}\n", .{v});
+                     }
+                 }
+             }
+@@ -529,11 +543,14 @@ pub fn main() anyerror!void {
+             if (map.get(key)) |v| {
+                 // bug in aerc.conf: tab separated lines are NOT supported
+                 // std.debug.print("{s}\t{s}\n", .{ v, key });
+-                try std.io.getStdOut().writer().print("{s}\n", .{v});
++                try outwriter.interface.print("{s}\n", .{v});
+             }
+         }
++
++        try outwriter.end();
++        try errwriter.end();
+     } else |err| {
+-        std.debug.print("{!}", .{err});
++        std.debug.print("{t}", .{err});
+         help();
+     }
+ }
