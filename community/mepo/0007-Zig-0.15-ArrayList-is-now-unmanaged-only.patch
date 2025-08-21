@@ -1,0 +1,298 @@
+From 94d89df6cb2007d49e283428579319007e505672 Mon Sep 17 00:00:00 2001
+From: LN Liberda <lauren@selfisekai.rocks>
+Date: Thu, 21 Aug 2025 03:17:27 +0200
+Subject: [PATCH] Zig 0.15: ArrayList is now unmanaged only
+
+---
+ src/Mepo.zig             | 12 ++++++------
+ src/TileCache.zig        |  8 +++++---
+ src/api/bind_button.zig  |  2 +-
+ src/api/filedump.zig     | 16 +++++++++-------
+ src/api/pin_add.zig      |  2 +-
+ src/api/pin_purge.zig    |  2 +-
+ src/api/pin_transfer.zig |  4 ++--
+ src/blit/blit.zig        | 21 +++++++++++----------
+ 8 files changed, 36 insertions(+), 31 deletions(-)
+
+diff --git a/src/Mepo.zig b/src/Mepo.zig
+index e8ae0ad..a3bd86d 100644
+--- a/src/Mepo.zig
++++ b/src/Mepo.zig
+@@ -60,7 +60,7 @@ pub fn convert_latlon_to_xy(mepo: *Self, lat_or_lon: enum { LonToX, LatToY }, la
+ 
+ fn event_fingerdown(mepo: *Self, e: sdl.SDL_Event) types.Pending {
+     for (mepo.fingers.items) |f| if (e.tfinger.fingerId == f) return .None;
+-    mepo.fingers.append(e.tfinger.fingerId) catch unreachable;
++    mepo.fingers.append(mepo.allocator, e.tfinger.fingerId) catch unreachable;
+     if (mepo.fingers.items.len > 1) mepo.fingers_gesture_delta = 0;
+     return .None;
+ }
+@@ -796,7 +796,7 @@ pub fn init(allocator: std.mem.Allocator, tile_cache: *TileCache, use_config: []
+         .config_contents = use_config,
+         .fonts_normal = try init_create_fonts_array(false),
+         .fonts_bold = try init_create_fonts_array(true),
+-        .fingers = std.ArrayList(sdl.SDL_FingerID).init(allocator),
++        .fingers = std.ArrayList(sdl.SDL_FingerID).empty,
+         .initialized_video = std.Thread.ResetEvent{},
+         .table_gestures = std.array_hash_map.AutoArrayHashMap(types.GestureInput, []const u8).init(allocator),
+         .table_keybindings = std.array_hash_map.AutoArrayHashMap(types.KeyInput, []const u8).init(allocator),
+@@ -805,14 +805,14 @@ pub fn init(allocator: std.mem.Allocator, tile_cache: *TileCache, use_config: []
+         .table_timers = std.array_hash_map.AutoArrayHashMap(types.TimerInput, []const u8).init(allocator),
+         .pin_groups = pin_groups: {
+             var pgs: [10]std.ArrayList(types.Pin) = undefined;
+-            for (pgs, 0..) |_, i| pgs[i] = std.ArrayList(types.Pin).init(allocator);
++            for (pgs, 0..) |_, i| pgs[i] = std.ArrayList(types.Pin).empty;
+             break :pin_groups pgs;
+         },
+         .tile_cache = tile_cache,
+         .uibuttons = b: {
+-            var uibuttons = std.ArrayList(types.UIButton).init(allocator);
+-            errdefer uibuttons.deinit();
+-            try uibuttons.append(.{
++            var uibuttons = std.ArrayList(types.UIButton).empty;
++            errdefer uibuttons.deinit(allocator);
++            try uibuttons.append(allocator, .{
+                 .text = try allocator.dupeZ(u8, "Cancel sync shellpipe"),
+                 .group_number = null,
+                 .only_visible_when_sync_shellpipe = true,
+diff --git a/src/TileCache.zig b/src/TileCache.zig
+index add1e4e..6253534 100644
+--- a/src/TileCache.zig
++++ b/src/TileCache.zig
+@@ -24,6 +24,7 @@ pub const DownloadBBoxRequest = struct {
+     zoom_max: i32,
+ };
+ const TransferDatum = struct {
++    allocator: std.mem.Allocator,
+     client: *curl.CURL,
+     coords: types.XYZ,
+     data_arraylist: std.ArrayList(u8),
+@@ -293,9 +294,10 @@ fn curl_add_to_multi_and_register_transfer(tile_cache: *Self, coords: types.XYZ,
+ 
+     const transfer_datum: *TransferDatum = datum: {
+         var dat = try tile_cache.allocator.create(TransferDatum);
++        dat.allocator = tile_cache.allocator;
+         dat.client = curl.curl_easy_init().?;
+         dat.coords = coords;
+-        dat.data_arraylist = std.ArrayList(u8).init(tile_cache.allocator);
++        dat.data_arraylist = std.ArrayList(u8).empty;
+         dat.progress_dl_now = null;
+         dat.progress_dl_total = null;
+         dat.load_to_texture = load_to_texture;
+@@ -358,7 +360,7 @@ fn curl_callback_tile_write(
+     //utildbg.log("Write!!: \n", .{});
+     const transfer_datum: *TransferDatum = @alignCast(@ptrCast(user_data));
+     const typed_data: [*]u8 = @ptrCast(data);
+-    transfer_datum.data_arraylist.appendSlice(typed_data[0 .. nmemb * size]) catch return 0;
++    transfer_datum.data_arraylist.appendSlice(transfer_datum.allocator, typed_data[0 .. nmemb * size]) catch return 0;
+     return nmemb * size;
+ }
+ 
+@@ -457,7 +459,7 @@ fn download_loop_transfer_complete(tile_cache: *Self, msg: *curl.CURLMsg) !void
+ fn download_loop_transfer_cleanup(tile_cache: *Self, client: ?*curl.CURL) !void {
+     if (tile_cache.curl_client_to_coords(client)) |coords| {
+         const transfer_datum = tile_cache.transfer_map.get(coords).?;
+-        tile_cache.transfer_map.get(coords).?.data_arraylist.deinit();
++        tile_cache.transfer_map.get(coords).?.data_arraylist.deinit(tile_cache.allocator);
+         _ = tile_cache.transfer_map.swapRemove(coords);
+         tile_cache.allocator.destroy(transfer_datum);
+ 
+diff --git a/src/api/bind_button.zig b/src/api/bind_button.zig
+index eff94bc..b29d7d6 100644
+--- a/src/api/bind_button.zig
++++ b/src/api/bind_button.zig
+@@ -40,7 +40,7 @@ fn bind_button(mepo: *Mepo, visible_only_when_pin_active: bool, group_number: ?u
+         }
+     }
+ 
+-    try mepo.uibuttons.append(.{
++    try mepo.uibuttons.append(mepo.allocator, .{
+         .text = try mepo.allocator.dupeZ(u8, text),
+         .group_number = group_number,
+         .jsonapi_click_single = try mepo.allocator.dupeZ(u8, expression_click_single),
+diff --git a/src/api/filedump.zig b/src/api/filedump.zig
+index 36c5a74..e67ea83 100644
+--- a/src/api/filedump.zig
++++ b/src/api/filedump.zig
+@@ -26,6 +26,7 @@ fn execute(mepo: *Mepo, args: [types.MepoFnNargs]types.MepoArg) !void {
+ pub fn filedump(mepo: *Mepo, save_types: []const u8, filepath: []const u8) !void {
+     var arena = std.heap.ArenaAllocator.init(mepo.allocator);
+     defer arena.deinit();
++    const allocator = arena.allocator();
+ 
+     const expanded_path = try utilfile.wordexp_filepath(arena.allocator(), filepath);
+     try utilfile.mkdirp_folder_basename(expanded_path);
+@@ -36,7 +37,8 @@ pub fn filedump(mepo: *Mepo, save_types: []const u8, filepath: []const u8) !void
+         cmd: [:0]const u8,
+         args: std.json.ArrayHashMap(std.json.Value),
+     };
+-    var statements = std.ArrayList(Statement).init(arena.allocator());
++    var statements = std.ArrayList(Statement).empty;
++    defer statements.clearAndFree(allocator);
+ 
+     // 1. Preferences
+     if (std.mem.containsAtLeast(u8, save_types, 1, "r")) {
+@@ -52,7 +54,7 @@ pub fn filedump(mepo: *Mepo, save_types: []const u8, filepath: []const u8) !void
+                 var args = std.StringArrayHashMap(std.json.Value).init(arena.allocator());
+                 try args.put("pref", .{ .string = pref.name });
+                 try args.put("value", .{ .string = if (pref.value.t) |tv| tv else "" });
+-                try statements.append(.{ .cmd = "prefset_t", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args }, .{}) });
++                try statements.append(allocator, .{ .cmd = "prefset_t", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args }, .{}) });
+             } else if (format_as == .Number) {
+                 var args = std.StringArrayHashMap(std.json.Value).init(arena.allocator());
+                 try args.put("pref", .{ .string = pref.name });
+@@ -62,12 +64,12 @@ pub fn filedump(mepo: *Mepo, save_types: []const u8, filepath: []const u8) !void
+                     .f => pref.value.f,
+                     else => unreachable,
+                 } });
+-                try statements.append(.{ .cmd = "prefset_n", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args }, .{}) });
++                try statements.append(allocator, .{ .cmd = "prefset_n", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args }, .{}) });
+             } else if (format_as == .HexText) {
+                 var args = std.StringArrayHashMap(std.json.Value).init(arena.allocator());
+                 try args.put("pref", .{ .string = pref.name });
+                 try args.put("value", .{ .string = try std.fmt.allocPrint(arena.allocator(), "#{x}", .{pref.value.u24}) });
+-                try statements.append(.{ .cmd = "prefset_t", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args }, .{}) });
++                try statements.append(allocator, .{ .cmd = "prefset_t", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args }, .{}) });
+             }
+         }
+     }
+@@ -89,7 +91,7 @@ pub fn filedump(mepo: *Mepo, save_types: []const u8, filepath: []const u8) !void
+                     if (pin.category == .Structural) break :b 1;
+                     break :b 0;
+                 } });
+-                try statements.append(.{ .cmd = "pin_add", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args_pinadd }, .{}) });
++                try statements.append(allocator, .{ .cmd = "pin_add", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args_pinadd }, .{}) });
+ 
+                 // Pin metadata
+                 var it = pin.metadata.iterator();
+@@ -102,7 +104,7 @@ pub fn filedump(mepo: *Mepo, save_types: []const u8, filepath: []const u8) !void
+                     try args_pinmeta.put("group", .{ .integer = @intCast(pg_i) });
+                     try args_pinmeta.put("key", .{ .string = kv.key_ptr.* });
+                     try args_pinmeta.put("value", .{ .string = kv.value_ptr.* });
+-                    try statements.append(.{ .cmd = "pin_meta", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args_pinmeta }, .{}) });
++                    try statements.append(allocator, .{ .cmd = "pin_meta", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args_pinmeta }, .{}) });
+                 }
+             }
+         }
+@@ -110,7 +112,7 @@ pub fn filedump(mepo: *Mepo, save_types: []const u8, filepath: []const u8) !void
+         // Pin Group activate
+         var args_pingroupactivate = std.StringArrayHashMap(std.json.Value).init(arena.allocator());
+         try args_pingroupactivate.put("group", .{ .integer = mepo.pin_group_active });
+-        try statements.append(.{ .cmd = "pin_groupactivate", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args_pingroupactivate }, .{}) });
++        try statements.append(allocator, .{ .cmd = "pin_groupactivate", .args = try std.json.ArrayHashMap(std.json.Value).jsonParseFromValue(arena.allocator(), .{ .object = args_pingroupactivate }, .{}) });
+     }
+ 
+     const str = try std.json.Stringify.valueAlloc(arena.allocator(), statements.items, .{
+diff --git a/src/api/pin_add.zig b/src/api/pin_add.zig
+index b849984..9a8c7b2 100644
+--- a/src/api/pin_add.zig
++++ b/src/api/pin_add.zig
+@@ -32,7 +32,7 @@ fn pin_add(mepo: *Mepo, group: i32, is_structural: bool, lat: f64, lon: f64, han
+         }
+     }
+ 
+-    try mepo.pin_groups[pin_group].append(.{
++    try mepo.pin_groups[pin_group].append(mepo.allocator, .{
+         .lat = lat,
+         .lon = lon,
+         .handle = if (handle.len == 0) null else try mepo.allocator.dupeZ(u8, handle), // E.g. for routes.. pins dont have handles
+diff --git a/src/api/pin_purge.zig b/src/api/pin_purge.zig
+index 7288a62..424f95a 100644
+--- a/src/api/pin_purge.zig
++++ b/src/api/pin_purge.zig
+@@ -25,5 +25,5 @@ fn execute(mepo: *Mepo, _: [types.MepoFnNargs]types.MepoArg) !void {
+             }
+         }
+     }
+-    mepo.pin_groups[mepo.pin_group_active].clearAndFree();
++    mepo.pin_groups[mepo.pin_group_active].clearAndFree(mepo.allocator);
+ }
+diff --git a/src/api/pin_transfer.zig b/src/api/pin_transfer.zig
+index 5e0bdde..7b5d947 100644
+--- a/src/api/pin_transfer.zig
++++ b/src/api/pin_transfer.zig
+@@ -42,7 +42,7 @@ fn pin_transfer(mepo: *Mepo, from_group_number: i32, target_pin_handle: [:0]cons
+     };
+ 
+     if (from_pin_i_opt) |from_pin_i| {
+-        try mepo.pin_groups[to_group].append(mepo.pin_groups[from_group].items[from_pin_i]);
++        try mepo.pin_groups[to_group].append(mepo.allocator, mepo.pin_groups[from_group].items[from_pin_i]);
+         _ = mepo.pin_groups[from_group].orderedRemove(from_pin_i);
+ 
+         // If pin to transfer is the currently active pin we
+@@ -56,7 +56,7 @@ fn pin_transfer(mepo: *Mepo, from_group_number: i32, target_pin_handle: [:0]cons
+         }
+     } else {
+         for (mepo.pin_groups[from_group].items, 0..) |_, pin_i| {
+-            try mepo.pin_groups[to_group].append(mepo.pin_groups[from_group].items[pin_i]);
++            try mepo.pin_groups[to_group].append(mepo.allocator, mepo.pin_groups[from_group].items[pin_i]);
+         }
+         for (mepo.pin_groups[from_group].items) |_| {
+             _ = mepo.pin_groups[from_group].orderedRemove(0);
+diff --git a/src/blit/blit.zig b/src/blit/blit.zig
+index 32c1386..94b2ad5 100644
+--- a/src/blit/blit.zig
++++ b/src/blit/blit.zig
+@@ -250,8 +250,9 @@ fn blit_overlay_pindetails(mepo: *Mepo) !void {
+ 
+     var arena = std.heap.ArenaAllocator.init(mepo.allocator);
+     defer arena.deinit();
++    const allocator = arena.allocator();
+ 
+-    var al = std.ArrayList([2][:0]const u8).init(arena.allocator());
++    var al = std.ArrayList([2][:0]const u8).empty;
+     if (mepo.pin_group_active_item) |_| {
+         const pin = mepo.pin_groups[mepo.pin_group_active].items[mepo.pin_group_active_item.?];
+         const pin_coords_str = try std.fmt.allocPrintZ(arena.allocator(), "{d:.5} lat / {d:.5} lon", .{ pin.lat, pin.lon });
+@@ -267,11 +268,11 @@ fn blit_overlay_pindetails(mepo: *Mepo) !void {
+         });
+ 
+         if (pin.handle != null) {
+-            try al.append(([_][:0]const u8{ "Handle:", pin.handle.? })[0..].*);
++            try al.append(allocator, ([_][:0]const u8{ "Handle:", pin.handle.? })[0..].*);
+         }
+-        try al.append(([_][:0]const u8{ "Coords:", pin_coords_str })[0..].*);
++        try al.append(allocator, ([_][:0]const u8{ "Coords:", pin_coords_str })[0..].*);
+         if (p.get(p.pref.overlay_pindetails_expanded).b) {
+-            try al.append(([_][:0]const u8{ try std.fmt.allocPrintZ(
++            try al.append(allocator, ([_][:0]const u8{ try std.fmt.allocPrintZ(
+                 arena.allocator(),
+                 "Group {d}:",
+                 .{mepo.pin_group_active},
+@@ -283,14 +284,14 @@ fn blit_overlay_pindetails(mepo: *Mepo) !void {
+                     mepo.pin_groups[mepo.pin_group_active].items.len,
+                 },
+             ) })[0..].*);
+-            try al.append(([_][:0]const u8{ "Dist:", distance_str })[0..].*);
++            try al.append(allocator, ([_][:0]const u8{ "Dist:", distance_str })[0..].*);
+             for (pin.metadata.keys()) |k| {
+                 const duped = try std.fmt.allocPrintZ(arena.allocator(), "{s}", .{k});
+-                try al.append(([_][:0]const u8{ duped, pin.metadata.get(k).? })[0..].*);
++                try al.append(allocator, ([_][:0]const u8{ duped, pin.metadata.get(k).? })[0..].*);
+             }
+         }
+         const off_y = p.get(p.pref.fontsize_ui).u + 26;
+-        try blit_table(mepo, 5, off_y, 5, al.items);
++        try blit_table(mepo, 5, off_y, 5, try al.toOwnedSlice(allocator));
+     }
+ }
+ 
+@@ -512,15 +513,15 @@ fn blit_help(mepo: *Mepo) !void {
+     if (!p.get(p.pref.help).b) return;
+ 
+     const msg = msg: {
+-        var acc = std.ArrayList([]const u8).init(mepo.allocator);
+-        defer acc.deinit();
++        var acc = std.ArrayList([]const u8).empty;
++        defer acc.deinit(mepo.allocator);
+         defer for (acc.items) |item| mepo.allocator.free(item);
+ 
+         var it = mepo.table_keybindings.iterator();
+ 
+         while (it.next()) |kv| {
+             const keymod = utilsdl.sdl_keymod_to_str(kv.key_ptr.keymod);
+-            try acc.append(try std.fmt.allocPrint(mepo.allocator, "{s} {c} = {s}", .{ keymod, kv.key_ptr.key, kv.value_ptr.* }));
++            try acc.append(mepo.allocator, try std.fmt.allocPrint(mepo.allocator, "{s} {c} = {s}", .{ keymod, kv.key_ptr.key, kv.value_ptr.* }));
+         }
+ 
+         break :msg try std.mem.join(mepo.allocator, "\n", acc.items);
