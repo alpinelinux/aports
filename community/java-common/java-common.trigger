@@ -8,7 +8,7 @@ if [ -x forced-jvm ]; then
 	ln -sfn forced-jvm default-jvm
 else
 	# if no "forced-jvm" is present, then the latest installed version is taken
-	LATEST=`ls -d java-* | sort -Vr | head -1`
+	LATEST=`ls -d java-*/bin/java | sort -Vr | head -1 | cut -d/ -f1`
 	if [ "$LATEST" ]; then
 		ln -sfn $LATEST default-jvm
 	fi
