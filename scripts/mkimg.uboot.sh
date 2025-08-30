@@ -27,6 +27,6 @@ profile_uboot() {
 	case "$ARCH" in
 		aarch64|armv7) kernel_addons="xtables-addons";;
 	esac
-	initfs_features="base ext4 kms mmc nvme phy raid scsi squashfs usb"
+	initfs_features="base ext4 kms mmc nvme phy raid scsi squashfs usb virtio"
 	uboot_install="yes"
 }
