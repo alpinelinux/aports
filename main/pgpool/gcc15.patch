@@ -1,0 +1,984 @@
+Patch-Source: https://github.com/pgpool/pgpool2/issues/124
+--
+From 1ae2fb5d374096ada124d00a6e58feab1a468567 Mon Sep 17 00:00:00 2001
+From: Tatsuo Ishii <ishii@postgresql.org>
+Date: Sun, 31 Aug 2025 15:49:15 +0900
+Subject: [PATCH v2] Allow to compile against gcc 15 (C23).
+
+This commit includes multiple fixes to compile Pgpool-II in Fedora 42,
+which uses gcc 15 (C23).
+
+- Modify pool_type.h. "bool" is now standard in C99 and
+  above. PostgreSQL decided to require C99 to compile it. So we follow
+  the way, which is just including <stdbool.h>.  Also we define
+  TRUE/FALSE to (bool) 1 and (bool) 0 respectively. They are used only
+  in Windows build in PostgreSQL but we still use them in some
+  places. Eventually we should replace it with true/false since we do
+  not support Windows.
+
+- It is now required that function pointer arguments matches the
+  function prototype to be called. For example:
+  static pid_t worker_fork_a_child(ProcessType type, void (*func) (), void *params);
+  should be:
+  static pid_t worker_fork_a_child(ProcessType type, void (*func) (void *), void *params);
+
+  Also the prototype of pool_create_relcache() is changed,
+
+- raw_expression_tree_walker() calls walker() in many places. Now
+  callers of walker() should cast the first argument of it using (Node
+  *). We replace the call:
+	return walker(((RangeVar *) node)->alias, context);
+	with:
+	return WALK(((RangeVar *) node)->alias, context);
+	where WALK is defined as:
+   	#define WALK(n,c) walker((Node *) (n), c)
+
+- Note: we have lots of warnings regarding OpenSSL while compiling
+  Pgpool-II in Fedora42. The version used in Fedora42:
+
+  $ openssl -version
+  OpenSSL 3.2.4 11 Feb 2025 (Library: OpenSSL 3.2.4 11 Feb 2025)
+
+  The fix is not included in this commit. We need
+  to look into it in the future.
+
+Discussion: https://github.com/pgpool/pgpool2/issues/124
+---
+ src/include/main/health_check.h               |   4 +-
+ src/include/pool.h                            |   2 +-
+ src/include/pool_type.h                       |  42 ++--
+ src/include/utils/pool_relcache.h             |  10 +-
+ src/include/utils/pool_select_walker.h        |   7 +-
+ src/main/health_check.c                       |  37 +--
+ src/main/pgpool_main.c                        |   4 +-
+ src/rewrite/pool_timestamp.c                  | 222 +++++++++---------
+ src/streaming_replication/pool_worker_child.c |   2 +-
+ .../010.rewrite_timestamp/timestamp/main.c    |   4 +-
+ src/utils/pool_relcache.c                     |   4 +-
+ 11 files changed, 173 insertions(+), 165 deletions(-)
+
+diff --git a/src/include/main/health_check.h b/src/include/main/health_check.h
+index ad26f2f0a..f7736a38b 100644
+--- a/src/include/main/health_check.h
++++ b/src/include/main/health_check.h
+@@ -3,7 +3,7 @@
+  * pgpool: a language independent connection pool server for PostgreSQL
+  * written by Tatsuo Ishii
+  *
+- * Copyright (c) 2003-2020	PgPool Global Development Group
++ * Copyright (c) 2003-2025	PgPool Global Development Group
+  *
+  * Permission to use, copy, modify, and distribute this software and
+  * its documentation for any purpose and without fee is hereby
+@@ -43,7 +43,7 @@ typedef struct {
+ 
+ extern volatile POOL_HEALTH_CHECK_STATISTICS	*health_check_stats;	/* health check stats area in shared memory */
+ 
+-extern void do_health_check_child(int *node_id);
++extern void do_health_check_child(void *params);
+ extern size_t	health_check_stats_shared_memory_size(void);
+ extern void		health_check_stats_init(POOL_HEALTH_CHECK_STATISTICS *addr);
+ 
+diff --git a/src/include/pool.h b/src/include/pool.h
+index 95570c08e..576bb1d57 100644
+--- a/src/include/pool.h
++++ b/src/include/pool.h
+@@ -650,7 +650,7 @@ extern size_t strlcpy(char *dst, const char *src, size_t siz);
+ #endif
+ 
+ /* pool_worker_child.c */
+-extern void do_worker_child(void);
++extern void do_worker_child(void *params);
+ extern int	get_query_result(POOL_CONNECTION_POOL_SLOT * *slots, int backend_id, char *query, POOL_SELECT_RESULT * *res);
+ 
+ #endif							/* POOL_H */
+diff --git a/src/include/pool_type.h b/src/include/pool_type.h
+index 43f29a595..a2d4948f2 100644
+--- a/src/include/pool_type.h
++++ b/src/include/pool_type.h
+@@ -31,32 +31,34 @@
+ #include <sys/socket.h>
+ #include <stddef.h>
+ #include "libpq-fe.h"
+-/* Define common boolean type. C++ and BEOS already has it so exclude them. */
+-#ifdef c_plusplus
+-#ifndef __cplusplus
+-#define __cplusplus
+-#endif							/* __cplusplus */
+-#endif							/* c_plusplus */
+-
+-#ifndef __BEOS__
+-#ifndef __cplusplus
+-#ifndef bool
+-typedef char bool;
+-#endif
+-#ifndef true
+-#define true ((bool) 1)
+-#endif
++
++/* ----------------------------------------------------------------
++ *				Section 2:	bool, true, false
++ * ----------------------------------------------------------------
++ */
++
++/*
++ * bool
++ *		Boolean value, either true or false.
++ *
++ * PostgreSQL currently cannot deal with bool of size other than 1; there are
++ * static assertions around the code to prevent that.
++ */
++
++#include <stdbool.h>
++
++/*
++ * Pgpool-II still uses TRUE/FALSE, that are only used Windows build in
++ * PostgreSQL.  In the feature, we should replace TRUE/FALSE with true/false,
++ * but until that day...
++ */
++
+ #ifndef TRUE
+ #define TRUE ((bool) 1)
+ #endif
+-#ifndef false
+-#define false ((bool) 0)
+-#endif
+ #ifndef FALSE
+ #define FALSE ((bool) 0)
+ #endif
+-#endif							/* not C++ */
+-#endif							/* __BEOS__ */
+ 
+ /* ----------------------------------------------------------------
+  *              Section 5:  offsetof, lengthof, endof, alignment
+diff --git a/src/include/utils/pool_relcache.h b/src/include/utils/pool_relcache.h
+index 70b7d3143..bffdc8777 100644
+--- a/src/include/utils/pool_relcache.h
++++ b/src/include/utils/pool_relcache.h
+@@ -6,7 +6,7 @@
+  * pgpool: a language independent connection pool server for PostgreSQL
+  * written by Tatsuo Ishii
+  *
+- * Copyright (c) 2003-2010	PgPool Global Development Group
++ * Copyright (c) 2003-2025	PgPool Global Development Group
+  *
+  * Permission to use, copy, modify, and distribute this software and
+  * its documentation for any purpose and without fee is hereby
+@@ -34,8 +34,6 @@
+ 
+ /* Relation lookup cache structure */
+ 
+-typedef void *(*func_ptr) ();
+-
+ typedef struct
+ {
+ 	char		dbname[MAX_ITEM_LENGTH];	/* database name */
+@@ -57,13 +55,13 @@ typedef struct
+ 	 * POOL_SELECT_RESULT *. This function must return a pointer to be saved
+ 	 * in cache->data.
+ 	 */
+-	func_ptr	register_func;
++	void	   *(*register_func) (POOL_SELECT_RESULT *data);
+ 
+ 	/*
+ 	 * User defined function to be called at data unregister. Argument
+ 	 * cache->data.
+ 	 */
+-	func_ptr	unregister_func;
++	void	   *(*unregister_func) (void *data);
+ 	bool		cache_is_session_local; /* True if cache life time is session
+ 										 * local */
+ 	bool		no_cache_if_zero;	/* if register func returns 0, do not
+@@ -72,7 +70,7 @@ typedef struct
+ }			POOL_RELCACHE;
+ 
+ extern POOL_RELCACHE * pool_create_relcache(int cachesize, char *sql,
+-											func_ptr register_func, func_ptr unregister_func,
++										   void *(*register_func) (POOL_SELECT_RESULT *), void *(*unregister_func) (void *),
+ 											bool issessionlocal);
+ extern void pool_discard_relcache(POOL_RELCACHE * relcache);
+ extern void *pool_search_relcache(POOL_RELCACHE * relcache, POOL_CONNECTION_POOL * backend, char *table);
+diff --git a/src/include/utils/pool_select_walker.h b/src/include/utils/pool_select_walker.h
+index 0ae7ffe7c..3f5c6e7d9 100644
+--- a/src/include/utils/pool_select_walker.h
++++ b/src/include/utils/pool_select_walker.h
+@@ -6,7 +6,7 @@
+  * pgpool: a language independent connection pool server for PostgreSQL
+  * written by Tatsuo Ishii
+  *
+- * Copyright (c) 2003-2024	PgPool Global Development Group
++ * Copyright (c) 2003-2025	PgPool Global Development Group
+  *
+  * Permission to use, copy, modify, and distribute this software and
+  * its documentation for any purpose and without fee is hereby
+@@ -54,6 +54,9 @@ typedef struct
+ 	char		table_names[POOL_MAX_SELECT_OIDS][NAMEDATALEN];	/* table names */
+ }			SelectContext;
+ 
++
++typedef bool (*tree_walker_callback) (Node *node, void *context);
++
+ extern int	pool_get_terminate_backend_pid(Node *node);
+ extern bool pool_has_function_call(Node *node);
+ extern bool pool_has_non_immutable_function_call(Node *node);
+@@ -66,7 +69,7 @@ extern bool pool_has_row_security(Node *node);
+ extern bool pool_has_insertinto_or_locking_clause(Node *node);
+ extern bool pool_has_pgpool_regclass(void);
+ extern bool pool_has_to_regclass(void);
+-extern bool raw_expression_tree_walker(Node *node, bool (*walker) (), void *context);
++extern bool raw_expression_tree_walker(Node *node, tree_walker_callback walker, void *context);
+ extern int	pool_table_name_to_oid(char *table_name);
+ extern int	pool_extract_table_oids_from_select_stmt(Node *node, SelectContext * ctx);
+ extern RangeVar *makeRangeVarFromNameList(List *names);
+diff --git a/src/main/health_check.c b/src/main/health_check.c
+index ae831dd6d..514fe2900 100644
+--- a/src/main/health_check.c
++++ b/src/main/health_check.c
+@@ -108,7 +108,7 @@ static bool check_backend_down_request(int node, bool done_requests);
+ * health check child main loop
+ */
+ void
+-do_health_check_child(int *node_id)
++do_health_check_child(void *params)
+ {
+ 	sigjmp_buf	local_sigjmp_buf;
+ 	MemoryContext HealthCheckMemoryContext;
+@@ -116,19 +116,22 @@ do_health_check_child(int *node_id)
+ 	static struct timeval	start_time;
+ 	static struct timeval	end_time;
+ 	long	diff_t;
++	int			node_id;
+ 
+ 	POOL_HEALTH_CHECK_STATISTICS	mystat;
+-	stats = &health_check_stats[*node_id];
++
++	node_id = *((int *) params);
++	stats = &health_check_stats[node_id];
+ 
+ 	/* Set application name */
+-	set_application_name_with_suffix(PT_HEALTH_CHECK, *node_id);
++	set_application_name_with_suffix(PT_HEALTH_CHECK, node_id);
+ 
+ 	ereport(DEBUG1,
+-			(errmsg("I am health check process pid:%d DB node id:%d", getpid(), *node_id)));
++			(errmsg("I am health check process pid:%d DB node id:%d", getpid(), node_id)));
+ 
+ 	/* Identify myself via ps */
+ 	init_ps_display("", "", "", "");
+-	snprintf(psbuffer, sizeof(psbuffer), "health check process(%d)", *node_id);
++	snprintf(psbuffer, sizeof(psbuffer), "health check process(%d)", node_id);
+ 	set_ps_display(psbuffer, false);
+ 
+ 	/* set up signal handlers */
+@@ -190,7 +193,7 @@ do_health_check_child(int *node_id)
+ 
+ 		CHECK_REQUEST;
+ 
+-		if (pool_config->health_check_params[*node_id].health_check_period <= 0)
++		if (pool_config->health_check_params[node_id].health_check_period <= 0)
+ 		{
+ 			stats->min_health_check_duration = 0;
+ 			sleep(30);
+@@ -200,27 +203,27 @@ do_health_check_child(int *node_id)
+ 		 * If health checking is enabled and the node is not in down status,
+ 		 * do health check.
+ 		 */
+-		else if (pool_config->health_check_params[*node_id].health_check_period > 0)
++		else if (pool_config->health_check_params[node_id].health_check_period > 0)
+ 		{
+ 			bool		result;
+-			BackendInfo *bkinfo = pool_get_node_info(*node_id);
++			BackendInfo *bkinfo = pool_get_node_info(node_id);
+ 
+ 			stats->total_count++;
+ 			gettimeofday(&start_time, NULL);
+ 
+ 			stats->last_health_check = time(NULL);
+ 
+-			result = establish_persistent_connection(*node_id);
++			result = establish_persistent_connection(node_id);
+ 
+ 			if (result && slot == NULL)
+ 			{
+ 				stats->last_failed_health_check = time(NULL);
+ 
+-				if (POOL_DISALLOW_TO_FAILOVER(BACKEND_INFO(*node_id).flag))
++				if (POOL_DISALLOW_TO_FAILOVER(BACKEND_INFO(node_id).flag))
+ 				{
+ 					ereport(LOG,
+ 							(errmsg("health check failed on node %d but failover is disallowed for the node",
+-									*node_id)));
++									node_id)));
+ 				}
+ 				else
+ 				{
+@@ -229,19 +232,19 @@ do_health_check_child(int *node_id)
+ 					stats->fail_count++;
+ 
+ 					ereport(LOG, (errmsg("health check failed on node %d (timeout:%d)",
+-										 *node_id, health_check_timer_expired)));
++										 node_id, health_check_timer_expired)));
+ 
+ 					if (bkinfo->backend_status == CON_DOWN && bkinfo->quarantine == true)
+ 					{
+ 						ereport(LOG, (errmsg("health check failed on quarantine node %d (timeout:%d)",
+-											 *node_id, health_check_timer_expired),
++											 node_id, health_check_timer_expired),
+ 									  errdetail("ignoring..")));
+ 					}
+ 					else
+ 					{
+ 						/* trigger failover */
+ 						partial = health_check_timer_expired ? false : true;
+-						degenerate_backend_set(node_id, 1, partial ? REQ_DETAIL_SWITCHOVER : 0);
++						degenerate_backend_set(&node_id, 1, partial ? REQ_DETAIL_SWITCHOVER : 0);
+ 					}
+ 				}
+ 			}
+@@ -253,7 +256,7 @@ do_health_check_child(int *node_id)
+ 				/* The node has become reachable again. Reset
+ 				 * the quarantine state
+ 				 */
+-				send_failback_request(*node_id, false, REQ_DETAIL_UPDATE | REQ_DETAIL_WATCHDOG);
++				send_failback_request(node_id, false, REQ_DETAIL_UPDATE | REQ_DETAIL_WATCHDOG);
+ 			}
+ 			else if (result && slot)
+ 			{
+@@ -270,7 +273,7 @@ do_health_check_child(int *node_id)
+ 			}
+ 
+ 			/* Discard persistent connections */
+-			discard_persistent_connection(*node_id);
++			discard_persistent_connection(node_id);
+ 
+ 			/*
+ 			 Update health check duration only if health check was not skipped
+@@ -298,7 +301,7 @@ do_health_check_child(int *node_id)
+ 
+ 			memcpy(&mystat, (void *)stats, sizeof(mystat));
+ 
+-			sleep(pool_config->health_check_params[*node_id].health_check_period);
++			sleep(pool_config->health_check_params[node_id].health_check_period);
+ 		}
+ 	}
+ 	exit(0);
+diff --git a/src/main/pgpool_main.c b/src/main/pgpool_main.c
+index d74cf12b2..12a906809 100644
+--- a/src/main/pgpool_main.c
++++ b/src/main/pgpool_main.c
+@@ -151,7 +151,7 @@ static void signal_user1_to_parent_with_reason(User1SignalReason reason);
+ static void FileUnlink(int code, Datum path);
+ static pid_t pcp_fork_a_child(int *fds, char *pcp_conf_file);
+ static pid_t fork_a_child(int *fds, int id);
+-static pid_t worker_fork_a_child(ProcessType type, void (*func) (), void *params);
++static pid_t worker_fork_a_child(ProcessType type, void (*func) (void *), void *params);
+ static int	create_unix_domain_socket(struct sockaddr_un un_addr_tmp, const char *group, const int permissions);
+ static int *create_unix_domain_sockets_by_list(struct sockaddr_un *un_addrs, char *group, int permissions, int n_sockets);
+ static int *create_inet_domain_sockets(const char *hostname, const int port);
+@@ -876,7 +876,7 @@ fork_a_child(int *fds, int id)
+ * fork worker child process
+ */
+ static pid_t
+-worker_fork_a_child(ProcessType type, void (*func) (), void *params)
++worker_fork_a_child(ProcessType type, void (*func) (void *), void *params)
+ {
+ 	pid_t		pid;
+ 
+diff --git a/src/rewrite/pool_timestamp.c b/src/rewrite/pool_timestamp.c
+index 4dca05e9f..c10259675 100644
+--- a/src/rewrite/pool_timestamp.c
++++ b/src/rewrite/pool_timestamp.c
+@@ -5,7 +5,7 @@
+  * pgpool: a language independent connection pool server for PostgreSQL
+  * written by Tatsuo Ishii
+  *
+- * Copyright (c) 2003-2023	PgPool Global Development Group
++ * Copyright (c) 2003-2025	PgPool Global Development Group
+  *
+  * Permission to use, copy, modify, and distribute this software and
+  * its documentation for any purpose and without fee is hereby
+@@ -74,7 +74,6 @@ static char *get_current_timestamp(POOL_CONNECTION_POOL * backend);
+ static Node *makeTsExpr(TSRewriteContext * ctx);
+ static TypeCast *makeTypeCastFromSvfOp(SQLValueFunctionOp op);
+ static A_Const *makeStringConstFromQuery(POOL_CONNECTION_POOL * backend, char *expression);
+-bool		raw_expression_tree_walker(Node *node, bool (*walker) (), void *context);
+ 
+ POOL_RELCACHE *ts_relcache;
+ 
+@@ -1360,9 +1359,10 @@ makeTypeCastFromSvfOp(SQLValueFunctionOp op)
+  */
+ bool
+ raw_expression_tree_walker(Node *node,
+-						   bool (*walker) (),
++						   tree_walker_callback walker,
+ 						   void *context)
+ {
++#define WALK(n,c) walker((Node *) (n), c)
+ 	ListCell   *temp;
+ 
+ 	/*
+@@ -1395,17 +1395,17 @@ raw_expression_tree_walker(Node *node,
+ 			/* we assume the colnames list isn't interesting */
+ 			break;
+ 		case T_RangeVar:
+-			return walker(((RangeVar *) node)->alias, context);
++			return WALK(((RangeVar *) node)->alias, context);
+ 		case T_GroupingFunc:
+-			return walker(((GroupingFunc *) node)->args, context);
++			return WALK(((GroupingFunc *) node)->args, context);
+ 		case T_SubLink:
+ 			{
+ 				SubLink    *sublink = (SubLink *) node;
+ 
+-				if (walker(sublink->testexpr, context))
++				if (WALK(sublink->testexpr, context))
+ 					return true;
+ 				/* we assume the operName is not interesting */
+-				if (walker(sublink->subselect, context))
++				if (WALK(sublink->subselect, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1413,7 +1413,7 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				CaseExpr   *caseexpr = (CaseExpr *) node;
+ 
+-				if (walker(caseexpr->arg, context))
++				if (WALK(caseexpr->arg, context))
+ 					return true;
+ 				/* we assume walker doesn't care about CaseWhens, either */
+ 				foreach(temp, caseexpr->args)
+@@ -1421,48 +1421,48 @@ raw_expression_tree_walker(Node *node,
+ 					CaseWhen   *when = (CaseWhen *) lfirst(temp);
+ 
+ 					Assert(IsA(when, CaseWhen));
+-					if (walker(when->expr, context))
++					if (WALK(when->expr, context))
+ 						return true;
+-					if (walker(when->result, context))
++					if (WALK(when->result, context))
+ 						return true;
+ 				}
+-				if (walker(caseexpr->defresult, context))
++				if (WALK(caseexpr->defresult, context))
+ 					return true;
+ 			}
+ 			break;
+ 		case T_RowExpr:
+ 			/* Assume colnames isn't interesting */
+-			return walker(((RowExpr *) node)->args, context);
++			return WALK(((RowExpr *) node)->args, context);
+ 		case T_CoalesceExpr:
+-			return walker(((CoalesceExpr *) node)->args, context);
++			return WALK(((CoalesceExpr *) node)->args, context);
+ 		case T_MinMaxExpr:
+-			return walker(((MinMaxExpr *) node)->args, context);
++			return WALK(((MinMaxExpr *) node)->args, context);
+ 		case T_XmlExpr:
+ 			{
+ 				XmlExpr    *xexpr = (XmlExpr *) node;
+ 
+-				if (walker(xexpr->named_args, context))
++				if (WALK(xexpr->named_args, context))
+ 					return true;
+ 				/* we assume walker doesn't care about arg_names */
+-				if (walker(xexpr->args, context))
++				if (WALK(xexpr->args, context))
+ 					return true;
+ 			}
+ 			break;
+ 		case T_NullTest:
+-			return walker(((NullTest *) node)->arg, context);
++			return WALK(((NullTest *) node)->arg, context);
+ 		case T_BooleanTest:
+-			return walker(((BooleanTest *) node)->arg, context);
++			return WALK(((BooleanTest *) node)->arg, context);
+ 		case T_JoinExpr:
+ 			{
+ 				JoinExpr   *join = (JoinExpr *) node;
+ 
+-				if (walker(join->larg, context))
++				if (WALK(join->larg, context))
+ 					return true;
+-				if (walker(join->rarg, context))
++				if (WALK(join->rarg, context))
+ 					return true;
+-				if (walker(join->quals, context))
++				if (WALK(join->quals, context))
+ 					return true;
+-				if (walker(join->alias, context))
++				if (WALK(join->alias, context))
+ 					return true;
+ 				/* using list is deemed uninteresting */
+ 			}
+@@ -1471,18 +1471,18 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				IntoClause *into = (IntoClause *) node;
+ 
+-				if (walker(into->rel, context))
++				if (WALK(into->rel, context))
+ 					return true;
+ 				/* colNames, options are deemed uninteresting */
+ 				/* viewQuery should be null in raw parsetree, but check it */
+-				if (walker(into->viewQuery, context))
++				if (WALK(into->viewQuery, context))
+ 					return true;
+ 			}
+ 			break;
+ 		case T_List:
+ 			foreach(temp, (List *) node)
+ 			{
+-				if (walker((Node *) lfirst(temp), context))
++				if (WALK((Node *) lfirst(temp), context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1490,11 +1490,11 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				MergeWhenClause *mergeWhenClause = (MergeWhenClause *) node;
+ 
+-				if (walker(mergeWhenClause->condition, context))
++				if (WALK(mergeWhenClause->condition, context))
+ 					return true;
+-				if (walker(mergeWhenClause->targetList, context))
++				if (WALK(mergeWhenClause->targetList, context))
+ 					return true;
+-				if (walker(mergeWhenClause->values, context))
++				if (WALK(mergeWhenClause->values, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1502,9 +1502,9 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				MergeAction *action = (MergeAction *) node;
+ 
+-				if (walker(action->targetList, context))
++				if (WALK(action->targetList, context))
+ 					return true;
+-				if (walker(action->qual, context))
++				if (WALK(action->qual, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1512,17 +1512,17 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				InsertStmt *stmt = (InsertStmt *) node;
+ 
+-				if (walker(stmt->relation, context))
++				if (WALK(stmt->relation, context))
+ 					return true;
+-				if (walker(stmt->cols, context))
++				if (WALK(stmt->cols, context))
+ 					return true;
+-				if (walker(stmt->selectStmt, context))
++				if (WALK(stmt->selectStmt, context))
+ 					return true;
+-				if (walker(stmt->onConflictClause, context))
++				if (WALK(stmt->onConflictClause, context))
+ 					return true;
+-				if (walker(stmt->returningList, context))
++				if (WALK(stmt->returningList, context))
+ 					return true;
+-				if (walker(stmt->withClause, context))
++				if (WALK(stmt->withClause, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1530,15 +1530,15 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				DeleteStmt *stmt = (DeleteStmt *) node;
+ 
+-				if (walker(stmt->relation, context))
++				if (WALK(stmt->relation, context))
+ 					return true;
+-				if (walker(stmt->usingClause, context))
++				if (WALK(stmt->usingClause, context))
+ 					return true;
+-				if (walker(stmt->whereClause, context))
++				if (WALK(stmt->whereClause, context))
+ 					return true;
+-				if (walker(stmt->returningList, context))
++				if (WALK(stmt->returningList, context))
+ 					return true;
+-				if (walker(stmt->withClause, context))
++				if (WALK(stmt->withClause, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1546,17 +1546,17 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				UpdateStmt *stmt = (UpdateStmt *) node;
+ 
+-				if (walker(stmt->relation, context))
++				if (WALK(stmt->relation, context))
+ 					return true;
+-				if (walker(stmt->targetList, context))
++				if (WALK(stmt->targetList, context))
+ 					return true;
+-				if (walker(stmt->whereClause, context))
++				if (WALK(stmt->whereClause, context))
+ 					return true;
+-				if (walker(stmt->fromClause, context))
++				if (WALK(stmt->fromClause, context))
+ 					return true;
+-				if (walker(stmt->returningList, context))
++				if (WALK(stmt->returningList, context))
+ 					return true;
+-				if (walker(stmt->withClause, context))
++				if (WALK(stmt->withClause, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1564,37 +1564,37 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				SelectStmt *stmt = (SelectStmt *) node;
+ 
+-				if (walker(stmt->distinctClause, context))
++				if (WALK(stmt->distinctClause, context))
+ 					return true;
+-				if (walker(stmt->intoClause, context))
++				if (WALK(stmt->intoClause, context))
+ 					return true;
+-				if (walker(stmt->targetList, context))
++				if (WALK(stmt->targetList, context))
+ 					return true;
+-				if (walker(stmt->fromClause, context))
++				if (WALK(stmt->fromClause, context))
+ 					return true;
+-				if (walker(stmt->whereClause, context))
++				if (WALK(stmt->whereClause, context))
+ 					return true;
+-				if (walker(stmt->groupClause, context))
++				if (WALK(stmt->groupClause, context))
+ 					return true;
+-				if (walker(stmt->havingClause, context))
++				if (WALK(stmt->havingClause, context))
+ 					return true;
+-				if (walker(stmt->windowClause, context))
++				if (WALK(stmt->windowClause, context))
+ 					return true;
+-				if (walker(stmt->valuesLists, context))
++				if (WALK(stmt->valuesLists, context))
+ 					return true;
+-				if (walker(stmt->sortClause, context))
++				if (WALK(stmt->sortClause, context))
+ 					return true;
+-				if (walker(stmt->limitOffset, context))
++				if (WALK(stmt->limitOffset, context))
+ 					return true;
+-				if (walker(stmt->limitCount, context))
++				if (WALK(stmt->limitCount, context))
+ 					return true;
+-				if (walker(stmt->lockingClause, context))
++				if (WALK(stmt->lockingClause, context))
+ 					return true;
+-				if (walker(stmt->withClause, context))
++				if (WALK(stmt->withClause, context))
+ 					return true;
+-				if (walker(stmt->larg, context))
++				if (WALK(stmt->larg, context))
+ 					return true;
+-				if (walker(stmt->rarg, context))
++				if (WALK(stmt->rarg, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1602,9 +1602,9 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				A_Expr	   *expr = (A_Expr *) node;
+ 
+-				if (walker(expr->lexpr, context))
++				if (WALK(expr->lexpr, context))
+ 					return true;
+-				if (walker(expr->rexpr, context))
++				if (WALK(expr->rexpr, context))
+ 					return true;
+ 				/* operator name is deemed uninteresting */
+ 			}
+@@ -1613,7 +1613,7 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				BoolExpr   *expr = (BoolExpr *) node;
+ 
+-				if (walker(expr->args, context))
++				if (WALK(expr->args, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1624,26 +1624,26 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				FuncCall   *fcall = (FuncCall *) node;
+ 
+-				if (walker(fcall->args, context))
++				if (WALK(fcall->args, context))
+ 					return true;
+-				if (walker(fcall->agg_order, context))
++				if (WALK(fcall->agg_order, context))
+ 					return true;
+-				if (walker(fcall->agg_filter, context))
++				if (WALK(fcall->agg_filter, context))
+ 					return true;
+-				if (walker(fcall->over, context))
++				if (WALK(fcall->over, context))
+ 					return true;
+ 				/* function name is deemed uninteresting */
+ 			}
+ 			break;
+ 		case T_NamedArgExpr:
+-			return walker(((NamedArgExpr *) node)->arg, context);
++			return WALK(((NamedArgExpr *) node)->arg, context);
+ 		case T_A_Indices:
+ 			{
+ 				A_Indices  *indices = (A_Indices *) node;
+ 
+-				if (walker(indices->lidx, context))
++				if (WALK(indices->lidx, context))
+ 					return true;
+-				if (walker(indices->uidx, context))
++				if (WALK(indices->uidx, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1651,51 +1651,51 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				A_Indirection *indir = (A_Indirection *) node;
+ 
+-				if (walker(indir->arg, context))
++				if (WALK(indir->arg, context))
+ 					return true;
+-				if (walker(indir->indirection, context))
++				if (WALK(indir->indirection, context))
+ 					return true;
+ 			}
+ 			break;
+ 		case T_A_ArrayExpr:
+-			return walker(((A_ArrayExpr *) node)->elements, context);
++			return WALK(((A_ArrayExpr *) node)->elements, context);
+ 		case T_ResTarget:
+ 			{
+ 				ResTarget  *rt = (ResTarget *) node;
+ 
+-				if (walker(rt->indirection, context))
++				if (WALK(rt->indirection, context))
+ 					return true;
+-				if (walker(rt->val, context))
++				if (WALK(rt->val, context))
+ 					return true;
+ 			}
+ 			break;
+ 		case T_MultiAssignRef:
+-			return walker(((MultiAssignRef *) node)->source, context);
++			return WALK(((MultiAssignRef *) node)->source, context);
+ 		case T_TypeCast:
+ 			{
+ 				TypeCast   *tc = (TypeCast *) node;
+ 
+-				if (walker(tc->arg, context))
++				if (WALK(tc->arg, context))
+ 					return true;
+-				if (walker(tc->typeName, context))
++				if (WALK(tc->typeName, context))
+ 					return true;
+ 			}
+ 			break;
+ 		case T_CollateClause:
+-			return walker(((CollateClause *) node)->arg, context);
++			return WALK(((CollateClause *) node)->arg, context);
+ 		case T_SortBy:
+-			return walker(((SortBy *) node)->node, context);
++			return WALK(((SortBy *) node)->node, context);
+ 		case T_WindowDef:
+ 			{
+ 				WindowDef  *wd = (WindowDef *) node;
+ 
+-				if (walker(wd->partitionClause, context))
++				if (WALK(wd->partitionClause, context))
+ 					return true;
+-				if (walker(wd->orderClause, context))
++				if (WALK(wd->orderClause, context))
+ 					return true;
+-				if (walker(wd->startOffset, context))
++				if (WALK(wd->startOffset, context))
+ 					return true;
+-				if (walker(wd->endOffset, context))
++				if (WALK(wd->endOffset, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1703,9 +1703,9 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				RangeSubselect *rs = (RangeSubselect *) node;
+ 
+-				if (walker(rs->subquery, context))
++				if (WALK(rs->subquery, context))
+ 					return true;
+-				if (walker(rs->alias, context))
++				if (WALK(rs->alias, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1713,11 +1713,11 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				RangeFunction *rf = (RangeFunction *) node;
+ 
+-				if (walker(rf->functions, context))
++				if (WALK(rf->functions, context))
+ 					return true;
+-				if (walker(rf->alias, context))
++				if (WALK(rf->alias, context))
+ 					return true;
+-				if (walker(rf->coldeflist, context))
++				if (WALK(rf->coldeflist, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1725,12 +1725,12 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				RangeTableSample *rts = (RangeTableSample *) node;
+ 
+-				if (walker(rts->relation, context))
++				if (WALK(rts->relation, context))
+ 					return true;
+ 				/* method name is deemed uninteresting */
+-				if (walker(rts->args, context))
++				if (WALK(rts->args, context))
+ 					return true;
+-				if (walker(rts->repeatable, context))
++				if (WALK(rts->repeatable, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1738,9 +1738,9 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				TypeName   *tn = (TypeName *) node;
+ 
+-				if (walker(tn->typmods, context))
++				if (WALK(tn->typmods, context))
+ 					return true;
+-				if (walker(tn->arrayBounds, context))
++				if (WALK(tn->arrayBounds, context))
+ 					return true;
+ 				/* type name itself is deemed uninteresting */
+ 			}
+@@ -1749,38 +1749,38 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				ColumnDef  *coldef = (ColumnDef *) node;
+ 
+-				if (walker(coldef->typeName, context))
++				if (WALK(coldef->typeName, context))
+ 					return true;
+-				if (walker(coldef->raw_default, context))
++				if (WALK(coldef->raw_default, context))
+ 					return true;
+-				if (walker(coldef->collClause, context))
++				if (WALK(coldef->collClause, context))
+ 					return true;
+ 				/* for now, constraints are ignored */
+ 			}
+ 			break;
+ 		case T_GroupingSet:
+-			return walker(((GroupingSet *) node)->content, context);
++			return WALK(((GroupingSet *) node)->content, context);
+ 		case T_LockingClause:
+-			return walker(((LockingClause *) node)->lockedRels, context);
++			return WALK(((LockingClause *) node)->lockedRels, context);
+ 		case T_XmlSerialize:
+ 			{
+ 				XmlSerialize *xs = (XmlSerialize *) node;
+ 
+-				if (walker(xs->expr, context))
++				if (WALK(xs->expr, context))
+ 					return true;
+-				if (walker(xs->typeName, context))
++				if (WALK(xs->typeName, context))
+ 					return true;
+ 			}
+ 			break;
+ 		case T_WithClause:
+-			return walker(((WithClause *) node)->ctes, context);
++			return WALK(((WithClause *) node)->ctes, context);
+ 		case T_InferClause:
+ 			{
+ 				InferClause *stmt = (InferClause *) node;
+ 
+-				if (walker(stmt->indexElems, context))
++				if (WALK(stmt->indexElems, context))
+ 					return true;
+-				if (walker(stmt->whereClause, context))
++				if (WALK(stmt->whereClause, context))
+ 					return true;
+ 			}
+ 			break;
+@@ -1788,16 +1788,16 @@ raw_expression_tree_walker(Node *node,
+ 			{
+ 				OnConflictClause *stmt = (OnConflictClause *) node;
+ 
+-				if (walker(stmt->infer, context))
++				if (WALK(stmt->infer, context))
+ 					return true;
+-				if (walker(stmt->targetList, context))
++				if (WALK(stmt->targetList, context))
+ 					return true;
+-				if (walker(stmt->whereClause, context))
++				if (WALK(stmt->whereClause, context))
+ 					return true;
+ 			}
+ 			break;
+ 		case T_CommonTableExpr:
+-			return walker(((CommonTableExpr *) node)->ctequery, context);
++			return WALK(((CommonTableExpr *) node)->ctequery, context);
+ 		default:
+ 
+ 			/*
+diff --git a/src/streaming_replication/pool_worker_child.c b/src/streaming_replication/pool_worker_child.c
+index 746659e0f..e91deaff5 100644
+--- a/src/streaming_replication/pool_worker_child.c
++++ b/src/streaming_replication/pool_worker_child.c
+@@ -106,7 +106,7 @@ static	volatile bool follow_primary_lock_acquired;
+ * worker child main loop
+ */
+ void
+-do_worker_child(void)
++do_worker_child(void *params)
+ {
+ 	sigjmp_buf	local_sigjmp_buf;
+ 	MemoryContext WorkerMemoryContext;
+diff --git a/src/test/regression/tests/010.rewrite_timestamp/timestamp/main.c b/src/test/regression/tests/010.rewrite_timestamp/timestamp/main.c
+index 89a36f2c0..da1c71584 100644
+--- a/src/test/regression/tests/010.rewrite_timestamp/timestamp/main.c
++++ b/src/test/regression/tests/010.rewrite_timestamp/timestamp/main.c
+@@ -90,7 +90,9 @@ Pgversion(POOL_CONNECTION_POOL * backend)
+ }
+ 
+ POOL_RELCACHE *
+-pool_create_relcache(int cachesize, char *sql, func_ptr register_func, func_ptr unregister_func, bool issessionlocal)
++pool_create_relcache(int cachesize, char *sql,
++					 void *(*register_func) (), void *(*unregister_func) (),
++					 bool issessionlocal)
+ {
+ 	return (POOL_RELCACHE *) 1;
+ }
+diff --git a/src/utils/pool_relcache.c b/src/utils/pool_relcache.c
+index 32362fc6b..e5bf8e0d8 100644
+--- a/src/utils/pool_relcache.c
++++ b/src/utils/pool_relcache.c
+@@ -5,7 +5,7 @@
+  * pgpool: a language independent connection pool server for PostgreSQL
+  * written by Tatsuo Ishii
+  *
+- * Copyright (c) 2003-2023	PgPool Global Development Group
++ * Copyright (c) 2003-2025	PgPool Global Development Group
+  *
+  * Permission to use, copy, modify, and distribute this software and
+  * its documentation for any purpose and without fee is hereby
+@@ -48,7 +48,7 @@ static char *relation_cache_to_query_cache(POOL_SELECT_RESULT *res,size_t *size)
+  */
+ POOL_RELCACHE *
+ pool_create_relcache(int cachesize, char *sql,
+-					 func_ptr register_func, func_ptr unregister_func,
++					 void *(*register_func) (POOL_SELECT_RESULT *), void *(*unregister_func) (void *),
+ 					 bool issessionlocal)
+ {
+ 	POOL_RELCACHE *p;
+-- 
+2.25.1
+
