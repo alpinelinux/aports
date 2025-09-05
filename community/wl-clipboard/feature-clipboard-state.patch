@@ -1,0 +1,186 @@
+Patch-Source:
+- https://github.com/bugaevc/wl-clipboard/commit/e3c1b21ddd0885fba909602cf21e9f4f35862dea
+- https://github.com/bugaevc/wl-clipboard/commit/1e50b65d5ef94d2e595cfaf30a81f933ba80b1f9
+
+diff --git a/data/wl-clipboard.1 b/data/wl-clipboard.1
+index 6846977..2236a82 100644
+--- a/data/wl-clipboard.1
++++ b/data/wl-clipboard.1
+@@ -96,6 +96,12 @@ of the spawned processes (see below).
+ .IP
+ This mode requires a compositor that supports the wlroots data-control protocol.
+ .TP
++\fB\-\-sensitive\fR (for \fBwl-copy\fR)
++Hint that the data being copied contains passwords, keys, or other sensitive
++content. Some clipboard managers may react by not persisting the copied data in
++the clipboard history. This corresponds to \fBCLIPBOARD_STATE=sensitive\fR (see
++below).
++.TP
+ \fB\-v\fR, \fB\-\-version
+ Display the version of wl-clipboard and some short info about its license.
+ .TP
+diff --git a/src/types/copy-action.c b/src/types/copy-action.c
+index 19b7599..9975c35 100644
+--- a/src/types/copy-action.c
++++ b/src/types/copy-action.c
+@@ -69,9 +69,23 @@ static void on_focus(
+ static void do_send(struct source *source, const char *mime_type, int fd) {
+     struct copy_action *self = source->data;
+ 
+-     /* Unset O_NONBLOCK */
++    /* Unset O_NONBLOCK */
+     fcntl(fd, F_SETFL, 0);
+ 
++    if (!strcmp(mime_type, x_kde_password_manager_hint)) {
++        /* We always respond to x-kde-passwordManagerHint,
++         * even though we only offer it when --sensitive
++         * is set.
++         */
++        const char *data = self->sensitive ? "secret" : "public";
++        write(fd, data, strlen(data));
++        close(fd);
++        /* This does not count as pasting, so don't invoke
++         * our pasted_callback, just return.
++         */
++        return;
++    }
++
+     if (self->fd_to_copy_from != -1) {
+         /* Copy the file to the given file descriptor
+          * by spawning an appropriate cat process.
+diff --git a/src/types/copy-action.h b/src/types/copy-action.h
+index babe179..426e929 100644
+--- a/src/types/copy-action.h
++++ b/src/types/copy-action.h
+@@ -33,6 +33,7 @@ struct copy_action {
+     struct source *source;
+     struct popup_surface *popup_surface;
+     int primary;
++    int sensitive;
+ 
+     void (*did_set_selection_callback)(struct copy_action *self);
+     void (*pasted_callback)(struct copy_action *self);
+diff --git a/src/util/string.h b/src/util/string.h
+index 1477944..8275d7a 100644
+--- a/src/util/string.h
++++ b/src/util/string.h
+@@ -21,6 +21,7 @@
+ 
+ #define text_plain "text/plain"
+ #define text_plain_utf8 "text/plain;charset=utf-8"
++#define x_kde_password_manager_hint "x-kde-passwordManagerHint"
+ 
+ typedef char * const *argv_t;
+ 
+diff --git a/src/wl-copy.c b/src/wl-copy.c
+index b040cb6..bee20ff 100644
+--- a/src/wl-copy.c
++++ b/src/wl-copy.c
+@@ -43,6 +43,7 @@ static struct {
+     int trim_newline;
+     int paste_once;
+     int primary;
++    int sensitive;
+     const char *seat_name;
+ } options;
+ 
+@@ -121,6 +122,7 @@ static void print_usage(FILE *f, const char *argv0) {
+         "\t-n, --trim-newline\tDo not copy the trailing newline character.\n"
+         "\t-t, --type mime/type\t"
+         "Override the inferred MIME type for the content.\n"
++        "\t    --sensitive\t\tHint that the content is sensitive.\n"
+         "\t-s, --seat seat-name\t"
+         "Pick the seat to work with.\n"
+         "\t-v, --version\t\tDisplay version info.\n"
+@@ -147,6 +149,7 @@ static void parse_options(int argc, argv_t argv) {
+         {"foreground", no_argument, 0, 'f'},
+         {"clear", no_argument, 0, 'c'},
+         {"type", required_argument, 0, 't'},
++        {"sensitive", no_argument, 0, 'S'},
+         {"seat", required_argument, 0, 's'},
+         {0, 0, 0, 0}
+     };
+@@ -185,6 +188,9 @@ static void parse_options(int argc, argv_t argv) {
+         case 't':
+             options.mime_type = strdup(optarg);
+             break;
++        case 'S':
++            options.sensitive = 1;
++            break;
+         case 's':
+             options.seat_name = strdup(optarg);
+             break;
+@@ -246,6 +252,7 @@ int main(int argc, argv_t argv) {
+     copy_action->fd_to_copy_from = -1;
+     copy_action->device = device;
+     copy_action->primary = options.primary;
++    copy_action->sensitive = options.sensitive;
+ 
+     if (!options.clear) {
+         if (optind < argc) {
+@@ -305,6 +312,9 @@ int main(int argc, argv_t argv) {
+         }
+         free(options.mime_type);
+         options.mime_type = NULL;
++        if (options.sensitive) {
++            source_offer(copy_action->source, x_kde_password_manager_hint);
++        }
+     }
+ 
+     if (device->needs_popup_surface) {
+diff --git a/data/wl-clipboard.1 b/data/wl-clipboard.1
+index 2236a82..f7f3a90 100644
+--- a/data/wl-clipboard.1
++++ b/data/wl-clipboard.1
+@@ -155,8 +155,9 @@ as to fall back to some sensible behavior if \fBCLIPBOARD_STATE\fR is unset or
+ set to some unrecognized value (this is to leave the design space open for
+ future extensions). However, the currently existing Wayland clipboard protocols
+ don't let wl-clipboard identify the cases where \fBclear\fR and \fBsensitive\fR
+-values should be set, so currently wl-clipboard only ever sets
+-\fBCLIPBOARD_STATE\fR to \fBdata\fR or \fBnil\fR.
++values should be set. For this reason, currently, wl-clipboard never actually
++sets \fBCLIPBOARD_STATE\fR to \fBclear\fR, and only sets it to \fBsensitive\fR
++when it enounters \fBx-kde-passwordManagerHint\fR among the MIME types.
+ .IP
+ The \fBCLIPBOARD_STATE\fR protocol was intentionally designed to not be specific
+ to either wl-clipboard or Wayland; in fact, other clipboard tools are encouraged
+diff --git a/src/wl-paste.c b/src/wl-paste.c
+index dee2fad..63fe526 100644
+--- a/src/wl-paste.c
++++ b/src/wl-paste.c
+@@ -53,6 +53,7 @@ struct types {
+     int inferred_available;
+     int plain_text_utf8_available;
+     int plain_text_available;
++    int has_sensitive_hint;
+     const char *having_explicit_as_prefix;
+     const char *any_text;
+     const char *any;
+@@ -99,6 +100,14 @@ static struct types classify_offer_types(struct offer *offer) {
+         ) {
+             types.having_explicit_as_prefix = mime_type;
+         }
++        if (strcmp(mime_type, x_kde_password_manager_hint) == 0) {
++            /* We should be checking if it contains
++             * the string "secret" as opposed to "public",
++             * but for now let's just use the presence
++             * of the type as an indication.
++             */
++            types.has_sensitive_hint = 1;
++        }
+     }
+     return types;
+ }
+@@ -319,7 +328,11 @@ static void selection_callback(struct offer *offer, int primary) {
+     wl_display_flush(wl_display);
+ 
+     close(pipefd[1]);
+-    rc = run_paste_command(pipefd[0], "data");
++    const char *clipboard_state = "data";
++    if (types.has_sensitive_hint) {
++        clipboard_state = "sensitive";
++    }
++    rc = run_paste_command(pipefd[0], clipboard_state);
+     if (!rc) {
+         if (options.watch) {
+             /* Try to cope without exiting completely */
