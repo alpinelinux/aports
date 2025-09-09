@@ -1,0 +1,94 @@
+From aed4cfd64d178aee677a8790440addda03678cd6 Mon Sep 17 00:00:00 2001
+From: Roger Pau Monne <roger.pau@citrix.com>
+Date: Thu, 3 Jul 2025 13:09:03 +0200
+Subject: [PATCH 3/3] x86/viridian: protect concurrent modification of the
+ reference TSC page
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The reference TSC page is shared between all vCPUs, and the data stored in
+the domain struct.  However the handlers to set and clear it are not safe
+against concurrent accesses.  It's possible for two (or more) vCPUs to call
+HV_X64_MSR_REFERENCE_TSC at the same time and cause the in-use reference
+TSC page to be freed, while still being on the p2m.  This creates an
+information leak, where the page can end up mapped in another domain while
+still being part of the original domain p2m.
+
+It's also possible to underflow the reference counter, as multiple
+concurrent writes to HV_X64_MSR_REFERENCE_TSC can create an imbalance on
+the number of put_page_and_type() calls.
+
+Introduce a lock to protect the reference TSC domain field, thus
+serializing concurrent vCPU accesses.
+
+This is CVE-2025-58143 / part of XSA-472.
+
+Fixes: 386b3365221d ('viridian: use viridian_map/unmap_guest_page() for reference tsc page')
+Signed-off-by: Roger Pau Monné <roger.pau@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/arch/x86/hvm/viridian/time.c        | 4 ++++
+ xen/arch/x86/hvm/viridian/viridian.c    | 2 ++
+ xen/arch/x86/include/asm/hvm/viridian.h | 1 +
+ 3 files changed, 7 insertions(+)
+
+diff --git a/xen/arch/x86/hvm/viridian/time.c b/xen/arch/x86/hvm/viridian/time.c
+index ca6d526f46b7..9311858d63c0 100644
+--- a/xen/arch/x86/hvm/viridian/time.c
++++ b/xen/arch/x86/hvm/viridian/time.c
+@@ -108,8 +108,10 @@ static void time_ref_count_thaw(const struct domain *d)
+ 
+     trc->off = (int64_t)trc->val - trc_val(d, 0);
+ 
++    spin_lock(&vd->lock);
+     if ( vd->reference_tsc.msr.enabled )
+         update_reference_tsc(d, false);
++    spin_unlock(&vd->lock);
+ }
+ 
+ static uint64_t time_ref_count(const struct domain *d)
+@@ -331,6 +333,7 @@ int viridian_time_wrmsr(struct vcpu *v, uint32_t idx, uint64_t val)
+         if ( !(viridian_feature_mask(d) & HVMPV_reference_tsc) )
+             return X86EMUL_EXCEPTION;
+ 
++        spin_lock(&vd->lock);
+         viridian_unmap_guest_page(&vd->reference_tsc);
+         vd->reference_tsc.msr.raw = val;
+         viridian_dump_guest_page(v, "REFERENCE_TSC", &vd->reference_tsc);
+@@ -339,6 +342,7 @@ int viridian_time_wrmsr(struct vcpu *v, uint32_t idx, uint64_t val)
+             viridian_map_guest_page(d, &vd->reference_tsc);
+             update_reference_tsc(d, true);
+         }
++        spin_unlock(&vd->lock);
+         break;
+ 
+     case HV_X64_MSR_TIME_REF_COUNT:
+diff --git a/xen/arch/x86/hvm/viridian/viridian.c b/xen/arch/x86/hvm/viridian/viridian.c
+index 7ea6c9016894..c0be24bd2210 100644
+--- a/xen/arch/x86/hvm/viridian/viridian.c
++++ b/xen/arch/x86/hvm/viridian/viridian.c
+@@ -494,6 +494,8 @@ int viridian_domain_init(struct domain *d)
+     if ( !d->arch.hvm.viridian )
+         return -ENOMEM;
+ 
++    spin_lock_init(&d->arch.hvm.viridian->lock);
++
+     rc = viridian_synic_domain_init(d);
+     if ( rc )
+         goto fail;
+diff --git a/xen/arch/x86/include/asm/hvm/viridian.h b/xen/arch/x86/include/asm/hvm/viridian.h
+index 4c8ff6e80b6f..47c9d13841ac 100644
+--- a/xen/arch/x86/include/asm/hvm/viridian.h
++++ b/xen/arch/x86/include/asm/hvm/viridian.h
+@@ -71,6 +71,7 @@ struct viridian_domain
+     DECLARE_BITMAP(hypercall_flags, _HCALL_nr);
+     struct viridian_time_ref_count time_ref_count;
+     struct viridian_page reference_tsc;
++    spinlock_t lock;
+ };
+ 
+ void cpuid_viridian_leaves(const struct vcpu *v, uint32_t leaf,
+-- 
+2.49.0
+
