@@ -1,0 +1,199 @@
+From e30eae05ab0d0ec43c18816cf9bcf1150b3c3b61 Mon Sep 17 00:00:00 2001
+From: LN Liberda <lauren@selfisekai.rocks>
+Date: Fri, 22 Aug 2025 23:59:00 +0200
+Subject: [PATCH] Update for Zig 0.15
+
+Fixes #11
+---
+ README.md       |  2 +-
+ build.zig       |  8 +++++---
+ build.zig.zon   |  4 ++--
+ src/Loop.zig    | 15 ++++++++++-----
+ src/Tags.zig    |  3 ++-
+ src/Wayland.zig | 12 ++++++------
+ src/main.zig    |  7 ++++++-
+ src/render.zig  |  2 +-
+ 8 files changed, 33 insertions(+), 20 deletions(-)
+
+diff --git a/README.md b/README.md
+index 28b133b..454258b 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,7 @@ On the right-hand side, the current time is shown, this is information is genera
+ 
+ The following dependencies need to be installed:
+ 
+-* [zig] 0.13.0
++* [zig] 0.15.0
+ * [wayland] 1.21.0
+ * [pixman] 0.42.0
+ * [fcft] 3.1.5 (with [utf8proc] support)
+diff --git a/build.zig b/build.zig
+index c8fb224..bf39f21 100644
+--- a/build.zig
++++ b/build.zig
+@@ -33,9 +33,11 @@ pub fn build(b: *std.Build) void {
+ 
+     const exe = b.addExecutable(.{
+         .name = "creek",
+-        .root_source_file = b.path("src/main.zig"),
+-        .target = target,
+-        .optimize = optimize,
++        .root_module = b.createModule(.{
++            .root_source_file = b.path("src/main.zig"),
++            .target = target,
++            .optimize = optimize,
++        }),
+     });
+     exe.pie = pie;
+ 
+diff --git a/build.zig.zon b/build.zig.zon
+index da66d9c..20d7d40 100644
+--- a/build.zig.zon
++++ b/build.zig.zon
+@@ -9,8 +9,8 @@
+             .hash = "pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6HwtMuDX",
+         },
+         .wayland = .{
+-            .url = "https://codeberg.org/ifreund/zig-wayland/archive/v0.3.0.tar.gz",
+-            .hash = "wayland-0.3.0-lQa1kjPIAQDmhGYpY-zxiRzQJFHQ2VqhJkQLbKKdt5wl",
++            .url = "https://codeberg.org/ifreund/zig-wayland/archive/v0.4.0.tar.gz",
++            .hash = "wayland-0.4.0-lQa1khbMAQAsLS2eBR7M5lofyEGPIbu2iFDmoz8lPC27",
+         },
+         .fcft = .{
+             .url = "https://git.sr.ht/~novakane/zig-fcft/archive/v2.0.0.tar.gz",
+diff --git a/src/Loop.zig b/src/Loop.zig
+index ba3550c..06ef7d1 100644
+--- a/src/Loop.zig
++++ b/src/Loop.zig
+@@ -4,6 +4,7 @@ const mem = std.mem;
+ const posix = std.posix;
+ const linux = std.os.linux;
+ const io = std.io;
++const fs = std.fs;
+ 
+ const render = @import("render.zig");
+ const Loop = @This();
+@@ -13,7 +14,7 @@ const state = &@import("root").state;
+ sfd: posix.fd_t,
+ 
+ pub fn init() !Loop {
+-    var mask = posix.empty_sigset;
++    var mask = linux.sigemptyset();
+     linux.sigaddset(&mask, linux.SIG.INT);
+     linux.sigaddset(&mask, linux.SIG.TERM);
+     linux.sigaddset(&mask, linux.SIG.QUIT);
+@@ -45,7 +46,8 @@ pub fn run(self: *Loop) !void {
+         },
+     };
+ 
+-    var reader = io.getStdIn().reader();
++    var readbuffer: [1024]u8 = undefined;
++    var reader = fs.File.stdin().reader(&readbuffer);
+     while (true) {
+         while (true) {
+             const ret = wayland.display.dispatchPending();
+@@ -84,11 +86,14 @@ pub fn run(self: *Loop) !void {
+             if (state.wayland.river_seat) |seat| {
+                 if (seat.focusedBar()) |bar| {
+                     seat.status_text.reset();
+-                    try reader.streamUntilDelimiter(seat.status_text.writer(), '\n', null);
++                    // zig-wayland still uses std.io.DeprecatedWriter.
++                    var tmp_buffer: [1024]u8 = undefined;
++                    var adapter_writer = seat.status_text.writer().adaptToNewApi(&tmp_buffer);
++                    _ = try reader.interface.streamDelimiter(&adapter_writer.new_interface, '\n');
++                    try adapter_writer.new_interface.flush();
+ 
+                     render.renderText(bar, seat.status_text.getWritten()) catch |err| {
+-                        log.err("renderText failed for monitor {}: {s}",
+-                            .{bar.monitor.globalName, @errorName(err)});
++                        log.err("renderText failed for monitor {}: {s}", .{ bar.monitor.globalName, @errorName(err) });
+                         continue;
+                     };
+ 
+diff --git a/src/Tags.zig b/src/Tags.zig
+index b503b32..511c26c 100644
+--- a/src/Tags.zig
++++ b/src/Tags.zig
+@@ -107,10 +107,11 @@ pub fn handleClick(self: *Tags, x: u32) !void {
+ 
+     if (self.monitor.bar) |bar| {
+         const index = x / bar.height;
+-        const payload = try std.fmt.allocPrintZ(
++        const payload = try std.fmt.allocPrintSentinel(
+             state.gpa,
+             "{d}",
+             .{@as(u32, 1) << @as(u5, @intCast(index))},
++            0,
+         );
+         defer state.gpa.free(payload);
+ 
+diff --git a/src/Wayland.zig b/src/Wayland.zig
+index e104aa2..e0fa1a7 100644
+--- a/src/Wayland.zig
++++ b/src/Wayland.zig
+@@ -44,8 +44,8 @@ pub fn init() !Wayland {
+         .display = display,
+         .registry = registry,
+         .fd = wfd,
+-        .monitors = std.ArrayList(*Monitor).init(state.gpa),
+-        .inputs = std.ArrayList(*Input).init(state.gpa),
++        .monitors = std.ArrayList(*Monitor).empty,
++        .inputs = std.ArrayList(*Input).empty,
+     };
+ }
+ 
+@@ -54,8 +54,8 @@ pub fn deinit(self: *Wayland) void {
+     for (self.inputs.items) |input| input.destroy();
+ 
+     if (self.river_seat) |s| s.destroy();
+-    self.monitors.deinit();
+-    self.inputs.deinit();
++    self.monitors.deinit(state.gpa);
++    self.inputs.deinit(state.gpa);
+ 
+     if (self.compositor) |global| global.destroy();
+     if (self.subcompositor) |global| global.destroy();
+@@ -141,9 +141,9 @@ fn bindGlobal(self: *Wayland, registry: *wl.Registry, name: u32, iface: [*:0]con
+         self.control = try registry.bind(name, zriver.ControlV1, 1);
+     } else if (mem.orderZ(u8, iface, wl.Output.interface.name) == .eq) {
+         const monitor = try Monitor.create(registry, name);
+-        try self.monitors.append(monitor);
++        try self.monitors.append(state.gpa, monitor);
+     } else if (mem.orderZ(u8, iface, wl.Seat.interface.name) == .eq) {
+         self.seat = try registry.bind(name, wl.Seat, 5);
+-        try self.inputs.append(try Input.create(name));
++        try self.inputs.append(state.gpa, try Input.create(name));
+     }
+ }
+diff --git a/src/main.zig b/src/main.zig
+index b4695aa..ac3ea64 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -100,7 +100,12 @@ pub fn usage() noreturn {
+         \\
+     ;
+ 
+-    io.getStdErr().writeAll(desc) catch |err| {
++    var buffer: [1024]u8 = undefined;
++    var serr = std.fs.File.stderr().writer(&buffer);
++    serr.interface.writeAll(desc) catch |err| {
++        std.debug.panic("{s}", .{@errorName(err)});
++    };
++    serr.end() catch |err| {
+         std.debug.panic("{s}", .{@errorName(err)});
+     };
+ 
+diff --git a/src/render.zig b/src/render.zig
+index 8c14c0e..88a4d38 100644
+--- a/src/render.zig
++++ b/src/render.zig
+@@ -24,7 +24,7 @@ pub fn toUtf8(gpa: mem.Allocator, bytes: []const u8) ![]u32 {
+         runes.appendAssumeCapacity(rune);
+     }
+ 
+-    return runes.toOwnedSlice();
++    return runes.toOwnedSlice(gpa);
+ }
+ 
+ pub fn renderTags(bar: *Bar) !void {
