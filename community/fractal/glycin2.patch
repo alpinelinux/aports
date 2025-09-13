@@ -1,0 +1,1537 @@
+From 8a7c690d2115f23eac6bee243c668adb23d2036c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?K=C3=A9vin=20Commaille?= <zecakeh@tedomum.fr>
+Date: Mon, 11 Aug 2025 16:36:55 +0200
+Subject: [PATCH 1/4] session: Do not expose Matrix client as property
+
+---
+ src/session/model/session.rs | 67 ++++++++++++++++++------------------
+ 1 file changed, 34 insertions(+), 33 deletions(-)
+
+diff --git a/src/session/model/session.rs b/src/session/model/session.rs
+index e832312f3..db42ca482 100644
+--- a/src/session/model/session.rs
++++ b/src/session/model/session.rs
+@@ -58,10 +58,6 @@ pub enum SessionState {
+     Ready = 2,
+ }
+ 
+-#[derive(Clone, Debug, glib::Boxed)]
+-#[boxed_type(name = "BoxedClient")]
+-pub struct BoxedClient(Client);
+-
+ mod imp {
+     use std::cell::{Cell, OnceCell, RefCell};
+ 
+@@ -70,9 +66,8 @@ mod imp {
+     #[derive(Debug, Default, glib::Properties)]
+     #[properties(wrapper_type = super::Session)]
+     pub struct Session {
+-        /// The Matrix client.
+-        #[property(construct_only)]
+-        client: TokioDrop<BoxedClient>,
++        /// The Matrix client for this session.
++        client: TokioDrop<Client>,
+         /// The list model of the sidebar.
+         #[property(get = Self::sidebar_list_model)]
+         sidebar_list_model: OnceCell<SidebarListModel>,
+@@ -128,27 +123,6 @@ mod imp {
+ 
+     #[glib::derived_properties]
+     impl ObjectImpl for Session {
+-        fn constructed(&self) {
+-            self.parent_constructed();
+-            let obj = self.obj();
+-
+-            self.ignored_users.set_session(Some(obj.clone()));
+-            self.notifications.set_session(Some(obj.clone()));
+-            self.user_sessions.init(&obj, obj.user_id().clone());
+-
+-            let monitor = gio::NetworkMonitor::default();
+-            let handler_id = monitor.connect_network_changed(clone!(
+-                #[weak(rename_to = imp)]
+-                self,
+-                move |_, _| {
+-                    spawn!(async move {
+-                        imp.update_homeserver_reachable().await;
+-                    });
+-                }
+-            ));
+-            self.network_monitor_handler_id.replace(Some(handler_id));
+-        }
+-
+         fn dispose(&self) {
+             // Needs to be disconnected or else it may restart the sync
+             if let Some(handler_id) = self.network_monitor_handler_id.take() {
+@@ -176,9 +150,34 @@ mod imp {
+     }
+ 
+     impl Session {
+-        // The Matrix client.
++        /// Set the Matrix client for this session.
++        pub(super) fn set_client(&self, client: Client) {
++            self.client
++                .set(client)
++                .expect("client should be uninitialized");
++
++            let obj = self.obj();
++
++            self.ignored_users.set_session(Some(obj.clone()));
++            self.notifications.set_session(Some(obj.clone()));
++            self.user_sessions.init(&obj, obj.user_id().clone());
++
++            let monitor = gio::NetworkMonitor::default();
++            let handler_id = monitor.connect_network_changed(clone!(
++                #[weak(rename_to = imp)]
++                self,
++                move |_, _| {
++                    spawn!(async move {
++                        imp.update_homeserver_reachable().await;
++                    });
++                }
++            ));
++            self.network_monitor_handler_id.replace(Some(handler_id));
++        }
++
++        /// The Matrix client for this session.
+         pub(super) fn client(&self) -> &Client {
+-            &self.client.get().expect("session should be restored").0
++            self.client.get().expect("client should be initialized")
+         }
+ 
+         /// The list model of the sidebar.
+@@ -752,11 +751,13 @@ impl Session {
+         .await
+         .expect("task was not aborted")?;
+ 
+-        Ok(glib::Object::builder()
++        let obj = glib::Object::builder::<Self>()
+             .property("info", stored_session)
+             .property("settings", settings)
+-            .property("client", BoxedClient(client))
+-            .build())
++            .build();
++        obj.imp().set_client(client);
++
++        Ok(obj)
+     }
+ 
+     /// Create a new session from the session of the given Matrix client.
+-- 
+GitLab
+
+
+From 45975191282ab9f7140cbb6f0459a95813b9f631 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?K=C3=A9vin=20Commaille?= <zecakeh@tedomum.fr>
+Date: Mon, 11 Aug 2025 16:53:15 +0200
+Subject: [PATCH 2/4] utils: Simplify TokioDrop API
+
+It is now just a wrapper.
+---
+ src/session/model/session.rs                  |  4 +-
+ .../room_history/message_toolbar/mod.rs       |  3 +-
+ src/utils/mod.rs                              | 68 ++++++-------------
+ 3 files changed, 23 insertions(+), 52 deletions(-)
+
+diff --git a/src/session/model/session.rs b/src/session/model/session.rs
+index db42ca482..7f0859b89 100644
+--- a/src/session/model/session.rs
++++ b/src/session/model/session.rs
+@@ -67,7 +67,7 @@ mod imp {
+     #[properties(wrapper_type = super::Session)]
+     pub struct Session {
+         /// The Matrix client for this session.
+-        client: TokioDrop<Client>,
++        client: OnceCell<TokioDrop<Client>>,
+         /// The list model of the sidebar.
+         #[property(get = Self::sidebar_list_model)]
+         sidebar_list_model: OnceCell<SidebarListModel>,
+@@ -153,7 +153,7 @@ mod imp {
+         /// Set the Matrix client for this session.
+         pub(super) fn set_client(&self, client: Client) {
+             self.client
+-                .set(client)
++                .set(TokioDrop::new(client))
+                 .expect("client should be uninitialized");
+ 
+             let obj = self.obj();
+diff --git a/src/session/view/content/room_history/message_toolbar/mod.rs b/src/session/view/content/room_history/message_toolbar/mod.rs
+index 1ceda34dc..9993dd9c9 100644
+--- a/src/session/view/content/room_history/message_toolbar/mod.rs
++++ b/src/session/view/content/room_history/message_toolbar/mod.rs
+@@ -813,8 +813,7 @@ mod imp {
+                     }
+                     future::Either::Right((response, _)) => {
+                         // The linux location stream requires a tokio executor when dropped.
+-                        let stream_drop = TokioDrop::new();
+-                        let _ = stream_drop.set(location_stream);
++                        let _ = TokioDrop::new(location_stream);
+ 
+                         if response == gtk::ResponseType::Ok {
+                             break;
+diff --git a/src/utils/mod.rs b/src/utils/mod.rs
+index 48b0f4868..c17bec4bf 100644
+--- a/src/utils/mod.rs
++++ b/src/utils/mod.rs
+@@ -3,8 +3,9 @@
+ use std::{
+     borrow::Cow,
+     cell::{Cell, OnceCell, RefCell},
+-    fmt, fs, io,
+-    io::Write,
++    fmt, fs,
++    io::{self, Write},
++    ops::Deref,
+     path::{Path, PathBuf},
+     rc::{Rc, Weak},
+     sync::{Arc, LazyLock},
+@@ -384,36 +385,30 @@ impl<T> AsyncAction<T> {
+     }
+ }
+ 
+-/// A type that requires the tokio runtime to be running when dropped.
+-///
+-/// This is basically usable as a [`OnceCell`].
++/// A wrapper that requires the tokio runtime to be running when dropped.
+ #[derive(Debug, Clone)]
+-pub struct TokioDrop<T>(OnceCell<T>);
++pub struct TokioDrop<T>(Option<T>);
+ 
+ impl<T> TokioDrop<T> {
+-    /// Create a new empty `TokioDrop`;
+-    pub fn new() -> Self {
+-        Self::default()
++    /// Create a new `TokioDrop` wrapping the given type.
++    pub fn new(value: T) -> Self {
++        Self(Some(value))
+     }
++}
+ 
+-    /// Gets a reference to the underlying value.
+-    ///
+-    /// Returns `None` if the cell is empty.
+-    pub fn get(&self) -> Option<&T> {
+-        self.0.get()
+-    }
++impl<T> Deref for TokioDrop<T> {
++    type Target = T;
+ 
+-    /// Sets the contents of this cell to `value`.
+-    ///
+-    /// Returns `Ok(())` if the cell was empty and `Err(value)` if it was full.
+-    pub(crate) fn set(&self, value: T) -> Result<(), T> {
+-        self.0.set(value)
++    fn deref(&self) -> &Self::Target {
++        self.0
++            .as_ref()
++            .expect("TokioDrop should always contain a value")
+     }
+ }
+ 
+-impl<T> Default for TokioDrop<T> {
+-    fn default() -> Self {
+-        Self(Default::default())
++impl<T> From<T> for TokioDrop<T> {
++    fn from(value: T) -> Self {
++        Self::new(value)
+     }
+ }
+ 
+@@ -421,35 +416,12 @@ impl<T> Drop for TokioDrop<T> {
+     fn drop(&mut self) {
+         let _guard = RUNTIME.enter();
+ 
+-        if let Some(inner) = self.0.take() {
+-            drop(inner);
++        if let Some(value) = self.0.take() {
++            drop(value);
+         }
+     }
+ }
+ 
+-impl<T: glib::property::Property> glib::property::Property for TokioDrop<T> {
+-    type Value = T::Value;
+-}
+-
+-impl<T> glib::property::PropertyGet for TokioDrop<T> {
+-    type Value = T;
+-
+-    fn get<R, F: Fn(&Self::Value) -> R>(&self, f: F) -> R {
+-        f(self.get().unwrap())
+-    }
+-}
+-
+-impl<T> glib::property::PropertySet for TokioDrop<T> {
+-    type SetValue = T;
+-
+-    fn set(&self, v: Self::SetValue) {
+-        assert!(
+-            self.set(v).is_ok(),
+-            "TokioDrop value was already initialized"
+-        );
+-    }
+-}
+-
+ /// The state of a resource that can be loaded.
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, glib::Enum)]
+ #[enum_type(name = "LoadingState")]
+-- 
+GitLab
+
+
+From 0e9d34dd9d24e1632b1a5214d54a65a9bfc181bb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?K=C3=A9vin=20Commaille?= <zecakeh@tedomum.fr>
+Date: Mon, 11 Aug 2025 17:03:24 +0200
+Subject: [PATCH 3/4] Upgrade glycin
+
+Tests the beta for GNOME 49 with the loaders in the Flatpak runtime.
+---
+ Cargo.lock                                    | 142 ++++++++++++++++--
+ Cargo.toml                                    |   2 +-
+ build-aux/org.gnome.Fractal.Devel.json        |  21 ---
+ .../media/animated_image_paintable.rs         |  20 +--
+ src/utils/media/image/mod.rs                  |  18 ++-
+ src/utils/media/image/queue.rs                |  74 ++-------
+ 6 files changed, 168 insertions(+), 109 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index c36614aa5..76b5ad7b4 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -216,6 +216,17 @@ dependencies = [
+  "tokio",
+ ]
+ 
++[[package]]
++name = "async-lock"
++version = "3.4.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5fd03604047cee9b6ce9de9f70c6cd540a0520c813cbd49bae61f33ab80ed1dc"
++dependencies = [
++ "event-listener",
++ "event-listener-strategy",
++ "pin-project-lite",
++]
++
+ [[package]]
+ name = "async-recursion"
+ version = "1.1.1"
+@@ -259,6 +270,12 @@ dependencies = [
+  "syn",
+ ]
+ 
++[[package]]
++name = "async-task"
++version = "4.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
++
+ [[package]]
+ name = "async-trait"
+ version = "0.1.88"
+@@ -453,6 +470,19 @@ dependencies = [
+  "generic-array",
+ ]
+ 
++[[package]]
++name = "blocking"
++version = "1.6.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e83f8d02be6967315521be875afa792a316e28d57b5a2d401897e2a7921b7f21"
++dependencies = [
++ "async-channel",
++ "async-task",
++ "futures-io",
++ "futures-lite",
++ "piper",
++]
++
+ [[package]]
+ name = "bloomfilter"
+ version = "1.0.16"
+@@ -695,12 +725,37 @@ dependencies = [
+  "cfg-if",
+ ]
+ 
++[[package]]
++name = "crossbeam-deque"
++version = "0.8.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
++dependencies = [
++ "crossbeam-epoch",
++ "crossbeam-utils",
++]
++
++[[package]]
++name = "crossbeam-epoch"
++version = "0.9.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
++dependencies = [
++ "crossbeam-utils",
++]
++
+ [[package]]
+ name = "crossbeam-utils"
+ version = "0.8.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+ 
++[[package]]
++name = "crunchy"
++version = "0.2.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
++
+ [[package]]
+ name = "crypto-common"
+ version = "0.1.6"
+@@ -1684,14 +1739,16 @@ dependencies = [
+ 
+ [[package]]
+ name = "glycin"
+-version = "2.1.1"
++version = "3.0.0-beta.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "37cb9e103cb6b8925bf5e8a1cf8a1166797d8aaefaabd03e68cf6ad7443a1baa"
++checksum = "0ca9a2584f5315609d3284b8885ebd7f8475b991b2ae77b7fdfb22b723fe3321"
+ dependencies = [
+  "futures-channel",
+  "futures-util",
+  "gdk4",
+  "gio",
++ "glib",
++ "glycin-common",
+  "glycin-utils",
+  "gufo-common",
+  "gufo-exif",
+@@ -1711,25 +1768,51 @@ dependencies = [
+  "zbus",
+ ]
+ 
++[[package]]
++name = "glycin-common"
++version = "1.0.0-beta.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3344437ebbb38f373d52a2636cefdae31689d32042bbed402438d29abe04d9e9"
++dependencies = [
++ "bitflags 2.9.1",
++ "gufo-common",
++ "half",
++ "memmap2",
++ "nix 0.29.0",
++ "paste",
++ "rmp-serde",
++ "serde",
++ "thiserror 2.0.12",
++ "zerocopy",
++ "zvariant",
++]
++
+ [[package]]
+ name = "glycin-utils"
+-version = "3.0.1"
++version = "4.0.0-beta.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c0816d1db00696479cda3cd6c914fb07115982b019dac96555d203c0d5b6d37a"
++checksum = "5bb0e781372a461edbf6efddf5fb5ea4b700581773ca6a962cbf9666c8765a46"
+ dependencies = [
++ "async-lock",
++ "bitflags 2.9.1",
++ "blocking",
+  "env_logger",
++ "futures-util",
++ "glycin-common",
+  "gufo-common",
++ "half",
+  "libc",
+  "libseccomp",
+  "log",
+  "memmap2",
+  "nix 0.29.0",
+  "paste",
+- "rmp-serde",
++ "rayon",
+  "serde",
+  "thiserror 2.0.12",
+  "tokio",
+  "zbus",
++ "zerocopy",
+ ]
+ 
+ [[package]]
+@@ -2073,9 +2156,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "gufo-common"
+-version = "0.2.0"
++version = "1.0.0-beta"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ccb2b4c040e67e6d6ad954f04693a11864df82bce6c6c468524b6a78bb75581f"
++checksum = "6b369fe87840c7f9769e475e65500420072bf040c09b12d00fda83567190ea0f"
+ dependencies = [
+  "paste",
+  "serde",
+@@ -2084,9 +2167,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "gufo-exif"
+-version = "0.2.2"
++version = "0.3.0-beta"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1448d72e2458b35dd10c0f148ea913b38c61b649552b22a97fa836ec376189ff"
++checksum = "42ed15d1144c2ea214eaf8cb8a83168c9a4dccdbc3b18b889e5610f8cf33128d"
+ dependencies = [
+  "gufo-common",
+  "thiserror 2.0.12",
+@@ -2112,6 +2195,16 @@ dependencies = [
+  "tracing",
+ ]
+ 
++[[package]]
++name = "half"
++version = "2.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "459196ed295495a68f7d7fe1d84f6c4b7ff0e21fe3017b2f283c6fac3ad803c9"
++dependencies = [
++ "cfg-if",
++ "crunchy",
++]
++
+ [[package]]
+ name = "hashbrown"
+ version = "0.15.5"
+@@ -3866,6 +3959,17 @@ version = "0.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+ 
++[[package]]
++name = "piper"
++version = "0.2.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "96c8c490f422ef9a4efd2cb5b42b76c8613d7e7dfc1caf667b8a3350a5acc066"
++dependencies = [
++ "atomic-waker",
++ "fastrand",
++ "futures-io",
++]
++
+ [[package]]
+ name = "pkcs8"
+ version = "0.10.2"
+@@ -4108,6 +4212,26 @@ dependencies = [
+  "rand_core 0.9.3",
+ ]
+ 
++[[package]]
++name = "rayon"
++version = "1.10.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b418a60154510ca1a002a752ca9714984e21e4241e804d32555251faf8b78ffa"
++dependencies = [
++ "either",
++ "rayon-core",
++]
++
++[[package]]
++name = "rayon-core"
++version = "1.12.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1465873a3dfdaa8ae7cb14b4383657caab0b3e8a0aa9ae8e04b044854c8dfce2"
++dependencies = [
++ "crossbeam-deque",
++ "crossbeam-utils",
++]
++
+ [[package]]
+ name = "readlock"
+ version = "0.1.9"
+diff --git a/Cargo.toml b/Cargo.toml
+index 00c609e34..0f0fa0b64 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -61,7 +61,7 @@ zeroize = "1"
+ 
+ # gtk-rs project and dependents. These usually need to be updated together.
+ adw = { package = "libadwaita", version = "0.7", features = ["v1_7"] }
+-glycin = { version = "2", default-features = false, features = ["tokio", "gdk4"] }
++glycin = { version = "3.0.0-beta.1", default-features = false, features = ["tokio", "gdk4"] }
+ gst = { version = "0.23", package = "gstreamer" }
+ gst_app = { version = "0.23", package = "gstreamer-app" }
+ gst_pbutils = { version = "0.23", package = "gstreamer-pbutils" }
+diff --git a/src/components/media/animated_image_paintable.rs b/src/components/media/animated_image_paintable.rs
+index ae746e76a..75fcabcf2 100644
+--- a/src/components/media/animated_image_paintable.rs
++++ b/src/components/media/animated_image_paintable.rs
+@@ -6,7 +6,7 @@ use tracing::error;
+ 
+ use crate::{
+     spawn, spawn_tokio,
+-    utils::{CountedRef, File},
++    utils::{CountedRef, File, TokioDrop},
+ };
+ 
+ mod imp {
+@@ -20,7 +20,7 @@ mod imp {
+     #[derive(Default)]
+     pub struct AnimatedImagePaintable {
+         /// The image loader.
+-        image_loader: OnceCell<Arc<Image<'static>>>,
++        image_loader: OnceCell<Arc<TokioDrop<Image>>>,
+         /// The file of the image.
+         file: OnceCell<File>,
+         /// The current frame that is displayed.
+@@ -49,7 +49,7 @@ mod imp {
+             self.current_frame
+                 .borrow()
+                 .as_ref()
+-                .map_or_else(|| self.image_loader().info().height, |f| f.height())
++                .map_or_else(|| self.image_loader().details().height(), |f| f.height())
+                 .try_into()
+                 .unwrap_or(i32::MAX)
+         }
+@@ -58,7 +58,7 @@ mod imp {
+             self.current_frame
+                 .borrow()
+                 .as_ref()
+-                .map_or_else(|| self.image_loader().info().width, |f| f.width())
++                .map_or_else(|| self.image_loader().details().width(), |f| f.width())
+                 .try_into()
+                 .unwrap_or(i32::MAX)
+         }
+@@ -95,23 +95,23 @@ mod imp {
+ 
+     impl AnimatedImagePaintable {
+         /// The image loader.
+-        fn image_loader(&self) -> &Arc<Image<'static>> {
++        fn image_loader(&self) -> &Arc<TokioDrop<Image>> {
+             self.image_loader
+                 .get()
+-                .expect("image loader is initialized")
++                .expect("image loader should be initialized")
+         }
+ 
+         /// Initialize the image.
+         pub(super) fn init(
+             &self,
+             file: File,
+-            image_loader: Arc<Image<'static>>,
++            image_loader: Arc<TokioDrop<Image>>,
+             first_frame: Arc<Frame>,
+         ) {
+-            self.file.set(file).expect("file is uninitialized");
++            self.file.set(file).expect("file should be uninitialized");
+             self.image_loader
+                 .set(image_loader)
+-                .expect("image loader is uninitialized");
++                .expect("image loader should be uninitialized");
+             self.current_frame.replace(Some(first_frame));
+ 
+             self.update_animation();
+@@ -233,7 +233,7 @@ impl AnimatedImagePaintable {
+     /// frame.
+     pub(crate) fn new(
+         file: File,
+-        image_loader: Arc<Image<'static>>,
++        image_loader: Arc<TokioDrop<Image>>,
+         first_frame: Arc<Frame>,
+     ) -> Self {
+         let obj = glib::Object::new::<Self>();
+diff --git a/src/utils/media/image/mod.rs b/src/utils/media/image/mod.rs
+index 866bda3f6..fee8b4d81 100644
+--- a/src/utils/media/image/mod.rs
++++ b/src/utils/media/image/mod.rs
+@@ -28,7 +28,10 @@ pub(crate) use queue::{IMAGE_QUEUE, ImageRequestPriority};
+ 
+ use super::{FrameDimensions, MediaFileError};
+ use crate::{
+-    DISABLE_GLYCIN_SANDBOX, RUNTIME, components::AnimatedImagePaintable, spawn_tokio, utils::File,
++    DISABLE_GLYCIN_SANDBOX, RUNTIME,
++    components::AnimatedImagePaintable,
++    spawn_tokio,
++    utils::{File, TokioDrop},
+ };
+ 
+ /// The maximum dimensions of a thumbnail in the timeline.
+@@ -65,7 +68,7 @@ const THUMBNAIL_DIMENSIONS_THRESHOLD: u32 = 200;
+ const SUPPORTED_ANIMATED_IMAGE_MIME_TYPES: &[&str] = &["image/gif", "image/png", "image/webp"];
+ 
+ /// Get an image loader for the given file.
+-async fn image_loader(file: gio::File) -> Result<glycin::Image<'static>, glycin::ErrorCtx> {
++async fn image_loader(file: gio::File) -> Result<glycin::Image, glycin::ErrorCtx> {
+     let mut loader = glycin::Loader::new(file);
+ 
+     if DISABLE_GLYCIN_SANDBOX {
+@@ -88,11 +91,11 @@ async fn load_image(
+     let image_loader = image_loader(file.as_gfile()).await?;
+ 
+     let frame_request = request_dimensions.map(|request| {
+-        let image_info = image_loader.info();
++        let image_details = image_loader.details();
+ 
+         let original_dimensions = FrameDimensions {
+-            width: image_info.width,
+-            height: image_info.height,
++            width: image_details.width(),
++            height: image_details.height(),
+         };
+ 
+         original_dimensions.to_image_loader_request(request)
+@@ -104,9 +107,10 @@ async fn load_image(
+         } else {
+             image_loader.next_frame().await?
+         };
++
+         Ok(Image {
+             file,
+-            loader: image_loader.into(),
++            loader: TokioDrop::new(image_loader).into(),
+             first_frame: first_frame.into(),
+         })
+     })
+@@ -120,7 +124,7 @@ pub(crate) struct Image {
+     /// The file of the image.
+     file: File,
+     /// The image loader.
+-    loader: Arc<glycin::Image<'static>>,
++    loader: Arc<TokioDrop<glycin::Image>>,
+     /// The first frame of the image.
+     first_frame: Arc<glycin::Frame>,
+ }
+diff --git a/src/utils/media/image/queue.rs b/src/utils/media/image/queue.rs
+index 5d8dc3b3c..ca01526c9 100644
+--- a/src/utils/media/image/queue.rs
++++ b/src/utils/media/image/queue.rs
+@@ -491,14 +491,13 @@ impl IntoFuture for DownloadRequestData {
+ 
+         Box::pin(async move {
+             let media = client.media();
+-            let data = match media.get_media_content(&settings, true).await {
+-                Ok(data) => data,
+-                Err(error) => {
+-                    return Err(MediaFileError::from(error));
+-                }
+-            };
++            let data = media
++                .get_media_content(&settings, true)
++                .await
++                .map_err(MediaFileError::from)?;
+ 
+             let file = save_data_to_tmp_file(data).await?;
++
+             Ok(file)
+         })
+     }
+@@ -516,7 +515,7 @@ struct FileRequestData {
+ impl FileRequestData {
+     /// The ID of the image request with this data.
+     fn request_id(&self) -> ImageRequestId {
+-        ImageRequestId::File(self.file.path().expect("file has a path"))
++        ImageRequestId::File(self.file.path().expect("file should have a path"))
+     }
+ }
+ 
+@@ -535,13 +534,7 @@ impl IntoFuture for FileRequestData {
+ #[derive(Clone)]
+ enum ImageRequestData {
+     /// The data for a download request.
+-    Download {
+-        /// The data to download the image.
+-        download_data: DownloadRequestData,
+-        /// The data to load the image into a paintable, after it was
+-        /// downloaded.
+-        file_data: Option<FileRequestData>,
+-    },
++    Download(DownloadRequestData),
+     /// The data for a file request.
+     File(FileRequestData),
+ }
+@@ -550,27 +543,10 @@ impl ImageRequestData {
+     /// The ID of the image request with this data.
+     fn request_id(&self) -> ImageRequestId {
+         match self {
+-            ImageRequestData::Download { download_data, .. } => download_data.request_id(),
++            ImageRequestData::Download(download_data) => download_data.request_id(),
+             ImageRequestData::File(file_data) => file_data.request_id(),
+         }
+     }
+-
+-    /// The data for the next request with this image request data.
+-    fn into_next_request_data(self) -> DownloadOrFileRequestData {
+-        match self {
+-            Self::Download {
+-                download_data,
+-                file_data,
+-            } => {
+-                if let Some(file_data) = file_data {
+-                    file_data.into()
+-                } else {
+-                    download_data.into()
+-                }
+-            }
+-            Self::File(file_data) => file_data.into(),
+-        }
+-    }
+ }
+ 
+ impl IntoFuture for ImageRequestData {
+@@ -579,8 +555,8 @@ impl IntoFuture for ImageRequestData {
+ 
+     fn into_future(self) -> Self::IntoFuture {
+         Box::pin(async move {
+-            let file_data = match self.into_next_request_data() {
+-                DownloadOrFileRequestData::Download(download_data) => {
++            let file_data = match self {
++                Self::Download(download_data) => {
+                     let dimensions = download_data.dimensions;
+ 
+                     // Download the image to a file.
+@@ -592,11 +568,11 @@ impl IntoFuture for ImageRequestData {
+                         }
+                     }
+                 }
+-                DownloadOrFileRequestData::File(file_data) => file_data,
++                Self::File(file_data) => file_data,
+             };
+ 
+             // Load the image from the file.
+-            match file_data.clone().await {
++            match file_data.await {
+                 Ok(image) => Ok(image),
+                 Err(error) => {
+                     warn!("Could not load image from file: {error}");
+@@ -608,36 +584,12 @@ impl IntoFuture for ImageRequestData {
+ }
+ 
+ impl From<DownloadRequestData> for ImageRequestData {
+-    fn from(download_data: DownloadRequestData) -> Self {
+-        Self::Download {
+-            download_data,
+-            file_data: None,
+-        }
+-    }
+-}
+-
+-impl From<FileRequestData> for ImageRequestData {
+-    fn from(value: FileRequestData) -> Self {
+-        Self::File(value)
+-    }
+-}
+-
+-/// The data of a download request or a file request.
+-#[derive(Clone)]
+-enum DownloadOrFileRequestData {
+-    /// The data for a download request.
+-    Download(DownloadRequestData),
+-    /// The data for a file request.
+-    File(FileRequestData),
+-}
+-
+-impl From<DownloadRequestData> for DownloadOrFileRequestData {
+     fn from(download_data: DownloadRequestData) -> Self {
+         Self::Download(download_data)
+     }
+ }
+ 
+-impl From<FileRequestData> for DownloadOrFileRequestData {
++impl From<FileRequestData> for ImageRequestData {
+     fn from(value: FileRequestData) -> Self {
+         Self::File(value)
+     }
+-- 
+GitLab
+
+
+From e3c34328ee40a6748beb86a25c3e31802fe43380 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?K=C3=A9vin=20Commaille?= <zecakeh@tedomum.fr>
+Date: Wed, 13 Aug 2025 11:17:10 +0200
+Subject: [PATCH 4/4] utils: Avoid to use a temp file for decoding images when
+ possible
+
+By using the new API from glycin.
+---
+ .../media/animated_image_paintable.rs         |  48 ++--
+ src/utils/media/image/mod.rs                  | 152 ++++++++-----
+ src/utils/media/image/queue.rs                | 207 ++++++++----------
+ src/utils/mod.rs                              |   1 +
+ 4 files changed, 215 insertions(+), 193 deletions(-)
+
+diff --git a/src/components/media/animated_image_paintable.rs b/src/components/media/animated_image_paintable.rs
+index 75fcabcf2..33b51785e 100644
+--- a/src/components/media/animated_image_paintable.rs
++++ b/src/components/media/animated_image_paintable.rs
+@@ -19,9 +19,12 @@ mod imp {
+ 
+     #[derive(Default)]
+     pub struct AnimatedImagePaintable {
+-        /// The image loader.
+-        image_loader: OnceCell<Arc<TokioDrop<Image>>>,
++        /// The image decoder.
++        decoder: OnceCell<Arc<TokioDrop<Image>>>,
+         /// The file of the image.
++        ///
++        /// We need to keep a strong reference to the temporary file or it will
++        /// be destroyed.
+         file: OnceCell<File>,
+         /// The current frame that is displayed.
+         pub(super) current_frame: RefCell<Option<Arc<Frame>>>,
+@@ -49,7 +52,7 @@ mod imp {
+             self.current_frame
+                 .borrow()
+                 .as_ref()
+-                .map_or_else(|| self.image_loader().details().height(), |f| f.height())
++                .map_or_else(|| self.decoder().details().height(), |f| f.height())
+                 .try_into()
+                 .unwrap_or(i32::MAX)
+         }
+@@ -58,7 +61,7 @@ mod imp {
+             self.current_frame
+                 .borrow()
+                 .as_ref()
+-                .map_or_else(|| self.image_loader().details().width(), |f| f.width())
++                .map_or_else(|| self.decoder().details().width(), |f| f.width())
+                 .try_into()
+                 .unwrap_or(i32::MAX)
+         }
+@@ -94,26 +97,27 @@ mod imp {
+     }
+ 
+     impl AnimatedImagePaintable {
+-        /// The image loader.
+-        fn image_loader(&self) -> &Arc<TokioDrop<Image>> {
+-            self.image_loader
+-                .get()
+-                .expect("image loader should be initialized")
++        /// The image decoder.
++        fn decoder(&self) -> &Arc<TokioDrop<Image>> {
++            self.decoder.get().expect("decoder should be initialized")
+         }
+ 
+         /// Initialize the image.
+         pub(super) fn init(
+             &self,
+-            file: File,
+-            image_loader: Arc<TokioDrop<Image>>,
++            decoder: Arc<TokioDrop<Image>>,
+             first_frame: Arc<Frame>,
++            file: Option<File>,
+         ) {
+-            self.file.set(file).expect("file should be uninitialized");
+-            self.image_loader
+-                .set(image_loader)
+-                .expect("image loader should be uninitialized");
++            self.decoder
++                .set(decoder)
++                .expect("decoder should be uninitialized");
+             self.current_frame.replace(Some(first_frame));
+ 
++            if let Some(file) = file {
++                self.file.set(file).expect("file should be uninitialized");
++            }
++
+             self.update_animation();
+         }
+ 
+@@ -198,9 +202,9 @@ mod imp {
+         }
+ 
+         async fn load_next_frame_inner(&self) {
+-            let image = self.image_loader().clone();
++            let decoder = self.decoder().clone();
+ 
+-            let result = spawn_tokio!(async move { image.next_frame().await })
++            let result = spawn_tokio!(async move { decoder.next_frame().await })
+                 .await
+                 .unwrap();
+ 
+@@ -229,16 +233,16 @@ glib::wrapper! {
+ }
+ 
+ impl AnimatedImagePaintable {
+-    /// Construct an `AnimatedImagePaintable` with the given loader and first
+-    /// frame.
++    /// Construct an `AnimatedImagePaintable` with the given  decoder, first
++    /// frame, and the file containing the image, if any.
+     pub(crate) fn new(
+-        file: File,
+-        image_loader: Arc<TokioDrop<Image>>,
++        decoder: Arc<TokioDrop<Image>>,
+         first_frame: Arc<Frame>,
++        file: Option<File>,
+     ) -> Self {
+         let obj = glib::Object::new::<Self>();
+ 
+-        obj.imp().init(file, image_loader, first_frame);
++        obj.imp().init(decoder, first_frame, file);
+ 
+         obj
+     }
+diff --git a/src/utils/media/image/mod.rs b/src/utils/media/image/mod.rs
+index fee8b4d81..48729c985 100644
+--- a/src/utils/media/image/mod.rs
++++ b/src/utils/media/image/mod.rs
+@@ -31,7 +31,7 @@ use crate::{
+     DISABLE_GLYCIN_SANDBOX, RUNTIME,
+     components::AnimatedImagePaintable,
+     spawn_tokio,
+-    utils::{File, TokioDrop},
++    utils::{File, TokioDrop, save_data_to_tmp_file},
+ };
+ 
+ /// The maximum dimensions of a thumbnail in the timeline.
+@@ -67,64 +67,111 @@ const THUMBNAIL_DIMENSIONS_THRESHOLD: u32 = 200;
+ /// [supported image formats of glycin]: https://gitlab.gnome.org/GNOME/glycin/-/tree/main?ref_type=heads#supported-image-formats
+ const SUPPORTED_ANIMATED_IMAGE_MIME_TYPES: &[&str] = &["image/gif", "image/png", "image/webp"];
+ 
+-/// Get an image loader for the given file.
+-async fn image_loader(file: gio::File) -> Result<glycin::Image, glycin::ErrorCtx> {
+-    let mut loader = glycin::Loader::new(file);
++/// The source for decoding an image.
++enum ImageDecoderSource {
++    /// The bytes containing the encoded image.
++    Data(Vec<u8>),
++    /// The file containing the encoded image.
++    File(File),
++}
+ 
+-    if DISABLE_GLYCIN_SANDBOX {
+-        loader.sandbox_selector(glycin::SandboxSelector::NotSandboxed);
+-    }
++impl ImageDecoderSource {
++    /// The maximum size of the `Data` variant. This is 1 MB.
++    const MAX_DATA_SIZE: usize = 1_048_576;
+ 
+-    spawn_tokio!(async move { loader.load().await })
+-        .await
+-        .unwrap()
+-}
++    /// Construct an `ImageSource` from the given bytes.
++    ///
++    /// If the size of the bytes are too big to be kept in memory, they are
++    /// written to a temporary file.
++    async fn with_bytes(bytes: Vec<u8>) -> Result<Self, MediaFileError> {
++        if bytes.len() > Self::MAX_DATA_SIZE {
++            Ok(Self::File(save_data_to_tmp_file(bytes).await?))
++        } else {
++            Ok(Self::Data(bytes))
++        }
++    }
+ 
+-/// Load the given file as an image into a `GdkPaintable`.
+-///
+-/// Set `request_dimensions` if the image will be shown at specific dimensions.
+-/// To show the image at its natural size, set it to `None`.
+-async fn load_image(
+-    file: File,
+-    request_dimensions: Option<FrameDimensions>,
+-) -> Result<Image, glycin::ErrorCtx> {
+-    let image_loader = image_loader(file.as_gfile()).await?;
+-
+-    let frame_request = request_dimensions.map(|request| {
+-        let image_details = image_loader.details();
+-
+-        let original_dimensions = FrameDimensions {
+-            width: image_details.width(),
+-            height: image_details.height(),
++    /// Convert this image source into a loader.
++    ///
++    /// Returns the created loader, and the image file, if any.
++    fn into_loader(self) -> (glycin::Loader, Option<File>) {
++        let (mut loader, file) = match self {
++            Self::Data(bytes) => (glycin::Loader::new_vec(bytes), None),
++            Self::File(file) => (glycin::Loader::new(file.as_gfile()), Some(file)),
+         };
+ 
+-        original_dimensions.to_image_loader_request(request)
+-    });
++        if DISABLE_GLYCIN_SANDBOX {
++            loader.sandbox_selector(glycin::SandboxSelector::NotSandboxed);
++        }
+ 
+-    spawn_tokio!(async move {
+-        let first_frame = if let Some(frame_request) = frame_request {
+-            image_loader.specific_frame(frame_request).await?
+-        } else {
+-            image_loader.next_frame().await?
+-        };
++        (loader, file)
++    }
++
++    /// Decode this image source into an [`Image`].
++    ///
++    /// Set `request_dimensions` if the image will be shown at specific
++    /// dimensions. To show the image at its natural size, set it to `None`.
++    async fn decode_image(
++        self,
++        request_dimensions: Option<FrameDimensions>,
++    ) -> Result<Image, ImageError> {
++        let (loader, file) = self.into_loader();
++
++        let decoder = spawn_tokio!(async move { loader.load().await })
++            .await
++            .expect("task was not aborted")?;
++
++        let frame_request = request_dimensions.map(|request| {
++            let image_details = decoder.details();
+ 
+-        Ok(Image {
+-            file,
+-            loader: TokioDrop::new(image_loader).into(),
+-            first_frame: first_frame.into(),
++            let original_dimensions = FrameDimensions {
++                width: image_details.width(),
++                height: image_details.height(),
++            };
++
++            original_dimensions.to_image_loader_request(request)
++        });
++
++        spawn_tokio!(async move {
++            let first_frame = if let Some(frame_request) = frame_request {
++                decoder.specific_frame(frame_request).await?
++            } else {
++                decoder.next_frame().await?
++            };
++
++            Ok(Image {
++                file,
++                decoder: TokioDrop::new(decoder).into(),
++                first_frame: first_frame.into(),
++            })
+         })
+-    })
+-    .await
+-    .expect("task was not aborted")
++        .await
++        .expect("task was not aborted")
++    }
++}
++
++impl From<File> for ImageDecoderSource {
++    fn from(value: File) -> Self {
++        Self::File(value)
++    }
++}
++
++impl From<gio::File> for ImageDecoderSource {
++    fn from(value: gio::File) -> Self {
++        Self::File(value.into())
++    }
+ }
+ 
+ /// An image that was just loaded.
+ #[derive(Clone)]
+ pub(crate) struct Image {
+-    /// The file of the image.
+-    file: File,
+-    /// The image loader.
+-    loader: Arc<TokioDrop<glycin::Image>>,
++    /// The file containing the image, if any.
++    ///
++    /// We need to keep a strong reference to the temporary file or it will be
++    /// destroyed.
++    file: Option<File>,
++    /// The image decoder.
++    decoder: Arc<TokioDrop<glycin::Image>>,
+     /// The first frame of the image.
+     first_frame: Arc<glycin::Frame>,
+ }
+@@ -138,7 +185,7 @@ impl fmt::Debug for Image {
+ impl From<Image> for gdk::Paintable {
+     fn from(value: Image) -> Self {
+         if value.first_frame.delay().is_some() {
+-            AnimatedImagePaintable::new(value.file, value.loader, value.first_frame).upcast()
++            AnimatedImagePaintable::new(value.decoder, value.first_frame, value.file).upcast()
+         } else {
+             value.first_frame.texture().upcast()
+         }
+@@ -161,9 +208,14 @@ impl ImageInfoLoader {
+     async fn into_first_frame(self) -> Option<Frame> {
+         match self {
+             Self::File(file) => {
+-                let image_loader = image_loader(file).await.ok()?;
+-                let handle = spawn_tokio!(async move { image_loader.next_frame().await });
+-                Some(Frame::Glycin(handle.await.unwrap().ok()?))
++                let (loader, _) = ImageDecoderSource::from(file).into_loader();
++
++                let frame = spawn_tokio!(async move { loader.load().await?.next_frame().await })
++                    .await
++                    .expect("task was not aborted")
++                    .ok()?;
++
++                Some(Frame::Glycin(frame))
+             }
+             Self::Texture(texture) => Some(Frame::Texture(texture)),
+         }
+diff --git a/src/utils/media/image/queue.rs b/src/utils/media/image/queue.rs
+index ca01526c9..6c9dfb720 100644
+--- a/src/utils/media/image/queue.rs
++++ b/src/utils/media/image/queue.rs
+@@ -19,13 +19,12 @@ use tokio::{
+ };
+ use tracing::{debug, warn};
+ 
+-use super::{Image, ImageError, load_image};
++use super::{Image, ImageDecoderSource, ImageError};
+ use crate::{
+     spawn_tokio,
+     utils::{
+         File,
+         media::{FrameDimensions, MediaFileError},
+-        save_data_to_tmp_file,
+     },
+ };
+ 
+@@ -156,7 +155,7 @@ impl ImageRequestQueueInner {
+     }
+ 
+     /// Add the given request to the queue.
+-    fn add_request(&mut self, request_id: ImageRequestId, request: ImageRequest) {
++    fn queue_request(&mut self, request_id: ImageRequestId, request: ImageRequest) {
+         let is_limit_reached = self.is_limit_reached();
+         if !is_limit_reached || request.priority == ImageRequestPriority::High {
+             // Spawn the request right away.
+@@ -175,23 +174,16 @@ impl ImageRequestQueueInner {
+         self.requests.insert(request_id, request);
+     }
+ 
+-    /// Add a request to download an image.
++    /// Add the given image request.
+     ///
+     /// If another request for the same image already exists, this will reuse
+     /// the same request.
+-    fn add_download_request(
++    fn add_request(
+         &mut self,
+-        client: Client,
+-        settings: MediaRequestParameters,
+-        dimensions: Option<FrameDimensions>,
++        inner: ImageLoaderRequest,
+         priority: ImageRequestPriority,
+     ) -> ImageRequestHandle {
+-        let data = DownloadRequestData {
+-            client,
+-            settings,
+-            dimensions,
+-        };
+-        let request_id = data.request_id();
++        let request_id = inner.source.request_id();
+ 
+         // If the request already exists, use the existing one.
+         if let Some(request) = self.requests.get(&request_id) {
+@@ -200,12 +192,33 @@ impl ImageRequestQueueInner {
+         }
+ 
+         // Build and add the request.
+-        let (request, result_receiver) = ImageRequest::new(data, priority);
+-        self.add_request(request_id.clone(), request);
++        let (request, result_receiver) = ImageRequest::new(inner, priority);
++
++        self.queue_request(request_id.clone(), request);
+ 
+         ImageRequestHandle::new(result_receiver)
+     }
+ 
++    /// Add a request to download an image.
++    ///
++    /// If another request for the same image already exists, this will reuse
++    /// the same request.
++    fn add_download_request(
++        &mut self,
++        client: Client,
++        settings: MediaRequestParameters,
++        dimensions: Option<FrameDimensions>,
++        priority: ImageRequestPriority,
++    ) -> ImageRequestHandle {
++        self.add_request(
++            ImageLoaderRequest {
++                source: ImageRequestSource::Download(DownloadRequest { client, settings }),
++                dimensions,
++            },
++            priority,
++        )
++    }
++
+     /// Add a request to load an image from a file.
+     ///
+     /// If another request for the same file already exists, this will reuse the
+@@ -215,23 +228,15 @@ impl ImageRequestQueueInner {
+         file: File,
+         dimensions: Option<FrameDimensions>,
+     ) -> ImageRequestHandle {
+-        let data = FileRequestData { file, dimensions };
+-        let request_id = data.request_id();
+-
+-        // If the request already exists, use the existing one.
+-        if let Some(request) = self.requests.get(&request_id) {
+-            let result_receiver = request.result_sender.subscribe();
+-            return ImageRequestHandle::new(result_receiver);
+-        }
+-
+-        // Build and add the request.
+         // Always use high priority because file requests should always be for
+         // previewing a local image.
+-        let (request, result_receiver) = ImageRequest::new(data, ImageRequestPriority::High);
+-
+-        self.add_request(request_id.clone(), request);
+-
+-        ImageRequestHandle::new(result_receiver)
++        self.add_request(
++            ImageLoaderRequest {
++                source: ImageRequestSource::File(file),
++                dimensions,
++            },
++            ImageRequestPriority::High,
++        )
+     }
+ 
+     /// Mark the request with the given ID as stalled.
+@@ -335,8 +340,8 @@ impl ImageRequestQueueInner {
+ 
+ /// A request for an image.
+ struct ImageRequest {
+-    /// The data of the request.
+-    data: ImageRequestData,
++    /// The request to the image loader.
++    inner: ImageLoaderRequest,
+     /// The priority of the request.
+     priority: ImageRequestPriority,
+     /// The sender of the channel to use to send the result.
+@@ -352,13 +357,13 @@ struct ImageRequest {
+ impl ImageRequest {
+     /// Construct an image request with the given data and priority.
+     fn new(
+-        data: impl Into<ImageRequestData>,
++        inner: ImageLoaderRequest,
+         priority: ImageRequestPriority,
+     ) -> (Self, broadcast::Receiver<Result<Image, ImageError>>) {
+         let (result_sender, result_receiver) = broadcast::channel(1);
+         (
+             Self {
+-                data: data.into(),
++                inner,
+                 priority,
+                 result_sender,
+                 retries_count: 0,
+@@ -379,14 +384,14 @@ impl ImageRequest {
+ 
+     /// Spawn this request.
+     fn spawn(&self) {
+-        let data = self.data.clone();
++        let inner = self.inner.clone();
+         let result_sender = self.result_sender.clone();
+         let retries_count = self.retries_count;
+         let task_handle = self.task_handle.clone();
+         let stalled_timeout_source = self.stalled_timeout_source.clone();
+ 
+         let abort_handle = spawn_tokio!(async move {
+-            let request_id = data.request_id();
++            let request_id = inner.source.request_id();
+ 
+             let stalled_timeout_source_clone = stalled_timeout_source.clone();
+             let request_id_clone = request_id.clone();
+@@ -404,7 +409,7 @@ impl ImageRequest {
+                 source.remove();
+             }
+ 
+-            let result = data.await;
++            let result = inner.await;
+ 
+             // Cancel the timeout.
+             if let Ok(Some(source)) = stalled_timeout_source.lock().map(|mut s| s.take()) {
+@@ -451,7 +456,7 @@ impl Drop for ImageRequest {
+             handle.abort();
+ 
+             // Broadcast that the request was aborted.
+-            let request_id = self.data.request_id();
++            let request_id = self.inner.source.request_id();
+             let result_sender = self.result_sender.clone();
+             spawn_tokio!(async move {
+                 if let Err(error) = result_sender.send(Err(ImageError::Aborted)) {
+@@ -462,26 +467,17 @@ impl Drop for ImageRequest {
+     }
+ }
+ 
+-/// The data of a request to download an image.
++/// A request to download an image.
+ #[derive(Clone)]
+-struct DownloadRequestData {
++struct DownloadRequest {
+     /// The Matrix client to use to make the request.
+     client: Client,
+     /// The settings of the request.
+     settings: MediaRequestParameters,
+-    /// The dimensions to request.
+-    dimensions: Option<FrameDimensions>,
+ }
+ 
+-impl DownloadRequestData {
+-    /// The ID of the image request with this data.
+-    fn request_id(&self) -> ImageRequestId {
+-        ImageRequestId::Download(self.settings.unique_key())
+-    }
+-}
+-
+-impl IntoFuture for DownloadRequestData {
+-    type Output = Result<File, MediaFileError>;
++impl IntoFuture for DownloadRequest {
++    type Output = Result<ImageDecoderSource, MediaFileError>;
+     type IntoFuture = BoxFuture<'static, Self::Output>;
+ 
+     fn into_future(self) -> Self::IntoFuture {
+@@ -496,102 +492,71 @@ impl IntoFuture for DownloadRequestData {
+                 .await
+                 .map_err(MediaFileError::from)?;
+ 
+-            let file = save_data_to_tmp_file(data).await?;
++            let file = ImageDecoderSource::with_bytes(data).await?;
+ 
+             Ok(file)
+         })
+     }
+ }
+ 
+-/// The data of a request to load an image file into a paintable.
++/// A request to the image loader.
+ #[derive(Clone)]
+-struct FileRequestData {
+-    /// The image file to load.
+-    file: File,
++struct ImageLoaderRequest {
++    /// The source of the image data.
++    source: ImageRequestSource,
+     /// The dimensions to request.
+     dimensions: Option<FrameDimensions>,
+ }
+ 
+-impl FileRequestData {
+-    /// The ID of the image request with this data.
+-    fn request_id(&self) -> ImageRequestId {
+-        ImageRequestId::File(self.file.path().expect("file should have a path"))
+-    }
+-}
+-
+-impl IntoFuture for FileRequestData {
+-    type Output = Result<Image, glycin::ErrorCtx>;
++impl IntoFuture for ImageLoaderRequest {
++    type Output = Result<Image, ImageError>;
+     type IntoFuture = BoxFuture<'static, Self::Output>;
+ 
+     fn into_future(self) -> Self::IntoFuture {
+-        let Self { file, dimensions } = self;
++        Box::pin(async move {
++            // Load the data from the source.
++            let source = self.source.try_into_decoder_source().await?;
+ 
+-        Box::pin(async move { load_image(file, dimensions).await })
++            // Decode the image from the data.
++            source
++                .decode_image(self.dimensions)
++                .await
++                .inspect_err(|error| warn!("Could not decode image: {error}"))
++        })
+     }
+ }
+ 
+-/// The data of an image request.
++/// The source for an image request.
+ #[derive(Clone)]
+-enum ImageRequestData {
+-    /// The data for a download request.
+-    Download(DownloadRequestData),
+-    /// The data for a file request.
+-    File(FileRequestData),
++enum ImageRequestSource {
++    /// The image must be downloaded from the media cache or the server.
++    Download(DownloadRequest),
++    /// The image is in the given file.
++    File(File),
+ }
+ 
+-impl ImageRequestData {
+-    /// The ID of the image request with this data.
++impl ImageRequestSource {
++    /// The ID of the image request with this source.
+     fn request_id(&self) -> ImageRequestId {
+         match self {
+-            ImageRequestData::Download(download_data) => download_data.request_id(),
+-            ImageRequestData::File(file_data) => file_data.request_id(),
++            Self::Download(download_request) => {
++                ImageRequestId::Download(download_request.settings.unique_key())
++            }
++            Self::File(file) => ImageRequestId::File(file.path().expect("file should have a path")),
+         }
+     }
+-}
+ 
+-impl IntoFuture for ImageRequestData {
+-    type Output = Result<Image, ImageError>;
+-    type IntoFuture = BoxFuture<'static, Self::Output>;
+-
+-    fn into_future(self) -> Self::IntoFuture {
+-        Box::pin(async move {
+-            let file_data = match self {
+-                Self::Download(download_data) => {
+-                    let dimensions = download_data.dimensions;
+-
+-                    // Download the image to a file.
+-                    match download_data.await {
+-                        Ok(file) => FileRequestData { file, dimensions },
+-                        Err(error) => {
+-                            warn!("Could not retrieve image: {error}");
+-                            return Err(error.into());
+-                        }
+-                    }
+-                }
+-                Self::File(file_data) => file_data,
+-            };
+-
+-            // Load the image from the file.
+-            match file_data.await {
+-                Ok(image) => Ok(image),
+-                Err(error) => {
+-                    warn!("Could not load image from file: {error}");
+-                    Err(error.into())
+-                }
++    /// Try to download the image, if necessary.
++    async fn try_into_decoder_source(self) -> Result<ImageDecoderSource, ImageError> {
++        match self {
++            Self::Download(download_request) => {
++                // Download the image.
++                Ok(download_request
++                    .await
++                    .inspect_err(|error| warn!("Could not retrieve image: {error}"))?)
+             }
+-        })
+-    }
+-}
+-
+-impl From<DownloadRequestData> for ImageRequestData {
+-    fn from(download_data: DownloadRequestData) -> Self {
+-        Self::Download(download_data)
+-    }
+-}
+-
+-impl From<FileRequestData> for ImageRequestData {
+-    fn from(value: FileRequestData) -> Self {
+-        Self::File(value)
++            Self::File(data) => Ok(data.into()),
++        }
+     }
+ }
+ 
+diff --git a/src/utils/mod.rs b/src/utils/mod.rs
+index c17bec4bf..76f3bc854 100644
+--- a/src/utils/mod.rs
++++ b/src/utils/mod.rs
+@@ -511,6 +511,7 @@ pub(crate) async fn save_data_to_tmp_file(data: Vec<u8>) -> Result<File, std::io
+                 }
+             }
+             let mut file = NamedTempFile::new_in(dir)?;
++            tracing::debug!("Created new tmp file: {}", file.path().to_string_lossy());
+             file.write_all(&data)?;
+ 
+             Ok(file.into())
+-- 
+GitLab
+
