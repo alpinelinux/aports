@@ -1,0 +1,226 @@
+Subject: Fix compilation with different ucontext_t on musl
+Upstream: No
+Author: Simon Frankenberger <simon-alpine@fraho.eu>
+
+The machine state registers have to be accessed differently when
+running on musl libc. This patch fix this by replacing
+"uc_mcontext.regs->grp" with "uc_mcontext.gp_regs"
+and accessing the named fields (like "->nip") by the array index constants.
+
+--- old/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
++++ new/src/hotspot/cpu/ppc/macroAssembler_ppc.cpp
+@@ -51,6 +51,10 @@
+ #include "utilities/macros.hpp"
+ #include "utilities/powerOfTwo.hpp"
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
++
+ #ifdef PRODUCT
+ #define BLOCK_COMMENT(str) // nothing
+ #else
+--- old/src/hotspot/cpu/ppc/vm_version_ppc.cpp
++++ new/src/hotspot/cpu/ppc/vm_version_ppc.cpp
+@@ -44,6 +44,10 @@
+ #include <libperfstat.h>
+ #endif
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
++
+ bool VM_Version::_is_determine_features_test_running = false;
+ uint64_t VM_Version::_dscr_val = 0;
+ 
+--- old/src/hotspot/os_cpu/linux_ppc/javaThread_linux_ppc.cpp
++++ new/src/hotspot/os_cpu/linux_ppc/javaThread_linux_ppc.cpp
+@@ -28,6 +28,10 @@
+ #include "runtime/frame.inline.hpp"
+ #include "runtime/javaThread.hpp"
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
++
+ frame JavaThread::pd_last_frame() {
+   assert(has_last_Java_frame(), "must have last_Java_sp() when suspended");
+ 
+@@ -67,7 +71,11 @@
+   // if we were running Java code when SIGPROF came in.
+   if (isInJava) {
+     ucontext_t* uc = (ucontext_t*) ucontext;
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+     address pc = (address)uc->uc_mcontext.regs->nip;
++#else // Musl
++    address pc = (address)uc->uc_mcontext.gp_regs[PT_NIP];
++#endif
+ 
+     if (pc == nullptr) {
+       // ucontext wasn't useful
+@@ -75,7 +83,11 @@
+     }
+ 
+     // pc could refer to a native address outside the code cache even though the thread isInJava.
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+     frame ret_frame((intptr_t*)uc->uc_mcontext.regs->gpr[1/*REG_SP*/], pc, frame::kind::unknown);
++#else // Musl
++    frame ret_frame((intptr_t*)uc->uc_mcontext.gp_regs[1/*REG_SP*/], pc, frame::kind::unknown);
++#endif
+ 
+     if (ret_frame.fp() == nullptr) {
+       // The found frame does not have a valid frame pointer.
+@@ -94,7 +106,11 @@
+       if (!Method::is_valid_method(m)) return false;
+       if (!Metaspace::contains(m->constMethod())) return false;
+ 
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+       uint64_t reg_bcp = uc->uc_mcontext.regs->gpr[14/*R14_bcp*/];
++#else // Musl
++      uint64_t reg_bcp = uc->uc_mcontext.gp_regs[14/*R14_bcp*/];
++#endif
+       uint64_t istate_bcp = istate->bcp;
+       uint64_t code_start = (uint64_t)(m->code_base());
+       uint64_t code_end = (uint64_t)(m->code_base() + m->code_size());
+--- old/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
++++ new/src/hotspot/os_cpu/linux_ppc/os_linux_ppc.cpp
+@@ -76,7 +76,11 @@
+ # include <poll.h>
+ # include <ucontext.h>
+ 
++#if ! (defined(__GLIBC__) || defined(__UCLIBC__))
++#include <asm/ptrace.h>
++#endif
+ 
++
+ address os::current_stack_pointer() {
+   return (address)__builtin_frame_address(0);
+ }
+@@ -103,24 +107,42 @@
+   // - if uc was filled by getcontext(), it is undefined - getcontext() does not fill
+   //   it because the volatile registers are not needed to make setcontext() work.
+   //   Hopefully it was zero'd out beforehand.
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   guarantee(uc->uc_mcontext.regs != nullptr, "only use ucontext_get_pc in sigaction context");
+   return (address)uc->uc_mcontext.regs->nip;
++#else // Musl
++  guarantee(uc->uc_mcontext.gp_regs != NULL, "only use ucontext_get_pc in sigaction context");
++  return (address)uc->uc_mcontext.gp_regs[PT_NIP];
++#endif
+ }
+ 
+ // modify PC in ucontext.
+ // Note: Only use this for an ucontext handed down to a signal handler. See comment
+ // in ucontext_get_pc.
+ void os::Posix::ucontext_set_pc(ucontext_t * uc, address pc) {
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   guarantee(uc->uc_mcontext.regs != nullptr, "only use ucontext_set_pc in sigaction context");
+   uc->uc_mcontext.regs->nip = (unsigned long)pc;
++#else // Musl
++  guarantee(uc->uc_mcontext.gp_regs != NULL, "only use ucontext_set_pc in sigaction context");
++  uc->uc_mcontext.gp_regs[PT_NIP] = (unsigned long)pc;
++#endif
+ }
+ 
+ static address ucontext_get_lr(const ucontext_t * uc) {
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   return (address)uc->uc_mcontext.regs->link;
++#else // Musl
++  return (address)uc->uc_mcontext.gp_regs[PT_LNK];
++#endif
+ }
+ 
+ intptr_t* os::Linux::ucontext_get_sp(const ucontext_t * uc) {
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   return (intptr_t*)uc->uc_mcontext.regs->gpr[1/*REG_SP*/];
++#else // Musl
++  return (intptr_t*)uc->uc_mcontext.gp_regs[1/*REG_SP*/];
++#endif
+ }
+ 
+ intptr_t* os::Linux::ucontext_get_fp(const ucontext_t * uc) {
+@@ -128,7 +150,11 @@
+ }
+ 
+ static unsigned long ucontext_get_trap(const ucontext_t * uc) {
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   return uc->uc_mcontext.regs->trap;
++#else // Musl
++  return uc->uc_mcontext.gp_regs[PT_TRAP];
++#endif
+ }
+ 
+ address os::fetch_frame_from_context(const void* ucVoid,
+@@ -207,7 +233,11 @@
+     // 3.2.1 "Machine State Register"), however note that ISA notation for bit
+     // numbering is MSB 0, so for normal bit numbering (LSB 0) they come to be
+     // bits 33 and 34. It's not related to endianness, just a notation matter.
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+     if (second_uc->uc_mcontext.regs->msr & 0x600000000) {
++#else // Musl
++    if (second_uc->uc_mcontext.gp_regs[PT_MSR] & 0x600000000) {
++#endif
+       if (TraceTraps) {
+         tty->print_cr("caught signal in transaction, "
+                         "ignoring to jump to abort handler");
+@@ -461,6 +491,7 @@
+   const ucontext_t* uc = (const ucontext_t*)context;
+ 
+   st->print_cr("Registers:");
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+   st->print("pc =" INTPTR_FORMAT "  ", uc->uc_mcontext.regs->nip);
+   st->print("lr =" INTPTR_FORMAT "  ", uc->uc_mcontext.regs->link);
+   st->print("ctr=" INTPTR_FORMAT "  ", uc->uc_mcontext.regs->ctr);
+@@ -469,8 +500,18 @@
+     st->print("r%-2d=" INTPTR_FORMAT "  ", i, uc->uc_mcontext.regs->gpr[i]);
+     if (i % 3 == 2) st->cr();
+   }
++#else // Musl
++  st->print("pc =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_NIP]);
++  st->print("lr =" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_LNK]);
++  st->print("ctr=" INTPTR_FORMAT "  ", uc->uc_mcontext.gp_regs[PT_CTR]);
+   st->cr();
++  for (int i = 0; i < 32; i++) {
++    st->print("r%-2d=" INTPTR_FORMAT "  ", i, uc->uc_mcontext.gp_regs[i]);
++    if (i % 3 == 2) st->cr();
++  }
++#endif
+   st->cr();
++  st->cr();
+ }
+ 
+ void os::print_register_info(outputStream *st, const void *context, int& continuation) {
+@@ -487,17 +528,33 @@
+     continuation = n + 1;
+     switch (n) {
+     case 0:
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+       st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->nip);
++#else // Musl
++      st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_NIP]);
++#endif
+       break;
+     case 1:
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+       st->print("lr ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->link);
++#else // Musl
++      st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_LNK]);
++#endif
+       break;
+     case 2:
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+       st->print("ctr ="); print_location(st, (intptr_t)uc->uc_mcontext.regs->ctr);
++#else // Musl
++      st->print("pc ="); print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[PT_CTR]);
++#endif
+       break;
+     default:
+       st->print("r%-2d=", n-3);
++#if defined(__GLIBC__) || defined(__UCLIBC__)
+       print_location(st, (intptr_t)uc->uc_mcontext.regs->gpr[n-3]);
++#else // Musl
++      print_location(st, (intptr_t)uc->uc_mcontext.gp_regs[n-3]);
++#endif
+       break;
+     }
+     ++n;
