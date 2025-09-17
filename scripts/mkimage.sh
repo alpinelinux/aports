@@ -18,32 +18,14 @@ set -e
 scriptdir="$(dirname "$0")"
 git=$(command -v git) || git=true
 
-# echo '-dirty' if git is not clean
-git_dirty() {
-	[ $($git status -s -- "$scriptdir" | wc -l) -ne 0 ] && echo "-dirty"
-}
-
-# echo last commit hash id
-git_last_commit() {
-	$git log --format=oneline -n 1 -- "$scriptdir" | awk '{print $1}'
-}
-
-# date of last commit
-git_last_commit_epoch() {
-	$git log -1 --format=%cd --date=unix "$1" -- "$scriptdir"
-}
-
 set_source_date() {
 	# dont error out if we're not in git
 	if ! $git rev-parse --show-toplevel >/dev/null 2>&1; then
 		git=true
 	fi
 	# set time stamp for reproducible builds
-	if [ -z "$ABUILD_LAST_COMMIT" ]; then
-		export ABUILD_LAST_COMMIT="$(git_last_commit)$(git_dirty)"
-	fi
-	if [ -z "$SOURCE_DATE_EPOCH" ] && [ "${ABUILD_LAST_COMMIT%-dirty}" = "$ABUILD_LAST_COMMIT" ]; then
-		SOURCE_DATE_EPOCH=$(git_last_commit_epoch "$ABUILD_LAST_COMMIT")
+	if [ -z "$SOURCE_DATE_EPOCH" ] && [ $($git -C "$scriptdir" status -s | wc -l) -ne 0 ]; then
+		SOURCE_DATE_EPOCH=$($git -C "$scriptdir" log -1 --format=%cd --date=unix)
 	fi
 	if [ -z "$SOURCE_DATE_EPOCH" ]; then
 		SOURCE_DATE_EPOCH=$(date -u "+%s")
