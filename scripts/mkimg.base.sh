@@ -21,8 +21,7 @@ build_kernel() {
 		--feature "$initfs_features" \
 		--modloopfw "$modloopfw" \
 		--repositories-file "$APKROOT/etc/apk/repositories" \
-		"$DESTDIR" \
-		|| return 1
+		"$DESTDIR"
 	for _add in $boot_addons; do
 		apk fetch --root "$APKROOT" --quiet --stdout $_add | tar -C "${DESTDIR}" -zx boot/
 	done
@@ -90,7 +89,7 @@ build_syslinux() {
 	mkdir -p "$DESTDIR"/boot/syslinux
 	apk fetch --root "$APKROOT" --stdout syslinux | tar -C "$DESTDIR" -xz usr/share/syslinux
 	for _fn in isohdpfx.bin isolinux.bin ldlinux.c32 libutil.c32 libcom32.c32 mboot.c32; do
-		mv "$DESTDIR"/usr/share/syslinux/$_fn "$DESTDIR"/boot/syslinux/$_fn || return 1
+		mv "$DESTDIR"/usr/share/syslinux/$_fn "$DESTDIR"/boot/syslinux/$_fn
 	done
 	rm -rf "$DESTDIR"/usr
 }

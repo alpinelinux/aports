@@ -121,7 +121,6 @@ build_section() {
 	local args="$@"
 
 	if [ -z "$_dir" ]; then
-		_fail="yes"
 		return 1
 	fi
 
@@ -131,14 +130,9 @@ build_section() {
 		if [ -z "$_simulate" ]; then
 			rm -rf "$DESTDIR"
 			mkdir -p "$DESTDIR"
-			if build_${section} "$@"; then
-				mv "$DESTDIR" "$WORKDIR/${_dir}"
-				_dirty="yes"
-			else
-				rm -rf "$DESTDIR"
-				_fail="yes"
-				return 1
-			fi
+			build_${section} "$@"
+			mv "$DESTDIR" "$WORKDIR/${_dir}"
+			_dirty="yes"
 		fi
 	fi
 	unset DESTDIR
@@ -150,7 +144,6 @@ build_profile() {
 	local _id _dir _spec
 	_my_sections=""
 	_dirty="no"
-	_fail="no"
 
 	profile_$PROFILE
 	list_has $ARCH $arch || return 0
@@ -159,9 +152,8 @@ build_profile() {
 
 	# Collect list of needed sections, and make sure they are built
 	for SECTION in $all_sections; do
-		section_$SECTION || return 1
+		section_$SECTION
 	done
-	[ "$_fail" = "no" ] || return 1
 
 	# Defaults
 	[ -n "$image_name" ] || image_name="alpine-${PROFILE}"
@@ -189,7 +181,7 @@ build_profile() {
 	if [ "$_dirty" = "yes" -o ! -e "$output_file" ]; then
 		# Create image
 		[ -n "$output_format" ] || output_format="${image_ext//[:\.]/}"
-		create_image_${output_format} || { _fail="yes"; return 1; }
+		create_image_${output_format}
 
 		if [ "$_checksum" = "yes" ]; then
 			for _c in $all_checksums; do
@@ -207,7 +199,9 @@ build_profile() {
 
 # load plugins
 load_plugins "$scriptdir"
-[ -z "$HOME" ] || load_plugins "$HOME/.mkimage"
+if [ -n "$HOME" ]; then
+	load_plugins "$HOME/.mkimage"
+fi
 
 mkimage_yaml="$(dirname $0)"/mkimage-yaml.sh
 
@@ -281,8 +275,9 @@ for ARCH in $req_arch; do
 	if [ ! -e "$APKROOT" ]; then
 		# create root for caching packages
 		mkdir -p "$APKROOT/etc/apk/cache" "$APKROOT"/etc/apk/keys
-		[ -d /usr/share/apk/keys/"$ARCH" ] &&
+		if [ -d /usr/share/apk/keys/"$ARCH" ]; then
 			cp /usr/share/apk/keys/"$ARCH"/* "$APKROOT"/etc/apk/keys
+		fi
 		if [ -n "$_hostkeys" ]; then
 			cp /etc/apk/keys/* "$APKROOT"/etc/apk/keys
 		fi
@@ -307,7 +302,7 @@ for ARCH in $req_arch; do
 		echo "---" > "$_yaml_out"
 	fi
 	for PROFILE in $req_profiles; do
-		(set -eo pipefail; build_profile) || exit 1
+		(set -eo pipefail; build_profile)
 	done
 done
 echo "Images generated in $OUTDIR"
