@@ -2,7 +2,13 @@ build_kernel() {
 	local _flavor="$2" _modloopsign= _add
 	shift 3
 	local _pkgs="$@"
-	[ "$modloop_sign" = "yes" ] && _modloopsign="--modloopsign"
+	if [ "$modloop_sign" = "yes" ]; then
+		_modloopsign="--modloopsign"
+		if [ -z "$PACKAGER_PRIVKEY" ]; then
+			error "Need \$PACKAGER_PRIVKEY to be set for modloop_sign=yes"
+			return 1
+		fi
+	fi
 	update-kernel \
 		$_hostkeys \
 		${_abuild_pubkey:+--apk-pubkey $_abuild_pubkey} \
