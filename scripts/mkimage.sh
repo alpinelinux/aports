@@ -290,10 +290,8 @@ mkdir -p "$OUTDIR"
 # get abuild pubkey used to sign the apkindex
 # we need inject this to the initramfs or we will not be able to use the
 # boot repository
-if [ -z "$_hostkeys" ]; then
-	_pub=${PACKAGER_PRIVKEY:+${PACKAGER_PRIVKEY}.pub}
-	_abuild_pubkey="${PACKAGER_PUBKEY:-$_pub}"
-fi
+_pub=${PACKAGER_PRIVKEY:+${PACKAGER_PRIVKEY}.pub}
+_abuild_pubkey="${PACKAGER_PUBKEY:-$_pub}"
 
 # create images
 for ARCH in $req_arch; do
@@ -305,7 +303,8 @@ for ARCH in $req_arch; do
 			cp /usr/share/apk/keys/"$ARCH"/* "$APKROOT"/etc/apk/keys
 		if [ -n "$_hostkeys" ]; then
 			cp /etc/apk/keys/* "$APKROOT"/etc/apk/keys
-		else
+		fi
+		if [ -n "$_abuild_pubkey" ]; then
 			cp "$_abuild_pubkey" "$APKROOT"/etc/apk/keys
 		fi
 		apk --arch "$ARCH" --root "$APKROOT" add --initdb --no-chown
