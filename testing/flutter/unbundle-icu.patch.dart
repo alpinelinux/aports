@@ -34,7 +34,7 @@ index 90dc09a0c02..8f88873dc18 100644
      if (exclude_kernel_service) {
        defines += [ "EXCLUDE_CFE_AND_KERNEL_PLATFORM" ]
      }
-@@ -911,10 +911,12 @@
+@@ -1004,10 +1004,12 @@
      "..:add_empty_macho_section_config",
    ]
    extra_deps = [
@@ -43,11 +43,11 @@ index 90dc09a0c02..8f88873dc18 100644
      "../platform:libdart_platform_aotruntime",
    ]
 +  if (dart_embed_icu_data) {
-+    extra_deps += [ ":icudtl_cc" ]
++    extra_deps += [":icudtl_cc"]
 +  }
-   if (dart_runtime_mode != "release") {
-     extra_deps += [ "../observatory:standalone_observatory_archive" ]
-   }
+   extra_sources = [
+     "builtin.cc",
+     "gzip.cc",
 diff --git a/runtime/runtime_args.gni b/runtime/runtime_args.gni
 index fbcfeb157fb..061e8f74a5c 100644
 --- a/runtime/runtime_args.gni
