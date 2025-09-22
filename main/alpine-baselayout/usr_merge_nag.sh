@@ -1,9 +1,8 @@
 #!/bin/sh
 if [ ! -L /lib ] && [ "$1" = "post-commit" ]; then
 	cat << __EOF__
-* WARNING: Alpine Linux is transitioning to a /usr-merged system, and it
-* will soon be recommended for everybody to migrate. Help testing is very
-* welcomed. For more details, see
-* https://gitlab.alpinelinux.org/alpine/infra/alpine-mksite/-/merge_requests/88
+* WARNING: The current system is not /usr-merged. You are encouraged to
+* migrate manually to ensure the best-possible support. See
+* https://alpinelinux.org/posts/2025-10-01-usr-merge.html for more details
 __EOF__
 fi
