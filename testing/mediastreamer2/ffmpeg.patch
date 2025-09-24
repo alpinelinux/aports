@@ -1,0 +1,224 @@
+Based on: https://build.opensuse.org/projects/openSUSE:Factory/packages/mediastreamer2/files/fix-build-ffmpeg5.patch
+
+Index: mediastreamer2-5.3.4/src/utils/ffmpeg-priv.c
+===================================================================
+--- mediastreamer2-5.3.4.orig/src/utils/ffmpeg-priv.c
++++ mediastreamer2-5.3.4/src/utils/ffmpeg-priv.c
+@@ -23,29 +23,22 @@
+ 
+ #ifndef HAVE_FUN_avcodec_encode_video2
+ int avcodec_encode_video2(AVCodecContext *avctx, AVPacket *avpkt, const AVFrame *frame, int *got_packet_ptr) {
+-	int error = avcodec_encode_video(avctx, avpkt->data, avpkt->size, frame);
+-	if (error < 0) {
+-		return error;
+-	} else {
+-		if (error > 0) {
+-			*got_packet_ptr = 1;
+-			avpkt->size = error;
+-		} else *got_packet_ptr = 0;
+-	}
+-	return 0;
+-}
+-#endif
++    int ret;
+ 
+-#ifndef HAVE_FUN_avcodec_get_context_defaults3 /**/
+-int avcodec_get_context_defaults3(AVCodecContext *s, AVCodec *codec) {
+-	avcodec_get_context_defaults(s);
+-	return 0;
+-}
++    *got_packet_ptr = 0;
++ 
++    ret = avcodec_send_frame(avctx, frame);
++    if (ret < 0)
++        return ret;
+ 
+-AVCodecContext *avcodec_alloc_context3(AVCodec *codec) {
+-	return avcodec_alloc_context();
+-}
++    ret = avcodec_receive_packet(avctx, avpkt);
++    if (!ret)
++        *got_packet_ptr = 1;
++    if (ret == AVERROR(EAGAIN))
++        return 0;
+ 
++    return ret;
++}
+ #endif
+ 
+ #ifndef HAVE_FUN_avcodec_open2 /**/
+Index: mediastreamer2-5.3.4/src/utils/ffmpeg-priv.h
+===================================================================
+--- mediastreamer2-5.3.4.orig/src/utils/ffmpeg-priv.h
++++ mediastreamer2-5.3.4/src/utils/ffmpeg-priv.h
+@@ -76,6 +76,29 @@ static inline int
+ avcodec_decode_video2(AVCodecContext *avctx, AVFrame *picture, int *got_picture_ptr, AVPacket *avpkt) {
+ 	return avcodec_decode_video(avctx, picture, got_picture_ptr, avpkt->data, avpkt->size);
+ }
++#else
++static inline int avcodec_decode_video2(AVCodecContext *avctx, AVFrame *frame, int *got_frame, AVPacket *pkt)
++{
++    int ret;
++
++    *got_frame = 0;
++
++    if (pkt) {
++        ret = avcodec_send_packet(avctx, pkt);
++        // In particular, we don't expect AVERROR(EAGAIN), because we read all
++        // decoded frames with avcodec_receive_frame() until done.
++        if (ret < 0)
++            return ret == AVERROR_EOF ? 0 : ret;
++    }
++
++    ret = avcodec_receive_frame(avctx, frame);
++    if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
++        return ret;
++    if (ret >= 0)
++        *got_frame = 1;
++
++    return 0;
++}
+ #endif
+ #if HAVE_AVCODEC_OLD_CODEC_IDS
+ #include <libavcodec/old_codec_ids.h>
+@@ -116,11 +139,6 @@ extern "C" {
+ int avcodec_encode_video2(AVCodecContext *avctx, AVPacket *avpkt, const AVFrame *frame, int *got_packet_ptr);
+ #endif
+ 
+-#ifndef HAVE_FUN_avcodec_get_context_defaults3 /**/
+-int avcodec_get_context_defaults3(AVCodecContext *s, AVCodec *codec);
+-AVCodecContext *avcodec_alloc_context3(AVCodec *codec);
+-#endif
+-
+ #ifndef HAVE_FUN_avcodec_open2 /**/
+ int avcodec_open2(AVCodecContext *avctx, AVCodec *codec, AVDictionary **options);
+ #endif
+Index: mediastreamer2-5.3.4/src/utils/jpgloader-ffmpeg.c
+===================================================================
+--- mediastreamer2-5.3.4.orig/src/utils/jpgloader-ffmpeg.c
++++ mediastreamer2-5.3.4/src/utils/jpgloader-ffmpeg.c
+@@ -76,7 +76,6 @@ mblk_t *jpeg2yuv(uint8_t *jpgbuf, int bu
+ 		return NULL;
+ 	}
+ 
+-	avcodec_get_context_defaults3(&av_context, NULL);
+ 	if (avcodec_open2(&av_context, codec, NULL) < 0) {
+ 		ms_error("jpeg2yuv: avcodec_open failed");
+ 		return NULL;
+Index: mediastreamer2-5.3.4/src/videofilters/ffmpegjpegwriter.c
+===================================================================
+--- mediastreamer2-5.3.4.orig/src/videofilters/ffmpegjpegwriter.c
++++ mediastreamer2-5.3.4/src/videofilters/ffmpegjpegwriter.c
+@@ -190,7 +190,7 @@ static void jpg_process_frame_task(void
+ 		sws_freeContext(sws_ctx);
+ 
+ 		av_frame_unref(s->pict);
+-		avpicture_fill((AVPicture *)s->pict, (uint8_t *)jpegm->b_rptr, avctx->pix_fmt, avctx->width, avctx->height);
++    av_image_fill_arrays(s->pict->data,s->pict->linesize,(uint8_t*)jpegm->b_rptr,avctx->pix_fmt,avctx->width,avctx->height, 1);
+ 		packet.data = comp_buf;
+ 		packet.size = (int)comp_buf_sz;
+ 		packet.pts = frame_ts;
+Index: mediastreamer2-5.3.4/src/videofilters/h264dec.cpp
+===================================================================
+--- mediastreamer2-5.3.4.orig/src/videofilters/h264dec.cpp
++++ mediastreamer2-5.3.4/src/videofilters/h264dec.cpp
+@@ -66,17 +66,15 @@ typedef struct _DecData {
+ static void ffmpeg_init(void) {
+ 	static bool_t done = FALSE;
+ 	if (!done) {
+-		avcodec_register_all();
+ 		done = TRUE;
+ 	}
+ }
+ 
+ static void dec_open(DecData *d) {
+-	AVCodec *codec;
++	const AVCodec *codec;
+ 	int error;
+ 	codec = avcodec_find_decoder(CODEC_ID_H264);
+ 	if (codec == NULL) ms_fatal("Could not find H264 decoder in ffmpeg.");
+-	avcodec_get_context_defaults3(&d->av_context, NULL);
+ 	error = avcodec_open2(&d->av_context, codec, NULL);
+ 	if (error != 0) {
+ 		ms_fatal("avcodec_open() failed.");
+@@ -162,7 +160,7 @@ static mblk_t *get_as_yuvmsg(MSFilter *f
+ 		ms_error("%s: error in sws_scale().", f->desc->name);
+ 	}
+ #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(50, 43, 0) // backward compatibility with Debian Squeeze (6.0)
+-	mblk_set_timestamp_info(yuv_msg, (uint32_t)orig->pkt_pts);
++  mblk_set_timestamp_info(yuv_msg, (uint32_t)orig->pts);
+ #endif
+ 	return yuv_msg;
+ }
+Index: mediastreamer2-5.3.4/src/videofilters/videodec.c
+===================================================================
+--- mediastreamer2-5.3.4.orig/src/videofilters/videodec.c
++++ mediastreamer2-5.3.4/src/videofilters/videodec.c
+@@ -67,7 +67,6 @@ static void dec_init(MSFilter *f, enum C
+ 	DecState *s = (DecState *)ms_new0(DecState, 1);
+ 	ms_ffmpeg_check_init();
+ 
+-	avcodec_get_context_defaults3(&s->av_context, NULL);
+ 	s->allocator = ms_yuv_buf_allocator_new();
+ 	s->av_codec = NULL;
+ 	s->codec = cid;
+@@ -591,7 +590,7 @@ static mblk_t *get_as_yuvmsg(MSFilter *f
+ #endif
+ 		ms_error("%s: error in ms_sws_scale().", f->desc->name);
+ 	}
+-	mblk_set_timestamp_info(yuv_msg, (uint32_t)orig->pkt_pts);
++	mblk_set_timestamp_info(yuv_msg, (uint32_t)orig->pts);
+ 	return yuv_msg;
+ }
+ /* Bitmasks to select bits of a byte from low side */
+Index: mediastreamer2-5.3.4/src/videofilters/videoenc.c
+===================================================================
+--- mediastreamer2-5.3.4.orig/src/videofilters/videoenc.c
++++ mediastreamer2-5.3.4/src/videofilters/videoenc.c
+@@ -109,7 +109,6 @@ void ms_ffmpeg_log_callback(void *ptr, i
+ 
+ void ms_ffmpeg_check_init() {
+ 	if (!avcodec_initialized) {
+-		avcodec_register_all();
+ 		avcodec_initialized = TRUE;
+ #ifdef ENABLE_LOG_FFMPEG
+ 		av_log_set_level(AV_LOG_WARNING);
+@@ -250,7 +249,6 @@ static void prepare(EncState *s) {
+ 	AVCodecContext *c = &s->av_context;
+ 	const int max_br_vbv = 128000;
+ 
+-	avcodec_get_context_defaults3(c, NULL);
+ 	if (s->codec == CODEC_ID_MJPEG) {
+ 		ms_message("Codec bitrate set to %i", (int)c->bit_rate);
+ 		c->width = s->vconf.vsize.width;
+@@ -312,7 +310,6 @@ static void prepare_h263(EncState *s) {
+ #if LIBAVCODEC_VERSION_INT < ((52 << 16) + (0 << 8) + 0)
+ 	c->rtp_mode = 1;
+ #endif
+-	c->rtp_payload_size = s->mtu / 2;
+ 	if (s->profile == 0) {
+ 		s->codec = CODEC_ID_H263;
+ 	} else {
+@@ -787,7 +784,7 @@ static void process_frame(MSFilter *f, m
+ 	ms_yuv_buf_init_from_mblk(&yuv, inm);
+ 	/* convert image if necessary */
+ 	av_frame_unref(s->pict);
+-	avpicture_fill((AVPicture *)s->pict, yuv.planes[0], c->pix_fmt, c->width, c->height);
++  av_image_fill_arrays(s->pict->data,s->pict->linesize,yuv.planes[0],c->pix_fmt,c->width,c->height,1);
+ 
+ 	/* timestamp used by ffmpeg, unset here */
+ 	s->pict->pts = AV_NOPTS_VALUE;
+
+
+diff --git a/src/utils/ffmpeg-priv.h b/src/utils/ffmpeg-priv.h
+index f8113d5..c31c1b2 100644
+--- a/src/utils/ffmpeg-priv.h
++++ b/src/utils/ffmpeg-priv.h
+@@ -50,6 +50,7 @@ extern "C" {
+ /* new layout */
+ #include <libavcodec/avcodec.h>
+ #include <libavutil/avutil.h>
++#include <libavutil/imgutils.h>
+ #include <libavutil/mem.h>
+ #endif
+ 
