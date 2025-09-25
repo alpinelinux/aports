@@ -35,7 +35,4 @@ fi
 # is vfat and correct mountpoint..
 
 # correct location to place a BOOTXXXX.efi that gets default-loaded.
-# make the directory in case it doesn't already exist..
-mkdir -p "$efi_system_partition"/EFI/BOOT/
-
 install -Dm755 /usr/share/limine/"$efi_file" -t "$efi_system_partition"/EFI/BOOT/
