@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/busybox sh
 
 do_bb_install=
 
