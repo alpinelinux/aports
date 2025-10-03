@@ -39,7 +39,7 @@ Indent with tabs, don't use spaces. Avoid whitespaces.
 Maximum line length is 80 characters, this should be considered a
 recommendation and not a strict requirement which must be followed at
 all costs. Most notably, automatically generated parts (e.g. by `abuild
-checksum`) are except from this rule.
+checksum`) are exempt from this rule.
 
 ### Compound Statements
 
