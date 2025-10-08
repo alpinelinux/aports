@@ -1,20 +1,40 @@
 #!/bin/sh
 # TODO: limine-enroll-config with b2sum option
 
-. /etc/limine/limine-efi.conf
+. /etc/limine/limine-efi-updater.conf
 
-if [ "$disable_update_hook" = 1 ]; then
-  exit 0
+if [ -z "$efi_file" ]; then
+  case "$(uname -m)" in
+    aarch64) efi_file="BOOTAA64.EFI" ;;
+    loongarch64) efi_file="BOOTLOONGARCH64.EFI" ;;
+    riscv64) efi_file="BOOTRISCV64.EFI" ;;
+    x86_64) efi_file="BOOTX64.EFI" ;;
+    i?86) efi_file="BOOTIA32.EFI" ;;
+    *)
+      echo "* could not autodetect EFI file! must set efi_file variable" >&2
+      exit 1
+  esac
+fi
+
+if [ -z "$efi_system_partition" ]; then
+  echo "* efi_system_partition variable not set in /etc/limine/limine-efi-updater.conf" >&2
+  exit 1
+fi
+
+if [ -z "$destination_path" ]; then
+  destination_path=/EFI/BOOT
+fi
+
+if [ -z "$destination_filename" ]; then
+  destination_filename="$efi_file"
 fi
 
 if ! [ -f "/usr/share/limine/$efi_file" ]; then
   # not found as a file..
   echo "* efi_file: $efi_file was not found in /usr/share/limine/ .." >&2
   echo "* you probably need to install the package that contains the one you want:" >&2
-  echo "* [limine-x86_64 | limine-x86_32 | limine-aarch64]" >&2
-  echo "* and configure efi_file accordingly in /etc/limine-efi.conf" >&2
-  echo "*" >&2
-  echo "* seeing this on first install is normal." >&2
+  echo "* limine-efi-<architecture>" >&2
+  echo "* and configure efi_file accordingly in /etc/limine/limine-efi-updater.conf" >&2
   exit 1
 fi
 
@@ -35,4 +55,4 @@ fi
 # is vfat and correct mountpoint..
 
 # correct location to place a BOOTXXXX.efi that gets default-loaded.
-install -Dm755 /usr/share/limine/"$efi_file" -t "$efi_system_partition"/EFI/BOOT/
+install -Dm644 /usr/share/limine/"$efi_file" "$efi_system_partition"/"$destination_path"/"$destination_filename"
