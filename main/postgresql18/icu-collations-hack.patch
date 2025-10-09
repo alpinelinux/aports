@@ -1,0 +1,892 @@
+From: Jakub Jirutka <jakub@jirutka.cz>
+Date: Wed, 03 Aug 2022 20:40:33 +0200
+Subject: [PATCH] Hack to generate usable ICU-based collations with
+  icu-data-en
+
+This is a downstream patch for Alpine Linux, it should never be
+upstreamed in this form!
+
+When the PostgreSQL cluster is initialized (using initdb(1)) or the
+DB administrator calls `pg_import_system_collations()` directly, this
+function creates COLLATIONs in the system catalog (pg_collations).
+There are two types: libc-based and ICU-based. The latter are created
+based on *locales* (not collations) known to ICU, i.e. based on the ICU
+data installed at the time.
+
+collationcmds.c includes the following comment:
+> We use uloc_countAvailable()/uloc_getAvailable() rather than
+> ucol_countAvailable()/ucol_getAvailable().  The former returns a full
+> set of language+region combinations, whereas the latter only returns
+> language+region combinations if they are distinct from the language's
+> base collation.  So there might not be a de-DE or en-GB, which would be
+> confusing.
+
+There's a problem with this approach: locales and collations are two
+different things. ICU data may include collation algorithms and data for
+all or some languages, but not locales (language + country/region).
+The collation data is small compared to locales. There are ~800 locales
+(combinations of language, country and variants), but only 98 collations.
+There's a mapping between collations and locales hidden somewhere in ICU
+data.
+
+Since full ICU data is very big (30 MiB), we have created a stripped down
+variant with only English locale (package icu-data-en, 2.6 MiB). It also
+includes a subset of 18 collations that cover hundreds of languages.
+
+When the cluster is initialized or `pg_import_system_collations()` is
+called directly and only icu-data-en (default) is installed, the user
+ends up with only und, en and en_GB ICU-based COLLATIONs. The user can
+create missing COLLATIONs manually, but this a) is not expected nor
+reasonable behaviour, b) it's not easy to find out for which locales
+there's a collation available for.
+
+I couldn't find any way how to list all language+country variants for the
+given collation. It can be constructed when we iterate over all locales,
+but this approach is useless when we don't have the locale data
+available... I should also note that the reverse lookup (locale ->
+collation) is not a problem for ICU when full locale data is stripped.
+
+So I ended up with a very ugly workaround: pre-generating a list of
+collation -> locale mapping and embedding it in the collationcmds.c
+source. Then we replace `uloc_countAvailable()`/`uloc_getAvailable()`
+with `ucol_countAvailable()` / `ucol_getAvailable()` to iterate over
+the collations instead of locales and lookup the locales in the
+pre-generated list.
+
+This data is quite stable, there's a very low risk of getting outdated in
+a way that would be a problem.
+
+`icu_coll_locales` has been generated using the following code:
+
+    #include <stdio.h>
+    #include <string.h>
+    #include <unicode/ucol.h>
+    
+    // Copy-pasted from collationcmds.c.
+    static char *get_icu_language_tag(const char *localename) {
+        char buf[ULOC_FULLNAME_CAPACITY];
+        UErrorCode status = U_ZERO_ERROR;
+    
+        uloc_toLanguageTag(localename, buf, sizeof(buf), true, &status);
+    
+        if (U_FAILURE(status)) {
+            fprintf(stderr, "could not convert locale name \"%s\" to language tag: %s\n",
+                    localename, u_errorName(status));
+            return strdup(localename);
+        }
+        return strdup(buf);
+    }
+    
+    int main() {
+        UErrorCode status = U_ZERO_ERROR;
+    
+        for (int i = 0; i < uloc_countAvailable(); i++) {
+            const char *locale = uloc_getAvailable(i);
+    
+            UCollator *collator = ucol_open(locale, &status);
+            const char *actual_locale = ucol_getLocaleByType(collator, ULOC_ACTUAL_LOCALE, &status);
+    
+            // Strip @.*
+            char *ptr = strchr(actual_locale, '@');
+            if (ptr != NULL) {
+                *ptr = '\0';
+            }
+            if (strcmp(actual_locale, "root") == 0) {
+                actual_locale = "";
+            }
+            if (strcmp(actual_locale, locale) != 0) {
+                printf("\"%s\", \"%s\",\n", actual_locale, get_icu_language_tag(locale));
+            }
+            ucol_close(collator);
+        }
+        return 0;
+    }
+
+compiled and executed using:
+
+    gcc -o main main.c $(pkg-config --libs icu-uc icu-io) && ./main | sort | uniq
+
+--- a/src/backend/commands/collationcmds.c
++++ b/src/backend/commands/collationcmds.c
+@@ -677,6 +677,715 @@
+ 
+ 	return result;
+ }
++
++/*
++ * XXX-Patched: Added a static mapping: collation name (parent) to locale (children)
++ * I'm gonna burn in hell for this...
++ */
++static char* icu_coll_locales[] = {
++	"", "agq",
++	"", "agq-CM",
++	"", "ak",
++	"", "ak-GH",
++	"", "asa",
++	"", "asa-TZ",
++	"", "ast",
++	"", "ast-ES",
++	"", "bas",
++	"", "bas-CM",
++	"", "bem",
++	"", "bem-ZM",
++	"", "bez",
++	"", "bez-TZ",
++	"", "bm",
++	"", "bm-ML",
++	"", "brx",
++	"", "brx-IN",
++	"", "ca",
++	"", "ca-AD",
++	"", "ca-ES",
++	"", "ca-FR",
++	"", "ca-IT",
++	"", "ccp",
++	"", "ccp-BD",
++	"", "ccp-IN",
++	"", "ce",
++	"", "ce-RU",
++	"", "cgg",
++	"", "cgg-UG",
++	"", "ckb",
++	"", "ckb-IQ",
++	"", "ckb-IR",
++	"", "dav",
++	"", "dav-KE",
++	"", "de",
++	"", "de-AT",
++	"", "de-BE",
++	"", "de-CH",
++	"", "de-DE",
++	"", "de-IT",
++	"", "de-LI",
++	"", "de-LU",
++	"", "dje",
++	"", "dje-NE",
++	"", "doi",
++	"", "doi-IN",
++	"", "dua",
++	"", "dua-CM",
++	"", "dyo",
++	"", "dyo-SN",
++	"", "dz",
++	"", "dz-BT",
++	"", "ebu",
++	"", "ebu-KE",
++	"", "en",
++	"", "en-001",
++	"", "en-150",
++	"", "en-AE",
++	"", "en-AG",
++	"", "en-AI",
++	"", "en-AS",
++	"", "en-AT",
++	"", "en-AU",
++	"", "en-BB",
++	"", "en-BE",
++	"", "en-BI",
++	"", "en-BM",
++	"", "en-BS",
++	"", "en-BW",
++	"", "en-BZ",
++	"", "en-CA",
++	"", "en-CC",
++	"", "en-CH",
++	"", "en-CK",
++	"", "en-CM",
++	"", "en-CX",
++	"", "en-CY",
++	"", "en-DE",
++	"", "en-DG",
++	"", "en-DK",
++	"", "en-DM",
++	"", "en-ER",
++	"", "en-FI",
++	"", "en-FJ",
++	"", "en-FK",
++	"", "en-FM",
++	"", "en-GB",
++	"", "en-GD",
++	"", "en-GG",
++	"", "en-GH",
++	"", "en-GI",
++	"", "en-GM",
++	"", "en-GU",
++	"", "en-GY",
++	"", "en-HK",
++	"", "en-IE",
++	"", "en-IL",
++	"", "en-IM",
++	"", "en-IN",
++	"", "en-IO",
++	"", "en-JE",
++	"", "en-JM",
++	"", "en-KE",
++	"", "en-KI",
++	"", "en-KN",
++	"", "en-KY",
++	"", "en-LC",
++	"", "en-LR",
++	"", "en-LS",
++	"", "en-MG",
++	"", "en-MH",
++	"", "en-MO",
++	"", "en-MP",
++	"", "en-MS",
++	"", "en-MT",
++	"", "en-MU",
++	"", "en-MV",
++	"", "en-MW",
++	"", "en-MY",
++	"", "en-NA",
++	"", "en-NF",
++	"", "en-NG",
++	"", "en-NL",
++	"", "en-NR",
++	"", "en-NU",
++	"", "en-NZ",
++	"", "en-PG",
++	"", "en-PH",
++	"", "en-PK",
++	"", "en-PN",
++	"", "en-PR",
++	"", "en-PW",
++	"", "en-RW",
++	"", "en-SB",
++	"", "en-SC",
++	"", "en-SD",
++	"", "en-SE",
++	"", "en-SG",
++	"", "en-SH",
++	"", "en-SI",
++	"", "en-SL",
++	"", "en-SS",
++	"", "en-SX",
++	"", "en-SZ",
++	"", "en-TC",
++	"", "en-TK",
++	"", "en-TO",
++	"", "en-TT",
++	"", "en-TV",
++	"", "en-TZ",
++	"", "en-UG",
++	"", "en-UM",
++	"", "en-US",
++	"", "en-VC",
++	"", "en-VG",
++	"", "en-VI",
++	"", "en-VU",
++	"", "en-WS",
++	"", "en-ZA",
++	"", "en-ZM",
++	"", "en-ZW",
++	"", "eu",
++	"", "eu-ES",
++	"", "ewo",
++	"", "ewo-CM",
++	"", "ff",
++	"", "ff-Latn",
++	"", "ff-Latn-BF",
++	"", "ff-Latn-CM",
++	"", "ff-Latn-GH",
++	"", "ff-Latn-GM",
++	"", "ff-Latn-GN",
++	"", "ff-Latn-GW",
++	"", "ff-Latn-LR",
++	"", "ff-Latn-MR",
++	"", "ff-Latn-NE",
++	"", "ff-Latn-NG",
++	"", "ff-Latn-SL",
++	"", "ff-Latn-SN",
++	"", "fr",
++	"", "fr-BE",
++	"", "fr-BF",
++	"", "fr-BI",
++	"", "fr-BJ",
++	"", "fr-BL",
++	"", "fr-CD",
++	"", "fr-CF",
++	"", "fr-CG",
++	"", "fr-CH",
++	"", "fr-CI",
++	"", "fr-CM",
++	"", "fr-DJ",
++	"", "fr-DZ",
++	"", "fr-FR",
++	"", "fr-GA",
++	"", "fr-GF",
++	"", "fr-GN",
++	"", "fr-GP",
++	"", "fr-GQ",
++	"", "fr-HT",
++	"", "fr-KM",
++	"", "fr-LU",
++	"", "fr-MA",
++	"", "fr-MC",
++	"", "fr-MF",
++	"", "fr-MG",
++	"", "fr-ML",
++	"", "fr-MQ",
++	"", "fr-MR",
++	"", "fr-MU",
++	"", "fr-NC",
++	"", "fr-NE",
++	"", "fr-PF",
++	"", "fr-PM",
++	"", "fr-RE",
++	"", "fr-RW",
++	"", "fr-SC",
++	"", "fr-SN",
++	"", "fr-SY",
++	"", "fr-TD",
++	"", "fr-TG",
++	"", "fr-TN",
++	"", "fr-VU",
++	"", "fr-WF",
++	"", "fr-YT",
++	"", "fur",
++	"", "fur-IT",
++	"", "fy",
++	"", "fy-NL",
++	"", "ga",
++	"", "ga-GB",
++	"", "ga-IE",
++	"", "gd",
++	"", "gd-GB",
++	"", "gsw",
++	"", "gsw-CH",
++	"", "gsw-FR",
++	"", "gsw-LI",
++	"", "guz",
++	"", "guz-KE",
++	"", "gv",
++	"", "gv-IM",
++	"", "ia",
++	"", "ia-001",
++	"", "id",
++	"", "id-ID",
++	"", "ii",
++	"", "ii-CN",
++	"", "it",
++	"", "it-CH",
++	"", "it-IT",
++	"", "it-SM",
++	"", "it-VA",
++	"", "jgo",
++	"", "jgo-CM",
++	"", "jmc",
++	"", "jmc-TZ",
++	"", "jv",
++	"", "jv-ID",
++	"", "kab",
++	"", "kab-DZ",
++	"", "kam",
++	"", "kam-KE",
++	"", "kde",
++	"", "kde-TZ",
++	"", "kea",
++	"", "kea-CV",
++	"", "kgp",
++	"", "kgp-BR",
++	"", "khq",
++	"", "khq-ML",
++	"", "ki",
++	"", "ki-KE",
++	"", "kkj",
++	"", "kkj-CM",
++	"", "kln",
++	"", "kln-KE",
++	"", "ks",
++	"", "ks-Arab",
++	"", "ks-Arab-IN",
++	"", "ks-Deva",
++	"", "ks-Deva-IN",
++	"", "ksb",
++	"", "ksb-TZ",
++	"", "ksf",
++	"", "ksf-CM",
++	"", "ksh",
++	"", "ksh-DE",
++	"", "kw",
++	"", "kw-GB",
++	"", "lag",
++	"", "lag-TZ",
++	"", "lb",
++	"", "lb-LU",
++	"", "lg",
++	"", "lg-UG",
++	"", "lrc",
++	"", "lrc-IQ",
++	"", "lrc-IR",
++	"", "lu",
++	"", "lu-CD",
++	"", "luo",
++	"", "luo-KE",
++	"", "luy",
++	"", "luy-KE",
++	"", "mai",
++	"", "mai-IN",
++	"", "mas",
++	"", "mas-KE",
++	"", "mas-TZ",
++	"", "mer",
++	"", "mer-KE",
++	"", "mfe",
++	"", "mfe-MU",
++	"", "mg",
++	"", "mg-MG",
++	"", "mgh",
++	"", "mgh-MZ",
++	"", "mgo",
++	"", "mgo-CM",
++	"", "mi",
++	"", "mi-NZ",
++	"", "mni",
++	"", "mni-Beng",
++	"", "mni-Beng-IN",
++	"", "ms",
++	"", "ms-BN",
++	"", "ms-ID",
++	"", "ms-MY",
++	"", "ms-SG",
++	"", "mua",
++	"", "mua-CM",
++	"", "mzn",
++	"", "mzn-IR",
++	"", "naq",
++	"", "naq-NA",
++	"", "nd",
++	"", "nd-ZW",
++	"", "nl",
++	"", "nl-AW",
++	"", "nl-BE",
++	"", "nl-BQ",
++	"", "nl-CW",
++	"", "nl-NL",
++	"", "nl-SR",
++	"", "nl-SX",
++	"", "nmg",
++	"", "nmg-CM",
++	"", "nnh",
++	"", "nnh-CM",
++	"", "nus",
++	"", "nus-SS",
++	"", "nyn",
++	"", "nyn-UG",
++	"", "os",
++	"", "os-GE",
++	"", "os-RU",
++	"", "pcm",
++	"", "pcm-NG",
++	"", "pt",
++	"", "pt-AO",
++	"", "pt-BR",
++	"", "pt-CH",
++	"", "pt-CV",
++	"", "pt-GQ",
++	"", "pt-GW",
++	"", "pt-LU",
++	"", "pt-MO",
++	"", "pt-MZ",
++	"", "pt-PT",
++	"", "pt-ST",
++	"", "pt-TL",
++	"", "qu",
++	"", "qu-BO",
++	"", "qu-EC",
++	"", "qu-PE",
++	"", "rm",
++	"", "rm-CH",
++	"", "rn",
++	"", "rn-BI",
++	"", "rof",
++	"", "rof-TZ",
++	"", "rw",
++	"", "rw-RW",
++	"", "rwk",
++	"", "rwk-TZ",
++	"", "sa",
++	"", "sa-IN",
++	"", "sah",
++	"", "sah-RU",
++	"", "saq",
++	"", "saq-KE",
++	"", "sat",
++	"", "sat-Olck",
++	"", "sat-Olck-IN",
++	"", "sbp",
++	"", "sbp-TZ",
++	"", "sc",
++	"", "sc-IT",
++	"", "sd",
++	"", "sd-Arab",
++	"", "sd-Arab-PK",
++	"", "sd-Deva",
++	"", "sd-Deva-IN",
++	"", "seh",
++	"", "seh-MZ",
++	"", "ses",
++	"", "ses-ML",
++	"", "sg",
++	"", "sg-CF",
++	"", "shi",
++	"", "shi-Latn",
++	"", "shi-Latn-MA",
++	"", "shi-Tfng",
++	"", "shi-Tfng-MA",
++	"", "sn",
++	"", "sn-ZW",
++	"", "so",
++	"", "so-DJ",
++	"", "so-ET",
++	"", "so-KE",
++	"", "so-SO",
++	"", "su",
++	"", "su-Latn",
++	"", "su-Latn-ID",
++	"", "sw",
++	"", "sw-CD",
++	"", "sw-KE",
++	"", "sw-TZ",
++	"", "sw-UG",
++	"", "teo",
++	"", "teo-KE",
++	"", "teo-UG",
++	"", "tg",
++	"", "tg-TJ",
++	"", "ti",
++	"", "ti-ER",
++	"", "ti-ET",
++	"", "tt",
++	"", "tt-RU",
++	"", "twq",
++	"", "twq-NE",
++	"", "tzm",
++	"", "tzm-MA",
++	"", "vai",
++	"", "vai-Latn",
++	"", "vai-Latn-LR",
++	"", "vai-Vaii",
++	"", "vai-Vaii-LR",
++	"", "vun",
++	"", "vun-TZ",
++	"", "wae",
++	"", "wae-CH",
++	"", "xh",
++	"", "xh-ZA",
++	"", "xog",
++	"", "xog-UG",
++	"", "yav",
++	"", "yav-CM",
++	"", "yrl",
++	"", "yrl-BR",
++	"", "yrl-CO",
++	"", "yrl-VE",
++	"", "zgh",
++	"", "zgh-MA",
++	"", "zu",
++	"", "zu-ZA",
++	"af", "af-NA",
++	"af", "af-ZA",
++	"am", "am-ET",
++	"ar", "ar-001",
++	"ar", "ar-AE",
++	"ar", "ar-BH",
++	"ar", "ar-DJ",
++	"ar", "ar-DZ",
++	"ar", "ar-EG",
++	"ar", "ar-EH",
++	"ar", "ar-ER",
++	"ar", "ar-IL",
++	"ar", "ar-IQ",
++	"ar", "ar-JO",
++	"ar", "ar-KM",
++	"ar", "ar-KW",
++	"ar", "ar-LB",
++	"ar", "ar-LY",
++	"ar", "ar-MA",
++	"ar", "ar-MR",
++	"ar", "ar-OM",
++	"ar", "ar-PS",
++	"ar", "ar-QA",
++	"ar", "ar-SA",
++	"ar", "ar-SD",
++	"ar", "ar-SO",
++	"ar", "ar-SS",
++	"ar", "ar-SY",
++	"ar", "ar-TD",
++	"ar", "ar-TN",
++	"ar", "ar-YE",
++	"as", "as-IN",
++	"az", "az-Cyrl",
++	"az", "az-Cyrl-AZ",
++	"az", "az-Latn",
++	"az", "az-Latn-AZ",
++	"be", "be-BY",
++	"bg", "bg-BG",
++	"bn", "bn-BD",
++	"bn", "bn-IN",
++	"bo", "bo-CN",
++	"bo", "bo-IN",
++	"br", "br-FR",
++	"bs", "bs-Latn",
++	"bs", "bs-Latn-BA",
++	"bs_Cyrl", "bs-Cyrl-BA",
++	"ceb", "ceb-PH",
++	"chr", "chr-US",
++	"cs", "cs-CZ",
++	"cy", "cy-GB",
++	"da", "da-DK",
++	"da", "da-GL",
++	"dsb", "dsb-DE",
++	"ee", "ee-GH",
++	"ee", "ee-TG",
++	"el", "el-CY",
++	"el", "el-GR",
++	"eo", "eo-001",
++	"es", "es-419",
++	"es", "es-AR",
++	"es", "es-BO",
++	"es", "es-BR",
++	"es", "es-BZ",
++	"es", "es-CL",
++	"es", "es-CO",
++	"es", "es-CR",
++	"es", "es-CU",
++	"es", "es-DO",
++	"es", "es-EA",
++	"es", "es-EC",
++	"es", "es-ES",
++	"es", "es-GQ",
++	"es", "es-GT",
++	"es", "es-HN",
++	"es", "es-IC",
++	"es", "es-MX",
++	"es", "es-NI",
++	"es", "es-PA",
++	"es", "es-PE",
++	"es", "es-PH",
++	"es", "es-PR",
++	"es", "es-PY",
++	"es", "es-SV",
++	"es", "es-US",
++	"es", "es-UY",
++	"es", "es-VE",
++	"et", "et-EE",
++	"fa", "fa-IR",
++	"ff_Adlm", "ff-Adlm-BF",
++	"ff_Adlm", "ff-Adlm-CM",
++	"ff_Adlm", "ff-Adlm-GH",
++	"ff_Adlm", "ff-Adlm-GM",
++	"ff_Adlm", "ff-Adlm-GN",
++	"ff_Adlm", "ff-Adlm-GW",
++	"ff_Adlm", "ff-Adlm-LR",
++	"ff_Adlm", "ff-Adlm-MR",
++	"ff_Adlm", "ff-Adlm-NE",
++	"ff_Adlm", "ff-Adlm-NG",
++	"ff_Adlm", "ff-Adlm-SL",
++	"ff_Adlm", "ff-Adlm-SN",
++	"fi", "fi-FI",
++	"fil", "fil-PH",
++	"fo", "fo-DK",
++	"fo", "fo-FO",
++	"gl", "gl-ES",
++	"gu", "gu-IN",
++	"ha", "ha-GH",
++	"ha", "ha-NE",
++	"ha", "ha-NG",
++	"haw", "haw-US",
++	"he", "he-IL",
++	"hi", "hi-IN",
++	"hi", "hi-Latn",
++	"hi", "hi-Latn-IN",
++	"hr", "hr-BA",
++	"hr", "hr-HR",
++	"hsb", "hsb-DE",
++	"hu", "hu-HU",
++	"hy", "hy-AM",
++	"ig", "ig-NG",
++	"is", "is-IS",
++	"ja", "ja-JP",
++	"ka", "ka-GE",
++	"kk", "kk-KZ",
++	"kl", "kl-GL",
++	"km", "km-KH",
++	"kn", "kn-IN",
++	"ko", "ko-KP",
++	"ko", "ko-KR",
++	"kok", "kok-IN",
++	"ku", "ku-TR",
++	"ky", "ky-KG",
++	"lkt", "lkt-US",
++	"ln", "ln-AO",
++	"ln", "ln-CD",
++	"ln", "ln-CF",
++	"ln", "ln-CG",
++	"lo", "lo-LA",
++	"lt", "lt-LT",
++	"lv", "lv-LV",
++	"mk", "mk-MK",
++	"ml", "ml-IN",
++	"mn", "mn-MN",
++	"mr", "mr-IN",
++	"mt", "mt-MT",
++	"my", "my-MM",
++	"ne", "ne-IN",
++	"ne", "ne-NP",
++	"no", "nb",
++	"no", "nb-NO",
++	"no", "nb-SJ",
++	"no", "nn",
++	"no", "nn-NO",
++	"om", "om-ET",
++	"om", "om-KE",
++	"or", "or-IN",
++	"pa", "pa-Arab",
++	"pa", "pa-Arab-PK",
++	"pa", "pa-Guru",
++	"pa", "pa-Guru-IN",
++	"pl", "pl-PL",
++	"ps", "ps-AF",
++	"ps", "ps-PK",
++	"ro", "ro-MD",
++	"ro", "ro-RO",
++	"ru", "ru-BY",
++	"ru", "ru-KG",
++	"ru", "ru-KZ",
++	"ru", "ru-MD",
++	"ru", "ru-RU",
++	"ru", "ru-UA",
++	"se", "se-FI",
++	"se", "se-NO",
++	"se", "se-SE",
++	"si", "si-LK",
++	"sk", "sk-SK",
++	"sl", "sl-SI",
++	"smn", "smn-FI",
++	"sq", "sq-AL",
++	"sq", "sq-MK",
++	"sq", "sq-XK",
++	"sr", "sr-Cyrl",
++	"sr", "sr-Cyrl-BA",
++	"sr", "sr-Cyrl-ME",
++	"sr", "sr-Cyrl-RS",
++	"sr", "sr-Cyrl-XK",
++	"sr_Latn", "sr-Latn-BA",
++	"sr_Latn", "sr-Latn-ME",
++	"sr_Latn", "sr-Latn-RS",
++	"sr_Latn", "sr-Latn-XK",
++	"sv", "sv-AX",
++	"sv", "sv-FI",
++	"sv", "sv-SE",
++	"ta", "ta-IN",
++	"ta", "ta-LK",
++	"ta", "ta-MY",
++	"ta", "ta-SG",
++	"te", "te-IN",
++	"th", "th-TH",
++	"tk", "tk-TM",
++	"to", "to-TO",
++	"tr", "tr-CY",
++	"tr", "tr-TR",
++	"ug", "ug-CN",
++	"uk", "uk-UA",
++	"ur", "ur-IN",
++	"ur", "ur-PK",
++	"uz", "uz-Arab",
++	"uz", "uz-Arab-AF",
++	"uz", "uz-Cyrl",
++	"uz", "uz-Cyrl-UZ",
++	"uz", "uz-Latn",
++	"uz", "uz-Latn-UZ",
++	"vi", "vi-VN",
++	"wo", "wo-SN",
++	"yi", "yi-001",
++	"yo", "yo-BJ",
++	"yo", "yo-NG",
++	"zh", "yue",
++	"zh", "yue-Hans",
++	"zh", "yue-Hans-CN",
++	"zh", "yue-Hant",
++	"zh", "yue-Hant-HK",
++	"zh", "zh-Hans",
++	"zh", "zh-Hans-CN",
++	"zh", "zh-Hans-HK",
++	"zh", "zh-Hans-MO",
++	"zh", "zh-Hans-SG",
++	"zh", "zh-Hant",
++	"zh", "zh-Hant-HK",
++	"zh", "zh-Hant-MO",
++	"zh", "zh-Hant-TW",
++	NULL, NULL,
++};
++
+ #endif							/* USE_ICU */
+ 
+ 
+@@ -987,17 +1696,18 @@
+ 		 * Start the loop at -1 to sneak in the root locale without too much
+ 		 * code duplication.
+ 		 */
+-		for (i = -1; i < uloc_countAvailable(); i++)
++		for (i = -1; i < ucol_countAvailable(); i++)  /* XXX-Patched: changed from uloc_countAvailable() */
+ 		{
+ 			const char *name;
+ 			char	   *langtag;
+ 			char	   *icucomment;
+ 			Oid			collid;
++			char	   **ptr;  /* XXX-Patched: added */
+ 
+ 			if (i == -1)
+ 				name = "";		/* ICU root locale */
+ 			else
+-				name = uloc_getAvailable(i);
++				name = ucol_getAvailable(i);  /* XXX-Patched: changed from uloc_getAvailable() */
+ 
+ 			langtag = icu_language_tag(name, ERROR);
+ 
+@@ -1025,6 +1735,44 @@
+ 					CreateComments(collid, CollationRelationId, 0,
+ 								   icucomment);
+ 			}
++
++			/*
++			 * XXX-Patched: The following block is added to create collations also for derived
++			 * locales (combination of language+country/region).
++			 * It's terribly inefficient, but in the big picture, it doesn't matter that much
++			 * (it's typically called only once in the life of the cluster).
++			 */
++			for (ptr = icu_coll_locales; *ptr != NULL; ptr++)
++			{
++				/*
++				 * icu_coll_locales is a 1D array of pairs: collation name and locale (langtag).
++				 * ptr++ moves pointer to the second string of the pair and it's a post-increment,
++				 * so after the comparison with name is evaluated.
++				 */
++				if (strcmp(*ptr++, name) == 0) {
++					const char *langtag;
++
++					langtag = pstrdup(*ptr);
++					collid = CollationCreate(psprintf("%s-x-icu", langtag),
++										 nspid, GetUserId(),
++										 COLLPROVIDER_ICU, true, -1,
++										 NULL, NULL, langtag, NULL,
++										 get_collation_actual_version(COLLPROVIDER_ICU, langtag),
++										 true, true);
++
++					if (OidIsValid(collid))
++					{
++						ncreated++;
++
++						CommandCounterIncrement();
++
++						icucomment = get_icu_locale_comment(langtag);
++						if (icucomment)
++							CreateComments(collid, CollationRelationId, 0,
++										   icucomment);
++					}
++				}
++			}
+ 		}
+ 	}
+ #endif							/* USE_ICU */

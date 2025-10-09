@@ -1,0 +1,508 @@
+# Contributor: G.J.R. Timmer <gjr.timmer@gmail.com>
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Maintainer: Jakub Jirutka <jakub@jirutka.cz>
+_pkgname=postgresql
+pkgver=18.0
+pkgrel=0
+_majorver=${pkgver%%[_.]*}
+# Should this aport provide libpq* and libecpg*? true/false
+# Exactly one postgresql aport must be the default one!
+_default_ver=false
+pkgname=$_pkgname$_majorver
+pkgdesc="A sophisticated object-relational DBMS, version $_majorver"
+url="https://www.postgresql.org/"
+arch="all"
+license="PostgreSQL"
+_llvmver=20
+depends="$pkgname-client postgresql-common tzdata"
+depends_dev="
+	libpq-dev
+	libecpg-dev
+	clang$_llvmver
+	icu-dev
+	llvm$_llvmver
+	lz4-dev
+	openssl-dev
+	zstd-dev
+	"
+checkdepends="
+	diffutils
+	icu-data-full
+	perl-ipc-run
+	"
+makedepends="$depends_dev
+	bison
+	docbook-xsl-nons
+	flex
+	libxml2-dev~2.13
+	linux-headers
+	llvm$_llvmver-dev
+	openldap-dev
+	perl-dev
+	python3-dev
+	readline-dev
+	tcl-dev
+	util-linux-dev
+	zlib-dev
+	"
+pkgusers="postgres"
+pkggroups="postgres"
+install="$pkgname.post-install $pkgname.pre-deinstall"
+provider_priority=$_majorver
+provides="postgresql"
+replaces="postgresql"  # for backward compatibility
+$_default_ver && subpackages="
+	libpq
+	libpq-dev:libpq_dev
+	libecpg
+	libecpg-dev:libecpg_dev
+	"
+subpackages="
+	$subpackages
+	$pkgname-client
+	$pkgname-jit
+	$pkgname-contrib
+	$pkgname-plperl
+	$pkgname-plperl-contrib:plperl_contrib
+	$pkgname-plpython3
+	$pkgname-plpython3-contrib:plpython3_contrib
+	$pkgname-pltcl
+	$pkgname-contrib-jit:contrib_jit
+	$pkgname-dev
+	$pkgname-doc
+	$pkgname-openrc
+	"
+source="https://ftp.postgresql.org/pub/source/v$pkgver/postgresql-$pkgver.tar.bz2
+	initdb.patch
+	perl-rpath.patch
+	per-version-dirs.patch
+	unix_socket_directories.patch
+	disable-html-docs.patch
+	remove-libecpg_compat.patch
+	czech-snowball-stemmer.patch
+	make-split-headers.patch
+	jit-datalayout-mismatch-on-s390x-and-x86.patch
+	pg_config-add-major-version.patch
+	dont-use-locale-a-on-musl.patch
+	icu-collations-hack.patch
+	fix-test-check_guc.patch
+	libpgport-pkglibdir.patch.txt
+	external-libpq.patch.txt
+
+	pltcl_create_tables.sql
+	"
+builddir="$srcdir/$_pkgname-$pkgver"
+options="net"
+
+case "$CARCH" in
+	# XXX: Tests are broken.
+	riscv64|loongarch64) options="$options !check"
+esac
+
+_bindir=usr/libexec/$pkgname
+_datadir=usr/share/$pkgname
+_docdir=usr/share/doc/$pkgname
+_mandir=$_datadir/man
+_includedir=usr/include/postgresql
+# Directory for server-related libraries. This is hard-coded in
+# per-version-dirs.patch.
+_srvlibdir=usr/lib/$pkgname
+
+# Programs to be included in the -client subpackage.
+# TODO: This was probably originally copied from Debian and I have no idea
+#   why these are considered as front-end (client) programs and the rest of
+#   the programs are not. So it should be reviewed.
+_client_cmds="
+	clusterdb
+	createdb
+	createuser
+	dropdb
+	dropuser
+	pg_amcheck
+	pg_basebackup
+	pg_dump
+	pg_dumpall
+	pg_isready
+	pg_receivewal
+	pg_recvlogical
+	pg_restore
+	pg_verifybackup
+	pgbench
+	psql
+	reindexdb
+	vacuumdb
+	"
+
+prepare() {
+	default_prepare
+
+	# FIXME: This test is broken, skip it for now.
+	sed -i '/test_pg_dump/d' src/test/modules/Makefile
+
+	if $_default_ver; then
+		cp -rl "$builddir" "$builddir-ifaces"
+	else
+		msg 'external-libpq.patch'
+		patch -p1 < "$srcdir"/external-libpq.patch.txt
+	fi
+	# Note: This must be applied after clonning $builddir-ifaces.
+	msg 'libpgport-pkglibdir.patch'
+	patch -p1 < "$srcdir"/libpgport-pkglibdir.patch.txt
+}
+
+build() {
+	export LLVM_CONFIG="/usr/lib/llvm$_llvmver/bin/llvm-config"
+	export PYTHON=/usr/bin/python3
+	export CFLAGS="${CFLAGS/-Os/-O2}"
+	export CPPFLAGS="${CPPFLAGS/-Os/-O2}"
+	# older clang versions don't have a 'clang' exe anymore.
+	export CLANG=clang-$_llvmver
+
+	_configure --with-ldap
+	make world
+
+	if $_default_ver; then
+		cd "$builddir-ifaces"
+
+		_configure --without-ldap
+		local dir; for dir in include common port interfaces bin/pg_config; do
+			make -C src/$dir
+		done
+	fi
+}
+
+_configure() {
+	local _extra_opts
+	# When disable-spinlocks is no longer required - check postgresql-bdr package.
+	case "$CARCH" in
+		riscv64) _extra_opts='--disable-spinlocks';;
+	esac
+	want_check && _extra_opts="$_extra_opts --enable-tap-tests"
+
+	./configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--bindir=/$_bindir \
+		--datarootdir=/usr/share \
+		--datadir=/$_datadir \
+		--docdir=/$_docdir \
+		--includedir=/$_includedir \
+		--libdir=/usr/lib \
+		--mandir=/$_mandir \
+		--sysconfdir=/etc/postgresql \
+		--disable-rpath \
+		--with-system-tzdata=/usr/share/zoneinfo \
+		--with-libxml \
+		--with-openssl \
+		--with-uuid=e2fs \
+		--with-llvm \
+		--with-perl \
+		--with-python \
+		--with-tcl \
+		--with-lz4 \
+		--with-zstd \
+		$_extra_opts \
+		"$@"
+}
+
+check() {
+	case "$CARCH" in
+	# XXX: Tests fail on 32-bit, but they shouldn't.
+	arm* | x86)
+		warning "Skipping server tests on 32-bit";;
+	*)
+		_run_tests src/test
+		_run_tests src/pl
+		_run_tests contrib
+	esac
+
+	if $_default_ver; then
+		_run_tests src/interfaces/libpq
+	fi
+}
+
+package() {
+	make DESTDIR="$pkgdir" install install-docs
+
+	if $_default_ver; then
+		cd "$builddir-ifaces"
+
+		# Override libpq and libecpg files with the build without LDAP support.
+		local dir; for dir in common port interfaces bin/pg_config; do
+			make -C src/$dir DESTDIR="$pkgdir" bindir=/usr/bin install
+		done
+		make -C src/include DESTDIR="$pkgdir" install-interfaces
+	fi
+
+	cd "$pkgdir"
+
+	# Duplicate of usr/bin/ecpg.
+	rm -f ./$_bindir/ecpg
+
+	mkdir -p ./usr/bin
+	ln -s /$_bindir/postgres ./usr/bin/postgres$_majorver
+
+	# This file is used by pg_versions and init script.
+	echo "$_majorver" > ./$_bindir/PG_VERSION
+
+	install -d -m750 -o postgres -g postgres \
+		./etc/postgresql$_majorver \
+		./var/lib/postgresql \
+		./var/log/postgresql
+
+	local server_cmds=$(_setdiff "$(ls -1 $_bindir)" "$_client_cmds pg_config ecpg PG_VERSION")
+	[ "$server_cmds" ] || die 'package: variable server_cmds is empty'
+
+	# These commands are symlinked to /usr/bin by pg_versions script after
+	# installation.
+	provides="$provides $(echo "$server_cmds" | sed 's/^/cmd:&/')"
+}
+
+libpq() {
+	pkgdesc="PostgreSQL client library"
+	depends=""
+	replaces=""
+
+	amove usr/lib/libpq.so.*
+}
+
+libpq_dev() {
+	pkgdesc="PostgreSQL client library (development files)"
+	depends=""
+	replaces=""
+
+	amove usr/bin/pg_config
+
+	amove $_includedir/internal/*
+	amove $_includedir/libpq-*.h
+	amove $_includedir/libpq/*
+	amove $_includedir/pg_config*.h
+	amove $_includedir/postgres_ext.h
+
+	amove usr/lib/libpq.*
+	amove usr/lib/libpgcommon*.a
+	amove usr/lib/libpgport*.a
+	amove usr/lib/pkgconfig/libpq.pc
+}
+
+libecpg() {
+	pkgdesc="ECPG - Embedded SQL in C"
+	depends=""
+	provides="postgresql-libs"  # for backward compatibility (Alpine <3.15)
+	replaces="$provides"  # for backward compatibility (Alpine <3.15)
+
+	amove usr/lib/libecpg.so.*
+	amove usr/lib/libpgtypes.so.*
+}
+
+libecpg_dev() {
+	pkgdesc="ECPG - Embedded SQL in C (development files)"
+	depends="libpq-dev=$pkgver-r$pkgrel"
+	replaces=""
+
+	amove usr/bin/ecpg
+
+	amove $_includedir/ecpg*.h
+	amove $_includedir/informix/*
+	amove $_includedir/pgtypes*.h
+	amove $_includedir/sql3types.h
+	amove $_includedir/sqlca.h
+	amove $_includedir/sqlda*.h
+
+	amove usr/lib/libecpg.*
+	amove usr/lib/libpgtypes.*
+	amove usr/lib/pkgconfig/libecpg.pc
+	amove usr/lib/pkgconfig/libpgtypes.pc
+}
+
+client() {
+	pkgdesc="PostgreSQL client"
+	depends="postgresql-common"
+	_subpkg_common
+
+	local cmd; for cmd in $_client_cmds; do
+		amove $_bindir/$cmd
+		# These commands are symlinked to /usr/bin by pg_versions script after
+		# installation.
+		provides="$provides cmd:$cmd"
+	done
+	amove $_bindir/PG_VERSION
+}
+
+jit() {
+	pkgdesc="Just-in-time compilation support for PostgreSQL"
+	depends="$pkgname=$pkgver-r$pkgrel"
+	_subpkg_common
+
+	amove $_srvlibdir/bitcode/*
+	amove $_srvlibdir/llvmjit.so
+	amove $_srvlibdir/llvmjit_types.bc
+}
+
+contrib() {
+	pkgdesc="Extension modules distributed with PostgreSQL"
+	depends="$pkgname=$pkgver-r$pkgrel"
+	_subpkg_common
+
+	cd "$builddir"
+
+	# Avoid installing plperl and plpython extensions, these will be
+	# installed into separate subpackages.
+	sed -Ei -e 's/(.*_plperl)/#\1/' \
+		-e 's/(.*_plpython)/#\1/' \
+		contrib/Makefile
+
+	make -C contrib DESTDIR="$subpkgdir" install
+
+	_contrib_common
+
+	provides="$provides $(ls -1 "$subpkgdir"/$_bindir | sed 's/^/cmd:&/')"
+}
+
+pltcl() {
+	pkgdesc="PL/Tcl procedural language for PostgreSQL"
+	depends="$pkgname=$pkgver-r$pkgrel pgtcl"
+	_subpkg_common
+
+	amove $_srvlibdir/pltcl.so
+	amove $_datadir/extension/pltcl*
+
+	install -m 644 "$srcdir"/pltcl_create_tables.sql -t "$subpkgdir"/$_datadir/
+}
+
+plperl() {
+	pkgdesc="PL/Perl procedural language for PostgreSQL"
+	depends="$pkgname=$pkgver-r$pkgrel"
+	_subpkg_common
+
+	amove $_srvlibdir/plperl.so
+	amove $_datadir/extension/plperl*
+}
+
+plperl_contrib() {
+	_plcontrib plperl "PL/Perl"
+
+	cd "$builddir"
+	make -C contrib/hstore_plperl DESTDIR="$subpkgdir" install
+
+	_contrib_common
+}
+
+plpython3() {
+	pkgdesc="PL/Python3 procedural language for PostgreSQL"
+	depends="$pkgname=$pkgver-r$pkgrel python3"
+	_subpkg_common
+
+	amove $_srvlibdir/plpython3.so
+	amove $_datadir/extension/plpython*
+}
+
+plpython3_contrib() {
+	_plcontrib plpython3 "PL/Python 3"
+
+	cd "$builddir"
+	make -C contrib/hstore_plpython DESTDIR="$subpkgdir" install
+	make -C contrib/ltree_plpython DESTDIR="$subpkgdir" install
+
+	_contrib_common
+}
+
+contrib_jit() {
+	pkgdesc="Extension modules distributed with PostgreSQL (JIT support)"
+	depends="$pkgname-contrib=$pkgver-r$pkgrel"
+	install_if="$pkgname-jit $pkgname-contrib=$pkgver-r$pkgrel"
+	_subpkg_common
+
+	amove $_srvlibdir/bitcode/*
+}
+
+dev() {
+	default_dev
+	_subpkg_common
+	replaces=""
+
+	amove $_srvlibdir/pgxs/*
+}
+
+doc() {
+	default_doc
+	_subpkg_common
+
+	amove $_mandir
+}
+
+openrc() {
+	default_openrc
+	depends="postgresql-common-openrc"
+
+	mkdir -p "$subpkgdir"
+}
+
+_plcontrib() {
+	local subname="$1"
+	pkgdesc="$2 extension modules distributed with PostgreSQL"
+	depends="$pkgname-$subname=$pkgver-r$pkgrel"
+	install_if="$pkgname-$subname=$pkgver-r$pkgrel $pkgname-contrib=$pkgver-r$pkgrel"
+	_subpkg_common
+}
+
+_subpkg_common() {
+	provides="postgresql${subpkgname#$pkgname}"
+	replaces="$provides"  # for backward compatibility
+}
+
+_contrib_common() {
+	# Move headers, bitcode and docs from subpackage back to pkgdir, so it
+	# can be catched by subsequent split functions.
+	local dir; for dir in $_includedir $_srvlibdir/bitcode $_docdir; do
+		[ -d "$subpkgdir"/$dir ] || continue
+
+		mkdir -p "$pkgdir"/$dir
+		cp -rf "$subpkgdir"/$dir/* "$pkgdir"/$dir/
+		rm -rf "$subpkgdir"/$dir/*
+		rmdir -p "$subpkgdir"/$dir || true
+	done
+}
+
+_run_tests() {
+	local path="$1"; shift
+
+	msg "Running test suite at $path..."
+	# Note: some tests fail when running in parallel.
+	make -k -j 1 -C "$path" "$@" check MAX_CONNECTIONS=5 || {
+		printf "\n%s\n\n" "Trying to find all regression.diffs files in build directory..." >&2
+		find "$path" -name regression.diffs | while read -r file; do
+			echo "=== test failure: $file ===" >&2
+			cat "$file" >&2
+		done
+		return 1
+	}
+}
+
+# $1: whitespace-separated items of set A
+# $2: whitespace-separated items of set B
+# stdout: newline-separated items of A - B
+_setdiff() {
+	python3 -c 'import sys;print("\n".join(set(sys.argv[1].split()).difference(set(sys.argv[2].split()))))' "$@"
+}
+
+sha512sums="
+d3a2b460465259c461b1e53555f48881986d3103af6f7c654366ada04ab43b61ce22eb3cb078c70afdac22ddfa5bd9ce2928e3edb110f7f029c958340a980f37  postgresql-18.0.tar.bz2
+c3de763d8fba5a2ac5f51a4e2831c11c40b455302cd3d5a023b2c4e90839c3600ec882eba0985d595796ee3b25c1332437a93c453e674e2f6e367b67fa39b20b  initdb.patch
+42e7ff5e4114390ec7f0f69b037ebcbc9a7739b239d992bc6f4d13561e188f9027e896892230a5d7cbf1ec0a1ad68deacdd414dcfc7d919bfc368442a220d352  perl-rpath.patch
+7501022ac2befce1adcf72a4ca06f10af3aad6ad19692fa53e6fa7cc24457ce0852ef1805ddfcd82db6402f6d1e684570b3151028397f0a55a696164aa73975d  per-version-dirs.patch
+9ad57531cc8b848d53a21d5ba9838b4f76272ce80a40b7802993d4999667b87decdd31527dc8b22464f6b21b66fb1f54efcbbb0e2f6d6d961cbc622d78150a27  unix_socket_directories.patch
+e1503664ede8ec677edb11b03eac86d392c5aea64e95d2b98c952c0f1773d07e14e01d8ba072cf8dcbc0d54deb3dab5d6d93a0048f0e97e7c9844346a8faf8da  disable-html-docs.patch
+47d7675c6092bb88ceab36c842d94823c0b212e9abfef338f8e8d99d01ded642447db5f2556860fb7df7131634168158bda6ed20fcddc9a41d2924a2570bf93d  remove-libecpg_compat.patch
+3494de24c343f40228ad73b501a76025dc536083399a65adf010ee61813d7af3b2151e8850c018c2062f4c2d2e9a9e5eb64087da73d8bd3541fbcf88bc2a8bea  czech-snowball-stemmer.patch
+2b19d6fe44ff5df0047178de47a77e977727321c66459f7f023c536a2d830649453863e2072ee4af76ee7f46145218eb3b323a9aaa5ce077c9992955bb18c982  make-split-headers.patch
+005376d22f7866ad2b68387cc8585184442b03079b5c25002de9611ac2dc13cdde6ae747542908eca1585e40467bc4484d5acf84ef9dcf8d214f7d561cb0ff5e  jit-datalayout-mismatch-on-s390x-and-x86.patch
+04751b23c7085b40829c6d2d63bb428e04b11d79aa58804045f2ed52d096e75304b1c7d0f8f37e3398156f18f69e6f6f2879ece46209c091b4348bc39d181511  pg_config-add-major-version.patch
+5b271bfb9c109d7c9c6ddb126528d4028f9f0193e0b9b8bc1a5afb3c47dada8fbee7265f73cb168ac8d518867b8dc830ad5392eb5f405a8e5db9d7d2e58fd3ef  dont-use-locale-a-on-musl.patch
+59928acfd23f917134f1ccca241d0fed2f81cea402e21bb3c9821f25ff895ac2ad60f391c0fc7b302daf0361e646d13b4e2b7aac09c54f2a5d35651bfbfddf01  icu-collations-hack.patch
+66c93d499c2629589936dc4097413b2b103f7ac10ad716636d8e78fb2104a0f458b48b4a6bd0d45e53a8a65c4a62ca119ee34a9f1ab9bcda988db6d5f5514691  fix-test-check_guc.patch
+1ef4cc68e6781e0680472bfe71f07385982cc5f3932f63928d4025b8b3a74f630c775fdbc02f903f1da3c2187756393a572387f8ac7fbd643d6b06bd9fc9b93b  libpgport-pkglibdir.patch.txt
+06f32f8a05228f27bc8c5ed4aac7ac6eab0c64915932ed0c37f76335fbe635396a43226a006ce83ba93ef3b8ca2dff424725dddd490ed9c5f686c1ea2607781e  external-libpq.patch.txt
+5c9bfd9e295dcf678298bf0aa974347a7c311d6e7c2aa76a6920fcb751d01fd1ab77abbec11f3c672f927ad9deaa88e04e370c0b5cd1b60087554c474b748731  pltcl_create_tables.sql
+"
