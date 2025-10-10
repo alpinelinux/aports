@@ -1,10 +1,11 @@
 #!/bin/sh
 
 # apk add \
-#	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso cmd:mksquashfs
-#	(for efi:) mtools grub
+#	abuild apk-tools alpine-conf busybox fakeroot syslinux xorriso cmd:mksquashfs mtools
+#	(for efi:) grub
 #	(for s390x:) s390-tools
 #	(for ppc64le:) grub
+#	(for pi:) sfdisk dosfstools
 
 # FIXME: clean workdir out of unneeded sections
 # FIXME: --release: cp/mv images to REPODIR/$ARCH/releases/
