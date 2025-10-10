@@ -8,8 +8,7 @@ if [ -z "$efi_file" ]; then
     aarch64) efi_file="BOOTAA64.EFI" ;;
     loongarch64) efi_file="BOOTLOONGARCH64.EFI" ;;
     riscv64) efi_file="BOOTRISCV64.EFI" ;;
-    x86_64) efi_file="BOOTX64.EFI" ;;
-    i?86) efi_file="BOOTIA32.EFI" ;;
+    x86_64|i?86) efi_file="BOOTX64.EFI BOOTIA32.EFI" ;;
     *)
       echo "* could not autodetect EFI file! must set efi_file variable" >&2
       exit 1
@@ -17,8 +16,21 @@ if [ -z "$efi_file" ]; then
 fi
 
 if [ -z "$efi_system_partition" ]; then
-  echo "* efi_system_partition variable not set in /etc/limine/limine-efi-updater.conf" >&2
-  exit 1
+  for mount_point_raw in $(awk '$3 == "vfat" {print $2}' /etc/mtab); do
+    # decode all octal escape sequences
+    mount_point="$(printf '%b' "$mount_point_raw")"
+
+    if [ -d "$mount_point/EFI" ]; then
+      efi_system_partition="$mount_point"
+      break
+    fi
+  done
+
+  if [ -z "$efi_system_partition" ]; then
+    echo "* efi_system_partition variable not set in /etc/limine/limine-efi-updater.conf" >&2
+    echo "* and ESP autodetection failed" >&2
+    exit 1
+  fi
 fi
 
 if [ -z "$destination_path" ]; then
@@ -29,14 +41,21 @@ if [ -z "$destination_filename" ]; then
   destination_filename="$efi_file"
 fi
 
-if ! [ -f "/usr/share/limine/$efi_file" ]; then
-  # not found as a file..
-  echo "* efi_file: $efi_file was not found in /usr/share/limine/ .." >&2
-  echo "* you probably need to install the package that contains the one you want:" >&2
-  echo "* limine-efi-<architecture>" >&2
-  echo "* and configure efi_file accordingly in /etc/limine/limine-efi-updater.conf" >&2
+if ! [ "$(echo "$efi_file" | wc -w)" = "$(echo "$destination_filename" | wc -w)" ]; then
+  echo "* the efi_file variable and the destination_filename variable have a different" >&2
+  echo "* amount of items" >&2
   exit 1
 fi
+
+for f in $efi_file; do
+  if ! [ -f "/usr/share/limine/$f" ]; then
+    # not found as a file..
+    echo "* efi_file: $f was not found in /usr/share/limine/ .." >&2
+    echo "* you probably need to install the package that contains the one you want:" >&2
+    echo "* limine-efi-<architecture>" >&2
+    exit 1
+  fi
+done
 
 # partition | mountpoint | fstype | flags | ..
 parttype="$(awk "\$2 == \"$efi_system_partition\" { print \$3 }" < /etc/mtab)"
@@ -54,5 +73,7 @@ elif ! [ "$parttype" = "vfat" ]; then
 fi
 # is vfat and correct mountpoint..
 
-# correct location to place a BOOTXXXX.efi that gets default-loaded.
-install -Dm644 /usr/share/limine/"$efi_file" "$efi_system_partition"/"$destination_path"/"$destination_filename"
+for f in $efi_file; do
+  install -Dm644 /usr/share/limine/"$f" "$efi_system_partition"/"$destination_path"/"${destination_filename%% *}"
+  destination_filename="${destination_filename#* }"
+done
