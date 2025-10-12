@@ -52,12 +52,14 @@ profile_rpi() {
 }
 
 create_image_imggz() {
+	MIN_IMG_SIZE=130 # exceed 128MB minimum FAT16 partition size in MB to cross 4k cluster size boundary
 	sync "$DESTDIR"
-	local image_size=$(du -L -k -s "$DESTDIR" | awk '{print $1 + 8192}' )
 	local imgfile="${OUTDIR}/${output_filename%.gz}"
-	dd if=/dev/zero of="$imgfile" bs=1M count=$(( image_size / 1024 ))
-	mformat -i "$imgfile" -N 0 ::
-	mcopy -s -i "$imgfile" "$DESTDIR"/* "$DESTDIR"/.alpine-release ::
+	local image_size=$(du -L -k -s "$DESTDIR" | awk '{print int(($1 + 8192) / 1024)}' )
+	dd if=/dev/zero of="$imgfile" bs=1M count=$(( image_size > $MIN_IMG_SIZE ? image_size : $MIN_IMG_SIZE ))
+	echo 'start=2048, type=6, bootable' | sfdisk "$imgfile" # create partition table with FAT16 at standard 2048 sector (1MB)
+	mkfs.vfat -n PIBOOT -F 16 --offset 2048 "$imgfile"
+	mcopy -s -i "$imgfile"@@2048s "$DESTDIR"/* "$DESTDIR"/.alpine-release ::
 	echo "Compressing $imgfile..."
 	pigz -v -f -9 "$imgfile" || gzip -f -9 "$imgfile"
 }
