@@ -1,0 +1,105 @@
+From bd9ecc0200a7cb43a57647375ab5c0c47da8bf49 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Thu, 16 Oct 2025 10:58:54 +0200
+Subject: [PATCH] update-kernel: fix bug when firmware glob expands to
+ directory
+
+Fix the case when `modinfo -F firmware` glob expands to a directory
+instead of a file. This happens with ath11k firmware.
+
+fixes: https://gitlab.alpinelinux.org/alpine/alpine-conf/-/issues/10626
+---
+ tests/bin/apk            | 22 ++++++++++++++++++++--
+ tests/update_kernel_test |  2 ++
+ update-kernel.in         |  8 +++++++-
+ 3 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/tests/bin/apk b/tests/bin/apk
+index fd63528..00cb5c3 100755
+--- a/tests/bin/apk
++++ b/tests/bin/apk
+@@ -83,7 +83,8 @@ for pkg in $pkgs; do
+ 	case "$pkg" in
+ 		linux-firmware*)
+ 			# simulate install firmware
+-			mkdir -p "$rootfs"/lib/firmware/brcm
++			mkdir -p "$rootfs"/lib/firmware/brcm \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0/nfa765
+ 			touch "$rootfs"/lib/firmware/brcm/brcmfmac43456-sdio.raspberrypi,400.bin \
+ 				"$rootfs"/lib/firmware/brcm/brcmfmac43456-sdio.raspberrypi,400.clm_blob \
+ 				"$rootfs"/lib/firmware/brcm/brcmfmac43456-sdio.raspberrypi,400.txt \
+@@ -91,12 +92,22 @@ for pkg in $pkgs; do
+ 				"$rootfs"/lib/firmware/brcm/brcmfmac43752-sdio.txt \
+ 				"$rootfs"/lib/firmware/brcm/"brcmfmac43455-sdio.Raspberry Pi Foundation-Raspberry Pi Compute Module 4.txt" \
+ 				"$rootfs"/lib/firmware/brcm/brcmfmac43455-sdio.bin \
+-				"$rootfs"/lib/firmware/brcm/brcmfmac43455-sdio.clm_blob
++				"$rootfs"/lib/firmware/brcm/brcmfmac43455-sdio.clm_blob \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0 \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0/board-2.bin.zst \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0/m3.bin.zst \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0/nfa765/m3.bin.zst \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0/nfa765/Notice.txt.zst \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0/nfa765/amss.bin.zst \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0/Notice.txt.zst \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0/amss.bin.zst \
++				"$rootfs"/lib/firmware/ath11k/WCN6855/hw2.0/regdb.bin.zst
+ 			;;
+ 		linux-*)
+ 			# simulate installing kernel
+ 			flavor=${pkg#linux-}
+ 			mkdir -p "$rootfs"/lib/modules/$kver-$flavor/kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac \
++				"$rootfs"/lib/modules/$kver-$flavor/kernel/drivers/net/wireless/ath/ath11k/ \
+ 				"$rootfs"/boot
+ 			touch "$rootfs"/boot/System.map-$kver-$flavor \
+ 				"$rootfs"/boot/config-$flavor \
+@@ -108,6 +119,13 @@ for pkg in $pkgs; do
+ 				firmware:       brcm/brcmfmac43752-sdio.clm_blob
+ 				firmware:       brcm/brcmfmac43752-sdio.bin
+ 			EOF
++			cat >"$rootfs/lib/modules/$kver-$flavor"/kernel/drivers/net/wireless/ath/ath11k/ath11k_pci.ko <<-EOF
++				vermagic:       $kver-$flavor SMP preempt mod_unload modversions $arch
++				firmware:       ath11k/WCN6855/hw2.1/*
++				firmware:       ath11k/WCN6855/hw2.0/*
++				firmware:       ath11k/QCN9074/hw1.0/*
++				firmware:       ath11k/QCA6390/hw2.0/*
++			EOF
+ 			gzip "$rootfs/lib/modules/$kver-$flavor"/kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac/brcmfmac.ko
+ 			;;
+ 	esac
+diff --git a/tests/update_kernel_test b/tests/update_kernel_test
+index 34c8116..868399f 100755
+--- a/tests/update_kernel_test
++++ b/tests/update_kernel_test
+@@ -45,8 +45,10 @@ update_kernel_firmware_body() {
+ 	MKSQUASHFS_OPTS="-info" atf_check -s exit:0 \
+ 		-o match:"apk add.*linux-firmware" \
+ 		-o match:"file .*brcmfmac.ko" \
++		-o match:"file .*ath11k_pci.ko" \
+ 		-o match:"file .*brcm/brcmfmac43752-sdio.bin" \
+ 		-o match:"file .*brcm/brcmfmac43752-sdio.txt" \
+ 		-o match:"file .*brcmfmac.*sdio.raspberrypi*" \
++		-o match:"file .*WCN6855/hw2.0/board-2.bin*" \
+ 		update-kernel --verbose --flavor rpi out/
+ }
+diff --git a/update-kernel.in b/update-kernel.in
+index 5f55c8b..18b83ed 100644
+--- a/update-kernel.in
++++ b/update-kernel.in
+@@ -311,7 +311,13 @@ find $ROOTFS/lib/modules -type f -name "*.ko*" | xargs modinfo -k $KVER -F firmw
+ 		if ! [ -e "$f" ]; then
+ 			continue
+ 		fi
+-		install -pD "$f" "$MODLOOP/modules/firmware/${f#*/lib/firmware}"
++		target="$MODLOOP/modules/firmware/${f#*/lib/firmware}"
++		if [ -d "$f" ]; then
++			mkdir -p "${target%/*}"
++			cp -a "$f" "${target%/*}"
++			continue
++		fi
++		install -pD "$f" "$target"
+ 		# copy also all potentially associated files
+ 		f=${f%.zst}
+ 		f=${f%.xz}
+-- 
+2.51.0
+
