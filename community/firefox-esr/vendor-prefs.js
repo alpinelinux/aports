@@ -11,8 +11,10 @@ pref("browser.shell.checkDefaultBrowser", false);
 pref("extensions.autoDisableScopes", 11);
 pref("extensions.shownSelectionUI", true);
 
-// Disable sponsored tiles from "Mozilla Tiles Service"
+// Disable sponsored content
 pref("browser.topsites.contile.enabled", false);
+pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);
+pref("browser.newtabpage.activity-stream.feeds.section.topstories", false);
 
 // Disable Widevine CDM support (doesn't work on musl anyway)
 pref("media.gmp-widevinecdm.visible", false);
@@ -20,3 +22,12 @@ pref("media.gmp-widevinecdm.enabled", false);
 
 // Disable Privacy-Preserving Attribution Measurement
 pref("dom.private-attribution.submission.enabled", false);
+
+// Disable various telemetry sources
+pref("browser.newtabpage.activity-stream.telemetry", false);
+pref("toolkit.telemetry.shutdownPingSender.enabled", false);
+pref("toolkit.telemetry.newProfilePing.enabled", false);
+pref("toolkit.telemetry.updatePing.enabled", false);
+pref("toolkit.telemetry.bhrPing.enabled", false);
+pref("datareporting.healthreport.uploadEnabled", false);
+pref("datareporting.usage.uploadEnabled", false);
