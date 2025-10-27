@@ -16,21 +16,8 @@ if [ -z "$efi_file" ]; then
 fi
 
 if [ -z "$efi_system_partition" ]; then
-  for mount_point_raw in $(awk '$3 == "vfat" {print $2}' /etc/mtab); do
-    # decode all octal escape sequences
-    mount_point="$(printf '%b' "$mount_point_raw")"
-
-    if [ -d "$mount_point/EFI" ]; then
-      efi_system_partition="$mount_point"
-      break
-    fi
-  done
-
-  if [ -z "$efi_system_partition" ]; then
-    echo "* efi_system_partition variable not set in /etc/limine/limine-efi-updater.conf" >&2
-    echo "* and ESP autodetection failed" >&2
-    exit 1
-  fi
+  echo "* efi_system_partition variable not set in /etc/limine/limine-efi-updater.conf" >&2
+  exit 1
 fi
 
 if [ -z "$destination_path" ]; then
