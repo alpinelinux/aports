@@ -1,0 +1,213 @@
+Patch-Source: https://github.com/janeczku/calibre-web/commit/8bdd95fc452b819281eea48b610a8c56398c8593
+---
+From 8bdd95fc452b819281eea48b610a8c56398c8593 Mon Sep 17 00:00:00 2001
+From: Ozzie Isaacs <ozzie.fernandez.isaacs@googlemail.com>
+Date: Sat, 14 Feb 2026 10:08:32 +0100
+Subject: [PATCH] Fixes for flask_limiter > 4
+
+---
+ cps/__init__.py       |  4 ++--
+ cps/error_handler.py  | 27 +++++++++++++++++++++++++--
+ cps/kobo_auth.py      | 14 +++++++-------
+ cps/main.py           |  4 ++--
+ cps/usermanagement.py |  2 +-
+ cps/web.py            | 38 +++++++++++++++++++-------------------
+ 6 files changed, 56 insertions(+), 33 deletions(-)
+
+diff --git a/cps/__init__.py b/cps/__init__.py
+index 890d5867da..9f0f307b05 100644
+--- a/src/calibreweb/cps/__init__.py
++++ b/src/calibreweb/cps/__init__.py
+@@ -25,7 +25,7 @@
+ import os
+ import mimetypes
+ 
+-from flask import Flask, request
++from flask import Flask
+ from flask.sessions import SecureCookieSessionInterface
+ from .MyLoginManager import MyLoginManager
+ from flask_principal import Principal
+@@ -111,7 +111,7 @@
+ updater_thread = Updater()
+ 
+ if limiter_present:
+-    limiter = Limiter(key_func=True, headers_enabled=True, auto_check=False, swallow_errors=False)
++    limiter = Limiter(key_func=True, headers_enabled=True, default_limits=[], swallow_errors=False)
+ else:
+     limiter = None
+ 
+diff --git a/cps/error_handler.py b/cps/error_handler.py
+index 54942ec226..679a869212 100644
+--- a/src/calibreweb/cps/error_handler.py
++++ b/src/calibreweb/cps/error_handler.py
+@@ -18,7 +18,9 @@
+ 
+ import traceback
+ 
+-from flask import render_template
++from flask import render_template, request, flash, abort
++from flask_limiter import RateLimitExceeded
++from flask_babel import gettext as _
+ from werkzeug.exceptions import default_exceptions
+ try:
+     from werkzeug.exceptions import FailedDependency
+@@ -26,7 +28,10 @@
+     from werkzeug.exceptions import UnprocessableEntity as FailedDependency
+ 
+ from . import config, app, logger, services
+-
++from .render_template import render_title_template
++from .web import render_login
++from .usermanagement import auth
++from cps.string_helper import strip_whitespaces
+ 
+ log = logger.create()
+ 
+@@ -85,3 +90,21 @@ def handle_exception(e):
+             log.debug('LDAP server not accessible while trying to login to opds feed')
+             return error_http(FailedDependency())
+ 
++
++
++@app.errorhandler(RateLimitExceeded)
++def handle_rate_limit(__):
++    log.error("Rate limit exceeded {}".format(request.endpoint))
++    if "register" in request.endpoint:
++        flash(_(u"Please wait one minute to register next user"), category="error")
++        return render_title_template('register.html', config=config, title=_("Register"), page="register")
++    elif "login" in request.endpoint:
++        form = request.form.to_dict()
++        username = strip_whitespaces(form.get('username', "")).lower().replace("\n", "").replace("\r", "")
++        flash(_("Please wait one minute before next login"), category="error")
++        return render_login(username, form.get("password", ""))
++    elif "opds" in request.endpoint:
++        return auth.auth_error_callback(429)
++    else:
++        return abort(429)
++
+diff --git a/cps/kobo_auth.py b/cps/kobo_auth.py
+index 53f35dcc5a..9a5b47fc15 100644
+--- a/src/calibreweb/cps/kobo_auth.py
++++ b/src/calibreweb/cps/kobo_auth.py
+@@ -154,13 +154,13 @@ def requires_kobo_auth(f):
+     def inner(*args, **kwargs):
+         auth_token = get_auth_token()
+         if auth_token is not None:
+-            try:
+-                limiter.check()
+-            except RateLimitExceeded:
+-                return abort(429)
+-            except (ConnectionError, Exception) as e:
+-                log.error("Connection error to limiter backend: %s", e)
+-                return abort(429)
++            #try:
++            #    limiter.check()
++            #except RateLimitExceeded:
++            #    return abort(429)
++            #except (ConnectionError, Exception) as e:
++            #    log.error("Connection error to limiter backend: %s", e)
++            #    return abort(429)
+             user = (
+                 ub.session.query(ub.User)
+                 .join(ub.RemoteAuthToken)
+diff --git a/cps/main.py b/cps/main.py
+index 44e563f93f..b0f56b6d47 100644
+--- a/src/calibreweb/cps/main.py
++++ b/src/calibreweb/cps/main.py
+@@ -66,8 +66,8 @@ def main():
+     app.register_blueprint(tasks)
+     app.register_blueprint(web)
+     app.register_blueprint(basic)
+-    app.register_blueprint(opds)
+     limiter.limit("3/minute", key_func=request_username)(opds)
++    app.register_blueprint(opds)
+     app.register_blueprint(jinjia)
+     app.register_blueprint(about)
+     app.register_blueprint(shelf)
+@@ -77,9 +77,9 @@ def main():
+     app.register_blueprint(gdrive)
+     app.register_blueprint(editbook)
+     if kobo_available:
++        limiter.limit("3/minute", key_func=get_remote_address)(kobo)
+         app.register_blueprint(kobo)
+         app.register_blueprint(kobo_auth)
+-        limiter.limit("3/minute", key_func=get_remote_address)(kobo)
+     if oauth_available:
+         app.register_blueprint(oauth)
+     success = web_server.start()
+diff --git a/cps/usermanagement.py b/cps/usermanagement.py
+index 31c37a9332..c7fdf9492d 100644
+--- a/src/calibreweb/cps/usermanagement.py
++++ b/src/calibreweb/cps/usermanagement.py
+@@ -48,7 +48,7 @@ def verify_password(username, password):
+             if error is not None:
+                 log.error(error)
+         else:
+-            limiter.check()
++            # limiter.check()
+             if check_password_hash(str(user.password), password):
+                 [limiter.limiter.storage.clear(k.key) for k in limiter.current_limits]
+                 return user
+diff --git a/cps/web.py b/cps/web.py
+index dc75754e62..ce09ac1dc8 100644
+--- a/src/calibreweb/cps/web.py
++++ b/src/calibreweb/cps/web.py
+@@ -30,7 +30,7 @@
+ from flask_babel import gettext as _
+ from flask_babel import get_locale
+ from .cw_login import login_user, logout_user, current_user
+-from flask_limiter import RateLimitExceeded
++# from flask_limiter import RateLimitExceeded
+ from flask_limiter.util import get_remote_address
+ from sqlalchemy.exc import IntegrityError, InvalidRequestError, OperationalError
+ from sqlalchemy.sql.expression import text, func, false, not_, and_, or_
+@@ -1285,15 +1285,15 @@ def register_post():
+     if not config.config_public_reg:
+         abort(404)
+     to_save = request.form.to_dict()
+-    try:
+-        limiter.check()
+-    except RateLimitExceeded:
+-        flash(_(u"Please wait one minute to register next user"), category="error")
+-        return render_title_template('register.html', config=config, title=_("Register"), page="register")
+-    except (ConnectionError, Exception) as e:
+-        log.error("Connection error to limiter backend: %s", e)
+-        flash(_("Connection error to limiter backend, please contact your administrator"), category="error")
+-        return render_title_template('register.html', config=config, title=_("Register"), page="register")
++    #try:
++    #    limiter.check()
++    #except RateLimitExceeded:
++    #    flash(_(u"Please wait one minute to register next user"), category="error")
++    #    return render_title_template('register.html', config=config, title=_("Register"), page="register")
++    #except (ConnectionError, Exception) as e:
++    #    log.error("Connection error to limiter backend: %s", e)
++    #    flash(_("Connection error to limiter backend, please contact your administrator"), category="error")
++    #    return render_title_template('register.html', config=config, title=_("Register"), page="register")
+     if current_user is not None and current_user.is_authenticated:
+         return redirect(url_for('web.index'))
+     if not config.get_mail_server_configured():
+@@ -1388,15 +1388,15 @@ def login():
+ def login_post():
+     form = request.form.to_dict()
+     username = strip_whitespaces(form.get('username', "")).lower().replace("\n","").replace("\r","")
+-    try:
+-        limiter.check()
+-    except RateLimitExceeded:
+-        flash(_("Please wait one minute before next login"), category="error")
+-        return render_login(username, form.get("password", ""))
+-    except (ConnectionError, Exception) as e:
+-        log.error("Connection error to limiter backend: %s", e)
+-        flash(_("Connection error to limiter backend, please contact your administrator"), category="error")
+-        return render_login(username, form.get("password", ""))
++    #try:
++    #    limiter.check()
++    #except RateLimitExceeded:
++    #    flash(_("Please wait one minute before next login"), category="error")
++    #    return render_login(username, form.get("password", ""))
++    #except (ConnectionError, Exception) as e:
++    #    log.error("Connection error to limiter backend: %s", e)
++    #    flash(_("Connection error to limiter backend, please contact your administrator"), category="error")
++    #    return render_login(username, form.get("password", ""))
+     if current_user is not None and current_user.is_authenticated:
+         return redirect(url_for('web.index'))
+     if config.config_login_type == constants.LOGIN_LDAP and not services.ldap:
