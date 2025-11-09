@@ -21,5 +21,5 @@ profile_minirootfs() {
 	image_ext=tar.gz
 	output_format=rootfs
 	arch="$ARCH"  # allow any arch
-	rootfs_apks="busybox alpine-baselayout alpine-keys alpine-release apk-tools libc-utils"
+	rootfs_apks="busybox alpine-baselayout alpine-keys alpine-release apk-tools musl-utils"
 }
