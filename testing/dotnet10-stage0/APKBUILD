@@ -1,0 +1,499 @@
+# Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
+# Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>
+pkgname=dotnet10-stage0
+pkgver=10.0.100
+pkgrel=0
+
+[ "$CBUILD" != "$CHOST" ] && _cross="-$CARCH" || _cross=""
+
+# Tag of tarball generator.
+_gittag=v10.0.100
+
+# Versions of prebuilt artifacts and bootstrap tar
+# _artifactsver can be set using PrivateSourceBuiltArtifactsVersion
+# in `eng/Versions.props` keeping centos.10-x64
+_artifactsver="10.0.100-rtm.25523.111.centos.10-x64"
+_bootstrapver="10.0.100"
+_iltoolsver="10.0.0"
+_runtimever="10.0.0"
+_aspnetver="10.0.0"
+
+_patches="
+	aspnetcore_ignore-unsecure-packages.patch
+	runtime_82269-mono-thread-coop-undefine-fortify-source.patch
+	runtime_83682-specify-notext-on-linux-musl-x86.patch
+	runtime_121124-clang-21-fixes.patch
+	runtime_121499-fix-av-caused-by-jit.patch
+	runtime_disable-fortify-on-ilasm-parser.patch
+	runtime_openssl-sha1.patch
+	runtime_re-enable-implicit-rejection.patch
+	runtime_nuget-disable-audit-source.patch
+	"
+
+_pkgver_macro=${pkgver%.*}
+_pkgver_prior=1
+_pkgver_name="${_pkgver_macro/.*}"
+pkgdesc="The .NET Core stage0 bits for dotnet build"
+# x86: blocked by https://github.com/dotnet/runtime/issues/83509
+# armhf: blocked by https://github.com/dotnet/runtime/issues/77663
+# riscv64: port WIP https://github.com/dotnet/runtime/issues/84834
+# s390x | ppc64le: mono-based builds are not yet stable on musl
+# loongarch64: upstream code supported, blocked by binary tarball
+# armv7: crossgen broken for some reason
+arch="all !x86 !armhf !riscv64 !s390x !ppc64le !loongarch64 !armv7"
+_giturl=https://github.com/dotnet/dotnet
+url=https://dotnet.microsoft.com
+license="MIT"
+options="!check net" # Testsuite in main runtime aport
+# makes sure different major versions don't conflict
+sonameprefix="dotnet$_pkgver_name:"
+subpackages="
+	dotnet$_pkgver_name-stage0-artifacts:artifacts:noarch
+	dotnet$_pkgver_name-stage0-bootstrap
+	"
+source="
+	dotnet-tarball-$_gittag.tar.gz::https://github.com/dotnet/dotnet/archive/refs/tags/$_gittag.tar.gz
+	dotnet-release-$_gittag.json::https://github.com/dotnet/dotnet/releases/download/$_gittag/release.json
+	dotnet-sdk-$_bootstrapver-linux-musl-x64.noextract::https://dotnetcli.azureedge.net/dotnet/Sdk/$_bootstrapver/dotnet-sdk-$_bootstrapver-linux-musl-x64.tar.gz
+	dotnet-sdk-$_bootstrapver-linux-musl-arm64.noextract::https://dotnetcli.azureedge.net/dotnet/Sdk/$_bootstrapver/dotnet-sdk-$_bootstrapver-linux-musl-arm64.tar.gz
+	dotnet-sdk-$_bootstrapver-linux-musl-arm.noextract::https://dotnetcli.azureedge.net/dotnet/Sdk/$_bootstrapver/dotnet-sdk-$_bootstrapver-linux-musl-arm.tar.gz
+	Private.SourceBuilt.Artifacts.$_artifactsver.noextract::https://builds.dotnet.microsoft.com/dotnet/source-build/Private.SourceBuilt.Artifacts.$_artifactsver.tar.gz
+	$_patches
+	"
+_llvmver=21
+makedepends_host="
+	alpine-release
+	autoconf
+	automake
+	bash
+	binutils
+	brotli-dev
+	clang$_llvmver
+	cmake
+	findutils
+	g++
+	gcc
+	grep
+	grpc-plugins
+	icu-dev
+	icu-data-full
+	krb5-dev
+	libintl
+	libstdc++
+	libucontext-dev
+	libunwind-dev
+	libxml2-dev
+	libxml2-utils
+	linux-headers
+	lttng-ust-dev
+	nodejs
+	npm
+	musl-dev
+	musl-utils
+	openssl-dev
+	protoc
+	pigz
+	rapidjson-dev
+	unzip
+	zip
+	zlib-dev
+	zlib-ng-dev
+	"
+case $CARCH in
+	s390x) ;;
+	*) makedepends_host="$makedepends_host lld$_llvmver-dev";;
+esac
+makedepends_build="
+	$makedepends_host
+	binutils$_cross
+	git
+	gcc$_cross
+	jq
+	llvm$_llvmver
+	llvm$_llvmver-dev
+	patchelf
+	python3
+	sed
+	xz
+	"
+
+# set system libs
+# TODO: llvmlibunwind, libunwind on x86_64
+_system_libs="brotli+rapidjson+zlib"
+
+case $CBUILD_ARCH in
+	x86_64) _dotnet_arch="x64";;
+	aarch64) _dotnet_arch="arm64";;
+	armv7|armhf) _dotnet_arch="arm";;
+	i586) _dotnet_arch="x86";;
+	*) _dotnet_arch=$CBUILD_ARCH;;
+esac
+case $CTARGET_ARCH in
+	x86_64) _dotnet_target="x64";;
+	aarch64) _dotnet_target="arm64";;
+	armv7|armhf) _dotnet_target="arm";;
+	i586) _dotnet_target="x86";;
+	*) _dotnet_target=$CTARGET_ARCH;;
+esac
+
+builddir="$srcdir"/dotnet-${_gittag/v}
+_packagesdir="$srcdir"/local-packages
+_libdir="/usr/lib"
+_nugetdir="$srcdir"/nuget
+_downloaddir="$srcdir"/local-downloads
+_cli_root="$srcdir"/bootstrap
+_nuget="$_cli_root/dotnet nuget"
+_outputdir="$srcdir"/artifacts
+# if true, then within pipeline environment, in which case send logs there
+# to be scooped
+if [ -d "$APORTSDIR/logs" ]; then
+	_logdir="$APORTSDIR"/logs/$pkgname
+else
+	_logdir="$srcdir"/logs
+fi
+
+prepare() {
+	default_prepare
+
+	mkdir -p "$_cli_root" $_packagesdir $_downloaddir $_outputdir $_nugetdir $_logdir
+
+	# sdk and installer insists on downloading its own dotnet unless ArcadeBuildFromSource
+	# is true, which opens up a can of worms
+	sed 's|ArcadeBuildFromSource=true|Architecture|' -i src/*/eng/restore-toolset.sh
+	sed "/^  InitializeCustomToolset/d" -i src/sdk/eng/common/build.sh
+
+	# links logfiles to pipeline logs for easy pickup in pipelines
+	mkdir -p "$_logdir" "$builddir"/artifacts
+	ln -s "$_logdir" "$builddir"/artifacts/logs
+	ln -s "$_logdir" "$builddir"/artifacts/log
+	for i in "$builddir"/src/*; do
+		if [ -f "$i" ]; then
+			continue
+		fi
+		mkdir -p "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts
+		ln -s "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts/log
+	done
+
+	tar -xf "$srcdir"/dotnet-sdk-$_pkgver_macro*$_dotnet_arch.noextract -C "$_cli_root" --no-same-owner
+
+	local components="$(find "$builddir"/src -maxdepth 1 -mindepth 1 -type d -exec basename '{}' \;)"
+	for i in $components; do
+		if [ -f "$builddir/src/$i/NuGet.config" ]; then
+			$_nuget add source $_packagesdir --name local --configfile "$builddir"/src/$i/NuGet.config
+		fi
+		if [ -f "$builddir/src/$i/global.json" ]; then
+			tmp=$(mktemp)
+			jq ".tools.dotnet = \"$_bootstrapver\"" "$builddir"/src/$i/global.json > $tmp && mv $tmp "$builddir"/src/$i/global.json
+			jq 'del(.sdk.version)' "$builddir"/src/$i/global.json > $tmp && mv $tmp "$builddir"/src/$i/global.json
+			jq 'del(.tools.runtimes)' "$builddir"/src/$i/global.json > $tmp && mv $tmp "$builddir"/src/$i/global.json
+		fi
+	done
+
+	# extracting PackageVersions.props as some version information is there
+	tar -xzf "$srcdir"/Private.SourceBuilt.Artifacts.*.noextract PackageVersions.props
+
+	# Clean-up bundled libs
+	for i in $(printf '%s\n' ${_system_libs//+/ }); do
+		_external_dir=src/runtime/src/native/external
+		case $i in
+			brotli) rm -rf $_external_dir/brotli;;
+			rapidjson) rm -rf $_external_dir/rapidjson;;
+			zlib)
+				rm -rf $_external_dir/zlib
+				rm -rf $_external_dir/zlib-intel
+				rm -rf $_external_dir/zlib-ng
+			;;
+			libunwind) rm -rf $_external_dir/libunwind;;
+			llvmlibunwind) rm -rf $_external_dir/llvm-libunwind;;
+		esac
+	done
+}
+
+_init() {
+	export _InitializeDotNetCli=$_cli_root
+	export DOTNET_INSTALL_DIR=$_cli_root
+	export DOTNET_PATH=$_cli_root
+	export DotnetTool=$_cli_root/dotnet
+	export PATH="$_cli_root:/usr/lib/llvm$_llvmver/bin:$PATH"
+	export NUGET_PACKAGES=$_nugetdir
+	export DOTNET_CLI_TELEMETRY_OPTOUT=true
+	export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=true
+	export SHELL=/bin/bash
+	export EXTRA_CPPFLAGS="${CPPFLAGS/--sysroot=$CBUILDROOT}"
+	export EXTRA_CXXFLAGS="${CXXFLAGS/--sysroot=$CBUILDROOT}"
+	export EXTRA_CFLAGS="${CFLAGS/--sysroot=$CBUILDROOT}"
+	export EXTRA_LDFLAGS="$LDFLAGS"
+	# sets LIBC_SO for /usr-merge setups
+	export EXTRA_CFLAGS="$EXTRA_CFLAGS -DLIBC_SO=\\\"libc.musl-$CARCH.so.1\\\""
+	unset CXXFLAGS CFLAGS LDFLAGS CPPFLAGS
+
+	ulimit -n 4096
+
+	"$_cli_root"/dotnet build-server shutdown
+}
+
+_runtime() {
+	_init
+	if [ -z "${_runtimever+x}" ]; then
+		local _runtimever=$(awk -F '[<>]' '/MicrosoftNETCoreAppRuntimeCentos10X64PackageVersion/{print $3}' "$builddir"/PackageVersions.props)
+	fi
+	local _runtimever_ns=$(awk '{if($2 ~ "Name=\"Microsoft.NETCore.App.Ref\""){print $3}}' "$builddir"/src/sdk/eng/Version.Details.xml | awk -F '"' '{print $2}')
+
+	msg "[$(date)] Building runtime version $_runtimever"
+	cd "$builddir"/src/runtime
+
+	local args="
+		-c Release
+		-bl
+		-clang
+		-arch $_dotnet_target
+		/consoleLoggerParameters:ShowTimestamp
+		/p:NoPgoOptimize=true
+		/p:EnableNgenOptimization=false
+		/p:ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch=none
+		/p:_toolsRID=linux-musl-$_dotnet_arch
+		/p:OutputRid=linux-musl-$_dotnet_target
+		/p:Version=$_runtimever
+		"
+
+	# build mono on s390x|ppc64le, build clr on rest
+	case $CARCH in
+		s390x|ppc64le) local args="$args /p:DefaultSubsets=mono+libs+tools+host+packs";;
+		*) local args="$args /p:DefaultSubsets=clr+libs+tools+host+packs";;
+	esac
+
+	# use system libs
+	for i in $(printf '%s\n' ${_system_libs//+/ }); do
+		_external_dir=src/runtime/src/native/external
+		case $i in
+			brotli) local args="$args --cmakeargs -DCLR_CMAKE_USE_SYSTEM_BROTLI=true";;
+			rapidjson) local args="$args --cmakeargs -DCLR_CMAKE_USE_SYSTEM_RAPIDJSON=true";;
+			zlib) local args="$args --cmakeargs -DCLR_CMAKE_USE_SYSTEM_ZLIB=true" ;;
+			libunwind) local args="$args --cmakeargs -DCLR_CMAKE_USE_SYSTEM_LIBUNWIND=true";;
+			llvmlibunwind) continue;;
+		esac
+	done
+
+	if [ "$CBUILD" != "$CHOST" ]; then
+		local args="$args -cross"
+		# x86 build of mono broken, thus do not build mono
+		case $_dotnet_target in
+			x86) local args="$args /p:DefaultSubsets=clr+libs+host+packs";;
+		esac
+	fi
+	ROOTFS_DIR="$CBUILDROOT" ./build.sh $args
+
+	for i in artifacts/packages/*/*/*.nupkg; do
+		$_nuget push $i --source="$_packagesdir"
+	done
+	mkdir -p "$_downloaddir"/Runtime/$_runtimever_ns
+	cp artifacts/packages/*/*/dotnet-runtime-*-*.tar.gz $_downloaddir/Runtime/$_runtimever_ns
+}
+
+_sdk() {
+	_init
+	if [ -z "${_sdkver+x}" ]; then
+		local _sdkver=$(awk -F '[<>]' '/MicrosoftNETSdkVersion/{print $3}' "$builddir"/PackageVersions.props)
+	fi
+
+	msg "[$(date)] Building sdk version $_sdkver"
+	cd "$builddir"/src/sdk
+
+	local args="
+		-c Release
+		-bl
+		/consoleLoggerParameters:ShowTimestamp
+		/p:EnableSourceLink=false
+		/p:OSName=linux-musl
+		/p:HostOSName=linux-musl
+		/p:PublicBaseURL=file://$_downloaddir/
+		/p:Architecture=$_dotnet_target
+		/p:TestCliNuGetDirectoryTargetFramework=netcoreapp3.1
+		/p:Version=$_sdkver
+		"
+	./build.sh --pack /p:Projects=$builddir/src/sdk/source-build.slnf $args
+
+	for i in artifacts/packages/*/*/*.nupkg; do
+		$_nuget push $i --source="$_packagesdir"
+	done
+	mkdir -p "$_downloaddir"/Sdk/$_sdkver
+	cp artifacts/packages/*/*/dotnet-sdk-$_pkgver_macro*.tar.gz "$_downloaddir"/Sdk/$_sdkver
+}
+
+_aspnetcore() {
+	_init
+	if [ -z "${_aspnetver+x}" ]; then
+		local _aspnetver=$(awk -F '[<>]' '/MicrosoftAspNetCoreAppRuntimeCentos10X64PackageVersion/{print $3}' "$builddir"/PackageVersions.props)
+	fi
+	local _aspnetver_ns=$(awk '{if($2 == "Name=\"Microsoft.AspNetCore.App.Ref.Internal\""){print $3}}' "$builddir"/src/sdk/eng/Version.Details.xml | awk -F '"' '{print $2}')
+
+	msg "[$(date)] Build aspnetcore version $_aspnetver"
+	cd "$builddir"/src/aspnetcore
+	npm ci
+	npm run build
+
+	local args="
+		-c Release
+		-bl
+		--os-name linux-musl
+		-arch $_dotnet_target
+		-no-build-nodejs
+		/consoleLoggerParameters:ShowTimestamp
+		/p:BuildNodeJs=false
+		/p:BuildOSName=linux-musl
+		/p:DotNetBuild=true
+		/p:Protobuf_ProtocFullPath=/usr/bin/protoc
+		/p:gRPC_PluginFullPath=/usr/bin/grpc_csharp_plugin
+		/p:DotNetAssetRootUrl=file://$_downloaddir/
+		/p:EnablePackageValidation=false
+		/p:Version=$_aspnetver
+		"
+
+	# aspnetcore can't find newly created Microsoft.NETCore.App.Runtime.linux-musl-x86 for some reason
+	# on arm 32-bit, crossgen on musl not working for bootstrap
+	case $_dotnet_target in
+		riscv64|x86|arm) local args="$args /p:CrossgenOutput=false";;
+	esac
+
+	./eng/build.sh --pack $args
+
+	for i in artifacts/packages/*/*/*.nupkg; do
+		$_nuget push $i --source="$_packagesdir"
+	done
+
+	mkdir -p "$_downloaddir"/aspnetcore/Runtime/$_aspnetver_ns
+	cp artifacts/packages/Release/*/aspnetcore-runtime-*-linux-musl-$_dotnet_target.tar.gz "$_downloaddir"/aspnetcore/Runtime/$_aspnetver_ns
+	cp artifacts/installers/Release/aspnetcore_base_runtime.version "$_downloaddir"/aspnetcore/Runtime/$_aspnetver_ns
+}
+
+build() {
+	_runtime
+	_aspnetcore
+	_sdk
+}
+
+package() {
+	# lua-aports / buildrepo doesn't know to always build stage0 first when dealing
+	# with virtual packages. Thus, we need to depend on an empty stage0 pkg that
+	# dotnetx-build will pull, thus forcing build of stage0 first
+	mkdir -p "$pkgdir"
+}
+
+bootstrap() {
+	# allows stage0 to be pulled by dotnetx-build if first build of dotnetx
+	provides="dotnet$_pkgver_name-bootstrap"
+	provider_priority=$_pkgver_prior
+
+	if [ -z "${_iltoolsver+x}" ]; then
+		local _iltoolsver=$(grep \<MicrosoftNETCoreILAsmVersion "$builddir"/PackageVersions.props | sed -E 's|</?MicrosoftNETCoreILAsmVersion>||g' | tr -d ' ')
+	fi
+
+	install -dm 755 \
+		"$subpkgdir"/$_libdir/dotnet/bootstrap/$pkgver/docs \
+		"$subpkgdir"/$_libdir/dotnet/bootstrap/$pkgver/comp \
+		"$subpkgdir"/$_libdir/dotnet/artifacts/$pkgver
+
+	# unpack build artifacts to bootstrap subdir for use by future builds
+	tar --use-compress-program="pigz" \
+		-xf "$_downloaddir"/Sdk/*/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/bootstrap/$pkgver/ \
+		--no-same-owner
+
+	local _iltools_array="
+		runtime.*.Microsoft.NETCore.TestHost.*.nupkg
+		runtime.*.Microsoft.NETCore.ILAsm.*.nupkg
+		runtime.*.Microsoft.NETCore.ILDAsm.*.nupkg
+		"
+
+	local _nupkgs_array="
+		$_iltools_array
+		Microsoft.NETCore.App.Host.*.*.nupkg
+		Microsoft.NETCore.App.Runtime.*.*.nupkg
+		Microsoft.NETCore.App.Crossgen2.*.*.nupkg
+		runtime.*.Microsoft.DotNet.ILCompiler.*.nupkg
+		runtime.*.Microsoft.NETCore.DotNetHost.*.nupkg
+		runtime.*.Microsoft.NETCore.DotNetHostPolicy.*.nupkg
+		runtime.*.Microsoft.NETCore.DotNetHostResolver.*.nupkg
+		runtime.*.Microsoft.NETCore.DotNetAppHost.*.nupkg
+		Microsoft.AspNetCore.App.Runtime.linux-musl-*.*.nupkg
+		"
+
+	# copies artifacts to artifacts dir for use by future dotnet builds
+	for i in $_nupkgs_array; do install -Dm644 "$_packagesdir"/$i "$subpkgdir"/$_libdir/dotnet/artifacts/$pkgver/ || true; done
+
+	msg "Changing iltools version to $_iltoolsver"
+	# source-build expects a certain version of ilasm, ildasm and testhost
+	# following adjusts version
+	for i in $_iltools_array; do
+		local nupath="$subpkgdir"$_libdir/dotnet/artifacts/$pkgver/$i
+		local nupath=$(find $nupath || true)
+		local nupkg="${nupath##*/}"
+		local nuname="${nupkg/.nupkg}"
+		if [ -z "${nuname/*rtm*}" ] || [ -z "${nuname/*servicing*}" ] || [ -z "${nuname/*preview*}" ] || [ -z "${nuname/*rc*}" ]; then
+			nuname=${nuname%-*}
+		fi
+		local nuname="${nuname%.*.*.*}"
+		local nuver="${nupkg/$nuname.}"
+		local nuver="${nuver/.nupkg}"
+		local nuspec="$nuname.nuspec"
+
+		if [ ! "$nupath" ] || [ "$nupath" = "${nupath/$nuver/$_iltoolsver}" ]; then
+			continue
+		fi
+		# shellcheck disable=SC2094
+		unzip -p "$nupath" $nuspec | sed "s|$nuver|$_iltoolsver|" > "$srcdir"/$nuspec
+		cd "$srcdir"
+		zip -u "$nupath" $nuspec
+		mv "$nupath" "${nupath/$nuver/$_iltoolsver}"
+	done
+
+	# TODO: Remove once https://gitlab.alpinelinux.org/alpine/abuild/-/commit/5ad0236004343a534b2591421bffb242b6ea16cc is in abuild package
+	# make absolute rpath of libmscordbi.so to help abuild find libmscordaccore.so
+	local _libmscordbi_path="$(realpath "$subpkgdir"/usr/lib/dotnet/bootstrap/*/shared/Microsoft.NETCore.App/*/libmscordbi.so)"
+	local _libmscordbi_path="${_libmscordbi_path/$subpkgdir/}"
+	local _libmscordbi_path="${_libmscordbi_path%/*}"
+	patchelf $subpkgdir/usr/lib/dotnet/bootstrap/*/shared/Microsoft.NETCore.App/*/libmscordbi.so --set-rpath $_libmscordbi_path
+
+	# expects liblttng-ust.so.0, which doesn't exist
+	rm -f "$subpkgdir"$_libdir/dotnet/bootstrap/*/shared/Microsoft.NETCore.App/*/libcoreclrtraceptprovider.so
+}
+
+# build relies on a plethora of nupkgs which are provided by this Artifacts file.
+# stage0 sources these from Microsoft, which then allows bootstrap to build
+# locally hosted versions. The following unpacks built tarball into directory
+# for use by future builds.
+artifacts() {
+	pkgdesc="Internal package for building .NET $_pkgver_macro Software Development Kit"
+	# hack to allow artifacts to pull itself
+	provides="dotnet$_pkgver_name-bootstrap-artifacts"
+	provider_priority=$_pkgver_prior
+
+	# directory creation
+	install -dm 755 \
+		"$subpkgdir"/$_libdir/dotnet/artifacts/$pkgver \
+		"$subpkgdir"/usr/share/licenses
+
+	# extract artifacts to artifacts dir for use by future dotnet builds
+	tar --use-compress-program="pigz" \
+		-xf "$srcdir"/Private.SourceBuilt.Artifacts.*.noextract \
+		-C "$subpkgdir"/$_libdir/dotnet/artifacts/$pkgver/ \
+		--no-same-owner
+}
+
+sha512sums="
+0c292fe98c9c60864be176829011384542e94625e0969007f198df9a520aab68517a8a807927c25e885915597f3d87ffc8c1ba797606d5896f305705f3c44c98  dotnet-tarball-v10.0.100.tar.gz
+33445320cd0bf762582f63256fec0fb53802db033b9e30c87b8e586c45bfa3db330ce2468a509b4d80ae9c9f13394f9cddde7d34a602d9a2ed5f2db5cacb2c96  dotnet-release-v10.0.100.json
+2fb7ddc9b232a67f69262b8beebb5fa223da86c9314f074ed79b151a7bbd0b1b5c36be5480d363d82709ae69fd90f7a6a451ef68026e0406581434ed288b20ec  dotnet-sdk-10.0.100-linux-musl-x64.noextract
+5fb94421ce5896fb36b64bd0f975a83d1938641205d89f44722c8ea44a03fb5844d9fee6d72f92ac563d1040b76ee3f1e63e2f738467b4329d2eabed0c5b04ca  dotnet-sdk-10.0.100-linux-musl-arm64.noextract
+5a543758451019c29c9dc3220c3095be5234a9adc6fe5dccc367886b160a907b2d6a81be8fd3c0f527e9ec832703b2546dec81a8df2802d9f6ef5614082e13b0  dotnet-sdk-10.0.100-linux-musl-arm.noextract
+380985e850077b9b493bc5f16230db63a2f787699b83bf2fadf41463844f6259cc771431472bdeb535476999d7c555b1d1f50905a980ce2b43581e71132559d8  Private.SourceBuilt.Artifacts.10.0.100-rtm.25523.111.centos.10-x64.noextract
+bc133a8af312a21726d84fb36d683b1aa5986c02ecac7dd6e43290128cda34c314a56635056b79064917f2ee255e11bce755d731afdc1cf9f6d23d11e545ce36  aspnetcore_ignore-unsecure-packages.patch
+d732df247c721c9f677baabdd7f36dbf4b564814ff64164361065bb1c196b767494a1d39f634eadf01a23032c7b3e64102614b7213065c81096bbf3f8022e6a0  runtime_82269-mono-thread-coop-undefine-fortify-source.patch
+c983a1ab7f06ac86691e0fa7a61fcad69a074d984ef4a4116bee43f20be918215963c7ec8ddd7edd70432b29b160ff78288183acc89fda15ce4a75bfdbf99ee3  runtime_83682-specify-notext-on-linux-musl-x86.patch
+c7238717f1bede9d5b29af6ad0da8534959024ec618b1fc70abddddf6a04d651327400c8d9b475160a499486c682dc611a647b4c8f25ed53bc04bc128295de83  runtime_121124-clang-21-fixes.patch
+ed1574fceeb11e600fdffe26df5b7692d9329cb81fa00050377288575dbb0d85d5c7cada11bb490f7b9aca6b47cc7126adeda25ebaa7a4a002ca81b7118d80ba  runtime_121499-fix-av-caused-by-jit.patch
+be8b98cb93c3d1e23cc72fd1f0c4e228613f8d39e1340b5c966de37c83419719956903d8937cff8e91e91c17e80141a710690c978742284ce9d4d65ecd4b49e7  runtime_disable-fortify-on-ilasm-parser.patch
+d3b62668c2d5a1056e698b804a20b933b79ad11b46aa37298b9089396969ce510a9620847c5787b7f95c33ccf5a6aabab41655809168740976c3dadd65f87e2b  runtime_openssl-sha1.patch
+0246634c4c907c1194e2680ad4d3ddbf1ef072f0710a02fa35e2f634826a3be26970ebec0c375b33ee62e42314e871befc1b964aebb27a2d73499c69ff989920  runtime_re-enable-implicit-rejection.patch
+6cdff9ea4154cf153fefb4274f4cceb338a3ae8480e1d6bb60545ab5999afbbadc6cfa989537d2eab79ee92c0791490e126feb3d1ede7ae6011dac6bea761c3f  runtime_nuget-disable-audit-source.patch
+"
