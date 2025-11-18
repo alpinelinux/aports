@@ -112,11 +112,11 @@ fi
 
 # Build libucontext without docs and pkgconfig file as a dependency for gcc-gdc
 EXTRADEPENDS_BUILD="gcc-pass2-$TARGET_ARCH" \
-EXTRADEPENDS_TARGET="musl musl-dev" \
+EXTRADEPENDS_TARGET="musl-dev" \
 CHOST=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname libucontext) abuild $abuild_opts
 
 # Full cross GCC
-EXTRADEPENDS_TARGET="musl musl-dev libucontext-dev" \
+EXTRADEPENDS_TARGET="musl-dev libucontext-dev" \
 CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname gcc) abuild $abuild_opts
 
 # Cross build-base
