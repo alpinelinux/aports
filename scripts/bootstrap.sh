@@ -17,7 +17,7 @@ shift
 #: ${KERNEL_PKG=linux-firmware linux-lts}
 #: ${COMPILER_PKG=libffi brotli libev c-ares cunit nghttp2 libidn2 libunistring libpsl curl libssh2 libxml2 llvm15 community/ghc llvm21 rust community/go}
 # FIXME: Maybe subdivide into ghc, rust, and go stuff
-: ${MKINITFS=libcap-ng ncurses readline sqlite util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs pax-utils}
+: ${MKINITFS=libcap-ng ncurses readline sqlite util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs}
 #: ${OPENSSH=openssh}
 #: ${LUA_APORTS=ncurses readline lua5.4 lua-cjson lua-filesystem lua-optarg lua-aports}
 
@@ -145,7 +145,7 @@ if [ $# -eq 0 ]; then
 	   apk-tools file \
 	   libcap openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
 	   attr acl fakeroot tar \
-	   lzip abuild \
+	   lzip pax-utils abuild \
 	   $OPENSSH \
 	   $MKINITFS \
 	   $COMPILER_PKG \
