@@ -138,14 +138,11 @@ if [ "$TARGET_ARCH" = "riscv64" ]; then
 fi
 
 if [ $# -eq 0 ]; then
-	set -- fortify-headers linux-headers musl pkgconf zlib \
-	   openssl ca-certificates libmd \
-	   gmp mpfr4 mpc1 isl26 libucontext zstd binutils gcc \
-	   bsd-compat-headers libbsd busybox make \
-	   apk-tools file \
-	   libcap openrc alpine-conf alpine-baselayout alpine-keys alpine-base patch build-base \
-	   attr acl fakeroot tar \
-	   lzip pax-utils abuild \
+	set -- fortify-headers linux-headers musl zlib pkgconf gmp mpfr4 \
+	   mpc1 isl26 libucontext zstd binutils gcc make file patch openssl \
+	   busybox build-base ca-certificates libmd bsd-compat-headers libbsd \
+	   apk-tools libcap openrc alpine-conf alpine-baselayout alpine-keys \
+	   alpine-base attr acl fakeroot tar pax-utils lzip abuild \
 	   $OPENSSH \
 	   $MKINITFS \
 	   $COMPILER_PKG \
