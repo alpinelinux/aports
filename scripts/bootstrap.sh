@@ -125,10 +125,10 @@ CTARGET=$TARGET_ARCH BOOTSTRAP=nobase APKBUILD=$(apkbuildname build-base) abuild
 msg "Cross building base system"
 
 # Implicit dependencies for early targets
-EXTRADEPENDS_TARGET="libgcc libstdc++ musl-dev"
+export EXTRADEPENDS_TARGET="libgcc libstdc++ musl-dev"
 
 # On a few architectures like riscv64 we need to account for
-# gcc requiring -ltomic to be set explicitly if a C[++]11 program
+# gcc requiring -latomic to be set explicitly if a C[++]11 program
 # uses atomics (e.g. #include <atomic>):
 # https://github.com/riscv/riscv-gnu-toolchain/issues/183#issuecomment-253721765
 # The reason gcc itself is needed is because .so is in that package,
@@ -154,11 +154,6 @@ if [ $# -eq 0 ]; then
 fi
 
 for PKG; do
-
-	if [ "$NEEDS_LIBATOMIC" = "yes" ]; then
-		EXTRADEPENDS_BUILD="libatomic gcc-$TARGET_ARCH g++-$TARGET_ARCH"
-	fi
-	EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET"  EXTRADEPENDS_BUILD="$EXTRADEPENDS_BUILD" \
 	CHOST=$TARGET_ARCH BOOTSTRAP=bootimage APKBUILD=$(apkbuildname $PKG) abuild $abuild_opts
 
 	case "$PKG" in
@@ -168,7 +163,7 @@ for PKG; do
 		;;
 	gcc)
 		if [ "$NEEDS_LIBATOMIC" = "yes" ]; then
-			EXTRADEPENDS_TARGET="libatomic gcc $EXTRADEPENDS_TARGET"
+			EXTRADEPENDS_TARGET="$EXTRADEPENDS_TARGET $PKG"
 		fi
 		;;
 	build-base)
