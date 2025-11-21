@@ -262,6 +262,7 @@ create_image_iso() {
 		# Create the EFI boot partition image
 		mformat -i ${DESTDIR}/boot/grub/efi.img -C -f 1440 -N 0 ::
 		# work around bug on old macs
+		# https://www.mail-archive.com/grub-devel@gnu.org/msg28931.html
 		dd if=/dev/zero of=${DESTDIR}/boot/grub/efi.img bs=1 seek=446 count=16
 		mcopy -i ${DESTDIR}/boot/grub/efi.img -s ${DESTDIR}/efi ::
 		touch -md "@${SOURCE_DATE_EPOCH}" ${DESTDIR}/boot/grub/efi.img
