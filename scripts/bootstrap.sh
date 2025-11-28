@@ -17,11 +17,15 @@ shift
 
 # optional cross build packages
 #: ${KERNEL_PKG=linux-firmware linux-lts}
-#: ${COMPILER_PKG=libffi brotli libev c-ares cunit nghttp2 libidn2 libunistring libpsl curl libssh2 libxml2 llvm15 community/ghc llvm21 rust community/go}
-# FIXME: Maybe subdivide into ghc, rust, and go stuff
-: ${MKINITFS=libcap-ng ncurses readline sqlite util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs}
 #: ${OPENSSH=openssh}
 #: ${LUA_APORTS=ncurses readline lua5.4 lua-cjson lua-filesystem lua-optarg lua-aports}
+#: ${MKINITFS=libcap-ng ncurses readline sqlite util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs}
+# Some languages that need to be cross compiled, for java and others we do not yet have an automated process
+: ${GO=community/go}
+: ${LLVM_DEPS=libffi brotli libev c-ares cunit nghttp2 nghttp3 libidn2 libunistring libpsl curl libssh2 libxml2}
+: ${RUST=llvm21 rust}
+#: ${GHC=community/llvm15 community/ghc}
+#: ${COMPILER_PKG=$GO $LLVM_DEPS $RUST $GHC}
 
 if [ -z "$CTARGET" ]; then
 	program=$(basename $0)
@@ -32,6 +36,7 @@ This script creates a local cross-compiler, and uses it to
 cross-compile an Alpine Linux base system for new architecture.
 
 Steps for introducing new architecture include:
+- optional: joining the #alpine-ports channel on oftc
 - adding the compiler triplet and arch type to abuild
 - adjusting build rules for packages that are arch aware:
   gcc, openssl, linux-headers, musl
