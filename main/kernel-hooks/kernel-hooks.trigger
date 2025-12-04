@@ -11,7 +11,7 @@ for path in "$@"; do
 	name="${path##*/}"
 
 	case "$name" in
-		[0-9]*-[0-9]*-*) ;;  # go on
+		[0-9]*-[0-9]*-*) ;;  # go on
 		*) echo "$PROGNAME: ERROR: invalid kernel version: $name!" >&2; exit 1;;
 	esac
 
