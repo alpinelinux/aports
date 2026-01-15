@@ -1,0 +1,224 @@
+# Maintainer: Natanael Copa <ncopa@alpinelinux.org>
+pkgname=boost1.89
+pkgver=1.89.0
+_pkgver=${pkgver//./_}
+pkgrel=0
+pkgdesc="Free peer-reviewed portable C++ source libraries"
+url="https://www.boost.org/"
+arch="all"
+license="BSL-1.0"
+depends="$pkgname-libs"
+depends_dev="$pkgname linux-headers bzip2-dev icu-dev xz-dev zlib-dev zstd-dev"
+makedepends="$depends_dev python3-dev>=3.10 flex bison"
+subpackages="
+	$pkgname-static
+	$pkgname-dev
+	$pkgname-doc
+	boost-dev:_dev
+	"
+source="https://archives.boost.io/release/$pkgver/source/boost_$_pkgver.tar.bz2
+	boost-1.57.0-python-abi_letters.patch
+	boost-1.57.0-python-libpython_dep.patch
+	boost-phoenix-uarg.patch
+"
+
+builddir="$srcdir/boost_$_pkgver"
+
+_libs="
+	atomic
+	chrono
+	container
+	context
+	contract
+	coroutine
+	date_time
+	fiber
+	filesystem
+	graph
+	iostreams
+	locale
+	process
+	prg_exec_monitor
+	program_options
+	python3
+	random
+	regex
+	serialization
+	thread
+	timer
+	type_erasure
+	unit_test_framework
+	url
+	wave
+	wserialization
+	json
+	nowide
+	"
+# Add log libraries for non-RISC-V architectures
+case "$CARCH" in
+	riscv64) ;;
+	*) _libs="$_libs log_setup log" ;;
+esac
+
+for _lib in $_libs; do
+	subpackages="$subpackages $pkgname-$_lib:_boostlib"
+	depends_libs="$depends_libs $pkgname-$_lib"
+done; unset _lib
+subpackages="$subpackages $pkgname-libs"
+
+_previousver=1.84
+
+b2() {
+	local jobs=${JOBS:-$(nproc)}
+	case "$CARCH" in
+			riscv64)
+					jobs=48  # RISC-V host has 64 cores
+					# Disable memory-intensive libraries on RISC-V
+					without_libs="--without-log"
+					;;
+	esac
+
+	./b2 \
+		--user-config="$builddir/user-config.jam" \
+		--stagedir="$builddir/stage" \
+		--prefix="$pkgdir/usr" \
+		variant=release \
+		python="$PY3_VERSION" \
+		toolset=gcc \
+		debug-symbols=off \
+		threading=multi \
+		runtime-link=shared \
+		link=shared,static \
+		cflags=-fno-strict-aliasing \
+		--layout=system \
+		--without-graph_parallel \
+		--without-mpi \
+		boost.stacktrace.from_exception=off \
+		-q $without_libs \
+		-j$jobs $_b2_extra_args
+}
+
+prepare() {
+	default_prepare
+
+	local _python="$(_pyversion python3)"
+	export PY3_VERSION="$_python"
+	export BOOST_ROOT=$builddir
+
+	local abiflags="$(python3-config --abiflags)"
+
+	# create user-config.jam
+	cat > user-config.jam <<-__EOF__
+
+	using gcc : : $CXX : <cflags>"$CFLAGS" <cxxflags>"$CXXFLAGS" <linkflags>"$LDFLAGS" ;
+	using python : $PY3_VERSION : /usr/bin/python3 : /usr/include/python${PY3_VERSION}$abiflags : : : : $abiflags ;
+
+	__EOF__
+}
+
+build() {
+	msg "Building b2"
+	cd "$builddir"/tools/build
+	./bootstrap.sh --cxxflags="$CXXFLAGS $LDFLAGS"
+
+	msg "Building bcp"
+	cd "$builddir"/tools/bcp
+	../build/b2 -j${JOBS:-2}
+
+	msg "Building boost"
+	cd "$builddir"
+	./bootstrap.sh --with-toolset=gcc --with-icu --with-python=python3
+	_b2_extra_args=""
+	b2
+}
+
+check() {
+	cd "$builddir"/tools/build/test
+
+	PATH="$builddir:$PATH" python3 test_all.py --default-bjam
+}
+
+package() {
+	install -Dm644 LICENSE_1_0.txt \
+		"$pkgdir"/usr/share/licenses/$pkgname/LICENSE_1_0.txt
+
+	echo "Installing boost libraries..."
+	echo "From package dir : $pkgdir"
+
+	_b2_extra_args="--includedir=$pkgdir/usr/include --libdir=$pkgdir/usr/lib install"
+	b2
+
+	echo "Installing boost bcp and b2 binaries..."
+	install -Dm755 -t "$pkgdir"/usr/bin dist/bin/bcp b2
+	if [ ! -f "$pkgdir"/usr/bin/bjam ]; then
+		echo "Creating symlink for bjam..."
+		ln -s b2 "$pkgdir"/usr/bin/bjam # old name for b2 binary
+	fi
+}
+
+static() {
+	pkgdesc="Boost static libraries"
+	depends="$depends_static"
+
+	# Claim the unversioned name, this must be removed once we switch our
+	# boost to a new version
+	provides="boost-static=$pkgver-r$pkgrel"
+	replaces="boost$_previousver-static"
+
+	amove usr/lib/lib*.a
+}
+
+_boostlib() {
+	local name="${subpkgname#"$pkgname"-}"
+	pkgdesc="Boost $name shared library"
+
+	# Claim the unversioned name, this must be removed once we switch our
+	# boost to a new version
+	provides="boost-$name=$pkgver-r$pkgrel"
+	replaces="boost$_previousver-$name"
+	depends=
+
+	amove usr/lib/libboost_$name*.so.[0-9]*
+}
+
+libs() {
+	default_libs
+
+	# Claim the unversioned name, this must be removed once we switch our
+	# boost to a new version
+	provides="boost-libs=$pkgver-r$pkgrel"
+	pkgdesc="Boost shared libraries"
+	mkdir -p "$subpkgdir"
+}
+
+dev() {
+	default_dev
+	# Replace previous boost version for clean -dev upgrade
+	replaces="boost$_previousver-dev"
+}
+
+_dev() {
+	# This makes boost-dev be a metapackage that depends on boostX.Y-dev
+	mkdir -p "$subpkgdir"
+	depends="$pkgname-dev=$pkgver-r$pkgrel"
+}
+
+doc() {
+	# Claim the unversioned name, this must be removed once we switch our
+	# boost to a new version
+	provides="boost-doc=$pkgver-r$pkgrel"
+	replaces="boost$_previousver-doc"
+
+	default_doc
+}
+
+_pyversion() {
+	"$1" -c 'import sys; print("%i.%i" % (sys.version_info.major, sys.version_info.minor))'
+}
+
+sha512sums="
+5153fe92372c40afb400482c5dcb6043d3f64ad58b8e579d8f8a9a9c3dc66737a567ad8ccaa45c49ea02166ef9283c4904700d25971742d9b5fdf39b21fb2aa7  boost_1_89_0.tar.bz2
+d96d4d37394a31764ed817d0bc4a99cffa68a75ff1ecfd4417b9e1e5ae2c31a96ed24f948c6f2758ffdac01328d2402c4cf0d33a37107e4f5f721e636daebd66  boost-1.57.0-python-abi_letters.patch
+132c4b62815d605c2d3c9038427fa4f422612a33711d47b2862f2311516af8a371d6b75bf078a7bffe20be863f8d21fb9fe74dc1a1bac3a10d061e9768ec3e02  boost-1.57.0-python-libpython_dep.patch
+7fad4b81ae5df38f740148153bcb5b4b31c12061f1264404b96a324e0d2f06943530cbcf9002d17772fb4ad87dcf0ba8bf4ed397725ee448a4d310df5d0383ad  boost-phoenix-uarg.patch
+"
