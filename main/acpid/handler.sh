@@ -17,7 +17,8 @@ case "$1:$2:$3:$4" in
 button/power:PWRF:* | button/power:PBTN:*)
 	log 'Power button pressed'
 	# If we have a lid (notebook), suspend to RAM, otherwise power off.
-	if [ -e /proc/acpi/button/lid/LID ]; then
+	for f in /proc/acpi/button/lid/LID*; do break; done
+	if [ -e "$f" ]; then
 		suspend
 	else
 		poweroff
