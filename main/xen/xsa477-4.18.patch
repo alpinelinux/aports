@@ -1,0 +1,112 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: x86/shadow: don't overrun trace_emul_write_val
+
+Guests can do wider-than-PTE-size writes on page tables. The tracing
+helper variable, however, only offers space for a single PTE (and it is
+being switched to the more correct type right here). Therefore bound
+incoming write sizes to the amount of space available.
+
+To not leave dead code (which is a Misra concern), drop the now unused
+guest_pa_t as well.
+
+Also move and adjust GUEST_PTE_SIZE: Derive it rather than using hard-
+coded numbers, and put it in the sole source file where it's actually
+needed. This then also addresses a Misra rule 20.9 ("All identifiers
+used in the controlling expression of #if or #elif preprocessing
+directives shall be #define'd before evaluation") violation:
+GUEST_PAGING_LEVELS is #define'd only in multi.c.
+
+This is XSA-477 / CVE-2025-58150.
+
+Fixes: 9a86ac1aa3d2 ("xentrace 5/7: Additional tracing for the shadow code")
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Andrew Cooper <andrew.cooper3@citrix.com>
+
+--- a/xen/arch/x86/mm/shadow/multi.c
++++ b/xen/arch/x86/mm/shadow/multi.c
+@@ -1965,15 +1965,15 @@ static void sh_prefetch(struct vcpu *v,
+ 
+ #if GUEST_PAGING_LEVELS == 4
+ typedef u64 guest_va_t;
+-typedef u64 guest_pa_t;
+ #elif GUEST_PAGING_LEVELS == 3
+ typedef u32 guest_va_t;
+-typedef u64 guest_pa_t;
+ #else
+ typedef u32 guest_va_t;
+-typedef u32 guest_pa_t;
+ #endif
+ 
++/* Size (in bytes) of a guest PTE */
++#define GUEST_PTE_SIZE sizeof(guest_l1e_t)
++
+ static inline void trace_shadow_gen(u32 event, guest_va_t va)
+ {
+     if ( tb_init_done )
+@@ -2062,11 +2062,14 @@ static inline void trace_shadow_emulate_
+ static DEFINE_PER_CPU(guest_va_t,trace_emulate_initial_va);
+ static DEFINE_PER_CPU(int,trace_extra_emulation_count);
+ #endif
+-static DEFINE_PER_CPU(guest_pa_t,trace_emulate_write_val);
++static DEFINE_PER_CPU(guest_l1e_t, trace_emulate_write_val);
+ 
+ static void cf_check trace_emulate_write_val(
+     const void *ptr, unsigned long vaddr, const void *src, unsigned int bytes)
+ {
++    if ( bytes > sizeof(this_cpu(trace_emulate_write_val)) )
++        bytes = sizeof(this_cpu(trace_emulate_write_val));
++
+ #if GUEST_PAGING_LEVELS == 3
+     if ( vaddr == this_cpu(trace_emulate_initial_va) )
+         memcpy(&this_cpu(trace_emulate_write_val), src, bytes);
+@@ -2088,8 +2091,13 @@ static inline void trace_shadow_emulate(
+     if ( tb_init_done )
+     {
+         struct __packed {
+-            /* for PAE, guest_l1e may be 64 while guest_va may be 32;
+-               so put it first for alignment sake. */
++            /*
++             * For GUEST_PAGING_LEVELS=3 (PAE paging), guest_l1e is 64 while
++             * guest_va is 32.  Put it first to avoid padding.
++             *
++             * Note: .write_val is an arbitrary set of written bytes, possibly
++             * misaligned and possibly spanning the next gl1e.
++             */
+             guest_l1e_t gl1e, write_val;
+             guest_va_t va;
+             uint32_t flags:29, emulation_count:3;
+@@ -2099,7 +2107,7 @@ static inline void trace_shadow_emulate(
+         event = TRC_SHADOW_EMULATE | ((GUEST_PAGING_LEVELS-2)<<8);
+ 
+         d.gl1e = gl1e;
+-        d.write_val.l1 = this_cpu(trace_emulate_write_val);
++        d.write_val = this_cpu(trace_emulate_write_val);
+         d.va = va;
+ #if GUEST_PAGING_LEVELS == 3
+         d.emulation_count = this_cpu(trace_extra_emulation_count);
+@@ -2680,7 +2688,7 @@ static int cf_check sh_page_fault(
+     paging_unlock(d);
+     put_gfn(d, gfn_x(gfn));
+ 
+-    this_cpu(trace_emulate_write_val) = 0;
++    this_cpu(trace_emulate_write_val) = (guest_l1e_t){};
+ 
+ #if SHADOW_OPTIMIZATIONS & SHOPT_FAST_EMULATION
+  early_emulation:
+--- a/xen/arch/x86/mm/shadow/private.h
++++ b/xen/arch/x86/mm/shadow/private.h
+@@ -120,14 +120,6 @@ enum {
+     TRCE_SFLAG_OOS_FIXUP_EVICT,
+ };
+ 
+-
+-/* Size (in bytes) of a guest PTE */
+-#if GUEST_PAGING_LEVELS >= 3
+-# define GUEST_PTE_SIZE 8
+-#else
+-# define GUEST_PTE_SIZE 4
+-#endif
+-
+ /******************************************************************************
+  * Auditing routines
+  */
