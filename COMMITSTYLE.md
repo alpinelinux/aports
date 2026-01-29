@@ -104,6 +104,8 @@ One commit per downgraded aport.
 ### Move
 
 Moves an aport from one repository to another.
+No change to value of `pkgrel` is necessary unless there are other changes
+in addition to the move.
 
 ###### Template
 
