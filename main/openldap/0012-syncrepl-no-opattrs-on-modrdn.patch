@@ -1,0 +1,64 @@
+Alpine-specific hotfix: syncrepl invokes mdb's be_modrdn / be_add /
+be_modify / be_delete without setting orm_no_opattrs=1, so mdb's
+modrdn (and friends) call slap_mods_opattrs() which auto-injects a
+"replace modifiersName=<o_dn>" mod whenever modifiersName is not
+already in the modlist. Since op->o_dn is the consumer's local rootdn
+(op->o_bd->be_rootdn) the consumer ends up with modifiersName=cn=consumer
+instead of the provider's value.
+
+After MR#817 removed the kludge that always forced modifiersName into
+the modlist (commit 87933f3e, ITS#10250) the auto-overwrite becomes
+visible whenever provider and consumer happen to already agree on
+modifiersName (so syncrepl_diff_entry generates no mod for it).
+Worst case the consumer ends up with the provider's entryCSN (from
+the modrdn) but the wrong modifiersName, and ITS#10358's retry sees
+"identical CSN" and skips remediation.
+
+Masked on x86_64/aarch64 but reproduces deterministically on
+x86/armv7/armhf/s390x. Also affects delta-multiprovider replication
+(test063) flakily on ppc64le.
+
+Two affected code paths in servers/slapd/syncrepl.c:
+
+1. syncrepl_entry() — refresh-mode rename+content updates (be_modrdn).
+   Mirrors what the parallel be_modify branch already does.
+
+2. syncrepl_message_to_op() — delta-sync log replay (be_add, be_modify,
+   be_modrdn, be_delete). Set the flag once at function entry and clear
+   at the 'done:' exit so all four backend calls run with op-attr
+   auto-injection suppressed.
+
+--- a/servers/slapd/syncrepl.c
++++ b/servers/slapd/syncrepl.c
+@@ -3214,6 +3214,7 @@ syncrepl_message_to_op(
+ 	Debug( LDAP_DEBUG_SYNC, "syncrepl_message_to_op: %s tid %p\n",
+ 		si->si_ridtxt, (void *)op->o_tid );
+
++	op->orm_no_opattrs = 1;
+ 	switch( op->o_tag ) {
+ 	case LDAP_REQ_ADD:
+ 	case LDAP_REQ_MODIFY:
+@@ -3347,6 +3348,7 @@ syncrepl_message_to_op(
+ 		break;
+ 	}
+ done:
++	op->orm_no_opattrs = 0;
+ 	if ( do_graduate )
+ 		slap_graduate_commit_csn( op );
+ 	if ( do_unlock )
+@@ -4641,6 +4643,7 @@ retry_modrdn:;
+ 				mod->sml_next = m2;
+ 			}
+ 			op->o_bd = si->si_wbe;
++			op->orm_no_opattrs = 1;
+ retry_modrdn:;
+ 			rs_reinit( &rs_modify, REP_RESULT );
+ 			rc = op->o_bd->be_modrdn( op, &rs_modify );
+@@ -4656,6 +4659,7 @@ retry_modrdn:;
+ 					goto retry_modrdn;
+ 				}
+ 			}
++			op->orm_no_opattrs = 0;
+ 			if ( rc == LDAP_ASSERTION_FAILED ) {
+ 				goto retry_diff;
+ 			}

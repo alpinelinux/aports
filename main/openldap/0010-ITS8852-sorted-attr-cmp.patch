@@ -1,0 +1,193 @@
+Patch-Source: https://git.openldap.org/openldap/openldap/-/commit/8986f99d33725e5365573f7a57db570d4bfd2a5a
+Prerequisite for MR#817 (ITS#10250): adds the sorted_attr_cmp() helper and the
+SLAP_ATTR_SORTED_VALS branch in syncrepl_diff_entry() that MR#817 then replaces.
+Without this, MR#817's hunk that deletes the SORTED_VALS branch fails to apply
+on 2.6.13.
+
+From 8986f99d33725e5365573f7a57db570d4bfd2a5a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ond=C5=99ej=20Kuzn=C3=ADk?= <ondra@mistotebe.net>
+Date: Fri, 3 Nov 2023 13:53:39 +0000
+Subject: [PATCH] ITS#8852 Optimise attr_cmp for sortval attributes
+
+---
+ servers/slapd/syncrepl.c | 155 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 153 insertions(+), 2 deletions(-)
+
+diff --git a/servers/slapd/syncrepl.c b/servers/slapd/syncrepl.c
+index 3e768cc5af..80317f51fd 100644
+--- a/servers/slapd/syncrepl.c
++++ b/servers/slapd/syncrepl.c
+@@ -5395,6 +5395,153 @@ syncrepl_updateCookie(
+ 	return rc;
+ }
+ 
++static void
++sorted_attr_cmp( Operation *op, Attribute *old, Attribute *new,
++	Modifications ***mret, Modifications ***mcur )
++{
++	Modifications *mod, **modtail = *mret;
++	struct berval **adds, **nadds = NULL, **dels, **ndels = NULL;
++	const char *text;
++	unsigned int i = 0, j = 0, n = 0, o = 0, nn = new->a_numvals,
++		no = old->a_numvals;
++	int match = -1, rc;
++
++	assert( no != 0 );
++	assert( nn != 0 );
++
++	adds = op->o_tmpalloc( sizeof(struct berval *) * nn, op->o_tmpmemctx );
++	dels = op->o_tmpalloc( sizeof(struct berval *) * no, op->o_tmpmemctx );
++
++	if ( old->a_vals != old->a_nvals ) {
++		nadds = op->o_tmpalloc( sizeof(struct berval *) * nn, op->o_tmpmemctx );
++		ndels = op->o_tmpalloc( sizeof(struct berval *) * no, op->o_tmpmemctx );
++	}
++
++	do {
++		if ( n == nn ) {
++			if ( ndels ) {
++				ndels[i] = &old->a_vals[o];
++			}
++			dels[i++] = &old->a_vals[o++];
++		} else if ( o == no ) {
++			if ( nadds ) {
++				nadds[j] = &new->a_vals[n];
++			}
++			adds[j++] = &new->a_vals[n++];
++		} else {
++			rc = value_match( &match, old->a_desc,
++					old->a_desc->ad_type->sat_equality, SLAP_MR_EQUALITY,
++					&old->a_nvals[o], &new->a_nvals[n], &text );
++			if ( rc != LDAP_SUCCESS ) {
++				Debug( LDAP_DEBUG_ANY, "attr_cmp: "
++						"sorted vals attribute %s values can't be compared? (%s)\n",
++						old->a_desc->ad_cname.bv_val, text );
++				assert(0);
++			}
++			if ( match == 0 ) {
++				/* Value still present */
++				o++;
++				n++;
++			} else if ( match < 0 ) {
++				/* Old value not present anymore */
++				if ( ndels ) {
++					ndels[i] = &old->a_nvals[o];
++				}
++				dels[i++] = &old->a_vals[o++];
++			} else {
++				if ( nadds ) {
++					nadds[j] = &new->a_nvals[n];
++				}
++				adds[j++] = &new->a_vals[n++];
++			}
++		}
++	} while ( n < nn || o < no );
++
++	mod = **mcur;
++	if ( mod && i == no ) {
++		**mcur = mod->sml_next;
++		*modtail = mod;
++		modtail = &mod->sml_next;
++	}
++
++	/* If we deleted all, just use the replace */
++	if ( i && i != no ) {
++		mod = ch_malloc( sizeof( Modifications ) );
++		mod->sml_op = LDAP_MOD_DELETE;
++		mod->sml_flags = 0;
++		mod->sml_desc = old->a_desc;
++		mod->sml_type = mod->sml_desc->ad_cname;
++		mod->sml_numvals = i;
++
++		mod->sml_values = ch_malloc( ( i + 1 ) * sizeof(struct berval) );
++		if ( old->a_vals != old->a_nvals ) {
++			mod->sml_nvalues = ch_malloc( ( i + 1 ) * sizeof(struct berval) );
++		} else {
++			mod->sml_nvalues = NULL;
++		}
++
++		for ( i=0; i < mod->sml_numvals; i++ ) {
++			ber_dupbv( &mod->sml_values[i], dels[i] );
++			if ( mod->sml_nvalues ) {
++				ber_dupbv( &mod->sml_nvalues[i], ndels[i] );
++			}
++		}
++
++		BER_BVZERO( &mod->sml_values[i] );
++		if ( mod->sml_nvalues ) {
++			BER_BVZERO( &mod->sml_nvalues[i] );
++		}
++
++		*modtail = mod;
++		modtail = &mod->sml_next;
++	}
++
++	if ( j ) {
++		mod = ch_malloc( sizeof( Modifications ) );
++		mod->sml_op = LDAP_MOD_ADD;
++		mod->sml_flags = 0;
++		mod->sml_desc = old->a_desc;
++		mod->sml_type = mod->sml_desc->ad_cname;
++		mod->sml_numvals = j;
++
++		mod->sml_values = ch_malloc( ( j + 1 ) * sizeof(struct berval) );
++		if ( old->a_vals != old->a_nvals ) {
++			mod->sml_nvalues = ch_malloc( ( j + 1 ) * sizeof(struct berval) );
++		} else {
++			mod->sml_nvalues = NULL;
++		}
++
++		for ( j=0; j < mod->sml_numvals; j++ ) {
++			ber_dupbv( &mod->sml_values[j], adds[j] );
++			if ( mod->sml_nvalues ) {
++				ber_dupbv( &mod->sml_nvalues[j], nadds[j] );
++			}
++		}
++
++		BER_BVZERO( &mod->sml_values[j] );
++		if ( mod->sml_nvalues ) {
++			BER_BVZERO( &mod->sml_nvalues[j] );
++		}
++
++		*modtail = mod;
++		modtail = &mod->sml_next;
++	}
++
++	if ( old->a_vals != old->a_nvals ) {
++		op->o_tmpfree( ndels, op->o_tmpmemctx );
++		op->o_tmpfree( nadds, op->o_tmpmemctx );
++	}
++	op->o_tmpfree( dels, op->o_tmpmemctx );
++	op->o_tmpfree( adds, op->o_tmpmemctx );
++
++	/* advance to next element */
++	mod = **mcur;
++	if ( mod ) {
++		*mcur = &mod->sml_next;
++	}
++	*mret = modtail;
++}
++
+ /* Compare the attribute from the old entry to the one in the new
+  * entry. The Modifications from the new entry will either be left
+  * in place, or changed to an Add or Delete as needed.
+@@ -5616,10 +5763,14 @@ void syncrepl_diff_entry( Operation *op, Attribute *old, Attribute *new,
+ 		 * if we know there are other valid mods.
+ 		 */
+ 		if ( *mods && ( old->a_desc == slap_schema.si_ad_modifiersName ||
+-			old->a_desc == slap_schema.si_ad_modifyTimestamp ))
++			old->a_desc == slap_schema.si_ad_modifyTimestamp )) {
+ 			attr_cmp( op, NULL, new, &modtail, &ml );
+-		else
++		} else if ( old->a_flags & SLAP_ATTR_SORTED_VALS ) {
++			sorted_attr_cmp( op, old, new, &modtail, &ml );
++		} else {
+ 			attr_cmp( op, old, new, &modtail, &ml );
++		}
++
+ 		new = new->a_next;
+ 		old = old->a_next;
+ 	}
+-- 
+GitLab
+
