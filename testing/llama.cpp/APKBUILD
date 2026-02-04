@@ -1,0 +1,192 @@
+# Contributor: Marian Buschsieweke <marian.buschsieweke@posteo.net>
+maintainer="Hugo Osvaldo Barrera <hugo@whynothugo.nl>"
+pkgname=llama.cpp
+pkgver=0.0.8368
+_buildver=${pkgver#0.0.}
+pkgrel=0
+pkgdesc="LLM inference in C/C++ (with Vulkan GPU acceleration)"
+# armhf armv7, riscv64, x86: build fails
+# ppc64le: internal compiler error
+arch="all !armv7 !armhf !ppc64le !riscv64 !x86"
+url="https://github.com/ggml-org/llama.cpp"
+license="MIT"
+pkgusers="llama-server"
+pkggroups="llama-server"
+makedepends="
+	cmake
+	glslang-dev
+	jq
+	linux-headers
+	openblas-dev
+	openssl-dev
+	samurai
+	shaderc
+	vulkan-loader-dev
+	"
+checkdepends="bash py3-jinja2"
+install="$pkgname.pre-install"
+# convert_hf_to_gguf: disabled; too many missing depends.
+subpackages="
+	$pkgname-vulkan
+	$pkgname-dev
+	$pkgname-extras
+	$pkgname-openrc
+	"
+source="$pkgname-b$_buildver.tar.gz::https://github.com/ggml-org/llama.cpp/archive/refs/tags/b$_buildver.tar.gz
+	$pkgname-b$_buildver.json::https://api.github.com/repos/ggml-org/llama.cpp/git/ref/tags/b$_buildver
+	llama-server.initd
+	llama-server.confd
+	0001-Fix-link-failures-in-s390x.patch
+	"
+builddir="$srcdir/$pkgname-b$_buildver"
+sonameprefix="$pkgname:"
+
+case "$CARCH" in
+loongarch64)
+	_ggml_cpu_all_variants=OFF
+	;;
+*)
+	_ggml_cpu_all_variants=ON
+	subpackages="$pkgname-cpu $subpackages"
+	;;
+esac
+
+case "$CARCH" in
+riscv64) _lto=OFF ;;
+*) _lto=ON ;;
+esac
+
+# The bundled ggml and the standalone ggml have diverging APIs.
+# llama.cpp won't build with the standalone one. Upstream recommends using the
+# vendored one.
+
+build() {
+	_commit=$(jq -r '.object.sha' < $srcdir/$pkgname-b$_buildver.json)
+
+	cmake -B build -G Ninja -Wno-dev \
+		-DBUILD_SHARED_LIBS=ON \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DGGML_ALL_WARNINGS=OFF \
+		-DGGML_ALL_WARNINGS_3RD_PARTY=OFF \
+		-DGGML_BACKEND_DIR=/usr/lib/llama.cpp \
+		-DGGML_BACKEND_DL=ON \
+		-DGGML_BLAS=ON \
+		-DGGML_BLAS_VENDOR=OpenBLAS \
+		-DGGML_BUILD_EXAMPLES=OFF \
+		-DGGML_CPU_ALL_VARIANTS=$_ggml_cpu_all_variants \
+		-DGGML_CUDA_FA_ALL_QUANTS=ON \
+		-DGGML_LIB_INSTALL_DIR=/usr/lib/llama.cpp \
+		-DGGML_LTO=$_lto \
+		-DGGML_NATIVE=OFF \
+		-DGGML_RPC=ON \
+		-DLLAMA_BUILD_COMMIT="$_commit" \
+		-DLLAMA_BUILD_NUMBER="$_buildver" \
+		-DGGML_VULKAN=ON
+	cmake --build build
+}
+
+check() {
+	local skip="test-arg-parser"                   # test fails
+	skip="$skip|test-backend-ops"                  # segfaults
+	skip=$skip"|test-download-model"               # requires network
+	skip=$skip"|test-eval-callback-download-model" # requires network
+	skip=$skip"|test-eval-callback"                # requires network
+	skip=$skip"|test-state-restore-fragmented"     # requires network
+	skip=$skip"|test-thread-safety"                # requires network
+	skip=$skip"|test-tokenizers-ggml-vocabs"       # fails on CI (only when network is available)
+	skip=$skip"|test-llama-archs"                  # https://github.com/ggml-org/llama.cpp/issues/20611
+	skip=$skip"|test-opt"                          # hangs, needs research
+
+	case "$CARCH" in
+	ppc64le) skip="$skip|test-opt" ;; # only rpc backend available
+	s390x) return ;;                  # requires big-endian models
+	esac
+
+	ctest --test-dir build -E "$skip"
+}
+
+package() {
+	DESTDIR="$pkgdir" cmake --install build
+	install -Dm 644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm 755 "$srcdir/llama-server.initd" "$pkgdir/etc/init.d/llama-server"
+	install -Dm 644 "$srcdir/llama-server.confd" "$pkgdir/etc/conf.d/llama-server"
+	install -dm 755 -o llama-server -g llama-server "$pkgdir/var/lib/llama-server"
+
+	# # Don't install tests.
+	find "$pkgdir/usr/bin/" -name "test-*" -exec rm {} \;
+
+	# TODO: missing dependencies for convert_hf_to_gguf
+	rm "$pkgdir/usr/bin/convert_hf_to_gguf.py"
+}
+
+cpu() {
+	install_if="$pkgname=$pkgver-r$pkgrel"
+	depends=""
+	amove usr/lib/llama.cpp/libggml-cpu-*.so
+}
+
+vulkan() {
+	install_if="$pkgname=$pkgver-r$pkgrel vulkan-loader"
+	depends=""
+	amove usr/lib/llama.cpp/libggml-vulkan.so
+}
+
+extras() {
+	pkgdesc="llama.cpp additional binaries"
+	amove usr/bin/llama-batched \
+		usr/bin/llama-batched-bench \
+		usr/bin/llama-completion \
+		usr/bin/llama-debug \
+		usr/bin/llama-diffusion-cli \
+		usr/bin/llama-embedding \
+		usr/bin/llama-eval-callback \
+		usr/bin/llama-finetune \
+		usr/bin/llama-fit-params \
+		usr/bin/llama-gen-docs \
+		usr/bin/llama-gguf \
+		usr/bin/llama-gguf-hash \
+		usr/bin/llama-gguf-split \
+		usr/bin/llama-idle \
+		usr/bin/llama-imatrix \
+		usr/bin/llama-lookahead \
+		usr/bin/llama-lookup \
+		usr/bin/llama-lookup-create \
+		usr/bin/llama-lookup-merge \
+		usr/bin/llama-lookup-stats \
+		usr/bin/llama-mtmd-cli \
+		usr/bin/llama-parallel \
+		usr/bin/llama-passkey \
+		usr/bin/llama-perplexity \
+		usr/bin/llama-quantize \
+		usr/bin/llama-retrieval \
+		usr/bin/llama-save-load-state \
+		usr/bin/llama-simple \
+		usr/bin/llama-speculative \
+		usr/bin/llama-speculative-simple \
+		usr/bin/llama-tokenize \
+		usr/bin/rpc-server
+}
+
+convert_hf_to_gguf() {
+	# FIXME: all except py3-numpy are missing.
+	#        py3-pytorch is a huge effort to package.
+	depends="
+		py3-gguf
+		py3-numpy
+		py3-pytorch
+		py3-safetensors
+		py3-sentencepiece
+		py3-transformers
+	"
+
+	amove usr/bin/convert_hf_to_gguf.py
+}
+
+sha512sums="
+9019dcc56ce46c654aae7b9f1440b8add5f601feb886b17d0771cd1eaf161fbc9b36a9e61c202e1a1432e128733b4087dddf9db1470130bd653b034300372f7d  llama.cpp-b8368.tar.gz
+bbaa478f7775afd5b61f89200f3f7606d16e57a1225a43b8e7e13f7cbe0f2d6a3ccfe24651c9c5d95b07fdcd676cc79c8aece302bc5dec8a918484e527fee6c4  llama.cpp-b8368.json
+f267b37021bd67f870538d8ff3ae631192e75e4792dffc0aedc3f0d21a695ca6272468f218b9e2870fb1ff9f9ae6a885dfc5741d27f7add2f5a8078599995f30  llama-server.initd
+4165b6c288267b10ad063521b67e8fdfbfc35f2a9959f01fe3aedda214000c385dd646167b5f78e61124ccf9e40233f9fa3ecb9b0dc014efd774d009403f779c  llama-server.confd
+1280aeb6d3700bd3e4a765dcceb2074ccc47a774dfd3ac876e38d64616050459c1c87ab17783daeaf37f4fff43a18eba55cd47b35a8f1e92679b79c5a637dfaf  0001-Fix-link-failures-in-s390x.patch
+"
