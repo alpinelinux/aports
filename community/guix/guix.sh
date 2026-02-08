@@ -21,7 +21,7 @@ export MANPATH="$GUIX_PROFILE/share/man:$MANPATH"
 
 # User's default profile, if it exists
 GUIX_PROFILE="$HOME/.guix-profile"
-if [ -L "$GUIX_PROFILE" ]; then
+if [ -f "$GUIX_PROFILE/etc/profile" ]; then
   . "$GUIX_PROFILE/etc/profile"
 
   # see info '(guix) Application Setup'
