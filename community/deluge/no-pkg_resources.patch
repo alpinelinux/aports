@@ -1,0 +1,173 @@
+diff --git a/deluge/common.py b/deluge/common.py
+index 7b76d245c..4631a6a93 100644
+--- a/deluge/common.py
++++ b/deluge/common.py
+@@ -33,10 +33,7 @@
+ from deluge.decorators import deprecated
+ from deluge.error import InvalidPathError
+ 
+-try:
+-    from importlib.metadata import distribution
+-except ImportError:
+-    from pkg_resources import get_distribution as distribution
++from importlib.metadata import distribution
+ 
+ 
+ try:
+diff --git a/deluge/pluginmanagerbase.py b/deluge/pluginmanagerbase.py
+index 52dae615b..77985715d 100644
+--- a/deluge/pluginmanagerbase.py
++++ b/deluge/pluginmanagerbase.py
+@@ -11,9 +11,10 @@
+ 
+ import email
+ import logging
+-import os.path
++import os
++import sys
++from importlib.metadata import Distribution
+ 
+-import pkg_resources
+ from twisted.internet import defer
+ from twisted.python.failure import Failure
+ 
+@@ -102,21 +103,40 @@ def scan_for_plugins(self):
+         ]
+         plugin_dirs = [base_dir, user_dir] + base_subdir
+ 
+-        for dirname in plugin_dirs:
+-            pkg_resources.working_set.add_entry(dirname)
+-        self.pkg_env = pkg_resources.Environment(
+-            plugin_dirs, platform=None, python=None
+-        )
+-
++        self._plugin_dists = {}
+         self.available_plugins = []
+-        for name in self.pkg_env:
+-            log.debug(
+-                'Found plugin: %s %s at %s',
+-                self.pkg_env[name][0].project_name,
+-                self.pkg_env[name][0].version,
+-                self.pkg_env[name][0].location,
+-            )
+-            self.available_plugins.append(self.pkg_env[name][0].project_name)
++
++        for plugin_dir in plugin_dirs:
++            if not os.path.isdir(plugin_dir):
++                continue
++            if plugin_dir not in sys.path:
++                sys.path.insert(0, plugin_dir)
++
++            for item in os.listdir(plugin_dir):
++                item_path = os.path.join(plugin_dir, item)
++                dist = None
++
++                if item.endswith('.egg') and os.path.isdir(item_path):
++                    # Add .egg directory to sys.path for imports
++                    if item_path not in sys.path:
++                        sys.path.insert(0, item_path)
++                    egg_info = os.path.join(item_path, 'EGG-INFO')
++                    if os.path.isdir(egg_info):
++                        dist = Distribution.at(egg_info)
++                elif item.endswith(('.egg-info', '.dist-info')) and os.path.isdir(item_path):
++                    dist = Distribution.at(item_path)
++
++                if dist:
++                    name = dist.metadata['Name']
++                    if name not in self._plugin_dists:
++                        self._plugin_dists[name] = dist
++                        self.available_plugins.append(name)
++                        log.debug(
++                            'Found plugin: %s %s at %s',
++                            name,
++                            dist.version,
++                            plugin_dir,
++                        )
+ 
+     def enable_plugin(self, plugin_name):
+         """Enable a plugin.
+@@ -138,28 +158,27 @@ def enable_plugin(self, plugin_name):
+             return defer.succeed(True)
+ 
+         plugin_name = plugin_name.replace(' ', '-')
+-        egg = self.pkg_env[plugin_name][0]
+-        # Activate is required by non-namespace plugins.
+-        egg.activate()
++        dist = self._plugin_dists[plugin_name]
+         return_d = defer.succeed(True)
+ 
+-        for name in egg.get_entry_map(self.entry_name):
++        entry_points = [ep for ep in dist.entry_points if ep.group == self.entry_name]
++        for ep in entry_points:
+             try:
+-                cls = egg.load_entry_point(self.entry_name, name)
++                cls = ep.load()
+                 instance = cls(plugin_name.replace('-', '_'))
+             except component.ComponentAlreadyRegistered as ex:
+                 log.error(ex)
+                 return defer.succeed(False)
+             except Exception as ex:
+                 log.error(
+-                    'Unable to instantiate plugin %r from %r!', name, egg.location
++                    'Unable to instantiate plugin %r from %r!', ep.name, dist.metadata['Name']
+                 )
+                 log.exception(ex)
+                 continue
+             try:
+                 return_d = defer.maybeDeferred(instance.enable)
+             except Exception as ex:
+-                log.error('Unable to enable plugin: %s', name)
++                log.error('Unable to enable plugin: %s', ep.name)
+                 log.exception(ex)
+                 return_d = defer.fail(False)
+ 
+@@ -167,7 +186,7 @@ def enable_plugin(self, plugin_name):
+                 import warnings
+ 
+                 warnings.warn_explicit(
+-                    DEPRECATION_WARNING % name,
++                    DEPRECATION_WARNING % ep.name,
+                     DeprecationWarning,
+                     instance.__module__,
+                     0,
+@@ -257,14 +276,14 @@ def on_disabled(result):
+     def get_plugin_info(self, name):
+         """Returns a dictionary of plugin info from the metadata"""
+ 
+-        if not self.pkg_env[name]:
++        if name not in self._plugin_dists:
+             log.warning('Failed to retrieve info for plugin: %s', name)
+             info = {}.fromkeys(METADATA_KEYS, '')
+             info['Name'] = info['Version'] = 'not available'
+             return info
+ 
+-        pkg_info = self.pkg_env[name][0].get_metadata('PKG-INFO')
+-        return self.parse_pkg_info(pkg_info)
++        metadata = self._plugin_dists[name].metadata
++        return {key: metadata.get(key, '') for key in METADATA_KEYS}
+ 
+     @staticmethod
+     def parse_pkg_info(pkg_info):
+diff --git a/deluge/ui/ui_entry.py b/deluge/ui/ui_entry.py
+index f0a983106..2cf7e4b4e 100644
+--- a/deluge/ui/ui_entry.py
++++ b/deluge/ui/ui_entry.py
+@@ -16,8 +16,7 @@
+ import logging
+ import os
+ import sys
+-
+-import pkg_resources
++from importlib.metadata import entry_points
+ 
+ import deluge.common
+ import deluge.configmanager
+@@ -35,7 +34,7 @@ def start_ui():
+ 
+     # Get the registered UI entry points
+     ui_entrypoints = {}
+-    for entrypoint in pkg_resources.iter_entry_points('deluge.ui'):
++    for entrypoint in entry_points(group='deluge.ui'):
+         try:
+             ui_entrypoints[entrypoint.name] = entrypoint.load()
+         except ImportError:
