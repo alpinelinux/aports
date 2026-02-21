@@ -1,0 +1,199 @@
+# Contributor: Will Sinatra <wpsinatra@gmail.com>
+# Maintainer: Will Sinatra <wpsinatra@gmail.com>
+pkgname=mediawiki
+pkgver=1.45.1
+pkgrel=0
+_pkgvermaj=${pkgver%.*}
+pkgdesc="Free and open-source wiki software used by Wikipedia"
+url="https://www.mediawiki.org/"
+arch="noarch !s390x"
+# s390x fails to fetch source (429 too many requests)
+license="GPL-2.0-only"
+_php=php83
+_php_mods="-calendar -ctype -curl -dom -fileinfo -gd -iconv -intl
+	-mbstring -mysqli -opcache -openssl -session -simplexml
+	-tokenizer -xml -xmlreader -xmlwriter -zip"
+depends="
+	$_php
+	$_php-fpm
+	${_php_mods//-/$_php-}
+	diffutils
+	imagemagick
+	"
+makedepends="
+	composer
+	$_php-phar
+	$_php-sodium
+	"
+install="$pkgname.pre-install $pkgname-nginx.post-install"
+options="!check" # no test suite in release tarball
+subpackages="
+	$pkgname-doc
+	$pkgname-nginx:_nginx
+	$pkgname-default-extensions:_default_extensions
+	"
+source="https://releases.wikimedia.org/mediawiki/$_pkgvermaj/mediawiki-$pkgver.tar.gz
+	mediawiki_nginx.conf
+	mediawiki_fpm.conf
+	"
+
+# Extensions bundled in the tarball that we split into subpackages.
+# Core/mandatory extensions (always shipped with core) are NOT listed here.
+# Only optional bundled extensions that users may want to enable individually.
+_extensions="
+	AbuseFilter
+	CategoryTree
+	Cite
+	CiteThisPage
+	CodeEditor
+	ConfirmEdit
+	DiscussionTools
+	Echo
+	Gadgets
+	ImageMap
+	InputBox
+	Linter
+	LoginNotify
+	Math
+	MultimediaViewer
+	Nuke
+	OATHAuth
+	PageImages
+	ParserFunctions
+	PdfHandler
+	Poem
+	ReplaceText
+	Scribunto
+	SecureLinkFixer
+	SpamBlacklist
+	SyntaxHighlight_GeSHi
+	TemplateData
+	TextExtracts
+	Thanks
+	TitleBlacklist
+	VisualEditor
+	WikiEditor
+	"
+for _ext in $_extensions; do
+	_ext_lower=$(echo "$_ext" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+	subpackages="$subpackages $pkgname-extension-$_ext_lower:_extension"
+done
+
+build() {
+	$_php /usr/bin/composer.phar config --no-interaction audit.block-insecure false
+
+	# Upstream pins phpunit in require-dev which has a security advisory.
+	# Even with --no-dev, composer still resolves require-dev deps.
+	# The audit.block-insecure=false above allows resolution to proceed.
+	$_php /usr/bin/composer.phar install \
+		--no-dev \
+		--no-cache \
+		--no-interaction \
+		--optimize-autoloader
+}
+
+package() {
+	local wwwdir="usr/share/webapps/mediawiki"
+	local confdir="etc/webapps/mediawiki"
+	local datadir="var/lib/mediawiki"
+
+	mkdir -p "$pkgdir"/$wwwdir
+	mkdir -p "$pkgdir"/$confdir
+	mkdir -p "$pkgdir"/$datadir/images
+	mkdir -p "$pkgdir"/$datadir/cache
+	mkdir -p "$pkgdir"/$datadir/cache/tmp
+
+	# Copy core files
+	cp -a "$builddir"/* "$pkgdir"/$wwwdir/
+	cp -a "$builddir"/.htaccess "$pkgdir"/$wwwdir/ 2>/dev/null || true
+
+	# Move mutable data directories out of webroot
+	# Relative symlinks: ../../../../ = 4 components of $wwwdir (usr/share/webapps/mediawiki)
+	rm -rf "$pkgdir"/$wwwdir/images
+	ln -s ../../../../$datadir/images "$pkgdir"/$wwwdir/images
+
+	rm -rf "$pkgdir"/$wwwdir/cache
+	ln -s ../../../../$datadir/cache "$pkgdir"/$wwwdir/cache
+
+	# Move LocalSettings.php to /etc and symlink
+	if [ -f "$pkgdir"/$wwwdir/LocalSettings.php ]; then
+		mv "$pkgdir"/$wwwdir/LocalSettings.php "$pkgdir"/$confdir/
+	fi
+	ln -s ../../../../$confdir/LocalSettings.php "$pkgdir"/$wwwdir/LocalSettings.php
+
+	# Set permissions
+	chown -R root:www-data "$pkgdir"/$wwwdir
+	chown -R root:www-data "$pkgdir"/$datadir
+	chmod -R 0775 "$pkgdir"/$datadir/images
+	chmod -R 0775 "$pkgdir"/$datadir/cache
+
+	# Install documentation
+	install -d "$pkgdir"/usr/share/doc/$pkgname
+	for f in COPYING CREDITS FAQ HISTORY INSTALL README.md RELEASE-NOTES-$_pkgvermaj UPGRADE; do
+		install -m644 "$builddir"/$f "$pkgdir"/usr/share/doc/$pkgname/
+	done
+
+	# Remove Scribunto's bundled Lua binaries (precompiled for glibc platforms).
+	# The scribunto subpackage depends on system lua5.1 instead.
+	rm -rf "$pkgdir"/$wwwdir/extensions/Scribunto/includes/Engines/LuaStandalone/binaries \
+		"$pkgdir"/$wwwdir/extensions/Scribunto/includes/engines/LuaStandalone/binaries
+}
+
+_nginx() {
+	pkgdesc="nginx configuration for MediaWiki"
+	install_if="nginx $pkgname=$pkgver-r$pkgrel"
+
+	install -Dm0644 "$srcdir"/mediawiki_nginx.conf "$subpkgdir"/etc/nginx/http.d/mediawiki.conf
+	install -Dm0644 "$srcdir"/mediawiki_fpm.conf "$subpkgdir"/etc/$_php/php-fpm.d/mediawiki.conf
+}
+
+_default_extensions() {
+	pkgdesc="MediaWiki default bundled extensions (upstream equivalent)"
+	depends="$pkgname"
+
+	# Pull in all bundled extensions to match upstream's full tarball experience
+	for _ext in $_extensions; do
+		_ext_lower=$(echo "$_ext" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+		depends="$depends $pkgname-extension-$_ext_lower"
+	done
+
+	mkdir -p "$subpkgdir"
+}
+
+_extension() {
+	local _extsubpkg="${subpkgname#"$pkgname"-extension-}"
+	local wwwdir="usr/share/webapps/mediawiki"
+	local _extname=""
+
+	# Map lowercase-hyphenated subpackage name back to actual extension directory name
+	for _ext in $_extensions; do
+		_check=$(echo "$_ext" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+		if [ "$_check" = "$_extsubpkg" ]; then
+			_extname="$_ext"
+			break
+		fi
+	done
+
+	if [ -z "$_extname" ]; then
+		error "Could not find extension for subpackage $_extsubpkg"
+		return 1
+	fi
+
+	pkgdesc="MediaWiki $_extname extension"
+	depends="$pkgname"
+
+	# Extension-specific dependencies
+	case "$_extname" in
+		Scribunto) depends="$depends lua5.1" ;;
+		SyntaxHighlight_GeSHi) depends="$depends python3" ;;
+	esac
+
+	mkdir -p "$subpkgdir"/$wwwdir/extensions
+	mv "$pkgdir"/$wwwdir/extensions/"$_extname" "$subpkgdir"/$wwwdir/extensions/
+}
+
+sha512sums="
+86272f30de47e231406450346fdeb06f7d5634374b1629456db5e03437833e50d7705d712b47a55a1506a8195e6189020154ec5ac8b02208bd20d9053b1a01ee  mediawiki-1.45.1.tar.gz
+e1a68a52ba524efdafb76edaecd2c121816eaad5db4d17238fab2c60b0970cc88708762924e1b1a6dac24d440c774ee061eac90771082d7246b0d46fb2ddcf1d  mediawiki_nginx.conf
+87ee178d8c8baa97dca90b0e819df4195135f6a75c136ac402516afe1db769fae2890099b4c4815ccce6f7c84435f9780133d228fb2aac3bb342f3a4cb0d3e38  mediawiki_fpm.conf
+"
