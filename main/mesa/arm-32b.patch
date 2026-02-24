@@ -1,0 +1,148 @@
+From 500f991d88eb90613ebc9f70f7ea1fd176b16a3c Mon Sep 17 00:00:00 2001
+From: Urja Rannikko <urjaman@gmail.com>
+Date: Thu, 25 Dec 2025 05:35:35 +0200
+Subject: [PATCH] hash_table: fix use-after-free by reorganization of destruct
+ callbacks
+
+Remove the allocation of a dummy context for the destruction callback
+of hash_table_u64 (on 32-bit), instead have hash_table provide
+callback(s) for handing destruction of the table contents.
+
+Signed-off-by: Urja Rannikko <urjaman@gmail.com>
+Fixes #14521
+---
+ src/util/hash_table.c | 69 +++++++++++++++++++++++++++----------------
+ src/util/hash_table.h |  1 +
+ 2 files changed, 45 insertions(+), 25 deletions(-)
+
+diff --git a/src/util/hash_table.c b/src/util/hash_table.c
+index e6bd3b9e3b7f..5ae9c4a9e88f 100644
+--- a/src/util/hash_table.c
++++ b/src/util/hash_table.c
+@@ -176,6 +176,7 @@ _mesa_hash_table_init(struct hash_table *ht,
+    ht->max_entries = hash_sizes[ht->size_index].max_entries;
+    ht->key_hash_function = key_hash_function;
+    ht->key_equals_function = key_equals_function;
++   ht->table_destructor = NULL;
+    assert(ht->size == ARRAY_SIZE(ht->_initial_storage));
+    ht->table = ht->_initial_storage;
+    memset(ht->table, 0, sizeof(ht->_initial_storage));
+@@ -184,6 +185,38 @@ _mesa_hash_table_init(struct hash_table *ht,
+    ht->deleted_key = &deleted_key_value;
+ }
+ 
++static void
++_mesa_hash_table_initial_storage_destructor(void *data)
++{
++   struct hash_table *ht = (struct hash_table*)data;
++
++   if (!ht->table)
++      return;
++
++   if (ht->table_destructor)
++      ht->table_destructor(ht);
++
++   ht->table = NULL; /* avoid double-calling the table destructor */
++}
++
++static void
++_mesa_hash_table_ralloc_table_destructor(void *data)
++{
++   void *parent = ralloc_parent(data);
++
++   _mesa_hash_table_initial_storage_destructor(parent);
++}
++
++static void
++_mesa_hash_table_set_destructor(struct hash_table *ht,
++                                void(*table_destructor)(void *data))
++{
++   ht->table_destructor = table_destructor;
++   ralloc_set_destructor(ht, _mesa_hash_table_initial_storage_destructor);
++   if (ht->table != ht->_initial_storage)
++      ralloc_set_destructor(ht->table, _mesa_hash_table_ralloc_table_destructor);
++}
++
+ /* It's preferred to use _mesa_hash_table_init instead of this to skip ralloc. */
+ struct hash_table *
+ _mesa_hash_table_create(void *mem_ctx,
+@@ -462,6 +495,9 @@ _mesa_hash_table_rehash(struct hash_table *ht, unsigned new_size_index)
+    if (table == NULL)
+       return;
+ 
++   if (ht->table_destructor)
++      ralloc_set_destructor(table, _mesa_hash_table_ralloc_table_destructor);
++
+    if (ht->table == ht->_initial_storage) {
+       /* Copy the whole structure including the initial storage. */
+       old_ht = *ht;
+@@ -487,8 +523,11 @@ _mesa_hash_table_rehash(struct hash_table *ht, unsigned new_size_index)
+ 
+    ht->entries = old_ht.entries;
+ 
+-   if (old_ht.table != old_ht._initial_storage)
++   if (old_ht.table != old_ht._initial_storage) {
++      if (ht->table_destructor)
++         ralloc_set_destructor(old_ht.table, NULL);
+       ralloc_free(old_ht.table);
++   }
+ }
+ 
+ static struct hash_entry *
+@@ -878,7 +917,7 @@ key_u64_equals(const void *a, const void *b)
+ 
+ static void _mesa_hash_table_u64_delete_keys(void *data)
+ {
+-   struct hash_table_u64 *ht = ralloc_parent(data);
++   struct hash_table_u64 *ht = (struct hash_table_u64*)(data);
+ 
+    _mesa_hash_table_u64_clear(ht);
+ }
+@@ -898,29 +937,9 @@ _mesa_hash_table_u64_create(void *mem_ctx)
+                             _mesa_key_pointer_equal);
+    } else {
+       _mesa_hash_table_init(&ht->table, ht, key_u64_hash, key_u64_equals);
+-
+-      /* Allocate a ralloc sub-context which takes the u64 hash table
+-       * as a parent and attach a destructor to it so we can free the
+-       * hash_key_u64 objects that were allocated by
+-       * _mesa_hash_table_u64_insert().
+-       *
+-       * The order of creation of this sub-context is crucial: it needs
+-       * to happen after the _mesa_hash_table_init() call to guarantee
+-       * that the destructor is called before ht->table and its children
+-       * are freed, otherwise the _mesa_hash_table_u64_clear() call in the
+-       * destructor leads to a use-after-free situation.
+-       */
+-      void *dummy_ctx = ralloc_context(ht);
+-
+-      /* If we can't allocate a sub-context, free the hash table
+-       * immediately and return NULL to avoid future leaks.
+-       */
+-      if (!dummy_ctx) {
+-         ralloc_free(ht);
+-         return NULL;
+-      }
+-
+-      ralloc_set_destructor(dummy_ctx, _mesa_hash_table_u64_delete_keys);
++      /* hash_table takes care of placing the correct ralloc callback(s) and calling this
++       * callback early enough to deallocate the hash_key_u64's before hash_table.table */
++      _mesa_hash_table_set_destructor(&ht->table, _mesa_hash_table_u64_delete_keys);
+    }
+ 
+    _mesa_hash_table_set_deleted_key(&ht->table, uint_key(DELETED_KEY_VALUE));
+diff --git a/src/util/hash_table.h b/src/util/hash_table.h
+index 83a55e809d5f..bb9bb84a4d03 100644
+--- a/src/util/hash_table.h
++++ b/src/util/hash_table.h
+@@ -48,6 +48,7 @@ struct hash_table {
+    struct hash_entry *table;
+    uint32_t (*key_hash_function)(const void *key);
+    bool (*key_equals_function)(const void *a, const void *b);
++   void (*table_destructor)(void *data);
+    const void *deleted_key;
+    uint32_t size;
+    uint32_t rehash;
+-- 
+GitLab
+
