@@ -1,0 +1,170 @@
+From 9f6fcfa699885652adec42c0feb0fe26ffb0333d Mon Sep 17 00:00:00 2001
+From: Azkali Manad <a.ffcc7@gmail.com>
+Date: Sun, 8 Feb 2026 14:00:48 +0700
+Subject: [PATCH 1/4] src: platforms: fix anonymous call for C++20
+
+---
+ src/platforms/mirserver/qmirserver_p.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/platforms/mirserver/qmirserver_p.cpp b/src/platforms/mirserver/qmirserver_p.cpp
+index b2843d65..126cff89 100644
+--- a/src/platforms/mirserver/qmirserver_p.cpp
++++ b/src/platforms/mirserver/qmirserver_p.cpp
+@@ -269,7 +269,7 @@ void QMirServerPrivate::run(const std::function<void()> &startCallback)
+                     std::shared_ptr<QtCompositor> qtCompsitor = std::dynamic_pointer_cast<QtCompositor>(compositor);
+                     qCDebug(QTMIR_MIR_MESSAGES) << "Initializing screens model";
+ #if MIR_SERVER_VERSION >= MIR_VERSION_NUMBER(2, 20, 0)
+-                    auto callback = [=](std::shared_ptr<mir::graphics::GLRenderingProvider> provider) {
++                    auto callback = [=, this](std::shared_ptr<mir::graphics::GLRenderingProvider> provider) {
+                         this->renderingProvider = provider;
+                         qCDebug(QTMIR_MIR_MESSAGES) << "renderingProvider set";
+                     };
+-- 
+GitLab
+
+
+From 45467728bd5ee5e0f24b605680eefdebdeb548f2 Mon Sep 17 00:00:00 2001
+From: Azkali Manad <a.ffcc7@gmail.com>
+Date: Sun, 8 Feb 2026 14:02:43 +0700
+Subject: [PATCH 2/4] src: platforms: Fix synchronization bug with Mir2
+ crashing Mir (run on same thread)
+
+---
+ src/platforms/mirserver/screensmodel.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/platforms/mirserver/screensmodel.cpp b/src/platforms/mirserver/screensmodel.cpp
+index 8998d06d..ab0b78c3 100644
+--- a/src/platforms/mirserver/screensmodel.cpp
++++ b/src/platforms/mirserver/screensmodel.cpp
+@@ -77,7 +77,7 @@ void ScreensModel::init(
+     // Queued connections work because the thread affinity of this class is with the Qt GUI thread.
+     auto qtCompositor = compositor.get();
+     connect(qtCompositor, &QtCompositor::starting,
+-            this, &ScreensModel::onCompositorStarting);
++            this, &ScreensModel::onCompositorStarting, Qt::DirectConnection);
+     connect(qtCompositor, &QtCompositor::stopping,
+             this, &ScreensModel::onCompositorStopping, Qt::BlockingQueuedConnection);
+ 
+-- 
+GitLab
+
+
+From 58a62d2f9df559cb084a3243aafbd52098e78210 Mon Sep 17 00:00:00 2001
+From: Azkali Manad <a.ffcc7@gmail.com>
+Date: Sun, 8 Feb 2026 14:20:37 +0700
+Subject: [PATCH 3/4] src: platforms: Do not composite again on running
+ compositor also compare scaled logical size with physical size as sometime
+ the logical size is not correctly mapped during init
+
+---
+ src/platforms/mirserver/screensmodel.cpp | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/src/platforms/mirserver/screensmodel.cpp b/src/platforms/mirserver/screensmodel.cpp
+index ab0b78c3..b5ab1256 100644
+--- a/src/platforms/mirserver/screensmodel.cpp
++++ b/src/platforms/mirserver/screensmodel.cpp
+@@ -125,6 +125,11 @@ void ScreensModel::updateInternal()
+ {
+     DEBUG_MSG << "()";
+ 
++    if (m_compositing) {
++        DEBUG_MSG << "updateInternal() ignored while compositing";
++        return;
++    }
++
+     const bool wasCompositing = m_compositing;
+ 
+     auto display = m_display.lock();
+@@ -204,7 +209,21 @@ void ScreensModel::updateInternal()
+                          sink.view_area().size.height.as_int());
+ 
+             Q_FOREACH (auto screen, m_screenList) {
+-                if (dbGeom == screen->geometry()) {
++                QSize logical = screen->geometry().size();
++                qreal scale = screen->scale();
++
++                QRect physical(
++                    screen->geometry().x(),
++                    screen->geometry().y(),
++                    logical.width() / scale,
++                    logical.height() / scale
++                );
++
++                qCDebug(QTMIR_SCREENS) << "Comparing sink physical geom" << dbGeom
++                           << "to screen physical geom" << physical;
++
++                if (dbGeom == physical)
++                {
+                     // Find suitable glProvider
+                     std::pair<mg::probe::Result, std::shared_ptr<mg::GLRenderingProvider>> best_provider = std::make_pair(mg::probe::unsupported, nullptr);
+ 
+-- 
+GitLab
+
+
+From ba38a00b3eba6822b0c27c0f05729f44dfb10f33 Mon Sep 17 00:00:00 2001
+From: Azkali <a.ffcc7@gmail.com>
+Date: Mon, 16 Feb 2026 09:14:39 +0700
+Subject: [PATCH 4/4] src: platforms: Remove guard producing dead code; use
+ caching instead
+
+---
+ src/platforms/mirserver/platformscreen.cpp | 9 +++++++--
+ src/platforms/mirserver/platformscreen.h   | 1 +
+ src/platforms/mirserver/screensmodel.cpp   | 5 -----
+ 3 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/src/platforms/mirserver/platformscreen.cpp b/src/platforms/mirserver/platformscreen.cpp
+index d27ce391..eb73aa08 100644
+--- a/src/platforms/mirserver/platformscreen.cpp
++++ b/src/platforms/mirserver/platformscreen.cpp
+@@ -490,8 +490,13 @@ void PlatformScreen::removeWindow(ScreenPlatformWindow *window)
+ #if MIR_SERVER_VERSION >= MIR_VERSION_NUMBER(2, 20, 0)
+ void PlatformScreen::setMirDisplaySink(mir::graphics::GLRenderingProvider &glProvider, mir::graphics::DisplaySink *sink, mir::graphics::DisplaySyncGroup *group)
+ {
+-    m_outputSurface = glProvider.surface_for_sink(*sink, MirGLConfig{});
+-    DEBUG_MSG_SCREENS << "(outputSurface=" << m_outputSurface.get() << ", outputSink=" << sink <<  ", displayGroup=" << group << ")";
++    if (sink != m_lastDisplaySink) {
++        m_outputSurface = glProvider.surface_for_sink(*sink, MirGLConfig{});
++        m_lastDisplaySink = sink;
++        DEBUG_MSG_SCREENS << "(outputSurface=" << m_outputSurface.get() << ", outputSink=" << sink <<  ", displayGroup=" << group << ") [new sink]";
++    } else {
++        DEBUG_MSG_SCREENS << "(outputSurface=" << m_outputSurface.get() << ", outputSink=" << sink <<  ", displayGroup=" << group << ") [cached sink]";
++    }
+     // This operation should only be performed while rendering is stopped
+     m_displaySink = sink;
+     m_displayGroup = group;
+diff --git a/src/platforms/mirserver/platformscreen.h b/src/platforms/mirserver/platformscreen.h
+index be78e68e..66657d16 100644
+--- a/src/platforms/mirserver/platformscreen.h
++++ b/src/platforms/mirserver/platformscreen.h
+@@ -174,6 +174,7 @@ private:
+ #if MIR_SERVER_VERSION >= MIR_VERSION_NUMBER(2, 20, 0)
+     std::unique_ptr<mir::graphics::gl::OutputSurface> m_outputSurface;
+     mir::graphics::DisplaySink *m_displaySink;
++    mir::graphics::DisplaySink *m_lastDisplaySink = nullptr;
+ #else
+     mir::renderer::gl::RenderTarget *m_renderTarget;
+ #endif
+diff --git a/src/platforms/mirserver/screensmodel.cpp b/src/platforms/mirserver/screensmodel.cpp
+index b5ab1256..7f8962c6 100644
+--- a/src/platforms/mirserver/screensmodel.cpp
++++ b/src/platforms/mirserver/screensmodel.cpp
+@@ -125,11 +125,6 @@ void ScreensModel::updateInternal()
+ {
+     DEBUG_MSG << "()";
+ 
+-    if (m_compositing) {
+-        DEBUG_MSG << "updateInternal() ignored while compositing";
+-        return;
+-    }
+-
+     const bool wasCompositing = m_compositing;
+ 
+     auto display = m_display.lock();
+-- 
+GitLab
+
