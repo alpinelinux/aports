@@ -1,0 +1,329 @@
+From 5937c2ddbd0306b395a98d3219c59405fab76f97 Mon Sep 17 00:00:00 2001
+From: Maximilian Hils <git@maximilianhils.com>
+Date: Fri, 10 Oct 2025 08:59:23 +0200
+Subject: [PATCH] Add custom htpasswd parser (#7906)
+
+* add custom htpasswd parser
+
+This PR migrates us off passlib, which is unmaintained.
+
+* [autofix.ci] apply automated fixes
+
+---------
+
+Co-authored-by: autofix-ci[bot] <114827586+autofix-ci[bot]@users.noreply.github.com>
+
+(cherry-picked from commit 46d0adc7d1474e35d2c8490cba9a7129594ef0a0 on top of v11.0.0)
+---
+ CHANGELOG.md                            |  5 ++
+ mitmproxy/addons/proxyauth.py           | 13 ++--
+ mitmproxy/utils/htpasswd.py             | 81 +++++++++++++++++++++++++
+ pyproject.toml                          |  2 +-
+ test/mitmproxy/addons/test_proxyauth.py | 27 ++++++---
+ test/mitmproxy/data/htpasswd            |  2 +-
+ test/mitmproxy/data/htpasswd.invalid    |  1 -
+ test/mitmproxy/utils/test_htpasswd.py   | 59 ++++++++++++++++++
+ 8 files changed, 172 insertions(+), 18 deletions(-)
+ create mode 100644 mitmproxy/utils/htpasswd.py
+ delete mode 100644 test/mitmproxy/data/htpasswd.invalid
+ create mode 100644 test/mitmproxy/utils/test_htpasswd.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 02b1a7f91..50bffa31e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,11 @@
+ 
+ ## Unreleased: mitmproxy next
+ 
++- Replace `htpasswd` file parser with a custom implementation to migrate off unmaintained
++  `passlib` dependency. The new parser only supports bcrypt and SHA-1 hashing.
++  Contributions for additional formats are welcome as long as they don't introduce new
++  dependencies.
++  ([#7906](https://github.com/mitmproxy/mitmproxy/pull/7906), @mhils)
+ 
+ ## 02 October 2024: mitmproxy 11.0.0
+ 
+diff --git a/mitmproxy/addons/proxyauth.py b/mitmproxy/addons/proxyauth.py
+index 9250251da..9839c619a 100644
+--- a/mitmproxy/addons/proxyauth.py
++++ b/mitmproxy/addons/proxyauth.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import binascii
++import pathlib
+ import weakref
+ from abc import ABC
+ from abc import abstractmethod
+@@ -8,7 +9,6 @@ from collections.abc import MutableMapping
+ from typing import Optional
+ 
+ import ldap3
+-import passlib.apache
+ 
+ from mitmproxy import connection
+ from mitmproxy import ctx
+@@ -17,6 +17,7 @@ from mitmproxy import http
+ from mitmproxy.net.http import status_codes
+ from mitmproxy.proxy import mode_specs
+ from mitmproxy.proxy.layers import modes
++from mitmproxy.utils import htpasswd
+ 
+ REALM = "mitmproxy"
+ 
+@@ -201,11 +202,13 @@ class SingleUser(Validator):
+ 
+ class Htpasswd(Validator):
+     def __init__(self, proxyauth: str):
+-        path = proxyauth[1:]
++        path = pathlib.Path(proxyauth[1:]).expanduser()
+         try:
+-            self.htpasswd = passlib.apache.HtpasswdFile(path)
+-        except (ValueError, OSError):
+-            raise exceptions.OptionsError(f"Could not open htpasswd file: {path}")
++            self.htpasswd = htpasswd.HtpasswdFile.from_file(path)
++        except (ValueError, OSError) as e:
++            raise exceptions.OptionsError(
++                f"Could not open htpasswd file: {path}"
++            ) from e
+ 
+     def __call__(self, username: str, password: str) -> bool:
+         return self.htpasswd.check_password(username, password)
+diff --git a/mitmproxy/utils/htpasswd.py b/mitmproxy/utils/htpasswd.py
+new file mode 100644
+index 000000000..22081ea3f
+--- /dev/null
++++ b/mitmproxy/utils/htpasswd.py
+@@ -0,0 +1,81 @@
++"""
++A standalone, minimal htpasswd parser.
++
++This implementation currently supports bcrypt and SHA1 passwords. SHA1 is insecure.
++"""
++
++from __future__ import annotations
++
++import base64
++import hashlib
++from pathlib import Path
++
++import bcrypt
++
++
++class HtpasswdFile:
++    def __init__(self, content: str):
++        """
++        Create a HtpasswdFile from a string.
++        """
++        self.users: dict[str, str] = {}
++        for line in content.splitlines():
++            line = line.strip()
++            if not line or line.startswith("#"):
++                continue
++            if ":" not in line:
++                raise ValueError(f"Malformed htpasswd line: {line!r}")
++            user, pwhash = line.split(":", 1)
++            if not user:
++                raise ValueError(f"Malformed htpasswd line: {line!r}")
++
++            is_sha = pwhash.startswith("{SHA}")
++            is_bcrypt = pwhash.startswith(("$2y$", "$2b$", "$2a$"))
++            if not is_sha and not is_bcrypt:
++                raise ValueError(f"Unsupported htpasswd format for user {user!r}")
++
++            self.users[user] = pwhash
++
++    @classmethod
++    def from_file(cls, path: Path) -> HtpasswdFile:
++        """
++        Initializes and loads an htpasswd file.
++
++        Args:
++            path: The path to the htpasswd file.
++
++        Raises:
++            OSError: If the file cannot be read.
++            ValueError: If the file is malformed.
++        """
++        try:
++            content = path.read_text("utf-8")
++        except FileNotFoundError:
++            raise OSError(f"Htpasswd file not found: {path}") from None
++        return cls(content)
++
++    def check_password(self, username: str, password: str) -> bool:
++        """
++        Checks if a username and password combination is valid.
++
++        Args:
++            username: The username to check.
++            password: The password to check.
++
++        Returns:
++            True if the password is valid, False otherwise.
++        """
++        pwhash = self.users.get(username)
++        if pwhash is None:
++            return False
++
++        pwhash = pwhash.split(":", 1)[0]
++
++        if pwhash.startswith("{SHA}"):
++            # Apache's {SHA} is base64-encoded SHA-1.
++            # https://httpd.apache.org/docs/2.4/misc/password_encryptions.html
++            digest = hashlib.sha1(password.encode("utf-8")).digest()
++            expected = base64.b64encode(digest).decode("ascii")
++            return pwhash[5:] == expected
++        else:  # pwhash.startswith(("$2y$", "$2b$", "$2a$")):
++            return bcrypt.checkpw(password.encode("utf-8"), pwhash.encode("utf-8"))
+diff --git a/pyproject.toml b/pyproject.toml
+index af30cb0b7..a606945eb 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -34,6 +34,7 @@ classifiers = [
+ dependencies = [
+     "aioquic>=1.1.0,<=1.2.0",
+     "asgiref>=3.2.10,<=3.8.1",
++    "bcrypt>=5.0.0,<=5.0.0",
+     "Brotli>=1.0,<=1.1.0",
+     "certifi>=2019.9.11",  # no upper bound here to get latest CA bundle
+     "cryptography>=42.0,<43.1",  # relaxed upper bound here to get security fixes
+@@ -45,7 +46,6 @@ dependencies = [
+     "ldap3>=2.8,<=2.9.1",
+     "mitmproxy_rs>=0.9.1,<0.10",  # relaxed upper bound here: we control this
+     "msgpack>=1.0.0,<=1.1.0",
+-    "passlib>=1.6.5,<=1.7.4",
+     "protobuf>=5.27.2,<=5.28.2",
+     "pydivert>=2.0.3,<=2.1.0; sys_platform == 'win32'",
+     "pyOpenSSL>=22.1,<=24.2.1",
+diff --git a/test/mitmproxy/addons/test_proxyauth.py b/test/mitmproxy/addons/test_proxyauth.py
+index e715e9d11..e88c36f92 100644
+--- a/test/mitmproxy/addons/test_proxyauth.py
++++ b/test/mitmproxy/addons/test_proxyauth.py
+@@ -125,7 +125,7 @@ class TestProxyAuth:
+             assert not f.response
+             assert not f.request.headers.get("Authorization")
+ 
+-    def test_configure(self, monkeypatch, tdata):
++    def test_configure(self, monkeypatch, tdata, tmp_path):
+         monkeypatch.setattr(ldap3, "Server", mock.MagicMock())
+         monkeypatch.setattr(ldap3, "Connection", mock.MagicMock())
+ 
+@@ -196,21 +196,28 @@ class TestProxyAuth:
+             ):
+                 ctx.configure(pa, proxyauth="ldapssssssss:fake_server:dn:password:tree")
+ 
++            # test htpasswd
++            # Manually create a SHA1-hashed password for "test:test".
++            # The htpasswd file in the repo uses unsalted MD5, which we don't support.
++            p = tmp_path / "htpasswd"
++            p.write_text("test:{SHA}qUqP5cyxm6YcTAhz05Hph5gvu9M=\n")
++            ctx.configure(pa, proxyauth=f"@{p}")
++            assert isinstance(pa.validator, proxyauth.Htpasswd)
++            assert pa.validator("test", "test")
++            assert not pa.validator("test", "foo")
++
++            # nonexistent file
+             with pytest.raises(
+                 exceptions.OptionsError, match="Could not open htpasswd file"
+             ):
+-                ctx.configure(
+-                    pa, proxyauth="@" + tdata.path("mitmproxy/net/data/server.crt")
+-                )
++                ctx.configure(pa, proxyauth="@nonexistent")
++
++            # malformed file
++            p.write_text("malformed\n")
+             with pytest.raises(
+                 exceptions.OptionsError, match="Could not open htpasswd file"
+             ):
+-                ctx.configure(pa, proxyauth="@nonexistent")
+-
+-            ctx.configure(pa, proxyauth="@" + tdata.path("mitmproxy/net/data/htpasswd"))
+-            assert isinstance(pa.validator, proxyauth.Htpasswd)
+-            assert pa.validator("test", "test")
+-            assert not pa.validator("test", "foo")
++                ctx.configure(pa, proxyauth=f"@{p}")
+ 
+     def test_handlers(self):
+         up = proxyauth.ProxyAuth()
+diff --git a/test/mitmproxy/data/htpasswd b/test/mitmproxy/data/htpasswd
+index 54c95b8cc..067047e7c 100644
+--- a/test/mitmproxy/data/htpasswd
++++ b/test/mitmproxy/data/htpasswd
+@@ -1 +1 @@
+-test:$apr1$/LkYxy3x$WI4.YbiJlu537jLGEW2eu1
++user:$2b$05$opH8g9/PUhK6HVSnhdX7P.oB6MTMOlIlXgb4THm1Adh12t4IuqMsK
+diff --git a/test/mitmproxy/data/htpasswd.invalid b/test/mitmproxy/data/htpasswd.invalid
+deleted file mode 100644
+index 257cc5642..000000000
+--- a/test/mitmproxy/data/htpasswd.invalid
++++ /dev/null
+@@ -1 +0,0 @@
+-foo
+diff --git a/test/mitmproxy/utils/test_htpasswd.py b/test/mitmproxy/utils/test_htpasswd.py
+new file mode 100644
+index 000000000..4eb4f7c6a
+--- /dev/null
++++ b/test/mitmproxy/utils/test_htpasswd.py
+@@ -0,0 +1,59 @@
++from pathlib import Path
++
++import pytest
++
++from mitmproxy.utils import htpasswd
++
++
++def test_sha1():
++    ht = htpasswd.HtpasswdFile(
++        "user1:{SHA}8FePHnF0saQcTqjG4X96ijuIySo=\n"
++        "user2:{SHA}i+UhJqb95FCnFio2UdWJu1HpV50=\n"
++        "user3:{SHA}3ipNV1GrBtxPmHFC21fCbVCSXIo=:extra\n"
++    )
++    assert ht.check_password("user1", "pass1")
++    assert ht.check_password("user2", "pass2")
++    assert ht.check_password("user3", "pass3")
++    assert not ht.check_password("user1", "pass2")
++    assert not ht.check_password("wronguser", "testpassword")
++
++
++def test_bcrypt():
++    ht = htpasswd.HtpasswdFile(
++        "user_bcrypt:$2b$05$opH8g9/PUhK6HVSnhdX7P.oB6MTMOlIlXgb4THm1Adh12t4IuqMsK\n"
++    )
++    assert ht.check_password("user_bcrypt", "pass")
++    assert not ht.check_password("user_bcrypt", "wrong")
++
++
++@pytest.mark.parametrize(
++    "file_content, err_msg",
++    [
++        ("malformed", "Malformed htpasswd line"),
++        (":malformed", "Malformed htpasswd line"),
++        ("user_md5:$apr1$....", "Unsupported htpasswd format"),
++        ("user_ssha:{SSHA}...", "Unsupported htpasswd format"),
++        ("user_plain:pass", "Unsupported htpasswd format"),
++        ("user_crypt:..j8N8I28nVM", "Unsupported htpasswd format"),
++        ("user_empty_pw:", "Unsupported htpasswd format"),
++    ],
++)
++def test_errors(file_content, err_msg):
++    with pytest.raises(ValueError, match=err_msg):
++        htpasswd.HtpasswdFile(file_content)
++
++
++def test_from_file(tdata):
++    assert htpasswd.HtpasswdFile.from_file(
++        Path(tdata.path("mitmproxy/data/htpasswd"))
++    ).users
++
++
++def test_file_not_found():
++    with pytest.raises(OSError, match="Htpasswd file not found"):
++        htpasswd.HtpasswdFile.from_file(Path("/nonexistent"))
++
++
++def test_empty_and_comments():
++    ht = htpasswd.HtpasswdFile("\n# comment\n \n\t# another comment\n")
++    assert not ht.users
