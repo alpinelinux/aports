@@ -1,0 +1,120 @@
+From c3769d85c9aa120057fe2f4d128dd5eb81c9dee8 Mon Sep 17 00:00:00 2001
+From: Harald Sitter <sitter@kde.org>
+Date: Mon, 23 Feb 2026 18:05:39 +0100
+Subject: [PATCH 1/2] ksycocafactory: guard against integer underflow
+
+dealing with int and unsigned we'll want to make sure we aren't
+negative
+---
+ src/sycoca/ksycocafactory.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/sycoca/ksycocafactory.cpp b/src/sycoca/ksycocafactory.cpp
+index 0100226b..a9eaa780 100644
+--- a/src/sycoca/ksycocafactory.cpp
++++ b/src/sycoca/ksycocafactory.cpp
+@@ -186,8 +186,8 @@ KSycocaEntry::List KSycocaFactory::allEntries() const
+     qint32 entryCount;
+     (*str) >> entryCount;
+ 
+-    if (entryCount > 8192) {
+-        qCWarning(SYCOCA) << QThread::currentThread() << "error detected in factory" << this;
++    if (entryCount < 0 || entryCount > 8192) { // mind that new accepts a size_t (unsigned) but we are dealing with an int here
++        qCWarning(SYCOCA) << QThread::currentThread() << "error detected in factory" << this << entryCount;
+         KSycoca::flagError();
+         return list;
+     }
+-- 
+GitLab
+
+
+From 1a2c38c1797061c445ed60f1cb6149bfdb708a21 Mon Sep 17 00:00:00 2001
+From: Harald Sitter <sitter@kde.org>
+Date: Mon, 23 Feb 2026 18:14:14 +0100
+Subject: [PATCH 2/2] ksycocafactory: do not crash when failing to find a
+ factory stream
+
+through race conditions of one type or another the findFactory call may
+actually return with a nullptr. we would then risk crashing at a later
+point on trying to read from this nullptr as absolutely nothing in
+dervied classes is prepared to deal with the absence of the stream.
+
+to not crash we create a fake stream now. also the if conditions are now
+correctly presenting what we want to express here (inside kbuildsycoca
+versus outside and stream versus no stream)
+
+longer term we should think about how to make kservice more robust. the
+sycoca building and coordination between multiple different services
+wanting to do so at any time has always been a source of problems.
+
+Fixes PLASMA-WORKSPACE-422D
+https://crash-reports.kde.org/organizations/kde/issues/332219
+---
+ src/sycoca/ksycocafactory.cpp | 45 +++++++++++++++++++++++------------
+ 1 file changed, 30 insertions(+), 15 deletions(-)
+
+diff --git a/src/sycoca/ksycocafactory.cpp b/src/sycoca/ksycocafactory.cpp
+index a9eaa780..7bb0d482 100644
+--- a/src/sycoca/ksycocafactory.cpp
++++ b/src/sycoca/ksycocafactory.cpp
+@@ -34,27 +34,42 @@ public:
+     int m_beginEntryOffset = 0;
+     int m_endEntryOffset = 0;
+     KSycocaDict *m_sycocaDict = nullptr;
++    // Used to avoid crashes when the factory failed to locate an actual data stream.
++    // Mind that we need a backing buffer since callers also tap into the stream's QIODevice.
++    QByteArray m_fallbackBuffer;
++    QDataStream m_fallbackStream{m_fallbackBuffer};
+ };
+ 
+ KSycocaFactory::KSycocaFactory(KSycocaFactoryId factory_id, KSycoca *sycoca)
+     : m_sycoca(sycoca)
+     , d(new KSycocaFactoryPrivate)
+ {
+-    if (!m_sycoca->isBuilding() && (m_str = m_sycoca->findFactory(factory_id))) {
+-        // Read position of index tables....
+-        qint32 i;
+-        (*m_str) >> i;
+-        d->m_sycocaDictOffset = i;
+-        (*m_str) >> i;
+-        d->m_beginEntryOffset = i;
+-        (*m_str) >> i;
+-        d->m_endEntryOffset = i;
+-
+-        QDataStream *str = stream();
+-        qint64 saveOffset = str->device()->pos();
+-        // Init index tables
+-        d->m_sycocaDict = new KSycocaDict(str, d->m_sycocaDictOffset);
+-        saveOffset = str->device()->seek(saveOffset);
++    if (!m_sycoca->isBuilding()) {
++        m_str = m_sycoca->findFactory(factory_id);
++        if (m_str) {
++            // Read position of index tables....
++            qint32 i;
++            (*m_str) >> i;
++            d->m_sycocaDictOffset = i;
++            (*m_str) >> i;
++            d->m_beginEntryOffset = i;
++            (*m_str) >> i;
++            d->m_endEntryOffset = i;
++
++            QDataStream *str = stream();
++            qint64 saveOffset = str->device()->pos();
++            // Init index tables
++            d->m_sycocaDict = new KSycocaDict(str, d->m_sycocaDictOffset);
++            saveOffset = str->device()->seek(saveOffset);
++        } else {
++            qWarning() << "Could not find factory with id" << int(factory_id)
++                       << "in sycoca database, you must run kbuildsycoca first! Creating a fake stream to not crash.";
++            m_str = &d->m_fallbackStream;
++            m_entryDict = new KSycocaEntryDict;
++            d->m_sycocaDict = new KSycocaDict;
++            d->m_beginEntryOffset = 0;
++            d->m_endEntryOffset = 0;
++        }
+     } else {
+         // We are in kbuildsycoca -- build new database!
+         m_entryDict = new KSycocaEntryDict;
+-- 
+GitLab
+
