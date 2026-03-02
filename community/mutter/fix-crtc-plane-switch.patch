@@ -1,0 +1,135 @@
+Patch-Source: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/4850> (merged)
+---
+From 6f7b463b1d2582f9caf17a20ef38c7c7b40528ea Mon Sep 17 00:00:00 2001
+From: Stephan Gerhold <stephan@gerhold.net>
+Date: Sun, 11 Jan 2026 18:13:24 +0100
+Subject: [PATCH] crtc/kms: Prevent directly switching planes across CRTCs
+
+The DRM Atomic API does not allow switching planes from one CRTC to another
+CRTC in a single commit, see e.g. the plane_switching_crtc() function in
+the Linux kernel source code [1] and commit f8aeb41c4b7e ("drm/atomic:
+refuse changing CRTC for planes directly") inside the Linux kernel [2]. To
+switch a plane from one CRTC to another, the plane must first be unassigned
+in one commit and then re-enabled as part of another commit.
+
+Currently, mutter re-assigns CRTCs and planes arbitrarily during monitor
+reconfiguration and applies the result as part of a single commit. With
+this approach, if an active plane ends up getting assigned to another CRTC,
+all subsequent commits for that plane will fail and the affected screens
+are effectively frozen until the previous plane assignment (usually the old
+monitor configuration) is restored. On hardware that allows assigning
+planes to arbitrary CRTCs, this problem usually happens when disabling a
+monitor: mutter may try to switch planes from the disabled CRTC to another
+enabled CRTC and subsequent atomic commits will fail (see #4399).
+
+Avoid this error by refusing to re-assign any currently assigned plane,
+similar to the existing check for leased CRTCs. Reuse already assigned
+planes for CRTCs if possible.
+
+This new approach solves the problem for hardware that has sufficient
+planes for all CRTCs. More complex changes would be needed if a
+reconfiguration would really require switching planes from one CRTC to
+another. In this case, the reconfiguration would need to be split into two
+separate commits.
+
+[1]: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/gpu/drm/drm_atomic.c?h=v6.18#n571
+[2]: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=f8aeb41c4b7e9de0a4df4ed1ba78cd6ee5c87281
+
+Fixes: cc7bca073 ("crtc/kms: Dynamically assign primary and cursor planes")
+Closes: https://gitlab.gnome.org/GNOME/mutter/-/issues/4399
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/4850>
+---
+ src/backends/native/meta-crtc-kms.c | 49 ++++++++++++++++++++++++++---
+ 1 file changed, 44 insertions(+), 5 deletions(-)
+
+diff --git a/src/backends/native/meta-crtc-kms.c b/src/backends/native/meta-crtc-kms.c
+index 8082c4a2e64..f65ca5607f9 100644
+--- a/src/backends/native/meta-crtc-kms.c
++++ b/src/backends/native/meta-crtc-kms.c
+@@ -260,10 +260,27 @@ is_plane_assigned (MetaKmsPlane     *plane,
+   return FALSE;
+ }
+ 
++static MetaKmsPlane *
++crtc_assigned_plane (MetaCrtcKms      *crtc_kms,
++                     MetaKmsPlaneType  kms_plane_type)
++{
++  switch (kms_plane_type)
++    {
++    case META_KMS_PLANE_TYPE_PRIMARY:
++      return crtc_kms->assigned_primary_plane;
++    case META_KMS_PLANE_TYPE_CURSOR:
++      return crtc_kms->assigned_cursor_plane;
++    case META_KMS_PLANE_TYPE_OVERLAY:
++    default:
++      g_assert_not_reached ();
++    }
++}
++
+ static gboolean
+-is_plane_leased (MetaKmsDevice *kms_device,
++is_plane_active (MetaKmsDevice *kms_device,
+                  MetaKmsPlane  *kms_plane)
+ {
++  MetaKmsPlaneType kms_plane_type = meta_kms_plane_get_plane_type (kms_plane);
+   GList *l;
+ 
+   for (l = meta_kms_device_get_crtcs (kms_device); l; l = l->next)
+@@ -271,9 +288,15 @@ is_plane_leased (MetaKmsDevice *kms_device,
+       MetaKmsCrtc *kms_crtc = l->data;
+       MetaCrtcKms *crtc_kms = meta_crtc_kms_from_kms_crtc (kms_crtc);
+ 
+-      if (meta_kms_crtc_is_leased (kms_crtc) &&
+-          crtc_kms->assigned_primary_plane == kms_plane)
+-        return TRUE;
++      if (crtc_assigned_plane (crtc_kms, kms_plane_type) == kms_plane)
++        {
++          meta_topic (META_DEBUG_KMS,
++                      "Plane %u is currently active as %s for CRTC %u\n",
++                      meta_kms_plane_get_id (kms_plane),
++                      meta_kms_plane_type_to_string(kms_plane_type),
++                      meta_kms_crtc_get_id (kms_crtc));
++          return TRUE;
++        }
+     }
+ 
+   return FALSE;
+@@ -286,8 +309,18 @@ find_unassigned_plane (MetaCrtcKms      *crtc_kms,
+ {
+   MetaKmsCrtc *kms_crtc = meta_crtc_kms_get_kms_crtc (crtc_kms);
+   MetaKmsDevice *kms_device = meta_kms_crtc_get_device (kms_crtc);
++  MetaKmsPlane *assigned_plane = crtc_assigned_plane (crtc_kms, kms_plane_type);
+   GList *l;
+ 
++  if (assigned_plane)
++    {
++      meta_topic (META_DEBUG_KMS, "Reusing assigned %s plane %u for CRTC %u\n",
++                  meta_kms_plane_type_to_string (kms_plane_type),
++                  meta_kms_plane_get_id (assigned_plane),
++                  meta_kms_crtc_get_id (kms_crtc));
++      return assigned_plane;
++    }
++
+   for (l = meta_kms_device_get_planes (kms_device); l; l = l->next)
+     {
+       MetaKmsPlane *kms_plane = l->data;
+@@ -302,9 +335,15 @@ find_unassigned_plane (MetaCrtcKms      *crtc_kms,
+                              crtc_assignments))
+         continue;
+ 
+-      if (is_plane_leased (kms_device, kms_plane))
++      if (is_plane_active (kms_device, kms_plane))
+         continue;
+ 
++      meta_topic (META_DEBUG_KMS,
++                  "Plane %u is unassigned and can be used as %s for CRTC %u\n",
++                  meta_kms_plane_get_id (kms_plane),
++                  meta_kms_plane_type_to_string (kms_plane_type),
++                  meta_kms_crtc_get_id (kms_crtc));
++
+       return kms_plane;
+     }
+ 
+-- 
+GitLab
+
