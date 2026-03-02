@@ -1,4 +1,3 @@
 #!/bin/sh
 
-/sbin/zipl --verbose
-
+zipl --verbose
