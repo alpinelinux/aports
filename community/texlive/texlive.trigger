@@ -14,21 +14,6 @@ print_result() {
     fi
 }
 
-update_lang_config() {
-    retval=0
-
-    cat $(find /usr/share/texmf-dist/tex/generic/config/lang.d/ -name '*.def' | sort) \
-        > /usr/share/texmf-dist/tex/generic/config/language.def || retval=1
-
-    cat $(find /usr/share/texmf-dist/tex/generic/config/lang.d/ -name '*.dat' | sort) \
-        > /usr/share/texmf-dist/tex/generic/config/language.dat || retval=1
-
-    cat $(find /usr/share/texmf-dist/tex/generic/config/lang.d/ -name '*.dat.lua' | sort) \
-        > /usr/share/texmf-dist/tex/generic/config/language.dat.lua || retval=1
-
-    return "$retval"
-}
-
 if [ ! -f /usr/share/texmf-dist/tex/generic/config/lang.d/00-preamble.dat ]; then
     # This can only happen right after uninstalling texlive. In this case, no
     # language config will be present and update_lang_config would call cat
@@ -36,10 +21,6 @@ if [ ! -f /usr/share/texmf-dist/tex/generic/config/lang.d/00-preamble.dat ]; the
     echo "SKIPPED"
     exit 0
 fi
-
-msg "updating language config"
-update_lang_config > /dev/null 2>&1
-print_result "$?"
 
 msg "mktexlsr"
 mktexlsr > /dev/null 2>&1
