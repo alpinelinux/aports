@@ -1,0 +1,103 @@
+From c27fa53b858b4ee6552a719aa599c250cf98a586 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bj=C3=B6rn=20T=C3=B6pel?= <bjorn@rivosinc.com>
+Date: Wed, 3 Apr 2024 09:26:38 +0200
+Subject: [PATCH] riscv: Fix vector state restore in rt_sigreturn()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The RISC-V Vector specification states in "Appendix D: Calling
+Convention for Vector State" [1] that "Executing a system call causes
+all caller-saved vector registers (v0-v31, vl, vtype) and vstart to
+become unspecified.". In the RISC-V kernel this is called "discarding
+the vstate".
+
+Returning from a signal handler via the rt_sigreturn() syscall, vector
+discard is also performed. However, this is not an issue since the
+vector state should be restored from the sigcontext, and therefore not
+care about the vector discard.
+
+The "live state" is the actual vector register in the running context,
+and the "vstate" is the vector state of the task. A dirty live state,
+means that the vstate and live state are not in synch.
+
+When vectorized user_from_copy() was introduced, an bug sneaked in at
+the restoration code, related to the discard of the live state.
+
+An example when this go wrong:
+
+  1. A userland application is executing vector code
+  2. The application receives a signal, and the signal handler is
+     entered.
+  3. The application returns from the signal handler, using the
+     rt_sigreturn() syscall.
+  4. The live vector state is discarded upon entering the
+     rt_sigreturn(), and the live state is marked as "dirty", indicating
+     that the live state need to be synchronized with the current
+     vstate.
+  5. rt_sigreturn() restores the vstate, except the Vector registers,
+     from the sigcontext
+  6. rt_sigreturn() restores the Vector registers, from the sigcontext,
+     and now the vectorized user_from_copy() is used. The dirty live
+     state from the discard is saved to the vstate, making the vstate
+     corrupt.
+  7. rt_sigreturn() returns to the application, which crashes due to
+     corrupted vstate.
+
+Note that the vectorized user_from_copy() is invoked depending on the
+value of CONFIG_RISCV_ISA_V_UCOPY_THRESHOLD. Default is 768, which
+means that vlen has to be larger than 128b for this bug to trigger.
+
+The fix is simply to mark the live state as non-dirty/clean prior
+performing the vstate restore.
+
+Link: https://github.com/riscv/riscv-isa-manual/releases/download/riscv-isa-release-8abdb41-2024-03-26/unpriv-isa-asciidoc.pdf # [1]
+Reported-by: Charlie Jenkins <charlie@rivosinc.com>
+Reported-by: Vineet Gupta <vgupta@kernel.org>
+Fixes: c2a658d41924 ("riscv: lib: vectorize copy_to_user/copy_from_user")
+Signed-off-by: Björn Töpel <bjorn@rivosinc.com>
+Reviewed-by: Andy Chiu <andy.chiu@sifive.com>
+Tested-by: Vineet Gupta <vineetg@rivosinc.com>
+Link: https://lore.kernel.org/r/20240403072638.567446-1-bjorn@kernel.org
+Cc: stable@vger.kernel.org
+Signed-off-by: Palmer Dabbelt <palmer@rivosinc.com>
+---
+ arch/riscv/kernel/signal.c | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/arch/riscv/kernel/signal.c b/arch/riscv/kernel/signal.c
+index 501e66debf69..5a2edd7f027e 100644
+--- a/arch/riscv/kernel/signal.c
++++ b/arch/riscv/kernel/signal.c
+@@ -119,6 +119,13 @@ static long __restore_v_state(struct pt_regs *regs, void __user *sc_vec)
+ 	struct __sc_riscv_v_state __user *state = sc_vec;
+ 	void __user *datap;
+ 
++	/*
++	 * Mark the vstate as clean prior performing the actual copy,
++	 * to avoid getting the vstate incorrectly clobbered by the
++	 *  discarded vector state.
++	 */
++	riscv_v_vstate_set_restore(current, regs);
++
+ 	/* Copy everything of __sc_riscv_v_state except datap. */
+ 	err = __copy_from_user(&current->thread.vstate, &state->v_state,
+ 			       offsetof(struct __riscv_v_ext_state, datap));
+@@ -133,13 +140,7 @@ static long __restore_v_state(struct pt_regs *regs, void __user *sc_vec)
+ 	 * Copy the whole vector content from user space datap. Use
+ 	 * copy_from_user to prevent information leak.
+ 	 */
+-	err = copy_from_user(current->thread.vstate.datap, datap, riscv_v_vsize);
+-	if (unlikely(err))
+-		return err;
+-
+-	riscv_v_vstate_set_restore(current, regs);
+-
+-	return err;
++	return copy_from_user(current->thread.vstate.datap, datap, riscv_v_vsize);
+ }
+ #else
+ #define save_v_state(task, regs) (0)
+-- 
+2.53.0
+
