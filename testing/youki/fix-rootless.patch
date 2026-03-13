@@ -1,0 +1,549 @@
+Patch-Source: https://github.com/youki-dev/youki/pull/3146
+--
+From d8198befdf89e33e28425cc334a342a73e725043 Mon Sep 17 00:00:00 2001
+From: Michal Rostecki <vadorovsky@disroot.org>
+Date: Fri, 11 Apr 2025 07:41:31 +0200
+Subject: [PATCH] libcontainer: Skip cgroup creation for rootless containers
+ with cgroupfs
+
+Creating cgroups with cgroupfs as non-root is not possible. Before this
+change, we used to enforce systemd as a cgroup manager for all rootless
+containers, but that prevents the usage of rootless youki on systems
+wuthout systemd. To make such usage possible, raise a warning and skip
+cgroup-related activities instead. That matches the behavior of crun
+(containers/crun#97).
+
+Fixes #3144
+
+Signed-off-by: Michal Rostecki <vadorovsky@disroot.org>
+---
+ crates/libcgroups/src/common.rs               | 19 ++++--
+ .../src/container/builder_impl.rs             | 14 +++--
+ .../libcontainer/src/container/container.rs   |  9 +++
+ .../src/container/container_delete.rs         |  5 +-
+ .../src/container/container_events.rs         | 37 ++++++-----
+ .../src/container/container_kill.rs           | 60 ++++++++++--------
+ .../src/container/container_pause.rs          |  5 +-
+ .../src/container/container_resume.rs         |  5 +-
+ .../src/container/init_builder.rs             |  1 +
+ crates/libcontainer/src/container/state.rs    |  3 +
+ .../process/container_intermediate_process.rs | 12 ++--
+ crates/youki/src/commands/mod.rs              |  3 +-
+ crates/youki/src/commands/ps.rs               | 62 ++++++++++---------
+ crates/youki/src/commands/update.rs           | 42 +++++++------
+ 14 files changed, 163 insertions(+), 114 deletions(-)
+
+diff --git a/crates/libcgroups/src/common.rs b/crates/libcgroups/src/common.rs
+index 76bcc14f00..9148326d76 100644
+--- a/crates/libcgroups/src/common.rs
++++ b/crates/libcgroups/src/common.rs
+@@ -330,6 +330,7 @@ pub enum CreateCgroupSetupError {
+ pub struct CgroupConfig {
+     pub cgroup_path: PathBuf,
+     pub systemd_cgroup: bool,
++    pub rootless_container: bool,
+     pub container_name: String,
+ }
+ 
+@@ -338,7 +339,13 @@ pub struct CgroupConfig {
+ pub fn create_cgroup_manager_with_root(
+     root_path: Option<&Path>,
+     config: CgroupConfig,
+-) -> Result<AnyCgroupManager, CreateCgroupSetupError> {
++) -> Result<Option<AnyCgroupManager>, CreateCgroupSetupError> {
++    // Creating cgroups with cgroupfs as non-root is not possible.
++    if !config.systemd_cgroup && config.rootless_container {
++        tracing::warn!("cannot configure rootless cgroup using the cgroupfs manager");
++        return Ok(None);
++    }
++
+     let root = match root_path {
+         Some(p) => p,
+         None => Path::new(DEFAULT_CGROUP_ROOT),
+@@ -353,24 +360,24 @@ pub fn create_cgroup_manager_with_root(
+ 
+     match cgroup_setup {
+         CgroupSetup::Legacy | CgroupSetup::Hybrid => {
+-            Ok(create_v1_cgroup_manager(cgroup_path)?.any())
++            Ok(Some(create_v1_cgroup_manager(cgroup_path)?.any()))
+         }
+         CgroupSetup::Unified => {
+             // ref https://github.com/opencontainers/runtime-spec/blob/main/config-linux.md#cgroups-path
+             if cgroup_path.is_absolute() || !config.systemd_cgroup {
+-                return Ok(create_v2_cgroup_manager(root, cgroup_path)?.any());
++                return Ok(Some(create_v2_cgroup_manager(root, cgroup_path)?.any()));
+             }
+-            Ok(
++            Ok(Some(
+                 create_systemd_cgroup_manager(root, cgroup_path, config.container_name.as_str())?
+                     .any(),
+-            )
++            ))
+         }
+     }
+ }
+ 
+ pub fn create_cgroup_manager(
+     config: CgroupConfig,
+-) -> Result<AnyCgroupManager, CreateCgroupSetupError> {
++) -> Result<Option<AnyCgroupManager>, CreateCgroupSetupError> {
+     create_cgroup_manager_with_root(Some(Path::new(DEFAULT_CGROUP_ROOT)), config)
+ }
+ 
+diff --git a/crates/libcontainer/src/container/builder_impl.rs b/crates/libcontainer/src/container/builder_impl.rs
+index 8d8494bd76..96f098ad33 100644
+--- a/crates/libcontainer/src/container/builder_impl.rs
++++ b/crates/libcontainer/src/container/builder_impl.rs
+@@ -88,7 +88,8 @@ impl ContainerBuilderImpl {
+         let cgroups_path = utils::get_cgroup_path(linux.cgroups_path(), &self.container_id);
+         let cgroup_config = libcgroups::common::CgroupConfig {
+             cgroup_path: cgroups_path,
+-            systemd_cgroup: self.use_systemd || self.user_ns_config.is_some(),
++            systemd_cgroup: self.use_systemd,
++            rootless_container: self.user_ns_config.is_some(),
+             container_name: self.container_id.to_owned(),
+         };
+         let process = self
+@@ -212,15 +213,18 @@ impl ContainerBuilderImpl {
+         let cmanager =
+             libcgroups::common::create_cgroup_manager(libcgroups::common::CgroupConfig {
+                 cgroup_path: cgroups_path,
+-                systemd_cgroup: self.use_systemd || self.user_ns_config.is_some(),
++                systemd_cgroup: self.use_systemd,
++                rootless_container: self.user_ns_config.is_some(),
+                 container_name: self.container_id.to_string(),
+             })?;
+ 
+         let mut errors = Vec::new();
+ 
+-        if let Err(e) = cmanager.remove() {
+-            tracing::error!(error = ?e, "failed to remove cgroup manager");
+-            errors.push(e.to_string());
++        if let Some(cmanager) = cmanager {
++            if let Err(e) = cmanager.remove() {
++                tracing::error!(error = ?e, "failed to remove cgroup manager");
++                errors.push(e.to_string());
++            }
+         }
+ 
+         if let Some(container) = &self.container {
+diff --git a/crates/libcontainer/src/container/container.rs b/crates/libcontainer/src/container/container.rs
+index 7a05c3495f..2abe190cc1 100644
+--- a/crates/libcontainer/src/container/container.rs
++++ b/crates/libcontainer/src/container/container.rs
+@@ -130,6 +130,15 @@ impl Container {
+         self
+     }
+ 
++    pub fn rootless(&self) -> bool {
++        self.state.is_rootless
++    }
++
++    pub fn set_rootless(&mut self, is_rootless: bool) -> &mut Self {
++        self.state.is_rootless = is_rootless;
++        self
++    }
++
+     pub fn set_clean_up_intel_rdt_directory(&mut self, clean_up: bool) -> &mut Self {
+         self.state.clean_up_intel_rdt_subdirectory = Some(clean_up);
+         self
+diff --git a/crates/libcontainer/src/container/container_delete.rs b/crates/libcontainer/src/container/container_delete.rs
+index d246658c32..69aea6f537 100644
+--- a/crates/libcontainer/src/container/container_delete.rs
++++ b/crates/libcontainer/src/container/container_delete.rs
+@@ -89,13 +89,16 @@ impl Container {
+                         libcgroups::common::CgroupConfig {
+                             cgroup_path: config.cgroup_path.to_owned(),
+                             systemd_cgroup: self.systemd(),
++                            rootless_container: self.rootless(),
+                             container_name: self.id().to_string(),
+                         },
+                     )?;
+-                    cmanager.remove().map_err(|err| {
++                    if let Some(cmanager) = cmanager {
++                        cmanager.remove().map_err(|err| {
+                         tracing::error!(cgroup_path = ?config.cgroup_path, "failed to remove cgroup due to: {err:?}");
+                         err
+                     })?;
++                    }
+ 
+                     if let Some(hooks) = config.hooks.as_ref() {
+                         hooks::run_hooks(hooks.poststop().as_ref(), Some(self), None).map_err(
+diff --git a/crates/libcontainer/src/container/container_events.rs b/crates/libcontainer/src/container/container_events.rs
+index 83df282f4d..8ee0455356 100644
+--- a/crates/libcontainer/src/container/container_events.rs
++++ b/crates/libcontainer/src/container/container_events.rs
+@@ -38,26 +38,29 @@ impl Container {
+             libcgroups::common::create_cgroup_manager(libcgroups::common::CgroupConfig {
+                 cgroup_path: self.spec()?.cgroup_path,
+                 systemd_cgroup: self.systemd(),
++                rootless_container: self.rootless(),
+                 container_name: self.id().to_string(),
+             })?;
+-        match stats {
+-            true => {
+-                let stats = cgroup_manager.stats()?;
+-                println!(
+-                    "{}",
+-                    serde_json::to_string_pretty(&stats)
+-                        .map_err(LibcontainerError::OtherSerialization)?
+-                );
++        if let Some(cgroup_manager) = cgroup_manager {
++            match stats {
++                true => {
++                    let stats = cgroup_manager.stats()?;
++                    println!(
++                        "{}",
++                        serde_json::to_string_pretty(&stats)
++                            .map_err(LibcontainerError::OtherSerialization)?
++                    );
++                }
++                false => loop {
++                    let stats = cgroup_manager.stats()?;
++                    println!(
++                        "{}",
++                        serde_json::to_string_pretty(&stats)
++                            .map_err(LibcontainerError::OtherSerialization)?
++                    );
++                    thread::sleep(Duration::from_secs(interval as u64));
++                },
+             }
+-            false => loop {
+-                let stats = cgroup_manager.stats()?;
+-                println!(
+-                    "{}",
+-                    serde_json::to_string_pretty(&stats)
+-                        .map_err(LibcontainerError::OtherSerialization)?
+-                );
+-                thread::sleep(Duration::from_secs(interval as u64));
+-            },
+         }
+ 
+         Ok(())
+diff --git a/crates/libcontainer/src/container/container_kill.rs b/crates/libcontainer/src/container/container_kill.rs
+index fc5da3db9e..53faa74e6a 100644
+--- a/crates/libcontainer/src/container/container_kill.rs
++++ b/crates/libcontainer/src/container/container_kill.rs
+@@ -86,10 +86,13 @@ impl Container {
+                         libcgroups::common::CgroupConfig {
+                             cgroup_path: self.spec()?.cgroup_path,
+                             systemd_cgroup: self.systemd(),
++                            rootless_container: self.rootless(),
+                             container_name: self.id().to_string(),
+                         },
+                     )?;
+-                    cmanager.freeze(libcgroups::common::FreezerState::Thawed)?;
++                    if let Some(cmanager) = cmanager {
++                        cmanager.freeze(libcgroups::common::FreezerState::Thawed)?;
++                    }
+                 }
+                 libcgroups::common::CgroupSetup::Unified => {}
+             }
+@@ -103,37 +106,40 @@ impl Container {
+             libcgroups::common::create_cgroup_manager(libcgroups::common::CgroupConfig {
+                 cgroup_path: self.spec()?.cgroup_path,
+                 systemd_cgroup: self.systemd(),
++                rootless_container: self.rootless(),
+                 container_name: self.id().to_string(),
+             })?;
+ 
+-        if let Err(e) = cmanager.freeze(libcgroups::common::FreezerState::Frozen) {
+-            tracing::warn!(
+-                err = ?e,
+-                id = ?self.id(),
+-                "failed to freeze container",
+-            );
+-        }
++        if let Some(cmanager) = cmanager {
++            if let Err(e) = cmanager.freeze(libcgroups::common::FreezerState::Frozen) {
++                tracing::warn!(
++                    err = ?e,
++                    id = ?self.id(),
++                    "failed to freeze container",
++                );
++            }
+ 
+-        let pids = cmanager.get_all_pids()?;
+-        pids.iter()
+-            .try_for_each(|&pid| {
+-                tracing::debug!("kill signal {} to {}", signal, pid);
+-                let res = signal::kill(pid, signal);
+-                match res {
+-                    Err(nix::errno::Errno::ESRCH) => {
+-                        // the process does not exist, which is what we want
+-                        Ok(())
++            let pids = cmanager.get_all_pids()?;
++            pids.iter()
++                .try_for_each(|&pid| {
++                    tracing::debug!("kill signal {} to {}", signal, pid);
++                    let res = signal::kill(pid, signal);
++                    match res {
++                        Err(nix::errno::Errno::ESRCH) => {
++                            // the process does not exist, which is what we want
++                            Ok(())
++                        }
++                        _ => res,
+                     }
+-                    _ => res,
+-                }
+-            })
+-            .map_err(LibcontainerError::OtherSyscall)?;
+-        if let Err(err) = cmanager.freeze(libcgroups::common::FreezerState::Thawed) {
+-            tracing::warn!(
+-                err = ?err,
+-                id = ?self.id(),
+-                "failed to thaw container",
+-            );
++                })
++                .map_err(LibcontainerError::OtherSyscall)?;
++            if let Err(err) = cmanager.freeze(libcgroups::common::FreezerState::Thawed) {
++                tracing::warn!(
++                    err = ?err,
++                    id = ?self.id(),
++                    "failed to thaw container",
++                );
++            }
+         }
+ 
+         Ok(())
+diff --git a/crates/libcontainer/src/container/container_pause.rs b/crates/libcontainer/src/container/container_pause.rs
+index 7dcfa77936..50776e6b8d 100644
+--- a/crates/libcontainer/src/container/container_pause.rs
++++ b/crates/libcontainer/src/container/container_pause.rs
+@@ -36,9 +36,12 @@ impl Container {
+             libcgroups::common::create_cgroup_manager(libcgroups::common::CgroupConfig {
+                 cgroup_path: self.spec()?.cgroup_path,
+                 systemd_cgroup: self.systemd(),
++                rootless_container: self.rootless(),
+                 container_name: self.id().to_string(),
+             })?;
+-        cmanager.freeze(FreezerState::Frozen)?;
++        if let Some(cmanager) = cmanager {
++            cmanager.freeze(FreezerState::Frozen)?;
++        }
+ 
+         tracing::debug!("saving paused status");
+         self.set_status(ContainerStatus::Paused).save()?;
+diff --git a/crates/libcontainer/src/container/container_resume.rs b/crates/libcontainer/src/container/container_resume.rs
+index 48fd65d849..0310c58109 100644
+--- a/crates/libcontainer/src/container/container_resume.rs
++++ b/crates/libcontainer/src/container/container_resume.rs
+@@ -37,10 +37,13 @@ impl Container {
+             libcgroups::common::create_cgroup_manager(libcgroups::common::CgroupConfig {
+                 cgroup_path: self.spec()?.cgroup_path,
+                 systemd_cgroup: self.systemd(),
++                rootless_container: self.rootless(),
+                 container_name: self.id().to_string(),
+             })?;
+         // resume the frozen container
+-        cmanager.freeze(FreezerState::Thawed)?;
++        if let Some(cmanager) = cmanager {
++            cmanager.freeze(FreezerState::Thawed)?;
++        }
+ 
+         tracing::debug!("saving running status");
+         self.set_status(ContainerStatus::Running).save()?;
+diff --git a/crates/libcontainer/src/container/init_builder.rs b/crates/libcontainer/src/container/init_builder.rs
+index 86e728802d..64b7e741ad 100644
+--- a/crates/libcontainer/src/container/init_builder.rs
++++ b/crates/libcontainer/src/container/init_builder.rs
+@@ -89,6 +89,7 @@ impl InitContainerBuilder {
+         };
+ 
+         let user_ns_config = UserNamespaceConfig::new(&spec)?;
++        container.set_rootless(user_ns_config.is_some());
+ 
+         let config = YoukiConfig::from_spec(&spec, container.id())?;
+         config.save(&container_dir).map_err(|err| {
+diff --git a/crates/libcontainer/src/container/state.rs b/crates/libcontainer/src/container/state.rs
+index 4f0bc07aac..068f92920d 100644
+--- a/crates/libcontainer/src/container/state.rs
++++ b/crates/libcontainer/src/container/state.rs
+@@ -114,6 +114,8 @@ pub struct State {
+     pub creator: Option<u32>,
+     // Specifies if systemd should be used to manage cgroups
+     pub use_systemd: bool,
++    // Specifies if the container is rootless.
++    pub is_rootless: bool,
+     // Specifies if the Intel RDT subdirectory needs be cleaned up.
+     pub clean_up_intel_rdt_subdirectory: Option<bool>,
+ }
+@@ -137,6 +139,7 @@ impl State {
+             created: None,
+             creator: None,
+             use_systemd: false,
++            is_rootless: false,
+             clean_up_intel_rdt_subdirectory: None,
+         }
+     }
+diff --git a/crates/libcontainer/src/process/container_intermediate_process.rs b/crates/libcontainer/src/process/container_intermediate_process.rs
+index 1bee6f3eee..a2c3310f2a 100644
+--- a/crates/libcontainer/src/process/container_intermediate_process.rs
++++ b/crates/libcontainer/src/process/container_intermediate_process.rs
+@@ -62,11 +62,13 @@ pub fn container_intermediate_process(
+     // In addition this needs to be done before we enter the cgroup namespace as
+     // the cgroup of the process will form the root of the cgroup hierarchy in
+     // the cgroup namespace.
+-    apply_cgroups(
+-        &cgroup_manager,
+-        linux.resources().as_ref(),
+-        matches!(args.container_type, ContainerType::InitContainer),
+-    )?;
++    if let Some(cgroup_manager) = cgroup_manager {
++        apply_cgroups(
++            &cgroup_manager,
++            linux.resources().as_ref(),
++            matches!(args.container_type, ContainerType::InitContainer),
++        )?;
++    }
+ 
+     // if new user is specified in specification, this will be true and new
+     // namespace will be created, check
+diff --git a/crates/youki/src/commands/mod.rs b/crates/youki/src/commands/mod.rs
+index 08044b7fbf..d7e84df147 100644
+--- a/crates/youki/src/commands/mod.rs
++++ b/crates/youki/src/commands/mod.rs
+@@ -55,12 +55,13 @@ fn container_exists<P: AsRef<Path>>(root_path: P, container_id: &str) -> Result<
+ fn create_cgroup_manager<P: AsRef<Path>>(
+     root_path: P,
+     container_id: &str,
+-) -> Result<AnyCgroupManager> {
++) -> Result<Option<AnyCgroupManager>> {
+     let container = load_container(root_path, container_id)?;
+     Ok(libcgroups::common::create_cgroup_manager(
+         libcgroups::common::CgroupConfig {
+             cgroup_path: container.spec()?.cgroup_path,
+             systemd_cgroup: container.systemd(),
++            rootless_container: container.rootless(),
+             container_name: container.id().to_string(),
+         },
+     )?)
+diff --git a/crates/youki/src/commands/ps.rs b/crates/youki/src/commands/ps.rs
+index a195196ac9..4cf2d09040 100644
+--- a/crates/youki/src/commands/ps.rs
++++ b/crates/youki/src/commands/ps.rs
+@@ -10,37 +10,39 @@ use crate::commands::create_cgroup_manager;
+ pub fn ps(args: Ps, root_path: PathBuf) -> Result<()> {
+     let cmanager = create_cgroup_manager(root_path, &args.container_id)?;
+ 
+-    let pids: Vec<i32> = cmanager
+-        .get_all_pids()?
+-        .iter()
+-        .map(|pid| pid.as_raw())
+-        .collect();
++    if let Some(cmanager) = cmanager {
++        let pids: Vec<i32> = cmanager
++            .get_all_pids()?
++            .iter()
++            .map(|pid| pid.as_raw())
++            .collect();
+ 
+-    if args.format == "json" {
+-        println!("{}", serde_json::to_string(&pids)?);
+-    } else if args.format == "table" {
+-        let default_ps_options = vec![String::from("-ef")];
+-        let ps_options = if args.ps_options.is_empty() {
+-            &default_ps_options
+-        } else {
+-            &args.ps_options
+-        };
+-        let output = Command::new("ps").args(ps_options).output()?;
+-        if !output.status.success() {
+-            println!("{}", std::str::from_utf8(&output.stderr)?);
+-        } else {
+-            let lines = std::str::from_utf8(&output.stdout)?;
+-            let lines: Vec<&str> = lines.split('\n').collect();
+-            let pid_index = get_pid_index(lines[0])?;
+-            println!("{}", &lines[0]);
+-            for line in &lines[1..] {
+-                if line.is_empty() {
+-                    continue;
+-                }
+-                let fields: Vec<&str> = line.split_whitespace().collect();
+-                let pid: i32 = fields[pid_index].parse()?;
+-                if pids.contains(&pid) {
+-                    println!("{line}");
++        if args.format == "json" {
++            println!("{}", serde_json::to_string(&pids)?);
++        } else if args.format == "table" {
++            let default_ps_options = vec![String::from("-ef")];
++            let ps_options = if args.ps_options.is_empty() {
++                &default_ps_options
++            } else {
++                &args.ps_options
++            };
++            let output = Command::new("ps").args(ps_options).output()?;
++            if !output.status.success() {
++                println!("{}", std::str::from_utf8(&output.stderr)?);
++            } else {
++                let lines = std::str::from_utf8(&output.stdout)?;
++                let lines: Vec<&str> = lines.split('\n').collect();
++                let pid_index = get_pid_index(lines[0])?;
++                println!("{}", &lines[0]);
++                for line in &lines[1..] {
++                    if line.is_empty() {
++                        continue;
++                    }
++                    let fields: Vec<&str> = line.split_whitespace().collect();
++                    let pid: i32 = fields[pid_index].parse()?;
++                    if pids.contains(&pid) {
++                        println!("{line}");
++                    }
+                 }
+             }
+         }
+diff --git a/crates/youki/src/commands/update.rs b/crates/youki/src/commands/update.rs
+index 115c334274..d43e9fd05c 100644
+--- a/crates/youki/src/commands/update.rs
++++ b/crates/youki/src/commands/update.rs
+@@ -12,28 +12,30 @@ use crate::commands::create_cgroup_manager;
+ pub fn update(args: Update, root_path: PathBuf) -> Result<()> {
+     let cmanager = create_cgroup_manager(root_path, &args.container_id)?;
+ 
+-    let linux_res: LinuxResources;
+-    if let Some(resources_path) = args.resources {
+-        linux_res = if resources_path.to_string_lossy() == "-" {
+-            serde_json::from_reader(io::stdin())?
++    if let Some(cmanager) = cmanager {
++        let linux_res: LinuxResources;
++        if let Some(resources_path) = args.resources {
++            linux_res = if resources_path.to_string_lossy() == "-" {
++                serde_json::from_reader(io::stdin())?
++            } else {
++                let file = fs::File::open(resources_path)?;
++                let reader = io::BufReader::new(file);
++                serde_json::from_reader(reader)?
++            };
+         } else {
+-            let file = fs::File::open(resources_path)?;
+-            let reader = io::BufReader::new(file);
+-            serde_json::from_reader(reader)?
+-        };
+-    } else {
+-        let mut builder = LinuxResourcesBuilder::default();
+-        if let Some(new_pids_limit) = args.pids_limit {
+-            builder = builder.pids(LinuxPidsBuilder::default().limit(new_pids_limit).build()?);
++            let mut builder = LinuxResourcesBuilder::default();
++            if let Some(new_pids_limit) = args.pids_limit {
++                builder = builder.pids(LinuxPidsBuilder::default().limit(new_pids_limit).build()?);
++            }
++            linux_res = builder.build()?;
+         }
+-        linux_res = builder.build()?;
+-    }
+ 
+-    cmanager.apply(&ControllerOpt {
+-        resources: &linux_res,
+-        disable_oom_killer: false,
+-        oom_score_adj: None,
+-        freezer_state: None,
+-    })?;
++        cmanager.apply(&ControllerOpt {
++            resources: &linux_res,
++            disable_oom_killer: false,
++            oom_score_adj: None,
++            freezer_state: None,
++        })?;
++    }
+     Ok(())
+ }
