@@ -1,0 +1,448 @@
+From fd20606710a7fbef913fc4e5565942cc7a8cc15a Mon Sep 17 00:00:00 2001
+From: Daniel Cheng <dcheng@chromium.org>
+Date: Fri, 5 Dec 2025 01:35:19 -0800
+Subject: [PATCH] Add a sha256 hash implementation and use it for string_hash
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Even for something that's not cryptographically-sensitive, it is better
+to avoid introducing new dependencies on known-broken hashes.
+
+Bug: chromium:463302946
+Change-Id: Idc3dacc0d7d84845bfd3f9e9ec5147a7ec0347b2
+Reviewed-on: https://gn-review.googlesource.com/c/gn/+/20540
+Reviewed-by: Łukasz Anforowicz <lukasza@chromium.org>
+Reviewed-by: Andrew Grieve <agrieve@google.com>
+Commit-Queue: Daniel Cheng <dcheng@chromium.org>
+---
+ build/gen.py                 |   2 +
+ docs/reference.md            |  12 ++-
+ src/base/sha2.cc             | 179 +++++++++++++++++++++++++++++++++++
+ src/base/sha2.h              |  23 +++++
+ src/base/sha2_unittest.cc    |  58 ++++++++++++
+ src/gn/functions.cc          |  26 ++---
+ src/gn/functions_unittest.cc |   4 +-
+ 7 files changed, 279 insertions(+), 25 deletions(-)
+ create mode 100644 src/base/sha2.cc
+ create mode 100644 src/base/sha2.h
+ create mode 100644 src/base/sha2_unittest.cc
+
+diff --git a/build/gen.py b/build/gen.py
+index 5900566c..9f2a924f 100755
+--- a/build/gen.py
++++ b/build/gen.py
+@@ -628,6 +628,7 @@ def WriteGNNinja(path, platform, host, options, args_list):
+         'src/base/memory/ref_counted.cc',
+         'src/base/memory/weak_ptr.cc',
+         'src/base/sha1.cc',
++        'src/base/sha2.cc',
+         'src/base/strings/string_number_conversions.cc',
+         'src/base/strings/string_split.cc',
+         'src/base/strings/string_util.cc',
+@@ -811,6 +812,7 @@ def WriteGNNinja(path, platform, host, options, args_list):
+       'gn': {'sources': [ 'src/gn/gn_main.cc' ], 'libs': []},
+ 
+       'gn_unittests': { 'sources': [
++        'src/base/sha2_unittest.cc',
+         'src/gn/action_target_generator_unittest.cc',
+         'src/gn/analyzer_unittest.cc',
+         'src/gn/args_unittest.cc',
+diff --git a/docs/reference.md b/docs/reference.md
+index 21949666..59ba847b 100644
+--- a/docs/reference.md
++++ b/docs/reference.md
+@@ -1326,6 +1326,11 @@
+           source_set|static_library)
+       Restrict outputs to targets matching the given type. If
+       unspecified, no filtering will be performed.
++
++  --relation=(source|public|input|data|script|output)
++      Restricts output to targets which refer to input files by a specific
++      relation. Defaults to any relation. Can be provided multiple times to
++      include multiple relations.
+ ```
+ 
+ #### **Examples (target input)**
+@@ -3465,9 +3470,9 @@
+   hash = string_hash(long_string)
+ 
+   `string_hash` returns a string that contains a hash of the argument.  The hash
+-  is computed by first calculating an MD5 hash of the argument, and then
++  is computed by first calculating a SHA256 hash of the argument, and then
+   returning the first 8 characters of the lowercase-ASCII, hexadecimal encoding
+-  of the MD5 hash.
++  of the SHA256 hash.
+ 
+   `string_hash` is intended to be used when it is desirable to translate,
+   globally unique strings (such as GN labels) into short filenames that are
+@@ -3484,7 +3489,7 @@
+ #### **Examples**
+ 
+ ```
+-    string_hash("abc")  -->  "90015098"
++    string_hash("abc")  -->  "ba7816bf"
+ ```
+ ### <a name="func_string_join"></a>**string_join**: Concatenates a list of strings with a separator.&nbsp;[Back to Top](#gn-reference)
+ 
+@@ -8476,4 +8481,3 @@
+     *   -v: Verbose logging.
+     *   --version: Prints the GN version number and exits.
+ ```
+-
+diff --git a/src/base/sha2.cc b/src/base/sha2.cc
+new file mode 100644
+index 00000000..e6fcc089
+--- /dev/null
++++ b/src/base/sha2.cc
+@@ -0,0 +1,179 @@
++// Copyright 2025 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/sha2.h"
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include <algorithm>
++#include <array>
++#include <utility>
++
++#include "base/logging.h"
++#include "base/sys_byteorder.h"
++
++namespace base {
++
++namespace {
++
++// Reference: http://dx.doi.org/10.6028/NIST.FIPS.180-4
++
++// From section 2.2.2:
++uint32_t RotateRight(uint32_t x, uint8_t n) {
++  return (x >> n) | (x << (32 - n));
++}
++
++// From section 4.1.2:
++uint32_t Ch(uint32_t x, uint32_t y, uint32_t z) {
++  return (x & y) ^ (~x & z);
++}
++
++uint32_t Maj(uint32_t x, uint32_t y, uint32_t z) {
++  return (x & y) ^ (x & z) ^ (y & z);
++}
++
++uint32_t Sum0(uint32_t x) {
++  return RotateRight(x, 2) ^ RotateRight(x, 13) ^ RotateRight(x, 22);
++}
++
++uint32_t Sum1(uint32_t x) {
++  return RotateRight(x, 6) ^ RotateRight(x, 11) ^ RotateRight(x, 25);
++}
++
++uint32_t Sigma0(uint32_t x) {
++  return RotateRight(x, 7) ^ RotateRight(x, 18) ^ (x >> 3);
++}
++
++uint32_t Sigma1(uint32_t x) {
++  return RotateRight(x, 17) ^ RotateRight(x, 19) ^ (x >> 10);
++}
++
++// From section 4.2.2:
++constexpr std::array<uint32_t, 64> kConstants = {
++    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
++    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
++    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
++    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
++    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
++    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
++};
++
++class Sha256Hasher {
++ public:
++  Sha256Hasher() = default;
++
++  // Pre-requisite: `chunk.size() == 64`, since SHA256 operates on 512-bit
++  // blocks.
++  void Update(std::string_view chunk) {
++    CHECK(chunk.size() == 64);
++
++    // From section 6.2.2, step 1: "Prepare the message schedule"
++    memcpy(w_.data(), chunk.data(), chunk.size());
++    for (int t = 0; t < 16; ++t) {
++      w_[t] = ByteSwap(w_[t]);
++    }
++    for (int t = 16; t < 64; ++t) {
++      w_[t] = Sigma1(w_[t - 2]) + w_[t - 7] + Sigma0(w_[t - 15]) + w_[t - 16];
++    }
++
++    // From section 6.2.2, step 2: "Initialize the eight working variables"
++    uint32_t a = hash_[0];
++    uint32_t b = hash_[1];
++    uint32_t c = hash_[2];
++    uint32_t d = hash_[3];
++    uint32_t e = hash_[4];
++    uint32_t f = hash_[5];
++    uint32_t g = hash_[6];
++    uint32_t h = hash_[7];
++
++    // From section 6.2.2, step 3:
++    for (int t = 0; t < 64; ++t) {
++      uint32_t tmp1 = h + Sum1(e) + Ch(e, f, g) + kConstants[t] + w_[t];
++      uint32_t tmp2 = Sum0(a) + Maj(a, b, c);
++      h = g;
++      g = f;
++      f = e;
++      e = d + tmp1;
++      d = c;
++      c = b;
++      b = a;
++      a = tmp1 + tmp2;
++    }
++
++    // From section 6.2.2, step 4:
++    hash_[0] += a;
++    hash_[1] += b;
++    hash_[2] += c;
++    hash_[3] += d;
++    hash_[4] += e;
++    hash_[5] += f;
++    hash_[6] += g;
++    hash_[7] += h;
++  }
++
++  std::array<uint8_t, kSha256Length> Finalize(std::string_view chunk,
++                                              uint64_t original_size) && {
++    std::array<char, 64> padding_chunk = {};
++    auto next = std::copy(chunk.begin(), chunk.end(), padding_chunk.begin());
++    // From section 5.1.1, the padding consists of a 0x80 byte, followed by a
++    // 64-bit block with the length of the message in bits in big-endian order.
++    *next++ = uint8_t{0x80};
++
++    // If there's not enough space for the length, pad out one additional chunk.
++    if (padding_chunk.end() - next < 8) {
++      Update(std::string_view(padding_chunk.data(), padding_chunk.size()));
++      std::fill(padding_chunk.begin(), padding_chunk.begin() + 56, 0);
++    }
++
++    const uint64_t original_size_in_bits = original_size * 8;
++    padding_chunk[56] = (original_size_in_bits >> 56) & 0xffu;
++    padding_chunk[57] = (original_size_in_bits >> 48) & 0xffu;
++    padding_chunk[58] = (original_size_in_bits >> 40) & 0xffu;
++    padding_chunk[59] = (original_size_in_bits >> 32) & 0xffu;
++    padding_chunk[60] = (original_size_in_bits >> 24) & 0xffu;
++    padding_chunk[61] = (original_size_in_bits >> 16) & 0xffu;
++    padding_chunk[62] = (original_size_in_bits >> 8) & 0xffu;
++    padding_chunk[63] = original_size_in_bits & 0xffu;
++    Update(std::string_view(padding_chunk.data(), padding_chunk.size()));
++
++    std::array<uint8_t, kSha256Length> result;
++    for (uint32_t& word : hash_) {
++      word = ByteSwap(word);
++    }
++    memcpy(result.data(), hash_.data(), sizeof(result));
++    return result;
++  }
++
++ private:
++  // From section 5.3.3:
++  std::array<uint32_t, 8> hash_ = {
++      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
++  };
++  // The message schedule for intermediate states. Member to make it easier to
++  // reuse code between `Update()` and `Finalize()`.
++  std::array<uint32_t, 64> w_ = {};
++};
++
++}  // namespace
++
++std::array<uint8_t, kSha256Length> Sha256(std::string_view str) {
++  const size_t original_size = str.size();
++  Sha256Hasher hasher;
++  while (str.size() >= 64) {
++    std::string_view next = str.substr(0, 64);
++    hasher.Update(next);
++    str.remove_prefix(64);
++  }
++  return std::move(hasher).Finalize(str, original_size);
++}
++
++}  // namespace base
+diff --git a/src/base/sha2.h b/src/base/sha2.h
+new file mode 100644
+index 00000000..94dffe78
+--- /dev/null
++++ b/src/base/sha2.h
+@@ -0,0 +1,23 @@
++// Copyright 2025 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_SHA2_H_
++#define BASE_SHA2_H_
++
++#include <stdint.h>
++
++#include <array>
++#include <string_view>
++
++namespace base {
++
++static const size_t kSha256Length = 32;  // Length in bytes of a SHA-256 hash.
++
++// Computes the SHA-256 hash of `bytes` and returns the digest as an array of
++// bytes.
++std::array<uint8_t, kSha256Length> Sha256(std::string_view bytes);
++
++}  // namespace base
++
++#endif  // BASE_SHA2_H_
+diff --git a/src/base/sha2_unittest.cc b/src/base/sha2_unittest.cc
+new file mode 100644
+index 00000000..99a08b08
+--- /dev/null
++++ b/src/base/sha2_unittest.cc
+@@ -0,0 +1,58 @@
++// Copyright 2025 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/sha2.h"
++
++#include <string>
++
++#include "base/strings/string_number_conversions.h"
++#include "util/test/test.h"
++
++namespace base {
++
++namespace {
++
++std::string Sha256AsHexString(std::string_view in) {
++  std::array<uint8_t, kSha256Length> result = Sha256(in);
++  return HexEncode(result.data(), result.size());
++}
++
++TEST(Sha2Test, Basic) {
++  EXPECT_EQ("E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
++            Sha256AsHexString(""));
++
++  // Reference values from
++  // https://csrc.nist.gov/csrc/media/projects/cryptographic-standards-and-guidelines/documents/examples/sha256.pdf
++  EXPECT_EQ("BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
++            Sha256AsHexString("abc"));
++  EXPECT_EQ("248D6A61D20638B8E5C026930C3E6039A33CE45964FF2167F6ECEDD419DB06C1",
++            Sha256AsHexString(
++                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"));
++  // Additional tests from
++  // https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Standards-and-Guidelines/documents/examples/SHA2_Additional.pdf
++  EXPECT_EQ("68325720AABD7C82F30F554B313D0570C95ACCBB7DC4B5AAE11204C08FFE732B",
++            Sha256AsHexString("\xbd"));
++  EXPECT_EQ("7ABC22C0AE5AF26CE93DBB94433A0E0B2E119D014F8E7F65BD56C61CCCCD9504",
++            Sha256AsHexString("\xc9\x8c\x8e\x55"));
++  EXPECT_EQ("02779466CDEC163811D078815C633F21901413081449002F24AA3E80F0B88EF7",
++      Sha256AsHexString(std::string(55, '\0')));
++  EXPECT_EQ("D4817AA5497628E7C77E6B606107042BBBA3130888C5F47A375E6179BE789FBB",
++      Sha256AsHexString(std::string(56, '\0')));
++  EXPECT_EQ("65A16CB7861335D5ACE3C60718B5052E44660726DA4CD13BB745381B235A1785",
++      Sha256AsHexString(std::string(57, '\0')));
++  EXPECT_EQ("F5A5FD42D16A20302798EF6ED309979B43003D2320D9F0E8EA9831A92759FB4B",
++      Sha256AsHexString(std::string(64, '\0')));
++  EXPECT_EQ("541B3E9DAA09B20BF85FA273E5CBD3E80185AA4EC298E765DB87742B70138A53",
++      Sha256AsHexString(std::string(1000, '\0')));
++  EXPECT_EQ("C2E686823489CED2017F6059B8B239318B6364F6DCD835D0A519105A1EADD6E4",
++      Sha256AsHexString(std::string(1000, 'A')));
++  EXPECT_EQ("F4D62DDEC0F3DD90EA1380FA16A5FF8DC4C54B21740650F24AFC4120903552B0",
++      Sha256AsHexString(std::string(1005, 'U')));
++  EXPECT_EQ("D29751F2649B32FF572B5E0A9F541EA660A50F94FF0BEEDFB0B692B924CC8025",
++      Sha256AsHexString(std::string(1000000, '\0')));
++}
++
++}  // namespace
++
++}  // namespace base
+diff --git a/src/gn/functions.cc b/src/gn/functions.cc
+index 85da0013..192cb637 100644
+--- a/src/gn/functions.cc
++++ b/src/gn/functions.cc
+@@ -10,7 +10,8 @@
+ #include <utility>
+ 
+ #include "base/environment.h"
+-#include "base/md5.h"
++#include "base/sha2.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_util.h"
+ #include "gn/build_settings.h"
+ #include "gn/config.h"
+@@ -1146,9 +1147,9 @@ const char kStringHash_Help[] =
+   hash = string_hash(long_string)
+ 
+   `string_hash` returns a string that contains a hash of the argument.  The hash
+-  is computed by first calculating an MD5 hash of the argument, and then
++  is computed by first calculating the SHA256 hash of the argument, and then
+   returning the first 8 characters of the lowercase-ASCII, hexadecimal encoding
+-  of the MD5 hash.
++  of the SHA256 hash.
+ 
+   `string_hash` is intended to be used when it is desirable to translate,
+   globally unique strings (such as GN labels) into short filenames that are
+@@ -1163,7 +1164,7 @@ const char kStringHash_Help[] =
+ 
+ Examples:
+ 
+-    string_hash("abc")  -->  "90015098"
++    string_hash("abc")  -->  "ba7816bf"
+ )";
+ 
+ Value RunStringHash(Scope* scope,
+@@ -1187,25 +1188,12 @@ Value RunStringHash(Scope* scope,
+   const std::string& arg = args[0].string_value();
+ 
+   // Arguments looks good; do the hash.
+-
+-  // MD5 has been chosen as the hash algorithm, because:
+-  //
+-  // 1. MD5 implementation has been readily available in GN repo.
+-  // 2. It fits the requirements of the motivating scenario
+-  //    (see https://crbug.com/463302946).  In particular:
+-  //     2.1. This scenario doesn't require cryptographic-strength hashing.
+-  //     2.2. MD5 produces slightly shorter hashes than SHA1 and this scenario
+-  //          cares about keeping the filenames short, and somewhat ergonomic.
+-  //     2.3. MD5 is a well-known hashing algorithm and this scenario needs
+-  //          to replicate the same hash outside of GN.
+-  std::string md5 = base::MD5String(arg);
++  std::array<uint8_t, base::kSha256Length> hash = base::Sha256(arg);
+ 
+   // Trimming to 32 bits for improved ergonomics.  Probability of collisions
+   // should still be sufficiently low (see https://crbug.com/46330294 for more
+   // discussion).
+-  std::string trimmed = md5.substr(0, 8);
+-
+-  return Value(function, trimmed);
++  return Value(function, base::ToLowerASCII(base::HexEncode(hash.data(), 4)));
+ }
+ 
+ // string_join -----------------------------------------------------------------
+diff --git a/src/gn/functions_unittest.cc b/src/gn/functions_unittest.cc
+index c51351a8..61a3b353 100644
+--- a/src/gn/functions_unittest.cc
++++ b/src/gn/functions_unittest.cc
+@@ -218,8 +218,8 @@ TEST(Functions, StringHash) {
+     ASSERT_FALSE(err.has_error()) << err.message();
+ 
+     EXPECT_EQ(
+-        "<90015098>\n"
+-        "<d41d8cd9>\n",
++        "<ba7816bf>\n"
++        "<e3b0c442>\n",
+         setup.print_output())
+         << setup.print_output();
+   }

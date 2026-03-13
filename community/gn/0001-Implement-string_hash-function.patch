@@ -1,0 +1,220 @@
+From 2db29141762d9b6aac7ee9cf02952ea2657760b4 Mon Sep 17 00:00:00 2001
+From: Lukasz Anforowicz <lukasza@chromium.org>
+Date: Tue, 25 Nov 2025 18:54:59 +0000
+Subject: [PATCH] Implement `string_hash` function.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bug: chromium:463302946
+Change-Id: Iffb1f9071ac23e3a0fc55f5f3bec9f40e142b254
+Reviewed-on: https://gn-review.googlesource.com/c/gn/+/20480
+Reviewed-by: Andrew Grieve <agrieve@google.com>
+Commit-Queue: Łukasz Anforowicz <lukasza@chromium.org>
+---
+ docs/reference.md            | 28 ++++++++++++++
+ src/gn/functions.cc          | 75 ++++++++++++++++++++++++++++++++++++
+ src/gn/functions_unittest.cc | 44 +++++++++++++++++++++
+ 3 files changed, 147 insertions(+)
+
+diff --git a/docs/reference.md b/docs/reference.md
+index 93bc0af7..d3158cdd 100644
+--- a/docs/reference.md
++++ b/docs/reference.md
+@@ -64,6 +64,7 @@
+     *   [set_default_toolchain: Sets the default toolchain name.](#func_set_default_toolchain)
+     *   [set_defaults: Set default values for a target type.](#func_set_defaults)
+     *   [split_list: Splits a list into N different sub-lists.](#func_split_list)
++    *   [string_hash: Calculates a stable hash of the given string.](#func_string_hash)
+     *   [string_join: Concatenates a list of strings with a separator.](#func_string_join)
+     *   [string_replace: Replaces substring in the given string.](#func_string_replace)
+     *   [string_split: Split string into a list of strings.](#func_string_split)
+@@ -3439,6 +3440,33 @@
+   Will print:
+     [[1, 2], [3, 4], [5, 6]
+ ```
++### <a name="func_string_hash"></a>**string_hash**: Calculates a stable hash of the given string.&nbsp;[Back to Top](#gn-reference)
++
++```
++  hash = string_hash(long_string)
++
++  `string_hash` returns a string that contains a hash of the argument.  The hash
++  is computed by first calculating an MD5 hash of the argument, and then
++  returning the first 8 characters of the lowercase-ASCII, hexadecimal encoding
++  of the MD5 hash.
++
++  `string_hash` is intended to be used when it is desirable to translate,
++  globally unique strings (such as GN labels) into short filenames that are
++  still globally unique.  This is useful when supporting filesystems and build
++  systems which impose limits on the length of the supported filenames and/or on
++  the total path length.
++
++  Warning: This hash should never be used for cryptographic purposes.
++  Unique inputs can be assumed to result in unique hashes if the inputs
++  are trustworthy, but malicious inputs may be able to trigger collisions.
++  Directories and names of GN labels are usually considered trustworthy.
++```
++
++#### **Examples**
++
++```
++    string_hash("abc")  -->  "90015098"
++```
+ ### <a name="func_string_join"></a>**string_join**: Concatenates a list of strings with a separator.&nbsp;[Back to Top](#gn-reference)
+ 
+ ```
+diff --git a/src/gn/functions.cc b/src/gn/functions.cc
+index a12b0789..bd2a1f64 100644
+--- a/src/gn/functions.cc
++++ b/src/gn/functions.cc
+@@ -10,6 +10,7 @@
+ #include <utility>
+ 
+ #include "base/environment.h"
++#include "base/md5.h"
+ #include "base/strings/string_util.h"
+ #include "gn/build_settings.h"
+ #include "gn/config.h"
+@@ -1134,6 +1135,79 @@ Value RunSplitList(Scope* scope,
+   return result;
+ }
+ 
++// string_hash -----------------------------------------------------------------
++
++const char kStringHash[] = "string_hash";
++const char kStringHash_HelpShort[] =
++    "string_hash: Calculates a stable hash of the given string.";
++const char kStringHash_Help[] =
++    R"(string_hash: Calculates a stable hash of the given string.
++
++  hash = string_hash(long_string)
++
++  `string_hash` returns a string that contains a hash of the argument.  The hash
++  is computed by first calculating an MD5 hash of the argument, and then
++  returning the first 8 characters of the lowercase-ASCII, hexadecimal encoding
++  of the MD5 hash.
++
++  `string_hash` is intended to be used when it is desirable to translate,
++  globally unique strings (such as GN labels) into short filenames that are
++  still globally unique.  This is useful when supporting filesystems and build
++  systems which impose limits on the length of the supported filenames and/or on
++  the total path length.
++
++  Warning: This hash should never be used for cryptographic purposes.
++  Unique inputs can be assumed to result in unique hashes if the inputs
++  are trustworthy, but malicious inputs may be able to trigger collisions.
++  Directories and names of GN labels are usually considered trustworthy.
++
++Examples:
++
++    string_hash("abc")  -->  "90015098"
++)";
++
++Value RunStringHash(Scope* scope,
++                    const FunctionCallNode* function,
++                    const std::vector<Value>& args,
++                    Err* err) {
++  // Check usage: Number of arguments.
++  if (args.size() != 1) {
++    *err = Err(function, "Wrong number of arguments to string_hash().",
++               "Expecting exactly one. usage: string_hash(string)");
++    return Value();
++  }
++
++  // Check usage: argument is a string.
++  if (!args[0].VerifyTypeIs(Value::STRING, err)) {
++    *err = Err(function,
++               "argument of string_hash is not a string",
++               "Expecting argument to be a string.");
++    return Value();
++  }
++  const std::string& arg = args[0].string_value();
++
++  // Arguments looks good; do the hash.
++
++  // MD5 has been chosen as the hash algorithm, because:
++  //
++  // 1. MD5 implementation has been readily available in GN repo.
++  // 2. It fits the requirements of the motivating scenario
++  //    (see https://crbug.com/463302946).  In particular:
++  //     2.1. This scenario doesn't require cryptographic-strength hashing.
++  //     2.2. MD5 produces slightly shorter hashes than SHA1 and this scenario
++  //          cares about keeping the filenames short, and somewhat ergonomic.
++  //     2.3. MD5 is a well-known hashing algorithm and this scenario needs
++  //          to replicate the same hash outside of GN.
++  std::string md5 = base::MD5String(arg);
++
++  // Trimming to 32 bits for improved ergonomics.  Probability of collisions
++  // should still be sufficiently low (see https://crbug.com/46330294 for more
++  // discussion).
++  std::string trimmed = md5.substr(0, 8);
++
++  return Value(function, trimmed);
++}
++
+ // string_join -----------------------------------------------------------------
+ 
+ const char kStringJoin[] = "string_join";
+@@ -1486,6 +1560,7 @@ struct FunctionInfoInitializer {
+     INSERT_FUNCTION(SetDefaults, false)
+     INSERT_FUNCTION(SetDefaultToolchain, false)
+     INSERT_FUNCTION(SplitList, false)
++    INSERT_FUNCTION(StringHash, false)
+     INSERT_FUNCTION(StringJoin, false)
+     INSERT_FUNCTION(StringReplace, false)
+     INSERT_FUNCTION(StringSplit, false)
+diff --git a/src/gn/functions_unittest.cc b/src/gn/functions_unittest.cc
+index c51c4875..c51351a8 100644
+--- a/src/gn/functions_unittest.cc
++++ b/src/gn/functions_unittest.cc
+@@ -200,6 +200,50 @@ TEST(Functions, SplitList) {
+       setup.print_output());
+ }
+ 
++TEST(Functions, StringHash) {
++  TestWithScope setup;
++
++  // Verify output when string_hash() is called correctly.
++  {
++    TestParseInput input(R"gn(
++        print("<" + string_hash("abc") + ">")
++
++        # Empty string
++        print("<" + string_hash("") + ">")
++        )gn");
++    ASSERT_FALSE(input.has_error());
++
++    Err err;
++    input.parsed()->Execute(setup.scope(), &err);
++    ASSERT_FALSE(err.has_error()) << err.message();
++
++    EXPECT_EQ(
++        "<90015098>\n"
++        "<d41d8cd9>\n",
++        setup.print_output())
++        << setup.print_output();
++  }
++
++  // Verify usage errors are detected.
++  std::vector<std::string> bad_usage_examples = {
++      // Number of arguments.
++      R"gn(string_hash())gn",
++      R"gn(string_hash(1,2))gn",
++
++      // Argument type.
++      R"gn(string_hash(1))gn",
++      R"gn(string_hash(["oops"]))gn",
++  };
++  for (const auto& bad_usage_example : bad_usage_examples) {
++    TestParseInput input(bad_usage_example);
++    ASSERT_FALSE(input.has_error());
++
++    Err err;
++    input.parsed()->Execute(setup.scope(), &err);
++    ASSERT_TRUE(err.has_error()) << bad_usage_example;
++  }
++}
++
+ TEST(Functions, StringJoin) {
+   TestWithScope setup;
+ 
