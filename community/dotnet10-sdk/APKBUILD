@@ -1,21 +1,20 @@
 # Contributor: Antoine Martin (ayakael) <dev@ayakael.net>
 # Maintainer: Antoine Martin (ayakael) <dev@ayakael.net>
 pkgname=dotnet10-sdk
-pkgver=10.0.107
-_bldver=10.0.7-r0
+pkgver=10.0.202
 pkgrel=0
+_gittag=v$pkgver
+_patches="
+	build_disable-build-server-shutdown.patch
+	build_disable-prebuilt-usage.patch
+	sdk_hard-dereference-tar-gz.patch
+	"
+# enable to send logs to where Gitlab runners can scoop them
+# uses lots of space, thus usually disabled
+_scoop_logs=false
 
-# compute different versions for sdk and runtime
 _pkgver_macro=${pkgver%.*}
 _pkgver_name=${_pkgver_macro/.*}
-_bldver_ver=${_bldver%%-*}
-_bldver_micro=${_bldver_ver##*.}
-if [ ${#_bldver_micro} -eq 1 ]; then
-	_bldver_ver=${_bldver_ver/$_pkgver_macro./$_pkgver_macro.10}
-else
-	_bldver_ver=${_bldver_ver/$_pkgver_macro./$_pkgver_macro.10}
-fi
-
 pkgdesc="The .NET $_pkgver_macro SDK"
 # x86: blocked by https://github.com/dotnet/runtime/issues/77667
 # armhf: blocked by https://github.com/dotnet/runtime/issues/77663
@@ -25,7 +24,17 @@ pkgdesc="The .NET $_pkgver_macro SDK"
 arch="all !x86 !armhf !riscv64 !s390x !ppc64le !loongarch64"
 url="https://dotnet.microsoft.com"
 license="MIT"
-makedepends="dotnet$_pkgver_name-runtime-bootstrap=$_bldver"
+makedepends="dotnet$_pkgver_name-runtime-bootstrap"
+makedepends="
+	alpine-release
+	bash
+	dotnet$_pkgver_name-bootstrap
+	dotnet$_pkgver_name-bootstrap-artifacts
+	grep
+	icu-data-full
+	icu-libs
+	pigz
+	"
 subpackages="
 	dotnet$_pkgver_name-templates::noarch
 	dotnet$_pkgver_name-sdk-dbg::noarch
@@ -34,8 +43,12 @@ subpackages="
 	dotnet-doc
 	"
 options="!check" # No test suite
-builddir="$srcdir"
-_libdir="/usr/lib"
+source="
+	dotnet-tarball-$_gittag.tar.gz::https://github.com/dotnet/dotnet/archive/refs/tags/$_gittag.tar.gz
+	dotnet-release-$_gittag.json::https://github.com/dotnet/dotnet/releases/download/$_gittag/release.json
+	$_patches
+	"
+builddir="$srcdir"/dotnet-${_gittag/v}
 
 # subpackage is not built for mono-based builds
 case $CARCH in
@@ -50,6 +63,160 @@ case $CARCH in
 	armhf) _dotnet_arch="armv6";;
 	*) _dotnet_arch="$CARCH";;
 esac
+
+_cli_root="$srcdir"/bootstrap
+_nuget="$_cli_root/dotnet nuget"
+_libdir="/usr/lib"
+
+# if true, then within pipeline environment, in which case send logs there
+# to be scooped
+if [ -d "$APORTSDIR/logs" ]; then
+	_logdir="$APORTSDIR"/logs/$pkgname
+else
+	_logdir="$srcdir"/logs
+fi
+
+case $CARCH in
+	x86_64) _dotnet_arch="x64";;
+	aarch64) _dotnet_arch="arm64";;
+	armv7) _dotnet_arch="arm";;
+	armhf) _dotnet_arch="armv6";;
+	*) _dotnet_arch="$CARCH";;
+esac
+
+# Build doesn't set all the right executable bits for the right file types
+_fix_executable() {
+	# add executable bit
+	find "$1" -type f \( \
+		-name 'apphost' -o \
+		-name 'singlefilehost' -o \
+		-name 'lib*so' -o \
+		-name 'ilc' -o \
+		-name '*.sh' \
+			\) \
+		-exec chmod +x '{}' \;
+
+	# remove executable bit
+	find "$1" -type f \( \
+		-name '*.a' -o \
+		-name '*.o' -o \
+		-name '*.dll' -o \
+		-name '*.h' -o \
+		-name '*.json' -o \
+		-name '*.pdb' -o \
+		-name '*.props' -o \
+		-name '*.pubxml' -o \
+		-name '*.targets' -o \
+		-name '*.txt' -o \
+		-name '*.xml' -o \
+		-name '*.c' -o \
+		-name '*.in' -o \
+		-name '*.m' -o \
+		-name '*.orig' -o \
+		-name '*.def' -o \
+		-name '*.cmake' -o \
+		-name '*.cpp' \
+			\) \
+		-exec chmod -x '{}' \;
+}
+
+prepare() {
+	default_prepare
+
+	# ensure that dotnet does not download artifacts provided by dotnet-artifacts
+	rm -rf "$builddir"/packages/archive
+
+
+	# links logfiles to pipeline logs for easy pickup in pipelines if _scoop_logs is true
+	# usually disabled since logs can take lots of space, in any case check logs are scooped
+	mkdir -p "$_logdir"
+	if $_scoop_logs; then
+		mkdir -p "$builddir"/artifacts
+		ln -s "$_logdir" "$builddir"/artifacts/logs
+		ln -s "$_logdir" "$builddir"/artifacts/log
+		for i in "$builddir"/src/*; do
+			if [ -f "$i" ]; then
+				continue
+			fi
+			mkdir -p "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts
+			ln -s "$_logdir"/${i##*\/} "$builddir"/src/${i##*\/}/artifacts/log
+		done
+	fi
+
+	# dotnet requires its bootstrap to be in a writable dir
+	msg "Setting up bootstrap"
+	local _bootstrapdir=$(find $_libdir/dotnet/bootstrap/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
+	if [ ! -d "$_cli_root" ]; then
+		cp -r "$_bootstrapdir" "$_cli_root"
+	fi
+
+	# dotnet requires its shared-components dir to be in a writable dir
+	msg "Setting up shared components dir"
+	local _artifactsdir=$(find $_libdir/dotnet/artifacts/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
+	if [ ! -d "$_cli_root/shared-components" ]; then
+		cp -r "$_artifactsdir" "$_cli_root/shared-components"
+	fi
+
+	# for some reason, SDK does not have local repo
+	$_nuget add source "$_cli_root"/shared_components --name local --configfile "$builddir"/src/sdk/NuGet.config
+
+	# for some reason, not executable
+	chmod +x "$builddir"/src/diagnostics/eng/common/build.sh
+}
+
+build() {
+	ulimit -n 4096
+
+	# Disable use of LTTng as tracing on lttng <=2.13.0 is broken
+	# See https://github.com/dotnet/runtime/issues/57784.
+	if [ -f "/usr/lib/liblttng-ust.so.1" ]; then
+		export DOTNET_LTTng=0
+	fi
+
+	# looks for most recent recent version of _artifactsdir
+	local _artifactsdir=$(find $_libdir/dotnet/artifacts/$_pkgver_macro* -maxdepth 0 | sort -r | head -n 1)
+
+	# ci args, else the output is forwarded to log files which isn't ideal in a
+	# pipeline environment, and build by defaults uses lots of space
+	local args="
+		/v:minimal
+		/p:LogVerbosity=minimal
+		/p:MinimalConsoleLogOutput=true
+		/p:CleanWhileBuilding=true
+		/p:OfficialBuilder=Alpine
+		/p:ContinueOnPrebuiltBaselineError=true
+		"
+
+	# Sets TargetRid manually as dotnet cannot be trusted to reliably
+	# compute the machine's runtime ID
+	local _version_id="$(awk -F'=' '{if($1=="VERSION_ID"){print $2}}' /etc/os-release)"
+	local _id="$(awk -F'=' '{if($1=="ID"){print $2}}' /etc/os-release)"
+	local _version_id_dot="${_version_id//[^.]}"
+	while [ ${#_version_id_dot} -gt 1 ]; do
+		local _version_id="${_version_id%.*}"
+		local _version_id_dot="${_version_id//[^.]}"
+	done
+	local _version_id_dash="${_version_id//[^_]}"
+	while [ ${#_version_id_dash} -ge 1 ]; do
+		local _version_id="${_version_id%_*}"
+		local _version_id_dash="${_version_id//[^_]}"
+	done
+	local _target_rid=$_id.$_version_id-$_dotnet_arch
+	local args="$args /p:TargetRid=$_target_rid"
+
+	msg "Building $pkgname-$pkgver with args:"
+	printf '%s\n' $args
+
+	# CI=true interferes with dotnet/aspire's build
+	# see https://github.com/dotnet/dotnet/blob/v9.0.0-rc.1.24431.7/src/aspire/Directory.Build.targets#L18
+	CI= ./build.sh \
+		--with-sdk "$_cli_root" \
+		--with-packages "$_artifactsdir" \
+		--with-shared-components "$_cli_root/shared-components" \
+		--release-manifest "$srcdir"/dotnet-release-$_gittag.json \
+		--source-only \
+		-- $args
+}
 
 package() {
 	# libucontext isn't automatically detected on all platforms
@@ -66,12 +233,20 @@ package() {
 		dotnet$_pkgver_name-dev=$pkgver-r$pkgrel
 		"
 
-	install -dm 755 "$pkgdir"/$_libdir/dotnet/packs
+	install -dm 755 "$pkgdir"/$_libdir/dotnet
 
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/sdk "$pkgdir"/$_libdir/dotnet/.
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/sdk-manifests "$pkgdir"/$_libdir/dotnet/.
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/packs/Microsoft.NETCore.App.Runtime.* "$pkgdir"/$_libdir/dotnet/packs/.
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/packs/Microsoft.AspNetCore.App.Runtime.* "$pkgdir"/$_libdir/dotnet/packs/.
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/assets/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$pkgdir"/$_libdir/dotnet/ \
+		--wildcards \
+		--no-same-owner \
+		./sdk \
+		./sdk-manifests \
+		./packs/Microsoft.NETCore.App.Runtime.* \
+		./packs/Microsoft.AspNetCore.App.Runtime.*
+
+	# some files either should or should not have executable bits
+	_fix_executable "$pkgdir"
 
 	# See https://github.com/dotnet/source-build/issues/2579
 	find "$pkgdir" -type f -name 'vstest.console' -delete
@@ -79,7 +254,7 @@ package() {
 
 	# docs
 	install -dm 755 "$pkgdir"/usr/share/man/man1
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/docs/* "$pkgdir"/usr/share/man/man1/.
+	find "$builddir" -iname 'dotnet*.1' -type f -exec cp '{}' "$pkgdir"/usr/share/man/man1/. \;
 }
 
 aot() {
@@ -87,10 +262,18 @@ aot() {
 	depends="dotnet$_pkgver_name-sdk clang openssl-dev zlib-dev brotli-dev"
 	provides="dotnet-sdk-aot-$_pkgver_macro=$pkgver-r$pkgrel"
 
-	install -dm 755 "$subpkgdir"/$_libdir/dotnet/packs
+	install -dm 755	"$subpkgdir"/$_libdir/dotnet
 
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/packs/runtime.*.Microsoft.DotNet.ILCompiler "$subpkgdir"/$_libdir/dotnet/packs/.
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/packs/Microsoft.NETCore.App.Runtime.NativeAOT.* "$subpkgdir"/$_libdir/dotnet/packs/.
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/assets/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		--wildcards \
+		./packs/runtime.*.Microsoft.DotNet.ILCompiler  \
+		./packs/Microsoft.NETCore.App.Runtime.NativeAOT.*
+
+	# some files either should or should not have executable bits
+	_fix_executable "$subpkgdir"
 }
 
 dbg() {
@@ -119,7 +302,14 @@ templates() {
 
 	install -dm 755	"$subpkgdir"/$_libdir/dotnet
 
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/templates "$subpkgdir"/$_libdir/dotnet/.
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/assets/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/$_libdir/dotnet/ \
+		--no-same-owner \
+		./templates
+
+	# some files either should or should not have executable bits
+	_fix_executable "$subpkgdir"
 
 	# remove pdb files
 	find "$subpkgdir" -type f -name '*.pdb' -delete
@@ -131,9 +321,7 @@ zshcomp() {
 	install_if="dotnet$_pkgver_name-sdk zsh"
 	depends="dotnet-host"
 
-	install -dm 755 "$subpkgdir"/usr/share/zsh/site-functions
-
-	install -m 755 "$_libdir"/dotnet/bootstrap/$_bldver_ver/register-completions.zsh "$subpkgdir"/usr/share/zsh/site-functions/_dotnet
+	install -Dm 755 "$builddir"/src/sdk/scripts/register-completions.zsh "$subpkgdir"/usr/share/zsh/site-functions/_dotnet
 }
 
 bashcomp() {
@@ -142,9 +330,7 @@ bashcomp() {
 	install_if="dotnet$_pkgver_name-sdk bash-completion"
 	depends="dotnet-host"
 
-	install -dm 755	"$subpkgdir"/usr/share/bash-completion/completions
-
-	install -m 755 "$_libdir"/dotnet/bootstrap/$_bldver_ver/register-completions.bash "$subpkgdir"/usr/share/bash-completion/completions/_dotnet
+	install -Dm 755 "$builddir"/src/sdk/scripts/register-completions.bash "$subpkgdir"/usr/share/bash-completion/comppletions/_dotnet
 }
 
 doc() {
@@ -153,6 +339,18 @@ doc() {
 
 	# licenses
 	install -dm 755 "$subpkgdir"/usr/share/licenses/dotnet
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/LICENSE.txt "$subpkgdir"/usr/share/licenses/dotnet/.
-	cp -r $_libdir/dotnet/bootstrap/$_bldver_ver/ThirdPartyNotices.txt "$subpkgdir"/usr/share/licenses/dotnet/.
+
+	tar --use-compress-program="pigz" \
+		-xf "$builddir"/artifacts/assets/Release/dotnet-sdk-$_pkgver_macro*.tar.gz \
+		-C "$subpkgdir"/usr/share/licenses/dotnet/ \
+		--no-same-owner \
+		./LICENSE.txt \
+		./ThirdPartyNotices.txt
 }
+sha512sums="
+146d47de47b86e31ba5f5b216850d86fd107c40411a137a888134c0e9b61ad21286991ea91f155bb7b535a7d8f4587ee5888e7739c91ae7339c732c4595318f8  dotnet-tarball-v10.0.202.tar.gz
+25d23d8160203d314a61284744ca13695822d6f10801d345246508d27da2bbbe50e9b4243ba8953dd27ea0b72baf55d92356d819b8ca04c097d1a5ebd5b8137d  dotnet-release-v10.0.202.json
+681ad758c4f91c04a20191a9de18347bbc023b053562bfd3f3cadca5823b0d47dee99d8212a26c7dd16612e555701cfb3db0b4f57c50d55b5437b16bff5dc134  build_disable-build-server-shutdown.patch
+8005bb8d69dea77d7c10eb18b71a16d75d9795c6a3cbafddc8373d5f2b3c2c209033b294c2fb2f4ac439aaa5b6d976afaa65dff55ee43ef3103dce2d55c25792  build_disable-prebuilt-usage.patch
+0eed75752cee38c01abf40a77d013f17a137f3683cfd2388871710266f2d7e544f3c4aa58254657ffec45496558da4b4ea2a8a54142227c065e075b705017a30  sdk_hard-dereference-tar-gz.patch
+"
