@@ -1,0 +1,360 @@
+From 0628d97e3f4bb52ebf3a14d8964d390bcf0e936e Mon Sep 17 00:00:00 2001
+From: knuxify <knuxify@gmail.com>
+Date: Tue, 17 Mar 2026 18:45:21 +0100
+Subject: [PATCH 1/3] Revert "systemActions: Call into gnome-session for
+ suspend"
+
+This reverts commit 2e8eff96babbf47c76f208551d8ab55f89f9ad4b.
+---
+ .../org.freedesktop.login1.Manager.xml        |  6 ++++
+ .../org.gnome.SessionManager.xml              |  4 ---
+ js/misc/loginManager.js                       | 32 +++++++++++++++++++
+ js/misc/systemActions.js                      | 18 ++++-------
+ 4 files changed, 45 insertions(+), 15 deletions(-)
+
+diff --git a/data/dbus-interfaces/org.freedesktop.login1.Manager.xml b/data/dbus-interfaces/org.freedesktop.login1.Manager.xml
+index acd49acb8..7e0fc225e 100644
+--- a/data/dbus-interfaces/org.freedesktop.login1.Manager.xml
++++ b/data/dbus-interfaces/org.freedesktop.login1.Manager.xml
+@@ -1,5 +1,11 @@
+ <node>
+   <interface name="org.freedesktop.login1.Manager">
++    <method name="Suspend">
++      <arg type="b" direction="in"/>
++    </method>
++    <method name="CanSuspend">
++      <arg type="s" direction="out"/>
++    </method>
+     <method name="Inhibit">
+       <arg type="s" direction="in"/>
+       <arg type="s" direction="in"/>
+diff --git a/data/dbus-interfaces/org.gnome.SessionManager.xml b/data/dbus-interfaces/org.gnome.SessionManager.xml
+index 5c9ef11e3..628a4693b 100644
+--- a/data/dbus-interfaces/org.gnome.SessionManager.xml
++++ b/data/dbus-interfaces/org.gnome.SessionManager.xml
+@@ -5,16 +5,12 @@
+     </method>
+     <method name="Shutdown"/>
+     <method name="Reboot"/>
+-    <method name="Suspend"/>
+     <method name="CanShutdown">
+       <arg type="u" direction="out"/>
+     </method>
+     <method name="CanReboot">
+       <arg type="u" direction="out"/>
+     </method>
+-    <method name="CanSuspend">
+-      <arg type="u" direction="out"/>
+-    </method>
+     <method name="IsInhibited">
+       <arg type="u" direction="in"/>
+       <arg type="b" direction="out"/>
+diff --git a/js/misc/loginManager.js b/js/misc/loginManager.js
+index da989b5b1..a66ebed03 100644
+--- a/js/misc/loginManager.js
++++ b/js/misc/loginManager.js
+@@ -167,6 +167,20 @@ class LoginManagerSystemd extends Signals.EventEmitter {
+         }
+     }
+ 
++    async canSuspend() {
++        let canSuspend, needsAuth;
++
++        try {
++            const [result] = await this._proxy.CanSuspendAsync();
++            needsAuth = result === 'challenge';
++            canSuspend = needsAuth || result === 'yes';
++        } catch {
++            canSuspend = false;
++            needsAuth = false;
++        }
++        return {canSuspend, needsAuth};
++    }
++
+     async canRebootToBootLoaderMenu() {
+         let canRebootToBootLoaderMenu, needsAuth;
+ 
+@@ -199,6 +213,10 @@ class LoginManagerSystemd extends Signals.EventEmitter {
+         return new SystemdLoginSession(Gio.DBus.system, 'org.freedesktop.login1', objectPath);
+     }
+ 
++    suspend() {
++        this._proxy.SuspendAsync(true);
++    }
++
+     async inhibit(reason, cancellable) {
+         const inVariant = new GLib.Variant('(ssss)',
+             ['sleep', 'GNOME Shell', reason, 'delay']);
+@@ -250,6 +268,13 @@ class LoginManagerDummy extends Signals.EventEmitter  {
+         return new Promise(() => {});
+     }
+ 
++    canSuspend() {
++        return new Promise(resolve => resolve({
++            canSuspend: false,
++            needsAuth: false,
++        }));
++    }
++
+     canRebootToBootLoaderMenu() {
+         return new Promise(resolve => resolve({
+             canRebootToBootLoaderMenu: false,
+@@ -268,6 +293,13 @@ class LoginManagerDummy extends Signals.EventEmitter  {
+         return null;
+     }
+ 
++    suspend() {
++        this._preparingForSleep = true;
++        this.emit('prepare-for-sleep', true);
++        this._preparingForSleep = false;
++        this.emit('prepare-for-sleep', false);
++    }
++
+     get preparingForSleep() {
+         return this._preparingForSleep;
+     }
+diff --git a/js/misc/systemActions.js b/js/misc/systemActions.js
+index 75bada6a1..04a48c5b8 100644
+--- a/js/misc/systemActions.js
++++ b/js/misc/systemActions.js
+@@ -86,7 +86,6 @@ const SystemActions = GObject.registerClass({
+         this._canHaveReboot = true;
+         this._rebootNeedsAuth = false;
+         this._canHaveSuspend = true;
+-        this._suspendNeedsAuth = false;
+ 
+         function tokenizeKeywords(keywords) {
+             return keywords.split(';').map(keyword => GLib.str_tokenize_and_fold(keyword, null)).flat(2);
+@@ -163,6 +162,7 @@ const SystemActions = GObject.registerClass({
+         this._screenSaverSettings = new Gio.Settings({schema_id: SCREENSAVER_SCHEMA});
+ 
+         this._session = new GnomeSession.SessionManager();
++        this._loginManager = LoginManager.getLoginManager();
+         this._monitorManager = global.backend.get_monitor_manager();
+ 
+         this._userManager = AccountsService.UserManager.get_default();
+@@ -401,19 +401,15 @@ const SystemActions = GObject.registerClass({
+     }
+ 
+     async _updateHaveSuspend() {
+-        try {
+-            const [availability] = await this._session.CanSuspendAsync();
+-            this._canHaveSuspend = availability !== GnomeSession.ActionAvailability.UNAVAILABLE;
+-            this._suspendNeedsAuth = availability === GnomeSession.ActionAvailability.CHALLENGE;
+-        } catch {
+-            this._canHaveSuspend = false;
+-            this._suspendNeedsAuth = false;
+-        }
++        const {canSuspend, needsAuth} = await this._loginManager.canSuspend();
++        this._canHaveSuspend = canSuspend;
++        this._suspendNeedsAuth = needsAuth;
+         this._updateSuspend();
+     }
+ 
+     _updateSuspend() {
+-        const disabled = (Main.sessionMode.isLocked && this._suspendNeedsAuth) ||
++        const disabled = (Main.sessionMode.isLocked &&
++                        this._suspendNeedsAuth) ||
+                        (Main.sessionMode.isGreeter &&
+                         this._loginScreenSettings.get_boolean(DISABLE_RESTART_KEY));
+         this._actions.get(SUSPEND_ACTION_ID).available = this._canHaveSuspend && !disabled;
+@@ -506,7 +502,7 @@ const SystemActions = GObject.registerClass({
+         if (!this._actions.get(SUSPEND_ACTION_ID).available)
+             throw new Error('The suspend action is not available!');
+ 
+-        this._session.SuspendAsync().catch(logErrorUnlessCancelled);
++        this._loginManager.suspend();
+     }
+ 
+     activateScreenshotUI() {
+-- 
+2.53.0
+
+
+From 1edad19a4ba9fc4afc3f1c410bfedffc7cbab018 Mon Sep 17 00:00:00 2001
+From: knuxify <knuxify@gmail.com>
+Date: Tue, 17 Mar 2026 18:45:23 +0100
+Subject: [PATCH 2/3] Revert "systemActions: Separate CanReboot from
+ CanShutdown"
+
+This reverts commit fecd860d2c34238deacf5ca83f2d55fb58d606b3.
+---
+ .../org.gnome.SessionManager.xml              |  3 --
+ js/misc/systemActions.js                      | 37 +++----------------
+ 2 files changed, 5 insertions(+), 35 deletions(-)
+
+diff --git a/data/dbus-interfaces/org.gnome.SessionManager.xml b/data/dbus-interfaces/org.gnome.SessionManager.xml
+index 628a4693b..74a3a2e55 100644
+--- a/data/dbus-interfaces/org.gnome.SessionManager.xml
++++ b/data/dbus-interfaces/org.gnome.SessionManager.xml
+@@ -8,9 +8,6 @@
+     <method name="CanShutdown">
+       <arg type="u" direction="out"/>
+     </method>
+-    <method name="CanReboot">
+-      <arg type="u" direction="out"/>
+-    </method>
+     <method name="IsInhibited">
+       <arg type="u" direction="in"/>
+       <arg type="b" direction="out"/>
+diff --git a/js/misc/systemActions.js b/js/misc/systemActions.js
+index 04a48c5b8..b4242ccb5 100644
+--- a/js/misc/systemActions.js
++++ b/js/misc/systemActions.js
+@@ -83,8 +83,6 @@ const SystemActions = GObject.registerClass({
+ 
+         this._canHavePowerOff = true;
+         this._powerOffNeedsAuth = false;
+-        this._canHaveReboot = true;
+-        this._rebootNeedsAuth = false;
+         this._canHaveSuspend = true;
+ 
+         function tokenizeKeywords(keywords) {
+@@ -190,15 +188,11 @@ const SystemActions = GObject.registerClass({
+         this._lockdownSettings.connect(`changed::${DISABLE_LOCK_SCREEN_KEY}`,
+             () => this._updateLockScreen());
+ 
+-        this._lockdownSettings.connect(`changed::${DISABLE_LOG_OUT_KEY}`, () => {
+-            this._updateHaveShutdown();
+-            this._updateHaveReboot();
+-        });
++        this._lockdownSettings.connect(`changed::${DISABLE_LOG_OUT_KEY}`,
++            () => this._updateHaveShutdown());
+ 
+-        this._screenSaverSettings.connect(`changed::${RESTART_ENABLED_KEY}`, () => {
+-            this._updateHaveShutdown();
+-            this._updateHaveReboot();
+-        });
++        this._screenSaverSettings.connect(`changed::${RESTART_ENABLED_KEY}`,
++            () => this._updateHaveShutdown());
+ 
+         this.forceUpdate();
+ 
+@@ -279,7 +273,6 @@ const SystemActions = GObject.registerClass({
+     _sessionUpdated() {
+         this._updateLockScreen();
+         this._updatePowerOff();
+-        this._updateReboot();
+         this._updateSuspend();
+         this._updateMultiUser();
+     }
+@@ -289,7 +282,6 @@ const SystemActions = GObject.registerClass({
+         // settings and Polkit policy - we don't get change notifications for the
+         // latter, so their value may be outdated; force an update now
+         this._updateHaveShutdown();
+-        this._updateHaveReboot();
+         this._updateHaveSuspend();
+     }
+ 
+@@ -376,27 +368,8 @@ const SystemActions = GObject.registerClass({
+                         this._loginScreenSettings.get_boolean(DISABLE_RESTART_KEY));
+         this._actions.get(POWER_OFF_ACTION_ID).available = this._canHavePowerOff && !disabled;
+         this.notify('can-power-off');
+-    }
+ 
+-    async _updateHaveReboot() {
+-        try {
+-            const [availability] = await this._session.CanRebootAsync();
+-            this._canHaveReboot = availability !== GnomeSession.ActionAvailability.UNAVAILABLE;
+-            this._rebootNeedsAuth = availability === GnomeSession.ActionAvailability.CHALLENGE;
+-        } catch {
+-            this._canHaveReboot = false;
+-            this._rebootNeedsAuth = false;
+-        }
+-        this._updateReboot();
+-    }
+-
+-    _updateReboot() {
+-        const disabled = (Main.sessionMode.isLocked &&
+-                        !this._screenSaverSettings.get_boolean(RESTART_ENABLED_KEY)) ||
+-                       (Main.sessionMode.isLocked && this._rebootNeedsAuth) ||
+-                       (Main.sessionMode.isGreeter &&
+-                        this._loginScreenSettings.get_boolean(DISABLE_RESTART_KEY));
+-        this._actions.get(RESTART_ACTION_ID).available = this._canHaveReboot && !disabled;
++        this._actions.get(RESTART_ACTION_ID).available = this._canHavePowerOff && !disabled;
+         this.notify('can-restart');
+     }
+ 
+-- 
+2.53.0
+
+
+From f11256bd820d9ce292e7d31e2ce125b5340bee62 Mon Sep 17 00:00:00 2001
+From: knuxify <knuxify@gmail.com>
+Date: Tue, 17 Mar 2026 18:45:23 +0100
+Subject: [PATCH 3/3] Revert "systemActions: Switch to updated CanShutdown()
+ API"
+
+This reverts commit 9764ddf8b2575164449363a0b45cf38ad88478d6.
+---
+ data/dbus-interfaces/org.gnome.SessionManager.xml | 2 +-
+ js/misc/gnomeSession.js                           | 7 -------
+ js/misc/systemActions.js                          | 8 ++------
+ 3 files changed, 3 insertions(+), 14 deletions(-)
+
+diff --git a/data/dbus-interfaces/org.gnome.SessionManager.xml b/data/dbus-interfaces/org.gnome.SessionManager.xml
+index 74a3a2e55..c81c90f08 100644
+--- a/data/dbus-interfaces/org.gnome.SessionManager.xml
++++ b/data/dbus-interfaces/org.gnome.SessionManager.xml
+@@ -6,7 +6,7 @@
+     <method name="Shutdown"/>
+     <method name="Reboot"/>
+     <method name="CanShutdown">
+-      <arg type="u" direction="out"/>
++      <arg type="b" direction="out"/>
+     </method>
+     <method name="IsInhibited">
+       <arg type="u" direction="in"/>
+diff --git a/js/misc/gnomeSession.js b/js/misc/gnomeSession.js
+index 45526c74b..218250429 100644
+--- a/js/misc/gnomeSession.js
++++ b/js/misc/gnomeSession.js
+@@ -62,10 +62,3 @@ export const InhibitFlags = {
+     IDLE: 1 << 3,
+     AUTOMOUNT: 1 << 4,
+ };
+-
+-export const ActionAvailability = {
+-    UNAVAILABLE: 0,
+-    BLOCKED: 1,
+-    CHALLENGE: 2,
+-    AVAILABLE: 3,
+-};
+diff --git a/js/misc/systemActions.js b/js/misc/systemActions.js
+index b4242ccb5..e440d9344 100644
+--- a/js/misc/systemActions.js
++++ b/js/misc/systemActions.js
+@@ -82,7 +82,6 @@ const SystemActions = GObject.registerClass({
+         super._init();
+ 
+         this._canHavePowerOff = true;
+-        this._powerOffNeedsAuth = false;
+         this._canHaveSuspend = true;
+ 
+         function tokenizeKeywords(keywords) {
+@@ -350,12 +349,10 @@ const SystemActions = GObject.registerClass({
+ 
+     async _updateHaveShutdown() {
+         try {
+-            const [availability] = await this._session.CanShutdownAsync();
+-            this._canHavePowerOff = availability !== GnomeSession.ActionAvailability.UNAVAILABLE;
+-            this._powerOffNeedsAuth = availability === GnomeSession.ActionAvailability.CHALLENGE;
++            const [canShutdown] = await this._session.CanShutdownAsync();
++            this._canHavePowerOff = canShutdown;
+         } catch {
+             this._canHavePowerOff = false;
+-            this._powerOffNeedsAuth = false;
+         }
+         this._updatePowerOff();
+     }
+@@ -363,7 +360,6 @@ const SystemActions = GObject.registerClass({
+     _updatePowerOff() {
+         const disabled = (Main.sessionMode.isLocked &&
+                         !this._screenSaverSettings.get_boolean(RESTART_ENABLED_KEY)) ||
+-                       (Main.sessionMode.isLocked && this._powerOffNeedsAuth) ||
+                        (Main.sessionMode.isGreeter &&
+                         this._loginScreenSettings.get_boolean(DISABLE_RESTART_KEY));
+         this._actions.get(POWER_OFF_ACTION_ID).available = this._canHavePowerOff && !disabled;
+-- 
+2.53.0
+
