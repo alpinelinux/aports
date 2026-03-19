@@ -1,0 +1,488 @@
+Patch-Source: https://github.com/mopidy/mopidy/commit/136c6f435eafecb56d6b56d970db12c098cd88a2
+Backported for 3.4.2.
+---
+diff --git a/mopidy/__init__.py b/mopidy/__init__.py
+index ccb8082..0f9efd7 100644
+--- a/mopidy/__init__.py
++++ b/mopidy/__init__.py
+@@ -2,7 +2,7 @@ import platform
+ import sys
+ import warnings
+ 
+-import pkg_resources
++from importlib.metadata import version
+ 
+ if not sys.version_info >= (3, 7):
+     sys.exit(
+@@ -12,4 +12,4 @@ if not sys.version_info >= (3, 7):
+ 
+ warnings.filterwarnings("ignore", "could not open display")
+ 
+-__version__ = pkg_resources.get_distribution("Mopidy").version
++__version__ = version("Mopidy")
+diff --git a/mopidy/ext.py b/mopidy/ext.py
+index a2f7799..46da78c 100644
+--- a/mopidy/ext.py
++++ b/mopidy/ext.py
+@@ -4,7 +4,7 @@ import logging
+ from collections.abc import Mapping
+ from typing import TYPE_CHECKING, NamedTuple
+ 
+-import pkg_resources
++import importlib_metadata as metadata
+ 
+ from mopidy import config as config_lib
+ from mopidy import exceptions
+@@ -17,6 +17,8 @@ if TYPE_CHECKING:
+     from mopidy.commands import Command
+     from mopidy.config import ConfigSchema
+ 
++    from typing_extensions import TypeAlias
++
+     Config = Dict[str, Dict[str, Any]]
+ 
+ 
+@@ -73,6 +75,12 @@ class Extension:
+         schema["enabled"] = config_lib.Boolean()
+         return schema
+ 
++    @classmethod
++    def check_attr(cls) -> None:
++        """Check if ext_name exist."""
++        if not hasattr(cls, "ext_name") or cls.ext_name is None:
++            raise AttributeError(f"{cls} not an extension or ext_name missing!")
++
+     @classmethod
+     def get_cache_dir(cls, config: Config) -> Path:
+         """Get or create cache directory for the extension.
+@@ -82,8 +90,7 @@ class Extension:
+         :param config: the Mopidy config object
+         :return: pathlib.Path
+         """
+-        if cls.ext_name is None:
+-            raise AssertionError
++        cls.check_attr()
+         cache_dir_path = (
+             path.expand_path(config["core"]["cache_dir"]) / cls.ext_name
+         )
+@@ -97,8 +104,7 @@ class Extension:
+         :param config: the Mopidy config object
+         :return: pathlib.Path
+         """
+-        if cls.ext_name is None:
+-            raise AssertionError
++        cls.check_attr()
+         config_dir_path = (
+             path.expand_path(config["core"]["config_dir"]) / cls.ext_name
+         )
+@@ -114,8 +120,7 @@ class Extension:
+         :param config: the Mopidy config object
+         :returns: pathlib.Path
+         """
+-        if cls.ext_name is None:
+-            raise AssertionError
++        cls.check_attr()
+         data_dir_path = (
+             path.expand_path(config["core"]["data_dir"]) / cls.ext_name
+         )
+@@ -215,14 +220,12 @@ def load_extensions() -> List[ExtensionData]:
+ 
+     installed_extensions = []
+ 
+-    for entry_point in pkg_resources.iter_entry_points("mopidy.ext"):
++    for entry_point in metadata.entry_points(group="mopidy.ext"):
+         logger.debug("Loading entry point: %s", entry_point)
+         try:
+-            extension_class = entry_point.resolve()
+-        except Exception as e:
+-            logger.exception(
+-                f"Failed to load extension {entry_point.name}: {e}"
+-            )
++            extension_class = entry_point.load()
++        except Exception as exc:
++            logger.exception(f"Failed to load extension {entry_point.name}: {exc}")
+             continue
+ 
+         try:
+@@ -286,28 +289,15 @@ def validate_extension_data(data: ExtensionData) -> bool:
+         return False
+ 
+     try:
+-        data.entry_point.require()
+-    except pkg_resources.DistributionNotFound as exc:
++        data.entry_point.load()
++    except ModuleNotFoundError as exc:
+         logger.info(
+-            "Disabled extension %s: Dependency %s not found",
++            "Disabled extension %s: Exception %s",
+             data.extension.ext_name,
+             exc,
+         )
+-        return False
+-    except pkg_resources.VersionConflict as exc:
+-        if len(exc.args) == 2:
+-            found, required = exc.args
+-            logger.info(
+-                "Disabled extension %s: %s required, but found %s at %s",
+-                data.extension.ext_name,
+-                required,
+-                found,
+-                found.location,
+-            )
+-        else:
+-            logger.info(
+-                "Disabled extension %s: %s", data.extension.ext_name, exc
+-            )
++        # Remark: There are no version check, so any version is accepted
++        # this is a difference to pkg_resources, and affect debugging.
+         return False
+ 
+     try:
+diff --git a/mopidy/internal/deps.py b/mopidy/internal/deps.py
+index c8b53a4..e4fb48b 100644
+--- a/mopidy/internal/deps.py
++++ b/mopidy/internal/deps.py
+@@ -1,9 +1,10 @@
+ import functools
+ import os
+ import platform
++import re
+ import sys
+ 
+-import pkg_resources
++import importlib_metadata as metadata
+ 
+ from mopidy.internal import formatting
+ from mopidy.internal.gi import Gst, gi
+@@ -12,9 +13,9 @@ from mopidy.internal.gi import Gst, gi
+ def format_dependency_list(adapters=None):
+     if adapters is None:
+         dist_names = {
+-            ep.dist.project_name
+-            for ep in pkg_resources.iter_entry_points("mopidy.ext")
+-            if ep.dist.project_name != "Mopidy"
++            ep.dist.name
++            for ep in metadata.entry_points(group="mopidy.ext")
++            if ep.dist.name != "Mopidy"
+         }
+         dist_infos = [
+             functools.partial(pkg_info, dist_name) for dist_name in dist_names
+@@ -87,25 +88,32 @@ def pkg_info(
+     if project_name is None:
+         project_name = "Mopidy"
+     try:
+-        distribution = pkg_resources.get_distribution(project_name)
+-        extras = include_extras and distribution.extras or []
+-        if include_transitive_deps:
+-            dependencies = [
+-                pkg_info(
+-                    d.project_name,
+-                    include_transitive_deps=d.project_name != "Mopidy",
++        distribution = metadata.distribution(project_name)
++        if include_transitive_deps and distribution.requires:
++            dependencies = []
++            for raw in distribution.requires:
++                if "importlib_metadata" in raw or (
++                    not include_extras and "extra" in raw
++                ):
++                    continue
++                entry = re.match(
++                    "[a-zA-Z0-9_']+", raw
++                ).group()  # pyright: ignore[reportOptionalMemberAccess]
++                dependencies.append(
++                    pkg_info(
++                        entry,
++                        include_transitive_deps=entry != "Mopidy",
++                    )
+                 )
+-                for d in distribution.requires(extras)
+-            ]
+         else:
+             dependencies = []
+         return {
+             "name": project_name,
+             "version": distribution.version,
+-            "path": distribution.location,
++            "path": str(distribution.locate_file(".")),
+             "dependencies": dependencies,
+         }
+-    except pkg_resources.ResolutionError:
++    except metadata.PackageNotFoundError:
+         return {
+             "name": project_name,
+         }
+diff --git a/setup.cfg b/setup.cfg
+index 808d6ef..010950f 100644
+--- a/setup.cfg
++++ b/setup.cfg
+@@ -41,6 +41,7 @@ install_requires =
+     requests >= 2.0
+     setuptools
+     tornado >= 4.4
++    importlib_metadata >= 4.6
+ 
+ 
+ [options.extras_require]
+diff --git a/tests/internal/test_deps.py b/tests/internal/test_deps.py
+index e30e95b..d2af326 100644
+--- a/tests/internal/test_deps.py
++++ b/tests/internal/test_deps.py
+@@ -1,9 +1,10 @@
+ import platform
+ import sys
++from pathlib import Path
+ import unittest
+ from unittest import mock
+ 
+-import pkg_resources
++import importlib_metadata as metadata
+ 
+ from mopidy.internal import deps
+ from mopidy.internal.gi import Gst, gi
+@@ -79,25 +80,31 @@ class DepsTest(unittest.TestCase):
+         assert gi.__version__ in result["other"]
+         assert "Relevant elements:" in result["other"]
+ 
+-    @mock.patch("pkg_resources.get_distribution")
++    @mock.patch("importlib_metadata.distribution")
+     def test_pkg_info(self, get_distribution_mock):
+-        dist_setuptools = mock.Mock()
+-        dist_setuptools.project_name = "setuptools"
++        dist_setuptools = mock.MagicMock()
++        dist_setuptools.name = "setuptools"
+         dist_setuptools.version = "0.6"
+-        dist_setuptools.location = "/tmp/example/setuptools"
+-        dist_setuptools.requires.return_value = []
++        dist_setuptools.locate_file = mock.MagicMock(
++            return_value=Path("/tmp/example/setuptools/main.py")
++        )
++        dist_setuptools.requires = []
+ 
+         dist_pykka = mock.Mock()
+-        dist_pykka.project_name = "Pykka"
++        dist_pykka.name = "Pykka"
+         dist_pykka.version = "1.1"
+-        dist_pykka.location = "/tmp/example/pykka"
+-        dist_pykka.requires.return_value = [dist_setuptools]
++        dist_pykka.locate_file = mock.MagicMock(
++            return_value=Path("/tmp/example/pykka/main.py")
++        )
++        dist_pykka.requires = [f"{dist_setuptools.name}==0.6"]
+ 
+         dist_mopidy = mock.Mock()
+-        dist_mopidy.project_name = "Mopidy"
++        dist_mopidy.name = "Mopidy"
+         dist_mopidy.version = "0.13"
+-        dist_mopidy.location = "/tmp/example/mopidy"
+-        dist_mopidy.requires.return_value = [dist_pykka]
++        dist_mopidy.locate_file = mock.MagicMock(
++            return_value=Path("/tmp/example/mopidy/no_name.py")
++        )
++        dist_mopidy.requires = [f"{dist_pykka.name}==1.1"]
+ 
+         get_distribution_mock.side_effect = [
+             dist_mopidy,
+@@ -119,9 +126,9 @@ class DepsTest(unittest.TestCase):
+         assert "setuptools" == dep_info_setuptools["name"]
+         assert "0.6" == dep_info_setuptools["version"]
+ 
+-    @mock.patch("pkg_resources.get_distribution")
++    @mock.patch("importlib_metadata.distribution")
+     def test_pkg_info_for_missing_dist(self, get_distribution_mock):
+-        get_distribution_mock.side_effect = pkg_resources.DistributionNotFound
++        get_distribution_mock.side_effect = metadata.PackageNotFoundError("test")
+ 
+         result = deps.pkg_info()
+ 
+@@ -129,9 +136,10 @@ class DepsTest(unittest.TestCase):
+         assert "version" not in result
+         assert "path" not in result
+ 
+-    @mock.patch("pkg_resources.get_distribution")
++    @unittest.skip("Version control missing in metadata")
++    @mock.patch("importlib_metadata.distribution")
+     def test_pkg_info_for_wrong_dist_version(self, get_distribution_mock):
+-        get_distribution_mock.side_effect = pkg_resources.VersionConflict
++        # get_distribution_mock.side_effect = metadata.VersionConflict
+ 
+         result = deps.pkg_info()
+ 
+diff --git a/tests/test_ext.py b/tests/test_ext.py
+index afba70a..5903fc3 100644
+--- a/tests/test_ext.py
++++ b/tests/test_ext.py
+@@ -1,7 +1,7 @@
+ import pathlib
++from importlib import metadata
+ from unittest import mock
+ 
+-import pkg_resources
+ import pytest
+ 
+ from mopidy import config, exceptions, ext
+@@ -74,22 +74,23 @@ class TestExtension:
+ class TestLoadExtensions:
+     @pytest.fixture
+     def iter_entry_points_mock(self, request):
+-        patcher = mock.patch("pkg_resources.iter_entry_points")
++        patcher = mock.patch("importlib_metadata.entry_points")
+         iter_entry_points = patcher.start()
+         iter_entry_points.return_value = []
+         yield iter_entry_points
+         patcher.stop()
+ 
++    @pytest.fixture
++    def mock_entry_point(self, iter_entry_points_mock):
++        entry_point = mock.Mock()
++        entry_point.load = mock.Mock(return_value=DummyExtension)
++        iter_entry_points_mock.return_value = [entry_point]
++        return entry_point
++
+     def test_no_extensions(self, iter_entry_points_mock):
+-        iter_entry_points_mock.return_value = []
+         assert ext.load_extensions() == []
+ 
+-    def test_load_extensions(self, iter_entry_points_mock):
+-        mock_entry_point = mock.Mock()
+-        mock_entry_point.resolve.return_value = DummyExtension
+-
+-        iter_entry_points_mock.return_value = [mock_entry_point]
+-
++    def test_load_extensions(self, mock_entry_point):
+         expected = ext.ExtensionData(
+             any_testextension,
+             mock_entry_point,
+@@ -100,66 +101,41 @@ class TestLoadExtensions:
+ 
+         assert ext.load_extensions() == [expected]
+ 
+-    def test_gets_wrong_class(self, iter_entry_points_mock):
++    def test_load_extensions_exception(self, mock_entry_point, caplog):
++        mock_entry_point.load.side_effect = Exception("test")
++        ext.load_extensions()
++        assert "Failed to load extension" in caplog.records[0].message
++
++    def test_gets_wrong_class(self, mock_entry_point):
+         class WrongClass:
+             pass
+ 
+-        mock_entry_point = mock.Mock()
+-        mock_entry_point.resolve.return_value = WrongClass
+-
+-        iter_entry_points_mock.return_value = [mock_entry_point]
+-
++        mock_entry_point.load.return_value = WrongClass
+         assert ext.load_extensions() == []
+ 
+-    def test_gets_instance(self, iter_entry_points_mock):
+-        mock_entry_point = mock.Mock()
+-        mock_entry_point.resolve.return_value = DummyExtension()
+-
+-        iter_entry_points_mock.return_value = [mock_entry_point]
+-
++    def test_gets_instance(self, mock_entry_point):
++        mock_entry_point.load.return_value = DummyExtension()
+         assert ext.load_extensions() == []
+ 
+-    def test_creating_instance_fails(self, iter_entry_points_mock):
+-        mock_extension = mock.Mock(spec=ext.Extension)
+-        mock_extension.side_effect = Exception
+-
+-        mock_entry_point = mock.Mock()
+-        mock_entry_point.resolve.return_value = mock_extension
+-
+-        iter_entry_points_mock.return_value = [mock_entry_point]
+-
++    def test_creating_instance_fails(self, mock_entry_point):
++        mock_entry_point.load.return_value = mock.Mock(side_effect=Exception)
+         assert ext.load_extensions() == []
+ 
+-    def test_get_config_schema_fails(self, iter_entry_points_mock):
+-        mock_entry_point = mock.Mock()
+-        mock_entry_point.resolve.return_value = DummyExtension
+-
+-        iter_entry_points_mock.return_value = [mock_entry_point]
+-
++    def test_get_config_schema_fails(self, mock_entry_point):
+         with mock.patch.object(DummyExtension, "get_config_schema") as get:
+             get.side_effect = Exception
+ 
+             assert ext.load_extensions() == []
+             get.assert_called_once_with()
+ 
+-    def test_get_default_config_fails(self, iter_entry_points_mock):
+-        mock_entry_point = mock.Mock()
+-        mock_entry_point.resolve.return_value = DummyExtension
+-
+-        iter_entry_points_mock.return_value = [mock_entry_point]
+-
++    def test_get_default_config_fails(self, mock_entry_point):
+         with mock.patch.object(DummyExtension, "get_default_config") as get:
+             get.side_effect = Exception
+ 
+             assert ext.load_extensions() == []
+             get.assert_called_once_with()
+ 
+-    def test_get_command_fails(self, iter_entry_points_mock):
+-        mock_entry_point = mock.Mock()
+-        mock_entry_point.resolve.return_value = DummyExtension
+-
+-        iter_entry_points_mock.return_value = [mock_entry_point]
+-
++    def test_get_command_fails(self, mock_entry_point):
+         with mock.patch.object(DummyExtension, "get_command") as get:
+             get.side_effect = Exception
+ 
+@@ -174,33 +150,39 @@ class TestValidateExtensionData:
+ 
+         entry_point = mock.Mock()
+         entry_point.name = extension.ext_name
+-
+-        schema = extension.get_config_schema()
+-        defaults = extension.get_default_config()
+-        command = extension.get_command()
+-
+-        return ext.ExtensionData(
+-            extension, entry_point, schema, defaults, command
++        yield ext.ExtensionData(
++            extension,
++            entry_point,
++            extension.get_config_schema(),
++            extension.get_default_config(),
++            extension.get_command(),
+         )
+ 
++    def test_real(self):
++        for dist in ext.load_extensions():
++            assert ext.validate_extension_data(dist)
++
+     def test_name_mismatch(self, ext_data):
+         ext_data.entry_point.name = "barfoo"
+         assert not ext.validate_extension_data(ext_data)
+ 
+     def test_distribution_not_found(self, ext_data):
+-        error = pkg_resources.DistributionNotFound
+-        ext_data.entry_point.require.side_effect = error
++        error = metadata.PackageNotFoundError
++        ext_data.entry_point.load.side_effect = error
+         assert not ext.validate_extension_data(ext_data)
+ 
++    @pytest.mark.skip("Version control missing in metadata")
+     def test_version_conflict(self, ext_data):
+-        error = pkg_resources.VersionConflict
++        # error = metadata.VersionConflict
++        error = metadata.PackageNotFoundError
+         ext_data.entry_point.require.side_effect = error
++        # error = metadata.VersionConflict(
++        #     ext_data.extension, "test_expected"
++        # )
+         assert not ext.validate_extension_data(ext_data)
+ 
+     def test_entry_point_require_exception(self, ext_data):
+-        ext_data.entry_point.require.side_effect = Exception(
+-            "Some extension error"
+-        )
++        ext_data.entry_point.load.side_effect = Exception("Some extension error")
+ 
+         # Hope that entry points are well behaved, so exception will bubble.
+         with pytest.raises(Exception, match="Some extension error"):
