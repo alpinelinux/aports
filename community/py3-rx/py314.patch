@@ -1,0 +1,383 @@
+From 78f4a594ca2b0e27ad93ec0e1b1c0d56d5d6540d Mon Sep 17 00:00:00 2001
+From: Steve Traylen <steve.traylen@cern.ch>
+Date: Sat, 8 Nov 2025 09:42:45 +0100
+Subject: [PATCH] Avoid use of asyncio.get_event_loop (3.14) (#728)
+
+Python 3.14 will remove "asyncio.get_event_loop"
+
+https://docs.python.org/dev/whatsnew/3.14.html#id6
+
+Replace "ayscio.get_event_loop
+
+Co-authored-by: Dag Brattli <dag@brattli.net>
+---
+ reactivex/observable/observable.py            |  6 +++-
+ reactivex/operators/_tofuture.py              | 33 ++++++++++++-------
+ .../scheduler/eventloop/asyncioscheduler.py   |  2 +-
+ .../eventloop/asynciothreadsafescheduler.py   | 12 +++----
+ tests/test_observable/test_flatmap_async.py   |  2 +-
+ tests/test_observable/test_fromfuture.py      |  8 ++---
+ tests/test_observable/test_start.py           |  4 +--
+ tests/test_observable/test_tofuture.py        | 14 ++++----
+ .../test_eventloop/test_asyncioscheduler.py   | 10 +++---
+ .../test_asynciothreadsafescheduler.py        | 10 +++---
+ 10 files changed, 56 insertions(+), 45 deletions(-)
+
+diff --git a/reactivex/observable/observable.py b/reactivex/observable/observable.py
+index e540fe467..99b95a0e0 100644
+--- a/reactivex/observable/observable.py
++++ b/reactivex/observable/observable.py
+@@ -259,7 +259,11 @@ def __await__(self) -> Generator[Any, None, _T_out]:
+         """
+         from ..operators._tofuture import to_future_
+ 
+-        loop = asyncio.get_event_loop()
++        try:
++            loop = asyncio.get_running_loop()
++        except RuntimeError:
++            loop = asyncio.new_event_loop()
++
+         future: asyncio.Future[_T_out] = self.pipe(
+             to_future_(scheduler=AsyncIOScheduler(loop=loop))
+         )
+diff --git a/reactivex/operators/_tofuture.py b/reactivex/operators/_tofuture.py
+index 8369aba54..a7b2606b8 100644
+--- a/reactivex/operators/_tofuture.py
++++ b/reactivex/operators/_tofuture.py
+@@ -9,15 +9,11 @@
+ 
+ 
+ def to_future_(
+-    future_ctor: Optional[Callable[[], "Future[_T]"]] = None,
++    future_ctor: Optional[Callable[[], Future[_T]]] = None,
+     scheduler: Optional[abc.SchedulerBase] = None,
+-) -> Callable[[Observable[_T]], "Future[_T]"]:
+-    future_ctor_: Callable[[], "Future[_T]"] = (
+-        future_ctor or asyncio.get_event_loop().create_future
+-    )
+-    future: "Future[_T]" = future_ctor_()
++) -> Callable[[Observable[_T]], Future[_T]]:
+ 
+-    def to_future(source: Observable[_T]) -> "Future[_T]":
++    def to_future(source: Observable[_T]) -> Future[_T]:
+         """Converts an existing observable sequence to a Future.
+ 
+         If the observable emits a single item, then this item is set as the
+@@ -33,25 +29,38 @@ def to_future(source: Observable[_T]) -> "Future[_T]":
+         Returns:
+             A future with the last value from the observable sequence.
+         """
++        if future_ctor is not None:
++            future_ctor_ = future_ctor
++        else:
++            try:
++                future_ctor_ = asyncio.get_running_loop().create_future
++            except RuntimeError:
++
++                def create_future() -> Future[_T]:
++                    return Future()  # Explicitly using Future[_T]
++
++                future_ctor_ = create_future  # If no running loop
++
++        future: Future[_T] = future_ctor_()
+ 
+         has_value = False
+-        last_value = cast(_T, None)
++        last_value: Optional[_T] = None
+ 
+-        def on_next(value: _T):
++        def on_next(value: _T) -> None:
+             nonlocal last_value
+             nonlocal has_value
+             last_value = value
+             has_value = True
+ 
+-        def on_error(err: Exception):
++        def on_error(err: Exception) -> None:
+             if not future.cancelled():
+                 future.set_exception(err)
+ 
+-        def on_completed():
++        def on_completed() -> None:
+             nonlocal last_value
+             if not future.cancelled():
+                 if has_value:
+-                    future.set_result(last_value)
++                    future.set_result(cast(_T, last_value))
+                 else:
+                     future.set_exception(SequenceContainsNoElementsError())
+             last_value = None
+diff --git a/reactivex/scheduler/eventloop/asyncioscheduler.py b/reactivex/scheduler/eventloop/asyncioscheduler.py
+index 16d9f64ab..e7b504382 100644
+--- a/reactivex/scheduler/eventloop/asyncioscheduler.py
++++ b/reactivex/scheduler/eventloop/asyncioscheduler.py
+@@ -26,7 +26,7 @@ def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+ 
+         Args:
+             loop: Instance of asyncio event loop to use; typically, you would
+-                get this by asyncio.get_event_loop()
++                get this by asyncio.get_running_loop()
+         """
+         super().__init__()
+         self._loop: asyncio.AbstractEventLoop = loop
+diff --git a/reactivex/scheduler/eventloop/asynciothreadsafescheduler.py b/reactivex/scheduler/eventloop/asynciothreadsafescheduler.py
+index 9287419ad..7c792a690 100644
+--- a/reactivex/scheduler/eventloop/asynciothreadsafescheduler.py
++++ b/reactivex/scheduler/eventloop/asynciothreadsafescheduler.py
+@@ -145,13 +145,11 @@ def _on_self_loop_or_not_running(self) -> bool:
+         """
+         if not self._loop.is_running():
+             return True
+-        current_loop = None
++
+         try:
+-            # In python 3.7 there asyncio.get_running_loop() is prefered.
+-            current_loop = asyncio.get_event_loop()
++            current_loop = asyncio.get_running_loop()
+         except RuntimeError:
+-            # If there is no loop in current thread at all, and it is not main
+-            # thread, we get error like:
+-            # RuntimeError: There is no current event loop in thread 'Thread-1'
+-            pass
++            # If no running event loop is found, assume we're in a different thread
++            return True
++
+         return self._loop == current_loop
+diff --git a/tests/test_observable/test_flatmap_async.py b/tests/test_observable/test_flatmap_async.py
+index 6907c29bc..c012b7f11 100644
+--- a/tests/test_observable/test_flatmap_async.py
++++ b/tests/test_observable/test_flatmap_async.py
+@@ -9,7 +9,7 @@
+ class TestFlatMapAsync(unittest.TestCase):
+     def test_flat_map_async(self):
+         actual_next = None
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         scheduler = AsyncIOScheduler(loop=loop)
+ 
+         def mapper(i: int):
+diff --git a/tests/test_observable/test_fromfuture.py b/tests/test_observable/test_fromfuture.py
+index 7f85d80b4..833e28481 100644
+--- a/tests/test_observable/test_fromfuture.py
++++ b/tests/test_observable/test_fromfuture.py
+@@ -7,7 +7,7 @@
+ 
+ class TestFromFuture(unittest.TestCase):
+     def test_future_success(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         success = [False, True, False]
+ 
+         async def go():
+@@ -31,7 +31,7 @@ def on_completed():
+         assert all(success)
+ 
+     def test_future_failure(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         success = [True, False, True]
+ 
+         async def go():
+@@ -57,7 +57,7 @@ def on_completed():
+         assert all(success)
+ 
+     def test_future_cancel(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         success = [True, False, True]
+ 
+         async def go():
+@@ -80,7 +80,7 @@ def on_completed():
+         assert all(success)
+ 
+     def test_future_dispose(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         success = [True, True, True]
+ 
+         async def go():
+diff --git a/tests/test_observable/test_start.py b/tests/test_observable/test_start.py
+index 5c6bb4a20..9694c934d 100644
+--- a/tests/test_observable/test_start.py
++++ b/tests/test_observable/test_start.py
+@@ -16,7 +16,7 @@
+ 
+ class TestStart(unittest.TestCase):
+     def test_start_async(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         success = [False]
+ 
+         async def go():
+@@ -36,7 +36,7 @@ def on_next(x):
+         assert all(success)
+ 
+     def test_start_async_error(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         success = [False]
+ 
+         async def go():
+diff --git a/tests/test_observable/test_tofuture.py b/tests/test_observable/test_tofuture.py
+index e9569744b..e5a27fdab 100644
+--- a/tests/test_observable/test_tofuture.py
++++ b/tests/test_observable/test_tofuture.py
+@@ -18,7 +18,7 @@
+ 
+ class TestToFuture(unittest.TestCase):
+     def test_await_success(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         result = None
+ 
+         async def go():
+@@ -30,7 +30,7 @@ async def go():
+         assert result == 42
+ 
+     def test_await_success_on_sequence(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         result = None
+ 
+         async def go():
+@@ -42,7 +42,7 @@ async def go():
+         assert result == 42
+ 
+     def test_await_error(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         error = Exception("error")
+         result = None
+ 
+@@ -58,7 +58,7 @@ async def go():
+         assert result == error
+ 
+     def test_await_empty_observable(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         result = None
+ 
+         async def go():
+@@ -71,7 +71,7 @@ async def go():
+         )
+ 
+     def test_await_with_delay(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         result = None
+ 
+         async def go():
+@@ -83,7 +83,7 @@ async def go():
+         assert result == 42
+ 
+     def test_cancel(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+ 
+         async def go():
+             source = reactivex.return_value(42)
+@@ -96,7 +96,7 @@ async def go():
+         self.assertRaises(asyncio.CancelledError, loop.run_until_complete, go())
+ 
+     def test_dispose_on_cancel(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         sub = Subject()
+ 
+         async def using_sub():
+diff --git a/tests/test_scheduler/test_eventloop/test_asyncioscheduler.py b/tests/test_scheduler/test_eventloop/test_asyncioscheduler.py
+index e6a9622d8..e637d3e88 100644
+--- a/tests/test_scheduler/test_eventloop/test_asyncioscheduler.py
++++ b/tests/test_scheduler/test_eventloop/test_asyncioscheduler.py
+@@ -13,14 +13,14 @@
+ class TestAsyncIOScheduler(unittest.TestCase):
+     @pytest.mark.skipif(CI, reason="Flaky test in GitHub Actions")
+     def test_asyncio_schedule_now(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         scheduler = AsyncIOScheduler(loop)
+         diff = scheduler.now - datetime.fromtimestamp(loop.time(), tz=timezone.utc)
+         assert abs(diff) < timedelta(milliseconds=2)  # NOTE: may take 1 ms in CI
+ 
+     @pytest.mark.skipif(CI, reason="Test is flaky in GitHub Actions")
+     def test_asyncio_schedule_now_units(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         scheduler = AsyncIOScheduler(loop)
+         diff = scheduler.now
+         yield from asyncio.sleep(0.1)
+@@ -28,7 +28,7 @@ def test_asyncio_schedule_now_units(self):
+         assert timedelta(milliseconds=80) < diff < timedelta(milliseconds=180)
+ 
+     def test_asyncio_schedule_action(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+ 
+         async def go():
+             scheduler = AsyncIOScheduler(loop)
+@@ -46,7 +46,7 @@ def action(scheduler, state):
+         loop.run_until_complete(go())
+ 
+     def test_asyncio_schedule_action_due(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+ 
+         async def go():
+             scheduler = AsyncIOScheduler(loop)
+@@ -67,7 +67,7 @@ def action(scheduler, state):
+         loop.run_until_complete(go())
+ 
+     def test_asyncio_schedule_action_cancel(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+ 
+         async def go():
+             ran = False
+diff --git a/tests/test_scheduler/test_eventloop/test_asynciothreadsafescheduler.py b/tests/test_scheduler/test_eventloop/test_asynciothreadsafescheduler.py
+index 12f75ac47..2c19df1ef 100644
+--- a/tests/test_scheduler/test_eventloop/test_asynciothreadsafescheduler.py
++++ b/tests/test_scheduler/test_eventloop/test_asynciothreadsafescheduler.py
+@@ -14,14 +14,14 @@
+ class TestAsyncIOThreadSafeScheduler(unittest.TestCase):
+     @pytest.mark.skipif(CI, reason="Flaky test in GitHub Actions")
+     def test_asyncio_threadsafe_schedule_now(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         scheduler = AsyncIOThreadSafeScheduler(loop)
+         diff = scheduler.now - datetime.fromtimestamp(loop.time(), tz=timezone.utc)
+         assert abs(diff) < timedelta(milliseconds=2)
+ 
+     @pytest.mark.skipif(CI, reason="Flaky test in GitHub Actions")
+     def test_asyncio_threadsafe_schedule_now_units(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+         scheduler = AsyncIOThreadSafeScheduler(loop)
+         diff = scheduler.now
+         yield from asyncio.sleep(0.1)
+@@ -29,7 +29,7 @@ def test_asyncio_threadsafe_schedule_now_units(self):
+         assert timedelta(milliseconds=80) < diff < timedelta(milliseconds=180)
+ 
+     def test_asyncio_threadsafe_schedule_action(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+ 
+         async def go():
+             scheduler = AsyncIOThreadSafeScheduler(loop)
+@@ -50,7 +50,7 @@ def schedule():
+         loop.run_until_complete(go())
+ 
+     def test_asyncio_threadsafe_schedule_action_due(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+ 
+         async def go():
+             scheduler = AsyncIOThreadSafeScheduler(loop)
+@@ -74,7 +74,7 @@ def schedule():
+         loop.run_until_complete(go())
+ 
+     def test_asyncio_threadsafe_schedule_action_cancel(self):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
+ 
+         async def go():
+             ran = False
