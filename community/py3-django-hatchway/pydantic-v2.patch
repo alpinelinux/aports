@@ -1,0 +1,143 @@
+diff --git a/hatchway/schema.py b/hatchway/schema.py
+index fcdb491..7599e89 100644
+--- a/hatchway/schema.py
++++ b/hatchway/schema.py
+@@ -3,50 +3,48 @@ from typing import Any
+ from django.db.models import Manager, QuerySet
+ from django.db.models.fields.files import FieldFile
+ from django.template import Variable, VariableDoesNotExist
+-from pydantic.fields import Field  # noqa
+-from pydantic.main import BaseModel
+-from pydantic.utils import GetterDict
++from pydantic import BaseModel, ConfigDict, Field  # noqa
+ 
+ 
+-class DjangoGetterDict(GetterDict):
+-    def __init__(self, obj: Any):
+-        self._obj = obj
+-
+-    def __getitem__(self, key: str) -> Any:
++class DjangoAccessor:
++    @classmethod
++    def get(cls, obj: Any, key: str) -> Any:
+         try:
+-            item = getattr(self._obj, key)
++            item = getattr(obj, key)
+         except AttributeError:
+             try:
+-                item = Variable(key).resolve(self._obj)
++                item = Variable(key).resolve(obj)
+             except VariableDoesNotExist as e:
+                 raise KeyError(key) from e
+-        return self._convert_result(item)
+-
+-    def get(self, key: Any, default: Any = None) -> Any:
+-        try:
+-            return self[key]
+-        except KeyError:
+-            return default
++        return cls.convert_result(item)
+ 
+-    def _convert_result(self, result: Any) -> Any:
++    @classmethod
++    def convert_result(cls, result: Any) -> Any:
+         if isinstance(result, Manager):
+             return list(result.all())
+-
+-        elif isinstance(result, getattr(QuerySet, "__origin__", QuerySet)):
++        if isinstance(result, getattr(QuerySet, "__origin__", QuerySet)):
+             return list(result)
+-
+         if callable(result):
+             return result()
+-
+-        elif isinstance(result, FieldFile):
++        if isinstance(result, FieldFile):
+             if not result:
+                 return None
+             return result.url
+-
+         return result
+ 
+ 
+ class Schema(BaseModel):
+-    class Config:
+-        orm_mode = True
+-        getter_dict = DjangoGetterDict
++    model_config = ConfigDict(from_attributes=True)
++
++    @classmethod
++    def model_validate(cls, obj: Any, *args, **kwargs):
++        if isinstance(obj, dict):
++            data = obj
++        else:
++            data = {}
++            for field_name in cls.model_fields:
++                try:
++                    data[field_name] = DjangoAccessor.get(obj, field_name)
++                except KeyError:
++                    continue
++        return super().model_validate(data, *args, **kwargs)
+diff --git a/hatchway/view.py b/hatchway/view.py
+index f7bc305..fb5807a 100644
+--- a/hatchway/view.py
++++ b/hatchway/view.py
+@@ -290,7 +290,7 @@ class ApiView:
+             )
+         kwargs = {
+             name: getattr(model_instance, name)
+-            for name in model_instance.__fields__
++            for name in type(model_instance).model_fields
+             if values[name] is not None  # Trim out missing fields
+         }
+         # Add in any files
+@@ -318,9 +318,9 @@ class ApiView:
+             response = ApiResponse(response)
+         # Get pydantic to coerce the output response
+         if self.output_type is not None:
+-            response.data = self.output_model(value=response.data).dict()["value"]
++            response.data = self.output_model(value=response.data).model_dump()["value"]
+         elif isinstance(response.data, BaseModel):
+-            response.data = response.data.dict()
++            response.data = response.data.model_dump()
+         response.finalize()
+         return response
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 6de7463..7066e2e 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -13,7 +13,7 @@ classifiers = [
+ ]
+ dependencies = [
+     "django>=4.0",
+-    "pydantic~=1.10",
++    "pydantic>=2,<3",
+ ]
+ dynamic = ["version"]
+ 
+diff --git a/tests/test_view.py b/tests/test_view.py
+index 66c42dd..cba1c77 100644
+--- a/tests/test_view.py
++++ b/tests/test_view.py
+@@ -267,16 +267,10 @@ def test_string_not_list():
+         return 1
+ 
+     response = test_view(RequestFactory().get("/test/?id=notalist"))
+-    assert json.loads(response.content) == {
+-        "error": "invalid_input",
+-        "error_details": [
+-            {
+-                "loc": ["id"],
+-                "msg": "value is not a valid list",
+-                "type": "type_error.list",
+-            }
+-        ],
+-    }
++    payload = json.loads(response.content)
++    assert payload["error"] == "invalid_input"
++    assert payload["error_details"][0]["loc"] == ["id"]
++    assert payload["error_details"][0]["type"] == "list_type"
+     assert response.status_code == 400
+ 
+ 
