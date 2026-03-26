@@ -1,0 +1,204 @@
+diff --git a/arm_preprocessing/dataset.py b/arm_preprocessing/dataset.py
+index cd627a4..21789fa 100644
+--- a/arm_preprocessing/dataset.py
++++ b/arm_preprocessing/dataset.py
+@@ -1,4 +1,11 @@
+ import pandas as pd
++from pandas.api.types import (
++    is_bool_dtype,
++    is_datetime64_any_dtype,
++    is_numeric_dtype,
++    is_object_dtype,
++    is_string_dtype,
++)
+ from sport_activities_features.tcx_manipulation import TCXFile
+ from arm_preprocessing.discretisation import Discretisation
+ from arm_preprocessing.squashing import Squash
+@@ -23,7 +30,9 @@ class Dataset:
+         data (pd.DataFrame): Dataset.
+     """
+ 
+-    def __init__(self, filename=None, format='csv', target_format=None, datetime_columns=[]):
++    def __init__(
++        self, filename=None, format='csv', target_format=None, datetime_columns=None
++    ):
+         """
+         Initialise a Dataset instance.
+ 
+@@ -41,9 +50,54 @@ class Dataset:
+         self.filename = filename
+         self.format = format
+         self.target_format = target_format
+-        self.datetime_columns = [datetime_columns]
++        self.datetime_columns = datetime_columns or []
+         self.information = {}
+ 
++    def _is_categorical_like(self, series):
++        return (
++            is_string_dtype(series)
++            or is_object_dtype(series)
++            or isinstance(series.dtype, pd.CategoricalDtype)
++            or is_bool_dtype(series)
++        )
++
++    def _normalise_dtypes(self, data):
++        """
++        Normalize dtypes for compatibility with the project's pandas 2 API.
++
++        Returns:
++            pd.DataFrame
++        """
++        for column in data.columns:
++            series = data[column]
++            if is_string_dtype(series):
++                data[column] = series.astype(object)
++            elif is_datetime64_any_dtype(series):
++                data[column] = series.astype('datetime64[ns]')
++
++        return data
++
++    def _apply_datetime_columns(self, data):
++        """
++        Parse configured datetime columns after loading.
++
++        Returns:
++            pd.DataFrame
++        """
++        if not self.datetime_columns:
++            return data
++
++        if len(self.datetime_columns) == 1:
++            column = self.datetime_columns[0]
++            data[column] = pd.to_datetime(data[column]).astype('datetime64[ns]')
++            return data
++
++        combined_column = '_'.join(self.datetime_columns)
++        data[combined_column] = pd.to_datetime(
++            data[self.datetime_columns].astype(str).agg(' '.join, axis=1)
++        ).astype('datetime64[ns]')
++        return data
++
+     def load(self):
+         """
+         Load data from the specified file and analyse it.
+@@ -57,23 +111,16 @@ class Dataset:
+         # Load data from file
+         filename = f'{self.filename}.{self.format}'
+         if self.format == 'csv' or self.format == 'txt':
+-            if len(self.datetime_columns[0]) == 0:
+-                data = pd.read_csv(filename)
+-            else:
+-                data = pd.read_csv(
+-                    filename, parse_dates=self.datetime_columns)
++            data = pd.read_csv(filename)
+         elif self.format == 'json':
+-            if len(self.datetime_columns[0]) == 0:
+-                data = pd.read_json(filename, orient='records')
+-            else:
+-                data = pd.read_json(
+-                    filename, parse_dates=self.datetime_columns, orient='records'
+-                )
++            data = pd.read_json(filename, orient='records')
+         elif self.format == 'tcx':
+             tcx_file = TCXFile()
+             all_files = tcx_file.read_directory(self.filename)
+             data = pd.DataFrame(
+                 [tcx_file.extract_integral_metrics(file) for file in all_files])
++        data = self._apply_datetime_columns(data)
++        data = self._normalise_dtypes(data)
+         self.data = data
+ 
+         # Analyse data
+@@ -122,7 +169,8 @@ class Dataset:
+ 
+         # Identify dataset
+         for column in self.data.columns:
+-            if self.data[column].dtype == 'object':
++            series = self.data[column]
++            if self._is_categorical_like(series):
+                 unique_values = self.data[column].unique()
+                 max_str_length = max(len(str(value))
+                                      for value in unique_values)
+@@ -135,20 +183,22 @@ class Dataset:
+                 information['columns'].append(column_info)
+                 column_types.add(
+                     'categorical' if max_str_length < 25 else 'text')
+-            elif self.data[column].dtype == 'datetime64[ns]':
++            elif is_datetime64_any_dtype(series):
+                 information['columns'].append(
+                     {'column': column, 'type': 'time-series'})
+                 column_types.add('time-series')
+-            else:
++            elif is_numeric_dtype(series):
+                 information['columns'].append(
+                     {
+                         'column': column,
+                         'type': 'numerical',
+-                        'min': self.data[column].min(),
+-                        'max': self.data[column].max(),
++                        'min': series.min(),
++                        'max': series.max(),
+                     }
+                 )
+                 column_types.add('numerical')
++            else:
++                raise ValueError(f'Invalid column type: {series.dtype}')
+ 
+         # Determine the general type of the dataset
+         if 'time-series' in column_types:
+@@ -207,15 +257,15 @@ class Dataset:
+             self.data.dropna(axis=0, inplace=True)
+         elif method == 'impute':
+             for column in self.data.columns:
+-                if self.data[column].dtype == 'object':
+-                    self.data[column].fillna(
+-                        self.data[column].mode()[0], inplace=True)
+-                elif self.data[column].dtype == 'datetime64[ns]' or self.data[column].dtype == 'category':
+-                    self.data[column].fillna(
+-                        self.data[column].mode()[0], inplace=True)
++                series = self.data[column]
++                if is_numeric_dtype(series):
++                    self.data[column] = series.fillna(series.mean())
++                elif self._is_categorical_like(series) or is_datetime64_any_dtype(series):
++                    mode = series.mode(dropna=True)
++                    fill_value = mode.iloc[0] if not mode.empty else None
++                    self.data[column] = series.fillna(fill_value)
+                 else:
+-                    self.data[column].fillna(
+-                        self.data[column].mean(), inplace=True)
++                    raise ValueError(f'Invalid column type: {series.dtype}')
+ 
+     def discretise(self, method, num_bins, columns):
+         """
+@@ -281,18 +331,23 @@ class Dataset:
+ 
+         # Scale data
+         for column in self.data.columns:
+-            # Skip non-numerical columns
+-            if self.data[column].dtype in ['datetime64[ns]', 'object']:
++            series = self.data[column]
++            if not is_numeric_dtype(series):
+                 continue
+ 
+             if method == 'normalisation':
+-                self.data[column] = (
+-                    self.data[column] - self.data[column].min()
+-                ) / (self.data[column].max() - self.data[column].min())
++                minimum = series.min()
++                maximum = series.max()
++                if minimum == maximum:
++                    self.data[column] = 0.0
++                else:
++                    self.data[column] = (series - minimum) / (maximum - minimum)
+             elif method == 'standardisation':
+-                self.data[column] = (
+-                    self.data[column] - self.data[column].mean()
+-                ) / self.data[column].std()
++                std = series.std()
++                if std == 0:
++                    self.data[column] = 0.0
++                else:
++                    self.data[column] = (series - series.mean()) / std
+ 
+     def feature_selection(self, method, threshold, class_column):
+         """
