@@ -1,0 +1,195 @@
+From ac8633670a5467e7b7364651e77be2c94f7e3104 Mon Sep 17 00:00:00 2001
+From: azkali <a.ffcc7@gmail.com>
+Date: Tue, 23 Jan 2024 01:13:16 +0100
+Subject: [PATCH] Fix GIL for obj alloc
+
+---
+ Onboard/osk/osk_devices.c | 63 +++++++++++++++++++++++++--------------
+ 1 file changed, 40 insertions(+), 23 deletions(-)
+
+diff --git a/Onboard/osk/osk_devices.c b/Onboard/osk/osk_devices.c
+index 0a95dcb..71f8fcb 100644
+--- a/Onboard/osk/osk_devices.c
++++ b/Onboard/osk/osk_devices.c
+@@ -50,6 +50,13 @@ static unsigned int gdk_button_masks[] = {GDK_BUTTON1_MASK,
+ #define OSK_SLAVE_ATTACHED_EVENT 1102
+ #define OSK_SLAVE_DETACHED_EVENT 1103
+ 
++#define GIL_PROTECTED(op) {                \
++            PyGILState_STATE gstate;       \
++            gstate = PyGILState_Ensure();  \
++            op;                            \
++            PyGILState_Release(gstate);    \
++        }
++
+ typedef struct {
+     PyObject_HEAD
+ 
+@@ -90,14 +97,19 @@ osk_device_event_init (OskDeviceEvent* self, PyObject *args, PyObject *kwds)
+ static void
+ osk_device_event_dealloc (OskDeviceEvent* self)
+ {
+-    Py_DECREF(self->source_device);
++    GIL_PROTECTED( Py_DECREF(self->source_device); )
+     OSK_FINISH_DEALLOC (self);
+ }
+ 
+ static OskDeviceEvent*
+ new_device_event (void)
+ {
+-    OskDeviceEvent *ev = PyObject_New(OskDeviceEvent, &osk_device_event_type);
++    OskDeviceEvent *ev;
++
++    GIL_PROTECTED(
++        ev = PyObject_New(OskDeviceEvent, &osk_device_event_type);
++    )
++
+     if (ev)
+     {
+         osk_device_event_type.tp_init((PyObject*) ev, NULL, NULL);
+@@ -129,9 +141,11 @@ osk_device_event_copy (OskDeviceEvent* self, PyObject *args)
+         ev->sequence = self->sequence;
+         ev->time = self->time;
+ 
+-        Py_DECREF(ev->source_device);
+-        ev->source_device = self->source_device;
+-        Py_INCREF(ev->source_device);
++        GIL_PROTECTED(
++            Py_DECREF(ev->source_device);
++            ev->source_device = self->source_device;
++            Py_INCREF(ev->source_device);
++        )
+     }
+     return (PyObject*) ev;
+ }
+@@ -145,16 +159,18 @@ osk_device_event_get_time (OskDeviceEvent* self, PyObject *args)
+ static PyObject *
+ osk_device_event_set_source_device (OskDeviceEvent* self, PyObject* value)
+ {
+-    Py_DECREF(self->source_device);
+-    self->source_device = value;
+-    Py_INCREF(self->source_device);
++    GIL_PROTECTED(
++        Py_DECREF(self->source_device);
++        self->source_device = value;
++        Py_INCREF(self->source_device);
++    )
+     Py_RETURN_NONE;
+ }
+ 
+ static PyObject *
+ osk_device_event_get_source_device (OskDeviceEvent* self, PyObject *args)
+ {
+-    Py_INCREF(self->source_device);
++    GIL_PROTECTED( Py_INCREF(self->source_device); )
+     return self->source_device;
+ }
+ 
+@@ -291,7 +307,7 @@ osk_devices_init (OskDevices *dev, PyObject *args, PyObject *kwds)
+         if (!dev->event_queue)
+             return -1;
+ 
+-        Py_INCREF (dev->event_handler);
++        GIL_PROTECTED( Py_INCREF (dev->event_handler); )
+ 
+         XISetMask (mask, XI_HierarchyChanged);
+ 
+@@ -320,7 +336,7 @@ osk_devices_dealloc (OskDevices *dev)
+                                   (GdkFilterFunc) osk_devices_event_filter,
+                                   dev);
+ 
+-        Py_DECREF (dev->event_handler);
++        GIL_PROTECTED( Py_DECREF (dev->event_handler); )
+ 
+         if (dev->event_queue)
+         {
+@@ -354,14 +370,14 @@ queue_event (OskDevices* dev, OskDeviceEvent* event, Bool discard_pending)
+                 {
+                     //printf("deleting %d %d\n", e->type, event->type);
+                     g_queue_delete_link(queue, element);
+-                    Py_DECREF(e);
++                    GIL_PROTECTED( Py_DECREF(e); )
+                 }
+                 element = next;
+             }
+         }
+ 
+         // Enqueue the event.
+-        Py_INCREF(event);
++        GIL_PROTECTED( Py_INCREF(event); )
+         g_queue_push_head(queue, event);
+     }
+ }
+@@ -386,16 +402,18 @@ static gboolean idle_process_event_queue (OskDevices* dev)
+ 
+             result = PyObject_CallObject(dev->event_handler, arglist);
+             if (result)
+-                Py_DECREF (result);
++                GIL_PROTECTED( Py_DECREF (result); )
+             else
+                 PyErr_Print ();
+ 
+-            Py_DECREF (dev->event_handler);
+-            Py_DECREF (arglist);
++            GIL_PROTECTED(
++                Py_DECREF (dev->event_handler);
++                Py_DECREF (arglist);
++            )
+ 
+         }
+ 
+-        Py_DECREF (event);
++        GIL_PROTECTED( Py_DECREF (event); )
+     }
+ 
+     PyGILState_Release (state);
+@@ -405,7 +423,7 @@ static gboolean idle_process_event_queue (OskDevices* dev)
+ 
+ static void free_event_queue_element(gpointer data)
+ {
+-    Py_DECREF(data);
++    GIL_PROTECTED( Py_DECREF(data); )
+ }
+ 
+ 
+@@ -428,7 +446,7 @@ osk_devices_call_event_handler_device (OskDevices *dev,
+ 
+         queue_event (dev, ev, False);
+ 
+-        Py_DECREF(ev);
++        GIL_PROTECTED( Py_DECREF(ev); )
+     }
+ }
+ 
+@@ -469,7 +487,7 @@ osk_devices_call_event_handler_pointer (OskDevices  *dev,
+ 
+         queue_event (dev, ev, type == XI_Motion);
+ 
+-        Py_DECREF(ev);
++        GIL_PROTECTED( Py_DECREF(ev); )
+     }
+ }
+ 
+@@ -496,7 +514,7 @@ osk_devices_call_event_handler_key (OskDevices *dev,
+ 
+         queue_event (dev, ev, False);
+ 
+-        Py_DECREF(ev);
++        GIL_PROTECTED( Py_DECREF(ev); )
+     }
+ }
+ 
+@@ -1034,7 +1052,7 @@ osk_devices_list (PyObject *self, PyObject *args)
+ 
+         if (PyList_SetItem (list, i, value) < 0)
+         {
+-            Py_DECREF (value);
++            GIL_PROTECTED( Py_DECREF (value); )
+             goto error;
+         }
+     }
+@@ -1350,4 +1368,3 @@ static PyMethodDef osk_devices_methods[] = {
+     { "get_client_pointer", osk_devices_get_client_pointer, METH_NOARGS, NULL },
+     { NULL, NULL, 0, NULL }
+ };
+-
