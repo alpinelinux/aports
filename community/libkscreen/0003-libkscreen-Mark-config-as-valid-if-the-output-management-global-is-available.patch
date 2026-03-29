@@ -1,0 +1,196 @@
+From b38af62125c49633237314191f58f229eeac9966 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Wed, 14 Jan 2026 15:16:31 +0200
+Subject: [PATCH] backends/kwayland: Mark config as valid if the output
+ management global is available
+
+Startup times can vary depending on system load and other factors that
+are out of our control.
+
+For example, the initial roundtrip can take half of a second or more, we
+can't really put a time limit on it.
+
+Furthermore, the system can start without any outputs or all outputs can
+be removed later, this should be handled as well.
+
+This change replaces the initialization bits so only two roundtrips are
+performed. This should make startup more deterministic and prevent
+unexpectedly destroying the backend object.
+
+CCBUG: 511757
+(cherry picked from commit 3d42a5ebcf4bdd2bab0ff98aa434a0c3d6dacfab)
+
+BUG: 517993
+---
+ backends/kwayland/waylandbackend.cpp |  2 +-
+ backends/kwayland/waylandconfig.cpp  | 44 +++-------------------------
+ backends/kwayland/waylandconfig.h    | 19 +-----------
+ 3 files changed, 6 insertions(+), 59 deletions(-)
+
+diff --git a/backends/kwayland/waylandbackend.cpp b/backends/kwayland/waylandbackend.cpp
+index c8da6f86..cd0b8bf0 100644
+--- a/backends/kwayland/waylandbackend.cpp
++++ b/backends/kwayland/waylandbackend.cpp
+@@ -108,7 +108,7 @@ QByteArray WaylandBackend::edid(int outputId) const
+ 
+ bool WaylandBackend::isValid() const
+ {
+-    return m_internalConfig->isReady();
++    return m_internalConfig->isValid();
+ }
+ 
+ #include "moc_waylandbackend.cpp"
+diff --git a/backends/kwayland/waylandconfig.cpp b/backends/kwayland/waylandconfig.cpp
+index 5a81816d..fa73f6ed 100644
+--- a/backends/kwayland/waylandconfig.cpp
++++ b/backends/kwayland/waylandconfig.cpp
+@@ -16,7 +16,6 @@
+ 
+ #include "tabletmodemanager_interface.h"
+ 
+-#include <QElapsedTimer>
+ #include <QGuiApplication>
+ #include <QThread>
+ #include <QTimer>
+@@ -26,16 +25,13 @@
+ 
+ #include <wayland-client-protocol.h>
+ 
+-#include <chrono>
+ #include <utility>
+ 
+ using namespace KScreen;
+-using namespace std::chrono_literals;
+ 
+ WaylandConfig::WaylandConfig(QObject *parent)
+     : QObject(parent)
+     , m_outputManagement(std::make_unique<WaylandOutputManagement>(17))
+-    , m_registryInitialized(false)
+     , m_blockSignals(false)
+     , m_kscreenConfig(new Config)
+     , m_kscreenPendingConfig(nullptr)
+@@ -141,24 +137,8 @@ void WaylandConfig::setupRegistry()
+     static const wl_registry_listener registryListener{globalAdded, globalRemoved};
+     wl_registry_add_listener(m_registry, &registryListener, this);
+ 
+-    static const wl_callback_listener callbackListener{[](void *data, wl_callback *callback, uint32_t callbackData) {
+-        Q_UNUSED(callback)
+-        Q_UNUSED(callbackData)
+-        auto self = static_cast<WaylandConfig *>(data);
+-        self->m_registryInitialized = true;
+-        self->checkInitialized();
+-    }};
+-    auto callback = wl_display_sync(waylandApp->display());
+-    wl_callback_add_listener(callback, &callbackListener, this);
+-    QElapsedTimer timer;
+-    timer.start();
+-    while (!m_initialized) {
+-        if (timer.durationElapsed() >= 300ms) {
+-            qCWarning(KSCREEN_WAYLAND) << "Connection to Wayland server timed out.";
+-            break;
+-        }
+-        wl_display_roundtrip(display);
+-    }
++    wl_display_roundtrip(display); // list output devices
++    wl_display_roundtrip(display); // get output device properties
+ }
+ 
+ void WaylandConfig::destroyRegistry()
+@@ -227,7 +207,6 @@ void WaylandConfig::addOutput(quint32 name, quint32 version)
+             if (m_outputOrder) {
+                 device->setIndex(m_outputOrder->order().indexOf(device->name()) + 1);
+             }
+-            checkInitialized();
+ 
+             if (m_initializingOutputs.isEmpty()) {
+                 m_screen->setOutputs(m_outputMap.values());
+@@ -268,24 +247,9 @@ void WaylandConfig::removeOutput(WaylandOutputDevice *output)
+     }
+ }
+ 
+-bool WaylandConfig::isReady() const
++bool WaylandConfig::isValid() const
+ {
+-    // clang-format off
+-    return !m_blockSignals
+-            && m_registryInitialized
+-            && m_initializingOutputs.isEmpty()
+-            && m_outputMap.count() > 0
+-            && m_outputManagement->isActive();
+-    // clang-format on
+-}
+-
+-void WaylandConfig::checkInitialized()
+-{
+-    if (!m_initialized && isReady()) {
+-        m_initialized = true;
+-        m_screen->setOutputs(m_outputMap.values());
+-        Q_EMIT initialized();
+-    }
++    return m_outputManagement->isActive();
+ }
+ 
+ KScreen::ConfigPtr WaylandConfig::currentConfig()
+diff --git a/backends/kwayland/waylandconfig.h b/backends/kwayland/waylandconfig.h
+index 2b62a8ab..35bf1a14 100644
+--- a/backends/kwayland/waylandconfig.h
++++ b/backends/kwayland/waylandconfig.h
+@@ -26,19 +26,6 @@ class WaylandScreen;
+ class WaylandOutputManagement;
+ class WaylandOutputOrder;
+ 
+-/**
+- * @class WaylandConfig
+- *
+- * This class holds the basic skeleton of the configuration and takes care of
+- * fetching the information from the Wayland server and synchronizing the
+- * configuration out to the "clients" that receive the config from the backend.
+- * We initialize a wayland connection, using a threaded event queue when
+- * querying the wayland server for data.
+- * Initially, the creation of a WaylandConfig blocks until all data has been
+- * received, signalled by the initialized() signal. This means that the
+- * wayland client has received information about all interfaces, and that all
+- * outputs are completely initialized. From then on, we properly notifyUpdate().
+- */
+ class WaylandConfig : public QObject
+ {
+     Q_OBJECT
+@@ -53,18 +40,16 @@ public:
+     bool applyConfig(const KScreen::ConfigPtr &newConfig);
+     WaylandOutputDevice *findOutputDevice(struct ::kde_output_device_v2 *outputdevice) const;
+ 
+-    bool isReady() const;
++    bool isValid() const;
+ 
+ Q_SIGNALS:
+     void configChanged();
+-    void initialized();
+     void globalRemoved(uint32_t name);
+     void configFailed(const QString &reason);
+ 
+ private:
+     void setupRegistry();
+     void destroyRegistry();
+-    void checkInitialized();
+     void handleActiveChanged();
+ 
+     void initKWinTabletMode();
+@@ -89,7 +74,6 @@ private:
+     QList<WaylandOutputDevice *> m_initializingOutputs;
+     int m_lastOutputId = -1;
+ 
+-    bool m_registryInitialized;
+     bool m_blockSignals;
+     KScreen::ConfigPtr m_kscreenConfig;
+     KScreen::ConfigPtr m_kscreenPendingConfig;
+@@ -97,7 +81,6 @@ private:
+ 
+     bool m_tabletModeAvailable;
+     bool m_tabletModeEngaged;
+-    bool m_initialized = false;
+ };
+ 
+ }
+-- 
+GitLab
+
