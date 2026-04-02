@@ -11,6 +11,7 @@ APPS_DIR="${2:-./apps}"
 # These apps are intentionally not packaged or handled specially
 IGNORE_APPS="
 updatenotification
+testing
 "
 
 if [ ! -f "$APKBUILD" ]; then
