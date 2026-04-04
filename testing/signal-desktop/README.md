@@ -16,15 +16,6 @@ which adds complexity when maintaining the package. Executing `abuild
 _update_depends` automatically fetches the expected versions and updates
 the relevant variables. 
 
-A second layer of complexity is that webrtc's source code isn't available as a
-downloadable tarball. It is only fetchable using Google's `gclient` available
-in `depot_tools` with a reimplemented version in the `teapot` package. By
-executing, `abuild snapshot`, webrtc tarball can be fetched and packaged, as
-long as `gclient` is in your path. For ease of maintenance, a workflow on
-[Ayakael's Forge](https://ayakael.net/mirrors/signal-desktop) automatically
-fetches and packages the source code and makes it available in a [generic
-Forgejo repository](https://ayakael.net/mirrors/-/packages/generic/webrtc).
-
 ## Updating signal-desktop
 
 In a nutshell:
