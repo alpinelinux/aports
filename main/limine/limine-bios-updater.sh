@@ -13,4 +13,7 @@ fi
 
 install -Dm644 /usr/share/limine/limine-bios.sys -t /boot/limine/
 
-limine bios-install "$boot_device"
+limine bios-install "$boot_device" 2>&1 | grep -v \
+  -e '^Reminder: Remember to copy the limine-bios.sys file in either$' \
+  -e 'the root, /boot, /limine, or /boot/limine directories of$' \
+  -e 'one of the partitions on the device, or boot will fail!$'
