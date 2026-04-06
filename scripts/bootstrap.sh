@@ -23,7 +23,7 @@ shift
 # Some languages that need to be cross compiled, for java and others we do not yet have an automated process
 : ${GO=community/go}
 : ${LLVM_DEPS=libffi brotli libev c-ares cunit nghttp2 nghttp3 libidn2 libunistring libpsl curl libssh2 libxml2}
-: ${RUST=llvm21 rust}
+: ${RUST=llvm22 rust}
 #: ${GHC=community/llvm15 community/ghc}
 #: ${COMPILER_PKG=$GO $LLVM_DEPS $RUST $GHC}
 
