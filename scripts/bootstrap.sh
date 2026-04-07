@@ -18,7 +18,7 @@ shift
 # optional cross build packages
 #: ${KERNEL_PKG=linux-firmware linux-lts}
 #: ${OPENSSH=openssh}
-#: ${LUA_APORTS=ncurses readline lua5.4 lua-cjson lua-filesystem lua-optarg lua-aports}
+#: ${LUA_APORTS=ncurses readline lua5.5 lua-cjson lua-filesystem lua-optarg lua-aports}
 #: ${MKINITFS=libcap-ng ncurses readline sqlite util-linux libaio lvm2 popt xz json-c argon2 cryptsetup kmod lddtree mkinitfs}
 # Some languages that need to be cross compiled, for java and others we do not yet have an automated process
 : ${GO=community/go}
