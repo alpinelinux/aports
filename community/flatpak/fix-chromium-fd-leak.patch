@@ -1,0 +1,147 @@
+From 79d3e0936ccceae5319b6cc856b7a841de55229a Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@collabora.com>
+Date: Fri, 10 Apr 2026 09:58:05 +0100
+Subject: [PATCH 1/2] utils: Add flatpak_set_cloexec()
+
+Helps: https://github.com/flatpak/flatpak/issues/6582
+Signed-off-by: Simon McVittie <smcv@collabora.com>
+---
+ common/flatpak-utils-private.h |  2 ++
+ common/flatpak-utils.c         | 17 +++++++++++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/common/flatpak-utils-private.h b/common/flatpak-utils-private.h
+index efc534e9cc..4dccfcdcbc 100644
+--- a/common/flatpak-utils-private.h
++++ b/common/flatpak-utils-private.h
+@@ -385,4 +385,6 @@ void flatpak_add_all_tests (void);
+ 
+ #define FLATPAK_MESSAGE_ID "c7b39b1e006b464599465e105b361485"
+ 
++gboolean flatpak_set_cloexec (int fd);
++
+ #endif /* __FLATPAK_UTILS_H__ */
+diff --git a/common/flatpak-utils.c b/common/flatpak-utils.c
+index 60b04768bd..aad512cd84 100644
+--- a/common/flatpak-utils.c
++++ b/common/flatpak-utils.c
+@@ -2653,3 +2653,20 @@ void flatpak_add_all_tests (void)
+   }
+ #endif
+ }
++
++/* Sets errno on failure. */
++gboolean
++flatpak_set_cloexec (int fd)
++{
++  int flags = fcntl (fd, F_GETFD);
++
++  if (flags == -1)
++    return FALSE;
++
++  flags |= FD_CLOEXEC;
++
++  if (fcntl (fd, F_SETFD, flags) < 0)
++    return FALSE;
++
++  return TRUE;
++}
+
+From e0cd58169610a38737b3da446ad6b45ba5745a9f Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@collabora.com>
+Date: Fri, 10 Apr 2026 10:07:14 +0100
+Subject: [PATCH 2/2] run, context: Mark fd arguments as close-on-exec
+
+On entry to `flatpak run`, these fds have been inheritable (not
+FD_CLOEXEC), otherwise they would not have been inherited; but we don't
+want the "payload" command to inherit them, so set them as
+non-close-on-exec as soon as we receive them. In the cases where we pass
+them down to the underlying bwrap command, we'll either dup them, or
+set them to be inheritable again (in practice we dup them).
+
+In particular, Chromium-derived web browsers get very upset when their
+subsandbox processes inherit unexpected fds, which has been causing crashes
+with no useful diagnostic information since CVE-2026-34078 was fixed.
+
+Fixes: 1b5e886d "run: Add --usr-fd and --app-fd options"
+Fixes: b5ae89ed "run: Add --(ro-)bind-fd options"
+Resolves: https://github.com/flatpak/flatpak/issues/6582
+Signed-off-by: Simon McVittie <smcv@collabora.com>
+---
+ app/flatpak-builtins-run.c | 15 +++++++++++++++
+ common/flatpak-context.c   |  8 ++++++++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/app/flatpak-builtins-run.c b/app/flatpak-builtins-run.c
+index 64d6908ec3..da489d3f10 100644
+--- a/app/flatpak-builtins-run.c
++++ b/app/flatpak-builtins-run.c
+@@ -82,6 +82,9 @@ option_bind_fd_cb (const char  *option_name,
+   if (fd < 3)
+     return glnx_throw (error, "File descriptors 0, 1, 2 are reserved");
+ 
++  if (!flatpak_set_cloexec (fd))
++    return glnx_throw_errno_prefix (error, "--bind-fd");
++
+   g_array_append_val (opt_bind_fds, fd);
+   fd = -1; /* ownership transferred to GArray */
+   return TRUE;
+@@ -102,6 +105,9 @@ option_ro_bind_fd_cb (const char  *option_name,
+   if (fd < 3)
+     return glnx_throw (error, "File descriptors 0, 1, 2 are reserved");
+ 
++  if (!flatpak_set_cloexec (fd))
++    return glnx_throw_errno_prefix (error, "--ro-bind-fd");
++
+   g_array_append_val (opt_ro_bind_fds, fd);
+   fd = -1; /* ownership transferred to GArray */
+   return TRUE;
+@@ -122,6 +128,9 @@ opt_instance_id_fd_cb (const char  *option_name,
+   if (fd < 3)
+     return glnx_throw (error, "File descriptors 0, 1, 2 are reserved");
+ 
++  if (!flatpak_set_cloexec (fd))
++    return glnx_throw_errno_prefix (error, "--instance-id-fd");
++
+   opt_instance_id_fd = g_steal_fd (&fd);
+   return TRUE;
+ }
+@@ -141,6 +150,9 @@ opt_app_fd_cb (const char  *option_name,
+   if (fd < 3)
+     return glnx_throw (error, "File descriptors 0, 1, 2 are reserved");
+ 
++  if (!flatpak_set_cloexec (fd))
++    return glnx_throw_errno_prefix (error, "--app-fd");
++
+   opt_app_fd = g_steal_fd (&fd);
+   return TRUE;
+ }
+@@ -160,6 +172,9 @@ opt_usr_fd_cb (const char  *option_name,
+   if (fd < 3)
+     return glnx_throw (error, "File descriptors 0, 1, 2 are reserved");
+ 
++  if (!flatpak_set_cloexec (fd))
++    return glnx_throw_errno_prefix (error, "--usr-fd");
++
+   opt_usr_fd = g_steal_fd (&fd);
+   return TRUE;
+ }
+diff --git a/common/flatpak-context.c b/common/flatpak-context.c
+index 6fdc9cdc7d..c26561915c 100644
+--- a/common/flatpak-context.c
++++ b/common/flatpak-context.c
+@@ -2441,6 +2441,14 @@ option_env_fd_cb (const gchar *option_name,
+   if (fd < 3)
+     return glnx_throw (error, "File descriptors 0, 1, 2 are reserved");
+ 
++  /* This is not strictly necessary, because we're going to close it after
++   * parsing the environment block, but let's be consistent with other fd
++   * arguments that we need to avoid being inherited by the "payload"
++   * command. This is also a convenient place to validate that it's an
++   * open fd. */
++  if (!flatpak_set_cloexec (fd))
++    return glnx_throw_errno_prefix (error, "--env-fd");
++
+   return flatpak_context_parse_env_fd (context, fd, error);
+ }
+ 
