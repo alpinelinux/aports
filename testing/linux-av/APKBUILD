@@ -1,0 +1,265 @@
+# Maintainer: Milan P. Stanić <mps@arvanta.net>
+
+_flavor=av
+pkgname=linux-$_flavor
+# NOTE: please resist urge to upgrade it blindly
+pkgver=7.0.0
+_kernver=${pkgver%.*}
+pkgrel=0
+pkgdesc="kernel for SBCs, chromebooks, lean and fast"
+url="https://www.kernel.org"
+_depends_dev="perl gmp-dev flex bison"
+makedepends="$_depends_dev sed installkernel bc elfutils-dev linux-headers linux-firmware-any
+	openssl-dev diffutils findutils u-boot-tools dtc"
+_carch=$CARCH
+subpackages="$pkgname-dev:_dev:$CBUILD_ARCH"
+case "$_carch" in
+	aarch64|arm*) makedepends="$makedepends vboot-utils lz4"
+	subpackages="$subpackages $pkgname-cbook:_cbook:$CBUILD_ARCH"
+esac
+
+arch="aarch64 armv7"
+case "$_carch" in
+	aarch64*) _carch="arm64" ;;
+	arm*) _carch="arm" ;;
+	riscv64) _carch="riscv" ;;
+esac
+
+options="!strip !check"
+#provides="linux-elm linux-gru linux-starfive"
+_config=${config:-config-$_flavor.$CARCH}
+
+source="https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/linux-$_kernver.tar.xz"
+case $pkgver in
+	*.*.0)	;;
+	*.*.*)	source="
+		patch-$pkgver.patch.xz::https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/patch-$pkgver.xz
+		$source" ;;
+esac
+
+	source="$source
+	config-$_flavor.aarch64
+	config-$_flavor.armv7
+	kernel.its.aarch64
+	kernel.its.armv7
+	"
+
+license="GPL-2.0-only"
+
+builddir="$srcdir"/linux-$_kernver
+_flavors=
+for _i in $source; do
+	case $_i in
+	config-*.$CARCH)
+		_f=${_i%.$CARCH}
+		_f=${_f#config-}
+		_flavors="$_flavors ${_f}"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-${_f}::$CBUILD_ARCH linux-${_f}-dev:_dev:$CBUILD_ARCH"
+		fi
+		;;
+	esac
+done
+
+prepare() {
+	default_prepare
+
+	# remove localversion from patch if any
+	rm -f localversion*
+	oldconfig
+}
+
+oldconfig() {
+	for i in $_flavors; do
+		local _config=config-$i.$CARCH
+		mkdir -p "$builddir"
+		echo "-$pkgrel-$i" > "$builddir"/localversion-alpine \
+			|| return 1
+
+		install -m644 "$srcdir"/$_config "$builddir"/.config
+		make -C $builddir \
+			O="$builddir" \
+			ARCH="$_carch" \
+			listnewconfig oldconfig
+	done
+}
+
+build() {
+	unset LDFLAGS
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+	make ARCH="$_carch" DTC_FLAGS="-@" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+}
+
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	local _abi_release=$pkgver-$pkgrel-$_buildflavor
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+	# modules_install seems to regenerate a defect Modules.symvers on s390x. Work
+	# around it by backing it up and restore it after modules_install
+	cp Module.symvers Module.symvers.backup
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+
+	local _install
+	case "$CARCH" in
+		arm*|aarch64) _install="zinstall dtbs_install";;
+		riscv64) _install="zinstall dtbs_install";;
+		*) _install=install;;
+	esac
+
+	make -j1 modules_install $_install \
+		ARCH="$_carch" \
+		DTC_FLAGS="-@" \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_PATH="$_outdir"/boot \
+		INSTALL_DTBS_PATH="$_outdir/boot/dtbs-$_buildflavor"
+
+	cp Module.symvers.backup Module.symvers
+
+	rm -f "$_outdir"/lib/modules/$_abi_release/build \
+		"$_outdir"/lib/modules/$_abi_release/source
+	rm -rf "$_outdir"/lib/firmware
+
+	install -D -m644 include/config/kernel.release \
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+	cp "$builddir"/.config $pkgdir/boot/config-$_flavor
+	rm $pkgdir/boot/config-${_abi_release}
+	rm $pkgdir/boot/System.map-${_abi_release}
+
+}
+
+# main flavor installs in $pkgdir
+package() {
+	_package $_flavor "$pkgdir"
+}
+
+_cbook() {
+	pkgdesc="linux kernel for flash to chromeOS kernel partition"
+	depends="$pkgname"
+	install="$subpkgname.post-install $subpkgname.post-upgrade"
+	case "$CARCH" in
+		aarch64) _vbk_arch="aarch64" ;;
+		armv7) _vbk_arch="arm" ;;
+	esac
+	mkdir -p "$subpkgdir"/boot
+	cd $builddir
+	lz4 -20 -z -f -m arch/$_carch/boot/Image
+	cp $srcdir/kernel.its."$CARCH" .
+	mkimage -D "-I dts -O dtb -p 2048" -f kernel.its."$CARCH" vmlinux.uimg
+
+	dd if=/dev/zero of=bootloader.bin bs=512 count=1
+	echo "console=tty0 earlyprintk=tty0 init=/sbin/init root=PARTUUID=%U/PARTNROFF=1 rootwait rw noinitrd loglevel=7" > cmdline
+	vbutil_kernel \
+		--pack $pkgdir/boot/vmlinux-$_flavor.fit \
+		--version 1 \
+		--vmlinuz vmlinux.uimg \
+		--arch $_vbk_arch \
+		--keyblock /usr/share/vboot/devkeys/kernel.keyblock \
+		--signprivate kernel_data_key.vbprivk \
+		--signprivate /usr/share/vboot/devkeys/kernel_data_key.vbprivk \
+		--config cmdline \
+		--bootloader bootloader.bin
+
+	rm cmdline bootloader.bin
+	mv $pkgdir/boot/vmlinux-$_flavor.fit $subpkgdir/boot
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _abi_release=$pkgver-$pkgrel-$_flavor
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# simlar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="$_depends_dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-$_abi_release
+	export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	install -m644 "$srcdir"/config-$_flavor.$CARCH "$dir"/.config
+	echo "-$pkgrel-$_flavor" > "$dir"/localversion-alpine
+	cd $builddir
+
+	echo "Installing headers..."
+	cp -t "$dir" -a include
+
+	install -Dt "$dir" -m644 Makefile
+	install -Dt "$dir" -m644 Module.symvers
+	install -Dt "$dir" -m644 System.map
+	cp -t "$dir" -a scripts
+
+	install -Dt "$dir/arch/$_carch" -m644 arch/$_carch/Makefile
+	install -Dt "$dir/arch/$_carch/kernel" -m644 arch/$_carch/kernel/asm-offsets.s
+	cp -t "$dir/arch/$_carch" -a arch/$_carch/include
+
+	install -Dt "$dir/drivers/md" -m644 drivers/md/*.h
+	install -Dt "$dir/net/mac80211" -m644 net/mac80211/*.h
+
+	# https://bugs.archlinux.org/task/13146
+	install -Dt "$dir/drivers/media/i2c" -m644 drivers/media/i2c/msp3400-driver.h
+
+	# https://bugs.archlinux.org/task/20402
+	install -Dt "$dir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
+	install -Dt "$dir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
+	install -Dt "$dir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
+
+	# https://bugs.archlinux.org/task/71392
+	install -Dt "$dir/drivers/iio/common/hid-sensors" -m644 drivers/iio/common/hid-sensors/*.h
+
+	echo "Installing KConfig files..."
+	find . -name 'Kconfig*' -exec install -Dm644 {} "$dir/{}" \;
+
+	echo "Removing unneeded architectures..."
+	local arch
+	for arch in "$dir"/arch/*/; do
+		case $(basename "$arch") in $_carch) continue ;; esac
+		echo "Removing $(basename "$arch")"
+		rm -r "$arch"
+	done
+
+	echo "Removing broken symlinks..."
+	find -L "$builddir" -type l -printf 'Removing %P\n' -delete
+
+	echo "Removing loose objects..."
+	find "$builddir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+
+	echo "Stripping build tools..."
+	local file
+	while read -rd '' file; do
+		case "$(file -bi "$file")" in
+			application/x-sharedlib\;*)      # Libraries (.so)
+				strip -v $STRIP_SHARED "$file" ;;
+			application/x-archive\;*)        # Libraries (.a)
+				strip -v $STRIP_STATIC "$file" ;;
+			application/x-executable\;*)     # Binaries
+				strip -v $STRIP_BINARIES "$file" ;;
+			application/x-pie-executable\;*) # Relocatable binaries
+				strip -v $STRIP_SHARED "$file" ;;
+		esac
+	done < <(find "$builddir" -type f -perm -u+x ! -name vmlinux -print0)
+
+	echo "Stripping vmlinux..."
+	strip -v $STRIP_STATIC "$builddir/vmlinux"
+
+	echo "Adding symlink..."
+	mkdir -p "$subpkgdir"/lib/modules/$_abi_release
+	ln -sf /usr/src/linux-headers-$_abi_release \
+		"$subpkgdir"/lib/modules/$_abi_release/build
+}
+
+sha512sums="
+8c85b708342f8f09ca25b2234b22e93b62b144a9ef919fbb21827f52fa47498e778c79db1559524dd7fb360f95b2ce174171443c1859656c281be41d2b6c5a0b  linux-7.0.tar.xz
+c9b3b5c9a9aa55554ce990683d94a1e3f07f3bfa9c2c671f5758f7a4c5a2ffcea4ea0b1a5b89bdc7485bc53bea76d4ea23f635830fc89f0bb6d7b86f906664c9  config-av.aarch64
+9921e6369edcd50c513914482b8a875b2f1a2e9c45bc515fac7c4fd93ed28479587a867651dc9a01d7b613e8c6c62e3a3255c6f24b5491470b3535b09131b3f7  config-av.armv7
+0b4132a7fe8cbea63bf870045ead46942cae27dcae4bb94d68b2531d190dc963f164a2b00dd22077735d5997a30109324887d785cda62da4033a55200d221e9a  kernel.its.aarch64
+a6b1d1a58c5d12b50374e99918eeb28066c9b5f04fe55f4c76f129464e361718e39535ffd2f211635b65f951a876f2eecb04b78d7f346762206d446dab09bcc0  kernel.its.armv7
+"
