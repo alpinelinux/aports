@@ -1,0 +1,643 @@
+From 2aa789096b0f81ec0f46f6f2542c33b8c3c6154b Mon Sep 17 00:00:00 2001
+From: Nicolas Fella <nicolas.fella@gmx.de>
+Date: Mon, 13 Apr 2026 22:00:56 +0200
+Subject: [PATCH] Properly link against tesseract
+
+Dynamically loading it at runtime only complicates things, for no apparent benefit
+---
+ CMakeLists.txt                 |   3 +
+ src/CMakeLists.txt             |   2 +-
+ src/OcrManager.cpp             | 103 +++++++-----------
+ src/OcrManager.h               |   9 +-
+ src/TesseractRuntimeLoader.cpp | 189 ---------------------------------
+ src/TesseractRuntimeLoader.h   |  76 -------------
+ 6 files changed, 44 insertions(+), 338 deletions(-)
+ delete mode 100644 src/TesseractRuntimeLoader.cpp
+ delete mode 100644 src/TesseractRuntimeLoader.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e79b6ab7b..cac222370 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -92,6 +92,7 @@ find_package(PlasmaWaylandProtocols REQUIRED)
+ find_package(LayerShellQt REQUIRED)
+ find_package(KPipeWire)
+ find_package(OpenCV 4.7 REQUIRED core imgproc)
++find_package(PkgConfig REQUIRED)
+ 
+ set_package_properties(KPipeWire PROPERTIES DESCRIPTION
+     "Used to record pipewire streams into a file"
+@@ -107,6 +108,8 @@ set_package_properties(KQuickImageEditor PROPERTIES
+     PURPOSE "Add image editing capability to the screenshots"
+ )
+ 
++pkg_check_modules(TESSERACT REQUIRED IMPORTED_TARGET tesseract)
++
+ # optional components
+ find_package(KF6DocTools ${KF6_MIN_VERSION})
+ set_package_properties(KF6DocTools PROPERTIES DESCRIPTION
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 2e9584aff..84adc11dc 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -26,7 +26,6 @@ target_sources(spectacle PRIVATE
+     ExportManager.cpp
+     Geometry.cpp
+     OcrManager.cpp
+-    TesseractRuntimeLoader.cpp
+     Gui/CaptureWindow.cpp
+     Gui/ExportMenu.cpp
+     Gui/HelpMenu.cpp
+@@ -130,6 +129,7 @@ target_link_libraries(spectacle PRIVATE
+     LayerShellQt::Interface
+     KQuickImageEditor
+     ${OpenCV_LIBRARIES}
++    PkgConfig::TESSERACT
+ )
+ 
+ # qt_add_qml_module doesn't know how to deal with headers in subdirectories so
+diff --git a/src/OcrManager.cpp b/src/OcrManager.cpp
+index 6b3b9baa4..84eb7899d 100644
+--- a/src/OcrManager.cpp
++++ b/src/OcrManager.cpp
+@@ -31,7 +31,6 @@ OcrManager *OcrManager::s_instance = nullptr;
+ OcrManager::OcrManager(QObject *parent)
+     : QObject(parent)
+     , m_tesseract(nullptr)
+-    , m_runtimeApi(nullptr)
+     , m_worker(nullptr)
+     , m_workerThread(std::make_unique<QThread>())
+     , m_timeoutTimer(new QTimer(this))
+@@ -83,9 +82,9 @@ OcrManager::~OcrManager()
+         delete m_worker;
+         m_worker = nullptr;
+     }
+-    if (m_runtimeApi && m_tesseract) {
+-        m_runtimeApi->end(m_tesseract);
+-        m_runtimeApi->dispose(m_tesseract);
++    if (m_tesseract) {
++        m_tesseract->End();
++        delete m_tesseract;
+         m_tesseract = nullptr;
+     }
+ }
+@@ -100,7 +99,7 @@ OcrManager *OcrManager::instance()
+ 
+ bool OcrManager::isAvailable() const
+ {
+-    return m_initialized && m_tesseract != nullptr && m_runtimeApi != nullptr;
++    return m_initialized && m_tesseract != nullptr;
+ }
+ 
+ OcrManager::OcrStatus OcrManager::status() const
+@@ -317,8 +316,8 @@ void OcrManager::beginRecognition(const QImage &image)
+ 
+     QMetaObject::invokeMethod(
+         m_worker,
+-        [worker = m_worker, image, tesseract = m_tesseract, runtimeApi = m_runtimeApi]() {
+-            worker->processImage(image, tesseract, runtimeApi);
++        [worker = m_worker, image, tesseract = m_tesseract]() {
++            worker->processImage(image, tesseract);
+         },
+         Qt::QueuedConnection);
+ }
+@@ -326,43 +325,24 @@ void OcrManager::beginRecognition(const QImage &image)
+ void OcrManager::initializeTesseract()
+ {
+     auto cleanupTesseract = [this]() {
+-        if (m_runtimeApi && m_tesseract) {
+-            m_runtimeApi->end(m_tesseract);
+-            m_runtimeApi->dispose(m_tesseract);
++        if (m_tesseract) {
++            m_tesseract->End();
++            delete m_tesseract;
+             m_tesseract = nullptr;
+         }
+     };
+ 
+-    auto &loader = TesseractRuntimeLoader::instance();
+-    if (!loader.ensureLoaded()) {
+-        qCWarning(SPECTACLE_LOG) << "Tesseract runtime library not available";
+-        setStatus(OcrStatus::Error);
+-        return;
+-    }
+-
+-    m_runtimeApi = loader.api();
+-    if (!m_runtimeApi) {
+-        qCWarning(SPECTACLE_LOG) << "Missing Tesseract runtime API";
+-        setStatus(OcrStatus::Error);
+-        return;
+-    }
+-
+     try {
+-        m_tesseract = m_runtimeApi->create();
+-        if (!m_tesseract) {
+-            qCWarning(SPECTACLE_LOG) << "Failed to allocate Tesseract API";
+-            setStatus(OcrStatus::Error);
+-            return;
+-        }
++        m_tesseract = new TessBaseAPI;
+ 
+-        if (m_runtimeApi->init3(m_tesseract, nullptr, nullptr) != 0) {
++        if (m_tesseract->Init(nullptr, nullptr) != 0) {
+             qCWarning(SPECTACLE_LOG) << "Failed to initialize Tesseract OCR engine";
+             setStatus(OcrStatus::Error);
+             cleanupTesseract();
+             return;
+         }
+ 
+-        const char *datapath = m_runtimeApi->datapath(m_tesseract);
++        const char *datapath = m_tesseract->GetDatapath();
+         QString tessdataPath = datapath ? QString::fromUtf8(datapath) : QString();
+         if (tessdataPath.isEmpty()) {
+             qCWarning(SPECTACLE_LOG) << "Tesseract datapath is empty";
+@@ -381,7 +361,7 @@ void OcrManager::initializeTesseract()
+             return;
+         }
+ 
+-        m_runtimeApi->end(m_tesseract);
++        m_tesseract->End();
+ 
+         QStringList configLanguages = Settings::ocrLanguages();
+         QStringList initLanguages;
+@@ -411,7 +391,7 @@ void OcrManager::initializeTesseract()
+         const QString combinedInitLanguages = initLanguages.join(u"+"_s);
+         qCDebug(SPECTACLE_LOG) << "Initializing Tesseract with languages:" << combinedInitLanguages;
+ 
+-        if (m_runtimeApi->init3(m_tesseract, nullptr, combinedInitLanguages.toUtf8().constData()) != 0) {
++        if (m_tesseract->Init(nullptr, combinedInitLanguages.toUtf8().constData()) != 0) {
+             qCWarning(SPECTACLE_LOG) << "Failed to initialize Tesseract with languages:" << combinedInitLanguages;
+             setStatus(OcrStatus::Error);
+             cleanupTesseract();
+@@ -419,7 +399,7 @@ void OcrManager::initializeTesseract()
+         }
+ 
+         m_currentLanguageCode = combinedInitLanguages;
+-        m_runtimeApi->setPageSegMode(m_tesseract, PSM_AUTO);
++        m_tesseract->SetPageSegMode(tesseract::PSM_AUTO);
+ 
+         m_initialized = true;
+         setStatus(OcrStatus::Ready);
+@@ -497,11 +477,11 @@ bool OcrManager::isLanguageAvailable(const QString &languageCode) const
+ 
+ bool OcrManager::setupTesseractLanguages(const QStringList &langCodes)
+ {
+-    if (!m_tesseract || !m_runtimeApi || langCodes.isEmpty()) {
++    if (!m_tesseract || langCodes.isEmpty()) {
+         return false;
+     }
+ 
+-    const char *datapath = m_runtimeApi->datapath(m_tesseract);
++    const char *datapath = m_tesseract->GetDatapath();
+     QString tessdataPath = datapath ? QString::fromUtf8(datapath) : QString();
+ 
+     if (tessdataPath.isEmpty()) {
+@@ -518,11 +498,11 @@ bool OcrManager::setupTesseractLanguages(const QStringList &langCodes)
+     }
+ 
+     try {
+-        m_runtimeApi->end(m_tesseract);
++        m_tesseract->End();
+ 
+         const QString combinedLangs = langCodes.join(u"+"_s);
+ 
+-        if (m_runtimeApi->init3(m_tesseract, nullptr, combinedLangs.toUtf8().constData()) != 0) {
++        if (m_tesseract->Init(nullptr, combinedLangs.toUtf8().constData()) != 0) {
+             // Fallback to first available language
+             QString fallbackLang;
+             if (!m_availableLanguages.isEmpty()) {
+@@ -534,7 +514,7 @@ bool OcrManager::setupTesseractLanguages(const QStringList &langCodes)
+                 }
+             }
+ 
+-            if (fallbackLang.isEmpty() || m_runtimeApi->init3(m_tesseract, nullptr, fallbackLang.toUtf8().constData()) != 0) {
++            if (fallbackLang.isEmpty() || m_tesseract->Init(nullptr, fallbackLang.toUtf8().constData()) != 0) {
+                 qCWarning(SPECTACLE_LOG) << "Failed to initialize Tesseract with languages:" << combinedLangs << "and fallback:" << fallbackLang;
+                 return false;
+             }
+@@ -543,7 +523,7 @@ bool OcrManager::setupTesseractLanguages(const QStringList &langCodes)
+             m_currentLanguageCode = fallbackLang;
+         }
+ 
+-        m_runtimeApi->setPageSegMode(m_tesseract, PSM_AUTO);
++        m_tesseract->SetPageSegMode(tesseract::PSM_AUTO);
+         return true;
+     } catch (const std::exception &e) {
+         qCWarning(SPECTACLE_LOG) << "Exception while setting up Tesseract languages:" << e.what();
+@@ -563,25 +543,16 @@ void OcrManager::setupAvailableLanguages(const QString &tessdataPath)
+ 
+     QStringList detectedLanguages;
+ 
+-    if (!m_runtimeApi) {
+-        qCWarning(SPECTACLE_LOG) << "Cannot enumerate OCR languages: Runtime API not available";
+-        return;
+-    }
+-
+-    char **languages = m_runtimeApi->getAvailableLanguagesAsVector(m_tesseract);
+-    if (!languages) {
++    std::vector<std::string> languages;
++    m_tesseract->GetAvailableLanguagesAsVector(&languages);
++    if (languages.empty()) {
+         qCWarning(SPECTACLE_LOG) << "Tesseract API returned no languages";
+         return;
+     }
+ 
+-    int count = 0;
+-    for (char **entry = languages; *entry != nullptr; ++entry) {
+-        count++;
+-    }
+-
+-    detectedLanguages.reserve(count);
+-    for (char **entry = languages; *entry != nullptr; ++entry) {
+-        const QString langCode = QString::fromUtf8(*entry);
++    detectedLanguages.reserve(languages.size());
++    for (const auto &entry : languages) {
++        const QString langCode = QString::fromUtf8(entry);
+         if (langCode.isEmpty()) {
+             continue;
+         }
+@@ -599,8 +570,6 @@ void OcrManager::setupAvailableLanguages(const QString &tessdataPath)
+         }
+     }
+ 
+-    m_runtimeApi->deleteTextArray(languages);
+-
+     std::sort(detectedLanguages.begin(), detectedLanguages.end());
+     m_availableLanguages = detectedLanguages;
+ 
+@@ -678,11 +647,11 @@ OcrWorker::OcrWorker(QObject *parent)
+ {
+ }
+ 
+-void OcrWorker::processImage(const QImage &image, TessBaseAPI *tesseract, const TesseractRuntimeApi *runtimeApi)
++void OcrWorker::processImage(const QImage &image, TessBaseAPI *tesseract)
+ {
+     QMutexLocker locker(&m_mutex);
+ 
+-    if (!tesseract || !runtimeApi || image.isNull()) {
++    if (!tesseract || image.isNull()) {
+         Q_EMIT imageProcessed(QString(), false);
+         return;
+     }
+@@ -690,28 +659,28 @@ void OcrWorker::processImage(const QImage &image, TessBaseAPI *tesseract, const
+     try {
+         QImage rgbImage = image.convertToFormat(QImage::Format_RGB888);
+ 
+-        runtimeApi->setImage(tesseract, rgbImage.bits(), rgbImage.width(), rgbImage.height(), 3, rgbImage.bytesPerLine());
++        tesseract->SetImage(rgbImage.bits(), rgbImage.width(), rgbImage.height(), 3, rgbImage.bytesPerLine());
+ 
+-        if (runtimeApi->recognize(tesseract, nullptr) != 0) {
++        if (tesseract->Recognize(nullptr) != 0) {
+             Q_EMIT imageProcessed(QString(), false);
+             return;
+         }
+ 
+         QStringList lines;
+-        TessResultIterator *iterator = runtimeApi->iterator(tesseract);
++        TessResultIterator *iterator = tesseract->GetIterator();
+ 
+         if (iterator) {
+             do {
+-                char *lineText = runtimeApi->iteratorText(iterator, RIL_TEXTLINE);
++                char *lineText = iterator->GetUTF8Text(tesseract::RIL_TEXTLINE);
+                 if (lineText != nullptr) {
+                     QString line = QString::fromUtf8(lineText).trimmed();
+                     if (!line.isEmpty()) {
+                         lines.append(line);
+                     }
+-                    runtimeApi->deleteText(lineText);
++                    delete lineText;
+                 }
+-            } while (runtimeApi->iteratorNext(iterator, RIL_TEXTLINE) != 0);
+-            runtimeApi->iteratorDelete(iterator);
++            } while (iterator->Next(tesseract::RIL_TEXTLINE) != 0);
++            delete iterator;
+         }
+ 
+         const QString result = lines.join(QLatin1Char('\n')).trimmed();
+diff --git a/src/OcrManager.h b/src/OcrManager.h
+index 0813763a8..19eeae3c6 100644
+--- a/src/OcrManager.h
++++ b/src/OcrManager.h
+@@ -8,8 +8,6 @@
+ 
+ #include "Config.h"
+ 
+-#include "TesseractRuntimeLoader.h"
+-
+ #include <QImage>
+ #include <QMap>
+ #include <QMutex>
+@@ -20,6 +18,8 @@
+ 
+ #include <memory>
+ 
++#include <tesseract/capi.h>
++
+ /**
+  * @brief Worker class for OCR processing in background thread
+  */
+@@ -31,7 +31,7 @@ public:
+     explicit OcrWorker(QObject *parent = nullptr);
+ 
+ public Q_SLOTS:
+-    void processImage(const QImage &image, TessBaseAPI *tesseract, const TesseractRuntimeApi *runtimeApi);
++    void processImage(const QImage &image, TessBaseAPI *tesseract);
+ 
+ Q_SIGNALS:
+     void imageProcessed(const QString &text, bool success);
+@@ -153,7 +153,6 @@ private:
+     static OcrManager *s_instance;
+ 
+     TessBaseAPI *m_tesseract;
+-    const TesseractRuntimeApi *m_runtimeApi;
+     OcrWorker *m_worker;
+     std::unique_ptr<QThread> m_workerThread;
+     QTimer *m_timeoutTimer;
+@@ -169,4 +168,4 @@ private:
+     bool m_initialized;
+ 
+ private:
+-};
+\ No newline at end of file
++};
+diff --git a/src/TesseractRuntimeLoader.cpp b/src/TesseractRuntimeLoader.cpp
+deleted file mode 100644
+index 57276fbcc..000000000
+--- a/src/TesseractRuntimeLoader.cpp
++++ /dev/null
+@@ -1,189 +0,0 @@
+-/*
+- *  SPDX-FileCopyrightText: 2025 Jhair Paris <dev@jhairparis.com>
+- *
+- *  SPDX-License-Identifier: LGPL-2.0-or-later
+- */
+-
+-#include "TesseractRuntimeLoader.h"
+-
+-#include "spectacle_debug.h"
+-
+-#include <QMutexLocker>
+-#include <type_traits>
+-
+-TesseractRuntimeLoader &TesseractRuntimeLoader::instance()
+-{
+-    static TesseractRuntimeLoader s_instance;
+-    return s_instance;
+-}
+-
+-TesseractRuntimeLoader::TesseractRuntimeLoader() = default;
+-TesseractRuntimeLoader::~TesseractRuntimeLoader()
+-{
+-    if (m_library.isLoaded()) {
+-        m_library.unload();
+-    }
+-}
+-
+-bool TesseractRuntimeLoader::ensureLoaded()
+-{
+-    QMutexLocker locker(&m_mutex);
+-    if (m_loaded) {
+-        return true;
+-    }
+-    return loadLocked();
+-}
+-
+-bool TesseractRuntimeLoader::isLoaded() const
+-{
+-    QMutexLocker locker(&m_mutex);
+-    return m_loaded;
+-}
+-
+-const TesseractRuntimeApi *TesseractRuntimeLoader::api() const
+-{
+-    QMutexLocker locker(&m_mutex);
+-    return m_loaded ? &m_api : nullptr;
+-}
+-
+-bool TesseractRuntimeLoader::loadLocked()
+-{
+-    const auto candidates = candidateLibraryNames();
+-    for (const QString &candidate : candidates) {
+-        // From https://doc.qt.io/qt-6/qlibrary.html :
+-        // QLibrary tries the name with different platform-specific file prefixes,
+-        // like "lib" on Unix and Mac, and suffixes, like ".so" on Unix,
+-        // ".dylib" on the Mac, or ".dll" on Windows.
+-        m_library.setFileName(candidate);
+-        m_library.setLoadHints(QLibrary::ExportExternalSymbolsHint | QLibrary::PreventUnloadHint);
+-
+-        if (!m_library.load()) {
+-            qCWarning(SPECTACLE_LOG) << "Unable to load Tesseract candidate" << candidate << ':' << m_library.errorString();
+-            continue;
+-        }
+-
+-        qCInfo(SPECTACLE_LOG) << "Attempting to use Tesseract library" << candidate;
+-
+-        if (!resolveSymbols()) {
+-            m_library.unload();
+-            continue;
+-        }
+-
+-        if (!validateLoadedVersion()) {
+-            m_library.unload();
+-            continue;
+-        }
+-
+-        m_loaded = true;
+-        qCInfo(SPECTACLE_LOG) << "Loaded Tesseract runtime library from" << m_library.fileName();
+-        return true;
+-    }
+-
+-    qCWarning(SPECTACLE_LOG) << "Unable to locate a suitable Tesseract shared library";
+-    return false;
+-}
+-
+-bool TesseractRuntimeLoader::resolveSymbols()
+-{
+-    auto resolve = [this](auto &target, const char *symbol) {
+-        target = reinterpret_cast<std::remove_reference_t<decltype(target)>>(m_library.resolve(symbol));
+-        if (!target) {
+-            qCWarning(SPECTACLE_LOG) << "Failed to resolve" << symbol << "from" << m_library.fileName();
+-            return false;
+-        }
+-        return true;
+-    };
+-
+-    if (!resolve(m_api.create, "TessBaseAPICreate")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.dispose, "TessBaseAPIDelete")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.init3, "TessBaseAPIInit3")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.end, "TessBaseAPIEnd")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.setPageSegMode, "TessBaseAPISetPageSegMode")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.datapath, "TessBaseAPIGetDatapath")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.setImage, "TessBaseAPISetImage")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.recognize, "TessBaseAPIRecognize")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.iterator, "TessBaseAPIGetIterator")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.iteratorText, "TessResultIteratorGetUTF8Text")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.iteratorNext, "TessResultIteratorNext")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.iteratorDelete, "TessResultIteratorDelete")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.deleteText, "TessDeleteText")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.version, "TessVersion")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.getAvailableLanguagesAsVector, "TessBaseAPIGetAvailableLanguagesAsVector")) {
+-        return false;
+-    }
+-    if (!resolve(m_api.deleteTextArray, "TessDeleteTextArray")) {
+-        return false;
+-    }
+-
+-    return true;
+-}
+-
+-bool TesseractRuntimeLoader::validateLoadedVersion()
+-{
+-    constexpr int kMinSupportedMajor = 4;
+-    constexpr int kMaxSupportedMajor = 5;
+-
+-    if (!m_api.version) {
+-        qCWarning(SPECTACLE_LOG) << "Tesseract runtime missing TessVersion symbol";
+-        return false;
+-    }
+-
+-    const char *versionPtr = m_api.version();
+-    const QString versionString = versionPtr ? QString::fromLatin1(versionPtr) : QString();
+-
+-    if (versionString.isEmpty()) {
+-        qCWarning(SPECTACLE_LOG) << "Unable to determine Tesseract runtime version";
+-        return false;
+-    }
+-
+-    const QString majorComponent = versionString.section(QLatin1Char('.'), 0, 0);
+-    bool ok = false;
+-    const int majorVersion = majorComponent.toInt(&ok);
+-
+-    if (!ok) {
+-        qCWarning(SPECTACLE_LOG) << "Failed to parse Tesseract version" << versionString;
+-        return false;
+-    }
+-
+-    if (majorVersion < kMinSupportedMajor || majorVersion > kMaxSupportedMajor) {
+-        qCWarning(SPECTACLE_LOG) << "Unsupported Tesseract version" << versionString << "(supported major versions" << kMinSupportedMajor << "-"
+-                                 << kMaxSupportedMajor << ')';
+-        return false;
+-    }
+-
+-    qCInfo(SPECTACLE_LOG) << "Detected Tesseract version" << versionString;
+-    return true;
+-}
+-
+-QStringList TesseractRuntimeLoader::candidateLibraryNames() const
+-{
+-    return {QStringLiteral("tesseract")};
+-}
+diff --git a/src/TesseractRuntimeLoader.h b/src/TesseractRuntimeLoader.h
+deleted file mode 100644
+index 5a86bf0ec..000000000
+--- a/src/TesseractRuntimeLoader.h
++++ /dev/null
+@@ -1,76 +0,0 @@
+-/*
+- *  SPDX-FileCopyrightText: 2025 Jhair Paris <dev@jhairparis.com>
+- *
+- *  SPDX-License-Identifier: LGPL-2.0-or-later
+- */
+-
+-#pragma once
+-
+-#include "Config.h"
+-#include "TesseractCompatibility.h"
+-
+-#include <QLibrary>
+-#include <QMutex>
+-#include <QStringList>
+-
+-struct TesseractRuntimeApi {
+-    using CreateFunc = TessBaseAPI *(*)();
+-    using DeleteFunc = void (*)(TessBaseAPI *);
+-    using Init3Func = int (*)(TessBaseAPI *, const char *, const char *);
+-    using EndFunc = void (*)(TessBaseAPI *);
+-    using SetPageSegModeFunc = void (*)(TessBaseAPI *, TessPageSegMode);
+-    using GetDatapathFunc = const char *(*)(TessBaseAPI *);
+-    using SetImageFunc = void (*)(TessBaseAPI *, const unsigned char *, int, int, int, int);
+-    using RecognizeFunc = int (*)(TessBaseAPI *, ETEXT_DESC *);
+-    using GetIteratorFunc = TessResultIterator *(*)(TessBaseAPI *);
+-    using ResultGetUTF8TextFunc = char *(*)(const TessResultIterator *, TessPageIteratorLevel);
+-    using ResultNextFunc = int (*)(TessResultIterator *, TessPageIteratorLevel);
+-    using ResultDeleteFunc = void (*)(TessResultIterator *);
+-    using DeleteTextFunc = void (*)(char *);
+-    using DeleteTextArrayFunc = void (*)(char **);
+-    using VersionFunc = const char *(*)();
+-    using GetAvailableLanguagesAsVectorFunc = char **(*)(const TessBaseAPI *);
+-
+-    CreateFunc create = nullptr;
+-    DeleteFunc dispose = nullptr;
+-    Init3Func init3 = nullptr;
+-    EndFunc end = nullptr;
+-    SetPageSegModeFunc setPageSegMode = nullptr;
+-    GetDatapathFunc datapath = nullptr;
+-    SetImageFunc setImage = nullptr;
+-    RecognizeFunc recognize = nullptr;
+-    GetIteratorFunc iterator = nullptr;
+-    ResultGetUTF8TextFunc iteratorText = nullptr;
+-    ResultNextFunc iteratorNext = nullptr;
+-    ResultDeleteFunc iteratorDelete = nullptr;
+-    DeleteTextFunc deleteText = nullptr;
+-    DeleteTextArrayFunc deleteTextArray = nullptr;
+-    VersionFunc version = nullptr;
+-    GetAvailableLanguagesAsVectorFunc getAvailableLanguagesAsVector = nullptr;
+-};
+-
+-class TesseractRuntimeLoader
+-{
+-public:
+-    static TesseractRuntimeLoader &instance();
+-
+-    bool ensureLoaded();
+-    bool isLoaded() const;
+-    const TesseractRuntimeApi *api() const;
+-
+-private:
+-    TesseractRuntimeLoader();
+-    ~TesseractRuntimeLoader();
+-
+-    bool loadLocked();
+-    bool resolveSymbols();
+-    bool validateLoadedVersion();
+-    QStringList candidateLibraryNames() const;
+-
+-    Q_DISABLE_COPY_MOVE(TesseractRuntimeLoader)
+-
+-    mutable QMutex m_mutex;
+-    bool m_loaded = false;
+-    QLibrary m_library;
+-    TesseractRuntimeApi m_api;
+-};
+-- 
+GitLab
+
