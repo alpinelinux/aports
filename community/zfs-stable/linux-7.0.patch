@@ -1,0 +1,881 @@
+upstream: https://github.com/openzfs/zfs/pull/18215
+upstream: https://github.com/openzfs/zfs/pull/18216
+upstream: https://github.com/openzfs/zfs/pull/18354
+
+From 3a6568ef03f9e39c50af10197faba5cf51816189 Mon Sep 17 00:00:00 2001
+From: Rob Norris <rob.norris@truenas.com>
+Date: Thu, 5 Feb 2026 19:39:23 +1100
+Subject: [PATCH 1/3] Linux 7.0: blk_queue_nonrot() renamed to blk_queue_rot()
+
+It does exactly the same thing, just inverts the return. Detect its
+presence or absence and call the right one.
+
+Sponsored-by: TrueNAS
+Signed-off-by: Rob Norris <rob.norris@truenas.com>
+---
+ config/kernel-blk-queue.m4      | 26 ++++++++++++++++++++++++++
+ module/os/linux/zfs/vdev_disk.c |  4 ++++
+ 2 files changed, 30 insertions(+)
+
+diff --git a/config/kernel-blk-queue.m4 b/config/kernel-blk-queue.m4
+index 3a159d335f04..9647f9d36dd4 100644
+--- a/config/kernel-blk-queue.m4
++++ b/config/kernel-blk-queue.m4
+@@ -226,6 +226,30 @@ AC_DEFUN([ZFS_AC_KERNEL_BLK_QUEUE_MAX_HW_SECTORS], [
+ 	])
+ ])
+ 
++dnl #
++dnl # 7.0 API change
++dnl # blk_queue_rot() replaces blk_queue_nonrot() (inverted meaning)
++dnl #
++AC_DEFUN([ZFS_AC_KERNEL_SRC_BLK_QUEUE_ROT], [
++	ZFS_LINUX_TEST_SRC([blk_queue_rot], [
++		#include <linux/blkdev.h>
++	], [
++		struct request_queue *q __attribute__ ((unused)) = NULL;
++		(void) blk_queue_rot(q);
++	], [])
++])
++
++AC_DEFUN([ZFS_AC_KERNEL_BLK_QUEUE_ROT], [
++	AC_MSG_CHECKING([whether blk_queue_rot() is available])
++	ZFS_LINUX_TEST_RESULT([blk_queue_rot], [
++		AC_MSG_RESULT(yes)
++		AC_DEFINE(HAVE_BLK_QUEUE_ROT, 1,
++		    [blk_queue_rot() is available])
++	],[
++		AC_MSG_RESULT(no)
++	])
++])
++
+ dnl #
+ dnl # 2.6.34 API change
+ dnl # blk_queue_max_segments() consolidates blk_queue_max_hw_segments()
+@@ -279,6 +303,7 @@ AC_DEFUN([ZFS_AC_KERNEL_SRC_BLK_QUEUE], [
+ 	ZFS_AC_KERNEL_SRC_BLK_QUEUE_SECURE_ERASE
+ 	ZFS_AC_KERNEL_SRC_BLK_QUEUE_MAX_HW_SECTORS
+ 	ZFS_AC_KERNEL_SRC_BLK_QUEUE_MAX_SEGMENTS
++	ZFS_AC_KERNEL_SRC_BLK_QUEUE_ROT
+ 	ZFS_AC_KERNEL_SRC_BLK_MQ_RQ_HCTX
+ ])
+ 
+@@ -291,5 +316,6 @@ AC_DEFUN([ZFS_AC_KERNEL_BLK_QUEUE], [
+ 	ZFS_AC_KERNEL_BLK_QUEUE_SECURE_ERASE
+ 	ZFS_AC_KERNEL_BLK_QUEUE_MAX_HW_SECTORS
+ 	ZFS_AC_KERNEL_BLK_QUEUE_MAX_SEGMENTS
++	ZFS_AC_KERNEL_BLK_QUEUE_ROT
+ 	ZFS_AC_KERNEL_BLK_MQ_RQ_HCTX
+ ])
+diff --git a/module/os/linux/zfs/vdev_disk.c b/module/os/linux/zfs/vdev_disk.c
+index 1bd3500e9f66..ab7457b04e2e 100644
+--- a/module/os/linux/zfs/vdev_disk.c
++++ b/module/os/linux/zfs/vdev_disk.c
+@@ -445,7 +445,11 @@ vdev_disk_open(vdev_t *v, uint64_t *psize, uint64_t *max_psize,
+ 	v->vdev_has_securetrim = bdev_secure_discard_supported(bdev);
+ 
+ 	/* Inform the ZIO pipeline that we are non-rotational */
++#ifdef HAVE_BLK_QUEUE_ROT
++	v->vdev_nonrot = !blk_queue_rot(bdev_get_queue(bdev));
++#else
+ 	v->vdev_nonrot = blk_queue_nonrot(bdev_get_queue(bdev));
++#endif
+ 
+ 	/* Physical volume size in bytes for the partition */
+ 	*psize = bdev_capacity(bdev);
+
+From fdd4f00a573476124f1154c051f1484f6e9d369a Mon Sep 17 00:00:00 2001
+From: Rob Norris <rob.norris@truenas.com>
+Date: Tue, 27 Jan 2026 16:49:59 +1100
+Subject: [PATCH 2/3] Linux 7.0: posix_acl_to_xattr() now allocates memory
+
+Kernel devs noted that almost all callers to posix_acl_to_xattr() would
+check the ACL value size and allocate a buffer before make the call. To
+reduce the repetition, they've changed it to allocate this buffer
+internally and return it.
+
+Unfortunately that's not true for us; most of our calls are from
+xattr_handler->get() to convert a stored ACL to an xattr, and that call
+provides a buffer. For now we have no other option, so this commit
+detects the new version and wraps to copy the value back into the
+provided buffer and then free it.
+
+Sponsored-by: TrueNAS
+Signed-off-by: Rob Norris <rob.norris@truenas.com>
+---
+ config/kernel-acl.m4                         | 31 ++++++++++++++++++++
+ include/os/linux/kernel/linux/xattr_compat.h | 17 +++++++++++
+ 2 files changed, 48 insertions(+)
+
+diff --git a/config/kernel-acl.m4 b/config/kernel-acl.m4
+index bced1990bfc1..9350a4c5f00e 100644
+--- a/config/kernel-acl.m4
++++ b/config/kernel-acl.m4
+@@ -22,6 +22,35 @@ AC_DEFUN([ZFS_AC_KERNEL_POSIX_ACL_EQUIV_MODE_WANTS_UMODE_T], [
+ 	])
+ ])
+ 
++dnl #
++dnl # 7.0 API change
++dnl # posix_acl_to_xattr() now allocates and returns the value.
++dnl #
++AC_DEFUN([ZFS_AC_KERNEL_SRC_POSIX_ACL_TO_XATTR_ALLOC], [
++	ZFS_LINUX_TEST_SRC([posix_acl_to_xattr_alloc], [
++		#include <linux/fs.h>
++		#include <linux/posix_acl_xattr.h>
++	], [
++		struct user_namespace *ns = NULL;
++		struct posix_acl *acl = NULL;
++		size_t size = 0;
++		gfp_t gfp = 0;
++		void *xattr = NULL;
++		xattr = posix_acl_to_xattr(ns, acl, &size, gfp);
++	])
++])
++
++AC_DEFUN([ZFS_AC_KERNEL_POSIX_ACL_TO_XATTR_ALLOC], [
++	AC_MSG_CHECKING([whether posix_acl_to_xattr() allocates its result]);
++	ZFS_LINUX_TEST_RESULT([posix_acl_to_xattr_alloc], [
++		AC_MSG_RESULT(yes)
++		AC_DEFINE(HAVE_POSIX_ACL_TO_XATTR_ALLOC, 1,
++		    [posix_acl_to_xattr() allocates its result])
++	], [
++		AC_MSG_RESULT(no)
++	])
++])
++
+ dnl #
+ dnl # 3.1 API change,
+ dnl # Check if inode_operations contains the function get_acl
+@@ -174,12 +203,14 @@ AC_DEFUN([ZFS_AC_KERNEL_INODE_OPERATIONS_SET_ACL], [
+ 
+ AC_DEFUN([ZFS_AC_KERNEL_SRC_ACL], [
+ 	ZFS_AC_KERNEL_SRC_POSIX_ACL_EQUIV_MODE_WANTS_UMODE_T
++	ZFS_AC_KERNEL_SRC_POSIX_ACL_TO_XATTR_ALLOC
+ 	ZFS_AC_KERNEL_SRC_INODE_OPERATIONS_GET_ACL
+ 	ZFS_AC_KERNEL_SRC_INODE_OPERATIONS_SET_ACL
+ ])
+ 
+ AC_DEFUN([ZFS_AC_KERNEL_ACL], [
+ 	ZFS_AC_KERNEL_POSIX_ACL_EQUIV_MODE_WANTS_UMODE_T
++	ZFS_AC_KERNEL_POSIX_ACL_TO_XATTR_ALLOC
+ 	ZFS_AC_KERNEL_INODE_OPERATIONS_GET_ACL
+ 	ZFS_AC_KERNEL_INODE_OPERATIONS_SET_ACL
+ ])
+diff --git a/include/os/linux/kernel/linux/xattr_compat.h b/include/os/linux/kernel/linux/xattr_compat.h
+index f2f7e1ed017f..39645c19094f 100644
+--- a/include/os/linux/kernel/linux/xattr_compat.h
++++ b/include/os/linux/kernel/linux/xattr_compat.h
+@@ -130,10 +130,27 @@ zpl_acl_from_xattr(const void *value, int size)
+ 	return (posix_acl_from_xattr(kcred->user_ns, value, size));
+ }
+ 
++/*
++ * Linux 7.0 API change. posix_acl_to_xattr() changed from filling the
++ * caller-provided buffer to allocating a buffer with enough space and
++ * returning it. We wrap this up by copying the result into the provided
++ * buffer and freeing the allocated buffer.
++ */
+ static inline int
+ zpl_acl_to_xattr(struct posix_acl *acl, void *value, int size)
+ {
++#ifdef HAVE_POSIX_ACL_TO_XATTR_ALLOC
++	size_t s = 0;
++	void *v = posix_acl_to_xattr(kcred->user_ns, acl, &s,
++	    kmem_flags_convert(KM_SLEEP));
++	if (v == NULL)
++		return (-ENOMEM);
++	memcpy(value, v, MIN(size, s));
++	kfree(v);
++	return (0);
++#else
+ 	return (posix_acl_to_xattr(kcred->user_ns, acl, value, size));
++#endif
+ }
+ 
+ #endif /* _ZFS_XATTR_H */
+
+From 323490464e477a42a6c5d122ac3f0ec19931b838 Mon Sep 17 00:00:00 2001
+From: Rob Norris <rob.norris@truenas.com>
+Date: Mon, 26 Jan 2026 11:21:25 +1100
+Subject: [PATCH 3/3] Linux 7.0: add shims for the fs_context-based mount API
+
+The traditional mount API has been removed, so detect when its not
+available and instead use a small adapter to allow our existing mount
+functions to keep working.
+
+Sponsored-by: TrueNAS
+Signed-off-by: Rob Norris <rob.norris@truenas.com>
+---
+ config/kernel-fst-mount.m4      |  7 +++-
+ module/os/linux/zfs/zpl_super.c | 66 +++++++++++++++++++++++++++++++++
+ 2 files changed, 72 insertions(+), 1 deletion(-)
+
+diff --git a/config/kernel-fst-mount.m4 b/config/kernel-fst-mount.m4
+index 811cc4f61b18..3c9137498175 100644
+--- a/config/kernel-fst-mount.m4
++++ b/config/kernel-fst-mount.m4
+@@ -4,6 +4,10 @@ dnl # 2.6.38 API change
+ dnl # The .get_sb callback has been replaced by a .mount callback
+ dnl # in the file_system_type structure.
+ dnl #
++dnl # 7.0 API change
++dnl # The .mount callback has been removed, requiring all mount work
++dnl # to be done through the "new" mount API introduced in 5.2.
++dnl #
+ AC_DEFUN([ZFS_AC_KERNEL_SRC_FST_MOUNT], [
+         ZFS_LINUX_TEST_SRC([file_system_type_mount], [
+                 #include <linux/fs.h>
+@@ -25,7 +29,8 @@ AC_DEFUN([ZFS_AC_KERNEL_FST_MOUNT], [
+         AC_MSG_CHECKING([whether fst->mount() exists])
+         ZFS_LINUX_TEST_RESULT([file_system_type_mount], [
+                 AC_MSG_RESULT(yes)
++		AC_DEFINE(HAVE_FST_MOUNT, 1, [fst->mount() exists])
+         ],[
+-		ZFS_LINUX_TEST_ERROR([fst->mount()])
++		AC_MSG_RESULT(no)
+         ])
+ ])
+diff --git a/module/os/linux/zfs/zpl_super.c b/module/os/linux/zfs/zpl_super.c
+index 347b352506e5..d509152b6921 100644
+--- a/module/os/linux/zfs/zpl_super.c
++++ b/module/os/linux/zfs/zpl_super.c
+@@ -24,6 +24,7 @@
+  * Copyright (c) 2023, Datto Inc. All rights reserved.
+  * Copyright (c) 2025, Klara, Inc.
+  * Copyright (c) 2025, Rob Norris <robn@despairlabs.com>
++ * Copyright (c) 2026, TrueNAS.
+  */
+ 
+ 
+@@ -36,6 +37,10 @@
+ #include <linux/version.h>
+ #include <linux/vfs_compat.h>
+ 
++#ifndef HAVE_FST_MOUNT
++#include <linux/fs_context.h>
++#endif
++
+ /*
+  * What to do when the last reference to an inode is released. If 0, the kernel
+  * will cache it on the superblock. If 1, the inode will be freed immediately.
+@@ -504,6 +509,61 @@ zpl_prune_sb(uint64_t nr_to_scan, void *arg)
+ #endif
+ }
+ 
++#ifndef HAVE_FST_MOUNT
++/*
++ * In kernel 7.0, the file_system_type->mount() and
++ * super_operations->remount_fs() callbacks have been removed, requiring all
++ * users to convert to the "new" fs_context-based mount API introduced in 5.2.
++ *
++ * This is the simplest compatibility shim possible to adapt the fs_context
++ * interface to the old-style calls. Although this interface exists in almost
++ * all versions of Linux currently supported by OpenZFS, we only use it when
++ * the kernel-provided shims are unavailable, to avoid bugs in these new shims
++ * affecting all OpenZFS deployments.
++ */
++static int
++zpl_parse_monolithic(struct fs_context *fc, void *data)
++{
++	/*
++	 * We do options parsing in zfs_domount(); just stash the options blob
++	 * in the fs_context so we can pass it down later.
++	 */
++	fc->fs_private = data;
++	return (0);
++}
++
++static int
++zpl_get_tree(struct fs_context *fc)
++{
++	struct dentry *root =
++	    zpl_mount(fc->fs_type, fc->sb_flags, fc->source, fc->fs_private);
++	if (IS_ERR(root))
++		return (PTR_ERR(root));
++
++	fc->root = root;
++	return (0);
++}
++
++static int
++zpl_reconfigure(struct fs_context *fc)
++{
++	return (zpl_remount_fs(fc->root->d_sb, &fc->sb_flags, fc->fs_private));
++}
++
++const struct fs_context_operations zpl_fs_context_operations = {
++	.parse_monolithic	= zpl_parse_monolithic,
++	.get_tree		= zpl_get_tree,
++	.reconfigure		= zpl_reconfigure,
++};
++
++static int
++zpl_init_fs_context(struct fs_context *fc)
++{
++	fc->ops = &zpl_fs_context_operations;
++	return (0);
++}
++#endif
++
+ const struct super_operations zpl_super_operations = {
+ 	.alloc_inode		= zpl_inode_alloc,
+ #ifdef HAVE_SOPS_FREE_INODE
+@@ -517,7 +577,9 @@ const struct super_operations zpl_super_operations = {
+ 	.put_super		= zpl_put_super,
+ 	.sync_fs		= zpl_sync_fs,
+ 	.statfs			= zpl_statfs,
++#ifdef HAVE_FST_MOUNT
+ 	.remount_fs		= zpl_remount_fs,
++#endif
+ 	.show_devname		= zpl_show_devname,
+ 	.show_options		= zpl_show_options,
+ 	.show_stats		= NULL,
+@@ -560,7 +622,11 @@ struct file_system_type zpl_fs_type = {
+ #else
+ 	.fs_flags		= FS_USERNS_MOUNT,
+ #endif
++#ifdef HAVE_FST_MOUNT
+ 	.mount			= zpl_mount,
++#else
++	.init_fs_context	= zpl_init_fs_context,
++#endif
+ 	.kill_sb		= zpl_kill_sb,
+ };
+ 
+From b127b5e3ebafd03ed1d45c7ebcafbfc8f72ebccd Mon Sep 17 00:00:00 2001
+From: Rob Norris <rob.norris@truenas.com>
+Date: Sun, 15 Feb 2026 13:54:27 +1100
+Subject: [PATCH] Linux 7.0: explicitly set setlease handler to kernel
+ implementation
+
+The upcoming 7.0 kernel will no longer fall back to generic_setlease(),
+instead returning EINVAL if .setlease is NULL. So, we set it explicitly.
+
+To ensure that we catch any future kernel change, adds a sanity test for
+F_SETLEASE and F_GETLEASE too. Since this is a Linux-specific test,
+also a small adjustment to the test runner to allow OS-specific helper
+programs.
+
+Sponsored-by: TrueNAS
+Signed-off-by: Rob Norris <rob.norris@truenas.com>
+---
+ config/kernel-filelock.m4                     |  23 ++++
+ config/kernel.m4                              |   2 +
+ module/os/linux/zfs/zpl_file.c                |   4 +
+ scripts/zfs-tests.sh                          |  16 ++-
+ tests/runfiles/linux.run                      |   4 +
+ tests/zfs-tests/cmd/.gitignore                |   1 +
+ tests/zfs-tests/cmd/Makefile.am               |   1 +
+ tests/zfs-tests/cmd/setlease.c                | 126 ++++++++++++++++++
+ tests/zfs-tests/include/commands.cfg          |   5 +-
+ tests/zfs-tests/tests/Makefile.am             |   3 +
+ .../tests/functional/lease/cleanup.ksh        |  26 ++++
+ .../tests/functional/lease/lease_setlease.ksh |  44 ++++++
+ .../tests/functional/lease/setup.ksh          |  27 ++++
+ 13 files changed, 275 insertions(+), 7 deletions(-)
+ create mode 100644 config/kernel-filelock.m4
+ create mode 100644 tests/zfs-tests/cmd/setlease.c
+ create mode 100755 tests/zfs-tests/tests/functional/lease/cleanup.ksh
+ create mode 100755 tests/zfs-tests/tests/functional/lease/lease_setlease.ksh
+ create mode 100755 tests/zfs-tests/tests/functional/lease/setup.ksh
+
+diff --git a/config/kernel-filelock.m4 b/config/kernel-filelock.m4
+new file mode 100644
+index 000000000000..5e8d7c784692
+--- /dev/null
++++ b/config/kernel-filelock.m4
+@@ -0,0 +1,23 @@
++dnl # SPDX-License-Identifier: CDDL-1.0
++dnl #
++dnl # 6.3 API change
++dnl # locking support functions (eg generic_setlease) were moved out of
++dnl # linux/fs.h to linux/filelock.h
++dnl #
++AC_DEFUN([ZFS_AC_KERNEL_SRC_FILELOCK_HEADER], [
++	ZFS_LINUX_TEST_SRC([filelock_header], [
++		#include <linux/fs.h>
++		#include <linux/filelock.h>
++	], [])
++])
++
++AC_DEFUN([ZFS_AC_KERNEL_FILELOCK_HEADER], [
++	AC_MSG_CHECKING([for standalone filelock header])
++	ZFS_LINUX_TEST_RESULT([filelock_header], [
++		AC_MSG_RESULT(yes)
++		AC_DEFINE(HAVE_FILELOCK_HEADER, 1, [linux/filelock.h exists])
++	], [
++		AC_MSG_RESULT(no)
++	])
++])
++
+diff --git a/config/kernel.m4 b/config/kernel.m4
+index 6f23494d6f2a..c429397b05a4 100644
+--- a/config/kernel.m4
++++ b/config/kernel.m4
+@@ -141,6 +141,7 @@ AC_DEFUN([ZFS_AC_KERNEL_TEST_SRC], [
+ 	ZFS_AC_KERNEL_SRC_NAMESPACE
+ 	ZFS_AC_KERNEL_SRC_INODE_GENERIC_DROP
+ 	ZFS_AC_KERNEL_SRC_KASAN_ENABLED
++	ZFS_AC_KERNEL_SRC_FILELOCK_HEADER
+ 	case "$host_cpu" in
+ 		powerpc*)
+ 			ZFS_AC_KERNEL_SRC_CPU_HAS_FEATURE
+@@ -265,6 +266,7 @@ AC_DEFUN([ZFS_AC_KERNEL_TEST_RESULT], [
+ 	ZFS_AC_KERNEL_NAMESPACE
+ 	ZFS_AC_KERNEL_INODE_GENERIC_DROP
+ 	ZFS_AC_KERNEL_KASAN_ENABLED
++	ZFS_AC_KERNEL_FILELOCK_HEADER
+ 	case "$host_cpu" in
+ 		powerpc*)
+ 			ZFS_AC_KERNEL_CPU_HAS_FEATURE
+diff --git a/module/os/linux/zfs/zpl_file.c b/module/os/linux/zfs/zpl_file.c
+index f7691c02d163..30f3e3855355 100644
+--- a/module/os/linux/zfs/zpl_file.c
++++ b/module/os/linux/zfs/zpl_file.c
+@@ -43,6 +43,9 @@
+ #ifdef HAVE_VFS_FILEMAP_DIRTY_FOLIO
+ #include <linux/writeback.h>
+ #endif
++#ifdef HAVE_FILELOCK_HEADER
++#include <linux/filelock.h>
++#endif
+ 
+ /*
+  * When using fallocate(2) to preallocate space, inflate the requested
+@@ -1242,6 +1245,7 @@ const struct file_operations zpl_file_operations = {
+ 	.mmap		= zpl_mmap,
+ 	.fsync		= zpl_fsync,
+ 	.fallocate	= zpl_fallocate,
++	.setlease	= generic_setlease,
+ 	.copy_file_range	= zpl_copy_file_range,
+ #ifdef HAVE_VFS_CLONE_FILE_RANGE
+ 	.clone_file_range	= zpl_clone_file_range,
+diff --git a/scripts/zfs-tests.sh b/scripts/zfs-tests.sh
+index 09a15bafc27e..697c3f304d81 100755
+--- a/scripts/zfs-tests.sh
++++ b/scripts/zfs-tests.sh
+@@ -294,6 +294,16 @@ constrain_path() {
+ 	SYSTEM_DIRS="/usr/local/bin /usr/local/sbin"
+ 	SYSTEM_DIRS="$SYSTEM_DIRS /usr/bin /usr/sbin /bin /sbin $LIBEXEC_DIR"
+ 
++	SYSTEM_FILES="$SYSTEM_FILES_COMMON"
++	ZFSTEST_FILES="$ZFSTEST_FILES_COMMON"
++	if [ "$UNAME" = "FreeBSD" ] ; then
++		SYSTEM_FILES="$SYSTEM_FILES $SYSTEM_FILES_FREEBSD"
++		ZFSTEST_FILES="$ZFSTEST_FILES $ZFSTEST_FILES_FREEBSD"
++	else
++		SYSTEM_FILES="$SYSTEM_FILES $SYSTEM_FILES_LINUX"
++		ZFSTEST_FILES="$ZFSTEST_FILES $ZFSTEST_FILES_LINUX"
++	fi
++
+ 	if [ "$INTREE" = "yes" ]; then
+ 		# Constrained path set to $(top_builddir)/tests/zfs-tests/bin
+ 		STF_PATH="$BIN_DIR"
+@@ -326,12 +336,6 @@ constrain_path() {
+ 	fi
+ 
+ 	# Standard system utilities
+-	SYSTEM_FILES="$SYSTEM_FILES_COMMON"
+-	if [ "$UNAME" = "FreeBSD" ] ; then
+-		SYSTEM_FILES="$SYSTEM_FILES $SYSTEM_FILES_FREEBSD"
+-	else
+-		SYSTEM_FILES="$SYSTEM_FILES $SYSTEM_FILES_LINUX"
+-	fi
+ 	create_links "$SYSTEM_DIRS" "$SYSTEM_FILES"
+ 
+ 	# Exceptions
+diff --git a/tests/runfiles/linux.run b/tests/runfiles/linux.run
+index a65633dd8cfb..2717bf53d0b1 100644
+--- a/tests/runfiles/linux.run
++++ b/tests/runfiles/linux.run
+@@ -141,6 +141,10 @@ pre =
+ post =
+ tags = ['functional', 'largest_pool']
+ 
++[tests/functional/lease:Linux]
++tests = ['lease_setlease']
++tags = ['functional', 'lease']
++
+ [tests/functional/longname:Linux]
+ tests = ['longname_001_pos', 'longname_002_pos', 'longname_003_pos']
+ tags = ['functional', 'longname']
+diff --git a/tests/zfs-tests/cmd/Makefile.am b/tests/zfs-tests/cmd/Makefile.am
+index 003fb6108f12..6be5bd550181 100644
+--- a/tests/zfs-tests/cmd/Makefile.am
++++ b/tests/zfs-tests/cmd/Makefile.am
+@@ -130,6 +130,7 @@ scripts_zfs_tests_bin_PROGRAMS += %D%/statx
+ scripts_zfs_tests_bin_PROGRAMS += %D%/xattrtest
+ scripts_zfs_tests_bin_PROGRAMS += %D%/zed_fd_spill-zedlet
+ scripts_zfs_tests_bin_PROGRAMS += %D%/idmap_util
++scripts_zfs_tests_bin_PROGRAMS += %D%/setlease
+ 
+ %C%_idmap_util_LDADD = libspl.la
+ 
+diff --git a/tests/zfs-tests/cmd/setlease.c b/tests/zfs-tests/cmd/setlease.c
+new file mode 100644
+index 000000000000..12bcbd91beb5
+--- /dev/null
++++ b/tests/zfs-tests/cmd/setlease.c
+@@ -0,0 +1,126 @@
++// SPDX-License-Identifier: CDDL-1.0
++/*
++ * CDDL HEADER START
++ *
++ * The contents of this file are subject to the terms of the
++ * Common Development and Distribution License (the "License").
++ * You may not use this file except in compliance with the License.
++ *
++ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++ * or https://opensource.org/licenses/CDDL-1.0.
++ * See the License for the specific language governing permissions
++ * and limitations under the License.
++ *
++ * When distributing Covered Code, include this CDDL HEADER in each
++ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++ * If applicable, add the following below this CDDL HEADER, with the
++ * fields enclosed by brackets "[]" replaced with your own identifying
++ * information: Portions Copyright [yyyy] [name of copyright owner]
++ *
++ * CDDL HEADER END
++ */
++
++/*
++ * Copyright (c) 2026, TrueNAS.
++ */
++
++/*
++ * This is a sanity check test for the F_SETLEASE and F_GETLEASE fcntl() calls.
++ * We use the generic kernel implementation, but we want to be alerted if it
++ * ever breaks.
++ *
++ * This is not a comprehensive test. It would be nice if it could be!
++ */
++
++#ifndef _GNU_SOURCE
++#define	_GNU_SOURCE
++#endif
++
++#include <stdio.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <string.h>
++
++static int
++get_lease(int fd) {
++	int r = fcntl(fd, F_GETLEASE);
++	if (r < 0) {
++		perror("fcntl(GETLEASE)");
++		exit(2);
++	}
++	return (r);
++}
++
++static int
++set_lease(int fd, int lease) {
++	return (fcntl(fd, F_SETLEASE, lease) < 0 ? errno : 0);
++}
++
++static const char *lease_str[] = {
++	[F_RDLCK] = "RDLCK",
++	[F_WRLCK] = "WRLCK",
++	[F_UNLCK] = "UNLCK",
++};
++
++static void
++assert_lease(int fd, int expect) {
++	int got = get_lease(fd);
++	if (got != expect) {
++		fprintf(stderr, "ASSERT_LEASE: expected %s [%d], got %s [%d]\n",
++		    lease_str[expect], expect, lease_str[got], got);
++		abort();
++	}
++	printf("ok: lease is %s\n", lease_str[got]);
++}
++
++static void
++assert_set_lease(int fd, int lease) {
++	int err = set_lease(fd, lease);
++	if (err != 0) {
++		fprintf(stderr, "ASSERT_SET_LEASE: tried %s [%d], error: %s\n",
++		    lease_str[lease], lease, strerror(err));
++		abort();
++	}
++	printf("ok: set lease to %s\n", lease_str[lease]);
++}
++
++int
++main(int argc, char **argv)
++{
++	if (argc != 2) {
++		fprintf(stderr, "usage: %s <filename>\n", argv[0]);
++		exit(1);
++	}
++
++	/* create and open file, read+write */
++	int fd = open(argv[1], O_CREAT|O_RDONLY, S_IRWXU|S_IRWXG|S_IRWXO);
++	if (fd < 0) {
++		perror("open");
++		exit(2);
++	}
++	printf("ok: opened file RDONLY\n");
++
++	/* fd starts with no lease */
++	assert_lease(fd, F_UNLCK);
++
++	/* fd is readonly, so can take read lease */
++	assert_set_lease(fd, F_RDLCK);
++	/* confirm read lease */
++	assert_lease(fd, F_RDLCK);
++
++	/* no other openers, so can take write lease */
++	assert_set_lease(fd, F_WRLCK);
++	/* confirm write lease */
++	assert_lease(fd, F_WRLCK);
++
++	/* release lease */
++	assert_set_lease(fd, F_UNLCK);
++	/* confirm lease released */
++	assert_lease(fd, F_UNLCK);
++
++	close(fd);
++
++	return (0);
++}
+diff --git a/tests/zfs-tests/include/commands.cfg b/tests/zfs-tests/include/commands.cfg
+index 1c4d25e152a7..4ba9aa7c8b67 100644
+--- a/tests/zfs-tests/include/commands.cfg
++++ b/tests/zfs-tests/include/commands.cfg
+@@ -182,7 +182,7 @@ export ZFS_FILES='zdb
+     zfs_ids_to_path
+     zpool_influxdb'
+ 
+-export ZFSTEST_FILES='badsend
++export ZFSTEST_FILES_COMMON='badsend
+     btree_test
+     chg_usr_exec
+     clonefile
+@@ -241,3 +241,6 @@ export ZFSTEST_FILES='badsend
+     zfs_diff-socket
+     dosmode_readonly_write
+     idmap_util'
++
++export ZFSTEST_FILES_LINUX='
++    setlease'
+diff --git a/tests/zfs-tests/tests/Makefile.am b/tests/zfs-tests/tests/Makefile.am
+index 9bb39b012cf2..1a5cf6eba032 100644
+--- a/tests/zfs-tests/tests/Makefile.am
++++ b/tests/zfs-tests/tests/Makefile.am
+@@ -1658,6 +1658,9 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
+ 	functional/io/psync.ksh \
+ 	functional/io/setup.ksh \
+ 	functional/io/sync.ksh \
++	functional/lease/cleanup.ksh \
++	functional/lease/lease_setlease.ksh \
++	functional/lease/setup.ksh \
+ 	functional/l2arc/cleanup.ksh \
+ 	functional/l2arc/l2arc_arcstats_pos.ksh \
+ 	functional/l2arc/l2arc_l2miss_pos.ksh \
+diff --git a/tests/zfs-tests/tests/functional/lease/cleanup.ksh b/tests/zfs-tests/tests/functional/lease/cleanup.ksh
+new file mode 100755
+index 000000000000..5e73dd34936e
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/lease/cleanup.ksh
+@@ -0,0 +1,26 @@
++#!/bin/ksh -p
++# SPDX-License-Identifier: CDDL-1.0
++#
++# CDDL HEADER START
++#
++# The contents of this file are subject to the terms of the
++# Common Development and Distribution License (the "License").
++# You may not use this file except in compliance with the License.
++#
++# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++# or https://opensource.org/licenses/CDDL-1.0.
++# See the License for the specific language governing permissions
++# and limitations under the License.
++#
++# When distributing Covered Code, include this CDDL HEADER in each
++# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++# If applicable, add the following below this CDDL HEADER, with the
++# fields enclosed by brackets "[]" replaced with your own identifying
++# information: Portions Copyright [yyyy] [name of copyright owner]
++#
++# CDDL HEADER END
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++default_cleanup
+diff --git a/tests/zfs-tests/tests/functional/lease/lease_setlease.ksh b/tests/zfs-tests/tests/functional/lease/lease_setlease.ksh
+new file mode 100755
+index 000000000000..8647d01995c3
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/lease/lease_setlease.ksh
+@@ -0,0 +1,44 @@
++#!/bin/ksh -p
++# SPDX-License-Identifier: CDDL-1.0
++#
++# CDDL HEADER START
++#
++# The contents of this file are subject to the terms of the
++# Common Development and Distribution License (the "License").
++# You may not use this file except in compliance with the License.
++#
++# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++# or https://opensource.org/licenses/CDDL-1.0.
++# See the License for the specific language governing permissions
++# and limitations under the License.
++#
++# When distributing Covered Code, include this CDDL HEADER in each
++# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++# If applicable, add the following below this CDDL HEADER, with the
++# fields enclosed by brackets "[]" replaced with your own identifying
++# information: Portions Copyright [yyyy] [name of copyright owner]
++#
++# CDDL HEADER END
++#
++
++#
++# Copyright (c) 2026, TrueNAS.
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++verify_runnable "both"
++
++leasefile=/$TESTPOOL/leasefile
++
++function cleanup
++{
++	rm -f $leasefile
++}
++
++log_assert "F_SETLEASE is supported"
++log_onexit cleanup
++
++log_must setlease $leasefile
++
++log_pass "F_SETLEASE is supported"
+diff --git a/tests/zfs-tests/tests/functional/lease/setup.ksh b/tests/zfs-tests/tests/functional/lease/setup.ksh
+new file mode 100755
+index 000000000000..09da91b0f93f
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/lease/setup.ksh
+@@ -0,0 +1,27 @@
++#!/bin/ksh -p
++# SPDX-License-Identifier: CDDL-1.0
++#
++# CDDL HEADER START
++#
++# The contents of this file are subject to the terms of the
++# Common Development and Distribution License (the "License").
++# You may not use this file except in compliance with the License.
++#
++# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++# or https://opensource.org/licenses/CDDL-1.0.
++# See the License for the specific language governing permissions
++# and limitations under the License.
++#
++# When distributing Covered Code, include this CDDL HEADER in each
++# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++# If applicable, add the following below this CDDL HEADER, with the
++# fields enclosed by brackets "[]" replaced with your own identifying
++# information: Portions Copyright [yyyy] [name of copyright owner]
++#
++# CDDL HEADER END
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++DISK=${DISKS%% *}
++default_setup $DISK
+diff --git a/META b/META
+index c6d7e3e..805ab05 100644
+--- a/META
++++ b/META
+@@ -6,5 +6,5 @@ Release:       1
+ Release-Tags:  relext
+ License:       CDDL
+ Author:        OpenZFS
+-Linux-Maximum: 6.19
++Linux-Maximum: 7.0
+ Linux-Minimum: 4.18
+From 4a5886639091b795a4c1cb1b5677cd362cf71fe8 Mon Sep 17 00:00:00 2001
+From: John Cabaj <john.cabaj@canonical.com>
+Date: Thu, 19 Mar 2026 15:28:33 -0500
+Subject: [PATCH] Linux 7.0: autoconf: Remove copy-from-user-inatomic API
+ checks (#18348)
+
+This function was removed in c6442bd3b643: "Removing old code outside
+of 4.18 kernsls", but fails at present on PowerPC builds due to the
+recent inclusion of 6bc9c0a90522: "powerpc: fix KUAP warning in VMX
+usercopy path" in the upstream kernel, which introduces a use of
+cpu_feature_keys[], which is a GPL-only symbol. Removing the API
+check as it doesn't appear necessary.
+
+Signed-off-by: John Cabaj <john.cabaj@canonical.com>
+---
+ config/kernel-copy-from-user-inatomic.m4 | 30 ------------------------
+ config/kernel.m4                         |  2 --
+ 2 files changed, 32 deletions(-)
+ delete mode 100644 config/kernel-copy-from-user-inatomic.m4
+
+diff --git a/config/kernel-copy-from-user-inatomic.m4 b/config/kernel-copy-from-user-inatomic.m4
+deleted file mode 100644
+index ed8ab95a30c3..000000000000
+--- a/config/kernel-copy-from-user-inatomic.m4
++++ /dev/null
+@@ -1,29 +0,0 @@
+-dnl #
+-dnl # On certain architectures `__copy_from_user_inatomic`
+-dnl # is a GPL exported variable and cannot be used by OpenZFS.
+-dnl #
+-
+-dnl #
+-dnl # Checking if `__copy_from_user_inatomic` is available.
+-dnl #
+-AC_DEFUN([ZFS_AC_KERNEL_SRC___COPY_FROM_USER_INATOMIC], [
+-	ZFS_LINUX_TEST_SRC([__copy_from_user_inatomic], [
+-		#include <linux/uaccess.h>
+-	], [
+-		int result __attribute__ ((unused)) = __copy_from_user_inatomic(NULL, NULL, 0);
+-	], [], [ZFS_META_LICENSE])
+-])
+-
+-AC_DEFUN([ZFS_AC_KERNEL___COPY_FROM_USER_INATOMIC], [
+-	AC_MSG_CHECKING([whether __copy_from_user_inatomic is available])
+-	ZFS_LINUX_TEST_RESULT([__copy_from_user_inatomic_license], [
+-		AC_MSG_RESULT(yes)
+-	], [
+-		AC_MSG_RESULT(no)
+-		AC_MSG_ERROR([
+-	*** The `__copy_from_user_inatomic()` Linux kernel function is
+-	*** incompatible with the CDDL license and will prevent the module
+-	*** linking stage from succeeding.  OpenZFS cannot be compiled.
+-		])
+-	])
+-])
+diff --git a/config/kernel.m4 b/config/kernel.m4
+index 3389c5359834..e1dba34e5dbe 100644
+--- a/config/kernel.m4
++++ b/config/kernel.m4
+@@ -120,7 +120,6 @@ AC_DEFUN([ZFS_AC_KERNEL_TEST_SRC], [
+ 	ZFS_AC_KERNEL_SRC_ADD_DISK
+ 	ZFS_AC_KERNEL_SRC_KTHREAD
+ 	ZFS_AC_KERNEL_SRC_ZERO_PAGE
+-	ZFS_AC_KERNEL_SRC___COPY_FROM_USER_INATOMIC
+ 	ZFS_AC_KERNEL_SRC_IDMAP_MNT_API
+ 	ZFS_AC_KERNEL_SRC_IDMAP_NO_USERNS
+ 	ZFS_AC_KERNEL_SRC_IATTR_VFSID
+@@ -245,7 +244,6 @@ AC_DEFUN([ZFS_AC_KERNEL_TEST_RESULT], [
+ 	ZFS_AC_KERNEL_ADD_DISK
+ 	ZFS_AC_KERNEL_KTHREAD
+ 	ZFS_AC_KERNEL_ZERO_PAGE
+-	ZFS_AC_KERNEL___COPY_FROM_USER_INATOMIC
+ 	ZFS_AC_KERNEL_IDMAP_MNT_API
+ 	ZFS_AC_KERNEL_IDMAP_NO_USERNS
+ 	ZFS_AC_KERNEL_IATTR_VFSID
