@@ -1,0 +1,1625 @@
+From 81594b8d9ea329fa5405612b8a78167dce7b899b Mon Sep 17 00:00:00 2001
+From: Damien Caliste <dcaliste@free.fr>
+Date: Wed, 4 Mar 2026 22:38:34 +0100
+Subject: [PATCH 1/9] [mkcal] Adopt the deprecated notebook API.
+
+Since KF6, this API is removed from KCalendarCore.
+For a transition period, let's adopt the API here.
+This should allow to continue to use ExtendedCalendar
+for a while.
+---
+ src/extendedcalendar.cpp | 196 +++++++++++++++++++++++++++++++++++++++
+ src/extendedcalendar.h   | 134 ++++++++++++++++++++++++++
+ src/extendedstorage.cpp  |  12 ++-
+ src/extendedstorage.h    |   8 +-
+ tests/tst_storage.cpp    |   2 +-
+ 5 files changed, 347 insertions(+), 5 deletions(-)
+
+diff --git a/src/extendedcalendar.cpp b/src/extendedcalendar.cpp
+index 7b23c89..51f87c5 100644
+--- a/src/extendedcalendar.cpp
++++ b/src/extendedcalendar.cpp
+@@ -54,6 +54,13 @@ class mKCal::ExtendedCalendar::Private
+     ~Private()
+     {
+     }
++
++    // Deprecated notebook API.
++    QMultiHash<QString, Incidence::Ptr> mNotebookIncidences;
++    QHash<QString, QString> mUidToNotebook;
++    QHash<QString, bool> mNotebooks; // name to visibility
++    QHash<Incidence::Ptr, bool> mIncidenceVisibility; // incidence -> visibility
++    QString mDefaultNotebook; // uid of default notebook
+ };
+ 
+ ExtendedCalendar::ExtendedCalendar(const QTimeZone &timeZone)
+@@ -83,6 +90,15 @@ bool ExtendedCalendar::save()
+     return false;
+ }
+ 
++void ExtendedCalendar::close()
++{
++    d->mNotebookIncidences.clear();
++    d->mUidToNotebook.clear();
++    d->mIncidenceVisibility.clear();
++
++    MemoryCalendar::close();
++}
++
+ // Dissociate a single occurrence or all future occurrences from a recurring
+ // sequence. The new incidence is returned, but not automatically inserted
+ // into the calendar, which is left to the calling application.
+@@ -295,3 +311,183 @@ Journal::List ExtendedCalendar::journals(const QDate &start, const QDate &end)
+     }
+     return journalList;
+ }
++
++// Deprecated notebook API.
++Incidence::List ExtendedCalendar::duplicates(const Incidence::Ptr &incidence)
++{
++    if (!incidence) {
++        return {};
++    }
++
++    Incidence::List list;
++    const Incidence::List vals = rawIncidences();
++    std::copy_if(vals.cbegin(), vals.cend(), std::back_inserter(list), [&](const Incidence::Ptr &in) {
++        return (incidence->dtStart() == in->dtStart() || (!incidence->dtStart().isValid() && !in->dtStart().isValid()))
++            && incidence->summary() == in->summary();
++    });
++    return list;
++}
++
++bool ExtendedCalendar::addNotebook(const QString &notebook, bool isVisible)
++{
++    if (d->mNotebooks.contains(notebook)) {
++        return false;
++    } else {
++        d->mNotebooks.insert(notebook, isVisible);
++        return true;
++    }
++}
++
++bool ExtendedCalendar::updateNotebook(const QString &notebook, bool isVisible)
++{
++    if (!d->mNotebooks.contains(notebook)) {
++        return false;
++    } else {
++        d->mNotebooks.insert(notebook, isVisible);
++
++        for (auto  noteIt = d->mNotebookIncidences.find(notebook);
++             noteIt != d->mNotebookIncidences.end() && noteIt.key() == notebook;
++             ++noteIt) {
++            const Incidence::Ptr &incidence = noteIt.value();
++            auto visibleIt = d->mIncidenceVisibility.find(incidence);
++            if (visibleIt != d->mIncidenceVisibility.end()) {
++                *visibleIt = isVisible;
++            }
++        }
++        return true;
++    }
++}
++
++bool ExtendedCalendar::deleteNotebook(const QString &notebook)
++{
++    if (!d->mNotebooks.contains(notebook)) {
++        return false;
++    } else {
++        return d->mNotebooks.remove(notebook);
++    }
++}
++
++bool ExtendedCalendar::setDefaultNotebook(const QString &notebook)
++{
++    if (!d->mNotebooks.contains(notebook)) {
++        return false;
++    } else {
++        d->mDefaultNotebook = notebook;
++        return true;
++    }
++}
++
++QString ExtendedCalendar::defaultNotebook() const
++{
++    return d->mDefaultNotebook;
++}
++
++bool ExtendedCalendar::hasValidNotebook(const QString &notebook) const
++{
++    return d->mNotebooks.contains(notebook);
++}
++
++bool ExtendedCalendar::isVisible(const Incidence::Ptr &incidence) const
++{
++    if (d->mIncidenceVisibility.contains(incidence)) {
++        return d->mIncidenceVisibility[incidence];
++    }
++    const QString nuid = notebook(incidence);
++    bool rv;
++    if (d->mNotebooks.contains(nuid)) {
++        rv = d->mNotebooks.value(nuid);
++    } else {
++        // NOTE returns true also for nonexisting notebooks for compatibility
++        rv = true;
++    }
++    d->mIncidenceVisibility[incidence] = rv;
++    return rv;
++}
++
++bool ExtendedCalendar::isVisible(const QString &notebook) const
++{
++    QHash<QString, bool>::ConstIterator it = d->mNotebooks.constFind(notebook);
++    return (it != d->mNotebooks.constEnd()) ? *it : true;
++}
++
++void ExtendedCalendar::clearNotebookAssociations()
++{
++}
++
++bool ExtendedCalendar::setNotebook(const Incidence::Ptr &inc, const QString &notebook)
++{
++    if (!inc) {
++        return false;
++    }
++
++    if (!notebook.isEmpty() && !incidence(inc->uid(), inc->recurrenceId())) {
++        qCWarning(lcMkcal) << "cannot set notebook until incidence has been added";
++        return false;
++    }
++
++    if (d->mUidToNotebook.contains(inc->uid())) {
++        QString old = d->mUidToNotebook.value(inc->uid());
++        if (!old.isEmpty() && notebook != old) {
++            if (inc->hasRecurrenceId()) {
++                qCWarning(lcMkcal) << "cannot set notebook for child incidences";
++                return false;
++            }
++            // Move all possible children also.
++            const Incidence::List list = instances(inc);
++            for (const auto &incidence : list) {
++                d->mNotebookIncidences.remove(old, incidence);
++                d->mNotebookIncidences.insert(notebook, incidence);
++            }
++            notifyIncidenceChanged(inc); // for removing from old notebook
++            // do not remove from mUidToNotebook to keep deleted incidences
++            d->mNotebookIncidences.remove(old, inc);
++        }
++    }
++    if (!notebook.isEmpty()) {
++        d->mUidToNotebook.insert(inc->uid(), notebook);
++        d->mNotebookIncidences.insert(notebook, inc);
++        qCDebug(lcMkcal) << "setting notebook" << notebook << "for" << inc->uid();
++        notifyIncidenceChanged(inc); // for inserting into new notebook
++        const Incidence::List list = instances(inc);
++        for (const auto &incidence : list) {
++            notifyIncidenceChanged(incidence);
++        }
++    }
++
++    return true;
++}
++
++QString ExtendedCalendar::notebook(const Incidence::Ptr &incidence) const
++{
++    if (incidence) {
++        return d->mUidToNotebook.value(incidence->uid());
++    } else {
++        return QString();
++    }
++}
++
++QString ExtendedCalendar::notebook(const QString &uid) const
++{
++    return d->mUidToNotebook.value(uid);
++}
++
++QStringList ExtendedCalendar::notebooks() const
++{
++    return d->mNotebookIncidences.uniqueKeys();
++}
++
++Incidence::List ExtendedCalendar::incidences(const QString &notebook) const
++{
++    if (notebook.isEmpty()) {
++        return rawIncidences();
++    } else {
++        const QList<Incidence::Ptr> incs = d->mNotebookIncidences.values(notebook);
++        Incidence::List v;
++        v.reserve(incs.size());
++        for (QList<Incidence::Ptr>::ConstIterator it = incs.constBegin(), end = incs.constEnd();
++             it != end; ++it) {
++            v.push_back(*it);
++        }
++        return v;
++    }
++}
+diff --git a/src/extendedcalendar.h b/src/extendedcalendar.h
+index 0dc035c..bbc8b20 100644
+--- a/src/extendedcalendar.h
++++ b/src/extendedcalendar.h
+@@ -243,6 +243,12 @@ class MKCAL_EXPORT ExtendedCalendar : public KCalendarCore::MemoryCalendar
+     */
+     bool save();
+ 
++    /**
++      @copydoc
++      Calendar::close()
++    */
++    void close();
++
+     /**
+       Dissociate only one single Incidence from a recurring Incidence.
+       Incidence for the specified @a date will be dissociated and returned.
+@@ -366,6 +372,134 @@ class MKCAL_EXPORT ExtendedCalendar : public KCalendarCore::MemoryCalendar
+     static QSharedPointer<ExtendedStorage> defaultStorage(const ExtendedCalendar::Ptr
+                                                           &calendar);   //No typedef to avoid cyclic includes
+ 
++    // Adopt the deprecated notebook API from KF6.    
++    /**
++      Clears notebook associations from hash-tables for incidences.
++      Called when in-memory content of the calendar is cleared.
++     */
++    void clearNotebookAssociations();
++
++    /**
++      Associate notebook for an incidence.
++
++      @param incidence incidence
++      @param notebook notebook uid
++
++      @return true if the operation was successful; false otherwise.
++     */
++    bool setNotebook(const KCalendarCore::Incidence::Ptr &incidence, const QString &notebook);
++
++    /**
++      Get incidence's notebook.
++
++      @param incidence incidence
++
++      @return notebook uid
++     */
++    QString notebook(const KCalendarCore::Incidence::Ptr &incidence) const;
++
++    /**
++      Get incidence's notebook.
++
++      @param uid is a unique identifier string
++
++      @return notebook uid
++     */
++    QString notebook(const QString &uid) const;
++
++    /**
++      List all uids of notebooks currently in the memory.
++
++      @return list of uids of notebooks
++    */
++    QStringList notebooks() const;
++
++    /**
++      Check if calendar knows about the given notebook.
++      This means that it will be saved by one of the attached storages.
++
++      @param notebook notebook uid
++      @return true if calendar has valid notebook
++    */
++    Q_REQUIRED_RESULT bool hasValidNotebook(const QString &notebook) const;
++
++    /**
++      Add notebook information into calendar.
++      Is usually called by storages only.
++
++      @param notebook notebook uid
++      @param isVisible notebook visibility
++      @return true if operation succeeded
++      @see isVisible()
++    */
++    Q_REQUIRED_RESULT bool addNotebook(const QString &notebook, bool isVisible);
++
++    /**
++      Update notebook information in calendar.
++      Is usually called by storages only.
++
++      @param notebook notebook uid
++      @param isVisible notebook visibility
++      @return true if operation succeeded
++      @see isVisible()
++    */
++    Q_REQUIRED_RESULT bool updateNotebook(const QString &notebook, bool isVisible);
++
++    /**
++      Delete notebook information from calendar.
++      Is usually called by storages only.
++
++      @param notebook notebook uid
++      @return true if operation succeeded
++      @see isVisible()
++    */
++    Q_REQUIRED_RESULT bool deleteNotebook(const QString &notebook);
++
++    /**
++      set DefaultNotebook information to calendar.
++
++      @param notebook notebook uid
++      @return true if operation was successful; false otherwise.
++    */
++    Q_REQUIRED_RESULT bool setDefaultNotebook(const QString &notebook);
++
++    /**
++      Get uid of default notebook.
++
++      @return notebook uid
++     */
++    Q_REQUIRED_RESULT QString defaultNotebook() const;
++
++    /**
++      Check if incidence is visible.
++      @param incidence is a pointer to the Incidence to check for visibility.
++      @return true if incidence is visible, false otherwise
++    */
++    Q_REQUIRED_RESULT bool isVisible(const KCalendarCore::Incidence::Ptr &incidence) const;
++
++    /**
++      Check if notebook is visible.
++      @param notebook notebook uid.
++      @return true if notebook is visible, false otherwise
++    */
++    Q_REQUIRED_RESULT bool isVisible(const QString &notebook) const;
++
++    /**
++      List all notebook incidences in the memory.
++
++      @param notebook is the notebook uid.
++      @return a list of incidences for the notebook.
++    */
++    KCalendarCore::Incidence::List incidences(const QString &notebook) const;
++
++    /**
++      List all possible duplicate incidences.
++
++      @param incidence is the incidence to check.
++      @return a list of duplicate incidences.
++    */
++    KCalendarCore::Incidence::List duplicates(const KCalendarCore::Incidence::Ptr &incidence);
++
+ private:
+     //@cond PRIVATE
+     Q_DISABLE_COPY(ExtendedCalendar)
+diff --git a/src/extendedstorage.cpp b/src/extendedstorage.cpp
+index 238d67c..e6c72be 100644
+--- a/src/extendedstorage.cpp
++++ b/src/extendedstorage.cpp
+@@ -75,8 +75,9 @@ bool operator<(const QDate &at, const Range &range)
+ class mKCal::ExtendedStorage::Private: public AlarmHandler
+ {
+ public:
+-    Private(ExtendedStorage *storage, bool validateNotebooks)
++    Private(ExtendedStorage *storage, ExtendedCalendar::Ptr calendar, bool validateNotebooks)
+         : mStorage(storage)
++        , mCalendar(calendar)
+         , mValidateNotebooks(validateNotebooks)
+         , mIsRecurrenceLoaded(false)
+     {}
+@@ -85,6 +86,7 @@ class mKCal::ExtendedStorage::Private: public AlarmHandler
+     {}
+ 
+     ExtendedStorage *mStorage;
++    ExtendedCalendar::Ptr mCalendar;
+     bool mValidateNotebooks;
+     QList<Range> mRanges;
+     bool mIsRecurrenceLoaded;
+@@ -153,8 +155,7 @@ Incidence::List ExtendedStorage::Private::incidencesWithAlarms(const QString &no
+ //@endcond
+ 
+ ExtendedStorage::ExtendedStorage(const ExtendedCalendar::Ptr &cal, bool validateNotebooks)
+-    : CalStorage(cal),
+-      d(new ExtendedStorage::Private(this, validateNotebooks))
++    : d(new ExtendedStorage::Private(this, cal, validateNotebooks))
+ {
+     cal->registerObserver(this);
+ }
+@@ -165,6 +166,11 @@ ExtendedStorage::~ExtendedStorage()
+     delete d;
+ }
+ 
++ExtendedCalendar::Ptr ExtendedStorage::calendar() const
++{
++    return d->mCalendar;
++}
++
+ bool ExtendedStorage::close()
+ {
+     return d->clear();
+diff --git a/src/extendedstorage.h b/src/extendedstorage.h
+index 918c837..15af641 100644
+--- a/src/extendedstorage.h
++++ b/src/extendedstorage.h
+@@ -59,7 +59,7 @@ namespace mKCal {
+   notified about the action done.
+ */
+ class MKCAL_EXPORT ExtendedStorage
+-    : public KCalendarCore::CalStorage, public KCalendarCore::Calendar::CalendarObserver
++    : public QObject, public KCalendarCore::Calendar::CalendarObserver
+ {
+     Q_OBJECT
+ 
+@@ -100,6 +100,12 @@ class MKCAL_EXPORT ExtendedStorage
+     */
+     virtual ~ExtendedStorage();
+ 
++    /**
++      @copydoc
++      CalStorage::calendar()
++    */
++    ExtendedCalendar::Ptr calendar() const;
++
+     /**
+       @copydoc
+       CalStorage::open()
+diff --git a/tests/tst_storage.cpp b/tests/tst_storage.cpp
+index f43c9b7..26c18a9 100644
+--- a/tests/tst_storage.cpp
++++ b/tests/tst_storage.cpp
+@@ -297,7 +297,7 @@ typedef struct ExpandedIncidenceValidity {
+ } ExpandedIncidenceValidity;
+ typedef QPair<ExpandedIncidenceValidity, KCalendarCore::Incidence::Ptr> ExpandedIncidence;
+ typedef QVector<ExpandedIncidence> ExpandedIncidenceList;
+-static ExpandedIncidenceList rawExpandedIncidences(const KCalendarCore::Calendar &calendar, const QDateTime &start, const QDateTime &end)
++static ExpandedIncidenceList rawExpandedIncidences(const ExtendedCalendar &calendar, const QDateTime &start, const QDateTime &end)
+ {
+     ExpandedIncidenceList eventList;
+ 
+
+From 616d039866f217cd0fa4b6bf9918c8d0c1005a7b Mon Sep 17 00:00:00 2001
+From: Guido Berhoerster <guido+ubports@berhoerster.name>
+Date: Fri, 23 Jan 2026 10:49:17 +0100
+Subject: [PATCH 2/9] Switch to C++17 for Qt 6 support
+
+---
+ CMakeLists.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 057ae87..f98f35b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -9,7 +9,7 @@ set(CMAKE_AUTORCC ON)
+ set(CMAKE_AUTOUIC ON)
+ 
+ set(CMAKE_INCLUDE_CURRENT_DIR ON)
+-set(CMAKE_CXX_STANDARD 11)
++set(CMAKE_CXX_STANDARD 17)
+ 
+ find_package(ECM REQUIRED NO_MODULE)
+ set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
+
+From d7dbdb014d2226cb2ae765252b54652ced86d801 Mon Sep 17 00:00:00 2001
+From: Guido Berhoerster <guido+ubports@berhoerster.name>
+Date: Fri, 6 Mar 2026 09:11:10 +0100
+Subject: [PATCH 3/9] Add optional support for building against Qt 6
+
+---
+ CMakeLists.txt                                | 19 +++++++++----
+ .../defaultinvitationplugin/CMakeLists.txt    |  4 +--
+ src/CMakeLists.txt                            | 27 ++++++++++---------
+ tests/CMakeLists.txt                          | 20 +++++++-------
+ tools/mkcaltool/CMakeLists.txt                |  4 +--
+ 5 files changed, 42 insertions(+), 32 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f98f35b..7436862 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -22,15 +22,24 @@ option(BUILD_PLUGINS "Build plugin" ON)
+ option(BUILD_TESTS "Build tests" ON)
+ option(INSTALL_TESTS "Install the tests to the system" OFF)
+ option(BUILD_DOCUMENTATION "Build documentation" OFF)
++option(ENABLE_QT6 "Build against Qt 6" OFF)
+ 
+ find_package(PkgConfig REQUIRED)
+ 
+-set(QT_MIN_VERSION "5.6.0")
+-find_package(Qt5 ${QT_MIN_VERSION} COMPONENTS DBus Gui Test REQUIRED)
+-find_package(KF5 COMPONENTS CalendarCore REQUIRED)
++if(ENABLE_QT6)
++    set(QT_VERSION_MAJOR 6)
++    find_package(Qt6 COMPONENTS DBus Gui Test REQUIRED)
++    find_package(KF6 COMPONENTS CalendarCore REQUIRED)
++else()
++    set(QT_MIN_VERSION "5.6.0")
++    set(QT_VERSION_MAJOR 5)
++    find_package(Qt5 ${QT_MIN_VERSION} COMPONENTS DBus Gui Test REQUIRED)
++    find_package(KF5 COMPONENTS CalendarCore REQUIRED)
++
++    pkg_check_modules(TIMED timed-qt5 IMPORTED_TARGET)
++    pkg_check_modules(QMF QmfClient IMPORTED_TARGET)
++endif()
+ 
+-pkg_check_modules(QMF QmfClient IMPORTED_TARGET)
+-pkg_check_modules(TIMED timed-qt5 IMPORTED_TARGET)
+ pkg_check_modules(SQLITE3 sqlite3 IMPORTED_TARGET REQUIRED)
+ set_property(GLOBAL APPEND PROPERTY _CMAKE_sqlite3_TYPE REQUIRED)
+ 
+diff --git a/plugins/defaultinvitationplugin/CMakeLists.txt b/plugins/defaultinvitationplugin/CMakeLists.txt
+index dbe375b..6faf009 100644
+--- a/plugins/defaultinvitationplugin/CMakeLists.txt
++++ b/plugins/defaultinvitationplugin/CMakeLists.txt
+@@ -8,8 +8,8 @@ add_library(defaultinvitationplugin ${SRC} ${HEADERS})
+ target_include_directories(defaultinvitationplugin PRIVATE ${PROJECT_SOURCE_DIR}/src)
+ 
+ target_link_libraries(defaultinvitationplugin
+-	KF5::CalendarCore
+-	mkcal-qt5
++	KF${QT_VERSION_MAJOR}::CalendarCore
++	mkcal-qt${QT_VERSION_MAJOR}
+ 	PkgConfig::QMF)
+ 
+ install(TARGETS defaultinvitationplugin
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0e1a442..bec4b11 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -27,18 +27,19 @@ set(PRIVATE_HEADERS
+         sqliteformat.h
+         )
+ 
+-add_library(mkcal-qt5 SHARED ${SRC} ${HEADERS} ${PRIVATE_HEADERS})
++set(MKCAL_NAME mkcal-qt${QT_VERSION_MAJOR})
++add_library(${MKCAL_NAME} SHARED ${SRC} ${HEADERS} ${PRIVATE_HEADERS})
+ 
+-target_compile_definitions(mkcal-qt5 PRIVATE MKCAL_LIBRARY)
+-target_link_libraries(mkcal-qt5
++target_compile_definitions(${MKCAL_NAME} PRIVATE MKCAL_LIBRARY)
++target_link_libraries(${MKCAL_NAME}
+ 		PRIVATE
+-	Qt5::DBus
++	Qt${QT_VERSION_MAJOR}::DBus
+ 	PkgConfig::SQLITE3
+ 		PUBLIC
+-	Qt5::Gui
+-	KF5::CalendarCore)
++	Qt${QT_VERSION_MAJOR}::Gui
++	KF${QT_VERSION_MAJOR}::CalendarCore)
+ 
+-set_target_properties(mkcal-qt5 PROPERTIES
++set_target_properties(${MKCAL_NAME} PROPERTIES
+ 	SOVERSION ${PROJECT_VERSION_MAJOR}
+ 	VERSION ${PROJECT_VERSION})
+ 
+@@ -46,22 +47,22 @@ add_definitions(-fvisibility=hidden -fvisibility-inlines-hidden)
+ add_definitions(-DMKCALPLUGINDIR="${CMAKE_INSTALL_FULL_LIBDIR}/mkcalplugins")
+ 
+ if(TIMED_FOUND)
+-    target_link_libraries(mkcal-qt5 PRIVATE PkgConfig::TIMED)
++    target_link_libraries(${MKCAL_NAME} PRIVATE PkgConfig::TIMED)
+     add_definitions(-DTIMED_SUPPORT)
+ endif()
+ 
+ # Install the library
+-install(TARGETS mkcal-qt5
++install(TARGETS ${MKCAL_NAME}
+ 	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+ 
+ # Install headers
+ install(FILES ${HEADERS}
+-	DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mkcal-qt5
++	DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${MKCAL_NAME}
+ 	COMPONENT Devel)
+ 
+ ecm_generate_pkgconfig_file(
+-	BASE_NAME libmkcal-qt5
+-	LIB_NAME mkcal-qt5
+-	INCLUDE_INSTALL_DIR ${CMAKE_INSTALL_INCLUDEDIR}/mkcal-qt5
++	BASE_NAME lib${MKCAL_NAME}
++	LIB_NAME ${MKCAL_NAME}
++	INCLUDE_INSTALL_DIR ${CMAKE_INSTALL_INCLUDEDIR}/${MKCAL_NAME}
+ 	DESCRIPTION ${PROJECT_DESCRIPTION}
+ 	INSTALL)
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 4ca04b8..a0f21e0 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -8,11 +8,11 @@ add_executable(tst_storage ${SRC_STORAGE} ${HEADERS_STORAGE})
+ target_include_directories(tst_storage PRIVATE ${PROJECT_SOURCE_DIR}/src)
+ 
+ target_link_libraries(tst_storage
+-	Qt5::DBus
+-	Qt5::Test
+-	KF5::CalendarCore
++	Qt${QT_VERSION_MAJOR}::DBus
++	Qt${QT_VERSION_MAJOR}::Test
++	KF${QT_VERSION_MAJOR}::CalendarCore
+ 	PkgConfig::SQLITE3
+-	mkcal-qt5)
++	mkcal-qt${QT_VERSION_MAJOR})
+ 
+ if(TIMED_FOUND)
+     target_link_libraries(tst_storage PkgConfig::TIMED)
+@@ -31,9 +31,9 @@ add_executable(tst_perf ${SRC_PERF} ${HEADERS_PERF})
+ target_include_directories(tst_perf PRIVATE ${PROJECT_SOURCE_DIR}/src)
+ 
+ target_link_libraries(tst_perf
+-	Qt5::Test
+-	KF5::CalendarCore
+-	mkcal-qt5)
++	Qt${QT_VERSION_MAJOR}::Test
++	KF${QT_VERSION_MAJOR}::CalendarCore
++	mkcal-qt${QT_VERSION_MAJOR})
+ 
+ add_test(tst_perf tst_perf)
+ 
+@@ -42,9 +42,9 @@ add_executable(tst_load tst_load.cpp)
+ target_include_directories(tst_load PRIVATE ${PROJECT_SOURCE_DIR}/src)
+ 
+ target_link_libraries(tst_load
+-	Qt5::Test
+-	KF5::CalendarCore
+-	mkcal-qt5)
++	Qt${QT_VERSION_MAJOR}::Test
++	KF${QT_VERSION_MAJOR}::CalendarCore
++	mkcal-qt${QT_VERSION_MAJOR})
+ 
+ add_test(tst_load tst_load)
+ 
+diff --git a/tools/mkcaltool/CMakeLists.txt b/tools/mkcaltool/CMakeLists.txt
+index 0c165a4..098b76d 100644
+--- a/tools/mkcaltool/CMakeLists.txt
++++ b/tools/mkcaltool/CMakeLists.txt
+@@ -9,8 +9,8 @@ add_executable(mkcaltool ${SRC} ${HEADERS})
+ target_include_directories(mkcaltool PRIVATE ${PROJECT_SOURCE_DIR}/src)
+ 
+ target_link_libraries(mkcaltool
+-	KF5::CalendarCore
+-	mkcal-qt5)
++	KF${QT_VERSION_MAJOR}::CalendarCore
++	mkcal-qt${QT_VERSION_MAJOR})
+ 
+ install(TARGETS mkcaltool
+ 	DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+From 576a5b25c2a7a5b96c2be629a57e687d2a8e925e Mon Sep 17 00:00:00 2001
+From: Guido Berhoerster <guido+ubports@berhoerster.name>
+Date: Wed, 18 Mar 2026 09:05:18 +0100
+Subject: [PATCH 4/9] Adjust to removal of KCalendarCore
+ MemoryCalendar::close()
+
+This method has been removed in KCalendarCore >= 5.245.0, the MemoryCalendar
+destructor now takes care of this.
+---
+ src/extendedcalendar.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/extendedcalendar.cpp b/src/extendedcalendar.cpp
+index 51f87c5..167ab02 100644
+--- a/src/extendedcalendar.cpp
++++ b/src/extendedcalendar.cpp
+@@ -96,7 +96,9 @@ void ExtendedCalendar::close()
+     d->mUidToNotebook.clear();
+     d->mIncidenceVisibility.clear();
+ 
++#if KCALENDARCORE_VERSION < QT_VERSION_CHECK(5, 245, 0)
+     MemoryCalendar::close();
++#endif
+ }
+ 
+ // Dissociate a single occurrence or all future occurrences from a recurring
+
+From 40cb11378be463838f5bcdb59de3f1b1c5ad20ab Mon Sep 17 00:00:00 2001
+From: Guido Berhoerster <guido+ubports@berhoerster.name>
+Date: Wed, 18 Mar 2026 09:07:28 +0100
+Subject: [PATCH 5/9] Remove unnecessary usage of QHash::uniqueKeys()
+
+In Qt 6 QHash does not allow multiple entries per key and it is not used
+anyway.
+---
+ src/notebook.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/notebook.cpp b/src/notebook.cpp
+index 162a5ef..7894b80 100644
+--- a/src/notebook.cpp
++++ b/src/notebook.cpp
+@@ -529,5 +529,5 @@ QString Notebook::customProperty(const QByteArray &key, const QString &defaultVa
+ 
+ QList<QByteArray> Notebook::customPropertyKeys() const
+ {
+-    return d->mCustomProperties.uniqueKeys();
++    return d->mCustomProperties.keys();
+ }
+
+From 2fd1b385d1d752c518863565ebffb5cdaf50b441 Mon Sep 17 00:00:00 2001
+From: Guido Berhoerster <guido+ubports@berhoerster.name>
+Date: Wed, 18 Mar 2026 09:08:50 +0100
+Subject: [PATCH 6/9] Adjust to Qt 6 QDateTime constructor changes
+
+In Qt 6 the QDateTime constructor taking a single QDate& has been removed.
+---
+ src/extendedcalendar.cpp |  4 ++--
+ src/sqliteformat.cpp     |  4 ++--
+ tests/tst_storage.cpp    | 22 +++++++++++-----------
+ 3 files changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/src/extendedcalendar.cpp b/src/extendedcalendar.cpp
+index 167ab02..bef8f80 100644
+--- a/src/extendedcalendar.cpp
++++ b/src/extendedcalendar.cpp
+@@ -291,8 +291,8 @@ ExtendedStorage::Ptr ExtendedCalendar::defaultStorage(const ExtendedCalendar::Pt
+ Journal::List ExtendedCalendar::journals(const QDate &start, const QDate &end)
+ {
+     Journal::List journalList;
+-    QDateTime startK(start);
+-    QDateTime endK(end);
++    QDateTime startK(start, QTime(0, 0));
++    QDateTime endK(end, QTime(0, 0));
+ 
+     const Journal::List journals(rawJournals());
+     for (const Journal::Ptr &journal: journals) {
+diff --git a/src/sqliteformat.cpp b/src/sqliteformat.cpp
+index e5f7d25..15a8594 100644
+--- a/src/sqliteformat.cpp
++++ b/src/sqliteformat.cpp
+@@ -819,7 +819,7 @@ bool SqliteFormat::Private::insertRdates(const Incidence &incidence, int rowid)
+     DateList dateList = incidence.recurrence()->rDates();
+     DateList::ConstIterator dt;
+     for (dt = dateList.constBegin(); dt != dateList.constEnd(); ++dt) {
+-        if (!insertRdate(rowid, type, QDateTime((*dt)), true)) {
++        if (!insertRdate(rowid, type, QDateTime((*dt), QTime(0, 0)), true)) {
+             qCWarning(lcMkcal) << "failed to modify rdates for incidence" << incidence.uid();
+             success = false;
+         }
+@@ -828,7 +828,7 @@ bool SqliteFormat::Private::insertRdates(const Incidence &incidence, int rowid)
+     type = SqliteFormat::XDate;
+     dateList = incidence.recurrence()->exDates();
+     for (dt = dateList.constBegin(); dt != dateList.constEnd(); ++dt) {
+-        if (!insertRdate(rowid, type, QDateTime((*dt)), true)) {
++        if (!insertRdate(rowid, type, QDateTime((*dt), QTime(0, 0)), true)) {
+             qCWarning(lcMkcal) << "failed to modify xdates for incidence" << incidence.uid();
+             success = false;
+         }
+diff --git a/tests/tst_storage.cpp b/tests/tst_storage.cpp
+index 26c18a9..37c57dd 100644
+--- a/tests/tst_storage.cpp
++++ b/tests/tst_storage.cpp
+@@ -81,7 +81,7 @@ void tst_storage::tst_timezone()
+ {
+     // for test sanity, verify kdatetime actually agrees timezone is for helsinki.
+     QDateTime localTime(QDate(2014, 1, 1), QTime(), QTimeZone("Europe/Helsinki"));
+-    QCOMPARE(localTime.utcOffset(), 7200);
++    QCOMPARE(localTime.timeZone().offsetFromUtc(localTime), 7200);
+ }
+ 
+ Q_DECLARE_METATYPE(QDateTime)
+@@ -94,7 +94,7 @@ void tst_storage::tst_veventdtstart_data()
+     QTest::newRow("clock time") << QDateTime(QDate(2020, 5, 29), QTime(10, 15), Qt::LocalTime);
+     QTest::newRow("UTC") << QDateTime(QDate(2020, 5, 29), QTime(10, 15), Qt::UTC);
+     QTest::newRow("time zone") << QDateTime(QDate(2020, 5, 29), QTime(10, 15), QTimeZone("Europe/Paris"));
+-    QTest::newRow("date only") << QDateTime(QDate(2020, 5, 29));
++    QTest::newRow("date only") << QDateTime(QDate(2020, 5, 29), QTime(0, 0));
+     QTest::newRow("origin date time") << format.fromOriginTime(0);
+     // Not allowed by RFC, will be converted to origin of time after save.
+     QTest::newRow("bogus QDateTime") << QDateTime();
+@@ -235,7 +235,7 @@ void tst_storage::tst_alldayRecurrence()
+     auto event = KCalendarCore::Event::Ptr(new KCalendarCore::Event);
+ 
+     QDate startDate(2013, 12, 1);
+-    event->setDtStart(QDateTime(startDate));
++    event->setDtStart(QDateTime(startDate, QTime(0, 0)));
+     event->setAllDay(true);
+ 
+     KCalendarCore::Recurrence *recurrence = event->recurrence();
+@@ -254,9 +254,9 @@ void tst_storage::tst_alldayRecurrence()
+     KCalendarCore::Recurrence *fetchRecurrence = fetchEvent->recurrence();
+     QVERIFY(fetchRecurrence);
+     QCOMPARE(*recurrence, *fetchRecurrence);
+-    QDateTime match = fetchRecurrence->getNextDateTime(QDateTime(startDate));
+-    QCOMPARE(match, QDateTime(startDate.addDays(2)));
+-    match = fetchRecurrence->getNextDateTime(QDateTime(startDate.addDays(3)));
++    QDateTime match = fetchRecurrence->getNextDateTime(QDateTime(startDate, QTime(0, 0)));
++    QCOMPARE(match, QDateTime(startDate.addDays(2), QTime(0, 0)));
++    match = fetchRecurrence->getNextDateTime(QDateTime(startDate.addDays(3), QTime(0, 0)));
+     QCOMPARE(match, QDateTime(startDate.addDays(7), QTime(), Qt::LocalTime));
+ }
+ 
+@@ -472,7 +472,7 @@ void tst_storage::tst_recurrenceExpansion()
+     QCOMPARE(match, event->dtStart().addDays(3)); // skip the weekend
+ 
+     ExpandedIncidenceList expandedEvents
+-        = rawExpandedIncidences(*m_calendar, QDateTime(QDate(2019, 11, 05)),
++        = rawExpandedIncidences(*m_calendar, QDateTime(QDate(2019, 11, 05), QTime(0, 0)),
+                                 QDateTime(QDate(2019, 11, 18), QTime(23, 59, 59)));
+ 
+     const KCalendarCore::DateTimeList timesInInterval = event->recurrence()->timesInInterval(
+@@ -750,7 +750,7 @@ void tst_storage::tst_rawEvents()
+             event->setAllDay(true);
+         }
+     } else {
+-        event->setDtStart(QDateTime(date));
++        event->setDtStart(QDateTime(date, QTime(0, 0)));
+         event->setAllDay(true);
+     }
+     event->setSummary(QStringLiteral("testing rawExpandedIncidences()"));
+@@ -786,7 +786,7 @@ void tst_storage::tst_rawEvents()
+ 
+     // should return occurrence for expected days and omit exceptions
+     ExpandedIncidenceList events
+-        = rawExpandedIncidences(*m_calendar, QDateTime(date),
++        = rawExpandedIncidences(*m_calendar, QDateTime(date, QTime(0, 0)),
+                                 QDateTime(date.addDays(3), QTime(23, 59, 59)));
+ 
+     // note that if the range cuts off the first event, we expect an "extra" recurrence at the end to make up for it.
+@@ -1099,7 +1099,7 @@ void tst_storage::tst_rawEvents_nonRecur()
+     }
+ 
+     ExpandedIncidenceList events
+-        = rawExpandedIncidences(*m_calendar, QDateTime(rangeStartDate),
++        = rawExpandedIncidences(*m_calendar, QDateTime(rangeStartDate, QTime(0, 0)),
+                                 QDateTime(rangeEndDate, QTime(23, 59, 59)));
+ 
+     QCOMPARE(events.size(), expectFound ? 1 : 0);
+@@ -1647,7 +1647,7 @@ void tst_storage::tst_deleteAllEvents()
+     ev->setLastModified(QDateTime::currentDateTimeUtc().addSecs(-42));
+     ev->setGeoLatitude(42.);
+     ev->setGeoLongitude(42.);
+-    ev->setDtStart(QDateTime(QDate(2019, 10, 10)));
++    ev->setDtStart(QDateTime(QDate(2019, 10, 10), QTime(0, 0)));
+     KCalendarCore::Attendee bob(QStringLiteral("Bob"), QStringLiteral("bob@example.org"));
+     ev->addAttendee(bob);
+ 
+
+From 57581fd9d3df93587e2f2eeef3617f747a0a658c Mon Sep 17 00:00:00 2001
+From: Guido Berhoerster <guido+ubports@berhoerster.name>
+Date: Wed, 18 Mar 2026 09:39:51 +0100
+Subject: [PATCH 7/9] Adjust to the removal of deleted event tracking in
+ KCalendarCore
+
+---
+ tests/tst_storage.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/tests/tst_storage.cpp b/tests/tst_storage.cpp
+index 37c57dd..ae694d3 100644
+--- a/tests/tst_storage.cpp
++++ b/tests/tst_storage.cpp
+@@ -1329,7 +1329,9 @@ void tst_storage::tst_deleted()
+ 
+     QVERIFY(m_calendar->deleteIncidence(fetchEvent));
+     QVERIFY(!m_calendar->event(fetchEvent->uid()));
++#if KCALENDARCORE_VERSION < QT_VERSION_CHECK(5, 245, 0)
+     QVERIFY(m_calendar->deletedEvent(fetchEvent->uid()));
++#endif
+ 
+     // Deleted events are marked as deleted but remains in the DB
+     QVERIFY(m_storage->save());
+
+From ad2c05a453bc7a05b5e93acc57eb3cc667508196 Mon Sep 17 00:00:00 2001
+From: Guido Berhoerster <guido+ubports@berhoerster.name>
+Date: Wed, 18 Mar 2026 13:36:13 +0100
+Subject: [PATCH 8/9] Use QTimeZone rather than QTimeSpec with Qt 6
+
+---
+ src/sqliteformat.cpp  |  54 +++++++++++++++++--
+ tests/compat.h        |  34 ++++++++++++
+ tests/tst_load.cpp    |  19 +++----
+ tests/tst_storage.cpp | 119 +++++++++++++++++++++++-------------------
+ 4 files changed, 159 insertions(+), 67 deletions(-)
+ create mode 100644 tests/compat.h
+
+diff --git a/src/sqliteformat.cpp b/src/sqliteformat.cpp
+index 15a8594..759e6a5 100644
+--- a/src/sqliteformat.cpp
++++ b/src/sqliteformat.cpp
+@@ -1401,7 +1401,13 @@ static QDateTime getDateTime(SqliteFormat *format, sqlite3_stmt *stmt, int index
+         date = sqlite3_column_int64(stmt, index + 1);
+         if (date || sqlite3_column_int64(stmt, index)) {
+             dateTime = format->fromOriginTime(date);
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++            dateTime.setTimeZone(QTimeZone::LocalTime);
++#elif QT_VERSION > QT_VERSION_CHECK(6, 0, 0)
++            dateTime.setTimeZone(QTimeZone::systemTimeZone());
++#else
+             dateTime.setTimeSpec(Qt::LocalTime);
++#endif
+         }
+         if (isDate) {
+             *isDate = false;
+@@ -1409,7 +1415,13 @@ static QDateTime getDateTime(SqliteFormat *format, sqlite3_stmt *stmt, int index
+     } else if (timezone == QStringLiteral(FLOATING_DATE)) {
+         date = sqlite3_column_int64(stmt, index + 1);
+         dateTime = format->fromOriginTime(date);
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++        dateTime.setTimeZone(QTimeZone::LocalTime);
++#elif QT_VERSION > QT_VERSION_CHECK(6, 0, 0)
++        dateTime.setTimeZone(QTimeZone::systemTimeZone());
++#else
+         dateTime.setTimeSpec(Qt::LocalTime);
++#endif
+         dateTime.setTime(QTime(0, 0, 0));
+         if (isDate) {
+             *isDate = dateTime.isValid();
+@@ -2204,20 +2216,44 @@ sqlite3_int64 SqliteFormat::toOriginTime(const QDateTime &dt)
+ 
+ sqlite3_int64 SqliteFormat::toLocalOriginTime(const QDateTime &dt)
+ {
+-    return toOriginTime(QDateTime(dt.date(), dt.time(), Qt::UTC));
++    return toOriginTime(QDateTime(dt.date(), dt.time(),
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++        QTimeZone::UTC
++#elif QT_VERSION > QT_VERSION_CHECK(6, 0, 0)
++        QTimeZone::utc()
++#else
++        Qt::UTC
++#endif
++    ));
+ }
+ 
+ QDateTime SqliteFormat::fromLocalOriginTime(sqlite3_int64 seconds)
+ {
+     // Note: don't call toClockTime() as that implies a conversion first to the local time zone.
+     const QDateTime local = fromOriginTime(seconds);
+-    return QDateTime(local.date(), local.time(), Qt::LocalTime);
++    return QDateTime(local.date(), local.time(),
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++        QTimeZone::LocalTime
++#elif QT_VERSION > QT_VERSION_CHECK(6, 0, 0)
++        QTimeZone::systemTimeZone()
++#else
++        Qt::LocalTime
++#endif
++    );
+ }
+ 
+ QDateTime SqliteFormat::fromOriginTime(sqlite3_int64 seconds)
+ {
+     //qCDebug(lcMkcal) << "fromOriginTime" << seconds << d->mOriginTime.addSecs( seconds ).toUtc();
+-    return QDateTime::fromMSecsSinceEpoch(seconds * 1000, Qt::UTC);
++    return QDateTime::fromMSecsSinceEpoch(seconds * 1000,
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++        QTimeZone::UTC
++#elif QT_VERSION > QT_VERSION_CHECK(6, 0, 0)
++        QTimeZone::utc()
++#else
++        Qt::UTC
++#endif
++    );
+ }
+ 
+ QDateTime SqliteFormat::fromOriginTime(sqlite3_int64 seconds, const QByteArray &zonename)
+@@ -2236,12 +2272,24 @@ QDateTime SqliteFormat::fromOriginTime(sqlite3_int64 seconds, const QByteArray &
+             qCWarning(lcMkcal) << "invalid timezone" << zonename
+                                << ", assuming local time";
+             dt = fromOriginTime(seconds);
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++            dt.setTimeZone(QTimeZone::LocalTime);
++#elif QT_VERSION > QT_VERSION_CHECK(6, 0, 0)
++            dt.setTimeZone(QTimeZone::systemTimeZone());
++#else
+             dt.setTimeSpec(Qt::LocalTime);
++#endif
+         }
+     } else {
+         // Empty zonename, use floating time.
+         dt = fromOriginTime(seconds);
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++        dt.setTimeZone(QTimeZone::LocalTime);
++#elif QT_VERSION > QT_VERSION_CHECK(6, 0, 0)
++        dt.setTimeZone(QTimeZone::systemTimeZone());
++#else
+         dt.setTimeSpec(Qt::LocalTime);
++#endif
+     }
+ //  qCDebug(lcMkcal) << "fromOriginTime" << seconds << zonename << dt;
+     return dt;
+diff --git a/tests/compat.h b/tests/compat.h
+new file mode 100644
+index 0000000..74eb19e
+--- /dev/null
++++ b/tests/compat.h
+@@ -0,0 +1,34 @@
++/*
++  Copyright (c) 2026 Guido Berhoerster <guido+mkcal@berhoerster.name>
++
++  This library is free software; you can redistribute it and/or
++  modify it under the terms of the GNU Library General Public
++  License as published by the Free Software Foundation; either
++  version 2 of the License, or (at your option) any later version.
++
++  This library is distributed in the hope that it will be useful,
++  but WITHOUT ANY WARRANTY; without even the implied warranty of
++  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++  Library General Public License for more details.
++
++  You should have received a copy of the GNU Library General Public License
++  along with this library; see the file COPYING.LIB.  If not, write to
++  the Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++  Boston, MA 02110-1301, USA.
++*/
++
++#ifndef MKCAL_COMPAT_H
++#define MKCAL_COMPAT_H
++
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++     #define QDATETIME_CTOR_LOCAL_TZ (QTimeZone::LocalTime)
++     #define QDATETIME_CTOR_UTC_TZ (QTimeZone::UTC)
++#elif QT_VERSION > QT_VERSION_CHECK(6, 0, 0)
++    #define QDATETIME_CTOR_LOCAL_TZ (QTimeZone::systemTimeZone())
++    #define QDATETIME_CTOR_UTC_TZ (QTimeZone::utc())
++#else
++    #define QDATETIME_CTOR_LOCAL_TZ (Qt::LocalTime)
++    #define QDATETIME_CTOR_UTC_TZ (Qt::UTC)
++#endif
++
++#endif
+diff --git a/tests/tst_load.cpp b/tests/tst_load.cpp
+index 1dba8fb..d05cc52 100644
+--- a/tests/tst_load.cpp
++++ b/tests/tst_load.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include "extendedcalendar.h"
+ #include "extendedstorage.h"
++#include "compat.h"
+ 
+ using namespace mKCal;
+ 
+@@ -198,7 +199,7 @@ void tst_load::testSeries()
+ void tst_load::testByInstanceIdentifier()
+ {
+     KCalendarCore::Event::Ptr event(new KCalendarCore::Event);
+-    event->setDtStart(QDateTime(QDate(2021, 4, 26), QTime(16, 49), Qt::UTC));
++    event->setDtStart(QDateTime(QDate(2021, 4, 26), QTime(16, 49), QDATETIME_CTOR_UTC_TZ));
+     event->setSummary("Parent event");
+     event->setCreated(event->dtStart().addSecs(-3));
+     event->recurrence()->setDaily(1);
+@@ -248,21 +249,21 @@ void tst_load::testByDate()
+ 
+     // Plain event within the day.
+     KCalendarCore::Event::Ptr event(new KCalendarCore::Event);
+-    event->setDtStart(QDateTime(date, QTime(11, 56), Qt::UTC));
++    event->setDtStart(QDateTime(date, QTime(11, 56), QDATETIME_CTOR_UTC_TZ));
+     QVERIFY(mStorage->calendar()->addEvent(event));
+     // Plain event the day after at 00:00.
+     KCalendarCore::Event::Ptr event2(new KCalendarCore::Event);
+-    event2->setDtStart(QDateTime(date.addDays(1), QTime(), Qt::UTC));
++    event2->setDtStart(QDateTime(date.addDays(1), QTime(), QDATETIME_CTOR_UTC_TZ));
+     QVERIFY(mStorage->calendar()->addEvent(event2));
+     // Recurring daily event, intersecting date.
+     KCalendarCore::Event::Ptr event3(new KCalendarCore::Event);
+-    event3->setDtStart(QDateTime(date.addDays(-30), QTime(12, 07), Qt::UTC));
++    event3->setDtStart(QDateTime(date.addDays(-30), QTime(12, 07), QDATETIME_CTOR_UTC_TZ));
+     event3->recurrence()->setDaily(1);
+     QVERIFY(mStorage->calendar()->addEvent(event3));
+     // Multi-day event intersecting day.
+     KCalendarCore::Event::Ptr event4(new KCalendarCore::Event);
+-    event4->setDtStart(QDateTime(date.addDays(-2), QTime(), Qt::UTC));
+-    event4->setDtEnd(QDateTime(date.addDays(+2), QTime(), Qt::UTC));
++    event4->setDtStart(QDateTime(date.addDays(-2), QTime(), QDATETIME_CTOR_UTC_TZ));
++    event4->setDtEnd(QDateTime(date.addDays(+2), QTime(), QDATETIME_CTOR_UTC_TZ));
+     QVERIFY(mStorage->calendar()->addEvent(event4));
+     // All day event at day.
+     KCalendarCore::Event::Ptr event5(new KCalendarCore::Event);
+@@ -275,8 +276,8 @@ void tst_load::testByDate()
+     QVERIFY(mStorage->calendar()->addEvent(event6));
+     // Recurring event defined with rdates.
+     KCalendarCore::Event::Ptr event7(new KCalendarCore::Event);
+-    event7->setDtStart(QDateTime(date.addDays(-3), QTime(12, 0), Qt::UTC));
+-    event7->recurrence()->addRDateTime(QDateTime(date, QTime(9, 0), Qt::UTC));
++    event7->setDtStart(QDateTime(date.addDays(-3), QTime(12, 0), QDATETIME_CTOR_UTC_TZ));
++    event7->recurrence()->addRDateTime(QDateTime(date, QTime(9, 0), QDATETIME_CTOR_UTC_TZ));
+     QVERIFY(mStorage->calendar()->addEvent(event7));
+ 
+     QVERIFY(mStorage->save());
+@@ -392,7 +393,7 @@ void tst_load::testSearch()
+     event->setSummary(QString::fromLatin1("Test summary with string 'azerty_'\\ %plop"));
+     QVERIFY(mStorage->calendar()->addEvent(event));
+     KCalendarCore::Event::Ptr event2(new KCalendarCore::Event);
+-    event2->setDtStart(QDateTime(QDate(2023,2,27), QTime(8, 41), Qt::UTC));
++    event2->setDtStart(QDateTime(QDate(2023,2,27), QTime(8, 41), QDATETIME_CTOR_UTC_TZ));
+     event2->setSummary(QString::fromLatin1("Test summary with string 'azertyu'\\ fooplop"));
+     event2->recurrence()->setDaily(1);
+     QVERIFY(mStorage->calendar()->addEvent(event2));
+diff --git a/tests/tst_storage.cpp b/tests/tst_storage.cpp
+index ae694d3..c90bbdb 100644
+--- a/tests/tst_storage.cpp
++++ b/tests/tst_storage.cpp
+@@ -30,6 +30,7 @@
+ 
+ #include "dummystorage.h" // Not used, but tests API compilation
+ 
++#include "compat.h"
+ #include "tst_storage.h"
+ #include "sqlitestorage.h"
+ #include "sqliteformat.h"
+@@ -91,8 +92,8 @@ void tst_storage::tst_veventdtstart_data()
+ 
+     QTest::addColumn<QDateTime>("startDateTime");
+ 
+-    QTest::newRow("clock time") << QDateTime(QDate(2020, 5, 29), QTime(10, 15), Qt::LocalTime);
+-    QTest::newRow("UTC") << QDateTime(QDate(2020, 5, 29), QTime(10, 15), Qt::UTC);
++    QTest::newRow("clock time") << QDateTime(QDate(2020, 5, 29), QTime(10, 15), QDATETIME_CTOR_LOCAL_TZ);
++    QTest::newRow("UTC") << QDateTime(QDate(2020, 5, 29), QTime(10, 15), QDATETIME_CTOR_UTC_TZ);
+     QTest::newRow("time zone") << QDateTime(QDate(2020, 5, 29), QTime(10, 15), QTimeZone("Europe/Paris"));
+     QTest::newRow("date only") << QDateTime(QDate(2020, 5, 29), QTime(0, 0));
+     QTest::newRow("origin date time") << format.fromOriginTime(0);
+@@ -150,10 +151,10 @@ void tst_storage::tst_allday()
+     QFETCH(QDate, startDate);
+     QFETCH(int, days);
+ 
+-    event->setDtStart(QDateTime(startDate, QTime(), Qt::LocalTime));
++    event->setDtStart(QDateTime(startDate, QTime(), QDATETIME_CTOR_LOCAL_TZ));
+     event->setAllDay(true);
+     if (days) {
+-        event->setDtEnd(QDateTime(startDate.addDays(days), QTime(), Qt::LocalTime));
++        event->setDtEnd(QDateTime(startDate.addDays(days), QTime(), QDATETIME_CTOR_LOCAL_TZ));
+     }
+     event->setSummary("test event");
+ 
+@@ -183,7 +184,7 @@ void tst_storage::tst_allday()
+         QTime time = fetchedEvent->dtStart().time();
+         QVERIFY(time == QTime() || time == QTime(0, 0));
+ 
+-        QTime localTime = fetchedEvent->dtStart().toTimeSpec(Qt::LocalTime).time();
++        QTime localTime = fetchedEvent->dtStart().toLocalTime().time();
+         QVERIFY(localTime == QTime() || localTime == QTime(0, 0));
+ 
+         if (days) {
+@@ -204,7 +205,7 @@ void tst_storage::tst_alldayUtc()
+     // test event saved with UTC time
+     auto event = KCalendarCore::Event::Ptr(new KCalendarCore::Event);
+     QDate startDate(2013, 12, 1);
+-    event->setDtStart(QDateTime(startDate, QTime(), Qt::UTC));
++    event->setDtStart(QDateTime(startDate, QTime(), QDATETIME_CTOR_UTC_TZ));
+     event->setAllDay(true);
+     event->setSummary("test event utc");
+ 
+@@ -257,7 +258,7 @@ void tst_storage::tst_alldayRecurrence()
+     QDateTime match = fetchRecurrence->getNextDateTime(QDateTime(startDate, QTime(0, 0)));
+     QCOMPARE(match, QDateTime(startDate.addDays(2), QTime(0, 0)));
+     match = fetchRecurrence->getNextDateTime(QDateTime(startDate.addDays(3), QTime(0, 0)));
+-    QCOMPARE(match, QDateTime(startDate.addDays(7), QTime(), Qt::LocalTime));
++    QCOMPARE(match, QDateTime(startDate.addDays(7), QTime(), QDATETIME_CTOR_LOCAL_TZ));
+ }
+ 
+ // Verify that a recurrence with an exception rule is properly saved
+@@ -267,7 +268,7 @@ void tst_storage::tst_recurrence()
+ 
+     QDate startDate(2013, 12, 1);
+     QTime startTime(12, 34, 56);
+-    event->setDtStart(QDateTime(startDate, startTime, Qt::LocalTime));
++    event->setDtStart(QDateTime(startDate, startTime, QDATETIME_CTOR_LOCAL_TZ));
+ 
+     KCalendarCore::Recurrence *recurrence = event->recurrence();
+     recurrence->setDaily(1);
+@@ -432,10 +433,10 @@ void tst_storage::tst_recurrenceExpansion()
+     } else {
+         event->setDtStart(QDateTime(QDate(2019,11,8),
+                                     QTime(02,00,00),
+-                                    Qt::LocalTime));
++                                    QDATETIME_CTOR_LOCAL_TZ));
+         event->setDtEnd(QDateTime(QDate(2019,11,8),
+                                   QTime(03,00,00),
+-                                  Qt::LocalTime));
++                                  QDATETIME_CTOR_LOCAL_TZ));
+     }
+     event->setSummary(QStringLiteral("Test event summary"));
+     event->setCategories(QStringList() << QStringLiteral("Category One"));
+@@ -500,8 +501,16 @@ void tst_storage::tst_recurrenceExpansion()
+         } else {
+             QDateTime tsExpEvent = expandedEvents.at(i).first.dtStart;
+             QDateTime tsTimeInInterval = timesInInterval.at(i);
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++            tsExpEvent.setTimeZone(QTimeZone::LocalTime);
++            tsTimeInInterval.setTimeZone(QTimeZone::LocalTime);
++#elif QT_VERSION > QT_VERSION_CHECK(6, 0, 0)
++            tsExpEvent.setTimeZone(QTimeZone::systemTimeZone());
++            tsTimeInInterval.setTimeZone(QTimeZone::systemTimeZone());
++#else
+             tsExpEvent.setTimeSpec(Qt::LocalTime);
+             tsTimeInInterval.setTimeSpec(Qt::LocalTime);
++#endif
+             QCOMPARE(tsExpEvent, dt);
+             if (dt.date() != QDate(2019,11,12))
+                 QCOMPARE(tsTimeInInterval, dt);
+@@ -517,8 +526,8 @@ void tst_storage::tst_recurrenceExpansion()
+ 
+ void tst_storage::tst_origintimes()
+ {
+-    QDateTime utcTime(QDate(2014, 1, 15), QTime(), Qt::UTC);
+-    QDateTime localTime(QDate(2014, 1, 15), QTime(), Qt::LocalTime);
++    QDateTime utcTime(QDate(2014, 1, 15), QTime(), QDATETIME_CTOR_UTC_TZ);
++    QDateTime localTime(QDate(2014, 1, 15), QTime(), QDATETIME_CTOR_LOCAL_TZ);
+ 
+     // local origin time is the same as specific time set to utc
+     // note: currently origin time of clock time is saved as time in current time zone.
+@@ -544,7 +553,7 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone()
+         << QByteArray("Europe/Helsinki")
+         << false
+-        << (QDateTime(QDate(2019, 01, 03), QTime(00, 00), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2019, 01, 03), QTime(00, 00), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2019, 01, 03), QTime(00, 00), QTimeZone("Europe/Helsinki"))) == 0)
+         << false;
+ 
+@@ -554,7 +563,7 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone()
+         << QByteArray("America/Toronto")
+         << false
+-        << (QDateTime(QDate(2019, 01, 03), QTime(00, 00), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2019, 01, 03), QTime(00, 00), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2019, 01, 03), QTime(00, 00), QTimeZone("America/Toronto"))) == 0)
+         << false;
+ 
+@@ -564,9 +573,9 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone("Europe/Helsinki")
+         << QByteArray("Europe/Helsinki")
+         << (QDateTime(QDate(2011, 02, 01), QTime(12, 0), QTimeZone("Europe/Helsinki")).secsTo(
+-            QDateTime(QDate(2011, 02, 01), QTime(00, 0), Qt::LocalTime)) > 0)
++            QDateTime(QDate(2011, 02, 01), QTime(00, 0), QDATETIME_CTOR_LOCAL_TZ)) > 0)
+         << true // event tz and exception tz are equal
+-        << (QDateTime(QDate(2011, 02, 04), QTime(23, 59, 59), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2011, 02, 04), QTime(23, 59, 59), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2011, 02, 04), QTime(12, 00, 00), QTimeZone("Europe/Helsinki"))) > 0);
+ 
+     QTest::newRow("non all day event in Europe/Helsinki with exception in America/Toronto")
+@@ -575,9 +584,9 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone("Europe/Helsinki")
+         << QByteArray("America/Toronto")
+         << (QDateTime(QDate(2011, 02, 01), QTime(12, 0), QTimeZone("Europe/Helsinki")).secsTo(
+-            QDateTime(QDate(2011, 02, 01), QTime(00, 0), Qt::LocalTime)) > 0)
++            QDateTime(QDate(2011, 02, 01), QTime(00, 0), QDATETIME_CTOR_LOCAL_TZ)) > 0)
+         << false // event tz and exception tz are unequal
+-        << (QDateTime(QDate(2011, 02, 04), QTime(23, 59, 59), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2011, 02, 04), QTime(23, 59, 59), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2011, 02, 04), QTime(12, 00, 00), QTimeZone("Europe/Helsinki"))) > 0);
+ 
+     QTest::newRow("non all day event in Pacific/Midway with exception in Europe/Helsinki")
+@@ -586,9 +595,9 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone("Pacific/Midway")
+         << QByteArray("Europe/Helsinki")
+         << (QDateTime(QDate(2011, 03, 01), QTime(12, 0), QTimeZone("Pacific/Midway")).secsTo(
+-            QDateTime(QDate(2011, 03, 01), QTime(00, 0), Qt::LocalTime)) > 0)
++            QDateTime(QDate(2011, 03, 01), QTime(00, 0), QDATETIME_CTOR_LOCAL_TZ)) > 0)
+         << false
+-        << (QDateTime(QDate(2011, 03, 04), QTime(23, 59, 59), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2011, 03, 04), QTime(23, 59, 59), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2011, 03, 04), QTime(8, 00, 00), QTimeZone("Pacific/Midway"))) > 0);
+ 
+     QTest::newRow("non all day event in Pacific/Midway with exception in America/Toronto")
+@@ -597,9 +606,9 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone("Pacific/Midway")
+         << QByteArray("America/Toronto")
+         << (QDateTime(QDate(2011, 03, 01), QTime(12, 0), QTimeZone("Pacific/Midway")).secsTo(
+-            QDateTime(QDate(2011, 03, 01), QTime(00, 0), Qt::LocalTime)) > 0)
++            QDateTime(QDate(2011, 03, 01), QTime(00, 0), QDATETIME_CTOR_LOCAL_TZ)) > 0)
+         << false
+-        << (QDateTime(QDate(2011, 03, 04), QTime(23, 59, 59), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2011, 03, 04), QTime(23, 59, 59), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2011, 03, 04), QTime(8, 00, 00), QTimeZone("Pacific/Midway"))) > 0);
+ 
+     QTest::newRow("all day event stored as local clock with exception in Europe/Helsinki")
+@@ -608,7 +617,7 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone()
+         << QByteArray("Europe/Helsinki")
+         << false
+-        << (QDateTime(QDate(2019, 04, 03), QTime(00, 00), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2019, 04, 03), QTime(00, 00), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2019, 04, 03), QTime(00, 00), QTimeZone("Europe/Helsinki"))) == 0)
+         << false;
+ 
+@@ -618,7 +627,7 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone()
+         << QByteArray("America/Toronto")
+         << false
+-        << (QDateTime(QDate(2019, 04, 03), QTime(00, 00), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2019, 04, 03), QTime(00, 00), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2019, 04, 03), QTime(00, 00), QTimeZone("America/Toronto"))) == 0)
+         << false;
+ 
+@@ -628,7 +637,7 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone()
+         << QByteArray("Europe/Helsinki")
+         << false
+-        << (QDateTime(QDate(2019, 05, 03), QTime(00, 00), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2019, 05, 03), QTime(00, 00), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2019, 05, 03), QTime(00, 00), QTimeZone("Europe/Helsinki"))) == 0)
+         << false;
+ 
+@@ -638,7 +647,7 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone()
+         << QByteArray("America/Toronto")
+         << false
+-        << (QDateTime(QDate(2019, 05, 03), QTime(00, 00), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2019, 05, 03), QTime(00, 00), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2019, 05, 03), QTime(00, 00), QTimeZone("America/Toronto"))) == 0)
+         << false;
+ 
+@@ -648,7 +657,7 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone()
+         << QByteArray("Australia/Brisbane")
+         << false
+-        << (QDateTime(QDate(2019, 06, 03), QTime(00, 00), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2019, 06, 03), QTime(00, 00), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2019, 06, 03), QTime(00, 00), QTimeZone("Australia/Brisbane"))) == 0)
+         << false;
+ 
+@@ -658,9 +667,9 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone("Europe/Helsinki")
+         << QByteArray("Australia/Brisbane")
+         << (QDateTime(QDate(2011, 06, 01), QTime(12, 0), QTimeZone("Europe/Helsinki")).secsTo(
+-            QDateTime(QDate(2011, 06, 01), QTime(00, 0), Qt::LocalTime)) > 0)
++            QDateTime(QDate(2011, 06, 01), QTime(00, 0), QDATETIME_CTOR_LOCAL_TZ)) > 0)
+         << false
+-        << (QDateTime(QDate(2011, 06, 04), QTime(23, 59, 59), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2011, 06, 04), QTime(23, 59, 59), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2011, 06, 04), QTime(12, 00, 00), QTimeZone("Europe/Helsinki"))) > 0);
+ 
+     QTest::newRow("non all day event in Pacific/Midway with exception in Australia/Brisbane")
+@@ -669,9 +678,9 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone("Pacific/Midway")
+         << QByteArray("Australia/Brisbane")
+         << (QDateTime(QDate(2011, 06, 01), QTime(12, 0), QTimeZone("Pacific/Midway")).secsTo(
+-            QDateTime(QDate(2011, 06, 01), QTime(00, 0), Qt::LocalTime)) > 0)
++            QDateTime(QDate(2011, 06, 01), QTime(00, 0), QDATETIME_CTOR_LOCAL_TZ)) > 0)
+         << false
+-        << (QDateTime(QDate(2011, 06, 04), QTime(23, 59, 59), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2011, 06, 04), QTime(23, 59, 59), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2011, 06, 04), QTime(8, 00, 00), QTimeZone("Pacific/Midway"))) > 0);
+ 
+     QTest::newRow("all day event stored as local clock with exception in Australia/Brisbane")
+@@ -680,7 +689,7 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone()
+         << QByteArray("Australia/Brisbane")
+         << false
+-        << (QDateTime(QDate(2019, 07, 03), QTime(00, 00), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2019, 07, 03), QTime(00, 00), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2019, 07, 03), QTime(00, 00), QTimeZone("Australia/Brisbane"))) == 0)
+         << false;
+ 
+@@ -690,7 +699,7 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone()
+         << QByteArray("Australia/Brisbane")
+         << false
+-        << (QDateTime(QDate(2019, 07, 03), QTime(00, 00), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2019, 07, 03), QTime(00, 00), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2019, 07, 03), QTime(00, 00), QTimeZone("Australia/Brisbane"))) == 0)
+         << false;
+ 
+@@ -700,9 +709,9 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone("America/Toronto")
+         << QByteArray("Australia/Brisbane")
+         << (QDateTime(QDate(2011, 8, 1), QTime(12, 0), QTimeZone("America/Toronto")).secsTo(
+-            QDateTime(QDate(2011, 8, 1), QTime(00, 0), Qt::LocalTime)) > 0)
++            QDateTime(QDate(2011, 8, 1), QTime(00, 0), QDATETIME_CTOR_LOCAL_TZ)) > 0)
+         << false
+-        << (QDateTime(QDate(2011, 8, 4), QTime(23, 59, 59), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2011, 8, 4), QTime(23, 59, 59), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2011, 8, 4), QTime(12, 00, 00), QTimeZone("America/Toronto"))) > 0);
+ 
+     QTest::newRow("non all day event in America/Toronto with exception in America/Toronto")
+@@ -711,9 +720,9 @@ void tst_storage::tst_rawEvents_data()
+         << QTimeZone("America/Toronto")
+         << QByteArray("America/Toronto")
+         << (QDateTime(QDate(2011, 8, 1), QTime(12, 0), QTimeZone("America/Toronto")).secsTo(
+-            QDateTime(QDate(2011, 8, 1), QTime(00, 0), Qt::LocalTime)) > 0)
++            QDateTime(QDate(2011, 8, 1), QTime(00, 0), QDATETIME_CTOR_LOCAL_TZ)) > 0)
+         << true
+-        << (QDateTime(QDate(2011, 8, 4), QTime(23, 59, 59), Qt::LocalTime).secsTo(
++        << (QDateTime(QDate(2011, 8, 4), QTime(23, 59, 59), QDATETIME_CTOR_LOCAL_TZ).secsTo(
+             QDateTime(QDate(2011, 8, 4), QTime(12, 00, 00), QTimeZone("America/Toronto"))) > 0);
+ }
+ 
+@@ -740,12 +749,12 @@ void tst_storage::tst_rawEvents()
+         if (timeZone.isValid()) {
+             event->setDtStart(QDateTime(date, startTime, timeZone));
+         } else {
+-            event->setDtStart(QDateTime(date, startTime, Qt::LocalTime));
++            event->setDtStart(QDateTime(date, startTime, QDATETIME_CTOR_LOCAL_TZ));
+         }
+         if (endTime.isValid() && timeZone.isValid()) {
+             event->setDtEnd(QDateTime(date, endTime, timeZone));
+         } else if (endTime.isValid()) {
+-            event->setDtEnd(QDateTime(date, endTime, Qt::LocalTime));
++            event->setDtEnd(QDateTime(date, endTime, QDATETIME_CTOR_LOCAL_TZ));
+         } else if (startTime == QTime(0, 0)) {
+             event->setAllDay(true);
+         }
+@@ -762,7 +771,7 @@ void tst_storage::tst_rawEvents()
+     recurrence->setAllDay(event->allDay());
+     if (event->allDay()) {
+         // Save exception as clock time
+-        recurrence->addExDateTime(QDateTime(event->dtStart().date().addDays(1), QTime(0,0), Qt::LocalTime));
++        recurrence->addExDateTime(QDateTime(event->dtStart().date().addDays(1), QTime(0,0), QDATETIME_CTOR_LOCAL_TZ));
+         // Save exception in exception time zone
+         recurrence->addExDateTime(QDateTime(event->dtStart().date().addDays(2), QTime(0,0), exceptionSpec));
+     } else {
+@@ -1077,8 +1086,8 @@ void tst_storage::tst_rawEvents_nonRecur()
+         event->setDtStart(QDateTime(startDate, startTime, spec));
+         event->setDtEnd(QDateTime(endDate, endTime, spec));
+     } else {
+-        event->setDtStart(QDateTime(startDate, startTime, Qt::LocalTime));
+-        event->setDtEnd(QDateTime(endDate, endTime, Qt::LocalTime));
++        event->setDtStart(QDateTime(startDate, startTime, QDATETIME_CTOR_LOCAL_TZ));
++        event->setDtEnd(QDateTime(endDate, endTime, QDATETIME_CTOR_LOCAL_TZ));
+     }
+     event->setSummary(QStringLiteral("testing rawExpandedIncidences, non-recurring: %2").arg(eventUid));
+     event->setUid(eventUid);
+@@ -1094,8 +1103,8 @@ void tst_storage::tst_rawEvents_nonRecur()
+         QCOMPARE(fetchEvent->dtStart(), QDateTime(startDate, startTime, spec));
+         QCOMPARE(fetchEvent->dtEnd(), QDateTime(endDate, endTime, spec));
+     } else {
+-        QCOMPARE(fetchEvent->dtStart(), QDateTime(startDate, startTime, Qt::LocalTime));
+-        QCOMPARE(fetchEvent->dtEnd(), QDateTime(endDate, endTime, Qt::LocalTime));
++        QCOMPARE(fetchEvent->dtStart(), QDateTime(startDate, startTime, QDATETIME_CTOR_LOCAL_TZ));
++        QCOMPARE(fetchEvent->dtEnd(), QDateTime(endDate, endTime, QDATETIME_CTOR_LOCAL_TZ));
+     }
+ 
+     ExpandedIncidenceList events
+@@ -1144,7 +1153,7 @@ void tst_storage::tst_dateCreated()
+     // Verify that date craetion date can be tuned on new insertion and on update.
+     auto event = KCalendarCore::Event::Ptr(new KCalendarCore::Event);
+     event->setDtStart(QDateTime(QDate(2019, 04, 01), QTime(10, 11),
+-                                Qt::LocalTime));
++                                QDATETIME_CTOR_LOCAL_TZ));
+     event->setSummary("Creation date test event");
+     event->setCreated(dateCreated.toUTC());
+ 
+@@ -1177,7 +1186,7 @@ void tst_storage::tst_dateCreated()
+ // but actually updated whenever a modification is done to a stored incidence.
+ void tst_storage::tst_lastModified()
+ {
+-    QDateTime dt(QDate(2019, 07, 26), QTime(11, 41), Qt::LocalTime);
++    QDateTime dt(QDate(2019, 07, 26), QTime(11, 41), QDATETIME_CTOR_LOCAL_TZ);
+     KCalendarCore::Event::Ptr event = KCalendarCore::Event::Ptr(new KCalendarCore::Event);
+     event->setDtStart(dt.addDays(1));
+     event->setSummary("Modified date test event");
+@@ -1203,16 +1212,16 @@ void tst_storage::tst_dissociateSingleOccurrence_data()
+     QTest::addColumn<QDateTime>("dateTime");
+ 
+     QTest::newRow("local time")
+-        << QDateTime(QDate(2019, 05, 21), QTime(12, 0), Qt::LocalTime);
++        << QDateTime(QDate(2019, 05, 21), QTime(12, 0), QDATETIME_CTOR_LOCAL_TZ);
+     QTest::newRow("UTC time")
+-        << QDateTime(QDate(2019, 05, 21), QTime(12, 0), Qt::UTC);
++        << QDateTime(QDate(2019, 05, 21), QTime(12, 0), QDATETIME_CTOR_UTC_TZ);
+     QTest::newRow("time zone")
+         << QDateTime(QDate(2019, 05, 21), QTime(12, 0), QTimeZone("Europe/Helsinki"));
+ 
+     QTest::newRow("all day, local time")
+-        << QDateTime(QDate(2019, 05, 21), QTime(), Qt::LocalTime);
++        << QDateTime(QDate(2019, 05, 21), QTime(), QDATETIME_CTOR_LOCAL_TZ);
+     QTest::newRow("all day, UTC time")
+-        << QDateTime(QDate(2019, 05, 21), QTime(), Qt::UTC);
++        << QDateTime(QDate(2019, 05, 21), QTime(), QDATETIME_CTOR_UTC_TZ);
+     QTest::newRow("all day, time zone")
+         << QDateTime(QDate(2019, 05, 21), QTime(), QTimeZone("Europe/Helsinki"));
+ }
+@@ -1929,7 +1938,7 @@ void tst_storage::tst_url()
+ 
+     auto event = KCalendarCore::Event::Ptr(new KCalendarCore::Event);
+     event->setDtStart(QDateTime(QDate(2021, 1, 4), QTime(15, 37),
+-                                Qt::LocalTime));
++                                QDATETIME_CTOR_LOCAL_TZ));
+     event->setSummary("URL test event");
+     event->setUrl(url);
+     QCOMPARE(event->url(), url);
+@@ -1970,7 +1979,7 @@ void tst_storage::tst_color()
+     const QString &red = QString::fromLatin1("red");
+     auto event = KCalendarCore::Event::Ptr(new KCalendarCore::Event);
+     event->setDtStart(QDateTime(QDate(2021, 1, 4), QTime(15, 59),
+-                                Qt::LocalTime));
++                                QDATETIME_CTOR_LOCAL_TZ));
+     event->setSummary("Color test event");
+     event->setColor(red);
+     QCOMPARE(event->color(), red);
+@@ -1999,19 +2008,19 @@ void tst_storage::tst_addIncidence()
+ {
+     auto event = KCalendarCore::Event::Ptr(new KCalendarCore::Event);
+     event->setDtStart(QDateTime(QDate(2021, 5, 4), QTime(14, 54),
+-                                Qt::LocalTime));
++                                QDATETIME_CTOR_LOCAL_TZ));
+     event->setSummary("testing generic addIncidence for events.");
+     QVERIFY(m_calendar->addIncidence(event, NotebookId));
+ 
+     auto todo = KCalendarCore::Todo::Ptr(new KCalendarCore::Todo);
+     todo->setDtStart(QDateTime(QDate(2021, 5, 4), QTime(14, 55),
+-                                Qt::LocalTime));
++                                QDATETIME_CTOR_LOCAL_TZ));
+     todo->setSummary("testing generic addIncidence for todos.");
+     QVERIFY(m_calendar->addIncidence(todo, NotebookId));
+ 
+     auto journal = KCalendarCore::Journal::Ptr(new KCalendarCore::Journal);
+     journal->setDtStart(QDateTime(QDate(2021, 5, 4), QTime(14, 56),
+-                                  Qt::LocalTime));
++                                  QDATETIME_CTOR_LOCAL_TZ));
+     journal->setSummary("testing generic addIncidence for journals.");
+     QVERIFY(m_calendar->addIncidence(journal, NotebookId));
+ 
+
+From eee1a9460a27c8d10cd6f1871bb3c61acb6b6a2f Mon Sep 17 00:00:00 2001
+From: Guido Berhoerster <guido+ubports@berhoerster.name>
+Date: Thu, 19 Mar 2026 07:03:19 +0100
+Subject: [PATCH 9/9] Remove unnecessary requirements on QtGui and QtDBus
+
+QtDBus is only needed in case timed support is enabled.
+---
+ CMakeLists.txt       | 8 ++++++--
+ src/CMakeLists.txt   | 8 +++++---
+ tests/CMakeLists.txt | 6 ++++--
+ 3 files changed, 15 insertions(+), 7 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7436862..bbbe5b2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -28,15 +28,19 @@ find_package(PkgConfig REQUIRED)
+ 
+ if(ENABLE_QT6)
+     set(QT_VERSION_MAJOR 6)
+-    find_package(Qt6 COMPONENTS DBus Gui Test REQUIRED)
++    find_package(Qt6 COMPONENTS Core Test REQUIRED)
+     find_package(KF6 COMPONENTS CalendarCore REQUIRED)
+ else()
+     set(QT_MIN_VERSION "5.6.0")
+     set(QT_VERSION_MAJOR 5)
+-    find_package(Qt5 ${QT_MIN_VERSION} COMPONENTS DBus Gui Test REQUIRED)
++    find_package(Qt5 ${QT_MIN_VERSION} COMPONENTS Core Test REQUIRED)
+     find_package(KF5 COMPONENTS CalendarCore REQUIRED)
+ 
+     pkg_check_modules(TIMED timed-qt5 IMPORTED_TARGET)
++    if(TIMED_FOUND)
++        find_package(Qt5 ${QT_MIN_VERSION} COMPONENTS DBus REQUIRED)
++    endif()
++
+     pkg_check_modules(QMF QmfClient IMPORTED_TARGET)
+ endif()
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index bec4b11..8ee4127 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -33,10 +33,8 @@ add_library(${MKCAL_NAME} SHARED ${SRC} ${HEADERS} ${PRIVATE_HEADERS})
+ target_compile_definitions(${MKCAL_NAME} PRIVATE MKCAL_LIBRARY)
+ target_link_libraries(${MKCAL_NAME}
+ 		PRIVATE
+-	Qt${QT_VERSION_MAJOR}::DBus
+ 	PkgConfig::SQLITE3
+ 		PUBLIC
+-	Qt${QT_VERSION_MAJOR}::Gui
+ 	KF${QT_VERSION_MAJOR}::CalendarCore)
+ 
+ set_target_properties(${MKCAL_NAME} PROPERTIES
+@@ -47,7 +45,11 @@ add_definitions(-fvisibility=hidden -fvisibility-inlines-hidden)
+ add_definitions(-DMKCALPLUGINDIR="${CMAKE_INSTALL_FULL_LIBDIR}/mkcalplugins")
+ 
+ if(TIMED_FOUND)
+-    target_link_libraries(${MKCAL_NAME} PRIVATE PkgConfig::TIMED)
++    target_link_libraries(${MKCAL_NAME}
++        PRIVATE
++            Qt${QT_VERSION_MAJOR}::DBus
++            PkgConfig::TIMED
++    )
+     add_definitions(-DTIMED_SUPPORT)
+ endif()
+ 
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index a0f21e0..af37abc 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -8,14 +8,16 @@ add_executable(tst_storage ${SRC_STORAGE} ${HEADERS_STORAGE})
+ target_include_directories(tst_storage PRIVATE ${PROJECT_SOURCE_DIR}/src)
+ 
+ target_link_libraries(tst_storage
+-	Qt${QT_VERSION_MAJOR}::DBus
+ 	Qt${QT_VERSION_MAJOR}::Test
+ 	KF${QT_VERSION_MAJOR}::CalendarCore
+ 	PkgConfig::SQLITE3
+ 	mkcal-qt${QT_VERSION_MAJOR})
+ 
+ if(TIMED_FOUND)
+-    target_link_libraries(tst_storage PkgConfig::TIMED)
++    target_link_libraries(tst_storage
++        Qt${QT_VERSION_MAJOR}::DBus
++        PkgConfig::TIMED
++    )
+     add_definitions(-DTIMED_SUPPORT)
+ endif()
+ 
