@@ -1,0 +1,291 @@
+From 27a8d03c7e2b72c79efd7d8f7bba0163eea7e98c Mon Sep 17 00:00:00 2001
+From: LN Liberda <lauren@selfisekai.rocks>
+Date: Fri, 3 Apr 2026 17:44:15 +0200
+Subject: [PATCH] Zig 0.16: What did you do to IO?
+
+---
+ build.zig             | 16 +++++++----
+ src/args.zig          | 12 ++++----
+ src/gitversiontag.zig |  4 +--
+ src/main.zig          | 65 ++++++++++++++++++++++++-------------------
+ 4 files changed, 55 insertions(+), 42 deletions(-)
+
+diff --git a/build.zig b/build.zig
+index 7f2cb72..c464502 100644
+--- a/build.zig
++++ b/build.zig
+@@ -4,16 +4,22 @@ const gitVersionTag = @import("src/gitversiontag.zig").gitVersionTag;
+ pub fn build(b: *std.Build) void {
+     // write src/version.zig
+     const alloc = std.heap.page_allocator;
+-    const gvs = gitVersionTag(alloc);
++    var threaded = std.Io.Threaded.init(alloc, .{});
++    defer threaded.deinit();
++    const io = threaded.io();
++    const gvs = gitVersionTag(alloc, io);
+     const efmt = "WARNING: could not write src/version.zig:\n   {t}\n";
+     var stderr_buffer: [512]u8 = undefined;
+-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
++    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+     const stderr = &stderr_writer.interface;
+-    if (std.fs.cwd().createFile("src/version.zig", .{})) |file| {
+-        defer file.close();
++    if (std.Io.Dir.cwd().createFile(io, "src/version.zig", .{})) |file| {
++        defer file.close(io);
+         const zigfmt = "pub const version_string = \"{s}\";";
+         if (std.fmt.allocPrint(alloc, zigfmt, .{gvs})) |strline| {
+-            if (file.writeAll(strline)) {} else |e| {
++            var file_buffer: [512]u8 = undefined;
++            var writer = file.writer(io, &file_buffer);
++            defer writer.end() catch unreachable;
++            if (writer.interface.writeAll(strline)) {} else |e| {
+                 stderr.print(efmt, .{e}) catch unreachable;
+             }
+         } else |err| {
+diff --git a/src/args.zig b/src/args.zig
+index d2a6928..b6d3de6 100644
+--- a/src/args.zig
++++ b/src/args.zig
+@@ -4,11 +4,11 @@ const std = @import("std");
+ /// - `Spec` is the configuration of the arguments.
+ /// - `allocator` is the allocator that is used to allocate all required memory
+ /// - `error_handling` defines how parser errors will be handled.
+-pub fn parseForCurrentProcess(comptime Spec: type, allocator: std.mem.Allocator, error_handling: ErrorHandling) !ParseArgsResult(Spec, null) {
++pub fn parseForCurrentProcess(comptime Spec: type, allocator: std.mem.Allocator, process_args: std.process.Args, error_handling: ErrorHandling) !ParseArgsResult(Spec, null) {
+     // Use argsWithAllocator for portability.
+     // All data allocated by the ArgIterator is freed at the end of the function.
+     // Data returned to the user is always duplicated using the allocator.
+-    var args = try std.process.argsWithAllocator(allocator);
++    var args = try process_args.iterateAllocator(allocator);
+     defer args.deinit();
+ 
+     const executable_name = args.next() orelse {
+@@ -644,7 +644,7 @@ pub const ErrorHandling = union(enum) {
+     silent,
+ 
+     /// Print errors to stderr and return a `error.InvalidArguments`.
+-    print,
++    print: std.Io,
+ 
+     /// Collect errors into the error collection and return
+     /// `error.InvalidArguments` when any error was encountered.
+@@ -656,10 +656,10 @@ pub const ErrorHandling = union(enum) {
+             @compileError("src_error must be a error union!");
+         switch (self) {
+             .silent => return src_error,
+-            .print => {
+-                const stderr = std.fs.File.stderr();
++            .print => |io| {
++                const stderr = std.Io.File.stderr();
+                 var buffer: [1024]u8 = undefined;
+-                var writer = stderr.writer(&buffer);
++                var writer = stderr.writer(io, &buffer);
+                 try writer.interface.print("{f}\n", .{err});
+                 try writer.end();
+             },
+diff --git a/src/gitversiontag.zig b/src/gitversiontag.zig
+index aaa9ddd..37d83bd 100644
+--- a/src/gitversiontag.zig
++++ b/src/gitversiontag.zig
+@@ -1,12 +1,12 @@
+ const std = @import("std");
+-pub fn gitVersionTag(a: std.mem.Allocator) []const u8 {
++pub fn gitVersionTag(a: std.mem.Allocator, io: std.Io) []const u8 {
+     const args = [_][]const u8{
+         "git",
+         "tag",
+         "--sort=-creatordate",
+     };
+ 
+-    if (std.process.Child.run(.{ .argv = args[0..], .allocator = a })) |ret| {
++    if (std.process.run(a, io, .{ .argv = args[0..] })) |ret| {
+         var it = std.mem.splitSequence(u8, ret.stdout, "\n");
+         if (it.next()) |firstline| {
+             return firstline;
+diff --git a/src/main.zig b/src/main.zig
+index 79b4bab..ebf4a4b 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -74,19 +74,23 @@ fn help() void {
+ 
+ fn readAddressBook(
+     alloc: std.mem.Allocator,
++    io: std.Io,
+     filn: []const u8,
+     max_fs: usize,
+     keylist: *std.ArrayList([]const u8),
+     kvmap: *std.StringHashMap([]const u8),
+ ) !void {
+-    var file = try std.fs.cwd().openFile(filn, .{});
+-    defer file.close();
+-    const buffer = try file.readToEndAlloc(alloc, max_fs);
++    var file = try std.Io.Dir.cwd().openFile(io, filn, .{});
++    defer file.close(io);
++    var read_buffer: [1024]u8 = undefined;
++    var reader = file.reader(io, &read_buffer);
++    // XXX: This is never freed because parts of it are saved in keylist and kvmap.
++    const buffer = try reader.interface.allocRemaining(alloc, .limited(max_fs));
+     var it = std.mem.splitSequence(u8, buffer, "\n");
+     var index: usize = 0;
+     while (it.next()) |line_untrimmed| {
+         index += 1;
+-        const line = std.mem.trimRight(u8, line_untrimmed, " \t\n");
++        const line = std.mem.trimEnd(u8, line_untrimmed, " \t\n");
+         var itt = std.mem.splitSequence(u8, line, ":");
+         var trimmed_key: []const u8 = undefined;
+         var trimmed_value: []const u8 = undefined;
+@@ -150,35 +154,37 @@ fn replaceUtf8(str: []const u8, out_buffer: []u8) []const u8 {
+ }
+ 
+ fn addToAddressBook(
++    io: std.Io,
+     filn: []const u8,
+     key: []const u8,
+     value: []const u8,
+ ) !void {
+-    var file = try std.fs.cwd().createFile(filn, .{
++    var file = try std.Io.Dir.cwd().createFile(io, filn, .{
+         .read = true,
+         .truncate = false,
+     });
+-    defer file.close();
+-    try file.seekFromEnd(0);
++    defer file.close(io);
+     var read_buffer: [1024]u8 = undefined;
+-    var file_writer = file.writer(&read_buffer);
++    var file_writer = file.writer(io, &read_buffer);
++    try file_writer.seekTo(try file.length(io));
+     try file_writer.interface.print("\n{s} : {s}", .{ key, value });
+     try file_writer.end();
+ }
+ 
+ fn addEmailsToAddressBook(
++    io: std.Io,
+     filn: []const u8,
+     map: std.StringHashMap([]const u8),
+     emails: std.StringHashMap([]const u8),
+ ) !void {
+-    var file = try std.fs.cwd().createFile(filn, .{
++    var file = try std.Io.Dir.cwd().createFile(io, filn, .{
+         .read = true,
+         .truncate = false,
+     });
+-    defer file.close();
+-    try file.seekFromEnd(0);
++    defer file.close(io);
+     var read_buffer: [1024]u8 = undefined;
+-    var file_writer = file.writer(&read_buffer);
++    var file_writer = file.writer(io, &read_buffer);
++    try file_writer.seekTo(try file.length(io));
+     var it = emails.iterator();
+     var key_buffer: [512]u8 = undefined;
+     var val_buffer: [512]u8 = undefined;
+@@ -274,13 +280,13 @@ const ParseMailError = error{
+     ReadError,
+ };
+ 
+-fn parseMailFromStdin(alloc: std.mem.Allocator) !ParseMailResult {
+-    const stdin = std.fs.File.stdin();
++fn parseMailFromStdin(alloc: std.mem.Allocator, io: std.Io) !ParseMailResult {
++    const stdin = std.Io.File.stdin();
+ 
+     // read the 1st megabyte - we're interested in the header only
+     var buffer: [1024 * 1024]u8 = undefined;
+ 
+-    const howmany = try stdin.read(&buffer);
++    const howmany = try stdin.readPositionalAll(io, &buffer, 0);
+     if (howmany <= 0) return error.ReadError;
+ 
+     var ret = try ParseMailResult.init(alloc);
+@@ -353,8 +359,9 @@ fn parseMailFromStdin(alloc: std.mem.Allocator) !ParseMailResult {
+     return ret;
+ }
+ 
+-pub fn main() anyerror!void {
++pub fn main(init: std.process.Init) anyerror!void {
+     const alloc = std.heap.page_allocator;
++    const io = init.io;
+ 
+     //
+     // get cmd line args
+@@ -375,7 +382,7 @@ pub fn main() anyerror!void {
+         pub const shorthands = .{
+             .a = "add",
+         };
+-    }, alloc, .print)) |options| {
++    }, alloc, init.minimal.args, .{ .print = io })) |options| {
+         defer options.deinit();
+ 
+         const o = options.options;
+@@ -406,13 +413,13 @@ pub fn main() anyerror!void {
+         var map = std.StringHashMap([]const u8).init(alloc);
+         defer map.deinit();
+ 
+-        const stdout = std.fs.File.stdout();
++        const stdout = std.Io.File.stdout();
+         var outbuffer: [1024]u8 = undefined;
+-        var outwriter = stdout.writer(&outbuffer);
++        var outwriter = stdout.writer(io, &outbuffer);
+ 
+-        const stderr = std.fs.File.stderr();
++        const stderr = std.Io.File.stderr();
+         var errbuffer: [1024]u8 = undefined;
+-        var errwriter = stderr.writer(&errbuffer);
++        var errwriter = stderr.writer(io, &errbuffer);
+ 
+         //
+         // parse email -> add mode
+@@ -425,21 +432,21 @@ pub fn main() anyerror!void {
+                 return;
+             }
+ 
+-            if (readAddressBook(alloc, filn, max_file_size, &list, &map)) {
++            if (readAddressBook(alloc, io, filn, max_file_size, &list, &map)) {
+                 // do nothing
+             } else |err| {
+                 try errwriter.interface.print("Warning {t}: {s} --> creating it...\n", .{ err, filn });
+             }
+-            const ret = try parseMailFromStdin(alloc);
++            const ret = try parseMailFromStdin(alloc, io);
+ 
+             if (o.@"add-all" or o.@"add-from") {
+-                try addEmailsToAddressBook(filn, map, ret.from);
++                try addEmailsToAddressBook(io, filn, map, ret.from);
+             }
+             if (o.@"add-all" or o.@"add-to") {
+-                try addEmailsToAddressBook(filn, map, ret.to);
++                try addEmailsToAddressBook(io, filn, map, ret.to);
+             }
+             if (o.@"add-all" or o.@"add-cc") {
+-                try addEmailsToAddressBook(filn, map, ret.cc);
++                try addEmailsToAddressBook(io, filn, map, ret.cc);
+             }
+             return;
+         }
+@@ -461,7 +468,7 @@ pub fn main() anyerror!void {
+                 value = key;
+             }
+ 
+-            if (readAddressBook(alloc, filn, max_file_size, &list, &map)) {
++            if (readAddressBook(alloc, io, filn, max_file_size, &list, &map)) {
+                 //
+             } else |err| {
+                 try errwriter.interface.print("Warning {t}: {s} --> creating it...\n", .{ err, filn });
+@@ -476,7 +483,7 @@ pub fn main() anyerror!void {
+                 return;
+             }
+             const decoded_val = replaceUtf8(value, &val_buffer);
+-            try addToAddressBook(filn, decoded_key, decoded_val);
++            try addToAddressBook(io, filn, decoded_key, decoded_val);
+             return;
+         }
+ 
+@@ -497,7 +504,7 @@ pub fn main() anyerror!void {
+         // parse input file
+         //
+ 
+-        if (readAddressBook(alloc, filn, max_file_size, &list, &map)) {
++        if (readAddressBook(alloc, io, filn, max_file_size, &list, &map)) {
+             // do nothing
+         } else |err| {
+             try errwriter.interface.print("Error {t}: {s}\n", .{ err, filn });
