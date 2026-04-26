@@ -1,0 +1,428 @@
+--- a/salt/netapi/rest_tornado/saltnado.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/netapi/rest_tornado/saltnado.py	2026-04-25 20:51:51.000000000 +0000
+@@ -185,12 +185,12 @@
+ .. |500| replace:: internal server error
+ """
+ 
+-import cgi
+ import fnmatch
+ import logging
+ import time
+ from collections import defaultdict
+ from copy import copy
++from email.message import Message
+ 
+ import tornado.escape
+ import tornado.gen
+@@ -213,6 +213,26 @@
+     AuthorizationError,
+     EauthAuthenticationError,
+ )
++
++
++def _parse_header(line):
++    """
++    Parse a Content-type like header, returning the value and a dict of parameters.
++
++    This is a replacement for the deprecated cgi.parse_header(), which was
++    removed in Python 3.13.
++    """
++    msg = Message()
++    msg["content-type"] = line
++    params = msg.get_params()
++    if params:
++        # First item is the value itself (e.g. 'text/html')
++        key = params[0][0]
++        pdict = dict(params[1:])
++        return key, pdict
++    return line, {}
++
++
+ from salt.utils.event import tagify
+ 
+ _json = salt.utils.json.import_json()
+@@ -476,7 +496,7 @@
+         accept_header = self.request.headers.get("Accept", "*/*")
+         # Ignore any parameter, including q (quality) one
+         parsed_accept_header = [
+-            cgi.parse_header(h)[0] for h in accept_header.split(",")
++            _parse_header(h)[0] for h in accept_header.split(",")
+         ]
+ 
+         def find_acceptable_content_type(parsed_accept_header):
+@@ -559,8 +579,8 @@
+         }
+ 
+         try:
+-            # Use cgi.parse_header to correctly separate parameters from value
+-            value, parameters = cgi.parse_header(self.request.headers["Content-Type"])
++            # Use _parse_header to correctly separate parameters from value
++            value, parameters = _parse_header(self.request.headers["Content-Type"])
+             return ct_in_map[value](tornado.escape.native_str(data))
+         except KeyError:
+             self.send_error(406)
+--- a/salt/modules/baredoc.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/modules/baredoc.py	2026-04-25 20:42:15.000000000 +0000
+@@ -70,12 +70,8 @@
+     list_arg_defaults = function.args.defaults
+     if list_arg_defaults:
+         for arg_default in list_arg_defaults:
+-            if isinstance(arg_default, ast.NameConstant):
++            if isinstance(arg_default, ast.Constant):
+                 arg_default_strings.append(arg_default.value)
+-            elif isinstance(arg_default, ast.Str):
+-                arg_default_strings.append(arg_default.s)
+-            elif isinstance(arg_default, ast.Num):
+-                arg_default_strings.append(arg_default.n)
+ 
+     # Since only some args may have default values, need to zip in reverse order
+     backwards_args = OrderedDict(
+--- a/salt/transport/base.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/transport/base.py	2026-04-25 20:43:04.000000000 +0000
+@@ -510,29 +510,46 @@
+     backwards compatability older ssl config settings but adds verify_locations
+     and verify_flags options.
+     """
+-    default_version = ssl.PROTOCOL_TLS
+     if server_side:
+         default_version = ssl.PROTOCOL_TLS_SERVER
+         purpose = ssl.Purpose.CLIENT_AUTH
+     elif server_side is not None:
+         default_version = ssl.PROTOCOL_TLS_CLIENT
+         purpose = ssl.Purpose.SERVER_AUTH
++    else:
++        raise ValueError("server_side must be True or False")
+     # Use create_default_context to start with what Python considers resonably
+     # secure settings.
+     context = ssl.create_default_context(purpose)
+-    context.protocol = ssl_options.get("ssl_version", default_version)
++    # Note: context.protocol is read-only in Python 3.10+.
++    # If a specific ssl_version is provided, create a new context with it.
++    ssl_version = ssl_options.get("ssl_version")
++    if ssl_version and ssl_version != default_version:
++        context = ssl.SSLContext(ssl_version)
++        if server_side:
++            context.check_hostname = False
++            context.verify_mode = ssl.CERT_REQUIRED
++        elif server_side is not None:
++            context.check_hostname = True
++            context.verify_mode = ssl.CERT_REQUIRED
+     if "certfile" in ssl_options:
+         context.load_cert_chain(
+             ssl_options["certfile"], ssl_options.get("keyfile", None)
+         )
+-    if "cert_reqs" in ssl_options:
+-        if ssl_options["cert_reqs"].upper() == "CERT_NONE":
+-            # This may have been set automatically by PROTOCOL_TLS_CLIENT but is
+-            # incompatible with CERT_NONE so we must manually clear it.
+-            context.check_hostname = False
+-        context.verify_mode = getattr(ssl.VerifyMode, ssl_options["cert_reqs"])
+     if "ca_certs" in ssl_options:
+         context.load_verify_locations(ssl_options["ca_certs"])
++    if "cert_reqs" in ssl_options:
++        cert_reqs = ssl_options["cert_reqs"]
++        if isinstance(cert_reqs, str):
++            if cert_reqs.upper() == "CERT_NONE":
++                # This may have been set automatically by PROTOCOL_TLS_CLIENT but is
++                # incompatible with CERT_NONE so we must manually clear it.
++                context.check_hostname = False
++            context.verify_mode = getattr(ssl.VerifyMode, cert_reqs)
++        else:
++            if cert_reqs == ssl.CERT_NONE:
++                context.check_hostname = False
++            context.verify_mode = cert_reqs
+     if "verify_locations" in ssl_options:
+         for _ in ssl_options["verify_locations"]:
+             if isinstance(_, dict):
+--- a/salt/utils/http.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/utils/http.py	2026-04-25 20:43:24.000000000 +0000
+@@ -495,9 +495,11 @@
+                     port = 443
+                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                 sock.connect((hostname, int(port)))
+-                sockwrap = ssl.wrap_socket(
+-                    sock, ca_certs=ca_bundle, cert_reqs=ssl.CERT_REQUIRED
+-                )
++                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
++                ssl_context.load_verify_locations(ca_bundle)
++                ssl_context.verify_mode = ssl.CERT_REQUIRED
++                ssl_context.check_hostname = True
++                sockwrap = ssl_context.wrap_socket(sock, server_hostname=hostname)
+                 try:
+                     match_hostname(sockwrap.getpeercert(), hostname)
+                 except CertificateError as exc:
+--- a/salt/engines/logentries.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/engines/logentries.py	2026-04-25 20:43:57.000000000 +0000
+@@ -153,16 +153,13 @@
+     class TLSSocketAppender(PlainTextSocketAppender):
+         def open_connection(self):
+             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+-            sock = ssl.wrap_socket(
+-                sock=sock,
+-                keyfile=None,
+-                certfile=None,
+-                server_side=False,
+-                cert_reqs=ssl.CERT_REQUIRED,
+-                ssl_version=getattr(ssl, "PROTOCOL_TLSv1_2", ssl.PROTOCOL_TLSv1),
+-                ca_certs=certifi.where(),
+-                do_handshake_on_connect=True,
+-                suppress_ragged_eofs=True,
++            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
++            context.verify_mode = ssl.CERT_REQUIRED
++            context.check_hostname = True
++            context.load_verify_locations(certifi.where())
++            sock = context.wrap_socket(
++                sock,
++                server_hostname=self.LE_API,
+             )
+             sock.connect((self.LE_API, self.LE_TLS_PORT))
+             self._conn = sock
+--- a/salt/utils/vmware.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/utils/vmware.py	2026-04-25 20:44:09.000000000 +0000
+@@ -326,7 +326,8 @@
+         except Exception as exc:  # pylint: disable=broad-except
+             # pyVmomi's SmartConnect() actually raises Exception in some cases.
+             if "certificate verify failed" in str(exc):
+-                context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
++                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
++                context.check_hostname = False
+                 context.verify_mode = ssl.CERT_NONE
+                 try:
+                     service_instance = SmartConnect(
+--- a/salt/modules/nilrt_ip.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/modules/nilrt_ip.py	2026-04-25 20:44:21.000000000 +0000
+@@ -269,7 +269,7 @@
+         config_parser = configparser.RawConfigParser(
+             dict_type=CaseInsensitiveDict, converters={"unquoted": _remove_quotes}
+         )
+-        config_parser.readfp(config_file)
++        config_parser.read_file(config_file)
+         for option in options:
+             results[option] = config_parser.getunquoted(
+                 section, option, fallback=default_value
+@@ -572,7 +572,7 @@
+     if os.path.exists(filename):
+         try:
+             with salt.utils.files.fopen(filename, "r") as config_file:
+-                parser.readfp(config_file)
++                parser.read_file(config_file)
+         except configparser.MissingSectionHeaderError:
+             pass
+     interface = pyiface.Interface(name=interface)
+@@ -850,7 +850,7 @@
+     if os.path.exists(INTERFACES_CONFIG):
+         try:
+             with salt.utils.files.fopen(INTERFACES_CONFIG, "r") as config_file:
+-                parser.readfp(config_file)
++                parser.read_file(config_file)
+         except configparser.MissingSectionHeaderError:
+             pass
+     hwaddr = interface.hwaddr[:-1]
+--- a/salt/utils/ssdp.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/utils/ssdp.py	2026-04-25 20:45:10.000000000 +0000
+@@ -29,10 +29,7 @@
+ import salt.utils.json
+ import salt.utils.stringutils
+ 
+-try:
+-    from collections import OrderedDict
+-except ImportError:
+-    from collections import OrderedDict
++from collections import OrderedDict
+ 
+ _json = salt.utils.json.import_json()
+ if not hasattr(_json, "dumps"):
+@@ -40,16 +37,8 @@
+ 
+ try:
+     import asyncio
+-
+-    asyncio.ported = False
+ except ImportError:
+-    try:
+-        # Python 2 doesn't have asyncio
+-        import trollius as asyncio
+-
+-        asyncio.ported = True
+-    except ImportError:
+-        asyncio = None
++    asyncio = None
+ 
+ 
+ class TimeOutException(Exception):
+@@ -251,98 +240,6 @@
+             self._config[self.ANSWER] = {}
+         self._config[self.ANSWER].update({"master": self.get_self_ip()})
+ 
+-    @staticmethod
+-    def create_datagram_endpoint(
+-        loop,
+-        protocol_factory,
+-        local_addr=None,
+-        remote_addr=None,
+-        family=0,
+-        proto=0,
+-        flags=0,
+-    ):
+-        """
+-        Create datagram connection.
+-
+-        Based on code from Python 3.5 version, this method is used
+-        only in Python 2.7+ versions, since Trollius library did not
+-        ported UDP packets broadcast.
+-        """
+-        if not (local_addr or remote_addr):
+-            if not family:
+-                raise ValueError("unexpected address family")
+-            addr_pairs_info = (((family, proto), (None, None)),)
+-        else:
+-            addr_infos = OrderedDict()
+-            for idx, addr in ((0, local_addr), (1, remote_addr)):
+-                if addr is not None:
+-                    assert (
+-                        isinstance(addr, tuple) and len(addr) == 2
+-                    ), "2-tuple is expected"
+-                    infos = yield asyncio.coroutines.From(
+-                        loop.getaddrinfo(
+-                            *addr,
+-                            family=family,
+-                            type=socket.SOCK_DGRAM,
+-                            proto=proto,
+-                            flags=flags,
+-                        )
+-                    )
+-                    if not infos:
+-                        raise OSError("getaddrinfo() returned empty list")
+-                    for fam, _, pro, _, address in infos:
+-                        key = (fam, pro)
+-                        if key not in addr_infos:
+-                            addr_infos[key] = [None, None]
+-                        addr_infos[key][idx] = address
+-            addr_pairs_info = [
+-                (key, addr_pair)
+-                for key, addr_pair in addr_infos.items()
+-                if not (
+-                    (local_addr and addr_pair[0] is None)
+-                    or (remote_addr and addr_pair[1] is None)
+-                )
+-            ]
+-            if not addr_pairs_info:
+-                raise ValueError("can not get address information")
+-        exceptions = []
+-        for (family, proto), (local_address, remote_address) in addr_pairs_info:
+-            sock = r_addr = None
+-            try:
+-                sock = socket.socket(family=family, type=socket.SOCK_DGRAM, proto=proto)
+-                for opt in [socket.SO_REUSEADDR, socket.SO_BROADCAST]:
+-                    sock.setsockopt(socket.SOL_SOCKET, opt, 1)
+-                sock.setblocking(False)
+-                if local_addr:
+-                    sock.bind(local_address)
+-                if remote_addr:
+-                    yield asyncio.coroutines.From(
+-                        loop.sock_connect(sock, remote_address)
+-                    )
+-                    r_addr = remote_address
+-            except OSError as exc:
+-                if sock is not None:
+-                    sock.close()
+-                exceptions.append(exc)
+-            except Exception:  # pylint: disable=broad-except
+-                if sock is not None:
+-                    sock.close()
+-                raise
+-            else:
+-                break
+-        else:
+-            raise exceptions[0]
+-
+-        protocol = protocol_factory()
+-        waiter = asyncio.futures.Future(loop=loop)
+-        transport = loop._make_datagram_transport(sock, protocol, r_addr, waiter)
+-        try:
+-            yield asyncio.coroutines.From(waiter)
+-        except Exception:  # pylint: disable=broad-except
+-            transport.close()
+-            raise
+-        raise asyncio.coroutines.Return(transport, protocol)
+-
+     def run(self):
+         """
+         Run server.
+@@ -355,18 +252,11 @@
+         )
+         loop = asyncio.get_event_loop()
+         protocol = SSDPFactory(answer=self._config[self.ANSWER])
+-        if asyncio.ported:
+-            transport, protocol = loop.run_until_complete(
+-                SSDPDiscoveryServer.create_datagram_endpoint(
+-                    loop, protocol, local_addr=(listen_ip, port)
+-                )
+-            )
+-        else:
+-            transport, protocol = loop.run_until_complete(
+-                loop.create_datagram_endpoint(
+-                    protocol, local_addr=(listen_ip, port), allow_broadcast=True
+-                )
++        transport, protocol = loop.run_until_complete(
++            loop.create_datagram_endpoint(
++                protocol, local_addr=(listen_ip, port), allow_broadcast=True
+             )
++        )
+         try:
+             loop.run_forever()
+         finally:
+--- a/salt/utils/platform.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/utils/platform.py	2026-04-26 02:23:56.000000000 +0000
+@@ -237,12 +237,20 @@
+ 
+ def spawning_platform():
+     """
+-    Returns True if multiprocessing.get_start_method(allow_none=False) returns "spawn"
++    Returns True if the multiprocessing start method requires pickling to transfer
++    process state to the child.  This is the case for both "spawn" and "forkserver".
+ 
+-    This is the default for Windows Python >= 3.4 and macOS on Python >= 3.8.
+-    Salt, however, will force macOS to spawning by default on all python versions
++    "spawn" is the default on Windows (Python >= 3.4) and macOS (Python >= 3.8).
++    Salt forces macOS to spawning by default on all Python versions.
++
++    "forkserver" became the Linux default in Python 3.14 (via PEP 741).  Like
++    "spawn", it transfers the Process object to the child via pickle rather than
++    inheriting it through a plain fork of the parent process.  Salt must therefore
++    treat it identically: capture *args/**kwargs in __new__ so that __getstate__
++    can reconstruct the object on the other side, and skip parent-inherited
++    logging teardown since the child starts with a clean file-descriptor table.
+     """
+-    return multiprocessing.get_start_method(allow_none=False) == "spawn"
++    return multiprocessing.get_start_method(allow_none=False) in ("spawn", "forkserver")
+ 
+ 
+ def get_machine_identifier():
+--- a/salt/utils/process.py	2026-02-11 19:50:11.000000000 +0000
++++ b/salt/utils/process.py	2026-04-26 02:35:54.886029110 +0000
+@@ -20,6 +20,7 @@
+ import sys
+ import threading
+ import time
++import asyncio
+ 
+ from tornado import gen
+ 
+@@ -956,6 +957,16 @@
+     def __decorate_run(self, run_func):  # pylint: disable=unused-private-member
+         @functools.wraps(run_func)
+         def wrapped_run_func():
++            # Ensure an asyncio event loop exists in this child process.
++            # On forkserver (Python 3.14+ Linux default) and spawn platforms,
++            # the child does not inherit the parent's event loop, and Tornado
++            # requires one to be present before any coroutine or Future can
++            # be created.
++            try:
++                asyncio.get_event_loop()
++            except RuntimeError:
++                asyncio.set_event_loop(asyncio.new_event_loop())
++
+             # Static after fork method, always needs to happen first
+             appendproctitle(self.name)
+ 
