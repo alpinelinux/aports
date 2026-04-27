@@ -1,0 +1,697 @@
+From 42ace47bb426ca9705175d866bb9bdf168d5535f Mon Sep 17 00:00:00 2001
+From: Matt Stark <msta@google.com>
+Date: Mon, 13 Apr 2026 11:10:13 +1000
+Subject: [PATCH] Add function `expand_directory` to gn.
+
+This function expands a directory to a list of files.
+This will allow us to do a variety of things, such as:
+* Removing our `generate_libcxx_headers` script
+* Ensuring that our whole sysroot is in the inputs to a rule.
+
+This is required because the contents of a sysroot are not able to be
+stored in the chrome source code because chromeos sysroots can be paths
+pointing to the chromeos checkout rather than the chrome checkout.
+
+It also allows us to significantly improve the quality of our third
+party libraries, for which we would, after this change, no longer have
+to keep the source file list in sync, but instead simply use those third
+party libraries as the source of truth.
+
+Bug: b:491242305
+Change-Id: Ib52107b2f877021d3e59c54c9a554fac6a6a6964
+Reviewed-on: https://gn-review.googlesource.com/c/gn/+/21860
+Reviewed-by: Takuto Ikuta <tikuta@google.com>
+Commit-Queue: Matt Stark <msta@google.com>
+---
+ build/gen.py                                 |   2 +
+ docs/reference.md                            |  35 ++++
+ src/gn/build_settings.h                      |  11 ++
+ src/gn/function_exec_script.cc               |  14 +-
+ src/gn/function_expand_directory.cc          | 165 ++++++++++++++++++
+ src/gn/function_expand_directory_unittest.cc | 168 +++++++++++++++++++
+ src/gn/functions.cc                          |   1 +
+ src/gn/functions.h                           |   8 +
+ src/gn/setup.cc                              |  69 ++++++--
+ src/gn/source_file.cc                        |  13 ++
+ src/gn/source_file.h                         |   3 +
+ 11 files changed, 464 insertions(+), 25 deletions(-)
+ create mode 100644 src/gn/function_expand_directory.cc
+ create mode 100644 src/gn/function_expand_directory_unittest.cc
+
+diff --git a/build/gen.py b/build/gen.py
+index e40627c8..2a7e7318 100755
+--- a/build/gen.py
++++ b/build/gen.py
+@@ -698,6 +698,7 @@ def WriteGNNinja(path, platform, host, options, args_list):
+         'src/gn/file_writer.cc',
+         'src/gn/frameworks_utils.cc',
+         'src/gn/function_exec_script.cc',
++        'src/gn/function_expand_directory.cc',
+         'src/gn/function_filter.cc',
+         'src/gn/function_filter_labels.cc',
+         'src/gn/function_foreach.cc',
+@@ -842,6 +843,7 @@ def WriteGNNinja(path, platform, host, options, args_list):
+         'src/gn/filesystem_utils_unittest.cc',
+         'src/gn/file_writer_unittest.cc',
+         'src/gn/frameworks_utils_unittest.cc',
++        'src/gn/function_expand_directory_unittest.cc',
+         'src/gn/function_filter_unittest.cc',
+         'src/gn/function_filter_labels_unittest.cc',
+         'src/gn/function_foreach_unittest.cc',
+diff --git a/docs/reference.md b/docs/reference.md
+index 05329606..27d5af0f 100644
+--- a/docs/reference.md
++++ b/docs/reference.md
+@@ -41,6 +41,7 @@
+     *   [declare_args: Declare build arguments.](#func_declare_args)
+     *   [defined: Returns whether an identifier is defined.](#func_defined)
+     *   [exec_script: Synchronously run a script and return the output.](#func_exec_script)
++    *   [expand_directory: Expand a source directory and return files.](#func_expand_directory)
+     *   [filter_exclude: Remove values that match a set of patterns.](#func_filter_exclude)
+     *   [filter_include: Remove values that do not match a set of patterns.](#func_filter_include)
+     *   [filter_labels_exclude: Remove labels that match a set of patterns.](#func_filter_labels_exclude)
+@@ -2611,6 +2612,25 @@
+   # result.
+   exec_script("//foo/bar/myscript.py")
+ ```
++### <a name="func_expand_directory"></a>**expand_directory**: Expand a source directory and return files.&nbsp;[Back to Top](#gn-reference)
++
++```
++  expand_directory(directory, recursive)
++
++  Returns a list of all files contained within the specified directory.
++
++  Arguments:
++    directory: A string representing the directory to search, relative to
++               the current BUILD file or source-absolute (starting with "//").
++    recursive: A boolean indicating whether to search recursively.
++
++  Returns:
++    A list of source-absolute paths representing the files found, sorted
++    alphabetically.
++
++  Example:
++    files = expand_directory("src/data", true)
++```
+ ### <a name="func_filter_exclude"></a>**filter_exclude**: Remove values that match a set of patterns.&nbsp;[Back to Top](#gn-reference)
+ 
+ ```
+@@ -7358,6 +7378,21 @@
+       If both values are set, only the value in "exec_script_allowlist" will
+       have any effect (so don't set both!).
+ 
++  expand_directory_allowlist [optional]
++      A list of .gn/.gni files (not labels) that have permission to call the
++      expand_directory function. If this list is defined, calls to
++      expand_directory will be checked against this list and GN will fail if
++      the current file isn't in the list.
++
++      The use of expand_directory is restricted because it encourages
++      monolithic build targets with redundant inputs, which can slow down
++      the build.
++
++      Example:
++        expand_directory_allowlist = [
++          "//base/BUILD.gn",
++        ]
++
+   export_compile_commands [optional]
+       A list of label patterns for which to generate a Clang compilation
+       database (see "gn help label_pattern" for the string format).
+diff --git a/src/gn/build_settings.h b/src/gn/build_settings.h
+index 6c482845..0d4decb5 100644
+--- a/src/gn/build_settings.h
++++ b/src/gn/build_settings.h
+@@ -144,6 +144,15 @@ class BuildSettings {
+     exec_script_allowlist_ = std::move(list);
+   }
+ 
++  // A list of files that can call expand_directory(). If the returned pointer
++  // is null, expand_directory may be called from anywhere.
++  const SourceFileSet* expand_directory_allowlist() const {
++    return expand_directory_allowlist_.get();
++  }
++  void set_expand_directory_allowlist(std::unique_ptr<SourceFileSet> list) {
++    expand_directory_allowlist_ = std::move(list);
++  }
++
+  private:
+   Label root_target_label_;
+   std::vector<LabelPattern> root_patterns_;
+@@ -167,6 +176,8 @@ class BuildSettings {
+   PrintCallback print_callback_;
+ 
+   std::unique_ptr<SourceFileSet> exec_script_allowlist_;
++  std::unique_ptr<SourceFileSet> expand_directory_allowlist_ =
++      std::make_unique<SourceFileSet>();
+ 
+   BuildSettings& operator=(const BuildSettings&) = delete;
+ };
+diff --git a/src/gn/function_exec_script.cc b/src/gn/function_exec_script.cc
+index 01cdb661..966dbfcf 100644
+--- a/src/gn/function_exec_script.cc
++++ b/src/gn/function_exec_script.cc
+@@ -15,6 +15,7 @@
+ #include "gn/input_file.h"
+ #include "gn/parse_tree.h"
+ #include "gn/scheduler.h"
++#include "gn/source_file.h"
+ #include "gn/trace.h"
+ #include "gn/value.h"
+ #include "util/build_config.h"
+@@ -27,17 +28,8 @@ namespace {
+ bool CheckExecScriptPermissions(const BuildSettings* build_settings,
+                                 const FunctionCallNode* function,
+                                 Err* err) {
+-  const SourceFileSet* allowlist = build_settings->exec_script_allowlist();
+-  if (!allowlist)
+-    return true;  // No allowlist specified, don't check.
+-
+-  LocationRange function_range = function->GetRange();
+-  if (!function_range.begin().file())
+-    return true;  // No file, might be some internal thing, implicitly pass.
+-
+-  if (allowlist->find(function_range.begin().file()->name()) !=
+-      allowlist->end())
+-    return true;  // allowlisted, this is OK.
++  if (InSourceAllowList(function, build_settings->exec_script_allowlist()))
++    return true;
+ 
+   // Disallowed case.
+   *err = Err(
+diff --git a/src/gn/function_expand_directory.cc b/src/gn/function_expand_directory.cc
+new file mode 100644
+index 00000000..4005098a
+--- /dev/null
++++ b/src/gn/function_expand_directory.cc
+@@ -0,0 +1,165 @@
++// Copyright 2026 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <algorithm>
++#include <map>
++#include <mutex>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "base/files/file_enumerator.h"
++#include "base/files/file_util.h"
++#include "base/strings/stringprintf.h"
++#include "gn/err.h"
++#include "gn/filesystem_utils.h"
++#include "gn/functions.h"
++#include "gn/scheduler.h"
++#include "gn/scope.h"
++#include "gn/value.h"
++
++namespace functions {
++
++const char kExpandDirectory[] = "expand_directory";
++const char kExpandDirectory_HelpShort[] =
++    "expand_directory: Expand a source directory and return files.";
++const char kExpandDirectory_Help[] =
++    R"(expand_directory: Expand a source directory and return files.
++
++  expand_directory(directory, recursive)
++
++  Returns a list of all files contained within the specified directory.
++
++  Arguments:
++    directory: A string representing the directory to search, relative to
++               the current BUILD file or source-absolute (starting with "//").
++    recursive: A boolean indicating whether to search recursively.
++
++  Returns:
++    A list of source-absolute paths representing the files found, sorted
++    alphabetically.
++
++  Example:
++    files = expand_directory("src/data", true)
++)";
++
++namespace {
++
++Value ExpandDirectoryInternal(const ParseNode* function,
++                              SourceDir source_path,
++                              const base::FilePath& disk_path,
++                              bool recursive) {
++  auto add_gen_dep = [&](const base::FilePath& path) {
++    g_scheduler->AddGenDependency(
++        path.StripTrailingSeparators().NormalizePathSeparatorsTo(
++            base::FilePath::kSeparators[0]));
++  };
++
++  add_gen_dep(disk_path);
++
++  std::string disk_path_utf8 = FilePathToUTF8(disk_path);
++  Value files(function, Value::LIST);
++
++  base::FileEnumerator traverser(
++      disk_path, recursive,
++      base::FileEnumerator::FILES |
++          (recursive ? base::FileEnumerator::DIRECTORIES : 0));
++  for (base::FilePath current = traverser.Next(); !current.empty();
++       current = traverser.Next()) {
++    if (traverser.GetInfo().IsDirectory()) {
++      add_gen_dep(current);
++    } else {
++      std::string full = source_path.value() +
++                         FilePathToUTF8(current).substr(disk_path_utf8.size());
++      NormalizePath(&full);
++      files.list_value().emplace_back(function, full);
++    }
++  }
++
++  std::ranges::sort(files.list_value(), [](const auto& lhs, const auto& rhs) {
++    return lhs.string_value() < rhs.string_value();
++  });
++
++  return files;
++}
++
++}  // namespace
++
++Value RunExpandDirectory(Scope* scope,
++                         const FunctionCallNode* function,
++                         const std::vector<Value>& args,
++                         Err* err) {
++  if (args.size() != 2) {
++    *err = Err(function, "Wrong number of arguments.",
++               "expand_directory() takes exactly two arguments");
++    return Value();
++  }
++
++  if (!InSourceAllowList(
++          function,
++          scope->settings()->build_settings()->expand_directory_allowlist())) {
++    *err = Err(
++        function, "Disallowed expand_directory call.",
++        "The use of expand_directory is restricted in this build.\n"
++        "expand_directory is discouraged because it encourages monolithic \n"
++        "build targets with redundant inputs, slowing down the build.\n"
++        "\n"
++        "The allowed callers of expand_directory is maintained in the "
++        "\"//.gn\" file\n"
++        "if you need to modify the allowlist.");
++    return Value();
++  }
++
++  if (!args[0].VerifyTypeIs(Value::STRING, err) ||
++      !args[1].VerifyTypeIs(Value::BOOLEAN, err)) {
++    return Value();
++  }
++
++  std::string root_path = scope->settings()->build_settings()->root_path_utf8();
++  SourceDir dir =
++      scope->GetSourceDir().ResolveRelativeDir(args[0], err, root_path);
++  if (err->has_error())
++    return Value();
++
++  bool recursive = args[1].boolean_value();
++
++  base::FilePath dir_path =
++      scope->settings()->build_settings()->GetFullPath(dir);
++
++  if (!base::DirectoryExists(dir_path)) {
++    *err =
++        Err(function, "Directory does not exist: " + FilePathToUTF8(dir_path));
++    return Value();
++  }
++
++  // This is highly likely to be called once per toolchain per directory.
++  // Since this involves a file system scan, it's worth caching.
++  struct CacheEntry {
++    std::mutex mutex;
++    Value result;
++  };
++
++  static std::map<std::pair<base::FilePath, bool>, CacheEntry> cache;
++  static std::mutex cache_mutex;
++
++  CacheEntry* entry;
++  {
++    std::lock_guard<std::mutex> lock(cache_mutex);
++    entry = &cache[{dir_path, recursive}];
++  }
++
++  // Now lock the per-entry mutex
++  std::lock_guard<std::mutex> lock(entry->mutex);
++  if (entry->result.type() != Value::NONE) {
++    return entry->result;
++  }
++
++  Value result = ExpandDirectoryInternal(function, dir, dir_path, recursive);
++
++  entry->result = result;
++  return result;
++}
++
++}  // namespace functions
+diff --git a/src/gn/function_expand_directory_unittest.cc b/src/gn/function_expand_directory_unittest.cc
+new file mode 100644
+index 00000000..ecd467c6
+--- /dev/null
++++ b/src/gn/function_expand_directory_unittest.cc
+@@ -0,0 +1,168 @@
++// Copyright 2026 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <algorithm>
++
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "gn/filesystem_utils.h"
++#include "gn/functions.h"
++#include "gn/input_file.h"
++#include "gn/parse_tree.h"
++#include "gn/test_with_scheduler.h"
++#include "gn/test_with_scope.h"
++#include "util/test/test.h"
++
++class ExpandDirectoryTest : public TestWithScheduler {
++ protected:
++  ExpandDirectoryTest() {
++    CHECK(temp_dir_.CreateUniqueTempDir());
++    setup.build_settings()->SetRootPath(temp_dir_.GetPath());
++  }
++
++  base::ScopedTempDir temp_dir_;
++  TestWithScope setup;
++
++  std::unique_ptr<FunctionCallNode> SetupDefaultDirAndFunction(
++      InputFile* input_file,
++      base::FilePath dir) {
++    auto file1 = dir.AppendASCII("file1.txt");
++    auto file2 = dir.AppendASCII("file2.txt");
++    auto sub_dir = dir.AppendASCII("sub");
++    auto file3 = sub_dir.AppendASCII("file3.txt");
++
++    EXPECT_TRUE(base::CreateDirectory(sub_dir));
++    EXPECT_TRUE(WriteFile(file1, "content1", nullptr));
++    EXPECT_TRUE(WriteFile(file2, "content2", nullptr));
++    EXPECT_TRUE(WriteFile(file3, "content3", nullptr));
++
++    Location location(input_file, 1, 1);
++    Token token(location, Token::IDENTIFIER, "expand_directory");
++    auto function = std::make_unique<FunctionCallNode>();
++    function->set_function(token);
++
++    auto args = std::make_unique<ListNode>();
++    args->set_begin_token(token);
++    args->set_end(std::make_unique<EndNode>(token));
++    function->set_args(std::move(args));
++
++    auto allowlist = std::make_unique<SourceFileSet>();
++    allowlist->insert(input_file->name());
++    setup.build_settings()->set_expand_directory_allowlist(
++        std::move(allowlist));
++    return function;
++  }
++};
++
++TEST_F(ExpandDirectoryTest, Recursive) {
++  auto dir_path = temp_dir_.GetPath().AppendASCII("foo").AppendASCII("bar");
++  auto input_file = InputFile(SourceFile("//BUILD.gn"));
++  auto function = SetupDefaultDirAndFunction(&input_file, dir_path);
++
++  Err err;
++  Value result = functions::RunExpandDirectory(
++      setup.scope(), function.get(),
++      {Value(nullptr, "//foo/bar"), Value(nullptr, true)}, &err);
++  ASSERT_FALSE(err.has_error()) << err.message();
++
++  ASSERT_EQ(result.type(), Value::LIST);
++  ASSERT_EQ(result.list_value().size(), 3);
++  EXPECT_EQ(result.list_value()[0].string_value(), "//foo/bar/file1.txt");
++  EXPECT_EQ(result.list_value()[1].string_value(), "//foo/bar/file2.txt");
++  EXPECT_EQ(result.list_value()[2].string_value(), "//foo/bar/sub/file3.txt");
++
++  std::vector<base::FilePath> deps = scheduler().GetGenDependencies();
++  EXPECT_TRUE(std::ranges::find(deps, dir_path) != deps.end())
++      << FilePathToUTF8(dir_path);
++  auto sub = dir_path.AppendASCII("sub");
++  EXPECT_TRUE(std::ranges::find(deps, sub) != deps.end())
++      << FilePathToUTF8(sub);
++}
++
++TEST_F(ExpandDirectoryTest, NonRecursive) {
++  auto dir_path = temp_dir_.GetPath().AppendASCII("foo").AppendASCII("bar");
++  auto input_file = InputFile(SourceFile("//foo/BUILD.gn"));
++  auto function = SetupDefaultDirAndFunction(&input_file, dir_path);
++  setup.scope()->set_source_dir(SourceDir("//foo/"));
++
++  Err err;
++  Value result = functions::RunExpandDirectory(
++      setup.scope(), function.get(),
++      {Value(nullptr, "bar"), Value(nullptr, false)}, &err);
++  ASSERT_FALSE(err.has_error()) << err.message();
++  ASSERT_EQ(result.type(), Value::LIST);
++  ASSERT_EQ(result.list_value().size(), 2);
++  EXPECT_EQ(result.list_value()[0].string_value(), "//foo/bar/file1.txt");
++  EXPECT_EQ(result.list_value()[1].string_value(), "//foo/bar/file2.txt");
++
++  std::vector<base::FilePath> deps = scheduler().GetGenDependencies();
++  EXPECT_TRUE(std::ranges::find(deps, dir_path) != deps.end());
++  EXPECT_TRUE(std::ranges::find(deps, dir_path.AppendASCII("sub")) ==
++              deps.end());
++}
++
++TEST_F(ExpandDirectoryTest, EmptyDir) {
++  std::string dir_str = FilePathToUTF8(temp_dir_.GetPath());
++
++  FunctionCallNode function;
++  Err err;
++  Value result = functions::RunExpandDirectory(
++      setup.scope(), &function, {Value(nullptr, dir_str), Value(nullptr, true)},
++      &err);
++  ASSERT_FALSE(err.has_error());
++  ASSERT_EQ(result.type(), Value::LIST);
++  ASSERT_EQ(result.list_value().size(), 0);
++}
++
++TEST_F(ExpandDirectoryTest, NonExistentDir) {
++  base::FilePath non_existent = temp_dir_.GetPath().AppendASCII("non_existent");
++
++  FunctionCallNode function;
++  Err err;
++  Value result = functions::RunExpandDirectory(
++      setup.scope(), &function,
++      {Value(nullptr, FilePathToUTF8(non_existent)), Value(nullptr, true)},
++      &err);
++  EXPECT_TRUE(err.has_error());
++}
++
++TEST_F(ExpandDirectoryTest, Allowlist) {
++  InputFile input_file(SourceFile("//BUILD.gn"));
++  Location location(&input_file, 1, 1);
++  Token token(location, Token::IDENTIFIER, "expand_directory");
++  FunctionCallNode function;
++  function.set_function(token);
++
++  auto args = std::make_unique<ListNode>();
++  args->set_begin_token(token);
++  args->set_end(std::make_unique<EndNode>(token));
++  function.set_args(std::move(args));
++
++  // No allowlist
++  {
++    Err err;
++    Value result = functions::RunExpandDirectory(
++        setup.scope(), &function,
++        {Value(nullptr, FilePathToUTF8(temp_dir_.GetPath())),
++         Value(nullptr, true)},
++        &err);
++    EXPECT_TRUE(err.has_error());
++  }
++
++  // Empty allowlist
++  auto allowlist_owned = std::make_unique<SourceFileSet>();
++  auto allowlist = allowlist_owned.get();
++  setup.build_settings()->set_expand_directory_allowlist(
++      std::move(allowlist_owned));
++  allowlist->insert(SourceFile("//foo.gni"));
++  {
++    Err err;
++    Value result = functions::RunExpandDirectory(
++        setup.scope(), &function,
++        {Value(nullptr, FilePathToUTF8(temp_dir_.GetPath())),
++         Value(nullptr, true)},
++        &err);
++    EXPECT_TRUE(err.has_error());
++  }
++}
+diff --git a/src/gn/functions.cc b/src/gn/functions.cc
+index 830fcee7..d7099650 100644
+--- a/src/gn/functions.cc
++++ b/src/gn/functions.cc
+@@ -1524,6 +1524,7 @@ struct FunctionInfoInitializer {
+     INSERT_FUNCTION(DeclareArgs, false)
+     INSERT_FUNCTION(Defined, false)
+     INSERT_FUNCTION(ExecScript, false)
++    INSERT_FUNCTION(ExpandDirectory, false)
+     INSERT_FUNCTION(FilterExclude, false)
+     INSERT_FUNCTION(FilterInclude, false)
+     INSERT_FUNCTION(FilterLabelsInclude, false)
+diff --git a/src/gn/functions.h b/src/gn/functions.h
+index 787e6ed2..bf97b9e9 100644
+--- a/src/gn/functions.h
++++ b/src/gn/functions.h
+@@ -146,6 +146,14 @@ Value RunExecutable(Scope* scope,
+                     BlockNode* block,
+                     Err* err);
+ 
++extern const char kExpandDirectory[];
++extern const char kExpandDirectory_HelpShort[];
++extern const char kExpandDirectory_Help[];
++Value RunExpandDirectory(Scope* scope,
++                         const FunctionCallNode* function,
++                         const std::vector<Value>& args,
++                         Err* err);
++
+ extern const char kFilterExclude[];
+ extern const char kFilterExclude_HelpShort[];
+ extern const char kFilterExclude_Help[];
+diff --git a/src/gn/setup.cc b/src/gn/setup.cc
+index b29e2ff0..b83a2ea8 100644
+--- a/src/gn/setup.cc
++++ b/src/gn/setup.cc
+@@ -127,6 +127,21 @@ Variables
+       If both values are set, only the value in "exec_script_allowlist" will
+       have any effect (so don't set both!).
+ 
++  expand_directory_allowlist [optional]
++      A list of .gn/.gni files (not labels) that have permission to call the
++      expand_directory function. If this list is defined, calls to
++      expand_directory will be checked against this list and GN will fail if
++      the current file isn't in the list.
++
++      The use of expand_directory is restricted because it encourages
++      monolithic build targets with redundant inputs, which can slow down
++      the build.
++
++      Example:
++        expand_directory_allowlist = [
++          "//base/BUILD.gn",
++        ]
++
+   export_compile_commands [optional]
+       A list of label patterns for which to generate a Clang compilation
+       database (see "gn help label_pattern" for the string format).
+@@ -257,6 +272,28 @@ base::FilePath FindDotFile(const base::FilePath& current_dir) {
+   return FindDotFile(up_one_dir);
+ }
+ 
++std::unique_ptr<SourceFileSet> FillAllowlist(const Value* value,
++                                             const SourceDir& current_dir,
++                                             Err* err) {
++  if (!value)
++    return nullptr;
++
++  if (!value->VerifyTypeIs(Value::LIST, err)) {
++    return nullptr;
++  }
++  auto allowlist = std::make_unique<SourceFileSet>();
++  for (const auto& item : value->list_value()) {
++    if (!item.VerifyTypeIs(Value::STRING, err)) {
++      return nullptr;
++    }
++    allowlist->insert(current_dir.ResolveRelativeFile(item, err));
++    if (err->has_error()) {
++      return nullptr;
++    }
++  }
++  return allowlist;
++}
++
+ // Called on any thread. Post the item to the builder on the main thread.
+ void ItemDefinedCallback(MsgLoop* task_runner,
+                          Builder* builder_call_on_main_thread_only,
+@@ -1107,24 +1144,28 @@ bool Setup::FillOtherConfig(const base::CommandLine& cmdline, Err* err) {
+     exec_script_allowlist_value =
+         dotfile_scope_.GetValue("exec_script_whitelist", true);
+   }
+-
+   if (exec_script_allowlist_value) {
+-    // Fill the list of targets to check.
+-    if (!exec_script_allowlist_value->VerifyTypeIs(Value::LIST, err)) {
++    build_settings_.set_exec_script_allowlist(
++        FillAllowlist(exec_script_allowlist_value, current_dir, err));
++    if (err->has_error()) {
+       return false;
+     }
+-    std::unique_ptr<SourceFileSet> allowlist =
+-        std::make_unique<SourceFileSet>();
+-    for (const auto& item : exec_script_allowlist_value->list_value()) {
+-      if (!item.VerifyTypeIs(Value::STRING, err)) {
+-        return false;
+-      }
+-      allowlist->insert(current_dir.ResolveRelativeFile(item, err));
+-      if (err->has_error()) {
+-        return false;
+-      }
++  }
++
++  // Fill expand_directory_allowlist.
++  const Value* expand_directory_allowlist_value =
++      dotfile_scope_.GetValue("expand_directory_allowlist", true);
++
++  if (expand_directory_allowlist_value) {
++    build_settings_.set_expand_directory_allowlist(
++        FillAllowlist(expand_directory_allowlist_value, current_dir, err));
++    if (err->has_error()) {
++      return false;
+     }
+-    build_settings_.set_exec_script_allowlist(std::move(allowlist));
++  } else {
++    // Treat unspecified as empty.
++    build_settings_.set_expand_directory_allowlist(
++        std::make_unique<SourceFileSet>());
+   }
+ 
+   // Fill optional default_args.
+diff --git a/src/gn/source_file.cc b/src/gn/source_file.cc
+index 3a9198b3..ecc2d1e9 100644
+--- a/src/gn/source_file.cc
++++ b/src/gn/source_file.cc
+@@ -4,6 +4,8 @@
+ 
+ #include <string.h>
+ 
++#include "gn/input_file.h"
++#include "gn/parse_tree.h"
+ #include "gn/source_file.h"
+ 
+ #include "base/logging.h"
+@@ -222,3 +224,14 @@ bool SourceFileTypeSet::MixedSourceUsed() const {
+             << static_cast<int>(GoSourceUsed())
+             << static_cast<int>(SwiftSourceUsed())) > 2;
+ }
++
++bool InSourceAllowList(const ParseNode* node, const SourceFileSet* allowlist) {
++  if (!allowlist)
++    return true;
++
++  LocationRange range = node->GetRange();
++  if (!range.begin().file())
++    return true;
++
++  return allowlist->find(range.begin().file()->name()) != allowlist->end();
++}
+diff --git a/src/gn/source_file.h b/src/gn/source_file.h
+index f682f0d4..f63c5dc6 100644
+--- a/src/gn/source_file.h
++++ b/src/gn/source_file.h
+@@ -154,6 +154,9 @@ struct hash<SourceFile> {
+ // overall difference in "gn gen" time is about 10%.
+ using SourceFileSet = base::flat_set<SourceFile, SourceFile::PtrCompare>;
+ 
++class ParseNode;
++bool InSourceAllowList(const ParseNode* node, const SourceFileSet* allowlist);
++
+ // Represents a set of tool types.
+ class SourceFileTypeSet {
+  public:
