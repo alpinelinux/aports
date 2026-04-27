@@ -1,0 +1,613 @@
+From d8fc9abd3a572ecce1ac9156eb790d1c1dbca74a Mon Sep 17 00:00:00 2001
+From: Matt Stark <msta@google.com>
+Date: Tue, 10 Mar 2026 00:24:21 +1100
+Subject: [PATCH] Add `inputs` parameter to `tool`.
+
+This allows tools to specify what files are required for the tools
+itself, thus better supporting remote actions.
+
+Eg. cxx rules might add inputs = [ clang ].
+A rule with command `python3 foo.py` (where foo.py imports bar.py) would
+specify both foo.py and bar.py.
+
+BUG=b:491242305
+
+Change-Id: If5381bb944aa616c2a5d2435b6cb8e416a6a6964
+Reviewed-on: https://gn-review.googlesource.com/c/gn/+/21440
+Reviewed-by: Takuto Ikuta <tikuta@google.com>
+Commit-Queue: Matt Stark <msta@google.com>
+---
+ docs/reference.md                             |  5 ++
+ src/gn/config_values_extractors_unittest.cc   |  8 +--
+ src/gn/config_values_generator.cc             |  5 +-
+ src/gn/function_toolchain.cc                  |  5 ++
+ src/gn/ninja_binary_target_writer.cc          | 11 +++-
+ src/gn/ninja_binary_target_writer.h           |  2 +-
+ src/gn/ninja_c_binary_target_writer.cc        | 36 ++++++-----
+ src/gn/ninja_c_binary_target_writer.h         |  6 +-
+ .../ninja_c_binary_target_writer_unittest.cc  | 64 +++++++++++++++++++
+ src/gn/ninja_rust_binary_target_writer.cc     |  8 ++-
+ src/gn/ninja_toolchain_writer.cc              | 16 +++++
+ src/gn/ninja_toolchain_writer.h               |  1 +
+ src/gn/ninja_toolchain_writer_unittest.cc     | 25 ++++++++
+ src/gn/tool.cc                                | 33 +++++++++-
+ src/gn/tool.h                                 | 15 +++++
+ 15 files changed, 210 insertions(+), 30 deletions(-)
+
+diff --git a/docs/reference.md b/docs/reference.md
+index 7e848c7a..8fd26a5f 100644
+--- a/docs/reference.md
++++ b/docs/reference.md
+@@ -4475,6 +4475,11 @@
+ 
+     This concept is somewhat inefficient to express in Ninja (it requires a lot
+     of duplicate of rules) so should only be used when absolutely necessary.
++
++  inputs [string list]
++    A list of files needed to execute the tool.
++    For example, if your tool command is "python3 foo.py", and foo.py imports
++    bar.py, you should set inputs to [ "foo.py", "bar.py" ].
+ ```
+ 
+ #### **Example of defining a toolchain**
+diff --git a/src/gn/config_values_extractors_unittest.cc b/src/gn/config_values_extractors_unittest.cc
+index d187daba..b1fda895 100644
+--- a/src/gn/config_values_extractors_unittest.cc
++++ b/src/gn/config_values_extractors_unittest.cc
+@@ -160,8 +160,8 @@ TEST(ConfigValuesGenerator, DefinesWithNewlineError) {
+   setup.scope()->SetValue("defines", defines_value, nullptr);
+ 
+   ConfigValues config_values;
+-  ConfigValuesGenerator gen(&config_values, setup.scope(),
+-                            SourceDir("//foo/"), &err);
++  ConfigValuesGenerator gen(&config_values, setup.scope(), SourceDir("//foo/"),
++                            &err);
+   gen.Run();
+   EXPECT_TRUE(err.has_error());
+   EXPECT_EQ(err.message(), "Newlines in defines values are not supported.");
+@@ -177,8 +177,8 @@ TEST(ConfigValuesGenerator, CflagsWithNewlineError) {
+   setup.scope()->SetValue("cflags", cflags_value, nullptr);
+ 
+   ConfigValues config_values;
+-  ConfigValuesGenerator gen(&config_values, setup.scope(),
+-                            SourceDir("//foo/"), &err);
++  ConfigValuesGenerator gen(&config_values, setup.scope(), SourceDir("//foo/"),
++                            &err);
+   gen.Run();
+   EXPECT_TRUE(err.has_error());
+   EXPECT_EQ(err.message(), "Newlines in cflags values are not supported.");
+diff --git a/src/gn/config_values_generator.cc b/src/gn/config_values_generator.cc
+index 3d95f466..1f0f90c1 100644
+--- a/src/gn/config_values_generator.cc
++++ b/src/gn/config_values_generator.cc
+@@ -34,8 +34,9 @@ void GetStringList(Scope* scope,
+   for (size_t i = 0; i < strings.size(); i++) {
+     if (strings[i].find('\n') != std::string::npos) {
+       *err = Err(value->list_value()[i],
+-                 "Newlines in " + std::string(var_name) + " values are not "
+-                 "supported.",
++                 "Newlines in " + std::string(var_name) +
++                     " values are not "
++                     "supported.",
+                  "The value `" + strings[i] + "` contains a newline.");
+       return;
+     }
+diff --git a/src/gn/function_toolchain.cc b/src/gn/function_toolchain.cc
+index 2f9bf578..3fdddaeb 100644
+--- a/src/gn/function_toolchain.cc
++++ b/src/gn/function_toolchain.cc
+@@ -134,6 +134,11 @@ Functions and variables
+     This concept is somewhat inefficient to express in Ninja (it requires a lot
+     of duplicate of rules) so should only be used when absolutely necessary.
+ 
++  inputs [string list]
++    A list of files needed to execute the tool.
++    For example, if your tool command is "python3 foo.py", and foo.py imports
++    bar.py, you should set inputs to [ "foo.py", "bar.py" ].
++
+ Example of defining a toolchain
+ 
+   toolchain("32") {
+diff --git a/src/gn/ninja_binary_target_writer.cc b/src/gn/ninja_binary_target_writer.cc
+index ac45e976..abf5e153 100644
+--- a/src/gn/ninja_binary_target_writer.cc
++++ b/src/gn/ninja_binary_target_writer.cc
+@@ -276,19 +276,24 @@ void NinjaBinaryTargetWriter::WriteCompilerBuildLine(
+     const std::vector<SourceFile>& sources,
+     const std::vector<OutputFile>& extra_deps,
+     const std::vector<OutputFile>& order_only_deps,
+-    const char* tool_name,
++    const Tool* tool,
+     const std::vector<OutputFile>& outputs,
+     bool can_write_source_info,
+     bool restat_output_allowed) {
+   out_ << "build";
+   WriteOutputs(outputs);
+ 
+-  out_ << ": " << rule_prefix_ << tool_name;
++  out_ << ": " << rule_prefix_ << tool->name();
+   path_output_.WriteFiles(out_, sources);
+ 
+-  if (!extra_deps.empty()) {
++  if (!extra_deps.empty() || !tool->inputs().empty()) {
+     out_ << " |";
+     path_output_.WriteFiles(out_, extra_deps);
++    if (auto phony = tool->inputs_phony_or_file(rule_prefix_,
++                                                *settings_->build_settings())) {
++      out_ << " ";
++      path_output_.WriteFile(out_, *phony);
++    }
+   }
+ 
+   if (!order_only_deps.empty()) {
+diff --git a/src/gn/ninja_binary_target_writer.h b/src/gn/ninja_binary_target_writer.h
+index 29105b47..b64f8843 100644
+--- a/src/gn/ninja_binary_target_writer.h
++++ b/src/gn/ninja_binary_target_writer.h
+@@ -56,7 +56,7 @@ class NinjaBinaryTargetWriter : public NinjaTargetWriter {
+   void WriteCompilerBuildLine(const std::vector<SourceFile>& sources,
+                               const std::vector<OutputFile>& extra_deps,
+                               const std::vector<OutputFile>& order_only_deps,
+-                              const char* tool_name,
++                              const Tool* tool,
+                               const std::vector<OutputFile>& outputs,
+                               bool can_write_source_info = true,
+                               bool restat_output_allowed = false);
+diff --git a/src/gn/ninja_c_binary_target_writer.cc b/src/gn/ninja_c_binary_target_writer.cc
+index c864bc09..24852628 100644
+--- a/src/gn/ninja_c_binary_target_writer.cc
++++ b/src/gn/ninja_c_binary_target_writer.cc
+@@ -229,14 +229,14 @@ void NinjaCBinaryTargetWriter::WritePCHCommands(
+   const CTool* tool_c = target_->toolchain()->GetToolAsC(CTool::kCToolCc);
+   if (tool_c && tool_c->precompiled_header_type() != CTool::PCH_NONE &&
+       target_->source_types_used().Get(SourceFile::SOURCE_C)) {
+-    WritePCHCommand(&CSubstitutionCFlagsC, CTool::kCToolCc,
++    WritePCHCommand(&CSubstitutionCFlagsC, tool_c,
+                     tool_c->precompiled_header_type(), input_deps,
+                     order_only_deps, object_files, other_files);
+   }
+   const CTool* tool_cxx = target_->toolchain()->GetToolAsC(CTool::kCToolCxx);
+   if (tool_cxx && tool_cxx->precompiled_header_type() != CTool::PCH_NONE &&
+       target_->source_types_used().Get(SourceFile::SOURCE_CPP)) {
+-    WritePCHCommand(&CSubstitutionCFlagsCc, CTool::kCToolCxx,
++    WritePCHCommand(&CSubstitutionCFlagsCc, tool_cxx,
+                     tool_cxx->precompiled_header_type(), input_deps,
+                     order_only_deps, object_files, other_files);
+   }
+@@ -244,7 +244,7 @@ void NinjaCBinaryTargetWriter::WritePCHCommands(
+   const CTool* tool_objc = target_->toolchain()->GetToolAsC(CTool::kCToolObjC);
+   if (tool_objc && tool_objc->precompiled_header_type() == CTool::PCH_GCC &&
+       target_->source_types_used().Get(SourceFile::SOURCE_M)) {
+-    WritePCHCommand(&CSubstitutionCFlagsObjC, CTool::kCToolObjC,
++    WritePCHCommand(&CSubstitutionCFlagsObjC, tool_objc,
+                     tool_objc->precompiled_header_type(), input_deps,
+                     order_only_deps, object_files, other_files);
+   }
+@@ -253,7 +253,7 @@ void NinjaCBinaryTargetWriter::WritePCHCommands(
+       target_->toolchain()->GetToolAsC(CTool::kCToolObjCxx);
+   if (tool_objcxx && tool_objcxx->precompiled_header_type() == CTool::PCH_GCC &&
+       target_->source_types_used().Get(SourceFile::SOURCE_MM)) {
+-    WritePCHCommand(&CSubstitutionCFlagsObjCc, CTool::kCToolObjCxx,
++    WritePCHCommand(&CSubstitutionCFlagsObjCc, tool_objcxx,
+                     tool_objcxx->precompiled_header_type(), input_deps,
+                     order_only_deps, object_files, other_files);
+   }
+@@ -261,7 +261,7 @@ void NinjaCBinaryTargetWriter::WritePCHCommands(
+ 
+ void NinjaCBinaryTargetWriter::WritePCHCommand(
+     const Substitution* flag_type,
+-    const char* tool_name,
++    const Tool* tool,
+     CTool::PrecompiledHeaderType header_type,
+     const std::vector<OutputFile>& input_deps,
+     const std::vector<OutputFile>& order_only_deps,
+@@ -269,11 +269,11 @@ void NinjaCBinaryTargetWriter::WritePCHCommand(
+     std::vector<OutputFile>* other_files) {
+   switch (header_type) {
+     case CTool::PCH_MSVC:
+-      WriteWindowsPCHCommand(flag_type, tool_name, input_deps, order_only_deps,
++      WriteWindowsPCHCommand(flag_type, tool, input_deps, order_only_deps,
+                              object_files);
+       break;
+     case CTool::PCH_GCC:
+-      WriteGCCPCHCommand(flag_type, tool_name, input_deps, order_only_deps,
++      WriteGCCPCHCommand(flag_type, tool, input_deps, order_only_deps,
+                          other_files);
+       break;
+     case CTool::PCH_NONE:
+@@ -284,12 +284,13 @@ void NinjaCBinaryTargetWriter::WritePCHCommand(
+ 
+ void NinjaCBinaryTargetWriter::WriteGCCPCHCommand(
+     const Substitution* flag_type,
+-    const char* tool_name,
++    const Tool* tool,
+     const std::vector<OutputFile>& input_deps,
+     const std::vector<OutputFile>& order_only_deps,
+     std::vector<OutputFile>* gch_files) {
+   // Compute the pch output file (it will be language-specific).
+   std::vector<OutputFile> outputs;
++  auto tool_name = tool->name();
+   GetPCHOutputFiles(target_, tool_name, &outputs);
+   if (outputs.empty())
+     return;
+@@ -302,7 +303,7 @@ void NinjaCBinaryTargetWriter::WriteGCCPCHCommand(
+ 
+   // Build line to compile the file.
+   WriteCompilerBuildLine({target_->config_values().precompiled_source()},
+-                         extra_deps, order_only_deps, tool_name, outputs);
++                         extra_deps, order_only_deps, tool, outputs);
+ 
+   // This build line needs a custom language-specific flags value. Rule-specific
+   // variables are just indented underneath the rule line.
+@@ -340,13 +341,13 @@ void NinjaCBinaryTargetWriter::WriteGCCPCHCommand(
+ 
+ void NinjaCBinaryTargetWriter::WriteWindowsPCHCommand(
+     const Substitution* flag_type,
+-    const char* tool_name,
++    const Tool* tool,
+     const std::vector<OutputFile>& input_deps,
+     const std::vector<OutputFile>& order_only_deps,
+     std::vector<OutputFile>* object_files) {
+   // Compute the pch output file (it will be language-specific).
+   std::vector<OutputFile> outputs;
+-  GetPCHOutputFiles(target_, tool_name, &outputs);
++  GetPCHOutputFiles(target_, tool->name(), &outputs);
+   if (outputs.empty())
+     return;
+ 
+@@ -358,7 +359,7 @@ void NinjaCBinaryTargetWriter::WriteWindowsPCHCommand(
+ 
+   // Build line to compile the file.
+   WriteCompilerBuildLine({target_->config_values().precompiled_source()},
+-                         extra_deps, order_only_deps, tool_name, outputs);
++                         extra_deps, order_only_deps, tool, outputs);
+ 
+   // This build line needs a custom language-specific flags value. Rule-specific
+   // variables are just indented underneath the rule line.
+@@ -435,7 +436,7 @@ void NinjaCBinaryTargetWriter::WriteSources(
+           deps.push_back(module_dep.pcm);
+       }
+ 
+-      WriteCompilerBuildLine({source}, deps, order_only_deps, tool_name,
++      WriteCompilerBuildLine({source}, deps, order_only_deps, tool,
+                              tool_outputs);
+       WritePool(out_);
+     }
+@@ -480,8 +481,7 @@ void NinjaCBinaryTargetWriter::WriteSwiftSources(
+ 
+   const Tool* tool = target_->swift_values().GetTool(target_);
+   WriteCompilerBuildLine(target_->sources(), input_deps,
+-                         swift_order_only_deps.vector(), tool->name(),
+-                         *output_files,
++                         swift_order_only_deps.vector(), tool, *output_files,
+                          /*can_write_source_info=*/false,
+                          /*restat_output_allowed=*/true);
+ 
+@@ -591,6 +591,12 @@ void NinjaCBinaryTargetWriter::WriteLinkerStuff(
+   std::copy(input_deps.begin(), input_deps.end(),
+             std::back_inserter(implicit_deps));
+ 
++  if (auto phony = tool_->inputs_phony_or_file(rule_prefix_,
++                                               *settings_->build_settings());
++      phony) {
++    implicit_deps.emplace_back(std::move(*phony));
++  }
++
+   // Any C++ target which depends on a Rust .rlib has to depend on its entire
+   // tree of transitive rlibs found inside the linking target (which excludes
+   // rlibs only depended on inside a shared library dependency).
+diff --git a/src/gn/ninja_c_binary_target_writer.h b/src/gn/ninja_c_binary_target_writer.h
+index 3707f0eb..5436eeec 100644
+--- a/src/gn/ninja_c_binary_target_writer.h
++++ b/src/gn/ninja_c_binary_target_writer.h
+@@ -51,7 +51,7 @@ class NinjaCBinaryTargetWriter : public NinjaBinaryTargetWriter {
+ 
+   // Writes a .pch compile build line for a language type.
+   void WritePCHCommand(const Substitution* flag_type,
+-                       const char* tool_name,
++                       const Tool* tool,
+                        CTool::PrecompiledHeaderType header_type,
+                        const std::vector<OutputFile>& input_deps,
+                        const std::vector<OutputFile>& order_only_deps,
+@@ -59,13 +59,13 @@ class NinjaCBinaryTargetWriter : public NinjaBinaryTargetWriter {
+                        std::vector<OutputFile>* other_files);
+ 
+   void WriteGCCPCHCommand(const Substitution* flag_type,
+-                          const char* tool_name,
++                          const Tool* tool,
+                           const std::vector<OutputFile>& input_deps,
+                           const std::vector<OutputFile>& order_only_deps,
+                           std::vector<OutputFile>* gch_files);
+ 
+   void WriteWindowsPCHCommand(const Substitution* flag_type,
+-                              const char* tool_name,
++                              const Tool* tool,
+                               const std::vector<OutputFile>& input_deps,
+                               const std::vector<OutputFile>& order_only_deps,
+                               std::vector<OutputFile>* object_files);
+diff --git a/src/gn/ninja_c_binary_target_writer_unittest.cc b/src/gn/ninja_c_binary_target_writer_unittest.cc
+index f324d533..73804fde 100644
+--- a/src/gn/ninja_c_binary_target_writer_unittest.cc
++++ b/src/gn/ninja_c_binary_target_writer_unittest.cc
+@@ -2847,3 +2847,67 @@ TEST_F(NinjaCBinaryTargetWriterTest, Pool) {
+   std::string out_str = out.str();
+   EXPECT_EQ(expected, out_str) << expected << "\n" << out_str;
+ }
++
++TEST_F(NinjaCBinaryTargetWriterTest, ToolInputs) {
++  Err err;
++  TestWithScope setup;
++
++  Toolchain toolchain_with_inputs(
++      setup.settings(),
++      Label(SourceDir("//toolchain_with_inputs/"), "with_inputs"));
++
++  std::unique_ptr<Tool> cxx_tool = Tool::CreateTool(CTool::kCToolCxx);
++  TestWithScope::SetCommandForTool(
++      "c++ {{source}} {{cflags}} {{cflags_cc}} {{defines}} {{include_dirs}} "
++      "-o {{output}}",
++      cxx_tool.get());
++  cxx_tool->set_outputs(SubstitutionList::MakeForTest(
++      "{{source_out_dir}}/{{target_output_name}}.{{source_name_part}}.o"));
++  cxx_tool->set_inputs({SourceFile("//bin/clang++")});
++  toolchain_with_inputs.SetTool(std::move(cxx_tool));
++
++  std::unique_ptr<Tool> link = Tool::CreateTool(CTool::kCToolLink);
++  TestWithScope::SetCommandForTool(
++      "ld -o {{target_output_name}} {{source}} {{ldflags}} {{libs}}",
++      link.get());
++  link->set_outputs(
++      SubstitutionList::MakeForTest("{{root_out_dir}}/{{target_output_name}}"));
++  link->set_inputs(
++      {SourceFile("//bin/lld"), SourceFile("//bin/link_wrapper.py")});
++  toolchain_with_inputs.SetTool(std::move(link));
++
++  toolchain_with_inputs.ToolchainSetupComplete();
++
++  Target target(setup.settings(), Label(SourceDir("//foo/"), "bar"));
++  target.sources().push_back(SourceFile("//foo/source.cc"));
++  target.set_output_type(Target::EXECUTABLE);
++  target.visibility().SetPublic();
++  target.SetToolchain(&toolchain_with_inputs);
++  ASSERT_TRUE(target.OnResolved(&err));
++
++  std::ostringstream out;
++  NinjaBinaryTargetWriter writer(&target, out);
++  writer.Run();
++
++  const char expected[] =
++      "defines =\n"
++      "include_dirs =\n"
++      "root_out_dir = .\n"
++      "target_output_name = bar\n"
++      "\n"
++      "build obj/foo/bar.source.o: cxx ../../foo/source.cc | "
++      "../../bin/clang++\n"
++      "  source_file_part = source.cc\n"
++      "  source_name_part = source\n"
++      "\n"
++      "build ./bar: link obj/foo/bar.source.o | "
++      "phony/link_inputs\n"
++      "  ldflags =\n"
++      "  libs =\n"
++      "  frameworks =\n"
++      "  swiftmodules =\n"
++      "  output_extension =\n"
++      "  output_dir =\n";
++  std::string out_str = out.str();
++  EXPECT_EQ(expected, out_str) << expected << "\n" << out_str;
++}
+diff --git a/src/gn/ninja_rust_binary_target_writer.cc b/src/gn/ninja_rust_binary_target_writer.cc
+index ba6b4169..cbb5e4ff 100644
+--- a/src/gn/ninja_rust_binary_target_writer.cc
++++ b/src/gn/ninja_rust_binary_target_writer.cc
+@@ -139,6 +139,12 @@ void NinjaRustBinaryTargetWriter::Run() {
+   implicit_deps.Append(classified_deps.extra_object_files.begin(),
+                        classified_deps.extra_object_files.end());
+ 
++  if (auto phony = tool_->inputs_phony_or_file(rule_prefix_,
++                                               *settings_->build_settings());
++      phony) {
++    implicit_deps.emplace_back(std::move(*phony));
++  }
++
+   std::vector<OutputFile> rustdeps;
+   std::vector<OutputFile> nonrustdeps;
+   std::vector<OutputFile> swiftmodules;
+@@ -213,7 +219,7 @@ void NinjaRustBinaryTargetWriter::Run() {
+   SubstitutionWriter::ApplyListToLinkerAsOutputFile(
+       target_, tool_, tool_->outputs(), &tool_outputs);
+   WriteCompilerBuildLine({target_->rust_values().crate_root()},
+-                         implicit_deps.vector(), order_only_deps, tool_->name(),
++                         implicit_deps.vector(), order_only_deps, tool_,
+                          tool_outputs);
+ 
+   std::vector<const Target*> extern_deps(
+diff --git a/src/gn/ninja_toolchain_writer.cc b/src/gn/ninja_toolchain_writer.cc
+index 917d0681..fb04b954 100644
+--- a/src/gn/ninja_toolchain_writer.cc
++++ b/src/gn/ninja_toolchain_writer.cc
+@@ -119,6 +119,22 @@ void NinjaToolchainWriter::WriteToolRule(Tool* tool,
+ 
+   if (tool->restat())
+     out_ << kIndent << "restat = 1" << std::endl;
++
++  // If the size is exactly 1, we don't need a phony rule, since we just write
++  // the input file directly in the build action.
++  if (tool->inputs().size() > 1) {
++    out_ << "build ";
++    path_output_.WriteFile(
++        out_,
++        *tool->inputs_phony_or_file(rule_prefix, *settings_->build_settings()));
++    out_ << ": phony";
++    for (const auto& input : tool->inputs()) {
++      out_ << " ";
++      path_output_.WriteFile(out_,
++                             OutputFile(settings_->build_settings(), input));
++    }
++    out_ << std::endl;
++  }
+ }
+ 
+ void NinjaToolchainWriter::WriteRulePattern(const char* name,
+diff --git a/src/gn/ninja_toolchain_writer.h b/src/gn/ninja_toolchain_writer.h
+index cbc7c688..f734cfe5 100644
+--- a/src/gn/ninja_toolchain_writer.h
++++ b/src/gn/ninja_toolchain_writer.h
+@@ -31,6 +31,7 @@ class NinjaToolchainWriter {
+  private:
+   FRIEND_TEST_ALL_PREFIXES(NinjaToolchainWriter, WriteToolRule);
+   FRIEND_TEST_ALL_PREFIXES(NinjaToolchainWriter, WriteToolRuleWithLauncher);
++  FRIEND_TEST_ALL_PREFIXES(NinjaToolchainWriter, WriteToolRuleWithInputsPhony);
+ 
+   NinjaToolchainWriter(const Settings* settings,
+                        const Toolchain* toolchain,
+diff --git a/src/gn/ninja_toolchain_writer_unittest.cc b/src/gn/ninja_toolchain_writer_unittest.cc
+index 863c1744..7c46dcd3 100644
+--- a/src/gn/ninja_toolchain_writer_unittest.cc
++++ b/src/gn/ninja_toolchain_writer_unittest.cc
+@@ -38,3 +38,28 @@ TEST(NinjaToolchainWriter, WriteToolRuleWithLauncher) {
+       "-o ${out}\n",
+       stream.str());
+ }
++
++TEST(NinjaToolchainWriter, WriteToolRuleWithInputsPhony) {
++  TestWithScope setup;
++
++  std::unique_ptr<Tool> tool = Tool::CreateTool(CTool::kCToolCxx);
++  TestWithScope::SetCommandForTool(
++      "launcher c++ {{source}} {{cflags}} {{cflags_cc}} {{defines}} "
++      "{{include_dirs}} -o {{output}}",
++      tool.get());
++  tool->set_inputs(
++      {SourceFile("//bin/clang++"), SourceFile("//bin/plugin.so")});
++
++  std::ostringstream stream;
++  NinjaToolchainWriter writer(setup.settings(), setup.toolchain(), stream);
++  writer.WriteToolRule(tool.get(), std::string("prefix_"));
++
++  EXPECT_EQ(
++      "rule prefix_cxx\n"
++      "  command = launcher c++ ${in} ${cflags} ${cflags_cc} ${defines} "
++      "${include_dirs} "
++      "-o ${out}\n"
++      "build phony/prefix_cxx_inputs: phony ../../bin/clang++ "
++      "../../bin/plugin.so\n",
++      stream.str());
++}
+diff --git a/src/gn/tool.cc b/src/gn/tool.cc
+index 684dc3e3..52b6c4ea 100644
+--- a/src/gn/tool.cc
++++ b/src/gn/tool.cc
+@@ -4,12 +4,15 @@
+ 
+ #include "gn/tool.h"
+ 
++#include "base/strings/stringprintf.h"
+ #include "gn/builtin_tool.h"
+ #include "gn/c_tool.h"
+ #include "gn/general_tool.h"
++#include "gn/output_file.h"
+ #include "gn/rust_tool.h"
+ #include "gn/settings.h"
+ #include "gn/target.h"
++#include "gn/value_extractors.h"
+ 
+ const char* Tool::kToolNone = "";
+ 
+@@ -199,6 +202,33 @@ bool Tool::ReadOutputExtension(Scope* scope, Err* err) {
+   return true;
+ }
+ 
++bool Tool::ReadInputs(Scope* scope, Err* err) {
++  DCHECK(!complete_);
++  const Value* value = scope->GetValue("inputs", true);
++  if (!value)
++    return true;  // Not present is fine.
++
++  std::vector<SourceFile> inputs;
++  if (!ExtractListOfRelativeFiles(scope->settings()->build_settings(), *value,
++                                  scope->GetSourceDir(), &inputs, err)) {
++    return false;
++  }
++  set_inputs(std::move(inputs));
++  return true;
++}
++
++std::optional<OutputFile> Tool::inputs_phony_or_file(
++    std::string_view rule_prefix,
++    const BuildSettings& build_settings) const {
++  if (inputs_.size() == 1) {
++    return OutputFile(&build_settings, inputs_[0]);
++  } else if (inputs_.size() > 1) {
++    return OutputFile(base::StringPrintf(
++        "phony/%s%s_inputs", std::string(rule_prefix).c_str(), name_));
++  }
++  return std::nullopt;
++}
++
+ bool Tool::InitTool(Scope* scope, Toolchain* toolchain, Err* err) {
+   if (!ReadPattern(scope, "command", &command_, err) ||
+       !ReadString(scope, "command_launcher", &command_launcher_, err) ||
+@@ -211,7 +241,8 @@ bool Tool::InitTool(Scope* scope, Toolchain* toolchain, Err* err) {
+       !ReadBool(scope, "restat", &restat_, err) ||
+       !ReadPattern(scope, "rspfile", &rspfile_, err) ||
+       !ReadPattern(scope, "rspfile_content", &rspfile_content_, err) ||
+-      !ReadLabel(scope, "pool", toolchain->label(), &pool_, err)) {
++      !ReadLabel(scope, "pool", toolchain->label(), &pool_, err) ||
++      !ReadInputs(scope, err)) {
+     return false;
+   }
+   const bool command_is_required = name_ != GeneralTool::kGeneralToolAction;
+diff --git a/src/gn/tool.h b/src/gn/tool.h
+index 68e919cd..d0825416 100644
+--- a/src/gn/tool.h
++++ b/src/gn/tool.h
+@@ -5,11 +5,14 @@
+ #ifndef TOOLS_GN_TOOL_H_
+ #define TOOLS_GN_TOOL_H_
+ 
++#include <optional>
+ #include <string>
++#include <vector>
+ 
+ #include "base/logging.h"
+ #include "gn/label.h"
+ #include "gn/label_ptr.h"
++#include "gn/output_file.h"
+ #include "gn/scope.h"
+ #include "gn/source_file.h"
+ #include "gn/substitution_list.h"
+@@ -224,6 +227,16 @@ class Tool {
+   const LabelPtrPair<Pool>& pool() const { return pool_; }
+   void set_pool(LabelPtrPair<Pool> pool) { pool_ = std::move(pool); }
+ 
++  const std::vector<SourceFile>& inputs() const { return inputs_; }
++  void set_inputs(std::vector<SourceFile> inputs) {
++    DCHECK(!complete_);
++    inputs_ = std::move(inputs);
++  }
++
++  std::optional<OutputFile> inputs_phony_or_file(
++      std::string_view rule_prefix,
++      const BuildSettings& build_settings) const;
++
+   // Other functions ----------------------------------------------------------
+ 
+   // Function for the above override to call to complete the tool.
+@@ -277,6 +290,7 @@ class Tool {
+                  LabelPtrPair<Pool>* field,
+                  Err* err);
+   bool ReadOutputExtension(Scope* scope, Err* err);
++  bool ReadInputs(Scope* scope, Err* err);
+ 
+   const ParseNode* defined_from_ = nullptr;
+   const char* name_ = nullptr;
+@@ -303,6 +317,7 @@ class Tool {
+   SubstitutionPattern rspfile_;
+   SubstitutionPattern rspfile_content_;
+   LabelPtrPair<Pool> pool_;
++  std::vector<SourceFile> inputs_;
+ 
+   bool complete_ = false;
+ 

@@ -1,0 +1,134 @@
+From 46fd0cdb48cf3d42e29e19112eb3f297b3127dfd Mon Sep 17 00:00:00 2001
+From: Nico Weber <thakis@chromium.org>
+Date: Mon, 9 Mar 2026 12:43:52 -0400
+Subject: [PATCH] Reject newlines in string config values (defines, cflags,
+ etc.)
+
+A literal newline in a define or flag value would be written verbatim
+into ninja files, breaking ninja's line-based parsing. Rather than
+trying to escape newlines (which would work on POSIX via $$'\n' but
+has no equivalent for cmd.exe on Windows), reject them with a clear
+error at GN time. A newline in a compiler flag is almost certainly
+a mistake anyway.
+
+The validation is in GetStringList() so it covers all string config
+values: defines, cflags, cflags_c, cflags_cc, cflags_objc,
+cflags_objcc, asmflags, arflags, ldflags, rustflags, rustenv, and
+swiftflags.
+
+Before, without the pkg-config.py change in the linked bug, things
+failed at build time:
+
+```
+% autoninja -C out/gnlinux  base_unittests
+offline mode
+ninja: Entering directory `out/gnlinux'
+ 0.20s load build.ninja failed:
+
+ 1.47s Error: failed to load build.ninja: toolchain.ninja: line:61052: unexpected indent: "  include_dirs =
+```
+
+Now, the fail at `gn gen` time instead:
+
+```
+% ~/src/gn/out/gn gen out/gnlinux
+//build/config/linux/pkg-config.py ["-s", "../../build/linux/debian_bullseye_amd64-sysroot", "-a", "x64"] []
+ERROR at //build/config/linux/atk/BUILD.gn:33:5: Newlines in defines values are not supported.
+    "ATK_LIB_DIR=\"$atk_lib_dir\"",
+    ^-----------------------------
+The value `ATK_LIB_DIR="[[],[],[],[],[]]
+"` contains a newline.
+See //build/config/linux/atk/BUILD.gn:19:1: whence it was called.
+pkg_config("atk") {
+^------------------
+See //ui/accessibility/BUILD.gn:465:20: which caused the file to be included.
+      configs += [ "//build/config/linux/atk" ]
+                   ^-------------------------
+```
+
+Bug: 40176116
+Change-Id: I870d625552087430f5a679b8668a1929662e7b4a
+Reviewed-on: https://gn-review.googlesource.com/c/gn/+/21460
+Reviewed-by: Takuto Ikuta <tikuta@google.com>
+Commit-Queue: Nico Weber <thakis@chromium.org>
+Reviewed-by: Nico Weber <thakis@google.com>
+---
+ src/gn/config_values_extractors_unittest.cc | 36 +++++++++++++++++++++
+ src/gn/config_values_generator.cc           | 13 ++++++++
+ 2 files changed, 49 insertions(+)
+
+diff --git a/src/gn/config_values_extractors_unittest.cc b/src/gn/config_values_extractors_unittest.cc
+index 3db4bff9..d187daba 100644
+--- a/src/gn/config_values_extractors_unittest.cc
++++ b/src/gn/config_values_extractors_unittest.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "gn/config.h"
+ #include "gn/config_values_extractors.h"
++#include "gn/config_values_generator.h"
+ #include "gn/target.h"
+ #include "gn/test_with_scope.h"
+ #include "util/test/test.h"
+@@ -147,3 +148,38 @@ TEST(ConfigValuesExtractors, IncludeOrdering) {
+             "//target/ //target/config/ //target/all/ //target/direct/ "
+             "//dep1/all/ //dep2/all/ //dep1/direct/ ");
+ }
++
++TEST(ConfigValuesGenerator, DefinesWithNewlineError) {
++  TestWithScope setup;
++  Err err;
++
++  // Set up a scope with a defines list containing a newline.
++  Value defines_value(nullptr, Value::LIST);
++  defines_value.list_value().push_back(Value(nullptr, "GOOD"));
++  defines_value.list_value().push_back(Value(nullptr, "BAD=a\nb"));
++  setup.scope()->SetValue("defines", defines_value, nullptr);
++
++  ConfigValues config_values;
++  ConfigValuesGenerator gen(&config_values, setup.scope(),
++                            SourceDir("//foo/"), &err);
++  gen.Run();
++  EXPECT_TRUE(err.has_error());
++  EXPECT_EQ(err.message(), "Newlines in defines values are not supported.");
++  EXPECT_EQ(err.help_text(), "The value `BAD=a\nb` contains a newline.");
++}
++
++TEST(ConfigValuesGenerator, CflagsWithNewlineError) {
++  TestWithScope setup;
++  Err err;
++
++  Value cflags_value(nullptr, Value::LIST);
++  cflags_value.list_value().push_back(Value(nullptr, "-Dfoo\nbar"));
++  setup.scope()->SetValue("cflags", cflags_value, nullptr);
++
++  ConfigValues config_values;
++  ConfigValuesGenerator gen(&config_values, setup.scope(),
++                            SourceDir("//foo/"), &err);
++  gen.Run();
++  EXPECT_TRUE(err.has_error());
++  EXPECT_EQ(err.message(), "Newlines in cflags values are not supported.");
++}
+diff --git a/src/gn/config_values_generator.cc b/src/gn/config_values_generator.cc
+index cf91a8ce..3d95f466 100644
+--- a/src/gn/config_values_generator.cc
++++ b/src/gn/config_values_generator.cc
+@@ -27,6 +27,19 @@ void GetStringList(Scope* scope,
+     return;  // No value, empty input and succeed.
+ 
+   ExtractListOfStringValues(*value, &(config_values->*accessor)(), err);
++  if (err->has_error())
++    return;
++
++  const auto& strings = (config_values->*accessor)();
++  for (size_t i = 0; i < strings.size(); i++) {
++    if (strings[i].find('\n') != std::string::npos) {
++      *err = Err(value->list_value()[i],
++                 "Newlines in " + std::string(var_name) + " values are not "
++                 "supported.",
++                 "The value `" + strings[i] + "` contains a newline.");
++      return;
++    }
++  }
+ }
+ 
+ void GetDirList(Scope* scope,
