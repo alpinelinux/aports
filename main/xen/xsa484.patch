@@ -1,0 +1,89 @@
+From 3d0d19ad17f29c64dde4a7baf392da4fd58f3654 Mon Sep 17 00:00:00 2001
+From: Juergen Gross <jgross@suse.com>
+Date: Mon, 16 Mar 2026 15:06:11 +0100
+Subject: [PATCH] tools/xenstored: make conn_delete_all_transactions()
+ idempotent
+
+conn_delete_all_transactions() should be callable in any context,
+resetting ALL transaction related data.
+
+This includes number of active transactions and the transaction
+pointer in struct connection.
+
+So reset conn->trans to NULL in conn_delete_all_transactions() and
+do the cleanup for each transaction in destroy_transaction().
+
+This avoids triggering the assert() in conn_delete_all_transactions()
+in case e.g. ignore_connection() was called while an operation inside
+a transaction was performed, or XS_RESET_WATCHES was called in a
+transaction.
+
+This is XSA-484 / CVE-2026-23557.
+
+Reported-by: Andrii Sultanov <andriy.sultanov@vates.tech>
+Fixes: 1f9d04fb021c ("xenstored: allow guest to shutdown all its watches/transactions")
+Signed-off-by: Juergen Gross <jgross@suse.com>
+---
+ tools/xenstored/transaction.c | 20 +++++++++-----------
+ 1 file changed, 9 insertions(+), 11 deletions(-)
+
+diff --git a/tools/xenstored/transaction.c b/tools/xenstored/transaction.c
+index 167cd597fd..0825c48859 100644
+--- a/tools/xenstored/transaction.c
++++ b/tools/xenstored/transaction.c
+@@ -432,17 +432,23 @@ static int finalize_transaction(struct connection *conn,
+ static int destroy_transaction(void *_transaction)
+ {
+ 	struct transaction *trans = _transaction;
++	struct connection *conn = trans->conn;
+ 	struct accessed_node *i;
+ 
+ 	wrl_ntransactions--;
+ 	trace_destroy(trans, "transaction");
+ 	while ((i = list_top(&trans->accessed, struct accessed_node, list))) {
+ 		if (i->ta_node)
+-			db_delete(trans->conn, i->trans_name, NULL);
++			db_delete(conn, i->trans_name, NULL);
+ 		list_del(&i->list);
+ 		talloc_free(i);
+ 	}
+ 
++	list_del(&trans->list);
++	domain_transaction_dec(conn);
++	if (list_empty(&conn->transaction_list))
++		conn->ta_start_time = 0;
++
+ 	return 0;
+ }
+ 
+@@ -523,10 +529,6 @@ int do_transaction_end(const void *ctx, struct connection *conn,
+ 		return ENOENT;
+ 
+ 	conn->transaction = NULL;
+-	list_del(&trans->list);
+-	domain_transaction_dec(conn);
+-	if (list_empty(&conn->transaction_list))
+-		conn->ta_start_time = 0;
+ 
+ 	chk_quota = trans->node_created && domain_is_unprivileged(conn);
+ 
+@@ -572,14 +574,10 @@ void conn_delete_all_transactions(struct connection *conn)
+ 	struct transaction *trans;
+ 
+ 	while ((trans = list_top(&conn->transaction_list,
+-				 struct transaction, list))) {
+-		list_del(&trans->list);
++				 struct transaction, list)))
+ 		talloc_free(trans);
+-	}
+-
+-	assert(conn->transaction == NULL);
+ 
+-	conn->ta_start_time = 0;
++	conn->transaction = NULL;
+ }
+ 
+ int check_transactions(struct hashtable *hash)
+-- 
+2.53.0
+
