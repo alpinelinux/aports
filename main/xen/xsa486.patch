@@ -1,0 +1,181 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: gnttab: split gnttab_map_frame()
+
+If a domain tries to map status frames in parallel to switching grant
+table version from 2 to 1, the mapping operation may put in place P2M
+entries referencing MFNs which gnttab_unpopulate_status_frames() is in the
+process of freeing.
+
+Ideally we would refcount pages when entered into P2M tables, but that's a
+significant change. Extend the grant-table-locked region instead in
+xenmem_add_to_physmap_one() (being the sole caller of gnttab_map_frame()),
+such that a race with gnttab_unpopulate_status_frames() is no longer
+possible.
+
+This is XSA-486 / CVE-2026-23558.
+
+Fixes: 5ce8fafa947c ("Dynamic grant-table sizing")
+Fixes: a98dc13703e0 ("Introduce a grant_entry_v2 structure")
+Reported-by: Rafal Wojtczuk <rafal.wojtczuk@7bulls.com>
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+
+--- a/xen/arch/arm/mm.c
++++ b/xen/arch/arm/mm.c
+@@ -174,12 +174,10 @@ int xenmem_add_to_physmap_one(
+     switch ( space )
+     {
+     case XENMAPSPACE_grant_table:
+-        rc = gnttab_map_frame(d, idx, gfn, &mfn);
++        rc = gnttab_map_frame_begin(d, idx, gfn, &mfn);
+         if ( rc )
+             return rc;
+ 
+-        /* Need to take care of the reference obtained in gnttab_map_frame(). */
+-        page = mfn_to_page(mfn);
+         t = p2m_ram_rw;
+ 
+         break;
+@@ -281,10 +279,23 @@ int xenmem_add_to_physmap_one(
+      * to drop the reference we took earlier. In all other cases we need to
+      * drop any reference we took earlier (perhaps indirectly).
+      */
+-    if ( space == XENMAPSPACE_gmfn_foreign ? rc : page != NULL )
++    switch ( space )
+     {
++    default:
++        if ( page )
++            put_page(page);
++        break;
++
++    case XENMAPSPACE_grant_table:
++        gnttab_map_frame_end(d, mfn);
++        break;
++
++    case XENMAPSPACE_gmfn_foreign:
++        if ( !rc )
++            break;
+         ASSERT(page != NULL);
+         put_page(page);
++        break;
+     }
+ 
+     return rc;
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -2009,11 +2009,9 @@ int xenmem_add_to_physmap_one(
+         break;
+ 
+     case XENMAPSPACE_grant_table:
+-        rc = gnttab_map_frame(d, idx, gfn, &mfn);
++        rc = gnttab_map_frame_begin(d, idx, gfn, &mfn);
+         if ( rc )
+             return rc;
+-        /* Need to take care of the reference obtained in gnttab_map_frame(). */
+-        page = mfn_to_page(mfn);
+         break;
+ 
+     case XENMAPSPACE_gmfn:
+@@ -2095,19 +2093,28 @@ int xenmem_add_to_physmap_one(
+     put_gfn(d, gfn_x(gfn));
+ 
+  put_both:
+-    /*
+-     * In the XENMAPSPACE_gmfn case, we took a ref of the gfn at the top.
+-     * We also may need to transfer ownership of the page reference to our
+-     * caller.
+-     */
+-    if ( space == XENMAPSPACE_gmfn )
++    switch ( space )
+     {
++    case XENMAPSPACE_gmfn:
++        /*
++         * We took a ref of the gfn at the top.  We also may need to transfer
++         * ownership of the page reference to our caller.
++         */
+         put_gfn(d, gmfn);
+         if ( !rc && extra.ppage )
+         {
+             *extra.ppage = page;
+             page = NULL;
+         }
++        break;
++
++    case XENMAPSPACE_grant_table:
++        /*
++         * We (gnttab_map_frame_begin()) acquired a lock and took a ref of the
++         * page underlying the MFN at the top.
++         */
++        gnttab_map_frame_end(d, mfn);
++        break;
+     }
+ 
+     if ( page )
+--- a/xen/common/grant_table.c
++++ b/xen/common/grant_table.c
+@@ -4250,7 +4250,8 @@ int gnttab_acquire_resource(
+     return rc;
+ }
+ 
+-int gnttab_map_frame(struct domain *d, unsigned long idx, gfn_t gfn, mfn_t *mfn)
++int gnttab_map_frame_begin(
++    struct domain *d, unsigned long idx, gfn_t gfn, mfn_t *mfn)
+ {
+     int rc = 0;
+     struct grant_table *gt = d->grant_table;
+@@ -4288,11 +4289,19 @@ int gnttab_map_frame(struct domain *d, u
+             put_page(pg);
+     }
+ 
+-    grant_write_unlock(gt);
++    if ( rc )
++        grant_write_unlock(d->grant_table);
+ 
+     return rc;
+ }
+ 
++void gnttab_map_frame_end(struct domain *d, mfn_t mfn)
++{
++    put_page(mfn_to_page(mfn));
++
++    grant_write_unlock(d->grant_table);
++}
++
+ static void gnttab_usage_print(struct domain *rd)
+ {
+     int first = 1;
+--- a/xen/include/xen/grant_table.h
++++ b/xen/include/xen/grant_table.h
+@@ -60,8 +60,13 @@ int gnttab_release_mappings(struct domai
+ int mem_sharing_gref_to_gfn(struct grant_table *gt, grant_ref_t ref,
+                             gfn_t *gfn, uint16_t *status);
+ 
+-int gnttab_map_frame(struct domain *d, unsigned long idx, gfn_t gfn,
+-                     mfn_t *mfn);
++/*
++ * These need to be used as a pair, as the first (in the success case) returns
++ * with a lock and page reference held which the second needs to drop.
++ */
++int gnttab_map_frame_begin(struct domain *d, unsigned long idx, gfn_t gfn,
++                           mfn_t *mfn);
++void gnttab_map_frame_end(struct domain *d, mfn_t mfn);
+ 
+ unsigned int gnttab_resource_max_frames(const struct domain *d, unsigned int id);
+ 
+@@ -100,12 +105,14 @@ static inline int mem_sharing_gref_to_gf
+     return -EINVAL;
+ }
+ 
+-static inline int gnttab_map_frame(struct domain *d, unsigned long idx,
+-                                   gfn_t gfn, mfn_t *mfn)
++static inline int gnttab_map_frame_begin(struct domain *d, unsigned long idx,
++                                         gfn_t gfn, mfn_t *mfn)
+ {
+     return -EINVAL;
+ }
+ 
++static inline void gnttab_map_frame_end(struct domain *d, mfn_t mfn) {}
++
+ static inline unsigned int gnttab_resource_max_frames(
+     const struct domain *d, unsigned int id)
+ {
