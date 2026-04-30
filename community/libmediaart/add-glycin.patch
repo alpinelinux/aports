@@ -1,0 +1,264 @@
+Patch-Source: https://gitlab.gnome.org/GNOME/libmediaart/-/commit/94d187acd56164ec751cc12de113c16976ce3408
+MR: https://gitlab.gnome.org/GNOME/libmediaart/-/merge_requests/21
+---
+From 94d187acd56164ec751cc12de113c16976ce3408 Mon Sep 17 00:00:00 2001
+From: Carlos Garnacho <carlosg@gnome.org>
+Date: Sun, 23 Nov 2025 16:10:08 +0100
+Subject: [PATCH] libmediaart: Add glycin based implementation
+
+With gdk-pixbuf being sunset, it makes sense to add a Glycin-based
+implementation to extract media art. This new implementation will
+take precedence if both gdk-pixbuf and glycin are found.
+---
+ libmediaart/extractglycin.c | 185 ++++++++++++++++++++++++++++++++++++
+ libmediaart/meson.build     |   2 +
+ meson.build                 |  10 ++
+ meson_options.txt           |   2 +-
+ 4 files changed, 198 insertions(+), 1 deletion(-)
+ create mode 100644 libmediaart/extractglycin.c
+
+diff --git a/libmediaart/extractglycin.c b/libmediaart/extractglycin.c
+new file mode 100644
+index 0000000..3a394b6
+--- /dev/null
++++ b/libmediaart/extractglycin.c
+@@ -0,0 +1,185 @@
++/*
++ * Copyright (C) 2025, Carlos Garnacho
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA  02110-1301, USA.
++ *
++ * Authors:
++ * Carlos Garnacho <carlosg@gnome.org>
++ */
++
++#include "config.h"
++
++#include <glycin-2/glycin.h>
++
++#include "extractgeneric.h"
++
++static gint max_width_in_bytes = 0;
++
++void
++media_art_plugin_init (gint max_width)
++{
++	g_return_if_fail (max_width >= 0);
++
++	max_width_in_bytes = max_width;
++}
++
++void
++media_art_plugin_shutdown (void)
++{
++}
++
++static gboolean
++extract_media_art (GlyLoader    *loader,
++		   const gchar  *target,
++		   GError      **error)
++{
++	GlyImage *image = NULL;
++	GlyCreator *creator = NULL;
++	GlyFrame *frame = NULL;
++	GlyFrameRequest *frame_request = NULL;
++	GlyNewFrame *new_frame = NULL;
++	GlyEncodedImage *encoded_image = NULL;
++	GBytes *media_art_bytes = NULL;
++	uint32_t width, height;
++	gboolean success = FALSE;
++
++	gly_loader_set_accepted_memory_formats (loader, GLY_MEMORY_SELECTION_R8G8B8);
++
++	creator = gly_creator_new("image/jpeg", error);
++	if (!creator)
++		goto out;
++
++	g_debug ("Saving album art using GdkPixbufLoader for file:'%s' (max width:%d)",
++		 target,
++		 max_width_in_bytes);
++
++	image = gly_loader_load (loader, error);
++	if (!image)
++		goto out;
++
++	width = gly_image_get_width (image);
++	height = gly_image_get_height (image);
++	frame_request = gly_frame_request_new ();
++
++	if (max_width_in_bytes > 0 && width > max_width_in_bytes) {
++		gfloat scale, scale_w, scale_h;
++
++		scale = width / (gfloat) max_width_in_bytes;
++		scale_w = width * scale;
++		scale_h = height * scale;
++
++		gly_frame_request_set_scale (frame_request,
++					     (uint32_t) scale_w,
++					     (uint32_t) scale_h);
++	}
++
++	frame = gly_image_get_specific_frame (image, frame_request, error);
++	if (!frame)
++		goto out;
++
++	new_frame = gly_creator_add_frame_with_stride (creator,
++						       gly_frame_get_width (frame),
++						       gly_frame_get_height (frame),
++						       gly_frame_get_stride (frame),
++						       gly_frame_get_memory_format (frame),
++						       gly_frame_get_buf_bytes (frame),
++						       error);
++	if (!new_frame)
++		goto out;
++
++	encoded_image = gly_creator_create (creator, error);
++	if (!encoded_image)
++		goto out;
++
++	media_art_bytes = gly_encoded_image_get_data (encoded_image);
++
++	if (!g_file_set_contents (target,
++				  g_bytes_get_data (media_art_bytes, NULL),
++				  g_bytes_get_size (media_art_bytes),
++				  error))
++		goto out;
++
++	success = TRUE;
++
++ out:
++	g_clear_object (&image);
++	g_clear_object (&creator);
++	g_clear_object (&frame);
++	g_clear_object (&frame_request);
++	g_clear_object (&new_frame);
++	g_clear_object (&encoded_image);
++	g_clear_pointer (&media_art_bytes, g_bytes_unref);
++
++	return success;
++}
++
++gboolean
++media_art_file_to_jpeg (const gchar  *filename,
++                        const gchar  *target,
++                        GError      **error)
++{
++	GlyLoader *loader;
++	GFile *file;
++	gboolean retval;
++
++	file = g_file_new_for_path (filename);
++	loader = gly_loader_new (file);
++	g_object_unref (file);
++
++	retval = extract_media_art (loader, target, error);
++	g_object_unref (loader);
++
++	return retval;
++}
++
++gboolean
++media_art_buffer_to_jpeg (const unsigned char  *buffer,
++                          size_t                len,
++                          const gchar          *buffer_mime,
++                          const gchar          *target,
++                          GError              **error)
++{
++	if (max_width_in_bytes < 0) {
++		g_debug ("Not saving album art from buffer, disabled in config");
++		return TRUE;
++	}
++
++	/* FF D8 FF are the three first bytes of JPeg images */
++	if (max_width_in_bytes == 0 &&
++	    (g_strcmp0 (buffer_mime, "image/jpeg") == 0 ||
++	     g_strcmp0 (buffer_mime, "JPG") == 0) &&
++	    (buffer && len > 2 && buffer[0] == 0xff && buffer[1] == 0xd8 && buffer[2] == 0xff)) {
++		g_debug ("Saving album art using raw data as uri:'%s'", target);
++		if (!g_file_set_contents (target, (const gchar *) buffer, (gssize) len, error)) {
++			return FALSE;
++		}
++	} else {
++		GlyLoader *loader;
++		GBytes *bytes;
++		gboolean retval = FALSE;
++
++		bytes = g_bytes_new (buffer, len);
++		loader = gly_loader_new_for_bytes (bytes);
++		g_bytes_unref (bytes);
++
++		retval = extract_media_art (loader, target, error);
++		g_object_unref (loader);
++
++		return retval;
++	}
++
++	return TRUE;
++}
+diff --git a/libmediaart/meson.build b/libmediaart/meson.build
+index 4f1201c..36fe9de 100644
+--- a/libmediaart/meson.build
++++ b/libmediaart/meson.build
+@@ -17,6 +17,8 @@ libmediaart_sources = [
+ 
+ if image_library_name == 'gdk-pixbuf-2.0'
+   libmediaart_sources += 'extractpixbuf.c'
++elif image_library_name == 'glycin-2'
++  libmediaart_sources += 'extractglycin.c'
+ elif image_library_name == 'Qt5Gui'
+   add_languages('cpp', required : true)
+   libmediaart_sources += 'extractqt.cpp'
+diff --git a/meson.build b/meson.build
+index 7e4e0ec..435b880 100644
+--- a/meson.build
++++ b/meson.build
+@@ -19,6 +19,7 @@ libmediaart_ltversion = '@0@.@1@.@2@'.format(libmediaart_soversion, current, lib
+ 
+ glib_required = '2.38.0'
+ 
++glycin = dependency('glycin-2', version: '> 2.0', required: false)
+ gdk_pixbuf = dependency('gdk-pixbuf-2.0', version: '> 2.12.0', required: false)
+ glib = dependency('glib-2.0', version: '> ' + glib_required)
+ gio = dependency('gio-2.0', version: '> ' + glib_required)
+@@ -52,6 +53,15 @@ if image_library_name == ''
+   endif
+ endif
+ 
++if glycin.found()
++  if get_option('image_library') == 'auto' or get_option('image_library') == 'glycin'
++    image_library = glycin
++    image_library_name = 'glycin-2'
++  endif
++elif get_option('image_library') == 'glycin'
++  error('glycin backend explicitly requested, but glycin library was not found')
++endif
++
+ if image_library_name == ''
+   error('No usable image processing backends were found.')
+ endif
+diff --git a/meson_options.txt b/meson_options.txt
+index 3146b1f..c785b71 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -1,4 +1,4 @@
+-option('image_library', type: 'combo', choices: ['auto', 'gdk-pixbuf', 'qt4', 'qt5'],
++option('image_library', type: 'combo', choices: ['auto', 'glycin', 'gdk-pixbuf', 'qt4', 'qt5'],
+        description: 'Which image processing backend to use')
+ option('introspection', type : 'boolean', value : 'true',
+        description : 'Enable / disable the GObject-Introspection integration')
+-- 
+GitLab
+
