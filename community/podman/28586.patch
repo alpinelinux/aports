@@ -1,0 +1,187 @@
+From c7ed32c26678089349ce8a304e75f1abf8d72e1e Mon Sep 17 00:00:00 2001
+From: Clayton Craft <clayton@craftyguy.net>
+Date: Wed, 29 Apr 2026 11:09:58 -0700
+Subject: [PATCH] libpod: limit splitting of cgroup fields
+
+Apparently paths can have colons in them, and this completely breaks
+parsing:
+
+Error: could not find any cgroup in "/proc/6080/cgroup"
+$ cat /proc/6080/cgroup
+0::/user.slice/user-10000.slice/user@10000.service/app.slice/app-dbus\x2d:1.2\x2dorg.gnome.Console.slice/3809f153fce7324de5298d0d9b2782bb76f75f4603c2085acce13f71348c1fb6
+
+This limits the split to 3 fields, so that colons in the path don't
+cause problems.
+
+Signed-off-by: Clayton Craft <clayton@craftyguy.net>
+---
+ libpod/container.go                     | 77 +++++++++++++------------
+ libpod/container_internal_linux_test.go | 56 ++++++++++++++++++
+ 2 files changed, 96 insertions(+), 37 deletions(-)
+
+diff --git a/libpod/container.go b/libpod/container.go
+index b7e24bf8d05..60c7ebd1032 100644
+--- a/libpod/container.go
++++ b/libpod/container.go
+@@ -1128,6 +1128,41 @@ func (c *Container) CgroupPath() (string, error) {
+ 	return c.cGroupPath()
+ }
+ 
++// parseCgroupPath parses the contents of a /proc/<pid>/cgroup file and returns
++// the longest cgroup path found.  The longest path is used to account for
++// cgroups v1 hierarchies (see #8397).  Named cgroups (e.g., name=systemd) are
++// ignored to work around containers running systemd as payload (see #10602).
++func parseCgroupPath(procCgroupData []byte) (string, error) {
++	var cgroupPath string
++
++	for line := range bytes.SplitSeq(procCgroupData, []byte("\n")) {
++		// skip last empty line
++		if len(line) == 0 {
++			continue
++		}
++		// cgroups(7) nails it down to three fields with the 3rd
++		// pointing to the cgroup's path which works both on v1 and v2.
++		fields := bytes.SplitN(line, []byte(":"), 3)
++		if len(fields) != 3 {
++			logrus.Debugf("Error parsing cgroup: expected 3 fields but got %d: %q", len(fields), line)
++			continue
++		}
++		// Ignore named cgroups like name=systemd.
++		if bytes.Contains(fields[1], []byte("=")) {
++			continue
++		}
++		path := string(fields[2])
++		if len(path) > len(cgroupPath) {
++			cgroupPath = path
++		}
++	}
++
++	if len(cgroupPath) == 0 {
++		return "", fmt.Errorf("could not find any cgroup path")
++	}
++	return cgroupPath, nil
++}
++
+ // cGroupPath returns a cgroups "path" for the given container.
+ // Note that the container must be running.  Otherwise, an error
+ // is returned.
+@@ -1140,18 +1175,8 @@ func (c *Container) cGroupPath() (string, error) {
+ 		return "", fmt.Errorf("cannot get cgroup path unless container %s is running: %w", c.ID(), define.ErrCtrStopped)
+ 	}
+ 
+-	// Read /proc/{PID}/cgroup and find the *longest* cgroup entry.  That's
+-	// needed to account for hacks in cgroups v1, where each line in the
+-	// file could potentially point to a cgroup.  The longest one, however,
+-	// is the libpod-specific one we're looking for.
+-	//
+-	// See #8397 on the need for the longest-path look up.
+-	//
+-	// And another workaround for containers running systemd as the payload.
+-	// containers running systemd moves themselves into a child subgroup of
+-	// the named systemd cgroup hierarchy.  Ignore any named cgroups during
+-	// the lookup.
+-	// See #10602 for more details.
++	// Parse the cgroup file to find the container's cgroup path.
++	// See parseCgroupPath for details on the lookup heuristics.
+ 	procPath := fmt.Sprintf("/proc/%d/cgroup", c.state.PID)
+ 	lines, err := os.ReadFile(procPath)
+ 	if err != nil {
+@@ -1164,31 +1189,9 @@ func (c *Container) cGroupPath() (string, error) {
+ 		return "", err
+ 	}
+ 
+-	var cgroupPath string
+-	for line := range bytes.SplitSeq(lines, []byte("\n")) {
+-		// skip last empty line
+-		if len(line) == 0 {
+-			continue
+-		}
+-		// cgroups(7) nails it down to three fields with the 3rd
+-		// pointing to the cgroup's path which works both on v1 and v2.
+-		fields := bytes.Split(line, []byte(":"))
+-		if len(fields) != 3 {
+-			logrus.Debugf("Error parsing cgroup: expected 3 fields but got %d: %s", len(fields), procPath)
+-			continue
+-		}
+-		// Ignore named cgroups like name=systemd.
+-		if bytes.Contains(fields[1], []byte("=")) {
+-			continue
+-		}
+-		path := string(fields[2])
+-		if len(path) > len(cgroupPath) {
+-			cgroupPath = path
+-		}
+-	}
+-
+-	if len(cgroupPath) == 0 {
+-		return "", fmt.Errorf("could not find any cgroup in %q", procPath)
++	cgroupPath, err := parseCgroupPath(lines)
++	if err != nil {
++		return "", fmt.Errorf("%w in %q", err, procPath)
+ 	}
+ 
+ 	cgroupManager := c.CgroupManager()
+diff --git a/libpod/container_internal_linux_test.go b/libpod/container_internal_linux_test.go
+index 0ab62dd994a..b63b0500b1d 100644
+--- a/libpod/container_internal_linux_test.go
++++ b/libpod/container_internal_linux_test.go
+@@ -60,3 +60,59 @@ func TestGenerateUserGroupEntry(t *testing.T) {
+ 	}
+ 	assert.Equal(t, group, "0:x:0:567890\n")
+ }
++
++func TestParseCgroupPath(t *testing.T) {
++	tests := []struct {
++		name    string
++		data    string
++		want    string
++		wantErr bool
++	}{
++		{
++			name: "simple cgroup v2",
++			data: "0::/user.slice/user-1000.slice/session-1.scope\n",
++			want: "/user.slice/user-1000.slice/session-1.scope",
++		},
++		{
++			name: "named cgroup ignored",
++			data: "1:name=systemd:/user.slice\n0::/longer/path\n",
++			want: "/longer/path",
++		},
++		{
++			name: "longest path wins",
++			data: "0::/short\n0::/much/longer/path\n",
++			want: "/much/longer/path",
++		},
++		{
++			name: "trailing newline",
++			data: "0::/some/path\n",
++			want: "/some/path",
++		},
++		{
++			name:    "empty input",
++			data:    "",
++			wantErr: true,
++		},
++		{
++			name:    "only newlines",
++			data:    "\n\n",
++			wantErr: true,
++		},
++		{
++			name: "colon in cgroup path from dbus",
++			data: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-dbus\\x2d:1.2\\x2dorg.gnome.Console.slice/abc123\n",
++			want: "/user.slice/user-1000.slice/user@1000.service/app.slice/app-dbus\\x2d:1.2\\x2dorg.gnome.Console.slice/abc123",
++		},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got, err := parseCgroupPath([]byte(tt.data))
++			if tt.wantErr {
++				assert.Error(t, err)
++				return
++			}
++			assert.NoError(t, err)
++			assert.Equal(t, tt.want, got)
++		})
++	}
++}
