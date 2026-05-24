@@ -1,107 +1,129 @@
 # Contributor: Jakub Jirutka <jakub@jirutka.cz>
 # Maintainer: Jakub Jirutka <jakub@jirutka.cz>
 pkgname=ipfixprobe
-pkgver=4.16.0
+pkgver=5.6.0
 pkgrel=0
 pkgdesc="High-performance net flow exporter"
 url="https://github.com/CESNET/ipfixprobe"
-arch="all"
+# armhf,armv7,ppc64le,x86: not supported, fails to build
+arch="all !armhf !armv7 !ppc64le !x86"
 license="BSD-3-Clause"
+# python is needed for init/config2args.py
+depends="
+	py3-jsonschema
+	py3-pyaml
+	python3
+	"
 makedepends="
-	autoconf
-	automake
 	bsd-compat-headers
 	cesnet-telemetry-dev
+	cmake
 	libpcap-dev
 	libtool
+	libunwind-dev
 	linux-headers
-	openssl-dev
 	lz4-dev
+	openssl-dev
+	patchelf
+	samurai
 	"
 checkdepends="bash"
 install="$pkgname.pre-install"
 subpackages="
-	$pkgname-doc
+	$pkgname-input-pcap:_input_pcap
+	$pkgname-process-experimental:_process_experimental
 	$pkgname-openrc
-	$pkgname-bash-completion
 	"
 source="https://github.com/CESNET/ipfixprobe/archive/v$pkgver/ipfixprobe-$pkgver.tar.gz
+	lib64.patch
+	ipfixprobed.patch
+	link0.conf.patch
 	$pkgname.initd
 	$pkgname.confd
 	"
+options="!check"  # tests requires nemea-framework-dev
 
-_with_dpdk=no
+_enable_dpdk=OFF
 case "$CARCH" in
 # dpdk is supported only on these architectures:
-aarch64 | ppc64le | riscv64 | x86_64)
-	_with_dpdk=yes
+aarch64 | riscv64 | x86_64)
+	_enable_dpdk=ON
 	makedepends="$makedepends dpdk-dev"
-	subpackages="$subpackages $pkgname-dpdk"
+	subpackages="$subpackages $pkgname-input-dpdk:_input_dpdk"
 esac
 
-prepare() {
-	default_prepare
-	autoreconf -iv
-}
-
 build() {
-	if [ "$_with_dpdk" = yes ]; then
-		_build --with-dpdk
-		mv ipfixprobe ipfixprobe.dpdk
-	fi
-
-	_build --without-dpdk
-}
-
-_build() {
-	export CXXFLAGS="${CXXFLAGS/-Os/-O2}"
-
-	./configure \
-		--build=$CBUILD \
-		--host=$CHOST \
-		--prefix=/usr \
-		--sysconfdir=/etc \
-		--mandir=/usr/share/man \
-		--localstatedir=/var \
-		--with-pcap \
-		"$@"
-	make
+	local crossopts
+	[ "$CBUILD" != "$CHOST" ] \
+		&& crossopts="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_HOST_SYSTEM_NAME=Linux"
+	cmake -B build -G Ninja \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_INSTALL_LIBDIR=lib \
+		-DBUILD_SHARED_LIBS=ON \
+		-DENABLE_INPUT_PCAP=ON \
+		-DENABLE_INPUT_DPDK="$_enable_dpdk" \
+		-DENABLE_INPUT_NFB=OFF \
+		-DENABLE_PROCESS_EXPERIMENTAL=ON \
+		-DENABLE_NEMEA=OFF \
+		-DENABLE_RPMBUILD=OFF \
+		-DENABLE_TESTS="$(want_check && echo ON || echo OFF)" \
+		$crossopts
+	cmake --build build
 }
 
 check() {
-	make check
+	ctest --test-dir build
 }
 
 package() {
-	make DESTDIR="$pkgdir" install
+	DESTDIR="$pkgdir" cmake --install build
 
 	cd "$pkgdir"
 
 	rm -rf usr/lib/systemd
 
-	mv usr/share/doc/ipfixprobe/ipfixprobe/* usr/share/doc/ipfixprobe/
-	rmdir usr/share/doc/ipfixprobe/ipfixprobe
-
-	mv etc/ipfixprobe/*.example usr/share/doc/ipfixprobe/
-	rmdir etc/ipfixprobe
-
-	mkdir -p usr/share/bash-completion/completions
-	mv etc/bash_completion.d/ipfixprobe.bash usr/share/bash-completion/completions/ipfixprobe
-	rmdir etc/bash_completion.d
+	mv etc/ipfixprobe/link0.conf.example etc/ipfixprobe/link0.conf
 
 	install -D -m755 "$srcdir"/$pkgname.initd "$pkgdir"/etc/init.d/$pkgname
 	install -D -m644 "$srcdir"/$pkgname.confd "$pkgdir"/etc/conf.d/$pkgname
+
+	# Workaround for https://github.com/CESNET/ipfixprobe/issues/329
+	local mod; for mod in bstats phists pstats quic tls; do
+		patchelf --set-rpath '$ORIGIN/../output' \
+			"usr/lib/ipfixprobe/process/libipfixprobe-process-$mod.so"
+	done
 }
 
-dpdk() {
-	pkgdesc="$pkgdesc (with DPDK interface)"
-	replaces="$pkgname"
+_input_dpdk() {
+	pkgdesc="ipfixprobe high-speed input plugin using DPDK"
+	depends="$pkgname=$pkgver-r$pkgrel"
+	provides="$pkgname-dpdk=$pkgver-r$pkgrel"  # backward compatibility (Alpine <3.23)
 
-	install -D -m755 "$builddir"/ipfixprobe.dpdk "$subpkgdir"/usr/bin/ipfixprobe
+	amove usr/lib/ipfixprobe/input/libipfixprobe-input-dpdk.so
+}
+
+_input_pcap() {
+	pkgdesc="ipfixprobe input plugin for PCAP files and live capture"
+	depends="$pkgname=$pkgver-r$pkgrel"
+
+	amove usr/lib/ipfixprobe/input/libipfixprobe-input-pcap.so
+}
+
+_process_experimental() {
+	pkgdesc="ipfixprobe experimental process plugins"
+	depends="$pkgname=$pkgver-r$pkgrel"
+
+	local name; for name in nettisa sip rtsp mpls ntp; do
+		amove usr/lib/ipfixprobe/process/libipfixprobe-process-$name.so
+	done
 }
 
 sha512sums="
-a08f04753d73b45d5465a5cf2b06e19390f38be9a71b9d687fcf1f5eed6a1ace52bceeb3bd4d0374190a9a2a77d56865c088aaa0f37fed905f639ab5995634a2  ipfixprobe-4.16.0.tar.gz
-f249b80012909231f01469016ff1f78cb214d0b0e9590950a0143437028ec58e9ba7ac2e10020261bf99d3d0c260a901d453828be7388612257f286137fe84a8  ipfixprobe.initd
-7d86866beb9797910ebc4970cf8d2fca3c72071084fa637edf8e882024467f8337e02b8d7d0a69372c46968bc3589721cd81815277162e2f1510779d6c52beec  ipfixprobe.confd
+b0f994ccd751789d31c16a59af939a99871b78e9c9ca6598071be8da0cbe451b6000ffe14093eed5e308847b992373db21ae66ffd9fece7b54813ab2bec1724d  ipfixprobe-5.6.0.tar.gz
+307b38dea6bd263c780f486475130d27969fef86f0a9a21ba0f161a0c88e09b7d5d7d3567a9819f8065a8e29878e7e706f8174f4f3165678454d6d9f88964566  lib64.patch
+b311eee6e397aa64dc0c4c55753877597612c38cca3e55a59e9180a89deec8d11bb12fadee8dbe435b2526e9a6aee8f396b3b3f91eb2561f13c4aa2923fe66f3  ipfixprobed.patch
+22cbc4214a90ed3aefb6493451e9fb1c01ea32adca123b0ab62c791f6890f82528f8e76edb4e14c1aac415e9b6e2bd900abcd691c664ed500872c1187dcab28c  link0.conf.patch
+3ec5ec4c510d3fbd112bb9d93bea8d60ef89a82c3f9356635e0bfb263ef9d6e6e0436ac72393d8fd55096a9b97789423c671765ca67fbe19881475d98a662831  ipfixprobe.initd
+fa83b4c876426d2f5bd4d31b6d72f192941c7fbfb887c78ceb20682f1a506811e658f895e5d9b932627f9918de53e1ebf82cff4da1bec2869ef5ac9e2155bebb  ipfixprobe.confd
 "
