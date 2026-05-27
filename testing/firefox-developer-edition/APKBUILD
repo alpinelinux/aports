@@ -1,8 +1,8 @@
 # Maintainer: Patrycja Rosa <alpine@ptrcnull.me>
 pkgname=firefox-developer-edition
-pkgver=152.0_beta3
+pkgver=152.0_beta4
 _pkgver=${pkgver/_beta/b}
-_releasedate=2026-05-25
+_releasedate=2026-05-27
 pkgrel=0
 pkgdesc="Firefox web browser"
 url="https://www.firefox.com/"
@@ -22,6 +22,7 @@ makedepends="
 	clang$_llvmver-libclang
 	dbus-dev
 	gettext
+	gettext-envsubst
 	gtk+3.0-dev
 	hunspell-dev
 	icu-dev
@@ -37,7 +38,8 @@ makedepends="
 	libwebp-dev
 	libxcomposite-dev
 	libxt-dev
-	lld
+	lld$_llvmver
+	llvm
 	llvm$_llvmver-dev
 	m4
 	mesa-dev
@@ -45,12 +47,15 @@ makedepends="
 	nodejs
 	nspr-dev
 	nss-dev
+	patchelf
 	pipewire-dev
 	pulseaudio-dev
+	py3-mozshellutil
 	python3
+	scudo-malloc
 	sed
-	wasi-sdk
 	wasi-compiler-rt~$_llvmver
+	wasi-sdk
 	wireless-tools-dev
 	zip
 	"
@@ -61,10 +66,9 @@ source="https://ftp.mozilla.org/pub/firefox/releases/$_pkgver/source/firefox-$_p
 	install-dir.patch
 	lfs64.patch
 	musl-no-linux-prctl.patch
-	no-ccache-stats.patch
-	no-pip-check.patch
 	rust-lto-thin.patch
 	sandbox-sched_setscheduler.patch
+	widevine.patch
 
 	stab.h
 
@@ -89,18 +93,20 @@ _clear_vendor_checksums() {
 	sed -i 's/\("files":{\)[^}]*/\1/' third_party/rust/$1/.cargo-checksum.json
 }
 
-export CFLAGS="${CFLAGS/-fstack-clash-protection/} -g0 -O2"
-export CXXFLAGS="${CXXFLAGS/-fstack-clash-protection/} -g0 -O2 -Wno-deprecated-builtins -Wno-deprecated-declarations"
-
 prepare() {
 	default_prepare
 
 	cp "$srcdir"/stab.h toolkit/crashreporter/google-breakpad/src/
 
+	export CFLAGS="${CFLAGS/-fstack-clash-protection/} -g0 -O2"
+	export CXXFLAGS="${CXXFLAGS/-fstack-clash-protection/} -g0 -O2 -Wno-deprecated-builtins -Wno-deprecated-declarations"
+
 	_clear_vendor_checksums audio_thread_priority
 }
 
 build() {
+	export MOZ_BUILD_DATE="$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y%m%d%H%M%S")"
+
 	# for lto
 	ulimit -n 4096
 
@@ -116,12 +122,10 @@ build() {
 		if [ $thinlto_jobs -gt 8 ]; then
 			thinlto_jobs=8
 		fi
+		;;
 	esac
 
 	export LDFLAGS="$LDFLAGS -Wl,--thinlto-jobs=$thinlto_jobs"
-
-	export CC="clang-$_llvmver"
-	export CXX="clang++-$_llvmver"
 
 	export SHELL=/bin/sh
 	export BUILD_OFFICIAL=1
@@ -137,16 +141,16 @@ build() {
 	# Find our triplet JSON
 	export RUST_TARGET="$CTARGET"
 
+	# has to be the same version or older than lld
+	export CC="clang-$_llvmver"
+	export CXX="clang++-$_llvmver"
+
 	# set rpath so linker finds the libs
 	export LDFLAGS="$LDFLAGS -Wl,-rpath,$_mozappdir"
 
 	# let firefox do this itself.
 	unset CARGO_PROFILE_RELEASE_OPT_LEVEL
-	unset CARGO_PROFILE_RELEASE_CODEGEN_UNITS
-	unset CARGO_PROFILE_RELEASE_PANIC
 	unset CARGO_PROFILE_RELEASE_LTO
-
-	export MOZ_BUILD_DATE="$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y%m%d%H%M%S")"
 
 	export CBUILD CHOST builddir
 	envsubst < "$srcdir"/mozconfig > base-mozconfig
@@ -161,12 +165,20 @@ package() {
 	for _png in ./browser/branding/aurora/default*.png; do
 		local i=${_png%.png}
 		i=${i##*/default}
-		install -Dm644 "$_png" \
+		install -d "$pkgdir"/usr/share/icons/hicolor/"$i"x"$i"/apps/
+		ln -s "$_mozappdir"/browser/chrome/icons/default/default"$i".png \
 			"$pkgdir"/usr/share/icons/hicolor/"$i"x"$i"/apps/$pkgname.png
 	done
 
+	case "$CARCH" in
+	x86|arm*) ;;
+	*) patchelf --add-needed libscudo.so "$pkgdir"/usr/lib/firefox-developer-edition/firefox ;;
+	esac
+
 	install -Dm644 browser/branding/aurora/content/about-logo.png \
 		"$pkgdir"/usr/share/icons/hicolor/192x192/apps/$pkgname.png
+	install -Dm644 browser/branding/aurora/default*.png \
+		-t "$pkgdir"/"$_mozappdir"/browser/chrome/icons/default/
 	install -Dm644 browser/branding/aurora/content/about-logo@2x.png \
 		"$pkgdir"/usr/share/icons/hicolor/384x384/apps/$pkgname.png
 	install -Dm644 browser/branding/aurora/content/about-logo.svg \
@@ -190,23 +202,27 @@ package() {
 	EOF
 	rm "$pkgdir"/$_mozappdir/firefox-bin
 	ln -sfv /usr/bin/firefox-developer-edition "$pkgdir"/$_mozappdir/firefox-bin
+
+	# Add paxrelabel configuration to grant JIT access on systems with
+	# a PaX implementation.
+	mkdir -p "$pkgdir"/usr/share/paxrelabel.d
+	echo "PEmRs /usr/lib/firefox-developer-edition/firefox" > "$pkgdir"/usr/share/paxrelabel.d/"$pkgname"
 }
 
 sha512sums="
-dfc49a369a7545fa40508e2c41aa8e6b236c5e8b649ce74580937f6a3d9768bda3e5abc13a0458f6645f3464b5301616f90f2212f8d5234158f6f53b5a19cb0b  firefox-152.0b3.source.tar.xz
+d2c7d86935a3c688e9385d8eb5886dd1d7a14036b69f0683919f58afd76bc56ac2199d1d5951d52d293e0dec25f4304b5292bf101162b0f88725129007eb1ab6  firefox-152.0b4.source.tar.xz
 8775931ad403f8a6545ecbedf139b7e7e152a2d6638f70d8feb457ea33e6e86147cd3c882e8059732ae946045b4918b412d0d6ba4dfdaeb2878a2277c6671676  bmo-1988166-no-single_threaded-h.patch
 3c28e243c1c74a9bd1ea13729926b1cae3ee35843b14be92ff3287a8cd745e95954e1bc842f2add165923d159bb8d2a7bcd92ba8fb2f4017ba1aef892d77aecf  fix-fortify-system-wrappers.patch
 cd68b89e29e5f6379fbd5679db27b9a5ef70ea65e51c0d0a8137e1f1fd210e35a8cfb047798e9549bc7275606d7ec5c8d8af1335d29da4699db7acd8bc7ff556  fix-rust-target.patch
 ff471e5160e313a9657bcbb767a6a581bab9da053cced02bde38d1ef03349472ad3602dba026c10d676d55c1712af772dd2b7bdbfa72b5db498c9ce8a2133423  install-dir.patch
 e75daab5573ec6e28d3940a9bb98304d572dfb26ce7c1709e99fdd75dfa58abce170c96de683f8dc2224ea2e118aa7d78affbd54f99c4e328a4641685d64bd7d  lfs64.patch
 188ed701631a4034450d2ec2bf60acc4f0e6d7654cc9d8d5ea19bde2df16d22c288e21c90aa41e4ace6c806d1653be31db9232c980673d6a41e9717bceaa2e3d  musl-no-linux-prctl.patch
-64b6458099baa225b346b40e3080cea3a5c73a834e39fa4a438af77701e6ded84e2fb0d6fffff8c2533cc43b898fe9f411be023e875acebec452aa2379861f04  no-ccache-stats.patch
-aabec21c290bded5f1bde0b23db7a5c10ca1663673a4c9ad29ac0a495522a754bdfbd95def3bada29acb9b263b5578ee213bf46b963342e74cd60ecc8beae97b  no-pip-check.patch
 1c6918dd6655d3a1251bfd4af2e1c561cbb00d540a883b4c1ebf7f5de530d754d9ac07b4b5f56cdab6c511d25c8910ec94043f5733e97501a67abffe1bafaeb1  rust-lto-thin.patch
 f8c3555ef6207933cbffbf4fc101a9b4c0d2990c0063162f0f0bde70ef0b46f86bfac42e7110695183424a87948de593f3927b2d8509ede3e4fc7bd8a1fad1ce  sandbox-sched_setscheduler.patch
+eadf3f2d12d469010a1f6b83bd33ba276cdbf570db8c74c61b7c3d3eda80c7e843c1ea17400412be243b5309383543456f0d6de94b18323c542ba66d5cff89db  widevine.patch
 0b3f1e4b9fdc868e4738b5c81fd6c6128ce8885b260affcb9a65ff9d164d7232626ce1291aaea70132b3e3124f5e13fef4d39326b8e7173e362a823722a85127  stab.h
 aa4dbec39297542f2f36323ef4e6b79719864acd7306b53d4b7970526891b877cc8df7fc7b621ea6d1f7209b980143d456b9de707ee7ab520aff4df1907a9c74  mozconfig
 2ff0cb8e2eb94cee306b488adf6d7f4debbaff6155be3ed3eeee814cdb356e2e60fe38cc29d6c8d10079937fd2c930cfddf283977cf645395d31eaf76c7f0ac2  firefox-developer-edition.desktop
 4fd66382983d406ce0cd3586239fb1110224aeb2f9eee6fc931d980a31d18739d001d1f152208a7f1ccaae80867c40bd3d2ac674484617532a8f38049dc745bd  distribution.ini
-62e135345856f29f9dfde6e703527a3aecdc0da606b6dd72607c25b6646221d4bab86609f78ffaca051fb8b4c1c0eb5040957caf79a09852ad62cf124c1bb36f  vendor-prefs.js
+fe5ab5a0b59b09d7ae1234f8c0da8434a1931aaeebc05e0e42c88ac236dfe4724f8015838be38ab3b44387dac1fb556a481585e43f12895d01618caf4c76a4a7  vendor-prefs.js
 "
