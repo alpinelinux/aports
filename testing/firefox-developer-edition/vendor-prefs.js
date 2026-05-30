@@ -20,9 +20,6 @@ pref("browser.newtabpage.activity-stream.feeds.section.topstories", false);
 pref("media.gmp-widevinecdm.visible", false);
 pref("media.gmp-widevinecdm.enabled", false);
 
-// Disable Privacy-Preserving Attribution Measurement
-pref("dom.private-attribution.submission.enabled", false);
-
 // Disable various telemetry sources
 pref("browser.newtabpage.activity-stream.telemetry", false);
 pref("toolkit.telemetry.shutdownPingSender.enabled", false);
