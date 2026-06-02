@@ -1,0 +1,354 @@
+From cf2f1d025f33e922a771e5a73c57c4e0fe911b92 Mon Sep 17 00:00:00 2001
+From: Takuto Ikuta <tikuta@google.com>
+Date: Wed, 22 Apr 2026 00:11:41 +0900
+Subject: [PATCH] Add support for c_additional_outputs in config
+
+This feature is needed to support Debug Fission (.dwo files) in
+Chromium. Currently, referencing declare_args variables in a toolchain
+definition evaluates them in the context of the default toolchain,
+causing mismatches for secondary toolchains. Also, we need to control
+outputs based on target configs (e.g., whether -gsplit-dwarf is used or
+not) rather than applying them globally to all targets in a toolchain.
+
+This CL allows defining `c_additional_outputs` in a `config` block. When
+applied to a target, these outputs are expanded and added to the Ninja
+build edge's outputs for each source file compilation.
+
+Bug: 502431091
+Change-Id: I914b4ab220d68d3f9bd8eacd2fe4655138fb636c
+Reviewed-on: https://gn-review.googlesource.com/c/gn/+/21980
+Reviewed-by: Matt Stark <msta@google.com>
+Reviewed-by: Andrew Grieve <agrieve@google.com>
+Commit-Queue: Takuto Ikuta <tikuta@google.com>
+---
+ docs/reference.md                             | 20 +++++++
+ src/gn/config_values.cc                       |  1 +
+ src/gn/config_values.h                        |  9 ++++
+ src/gn/config_values_extractors_unittest.cc   | 19 +++++++
+ src/gn/config_values_generator.cc             | 17 ++++++
+ src/gn/ninja_c_binary_target_writer.cc        | 37 +++++++++++++
+ .../ninja_c_binary_target_writer_unittest.cc  | 53 +++++++++++++++++++
+ src/gn/variables.cc                           | 24 +++++++++
+ src/gn/variables.h                            |  4 ++
+ 9 files changed, 184 insertions(+)
+
+diff --git a/docs/reference.md b/docs/reference.md
+index 27d5af0f..41639374 100644
+--- a/docs/reference.md
++++ b/docs/reference.md
+@@ -107,6 +107,7 @@
+     *   [bundle_executable_dir: Expansion of {{bundle_executable_dir}} in create_bundle](#var_bundle_executable_dir)
+     *   [bundle_resources_dir: Expansion of {{bundle_resources_dir}} in create_bundle.](#var_bundle_resources_dir)
+     *   [bundle_root_dir: Expansion of {{bundle_root_dir}} in create_bundle.](#var_bundle_root_dir)
++    *   [c_additional_outputs: [string list] Additional outputs for the compiler.](#var_c_additional_outputs)
+     *   [cflags: [string list] Flags passed to all C compiler variants.](#var_cflags)
+     *   [cflags_c: [string list] Flags passed to the C compiler.](#var_cflags_c)
+     *   [cflags_cc: [string list] Flags passed to the C++ compiler.](#var_cflags_cc)
+@@ -5318,6 +5319,25 @@
+     bundle_executable_dir = "${bundle_contents_dir}/MacOS"
+   }
+ ```
++### <a name="var_c_additional_outputs"></a>**c_additional_outputs**: [string list] Additional outputs for the compiler.&nbsp;[Back to Top](#gn-reference)
++
++```
++  A list of substitution expressions that will be evaluated in the context
++  of the compiler tool (e.g. "cc") and added to its outputs when this config
++  is applied to a target.
++
++  This is useful for tools that produce side-artifacts like .dwo files
++  when specific flags (like -gsplit-dwarf) are used.
++
++  "c_additional_outputs" are applied to all invocations of the C, C++,
++  Objective C, and Objective C++ compilers.
++
++  Example:
++    config("split_dwarf") {
++      cflags = [ "-gsplit-dwarf" ]
++      c_additional_outputs = [ "{{source_out_dir}}/{{source_name_part}}.dwo" ]
++    }
++```
+ ### <a name="var_cflags"></a>**cflags***: Flags passed to the C compiler.&nbsp;[Back to Top](#gn-reference)
+ 
+ ```
+diff --git a/src/gn/config_values.cc b/src/gn/config_values.cc
+index 3bab686a..896e25c6 100644
+--- a/src/gn/config_values.cc
++++ b/src/gn/config_values.cc
+@@ -41,6 +41,7 @@ void ConfigValues::AppendValues(const ConfigValues& append) {
+   VectorAppend(&rustflags_, append.rustflags_);
+   VectorAppend(&rustenv_, append.rustenv_);
+   VectorAppend(&swiftflags_, append.swiftflags_);
++  VectorAppend(&c_additional_outputs_, append.c_additional_outputs_);
+ 
+   // Only append precompiled header if there isn't one. It might be nice to
+   // throw an error if there are conflicting precompiled headers, but that
+diff --git a/src/gn/config_values.h b/src/gn/config_values.h
+index 24a235a4..434f8074 100644
+--- a/src/gn/config_values.h
++++ b/src/gn/config_values.h
+@@ -11,6 +11,7 @@
+ #include "gn/lib_file.h"
+ #include "gn/source_dir.h"
+ #include "gn/source_file.h"
++#include "gn/substitution_pattern.h"
+ 
+ // Holds the values (include_dirs, defines, compiler flags, etc.) for a given
+ // config or target.
+@@ -62,6 +63,13 @@ class ConfigValues {
+   const std::vector<SourceFile>& inputs() const { return inputs_; }
+   std::vector<SourceFile>& inputs() { return inputs_; }
+ 
++  const std::vector<SubstitutionPattern>& c_additional_outputs() const {
++    return c_additional_outputs_;
++  }
++  std::vector<SubstitutionPattern>& c_additional_outputs() {
++    return c_additional_outputs_;
++  }
++
+   const std::vector<LibFile>& libs() const { return libs_; }
+   std::vector<LibFile>& libs() { return libs_; }
+ 
+@@ -100,6 +108,7 @@ class ConfigValues {
+   std::vector<std::string> rustenv_;
+   std::vector<std::string> swiftflags_;
+   std::vector<std::pair<std::string, LibFile>> externs_;
++  std::vector<SubstitutionPattern> c_additional_outputs_;
+   // If you add a new one, be sure to update AppendValues().
+ 
+   std::string precompiled_header_;
+diff --git a/src/gn/config_values_extractors_unittest.cc b/src/gn/config_values_extractors_unittest.cc
+index b1fda895..24efa4c8 100644
+--- a/src/gn/config_values_extractors_unittest.cc
++++ b/src/gn/config_values_extractors_unittest.cc
+@@ -183,3 +183,22 @@ TEST(ConfigValuesGenerator, CflagsWithNewlineError) {
+   EXPECT_TRUE(err.has_error());
+   EXPECT_EQ(err.message(), "Newlines in cflags values are not supported.");
+ }
++
++TEST(ConfigValuesGenerator, AdditionalOutputs) {
++  TestWithScope setup;
++  Err err;
++
++  Value outputs_value(nullptr, Value::LIST);
++  outputs_value.list_value().push_back(
++      Value(nullptr, "{{target_out_dir}}/{{source_name_part}}.dwo"));
++  setup.scope()->SetValue("c_additional_outputs", outputs_value, nullptr);
++
++  ConfigValues config_values;
++  ConfigValuesGenerator gen(&config_values, setup.scope(), SourceDir("//foo/"),
++                            &err);
++  gen.Run();
++  EXPECT_FALSE(err.has_error());
++  ASSERT_EQ(config_values.c_additional_outputs().size(), 1u);
++  EXPECT_EQ(config_values.c_additional_outputs()[0].AsString(),
++            "{{target_out_dir}}/{{source_name_part}}.dwo");
++}
+diff --git a/src/gn/config_values_generator.cc b/src/gn/config_values_generator.cc
+index 1f0f90c1..e2750662 100644
+--- a/src/gn/config_values_generator.cc
++++ b/src/gn/config_values_generator.cc
+@@ -212,4 +212,21 @@ void ConfigValuesGenerator::Run() {
+     if (err_->has_error())
+       return;
+   }
++
++  // C/C++/ObjectiveC/ObjectiveC++ additional outputs.
++  const Value* c_additional_outputs_value =
++      scope_->GetValue(variables::kCAdditionalOutputs, true);
++  if (c_additional_outputs_value) {
++    if (!c_additional_outputs_value->VerifyTypeIs(Value::LIST, err_))
++      return;
++
++    for (const Value& val : c_additional_outputs_value->list_value()) {
++      SubstitutionPattern pattern;
++      if (!pattern.Parse(val, err_))
++        return;
++      if (!pattern.IsInOutputDir(scope_->settings()->build_settings(), err_))
++        return;
++      config_values_->c_additional_outputs().push_back(std::move(pattern));
++    }
++  }
+ }
+diff --git a/src/gn/ninja_c_binary_target_writer.cc b/src/gn/ninja_c_binary_target_writer.cc
+index 90413414..d58871a5 100644
+--- a/src/gn/ninja_c_binary_target_writer.cc
++++ b/src/gn/ninja_c_binary_target_writer.cc
+@@ -391,6 +391,19 @@ void NinjaCBinaryTargetWriter::WriteSources(
+ 
+   std::vector<OutputFile> tool_outputs;  // Prevent reallocation in loop.
+   std::vector<OutputFile> deps;
++
++  // Collect unique C-family additional outputs from all recursive configs.
++  std::vector<SubstitutionPattern> c_additional_outputs;
++  std::set<std::string> seen_patterns;
++  for (ConfigValuesIterator iter(target_); !iter.done(); iter.Next()) {
++    for (const auto& pattern : iter.cur().c_additional_outputs()) {
++      std::string pattern_str = pattern.AsString();
++      if (seen_patterns.insert(std::move(pattern_str)).second) {
++        c_additional_outputs.push_back(pattern);
++      }
++    }
++  }
++
+   for (const auto& source : target_->sources()) {
+     DCHECK_NE(source.GetType(), SourceFile::SOURCE_SWIFT);
+ 
+@@ -440,6 +453,24 @@ void NinjaCBinaryTargetWriter::WriteSources(
+           deps.push_back(*module_dep.pcm);
+       }
+ 
++      if (tool_name == CTool::kCToolCc || tool_name == CTool::kCToolCxx ||
++          tool_name == CTool::kCToolObjC || tool_name == CTool::kCToolObjCxx) {
++        for (const auto& pattern : c_additional_outputs) {
++          // Use ApplyPatternToCompilerAsOutputFile instead of
++          // ApplyPatternToSourceAsOutputFile to support target-level
++          // substitutions (e.g. {{target_out_dir}}) in addition to source-level
++          // substitutions.
++          OutputFile extra_output =
++              SubstitutionWriter::ApplyPatternToCompilerAsOutputFile(
++                  target_, source, pattern);
++          if (!extra_output.value().empty() &&
++              std::find(tool_outputs.begin(), tool_outputs.end(), extra_output) ==
++                  tool_outputs.end()) {
++            tool_outputs.push_back(std::move(extra_output));
++          }
++        }
++      }
++
+       WriteCompilerBuildLine({source}, deps, order_only_deps, tool,
+                              tool_outputs);
+       WritePool(out_);
+@@ -452,6 +483,12 @@ void NinjaCBinaryTargetWriter::WriteSources(
+     } else {
+       extra_files->push_back(tool_outputs[0]);
+     }
++
++    // Add additional outputs to extra_files so they are included in the
++    // target's stamp file.
++    for (size_t i = 1; i < tool_outputs.size(); ++i) {
++      extra_files->push_back(tool_outputs[i]);
++    }
+   }
+ 
+   out_ << std::endl;
+diff --git a/src/gn/ninja_c_binary_target_writer_unittest.cc b/src/gn/ninja_c_binary_target_writer_unittest.cc
+index bf81b233..585eb534 100644
+--- a/src/gn/ninja_c_binary_target_writer_unittest.cc
++++ b/src/gn/ninja_c_binary_target_writer_unittest.cc
+@@ -165,6 +165,59 @@ TEST_F(NinjaCBinaryTargetWriterTest, SourceSet) {
+   }
+ }
+ 
++TEST_F(NinjaCBinaryTargetWriterTest, AdditionalOutputs) {
++  Err err;
++  TestWithScope setup;
++
++  Value outputs_value(nullptr, Value::LIST);
++  outputs_value.list_value().push_back(
++      Value(nullptr, "{{target_out_dir}}/{{source_name_part}}.dwo"));
++
++  Config config(setup.settings(), Label(SourceDir("//foo/"), "split_dwarf"));
++  config.visibility().SetPublic();
++
++  std::vector<SubstitutionPattern> patterns;
++  for (const auto& v : outputs_value.list_value()) {
++    SubstitutionPattern pattern;
++    ASSERT_TRUE(pattern.Parse(v, &err));
++    patterns.push_back(std::move(pattern));
++  }
++  config.own_values().c_additional_outputs() = std::move(patterns);
++  ASSERT_TRUE(config.OnResolved(&err));
++
++  Target target(setup.settings(), Label(SourceDir("//foo/"), "bar"));
++  target.set_output_type(Target::SOURCE_SET);
++  target.visibility().SetPublic();
++  target.sources().push_back(SourceFile("//foo/input1.cc"));
++  target.source_types_used().Set(SourceFile::SOURCE_CPP);
++  target.configs().push_back(LabelConfigPair(&config));
++  target.SetToolchain(setup.toolchain());
++  ASSERT_TRUE(target.OnResolved(&err));
++
++  std::ostringstream out;
++  NinjaCBinaryTargetWriter writer(&target, out);
++  writer.Run();
++
++  const char expected[] =
++      "defines =\n"
++      "include_dirs =\n"
++      "cflags =\n"
++      "cflags_cc =\n"
++      "root_out_dir = .\n"
++      "target_gen_dir = gen/foo\n"
++      "target_out_dir = obj/foo\n"
++      "target_output_name = bar\n"
++      "\n"
++      "build obj/foo/bar.input1.o obj/foo/input1.dwo: cxx "
++      "../../foo/input1.cc\n"
++      "  source_file_part = input1.cc\n"
++      "  source_name_part = input1\n"
++      "\n"
++      "build phony/foo/bar: phony obj/foo/bar.input1.o obj/foo/input1.dwo\n";
++
++  EXPECT_EQ(expected, out.str());
++}
++
+ TEST_F(NinjaCBinaryTargetWriterTest, EscapeDefines) {
+   TestWithScope setup;
+   Err err;
+diff --git a/src/gn/variables.cc b/src/gn/variables.cc
+index ad9657f3..960689b7 100644
+--- a/src/gn/variables.cc
++++ b/src/gn/variables.cc
+@@ -417,6 +417,29 @@ Possible values:
+     All public headers will be marked as textual.
+ )";
+ 
++const char kCAdditionalOutputs[] = "c_additional_outputs";
++const char kCAdditionalOutputs_HelpShort[] =
++    "c_additional_outputs: [string list] Additional outputs for the compiler.";
++const char kCAdditionalOutputs_Help[] =
++    R"(c_additional_outputs: [string list] Additional outputs for the compiler.
++
++  A list of substitution expressions that will be evaluated in the context
++  of the compiler tool (e.g. "cc") and added to its outputs when this config
++  is applied to a target.
++
++  This is useful for tools that produce side-artifacts like .dwo files
++  when specific flags (like -gsplit-dwarf) are used.
++
++  "c_additional_outputs" are applied to all invocations of the C, C++,
++  Objective C, and Objective C++ compilers.
++
++  Example:
++    config("split_dwarf") {
++      cflags = [ "-gsplit-dwarf" ]
++      c_additional_outputs = [ "{{source_out_dir}}/{{source_name_part}}.dwo" ]
++    }
++)";
++
+ // Target variables ------------------------------------------------------------
+ 
+ #define COMMON_ORDERING_HELP                                                 \
+@@ -2476,6 +2499,7 @@ const VariableInfoMap& GetTargetVariables() {
+     INSERT_VARIABLE(BundleExecutableDir)
+     INSERT_VARIABLE(XcassetCompilerFlags)
+     INSERT_VARIABLE(Transparent)
++    INSERT_VARIABLE(CAdditionalOutputs)
+     INSERT_VARIABLE(Cflags)
+     INSERT_VARIABLE(CflagsC)
+     INSERT_VARIABLE(CflagsCC)
+diff --git a/src/gn/variables.h b/src/gn/variables.h
+index 6820121e..66e0680e 100644
+--- a/src/gn/variables.h
++++ b/src/gn/variables.h
+@@ -86,6 +86,10 @@ extern const char kGenerateModulemap_Help[];
+ 
+ // Target vars -----------------------------------------------------------------
+ 
++extern const char kCAdditionalOutputs[];
++extern const char kCAdditionalOutputs_HelpShort[];
++extern const char kCAdditionalOutputs_Help[];
++
+ extern const char kAllDependentConfigs[];
+ extern const char kAllDependentConfigs_HelpShort[];
+ extern const char kAllDependentConfigs_Help[];
