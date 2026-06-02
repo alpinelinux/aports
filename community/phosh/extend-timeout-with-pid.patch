@@ -1,0 +1,205 @@
+From a79be9dbc846e469aa36fb0bd57d745e456c20ab Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Mon, 18 May 2026 13:12:58 +0200
+Subject: [PATCH 1/3] app-tracker: Better preserve pid
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fixes: f58db9a60 ("Add app-tracker")
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+Part-of: <https://gitlab.gnome.org/World/Phosh/phosh/-/merge_requests/1915>
+---
+ src/app-tracker.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/app-tracker.c b/src/app-tracker.c
+index d92a7378d..dd795ba06 100644
+--- a/src/app-tracker.c
++++ b/src/app-tracker.c
+@@ -188,9 +188,11 @@ update_app_state (PhoshAppTracker   *self,
+   g_return_val_if_fail (state, NULL);
+ 
+   /* Changing pid is not allowed */
+-  g_return_val_if_fail (!state->pid || (state->pid && state->pid != pid), state);
++  if (state->pid && pid && state->pid != pid)
++    g_warning ("Ignoring pid change %" G_GINT64_FORMAT " to %" G_GINT64_FORMAT, state->pid, pid);
++  else if (pid)
++    state->pid = pid;
+ 
+-  state->pid = pid;
+   g_debug ("Pid %" G_GINT64_FORMAT ", startup-id: %s got state %d",
+            state->pid,
+            state->startup_id,
+-- 
+GitLab
+
+
+From 4f085ebb9d3a566bf919a124dab67afbfd4d7a68 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Tue, 19 May 2026 10:40:40 +0200
+Subject: [PATCH 2/3] toplevel-manager: Move timeout to app-tracker
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This is where other parts of the shell get the app tracking
+data from
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+Part-of: <https://gitlab.gnome.org/World/Phosh/phosh/-/merge_requests/1915>
+---
+ src/app-tracker.h      | 2 ++
+ src/toplevel-manager.c | 4 +---
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/app-tracker.h b/src/app-tracker.h
+index b880c328f..6dcd6a304 100644
+--- a/src/app-tracker.h
++++ b/src/app-tracker.h
+@@ -14,6 +14,8 @@ G_BEGIN_DECLS
+ 
+ #define PHOSH_TYPE_APP_TRACKER (phosh_app_tracker_get_type ())
+ 
++#define APP_TRACKER_MAX_INITIAL_TOPLEVEL_TIMEOUT 30 /* s */
++
+ G_DECLARE_FINAL_TYPE (PhoshAppTracker, phosh_app_tracker, PHOSH, APP_TRACKER, GObject)
+ 
+ PhoshAppTracker *phosh_app_tracker_new (void);
+diff --git a/src/toplevel-manager.c b/src/toplevel-manager.c
+index 27511088e..806a16fce 100644
+--- a/src/toplevel-manager.c
++++ b/src/toplevel-manager.c
+@@ -42,8 +42,6 @@ enum {
+ };
+ static guint signals[N_SIGNALS];
+ 
+-#define MAX_INITIAL_TOPLEVEL_TIMEOUT 30 /* s */
+-
+ typedef struct {
+   GAppInfo *app_info;
+   guint     timeout_id;
+@@ -93,7 +91,7 @@ launching_app_info_new (PhoshToplevelManager *toplevel_manager, GAppInfo *app_in
+   info->app_info = g_object_ref (app_info);
+   info->manager = toplevel_manager;
+ 
+-  info->timeout_id = g_timeout_add_seconds_once (MAX_INITIAL_TOPLEVEL_TIMEOUT,
++  info->timeout_id = g_timeout_add_seconds_once (APP_TRACKER_MAX_INITIAL_TOPLEVEL_TIMEOUT,
+                                                  on_initial_toplevel_timeout,
+                                                  info);
+   return info;
+-- 
+GitLab
+
+
+From 5ec806ff1a4aa8b1e564e1a825f8b77b98b61cef Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Mon, 18 May 2026 13:20:57 +0200
+Subject: [PATCH 3/3] app-tracker: Give apps we have a PID for more time to
+ start
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+As long as we have a PID we give it more time up to a maximum, if the
+PID goes away we still wait a bit in case it forked.
+
+This is a simple improvement to help e.g. slow Firefox startup.
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+Part-of: <https://gitlab.gnome.org/World/Phosh/phosh/-/merge_requests/1915>
+---
+ src/app-tracker.c | 38 ++++++++++++++++++++++++++++++++------
+ 1 file changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/src/app-tracker.c b/src/app-tracker.c
+index dd795ba06..88ee165c2 100644
+--- a/src/app-tracker.c
++++ b/src/app-tracker.c
+@@ -25,7 +25,11 @@
+ #include <gio/gio.h>
+ #include <gio/gdesktopappinfo.h>
+ 
++/* Startup timeout when we don't track the spawning process */
+ #define STARTUP_TIMEOUT 5
++/* Startup timeout when we track the spawning process */
++#define STARTUP_TRACKED_TIMEOUT (APP_TRACKER_MAX_INITIAL_TOPLEVEL_TIMEOUT * 0.9)
++/* Startup timeout for debugging activation issues */
+ #define DEBUG_STARTUP_TIMEOUT 30
+ 
+ /**
+@@ -82,9 +86,13 @@ typedef struct  {
+   PhoshAppStateFlags state;
+ 
+   char              *startup_id;  /* (owned) */
+-  guint              timeout_id;
+   GDesktopAppInfo   *info;        /* (owned) */
+   PhoshAppTracker   *tracker;     /* (unowned) */
++  struct {
++    guint              id;
++    guint              waited;
++    guint              interval;
++  } timeout;
+ } PhoshAppState;
+ 
+ struct _PhoshAppTracker {
+@@ -111,16 +119,33 @@ on_startup_timeout (gpointer data)
+     g_warning ("Hit timeout for '%s' with startup id: '%s' although it's up",
+                g_app_info_get_name (G_APP_INFO (state->info)),
+                state->startup_id);
+-    state->timeout_id = 0;
++    state->timeout.id = 0;
+     return G_SOURCE_REMOVE;
+   }
+ 
+   if (!g_hash_table_contains (state->tracker->apps, state->startup_id)) {
+     g_warning ("No info for startup_id '%s' found", state->startup_id);
+-    state->timeout_id = 0;
++    state->timeout.id = 0;
+     return G_SOURCE_REMOVE;
+   }
+ 
++  state->timeout.waited += state->timeout.interval;
++  /* If we have a PID we can be more thorough */
++  if (state->pid && state->timeout.waited < STARTUP_TRACKED_TIMEOUT) {
++    /* TODO: track pidfd on Linux*/
++    if (!kill (state->pid, 0)) {
++      g_debug ("Startup id: '%s' has PID, waited %us, giving it more time to start",
++               state->startup_id,
++               state->timeout.waited);
++
++      return G_SOURCE_CONTINUE;
++    } else {
++      /* PID is gone. As this might be a fork give it one more
++       * iteration to bring up a toplevel */
++      state->timeout.waited  = STARTUP_TRACKED_TIMEOUT;
++    }
++  }
++
+   /* We got a "launched" signal but the compositor never reported the app as up */
+   g_warning ("Startup of app '%s' with startup id: '%s' timed out",
+              g_app_info_get_name (G_APP_INFO (state->info)),
+@@ -151,8 +176,9 @@ phosh_app_state_new (GDesktopAppInfo    *info,
+   state->state = flags;
+   state->info = g_object_ref (info);
+   state->tracker = tracker;
+-  state->timeout_id = g_timeout_add_seconds (timeout, on_startup_timeout, state);
+-  g_source_set_name_by_id (state->timeout_id, "[phosh] state timeout");
++  state->timeout.id = g_timeout_add_seconds (timeout, on_startup_timeout, state);
++  state->timeout.interval = timeout;
++  g_source_set_name_by_id (state->timeout.id, "[phosh] state timeout");
+ 
+   g_debug ("Pid %" G_GINT64_FORMAT ", '%s', startup-id: %s got state %d",
+            state->pid,
+@@ -167,7 +193,7 @@ phosh_app_state_new (GDesktopAppInfo    *info,
+ static void
+ phosh_app_state_free (PhoshAppState *state)
+ {
+-  g_clear_handle_id (&state->timeout_id, g_source_remove);
++  g_clear_handle_id (&state->timeout.id, g_source_remove);
+   g_object_unref (state->info);
+   g_free (state->startup_id);
+ 
+-- 
+GitLab
+
