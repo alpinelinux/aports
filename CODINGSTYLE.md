@@ -181,6 +181,10 @@ and `pkgrel`, in that order. This is to ease review and assignment as the
 maintainer will be visible in the three lines of context, in the diff, when
 `pkgver` or `pkgrel` is changed.
 
+If a package uses a commit hash or other similar string instead of a release
+or tag, the hash should be put in the variable `_commit` directly under
+`pkgrel`.
+
 ### Variable Assignments
 
 * Empty Metadata Variable assignments, e.g. `install=""` must be removed.
