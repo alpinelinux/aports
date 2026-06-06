@@ -1,0 +1,87 @@
+From: Daniel P. Smith <dpsmith@apertussolutions.com>
+Subject: domctl: protect locking for get_domain_state
+
+When DOMID_INVALID is passed, the dom exec handler lock is being taken
+without any check that the domain is even allowed to take the lock. This
+allows for an unauthorized domain to DoS the get_domain_state domctl op.
+Move to consider the op effectively being called against the hypervisor.
+Thus it is the target of the call being invoked to identify the last
+domain with a state change. The subsequent check of whether the source
+domain is allowed the state of the last domain to change state is still
+relevant.
+
+This is part of XSA-492.
+
+Signed-off-by: Daniel P. Smith <dpsmith@apertussolutions.com>
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+
+--- a/tools/flask/policy/modules/xenstore.te
++++ b/tools/flask/policy/modules/xenstore.te
+@@ -14,6 +14,7 @@ allow xenstore_t xen_t:xen writeconsole;
+ # Xenstore queries domaininfo on all domains
+ allow xenstore_t domain_type:domain getdomaininfo;
+ allow xenstore_t domain_type:domain2 get_domain_state;
++allow xenstore_t domxen_t:domain2 get_domain_state;
+ 
+ # As a shortcut, the following 3 rules are used instead of adding a domain_comms
+ # rule between xenstore_t and every domain type that talks to xenstore
+--- a/xen/common/domain.c
++++ b/xen/common/domain.c
+@@ -216,12 +216,8 @@ int get_domain_state(struct xen_domctl_g
+     if ( info->pad0 )
+         return -EINVAL;
+ 
+-    if ( d )
++    if ( d != dom_xen )
+     {
+-        rc = xsm_get_domain_state(XSM_XS_PRIV, d);
+-        if ( rc )
+-            return rc;
+-
+         set_domain_state_info(info, d);
+ 
+         return 0;
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -304,13 +304,19 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+         fallthrough;
+     case XEN_DOMCTL_test_assign_device:
+     case XEN_DOMCTL_vm_event_op:
+-    case XEN_DOMCTL_get_domain_state:
+         if ( op->domain == DOMID_INVALID )
+         {
+             d = NULL;
+             break;
+         }
+         fallthrough;
++    case XEN_DOMCTL_get_domain_state:
++        if ( op->domain == DOMID_INVALID )
++        {
++            d = dom_xen;
++            break;
++        }
++        fallthrough;
+     default:
+         d = rcu_lock_domain_by_id(op->domain);
+         if ( !d )
+@@ -863,7 +869,9 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+         break;
+ 
+     case XEN_DOMCTL_get_domain_state:
+-        ret = get_domain_state(&op->u.get_domain_state, d, &op->domain);
++        ret = xsm_get_domain_state(XSM_XS_PRIV, d);
++        if ( !ret )
++            ret = get_domain_state(&op->u.get_domain_state, d, &op->domain);
+         if ( !ret )
+             copyback = true;
+         break;
+@@ -876,7 +884,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+     domctl_lock_release();
+ 
+  domctl_out_unlock_domonly:
+-    if ( d && d != dom_io )
++    if ( d && !is_system_domain(d) )
+         rcu_unlock_domain(d);
+ 
+     if ( copyback && __copy_to_guest(u_domctl, op, 1) )

@@ -1,0 +1,378 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: domctl/XSM: drop {,de}assign_{,dt}device hooks
+
+Integrate the checking with xsm_domctl(). As a positive side effect,
+permissions are then checked at the same early point with and without
+Flask. As the DT device path needs fetching earlier (but must not be
+double fetched), cache it in a private field of the public interface
+struct.
+
+This is part of XSA-492.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: Daniel P. Smith <dpsmith@apertussolutions.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -325,6 +325,10 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+     case XEN_DOMCTL_deassign_device:
+         if ( op->domain == DOMID_IO )
+         {
++#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
++            if ( op->u.assign_device.dev == XEN_DOMCTL_DEV_DT )
++                op->u.assign_device.u.dt.dev = NULL;
++#endif
+             d = dom_io;
+             break;
+         }
+@@ -332,6 +336,11 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+             return -ESRCH;
+         fallthrough;
+     case XEN_DOMCTL_test_assign_device:
++#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
++        if ( op->u.assign_device.dev == XEN_DOMCTL_DEV_DT )
++            op->u.assign_device.u.dt.dev = NULL;
++        fallthrough;
++#endif
+     case XEN_DOMCTL_vm_event_op:
+         if ( op->domain == DOMID_INVALID )
+         {
+--- a/xen/drivers/passthrough/device_tree.c
++++ b/xen/drivers/passthrough/device_tree.c
+@@ -340,15 +340,15 @@ int iommu_do_dt_domctl(struct xen_domctl
+         if ( (d && d->is_dying) || domctl->u.assign_device.flags )
+             break;
+ 
+-        ret = dt_find_node_by_gpath(domctl->u.assign_device.u.dt.path,
+-                                    domctl->u.assign_device.u.dt.size,
+-                                    &dev);
+-        if ( ret )
+-            break;
+-
+-        ret = xsm_assign_dtdevice(XSM_HOOK, d, dt_node_full_name(dev));
+-        if ( ret )
+-            break;
++        dev = domctl->u.assign_device.u.dt.dev;
++        if ( !dev )
++        {
++            ret = dt_find_node_by_gpath(domctl->u.assign_device.u.dt.path,
++                                        domctl->u.assign_device.u.dt.size,
++                                        &dev);
++            if ( ret )
++                break;
++        }
+ 
+         if ( domctl->cmd == XEN_DOMCTL_test_assign_device )
+         {
+@@ -396,15 +396,15 @@ int iommu_do_dt_domctl(struct xen_domctl
+         if ( domctl->u.assign_device.flags )
+             break;
+ 
+-        ret = dt_find_node_by_gpath(domctl->u.assign_device.u.dt.path,
+-                                    domctl->u.assign_device.u.dt.size,
+-                                    &dev);
+-        if ( ret )
+-            break;
+-
+-        ret = xsm_deassign_dtdevice(XSM_HOOK, d, dt_node_full_name(dev));
+-        if ( ret )
+-            break;
++        dev = domctl->u.assign_device.u.dt.dev;
++        if ( !dev )
++        {
++            ret = dt_find_node_by_gpath(domctl->u.assign_device.u.dt.path,
++                                        domctl->u.assign_device.u.dt.size,
++                                        &dev);
++            if ( ret )
++                break;
++        }
+ 
+         if ( d == dom_io )
+         {
+--- a/xen/drivers/passthrough/pci.c
++++ b/xen/drivers/passthrough/pci.c
+@@ -1740,10 +1740,6 @@ int iommu_do_pci_domctl(
+ 
+         machine_sbdf = domctl->u.assign_device.u.pci.machine_sbdf;
+ 
+-        ret = xsm_assign_device(XSM_HOOK, d, machine_sbdf);
+-        if ( ret )
+-            break;
+-
+         seg = machine_sbdf >> 16;
+         bus = PCI_BUS(machine_sbdf);
+         devfn = PCI_DEVFN(machine_sbdf);
+@@ -1785,10 +1781,6 @@ int iommu_do_pci_domctl(
+ 
+         machine_sbdf = domctl->u.assign_device.u.pci.machine_sbdf;
+ 
+-        ret = xsm_deassign_device(XSM_HOOK, d, machine_sbdf);
+-        if ( ret )
+-            break;
+-
+         seg = machine_sbdf >> 16;
+         bus = PCI_BUS(machine_sbdf);
+         devfn = PCI_DEVFN(machine_sbdf);
+--- a/xen/include/public/domctl.h
++++ b/xen/include/public/domctl.h
+@@ -575,7 +575,10 @@ struct xen_domctl_assign_device {
+         } pci;
+         struct {
+             uint32_t size; /* Length of the path */
+-            XEN_GUEST_HANDLE_64(char) path; /* path to the device tree node */
++            XEN_GUEST_HANDLE_64(char) path; /* Path to the device tree node */
++#ifdef __XEN__
++            struct dt_device_node *dev; /* Resolved device node of the above */
++#endif
+         } dt;
+     } u;
+ };
+--- a/xen/include/xsm/dummy.h
++++ b/xen/include/xsm/dummy.h
+@@ -405,40 +405,8 @@ static XSM_INLINE int cf_check xsm_get_d
+     XSM_ASSERT_ACTION(XSM_PRIV);
+     return xsm_default_action(action, current->domain, NULL);
+ }
+-
+-static XSM_INLINE int cf_check xsm_assign_device(
+-    XSM_DEFAULT_ARG struct domain *d, uint32_t machine_bdf)
+-{
+-    XSM_ASSERT_ACTION(XSM_HOOK);
+-    return xsm_default_action(action, current->domain, d);
+-}
+-
+-static XSM_INLINE int cf_check xsm_deassign_device(
+-    XSM_DEFAULT_ARG struct domain *d, uint32_t machine_bdf)
+-{
+-    XSM_ASSERT_ACTION(XSM_HOOK);
+-    return xsm_default_action(action, current->domain, d);
+-}
+-
+ #endif /* HAS_PASSTHROUGH && HAS_PCI */
+ 
+-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE_DISCOVERY)
+-static XSM_INLINE int cf_check xsm_assign_dtdevice(
+-    XSM_DEFAULT_ARG struct domain *d, const char *dtpath)
+-{
+-    XSM_ASSERT_ACTION(XSM_HOOK);
+-    return xsm_default_action(action, current->domain, d);
+-}
+-
+-static XSM_INLINE int cf_check xsm_deassign_dtdevice(
+-    XSM_DEFAULT_ARG struct domain *d, const char *dtpath)
+-{
+-    XSM_ASSERT_ACTION(XSM_HOOK);
+-    return xsm_default_action(action, current->domain, d);
+-}
+-
+-#endif /* HAS_PASSTHROUGH && HAS_DEVICE_TREE_DISCOVERY */
+-
+ static XSM_INLINE int cf_check xsm_resource_plug_core(XSM_DEFAULT_VOID)
+ {
+     XSM_ASSERT_ACTION(XSM_HOOK);
+--- a/xen/include/xsm/xsm.h
++++ b/xen/include/xsm/xsm.h
+@@ -124,13 +124,6 @@ struct xsm_ops {
+ 
+ #if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_PCI)
+     int (*get_device_group)(uint32_t machine_bdf);
+-    int (*assign_device)(struct domain *d, uint32_t machine_bdf);
+-    int (*deassign_device)(struct domain *d, uint32_t machine_bdf);
+-#endif
+-
+-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE_DISCOVERY)
+-    int (*assign_dtdevice)(struct domain *d, const char *dtpath);
+-    int (*deassign_dtdevice)(struct domain *d, const char *dtpath);
+ #endif
+ 
+     int (*resource_plug_core)(void);
+@@ -533,35 +526,8 @@ static inline int xsm_get_device_group(x
+ {
+     return alternative_call(xsm_ops.get_device_group, machine_bdf);
+ }
+-
+-static inline int xsm_assign_device(
+-    xsm_default_t def, struct domain *d, uint32_t machine_bdf)
+-{
+-    return alternative_call(xsm_ops.assign_device, d, machine_bdf);
+-}
+-
+-static inline int xsm_deassign_device(
+-    xsm_default_t def, struct domain *d, uint32_t machine_bdf)
+-{
+-    return alternative_call(xsm_ops.deassign_device, d, machine_bdf);
+-}
+ #endif /* HAS_PASSTHROUGH && HAS_PCI) */
+ 
+-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE_DISCOVERY)
+-static inline int xsm_assign_dtdevice(
+-    xsm_default_t def, struct domain *d, const char *dtpath)
+-{
+-    return alternative_call(xsm_ops.assign_dtdevice, d, dtpath);
+-}
+-
+-static inline int xsm_deassign_dtdevice(
+-    xsm_default_t def, struct domain *d, const char *dtpath)
+-{
+-    return alternative_call(xsm_ops.deassign_dtdevice, d, dtpath);
+-}
+-
+-#endif /* HAS_PASSTHROUGH && HAS_DEVICE_TREE_DISCOVERY */
+-
+ static inline int xsm_resource_plug_pci(xsm_default_t def, uint32_t machine_bdf)
+ {
+     return alternative_call(xsm_ops.resource_plug_pci, machine_bdf);
+--- a/xen/xsm/dummy.c
++++ b/xen/xsm/dummy.c
+@@ -81,13 +81,6 @@ static const struct xsm_ops __initconst_
+ 
+ #if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_PCI)
+     .get_device_group              = xsm_get_device_group,
+-    .assign_device                 = xsm_assign_device,
+-    .deassign_device               = xsm_deassign_device,
+-#endif
+-
+-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE_DISCOVERY)
+-    .assign_dtdevice               = xsm_assign_dtdevice,
+-    .deassign_dtdevice             = xsm_deassign_dtdevice,
+ #endif
+ 
+     .resource_plug_core            = xsm_resource_plug_core,
+--- a/xen/xsm/flask/hooks.c
++++ b/xen/xsm/flask/hooks.c
+@@ -45,6 +45,17 @@ static int flask_shadow_control(struct d
+ #define pv_shim false
+ #endif
+ 
++#ifdef CONFIG_HAS_PASSTHROUGH
++#ifdef CONFIG_HAS_PCI
++static int flask_assign_device(struct domain *d, unsigned int machine_bdf);
++static int flask_deassign_device(struct domain *d, unsigned int machine_bdf);
++#endif
++#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
++static int flask_assign_dtdevice(struct domain *d, const char *dtpath);
++static int flask_deassign_dtdevice(struct domain *d, const char *dtpath);
++#endif
++#endif /* CONFIG_HAS_PASSTHROUGH */
++
+ static uint32_t domain_sid(const struct domain *dom)
+ {
+     struct domain_security_struct *dsec = dom->ssid;
+@@ -700,16 +711,6 @@ static int cf_check flask_domctl(struct
+ 
+     /* These have individual XSM hooks (common/domctl.c) */
+     case XEN_DOMCTL_set_target:
+-
+-#ifdef CONFIG_HAS_PASSTHROUGH
+-    /*
+-     * These have individual XSM hooks
+-     * (drivers/passthrough/{pci,device_tree.c)
+-     */
+-    case XEN_DOMCTL_test_assign_device:
+-    case XEN_DOMCTL_assign_device:
+-    case XEN_DOMCTL_deassign_device:
+-#endif
+         return 0;
+ 
+     case XEN_DOMCTL_destroydomain:
+@@ -789,6 +790,49 @@ static int cf_check flask_domctl(struct
+         return flask_shadow_control(d, op->u.shadow_op.op);
+ #endif
+ 
++#ifdef CONFIG_HAS_PASSTHROUGH
++
++    case XEN_DOMCTL_test_assign_device:
++    case XEN_DOMCTL_assign_device:
++    case XEN_DOMCTL_deassign_device:
++        switch ( op->u.assign_device.dev )
++        {
++#ifdef CONFIG_HAS_PCI
++        case XEN_DOMCTL_DEV_PCI:
++            return op->cmd != XEN_DOMCTL_deassign_device
++                   ? flask_assign_device(
++                         d, op->u.assign_device.u.pci.machine_sbdf)
++                   : flask_deassign_device(
++                         d, op->u.assign_device.u.pci.machine_sbdf);
++#endif
++
++#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
++        case XEN_DOMCTL_DEV_DT:
++        {
++            struct dt_device_node *dev;
++            int ret = dt_find_node_by_gpath(op->u.assign_device.u.dt.path,
++                                            op->u.assign_device.u.dt.size,
++                                            &dev);
++
++            if ( ret )
++                return ret;
++
++            op->u.assign_device.u.dt.dev = dev;
++
++            return op->cmd != XEN_DOMCTL_deassign_device
++                   ? flask_assign_dtdevice(d, dt_node_full_name(dev))
++                   : flask_deassign_dtdevice(d, dt_node_full_name(dev));
++        }
++#endif
++
++        default:
++            /* Unknown type. */
++            break;
++        }
++        return avc_unknown_permission("assign_device", op->cmd);
++
++#endif /* CONFIG_HAS_PASSTHROUGH */
++
+     case XEN_DOMCTL_mem_sharing_op:
+         return current_has_perm(d, SECCLASS_HVM, HVM__MEM_SHARING);
+ 
+@@ -1416,7 +1460,7 @@ static int flask_test_assign_device(uint
+     return avc_current_has_perm(rsid, SECCLASS_RESOURCE, RESOURCE__STAT_DEVICE, NULL);
+ }
+ 
+-static int cf_check flask_assign_device(struct domain *d, uint32_t machine_bdf)
++static int flask_assign_device(struct domain *d, uint32_t machine_bdf)
+ {
+     uint32_t dsid, rsid;
+     int rc = -EPERM;
+@@ -1446,7 +1490,7 @@ static int cf_check flask_assign_device(
+     return avc_has_perm(dsid, rsid, SECCLASS_RESOURCE, dperm, &ad);
+ }
+ 
+-static int cf_check flask_deassign_device(
++static int flask_deassign_device(
+     struct domain *d, uint32_t machine_bdf)
+ {
+     uint32_t rsid;
+@@ -1478,7 +1522,7 @@ static int flask_test_assign_dtdevice(co
+                                 NULL);
+ }
+ 
+-static int cf_check flask_assign_dtdevice(struct domain *d, const char *dtpath)
++static int flask_assign_dtdevice(struct domain *d, const char *dtpath)
+ {
+     uint32_t dsid, rsid;
+     int rc = -EPERM;
+@@ -1508,7 +1552,7 @@ static int cf_check flask_assign_dtdevic
+     return avc_has_perm(dsid, rsid, SECCLASS_RESOURCE, dperm, &ad);
+ }
+ 
+-static int cf_check flask_deassign_dtdevice(
++static int flask_deassign_dtdevice(
+     struct domain *d, const char *dtpath)
+ {
+     uint32_t rsid;
+@@ -1989,13 +2033,6 @@ static const struct xsm_ops __initconst_
+ 
+ #if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_PCI)
+     .get_device_group = flask_get_device_group,
+-    .assign_device = flask_assign_device,
+-    .deassign_device = flask_deassign_device,
+-#endif
+-
+-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE_DISCOVERY)
+-    .assign_dtdevice = flask_assign_dtdevice,
+-    .deassign_dtdevice = flask_deassign_dtdevice,
+ #endif
+ 
+     .platform_op = flask_platform_op,

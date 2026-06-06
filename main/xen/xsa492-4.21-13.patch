@@ -1,0 +1,163 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: domctl: handle XEN_DOMCTL_{irq,gsi}_permission without acquiring domctl lock
+
+With dedicated locking added, the domctl lock isn't required here anymore.
+As the GSI handling is in arch-specific code (x86 only), no code is being
+moved there; the 2nd invocation of arch_do_domctl() is re-used. Move the
+re-purposed (XSM_HOOK -> XSM_PRIV, as xsm_domctl() is now bypassed)
+dedicated XSM checks as early as possible.
+
+This is part of XSA-492.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: Daniel P. Smith <dpsmith@apertussolutions.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+
+--- a/xen/arch/x86/domctl.c
++++ b/xen/arch/x86/domctl.c
+@@ -272,10 +272,13 @@ long arch_do_domctl(
+             break;
+         }
+ 
++        ret = xsm_irq_permission(XSM_PRIV, d, irq, flags);
++        if ( ret )
++            break;
++
+         iocaps_double_lock(d, true);
+ 
+-        if ( !irq_access_permitted(currd, irq) ||
+-             xsm_irq_permission(XSM_HOOK, d, irq, flags) )
++        if ( !irq_access_permitted(currd, irq) )
+             ret = -EPERM;
+         else if ( flags )
+             ret = irq_permit_access(d, irq);
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -464,8 +464,41 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+         goto domctl_out_unlock_domonly;
+     }
+ 
++#ifdef CONFIG_HAS_PIRQ
++    case XEN_DOMCTL_irq_permission:
++    {
++        unsigned int pirq = op->u.irq_permission.pirq, irq;
++        bool allow = op->u.irq_permission.allow_access;
++
++        ret = -EINVAL;
++        if ( pirq >= current->domain->nr_pirqs )
++            goto domctl_out_unlock_domonly;
++
++        irq = domain_pirq_to_irq(current->domain, pirq);
++
++        ret = -EPERM;
++        if ( irq )
++            ret = xsm_irq_permission(XSM_PRIV, d, irq, allow);
++        if ( ret )
++            goto domctl_out_unlock_domonly;
++
++        iocaps_double_lock(d, true);
++
++        if ( !irq_access_permitted(current->domain, irq) )
++            ret = -EPERM;
++        else if ( allow )
++            ret = irq_permit_access(d, irq);
++        else
++            ret = irq_deny_access(d, irq);
++
++        iocaps_double_unlock(d, true);
++        goto domctl_out_unlock_domonly;
++    }
++#endif
++
+     case XEN_DOMCTL_ioport_permission:
+     case XEN_DOMCTL_ioport_mapping:
++    case XEN_DOMCTL_gsi_permission:
+     case XEN_DOMCTL_bind_pt_irq:
+     case XEN_DOMCTL_unbind_pt_irq:
+         ret = arch_do_domctl(op, d, u_domctl);
+@@ -779,33 +812,6 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+         }
+         break;
+ 
+-#ifdef CONFIG_HAS_PIRQ
+-    case XEN_DOMCTL_irq_permission:
+-    {
+-        unsigned int pirq = op->u.irq_permission.pirq, irq;
+-        int allow = op->u.irq_permission.allow_access;
+-
+-        if ( pirq >= current->domain->nr_pirqs )
+-        {
+-            ret = -EINVAL;
+-            break;
+-        }
+-
+-        iocaps_double_lock(d, true);
+-
+-        irq = pirq_access_permitted(current->domain, pirq);
+-        if ( !irq || xsm_irq_permission(XSM_HOOK, d, irq, allow) )
+-            ret = -EPERM;
+-        else if ( allow )
+-            ret = irq_permit_access(d, irq);
+-        else
+-            ret = irq_deny_access(d, irq);
+-
+-        iocaps_double_unlock(d, true);
+-        break;
+-    }
+-#endif
+-
+     case XEN_DOMCTL_settimeoffset:
+         domain_set_time_offset(d, op->u.settimeoffset.time_offset_seconds);
+         break;
+--- a/xen/include/xsm/dummy.h
++++ b/xen/include/xsm/dummy.h
+@@ -170,9 +170,11 @@ static XSM_INLINE int cf_check xsm_domct
+     case XEN_DOMCTL_bind_pt_irq:
+     case XEN_DOMCTL_getdomaininfo:
+     case XEN_DOMCTL_get_domain_state:
++    case XEN_DOMCTL_gsi_permission:
+     case XEN_DOMCTL_iomem_permission:
+     case XEN_DOMCTL_ioport_mapping:
+     case XEN_DOMCTL_ioport_permission:
++    case XEN_DOMCTL_irq_permission:
+     case XEN_DOMCTL_memory_mapping:
+     case XEN_DOMCTL_unbind_pt_irq:
+         ASSERT_UNREACHABLE();
+@@ -562,7 +564,7 @@ static XSM_INLINE int cf_check xsm_unmap
+ static XSM_INLINE int cf_check xsm_irq_permission(
+     XSM_DEFAULT_ARG struct domain *d, int pirq, uint8_t allow)
+ {
+-    XSM_ASSERT_ACTION(XSM_HOOK);
++    XSM_ASSERT_ACTION(XSM_PRIV);
+     return xsm_default_action(action, current->domain, d);
+ }
+ 
+--- a/xen/xsm/flask/hooks.c
++++ b/xen/xsm/flask/hooks.c
+@@ -686,9 +686,11 @@ static int cf_check flask_domctl(struct
+     case XEN_DOMCTL_bind_pt_irq:
+     case XEN_DOMCTL_getdomaininfo:
+     case XEN_DOMCTL_get_domain_state:
++    case XEN_DOMCTL_gsi_permission:
+     case XEN_DOMCTL_iomem_permission:
+     case XEN_DOMCTL_ioport_mapping:
+     case XEN_DOMCTL_ioport_permission:
++    case XEN_DOMCTL_irq_permission:
+     case XEN_DOMCTL_memory_mapping:
+     case XEN_DOMCTL_unbind_pt_irq:
+         ASSERT_UNREACHABLE();
+@@ -696,14 +698,12 @@ static int cf_check flask_domctl(struct
+ 
+     /* These have individual XSM hooks (common/domctl.c) */
+     case XEN_DOMCTL_scheduler_op:
+-    case XEN_DOMCTL_irq_permission:
+     case XEN_DOMCTL_set_target:
+     case XEN_DOMCTL_vm_event_op:
+ 
+ #ifdef CONFIG_X86
+     /* These have individual XSM hooks (arch/x86/domctl.c) */
+     case XEN_DOMCTL_shadow_op:
+-    case XEN_DOMCTL_gsi_permission:
+ #endif
+ #ifdef CONFIG_HAS_PASSTHROUGH
+     /*
