@@ -43,7 +43,7 @@ profile_extended() {
 		coreutils ethtool hwids doas
 		logrotate lsof lm_sensors lxc lxc-templates nano
 		pciutils strace tmux
-		usbutils v86d vim xtables-addons curl
+		usbutils v86d xtables-addons curl
 
 		acct arpon arpwatch awall bridge-utils bwm-ng
 		ca-certificates conntrack-tools cutter cyrus-sasl
