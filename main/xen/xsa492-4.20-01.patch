@@ -1,0 +1,264 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: sched: use sequence counter to enlighten vcpu_runstate_get()
+
+Subsequently XEN_DOMCTL_getdomaininfo will want to invoke the function
+without holding a lock, thus allowing parallel execution of potentially
+many instances. As was learned from 228ab9992ffb ("domctl: improve
+locking during domain destruction"), reverted by d0887cc6b16e, such
+parallelism can result in severe lock contention on any (previously)
+inner lock. To avoid taking that risk replace the use of the scheduler
+lock in vcpu_runstate_get() by a newly introduced sequence counter.
+Convert the "no lock if current" property to "use a local counter
+instance", thus guaranteeing the loop to exit after the first iteration.
+
+Skeleton and commentary of the seqcount implementation based on /
+derived from Linux 6.11-rc.
+
+To have runstate_seq placed next to runstate in struct vcpu, without
+introducing a new obvious padding hole, yet while keeping the latter
+adjacent to runstate_guest{,_area} as well, move runstate down a little.
+
+This is part of XSA-492.
+
+Requested-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+Reviewed-by: Juergen Gross <jgross@suse.com>
+
+--- a/xen/common/sched/core.c
++++ b/xen/common/sched/core.c
+@@ -281,13 +281,18 @@ static inline void vcpu_runstate_change(
+     }
+ 
+     delta = new_entry_time - v->runstate.state_entry_time;
+-    if ( delta > 0 )
++
++    /* Serialization: ->schedule_lock (see ASSERT() above). */
++    with_seq_write(&v->runstate_seq)
+     {
+-        v->runstate.time[v->runstate.state] += delta;
+-        v->runstate.state_entry_time = new_entry_time;
+-    }
++        if ( delta > 0 )
++        {
++            v->runstate.time[v->runstate.state] += delta;
++            v->runstate.state_entry_time = new_entry_time;
++        }
+ 
+-    v->runstate.state = new_state;
++        v->runstate.state = new_state;
++    }
+ }
+ 
+ void sched_guest_idle(void (*idle) (void), unsigned int cpu)
+@@ -307,30 +312,18 @@ void sched_guest_idle(void (*idle) (void
+ void vcpu_runstate_get(const struct vcpu *v,
+                        struct vcpu_runstate_info *runstate)
+ {
+-    spinlock_t *lock;
+-    s_time_t delta;
+-    struct sched_unit *unit;
++    struct seqcount seq = SEQCNT_ZERO();
++    const struct seqcount *s = likely(v == current) ? &seq : &v->runstate_seq;
+ 
+-    rcu_read_lock(&sched_res_rculock);
+-
+-    /*
+-     * Be careful in case of an idle vcpu: the assignment to a unit might
+-     * change even with the scheduling lock held, so be sure to use the
+-     * correct unit for locking in order to avoid triggering an ASSERT() in
+-     * the unlock function.
+-     */
+-    unit = is_idle_vcpu(v) ? get_sched_res(v->processor)->sched_unit_idle
+-                           : v->sched_unit;
+-    lock = likely(v == current) ? NULL : unit_schedule_lock_irq(unit);
+-    memcpy(runstate, &v->runstate, sizeof(*runstate));
+-    delta = NOW() - runstate->state_entry_time;
+-    if ( delta > 0 )
+-        runstate->time[runstate->state] += delta;
+-
+-    if ( unlikely(lock != NULL) )
+-        unit_schedule_unlock_irq(lock, unit);
++    until_seq_read(s)
++    {
++        s_time_t delta;
+ 
+-    rcu_read_unlock(&sched_res_rculock);
++        *runstate = v->runstate;
++        delta = NOW() - runstate->state_entry_time;
++        if ( delta > 0 )
++            runstate->time[runstate->state] += delta;
++    }
+ }
+ 
+ uint64_t get_cpu_idle_time(unsigned int cpu)
+--- a/xen/include/xen/sched.h
++++ b/xen/include/xen/sched.h
+@@ -16,6 +16,7 @@
+ #include <xen/radix-tree.h>
+ #include <xen/multicall.h>
+ #include <xen/nospec.h>
++#include <xen/seqcount.h>
+ #include <xen/tasklet.h>
+ #include <xen/mm.h>
+ #include <xen/smp.h>
+@@ -192,7 +193,6 @@ struct vcpu
+ 
+     struct sched_unit *sched_unit;
+ 
+-    struct vcpu_runstate_info runstate;
+ #ifndef CONFIG_COMPAT
+ # define runstate_guest(v) ((v)->runstate_guest)
+     XEN_GUEST_HANDLE(vcpu_runstate_info_t) runstate_guest; /* guest address */
+@@ -204,6 +204,8 @@ struct vcpu
+     } runstate_guest; /* guest address */
+ #endif
+     struct guest_area runstate_guest_area;
++    struct vcpu_runstate_info runstate;
++    struct seqcount  runstate_seq;
+     unsigned int     new_state;
+ 
+     /* Has the FPU been initialised? */
+--- /dev/null
++++ b/xen/include/xen/seqcount.h
+@@ -0,0 +1,139 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef XEN_SEQCOUNT_H
++#define XEN_SEQCOUNT_H
++
++#include <xen/lib.h>
++#include <xen/nospec.h>
++
++#include <asm/atomic.h>
++#include <asm/system.h>
++
++/*
++ * Sequence counters (seqcount_t)
++ *
++ * This is the raw counting mechanism, without any writer protection.
++ *
++ * Write side critical sections must be serialized (and non-preemptible).
++ *
++ * If readers can be invoked from interrupt contexts, interrupts must also
++ * be respectively disabled before entering the write section.
++ *
++ * This mechanism can't be used if the protected data contains pointers,
++ * as the writer can invalidate a pointer that a reader is following.
++ */
++struct seqcount {
++    unsigned int sequence;
++};
++
++/*
++ * SEQCNT_ZERO() - initializer for seqcount_t
++ * @name: Name of the struct seqcount instance
++ */
++#define SEQCNT_ZERO() { .sequence = 0 }
++
++static inline unsigned int seqprop_sequence(const struct seqcount *s)
++{
++    return ACCESS_ONCE(s->sequence);
++}
++
++/*
++ * read_seqcount_begin() - begin a seqcount read critical section
++ * @s: Pointer to struct seqcount
++ *
++ * Return: count to be passed to read_seqcount_retry()
++ */
++static inline unsigned int _read_seqcount_begin(const struct seqcount *s)
++{
++    unsigned int seq;
++
++    while ((seq = seqprop_sequence(s)) & 1)
++        cpu_relax();
++
++    smp_rmb();
++
++    return seq;
++}
++
++static always_inline unsigned int read_seqcount_begin(const struct seqcount *s)
++{
++    unsigned int seq = _read_seqcount_begin(s);
++
++    block_lock_speculation();
++
++    return seq;
++}
++
++/*
++ * read_seqcount_retry() - end a seqcount read critical section
++ * @s: Pointer to struct seqcount
++ * @start: count, from read_seqcount_begin()
++ *
++ * read_seqcount_retry closes the read critical section of given struct
++ * seqcount.  If the critical section was invalid, it must be ignored
++ * (and typically retried).
++ *
++ * Return: true if a read section retry is required, else false
++ */
++static inline bool _read_seqcount_retry(const struct seqcount *s,
++                                        unsigned int start)
++{
++    smp_rmb();
++    return unlikely(seqprop_sequence(s) != start);
++}
++
++static always_inline bool read_seqcount_retry(const struct seqcount *s,
++                                              unsigned int start)
++{
++    return lock_evaluate_nospec(_read_seqcount_retry(s, start));
++}
++
++/* Loops until a consistent count has been observed across the loop body. */
++#define until_seq_read(seq)                                    \
++    for ( unsigned int retry_ = 1, count_;                     \
++          retry_ && (count_ = read_seqcount_begin(seq), true); \
++          retry_ = read_seqcount_retry(seq, count_) )
++
++/*
++ * write_seqcount_begin() - start a struct seqcount write side critical section
++ * @s: Pointer to struct seqcount
++ *
++ * Context: sequence counter write side sections must be serialized.
++ * If readers can be invoked from interrupt context, interrupts must be
++ * respectively disabled.
++ */
++static inline void write_seqcount_begin(struct seqcount *s)
++{
++    add_sized(&s->sequence, 1);
++    smp_wmb();
++}
++
++/*
++ * write_seqcount_end() - end a struct seqcount write side critical section
++ * @s: Pointer to seqcount
++ */
++static inline void write_seqcount_end(struct seqcount *s)
++{
++    smp_wmb();
++    add_sized(&s->sequence, 1);
++}
++
++/*
++ * Not really a loop, but we need write_seqcount_{begin,end}() in the correct
++ * position.
++ */
++#define with_seq_write(seq)                           \
++    for ( bool once_ = true;                          \
++          once_ && (write_seqcount_begin(seq), true); \
++          (write_seqcount_end(seq), once_ = false) )
++
++#endif /* XEN_SEQCOUNT_H */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-file-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
