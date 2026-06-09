@@ -1,0 +1,172 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: domctl: handle XEN_DOMCTL_io{mem,port}_permission without acquiring domctl lock
+
+With dedicated locking added, the domctl lock isn't required here anymore.
+As the I/O port handling is in arch-specific code (x86 only), no code is
+being moved, but the 2nd invocation of arch_do_domctl() is re-used. Move
+the re-purposed dedicated XSM checks as early as possible.
+
+This is part of XSA-492.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+Acked-by: Daniel P. Smith <dpsmith@apertussolutions.com>
+
+--- a/xen/arch/x86/domctl.c
++++ b/xen/arch/x86/domctl.c
+@@ -225,12 +225,17 @@ long arch_do_domctl(
+         unsigned int np = domctl->u.ioport_permission.nr_ports;
+         int allow = domctl->u.ioport_permission.allow_access;
+ 
++        ret = -EINVAL;
++        if ( (fp + np) <= fp || (fp + np) > MAX_IOPORTS )
++            break;
++
++        ret = xsm_ioport_permission(XSM_PRIV, d, fp, fp + np - 1, allow);
++        if ( ret )
++            break;
++
+         iocaps_double_lock(d, true);
+ 
+-        if ( (fp + np) <= fp || (fp + np) > MAX_IOPORTS )
+-            ret = -EINVAL;
+-        else if ( !ioports_access_permitted(currd, fp, fp + np - 1) ||
+-                  xsm_ioport_permission(XSM_HOOK, d, fp, fp + np - 1, allow) )
++        if ( !ioports_access_permitted(currd, fp, fp + np - 1) )
+             ret = -EPERM;
+         else if ( allow )
+             ret = ioports_permit_access(d, fp, fp + np - 1);
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -366,6 +366,34 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+ 
+         goto domctl_out_unlock_domonly;
+ 
++    case XEN_DOMCTL_iomem_permission:
++    {
++        unsigned long mfn = op->u.iomem_permission.first_mfn;
++        unsigned long nr_mfns = op->u.iomem_permission.nr_mfns;
++        bool allow = op->u.iomem_permission.allow_access;
++
++        ret = -EINVAL;
++        if ( (mfn + nr_mfns - 1) < mfn ) /* Wrap? */
++            goto domctl_out_unlock_domonly;
++
++        ret = xsm_iomem_permission(XSM_PRIV, d, mfn, mfn + nr_mfns - 1, allow);
++        if ( ret )
++            goto domctl_out_unlock_domonly;
++
++        iocaps_double_lock(d, true);
++
++        if ( !iomem_access_permitted(current->domain,
++                                     mfn, mfn + nr_mfns - 1) )
++            ret = -EPERM;
++        else if ( allow )
++            ret = iomem_permit_access(d, mfn, mfn + nr_mfns - 1);
++        else
++            ret = iomem_deny_access(d, mfn, mfn + nr_mfns - 1);
++
++        iocaps_double_unlock(d, true);
++        goto domctl_out_unlock_domonly;
++    }
++
+     case XEN_DOMCTL_memory_mapping:
+     {
+         unsigned long gfn = op->u.memory_mapping.first_gfn;
+@@ -426,6 +454,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+         goto domctl_out_unlock_domonly;
+     }
+ 
++    case XEN_DOMCTL_ioport_permission:
+     case XEN_DOMCTL_ioport_mapping:
+     case XEN_DOMCTL_bind_pt_irq:
+     case XEN_DOMCTL_unbind_pt_irq:
+@@ -785,31 +814,6 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+     }
+ #endif
+ 
+-    case XEN_DOMCTL_iomem_permission:
+-    {
+-        unsigned long mfn = op->u.iomem_permission.first_mfn;
+-        unsigned long nr_mfns = op->u.iomem_permission.nr_mfns;
+-        int allow = op->u.iomem_permission.allow_access;
+-
+-        ret = -EINVAL;
+-        if ( (mfn + nr_mfns - 1) < mfn ) /* wrap? */
+-            break;
+-
+-        iocaps_double_lock(d, true);
+-
+-        if ( !iomem_access_permitted(current->domain,
+-                                     mfn, mfn + nr_mfns - 1) ||
+-             xsm_iomem_permission(XSM_HOOK, d, mfn, mfn + nr_mfns - 1, allow) )
+-            ret = -EPERM;
+-        else if ( allow )
+-            ret = iomem_permit_access(d, mfn, mfn + nr_mfns - 1);
+-        else
+-            ret = iomem_deny_access(d, mfn, mfn + nr_mfns - 1);
+-
+-        iocaps_double_unlock(d, true);
+-        break;
+-    }
+-
+     case XEN_DOMCTL_settimeoffset:
+         domain_set_time_offset(d, op->u.settimeoffset.time_offset_seconds);
+         break;
+--- a/xen/include/xsm/dummy.h
++++ b/xen/include/xsm/dummy.h
+@@ -169,7 +169,9 @@ static XSM_INLINE int cf_check xsm_domct
+     {
+     case XEN_DOMCTL_bind_pt_irq:
+     case XEN_DOMCTL_getdomaininfo:
++    case XEN_DOMCTL_iomem_permission:
+     case XEN_DOMCTL_ioport_mapping:
++    case XEN_DOMCTL_ioport_permission:
+     case XEN_DOMCTL_memory_mapping:
+     case XEN_DOMCTL_unbind_pt_irq:
+         ASSERT_UNREACHABLE();
+@@ -566,7 +568,7 @@ static XSM_INLINE int cf_check xsm_irq_p
+ static XSM_INLINE int cf_check xsm_iomem_permission(
+     XSM_DEFAULT_ARG struct domain *d, uint64_t s, uint64_t e, uint8_t allow)
+ {
+-    XSM_ASSERT_ACTION(XSM_HOOK);
++    XSM_ASSERT_ACTION(XSM_PRIV);
+     return xsm_default_action(action, current->domain, d);
+ }
+ 
+@@ -762,7 +764,7 @@ static XSM_INLINE int cf_check xsm_priv_
+ static XSM_INLINE int cf_check xsm_ioport_permission(
+     XSM_DEFAULT_ARG struct domain *d, uint32_t s, uint32_t e, uint8_t allow)
+ {
+-    XSM_ASSERT_ACTION(XSM_HOOK);
++    XSM_ASSERT_ACTION(XSM_PRIV);
+     return xsm_default_action(action, current->domain, d);
+ }
+ 
+--- a/xen/xsm/flask/hooks.c
++++ b/xen/xsm/flask/hooks.c
+@@ -681,7 +681,9 @@ static int cf_check flask_domctl(struct
+     /* These have individual XSM hooks and don't make it here. */
+     case XEN_DOMCTL_bind_pt_irq:
+     case XEN_DOMCTL_getdomaininfo:
++    case XEN_DOMCTL_iomem_permission:
+     case XEN_DOMCTL_ioport_mapping:
++    case XEN_DOMCTL_ioport_permission:
+     case XEN_DOMCTL_memory_mapping:
+     case XEN_DOMCTL_unbind_pt_irq:
+         ASSERT_UNREACHABLE();
+@@ -690,14 +692,12 @@ static int cf_check flask_domctl(struct
+     /* These have individual XSM hooks (common/domctl.c) */
+     case XEN_DOMCTL_scheduler_op:
+     case XEN_DOMCTL_irq_permission:
+-    case XEN_DOMCTL_iomem_permission:
+     case XEN_DOMCTL_set_target:
+     case XEN_DOMCTL_vm_event_op:
+ 
+ #ifdef CONFIG_X86
+     /* These have individual XSM hooks (arch/x86/domctl.c) */
+     case XEN_DOMCTL_shadow_op:
+-    case XEN_DOMCTL_ioport_permission:
+ #endif
+ #ifdef CONFIG_HAS_PASSTHROUGH
+     /*

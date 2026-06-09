@@ -1,0 +1,179 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: domctl/XSM: drop vm_event_control hook
+
+Integrate the checking with xsm_domctl(). Care needs to be taken with the
+GET_VERSION sub-op, which may be invoked with DOMID_INVALID, and which has
+been (and continues to be) bypassing XSM checking.
+
+Since the latter two parameters were unused, monitor_domctl() invoking the
+hook was actually redundant with the earlier xsm_domctl() (as can be seen
+nicely from the hunks changing xsm/flask/hooks.c).
+
+As a positive side effect, permissions are then checked at the same early
+point with and without Flask.
+
+While folding XEN_DOMCTL_monitor_op and XEN_DOMCTL_vm_event_op in
+flask_domctl(), also fold in XEN_DOMCTL_set_access_required.
+
+This is part of XSA-492.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: Daniel P. Smith <dpsmith@apertussolutions.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -486,6 +486,23 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+     }
+ #endif
+ 
++    case XEN_DOMCTL_vm_event_op:
++        if ( op->u.vm_event_op.op == XEN_VM_EVENT_GET_VERSION )
++        {
++            /* No XSM check (and potentially d == NULL) here. */
++            ret = vm_event_domctl(d, &op->u.vm_event_op);
++            if ( !ret )
++                copyback = true;
++            goto domctl_out_unlock_domonly;
++        }
++        if ( !d )
++        {
++            ret = -ESRCH;
++            goto domctl_out_unlock_domonly;
++        }
++        /* Other sub-ops handled further down. */
++        break;
++
+     case XEN_DOMCTL_ioport_permission:
+     case XEN_DOMCTL_ioport_mapping:
+     case XEN_DOMCTL_bind_pt_irq:
+--- a/xen/common/monitor.c
++++ b/xen/common/monitor.c
+@@ -30,16 +30,11 @@
+ 
+ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
+ {
+-    int rc;
+     bool requested_status = false;
+ 
+     if ( unlikely(current->domain == d) ) /* no domain_pause() */
+         return -EPERM;
+ 
+-    rc = xsm_vm_event_control(XSM_PRIV, d, mop->op, mop->event);
+-    if ( unlikely(rc) )
+-        return rc;
+-
+     switch ( mop->op )
+     {
+     case XEN_DOMCTL_MONITOR_OP_ENABLE:
+--- a/xen/common/vm_event.c
++++ b/xen/common/vm_event.c
+@@ -602,11 +602,10 @@ int vm_event_domctl(struct domain *d, st
+ 
+     /* All other subops need to target a real domain. */
+     if ( unlikely(d == NULL) )
+-        return -ESRCH;
+-
+-    rc = xsm_vm_event_control(XSM_PRIV, d, vec->mode, vec->op);
+-    if ( rc )
+-        return rc;
++    {
++        ASSERT_UNREACHABLE();
++        return -EILSEQ;
++    }
+ 
+     if ( unlikely(d == current->domain) ) /* no domain_pause() */
+     {
+--- a/xen/include/xsm/dummy.h
++++ b/xen/include/xsm/dummy.h
+@@ -650,13 +650,6 @@ static XSM_INLINE int cf_check xsm_hvm_a
+     }
+ }
+ 
+-static XSM_INLINE int cf_check xsm_vm_event_control(
+-    XSM_DEFAULT_ARG struct domain *d, int mode, int op)
+-{
+-    XSM_ASSERT_ACTION(XSM_PRIV);
+-    return xsm_default_action(action, current->domain, d);
+-}
+-
+ #ifdef CONFIG_MEM_ACCESS
+ static XSM_INLINE int cf_check xsm_mem_access(XSM_DEFAULT_ARG struct domain *d)
+ {
+--- a/xen/include/xsm/xsm.h
++++ b/xen/include/xsm/xsm.h
+@@ -154,8 +154,6 @@ struct xsm_ops {
+     int (*hvm_altp2mhvm_op)(struct domain *d, uint64_t mode, uint32_t op);
+     int (*get_vnumainfo)(struct domain *d);
+ 
+-    int (*vm_event_control)(struct domain *d, int mode, int op);
+-
+ #ifdef CONFIG_MEM_ACCESS
+     int (*mem_access)(struct domain *d);
+ #endif
+@@ -634,12 +632,6 @@ static inline int xsm_get_vnumainfo(xsm_
+     return alternative_call(xsm_ops.get_vnumainfo, d);
+ }
+ 
+-static inline int xsm_vm_event_control(
+-    xsm_default_t def, struct domain *d, int mode, int op)
+-{
+-    return alternative_call(xsm_ops.vm_event_control, d, mode, op);
+-}
+-
+ #ifdef CONFIG_MEM_ACCESS
+ static inline int xsm_mem_access(xsm_default_t def, struct domain *d)
+ {
+--- a/xen/xsm/dummy.c
++++ b/xen/xsm/dummy.c
+@@ -110,8 +110,6 @@ static const struct xsm_ops __initconst_
+     .remove_from_physmap           = xsm_remove_from_physmap,
+     .map_gmfn_foreign              = xsm_map_gmfn_foreign,
+ 
+-    .vm_event_control              = xsm_vm_event_control,
+-
+ #ifdef CONFIG_MEM_ACCESS
+     .mem_access                    = xsm_mem_access,
+ #endif
+--- a/xen/xsm/flask/hooks.c
++++ b/xen/xsm/flask/hooks.c
+@@ -693,7 +693,6 @@ static int cf_check flask_domctl(struct
+     /* These have individual XSM hooks (common/domctl.c) */
+     case XEN_DOMCTL_scheduler_op:
+     case XEN_DOMCTL_set_target:
+-    case XEN_DOMCTL_vm_event_op:
+ 
+ #ifdef CONFIG_X86
+     /* These have individual XSM hooks (arch/x86/domctl.c) */
+@@ -787,9 +786,8 @@ static int cf_check flask_domctl(struct
+         return current_has_perm(d, SECCLASS_DOMAIN, DOMAIN__TRIGGER);
+ 
+     case XEN_DOMCTL_set_access_required:
+-        return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__VM_EVENT);
+-
+     case XEN_DOMCTL_monitor_op:
++    case XEN_DOMCTL_vm_event_op:
+         return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__VM_EVENT);
+ 
+     case XEN_DOMCTL_debug_op:
+@@ -1352,11 +1350,6 @@ static int cf_check flask_hvm_altp2mhvm_
+     return current_has_perm(d, SECCLASS_HVM, HVM__ALTP2MHVM_OP);
+ }
+ 
+-static int cf_check flask_vm_event_control(struct domain *d, int mode, int op)
+-{
+-    return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__VM_EVENT);
+-}
+-
+ #ifdef CONFIG_MEM_ACCESS
+ static int cf_check flask_mem_access(struct domain *d)
+ {
+@@ -1940,8 +1933,6 @@ static const struct xsm_ops __initconst_
+     .do_xsm_op = do_flask_op,
+     .get_vnumainfo = flask_get_vnumainfo,
+ 
+-    .vm_event_control = flask_vm_event_control,
+-
+ #ifdef CONFIG_MEM_ACCESS
+     .mem_access = flask_mem_access,
+ #endif

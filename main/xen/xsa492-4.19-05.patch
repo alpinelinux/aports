@@ -1,0 +1,180 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: domain: locking for irq_caps accesses
+
+In order to be able to pull at least the XEN_DOMCTL_{,un}bind_pt_irq
+handling out of the domctl-locked region, a separate (per-domain) lock is
+needed to synchronize in particular with XEN_DOMCTL_irq_permission.
+
+Locking is added only as far as domctl-s are affected. Uses presently
+outside of the domctl lock may want dealing with subsequently (perhaps
+limited to non-__init code).
+
+This is part of XSA-492.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Roger Pau Monné <roger.pau@citrix.com>
+Reviewed-by: Julien Grall <julien@xen.org>
+
+--- a/xen/arch/arm/domctl.c
++++ b/xen/arch/arm/domctl.c
+@@ -76,6 +76,7 @@ long arch_do_domctl(struct xen_domctl *d
+     case XEN_DOMCTL_bind_pt_irq:
+     {
+         int rc;
++        struct domain *currd = current->domain;
+         struct xen_domctl_bind_pt_irq *bind = &domctl->u.bind_pt_irq;
+         uint32_t irq = bind->u.spi.spi;
+         uint32_t virq = bind->machine_irq;
+@@ -107,21 +108,26 @@ long arch_do_domctl(struct xen_domctl *d
+         if ( rc )
+             return rc;
+ 
+-        if ( !irq_access_permitted(current->domain, irq) )
+-            return -EPERM;
++        read_lock(&currd->caps_lock);
+ 
+-        if ( !vgic_reserve_virq(d, virq) )
+-            return -EBUSY;
+-
+-        rc = route_irq_to_guest(d, virq, irq, "routed IRQ");
+-        if ( rc )
+-            vgic_free_virq(d, virq);
++        if ( !irq_access_permitted(currd, irq) )
++            rc = -EPERM;
++        else if ( !vgic_reserve_virq(d, virq) )
++            rc = -EBUSY;
++        else
++        {
++            rc = route_irq_to_guest(d, virq, irq, "routed IRQ");
++            if ( rc )
++                vgic_free_virq(d, virq);
++        }
+ 
++        read_unlock(&currd->caps_lock);
+         return rc;
+     }
+     case XEN_DOMCTL_unbind_pt_irq:
+     {
+         int rc;
++        struct domain *currd = current->domain;
+         struct xen_domctl_bind_pt_irq *bind = &domctl->u.bind_pt_irq;
+         uint32_t irq = bind->u.spi.spi;
+         uint32_t virq = bind->machine_irq;
+@@ -138,16 +144,15 @@ long arch_do_domctl(struct xen_domctl *d
+         if ( rc )
+             return rc;
+ 
+-        if ( !irq_access_permitted(current->domain, irq) )
+-            return -EPERM;
+-
+-        rc = release_guest_irq(d, virq);
+-        if ( rc )
+-            return rc;
++        read_lock(&currd->caps_lock);
+ 
+-        vgic_free_virq(d, virq);
++        if ( !irq_access_permitted(currd, irq) )
++            rc = -EPERM;
++        else if ( !(rc = release_guest_irq(d, virq)) )
++            vgic_free_virq(d, virq);
+ 
+-        return 0;
++        read_unlock(&currd->caps_lock);
++        return rc;
+     }
+ 
+     case XEN_DOMCTL_vuart_op:
+--- a/xen/arch/x86/domctl.c
++++ b/xen/arch/x86/domctl.c
+@@ -539,20 +539,27 @@ long arch_do_domctl(
+             break;
+ 
+         irq = domain_pirq_to_irq(d, bind->machine_irq);
+-        ret = -EPERM;
+-        if ( irq <= 0 || !irq_access_permitted(currd, irq) )
+-            break;
++        if ( irq <= 0 )
++            ret = -EPERM;
++
++        read_lock(&currd->caps_lock);
+ 
+-        ret = -ESRCH;
+-        if ( is_iommu_enabled(d) )
++        if ( !irq_access_permitted(currd, irq) )
++            ret = -EPERM;
++        else if ( is_iommu_enabled(d) )
+         {
+             pcidevs_lock();
+             ret = pt_irq_create_bind(d, bind);
+             pcidevs_unlock();
++
++            if ( ret < 0 )
++                printk(XENLOG_G_ERR "pt_irq_create_bind failed (%ld) for %pd\n",
++                       ret, d);
+         }
+-        if ( ret < 0 )
+-            printk(XENLOG_G_ERR "pt_irq_create_bind failed (%ld) for dom%d\n",
+-                   ret, d->domain_id);
++        else
++            ret = -ESRCH;
++
++        read_unlock(&currd->caps_lock);
+         break;
+     }
+ 
+@@ -565,23 +572,26 @@ long arch_do_domctl(
+         if ( !is_hvm_domain(d) )
+             break;
+ 
+-        ret = -EPERM;
+-        if ( irq <= 0 || !irq_access_permitted(currd, irq) )
+-            break;
+-
+         ret = xsm_unbind_pt_irq(XSM_HOOK, d, bind);
+         if ( ret )
+             break;
+ 
+-        if ( is_iommu_enabled(d) )
++        read_lock(&currd->caps_lock);
++
++        if ( !irq_access_permitted(currd, irq) )
++            ret = -EPERM;
++        else if ( is_iommu_enabled(d) )
+         {
+             pcidevs_lock();
+             ret = pt_irq_destroy_bind(d, bind);
+             pcidevs_unlock();
++
++            if ( ret < 0 )
++                printk(XENLOG_G_ERR "pt_irq_destroy_bind failed (%ld) for %pd\n",
++                       ret, d);
+         }
+-        if ( ret < 0 )
+-            printk(XENLOG_G_ERR "pt_irq_destroy_bind failed (%ld) for dom%d\n",
+-                   ret, d->domain_id);
++
++        read_unlock(&currd->caps_lock);
+         break;
+     }
+ 
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -703,6 +703,9 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+             ret = -EINVAL;
+             break;
+         }
++
++        iocaps_double_lock(d, true);
++
+         irq = pirq_access_permitted(current->domain, pirq);
+         if ( !irq || xsm_irq_permission(XSM_HOOK, d, irq, allow) )
+             ret = -EPERM;
+@@ -710,6 +713,8 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xe
+             ret = irq_permit_access(d, irq);
+         else
+             ret = irq_deny_access(d, irq);
++
++        iocaps_double_unlock(d, true);
+         break;
+     }
+ #endif

@@ -1,0 +1,311 @@
+From 1efa09ba765b90a0f2f3f8063cc0be2316cada0d Mon Sep 17 00:00:00 2001
+From: Michal Orzel <michal.orzel@amd.com>
+Date: Tue, 14 Apr 2026 10:11:24 +0200
+Subject: xen/arm64: flushtlb: Optimize ARM64_WORKAROUND_REPEAT_TLBI
+
+The ARM64_WORKAROUND_REPEAT_TLBI workaround is used to mitigate several
+errata where broadcast TLBI;DSB sequences don't provide all the
+architecturally required synchronization. The workaround performs more
+work than necessary, and can have significant overhead. This patch
+optimizes the workaround, as explained below.
+
+1. All relevant errata only affect the ordering and/or completion of
+   memory accesses which have been translated by an invalidated TLB
+   entry. The actual invalidation of TLB entries is unaffected.
+
+2. The existing workaround is applied to both broadcast and local TLB
+   invalidation, whereas for all relevant errata it is only necessary to
+   apply a workaround for broadcast invalidation.
+
+3. The existing workaround replaces every TLBI with a TLBI;DSB;TLBI
+   sequence, whereas for all relevant errata it is only necessary to
+   execute a single additional TLBI;DSB sequence after any number of
+   TLBIs are completed by a DSB.
+
+   For example, for a sequence of batched TLBIs:
+
+       TLBI <op1>[, <arg1>]
+       TLBI <op2>[, <arg2>]
+       TLBI <op3>[, <arg3>]
+       DSB ISH
+
+   ... the existing workaround will expand this to:
+
+       TLBI <op1>[, <arg1>]
+       DSB ISH                  // additional
+       TLBI <op1>[, <arg1>]     // additional
+       TLBI <op2>[, <arg2>]
+       DSB ISH                  // additional
+       TLBI <op2>[, <arg2>]     // additional
+       TLBI <op3>[, <arg3>]
+       DSB ISH                  // additional
+       TLBI <op3>[, <arg3>]     // additional
+       DSB ISH
+
+   ... whereas it is sufficient to have:
+
+       TLBI <op1>[, <arg1>]
+       TLBI <op2>[, <arg2>]
+       TLBI <op3>[, <arg3>]
+       DSB ISH
+       TLBI <opX>[, <argX>]     // additional
+       DSB ISH                  // additional
+
+   Using a single additional TLBI and DSB at the end of the sequence can
+   have significantly lower overhead as each DSB which completes a TLBI
+   must synchronize with other PEs in the system, with potential
+   performance effects both locally and system-wide.
+
+4. The existing workaround repeats each specific TLBI operation, whereas
+   for all relevant errata it is sufficient for the additional TLBI to
+   use *any* operation which will be broadcast, regardless of which
+   translation regime or stage of translation the operation applies to.
+
+   For example, for a single TLBI:
+
+       TLBI ALLE2IS
+       DSB ISH
+
+   ... the existing workaround will expand this to:
+
+       TLBI ALLE2IS
+       DSB ISH
+       TLBI ALLE2IS             // additional
+       DSB ISH                  // additional
+
+   ... whereas it is sufficient to have:
+
+       TLBI ALLE2IS
+       DSB ISH
+       TLBI VALE1IS, XZR        // additional
+       DSB ISH                  // additional
+
+   As the additional TLBI doesn't have to match a specific earlier TLBI,
+   the additional TLBI can be implemented in separate code, with no
+   memory of the earlier TLBIs. The additional TLBI can also use a
+   cheaper TLBI operation.
+
+5. The existing workaround is applied to both Stage-1 and Stage-2 TLB
+   invalidation, whereas for all relevant errata it is only necessary to
+   apply a workaround for Stage-1 invalidation.
+
+   Architecturally, TLBI operations which invalidate only Stage-2
+   information (e.g. IPAS2E1IS) are not required to invalidate TLB
+   entries which combine information from Stage-1 and Stage-2
+   translation table entries, and consequently may not complete memory
+   accesses translated by those combined entries. In these cases,
+   completion of memory accesses is only guaranteed after subsequent
+   invalidation of Stage-1 information (e.g. VMALLE1IS).
+
+Rework the workaround logic as follows:
+ - add TLB_HELPER_LOCAL() to be used for local TLB ops without a
+   workaround,
+ - modify TLB_HELPER() workaround to use tlbi vale2is, xzr as a second
+   TLBI,
+ - drop TLB_HELPER_VA(). It's used only by __flush_xen_tlb_one_local
+   which is local and does not need workaround and by
+   __flush_xen_tlb_one. In the latter case, since it's used in a loop,
+   we don't need a workaround in the middle. Add __tlb_repeat_sync with
+   a workaround to be used at the end after DSB and before final ISB,
+ - TLBI VALE2IS passing XZR is used as an additional TLBI. While there is
+   an identity mapping there, it's used very rarely. The performance
+   impact is therefore negligible. If things change in the future, we
+   can revisit the decision.
+
+Signed-off-by: Michal Orzel <michal.orzel@amd.com>
+Reviewed-by: Luca Fancellu <luca.fancellu@arm.com>
+Reviewed-by: Julien Grall <jgrall@amazon.com>
+(cherry picked from commit 7c502d7591519135765b8041cbd1c70e56e5a0b9)
+
+diff --git a/xen/arch/arm/include/asm/arm32/flushtlb.h b/xen/arch/arm/include/asm/arm32/flushtlb.h
+index 61c25a318998..5483be08fbbe 100644
+--- a/xen/arch/arm/include/asm/arm32/flushtlb.h
++++ b/xen/arch/arm/include/asm/arm32/flushtlb.h
+@@ -57,6 +57,9 @@ static inline void __flush_xen_tlb_one(vaddr_t va)
+     asm volatile(STORE_CP32(0, TLBIMVAHIS) : : "r" (va) : "memory");
+ }
+ 
++/* Only for ARM64_WORKAROUND_REPEAT_TLBI */
++static inline void __tlb_repeat_sync(void) {}
++
+ #endif /* __ASM_ARM_ARM32_FLUSHTLB_H__ */
+ /*
+  * Local variables:
+diff --git a/xen/arch/arm/include/asm/arm64/flushtlb.h b/xen/arch/arm/include/asm/arm64/flushtlb.h
+index 45642201d147..c1314be122d7 100644
+--- a/xen/arch/arm/include/asm/arm64/flushtlb.h
++++ b/xen/arch/arm/include/asm/arm64/flushtlb.h
+@@ -12,9 +12,14 @@
+  * ARM64_WORKAROUND_REPEAT_TLBI:
+  * Modification of the translation table for a virtual address might lead to
+  * read-after-read ordering violation.
+- * The workaround repeats TLBI+DSB ISH operation for all the TLB flush
+- * operations. While this is strictly not necessary, we don't want to
+- * take any risk.
++ * The workaround repeats TLBI+DSB ISH operation for broadcast TLB flush
++ * operations. The workaround is not needed for local operations.
++ *
++ * It is sufficient for the additional TLBI to use *any* operation which will
++ * be broadcast, regardless of which translation regime or stage of translation
++ * the operation applies to. TLBI VALE2IS is used passing XZR. While there is
++ * an identity mapping there, it's only used during suspend/resume, CPU on/off,
++ * so the impact (performance if any) is negligible.
+  *
+  * For Xen page-tables the ISB will discard any instructions fetched
+  * from the old mappings.
+@@ -26,69 +31,90 @@
+  * Note that for local TLB flush, using non-shareable (nsh) is sufficient
+  * (see D5-4929 in ARM DDI 0487H.a). Although, the memory barrier in
+  * for the workaround is left as inner-shareable to match with Linux
+- * v6.1-rc8.
++ * v6.19.
+  */
+-#define TLB_HELPER(name, tlbop, sh)              \
++#define TLB_HELPER_LOCAL(name, tlbop)            \
+ static inline void name(void)                    \
+ {                                                \
+     asm volatile(                                \
+-        "dsb  "  # sh  "st;"                     \
++        "dsb  nshst;"                            \
+         "tlbi "  # tlbop  ";"                    \
+-        ALTERNATIVE(                             \
+-            "nop; nop;",                         \
+-            "dsb  ish;"                          \
+-            "tlbi "  # tlbop  ";",               \
+-            ARM64_WORKAROUND_REPEAT_TLBI,        \
+-            CONFIG_ARM64_WORKAROUND_REPEAT_TLBI) \
+-        "dsb  "  # sh  ";"                       \
++        "dsb  nsh;"                              \
+         "isb;"                                   \
+         : : : "memory");                         \
+ }
+ 
+-/*
+- * FLush TLB by VA. This will likely be used in a loop, so the caller
+- * is responsible to use the appropriate memory barriers before/after
+- * the sequence.
+- *
+- * See above about the ARM64_WORKAROUND_REPEAT_TLBI sequence.
+- */
+-#define TLB_HELPER_VA(name, tlbop)               \
+-static inline void name(vaddr_t va)              \
+-{                                                \
+-    asm volatile(                                \
+-        "tlbi "  # tlbop  ", %0;"                \
+-        ALTERNATIVE(                             \
+-            "nop; nop;",                         \
+-            "dsb  ish;"                          \
+-            "tlbi "  # tlbop  ", %0;",           \
+-            ARM64_WORKAROUND_REPEAT_TLBI,        \
+-            CONFIG_ARM64_WORKAROUND_REPEAT_TLBI) \
+-        : : "r" (va >> PAGE_SHIFT) : "memory");  \
++#define TLB_HELPER(name, tlbop)                       \
++static inline void name(void)                         \
++{                                                     \
++    asm volatile (                                    \
++        "dsb  ishst;"                                 \
++        "tlbi "  # tlbop  ";"                         \
++        ALTERNATIVE(                                  \
++            "nop; nop;",                              \
++            "dsb  ish;"                               \
++            "tlbi vale2is, xzr;",                     \
++            ARM64_WORKAROUND_REPEAT_TLBI,             \
++            CONFIG_ARM64_WORKAROUND_REPEAT_TLBI)      \
++        "dsb  ish;"                                   \
++        "isb;"                                        \
++        : : : "memory"); \
+ }
+ 
+ /* Flush local TLBs, current VMID only. */
+-TLB_HELPER(flush_guest_tlb_local, vmalls12e1, nsh)
++TLB_HELPER_LOCAL(flush_guest_tlb_local, vmalls12e1)
+ 
+ /* Flush innershareable TLBs, current VMID only */
+-TLB_HELPER(flush_guest_tlb, vmalls12e1is, ish)
++TLB_HELPER(flush_guest_tlb, vmalls12e1is)
+ 
+ /* Flush local TLBs, all VMIDs, non-hypervisor mode */
+-TLB_HELPER(flush_all_guests_tlb_local, alle1, nsh)
++TLB_HELPER_LOCAL(flush_all_guests_tlb_local, alle1)
+ 
+ /* Flush innershareable TLBs, all VMIDs, non-hypervisor mode */
+-TLB_HELPER(flush_all_guests_tlb, alle1is, ish)
++TLB_HELPER(flush_all_guests_tlb, alle1is)
+ 
+ /* Flush all hypervisor mappings from the TLB of the local processor. */
+-TLB_HELPER(flush_xen_tlb_local, alle2, nsh)
++TLB_HELPER_LOCAL(flush_xen_tlb_local, alle2)
++
++#undef TLB_HELPER_LOCAL
++#undef TLB_HELPER
++
++/*
++ * FLush TLB by VA. This will likely be used in a loop, so the caller
++ * is responsible to use the appropriate memory barriers before/after
++ * the sequence.
++ */
+ 
+ /* Flush TLB of local processor for address va. */
+-TLB_HELPER_VA(__flush_xen_tlb_one_local, vae2)
++static inline void __flush_xen_tlb_one_local(vaddr_t va)
++{
++    asm volatile (
++        "tlbi vae2, %0" : : "r" (va >> PAGE_SHIFT) : "memory");
++}
+ 
+ /* Flush TLB of all processors in the inner-shareable domain for address va. */
+-TLB_HELPER_VA(__flush_xen_tlb_one, vae2is)
++static inline void __flush_xen_tlb_one(vaddr_t va)
++{
++    asm volatile (
++        "tlbi vae2is, %0" : : "r" (va >> PAGE_SHIFT) : "memory");
++}
+ 
+-#undef TLB_HELPER
+-#undef TLB_HELPER_VA
++/*
++ * ARM64_WORKAROUND_REPEAT_TLBI:
++ * For all relevant erratas it is only necessary to execute a single
++ * additional TLBI;DSB sequence after any number of TLBIs are completed by DSB.
++ */
++static inline void __tlb_repeat_sync(void)
++{
++    asm volatile (
++        ALTERNATIVE(
++            "nop; nop;",
++            "tlbi vale2is, xzr;"
++            "dsb  ish;",
++            ARM64_WORKAROUND_REPEAT_TLBI,
++            CONFIG_ARM64_WORKAROUND_REPEAT_TLBI)
++        : : : "memory");
++}
+ 
+ #endif /* __ASM_ARM_ARM64_FLUSHTLB_H__ */
+ /*
+diff --git a/xen/arch/arm/include/asm/flushtlb.h b/xen/arch/arm/include/asm/flushtlb.h
+index e45fb6d97b02..c292c3c00d29 100644
+--- a/xen/arch/arm/include/asm/flushtlb.h
++++ b/xen/arch/arm/include/asm/flushtlb.h
+@@ -65,6 +65,7 @@ static inline void flush_xen_tlb_range_va(vaddr_t va,
+         va += PAGE_SIZE;
+     }
+     dsb(ish); /* Ensure the TLB invalidation has completed */
++    __tlb_repeat_sync();
+     isb();
+ }
+ 
+diff --git a/xen/arch/arm/include/asm/mmu/layout.h b/xen/arch/arm/include/asm/mmu/layout.h
+index a3b546465b5a..74848725e9a3 100644
+--- a/xen/arch/arm/include/asm/mmu/layout.h
++++ b/xen/arch/arm/include/asm/mmu/layout.h
+@@ -23,6 +23,10 @@
+  *
+  *  Reserved to identity map Xen
+  *
++ *  Note: As part of ARM64_WORKAROUND_REPEAT_TLBI, VA 0 is used for an extra
++ *  TLBI operation given its rare use (only identity mapping) and thus
++ *  negligible performance impact.
++ *
+  * 0x00000a0000000000 - 0x00000a7fffffffff (512GB, L0 slot [20])
+  *  (Relative offsets)
+  *   0  -   2M   Unmapped
