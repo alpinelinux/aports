@@ -1,0 +1,404 @@
+From 161ddee42ea7dc1a36015c156d0736696f91020d Mon Sep 17 00:00:00 2001
+From: Roger Pau Monne <roger.pau@citrix.com>
+Date: Mon, 16 Mar 2026 11:03:22 +0100
+Subject: [PATCH] x86/mm: accurately track which vCPU page-tables are loaded
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Neither current nor curr_vcpu per-CPU fields accurately track which
+page-tables are loaded.  There are corner cases when dealing with shadow
+paging failures that switch to the idle vCPU page-tables without changing
+current or curr_vcpu per-CPU fields.
+
+Introduce a new per-CPU field that attempts to track which vCPU page-tables
+are loaded.  Update such tracking when cr3 is changed, and do so in a
+region with interrupts disabled, as to avoid handling interrupts with a
+mismatch between the vCPU tracking field and the loaded page-tables.
+
+As a result of this newly more accurate tracking the mapcache override
+functionality can be removed: the dom0 PV builder was the only user of it,
+and it's updated here to properly signal which vCPU page-tables are loaded
+in the calls to switch_cr3_cr4().
+
+Note the EFI page-tables have the Xen owned L4 slots copied from the idle
+page-tables, so for the effects of the mapcache the EFI page-tables could
+use the idle mapcache if it had one.  Pass the idle vCPU in the
+switch_cr3_cr4() call that switches to the runtime EFI page-tables.
+
+There are known issues with the use of mapcache in NMI context.  This patch
+does not alter the behaviour.
+
+This is CVE-2026-42488 / XSA-494.
+
+Fixes: fb0ff49fe9f7 ("x86/shadow: defer releasing of PV's top-level shadow reference")
+Signed-off-by: Roger Pau Monné <roger.pau@citrix.com>
+Acked-by: Andrew Cooper <andrew.cooper3@citrix.com>
+---
+ xen/arch/x86/domain_page.c           | 48 ++++++++++++----------------
+ xen/arch/x86/flushtlb.c              |  5 ++-
+ xen/arch/x86/include/asm/domain.h    |  1 -
+ xen/arch/x86/include/asm/flushtlb.h  |  2 +-
+ xen/arch/x86/include/asm/processor.h |  3 ++
+ xen/arch/x86/mm.c                    |  4 +--
+ xen/arch/x86/pv/dom0_build.c         | 12 +++----
+ xen/arch/x86/pv/domain.c             | 13 ++++++--
+ xen/arch/x86/smpboot.c               |  1 +
+ xen/common/efi/common-stub.c         |  5 ---
+ xen/common/efi/runtime.c             | 21 +++++-------
+ xen/include/xen/efi.h                |  1 -
+ 12 files changed, 54 insertions(+), 62 deletions(-)
+
+diff --git a/xen/arch/x86/domain_page.c b/xen/arch/x86/domain_page.c
+index eac5e3304fb8..72c00194f315 100644
+--- a/xen/arch/x86/domain_page.c
++++ b/xen/arch/x86/domain_page.c
+@@ -18,48 +18,40 @@
+ #include <asm/hardirq.h>
+ #include <asm/setup.h>
+ 
+-static DEFINE_PER_CPU(struct vcpu *, override);
+-
+ static inline struct vcpu *mapcache_current_vcpu(void)
+ {
+-    /* In the common case we use the mapcache of the running VCPU. */
+-    struct vcpu *v = this_cpu(override) ?: current;
+-
+-    /*
+-     * When current isn't properly set up yet, this is equivalent to
+-     * running in an idle vCPU (callers must check for NULL).
+-     */
+-    if ( !v )
+-        return NULL;
++    struct vcpu *v = this_cpu(pgtable_vcpu);
++    struct vcpu *curr = current;
+ 
+     /*
+-     * When using efi runtime page tables, we have the equivalent of the idle
+-     * domain's page tables but current may point at another domain's VCPU.
+-     * Return NULL as though current is not properly set up yet.
++     * During early boot pgtable_vcpu is not set, callers must handle NULL.
++     * Non-PV domains don't have a mapcache, the directmap covers all physical
++     * address space.
+      */
+-    if ( efi_rs_using_pgtables() )
++    if ( !v || !is_pv_vcpu(v) )
+         return NULL;
+ 
+     /*
+-     * If guest_table is NULL, and we are running a paravirtualised guest,
+-     * then it means we are running on the idle domain's page table and must
+-     * therefore use its mapcache.
++     * If we are in a lazy context-switch state from a PV vCPU do a full switch
++     * to the idle vCPU now, otherwise an incoming FLUSH_VCPU_STATE IPI would
++     * change the page tables under our feet an invalidate any in-use mapcache
++     * entries.
+      */
+-    if ( unlikely(pagetable_is_null(v->arch.guest_table)) && is_pv_vcpu(v) )
++    if ( unlikely(this_cpu(curr_vcpu) != curr) )
+     {
+-        /* If we really are idling, perform lazy context switch now. */
+-        if ( (v = idle_vcpu[smp_processor_id()]) == current )
+-            sync_local_execstate();
++        ASSERT(curr == idle_vcpu[smp_processor_id()]);
++        sync_local_execstate();
+         /* We must now be running on the idle page table. */
+         ASSERT(cr3_pa(read_cr3()) == __pa(idle_pg_table));
+     }
+ 
+-    return v;
+-}
+-
+-void __init mapcache_override_current(struct vcpu *v)
+-{
+-    this_cpu(override) = v;
++    /*
++     * At this point we can guarantee Xen is not in lazy context switch: either
++     * the code above will have synced the state, or an incoming
++     * FLUSH_VCPU_STATE IPI has done so behind our back.  Use ACCESS_ONCE to
++     * ensure the compiler never returns the locally cached pgtable_vcpu value.
++     */
++    return ACCESS_ONCE(this_cpu(pgtable_vcpu));
+ }
+ 
+ #define mapcache_l2_entry(e) ((e) >> PAGETABLE_ORDER)
+diff --git a/xen/arch/x86/flushtlb.c b/xen/arch/x86/flushtlb.c
+index 65be0474a8ea..16f1fab5c5e6 100644
+--- a/xen/arch/x86/flushtlb.c
++++ b/xen/arch/x86/flushtlb.c
+@@ -111,7 +111,9 @@ static void do_tlb_flush(void)
+     local_irq_restore(flags);
+ }
+ 
+-void switch_cr3_cr4(unsigned long cr3, unsigned long cr4)
++DEFINE_PER_CPU(struct vcpu *, pgtable_vcpu);
++
++void switch_cr3_cr4(struct vcpu *v, unsigned long cr3, unsigned long cr4)
+ {
+     unsigned long flags, old_cr4;
+     u32 t = 0;
+@@ -155,6 +157,7 @@ void switch_cr3_cr4(unsigned long cr3, unsigned long cr4)
+     if ( (old_cr4 & X86_CR4_PCIDE) > (cr4 & X86_CR4_PCIDE) )
+         cr3 |= X86_CR3_NOFLUSH;
+     write_cr3(cr3);
++    this_cpu(pgtable_vcpu) = v;
+ 
+     if ( old_cr4 != cr4 )
+         write_cr4(cr4);
+diff --git a/xen/arch/x86/include/asm/domain.h b/xen/arch/x86/include/asm/domain.h
+index b79d6badd71c..f0370bc7bb12 100644
+--- a/xen/arch/x86/include/asm/domain.h
++++ b/xen/arch/x86/include/asm/domain.h
+@@ -75,7 +75,6 @@ struct mapcache_domain {
+ 
+ int mapcache_domain_init(struct domain *d);
+ int mapcache_vcpu_init(struct vcpu *v);
+-void mapcache_override_current(struct vcpu *v);
+ 
+ /* x86/64: toggle guest between kernel and user modes. */
+ void toggle_guest_mode(struct vcpu *v);
+diff --git a/xen/arch/x86/include/asm/flushtlb.h b/xen/arch/x86/include/asm/flushtlb.h
+index bb0ad58db49b..75e291d93bf6 100644
+--- a/xen/arch/x86/include/asm/flushtlb.h
++++ b/xen/arch/x86/include/asm/flushtlb.h
+@@ -99,7 +99,7 @@ static inline unsigned long read_cr3(void)
+ }
+ 
+ /* Write pagetable base and implicitly tick the tlbflush clock. */
+-void switch_cr3_cr4(unsigned long cr3, unsigned long cr4);
++void switch_cr3_cr4(struct vcpu *v, unsigned long cr3, unsigned long cr4);
+ 
+ /* flush_* flag fields: */
+  /*
+diff --git a/xen/arch/x86/include/asm/processor.h b/xen/arch/x86/include/asm/processor.h
+index 98734f4d3ff3..4b52d68a6f87 100644
+--- a/xen/arch/x86/include/asm/processor.h
++++ b/xen/arch/x86/include/asm/processor.h
+@@ -375,6 +375,9 @@ extern idt_entry_t *idt_tables[];
+ 
+ DECLARE_PER_CPU(root_pgentry_t *, root_pgt);
+ 
++/* vCPU of the currently loaded page-tables. */
++DECLARE_PER_CPU(struct vcpu *, pgtable_vcpu);
++
+ extern void write_ptbase(struct vcpu *v);
+ 
+ /* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index 3430b13dcd2c..23496407f2b9 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -542,7 +542,7 @@ void write_ptbase(struct vcpu *v)
+         cpu_info->pv_cr3 = __pa(this_cpu(root_pgt));
+         if ( new_cr4 & X86_CR4_PCIDE )
+             cpu_info->pv_cr3 |= get_pcid_bits(v, true);
+-        switch_cr3_cr4(v->arch.cr3, new_cr4);
++        switch_cr3_cr4(v, v->arch.cr3, new_cr4);
+     }
+     else
+     {
+@@ -550,7 +550,7 @@ void write_ptbase(struct vcpu *v)
+         cpu_info->use_pv_cr3 = false;
+         cpu_info->xen_cr3 = 0;
+         /* switch_cr3_cr4() serializes. */
+-        switch_cr3_cr4(v->arch.cr3, new_cr4);
++        switch_cr3_cr4(v, v->arch.cr3, new_cr4);
+         cpu_info->pv_cr3 = 0;
+     }
+ }
+diff --git a/xen/arch/x86/pv/dom0_build.c b/xen/arch/x86/pv/dom0_build.c
+index 5bc59b48a5a8..7ce82f199b3f 100644
+--- a/xen/arch/x86/pv/dom0_build.c
++++ b/xen/arch/x86/pv/dom0_build.c
+@@ -836,8 +836,7 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
+     update_cr3(v);
+ 
+     /* We run on dom0's page tables for the final part of the build process. */
+-    switch_cr3_cr4(cr3_pa(v->arch.cr3), read_cr4());
+-    mapcache_override_current(v);
++    switch_cr3_cr4(v, cr3_pa(v->arch.cr3), read_cr4());
+ 
+     /* Copy the OS image and free temporary buffer. */
+     elf.dest_base = (void*)vkern_start;
+@@ -846,8 +845,7 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
+     rc = elf_load_binary(&elf);
+     if ( rc < 0 )
+     {
+-        mapcache_override_current(NULL);
+-        switch_cr3_cr4(current->arch.cr3, read_cr4());
++        switch_cr3_cr4(current, current->arch.cr3, read_cr4());
+         printk("Failed to load the kernel binary\n");
+         goto out;
+     }
+@@ -858,8 +856,7 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
+         if ( (parms.virt_hypercall < v_start) ||
+              (parms.virt_hypercall >= v_end) )
+         {
+-            mapcache_override_current(NULL);
+-            switch_cr3_cr4(current->arch.cr3, read_cr4());
++            switch_cr3_cr4(current, current->arch.cr3, read_cr4());
+             printk("Invalid HYPERCALL_PAGE field in ELF notes.\n");
+             return -EINVAL;
+         }
+@@ -1000,8 +997,7 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
+ #endif
+ 
+     /* Return to idle domain's page tables. */
+-    mapcache_override_current(NULL);
+-    switch_cr3_cr4(current->arch.cr3, read_cr4());
++    switch_cr3_cr4(current, current->arch.cr3, read_cr4());
+ 
+     update_domain_wallclock_time(d);
+ 
+diff --git a/xen/arch/x86/pv/domain.c b/xen/arch/x86/pv/domain.c
+index 745c1dbb217a..0f45ccafc268 100644
+--- a/xen/arch/x86/pv/domain.c
++++ b/xen/arch/x86/pv/domain.c
+@@ -449,6 +449,8 @@ static void _toggle_guest_pt(struct vcpu *v)
+     pagetable_t old_shadow;
+     unsigned long cr3;
+ 
++    ASSERT(local_irq_is_enabled());
++
+     v->arch.flags ^= TF_kernel_mode;
+     guest_update = v->arch.flags & TF_kernel_mode;
+     old_shadow = update_cr3(v);
+@@ -471,15 +473,22 @@ static void _toggle_guest_pt(struct vcpu *v)
+     {
+         cr3 &= ~X86_CR3_NOFLUSH;
+ 
++        local_irq_disable();
+         if ( unlikely(mfn_eq(pagetable_get_mfn(old_shadow),
+                              maddr_to_mfn(cr3))) )
+         {
+-            cr3 = idle_vcpu[v->processor]->arch.cr3;
+             /* Also suppress runstate/time area updates below. */
+             guest_update = false;
++
++            cr3 = idle_vcpu[v->processor]->arch.cr3;
++            this_cpu(pgtable_vcpu) = idle_vcpu[v->processor];
+         }
++
++        write_cr3(cr3);
++        local_irq_enable();
+     }
+-    write_cr3(cr3);
++    else
++        write_cr3(cr3);
+ 
+     if ( !pagetable_is_null(old_shadow) )
+         shadow_put_top_level(v->domain, old_shadow);
+diff --git a/xen/arch/x86/smpboot.c b/xen/arch/x86/smpboot.c
+index 8742e3056141..fc0761150ffe 100644
+--- a/xen/arch/x86/smpboot.c
++++ b/xen/arch/x86/smpboot.c
+@@ -330,6 +330,7 @@ void asmlinkage start_secondary(void *unused)
+ 
+     set_current(idle_vcpu[cpu]);
+     this_cpu(curr_vcpu) = idle_vcpu[cpu];
++    this_cpu(pgtable_vcpu) = idle_vcpu[cpu];
+     rdmsrl(MSR_EFER, this_cpu(efer));
+     init_shadow_spec_ctrl_state();
+ 
+diff --git a/xen/common/efi/common-stub.c b/xen/common/efi/common-stub.c
+index 77f138a6c574..7b12005bea3f 100644
+--- a/xen/common/efi/common-stub.c
++++ b/xen/common/efi/common-stub.c
+@@ -7,11 +7,6 @@ bool efi_enabled(unsigned int feature)
+     return false;
+ }
+ 
+-bool efi_rs_using_pgtables(void)
+-{
+-    return false;
+-}
+-
+ unsigned long efi_get_time(void)
+ {
+     BUG();
+diff --git a/xen/common/efi/runtime.c b/xen/common/efi/runtime.c
+index 7e1fce291d92..af7f96fb7dd0 100644
+--- a/xen/common/efi/runtime.c
++++ b/xen/common/efi/runtime.c
+@@ -47,7 +47,6 @@ const CHAR16 *__read_mostly efi_fw_vendor;
+ const EFI_RUNTIME_SERVICES *__read_mostly efi_rs;
+ #ifndef CONFIG_ARM /* TODO - disabled until implemented on ARM */
+ static DEFINE_SPINLOCK(efi_rs_lock);
+-static unsigned int efi_rs_on_cpu = NR_CPUS;
+ #endif
+ 
+ UINTN __read_mostly efi_memmap_size;
+@@ -90,6 +89,11 @@ struct efi_rs_state efi_rs_enter(void)
+     if ( mfn_eq(efi_l4_mfn, INVALID_MFN) )
+         return state;
+ 
++    /*
++     * If in lazy idle context switch state sync now to avoid an incoming
++     * FLUSH_VCPU_STATE IPI changing the loaded page-tables.
++     */
++    sync_local_execstate();
+     state.cr3 = read_cr3();
+     save_fpu_enable();
+     asm volatile ( "fnclex; fldcw %0" :: "m" (fcw) );
+@@ -97,8 +101,6 @@ struct efi_rs_state efi_rs_enter(void)
+ 
+     spin_lock(&efi_rs_lock);
+ 
+-    efi_rs_on_cpu = smp_processor_id();
+-
+     /* prevent fixup_page_fault() from doing anything */
+     irq_enter();
+ 
+@@ -113,7 +115,8 @@ struct efi_rs_state efi_rs_enter(void)
+         lgdt(&gdt_desc);
+     }
+ 
+-    switch_cr3_cr4(mfn_to_maddr(efi_l4_mfn), read_cr4());
++    switch_cr3_cr4(idle_vcpu[smp_processor_id()], mfn_to_maddr(efi_l4_mfn),
++                   read_cr4());
+ 
+     /*
+      * At the time of writing (2022), no UEFI firwmare is CET-IBT compatible.
+@@ -141,7 +144,7 @@ void efi_rs_leave(struct efi_rs_state *state)
+     if ( state->msr_s_cet )
+         wrmsrl(MSR_S_CET, state->msr_s_cet);
+ 
+-    switch_cr3_cr4(state->cr3, read_cr4());
++    switch_cr3_cr4(curr, state->cr3, read_cr4());
+     if ( is_pv_vcpu(curr) && !is_idle_vcpu(curr) )
+     {
+         struct desc_ptr gdt_desc = {
+@@ -152,18 +155,10 @@ void efi_rs_leave(struct efi_rs_state *state)
+         lgdt(&gdt_desc);
+     }
+     irq_exit();
+-    efi_rs_on_cpu = NR_CPUS;
+     spin_unlock(&efi_rs_lock);
+     vcpu_restore_fpu_nonlazy(curr, true);
+ }
+ 
+-bool efi_rs_using_pgtables(void)
+-{
+-    return !mfn_eq(efi_l4_mfn, INVALID_MFN) &&
+-           (smp_processor_id() == efi_rs_on_cpu) &&
+-           (read_cr3() == mfn_to_maddr(efi_l4_mfn));
+-}
+-
+ unsigned long efi_get_time(void)
+ {
+     EFI_TIME time;
+diff --git a/xen/include/xen/efi.h b/xen/include/xen/efi.h
+index 160804e29444..356be1705a54 100644
+--- a/xen/include/xen/efi.h
++++ b/xen/include/xen/efi.h
+@@ -42,7 +42,6 @@ static inline bool efi_enabled(unsigned int feature)
+ 
+ void efi_init_memory(void);
+ bool efi_boot_mem_unused(unsigned long *start, unsigned long *end);
+-bool efi_rs_using_pgtables(void);
+ unsigned long efi_get_time(void);
+ void efi_halt_system(void);
+ void efi_reset_system(bool warm);
+-- 
+2.53.0
+
