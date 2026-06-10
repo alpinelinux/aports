@@ -2,7 +2,7 @@
 
 This documents defines a policy for writing APKBUILDs.
 
-# Standard selection
+# Standard Selection
 
 APKBUILDs are POSIX shell scripts as defined in
 [POSIX.1-2017 Volume 3][POSIX.1-2017 volume 3]. Additionally, the following
@@ -52,13 +52,13 @@ Put `; do` and `; then` on the same line as the `while`, `for` or `if`.
 * Don't use spacing between function name and parenthesis.
 * Do use spacing between function parenthesis and curly brackets.
 
-### Case statement
+### Case Statement
 
 * Don't indent alternatives.
 * A one-line alternative needs a space after the close parenthesis of the pattern and before the `;;`.
 * End the last case with `;;`.
 
-### Variable expansion
+### Variable Expansion
 
 * Use `${var}` over `$var` only when it is strictly necessary. Meaning:
   Only if the character following the [variable name][POSIX.1-2017 definition name]
@@ -124,7 +124,7 @@ Put `; do` and `; then` on the same line as the `while`, `for` or `if`.
 * Use TODO comments for code that is temporary, a short-term solution,
   or good-enough but not perfect.
 
-# APKBUILD style considerations
+# APKBUILD Style Considerations
 
 <!--
 This section attempts to document policies enforced by the linter from
@@ -169,7 +169,7 @@ Metadata Variables are variables used directly by abuild itself, e.g. `pkgname` 
 * In the case of package being abandoned, the variable should still be present,
   but left empty: `maintainer=""`.
 
-### Metadata order
+### Metadata Order
 
 The maintainer variable should be immediately followed by `pkgname`, `pkgver`
 and `pkgrel`, in that order. This is to ease review and assignment as the
