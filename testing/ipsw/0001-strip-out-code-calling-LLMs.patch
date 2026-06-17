@@ -1,0 +1,4237 @@
+From 3fa1eb3c9dcf0eab41880749aa9bfc619d30ec39 Mon Sep 17 00:00:00 2001
+From: Aster Boese <asterboese@mailbox.org>
+Date: Wed, 17 Jun 2026 21:39:21 +0200
+Subject: [PATCH] strip out code calling LLMs
+
+I don't want to help debug random failures that come from this. These never
+work anyways.
+
+Signed-off-by: Aster Boese <asterboese@mailbox.org>
+---
+ cmd/ipsw/cmd/dyld/dyld_disass.go     | 572 --------------------------
+ cmd/ipsw/cmd/macho/macho_disass.go   | 445 --------------------
+ internal/ai/acp/acp.go               | 579 ---------------------------
+ internal/ai/acp/acp_test.go          | 403 -------------------
+ internal/ai/ai.go                    | 363 -----------------
+ internal/ai/anthropic/anthropic.go   | 144 -------
+ internal/ai/copilot/copilot.go       | 509 -----------------------
+ internal/ai/gemini/gemini.go         | 146 -------
+ internal/ai/ollama/ollama.go         | 160 --------
+ internal/ai/openai/openai.go         | 131 ------
+ internal/ai/openrouter/openrouter.go | 259 ------------
+ internal/ai/utils/utils.go           |  27 --
+ internal/commands/disass/disass.go   | 145 -------
+ internal/db/ai/cache.go              | 181 ---------
+ internal/model/ai/cache.go           |  38 --
+ 15 files changed, 4102 deletions(-)
+ delete mode 100644 cmd/ipsw/cmd/dyld/dyld_disass.go
+ delete mode 100644 cmd/ipsw/cmd/macho/macho_disass.go
+ delete mode 100644 internal/ai/acp/acp.go
+ delete mode 100644 internal/ai/acp/acp_test.go
+ delete mode 100644 internal/ai/ai.go
+ delete mode 100644 internal/ai/anthropic/anthropic.go
+ delete mode 100644 internal/ai/copilot/copilot.go
+ delete mode 100644 internal/ai/gemini/gemini.go
+ delete mode 100644 internal/ai/ollama/ollama.go
+ delete mode 100644 internal/ai/openai/openai.go
+ delete mode 100644 internal/ai/openrouter/openrouter.go
+ delete mode 100644 internal/ai/utils/utils.go
+ delete mode 100644 internal/commands/disass/disass.go
+ delete mode 100644 internal/db/ai/cache.go
+ delete mode 100644 internal/model/ai/cache.go
+
+diff --git a/cmd/ipsw/cmd/dyld/dyld_disass.go b/cmd/ipsw/cmd/dyld/dyld_disass.go
+deleted file mode 100644
+index a408f0bf2..000000000
+--- a/cmd/ipsw/cmd/dyld/dyld_disass.go
++++ /dev/null
+@@ -1,572 +0,0 @@
+-/*
+-Copyright © 2018-2026 blacktop
+-
+-Permission is hereby granted, free of charge, to any person obtaining a copy
+-of this software and associated documentation files (the "Software"), to deal
+-in the Software without restriction, including without limitation the rights
+-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+-copies of the Software, and to permit persons to whom the Software is
+-furnished to do so, subject to the following conditions:
+-
+-The above copyright notice and this permission notice shall be included in
+-all copies or substantial portions of the Software.
+-
+-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+-THE SOFTWARE.
+-*/
+-package dyld
+-
+-import (
+-	"encoding/json"
+-	"fmt"
+-	"os"
+-	"path/filepath"
+-	"strings"
+-	"time"
+-
+-	"github.com/MakeNowJust/heredoc/v2"
+-	"github.com/alecthomas/chroma/v2/styles"
+-	"github.com/apex/log"
+-	"github.com/blacktop/ipsw/internal/ai"
+-	dcmd "github.com/blacktop/ipsw/internal/commands/disass"
+-	"github.com/blacktop/ipsw/pkg/disass"
+-	"github.com/blacktop/ipsw/pkg/dyld"
+-	"github.com/pkg/errors"
+-	"github.com/spf13/cobra"
+-	"github.com/spf13/viper"
+-)
+-
+-func init() {
+-	DyldCmd.AddCommand(DisassCmd)
+-	// DisassCmd.Flags().Uint64("slide", 0, "dyld_shared_cache slide to remove from --vaddr")
+-	DisassCmd.Flags().StringSliceP("image", "i", []string{}, "Dylib(s) to disassemble")
+-	DisassCmd.Flags().StringP("symbol", "s", "", "Function to disassemble")
+-	DisassCmd.Flags().String("symbol-image", "", "Dylib to search for symbol (speeds up symbol lookup)")
+-	DisassCmd.Flags().Uint64P("vaddr", "a", 0, "Virtual address to start disassembling")
+-	DisassCmd.Flags().Uint64P("count", "c", 0, "Number of instructions to disassemble")
+-	DisassCmd.Flags().Bool("dylibs", false, "Analyze all dylibs loaded by the image as well (could improve accuracy)")
+-	DisassCmd.Flags().BoolP("demangle", "d", false, "Demangle symbol names")
+-	DisassCmd.Flags().BoolP("dec", "D", false, "Decompile assembly")
+-	DisassCmd.Flags().String("dec-lang", "", "Language to decompile to (C, ObjC or Swift)")
+-	DisassCmd.Flags().String("dec-llm", "copilot", "LLM provider to use for decompilation (ollama, copilot, etc.)")
+-	DisassCmd.RegisterFlagCompletionFunc("dec-llm", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+-		return ai.Providers, cobra.ShellCompDirectiveDefault
+-	})
+-	DisassCmd.Flags().String("dec-model", "", "LLM model to use for decompilation")
+-	DisassCmd.Flags().Bool("dec-nocache", false, "Do not use decompilation cache")
+-	DisassCmd.Flags().Float64("dec-temp", 0.2, "LLM temperature for decompilation")
+-	DisassCmd.Flags().Float64("dec-top-p", 0.1, "LLM top_p for decompilation")
+-	DisassCmd.Flags().Int("dec-retries", 0, "Number of retries for LLM decompilation")
+-	DisassCmd.Flags().Duration("dec-retry-backoff", 30*time.Second, "Backoff time between retries (e.g. '30s', '2m')")
+-	DisassCmd.Flags().String("dec-theme", "nord", "Decompilation color theme (nord, github, etc)")
+-	DisassCmd.RegisterFlagCompletionFunc("dec-theme", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+-		return styles.Names(), cobra.ShellCompDirectiveNoFileComp
+-	})
+-	DisassCmd.Flags().BoolP("json", "j", false, "Output as JSON")
+-	DisassCmd.Flags().BoolP("quiet", "q", false, "Do NOT markup analysis (Faster)")
+-	DisassCmd.Flags().Bool("force", false, "Continue to disassemble even if there are analysis errors")
+-	DisassCmd.Flags().String("input", "", "Input function JSON file")
+-	DisassCmd.Flags().String("cache", "", "Path to .a2s addr to sym cache file (speeds up analysis)")
+-	DisassCmd.MarkFlagsMutuallyExclusive("symbol", "vaddr", "input", "image")
+-	// DisassCmd.Flags().Bool("replace", false, "Replace .a2s")
+-	viper.BindPFlag("dyld.disass.image", DisassCmd.Flags().Lookup("image"))
+-	viper.BindPFlag("dyld.disass.symbol", DisassCmd.Flags().Lookup("symbol"))
+-	viper.BindPFlag("dyld.disass.symbol-image", DisassCmd.Flags().Lookup("symbol-image"))
+-	viper.BindPFlag("dyld.disass.vaddr", DisassCmd.Flags().Lookup("vaddr"))
+-	viper.BindPFlag("dyld.disass.count", DisassCmd.Flags().Lookup("count"))
+-	viper.BindPFlag("dyld.disass.dylibs", DisassCmd.Flags().Lookup("dylibs"))
+-	viper.BindPFlag("dyld.disass.demangle", DisassCmd.Flags().Lookup("demangle"))
+-	viper.BindPFlag("dyld.disass.dec", DisassCmd.Flags().Lookup("dec"))
+-	viper.BindPFlag("dyld.disass.dec-lang", DisassCmd.Flags().Lookup("dec-lang"))
+-	viper.BindPFlag("dyld.disass.dec-llm", DisassCmd.Flags().Lookup("dec-llm"))
+-	viper.BindPFlag("dyld.disass.dec-model", DisassCmd.Flags().Lookup("dec-model"))
+-	viper.BindPFlag("dyld.disass.dec-nocache", DisassCmd.Flags().Lookup("dec-nocache"))
+-	viper.BindPFlag("dyld.disass.dec-temp", DisassCmd.Flags().Lookup("dec-temp"))
+-	viper.BindPFlag("dyld.disass.dec-top-p", DisassCmd.Flags().Lookup("dec-top-p"))
+-	viper.BindPFlag("dyld.disass.dec-retries", DisassCmd.Flags().Lookup("dec-retries"))
+-	viper.BindPFlag("dyld.disass.dec-retry-backoff", DisassCmd.Flags().Lookup("dec-retry-backoff"))
+-	viper.BindPFlag("dyld.disass.dec-theme", DisassCmd.Flags().Lookup("dec-theme"))
+-	viper.BindPFlag("dyld.disass.json", DisassCmd.Flags().Lookup("json"))
+-	viper.BindPFlag("dyld.disass.quiet", DisassCmd.Flags().Lookup("quiet"))
+-	viper.BindPFlag("dyld.disass.force", DisassCmd.Flags().Lookup("force"))
+-	viper.BindPFlag("dyld.disass.color", DisassCmd.Flags().Lookup("color"))
+-	viper.BindPFlag("dyld.disass.input", DisassCmd.Flags().Lookup("input"))
+-	viper.BindPFlag("dyld.disass.cache", DisassCmd.Flags().Lookup("cache"))
+-	// viper.BindPFlag("dyld.disass.replace", DisassCmd.Flags().Lookup("replace"))
+-}
+-
+-// DisassCmd represents the disass command
+-var DisassCmd = &cobra.Command{
+-	Use:     "disass <DSC>",
+-	Aliases: []string{"dis"},
+-	Short:   "Disassemble at symbol/vaddr",
+-	Example: heredoc.Doc(`
+-		# Disassemble all images in dyld_shared_cache
+-		❯ ipsw dsc disass DSC
+-		# Disassemble a few dylibs in dyld_shared_cache (NOTE: multiple -i flags OR comma separated dylibs)
+-		❯ ipsw dsc disass DSC --image libsystem_kernel.dylib --image libsystem_platform.dylib,libsystem_pthread.dylib
+-		# Disassemble a symbol in dyld_shared_cache (NOTE: supply --symbol-image 'libsystem_malloc.dylib' for faster lookup)
+-		❯ ipsw dsc disass DSC --symbol _malloc
+-		# Disassemble a function at a virtual address in dyld_shared_cache
+-		❯ ipsw dsc disass DSC --vaddr 0x1b19d6940
+-		# Disassemble a function at a virtual address in dyld_shared_cache and output as JSON
+-		❯ ipsw dsc disass DSC --vaddr 0x1b19d6940 --json
+-		# Disassemble a function at a virtual address in dyld_shared_cache and demangle symbol names
+-		❯ ipsw dsc disass DSC --vaddr 0x1b19d6940 --demangle
+-		# Disassemble a function at a virtual address in dyld_shared_cache and do NOT markup analysis (Faster)
+-		❯ ipsw dsc disass DSC --vaddr 0x1b19d6940 --quiet
+-		# Decompile a function at a virtual address in dyld_shared_cache (via GitHub Copilot)
+-		❯ ipsw dsc disass DSC --vaddr 0x1b19d6940 --dec --dec-model "Claude 3.7 Sonnet"
+-		# Decompile a function using OpenRouter to access various models
+-		❯ ipsw dsc disass DSC --vaddr 0x1b19d6940 --dec --dec-llm openrouter --dec-model "OpenAI: GPT-4o-mini"`),
+-	Args: cobra.ExactArgs(1),
+-	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+-		return getDSCs(toComplete), cobra.ShellCompDirectiveDefault
+-	},
+-	SilenceErrors: true,
+-	RunE: func(cmd *cobra.Command, args []string) error {
+-
+-		var data []byte
+-		var middleAddr uint64
+-		var image *dyld.CacheImage
+-		var images []*dyld.CacheImage
+-
+-		// flags
+-		imageNames := viper.GetStringSlice("dyld.disass.image")
+-		symbolName := viper.GetString("dyld.disass.symbol")
+-		symbolImageName := viper.GetString("dyld.disass.symbol-image")
+-		startAddr := viper.GetUint64("dyld.disass.vaddr")
+-		instructions := viper.GetUint64("dyld.disass.count")
+-
+-		decompile := viper.GetBool("dyld.disass.dec")
+-		demangleFlag := viper.GetBool("dyld.disass.demangle")
+-		asJSON := viper.GetBool("dyld.disass.json")
+-		quiet := viper.GetBool("dyld.disass.quiet")
+-
+-		tempFlagSet := dcmd.FlagWasProvided(cmd, "dec-temp", "dyld.disass.dec-temp")
+-		topPFlagSet := dcmd.FlagWasProvided(cmd, "dec-top-p", "dyld.disass.dec-top-p")
+-
+-		funcFile := viper.GetString("dyld.disass.input")
+-		cacheFile := viper.GetString("dyld.disass.cache")
+-		// validate flags
+-		if len(symbolImageName) > 0 && len(symbolName) == 0 {
+-			return fmt.Errorf("you must also supply a --symbol with --symbol-image flag")
+-		}
+-		if viper.GetString("dyld.disass.dec-llm") != "" {
+-			if !ai.IsValidProvider(viper.GetString("dyld.disass.dec-llm")) {
+-				return fmt.Errorf("invalid LLM provider '%s', must be one of: %s", viper.GetString("dyld.disass.dec-llm"), strings.Join(ai.Providers, ", "))
+-			}
+-		}
+-
+-		dscPath := filepath.Clean(args[0])
+-
+-		fileInfo, err := os.Lstat(dscPath)
+-		if err != nil {
+-			return fmt.Errorf("file %s does not exist", dscPath)
+-		}
+-
+-		// Check if file is a symlink
+-		if fileInfo.Mode()&os.ModeSymlink != 0 {
+-			symlinkPath, err := os.Readlink(dscPath)
+-			if err != nil {
+-				return errors.Wrapf(err, "failed to read symlink %s", dscPath)
+-			}
+-			// TODO: this seems like it would break
+-			linkParent := filepath.Dir(dscPath)
+-			linkRoot := filepath.Dir(linkParent)
+-
+-			dscPath = filepath.Join(linkRoot, symlinkPath)
+-		}
+-
+-		f, err := dyld.Open(dscPath)
+-		if err != nil {
+-			return err
+-		}
+-		defer f.Close()
+-
+-		if !f.IsArm64() {
+-			log.Errorf("can only disassemble arm64 caches")
+-			return nil
+-		}
+-
+-		if !quiet || len(symbolName) > 0 {
+-			if len(cacheFile) == 0 {
+-				cacheFile = dscPath + ".a2s"
+-			}
+-			if err := f.OpenOrCreateA2SCache(cacheFile); err != nil {
+-				return err
+-			}
+-		}
+-
+-		if len(symbolName) == 0 && startAddr == 0 && len(funcFile) == 0 { /* DEFAULT: disassemble image(s) */
+-
+-			if len(imageNames) == 0 {
+-				images = f.Images // disassemble ALL images
+-			} else {
+-				for _, name := range imageNames {
+-					image, err := f.Image(name)
+-					if err != nil {
+-						return fmt.Errorf("failed to find image %s: %v", name, err)
+-					}
+-					images = append(images, image)
+-				}
+-			}
+-
+-			for _, image := range images {
+-				m, err := image.GetMacho()
+-				if err != nil {
+-					return err
+-				}
+-				defer m.Close()
+-
+-				for idx, fn := range m.GetFunctions() {
+-					data, err := m.GetFunctionData(fn)
+-					if err != nil {
+-						log.Errorf("failed to get data for function: %v", err)
+-						continue
+-					}
+-
+-					engine := dyld.NewDyldDisass(f, &disass.Config{
+-						Image:        image.Name,
+-						Data:         data,
+-						StartAddress: fn.StartAddr,
+-						Middle:       0,
+-						AsJSON:       asJSON,
+-						Demangle:     demangleFlag,
+-						Quiet:        quiet,
+-						Color:        viper.GetBool("color") && !viper.GetBool("no-color") && !decompile,
+-					})
+-
+-					if !quiet {
+-						//***********************
+-						//* First pass ANALYSIS *
+-						//***********************
+-						if err := image.Analyze(); err != nil {
+-							if !viper.GetBool("dyld.disass.force") {
+-								return fmt.Errorf("failed to analyze image %s: %v (use --force to continue anyway)", filepath.Base(image.Name), err)
+-							}
+-						}
+-						if err := engine.Triage(); err != nil {
+-							return fmt.Errorf("first pass triage failed: %v", err)
+-						}
+-						if viper.GetBool("dyld.disass.dylibs") {
+-							for _, img := range engine.Dylibs() {
+-								if err := img.Analyze(); err != nil {
+-									if !viper.GetBool("dyld.disass.force") {
+-										return fmt.Errorf("failed to analyze image %s: %v (use --force to continue anyway)", filepath.Base(img.Name), err)
+-									}
+-								}
+-							}
+-						}
+-					} else {
+-						if !asJSON {
+-							if idx == 0 {
+-								fmt.Printf("sub_%x:\n", fn.StartAddr)
+-							} else {
+-								fmt.Printf("\nsub_%x:\n", fn.StartAddr)
+-							}
+-						}
+-					}
+-					//***************
+-					//* DISASSEMBLE *
+-					//***************
+-					asm := disass.Disassemble(engine)
+-					if decompile && len(asm) > 0 {
+-						decmp, err := dcmd.Decompile(asm, &dcmd.Config{
+-							UUID:           f.UUID.String(),
+-							LLM:            viper.GetString("dyld.disass.dec-llm"),
+-							Language:       viper.GetString("dyld.disass.dec-lang"),
+-							Model:          viper.GetString("dyld.disass.dec-model"),
+-							Temperature:    viper.GetFloat64("dyld.disass.dec-temp"),
+-							TemperatureSet: tempFlagSet,
+-							TopP:           viper.GetFloat64("dyld.disass.dec-top-p"),
+-							TopPSet:        topPFlagSet,
+-							Stream:         false,
+-							DisableCache:   viper.GetBool("dyld.disass.dec-nocache"),
+-							Verbose:        viper.GetBool("verbose"),
+-							Color:          viper.GetBool("color") && !viper.GetBool("no-color"),
+-							Theme:          viper.GetString("dyld.disass.dec-theme"),
+-							MaxRetries:     viper.GetInt("dyld.disass.dec-retries"),
+-							RetryBackoff:   viper.GetDuration("dyld.disass.dec-retry-backoff"),
+-						})
+-						if err != nil {
+-							return fmt.Errorf("failed to decompile via llm: %v", err)
+-						}
+-						fmt.Println(decmp)
+-					} else {
+-						fmt.Println(asm)
+-					}
+-				}
+-			}
+-
+-		} else { /* disassemble symbol, vaddr or input func file */
+-
+-			if len(symbolName) > 0 {
+-				// Calculate start address from symbol
+-				log.Info("Locating symbol: " + symbolName)
+-				if len(symbolImageName) > 0 {
+-					image, err = f.Image(symbolImageName)
+-					if err != nil {
+-						return fmt.Errorf("failed to find image %s: %v", symbolImageName, err)
+-					}
+-					sym, err := image.GetSymbol(symbolName)
+-					if err != nil {
+-						return err
+-					}
+-					startAddr = sym.Address
+-				} else {
+-					startAddr, image, err = f.GetSymbolAddress(symbolName)
+-					if err != nil {
+-						return err
+-					}
+-					log.Infof("Found symbol in %s", filepath.Base(image.Name))
+-				}
+-			}
+-
+-			if len(funcFile) > 0 { // INPUT FUNC FILE
+-				funcFile = filepath.Clean(funcFile)
+-				fdata, _ := os.ReadFile(funcFile)
+-
+-				var funcs []dscFunc
+-				if err := json.Unmarshal(fdata, &funcs); err != nil {
+-					return fmt.Errorf("failed to parse function JSON file %s: %v", funcFile, err)
+-				}
+-
+-				for _, fn := range funcs {
+-					funcImage, err := resolveDscFuncImage(f, fn)
+-					if err != nil {
+-						return err
+-					}
+-
+-					uuid, off, err := f.GetOffset(fn.Start)
+-					if err != nil {
+-						return err
+-					}
+-
+-					data, err := f.ReadBytesForUUID(uuid, int64(off), fn.Size)
+-					if err != nil {
+-						return err
+-					}
+-
+-					engine := dyld.NewDyldDisass(f, &disass.Config{
+-						Image:        funcImage.Name,
+-						Data:         data,
+-						StartAddress: fn.Start,
+-						Middle:       0,
+-						AsJSON:       asJSON,
+-						Demangle:     demangleFlag,
+-						Quiet:        quiet,
+-						Color:        viper.GetBool("color") && !viper.GetBool("no-color") && !decompile,
+-					})
+-
+-					if !quiet {
+-						//***********************
+-						//* First pass ANALYSIS *
+-						//***********************
+-						image = funcImage
+-						if err := image.Analyze(); err != nil {
+-							if !viper.GetBool("dyld.disass.force") {
+-								return fmt.Errorf("failed to analyze image %s: %v (use --force to continue anyway)", filepath.Base(image.Name), err)
+-							}
+-						}
+-						if err := engine.Triage(); err != nil {
+-							return fmt.Errorf("first pass triage failed: %v", err)
+-						}
+-						if viper.GetBool("dyld.disass.dylibs") {
+-							for _, img := range engine.Dylibs() {
+-								if err := img.Analyze(); err != nil {
+-									if !viper.GetBool("dyld.disass.force") {
+-										return fmt.Errorf("failed to analyze image %s: %v (use --force to continue anyway)", filepath.Base(img.Name), err)
+-									}
+-								}
+-							}
+-						}
+-					} else {
+-						if !asJSON {
+-							if len(fn.Name) > 0 {
+-								fmt.Printf("\n%s:\n", fn.Name)
+-							} else {
+-								fmt.Printf("\nsub_%x:\n", fn.Start)
+-							}
+-						}
+-					}
+-
+-					//***************
+-					//* DISASSEMBLE *
+-					//***************
+-					asm := disass.Disassemble(engine)
+-					if decompile && len(asm) > 0 {
+-						decmp, err := dcmd.Decompile(asm, &dcmd.Config{
+-							UUID:           f.UUID.String(),
+-							LLM:            viper.GetString("dyld.disass.dec-llm"),
+-							Language:       viper.GetString("dyld.disass.dec-lang"),
+-							Model:          viper.GetString("dyld.disass.dec-model"),
+-							Temperature:    viper.GetFloat64("dyld.disass.dec-temp"),
+-							TemperatureSet: tempFlagSet,
+-							TopP:           viper.GetFloat64("dyld.disass.dec-top-p"),
+-							TopPSet:        topPFlagSet,
+-							Stream:         false,
+-							DisableCache:   viper.GetBool("dyld.disass.dec-nocache"),
+-							Verbose:        viper.GetBool("verbose"),
+-							Color:          viper.GetBool("color") && !viper.GetBool("no-color"),
+-							Theme:          viper.GetString("dyld.disass.dec-theme"),
+-							MaxRetries:     viper.GetInt("dyld.disass.dec-retries"),
+-							RetryBackoff:   viper.GetDuration("dyld.disass.dec-retry-backoff"),
+-						})
+-						if err != nil {
+-							return fmt.Errorf("failed to decompile via llm: %v", err)
+-						}
+-						fmt.Println(decmp)
+-					} else {
+-						fmt.Println(asm)
+-					}
+-				}
+-			} else { // SYMBOL or VAADDR
+-				/*
+-				* Read in data to disassemble
+-				 */
+-				if instructions > 0 {
+-					uuid, off, err := f.GetOffset(startAddr)
+-					if err != nil {
+-						return err
+-					}
+-					data, err = f.ReadBytesForUUID(uuid, int64(off), instructions*4)
+-					if err != nil {
+-						return err
+-					}
+-				} else {
+-					if image, err = f.GetImageContainingVMAddr(startAddr); err == nil {
+-						if !quiet {
+-							if err := image.Analyze(); err != nil {
+-								if !viper.GetBool("dyld.disass.force") {
+-									return fmt.Errorf("failed to analyze image %s: %v (use --force to continue anyway)", filepath.Base(image.Name), err)
+-								}
+-							}
+-						}
+-						m, err := image.GetMacho()
+-						if err != nil {
+-							return err
+-						}
+-						defer m.Close()
+-						fn, err := m.GetFunctionForVMAddr(startAddr)
+-						if err != nil {
+-							return fmt.Errorf("failed to find function for 0x%x: %v", startAddr, err)
+-						}
+-						uuid, soff, err := f.GetOffset(fn.StartAddr)
+-						if err != nil {
+-							return err
+-						}
+-						data, err = f.ReadBytesForUUID(uuid, int64(soff), uint64(fn.EndAddr-fn.StartAddr))
+-						if err != nil {
+-							return err
+-						}
+-						if startAddr != fn.StartAddr {
+-							middleAddr = startAddr
+-							startAddr = fn.StartAddr
+-						}
+-					} else { // vmaddr not in image; fallback to reading instructions but set count to 100
+-						log.WithError(err).Warn("failed to find image containing vmaddr; falling back to reading raw instructions")
+-						if instructions == 0 {
+-							log.Warn("setting instruction count to 100, to change use --count flag")
+-							instructions = 100
+-						}
+-						uuid, off, err := f.GetOffset(startAddr)
+-						if err != nil {
+-							return err
+-						}
+-						data, err = f.ReadBytesForUUID(uuid, int64(off), instructions*4)
+-						if err != nil {
+-							return err
+-						}
+-					}
+-				}
+-				if data == nil {
+-					log.Fatal("failed to disassemble")
+-				}
+-
+-				// // Apply slide
+-				// if slide > 0 {
+-				// 	startAddr = startAddr - slide
+-				// }
+-				var imageName string
+-				if image != nil {
+-					imageName = image.Name
+-				}
+-
+-				engine := dyld.NewDyldDisass(f, &disass.Config{
+-					Image:        imageName,
+-					Data:         data,
+-					StartAddress: startAddr,
+-					Middle:       middleAddr,
+-					AsJSON:       asJSON,
+-					Demangle:     demangleFlag,
+-					Quiet:        quiet,
+-					Color:        viper.GetBool("color") && !viper.GetBool("no-color") && !decompile,
+-				})
+-
+-				if !quiet {
+-					//***********************
+-					//* First pass ANALYSIS *
+-					//***********************
+-					if err := engine.Triage(); err != nil {
+-						return fmt.Errorf("first pass triage failed: %v (use --force to continue anyway)", err)
+-					}
+-					if viper.GetBool("dyld.disass.dylibs") {
+-						for _, img := range engine.Dylibs() {
+-							if err := img.Analyze(); err != nil {
+-								if !viper.GetBool("dyld.disass.force") {
+-									return fmt.Errorf("failed to analyze image %s: %v (use --force to continue anyway)", filepath.Base(img.Name), err)
+-								}
+-							}
+-						}
+-					}
+-				} else {
+-					if !asJSON {
+-						if len(symbolName) > 0 {
+-							fmt.Printf("%s:\n", symbolName)
+-						} else {
+-							fmt.Printf("sub_%x:\n", startAddr)
+-						}
+-					}
+-				}
+-
+-				//***************
+-				//* DISASSEMBLE *
+-				//***************
+-				asm := disass.Disassemble(engine)
+-				if decompile && len(asm) > 0 {
+-					decmp, err := dcmd.Decompile(asm, &dcmd.Config{
+-						UUID:           f.UUID.String(),
+-						LLM:            viper.GetString("dyld.disass.dec-llm"),
+-						Language:       viper.GetString("dyld.disass.dec-lang"),
+-						Model:          viper.GetString("dyld.disass.dec-model"),
+-						Temperature:    viper.GetFloat64("dyld.disass.dec-temp"),
+-						TemperatureSet: tempFlagSet,
+-						TopP:           viper.GetFloat64("dyld.disass.dec-top-p"),
+-						TopPSet:        topPFlagSet,
+-						Stream:         false,
+-						DisableCache:   viper.GetBool("dyld.disass.dec-nocache"),
+-						Verbose:        viper.GetBool("verbose"),
+-						Color:          viper.GetBool("color") && !viper.GetBool("no-color"),
+-						Theme:          viper.GetString("dyld.disass.dec-theme"),
+-						MaxRetries:     viper.GetInt("dyld.disass.dec-retries"),
+-						RetryBackoff:   viper.GetDuration("dyld.disass.dec-retry-backoff"),
+-					})
+-					if err != nil {
+-						return fmt.Errorf("failed to decompile via llm: %v", err)
+-					}
+-					fmt.Println(decmp)
+-				} else {
+-					fmt.Println(asm)
+-				}
+-			}
+-		}
+-
+-		return nil
+-	},
+-}
+diff --git a/cmd/ipsw/cmd/macho/macho_disass.go b/cmd/ipsw/cmd/macho/macho_disass.go
+deleted file mode 100644
+index 303a9e941..000000000
+--- a/cmd/ipsw/cmd/macho/macho_disass.go
++++ /dev/null
+@@ -1,445 +0,0 @@
+-/*
+-Copyright © 2018-2026 blacktop
+-
+-Permission is hereby granted, free of charge, to any person obtaining a copy
+-of this software and associated documentation files (the "Software"), to deal
+-in the Software without restriction, including without limitation the rights
+-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+-copies of the Software, and to permit persons to whom the Software is
+-furnished to do so, subject to the following conditions:
+-
+-The above copyright notice and this permission notice shall be included in
+-all copies or substantial portions of the Software.
+-
+-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+-THE SOFTWARE.
+-*/
+-package macho
+-
+-import (
+-	"context"
+-	"fmt"
+-	"path/filepath"
+-	"strings"
+-	"time"
+-
+-	"github.com/alecthomas/chroma/v2/styles"
+-	"github.com/apex/log"
+-	"github.com/blacktop/go-macho"
+-	"github.com/blacktop/go-macho/types"
+-	"github.com/blacktop/ipsw/internal/ai"
+-	dcmd "github.com/blacktop/ipsw/internal/commands/disass"
+-	mcmd "github.com/blacktop/ipsw/internal/commands/macho"
+-	"github.com/blacktop/ipsw/internal/magic"
+-	"github.com/blacktop/ipsw/pkg/disass"
+-	"github.com/caarlos0/ctrlc"
+-	"github.com/pkg/errors"
+-	"github.com/spf13/cobra"
+-	"github.com/spf13/viper"
+-)
+-
+-func init() {
+-	MachoCmd.AddCommand(machoDisassCmd)
+-	// machoDisassCmd.Flags().Uint64("slide", 0, "MachO slide to remove from --vaddr")
+-	machoDisassCmd.Flags().String("arch", "", "Which architecture to use for fat/universal MachO")
+-	machoDisassCmd.Flags().BoolP("entry", "e", false, "Disassemble entry point")
+-	machoDisassCmd.Flags().StringP("symbol", "s", "", "Function to disassemble")
+-	machoDisassCmd.Flags().Uint64P("vaddr", "a", 0, "Virtual address to start disassembling")
+-	machoDisassCmd.Flags().Uint64P("off", "o", 0, "File offset to start disassembling")
+-	machoDisassCmd.Flags().Uint64P("count", "c", 0, "Number of instructions to disassemble")
+-	machoDisassCmd.Flags().BoolP("demangle", "d", false, "Demangle symbol names")
+-	machoDisassCmd.Flags().BoolP("dec", "D", false, "Decompile assembly")
+-	machoDisassCmd.Flags().String("dec-lang", "", "Language to decompile to (C, ObjC or Swift)")
+-	machoDisassCmd.Flags().String("dec-llm", "copilot", "LLM provider to use for decompilation (ollama, copilot, etc.)")
+-	machoDisassCmd.RegisterFlagCompletionFunc("dec-llm", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+-		return ai.Providers, cobra.ShellCompDirectiveDefault
+-	})
+-	machoDisassCmd.Flags().String("dec-model", "", "LLM model to use for decompilation")
+-	machoDisassCmd.Flags().Bool("dec-nocache", false, "Do not use decompilation cache")
+-	machoDisassCmd.Flags().Float64("dec-temp", 0.2, "LLM temperature for decompilation")
+-	machoDisassCmd.Flags().Float64("dec-top-p", 0.1, "LLM top_p for decompilation")
+-	machoDisassCmd.Flags().Int("dec-retries", 0, "Number of retries for LLM decompilation")
+-	machoDisassCmd.Flags().Duration("dec-retry-backoff", 30*time.Second, "Backoff time between retries (e.g. '30s', '2m')")
+-	machoDisassCmd.Flags().String("dec-theme", "nord", "Decompilation color theme (nord, github, etc)")
+-	machoDisassCmd.RegisterFlagCompletionFunc("dec-theme", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+-		return styles.Names(), cobra.ShellCompDirectiveNoFileComp
+-	})
+-	machoDisassCmd.Flags().BoolP("json", "j", false, "Output as JSON")
+-	machoDisassCmd.Flags().BoolP("quiet", "q", false, "Do NOT markup analysis (Faster)")
+-	machoDisassCmd.Flags().Bool("force", false, "Continue to disassemble even if there are analysis errors")
+-	// machoDisassCmd.Flags().StringP("input", "i", "", "Input function JSON file")
+-	machoDisassCmd.Flags().StringP("fileset-entry", "t", "", "Which fileset entry to analyze")
+-	machoDisassCmd.Flags().BoolP("all-fileset-entries", "z", false, "Parse all fileset entries")
+-	machoDisassCmd.Flags().StringP("section", "x", "", "Disassemble an entire segment/section (i.e. __TEXT_EXEC.__text)")
+-	machoDisassCmd.Flags().String("cache", "", "Path to .a2s addr to sym cache file (speeds up analysis)")
+-	machoDisassCmd.MarkFlagsMutuallyExclusive("entry", "symbol", "vaddr", "off")
+-
+-	viper.BindPFlag("macho.disass.arch", machoDisassCmd.Flags().Lookup("arch"))
+-	viper.BindPFlag("macho.disass.entry", machoDisassCmd.Flags().Lookup("entry"))
+-	viper.BindPFlag("macho.disass.symbol", machoDisassCmd.Flags().Lookup("symbol"))
+-	viper.BindPFlag("macho.disass.vaddr", machoDisassCmd.Flags().Lookup("vaddr"))
+-	viper.BindPFlag("macho.disass.off", machoDisassCmd.Flags().Lookup("off"))
+-	viper.BindPFlag("macho.disass.count", machoDisassCmd.Flags().Lookup("count"))
+-	viper.BindPFlag("macho.disass.demangle", machoDisassCmd.Flags().Lookup("demangle"))
+-	viper.BindPFlag("macho.disass.dec", machoDisassCmd.Flags().Lookup("dec"))
+-	viper.BindPFlag("macho.disass.dec-lang", machoDisassCmd.Flags().Lookup("dec-lang"))
+-	viper.BindPFlag("macho.disass.dec-llm", machoDisassCmd.Flags().Lookup("dec-llm"))
+-	viper.BindPFlag("macho.disass.dec-model", machoDisassCmd.Flags().Lookup("dec-model"))
+-	viper.BindPFlag("macho.disass.dec-nocache", machoDisassCmd.Flags().Lookup("dec-nocache"))
+-	viper.BindPFlag("macho.disass.dec-temp", machoDisassCmd.Flags().Lookup("dec-temp"))
+-	viper.BindPFlag("macho.disass.dec-top-p", machoDisassCmd.Flags().Lookup("dec-top-p"))
+-	viper.BindPFlag("macho.disass.dec-retries", machoDisassCmd.Flags().Lookup("dec-retries"))
+-	viper.BindPFlag("macho.disass.dec-retry-backoff", machoDisassCmd.Flags().Lookup("dec-retry-backoff"))
+-	viper.BindPFlag("macho.disass.dec-theme", machoDisassCmd.Flags().Lookup("dec-theme"))
+-	viper.BindPFlag("macho.disass.json", machoDisassCmd.Flags().Lookup("json"))
+-	viper.BindPFlag("macho.disass.quiet", machoDisassCmd.Flags().Lookup("quiet"))
+-	viper.BindPFlag("macho.disass.force", machoDisassCmd.Flags().Lookup("force"))
+-	// viper.BindPFlag("macho.disass.input", machoDisassCmd.Flags().Lookup("input"))
+-	viper.BindPFlag("macho.disass.fileset-entry", machoDisassCmd.Flags().Lookup("fileset-entry"))
+-	viper.BindPFlag("macho.disass.all-fileset-entries", machoDisassCmd.Flags().Lookup("all-fileset-entries"))
+-	viper.BindPFlag("macho.disass.section", machoDisassCmd.Flags().Lookup("section"))
+-	viper.BindPFlag("macho.disass.cache", machoDisassCmd.Flags().Lookup("cache"))
+-
+-	machoDisassCmd.MarkZshCompPositionalArgumentFile(1)
+-}
+-
+-// machoDisassCmd represents the dis command
+-var machoDisassCmd = &cobra.Command{
+-	Use:           "disass <MACHO>",
+-	Short:         "Disassemble ARM64 MachO at symbol/vaddr",
+-	Args:          cobra.MinimumNArgs(1),
+-	SilenceErrors: true,
+-	RunE: func(cmd *cobra.Command, args []string) error {
+-
+-		var err error
+-		var m *macho.File
+-		var ms []*macho.File
+-		var middleAddr uint64
+-		var engine *disass.MachoDisass
+-
+-		// flags
+-		selectedArch := viper.GetString("macho.disass.arch")
+-		entryStart := viper.GetBool("macho.disass.entry")
+-		symbolName := viper.GetString("macho.disass.symbol")
+-		startAddr := viper.GetUint64("macho.disass.vaddr")
+-		startOff := viper.GetUint64("macho.disass.off")
+-		instructions := viper.GetUint64("macho.disass.count")
+-		segmentSection := viper.GetString("macho.disass.section")
+-
+-		decompile := viper.GetBool("macho.disass.dec")
+-		demangleFlag := viper.GetBool("macho.disass.demangle")
+-		asJSON := viper.GetBool("macho.disass.json")
+-		quiet := viper.GetBool("macho.disass.quiet")
+-
+-		tempFlagSet := dcmd.FlagWasProvided(cmd, "dec-temp", "macho.disass.dec-temp")
+-		topPFlagSet := dcmd.FlagWasProvided(cmd, "dec-top-p", "macho.disass.dec-top-p")
+-
+-		// funcFile := viper.GetString("macho.disass.input")
+-		filesetEntry := viper.GetString("macho.disass.fileset-entry")
+-		cacheFile := viper.GetString("macho.disass.cache")
+-
+-		allFuncs := false
+-
+-		// validate args
+-		if len(symbolName) == 0 && startAddr == 0 && startOff == 0 && !entryStart {
+-			allFuncs = true
+-			// return fmt.Errorf("you must supply a --symbol OR --vaddr to disassemble")
+-		}
+-		if len(filesetEntry) > 0 && viper.GetBool("macho.disass.all-fileset-entries") {
+-			return fmt.Errorf("you can only use --fileset-entry OR --all-fileset-entries (not both)")
+-		} else if viper.GetBool("macho.disass.all-fileset-entries") && len(segmentSection) == 0 {
+-			log.Warn("you probably want to add --section '__TEXT_EXEC.__text'; as the NEW MH_FILESET entries don't ALL have LC_FUNCTION_STARTS (iOS18 added LC_FUNCTION_STARTS to all KEXTs ❤️)")
+-		}
+-		if viper.GetString("macho.disass.dec-llm") != "" {
+-			if !ai.IsValidProvider(viper.GetString("macho.disass.dec-llm")) {
+-				return fmt.Errorf("invalid LLM provider '%s', must be one of: %s", viper.GetString("macho.disass.dec-llm"), strings.Join(ai.Providers, ", "))
+-			}
+-		}
+-
+-		machoPath := filepath.Clean(args[0])
+-
+-		if ok, err := magic.IsMachO(machoPath); !ok {
+-			return fmt.Errorf("failed to detect file type: %v", err)
+-		}
+-
+-		mr, err := mcmd.OpenMachO(machoPath, selectedArch)
+-		if err != nil {
+-			return err
+-		}
+-		defer mr.Close()
+-		m = mr.File
+-
+-		if !strings.Contains(strings.ToLower(m.FileHeader.SubCPU.String(m.CPU)), "arm64") {
+-			return fmt.Errorf("can only disassemble arm64 binaries")
+-		}
+-
+-		if m.FileTOC.FileHeader.Type == types.MH_FILESET &&
+-			len(filesetEntry) == 0 && !viper.GetBool("macho.disass.all-fileset-entries") {
+-			return fmt.Errorf("file is a MH_FILESET, you must supply a --fileset-entry OR --all-fileset-entries")
+-		}
+-
+-		if len(filesetEntry) > 0 {
+-			if m.FileTOC.FileHeader.Type == types.MH_FILESET {
+-				m, err = m.GetFileSetFileByName(filesetEntry)
+-				if err != nil {
+-					return fmt.Errorf("failed to parse entry %s: %v", filesetEntry, err)
+-				}
+-			} else {
+-				log.Error("MachO type is not MH_FILESET (cannot use --fileset-entry)")
+-			}
+-			ms = append(ms, m)
+-		} else if viper.GetBool("macho.disass.all-fileset-entries") {
+-			for _, fe := range m.FileSets() {
+-				mfe, err := m.GetFileSetFileByName(fe.EntryID)
+-				if err != nil {
+-					return fmt.Errorf("failed to parse entry %s: %v", filesetEntry, err)
+-				}
+-				ms = append(ms, mfe)
+-			}
+-		} else {
+-			ms = append(ms, m)
+-		}
+-
+-		if err := ctrlc.Default.Run(context.Background(), func() error {
+-			for _, m := range ms {
+-				if entryStart {
+-					if main := m.GetLoadsByName("LC_MAIN"); len(main) == 0 {
+-						return fmt.Errorf("failed to find LC_MAIN in target when using --entry flag")
+-					} else {
+-						startAddr = main[0].(*macho.EntryPoint).EntryOffset + m.GetBaseAddress()
+-					}
+-				}
+-				if startAddr == 0 && startOff != 0 {
+-					if startAddr, err = m.GetVMAddress(startOff); err != nil {
+-						return fmt.Errorf("failed to get vmaddr for file offset %#x: %v", startOff, err)
+-					}
+-				}
+-
+-				if !quiet {
+-					if len(cacheFile) == 0 {
+-						cacheFile = machoPath + ".a2s"
+-					}
+-				}
+-
+-				if allFuncs && len(segmentSection) == 0 {
+-					for _, fn := range m.GetFunctions() {
+-						data, err := m.GetFunctionData(fn)
+-						if err != nil {
+-							log.Errorf("failed to get data for function: %v", err)
+-							continue
+-						}
+-
+-						engine = disass.NewMachoDisass(m, &disass.Config{
+-							Data:         data,
+-							StartAddress: fn.StartAddr,
+-							Middle:       0,
+-							AsJSON:       asJSON,
+-							Demangle:     demangleFlag,
+-							Quiet:        quiet,
+-							Color:        viper.GetBool("color") && !viper.GetBool("no-color") && !decompile,
+-						})
+-
+-						//***********************
+-						//* First pass ANALYSIS *
+-						//***********************
+-						if !quiet {
+-							if err := engine.OpenOrCreateSymMap(&cacheFile, machoPath); err != nil {
+-								return fmt.Errorf("failed to open or create symbol map: %v", err)
+-							}
+-							if err := engine.Triage(); err != nil {
+-								return fmt.Errorf("first pass triage failed: %v", err)
+-							}
+-							if engine.EmptySymMap() {
+-								if err := engine.Analyze(); err != nil {
+-									if !viper.GetBool("macho.disass.force") {
+-										return fmt.Errorf("MachO analysis failed: %v (use --force to continue anyway)", err)
+-									}
+-								}
+-							}
+-							if err := engine.SaveAddrToSymMap(cacheFile); err != nil {
+-								log.Errorf("failed to save symbol map: %v", err)
+-							}
+-						}
+-						//***************
+-						//* DISASSEMBLE *
+-						//***************
+-						asm := disass.Disassemble(engine)
+-						if decompile && len(asm) > 0 {
+-							decmp, err := dcmd.Decompile(asm, &dcmd.Config{
+-								UUID:           m.UUID().String(),
+-								LLM:            viper.GetString("macho.disass.dec-llm"),
+-								Language:       viper.GetString("macho.disass.dec-lang"),
+-								Model:          viper.GetString("macho.disass.dec-model"),
+-								Temperature:    viper.GetFloat64("macho.disass.dec-temp"),
+-								TemperatureSet: tempFlagSet,
+-								TopP:           viper.GetFloat64("macho.disass.dec-top-p"),
+-								TopPSet:        topPFlagSet,
+-								Stream:         false,
+-								DisableCache:   viper.GetBool("macho.disass.dec-nocache"),
+-								Verbose:        viper.GetBool("verbose"),
+-								Color:          viper.GetBool("color") && !viper.GetBool("no-color"),
+-								Theme:          viper.GetString("macho.disass.dec-theme"),
+-								MaxRetries:     viper.GetInt("macho.disass.dec-retries"),
+-								RetryBackoff:   viper.GetDuration("macho.disass.dec-retry-backoff"),
+-							})
+-							if err != nil {
+-								return fmt.Errorf("failed to decompile via llm: %v", err)
+-							}
+-							fmt.Println(decmp)
+-						} else {
+-							fmt.Println(asm)
+-						}
+-					}
+-				} else {
+-					if len(symbolName) > 0 {
+-						startAddr, err = m.FindSymbolAddress(symbolName)
+-						if err != nil {
+-							return err
+-						}
+-					} else if len(segmentSection) > 0 {
+-						parts := strings.Split(segmentSection, ".")
+-						if len(parts) != 2 {
+-							return fmt.Errorf("invalid --section format, must be segment.section")
+-						}
+-						if sec := m.Section(parts[0], parts[1]); sec != nil {
+-							startAddr = sec.Addr
+-							instructions = sec.Size / 4
+-						} else {
+-							return fmt.Errorf("failed to find section %s", segmentSection)
+-						}
+-					}
+-					// startAddr > 0 TODO: support slides
+-					// if slide > 0 {
+-					// 	startAddr = startAddr - slide
+-					// }
+-
+-					/*
+-					 * Read in data to disassemble
+-					 */
+-					var data []byte
+-					if instructions > 0 {
+-						off, err := m.GetOffset(startAddr)
+-						if err != nil {
+-							return err
+-						}
+-						data = make([]byte, instructions*4)
+-						if _, err := m.ReadAt(data, int64(off)); err != nil {
+-							return err
+-						}
+-					} else {
+-						if fn, err := m.GetFunctionForVMAddr(startAddr); err == nil {
+-							soff, err := m.GetOffset(fn.StartAddr)
+-							if err != nil {
+-								return err
+-							}
+-							data = make([]byte, uint64(fn.EndAddr-fn.StartAddr))
+-							if _, err := m.ReadAt(data, int64(soff)); err != nil {
+-								return err
+-							}
+-							if startAddr != fn.StartAddr {
+-								middleAddr = startAddr
+-								startAddr = fn.StartAddr
+-							}
+-						} else {
+-							log.Warnf("disassembling 100 instructions at %#x", startAddr)
+-							instructions = 100
+-							off, err := m.GetOffset(startAddr)
+-							if err != nil {
+-								return err
+-							}
+-							data = make([]byte, instructions*4)
+-							if _, err := m.ReadAt(data, int64(off)); err != nil {
+-								return err
+-							}
+-						}
+-					}
+-					if len(data) == 0 {
+-						log.Fatal("failed to disassemble")
+-					}
+-
+-					engine = disass.NewMachoDisass(m, &disass.Config{
+-						Data:         data,
+-						StartAddress: startAddr,
+-						Middle:       middleAddr,
+-						AsJSON:       asJSON,
+-						Demangle:     demangleFlag,
+-						Quiet:        quiet,
+-						Color:        viper.GetBool("color") && !viper.GetBool("no-color") && !decompile,
+-					})
+-
+-					//***********************
+-					//* First pass ANALYSIS *
+-					//***********************
+-					if !quiet {
+-						if err := engine.OpenOrCreateSymMap(&cacheFile, machoPath); err != nil {
+-							return fmt.Errorf("failed to open or create symbol map: %v", err)
+-						}
+-						if err := engine.Triage(); err != nil {
+-							return fmt.Errorf("first pass triage failed: %v", err)
+-						}
+-						// if engine.EmptySymMap() { FIXME: this is fast enough where we don't need to do this optimization
+-						if err := engine.Analyze(); err != nil {
+-							if !viper.GetBool("macho.disass.force") {
+-								return fmt.Errorf("MachO analysis failed: %v (use --force to continue anyway)", err)
+-							}
+-						}
+-						// }
+-						if entryStart {
+-							engine.SetStartSym(startAddr)
+-						}
+-						if err := engine.SaveAddrToSymMap(cacheFile); err != nil {
+-							log.Errorf("failed to save symbol map: %v", err)
+-						}
+-					}
+-					//***************
+-					//* DISASSEMBLE *
+-					//***************
+-					asm := disass.Disassemble(engine)
+-					if decompile && len(asm) > 0 {
+-						decmp, err := dcmd.Decompile(asm, &dcmd.Config{
+-							UUID:           m.UUID().String(),
+-							LLM:            viper.GetString("macho.disass.dec-llm"),
+-							Language:       viper.GetString("macho.disass.dec-lang"),
+-							Model:          viper.GetString("macho.disass.dec-model"),
+-							Temperature:    viper.GetFloat64("macho.disass.dec-temp"),
+-							TemperatureSet: tempFlagSet,
+-							TopP:           viper.GetFloat64("macho.disass.dec-top-p"),
+-							TopPSet:        topPFlagSet,
+-							Stream:         false,
+-							DisableCache:   viper.GetBool("macho.disass.dec-nocache"),
+-							Verbose:        viper.GetBool("verbose"),
+-							Color:          viper.GetBool("color") && !viper.GetBool("no-color"),
+-							Theme:          viper.GetString("macho.disass.dec-theme"),
+-							MaxRetries:     viper.GetInt("macho.disass.dec-retries"),
+-							RetryBackoff:   viper.GetDuration("macho.disass.dec-retry-backoff"),
+-						})
+-						if err != nil {
+-							return fmt.Errorf("failed to decompile via llm: %v", err)
+-						}
+-						fmt.Println(decmp)
+-					} else {
+-						fmt.Println(asm)
+-					}
+-				}
+-			}
+-			return nil
+-		}); err != nil {
+-			if errors.As(err, &ctrlc.ErrorCtrlC{}) {
+-				if !quiet {
+-					if err := engine.SaveAddrToSymMap(cacheFile); err != nil {
+-						log.Errorf("failed to save symbol map: %v", err)
+-					}
+-				}
+-				log.Warn("exiting...")
+-			} else {
+-				return err
+-			}
+-		}
+-		return nil
+-	},
+-}
+diff --git a/internal/ai/acp/acp.go b/internal/ai/acp/acp.go
+deleted file mode 100644
+index 7a6549cf7..000000000
+--- a/internal/ai/acp/acp.go
++++ /dev/null
+@@ -1,579 +0,0 @@
+-package acp
+-
+-import (
+-	"context"
+-	"fmt"
+-	"io"
+-	"log/slog"
+-	"os"
+-	"os/exec"
+-	"path/filepath"
+-	"strings"
+-	"sync"
+-	"time"
+-
+-	"github.com/apex/log"
+-	acp "github.com/coder/acp-go-sdk"
+-
+-	"github.com/blacktop/ipsw/internal/ai/utils"
+-)
+-
+-const maxACPStderrBytes = 4096
+-
+-type Config struct {
+-	Prompt      string  `json:"prompt"`
+-	Model       string  `json:"model"`
+-	Temperature float64 `json:"temperature"`
+-	TopP        float64 `json:"top_p"`
+-	Stream      bool    `json:"stream"`
+-
+-	Command string   `json:"-"`
+-	Args    []string `json:"-"`
+-	Env     []string `json:"-"`
+-	Verbose bool     `json:"-"`
+-}
+-
+-type ACP struct {
+-	ctx    context.Context
+-	conf   *Config
+-	models map[string]string
+-}
+-
+-var discardACPLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+-
+-func New(ctx context.Context, conf *Config) (*ACP, error) {
+-	if conf == nil {
+-		return nil, fmt.Errorf("acp: config is nil")
+-	}
+-	if strings.TrimSpace(conf.Command) == "" {
+-		return nil, fmt.Errorf("acp: command is required")
+-	}
+-	return &ACP{ctx: ctx, conf: conf}, nil
+-}
+-
+-func (c *ACP) Models() (map[string]string, error) {
+-	if len(c.models) > 0 {
+-		return c.models, nil
+-	}
+-
+-	// If the user pre-selected a model, treat it as the only selectable option.
+-	if strings.TrimSpace(c.conf.Model) != "" {
+-		c.models = map[string]string{c.conf.Model: c.conf.Model}
+-		return c.models, nil
+-	}
+-
+-	// Attempt to query supported models via ACP. The protocol exposes these as a
+-	// "model"-category session config option returned from `session/new`.
+-	models, err := c.fetchModelsViaACP()
+-	if err == nil && len(models) > 0 {
+-		c.models = models
+-		return c.models, nil
+-	}
+-	if err != nil && c.conf.Verbose {
+-		log.Debugf("acp: failed to fetch models (falling back to default): %v", err)
+-	}
+-
+-	// Fallback: the rest of the codebase expects at least one selectable model.
+-	c.models = map[string]string{"default": "default"}
+-	return c.models, nil
+-}
+-
+-func (c *ACP) fetchModelsViaACP() (map[string]string, error) {
+-	ctx, cancel := context.WithTimeout(c.ctx, 45*time.Second)
+-	defer cancel()
+-
+-	cmd := exec.CommandContext(ctx, c.conf.Command, c.conf.Args...)
+-	cmd.Env = append(os.Environ(), c.conf.Env...)
+-
+-	stdin, err := cmd.StdinPipe()
+-	if err != nil {
+-		return nil, fmt.Errorf("acp: failed to get stdin pipe: %w", err)
+-	}
+-	stdout, err := cmd.StdoutPipe()
+-	if err != nil {
+-		return nil, fmt.Errorf("acp: failed to get stdout pipe: %w", err)
+-	}
+-	stderr, err := cmd.StderrPipe()
+-	if err != nil {
+-		return nil, fmt.Errorf("acp: failed to get stderr pipe: %w", err)
+-	}
+-
+-	if err := cmd.Start(); err != nil {
+-		return nil, fmt.Errorf("acp: failed to start agent command '%s': %w", c.conf.Command, err)
+-	}
+-	stderrCapture := copyACPStderr(stderr, c.conf.Verbose)
+-	defer func() {
+-		_ = stdin.Close()
+-		_ = stdout.Close()
+-		_ = stderr.Close()
+-		if cmd.Process != nil {
+-			_ = cmd.Process.Kill()
+-		}
+-		_ = cmd.Wait()
+-	}()
+-
+-	clientConn, err := newClientConnection(stdin, stdout, c.conf.Verbose)
+-	if err != nil {
+-		return nil, err
+-	}
+-	if err := initializeClient(ctx, clientConn.conn); err != nil {
+-		return nil, stderrCapture.wrap(err)
+-	}
+-	sess, err := clientConn.conn.NewSession(ctx, acp.NewSessionRequest{
+-		Cwd:        clientConn.cwd,
+-		McpServers: []acp.McpServer{},
+-	})
+-	if err != nil {
+-		return nil, stderrCapture.wrap(fmt.Errorf("acp: newSession failed: %w", err))
+-	}
+-
+-	models := make(map[string]string)
+-	sel := modelConfigOption(sess.ConfigOptions)
+-	if sel == nil {
+-		return models, nil
+-	}
+-	for _, opt := range selectOptionValues(sel) {
+-		id := strings.TrimSpace(string(opt.Value))
+-		if id == "" {
+-			continue
+-		}
+-		key := strings.TrimSpace(opt.Name)
+-		if key == "" {
+-			key = id
+-		}
+-		if _, exists := models[key]; exists {
+-			key = fmt.Sprintf("%s (%s)", key, id)
+-		}
+-		models[key] = id
+-	}
+-
+-	return models, nil
+-}
+-
+-// modelConfigOption returns the model-selection config option the agent
+-// advertised in its session configuration, or nil if none is exposed. The ACP
+-// protocol surfaces model choices as a "select" session config option tagged
+-// with the "model" category.
+-func modelConfigOption(opts []acp.SessionConfigOption) *acp.SessionConfigOptionSelect {
+-	for i := range opts {
+-		sel := opts[i].Select
+-		if sel == nil || sel.Category == nil {
+-			continue
+-		}
+-		if *sel.Category == acp.SessionConfigOptionCategoryModel {
+-			return sel
+-		}
+-	}
+-	return nil
+-}
+-
+-// selectOptionValues flattens a select config option's grouped and ungrouped
+-// values into a single slice.
+-func selectOptionValues(sel *acp.SessionConfigOptionSelect) []acp.SessionConfigSelectOption {
+-	var out []acp.SessionConfigSelectOption
+-	if sel.Options.Ungrouped != nil {
+-		out = append(out, (*sel.Options.Ungrouped)...)
+-	}
+-	if sel.Options.Grouped != nil {
+-		for _, group := range *sel.Options.Grouped {
+-			out = append(out, group.Options...)
+-		}
+-	}
+-	return out
+-}
+-
+-func (c *ACP) SetModel(model string) error {
+-	model = strings.TrimSpace(model)
+-	if model == "" {
+-		return fmt.Errorf("no model specified")
+-	}
+-	if c.models == nil {
+-		c.models = make(map[string]string)
+-	}
+-	if modelID := strings.TrimSpace(c.models[model]); modelID != "" {
+-		c.models[modelID] = modelID
+-		c.conf.Model = modelID
+-		return nil
+-	}
+-	// ACP agents/adapters may accept arbitrary model IDs without a prior list.
+-	c.models[model] = model
+-	c.conf.Model = model
+-	return nil
+-}
+-
+-func (c *ACP) SetModels(models map[string]string) (map[string]string, error) {
+-	c.models = models
+-	return c.models, nil
+-}
+-
+-func (c *ACP) Verify() error {
+-	if strings.TrimSpace(c.conf.Model) == "" {
+-		return fmt.Errorf("no model specified")
+-	}
+-	if c.models == nil {
+-		c.models = make(map[string]string)
+-	}
+-	if _, ok := c.models[c.conf.Model]; !ok {
+-		c.models[c.conf.Model] = c.conf.Model
+-	}
+-	if c.models[c.conf.Model] == "" {
+-		return fmt.Errorf("model '%s' has empty ID", c.conf.Model)
+-	}
+-	return nil
+-}
+-
+-type collectingClient struct {
+-	mu sync.Mutex
+-	b  strings.Builder
+-
+-	cwd string
+-}
+-
+-var _ acp.Client = (*collectingClient)(nil)
+-
+-func (c *collectingClient) RequestPermission(ctx context.Context, p acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+-	if id, ok := autoApprovedPermissionOption(p); ok {
+-		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(id)}, nil
+-	}
+-	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
+-}
+-
+-func (c *collectingClient) SessionUpdate(ctx context.Context, n acp.SessionNotification) error {
+-	if n.Update.AgentMessageChunk != nil {
+-		content := n.Update.AgentMessageChunk.Content
+-		if content.Text != nil {
+-			c.mu.Lock()
+-			c.b.WriteString(content.Text.Text)
+-			c.mu.Unlock()
+-		}
+-	}
+-	return nil
+-}
+-
+-func (c *collectingClient) String() string {
+-	c.mu.Lock()
+-	defer c.mu.Unlock()
+-	return c.b.String()
+-}
+-
+-func (c *collectingClient) ReadTextFile(ctx context.Context, req acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+-	if err := ctx.Err(); err != nil {
+-		return acp.ReadTextFileResponse{}, err
+-	}
+-	path, err := c.resolveReadPath(req.Path)
+-	if err != nil {
+-		return acp.ReadTextFileResponse{}, err
+-	}
+-	b, err := os.ReadFile(path)
+-	if err != nil {
+-		return acp.ReadTextFileResponse{}, fmt.Errorf("acp client: read %s: %w", req.Path, err)
+-	}
+-	return acp.ReadTextFileResponse{Content: readTextWindow(string(b), req.Line, req.Limit)}, nil
+-}
+-
+-func (c *collectingClient) WriteTextFile(ctx context.Context, _ acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+-	return acp.WriteTextFileResponse{}, fmt.Errorf("acp client: writeTextFile denied")
+-}
+-
+-func (c *collectingClient) CreateTerminal(ctx context.Context, _ acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+-	return acp.CreateTerminalResponse{}, fmt.Errorf("acp client: terminal not supported")
+-}
+-
+-func (c *collectingClient) KillTerminal(ctx context.Context, _ acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+-	return acp.KillTerminalResponse{}, fmt.Errorf("acp client: terminal not supported")
+-}
+-
+-func (c *collectingClient) ReleaseTerminal(ctx context.Context, _ acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+-	return acp.ReleaseTerminalResponse{}, fmt.Errorf("acp client: terminal not supported")
+-}
+-
+-func (c *collectingClient) TerminalOutput(ctx context.Context, _ acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+-	return acp.TerminalOutputResponse{}, fmt.Errorf("acp client: terminal not supported")
+-}
+-
+-func (c *collectingClient) WaitForTerminalExit(ctx context.Context, _ acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+-	return acp.WaitForTerminalExitResponse{}, fmt.Errorf("acp client: terminal not supported")
+-}
+-
+-type acpStderrCapture struct {
+-	tail *lockedTailBuffer
+-	done chan struct{}
+-}
+-
+-type lockedTailBuffer struct {
+-	mu    sync.Mutex
+-	limit int
+-	buf   []byte
+-}
+-
+-func newLockedTailBuffer(limit int) *lockedTailBuffer {
+-	return &lockedTailBuffer{limit: limit}
+-}
+-
+-func (b *lockedTailBuffer) Write(p []byte) (int, error) {
+-	b.mu.Lock()
+-	defer b.mu.Unlock()
+-	b.buf = append(b.buf, p...)
+-	if len(b.buf) > b.limit {
+-		b.buf = b.buf[len(b.buf)-b.limit:]
+-	}
+-	return len(p), nil
+-}
+-
+-func (b *lockedTailBuffer) String() string {
+-	b.mu.Lock()
+-	defer b.mu.Unlock()
+-	return strings.TrimSpace(string(b.buf))
+-}
+-
+-func copyACPStderr(stderr io.Reader, verbose bool) *acpStderrCapture {
+-	tail := newLockedTailBuffer(maxACPStderrBytes)
+-	capture := &acpStderrCapture{
+-		tail: tail,
+-		done: make(chan struct{}),
+-	}
+-	dst := io.Writer(tail)
+-	if verbose {
+-		dst = io.MultiWriter(os.Stderr, tail)
+-	}
+-	go func() {
+-		defer close(capture.done)
+-		_, _ = io.Copy(dst, stderr)
+-	}()
+-	return capture
+-}
+-
+-func (c *acpStderrCapture) String() string {
+-	if c == nil || c.tail == nil {
+-		return ""
+-	}
+-	select {
+-	case <-c.done:
+-	case <-time.After(100 * time.Millisecond):
+-	}
+-	return c.tail.String()
+-}
+-
+-func (c *acpStderrCapture) wrap(err error) error {
+-	if c == nil {
+-		return err
+-	}
+-	if stderr := c.String(); stderr != "" {
+-		return fmt.Errorf("%w\nagent stderr:\n%s", err, stderr)
+-	}
+-	return err
+-}
+-
+-type clientConnection struct {
+-	cwd    string
+-	client *collectingClient
+-	conn   *acp.ClientSideConnection
+-}
+-
+-func newClientConnection(stdin io.Writer, stdout io.Reader, verbose bool) (*clientConnection, error) {
+-	cwd, err := os.Getwd()
+-	if err != nil {
+-		return nil, fmt.Errorf("acp: failed to get current working directory: %w", err)
+-	}
+-	client := &collectingClient{cwd: cwd}
+-	conn := acp.NewClientSideConnection(client, stdin, stdout)
+-	if !verbose {
+-		conn.SetLogger(discardACPLogger)
+-	}
+-	return &clientConnection{cwd: cwd, client: client, conn: conn}, nil
+-}
+-
+-func initializeClient(ctx context.Context, conn *acp.ClientSideConnection) error {
+-	_, err := conn.Initialize(ctx, acp.InitializeRequest{
+-		ProtocolVersion: acp.ProtocolVersionNumber,
+-		ClientCapabilities: acp.ClientCapabilities{
+-			// NOTE: Some ACP agents (notably gemini --experimental-acp) validate that
+-			// fs.readTextFile and fs.writeTextFile are present in the initialize payload.
+-			// The SDK uses `omitempty` on these booleans, so `false` would be omitted and
+-			// the agent rejects the request. We support readTextFile within the
+-			// session cwd and keep writeTextFile denied in the handler implementation.
+-			Fs:       acp.FileSystemCapabilities{ReadTextFile: true, WriteTextFile: true},
+-			Terminal: false,
+-		},
+-	})
+-	if err != nil {
+-		return fmt.Errorf("acp: initialize failed: %w", err)
+-	}
+-	return nil
+-}
+-
+-func autoApprovedPermissionOption(req acp.RequestPermissionRequest) (acp.PermissionOptionId, bool) {
+-	if req.ToolCall.Kind == nil {
+-		return "", false
+-	}
+-	switch *req.ToolCall.Kind {
+-	case acp.ToolKindRead, acp.ToolKindSearch, acp.ToolKindThink:
+-	default:
+-		return "", false
+-	}
+-	for _, opt := range req.Options {
+-		if opt.Kind == acp.PermissionOptionKindAllowOnce {
+-			return opt.OptionId, true
+-		}
+-	}
+-	for _, opt := range req.Options {
+-		if opt.Kind == acp.PermissionOptionKindAllowAlways {
+-			return opt.OptionId, true
+-		}
+-	}
+-	return "", false
+-}
+-
+-func (c *collectingClient) resolveReadPath(path string) (string, error) {
+-	if !filepath.IsAbs(path) {
+-		return "", fmt.Errorf("acp client: readTextFile path must be absolute: %s", path)
+-	}
+-	root, err := filepath.Abs(c.cwd)
+-	if err != nil {
+-		return "", fmt.Errorf("acp client: resolve cwd %s: %w", c.cwd, err)
+-	}
+-	root, err = filepath.EvalSymlinks(root)
+-	if err != nil {
+-		return "", fmt.Errorf("acp client: resolve cwd %s: %w", c.cwd, err)
+-	}
+-	target, err := filepath.EvalSymlinks(filepath.Clean(path))
+-	if err != nil {
+-		return "", fmt.Errorf("acp client: resolve read path %s: %w", path, err)
+-	}
+-	rel, err := filepath.Rel(root, target)
+-	if err != nil {
+-		return "", fmt.Errorf("acp client: resolve read path %s relative to %s: %w", path, root, err)
+-	}
+-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+-		return "", fmt.Errorf("acp client: readTextFile outside session cwd denied: %s", path)
+-	}
+-	return target, nil
+-}
+-
+-func readTextWindow(content string, line, limit *int) string {
+-	if line == nil && limit == nil {
+-		return content
+-	}
+-	lines := strings.Split(content, "\n")
+-	start := 0
+-	if line != nil && *line > 1 {
+-		start = min(*line-1, len(lines))
+-	}
+-	end := len(lines)
+-	if limit != nil {
+-		if *limit <= 0 {
+-			end = start
+-		} else if start+*limit < end {
+-			end = start + *limit
+-		}
+-	}
+-	return strings.Join(lines[start:end], "\n")
+-}
+-
+-func promptStopError(reason acp.StopReason, resp string) error {
+-	resp = strings.TrimSpace(utils.Clean(resp))
+-	if resp == "" {
+-		return fmt.Errorf("acp: prompt stopped with %s", reason)
+-	}
+-	const maxStopReasonSnippet = 1024
+-	if len(resp) > maxStopReasonSnippet {
+-		resp = resp[:maxStopReasonSnippet] + "... (truncated)"
+-	}
+-	return fmt.Errorf("acp: prompt stopped with %s: %s", reason, resp)
+-}
+-
+-func (c *ACP) Chat() (string, error) {
+-	if err := c.Verify(); err != nil {
+-		return "", fmt.Errorf("invalid model configuration: %w", err)
+-	}
+-
+-	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Minute)
+-	defer cancel()
+-
+-	cmd := exec.CommandContext(ctx, c.conf.Command, c.conf.Args...)
+-	cmd.Env = append(os.Environ(), c.conf.Env...)
+-
+-	stdin, err := cmd.StdinPipe()
+-	if err != nil {
+-		return "", fmt.Errorf("acp: failed to get stdin pipe: %w", err)
+-	}
+-	stdout, err := cmd.StdoutPipe()
+-	if err != nil {
+-		return "", fmt.Errorf("acp: failed to get stdout pipe: %w", err)
+-	}
+-	stderr, err := cmd.StderrPipe()
+-	if err != nil {
+-		return "", fmt.Errorf("acp: failed to get stderr pipe: %w", err)
+-	}
+-
+-	if err := cmd.Start(); err != nil {
+-		return "", fmt.Errorf("acp: failed to start agent command '%s': %w", c.conf.Command, err)
+-	}
+-	stderrCapture := copyACPStderr(stderr, c.conf.Verbose)
+-	defer func() {
+-		_ = stdin.Close()
+-		_ = stdout.Close()
+-		_ = stderr.Close()
+-		if cmd.Process != nil {
+-			_ = cmd.Process.Kill()
+-		}
+-		_ = cmd.Wait()
+-	}()
+-
+-	clientConn, err := newClientConnection(stdin, stdout, c.conf.Verbose)
+-	if err != nil {
+-		return "", err
+-	}
+-	if err := initializeClient(ctx, clientConn.conn); err != nil {
+-		return "", stderrCapture.wrap(err)
+-	}
+-
+-	sess, err := clientConn.conn.NewSession(ctx, acp.NewSessionRequest{
+-		Cwd:        clientConn.cwd,
+-		McpServers: []acp.McpServer{},
+-	})
+-	if err != nil {
+-		return "", stderrCapture.wrap(fmt.Errorf("acp: newSession failed: %w", err))
+-	}
+-
+-	// Best-effort: attempt to set the model if the agent advertises a model
+-	// configuration option (ACP session config option, category "model").
+-	if m := strings.TrimSpace(c.conf.Model); m != "" && m != "default" {
+-		if sel := modelConfigOption(sess.ConfigOptions); sel != nil {
+-			setModelReq := acp.SetSessionConfigOptionRequest{
+-				ValueId: &acp.SetSessionConfigOptionValueId{
+-					ConfigId:  sel.Id,
+-					SessionId: sess.SessionId,
+-					Value:     acp.SessionConfigValueId(m),
+-				},
+-			}
+-			if _, setErr := clientConn.conn.SetSessionConfigOption(ctx, setModelReq); setErr != nil {
+-				if c.conf.Verbose {
+-					log.Debugf("acp: SetSessionConfigOption(model) failed (ignored): %v", setErr)
+-				}
+-			}
+-		}
+-	}
+-
+-	promptResp, err := clientConn.conn.Prompt(ctx, acp.PromptRequest{
+-		SessionId: sess.SessionId,
+-		Prompt:    []acp.ContentBlock{acp.TextBlock(c.conf.Prompt)},
+-	})
+-	if err != nil {
+-		return "", stderrCapture.wrap(fmt.Errorf("acp: prompt failed: %w", err))
+-	}
+-
+-	resp := strings.TrimSpace(clientConn.client.String())
+-	if promptResp.StopReason != "" && promptResp.StopReason != acp.StopReasonEndTurn {
+-		return "", promptStopError(promptResp.StopReason, resp)
+-	}
+-	if resp == "" {
+-		return "", fmt.Errorf("no content returned from agent")
+-	}
+-
+-	return utils.Clean(resp), nil
+-}
+-
+-func (c *ACP) Close() error {
+-	return nil
+-}
+diff --git a/internal/ai/acp/acp_test.go b/internal/ai/acp/acp_test.go
+deleted file mode 100644
+index 08b57ee7e..000000000
+--- a/internal/ai/acp/acp_test.go
++++ /dev/null
+@@ -1,403 +0,0 @@
+-package acp
+-
+-import (
+-	"context"
+-	"fmt"
+-	"os"
+-	"path/filepath"
+-	"strings"
+-	"testing"
+-	"time"
+-
+-	acpsdk "github.com/coder/acp-go-sdk"
+-)
+-
+-const (
+-	testACPAgentModeEnv = "IPSW_TEST_ACP_AGENT_MODE"
+-	testACPReadPathEnv  = "IPSW_TEST_ACP_READ_PATH"
+-)
+-
+-func TestACPModelsFromAgent(t *testing.T) {
+-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+-	defer cancel()
+-
+-	client, err := New(ctx, &Config{
+-		Prompt:  "decompile this",
+-		Command: os.Args[0],
+-		Args:    []string{"-test.run=TestACPAgentHelperProcess"},
+-		Env:     []string{testACPAgentModeEnv + "=ok"},
+-	})
+-	if err != nil {
+-		t.Fatalf("New() error = %v", err)
+-	}
+-	models, err := client.Models()
+-	if err != nil {
+-		t.Fatalf("Models() error = %v", err)
+-	}
+-	if got := models["Test Model"]; got != "test-model" {
+-		t.Fatalf("Models()[Test Model] = %q, want test-model", got)
+-	}
+-}
+-
+-func TestACPChatAllowsReadOnlyFileContext(t *testing.T) {
+-	dir := t.TempDir()
+-	readPath := filepath.Join(dir, "context.txt")
+-	if err := os.WriteFile(readPath, []byte("alpha\nbravo\ncharlie\n"), 0o644); err != nil {
+-		t.Fatalf("write test context: %v", err)
+-	}
+-	chdir(t, dir)
+-
+-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+-	defer cancel()
+-
+-	client := newTestACP(t, ctx, "read", readPath)
+-	resp, err := client.Chat()
+-	if err != nil {
+-		t.Fatalf("Chat() error = %v", err)
+-	}
+-	if resp != "read:bravo" {
+-		t.Fatalf("Chat() = %q, want read:bravo", resp)
+-	}
+-}
+-
+-func TestACPChatReportsNonEndTurnStopReason(t *testing.T) {
+-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+-	defer cancel()
+-
+-	client := newTestACP(t, ctx, "cancelled", "")
+-	_, err := client.Chat()
+-	if err == nil {
+-		t.Fatal("Chat() error = nil, want stop reason error")
+-	}
+-	if !strings.Contains(err.Error(), "prompt stopped with cancelled") {
+-		t.Fatalf("Chat() error = %q, want cancelled stop reason", err)
+-	}
+-}
+-
+-func TestACPChatIncludesAgentStderrOnInitializeFailure(t *testing.T) {
+-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+-	defer cancel()
+-
+-	client := newTestACP(t, ctx, "stderr-exit", "")
+-	_, err := client.Chat()
+-	if err == nil {
+-		t.Fatal("Chat() error = nil, want initialize failure")
+-	}
+-	if !strings.Contains(err.Error(), "agent stderr:") {
+-		t.Fatalf("Chat() error = %q, want agent stderr section", err)
+-	}
+-	if !strings.Contains(err.Error(), "test acp adapter failed before initialize") {
+-		t.Fatalf("Chat() error = %q, want adapter stderr", err)
+-	}
+-}
+-
+-func TestACPSetModelResolvesDisplayNameToModelID(t *testing.T) {
+-	client, err := New(context.Background(), &Config{Command: "test-agent"})
+-	if err != nil {
+-		t.Fatalf("New() error = %v", err)
+-	}
+-	if _, err := client.SetModels(map[string]string{"Default (recommended)": "default"}); err != nil {
+-		t.Fatalf("SetModels() error = %v", err)
+-	}
+-
+-	if err := client.SetModel("Default (recommended)"); err != nil {
+-		t.Fatalf("SetModel() error = %v", err)
+-	}
+-	if client.conf.Model != "default" {
+-		t.Fatalf("conf.Model = %q, want default", client.conf.Model)
+-	}
+-	if got := client.models["default"]; got != "default" {
+-		t.Fatalf("models[default] = %q, want default", got)
+-	}
+-}
+-
+-func TestACPSetModelAllowsArbitraryModelID(t *testing.T) {
+-	client, err := New(context.Background(), &Config{Command: "test-agent"})
+-	if err != nil {
+-		t.Fatalf("New() error = %v", err)
+-	}
+-
+-	if err := client.SetModel("custom-model"); err != nil {
+-		t.Fatalf("SetModel() error = %v", err)
+-	}
+-	if client.conf.Model != "custom-model" {
+-		t.Fatalf("conf.Model = %q, want custom-model", client.conf.Model)
+-	}
+-	if got := client.models["custom-model"]; got != "custom-model" {
+-		t.Fatalf("models[custom-model] = %q, want custom-model", got)
+-	}
+-}
+-
+-func TestLockedTailBufferKeepsBoundedStderrTail(t *testing.T) {
+-	buf := newLockedTailBuffer(5)
+-	if _, err := buf.Write([]byte("hello")); err != nil {
+-		t.Fatalf("Write() error = %v", err)
+-	}
+-	if _, err := buf.Write([]byte(" world")); err != nil {
+-		t.Fatalf("Write() error = %v", err)
+-	}
+-	if got := buf.String(); got != "world" {
+-		t.Fatalf("String() = %q, want world", got)
+-	}
+-}
+-
+-func TestACPStderrCaptureWaitsForCopyToFinish(t *testing.T) {
+-	buf := newLockedTailBuffer(32)
+-	capture := &acpStderrCapture{
+-		tail: buf,
+-		done: make(chan struct{}),
+-	}
+-	go func() {
+-		time.Sleep(10 * time.Millisecond)
+-		_, _ = buf.Write([]byte("delayed stderr"))
+-		close(capture.done)
+-	}()
+-
+-	if got := capture.String(); got != "delayed stderr" {
+-		t.Fatalf("String() = %q, want delayed stderr", got)
+-	}
+-}
+-
+-func TestCollectingClientReadTextFileRestrictsCWD(t *testing.T) {
+-	dir := t.TempDir()
+-	inside := filepath.Join(dir, "inside.txt")
+-	if err := os.WriteFile(inside, []byte("one\ntwo\nthree"), 0o644); err != nil {
+-		t.Fatalf("write inside file: %v", err)
+-	}
+-	outsideDir := t.TempDir()
+-	outside := filepath.Join(outsideDir, "outside.txt")
+-	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+-		t.Fatalf("write outside file: %v", err)
+-	}
+-
+-	client := &collectingClient{cwd: dir}
+-	line, limit := 2, 1
+-	resp, err := client.ReadTextFile(context.Background(), acpsdk.ReadTextFileRequest{
+-		Path:  inside,
+-		Line:  &line,
+-		Limit: &limit,
+-	})
+-	if err != nil {
+-		t.Fatalf("ReadTextFile(inside) error = %v", err)
+-	}
+-	if resp.Content != "two" {
+-		t.Fatalf("ReadTextFile(inside) = %q, want two", resp.Content)
+-	}
+-
+-	if _, err := client.ReadTextFile(context.Background(), acpsdk.ReadTextFileRequest{Path: outside}); err == nil {
+-		t.Fatal("ReadTextFile(outside) error = nil, want denial")
+-	}
+-}
+-
+-func TestCollectingClientPermissionPolicy(t *testing.T) {
+-	client := &collectingClient{}
+-	tests := []struct {
+-		name      string
+-		kind      acpsdk.ToolKind
+-		wantAllow bool
+-	}{
+-		{name: "read", kind: acpsdk.ToolKindRead, wantAllow: true},
+-		{name: "edit", kind: acpsdk.ToolKindEdit},
+-	}
+-
+-	for _, tt := range tests {
+-		t.Run(tt.name, func(t *testing.T) {
+-			kind := tt.kind
+-			resp, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
+-				ToolCall: acpsdk.ToolCallUpdate{ToolCallId: acpsdk.ToolCallId(tt.name), Kind: &kind},
+-				Options: []acpsdk.PermissionOption{
+-					{Kind: acpsdk.PermissionOptionKindAllowOnce, Name: "Allow", OptionId: acpsdk.PermissionOptionId("allow")},
+-					{Kind: acpsdk.PermissionOptionKindRejectOnce, Name: "Reject", OptionId: acpsdk.PermissionOptionId("reject")},
+-				},
+-			})
+-			if err != nil {
+-				t.Fatalf("RequestPermission(%s) error = %v", tt.name, err)
+-			}
+-			if tt.wantAllow {
+-				if resp.Outcome.Selected == nil || resp.Outcome.Selected.OptionId != acpsdk.PermissionOptionId("allow") {
+-					t.Fatalf("RequestPermission(%s) = %#v, want allow selection", tt.name, resp.Outcome)
+-				}
+-				return
+-			}
+-			if resp.Outcome.Cancelled == nil {
+-				t.Fatalf("RequestPermission(%s) = %#v, want cancelled", tt.name, resp.Outcome)
+-			}
+-		})
+-	}
+-}
+-
+-func newTestACP(t *testing.T, ctx context.Context, mode, readPath string) *ACP {
+-	t.Helper()
+-	client, err := New(ctx, &Config{
+-		Prompt:  "decompile this",
+-		Model:   "default",
+-		Command: os.Args[0],
+-		Args:    []string{"-test.run=TestACPAgentHelperProcess"},
+-		Env: []string{
+-			testACPAgentModeEnv + "=" + mode,
+-			testACPReadPathEnv + "=" + readPath,
+-		},
+-	})
+-	if err != nil {
+-		t.Fatalf("New() error = %v", err)
+-	}
+-	return client
+-}
+-
+-func chdir(t *testing.T, dir string) {
+-	t.Helper()
+-	old, err := os.Getwd()
+-	if err != nil {
+-		t.Fatalf("get cwd: %v", err)
+-	}
+-	if err := os.Chdir(dir); err != nil {
+-		t.Fatalf("chdir %s: %v", dir, err)
+-	}
+-	t.Cleanup(func() {
+-		if err := os.Chdir(old); err != nil {
+-			t.Fatalf("restore cwd %s: %v", old, err)
+-		}
+-	})
+-}
+-
+-func TestACPAgentHelperProcess(t *testing.T) {
+-	mode := os.Getenv(testACPAgentModeEnv)
+-	if mode == "" {
+-		return
+-	}
+-	if mode == "stderr-exit" {
+-		_, _ = fmt.Fprintln(os.Stderr, "test acp adapter failed before initialize")
+-		os.Exit(2)
+-	}
+-
+-	agent := &testACPAgent{
+-		mode:     mode,
+-		readPath: os.Getenv(testACPReadPathEnv),
+-	}
+-	conn := acpsdk.NewAgentSideConnection(agent, os.Stdout, os.Stdin)
+-	agent.conn = conn
+-	<-conn.Done()
+-	os.Exit(0)
+-}
+-
+-type testACPAgent struct {
+-	conn     *acpsdk.AgentSideConnection
+-	mode     string
+-	readPath string
+-}
+-
+-var _ acpsdk.Agent = (*testACPAgent)(nil)
+-
+-func (a *testACPAgent) Authenticate(ctx context.Context, _ acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error) {
+-	return acpsdk.AuthenticateResponse{}, nil
+-}
+-
+-func (a *testACPAgent) Logout(ctx context.Context, _ acpsdk.LogoutRequest) (acpsdk.LogoutResponse, error) {
+-	return acpsdk.LogoutResponse{}, nil
+-}
+-
+-func (a *testACPAgent) Initialize(ctx context.Context, _ acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
+-	return acpsdk.InitializeResponse{
+-		ProtocolVersion:   acpsdk.ProtocolVersionNumber,
+-		AgentCapabilities: acpsdk.AgentCapabilities{LoadSession: false},
+-	}, nil
+-}
+-
+-func (a *testACPAgent) Cancel(ctx context.Context, _ acpsdk.CancelNotification) error {
+-	return nil
+-}
+-
+-func (a *testACPAgent) CloseSession(ctx context.Context, _ acpsdk.CloseSessionRequest) (acpsdk.CloseSessionResponse, error) {
+-	return acpsdk.CloseSessionResponse{}, nil
+-}
+-
+-func (a *testACPAgent) ListSessions(ctx context.Context, _ acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
+-	return acpsdk.ListSessionsResponse{}, nil
+-}
+-
+-func (a *testACPAgent) NewSession(ctx context.Context, _ acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
+-	modelCategory := acpsdk.SessionConfigOptionCategoryModel
+-	options := acpsdk.SessionConfigSelectOptionsUngrouped{{
+-		Name:  "Test Model",
+-		Value: acpsdk.SessionConfigValueId("test-model"),
+-	}}
+-	return acpsdk.NewSessionResponse{
+-		SessionId: acpsdk.SessionId("test-session"),
+-		ConfigOptions: []acpsdk.SessionConfigOption{{
+-			Select: &acpsdk.SessionConfigOptionSelect{
+-				Category:     &modelCategory,
+-				Id:           acpsdk.SessionConfigId("model"),
+-				Name:         "Model",
+-				CurrentValue: acpsdk.SessionConfigValueId("test-model"),
+-				Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &options},
+-			},
+-		}},
+-	}, nil
+-}
+-
+-func (a *testACPAgent) Prompt(ctx context.Context, req acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+-	switch a.mode {
+-	case "cancelled":
+-		if err := a.sendText(ctx, req.SessionId, "partial output"); err != nil {
+-			return acpsdk.PromptResponse{}, err
+-		}
+-		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
+-	case "read":
+-		kind := acpsdk.ToolKindRead
+-		perm, err := a.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
+-			SessionId: req.SessionId,
+-			ToolCall: acpsdk.ToolCallUpdate{
+-				ToolCallId: acpsdk.ToolCallId("read-context"),
+-				Kind:       &kind,
+-			},
+-			Options: []acpsdk.PermissionOption{
+-				{Kind: acpsdk.PermissionOptionKindAllowOnce, Name: "Allow", OptionId: acpsdk.PermissionOptionId("allow")},
+-				{Kind: acpsdk.PermissionOptionKindRejectOnce, Name: "Reject", OptionId: acpsdk.PermissionOptionId("reject")},
+-			},
+-		})
+-		if err != nil {
+-			return acpsdk.PromptResponse{}, err
+-		}
+-		if perm.Outcome.Selected == nil {
+-			return acpsdk.PromptResponse{}, fmt.Errorf("read permission was not selected")
+-		}
+-		line, limit := 2, 1
+-		file, err := a.conn.ReadTextFile(ctx, acpsdk.ReadTextFileRequest{
+-			SessionId: req.SessionId,
+-			Path:      a.readPath,
+-			Line:      &line,
+-			Limit:     &limit,
+-		})
+-		if err != nil {
+-			return acpsdk.PromptResponse{}, err
+-		}
+-		if err := a.sendText(ctx, req.SessionId, "read:"+file.Content); err != nil {
+-			return acpsdk.PromptResponse{}, err
+-		}
+-		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+-	default:
+-		if err := a.sendText(ctx, req.SessionId, "ok"); err != nil {
+-			return acpsdk.PromptResponse{}, err
+-		}
+-		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+-	}
+-}
+-
+-func (a *testACPAgent) ResumeSession(ctx context.Context, _ acpsdk.ResumeSessionRequest) (acpsdk.ResumeSessionResponse, error) {
+-	return acpsdk.ResumeSessionResponse{}, nil
+-}
+-
+-func (a *testACPAgent) SetSessionConfigOption(ctx context.Context, _ acpsdk.SetSessionConfigOptionRequest) (acpsdk.SetSessionConfigOptionResponse, error) {
+-	return acpsdk.SetSessionConfigOptionResponse{}, nil
+-}
+-
+-func (a *testACPAgent) SetSessionMode(ctx context.Context, _ acpsdk.SetSessionModeRequest) (acpsdk.SetSessionModeResponse, error) {
+-	return acpsdk.SetSessionModeResponse{}, nil
+-}
+-
+-func (a *testACPAgent) sendText(ctx context.Context, sessionID acpsdk.SessionId, text string) error {
+-	return a.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+-		SessionId: sessionID,
+-		Update:    acpsdk.UpdateAgentMessageText(text),
+-	})
+-}
+diff --git a/internal/ai/ai.go b/internal/ai/ai.go
+deleted file mode 100644
+index 3c4ec6bf1..000000000
+--- a/internal/ai/ai.go
++++ /dev/null
+@@ -1,363 +0,0 @@
+-package ai
+-
+-import (
+-	"context"
+-	"encoding/json"
+-	"errors"
+-	"fmt"
+-	"slices"
+-	"strings"
+-	"time"
+-
+-	"github.com/blacktop/ipsw/internal/utils"
+-
+-	"github.com/apex/log"
+-	"github.com/blacktop/ipsw/internal/ai/acp"
+-	"github.com/blacktop/ipsw/internal/ai/anthropic"
+-	"github.com/blacktop/ipsw/internal/ai/copilot"
+-	"github.com/blacktop/ipsw/internal/ai/gemini"
+-	"github.com/blacktop/ipsw/internal/ai/ollama"
+-	"github.com/blacktop/ipsw/internal/ai/openai"
+-	"github.com/blacktop/ipsw/internal/ai/openrouter"
+-	db "github.com/blacktop/ipsw/internal/db/ai"
+-	model "github.com/blacktop/ipsw/internal/model/ai"
+-	"gorm.io/gorm"
+-)
+-
+-var Providers = []string{
+-	"anthropic",
+-	"claude",
+-	"copilot",
+-	"codex",
+-	"gemini",
+-	"google",
+-	"ollama",
+-	"openai",
+-	"openrouter",
+-}
+-
+-var ProviderAliases = map[string]string{
+-	// Legacy ACP provider names
+-	"claude-code-acp": "claude",
+-	"codex-acp":       "codex",
+-	"gemini-acp":      "gemini",
+-	// Legacy API provider names
+-	"claude": "claude", // canonical (ACP)
+-	"gemini": "gemini", // canonical (ACP)
+-	// Explicit API aliases
+-	"claude-api": "anthropic",
+-	"gemini-api": "google",
+-}
+-
+-func NormalizeProvider(provider string) string {
+-	provider = strings.TrimSpace(provider)
+-	if provider == "" {
+-		return provider
+-	}
+-	if canonical, ok := ProviderAliases[provider]; ok {
+-		return canonical
+-	}
+-	return provider
+-}
+-
+-func IsValidProvider(provider string) bool {
+-	return slices.Contains(Providers, NormalizeProvider(provider))
+-}
+-
+-type AI interface {
+-	Chat() (string, error)
+-	Models() (map[string]string, error)
+-	// FIXME: dump convienence method to set models from cache
+-	SetModels(map[string]string) (map[string]string, error)
+-	SetModel(string) error
+-	Verify() error
+-	Close() error
+-}
+-
+-type Config struct {
+-	UUID           string
+-	Provider       string
+-	Prompt         string
+-	Model          string
+-	Temperature    float64
+-	TopP           float64
+-	TemperatureSet bool
+-	TopPSet        bool
+-	Stream         bool
+-	DisableCache   bool
+-	Verbose        bool
+-	MaxRetries     int
+-	RetryBackoff   time.Duration
+-}
+-
+-type CachingAI struct {
+-	ai     AI
+-	cache  db.CacheDB
+-	config *Config
+-}
+-
+-func (c *CachingAI) Chat() (string, error) {
+-	if c.cache != nil && !c.config.DisableCache && !c.config.Stream {
+-		chat, err := c.cache.Get(c.config.UUID, c.config.Provider, c.config.Model, c.config.Prompt, c.config.Temperature, c.config.TopP)
+-		if err == nil && chat != nil {
+-			return chat.Response, nil
+-		}
+-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) && !errors.Is(err, model.ErrNotFound) {
+-			log.Warnf("cache get error: %v", err)
+-		}
+-	}
+-
+-	response, err := utils.RetryWithResult(c.config.MaxRetries+1, c.config.RetryBackoff, func() (string, error) {
+-		resp, err := c.ai.Chat()
+-		if err == nil {
+-			return resp, nil
+-		}
+-		errStr := strings.ToLower(err.Error())
+-		if strings.Contains(errStr, "model not found") ||
+-			strings.Contains(errStr, "invalid model") ||
+-			strings.Contains(errStr, "unknown model") ||
+-			strings.Contains(errStr, "does not exist") ||
+-			strings.Contains(errStr, "404") ||
+-			strings.Contains(errStr, "400") {
+-			log.Warnf("Potential model error detected ('%s'), clearing DB models cache for provider %s", err.Error(), c.config.Provider)
+-			if c.cache != nil {
+-				if delErr := c.cache.DeleteProviderModels(c.config.Provider); delErr != nil {
+-					log.Warnf("Failed to delete provider models from cache for %s: %v", c.config.Provider, delErr)
+-				}
+-			}
+-			// No need to retry if the model is not found
+-			return "", &utils.StopRetryingError{Err: err}
+-		}
+-		return "", err
+-	})
+-	if err != nil {
+-		return "", err
+-	}
+-
+-	if c.cache != nil && !c.config.DisableCache && !c.config.Stream {
+-		newEntry := &model.ChatResponse{
+-			UUID:        c.config.UUID,
+-			Provider:    c.config.Provider,
+-			LLMModel:    c.config.Model,
+-			Prompt:      c.config.Prompt,
+-			Temperature: c.config.Temperature,
+-			TopP:        c.config.TopP,
+-			Response:    response,
+-		}
+-		if err := c.cache.Set(newEntry); err != nil {
+-			log.Warnf("cache set error: %v", err)
+-		}
+-	}
+-
+-	return response, nil
+-}
+-
+-func (c *CachingAI) Models() (map[string]string, error) {
+-	if c.cache != nil {
+-		cachedProviderModels, err := c.cache.GetProviderModels(c.config.Provider)
+-		if err == nil && cachedProviderModels != nil && cachedProviderModels.ModelsJSON != "" {
+-			var modelsList map[string]string
+-			if err := json.Unmarshal([]byte(cachedProviderModels.ModelsJSON), &modelsList); err != nil {
+-				return nil, fmt.Errorf("failed to unmarshal cached models for provider %s: %w", c.config.Provider, err)
+-			}
+-			return c.SetModels(modelsList)
+-		} else if err != nil && !errors.Is(err, model.ErrNotFound) && !errors.Is(err, gorm.ErrRecordNotFound) {
+-			return nil, fmt.Errorf("failed to get cached models for provider %s: %w", c.config.Provider, err)
+-		}
+-	}
+-
+-	log.Debugf("Fetching models for provider %s from underlying AI", c.config.Provider)
+-	models, err := c.ai.Models()
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to get models from underlying AI provider %s: %w", c.config.Provider, err)
+-	}
+-
+-	if c.cache != nil && len(models) > 0 {
+-		modelsJSON, err := json.Marshal(models)
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to marshal models for provider %s: %w", c.config.Provider, err)
+-		} else {
+-			providerModelsToCache := &model.ProviderModels{
+-				Provider:   c.config.Provider,
+-				ModelsJSON: string(modelsJSON),
+-			}
+-			if err := c.cache.SetProviderModels(providerModelsToCache); err != nil {
+-				return nil, fmt.Errorf("failed to set provider models in cache for %s: %w", c.config.Provider, err)
+-			}
+-		}
+-	} else if c.cache != nil && len(models) == 0 {
+-		log.Debugf("Underlying AI returned no models for provider %s. Caching empty list.", c.config.Provider)
+-		modelsJSON, _ := json.Marshal([]string{})
+-		providerModelsToCache := &model.ProviderModels{
+-			Provider:   c.config.Provider,
+-			ModelsJSON: string(modelsJSON),
+-		}
+-		if err := c.cache.SetProviderModels(providerModelsToCache); err != nil {
+-			return nil, fmt.Errorf("failed to set provider models in cache for %s: %w", c.config.Provider, err)
+-		}
+-	}
+-
+-	return models, nil
+-}
+-
+-func (c *CachingAI) SetModel(model string) error {
+-	c.config.Model = model
+-	return c.ai.SetModel(model)
+-}
+-
+-func (c *CachingAI) SetModels(models map[string]string) (map[string]string, error) {
+-	return c.ai.SetModels(models)
+-}
+-
+-func (c *CachingAI) Verify() error {
+-	return c.ai.Verify()
+-}
+-
+-func (c *CachingAI) Close() error {
+-	var errs []error
+-	if c.ai != nil {
+-		if err := c.ai.Close(); err != nil {
+-			errs = append(errs, fmt.Errorf("failed to close underlying AI: %w", err))
+-		}
+-	}
+-	if c.cache != nil {
+-		if err := c.cache.Close(); err != nil {
+-			errs = append(errs, fmt.Errorf("failed to close AI cache: %w", err))
+-		}
+-	}
+-	if len(errs) > 0 {
+-		return fmt.Errorf("errors while closing CachingAI: %v", errs)
+-	}
+-	return nil
+-}
+-
+-func NewAI(ctx context.Context, cfg *Config) (AI, error) {
+-	var baseAI AI
+-	var err error
+-	var cache db.CacheDB
+-
+-	cfg.Provider = NormalizeProvider(cfg.Provider)
+-
+-	if !cfg.DisableCache && !cfg.Stream {
+-		cache, err = db.NewCacheDB(cfg.Verbose)
+-		if err != nil {
+-			log.Warnf("Failed to initialize AI cache: %v. Proceeding without DB caching for tokens/chat.", err)
+-			cache = nil
+-		} else {
+-			log.Info("AI caching is enabled")
+-		}
+-	} else {
+-		log.Warn("AI caching is disabled by config")
+-		cache = nil
+-	}
+-
+-	// Set default values for retry-related fields if not specified
+-	if cfg.MaxRetries <= 0 {
+-		cfg.MaxRetries = 0 // Default: no retries
+-	}
+-
+-	switch cfg.Provider {
+-	case "claude":
+-		baseAI, err = acp.New(ctx, &acp.Config{
+-			Prompt:      cfg.Prompt,
+-			Model:       cfg.Model,
+-			Temperature: cfg.Temperature,
+-			TopP:        cfg.TopP,
+-			Stream:      cfg.Stream,
+-			Command:     "npx",
+-			Args:        []string{"-y", "@zed-industries/claude-code-acp@latest"},
+-			Verbose:     cfg.Verbose,
+-		})
+-	case "anthropic":
+-		baseAI, err = anthropic.NewClaude(ctx, &anthropic.Config{
+-			Prompt:         cfg.Prompt,
+-			Model:          cfg.Model,
+-			Temperature:    cfg.Temperature,
+-			TemperatureSet: cfg.TemperatureSet,
+-			TopP:           cfg.TopP,
+-			TopPSet:        cfg.TopPSet,
+-			Stream:         cfg.Stream,
+-		})
+-	case "copilot":
+-		baseAI, err = copilot.NewCopilot(ctx, &copilot.Config{
+-			Prompt:      cfg.Prompt,
+-			Model:       cfg.Model,
+-			Temperature: cfg.Temperature,
+-			TopP:        cfg.TopP,
+-			Stream:      cfg.Stream,
+-			Cache:       cache,
+-		})
+-	case "codex":
+-		baseAI, err = acp.New(ctx, &acp.Config{
+-			Prompt:      cfg.Prompt,
+-			Model:       cfg.Model,
+-			Temperature: cfg.Temperature,
+-			TopP:        cfg.TopP,
+-			Stream:      cfg.Stream,
+-			Command:     "npx",
+-			Args:        []string{"-y", "@zed-industries/codex-acp@latest"},
+-			Verbose:     cfg.Verbose,
+-		})
+-	case "gemini":
+-		baseAI, err = acp.New(ctx, &acp.Config{
+-			Prompt:      cfg.Prompt,
+-			Model:       cfg.Model,
+-			Temperature: cfg.Temperature,
+-			TopP:        cfg.TopP,
+-			Stream:      cfg.Stream,
+-			Command:     "npx",
+-			Args:        []string{"-y", "@google/gemini-cli@latest", "--experimental-acp"},
+-			Verbose:     cfg.Verbose,
+-		})
+-	case "google":
+-		baseAI, err = gemini.NewGemini(ctx, &gemini.Config{
+-			Prompt:      cfg.Prompt,
+-			Model:       cfg.Model,
+-			Temperature: cfg.Temperature,
+-			TopP:        cfg.TopP,
+-			Stream:      cfg.Stream,
+-		})
+-	case "ollama":
+-		baseAI, err = ollama.NewOllama(ctx, &ollama.Config{
+-			Prompt:      cfg.Prompt,
+-			Model:       cfg.Model,
+-			Temperature: cfg.Temperature,
+-			TopP:        cfg.TopP,
+-			Stream:      cfg.Stream,
+-		})
+-	case "openai":
+-		baseAI, err = openai.NewOpenAI(ctx, &openai.Config{
+-			Prompt:      cfg.Prompt,
+-			Model:       cfg.Model,
+-			Temperature: cfg.Temperature,
+-			TopP:        cfg.TopP,
+-			Stream:      cfg.Stream,
+-		})
+-	case "openrouter":
+-		baseAI, err = openrouter.NewOpenRouter(ctx, &openrouter.Config{
+-			Prompt:      cfg.Prompt,
+-			Model:       cfg.Model,
+-			Temperature: cfg.Temperature,
+-			TopP:        cfg.TopP,
+-			Stream:      cfg.Stream,
+-		})
+-	default:
+-		return nil, fmt.Errorf("unknown AI provider: %s", cfg.Provider)
+-	}
+-
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to create base AI provider %s: %w", cfg.Provider, err)
+-	}
+-
+-	ai := &CachingAI{
+-		ai:     baseAI,
+-		cache:  cache,
+-		config: cfg,
+-	}
+-
+-	if _, err := ai.Models(); err != nil {
+-		return nil, fmt.Errorf("failed to prefetch models: %w", err)
+-	}
+-
+-	return ai, nil
+-}
+diff --git a/internal/ai/anthropic/anthropic.go b/internal/ai/anthropic/anthropic.go
+deleted file mode 100644
+index 731de7d8a..000000000
+--- a/internal/ai/anthropic/anthropic.go
++++ /dev/null
+@@ -1,144 +0,0 @@
+-package anthropic
+-
+-import (
+-	"context"
+-	"fmt"
+-
+-	"github.com/anthropics/anthropic-sdk-go"
+-	"github.com/blacktop/ipsw/internal/ai/utils"
+-)
+-
+-type Config struct {
+-	Prompt         string  `json:"prompt"`
+-	Model          string  `json:"model"`
+-	Temperature    float64 `json:"temperature"`
+-	TemperatureSet bool    `json:"-"`
+-	TopP           float64 `json:"top_p"`
+-	TopPSet        bool    `json:"-"`
+-	Stream         bool    `json:"stream"`
+-}
+-
+-type Claude struct {
+-	ctx    context.Context
+-	conf   *Config
+-	cli    *anthropic.Client
+-	models map[string]string
+-}
+-
+-func NewClaude(ctx context.Context, conf *Config) (*Claude, error) {
+-	cli := anthropic.NewClient()
+-	claude := &Claude{
+-		ctx:  ctx,
+-		conf: conf,
+-		cli:  &cli,
+-	}
+-	return claude, nil
+-}
+-
+-func (c *Claude) Models() (map[string]string, error) {
+-	if len(c.models) > 0 {
+-		return c.models, nil
+-	}
+-	if err := c.getModels(); err != nil {
+-		return nil, fmt.Errorf("claude: failed to get models: %w", err)
+-	}
+-	return c.models, nil
+-}
+-
+-func (c *Claude) SetModel(model string) error {
+-	if _, ok := c.models[model]; !ok {
+-		return fmt.Errorf("model '%s' not found", model)
+-	}
+-	c.conf.Model = model
+-	return nil
+-}
+-
+-func (c *Claude) SetModels(models map[string]string) (map[string]string, error) {
+-	c.models = models
+-	return c.models, nil
+-}
+-
+-// Verify checks that the current model configuration is valid
+-func (c *Claude) Verify() error {
+-	if c.conf.Model == "" {
+-		return fmt.Errorf("no model specified")
+-	}
+-	if len(c.models) == 0 {
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-	}
+-	modelID, ok := c.models[c.conf.Model]
+-	if !ok {
+-		// Model not found in cache, try refreshing the models list
+-		c.models = make(map[string]string) // Clear cache to force refresh
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-		// Check again after refresh
+-		modelID, ok = c.models[c.conf.Model]
+-		if !ok {
+-			return fmt.Errorf("model '%s' not found in available models", c.conf.Model)
+-		}
+-	}
+-	if modelID == "" {
+-		return fmt.Errorf("model '%s' has empty ID", c.conf.Model)
+-	}
+-	return nil
+-}
+-
+-func (c *Claude) getModels() error {
+-	models, err := c.cli.Models.List(c.ctx, anthropic.ModelListParams{})
+-	if err != nil {
+-		return fmt.Errorf("failed to list models: %w", err)
+-	}
+-	c.models = make(map[string]string)
+-	for _, model := range models.Data {
+-		c.models[model.DisplayName] = model.ID
+-	}
+-	if len(c.models) == 0 {
+-		return fmt.Errorf("no models found")
+-	}
+-	return nil
+-}
+-
+-func (c *Claude) Chat() (string, error) {
+-	// Verify model configuration before making API call
+-	if err := c.Verify(); err != nil {
+-		return "", fmt.Errorf("invalid model configuration: %w", err)
+-	}
+-	if c.conf.TemperatureSet && c.conf.TopPSet {
+-		return "", fmt.Errorf("claude: temperature and top_p cannot both be set for the same request")
+-	}
+-
+-	params := anthropic.MessageNewParams{
+-		MaxTokens: 1024,
+-		Messages: []anthropic.MessageParam{
+-			anthropic.NewUserMessage(anthropic.NewTextBlock(c.conf.Prompt)),
+-		},
+-		Model:       anthropic.Model(c.models[c.conf.Model]),
+-		ServiceTier: anthropic.MessageNewParamsServiceTierAuto,
+-	}
+-	if c.conf.TemperatureSet {
+-		params.Temperature = anthropic.Float(c.conf.Temperature)
+-	}
+-	if c.conf.TopPSet {
+-		params.TopP = anthropic.Float(c.conf.TopP)
+-	}
+-
+-	message, err := c.cli.Messages.New(c.ctx, params)
+-	if err != nil {
+-		return "", fmt.Errorf("failed to create message: %w", err)
+-	}
+-
+-	if len(message.Content) == 0 {
+-		return "", fmt.Errorf("no content returned from message")
+-	}
+-
+-	return utils.Clean(message.Content[0].Text), nil
+-}
+-
+-// Close implements the ai.AI interface.
+-func (c *Claude) Close() error {
+-	return nil // No specific resources to close for Claude client
+-}
+diff --git a/internal/ai/copilot/copilot.go b/internal/ai/copilot/copilot.go
+deleted file mode 100644
+index d678e773a..000000000
+--- a/internal/ai/copilot/copilot.go
++++ /dev/null
+@@ -1,509 +0,0 @@
+-package copilot
+-
+-import (
+-	"bufio"
+-	"bytes"
+-	"context"
+-	"encoding/json"
+-	"errors"
+-	"fmt"
+-	"io"
+-	"net/http"
+-	"os"
+-	"path/filepath"
+-	"runtime"
+-	"strings"
+-	"time"
+-
+-	"github.com/apex/log"
+-	"github.com/blacktop/ipsw/internal/ai/utils"
+-	model "github.com/blacktop/ipsw/internal/model/ai"
+-)
+-
+-const (
+-	copilotChatAuthURL   = "https://api.github.com/copilot_internal/v2/token"
+-	copilotEditorVersion = "vscode/1.104.1"
+-	copilotUserAgent     = "curl/7.81.0" // Necessay to bypass the user-agent check
+-)
+-
+-var CopilotModels = []string{
+-	"Claude 3.5 Sonnet",
+-	"Claude 3.7 Sonnet",
+-	"Claude 3.7 Sonnet Thinking",
+-	"Gemini 2.0 Flash",
+-	"Gemini 2.5 Pro (Preview)",
+-	"o4-mini (Preview)",
+-	"GPT-4.1 (Preview)",
+-}
+-
+-// tokenResponse matches the GitHub auth endpoint
+-type tokenResponse struct {
+-	AnnotationsEnabled   bool `json:"annotations_enabled"`
+-	ChatEnabled          bool `json:"chat_enabled"`
+-	ChatJetbrainsEnabled bool `json:"chat_jetbrains_enabled"`
+-	CodeQuoteEnabled     bool `json:"code_quote_enabled"`
+-	CodeReviewEnabled    bool `json:"code_review_enabled"`
+-	Codesearch           bool `json:"codesearch"`
+-	CopilotignoreEnabled bool `json:"copilotignore_enabled"`
+-	Endpoints            struct {
+-		API           string `json:"api"`
+-		OriginTracker string `json:"origin-tracker"`
+-		Proxy         string `json:"proxy"`
+-		Telemetry     string `json:"telemetry"`
+-	} `json:"endpoints"`
+-	ExpiresAt             int64  `json:"expires_at"`
+-	Individual            bool   `json:"individual"`
+-	LimitedUserQuotas     any    `json:"limited_user_quotas"`
+-	LimitedUserResetDate  any    `json:"limited_user_reset_date"`
+-	Prompt8K              bool   `json:"prompt_8k"`
+-	PublicSuggestions     string `json:"public_suggestions"`
+-	RefreshIn             int    `json:"refresh_in"`
+-	SKU                   string `json:"sku"`
+-	SnippyLoadTestEnabled bool   `json:"snippy_load_test_enabled"`
+-	Telemetry             string `json:"telemetry"`
+-	Token                 string `json:"token"`
+-	TrackingID            string `json:"tracking_id"`
+-	VscElectronFetcherV2  bool   `json:"vsc_electron_fetcher_v2"`
+-	Xcode                 bool   `json:"xcode"`
+-	XcodeChat             bool   `json:"xcode_chat"`
+-	ErrorDetails          *struct {
+-		URL            string `json:"url,omitempty"`
+-		Message        string `json:"message,omitempty"`
+-		Title          string `json:"title,omitempty"`
+-		NotificationID string `json:"notification_id,omitempty"`
+-	} `json:"error_details,omitempty"`
+-}
+-
+-type modelsResponse struct {
+-	Data []struct {
+-		Capabilities struct {
+-			Family string `json:"family"`
+-			Limits struct {
+-				MaxContextWindowTokens int `json:"max_context_window_tokens"`
+-				MaxOutputTokens        int `json:"max_output_tokens"`
+-				MaxPromptTokens        int `json:"max_prompt_tokens"`
+-			} `json:"limits"`
+-			Object   string `json:"object"`
+-			Supports struct {
+-				Streaming bool `json:"streaming"`
+-				ToolCalls bool `json:"tool_calls"`
+-			} `json:"supports"`
+-			Tokenizer string `json:"tokenizer"`
+-			Type      string `json:"type"`
+-		} `json:"capabilities"`
+-		ID                 string `json:"id"`
+-		ModelPickerEnabled bool   `json:"model_picker_enabled"`
+-		Name               string `json:"name"`
+-		Object             string `json:"object"`
+-		Preview            bool   `json:"preview"`
+-		Vendor             string `json:"vendor"`
+-		Version            string `json:"version"`
+-		Policy             struct {
+-			State string `json:"state"`
+-			Terms string `json:"terms"`
+-		} `json:"policy"`
+-	} `json:"data"`
+-	Object string `json:"object"`
+-}
+-
+-// chatMessage represents a single message in the conversation
+-type chatMessage struct {
+-	Role    string `json:"role"`
+-	Content string `json:"content"`
+-}
+-
+-// chatRequest is the payload sent to the chat API
+-type chatRequest struct {
+-	Intent      bool          `json:"intent"`
+-	N           int           `json:"n"`
+-	Stream      bool          `json:"stream"`
+-	Temperature float64       `json:"temperature"`
+-	TopP        float64       `json:"top_p"`
+-	Model       string        `json:"model"`
+-	Messages    []chatMessage `json:"messages"`
+-}
+-
+-// responseEvent models both streaming and non‐streaming replies
+-type responseEvent struct {
+-	Choices []struct {
+-		FinishReason string `json:"finish_reason"`
+-		Index        int    `json:"index"`
+-		Delta        *struct {
+-			Content *string `json:"content"`
+-		} `json:"delta,omitempty"`
+-		Message *struct {
+-			Role    string `json:"role"`
+-			Content string `json:"content"`
+-		} `json:"message,omitempty"`
+-	} `json:"choices"`
+-	Created int64  `json:"created"`
+-	ID      string `json:"id"`
+-}
+-
+-// Cache defines the interface for caching Copilot tokens.
+-type Cache interface {
+-	GetToken(key string) (*model.CopilotToken, error)
+-	SetToken(token *model.CopilotToken) error
+-}
+-
+-type Config struct {
+-	Prompt      string  `json:"prompt"`
+-	Model       string  `json:"model"`
+-	Temperature float64 `json:"temperature"`
+-	TopP        float64 `json:"top_p"`
+-	Stream      bool    `json:"stream"`
+-	Cache       Cache
+-}
+-
+-type Copilot struct {
+-	ctx    context.Context
+-	conf   *Config
+-	token  *tokenResponse
+-	models map[string]string
+-}
+-
+-const copilotTokenCacheKey = "active_copilot_token"
+-
+-func NewCopilot(ctx context.Context, conf *Config) (*Copilot, error) {
+-	return &Copilot{
+-		ctx:    ctx,
+-		conf:   conf,
+-		models: make(map[string]string),
+-	}, nil
+-}
+-
+-func (c *Copilot) GetToken() error {
+-	var tr *tokenResponse
+-	if c.conf.Cache != nil {
+-		token, err := c.conf.Cache.GetToken(copilotTokenCacheKey)
+-		if err == nil && token != nil {
+-			if time.Now().Before(time.Unix(token.ExpiresAt, 0)) {
+-				// Token from cache is valid and not expired
+-				if err := json.Unmarshal([]byte(token.TokenResponseJSON), &tr); err != nil {
+-					log.FromContext(c.ctx).WithError(err).Warn("Failed to unmarshal cached Copilot token JSON")
+-					tr = nil // Ensure we fetch a new one
+-				}
+-			} else if token.ExpiresAt > 0 { // It was found but expired
+-				log.FromContext(c.ctx).Infof("Cached Copilot API token expired at %s, fetching new one.", time.Unix(token.ExpiresAt, 0).Format(time.RFC1123))
+-			}
+-		} else if err != nil && !errors.Is(err, model.ErrNotFound) {
+-			// Log error only if it's not ErrNotFound (which is expected if cache is empty)
+-			log.FromContext(c.ctx).WithError(err).Warn("Failed to get Copilot token from cache")
+-		}
+-	}
+-
+-	if tr == nil { // If not cached, expired, or error during cache retrieval/unmarshal
+-		oauth, err := readLocalToken()
+-		if err != nil {
+-			return fmt.Errorf("failed to read local github copilot token: %v", err)
+-		}
+-		apiTokenResp, err := getAPIToken(c.ctx, oauth)
+-		if err != nil {
+-			return fmt.Errorf("failed to get github copilot API token: %v", err)
+-		}
+-		tr = apiTokenResp // Assign the newly fetched token response
+-
+-		// Check expiry of the newly fetched token before caching
+-		if time.Now().After(time.Unix(tr.ExpiresAt, 0)) {
+-			expiresAt := time.Unix(tr.ExpiresAt, 0).Format(time.RFC1123)
+-			return fmt.Errorf("newly fetched github copilot API token is already expired at %s", expiresAt)
+-		}
+-
+-		if c.conf.Cache != nil {
+-			tokenJSON, err := json.Marshal(tr)
+-			if err != nil {
+-				log.FromContext(c.ctx).WithError(err).Warn("Failed to marshal Copilot token for caching")
+-			} else {
+-				dbTokenToCache := &model.CopilotToken{
+-					Key:               copilotTokenCacheKey,
+-					Token:             tr.Token,
+-					ExpiresAt:         tr.ExpiresAt,
+-					TokenResponseJSON: string(tokenJSON),
+-				}
+-				if err := c.conf.Cache.SetToken(dbTokenToCache); err != nil {
+-					log.FromContext(c.ctx).WithError(err).Warn("Failed to set Copilot token in cache")
+-				} else {
+-					log.FromContext(c.ctx).Infof("Saved new Copilot API token to cache, expires at %s", time.Unix(tr.ExpiresAt, 0).Format(time.RFC1123))
+-				}
+-			}
+-		}
+-	}
+-
+-	c.token = tr
+-	return nil
+-}
+-
+-func (c *Copilot) Models() (map[string]string, error) {
+-	if len(c.models) > 0 {
+-		return c.models, nil
+-	}
+-	if err := c.GetToken(); err != nil {
+-		return nil, fmt.Errorf("failed to get Copilot token: %v", err)
+-	}
+-	modelsResponse, err := c.token.getModels(c.ctx)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to get models: %v", err)
+-	}
+-	for _, model := range modelsResponse.Data {
+-		// if model.ModelPickerEnabled && model.Policy.State == "enabled" {
+-		if model.ModelPickerEnabled {
+-			c.models[model.Name] = model.ID
+-			// fmt.Println(model.Name)
+-		}
+-	}
+-	return c.models, nil
+-}
+-
+-func (c *Copilot) SetModels(models map[string]string) (map[string]string, error) {
+-	c.models = models
+-	return c.models, nil
+-}
+-
+-func (c *Copilot) SetModel(model string) error {
+-	if _, ok := c.models[model]; !ok {
+-		return fmt.Errorf("model '%s' not found", model)
+-	}
+-	c.conf.Model = model
+-	return nil
+-}
+-
+-// Verify checks that the current model configuration is valid
+-func (c *Copilot) Verify() error {
+-	if c.conf.Model == "" {
+-		return fmt.Errorf("no model specified")
+-	}
+-	if len(c.models) == 0 {
+-		if err := c.GetToken(); err != nil {
+-			return fmt.Errorf("failed to get token: %v", err)
+-		}
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-	}
+-	modelID, ok := c.models[c.conf.Model]
+-	if !ok {
+-		// Model not found in cache, try refreshing the models list
+-		c.models = make(map[string]string) // Clear cache to force refresh
+-		if err := c.GetToken(); err != nil {
+-			return fmt.Errorf("failed to get token: %v", err)
+-		}
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-		// Check again after refresh
+-		modelID, ok = c.models[c.conf.Model]
+-		if !ok {
+-			return fmt.Errorf("model '%s' not found in available models (note: newly released models may take time to appear in the API even if enabled in GitHub Copilot settings)", c.conf.Model)
+-		}
+-	}
+-	if modelID == "" {
+-		return fmt.Errorf("model '%s' has empty ID", c.conf.Model)
+-	}
+-	return nil
+-}
+-
+-func readLocalToken() (string, error) {
+-	home, err := os.UserHomeDir()
+-	if err != nil {
+-		return "", err
+-	}
+-
+-	for _, path := range []string{
+-		"hosts.json",
+-		"apps.json",
+-	} {
+-		configPath := filepath.Join(home, ".config/github-copilot", path)
+-		if runtime.GOOS == "windows" {
+-			configPath = filepath.Join(os.Getenv("LOCALAPPDATA"), "github-copilot", path)
+-		}
+-
+-		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+-			continue
+-		}
+-
+-		data, err := os.ReadFile(configPath)
+-		if err != nil {
+-			return "", err
+-		}
+-
+-		var config map[string]json.RawMessage
+-		if err := json.Unmarshal(data, &config); err != nil {
+-			return "", fmt.Errorf("failed to parse Copilot configuration file at %s: %w", configPath, err)
+-		}
+-
+-		for key, value := range config {
+-			if key == "github.com" || strings.HasPrefix(key, "github.com:") {
+-				var tokenData map[string]string
+-				if err := json.Unmarshal(value, &tokenData); err != nil {
+-					continue
+-				}
+-				if token, exists := tokenData["oauth_token"]; exists {
+-					return token, nil
+-				}
+-			}
+-		}
+-	}
+-
+-	return "", fmt.Errorf("token not found in HOME/.config/github-copilot hosts.json OR apps.json")
+-}
+-
+-func getAPIToken(ctx context.Context, oauth string) (*tokenResponse, error) {
+-	req, err := http.NewRequestWithContext(ctx, "GET", copilotChatAuthURL, nil)
+-	if err != nil {
+-		return nil, err
+-	}
+-	req.Header.Set("Authorization", "token "+oauth)
+-	req.Header.Set("Accept", "application/json")
+-	req.Header.Set("Editor-Version", copilotEditorVersion)
+-	req.Header.Set("User-Agent", copilotUserAgent)
+-
+-	client := &http.Client{Timeout: 10 * time.Second}
+-	resp, err := client.Do(req)
+-	if err != nil {
+-		return nil, err
+-	}
+-	defer resp.Body.Close()
+-
+-	if resp.StatusCode != http.StatusOK {
+-		body, _ := io.ReadAll(resp.Body)
+-		return nil, fmt.Errorf("auth failed: %s %s", resp.Status, body)
+-	}
+-
+-	// data, err := io.ReadAll(resp.Body)
+-	// if err != nil {
+-	// 	return nil, err
+-	// }
+-	// log.Debug(string(data))
+-
+-	var tr tokenResponse
+-	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+-		return nil, err
+-	}
+-
+-	return &tr, nil
+-}
+-
+-func (api *tokenResponse) getModels(ctx context.Context) (*modelsResponse, error) {
+-	req, err := http.NewRequestWithContext(ctx, "GET", api.Endpoints.API+"/models", nil)
+-	if err != nil {
+-		return nil, err
+-	}
+-	req.Header.Set("Authorization", "Bearer "+api.Token)
+-	req.Header.Set("Content-Type", "application/json")
+-	// req.Header.Set("Copilot-Integration-Id", "vscode-chat")
+-	req.Header.Set("Editor-Version", copilotEditorVersion)
+-	req.Header.Set("User-Agent", copilotUserAgent)
+-	resp, err := http.DefaultClient.Do(req)
+-	if err != nil {
+-		return nil, err
+-	}
+-	defer resp.Body.Close()
+-
+-	var modelsResponse modelsResponse
+-	if err := json.NewDecoder(resp.Body).Decode(&modelsResponse); err != nil {
+-		return nil, err
+-	}
+-
+-	return &modelsResponse, nil
+-}
+-
+-func (c *Copilot) Chat() (string, error) {
+-	if err := c.GetToken(); err != nil {
+-		return "", fmt.Errorf("failed to get Copilot token: %v", err)
+-	}
+-
+-	// Verify model is valid before attempting to chat
+-	if err := c.Verify(); err != nil {
+-		return "", fmt.Errorf("model verification failed: %v", err)
+-	}
+-
+-	reqBody := chatRequest{
+-		Intent:      true,
+-		N:           1,
+-		Stream:      c.conf.Stream,
+-		Temperature: c.conf.Temperature,
+-		TopP:        c.conf.TopP,
+-		Model:       c.models[c.conf.Model],
+-		Messages:    []chatMessage{{Role: "user", Content: c.conf.Prompt}},
+-	}
+-	data, err := json.Marshal(reqBody)
+-	if err != nil {
+-		return "", err
+-	}
+-
+-	req, err := http.NewRequestWithContext(c.ctx, "POST", c.token.Endpoints.API+"/chat/completions", bytes.NewBuffer(data))
+-	if err != nil {
+-		return "", err
+-	}
+-	req.Header.Set("Authorization", "Bearer "+c.token.Token)
+-	req.Header.Set("Content-Type", "application/json")
+-	// req.Header.Set("Copilot-Integration-Id", "vscode-chat")
+-	req.Header.Set("Editor-Version", copilotEditorVersion)
+-	req.Header.Set("User-Agent", copilotUserAgent)
+-
+-	client := &http.Client{Timeout: 0} // no timeout for streaming
+-	resp, err := client.Do(req)
+-	if err != nil {
+-		return "", err
+-	}
+-	defer resp.Body.Close()
+-
+-	if resp.StatusCode != http.StatusOK {
+-		body, _ := io.ReadAll(resp.Body)
+-		return "", fmt.Errorf("request failed: %s %s", resp.Status, body)
+-	}
+-
+-	if c.conf.Stream {
+-		reader := bufio.NewReader(resp.Body)
+-		var out strings.Builder
+-		for {
+-			line, err := reader.ReadString('\n')
+-			if err != nil {
+-				if err == io.EOF {
+-					break
+-				}
+-				return "", err
+-			}
+-			line = strings.TrimSpace(line)
+-			if !strings.HasPrefix(line, "data: ") {
+-				continue
+-			}
+-			payload := strings.TrimPrefix(line, "data: ")
+-			if payload == "[DONE]" {
+-				break
+-			}
+-			var ev responseEvent
+-			if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+-				return "", err
+-			}
+-			for _, choice := range ev.Choices {
+-				if choice.Delta != nil && choice.Delta.Content != nil {
+-					out.WriteString(*choice.Delta.Content)
+-				}
+-			}
+-		}
+-		return utils.Clean(out.String()), nil
+-	} else {
+-		body, err := io.ReadAll(resp.Body)
+-		if err != nil {
+-			return "", err
+-		}
+-		var ev responseEvent
+-		if err := json.Unmarshal(body, &ev); err != nil {
+-			return "", err
+-		}
+-		// print full assistant message
+-		for _, choice := range ev.Choices {
+-			if choice.Message != nil {
+-				return utils.Clean(choice.Message.Content), nil
+-			}
+-		}
+-	}
+-
+-	return "", fmt.Errorf("no response from API")
+-}
+-
+-// Close implements the ai.AI interface.
+-func (c *Copilot) Close() error {
+-	return nil // No specific resources to close for Copilot client
+-}
+diff --git a/internal/ai/gemini/gemini.go b/internal/ai/gemini/gemini.go
+deleted file mode 100644
+index b89bc6f4b..000000000
+--- a/internal/ai/gemini/gemini.go
++++ /dev/null
+@@ -1,146 +0,0 @@
+-package gemini
+-
+-import (
+-	"context"
+-	"fmt"
+-	"os"
+-	"slices"
+-
+-	"github.com/blacktop/ipsw/internal/ai/utils"
+-	"google.golang.org/genai"
+-)
+-
+-type Config struct {
+-	Prompt      string  `json:"prompt"`
+-	Model       string  `json:"model"`
+-	Temperature float64 `json:"temperature"`
+-	TopP        float64 `json:"top_p"`
+-	Stream      bool    `json:"stream"`
+-}
+-
+-type Gemini struct {
+-	ctx    context.Context
+-	conf   *Config
+-	cli    *genai.Client
+-	models map[string]string
+-}
+-
+-func NewGemini(ctx context.Context, conf *Config) (*Gemini, error) {
+-	apiKey := os.Getenv("GEMINI_API_KEY")
+-	if apiKey == "" {
+-		return nil, fmt.Errorf("failed to create google gemini client: GEMINI_API_KEY environment variable is not set")
+-	}
+-	cli, err := genai.NewClient(ctx, &genai.ClientConfig{
+-		APIKey:  apiKey,
+-		Backend: genai.BackendGeminiAPI,
+-	})
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to create google gemini client: %w", err)
+-	}
+-	gemini := &Gemini{
+-		ctx:  ctx,
+-		conf: conf,
+-		cli:  cli,
+-	}
+-	return gemini, nil
+-}
+-
+-func (c *Gemini) Models() (map[string]string, error) {
+-	if len(c.models) > 0 {
+-		return c.models, nil
+-	}
+-	if err := c.getModels(); err != nil {
+-		return nil, fmt.Errorf("gemini: failed to get models: %w", err)
+-	}
+-	return c.models, nil
+-}
+-
+-func (c *Gemini) SetModel(model string) error {
+-	if _, ok := c.models[model]; !ok {
+-		return fmt.Errorf("model '%s' not found", model)
+-	}
+-	c.conf.Model = model
+-	return nil
+-}
+-
+-func (c *Gemini) SetModels(models map[string]string) (map[string]string, error) {
+-	c.models = models
+-	return c.models, nil
+-}
+-
+-// Verify checks that the current model configuration is valid
+-func (c *Gemini) Verify() error {
+-	if c.conf.Model == "" {
+-		return fmt.Errorf("no model specified")
+-	}
+-	if len(c.models) == 0 {
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-	}
+-	modelID, ok := c.models[c.conf.Model]
+-	if !ok {
+-		// Model not found in cache, try refreshing the models list
+-		c.models = make(map[string]string) // Clear cache to force refresh
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-		// Check again after refresh
+-		modelID, ok = c.models[c.conf.Model]
+-		if !ok {
+-			return fmt.Errorf("model '%s' not found in available models", c.conf.Model)
+-		}
+-	}
+-	if modelID == "" {
+-		return fmt.Errorf("model '%s' has empty ID", c.conf.Model)
+-	}
+-	return nil
+-}
+-
+-func (c *Gemini) getModels() error {
+-	models, err := c.cli.Models.List(c.ctx, &genai.ListModelsConfig{})
+-	if err != nil {
+-		return fmt.Errorf("failed to list models: %w", err)
+-	}
+-	c.models = make(map[string]string)
+-	for _, model := range models.Items {
+-		if slices.Contains(model.SupportedActions, "generateContent") {
+-			c.models[model.DisplayName] = model.Name
+-		}
+-	}
+-	if len(c.models) == 0 {
+-		return fmt.Errorf("no models found")
+-	}
+-	return nil
+-}
+-
+-func (c *Gemini) Chat() (string, error) {
+-	// Verify model configuration before making API call
+-	if err := c.Verify(); err != nil {
+-		return "", fmt.Errorf("invalid model configuration: %w", err)
+-	}
+-
+-	chat, err := c.cli.Chats.Create(c.ctx,
+-		c.models[c.conf.Model],
+-		&genai.GenerateContentConfig{
+-			Temperature: new(float32(c.conf.Temperature)),
+-			TopP:        new(float32(c.conf.TopP)),
+-		},
+-		nil, // history
+-	)
+-	if err != nil {
+-		return "", fmt.Errorf("failed to create message: %w", err)
+-	}
+-
+-	message, err := chat.SendMessage(c.ctx, genai.Part{Text: c.conf.Prompt})
+-	if err != nil {
+-		return "", fmt.Errorf("failed to send message: %w", err)
+-	}
+-
+-	return utils.Clean(message.Text()), nil
+-}
+-
+-// Close implements the ai.AI interface.
+-func (g *Gemini) Close() error {
+-	return nil // No specific resources to close for Gemini client
+-}
+diff --git a/internal/ai/ollama/ollama.go b/internal/ai/ollama/ollama.go
+deleted file mode 100644
+index 8612eb86f..000000000
+--- a/internal/ai/ollama/ollama.go
++++ /dev/null
+@@ -1,160 +0,0 @@
+-package ollama
+-
+-import (
+-	"context"
+-	"fmt"
+-
+-	"github.com/blacktop/ipsw/internal/ai/utils"
+-	"github.com/ollama/ollama/api"
+-)
+-
+-type Config struct {
+-	Prompt      string  `json:"prompt"`
+-	Model       string  `json:"model"`
+-	Temperature float64 `json:"temperature"`
+-	TopP        float64 `json:"top_p"`
+-	Stream      bool    `json:"stream"`
+-}
+-
+-type Ollama struct {
+-	ctx    context.Context
+-	cfg    *Config
+-	cli    *api.Client
+-	models map[string]string
+-}
+-
+-func NewOllama(ctx context.Context, cfg *Config) (*Ollama, error) {
+-	cli, err := api.ClientFromEnvironment()
+-	if err != nil {
+-		return nil, fmt.Errorf("could not create ollama client: %w", err)
+-	}
+-	o := &Ollama{
+-		ctx: ctx,
+-		cfg: cfg,
+-		cli: cli,
+-	}
+-	if err := o.getModels(); err != nil {
+-		return nil, fmt.Errorf("could not get models: %w", err)
+-	}
+-	if cfg.Model != "" {
+-		if _, ok := o.models[cfg.Model]; !ok {
+-			return nil, fmt.Errorf("model %s not found", cfg.Model)
+-		}
+-	}
+-	if cfg.Temperature < 0 || cfg.Temperature > 1 {
+-		return nil, fmt.Errorf("temperature must be between 0 and 1")
+-	}
+-	if cfg.TopP < 0 || cfg.TopP > 1 {
+-		return nil, fmt.Errorf("top_p must be between 0 and 1")
+-	}
+-	if cfg.Prompt == "" {
+-		return nil, fmt.Errorf("prompt cannot be empty")
+-	}
+-	return o, nil
+-}
+-
+-func (o *Ollama) Chat() (string, error) {
+-	// Verify model configuration before making API call
+-	if err := o.Verify(); err != nil {
+-		return "", fmt.Errorf("invalid model configuration: %w", err)
+-	}
+-
+-	systemMsg := "Provide very brief, concise responses"
+-
+-	messages := []api.Message{
+-		{
+-			Role:    "system",
+-			Content: systemMsg,
+-		},
+-		{
+-			Role:    "user",
+-			Content: o.cfg.Prompt,
+-		},
+-	}
+-
+-	var out string
+-
+-	respFunc := func(cr api.ChatResponse) error {
+-		out = cr.Message.Content
+-		return nil
+-	}
+-
+-	if err := o.cli.Chat(context.Background(), &api.ChatRequest{
+-		Model:    o.cfg.Model,
+-		Messages: messages,
+-		Stream:   new(bool),
+-	}, respFunc); err != nil {
+-		return "", fmt.Errorf("failed to chat with ollama: %w", err)
+-	}
+-
+-	if out == "" {
+-		return "", fmt.Errorf("ollama returned empty response")
+-	}
+-
+-	return utils.Clean(out), nil
+-}
+-
+-func (o *Ollama) Models() (map[string]string, error) {
+-	if len(o.models) > 0 {
+-		return o.models, nil
+-	}
+-	if err := o.getModels(); err != nil {
+-		return nil, fmt.Errorf("ollama: failed to get models: %w", err)
+-	}
+-	return o.models, nil
+-}
+-
+-func (o *Ollama) SetModel(model string) error {
+-	if _, ok := o.models[model]; !ok {
+-		return fmt.Errorf("model '%s' not found", model)
+-	}
+-	o.cfg.Model = model
+-	return nil
+-}
+-
+-func (o *Ollama) SetModels(models map[string]string) (map[string]string, error) {
+-	return o.models, nil // cache is not used for local models
+-}
+-
+-// Verify checks that the current model configuration is valid
+-func (o *Ollama) Verify() error {
+-	if o.cfg.Model == "" {
+-		return fmt.Errorf("no model specified")
+-	}
+-	if len(o.models) == 0 {
+-		if _, err := o.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-	}
+-	if _, ok := o.models[o.cfg.Model]; !ok {
+-		// Model not found in cache, try refreshing the models list
+-		o.models = make(map[string]string) // Clear cache to force refresh
+-		if _, err := o.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-		// Check again after refresh
+-		if _, ok := o.models[o.cfg.Model]; !ok {
+-			return fmt.Errorf("model '%s' not found in available models", o.cfg.Model)
+-		}
+-	}
+-	return nil
+-}
+-
+-func (o *Ollama) getModels() error {
+-	o.models = make(map[string]string)
+-
+-	models, err := o.cli.List(o.ctx)
+-	if err != nil {
+-		return fmt.Errorf("failed to get models: %w", err)
+-	}
+-	for _, model := range models.Models {
+-		o.models[model.Name] = model.Model
+-	}
+-
+-	return nil
+-}
+-
+-// Close implements the ai.AI interface.
+-func (o *Ollama) Close() error {
+-	return nil // No specific resources to close for Ollama client
+-}
+diff --git a/internal/ai/openai/openai.go b/internal/ai/openai/openai.go
+deleted file mode 100644
+index 3213fa029..000000000
+--- a/internal/ai/openai/openai.go
++++ /dev/null
+@@ -1,131 +0,0 @@
+-package openai
+-
+-import (
+-	"context"
+-	"fmt"
+-
+-	"github.com/blacktop/ipsw/internal/ai/utils"
+-	"github.com/openai/openai-go"
+-)
+-
+-type Config struct {
+-	Prompt      string  `json:"prompt"`
+-	Model       string  `json:"model"`
+-	Temperature float64 `json:"temperature"`
+-	TopP        float64 `json:"top_p"`
+-	Stream      bool    `json:"stream"`
+-}
+-
+-type OpenAI struct {
+-	ctx    context.Context
+-	conf   *Config
+-	cli    *openai.Client
+-	models map[string]string
+-}
+-
+-func NewOpenAI(ctx context.Context, conf *Config) (*OpenAI, error) {
+-	cli := openai.NewClient()
+-	openai := &OpenAI{
+-		ctx:  ctx,
+-		conf: conf,
+-		cli:  &cli,
+-	}
+-	return openai, nil
+-}
+-
+-func (c *OpenAI) Models() (map[string]string, error) {
+-	if len(c.models) > 0 {
+-		return c.models, nil
+-	}
+-	if err := c.getModels(); err != nil {
+-		return nil, fmt.Errorf("openai: failed to get models: %w", err)
+-	}
+-	return c.models, nil
+-}
+-
+-func (c *OpenAI) SetModel(model string) error {
+-	if _, ok := c.models[model]; !ok {
+-		return fmt.Errorf("model '%s' not found", model)
+-	}
+-	c.conf.Model = model
+-	return nil
+-}
+-
+-func (c *OpenAI) SetModels(models map[string]string) (map[string]string, error) {
+-	c.models = models
+-	return c.models, nil
+-}
+-
+-// Verify checks that the current model configuration is valid
+-func (c *OpenAI) Verify() error {
+-	if c.conf.Model == "" {
+-		return fmt.Errorf("no model specified")
+-	}
+-	if len(c.models) == 0 {
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-	}
+-	modelID, ok := c.models[c.conf.Model]
+-	if !ok {
+-		// Model not found in cache, try refreshing the models list
+-		c.models = make(map[string]string) // Clear cache to force refresh
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-		// Check again after refresh
+-		modelID, ok = c.models[c.conf.Model]
+-		if !ok {
+-			return fmt.Errorf("model '%s' not found in available models", c.conf.Model)
+-		}
+-	}
+-	if modelID == "" {
+-		return fmt.Errorf("model '%s' has empty ID", c.conf.Model)
+-	}
+-	return nil
+-}
+-
+-func (c *OpenAI) getModels() error {
+-	models, err := c.cli.Models.List(c.ctx)
+-	if err != nil {
+-		return fmt.Errorf("failed to list models: %w", err)
+-	}
+-	c.models = make(map[string]string)
+-	for _, model := range models.Data {
+-		c.models[model.ID] = model.ID
+-	}
+-	if len(c.models) == 0 {
+-		return fmt.Errorf("no models found")
+-	}
+-	return nil
+-}
+-
+-func (c *OpenAI) Chat() (string, error) {
+-	// Verify model configuration before making API call
+-	if err := c.Verify(); err != nil {
+-		return "", fmt.Errorf("invalid model configuration: %w", err)
+-	}
+-
+-	message, err := c.cli.Chat.Completions.New(c.ctx, openai.ChatCompletionNewParams{
+-		Messages: []openai.ChatCompletionMessageParamUnion{
+-			openai.UserMessage(c.conf.Prompt),
+-		},
+-		Model:       c.models[c.conf.Model],
+-		Temperature: openai.Float(c.conf.Temperature),
+-		TopP:        openai.Float(c.conf.TopP),
+-	})
+-	if err != nil {
+-		return "", fmt.Errorf("failed to create message: %w", err)
+-	}
+-
+-	if len(message.Choices) == 0 {
+-		return "", fmt.Errorf("no content returned from message")
+-	}
+-
+-	return utils.Clean(message.Choices[0].Message.Content), nil
+-}
+-
+-// Close implements the ai.AI interface.
+-func (o *OpenAI) Close() error {
+-	return nil // No specific resources to close for OpenAI client
+-}
+diff --git a/internal/ai/openrouter/openrouter.go b/internal/ai/openrouter/openrouter.go
+deleted file mode 100644
+index df7c3856a..000000000
+--- a/internal/ai/openrouter/openrouter.go
++++ /dev/null
+@@ -1,259 +0,0 @@
+-package openrouter
+-
+-import (
+-	"bytes"
+-	"context"
+-	"encoding/json"
+-	"fmt"
+-	"io"
+-	"net/http"
+-	"os"
+-	"time"
+-
+-	"github.com/blacktop/ipsw/internal/ai/utils"
+-)
+-
+-const (
+-	openrouterChatCompletionsEndpoint = "https://openrouter.ai/api/v1/chat/completions"
+-	openrouterModelsEndpoint          = "https://openrouter.ai/api/v1/models"
+-)
+-
+-// Config holds the configuration for the OpenRouter LLM API client
+-type Config struct {
+-	Prompt      string  `json:"prompt"`
+-	Model       string  `json:"model"`
+-	Temperature float64 `json:"temperature"`
+-	TopP        float64 `json:"top_p"`
+-	Stream      bool    `json:"stream"`
+-}
+-
+-// OpenRouter represents a client for the OpenRouter API
+-type OpenRouter struct {
+-	ctx    context.Context
+-	conf   *Config
+-	client *http.Client
+-	models map[string]string
+-	apiKey string
+-}
+-
+-// chatMessage represents a single message in the conversation
+-type chatMessage struct {
+-	Role    string `json:"role"`
+-	Content string `json:"content"`
+-}
+-
+-// chatRequest is the payload sent to the OpenRouter chat API
+-type chatRequest struct {
+-	Model       string        `json:"model"`
+-	Messages    []chatMessage `json:"messages"`
+-	Temperature float64       `json:"temperature"`
+-	TopP        float64       `json:"top_p"`
+-	Stream      bool          `json:"stream"`
+-}
+-
+-// chatResponse represents the response from the OpenRouter chat API
+-type chatResponse struct {
+-	ID      string `json:"id"`
+-	Object  string `json:"object"`
+-	Created int64  `json:"created"`
+-	Model   string `json:"model"`
+-	Choices []struct {
+-		Message struct {
+-			Role    string `json:"role"`
+-			Content string `json:"content"`
+-		} `json:"message"`
+-		FinishReason string `json:"finish_reason"`
+-	} `json:"choices"`
+-	Usage struct {
+-		PromptTokens     int `json:"prompt_tokens"`
+-		CompletionTokens int `json:"completion_tokens"`
+-		TotalTokens      int `json:"total_tokens"`
+-	} `json:"usage"`
+-}
+-
+-// modelsResponse represents the response from the OpenRouter models API
+-type modelsResponse struct {
+-	Data []struct {
+-		ID              string  `json:"id"`
+-		Name            string  `json:"name"`
+-		Description     string  `json:"description"`
+-		Context_length  int     `json:"context_length"`
+-		PricePrompt     float64 `json:"pricing.prompt"`
+-		PriceCompletion float64 `json:"pricing.completion"`
+-	} `json:"data"`
+-}
+-
+-// NewOpenRouter creates a new OpenRouter API client
+-func NewOpenRouter(ctx context.Context, conf *Config) (*OpenRouter, error) {
+-	apiKey := os.Getenv("OPENROUTER_API_KEY")
+-	if apiKey == "" {
+-		return nil, fmt.Errorf("failed to create OpenRouter client: OPENROUTER_API_KEY environment variable is not set")
+-	}
+-
+-	client := &OpenRouter{
+-		ctx:    ctx,
+-		conf:   conf,
+-		client: &http.Client{Timeout: 300 * time.Second},
+-		models: make(map[string]string),
+-		apiKey: apiKey,
+-	}
+-
+-	return client, nil
+-}
+-
+-// Models returns the available models from OpenRouter
+-func (c *OpenRouter) Models() (map[string]string, error) {
+-	if len(c.models) > 0 {
+-		return c.models, nil
+-	}
+-	modelsResponse, err := c.getModels()
+-	if err != nil {
+-		return nil, fmt.Errorf("openrouter: failed to get models: %w", err)
+-	}
+-
+-	// Populate the models map with the model IDs
+-	for _, model := range modelsResponse.Data {
+-		c.models[model.Name] = model.ID
+-	}
+-
+-	return c.models, nil
+-}
+-
+-// SetModel sets the model to use for the OpenRouter client
+-func (c *OpenRouter) SetModel(model string) error {
+-	if _, ok := c.models[model]; !ok {
+-		return fmt.Errorf("model '%s' not found", model)
+-	}
+-	c.conf.Model = model
+-	return nil
+-}
+-
+-// SetModels sets the available models for the OpenRouter client
+-func (c *OpenRouter) SetModels(models map[string]string) (map[string]string, error) {
+-	c.models = models
+-	return c.models, nil
+-}
+-
+-// Verify checks that the current model configuration is valid
+-func (c *OpenRouter) Verify() error {
+-	if c.conf.Model == "" {
+-		return fmt.Errorf("no model specified")
+-	}
+-	if len(c.models) == 0 {
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-	}
+-	modelID, ok := c.models[c.conf.Model]
+-	if !ok {
+-		// Model not found in cache, try refreshing the models list
+-		c.models = make(map[string]string) // Clear cache to force refresh
+-		if _, err := c.Models(); err != nil {
+-			return fmt.Errorf("failed to fetch models: %v", err)
+-		}
+-		// Check again after refresh
+-		modelID, ok = c.models[c.conf.Model]
+-		if !ok {
+-			return fmt.Errorf("model '%s' not found in available models", c.conf.Model)
+-		}
+-	}
+-	if modelID == "" {
+-		return fmt.Errorf("model '%s' has empty ID", c.conf.Model)
+-	}
+-	return nil
+-}
+-
+-// getModels retrieves the available models from OpenRouter API
+-func (c *OpenRouter) getModels() (*modelsResponse, error) {
+-	req, err := http.NewRequestWithContext(c.ctx, "GET", openrouterModelsEndpoint, nil)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to create request: %w", err)
+-	}
+-
+-	c.setRequestHeaders(req)
+-
+-	resp, err := c.client.Do(req)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to send request: %w", err)
+-	}
+-	defer resp.Body.Close()
+-
+-	if resp.StatusCode != http.StatusOK {
+-		body, _ := io.ReadAll(resp.Body)
+-		return nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
+-	}
+-
+-	var response modelsResponse
+-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+-		return nil, fmt.Errorf("failed to decode response: %w", err)
+-	}
+-
+-	return &response, nil
+-}
+-
+-// Chat sends a message to the OpenRouter API and returns the response
+-func (c *OpenRouter) Chat() (string, error) {
+-	// Verify model configuration before making API call
+-	if err := c.Verify(); err != nil {
+-		return "", fmt.Errorf("invalid model configuration: %w", err)
+-	}
+-
+-	reqBody := chatRequest{
+-		Model:       c.models[c.conf.Model],
+-		Messages:    []chatMessage{{Role: "user", Content: c.conf.Prompt}},
+-		Temperature: c.conf.Temperature,
+-		TopP:        c.conf.TopP,
+-		Stream:      false, // We don't support streaming yet
+-	}
+-
+-	data, err := json.Marshal(reqBody)
+-	if err != nil {
+-		return "", fmt.Errorf("failed to marshal request: %w", err)
+-	}
+-
+-	req, err := http.NewRequestWithContext(c.ctx, "POST", openrouterChatCompletionsEndpoint, bytes.NewBuffer(data))
+-	if err != nil {
+-		return "", fmt.Errorf("failed to create request: %w", err)
+-	}
+-
+-	c.setRequestHeaders(req)
+-
+-	resp, err := c.client.Do(req)
+-	if err != nil {
+-		return "", fmt.Errorf("failed to send request: %w", err)
+-	}
+-	defer resp.Body.Close()
+-
+-	if resp.StatusCode != http.StatusOK {
+-		body, _ := io.ReadAll(resp.Body)
+-		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
+-	}
+-
+-	var response chatResponse
+-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+-		return "", fmt.Errorf("failed to decode response: %w", err)
+-	}
+-
+-	if len(response.Choices) == 0 {
+-		return "", fmt.Errorf("no response choices returned")
+-	}
+-
+-	return utils.Clean(response.Choices[0].Message.Content), nil
+-}
+-
+-// Close implements the ai.AI interface
+-func (c *OpenRouter) Close() error {
+-	return nil // No specific resources to close for OpenRouter client
+-}
+-
+-// setRequestHeaders sets the common headers for OpenRouter API requests
+-func (c *OpenRouter) setRequestHeaders(req *http.Request) {
+-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+-	req.Header.Set("Content-Type", "application/json")
+-	req.Header.Set("Accept", "application/json")
+-	// Set HTTP-Referer and X-Title headers only if OPENROUTER_CLIENT_TITLE is set
+-	if clientTitle := os.Getenv("OPENROUTER_CLIENT_TITLE"); clientTitle != "" {
+-		req.Header.Set("HTTP-Referer", "https://github.com/blacktop/ipsw")
+-		req.Header.Set("X-Title", clientTitle)
+-	}
+-}
+diff --git a/internal/ai/utils/utils.go b/internal/ai/utils/utils.go
+deleted file mode 100644
+index 1ea0d454f..000000000
+--- a/internal/ai/utils/utils.go
++++ /dev/null
+@@ -1,27 +0,0 @@
+-package utils
+-
+-import (
+-	"regexp"
+-	"strings"
+-)
+-
+-func removeThink(content string) string {
+-	if strings.HasPrefix(content, "<think>") {
+-		if _, rest, found := strings.Cut(content, "</think>"); found {
+-			return rest
+-		}
+-	}
+-	return content
+-}
+-
+-func Clean(content string) string {
+-	content = removeThink(content)
+-	content = strings.TrimSpace(content)
+-	// Use regex to extract code from Markdown code blocks
+-	codeBlockRegex := regexp.MustCompile("(?s)```(?:[a-zA-Z0-9_+-]*\\n)?(.*?)\\n?```")
+-	matches := codeBlockRegex.FindStringSubmatch(content)
+-	if len(matches) > 1 {
+-		return strings.TrimSpace(matches[1])
+-	}
+-	return content
+-}
+diff --git a/internal/commands/disass/disass.go b/internal/commands/disass/disass.go
+deleted file mode 100644
+index 6e6bf44fc..000000000
+--- a/internal/commands/disass/disass.go
++++ /dev/null
+@@ -1,145 +0,0 @@
+-package disass
+-
+-import (
+-	"context"
+-	"fmt"
+-	"maps"
+-	"math"
+-	"slices"
+-	"sort"
+-	"strconv"
+-	"strings"
+-	"time"
+-
+-	"github.com/AlecAivazis/survey/v2"
+-	"github.com/AlecAivazis/survey/v2/terminal"
+-	"github.com/alecthomas/chroma/v2/quick"
+-	"github.com/apex/log"
+-	"github.com/blacktop/ipsw/internal/ai"
+-	"github.com/blacktop/ipsw/pkg/disass"
+-	"github.com/briandowns/spinner"
+-	"github.com/fatih/color"
+-	"github.com/spf13/cobra"
+-	"github.com/spf13/viper"
+-)
+-
+-type Config struct {
+-	UUID           string
+-	LLM            string
+-	Language       string
+-	Model          string
+-	Temperature    float64
+-	TopP           float64
+-	TemperatureSet bool
+-	TopPSet        bool
+-	Stream         bool
+-	DisableCache   bool
+-	Verbose        bool
+-	Color          bool
+-	Theme          string
+-	MaxRetries     int
+-	RetryBackoff   time.Duration
+-}
+-
+-func Decompile(asm string, cfg *Config) (string, error) {
+-	promptFmt, lexer, err := disass.GetPrompt(asm, cfg.Language)
+-	if err != nil {
+-		return "", fmt.Errorf("failed to get prompt format string and syntax highlight lexer: %v", err)
+-	}
+-	llm, err := ai.NewAI(context.Background(), &ai.Config{
+-		UUID:           cfg.UUID,
+-		Provider:       cfg.LLM,
+-		Prompt:         fmt.Sprintf(promptFmt, asm),
+-		Model:          cfg.Model,
+-		Temperature:    cfg.Temperature,
+-		TemperatureSet: cfg.TemperatureSet,
+-		TopP:           cfg.TopP,
+-		TopPSet:        cfg.TopPSet,
+-		Stream:         cfg.Stream,
+-		DisableCache:   cfg.DisableCache,
+-		Verbose:        cfg.Verbose,
+-		MaxRetries:     cfg.MaxRetries,
+-		RetryBackoff:   cfg.RetryBackoff,
+-	})
+-	if err != nil {
+-		return "", fmt.Errorf("failed to create llm client: %v", err)
+-	}
+-	if cfg.Model == "" {
+-		modelMap, err := llm.Models()
+-		if err != nil {
+-			return "", fmt.Errorf("failed to get llm models: %v", err)
+-		}
+-		models := slices.Collect(maps.Keys(modelMap))
+-		sort.Strings(models)
+-
+-		// If the provider only offers a single 'default' model, don't bother prompting.
+-		if len(models) == 1 {
+-			choice := models[0]
+-			modelID := modelMap[choice]
+-			if modelID == "" {
+-				modelID = choice
+-			}
+-			if choice == "default" || modelID == "default" {
+-				if err := llm.SetModel("default"); err != nil {
+-					return "", fmt.Errorf("failed to set llm model: %v", err)
+-				}
+-				goto decompile
+-			}
+-		}
+-
+-		var choice string
+-		prompt := &survey.Select{
+-			Message:  "Select model to use:",
+-			Options:  models,
+-			PageSize: 10,
+-		}
+-		if err := survey.AskOne(prompt, &choice); err == terminal.InterruptErr {
+-			log.Warn("Exiting...")
+-			return "", nil
+-		}
+-		if err := llm.SetModel(choice); err != nil {
+-			return "", fmt.Errorf("failed to set llm model: %v", err)
+-		}
+-	}
+-
+-decompile:
+-	s := spinner.New(spinner.CharSets[38], 100*time.Millisecond)
+-	s.Prefix = color.BlueString("   • Decompiling... ")
+-	s.Start()
+-
+-	decmp, err := llm.Chat()
+-	s.Stop()
+-	if err != nil {
+-		return "", fmt.Errorf("failed to decompile via llm: %v", err)
+-	}
+-	if cfg.Color {
+-		var buf strings.Builder
+-		if err := quick.Highlight(&buf, "\n"+string(decmp)+"\n", lexer, "terminal256", cfg.Theme); err != nil {
+-			return "", err
+-		}
+-		return buf.String(), nil
+-	}
+-	return decmp, nil
+-}
+-
+-// FlagWasProvided reports whether a CLI flag was explicitly set via the command line
+-// or supplied through a config file. This allows callers to distinguish user intent
+-// from default values when forwarding options to downstream systems.
+-func FlagWasProvided(cmd *cobra.Command, flagName, viperKey string) bool {
+-	if cmd.Flags().Changed(flagName) {
+-		return true
+-	}
+-	if viper.InConfig(viperKey) {
+-		return true
+-	}
+-	flag := cmd.Flags().Lookup(flagName)
+-	if flag == nil {
+-		return false
+-	}
+-	defVal, err := strconv.ParseFloat(flag.DefValue, 64)
+-	if err != nil {
+-		return false
+-	}
+-	current := viper.GetFloat64(viperKey)
+-	return math.Abs(current-defVal) > 1e-9
+-}
+diff --git a/internal/db/ai/cache.go b/internal/db/ai/cache.go
+deleted file mode 100644
+index 03e706b20..000000000
+--- a/internal/db/ai/cache.go
++++ /dev/null
+@@ -1,181 +0,0 @@
+-package ai
+-
+-import (
+-	"errors"
+-	"fmt"
+-	"os"
+-	"path/filepath"
+-
+-	model "github.com/blacktop/ipsw/internal/model/ai"
+-	"github.com/glebarez/sqlite"
+-	"gorm.io/gorm"
+-	"gorm.io/gorm/clause"
+-	"gorm.io/gorm/logger"
+-)
+-
+-const cacheDBName = "dec.db"
+-
+-// CacheDB is the interface for AI response caching.
+-type CacheDB interface {
+-	Get(uuid, provider, modelName, prompt string, temperature, topP float64) (*model.ChatResponse, error)
+-	Set(entry *model.ChatResponse) error
+-	// Copilot Token Caching
+-	GetToken(key string) (*model.CopilotToken, error)
+-	SetToken(token *model.CopilotToken) error
+-	// Provider Models Caching
+-	GetProviderModels(providerName string) (*model.ProviderModels, error)
+-	SetProviderModels(models *model.ProviderModels) error
+-	DeleteProviderModels(providerName string) error
+-	Close() error
+-}
+-
+-type DB struct {
+-	db *gorm.DB
+-}
+-
+-// NewCacheDB creates a new CacheDB instance using SQLite.
+-func NewCacheDB(verbose bool) (CacheDB, error) {
+-	userConfigDir, err := os.UserConfigDir()
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to get user config directory: %w", err)
+-	}
+-
+-	ipswConfigDir := filepath.Join(userConfigDir, "ipsw")
+-	if err := os.MkdirAll(ipswConfigDir, 0750); err != nil {
+-		return nil, fmt.Errorf("failed to create ipsw config directory '%s': %w", ipswConfigDir, err)
+-	}
+-
+-	dbPath := filepath.Join(ipswConfigDir, cacheDBName)
+-
+-	gormDB, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{
+-		SkipDefaultTransaction: true,
+-		TranslateError:         true,
+-		Logger:                 logger.Default.LogMode(logger.Silent),
+-	})
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to connect to AI cache sqlite database at '%s': %w", dbPath, err)
+-	}
+-	if verbose {
+-		gormDB.Logger = logger.Default.LogMode(logger.Info)
+-	}
+-
+-	if err := gormDB.AutoMigrate(
+-		&model.ChatResponse{},
+-		&model.CopilotToken{},
+-		&model.ProviderModels{},
+-	); err != nil {
+-		sqlDB, closeErr := gormDB.DB()
+-		if closeErr == nil {
+-			_ = sqlDB.Close()
+-		}
+-		return nil, fmt.Errorf("failed to auto-migrate AI cache schema: %w", err)
+-	}
+-
+-	return &DB{db: gormDB}, nil
+-}
+-
+-/*
+-	Chat Response Caching Methods
+-*/
+-
+-// Get fetches an entry from the AI cache by parameters.
+-func (d *DB) Get(uuid, provider, modelName, prompt string, temperature, topP float64) (*model.ChatResponse, error) {
+-	var entry model.ChatResponse
+-	// Query by all relevant parameters using the composite index
+-	if err := d.db.Where(&model.ChatResponse{
+-		UUID:        uuid,
+-		Provider:    provider,
+-		LLMModel:    modelName,
+-		Prompt:      prompt,
+-		Temperature: temperature,
+-		TopP:        topP,
+-	}).First(&entry).Error; err != nil {
+-		if errors.Is(err, gorm.ErrRecordNotFound) {
+-			return nil, gorm.ErrRecordNotFound // Return gorm's error directly for cache miss
+-		}
+-		return nil, fmt.Errorf("failed to get AI cache entry: %w", err)
+-	}
+-	return &entry, nil
+-}
+-
+-// Set stores an entry in the AI cache.
+-func (d *DB) Set(entry *model.ChatResponse) error {
+-	if err := d.db.Create(entry).Error; err != nil {
+-		return fmt.Errorf("failed to set AI cache entry: %w", err)
+-	}
+-	return nil
+-}
+-
+-// Close closes the database connection.
+-func (d *DB) Close() error {
+-	sqlDB, err := d.db.DB()
+-	if err != nil {
+-		return fmt.Errorf("failed to get underlying DB instance: %w", err)
+-	}
+-	return sqlDB.Close()
+-}
+-
+-/*
+-	Copilot Token Caching Methods
+-*/
+-
+-// GetToken retrieves a cached Copilot token.
+-func (d *DB) GetToken(key string) (*model.CopilotToken, error) {
+-	var token model.CopilotToken
+-	if err := d.db.Where("key = ?", key).First(&token).Error; err != nil {
+-		if errors.Is(err, gorm.ErrRecordNotFound) {
+-			return nil, model.ErrNotFound // Use your defined ErrNotFound from model pkg
+-		}
+-		return nil, fmt.Errorf("failed to get copilot token from cache: %w", err)
+-	}
+-	return &token, nil
+-}
+-
+-// SetToken stores or updates a Copilot token in the cache.
+-func (d *DB) SetToken(tokenToSet *model.CopilotToken) error {
+-	// Attempt to find by key, then update or create.
+-	// Using Assign to either update the existing record or create a new one if not found.
+-	if err := d.db.Where(model.CopilotToken{Key: tokenToSet.Key}).Assign(tokenToSet).FirstOrCreate(tokenToSet).Error; err != nil {
+-		return fmt.Errorf("failed to set copilot token in cache: %w", err)
+-	}
+-	return nil
+-}
+-
+-/*
+-	Provider Models Caching Methods
+-*/
+-
+-// GetProviderModels retrieves cached models for a provider.
+-func (d *DB) GetProviderModels(provider string) (*model.ProviderModels, error) {
+-	var pm model.ProviderModels
+-	if err := d.db.Where("provider = ?", provider).First(&pm).Error; err != nil {
+-		if errors.Is(err, gorm.ErrRecordNotFound) {
+-			return nil, model.ErrNotFound
+-		}
+-		return nil, fmt.Errorf("failed to get provider models from cache for %s: %w", provider, err)
+-	}
+-	return &pm, nil
+-}
+-
+-// SetProviderModels stores or updates cached models for a provider.
+-func (d *DB) SetProviderModels(modelsToSet *model.ProviderModels) error {
+-	// This will update the ModelsJSON if the provider already exists, or insert if it doesn't
+-	if err := d.db.Clauses(clause.OnConflict{
+-		Columns:   []clause.Column{{Name: "provider"}},
+-		DoUpdates: clause.AssignmentColumns([]string{"models_json", "updated_at"}),
+-	}).Create(modelsToSet).Error; err != nil {
+-		return fmt.Errorf("failed to upsert provider models in cache for %s: %w", modelsToSet.Provider, err)
+-	}
+-	return nil
+-}
+-
+-// DeleteProviderModels removes cached models for a provider.
+-func (d *DB) DeleteProviderModels(provider string) error {
+-	if err := d.db.Where("provider = ?", provider).Delete(&model.ProviderModels{}).Error; err != nil {
+-		if errors.Is(err, gorm.ErrRecordNotFound) {
+-			return nil // Not an error if it's already gone or never existed
+-		}
+-		return fmt.Errorf("failed to delete provider models from cache for %s: %w", provider, err)
+-	}
+-	return nil
+-}
+diff --git a/internal/model/ai/cache.go b/internal/model/ai/cache.go
+deleted file mode 100644
+index a9622ce13..000000000
+--- a/internal/model/ai/cache.go
++++ /dev/null
+@@ -1,38 +0,0 @@
+-package ai
+-
+-import (
+-	"errors"
+-
+-	"gorm.io/gorm"
+-)
+-
+-var ErrNotFound = errors.New("not found")
+-
+-// ChatResponse represents a cached AI response in the database.
+-type ChatResponse struct {
+-	gorm.Model
+-	UUID        string  `gorm:"index"`
+-	Provider    string  `gorm:"index"`
+-	LLMModel    string  `gorm:"index"`
+-	Prompt      string  `gorm:"index"`
+-	Temperature float64 `gorm:"index"`
+-	TopP        float64 `gorm:"index"`
+-	// Stream bool // Decided to not cache streaming responses for now, or cache only the full aggregated response.
+-	Response string
+-}
+-
+-// CopilotToken represents a cached Copilot API token.
+-type CopilotToken struct {
+-	gorm.Model
+-	Key               string `gorm:"uniqueIndex"` // A unique key to identify this token, e.g., "active_copilot_token"
+-	Token             string // The API token (tokenResponse.Token)
+-	ExpiresAt         int64  // Unix timestamp (tokenResponse.ExpiresAt)
+-	TokenResponseJSON string // JSON marshaled full tokenResponse
+-}
+-
+-// ProviderModels represents cached AI provider models in the database.
+-type ProviderModels struct {
+-	gorm.Model
+-	Provider   string `gorm:"uniqueIndex"` // e.g., "copilot", "openai"
+-	ModelsJSON string // JSON marshaled map[string]string of model name to model ID
+-}
+-- 
+2.54.0
+
