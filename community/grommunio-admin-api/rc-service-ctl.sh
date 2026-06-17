@@ -7,8 +7,8 @@
 # Copyright 2024 Miguel Da Silva, Contauro AG
 # Distributed under the terms of the GNU General Public License, v2 or later
 # 
-# Version: 0.3 - 2024-05-20
-# Last change: Fixed info command
+# Version: 0.4 - 2026-06-17
+# Last change: exit 1 if a service not exists
 #
 
 usage() {
@@ -16,7 +16,7 @@ usage() {
     echo >&2
     echo >&2 "Usage: $(basename "$0") [options] <command> <service>"
     echo >&2
-    echo >&2 "Commands: start | stop | reload | restart | | enable | disable | status | info |"
+    echo >&2 "Commands: start | stop | reload | restart | enable | disable | status | info |"
     echo >&2 "          try-restart | reload-or-restart | try-reload-or-restart"
     echo >&2 "Service: one or multiple services separate by blanks"
     echo >&2
@@ -29,7 +29,7 @@ usage() {
 [ $# -eq 0 ] && usage
 
 # Retrieve options and command
-prog=""; cmd=""; opt=""; combined=0; try=0
+prog=""; cmd=""; opt=""; combined=0; try=0; err=0
 while [ -z "$cmd" ]; do
     case "$1" in
         "start")   prog="rc-service"; cmd="start" ;;
@@ -70,8 +70,10 @@ while [ -n "$2" ]; do
     initscript=$(rc-service -r $service)
     if [ -z "$initscript" ]; then
         [ "$cmd" != "info" ] && echo -e >&2 "\e[1;31m * \e[0m$service: unknown service"
-	shift
-	continue
+        # Set the error marker for later handling
+        err=1
+        shift
+        continue
     fi
 
     # Retrieve service state
@@ -128,3 +130,5 @@ while [ -n "$2" ]; do
     shift;
 done
 
+# Exit with error code 1 if one of the services failed
+[ $err -eq 0 ] && exit 0 || exit 1
