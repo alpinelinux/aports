@@ -1,0 +1,144 @@
+From 2e666964fe76774875905140b2d62f1abf5feb98 Mon Sep 17 00:00:00 2001
+From: Jakub Zelenka <bukka@php.net>
+Date: Sun, 3 May 2026 20:01:41 +0200
+Subject: [PATCH 4/7] GHSA-7qg2-v9fj-4mwv: [fpm] XSS within status endpoint
+
+Fixes GHSA-7qg2-v9fj-4mwv
+Fixes CVE-2026-6735
+
+(cherry picked from commit 13e72d1c97f72892421b04e8c5c05bc9bb193457)
+---
+ sapi/fpm/fpm/fpm_status.c                     | 34 +++++++++++--
+ .../tests/ghsa-7qg2-v9fj-4mwv-status-xss.phpt | 48 +++++++++++++++++++
+ 2 files changed, 78 insertions(+), 4 deletions(-)
+ create mode 100644 sapi/fpm/tests/ghsa-7qg2-v9fj-4mwv-status-xss.phpt
+
+diff --git a/sapi/fpm/fpm/fpm_status.c b/sapi/fpm/fpm/fpm_status.c
+index f698753cf4c..81292aa3bf8 100644
+--- a/sapi/fpm/fpm/fpm_status.c
++++ b/sapi/fpm/fpm/fpm_status.c
+@@ -525,8 +525,8 @@ int fpm_status_handle_request(void) /* {{{ */
+ 		if (full_syntax) {
+ 			unsigned int i;
+ 			int first;
+-			zend_string *tmp_query_string;
+-			char *query_string;
++			zend_string *tmp_query_string, *tmp_request_uri_string;
++			char *query_string, *request_uri_string;
+ 			struct timeval duration, now;
+ 			float cpu;
+ 
+@@ -551,13 +551,36 @@ int fpm_status_handle_request(void) /* {{{ */
+ 					}
+ 				}
+ 
++				request_uri_string = NULL;
++				tmp_request_uri_string = NULL;
++				if (proc->request_uri[0] != '\0') {
++					if (encode_html) {
++						tmp_request_uri_string = php_escape_html_entities_ex(
++								(const unsigned char *) proc->request_uri,
++								strlen(proc->request_uri), 1, ENT_DISALLOWED | ENT_HTML_DOC_XML1 | ENT_COMPAT,
++								NULL, /* double_encode */ 1, /* quiet */ 0);
++						request_uri_string = ZSTR_VAL(tmp_request_uri_string);
++					} else if (encode_json) {
++						tmp_request_uri_string = php_json_encode_string(proc->request_uri,
++								strlen(proc->request_uri), PHP_JSON_INVALID_UTF8_IGNORE);
++						request_uri_string = ZSTR_VAL(tmp_request_uri_string);
++						/* remove quotes around the string */
++						if (ZSTR_LEN(tmp_request_uri_string) >= 2) {
++							request_uri_string[ZSTR_LEN(tmp_request_uri_string) - 1] = '\0';
++							++request_uri_string;
++						}
++					} else {
++						request_uri_string = proc->request_uri;
++					}
++				}
++
+ 				query_string = NULL;
+ 				tmp_query_string = NULL;
+ 				if (proc->query_string[0] != '\0') {
+ 					if (encode_html) {
+ 						tmp_query_string = php_escape_html_entities_ex(
+ 								(const unsigned char *) proc->query_string,
+-								strlen(proc->query_string), 1, ENT_HTML_IGNORE_ERRORS & ENT_COMPAT,
++								strlen(proc->query_string), 1, ENT_DISALLOWED | ENT_HTML_DOC_XML1 | ENT_COMPAT,
+ 								NULL, /* double_encode */ 1, /* quiet */ 0);
+ 					} else if (encode_json) {
+ 						tmp_query_string = php_json_encode_string(proc->query_string,
+@@ -596,7 +619,7 @@ int fpm_status_handle_request(void) /* {{{ */
+ 					proc->requests,
+ 					duration.tv_sec * 1000000UL + duration.tv_usec,
+ 					proc->request_method[0] != '\0' ? proc->request_method : "-",
+-					proc->request_uri[0] != '\0' ? proc->request_uri : "-",
++					request_uri_string ? request_uri_string : "-",
+ 					query_string ? "?" : "",
+ 					query_string ? query_string : "",
+ 					proc->content_length,
+@@ -607,6 +630,9 @@ int fpm_status_handle_request(void) /* {{{ */
+ 				PUTS(buffer);
+ 				efree(buffer);
+ 
++				if (tmp_request_uri_string) {
++					zend_string_free(tmp_request_uri_string);
++				}
+ 				if (tmp_query_string) {
+ 					zend_string_free(tmp_query_string);
+ 				}
+diff --git a/sapi/fpm/tests/ghsa-7qg2-v9fj-4mwv-status-xss.phpt b/sapi/fpm/tests/ghsa-7qg2-v9fj-4mwv-status-xss.phpt
+new file mode 100644
+index 00000000000..475bc130a42
+--- /dev/null
++++ b/sapi/fpm/tests/ghsa-7qg2-v9fj-4mwv-status-xss.phpt
+@@ -0,0 +1,48 @@
++--TEST--
++FPM: GHSA-7qg2-v9fj-4mwv - status xss
++--SKIPIF--
++<?php include "skipif.inc"; ?>
++--FILE--
++<?php
++
++require_once "tester.inc";
++
++$cfg = <<<EOT
++[global]
++error_log = {{FILE:LOG}}
++[unconfined]
++listen = {{ADDR}}
++pm = static
++pm.max_children = 2
++pm.status_path = /status
++catch_workers_output = yes
++EOT;
++
++$code = <<<EOT
++<?php
++usleep(200000);
++EOT;
++
++$tester = new FPM\Tester($cfg, $code);
++$tester->start();
++$tester->expectLogStartNotices();
++$responses = $tester
++        ->multiRequest([
++                ['uri' => '/<script>alert(1)</script>', 'query' => '<script>alert(2)</script>'],
++                ['uri' => '/status', 'query' => 'full&html', 'delay' => 100000],
++        ]);
++var_dump(strpos($responses[1]->getBody(), '<script>'));
++$tester->terminate();
++$tester->expectLogTerminatingNotices();
++$tester->close();
++
++?>
++Done
++--EXPECT--
++bool(false)
++Done
++--CLEAN--
++<?php
++require_once "tester.inc";
++FPM\Tester::clean();
++?>
+-- 
+2.53.0
+
