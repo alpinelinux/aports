@@ -1,0 +1,127 @@
+commit c73d22868d33035d9cbe8e50edc45a5a084f74f5
+Author: Samuel Just <sjust@redhat.com>
+Date:   Fri Nov 7 23:56:14 2025 +0000
+
+    mgr: add mgr_subinterpreter_modules config
+    
+    This commit adds a mgr_subinterpreter_modules config to cause specified
+    modules (or all if * is specified) to be loaded in individual
+    subinterpreters.
+    
+    This changes the default behavior of ceph-mgr from running each module
+    in a distinct subinterpreter to running them all in the same main
+    interpreter.  We can reintroduce subinterpreter support over time by
+    adding modules to the list as we test them.
+    
+    Fixes: https://tracker.ceph.com/issues/73857
+    Fixes: https://tracker.ceph.com/issues/73859
+    Signed-off-by: Samuel Just <sjust@redhat.com>
+
+diff --git a/src/common/options/CMakeLists.txt b/src/common/options/CMakeLists.txt
+index f12a5513a63..3249d75a915 100644
+--- a/src/common/options/CMakeLists.txt
++++ b/src/common/options/CMakeLists.txt
+@@ -82,6 +82,8 @@ if(WITH_MGR)
+   endif()
+ endif()
+ 
++set(mgr_subinterpreter_modules "")
++
+ add_options(global)
+ add_options(cephfs-mirror)
+ add_options(crimson)
+diff --git a/src/common/options/mgr.yaml.in b/src/common/options/mgr.yaml.in
+index d79b1f0728a..7d31cefa8f8 100644
+--- a/src/common/options/mgr.yaml.in
++++ b/src/common/options/mgr.yaml.in
+@@ -138,6 +138,19 @@ options:
+   - mgr_module_path
+   flags:
+   - startup
++- name: mgr_subinterpreter_modules
++  type: str
++  level: advanced
++  desc: List of manager modules to load in independent subinterpreters
++  long_desc: A comma delimited list of module names. This list is read by manager
++    when it starts. By default, manager loads each module into the main interpreter.
++    Modules in this list will instead be loaded into independent subinterpreters.
++    Specifying '*' will cause all modules to be run in independent subinterpreters.
++  default: @mgr_subinterpreter_modules@
++  services:
++  - mgr
++  flags:
++  - startup
+ - name: mgr_initial_modules
+   type: str
+   level: basic
+diff --git a/src/mgr/PyModule.cc b/src/mgr/PyModule.cc
+index 20234ec5768..5275f664ae2 100644
+--- a/src/mgr/PyModule.cc
++++ b/src/mgr/PyModule.cc
+@@ -21,6 +21,7 @@
+ 
+ #include "include/stringify.h"
+ #include "common/BackTrace.h"
++#include "common/split.h"
+ #include "global/signal_handler.h"
+ 
+ #include "common/debug.h"
+@@ -346,8 +347,23 @@ int PyModule::load(PyThreadState *pMainThreadState)
+ {
+   ceph_assert(pMainThreadState != nullptr);
+ 
+-  // Configure sub-interpreter
+-  {
++  const auto subinterpreter_modules_opt = g_conf().get_val<std::string>(
++    "mgr_subinterpreter_modules"
++  );
++  auto subinterpreter_modules = ceph::split(subinterpreter_modules_opt);
++  use_main_interpreter = std::count(
++    subinterpreter_modules.begin(), subinterpreter_modules.end(), "*"
++  ) == 0 && std::count(
++    subinterpreter_modules.begin(), subinterpreter_modules.end(), module_name
++  ) == 0;
++
++  if (use_main_interpreter) {
++    // Use main interpreter
++    derr << "Loading module " << module_name << " in main interpreter" << dendl;
++    pMyThreadState.set(pMainThreadState);
++  } else {
++    // Configure sub-interpreter
++    derr << "Loading module " << module_name << " in sub-interpreter" << dendl;
+     SafeThreadState sts(pMainThreadState);
+     Gil gil(sts);
+ 
+@@ -370,6 +386,7 @@ int PyModule::load(PyThreadState *pMainThreadState)
+ 	       << string(begin(sys_path), end(sys_path)) << "'" << dendl;
+     }
+   }
++
+   // Environment is all good, import the external module
+   {
+     Gil gil(pMyThreadState);
+@@ -773,6 +790,10 @@ PyModule::~PyModule()
+     Gil gil(pMyThreadState, true);
+     Py_XDECREF(pClass);
+     Py_XDECREF(pStandbyClass);
++    if (use_main_interpreter) {
++      Py_EndInterpreter(pMyThreadState.ts);
++    }
++    pMyThreadState.ts = nullptr;
+   }
+ }
+ 
+diff --git a/src/mgr/PyModule.h b/src/mgr/PyModule.h
+index 8d88ff94c62..ba4cee9eea0 100644
+--- a/src/mgr/PyModule.h
++++ b/src/mgr/PyModule.h
+@@ -97,6 +97,9 @@ public:
+   PyObject *pClass = nullptr;
+   PyObject *pStandbyClass = nullptr;
+ 
++  // true unless module in mgr_subinterpreter_modules
++  bool use_main_interpreter = true;
++
+   explicit PyModule(const std::string &module_name_)
+     : module_name(module_name_)
+   {

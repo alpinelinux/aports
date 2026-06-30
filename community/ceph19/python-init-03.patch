@@ -1,0 +1,91 @@
+commit 7fe3f56c5cd86a2997096e30285c95c2ea1bd297
+Author: Kefu Chai <k.chai@proxmox.com>
+Date:   Thu Dec 4 16:05:27 2025 +0800
+
+    mgr/PyModule: clear Python exception when NOTIFY_TYPES is missing
+    
+    Commit 4589c4d8ac5 ("mgr: do not require NOTIFY_TYPES in python modules")
+    changed load_notify_types() to treat missing NOTIFY_TYPES as non-fatal,
+    but failed to clear the Python exception state set by PyObject_GetAttrString().
+    
+    When PyObject_GetAttrString() fails to find an attribute, it:
+    1. Returns nullptr
+    2. Sets AttributeError in the interpreter's exception state
+    
+    The exception state persists across subsequent Python C API calls until
+    explicitly cleared. This causes unrelated operations to fail with misleading
+    error messages.
+    
+    Bug Manifestation:
+    ------------------
+    In PyModule::load() (line 292), the call sequence is:
+    
+    1. load_subclass_of("MgrModule", &pClass) - succeeds
+    2. load_notify_types() - sets AttributeError but returns 0 (success)
+    3. load_subclass_of("MgrStandbyModule", &pStandbyClass) - FAILS
+    
+    The failure occurs because PyImport_ImportModule() at line 658 checks
+    PyErr_Occurred() before operating. When it detects the pending AttributeError
+    from step 2, it refuses to import and returns NULL immediately.
+    
+    This causes load_subclass_of() to report:
+    ```
+      1 mgr[py] Loading python module 'balancer'
+     -1 mgr[py] Module balancer has missing NOTIFY_TYPES member
+     -1 mgr[py] Module not found: 'mgr_module'
+     -1 mgr[py] AttributeError: type object 'Module' has no attribute 'NOTIFY_TYPES'
+    ```
+    
+    This error is misleading - mgr_module exists and is importable, but the
+    import fails due to the uncleared exception from an unrelated operation.
+    
+    Without this fix, modules without NOTIFY_TYPES may fail to load their
+    standby class, or cause subsequent module loads to fail entirely with
+    confusing error messages pointing to the wrong module.
+    
+    Fix:
+    ----
+    This patch follows Python's EAFP (Easier to Ask for Forgiveness than
+    Permission) philosophy by attempting the attribute access and handling the
+    expected AttributeError, rather than checking preconditions with
+    PyObject_HasAttrString() (LBYL approach). The EAFP approach:
+    
+    - Is more pythonic and idiomatic
+    - Requires only one API call instead of two (more efficient)
+    - Properly distinguishes expected errors (AttributeError) from unexpected
+      errors (e.g., interpreter shutdown, memory errors)
+    - Handles unexpected errors appropriately by reporting and returning -EINVAL
+    
+    Implementation:
+    - Use PyErr_ExceptionMatches() to check for expected AttributeError
+    - Clear expected exception with PyErr_Clear()
+    - Report unexpected exceptions via handle_pyerror()
+    
+    Refs: 4589c4d8ac5 ("mgr: do not require NOTIFY_TYPES in python modules")
+    Refs: https://tracker.ceph.com/issues/55835
+    Fixes: https://tracker.ceph.com/issues/70789
+    Signed-off-by: Kefu Chai <k.chai@proxmox.com>
+
+diff --git a/src/mgr/PyModule.cc b/src/mgr/PyModule.cc
+index f0286b66bcc..01f4e066969 100644
+--- a/src/mgr/PyModule.cc
++++ b/src/mgr/PyModule.cc
+@@ -532,8 +532,16 @@ int PyModule::load_notify_types()
+ {
+   PyObject *ls = PyObject_GetAttrString(pClass, "NOTIFY_TYPES");
+   if (ls == nullptr) {
+-    dout(10) << "Module " << get_name() << " has no NOTIFY_TYPES member" << dendl;
+-    return 0;
++    // NOTIFY_TYPES is optional - clear expected AttributeError
++    if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
++      PyErr_Clear();
++      dout(10) << "Module " << get_name() << " has no NOTIFY_TYPES member" << dendl;
++      return 0;
++    }
++    // Unexpected error - report it
++    derr << "Error getting NOTIFY_TYPES from " << get_name() << ": "
++         << handle_pyerror(true, module_name, "load_notify_types") << dendl;
++    return -EINVAL;
+   }
+   if (!PyObject_TypeCheck(ls, &PyList_Type)) {
+     // Relatively easy mistake for human to make, e.g. defining COMMANDS
