@@ -1,0 +1,125 @@
+Patch-Source: https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/5096.patch
+
+From f1570318ec3e9a38615eb91708bb71628ab8bcfd Mon Sep 17 00:00:00 2001
+From: Carlos Garnacho <carlosg@gnome.org>
+Date: Sun, 31 May 2026 11:23:06 +0200
+Subject: [PATCH 1/2] wayland: Only schedule a single cursor location update
+
+If the cursor is updated multiple times before the state is applied
+on the surface, the newer signal handled would overwrite the ID of
+the previous.
+
+We can coalesce these calls and keep just the last value with the
+already existing signal handler, add a check to make sure we don't
+add a second signal handler if there's one pending already.
+
+Fixes (harmless) warnings like:
+
+clutter_input_focus_set_cursor_location: assertion 'CLUTTER_IS_INPUT_FOCUS (focus)' failed
+
+When a second handler would stumble upon already cleared data.
+Easily reproducible when a VTE widget has the IM focus, but there
+may be other cases.
+
+Closes: https://gitlab.gnome.org/GNOME/mutter/-/work_items/4840
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/5096>
+---
+ src/wayland/meta-wayland-text-input.c | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/src/wayland/meta-wayland-text-input.c b/src/wayland/meta-wayland-text-input.c
+index ab635fda71d..a8fe13fa893 100644
+--- a/src/wayland/meta-wayland-text-input.c
++++ b/src/wayland/meta-wayland-text-input.c
+@@ -831,8 +831,11 @@ update_cursor_location (MetaWaylandSurface *surface,
+ {
+   MetaWaylandTextInput *text_input = user_data;
+ 
+-  clutter_input_focus_set_cursor_location (text_input->cursor_update.focus,
+-                                           &text_input->cursor_update.rect);
++  if (clutter_input_focus_is_focused (text_input->cursor_update.focus))
++    {
++      clutter_input_focus_set_cursor_location (text_input->cursor_update.focus,
++                                               &text_input->cursor_update.rect);
++    }
+ 
+   g_clear_object (&text_input->cursor_update.focus);
+   graphene_rect_init (&text_input->cursor_update.rect, 0, 0, 0, 0);
+@@ -936,10 +939,13 @@ text_input_commit_state (struct wl_client   *client,
+       graphene_rect_init (&text_input->cursor_update.rect,
+                           x1, y1, x2 - x1, y2 - y1);
+ 
+-      text_input->cursor_update.signal_id =
+-        g_signal_connect (text_input->surface, "pre-state-applied",
+-                          G_CALLBACK (update_cursor_location),
+-                          text_input);
++      if (text_input->cursor_update.signal_id == 0)
++        {
++          text_input->cursor_update.signal_id =
++            g_signal_connect (text_input->surface, "pre-state-applied",
++                              G_CALLBACK (update_cursor_location),
++                              text_input);
++        }
+     }
+ 
+   if (text_input->pending_state & META_WAYLAND_PENDING_STATE_ACTIONS)
+-- 
+GitLab
+
+
+From 61d5d89ac3e86081c49455b74805b01ecaeae714 Mon Sep 17 00:00:00 2001
+From: Carlos Garnacho <carlosg@gnome.org>
+Date: Mon, 1 Jun 2026 10:52:07 +0200
+Subject: [PATCH 2/2] wayland: Drop semi-temporary variable
+
+When scheduling IM cursor rect updates, the ClutterInputFocus
+is kept around for the purpose of it being updated along with
+wl_surface updates. There's only one ClutterInputFocus though,
+from the MetaWaylandTextInput perspective, this intermediate
+variable can be dropped.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/5096>
+---
+ src/wayland/meta-wayland-text-input.c | 8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+diff --git a/src/wayland/meta-wayland-text-input.c b/src/wayland/meta-wayland-text-input.c
+index a8fe13fa893..3f57354005b 100644
+--- a/src/wayland/meta-wayland-text-input.c
++++ b/src/wayland/meta-wayland-text-input.c
+@@ -623,8 +623,6 @@ text_input_destructor (struct wl_resource *resource)
+   g_clear_pointer (&text_input->preedit_style.hints, g_array_unref);
+   wl_list_remove (wl_resource_get_link (resource));
+   reset_text_input_focus (text_input);
+-
+-  g_clear_object (&text_input->cursor_update.focus);
+ }
+ 
+ static void
+@@ -831,13 +829,12 @@ update_cursor_location (MetaWaylandSurface *surface,
+ {
+   MetaWaylandTextInput *text_input = user_data;
+ 
+-  if (clutter_input_focus_is_focused (text_input->cursor_update.focus))
++  if (clutter_input_focus_is_focused (text_input->input_focus))
+     {
+-      clutter_input_focus_set_cursor_location (text_input->cursor_update.focus,
++      clutter_input_focus_set_cursor_location (text_input->input_focus,
+                                                &text_input->cursor_update.rect);
+     }
+ 
+-  g_clear_object (&text_input->cursor_update.focus);
+   graphene_rect_init (&text_input->cursor_update.rect, 0, 0, 0, 0);
+   g_clear_signal_handler (&text_input->cursor_update.signal_id, surface);
+ }
+@@ -935,7 +932,6 @@ text_input_commit_state (struct wl_client   *client,
+                                                      rect.y + rect.height,
+                                                      &x2, &y2);
+ 
+-      g_set_object (&text_input->cursor_update.focus, focus);
+       graphene_rect_init (&text_input->cursor_update.rect,
+                           x1, y1, x2 - x1, y2 - y1);
+ 
+-- 
+GitLab
+
