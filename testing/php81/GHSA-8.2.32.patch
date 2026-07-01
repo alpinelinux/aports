@@ -1,0 +1,97 @@
+Patch-Source: https://github.com/php/php-src/commit/cbc0489126a7682796aad1e5fb4e51de74af162c
+From cbc0489126a7682796aad1e5fb4e51de74af162c Mon Sep 17 00:00:00 2001
+From: David Carlier <devnexen@gmail.com>
+Date: Fri, 29 May 2026 21:44:14 +0100
+Subject: [PATCH] ext/openssl: openssl_encrypt() zend mm heap overflow on
+ AES-WRAP-PAD mode.
+
+Fix #22186
+
+close GH-22187
+---
+ NEWS                           |  3 +++
+ ext/openssl/openssl.c          | 17 +++++++++++++++--
+ ext/openssl/tests/gh22186.phpt | 32 ++++++++++++++++++++++++++++++++
+ 3 files changed, 50 insertions(+), 2 deletions(-)
+ create mode 100644 ext/openssl/tests/gh22186.phpt
+
+diff --git a/ext/openssl/openssl.c b/ext/openssl/openssl.c
+index 1d467f5b50af..c3e2ba2438e4 100644
+--- a/ext/openssl/openssl.c
++++ b/ext/openssl/openssl.c
+@@ -7472,6 +7472,7 @@ static int php_openssl_cipher_update(const EVP_CIPHER *cipher_type,
+ 		const char *aad, size_t aad_len, int enc)  /* {{{ */
+ {
+ 	int i = 0;
++	size_t outlen = data_len + EVP_CIPHER_block_size(cipher_type);
+ 
+ 	if (mode->is_single_run_aead && !EVP_CipherUpdate(cipher_ctx, NULL, &i, NULL, (int)data_len)) {
+ 		php_openssl_store_errors();
+@@ -7485,7 +7486,19 @@ static int php_openssl_cipher_update(const EVP_CIPHER *cipher_type,
+ 		return FAILURE;
+ 	}
+ 
+-	*poutbuf = zend_string_alloc((int)data_len + EVP_CIPHER_block_size(cipher_type), 0);
++#ifdef EVP_CIPH_WRAP_MODE
++	if ((EVP_CIPHER_mode(cipher_type)) == EVP_CIPH_WRAP_MODE) {
++		/*
++		 * RFC 5649 wrap-with-padding rounds the input up to the block size
++		 * and prepends an integrity block, we reserve one extra block.
++		 * See EVP_EncryptUpdate(3): wrap mode may write up to
++		 * inl + cipher_block_size bytes.
++		 */
++		outlen += EVP_CIPHER_block_size(cipher_type);
++	}
++#endif
++
++	*poutbuf = zend_string_alloc(outlen, false);
+ 
+ 	if (!EVP_CipherUpdate(cipher_ctx, (unsigned char*)ZSTR_VAL(*poutbuf),
+ 					&i, (const unsigned char *)data, (int)data_len)) {
+@@ -7497,7 +7510,7 @@ static int php_openssl_cipher_update(const EVP_CIPHER *cipher_type,
+ 		}
+ 		*/
+ 		php_openssl_store_errors();
+-		zend_string_release_ex(*poutbuf, 0);
++		zend_string_release_ex(*poutbuf, false);
+ 		return FAILURE;
+ 	}
+ 
+diff --git a/ext/openssl/tests/gh22186.phpt b/ext/openssl/tests/gh22186.phpt
+new file mode 100644
+index 000000000000..8f28e6c45b58
+--- /dev/null
++++ b/ext/openssl/tests/gh22186.phpt
+@@ -0,0 +1,32 @@
++--TEST--
++GH-22186 (Heap buffer overflow in openssl_encrypt with AES-WRAP-PAD)
++--EXTENSIONS--
++openssl
++--SKIPIF--
++<?php
++/* openssl_get_cipher_methods() enumerates provider ciphers, but openssl_encrypt()
++ * resolves names via the legacy EVP_get_cipherbyname(), so on some builds the
++ * cipher is listed yet not usable. Probe the actual call path instead. */
++if (!@openssl_encrypt("test", "aes-128-wrap-pad", str_repeat("k", 16),
++        OPENSSL_RAW_DATA | OPENSSL_DONT_ZERO_PAD_KEY, str_repeat("\0", 4))) {
++    die('skip aes-128-wrap-pad not usable on this OpenSSL build');
++}
++?>
++--FILE--
++<?php
++$pass = str_repeat("k", 16);
++$iv = str_repeat("\0", 4);
++
++for ($i = 1; $i < 258; $i++) {
++    $data = str_repeat("a", $i);
++    $enc = openssl_encrypt($data, 'aes-128-wrap-pad', $pass, OPENSSL_RAW_DATA | OPENSSL_DONT_ZERO_PAD_KEY, $iv);
++    $dec = openssl_decrypt($enc, 'aes-128-wrap-pad', $pass, OPENSSL_RAW_DATA | OPENSSL_DONT_ZERO_PAD_KEY, $iv);
++    if ($dec !== $data) {
++        die("mismatch at $i\n");
++    }
++}
++
++echo "done\n";
++?>
++--EXPECT--
++done
