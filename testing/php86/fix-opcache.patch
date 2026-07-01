@@ -1,0 +1,97 @@
+Patch-Source: https://github.com/php/php-src/pull/21696
+From 94bad2ae58b86961d0f2df8480075e59c8dc95db Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Thu, 9 Apr 2026 15:02:50 -0400
+Subject: [PATCH] Fix GH-21691: OPcache CFG optimizer drops QM_ASSIGN feeding
+ JMPZ/JMPZ_EX with IS_VAR
+
+The CFG optimizer (pass 5) substituted a QM_ASSIGN's source operand
+into its consumer without checking the source's operand type. When
+ASSIGN_REF produces IS_VAR and a QM_ASSIGN converts it to IS_TMP_VAR
+before JMPZ/JMPNZ or JMPZ_EX/JMPNZ_EX, eliminating the QM_ASSIGN
+leaves an IS_VAR operand on a consumer whose handler is declared
+CONST|TMP|CV, producing "Invalid opcode 43/4/0" (or 46/4/0 for the
+_EX variants).
+
+Guard both substitution sites with src->op1_type != IS_VAR, folded
+into the enclosing condition (per dstogov's review) so the BOOL_NOT
+branch is defensively covered as well. Test exercises both JMPZ and
+JMPZ_EX paths.
+
+Closes GH-21691
+---
+ Zend/Optimizer/block_pass.c    |  4 ++--
+ ext/opcache/tests/gh21691.phpt | 42 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 44 insertions(+), 2 deletions(-)
+ create mode 100644 ext/opcache/tests/gh21691.phpt
+
+diff --git a/Zend/Optimizer/block_pass.c b/Zend/Optimizer/block_pass.c
+index 61a69dae51e1..0a1662abdbdd 100644
+--- a/Zend/Optimizer/block_pass.c
++++ b/Zend/Optimizer/block_pass.c
+@@ -703,7 +703,7 @@ static void zend_optimize_block(zend_basic_block *block, zend_op_array *op_array
+ 					} else if (opline->op1_type == IS_TMP_VAR &&
+ 					           !zend_bitset_in(used_ext, VAR_NUM(opline->op1.var))) {
+ 						src = VAR_SOURCE(opline->op1);
+-						if (src) {
++						if (src && src->op1_type != IS_VAR) {
+ 							if (src->opcode == ZEND_BOOL_NOT) {
+ 								VAR_SOURCE(opline->op1) = NULL;
+ 								COPY_NODE(opline->op1, src->op1);
+@@ -747,7 +747,7 @@ static void zend_optimize_block(zend_basic_block *block, zend_op_array *op_array
+ 					           (!zend_bitset_in(used_ext, VAR_NUM(opline->op1.var)) ||
+ 					            opline->result.var == opline->op1.var)) {
+ 						src = VAR_SOURCE(opline->op1);
+-						if (src) {
++						if (src && src->op1_type != IS_VAR) {
+ 							if (src->opcode == ZEND_BOOL ||
+ 							    src->opcode == ZEND_QM_ASSIGN) {
+ 								VAR_SOURCE(opline->op1) = NULL;
+diff --git a/ext/opcache/tests/gh21691.phpt b/ext/opcache/tests/gh21691.phpt
+new file mode 100644
+index 000000000000..71bf6786f6de
+--- /dev/null
++++ b/ext/opcache/tests/gh21691.phpt
+@@ -0,0 +1,42 @@
++--TEST--
++GH-21691 (OPcache CFG optimizer breaks reference returns with JMPZ/JMPZ_EX)
++--INI--
++opcache.enable_cli=1
++--EXTENSIONS--
++opcache
++--FILE--
++<?php
++class Base {
++    protected function &getData(): array {
++        $x = [];
++        return $x;
++    }
++
++    public function process(): array {
++        if ($data = &$this->getData() && !isset($data['key'])) {
++        }
++        return $data;
++    }
++
++    public function check(): bool {
++        return ($data = &$this->getData()) && count($data) > 0;
++    }
++}
++
++class Child extends Base {
++    protected function &getData(): array {
++        static $x = ['value' => 42];
++        return $x;
++    }
++}
++
++$child = new Child();
++var_dump($child->process());
++var_dump($child->check());
++?>
++--EXPECT--
++array(1) {
++  ["value"]=>
++  int(42)
++}
++bool(true)
