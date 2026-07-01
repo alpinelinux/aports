@@ -1,0 +1,153 @@
+Patch-Source: https://github.com/phpredis/phpredis/commit/78c1c690 (Fix PHP 8.6 builds)
+Patch-Source: https://github.com/phpredis/phpredis/pull/2888 (Fix PHP 8.6 bin2hex build)
+PHP 8.6 removed XtOffsetOf, zval_dtor, zval_is_true, INI_STR/INI_INT/
+INI_BOOL, WRONG_PARAM_COUNT/ZEND_WRONG_PARAM_COUNT and
+EMPTY_SWITCH_DEFAULT_CASE (provided as compat macros in common.h), and
+changed the session module save_path/session_name arguments to
+zend_string* (handled in redis_session.c).
+
+PHP 8.6 also dropped php_hash_bin2hex() from ext/hash in favour of
+zend_bin2hex() in the Zend engine (upstream PR #2888), but the packaged
+8.6.0alpha1 predates that php-src change: it still ships the old
+function and lacks the new one, so no PHP_VERSION_ID guard can pick the
+right API. Instead a local redis_bin2hex() helper is added to common.h
+and the two call sites (redis.c, library.c) are switched to it, which
+works with any PHP version.
+--- a/common.h
++++ b/common.h
+@@ -4,6 +4,39 @@
+ #ifndef REDIS_COMMON_H
+ #define REDIS_COMMON_H
+ 
++/* PHP 8.6 removed a number of long-standing compatibility macros. Provide
++ * replacements so this release keeps building. See upstream commit 78c1c690
++ * "Fix PHP 8.6 builds" and PR #2888 "Fix PHP 8.6 bin2hex build". */
++#if PHP_VERSION_ID >= 80600
++# include <stddef.h>
++# define XtOffsetOf(type, member)     offsetof(type, member)
++# define zval_dtor(zv)                zval_ptr_dtor_nogc(zv)
++# define zval_is_true(zv)             zend_is_true(zv)
++# define INI_STR(name)                ((char *) zend_ini_string((name), strlen(name), 0))
++# define INI_INT(name)                zend_ini_long((name), strlen(name), 0)
++# define INI_BOOL(name)               ((bool) zend_ini_long((name), strlen(name), 0))
++# define ZEND_WRONG_PARAM_COUNT()     do { zend_wrong_param_count(); RETURN_THROWS(); } while (0)
++# define WRONG_PARAM_COUNT            ZEND_WRONG_PARAM_COUNT()
++# define EMPTY_SWITCH_DEFAULT_CASE()  default: ZEND_UNREACHABLE(); break;
++#endif
++
++/* PHP 8.6 dropped php_hash_bin2hex() from ext/hash in favour of
++ * zend_bin2hex() in the Zend engine, but 8.6.0alpha1 predates the
++ * replacement (it still ships the old function and lacks the new one),
++ * so no PHP_VERSION_ID guard can pick the right API. Use a local
++ * implementation instead; call sites are patched to use it. */
++static zend_always_inline void
++redis_bin2hex(char *out, const unsigned char *in, size_t in_len)
++{
++    static const char hexits[] = "0123456789abcdef";
++    size_t i;
++
++    for (i = 0; i < in_len; i++) {
++        out[i * 2]     = hexits[in[i] >> 4];
++        out[i * 2 + 1] = hexits[in[i] & 0x0F];
++    }
++}
++
+ #define PHPREDIS_CTX_PTR ((char *)0xDEADC0DE)
+ #define PHPREDIS_NOTUSED(v) ((void)v)
+ 
+--- a/redis.c
++++ b/redis.c
+@@ -330,7 +330,7 @@
+ 
+     /* First try to have PHP generate the bytes */
+     if (php_random_bytes_silent(ZSTR_VAL(s), bytes) == SUCCESS) {
+-        php_hash_bin2hex(dst, (unsigned char *)ZSTR_VAL(s), bytes);
++        redis_bin2hex(dst, (unsigned char *)ZSTR_VAL(s), bytes);
+         zend_string_release(s);
+         return;
+     }
+--- a/library.c
++++ b/library.c
+@@ -876,7 +876,7 @@
+     efree(ctx);
+ 
+     hex = zend_string_safe_alloc(ops->digest_size, 2, 0, 0);
+-    php_hash_bin2hex(ZSTR_VAL(hex), digest, ops->digest_size);
++    redis_bin2hex(ZSTR_VAL(hex), digest, ops->digest_size);
+     ZSTR_VAL(hex)[2 * ops->digest_size] = 0;
+ 
+     efree(digest);
+--- a/redis_session.c
++++ b/redis_session.c
+@@ -424,16 +424,24 @@
+     zval params, context, *zv;
+     int i, j, path_len;
+ 
++#if PHP_VERSION_ID >= 80600
++    const char *save_path_str = ZSTR_VAL(save_path);
++    size_t save_path_len = ZSTR_LEN(save_path);
++#else
++    const char *save_path_str = save_path;
++    size_t save_path_len = strlen(save_path);
++#endif
++
+     redis_pool *pool = ecalloc(1, sizeof(*pool));
+ 
+-    for (i = 0, j = 0, path_len = strlen(save_path); i < path_len; i = j + 1) {
++    for (i = 0, j = 0, path_len = save_path_len; i < path_len; i = j + 1) {
+         /* find beginning of url */
+-        while ( i< path_len && (isspace(save_path[i]) || save_path[i] == ','))
++        while ( i< path_len && (isspace(save_path_str[i]) || save_path_str[i] == ','))
+             i++;
+ 
+         /* find end of url */
+         j = i;
+-        while (j<path_len && !isspace(save_path[j]) && save_path[j] != ',')
++        while (j<path_len && !isspace(save_path_str[j]) && save_path_str[j] != ',')
+             j++;
+ 
+         if (i < j) {
+@@ -445,18 +453,18 @@
+             zend_string *user = NULL, *pass = NULL;
+ 
+             /* translate unix: into file: */
+-            if (!redis_strncmp(save_path+i, ZEND_STRL("unix:"))) {
++            if (!redis_strncmp(save_path_str+i, ZEND_STRL("unix:"))) {
+                 int len = j-i;
+-                char *path = estrndup(save_path+i, len);
++                char *path = estrndup(save_path_str+i, len);
+                 memcpy(path, "file:", sizeof("file:")-1);
+                 url = php_url_parse_ex(path, len);
+                 efree(path);
+             } else {
+-                url = php_url_parse_ex(save_path+i, j-i);
++                url = php_url_parse_ex(save_path_str+i, j-i);
+             }
+ 
+             if (!url) {
+-                char *path = estrndup(save_path+i, j-i);
++                char *path = estrndup(save_path_str+i, j-i);
+                 php_error_docref(NULL, E_WARNING,
+                     "Failed to parse session.save_path (error at offset %d, url was '%s')", i, path);
+                 efree(path);
+@@ -498,7 +506,7 @@
+             }
+ 
+             if ((url->path == NULL && url->host == NULL) || weight <= 0 || timeout <= 0) {
+-                char *path = estrndup(save_path+i, j-i);
++                char *path = estrndup(save_path_str+i, j-i);
+                 php_error_docref(NULL, E_WARNING,
+                     "Failed to parse session.save_path (error at offset %d, url was '%s')", i, path);
+                 efree(path);
+@@ -955,7 +963,11 @@
+ 
+     /* Parse configuration for session handler */
+     array_init(&z_conf);
++#if PHP_VERSION_ID >= 80600
++    sapi_module.treat_data(PARSE_STRING, estrdup(ZSTR_VAL(save_path)), &z_conf);
++#else
+     sapi_module.treat_data(PARSE_STRING, estrdup(save_path), &z_conf);
++#endif
+ 
+     /* We need seeds */
+     zv = REDIS_HASH_STR_FIND_TYPE_STATIC(Z_ARRVAL(z_conf), "seed", IS_ARRAY);
