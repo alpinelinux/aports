@@ -1,0 +1,92 @@
+From a7a3a98b09c281dc01b4cbe5b27737bc7f5c88ac Mon Sep 17 00:00:00 2001
+From: Aelin Reidel <aelin@mainlining.org>
+Date: Wed, 17 Jun 2026 00:38:17 +0200
+Subject: [PATCH 7/7] resolve_btfids: preserve tag and parameter names when
+ processing implicit args
+
+process_kfunc_with_implicit_args() obtains parameter names through
+btf__name_by_offset() and passes them to btf__add_func_param() while
+constructing a new function prototype. Tag names are processed in a
+similar fashion.
+
+The returned name pointer references memory owned by the BTF object.
+btf__add_func_param(), btf__add_decl_tag(), etc. modify the same BTF and
+may grow its internal storage, invalidating previously returned string
+pointers.
+
+This can result in btf__add_func_param(), btf__add_decl_tag(), etc.
+dereferencing a stale pointer when copying the string, leading to crashes
+in strset__add_str().
+
+Duplicate the parameter name before calling btf__add_func_param() so it
+remains valid across BTF updates.
+
+Fixes: 9d199965990c ("resolve_btfids: Support for KF_IMPLICIT_ARGS")
+Cc: stable@vger.kernel.org
+Signed-off-by: Aelin Reidel <aelin@mainlining.org>
+Signed-off-by: Achill Gilgenast <achill@achill.org>
+---
+ tools/bpf/resolve_btfids/main.c | 20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/tools/bpf/resolve_btfids/main.c b/tools/bpf/resolve_btfids/main.c
+index f8a91fa7584f..94b89e9c942e 100644
+--- a/tools/bpf/resolve_btfids/main.c
++++ b/tools/bpf/resolve_btfids/main.c
+@@ -1113,6 +1113,7 @@ static int process_kfunc_with_implicit_args(struct btf2btf_context *ctx, struct
+ {
+ 	s32 idx, new_proto_id, new_func_id, proto_id;
+ 	const char *param_name, *tag_name;
++	char *tmp_param_name, *tmp_tag_name;
+ 	const struct btf_param *params;
+ 	enum btf_func_linkage linkage;
+ 	char tmp_name[KSYM_NAME_LEN];
+@@ -1163,18 +1164,22 @@ static int process_kfunc_with_implicit_args(struct btf2btf_context *ctx, struct
+ 		if (strcmp(tag_name, "bpf_kfunc") == 0)
+ 			continue;
+ 
++		tmp_tag_name = strdup(tag_name);
+ 		idx = btf_decl_tag(t)->component_idx;
+ 
+ 		if (btf_kflag(t))
+-			err = btf__add_decl_attr(btf, tag_name, new_func_id, idx);
++			err = btf__add_decl_attr(btf, tmp_tag_name, new_func_id, idx);
+ 		else
+-			err = btf__add_decl_tag(btf, tag_name, new_func_id, idx);
++			err = btf__add_decl_tag(btf, tmp_tag_name, new_func_id, idx);
+ 
+ 		if (err < 0) {
+ 			pr_err("ERROR: resolve_btfids: failed to add decl tag %s for %s\n",
+-			       tag_name, tmp_name);
++			       tmp_tag_name, tmp_name);
++			free(tmp_tag_name);
+ 			return -EINVAL;
+ 		}
++
++		free(tmp_tag_name);
+ 	}
+ 
+ add_new_proto:
+@@ -1193,12 +1198,17 @@ static int process_kfunc_with_implicit_args(struct btf2btf_context *ctx, struct
+ 		if (is_kf_implicit_arg(btf, &params[i]))
+ 			break;
+ 		param_name = btf__name_by_offset(btf, params[i].name_off);
+-		err = btf__add_func_param(btf, param_name, params[i].type);
++		tmp_param_name = strdup(param_name);
++		if (!tmp_param_name)
++			return -ENOMEM;
++		err = btf__add_func_param(btf, tmp_param_name, params[i].type);
+ 		if (err < 0) {
+ 			pr_err("ERROR: resolve_btfids: failed to add param %s for %s\n",
+-			       param_name, kfunc->name);
++			       tmp_param_name, kfunc->name);
++			free(tmp_param_name);
+ 			return err;
+ 		}
++		free(tmp_param_name);
+ 		t = (struct btf_type *)btf__type_by_id(btf, proto_id);
+ 	}
+ 
+-- 
+2.55.0
+
