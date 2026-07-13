@@ -84,6 +84,11 @@ Put `; do` and `; then` on the same line as the `while`, `for` or `if`.
 
 * Prefer `[` over `test(1)`.
 
+### amove
+
+* Always use `amove` to move files to subpackages in custom split functions
+  unless the specific usecase is not supported by `amove`.
+
 ## Naming Conventions
 
 ### Function Names
