@@ -45,7 +45,7 @@ profile_rpi() {
 	image_ext="tar.gz"
 	arch="aarch64 armhf armv7"
 	kernel_flavors="rpi"
-	kernel_cmdline="console=tty1"
+	kernel_cmdline="brcmfmac.roamoff=1 brcmfmac.feature_disable=0x282000 console=tty1"
 	initfs_features="base squashfs mmc usb kms dhcp https"
 	hostname="rpi"
 	grub_mod=
