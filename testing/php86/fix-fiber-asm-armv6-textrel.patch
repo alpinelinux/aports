@@ -1,0 +1,148 @@
+Gate the Boost.Context ARMv6 branch on Cortex-M0, not on __ARM_ARCH < 7
+
+Upstream-Issue: https://github.com/boostorg/context/issues/326 (ARMv6 support)
+Upstream-PR: https://github.com/boostorg/context/pull/325 (regression source)
+Regression-Source: https://github.com/php/php-src/commit/9cefeea7b10 (Boost.Context 1.91.0 sync, GH-22584)
+Patch-Source: pending — file at php/php-src and boostorg/context, drop once released
+
+Boost.Context 1.91.0 pulled in boostorg/context PR #325, titled "fix cortex-m0
+support to aapcs_elf_gas target".  It adds a fallback branch to make_fcontext /
+jump_fcontext for the Thumb-1 encoding limits of ARMv6-M (Cortex-M0), where
+`push {r8-r11}` and `bic` with an immediate do not exist.
+
+The branch is correct for Cortex-M0, but it is gated on `__ARM_ARCH >= 7`.
+That predicate is also false for *classic ARMv6 in ARM state* — Alpine armhf
+(armv6kz / arm1176jzf-s), Raspberry Pi 1/Zero — which was never the target and
+needs none of the workaround.  Those builds get Thumb-1-shaped code they cannot
+benefit from, with two consequences:
+
+1. make_fcontext takes `ldr a2, =finish`, materialising the absolute address of
+   `finish` via a literal pool in .text.  That emits R_ARM_ABS32 against .text,
+   which in a PIE link becomes an R_ARM_RELATIVE dynamic relocation inside the
+   read-only text segment, tagging the binary DT_TEXTREL.
+
+   musl supports DT_TEXTREL only for DSOs it maps itself (map_library() mprotects
+   the mapping RWX).  The main executable is mapped by the kernel and handled by
+   kernel_mapped_dso(), which never inspects DT_TEXTREL — so ldso writes into a
+   read-only page and dies with SIGSEGV (SEGV_ACCERR) in do_relocs(), before
+   main(), with no diagnostic.  Every invocation of every SAPI, no output.
+   glibc masks this by mprotecting the segment writable and restoring it
+   (elf/dl-reloc.c), which is why Raspbian/Debian armv6 never noticed.
+
+2. jump_fcontext — the hot path on every fiber switch — compiles to 43
+   instructions instead of 13, replacing one burst `push {r0,r4-r11,lr}` /
+   `pop {r3,r4-r11,lr}` with eleven strs and ten ldrs.  This costs every armv6
+   build, glibc included.
+
+Gating on `__ARM_ARCH_6M__` — exactly the target PR #325 names — fixes both.
+Cortex-M0 keeps the fallback branch verbatim (verified byte-identical object
+code), so no `.align 2` workaround is needed: M0 retains `ldr a2, =finish`,
+while classic ARMv6 takes `adr a2, finish` like ARMv7 and like every pre-1.91
+Boost.Context release.
+
+The change introduces no new codegen anywhere.  Comparing .text bytes across
+three trees — alpha1 (pre-1.91, pre-regression), current master, and this fix:
+
+  target                        alpha1 vs fix    current vs fix
+  armv7-a (Alpine armv7)        IDENTICAL        IDENTICAL      (pure no-op)
+  armv6kz (Alpine armhf)        IDENTICAL        differs        (restored)
+  armv5te (Debian armel)        IDENTICAL        differs        (restored)
+  armv6-m (Cortex-M0)           differs          IDENTICAL      (M0 preserved)
+
+That is: this fix emits byte-identical .text to PHP 8.6.0alpha1 on every ARM
+target except Cortex-M0, where it emits byte-identical .text to current master.
+Every target gets back exactly the code it had before the regression, and M0
+keeps exactly what PR #325 added.
+
+Instruction counts at armv6kz (make_fcontext / jump_fcontext):
+  alpha1 11 / 13   ·   current 15 / 43   ·   this fix 11 / 13
+
+Other architectures are untouched: scanning every Zend/asm ELF file with clang
+for x86_64, i386, aarch64, riscv64, ppc64le, s390x and loongarch64 finds no
+absolute relocation in .text anywhere — make_arm_aapcs_elf_gas.S on armv6 is
+the only DT_TEXTREL source in the tree, and arm64 uses different files entirely.
+
+Alternatives considered:
+
+- Replacing only `ldr a2, =finish` with `adr a2, finish` also clears the
+  TEXTREL, but fails to assemble on Cortex-M0 ("misaligned pc-relative fixup
+  value" — `finish` lands 2-byte aligned in Thumb-1), i.e. it breaks the very
+  platform PR #325 exists for.  `adr` plus `.align 2` before `finish:` is the
+  smallest *safe* form of that.
+- Flipping only the single gate guarding adr/ldr (a one-line change) fixes the
+  crash and keeps Cortex-M0 byte-identical, but leaves jump_fcontext at 43
+  instructions and yields a make_fcontext that matches neither alpha1 nor
+  master — a hybrid that has never shipped in any PHP or Boost release.
+
+Both are smaller; neither is more conservative.  Gating on the Cortex-M0 macro
+is what restores known-good, already-shipped code on every affected target.
+
+diff --git a/Zend/asm/jump_arm_aapcs_elf_gas.S b/Zend/asm/jump_arm_aapcs_elf_gas.S
+--- a/Zend/asm/jump_arm_aapcs_elf_gas.S
++++ b/Zend/asm/jump_arm_aapcs_elf_gas.S
+@@ -50,7 +50,7 @@ jump_fcontext:
+     push {lr}
+     @ save hidden,V1-V8,LR
+
+-    #if __ARM_ARCH >= 7
++    #if !defined(__ARM_ARCH_6M__)
+
+     push {a1,v1-v8,lr}
+
+@@ -102,7 +102,7 @@ jump_fcontext:
+     add  sp, sp, #64
+
+     @ restore hidden,V1-V8,LR
+-    #if __ARM_ARCH >= 7
++    #if !defined(__ARM_ARCH_6M__)
+     pop {a4,v1-v8,lr}
+     #else
+
+diff --git a/Zend/asm/make_arm_aapcs_elf_gas.S b/Zend/asm/make_arm_aapcs_elf_gas.S
+--- a/Zend/asm/make_arm_aapcs_elf_gas.S
++++ b/Zend/asm/make_arm_aapcs_elf_gas.S
+@@ -48,7 +48,7 @@
+ make_fcontext:
+     @ shift address in A1 to lower 16 byte boundary
+
+-    #if __ARM_ARCH >= 7
++    #if !defined(__ARM_ARCH_6M__)
+     bic  a1, a1, #15
+     #else
+     lsrs	a1, a1, #4
+@@ -56,7 +56,7 @@ make_fcontext:
+     #endif
+
+     @ reserve space for context-data on context-stack
+-    #if __ARM_ARCH >= 7
++    #if !defined(__ARM_ARCH_6M__)
+     sub  a1, a1, #124
+     #else
+     subs  a1, #124
+@@ -66,7 +66,7 @@ make_fcontext:
+     str  a3, [a1, #104]
+
+     @ compute address of returned transfer_t
+-    #if __ARM_ARCH >= 7
++    #if !defined(__ARM_ARCH_6M__)
+     add  a2, a1, #108
+     #else
+     mov  a2, a1
+@@ -77,7 +77,7 @@ make_fcontext:
+
+
+     @ compute abs address of label finish
+-    #if __ARM_ARCH >= 7
++    #if !defined(__ARM_ARCH_6M__)
+     adr  a2, finish
+     #else
+     ldr  a2, =finish
+@@ -93,7 +93,7 @@ make_fcontext:
+
+ finish:
+     @ exit code is zero
+-    #if __ARM_ARCH >=7
++    #if !defined(__ARM_ARCH_6M__)
+     mov  a1, #0
+     #else
+     movs	r3, #0
