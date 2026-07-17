@@ -1,0 +1,193 @@
+Patch-Source: https://github.com/albertito/chasquid/commit/ab2a6e7eb3dccfbf6b314f5510758aa7e6d84e2a
+Backported for 1.17.0.
+---
+From ab2a6e7eb3dccfbf6b314f5510758aa7e6d84e2a Mon Sep 17 00:00:00 2001
+From: Alberto Bertogli <albertito@blitiri.com.ar>
+Date: Sun, 7 Jun 2026 00:07:42 +0100
+Subject: [PATCH] test: Update expected strings to Go 1.25.11/1.26.4
+
+In Go 1.25.11/1.26.4, net/textproto error formatting was changed, and
+now the message is quoted. This is to protect from general string
+injections.
+
+See https://go-review.googlesource.com/c/go/+/778182 and
+ec1c380418ec6a0da28d4519872e2b81ba9152ba.
+
+After this change, the error strings from net/textproto (and net/smtp
+which uses it) now include quotes.
+
+For chasquid, the only user-observable change in the server is that the
+errors included in the DSN messages are now quoted, which should not be
+a problem.
+
+However, some of the tests which validate error strings need to be
+adjusted.
+
+The patch also updates go.mod to set the Go version to match this new
+minimum.
+---
+ cmd/mda-lmtp/test_unix_failure.cmy |  2 +-
+ go.mod                             |  2 +-
+ internal/smtpsrv/server_test.go    | 49 +++++++++++++++---------------
+ test/t-10-hooks/run.sh             |  4 +--
+ test/t-16-spf/expected_dsn         |  4 +--
+ 5 files changed, 30 insertions(+), 31 deletions(-)
+
+diff --git a/cmd/mda-lmtp/test_unix_failure.cmy b/cmd/mda-lmtp/test_unix_failure.cmy
+index d5cd02c7..ea925f52 100644
+--- a/cmd/mda-lmtp/test_unix_failure.cmy
++++ b/cmd/mda-lmtp/test_unix_failure.cmy
+@@ -26,6 +26,6 @@ nc <- .
+ 
+ nc -> 452 Nananana
+ 
+-mda <- Delivery failed remotely: 452 Nananana
++mda <- Delivery failed remotely: 452 "Nananana"
+ mda wait 75
+ 
+diff --git a/internal/smtpsrv/server_test.go b/internal/smtpsrv/server_test.go
+index 7e7b8153..bcea6562 100644
+--- a/internal/smtpsrv/server_test.go
++++ b/internal/smtpsrv/server_test.go
+@@ -7,6 +7,7 @@ import (
+ 	"fmt"
+ 	"net"
+ 	"net/smtp"
++	"net/textproto"
+ 	"os"
+ 	"strings"
+ 	"testing"
+@@ -141,6 +142,23 @@ func sendEmailWithAuth(tb testing.TB, c *smtp.Client, auth smtp.Auth) {
+ 	localC.Wait()
+ }
+ 
++// Checks err is a textproto.Error with the given code and message.
++func expectTPErr(tb testing.TB, err error, code int, msg string) {
++	tb.Helper()
++	if err == nil {
++		tb.Fatalf("Expected error %d %q, got nil", code, msg)
++	}
++	netErr, ok := err.(*textproto.Error)
++	if !ok {
++		tb.Fatalf("Expected textproto.Error(%d %q), got %T: %v",
++			code, msg, err, err)
++	}
++	if netErr.Code != code || netErr.Msg != msg {
++		tb.Fatalf("Expected textproto.Error(%d %q), got %d %q",
++			code, msg, netErr.Code, netErr.Msg)
++	}
++}
++
+ func TestSimple(t *testing.T) {
+ 	c := mustDial(t, ModeSMTP, false)
+ 	defer c.Close()
+@@ -203,11 +221,7 @@ func TestBrokenAuth(t *testing.T) {
+ 
+ 	auth := smtp.PlainAuth("", "user@broken", "passwd", "127.0.0.1")
+ 	err := c.Auth(auth)
+-	if err == nil {
+-		t.Errorf("Broken auth succeeded")
+-	} else if err.Error() != "454 4.7.0 Temporary authentication failure" {
+-		t.Errorf("Broken auth returned unexpected error %q", err.Error())
+-	}
++	expectTPErr(t, err, 454, "4.7.0 Temporary authentication failure")
+ }
+ 
+ func TestWrongMailParsing(t *testing.T) {
+@@ -300,9 +314,7 @@ func TestTooManyRecipients(t *testing.T) {
+ 	}
+ 
+ 	err := c.Rcpt("to102@somewhere")
+-	if err == nil || err.Error() != "452 4.5.3 Too many recipients" {
+-		t.Errorf("Expected too many recipients, got: %v", err)
+-	}
++	expectTPErr(t, err, 452, "4.5.3 Too many recipients")
+ }
+ 
+ func TestRcptBrokenExists(t *testing.T) {
+@@ -314,13 +326,7 @@ func TestRcptBrokenExists(t *testing.T) {
+ 	}
+ 
+ 	err := c.Rcpt("to@broken")
+-	if err == nil {
+-		t.Errorf("Accepted RCPT with broken Exists")
+-	}
+-	expect := "451 4.4.3 Temporary error checking address"
+-	if err.Error() != expect {
+-		t.Errorf("RCPT returned unexpected error %q", err.Error())
+-	}
++	expectTPErr(t, err, 451, "4.4.3 Temporary error checking address")
+ }
+ 
+ func TestRcptUserDoesNotExist(t *testing.T) {
+@@ -332,13 +338,8 @@ func TestRcptUserDoesNotExist(t *testing.T) {
+ 	}
+ 
+ 	err := c.Rcpt("doesnotexist@localhost")
+-	if err == nil {
+-		t.Errorf("Accepted RCPT for non-existent user")
+-	}
+-	expect := "550 5.1.1 Destination address is unknown (user does not exist)"
+-	if err.Error() != expect {
+-		t.Errorf("RCPT returned unexpected error %q", err.Error())
+-	}
++	expectTPErr(t, err, 550,
++		"5.1.1 Destination address is unknown (user does not exist)")
+ }
+ 
+ var str1MiB string
+@@ -392,9 +393,7 @@ func TestTooMuchData(t *testing.T) {
+ 	localC.Wait()
+ 
+ 	err = sendLargeEmail(t, c, maxDataSizeMiB+1)
+-	if err == nil || err.Error() != "552 5.3.4 Message too big" {
+-		t.Fatalf("Expected message too big, got: %v", err)
+-	}
++	expectTPErr(t, err, 552, "5.3.4 Message too big")
+ 
+ 	// Repeat the test once again, the limit should not prevent connection
+ 	// from continuing.
+diff --git a/test/t-10-hooks/run.sh b/test/t-10-hooks/run.sh
+index eecc3fa1..be252e4a 100755
+--- a/test/t-10-hooks/run.sh
++++ b/test/t-10-hooks/run.sh
+@@ -54,7 +54,7 @@ check "SPF_PASS=0"
+ if smtpc blockme@testserver < content >.logs/smtpc.log 2>&1; then
+ 	fail "ERROR: hook did not block email as expected"
+ fi
+-if ! grep -q "451 ¡No pasarán!" .logs/smtpc.log; then
++if ! grep -q '451 "¡No pasarán!"' .logs/smtpc.log; then
+ 	cat .logs/smtpc.log
+ 	fail "ERROR: transient hook error not returned correctly"
+ fi
+@@ -63,7 +63,7 @@ fi
+ if smtpc permanent@testserver < content >.logs/smtpc.log 2>&1; then
+ 	fail "ERROR: hook did not block email as expected"
+ fi
+-if ! grep -q "554 Nos hacemos la permanente" .logs/smtpc.log; then
++if ! grep -q '554 "Nos hacemos la permanente"' .logs/smtpc.log; then
+ 	cat .logs/smtpc.log
+ 	fail "ERROR: permanent hook error not returned correctly"
+ fi
+diff --git a/test/t-16-spf/expected_dsn b/test/t-16-spf/expected_dsn
+index 840632b7..07d07c27 100644
+--- a/test/t-16-spf/expected_dsn
++++ b/test/t-16-spf/expected_dsn
+@@ -26,7 +26,7 @@ Delivery of your message to the following recipient(s) failed permanently:
+ 
+ Technical details:
+ - "userB@srv-b" (EMAIL) failed permanently with error:
+-    MAIL+RCPT 550 5.7.23 SPF check failed: matched all
++    MAIL+RCPT 550 "5.7.23 SPF check failed: matched all"
+ 
+ 
+ --???????????
+@@ -40,7 +40,7 @@ Original-Recipient: utf-8; userB@srv-b
+ Final-Recipient: utf-8; userB@srv-b
+ Action: failed
+ Status: 5.0.0
+-Diagnostic-Code: smtp; MAIL+RCPT 550 5.7.23 SPF check failed: matched all
++Diagnostic-Code: smtp; MAIL+RCPT 550 "5.7.23 SPF check failed: matched all"
+ 
+ 
+ 
