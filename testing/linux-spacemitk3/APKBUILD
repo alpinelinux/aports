@@ -1,0 +1,356 @@
+# Maintainer: Lauri Tirkkonen <lauri@hacktheplanet.fi>
+
+_flavor=spacemitk3
+pkgname=linux-$_flavor
+pkgver=7.2_rc4
+_kernver=${pkgver/_rc/-rc}
+pkgrel=0
+pkgdesc="Linux spacemitk3 kernel"
+url="https://www.kernel.org"
+depends="initramfs-generator"
+_depends_dev="perl gmp-dev mpc1-dev mpfr-dev elfutils-dev bash flex bison zstd"
+makedepends="$_depends_dev sed installkernel bc linux-headers linux-firmware-any openssl-dev>3 mawk
+	u-boot-tools diffutils findutils zstd pahole python3 gcc>=13.1.1_git20230624"
+options="!strip !check"
+_config=${config:-config-lts.${CARCH}}
+
+source="https://git.kernel.org/torvalds/t/linux-$_kernver.tar.gz
+
+	0003-kexec-add-kexec_load_disabled-boot-option.patch
+	0004-objtool-respect-AWK-setting.patch
+
+	0001-riscv-dts-spacemit-k3-add-USB-controller-and-USB-phy.patch
+	0002-riscv-dts-spacemit-k3-Add-PCIe-device-node.patch
+	0003-phy-spacemit-Add-USB3-PCIe-comb-PHY-driver-for-Space.patch
+	0004-dt-bindings-phy-Add-Spacemit-K3-USB3-PCIe-comb-phy-s.patch
+	0005-PCI-spacemit-k1-Add-device-data-support.patch
+	0006-PCI-spacemit-k1-Add-multiple-PHY-handles-support.patch
+	0007-PCI-spacemit-k1-Add-device-id-update-helper.patch
+	0008-dt-bindings-PCI-snps-dw-pcie-Add-msi-parent-for-MSI-.patch
+	0009-dt-bindings-PCI-spacemit-Introduce-Spacemit-K3-PCIe-.patch
+	0010-PCI-spacemit-k1-Add-Spacemit-K3-PCIe-host-controller.patch
+
+	spacemitk3.riscv64.config
+	"
+subpackages="$pkgname-dev:_dev:$CBUILD_ARCH $pkgname-doc"
+for _i in $source; do
+	case $_i in
+	*.$CARCH.config)
+		_f=${_i%."$CARCH".config}
+		_flavors="$_flavors $_f"
+		if [ "linux-$_f" != "$pkgname" ]; then
+			subpackages="$subpackages linux-$_f::$CBUILD_ARCH linux-$_f-dev:_dev:$CBUILD_ARCH"
+		fi
+		;;
+	esac
+done
+builddir="$srcdir"/linux-$_kernver
+
+case $pkgver in
+*_rc*)
+	;;
+*)
+	if [ "${pkgver%.0}" = "$pkgver" ]; then
+		# Prepend to apply first
+		source="patch-$pkgver.patch.xz::https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/patch-$pkgver.xz $source"
+	fi
+	;;
+esac
+arch="riscv64"
+license="GPL-2.0-only"
+
+prepare() {
+	default_prepare
+
+	# remove localversion from patch if any
+	rm -f localversion*
+}
+
+_kernelarch() {
+	local arch="$1"
+	case "$arch" in
+	aarch64*) arch="arm64" ;;
+	arm*) arch="arm" ;;
+	ppc*) arch="powerpc" ;;
+	s390*) arch="s390" ;;
+	riscv*) arch="riscv" ;;
+	loongarch64) arch="loongarch" ;;
+	esac
+	echo "$arch"
+}
+
+_prepareconfig() {
+	local _flavor="$1"
+	local _arch="$2"
+	local _config=$_flavor.$_arch.config
+	local _builddir="$srcdir"/build-$_flavor.$_arch
+	mkdir -p "$_builddir"
+	echo "-$pkgrel-$_flavor" >"$_builddir"/localversion-alpine
+
+	cp "$srcdir"/$_config "$_builddir"/.config
+	msg "Configuring $_flavor kernel ($_arch)"
+	make -C "$builddir" \
+		O="$_builddir" \
+		ARCH="$(_kernelarch $_arch)" \
+		olddefconfig
+
+	if grep "CONFIG_MODULE_SIG=y" "$_builddir"/.config >/dev/null; then
+		if [ -f "$KERNEL_SIGNING_KEY" ]; then
+			sed -i -e "s:^CONFIG_MODULE_SIG_KEY=.*:CONFIG_MODULE_SIG_KEY=\"$KERNEL_SIGNING_KEY\":" \
+				"$_builddir"/.config
+			msg "Using $KERNEL_SIGNING_KEY to sign $_flavor kernel ($_arch) modules"
+		else
+			warning "KERNEL_SIGNING_KEY was not set. A signing key will be generated, but 3rd"
+			warning "party modules can not be signed"
+		fi
+	fi
+}
+
+listconfigs() {
+	for i in $source; do
+		case "$i" in
+		*.config) echo $i ;;
+		esac
+	done
+}
+
+prepareconfigs() {
+	for _config in $(listconfigs); do
+		local _flavor=${_config%%.*}
+		local _arch=${_config%.config}
+		_arch=${_arch#*.}
+		local _builddir="$srcdir"/build-$_flavor.$_arch
+		_prepareconfig "$_flavor" "$_arch"
+	done
+}
+
+# this is supposed to be run before version is bumped so we can compare
+# what new kernel config knobs are introduced
+prepareupdate() {
+	clean && fetch && unpack && prepare && deps
+	prepareconfigs
+	rm -r "$builddir"
+}
+
+updateconfigs() {
+	if ! [ -d "$builddir" ]; then
+		deps && fetch && unpack && prepare
+	fi
+	for _config in ${CONFIGS:-$(listconfigs)}; do
+		msg "updating $_config"
+		local _flavor=${_config%%.*}
+		local _arch=${_config%.config}
+		_arch=${_arch#*.}
+		local _builddir="$srcdir"/build-$_flavor.$_arch
+		mkdir -p "$_builddir"
+		echo "-$pkgrel-$_flavor" >"$_builddir"/localversion-alpine
+		local actions="listnewconfig oldconfig"
+		if ! [ -f "$_builddir"/.config ]; then
+			cp "$srcdir"/$_config "$_builddir"/.config
+			actions="olddefconfig"
+		fi
+		env | grep ^CONFIG_ >>"$_builddir"/.config || true
+		make -j1 -C "$builddir" \
+			O="$_builddir" \
+			ARCH="$(_kernelarch $_arch)" \
+			$actions savedefconfig
+
+		cp "$_builddir"/defconfig "$startdir"/$_config
+	done
+}
+
+set_kbuild_timestamp() {
+	# KBUILD_BUILD_TIMESTAMP needs to be parsable by busybox date
+	export KBUILD_BUILD_TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S' -u${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+}
+
+build() {
+	unset LDFLAGS
+	# for some reason these sometimes leak into the kernel build,
+	# -Werror=format-security breaks some stuff
+	unset CFLAGS CPPFLAGS CXXFLAGS
+	set_kbuild_timestamp
+	for i in $_flavors; do
+		_prepareconfig "$i" "$CARCH"
+	done
+	for i in $_flavors; do
+		msg "Building $i kernel"
+		cd "$srcdir"/build-$i.$CARCH
+
+		# set org in cert for modules signing
+		# https://www.kernel.org/doc/html/v6.1/admin-guide/module-signing.html#generating-signing-keys
+		mkdir -p certs
+		sed -e 's/#O = Unspecified company/O = alpinelinux.org/' \
+			"$builddir"/certs/default_x509.genkey \
+			>certs/x509.genkey
+
+		make ARCH="$(_kernelarch $CARCH)" \
+			DTC_FLAGS="-@" \
+			CC="${CC:-gcc}" \
+			AWK="${AWK:-mawk}" \
+			KBUILD_BUILD_VERSION="$((pkgrel + 1))-Alpine"
+	done
+}
+
+_package() {
+	local _buildflavor="$1" _outdir="$2"
+	set_kbuild_timestamp
+
+	cd "$srcdir"/build-$_buildflavor.$CARCH
+	local _abi_release="$(make -s kernelrelease)"
+	# modules_install seems to regenerate a defect Modules.symvers on s390x. Work
+	# around it by backing it up and restore it after modules_install
+	cp Module.symvers Module.symvers.backup
+
+	mkdir -p "$_outdir"/boot "$_outdir"/lib/modules
+
+	local _install
+	case "$CARCH" in
+	arm* | aarch64) _install="zinstall dtbs_install" ;;
+	riscv*) _install="install dtbs_install" ;;
+	*) _install=install ;;
+	esac
+
+	make modules_install $_install \
+		ARCH="$(_kernelarch $CARCH)" \
+		INSTALL_MOD_PATH="$_outdir" \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_PATH="$_outdir"/boot \
+		INSTALL_DTBS_PATH="$_outdir/boot/dtbs-$_buildflavor"
+
+	cp Module.symvers.backup Module.symvers
+
+	rm -f "$_outdir"/lib/modules/"$_abi_release"/build \
+		"$_outdir"/lib/modules/"$_abi_release"/source
+	rm -rf "$_outdir"/lib/firmware
+
+	install -D -m644 include/config/kernel.release \
+		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
+
+	case "$CARCH" in
+	loongarch64)
+		mv "$_outdir"/boot/vmlinuz-$_abi_release \
+			"$_outdir"/boot/vmlinuz-$_buildflavor
+
+		mv "$_outdir"/boot/config-$_abi_release \
+			"$_outdir"/boot/config-$_buildflavor
+
+		mv "$_outdir"/boot/System.map-$_abi_release \
+			"$_outdir"/boot/System.map-$_buildflavor
+		;;
+	esac
+}
+
+# main flavor installs in $pkgdir
+package() {
+	depends="$depends linux-firmware-any"
+
+	_package "$_flavor" "$pkgdir"
+
+	# copy files for linux-lts-doc sub package
+	mkdir -p "$pkgdir"/usr/share/doc
+	cp -r "$builddir"/Documentation \
+		"$pkgdir"/usr/share/doc/linux-doc-"$pkgver"/
+	# remove files that aren't part of the documentation itself
+	for nondoc in \
+		.gitignore conf.py docutils.conf \
+		dontdiff Kconfig Makefile; do
+		rm -f "$pkgdir"/usr/share/doc/linux-doc-"$pkgver"/"$nondoc"
+	done
+	# create /usr/share/doc/linux-doc symlink
+	cd "$pkgdir"/usr/share/doc
+	ln -s linux-doc-"$pkgver" linux-doc
+}
+
+# subflavors install in $subpkgdir
+virt() {
+	_package virt "$subpkgdir"
+}
+
+_dev() {
+	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
+	local _builddir="$srcdir"/build-$_flavor.$CARCH
+	local _abi_release="$(make -C "$_builddir" -s kernelrelease)"
+	# copy the only the parts that we really need for build 3rd party
+	# kernel modules and install those as /usr/src/linux-headers,
+	# simlar to what ubuntu does
+	#
+	# this way you dont need to install the 300-400 kernel sources to
+	# build a tiny kernel module
+	#
+	pkgdesc="Headers and script for third party modules for $_flavor kernel"
+	depends="$_depends_dev"
+	local dir="$subpkgdir"/usr/src/linux-headers-"$_abi_release"
+	set_kbuild_timestamp
+
+	# first we import config, run prepare to set up for building
+	# external modules, and create the scripts
+	mkdir -p "$dir"
+	cp -a "$_builddir"/.config "$_builddir"/localversion-alpine \
+		"$dir"/
+
+	install -D -t "$dir"/certs "$_builddir"/certs/signing_key.x509 || :
+
+	make -C "$builddir" \
+		O="$dir" \
+		ARCH="$(_kernelarch $CARCH)" \
+		AWK="${AWK:-mawk}" \
+		prepare modules_prepare scripts
+
+	# remove the stuff that points to real sources. we want 3rd party
+	# modules to believe this is the sources
+	rm "$dir"/Makefile "$dir"/source
+
+	# copy the needed stuff from real sources
+	#
+	# this is taken from ubuntu kernel build script
+	# http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
+	cd "$builddir"
+	find . -path './include/*' -prune \
+		-o -path './scripts/*' -prune -o -type f \
+		\( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o \
+		-name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) \
+		-print | cpio -pdm "$dir"
+
+	cp -a scripts include "$dir"
+
+	find "arch/$_karch" -name include -type d -print | while IFS='' read -r folder; do
+		find "$folder" -type f
+	done | sort -u | cpio -pdm "$dir"
+
+	install -Dm644 "$srcdir"/build-$_flavor.$CARCH/Module.symvers \
+		"$dir"/Module.symvers
+
+	# remove unneeded things
+	msg "Removing documentation..."
+	rm -r "$dir"/Documentation
+	find "$dir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+	local _karch="$(_kernelarch $CARCH | sed 's/x86_64/x86/')"
+	msg "Removing unneeded arch headers..."
+	for i in "$dir"/arch/*; do
+		if [ "${i##*/}" != "$_karch" ]; then
+			echo "  ${i##*/}"
+			rm -r "$i"
+		fi
+	done
+
+	mkdir -p "$subpkgdir"/lib/modules/"$_abi_release"
+	ln -sf /usr/src/linux-headers-"$_abi_release" \
+		"$subpkgdir"/lib/modules/"$_abi_release"/build
+}
+sha512sums="
+e5f2e05f645fa57fceef79dc5be42a1d7a15969ac5dcefd3453a3145454fc96e4ec05920e807bc2cc61fa94d17fa60291d65052707292290a526e5d288079045  linux-7.2-rc4.tar.gz
+47bb91c94cf68d158cadc17d1e5da279cd56293de1ffe4aa59f025005887858a4d449db464cca0fe47082e062722000671f0230f56493f2e98564cd7a077c890  0003-kexec-add-kexec_load_disabled-boot-option.patch
+2d9ae121342849a23a946a837190669b06bad4028f1a43174b2f1eac6506b844764d2dbbfe2ad401f19e257ba5c10f57c29faba171ca534e535705d5905adeae  0004-objtool-respect-AWK-setting.patch
+95e45c7e119dc007bbac66aa85480656a3dd2033b9e9ed4190df747be3719dd80847bc680037b3d9d5116869c1acf950aae07e82cc423fccef06cbbfa887fa02  0001-riscv-dts-spacemit-k3-add-USB-controller-and-USB-phy.patch
+8ade007ffb4bd6ac9856d43cb5cf0b0e32903fffea06f220e1986dfd472a15672bad6ac967b0d41186f5f176fde589d1af179cd02f3843ca4ed9f1b6f008a115  0002-riscv-dts-spacemit-k3-Add-PCIe-device-node.patch
+0a9e2e6f55b99859780cfacb2efd36cec3b27d35c06477b733ae2d85af14782d62000f49b41c3c04f7ed57617d754364944fe589bd8e031967ed73dee3803811  0003-phy-spacemit-Add-USB3-PCIe-comb-PHY-driver-for-Space.patch
+fd19d8894955aa35ff7b9e44ecb73fd2814aabd16335c5509ed417f13d489503a65e305cdfbfe719c42f88f1531766c6d055cd03047a1676e4704a9a3110fd64  0004-dt-bindings-phy-Add-Spacemit-K3-USB3-PCIe-comb-phy-s.patch
+1ae136adee885ea63ab5d62ae78baba286bc399298d6e8ccecedbaa662c10e202f6ecbead161efd75dcd15388584f4a5c692f270d931ed2f675b164977d6d246  0005-PCI-spacemit-k1-Add-device-data-support.patch
+11e0d57d0318a7805a37a8aee56c4fd772f2a63397bda72af77dd98c05542957f661f9b79a2e2cfc881b722daaa379a2f67b5c2407e196d6a81044f62667c28c  0006-PCI-spacemit-k1-Add-multiple-PHY-handles-support.patch
+cbf80a3d371a7f616d8a2b37b45e4eef2efda87521455efc75a508dee3cb2c1e77dade2bd59b3f98e9c5996d87c4a98387f710a82fbffd218920df04519a09b4  0007-PCI-spacemit-k1-Add-device-id-update-helper.patch
+74a7fc5b56bd4b9cd170420d35cae3375740591f383203d062c76d2d11d30c27b43d3b9d8d8808d93b776e6e95258640471922f34a7dc1da6b126fbaf02fc79c  0008-dt-bindings-PCI-snps-dw-pcie-Add-msi-parent-for-MSI-.patch
+3abe19b9a6d6b4dc6d729fd7ab136e7ad1842607dfae39d84caf62603a62caf9c98336447989266d6e2b464a50fa0cbebc59d258231ff9465758b7d6013f0748  0009-dt-bindings-PCI-spacemit-Introduce-Spacemit-K3-PCIe-.patch
+e9782d610ae44b395281350cd68771a065e69b5a0a6701f44d03c3f50852ace7ca1e35be89dfaa9bfee8cb639d9dd4653956f4f050f5044ce9b6138a8ae4340f  0010-PCI-spacemit-k1-Add-Spacemit-K3-PCIe-host-controller.patch
+a6a94c5ca4bfcb117ee4ae37ad712563a5097b0c3a67699a2c6ec6ee4645dc9bafa672e36593dec8d0ec5c67050db39e970e88c5561c8835614b0ef4d05f4f2e  spacemitk3.riscv64.config
+"
