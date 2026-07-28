@@ -1,0 +1,223 @@
+From b30f25515a16f1b76d5042921391e50a101a9712 Mon Sep 17 00:00:00 2001
+From: Arran Cudbard-Bell <a.cudbardb@freeradius.org>
+Date: Tue, 14 Jul 2026 09:32:03 -0400
+Subject: [PATCH 3/3] fix json_object_put() to return 1 for freed scalars and
+ empty containers
+
+The iterative rewrite in 17328a67 made json_object_put() return 0 for freed scalars, strings and empty containers, contradicting the documented contract in json_object.h. Distinguish "freed" from "still referenced" in _json_object_put_maybe_free() and add regression tests.
+---
+ json_object.c                    | 49 ++++++++++++++++++--------
+ tests/test_deep_nesting.c        | 59 ++++++++++++++++++++++++++++++++
+ tests/test_deep_nesting.expected |  7 ++++
+ 3 files changed, 101 insertions(+), 14 deletions(-)
+
+diff --git a/json_object.c b/json_object.c
+index 095b84e..6212608 100644
+--- a/json_object.c
++++ b/json_object.c
+@@ -273,13 +273,31 @@ struct json_object *json_object_get(struct json_object *jso)
+ }
+ 
+ 
++/**
++  * Return values for _json_object_put_maybe_free().
++  * json_object_put_still_refd and json_object_put_freed match the documented
++  * return values of json_object_put(), so they can be returned directly.
++  */
++enum json_object_put_result
++{
++	json_object_put_still_refd = 0, /* refcount decremented, object not freed */
++	json_object_put_freed = 1,      /* refcount reached zero, memory released */
++	json_object_put_container = 2   /* refcount reached zero, but the object is a
++	                                   non-empty container: the caller must free
++	                                   the contents, then the object itself */
++};
++
+ /**
+   * Internal json_object_put function
+-  * Returns 0 if we're done "freeing" the object, either because its memory
+-  * was actually released, or we just needed to decrement the refcount.
+-  * Returns 1 when the object is a non-empty container that still needs to be handled.
++  * Returns json_object_put_still_refd if a reference remains, and the object
++  * was not freed.
++  * Returns json_object_put_freed if the object's memory was released, either
++  * because it holds no other objects, or because free_containers was set.
++  * Returns json_object_put_container when the refcount reached zero but the
++  * object is a non-empty container; the caller must free the contents, then
++  * call this function again with free_containers set to free the object itself.
+   */
+-static inline int _json_object_put_maybe_free(struct json_object *jso, int free_containers)
++static inline enum json_object_put_result _json_object_put_maybe_free(struct json_object *jso, int free_containers)
+ {
+ 	/* Avoid invalid free and crash explicitly instead of (silently)
+ 	 * segfaulting.
+@@ -298,7 +316,7 @@ static inline int _json_object_put_maybe_free(struct json_object *jso, int free_
+ 	if (--jso->_ref_count > 0)
+ #endif
+ 	{
+-		return 0;  // All done, caller doesn't need to do anything else
++		return json_object_put_still_refd;
+ 	}
+ 
+ 	if (jso->_user_delete)
+@@ -315,15 +333,15 @@ static inline int _json_object_put_maybe_free(struct json_object *jso, int free_
+ 			json_object_object_delete(jso);
+ 			break;
+ 		}
+-		return 1;
+-	case json_type_array: 
++		return json_object_put_container;
++	case json_type_array:
+ 		// container objects are handled by the caller
+ 		if (free_containers || array_list_length(JC_ARRAY(jso)->c_array) == 0)
+ 		{
+ 			json_object_array_delete(jso);
+ 			break;
+ 		}
+-		return 1;
++		return json_object_put_container;
+ 	case json_type_string:
+ 		json_object_string_delete(jso);
+ 		break;
+@@ -331,16 +349,19 @@ static inline int _json_object_put_maybe_free(struct json_object *jso, int free_
+ 		json_object_generic_delete(jso);
+ 		break;
+ 	}
+-	return 0;  // All done, caller doesn't need to do anything else
++	return json_object_put_freed;
+ }
+ 
+ int json_object_put(struct json_object *jso)
+ {
++	enum json_object_put_result rc;
++
+ 	if (!jso)
+ 		return 0;
+ 
+-	if (_json_object_put_maybe_free(jso, 0) == 0)
+-		return 0;
++	rc = _json_object_put_maybe_free(jso, 0);
++	if (rc != json_object_put_container)
++		return (int)rc;
+ 	// else, it's a non-empty container object, handle it below
+ 
+ 	// Note: jso is now a "zombie" object, _ref_count == 0 but memory not yet released
+@@ -399,7 +420,7 @@ int json_object_put(struct json_object *jso)
+ 			}
+ 
+ 			// Now, handle actually freeing the json_object in that slot
+-			if (!child || _json_object_put_maybe_free(child, 0) == 0)
++			if (!child || _json_object_put_maybe_free(child, 0) != json_object_put_container)
+ 			{
+  				// child is either freed, or still referenced somewhere else
+ 				// leave it as-is and handle the previous slot
+@@ -441,13 +462,13 @@ int json_object_put(struct json_object *jso)
+ 			// so we need to actually free it now
+ 			// Be sure to grab _delete_parent *before* freeing jso.
+ 			json_object *parent = jso->_delete_parent;
+-			int rc;
++			enum json_object_put_result rc;
+ 			assert(jso->_ref_count == 0);
+ 			jso->_ref_count++;   // We're the exclusive owner of jso, non-atomic add is ok.
+ 			// Note: the call must not be inside assert(), or it gets
+ 			// compiled out when NDEBUG is defined and the memory leaks.
+ 			rc = _json_object_put_maybe_free(jso, 1);
+-			assert(rc == 0);
++			assert(rc == json_object_put_freed);
+ 			(void)rc;
+ 			jso = parent;
+ 			// iteration will be reset at the top of the loop
+diff --git a/tests/test_deep_nesting.c b/tests/test_deep_nesting.c
+index 364c482..4bf2457 100644
+--- a/tests/test_deep_nesting.c
++++ b/tests/test_deep_nesting.c
+@@ -56,6 +56,61 @@ static void test_deep_nesting_tostring(const char *str)
+ 	json_tokener_free(tok);
+ }
+ 
++struct userdata_test {
++	int userdata_val;
++	char *p;
++};
++/*
++ * Check that the user_delete function is only called once, even with the
++ * newer code to avoid deeply nested calls during json_object_put().
++ */
++static void user_delete_test(struct json_object *jso, void *userdata_in)
++{
++	struct userdata_test *userdata = (struct userdata_test *)userdata_in;
++	printf("in user_delete, userdata_val=%d\n", userdata->userdata_val);
++	fflush(stdout);
++	userdata->userdata_val = 0;
++	userdata->p[0] = 'x';
++	userdata->p[8191] = 'x';
++	free(userdata->p);
++}
++static void test_nesting_with_user_delete(void)
++{
++	json_object *jso;
++	struct userdata_test userdata_val = {
++		1, malloc(8192)
++	};
++
++	jso = json_object_new_object();
++	json_object_set_userdata(jso, &userdata_val, user_delete_test);
++	json_object_object_add(jso, "somekey", json_object_new_string("foo"));
++	json_object_put(jso);
++}
++
++/*
++ * Check that json_object_put() returns 1 whenever the object is freed,
++ * including for scalars and empty containers, and 0 only when a
++ * reference remains.
++ */
++static void test_put_return_values(void)
++{
++	json_object *jso;
++
++	printf("put(empty object) returned %d\n", json_object_put(json_object_new_object()));
++	printf("put(empty array) returned %d\n", json_object_put(json_object_new_array()));
++	printf("put(string) returned %d\n", json_object_put(json_object_new_string("foo")));
++	printf("put(int) returned %d\n", json_object_put(json_object_new_int(42)));
++
++	jso = json_object_new_object();
++	json_object_object_add(jso, "somekey", json_object_new_string("foo"));
++	printf("put(non-empty object) returned %d\n", json_object_put(jso));
++
++	jso = json_object_new_object();
++	json_object_get(jso);
++	printf("put(still-referenced object) returned %d\n", json_object_put(jso));
++	printf("put(last reference) returned %d\n", json_object_put(jso));
++}
++
+ int main(int argc, char **argv)
+ {
+ 	char *str;	
+@@ -77,5 +132,9 @@ int main(int argc, char **argv)
+ 
+ 	free(str);
+ 
++	test_nesting_with_user_delete();
++
++	test_put_return_values();
++
+ 	return EXIT_SUCCESS;
+ }
+diff --git a/tests/test_deep_nesting.expected b/tests/test_deep_nesting.expected
+index b9c1ab9..2449ede 100644
+--- a/tests/test_deep_nesting.expected
++++ b/tests/test_deep_nesting.expected
+@@ -1,3 +1,10 @@
+ Parsed depth 100000 string to json_object: yes
+ Freed json_object
+ in user_delete, userdata_val=1
++put(empty object) returned 1
++put(empty array) returned 1
++put(string) returned 1
++put(int) returned 1
++put(non-empty object) returned 1
++put(still-referenced object) returned 0
++put(last reference) returned 1
+-- 
+2.55.0
+
