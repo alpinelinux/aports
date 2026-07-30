@@ -1,0 +1,93 @@
+Patch-Source: https://github.com/php/php-src/commit/2e0fa0a44441d74bf8cc4e1ce1c8af9cd4209f52
+#
+# The upstream commit also adds ext/phar/tests/tar/files/circular_symlinks*.tar
+# fixtures and a phpt using them. Those tars are git binary diffs, which busybox
+# patch cannot apply, so only the code fix is carried here.
+#
+From 77aca457ef8e902efa6910eeef8a1f592ff2c317 Mon Sep 17 00:00:00 2001
+From: Jakub Zelenka <bukka@php.net>
+Date: Sun, 3 May 2026 19:26:31 +0200
+Subject: [PATCH] Fix GHSA-vc5h-9ppw-p5f3: phar circular symlink crash
+
+Prevents infinite recursion in phar_get_link_source.
+
+(cherry picked from commit 2e0fa0a44441d74bf8cc4e1ce1c8af9cd4209f52)
+---
+ ext/phar/util.c | 51 ++++++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 40 insertions(+), 11 deletions(-)
+
+diff --git a/ext/phar/util.c b/ext/phar/util.c
+index 753c8d31b1f..62eba21a609 100644
+--- a/ext/phar/util.c
++++ b/ext/phar/util.c
+@@ -57,30 +57,59 @@ static char *phar_get_link_location(phar_entry_info *entry) /* {{{ */
+ }
+ /* }}} */
+ 
+-phar_entry_info *phar_get_link_source(phar_entry_info *entry) /* {{{ */
++static phar_entry_info *phar_follow_one_link(phar_entry_info *entry)
+ {
+ 	phar_entry_info *link_entry;
+ 	char *link;
+ 
+-	if (!entry->link) {
+-		return entry;
+-	}
+-
+ 	link = phar_get_link_location(entry);
+ 	if (NULL != (link_entry = zend_hash_str_find_ptr(&(entry->phar->manifest), entry->link, strlen(entry->link))) ||
+ 		NULL != (link_entry = zend_hash_str_find_ptr(&(entry->phar->manifest), link, strlen(link)))) {
+ 		if (link != entry->link) {
+ 			efree(link);
+ 		}
+-		return phar_get_link_source(link_entry);
+-	} else {
+-		if (link != entry->link) {
+-			efree(link);
++		return link_entry;
++	}
++
++	if (link != entry->link) {
++		efree(link);
++	}
++	return NULL;
++}
++
++phar_entry_info *phar_get_link_source(phar_entry_info *entry)
++{
++	phar_entry_info *slow, *fast;
++
++	if (!entry->link) {
++		return entry;
++	}
++
++	/*
++	 * Use Floyd's cycle detection algorithm to follow the symlink chain without unbounded
++	 * recursion. Each entry has at most one outgoing link, so if a cycle exists the fast pointer
++	 * will eventually meet the slow one. Otherwise the fast pointer reaches the end first.
++	 */
++	slow = fast = entry;
++	while (1) {
++		fast = phar_follow_one_link(fast);
++		if (!fast || !fast->link) {
++			return fast;
++		}
++		fast = phar_follow_one_link(fast);
++		if (!fast || !fast->link) {
++			return fast;
++		}
++
++		/* no need to check slow as it's always behind */
++		slow = phar_follow_one_link(slow);
++
++		if (slow == fast) {
++			/* circular symlink chain */
++			return NULL;
+ 		}
+-		return NULL;
+ 	}
+ }
+-/* }}} */
+ 
+ /* retrieve a phar_entry_info's current file pointer for reading contents */
+ php_stream *phar_get_efp(phar_entry_info *entry, int follow_links) /* {{{ */

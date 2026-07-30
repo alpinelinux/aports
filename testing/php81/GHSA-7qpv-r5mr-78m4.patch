@@ -1,0 +1,221 @@
+Patch-Source: https://github.com/php/php-src/commit/ab048bd83b578119cf81b456526d50498421d617
+From c5ef5f06a0f823f6324a19e544abf647b5d89aaa Mon Sep 17 00:00:00 2001
+From: Ilija Tovilo <ilija.tovilo@me.com>
+Date: Mon, 27 Jul 2026 16:49:38 +0200
+Subject: [PATCH 2/4] Fix SQL injection in ext-pgsql via E'...' backslash
+ breakout
+
+php_pgsql_add_quotes() quotes the string with E'...', but PQescapeStringConn()
+does not escape \ unless standard_conforming_strings is off.
+PQescapeStringConn() is meant to be used with '', so do that instead.
+
+Fixes GHSA-7qpv-r5mr-78m4
+
+(cherry picked from commit ab048bd83b578119cf81b456526d50498421d617)
+---
+ ext/pgsql/pgsql.c                            |  3 +-
+ ext/pgsql/tests/10pg_convert_9.phpt          | 18 +++++-
+ ext/pgsql/tests/10pg_convert_json_array.phpt |  4 +-
+ ext/pgsql/tests/12pg_insert_9.phpt           |  2 +-
+ ext/pgsql/tests/14pg_update_9.phpt           |  2 +-
+ ext/pgsql/tests/GHSA-7qpv-r5mr-78m4.phpt     | 58 ++++++++++++++++++++
+ ext/pgsql/tests/bug64609.phpt                |  2 +-
+ ext/pgsql/tests/bug68638.phpt                |  2 +-
+ 8 files changed, 81 insertions(+), 10 deletions(-)
+ create mode 100644 ext/pgsql/tests/GHSA-7qpv-r5mr-78m4.phpt
+
+diff --git a/ext/pgsql/pgsql.c b/ext/pgsql/pgsql.c
+index 01fb9dde3ba..de90b0b21d7 100644
+--- a/ext/pgsql/pgsql.c
++++ b/ext/pgsql/pgsql.c
+@@ -4563,7 +4563,7 @@ static int php_pgsql_convert_match(const zend_string *str, const char *regex , s
+  */
+ static zend_string *php_pgsql_add_quotes(zend_string *src)
+ {
+-	return zend_string_concat3("E'", strlen("E'"), ZSTR_VAL(src), ZSTR_LEN(src), "'", strlen("'"));
++	return zend_string_concat3("'", strlen("'"), ZSTR_VAL(src), ZSTR_LEN(src), "'", strlen("'"));
+ }
+ /* }}} */
+ 
+@@ -4841,7 +4841,6 @@ PHP_PGSQL_API zend_result php_pgsql_convert(PGconn *pg_link, const zend_string *
+ 							zend_string *str;
+ 							/* PostgreSQL ignores \0 */
+ 							str = zend_string_alloc(Z_STRLEN_P(val) * 2, 0);
+-							/* better to use PGSQLescapeLiteral since PGescapeStringConn does not handle special \ */
+ 							ZSTR_LEN(str) = PQescapeStringConn(pg_link, ZSTR_VAL(str),
+ 									Z_STRVAL_P(val), Z_STRLEN_P(val), &escape_err);
+ 							if (escape_err) {
+diff --git a/ext/pgsql/tests/10pg_convert_9.phpt b/ext/pgsql/tests/10pg_convert_9.phpt
+index f4bfaf5e395..fb36e5801c8 100644
+--- a/ext/pgsql/tests/10pg_convert_9.phpt
++++ b/ext/pgsql/tests/10pg_convert_9.phpt
+@@ -21,6 +21,8 @@ $converted = pg_convert($db, $table_name, $fields);
+ 
+ var_dump($converted);
+ 
++var_dump(pg_convert($db, $table_name, ['str' => "\\' OR 1=1"]));
++
+ /* Invalid values */
+ try {
+     $converted = pg_convert($db, $table_name, [5 => 'AAA']);
+@@ -48,18 +50,30 @@ try {
+ } catch (\TypeError $e) {
+     echo $e->getMessage(), \PHP_EOL;
+ }
++
++/* standard_conforming_strings = 1 */
++pg_query($db, "SET standard_conforming_strings = 1");
++var_dump(pg_convert($db, $table_name, ['str' => "\\' OR 1=1"]));
+ ?>
+ --EXPECT--
+ array(3) {
+   [""num""]=>
+   string(4) "1234"
+   [""str""]=>
+-  string(6) "E'AAA'"
++  string(5) "'AAA'"
+   [""bin""]=>
+-  string(12) "E'\\x424242'"
++  string(11) "'\\x424242'"
++}
++array(1) {
++  [""str""]=>
++  string(13) "'\\'' OR 1=1'"
+ }
+ Array of values must be an associative array with string keys
+ Array of values must be an associative array with string keys
+ Values must be of type string|int|float|bool|null, array given
+ Values must be of type string|int|float|bool|null, stdClass given
+ Values must be of type string|int|float|bool|null, PgSql\Connection given
++array(1) {
++  [""str""]=>
++  string(12) "'\'' OR 1=1'"
++}
+diff --git a/ext/pgsql/tests/10pg_convert_json_array.phpt b/ext/pgsql/tests/10pg_convert_json_array.phpt
+index 918765db06c..5353e04dac5 100644
+--- a/ext/pgsql/tests/10pg_convert_json_array.phpt
++++ b/ext/pgsql/tests/10pg_convert_json_array.phpt
+@@ -32,8 +32,8 @@ if (!pg_insert($db, $table_name_92, $fields)) {
+ --EXPECT--
+ array(2) {
+   [""textary""]=>
+-  string(51) "E'{"meeting", "lunch", "training", "presentation"}'"
++  string(50) "'{"meeting", "lunch", "training", "presentation"}'"
+   [""jsn""]=>
+-  string(22) "E'{"f1":1,"f2":"foo"}'"
++  string(21) "'{"f1":1,"f2":"foo"}'"
+ }
+ OK
+diff --git a/ext/pgsql/tests/12pg_insert_9.phpt b/ext/pgsql/tests/12pg_insert_9.phpt
+index 892494fe6f0..699426c89b2 100644
+--- a/ext/pgsql/tests/12pg_insert_9.phpt
++++ b/ext/pgsql/tests/12pg_insert_9.phpt
+@@ -54,7 +54,7 @@ try {
+ echo "Ok\n";
+ ?>
+ --EXPECTF--
+-INSERT INTO "php_pgsql_test" ("num","str","bin") VALUES (1234,E'AAA',E'\\x424242');
++INSERT INTO "php_pgsql_test" ("num","str","bin") VALUES (1234,'AAA','\\x424242');
+ INSERT INTO "php_pgsql_test" ("num","str","bin") VALUES ('1234','AAA','BBB');
+ object(PgSql\Result)#%d (0) {
+ }
+diff --git a/ext/pgsql/tests/14pg_update_9.phpt b/ext/pgsql/tests/14pg_update_9.phpt
+index d34f05216ec..64493075490 100644
+--- a/ext/pgsql/tests/14pg_update_9.phpt
++++ b/ext/pgsql/tests/14pg_update_9.phpt
+@@ -26,6 +26,6 @@ echo pg_update($db, $table_name, $fields, $ids, PGSQL_DML_STRING|PGSQL_DML_ESCAP
+ echo "Ok\n";
+ ?>
+ --EXPECT--
+-UPDATE "php_pgsql_test" SET "num"=1234,"str"=E'ABC',"bin"=E'\\x58595a' WHERE "num"=1234;
++UPDATE "php_pgsql_test" SET "num"=1234,"str"='ABC',"bin"='\\x58595a' WHERE "num"=1234;
+ UPDATE "php_pgsql_test" SET "num"='1234',"str"='ABC',"bin"='XYZ' WHERE "num"='1234';
+ Ok
+diff --git a/ext/pgsql/tests/GHSA-7qpv-r5mr-78m4.phpt b/ext/pgsql/tests/GHSA-7qpv-r5mr-78m4.phpt
+new file mode 100644
+index 00000000000..88b37a8432f
+--- /dev/null
++++ b/ext/pgsql/tests/GHSA-7qpv-r5mr-78m4.phpt
+@@ -0,0 +1,58 @@
++--TEST--
++GHSA-7qpv-r5mr-78m4: SQL injection via E'...' backslash breakout
++--CREDITS--
++expatch.llc
++--EXTENSIONS--
++pgsql
++--SKIPIF--
++<?php include("skipif.inc"); ?>
++--FILE--
++<?php
++include 'config.inc';
++
++$db = pg_connect($conn_str);
++
++pg_query($db, "SET standard_conforming_strings = 1");
++
++pg_query($db, "DROP TABLE IF EXISTS ghsa_7qpv_r5mr_78m4");
++pg_query($db, "CREATE TABLE ghsa_7qpv_r5mr_78m4 (id serial primary key, name text, admin boolean)");
++pg_query($db, "INSERT INTO ghsa_7qpv_r5mr_78m4 (name, admin) VALUES ('alice', false), ('bob', false)");
++
++$params = ['name' => "zzz' OR 1=1 --"];
++echo pg_select($db, 'ghsa_7qpv_r5mr_78m4', $params, PGSQL_DML_STRING) . "\n";
++printf("returned: %d\n\n", count(pg_select($db, 'ghsa_7qpv_r5mr_78m4', $params)));
++
++$params = ['name' => "zzz\\' OR 1=1 --"];
++echo pg_select($db, 'ghsa_7qpv_r5mr_78m4', $params, PGSQL_DML_STRING) . "\n";
++printf("returned: %d\n\n", count(pg_select($db, 'ghsa_7qpv_r5mr_78m4', $params)));
++
++$params = ['name' => "john\\', true) --", 'admin' => 'false'];
++echo pg_insert($db, 'ghsa_7qpv_r5mr_78m4', $params, PGSQL_DML_STRING) . "\n";
++pg_insert($db, 'ghsa_7qpv_r5mr_78m4', $params);
++var_dump(pg_select($db, 'ghsa_7qpv_r5mr_78m4', ['id' => 3])[0]['admin']);
++echo "\n";
++
++$params = ['name' => "jake\\', true) --", 'admin' => 'f'];
++echo pg_insert($db, 'ghsa_7qpv_r5mr_78m4', $params, PGSQL_DML_ESCAPE|PGSQL_DML_STRING) . "\n";
++pg_insert($db, 'ghsa_7qpv_r5mr_78m4', $params, PGSQL_DML_EXEC|PGSQL_DML_ESCAPE);
++var_dump(pg_select($db, 'ghsa_7qpv_r5mr_78m4', ['id' => 4])[0]['admin']);
++
++?>
++--EXPECT--
++SELECT * FROM "ghsa_7qpv_r5mr_78m4" WHERE "name"='zzz'' OR 1=1 --';
++returned: 0
++
++SELECT * FROM "ghsa_7qpv_r5mr_78m4" WHERE "name"='zzz\'' OR 1=1 --';
++returned: 0
++
++INSERT INTO "ghsa_7qpv_r5mr_78m4" ("name","admin") VALUES ('john\'', true) --','f');
++string(1) "f"
++
++INSERT INTO "ghsa_7qpv_r5mr_78m4" ("name","admin") VALUES ('jake\'', true) --','f');
++string(1) "f"
++--CLEAN--
++<?php
++include('config.inc');
++$db = pg_connect($conn_str);
++pg_query($db, "DROP TABLE IF EXISTS ghsa_7qpv_r5mr_78m4");
++?>
+diff --git a/ext/pgsql/tests/bug64609.phpt b/ext/pgsql/tests/bug64609.phpt
+index ebf878dbeed..ba27091ecf3 100644
+--- a/ext/pgsql/tests/bug64609.phpt
++++ b/ext/pgsql/tests/bug64609.phpt
+@@ -28,5 +28,5 @@ var_dump($converted);
+ --EXPECT--
+ array(1) {
+   [""a""]=>
+-  string(5) "E'ok'"
++  string(4) "'ok'"
+ }
+diff --git a/ext/pgsql/tests/bug68638.phpt b/ext/pgsql/tests/bug68638.phpt
+index d95fa1e4412..2a1025cad8d 100644
+--- a/ext/pgsql/tests/bug68638.phpt
++++ b/ext/pgsql/tests/bug68638.phpt
+@@ -34,7 +34,7 @@ pg_query($conn, "DROP TABLE $table");
+ 
+ ?>
+ --EXPECT--
+-string(52) "UPDATE "test_68638" SET "value"=E'inf' WHERE "id"=1;"
++string(51) "UPDATE "test_68638" SET "value"='inf' WHERE "id"=1;"
+ array(2) {
+   ["id"]=>
+   string(1) "1"
