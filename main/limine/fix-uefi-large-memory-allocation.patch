@@ -1,0 +1,96 @@
+diff --git a/common/mm/pmm.s2.c b/common/mm/pmm.s2.c
+--- a/common/mm/pmm.s2.c
++++ b/common/mm/pmm.s2.c
+@@ -307,7 +307,72 @@
+ static struct memmap_entry *recl;
+ 
+ extern symbol __slide, __image_base, __image_end;
++
++// Keep individual firmware allocations bounded to 1GiB. Some UEFI
++// implementations reject or take an impractical amount of time to process
++// requests spanning a large fraction of physical memory.
++#define UEFI_ALLOC_MAX_PAGES (0x40000000 / PAGE_SIZE)
++
++// Splitting UEFI_ALLOC_MAX_PAGES down to individual pages needs at most 19
++// entries. Leave additional headroom in case the maximum is increased later.
++#define UEFI_ALLOC_SPLIT_STACK_SIZE 32
++
++struct uefi_page_range {
++    EFI_PHYSICAL_ADDRESS base;
++    UINTN pages;
++};
++
++static void pmm_claim_uefi_pages(EFI_PHYSICAL_ADDRESS base, UINTN page_count) {
++    while (page_count != 0) {
++        UINTN chunk_pages = page_count > UEFI_ALLOC_MAX_PAGES
++                          ? UEFI_ALLOC_MAX_PAGES : page_count;
++        struct uefi_page_range ranges[UEFI_ALLOC_SPLIT_STACK_SIZE] = {
++            {base, chunk_pages}
++        };
++        size_t ranges_i = 1;
++
++        while (ranges_i != 0) {
++            struct uefi_page_range range = ranges[--ranges_i];
++            EFI_PHYSICAL_ADDRESS alloc_base = range.base;
++            EFI_STATUS status = gBS->AllocatePages(AllocateAddress,
++                                                   EfiLoaderCode,
++                                                   range.pages,
++                                                   &alloc_base);
++            if (!status) {
++                continue;
++            }
++
++            if (range.pages == 1) {
++                memmap_alloc_range(range.base, PAGE_SIZE,
++                                   MEMMAP_EFI_RECLAIMABLE, MEMMAP_USABLE,
++                                   true, false, false);
++                continue;
++            }
++
++            if (ranges_i > UEFI_ALLOC_SPLIT_STACK_SIZE - 2) {
++                panic(false, "pmm: UEFI allocation split stack exhausted");
++            }
++
++            // Process the left half first so allocations remain ordered by
++            // physical address. The right half stays on the explicit stack.
++            UINTN left_pages = range.pages / 2;
++            UINTN right_pages = range.pages - left_pages;
++
++            ranges[ranges_i++] = (struct uefi_page_range) {
++                range.base + (uint64_t)left_pages * PAGE_SIZE,
++                right_pages
++            };
++            ranges[ranges_i++] = (struct uefi_page_range) {
++                range.base,
++                left_pages
++            };
++        }
+ 
++        base += (uint64_t)chunk_pages * PAGE_SIZE;
++        page_count -= chunk_pages;
++    }
++}
++
+ void init_memmap(void) {
+     EFI_STATUS status;
+ 
+@@ -421,18 +486,7 @@ void init_memmap(void) {
+         }
+ #endif
+ 
+-        status = gBS->AllocatePages(AllocateAddress, EfiLoaderCode,
+-                                    untouched_memmap[i].length / 4096, &base);
+-
+-        if (status) {
+-            for (size_t j = 0; j < untouched_memmap[i].length; j += 4096) {
+-                base = untouched_memmap[i].base + j;
+-                status = gBS->AllocatePages(AllocateAddress, EfiLoaderCode, 1, &base);
+-                if (status) {
+-                    memmap_alloc_range(base, 4096, MEMMAP_EFI_RECLAIMABLE, MEMMAP_USABLE, true, false, false);
+-                }
+-            }
+-        }
++        pmm_claim_uefi_pages(base, untouched_memmap[i].length / PAGE_SIZE);
+     }
+ 
+     memcpy(untouched_memmap, memmap, memmap_entries * sizeof(struct memmap_entry));
