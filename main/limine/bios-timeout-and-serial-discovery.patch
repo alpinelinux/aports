@@ -1,0 +1,380 @@
+diff --git a/common/drivers/serial.c b/common/drivers/serial.c
+index fe0f82f1..ea390f7e 100644
+--- a/common/drivers/serial.c
++++ b/common/drivers/serial.c
+@@ -2,30 +2,104 @@
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
++#include <stddef.h>
++#include <lib/acpi.h>
+ #include <lib/misc.h>
+ #include <drivers/serial.h>
+ #include <sys/cpu.h>
+ 
+ static bool serial_initialised = false;
++static bool serial_mmio;
++static uintptr_t serial_base;
+ uint32_t serial_baudrate;
+ 
++struct acpi_gas {
++    uint8_t address_space;
++    uint8_t bit_width;
++    uint8_t bit_offset;
++    uint8_t access_size;
++    uint64_t address;
++} __attribute__((packed));
++
++struct acpi_spcr {
++    struct sdt header;
++    uint8_t interface_type;
++    uint8_t reserved[3];
++    struct acpi_gas base_address;
++} __attribute__((packed));
++
++static uint8_t serial_read(size_t reg) {
++    if (serial_mmio) {
++        return *(volatile uint8_t *)(serial_base + reg);
++    }
++    return inb(serial_base + reg);
++}
++
++static void serial_write(size_t reg, uint8_t value) {
++    if (serial_mmio) {
++        *(volatile uint8_t *)(serial_base + reg) = value;
++        return;
++    }
++    outb(serial_base + reg, value);
++}
++
++static bool serial_find(void) {
++    uint16_t bda_port = mminw(0x400);
++    if (bda_port != 0) {
++        serial_base = bda_port;
++        serial_mmio = false;
++        return true;
++    }
++
++    struct acpi_spcr *spcr = acpi_get_table_quiet("SPCR", 0);
++    if (spcr == NULL || spcr->header.length < sizeof(struct acpi_spcr)
++     || acpi_checksum(spcr, spcr->header.length) != 0
++     || spcr->interface_type != 0
++     || spcr->base_address.bit_width != 8
++     || spcr->base_address.bit_offset != 0
++     || (spcr->base_address.access_size != 0
++      && spcr->base_address.access_size != 1)
++     || spcr->base_address.address == 0
++     || spcr->base_address.address > UINTPTR_MAX - 7) {
++        return false;
++    }
++
++    serial_base = (uintptr_t)spcr->base_address.address;
++    if (spcr->base_address.address_space == 0) {
++        serial_mmio = true;
++    } else if (spcr->base_address.address_space == 1
++            && serial_base <= UINT16_MAX - 7) {
++        serial_mmio = false;
++    } else {
++        return false;
++    }
++
++    return true;
++}
++
+ static void serial_initialise(void) {
+     if (serial_initialised || !serial) {
+         return;
+     }
+ 
++    if (!serial_find()) {
++        serial = false;
++        serial_initialised = true;
++        return;
++    }
++
+     // Init com1
+-    outb(0x3f8 + 3, 0x00);
+-    outb(0x3f8 + 1, 0x00);
+-    outb(0x3f8 + 3, 0x80);
++    serial_write(3, 0x00);
++    serial_write(1, 0x00);
++    serial_write(3, 0x80);
+ 
+     uint16_t divisor = (uint16_t)(115200 / serial_baudrate);
+-    outb(0x3f8 + 0, divisor & 0xff);
+-    outb(0x3f8 + 1, (divisor >> 8) & 0xff);
++    serial_write(0, divisor & 0xff);
++    serial_write(1, (divisor >> 8) & 0xff);
+ 
+-    outb(0x3f8 + 3, 0x03);
+-    outb(0x3f8 + 2, 0xc7);
+-    outb(0x3f8 + 4, 0x0b);
++    serial_write(3, 0x03);
++    serial_write(2, 0xc7);
++    serial_write(4, 0x0b);
+ 
+     serial_initialised = true;
+ }
+@@ -33,17 +107,30 @@ static void serial_initialise(void) {
+ void serial_out(uint8_t b) {
+     serial_initialise();
+ 
+-    while ((inb(0x3f8 + 5) & 0x20) == 0);
+-    outb(0x3f8, b);
++    if (!serial) {
++        return;
++    }
++
++    uint64_t deadline = rdtsc_deadline(100000);
++    size_t retries = 16;
++
++    while ((serial_read(5) & 0x20) == 0) {
++        if (rdtsc_deadline_expired(deadline)
++         || --retries == 0) {
++            serial = false;
++            return;
++        }
++    }
++    serial_write(0, b);
+ }
+ 
+ int serial_in(void) {
+     serial_initialise();
+ 
+-    if ((inb(0x3f8 + 5) & 0x01) == 0) {
++    if (!serial || (serial_read(5) & 0x01) == 0) {
+         return -1;
+     }
+-    return inb(0x3f8);
++    return serial_read(0);
+ }
+ 
+ #endif
+diff --git a/common/lib/acpi.c b/common/lib/acpi.c
+index 5b116ae1..259520c8 100644
+--- a/common/lib/acpi.c
++++ b/common/lib/acpi.c
+@@ -205,7 +205,7 @@ void *acpi_get_rsdp_v2(void) {
+     return NULL;
+ }
+ 
+-void *acpi_get_table(const char *signature, int index) {
++static void *acpi_get_table_impl(const char *signature, int index, bool log) {
+     int cnt = 0;
+ 
+     struct rsdp *rsdp = acpi_get_rsdp();
+@@ -229,7 +229,8 @@ void *acpi_get_table(const char *signature, int index) {
+ 
+     // Validate RSDT/XSDT header length
+     if (rsdt->header.length < sizeof(struct sdt)) {
+-        printv("acpi: Invalid %s header length\n", use_xsdt ? "XSDT" : "RSDT");
++        if (log)
++            printv("acpi: Invalid %s header length\n", use_xsdt ? "XSDT" : "RSDT");
+         return NULL;
+     }
+ 
+@@ -250,17 +251,32 @@ void *acpi_get_table(const char *signature, int index) {
+         if (!memcmp(ptr->signature, signature, 4)
+          && cnt++ == index) {
+             if (acpi_checksum(ptr, ptr->length)) {
+-                printv("acpi: warning: bad checksum in \"%s\", using anyway\n", signature);
++                if (log)
++                    printv("acpi: warning: bad checksum in \"%s\", using anyway\n", signature);
+             }
+-            printv("acpi: Found \"%s\" at %p\n", signature, ptr);
++            if (log)
++                printv("acpi: Found \"%s\" at %p\n", signature, ptr);
+             return ptr;
+         }
+     }
+ 
+-    printv("acpi: \"%s\" not found\n", signature);
++    if (log)
++        printv("acpi: \"%s\" not found\n", signature);
+     return NULL;
+ }
+ 
++void *acpi_get_table(const char *signature, int index) {
++    return acpi_get_table_impl(signature, index, true);
++}
++
++void *acpi_get_table_quiet(const char *signature, int index) {
++    bool old_verbose = verbose;
++    verbose = false;
++    void *ret = acpi_get_table_impl(signature, index, false);
++    verbose = old_verbose;
++    return ret;
++}
++
+ static bool acpi_padding_is_safe(uint64_t base, uint64_t length) {
+     if (length == 0) {
+         return true;
+diff --git a/common/lib/acpi.h b/common/lib/acpi.h
+index 3d375401..6ff46d5c 100644
+--- a/common/lib/acpi.h
++++ b/common/lib/acpi.h
+@@ -216,6 +216,7 @@ void   *acpi_get_rsdp_v1(void);
+ void   *acpi_get_rsdp_v2(void);
+ 
+ void   *acpi_get_table(const char *signature, int index);
++void   *acpi_get_table_quiet(const char *signature, int index);
+ void    acpi_get_smbios(void **smbios32, void **smbios64);
+ 
+ void acpi_map_tables(void);
+diff --git a/common/lib/getchar.c b/common/lib/getchar.c
+index 88f73937..9acccf41 100644
+--- a/common/lib/getchar.c
++++ b/common/lib/getchar.c
+@@ -175,7 +175,8 @@ int getchar_internal(uint8_t scancode, uint8_t ascii, uint32_t shift_state) {
+ }
+ 
+ #if defined (BIOS)
+-int _pit_sleep_and_quit_on_keypress(uint32_t ticks, uint32_t aux_poll);
++int _pit_sleep_and_quit_on_keypress(uint32_t ticks, uint32_t aux_poll,
++                                    uint64_t tsc_deadline);
+ 
+ // XXX: sync with lib/sleep.asm_bios_ia32.
+ #define PIT_SLEEP_AUX_BREAK (-100)
+@@ -273,6 +274,10 @@ static int sleep_ms_core(uint64_t milliseconds, int mouse_mode) {
+         return 0;
+     }
+ 
++    uint64_t tsc_deadline = rdtsc_deadline(milliseconds > UINT64_MAX / 1000
++                                         ? UINT64_MAX
++                                         : milliseconds * 1000);
++
+     // Hand over mouse state accumulated while nobody was listening (e.g. a
+     // pointer position preserved across a menu re-entry) before blocking.
+     if (mouse_mode == MOUSE_MODE_FULL && mouse_state_pending()) {
+@@ -284,7 +289,7 @@ static int sleep_ms_core(uint64_t milliseconds, int mouse_mode) {
+     bool aux_poll = mouse_present();
+ 
+     if (!serial && !aux_poll) {
+-        return _pit_sleep_and_quit_on_keypress(ticks, 0);
++        return _pit_sleep_and_quit_on_keypress(ticks, 0, tsc_deadline);
+     }
+ 
+     uint32_t start = mmind(0x46c);
+@@ -293,7 +298,7 @@ static int sleep_ms_core(uint64_t milliseconds, int mouse_mode) {
+     for (;;) {
+         uint32_t remaining = ticks - elapsed;
+         int ret = _pit_sleep_and_quit_on_keypress(serial && remaining > 1 ? 1 : remaining,
+-                                                  aux_poll);
++                                                  aux_poll, tsc_deadline);
+ 
+         if (ret == PIT_SLEEP_AUX_BREAK) {
+             int ev = mouse_process_pending();
+@@ -315,6 +320,10 @@ static int sleep_ms_core(uint64_t milliseconds, int mouse_mode) {
+             }
+         }
+ 
++        if (rdtsc_deadline_expired(tsc_deadline)) {
++            return 0;
++        }
++
+         uint32_t now = mmind(0x46c);
+         elapsed = now >= start ? now - start
+                 : now + (uint32_t)(BDA_TICKS_PER_DAY - start);
+diff --git a/common/lib/sleep.asm_bios_ia32 b/common/lib/sleep.asm_bios_ia32
+index 515e5b4c..c3a07171 100644
+--- a/common/lib/sleep.asm_bios_ia32
++++ b/common/lib/sleep.asm_bios_ia32
+@@ -2,6 +2,8 @@ section .realmode
+ 
+ int_08_ticks_counter: dd 0
+ int_08_callback:      dd 0
++pit_ticks:            dd 0
++tsc_deadline:         dq 0
+ 
+ int_08_isr:
+     bits 16
+@@ -20,8 +22,13 @@ _pit_sleep_and_quit_on_keypress:
+     mov dword [int_08_callback], edx
+     mov dword [0x08*4], int_08_isr
+ 
+-    ; pit_ticks in edx
+-    mov edx, dword [esp+4]
++    mov eax, dword [esp+4]
++    mov dword [pit_ticks], eax
++
++    mov eax, dword [esp+12]
++    mov dword [tsc_deadline], eax
++    mov eax, dword [esp+16]
++    mov dword [tsc_deadline+4], eax
+ 
+     ; whether to also break out on pending PS/2 aux (mouse) data
+     mov eax, dword [esp+8]
+@@ -74,9 +81,23 @@ _pit_sleep_and_quit_on_keypress:
+     mov byte [.aux_hit], 0
+ 
+   .loop:
+-    cmp dword [int_08_ticks_counter], edx
+-    je .done
+-
++    mov eax, dword [int_08_ticks_counter]
++    cmp eax, dword [cs:pit_ticks]
++    jae .done
++
++    cmp dword [cs:tsc_deadline+4], 0
++    jne .check_tsc
++    cmp dword [cs:tsc_deadline], 0
++    je .check_aux
++  .check_tsc:
++    rdtsc
++    cmp edx, dword [cs:tsc_deadline+4]
++    ja .done
++    jb .check_aux
++    cmp eax, dword [cs:tsc_deadline]
++    jae .done
++
++  .check_aux:
+     cmp byte [.aux_poll], 0
+     je .no_aux
+     in al, 0x64
+diff --git a/common/sys/cpu.h b/common/sys/cpu.h
+index 955ada88..566df609 100644
+--- a/common/sys/cpu.h
++++ b/common/sys/cpu.h
+@@ -534,6 +534,42 @@ static inline uint64_t rdtsc_usec(void) {
+          + exec_ticks % tsc_freq * 1000000 / tsc_freq;
+ }
+ 
++static inline uint64_t rdtsc_deadline(uint64_t us) {
++    if (tsc_freq == 0) {
++        return 0;
++    }
++
++    uint64_t seconds = us / 1000000;
++    uint64_t remainder = us % 1000000;
++
++    uint64_t ticks;
++    if (__builtin_mul_overflow(seconds, tsc_freq, &ticks)) {
++        return UINT64_MAX;
++    }
++
++    uint64_t remainder_ticks;
++    if (__builtin_mul_overflow(remainder, tsc_freq / 1000000,
++                               &remainder_ticks)) {
++        return UINT64_MAX;
++    }
++    remainder_ticks += remainder * (tsc_freq % 1000000) / 1000000;
++
++    if (__builtin_add_overflow(ticks, remainder_ticks, &ticks)) {
++        return UINT64_MAX;
++    }
++
++    uint64_t now = rdtsc();
++    if (__builtin_add_overflow(now, ticks, &ticks)) {
++        return UINT64_MAX;
++    }
++
++    return ticks;
++}
++
++static inline bool rdtsc_deadline_expired(uint64_t deadline) {
++    return deadline != 0 && rdtsc() >= deadline;
++}
++
+ static inline void stall(uint64_t us) {
+     uint64_t ticks = (tsc_freq * us + 999999) / 1000000;
+     uint64_t next_stop = rdtsc() + ticks;
