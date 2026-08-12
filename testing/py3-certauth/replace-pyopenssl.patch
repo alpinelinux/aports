@@ -1,0 +1,325 @@
+Patch-Source: not yet submitted upstream; certauth has had no commit since
+2019 and https://github.com/ikreymer/certauth/issues/23 (the same pyOpenSSL
+breakage) has been open and unanswered.  To be filed at
+https://github.com/ikreymer/certauth/issues
+
+pyOpenSSL 26.4.0 removed X509Req, X509Extension, PKCS12, load_pkcs12 and
+X509.add_extensions, which leaves certauth completely non-functional -
+CertificateAuthority() cannot even be constructed.  Replace pyopenssl with
+cryptography throughout.
+
+Notes on behaviour changes:
+- The CSR built in generate_host_cert() is dropped, it only carried the
+  public key into a certificate signed by the CA.
+- Serial numbers now start at 1, cryptography rejects a zero serial number.
+- Host certificates get an authorityKeyIdentifier.  Without it OpenSSL 3.5
+  rejects them with "Missing Authority Key Identifier", which defeats the
+  point of the package.
+- CertificateAuthority now hands out cryptography objects instead of
+  OpenSSL.crypto ones.  pyOpenSSL's SSL.Context.use_certificate() and
+  use_privatekey() accept both, so wsgiprox keeps working.
+
+--- a/setup.py
++++ b/setup.py
+@@ -32,7 +32,7 @@
+         'certauth',
+         ],
+     install_requires=[
+-        'pyopenssl',
++        'cryptography',
+         'tldextract',
+         ],
+     zip_safe=True,
+
+--- a/certauth/certauth.py
++++ b/certauth/certauth.py
+@@ -3,9 +3,14 @@
+ 
+ from io import BytesIO
+ 
+-from OpenSSL import crypto
+-from OpenSSL.SSL import FILETYPE_PEM
++from cryptography import x509
++from cryptography.hazmat.primitives import hashes
++from cryptography.hazmat.primitives import serialization
++from cryptography.hazmat.primitives.asymmetric import rsa
++from cryptography.hazmat.primitives.serialization import pkcs12
++from cryptography.x509.oid import NameOID
+ 
++import datetime
+ import random
+ 
+ import ipaddress
+@@ -33,6 +38,14 @@
+ 
+ 
+ # =================================================================
++def _hash_algorithm(hash_func):
++    try:
++        return getattr(hashes, hash_func.upper())()
++    except AttributeError:
++        raise ValueError('Unsupported hash function: ' + hash_func)
++
++
++# =================================================================
+ class CertificateAuthority(object):
+     """
+     Utility class for signing individual certificate
+@@ -191,10 +204,12 @@
+         return res[2]
+ 
+     def get_root_PKCS12(self):
+-        p12 = crypto.PKCS12()
+-        p12.set_certificate(self.ca_cert)
+-        p12.set_privatekey(self.ca_key)
+-        return p12.export()
++        return pkcs12.serialize_key_and_certificates(
++            name=None,
++            key=self.ca_key,
++            cert=self.ca_cert,
++            cas=None,
++            encryption_algorithm=serialization.NoEncryption())
+ 
+     def get_root_pem(self):
+         return self.ca_file_cache.get(ROOT_CA)
+@@ -203,40 +218,46 @@
+         return self.ca_file_cache.ca_file
+ 
+     def _make_cert(self, certname):
+-        cert = crypto.X509()
+-        cert.set_serial_number(random.randint(0, 2 ** 64 - 1))
+-        cert.get_subject().CN = certname
+-
+-        cert.set_version(2)
+-        cert.gmtime_adj_notBefore(self.cert_not_before)
+-        cert.gmtime_adj_notAfter(self.cert_not_after)
+-        return cert
++        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, certname)])
++
++        now = datetime.datetime.now(datetime.timezone.utc)
++
++        builder = (x509.CertificateBuilder()
++                   .serial_number(random.randint(1, 2 ** 64 - 1))
++                   .subject_name(subject)
++                   .not_valid_before(
++                       now + datetime.timedelta(seconds=self.cert_not_before))
++                   .not_valid_after(
++                       now + datetime.timedelta(seconds=self.cert_not_after)))
++
++        return builder, subject
+ 
+     def generate_ca_root(self, ca_name, hash_func=DEF_HASH_FUNC):
+         # Generate key
+-        key = crypto.PKey()
+-        key.generate_key(crypto.TYPE_RSA, 2048)
++        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+ 
+         # Generate cert
+-        cert = self._make_cert(ca_name)
++        builder, subject = self._make_cert(ca_name)
+ 
+-        cert.set_issuer(cert.get_subject())
+-        cert.set_pubkey(key)
+-        cert.add_extensions([
+-            crypto.X509Extension(b"basicConstraints",
+-                                 True,
+-                                 b"CA:TRUE, pathlen:0"),
+-
+-            crypto.X509Extension(b"keyUsage",
+-                                 True,
+-                                 b"keyCertSign, cRLSign"),
+-
+-            crypto.X509Extension(b"subjectKeyIdentifier",
+-                                 False,
+-                                 b"hash",
+-                                 subject=cert),
+-            ])
+-        cert.sign(key, hash_func)
++        cert = (builder
++                .issuer_name(subject)
++                .public_key(key.public_key())
++                .add_extension(x509.BasicConstraints(ca=True, path_length=0),
++                               critical=True)
++                .add_extension(x509.KeyUsage(digital_signature=False,
++                                             content_commitment=False,
++                                             key_encipherment=False,
++                                             data_encipherment=False,
++                                             key_agreement=False,
++                                             key_cert_sign=True,
++                                             crl_sign=True,
++                                             encipher_only=False,
++                                             decipher_only=False),
++                               critical=True)
++                .add_extension(
++                    x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
++                    critical=False)
++                .sign(key, _hash_algorithm(hash_func)))
+ 
+         return cert, key
+ 
+@@ -245,51 +266,47 @@
+                            hash_func=DEF_HASH_FUNC,
+                            is_ip=False):
+ 
+-        host = host.encode('utf-8')
+-
+         # Generate key
+-        key = crypto.PKey()
+-        key.generate_key(crypto.TYPE_RSA, 2048)
+-
+-        # Generate CSR
+-        req = crypto.X509Req()
+-        req.get_subject().CN = host
+-        req.set_pubkey(key)
+-        req.sign(key, hash_func)
++        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+ 
+         # Generate Cert
+-        cert = self._make_cert(host)
++        builder, dummy = self._make_cert(host)
+ 
+-        cert.set_issuer(root_cert.get_subject())
+-        cert.set_pubkey(req.get_pubkey())
+-
+-        primary = b'DNS:' + host
++        alt_hosts = [x509.DNSName(host)]
+ 
+         if wildcard:
+-            alt_hosts = primary + b', DNS:*.' + host
++            alt_hosts.append(x509.DNSName('*.' + host))
+ 
+         elif is_ip:
+-            alt_hosts = b'IP:' + host + b', ' + primary
++            alt_hosts.insert(0, x509.IPAddress(ipaddress.ip_address(host)))
+ 
+-        else:
+-            alt_hosts = primary
++        root_ski = root_cert.extensions.get_extension_for_class(
++            x509.SubjectKeyIdentifier)
+ 
+-        cert.add_extensions([
+-            crypto.X509Extension(b'subjectAltName',
+-                                 False,
+-                                 alt_hosts)])
++        cert = (builder
++                .issuer_name(root_cert.subject)
++                .public_key(key.public_key())
++                .add_extension(x509.SubjectAlternativeName(alt_hosts),
++                               critical=False)
++                .add_extension(
++                    x509.AuthorityKeyIdentifier
++                    .from_issuer_subject_key_identifier(root_ski.value),
++                    critical=False)
++                .sign(root_key, _hash_algorithm(hash_func)))
+ 
+-        cert.sign(root_key, hash_func)
+         return cert, key
+ 
+     def write_pem(self, buff, cert, key):
+-        buff.write(crypto.dump_privatekey(FILETYPE_PEM, key))
+-        buff.write(crypto.dump_certificate(FILETYPE_PEM, cert))
++        buff.write(key.private_bytes(
++            encoding=serialization.Encoding.PEM,
++            format=serialization.PrivateFormat.TraditionalOpenSSL,
++            encryption_algorithm=serialization.NoEncryption()))
++        buff.write(cert.public_bytes(serialization.Encoding.PEM))
+ 
+     def read_pem(self, buff):
+-        cert = crypto.load_certificate(FILETYPE_PEM, buff.read())
+-        buff.seek(0)
+-        key = crypto.load_privatekey(FILETYPE_PEM, buff.read())
++        data = buff.read()
++        cert = x509.load_pem_x509_certificate(data)
++        key = serialization.load_pem_private_key(data, password=None)
+         return cert, key
+ 
+ 
+
+--- a/test/test_certauth.py
++++ b/test/test_certauth.py
+@@ -4,8 +4,8 @@
+ from certauth.certauth import main, CertificateAuthority, FileCache, LRUCache, ROOT_CA
+ 
+ import tempfile
+-from OpenSSL import crypto
+-from OpenSSL.SSL import FILETYPE_PEM
++from cryptography import x509
++from cryptography.hazmat.primitives.serialization import pkcs12
+ import datetime
+ import time
+ 
+@@ -39,13 +39,21 @@
+     assert not os.path.isfile(TEST_CA_ROOT)
+ 
+ 
+-def verify_cert_san(cert, san_string):
+-    assert cert.get_extension_count() == 1
+-    assert str(cert.get_extension(0)) == san_string
++def format_cert_san(cert):
++    san = cert.extensions.get_extension_for_class(
++        x509.SubjectAlternativeName).value
++
++    return ', '.join(
++        'IP Address:' + str(name.value) if isinstance(name, x509.IPAddress)
++        else 'DNS:' + name.value
++        for name in san)
++
+ 
+-    #if 'IP Address' in san_string:
+-    #    print(crypto.dump_certificate(crypto.FILETYPE_TEXT, cert).decode('utf-8'))
+-    #    assert False
++def verify_cert_san(cert, san_string):
++    assert len(cert.extensions) == 2
++    assert cert.extensions.get_extension_for_class(
++        x509.AuthorityKeyIdentifier) is not None
++    assert format_cert_san(cert) == san_string
+ 
+ def verify_san(ca, filename, san_string):
+     assert os.path.isfile(filename)
+@@ -123,7 +131,7 @@
+     filename = os.path.join(TEST_CA_DIR, '2001-0db8-85a3-0000-0000-8a2e-0370-7334.pem')
+     assert cert_filename == filename
+ 
+-    verify_san(ca, filename, 'IP Address:2001:DB8:85A3:0:0:8A2E:370:7334\n, DNS:2001:0db8:85a3:0000:0000:8a2e:0370:7334')
++    verify_san(ca, filename, 'IP Address:2001:db8:85a3::8a2e:370:7334, DNS:2001:0db8:85a3:0000:0000:8a2e:0370:7334')
+ 
+     os.remove(filename)
+ 
+@@ -223,16 +231,13 @@
+     buff_pk12 = ca.get_root_PKCS12()
+     assert len(buff_pk12) > 0
+ 
+-    cert = crypto.load_pkcs12(buff_pk12).get_certificate()
++    cert = pkcs12.load_key_and_certificates(buff_pk12, None)[1]
+ 
+     expected_not_before = datetime.datetime.utcnow() - datetime.timedelta(seconds=60 * 60)
+     expected_not_after = datetime.datetime.utcnow() + datetime.timedelta(seconds=60 * 60 * 24 * 3)
+ 
+-
+-    actual_not_before = datetime.datetime.strptime(
+-            cert.get_notBefore().decode('ascii'), '%Y%m%d%H%M%SZ')
+-    actual_not_after = datetime.datetime.strptime(
+-            cert.get_notAfter().decode('ascii'), '%Y%m%d%H%M%SZ')
++    actual_not_before = cert.not_valid_before_utc.replace(tzinfo=None)
++    actual_not_after = cert.not_valid_after_utc.replace(tzinfo=None)
+ 
+     time.mktime(expected_not_before.utctimetuple())
+     assert abs((time.mktime(actual_not_before.utctimetuple()) - time.mktime(expected_not_before.utctimetuple()))) < 10
+@@ -251,13 +256,15 @@
+     # PEM stored in root_cert_dict
+     assert root_cert_dict[ROOT_CA] == buff_pem
+ 
+-    cert_pem = crypto.load_certificate(FILETYPE_PEM, buff_pem)
++    cert_pem = x509.load_pem_x509_certificate(buff_pem)
+ 
+     # check PKCS12
+     buff_pk12 = ca.get_root_PKCS12()
+     assert len(buff_pk12) > 0
+ 
+-    cert_pk12 = crypto.load_pkcs12(buff_pk12).get_certificate()
++    cert_pk12 = pkcs12.load_key_and_certificates(buff_pk12, None)[1]
++
++    assert cert_pk12 == cert_pem
+ 
+ 
+ def test_ca_lru_cache():
