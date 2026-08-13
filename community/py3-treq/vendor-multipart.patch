@@ -2,110 +2,81 @@ Patch-Source: https://github.com/twisted/treq/pull/400
 Upstream issues:
 https://github.com/twisted/treq/issues/399
 https://github.com/twisted/treq/issues/403
----
-From 7c52d4917f41291da271fd5cebf2e69e73dcee32 Mon Sep 17 00:00:00 2001
-From: Glyph <code@glyph.im>
-Date: Thu, 19 Sep 2024 11:33:27 -0700
-Subject: [PATCH 1/7] remove dependency on `multipart` package
+--
+Alpine cannot depend on the `multipart` package (defnull/multipart): it
+installs a top-level `multipart` module that collides with the one shipped
+by py3-python-multipart (andrew-d/python-multipart), which is already in
+community and provides a different API under the same import name.
 
----
- setup.py | 1 -
- 1 file changed, 1 deletion(-)
-
-diff --git a/setup.py b/setup.py
-index 24ba08f6..8ba4b303 100644
---- a/setup.py
-+++ b/setup.py
-@@ -36,7 +36,6 @@
-             "Twisted[tls] >= 22.10.0",  # For #11635
-             "attrs",
-             "typing_extensions >= 3.10.0",
--            "multipart",
-         ],
-         extras_require={
-             "dev": [
-
-From 1526431a37745bb33982f79bb38d1d4e4554907d Mon Sep 17 00:00:00 2001
-From: Glyph <code@glyph.im>
-Date: Thu, 19 Sep 2024 11:41:01 -0700
-Subject: [PATCH 2/7] add a lightly-modified vendored version of
- https://github.com/defnull/multipart/blob/v0.2.5/multipart.py to comply with
- our linting
-
----
- pyproject.toml                  |   6 +
- src/treq/_multipart.py          | 559 ++++++++++++++++++++++++++++++++
- src/treq/content.py             |   6 +-
- src/treq/test/test_multipart.py |   2 +-
- 4 files changed, 571 insertions(+), 2 deletions(-)
- create mode 100644 src/treq/_multipart.py
-
+Vendor the two helpers treq needs, as upstream PR #400 proposes.
+Regenerated against 26.7.0; the previous version of this patch was written
+against the setup.py-era tree and no longer applies.
+--
 diff --git a/pyproject.toml b/pyproject.toml
-index be4335d7..76e6956d 100644
+index 5a80ee1..0b2a2d9 100644
 --- a/pyproject.toml
 +++ b/pyproject.toml
-@@ -83,3 +83,9 @@ module = [
- disallow_untyped_defs = false
- check_untyped_defs = false
- ignore_missing_imports = true
-+
-+[[tool.mypy.overrides]]
-+  module = [
-+    "treq._multipart",
-+  ]
-+  disallow_untyped_defs = false
+@@ -41,7 +41,6 @@ dependencies = [
+     "Twisted[tls] >= 22.10.0",  # For #11635
+     "attrs",
+     "typing_extensions >= 3.10.0",
+-    "multipart",
+ ]
+ 
+ [project.optional-dependencies]
 diff --git a/src/treq/_multipart.py b/src/treq/_multipart.py
 new file mode 100644
-index 00000000..53e00d21
+index 0000000..6a9d976
 --- /dev/null
 +++ b/src/treq/_multipart.py
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,561 @@
 +# -*- coding: utf-8 -*-
 +
 +"""
 +Parser for multipart/form-data
 +==============================
 +
-+This module provides a parser for the multipart/form-data format. It can read
-+from a file, a socket or a WSGI environment. The parser can be used to replace
++This module provides a parser for the multipart/form-data format.  It can read
++from a file, a socket or a WSGI environment.  The parser can be used to replace
 +cgi.FieldStorage to work around its limitations.
++
++..note::
++
++    Copyright (c) 2010, Marcel Hellkamp.
++    Inspired by the Werkzeug library: http://werkzeug.pocoo.org/
++
++    Permission is hereby granted, free of charge, to any person obtaining a copy
++    of this software and associated documentation files (the "Software"), to deal
++    in the Software without restriction, including without limitation the rights
++    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++    copies of the Software, and to permit persons to whom the Software is
++    furnished to do so, subject to the following conditions:
++
++    The above copyright notice and this permission notice shall be included in
++    all copies or substantial portions of the Software.
++
++    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++    THE SOFTWARE.
 +"""
 +
-+"""
-+Copyright (c) 2010, Marcel Hellkamp.
-+Inspired by the Werkzeug library: http://werkzeug.pocoo.org/
++import re
++from io import BytesIO
++from typing import IO
++from tempfile import TemporaryFile
++from urllib.parse import parse_qs
++from wsgiref.headers import Headers
++from collections.abc import MutableMapping as DictMixin
 +
-+Permission is hereby granted, free of charge, to any person obtaining a copy
-+of this software and associated documentation files (the "Software"), to deal
-+in the Software without restriction, including without limitation the rights
-+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-+copies of the Software, and to permit persons to whom the Software is
-+furnished to do so, subject to the following conditions:
-+
-+The above copyright notice and this permission notice shall be included in
-+all copies or substantial portions of the Software.
-+
-+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-+THE SOFTWARE.
-+"""
 +
 +__author__ = "Marcel Hellkamp"
 +__version__ = "0.2.5"
 +__license__ = "MIT"
 +__all__ = ["MultipartError", "MultipartParser", "MultipartPart", "parse_form_data"]
-+
-+
-+import re
-+from io import BytesIO, IO
-+from tempfile import TemporaryFile
-+from urllib.parse import parse_qs
-+from wsgiref.headers import Headers
-+from collections.abc import MutableMapping as DictMixin
 +
 +
 +##############################################################################
@@ -430,10 +401,11 @@ index 00000000..53e00d21
 +
 +class MultipartPart(object):
 +    file: IO[bytes]
++
 +    def __init__(self, buffer_size=2**16, memfile_limit=2**18, charset="latin1"):
 +        self.headerlist = []
 +        self.headers = None
-+        self.file = False       # type:ignore
++        self.file = False  # type:ignore
 +        self.size = 0
 +        self._buf = b""
 +        self.disposition = None
@@ -541,7 +513,7 @@ index 00000000..53e00d21
 +    def close(self):
 +        if self.file:
 +            self.file.close()
-+            self.file = False   # type:ignore
++            self.file = False  # type:ignore
 +
 +
 +##############################################################################
@@ -620,240 +592,28 @@ index 00000000..53e00d21
 +
 +    return forms, files
 diff --git a/src/treq/content.py b/src/treq/content.py
-index e3f4aaad..da0dc5d2 100644
+index b4a238f..0933b9a 100644
 --- a/src/treq/content.py
 +++ b/src/treq/content.py
-@@ -1,7 +1,11 @@
-+"""
-+Utilities related to retrieving the contents of the response-body.
-+"""
-+
+@@ -5,7 +5,7 @@ Utilities related to retrieving the contents of the response-body.
  import json
- from typing import Any, Callable, FrozenSet, List, Optional, cast
+ from typing import Any, Callable, Optional, cast
  
--import multipart  # type: ignore
-+from .import _multipart
+-from multipart import parse_options_header
++from treq._multipart import parse_options_header
  from twisted.internet.defer import Deferred, succeed
  from twisted.internet.protocol import Protocol, connectionDone
  from twisted.python.failure import Failure
 diff --git a/src/treq/test/test_multipart.py b/src/treq/test/test_multipart.py
-index 999f1afd..7b123006 100644
+index 4614342..f5c9871 100644
 --- a/src/treq/test/test_multipart.py
 +++ b/src/treq/test/test_multipart.py
-@@ -5,7 +5,7 @@
+@@ -5,7 +5,7 @@ from typing import cast, AnyStr
  
  from io import BytesIO
  
--from multipart import MultipartParser  # type: ignore
-+from .._multipart import MultipartParser
+-from multipart import MultipartParser
++from treq._multipart import MultipartParser
  from twisted.trial import unittest
  from zope.interface.verify import verifyObject
  
-
-From 7f16b87f0a2574a2ef67a50e6bf89ad9941fcf4c Mon Sep 17 00:00:00 2001
-From: Glyph <code@glyph.im>
-Date: Thu, 19 Sep 2024 11:42:45 -0700
-Subject: [PATCH 3/7] correct import
-
----
- src/treq/_multipart.py | 3 ++-
- 1 file changed, 2 insertions(+), 1 deletion(-)
-
-diff --git a/src/treq/_multipart.py b/src/treq/_multipart.py
-index 53e00d21..be6526a1 100644
---- a/src/treq/_multipart.py
-+++ b/src/treq/_multipart.py
-@@ -39,7 +39,8 @@
- 
- 
- import re
--from io import BytesIO, IO
-+from io import BytesIO
-+from typing import IO
- from tempfile import TemporaryFile
- from urllib.parse import parse_qs
- from wsgiref.headers import Headers
-
-From f0a5148cba2c983335758dd34ab78bff46f2dc6b Mon Sep 17 00:00:00 2001
-From: Glyph <code@glyph.im>
-Date: Thu, 19 Sep 2024 11:44:49 -0700
-Subject: [PATCH 4/7] fix import, switch to `from`
-
----
- src/treq/content.py | 4 ++--
- 1 file changed, 2 insertions(+), 2 deletions(-)
-
-diff --git a/src/treq/content.py b/src/treq/content.py
-index da0dc5d2..60a0694d 100644
---- a/src/treq/content.py
-+++ b/src/treq/content.py
-@@ -5,7 +5,7 @@
- import json
- from typing import Any, Callable, FrozenSet, List, Optional, cast
- 
--from .import _multipart
-+from ._multipart import parse_options_header
- from twisted.internet.defer import Deferred, succeed
- from twisted.internet.protocol import Protocol, connectionDone
- from twisted.python.failure import Failure
-@@ -33,7 +33,7 @@ def _encoding_from_headers(headers: Headers) -> Optional[str]:
- 
-     # This seems to be the choice browsers make when encountering multiple
-     # content-type headers.
--    media_type, params = multipart.parse_options_header(content_types[-1])
-+    media_type, params = parse_options_header(content_types[-1])
- 
-     charset = params.get("charset")
-     if charset:
-
-From 4fd3c842c21a3fa45560dc7eb41767fcbb4e653a Mon Sep 17 00:00:00 2001
-From: Glyph <code@glyph.im>
-Date: Thu, 19 Sep 2024 11:47:35 -0700
-Subject: [PATCH 5/7] try to make the linter happy
-
----
- src/treq/_multipart.py | 63 +++++++++++++++++++++---------------------
- 1 file changed, 32 insertions(+), 31 deletions(-)
-
-diff --git a/src/treq/_multipart.py b/src/treq/_multipart.py
-index be6526a1..6a9d976d 100644
---- a/src/treq/_multipart.py
-+++ b/src/treq/_multipart.py
-@@ -4,39 +4,33 @@
- Parser for multipart/form-data
- ==============================
- 
--This module provides a parser for the multipart/form-data format. It can read
--from a file, a socket or a WSGI environment. The parser can be used to replace
-+This module provides a parser for the multipart/form-data format.  It can read
-+from a file, a socket or a WSGI environment.  The parser can be used to replace
- cgi.FieldStorage to work around its limitations.
--"""
- 
--"""
--Copyright (c) 2010, Marcel Hellkamp.
--Inspired by the Werkzeug library: http://werkzeug.pocoo.org/
--
--Permission is hereby granted, free of charge, to any person obtaining a copy
--of this software and associated documentation files (the "Software"), to deal
--in the Software without restriction, including without limitation the rights
--to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
--copies of the Software, and to permit persons to whom the Software is
--furnished to do so, subject to the following conditions:
--
--The above copyright notice and this permission notice shall be included in
--all copies or substantial portions of the Software.
--
--THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
--IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
--FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
--AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
--LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
--OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
--THE SOFTWARE.
--"""
-+..note::
- 
--__author__ = "Marcel Hellkamp"
--__version__ = "0.2.5"
--__license__ = "MIT"
--__all__ = ["MultipartError", "MultipartParser", "MultipartPart", "parse_form_data"]
-+    Copyright (c) 2010, Marcel Hellkamp.
-+    Inspired by the Werkzeug library: http://werkzeug.pocoo.org/
- 
-+    Permission is hereby granted, free of charge, to any person obtaining a copy
-+    of this software and associated documentation files (the "Software"), to deal
-+    in the Software without restriction, including without limitation the rights
-+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-+    copies of the Software, and to permit persons to whom the Software is
-+    furnished to do so, subject to the following conditions:
-+
-+    The above copyright notice and this permission notice shall be included in
-+    all copies or substantial portions of the Software.
-+
-+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-+    THE SOFTWARE.
-+"""
- 
- import re
- from io import BytesIO
-@@ -47,6 +41,12 @@
- from collections.abc import MutableMapping as DictMixin
- 
- 
-+__author__ = "Marcel Hellkamp"
-+__version__ = "0.2.5"
-+__license__ = "MIT"
-+__all__ = ["MultipartError", "MultipartParser", "MultipartPart", "parse_form_data"]
-+
-+
- ##############################################################################
- ################################ Helper & Misc ###############################
- ##############################################################################
-@@ -369,10 +369,11 @@ def _iterparse(self):
- 
- class MultipartPart(object):
-     file: IO[bytes]
-+
-     def __init__(self, buffer_size=2**16, memfile_limit=2**18, charset="latin1"):
-         self.headerlist = []
-         self.headers = None
--        self.file = False       # type:ignore
-+        self.file = False  # type:ignore
-         self.size = 0
-         self._buf = b""
-         self.disposition = None
-@@ -480,7 +481,7 @@ def save_as(self, path):
-     def close(self):
-         if self.file:
-             self.file.close()
--            self.file = False   # type:ignore
-+            self.file = False  # type:ignore
- 
- 
- ##############################################################################
-
-From d7c16de8f522c5fc10cf2108371afce635d39e4e Mon Sep 17 00:00:00 2001
-From: Glyph <code@glyph.im>
-Date: Thu, 19 Sep 2024 11:48:35 -0700
-Subject: [PATCH 6/7] octothorpes rise up
-
----
- tox.ini | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
-
-diff --git a/tox.ini b/tox.ini
-index 1ce2bece..6b70acf2 100644
---- a/tox.ini
-+++ b/tox.ini
-@@ -81,4 +81,4 @@ commands =
- # This is a minimal Black-compatible config.
- # See https://black.readthedocs.io/en/stable/compatible_configs.html#flake8
- max-line-length = 88
--extend-ignore = E203, W503
-+extend-ignore = E203, W503, E266
-
-From 4aa1ee8a3ca5461c165ea380b1cbd0ea5b41cce4 Mon Sep 17 00:00:00 2001
-From: Glyph <code@glyph.im>
-Date: Thu, 19 Sep 2024 13:00:40 -0700
-Subject: [PATCH 7/7] news fragment
-
----
- changelog.d/399.bugfix.rst | 3 +++
- 1 file changed, 3 insertions(+)
- create mode 100644 changelog.d/399.bugfix.rst
-
-diff --git a/changelog.d/399.bugfix.rst b/changelog.d/399.bugfix.rst
-new file mode 100644
-index 00000000..d5d2ec9d
---- /dev/null
-+++ b/changelog.d/399.bugfix.rst
-@@ -0,0 +1,3 @@
-+treq has vendored its dependency on the ``multipart`` library to avoid import
-+conflicts with ``python-multipart``; it should now be installable alongside
-+that library.
