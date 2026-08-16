@@ -1,0 +1,71 @@
+From d8163884f854c533dc5be2944f0330f2658a53f1 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Tue, 28 Jul 2026 22:55:20 -0400
+Subject: [PATCH] fix toctou race in popen children's closing of other popen
+ pipes
+
+since commit e1a51185ceb4386481491e11f6dd39569b9e54f7, popen obeys an
+obscure historical requirement to implement a sort of pseudo-cloexec
+behavior for other pipe streams obtained by popen. but since popen
+uses posix_spawn (and thereby posix_spawn file actions) internally,
+the time of check for other pipe streams is separated from the time of
+closure.
+
+this was intended to be addressed by popen holding the open file list
+lock across posix_spawn, but pclose (via fclose) closes the file
+descriptor before taking the open file list lock, only using the lock
+for updating the linked list pointers. this is to avoid serializing
+fclose operations across the entire process, since in general close
+may be a blocking operation.
+
+multiple solutions to this problem were considered, but the simplest
+and least invasive is conditionally taking the open file list lock
+early for popen streams -- that is, for FILE streams where the
+pipe_pid member is nonzero. since the file descriptor refers to a
+pipe, closing it is a simple, nonblocking operation, and the only cost
+is the time spent entering and leaving kernelspace while the lock is
+held.
+
+since individual FILE locks cannot be held while taking the open file
+list lock (this would violate lock order protocol and produce
+deadlocks), the FILE lock must be released after fflush but before the
+ofl lock is taken. there is no point in retaking the lock afterwards,
+since the FILE pointer is no longer valid and any further use by the
+application would be undefined. so, simply let fflush do the locking.
+
+note that the early return path (F_PERM) is not reachable for popen
+streams, only for stdin/stdout/stderr, which are always normal FILEs.
+thus, it does not provide a code path to return with the ofl lock
+still held.
+---
+ src/stdio/fclose.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/stdio/fclose.c b/src/stdio/fclose.c
+index d594532b..30bdfe24 100644
+--- a/src/stdio/fclose.c
++++ b/src/stdio/fclose.c
+@@ -7,11 +7,11 @@ weak_alias(dummy, __unlist_locked_file);
+ int fclose(FILE *f)
+ {
+ 	int r;
+-	
+-	FLOCK(f);
++	FILE **head = 0;
++
+ 	r = fflush(f);
++	if (f->pipe_pid) head = __ofl_lock();
+ 	r |= f->close(f);
+-	FUNLOCK(f);
+ 
+ 	/* Past this point, f is closed and any further explict access
+ 	 * to it is undefined. However, it still exists as an entry in
+@@ -25,7 +25,7 @@ int fclose(FILE *f)
+ 
+ 	__unlist_locked_file(f);
+ 
+-	FILE **head = __ofl_lock();
++	if (!head) head = __ofl_lock();
+ 	if (f->prev) f->prev->next = f->next;
+ 	if (f->next) f->next->prev = f->prev;
+ 	if (*head == f) *head = f->next;
