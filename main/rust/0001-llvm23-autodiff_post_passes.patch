@@ -1,0 +1,365 @@
+From d7e4edd9a1dac40e4518ecd2031d1274a1fcd144 Mon Sep 17 00:00:00 2001
+From: sgasho <SuganoShota1999@gmail.com>
+Date: Fri, 3 Jul 2026 00:43:49 +0900
+Subject: [PATCH] Add -Zautodiff_post_passes flag to limit which llvm passes to
+ run after enzyme
+
+---
+ compiler/rustc_codegen_llvm/src/back/lto.rs   |   4 +-
+ compiler/rustc_codegen_llvm/src/back/write.rs |  10 +
+ compiler/rustc_codegen_llvm/src/llvm/ffi.rs   |   2 +
+ compiler/rustc_codegen_ssa/src/back/write.rs  |   5 +
+ compiler/rustc_interface/src/tests.rs         |   1 +
+ .../rustc_llvm/llvm-wrapper/PassWrapper.cpp   | 215 +++++++++---------
+ compiler/rustc_session/src/options.rs         |   2 +
+ 7 files changed, 136 insertions(+), 103 deletions(-)
+
+diff --git a/compiler/rustc_codegen_llvm/src/back/lto.rs b/compiler/rustc_codegen_llvm/src/back/lto.rs
+index 020c6668fb9d3..b2d22876c1858 100644
+--- a/compiler/rustc_codegen_llvm/src/back/lto.rs
++++ b/compiler/rustc_codegen_llvm/src/back/lto.rs
+@@ -620,7 +620,9 @@ pub(crate) fn run_pass_manager(
+     if cfg!(feature = "llvm_enzyme") && enable_ad && !thin {
+         let opt_stage = llvm::OptStage::FatLTO;
+         let stage = write::AutodiffStage::PostAD;
+-        if !config.autodiff.contains(&config::AutoDiff::NoPostopt) {
++        if !config.autodiff.contains(&config::AutoDiff::NoPostopt)
++            && config.autodiff_post_passes.as_deref() != Some("")
++        {
+             unsafe {
+                 write::llvm_optimize(
+                     cgcx, prof, dcx, module, None, None, config, opt_level, opt_stage, stage,
+diff --git a/compiler/rustc_codegen_llvm/src/back/write.rs b/compiler/rustc_codegen_llvm/src/back/write.rs
+index 4426f6ebb3c17..e44c579e06c83 100644
+--- a/compiler/rustc_codegen_llvm/src/back/write.rs
++++ b/compiler/rustc_codegen_llvm/src/back/write.rs
+@@ -566,6 +566,14 @@ pub(crate) unsafe fn llvm_optimize(
+     let print_before_enzyme = config.autodiff.contains(&config::AutoDiff::PrintModBefore);
+     let print_after_enzyme = config.autodiff.contains(&config::AutoDiff::PrintModAfter);
+     let print_passes = config.autodiff.contains(&config::AutoDiff::PrintPasses);
++    let passes_after_enzyme = if autodiff_stage == AutodiffStage::PostAD {
++        config.autodiff_post_passes.as_deref()
++    } else {
++        None
++    };
++    let passes_after_enzyme_ptr =
++        passes_after_enzyme.map_or(std::ptr::null(), |s| s.as_c_char_ptr());
++    let passes_after_enzyme_len = passes_after_enzyme.map_or(0, |s| s.len());
+     let merge_functions;
+     let unroll_loops;
+     let vectorize_slp;
+@@ -795,6 +803,8 @@ pub(crate) unsafe fn llvm_optimize(
+             llvm_selfprofiler,
+             selfprofile_before_pass_callback,
+             selfprofile_after_pass_callback,
++            passes_after_enzyme_ptr,
++            passes_after_enzyme_len,
+             extra_passes.as_c_char_ptr(),
+             extra_passes.len(),
+             llvm_plugins.as_c_char_ptr(),
+diff --git a/compiler/rustc_codegen_llvm/src/llvm/ffi.rs b/compiler/rustc_codegen_llvm/src/llvm/ffi.rs
+index dd527eafe8362..206b2da9eb6e8 100644
+--- a/compiler/rustc_codegen_llvm/src/llvm/ffi.rs
++++ b/compiler/rustc_codegen_llvm/src/llvm/ffi.rs
+@@ -2492,6 +2492,8 @@ unsafe extern "C" {
+         llvm_selfprofiler: *mut c_void,
+         begin_callback: SelfProfileBeforePassCallback,
+         end_callback: SelfProfileAfterPassCallback,
++        PostEnzymePasses: *const c_char,
++        PostEnzymePassesLen: size_t,
+         ExtraPasses: *const c_char,
+         ExtraPassesLen: size_t,
+         LLVMPlugins: *const c_char,
+diff --git a/compiler/rustc_codegen_ssa/src/back/write.rs b/compiler/rustc_codegen_ssa/src/back/write.rs
+index 112cf45ebbf2e..8f3a4711424a9 100644
+--- a/compiler/rustc_codegen_ssa/src/back/write.rs
++++ b/compiler/rustc_codegen_ssa/src/back/write.rs
+@@ -108,6 +108,7 @@ pub struct ModuleConfig {
+     pub emit_lifetime_markers: bool,
+     pub llvm_plugins: Vec<String>,
+     pub autodiff: Vec<config::AutoDiff>,
++    pub autodiff_post_passes: Option<String>,
+     pub offload: Vec<config::Offload>,
+ }
+ 
+@@ -259,6 +260,10 @@ impl ModuleConfig {
+             emit_lifetime_markers: sess.emit_lifetime_markers(),
+             llvm_plugins: if_regular!(sess.opts.unstable_opts.llvm_plugins.clone(), vec![]),
+             autodiff: if_regular!(sess.opts.unstable_opts.autodiff.clone(), vec![]),
++            autodiff_post_passes: if_regular!(
++                sess.opts.unstable_opts.autodiff_post_passes.clone(),
++                None
++            ),
+             offload: if_regular!(sess.opts.unstable_opts.offload.clone(), vec![]),
+         }
+     }
+diff --git a/compiler/rustc_interface/src/tests.rs b/compiler/rustc_interface/src/tests.rs
+index 5933d0fd4b356..c43acb7363107 100644
+--- a/compiler/rustc_interface/src/tests.rs
++++ b/compiler/rustc_interface/src/tests.rs
+@@ -788,6 +788,7 @@ fn test_unstable_options_tracking_hash() {
+     tracked!(annotate_moves, AnnotateMoves::Enabled(Some(1234)));
+     tracked!(assume_incomplete_release, true);
+     tracked!(autodiff, vec![AutoDiff::Enable, AutoDiff::NoTT]);
++    tracked!(autodiff_post_passes, Some("function(mem2reg,instsimplify,simplifycfg)".to_string()));
+     tracked!(binary_dep_depinfo, true);
+     tracked!(box_noalias, false);
+     tracked!(
+diff --git a/compiler/rustc_llvm/llvm-wrapper/PassWrapper.cpp b/compiler/rustc_llvm/llvm-wrapper/PassWrapper.cpp
+index 5dcaa5f6f84b8..c15ab2e944db8 100644
+--- a/compiler/rustc_llvm/llvm-wrapper/PassWrapper.cpp
++++ b/compiler/rustc_llvm/llvm-wrapper/PassWrapper.cpp
+@@ -606,6 +606,7 @@ extern "C" LLVMRustResult LLVMRustOptimize(
+     bool DebugInfoForProfiling, void *LlvmSelfProfiler,
+     LLVMRustSelfProfileBeforePassCallback BeforePassCallback,
+     LLVMRustSelfProfileAfterPassCallback AfterPassCallback,
++    const char *PostEnzymePasses, size_t PostEnzymePassesLen,
+     const char *ExtraPasses, size_t ExtraPassesLen, const char *LLVMPlugins,
+     size_t LLVMPluginsLen) {
+   Module *TheModule = unwrap(ModuleRef);
+@@ -842,120 +843,130 @@ extern "C" LLVMRustResult LLVMRustOptimize(
+   raw_string_ostream ThinLinkDataOS(ThinLTOSummaryBuffer->data);
+   bool IsLTO = OptStage == LLVMRustOptStage::ThinLTO ||
+                OptStage == LLVMRustOptStage::FatLTO;
+-  if (!NoPrepopulatePasses) {
+-    for (const auto &C : PipelineStartEPCallbacks)
+-      PB.registerPipelineStartEPCallback(C);
+-    for (const auto &C : OptimizerLastEPCallbacks)
+-      PB.registerOptimizerLastEPCallback(C);
+-
+-    // The pre-link pipelines don't support O0 and require using
+-    // buildO0DefaultPipeline() instead. At the same time, the LTO pipelines do
+-    // support O0 and using them is required.
+-    if (OptLevel == OptimizationLevel::O0 && !IsLTO) {
+-      // We manually schedule ThinLTOBufferPasses below, so don't pass the value
+-      // to enable it here.
+-      MPM = PB.buildO0DefaultPipeline(OptLevel);
+-    } else {
+-      switch (OptStage) {
+-      case LLVMRustOptStage::PreLinkNoLTO:
+-        if (ThinLTOBufferRef) {
+-          // This is similar to LLVM's `buildFatLTODefaultPipeline`, where the
+-          // bitcode for embedding is obtained after performing
+-          // `ThinLTOPreLinkDefaultPipeline`.
+-          MPM.addPass(PB.buildThinLTOPreLinkDefaultPipeline(OptLevel));
+-          MPM.addPass(ThinLTOBitcodeWriterPass(
+-              ThinLTODataOS,
+-              ThinLTOSummaryBufferRef ? &ThinLinkDataOS : nullptr));
+-          *ThinLTOBufferRef = ThinLTOBuffer.release();
+-          if (ThinLTOSummaryBufferRef) {
+-            *ThinLTOSummaryBufferRef = ThinLTOSummaryBuffer.release();
++  if (PostEnzymePassesLen) {
++    if (auto Err = PB.parsePassPipeline(
++            MPM, StringRef(PostEnzymePasses, PostEnzymePassesLen))) {
++      std::string ErrMsg = toString(std::move(Err));
++      LLVMRustSetLastError(ErrMsg.c_str());
++      return LLVMRustResult::Failure;
++    }
++  } else {
++    if (!NoPrepopulatePasses) {
++      for (const auto &C : PipelineStartEPCallbacks)
++        PB.registerPipelineStartEPCallback(C);
++      for (const auto &C : OptimizerLastEPCallbacks)
++        PB.registerOptimizerLastEPCallback(C);
++
++      // The pre-link pipelines don't support O0 and require using
++      // buildO0DefaultPipeline() instead. At the same time, the LTO pipelines
++      // do support O0 and using them is required.
++      if (OptLevel == OptimizationLevel::O0 && !IsLTO) {
++        // We manually schedule ThinLTOBufferPasses below, so don't pass the
++        // value to enable it here.
++        MPM = PB.buildO0DefaultPipeline(OptLevel);
++      } else {
++        switch (OptStage) {
++        case LLVMRustOptStage::PreLinkNoLTO:
++          if (ThinLTOBufferRef) {
++            // This is similar to LLVM's `buildFatLTODefaultPipeline`, where the
++            // bitcode for embedding is obtained after performing
++            // `ThinLTOPreLinkDefaultPipeline`.
++            MPM.addPass(PB.buildThinLTOPreLinkDefaultPipeline(OptLevel));
++            MPM.addPass(ThinLTOBitcodeWriterPass(
++                ThinLTODataOS,
++                ThinLTOSummaryBufferRef ? &ThinLinkDataOS : nullptr));
++            *ThinLTOBufferRef = ThinLTOBuffer.release();
++            if (ThinLTOSummaryBufferRef) {
++              *ThinLTOSummaryBufferRef = ThinLTOSummaryBuffer.release();
++            }
++            MPM.addPass(PB.buildModuleOptimizationPipeline(
++                OptLevel, ThinOrFullLTOPhase::None));
++            MPM.addPass(
++                createModuleToFunctionPassAdaptor(AnnotationRemarksPass()));
++          } else {
++            MPM = PB.buildPerModuleDefaultPipeline(OptLevel);
+           }
+-          MPM.addPass(PB.buildModuleOptimizationPipeline(
+-              OptLevel, ThinOrFullLTOPhase::None));
+-          MPM.addPass(
+-              createModuleToFunctionPassAdaptor(AnnotationRemarksPass()));
+-        } else {
+-          MPM = PB.buildPerModuleDefaultPipeline(OptLevel);
++          break;
++        case LLVMRustOptStage::PreLinkThinLTO:
++        case LLVMRustOptStage::PreLinkFatLTO:
++          MPM = PB.buildThinLTOPreLinkDefaultPipeline(OptLevel);
++          NeedThinLTOBufferPasses = false;
++          break;
++        case LLVMRustOptStage::ThinLTO:
++          // FIXME: Does it make sense to pass the ModuleSummaryIndex?
++          // It only seems to be needed for C++ specific optimizations.
++          MPM = PB.buildThinLTODefaultPipeline(OptLevel, nullptr);
++          break;
++        case LLVMRustOptStage::FatLTO:
++          MPM = PB.buildLTODefaultPipeline(OptLevel, nullptr);
++          NeedThinLTOBufferPasses = false;
++          break;
+         }
+-        break;
+-      case LLVMRustOptStage::PreLinkThinLTO:
+-      case LLVMRustOptStage::PreLinkFatLTO:
+-        MPM = PB.buildThinLTOPreLinkDefaultPipeline(OptLevel);
+-        NeedThinLTOBufferPasses = false;
+-        break;
+-      case LLVMRustOptStage::ThinLTO:
+-        // FIXME: Does it make sense to pass the ModuleSummaryIndex?
+-        // It only seems to be needed for C++ specific optimizations.
+-        MPM = PB.buildThinLTODefaultPipeline(OptLevel, nullptr);
+-        break;
+-      case LLVMRustOptStage::FatLTO:
+-        MPM = PB.buildLTODefaultPipeline(OptLevel, nullptr);
+-        NeedThinLTOBufferPasses = false;
+-        break;
+       }
++    } else {
++      // We're not building any of the default pipelines but we still want to
++      // add the verifier, instrumentation, etc passes if they were requested
++      for (const auto &C : PipelineStartEPCallbacks)
++        C(MPM, OptLevel);
++      for (const auto &C : OptimizerLastEPCallbacks)
++        C(MPM, OptLevel, ThinOrFullLTOPhase::None);
+     }
+-  } else {
+-    // We're not building any of the default pipelines but we still want to
+-    // add the verifier, instrumentation, etc passes if they were requested
+-    for (const auto &C : PipelineStartEPCallbacks)
+-      C(MPM, OptLevel);
+-    for (const auto &C : OptimizerLastEPCallbacks)
+-      C(MPM, OptLevel, ThinOrFullLTOPhase::None);
+-  }
+ 
+-  if (ExtraPassesLen) {
+-    if (auto Err =
+-            PB.parsePassPipeline(MPM, StringRef(ExtraPasses, ExtraPassesLen))) {
+-      std::string ErrMsg = toString(std::move(Err));
+-      LLVMRustSetLastError(ErrMsg.c_str());
+-      return LLVMRustResult::Failure;
++    if (ExtraPassesLen) {
++      if (auto Err = PB.parsePassPipeline(
++              MPM, StringRef(ExtraPasses, ExtraPassesLen))) {
++        std::string ErrMsg = toString(std::move(Err));
++        LLVMRustSetLastError(ErrMsg.c_str());
++        return LLVMRustResult::Failure;
++      }
+     }
+-  }
+ 
+-  if (NeedThinLTOBufferPasses) {
+-    MPM.addPass(CanonicalizeAliasesPass());
+-    MPM.addPass(NameAnonGlobalPass());
+-  }
+-  // For `-Copt-level=0`, and the pre-link fat/thin LTO stages.
+-  if (ThinLTOBufferRef && *ThinLTOBufferRef == nullptr) {
+-    // thin lto summaries prevent fat lto, so do not emit them if fat
+-    // lto is requested. See PR #136840 for background information.
+-    if (OptStage != LLVMRustOptStage::PreLinkFatLTO) {
+-      MPM.addPass(ThinLTOBitcodeWriterPass(
+-          ThinLTODataOS, ThinLTOSummaryBufferRef ? &ThinLinkDataOS : nullptr));
+-    } else {
+-      MPM.addPass(BitcodeWriterPass(ThinLTODataOS));
++    if (NeedThinLTOBufferPasses) {
++      MPM.addPass(CanonicalizeAliasesPass());
++      MPM.addPass(NameAnonGlobalPass());
+     }
+-    *ThinLTOBufferRef = ThinLTOBuffer.release();
+-    if (ThinLTOSummaryBufferRef) {
+-      *ThinLTOSummaryBufferRef = ThinLTOSummaryBuffer.release();
++    // For `-Copt-level=0`, and the pre-link fat/thin LTO stages.
++    if (ThinLTOBufferRef && *ThinLTOBufferRef == nullptr) {
++      // thin lto summaries prevent fat lto, so do not emit them if fat
++      // lto is requested. See PR #136840 for background information.
++      if (OptStage != LLVMRustOptStage::PreLinkFatLTO) {
++        MPM.addPass(ThinLTOBitcodeWriterPass(
++            ThinLTODataOS,
++            ThinLTOSummaryBufferRef ? &ThinLinkDataOS : nullptr));
++      } else {
++        MPM.addPass(BitcodeWriterPass(ThinLTODataOS));
++      }
++      *ThinLTOBufferRef = ThinLTOBuffer.release();
++      if (ThinLTOSummaryBufferRef) {
++        *ThinLTOSummaryBufferRef = ThinLTOSummaryBuffer.release();
++      }
+     }
+-  }
+ 
+-  // now load "-enzyme" pass:
+-  // With dlopen, ENZYME macro may not be defined, so check EnzymePtr directly
+-  // In the case of debug builds with multiple codegen units, we might not
+-  // have all function definitions available during the early compiler
+-  // invocations. We therefore wait for the final lto step to run Enzyme.
+-  if (EnzymePtr && IsLTO) {
+-
+-    if (PrintBeforeEnzyme) {
+-      // Handle the Rust flag `-Zautodiff=PrintModBefore`.
+-      std::string Banner = "Module before EnzymeNewPM";
+-      MPM.addPass(PrintModulePass(outs(), Banner, true, false));
+-    }
++    // now load "-enzyme" pass:
++    // With dlopen, ENZYME macro may not be defined, so check EnzymePtr directly
++    // In the case of debug builds with multiple codegen units, we might not
++    // have all function definitions available during the early compiler
++    // invocations. We therefore wait for the final lto step to run Enzyme.
++    if (EnzymePtr && IsLTO) {
++
++      if (PrintBeforeEnzyme) {
++        // Handle the Rust flag `-Zautodiff=PrintModBefore`.
++        std::string Banner = "Module before EnzymeNewPM";
++        MPM.addPass(PrintModulePass(outs(), Banner, true, false));
++      }
+ 
+-    EnzymePtr(PB, false);
+-    if (auto Err = PB.parsePassPipeline(MPM, "enzyme")) {
+-      std::string ErrMsg = toString(std::move(Err));
+-      LLVMRustSetLastError(ErrMsg.c_str());
+-      return LLVMRustResult::Failure;
+-    }
++      EnzymePtr(PB, false);
++      if (auto Err = PB.parsePassPipeline(MPM, "enzyme")) {
++        std::string ErrMsg = toString(std::move(Err));
++        LLVMRustSetLastError(ErrMsg.c_str());
++        return LLVMRustResult::Failure;
++      }
+ 
+-    if (PrintAfterEnzyme) {
+-      // Handle the Rust flag `-Zautodiff=PrintModAfter`.
+-      std::string Banner = "Module after EnzymeNewPM";
+-      MPM.addPass(PrintModulePass(outs(), Banner, true, false));
++      if (PrintAfterEnzyme) {
++        // Handle the Rust flag `-Zautodiff=PrintModAfter`.
++        std::string Banner = "Module after EnzymeNewPM";
++        MPM.addPass(PrintModulePass(outs(), Banner, true, false));
++      }
+     }
+   }
+ 
+diff --git a/compiler/rustc_session/src/options.rs b/compiler/rustc_session/src/options.rs
+index efc8a70f4feb2..e2ff67dd2fcf1 100644
+--- a/compiler/rustc_session/src/options.rs
++++ b/compiler/rustc_session/src/options.rs
+@@ -2294,6 +2294,8 @@ options! {
+         `=LooseTypes`
+         `=Inline`
+         Multiple options can be combined with commas."),
++    autodiff_post_passes: Option<String> = (None, parse_opt_string, [TRACKED],
++        "set llvm passes to run after enzyme (no passes run when it is empty)"),
+     #[rustc_lint_opt_deny_field_access("use `Session::binary_dep_depinfo` instead of this field")]
+     binary_dep_depinfo: bool = (false, parse_bool, [TRACKED],
+         "include artifacts (sysroot, crate dependencies) used during compilation in dep-info \
