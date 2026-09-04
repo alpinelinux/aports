@@ -1,0 +1,92 @@
+sandbox: allow tkill in isolated renderer PID namespaces
+
+musl uses tkill for pthread_kill, which V8 calls during CPU profiling.
+The sandbox rejects it, causing renderer crashes on profiling-enabled pages.
+
+Allow tkill for renderers running as PID 1 with both user and PID namespace
+sandboxing enabled. Their private PID namespace confines signal targets
+to the renderer's own threads.
+
+ref: https://gitlab.alpinelinux.org/alpine/aports/-/work_items/18482
+
+--- a/sandbox/policy/linux/bpf_renderer_policy_linux.h
++++ b/sandbox/policy/linux/bpf_renderer_policy_linux.h
+@@ -19,7 +19,8 @@
+ class SANDBOX_POLICY_EXPORT RendererProcessPolicy : public BPFBasePolicy {
+  public:
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+-  RendererProcessPolicy();
++  // Only enable when the process owns a private PID namespace and cannot fork.
++  explicit RendererProcessPolicy(bool allow_tkill = false);
+ #elif BUILDFLAG(IS_ANDROID)
+   explicit RendererProcessPolicy(
+       const BaselinePolicyAndroid::RuntimeOptions& options);
+@@ -31,6 +32,9 @@
+   ~RendererProcessPolicy() override;
+ 
+   bpf_dsl::ResultExpr EvaluateSyscall(int system_call_number) const override;
++
++ private:
++  const bool allow_tkill_ = false;
+ };
+ 
+ }  // namespace sandbox::policy
+--- a/sandbox/policy/linux/bpf_renderer_policy_linux.cc
++++ b/sandbox/policy/linux/bpf_renderer_policy_linux.cc
+@@ -53,7 +53,8 @@
+ 
+ }  // namespace
+ #if !BUILDFLAG(IS_ANDROID)
+-RendererProcessPolicy::RendererProcessPolicy() = default;
++RendererProcessPolicy::RendererProcessPolicy(bool allow_tkill)
++    : allow_tkill_(allow_tkill) {}
+ #else
+ RendererProcessPolicy::RendererProcessPolicy(
+     const BaselinePolicyAndroid::RuntimeOptions& options)
+@@ -63,6 +64,8 @@
+ 
+ ResultExpr RendererProcessPolicy::EvaluateSyscall(int sysno) const {
+   switch (sysno) {
++    case __NR_tkill:
++      return allow_tkill_ ? Allow() : BPFBasePolicy::EvaluateSyscall(sysno);
+     // The baseline policy allows __NR_clock_gettime. Allow
+     // clock_getres() for V8. crbug.com/329053.
+     case __NR_clock_getres:
+--- a/sandbox/policy/linux/sandbox_seccomp_bpf_linux.cc
++++ b/sandbox/policy/linux/sandbox_seccomp_bpf_linux.cc
+@@ -9,6 +9,7 @@
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <unistd.h>
+ 
+ #include <memory>
+ #include <utility>
+@@ -48,6 +49,7 @@
+ #include "sandbox/policy/linux/bpf_print_backend_policy_linux.h"
+ #include "sandbox/policy/linux/bpf_print_compositor_policy_linux.h"
+ #include "sandbox/policy/linux/bpf_renderer_policy_linux.h"
++#include "sandbox/policy/linux/sandbox_linux.h"
+ #include "sandbox/policy/linux/bpf_screen_ai_policy_linux.h"
+ #include "sandbox/policy/linux/bpf_service_policy_linux.h"
+ #include "sandbox/policy/linux/bpf_speech_recognition_policy_linux.h"
+@@ -184,8 +186,17 @@
+   switch (sandbox_type) {
+     case sandbox::mojom::Sandbox::kGpu:
+       return GetGpuProcessSandbox(options, MremapPolicy::kBlock);
+-    case sandbox::mojom::Sandbox::kRenderer:
+-      return std::make_unique<RendererProcessPolicy>();
++    case sandbox::mojom::Sandbox::kRenderer: {
++      // The user-namespace zygote creates a fresh PID namespace for each child.
++      // The setuid sandbox shares its PID namespace and must not qualify.
++      // The renderer policy blocks creating processes and joining namespaces,
++      // so tkill cannot reach other processes after this sandbox is installed.
++      const int required = SandboxLinux::kUserNS | SandboxLinux::kPIDNS;
++      const bool owns_pid_namespace =
++          getpid() == 1 &&
++          (SandboxLinux::GetInstance()->GetStatus() & required) == required;
++      return std::make_unique<RendererProcessPolicy>(owns_pid_namespace);
++    }
+     case sandbox::mojom::Sandbox::kOnDeviceModelExecution:
+       return GetGpuProcessSandbox(options, MremapPolicy::kAllow);
+     case sandbox::mojom::Sandbox::kUtility:
