@@ -1,0 +1,497 @@
+From a7b73c3cbd6ec0e15ddde79aae8864be1abda800 Mon Sep 17 00:00:00 2001
+From: Nikolaus Schuetz <nikolauspschuetz@gmail.com>
+Date: Fri, 10 Jul 2026 15:20:57 -0700
+Subject: [PATCH] test: poll instead of fixed sleeps across several tests
+ (#8275)
+
+Several tests slept a fixed duration then took a single snapshot of an
+async result, racing whatever they waited on:
+- forward health tests waited 20ms for the health-check goroutine to bump
+  an atomic counter,
+- the auto plugin tests (dns + metrics) waited 50-110ms for a file-watch
+  reload to be picked up,
+- the file ZoneReload test waited 30ms (self-described as could still be
+  racy) for a reload,
+- the overloaded health test slept 1s for its background goroutine to fire
+  its first request.
+
+Replace each with a bounded poll of the actual condition (the atomic
+counter, a dns.Exchange response, a metrics scrape, z.ApexIfDefined, or a
+channel signalled by the test's own handler) so they pass as soon as the
+awaited state is reached and no longer flake when it is slower than the
+fixed wait. Test-only.
+
+Signed-off-by: Nikolaus Schuetz <nikolauspschuetz@gmail.com>
+---
+ plugin/file/reload_test.go       | 15 +++++++------
+ plugin/forward/health_test.go    | 30 ++++++++++++++++++++------
+ plugin/health/overloaded_test.go | 12 +++++++++--
+ test/auto_test.go                | 27 +++++++++++++++--------
+ test/metrics_test.go             | 37 +++++++++++++++++---------------
+ 5 files changed, 81 insertions(+), 40 deletions(-)
+
+diff --git a/plugin/file/reload_test.go b/plugin/file/reload_test.go
+index 0dc7c5b65c..d6fd69c35b 100644
+--- a/plugin/file/reload_test.go
++++ b/plugin/file/reload_test.go
+@@ -58,12 +58,15 @@ func TestZoneReload(t *testing.T) {
+ 	if err := os.WriteFile(fileName, []byte(reloadZone2Test), 0644); err != nil {
+ 		t.Fatalf("Failed to write new zone data: %s", err)
+ 	}
+-	// Could still be racy, but we need to wait a bit for the event to be seen
+-	time.Sleep(30 * time.Millisecond)
+-
+-	rrs, err = z.ApexIfDefined()
+-	if err != nil {
+-		t.Fatal(err)
++	for start := time.Now(); time.Since(start) < 2*time.Second; {
++		rrs, err = z.ApexIfDefined()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if len(rrs) == 3 {
++			break
++		}
++		time.Sleep(2 * time.Millisecond)
+ 	}
+ 	if len(rrs) != 3 {
+ 		t.Fatalf("Expected 3 RRs, got %d", len(rrs))
+diff --git a/plugin/forward/health_test.go b/plugin/forward/health_test.go
+index 677dbd7b34..4b7e7d7d2b 100644
+--- a/plugin/forward/health_test.go
++++ b/plugin/forward/health_test.go
+@@ -47,8 +47,14 @@ func TestHealth(t *testing.T) {
+ 
+ 	f.ServeDNS(context.TODO(), &test.ResponseWriter{}, req)
+ 
+-	time.Sleep(20 * time.Millisecond)
+-	i1 := atomic.LoadUint32(&i)
++	i1 := uint32(0)
++	for start := time.Now(); time.Since(start) < 2*time.Second; {
++		i1 = atomic.LoadUint32(&i)
++		if i1 == 1 {
++			break
++		}
++		time.Sleep(2 * time.Millisecond)
++	}
+ 	if i1 != 1 {
+ 		t.Errorf("Expected number of health checks with RecursionDesired==true to be %d, got %d", 1, i1)
+ 	}
+@@ -88,8 +94,14 @@ func TestHealthTCP(t *testing.T) {
+ 
+ 	f.ServeDNS(context.TODO(), &test.ResponseWriter{TCP: true}, req)
+ 
+-	time.Sleep(20 * time.Millisecond)
+-	i1 := atomic.LoadUint32(&i)
++	i1 := uint32(0)
++	for start := time.Now(); time.Since(start) < 2*time.Second; {
++		i1 = atomic.LoadUint32(&i)
++		if i1 == 1 {
++			break
++		}
++		time.Sleep(2 * time.Millisecond)
++	}
+ 	if i1 != 1 {
+ 		t.Errorf("Expected number of health checks with RecursionDesired==true to be %d, got %d", 1, i1)
+ 	}
+@@ -129,8 +141,14 @@ func TestHealthNoRecursion(t *testing.T) {
+ 
+ 	f.ServeDNS(context.TODO(), &test.ResponseWriter{}, req)
+ 
+-	time.Sleep(20 * time.Millisecond)
+-	i1 := atomic.LoadUint32(&i)
++	i1 := uint32(0)
++	for start := time.Now(); time.Since(start) < 2*time.Second; {
++		i1 = atomic.LoadUint32(&i)
++		if i1 == 1 {
++			break
++		}
++		time.Sleep(2 * time.Millisecond)
++	}
+ 	if i1 != 1 {
+ 		t.Errorf("Expected number of health checks with RecursionDesired==false to be %d, got %d", 1, i1)
+ 	}
+diff --git a/plugin/health/overloaded_test.go b/plugin/health/overloaded_test.go
+index 4ae39d3b3e..48c8c1588e 100644
+--- a/plugin/health/overloaded_test.go
++++ b/plugin/health/overloaded_test.go
+@@ -10,7 +10,12 @@ import (
+ )
+ 
+ func Test_health_overloaded_cancellation(t *testing.T) {
++	started := make(chan struct{}, 1)
+ 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _r *http.Request) {
++		select {
++		case started <- struct{}{}:
++		default:
++		}
+ 		time.Sleep(1 * time.Second)
+ 		w.WriteHeader(http.StatusOK)
+ 	}))
+@@ -36,8 +41,11 @@ func Test_health_overloaded_cancellation(t *testing.T) {
+ 		stopped <- struct{}{}
+ 	}()
+ 
+-	// wait for overloaded function to start atleast once
+-	time.Sleep(1 * time.Second)
++	select {
++	case <-started:
++	case <-time.After(5 * time.Second):
++		t.Fatal("overloaded function did not start")
++	}
+ 
+ 	cancel()
+ 
+diff --git a/test/auto_test.go b/test/auto_test.go
+index ea98b1c91f..7cf0da2e24 100644
+--- a/test/auto_test.go
++++ b/test/auto_test.go
+@@ -41,11 +41,15 @@ func TestAuto(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
+-	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
+-
+-	resp, err = dns.Exchange(m, udp)
+-	if err != nil {
+-		t.Fatal("Expected to receive reply, but didn't")
++	for start := time.Now(); time.Since(start) < 5*time.Second; {
++		resp, err = dns.Exchange(m, udp)
++		if err != nil {
++			t.Fatal("Expected to receive reply, but didn't")
++		}
++		if len(resp.Answer) == 1 {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
+ 	}
+ 	if len(resp.Answer) != 1 {
+ 		t.Fatalf("Expected 1 RR in the answer section, got %d", len(resp.Answer))
+@@ -54,10 +58,15 @@ func TestAuto(t *testing.T) {
+ 	// Remove db.example.org again.
+ 	os.Remove(filepath.Join(tmpdir, "db.example.org"))
+ 
+-	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
+-	resp, err = dns.Exchange(m, udp)
+-	if err != nil {
+-		t.Fatal("Expected to receive reply, but didn't")
++	for start := time.Now(); time.Since(start) < 5*time.Second; {
++		resp, err = dns.Exchange(m, udp)
++		if err != nil {
++			t.Fatal("Expected to receive reply, but didn't")
++		}
++		if resp.Rcode == dns.RcodeRefused {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
+ 	}
+ 	if resp.Rcode != dns.RcodeRefused {
+ 		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
+diff --git a/test/metrics_test.go b/test/metrics_test.go
+index efb3bdbbdb..0168b8100b 100644
+--- a/test/metrics_test.go
++++ b/test/metrics_test.go
+@@ -253,35 +253,38 @@ func TestMetricsAuto(t *testing.T) {
+ 	if err = os.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	time.Sleep(110 * time.Millisecond) // wait for it to be picked up
+ 
+ 	m := new(dns.Msg)
+ 	m.SetQuestion("www.example.org.", dns.TypeA)
+ 
+-	if _, err := dns.Exchange(m, udp); err != nil {
+-		t.Fatalf("Could not send message: %s", err)
+-	}
+-
+ 	metricName := "coredns_dns_requests_total" // {zone, proto, family, type}
+ 
+-	data := test.Scrape("http://" + metrics.ListenAddr + "/metrics")
+-	// Get the value for the metrics where the one of the labels values matches "example.org."
+-	got, _ := test.MetricValueLabel(metricName, "example.org.", data)
++	// pollMetric re-issues the query and scrapes until the example.org. zone
++	// counter is present and non-zero, or the 5s cap is reached.
++	pollMetric := func() string {
++		var got string
++		deadline := time.Now().Add(5 * time.Second)
++		for {
++			if _, err := dns.Exchange(m, udp); err != nil {
++				t.Fatalf("Could not send message: %s", err)
++			}
++			data := test.Scrape("http://" + metrics.ListenAddr + "/metrics")
++			got, _ = test.MetricValueLabel(metricName, "example.org.", data)
++			if (got != "" && got != "0") || time.Now().After(deadline) {
++				return got
++			}
++			time.Sleep(10 * time.Millisecond)
++		}
++	}
+ 
++	got := pollMetric()
+ 	if got == "0" {
+ 		t.Errorf("Expected value %s for %s, but got %s", "> 1", metricName, got)
+ 	}
+ 
+-	// Remove db.example.org again. And see if the metric stops increasing.
++	// Remove db.example.org again.
+ 	os.Remove(filepath.Join(tmpdir, "db.example.org"))
+-	time.Sleep(110 * time.Millisecond) // wait for it to be picked up
+-	if _, err := dns.Exchange(m, udp); err != nil {
+-		t.Fatalf("Could not send message: %s", err)
+-	}
+-
+-	data = test.Scrape("http://" + metrics.ListenAddr + "/metrics")
+-	got, _ = test.MetricValueLabel(metricName, "example.org.", data)
+-
++	got = pollMetric()
+ 	if got == "0" {
+ 		t.Errorf("Expected value %s for %s, but got %s", "> 1", metricName, got)
+ 	}From a7b73c3cbd6ec0e15ddde79aae8864be1abda800 Mon Sep 17 00:00:00 2001
+From: Nikolaus Schuetz <nikolauspschuetz@gmail.com>
+Date: Fri, 10 Jul 2026 15:20:57 -0700
+Subject: [PATCH] test: poll instead of fixed sleeps across several tests
+ (#8275)
+
+Several tests slept a fixed duration then took a single snapshot of an
+async result, racing whatever they waited on:
+- forward health tests waited 20ms for the health-check goroutine to bump
+  an atomic counter,
+- the auto plugin tests (dns + metrics) waited 50-110ms for a file-watch
+  reload to be picked up,
+- the file ZoneReload test waited 30ms (self-described as could still be
+  racy) for a reload,
+- the overloaded health test slept 1s for its background goroutine to fire
+  its first request.
+
+Replace each with a bounded poll of the actual condition (the atomic
+counter, a dns.Exchange response, a metrics scrape, z.ApexIfDefined, or a
+channel signalled by the test's own handler) so they pass as soon as the
+awaited state is reached and no longer flake when it is slower than the
+fixed wait. Test-only.
+
+Signed-off-by: Nikolaus Schuetz <nikolauspschuetz@gmail.com>
+---
+ plugin/file/reload_test.go       | 15 +++++++------
+ plugin/forward/health_test.go    | 30 ++++++++++++++++++++------
+ plugin/health/overloaded_test.go | 12 +++++++++--
+ test/auto_test.go                | 27 +++++++++++++++--------
+ test/metrics_test.go             | 37 +++++++++++++++++---------------
+ 5 files changed, 81 insertions(+), 40 deletions(-)
+
+diff --git a/plugin/file/reload_test.go b/plugin/file/reload_test.go
+index 0dc7c5b65c..d6fd69c35b 100644
+--- a/plugin/file/reload_test.go
++++ b/plugin/file/reload_test.go
+@@ -58,12 +58,15 @@ func TestZoneReload(t *testing.T) {
+ 	if err := os.WriteFile(fileName, []byte(reloadZone2Test), 0644); err != nil {
+ 		t.Fatalf("Failed to write new zone data: %s", err)
+ 	}
+-	// Could still be racy, but we need to wait a bit for the event to be seen
+-	time.Sleep(30 * time.Millisecond)
+-
+-	rrs, err = z.ApexIfDefined()
+-	if err != nil {
+-		t.Fatal(err)
++	for start := time.Now(); time.Since(start) < 2*time.Second; {
++		rrs, err = z.ApexIfDefined()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if len(rrs) == 3 {
++			break
++		}
++		time.Sleep(2 * time.Millisecond)
+ 	}
+ 	if len(rrs) != 3 {
+ 		t.Fatalf("Expected 3 RRs, got %d", len(rrs))
+diff --git a/plugin/forward/health_test.go b/plugin/forward/health_test.go
+index 677dbd7b34..4b7e7d7d2b 100644
+--- a/plugin/forward/health_test.go
++++ b/plugin/forward/health_test.go
+@@ -47,8 +47,14 @@ func TestHealth(t *testing.T) {
+ 
+ 	f.ServeDNS(context.TODO(), &test.ResponseWriter{}, req)
+ 
+-	time.Sleep(20 * time.Millisecond)
+-	i1 := atomic.LoadUint32(&i)
++	i1 := uint32(0)
++	for start := time.Now(); time.Since(start) < 2*time.Second; {
++		i1 = atomic.LoadUint32(&i)
++		if i1 == 1 {
++			break
++		}
++		time.Sleep(2 * time.Millisecond)
++	}
+ 	if i1 != 1 {
+ 		t.Errorf("Expected number of health checks with RecursionDesired==true to be %d, got %d", 1, i1)
+ 	}
+@@ -88,8 +94,14 @@ func TestHealthTCP(t *testing.T) {
+ 
+ 	f.ServeDNS(context.TODO(), &test.ResponseWriter{TCP: true}, req)
+ 
+-	time.Sleep(20 * time.Millisecond)
+-	i1 := atomic.LoadUint32(&i)
++	i1 := uint32(0)
++	for start := time.Now(); time.Since(start) < 2*time.Second; {
++		i1 = atomic.LoadUint32(&i)
++		if i1 == 1 {
++			break
++		}
++		time.Sleep(2 * time.Millisecond)
++	}
+ 	if i1 != 1 {
+ 		t.Errorf("Expected number of health checks with RecursionDesired==true to be %d, got %d", 1, i1)
+ 	}
+@@ -129,8 +141,14 @@ func TestHealthNoRecursion(t *testing.T) {
+ 
+ 	f.ServeDNS(context.TODO(), &test.ResponseWriter{}, req)
+ 
+-	time.Sleep(20 * time.Millisecond)
+-	i1 := atomic.LoadUint32(&i)
++	i1 := uint32(0)
++	for start := time.Now(); time.Since(start) < 2*time.Second; {
++		i1 = atomic.LoadUint32(&i)
++		if i1 == 1 {
++			break
++		}
++		time.Sleep(2 * time.Millisecond)
++	}
+ 	if i1 != 1 {
+ 		t.Errorf("Expected number of health checks with RecursionDesired==false to be %d, got %d", 1, i1)
+ 	}
+diff --git a/plugin/health/overloaded_test.go b/plugin/health/overloaded_test.go
+index 4ae39d3b3e..48c8c1588e 100644
+--- a/plugin/health/overloaded_test.go
++++ b/plugin/health/overloaded_test.go
+@@ -10,7 +10,12 @@ import (
+ )
+ 
+ func Test_health_overloaded_cancellation(t *testing.T) {
++	started := make(chan struct{}, 1)
+ 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _r *http.Request) {
++		select {
++		case started <- struct{}{}:
++		default:
++		}
+ 		time.Sleep(1 * time.Second)
+ 		w.WriteHeader(http.StatusOK)
+ 	}))
+@@ -36,8 +41,11 @@ func Test_health_overloaded_cancellation(t *testing.T) {
+ 		stopped <- struct{}{}
+ 	}()
+ 
+-	// wait for overloaded function to start atleast once
+-	time.Sleep(1 * time.Second)
++	select {
++	case <-started:
++	case <-time.After(5 * time.Second):
++		t.Fatal("overloaded function did not start")
++	}
+ 
+ 	cancel()
+ 
+diff --git a/test/auto_test.go b/test/auto_test.go
+index ea98b1c91f..7cf0da2e24 100644
+--- a/test/auto_test.go
++++ b/test/auto_test.go
+@@ -41,11 +41,15 @@ func TestAuto(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
+-	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
+-
+-	resp, err = dns.Exchange(m, udp)
+-	if err != nil {
+-		t.Fatal("Expected to receive reply, but didn't")
++	for start := time.Now(); time.Since(start) < 5*time.Second; {
++		resp, err = dns.Exchange(m, udp)
++		if err != nil {
++			t.Fatal("Expected to receive reply, but didn't")
++		}
++		if len(resp.Answer) == 1 {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
+ 	}
+ 	if len(resp.Answer) != 1 {
+ 		t.Fatalf("Expected 1 RR in the answer section, got %d", len(resp.Answer))
+@@ -54,10 +58,15 @@ func TestAuto(t *testing.T) {
+ 	// Remove db.example.org again.
+ 	os.Remove(filepath.Join(tmpdir, "db.example.org"))
+ 
+-	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
+-	resp, err = dns.Exchange(m, udp)
+-	if err != nil {
+-		t.Fatal("Expected to receive reply, but didn't")
++	for start := time.Now(); time.Since(start) < 5*time.Second; {
++		resp, err = dns.Exchange(m, udp)
++		if err != nil {
++			t.Fatal("Expected to receive reply, but didn't")
++		}
++		if resp.Rcode == dns.RcodeRefused {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
+ 	}
+ 	if resp.Rcode != dns.RcodeRefused {
+ 		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
+diff --git a/test/metrics_test.go b/test/metrics_test.go
+index efb3bdbbdb..0168b8100b 100644
+--- a/test/metrics_test.go
++++ b/test/metrics_test.go
+@@ -253,35 +253,38 @@ func TestMetricsAuto(t *testing.T) {
+ 	if err = os.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	time.Sleep(110 * time.Millisecond) // wait for it to be picked up
+ 
+ 	m := new(dns.Msg)
+ 	m.SetQuestion("www.example.org.", dns.TypeA)
+ 
+-	if _, err := dns.Exchange(m, udp); err != nil {
+-		t.Fatalf("Could not send message: %s", err)
+-	}
+-
+ 	metricName := "coredns_dns_requests_total" // {zone, proto, family, type}
+ 
+-	data := test.Scrape("http://" + metrics.ListenAddr + "/metrics")
+-	// Get the value for the metrics where the one of the labels values matches "example.org."
+-	got, _ := test.MetricValueLabel(metricName, "example.org.", data)
++	// pollMetric re-issues the query and scrapes until the example.org. zone
++	// counter is present and non-zero, or the 5s cap is reached.
++	pollMetric := func() string {
++		var got string
++		deadline := time.Now().Add(5 * time.Second)
++		for {
++			if _, err := dns.Exchange(m, udp); err != nil {
++				t.Fatalf("Could not send message: %s", err)
++			}
++			data := test.Scrape("http://" + metrics.ListenAddr + "/metrics")
++			got, _ = test.MetricValueLabel(metricName, "example.org.", data)
++			if (got != "" && got != "0") || time.Now().After(deadline) {
++				return got
++			}
++			time.Sleep(10 * time.Millisecond)
++		}
++	}
+ 
++	got := pollMetric()
+ 	if got == "0" {
+ 		t.Errorf("Expected value %s for %s, but got %s", "> 1", metricName, got)
+ 	}
+ 
+-	// Remove db.example.org again. And see if the metric stops increasing.
++	// Remove db.example.org again.
+ 	os.Remove(filepath.Join(tmpdir, "db.example.org"))
+-	time.Sleep(110 * time.Millisecond) // wait for it to be picked up
+-	if _, err := dns.Exchange(m, udp); err != nil {
+-		t.Fatalf("Could not send message: %s", err)
+-	}
+-
+-	data = test.Scrape("http://" + metrics.ListenAddr + "/metrics")
+-	got, _ = test.MetricValueLabel(metricName, "example.org.", data)
+-
++	got = pollMetric()
+ 	if got == "0" {
+ 		t.Errorf("Expected value %s for %s, but got %s", "> 1", metricName, got)
+ 	}
