@@ -1,0 +1,150 @@
+Patch-Source: https://github.com/kjdev/php-ext-zstd/pull/110
+Report success from the compress.zstd:// stream close handlers.
+
+Both close handlers returned EOF unconditionally. Since PHP 8.6.0RC1
+(php/php-src@c07cc8502c0, bug #60110) fclose(), file_put_contents() and
+copy() propagate a non-zero close result as false, so every write through
+the wrapper was reported as a failure.
+
+diff --git a/tests/streams_10.phpt b/tests/streams_10.phpt
+new file mode 100644
+index 0000000..05d32c1
+--- /dev/null
++++ b/tests/streams_10.phpt
+@@ -0,0 +1,48 @@
++--TEST--
++compress.zstd streams report a successful close
++--FILE--
++<?php
++$file = dirname(__FILE__) . '/streams_10.out';
++$plain = dirname(__FILE__) . '/streams_10.txt';
++
++// As of PHP 8.6, fclose(), file_put_contents() and copy() return false when
++// closing the stream fails, so the close handler has to report success.
++$data = str_repeat('abcd', 1024);
++
++echo "Compress\n";
++
++$fp = fopen('compress.zstd://' . $file, 'w');
++var_dump($fp !== false);
++var_dump(fwrite($fp, $data) === strlen($data));
++var_dump(fclose($fp));
++
++echo "Decompress\n";
++
++$fp = fopen('compress.zstd://' . $file, 'r');
++var_dump($fp !== false);
++var_dump(stream_get_contents($fp) === $data);
++var_dump(fclose($fp));
++
++echo "Copy\n";
++
++file_put_contents($plain, $data);
++var_dump(copy($plain, 'compress.zstd://' . $file));
++var_dump(file_get_contents('compress.zstd://' . $file) === $data);
++
++@unlink($file);
++@unlink($plain);
++?>
++===DONE===
++--EXPECT--
++Compress
++bool(true)
++bool(true)
++bool(true)
++Decompress
++bool(true)
++bool(true)
++bool(true)
++Copy
++bool(true)
++bool(true)
++===DONE===
+diff --git a/zstd.c b/zstd.c
+index f0891e0..3c6f0fd 100644
+--- a/zstd.c
++++ b/zstd.c
+@@ -841,9 +841,13 @@ static int php_zstd_decomp_close(php_stream *stream, int close_handle)
+         return EOF;
+     }
+ 
++    int ret = 0;
++
+     if (close_handle) {
+         if (self->stream) {
+-            php_stream_close(self->stream);
++            if (php_stream_close(self->stream)) {
++                ret = EOF;
++            }
+             self->stream = NULL;
+         }
+     }
+@@ -854,7 +858,7 @@ static int php_zstd_decomp_close(php_stream *stream, int close_handle)
+     efree(self);
+     stream->abstract = NULL;
+ 
+-    return EOF;
++    return ret;
+ }
+ 
+ static int php_zstd_comp_flush_or_end(php_zstd_stream_data *self, int end)
+@@ -872,9 +876,15 @@ static int php_zstd_comp_flush_or_end(php_zstd_stream_data *self, int end)
+         if (ZSTD_isError(res)) {
+             ZSTD_WARNING("zstd: %s", ZSTD_getErrorName(res));
+             ret = EOF;
++            break;
++        }
++        if (self->ctx.output.pos
++            && (size_t) php_stream_write(self->stream, self->ctx.output.dst,
++                                         self->ctx.output.pos)
++               != self->ctx.output.pos) {
++            ret = EOF;
++            break;
+         }
+-        php_stream_write(self->stream,
+-                         self->ctx.output.dst, self->ctx.output.pos);
+     } while (res > 0);
+ 
+     return ret;
+@@ -897,11 +907,13 @@ static int php_zstd_comp_close(php_stream *stream, int close_handle)
+         return EOF;
+     }
+ 
+-    php_zstd_comp_flush_or_end(self, 1);
++    int ret = php_zstd_comp_flush_or_end(self, 1);
+ 
+     if (close_handle) {
+         if (self->stream) {
+-            php_stream_close(self->stream);
++            if (php_stream_close(self->stream)) {
++                ret = EOF;
++            }
+             self->stream = NULL;
+         }
+     }
+@@ -911,7 +923,7 @@ static int php_zstd_comp_close(php_stream *stream, int close_handle)
+     efree(self);
+     stream->abstract = NULL;
+ 
+-    return EOF;
++    return ret;
+ }
+ 
+ 
+@@ -997,8 +1009,14 @@ php_zstd_comp_write(php_stream *stream, const char *buf, size_t count)
+             return -1;
+ #endif
+         }
+-        php_stream_write(self->stream,
+-                         self->ctx.output.dst, self->ctx.output.pos);
++        if (self->ctx.output.pos
++            && (size_t) php_stream_write(self->stream, self->ctx.output.dst,
++                                         self->ctx.output.pos)
++               != self->ctx.output.pos) {
++#if PHP_VERSION_ID >= 70400
++            return -1;
++#endif
++        }
+ 
+     } while (res > 0);
+ 
