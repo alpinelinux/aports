@@ -1,0 +1,189 @@
+Patch-Source: https://github.com/websupport-sk/pecl-memcache/pull/122
+PHP 8.6 PS_MOD() references the ps_create_sid/ps_validate_sid handlers
+(php-src 4b01cd1); implement them for the memcache session handler.
+
+diff --git a/src/memcache_session.c b/src/memcache_session.c
+index 55a6e82..ce20c27 100644
+--- a/src/memcache_session.c
++++ b/src/memcache_session.c
+@@ -573,6 +573,116 @@ PS_GC_FUNC(memcache)
+ }
+ /* }}} */
+ 
++#if PHP_VERSION_ID >= 80600
++static zend_result php_mmc_session_key_exists(mmc_pool_t *pool, zend_string *key)
++{
++	zval result, zkey;
++	zval *resultparam[3];
++	mmc_t *mmc;
++	mmc_request_t *request;
++	mmc_queue_t skip_servers = {0};
++	unsigned int last_index = 0;
++
++	ZVAL_STR(&zkey, key);
++
++	resultparam[0] = &result;
++	resultparam[1] = NULL;
++	resultparam[2] = NULL;
++
++	do {
++		ZVAL_NULL(&result);
++
++		request = mmc_pool_request_get(
++			pool, MMC_PROTO_TCP, mmc_value_handler_single, resultparam,
++			mmc_pool_failover_handler_null, NULL);
++
++		if (mmc_prepare_key_ex(
++				ZSTR_VAL(key), ZSTR_LEN(key),
++				request->key, &(request->key_len),
++				MEMCACHE_G(session_key_prefix)) != MMC_OK) {
++			mmc_pool_release(pool, request);
++			mmc_queue_free(&skip_servers);
++			return FAILURE;
++		}
++
++		pool->protocol->get(
++			request, MMC_OP_GET, &zkey,
++			request->key, request->key_len);
++
++		mmc = mmc_pool_find_next(
++			pool,
++			request->key, request->key_len,
++			&skip_servers, &last_index);
++
++		if (!mmc_server_valid(mmc) ||
++			mmc_pool_schedule(pool, mmc, request) != MMC_OK) {
++			mmc_pool_release(pool, request);
++			mmc_queue_push(&skip_servers, mmc);
++			continue;
++		}
++
++		mmc_pool_run(pool);
++
++		if (Z_TYPE(result) == IS_STRING) {
++			zval_ptr_dtor(&result);
++			mmc_queue_free(&skip_servers);
++			return SUCCESS;
++		}
++
++		zval_ptr_dtor(&result);
++		mmc_queue_push(&skip_servers, mmc);
++
++	} while (skip_servers.len < MEMCACHE_G(session_redundancy) &&
++		 skip_servers.len < pool->num_servers);
++
++	mmc_queue_free(&skip_servers);
++
++	return FAILURE;
++}
++
++PS_VALIDATE_SID_FUNC(memcache)
++{
++	mmc_pool_t *pool = PS_GET_MOD_DATA();
++
++	if (pool == NULL) {
++		return FAILURE;
++	}
++
++	return php_mmc_session_key_exists(pool, key);
++}
++
++PS_CREATE_SID_FUNC(memcache)
++{
++	mmc_pool_t *pool = PS_GET_MOD_DATA();
++	zend_string *sid;
++	int maxfail = 3;
++
++	do {
++		sid = php_session_create_id(mod_data);
++
++		if (sid == NULL) {
++			if (--maxfail < 0) {
++				return NULL;
++			}
++			continue;
++		}
++
++		if (pool != NULL &&
++			php_mmc_session_key_exists(pool, sid) == SUCCESS) {
++			zend_string_release_ex(sid, false);
++			sid = NULL;
++
++			if (--maxfail < 0) {
++				return NULL;
++			}
++		}
++	} while (sid == NULL);
++
++	return sid;
++}
++
++#endif /* PHP_VERSION_ID >= 80600 */
++
+ /*
+  * Local variables:
+  * tab-width: 4
+diff --git a/tests/session_strict_mode.phpt b/tests/session_strict_mode.phpt
+new file mode 100644
+index 0000000..85b0144
+--- /dev/null
++++ b/tests/session_strict_mode.phpt
+@@ -0,0 +1,58 @@
++--TEST--
++Memcache session handler supports strict mode
++--SKIPIF--
++<?php
++if (!extension_loaded('memcache')) {
++    die('skip memcache extension not loaded');
++}
++if (PHP_VERSION_ID < 80600) {
++    die('skip PHP 8.6+ only');
++}
++?>
++--INI--
++session.save_handler=memcache
++session.save_path=tcp://127.0.0.1:11211
++session.use_strict_mode=1
++session.use_cookies=0
++session.cache_limiter=
++--FILE--
++<?php
++
++/* Create a session and write some data. */
++session_start();
++$sid = session_id();
++
++$_SESSION['foo'] = 'bar';
++$_SESSION['answer'] = 42;
++
++session_write_close();
++
++/* An existing SID must be accepted in strict mode. */
++session_id($sid);
++var_dump(session_start());
++var_dump(session_id() === $sid);
++var_dump($_SESSION);
++
++session_write_close();
++
++/* A nonexistent SID must be rejected in strict mode. */
++$invalid = 'this-session-does-not-exist';
++
++session_id($invalid);
++var_dump(session_start());
++var_dump(session_id() !== $invalid);
++
++session_abort();
++
++?>
++--EXPECT--
++bool(true)
++bool(true)
++array(2) {
++  ["foo"]=>
++  string(3) "bar"
++  ["answer"]=>
++  int(42)
++}
++bool(true)
++bool(true)
