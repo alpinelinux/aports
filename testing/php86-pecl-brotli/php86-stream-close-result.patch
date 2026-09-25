@@ -1,0 +1,154 @@
+Patch-Source: https://github.com/kjdev/php-ext-brotli/pull/104
+Report success from the compress.brotli:// stream close handlers.
+
+Both close handlers returned EOF unconditionally. Since PHP 8.6.0RC1
+(php/php-src@c07cc8502c0, bug #60110) fclose(), file_put_contents() and
+copy() propagate a non-zero close result as false, so every write through
+the wrapper was reported as a failure.
+
+diff --git a/brotli.c b/brotli.c
+index 2229001..349d79c 100644
+--- a/brotli.c
++++ b/brotli.c
+@@ -917,9 +917,13 @@ static int php_brotli_decompress_close(php_stream *stream,
+         return EOF;
+     }
+ 
++    int ret = 0;
++
+     if (close_handle) {
+         if (self->stream) {
+-            php_stream_close(self->stream);
++            if (php_stream_close(self->stream)) {
++                ret = EOF;
++            }
+             self->stream = NULL;
+         }
+     }
+@@ -934,7 +938,7 @@ static int php_brotli_decompress_close(php_stream *stream,
+ 
+     stream->abstract = NULL;
+ 
+-    return EOF;
++    return ret;
+ }
+ 
+ #if PHP_VERSION_ID < 70400
+@@ -1028,6 +1032,7 @@ static int php_brotli_compress_close(php_stream *stream,
+         return EOF;
+     }
+ 
++    int ret = 0;
+     const uint8_t *next_in = NULL;
+     size_t available_in = 0;
+ 
+@@ -1044,12 +1049,17 @@ static int php_brotli_compress_close(php_stream *stream,
+                                         &next_out,
+                                         0)) {
+             size_t out_size = (size_t)(next_out - output);
+-            if (out_size) {
+-                php_stream_write(self->stream, output, out_size);
++            if (out_size
++                && (size_t) php_stream_write(self->stream, output, out_size)
++                   != out_size) {
++                ret = EOF;
++                break;
+             }
+         } else {
+             php_error_docref(NULL, E_WARNING,
+                              "brotli: failed to clean up compression");
++            ret = EOF;
++            break;
+         }
+     }
+ 
+@@ -1057,7 +1067,9 @@ static int php_brotli_compress_close(php_stream *stream,
+ 
+     if (close_handle) {
+         if (self->stream) {
+-            php_stream_close(self->stream);
++            if (php_stream_close(self->stream)) {
++                ret = EOF;
++            }
+             self->stream = NULL;
+         }
+     }
+@@ -1067,7 +1079,7 @@ static int php_brotli_compress_close(php_stream *stream,
+     efree(self);
+     stream->abstract = NULL;
+ 
+-    return EOF;
++    return ret;
+ }
+ 
+ #if PHP_VERSION_ID < 70400
+@@ -1102,8 +1114,13 @@ static ssize_t php_brotli_compress_write(php_stream *stream,
+                                         &next_out,
+                                         0)) {
+             size_t out_size = (size_t)(next_out - output);
+-            if (out_size) {
+-                php_stream_write(self->stream, output, out_size);
++            if (out_size
++                && (size_t) php_stream_write(self->stream, output, out_size)
++                   != out_size) {
++#if PHP_VERSION_ID >= 70400
++                efree(output);
++                return -1;
++#endif
+             }
+         } else {
+             php_error_docref(NULL, E_WARNING, "brotli: failed to compression");
+diff --git a/tests/streams_008.phpt b/tests/streams_008.phpt
+new file mode 100644
+index 0000000..fa807f3
+--- /dev/null
++++ b/tests/streams_008.phpt
+@@ -0,0 +1,48 @@
++--TEST--
++compress.brotli streams report a successful close
++--FILE--
++<?php
++$file = dirname(__FILE__) . '/streams_008.out';
++$plain = dirname(__FILE__) . '/streams_008.txt';
++
++// As of PHP 8.6, fclose(), file_put_contents() and copy() return false when
++// closing the stream fails, so the close handler has to report success.
++$data = str_repeat('abcd', 1024);
++
++echo "Compress\n";
++
++$fp = fopen('compress.brotli://' . $file, 'w');
++var_dump($fp !== false);
++var_dump(fwrite($fp, $data) === strlen($data));
++var_dump(fclose($fp));
++
++echo "Decompress\n";
++
++$fp = fopen('compress.brotli://' . $file, 'r');
++var_dump($fp !== false);
++var_dump(stream_get_contents($fp) === $data);
++var_dump(fclose($fp));
++
++echo "Copy\n";
++
++file_put_contents($plain, $data);
++var_dump(copy($plain, 'compress.brotli://' . $file));
++var_dump(file_get_contents('compress.brotli://' . $file) === $data);
++
++@unlink($file);
++@unlink($plain);
++?>
++===DONE===
++--EXPECT--
++Compress
++bool(true)
++bool(true)
++bool(true)
++Decompress
++bool(true)
++bool(true)
++bool(true)
++Copy
++bool(true)
++bool(true)
++===DONE===
