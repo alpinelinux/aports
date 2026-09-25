@@ -1,0 +1,85 @@
+From 90c3dbc4a249989a314d9249a789906b2f8af9f9 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Mon, 24 Aug 2026 12:05:47 -0400
+Subject: [PATCH 11/13] [http] Fix out-of-bounds read on empty Location header
+
+An empty Location header allocates a single byte for the NUL
+terminator, so reading location[1] in the relative-redirect branch
+over-reads heap memory and could append a garbage-derived path to the
+redirect target instead of the correct host root. Use location_len
+instead of strlen, and skip the relative join when location_len is 0,
+so the second byte is never read.
+
+Closes GH-23467
+
+(cherry picked from commit 547566f17a12b4900efb69a7cf8cd325d00613a2)
+---
+ ext/standard/http_fopen_wrapper.c             |  4 +--
+ .../http/http_empty_location_redirect.phpt    | 36 +++++++++++++++++++
+ 2 files changed, 38 insertions(+), 2 deletions(-)
+ create mode 100644 ext/standard/tests/http/http_empty_location_redirect.phpt
+
+diff --git a/ext/standard/http_fopen_wrapper.c b/ext/standard/http_fopen_wrapper.c
+index 24ab1f15e9a..c00aa61f016 100644
+--- a/ext/standard/http_fopen_wrapper.c
++++ b/ext/standard/http_fopen_wrapper.c
+@@ -1080,7 +1080,7 @@ finish:
+ 
+ 			char *new_path = NULL;
+ 
+-			if (strlen(header_info.location) < 8 ||
++			if (header_info.location_len < 8 ||
+ 					(strncasecmp(header_info.location, "http://", sizeof("http://")-1) &&
+ 							strncasecmp(header_info.location, "https://", sizeof("https://")-1) &&
+ 							strncasecmp(header_info.location, "ftp://", sizeof("ftp://")-1) &&
+@@ -1088,7 +1088,7 @@ finish:
+ 			{
+ 				char *loc_path = NULL;
+ 				if (*header_info.location != '/') {
+-					if (*(header_info.location+1) != '\0' && resource->path) {
++					if (header_info.location_len > 0 && resource->path) {
+ 						char *s = strrchr(ZSTR_VAL(resource->path), '/');
+ 						if (!s) {
+ 							s = ZSTR_VAL(resource->path);
+diff --git a/ext/standard/tests/http/http_empty_location_redirect.phpt b/ext/standard/tests/http/http_empty_location_redirect.phpt
+new file mode 100644
+index 00000000000..a7f99bf1e24
+--- /dev/null
++++ b/ext/standard/tests/http/http_empty_location_redirect.phpt
+@@ -0,0 +1,36 @@
++--TEST--
++Empty Location header must not over-read when building the redirect target
++--FILE--
++<?php
++$serverCode = <<<'CODE'
++$server = stream_socket_server("tcp://127.0.0.1:0", $errno, $errstr);
++phpt_notify_server_start($server);
++
++for ($n = 0; $n < 4; $n++) {
++    $conn = stream_socket_accept($server, 10);
++    if (!$conn) {
++        break;
++    }
++    $req = fgets($conn);
++    while (trim(fgets($conn)) !== '') {}
++    $uri = explode(' ', $req)[1];
++    if ($n < 3) {
++        fwrite($conn, "HTTP/1.1 302 Found\r\nLocation:\r\nContent-Length: 0\r\n\r\n");
++    } else {
++        $body = "uri=$uri";
++        fwrite($conn, "HTTP/1.1 200 OK\r\nContent-Length: " . strlen($body) . "\r\n\r\n$body");
++    }
++    fclose($conn);
++}
++CODE;
++
++$clientCode = <<<'CODE'
++$ctx = stream_context_create(['http' => ['follow_location' => 1]]);
++echo @file_get_contents("http://{{ ADDR }}/a/b", false, $ctx), "\n";
++CODE;
++
++include sprintf("%s/../../../openssl/tests/ServerClientTestCase.inc", __DIR__);
++ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
++?>
++--EXPECT--
++uri=/

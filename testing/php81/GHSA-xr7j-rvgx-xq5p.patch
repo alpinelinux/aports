@@ -1,0 +1,112 @@
+From 971dda5b726dcb17ea423b2d2e07398484145a95 Mon Sep 17 00:00:00 2001
+From: Jakub Zelenka <bukka@php.net>
+Date: Mon, 10 Aug 2026 14:15:35 +0200
+Subject: [PATCH 04/13] Fix GHSA-xr7j-rvgx-xq5p: OOB read in
+ php_openssl_matches_wildcard_name()
+
+The memchr() length underflowed when the wildcard prefix and suffix
+overlapped in the subject name (e.g. CN "a*aaaa" against peer name "aaaa").
+
+(cherry picked from commit 78cc82b37a340840c6fbff676f513eb4e3d96533)
+---
+ ext/openssl/tests/GHSA-xr7j-rvgx-xq5p.phpt | 67 ++++++++++++++++++++++
+ ext/openssl/xp_ssl.c                       |  5 +-
+ 2 files changed, 69 insertions(+), 3 deletions(-)
+ create mode 100644 ext/openssl/tests/GHSA-xr7j-rvgx-xq5p.phpt
+
+diff --git a/ext/openssl/tests/GHSA-xr7j-rvgx-xq5p.phpt b/ext/openssl/tests/GHSA-xr7j-rvgx-xq5p.phpt
+new file mode 100644
+index 00000000000..daf5b878bbf
+--- /dev/null
++++ b/ext/openssl/tests/GHSA-xr7j-rvgx-xq5p.phpt
+@@ -0,0 +1,67 @@
++--TEST--
++GHSA-xr7j-rvgx-xq5p: OOB read in php_openssl_matches_wildcard_name() with overlapping wildcard prefix and suffix
++--EXTENSIONS--
++openssl
++--SKIPIF--
++<?php
++if (!function_exists("proc_open")) die("skip no proc_open");
++?>
++--FILE--
++<?php
++$certFile = __DIR__ . DIRECTORY_SEPARATOR . 'GHSA-xr7j-rvgx-xq5p.pem.tmp';
++$san = 'DNS:a*aaaa, DNS:w*www.example.org';
++
++$serverCode = <<<'CODE'
++    $serverUri = "ssl://127.0.0.1:0";
++    $serverFlags = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN;
++    $serverCtx = stream_context_create(['ssl' => [
++        'local_cert' => '%s',
++    ]]);
++
++    $server = stream_socket_server($serverUri, $errno, $errstr, $serverFlags, $serverCtx);
++    phpt_notify_server_start($server);
++
++    @stream_socket_accept($server, 1);
++    @stream_socket_accept($server, 1);
++CODE;
++$serverCode = sprintf($serverCode, $certFile);
++
++$clientCode = <<<'CODE'
++    $serverUri = "ssl://{{ ADDR }}";
++    $clientFlags = STREAM_CLIENT_CONNECT;
++    $clientCtx = stream_context_create(['ssl' => [
++        'verify_peer' => false,
++    ]]);
++
++    stream_context_set_option($clientCtx, 'ssl', 'peer_name', 'aaaa');
++    var_dump(stream_socket_client($serverUri, $errno, $errstr, 1, $clientFlags, $clientCtx));
++
++    stream_context_set_option($clientCtx, 'ssl', 'peer_name', 'www.example.org');
++    var_dump(stream_socket_client($serverUri, $errno, $errstr, 1, $clientFlags, $clientCtx));
++CODE;
++
++include 'CertificateGenerator.inc';
++$certificateGenerator = new CertificateGenerator();
++$certificateGenerator->saveNewCertAsFileWithKey('a*aaaa', $certFile, null, $san);
++
++include 'ServerClientTestCase.inc';
++ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
++?>
++--CLEAN--
++<?php
++@unlink(__DIR__ . DIRECTORY_SEPARATOR . 'GHSA-xr7j-rvgx-xq5p.pem.tmp');
++?>
++--EXPECTF--
++Warning: stream_socket_client(): Peer certificate subjectAltName did not match expected name `aaaa' in %s on line %d
++
++Warning: stream_socket_client(): Failed to enable crypto in %s on line %d
++
++Warning: stream_socket_client(): Unable to connect to ssl://127.0.0.1:%d (Unknown error) in %s on line %d
++bool(false)
++
++Warning: stream_socket_client(): Peer certificate subjectAltName did not match expected name `www.example.org' in %s on line %d
++
++Warning: stream_socket_client(): Failed to enable crypto in %s on line %d
++
++Warning: stream_socket_client(): Unable to connect to ssl://127.0.0.1:%d (Unknown error) in %s on line %d
++bool(false)
+diff --git a/ext/openssl/xp_ssl.c b/ext/openssl/xp_ssl.c
+index bc48bf87f0c..253530d2179 100644
+--- a/ext/openssl/xp_ssl.c
++++ b/ext/openssl/xp_ssl.c
+@@ -403,8 +403,7 @@ static bool php_openssl_x509_fingerprint_match(X509 *peer, zval *val)
+ static bool php_openssl_matches_wildcard_name(const char *subjectname, const char *certname) /* {{{ */
+ {
+ 	char *wildcard = NULL;
+-	ptrdiff_t prefix_len;
+-	size_t suffix_len, subject_len;
++	size_t prefix_len, suffix_len, subject_len;
+ 
+ 	if (strcasecmp(subjectname, certname) == 0) {
+ 		return 1;
+@@ -423,7 +422,7 @@ static bool php_openssl_matches_wildcard_name(const char *subjectname, const cha
+ 
+ 	suffix_len = strlen(wildcard + 1);
+ 	subject_len = strlen(subjectname);
+-	if (suffix_len <= subject_len) {
++	if (suffix_len + prefix_len <= subject_len) {
+ 		/* 2) suffix must match
+ 		 * 3) no . between prefix and suffix
+ 		 **/

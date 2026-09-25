@@ -1,0 +1,439 @@
+From 420e72648584f8a7e08a573c50ee939f72de3466 Mon Sep 17 00:00:00 2001
+From: Alexandre Daubois <alex.daubois@gmail.com>
+Date: Thu, 17 Sep 2026 08:09:08 +0200
+Subject: [PATCH 07/13] Fix GHSA-rgrp-mwpx-f6rm: unbounded recursion in
+ ext/soap XML parsing and decoding
+
+(cherry picked from commit 3655b79c7bfa90db004d75a3b282ed0f538f4836)
+---
+ ext/soap/php_encoding.c                       |   7 ++
+ ext/soap/php_soap.h                           |   3 +
+ ext/soap/php_xml.c                            | 102 ++++++++++++++----
+ ext/soap/soap.c                               |   1 +
+ .../tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt |  47 ++++++++
+ .../tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt |  43 ++++++++
+ ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt       |  89 +++++++++++++++
+ 7 files changed, 272 insertions(+), 20 deletions(-)
+ create mode 100644 ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt
+ create mode 100644 ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt
+ create mode 100644 ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt
+
+diff --git a/ext/soap/php_encoding.c b/ext/soap/php_encoding.c
+index 9bd6f50834e..cc8b58e7504 100644
+--- a/ext/soap/php_encoding.c
++++ b/ext/soap/php_encoding.c
+@@ -552,7 +552,12 @@ static zval *master_to_zval_int(zval *ret, encodePtr encode, xmlNodePtr data)
+ 		}
+ 	}
+ 	if (encode->to_zval) {
++		if (SOAP_GLOBAL(decode_depth) >= SOAP_MAX_DECODE_DEPTH) {
++			soap_error0(E_ERROR, "Encoding: Nesting level too deep");
++		}
++		SOAP_GLOBAL(decode_depth)++;
+ 		ret = encode->to_zval(ret, &encode->details, data);
++		SOAP_GLOBAL(decode_depth)--;
+ 	}
+ 	return ret;
+ }
+@@ -3433,6 +3438,7 @@ void encode_reset_ns()
+ {
+ 	SOAP_GLOBAL(cur_uniq_ns) = 0;
+ 	SOAP_GLOBAL(cur_uniq_ref) = 0;
++	SOAP_GLOBAL(decode_depth) = 0;
+ 	if (SOAP_GLOBAL(ref_map)) {
+ 		zend_hash_destroy(SOAP_GLOBAL(ref_map));
+ 	} else {
+@@ -3445,6 +3451,7 @@ void encode_finish()
+ {
+ 	SOAP_GLOBAL(cur_uniq_ns) = 0;
+ 	SOAP_GLOBAL(cur_uniq_ref) = 0;
++	SOAP_GLOBAL(decode_depth) = 0;
+ 	if (SOAP_GLOBAL(ref_map)) {
+ 		zend_hash_destroy(SOAP_GLOBAL(ref_map));
+ 		efree(SOAP_GLOBAL(ref_map));
+diff --git a/ext/soap/php_soap.h b/ext/soap/php_soap.h
+index 33a071ed418..e14916c038e 100644
+--- a/ext/soap/php_soap.h
++++ b/ext/soap/php_soap.h
+@@ -150,6 +150,8 @@ struct _soapService {
+ #define SOAP_SSL_METHOD_SSLv3   2
+ #define SOAP_SSL_METHOD_SSLv23  3
+ 
++#define SOAP_MAX_XML_DEPTH 2048
++#define SOAP_MAX_DECODE_DEPTH (SOAP_MAX_XML_DEPTH * 2)
+ 
+ ZEND_BEGIN_MODULE_GLOBALS(soap)
+ 	HashTable  defEncNs;     /* mapping of default namespaces to prefixes */
+@@ -175,6 +177,7 @@ ZEND_BEGIN_MODULE_GLOBALS(soap)
+ 	HashTable  wsdl_cache;
+ 	int        cur_uniq_ref;
+ 	HashTable *ref_map;
++	unsigned int decode_depth;
+ ZEND_END_MODULE_GLOBALS(soap)
+ 
+ #ifdef ZTS
+diff --git a/ext/soap/php_xml.c b/ext/soap/php_xml.c
+index 20fd91ac4b4..340dbd8ea4a 100644
+--- a/ext/soap/php_xml.c
++++ b/ext/soap/php_xml.c
+@@ -35,36 +35,72 @@ static int is_blank(const xmlChar* str)
+ 	return 1;
+ }
+ 
+-/* removes all empty text, comments and other insignoficant nodes */
++/* removes all empty text, comments and other insignoficant nodes.
++ * Iterative because recursion overflows the stack on a deep document. */
+ static void cleanup_xml_node(xmlNodePtr node)
+ {
+-	xmlNodePtr trav;
+-	xmlNodePtr del = NULL;
++	xmlNodePtr parent = node;
++	xmlNodePtr trav = node->children;
+ 
+-	trav = node->children;
+ 	while (trav != NULL) {
+-		if (del != NULL) {
+-			xmlUnlinkNode(del);
+-			xmlFreeNode(del);
+-			del = NULL;
+-		}
++		xmlNodePtr next = trav->next;
++
+ 		if (trav->type == XML_TEXT_NODE) {
+ 			if (is_blank(trav->content)) {
+-				del = trav;
++				xmlUnlinkNode(trav);
++				xmlFreeNode(trav);
+ 			}
+ 		} else if ((trav->type != XML_ELEMENT_NODE) &&
+ 		           (trav->type != XML_CDATA_SECTION_NODE)) {
+-			del = trav;
++			xmlUnlinkNode(trav);
++			xmlFreeNode(trav);
+ 		} else if (trav->children != NULL) {
+-			cleanup_xml_node(trav);
++			parent = trav;
++			trav = trav->children;
++			continue;
+ 		}
+-		trav = trav->next;
++
++		while (next == NULL) {
++			if (parent == node) {
++				return;
++			}
++			next = parent->next;
++			parent = parent->parent;
++		}
++		trav = next;
+ 	}
+-	if (del != NULL) {
+-		xmlUnlinkNode(del);
+-		xmlFreeNode(del);
++}
++
++#if LIBXML_VERSION < 21300
++static int is_nesting_too_deep(xmlNodePtr node)
++{
++	xmlNodePtr trav = node->children;
++	unsigned int depth = 0;
++
++	while (trav != NULL) {
++		/* An entity reference borrows its declaration as child list, and that
++		 * declaration hangs off the DTD, so descending leaves the document. */
++		if (trav->children != NULL &&
++		    trav->type != XML_ENTITY_REF_NODE &&
++		    trav->type != XML_DTD_NODE) {
++			if (++depth > SOAP_MAX_XML_DEPTH) {
++				return TRUE;
++			}
++			trav = trav->children;
++			continue;
++		}
++		while (trav->next == NULL) {
++			trav = trav->parent;
++			if (trav == node) {
++				return FALSE;
++			}
++			depth--;
++		}
++		trav = trav->next;
+ 	}
++	return FALSE;
+ }
++#endif
+ 
+ static void soap_ignorableWhitespace(void *ctx, const xmlChar *ch, int len)
+ {
+@@ -125,6 +161,15 @@ xmlDocPtr soap_xmlParseFile(const char *filename)
+ */
+ 
+ 	if (ret) {
++#if LIBXML_VERSION < 21300
++		if (is_nesting_too_deep((xmlNodePtr)ret)) {
++			/* php_sdl.c reports xmlGetLastError() as the reason, and libxml2 did
++			 * not fail here, so drop the error an earlier parse left behind. */
++			xmlResetLastError();
++			xmlFreeDoc(ret);
++			return NULL;
++		}
++#endif
+ 		cleanup_xml_node((xmlNodePtr)ret);
+ 	}
+ 	return ret;
+@@ -175,6 +220,13 @@ xmlDocPtr soap_xmlParseMemory(const void *buf, size_t buf_size)
+ 	xmlCleanupParser();
+ */
+ 
++#if LIBXML_VERSION < 21300
++	if (ret && is_nesting_too_deep((xmlNodePtr)ret)) {
++		xmlFreeDoc(ret);
++		ret = NULL;
++	}
++#endif
++
+ /*
+ 	if (ret) {
+ 		cleanup_xml_node((xmlNodePtr)ret);
+@@ -297,6 +349,8 @@ xmlNodePtr get_node_with_attribute_ex(xmlNodePtr node, char *name, char *name_ns
+ 
+ xmlNodePtr get_node_with_attribute_recursive_ex(xmlNodePtr node, char *name, char *name_ns, char *attribute, char *value, char *attr_ns)
+ {
++	unsigned int depth = 0;
++
+ 	while (node != NULL) {
+ 		if (node_is_equal_ex(node, name, name_ns)) {
+ 			xmlAttrPtr attr = get_attribute_ex(node->properties, attribute, attr_ns);
+@@ -304,11 +358,19 @@ xmlNodePtr get_node_with_attribute_recursive_ex(xmlNodePtr node, char *name, cha
+ 				return node;
+ 			}
+ 		}
+-		if (node->children != NULL) {
+-			xmlNodePtr tmp = get_node_with_attribute_recursive_ex(node->children, name, name_ns, attribute, value, attr_ns);
+-			if (tmp) {
+-				return tmp;
++		if (node->children != NULL &&
++		    node->type != XML_ENTITY_REF_NODE &&
++		    node->type != XML_DTD_NODE) {
++			node = node->children;
++			depth++;
++			continue;
++		}
++		while (node->next == NULL) {
++			if (depth == 0) {
++				return NULL;
+ 			}
++			node = node->parent;
++			depth--;
+ 		}
+ 		node = node->next;
+ 	}
+diff --git a/ext/soap/soap.c b/ext/soap/soap.c
+index bb8b664af58..728e85bd4c5 100644
+--- a/ext/soap/soap.c
++++ b/ext/soap/soap.c
+@@ -320,6 +320,7 @@ static void php_soap_init_globals(zend_soap_globals *soap_globals)
+ 	soap_globals->soap_version = SOAP_1_1;
+ 	soap_globals->mem_cache = NULL;
+ 	soap_globals->ref_map = NULL;
++	soap_globals->decode_depth = 0;
+ }
+ 
+ PHP_MSHUTDOWN_FUNCTION(soap)
+diff --git a/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt
+new file mode 100644
+index 00000000000..e07f78d816f
+--- /dev/null
++++ b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt
+@@ -0,0 +1,47 @@
++--TEST--
++GHSA-rgrp-mwpx-f6rm: Stack overflow on a chain of href references
++--EXTENSIONS--
++soap
++--FILE--
++<?php
++
++/* The body stays four deep whatever $n is: the decoder walks the href chain. */
++function chain(int $n): string
++{
++    $links = '';
++    for ($i = 1; $i <= $n; $i++) {
++        $links .= '<x id="i' . $i . '">' . ($i < $n ? '<q href="#i' . ($i + 1) . '"/>' : 'leaf') . '</x>';
++    }
++
++    return '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><test><p href="#i1"/>'
++        . $links . '</test></s:Body></s:Envelope>';
++}
++
++function test($arg)
++{
++    $GLOBALS['decoded'] = $arg;
++
++    return 'ok';
++}
++
++$server = new SoapServer(null, ['uri' => 'urn:test']);
++$server->addFunction('test');
++
++$server->handle(chain(3));
++var_dump($GLOBALS['decoded']);
++
++$server->handle(chain(12000));
++
++?>
++--EXPECTF--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:test" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:testResponse><return xsi:type="xsd:string">ok</return></ns1:testResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
++object(stdClass)#%d (1) {
++  ["q"]=>
++  object(stdClass)#%d (1) {
++    ["q"]=>
++    string(4) "leaf"
++  }
++}
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>SOAP-ERROR: Encoding: Nesting level too deep</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+diff --git a/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt
+new file mode 100644
+index 00000000000..5058ba109bf
+--- /dev/null
++++ b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt
+@@ -0,0 +1,43 @@
++--TEST--
++GHSA-rgrp-mwpx-f6rm: Stack overflow on an array element referencing its own array
++--EXTENSIONS--
++soap
++--FILE--
++<?php
++
++function envelope(string $param): string
++{
++    return '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"'
++        . ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
++        . ' xmlns:e="http://schemas.xmlsoap.org/soap/encoding/"'
++        . ' s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
++        . '<s:Body><test>' . $param . '</test></s:Body></s:Envelope>';
++}
++
++function test($arg)
++{
++    $GLOBALS['decoded'] = $arg;
++
++    return 'ok';
++}
++
++$server = new SoapServer(null, ['uri' => 'urn:test']);
++$server->addFunction('test');
++
++$server->handle(envelope('<param xsi:type="e:Array" e:arrayType="xsi:string[2]"><i>a</i><i>b</i></param>'));
++var_dump($GLOBALS['decoded']);
++
++$server->handle(envelope('<param xsi:type="e:Array" e:arrayType="xsi:anyType[1]" id="x"><i href="#x"/></param>'));
++
++?>
++--EXPECTF--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:test" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:testResponse><return xsi:type="xsd:string">ok</return></ns1:testResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
++array(2) {
++  [0]=>
++  string(1) "a"
++  [1]=>
++  string(1) "b"
++}
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>SOAP-ERROR: Encoding: Nesting level too deep</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+diff --git a/ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt
+new file mode 100644
+index 00000000000..f3213962b47
+--- /dev/null
++++ b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt
+@@ -0,0 +1,89 @@
++--TEST--
++GHSA-rgrp-mwpx-f6rm: Stack overflow on deeply nested XML
++--EXTENSIONS--
++soap
++--INI--
++soap.wsdl_cache_enabled=0
++--FILE--
++<?php
++
++function envelope(int $depth): string
++{
++    return '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><test>'
++        . str_repeat('<a>', $depth) . 'leaf' . str_repeat('</a>', $depth)
++        . '</test></s:Body></s:Envelope>';
++}
++
++function test($arg)
++{
++    $depth = 0;
++    while (is_object($arg)) {
++        $depth++;
++        $arg = $arg->a;
++    }
++    $GLOBALS['decoded'] = [$depth, $arg];
++
++    return 'ok';
++}
++
++$server = new SoapServer(null, ['uri' => 'urn:test']);
++$server->addFunction('test');
++
++$server->handle(envelope(200));
++var_dump($GLOBALS['decoded']);
++
++/* libxml2 2.13 rejects past 2048 despite XML_PARSE_HUGE, older ones do not. */
++$wsdl = __DIR__ . '/GHSA-rgrp-mwpx-f6rm.wsdl';
++foreach ([1000, 2100] as $depth) {
++    file_put_contents($wsdl, '<r>' . str_repeat('<a>', $depth) . 'leaf' . str_repeat('</a>', $depth) . '</r>');
++    try {
++        new SoapClient($wsdl);
++    } catch (SoapFault $e) {
++        echo rtrim($e->getMessage()), "\n";
++    }
++}
++
++/* A WSDL reached through an entity reference still loads. Its replacement tree cannot
++   be built deeper than the 2048 libxml2 2.13 enforces, so this pins the entity skip
++   rather than the limit. */
++$entity = __DIR__ . '/GHSA-rgrp-mwpx-f6rm-entity.wsdl';
++$desc = str_repeat('&#60;p&#62;', 300) . 'A test service.' . str_repeat('&#60;/p&#62;', 300);
++file_put_contents($entity, '<?xml version="1.0"?>
++<!DOCTYPE definitions [<!ENTITY desc "' . $desc . '">]>
++<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:tns="urn:test" targetNamespace="urn:test" name="T">
++  <documentation>&desc;</documentation>
++  <message name="inMsg"/>
++  <portType name="pt"><operation name="op"><input message="tns:inMsg"/></operation></portType>
++  <binding name="b" type="tns:pt">
++    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
++    <operation name="op"><soap:operation soapAction="op"/><input><soap:body use="encoded" namespace="urn:test" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input></operation>
++  </binding>
++  <service name="s"><port name="p" binding="tns:b"><soap:address location="http://example.org/"/></port></service>
++</definitions>');
++var_dump((new SoapClient($entity))->__getFunctions());
++
++$server->handle(envelope(3000));
++
++?>
++--CLEAN--
++<?php
++@unlink(__DIR__ . '/GHSA-rgrp-mwpx-f6rm.wsdl');
++@unlink(__DIR__ . '/GHSA-rgrp-mwpx-f6rm-entity.wsdl');
++?>
++--EXPECTF--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:test" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:testResponse><return xsi:type="xsd:string">ok</return></ns1:testResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
++array(2) {
++  [0]=>
++  int(199)
++  [1]=>
++  string(4) "leaf"
++}
++SOAP-ERROR: Parsing WSDL: Couldn't find <definitions> in '%sGHSA-rgrp-mwpx-f6rm.wsdl'
++SOAP-ERROR: Parsing WSDL: Couldn't load from '%sGHSA-rgrp-mwpx-f6rm.wsdl'%S
++array(1) {
++  [0]=>
++  string(9) "void op()"
++}
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Client</faultcode><faultstring>Bad Request</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>

@@ -1,0 +1,395 @@
+From 1f4832e0ae5b21c138c9c021aedc5728e5d088a5 Mon Sep 17 00:00:00 2001
+From: Jakub Zelenka <bukka@php.net>
+Date: Sun, 13 Sep 2026 22:37:00 +0200
+Subject: [PATCH 09/13] Fix GHSA-j3wh-g957-2m85: phar tar entry injection
+
+Reject entry sizes that cannot be parsed or represented, and skip the data
+blocks of every entry type that carries data. Both left the stream on
+attacker controlled data that was then parsed as a tar header.
+
+(cherry picked from commit 0994e2e887cd993866b5e4d7dba2fade5caeefec)
+---
+ ext/phar/phar_internal.h                      |  5 +
+ ext/phar/tar.c                                | 80 +++++++++++++++-
+ .../tar/GHSA-j3wh-g957-2m85-longlink.phpt     | 50 ++++++++++
+ .../tests/tar/GHSA-j3wh-g957-2m85-size.phpt   | 92 +++++++++++++++++++
+ .../tar/GHSA-j3wh-g957-2m85-typeflag.phpt     | 79 ++++++++++++++++
+ 5 files changed, 301 insertions(+), 5 deletions(-)
+ create mode 100644 ext/phar/tests/tar/GHSA-j3wh-g957-2m85-longlink.phpt
+ create mode 100644 ext/phar/tests/tar/GHSA-j3wh-g957-2m85-size.phpt
+ create mode 100644 ext/phar/tests/tar/GHSA-j3wh-g957-2m85-typeflag.phpt
+
+diff --git a/ext/phar/phar_internal.h b/ext/phar/phar_internal.h
+index 30b408a8c44..81245a3e9b1 100644
+--- a/ext/phar/phar_internal.h
++++ b/ext/phar/phar_internal.h
+@@ -115,8 +115,13 @@
+ #define TAR_FILE    '0'
+ #define TAR_LINK    '1'
+ #define TAR_SYMLINK '2'
++#define TAR_CHAR    '3'
++#define TAR_BLOCK   '4'
+ #define TAR_DIR     '5'
++#define TAR_FIFO    '6'
+ #define TAR_NEW     '8'
++#define TAR_LONGLINK 'K'
++#define TAR_LONGNAME 'L'
+ #define TAR_GLOBAL_HDR 'g'
+ #define TAR_FILE_HDR   'x'
+ 
+diff --git a/ext/phar/tar.c b/ext/phar/tar.c
+index 80a17d69318..78308199eab 100644
+--- a/ext/phar/tar.c
++++ b/ext/phar/tar.c
+@@ -37,6 +37,52 @@ static uint32_t phar_tar_number(char *buf, size_t len) /* {{{ */
+ }
+ /* }}} */
+ 
++static bool phar_tar_type_has_data(char typeflag)
++{
++	switch (typeflag) {
++		case TAR_LINK:
++		case TAR_SYMLINK:
++		case TAR_CHAR:
++		case TAR_BLOCK:
++		case TAR_DIR:
++		case TAR_FIFO:
++			return false;
++		default:
++			return true;
++	}
++}
++
++static bool phar_tar_size(const char *buf, size_t len, uint32_t *result)
++{
++	uint64_t num = 0;
++	size_t i = 0;
++
++	while (i < len && buf[i] == ' ') {
++		++i;
++	}
++
++	/* GNU base-256 encoding is only used for sizes that do not fit the octal field */
++	if (i < len && (((unsigned char) buf[i]) & 0x80)) {
++		return false;
++	}
++
++	while (i < len && buf[i] >= '0' && buf[i] <= '7') {
++		num = num * 8 + (buf[i] - '0');
++		++i;
++	}
++
++	while (i < len && (buf[i] == ' ' || buf[i] == '\0')) {
++		++i;
++	}
++
++	if (i != len || num > UINT32_MAX - 511) {
++		return false;
++	}
++
++	*result = (uint32_t) num;
++	return true;
++}
++
+ /* adapted from format_octal() in libarchive
+  *
+  * Copyright (c) 2003-2009 Tim Kientzle
+@@ -277,8 +323,32 @@ int phar_parse_tarfile(php_stream* fp, char *fname, size_t fname_len, char *alia
+ 			}
+ 		}
+ 
+-		size = entry.uncompressed_filesize = entry.compressed_filesize =
+-			phar_tar_number(hdr->size, sizeof(hdr->size));
++		if (!phar_tar_size(hdr->size, sizeof(hdr->size), &size)) {
++			if (error) {
++				spprintf(error, 4096, "phar error: \"%s\" is a corrupted tar file (invalid entry size)", fname);
++			}
++			if (last_was_longlink) {
++				pefree(entry.filename, myphar->is_persistent);
++			}
++			php_stream_close(fp);
++			phar_destroy_phar_data(myphar);
++			return FAILURE;
++		}
++		entry.uncompressed_filesize = entry.compressed_filesize = size;
++
++		/* GNU long link names are not supported, so refuse the record instead of
++		 * registering it as an entry and dropping the link target of the entry that follows */
++		if (hdr->typeflag == TAR_LONGLINK) {
++			if (error) {
++				spprintf(error, 4096, "phar error: \"%s\" is a tar file with an unsupported GNU long link entry", fname);
++			}
++			if (last_was_longlink) {
++				pefree(entry.filename, myphar->is_persistent);
++			}
++			php_stream_close(fp);
++			phar_destroy_phar_data(myphar);
++			return FAILURE;
++		}
+ 
+ 		/* skip global/file headers (pax) */
+ 		if (!old && (hdr->typeflag == TAR_GLOBAL_HDR || hdr->typeflag == TAR_FILE_HDR)) {
+@@ -366,13 +436,13 @@ bail:
+ 			goto bail;
+ 		}
+ 
+-		if (!last_was_longlink && hdr->typeflag == 'L') {
++		if (!last_was_longlink && hdr->typeflag == TAR_LONGNAME) {
+ 			last_was_longlink = 1;
+ 			/* support the ././@LongLink system for storing long filenames */
+ 			entry.filename_len = entry.uncompressed_filesize;
+ 
+ 			/* Check for overflow - bug 61065 */
+-			if (entry.filename_len == UINT_MAX || entry.filename_len == 0) {
++			if (entry.filename_len == 0 || entry.filename_len > totalsize) {
+ 				if (error) {
+ 					spprintf(error, 4096, "phar error: \"%s\" is a corrupted tar file (invalid entry size)", fname);
+ 				}
+@@ -583,7 +653,7 @@ bail:
+ 
+ 		size = (size+511)&~511;
+ 
+-		if (((hdr->typeflag == '\0') || (hdr->typeflag == TAR_FILE)) && size > 0) {
++		if (phar_tar_type_has_data(hdr->typeflag) && size > 0) {
+ next:
+ 			/* this is not good enough - seek succeeds even on truncated tars */
+ 			php_stream_seek(fp, size, SEEK_CUR);
+diff --git a/ext/phar/tests/tar/GHSA-j3wh-g957-2m85-longlink.phpt b/ext/phar/tests/tar/GHSA-j3wh-g957-2m85-longlink.phpt
+new file mode 100644
+index 00000000000..5d05ac311ef
+--- /dev/null
++++ b/ext/phar/tests/tar/GHSA-j3wh-g957-2m85-longlink.phpt
+@@ -0,0 +1,50 @@
++--TEST--
++GHSA-j3wh-g957-2m85 (././@LongLink name longer than the archive)
++--EXTENSIONS--
++phar
++--INI--
++phar.require_hash=0
++--FILE--
++<?php
++function tar_header(string $name, string $size, string $typeflag = '0'): string
++{
++    $header = str_repeat("\0", 512);
++    $header = substr_replace($header, $name, 0, strlen($name));
++    $header = substr_replace($header, sprintf("%07o\0", 0644), 100, 8);
++    $header = substr_replace($header, sprintf("%07o\0", 0), 108, 8);
++    $header = substr_replace($header, sprintf("%07o\0", 0), 116, 8);
++    $header = substr_replace($header, $size, 124, 12);
++    $header = substr_replace($header, sprintf("%011o\0", 1700000000), 136, 12);
++    $header[156] = $typeflag;
++    $header = substr_replace($header, "ustar\0", 257, 6);
++    $header = substr_replace($header, "00", 263, 2);
++
++    $checksum = 0;
++    for ($i = 0; $i < 512; $i++) {
++        $checksum += ($i >= 148 && $i < 156) ? 0x20 : ord($header[$i]);
++    }
++
++    return substr_replace($header, sprintf("%06o\0 ", $checksum), 148, 8);
++}
++
++$fname = __DIR__ . '/' . basename(__FILE__, '.php') . '.tar';
++
++/* 2 GB of file name announced by a 2 KB archive */
++$tar  = tar_header('././@LongLink', "20000000000\0", 'L');
++$tar .= str_pad('long.txt', 512, "\0");
++$tar .= tar_header('short.txt', sprintf("%011o\0", 3)) . str_pad('abc', 512, "\0");
++$tar .= str_repeat("\0", 1024);
++file_put_contents($fname, $tar);
++
++try {
++    new PharData($fname);
++} catch (UnexpectedValueException $e) {
++    echo $e->getMessage(), "\n";
++}
++?>
++--CLEAN--
++<?php
++unlink(__DIR__ . '/' . basename(__FILE__, '.clean.php') . '.tar');
++?>
++--EXPECTF--
++phar error: "%s" is a corrupted tar file (invalid entry size)
+diff --git a/ext/phar/tests/tar/GHSA-j3wh-g957-2m85-size.phpt b/ext/phar/tests/tar/GHSA-j3wh-g957-2m85-size.phpt
+new file mode 100644
+index 00000000000..731422a0250
+--- /dev/null
++++ b/ext/phar/tests/tar/GHSA-j3wh-g957-2m85-size.phpt
+@@ -0,0 +1,92 @@
++--TEST--
++GHSA-j3wh-g957-2m85 (tar entry injection via invalid entry size)
++--EXTENSIONS--
++phar
++--INI--
++phar.require_hash=0
++--FILE--
++<?php
++function tar_header(string $name, string $size, string $typeflag = '0'): string
++{
++    $header = str_repeat("\0", 512);
++    $header = substr_replace($header, $name, 0, strlen($name));
++    $header = substr_replace($header, sprintf("%07o\0", 0644), 100, 8);
++    $header = substr_replace($header, sprintf("%07o\0", 0), 108, 8);
++    $header = substr_replace($header, sprintf("%07o\0", 0), 116, 8);
++    $header = substr_replace($header, $size, 124, 12);
++    $header = substr_replace($header, sprintf("%011o\0", 1700000000), 136, 12);
++    $header[156] = $typeflag;
++    $header = substr_replace($header, "ustar\0", 257, 6);
++    $header = substr_replace($header, "00", 263, 2);
++
++    $checksum = 0;
++    for ($i = 0; $i < 512; $i++) {
++        $checksum += ($i >= 148 && $i < 156) ? 0x20 : ord($header[$i]);
++    }
++
++    return substr_replace($header, sprintf("%06o\0 ", $checksum), 148, 8);
++}
++
++function tar_dump(string $fname): void
++{
++    try {
++        $phar = new PharData($fname);
++        $names = [];
++        foreach (new RecursiveIteratorIterator($phar) as $file) {
++            $names[] = $file->getFilename();
++        }
++        sort($names);
++        echo implode(', ', $names), "\n";
++    } catch (UnexpectedValueException $e) {
++        echo $e->getMessage(), "\n";
++    }
++}
++
++$base = __DIR__ . '/' . basename(__FILE__, '.php');
++
++/* the entry after the carrier is never reached by a conforming tar reader */
++$sizes = [
++    'octal overflow to 0'    => "40000000000\0",
++    'octal overflow to 1'    => "40000000001\0",
++    'octal padding overflow' => "37777777400\0",
++    'GNU base-256'           => "\x80" . str_repeat("\0", 9) . "\x02\x00",
++    'non-octal digits'       => "99999999999\0",
++    'trailing garbage'       => "0000000001XX",
++];
++
++$i = 0;
++foreach ($sizes as $label => $size) {
++    $fname = $base . '.' . $i++ . '.tar';
++    $tar  = tar_header('normal.txt', sprintf("%011o\0", 9)) . str_pad('NORMAL_OK', 512, "\0");
++    $tar .= tar_header('carrier.bin', $size);
++    $tar .= tar_header('injected.txt', sprintf("%011o\0", 8)) . str_pad('INJECTED', 512, "\0");
++    $tar .= str_repeat("\0", 1024);
++    file_put_contents($fname, $tar);
++
++    echo $label, ': ';
++    tar_dump($fname);
++}
++
++$fname = $base . '.valid.tar';
++$tar  = tar_header('normal.txt', sprintf("%011o\0", 9)) . str_pad('NORMAL_OK', 512, "\0");
++$tar .= tar_header('second.txt', sprintf("%011o\0", 8)) . str_pad('SECOND__', 512, "\0");
++$tar .= str_repeat("\0", 1024);
++file_put_contents($fname, $tar);
++
++echo 'valid archive: ';
++tar_dump($fname);
++?>
++--CLEAN--
++<?php
++foreach (glob(__DIR__ . '/' . basename(__FILE__, '.clean.php') . '.*.tar') as $file) {
++    unlink($file);
++}
++?>
++--EXPECTF--
++octal overflow to 0: phar error: "%s" is a corrupted tar file (invalid entry size)
++octal overflow to 1: phar error: "%s" is a corrupted tar file (invalid entry size)
++octal padding overflow: phar error: "%s" is a corrupted tar file (invalid entry size)
++GNU base-256: phar error: "%s" is a corrupted tar file (invalid entry size)
++non-octal digits: phar error: "%s" is a corrupted tar file (invalid entry size)
++trailing garbage: phar error: "%s" is a corrupted tar file (invalid entry size)
++valid archive: normal.txt, second.txt
+diff --git a/ext/phar/tests/tar/GHSA-j3wh-g957-2m85-typeflag.phpt b/ext/phar/tests/tar/GHSA-j3wh-g957-2m85-typeflag.phpt
+new file mode 100644
+index 00000000000..227d33a4823
+--- /dev/null
++++ b/ext/phar/tests/tar/GHSA-j3wh-g957-2m85-typeflag.phpt
+@@ -0,0 +1,79 @@
++--TEST--
++GHSA-j3wh-g957-2m85 (tar entry injection via entry types that carry data)
++--EXTENSIONS--
++phar
++--INI--
++phar.require_hash=0
++--FILE--
++<?php
++function tar_header(string $name, string $size, string $typeflag = '0'): string
++{
++    $header = str_repeat("\0", 512);
++    $header = substr_replace($header, $name, 0, strlen($name));
++    $header = substr_replace($header, sprintf("%07o\0", 0644), 100, 8);
++    $header = substr_replace($header, sprintf("%07o\0", 0), 108, 8);
++    $header = substr_replace($header, sprintf("%07o\0", 0), 116, 8);
++    $header = substr_replace($header, $size, 124, 12);
++    $header = substr_replace($header, sprintf("%011o\0", 1700000000), 136, 12);
++    $header[156] = $typeflag;
++    $header = substr_replace($header, "ustar\0", 257, 6);
++    $header = substr_replace($header, "00", 263, 2);
++
++    $checksum = 0;
++    for ($i = 0; $i < 512; $i++) {
++        $checksum += ($i >= 148 && $i < 156) ? 0x20 : ord($header[$i]);
++    }
++
++    return substr_replace($header, sprintf("%06o\0 ", $checksum), 148, 8);
++}
++
++$base = __DIR__ . '/' . basename(__FILE__, '.php');
++
++/* '5' and the other types below carry no data in any tar reader, so the
++ * injected header stays visible to all of them and is not hidden from
++ * anything that inspects the archive with a different implementation.
++ * 'K' is a GNU metadata record that is not supported and is refused. */
++$typeflags = [
++    'contiguous file' => '7',
++    'unknown type'    => 'Z',
++    'GNU long link'   => 'K',
++    'directory'       => '5',
++    'fifo'            => '6',
++];
++
++$i = 0;
++foreach ($typeflags as $label => $typeflag) {
++    $fname = $base . '.' . $i++ . '.tar';
++    $tar  = tar_header('normal.txt', sprintf("%011o\0", 9)) . str_pad('NORMAL_OK', 512, "\0");
++    $tar .= tar_header('carrier.bin', sprintf("%011o\0", 512), $typeflag);
++    /* the carrier's only data block is a tar header a conforming reader skips */
++    $tar .= tar_header('injected.txt', sprintf("%011o\0", 0));
++    $tar .= str_repeat("\0", 1024);
++    file_put_contents($fname, $tar);
++
++    echo $label, ': ';
++    try {
++        $phar = new PharData($fname);
++        $names = [];
++        foreach (new RecursiveIteratorIterator($phar) as $file) {
++            $names[] = $file->getFilename();
++        }
++        sort($names);
++        echo implode(', ', $names), "\n";
++    } catch (UnexpectedValueException $e) {
++        echo $e->getMessage(), "\n";
++    }
++}
++?>
++--CLEAN--
++<?php
++foreach (glob(__DIR__ . '/' . basename(__FILE__, '.clean.php') . '.*.tar') as $file) {
++    unlink($file);
++}
++?>
++--EXPECTF--
++contiguous file: carrier.bin, normal.txt
++unknown type: carrier.bin, normal.txt
++GNU long link: phar error: "%s" is a tar file with an unsupported GNU long link entry
++directory: injected.txt, normal.txt
++fifo: carrier.bin, injected.txt, normal.txt
