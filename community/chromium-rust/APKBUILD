@@ -1,0 +1,636 @@
+# Contributor: Rasmus Thomsen <oss@cogitri.dev>
+# Contributor: Jakub Jirutka <jakub@jirutka.cz>
+# Contributor: Shiz <hi@shiz.me>
+# Contributor: Jeizsm <jeizsm@gmail.com>
+# Contributor: Ariadne Conill <ariadne@dereferenced.org>
+# Contributor: Celeste <cielesti@protonmail.com>
+# Contributor: omni <omni+alpine@hack.org>
+# Maintainer: lauren n. liberda <lauren@selfisekai.rocks>
+pkgname=chromium-rust
+pkgver=1.97.0
+_llvmver=22
+_bootver=1.96.1
+_change_id=154587
+pkgrel=0
+# Source tarballs for beta releases are listed here:
+# https://static.rust-lang.org/dist/channel-rust-beta.toml
+pkgdesc="Rust Programming Language toolchain (for Chromium)"
+url="https://www.rust-lang.org/"
+arch="aarch64 armv7 x86_64"
+license="Apache-2.0 OR MIT"
+
+# 'cc' is needed at runtime just for linking. Someday rustc might invoke
+# the linker directly, and then we'll only need 'ld'.
+# See: https://github.com/rust-lang/rust/issues/11937
+depends="gcc musl-dev"
+
+# * Rust is self-hosted, so you need rustc (and cargo) to build rustc...
+#   The last revision of this abuild that does not depend on itself (uses
+#   prebuilt rustc and cargo) is 2e6769eb39eaff3029d8298fc02856623c563cd8.
+# * Don't add libgit2-dev into make dependencies. There's no compatibility
+#   guarantees between libgit2-sys and arbitrary system libgit2 versions;
+#   when system libgit2 is upgraded to a new minor version, it may break
+#   cargo and since we need cargo to rebuild cargo... this already happened
+#   several times. For this reason we build cargo with vendored libgit2.
+makedepends_host="
+	!libgit2-dev
+	curl-dev
+	libssh2-dev
+	llvm$_llvmver-dev
+	openssl-dev
+	sqlite-dev
+	zlib-dev
+	"
+makedepends_build="
+	$makedepends_host
+	cargo-bootstrap>=$_bootver
+	clang$_llvmver
+	file
+	llvm$_llvmver-test-utils
+	python3
+	rust-bootstrap>=$_bootver
+	tar
+	xz-dev
+	"
+
+# XXX: This is a hack to allow this abuild to depend on itself. Adding "rust"
+# to makedepends would not work, because abuild implicitly removes $pkgname
+# and $subpackages from the abuild's dependencies.
+provides="chromium-rust-bootstrap=$pkgver-r$pkgrel"
+# !archcheck: needed for -src that contains some testing binaries.
+# net: crates from crate.io
+options="!archcheck net"
+
+# Only cargo is needed for bootstrapping.
+subpackages="chromium-cargo:_cargo"
+if [ -z "$BOOTSTRAP" ]; then
+	subpackages="
+		$pkgname-dbg
+		$subpackages
+		$pkgname-doc
+		$pkgname-clippy
+		$pkgname-clippy-doc:_clippy_doc
+		$pkgname-gdb::noarch
+		$pkgname-lldb::noarch
+		$pkgname-src::noarch
+		$pkgname-wasm
+		chromium-cargo-bash-completions:_cargo_bashcomp:noarch
+		chromium-cargo-zsh-completion:_cargo_zshcomp:noarch
+		chromium-cargo-doc:_cargo_doc:noarch
+		chromium-rustc-dev:_rustc_dev
+		chromium-rustfmt:rustfmt
+		chromium-rustfmt-doc:_rustfmt_doc
+		chromium-wasm-component-ld:_wasm_cmld
+		chromium-wasm-component-ld-dbg:_wasm_cmld_dbg
+		"
+	case "$CHOST" in
+		aarch64*|x86_64*)
+		subpackages="$subpackages $pkgname-uefi"
+		;;
+	esac
+	makedepends_build="
+		$makedepends_build
+		wasi-libc
+		patchelf
+		"
+	makedepends_host="
+		$makedepends_host
+		scudo-malloc
+		"
+fi
+source="https://static.rust-lang.org/dist/rustc-$pkgver-src.tar.xz
+	alpine-move-py-scripts-to-share.patch
+	alpine-target.patch
+	do-not-install-libunwind-source.patch
+	embed-metadata.patch
+	gcc-eh-libunwind.patch
+	install-template-shebang.patch
+	no-export-ld-library-path.patch
+	remove-musl-root.patch
+	system-wasm-ld.patch
+	system-uefi-ld.patch
+	compiler-builtins-no-unwrap.patch
+	check-rustc
+	"
+builddir="$srcdir/rustc-$pkgver-src"
+
+# secfixes:
+#   1.96.1-r0:
+#     - CVE-2025-15661
+#     - CVE-2026-55199
+#     - CVE-2026-55200
+#   1.96.0-r0:
+#     - CVE-2026-5222
+#     - CVE-2026-5223
+#   1.94.0-r1:
+#     - CVE-2026-33056
+#   1.71.1-r0:
+#     - CVE-2023-38497
+#   1.66.1-r0:
+#     - CVE-2022-46176
+#   1.56.1-r0:
+#     - CVE-2021-42574
+#   1.52.1-r1:
+#     - CVE-2021-29922
+#   1.51.0-r2:
+#     - CVE-2020-36323
+#     - CVE-2021-31162
+#   1.34.2-r0:
+#     - CVE-2019-12083
+#   1.26.0-r0:
+#     - CVE-2019-16760
+
+# We have to add new architectures in multiple steps:
+# 1. Compile with the upstream triplets, compiling alpine's triplets in
+# 2. Compile again, now with our triplets selected as build/target, now that
+#    rustc knows about them
+_build="$CBUILD"
+_target="$CHOST"
+
+_rlibdir="usr/lib/rustlib/$_target/lib"
+_sharedir="usr/share/rust"
+
+ldpath="/$_rlibdir"
+
+export LIBSQLITE3_SYS_USE_PKG_CONFIG=1
+export LIBSSH2_SYS_USE_PKG_CONFIG=1
+export OPENSSL_NO_VENDOR=1
+export RUST_BACKTRACE=1
+
+export gztool="$(command -v pigz || echo gzip)"
+
+# this is useful for when we have to patch vendored projects
+_clear_vendor_checksums() {
+	sed -i 's/\("files":{\)[^}]*/\1/' vendor/$1/.cargo-checksum.json
+}
+
+_unpack_build_dist() {
+	local distname="$1" destdir="$2" tarball=
+
+	case "$distname" in
+	rust-src)
+		tarball="$builddir"/build/dist/rust-src-$pkgver.tar.gz
+		;;
+	rust-std-*)
+		tarball="$builddir"/build/dist/rust-std-$pkgver-${distname#rust-std-*}.tar.gz
+		;;
+	*)
+		tarball="$builddir"/build/dist/$distname-$pkgver-$_target.tar.gz
+		;;
+	esac
+
+	tar -I "$gztool -d" -xf "$tarball" \
+		-C "$destdir" --strip-components=2 \
+		--exclude=manifest.in --no-same-owner
+}
+
+build() {
+	local extra_conf_opts=
+
+	export PATH="/usr/lib/llvm$_llvmver/bin:$PATH"
+	export CFLAGS="$CFLAGS -O2"
+	export CXXFLAGS="$CXXFLAGS -O2"
+	export WASI_SDK_PATH=/usr
+
+	if [ "$_build" != "$_target" ]; then
+		# Use variables with triplets since they are otherwise passed to the wrong targets
+		export "PKG_CONFIG_SYSROOT_DIR_${_target//-/_}=$PKG_CONFIG_SYSROOT_DIR"
+		export "PKG_CONFIG_PATH_${_target//-/_}=$PKG_CONFIG_PATH"
+		export "CFLAGS_${_target//-/_}=$CFLAGS"
+		export "CXXFLAGS_${_target//-/_}=$CXXFLAGS"
+		export "CFLAGS_${_build//-/_}=$BUILDCFLAGS -O2"
+		export "CXXFLAGS_${_build//-/_}=$BUILDCXXFLAGS -O2"
+		unset RUSTFLAGS CC CXX CFLAGS CXXFLAGS PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_PATH
+
+		# Cross compiling is just a hack, make the hack work with alpine
+		# https://github.com/rust-lang/rust/blob/f19142044f270760ce0ebc03b2c3a44217d8703d/compiler/rustc_llvm/build.rs#L327
+		cat << EOF > llvm-config
+#!/bin/sh -e
+for i; do
+	case "\$i" in
+		--ldflags) printf '-L%s/usr/lib/llvm$_llvmver/lib\n' "\$CBUILDROOT"; exit ;;
+		--libdir) printf '%s/usr/lib/llvm$_llvmver/lib\n' "\$CBUILDROOT"; exit ;;
+		--bindir) printf '%s/usr/lib/llvm$_llvmver/bin\n' "\$CBUILDROOT"; exit ;;
+		# Enabled targets vary between arches
+		--components) printf '%s\n' 'ipo bitreader bitwriter linker asmparser lto coverage instrumentation $(
+			sed -n 's/^set(LLVM_TARGETS_TO_BUILD \(.*\))$/\1/p' "$CBUILDROOT/usr/lib/llvm$_llvmver/lib/cmake/llvm/LLVMConfig.cmake" | tr 'A-Z;' 'a-z '
+		)'; exit ;;
+	esac
+done
+exec llvm-config "\$@"
+EOF
+		chmod +x llvm-config
+	fi
+	if [ "$pkgver" = "$_bootver" ]; then
+		# Skip stage0 when `rust-bootstrap` is of the
+		# same version as the Rust we are building.
+		extra_conf_opts="$extra_conf_opts --set=build.local-rebuild=true"
+	fi
+
+	local tools="cargo"
+	if [ -z "$BOOTSTRAP" ]; then
+		tools="$tools,clippy,src,rustdoc,rustfmt,rust-analyzer-proc-macro-srv,rust-demangler,wasm-component-ld"
+
+		case "$CARCH" in
+		riscv64|aarch64|arm*|s390x|x86_64)
+			# Default LTO=thin-local to allow for faster bootstrapping
+			# and avoid OOM issues (aarch64, arm*, x86_64 & s390x) TODO: fix
+			;;
+		*)
+			extra_conf_opts="$extra_conf_opts --set=rust.lto=thin"
+			;;
+		esac
+	fi
+
+	# absolutely do not set these here, rust "knows" what it's doing
+	unset CARGO_PROFILE_RELEASE_LTO
+	unset CARGO_PROFILE_RELEASE_OPT_LEVEL
+	unset CARGO_PROFILE_RELEASE_PANIC
+	unset CARGO_PROFILE_RELEASE_CODEGEN_UNITS
+
+	local targets="$_target"
+	if subpackage_types_has wasm; then
+		targets="$targets,wasm32-unknown-unknown"
+		extra_conf_opts="$extra_conf_opts
+			--set=target.wasm32-unknown-unknown.sanitizers=false
+			--set=target.wasm32-unknown-unknown.profiler=false
+			--set=target.wasm32-unknown-unknown.cc=clang-$_llvmver
+			--set=target.wasm32-unknown-unknown.linker=lld
+			"
+
+		for t in wasm32-wasip1 wasm32-wasip1-threads wasm32-wasip2; do
+			targets="$targets,$t"
+			extra_conf_opts="$extra_conf_opts
+				--set=target.$t.sanitizers=false
+				--set=target.$t.profiler=false
+				--set=target.$t.wasi-root=/usr/share/wasi-sysroot
+				--set=target.$t.cc=clang-$_llvmver
+				--set=target.$t.cxx=clang++-$_llvmver
+				--set=target.$t.ar=llvm$_llvmver-ar
+				--set=target.$t.ranlib=llvm$_llvmver-ranlib
+				"
+		done
+	fi
+	local _uefi_target=${CHOST%%-*}-unknown-uefi
+	if subpackage_types_has uefi; then
+		targets="$targets,$_uefi_target"
+	fi
+
+	# ./configure will not run when bootstrap.toml exists,
+	# so assume we are restarting the build with ./x.py
+	[ -f "bootstrap.toml" ] || ./configure \
+		--build="$_build" \
+		--host="$_target" \
+		--target="$targets" \
+		--prefix="/usr" \
+		--release-channel="stable" \
+		--enable-local-rust \
+		--disable-docs \
+		--enable-extended \
+		--tools="$tools" \
+		--enable-llvm-link-shared \
+		--enable-option-checking \
+		--enable-locked-deps \
+		--enable-profiler \
+		--enable-vendor \
+		--dist-compression-formats=gz \
+		--python="python3" \
+		--set="change-id=$_change_id" \
+		--set="build.description=Alpine Linux Rust $pkgver-r$pkgrel" \
+		--set="rust.backtrace-on-ice=true" \
+		--set="rust.codegen-units=1" \
+		--set="rust.codegen-units-std=1" \
+		--set="rust.deny-warnings=false" \
+		--set="rust.remap-debuginfo=true" \
+		--set="rust.lld=false" \
+		--set="rust.incremental=$([ -n "$BOOTSTRAP" ] && echo true || echo false)" \
+		--set="target.$_target.llvm-config=$builddir/llvm-config" \
+		--set="target.$_target.crt-static=false" \
+		--set="target.$_target.cc=${CROSS_COMPILE}cc" \
+		--set="target.$_target.cxx=${CROSS_COMPILE}c++" \
+		--set="target.$_target.ar=${CROSS_COMPILE}ar" \
+		--set="target.$_target.linker=${CROSS_COMPILE}cc" \
+		--set="target.$_uefi_target.crt-static=true" \
+		--set="target.$_uefi_target.cc=clang-$_llvmver" \
+		--set="target.$_uefi_target.profiler=false" \
+		--set="target.$_uefi_target.optimized-compiler-builtins=false" \
+		--set="target.$_build.llvm-config=$(command -v llvm-config)" \
+		--set="target.$_build.crt-static=false" \
+		--set="target.$_build.cc=cc" \
+		--set="target.$_build.cxx=c++" \
+		--set="target.$_build.ar=ar" \
+		--set="target.$_build.linker=cc" \
+		$extra_conf_opts
+
+	python3 ./x.py dist --jobs ${JOBS:-2} ${BOOTSTRAP:+cargo rustc rust-std}
+}
+
+check() {
+	# At this moment lib/rustlib/$CHOST/lib does not contain a complete
+	# copy of the .so libs from lib (they will be copied there during
+	# 'x.py install'). Thus we must set LD_LIBRARY_PATH for tests to work.
+
+	msg "Setting up test env..."
+
+	mkdir -p "$builddir/test-rustc"
+
+	_unpack_build_dist rustc "$builddir/test-rustc" &
+	_unpack_build_dist rust-std "$builddir/test-rustc" &
+	wait
+
+	export LD_LIBRARY_PATH="$builddir/test-rustc/lib/rustlib/$CHOST/lib"
+
+	msg "Sanity checks..."
+	"$srcdir"/check-rustc "$builddir"/test-rustc/bin/rustc
+
+	# XXX: There's some problem with these tests, we will figure it out later.
+	#	make check \
+	#		LD_LIBRARY_PATH="$_stage0dir/lib" \
+	#		VERBOSE=1
+
+	# these rebuild the whole compiler which takes a long time
+	# msg "Running tests for cargo..."
+	# CFG_DISABLE_CROSS_TESTS=1 python3 ./x.py test --no-fail-fast src/tools/cargo
+
+	unset LD_LIBRARY_PATH
+}
+
+package() {
+	# merged into main package
+	provides="$provides chromium-rust-stdlib=$pkgver-r$pkgrel"
+	replaces="rust-stdlib"
+
+	mkdir -p "$pkgdir/usr"
+
+	cd "$pkgdir"
+
+	_unpack_build_dist rustc "$pkgdir/usr" &
+	_unpack_build_dist rust-std "$pkgdir/usr" &
+	_unpack_build_dist cargo "$pkgdir/usr" &
+	wait
+
+	if [ -n "$BOOTSTRAP" ]; then
+		# Only keep files needed to compile the full rust package
+		rm -r usr/bin/rust-gdb* usr/share usr/etc usr/lib/rustlib/etc
+		return 0
+	fi
+
+	_unpack_build_dist rustc-dev "$pkgdir/usr" &
+	_unpack_build_dist rust-src "$pkgdir/usr" &
+	wait
+	_unpack_build_dist clippy "$pkgdir/usr" &
+	_unpack_build_dist rustfmt "$pkgdir/usr" &
+	if subpackage_types_has wasm; then
+		_unpack_build_dist rust-std-wasm32-unknown-unknown "$pkgdir/usr" &
+		_unpack_build_dist rust-std-wasm32-wasip1 "$pkgdir/usr" &
+		_unpack_build_dist rust-std-wasm32-wasip1-threads "$pkgdir/usr" &
+		_unpack_build_dist rust-std-wasm32-wasip2 "$pkgdir/usr" &
+	fi
+	if subpackage_types_has uefi; then
+		_unpack_build_dist rust-std-${_target%%-*}-unknown-uefi "$pkgdir/usr" &
+	fi
+	wait
+
+	# Prevent rustc-dev from providing the same *.so files,
+	# which causes it to conflict with the main rust package.
+	local libpath; for libpath in usr/lib/*.so; do
+		rm -v "$_rlibdir/${libpath##*/}"
+		ln -sv "/$libpath" $_rlibdir/
+	done
+
+	# We don't want to include stuff like rust-llvm-* tools, as we will use the
+	# system tools.
+	rm -f usr/lib/rustlib/"$_target"/bin/rust-llvm-*
+
+	# Python scripts are noarch, so move them to /usr/share.
+	# Requires move-py-scripts-to-share.patch to be applied.
+	_mv usr/lib/rustlib/etc/*.py $_sharedir/etc/
+	rmdir -p usr/lib/rustlib/etc 2>/dev/null || true
+
+	_mv usr/etc/bash_completion.d/cargo usr/share/bash-completion/completions/
+	rmdir -p usr/etc/bash_completion.d 2>/dev/null || true
+
+	_mv usr/lib/rustlib/src/rust usr/src/
+	ln -s ../../../src/rust usr/lib/rustlib/src/rust
+	mv usr/lib/rustlib/rustc-src/rust usr/src/rustc
+	ln -s ../../../src/rustc usr/lib/rustlib/rustc-src/rust
+
+	# we don't want to introduce a usr/etc/ but the file could still be useful
+	# even though there's the --print target-spec-json-schema option
+	_mv usr/etc/target-spec-json-schema.json usr/share/doc/rust/
+	rmdir usr/etc 2>/dev/null || true
+
+	# Remove some clutter.
+	cd "$pkgdir"/usr/lib/rustlib
+	rm -f components install.log manifest-* rust-installer-version uninstall.sh
+	if [ "$_build" != "$_target" ]; then
+		rm -rf "$pkgdir"/usr/lib/rustlib/$_build
+	fi
+	# the below were added with the 1.94.0 upgrade and almost doubled the size
+	# of the rust-wasm and rust-uefi subpackages and don't seem to be needed
+	rm -rf "$pkgdir"/usr/lib/rustlib/wasm32-*/lib/*.rmeta \
+		"$pkgdir"/usr/lib/rustlib/*-uefi/lib/*.rmeta
+	# if they would later be found to be useful, please move them to
+	# rust-wasm-dev and rust-uefi-dev subpackages
+
+	# for some reason the tar archive gets some root-only files for rlibs
+	find "$pkgdir"/usr/lib/rustlib -type f -perm -600 -exec chmod 0644 {} \+
+	find "$pkgdir"/usr/lib/rustlib -type f -perm -700 -exec chmod 0755 {} \+
+
+	# link scudo to tools by default on architectures where it works well
+	# this is roughly 20+% faster with no downside except slightly higher
+	# memory use, but this is a compiler that already uses a ton of memory
+	case "$CARCH" in
+	arm*) ;;
+	*)
+		patchelf --add-needed libscudo.so \
+			"$pkgdir"/usr/bin/cargo \
+			"$pkgdir"/usr/bin/rustc \
+			"$pkgdir"/usr/bin/rustdoc
+		;;
+	esac
+}
+
+_rustc_dev() {
+	pkgdesc="$pkgdesc (compiler libraries)"
+
+	# needs embed-metadata.patch
+	amove $_rlibdir/lib*.rmeta \
+		$_rlibdir/lib*.so
+}
+
+wasm() {
+	pkgdesc="WebAssembly targets for rust"
+	url="https://rust-lang.org/what/wasm/"
+	depends="chromium-rust=$pkgver-r$pkgrel lld wasi-libc"
+
+	amove usr/lib/rustlib/wasm32-*
+}
+
+uefi() {
+	pkgdesc="UEFI targets for rust"
+	url="https://rust-osdev.com/uefi-book"
+	depends="chromium-rust=$pkgver-r$pkgrel lld"
+
+	amove usr/lib/rustlib/*-uefi
+}
+
+analysis() {
+	pkgdesc="Compiler analysis data for the Rust standard library"
+	depends="$pkgname=$pkgver-r$pkgrel"
+
+	amove $_rlibdir/../analysis
+}
+
+gdb() {
+	pkgdesc="GDB pretty printers for Rust"
+	url="https://rustc-dev-guide.rust-lang.org/debugging-support-in-rustc.html"
+	depends="$pkgname=$pkgver-r$pkgrel gdb"
+
+	amove usr/bin/rust-gdb*
+	amove $_sharedir/etc/gdb_*.py
+}
+
+lldb() {
+	pkgdesc="LLDB pretty printers for Rust"
+	url="https://rustc-dev-guide.rust-lang.org/debugging-support-in-rustc.html"
+	depends="$pkgname=$pkgver-r$pkgrel lldb py3-lldb"
+
+	amove usr/bin/rust-lldb
+	amove $_sharedir/etc/lldb_*.py
+	amove usr/lib/rustlib/etc/lldb_commands
+}
+
+clippy() {
+	pkgdesc="Lints to catch common mistakes and improve your Rust code"
+	license="MIT or Apache-2.0"
+	url="https://doc.rust-lang.org/clippy/"
+	depends="chromium-cargo=$pkgver-r$pkgrel"
+
+	amove usr/bin/cargo-clippy
+	amove usr/bin/clippy-driver
+}
+
+_clippy_doc() {
+	pkgdesc="Rust Code Linter (documentation)"
+	install_if="docs chromium-rust-clippy=$pkgver-r$pkgrel"
+
+	# XXX: This is hackish!
+	cd "$pkgdir"/../$pkgname-doc
+	_mv "$builddir"/src/tools/clippy/book/src/* usr/share/doc/clippy/* \
+		"$subpkgdir"/usr/share/doc/rust-clippy/
+	rmdir -p usr/share/doc/clippy 2>/dev/null || true
+}
+
+src() {
+	pkgdesc="$pkgdesc (source code)"
+	license="($license) AND OFL-1.1 AND GPL-3.0-or-later AND GPL-3.0-with-GCC-exception AND CC-BY-SA-3.0 LGPL-3.0"
+	url="https://github.com/rust-lang/rust/tree/$pkgver"
+	depends="$pkgname=$pkgver-r$pkgrel"
+
+	amove usr/src \
+		usr/lib/rustlib/src \
+		usr/lib/rustlib/rustc-src
+}
+
+_cargo() {
+	pkgdesc="The Rust package manager"
+	license="(Apache-2.0 OR MIT) AND UNLICENSE"
+	url="https://doc.rust-lang.org/cargo/"
+	depends="$pkgname=$pkgver-r$pkgrel"
+	# XXX: See comment on top-level provides=.
+	provides="chromium-cargo-bootstrap=$pkgver-r$pkgrel"
+
+	amove usr/bin/cargo
+}
+
+_cargo_bashcomp() {
+	default_bashcomp
+
+	pkgdesc="Bash completions for cargo"
+	url="https://doc.rust-lang.org/cargo/"
+	install_if="chromium-cargo=$pkgver-r$pkgrel bash-completion"
+}
+
+_cargo_zshcomp() {
+	default_zshcomp
+
+	pkgdesc="ZSH completions for cargo"
+	url="https://doc.rust-lang.org/cargo/"
+	install_if="chromium-cargo=$pkgver-r$pkgrel zsh"
+}
+
+_cargo_doc() {
+	pkgdesc="The Rust package manager (documentation)"
+	url="https://doc.rust-lang.org/cargo/"
+	install_if="docs chromium-cargo=$pkgver-r$pkgrel"
+
+	# XXX: This is hackish!
+	cd "$pkgdir"/../$pkgname-doc
+	_mv usr/share/man/man1/cargo* "$subpkgdir"/usr/share/man/man1/
+	_mv usr/share/doc/cargo "$subpkgdir"/usr/share/doc/
+}
+
+rustfmt() {
+	pkgdesc="Rust Code Formatter"
+	license="Apache-2.0 OR MIT"
+	url="https://rust-lang.github.io/rustfmt/"
+	depends="chromium-cargo=$pkgver-r$pkgrel"
+
+	amove usr/bin/rustfmt
+	amove usr/bin/cargo-fmt
+}
+
+_rustfmt_doc() {
+	pkgdesc="Rust Code Formatter (documentation)"
+	url="https://rust-lang.github.io/rustfmt/"
+	install_if="docs chromium-rustfmt=$pkgver-r$pkgrel"
+
+	cd "$pkgdir"/../$pkgname-doc
+	_mv usr/share/doc/rustfmt "$subpkgdir"/usr/share/doc/
+	install -Dm0644 -t "$subpkgdir"/usr/share/doc/rustfmt/ \
+		"$builddir"/src/tools/rustfmt/README.md \
+		"$builddir"/src/tools/rustfmt/Configurations.md \
+		"$builddir"/src/tools/rustfmt/Design.md
+}
+
+_wasm_cmld() {
+	pkgdesc="Command line linker for creating WebAssembly components"
+	url="https://github.com/bytecodealliance/wasm-component-ld"
+	depends="lld$_llvmver" # wasm-ld
+
+	install -Dm0755 -t"$subpkgdir"/usr/bin/ \
+		"$pkgdir"/usr/lib/rustlib/"$CHOST"/bin/wasm-component-ld
+}
+
+_wasm_cmld_dbg() {
+	pkgdesc="Command line linker for creating WebAssembly components (debug info)"
+	url="https://github.com/bytecodealliance/wasm-component-ld"
+	depends="chromium-wasm-component-ld=$pkgver-r$pkgrel"
+
+	cd "$pkgdir"/../$pkgname-dbg
+	_dbgpath="usr/lib/debug/usr/lib/rustlib/$CHOST/bin"
+	_mv "$_dbgpath"/wasm-component-ld.debug "$subpkgdir"/"$_dbgpath"/
+}
+
+_mv() {
+	local dest; for dest; do true; done  # get last argument
+	mkdir -p "$dest"
+	mv "$@"
+}
+
+sha512sums="
+0f337f9bd48a4e18e2f440923524ff84db222144c9e8f07f5a2cea40ea894eceaa1ba86cb973f356a416ad22d3b14156a930cccd897773947178d4a03528a223  rustc-1.97.0-src.tar.xz
+2065b0226ca1e8b909e50ce9afc0a1ff5b1d43d608b190bab4ec91b0e8c74b471927ea660ffc78d22e8b42001f436fdbf74d49f9b75d37541bba58d9dfded182  alpine-move-py-scripts-to-share.patch
+c7aa0c4bd4c57a49ba3249a5c94208ae7b2b0ee8d5c076fbec8261a212b2ef5a6fd43ec389d90fa1397fc26cc2b67ca1f5b29eb430de8b1da7eded23faf97a6a  alpine-target.patch
+682197c10726304ff3988fe08e5468dfe15605b14decccb5c736020097d77dec12d321388e151b75f876a13a859ce727bb6b7708740f2ae50846aab5cf08eac0  do-not-install-libunwind-source.patch
+4e8b6cbf7a3888f1d9dea5657900d35a369196cbd399cf47a7f3cac304ec0b2447f15d652ac9ab7189844b41a056e850b66bb5b8ebfe372039da7bec7e89a047  embed-metadata.patch
+a3241baf7d0e5bf6f464becfa8817dcebcb3df76a739b3f82b146e465b4f5a2cdc86159ffb84f02c918a4594cba390a7a34dd27da63345bb0d55f0200495f283  gcc-eh-libunwind.patch
+b283d31cc8d6559aa639d44f776e97c2a1e0f23c717b6784e549861b881555bd467fa6023180866aae81a9a58c5f83e306940ee645f3c6733a1bdef6130036c9  install-template-shebang.patch
+1b3ac7eaf39f3ae279bbbe2c1493d01d2963c7e018abde4539fbabe565d3b876f353a2e70f6dfbe999c0eadfc4da057abf4977f51db5105c026ca0cebb9aaafd  no-export-ld-library-path.patch
+16acfa5814b64224d7dad77e95713c350695fa1c43b87fba63c692222bd1421fba6587796765698e3bfd2fd1cb53636e89937413b5b8dd926adbc3baee3ef5b7  remove-musl-root.patch
+3aef4d14dada124bd4c6441ff21cdc07a0275aeac0575fc0b84cfe93e9b8471557db8e5f7402f526139a1d78e0f2a39cb5bd168a3ca634f2e491a05f4dad7f52  system-wasm-ld.patch
+b9fec35959e15e58b4a69701c4bf5aada6cfbc895a4c121690e423a678fb89a7d2b7066c9253ac8b52800730ec8da4fcd4423eeb148a6ac77da38c0c71c18bd2  system-uefi-ld.patch
+301f3fbb50df7641234fe108d9e0b9daa5debb7404bd9df9fc6c5fb1f6de0701dccbbd3bbba6197d7a31e7492420d5bc788f3a664e6eb3031857a524332c91a8  compiler-builtins-no-unwrap.patch
+c31fdfe8a9b3411576c75da46645cf0465b9053000a2ab49cf9b2f2733f679d6d33acbf236d67a20e14935d094a685453b7f1840180249f39d610fd0902c3125  check-rustc
+"
