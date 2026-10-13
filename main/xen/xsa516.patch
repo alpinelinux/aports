@@ -1,0 +1,250 @@
+From: George Dunlap <gwd@xenproject.org>
+Subject: x86/pv: map each vCPU's root page table in its per-domain area
+
+For XPTI enabled VMs, restore_all_guest() copies most of the active L4
+pagetable into the per-CPU root_pgt.  The L4 is read via the
+directmap.
+
+Unfortunately, there was no accounting for the fact that PV guests
+have short directmaps.  For an L4 living beyond the 5T boundary (3.5T
+for CONFIG_BIGMEM), Xen will copy arbitrary data from guest-controlled
+virtual address space into the per-CPU root_pgt, instead of the
+intended L4.
+
+Xen has per-domain mappings for the LDT and GDT, with two pages
+reserved for Xen's use in the GDT but only one in use.  Reuse GDT page
+15 to map the effective L4.  The GDT limit keeps implicit accesses out
+of this page.
+
+We update this mapping in make_cr3(), the only place a non-empty value
+of v->arch.cr3 is written into a guest's vcpu struct, for two reasons.
+First is reference counting: this makes it easier to argue that the
+reference for v->arch.cr3 itself covers the reference for the mapping.
+
+Secondly, this guarantees that all updates, even updates made in
+shadow mode, result in an update to the mapping.  During live
+migration, it's possible for guest_get_eff_kern_l1e() to result in a
+modified value of v->arch.cr3 (sketch below); placing the mapping
+update at make_cr3() catches this, while other candidate locations
+like write_ptbase() and toggle_guest_mode() don't.
+
+Note that we introduce the idea of an "effective L4" here, to mean
+"guest L4 after any transformations": XPTI copies either the actual
+guest L4 if not shadowed, or the shadow L4 (transformed) if shadowed.
+
+Sketch: guest_get_eff_kern_l1e() has a pair of toggle_guest_pt() calls
+which happen if the guest is in user mode.  During live migration, a
+log-dirty clean will do a domain_pause and then call
+shadow_blow_tables(), unpinning the shadow of the guest user root
+pagetable.  After execution resumes, the first toggle_guest_pt() could
+then cause that page to become unshadowed.  The second
+toggle_guest_pt() would then re-shadow it, possibly with a different
+backing shadow page.
+
+This is XSA-516 / CVE-2026-79609.
+
+Fixes: 5784de3e2067 ("x86: Meltdown band-aid against malicious 64-bit PV guests")
+Assisted-by: Claude Code:claude-fable-5-1
+Signed-off-by: George Dunlap <gwd@xenproject.org>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+
+Changes in v4:
+- Reworded the pv_unmap_eff_root_pt() comment and the lifetime note
+  below.  The window has exactly v->arch.cr3's validity: in shadow mode
+  both name the top-level shadow after shadow_teardown() has released
+  it, until vcpu_destroy_pagetables() clears them, and nothing uses
+  either by then.  The earlier wording claimed more.
+- Tweaked commit message wording re sketch to make it clear it's not a race
+- Reworked "last page of GDT" comment to be more technically accurate
+
+(A patch marked v3 was sent erroneously.)
+
+Changes in v2 (of security@ posting):
+- Merged is_pv_domain() condition in make_cr3()
+- Use KB(64) as requested during review
+- BUILD_BUG_ON() now expressed with LAST_RESERVED_GDT_BYTE as
+  requested during review
+- Switched to "PV_EFF_ROOT_PT" to specify that this is after potential
+  shadow transformations
+- Trimmed down the commit message, clarified make_cr3() rationale.
+
+Relative to v5:
+- The window is the spare GDT page after Xen's reserved range rather
+  than a new sub-area: no allocation (v2's array drew a 32x
+  over-allocation remark) and nothing to create or tear down per vCPU.
+- The refresh is in make_cr3(), which every root change passes through,
+  shadow mode included, instead of write_ptbase() plus the toggle.
+- The window is cleared in vcpu_destroy_pagetables() alongside
+  v->arch.cr3, so it has exactly v->arch.cr3's validity.
+- The entry.S computation keeps the v2 shape; the mapping stays
+  read-only, as suggested on v2.
+- Build-time checks pin the window to the reserved range.
+It applies on its own to current staging, using the per-vCPU GDT L1
+table Xen already keeps.
+---
+ xen/arch/x86/include/asm/config.h | 23 ++++++++++++++--
+ xen/arch/x86/include/asm/desc.h   | 10 +++++++
+ xen/arch/x86/mm.c                 | 45 +++++++++++++++++++++++++++++--
+ xen/arch/x86/x86_64/asm-offsets.c |  1 +
+ xen/arch/x86/x86_64/entry.S       |  7 ++++-
+ 5 files changed, 81 insertions(+), 5 deletions(-)
+
+diff --git a/xen/arch/x86/include/asm/config.h b/xen/arch/x86/include/asm/config.h
+index 1b28349a42..0c004edc66 100644
+--- a/xen/arch/x86/include/asm/config.h
++++ b/xen/arch/x86/include/asm/config.h
+@@ -249,11 +249,30 @@ extern unsigned long xen_phys_start;
+ #define GDT_LDT_VIRT_START       PERDOMAIN_VIRT_SLOT(0)
+ #define GDT_LDT_VIRT_END         (GDT_LDT_VIRT_START + (GDT_LDT_MBYTES << 20))
+ 
+-/* The address of a particular VCPU's GDT or LDT. */
++/*
++ * The address of a particular VCPU's GDT or LDT; each is the architectural
++ * maximum of 64k.
++ */
++#define GDT_VIRT_SIZE        KB(64)
+ #define GDT_VIRT_START(v)    \
+     (PERDOMAIN_VIRT_START + ((v)->vcpu_id << GDT_LDT_VCPU_VA_SHIFT))
+ #define LDT_VIRT_START(v)    \
+-    (GDT_VIRT_START(v) + (64*1024))
++    (GDT_VIRT_START(v) + GDT_VIRT_SIZE)
++
++/*
++ * The vCPU's effective root page table, mapped read-only in the last
++ * page of its GDT: the page after Xen's reserved range, beyond the
++ * GDT limit Xen loads (LAST_RESERVED_GDT_BYTE), so no selector can
++ * reach it.  "Effective" is the root page table the vCPU is meant to
++ * run on after any transformation: the guest's own, or its shadow
++ * under shadow paging.  XPTI does not transform it further but copies
++ * from it: the exit path reads the guest-visible L4 slots from here.
++ * Adding a reserved GDT page would mean moving the window out of the
++ * GDT first; pv_map_eff_root_pt() checks the layout at build time.
++ */
++#define PV_EFF_ROOT_PT_PAGE    (FIRST_RESERVED_GDT_PAGE + 1)
++#define PV_EFF_ROOT_PT_OFFSET  (PV_EFF_ROOT_PT_PAGE << PAGE_SHIFT)
++#define PV_EFF_ROOT_PT(v)      (GDT_VIRT_START(v) + PV_EFF_ROOT_PT_OFFSET)
+ 
+ /* map_domain_page() map cache. The second per-domain-mapping sub-area. */
+ #define MAPCACHE_VCPU_ENTRIES    (CONFIG_PAGING_LEVELS * CONFIG_PAGING_LEVELS)
+diff --git a/xen/arch/x86/include/asm/desc.h b/xen/arch/x86/include/asm/desc.h
+index dcbdac3ff7..7cbb9a7336 100644
+--- a/xen/arch/x86/include/asm/desc.h
++++ b/xen/arch/x86/include/asm/desc.h
+@@ -6,6 +6,16 @@
+ /*
+  * Xen reserves a memory page of GDT entries.
+  * No guest GDT entries exist beyond the Xen reserved area.
++ *
++ * The page after the reserved area, the last of the GDT's 64k, is the
++ * PV effective root-table window (PV_EFF_ROOT_PT_PAGE, config.h):
++ * beyond the GDT limit Xen loads (LAST_RESERVED_GDT_BYTE), so no
++ * selector reaches it.  Xen uses only a few of the reserved page's
++ * 512 slots, so more Xen descriptors never need another page; if one
++ * were needed regardless, the window would have to move out of the
++ * GDT first (into a per-domain sub-area of its own), as this is the
++ * GDT's last page.  pv_map_eff_root_pt() checks the layout at build
++ * time.
+  */
+ #define NR_RESERVED_GDT_PAGES   1
+ #define NR_RESERVED_GDT_BYTES   (NR_RESERVED_GDT_PAGES * PAGE_SIZE)
+diff --git a/xen/arch/x86/mm.c b/xen/arch/x86/mm.c
+index b158742408..f4b87ed5ec 100644
+--- a/xen/arch/x86/mm.c
++++ b/xen/arch/x86/mm.c
+@@ -510,13 +510,52 @@ void share_xen_page_with_guest(struct page_info *page, struct domain *d,
+     nrspin_unlock(&d->page_alloc_lock);
+ }
+ 
++/*
++ * Map @mfn read-only at v's PV_EFF_ROOT_PT() window.  The window lives in
++ * v's per-domain area, so v need not be current; the local flush is for
++ * when it is, with its own page tables loaded.
++ */
++static void pv_map_eff_root_pt(const struct vcpu *v, mfn_t mfn)
++{
++    /*
++     * The window must lie beyond the GDT limit Xen loads, so that no
++     * selector reaches it, and within the GDT's 64k.
++     */
++    BUILD_BUG_ON(PV_EFF_ROOT_PT_OFFSET <= LAST_RESERVED_GDT_BYTE);
++    BUILD_BUG_ON(PV_EFF_ROOT_PT_OFFSET + PAGE_SIZE > GDT_VIRT_SIZE);
++
++    l1e_write(pv_gdt_ptes(v) + PV_EFF_ROOT_PT_PAGE,
++              l1e_from_mfn(mfn, __PAGE_HYPERVISOR_RO));
++    flush_tlb_one_local(PV_EFF_ROOT_PT(v));
++}
++
++/*
++ * Clear the window.  Its lifetime is v->arch.cr3's: make_cr3() writes it
++ * wherever v->arch.cr3 is set, and vcpu_destroy_pagetables() clears it where
++ * v->arch.cr3 is zeroed.  In shadow mode both name a top-level shadow, which
++ * shadow_teardown() releases before that point; nothing uses either once the
++ * vCPU can no longer run.
++ */
++static void pv_unmap_eff_root_pt(const struct vcpu *v)
++{
++    l1e_write(pv_gdt_ptes(v) + PV_EFF_ROOT_PT_PAGE, l1e_empty());
++    flush_tlb_one_local(PV_EFF_ROOT_PT(v));
++}
++
+ void make_cr3(struct vcpu *v, mfn_t mfn)
+ {
+     struct domain *d = v->domain;
+ 
+     v->arch.cr3 = mfn_x(mfn) << PAGE_SHIFT;
+-    if ( is_pv_domain(d) && d->arch.pv.pcid )
+-        v->arch.cr3 |= get_pcid_bits(v, false);
++
++    if ( is_pv_domain(d) )
++    {
++        if ( d->arch.pv.pcid )
++            v->arch.cr3 |= get_pcid_bits(v, false);
++
++        if ( d->arch.pv.xpti )
++            pv_map_eff_root_pt(v, mfn);
++    }
+ }
+ 
+ void write_ptbase(struct vcpu *v)
+@@ -3224,6 +3263,8 @@ int vcpu_destroy_pagetables(struct vcpu *v)
+         return rc;
+ 
+     v->arch.cr3 = 0;
++    if ( is_pv_domain(v->domain) && v->domain->arch.pv.xpti )
++        pv_unmap_eff_root_pt(v);
+ 
+     /*
+      * Get the top-level guest page; either the guest_table itself, for
+diff --git a/xen/arch/x86/x86_64/asm-offsets.c b/xen/arch/x86/x86_64/asm-offsets.c
+index baf266ab80..0549fd5e8d 100644
+--- a/xen/arch/x86/x86_64/asm-offsets.c
++++ b/xen/arch/x86/x86_64/asm-offsets.c
+@@ -82,6 +82,7 @@ void __dummy__(void)
+ 
+ #undef OFFSET_EF
+ 
++    OFFSET(VCPU_id, struct vcpu, vcpu_id);
+     OFFSET(VCPU_processor, struct vcpu, processor);
+     OFFSET(VCPU_domain, struct vcpu, domain);
+     OFFSET(VCPU_vcpu_info, struct vcpu, vcpu_info_area.map);
+diff --git a/xen/arch/x86/x86_64/entry.S b/xen/arch/x86/x86_64/entry.S
+index 59953c9f52..ba175bde7c 100644
+--- a/xen/arch/x86/x86_64/entry.S
++++ b/xen/arch/x86/x86_64/entry.S
+@@ -200,9 +200,14 @@ FUNC_LOCAL(restore_all_guest)
+         movabs $PADDR_MASK & PAGE_MASK, %rsi
+         movabs $DIRECTMAP_VIRT_START, %rcx
+         and   %rsi, %rdi
+-        and   %r9, %rsi
+         add   %rcx, %rdi
++
++        /* Effective root page table is mapped at PV_EFF_ROOT_PT(v) */
++        mov   VCPU_id(%rbx), %esi
++        shl   $GDT_LDT_VCPU_VA_SHIFT, %rsi
++        movabs $GDT_LDT_VIRT_START + PV_EFF_ROOT_PT_OFFSET, %rcx
+         add   %rcx, %rsi
++
+         mov   $ROOT_PAGETABLE_FIRST_XEN_SLOT, %ecx
+         mov   root_table_offset(SH_LINEAR_PT_VIRT_START)*8(%rsi), %r8
+         mov   %r8, root_table_offset(SH_LINEAR_PT_VIRT_START)*8(%rdi)
