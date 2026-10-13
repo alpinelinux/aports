@@ -1,0 +1,162 @@
+From aaf6143098e1e8314648e65469a1b469c4ad3ae5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ball=C3=B3=20Gy=C3=B6rgy?= <ballogyor@gmail.com>
+Date: Wed, 14 Oct 2026 03:54:41 +0200
+Subject: [PATCH] tests: Fix fallback test for host registration checks
+
+Reply to GetAll requests with IsStatusNotifierHostRegistered set
+to TRUE and restart the watcher after registering the status
+notifier item to test the fallback and unfallback sequence.
+---
+ tests/test-libappindicator-fallback-item.c    |  4 +-
+ tests/test-libappindicator-fallback-watcher.c | 83 ++++++++++++++++---
+ 2 files changed, 76 insertions(+), 11 deletions(-)
+
+diff --git a/tests/test-libappindicator-fallback-item.c b/tests/test-libappindicator-fallback-item.c
+index 3c6f630a..2a928cb5 100644
+--- a/tests/test-libappindicator-fallback-item.c
++++ b/tests/test-libappindicator-fallback-item.c
+@@ -51,6 +51,7 @@ test_libappindicator_fallback_item_init (TestLibappindicatorFallbackItem *self)
+ 
+ GMainLoop * mainloop = NULL;
+ gboolean passed = FALSE;
++gboolean timed_out = FALSE;
+ 
+ enum {
+     STATE_INIT,
+@@ -98,6 +99,7 @@ gboolean
+ kill_func (gpointer data)
+ {
+     g_debug("Kill Function");
++    timed_out = TRUE;
+     g_main_loop_quit(mainloop);
+     return FALSE;
+ }
+@@ -155,7 +157,7 @@ main (int argc, char ** argv)
+ 
+     g_object_unref(G_OBJECT(item));
+ 
+-    if (passed) {
++    if (passed && !timed_out) {
+         return 0;
+     } else {
+         return 1;
+diff --git a/tests/test-libappindicator-fallback-watcher.c b/tests/test-libappindicator-fallback-watcher.c
+index 1ef08397..58ea91e1 100644
+--- a/tests/test-libappindicator-fallback-watcher.c
++++ b/tests/test-libappindicator-fallback-watcher.c
+@@ -29,11 +29,78 @@ with this program.  If not, see <http://www.gnu.org/licenses/>.
+ gboolean kill_func (gpointer userdata);
+ 
+ static GMainLoop * mainloop = NULL;
++static guint watcher_owner_id = 0;
++static gboolean watcher_restarted = FALSE;
++
++static gboolean
++reacquire_watcher_name (gpointer userdata)
++{
++    watcher_owner_id = g_bus_own_name_on_connection (
++        G_DBUS_CONNECTION (userdata),
++        NOTIFICATION_WATCHER_DBUS_ADDR,
++        G_BUS_NAME_OWNER_FLAGS_NONE,
++        NULL, NULL, NULL, NULL);
++
++    return G_SOURCE_REMOVE;
++}
++
++static gboolean
++restart_watcher (gpointer userdata)
++{
++    g_bus_unown_name (watcher_owner_id);
++    watcher_owner_id = 0;
++
++    g_timeout_add (100, reacquire_watcher_name, userdata);
++
++    return G_SOURCE_REMOVE;
++}
+ 
+ static GDBusMessage* dbus_filter (GDBusConnection *pConnection, GDBusMessage *pMessage, gboolean bIncoming, void *pUserData)
+ {
+     GDBusMessageType cType = g_dbus_message_get_message_type (pMessage);
+     const gchar *sMember = g_dbus_message_get_member (pMessage);
++
++    if (cType == G_DBUS_MESSAGE_TYPE_METHOD_CALL &&
++        g_strcmp0 (g_dbus_message_get_path (pMessage),
++                   NOTIFICATION_WATCHER_DBUS_OBJ) == 0 &&
++        g_strcmp0 (g_dbus_message_get_interface (pMessage),
++                   DBUS_INTERFACE_PROPERTIES) == 0 &&
++        g_strcmp0 (sMember, "GetAll") == 0)
++    {
++        GVariant *pBody = g_dbus_message_get_body (pMessage);
++
++        if (pBody == NULL ||
++            !g_variant_is_of_type (pBody, G_VARIANT_TYPE ("(s)")))
++        {
++            return pMessage;
++        }
++
++        const gchar *sInterface = NULL;
++        g_variant_get (pBody, "(&s)", &sInterface);
++
++        if (g_strcmp0 (sInterface, NOTIFICATION_WATCHER_DBUS_IFACE) == 0)
++        {
++            GVariantBuilder builder;
++            g_variant_builder_init (&builder, G_VARIANT_TYPE ("a{sv}"));
++            g_variant_builder_add (&builder, "{sv}",
++                                   "IsStatusNotifierHostRegistered",
++                                   g_variant_new_boolean (TRUE));
++
++            GDBusMessage *pReply =
++                g_dbus_message_new_method_reply (pMessage);
++            g_dbus_message_set_body (
++                pReply,
++                g_variant_new ("(@a{sv})",
++                               g_variant_builder_end (&builder)));
++            g_dbus_connection_send_message (pConnection, pReply,
++                                            G_DBUS_SEND_MESSAGE_FLAGS_NONE,
++                                            NULL, NULL);
++            g_object_unref (pReply);
++            g_object_unref (pMessage);
++            return NULL;
++        }
++    }
++
+     int nMemberComp = g_strcmp0 (sMember, "RegisterStatusNotifierItem");
+ 
+     if (cType == G_DBUS_MESSAGE_TYPE_METHOD_CALL && nMemberComp == 0)
+@@ -41,7 +108,10 @@ static GDBusMessage* dbus_filter (GDBusConnection *pConnection, GDBusMessage *pM
+         GDBusMessage *pReply = g_dbus_message_new_method_reply (pMessage);
+         g_dbus_connection_send_message (pConnection, pReply, G_DBUS_SEND_MESSAGE_FLAGS_NONE, NULL, NULL);
+         g_object_unref (pReply);
+-        g_timeout_add (50, kill_func, NULL);
++        if (!watcher_restarted) {
++            watcher_restarted = TRUE;
++            g_timeout_add (50, restart_watcher, pConnection);
++        }
+         g_object_unref (pMessage);
+         pMessage = NULL;
+     }
+@@ -100,22 +170,15 @@ main (int argv, char ** argc)
+     g_debug("Initing");
+ 
+     GDBusConnection *pConnection = g_dbus_proxy_get_connection (pProxy);
+-    guint nName = g_bus_own_name_on_connection (pConnection, NOTIFICATION_WATCHER_DBUS_ADDR, G_BUS_NAME_OWNER_FLAGS_NONE, NULL, NULL, NULL, NULL);
++    watcher_owner_id = g_bus_own_name_on_connection (pConnection, NOTIFICATION_WATCHER_DBUS_ADDR, G_BUS_NAME_OWNER_FLAGS_NONE, NULL, NULL, NULL, NULL);
+ 
+-    if (!nName)
++    if (!watcher_owner_id)
+     {
+         g_error ("Unable to call to request name");
+ 
+         return 1;
+     }
+ 
+-    if (nName != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER)
+-    {
+-        g_error ("Unable to get name");
+-
+-        return 1;
+-    }
+-
+     g_dbus_connection_add_filter (pConnection, dbus_filter, NULL, NULL);
+ 
+     /* This is the final kill function.  It really shouldn't happen
