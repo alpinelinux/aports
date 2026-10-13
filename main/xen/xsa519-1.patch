@@ -1,0 +1,116 @@
+From: Leonid Komarianskyi <leonid_komarianskyi@epam.com>
+Subject: xen/arm: Fix size underflow in invalidate_dcache_va_range()
+
+When the start address is not cacheline aligned, the bytes covered by
+the first, partial cacheline are subtracted from 'size'. Nothing checks
+that the region actually extends beyond that cacheline, so if it does
+not, the unsigned subtraction underflows and the loop that follows walks
+practically the entire address space.
+
+For example, with a 64-byte cacheline, p = 0x40000001 and size = 1:
+
+    p & cacheline_mask     -> 1, so the partial head is taken
+    size -= 64 - 1         -> 1 - 63 underflows to 0xffffffffffffffc2
+
+Instead of a single "dc civac" at 0x40000000, the loop then runs
+288230376151711743 times, issuing "dc ivac" from 0x40000040 upwards.
+Invalidating without cleaning discards dirty cachelines, so this
+corrupts whatever is mapped along the way until Xen takes a data abort.
+
+Moreover, _cache_flush() in common/grant_table.c, reachable from a guest
+via GNTTABOP_cache_flush, bounds 'offset' and 'length' against the page
+size but requires no alignment, so GNTTAB_CACHE_INVAL with offset = 1
+and length = 1 is enough to trigger this. Note that the page may belong
+to a different domain (the d != owner path), so the data being discarded
+is not necessarily the caller's own.
+
+The subtraction dates back to the fix for XSA-437, so this is a regression
+in that change.
+
+Fix this by detecting the underflow instead of letting it happen: if the
+region ends inside the first cacheline, there is nothing left to flush
+and the function bails out right after cleaning it. Partially covered
+cachelines are still cleaned as well as invalidated, so that data outside
+of the region is not discarded.
+
+Additionally, drop 'idx' and advance 'p' directly instead. It simplifies
+the logic while using fewer variables and less arithmetic.
+
+Note that the partial head is now cleaned using the unaligned start of the
+region instead of the start of its cacheline. This is permitted by the
+architecture; the Arm ARM (DDI 0487) states:
+
+  "When a DC instruction requires an address argument this takes the form
+  of a 64-bit register that holds the VA argument. No alignment
+  restrictions apply for this address."
+
+The same applies on Arm32.
+
+Also, switch the asm() in the loop to asm_inline, like the neighbouring
+ones: the wrapper expands to a single instruction with a trailing
+semicolon, which GCC counts as two statements, overestimating the size
+of the function when deciding whether to inline it.
+
+This is CVE-2026-102699, part of XSA-519.
+
+Fixes: 9a216e92de9f ("xen/arm: page: Handle cache flush of an element at the top of the address space")
+Signed-off-by: Leonid Komarianskyi <leonid_komarianskyi@epam.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Julien Grall <julien@xen.org>
+
+diff --git a/xen/arch/arm/include/asm/page.h b/xen/arch/arm/include/asm/page.h
+index 90100a96dfda..6da4745736a2 100644
+--- a/xen/arch/arm/include/asm/page.h
++++ b/xen/arch/arm/include/asm/page.h
+@@ -168,7 +168,7 @@ static inline size_t read_dcache_line_bytes(void)
+ static inline int invalidate_dcache_va_range(const void *p, unsigned long size)
+ {
+     size_t cacheline_mask = dcache_line_bytes - 1;
+-    unsigned long idx = 0;
++    unsigned long partial_head;
+ 
+     if ( !size )
+         return 0;
+@@ -178,23 +178,35 @@ static inline int invalidate_dcache_va_range(const void *p, unsigned long size)
+ 
+     dsb(sy);           /* So the CPU issues all writes to the range */
+ 
+-    if ( (uintptr_t)p & cacheline_mask )
++    /*
++     * A cacheline only partially covered by the region has to be cleaned as
++     * well as invalidated, so that data living outside of the region is not
++     * discarded.
++     */
++    partial_head = (uintptr_t)p & cacheline_mask;
++    if ( partial_head )
+     {
+-        size -= dcache_line_bytes - ((uintptr_t)p & cacheline_mask);
+-        p = (void *)((uintptr_t)p & ~cacheline_mask);
++        unsigned long rem = dcache_line_bytes - partial_head;
++
+         asm_inline volatile (
+             __clean_and_invalidate_dcache_one(0) :: "r" (p) );
+-        p += dcache_line_bytes;
++        p += rem;
++
++        /* The region may end within this cacheline, leaving nothing to do. */
++        if ( __builtin_usubl_overflow(size, rem, &size) )
++            goto done;
+     }
+ 
+     for ( ; size >= dcache_line_bytes;
+-            idx += dcache_line_bytes, size -= dcache_line_bytes )
+-        asm volatile (__invalidate_dcache_one(0) : : "r" (p + idx));
++            p += dcache_line_bytes, size -= dcache_line_bytes )
++        asm_inline volatile (__invalidate_dcache_one(0) : : "r" (p));
+ 
++    /* Partial tail must be cleaned as well. */
+     if ( size > 0 )
+         asm_inline volatile (
+-            __clean_and_invalidate_dcache_one(0) :: "r" (p + idx) );
++            __clean_and_invalidate_dcache_one(0) :: "r" (p) );
+ 
++ done:
+     dsb(sy);           /* So we know the flushes happen before continuing */
+ 
+     return 0;
