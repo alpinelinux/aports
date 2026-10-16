@@ -1,0 +1,153 @@
+Patch-Source: https://github.com/libjxl/libjxl/pull/4095
+From 4b7c3f7d8f2c67645ec10d6350cfc942e9cf8c48 Mon Sep 17 00:00:00 2001
+From: Eugene Kliuchnikov <eustas@google.com>
+Date: Thu, 30 Jan 2025 13:49:03 +0100
+Subject: [PATCH] Fix modular on big-endian machines (#4095)
+
+---
+ lib/jxl/dec_noise.cc                   |  4 ++--
+ lib/jxl/modular/transform/squeeze.cc   | 28 +++++++++++++++-----------
+ lib/jxl/render_pipeline/stage_noise.cc |  7 +++++--
+ 3 files changed, 23 insertions(+), 16 deletions(-)
+
+diff --git a/lib/jxl/dec_noise.cc b/lib/jxl/dec_noise.cc
+index 949ddc82..51330fd6 100644
+--- a/lib/jxl/dec_noise.cc
++++ b/lib/jxl/dec_noise.cc
+@@ -26,12 +26,12 @@ namespace HWY_NAMESPACE {
+ 
+ // These templates are not found via ADL.
+ using hwy::HWY_NAMESPACE::Or;
++using hwy::HWY_NAMESPACE::Rebind;
+ using hwy::HWY_NAMESPACE::ShiftRight;
+ using hwy::HWY_NAMESPACE::Vec;
+ 
+ using D = HWY_CAPPED(float, kBlockDim);
+-using DI = hwy::HWY_NAMESPACE::Rebind<int, D>;
+-using DI8 = hwy::HWY_NAMESPACE::Repartition<uint8_t, D>;
++using DI = Rebind<int, D>;
+ 
+ // Converts one vector's worth of random bits to floats in [1, 2).
+ // NOTE: as the convolution kernel sums to 0, it doesn't matter if inputs are in
+diff --git a/lib/jxl/modular/transform/squeeze.cc b/lib/jxl/modular/transform/squeeze.cc
+index de685f77..cb2677a0 100644
+--- a/lib/jxl/modular/transform/squeeze.cc
++++ b/lib/jxl/modular/transform/squeeze.cc
+@@ -25,6 +25,8 @@ HWY_BEFORE_NAMESPACE();
+ namespace jxl {
+ namespace HWY_NAMESPACE {
+ 
++#if HWY_TARGET != HWY_SCALAR
++
+ // These templates are not found via ADL.
+ using hwy::HWY_NAMESPACE::Abs;
+ using hwy::HWY_NAMESPACE::Add;
+@@ -34,6 +36,7 @@ using hwy::HWY_NAMESPACE::IfThenElse;
+ using hwy::HWY_NAMESPACE::IfThenZeroElse;
+ using hwy::HWY_NAMESPACE::Lt;
+ using hwy::HWY_NAMESPACE::MulEven;
++using hwy::HWY_NAMESPACE::MulOdd;
+ using hwy::HWY_NAMESPACE::Ne;
+ using hwy::HWY_NAMESPACE::Neg;
+ using hwy::HWY_NAMESPACE::OddEven;
+@@ -43,7 +46,10 @@ using hwy::HWY_NAMESPACE::ShiftRight;
+ using hwy::HWY_NAMESPACE::Sub;
+ using hwy::HWY_NAMESPACE::Xor;
+ 
+-#if HWY_TARGET != HWY_SCALAR
++using D = HWY_CAPPED(pixel_type, 8);
++using DU = RebindToUnsigned<D>;
++constexpr D d;
++constexpr DU du;
+ 
+ JXL_INLINE void FastUnsqueeze(const pixel_type *JXL_RESTRICT p_residual,
+                               const pixel_type *JXL_RESTRICT p_avg,
+@@ -51,8 +57,6 @@ JXL_INLINE void FastUnsqueeze(const pixel_type *JXL_RESTRICT p_residual,
+                               const pixel_type *p_pout,
+                               pixel_type *JXL_RESTRICT p_out,
+                               pixel_type *p_nout) {
+-  const HWY_CAPPED(pixel_type, 8) d;
+-  const RebindToUnsigned<decltype(d)> du;
+   const size_t N = Lanes(d);
+   auto onethird = Set(d, 0x55555556);
+   for (size_t x = 0; x < 8; x += N) {
+@@ -68,12 +72,13 @@ JXL_INLINE void FastUnsqueeze(const pixel_type *JXL_RESTRICT p_residual,
+     auto absan = Abs(an);
+     auto absBn = Abs(Sub(top, next_avg));
+     // Compute a3 = absBa / 3
+-    auto a3e = BitCast(d, ShiftRight<32>(MulEven(absBa, onethird)));
+-    auto a3oi = MulEven(Reverse(d, absBa), onethird);
+-    auto a3o = BitCast(
+-        d, Reverse(hwy::HWY_NAMESPACE::Repartition<pixel_type_w, decltype(d)>(),
+-                   a3oi));
+-    auto a3 = OddEven(a3o, a3e);
++    auto a3eh = MulEven(absBa, onethird);
++    auto a3oh = MulOdd(absBa, onethird);
++#if HWY_IS_LITTLE_ENDIAN
++    auto a3 = InterleaveOdd(d, BitCast(d, a3eh), BitCast(d, a3oh));
++#else
++    auto a3 = InterleaveEven(d, BitCast(d, a3eh), BitCast(d, a3oh));
++#endif
+     a3 = Add(a3, Add(absBn, Set(d, 2)));
+     auto absdiff = ShiftRight<2>(a3);
+     auto skipdiff = Ne(Ba, Zero(d));
+@@ -99,7 +104,7 @@ JXL_INLINE void FastUnsqueeze(const pixel_type *JXL_RESTRICT p_residual,
+   }
+ }
+ 
+-#endif
++#endif  // HWY_TARGET != HWY_SCALAR
+ 
+ Status InvHSqueeze(Image &input, uint32_t c, uint32_t rc, ThreadPool *pool) {
+   JXL_ENSURE(c < input.channel.size());
+@@ -174,7 +179,6 @@ Status InvHSqueeze(Image &input, uint32_t c, uint32_t rc, ThreadPool *pool) {
+     HWY_ALIGN pixel_type b_p_out_odd[8 * kRowsPerThread];
+     HWY_ALIGN pixel_type b_p_out_evenT[8 * kRowsPerThread];
+     HWY_ALIGN pixel_type b_p_out_oddT[8 * kRowsPerThread];
+-    const HWY_CAPPED(pixel_type, 8) d;
+     const size_t N = Lanes(d);
+     if (chin_residual.w > 16 && rows == kRowsPerThread) {
+       for (; x < chin_residual.w - 9; x += 8) {
+@@ -202,7 +206,7 @@ Status InvHSqueeze(Image &input, uint32_t c, uint32_t rc, ThreadPool *pool) {
+         }
+       }
+     }
+-#endif
++#endif  // HWY_TARGET != HWY_SCALAR
+     for (size_t y = 0; y < rows; y++) {
+       unsqueeze_row(y0 + y, x);
+     }
+diff --git a/lib/jxl/render_pipeline/stage_noise.cc b/lib/jxl/render_pipeline/stage_noise.cc
+index 5a241183..3498352f 100644
+--- a/lib/jxl/render_pipeline/stage_noise.cc
++++ b/lib/jxl/render_pipeline/stage_noise.cc
+@@ -28,14 +28,16 @@ using hwy::HWY_NAMESPACE::Min;
+ using hwy::HWY_NAMESPACE::Mul;
+ using hwy::HWY_NAMESPACE::MulAdd;
+ using hwy::HWY_NAMESPACE::Or;
++using hwy::HWY_NAMESPACE::Rebind;
++using hwy::HWY_NAMESPACE::Repartition;
+ using hwy::HWY_NAMESPACE::Sub;
+ using hwy::HWY_NAMESPACE::TableLookupBytes;
+ using hwy::HWY_NAMESPACE::Vec;
+ using hwy::HWY_NAMESPACE::ZeroIfNegative;
+ 
+ using D = HWY_CAPPED(float, kBlockDim);
+-using DI = hwy::HWY_NAMESPACE::Rebind<int32_t, D>;
+-using DI8 = hwy::HWY_NAMESPACE::Repartition<uint8_t, D>;
++using DI = Rebind<int32_t, D>;
++using DI8 = Repartition<uint8_t, D>;
+ 
+ // [0, max_value]
+ template <class D, class V>
+@@ -65,6 +67,7 @@ class StrengthEvalLut {
+     uint32_t lut[NoiseParams::kNumNoisePoints];
+     memcpy(lut, noise_params.lut.data(),
+            NoiseParams::kNumNoisePoints * sizeof(uint32_t));
++    // TODO(eustas): make sure it works on big-endian
+     for (size_t i = 0; i < NoiseParams::kNumNoisePoints; i++) {
+       low16_lut[2 * i] = (lut[i] >> 0) & 0xFF;
+       low16_lut[2 * i + 1] = (lut[i] >> 8) & 0xFF;
+-- 
+2.51.1
+
