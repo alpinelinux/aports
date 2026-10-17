@@ -1,0 +1,417 @@
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Mon, 27 Apr 2026 09:14:51 +0200
+Subject: [PATCH] setopt: clear proxy auth properties when switching
+
+Verify with test 1588
+
+Closes #21453
+
+Backported-by: Samuel Henrique <samueloph@debian.org>
+ * lib/setopt.c: upstream's CURLOPT_PROXY case lives in a dedicated
+   setopt_cptr_proxy() function; in 8.14.1 it is still inline in the
+   setopt_cptr() switch. The setproxy() helper is added directly
+   above setopt_cptr() and the inline Curl_setstropt() call is
+   swapped for setproxy().
+ * lib/vauth/vauth.h: upstream's hunk also adds a no-op
+   Curl_auth_is_digest_supported() macro to the CURL_DISABLE_DIGEST_AUTH
+   branch, but our 8.14.1 vauth.h has no such #else branch (the file
+   ends the digest block with a bare #endif). Add only the
+   Curl_auth_digest_cleanup(x) no-op macro inside a new #else, which
+   is the part actually needed by setproxy() in disable-digest builds.
+ * tests/data/test1588: regression test from upstream with two changes:
+   crlf="headers" -> crlf="yes" so the 8.14.1 test runner correctly
+   applies CRLF to header lines on both the server-side data and the
+   expected protocol block; and the "digest" entry in <features> is
+   dropped because the 8.14.1 curlinfo emits the feature toggle as
+   "digest-auth" rather than "digest", so the unmodified feature gate
+   would always SKIP the test on this branch. Other digest-auth tests
+   (e.g. test1061) similarly do not list "digest" as a required
+   feature.
+ * tests/libtest/lib1588.c: rewritten to use the 8.14.1 libtest
+   harness (test.h / CURLcode test(char *URL) / easy_init / easy_setopt
+   with goto test_cleanup) instead of upstream's newer first.h-based
+   one. The init1588() helper also reuses the parent's test_cleanup
+   label rather than upstream's separate init_failed label, since
+   8.14.1's easy_setopt jumps directly to test_cleanup.
+---
+ lib/setopt.c                     |  17 +++++-
+ lib/vauth/vauth.h                |   2 +
+ tests/data/Makefile.am           |   1 +
+ tests/data/{test540 => test1588} | 109 +++++++++++++++++-----------------
+ tests/libtest/Makefile.inc       |   5 +-
+ tests/libtest/lib1588.c          | 124 +++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 200 insertions(+), 58 deletions(-)
+ copy tests/data/{test540 => test1588} (64%)
+ create mode 100644 tests/libtest/lib1588.c
+
+diff --git a/lib/setopt.c b/lib/setopt.c
+index d5ddf6d..fddef99 100644
+--- a/lib/setopt.c
++++ b/lib/setopt.c
+@@ -54,6 +54,7 @@
+ #include "tftp.h"
+ #include "strdup.h"
+ #include "escape.h"
++#include "vauth/vauth.h"
+ 
+ /* The last 3 #include files should be in this order */
+ #include "curl_printf.h"
+@@ -1662,6 +1663,20 @@ static CURLcode setopt_pointers(struct Curl_easy *data, CURLoption option,
+   return result;
+ }
+ 
++#ifndef CURL_DISABLE_PROXY
++static CURLcode setproxy(struct Curl_easy *data, const char *proxy)
++{
++  if((data->set.str[STRING_PROXY] && proxy) &&
++     /* there was one set, is this a new one? */
++     !strcmp(data->set.str[STRING_PROXY], proxy))
++    return CURLE_OK; /* same one as before */
++
++  Curl_auth_digest_cleanup(&data->state.proxydigest);
++  memset(&data->state.authproxy, 0, sizeof(data->state.authproxy));
++  return Curl_setstropt(&data->set.str[STRING_PROXY], proxy);
++}
++#endif
++
+ static CURLcode setopt_cptr(struct Curl_easy *data, CURLoption option,
+                             char *ptr)
+ {
+@@ -1949,7 +1964,7 @@ static CURLcode setopt_cptr(struct Curl_easy *data, CURLoption option,
+      * Setting it to NULL, means no proxy but allows the environment variables
+      * to decide for us (if CURLOPT_SOCKS_PROXY setting it to NULL).
+      */
+-    return Curl_setstropt(&data->set.str[STRING_PROXY], ptr);
++    return setproxy(data, ptr);
+ 
+   case CURLOPT_PRE_PROXY:
+     /*
+diff --git a/lib/vauth/vauth.h b/lib/vauth/vauth.h
+index 58b13f5..af73b14 100644
+--- a/lib/vauth/vauth.h
++++ b/lib/vauth/vauth.h
+@@ -117,6 +117,8 @@ CURLcode Curl_auth_create_digest_http_message(struct Curl_easy *data,
+ 
+ /* This is used to clean up the digest specific data */
+ void Curl_auth_digest_cleanup(struct digestdata *digest);
++#else
++#define Curl_auth_digest_cleanup(x)
+ #endif /* !CURL_DISABLE_DIGEST_AUTH */
+ 
+ #ifdef USE_GSASL
+diff --git a/tests/data/Makefile.am b/tests/data/Makefile.am
+index 0e9b4f2..70d45c6 100644
+--- a/tests/data/Makefile.am
++++ b/tests/data/Makefile.am
+@@ -209,6 +209,7 @@ test1550 test1551 test1552 test1553 test1554 test1555 test1556 test1557 \
+ test1558 test1559 test1560 test1561 test1562 test1563 test1564 test1565 \
+ test1566 test1567 test1568 test1569 test1570 test1571 test1572 test1573 \
+ test1574 test1575 test1576 test1577 test1578 test1579 test1580 test1581 \
++test1588 \
+ \
+ test1590 test1591 test1592 test1593 test1594 test1595 test1596 test1597 \
+ test1598 \
+diff --git a/tests/data/test540 b/tests/data/test1588
+similarity index 64%
+copy from tests/data/test540
+copy to tests/data/test1588
+index ef13108..6428cd7 100644
+--- a/tests/data/test540
++++ b/tests/data/test1588
+@@ -1,3 +1,4 @@
++<?xml version="1.0" encoding="US-ASCII"?>
+ <testcase>
+ <info>
+ <keywords>
+@@ -11,46 +12,43 @@ multi
+ 
+ # Server-side
+ <reply>
+-<servercmd>
+-connection-monitor
+-</servercmd>
+ 
+ # this is returned first since we get no proxy-auth
+-<data>
+-HTTP/1.1 407 Authorization Required to proxy me my dear
+-Proxy-Authenticate: Digest realm="weirdorealm", nonce="12345"
+-Content-Length: 33
+-
++<data crlf="yes">
++HTTP/1.1 407 Authorization Required to proxy me my dear
++Proxy-Authenticate: Digest realm="weirdorealm", nonce="12345"
++Content-Length: 33
++
+ And you should ignore this data.
+ </data>
+ 
+ # then this is returned when we get proxy-auth
+-<data1000>
+-HTTP/1.1 200 OK
+-Content-Length: 21
+-Server: no
+-
++<data1000 crlf="yes">
++HTTP/1.1 200 OK
++Content-Length: 21
++Server: no
++
+ Nice proxy auth sir!
+ </data1000>
+ 
+-<datacheck>
+-HTTP/1.1 407 Authorization Required to proxy me my dear
+-Proxy-Authenticate: Digest realm="weirdorealm", nonce="12345"
+-Content-Length: 33
+-
+-HTTP/1.1 200 OK
+-Content-Length: 21
+-Server: no
+-
++<datacheck crlf="yes">
++HTTP/1.1 407 Authorization Required to proxy me my dear
++Proxy-Authenticate: Digest realm="weirdorealm", nonce="12345"
++Content-Length: 33
++
++HTTP/1.1 200 OK
++Content-Length: 21
++Server: no
++
+ Nice proxy auth sir!
+-HTTP/1.1 407 Authorization Required to proxy me my dear
+-Proxy-Authenticate: Digest realm="weirdorealm", nonce="12345"
+-Content-Length: 33
+-
+-HTTP/1.1 200 OK
+-Content-Length: 21
+-Server: no
+-
++HTTP/1.1 407 Authorization Required to proxy me my dear
++Proxy-Authenticate: Digest realm="weirdorealm", nonce="12345"
++Content-Length: 33
++
++HTTP/1.1 200 OK
++Content-Length: 21
++Server: no
++
+ Nice proxy auth sir!
+ </datacheck>
+ </reply>
+@@ -70,39 +68,38 @@ crypto
+ proxy
+ </features>
+ <name>
+-HTTP proxy auth Digest multi API re-using connection
++HTTP proxy auth Digest, then change proxy and do it again
+ </name>
+ <command>
+-http://test.remote.example.com/path/%TESTNUMBER http://%HOSTIP:%HTTPPORT silly:person custom.set.host.name
++http://test.remote.example.com/path/%TESTNUMBER %HOSTIP %HTTPPORT silly:person custom.set.host.name
+ </command>
+ </client>
+ 
+ # Verify data after the test has been "shot"
+ <verify>
+-<protocol>
+-GET http://test.remote.example.com/path/%TESTNUMBER HTTP/1.1
+-Host: custom.set.host.name
+-Accept: */*
+-Proxy-Connection: Keep-Alive
+-
+-GET http://test.remote.example.com/path/%TESTNUMBER HTTP/1.1
+-Host: custom.set.host.name
+-Proxy-Authorization: Digest username="silly", realm="weirdorealm", nonce="12345", uri="/path/%TESTNUMBER", response="ca507dcf189196b6a5374d3233042261"
+-Accept: */*
+-Proxy-Connection: Keep-Alive
+-
+-GET http://test.remote.example.com/path/%TESTNUMBER HTTP/1.1
+-Host: custom.set.host.name
+-Accept: */*
+-Proxy-Connection: Keep-Alive
+-
+-GET http://test.remote.example.com/path/%TESTNUMBER HTTP/1.1
+-Host: custom.set.host.name
+-Proxy-Authorization: Digest username="silly", realm="weirdorealm", nonce="12345", uri="/path/%TESTNUMBER", response="ca507dcf189196b6a5374d3233042261"
+-Accept: */*
+-Proxy-Connection: Keep-Alive
+-
+-[DISCONNECT]
++<protocol crlf="yes">
++GET http://test.remote.example.com/path/1588 HTTP/1.1
++Host: test.remote.example.com
++Accept: */*
++Proxy-Connection: Keep-Alive
++
++GET http://test.remote.example.com/path/1588 HTTP/1.1
++Host: test.remote.example.com
++Proxy-Authorization: Digest username="silly", realm="weirdorealm", nonce="12345", uri="/path/1588", response="d0b2f000c7e3fca24452b5810713404a"
++Accept: */*
++Proxy-Connection: Keep-Alive
++
++GET http://test.remote.example.com/path/1588 HTTP/1.1
++Host: test.remote.example.com
++Accept: */*
++Proxy-Connection: Keep-Alive
++
++GET http://test.remote.example.com/path/1588 HTTP/1.1
++Host: test.remote.example.com
++Proxy-Authorization: Digest username="silly", realm="weirdorealm", nonce="12345", uri="/path/1588", response="d0b2f000c7e3fca24452b5810713404a"
++Accept: */*
++Proxy-Connection: Keep-Alive
++
+ </protocol>
+ </verify>
+ </testcase>
+diff --git a/tests/libtest/Makefile.inc b/tests/libtest/Makefile.inc
+index 788cffa..bdbd8b5 100644
+--- a/tests/libtest/Makefile.inc
++++ b/tests/libtest/Makefile.inc
+@@ -63,7 +63,7 @@ LIBTESTPROGS = libauthretry libntlmconnect libprereq                     \
+  lib1540 lib1541 lib1542 lib1543         lib1545 \
+  lib1550 lib1551 lib1552 lib1553 lib1554 lib1555 lib1556 lib1557 \
+  lib1558 lib1559 lib1560 lib1564 lib1565 lib1567 lib1568 lib1569 lib1571 \
+-                         lib1576 lib1578 \
++                         lib1576 lib1578 lib1588 \
+  lib1591 lib1592 lib1593 lib1594 lib1596 lib1597 lib1598 \
+  \
+  lib1662 \
+@@ -541,6 +541,9 @@ lib1576_SOURCES = lib1576.c $(SUPPORTFILES)
+ lib1578_SOURCES = lib1576.c $(SUPPORTFILES)
+ lib1578_CPPFLAGS = $(AM_CPPFLAGS) -DLIB1578
+ 
++lib1588_SOURCES = lib1588.c $(SUPPORTFILES) $(TESTUTIL) $(WARNLESS)
++lib1588_LDADD = $(TESTUTIL_LIBS)
++
+ lib1591_SOURCES = lib1591.c $(SUPPORTFILES) $(TESTUTIL) $(WARNLESS)
+ lib1591_LDADD = $(TESTUTIL_LIBS)
+ 
+diff --git a/tests/libtest/lib1588.c b/tests/libtest/lib1588.c
+new file mode 100644
+index 0000000..b4022b3
+--- /dev/null
++++ b/tests/libtest/lib1588.c
+@@ -0,0 +1,124 @@
++/***************************************************************************
++ *                                  _   _ ____  _
++ *  Project                     ___| | | |  _ \| |
++ *                             / __| | | | |_) | |
++ *                            | (__| |_| |  _ <| |___
++ *                             \___|\___/|_| \_\_____|
++ *
++ * Copyright (C) Daniel Stenberg, <daniel@haxx.se>, et al.
++ *
++ * This software is licensed as described in the file COPYING, which
++ * you should have received as part of this distribution. The terms
++ * are also available at https://curl.se/docs/copyright.html.
++ *
++ * You may opt to use, copy, modify, merge, publish, distribute and/or sell
++ * copies of the Software, and permit persons to whom the Software is
++ * furnished to do so, under the terms of the COPYING file.
++ *
++ * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
++ * KIND, either express or implied.
++ *
++ * SPDX-License-Identifier: curl
++ *
++ ***************************************************************************/
++/*
++ * argv1 = URL
++ * argv2 = proxy host
++ * argv3 = proxy port
++ * argv4 = proxyuser:password
++ */
++
++#include "test.h"
++
++#include "testutil.h"
++#include "warnless.h"
++#include "memdebug.h"
++
++static CURLcode init1588(CURL *curl, const char *url,
++                         const char *userpwd, const char *proxy)
++{
++  CURLcode res = CURLE_OK;
++
++  easy_setopt(curl, CURLOPT_URL, url);
++  easy_setopt(curl, CURLOPT_PROXY, proxy);
++  easy_setopt(curl, CURLOPT_PROXYUSERPWD, userpwd);
++  easy_setopt(curl, CURLOPT_PROXYAUTH, (long)CURLAUTH_DIGEST);
++  easy_setopt(curl, CURLOPT_VERBOSE, 1L);
++  easy_setopt(curl, CURLOPT_HEADER, 1L);
++
++test_cleanup:
++  return res;
++}
++
++static CURLcode run1588(CURL *curl, const char *url, const char *userpwd,
++                        const char *proxy)
++{
++  CURLcode res = init1588(curl, url, userpwd, proxy);
++  if(res)
++    return res;
++  return curl_easy_perform(curl);
++}
++
++CURLcode test(char *URL)
++{
++  CURLcode res = CURLE_OK;
++  CURL *curl = NULL;
++  const char *proxyuserpws = libtest_arg4;
++  struct curl_slist *host = NULL;
++  struct curl_slist *host2 = NULL;
++  char proxy1_resolve[128];
++  char proxy2_resolve[128];
++  char proxy1_connect[128];
++  char proxy2_connect[128];
++
++  if(!libtest_arg2 || !libtest_arg3 || !libtest_arg4)
++    return TEST_ERR_MAJOR_BAD;
++
++  curl_msnprintf(proxy1_resolve, sizeof(proxy1_resolve),
++                 "firstproxy:%s:%s", libtest_arg3, libtest_arg2);
++  curl_msnprintf(proxy2_resolve, sizeof(proxy2_resolve),
++                 "secondproxy:%s:%s", libtest_arg3, libtest_arg2);
++
++  /* we connect to the fake host name but the right port number */
++  curl_msnprintf(proxy1_connect, sizeof(proxy1_connect),
++                 "firstproxy:%s", libtest_arg3);
++  curl_msnprintf(proxy2_connect, sizeof(proxy2_connect),
++                 "secondproxy:%s", libtest_arg3);
++
++  global_init(CURL_GLOBAL_ALL);
++
++  easy_init(curl);
++
++  host = curl_slist_append(NULL, proxy1_resolve);
++  if(!host) {
++    res = CURLE_OUT_OF_MEMORY;
++    goto test_cleanup;
++  }
++  host2 = curl_slist_append(host, proxy2_resolve);
++  if(!host2) {
++    res = CURLE_OUT_OF_MEMORY;
++    goto test_cleanup;
++  }
++  host = host2;
++
++  start_test_timing();
++
++  easy_setopt(curl, CURLOPT_RESOLVE, host);
++
++  res = run1588(curl, URL, proxyuserpws, proxy1_connect);
++  if(res)
++    goto test_cleanup;
++
++  curl_mfprintf(stderr, "lib1588: now we do the request again\n");
++
++  res = run1588(curl, URL, proxyuserpws, proxy2_connect);
++
++test_cleanup:
++
++  /* proper cleanup sequence - type PB */
++
++  curl_easy_cleanup(curl);
++  curl_global_cleanup();
++  curl_slist_free_all(host);
++  return res;
++}
