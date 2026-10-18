@@ -11,18 +11,25 @@ to initiate wildcard connection for known address via vici.
 
 In addition this allows simpler implementation of trap-any patches
 and is a prerequisite for dmvpn support.
+
+[ncopa: rebased on 6.0.2+, where upstream commit 367e78205 (controller:
+Avoid memory leak if initiate job is never executed) moved releasing the
+peer_cfg from initiate_execute() to destroy_job(). Do not release it in
+initiate_execute() any more, which caused a double free of the peer_cfg,
+and release the host hints in destroy_job() too.
+https://gitlab.alpinelinux.org/alpine/aports/-/issues/18502]
 ---
- src/libcharon/control/controller.c        | 36 +++++++++++++++++-
- src/libcharon/control/controller.h        | 28 ++++++++++++++
- src/libcharon/plugins/vici/vici_control.c | 41 ++++++++++++++++----
- src/libcharon/sa/ike_sa_manager.c         | 34 ++++++++++++++++-
- src/libcharon/sa/ike_sa_manager.h         | 25 +++++++++++-
- src/libcharon/sa/trap_manager.c           | 46 +++++++++--------------
- src/swanctl/commands/initiate.c           | 19 +++++++++-
- 7 files changed, 189 insertions(+), 40 deletions(-)
+ src/libcharon/control/controller.c        | 31 +++++++++++++++++++--
+ src/libcharon/control/controller.h        | 28 +++++++++++++++++++
+ src/libcharon/plugins/vici/vici_control.c | 41 ++++++++++++++++++++++-----
+ src/libcharon/sa/ike_sa_manager.c         | 34 ++++++++++++++++++++++-
+ src/libcharon/sa/ike_sa_manager.h         | 25 ++++++++++++++++-
+ src/libcharon/sa/trap_manager.c           | 46 ++++++++++++-------------------
+ src/swanctl/commands/initiate.c           | 19 ++++++++++++-
+ 7 files changed, 184 insertions(+), 40 deletions(-)
 
 diff --git a/src/libcharon/control/controller.c b/src/libcharon/control/controller.c
-index 4e778ed63d0..2b8a75e2c10 100644
+index c3d0b67..568801e 100644
 --- a/src/libcharon/control/controller.c
 +++ b/src/libcharon/control/controller.c
 @@ -1,4 +1,6 @@
@@ -49,27 +56,28 @@ index 4e778ed63d0..2b8a75e2c10 100644
  	/**
  	 * unique ID, used for various methods
  	 */
-@@ -418,9 +430,17 @@ METHOD(job_t, initiate_execute, job_requeue_t,
- {
+@@ -421,6 +433,8 @@ METHOD(job_t, destroy_job, void,
+ 		DESTROY_IF(this->listener.done);
+ 		DESTROY_IF(this->listener.child_cfg);
+ 		DESTROY_IF(this->listener.peer_cfg);
++		DESTROY_IF(this->listener.my_host);
++		DESTROY_IF(this->listener.other_host);
+ 		free(this);
+ 	}
+ }
+@@ -438,8 +452,9 @@ METHOD(job_t, initiate_execute, job_requeue_t,
  	ike_sa_t *ike_sa;
  	interface_listener_t *listener = &job->listener;
-+	peer_cfg_t *peer_cfg = listener->peer_cfg;
-+	host_t *my_host = listener->my_host;
-+	host_t *other_host = listener->other_host;
-+
-+	ike_sa = charon->ike_sa_manager->checkout_by_config2(charon->ike_sa_manager,
-+														peer_cfg, my_host, other_host);
-+	peer_cfg->destroy(peer_cfg);
-+
-+	if (my_host) my_host->destroy(my_host);
-+	if (other_host) other_host->destroy(other_host);
  
 -	ike_sa = charon->ike_sa_manager->checkout_by_config(charon->ike_sa_manager,
 -														listener->peer_cfg);
++	ike_sa = charon->ike_sa_manager->checkout_by_config2(charon->ike_sa_manager,
++									listener->peer_cfg, listener->my_host,
++									listener->other_host);
  	if (!ike_sa)
  	{
  		listener->status = FAILED;
-@@ -502,6 +522,15 @@ METHOD(controller_t, initiate, status_t,
+@@ -521,6 +536,15 @@ METHOD(controller_t, initiate, status_t,
  	private_controller_t *this, peer_cfg_t *peer_cfg, child_cfg_t *child_cfg,
  	controller_cb_t callback, void *param, level_t max_level, u_int timeout,
  	bool limits)
@@ -85,7 +93,7 @@ index 4e778ed63d0..2b8a75e2c10 100644
  {
  	interface_job_t *job;
  	status_t status;
-@@ -524,6 +553,8 @@ METHOD(controller_t, initiate, status_t,
+@@ -544,6 +568,8 @@ METHOD(controller_t, initiate, status_t,
  			.status = FAILED,
  			.child_cfg = child_cfg,
  			.peer_cfg = peer_cfg,
@@ -94,7 +102,7 @@ index 4e778ed63d0..2b8a75e2c10 100644
  			.lock = spinlock_create(),
  			.options.limits = limits,
  		},
-@@ -771,6 +802,7 @@ controller_t *controller_create(void)
+@@ -791,6 +817,7 @@ controller_t *controller_create(void)
  		.public = {
  			.create_ike_sa_enumerator = _create_ike_sa_enumerator,
  			.initiate = _initiate,
@@ -103,7 +111,7 @@ index 4e778ed63d0..2b8a75e2c10 100644
  			.terminate_child = _terminate_child,
  			.destroy = _destroy,
 diff --git a/src/libcharon/control/controller.h b/src/libcharon/control/controller.h
-index 36a1d463178..f5c60e2e72b 100644
+index 36a1d46..f5c60e2 100644
 --- a/src/libcharon/control/controller.h
 +++ b/src/libcharon/control/controller.h
 @@ -98,6 +98,34 @@ struct controller_t {
@@ -142,7 +150,7 @@ index 36a1d463178..f5c60e2e72b 100644
  	 * Terminate an IKE_SA and all of its CHILD_SAs.
  	 *
 diff --git a/src/libcharon/plugins/vici/vici_control.c b/src/libcharon/plugins/vici/vici_control.c
-index 1c236d2491d..932d0cb5a89 100644
+index c781238..d9496ab 100644
 --- a/src/libcharon/plugins/vici/vici_control.c
 +++ b/src/libcharon/plugins/vici/vici_control.c
 @@ -1,4 +1,6 @@
@@ -231,7 +239,7 @@ index 1c236d2491d..932d0cb5a89 100644
  
  /**
 diff --git a/src/libcharon/sa/ike_sa_manager.c b/src/libcharon/sa/ike_sa_manager.c
-index c128cc07872..bf4e125c840 100644
+index 7796efb..fde9892 100644
 --- a/src/libcharon/sa/ike_sa_manager.c
 +++ b/src/libcharon/sa/ike_sa_manager.c
 @@ -1,5 +1,7 @@
@@ -242,7 +250,7 @@ index c128cc07872..bf4e125c840 100644
   * Copyright (C) 2005-2011 Martin Willi
   * Copyright (C) 2005 Jan Hutter
   *
-@@ -1500,6 +1502,13 @@ typedef struct {
+@@ -1516,6 +1518,13 @@ typedef struct {
  
  METHOD(ike_sa_manager_t, checkout_by_config, ike_sa_t*,
  	private_ike_sa_manager_t *this, peer_cfg_t *peer_cfg)
@@ -256,7 +264,7 @@ index c128cc07872..bf4e125c840 100644
  {
  	enumerator_t *enumerator;
  	entry_t *entry;
-@@ -1510,7 +1519,16 @@ METHOD(ike_sa_manager_t, checkout_by_config, ike_sa_t*,
+@@ -1526,7 +1535,16 @@ METHOD(ike_sa_manager_t, checkout_by_config, ike_sa_t*,
  	u_int segment;
  	int i;
  
@@ -274,7 +282,7 @@ index c128cc07872..bf4e125c840 100644
  
  	if (!this->reuse_ikesa && peer_cfg->get_ike_version(peer_cfg) != IKEV1)
  	{	/* IKE_SA reuse disabled by config (not possible for IKEv1) */
-@@ -1569,6 +1587,15 @@ METHOD(ike_sa_manager_t, checkout_by_config, ike_sa_t*,
+@@ -1586,6 +1604,15 @@ METHOD(ike_sa_manager_t, checkout_by_config, ike_sa_t*,
  			continue;
  		}
  
@@ -290,7 +298,7 @@ index c128cc07872..bf4e125c840 100644
  		current_peer = entry->ike_sa->get_peer_cfg(entry->ike_sa);
  		if (current_peer && current_peer->equals(current_peer, peer_cfg))
  		{
-@@ -1595,6 +1622,10 @@ METHOD(ike_sa_manager_t, checkout_by_config, ike_sa_t*,
+@@ -1612,6 +1639,10 @@ METHOD(ike_sa_manager_t, checkout_by_config, ike_sa_t*,
  		{
  			ike_sa->set_peer_cfg(ike_sa, peer_cfg);
  			checkout_new(this, ike_sa);
@@ -301,7 +309,7 @@ index c128cc07872..bf4e125c840 100644
  		}
  	}
  	charon->bus->set_sa(charon->bus, ike_sa);
-@@ -2560,6 +2591,7 @@ ike_sa_manager_t *ike_sa_manager_create()
+@@ -2577,6 +2608,7 @@ ike_sa_manager_t *ike_sa_manager_create()
  			.checkout = _checkout,
  			.checkout_by_message = _checkout_by_message,
  			.checkout_by_config = _checkout_by_config,
@@ -310,10 +318,10 @@ index c128cc07872..bf4e125c840 100644
  			.checkout_by_name = _checkout_by_name,
  			.new_initiator_spi = _new_initiator_spi,
 diff --git a/src/libcharon/sa/ike_sa_manager.h b/src/libcharon/sa/ike_sa_manager.h
-index 004cc221688..d001f5a802f 100644
+index fecf0d7..d629521 100644
 --- a/src/libcharon/sa/ike_sa_manager.h
 +++ b/src/libcharon/sa/ike_sa_manager.h
-@@ -123,7 +123,8 @@ struct ike_sa_manager_t {
+@@ -124,7 +124,8 @@ struct ike_sa_manager_t {
  	ike_sa_t* (*checkout_by_message) (ike_sa_manager_t* this, message_t *message);
  
  	/**
@@ -323,7 +331,7 @@ index 004cc221688..d001f5a802f 100644
  	 *
  	 * To initiate, a CHILD_SA may be established within an existing IKE_SA.
  	 * This call checks for an existing IKE_SA by comparing the configuration.
-@@ -140,6 +141,28 @@ struct ike_sa_manager_t {
+@@ -141,6 +142,28 @@ struct ike_sa_manager_t {
  	 */
  	ike_sa_t *(*checkout_by_config)(ike_sa_manager_t* this, peer_cfg_t *peer_cfg);
  
@@ -353,7 +361,7 @@ index 004cc221688..d001f5a802f 100644
  	 * Reset initiator SPI.
  	 *
 diff --git a/src/libcharon/sa/trap_manager.c b/src/libcharon/sa/trap_manager.c
-index 17953010a10..c316eea2133 100644
+index 9a4f08d..676b201 100644
 --- a/src/libcharon/sa/trap_manager.c
 +++ b/src/libcharon/sa/trap_manager.c
 @@ -532,9 +532,9 @@ METHOD(trap_manager_t, acquire, void,
@@ -368,7 +376,7 @@ index 17953010a10..c316eea2133 100644
  
  	this->lock->read_lock(this->lock);
  	enumerator = this->traps->create_enumerator(this->traps);
-@@ -609,36 +609,26 @@ METHOD(trap_manager_t, acquire, void,
+@@ -617,36 +617,26 @@ METHOD(trap_manager_t, acquire, void,
  	this->lock->unlock(this->lock);
  
  	if (wildcard)
@@ -422,7 +430,7 @@ index 17953010a10..c316eea2133 100644
  
  	if (ike_sa)
 diff --git a/src/swanctl/commands/initiate.c b/src/swanctl/commands/initiate.c
-index e0fffb907d4..c0fc8c59526 100644
+index e0fffb9..c0fc8c5 100644
 --- a/src/swanctl/commands/initiate.c
 +++ b/src/swanctl/commands/initiate.c
 @@ -1,4 +1,5 @@
