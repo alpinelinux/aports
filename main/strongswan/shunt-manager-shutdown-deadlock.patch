@@ -1,0 +1,61 @@
+From 7b1f9f493327b9c5f31d7b3118787a0c6b0ca7b1 Mon Sep 17 00:00:00 2001
+From: Tobias Brunner <tobias@strongswan.org>
+Date: Thu, 10 Sep 2026 15:41:18 +0200
+Subject: [PATCH] shunt-manager: Ignore uninstalls during shutdown to avoid
+ deadlock
+
+The policies are flushed and the manager disabled before the plugins
+are unloaded.  So any plugin (e.g. bypass-lan) that tries to uninstall
+shunt policies at that time caused a deadlock as the call would just
+block on the condvar.  The check is put inside the loop in case a thread
+is waiting there for an `install()` call to complete while `flush()` is
+concurrently called and then the thread in `flush()` is woken first.
+
+Using `broadcast()` also fixes an issue if multiple threads are waiting
+in `uninstall()`.
+
+A new check in `flush()` prevents a deadlock due to a potential second
+call.
+
+Fixes: 6dca323ae0ea ("shunt-manager: Fix potential race between install and uninstall")
+---
+ src/libcharon/sa/shunt_manager.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/libcharon/sa/shunt_manager.c b/src/libcharon/sa/shunt_manager.c
+index 843642ac1d..a0acfe6040 100644
+--- a/src/libcharon/sa/shunt_manager.c
++++ b/src/libcharon/sa/shunt_manager.c
+@@ -251,7 +251,7 @@ METHOD(shunt_manager_t, install, bool,
+ 		entry_destroy(entry);
+ 	}
+ 	this->installing--;
+-	this->condvar->signal(this->condvar);
++	this->condvar->broadcast(this->condvar);
+ 	this->lock->unlock(this->lock);
+ 	return success;
+ }
+@@ -379,6 +379,11 @@ METHOD(shunt_manager_t, uninstall, bool,
+ 	this->lock->write_lock(this->lock);
+ 	while (this->installing)
+ 	{
++		if (this->installing == INSTALL_DISABLED)
++		{	/* flush() has been called, policy is already uninstalled */
++			this->lock->unlock(this->lock);
++			return TRUE;
++		}
+ 		this->condvar->wait(this->condvar, this->lock);
+ 	}
+ 	enumerator = this->shunts->create_enumerator(this->shunts);
+@@ -441,6 +446,11 @@ METHOD(shunt_manager_t, flush, void,
+ 	entry_t *entry;
+ 
+ 	this->lock->write_lock(this->lock);
++	if (this->installing == INSTALL_DISABLED)
++	{
++		this->lock->unlock(this->lock);
++		return;
++	}
+ 	while (this->installing)
+ 	{
+ 		this->condvar->wait(this->condvar, this->lock);
