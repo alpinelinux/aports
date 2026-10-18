@@ -1,0 +1,160 @@
+From e85b536ab4fb20736791d5d474a916f86d57ca05 Mon Sep 17 00:00:00 2001
+From: Patrycja Rosa <mozcontrib@ptrcnull.me>
+Date: Sun, 18 Oct 2026 21:59:13 +0200
+Subject: [PATCH] rustix-statx.patch
+
+backport of https://github.com/bytecodealliance/rustix/commit/ded795bab5f620ff9fd4045f114f6a14b5bb8e71
+---
+ third_party/rust/rustix/src/backend/libc/c.rs | 51 ++++++++++---------
+ .../rustix/src/backend/libc/fs/syscalls.rs    |  9 ++++
+ third_party/rust/rustix/src/net/types.rs      |  5 +-
+ 3 files changed, 37 insertions(+), 28 deletions(-)
+
+diff --git a/third_party/rust/rustix/src/backend/libc/c.rs b/third_party/rust/rustix/src/backend/libc/c.rs
+index 5eeff953f4c14..fb748979faa97 100644
+--- a/third_party/rust/rustix/src/backend/libc/c.rs
++++ b/third_party/rust/rustix/src/backend/libc/c.rs
+@@ -474,30 +474,8 @@ mod readwrite_pv64v2 {
+ ))]
+ pub(super) use readwrite_pv64v2::{preadv64v2 as preadv2, pwritev64v2 as pwritev2};
+ 
+-// Rust's libc crate lacks statx for Non-glibc targets.
+-#[cfg(feature = "fs")]
+-#[cfg(all(
+-    linux_like,
+-    linux_raw_dep,
+-    not(any(
+-        target_os = "emscripten",
+-        target_env = "gnu",
+-        all(target_arch = "loongarch64", target_env = "musl")
+-    ))
+-))]
+-mod statx_flags {
+-    pub(crate) use linux_raw_sys::general::{
+-        STATX_ALL, STATX_ATIME, STATX_BASIC_STATS, STATX_BLOCKS, STATX_BTIME, STATX_CTIME,
+-        STATX_DIOALIGN, STATX_GID, STATX_INO, STATX_MNT_ID, STATX_MODE, STATX_MTIME, STATX_NLINK,
+-        STATX_SIZE, STATX_TYPE, STATX_UID,
+-    };
+-
+-    pub(crate) use linux_raw_sys::general::{
+-        STATX_ATTR_APPEND, STATX_ATTR_AUTOMOUNT, STATX_ATTR_COMPRESSED, STATX_ATTR_DAX,
+-        STATX_ATTR_ENCRYPTED, STATX_ATTR_IMMUTABLE, STATX_ATTR_MOUNT_ROOT, STATX_ATTR_NODUMP,
+-        STATX_ATTR_VERITY,
+-    };
+-}
++// Rust's libc crate > v0.2.189 may also define these constants,
++// so we use an explicit import.
+ #[cfg(feature = "fs")]
+ #[cfg(all(
+     linux_like,
+@@ -509,7 +487,30 @@ mod statx_flags {
+         all(target_arch = "loongarch64", target_env = "musl")
+     ))
+ ))]
+-pub(crate) use statx_flags::*;
++pub(crate) use linux_raw_sys::general::{
++    STATX_ALL, STATX_ATIME, STATX_BASIC_STATS, STATX_BLOCKS, STATX_BTIME, STATX_CTIME,
++    STATX_DIOALIGN, STATX_GID, STATX_INO, STATX_MNT_ID, STATX_MODE, STATX_MTIME, STATX_NLINK,
++    STATX_SIZE, STATX_TYPE, STATX_UID,
++};
++
++// Rust's libc crate > v0.2.189 may also define these constants,
++// so we use an explicit import.
++#[cfg(feature = "fs")]
++#[cfg(all(
++    linux_like,
++    linux_raw_dep,
++    not(any(
++        target_os = "android",
++        target_os = "emscripten",
++        target_env = "gnu",
++        all(target_arch = "loongarch64", target_env = "musl")
++    ))
++))]
++pub(crate) use linux_raw_sys::general::{
++    STATX_ATTR_APPEND, STATX_ATTR_AUTOMOUNT, STATX_ATTR_COMPRESSED, STATX_ATTR_DAX,
++    STATX_ATTR_ENCRYPTED, STATX_ATTR_IMMUTABLE, STATX_ATTR_MOUNT_ROOT, STATX_ATTR_NODUMP,
++    STATX_ATTR_VERITY,
++};
+ 
+ #[cfg(feature = "fs")]
+ #[cfg(target_os = "android")]
+diff --git a/third_party/rust/rustix/src/backend/libc/fs/syscalls.rs b/third_party/rust/rustix/src/backend/libc/fs/syscalls.rs
+index 71bc8b0abf3f7..1a5ea4fa64697 100644
+--- a/third_party/rust/rustix/src/backend/libc/fs/syscalls.rs
++++ b/third_party/rust/rustix/src/backend/libc/fs/syscalls.rs
+@@ -941,6 +941,7 @@ pub(crate) fn utimensat(
+                 c::c_int
+             ) -> c::c_int
+         }
++        #[cfg(not(any(target_os = "tvos", target_os = "watchos")))]
+         extern "C" {
+             fn setattrlist(
+                 path: *const ffi::c_char,
+@@ -950,6 +951,7 @@ pub(crate) fn utimensat(
+                 options: c::c_ulong,
+             ) -> c::c_int;
+         }
++        #[cfg(not(any(target_os = "tvos", target_os = "watchos")))]
+         const FSOPT_NOFOLLOW: c::c_ulong = 0x0000_0001;
+ 
+         // If we have `utimensat`, use it.
+@@ -962,8 +964,14 @@ pub(crate) fn utimensat(
+             ));
+         }
+ 
++        // Return `NOSYS` on platforms where `utimensat` cannot be emulated
++        // because `fork` is unavailable.
++        #[cfg(any(target_os = "tvos", target_os = "watchos"))]
++        return Err(io::Errno::NOSYS);
++
+         // Convert `times`. We only need this in the child, but do it before
+         // calling `fork` because it might fail.
++        #[cfg(not(any(target_os = "tvos", target_os = "watchos")))]
+         let (attrbuf_size, times, attrs) = times_to_attrlist(times)?;
+ 
+         // `setattrlistat` was introduced in 10.13 along with `utimensat`, so
+@@ -971,6 +979,7 @@ pub(crate) fn utimensat(
+         // Emulate it using `fork`, and `fchdir` and [`setattrlist`].
+         //
+         // [`setattrlist`]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/setattrlist.2.html
++        #[cfg(not(any(target_os = "tvos", target_os = "watchos")))]
+         match c::fork() {
+             -1 => Err(io::Errno::IO),
+             0 => {
+diff --git a/third_party/rust/rustix/src/net/types.rs b/third_party/rust/rustix/src/net/types.rs
+index 370f2468fb8f7..534f6bb0a3a16 100644
+--- a/third_party/rust/rustix/src/net/types.rs
++++ b/third_party/rust/rustix/src/net/types.rs
+@@ -740,7 +740,7 @@ impl AddressFamily {
+     #[cfg(target_os = "freebsd")]
+     pub const SLOW: Self = Self(c::AF_SLOW as _);
+     /// `AF_SYS_CONTROL`
+-    #[cfg(apple)]
++    #[cfg(target_os = "macos")]
+     pub const SYS_CONTROL: Self = Self(c::AF_SYS_CONTROL as _);
+     /// `AF_SYSTEM`
+     #[cfg(apple)]
+@@ -1116,6 +1116,7 @@ pub mod ipproto {
+ }
+ 
+ /// `SYSPROTO_*` constants.
++#[cfg(target_os = "macos")]
+ pub mod sysproto {
+     #[cfg(apple)]
+     use {
+@@ -1124,11 +1125,9 @@ pub mod sysproto {
+     };
+ 
+     /// `SYSPROTO_EVENT`
+-    #[cfg(apple)]
+     pub const EVENT: Protocol = Protocol(new_raw_protocol(c::SYSPROTO_EVENT as _));
+ 
+     /// `SYSPROTO_CONTROL`
+-    #[cfg(apple)]
+     pub const CONTROL: Protocol = Protocol(new_raw_protocol(c::SYSPROTO_CONTROL as _));
+ }
+ 
+-- 
+2.56.0
+
