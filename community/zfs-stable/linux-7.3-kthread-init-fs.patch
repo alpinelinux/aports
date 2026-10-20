@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rob Norris <rob.norris@truenas.com>
+Date: Tue, 8 Sep 2026 10:24:30 +1000
+Subject: [PATCH 4/5] Linux 7.3: make host filesystem available to kernel
+ threads
+
+Every kernel task has a `struct fs_struct *fs` that points to the root
+of the filesystem tree for this task, and is used as the starting point
+for path resolution. This is what is modified by chroot(2),
+pivot_root(2), etc.
+
+Kernel threads (as spawned by kthreadd) used to get a pointer to the
+root filesystem by default. In 7.3 this changed, and kernel threads now
+get a pointer to an internal nullfs; effectively a "no-op" filesystem
+with no path into the true filesystem. An opt-in mechanism is provided
+in the form of `scoped_with_init_fs()`, which swaps in a a pointer to
+the root filesystem for the scoped code, and reverts it at end of scope.
+
+Currently we don't have any good notion of whether or not a given thread
+(including taskq tasks) will require filesystem access, and no good way
+to signal it anyway. For now, to maintain the status quo, we add
+`scoped_with_init_fs()` in the two places where arbitrary code may run
+on a kernel thread: in `thread_generic_wrapper()`, the startup
+trampoline for `thread_create()`, and in `taskq_thread()`, when calling
+a task entry. This ensures all SPL-managed threads and tasks retain
+filesystem access.
+
+For older kernels that do not have `scoped_with_init_fs()`, a compat
+wrapper is provided (a much grander description than it deserves).
+
+Sponsored-by: TrueNAS
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Reviewed-by: Tony Hutter <hutter2@llnl.gov>
+Co-developed-by: TheAlmightyOgreLord <beardedtechwizard@protonmail.com>
+Signed-off-by: Rob Norris <rob.norris@truenas.com>
+Closes #19082
+---
+ include/os/linux/Makefile.am                  |  1 +
+ .../os/linux/kernel/linux/kthread_compat.h    | 35 +++++++++++++++++++
+ module/os/linux/spl/spl-taskq.c               |  4 ++-
+ module/os/linux/spl/spl-thread.c              |  7 ++--
+ 4 files changed, 44 insertions(+), 3 deletions(-)
+ create mode 100644 include/os/linux/kernel/linux/kthread_compat.h
+
+diff --git a/include/os/linux/Makefile.am b/include/os/linux/Makefile.am
+index 083ccd4..27e8fdf 100644
+--- a/include/os/linux/Makefile.am
++++ b/include/os/linux/Makefile.am
+@@ -6,6 +6,7 @@ kernel_linux_HEADERS = \
+ 	%D%/kernel/linux/compiler_compat.h \
+ 	%D%/kernel/linux/dcache_compat.h \
+ 	%D%/kernel/linux/kmap_compat.h \
++	%D%/kernel/linux/kthread_compat.h \
+ 	%D%/kernel/linux/mm_compat.h \
+ 	%D%/kernel/linux/mod_compat.h \
+ 	%D%/kernel/linux/page_compat.h \
+diff --git a/include/os/linux/kernel/linux/kthread_compat.h b/include/os/linux/kernel/linux/kthread_compat.h
+new file mode 100644
+index 0000000..f68fc9f
+--- /dev/null
++++ b/include/os/linux/kernel/linux/kthread_compat.h
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: CDDL-1.0
++/*
++ * This file and its contents are supplied under the terms of the
++ * Common Development and Distribution License ("CDDL"), version 1.0.
++ * You may only use this file in accordance with the terms of version
++ * 1.0 of the CDDL.
++ *
++ * A full copy of the text of the CDDL should have accompanied this
++ * source.  A copy of the CDDL is also available via the Internet at
++ * https://opensource.org/license/CDDL-1.0.
++ */
++
++/*
++ * Copyright (c) 2026, TrueNAS.
++ */
++
++#ifndef _ZFS_KTHREAD_COMPAT_H
++#define	_ZFS_KTHREAD_COMPAT_H
++
++#include <linux/fs_struct.h>
++
++/*
++ * Linux 7.3 change. Kernel-internal threads no longer have access to the
++ * filesystem by default. Callers that need it should wrap the necessary code
++ * in `scoped_with_init_fs()`, which will make the filesystem availble until
++ * end of scope.
++ *
++ * For older kernels that do not provide this macro, we define it to be a
++ * no-op.
++ */
++#ifndef scoped_with_init_fs
++#define	scoped_with_init_fs()	if (1)
++#endif
++
++#endif
+diff --git a/module/os/linux/spl/spl-taskq.c b/module/os/linux/spl/spl-taskq.c
+index d583b92..d6ba401 100644
+--- a/module/os/linux/spl/spl-taskq.c
++++ b/module/os/linux/spl/spl-taskq.c
+@@ -38,6 +38,7 @@
+ #include <sys/kstat.h>
+ #include <linux/cpuhotplug.h>
+ #include <linux/mod_compat.h>
++#include <linux/kthread_compat.h>
+ 
+ /* Linux 6.2 renamed timer_delete_sync(); point it at its old name for those. */
+ #ifndef HAVE_TIMER_DELETE_SYNC
+@@ -1107,7 +1108,8 @@ taskq_thread(void *args)
+ 			DTRACE_PROBE1(taskq_ent__start, taskq_ent_t *, t);
+ 
+ 			/* Perform the requested task */
+-			t->tqent_func(t->tqent_arg);
++			scoped_with_init_fs()
++			    t->tqent_func(t->tqent_arg);
+ 
+ 			DTRACE_PROBE1(taskq_ent__finish, taskq_ent_t *, t);
+ 
+diff --git a/module/os/linux/spl/spl-thread.c b/module/os/linux/spl/spl-thread.c
+index 8f5c73b..c63bf45 100644
+--- a/module/os/linux/spl/spl-thread.c
++++ b/module/os/linux/spl/spl-thread.c
+@@ -29,6 +29,7 @@
+ #include <sys/tsd.h>
+ #include <sys/string.h>
+ #include <sys/misc.h>
++#include <linux/kthread_compat.h>
+ 
+ /*
+  * Thread interfaces
+@@ -59,8 +60,10 @@ thread_generic_wrapper(void *arg)
+ 	kmem_free(tp->tp_name, tp->tp_name_size);
+ 	kmem_free(tp, sizeof (thread_priv_t));
+ 
+-	if (func)
+-		func(args);
++	if (func) {
++		scoped_with_init_fs()
++		    func(args);
++	}
+ 
+ 	return (0);
+ }
