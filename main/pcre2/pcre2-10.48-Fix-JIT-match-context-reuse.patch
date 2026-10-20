@@ -1,0 +1,178 @@
+From 87f50503b9818ac2ba909147bfa74c8ee48d2ff7 Mon Sep 17 00:00:00 2001
+From: Nicholas Wilson <nicholas@nicholaswilson.me.uk>
+Date: Sat, 8 Aug 2026 19:17:36 +0100
+Subject: [PATCH] Backport of pcre2-10.48-Fix-JIT-match-context-reuse.patch
+
+Cherry-pick of 1dcd0cf42a6a7cb62cc9a7c024196733abcfda95 and 1cad831209af67d24298c301a74c615d3a6d57eb
+
+Fix leak & stale PCRE2_MD_COPIED_SUBJECT if pcre2_jit_match used with existing match context (#937)
+
+The problem is not that pcre2_jit_match() needs to add support for PCRE2_COPY_MATCHED_SUBJECT. Instead, if the passed-in context somehow contains a previously-copied subject (by non-JIT matcher using a global or cached subject) then it will be leaked, and worse, incorrectly free'd later.
+
+pcre2test: honor no_jit when used with jitfast (#946)
+
+`pcre2_jit_match()` ignores the PCRE2_NO_JIT option, so teach pcre2test
+to avoid calling it if the subject modifier that sets that option is
+used together with the option to call it directly.
+
+While at it, make jitverify more reliable and add a unittest to validate
+that PCRE2_NO_JIT is ignored in the fast JIt path.
+---
+ src/pcre2_jit_match.c | 10 ++++++++++
+ src/pcre2test.c       | 43 ++++++++++++++++++++++++++++---------------
+ testdata/testinput17  |  7 ++++++-
+ testdata/testoutput17 | 10 +++++++++-
+ 4 files changed, 53 insertions(+), 17 deletions(-)
+
+diff --git a/src/pcre2_jit_match.c b/src/pcre2_jit_match.c
+index ae5903e2..91ae566e 100644
+--- a/src/pcre2_jit_match.c
++++ b/src/pcre2_jit_match.c
+@@ -126,6 +126,16 @@ else if ((options & PCRE2_PARTIAL_SOFT) != 0)
+ if (functions == NULL || functions->executable_funcs[index] == NULL)
+   return PCRE2_ERROR_JIT_BADOPTION;
+ 
++/* If the match data block was previously used with PCRE2_COPY_MATCHED_SUBJECT,
++free the memory that was obtained. */
++
++if ((match_data->flags & PCRE2_MD_COPIED_SUBJECT) != 0)
++  {
++  match_data->memctl.free((void *)match_data->subject,
++    match_data->memctl.memory_data);
++  match_data->flags &= ~PCRE2_MD_COPIED_SUBJECT;
++  }
++
+ /* Sanity checks should be handled by pcre2_match. */
+ arguments.str = subject + start_offset;
+ arguments.begin = subject;
+diff --git a/src/pcre2test.c b/src/pcre2test.c
+index 8066d962..1c9bf0a3 100644
+--- a/src/pcre2test.c
++++ b/src/pcre2test.c
+@@ -6238,7 +6238,8 @@ for (;;)
+       PTR(dat_context), dfa_workspace, DFA_WS_DIMENSION);
+     }
+ 
+-  else if ((pat_patctl.control & CTL_JITFAST) != 0)
++  else if ((pat_patctl.control & CTL_JITFAST) != 0 &&
++           (dat_datctl.options & PCRE2_NO_JIT) == 0)
+     PCRE2_JIT_MATCH(capcount, compiled_code, pp, ulen, dat_datctl.offset,
+       dat_datctl.options, match_data, PTR(dat_context));
+ 
+@@ -7561,7 +7562,8 @@ if (dat_datctl.replacement[0] != 0)
+ 
+   if (emoption != 0)
+     {
+-    if ((pat_patctl.control & CTL_JITFAST) != 0)
++    if ((pat_patctl.control & CTL_JITFAST) != 0 &&
++        (dat_datctl.options & PCRE2_NO_JIT) == 0)
+       {
+       PCRE2_JIT_MATCH(rc, compiled_code, pp, arg_ulen, dat_datctl.offset,
+         dat_datctl.options, match_data, use_dat_context);
+@@ -7771,7 +7773,8 @@ for (gmatched = 0;; gmatched++)
+         }
+       }
+ 
+-    else if ((pat_patctl.control & CTL_JITFAST) != 0)
++    else if ((pat_patctl.control & CTL_JITFAST) != 0 &&
++             (dat_datctl.options & PCRE2_NO_JIT) == 0)
+       {
+       start_time = clock();
+       for (i = 0; i < timeitm; i++)
+@@ -7867,7 +7870,8 @@ for (gmatched = 0;; gmatched++)
+       }
+     else
+       {
+-      if ((pat_patctl.control & CTL_JITFAST) != 0)
++      if ((pat_patctl.control & CTL_JITFAST) != 0 &&
++          (dat_datctl.options & PCRE2_NO_JIT) == 0)
+         PCRE2_JIT_MATCH(capcount, compiled_code, pp, arg_ulen, dat_datctl.offset,
+           dat_datctl.options | g_notempty, match_data, use_dat_context);
+       else
+@@ -7908,20 +7912,29 @@ for (gmatched = 0;; gmatched++)
+     /* If PCRE2_COPY_MATCHED_SUBJECT was set, check that things are as they
+     should be, but not for fast JIT, where it isn't supported. */
+ 
+-    if ((dat_datctl.options & PCRE2_COPY_MATCHED_SUBJECT) != 0 &&
+-        (pat_patctl.control & CTL_JITFAST) == 0)
++    if ((dat_datctl.options & PCRE2_COPY_MATCHED_SUBJECT) != 0)
+       {
+-      if ((FLD(match_data, flags) & PCRE2_MD_COPIED_SUBJECT) == 0)
+-        fprintf(outfile,
+-          "** PCRE2 error: flag not set after copy_matched_subject\n");
++      if ((pat_patctl.control & CTL_JITFAST) != 0 &&
++          (dat_datctl.options & PCRE2_NO_JIT) == 0)
++        {
++        if ((FLD(match_data, flags) & PCRE2_MD_COPIED_SUBJECT) != 0)
++          fprintf(outfile,
++            "** PCRE2 error: flag set after unsupported copy_matched_subject\n");
++        }
++      else
++        {
++        if ((FLD(match_data, flags) & PCRE2_MD_COPIED_SUBJECT) == 0)
++          fprintf(outfile,
++            "** PCRE2 error: flag not set after copy_matched_subject\n");
+ 
+-      if (CASTFLD(void *, match_data, subject) == pp)
+-        fprintf(outfile,
+-          "** PCRE2 error: copy_matched_subject has not copied\n");
++        if (CASTFLD(void *, match_data, subject) == pp)
++          fprintf(outfile,
++            "** PCRE2 error: copy_matched_subject has not copied\n");
+ 
+-      if (memcmp(CASTFLD(void *, match_data, subject), pp, ulen) != 0)
+-        fprintf(outfile,
+-          "** PCRE2 error: copy_matched_subject mismatch\n");
++        if (memcmp(CASTFLD(void *, match_data, subject), pp, ulen) != 0)
++          fprintf(outfile,
++            "** PCRE2 error: copy_matched_subject mismatch\n");
++        }
+       }
+ 
+     /* If this is not the first time round a global loop, check that the
+diff --git a/testdata/testinput17 b/testdata/testinput17
+index 7dd2d8ea..b979a634 100644
+--- a/testdata/testinput17
++++ b/testdata/testinput17
+@@ -294,8 +294,13 @@
+     
+ /abc/jitfast
+     abc
++    abc\=copy_matched_subject
+     abc\=no_jit 
+-    
++
++/abc/jitfast
++    abc\=copy_matched_subject,no_jit
++    abc
++
+ # ---- 
+ 
+ /[aC]/mg,firstline,newline=lf
+diff --git a/testdata/testoutput17 b/testdata/testoutput17
+index ff17d061..f3ec654d 100644
+--- a/testdata/testoutput17
++++ b/testdata/testoutput17
+@@ -536,10 +536,18 @@ Failed: error -47: match limit exceeded
+     
+ /abc/jitfast
+     abc
++ 0: abc (JIT)
++    abc\=copy_matched_subject
+  0: abc (JIT)
+     abc\=no_jit 
+  0: abc (JIT)
+-    
++
++/abc/jitfast
++    abc\=copy_matched_subject,no_jit
++ 0: abc (JIT)
++    abc
++ 0: abc (JIT)
++
+ # ---- 
+ 
+ /[aC]/mg,firstline,newline=lf
+-- 
+2.56.0
+
