@@ -1,0 +1,156 @@
+From bcaf1ba40748a27e1e666491a0e9887f0f5f2965 Mon Sep 17 00:00:00 2001
+From: Nicholas Wilson <nicholas@nicholaswilson.me.uk>
+Date: Thu, 27 Aug 2026 16:52:16 +0100
+Subject: [PATCH] Backport of pcre2-10.48-Fix-DFA-workspace-overflows.patch
+
+Cherry-pick of c932e70451eafef922ebef364ac25042f0031135
+
+Fix DFA workspace overflows; see GHSA-3r4p-g7gg-ppmf for details
+---
+ src/pcre2_dfa_match.c | 44 ++++++++++++++++++++++++++++++++++++-------
+ testdata/testinput6   |  5 +++++
+ testdata/testoutput6  |  6 ++++++
+ 3 files changed, 48 insertions(+), 7 deletions(-)
+
+diff --git a/src/pcre2_dfa_match.c b/src/pcre2_dfa_match.c
+index ebf31d28..9911acf2 100644
+--- a/src/pcre2_dfa_match.c
++++ b/src/pcre2_dfa_match.c
+@@ -407,8 +407,8 @@ return (mb->callout)(cb, mb->callout_data);
+ 
+ /* This function is called when internal_dfa_match() is about to be called
+ recursively and there is insufficient working space left in the current
+-workspace block. If there's an existing next block, use it; otherwise get a new
+-block unless the heap limit is reached.
++workspace block. If there's a sufficiently large next block, use it; get a new
++block unless the heap limit is (or has been) reached.
+ 
+ Arguments:
+   rwsptr     pointer to block pointer (updated)
+@@ -424,9 +424,18 @@ more_workspace(RWS_anchor **rwsptr, unsigned int ovecsize, dfa_match_block *mb)
+ {
+ RWS_anchor *rws = *rwsptr;
+ RWS_anchor *new;
++uint32_t requested;
++
++PCRE2_ASSERT(ovecsize <= UINT32_MAX - RWS_RSIZE - RWS_ANCHOR_SIZE);
++requested = RWS_RSIZE + ovecsize + RWS_ANCHOR_SIZE;
+ 
+ if (rws->next != NULL)
+   {
++  /* Although the initial block is large, and subsequent ones try to double, the
++  heap limit may cause the last one to be smaller; in this case, we have already
++  hit the heap limit and allocating a larger block will not be possible. */
++  if (rws->next->size < requested)
++    return PCRE2_ERROR_HEAPLIMIT;
+   new = rws->next;
+   }
+ 
+@@ -436,14 +445,30 @@ overflow. */
+ 
+ else
+   {
+-  uint32_t newsize = (rws->size >= UINT32_MAX/(sizeof(int)*2))? UINT32_MAX/sizeof(int) : rws->size * 2;
++  uint32_t newsize = (rws->size >= (UINT32_MAX/sizeof(int))/2)?
++    UINT32_MAX/sizeof(int) : rws->size * 2;
+   uint32_t newsizeK = newsize/(1024/sizeof(int));
+ 
+-  if (newsizeK + mb->heap_used > mb->heap_limit)
+-    newsizeK = (uint32_t)(mb->heap_limit - mb->heap_used);
+-  newsize = newsizeK*(1024/sizeof(int));
++  /* Clamp the allocation to the remaining heap allowance with care for overflows */
++
++  if (mb->heap_used >= mb->heap_limit)
++    {
++    newsize = 0;
++    newsizeK = 0;
++    }
++  else
++    {
++    PCRE2_SIZE availableK = mb->heap_limit - mb->heap_used;
++    /* newsize always capped at UINT32_MAX/sizeof(int), so newsizeK also capped;
++    and - if availableK is smaller - then multiplication to form newsize is safe */
++    if (newsizeK > availableK)
++      {
++      newsize = (uint32_t)(availableK*(1024/sizeof(int)));
++      newsizeK = availableK;
++      }
++    }
+ 
+-  if (newsize < RWS_RSIZE + ovecsize + RWS_ANCHOR_SIZE)
++  if (newsize < requested)
+     return PCRE2_ERROR_HEAPLIMIT;
+   new = mb->memctl.malloc(newsize*sizeof(int), mb->memctl.memory_data);
+   if (new == NULL) return PCRE2_ERROR_NOMEMORY;
+@@ -2803,6 +2828,7 @@ for (;;)
+ 
+         local_offsets = (PCRE2_SIZE *)(RWS + rws->size - rws->free);
+         local_workspace = ((int *)local_offsets) + RWS_OVEC_OSIZE;
++        PCRE2_ASSERT(rws->free >= RWS_RSIZE + RWS_OVEC_OSIZE);
+         rws->free -= RWS_RSIZE + RWS_OVEC_OSIZE;
+ 
+         while (*endasscode == OP_ALT) endasscode += GET(endasscode, 1);
+@@ -2902,6 +2928,7 @@ for (;;)
+ 
+           local_offsets = (PCRE2_SIZE *)(RWS + rws->size - rws->free);
+           local_workspace = ((int *)local_offsets) + RWS_OVEC_OSIZE;
++          PCRE2_ASSERT(rws->free >= RWS_RSIZE + RWS_OVEC_OSIZE);
+           rws->free -= RWS_RSIZE + RWS_OVEC_OSIZE;
+ 
+           while (*endasscode == OP_ALT) endasscode += GET(endasscode, 1);
+@@ -2950,6 +2977,7 @@ for (;;)
+ 
+         local_offsets = (PCRE2_SIZE *)(RWS + rws->size - rws->free);
+         local_workspace = ((int *)local_offsets) + RWS_OVEC_RSIZE;
++        PCRE2_ASSERT(rws->free >= RWS_RSIZE + RWS_OVEC_RSIZE);
+         rws->free -= RWS_RSIZE + RWS_OVEC_RSIZE;
+ 
+         /* Check for repeating a recursion without advancing the subject
+@@ -3049,6 +3077,7 @@ for (;;)
+ 
+         local_offsets = (PCRE2_SIZE *)(RWS + rws->size - rws->free);
+         local_workspace = ((int *)local_offsets) + RWS_OVEC_OSIZE;
++        PCRE2_ASSERT(rws->free >= RWS_RSIZE + RWS_OVEC_OSIZE);
+         rws->free -= RWS_RSIZE + RWS_OVEC_OSIZE;
+ 
+         if (codevalue == OP_BRAPOSZERO)
+@@ -3148,6 +3177,7 @@ for (;;)
+ 
+         local_offsets = (PCRE2_SIZE *)(RWS + rws->size - rws->free);
+         local_workspace = ((int *)local_offsets) + RWS_OVEC_OSIZE;
++        PCRE2_ASSERT(rws->free >= RWS_RSIZE + RWS_OVEC_OSIZE);
+         rws->free -= RWS_RSIZE + RWS_OVEC_OSIZE;
+ 
+         rc = internal_dfa_match(
+diff --git a/testdata/testinput6 b/testdata/testinput6
+index 1fbe4ce8..8b75c796 100644
+--- a/testdata/testinput6
++++ b/testdata/testinput6
+@@ -5200,4 +5200,9 @@
+ 
+ # --------------
+ 
++# Test workspace resizing and workspace re-use
++
++/(*LIMIT_HEAP=4)(?=(?=(?=(?=(?=(?=(?=(?=a))(?R)))))))./
++    a\=dfa
++
+ # End of testinput6
+diff --git a/testdata/testoutput6 b/testdata/testoutput6
+index 74c40e90..802bd847 100644
+--- a/testdata/testoutput6
++++ b/testdata/testoutput6
+@@ -8164,4 +8164,10 @@ No match
+ 
+ # --------------
+ 
++# Test workspace resizing and workspace re-use
++
++/(*LIMIT_HEAP=4)(?=(?=(?=(?=(?=(?=(?=(?=a))(?R)))))))./
++    a\=dfa
++Failed: error -63: heap limit exceeded
++
+ # End of testinput6
+-- 
+2.56.0
+
