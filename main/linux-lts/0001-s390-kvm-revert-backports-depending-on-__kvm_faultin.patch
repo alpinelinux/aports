@@ -1,0 +1,803 @@
+From ba523a967f02a749c299e9e966c98111b27278b4 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Wed, 21 Oct 2026 16:52:40 +0200
+Subject: [PATCH] s390/kvm: revert backports depending on __kvm_faultin_pfn()
+
+6.12.114 pulled in upstream commit 3762e905ec2e ("KVM: s390: use
+__kvm_faultin_pfn()") as a Stable-dep-of 5f9df945d4e8 ("KVM: s390: Fix
+FOLL_*/FAULT_FLAG_* confusion"). It depends on the KVM faultin rework
+from v6.13 (__kvm_faultin_pfn(), KVM_PFN_ERR_NEEDS_IO,
+kvm_release_faultin_page()), which is not in 6.12, so the build fails:
+
+  arch/s390/kvm/kvm-s390.c:4776:15: error: implicit declaration of function '__kvm_faultin_pfn'
+  arch/s390/kvm/kvm-s390.c:4786:20: error: 'KVM_PFN_ERR_NEEDS_IO' undeclared
+  arch/s390/kvm/kvm-s390.c:4806:17: error: implicit declaration of function 'kvm_release_faultin_page'
+
+Revert it together with the backports built on top of it:
+
+  cd78dd7fb054 s390/uv: Don't return 0 from make_hva_secure() if the operation was not successful
+  f5b6a9fa37d0 KVM: s390: Fix FOLL_*/FAULT_FLAG_* confusion
+  45a6af541323 KVM: s390: pv: fix race when making a page secure
+  4f2fe83204ec KVM: s390: move gmap_shadow_pgt_lookup() into kvm
+  151690151a25 KVM: s390: use __kvm_faultin_pfn()
+
+This restores the gmap_fault() based DAT fault handling, which only uses
+FAULT_FLAG_* flags and is thus not affected by the FOLL_*/FAULT_FLAG_*
+confusion.
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ arch/s390/include/asm/gmap.h |   4 +-
+ arch/s390/include/asm/uv.h   |   2 +-
+ arch/s390/kernel/uv.c        | 139 ++-----------------------------
+ arch/s390/kvm/gaccess.c      |  42 +---------
+ arch/s390/kvm/gmap.c         | 103 +++++++++++++++++++++--
+ arch/s390/kvm/gmap.h         |   2 -
+ arch/s390/kvm/kvm-s390.c     | 155 +++++++++--------------------------
+ arch/s390/kvm/kvm-s390.h     |   6 --
+ arch/s390/mm/gmap.c          |  73 ++++++++++++++++-
+ 9 files changed, 218 insertions(+), 308 deletions(-)
+
+diff --git a/arch/s390/include/asm/gmap.h b/arch/s390/include/asm/gmap.h
+index b458957a383e..22775b1ce710 100644
+--- a/arch/s390/include/asm/gmap.h
++++ b/arch/s390/include/asm/gmap.h
+@@ -134,6 +134,8 @@ int gmap_shadow_sgt(struct gmap *sg, unsigned long saddr, unsigned long sgt,
+ 		    int fake);
+ int gmap_shadow_pgt(struct gmap *sg, unsigned long saddr, unsigned long pgt,
+ 		    int fake);
++int gmap_shadow_pgt_lookup(struct gmap *sg, unsigned long saddr,
++			   unsigned long *pgt, int *dat_protection, int *fake);
+ int gmap_shadow_page(struct gmap *sg, unsigned long saddr, pte_t pte);
+ 
+ void gmap_register_pte_notifier(struct gmap_notifier *);
+@@ -150,7 +152,7 @@ int s390_replace_asce(struct gmap *gmap);
+ void s390_uv_destroy_pfns(unsigned long count, unsigned long *pfns);
+ int __s390_uv_destroy_range(struct mm_struct *mm, unsigned long start,
+ 			    unsigned long end, bool interruptible);
+-unsigned long *gmap_table_walk(struct gmap *gmap, unsigned long gaddr, int level);
++int kvm_s390_wiggle_split_folio(struct mm_struct *mm, struct folio *folio, bool split);
+ 
+ /**
+  * s390_uv_destroy_range - Destroy a range of pages in the given mm.
+diff --git a/arch/s390/include/asm/uv.h b/arch/s390/include/asm/uv.h
+index 7e82dfb3c7aa..5cd127654a86 100644
+--- a/arch/s390/include/asm/uv.h
++++ b/arch/s390/include/asm/uv.h
+@@ -479,7 +479,7 @@ int uv_pin_shared(unsigned long paddr);
+ int uv_destroy_folio(struct folio *folio);
+ int uv_destroy_pte(pte_t pte);
+ int uv_convert_from_secure_pte(pte_t pte);
+-int make_hva_secure(struct mm_struct *mm, unsigned long hva, struct uv_cb_header *uvcb);
++int make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb);
+ int uv_convert_from_secure(unsigned long paddr);
+ int uv_convert_from_secure_folio(struct folio *folio);
+ 
+diff --git a/arch/s390/kernel/uv.c b/arch/s390/kernel/uv.c
+index 6cf5025c1f58..23c3637f5014 100644
+--- a/arch/s390/kernel/uv.c
++++ b/arch/s390/kernel/uv.c
+@@ -206,39 +206,6 @@ int uv_convert_from_secure_pte(pte_t pte)
+ 	return uv_convert_from_secure_folio(pfn_folio(pte_pfn(pte)));
+ }
+ 
+-/**
+- * should_export_before_import - Determine whether an export is needed
+- * before an import-like operation
+- * @uvcb: the Ultravisor control block of the UVC to be performed
+- * @mm: the mm of the process
+- *
+- * Returns whether an export is needed before every import-like operation.
+- * This is needed for shared pages, which don't trigger a secure storage
+- * exception when accessed from a different guest.
+- *
+- * Although considered as one, the Unpin Page UVC is not an actual import,
+- * so it is not affected.
+- *
+- * No export is needed also when there is only one protected VM, because the
+- * page cannot belong to the wrong VM in that case (there is no "other VM"
+- * it can belong to).
+- *
+- * Return: true if an export is needed before every import, otherwise false.
+- */
+-static bool should_export_before_import(struct uv_cb_header *uvcb, struct mm_struct *mm)
+-{
+-	/*
+-	 * The misc feature indicates, among other things, that importing a
+-	 * shared page from a different protected VM will automatically also
+-	 * transfer its ownership.
+-	 */
+-	if (uv_has_feature(BIT_UV_FEAT_MISC))
+-		return false;
+-	if (uvcb->cmd == UVC_CMD_UNPIN_PAGE_SHARED)
+-		return false;
+-	return atomic_read(&mm->context.protected_count) > 1;
+-}
+-
+ /*
+  * Calculate the expected ref_count for a folio that would otherwise have no
+  * further pins. This was cribbed from similar functions in other places in
+@@ -261,7 +228,7 @@ static int expected_folio_refs(struct folio *folio)
+ }
+ 
+ /**
+- * __make_folio_secure() - make a folio secure
++ * make_folio_secure() - make a folio secure
+  * @folio: the folio to make secure
+  * @uvcb: the uvcb that describes the UVC to be used
+  *
+@@ -270,18 +237,20 @@ static int expected_folio_refs(struct folio *folio)
+  *
+  * Return: 0 on success;
+  *         -EBUSY if the folio is in writeback or has too many references;
++ *         -E2BIG if the folio is large;
+  *         -EAGAIN if the UVC needs to be attempted again;
+  *         -ENXIO if the address is not mapped;
+  *         -EINVAL if the UVC failed for other reasons.
+  *
+  * Context: The caller must hold exactly one extra reference on the folio
+- *          (it's the same logic as split_folio()), and the folio must be
+- *          locked.
++ *          (it's the same logic as split_folio())
+  */
+-static int __make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
++int make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
+ {
+ 	int expected, cc = 0;
+ 
++	if (folio_test_large(folio))
++		return -E2BIG;
+ 	if (folio_test_writeback(folio))
+ 		return -EBUSY;
+ 	expected = expected_folio_refs(folio) + 1;
+@@ -308,101 +277,7 @@ static int __make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
+ 		return -EAGAIN;
+ 	return uvcb->rc == 0x10a ? -ENXIO : -EINVAL;
+ }
+-
+-static int make_folio_secure(struct mm_struct *mm, struct folio *folio, struct uv_cb_header *uvcb)
+-{
+-	int rc;
+-
+-	if (!folio_trylock(folio))
+-		return -EAGAIN;
+-	if (should_export_before_import(uvcb, mm))
+-		uv_convert_from_secure(folio_to_phys(folio));
+-	rc = __make_folio_secure(folio, uvcb);
+-	folio_unlock(folio);
+-
+-	return rc;
+-}
+-
+-/**
+- * s390_wiggle_split_folio() - try to drain extra references to a folio and optionally split.
+- * @mm:    the mm containing the folio to work on
+- * @folio: the folio
+- * @split: whether to split a large folio
+- *
+- * Context: Must be called while holding an extra reference to the folio;
+- *          the mm lock should not be held.
+- * Return: 0 if the folio was split successfully;
+- *         -EAGAIN if the folio was not split successfully but another attempt
+- *                 can be made, or if @split was set to false;
+- *         -EINVAL in case of other errors. See split_folio().
+- */
+-static int s390_wiggle_split_folio(struct mm_struct *mm, struct folio *folio, bool split)
+-{
+-	int rc;
+-
+-	lockdep_assert_not_held(&mm->mmap_lock);
+-	folio_wait_writeback(folio);
+-	lru_add_drain_all();
+-	if (split) {
+-		folio_lock(folio);
+-		rc = split_folio(folio);
+-		folio_unlock(folio);
+-
+-		if (rc != -EBUSY)
+-			return rc;
+-	}
+-	return -EAGAIN;
+-}
+-
+-int make_hva_secure(struct mm_struct *mm, unsigned long hva, struct uv_cb_header *uvcb)
+-{
+-	struct vm_area_struct *vma;
+-	struct folio_walk fw;
+-	struct folio *folio;
+-	int rc;
+-
+-	mmap_read_lock(mm);
+-	vma = vma_lookup(mm, hva);
+-	if (!vma) {
+-		mmap_read_unlock(mm);
+-		return -EFAULT;
+-	}
+-	folio = folio_walk_start(&fw, vma, hva, 0);
+-	if (!folio) {
+-		mmap_read_unlock(mm);
+-		return -ENXIO;
+-	}
+-
+-	folio_get(folio);
+-	/*
+-	 * Secure pages cannot be huge and userspace should not combine both.
+-	 * In case userspace does it anyway this will result in an -EFAULT for
+-	 * the unpack. The guest is thus never reaching secure mode.
+-	 * If userspace plays dirty tricks and decides to map huge pages at a
+-	 * later point in time, it will receive a segmentation fault or
+-	 * KVM_RUN will return -EFAULT.
+-	 */
+-	if (folio_test_hugetlb(folio))
+-		rc = -EFAULT;
+-	else if (folio_test_large(folio))
+-		rc = -E2BIG;
+-	else if (!pte_write(fw.pte) || (pte_val(fw.pte) & _PAGE_INVALID))
+-		rc = -ENXIO;
+-	else
+-		rc = make_folio_secure(mm, folio, uvcb);
+-	folio_walk_end(&fw, vma);
+-	mmap_read_unlock(mm);
+-
+-	if (rc == -E2BIG || rc == -EBUSY) {
+-		rc = s390_wiggle_split_folio(mm, folio, rc == -E2BIG);
+-		if (!rc)
+-			rc = -EAGAIN;
+-	}
+-	folio_put(folio);
+-
+-	return rc;
+-}
+-EXPORT_SYMBOL_GPL(make_hva_secure);
++EXPORT_SYMBOL_GPL(make_folio_secure);
+ 
+ /*
+  * To be called with the folio locked or with an extra reference! This will
+diff --git a/arch/s390/kvm/gaccess.c b/arch/s390/kvm/gaccess.c
+index 448304e662fb..7bc97ebd60d5 100644
+--- a/arch/s390/kvm/gaccess.c
++++ b/arch/s390/kvm/gaccess.c
+@@ -16,7 +16,6 @@
+ #include <asm/gmap.h>
+ #include <asm/dat-bits.h>
+ #include "kvm-s390.h"
+-#include "gmap.h"
+ #include "gaccess.h"
+ 
+ /*
+@@ -1393,42 +1392,6 @@ static int kvm_s390_shadow_tables(struct gmap *sg, unsigned long saddr,
+ 	return 0;
+ }
+ 
+-/**
+- * shadow_pgt_lookup() - find a shadow page table
+- * @sg: pointer to the shadow guest address space structure
+- * @saddr: the address in the shadow aguest address space
+- * @pgt: parent gmap address of the page table to get shadowed
+- * @dat_protection: if the pgtable is marked as protected by dat
+- * @fake: pgt references contiguous guest memory block, not a pgtable
+- *
+- * Returns 0 if the shadow page table was found and -EAGAIN if the page
+- * table was not found.
+- *
+- * Called with sg->mm->mmap_lock in read.
+- */
+-static int shadow_pgt_lookup(struct gmap *sg, unsigned long saddr, unsigned long *pgt,
+-			     int *dat_protection, int *fake)
+-{
+-	unsigned long *table;
+-	struct page *page;
+-	int rc;
+-
+-	spin_lock(&sg->guest_table_lock);
+-	table = gmap_table_walk(sg, saddr, 1); /* get segment pointer */
+-	if (table && !(*table & _SEGMENT_ENTRY_INVALID)) {
+-		/* Shadow page tables are full pages (pte+pgste) */
+-		page = pfn_to_page(*table >> PAGE_SHIFT);
+-		*pgt = page->index & ~GMAP_SHADOW_FAKE_TABLE;
+-		*dat_protection = !!(*table & _SEGMENT_ENTRY_PROTECT);
+-		*fake = !!(page->index & GMAP_SHADOW_FAKE_TABLE);
+-		rc = 0;
+-	} else  {
+-		rc = -EAGAIN;
+-	}
+-	spin_unlock(&sg->guest_table_lock);
+-	return rc;
+-}
+-
+ /**
+  * kvm_s390_shadow_fault - handle fault on a shadow page table
+  * @vcpu: virtual cpu
+@@ -1452,9 +1415,6 @@ int kvm_s390_shadow_fault(struct kvm_vcpu *vcpu, struct gmap *sg,
+ 	int dat_protection, fake;
+ 	int rc;
+ 
+-	if (KVM_BUG_ON(!gmap_is_shadow(sg), vcpu->kvm))
+-		return -EFAULT;
+-
+ 	mmap_read_lock(sg->mm);
+ 	/*
+ 	 * We don't want any guest-2 tables to change - so the parent
+@@ -1463,7 +1423,7 @@ int kvm_s390_shadow_fault(struct kvm_vcpu *vcpu, struct gmap *sg,
+ 	 */
+ 	ipte_lock(vcpu->kvm);
+ 
+-	rc = shadow_pgt_lookup(sg, saddr, &pgt, &dat_protection, &fake);
++	rc = gmap_shadow_pgt_lookup(sg, saddr, &pgt, &dat_protection, &fake);
+ 	if (rc)
+ 		rc = kvm_s390_shadow_tables(sg, saddr, &pgt, &dat_protection,
+ 					    &fake);
+diff --git a/arch/s390/kvm/gmap.c b/arch/s390/kvm/gmap.c
+index 6d8944d1b4a0..02adf151d4de 100644
+--- a/arch/s390/kvm/gmap.c
++++ b/arch/s390/kvm/gmap.c
+@@ -22,6 +22,92 @@
+ 
+ #include "gmap.h"
+ 
++/**
++ * should_export_before_import - Determine whether an export is needed
++ * before an import-like operation
++ * @uvcb: the Ultravisor control block of the UVC to be performed
++ * @mm: the mm of the process
++ *
++ * Returns whether an export is needed before every import-like operation.
++ * This is needed for shared pages, which don't trigger a secure storage
++ * exception when accessed from a different guest.
++ *
++ * Although considered as one, the Unpin Page UVC is not an actual import,
++ * so it is not affected.
++ *
++ * No export is needed also when there is only one protected VM, because the
++ * page cannot belong to the wrong VM in that case (there is no "other VM"
++ * it can belong to).
++ *
++ * Return: true if an export is needed before every import, otherwise false.
++ */
++static bool should_export_before_import(struct uv_cb_header *uvcb, struct mm_struct *mm)
++{
++	/*
++	 * The misc feature indicates, among other things, that importing a
++	 * shared page from a different protected VM will automatically also
++	 * transfer its ownership.
++	 */
++	if (uv_has_feature(BIT_UV_FEAT_MISC))
++		return false;
++	if (uvcb->cmd == UVC_CMD_UNPIN_PAGE_SHARED)
++		return false;
++	return atomic_read(&mm->context.protected_count) > 1;
++}
++
++static int __gmap_make_secure(struct gmap *gmap, struct page *page, void *uvcb)
++{
++	struct folio *folio = page_folio(page);
++	int rc;
++
++	/*
++	 * Secure pages cannot be huge and userspace should not combine both.
++	 * In case userspace does it anyway this will result in an -EFAULT for
++	 * the unpack. The guest is thus never reaching secure mode.
++	 * If userspace plays dirty tricks and decides to map huge pages at a
++	 * later point in time, it will receive a segmentation fault or
++	 * KVM_RUN will return -EFAULT.
++	 */
++	if (folio_test_hugetlb(folio))
++		return -EFAULT;
++	if (folio_test_large(folio)) {
++		mmap_read_unlock(gmap->mm);
++		rc = kvm_s390_wiggle_split_folio(gmap->mm, folio, true);
++		mmap_read_lock(gmap->mm);
++		if (rc)
++			return rc;
++		folio = page_folio(page);
++	}
++
++	if (!folio_trylock(folio))
++		return -EAGAIN;
++	if (should_export_before_import(uvcb, gmap->mm))
++		uv_convert_from_secure(folio_to_phys(folio));
++	rc = make_folio_secure(folio, uvcb);
++	folio_unlock(folio);
++
++	/*
++	 * In theory a race is possible and the folio might have become
++	 * large again before the folio_trylock() above. In that case, no
++	 * action is performed and -EAGAIN is returned; the callers will
++	 * have to try again later.
++	 * In most cases this implies running the VM again, getting the same
++	 * exception again, and make another attempt in this function.
++	 * This is expected to happen extremely rarely.
++	 */
++	if (rc == -E2BIG)
++		return -EAGAIN;
++	/* The folio has too many references, try to shake some off */
++	if (rc == -EBUSY) {
++		mmap_read_unlock(gmap->mm);
++		kvm_s390_wiggle_split_folio(gmap->mm, folio, false);
++		mmap_read_lock(gmap->mm);
++		return -EAGAIN;
++	}
++
++	return rc;
++}
++
+ /**
+  * gmap_make_secure() - make one guest page secure
+  * @gmap: the guest gmap
+@@ -29,19 +115,24 @@
+  * @uvcb: the UVCB specifying which operation needs to be performed
+  *
+  * Context: needs to be called with kvm->srcu held.
+- * Return: 0 on success, < 0 in case of error.
++ * Return: 0 on success, < 0 in case of error (see __gmap_make_secure()).
+  */
+ int gmap_make_secure(struct gmap *gmap, unsigned long gaddr, void *uvcb)
+ {
+ 	struct kvm *kvm = gmap->private;
+-	unsigned long vmaddr;
++	struct page *page;
++	int rc = 0;
+ 
+ 	lockdep_assert_held(&kvm->srcu);
+ 
+-	vmaddr = gfn_to_hva(kvm, gpa_to_gfn(gaddr));
+-	if (kvm_is_error_hva(vmaddr))
+-		return -EFAULT;
+-	return make_hva_secure(gmap->mm, vmaddr, uvcb);
++	page = gfn_to_page(kvm, gpa_to_gfn(gaddr));
++	mmap_read_lock(gmap->mm);
++	if (page)
++		rc = __gmap_make_secure(gmap, page, uvcb);
++	kvm_release_page_clean(page);
++	mmap_read_unlock(gmap->mm);
++
++	return rc;
+ }
+ 
+ int gmap_convert_to_secure(struct gmap *gmap, unsigned long gaddr)
+diff --git a/arch/s390/kvm/gmap.h b/arch/s390/kvm/gmap.h
+index 14431ce978da..f2b52ce29be3 100644
+--- a/arch/s390/kvm/gmap.h
++++ b/arch/s390/kvm/gmap.h
+@@ -10,8 +10,6 @@
+ #ifndef ARCH_KVM_S390_GMAP_H
+ #define ARCH_KVM_S390_GMAP_H
+ 
+-#define GMAP_SHADOW_FAKE_TABLE 1ULL
+-
+ int gmap_make_secure(struct gmap *gmap, unsigned long gaddr, void *uvcb);
+ int gmap_convert_to_secure(struct gmap *gmap, unsigned long gaddr);
+ int gmap_destroy_page(struct gmap *gmap, unsigned long gaddr);
+diff --git a/arch/s390/kvm/kvm-s390.c b/arch/s390/kvm/kvm-s390.c
+index 7bb5640bb8a7..d7f2fa2a4b5f 100644
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@ -4743,114 +4743,30 @@ static void kvm_s390_assert_primary_as(struct kvm_vcpu *vcpu)
+ 		current->thread.gmap_int_code, current->thread.gmap_teid.val);
+ }
+ 
+-/*
+- * __kvm_s390_handle_dat_fault() - handle a dat fault for the gmap of a vcpu
+- * @vcpu: the vCPU whose gmap is to be fixed up
+- * @gfn: the guest frame number used for memslots (including fake memslots)
+- * @gaddr: the gmap address, does not have to match @gfn for ucontrol gmaps
+- * @foll: FOLL_* flags
+- *
+- * Return: 0 on success, < 0 in case of error.
+- * Context: The mm lock must not be held before calling. May sleep.
+- */
+-int __kvm_s390_handle_dat_fault(struct kvm_vcpu *vcpu, gfn_t gfn, gpa_t gaddr, unsigned int foll)
+-{
+-	struct kvm_memory_slot *slot;
+-	unsigned int fault_flags;
+-	bool writable, unlocked;
+-	unsigned long vmaddr;
+-	struct page *page;
+-	kvm_pfn_t pfn;
+-	int rc;
+-
+-	slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
+-	if (!slot || slot->flags & KVM_MEMSLOT_INVALID)
+-		return vcpu_post_run_addressing_exception(vcpu);
+-
+-	fault_flags = foll & FOLL_WRITE ? FAULT_FLAG_WRITE : 0;
+-	if (vcpu->arch.gmap->pfault_enabled)
+-		foll |= FOLL_NOWAIT;
+-	vmaddr = __gfn_to_hva_memslot(slot, gfn);
+-
+-try_again:
+-	pfn = __kvm_faultin_pfn(slot, gfn, foll, &writable, &page);
+-
+-	/* Access outside memory, inject addressing exception */
+-	if (is_noslot_pfn(pfn))
+-		return vcpu_post_run_addressing_exception(vcpu);
+-	/* Signal pending: try again */
+-	if (pfn == KVM_PFN_ERR_SIGPENDING)
+-		return -EAGAIN;
+-
+-	/* Needs I/O, try to setup async pfault (only possible with FOLL_NOWAIT) */
+-	if (pfn == KVM_PFN_ERR_NEEDS_IO) {
+-		trace_kvm_s390_major_guest_pfault(vcpu);
+-		if (kvm_arch_setup_async_pf(vcpu))
+-			return 0;
+-		vcpu->stat.pfault_sync++;
+-		/* Could not setup async pfault, try again synchronously */
+-		foll &= ~FOLL_NOWAIT;
+-		goto try_again;
+-	}
+-	/* Any other error */
+-	if (is_error_pfn(pfn))
+-		return -EFAULT;
+-
+-	/* Success */
+-	mmap_read_lock(vcpu->arch.gmap->mm);
+-	/* Mark the userspace PTEs as young and/or dirty, to avoid page fault loops */
+-	rc = fixup_user_fault(vcpu->arch.gmap->mm, vmaddr, fault_flags, &unlocked);
+-	if (!rc)
+-		rc = __gmap_link(vcpu->arch.gmap, gaddr, vmaddr);
+-	scoped_guard(spinlock, &vcpu->kvm->mmu_lock) {
+-		kvm_release_faultin_page(vcpu->kvm, page, false, writable);
+-	}
+-	mmap_read_unlock(vcpu->arch.gmap->mm);
+-	return rc;
+-}
+-
+-static int vcpu_dat_fault_handler(struct kvm_vcpu *vcpu, unsigned long gaddr, unsigned int foll)
+-{
+-	unsigned long gaddr_tmp;
+-	gfn_t gfn;
+-
+-	gfn = gpa_to_gfn(gaddr);
+-	if (kvm_is_ucontrol(vcpu->kvm)) {
+-		/*
+-		 * This translates the per-vCPU guest address into a
+-		 * fake guest address, which can then be used with the
+-		 * fake memslots that are identity mapping userspace.
+-		 * This allows ucontrol VMs to use the normal fault
+-		 * resolution path, like normal VMs.
+-		 */
+-		mmap_read_lock(vcpu->arch.gmap->mm);
+-		gaddr_tmp = __gmap_translate(vcpu->arch.gmap, gaddr);
+-		mmap_read_unlock(vcpu->arch.gmap->mm);
+-		if (gaddr_tmp == -EFAULT) {
+-			vcpu->run->exit_reason = KVM_EXIT_S390_UCONTROL;
+-			vcpu->run->s390_ucontrol.trans_exc_code = gaddr;
+-			vcpu->run->s390_ucontrol.pgm_code = PGM_SEGMENT_TRANSLATION;
+-			return -EREMOTE;
+-		}
+-		gfn = gpa_to_gfn(gaddr_tmp);
+-	}
+-	return __kvm_s390_handle_dat_fault(vcpu, gfn, gaddr, foll);
+-}
+-
+ static int vcpu_post_run_handle_fault(struct kvm_vcpu *vcpu)
+ {
+-	unsigned int foll = 0;
++	unsigned int flags = 0;
+ 	unsigned long gaddr;
+-	int rc;
++	int rc = 0;
+ 
+ 	gaddr = current->thread.gmap_teid.addr * PAGE_SIZE;
+ 	if (kvm_s390_cur_gmap_fault_is_write())
+-		foll = FOLL_WRITE;
++		flags = FAULT_FLAG_WRITE;
+ 
+ 	switch (current->thread.gmap_int_code & PGM_INT_CODE_MASK) {
+ 	case 0:
+ 		vcpu->stat.exit_null++;
+ 		break;
++	case PGM_NON_SECURE_STORAGE_ACCESS:
++		kvm_s390_assert_primary_as(vcpu);
++		/*
++		 * This is normal operation; a page belonging to a protected
++		 * guest has not been imported yet. Try to import the page into
++		 * the protected guest.
++		 */
++		if (gmap_convert_to_secure(vcpu->arch.gmap, gaddr) == -EINVAL)
++			send_sig(SIGSEGV, current, 0);
++		break;
+ 	case PGM_SECURE_STORAGE_ACCESS:
+ 	case PGM_SECURE_STORAGE_VIOLATION:
+ 		kvm_s390_assert_primary_as(vcpu);
+@@ -4875,20 +4791,6 @@ static int vcpu_post_run_handle_fault(struct kvm_vcpu *vcpu)
+ 			send_sig(SIGSEGV, current, 0);
+ 		}
+ 		break;
+-	case PGM_NON_SECURE_STORAGE_ACCESS:
+-		kvm_s390_assert_primary_as(vcpu);
+-		/*
+-		 * This is normal operation; a page belonging to a protected
+-		 * guest has not been imported yet. Try to import the page into
+-		 * the protected guest.
+-		 */
+-		rc = gmap_convert_to_secure(vcpu->arch.gmap, gaddr);
+-		if (rc == -EINVAL)
+-			send_sig(SIGSEGV, current, 0);
+-		if (rc != -ENXIO)
+-			break;
+-		foll = FOLL_WRITE;
+-		fallthrough;
+ 	case PGM_PROTECTION:
+ 	case PGM_SEGMENT_TRANSLATION:
+ 	case PGM_PAGE_TRANSLATION:
+@@ -4897,14 +4799,37 @@ static int vcpu_post_run_handle_fault(struct kvm_vcpu *vcpu)
+ 	case PGM_REGION_SECOND_TRANS:
+ 	case PGM_REGION_THIRD_TRANS:
+ 		kvm_s390_assert_primary_as(vcpu);
+-		return vcpu_dat_fault_handler(vcpu, gaddr, foll);
++		if (vcpu->arch.gmap->pfault_enabled) {
++			rc = gmap_fault(vcpu->arch.gmap, gaddr, flags | FAULT_FLAG_RETRY_NOWAIT);
++			if (rc == -EFAULT)
++				return vcpu_post_run_addressing_exception(vcpu);
++			if (rc == -EAGAIN) {
++				trace_kvm_s390_major_guest_pfault(vcpu);
++				if (kvm_arch_setup_async_pf(vcpu))
++					return 0;
++				vcpu->stat.pfault_sync++;
++			} else {
++				return rc;
++			}
++		}
++		rc = gmap_fault(vcpu->arch.gmap, gaddr, flags);
++		if (rc == -EFAULT) {
++			if (kvm_is_ucontrol(vcpu->kvm)) {
++				vcpu->run->exit_reason = KVM_EXIT_S390_UCONTROL;
++				vcpu->run->s390_ucontrol.trans_exc_code = gaddr;
++				vcpu->run->s390_ucontrol.pgm_code = 0x10;
++				return -EREMOTE;
++			}
++			return vcpu_post_run_addressing_exception(vcpu);
++		}
++		break;
+ 	default:
+ 		KVM_BUG(1, vcpu->kvm, "Unexpected program interrupt 0x%x, TEID 0x%016lx",
+ 			current->thread.gmap_int_code, current->thread.gmap_teid.val);
+ 		send_sig(SIGSEGV, current, 0);
+ 		break;
+ 	}
+-	return 0;
++	return rc;
+ }
+ 
+ static int vcpu_post_run(struct kvm_vcpu *vcpu, int exit_reason)
+@@ -5785,9 +5710,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
+ 	}
+ #endif
+ 	case KVM_S390_VCPU_FAULT: {
+-		idx = srcu_read_lock(&vcpu->kvm->srcu);
+-		r = vcpu_dat_fault_handler(vcpu, arg, 0);
+-		srcu_read_unlock(&vcpu->kvm->srcu, idx);
++		r = gmap_fault(vcpu->arch.gmap, arg, 0);
+ 		break;
+ 	}
+ 	case KVM_ENABLE_CAP:
+diff --git a/arch/s390/kvm/kvm-s390.h b/arch/s390/kvm/kvm-s390.h
+index 3f72a217ee99..597d7a71deeb 100644
+--- a/arch/s390/kvm/kvm-s390.h
++++ b/arch/s390/kvm/kvm-s390.h
+@@ -408,12 +408,6 @@ void kvm_s390_vcpu_unsetup_cmma(struct kvm_vcpu *vcpu);
+ void kvm_s390_set_cpu_timer(struct kvm_vcpu *vcpu, __u64 cputm);
+ __u64 kvm_s390_get_cpu_timer(struct kvm_vcpu *vcpu);
+ int kvm_s390_cpus_from_pv(struct kvm *kvm, u16 *rc, u16 *rrc);
+-int __kvm_s390_handle_dat_fault(struct kvm_vcpu *vcpu, gfn_t gfn, gpa_t gaddr, unsigned int flags);
+-
+-static inline int kvm_s390_handle_dat_fault(struct kvm_vcpu *vcpu, gpa_t gaddr, unsigned int flags)
+-{
+-	return __kvm_s390_handle_dat_fault(vcpu, gpa_to_gfn(gaddr), gaddr, flags);
+-}
+ 
+ /* implemented in diag.c */
+ int kvm_s390_handle_diag(struct kvm_vcpu *vcpu);
+diff --git a/arch/s390/mm/gmap.c b/arch/s390/mm/gmap.c
+index 719a9adc2ad3..2527c6574ad1 100644
+--- a/arch/s390/mm/gmap.c
++++ b/arch/s390/mm/gmap.c
+@@ -635,7 +635,6 @@ int __gmap_link(struct gmap *gmap, unsigned long gaddr, unsigned long vmaddr)
+ 	radix_tree_preload_end();
+ 	return rc;
+ }
+-EXPORT_SYMBOL(__gmap_link);
+ 
+ /**
+  * gmap_fault - resolve a fault on a guest address
+@@ -804,7 +803,8 @@ static void gmap_call_notifier(struct gmap *gmap, unsigned long start,
+  *
+  * Note: Can also be called for shadow gmaps.
+  */
+-unsigned long *gmap_table_walk(struct gmap *gmap, unsigned long gaddr, int level)
++static inline unsigned long *gmap_table_walk(struct gmap *gmap,
++					     unsigned long gaddr, int level)
+ {
+ 	const int asce_type = gmap->asce & _ASCE_TYPE_MASK;
+ 	unsigned long *table = gmap->table;
+@@ -855,7 +855,6 @@ unsigned long *gmap_table_walk(struct gmap *gmap, unsigned long gaddr, int level
+ 	}
+ 	return table;
+ }
+-EXPORT_SYMBOL(gmap_table_walk);
+ 
+ /**
+  * gmap_pte_op_walk - walk the gmap page table, get the page table lock
+@@ -2003,6 +2002,46 @@ int gmap_shadow_sgt(struct gmap *sg, unsigned long saddr, unsigned long sgt,
+ }
+ EXPORT_SYMBOL_GPL(gmap_shadow_sgt);
+ 
++/**
++ * gmap_shadow_pgt_lookup - find a shadow page table
++ * @sg: pointer to the shadow guest address space structure
++ * @saddr: the address in the shadow aguest address space
++ * @pgt: parent gmap address of the page table to get shadowed
++ * @dat_protection: if the pgtable is marked as protected by dat
++ * @fake: pgt references contiguous guest memory block, not a pgtable
++ *
++ * Returns 0 if the shadow page table was found and -EAGAIN if the page
++ * table was not found.
++ *
++ * Called with sg->mm->mmap_lock in read.
++ */
++int gmap_shadow_pgt_lookup(struct gmap *sg, unsigned long saddr,
++			   unsigned long *pgt, int *dat_protection,
++			   int *fake)
++{
++	unsigned long *table;
++	struct page *page;
++	int rc;
++
++	BUG_ON(!gmap_is_shadow(sg));
++	spin_lock(&sg->guest_table_lock);
++	table = gmap_table_walk(sg, saddr, 1); /* get segment pointer */
++	if (table && !(*table & _SEGMENT_ENTRY_INVALID)) {
++		/* Shadow page tables are full pages (pte+pgste) */
++		page = pfn_to_page(*table >> PAGE_SHIFT);
++		*pgt = page->index & ~GMAP_SHADOW_FAKE_TABLE;
++		*dat_protection = !!(*table & _SEGMENT_ENTRY_PROTECT);
++		*fake = !!(page->index & GMAP_SHADOW_FAKE_TABLE);
++		rc = 0;
++	} else  {
++		rc = -EAGAIN;
++	}
++	spin_unlock(&sg->guest_table_lock);
++	return rc;
++
++}
++EXPORT_SYMBOL_GPL(gmap_shadow_pgt_lookup);
++
+ /**
+  * gmap_shadow_pgt - instantiate a shadow page table
+  * @sg: pointer to the shadow guest address space structure
+@@ -2943,3 +2982,31 @@ int s390_replace_asce(struct gmap *gmap)
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(s390_replace_asce);
++
++/**
++ * kvm_s390_wiggle_split_folio() - try to drain extra references to a folio and optionally split
++ * @mm:    the mm containing the folio to work on
++ * @folio: the folio
++ * @split: whether to split a large folio
++ *
++ * Context: Must be called while holding an extra reference to the folio;
++ *          the mm lock should not be held.
++ */
++int kvm_s390_wiggle_split_folio(struct mm_struct *mm, struct folio *folio, bool split)
++{
++	int rc;
++
++	lockdep_assert_not_held(&mm->mmap_lock);
++	folio_wait_writeback(folio);
++	lru_add_drain_all();
++	if (split) {
++		folio_lock(folio);
++		rc = split_folio(folio);
++		folio_unlock(folio);
++
++		if (rc != -EBUSY)
++			return rc;
++	}
++	return -EAGAIN;
++}
++EXPORT_SYMBOL_GPL(kvm_s390_wiggle_split_folio);
+-- 
+2.56.0
+
