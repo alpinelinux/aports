@@ -1,0 +1,63 @@
+From 195c81658995a4b7531c30a12c5aef6cf2bbd671 Mon Sep 17 00:00:00 2001
+From: Matt Arsenault <Matthew.Arsenault@amd.com>
+Date: Sat, 3 Oct 2026 09:15:36 +0200
+Subject: [PATCH] ORC: Fix flaky OrcLazy tests (#228619)
+
+I've seen this fail a few too many times so just let AI deal with it. I
+don't
+know anything about orc, but extending lifetime of lock_guard seems
+plausible.
+
+Notify lookupInitSymbols CV while holding the mutex
+
+The init-symbol lookup completion callback decremented Count under
+LookupMutex but called CV.notify_one() after releasing it. The waiting
+thread could observe Count == 0, return from lookupInitSymbols, and
+destroy the stack-allocated mutex and condition variable before the
+callback signalled it. With concurrent compile threads the callback runs
+on a dispatcher thread, so the late notify wrote into reused stack
+memory, e.g. during endSession right after deinitialize.
+
+This caused intermittent crashes in
+ExecutionEngine/OrcLazy/multiple-compile-threads-basic.ll on macOS
+(#50408, #126982). MachOPlatform and ELFNixPlatform already notify their
+bootstrap condition variables under the mutex for the same reason.
+
+Co-authored-by: Claude
+[noreply@anthropic.com](mailto:noreply@anthropic.com)
+
+Co-authored-by: Claude <noreply@anthropic.com>
+---
+ llvm/lib/ExecutionEngine/Orc/Core.cpp | 19 +++++++++----------
+ 1 file changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/llvm/lib/ExecutionEngine/Orc/Core.cpp b/llvm/lib/ExecutionEngine/Orc/Core.cpp
+index b026addd5b083e..da434e55ce4d15 100644
+--- a/llvm/lib/ExecutionEngine/Orc/Core.cpp
++++ b/llvm/lib/ExecutionEngine/Orc/Core.cpp
+@@ -1462,16 +1462,15 @@ Expected<DenseMap<JITDylib *, SymbolMap>> Platform::lookupInitSymbols(
+         JITDylibSearchOrder({{JD, JITDylibLookupFlags::MatchAllSymbols}}),
+         std::move(Names), SymbolState::Ready,
+         [&, JD](Expected<SymbolMap> Result) {
+-          {
+-            std::lock_guard<std::mutex> Lock(LookupMutex);
+-            --Count;
+-            if (Result) {
+-              assert(!CompoundResult.count(JD) &&
+-                     "Duplicate JITDylib in lookup?");
+-              CompoundResult[JD] = std::move(*Result);
+-            } else
+-              CompoundErr =
+-                  joinErrors(std::move(CompoundErr), Result.takeError());
++          std::lock_guard<std::mutex> Lock(LookupMutex);
++          --Count;
++          if (Result) {
++            assert(!CompoundResult.count(JD) &&
++                   "Duplicate JITDylib in lookup?");
++            CompoundResult[JD] = std::move(*Result);
++          } else {
++            CompoundErr =
++                joinErrors(std::move(CompoundErr), Result.takeError());
+           }
+           CV.notify_one();
+         },
