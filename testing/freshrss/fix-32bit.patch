@@ -1,0 +1,122 @@
+From 10e64adc22b97cbce28162a7bc5c5aa5d45e6e48 Mon Sep 17 00:00:00 2001
+From: Raed <Raed2180416@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 03:23:41 +0530
+Subject: [PATCH 1/2] Fix TypeError from entry IDs on 32-bit platforms
+
+An integer literal above PHP_INT_MAX is a float on x86, and _id() only
+accepted int|string, so the export test failed there with "must be of type
+string|int, float given". Accept the float and format it without the
+exponent notation a plain cast would produce.
+---
+ app/Models/Entry.php           | 7 +++++--
+ tests/app/Models/EntryTest.php | 7 +++++++
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/app/Models/Entry.php b/app/Models/Entry.php
+index 1680181d035..a2e0de29ad2 100644
+--- a/app/Models/Entry.php
++++ b/app/Models/Entry.php
+@@ -536,10 +536,13 @@ public function _sqlContentLength(int $value): void {
+ 		$this->sqlContentLength = $value > 0 ? $value : null;
+ 	}
+ 
+-	/** @param int|numeric-string $value String is for compatibility with 32-bit platforms */
+-	public function _id(int|string $value): void {
++	/** @param int|float|numeric-string $value String and float are for compatibility with 32-bit platforms */
++	public function _id(int|float|string $value): void {
+ 		if (is_int($value)) {
+ 			$value = (string)$value;
++		} elseif (is_float($value)) {
++			// Casting a large float to string gives its exponent notation form
++			$value = sprintf('%.0f', $value);
+ 		}
+ 		$this->id = $value;
+ 		if ($this->date_added == 0) {
+diff --git a/tests/app/Models/EntryTest.php b/tests/app/Models/EntryTest.php
+index 75af92e695c..cb73f73e6e9 100644
+--- a/tests/app/Models/EntryTest.php
++++ b/tests/app/Models/EntryTest.php
+@@ -109,4 +109,11 @@ public function test_toGReaderFreshRssExportRoundTripsEncoding(): void {
+ 		self::assertSame('A &amp; B', $item['title']);
+ 		self::assertSame('B &amp; C', $item['author']);
+ 	}
++
++	/** Above PHP_INT_MAX, an integer literal is a float on 32-bit platforms */
++	public function test_idAcceptsTheFloatA32BitPlatformPasses(): void {
++		$entry = new FreshRSS_Entry(1, 'guid-1', 'Title', '', '', 'https://example.net/1', 1700000000);
++		$entry->_id(1700000000000001.0);
++		self::assertSame('1700000000000001', $entry->id());
++	}
+ }
+
+From c2323c6d5afba19f234db1a644a18393017bf4e7 Mon Sep 17 00:00:00 2001
+From: Raed <Raed2180416@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 14:10:41 +0530
+Subject: [PATCH 2/2] Build entry IDs as strings in the tests
+
+1700000000000000 + $i is a float on 32-bit platforms, where it exceeds
+PHP_INT_MAX, and FreshRSS_Entry::_id() rejects it. Entry IDs are strings
+everywhere else, since uTimeString() and the DAO layer both produce
+numeric strings, so keep the ID a string in the test instead of accepting
+a float. A test now pins that contract.
+
+Refs #9569
+---
+ app/Models/Entry.php                   | 7 ++-----
+ tests/app/Models/EntryTest.php         | 7 ++++---
+ tests/app/Views/exportArticlesTest.php | 3 ++-
+ 3 files changed, 8 insertions(+), 9 deletions(-)
+
+diff --git a/app/Models/Entry.php b/app/Models/Entry.php
+index a2e0de29ad2..1680181d035 100644
+--- a/app/Models/Entry.php
++++ b/app/Models/Entry.php
+@@ -536,13 +536,10 @@ public function _sqlContentLength(int $value): void {
+ 		$this->sqlContentLength = $value > 0 ? $value : null;
+ 	}
+ 
+-	/** @param int|float|numeric-string $value String and float are for compatibility with 32-bit platforms */
+-	public function _id(int|float|string $value): void {
++	/** @param int|numeric-string $value String is for compatibility with 32-bit platforms */
++	public function _id(int|string $value): void {
+ 		if (is_int($value)) {
+ 			$value = (string)$value;
+-		} elseif (is_float($value)) {
+-			// Casting a large float to string gives its exponent notation form
+-			$value = sprintf('%.0f', $value);
+ 		}
+ 		$this->id = $value;
+ 		if ($this->date_added == 0) {
+diff --git a/tests/app/Models/EntryTest.php b/tests/app/Models/EntryTest.php
+index cb73f73e6e9..b3f7b558884 100644
+--- a/tests/app/Models/EntryTest.php
++++ b/tests/app/Models/EntryTest.php
+@@ -110,10 +110,11 @@ public function test_toGReaderFreshRssExportRoundTripsEncoding(): void {
+ 		self::assertSame('B &amp; C', $item['author']);
+ 	}
+ 
+-	/** Above PHP_INT_MAX, an integer literal is a float on 32-bit platforms */
+-	public function test_idAcceptsTheFloatA32BitPlatformPasses(): void {
++	/** Above PHP_INT_MAX, an integer literal is a float on 32-bit platforms, so an entry ID is only ever a string */
++	public function test_idRejectsAFloat(): void {
+ 		$entry = new FreshRSS_Entry(1, 'guid-1', 'Title', '', '', 'https://example.net/1', 1700000000);
++		$this->expectException(\TypeError::class);
++		// @phpstan-ignore argument.type
+ 		$entry->_id(1700000000000001.0);
+-		self::assertSame('1700000000000001', $entry->id());
+ 	}
+ }
+diff --git a/tests/app/Views/exportArticlesTest.php b/tests/app/Views/exportArticlesTest.php
+index 6ba90fe6dbe..913f0c0efb4 100644
+--- a/tests/app/Views/exportArticlesTest.php
++++ b/tests/app/Views/exportArticlesTest.php
+@@ -28,7 +28,8 @@ private static function entries(int $count): array {
+ 		for ($i = 1; $i <= $count; $i++) {
+ 			$entry = new FreshRSS_Entry(1, 'guid-' . $i, 'Title ' . $i, '', str_repeat('<p>Contenu exporté ' . $i . '</p>', 200),
+ 				'https://example.net/' . $i, 1700000000 + $i);
+-			$entry->_id(1700000000000000 + $i);
++			// A string, because this value exceeds PHP_INT_MAX on 32-bit platforms and would be a float there
++			$entry->_id('17000000000000' . sprintf('%02d', $i));	// @phpstan-ignore argument.type (numeric-string)
+ 			$entries[] = $entry;
+ 		}
+ 		return $entries;
