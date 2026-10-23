@@ -1,20 +1,36 @@
 # Maintainer: Natanael Copa <ncopa@alpinelinux.org>
-
 _flavor=eswin
 pkgname=linux-$_flavor
-pkgver=6.16.4
+pkgver=7.3.0
 _kernver=${pkgver%.*}
 pkgrel=0
-pkgdesc="Linux lts kernel"
-url="https://github.com/jmontleon/linux-eswin"
+pkgdesc="Linux kernel with ESWIN EIC7700 support"
+url="https://www.kernel.org"
 depends="initramfs-generator"
 _depends_dev="perl gmp-dev mpc1-dev mpfr-dev elfutils-dev bash flex bison zstd"
-makedepends="$_depends_dev sed installkernel bc linux-headers linux-firmware-any openssl-dev>3 mawk
-	diffutils findutils zstd pahole python3 gcc>=13.1.1_git20230624"
+makedepends="$_depends_dev
+	bc
+	diffutils
+	elfutils
+	findutils
+	gcc>=13.1.1_git20230624
+	grep
+	installkernel
+	linux-firmware-any
+	linux-headers
+	mawk
+	openssl-dev>3
+	pahole
+	python3
+	sed
+	zlib-dev
+	zstd
+	"
 options="!strip !check"
-_config=${config:-config-lts.${CARCH}}
+# Integration branch: eswin-7.3.y-alpine
+# Source commit: cf91875c6021f61867bb7532ce0539cdd1b6ed8e
 source="https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/linux-$_kernver.tar.xz
-	https://dev.alpinelinux.org/archive/$_flavor-patches/$_flavor-$pkgver-alpine.patch
+	https://dev.alpinelinux.org/archive/$_flavor-patches/$_flavor-${pkgver%.0}-alpine.patch
 	0004-objtool-respect-AWK-setting.patch
 
 	eswin.riscv64.config
@@ -39,6 +55,9 @@ if [ "${pkgver%.0}" = "$pkgver" ]; then
 fi
 arch="riscv64"
 license="GPL-2.0-only"
+
+# secfixes are not tracked
+# https://gitlab.alpinelinux.org/alpine/aports/-/work_items/18194
 
 prepare() {
 	default_prepare
@@ -169,6 +188,20 @@ build() {
 			CC="${CC:-gcc}" \
 			AWK="${AWK:-mawk}" \
 			KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine"
+
+		if grep -q '^CONFIG_DEBUG_INFO_BTF=y' .config; then
+			# Generate vmlinux.h
+			mkdir -p "$srcdir/bpftool"
+			make -C "$builddir/tools/bpf/bpftool" \
+				OUTPUT="$srcdir/bpftool/" bootstrap
+			"$srcdir/bpftool/bootstrap/bpftool" btf dump file vmlinux format c > vmlinux.h
+
+			if [ "$CARCH" = "ppc64le" ]; then
+				# ppc64le installs the uncompressed vmlinux, which is extremely
+				# large with BTF debuginfo unless stripped
+				eu-strip --remove-comment vmlinux
+			fi
+		fi
 	done
 }
 
@@ -206,18 +239,8 @@ _package() {
 	install -D -m644 include/config/kernel.release \
 		"$_outdir"/usr/share/kernel/$_buildflavor/kernel.release
 
-	case "$CARCH" in
-	loongarch64)
-		mv  "$_outdir"/boot/vmlinuz-$_abi_release \
-			"$_outdir"/boot/vmlinuz-$_buildflavor
-
-		mv  "$_outdir"/boot/config-$_abi_release \
-			"$_outdir"/boot/config-$_buildflavor
-
-		mv  "$_outdir"/boot/System.map-$_abi_release \
-			"$_outdir"/boot/System.map-$_buildflavor
-		;;
-	esac
+	ln -sf /boot/vmlinuz-"$_buildflavor" \
+		"$_outdir"/lib/modules/"$_abi_release"/vmlinuz
 }
 
 # main flavor installs in $pkgdir
@@ -226,33 +249,26 @@ package() {
 
 	_package "$_flavor" "$pkgdir"
 
-	# copy files for linux-lts-doc sub package
+	# copy files for linux-eswin-doc sub package
 	mkdir -p "$pkgdir"/usr/share/doc
 	cp -r "$builddir"/Documentation \
-		"$pkgdir"/usr/share/doc/linux-doc-"$pkgver"/
+		"$pkgdir"/usr/share/doc/linux-eswin-doc-"$pkgver"/
 	# remove files that aren't part of the documentation itself
-	for nondoc in \
-		.gitignore conf.py docutils.conf \
-		Kconfig Makefile
-	do
-		rm "$pkgdir"/usr/share/doc/linux-doc-"$pkgver"/"$nondoc"
+	for nondoc in .gitignore conf.py docutils.conf Kconfig Makefile; do
+		rm "$pkgdir"/usr/share/doc/linux-eswin-doc-"$pkgver"/"$nondoc"
 	done
-	# create /usr/share/doc/linux-doc symlink
-	cd "$pkgdir"/usr/share/doc; ln -s linux-doc-"$pkgver" linux-doc
-}
-
-# subflavors install in $subpkgdir
-virt() {
-	_package virt "$subpkgdir"
+	# create /usr/share/doc/linux-eswin-doc symlink
+	cd "$pkgdir"/usr/share/doc; ln -s linux-eswin-doc-"$pkgver" linux-eswin-doc
 }
 
 _dev() {
 	local _flavor=$(echo $subpkgname | sed -E 's/(^linux-|-dev$)//g')
 	local _builddir="$srcdir"/build-$_flavor.$CARCH
 	local _abi_release="$(make -C "$_builddir" -s kernelrelease)"
+	local _karch="$(_kernelarch $CARCH | sed 's/x86_64/x86/')"
 	# copy the only the parts that we really need for build 3rd party
 	# kernel modules and install those as /usr/src/linux-headers,
-	# simlar to what ubuntu does
+	# similar to what ubuntu does
 	#
 	# this way you dont need to install the 300-400 kernel sources to
 	# build a tiny kernel module
@@ -269,6 +285,11 @@ _dev() {
 		"$dir"/
 
 	install -D -t "$dir"/certs "$_builddir"/certs/signing_key.x509 || :
+
+	# Install vmlinux.h
+	if grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$_builddir"/.config; then
+		install -Dm644 "$_builddir"/vmlinux.h -t "$dir/"
+	fi
 
 	make -C "$builddir" \
 		O="$dir" \
@@ -293,9 +314,8 @@ _dev() {
 
 	cp -a scripts include "$dir"
 
-	find "arch/$_karch" -name include -type d -print | while IFS='' read -r folder; do
-		find "$folder" -type f
-	done | sort -u | cpio -pdm "$dir"
+	find "arch/$_karch" "tools/include" "tools/arch/$_karch" -type f -path '*/include/*' \
+		-print | cpio -pdm "$dir"
 
 	install -Dm644 "$srcdir"/build-$_flavor.$CARCH/Module.symvers \
 		"$dir"/Module.symvers
@@ -303,15 +323,8 @@ _dev() {
 	# remove unneeded things
 	msg "Removing documentation..."
 	rm -r "$dir"/Documentation
-	find "$dir" -type f -name '*.o' -printf 'Removing %P\n' -delete
-	local _karch="$(_kernelarch $CARCH | sed 's/x86_64/x86/')"
-	msg "Removing unneeded arch headers..."
-	for i in "$dir"/arch/*; do
-		if [ "${i##*/}" != "$_karch" ]; then
-			echo "  ${i##*/}"
-			rm -r "$i"
-		fi
-	done
+	sed -i -e '/Documentation/d' "$dir"/Kconfig
+	find "$dir" -type f \( -name '*.o' -o -name '*.cmd' \) -exec rm -v -- {} +
 
 	mkdir -p "$subpkgdir"/lib/modules/"$_abi_release"
 	ln -sf /usr/src/linux-headers-"$_abi_release" \
@@ -319,9 +332,8 @@ _dev() {
 }
 
 sha512sums="
-b71b17fdc8f25e4e4e05b364c31a66502a3e00e6e3d66808f9726098f1f2e315e3666aa69c6f164a6cf8f1c2c4359fcd620b0dd624a98d007da4bd34310b03f1  patch-6.16.4.patch.xz
-55a00f89ad6db6db2e26ff5dc5cfc96bbf6654e5bd5d17d2a3b944a47640367e54139716d230923187bebc6cb7756edc9511a620fb8abc6f32c50a658a734784  linux-6.16.tar.xz
-6fc12c58ebf7dd2072cf1a181d19178664730c58af9d4166df74a30b29bc0e47e3683a97261c667081d642a812c677f8a8b388cdcb4c0e292124926ce504d7a1  eswin-6.16.4-alpine.patch
-28c83be4c97152001381cd5e3a8acb8552a42d9dac9aaec8f096e3762b7944035aa5a4363fb4602f9bb427c4f72cfd2f996a0a725f7f9e07ab250317985aff9e  0004-objtool-respect-AWK-setting.patch
-c33a06ed5c454250372fe3037426ae7fbf2ab31be3f7747c081b298e51b36345f220d7fb0f67a4ae014292742430eac1bd196c57ac0fcaee7ae00a9dadc09ae8  eswin.riscv64.config
+14b99ea7cc2adc0798a183ac5f3e184587f2496c3b2d1d53b625574389891c69e8be375b5d03875fe859b09ac9314aa15da604087274ba815671135bd6a0e590  linux-7.3.tar.xz
+1efc96a1843adaf79c6b42511f58bacaeeba537bab8cc7f394f76ddb766922f5815f721c46397a0c03fbf5d8be75dff1bf15dea9fa495f7739f556c31953a391  eswin-7.3-alpine.patch
+38f1947531389a83fd41d7827c10b1bc563f219331f3dd65df8df1ad5f7323f79415bba481e5a2bbd80ff0edb4699c6cfc612f6447061801c5a0993a74167875  0004-objtool-respect-AWK-setting.patch
+4f28f2a0afcc21841716805343479d28457c1869974079e9f2f66c62f8a4bef99ef587dafca779eefe017e73dec8ef60192c7c93b664ea3e236abbab16b2392e  eswin.riscv64.config
 "
