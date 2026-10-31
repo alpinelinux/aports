@@ -1,0 +1,813 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inochi Amaoto <inochiama@gmail.com>
+Subject: [PATCH v6 0/6] riscv: spacemit: Add PCIe RC controller support for K3
+Date: Wed, 23 Sep 2026 09:50:09 +0800
+
+The PCIe controller on Spacemit K3 is almost a standard Synopsys
+Designware PCIe IP with extra control and external MSI controller
+(IMSIC).
+
+Add binding and driver support for PCIe RC controller support on K3.
+
+Since v5, multiple vendor fix are included in this series, you can find
+in [1]. And this version required [2] for phy bulk data support.
+
+[1] https://github.com/spacemit-com/linux-6.18/commits/k3-br-v1.0.y/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+[2] https://lore.kernel.org/linux-phy/20260904083709.425893-1-inochiama@gmail.com/
+
+Changed from v5:
+- https://lore.kernel.org/linux-pci/20260907112606.465778-1-inochiama@gmail.com/
+patch 1:
+1. Return ENODATA for no device data found.
+patch 2:
+1. Add power_on/power_off suggested in [2].
+2. Add zero phy check in the driver.
+patch 5:
+1. Add K3 device description.
+patch 6:
+1. Update comments.
+
+Changed from v4:
+- https://lore.kernel.org/linux-pci/20260709040027.958400-1-inochiama@gmail.com/
+patch 1:
+1. fix comments
+patch 2:
+1. Use phy bulk data to simplify the code
+patch 3:
+1. Rebased to latest master
+patch 6:
+1. Apply several fix from the vendor code
+2. Use separated init/deinit function for K3.
+3. Add some error handle for K3 init function
+
+Changed from v3:
+- https://lore.kernel.org/linux-pci/20260703020003.485436-1-inochiama@gmail.com/
+patch 5:
+1. Add missing interrupt/interrupt-names check for K1
+
+Changed from v2:
+- https://lore.kernel.org/linux-pci/20260517014841.254085-1-inochiama@gmail.com/
+patch 2:
+1. Use unify PCIe phy get/enable/exit function for both K1 and K3.
+patch 3:
+1. New patch for updating device id for both K1/K3
+patch 5:
+1. Reuse binding for spacemit,k1-pcie-host
+patch 6:
+1. Multiple cleanup for the logic already generalized in the previous
+   patches.
+2. Use generic description for the Kconfig entry.
+
+Changed from v1:
+patch 1:
+1. Remove post_init callback.
+patch 2:
+1. Fix devm_kmalloc_array arguments order and error check.
+patch 3:
+1. Apply Rob's tag.
+2. Change check from oneOf to anyOf.
+3. Fix spelling mistakes in commit message.
+patch 4:
+1. Add comment about PHY handle.
+2. Remove interrupt "app".
+3. Fix spelling mistakes in commit message.
+patch 5:
+1. Remove all logic related to link up interrupt.
+2. Clean up all unused macros.
+3. Fix devm_kmalloc_array arguments order and error check.
+4. Remove unnecessary start_link logic.
+5. Make all magic number as a macro.
+6. Fix spelling mistakes in code and commit message.
+
+Inochi Amaoto (6):
+  PCI: spacemit-k1: Add device data support
+  PCI: spacemit-k1: Add multiple PHY handles support
+  PCI: spacemit-k1: Add device id update helper
+  dt-bindings: PCI: snps,dw-pcie: Add msi-parent for MSI handle check
+  dt-bindings: PCI: spacemit: Introduce Spacemit K3 PCIe host controller
+  PCI: spacemit-k1: Add Spacemit K3 PCIe host controller support
+
+ .../devicetree/bindings/pci/snps,dw-pcie.yaml |   7 +-
+ .../bindings/pci/spacemit,k1-pcie-host.yaml   |  55 +++-
+ drivers/pci/controller/dwc/Kconfig            |   4 +-
+ drivers/pci/controller/dwc/pcie-spacemit-k1.c | 237 ++++++++++++++++--
+ 4 files changed, 270 insertions(+), 33 deletions(-)
+
+--
+2.55.0
+
+
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inochi Amaoto <inochiama@gmail.com>
+Subject: [PATCH v6 1/6] PCI: spacemit-k1: Add device data support
+Date: Wed, 23 Sep 2026 09:50:10 +0800
+
+To reuse the K1 PCIe driver logic for K3 PCIe controller, add device
+data to handle the K1 specific logic and make room for the incoming
+logic for K3.
+
+Signed-off-by: Inochi Amaoto <inochiama@gmail.com>
+---
+ drivers/pci/controller/dwc/pcie-spacemit-k1.c | 30 ++++++++++++++++---
+ 1 file changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/pci/controller/dwc/pcie-spacemit-k1.c b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+index 0564c46e2f48..ab2953ad8f56 100644
+--- a/drivers/pci/controller/dwc/pcie-spacemit-k1.c
++++ b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+@@ -45,8 +45,17 @@
+ #define PCIE_CONTROL_LOGIC			0x0004
+ #define PCIE_SOFT_RESET			BIT(0)
+ 
++struct k1_pcie;
++
++struct k1_pcie_device_data {
++	const struct dw_pcie_host_ops *host_ops;
++	const struct dw_pcie_ops *ops;
++	int (*parse_port)(struct k1_pcie *k1);
++};
++
+ struct k1_pcie {
+ 	struct dw_pcie pci;
++	const struct k1_pcie_device_data *data;
+ 	struct phy *phy;
+ 	void __iomem *link;
+ 	struct regmap *pmu;	/* Errors ignored; MMIO-backed regmap */
+@@ -274,14 +283,21 @@ static int k1_pcie_parse_port(struct k1_pcie *k1)
+ 
+ static int k1_pcie_probe(struct platform_device *pdev)
+ {
++	const struct k1_pcie_device_data *data;
+ 	struct device *dev = &pdev->dev;
+ 	struct k1_pcie *k1;
+ 	int ret;
+ 
++	data = device_get_match_data(dev);
++	if (!data)
++		return -ENODATA;
++
+ 	k1 = devm_kzalloc(dev, sizeof(*k1), GFP_KERNEL);
+ 	if (!k1)
+ 		return -ENOMEM;
+ 
++	k1->data = data;
++
+ 	k1->pmu = syscon_regmap_lookup_by_phandle_args(dev_of_node(dev),
+ 						       SYSCON_APMU, 1,
+ 						       &k1->pmu_off);
+@@ -295,11 +311,11 @@ static int k1_pcie_probe(struct platform_device *pdev)
+ 				     "failed to map \"link\" registers\n");
+ 
+ 	k1->pci.dev = dev;
+-	k1->pci.ops = &k1_pcie_ops;
++	k1->pci.ops = data->ops;
+ 	k1->pci.pp.num_vectors = MAX_MSI_IRQS;
+ 	dw_pcie_cap_set(&k1->pci, REQ_RES);
+ 
+-	k1->pci.pp.ops = &k1_pcie_host_ops;
++	k1->pci.pp.ops = data->host_ops;
+ 
+ 	/* Hold the PHY in reset until we start the link */
+ 	regmap_set_bits(k1->pmu, k1->pmu_off + PCIE_CLK_RESET_CONTROL,
+@@ -316,7 +332,7 @@ static int k1_pcie_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, k1);
+ 
+-	ret = k1_pcie_parse_port(k1);
++	ret = data->parse_port(k1);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to parse root port\n");
+ 
+@@ -334,8 +350,14 @@ static void k1_pcie_remove(struct platform_device *pdev)
+ 	dw_pcie_host_deinit(&k1->pci.pp);
+ }
+ 
++static const struct k1_pcie_device_data k1_pcie_device_data = {
++	.host_ops	= &k1_pcie_host_ops,
++	.ops		= &k1_pcie_ops,
++	.parse_port	= k1_pcie_parse_port,
++};
++
+ static const struct of_device_id k1_pcie_of_match_table[] = {
+-	{ .compatible = "spacemit,k1-pcie", },
++	{ .compatible = "spacemit,k1-pcie", .data = &k1_pcie_device_data },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, k1_pcie_of_match_table);
+-- 
+2.55.0
+
+
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inochi Amaoto <inochiama@gmail.com>
+Subject: [PATCH v6 2/6] PCI: spacemit-k1: Add multiple PHY handles support
+Date: Wed, 23 Sep 2026 09:50:11 +0800
+
+The PCIe controller on Spacemit K3 may use multiple PHYs at the
+same time. The feature is not supported by the current driver.
+So extend the PHY definition to support multiple PHY handles.
+
+Signed-off-by: Inochi Amaoto <inochiama@gmail.com>
+---
+ drivers/pci/controller/dwc/pcie-spacemit-k1.c | 57 ++++++++++++++-----
+ 1 file changed, 42 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/pci/controller/dwc/pcie-spacemit-k1.c b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+index ab2953ad8f56..8c4f0b09fe24 100644
+--- a/drivers/pci/controller/dwc/pcie-spacemit-k1.c
++++ b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+@@ -51,12 +51,14 @@ struct k1_pcie_device_data {
+ 	const struct dw_pcie_host_ops *host_ops;
+ 	const struct dw_pcie_ops *ops;
+ 	int (*parse_port)(struct k1_pcie *k1);
++	unsigned int max_phy_count;
+ };
+ 
+ struct k1_pcie {
+ 	struct dw_pcie pci;
+ 	const struct k1_pcie_device_data *data;
+-	struct phy *phy;
++	struct phy_bulk_data *phys;
++	unsigned int phy_count;
+ 	void __iomem *link;
+ 	struct regmap *pmu;	/* Errors ignored; MMIO-backed regmap */
+ 	u32 pmu_off;
+@@ -115,6 +117,25 @@ static void k1_pcie_disable_resources(struct k1_pcie *k1)
+ 	clk_bulk_disable_unprepare(ARRAY_SIZE(pci->app_clks), pci->app_clks);
+ }
+ 
++static int k1_pcie_get_phy_handle(struct k1_pcie *k1, struct device_node *node)
++{
++	const struct k1_pcie_device_data *data = k1->data;
++	struct device *dev = k1->pci.dev;
++	int count;
++
++	count = devm_of_phy_bulk_get_all(dev, node, &k1->phys);
++	if (count < 0)
++		return count;
++	if (!count)
++		return -ENOENT;
++	if (count > data->max_phy_count)
++		return -EINVAL;
++
++	k1->phy_count = count;
++
++	return 0;
++}
++
+ /* FIXME: Disable ASPM L1 to avoid errors reported on some NVMe drives */
+ static void k1_pcie_disable_aspm_l1(struct k1_pcie *k1)
+ {
+@@ -170,12 +191,13 @@ static int k1_pcie_init(struct dw_pcie_rp *pp)
+ 	 */
+ 	regmap_set_bits(k1->pmu, reset_ctrl, DEVICE_TYPE_RC | PCIE_AUX_PWR_DET);
+ 
+-	ret = phy_init(k1->phy);
+-	if (ret) {
+-		k1_pcie_disable_resources(k1);
++	ret = phy_bulk_init(k1->phy_count, k1->phys);
++	if (ret)
++		goto failed_phy_init;
+ 
+-		return ret;
+-	}
++	ret = phy_bulk_power_on(k1->phy_count, k1->phys);
++	if (ret)
++		goto failed_phy_power_on;
+ 
+ 	/* Deassert fundamental reset (drive PERST# high) */
+ 	regmap_clear_bits(k1->pmu, reset_ctrl, PCIE_RC_PERST);
+@@ -184,6 +206,14 @@ static int k1_pcie_init(struct dw_pcie_rp *pp)
+ 	k1_pcie_disable_aspm_l1(k1);
+ 
+ 	return 0;
++
++failed_phy_power_on:
++	phy_bulk_exit(k1->phy_count, k1->phys);
++failed_phy_init:
++	k1_pcie_disable_resources(k1);
++
++	return ret;
++
+ }
+ 
+ static void k1_pcie_deinit(struct dw_pcie_rp *pp)
+@@ -195,7 +225,8 @@ static void k1_pcie_deinit(struct dw_pcie_rp *pp)
+ 	regmap_set_bits(k1->pmu, k1->pmu_off + PCIE_CLK_RESET_CONTROL,
+ 			PCIE_RC_PERST);
+ 
+-	phy_exit(k1->phy);
++	phy_bulk_power_off(k1->phy_count, k1->phys);
++	phy_bulk_exit(k1->phy_count, k1->phys);
+ 
+ 	k1_pcie_disable_resources(k1);
+ }
+@@ -262,23 +293,18 @@ static int k1_pcie_parse_port(struct k1_pcie *k1)
+ {
+ 	struct device *dev = k1->pci.dev;
+ 	struct device_node *root_port;
+-	struct phy *phy;
++	int ret;
+ 
+ 	/* We assume only one root port */
+ 	root_port = of_get_next_available_child(dev_of_node(dev), NULL);
+ 	if (!root_port)
+ 		return -EINVAL;
+ 
+-	phy = devm_of_phy_get(dev, root_port, NULL);
++	ret = k1_pcie_get_phy_handle(k1, root_port);
+ 
+ 	of_node_put(root_port);
+ 
+-	if (IS_ERR(phy))
+-		return PTR_ERR(phy);
+-
+-	k1->phy = phy;
+-
+-	return 0;
++	return ret;
+ }
+ 
+ static int k1_pcie_probe(struct platform_device *pdev)
+@@ -354,6 +380,7 @@ static const struct k1_pcie_device_data k1_pcie_device_data = {
+ 	.host_ops	= &k1_pcie_host_ops,
+ 	.ops		= &k1_pcie_ops,
+ 	.parse_port	= k1_pcie_parse_port,
++	.max_phy_count	= 1,
+ };
+ 
+ static const struct of_device_id k1_pcie_of_match_table[] = {
+-- 
+2.55.0
+
+
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inochi Amaoto <inochiama@gmail.com>
+Subject: [PATCH v6 3/6] PCI: spacemit-k1: Add device id update helper
+Date: Wed, 23 Sep 2026 09:50:12 +0800
+
+Both K1 and K3 need to set vendor id and device id, add a helper function
+to simplify this.
+
+Signed-off-by: Inochi Amaoto <inochiama@gmail.com>
+---
+ drivers/pci/controller/dwc/pcie-spacemit-k1.c | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/pci/controller/dwc/pcie-spacemit-k1.c b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+index 8c4f0b09fe24..ec59ccb710ec 100644
+--- a/drivers/pci/controller/dwc/pcie-spacemit-k1.c
++++ b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+@@ -52,6 +52,7 @@ struct k1_pcie_device_data {
+ 	const struct dw_pcie_ops *ops;
+ 	int (*parse_port)(struct k1_pcie *k1);
+ 	unsigned int max_phy_count;
++	unsigned int device_id;
+ };
+ 
+ struct k1_pcie {
+@@ -153,6 +154,16 @@ static void k1_pcie_disable_aspm_l1(struct k1_pcie *k1)
+ 	dw_pcie_dbi_ro_wr_dis(pci);
+ }
+ 
++static void k1_pcie_set_device_id(struct k1_pcie *k1)
++{
++	struct dw_pcie *pci = &k1->pci;
++
++	dw_pcie_dbi_ro_wr_en(pci);
++	dw_pcie_writew_dbi(pci, PCI_VENDOR_ID, PCI_VENDOR_ID_SPACEMIT);
++	dw_pcie_writew_dbi(pci, PCI_DEVICE_ID, k1->data->device_id);
++	dw_pcie_dbi_ro_wr_dis(pci);
++}
++
+ static int k1_pcie_init(struct dw_pcie_rp *pp)
+ {
+ 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+@@ -168,10 +179,7 @@ static int k1_pcie_init(struct dw_pcie_rp *pp)
+ 		return ret;
+ 
+ 	/* Set the PCI vendor and device ID */
+-	dw_pcie_dbi_ro_wr_en(pci);
+-	dw_pcie_writew_dbi(pci, PCI_VENDOR_ID, PCI_VENDOR_ID_SPACEMIT);
+-	dw_pcie_writew_dbi(pci, PCI_DEVICE_ID, PCI_DEVICE_ID_SPACEMIT_K1);
+-	dw_pcie_dbi_ro_wr_dis(pci);
++	k1_pcie_set_device_id(k1);
+ 
+ 	/*
+ 	 * Start by asserting fundamental reset (drive PERST# low).  The
+@@ -381,6 +389,7 @@ static const struct k1_pcie_device_data k1_pcie_device_data = {
+ 	.ops		= &k1_pcie_ops,
+ 	.parse_port	= k1_pcie_parse_port,
+ 	.max_phy_count	= 1,
++	.device_id	= PCI_DEVICE_ID_SPACEMIT_K1,
+ };
+ 
+ static const struct of_device_id k1_pcie_of_match_table[] = {
+-- 
+2.55.0
+
+
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inochi Amaoto <inochiama@gmail.com>
+Subject: [PATCH v6 4/6] dt-bindings: PCI: snps,dw-pcie: Add msi-parent for MSI handle check
+Date: Wed, 23 Sep 2026 09:50:13 +0800
+Message-ID: <20260923015016.64069-5-inochiama@gmail.com>
+X-Mailer: git-send-email 2.55.0
+In-Reply-To: <20260923015016.64069-1-inochiama@gmail.com>
+References: <20260923015016.64069-1-inochiama@gmail.com>
+Precedence: bulk
+X-Mailing-List: spacemit@lists.linux.dev
+List-Id: <spacemit.lists.linux.dev>
+List-Subscribe: <mailto:spacemit+subscribe@lists.linux.dev>
+List-Unsubscribe: <mailto:spacemit+unsubscribe@lists.linux.dev>
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+
+The IMSIC device on RISC-V based system does not require ID
+remapping for MSI. So this device only needs "msi-parent"
+property for IMSIC-based SoC, and the "msi-map" is not a
+necessary property.
+
+Add new condition for MSI handling on IMSIC based SoC.
+
+Signed-off-by: Inochi Amaoto <inochiama@gmail.com>
+Acked-by: Rob Herring (Arm) <robh@kernel.org>
+---
+ Documentation/devicetree/bindings/pci/snps,dw-pcie.yaml | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/pci/snps,dw-pcie.yaml b/Documentation/devicetree/bindings/pci/snps,dw-pcie.yaml
+index b3216141881c..91bbbc8924f6 100644
+--- a/Documentation/devicetree/bindings/pci/snps,dw-pcie.yaml
++++ b/Documentation/devicetree/bindings/pci/snps,dw-pcie.yaml
+@@ -27,8 +27,11 @@ allOf:
+   - $ref: /schemas/pci/snps,dw-pcie-common.yaml#
+   - if:
+       not:
+-        required:
+-          - msi-map
++        anyOf:
++          - required:
++              - msi-map
++          - required:
++              - msi-parent
+     then:
+       properties:
+         interrupt-names:
+-- 
+2.55.0
+
+
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inochi Amaoto <inochiama@gmail.com>
+Subject: [PATCH v6 5/6] dt-bindings: PCI: spacemit: Introduce Spacemit K3 PCIe host controller
+Date: Wed, 23 Sep 2026 09:50:14 +0800
+
+Add binding support for the PCIe controller on the SpacemiT K3 SoC.
+This controller is almost a standard Synopsys DesignWare PCIe IP,
+with some extra link and reset state control.
+
+Signed-off-by: Inochi Amaoto <inochiama@gmail.com>
+---
+ .../bindings/pci/spacemit,k1-pcie-host.yaml   | 55 ++++++++++++++++---
+ 1 file changed, 46 insertions(+), 9 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/pci/spacemit,k1-pcie-host.yaml b/Documentation/devicetree/bindings/pci/spacemit,k1-pcie-host.yaml
+index c4c00b5fcdc0..af32e427c0c5 100644
+--- a/Documentation/devicetree/bindings/pci/spacemit,k1-pcie-host.yaml
++++ b/Documentation/devicetree/bindings/pci/spacemit,k1-pcie-host.yaml
+@@ -4,7 +4,7 @@
+ $id: http://devicetree.org/schemas/pci/spacemit,k1-pcie-host.yaml#
+ $schema: http://devicetree.org/meta-schemas/core.yaml#
+ 
+-title: SpacemiT K1 PCI Express Host Controller
++title: SpacemiT K1/K3 PCI Express Host Controller
+ 
+ maintainers:
+   - Alex Elder <elder@riscstar.com>
+@@ -12,28 +12,32 @@ maintainers:
+ description: >
+   The SpacemiT K1 SoC PCIe host controller is based on the Synopsys DesignWare
+   PCIe IP.  The controller uses the DesignWare built-in MSI interrupt
+-  controller, and supports 256 MSIs.
+-
+-allOf:
+-  - $ref: /schemas/pci/snps,dw-pcie.yaml#
++  controller, and supports 256 MSIs. The K3 controller uses an
++  external MSI interrupt controller and may use multiple PHYs.
+ 
+ properties:
+   compatible:
+-    const: spacemit,k1-pcie
++    enum:
++      - spacemit,k1-pcie
++      - spacemit,k3-pcie
+ 
+   reg:
++    minItems: 4
+     items:
+       - description: DesignWare PCIe registers
+       - description: ATU address space
+       - description: PCIe configuration space
+       - description: Link control registers
++      - description: Data Bus Interface (DBI) shadow registers.
+ 
+   reg-names:
++    minItems: 4
+     items:
+       - const: dbi
+       - const: atu
+       - const: config
+       - const: link
++      - const: dbi2
+ 
+   clocks:
+     items:
+@@ -66,6 +70,8 @@ properties:
+   interrupt-names:
+     const: msi
+ 
++  msi-parent: true
++
+   spacemit,apmu:
+     $ref: /schemas/types.yaml#/definitions/phandle-array
+     description:
+@@ -84,7 +90,8 @@ patternProperties:
+ 
+     properties:
+       phys:
+-        maxItems: 1
++        minItems: 1
++        maxItems: 6
+ 
+       vpcie3v3-supply:
+         description:
+@@ -96,13 +103,43 @@ patternProperties:
+ 
+     unevaluatedProperties: false
+ 
++allOf:
++  - $ref: /schemas/pci/snps,dw-pcie.yaml#
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: spacemit,k1-pcie
++    then:
++      properties:
++        reg:
++          maxItems: 4
++
++        reg-names:
++          maxItems: 4
++
++      patternProperties:
++        '^pcie@':
++          properties:
++            phys:
++              maxItems: 1
++
++      required:
++        - interrupts
++        - interrupt-names
++    else:
++      properties:
++        reg:
++          minItems: 5
++
++        reg-names:
++          minItems: 5
++
+ required:
+   - clocks
+   - clock-names
+   - resets
+   - reset-names
+-  - interrupts
+-  - interrupt-names
+   - spacemit,apmu
+ 
+ unevaluatedProperties: false
+-- 
+2.55.0
+
+
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inochi Amaoto <inochiama@gmail.com>
+Subject: [PATCH v6 6/6] PCI: spacemit-k1: Add Spacemit K3 PCIe host controller support
+Date: Wed, 23 Sep 2026 09:50:15 +0800
+
+The PCIe controller on Spacemit K3 is almost a standard Synopsys
+DesignWare PCIe IP with extra link and reset control. Unlike
+the PCIe controller on K1, this controller supports external MSI
+interrupt controller and can use multiple PHYs at the same time.
+
+Add driver to support PCIe controller on Spacemit K3 PCIe.
+
+Signed-off-by: Inochi Amaoto <inochiama@gmail.com>
+---
+ drivers/pci/controller/dwc/Kconfig            |   4 +-
+ drivers/pci/controller/dwc/pcie-spacemit-k1.c | 139 ++++++++++++++++++
+ 2 files changed, 141 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/pci/controller/dwc/Kconfig b/drivers/pci/controller/dwc/Kconfig
+index dcfbe7e229fd..f9c27165260e 100644
+--- a/drivers/pci/controller/dwc/Kconfig
++++ b/drivers/pci/controller/dwc/Kconfig
+@@ -443,7 +443,7 @@ config PCIE_SOPHGO_DW
+ 	  Sophgo SoCs.
+ 
+ config PCIE_SPACEMIT_K1
+-	tristate "SpacemiT K1 PCIe controller (host mode)"
++	tristate "SpacemiT PCIe controller (host mode)"
+ 	depends on ARCH_SPACEMIT || COMPILE_TEST
+ 	depends on HAS_IOMEM
+ 	select PCIE_DW_HOST
+@@ -451,7 +451,7 @@ config PCIE_SPACEMIT_K1
+ 	default ARCH_SPACEMIT
+ 	help
+ 	  Enables support for the DesignWare based PCIe controller in
+-	  the SpacemiT K1 SoC operating in host mode.  Three controllers
++	  the SpacemiT SoC operating in host mode. Three controllers
+ 	  are available on the K1 SoC; the first of these shares a PHY
+ 	  with a USB 3.0 host controller (one or the other can be used).
+ 
+diff --git a/drivers/pci/controller/dwc/pcie-spacemit-k1.c b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+index ec59ccb710ec..c3b935f424cd 100644
+--- a/drivers/pci/controller/dwc/pcie-spacemit-k1.c
++++ b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+@@ -28,8 +28,18 @@
+ #define SMLH_LINK_UP			BIT(1)
+ #define RDLH_LINK_UP			BIT(12)
+ 
++#define INTR_STATUS				0x0010
++
+ #define INTR_ENABLE				0x0014
+ #define MSI_CTRL_INT			BIT(11)
++#define RDLH_LINK_UP_INT		BIT(20)
++
++#define K3_PHY_AHB_IRQSTATUS_INTX		0x0008
++
++#define K3_ADDR_INTR_STATUS1			0x0018
++
++#define K3_CACHE_MSTR_AWCACHE_MODE	GENMASK(14, 11)
++#define K3_CACHE_MSTR_AWCACHE_BEHAVIOR	0xf
+ 
+ /* Some controls require APMU regmap access */
+ #define SYSCON_APMU			"spacemit,apmu"
+@@ -44,6 +54,9 @@
+ 
+ #define PCIE_CONTROL_LOGIC			0x0004
+ #define PCIE_SOFT_RESET			BIT(0)
++#define PCIE_PERSTN_OE			BIT(24)
++#define PCIE_PERSTN_OUT			BIT(25)
++#define PCIE_IGNORE_PERSTN		BIT(31)
+ 
+ struct k1_pcie;
+ 
+@@ -315,6 +328,123 @@ static int k1_pcie_parse_port(struct k1_pcie *k1)
+ 	return ret;
+ }
+ 
++static int k3_pcie_init(struct dw_pcie_rp *pp)
++{
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct k1_pcie *k1 = to_k1_pcie(pci);
++	u32 reset_ctrl = k1->pmu_off + PCIE_CLK_RESET_CONTROL;
++	u32 val;
++	int ret;
++
++	regmap_clear_bits(k1->pmu, reset_ctrl, LTSSM_EN);
++
++	k1_pcie_toggle_soft_reset(k1);
++
++	/* K3: Set IGNORE_PERSTN and drive PERSTN_OE high (assert reset) */
++	regmap_update_bits(k1->pmu, k1->pmu_off + PCIE_CONTROL_LOGIC,
++			   PCIE_IGNORE_PERSTN | PCIE_PERSTN_OE | PCIE_PERSTN_OUT,
++			   PCIE_IGNORE_PERSTN | PCIE_PERSTN_OE);
++
++	ret = k1_pcie_enable_resources(k1);
++	if (ret)
++		goto failed_resources;
++
++	regmap_set_bits(k1->pmu, reset_ctrl, PCIE_AUX_PWR_DET);
++	regmap_clear_bits(k1->pmu, reset_ctrl, APP_HOLD_PHY_RST);
++
++	ret = phy_bulk_init(k1->phy_count, k1->phys);
++	if (ret)
++		goto failed_phy_init;
++
++	ret = phy_bulk_power_on(k1->phy_count, k1->phys);
++	if (ret)
++		goto failed_phy_power_on;
++
++	msleep(PCIE_T_PVPERL_MS);
++
++	regmap_set_bits(k1->pmu, k1->pmu_off + PCIE_CONTROL_LOGIC,
++			PCIE_PERSTN_OUT | PCIE_PERSTN_OE);
++
++	val = dw_pcie_readl_dbi(pci, GEN3_EQ_CONTROL_OFF);
++	val = u32_replace_bits(val, BIT(7),
++			       GEN3_EQ_CONTROL_OFF_PSET_REQ_VEC);
++	dw_pcie_writel_dbi(pci, GEN3_EQ_CONTROL_OFF, val);
++
++	k1_pcie_set_device_id(k1);
++
++	/* Finally, as a workaround, disable ASPM L1 */
++	k1_pcie_disable_aspm_l1(k1);
++
++	return 0;
++
++failed_phy_power_on:
++	phy_bulk_exit(k1->phy_count, k1->phys);
++failed_phy_init:
++	k1_pcie_disable_resources(k1);
++failed_resources:
++	regmap_update_bits(k1->pmu, k1->pmu_off + PCIE_CONTROL_LOGIC,
++			   PCIE_PERSTN_OUT | PCIE_PERSTN_OE | PCIE_IGNORE_PERSTN,
++			   PCIE_PERSTN_OUT | PCIE_PERSTN_OE);
++
++	return ret;
++}
++
++static void k3_pcie_deinit(struct dw_pcie_rp *pp)
++{
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct k1_pcie *k1 = to_k1_pcie(pci);
++
++	/* Assert fundamental reset (drive PERST# low) */
++	regmap_update_bits(k1->pmu, k1->pmu_off + PCIE_CONTROL_LOGIC,
++			   PCIE_PERSTN_OUT | PCIE_PERSTN_OE,
++			   PCIE_PERSTN_OE);
++
++	phy_bulk_power_off(k1->phy_count, k1->phys);
++	phy_bulk_exit(k1->phy_count, k1->phys);
++
++	k1_pcie_disable_resources(k1);
++}
++
++static int k3_pcie_msi_host_init(struct dw_pcie_rp *pp)
++{
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	u32 val;
++
++	dw_pcie_dbi_ro_wr_en(pci);
++
++	/* For IMSIC interrupt */
++	val = dw_pcie_readl_dbi(pci, COHERENCY_CONTROL_3_OFF);
++	val = u32_replace_bits(val, K3_CACHE_MSTR_AWCACHE_BEHAVIOR,
++			       K3_CACHE_MSTR_AWCACHE_MODE);
++	dw_pcie_writel_dbi(pci, COHERENCY_CONTROL_3_OFF, val);
++
++	dw_pcie_dbi_ro_wr_dis(pci);
++
++	return 0;
++}
++
++static const struct dw_pcie_host_ops k3_pcie_host_ops = {
++	.init		= k3_pcie_init,
++	.deinit		= k3_pcie_deinit,
++	.msi_init	= k3_pcie_msi_host_init,
++};
++
++static int k3_pcie_parse_port(struct k1_pcie *k1)
++{
++	u32 status0, status1, status2;
++
++	/* Clear the status registers */
++	status0 = readl_relaxed(k1->link + K3_PHY_AHB_IRQSTATUS_INTX);
++	status1 = readl_relaxed(k1->link + INTR_STATUS);
++	status2 = readl_relaxed(k1->link + K3_ADDR_INTR_STATUS1);
++
++	writel_relaxed(status0, k1->link + K3_PHY_AHB_IRQSTATUS_INTX);
++	writel_relaxed(status1, k1->link + INTR_STATUS);
++	writel_relaxed(status2, k1->link + K3_ADDR_INTR_STATUS1);
++
++	return k1_pcie_parse_port(k1);
++}
++
+ static int k1_pcie_probe(struct platform_device *pdev)
+ {
+ 	const struct k1_pcie_device_data *data;
+@@ -392,8 +522,17 @@ static const struct k1_pcie_device_data k1_pcie_device_data = {
+ 	.device_id	= PCI_DEVICE_ID_SPACEMIT_K1,
+ };
+ 
++static const struct k1_pcie_device_data k3_pcie_device_data = {
++	.host_ops	= &k3_pcie_host_ops,
++	.ops		= &k1_pcie_ops,
++	.parse_port	= k3_pcie_parse_port,
++	.max_phy_count	= 6,
++	.device_id	= PCI_DEVICE_ID_SPACEMIT_K3,
++};
++
+ static const struct of_device_id k1_pcie_of_match_table[] = {
+ 	{ .compatible = "spacemit,k1-pcie", .data = &k1_pcie_device_data },
++	{ .compatible = "spacemit,k3-pcie", .data = &k3_pcie_device_data },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, k1_pcie_of_match_table);
+-- 
+2.55.0
+
+
