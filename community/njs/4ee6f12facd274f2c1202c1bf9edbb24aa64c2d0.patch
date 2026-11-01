@@ -1,0 +1,237 @@
+From 4ee6f12facd274f2c1202c1bf9edbb24aa64c2d0 Mon Sep 17 00:00:00 2001
+From: Dmitry Volyntsev <xeioex@nginx.com>
+Date: Wed, 21 Oct 2026 21:49:20 -0700
+Subject: [PATCH] Parser: fix reference atom IDs on big-endian systems
+
+Previously, references to local variables and function arguments
+failed with ReferenceError on 64-bit big-endian systems.  The parser
+overwrote a uintptr_t reference atom ID through the overlapping
+uint32_t value member, replacing the high half of the ID.
+
+The issue was introduced in 9ff881e3 (1.0.2), which moved the
+reference atom ID to the start of the parser node union.
+
+Now, reference and value payloads share a uint32_t atom ID at the same
+offset, initialized in the corresponding parser paths.
+This removes the redundant value-member write and makes atom ID access
+independent of byte order without increasing the parser node size.
+
+This fixes #1143.
+---
+ src/njs_generator.c | 20 ++++++++++----------
+ src/njs_parser.c    | 12 ++++--------
+ src/njs_parser.h    |  4 +++-
+ src/njs_variable.c  | 12 +++++-------
+ src/njs_variable.h  |  2 +-
+ 5 files changed, 23 insertions(+), 27 deletions(-)
+
+diff --git a/src/njs_generator.c b/src/njs_generator.c
+index a3215bcc8..a45d51853 100644
+--- a/src/njs_generator.c
++++ b/src/njs_generator.c
+@@ -1348,7 +1348,7 @@ njs_generate_var_statement_after(njs_vm_t *vm, njs_generator_t *generator,
+ 
+         if (name.length == 0) {
+             njs_atom_to_value(vm, &expr->u.value.data.u.lambda->name,
+-                              node->left->u.reference.atom_id);
++                              node->left->u.atom_id);
+         }
+     }
+ 
+@@ -2514,7 +2514,7 @@ njs_generate_for_in_set_prop_block(njs_vm_t *vm, njs_generator_t *generator,
+ 
+     if (prop->token_type == NJS_TOKEN_STRING
+         || (prop->token_type == NJS_TOKEN_NUMBER
+-            && prop->u.value.atom_id != NJS_ATOM_STRING_unknown))
++            && prop->u.atom_id != NJS_ATOM_STRING_unknown))
+     {
+         opcode = NJS_VMCODE_PROPERTY_ATOM_SET;
+ 
+@@ -3248,7 +3248,7 @@ njs_generate_global_property_set(njs_vm_t *vm, njs_generator_t *generator,
+         prop_set->value = node_dst->index;
+         prop_set->object = njs_scope_global_this_index();
+ 
+-        njs_atom_to_value(vm, &property,node_dst->u.reference.atom_id);
++        njs_atom_to_value(vm, &property, node_dst->u.atom_id);
+ 
+         prop_set->property = njs_scope_global_index(vm, &property,
+                                                 generator->runtime);
+@@ -3411,7 +3411,7 @@ njs_generate_property_get_opcode(njs_parser_node_t *node)
+ {
+     if (node->token_type == NJS_TOKEN_STRING
+         || (node->token_type == NJS_TOKEN_NUMBER
+-            && node->u.value.atom_id != NJS_ATOM_STRING_unknown))
++            && node->u.atom_id != NJS_ATOM_STRING_unknown))
+     {
+         return NJS_VMCODE_PROPERTY_ATOM_GET;
+     }
+@@ -3425,7 +3425,7 @@ njs_generate_property_set_opcode(njs_parser_node_t *node)
+ {
+     if (node->token_type == NJS_TOKEN_STRING
+         || (node->token_type == NJS_TOKEN_NUMBER
+-            && node->u.value.atom_id != NJS_ATOM_STRING_unknown))
++            && node->u.atom_id != NJS_ATOM_STRING_unknown))
+     {
+         return NJS_VMCODE_PROPERTY_ATOM_SET;
+     }
+@@ -4598,7 +4598,7 @@ njs_generate_3addr_operation_end(njs_vm_t *vm, njs_generator_t *generator,
+     if (node->u.operation == NJS_VMCODE_PROPERTY_GET
+         && (right->token_type == NJS_TOKEN_STRING
+             || (right->token_type == NJS_TOKEN_NUMBER
+-                && right->u.value.atom_id != NJS_ATOM_STRING_unknown)))
++                && right->u.atom_id != NJS_ATOM_STRING_unknown)))
+     {
+         opcode = NJS_VMCODE_PROPERTY_ATOM_GET;
+ 
+@@ -4842,7 +4842,7 @@ njs_generate_inc_dec_operation_prop(njs_vm_t *vm, njs_generator_t *generator,
+ 
+     if (prop->token_type == NJS_TOKEN_STRING
+         || (prop->token_type == NJS_TOKEN_NUMBER
+-            && prop->u.value.atom_id != NJS_ATOM_STRING_unknown))
++            && prop->u.atom_id != NJS_ATOM_STRING_unknown))
+     {
+         opcode = NJS_VMCODE_PROPERTY_ATOM_GET;
+ 
+@@ -4918,7 +4918,7 @@ njs_generate_function_declaration(njs_vm_t *vm, njs_generator_t *generator,
+ 
+     lambda = njs_variable_lambda(var);
+ 
+-    njs_atom_to_value(vm, &lambda->name, node->u.reference.atom_id);
++    njs_atom_to_value(vm, &lambda->name, node->u.atom_id);
+     njs_string_get(vm, &lambda->name, &name);
+ 
+     ret = njs_generate_function_scope(vm, generator, lambda, node, &name);
+@@ -6457,7 +6457,7 @@ njs_generate_global_reference(njs_vm_t *vm, njs_generator_t *generator,
+         return NJS_ERROR;
+     }
+ 
+-    njs_atom_to_value(vm, &property, node->u.reference.atom_id);
++    njs_atom_to_value(vm, &property, node->u.atom_id);
+ 
+     prop_get->property = njs_scope_global_index(vm, &property,
+                                                 generator->runtime);
+@@ -6495,7 +6495,7 @@ njs_generate_reference_error(njs_vm_t *vm, njs_generator_t *generator,
+ 
+     ref_err->type = NJS_OBJ_TYPE_REF_ERROR;
+ 
+-    njs_atom_string_get(vm, node->u.reference.atom_id, &entry);
++    njs_atom_string_get(vm, node->u.atom_id, &entry);
+ 
+     return njs_name_copy(vm, &ref_err->u.name, &entry);
+ }
+diff --git a/src/njs_parser.c b/src/njs_parser.c
+index 79a07e316..0fd63bbba 100644
+--- a/src/njs_parser.c
++++ b/src/njs_parser.c
+@@ -1064,7 +1064,7 @@ njs_parser_primary_expression_test(njs_parser_t *parser,
+         if (njs_number_is_integer_index(token->number)
+             && token->number < 0x80000000)
+         {
+-            node->u.value.atom_id = njs_number_atom((uint32_t) token->number);
++            node->u.atom_id = njs_number_atom((uint32_t) token->number);
+         }
+ 
+         node->token_line = token->line;
+@@ -1267,8 +1267,6 @@ njs_parser_primary_expression_test(njs_parser_t *parser,
+         return NJS_ERROR;
+     }
+ 
+-    node->u.value.atom_id = token->atom_id;
+-
+     node->token_line = token->line;
+     parser->node = node;
+ 
+@@ -8214,6 +8212,7 @@ njs_parser_reference(njs_parser_t *parser, njs_lexer_token_t *token)
+ 
+     case NJS_TOKEN_NULL:
+         njs_thread_log_debug("JS: null");
++        node->u.atom_id = token->atom_id;
+         break;
+ 
+     case NJS_TOKEN_THIS:
+@@ -9001,15 +9000,12 @@ njs_parser_escape_string_calc_length(njs_parser_t *parser,
+ 
+ njs_int_t
+ njs_parser_variable_reference(njs_parser_t *parser, njs_parser_scope_t *scope,
+-    njs_parser_node_t *node, uintptr_t atom_id)
++    njs_parser_node_t *node, uint32_t atom_id)
+ {
+     njs_rbtree_node_t         *rb_node;
+-    njs_variable_reference_t  *vr;
+     njs_parser_rbtree_node_t  parse_node, *rb_parse_node;
+ 
+-    vr = &node->u.reference;
+-
+-    vr->atom_id = atom_id;
++    node->u.atom_id = atom_id;
+ 
+     parse_node.key = atom_id;
+ 
+diff --git a/src/njs_parser.h b/src/njs_parser.h
+index 16ceb3a8f..604f34e51 100644
+--- a/src/njs_parser.h
++++ b/src/njs_parser.h
+@@ -56,6 +56,8 @@ struct njs_parser_node_s {
+             njs_arr_t               *items;
+             uint32_t                length;
+         } array;
++        /* Only reference and value payloads share this field. */
++        uint32_t                    atom_id;
+         njs_variable_reference_t    reference;
+         njs_value_t                 value;
+         uintptr_t                   label;
+@@ -156,7 +158,7 @@ njs_bool_t njs_variable_closure_test(njs_parser_scope_t *root,
+ njs_variable_t *njs_variable_resolve(njs_vm_t *vm, njs_parser_node_t *node);
+ njs_index_t njs_variable_index(njs_vm_t *vm, njs_parser_node_t *node);
+ njs_int_t njs_parser_variable_reference(njs_parser_t *parser,
+-    njs_parser_scope_t *scope, njs_parser_node_t *node, uintptr_t atom_id);
++    njs_parser_scope_t *scope, njs_parser_node_t *node, uint32_t atom_id);
+ njs_token_type_t njs_parser_unexpected_token(njs_vm_t *vm, njs_parser_t *parser,
+     njs_str_t *name, njs_token_type_t type);
+ njs_int_t njs_parser_string_create(njs_vm_t *vm, njs_lexer_token_t *token,
+diff --git a/src/njs_variable.c b/src/njs_variable.c
+index 4f5ba0eae..6e21afd75 100644
+--- a/src/njs_variable.c
++++ b/src/njs_variable.c
+@@ -369,15 +369,13 @@ njs_variable_closure_test(njs_parser_scope_t *root, njs_parser_scope_t *scope)
+ njs_variable_t *
+ njs_variable_resolve(njs_vm_t *vm, njs_parser_node_t *node)
+ {
+-    njs_rbtree_node_t         *rb_node;
+-    njs_parser_scope_t        *scope;
+-    njs_variable_node_t       var_node;
+-    njs_variable_reference_t  *ref;
++    njs_rbtree_node_t    *rb_node;
++    njs_parser_scope_t   *scope;
++    njs_variable_node_t  var_node;
+ 
+-    ref = &node->u.reference;
+     scope = node->scope;
+ 
+-    var_node.key = ref->atom_id;
++    var_node.key = node->u.atom_id;
+ 
+     do {
+         rb_node = njs_rbtree_find(&scope->variables, &var_node.node);
+@@ -510,7 +508,7 @@ njs_variable_reference(njs_vm_t *vm, njs_mp_t *mem_pool,
+ 
+     closure = njs_variable_closure_test(node->scope, ref->variable->scope);
+ 
+-    ref_node.key = ref->atom_id;
++    ref_node.key = node->u.atom_id;
+ 
+     rb_node = njs_rbtree_find(&scope->references, &ref_node.node);
+     if (njs_slow_path(rb_node == NULL)) {
+diff --git a/src/njs_variable.h b/src/njs_variable.h
+index 8b89a4278..a1b7707e3 100644
+--- a/src/njs_variable.h
++++ b/src/njs_variable.h
+@@ -44,7 +44,7 @@ typedef enum {
+ 
+ 
+ typedef struct {
+-    uintptr_t             atom_id;
++    uint32_t              atom_id;
+     njs_variable_t        *variable;
+ } njs_variable_reference_t;
+ 
