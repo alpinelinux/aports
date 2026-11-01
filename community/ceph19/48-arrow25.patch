@@ -1,0 +1,405 @@
+https://github.com/ceph/s3select/pull/169
+
+arrow >= 24.0.0 removed the arrow::util::span shim in favor of std::span
+(GH-48588, apache/arrow#49492), so `#include "arrow/util/span.h"` and
+`::arrow::util::span<...>` no longer exist. arrow >= 22.0.0 also switched
+InternalFileDecryptor to store encryption keys in arrow::util::SecureString
+instead of std::string; the vendored encryption_internal_20.h /
+internal_file_decryptor_20.h added by 48-arrow20.patch predate that and
+still declare the old (span-based / string-keyed) layout, which happens to
+link against the arrow 20-23 build of libparquet (SecureString has the same
+layout as std::string) but no longer compiles at all once span.h is gone.
+
+Add a third variant of the two vendored parquet-internal headers
+(encryption_internal_24.h / internal_file_decryptor_24.h) that match
+verbatim what parquet/encryption/{encryption_internal,internal_file_decryptor}.h
+declare in arrow >= 24 (checked against apache-arrow-25.0.1), and select it
+via ARROW_VERSION_MAJOR. The ARROW_VERSION_MAJOR >= 20 code path already in
+s3select_parquet_intrf.h (constructing InternalFileDecryptor and calling
+GetColumn{Meta,Data}DecryptorFactory) has an unchanged signature all the
+way through arrow 25.
+
+Separately, arrow 25 added an `allow_short_read` bool parameter to the
+DoReadAt() hook that arrow::io::internal::RandomAccessFileConcurrencyWrapper
+calls on its CRTP subclass (checked against apache-arrow-25.0.1's
+cpp/src/arrow/io/concurrency.h and cpp/src/arrow/io/file.cc). The vendored
+arrow::io::ceph::ReadableFile shim in s3select_parquet_intrf.h still
+implements the pre-25 two/three-argument overloads, so add the new
+parameter to both the declaration and the out-of-line definitions to match;
+it isn't forwarded further since the underlying RGW range-read plumbing
+already always attempts a full read.
+---
+ include/encryption_internal.h        |   4 +-
+ include/encryption_internal_24.h     | 136 ++++++++++++++++++++++
+ include/internal_file_decryptor.h    |   4 +-
+ include/internal_file_decryptor_24.h | 155 ++++++++++++++++++++++++
+ include/s3select_parquet_intrf.h     |  12 ++++++++----
+ 5 files changed, 305 insertions(+), 6 deletions(-)
+ create mode 100644 include/encryption_internal_24.h
+ create mode 100644 include/internal_file_decryptor_24.h
+
+diff --git a/src/s3select/include/encryption_internal.h b/src/s3select/include/encryption_internal.h
+index 00129a2e..ed67309b 100644
+--- a/src/s3select/include/encryption_internal.h
++++ b/src/s3select/include/encryption_internal.h
+@@ -19,6 +19,8 @@
+ 
+ #if ARROW_VERSION_MAJOR < 20
+ #include "encryption_internal_19.h"
+-#else
++#elif ARROW_VERSION_MAJOR < 24
+ #include "encryption_internal_20.h"
++#else
++#include "encryption_internal_24.h"
+ #endif
+diff --git a/src/s3select/include/encryption_internal_24.h b/src/s3select/include/encryption_internal_24.h
+new file mode 100644
+index 00000000..de256809
+--- /dev/null
++++ b/src/s3select/include/encryption_internal_24.h
+@@ -0,0 +1,136 @@
++// Licensed to the Apache Software Foundation (ASF) under one
++// or more contributor license agreements.  See the NOTICE file
++// distributed with this work for additional information
++// regarding copyright ownership.  The ASF licenses this file
++// to you under the Apache License, Version 2.0 (the
++// "License"); you may not use this file except in compliance
++// with the License.  You may obtain a copy of the License at
++//
++//   http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing,
++// software distributed under the License is distributed on an
++// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++// KIND, either express or implied.  See the License for the
++// specific language governing permissions and limitations
++// under the License.
++
++#pragma once
++
++#include <memory>
++#include <span>
++#include <string>
++#include <vector>
++
++#include "parquet/properties.h"
++#include "parquet/types.h"
++
++using parquet::ParquetCipher;
++
++namespace parquet::encryption {
++
++constexpr int32_t kGcmTagLength = 16;
++constexpr int32_t kNonceLength = 12;
++
++// Module types
++constexpr int8_t kFooter = 0;
++constexpr int8_t kColumnMetaData = 1;
++constexpr int8_t kDataPage = 2;
++constexpr int8_t kDictionaryPage = 3;
++constexpr int8_t kDataPageHeader = 4;
++constexpr int8_t kDictionaryPageHeader = 5;
++constexpr int8_t kColumnIndex = 6;
++constexpr int8_t kOffsetIndex = 7;
++constexpr int8_t kBloomFilterHeader = 8;
++constexpr int8_t kBloomFilterBitset = 9;
++
++/// Performs AES encryption operations with GCM or CTR ciphers.
++class PARQUET_EXPORT AesEncryptor {
++ public:
++  /// Can serve one key length only. Possible values: 16, 24, 32 bytes.
++  /// If write_length is true, prepend ciphertext length to the ciphertext
++  explicit AesEncryptor(ParquetCipher::type alg_id, int32_t key_len, bool metadata,
++                        bool write_length = true);
++
++  static std::unique_ptr<AesEncryptor> Make(ParquetCipher::type alg_id, int32_t key_len,
++                                            bool metadata, bool write_length = true);
++
++  ~AesEncryptor();
++
++  /// The size of the ciphertext, for this cipher and the specified plaintext length.
++  [[nodiscard]] int32_t CiphertextLength(int64_t plaintext_len) const;
++
++  /// Encrypts plaintext with the key and aad. Key length is passed only for validation.
++  /// If different from value in constructor, exception will be thrown.
++  int32_t Encrypt(std::span<const uint8_t> plaintext, std::span<const uint8_t> key,
++                  std::span<const uint8_t> aad, std::span<uint8_t> ciphertext);
++
++  /// Encrypts plaintext footer, in order to compute footer signature (tag).
++  int32_t SignedFooterEncrypt(std::span<const uint8_t> footer,
++                              std::span<const uint8_t> key, std::span<const uint8_t> aad,
++                              std::span<const uint8_t> nonce,
++                              std::span<uint8_t> encrypted_footer);
++
++ private:
++  // PIMPL Idiom
++  class AesEncryptorImpl;
++  std::unique_ptr<AesEncryptorImpl> impl_;
++};
++
++/// Performs AES decryption operations with GCM or CTR ciphers.
++class PARQUET_EXPORT AesDecryptor {
++ public:
++  /// \brief Construct an AesDecryptor
++  ///
++  /// \param alg_id the encryption algorithm to use
++  /// \param key_len key length. Possible values: 16, 24, 32 bytes.
++  /// \param metadata if true then this is a metadata decryptor
++  /// \param contains_length if true, expect ciphertext length prepended to the ciphertext
++  explicit AesDecryptor(ParquetCipher::type alg_id, int32_t key_len, bool metadata,
++                        bool contains_length = true);
++
++  static std::unique_ptr<AesDecryptor> Make(ParquetCipher::type alg_id, int32_t key_len,
++                                            bool metadata);
++
++  ~AesDecryptor();
++
++  /// The size of the plaintext, for this cipher and the specified ciphertext length.
++  [[nodiscard]] int32_t PlaintextLength(int32_t ciphertext_len) const;
++
++  /// The size of the ciphertext, for this cipher and the specified plaintext length.
++  [[nodiscard]] int32_t CiphertextLength(int32_t plaintext_len) const;
++
++  /// Decrypts ciphertext with the key and aad. Key length is passed only for
++  /// validation. If different from value in constructor, exception will be thrown.
++  /// The caller is responsible for ensuring that the plaintext buffer is at least as
++  /// large as PlaintextLength(ciphertext_len).
++  int32_t Decrypt(std::span<const uint8_t> ciphertext, std::span<const uint8_t> key,
++                  std::span<const uint8_t> aad, std::span<uint8_t> plaintext);
++
++ private:
++  // PIMPL Idiom
++  class AesDecryptorImpl;
++  std::unique_ptr<AesDecryptorImpl> impl_;
++};
++
++std::string CreateModuleAad(const std::string& file_aad, int8_t module_type,
++                            int16_t row_group_ordinal, int16_t column_ordinal,
++                            int32_t page_ordinal);
++
++std::string CreateFooterAad(const std::string& aad_prefix_bytes);
++
++// Update last two bytes of page (or page header) module AAD
++void QuickUpdatePageAad(int32_t new_page_ordinal, std::string* AAD);
++
++// Wraps OpenSSL RAND_bytes function
++void RandBytes(unsigned char* buf, size_t num);
++
++// Ensure OpenSSL is initialized.
++//
++// This is only necessary in specific situations since OpenSSL otherwise
++// initializes itself automatically. For example, under Valgrind, a memory
++// leak will be reported if OpenSSL is initialized for the first time from
++// a worker thread; calling this function from the main thread prevents this.
++void EnsureBackendInitialized();
++
++}  // namespace parquet::encryption
+diff --git a/src/s3select/include/internal_file_decryptor.h b/src/s3select/include/internal_file_decryptor.h
+index 1e4f4b99..40298470 100644
+--- a/src/s3select/include/internal_file_decryptor.h
++++ b/src/s3select/include/internal_file_decryptor.h
+@@ -19,6 +19,8 @@
+ 
+ #if ARROW_VERSION_MAJOR < 20
+ #include "internal_file_decryptor_19.h"
+-#else
++#elif ARROW_VERSION_MAJOR < 24
+ #include "internal_file_decryptor_20.h"
++#else
++#include "internal_file_decryptor_24.h"
+ #endif
+diff --git a/src/s3select/include/internal_file_decryptor_24.h b/src/s3select/include/internal_file_decryptor_24.h
+new file mode 100644
+index 00000000..baf2fb64
+--- /dev/null
++++ b/src/s3select/include/internal_file_decryptor_24.h
+@@ -0,0 +1,155 @@
++// Licensed to the Apache Software Foundation (ASF) under one
++// or more contributor license agreements.  See the NOTICE file
++// distributed with this work for additional information
++// regarding copyright ownership.  The ASF licenses this file
++// to you under the Apache License, Version 2.0 (the
++// "License"); you may not use this file except in compliance
++// with the License.  You may obtain a copy of the License at
++//
++//   http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing,
++// software distributed under the License is distributed on an
++// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++// KIND, either express or implied.  See the License for the
++// specific language governing permissions and limitations
++// under the License.
++
++#pragma once
++
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <span>
++#include <string>
++#include <vector>
++
++#include "arrow/util/secure_string.h"
++#include "parquet/schema.h"
++
++namespace parquet {
++
++namespace encryption {
++class AesDecryptor;
++class AesEncryptor;
++}  // namespace encryption
++
++class ColumnCryptoMetaData;
++class DecryptionKeyRetriever;
++class FileDecryptionProperties;
++
++// An object handling decryption using well-known encryption parameters
++//
++// CAUTION: Decryptor objects are not thread-safe.
++class PARQUET_EXPORT Decryptor {
++ public:
++  Decryptor(std::unique_ptr<encryption::AesDecryptor> decryptor,
++            ::arrow::util::SecureString key, std::string file_aad, std::string aad,
++            ::arrow::MemoryPool* pool);
++  ~Decryptor();
++
++  const std::string& file_aad() const { return file_aad_; }
++  void UpdateAad(const std::string& aad) { aad_ = aad; }
++  ::arrow::MemoryPool* pool() { return pool_; }
++
++  [[nodiscard]] int32_t PlaintextLength(int32_t ciphertext_len) const;
++  [[nodiscard]] int32_t CiphertextLength(int32_t plaintext_len) const;
++  int32_t Decrypt(std::span<const uint8_t> ciphertext, std::span<uint8_t> plaintext);
++
++ private:
++  std::unique_ptr<encryption::AesDecryptor> aes_decryptor_;
++  ::arrow::util::SecureString key_;
++  std::string file_aad_;
++  std::string aad_;
++  ::arrow::MemoryPool* pool_;
++};
++
++class InternalFileDecryptor {
++ public:
++  explicit InternalFileDecryptor(std::shared_ptr<FileDecryptionProperties> properties,
++                                 const std::string& file_aad,
++                                 ParquetCipher::type algorithm,
++                                 const std::string& footer_key_metadata,
++                                 ::arrow::MemoryPool* pool);
++
++  const std::string& file_aad() const { return file_aad_; }
++
++  const ::arrow::util::SecureString& GetFooterKey();
++
++  ParquetCipher::type algorithm() const { return algorithm_; }
++
++  const std::string& footer_key_metadata() const { return footer_key_metadata_; }
++
++  const std::shared_ptr<FileDecryptionProperties>& properties() const {
++    return properties_;
++  }
++
++  ::arrow::MemoryPool* pool() const { return pool_; }
++
++  // Get a Decryptor instance for the Parquet footer
++  std::unique_ptr<Decryptor> GetFooterDecryptor();
++
++  // Get a Decryptor instance for column chunk metadata.
++  std::unique_ptr<Decryptor> GetColumnMetaDecryptor(
++      const std::string& column_path, const std::string& column_key_metadata,
++      const std::string& aad = "") {
++    return GetColumnDecryptor(column_path, column_key_metadata, aad, /*metadata=*/true);
++  }
++
++  // Get a Decryptor instance for column chunk data.
++  std::unique_ptr<Decryptor> GetColumnDataDecryptor(
++      const std::string& column_path, const std::string& column_key_metadata,
++      const std::string& aad = "") {
++    return GetColumnDecryptor(column_path, column_key_metadata, aad, /*metadata=*/false);
++  }
++
++  // Get a Decryptor factory for column chunk metadata.
++  //
++  // This is typically useful if multi-threaded decryption is expected.
++  // This is a static function as it accepts a null `InternalFileDecryptor*`
++  // argument if the column is not encrypted.
++  static std::function<std::unique_ptr<Decryptor>()> GetColumnMetaDecryptorFactory(
++      InternalFileDecryptor*, const ColumnCryptoMetaData* crypto_metadata,
++      const std::string& aad = "");
++  // Get a Decryptor factory for column chunk data.
++  //
++  // This is typically useful if multi-threaded decryption is expected.
++  // This is a static function as it accepts a null `InternalFileDecryptor*`
++  // argument if the column is not encrypted.
++  static std::function<std::unique_ptr<Decryptor>()> GetColumnDataDecryptorFactory(
++      InternalFileDecryptor*, const ColumnCryptoMetaData* crypto_metadata,
++      const std::string& aad = "");
++
++ private:
++  std::shared_ptr<FileDecryptionProperties> properties_;
++  // Concatenation of aad_prefix (if exists) and aad_file_unique
++  std::string file_aad_;
++  ParquetCipher::type algorithm_;
++  std::string footer_key_metadata_;
++  ::arrow::MemoryPool* pool_;
++
++  // Protects footer_key_ updates
++  std::mutex mutex_;
++  ::arrow::util::SecureString footer_key_;
++
++  ::arrow::util::SecureString GetColumnKey(const std::string& column_path,
++                                           const std::string& column_key_metadata);
++
++  static ::arrow::util::SecureString RetrieveColumnKeyIfEmpty(
++      ::arrow::util::SecureString column_key, const std::string& column_key_metadata,
++      const std::shared_ptr<DecryptionKeyRetriever>& key_retriever);
++
++  std::unique_ptr<Decryptor> GetFooterDecryptor(const std::string& aad, bool metadata);
++
++  std::unique_ptr<Decryptor> GetColumnDecryptor(const std::string& column_path,
++                                                const std::string& column_key_metadata,
++                                                const std::string& aad, bool metadata);
++
++  std::function<std::unique_ptr<Decryptor>()> GetColumnDecryptorFactory(
++      const ColumnCryptoMetaData* crypto_metadata, const std::string& aad, bool metadata);
++};
++
++void UpdateDecryptor(Decryptor* decryptor, int16_t row_group_ordinal,
++                     int16_t column_ordinal, int8_t module_type);
++
++}  // namespace parquet
+diff --git a/src/s3select/include/s3select_parquet_intrf.h b/src/s3select/include/s3select_parquet_intrf.h
+index 8dad80ef..a4c37a7e 100644
+--- a/src/s3select/include/s3select_parquet_intrf.h
++++ b/src/s3select/include/s3select_parquet_intrf.h
+@@ -561,10 +561,12 @@ class ARROW_EXPORT ReadableFile
+   Result<std::shared_ptr<Buffer>> DoRead(int64_t nbytes);
+ 
+   /// \brief Thread-safe implementation of ReadAt
+-  Result<int64_t> DoReadAt(int64_t position, int64_t nbytes, void* out);
++  Result<int64_t> DoReadAt(int64_t position, int64_t nbytes, bool allow_short_read,
++                           void* out);
+ 
+   /// \brief Thread-safe implementation of ReadAt
+-  Result<std::shared_ptr<Buffer>> DoReadAt(int64_t position, int64_t nbytes);
++  Result<std::shared_ptr<Buffer>> DoReadAt(int64_t position, int64_t nbytes,
++                                           bool allow_short_read);
+ 
+   Result<int64_t> DoGetSize();
+   Status DoSeek(int64_t position);
+@@ -687,11 +689,13 @@ Result<int64_t> ReadableFile::DoRead(int64_t nbytes, void* out) {
+   return impl_->IMPL->Read(nbytes, out);
+ }
+ 
+-Result<int64_t> ReadableFile::DoReadAt(int64_t position, int64_t nbytes, void* out) {
++Result<int64_t> ReadableFile::DoReadAt(int64_t position, int64_t nbytes,
++                                       bool allow_short_read, void* out) {
+   return impl_->IMPL->ReadAt(position, nbytes, out);
+ }
+ 
+-Result<std::shared_ptr<Buffer>> ReadableFile::DoReadAt(int64_t position, int64_t nbytes) {
++Result<std::shared_ptr<Buffer>> ReadableFile::DoReadAt(int64_t position, int64_t nbytes,
++                                                       bool allow_short_read) {
+   return impl_->ReadBufferAt(position, nbytes);
+ }
